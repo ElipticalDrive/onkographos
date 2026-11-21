@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,34 @@
+ 
+ ## Overview
+-Multi-Stage Rasterization for Shaded Isosurfaces is a hardware-accelerated technique for rendering shaded isosurfaces from volumetric data on standard PC graphics hardware. It adapts the "Fast Shaded Isosurfaces" algorithm by utilizing multi-stage rasterization and 2D textures to compute surface normals and lighting interactions efficiently. Unlike general volume rendering methods that integrate opacity, this method focuses on extracting and shading a specific isosurface boundary. It is distinct from [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by replacing iterative ray-marching with a two-pass rasterization pipeline that leverages the GPU's fixed-function register combiners for gradient interpolation and dot-product shading.
++Multi-Stage Rasterization for Shaded Isosurfaces is an adaptation of the Fast Shaded Isosurfaces method for PC hardware, using multi-stage rasterization and 2D textures to enable efficient rendering of shaded isosurfaces [S1]. It replaces iterative ray-marching with a two-pass rasterization pipeline that leverages fixed-function register combiners for gradient interpolation and dot-product shading [S1]. Unlike general volume rendering that integrates opacity, this method extracts and shades a specific isosurface boundary [S1]. It builds on [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by rasterizing pre-computed voxel data instead of marching rays [S1].
+ 
+ ## How it works
+-The method relies on a two-pass rendering pipeline using the OpenGL register combiner architecture. It assumes the existence of a scalar field volume where the isosurface is defined by a threshold value.
+-
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset represented as a sequence of 2D slices. Each slice contains scalar values (intensity) and pre-computed voxel gradients.
+-*   **Output:** A shaded 2D image of the isosurface projected onto the screen.
++*   **Input:** A volumetric dataset represented as a sequence of 2D slices. Each slice contains scalar values (intensity) and pre-computed voxel gradients [S1].
++*   **Output:** A shaded 2D image of the isosurface projected onto the screen [S1].
+ 
+ **Data Structures:**
+-The volume is decomposed into 2D textures.
+-*   **Texture 0:** Stores the voxel gradients. The RGB components hold the gradient vector $\tilde{n} = (n_x, n_y, n_z)$.
+-*   **Texture 1:** Stores the scalar intensity values. The Alpha component holds the intensity $I$. The RGB components are unused or set to zero.
++The volume is decomposed into 2D textures [S1].
++*   **Texture 0:** Stores the voxel gradients. The RGB components hold the gradient vector $\tilde{n} = (n_x, n_y, n_z)$ [S1].
++*   **Texture 1:** Stores the scalar intensity values. The Alpha component holds the intensity $I$. The RGB components are unused or set to zero [S1].
+ *   **Constant Color Registers:**
+-    *   `const color 1`: Stores the light direction vector $\tilde{l}$.
+-    *   `const color 2`: Stores the diffuse light color $C_{diffuse}$.
+-    *   `const color 3`: Stores the ambient light color $C_{ambient}$.
++    *   `const color 1`: Stores the light direction vector $\tilde{l}$ [S1].
++    *   `const color 2`: Stores the diffuse light color $C_{diffuse}$ [S1].
++    *   `const color 3`: Stores the ambient light color $C_{ambient}$ [S1].
+ 
+ **Numbered Steps:**
++1.  **Gradient and Intensity Encoding:** Compute the voxel gradient $\tilde{n}$ for each voxel in the volume. Encode $\tilde{n}$ into the RGB components of a 2D texture representing the volume slice. Encode the scalar intensity $I$ into the Alpha component of a separate 2D texture [S1].
++2.  **First Pass: Interpolation (General Combiner 0):** Render the volume slices using a multi-texture interpolation technique. Input A is the RGB output from Texture 0 (gradient $\tilde{n}$). The combiner interpolates the gradient vector $\tilde{n}$ across the screen space based on the fragment's position relative to the slice boundaries. The result is the interpolated normal $\tilde{n}_{interp}$. The Alpha output is the interpolated intensity [S1].
++3.  **Second Pass: Lighting Calculation (General Combiner 1):** Enable the second general combiner to compute the diffuse lighting term. Input A is the RGB output of Combiner 0 (the interpolated normal $\tilde{n}_{interp}$). Input B is Constant Color Register 1 (the light vector $\tilde{l}$). The operation computes the dot product $D = \tilde{n}_{interp} \cdot \tilde{l}$. The Alpha component is not modified by Combiner 1 and remains the interpolated intensity from the previous stage [S1].
++4.  **Final Compositing:** Combine the diffuse lighting term with ambient lighting. Input A is the dot product $D$. Input B is Constant Color Register 2 (diffuse light color $C_{diffuse}$). Input C is Constant Color Register 3 (ambient light color $C_{ambient}$). The operation calculates the final color $C_{final} = D \cdot C_{diffuse} + C_{ambient}$ [S1].
+ 
+-1.  **Gradient and Intensity Encoding:**
+-    Compute the voxel gradient $\tilde{n}$ for each voxel in the volume. Encode $\tilde{n}$ into the RGB components of a 2D texture representing the volume slice. Encode the scalar intensity $I$ into the Alpha component of a separate 2D texture. Note that general combiner stages support signed fixed-point values, so no scaling or biasing is required for the gradient components [S1].
+-
+-2.  **First Pass: Interpolation (General Combiner 0):**
+-    Render the volume slices using a multi-texture interpolation technique.
+-    *   **Input A:** RGB output from Texture 0 (gradient $\tilde{n}$).
+-    *   **Input B:** RGB output from Texture 1 (intensity $I$, mapped to alpha).
+-    *   **Operation:** Interpolate the gradient vector $\tilde{n}$ across the screen space based on the fragment's position relative to the slice boundaries. The result is the interpolated normal $\tilde{n}_{interp}$.
+-    *   **Output:** The RGB output of Combiner 0 is $\tilde{n}_{interp}$. The Alpha output is the interpolated intensity.
+-
+-3.  **Second Pass: Lighting Calculation (General Combiner 1):**
+-    Enable the second general combiner to compute the diffuse lighting term.
+-    *   **Input A:** RGB output of Combiner 0 (the interpolated normal $\tilde{n}_{interp}$).
+-    *   **Input B:** Constant Color Register 1 (the light vector $\tilde{l}$).
+-    *   **Operation:** Compute the dot product $D = \tilde{n}_{interp} \cdot \tilde{l}$.
+-    *   **Output:** The RGB output of Combiner 1 is the dot product $D$. The Alpha component is not modified by Combiner 1 and remains the interpolated intensity from the previous stage.
+-
+-4.  **Final Compositing:**
+-    Combine the diffuse lighting term with ambient lighting.
+-    *   **Input A:** RGB output of Combiner 1 (dot product $D$).
+-    *   **Input B:** Constant Color Register 2 (diffuse light color $C_{diffuse}$).
+-    *   **Input C:** Constant Color Register 3 (ambient light color $C_{ambient}$).
+-    *   **Operation:** Calculate final color $C_{final} = D \cdot C_{diffuse} + C_{ambient}$.
+-    *   **Output:** The final rendered pixel color.
+-
+-**Pseudocode:**
+-```python
+-# Pseudocode representing the register combiner setup
+-# Note: This is a conceptual mapping of the hardware operations described in [S1]
+-
+-def setup_combiners():
+-    # Combiner 0: Interpolate gradient
+-    combiner_0_input_A = texture_0_rgb  # Gradient n
+-    combiner_0_input_B = texture_1_alpha # Intensity I (used for interpolation factor)
+-    combiner_0_output_rgb = interpolate(combiner_0_input_A, combiner_0_input_B)
+-    # combiner_0_output_alpha is also interpolated intensity
+-
+-    # Combiner 1: Compute dot product with light vector
+-    combiner_1_input_A = combiner_0_output_rgb # Interpolated normal n_interp
+-    combiner_1_input_B = const_color_1         # Light vector l
+-    combiner_1_output_rgb = dot_product(combiner_1_input_A, combiner_1_input_B)
+-    # combiner_1_output_alpha is unchanged (interpolated intensity)
+-
+-    # Final Combiner: Add ambient light
+-    final_input_A = combiner_1_output_rgb      # Dot product D
+-    final_input_B = const_color_2              # Diffuse color C_diffuse
+-    final_input_C = const_color_3              # Ambient color C_ambient
+-    
+-    # Formula: C_final = D * C_diffuse + C_ambient
+-    final_output_rgb = (final_input_A * final_input_B) + final_input_C
+-    
+-    return final_output_rgb
+-
+-def render_slice(slice_index, alpha):
+-    """
+-    Renders a single slice of the volume.
+-    alpha: interpolation factor between slice i and i+1
+-    """
+-    # Bind textures
+-    bind_texture_0(slice_gradients) # RGB = gradient
+-    bind_texture_1(slice_intensities) # Alpha = intensity
+-    
+-    # Execute combiner pipeline
+-    color = setup_combiners()
+-    
+-    # Write to framebuffer
+-    write_pixel(color)
+-```
++**Formulas:**
++*   $\tilde{n}$: voxel gradient vector.
++*   $\tilde{l}$: light direction vector.
++*   $I$: scalar intensity value.
++*   $\alpha$: interpolation factor between slice $i$ and slice $i+1$.
++*   $D$: dot product $\tilde{n}_{interp} \cdot \tilde{l}$.
++*   $C_{diffuse}, C_{ambient}$: RGB light color vectors.
++*   $C_{final}$: output pixel color.
+ 
+ **Parameters and Typical Values:**
+@@ -100,18 +42,55 @@
+ **Edge Cases and Pitfalls:**
+ *   **Single Light Source:** The method is restricted to a single light source due to the fixed-function dot product calculation in the combiner pipeline [S1].
+-*   **Monochrome Display:** The description implies a monochrome or single-color shading model unless additional combiner stages are added for color mixing.
+-*   **Gradient Accuracy:** The quality of the shading depends on the accuracy of the pre-computed voxel gradients.
++*   **Monochrome Display:** The description implies a monochrome or single-color shading model unless additional combiner stages are added for color mixing [S1].
++*   **Gradient Accuracy:** The quality of the shading depends on the accuracy of the pre-computed voxel gradients [S1].
++
++**Pseudocode:**
++```python
++def render_shaded_isosurface(volume_slices, light_vector, diffuse_color, ambient_color):
++    """
++    Simulates the multi-stage register combiner pipeline for shaded isosurfaces.
++    volume_slices: list of 2D arrays, each (H, W, 4). RGB=gradient, Alpha=intensity.
++    light_vector, diffuse_color, ambient_color: (3,) arrays.
++    """
++    output_image = None
++    
++    for i in range(len(volume_slices) - 1):
++        alpha = 0.5  # Interpolation factor between slice i and i+1 [G]
++        
++        s_curr = volume_slices[i]
++        s_next = volume_slices[i + 1]
++        
++        # Combiner 0: Interpolate intermediate slices
++        # Interpolate RGB (gradient n) and Alpha (intensity I)
++        n_interp = (1.0 - alpha) * s_curr[:, :, :3] + alpha * s_next[:, :, :3]
++        i_interp = (1.0 - alpha) * s_curr[:, :, 3] + alpha * s_next[:, :, 3]
++        
++        # Combiner 1: Compute dot product A . B
++        # Input A: n_interp, Input B: light_vector
++        # D = n_interp . light_vector
++        D = n_interp[:, :, 0] * light_vector[0] + n_interp[:, :, 1] * light_vector[1] + n_interp[:, :, 2] * light_vector[2]
++        
++        # Final Combiner: C_final = D * C_diffuse + C_ambient
++        final_rgb = D[:, :, None] * diffuse_color + ambient_color
++        
++        output_image = final_rgb
++        
++    return output_image
++```
+ 
+ ## Subtopics
+ 
++### [K-Buffer Isosurface Extraction](6210-k-buffer-isosurface-extraction.md)
++Extracts flat-shaded isosurfaces by adapting the K-Buffer rasterization technique to replace 3D pre-integrated volume tables with a 2D lookup table for boolean detection between front and back scalar values. It is chosen when simple, fast hardware boolean extraction is preferred over continuous gradient-based shading. See [K-Buffer Isosurface Extraction](6210-k-buffer-isosurface-extraction.md).
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the screen space projection. The complexity is dominated by the rasterization and texture sampling, which are hardware-accelerated.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the screen space projection. The complexity is dominated by the rasterization and texture sampling, which are hardware-accelerated [S1].
+ *   **Memory Complexity:** $O(V)$ where $V$ is the volume size, stored in 2D textures.
+ *   **Performance:** Enables interactive frame rates for shaded isosurfaces on standard PC hardware [S1].
+ *   **Strengths:** Efficient use of fixed-function GPU hardware; avoids software ray-marching.
+-*   **Limitations:** Restricted to single light sources; limited to monochrome or simple shading models without additional combiner stages; requires pre-computation of gradients.
++*   **Limitations:** Restricted to single light sources; limited to monochrome or simple shading models without additional combiner stages; requires pre-computation of gradients [S1].
+ 
+ ## Background
+-The method is an adaptation of the "Fast Shaded Isosurfaces" algorithm, designed to leverage the capabilities of standard PC graphics hardware (specifically OpenGL register combiners) for volume visualization. It was developed to provide efficient rendering of shaded isosurfaces at interactive frame rates.
++The method is an adaptation of the "Fast Shaded Isosurfaces" algorithm, designed to leverage the capabilities of standard PC graphics hardware (specifically OpenGL register combiners) for volume visualization. It was developed to provide efficient rendering of shaded isosurfaces at interactive frame rates [S1].
+ 
+ ## Sources

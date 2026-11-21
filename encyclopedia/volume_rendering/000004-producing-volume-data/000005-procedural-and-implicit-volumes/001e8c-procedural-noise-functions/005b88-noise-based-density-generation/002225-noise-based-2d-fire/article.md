@@ -1,0 +1,214 @@
+# Noise-based 2D Fire
+
+Also called: 2D Fire Texture Generation, Voronoi-Perlin Fire Noise
+
+## Overview
+Noise-based 2D Fire is a procedural technique for generating the base density and color texture of volumetric fire, serving as the input for constructing 3D cylindrical fire volumes [S1, S4]. It distinguishes itself from sprite-based systems by providing a continuous, artifact-free texture that supports dynamic scaling without stretching, and from photo-realistic fluid simulations by offering real-time performance with artist-controllable aesthetics [S4]. The method typically combines multiple noise functions (such as Perlin and Voronoi) to create turbulent micro-details, which are then mapped onto a 2D profile to drive the visual appearance of the flame [S3, unofficial][S4].
+
+## How it works
+The method generates a 2D texture that defines the fire's shape, color, and intensity. This texture is subsequently used to map colors onto a 3D lattice surrounding a central curve [S1, S4]. The generation involves creating noise fields, combining them, and applying a color gradient.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Noise parameters: frequency, scale, time offset, and type (e.g., Perlin, Voronoi, M-Noise) [S2, unofficial][S4][S5, unofficial].
+    *   Application-specific frequency factor for spatial detail scaling [S2, unofficial].
+    *   Perceived burning speed parameter [S4].
+    *   A standard UV coordinate system for the 2D texture space [S3, unofficial].
+*   **Outputs**:
+    *   A 2D color texture (Fire Profile Texture) where pixel values represent the fire's color and intensity [S1, S4].
+
+### Data Structures
+*   **Noise Space**: A coordinate system $(x, y, t)$ where $x$ and $y$ are spatial dimensions and $t$ is time. The $z$ dimension is not used in the 2D noise generation itself but is implied in the final 3D mapping [S2, unofficial][S4].
+*   **Fire Profile Texture**: A 2D image buffer storing RGBA values. The horizontal axis represents the radial distance from the fire center, and the vertical axis represents the height along the fire [S1].
+
+### Steps
+1.  **Generate Noise Fields**:
+    *   Generate a Perlin noise field (or Improved Perlin Noise/M-Noise) for turbulent detail [S4][S5, unofficial].
+    *   Generate a Voronoi noise field for cellular structure [S3, unofficial].
+    *   *Note*: M-Noise is a GPU-optimized variant of Perlin Noise that avoids chained table lookups to prevent bottlenecks [S5, unofficial].
+
+2.  **Scale and Offset Noise Space**:
+    *   To prevent stretching artifacts when the fire radius or length changes, dynamically scale the noise space [S2, unofficial].
+    *   Scale the horizontal ($x$) and vertical ($y$) axes of the noise space by the fire's radius and length, respectively [S2, unofficial].
+    *   Multiply the scaled noise coordinates by an application-specific frequency factor to adjust the level of detail [S2, unofficial].
+    *   Correct each noise function to have a base frequency of one, ensuring the frequency factor represents the spatial frequency of micro-level detail in world space [S2, unofficial].
+    *   Add a time offset to the vertical axis (e.g., $-time$) to create an upward flow effect [S2, unofficial].
+    *   Add a unique constant offset to the noise position for each fire instance to ensure uniqueness [S2, unofficial].
+
+3.  **Combine Noise Functions**:
+    *   Multiply the Voronoi noise texture by the Perlin noise texture [S3, unofficial].
+    *   *Alternative*: Use only Improved Perlin Noise or M-Noise for turbulence if Voronoi is not required [S4][S5, unofficial].
+
+4.  **Modify UV Coordinates**:
+    *   Interpolate the product of the combined noises with a standard UV texture to create a modified UV coordinate [S3, unofficial].
+    *   *Note*: This step warps the sampling coordinates based on the noise values to create organic, fire-like variations [S3, unofficial].
+
+5.  **Sample Fire Profile**:
+    *   Sample a single Gaussian blob using the modified UV coordinates to create fire-like density variations [S3, unofficial].
+    *   Alternatively, map the 3D unit fire volume coordinates to the 2D texture using the transformation defined in the formulas below [S1].
+
+6.  **Apply Color Gradient**:
+    *   Apply a color gradient to the result to give the fire its characteristic orange (or other desired) color [S3, unofficial].
+    *   Artists can customize the look by editing the Fire Profile Texture directly (e.g., coloring it blue for magical fire) [S1].
+
+### Formulas
+The mapping from the 3D unit fire volume to the 2D Fire Profile Texture is defined by [S1]:
+
+$$ \vec{uv} = \left( \sqrt{tex_x^2 + tex_y^2}, tex_z \right) $$
+
+$$ color = \text{FireProfileTexture}(\vec{uv}) $$
+
+Where:
+*   $\vec{uv}$ is the 2D positional vector sampled in the fire profile texture.
+*   $tex_x, tex_y$ are the horizontal coordinates in the unit fire volume, ranging from $[-1, 1]$.
+*   $tex_z$ is the vertical coordinate in the unit fire volume, ranging from $[0, 1]$.
+*   $\sqrt{tex_x^2 + tex_y^2}$ represents the radial distance from the center axis.
+
+The noise space scaling for dynamic resizing is described by [S2, unofficial]:
+*   The noise position $\mathbf{P}_{noise}$ is calculated by scaling the unit fire volume texture coordinates by a `noisescale` factor, which is derived from the fire's radius and length.
+*   The fourth dimension (time) is added to enable 4D noise animation.
+
+### Parameters
+*   **Frequency**: Controls the spatial frequency of micro-level detail. Scaled to world coordinates to eliminate stretching [S4].
+*   **Burning Speed**: A parameter passed to the pixel shader to control the rate of temporal change (flicker) [S4].
+*   **Time Offset**: Used to create upward flow; the vertical axis is offset by $-time$ [S2, unofficial].
+*   **Instance Offset**: A constant added to the noise position for each fire instance to ensure uniqueness [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Stretching Artifacts**: If the noise space is not dynamically scaled according to the fire's radius and length, enlarging the fire will cause visible stretching artifacts [S2, unofficial].
+*   **Performance Bottlenecks**: Standard Perlin Noise may cause bottlenecks on GPUs due to chained table lookups. M-Noise is recommended for hardware acceleration [S5, unofficial].
+*   **Boundary Conditions**: The unit fire volume has specific coordinate ranges ($x,y \in [-1,1]$, $z \in [0,1]$). Sampling outside these ranges requires clamping or wrapping logic in the texture lookup [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_noise_2d_fire(width, height, radius, length, time, frequency, burning_speed, instance_offset):
+    """
+    Generates a 2D fire texture using combined noise functions.
+    
+    Args:
+        width (int): Width of the output texture.
+        height (int): Height of the output texture.
+        radius (float): Current radius of the fire.
+        length (float): Current length of the fire.
+        time (float): Current simulation time.
+        frequency (float): Application-specific spatial frequency.
+        burning_speed (float): Parameter controlling flicker speed.
+        instance_offset (float): Unique offset for this fire instance.
+        
+    Returns:
+        numpy.ndarray: 2D array of RGB colors representing the fire texture.
+    """
+    # Initialize output texture
+    texture = np.zeros((height, width, 3))
+    
+    # Pre-calculate scale factors to prevent stretching
+    # Scale noise space by radius and length
+    scale_x = radius
+    scale_y = length
+    
+    # Iterate over each pixel in the texture
+    for y in range(height):
+        for x in range(width):
+            # Normalize pixel coordinates to [0, 1]
+            u = x / width
+            v = y / height
+            
+            # Map to noise space coordinates
+            # Note: The exact mapping from UV to noise space depends on the specific implementation.
+            # Based on [S2, unofficial], we scale by radius and length.
+            # Assuming u corresponds to radial direction and v to vertical.
+            
+            # Calculate base noise coordinates
+            # Correct for base frequency of one
+            noise_x = u * frequency / scale_x
+            noise_y = v * frequency / scale_y
+            
+            # Add time offset for upward flow (negative time for upward movement)
+            # Add instance offset for uniqueness
+            noise_y -= time * burning_speed
+            noise_y += instance_offset
+            
+            # Generate Perlin Noise (or M-Noise)
+            # This function should return a value in [-1, 1] or [0, 1]
+            perlin_val = improved_perlin_noise(noise_x, noise_y)
+            
+            # Generate Voronoi Noise
+            voronoi_val = voronoi_noise(noise_x, noise_y)
+            
+            # Combine noises: Multiply Voronoi and Perlin
+            combined_noise = perlin_val * voronoi_val
+            
+            # Modify UV coordinates (interpolate product with standard UV)
+            # This step warps the sampling
+            modified_u = u + combined_noise * 0.1 # Example warp factor
+            modified_v = v + combined_noise * 0.1
+            
+            # Sample Gaussian blob or Fire Profile
+            # For a procedural generation without an external texture, we simulate the profile
+            # A simple Gaussian-like falloff from the center
+            radial_dist = np.sqrt(modified_u**2 + modified_v**2)
+            gaussian_blob = np.exp(-radial_dist**2 / 0.1)
+            
+            # Apply Color Gradient (Orange)
+            # Map intensity to orange color
+            intensity = gaussian_blob * combined_noise
+            r = intensity * 1.0
+            g = intensity * 0.5
+            b = intensity * 0.1
+            
+            texture[y, x] = [r, g, b]
+            
+    return texture
+
+def improved_perlin_noise(x, y):
+    """
+    Placeholder for Improved Perlin Noise or M-Noise implementation.
+    Must return a smooth, pseudo-random value.
+    """
+    # Implementation details depend on the specific noise function used.
+    # For M-Noise, this should avoid chained table lookups [S5, unofficial].
+    return (np.sin(x * 12.9898) * np.cos(y * 78.233)) * 43758.5453 % 1 * 2 - 1
+
+def voronoi_noise(x, y):
+    """
+    Placeholder for Voronoi Noise implementation.
+    """
+    # Implementation details depend on the specific noise function used.
+    return np.random.rand()
+```
+
+## Subtopics
+
+### Perlin-Worley Noise for Cloud Density
+Uses similar noise combinations but targets volumetric cloud density rather than fire. It focuses on soft, billowy structures. [Link](7139-perlin-worley-noise-for-cloud-density.md)
+
+### Cartoon Cloud Density Generation
+Uses noise for stylized, non-photorealistic cloud shapes. It prioritizes artistic control over physical accuracy. [Link](8309-cartoon-cloud-density-generation.md)
+
+## Operating characteristics
+*   **Time Complexity**: The generation is performed per-pixel in a pixel shader, making it $O(N)$ where $N$ is the number of pixels in the texture. The complexity of the noise function (Perlin/Voronoi) is constant per pixel.
+*   **Memory Complexity**: $O(W \times H)$ for the 2D texture storage, where $W$ and $H$ are the texture dimensions.
+*   **Performance**: Real-time performance is achieved through hardware acceleration (GPU shaders) [S4]. M-Noise is specifically designed to avoid bottlenecks associated with standard Perlin Noise on GPUs [S5, unofficial].
+*   **Strengths**:
+    *   Real-time rendering capability [S4].
+    *   Artist-controllable appearance via 2D texture editing [S1].
+    *   Dynamic scaling without stretching artifacts [S2, unofficial].
+    *   Supports bi-directional environmental interaction (e.g., wind, collision) [S4].
+*   **Limitations**:
+    *   Not physically accurate; relies on artistic approximation [S1].
+    *   Requires a 3D lattice construction for the final volume, adding complexity to the rendering pipeline [S4].
+    *   M-Noise implementation may be hardware-specific [S5, unofficial].
+*   **When to Use**: Real-time applications (games, interactive simulations) where visual appeal and performance are prioritized over physical accuracy.
+*   **When Not to Use**: Offline rendering requiring photo-realistic fire simulation, or scenes where physical accuracy is critical.
+
+## Background
+The method was developed by Fuller, Krishnan, Mahrous, Hamann, and Joy at UC Davis, as presented in their 2006 paper "Real-Time Procedural Volumetric Fire" [S4][S2, unofficial]. It was designed to address the limitations of sprite-based fire systems (artifacts) and physical simulations (computational cost) [S4]. The approach leverages "Improved Perlin Noise" and a particle simulation to create vibrant, interactive fire [S4]. Subsequent variations and implementations have been documented in unofficial reports and GitHub projects, such as the "Fire Simulation and Rendering" project [S3, unofficial] and the "Realistic Real-Time Rendering of Fire in a Production System" proposal [S5, unofficial].
+
+## Sources
+[S1] Real-time procedural volumetric fire, https://doi.org/10.1145/1230100.1230131, fetched 2026-11-05
+[S2] PDF Real-time Procedural Volumetric Fire - UC Davis, https://web.cs.ucdavis.edu/~hamann/FullerKrishnanMahrousHamannJoyFirePaperFor_I3D2007AsSubmitted11012006.pdf, fetched 2026-10-27 (unofficial)
+[S3] Fire Simulation and Rendering - GitHub Pages, https://cs184-firesim.github.io/final-report/, fetched 2026-10-27 (unofficial)
+[S4] Real-Time Procedural Volumetric Fire, http://graphics.cs.ucdavis.edu/~hamann/FullerKrishnanMahrousHamannJoy2006Final03102006.pdf, fetched 2026-10-27
+[S5] Realistic Real-Time Rendering of Fire in a Production System, https://clas.iusb.edu/math-compsci/_prior-proposals/YVanzine_Proposal.pdf, fetched 2026-10-28 (unofficial)

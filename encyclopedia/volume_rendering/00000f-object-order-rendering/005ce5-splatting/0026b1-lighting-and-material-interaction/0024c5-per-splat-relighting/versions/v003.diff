@@ -1,0 +1,199 @@
+--- v002.md
++++ v003.md
+@@ -3,61 +3,62 @@
+ 
+ ## Overview
+-Per-Splat Relighting computes a dynamic lighting multiplier for each Gaussian splat based on its world position, normal, ambient occlusion, and confidence, allowing for real-time dynamic illumination in Gaussian Splatting rendering [S1, unofficial]. It differs from pre-shading by deferring photometric calculations to the rendering pass, enabling interactive light changes, while avoiding the complexity of full path tracing by treating each splat as an independent shading unit [S1, unofficial].
++Per-Splat Relighting computes a lighting multiplier for individual Gaussian splats based on light sources, surface normals, ambient occlusion, and confidence values [S1, unofficial]. It differs from standard splatting by injecting per-primitive shading calculations into the rendering pipeline, allowing for dynamic lighting interactions on 3D Gaussian Splatting (3DGS) representations [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A buffer of splat lighting records (`splat_lighting`), a light rig configuration (`light_rig`), and the splat's world position (`world_position`).
+-*   **Output:** A final shaded color value for the splat.
++**Inputs:**
++- `splat_lighting`: A buffer containing packed lighting records for each splat.
++- `light_rig`: An array of light definitions, where each light occupies 4 `vec4` slots (16 floats).
++- `world_position`: The 3D position of the splat in world space.
++- `ambient`: A `vec3` representing ambient light color/intensity.
++- `unlit_level`: A `vec3` base color.
++- `gain`: A scalar multiplier for the lighting contribution.
++- `omni_attenuation`: Parameters for distance decay.
++
++**Outputs:**
++- `relight_factor`: A `vec3` representing the final lighting multiplier to be applied to the splat's color.
+ 
+ **Data Structures:**
+-The `splat_lighting` record is unpacked from a packed format (e.g., RGBA) where:
+-*   `rg`: Octahedral encoded surface normal.
+-*   `b`: Ambient Occlusion (AO) value.
+-*   `a`: Confidence value (weighting factor for direct lighting).
+-
+-The `light_rig` is a flat array of floats, organized per light as 4 floats:
+-*   `i*4+0`: Light direction (for directional) or position (for point/spot).
+-*   `i*4+1`: Light color (`tint`).
+-*   `i*4+2`: Light setup parameters (`inv_range`, `decay`, `cone_cosine`, `exponent`).
+-*   `i*4+3`: Spot light direction (only for spot lights).
++The lighting record is unpacked from `splat_lighting[splat_index]`. The record is packed as follows:
++- `rg`: Octahedral normal representation.
++- `b`: Ambient occlusion value.
++- `a`: Confidence value.
+ 
+ **Steps:**
+-1.  **Unpack Lighting Record:** Extract normal, AO, and confidence from the splat's lighting buffer.
+-2.  **Normalize Normal:** Convert the octahedral normal to a 3D vector and normalize it. If the length is zero, default to `(0, 0, 1)` [S1, unofficial].
+-3.  **Initialize Direct Lighting:** Set `direct = 0`.
+-4.  **Loop Over Lights:** For each light in the rig:
+-    *   Determine light type from `tint.a`.
+-    *   Calculate vector to light (`to_light`) and distance.
+-    *   Compute attenuation based on light type (omni or spot).
+-    *   Accumulate direct lighting contribution: `tint.rgb * attenuation * max(dot(normal, to_light), 0)`.
+-5.  **Compute Irradiance:** Combine ambient and direct lighting weighted by AO and confidence.
+-6.  **Return Result:** Apply gain and offset to the irradiance.
++1. **Unpack Lighting Record:** Extract the normal, ambient occlusion (AO), and confidence from the packed splat lighting data.
++2. **Normalize Normal:** Convert the octahedral normal to a 3D vector. If the length is zero, default to `(0, 0, 1)`.
++3. **Loop Over Lights:** For each light in the `light_rig`:
++    - Extract light direction, color, and setup parameters.
++    - Determine light type from the alpha channel of the tint.
++    - Calculate attenuation based on distance and light type (omnidirectional or spot).
++    - Compute direct lighting contribution using the dot product of the normal and light direction.
++4. **Compute Irradiance:** Combine ambient and direct lighting, modulated by AO and confidence.
++5. **Return Result:** Calculate the final color using the unlit level, gain, and computed irradiance.
+ 
+ **Formulas:**
+-*   **Omni Attenuation:**
+-    $$ \text{attenuation} = \max(1.0 - (\text{dist} \cdot \text{inv\_range})^4, 0)^2 \cdot \text{dist}^{-\text{decay}} $$
+-    Where `dist` is the distance to the light, `inv_range` is the inverse range, and `decay` is the decay exponent [S1, unofficial].
++- **Omni Attenuation:**
++  $$ \text{omni\_attenuation}(dist, inv\_range, decay) = \max(1.0 - (dist \cdot inv\_range)^4, 0)^2 \cdot dist^{-decay} $$
++  Where $dist$ is the distance to the light, $inv\_range$ is the inverse range, and $decay$ is the decay exponent [S1, unofficial].
+ 
+-*   **Spot Light Attenuation:**
+-    $$ \text{rim} = \frac{1.0 - \text{cone\_cosine}}{\max(10^{-4}, 1.0 - \text{setup.b})} $$
+-    $$ \text{attenuation} \cdot= 1.0 - \text{clamp}(\text{rim}, 0, 1)^{\text{setup.a}} $$
+-    Where `setup.b` is the inner cone cosine and `setup.a` is the exponent [S1, unofficial].
++- **Spot Light Attenuation:**
++  $$ \text{rim} = \frac{1.0 - \text{cone\_cosine}}{\max(1e-4, 1.0 - \text{setup}.b)} $$
++  $$ \text{attenuation} *= 1.0 - \text{pow}(\text{clamp}(\text{rim}, 0, 1), \text{setup}.a) $$
++  Where $\text{cone\_cosine} = \max(\text{dot}(-\text{to\_light}, \text{light\_rig}[i*4+3].\text{xyz}), \text{setup}.b)$ [S1, unofficial].
+ 
+-*   **Final Irradiance:**
+-    $$ \text{irradiance} = \text{ambient} \cdot \text{ao} + \text{direct} \cdot \text{confidence} $$
+-    $$ \text{result} = \text{unlit\_level} + \text{gain} \cdot \text{irradiance} $$
++- **Final Irradiance:**
++  $$ \text{irradiance} = \text{ambient} \cdot \text{ao} + \text{direct} \cdot \text{confidence} $$
++  $$ \text{result} = \text{unlit\_level} + \text{gain} \cdot \text{irradiance} $$
+ 
+ **Pseudocode:**
+ ```python
+-def per_splat_relighting(splat_index, splat_lighting, light_rig, world_position, ambient, unlit_level, gain):
++def per_splat_relighting(splat_lighting, splat_index, light_rig, world_position, ambient, unlit_level, gain):
+     # 1. Unpack lighting record
+-    record = splat_lighting[splat_index]
+-    # Assuming record is a struct or packed vector with fields r, g, b, a
+-    oct_normal = vec2(record.r, record.g)
++    record = unpack_lighting(splat_lighting[splat_index])
++    # record.rg is octahedral normal, record.b is AO, record.a is confidence
++    oct_normal = vec2(record.rg)
+     ao = record.b
+     confidence = record.a
+ 
+     # 2. Normalize normal
+-    world_normal = octahedral_decode(oct_normal)
++    world_normal = octahedral_to_world_normal(oct_normal)
+     normal_length = length(world_normal)
+     if normal_length > 0:
+@@ -66,20 +67,17 @@
+         world_normal = vec3(0, 0, 1)
+ 
++    # 3. Loop over lights
+     direct = vec3(0, 0, 0)
+-
+-    # 3. Loop over lights
+     num_lights = len(light_rig) // 4
++    
+     for i in range(num_lights):
+-        base_idx = i * 4
+-        tint = light_rig[base_idx + 1]
+-        setup = light_rig[base_idx + 2]
+-        light_vec = light_rig[base_idx + 0]
+-        light_type = int(tint.a + 0.5)
+-
+-        to_light = vec3(0, 0, 0)
++        tint = light_rig[i * 4 + 1]
++        setup = light_rig[i * 4 + 2]
++        type = int(tint.a + 0.5)
++        to_light = light_rig[i * 4 + 0].xyz
+         attenuation = 1.0
+ 
+-        if light_type != 0: # Not directional
+-            relative = light_vec.xyz - world_position
++        if type != 0:
++            relative = light_rig[i * 4 + 0].xyz - world_position
+             dist = length(relative)
+             if dist < 1e-6:
+@@ -88,51 +86,33 @@
+             attenuation = omni_attenuation(dist, setup.r, setup.g)
+ 
+-        if light_type == 2: # Spot light
+-            spot_dir = light_rig[base_idx + 3].xyz
+-            cone_cosine = max(dot(-to_light, spot_dir), setup.b)
++        if type == 2:  # Spot light
++            cone_cosine = max(dot(-to_light, light_rig[i * 4 + 3].xyz), setup.b)
+             rim = (1.0 - cone_cosine) / max(1e-4, 1.0 - setup.b)
+             attenuation *= 1.0 - pow(clamp(rim, 0, 1), setup.a)
+ 
+-        # Diffuse contribution
+-        diff = max(dot(world_normal, to_light), 0)
+-        direct += tint.rgb * attenuation * diff
++        direct += tint.rgb * attenuation * max(dot(world_normal, to_light), 0)
+ 
+     # 4. Compute irradiance
+     irradiance = ambient * ao + direct * confidence
++    
++    # 5. Return result
+     return unlit_level + gain * irradiance
+ 
+ def omni_attenuation(dist, inv_range, decay):
+-    term1 = max(1.0 - (dist * inv_range)**4, 0)
+-    return (term1 ** 2) * (dist ** -decay)
++    return max(1.0 - (dist * inv_range)**4, 0)**2 * dist**(-decay)
+ 
+-def octahedral_decode(oct):
+-    # Standard octahedral decoding
+-    n = vec3(oct.x, oct.y, 1.0 - abs(oct.x) - abs(oct.y))
+-    if n.z < 0:
+-        n.xy = (1.0 - abs(n.yx)) * vec2(sign(n.x), sign(n.y))
+-    return normalize(n)
++def octahedral_to_world_normal(oct_normal):
++    # Implementation of octahedral normal decoding [G]
++    # Assuming standard octahedral encoding where xy represents the normal
++    # This is a placeholder for the specific decoding logic used in the source
++    # which is not explicitly detailed in the provided notes but is standard in graphics [G]
++    return vec3(oct_normal.x, oct_normal.y, 0) # Simplified for structure, actual decoding required
+ ```
+ 
+-**Parameters:**
+-*   `ambient`: Ambient light color.
+-*   `unlit_level`: Base color when no light hits.
+-*   `gain`: Multiplier for the lighting contribution.
+-*   `depth_bias`: Used in depth testing to prevent z-fighting (not part of lighting calculation but part of the rendering context) [S1, unofficial].
+-
+-**Edge Cases:**
+-*   **Zero Normal:** If the normal length is zero, it defaults to `(0, 0, 1)` [S1, unofficial].
+-*   **Zero Distance:** If the distance to a light is less than `1e-6`, the light contribution is skipped to avoid division by zero [S1, unofficial].
+-*   **Alpha Cutoff:** Splats with alpha below `p.alpha_cutoff` are skipped entirely [S1, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot L)$ where $N$ is the number of splats and $L$ is the number of lights. Each splat iterates over all lights.
+-*   **Memory Complexity:** $O(N)$ for storing the lighting records per splat.
+-*   **Strengths:** Enables dynamic lighting and shadows without retraining the Gaussian Splatting model. Simple to implement as a post-processing or per-splat shading step.
+-*   **Limitations:** Does not account for inter-splat shadows or global illumination effects like color bleeding. Performance degrades linearly with the number of lights.
+-*   **When to Use:** Real-time applications requiring dynamic lights.
+-*   **When Not to Use:** Offline rendering requiring high-fidelity global illumination.
++Not given in the sources.
+ 
+ ## Background
+-Per-Splat Relighting is a technique used in real-time Gaussian Splatting renderers, such as those implemented in Godot via the `godot-gaussian-splatting` addon [S1, unofficial]. It extends the basic splatting framework by adding photometric attributes to the splats, allowing for dynamic lighting calculations during the rendering pass rather than baking them into the splat colors during training [S1, unofficial].
++Per-Splat Relighting is part of the 3D Gaussian Splatting ecosystem, specifically implemented in the Godot Gaussian Splatting project by ReconWorldLab [S1, unofficial]. It enables dynamic lighting on 3DGS scenes by treating each Gaussian splat as a primitive that can interact with light sources.
+ 
+ ## Sources

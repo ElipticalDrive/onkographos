@@ -1,0 +1,134 @@
+# Gaussian Rasterization Setup
+
+Also called: Gaussian Renderer Setup, GaussianRasterizer Setup, Rasterization Configuration and Tensor Preparation, render function setup
+
+## Overview
+This step prepares the scene data and computational buffers required to invoke the differentiable Gaussian rasterizer. It initializes tensors for gradient accumulation and constructs the configuration object that defines the camera parameters and rendering constraints. It differs from the rasterizer itself by handling the setup of state and memory layout rather than the pixel-wise projection and blending logic.
+
+## How it works
+The setup process ensures that all necessary tensors are allocated on the correct device with appropriate gradient tracking capabilities, and that the rasterization settings are correctly formatted for the underlying C++/CUDA kernel.
+
+### Inputs and Outputs
+**Inputs:**
+- `pc`: The Gaussian point cloud object containing attributes (e.g., `_xyz`, scales, rotations, SH coefficients).
+- `viewpoint_camera`: The current camera object containing field of view (FoV) and position.
+- `image_width`, `image_height`: The resolution of the target image.
+- `background`: The background color tensor.
+
+**Outputs:**
+- `GaussianRasterizationSettings`: An object containing all camera and rendering parameters.
+- `screenspace_points`: A tensor initialized to zero, used to store gradients for 2D screen-space means.
+
+### Data Structures
+**GaussianRasterizationSettings**
+The settings object aggregates the following fields:
+- `image_width`: Integer, width of the output image.
+- `image_height`: Integer, height of the output image.
+- `tanfovx`: Float, tangent of half the horizontal field of view.
+- `tanfovy`: Float, tangent of half the vertical field of view.
+- `bg_color`: Tensor, background color (must be on GPU).
+- `scale_modifier`: Float, multiplier for Gaussian scales (default 1.0) [S2, unofficial].
+- `viewmatrix`: Tensor, 4x4 view transformation matrix.
+- `projmatrix`: Tensor, 4x4 projection matrix.
+- `sh_degree`: Integer, number of spherical harmonic degrees.
+- `campos`: Tensor, camera position in world coordinates.
+- Additional fields may include opacity modifiers, depth settings, or time parameters depending on the specific implementation variant [S2, unofficial].
+
+**screenspace_points**
+- Shape: `(N,)` or `(N, 2)` depending on implementation, where `N` is the number of Gaussians.
+- Dtype: Same as `pc.get_xyz().dtype`.
+- Device: Same as `pc.get_xyz().device`.
+- Requires Grad: `True`.
+
+### Steps
+1. **Initialize Gradient Tensor**: Create a zero tensor `screenspace_points` with the same dtype and device as the 3D positions (`pc.get_xyz()`). This tensor is used to store gradients of the 2D screen-space means [S1, S2, unofficial].
+2. **Enable Gradient Retention**: Call `retain_grad()` on `screenspace_points` to ensure gradients are retained during the backward pass, allowing access to the gradient of the 2D means [S1, S2, unofficial].
+3. **Calculate FOV Tangents**: Compute the tangent of half the field of view for the x and y axes:
+   $$ \text{tanfovx} = \tan\left(\frac{\text{viewpoint\_camera.FoVx}}{2}\right) $$
+   $$ \text{tanfovy} = \tan\left(\frac{\text{viewpoint\_camera.FoVy}}{2}\right) $$
+   [S1, unofficial]
+4. **Construct Settings Object**: Instantiate `GaussianRasterizationSettings` with the calculated FOV tangents, image dimensions, background color, scale modifier, view/projection matrices, SH degree, and camera position [S1, S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def setup_gaussian_rasterization(pc, viewpoint_camera, image_width, image_height, background):
+    """
+    Prepares tensors and settings for Gaussian rasterization.
+    
+    Args:
+        pc: Gaussian point cloud object with get_xyz() method.
+        viewpoint_camera: Camera object with FoVx, FoVy, and position.
+        image_width: int, width of the output image.
+        image_height: int, height of the output image.
+        background: Tensor, background color on GPU.
+        
+    Returns:
+        settings: GaussianRasterizationSettings object.
+        screenspace_points: Tensor for 2D mean gradients.
+    """
+    # Step 1: Initialize screenspace_points tensor
+    # Must match dtype and device of 3D positions
+    xyz = pc.get_xyz()
+    screenspace_points = torch.zeros(xyz.shape[0], device=xyz.device, dtype=xyz.dtype, requires_grad=True)
+    
+    # Step 2: Retain gradients for screenspace_points
+    # This allows gradient access during backward pass
+    screenspace_points.retain_grad()
+    
+    # Step 3: Calculate FOV tangents
+    tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+    tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+    
+    # Step 4: Construct GaussianRasterizationSettings
+    # Note: The exact constructor signature may vary by implementation.
+    # Common parameters include:
+    # - image dimensions
+    # - FOV tangents
+    # - background color
+    # - scale modifier (default 1.0)
+    # - view/projection matrices
+    # - SH degree
+    # - camera position
+    
+    settings = GaussianRasterizationSettings(
+        image_width=image_width,
+        image_height=image_height,
+        tanfovx=tanfovx,
+        tanfovy=tanfovy,
+        bg_color=background,
+        scale_modifier=1.0,  # Default value [S2, unofficial]
+        viewmatrix=viewpoint_camera.viewmatrix,
+        projmatrix=viewpoint_camera.projmatrix,
+        sh_degree=pc.sh_degree,
+        campos=viewpoint_camera.campos
+    )
+    
+    return settings, screenspace_points
+```
+
+### Parameters
+- `scale_modifier`: Multiplier for the Gaussian scale. Default is 1.0 [S2, unofficial].
+- `bg_color`: Background color tensor. Must be on GPU [S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Device Mismatch**: `bg_color` must be on the same device as the Gaussian attributes. Failure to move `bg_color` to GPU will cause kernel launch errors [S2, unofficial].
+- **Gradient Loss**: If `retain_grad()` is not called on `screenspace_points`, gradients for 2D means will not be accessible during the backward pass, breaking differentiability for certain optimization steps [S1, S2, unofficial].
+- **FOV Calculation**: Ensure `FoVx` and `FoVy` are in radians if `math.tan` is used. If they are in degrees, conversion is required.
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ for tensor initialization, where $N$ is the number of Gaussians. The FOV calculation is $O(1)$.
+- **Memory Complexity**: $O(N)$ for `screenspace_points`.
+- **Strengths**: Minimal overhead; prepares necessary state for differentiable rendering.
+- **Limitations**: Requires careful handling of device placement and gradient retention.
+
+## Background
+This setup procedure is part of the 3D Gaussian Splatting rendering pipeline, specifically the configuration phase before the actual rasterization kernel is invoked. It originates from the implementation details of differentiable Gaussian splatting frameworks [S1, S2, unofficial].
+
+## Sources
+[S1] Ingyu-Jeong/EGGS, https://github.com/Ingyu-Jeong/EGGS, fetched 2026-10-26 (unofficial)
+[S2] LogosIntelligenceLab/4d-gaussian-splatting, https://github.com/LogosIntelligenceLab/4d-gaussian-splatting, fetched 2026-10-27 (unofficial)

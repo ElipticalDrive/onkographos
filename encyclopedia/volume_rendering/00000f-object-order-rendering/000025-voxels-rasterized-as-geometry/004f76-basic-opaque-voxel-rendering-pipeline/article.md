@@ -1,0 +1,101 @@
+# Basic Opaque Voxel Rendering Pipeline
+Also called: Basic Opaque Rendering Pipeline
+
+## Overview
+This method implements a minimal, high-performance rendering pipeline for opaque voxel geometry, typically targeting modern graphics APIs like WebGPU. It solves the problem of efficiently displaying static or semi-static voxel worlds by treating occupied voxels as opaque geometric primitives. It distinguishes itself from sibling methods by enforcing a strict single-pipeline architecture with fixed lighting models (sun, sky, baked-AO) and specific depth buffer configurations, avoiding the complexity of transparency handling or dynamic shader compilation found in more advanced variants [S1, unofficial].
+
+## How it works
+The pipeline converts voxel data into GPU-drawable geometry and renders it using a fixed-function shading model.
+
+**Inputs and Outputs:**
+- **Input:** A set of voxel definitions (cell types) and a volume data structure containing cell instances with positions and orientations.
+- **Output:** Rasterized images (e.g., RGB/RGBA with depth) representing the opaque voxel scene.
+
+**Data Structures:**
+1.  **Voxel Definition:** An immutable structure defining the visual properties of a cell type (e.g., stone, dirt). It is shared across instances [S2].
+2.  **Voxel Volume:** A dense or sparse grid of cells. Constructed via a `Builder` pattern where cells are placed at specific indices $(i, j, k)$ with specific orientations [S2].
+3.  **Model:** An immutable mesh representation generated from the Volume. It contains opaque and transparent mesh subsets, though this specific pipeline only utilizes the opaque subset [S2].
+4.  **Assembly:** A copyable container of Models, allowing local transforms to be applied to groups of voxels (e.g., a character body part) [S2].
+5.  **Vertex/Index Buffer:** A single, growing, reusable buffer managed by a `MeshUploader`. It has an explicit byte budget; uploads exceeding this budget are rejected [S1, unofficial].
+
+**Pipeline Configuration:**
+The rendering pipeline is configured with the following fixed states [S1, unofficial]:
+-   **Front Face:** Counter-Clockwise (CCW).
+-   **Depth Buffer:** `Depth32Float`.
+-   **Culling:** Back-face culling is enabled.
+-   **Coordinate System:** Targets WebGPU NDC where $z \in [0, 1]$.
+
+**Rendering Steps:**
+1.  **Volume Construction:** The application constructs a `Voxel::Volume` using a `Builder`. Cells are added with specific definitions and orientations [S2].
+2.  **Meshing (Baking):** A `VoxelMesher` synchronously processes the `Volume` to generate an immutable `Model`. This step converts logical voxel data into geometric primitives (vertices and indices) [S2].
+3.  **Assembly Composition:** The application composes `Model`s into an `Assembly`, applying local transforms. The assembly state is invalidated if transforms change [S2].
+4.  **Entity Binding:** An `AssemblyRenderingComponent` is attached to a 3D Entity, binding the assembly without owning it [S2].
+5.  **Batching:** A `VoxelRenderingSystem` collects these components via a Registry. It reconstructs compact batches every frame. For each non-empty bucket, a new Storage Buffer (SSBO) is created [S2].
+6.  **Draw Commands:** The system emits instanced draw commands. No per-instance update commands are used; all instance data is pushed via the SSBOs [S2].
+7.  **Culling:** Frustum culling is applied using the Gribb–Hartmann algorithm to exclude voxels outside the camera view [S1, unofficial].
+8.  **Shading:** The fragment shader applies a lighting model combining direct sunlight, sky ambient, and baked ambient occlusion (AO) [S1, unofficial].
+9.  **Capture (Optional):** For debugging or testing, the scene can be rendered offscreen to an `Rgba8UnormSrgb` texture with depth, read back, and saved as PNGs [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Step 1: Define Voxel Types
+stone_def = VoxelDefinition(material="stone", color=[0.5, 0.5, 0.5])
+
+# Step 2: Build Volume
+volume_builder = VoxelVolumeBuilder(dimensions=(16, 16, 16))
+cell = VoxelCell(definition=stone_def, orientation=Identity)
+volume_builder.set(position=(2, 4, 1), cell=cell)
+volume = volume_builder.build()
+
+# Step 3: Bake Mesh
+model = mesher.bake(volume) # Returns immutable Model with opaque meshes
+
+# Step 4: Create Assembly
+assembly = VoxelAssembly()
+assembly.add_part("body", model, transform=Identity)
+
+# Step 5: Render Loop
+for frame in frames:
+    # Update assembly if transforms changed
+    if assembly.needs_update:
+        assembly.update_transforms()
+    
+    # System collects components and builds batches
+    batches = voxel_rendering_system.collect_batches([assembly])
+    
+    # Create SSBOs for each bucket
+    for bucket in batches:
+        ssbo = create_ssbo(bucket.instance_data)
+        
+        # Issue instanced draw call
+        draw_instanced(
+            pipeline=pipeline, # CCW, Depth32Float, BackFaceCull
+            vertex_buffer=mesh_buffer,
+            index_buffer=mesh_index_buffer,
+            instance_buffer=ssbo,
+            instance_count=bucket.instance_count,
+            index_count=bucket.index_count
+        )
+```
+
+## Subtopics
+
+### Voxel Rendering Pipeline
+A specific implementation of the basic opaque pipeline within the Sparkle engine context. It differs by introducing a high-level abstraction layer involving `Volume`, `Model`, and `Assembly` objects, and relies on a registry-based system for rendering components. It emphasizes synchronous baking and per-frame batch reconstruction with SSBOs for instance data, avoiding per-instance update commands [S2].
+
+## Operating characteristics
+-   **Time Complexity:** Meshing is synchronous and occurs during volume construction or explicit bake calls, not per-frame. Rendering is $O(N)$ with respect to the number of visible voxel instances, dominated by draw call overhead and vertex processing.
+-   **Memory Complexity:** The vertex/index buffer grows with the number of visible faces. The SSBOs scale with the number of instances per bucket. The `MeshUploader`'s byte budget limits peak memory usage per frame [S1, unofficial].
+-   **Performance:** Efficient for static or slowly changing scenes due to immutable models and instanced rendering. The Gribb–Hartmann culling reduces overdraw [S1, unofficial].
+-   **Limitations:** Only supports opaque rendering. Transparency is handled by a separate mesh subset in the model but not rendered by this specific pipeline configuration. Lighting is static (baked AO), limiting dynamic shadowing capabilities [S1, unofficial].
+-   **When to use:** Ideal for voxel-based games or simulations where performance is critical, lighting requirements are simple, and transparency is not needed or handled separately.
+-   **When not to use:** When dynamic lighting, complex shadows, or transparency are required.
+
+## Background
+This pipeline originates from the `spall` project, specifically the `spall_render` module, which provides a baseline implementation for WebGPU-based voxel rendering. It is designed as a minimal, reference-quality implementation to validate the meshing and rendering logic before adding more complex features. The approach of using instanced rendering with SSBOs for instance data is a common optimization in modern graphics programming for large numbers of similar objects [S1, unofficial]. The Sparkle engine's implementation adapts these principles into a more structured, entity-component-system (ECS) friendly architecture [S2].
+
+## Sources
+[S1] T05 — Visible voxel baseline (spall_mesh, spall_render), https://github.com/deranjer/spall/pull/10, fetched 2026-10-27 (unofficial)
+[S2] V0.1.4 — Voxel engine design and implementation specification, https://github.com/EreliaStudio/Sparkle/pull/37, fetched 2026-10-26

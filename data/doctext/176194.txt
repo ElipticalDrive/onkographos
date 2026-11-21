@@ -1,0 +1,178 @@
+Implementing Morton ordering for chunked voxel data in PolyVox
+
+Implementing Morton ordering for chunked voxel data - Volumes Of Fun
+We’ve recently been doing some work in PolyVox to switch the ordering of voxel data from linear order to Morton order. This work is now complete, and in this relatively technical post I’m going to highlight a couple of the interesting tricks which we came across while doing it. Hopefully these will be beneficial to other people working on the low-level details of voxel engines.
+Like many voxel engines, PolyVox allows volume data to be broken down into a number of ‘chunks’. The primary advantage of this approach is that not all the data has to be loaded into memory at the same time, and we can instead load and unload chunks on demand. Note that this is an implementation detail of the our ‘PagedVolume’ class, and algorithms which operate on the data (mesh extractors, raycasting, etc) are not aware that the data is stored in this way.
+The size of each chunk can be specified by the user (with the ideal size depending on a number of factors) but typically contain 32³, 64³, or 128³ voxels. The ‘ordering’ of these voxels refers to the way they are laid out in memory, and two possibilities are shown below for the 2D case. The linear ordering is the easiest to understand and can be traversed with a simple nested for loop, but the Morton ordering brings numerous benefits in terms of locality of reference, ease of downsampling, and increased compressibility.
+Linear ordering (left) vs. Morton ordering (right)
+However, the purpose of this blog post is not to explain the benefits of Morton ordering, nor to describe how (x,y,z) positions are mapped to locations on the Morton curve. For this we refer you to the Wikipedia article and the excellent blog posts by Jeroen Baert and Fabian Giesen. Instead, we wish to highlight a couple of optimizations which were useful in our implementation.
+Morton index calculation
+Jeroen Baert did some extensive tests on the most performant way to determine Morton curve positions from a 3D input position. The conclusion was that it is fastest to make use of a lookup table rather than perform a series of bitwise operations – a perhaps surprising result given the relative cost of processor cycles vs. memory access on modern hardware.
+We tested both approaches and were able to verify Jeroen’s original findings. Compared to using a simple linear index for the 3D position, computing and accessing a Morton index took roughly four times as long. By comparison, using the lookup table only took about 40% longer than the linear index, clearly showing the benefits of this approach. None-the-less, a 40% increase in voxel access time is a significant price to pay even given the other advantages of the Morton ordering, and it is here that we make our first useful observation.
+Jeroen is working in the context of SVO rendering and is using very large volumes. His function to map a 3D position to on the Morton curve looks as follows:
+```
+inline uint64_t mortonEncode_LUT(unsigned int x, unsigned int y, unsigned int z)
+{
+    uint64_t answer = 0;
+    answer =    morton256_z[(z >> 16) & 0xFF ] | // we start by shifting the third byte, since we only look at the first 21 bits
+                morton256_y[(y >> 16) & 0xFF ] |
+                morton256_x[(x >> 16) & 0xFF ];
+    answer = answer << 48 | morton256_z[(z >> 8) & 0xFF ] | // shifting second byte
+                morton256_y[(y >> 8) & 0xFF ] |
+                morton256_x[(x >> 8) & 0xFF ];
+    answer = answer << 24 |
+                morton256_z[(z) & 0xFF ] | // first byte
+                morton256_y[(y) & 0xFF ] |
+                morton256_x[(x) & 0xFF ];
+    return answer;
+}
+```
+The variables ‘morton256_x’, ‘morton256_y’, and ‘morton256_z’ are the lookup tables, and each stores 256 entries (enough to perform the mapping for a single byte) due to the impracticality of having an entry in the lookup table for every possible value of the unsigned int inputs. Construction of the full Morton key is therefore done by using these lookup tables repeatedly to process each byte of the input, and them combining them with more bitwise operations.
+For our purposes the size of each chunk is actually very limited, and setting a hard limit of 256^3 seems reasonable. The actual volume can of course be much larger, consisting of many of these chunks. Therefore we apply this hard limit and reduce the above code to just three lookups which are OR’d:
+```
+template <typename VoxelType>
+VoxelType PagedVolume<VoxelType>::Chunk::getVoxel(uint32_t uXPos, uint32_t uYPos, uint32_t uZPos) const
+{
+    uint32_t index = morton256_x[uXPos] | morton256_y[uYPos] | morton256_z[uZPos];
+    return m_tData[index];
+}
+```
+With this change the calculation of the position on the Morton curve is about 1-2% faster than with the linear version, though with such a small improvement it is hard to be sure. At least, we are not paying any extra access cost for the benefits which Morton ordering provides.
+Fast neighbourhood access
+As well as ensuring that random access to any voxel is as fast as possible, it is also important to consider realistic access patterns. In the context of voxel engines this typically means providing fast access to a given voxel’s neighbours as this is often required for tasks such as filtering, normal estimation, and surface extraction.
+Access to such neighbours is trivial with a simple linear ordering. For a given position (x,y,z), if we want to access position (x+1,y,z) then we know it is simply the next voxel in memory. There is no need to work out which chunk it is in (disregarding edge cases here) nor to perform the index calculations. In PolyVox we provide ‘peek…()’ functions to retrieve a neighbour of our current voxel, and so an older (linear) version of PolyVox peeked one voxel in the x direction as follows:
+```
+template <typename VoxelType>
+VoxelType PagedVolume<VoxelType>::Sampler::peekVoxel1px0py0pz(void) const
+{
+    if(CAN_GO_POS_X(this->mXPosInVolume) )
+    {
+        return *(mCurrentVoxel + 1);
+    }
+    return this->mVolume->getVoxel(this->mXPosInVolume+1,this->mYPosInVolume,this->mZPosInVolume);
+}
+```
+Note that the ‘CAN_GO_POS_X’ macro was just to ensure we were not on a chunk boundary, because if we were then our clever trick didn’t apply and we fell back on a regular call to getVoxel(). Peeking in multiple directions was more complex but the same principle applied:
+```
+template <typename VoxelType>
+VoxelType PagedVolume<VoxelType>::Sampler::peekVoxel1px1py1pz(void) const
+{
+    if(CAN_GO_POS_X(this->mXPosInVolume) && CAN_GO_POS_Y(this->mYPosInVolume) && CAN_GO_POS_Z(this->mZPosInVolume) )
+    {
+        return *(mCurrentVoxel + 1 + this->mVolume->m_uChunkSideLength + this->mVolume->m_uChunkSideLength*this->mVolume->m_uChunkSideLength);
+    }
+    return this->mVolume->getVoxel(this->mXPosInVolume+1,this->mYPosInVolume+1,this->mZPosInVolume+1);
+}
+```
+However, the situation becomes more complex when Morton ordering is applied. In this case, the neighbouring voxel in the x direction is not simply next to the current voxel in memory, and things get even harder when peeking in multiple directions at once. We did not find much information on how to handle this correctly, which is why we decided to present our solution here.
+The naive approach is to take the Morton position for our current voxel and reverse the encoding process to obtain the original (x,y,z) position. This can then be modified by adding or subtracting the desired offset to the desired component(s), and the resulting 3D position can then be re-encoded into an index on the Morton curve. Clearly this involves quite a lot of processing.
+It is possible to directly combine (‘add’?) two Morton positions as alluded to by this StackOverflow answer. However, this is still relatively expensive and again requires some significant bit-shifting. Update: Fabian Giesen has a much more detailed coverage (and more efficient version) of this approach – see the comments and also Texture tiling and swizzling.
+At this point Matt made a useful observation. As he states there, “for a given (x,y,z) which has a Morton position p; if we want to peek at (x+1,y,z) then the amount by which p must increase, Δp, is dependent only on x and is independent of y and z. This same logic holds for peeking in y and z”. In other words, we can make use of three more lookup tables (for x, y, and z) which store the offset for moving a single voxel in each direction.
+Such lookup tables can be generated by a simple program such as this (based on this code) which computes the offset between different pairs of adjacent x, y and z positions. The size of the lookup table needs to be at least as large as the largest chunk size we wish to support, though smaller chunk sizes are also supported by this as the elements of a smaller table are a subset of the elements of the large table.
+In PolyVox we are making use of three 256 element tables allowing us to support chunks of up to 256^3 voxels. The table for moving/peeking one voxel in the x direction is:
+```
+static const std::array&lt;int32_t, 256&gt; deltaX =
+{
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 28087,
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 224695,
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 28087,
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 1797559,
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 28087,
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 224695,
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 28087,
+    1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1, 3511, 1, 7, 1, 55, 1, 7, 1, 439, 1, 7, 1, 55, 1, 7, 1
+};
+```
+and you can find the other tables in the PolyVox source here. We also define a few macros to make using the tables easier:
+```
+...
+#define POS_X_DELTA (deltaX[this->m_uXPosInChunk])
+...
+```
+With this is place, the Morton version of our function for peeking one voxel in the x direction becomes as simple as:
+```
+template <typename VoxelType>
+VoxelType PagedVolume<VoxelType>::Sampler::peekVoxel1px0py0pz(void) const
+{
+    if (CAN_GO_POS_X(this->m_uXPosInChunk))
+    {
+        return *(mCurrentVoxel + POS_X_DELTA);
+    }
+    return this->mVolume->getVoxel(this->mXPosInVolume+1,this->mYPosInVolume,this->mZPosInVolume);
+}
+```
+and for peeking multiple directions at once:
+```
+template <typename VoxelType>
+VoxelType PagedVolume<VoxelType>::Sampler::peekVoxel1px1py1pz(void) const
+{
+    if (CAN_GO_POS_X(this->m_uXPosInChunk) && CAN_GO_POS_Y(this->m_uYPosInChunk) && CAN_GO_POS_Z(this->m_uZPosInChunk))
+    {
+        return *(mCurrentVoxel + POS_X_DELTA + POS_Y_DELTA + POS_Z_DELTA);
+    }
+    return this->mVolume->getVoxel(this->mXPosInVolume+1,this->mYPosInVolume+1,this->mZPosInVolume+1);
+}
+```
+Conclusion
+We have found that Morton ordering works well for storing voxel data in chunks inside PolyVox. While we can’t be sure that computing a Morton position is quite as fast as computing a linear position, we can say that the improved memory access time at least makes up for this due to the improved cache locality. Benefits such as improved compression and easier downsampling are then essentially free.
+If you are interested in any of our work above then you can check out the PolyVox code in BitBucket (currently you need the develop branch) and look at the PagedVolume*.h/inl files. If you want to see the discussion and tests which led to the conclusions above then you can have a read of our thread in the issue tracker.
+In the future we intend to have a few more of these posts covering the low-level details of PolyVox and Cubiquity, so stay tuned!
+12 thoughts on “Implementing Morton ordering for chunked voxel data”
+Hiya David,
+going to an adjacent Morton-encoded coordinate does not actually require fully re-encoding; it’s substantially cheaper than that, and can be done directly in Morton form. I explain the basic idea in my blog post “Texture tiling and swizzling”.
+In particular, suppose c is a morton code and you want to increment the x coordinate. Then you can do:
+x_inc = ((c & x_mask) – x_mask) & x_mask;
+c_new = (c & ~x_mask) | x_inc;
+where x_mask is a bit mask specifying where the x coordinate bits are. Note the same code as for x_inc also works with a different mask, so you can increment y and z the same way. The general form where you step by dx in x, dy in y, and dz in z looks like this:
+x_new = ((c &amp: x_mask) – encode_morton_x(-dx)) & x_mask;
+y_new = ((c &amp: y_mask) – encode_morton_y(-dy)) & y_mask;
+z_new = ((c &amp: z_mask) – encode_morton_z(-dz)) & z_mask;
+c_new = x_new | y_new | z_new;
+Note for constant dx, dy, dz all of this simplifies down to constants; with the delta being 1, you get encode_morton_axis(-1) which is the same as the bit mask for the axis, hence the earlier trick.
+Nowhere near as cheap as just incrementing an integer, but should still be better than re-encoding from scratch.
+Reply ↓
+Wow, that’s an very interesting blog post – too bad I didn’t find it earlier. For other readers it’s here: https://fgiesen.wordpress.com/2011/01/17/texture-tiling-and-swizzling/
+I would have to experiment to see how the performance of this approach compares, but you’ve certainly managed to squeeze it into a very small number of bitwise operations. So it essentially comes down to the time to execute these instructions vs. the time to retrieve our precomputed offset from the lookup table. In principle calculations are supposed be faster but the lookup table is fairly small.
+It’s worth noting though that we don’t actually store the Morton key explicitly. Instead of storing our position as a base pointer plus the Morton key we instead store and adjust only the combined result (the sum). Adding the precomputed offset still works, but to actually compute that offset using bitwise operations we’d have to first subtract (and therefore know) the base pointer to get the raw Morton key. Still, maybe it’s worth tracking these two things separately – your post makes an interesting point that modern CPUs have an addressing mode which uses the sum of two registers.
+Lots of thinking to do – thanks for the comments!
+Reply ↓
+To increment one axis value if you already have the Morton offset, the math is pretty hard to beat. (Computing those table offsets takes arithmetic operations too!)
+For the rest it depends; a small table is certainly not bad.
+One thing that might be useful for you is that morton256_y[i] = morton256_x[i] << 1 and morton256_z[i] = morton256_x[i] << 2, and the same goes for the delta tables. So you can reduce the amount of tables you store (and cache misses you might incur accessing them!) by a factor of 3 for the cost of 2 bit shifts per access, which is a pretty good deal.
+Reply ↓
+Thanks a lot, I really appreciate the feedback. I think I’ll try doing (at least some of) the calculations on the fly and see how it compares.
+Reply ↓
+Thanks for sharing this info. What performance gain do you expect? It would be great to have such summary with linear and morton order access fot your project.
+Reply ↓
+Overall we’re not seeing a big change in performance – the extra cost of Morton calculations is balanced by improved memory access time (or something else is the bottleneck). But the interesting point is that if Morton is no more expensive then we get the other benefits of it (better compression, easier downsampling, etc) for free.
+Edit: Maybe that was too negative. Here I said “The tests which are very heavy on sampler access show a 40-50% increase , but practical algorithms such as the Marching Cubes extractor show only a few % increase.”
+I think overall it is worth it, but your mileage may vary 🙂
+Reply ↓
+I’m that guy from the “add Morton coordinates” stackoverflow answer, it can be done quite efficiently (see below the hline). I also wrote a bunch more about it, like taking the minimum (and max, which is of course essentially the same), increment and increment with saturation, google “tesseral arithmetic”. Probably more can be done.
+Reply ↓
+For future readers this must be the stuff you are referring to: http://bitmath.blogspot.nl/2012/11/tesseral-arithmetic.html
+It looks like really cool stuff. You and Fabian Giesen have got me thinking again about computing some of this on the fly (rather than using the lookup tables) as in principle such bitwise operations are supposed to be faster than memory accesses.
+Reply ↓
+Hi David,
+Thanks for your blog post, very interesting !
+I’m the original author of the code you link for generating Morton offsets at compile time (https://github.com/aavenel/FastMortonKeys/blob/master/mortonkeys.h).
+However, I’m not very proud of this, and it’s possible to implement this in a much easier way :/
+I agree with Fabian comment, only one table should be better.
+If you want, I have some code snippet for additionning morton-encoded coordinates in xyz form, you can have a look here :
+https://gist.github.com/aavenel/a5349516aa33b7499eef
+Reply ↓
+Well thanks for the snippet (and sorry for not crediting you – I’ve added a link to your GitHub repo to the blog post now)!
+I think we need to do some more tests with these lookup tables vs. computing the offset at run time with the tricks you describe. I do agree that the calculations should be faster in principle due to touching less memory. It’s surprisingly difficult to test these things accurately though.
+Reply ↓
+This is actually a terrible idea.
+It seems like a good idea, but at 31,31,31 the distance between near sectors is huge. 32*32 is only 1024, whereas the min-max range covered from near voxels is 196616. which will cover several pages of memory.
+It looks good at low values, the distance from (-1,-1,-1) to (1,1,1) around 7,7,7 is only 3080 (still more than the 2048+ a little it would require)… so okay
+at 1,1,1 the distance is only 56. But as the values increase so does the distance spanned in memory.
+doing 1,1,1 to 32,32,32 the average is 14336 min/max range.
+Having reasonably sized sectors (16x16x64 or even 32x32x32) is more likely to have near values cached. It also complicates the indexing between sectors for near points.
+Reply ↓
+I’m not sure I fully understand your concerns. You are concerned about the distance (in memory?) between voxels in different chunks? Actually we do not store the chunks continuously anyway (they are spread out in memory) so I don’t expect this makes much difference. Of course, it may be interesting to organise the chunks differently but that’s not the issue we are addressing here.
+As for the performance, well overall there is not a big difference but the Morton version may be slightly faster. I think the main reason it is interesting is that it makes some other operations easier such as downsampling the volume data.
+But really I’m just giving information on how you implement this scheme. Whether you actually want to may depend on your exact use case.
+Reply ↓
+Leave a Reply Cancel reply

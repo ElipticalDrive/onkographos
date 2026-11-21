@@ -1,0 +1,262 @@
+--- v002.md
++++ v003.md
+@@ -1,143 +1,150 @@
+ # Standard Constant Step Ray Marching
+ 
+-Also called: Basic Raymarching Loop, Fixed Step Ray Marching, Raymarch, SDF Ray Marching
++Also called: Constant step ray marching, Fixed step ray marching, Uniform step ray marching
+ 
+ ## Overview
+-Standard Constant Step Ray Marching is an iterative algorithm for finding the intersection of a ray with an implicit surface or sampling a volume by advancing the ray position at fixed intervals [S4, S5, unofficial]. It mitigates the drawback of root-finding methods that may identify multiple intersection points by focusing on determining the first root (or accumulating volume data) [S4, unofficial]. Unlike Spheretracing, which uses the distance field value to determine the step size, this method uses a predefined constant step size, allowing it to work with any function that returns a boolean (inside/outside) or a scalar field, rather than requiring a strict Signed Distance Field (SDF) [S2, unofficial]. It builds on [Ray-primitive intersection](769-ray-primitive-intersection.md).
++Standard Constant Step Ray Marching is a rendering technique that samples a scene defined by Signed Distance Fields (SDFs) or implicit functions by advancing a ray along its direction by a fixed, predefined distance $\Delta t$ at each iteration [S1, S13, S19, S27, unofficial]. Unlike Sphere Tracing, which uses the SDF value as the step size to guarantee no overshooting, this method uses a static step size, requiring the step to be smaller than the smallest feature size in the scene to avoid artifacts [S13, S19, unofficial]. It solves the problem of rendering implicit surfaces without rasterization by iteratively checking for intersections (or density accumulation) at uniform intervals [S1, S23, unofficial]. It is distinguished from its siblings by its simplicity and lack of dependency on local geometry estimates for step sizing, making it suitable for non-SDF height fields or when performance constraints favor fixed-loop unrolling over conditional branching [S13, S19, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Ray origin $\mathbf{r}_0$ (e.g., camera position) [S3, S5, unofficial].
+-*   Ray direction $\mathbf{r}_d$ (normalized unit vector) [S3, S4, unofficial].
+-*   Fixed step size $\Delta t$ [S4, unofficial].
+-*   Maximum step count $k_{\max}$ (or maximum distance) [S2, S4, unofficial].
+-*   Implicit surface function $f(\mathbf{x})$ or scalar field map [S4, S5, unofficial].
+-*   (Optional) Bounding box limits $t_{\min}, t_{\max}$ [S5, unofficial].
++*   Ray origin $\mathbf{o}$ (camera position).
++*   Ray direction $\mathbf{d}$ (normalized vector from camera to pixel).
++*   Fixed step size $\Delta t$ (constant scalar).
++*   Maximum travel distance $t_{max}$ (far clipping plane).
++*   Maximum step count $N_{max}$ (iteration limit).
++*   Surface function $f(\mathbf{p})$: Returns a scalar value. For SDFs, $f(\mathbf{p})$ is the distance to the nearest surface (positive outside, negative inside, zero on surface). For height fields, $f(\mathbf{p})$ may return height or boolean hit status [S6, S13, S19, unofficial].
++*   Precision threshold $\epsilon$ (optional, for SDF convergence).
+ 
+ **Outputs:**
+-*   Intersection distance $t$ (if surface hit) [S4, unofficial].
+-*   Accumulated radiance/color (if volume rendering) [S5, unofficial].
+-*   Boolean indicating hit/miss [S2, S4, unofficial].
++*   Intersection distance $t_{hit}$ (if hit).
++*   Hit status (boolean).
++*   (Optional) Accumulated radiance/color for volume rendering [S23, unofficial].
+ 
+ **Data Structures:**
+-*   Scalar variables for position, distance, and counters. No complex structures required.
++*   `Ray`: Struct containing `origin` (vec3), `direction` (vec3), `t` (float, accumulated distance).
++*   `SceneHit`: Struct containing `position` (vec3), `normal` (vec3, optional), `distanceTravelled` (float), `hit` (bool) [S4, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  Initialize step counter $k = 0$ and current distance $t = 0$ [S4, S5, unofficial].
+-2.  (Optional) Compute bounding box intersection parameters $t_{\min}$ and $t_{\max}$ for the ray [S5, unofficial].
+-3.  Loop while $k < k_{\max}$ and (if bounding box is used) $t \le t_{\max}$:
+-    a. Calculate current sample point: $\mathbf{r}(k) = \mathbf{r}_0 + \Delta t \cdot k \cdot \mathbf{r}_d$ [S4, unofficial].
+-    b. Evaluate the field function at $\mathbf{r}(k)$: $d = f(\mathbf{r}(k))$ [S4, unofficial].
+-    c. **Surface Intersection Variant:**
+-        i. If $d \le 0$ (or $d < \epsilon$), the ray has hit or passed inside the surface. Return intersection distance $t = k \cdot \Delta t$ [S4, unofficial].
+-        ii. If $d > 0$ and a maximum distance check is used, break if $t > \text{MAX\_DIST}$ [S1, unofficial].
+-    d. **Volume Rendering Variant:**
+-        i. Sample density $\rho$ from $d$ [S5, unofficial].
+-        ii. Evaluate transfer function to get attenuation $\alpha$ and color contribution [S5, unofficial].
+-        iii. Update accumulated radiance: $L_{\text{new}} = L_{\text{old}} \cdot \exp(-\rho \cdot \Delta t \cdot \alpha)$ [S5, unofficial].
+-        iv. Advance $t$ by $\Delta t$ [S5, unofficial].
+-    e. Increment $k$ [S4, unofficial].
+-4.  If loop completes without hit (surface) or termination (volume), return miss/no intersection [S4, unofficial].
++**Parameters:**
++*   $\Delta t$: Typical values range from $0.001$ to $0.1$ depending on scene scale [S6, S13, S23, unofficial].
++*   $t_{max}$: Typical values $10.0$ to $100.0$ [S6, S13, unofficial].
++*   $N_{max}$: Typical values $10$ to $255$ [S6, S13, S23, unofficial].
++*   $\epsilon$: Typical value $0.001$ [S20, S26, unofficial].
+ 
+-**Pseudocode (Surface Intersection):**
++**Algorithm:**
++1.  Initialize accumulated distance $t = 0.0$ (or near clip $t_{min}$) [S6, S12, unofficial][S14].
++2.  Loop for $k = 0$ to $N_{max} - 1$:
++    a. Calculate current position: $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{d}$ [S7, unofficial][S14][S19, unofficial].
++    b. Evaluate surface function: $val = f(\mathbf{p})$ [S3, unofficial][S14][S17, unofficial].
++    c. Check termination conditions:
++        i. If $val \le 0$ (for SDFs, hit or inside) OR specific height condition met (e.g., $p_y < f(p_x, p_z)$), the ray has intersected [S6, S19, S27, unofficial].
++            *   For SDFs: If $|val| < \epsilon$, consider it a hit. Refine position if necessary (e.g., midpoint approximation $t - 0.5 \Delta t$) [S6, S20, unofficial].
++            *   Return hit status and $t$ (or $\mathbf{p}$).
++        ii. If $t \ge t_{max}$, the ray has missed. Return miss status [S6, S12, unofficial][S14].
++    d. Advance ray: $t \leftarrow t + \Delta t$ [S6, S13, S19, unofficial].
++3.  If loop completes without hit, return miss status [S19, S27, unofficial].
++
++**Pseudocode:**
+ ```python
+-import math
+-
+-def ray_march_surface(r0, rd, step_size, max_steps, surface_func):
++def constant_step_ray_march(ray_origin, ray_direction, scene_func, step_size, max_dist, max_steps, epsilon=0.001):
+     """
+-    r0: vec3, ray origin
+-    rd: vec3, normalized ray direction
+-    step_size: float, fixed delta t
+-    max_steps: int, maximum iterations
+-    surface_func: function, returns distance (negative if inside)
++    Marches a ray using a fixed step size.
++    
++    Args:
++        ray_origin: vec3, camera position.
++        ray_direction: vec3, normalized ray direction.
++        scene_func: callable, f(p) -> float (SDF value or height).
++        step_size: float, constant delta t.
++        max_dist: float, far clipping plane.
++        max_steps: int, maximum iterations.
++        epsilon: float, precision threshold for SDF hits.
++        
++    Returns:
++        tuple: (hit: bool, distance: float, position: vec3)
+     """
+-    k = 0
+     t = 0.0
+-    
+-    while k < max_steps:
+-        # Calculate current position using fixed step formula [S4, unofficial]
+-        pos = r0 + rd * (step_size * k)
++    for i in range(max_steps):
++        # 1. Calculate current position
++        p = ray_origin + ray_direction * t
+         
+-        # Sample the implicit surface
+-        dist = surface_func(pos)
++        # 2. Evaluate scene function
++        # For SDF: returns distance to surface. < 0 inside, > 0 outside.
++        # For Height Field: returns height f(x,z).
++        val = scene_func(p)
+         
+-        # Check for intersection: d <= 0 indicates inside or on surface [S4, unofficial]
+-        if dist <= 0.0:
+-            return t, True
++        # 3. Check for intersection
++        # Note: Logic varies by function type. 
++        # SDF approach: hit if val <= epsilon (surface reached)
++        # Height field approach: hit if point is below surface (p.y < val)
++        
++        is_hit = False
++        if val <= epsilon:
++            # SDF hit detected
++            is_hit = True
++        elif scene_func.is_height_field and p.y < val:
++            # Height field hit detected
++            is_hit = True
+             
+-        k += 1
+-        t = step_size * k
++        if is_hit:
++            # Optional refinement for SDF to get closer to zero crossing
++            # Midpoint approximation if step was large
++            hit_dist = t
++            if step_size > epsilon:
++                hit_dist = t - 0.5 * step_size
++            return (True, hit_dist, p)
++            
++        # 4. Check for miss (max distance)
++        if t >= max_dist:
++            return (False, max_dist, p)
++            
++        # 5. Advance step
++        t += step_size
+         
+-    return 0.0, False
++    # Max steps reached without hit
++    return (False, t, p)
+ ```
+ 
+-**Pseudocode (Volume Rendering):**
+-```python
+-import math
+-
+-def ray_march_volume(r0, rd, step_size, max_steps, volume_func, transfer_func):
+-    """
+-    volume_func: returns scalar density
+-    transfer_func: returns (density, attenuation) tuple
+-    """
+-    t = 0.0
+-    L = 1.0 # Incoming radiance
+-    
+-    # Optional: Compute t_min, t_max for bounding box [S5, unofficial]
+-    # t_min, t_max = compute_box_intersection(r0, rd, box)
+-    
+-    k = 0
+-    while k < max_steps:
+-        pos = r0 + rd * t
+-        
+-        # Sample volume
+-        density = volume_func(pos)
+-        
+-        # Apply transfer function
+-        tf_val = transfer_func(density)
+-        density_val = tf_val.density
+-        attenuation = tf_val.attenuation
+-        
+-        # Accumulate radiance [S5, unofficial]
+-        L = L * math.exp(-density_val * step_size * attenuation)
+-        
+-        t += step_size
+-        k += 1
+-        
+-    return L
+-```
+-
+-**Parameters:**
+-*   $\Delta t$ (Step Size): Critical parameter. Typical values range from 0.001 (high precision/volume) to 0.1 (coarse/surface) [S2, S5, unofficial].
+-*   $k_{\max}$ (Max Steps): Typical value 10–64 depending on scene complexity and step size [S2, S3, unofficial].
+-*   $\epsilon$ (Epsilon): Threshold for intersection detection. Often $0.001$ or similar small value [S3, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Tunneling:** If $\Delta t$ is too large, the ray may jump over thin geometry between samples [S2, S4, unofficial].
+-*   **Performance:** If $\Delta t$ is too small, excessive samples are taken in empty space, causing performance loss [S2, unofficial].
+-*   **Surface Definition:** The algorithm assumes $f(x) < 0$ is inside and $f(x) = 0$ is the surface boundary [S4, unofficial].
+-*   **Precision:** Fixed steps do not adapt to local geometry, potentially missing details that Spheretracing (adaptive step) would catch [S3, unofficial].
++*   **Overshooting:** If $\Delta t$ is larger than the distance to a thin surface, the ray will pass through it without detection [S19, unofficial]. The step size must be chosen conservatively based on the smallest scene feature [S13, unofficial].
++*   **Aliasing:** Large step sizes cause jagged edges and missed details. Smaller steps increase accuracy but reduce performance [S13, S19, unofficial].
++*   **Infinite Loops:** If the ray travels parallel to a surface or in empty space, $t$ will eventually exceed $t_{max}$, terminating the loop. A maximum step count $N_{max}$ provides a secondary safety break [S6, S13, unofficial].
++*   **Precision:** For SDFs, checking `val <= 0` might miss the exact surface if the step lands slightly outside. Using a small epsilon or refining the hit position (e.g., binary search or midpoint) improves accuracy [S6, S20, unofficial].
+ 
+ ## Subtopics
+ 
+-### Iteration-Based Coloring
+-A rendering technique where the pixel color is determined by the number of raymarching steps taken before hitting a surface or reaching the maximum step count, visualizing computational intensity [S6, unofficial]. It serves as a debug or artistic tool rather than a physically accurate method [S6, unofficial].
++### Coarse-to-Fine Entry Point Search
++An optimization for volume rendering where the entry point into solid matter is determined more accurately. It first samples forward along the ray in large steps to find the approximate entry into solid matter, then samples backward in smaller steps to pinpoint the entry point precisely [S30, unofficial].
++
++### Quilez Ray Marching AO
++A modification of Evans' method for Ambient Occlusion using constant step marching along the surface normal. It samples points $r_n(k) = x + k \Delta t n$ and calculates occlusion based on the deviation of the sampled distance from the ideal linear progression [S27, unofficial].
++
++### [Iteration-Based Coloring](1244-iteration-based-coloring.md)
++A rendering technique where the final pixel color is determined by the number of raymarching steps taken before termination. It visualizes computational intensity, highlighting regions where the ray traveled further or required more sampling iterations.
++
++### [Step Size Selection](2331-step-size-selection.md)
++While this article focuses on *constant* step size, the selection of that constant is critical. It balances rendering speed against the accuracy of the Riemann sum approximation. A fixed step size simplifies implementation but requires heuristic selection to avoid aliasing or missed features, unlike adaptive methods.
++
++### [SDF Ray Marching with Grid Lookup](5017-sdf-ray-marching-with-grid-lookup.md)
++A GPU-based variant that samples a 3D SDF grid to find intersections. It uses linear interpolation to evaluate the SDF at arbitrary points within the grid bounds, optimizing memory access patterns compared to procedural SDF evaluation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k_{\max})$, linear with respect to the maximum number of steps [S4, unofficial].
+-*   **Memory Complexity:** $O(1)$, constant space per ray [S4, unofficial].
+-*   **Strengths:** Simple to implement; works with any implicit function (boolean or scalar), not just SDFs [S2, unofficial].
+-*   **Limitations:** Prone to tunneling if step size is not carefully chosen; inefficient in empty space if step size is small; does not guarantee finding the *exact* first intersection point as accurately as adaptive methods (like Spheretracing) [S2, S4, unofficial].
+-*   **When to use:** Simple shapes, boolean volumes, or when SDF evaluation is expensive/impossible [S2, unofficial].
+-*   **When not to use:** Complex scenes with thin geometry requiring high precision, or when SDFs are available (use Spheretracing instead) [S2, S3, unofficial].
++*   **Time Complexity:** $O(N)$, where $N$ is the number of steps. Each step involves one function evaluation and one vector addition. The number of steps is proportional to $t_{max} / \Delta t$ [S13, S19, unofficial].
++*   **Memory Complexity:** $O(1)$ auxiliary space per ray. No additional data structures are required beyond the ray state and scene function [S13, unofficial].
++*   **Performance:** Generally faster than adaptive sphere tracing for simple scenes or when the step size is small relative to the scene scale, due to predictable memory access and lack of branching on step size calculation [S13, unofficial]. However, it requires more steps than sphere tracing to achieve the same geometric accuracy for complex, varying-scale scenes [S19, unofficial].
++*   **Strengths:** Simple implementation, easy to parallelize, no dependency on SDF gradient or local feature size estimation, works with non-SDF implicit functions (e.g., height fields) [S13, S19, unofficial].
++*   **Limitations:** Prone to overshooting thin geometry, requires manual tuning of $\Delta t$, inefficient in empty space (cannot skip large distances like sphere tracing) [S13, S19, unofficial].
++*   **When to use:** Simple scenes with uniform scale, height field rendering, or when the step size can be guaranteed to be smaller than the smallest feature [S13, S19, unofficial].
++*   **When not to use:** Complex scenes with varying feature sizes, where sphere tracing or adaptive stepping would significantly reduce sample count [S19, unofficial].
+ 
+ ## Background
+-The method was indicated by [PH89] and used for rendering Hypertexture volumes [S4, unofficial]. It is similar to volumetric ray-casting techniques [S4, S5, unofficial]. The ray equation $\mathbf{r}(k) = \mathbf{r}_0 + \Delta t k \mathbf{r}_d$ is a standard formulation for fixed-step traversal [S4, unofficial].
++Standard constant step ray marching is one of the earliest methods for rendering implicit surfaces. It was described by Hart in 1995 as "Sphere Tracing," although Hart's method specifically used the SDF value as the step size. The constant step variant is a simplification often used in educational contexts and for height fields [S3, S13, unofficial]. It is widely used in demoscene graphics and early shader-based ray marching tutorials due to its simplicity [S1, S13, unofficial]. The method is a foundational technique in the family of distance-field ray marching, preceding more advanced adaptive and optimization techniques [S13, S19, unofficial].
+ 
+ ## Sources
+-[S1] MohammadHossinzehi/sdf-raymarcher, https://github.com/MohammadHossinzehi/sdf-raymarcher, fetched 2026-10-26 (unofficial)
+-[S2] Spheretracing Basics | Ronja's tutorials, https://www.ronja-tutorials.com/post/043-spheretracing-basics/, fetched 2026-10-27 (unofficial)
+-[S3] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)
+-[S4] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
+-[S5] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
+-[S6] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)+[S1] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)
++[S3] Leesan-haruki/FunctionRenderer, https://github.com/Leesan-haruki/FunctionRenderer, fetched 2026-10-26 (unofficial)
++[S6] Adam-Gleave/sdf-terrain, https://github.com/Adam-Gleave/sdf-terrain, fetched 2026-10-26 (unofficial)
++[S13] Spheretracing Basics | Ronja's tutorials, https://www.ronja-tutorials.com/post/043-spheretracing-basics/, fetched 2026-10-27 (unofficial)
++[S19] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
++[S20] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
++[S23] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
++[S27] GPU Ray Marching for Ambient Occlusion, https://www.scribd.com/document/520755804/imm6392, fetched 2026-10-28 (unofficial)
++[S30] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)

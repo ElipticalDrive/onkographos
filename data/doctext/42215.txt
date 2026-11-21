@@ -1,0 +1,1874 @@
+1
+Differentiable Uncalibrated Imaging
+Sidharth Gupta † , Konik Kothari † , Valentin Debarnot ‡ , and Ivan Dokmanić ‡, †
+University of Illinois at Urbana-Champaign, ‡ University of Basel
+{gupta67, kkothar3}@illinois.edu, {valentin.debarnot, ivan.dokmanic}@unibas.ch
+arXiv:2211.10525v3 [eess.IV] 20 Dec 2023
+†
+Abstract—We propose a differentiable imaging framework to
+address uncertainty in measurement coordinates such as sensor
+locations and projection angles. We formulate the problem as
+measurement interpolation at unknown nodes supervised through
+the forward operator. To solve it we apply implicit neural
+networks, also known as neural fields, which are naturally
+differentiable with respect to the input coordinates. We also
+develop differentiable spline interpolators which perform as well
+as neural networks, require less time to optimize and have
+well-understood properties. Differentiability is key as it allows
+us to jointly fit a measurement representation, optimize over
+the uncertain measurement coordinates, and perform image
+reconstruction which in turn ensures consistent calibration. We
+apply our approach to 2D and 3D computed tomography, and
+show that it produces improved reconstructions compared to
+baselines that do not account for the lack of calibration. The
+flexibility of the proposed framework makes it easy to extend to
+almost arbitrary imaging problems.
+I. I NTRODUCTION
+In computational imaging a physical process, A, such as
+2D computed tomography (CT) relates the object we want to
+image, x, to an observable field, y. Both x and y are naturally
+functions of continuous coordinates: x could be a density over
+2D spatial coordinates (e.g., [0, 1]2 ), and y a sinogram over
+angles and 1D projection coordinates (e.g., [0, π) × [−1, 1]).
+In practice, however, we have finite sensors. Denoting
+the space of continuous measurement coordinates by Ω, the
+e = (e
+sensors sample the field y at µ
+µ1 , . . . , µ
+eM ) ∈ ΩM , such
+M
+that the observed measurements y ∈ R follow
+y = Aµ
+e (x) + η,
+(1)
+where
+def
+def
+y = y(e
+µ) = [y(e
+µ1 ), . . . , y(e
+µM )]T ,
+(2)
+and η ∈ RM is the measurement noise. The discrete forward
+e samples the output of A.
+operator Aµ
+e parameterized by µ
+In computational imaging we work with a discretization or
+some other finite-dimensional approximation of x denoted by
+x ∈ RN . Hereafter we let Aµ
+e act on x rather than on x.
+In this paper we address the scenario where the true
+measurement coordinates e
+µ are only approximately known:
+the imaging system is out of calibration. Consequently, the
+true operator A e
+µ is unknown, and we work with an operator
+Aµ for measurement coordinates µ = (µ1 , . . . , µM ), which
+This work was supported by the European Research Council Starting Grant
+852821—SWING. This research was also supported by the donation of GPUs
+from NVIDIA Corporation to the University of Illinois at Urbana-Champaign.
+Additionally, calculations were performed at sciCORE (http://scicore.unibas.
+ch/) scientific computing center at University of Basel.
+would be correct if the system was calibrated. The assumed
+measurement coordinates µ are related to the unknown true
+e by small perturbations.
+measurement coordinates µ
+e and µ can lead
+Not accounting for the mismatch between µ
+to a poor reconstruction. The gist of our method is to learn a
+representation of the measurement space that can be evaluated
+and differentiated at arbitrary measurement coordinates µ.
+This gives us measurements y(µ) that are then well-suited for
+a reconstruction method that uses µ. Our proposed framework
+enables us to
+1) Jointly reconstruct the image x and learn the true unknown measurement coordinates e
+µ by using gradientbased optimization.
+2) Learn continuous measurement representations that take
+measurement coordinates as input. These representations
+can be evaluated at µ and are in essence interpolations
+of the discrete measurements with unknown interpolation
+knots.
+3) Leverage standard differentiable image reconstruction
+methods that exist for the assumed µ even though the
+e . This helps learn
+observations correspond to unknown µ
+consistent measurement representations.
+A strength of our approach is that we can use any continuous
+interpolation method that admits backpropagation to input
+coordinates. To showcase this, we use implicit neural networks
+(neural fields) but also develop fully-differentiable variableknot splines which allow us to optimize spline control points
+and control point weights. We show that splines perform as
+well as implicit neural networks while being faster to fit and
+simpler to interpret. A key property of both these representation types is that we can perform automatic differentiation with
+e by gradientrespect to their input coordinates and recover µ
+based optimization.
+A. Example: Computed tomography
+We illustrate our framework with 2D CT, where we measure
+parallel beam projections of an image at different view angles
+in a detector plane. Let Ω = [0, π) × R, x ∈ L2 ([−1, 1]2 ),
+and y ∈ L2 (Ω).1 The measured projections y are obtained
+e = (θe1 , . . . , θeJ ),
+from a finite set of discrete view angles Θ
+and are sampled at a finite set of discrete detector locations
+Te = (e
+t1 , . . . , e
+tK ). The true set of unknown measurement
+e
+e
+coordinates are then (e
+µm )M
+m=1 = Θ × T with M = J · K.
+Furthermore, A e
+µ is given by the discrete Radon transform
+e and detector locations Te . Many other
+for view angles Θ
+1 We denote by L2 (M) the space of square integrable functions on M.
+2
+Measurements y
+Reconstruct
+using µ
+Ground truth
+y(µ)
+A
+Radon
+Transform
+26.1 dB
+Reconstruct
+using µ
+y( e
+µ)
+Detector
+location T
+View angle Θ
+µ: Assumed measurement coordinates
+y(µ): Measurements sampled at µ
+µ
+e : True unknown measurement coordinates
+y( e
+µ): Measurements sampled at µ
+e
+19.0 dB
+e and µ in 2D CT imaging that is described in Section I-A. A mismatch in the view angles between
+Fig. 1. Visualization of the parameter mismatch between µ
+µ and µ̃ can produce a significant drop in reconstruction quality.
+Parameter
+mismatch
+No parameter
+mismatch
+120 view angles
+90 view angles
+Ground
+truth
+19.0
+26.1
+16.4
+27.6
+Fig. 2. 2D CT reconstructions with 90 and 120 view angle. The SNRs (in
+dB) are written in the bottom-left corners. When there is parameter mismatch
+because the true and assumed view angles differ, the reconstruction method
+performs poorly and there is a clear degradation.
+computational imaging applications such as electron cryotomography (CryoET), magnetic resonance imaging and optical
+microscopy can be parameterized similarly.
+e and µ and its severe
+The parameter mismatch between µ
+impact is illustrated in Fig. 1. We use a state-of-the-art
+reconstruction method that computes a filtered backprojection
+estimate with µ and feeds it into a UNet deep neural network
+to obtain a reconstruction of x [1], [2]. The neural network is
+trained in a supervised manner using training data that is also
+generated using µ. When there is parameter mismatch, the true
+view angles differ from the assumed view angles and therefore
+e ̸= µ. Fig. 1 shows that in this case, the reconstruction
+µ
+method produces a degraded reconstruction from both a visual
+and SNR evaluation. Fig. 2 shows this for another ground truth
+image and number of view angles. The last column of Fig. 2
+also shows that when there is no parameter mismatch (e
+µ = µ),
+the same reconstruction method performs strongly.
+B. Related work
+Many of the state-of-the-art methods for solving imaging
+inverse problems are based on deep learning [3], [4]. Popular
+supervised approaches use the forward operator to obtain an
+initial estimate which is then enhanced by a neural network
+(reconstruction method in Fig. 2 for example) [2], [5], [6], [7].
+Unrolling iterative methods or replacing optimization components with deep networks is another established approach
+[8], [9], [10], [11], [12], [13]. A different direction involves
+requiring the inverse problem solution to lie in the range of
+a generative neural network [14], [15], [16]. In general all
+these methods utilize a forward operator in some way but do
+not account for measurement coordinate uncertainty. This can
+severely impact the reconstruction as shown in Fig. 2. In this
+paper we propose to address this problem by reevaluating the
+measurements at the measurement coordinates that deep neural
+network reconstruction methods are designed for.
+While much less common, there are some recent deep
+learning approaches which address measurement coordinate
+uncertainty. Gilton et al. explored fine-tuning a neural network
+that was trained with measurements sampled at µ to work
+e [17].
+well with test measurements sampled at unknown µ
+Our method is different: we reevaluate the measurements
+via a measurement representation for a single example so
+we do not need to fine-tune. Another appealing approach
+is to train a neural network on a family of operators with
+different parameterizations [18]. These methods always induce
+a tradeoff between the reconstruction quality and the variety of
+forward maps they are trained on, and they only work well for
+the distribution of perturbations seen at training time. There is
+also the challenge of dataset generation, especially in computeintensive problems. We mitigate this tradeoff by using consistency to identify the true measurement coordinates.
+Continuous representations have been used to solve a variety
+of science and engineering problems. To the best of our
+knowledge no prior work has used them for imaging with
+measurement coordinate uncertainty. Splines have long been
+used to model surfaces and curves in geometry [19], [20],
+3
+[21], [22]. Moreover, differentiable splines with parameters
+that can be fitted using automatic differentiation have also been
+developed [23]. Recently deep learning methods called neural
+fields or implicit neural networks have proven to be extremely
+good and efficient continuous representations [24]. They have
+been employed in a broad spectrum of applications ranging
+from representing geometry via signed distance functions [25],
+[26] to solving partial differential equations [27]. Implicit
+neural networks have also been used to solve tomographic
+imaging inverse problems [28], [29]. In particular, Sun et al.
+also used them to represent 2D CT measurements [30]. Rather
+than for calibration, they use implicit networks to upsample
+measurements for downstream reconstruction by a deep neural
+network. While upsampling may also be performed by traditional tools such as splines, our framework relies on the
+differentiability of the used representations—both neural and
+spline-based—with respect to the input coordinates.
+In this paper, we learn forward model parameters and continuous measurement representations through a differentiable
+imaging framework [31]. We use automatic differentiation to
+optimize the parameters and inputs of implicit neural network
+and differentiable spline representations. Prior differentiable
+imaging works for microscopy [32], holography, ptychography
+and ptychographic tomography [33] also learn forward model
+parameters via automatic differentiation. However, these works
+do not learn a continuous measurement representation, and so
+do not reevaluate measurements for use with state-of-the-art
+reconstruction methods that assume different parameters.
+There are alternative approaches for handling uncertainty in
+measurement coordinates. Bundle adjustment is an example
+from computer vision where scene coordinates, camera coordinates and system coordinates are jointly optimized [34].
+Similar to our framework, bundle adjustment uses a good
+starting estimate to optimize the coordinates. However, a key
+difference is that we obtain a final solution by reevaluating
+measurements at the assumed measurement coordinates, and
+use a reconstruction method designed for the assumed measurement coordinates. Imaging approaches based on alternating minimization optimization [35], and designing handcrafted
+regularizers to manage ill-posedness [36], [37] have also
+been employed when there is miscalibration. In this work we
+jointly minimize our objective function. Furthermore, we use
+a consistency loss which can be interpreted as a regularizer
+when learning the measurement representation.
+Our work is related to the broader theme of inverse problems
+with “noisy” forward operators. On one end of the spectrum
+there are inverse problems where the operator (and e
+µ) is
+perfectly known, and at the other extreme there are blind
+e are completely
+inverse problems where the operator and µ
+unknown. Related blind imaging problems are tomography
+with unknown view angles [38], [39] and cryo-electron microscopy with unknown projection angles [40]. In between
+the extremes, there are semi-blind inverse problems where the
+e are approximately known. Total least squares
+operator and µ
+approaches that perturb an assumed operator [41], [42], [43]
+and our proposed measurement coordinate-based framework
+fall under this category.
+C. Paper organization
+In Section II we present the optimization problem which
+models joint calibration and image reconstruction. We first
+model measurements as continuous functions and then show
+how to learn these measurement representations. We show
+how implicit neural networks and splines can both be used
+as representations. Section III numerically verifies that when
+there is measurement coordinate uncertainty, our proposed
+method yields significantly improved reconstructions. The
+simulated experiments are performed on 2D CT in the main
+paper and 3D CT in Appendix B. We conclude the paper and
+motivate future work directions in Section IV.
+II. D IFFERENTIABLE FRAMEWORK
+We wish to learn a continuous representation of the measurement space so that we can sample it at specific measurement coordinates and obtain the corresponding measurements.
+We model the measurement representations as continuous
+functions rφ (·) that take measurement coordinates as input
+and map them to the corresponding sampled measurements.
+The learnable parameters, φ ∈ Φ where Φ is the space of
+feasible parameters, are optimized so that
+rφ (ω) ≈ y(ω)
+(3)
+where ω ∈ Ω is a measurement coordinate and y(ω) ∈ R is
+the sample from the measurement space at measurement coordinate ω. For convenience we also denote a batch evaluation
+of rφ (·) as
+def
+Rφ (ω) = [rφ (ω1 ), . . . , rφ (ωQ )]T
+≈ [y(ω1 ), . . . , y(ωQ )]T
+(4)
+where ω = (ω1 , . . . , ωQ ) ∈ ΩQ and Rφ (ω) ∈ RQ . We also
+require rφ (·) to be differentiable with respect to φ and its input
+so that we can use gradient-based optimization to estimate φ
+and the unknown measurement coordinates.
+A. Joint optimization objective
+We want rφ (·) to accurately produce samples from the space
+of measurements. Since we only observe measurements y at
+e in (1), we require
+measurement coordinates µ
+Rφ (e
+µ) ≈ y
+(5)
+However, since e
+µ is unknown we cannot use it to verify
+the accuracy of rφ (·). This motivates us to jointly learn the
+representation parameters φ and the unknown measurement
+e by minimizing a measurement fitting loss,
+coordinates µ
+def
+2
+Lfitting (ν, φ) = ∥y − Rφ (ν)∥2 ,
+(6)
+with respect to the input ν ∈ ΩM and φ. Recall y ∈ RM is
+defined by (1).
+Learning rφ (·) by minimizing only Lfitting (ν, φ) with respect to both the representation’s parameters and input would
+not in general result in an accurate measurement representation
+because there are too many degrees of freedom. Therefore we
+regularize and control φ by enforcing rφ (·) to be consistent
+with reconstructions that could be obtained by using its output.
+4
+This is done by minimizing a consistency loss with respect
+to φ,
+def
+2
+Lconsistency (φ) = ∥Rφ (µ) − Aµ Gµ (Rφ (µ))∥2 ,
+(7)
+where Gµ : RM → RN is a differentiable reconstruction
+method that was designed using measurement coordinates µ.
+Putting everything together, our complete joint optimization
+objective is
+b, φ
+b = arg min Lfitting (ν, φ) + λ Lconsistency (φ)
+µ
+(8)
+ν∈ΩM , φ∈Φ
+where λ ∈ R≥0 is a tunable weight that controls the relative
+importance of the consistency and fitting losses. As the assumed coordinates µ are close to the true unknown coordinates
+e , we initialize ν to µ. After completing the optimization (8),
+µ
+b are close to µ
+e (verified in Section
+the learned coordinates µ
+III), and the final reconstruction and estimate of x ∈ RN is
+given by
+b = Gµ (Rφ (µ)).
+x
+(9)
+One of the advantages of the objective (8) is that the same
+operator, Aµ in (7), is used in each optimization iteration.
+A formulation that uses the continually updating learned measurement coordinates ν in (7), would require the operator to be
+rebuilt after each optimization iteration. If there is no efficient
+implementation to change the measurement coordinates due
+to the complexity of the forward process, and if the operator
+is large, this can be severely time consuming and resource
+intensive.
+B. Leveraging reconstruction methods
+A key aspect of our framework is that consistency and
+the final reconstruction are obtained by using reconstruction
+method Gµ (·) that was designed using measurement coordinates µ even though the observations in (1) are sampled at
+e . This provides significant flexibilmeasurement coordinates µ
+ity and allows us to incorporate a variety of reconstruction
+methods. For example, the reconstruction method may be a
+relatively straightforward adjoint or pseudoinverse operation.
+Alternatively, it can be a more complex neural network that
+provides state-of-the-art reconstructions with measurements
+from µ (reconstruction method in Fig. 2 is one example). Our
+framework is particularly advantageous in this case because it
+may be cumbersome to retrain a neural network for different
+measurement coordinates.
+C. Measurement representations
+In order to better understand how to use the framework
+to solve real imaging problems, we now pick implicit neural networks and splines and explain how they are suitable
+measurement representations. While we consider these, we
+emphasize that our framework is general and is not restricted
+to these representation types.
+1) Implicit neural representations: Implicit neural representations are deep feedforward neural networks that represent
+discrete signals as continuous functions. When used as the
+measurement representation rφ (·) in (3), φ are the trainable
+network parameters. The input to the network are measurement
+coordinates and the output are the corresponding measurements. Implicit neural networks have previously been used
+to represent measurements when there is no measurement
+uncertainty [30]. In this case the network input was not
+optimized and consistency (7) was not enforced.
+As implicit neural representations are neural networks, we
+can use automatic differentiation to calculate their gradients
+with respect to φ and their input coordinates to solve (8).
+In this paper we use an architecture comprising a Fourier
+feature mapping layer followed by standard fully-connected
+layers [26], [30].
+2) Differentiable splines: Splines use locally supported
+basis functions to represent signals as a continuous surface. In this paper we focus on Non-uniform Rational Basis
+Splines (NURBS) because of their ability to model complex
+surfaces [21], [44], [45]. To aid understanding, we explain
+NURBS using the 2D CT imaging example that was introduced in Section I-A. The measurement coordinates µ are
+the Cartesian product of assumed view angles and assumed
+detector locations, Θ × T where Θ = (θ1 , . . . , θJ ) and T =
+(t1 , . . . , tK ). The NURBS surface sφ (·) with parameters φ
+evaluated at measurement coordinate µ′ = [θ′ , t′ ]T ∈ [0, π]×R
+is then
+sφ (µ′ ) =
+J−1
+X
+X K−1
+bj,k (µ′ ) pj,k
+(10)
+j=0 k=0
+where bj,k (·) ∈ R are scalar-valued rational basis functions
+with local support and pj,k ∈ R3 are control point vectors. The
+NURBS are parameterized by weight parameters wj,k ∈ R
+of the rational basis functions, and the control point vectors.
+J−1, K−1
+J−1, K−1
+This gives φ = {wj,k }j=0, k=0 ∪ {pj,k }j=0,
+k=0 . Note that
+the control point vectors are three-dimensional because for
+each two-dimensional measurement coordinate µ′ , there is a
+corresponding scalar measurement. Consequently, according
+to (10), sφ (µ′ ) is also three-dimensional. We then establish
+the following relationship between NURBS surfaces and our
+measurement representations (3) to get a spline measurement
+representation,
+rφ (ω) = s⋄φ (ω),
+(11)
+where s⋄φ (·) denotes the value of the measurement dimension
+of sφ (·).
+It has recently been shown that automatic differentiation can
+be used to learn spline parameters [23]. Hence, we develop
+differentiable spline representations and use gradient-based
+optimization to learn the NURBS parameters φ and their input
+measurement coordinates. These differentiable splines fit into
+our framework straightforwardly as measurement representations (11), and we can use them to solve (8).
+In our numerical experiments, we carefully initialize the
+spline parameters φ and then learn them: wj,k is initialized
+to one and control point vectors pj,k are initialized using
+5
+the assumed measurement coordinates
+and their corresponding
+h
+iT
+observed measurements, pj,k = θj , tk , y([θej , e
+t k ] T ) ∈ R3 .
+Additionally, in our simulated experiments we also extend
+(10) to higher dimensional measurement coordinates (see
+Appendix B). Further details on NURBS and their implementation are provided in Appendices C and D.
+III. N UMERICAL VERIFICATION WITH 2D CT IMAGING
+We experimentally verify our framework by solving 2D CT
+imaging problems in the main paper. Further simulation results
+for 3D CT imaging are provided in Appendix B. The imaging
+forward operators are implemented using the Operator Discretization Library (ODL) [46]. These simulated experiments
+demonstrate that our framework can be used to solve imaging
+problems with different measurement coordinate dimensions.
+Furthermore, we exhibit the flexibility of our method by
+using implicit neural networks and splines as measurement
+representations.2
+We use SNR (in dB) to quantify the measurement noise and
+measurement coordinate uncertainty. SNR is calculated by
+
+
+∥c − d∥2
+.
+(12)
+SNR(c, d) = −20 log10
+∥d∥2
+If we let y ∈ RM denote the observed measurements as in
+e denote the unobserved noiseless measurements,
+(1) and let y
+e ). The measurement
+the measurement noise level is SNR(y, y
+noise is simulated with zero-mean iid Gaussian noise with
+variance adjusted to achieve a target SNR level.
+Due to their state-of-the art performance when there is no
+measurement coordinate uncertainty, we use deep neural networks for the reconstruction method, Gµ (·), in (8). For 2D CT
+we use a 2D Unet [2], and for 3D CT in Appendix B, we use
+a 3D Unet [47]. Following standard practice, a preprocessing
+step applies the pseudoinverse of the imaging operator to the
+measurements to produce an initial image estimate [2]. These
+networks are then trained in a supervised manner to map the
+initial estimates to ground truth images. The training data
+generation and preprocessing step are done with the assumed
+measurement coordinates µ. The measurements in the training
+data are noisy and in each experiment we use a Unet whose
+training measurement noise level matches the measurement
+noise level of the obtained measurements.
+As mentioned in Section II, the solution, b
+x, is given by (9).
+We use SNR to evaluate the solution quality, SNR(b
+x, x). We
+compare b
+x against baseline reconstructions that are obtained
+by directly using the obtained measurements with the reconstruction Unets,
+xbaseline = Gµ (y).
+(13)
+Recall, the obtained measurements correspond to measurement
+e . Appendix D contains further hyperparameter
+coordinates µ
+and implementation details.
+In 2D CT imaging, one-dimensional projections of a twodimensional object at different view angles are collected by
+2 Code
+available at
+uncalibrated imaging.
+https://github.com/swing-research/differentiable
+an array of detectors. Our goal is to reconstruct an image of
+the object from these projections when there is uncertainty in
+only the view angles, only the detector locations, or in both
+the view angles and the detector locations at the same time.
+For these simulated experiments, the assumed view angles
+are uniformly spaced on the interval [0, π], and the true
+view angles can have an unknown perturbation from these
+assumed view angles to simulate experimental incertitude.
+We keep the view angle measurement coordinate uncertainty
+level the same for each view angle—each true view angle is
+independently perturbed from the assumed view angle by zeromean Gaussian noise with variance adjusted to obtain a target
+SNR level. If we let µ
+em ∈ R and µm ∈ R denote the mth
+true and assumed view angles, the view angle measurement
+coordinate uncertainty level is SNR(e
+µm , µm ).
+Similarly, the assumed detector locations are uniformly
+spaced on the normalized interval [0, 1] and the true detector
+locations can have an unknown perturbation from the assumed
+detector locations. To simulate detector uncertainty, we first
+independently perturb the first and last detectors from their
+assumed locations with a uniform perturbation scaled so that
+their location uncertainty meets a target SNR. The remaining
+detectors are then perturbed so that that the final true unknown
+detector array is uniformly spaced between the perturbed
+first and last detectors. Unlike the view angle measurement
+coordinate uncertainty model, this detector location coordinate
+uncertainty model is not iid. This enables us to evaluate
+the performance of our framework when there are non-iid
+measurement coordinate uncertainties.
+Combining these spaces gives the measurement coordinates
+space as Ω = [0, π] × [0, 1]. We explore the performance of
+our method compared to the baseline which does not account
+for measurement coordinate uncertainty. We use images from
+the the LoDoPaB-CT tomography dataset resized to 128 ×
+128 [48]. From this dataset, 35,000 samples were used to train
+the image reconstruction 2D Unet Gµ (·). Test images from
+this dataset are used in this section to verify our framework.
+A. View angle uncertainty
+In the first group of experiments we consider the case where
+there is only view angle uncertainty and no uncertainty in the
+detector locations. As there is only uncertainty in the view
+angle dimension and not in the detector location dimension, we
+only optimize the view angle dimension of the measurement
+coordinates in (8).
+1) Combinations of measurement noise and view angle
+error: To determine how our framework performs under
+different settings, we consider different combinations of measurement noise and view angle measurement coordinate uncertainty. We do trials over 25 different test images, and in each
+trial, different measurement noise and view angle perturbations
+are used.
+We evaluate the performance of our framework relative to
+the baseline by calculating the average reconstruction SNR
+improvement over the baseline. Fig. 3a shows the performance
+for 90 view angles. The performance trends are similar for
+both implicit neural and spline measurement representations.
+6
+Implicit neural
+4
+3
+2
+1
+0
+1
+2
+25
+30
+35
+Angle SNR
+40
+e and Θ.
+b
+unknown view angles and learned view angles as Θ
+We quantitatively measure the average angle error in degrees
+as
+4
+Average SNR improvement
+5
+Average SNR improvement
+Spline
+Measurement SNR
+30
+35
+40
+3
+Average angle error =
+2
+1
+Measurement SNR
+30
+35
+0
+40
+45
+25
+30
+35
+Angle SNR
+40
+45
+40
+45
+(a) 90 view angles
+Implicit neural
+Measurement SNR
+30
+35
+40
+Average SNR improvement
+5
+4
+3
+2
+1
+0
+1
+25
+30
+35
+Angle SNR
+40
+45
+Spline
+4
+Average SNR improvement
+6
+3
+2
+1
+Measurement SNR
+30
+35
+0
+40
+25
+30
+35
+Angle SNR
+(b) 120 view angles
+Fig. 3. SNR improvement (dB) when solving (8) for 2D CT imaging.
+There are different combinations of measurement noise SNR and view angle
+uncertainty SNR. We consider 90 and 120 view angles.
+For a given measurement noise SNR, our method shows
+increasing improvements as the view angle SNR decreases
+(measurement coordinate uncertainty increases). This shows
+that our method handles measurement coordinate uncertainty
+well, especially when the uncertainties begin to dominate over
+measurement noise. We can also see that for a fixed angle
+SNR, the performance gains decrease as measurement SNR
+decreases and measurement errors becomes more dominant.
+Fig. 3b shows that the same trends hold when there are 120
+view angles. The slight SNR drops seen with splines in Fig.
+3a, when the measurement SNR is 30 dB and 35 dB, do not
+appear in Fig. 3b. This is because there are more view angles
+which makes the imaging problem less ill-posed.
+In Fig. 4, we show some randomly chosen example ground
+truth, pseudoinverse filtered backprojection (FBP) and baseline
+reconstructions with their SNRs when there are 90 view
+angles. The reconstructions using our framework with implicit
+neural and spline measurement representations are also shown.
+Compared to the baseline, solutions obtained using our framework have fewer artifacts. Note that Fig. 4 shows specific
+examples, and that the average performance for different combinations of measurement noise and view angle uncertainty is
+shown in Fig. 3a. Fig. 11 in the Appendix shows these same
+reconstructions when there are 120 view angles instead.
+2) Learned view angles accuracy: In the next numerical
+experiment we verify that the learned measurement coordib in (8), are close to the true unknown measurement
+nates, µ
+e . As the detector locations have no error, we
+coordinates µ
+verify the learned view angles only. We denote the set of true
+1 e b
+∥Θ − Θ∥1 ,
+J
+(14)
+where J is the number of view angles.
+Fig. 5 shows how the average angle error changes as the
+optimization iterations of (8) progress. This is shown for one
+of the test images with different combinations of measurement
+noise and view angle uncertainty when there are 90 view
+angles. The solid lines are for implicit neural representations
+and the dashed lines are for spline representations. For both
+representation types, the angle error reduces as (8) is solved
+which confirms that our framework learns measurement coordinates that are more accurate than the assumed measurement
+coordinates which they were initialized with. The average
+angle error when using the assumed measurement coordinates
+for reconstruction, as is done in the baseline, is the initial point
+on the plots. In some instances, the average angle error may
+increase slightly as the optimization of (8) progresses. This
+behavior can be explained as overfitting of the measurement
+representations. Fig. 12 in the Appendix shows that the same
+trends hold when when there are 120 view angles.
+3) Reconstruction with more measurements: Next we investigate a variant of the main problem considered in this
+paper: in addition to the M true measurement coordinates
+being unknown, the reconstruction method Gµ (·) is now
+designed for M ′ measurements where M ′ ≥ M . In this case
+e
+µ = (e
+µ1 , . . . , µ
+eM ) as before and now µ = (µ1 , . . . , µM ′ ).
+As the measurement representation rφ (·) can be evaluated
+at any measurement coordinate, we can evaluate (7) at M ′
+measurement coordinates.
+In this simulated experiment we obtain measurements from
+90 view angles. As in the previous experiments, the true
+view angles are unknown and we initialize the angles of
+measurements coordinates ν in (6) to be 90 uniformly spaced
+view angles in the interval [0, π]. The detector locations have
+no uncertainty. We consider different values of M ′ by varying
+the number of view angles J ′ . The number of detectors K
+are not varied which gives M ′ = J ′ · K. Again, to obtain the
+strongest performance, we use state-of-the-art reconstruction
+′
+Unets. We try two different reconstruction Unets: 1) GJµ (·)
+which was trained with training data having J ′ view angles
+uniformly spaced on [0, π] and, 2) G90
+µ (·) which was trained
+with training data having 90 view angles uniformly spaced on
+[0, π].3
+Table I shows the average reconstruction SNR over 25 test
+images. There is 35 dB measurement noise and the unknown
+true view angles are perturbed by 35 dB from 90 uniformly
+′
+spaced view angles. With Unet GJµ (·), the performance fluctuates. The performance is stable with Unet G90
+µ (·). With both
+reconstruction methods, the best performance is seen when
+J ′ = 90 (M ′ = M ) and evaluating more measurements does
+3 The number of Unet training view angles and evaluated view angles J ′
+can be different. This is because the Unet input is computed by a filtered
+backprojection for J ′ view angles which always results in an Unet input with
+the dimensions of the image being reconstructed.
+7
+Angle: 45
+Measurement: 40
+Angle: 40
+Measurement: 35
+Angle: 35
+Measurement: 35
+Angle: 30
+Measurement: 40
+Angle: 25
+Measurement: 30
+Ground truth
+Pseudoinverse
+Baseline
+Implicit neural
+Spline
+12.3
+16.2
+19.4
+18.3
+18.4
+20.7
+22.8
+23.2
+16.0
+22.1
+21.9
+23.1
+17.3
+25.6
+26.2
+25.9
+20.2
+25.7
+26.0
+26.0
+Fig. 4. Example reconstructions for different measurement noise SNR and view angle uncertainty SNR combinations for 2D CT imaging. There are 90 view
+angles. The reconstruction SNRs are shown for each reconstruction.
+not help. This is because the fitting loss (6) ensures that rφ (·)
+accurately represents the M obtained measurements which
+e.
+were sampled from the measurement space at coordinates µ
+Then when M ′ = M , because the measurement coordinates
+used for reconstruction, µ, are a small perturbation away
+from e
+µ, they are also represented accurately which results in
+good reconstructions. Furthermore, when M ′ = M , there are
+enough measurement coordinates that densely cover the measurement space. The accuracy of the measurement coordinates
+for the extra measurements when M ′ > M is not enforced by
+the fitting loss (6).
+It has been shown that reconstruction with more measurements can help when there is no measurement coordinate uncertainty, and when the input to the reconstruction
+neural network combines the observed measurements with
+the measurement representation output [30]. When there is
+TABLE I
+AVERAGE 2D CT RECONSTRUCTION SNR WHEN RECONSTRUCTING WITH
+MORE MEASUREMENTS .
+′
+J′
+90
+110
+120
+130
+150
+180
+GJ
+µ (·)
+Implicit
+Spline
+23.5
+22.6
+23.4
+23.2
+22.9
+22.3
+23.6
+23.1
+23.1
+22.8
+22.5
+22.0
+G90
+µ (·)
+Implicit
+Spline
+23.5
+23.7
+23.8
+23.7
+23.8
+23.9
+23.6
+23.6
+23.6
+23.5
+23.6
+23.6
+measurement coordinate uncertainty, using the observed measurements in the input to the reconstruction neural network
+can reduce performance as shown by Fig. 2 and the baseline
+reconstructions in Fig. 4.
+3.2
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+2.2
+Angle: 30
+Measurement: 40
+2.0
+1.8
+1.6
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Angle: 40
+Measurement: 35
+0.9
+0.8
+0.7
+0.6
+0.5
+0.4
+0.3
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+2.0
+1.8
+1.6
+1.4
+1.3
+1.2
+1.1
+1.0
+0.9
+0.8
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Angle: 35
+Measurement: 35
+Implicit neural
+10.0
+Spline
+Measurement SNR
+30
+35
+40
+7.5
+5.0
+2.5
+0.0
+2.5
+5.0
+7.5
+25
+30
+35
+40
+Detector SNR
+45
+Measurement SNR
+30
+35
+40
+10
+Average SNR improvement
+3.4
+2.2
+Angle: 30
+Measurement: 30
+Average SNR improvement
+3.6
+Average angle error (degrees)
+3.8
+Average angle error (degrees)
+Angle: 25
+Measurement: 30
+Average angle error (degrees)
+Average angle error (degrees)
+Average angle error (degrees)
+Average angle error (degrees)
+8
+8
+6
+4
+2
+0
+2
+25
+30
+35
+40
+Detector SNR
+45
+Fig. 6. Average SNR improvement (dB) when solving (8) for 2D CT imaging.
+There are different combinations of measurement noise SNR and detector
+location uncertainty SNR. There are 90 view angles.
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Angle: 45
+Measurement: 40
+0.8
+0.6
+0.4
+0.2
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Fig. 5. Average angle error for one test image with different combinations
+of measurement noise and view angle uncertainty when there are 90 2D CT
+view angles. The solid lines are for implicit neural representations and the
+dashed lines are for spline representations.
+dominate over measurement noise. Note that our framework
+does not assume a specific uncertainty model—we have used
+different uncertainty simulation models for view angle uncertainty in Fig. 3 and detector location uncertainty in Fig. 6.
+Compared to Fig. 3, the curves in Fig. 6 for high measurement
+SNR and measurement coordinate uncertainty SNR almost
+overlap at times because the baseline SNR is higher and so
+the average SNR improvement is lower.
+In Fig. 7, we show randomly chosen example reconstructions with their SNRs.
+2) Learned detector locations accuracy: Similar to Section
+III-A2, in the next simulation we verify that the learned
+detector locations are close to the true unknown detector
+locations. We denote the set of true unknown detector locations
+and learned detector locations as Te and Tb . We measure the
+average detector location error as
+Average detector error =
+B. Detector location uncertainty
+The previous experiments demonstrate that our framework
+improves over the baseline when there is uncertainty in the
+view angles. Next we consider the case where there is only
+uncertainty in the detector location and no uncertainty in the
+view angles. In this set of experiments there are always 90
+uniformly spaced view angles. As there is only uncertainty
+in detector locations, we only optimize the detector location
+dimension of the measurement coordinates in (8).
+1) Combinations of measurement noise and detector location error: Similar to Section III-A1, we consider different
+combinations of measurement noise and detector location
+uncertainty. We do trials over the same 25 test images. In
+each trial, different measurement noise and detector location
+perturbations are used.
+The average reconstruction SNR improvement over the
+baseline is shown in Fig. 6. For a given measurement noise
+SNR, our method shows increasing improvements as the
+detector location SNR decreases (measurement coordinate
+uncertainty increases). This is consistent with the previous
+results for view angle measurement coordinate uncertainty
+shown in Fig. 3. Our method handles measurement coordinate
+uncertainty well, especially when the uncertainties begin to
+1 e b
+∥T − T ∥ 1 ,
+K
+(15)
+where K is the number of detectors.
+Fig. 8 shows how the average detector error changes as
+the optimization progresses for different combinations of
+measurement noise and detector location uncertainty. Again,
+the solid lines are for implicit neural representations and the
+dashed lines are for spline representations. Compared to the
+assumed detector locations, for both representation types, the
+final learned detector locations are closer to the true detector
+locations.
+C. View angle and detector location uncertainty
+The numerical experiments in Sections III-A and III-B
+demonstrates that our proposed framework performs well
+when there is view angle or detector location measurement
+coordinate uncertainty. We now perform simulations when
+there is view angle and detector location uncertainty at the
+same time. There are 90 view angles in these experiments. As
+there is uncertainty in both the view angles and the detector
+locations, we will optimize both the view angle and detector
+location dimensions of the measurement coordinates in (8).
+1) Combinations of measurement noise and measurement
+coordinate error: Following the experiments of Figs. 3 and
+6, we consider different combinations of measurement noise
+9
+Detector: 45
+Measurement: 40
+Detector: 40
+Measurement: 35
+Detector: 30
+Measurement: 40
+Detector: 25
+Measurement: 30
+Ground truth
+Pseudoinverse
+Baseline
+Implicit neural
+Spline
+8.9
+9.6
+20.3
+19.9
+16.1
+16.3
+22.8
+25.2
+18.0
+27.0
+24.3
+27.9
+20.7
+25.1
+22.4
+26.1
+Fig. 7. Example reconstructions for 2D CT imaging. There are different measurement noise SNR and detector location uncertainty SNR combinations and
+90 view angles. The reconstruction SNRs are shown for each reconstruction.
+and measurement coordinate uncertainty over the same 25 test
+images. The view angle and detector location SNRs are the
+same in these experiments.
+The average reconstruction SNR improvement over the
+baseline is shown in Fig. 9. Consistent with previous experiments, Fig. 9 shows that we are able to improve upon the
+baseline when there is measurement coordinate uncertainty. In
+Fig. 10, we also show randomly chosen example reconstructions with their SNRs when there is measurement coordinate
+uncertainty in both the view angles and the detector locations.
+IV. C ONCLUSION
+We presented a differentiable imaging inverse problem
+framework to jointly reconstruct the unknown image and learn
+unknown measurement coordinates when they are approximately known. There are two major elements in our proposed
+method. Firstly, we learn continuous representations of the
+measurements whose input are measurement coordinates and
+output are the corresponding measurements. By optimizing
+with respect to their parameters and their input, we jointly
+learn the measurement representation parameters and the unknown measurement coordinates. The second aspect of our
+method is that because these representations can be evaluated at any input coordinate, we can leverage reconstruction
+methods that are designed for measurement coordinates that
+are different from the ones of the observations. Our 2D and
+3D CT imaging simulations show that the benefit of using our
+framework increases with the level of measurement coordinate
+uncertainty.
+As our framework does not assume a particular measurement representation, we use both implicit neural networks
+and splines to represent measurements. Splines are generally
+viewed as interpolation tools, however, our work demonstrates
+that they can also be learnable differentiable representations
+that perform comparably to implicit neural representations.
+Differentiable splines may provide a viable solution for current
+research directions that have been focusing on using implicit
+neural networks which can have significantly more parameters
+and complexity [24].
+A strength of our framework is that no extra training data is
+required to learn the measurement representations. However, a
+drawback is that it can be time consuming if there are multiple
+test images because we have to learn separate measurement
+representations and measurement coordinates for each new
+set of observations. Therefore, extending our framework to
+0.0265
+Detector: 25
+Measurement: 30
+0.012
+Average detector error
+Average detector error
+10
+0.0260
+0.0255
+0.0250
+0.0245
+0.0
+0.5
+1.0
+Fraction of total iterations
+0.008
+0.006
+0.004
+0.004
+0.002
+0.0
+0.5
+1.0
+Fraction of total iterations
+Detector: 40
+Measurement: 35
+Average detector error
+Average detector error
+0.006
+R EFERENCES
+0.010
+Detector: 35
+Measurement: 40
+0.008
+Detector: 30
+Measurement: 30
+0.007
+0.006
+0.005
+0.004
+0.003
+0.002
+0.0
+0.5
+1.0
+Fraction of total iterations
+0.0
+0.5
+1.0
+Fraction of total iterations
+Fig. 8. Average detector error for one test image with different combinations
+of measurement noise and measurement detector location uncertainty when
+performing 2D CT imaging. The solid lines are for implicit neural representations and the dashed lines are for spline representations.
+Implicit neural
+Average SNR improvement
+4
+2
+0
+2
+4
+6
+Spline
+5
+Measurement SNR
+30
+35
+40
+4
+Average SNR improvement
+Measurement SNR
+30
+35
+40
+3
+2
+1
+0
+1
+2
+25
+30
+35
+40
+Measurement coordinate SNR
+45
+25
+30
+35
+40
+Measurement coordinate SNR
+45
+Fig. 9. Average SNR improvement (dB) for 2D CT imaging when solving
+(8) for different combinations of measurement noise SNR and measurement
+coordinate uncertainty. There is uncertainty in both the view angles and
+detector locations.
+jointly recover a batch of images and the shared unknown
+measurement coordinates is an important step towards helping practitioners adopt our framework. Batch imaging also
+introduces robustness which can help learn more accurate
+measurement representations.
+Another important endeavor is to adapt our framework to
+account for operator uncertainties due to reasons other than
+measurement coordinate uncertainty which this paper studied.
+For example, there may be approximation uncertainties if the
+true operator is approximated to enable faster computations
+and facilitate analysis. Not accounting for the approximation
+can lead to degraded solutions [49]. Another source of operator
+uncertainty arises when the object being imaged is altered
+in an unknown manner during the measurement acquisition
+process. For example, in CryoET imaging, the sample can
+translate and deform during imaging which needs to be taken
+into account [50], [51], [52].
+[1] O. Ronneberger, P. Fischer, and T. Brox, “U-net: Convolutional networks
+for biomedical image segmentation,” in International Conference on
+Medical image computing and computer-assisted intervention. Springer,
+2015, pp. 234–241.
+[2] K. H. Jin, M. T. McCann, E. Froustey, and M. Unser, “Deep convolutional neural network for inverse problems in imaging,” IEEE
+Transactions on Image Processing, vol. 26, no. 9, pp. 4509–4522, 2017.
+[3] M. T. McCann, K. H. Jin, and M. Unser, “Convolutional neural networks
+for inverse problems in imaging: A review,” IEEE Signal Processing
+Magazine, vol. 34, no. 6, pp. 85–95, 2017.
+[4] G. Ongie, A. Jalal, C. A. Metzler, R. G. Baraniuk, A. G. Dimakis, and
+R. Willett, “Deep learning techniques for inverse problems in imaging,”
+IEEE Journal on Selected Areas in Information Theory, vol. 1, no. 1,
+pp. 39–56, 2020.
+[5] S. Antholzer, M. Haltmeier, and J. Schwab, “Deep learning for photoacoustic tomography from sparse data,” Inverse problems in science and
+engineering, vol. 27, no. 7, pp. 987–1005, 2019.
+[6] K. Kothari, S. Gupta, M. v. de Hoop, and I. Dokmanic, “Random
+mesh projectors for inverse problems,” in International Conference on
+Learning Representations, 2019.
+[7] D. Ulyanov, A. Vedaldi, and V. Lempitsky, “Deep image prior,” in
+Proceedings of the IEEE conference on computer vision and pattern
+recognition, 2018, pp. 9446–9454.
+[8] K. Gregor and Y. LeCun, “Learning fast approximations of sparse
+coding,” in Proceedings of the 27th international conference on international conference on machine learning, 2010, pp. 399–406.
+[9] J. Adler and O. Öktem, “Learned primal-dual reconstruction,” IEEE
+transactions on medical imaging, vol. 37, no. 6, pp. 1322–1332, 2018.
+[10] H. Gupta, K. H. Jin, H. Q. Nguyen, M. T. McCann, and M. Unser, “Cnnbased projected gradient descent for consistent ct image reconstruction,”
+IEEE transactions on medical imaging, vol. 37, no. 6, pp. 1440–1453,
+2018.
+[11] J. Rick Chang, C.-L. Li, B. Poczos, B. Vijaya Kumar, and A. C.
+Sankaranarayanan, “One network to solve them all–solving linear inverse problems using deep projection models,” in Proceedings of the
+IEEE International Conference on Computer Vision, 2017, pp. 5888–
+5897.
+[12] D. Gilton, G. Ongie, and R. Willett, “Neumann networks for linear
+inverse problems in imaging,” IEEE Transactions on Computational
+Imaging, vol. 6, pp. 328–343, 2019.
+[13] K. Zhang, Y. Li, W. Zuo, L. Zhang, L. Van Gool, and R. Timofte, “Plugand-play image restoration with deep denoiser prior,” IEEE Transactions
+on Pattern Analysis and Machine Intelligence, 2021.
+[14] A. Bora, A. Jalal, E. Price, and A. G. Dimakis, “Compressed sensing
+using generative models,” in International Conference on Machine
+Learning. PMLR, 2017, pp. 537–546.
+[15] K. Kothari, A. Khorashadizadeh, M. de Hoop, and I. Dokmanić, “Trumpets: Injective flows for inference and inverse problems,” in Uncertainty
+in Artificial Intelligence. PMLR, 2021, pp. 1269–1278.
+[16] Y. Song, L. Shen, L. Xing, and S. Ermon, “Solving inverse problems
+in medical imaging with score-based generative models,” arXiv preprint
+arXiv:2111.08005, 2021.
+[17] D. Gilton, G. Ongie, and R. Willett, “Model adaptation for inverse
+problems in imaging,” IEEE Transactions on Computational Imaging,
+vol. 7, pp. 661–674, 2021.
+[18] A. Gossard and P. Weiss, “Training adaptive reconstruction networks for
+inverse problems,” arXiv preprint arXiv:2202.11342, 2022.
+[19] R. H. Bartels, J. C. Beatty, and B. A. Barsky, An introduction to
+splines for use in computer graphics and geometric modeling. Morgan
+Kaufmann, 1995.
+[20] D. F. Rogers and J. A. Adams, Mathematical elements for computer
+graphics. McGraw-Hill, Inc., 1989.
+[21] L. Piegl, “On nurbs: a survey,” IEEE Computer Graphics and Applications, vol. 11, no. 01, pp. 55–71, 1991.
+[22] E. Cohen, T. Lyche, and R. Riesenfeld, “Discrete b-splines and subdivision techniques in computer-aided geometric design and computer
+graphics,” Computer graphics and image processing, vol. 14, no. 2, pp.
+87–111, 1980.
+[23] A. D. Prasad, A. Balu, H. Shah, S. Sarkar, C. Hegde, and A. Krishnamurthy, “Nurbs-diff: A differentiable programming module for nurbs,”
+Computer-Aided Design, vol. 146, p. 103199, 2022.
+[24] Y. Xie, T. Takikawa, S. Saito, O. Litany, S. Yan, N. Khan, F. Tombari,
+J. Tompkin, V. Sitzmann, and S. Sridhar, “Neural fields in visual
+computing and beyond,” in Computer Graphics Forum, vol. 41, no. 2.
+Wiley Online Library, 2022, pp. 641–676.
+11
+Coordinate: 35
+Measurement: 35
+Coordinate: 30
+Measurement: 35
+Coordinate: 40
+Measurement: 30
+Coordinate: 30
+Measurement: 40
+Ground truth
+Pseudoinverse
+Baseline
+Implicit neural
+Spline
+11.5
+11.4
+16.0
+21.0
+13.6
+22.2
+18.2
+20.4
+16.0
+20.3
+21.1
+24.9
+16.7
+21.0
+17.4
+23.0
+Fig. 10. Example reconstructions for 2D CT imaging. There are different measurement noise SNR and measurement coordinate uncertainty SNR combinations.
+There is uncertainty in both the view angles and detector locations. The reconstruction SNRs are shown for each reconstruction.
+[25] J. J. Park, P. Florence, J. Straub, R. Newcombe, and S. Lovegrove,
+“Deepsdf: Learning continuous signed distance functions for shape representation,” in Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, 2019, pp. 165–174.
+[26] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “Nerf: Representing scenes as neural radiance fields for view
+synthesis,” in European conference on computer vision. Springer, 2020,
+pp. 405–421.
+[27] V. Sitzmann, J. Martel, A. Bergman, D. Lindell, and G. Wetzstein,
+“Implicit neural representations with periodic activation functions,”
+Advances in Neural Information Processing Systems, vol. 33, pp. 7462–
+7473, 2020.
+[28] A. W. Reed, H. Kim, R. Anirudh, K. A. Mohan, K. Champley, J. Kang,
+and S. Jayasuriya, “Dynamic ct reconstruction from limited views
+with implicit neural representations and parametric motion fields,” in
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision (ICCV), October 2021, pp. 2258–2268.
+[29] L. Lozenski, M. Anastasio, and U. Villa, “Neural fields for dynamic
+imaging,” in Medical Imaging 2022: Physics of Medical Imaging, vol.
+12031. SPIE, 2022, pp. 231–238.
+[30] Y. Sun, J. Liu, M. Xie, B. Wohlberg, and U. S. Kamilov, “Coil:
+Coordinate-based internal learning for tomographic imaging,” IEEE
+Transactions on Computational Imaging, vol. 7, pp. 1400–1412, 2021.
+[31] N. Chen, L. Cao, T.-C. Poon, B. Lee, and E. Y. Lam, “Differentiable
+imaging: A new tool for computational optical imaging,” Advanced
+Physics Research, 2023.
+[32] M. Du, Y. S. Nashed, S. Kandel, D. Gürsoy, and C. Jacobsen, “Three
+dimensions, two microscopes, one code: Automatic differentiation for xray nanotomography beyond the depth of focus limit,” Science advances,
+vol. 6, no. 13, p. eaay3700, 2020.
+[33] M. Du, S. Kandel, J. Deng, X. Huang, A. Demortiere, T. T. Nguyen,
+R. Tucoulou, V. De Andrade, Q. Jin, and C. Jacobsen, “Adorym: A
+multi-platform generic x-ray image reconstruction framework based on
+automatic differentiation,” Optics express, vol. 29, no. 7, pp. 10 000–
+10 035, 2021.
+[34] B. Triggs, P. F. McLauchlan, R. I. Hartley, and A. W. Fitzgibbon,
+“Bundle adjustment—a modern synthesis,” in Vision Algorithms: Theory
+and Practice: International Workshop on Vision Algorithms Corfu,
+Greece, September 21–22, 1999 Proceedings. Springer, 2000, pp. 298–
+372.
+[35] P. Campisi and K. Egiazarian, Blind image deconvolution: theory and
+applications. CRC press, 2017.
+[36] T. F. Chan and C.-K. Wong, “Total variation blind deconvolution,” IEEE
+transactions on Image Processing, vol. 7, no. 3, pp. 370–375, 1998.
+[37] N. A. B. Riis, Y. Dong, and P. C. Hansen, “Computed tomography
+reconstruction with uncertain view angles by iteratively updated model
+discrepancy,” Journal of Mathematical Imaging and Vision, vol. 63,
+no. 2, pp. 133–143, 2021.
+[38] S. Basu and Y. Bresler, “Uniqueness of tomography with unknown view
+angles,” IEEE Transactions on Image Processing, vol. 9, no. 6, pp. 1094–
+1106, 2000.
+[39] R. R. Coifman, Y. Shkolnisky, F. J. Sigworth, and A. Singer, “Graph
+laplacian tomography from unknown random projections,” IEEE Transactions on Image Processing, vol. 17, no. 10, pp. 1891–1899, 2008.
+[40] T. Bendory, A. Bartesaghi, and A. Singer, “Single-particle cryo-electron
+microscopy: Mathematical theory, computational challenges, and opportunities,” IEEE signal processing magazine, vol. 37, no. 2, pp. 58–76,
+2020.
+[41] G. H. Golub and C. F. Van Loan, “An analysis of the total least squares
+problem,” SIAM journal on numerical analysis, vol. 17, no. 6, pp. 883–
+12
+893, 1980.
+[42] I. Markovsky and S. Van Huffel, “Overview of total least-squares
+methods,” Signal processing, vol. 87, no. 10, pp. 2283–2302, 2007.
+[43] S. Gupta and I. Dokmanić, “Total least squares phase retrieval,” IEEE
+Transactions on Signal Processing, vol. 70, pp. 536–549, 2021.
+[44] L. Piegl and W. Tiller, The NURBS book. Springer Science & Business
+Media, 1996.
+[45] D. F. Rogers, An introduction to NURBS: with historical perspective.
+Morgan Kaufmann, 2001.
+[46] J. Adler, H. Kohr, and O. Öktem, “Operator discretization library (odl),”
+Zenodo, 2017.
+[47] Ö. Çiçek, A. Abdulkadir, S. S. Lienkamp, T. Brox, and O. Ronneberger,
+“3d u-net: learning dense volumetric segmentation from sparse annotation,” in International conference on medical image computing and
+computer-assisted intervention. Springer, 2016, pp. 424–432.
+[48] J. Leuschner, M. Schmidt, D. O. Baguer, and P. Maaß, “The lodopab-ct
+dataset: A benchmark dataset for low-dose ct reconstruction methods,”
+arXiv preprint arXiv:1910.01113, 2019.
+[49] S. Lunz, A. Hauptmann, T. Tarvainen, C.-B. Schonlieb, and S. Arridge,
+“On learned operator correction in inverse problems,” SIAM Journal on
+Imaging Sciences, vol. 14, no. 1, pp. 92–127, 2021.
+[50] D. Tegunov and P. Cramer, “Real-time cryo-electron microscopy data
+preprocessing with warp,” Nature methods, vol. 16, no. 11, pp. 1146–
+1152, 2019.
+[51] K. Naydenova, P. Jia, and C. J. Russo, “Cryo-em with sub–1 å specimen
+movement,” Science, vol. 370, no. 6513, pp. 223–226, 2020.
+[52] J.-J. Fernandez and S. Li, “Tomoalign: A novel approach to correcting
+sample motion and 3d ctf in cryoet,” Journal of Structural Biology, vol.
+213, no. 4, p. 107778, 2021.
+[53] B. H. Menze, A. Jakab, S. Bauer, J. Kalpathy-Cramer, K. Farahani,
+J. Kirby, Y. Burren, N. Porz, J. Slotboom, R. Wiest et al., “The
+multimodal brain tumor image segmentation benchmark (brats),” IEEE
+transactions on medical imaging, vol. 34, no. 10, pp. 1993–2024, 2014.
+[54] S. Bakas, H. Akbari, A. Sotiras, M. Bilello, M. Rozycki, J. S. Kirby,
+J. B. Freymann, K. Farahani, and C. Davatzikos, “Advancing the cancer
+genome atlas glioma mri collections with expert segmentation labels and
+radiomic features,” Scientific data, vol. 4, no. 1, pp. 1–13, 2017.
+[55] S. Bakas, M. Reyes, A. Jakab, S. Bauer, M. Rempfler, A. Crimi, R. T.
+Shinohara, C. Berger, S. M. Ha, M. Rozycki et al., “Identifying the best
+machine learning algorithms for brain tumor segmentation, progression
+assessment, and overall survival prediction in the brats challenge,” arXiv
+preprint arXiv:1811.02629, 2018.
+[56] M. Buda, A. Saha, and M. A. Mazurowski, “Association of genomic
+subtypes of lower-grade gliomas with shape features automatically
+extracted by a deep learning algorithm,” Computers in Biology and
+Medicine, vol. 109, 2019.
+[57] J. L. Prince and A. S. Willsky, “Constrained sinogram restoration for
+limited-angle tomography,” Optical Engineering, vol. 29, no. 5, pp. 535–
+544, 1990.
+A PPENDIX A
+2D CT SIMULATIONS WITH 120 VIEW ANGLES
+In Fig. 11 we show 2D CT imaging sample reconstructions
+for different combinations of measurement noise and measurement coordinate uncertainty when there are 120 view angles.
+The simulated experiment is performed as described in Section
+III-A1. The reconstructions for when there are 90 view angles
+is shown in Fig. 4.
+Fig. 12 shows average angle error plots for 2D CT imaging
+when there are 120 view angles. The experimental details are
+in Section III-A2 and the equivalent results for 90 view angles
+are shown in Fig. 5.
+A PPENDIX B
+T HREE - DIMENSIONAL CT IMAGING
+Similar to 2D CT imaging, in 3D CT imaging, twodimensional projections of a three-dimensional volume are
+collected by tilting it at different tilt angles. The goal is to
+reconstruct the volume from the the series of projections.
+Inspired by CryoET imaging, we obtain projections at 60 tilt
+angles which we assume to be uniformly spaced on the interval
+[−π/3, π/3]. The true unknown tilt angles are perturbed from
+these. This setup is challenging because there is a ‘wedge’
+of tilt angles for which we do not have projections. The
+detectors are uniformly spaced on a two-dimensional unit
+square [0, 1]2 and have no uncertainty in these experiments.
+Combining these spaces gives the measurement coordinates
+space as Ω = [−π/3, π/3] × [0, 1]2 . The tilt angle uncertainty is
+simulated in the same way as the 2D CT imaging view angle
+uncertainty. Furthermore, we only optimize the tilt angles
+dimension of the measurement coordinates in (8) because the
+detector locations have no uncertainty in these simulations.
+To train the reconstruction 3D Unets, we use 3D volumes
+from the 2019 Brain Tumor Segmentation (BraTS) Challenge
+dataset [53], [54], [55]. The volumes are resized to be 64 ×
+64 × 64. We use 478 volumes for training and 15 separate
+volumes to test and verify our framework.
+A. Combinations of measurement and coordinate error
+We consider different combinations of measurement noise
+and measurement coordinate uncertainty (in tilt angles) in
+the same way as was done for 2D CT. The trials are done
+over 15 test volumes and the results are shown in Fig.
+13. We see that the performance trends for both implicit
+neural and spline representations are similar. Furthermore, the
+performance is consistent with what was seen for the 2D
+CT problem (Fig. 3)—as measurement coordinate uncertainty
+increases, our framework provides increasing gains.
+Fig. 14 shows two-dimensional slices through some of the
+test volumes. The ground truth, psuedoinverse, baseline and
+our reconstructions are shown with the SNRs of the entire
+volumes. Similarly, Fig. 15 shows 3D reconstructions of the
+same test volumes. Two central orthogonal volume slices have
+been plotted. Reconstructions using our framework are better
+than the baseline at recovering the geometric structure of the
+volumes and have fewer artifacts.
+B. Learned tilt angles accuracy
+Next we verify that the learned measurement coordinates
+are accurate. The uncertainty is only in the tilt angles and
+we follow the same procedure as when verifying the learned
+2D CT view angles in Fig. 5. We use the metric defined
+in (14) and show the results in Fig. 16 for one test volume
+with different measurement noise and measurement coordinate
+uncertainty combinations. Again, the solid lines are for the
+implicit neural representations, and the dashed lines are for
+the spline representations. For both representation types, the
+average tilt angle error reduces as the optimization of (8)
+progresses. This demonstrates that our framework learns tilt
+angles (measurement coordinates) that are more accurate than
+the assumed ones.
+A PPENDIX C
+A DDITIONAL SPLINE INFORMATION
+We continue using 2D CT as an example and build on
+Section II-C2 to provide further information on NURBS.
+13
+Angle: 45
+Measurement: 40
+Angle: 40
+Measurement: 35
+Angle: 35
+Measurement: 35
+Angle: 30
+Measurement: 40
+Angle: 25
+Measurement: 30
+Ground truth
+Pseudoinverse
+Baseline
+Implicit neural
+Spline
+11.8
+14.0
+19.3
+17.5
+19.3
+21.5
+23.3
+23.1
+16.9
+22.2
+22.6
+22.9
+18.4
+26.4
+26.9
+27.3
+21.0
+26.5
+26.8
+27.2
+Fig. 11. Example reconstructions for different measurement noise and 2D CT view angle uncertainty. There are 120 view angles. The SNRs are shown for
+each reconstruction
+Besides the learnable weights and learnable control point
+vectors explained in Section II-C2, there is a knot vector for
+each dimension of the measurement coordinates that is not
+learnable. The NURBS surface also has degrees dΘ , dT ∈
+Z+ for the view angle and detector location measurement
+coordinate dimensions. The knot vector for the view angle
+dimension has (J + dΘ + 1) elements which are arranged in
+ascending order. We design its uth element, ku , to be zero
+when 0 ≤ u < dΘ + 1, uniformly spaced between zero and
+one when dΘ + 1 ≤ u ≤ J, and one when J < u ≤ J + dΘ
+[23]. The knot vector for the detector location dimension has
+(J + dT + 1) elements and is made in a similar manner by
+using its degree dT .
+The rational basis functions defined in (10) are
+wj,k Qj,d (θ′ ) Qk,dT (t′ )
+.
+bj,k ([θ′ , t′ ]T ) = PJ−1 PK−1 Θ
+′
+′
+v=0 wu,v Qu,dΘ (θ ) Qv,dT (t )
+u=0
+(16)
+The function Qu,d (·) is the uth B-spline basis function of
+degree d. If ku denotes the uth element of a knot vector,
+each basis function can be obtained using the Cox-de Boor
+recursion method,
+(
+1 if ku ≤ k ≤ ku+1
+Qu,0 (k) =
+(17)
+0 otherwise
+k − ku
+Qu,d (k) =
+Qu,d−1 (k)
+ku+d − ku
+ku+d+1 − k
++
+Qu+1,d−1 (k).
+(18)
+ku+d+1 − ku+1
+3.9
+3.8
+3.7
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+2.6
+2.5
+2.4
+2.3
+2.2
+2.1
+Angle: 30
+Measurement: 40
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+0.9
+Angle: 40
+Measurement: 35
+0.8
+0.7
+0.6
+0.5
+0.4
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Average angle error (degrees)
+4.0
+Average angle error (degrees)
+Angle: 25
+Measurement: 30
+Average angle error (degrees)
+Average angle error (degrees)
+Average angle error (degrees)
+Average angle error (degrees)
+14
+Angle: 30
+Measurement: 30
+for D-dimensional measurement coordinates, we take the
+tensor product of D one-dimensional NURBS curves. This
+is done for D = 3 in Appendix B.
+2.2
+2.1
+2.0
+A PPENDIX D
+I MPLEMENTATION DETAILS
+1.9
+1.8
+A. Framework optimization
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Angle: 35
+Measurement: 35
+1.6
+1.5
+1.4
+1.3
+1.2
+1.1
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Angle: 45
+Measurement: 40
+0.8
+0.6
+0.4
+0.2
+0.00 0.25 0.50 0.75 1.00
+Fraction of total iterations
+Fig. 12. Average angle error for one test image with different measurement
+noise and measurement coordinate uncertainty combinations when there are
+120 2D CT view angles. The solid lines are for implicit neural representations
+and the dashed lines are for spline representations.
+Implicit neural
+1.5
+1.0
+0.5
+0.0
+Measurement SNR
+25
+30
+35
+2.5
+Average SNR improvement
+Average SNR improvement
+Spline
+Measurement SNR
+25
+30
+35
+2.0
+2.0
+1.5
+1.0
+0.5
+0.0
+10
+15
+20
+Angle SNR
+25
+30
+10
+15
+20
+Angle SNR
+25
+30
+Fig. 13. Average SNR improvement (dB) when using our framework (8)
+for 3D CT. There are different combinations of measurement noise SNR and
+measurement coordinate uncertainty SNR. There are 60 tilt angles on the
+interval [−π/3, π/3].
+From (17), we can see that a degree zero NURBS is constructed from piecewise constant basis functions. The recursion (18) is then used to create higher degree basis functions
+with larger support. If the denominator in any term of (18) is
+zero, that term is taken to be zero.
+The NURBS surface for two-dimensional measurement coordinates in (10) is the tensor product of two one-dimensional
+NURBS curves as shown in (16). To create NURBS surfaces
+In this section we provide implementation details for solving
+our optimization problem (8). All parameters were tuned on a
+held out set of images for three randomly chosen measurement
+and operator error combinations.
+To implement NURBS, we modified and extended the
+PyTorch source code released by the NURBS-Diff module
+authors [23]. The implicit neural representation and neural
+network for Gµ (·) in (8) are also implemented in PyTorch.
+This enables us to conveniently optimize the objective function
+(8) using automatic differentiation and the Adam optimizer.
+When implicit neural networks are used, the optimization is
+run for at least 8,000 iterations and at most 20,000 iterations.
+The optimization is terminated when the loss value between
+successive iterations is below 1×10−10 for 2D CT imaging and
+1×10−11 for 3D CT imaging. When splines are used and there
+is any view angle or tilt angle uncertainty, the optimization
+runs for at least 2,000 iterations and at most 5,000 iterations.
+If there is only detector location uncertainty, the optimization
+runs for at least 6,000 iterations and at most 15,000 iterations.
+Additionally, when splines are used, the optimization for all
+imaging problems is terminated when the loss value between
+successive iterations is below 1 × 10−11 .
+1) 2D CT imaging: When implicit neural representations
+are used, λ = 0.1 in (8). The learning rate for both the neural
+network parameters and the input coordinates is 5 × 10−4 .
+When splines are used, λ = 0.025 if there is only view
+angle uncertainty, and λ = 0.25 if there is any detector
+location uncertainty. The learning rate for the neural network
+parameters is 5 × 10−2 and for the input coordinates is
+2 × 10−4 .
+For the implicit neural representation, we use the cosine
+of the view angle rather than the angle when creating the
+measurement coordinate. This encodes the circular nature of
+angular data and improves performance.
+2) 3D CT imaging: When implicit neural representations
+are used, λ = 0.1. The learning rate for the neural network
+parameters is 1 × 10−3 and for the input coordinates is 1 ×
+10−4 . When splines are used, λ = 0.6. The learning rate for
+the neural network parameters is 5 × 10−3 and for the input
+coordinates is 1 × 10−4 .
+B. Reconstruction Unet training
+In this section we describe the implementation details for
+the Unet neural networks used for the reconstruction method
+Gµ (·) in (8).
+A mean-squared error loss function is minimized using
+Adam during training. We train the Unets for 100 epochs
+where one epoch is a full pass through the training dataset.
+15
+Angle: 25
+Measurement: 30
+Angle: 20
+Measurement: 25
+Angle: 12
+Measurement: 35
+Angle: 10
+Measurement: 30
+Ground truth
+Pseudoinverse
+Baseline
+Implicit neural
+Spline
+8.1
+16.6
+18.1
+18.9
+10.9
+17.6
+20.1
+19.8
+8.7
+19.7
+19.4
+19.7
+8.4
+19.4
+19.5
+19.5
+Fig. 14. Example reconstructions of slices of the 3D test volumes. Reconstructions for different measurement noise SNR and measurement coordinate
+uncertainty SNR are shown. The reconstruction SNRs for each volume are stated.
+For the 2D Unet, a batch size of 128 and learning rate of
+1 × 10−3 is used. For the 3D Unet, a batch size of 16 and
+learning rate of 1 × 10−3 is used.
+Publicly available Unet architectures were downloaded
+and trained. Unless mentioned here, the default parameters from the download sources were used. The
+2D Unet model is from https://github.com/mateuszbuda/
+brain-segmentation-pytorch [56]. We used one input channel,
+one output channel, and 16 features in the first layer. The
+3D Unet model is from https://github.com/ELEKTRONN/
+elektronn3. We used one input channel, one output channel,
+16 features in the first layer and a depth of four blocks.
+Due to the limited size of the 3D volume training dataset
+for 3D CT imaging, we use a data augmentation strategy. We
+perform random horizontal flips, random vertical flips, and
+random rotations by 90, 180 or 270 degrees.
+to ensure the spline measurement representations satisfy the
+Radon transform measurement consistency conditions [57]
+C. NURBS
+1) 2D CT imaging: For 2D CT imaging, the NURBS
+degree along the measurement coordinate dimension being
+learned is 18. It is two in the measurement coordinate dimension that is not being learned. Furthermore, where there
+is view angle uncertainty, we create additional control points
+for 1 ≤ j ≤ dΘ and
+rφ ([θ + π, t]T ) = rφ ([θ, −t]T ),
+(19)
+rφ ([θ − π, t]T ) = rφ ([θ, −t]T ),
+(20)
+and
+where a detector location of −t refers to the tth last detector.
+This gives the locally supported NURBS basis functions (16) a
+sufficient number of control points around 0 and π radians and
+ensures the NURBS is accurate in the interval [0, π] radians.
+Specifically, if dΘ is the degree of the spline in the view angle
+dimension, we use the consistency condition to create new
+control points for (10)
+h
+iT
+pj+J−1,k = θj + π, tk , y([θej , −tek ]T )
+(21)
+h
+iT
+pj−J−1,k = θj − π, tk , y([θej , −tek ]T )
+(22)
+for J − dΘ < j ≤ J where J is the number of view angles
+in the observed measurements. Essentially, if there are K
+detectors, we create 2dΘ K additional control points.
+16
+Baseline
+Implicit neural
+Spline
+Angle: 10
+Measurement: 30
+Ground truth
+18.1
+18.9
+17.6
+20.1
+19.8
+19.7
+19.4
+19.7
+19.4
+19.5
+19.5
+Angle: 25
+Measurement: 30
+Angle: 20
+Measurement: 25
+Angle: 12
+Measurement: 35
+16.6
+0.0
+0.5
+1.0
+Fraction of total iterations
+Angle: 20
+Measurement: 30
+2.25
+2.20
+2.15
+2.10
+0.0
+0.5
+1.0
+Fraction of total iterations
+Average angle error (degrees)
+5.500
+5.475
+5.450
+5.425
+5.400
+5.375
+4.025
+4.000
+3.975
+3.950
+3.925
+3.900
+3.875
+Average angle error (degrees)
+Angle: 12
+Measurement: 30
+Average angle error (degrees)
+2) 3D CT imaging: For 3D CT, the NURBS degree along
+the tilt angle measurement coordinate dimension is 15. It is
+two in the two detector location dimensions. Additionally, for
+this imaging technique, we fix the basis function weights to
+one and do not optimize them. This makes the NURBS surface
+a B-spline surface.
+Average angle error (degrees)
+Fig. 15. Example reconstructions for two of the orthogonal central slices of each of the 3D test volumes in Fig. 14 for 3D CT imaging. The SNRs for the
+entire volume are stated.
+Angle: 15
+Measurement: 35
+0.0
+0.5
+1.0
+Fraction of total iterations
+Angle: 25
+Measurement: 35
+1.5
+1.4
+1.3
+1.2
+0.0
+0.5
+1.0
+Fraction of total iterations
+Fig. 16. Average tilt angle error for one 3D CT test volume with different
+measurement noise and measurement coordinate uncertainty combinations.
+The solid lines are for implicit neural representations and the dashed lines are
+for spline representations.

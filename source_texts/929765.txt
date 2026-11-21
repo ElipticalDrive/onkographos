@@ -1,0 +1,144 @@
+Switch games running natively on iPhone, iPad and Mac: an NSP folder becomes an unsigned IPA (NSO rewriter, Horizon HLE host, NVN→Metal) - perf(shaders): store stage memory bytes with atomic AND and OR instead of a compare-and-swap loop by Romen-Adama-Dev · Pull Request #1503 · seedds/nxnative
+
+perf(shaders): store stage memory bytes with atomic AND and OR instead of a compare-and-swap loop by Romen-Adama-Dev · Pull Request #1503 · seedds/nxnative · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Romen-Adama-Dev
+commented
+Nov 6, 2026
+Copy link
+Copy Markdown
+What
+The translator's shared memory byte store (SharedStore8, also the 16-bit SharedStore16) was a compare-and-swap loop on the word, from upstream Ryujinx. GenerateSharedStore now clears the field with an atomic AND and sets it with an atomic OR. Lanes writing other bytes of the same word commute with both, so the word ends as the loop left it, without retries. A chain change: translator rebuilt, dmsh_chain.lock and dmsh_chain.h updated (chain 26a894c0f40a), the StageMemory test checks the new form. DM_NVN_SKIP_MESH=1 drops every task / mesh draw (as DM_NVN_SKIP_FS drops draws by fragment shader): how the cost was isolated.
+Why
+A task or mesh shader writes its primitive indices and count as bytes (0x927 modes 0x80 and 0x88). The 32 lanes of a workgroup write neighbouring bytes, so four lanes contend for each word and the loop ran about four times a store, with a divergent retry each time. Ocarina of Time's foliage mesh shaders have ten such stores a lane, over tens of thousands of workgroups a frame.
+Semantics: two lanes writing the same byte at once now get a mix of their values where the loop gave one of the two; the hardware's order between them is undefined as well. No shader seen writes the same byte from two lanes.
+Measured
+The Legend of Zelda: Ocarina of Time, Kokiri Forest, M3 Pro (18 GB), DM_NVN_GPUPROF=every:600. The pass after the opaque pass holds the foliage mesh draws; a render pass's start stamp is written after its vertex stage, where Metal runs the object and mesh stages, so the mesh work shows as the gap before that pass or as its duration.
+Run
+Foliage pass
+Frame
+Internal resolution (the game's controller)
+main (671c68e), as shipped
+8.3-8.6 ms
+25-28 ms, 36-40 fps
+854x480
+mesh draws dropped (DM_NVN_SKIP_MESH=1)
+-
+18.4 ms
+1440x810
+mesh bodies emptied (groups still launched)
+~0
+16.3 ms
+1440x810
+this change, the forest's 39 mesh shaders rebuilt by hand
+3.5-4.0 ms
+20.7 ms, 48 fps
+1440x810
+this change, full chain rebuild on top of 0f510fd (4919040, chain 26a894c0f40a)
+4.9-5.4 ms (a denser view: 815-824 draws in the pass before, against 409-425)
+20.8 ms p50, 22.0 ms p95, 48 fps
+1120x630
+Every run follows the same scripted route from the same save; the last row comes from the packed app, with 10.0 GB resident and no new [RED] line. The empty-body run shows the cost was in the translated body, not in launching the groups; the remaining 3.5-4.0 ms is the body itself (zeroing of the stage memory, loads, the output copy).
+Checks
+DMSH_TEST_XLATE=dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate python3 dm/gfx/tests/test_dmsh_ampere_mem.py: 64 ok (the byte store has the two atomics and no compare-and-swap).
+python3 dm/gfx/tests/test_dmsh_meshstage.py: 26 ok. python3 dm/tools/tests/test_nsp_chain.py: 17 ok. python3 dm/tools/tests/test_docs.py: ok.
+scripts/regress.py check --games: not run, this Mac has only Ocarina of Time. The change reaches every game whose compute, task or mesh shaders store bytes or half-words in shared memory; a run on the usual five would be welcome.
+Docs
+docs/reference/shaders.md: "Stage memory byte stores through a compare-and-swap loop" (Symptom / Cause / Fix / Check / Found on), symptom index regenerated.
+dm/games/0400486024DEC000/README.md: a line under "Found on this game".
+perf(shaders): store stage memory bytes with atomic AND and OR instea…
+…
+4919040
+```
+…d of a compare-and-swap loop
+
+A task or mesh shader writes its primitive indices and count as bytes, which the
+translator's shared memory byte store turned into a compare-and-swap loop on the
+word. The 32 lanes of a workgroup write neighbouring bytes, so four lanes contend
+for each word and the loop ran about four times a store, with a divergent retry
+each time. Ocarina of Time's foliage mesh shaders have ten such stores a lane over
+tens of thousands of workgroups a frame: 8.3-8.6 ms of GPU a frame on an M3 Pro,
+a third of the frame, whatever the resolution.
+
+GenerateSharedStore now clears the field with an atomic AND and sets it with an
+atomic OR. Lanes writing other bytes of the word commute with both, so the word
+ends as the loop left it, without retries. Two lanes writing the same byte at once
+get a mix of their values where the loop gave one of the two; the hardware's order
+between them is undefined as well. The helper also serves 16-bit stores and the
+shared memory of compute shaders. A chain change (7b8c971669dc): translator
+rebuilt, lock and header updated, the StageMemory test checks the new form.
+
+DM_NVN_SKIP_MESH=1 drops every task / mesh draw, as DM_NVN_SKIP_FS drops draws by
+fragment shader: how the cost was isolated.
+
+Measured on an M3 Pro (18 GB), Kokiri Forest, the pass holding the foliage:
+8.3-8.6 ms -> 3.5-4.0 ms a frame; the game's resolution controller then holds
+1440x810 at 48 fps where it held 854x480 at 36-40 fps.
+```
+github-actions
+Bot
+added
+nvn
+NVN on Metal and its tests (dm/gfx/nvn, dm/gfx/tests)
+docs
+Documentation
+shader chain
+The shader translation chain (DMSH_CHAIN): a change rebuilds every game's shaders
+game: 0400486024DEC000
+A game
+labels
+Nov 6, 2026
+javierdv7
+pushed a commit
+to javierdv7/nxnative
+that referenced
+this pull request
+Nov 6, 2026
+Translator rebuilt with the picked chain changes (seedds#1503, seedds…
+…
+d40104d
+```
+…#1462's CAS, seedds#1487, seedds#1329, seedds#1410, seedds#1411, seedds#1412, seedds#1357): lock and chain header; conflict leftovers removed from shaders.md and test_dmsh_ampere_alu.py
+```
+gnosticgeek
+pushed a commit
+to gnosticgeek/nxforge
+that referenced
+this pull request
+Nov 6, 2026
+Merge upstream PR seedds#1503
+…
+6fc4114
+```
+# Conflicts:
+#	dm/gfx/nvn/dmsh_chain.h
+#	dm/gfx/tools/dmsh_chain.lock
+#	dm/gfx/tools/dmsh_xlate_bin/Ryujinx.Common.dll
+#	dm/gfx/tools/dmsh_xlate_bin/Ryujinx.Graphics.Shader.dll
+#	dm/gfx/tools/dmsh_xlate_bin/Spv.Generator.dll
+#	dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.dll
+#	dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate.pdb
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+docs
+Documentation
+game: 0400486024DEC000
+A game
+nvn
+NVN on Metal and its tests (dm/gfx/nvn, dm/gfx/tests)
+shader chain
+The shader translation chain (DMSH_CHAIN): a change rebuilds every game's shaders
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

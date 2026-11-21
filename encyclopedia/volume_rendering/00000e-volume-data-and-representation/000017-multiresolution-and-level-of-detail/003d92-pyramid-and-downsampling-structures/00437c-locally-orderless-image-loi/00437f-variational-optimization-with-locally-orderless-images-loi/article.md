@@ -1,0 +1,142 @@
+# Variational Optimization with Locally Orderless Images (LOI)
+
+Also called: LOI variational optimization, Matching local image histograms
+
+## Overview
+Variational Optimization with Locally Orderless Images (LOI) is a differentiable rendering optimization technique that combines variational derivatives with multi-scale local histogram matching to recover scene parameters (e.g., geometry, camera pose, material properties) from images where standard RGB gradients are unstable, sparse, or insufficient due to complex light transport or high variance [S1]. Unlike variational optimization using stationary image matching, which fails due to strict alignment sensitivity and noise, LOI matching does not require perfect alignment between the variational estimate and reference images, allowing reliable recovery from arbitrary initializations [S1].
+
+## How it works
+The method optimizes a parameter vector $\theta$ (e.g., kaleidoscope configuration, particle positions, or object translation) by minimizing a loss derived from matching the local intensity distributions of the rendered variational estimate and the target image, rather than matching pixel intensities directly [S1].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Target image $I_{target}$ [S1].
+    *   Initial parameter estimate $\theta^{(0)}$ [S1].
+    *   Differentiable renderer capable of computing variational derivatives (e.g., PRDPT [7]) [S1].
+    *   Scale-space parameters: $\alpha \in [1, 5, 15, 45]$, $\sigma \in [0, 5]$, $\beta = 0.03125$ [S1].
+*   **Outputs:**
+    *   Optimized parameter vector $\theta^*$ [S1].
+
+### Data Structures
+The method operates on images represented as 2D arrays of RGB values. The core data structure for the loss computation is the local histogram, computed over a sliding window or kernel defined by the scale-space parameters [S1].
+
+### Steps
+1.  **Initialize Parameters:** Set initial parameters $\theta^{(0)}$ [S1].
+2.  **Render Variational Estimate:** Use the differentiable renderer with variational derivatives to render an image $I_{var}$ from the current parameters $\theta^{(t)}$ [S1].
+3.  **Compute Local Histograms:** For both $I_{var}$ and $I_{target}$, compute local histograms at multiple scales defined by $\alpha$ and $\sigma$ [S1].
+4.  **Match Histograms:** Compute the loss by comparing the local histograms of $I_{var}$ and $I_{target}$ across the scale space [S1].
+5.  **Update Parameters:** Compute the gradient of the loss with respect to $\theta$ using the variational derivatives and update $\theta$ via gradient-based optimization (e.g., Adam or L-BFGS) [S1].
+6.  **Iterate:** Repeat steps 2–5 until convergence or a maximum number of iterations is reached [S1].
+
+### Formulas and Parameters
+The loss function is based on matching local image histograms. The specific mathematical formulation of the histogram distance metric is not provided in the sources [S1]. However, the scale-space parameters used for the LOI representation and scale-space blurring are explicitly defined as:
+*   $\alpha = [1, 5, 15, 45]$ [S1]
+*   $\sigma = [0, 5]$ [S1]
+*   $\beta = 0.03125$ [S1]
+
+These parameters define the multi-scale nature of the histogram matching. The sources indicate that matching only in the $\sigma$ space (without $\alpha$ and $\beta$ scale spaces) reduces the method to standard Gaussian Pyramids, which is insufficient for the inverse rendering tasks described [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def variational_optimization_loi(target_image, initial_theta, renderer, max_iterations):
+    """
+    Optimizes parameters theta using variational derivatives and LOI histogram matching.
+    
+    Args:
+        target_image: The reference image to match.
+        initial_theta: Initial guess for the scene parameters.
+        renderer: A differentiable renderer that supports variational derivatives.
+        max_iterations: Maximum number of optimization steps.
+        
+    Returns:
+        theta_opt: The optimized parameters.
+    """
+    # Scale-space parameters from [S1]
+    alpha_scales = [1, 5, 15, 45]
+    sigma_scales = [0, 5]
+    beta = 0.03125
+    
+    theta = initial_theta
+    
+    for i in range(max_iterations):
+        # Step 2: Render variational estimate using variational derivatives [S1]
+        # The renderer computes the image and its gradient w.r.t theta
+        rendered_image, grad_renderer = renderer.render(theta)
+        
+        # Step 3: Compute local histograms for rendered and target images [S1]
+        # This involves blurring and binning intensity values at multiple scales
+        # The exact histogram computation function is not detailed in [S1]
+        # We assume a function compute_local_histograms exists that takes
+        # an image and the scale parameters (alpha, sigma, beta)
+        hist_rendered = compute_local_histograms(rendered_image, alpha_scales, sigma_scales, beta)
+        hist_target = compute_local_histograms(target_image, alpha_scales, sigma_scales, beta)
+        
+        # Step 4: Match local histograms to compute loss [S1]
+        # The specific distance metric (e.g., Earth Mover's Distance, Chi-squared)
+        # is not specified in the sources [S1]
+        loss = compute_histogram_loss(hist_rendered, hist_target)
+        
+        # Step 5: Update parameters using gradient-based optimization [S1]
+        # The gradient of the loss w.r.t theta is computed via the variational
+        # derivatives provided by the renderer [S1]
+        # Note: The sources state that variational derivatives are used to estimate
+        # gradients [S1]. The exact backpropagation through the histogram loss
+        # is not detailed [S1].
+        grad_theta = compute_gradient(loss, grad_renderer)
+        
+        # Update theta (e.g., using Adam or L-BFGS)
+        theta = update_parameters(theta, grad_theta)
+        
+        # Check for convergence (not specified in sources) [G]
+        if loss < tolerance:
+            break
+            
+    return theta
+
+def compute_local_histograms(image, alpha_scales, sigma_scales, beta):
+    """
+    Computes local histograms at multiple scales.
+    Implementation details are not provided in [S1].
+    This function is a placeholder for the LOI representation logic.
+    """
+    # Not given in the sources.
+    pass
+
+def compute_histogram_loss(hist_rendered, hist_target):
+    """
+    Computes the loss between two sets of local histograms.
+    Implementation details are not provided in [S1].
+    """
+    # Not given in the sources.
+    pass
+
+def compute_gradient(loss, grad_renderer):
+    """
+    Computes the gradient of the loss w.r.t theta using variational derivatives.
+    Implementation details are not provided in [S1].
+    """
+    # Not given in the sources.
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Alignment Sensitivity:** Standard variational optimization with stationary image matching fails if the variational estimate is not perfectly aligned with the target, as it requires exact overlap of features (e.g., highlights) [S1]. LOI matching mitigates this by comparing distributions rather than pixel values [S1].
+*   **Insufficient Scale Space:** Using only the $\sigma$ scale space (without $\alpha$ and $\beta$) fails in real scene inverse rendering tasks, as it degenerates to standard Gaussian Pyramids which lose high-frequency and intensity distribution modes [S1].
+*   **Complex Light Transport:** In scenes with complex light transport (e.g., kaleidoscopes), RGB gradients are unstable and inefficient [S1]. LOI is specifically designed to handle these cases where standard gradients lead to local minima [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The method involves rendering at each iteration and computing multi-scale histograms, which adds computational overhead compared to simple RGB loss [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** In a kaleidoscope scene, the method successfully recovers the optimal configuration of the kaleidoscope and reflecting particles, whereas PRDPT [7] gets stuck in a local minimum [S1]. In a real scene inverse rendering task with a glass orb, the method successfully recovers the translation from a real photograph, while matching at stationary resolution fails [S1].
+*   **Strengths:** Robust to sensor noise and calibration errors [S1]. Does not require perfect alignment between variational estimate and reference images [S1]. Effective for scenes with complex light transport where RGB gradients are unstable [S1].
+*   **Limitations:** Requires a differentiable renderer that supports variational derivatives [S1]. The specific histogram distance metric and its computational cost are not detailed [S1].
+*   **When to Use:** Use when RGB gradients are sparse, unstable, or insufficient due to complex light transport or high variance, and when standard variational optimization fails due to alignment sensitivity [S1].
+*   **When Not to Use:** Use with caution if the scene has low-dimensional parameter spaces where standard RGB derivatives perform comparably to other methods, as the added complexity of LOI may not be necessary [S1].
+
+## Background
+The method was introduced in the paper "Locally Orderless Images for Optimization in Differentiable Rendering" [S1]. It builds on the concept of Locally Orderless Images (LOI) [11018-locally-orderless-image-loi.md] and variational derivatives [7]. The authors demonstrated the method on virtual scenes (kaleidoscope) and real-world inverse rendering tasks (glass orb) to show its robustness compared to standard variational optimization and image pyramid methods [S1].
+
+## Sources
+[S1] Locally Orderless Images for Optimization in Differentiable Rendering, https://doi.org/10.1109/cvpr52734.2025.00541, fetched 2026-10-26

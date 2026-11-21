@@ -1,0 +1,149 @@
+Experimental Rust voxel game engine. Contribute to deranjer/spall development by creating an account on GitHub.
+
+T03 — Fixture worlds, rays, and integer brushes by deranjer · Pull Request #4 · deranjer/spall · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+deranjer
+commented
+Sep 7, 2026
+Copy link
+Copy Markdown
+Owner
+Implements T03 (ENG-10) from docs/tasks.md. Stacked on #3 (T02); retargets to main once #1–#3 merge.
+Read-side queries and deterministic brush plans on top of T02's spall_voxel storage. No server loop, no graphics — CPU only.
+transform.rs — RigidXform
+Maps a volume's local cell space to world metres: local_cell → *cell_size_m → rotate → +translation. from_pose builds one from a replicated Pose (dequantise + renormalise the quaternion; reject a zero orientation). The stored rotation is normalised, so the conjugate is the exact inverse. Round-trips tested for identity, pure translation, and an arbitrary-axis 45° rotation at negative cell coordinates (1e-9), plus a looser pass through Pose quantisation.
+query.rs — DDA ray traversal
+cast_ray runs a 3D DDA (Amanatides & Woo) over a Volume in local cell space; cast_ray_world maps a metre-space ray through a RigidXform, traces, and reports t back in metres (face stays volume-local).
+Defined and tested behaviour:
+Case
+Behaviour
+zero / non-finite direction
+Err(RayError::ZeroDirection / NonFinite)
+per-axis zero component
+fine — that axis never steps
+origin exactly on a boundary k.0
+belongs to cell k (floor)
+coincident axis crossings (edge/corner)
+fixed step priority X, then Y, then Z
+ray starts inside a solid cell
+Hit { face: None, t: 0.0, placement_cell == cell }
+past max_distance / hits max_steps
+Miss { reason: OutOfRange / StepLimit }
+resident-but-unavailable brick in the path
+Unknown { residency, .. } — never a miss
+cell outside a bounded volume
+traversable empty space (ray can cross into the volume)
+RayHit carries the struck cell, the entered Face (its normal() points back toward the origin), the placement_cell (cell + face.normal()), t, and steps.
+brush.rs — integer brush → EditPlan
+EditPlan::filled_box and EditPlan::sphere emit cell writes in canonical (z, y, x) order. The sphere uses only spall_core's fixed-point contains_cell_centre predicate over the shape's cell bounding box, so the write set and order are byte-stable — pinned BLAKE3 digests guard it, and a brute-force reference over a wider box confirms the set. Both brushes verified to touch exactly eight bricks when centred on the corner where eight meet; a cell centre exactly on the radius is included.
+fixtures.rs — deterministic fixture worlds
+Pure functions of a VolumeId — no RNG, no clock, no I/O:
+flat_terrain — 2×2×2-brick bounded stone slab under a resident (not absent) air layer, all uniform storage
+hollow_tower — 8-brick, 2-cell-thick stone shell straddling the origin (negative coordinates, cross-brick)
+cross_brick_bridge — 2×2-cell beam spanning four X bricks (matches the bridge-cross-brick acceptance fixture)
+sloped_terrain — small excavatable staircase with a dirt surface over stone
+digest(&Volume) gives a platform-stable BLAKE3 over resident bricks in (z, y, x) order (coord, content hash, revision), pinned in tests. It is a local regression check, explicitly not the replicated spall.topology.v1 hash.
+Other
+volume.rs: Volume::resident_brick_coords() in canonical order.
+New dependency glam 0.33.6 (f64 feature, no transitive deps) for the transform / ray math — the math crate named in README.md; recorded in docs/dependencies.md. Ray results are explicitly not required to be bit-identical across machines (hit validation is server-side); integer brush plans stay fully deterministic.
+Checks
+cargo xtask check — fmt clean, clippy -D warnings clean, 103 workspace tests pass (spall_voxel adds 29: transform 4, query 12, brush 8, fixtures 5). cargo xtask smoke --ticks 60 passes.
+Acceptance vs. task
+negative-coordinate & exact-boundary rays — query::negative_coordinate_ray_hits_a_wall_with_a_signed_cell, exact_boundary_origin_is_owned_by_the_upper_cell, diagonal_corner_crossing_steps_x_before_y.
+cuts spanning eight bricks — brush::box_edit_spanning_eight_bricks_touches_exactly_eight, sphere_edit_spanning_eight_bricks_touches_exactly_eight.
+rigid-transform local/world round-trips — transform::world_local_round_trips_for_rotated_translated_volumes, query::world_ray_and_local_ray_agree_on_a_rotated_translated_volume.
+fixed seeds/hashes for all foundation fixtures — fixtures::fixture_digests_are_pinned (4 pinned digests), fixture_digest_is_independent_of_volume_id_and_run; brush::brush_write_lists_are_deterministic.
+face normal / placement cell / zero direction / start-inside / finite range — the query behaviour table above, each with a test.
+No graphics dependency — spall_voxel deps are blake3, glam (f64), spall_core, thiserror.
+🤖 Generated with Claude Code
+feat: add T03 fixture worlds, ray queries, and integer brushes
+…
+f5204c5
+```
+Implements T03 (ENG-10) from docs/tasks.md on top of T02's spall_voxel
+storage. Read-side queries and deterministic brush plans; no server loop,
+no graphics.
+
+- transform.rs: RigidXform maps a volume's local cell space to world
+  metres (rotate + f64 translate + uniform cell scale). from_pose builds
+  it from a replicated Pose; conjugate is the exact inverse for the unit
+  quaternion it keeps. Round-trips tested for identity, translation, and
+  arbitrary-axis rotation at negative coordinates.
+- query.rs: cast_ray runs a 3D DDA (Amanatides & Woo) over a Volume in
+  local cell space; cast_ray_world maps a metre-space ray through a
+  RigidXform and reports t back in metres. Defined behaviour: zero /
+  non-finite direction rejected; per-axis zero components fine; origin
+  k.0 belongs to cell k (floor); coincident crossings step X, then Y,
+  then Z; finite max_distance and a hard max_steps cap both yield Miss;
+  a resident-but-unavailable brick yields Unknown, never a miss; cells
+  outside a bounded volume are traversable empty space. RayHit carries
+  the struck cell, entered Face (None when starting inside a solid),
+  placement_cell, and t.
+- brush.rs: EditPlan::filled_box and EditPlan::sphere generate cell
+  writes in canonical (z, y, x) order. The sphere uses only
+  spall_core's fixed-point contains_cell_centre predicate, so the write
+  set and order are byte-stable; pinned BLAKE3 digests guard it. Both
+  brushes verified to span exactly eight bricks when centred on a brick
+  corner, and the sphere matches a brute-force reference.
+- fixtures.rs: flat_terrain (2x2x2-brick bounded slab + resident air),
+  hollow_tower (8-brick shell around the origin, negative coords),
+  cross_brick_bridge (beam across four X bricks), sloped_terrain
+  (excavatable staircase). Each is a pure function of its VolumeId;
+  digest() gives a platform-stable content hash, pinned in tests. This
+  is a local regression check, not the wire topology hash.
+- volume.rs: add Volume::resident_brick_coords() in canonical order.
+- New dependency: glam 0.33.6 (f64 feature, no transitive deps) for the
+  transform / ray math; recorded in docs/dependencies.md.
+
+Checks: cargo xtask check passes (fmt, clippy -D warnings, 103 workspace
+tests; spall_voxel adds 29). cargo xtask smoke --ticks 60 passes.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_018YENsZQKRzEWFDyH4nWjJ2
+```
+This was referenced Sep 7, 2026
+T04 — Bounded job scheduling (spall_jobs)
+#5
+Merged
+T07 — Support graph and split plans (spall_structure)
+#6
+Merged
+deranjer
+added 2 commits
+September 7, 2026 15:13
+Merge branch 'review/ready-pr3' into review/ready-pr4
+a691e27
+fix: handle extreme ray and brush coordinates
+72270cd
+Hide details
+View details
+deranjer
+merged commit 9407bdb
+into
+agent/t02-brick-storage-and-revisioned-edits
+Sep 7, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+deranjer
+mentioned this pull request
+Sep 8, 2026
+Integrate reviewed T03/T04/T07 foundation stack into main (ENG-33)
+#13
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

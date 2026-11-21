@@ -1,0 +1,120 @@
+# Level-aware Decoding
+
+Also called: LAD
+
+## Overview
+Level-aware Decoding (LAD) is a module within the Iterative Gaussian Synopsis framework that enables efficient, level-specific interpretation of modulated features for 3D Gaussian Splatting [S1]. It solves the problem of maintaining high visual fidelity across different Levels of Detail (LOD) without storing explicit, redundant Gaussian attributes for every level [S1]. By introducing level-specific fusion and attribute-prediction Multi-Layer Perceptrons (MLPs), LAD adapts a compact, function-based predictor to each LOD's objective, ensuring structural flexibility and strict model compactness [S1]. It sets itself apart from static attribute storage by dynamically fine-tuning the decoding network for each resolution level during the unfolding process [S1].
+
+## How it works
+**Inputs:**
+- Downsampled hierarchical grids for the target LOD $\ell$ [S1].
+- Modulated local features associated with the anchors at LOD $\ell$ [S1].
+- Level index $\ell$ [S1, S2].
+
+**Outputs:**
+- Predicted Gaussian attributes (opacity, covariance, color) for the primitives at LOD $\ell$ [S1, S2].
+
+**Data Structures:**
+- **MLP Fusion ($MLP^{(\ell)}_{fuse}$):** A neural network specific to LOD $\ell$ that fuses the modulated local features with the hierarchical grid features [S1].
+- **MLP Attribute Prediction ($MLP^{(\ell)}_{attr}$):** A neural network specific to LOD $\ell$ that predicts Gaussian properties from the fused features [S1, S2].
+- **Level Information:** An explicit parameter or embedding representing the current LOD level, incorporated into the feature processing [S2].
+
+**Steps:**
+1. **Initialize Level-Specific MLPs:** During the unfolding step for LOD $\ell$, copy the weights of the fusion and attribute-prediction MLPs from the trained foundational codebook (or the previous level's foundational counterparts) [S1]. This preserves coherence of the shared basis [S1].
+2. **Feature Extraction:** Extract features for each visible anchor point based on the LOD mask [S2].
+3. **Level Incorporation:** Incorporate the level index $\ell$ into the feature processing pipeline via the `add_level` parameter [S2]. This allows the networks to learn level-specific representations [S2].
+4. **Fusion:** Apply $MLP^{(\ell)}_{fuse}$ to the modulated local features and the downsampled hierarchical grid features [S1].
+5. **Attribute Prediction:** Apply $MLP^{(\ell)}_{attr}$ to the fused features to predict the Gaussian properties (opacity, covariance, color) [S1, S2].
+6. **Fine-Tuning:** Fine-tune the level-specific MLPs ($MLP^{(\ell)}_{fuse}$ and $MLP^{(\ell)}_{attr}$) using the LLOD loss until the anchors condense to the next coarser level or the target LOD is reached [S1].
+
+**Parameters:**
+- Learning rate for fusion MLP updates during unfolding: 0.005 [S1].
+- Learning rate for opacity MLP updates during unfolding: 0.002 [S1].
+- Learning rate for color MLP updates during unfolding: 0.008 [S1].
+- Learning rate for covariance MLP updates during unfolding: 0.004 [S1] [S2].
+- `add_level`: A boolean or configuration parameter that explicitly incorporates level information into the neural networks [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def level_aware_decoding(anchor_points, hierarchical_grids, level_index, foundational_mlp_fuse, foundational_mlp_attr):
+    """
+    Performs level-aware decoding for a specific LOD level.
+    
+    Args:
+        anchor_points: List of visible anchor points for the current LOD.
+        hierarchical_grids: Downsampled hierarchical grids for the current LOD.
+        level_index: The integer index of the current LOD (e.g., 0, 1, 2, 3).
+        foundational_mlp_fuse: The foundational fusion MLP weights.
+        foundational_mlp_attr: The foundational attribute prediction MLP weights.
+        
+    Returns:
+        gaussian_attributes: Predicted properties (opacity, covariance, color) for the Gaussians.
+    """
+    # Step 1: Initialize level-specific MLPs from foundational counterparts
+    # This preserves coherence of the shared basis [S1]
+    mlp_fuse = copy_weights(foundational_mlp_fuse)
+    mlp_attr = copy_weights(foundational_mlp_attr)
+    
+    # Step 2: Extract features for each anchor point
+    # Select visible anchor points based on the LOD mask [S2]
+    visible_anchors = select_visible_anchors(anchor_points, level_index)
+    features = extract_features(visible_anchors, hierarchical_grids)
+    
+    # Step 3: Incorporate level information
+    # Explicitly incorporate level information into feature processing [S2]
+    level_embedding = get_level_embedding(level_index)
+    features_with_level = combine_features(features, level_embedding)
+    
+    # Step 4: Fusion
+    # Apply level-specific fusion MLP [S1]
+    fused_features = mlp_fuse(features_with_level)
+    
+    # Step 5: Attribute Prediction
+    # Apply level-specific attribute prediction MLP [S1, S2]
+    gaussian_attributes = mlp_attr(fused_features)
+    
+    # Step 6: Fine-Tuning (performed during the unfolding optimization loop)
+    # The MLPs are fine-tuned under LLOD loss [S1]
+    # Typical learning rates:
+    #   fusion: 0.005 [S1]
+    #   opacity: 0.002 [S1]
+    #   color: 0.008 [S1]
+    #   covariance: 0.004 [S1]
+    
+    return gaussian_attributes
+```
+
+## Subtopics
+
+### Neural Gaussian Generation with Level Awareness
+A rendering pipeline stage where neural networks predict Gaussian properties (color, opacity, covariance) using features extracted from anchor points, explicitly incorporating level information to learn level-specific representations [S2]. It differs from standard generation by using the `add_level` parameter to inject LOD context into the feature processing, allowing the MLPs (Feature Bank, Opacity, Covariance, Color) to adapt their predictions based on the current resolution level [S2]. Choose this when you need to dynamically adjust the number of Gaussians and their properties based on viewing distance or LOD mask [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Memory usage is lower than non-LOD approaches because only level-dependent data is loaded [S2]. The total model size is measured in megabytes (MB), including the Compressed Delta Size for transitions between LODs [S1].
+- Rendering time is consistent and bounded by level selection, as opposed to being inconsistent and dependent on the full scene complexity [S2].
+
+**Measured Performance:**
+- Evaluated using PSNR, SSIM, and LPIPS [S1].
+- Framework generates a hierarchy of 4 LODs (L0 to L3) [S1].
+- Uses a multi-resolution hash grid with 12 levels and a feature dimension of 4 [S1].
+- Global Anchor Codebook size $N_c$ is 256 with feature dimension $D_c = 32$ [S1].
+- Group sparsity loss weight $\lambda_{group}$ is 0.01 [S1].
+- Models are trained for 30,000 iterations at full fidelity before unfolding [S1].
+
+**Strengths and Limitations:**
+- Strengths: High fidelity and structural flexibility while maintaining strict model compactness [S1]. Enables streaming suitability by quantifying incremental network payload [S1].
+- Limitations: Requires iterative unfolding and fine-tuning of MLPs for each level, which adds complexity to the training pipeline [S1].
+
+**When to Use:**
+- Use when deploying 3D Gaussian Splatting for streaming or real-time applications where bandwidth and memory are constrained [S1].
+- Use when a hierarchy of LODs is required to adapt rendering quality to viewing distance [S2].
+
+## Background
+Level-aware Decoding is part of the "Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis" framework [S1]. It was introduced to address the need for efficient LOD management in 3D Gaussian Splatting, building on the iterative synopsis method that constructs a hierarchy from full fidelity down to coarse levels [S1]. The method leverages the concept of a foundational codebook and modulated features to avoid storing explicit attributes for every LOD [S1].
+
+## Sources
+[S1] Unfolding 3D Gaussian Splatting via Iterative Gaussian Synopsis., https://doi.org/10.1109/tvcg.2026.3746672, fetched 2026-10-26
+[S2] Level of Detail System | city-super/Octree-GS | DeepWiki, https://deepwiki.com/city-super/Octree-GS/2.3-level-of-detail-system, fetched 2026-10-28

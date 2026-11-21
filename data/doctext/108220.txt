@@ -1,0 +1,1436 @@
+# Gaussian Splat Viewer
+
+A 3D Gaussian Splatting visualization tool based on OpenGL, designed for rendering and interactively viewing Gaussian point cloud data in PLY format.
+
+## System Requirements
+
+- CMake 3.16+
+- C++17 compiler
+- OpenGL 4.2+
+- Linux
+
+### Dependencies
+
+- **GLFW3** - Window management and input handling
+- **GLM** - Math library
+- **OpenGL** - Graphics rendering
+- **GLAD** - OpenGL loader (included)
+- **TinyPLY** - PLY file parser (included)
+
+## Build Instructions
+
+### Install Dependencies
+
+On Ubuntu/Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install libglfw3-dev libglm-dev libgl1-mesa-dev cmake build-essential
+```
+
+### Build the Project
+
+```bash
+# Create build directory
+mkdir build
+cd build
+
+# Configure and build
+cmake ..
+cmake --build .
+```
+
+After successful compilation, the executable `gsplat_viewer` will be generated in the `build` directory.
+
+## Usage
+
+```bash
+./gsplat_viewer <ply_file>
+```
+
+### Controls
+
+| Action                | Description         |
+|-----------------------|--------------------|
+| **Left Mouse Drag**   | Rotate camera      |
+| **Middle/Right Drag** | Pan camera         |
+| **Mouse Wheel**       | Zoom view          |
+| **ESC**               | Exit program       |
+
+### include/AppContext.h
+```
+#pragma once
+
+namespace gsplat {
+
+class Renderer;
+class OrbitControls;
+
+struct AppContext {
+    Renderer* renderer = nullptr;
+    OrbitControls* controls = nullptr;
+};
+
+} // namespace gsplat
+```
+
+### include/Camera.h
+```
+#pragma once
+
+#include "glm/glm.hpp"
+
+namespace gsplat {
+
+class Camera {
+public:
+    Camera(int width, int height, float fov = 45.0f);
+    
+    void setSize(int width, int height);
+    void setFov(float fov);
+    void setPosition(const glm::vec3& pos);
+    void setTarget(const glm::vec3& target);
+    void setUp(const glm::vec3& up);
+    
+    void update();
+    
+    const glm::mat4& getViewMatrix() const { return viewMatrix; }
+    const glm::mat4& getProjectionMatrix() const { return projectionMatrix; }
+    const glm::mat4& getViewProjMatrix() const { return viewProjMatrix; }
+    
+    glm::vec3 getPosition() const { return position; }
+    glm::vec3 getTarget() const { return target; }
+    glm::vec3 getUp() const { return up; }
+    
+    float getFx() const { return fx; }
+    float getFy() const { return fy; }
+    int getWidth() const { return width; }
+    int getHeight() const { return height; }
+
+private:
+    glm::vec3 position;
+    glm::vec3 target;
+    glm::vec3 up;
+    
+    glm::mat4 viewMatrix;
+    glm::mat4 projectionMatrix;
+    glm::mat4 viewProjMatrix;
+    
+    int width, height;
+    float fov;
+    float fx, fy;
+    float aspect;
+    float nearPlane, farPlane;
+};
+
+} // namespace gsplat
+```
+
+### include/GaussianData.h
+```
+#pragma once
+
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+namespace gsplat {
+
+struct GaussianData {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> scales;
+    std::vector<glm::quat> rotations;
+    std::vector<glm::u8vec4> colors;
+    
+    // Packed data for GPU
+    std::vector<uint32_t> packedData;
+    std::vector<float> worldPositions;  // Only needed for sorting
+    
+    size_t count() const { return positions.size(); }
+    
+    void pack();
+    void clear();
+};
+
+} // namespace gsplat
+```
+
+### include/OrbitControls.h
+```
+#pragma once
+
+#include "Camera.h"
+
+struct GLFWwindow;
+
+namespace gsplat {
+
+class OrbitControls {
+public:
+    OrbitControls(GLFWwindow* window, Camera* camera);
+    
+    void update(float deltaTime);
+    void reset();
+    
+    void setRotationSpeed(float speed) { rotationSpeed = speed; }
+    void setZoomSpeed(float speed) { zoomSpeed = speed; }
+    void setPanSpeed(float speed) { panSpeed = speed; }
+    
+    void handleMouseButton(int button, int action, int mods);
+    void handleMouseMove(double xpos, double ypos);
+    void handleScroll(double xoffset, double yoffset);
+  
+private:  
+
+    GLFWwindow* window;
+    Camera* camera;
+    
+    double lastX, lastY;
+    bool rotating;
+    bool panning;
+    
+    float distance;
+    float theta, phi;
+    glm::vec3 targetPos;
+    
+    float rotationSpeed;
+    float zoomSpeed;
+    float panSpeed;
+    
+    friend void mouse_button_callback(GLFWwindow* window, int button, int action, int mods);
+    friend void cursor_position_callback(GLFWwindow* window, double xpos, double ypos);
+    friend void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
+};
+
+} // namespace gsplat
+```
+
+### include/PLYLoader.h
+```
+#pragma once
+
+#include <string>
+
+#include "GaussianData.h"
+
+namespace gsplat {
+
+class PLYLoader {
+public:
+    static GaussianData load(const std::string& path);
+};
+
+} // namespace gsplat
+```
+
+### include/Renderer.h
+```
+#pragma once
+
+#include <vector>
+
+#include "glad/glad.h"
+
+#include "Camera.h"
+#include "GaussianData.h"
+
+namespace gsplat {
+
+class Renderer {
+public:
+    Renderer(int width, int height);
+    ~Renderer();
+    
+    void setGaussianData(const GaussianData& data);
+    void render(Camera& camera);
+    void resize(int width, int height);
+    
+    size_t getSplatCount() const { return splatCount; }
+
+private:
+    void initShaders();
+    void initBuffers();
+    void updateTextures();
+    void sortSplats(const glm::mat4& viewProj);
+    
+    GLuint compileShader(GLenum type, const char* source);
+    GLuint createProgram(const char* vertexSource, const char* fragmentSource);
+    
+    int width, height;
+    
+    // Shader program
+    GLuint program;
+    GLint u_projection, u_view, u_focal, u_viewport;
+    GLint u_texture;
+    
+    // Textures
+    GLuint splatTexture;
+    
+    // Buffers
+    GLuint vao;
+    GLuint positionVBO;
+    GLuint indexVBO;
+    // Cached attribute locations
+    GLint a_position = -1;
+    GLint a_index = -1;
+    
+    // Gaussian data
+    GaussianData gaussianData;
+    std::vector<uint32_t> depthIndex;
+    size_t splatCount;
+    
+    // Texture dimensions
+    int textureWidth, textureHeight;
+};
+
+} // namespace gsplat
+```
+
+### include/SplatSort.h
+```
+#pragma once
+
+#include <vector>
+#include <cstdint>
+
+#include "glm/glm.hpp"
+
+namespace gsplat {
+
+class SplatSort {
+public:
+    static void sort(
+        const glm::mat4& viewProj,
+        const float* positions,
+        uint32_t vertexCount,
+        std::vector<uint32_t>& depthIndex
+    );
+};
+
+} // namespace gsplat
+```
+
+### include/Utils.h
+```
+#pragma once
+
+#include <fstream>
+#include <sstream>
+#include <cstdint>
+#include <cstring>
+
+namespace gsplat {
+
+// Read entire file into string
+inline std::string readFile(const std::string& path) {
+    std::ifstream file(path, std::ios::in | std::ios::binary);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + path);
+    }
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    return buffer.str();
+}
+
+// Pack two 16-bit halfs into a 32-bit uint
+inline uint16_t floatToHalf(float value) {
+    // Avoid type-punning UB by using memcpy
+    uint32_t f = 0;
+    std::memcpy(&f, &value, sizeof(uint32_t));
+    uint32_t sign = (f >> 31) & 0x0001;
+    uint32_t exp = (f >> 23) & 0x00ff;
+    uint32_t frac = f & 0x007fffff;
+    
+    uint32_t newExp;
+    if (exp == 0) {
+        newExp = 0;
+    } else if (exp < 113) {
+        newExp = 0;
+        frac |= 0x00800000;
+        frac >>= (113 - exp);
+        if (frac & 0x01000000) {
+            newExp = 1;
+            frac = 0;
+        }
+    } else if (exp < 142) {
+        newExp = exp - 112;
+    } else {
+        newExp = 31;
+        frac = 0;
+    }
+    
+    return (sign << 15) | (newExp << 10) | (frac >> 13);
+}
+
+inline uint32_t packHalf2x16(float x, float y) {
+    uint16_t hx = floatToHalf(x);
+    uint16_t hy = floatToHalf(y);
+    return (uint32_t)hx | ((uint32_t)hy << 16);
+}
+
+// Spherical harmonics constant
+constexpr float SH_C0 = 0.28209479177387814f;
+
+// OpenGL error checking (defined in Renderer.cpp to avoid GL headers here)
+void checkGLError(const char* context);
+
+} // namespace gsplat
+```
+
+### shaders/splat.frag
+```
+#version 420 core
+
+in vec4 vColor;
+in vec2 vPosition;
+
+out vec4 fragColor;
+
+// Function to increase saturation
+vec3 adjustSaturation(vec3 color, float saturation) {
+    const vec3 luminanceWeights = vec3(0.2126, 0.7152, 0.0722);
+    float luminance = dot(color, luminanceWeights);
+    return mix(vec3(luminance), color, saturation);
+}
+
+// White point adjustment (exposure and tone mapping)
+vec3 adjustWhitePoint(vec3 color, float whitePoint) {
+    // Use Reinhard tone mapping variant
+    return color * (1.0 + color / (whitePoint * whitePoint)) / (1.0 + color);
+}
+
+void main() {
+    float A = -dot(vPosition, vPosition);
+    
+    // Stricter clipping for finer edges
+    if (A < -4.0) discard;
+    
+    // Use smoother attenuation curve
+    float gaussian = exp(A);
+    
+    // Add edge smoothing to reduce aliasing
+    float edgeSmoothness = smoothstep(-4.0, -3.5, A);
+    float B = gaussian * vColor.a * edgeSmoothness;
+    
+    vec3 color = B * vColor.rgb;
+    
+    // Adjust saturation (1.0 = original, >1.0 = more saturated, <1.0 = desaturated)
+    color = adjustSaturation(color, 1.2);
+    
+    // Adjust white point (lower value = brighter highlights)
+    color = adjustWhitePoint(color, 0.9);
+    
+    // Slight sharpening effect to enhance details
+    float sharpness = 1.05;
+    color = pow(color, vec3(1.0 / sharpness));
+    
+    fragColor = vec4(color, B);
+}
+```
+
+### shaders/splat.vert
+```
+#version 420 core
+
+uniform usampler2D u_texture;
+uniform mat4 projection;
+uniform mat4 view;
+uniform vec2 focal;
+uniform vec2 viewport;
+
+in vec2 position;
+in uint index;
+
+out vec4 vColor;
+out vec2 vPosition;
+
+void main() {
+    // Fetch gaussian data from texture
+    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
+    
+    // Transform position to camera space
+    vec4 cam = view * vec4(uintBitsToFloat(cen.xyz), 1.0);
+    vec4 pos2d = projection * cam;
+    
+    // Frustum culling
+    float clip = 1.2 * pos2d.w;
+    if (pos2d.z < -pos2d.w || pos2d.z > pos2d.w || 
+        pos2d.x < -clip || pos2d.x > clip || 
+        pos2d.y < -clip || pos2d.y > clip) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
+    
+    // Fetch covariance data
+    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
+    
+    // Unpack half-precision covariance
+    vec2 u1 = unpackHalf2x16(cov.x);
+    vec2 u2 = unpackHalf2x16(cov.y);
+    vec2 u3 = unpackHalf2x16(cov.z);
+    mat3 Vrk = mat3(
+        u1.x, u1.y, u2.x,
+        u1.y, u2.y, u3.x,
+        u2.x, u3.x, u3.y
+    );
+    
+    // Compute 2D covariance
+    mat3 J = mat3(
+        focal.x / cam.z, 0.0, -(focal.x * cam.x) / (cam.z * cam.z),
+        0.0, focal.y / cam.z, -(focal.y * cam.y) / (cam.z * cam.z),
+        0.0, 0.0, 0.0
+    );
+    
+    mat3 T = transpose(mat3(view)) * J;
+    mat3 cov2d = transpose(T) * Vrk * T;
+    
+    // Add low-pass filter (reduce value for finer splats)
+    cov2d[0][0] += 0.1;
+    cov2d[1][1] += 0.1;
+    
+    // Compute eigenvalues for ellipse
+    float mid = (cov2d[0][0] + cov2d[1][1]) / 2.0;
+    float radius = length(vec2((cov2d[0][0] - cov2d[1][1]) / 2.0, cov2d[0][1]));
+    float lambda1 = mid + radius;
+    float lambda2 = mid - radius;
+    
+    if (lambda2 < 0.0) {
+        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+        return;
+    }
+    
+    vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
+    // Reduce scale for finer splat coverage
+    float scale = 2.5;
+    vec2 majorAxis = scale * min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector;
+    vec2 minorAxis = scale * min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x);
+    
+    // Unpack color
+    vec4 color = vec4(
+        float((cov.w) & 0xffu),
+        float((cov.w >> 8) & 0xffu),
+        float((cov.w >> 16) & 0xffu),
+        float((cov.w >> 24) & 0xffu)
+    ) / 255.0;
+    
+    vColor = color;
+    vPosition = position;
+    
+    // Compute final position
+    vec2 vCenter = vec2(pos2d) / pos2d.w;
+    gl_Position = vec4(
+        vCenter + 
+        position.x * majorAxis / viewport + 
+        position.y * minorAxis / viewport,
+        pos2d.z / pos2d.w, 1.0
+    );
+}
+```
+
+### src/Camera.cpp
+```
+#include <glm/gtc/matrix_transform.hpp>
+
+#include "Camera.h"
+
+namespace gsplat {
+
+Camera::Camera(int width, int height, float fov)
+    : position(0.0f, 5.0f, 5.0f)
+    , target(0.0f, 0.0f, 0.0f)
+    , up(0.0f, -1.0f, 0.0f)
+    , width(width)
+    , height(height)
+    , fov(fov)
+    , nearPlane(0.1f)
+    , farPlane(100.0f)
+{
+    setSize(width, height);
+    update();
+}
+
+void Camera::setSize(int w, int h) {
+    width = w;
+    height = h;
+    aspect = static_cast<float>(width) / static_cast<float>(height);
+    
+    // Compute focal lengths from FOV
+    float fovRad = glm::radians(fov);
+    fy = height / (2.0f * std::tan(fovRad / 2.0f));
+    fx = fy; // Assume square pixels
+    
+    projectionMatrix = glm::perspective(fovRad, aspect, nearPlane, farPlane);
+}
+
+void Camera::setFov(float newFov) {
+    fov = newFov;
+    setSize(width, height);
+}
+
+void Camera::setPosition(const glm::vec3& pos) {
+    position = pos;
+}
+
+void Camera::setTarget(const glm::vec3& t) {
+    target = t;
+}
+
+void Camera::setUp(const glm::vec3& u) {
+    up = u;
+}
+
+void Camera::update() {
+    viewMatrix = glm::lookAt(position, target, up);
+    viewProjMatrix = projectionMatrix * viewMatrix;
+}
+
+} // namespace gsplat
+```
+
+### src/GaussianData.cpp
+```
+#include "GaussianData.h"
+
+#include "Utils.h"
+
+namespace gsplat {
+
+void GaussianData::pack() {
+    size_t n = positions.size();
+    
+    // Allocate packed data - 2 uvec4 per gaussian
+    packedData.resize(n * 8); // 8 uint32 per gaussian (2 uvec4)
+    worldPositions.resize(n * 3);
+    
+    for (size_t i = 0; i < n; i++) {
+        const glm::vec3& pos = positions[i];
+        const glm::vec3& scale = scales[i];
+        const glm::quat& rot = rotations[i];
+        const glm::u8vec4& color = colors[i];
+        
+        // First uvec4: position (xyz as floats reinterpreted as uint) + selection flag (w)
+        // Safe bit copy without violating strict aliasing
+        uint32_t ux, uy, uz;
+        std::memcpy(&ux, &pos.x, sizeof(uint32_t));
+        std::memcpy(&uy, &pos.y, sizeof(uint32_t));
+        std::memcpy(&uz, &pos.z, sizeof(uint32_t));
+        packedData[i * 8 + 0] = ux;
+        packedData[i * 8 + 1] = uy;
+        packedData[i * 8 + 2] = uz;
+        packedData[i * 8 + 3] = 0; // selection flag (0 = not selected)
+        
+        worldPositions[i * 3 + 0] = pos.x;
+        worldPositions[i * 3 + 1] = pos.y;
+        worldPositions[i * 3 + 2] = pos.z;
+        
+        // Convert quaternion to matrix for covariance
+        glm::mat3 rotMat = glm::mat3_cast(rot);
+        glm::mat3 scaleMat(0.0f);
+        scaleMat[0][0] = scale.x;
+        scaleMat[1][1] = scale.y;
+        scaleMat[2][2] = scale.z;
+        
+        glm::mat3 M = rotMat * scaleMat;
+        
+        // Compute 3D covariance (symmetric)
+        float sigma[6];
+        sigma[0] = M[0][0] * M[0][0] + M[1][0] * M[1][0] + M[2][0] * M[2][0]; // xx
+        sigma[1] = M[0][0] * M[0][1] + M[1][0] * M[1][1] + M[2][0] * M[2][1]; // xy
+        sigma[2] = M[0][0] * M[0][2] + M[1][0] * M[1][2] + M[2][0] * M[2][2]; // xz
+        sigma[3] = M[0][1] * M[0][1] + M[1][1] * M[1][1] + M[2][1] * M[2][1]; // yy
+        sigma[4] = M[0][1] * M[0][2] + M[1][1] * M[1][2] + M[2][1] * M[2][2]; // yz
+        sigma[5] = M[0][2] * M[0][2] + M[1][2] * M[1][2] + M[2][2] * M[2][2]; // zz
+        
+        // Second uvec4: covariance (xyz as half2) + color (w as packed RGBA)
+        // Pack covariance as half-precision floats: xy, xz|yy, yz|zz
+        packedData[i * 8 + 4] = packHalf2x16(sigma[0], sigma[1]); // xx, xy
+        packedData[i * 8 + 5] = packHalf2x16(sigma[2], sigma[3]); // xz, yy
+        packedData[i * 8 + 6] = packHalf2x16(sigma[4], sigma[5]); // yz, zz
+        
+        // Pack color as RGBA in a single uint32
+        uint32_t packedColor = color.r | (color.g << 8) | (color.b << 16) | (color.a << 24);
+        packedData[i * 8 + 7] = packedColor;
+    }
+}
+
+void GaussianData::clear() {
+    positions.clear();
+    scales.clear();
+    rotations.clear();
+    colors.clear();
+    packedData.clear();
+    worldPositions.clear();
+}
+
+} // namespace gsplat
+```
+
+### src/OrbitControls.cpp
+```
+#include "GLFW/glfw3.h"
+
+#include "OrbitControls.h"
+#include "AppContext.h"
+
+namespace gsplat {
+
+// Global callback wrappers
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    auto ctx = static_cast<AppContext*>(glfwGetWindowUserPointer(window));
+    if (ctx && ctx->controls) ctx->controls->handleMouseButton(button, action, mods);
+}
+
+void cursor_position_callback(GLFWwindow* window, double xpos, double ypos) {
+    auto ctx = static_cast<AppContext*>(glfwGetWindowUserPointer(window));
+    if (ctx && ctx->controls) ctx->controls->handleMouseMove(xpos, ypos);
+}
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    auto ctx = static_cast<AppContext*>(glfwGetWindowUserPointer(window));
+    if (ctx && ctx->controls) ctx->controls->handleScroll(xoffset, yoffset);
+}
+
+OrbitControls::OrbitControls(GLFWwindow* window, Camera* camera)
+    : window(window)
+    , camera(camera)
+    , lastX(0.0)
+    , lastY(0.0)
+    , rotating(false)
+    , panning(false)
+    , distance(5.0f)
+    , theta(0.0f)
+    , phi(M_PI / 4.0f)
+    , targetPos(0.0f, 0.0f, 0.0f)
+    , rotationSpeed(0.005f)
+    , zoomSpeed(0.1f)
+    , panSpeed(0.001f)
+{
+    // Note: glfwSetWindowUserPointer will be set in main.cpp with AppContext
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetCursorPosCallback(window, cursor_position_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+}
+
+void OrbitControls::update([[maybe_unused]] float deltaTime) {
+    // Compute camera position from spherical coordinates
+    float x = distance * std::sin(phi) * std::cos(theta);
+    float y = distance * std::cos(phi);
+    float z = distance * std::sin(phi) * std::sin(theta);
+    
+    camera->setPosition(targetPos + glm::vec3(x, y, z));
+    camera->setTarget(targetPos);
+}
+
+void OrbitControls::reset() {
+    distance = 5.0f;
+    theta = 0.0f;
+    phi = M_PI / 4.0f;
+    targetPos = glm::vec3(0.0f, 0.0f, 0.0f);
+}
+
+void OrbitControls::handleMouseButton(int button, int action, [[maybe_unused]] int mods) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        if (action == GLFW_PRESS) {
+            rotating = true;
+            glfwGetCursorPos(window, &lastX, &lastY);
+        } else if (action == GLFW_RELEASE) {
+            rotating = false;
+        }
+    } else if (button == GLFW_MOUSE_BUTTON_MIDDLE || button == GLFW_MOUSE_BUTTON_RIGHT) {
+        if (action == GLFW_PRESS) {
+            panning = true;
+            glfwGetCursorPos(window, &lastX, &lastY);
+        } else if (action == GLFW_RELEASE) {
+            panning = false;
+        }
+    }
+}
+
+void OrbitControls::handleMouseMove(double xpos, double ypos) {
+    double dx = xpos - lastX;
+    double dy = ypos - lastY;
+    
+    if (rotating) {
+        theta -= dx * rotationSpeed;
+        phi -= dy * rotationSpeed;
+        
+        // Clamp phi to avoid gimbal lock
+        phi = std::max(0.01f, std::min((float)M_PI - 0.01f, phi));
+    } else if (panning) {
+        // Pan in camera space
+        glm::vec3 camPos = camera->getPosition();
+        glm::vec3 forward = glm::normalize(targetPos - camPos);
+        glm::vec3 right = glm::normalize(glm::cross(forward, camera->getUp()));
+        glm::vec3 up = glm::normalize(glm::cross(right, forward));
+        
+        float panX = -dx * panSpeed * distance;
+        float panY = dy * panSpeed * distance;
+        
+        targetPos += right * panX + up * panY;
+    }
+    
+    lastX = xpos;
+    lastY = ypos;
+}
+
+void OrbitControls::handleScroll([[maybe_unused]] double xoffset, double yoffset) {
+    distance -= yoffset * zoomSpeed * distance;
+    distance = std::max(0.1f, std::min(100.0f, distance));
+}
+
+} // namespace gsplat
+```
+
+### src/PLYLoader.cpp
+```
+#include <algorithm>
+
+#include "tinyply.h"
+
+#include "PLYLoader.h"
+#include "Utils.h"
+
+namespace gsplat {
+
+GaussianData PLYLoader::load(const std::string& path) {
+    std::ifstream ss(path, std::ios::binary);
+    if (!ss.is_open()) {
+        throw std::runtime_error("Failed to open PLY file: " + path);
+    }
+    
+    tinyply::PlyFile file;
+    file.parse_header(ss);
+    
+    GaussianData data;
+    
+    // Read vertex properties
+    std::shared_ptr<tinyply::PlyData> vertices_x, vertices_y, vertices_z;
+    std::shared_ptr<tinyply::PlyData> scale_0, scale_1, scale_2;
+    std::shared_ptr<tinyply::PlyData> rot_0, rot_1, rot_2, rot_3;
+    std::shared_ptr<tinyply::PlyData> f_dc_0, f_dc_1, f_dc_2;
+    std::shared_ptr<tinyply::PlyData> opacity;
+    std::shared_ptr<tinyply::PlyData> red, green, blue;
+    
+    try {
+        vertices_x = file.request_properties_from_element("vertex", {"x"});
+        vertices_y = file.request_properties_from_element("vertex", {"y"});
+        vertices_z = file.request_properties_from_element("vertex", {"z"});
+    } catch (const std::exception&) {
+        throw std::runtime_error("PLY file missing position data");
+    }
+    
+    // Try different naming conventions
+    try {
+        scale_0 = file.request_properties_from_element("vertex", {"scale_0"});
+        scale_1 = file.request_properties_from_element("vertex", {"scale_1"});
+        scale_2 = file.request_properties_from_element("vertex", {"scale_2"});
+    } catch (const std::exception&) {
+        try {
+            scale_0 = file.request_properties_from_element("vertex", {"scaling_0"});
+            scale_1 = file.request_properties_from_element("vertex", {"scaling_1"});
+            scale_2 = file.request_properties_from_element("vertex", {"scaling_2"});
+        } catch (const std::exception&) {
+            throw std::runtime_error("PLY file missing scale data");
+        }
+    }
+    
+    try {
+        rot_0 = file.request_properties_from_element("vertex", {"rot_0"});
+        rot_1 = file.request_properties_from_element("vertex", {"rot_1"});
+        rot_2 = file.request_properties_from_element("vertex", {"rot_2"});
+        rot_3 = file.request_properties_from_element("vertex", {"rot_3"});
+    } catch (const std::exception&) {
+        try {
+            rot_0 = file.request_properties_from_element("vertex", {"rotation_0"});
+            rot_1 = file.request_properties_from_element("vertex", {"rotation_1"});
+            rot_2 = file.request_properties_from_element("vertex", {"rotation_2"});
+            rot_3 = file.request_properties_from_element("vertex", {"rotation_3"});
+        } catch (const std::exception&) {
+            throw std::runtime_error("PLY file missing rotation data");
+        }
+    }
+    
+    // Try to read colors
+    bool hasSH = false;
+    bool hasRGB = false;
+    
+    try {
+        f_dc_0 = file.request_properties_from_element("vertex", {"f_dc_0"});
+        f_dc_1 = file.request_properties_from_element("vertex", {"f_dc_1"});
+        f_dc_2 = file.request_properties_from_element("vertex", {"f_dc_2"});
+        hasSH = true;
+    } catch (const std::exception&) {
+        try {
+            red = file.request_properties_from_element("vertex", {"red"});
+            green = file.request_properties_from_element("vertex", {"green"});
+            blue = file.request_properties_from_element("vertex", {"blue"});
+            hasRGB = true;
+        } catch (const std::exception&) {
+            // Default white color
+        }
+    }
+    
+    try {
+        opacity = file.request_properties_from_element("vertex", {"opacity"});
+    } catch (const std::exception&) {
+        // Default full opacity
+    }
+    
+    file.read(ss);
+    
+    size_t vertexCount = vertices_x->count;
+    data.positions.resize(vertexCount);
+    data.scales.resize(vertexCount);
+    data.rotations.resize(vertexCount);
+    data.colors.resize(vertexCount);
+    
+    const float* x_data = reinterpret_cast<const float*>(vertices_x->buffer.get());
+    const float* y_data = reinterpret_cast<const float*>(vertices_y->buffer.get());
+    const float* z_data = reinterpret_cast<const float*>(vertices_z->buffer.get());
+    
+    const float* scale_0_data = reinterpret_cast<const float*>(scale_0->buffer.get());
+    const float* scale_1_data = reinterpret_cast<const float*>(scale_1->buffer.get());
+    const float* scale_2_data = reinterpret_cast<const float*>(scale_2->buffer.get());
+    
+    const float* rot_0_data = reinterpret_cast<const float*>(rot_0->buffer.get());
+    const float* rot_1_data = reinterpret_cast<const float*>(rot_1->buffer.get());
+    const float* rot_2_data = reinterpret_cast<const float*>(rot_2->buffer.get());
+    const float* rot_3_data = reinterpret_cast<const float*>(rot_3->buffer.get());
+    
+    const float* f_dc_0_data = hasSH ? reinterpret_cast<const float*>(f_dc_0->buffer.get()) : nullptr;
+    const float* f_dc_1_data = hasSH ? reinterpret_cast<const float*>(f_dc_1->buffer.get()) : nullptr;
+    const float* f_dc_2_data = hasSH ? reinterpret_cast<const float*>(f_dc_2->buffer.get()) : nullptr;
+    
+    const int* red_data = hasRGB ? reinterpret_cast<const int*>(red->buffer.get()) : nullptr;
+    const int* green_data = hasRGB ? reinterpret_cast<const int*>(green->buffer.get()) : nullptr;
+    const int* blue_data = hasRGB ? reinterpret_cast<const int*>(blue->buffer.get()) : nullptr;
+    
+    const float* opacity_data = opacity ? reinterpret_cast<const float*>(opacity->buffer.get()) : nullptr;
+    
+    for (size_t i = 0; i < vertexCount; i++) {
+        // Position
+        data.positions[i] = glm::vec3(x_data[i], y_data[i], z_data[i]);
+        
+        // Scale (exponential)
+        data.scales[i] = glm::vec3(
+            std::exp(scale_0_data[i]),
+            std::exp(scale_1_data[i]),
+            std::exp(scale_2_data[i])
+        );
+        
+        // Rotation (quaternion - note: different convention)
+        glm::quat q(rot_0_data[i], rot_1_data[i], rot_2_data[i], rot_3_data[i]);
+        data.rotations[i] = glm::normalize(q);
+        
+        // Color
+        uint8_t r, g, b, a;
+        
+        if (hasSH) {
+            // Spherical harmonics to RGB
+            r = static_cast<uint8_t>(std::clamp((0.5f + SH_C0 * f_dc_0_data[i]) * 255.0f, 0.0f, 255.0f));
+            g = static_cast<uint8_t>(std::clamp((0.5f + SH_C0 * f_dc_1_data[i]) * 255.0f, 0.0f, 255.0f));
+            b = static_cast<uint8_t>(std::clamp((0.5f + SH_C0 * f_dc_2_data[i]) * 255.0f, 0.0f, 255.0f));
+        } else if (hasRGB) {
+            r = static_cast<uint8_t>(std::clamp(red_data[i], 0, 255));
+            g = static_cast<uint8_t>(std::clamp(green_data[i], 0, 255));
+            b = static_cast<uint8_t>(std::clamp(blue_data[i], 0, 255));
+        } else {
+            r = g = b = 255;
+        }
+        
+        // Opacity (sigmoid)
+        if (opacity_data) {
+            float op = 1.0f / (1.0f + std::exp(-opacity_data[i]));
+            a = static_cast<uint8_t>(std::clamp(op * 255.0f, 0.0f, 255.0f));
+        } else {
+            a = 255;
+        }
+        
+        data.colors[i] = glm::u8vec4(r, g, b, a);
+    }
+    
+    // Pack data for GPU
+    data.pack();
+    
+    return data;
+}
+
+} // namespace gsplat
+```
+
+### src/Renderer.cpp
+```
+#include <iostream>
+
+#include "glm/gtc/type_ptr.hpp"
+
+#include "Renderer.h"
+#include "Utils.h"
+#include "SplatSort.h"
+
+namespace gsplat {
+
+Renderer::Renderer(int width, int height)
+    : width(width)
+    , height(height)
+    , program(0)
+    , splatTexture(0)
+    , vao(0)
+    , positionVBO(0)
+    , indexVBO(0)
+    , splatCount(0)
+    , textureWidth(0)
+    , textureHeight(0)
+{
+    initShaders();
+    initBuffers();
+}
+
+Renderer::~Renderer() {
+    glDeleteProgram(program);
+    glDeleteTextures(1, &splatTexture);
+    glDeleteBuffers(1, &positionVBO);
+    glDeleteBuffers(1, &indexVBO);
+    glDeleteVertexArrays(1, &vao);
+}
+
+// Define GL error check here to keep Utils.h light
+void checkGLError(const char* context) {
+    GLenum err;
+    while ((err = glGetError()) != GL_NO_ERROR) {
+        std::cerr << "OpenGL error in " << context << ": 0x" << std::hex << err << std::dec << std::endl;
+    }
+}
+
+GLuint Renderer::compileShader(GLenum type, const char* source) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    
+    GLint success;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetShaderInfoLog(shader, 512, nullptr, infoLog);
+        std::cerr << "Shader compilation failed:\n" << infoLog << std::endl;
+        glDeleteShader(shader);
+        return 0;
+    }
+    
+    return shader;
+}
+
+GLuint Renderer::createProgram(const char* vertexSource, const char* fragmentSource) {
+    GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertexSource);
+    GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragmentSource);
+    
+    if (vertexShader == 0 || fragmentShader == 0) {
+        return 0;
+    }
+    
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vertexShader);
+    glAttachShader(prog, fragmentShader);
+    glLinkProgram(prog);
+    
+    GLint success;
+    glGetProgramiv(prog, GL_LINK_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(prog, 512, nullptr, infoLog);
+        std::cerr << "Program linking failed:\n" << infoLog << std::endl;
+        glDeleteProgram(prog);
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+        return 0;
+    }
+    
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+    
+    return prog;
+}
+
+void Renderer::initShaders() {
+    std::string vertexSource = readFile("shaders/splat.vert");
+    std::string fragmentSource = readFile("shaders/splat.frag");
+    
+    program = createProgram(vertexSource.c_str(), fragmentSource.c_str());
+    if (program == 0) {
+        throw std::runtime_error("Failed to create shader program");
+    }
+    
+    // Get uniform locations
+    u_projection = glGetUniformLocation(program, "projection");
+    u_view = glGetUniformLocation(program, "view");
+    u_focal = glGetUniformLocation(program, "focal");
+    u_viewport = glGetUniformLocation(program, "viewport");
+    u_texture = glGetUniformLocation(program, "u_texture");
+}
+
+void Renderer::initBuffers() {
+    // Create VAO
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    
+    // Quad positions for point sprite
+    float quadVertices[] = {
+        -2.0f, -2.0f,
+         2.0f, -2.0f,
+         2.0f,  2.0f,
+        -2.0f,  2.0f
+    };
+    
+    glGenBuffers(1, &positionVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, positionVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+    
+    a_position = glGetAttribLocation(program, "position");
+    glEnableVertexAttribArray(a_position);
+    glVertexAttribPointer(a_position, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    
+    // Index buffer (per-instance)
+    glGenBuffers(1, &indexVBO);
+    
+    glBindVertexArray(0);
+    
+    // Create textures
+    glGenTextures(1, &splatTexture);
+}
+
+void Renderer::setGaussianData(const GaussianData& data) {
+    gaussianData = data;
+    splatCount = data.count();
+    
+    // Compute texture dimensions
+    // Texture layout: each gaussian takes 2 columns (2 uvec4)
+    // x coordinate: (index & 0x3ff) << 1 means 1024 gaussians per row
+    // y coordinate: index >> 10
+    textureWidth = 2048;  // 1024 * 2 columns
+    textureHeight = std::max(1, (int)std::ceil(splatCount / 1024.0f));
+    
+    updateTextures();
+}
+
+void Renderer::updateTextures() {
+    if (splatCount == 0) return;
+    
+    glUseProgram(program);
+    
+    // Reorganize packed data into 2D texture layout
+    // Each gaussian occupies 2 horizontal pixels (columns)
+    std::vector<uint32_t> textureData(textureWidth * textureHeight * 4);
+    for (size_t i = 0; i < splatCount; i++) {
+        int row = i / 1024;
+        int col = (i % 1024) * 2;  // Each gaussian takes 2 columns
+        
+        // First uvec4 (position + selection)
+        int idx1 = (row * textureWidth + col) * 4;
+        textureData[idx1 + 0] = gaussianData.packedData[i * 8 + 0];
+        textureData[idx1 + 1] = gaussianData.packedData[i * 8 + 1];
+        textureData[idx1 + 2] = gaussianData.packedData[i * 8 + 2];
+        textureData[idx1 + 3] = gaussianData.packedData[i * 8 + 3];
+        
+        // Second uvec4 (covariance + color)
+        int idx2 = (row * textureWidth + col + 1) * 4;
+        textureData[idx2 + 0] = gaussianData.packedData[i * 8 + 4];
+        textureData[idx2 + 1] = gaussianData.packedData[i * 8 + 5];
+        textureData[idx2 + 2] = gaussianData.packedData[i * 8 + 6];
+        textureData[idx2 + 3] = gaussianData.packedData[i * 8 + 7];
+    }
+    
+    // Upload splat data texture
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, splatTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32UI, textureWidth, textureHeight, 0,
+                 GL_RGBA_INTEGER, GL_UNSIGNED_INT, textureData.data());
+    glUniform1i(u_texture, 0);
+    checkGLError("Upload splat texture");
+}
+
+void Renderer::sortSplats(const glm::mat4& viewProj) {
+    if (splatCount == 0) return;
+    
+    SplatSort::sort(viewProj, gaussianData.worldPositions.data(), splatCount, depthIndex);
+}
+
+void Renderer::render(Camera& camera) {
+    if (splatCount == 0) {
+        std::cerr << "Warning: splatCount is 0" << std::endl;
+        return;
+    }
+    
+    camera.update();
+    
+    // Sort splats
+    sortSplats(camera.getViewProjMatrix());
+    
+    // Upload sorted indices
+    glBindBuffer(GL_ARRAY_BUFFER, indexVBO);
+    glBufferData(GL_ARRAY_BUFFER, depthIndex.size() * sizeof(uint32_t), 
+                 depthIndex.data(), GL_STREAM_DRAW);
+    checkGLError("Upload indices");
+    
+    // Setup OpenGL state
+    glViewport(0, 0, width, height);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);  // Zero alpha so front-to-back blending accumulates correctly
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_ONE_MINUS_DST_ALPHA, GL_ONE, GL_ONE_MINUS_DST_ALPHA, GL_ONE);
+    glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+    checkGLError("Setup blend state");
+    checkGLError("Setup GL state");
+    
+    glUseProgram(program);
+    glBindVertexArray(vao);
+    
+    // Set uniforms
+    glUniformMatrix4fv(u_projection, 1, GL_FALSE, glm::value_ptr(camera.getProjectionMatrix()));
+    glUniformMatrix4fv(u_view, 1, GL_FALSE, glm::value_ptr(camera.getViewMatrix()));
+    glUniform2f(u_focal, camera.getFx(), camera.getFy());
+    glUniform2f(u_viewport, static_cast<float>(width), static_cast<float>(height));
+    checkGLError("Set uniforms");
+    
+    // Setup vertex attributes
+    glBindBuffer(GL_ARRAY_BUFFER, positionVBO);
+    glEnableVertexAttribArray(a_position);
+    glVertexAttribPointer(a_position, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    
+    glBindBuffer(GL_ARRAY_BUFFER, indexVBO);
+    if (a_index == -1) {
+        a_index = glGetAttribLocation(program, "index");
+    }
+    glEnableVertexAttribArray(a_index);
+    glVertexAttribIPointer(a_index, 1, GL_UNSIGNED_INT, 0, 0);
+    glVertexAttribDivisor(a_index, 1);
+    checkGLError("Setup vertex attributes");
+    
+    // Draw
+    glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, splatCount);
+    checkGLError("Draw");
+    
+    glBindVertexArray(0);
+}
+
+void Renderer::resize(int w, int h) {
+    width = w;
+    height = h;
+}
+
+} // namespace gsplat
+```
+
+### src/SplatSort.cpp
+```
+#include <algorithm>
+#include <vector>
+
+#include "SplatSort.h"
+
+namespace gsplat {
+
+void SplatSort::sort(
+    const glm::mat4& viewProj,
+    const float* positions,
+    uint32_t vertexCount,
+    std::vector<uint32_t>& depthIndex
+) {
+    // Compute depths
+    std::vector<std::pair<float, uint32_t>> depths(vertexCount);
+    
+    for (uint32_t i = 0; i < vertexCount; i++) {
+        glm::vec3 pos(
+            positions[i * 3 + 0],
+            positions[i * 3 + 1],
+            positions[i * 3 + 2]
+        );
+        
+        glm::vec4 projected = viewProj * glm::vec4(pos, 1.0f);
+        float depth = projected.z / projected.w;
+        
+        depths[i] = {depth, i};
+    }
+    
+    // Sort by depth (front to back for weighted blended transparency)
+    std::sort(depths.begin(), depths.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+    
+    // Extract sorted indices
+    depthIndex.resize(vertexCount);
+    for (uint32_t i = 0; i < vertexCount; i++) {
+        depthIndex[i] = depths[i].second;
+    }
+}
+
+} // namespace gsplat
+```
+
+### src/main.cpp
+```
+#include <iostream>
+#include <chrono>
+
+#include "glad/glad.h"
+#include "GLFW/glfw3.h"
+
+#include "Renderer.h"
+#include "Camera.h"
+#include "PLYLoader.h"
+#include "OrbitControls.h"
+#include "AppContext.h"
+
+using namespace gsplat;
+
+void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
+    auto ctx = static_cast<AppContext*>(glfwGetWindowUserPointer(window));
+    if (ctx && ctx->renderer) {
+        ctx->renderer->resize(width, height);
+    }
+}
+
+void printUsage(const char* prog) {
+    std::cout << "Usage: " << prog << " <ply_file>\n";
+    std::cout << "\nControls:\n";
+    std::cout << "  Left Mouse:   Rotate camera\n";
+    std::cout << "  Middle/Right: Pan camera\n";
+    std::cout << "  Scroll:       Zoom in/out\n";
+    std::cout << "  ESC:          Quit\n";
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        printUsage(argv[0]);
+        return 1;
+    }
+    
+    std::string plyPath = argv[1];
+    
+    // Initialize GLFW
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW" << std::endl;
+        return -1;
+    }
+    
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#endif
+    
+    // Create window
+    int width = 1280;
+    int height = 720;
+    GLFWwindow* window = glfwCreateWindow(width, height, "Gaussian Splat Viewer", nullptr, nullptr);
+    if (!window) {
+        std::cerr << "Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return -1;
+    }
+    
+    glfwMakeContextCurrent(window);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+    
+    // Load OpenGL functions
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cerr << "Failed to initialize GLAD" << std::endl;
+        return -1;
+    }
+    
+    std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
+    std::cout << "GLSL Version: " << glGetString(GL_SHADING_LANGUAGE_VERSION) << std::endl;
+    
+    try {
+        // Load PLY file
+        std::cout << "Loading " << plyPath << "..." << std::endl;
+        auto startLoad = std::chrono::high_resolution_clock::now();
+        
+        GaussianData data = PLYLoader::load(plyPath);
+        
+        auto endLoad = std::chrono::high_resolution_clock::now();
+        auto loadTime = std::chrono::duration_cast<std::chrono::milliseconds>(endLoad - startLoad).count();
+        
+        std::cout << "Loaded " << data.count() << " Gaussians in " << loadTime << "ms" << std::endl;
+        
+        // Calculate bounding box for camera positioning
+        glm::vec3 minPos(FLT_MAX), maxPos(-FLT_MAX);
+        for (auto position: data.positions) {
+            minPos = glm::min(minPos, position);
+            maxPos = glm::max(maxPos, position);
+        }
+        glm::vec3 center = (minPos + maxPos) * 0.5f;
+        glm::vec3 size = maxPos - minPos;
+        float maxDim = std::max(std::max(size.x, size.y), size.z);
+        float distance = std::max(maxDim * 2.0f, 1.0f);
+
+        Renderer renderer(width, height);
+        renderer.setGaussianData(data);
+
+        Camera camera(width, height, 45.0f);
+        camera.setPosition(center + glm::vec3(0.0f, 0.0f, distance));
+        camera.setTarget(center);
+        
+        // Create controls
+        OrbitControls controls(window, &camera);
+        
+        // Setup context for callbacks
+        AppContext ctx;
+        ctx.renderer = &renderer;
+        ctx.controls = &controls;
+        glfwSetWindowUserPointer(window, &ctx);
+        
+        std::cout << "\nRendering started. Press ESC to quit.\n" << std::endl;
+        
+        // Render loop
+        auto lastFrame = std::chrono::high_resolution_clock::now();
+        int frameCount = 0;
+        double fpsTimer = 0.0;
+        
+        while (!glfwWindowShouldClose(window)) {
+            auto currentFrame = std::chrono::high_resolution_clock::now();
+            float deltaTime = std::chrono::duration<float>(currentFrame - lastFrame).count();
+            lastFrame = currentFrame;
+            
+            // Update FPS counter
+            frameCount++;
+            fpsTimer += deltaTime;
+            if (fpsTimer >= 1.0) {
+                std::string title = "Gaussian Splat Viewer - " + std::to_string(frameCount) + " FPS - " +
+                                    std::to_string(data.count()) + " Gaussians";
+                glfwSetWindowTitle(window, title.c_str());
+                frameCount = 0;
+                fpsTimer = 0.0;
+            }
+            
+            // Handle input
+            if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+                glfwSetWindowShouldClose(window, true);
+            }
+            
+            // Update controls and camera
+            controls.update(deltaTime);
+            
+            // Render
+            renderer.render(camera);
+            
+            // Swap buffers and poll events
+            glfwSwapBuffers(window);
+            glfwPollEvents();
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        glfwTerminate();
+        return -1;
+    }
+    
+    glfwTerminate();
+    return 0;
+}
+```

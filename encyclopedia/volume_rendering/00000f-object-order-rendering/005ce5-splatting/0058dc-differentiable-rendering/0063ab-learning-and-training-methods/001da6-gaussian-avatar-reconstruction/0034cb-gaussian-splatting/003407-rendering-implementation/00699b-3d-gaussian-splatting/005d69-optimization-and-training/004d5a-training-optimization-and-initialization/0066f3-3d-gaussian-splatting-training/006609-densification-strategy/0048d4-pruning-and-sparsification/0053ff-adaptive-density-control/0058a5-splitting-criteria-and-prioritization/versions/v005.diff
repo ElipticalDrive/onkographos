@@ -1,0 +1,184 @@
+--- v004.md
++++ v005.md
+@@ -1,168 +1,31 @@
+ # Splitting Criteria and Prioritization
+ 
+-Also called: Average Contribution Criterion, Occlusion-Aware Densification Criterion
++Also called: Densification scoring, Gradient-based splitting metrics
+ 
+ ## Overview
+-This method defines the metric used to decide whether a 3D Gaussian primitive should be split or cloned during the training of 3D Gaussian Splatting. It solves the problem where standard densification criteria (like the original 3DGS positional gradient average) treat all observed views equally, causing occluded or faintly visible Gaussians to receive artificially low gradient scores and thus failing to densify in complex, partially occluded regions [S1, unofficial]. It sets itself apart from its siblings, such as [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md) (which fixes vector addition errors in multi-view space) and [Complexity-Aware Adaptive Density Control](16126-complexity-aware-adaptive-density-control.md) (which uses image complexity), by weighting views based on their actual blending contribution rather than binary visibility or vector norms [S1, unofficial].
++Splitting Criteria and Prioritization determines which 3D Gaussians should be subdivided (split or cloned) during the training of Gaussian Splatting models to adapt their density to scene complexity. It solves the problem of static primitive distribution by dynamically adding primitives in high-error regions while removing redundant ones. It differs from its siblings by offering specific mathematical formulations for computing the "importance" or "error" score of a Gaussian, such as using squared gradient norms for multi-view consistency, complexity-aware sampling for LoD, or average contribution for occlusion handling.
+ 
+-## How it works
+-The method computes a densification score $\gamma_i$ for each Gaussian $i$ based on the magnitude of its positional gradients, normalized by its average blending weight across views. This ensures that Gaussians contributing significantly to the image (high blending weight) are prioritized for densification, while those that are occluded or faint are not penalized by a denominator that assumes full visibility.
+-
+-**Inputs:**
+-- Set of Gaussians $\{G_i\}$.
+-- Training views $v \in \{1, \dots, M\}$.
+-- For each Gaussian $i$ and view $v$:
+-  - Set of pixels $P_{i,v}$ where Gaussian $i$ contributes (blending weight $w_{i,p} > 0$).
+-  - Per-pixel blending weight $w_{i,p} = \alpha_{i,p} T_{i,p}$, where $\alpha_{i,p}$ is opacity and $T_{i,p}$ is accumulated transmittance.
+-  - Per-pixel gradient factor $s_{i,p}$, a vector combining photometric residual, geometric steering, and local contrast.
+-
+-**Outputs:**
+-- Densification score $\gamma_i$ for each Gaussian.
+-- Boolean decision: Split/Clone if $\gamma_i > \tau$.
+-
+-**Data Structures:**
+-- `gradient_magnitude[v]`: Float, magnitude of the accumulated gradient vector for view $v$.
+-- `mean_blending_weight[v]`: Float, average blending weight for view $v$.
+-- `total_mean_blending_weight`: Float, sum of `mean_blending_weight` across all views.
+-
+-**Parameters:**
+-- Densification threshold $\tau = 0.002$. Calibrated on the Mip-NeRF360 sweep subset (bicycle, bonsai, counter, garden) and fixed for all experiments [S1, unofficial].
+-- Denominator floor constant $C = 1$. Ensures scores increase smoothly for rarely observed Gaussians and prevents division by zero or unbounded scores [S1, unofficial].
+-
+-**Steps:**
+-1. For each Gaussian $i$ and each view $v$ where it contributes to at least one pixel:
+-   a. Compute the per-view gradient vector $g_{i,v}$ by summing the weight-independent vectors $s_{i,p}$ scaled by blending weights:
+-      $$g_{i,v} = \sum_{p \in P_{i,v}} w_{i,p} s_{i,p}$$
+-   b. Compute the mean blending weight $\bar{w}_{i,v}$ for view $v$:
+-      $$\bar{w}_{i,v} = \frac{1}{|P_{i,v}|} \sum_{p \in P_{i,v}} w_{i,p}$$
+-   c. Compute the gradient magnitude $\|g_{i,v}\|$.
+-
+-2. Sum the gradient magnitudes across all observed views:
+-   $$\Sigma_g = \sum_{v} \|g_{i,v}\|$$
+-
+-3. Sum the mean blending weights across all observed views:
+-   $$\Sigma_w = \sum_{v} \bar{w}_{i,v}$$
+-
+-4. Compute the final densification score $\gamma_i^{\text{Ours}}$:
+-   $$\gamma_i^{\text{Ours}} = \frac{\Sigma_g}{1 + \Sigma_w}$$
+-
+-5. If $\gamma_i^{\text{Ours}} > \tau$, mark Gaussian $i$ for densification (split or clone).
+-
+-**Pseudocode:**
+-```python
+-def compute_densification_score(gaussian, views):
+-    """
+-    Computes the average contribution criterion score for a Gaussian.
+-    
+-    Args:
+-        gaussian: Object containing properties of the 3D Gaussian.
+-        views: List of view indices where the Gaussian is visible (contributes to at least one pixel).
+-        
+-    Returns:
+-        float: The densification score gamma_i.
+-    """
+-    sum_gradient_magnitudes = 0.0
+-    sum_mean_blending_weights = 0.0
+-    
+-    for v in views:
+-        # Retrieve pixels where this Gaussian contributes
+-        pixels = gaussian.get_contributing_pixels(v)
+-        
+-        if not pixels:
+-            continue
+-            
+-        # Step 1a: Compute per-view gradient vector g_{i,v}
+-        # s_{i,p} is assumed to be pre-computed or available as gradient_factor
+-        # w_{i,p} is blending weight alpha * T
+-        gradient_vector = Vector2(0.0, 0.0)
+-        sum_blending_weights = 0.0
+-        
+-        for p in pixels:
+-            w_ip = p.blending_weight # alpha * T
+-            s_ip = p.gradient_factor # Weight-independent vector (residual, steering, contrast)
+-            
+-            gradient_vector += w_ip * s_ip
+-            sum_blending_weights += w_ip
+-            
+-        # Step 1b: Compute mean blending weight w_bar_{i,v}
+-        n_pixels = len(pixels)
+-        mean_blending_weight = sum_blending_weights / n_pixels
+-        
+-        # Step 1c: Compute gradient magnitude ||g_{i,v}||
+-        gradient_magnitude = gradient_vector.magnitude()
+-        
+-        # Accumulate sums
+-        sum_gradient_magnitudes += gradient_magnitude
+-        sum_mean_blending_weights += mean_blending_weight
+-        
+-    # Step 4: Compute final score with denominator floor of 1
+-    # gamma_i = sum(||g||) / (1 + sum(w_bar))
+-    score = sum_gradient_magnitudes / (1.0 + sum_mean_blending_weights)
+-    
+-    return score
+-
+-def densify_gaussians(gaussians, threshold=0.002):
+-    """
+-    Identifies Gaussians to split or clone based on the average contribution criterion.
+-    
+-    Args:
+-        gaussians: List of Gaussian objects.
+-        threshold: Float, densification threshold (default 0.002).
+-        
+-    Returns:
+-        List of Gaussian objects marked for densification.
+-    """
+-    to_densify = []
+-    
+-    for g in gaussians:
+-        # Determine which views the Gaussian contributes to
+-        # This is typically tracked during rasterization
+-        observed_views = g.get_observed_views()
+-        
+-        if not observed_views:
+-            continue
+-            
+-        score = compute_densification_score(g, observed_views)
+-        
+-        if score > threshold:
+-            to_densify.append(g)
+-            
+-    return to_densify
+-```
+-
+-**Edge Cases and Pitfalls:**
+-- **Denominator Floor:** Without the constant $1$ in the denominator, Gaussians with very low total blending weight (rarely observed) would receive unbounded scores, leading to training divergence [S1, unofficial].
+-- **Over-densification:** Using a lower threshold (e.g., 0.001) leads to excessive Gaussian counts (e.g., 4.90M) and lower PSNR. Using a higher threshold (e.g., 0.004) leads to under-densification and higher LPIPS [S1, unofficial].
+-- **Comparison with PixelGS:** Unlike PixelGS, which uses a visible-pixel count that entangles view visibility with screen-space footprint and over-densifies near-camera Gaussians, this method uses mean blending weight, which is independent of coverage and avoids distance scaling dependencies [S1, unofficial].
+-- **Occlusion Awareness:** The criterion is inherently occlusion-aware because the blending weight $w_{i,p}$ includes transmittance $T_{i,p}$. A fully occluded view contributes zero to the gradient sum and zero to the mean blending weight, effectively dropping out of the normalization without requiring an explicit visibility test [S1, unofficial].
++## Shared principles
++The core mechanism involves computing a scalar score $S(G)$ for each Gaussian $G$ based on training gradients, opacity, or reconstruction error. This score is compared against a threshold $\tau$. If $S(G) > \tau$, the Gaussian is marked for densification. The specific definition of $S(G)$ varies by child method. Common inputs include the loss gradient $\nabla L$, the Gaussian's opacity $\alpha$, and its screen-space footprint. The decision is typically made periodically during training steps.
+ 
+ ## Subtopics
+ 
+ ### [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md)
+-The Multi-View Density Control Criterion is a densification strategy for 3D Gaussian Splatting designed to resolve invalid vector arithmetic that occurs when applying standard Adaptive Density Control (ADC) to multi-view training. Standard ADC sums 2D positional gradients from pixels covering a Gaussian; however, in multi-view training, a single Gaussian is projected onto multiple image planes, and adding 2D vectors from different coordinate spaces is mathematically invalid and can result in nullified gradients. This criterion replaces vector addition with the summation of squared norms, providing a space-independent error metric that correctly identifies Gaussians requiring densification across multiple views. It yields higher reconstruction quality with fewer primitives compared to the standard positional-gradient rule.
++A densification strategy for multi-view training that replaces the summation of 2D positional gradient vectors with a sum of squared norms. It resolves invalid vector arithmetic across different image planes by ensuring error metrics remain valid. It yields higher reconstruction quality with fewer primitives compared to standard positional-gradient rules.
+ 
+ ### [Complexity-Aware Adaptive Density Control](16126-complexity-aware-adaptive-density-control.md)
+-Complexity-Aware Adaptive Density Control is a training optimization strategy for 3D Gaussian Splatting that replaces opacity-only metrics with a composite score incorporating local image complexity to guide Gaussian splitting, relocation, and pruning. It solves the problem where standard opacity-based methods concentrate primitives in already-resolved regions while neglecting complex, unresolved areas, and where uniform pruning degrades simple regions as severely as complex ones. It sets itself apart from siblings like [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md) by explicitly modeling spatial complexity as a surrogate for reconstruction error to bias the exponential growth of particle counts and to weight the spatial footprint of primitives during level-of-detail (LoD) transitions.
++Replaces opacity-only heuristics with a composite importance score incorporating image complexity, opacity, and scale. It solves inefficient primitive distribution by biasing densification toward high-complexity regions. It differs from standard 3DGS by using a complexity field as a surrogate for reconstruction error and from siblings by explicitly modeling the exponential relationship between particle count and visual complexity.
++
++### [Average Contribution Criterion](16892-average-contribution-criterion.md)
++Determines split/clone decisions based on the mean blending weight per view rather than a binary view count. It solves occlusion bias where fully occluded views inflate the denominator and dilute the gradient signal. It intrinsically weights views by their actual contribution, preventing occluded views from biasing the average downward.
+ 
+ ### Distortion-based Gaussian Splitting Prioritization
+-A criterion for prioritizing which Gaussians to split, based on rate-distortion optimization to maximize PSNR gain. It associates a reconstruction Squared Error $SE_{c,i}$ to each Gaussian defined as $SE_{c,i} = \sum_{p \in I_c} w_i^{(c)} (R^{(c)}(p) - I^{(c)}(p))^2$, where $I^{(c)}$ is the ground-truth image from camera $c$, $R^{(c)}(p)$ is the rendered color, and $w_i^{(c)}$ is the blending weight. Gaussians to be split are those that will induce the highest gain in the PSNR quality metric [S2].
+-
+-## Operating characteristics
+-- **Time Complexity:** The criterion requires iterating over all pixels contributing to each Gaussian for each view. This is comparable to the original 3DGS gradient accumulation but adds the computation of mean blending weights. The normalization step is $O(V)$ where $V$ is the number of views.
+-- **Memory Complexity:** No additional large data structures are required beyond storing the per-view gradient magnitudes and mean blending weights during the densification step.
+-- **Measured Performance:**
+-  - On Zip-NeRF scenes (30k iterations): 25.81 PSNR, 0.830 SSIM, 0.330 LPIPS, 0.106 GMSD, using 1.133 million Gaussians in 29.9 minutes [S1, unofficial].
+-  - On Zip-NeRF scenes (210k iterations): 26.60 PSNR, 0.852 SSIM, 0.282 LPIPS, 0.087 GMSD, using 2.495 million Gaussians in 262.9 minutes [S1, unofficial].
+-  - On Zip-NeRF scenes (300k iterations): Gaussian count stays bounded at 2.75M while continuing to improve in LPIPS and GMSD [S1, unofficial].
+-  - On Deep Blending dataset (Reset variant): 29.90 PSNR, 0.902 SSIM, 0.231 LPIPS using 1.656M Gaussians [S1, unofficial].
+-  - On Deep Blending dataset (Decay variant): 30.03 PSNR, 0.905 SSIM, 0.234 LPIPS using 0.894M Gaussians [S1, unofficial].
+-- **Scaling:** The method is intrinsically self-limiting and does not require external guard rails like distance scaling. It remains stable even on large scenes (Zip-NeRF) where other criteria (like raw PixelGS) diverge or crash due to exceeding the trainable Gaussian count limit (~16.8M) [S1, unofficial].
+-- **Strengths:** Produces the fewest Gaussians (roughly 55–75% of other criteria's counts) at matched quality. It is occlusion-aware without explicit visibility tests. It avoids the entanglement of view visibility and screen-space footprint.
+-- **Limitations:** Requires a one-time recalibration of the densification threshold (0.002) due to the new scale of the criterion. It may under-densify in regions with very low blending weights if the threshold is not carefully chosen [S1, unofficial].
++A criterion for prioritizing which Gaussians to split, based on rate-distortion optimization to maximize PSNR gain [S1]. It associates a reconstruction Squared Error $SE_{c,i}$ to each Gaussian $i$ in camera view $c$, defined as:
++$$SE_{c,i} = \sum_{p \in I_c} w_i^{(c)} (R^{(c)}(p) - I^{(c)}(p))^2$$
++where $I^{(c)}$ is the ground-truth image, $R^{(c)}(p)$ is the rendered pixel value, and $w_i^{(c)}$ is the blending weight [S1]. This formulation spreads the error metric across Gaussians, allowing the selection of Gaussians that will induce the highest gain in PSNR quality when split [S1].
+ 
+ ## Background
+-The method was introduced in "Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting" [S1, unofficial]. It addresses limitations in the original 3DGS densification strategy, which averages positional gradients across views without accounting for the fact that occluded or faintly visible views contribute less information. The authors observed that the original criterion's denominator (view count) weights all views equally, biasing the average downward for partially occluded Gaussians. By replacing the view count with the sum of mean blending weights, the criterion provides a more faithful measure of observation. The method has been shown to improve compactness and stability, particularly on large, occlusion-heavy scenes like Zip-NeRF [S1, unofficial].
++The concept of adaptive density control in Gaussian Splatting was introduced in the original 3D Gaussian Splatting paper [G]. The specific splitting criteria discussed here, such as the Multi-View Density Control Criterion and Average Contribution Criterion, are refinements proposed in subsequent research to address limitations in multi-view consistency and occlusion handling. The distortion-based prioritization is described in BOGausS [S1].
+ 
+ ## Sources
+-[S1] Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting, https://arxiv.org/abs/2610.27108, fetched 2026-10-26 (unofficial)
+-[S2] BOGausS: Better Optimized Gaussian Splatting, https://doi.org/10.23919/eusipco63237.2025.11226626, fetched 2026-10-26+[S1] BOGausS: Better Optimized Gaussian Splatting, https://doi.org/10.23919/eusipco63237.2025.11226626, fetched 2026-10-26

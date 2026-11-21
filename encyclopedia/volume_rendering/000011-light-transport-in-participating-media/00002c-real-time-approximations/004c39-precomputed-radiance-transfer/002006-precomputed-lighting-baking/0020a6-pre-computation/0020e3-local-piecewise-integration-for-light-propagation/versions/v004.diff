@@ -1,0 +1,352 @@
+--- v003.md
++++ v004.md
+@@ -1,192 +1,135 @@
+ # Local Piecewise Integration for Light Propagation
+ 
+-Also called: Local Piecewise Integration
++Also called: Convection-Diffusion Volume Lighting, Grid-based Volume Illumination, Grid-based illumination method, Light Volume Method, Light propagation method, Local Piecewise Integration, Upwind scheme illumination
+ 
+ ## Overview
+-Local Piecewise Integration is a precomputation technique for real-time volume rendering that approximates global light transport by dividing light paths into discrete segments. It solves the problem of expensive volumetric illumination by storing transmittance data in a multiresolution 3D texture, allowing incoming radiance to be computed via a single texture lookup per sample. It is distinguished from full path-tracing methods by its reliance on precomputed segment data and from simple direct illumination by its inclusion of first-order inscattering approximations [S1].
++Local Piecewise Integration for Light Propagation is a precomputation technique that approximates global light transport in participating media by decomposing the radiative transfer equation into convection (absorption) and diffusion (scattering) steps solved on a regular grid [S1, S2]. It solves the problem of expensive volumetric illumination by computing high-resolution local shadows via piecewise opacity segments and propagating light energy through the volume using a convection-diffusion solver, allowing real-time rendering via single texture lookups [S2]. It is distinguished from full path-tracing methods by its reliance on precomputed segment data and from simple direct illumination by its inclusion of first-order inscattering approximations [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volumetric dataset (extinction/opacity field), Transfer Function (TF), light source position and intensity $I_0$, segment length $\Delta s$, number of samples per segment $N$, bias $I_{bias}$, scattering sphere radius $R\Omega$.
+-*   **Output:** Precomputed transparency values $T_{lp}(s_n)$ stored in a Shadow Volume Representation (SVR) texture, and final rendered image with global illumination.
++*   **Inputs:** Volume dataset (resampled to grid), Transfer Function (TF), light source definitions (position, intensity, type), grid resolution $\Delta x$.
++*   **Outputs:** Final illumination volume $L(x)$ (RGB 3D texture), piecewise opacity segments $\alpha_{lp}(s_n)$.
+ 
+ **Data Structures:**
+-*   **Shadow Volume Representation (SVR):** A 3D texture storing the precomputed segment opacities $\alpha_{lp}(s_n)$ or transparencies $T_{lp}(s_n)$. The resolution of the SVR can be lower than the volume dataset to save memory and improve performance [S1].
+-*   **Volume Dataset:** The primary volumetric data containing extinction coefficients or opacity values $\alpha(x)$.
++1.  **Opacity Volume:** 3D grid derived from the transfer function and resampled data volume. Resolution matches the light volume. Used to compute absorption coefficient $\sigma_a(x)$ [S1].
++2.  **Light Volume:** 3D grid of energy density values $\rho_{i,j,k}$. Resolution $N_x, N_y, N_z$. Typically half the resolution of the original volume data [S1].
++3.  **Light Color Field:** 3D grid of RGB vectors $L(x)$, composed from individual light energy densities $\rho_k(x)$ and light colors $L_k$ [S1].
++4.  **Piecewise Segments:** Stored transparency values $T_{lp}(s_n)$ or opacity $\alpha_{lp}(s_n)$ for segments of length $\Delta s$ [S2].
+ 
+-**Numbered Steps:**
++**Parameters:**
++*   $\Delta x$: Grid resolution. Can be lower than volume dataset for performance [S1].
++*   $c$: Speed of light (used in CFL condition). Implementation uses $c\Delta t = \Delta x/2$ [S1].
++*   $\sigma_a(x)$: Absorption coefficient, $0 \le \sigma_a \le 1$ [S1].
++*   $\sigma_s$: Scattering coefficient. Scalar for Eq. 13, vector $\hat{\sigma}_s$ for Eq. 23 (RGB channels) [S1].
++*   $N$: Number of samples along a local piecewise segment [S2].
++*   $\Delta s$: Step length for global light integration, equal to segment length. Typically 8-16 voxels [S2].
++*   $I_{bias}$: Minimum lighting adjustment to prevent completely dark regions [S2].
++*   $R^*\Omega$: Scattering sphere radius; larger values result in less distinct shadows [S2].
++*   Iterations per layer: Typically 4-5 iterations for the upwind scheme [S1].
+ 
+-1.  **Segment Definition:** Divide the ray from the light source to each voxel into segments of length $\Delta s$. Let $s_n = n \Delta s$ be the start of the $n$-th segment, where $s_0$ is the current voxel location [S1].
+-2.  **Local Opacity Integration:** For each voxel location in the volume, cast rays in the direction of the light source. Compute the transparency $T_{lp}(s_n)$ for segments starting at $s_n$. This involves sampling $N$ points along the segment to compute the segment opacity [S1].
+-3.  **Discretization of Segment Opacity:** The opacity of a segment $\alpha_{lp}(s_n)$ is calculated by sampling $N$ points along the segment. Let $\alpha(n_i)$ be the opacity of the $i$-th sample point in the current TF domain. The segment opacity is:
+-    $$ \alpha_{lp}(s_n) = 1 - \prod_{i=0}^N (1 - \alpha(n_i)) $$
+-    The transparency is then $T_{lp}(s_n) = 1 - \alpha_{lp}(s_n)$ [S1].
+-4.  **Storage:** Store the computed $T_{lp}(s_n)$ values in the SVR. These segments are reused for global light integration [S1].
+-5.  **Global Light Integration:** During rendering, the intensity of direct light reaching position $s$ is calculated as:
+-    $$ I(s) = I_0 \times \prod_{n=0}^k T_{lp}(s_n) $$
+-    where $I_0$ is the light source intensity and $T_{lp}(s_n)$ is the transparency of the $n$-th segment [S1].
+-6.  **Rendering Update:** During ray casting, only one additional texture lookup is performed for each sample to apply the pre-computed light intensities from the SVR [S1].
+-7.  **Parameter Adjustment:** Apply bias $I_{bias}$ to adjust minimum lighting and scattering sphere radius $R\Omega$ to control shadow distinctness [S1].
++**Algorithm Steps:**
++
++1.  **Volume Discretization:**
++    Discretize the volume domain using a regular grid with resolution $\Delta x$. Energy density $\rho(x)$ is discretized as $\rho_{i,j,k} = \rho(x_{i,j,k})$ where $x_{i,j,k} = (i\Delta x, j\Delta x, k\Delta x)$ [S1].
++
++2.  **Local Piecewise Integration (Shadowing):**
++    For each voxel location in the volume, cast rays in the direction of the light source. Compute the transparency $T_{lp}(s_n)$ for segments starting at $s_n = n\Delta s$, where $s_0$ is the current voxel location [S2].
++    The intensity of direct light reaching position $s$ is calculated as:
++    $$I(s) = I_0 \times \prod_{n=0}^k T_{lp}(s_n)$$
++    where $I_0$ is the light source intensity and $T_{lp}(s_n)$ is the transparency of the $n$-th segment [S2].
++    The transparency of a single segment is defined as:
++    $$T_{lp}(s_n) = e^{-\int_{s_n}^{s_n+1} \tau(t) dt}$$
++    where $\tau(t)$ is the absorption coefficient [S2].
++    The segment opacity $\alpha_{lp}(s_n)$ is discretized by sampling $N$ points along the segment:
++    $$\alpha_{lp}(s_n) = 1 - \prod_{i=0}^N (1 - \alpha(n_i))$$
++    where $\alpha(n_i)$ is the opacity of the $i$-th sample point in the current Transfer Function (TF) domain [S2].
++    *Note: These segments must be recomputed whenever the TF changes or the volume moves relative to the light source [S2].*
++
++3.  **Light Volume Initialization:**
++    Initialize the light volume grid $\rho_{i,j,k}$. Set boundary values according to light source type (Dirichlet/Neumann) and set interior values to zero, except for internal point lights [S1].
++    *   **External Point Lights:** If $x_P \notin \Omega$, use hybrid Dirichlet-Neumann boundary conditions. $\rho(x)|_{\partial \Omega} = G(x, x_P)\rho_P$ if $n(x) \cdot (x - x_P) < 0$, else $\frac{\partial \rho(x)}{\partial n} = 0$. $G(x, x_P)$ is a Gaussian falloff function [S1].
++    *   **Internal Point Lights:** If $x_P \in \Omega$, set voxels within distance $2\Delta x$ from $x_P$ to the light intensity $\rho_P$. These voxels are treated as an internal boundary and not updated during simulation: $\rho(x_P) = \rho_P$ [S1].
++
++4.  **Convection Step (Absorption):**
++    Solve the convection equation with absorption for each light source individually:
++    $$\frac{\partial \rho(x)}{\partial t} = -c u(x) \cdot \nabla \rho(x) - \sigma_a(x)\rho(x)$$
++    where $c$ is speed of light, $u(x)$ is unit light direction, and $\sigma_a(x)$ is absorption coefficient [S1].
++    Use a first-order upwind scheme. Update layer by layer along the light propagation direction. Repeat until steady state ($-c u(x) \cdot \nabla \rho(x) - \sigma_a(x)\rho(x) = 0$) is reached, typically 4-5 iterations per layer [S1].
++    The upwind gradient component $x$ is computed as:
++    $$\rho_{i,j,k}^x = \begin{cases} \frac{\rho_{i+1,j,k} - \rho_{i,j,k}}{\Delta x} & \text{if } u_{i,j,k} < 0 \\ \frac{\rho_{i,j,k} - \rho_{i-1,j,k}}{\Delta x} & \text{if } u_{i,j,k} > 0 \end{cases}$$
++    (Similar formulas apply for $y$ and $z$ components based on $v_{i,j,k}$ and $w_{i,j,k}$) [S1].
++    The update rule is:
++    $$\rho_{i,j,k}(t+\Delta t) = (1 - \sigma_a(x))\rho_{i,j,k}(t) - \frac{\Delta t}{\Delta x} \Delta \rho_{i,j,k}(t)$$
++    with CFL condition $C = c\Delta t/\Delta x \le 1$. Implementation uses $c\Delta t = \Delta x/2$, so $C=1/2$ [S1].
++
++5.  **Light Field Composition:**
++    Composite solutions from all light sources into a single light color field $L(x)$:
++    $$L(x) = \sum_{k=1}^N (\rho_k(x)L_k)$$
++    where $\rho_k(x)$ is the solution for the $k$-th light source and $L_k$ is its color [S1].
++
++6.  **Diffusion Step (Scattering):**
++    Solve the diffusion equation for scattering using Gauss-Seidel iteration on the combined light field $L(x)$:
++    $$\frac{\partial L(x)}{\partial t} = \hat{\sigma}_s \nabla^2 L(x)$$
++    where $\hat{\sigma}_s$ consists of three scattering coefficients for different color channels [S1].
++    Use the solution at $t=1$ as the final illumination volume. Solving this once for the combined field is significantly cheaper than solving for each light source separately [S1].
++
++7.  **Rendering:**
++    Render using volume ray casting. For each sample point, lookup illumination $L(x)$ from the final volume and combine with Phong shading:
++    $$L_{final}(x) = L(x)(I_a(x) + I_d(x) + I_s(x))$$
++    where $I_a, I_d, I_s$ are ambient, diffuse, and specular lighting intensities [S1].
++    Only one additional texture lookup is performed for each sample to apply the pre-computed light intensities [S2].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def compute_local_piecewise_integration(volume, tf, light_direction, delta_s, N):
+-    """
+-    Precomputes local piecewise transparency segments for all voxels.
++def local_piecewise_integration(volume_data, transfer_function, lights, grid_resolution):
++    # 1. Discretize and Initialize
++    opacity_volume = compute_opacity_volume(volume_data, transfer_function, grid_resolution)
++    light_volume = initialize_light_volume(grid_resolution)
+     
+-    Args:
+-        volume: 3D array of opacity values alpha(x)
+-        tf: Transfer function mapping density to opacity
+-        light_direction: Unit vector pointing from voxel to light source
+-        delta_s: Length of each piecewise segment in voxels
+-        N: Number of samples per segment
++    # 2. Compute Local Piecewise Segments (Shadows)
++    # Recompute if TF or volume-light relation changes
++    piecewise_segments = []
++    for voxel in grid_voxels:
++        segment_opacities = []
++        for n in range(num_segments):
++            samples = sample_ray(voxel, light_direction, segment_length, transfer_function)
++            alpha_segment = 1.0
++            for sample in samples:
++                alpha_segment *= (1.0 - sample.opacity)
++            segment_opacities.append(1.0 - alpha_segment)
++        piecewise_segments.append(segment_opacities)
++
++    # 3. Solve Convection for each light
++    for light in lights:
++        current_energy = initialize_energy_volume(light, grid_resolution)
+         
+-    Returns:
+-        svr: 3D texture storing T_lp(s_n) for each voxel and segment index
+-    """
+-    # Determine volume dimensions
+-    dims = volume.shape
+-    svr = create_3d_texture(dims)
++        # Initialize boundaries based on light type (Dirichlet/Neumann/Internal)
++        set_boundary_conditions(current_energy, light, opacity_volume)
++        
++        # Upwind Scheme Iteration
++        for layer in layers_along_light_direction:
++            for iteration in range(4, 6): # 4-5 iterations
++                update_convection_step(current_energy, opacity_volume, light.direction, grid_resolution)
++        
++        accumulate_energy(light_volume, current_energy, light.color)
++
++    # 4. Solve Diffusion for Scattering
++    # Solve once on combined light field
++    final_illumination = solve_diffusion_gauss_seidel(light_volume, scattering_coefficient)
+     
+-    # Iterate over each voxel in the volume
+-    for x in range(dims[0]):
+-        for y in range(dims[1]):
+-            for z in range(dims[2]):
+-                current_voxel = (x, y, z)
+-                
+-                # Cast ray in light direction
+-                # Calculate number of segments needed to cover the volume in light direction
+-                # This depends on the specific implementation of "global light integration"
+-                # For simplicity, we assume we compute segments up to a certain distance or until exit
+-                segment_index = 0
+-                current_pos = current_voxel
+-                
+-                while current_pos is within volume bounds:
+-                    # Sample N points along the segment starting at current_pos
+-                    segment_opacities = []
+-                    for i in range(N):
+-                        # Interpolate position along the segment
+-                        t = i / N
+-                        sample_pos = interpolate(current_pos, light_direction, delta_s * t)
+-                        
+-                        # Get density from volume and apply TF to get opacity
+-                        density = get_density(volume, sample_pos)
+-                        opacity = tf(density)
+-                        segment_opacities.append(opacity)
+-                    
+-                    # Compute segment transparency T_lp(s_n)
+-                    # alpha_lp = 1 - product(1 - alpha(n_i))
+-                    # T_lp = 1 - alpha_lp = product(1 - alpha(n_i))
+-                    product_term = 1.0
+-                    for alpha in segment_opacities:
+-                        product_term *= (1.0 - alpha)
+-                    
+-                    t_lp = product_term
+-                    
+-                    # Store in SVR
+-                    svr[current_voxel][segment_index] = t_lp
+-                    
+-                    # Move to next segment
+-                    current_pos = current_pos + light_direction * delta_s
+-                    segment_index += 1
+-                    
+-    return svr
++    return final_illumination, piecewise_segments
+ 
+-def render_with_piecewise_integration(svr, camera, light_intensity, ibias, r_omega):
+-    """
+-    Renders the volume using precomputed piecewise integration.
+-    """
+-    image = create_image()
+-    
+-    for each pixel in image:
+-        ray = cast_ray(camera, pixel)
+-        accumulated_light = 0.0
+-        transmittance = 1.0
+-        
+-        while ray is within volume:
+-            voxel = ray.current_voxel
+-            
+-            # Retrieve precomputed transparency for the segment starting at this voxel
+-            # Note: In practice, this might involve interpolation or selecting the appropriate segment index
+-            # based on the ray's position relative to the grid.
+-            # The source states "one additional texture look-up ... for each sample"
+-            # This implies the SVR stores the cumulative or segment-specific transmittance.
+-            # Based on formula I(s) = I0 * product(T_lp(s_n)), we need T_lp for each segment along the ray.
+-            
+-            # Assuming SVR stores T_lp for the segment starting at the voxel
+-            # We need to accumulate product of T_lp along the ray path to the light source?
+-            # Actually, the source says I(s) = I0 * product(T_lp(s_n)) where s_n are segments from light to s.
+-            # So during ray marching from eye to light, we are accumulating transmittance TO the light.
+-            
+-            # Let's assume we have a function to get the segment transmittance towards the light
+-            t_lp = svr.lookup(voxel, light_direction)
+-            
+-            # Update accumulated transmittance for the path to the light
+-            # Note: The formula I(s) = I0 * product(T_lp(s_n)) calculates light AT s.
+-            # Standard volume rendering integrates color along the eye ray.
+-            # The contribution of light at sample point s is modulated by transmittance from eye to s
+-            # AND the light intensity at s.
+-            
+-            # Light intensity at current sample point s (voxel)
+-            # This requires the product of T_lp for all segments from light to s.
+-            # This implies we need to store cumulative products or compute them on the fly.
+-            # The source says "global light integration is updated at a lower frequency... using piecewise segments"
+-            # and "one additional texture look-up ... to apply pre-computed light intensities".
+-            # This suggests the SVR might store the final light intensity I(s) or a cumulative factor.
+-            # However, the formula explicitly defines I(s) as a product.
+-            # Let's stick to the formula: I(s) = I0 * product(T_lp(s_n))
+-            # If SVR stores T_lp(s_n), we need to accumulate the product along the ray from light to s.
+-            # But we are ray marching from eye to light.
+-            # This implies the "global light integration" step (Step 5) computes I(s) for all s and stores it?
+-            # Or does it compute it on the fly?
+-            # "Global light integration updates... using piecewise segments... 284-552 ms"
+-            # This suggests I(s) is precomputed and stored, or the product is accumulated efficiently.
+-            # Given "one additional texture look-up", it's likely the SVR stores I(s) directly or a factor that allows O(1) update.
+-            # Let's assume the SVR stores the cumulative transmittance from the light to the voxel, i.e., T_global(s) = product(T_lp(s_n)).
+-            # Then I(s) = I0 * T_global(s).
+-            
+-            # Re-reading: "The resulting opacities, alpha_lp(s0), constitute the piecewise segments that will be reused...
+-            # The step length in the global light integration is equal to the length of the local piecewise segments."
+-            # "Integration of light intensities... without local piecewise... is 10x slower."
+-            # "Global light integration is updated... 284-552 ms".
+-            # This strongly implies I(s) is precomputed and stored in a texture (possibly the SVR or another one).
+-            # Let's assume SVR stores I(s) or T_global(s).
+-            
+-            # If SVR stores T_global(s):
+-            t_global = svr.lookup(voxel, light_direction) # This lookup returns product(T_lp) from light to voxel
+-            light_intensity_at_voxel = light_intensity * t_global
+-            
+-            # Apply bias
+-            light_intensity_at_voxel = max(light_intensity_at_voxel, ibias)
+-            
+-            # Standard volume rendering accumulation
+-            # C(s) = color(s) * (1 - exp(-alpha(s) * delta))
+-            # But here, the "color" is the light intensity at s, modulated by scattering?
+-            # The source mentions "first order scattering incremental refinements".
+-            # For direct illumination only:
+-            contribution = light_intensity_at_voxel * alpha_sample * transmittance_from_eye
+-            accumulated_light += contribution
+-            transmittance_from_eye *= (1 - alpha_sample)
+-            
+-            ray.advance()
+-            
+-        image[pixel] = accumulated_light
+-        
+-    return image
++def update_convection_step(energy, opacity, direction, dx):
++    # First-order upwind scheme
++    # CFL condition: c*dt = dx/2
++    for voxel in energy:
++        grad_x = upwind_gradient(energy, direction.x, dx)
++        grad_y = upwind_gradient(energy, direction.y, dx)
++        grad_z = upwind_gradient(energy, direction.z, dx)
++        divergence = direction.x * grad_x + direction.y * grad_y + direction.z * grad_z
++        sigma_a = opacity[voxel]
++        energy[voxel] = (1.0 - sigma_a) * energy[voxel] - 0.5 * divergence
+ ```
+-
+-**Parameters:**
+-*   **N:** Number of samples taken along the local piecewise segment. [S1]
+-*   **$\Delta s$:** Step length for global light integration, equal to the length of local piecewise segments. Typically 8-16 voxels. [S1]
+-*   **$I_{bias}$:** Adjusts minimum lighting to prevent completely dark regions. [S1]
+-*   **$R\Omega$:** Scattering sphere radius. Increase results in less distinct shadows. [S1]
+-
+-**Edge Cases and Pitfalls:**
+-*   **Transfer Function Changes:** Local piecewise segments must be recomputed whenever the Transfer Function (TF) changes. [S1]
+-*   **Volume Movement:** Segments must be recomputed if the volume moves relative to the light source. [S1]
+-*   **Block Artifacts:** Jagged edges appear on sharp edges and surfaces if the SVR resolution is too low. [S1]
+-*   **Banding Effects:** Interpolation between shadowed and un-shadowed regions can cause banding effects, particularly on curved surfaces like the side of a head, when SVR size is reduced. [S1]
+-*   **Precision:** Integration errors are small (RMS $\Delta E$ 0.19), but high distortion pixels (6% with $\Delta E > 6$) occur at sharp edges and thin structures. [S1]
+ 
+ ## Subtopics
+@@ -196,24 +139,30 @@
+ 
+ ### Source Term Computation for External Lighting
+-This variant computes the multiple scattering source term $q_{ri}(x)$ for external directional light $L_l$ as $q_{ri}(x) = L_l \cdot \sigma_s(x) \cdot T(x)$, where $\sigma_s$ is the scattering coefficient and $T(x)$ is transmittance. The term is computed via raymarching and stored at the full resolution of the dataset extinction field [S2].
++A variant for handling external directional light $L_l$. It computes the multiple scattering source term $q_{ri}(x)$ for external directional light as $q_{ri}(x) = L_l \cdot \sigma_s(x) \cdot T(x)$, where $\sigma_s$ is the scattering coefficient and $T(x)$ is transmittance. This term is computed via raymarching and stored at the full resolution of the dataset extinction field [S3].
+ 
+ ### Radial Grids for Local Light Sources
+-This variant extends the propagation scheme to local point lights using radial grids (topologically equivalent to rectilinear grids but cyclic in two angular dimensions). This allows approximate treatment of space as locally Euclidean. It uses spherical grids with two angular coordinates and a radial coordinate aligned with the initial principal directions of the point source. VPLs are prefiltered based on importance and anisotropy [S3].
++A propagation scheme using radial grids (topologically equivalent to rectilinear grids but cyclic in two angular dimensions) for local point lights, allowing approximate treatment of space as locally Euclidean. It extends the Principal-Ordinates Propagation (POP) method to local light sources by using spherical grids aligned with the initial principal directions of the point source. VPLs with large importance have high initial anisotropy, which is accounted for in the grid spacing [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Integration of light intensities without the local piecewise approximation is approximately 10 times slower [S1].
+-*   **Performance:** Global light integration updates in 284-552 ms (for 8 voxel segments) depending on SVR size; first order scattering incremental refinements take 62-233 ms [S1]. High frame rates (15-22 fps) are reached once light calculations are updated, as only one additional texture lookup is needed per sample during ray casting [S1].
+-*   **Memory Complexity:** The SVR resolution can be reduced (e.g., 8.9:1 data reduction) with negligible visual error, allowing for multi-resolution data management [S1].
+-*   **Accuracy:** Root Mean Square (RMS) error of 0.19 for $\Delta E$ (CIE 1976 L*u*v* color space), with 6% of pixels having $\Delta E$ above 6 [S1].
+-*   **Strengths:** Nearly physically correct scattering effects compared to blur-based methods (e.g., Kniss et al. [KPH*03]). Allows light source positioning anywhere in the scene, even within the volume. Handles large scale volumes via multi-resolution data management [S1].
+-*   **Limitations:** Requires recomputation when TF changes or volume moves. Block artifacts and banding can occur with low SVR resolution. Shadows are generally indistinct with isotropic phase functions [S1].
+-*   **When to Use:** Real-time volume rendering requiring global illumination and shadows, especially with large volumes or dynamic light sources.
+-*   **When Not to Use:** When high-fidelity multiple scattering is required without approximation, or when the volume/TF is static and offline precomputation is acceptable for higher accuracy.
++**Time and Memory Complexity:**
++*   **Memory:** The whole volume data is stored in GPU memory, constraining maximum volume size by total available GPU memory [S1].
++*   **Time:** Integration of light intensities without the local piecewise approximation is approximately 10 times slower [S2]. Global light integration updates in 284-552 ms (for 8 voxel segments) depending on Shadow Volume Representation (SVR) size; first order scattering incremental refinements take 62-233 ms [S2]. Light simulation time for a $128 \times 128 \times 128$ light volume: Absorption takes 34ms, Scattering takes 18ms [S1].
++
++**Measured Performance:**
++*   Hardware: Laptop with Intel 1.7GHz CPU and NVIDIA Geforce 460M GPU [S1].
++*   Accuracy: Root Mean Square (RMS) error of 0.19 for $\Delta E$ (CIE 1976 L*u*v* color space), with 6% of pixels having $\Delta E$ above 6 [S2].
++
++**Strengths and Limitations:**
++*   **Strengths:** Interactive frame rates (15-22 fps) once light calculations are updated; nearly physically correct scattering effects compared to blur-based methods like Kniss et al. [KPH*03]; light source can be positioned anywhere, even within the volume; handles large scale volumes via multi-resolution data management [S2].
++*   **Limitations:** Numerical dissipation from first-order upwind scheme causes soft shadows instead of hard shadows (though considered visually plausible) [S1]; not as fast as precomputation-based techniques that do not require per-frame updates; block artifacts and banding effects appear if SVR resolution is too low [S2].
++*   **When to use:** Real-time volume visualization where lighting changes (TF, light position) occur frequently, and precomputation is not feasible.
++*   **When not to use:** When hard shadows are required, or when the volume is extremely large and GPU memory is insufficient.
+ 
+ ## Background
+-Local Piecewise Integration was introduced in the paper "Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration" (2008) [S1]. It was developed to provide interactive global light propagation in direct volume rendering. The method builds on the concept of piecewise integration to efficiently compute light propagation from a global light source. It is used in direct volume rendering to enhance realism by incorporating shadows and first-order scattering. The method is compared to object-order light propagation methods and blur-based techniques like Kniss et al. [KPH*03] [S1].
++The method was introduced by Cheng and Cheng in 2012 [S1] and further refined by Larsson et al. in 2008 [S2]. It is based on solving the convection-diffusion equation to model light propagation, absorption, and scattering in optically thick media. The upwind scheme originates from Courant et al. (1952) [S1]. The technique is implemented using NVIDIA CUDA for simulation and OpenGL for rendering, with the final light volume stored in an OpenGL 3D texture [S1].
+ 
+ ## Sources
+-[S1] Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration, https://doi.org/10.2312/vg/vg-pbg08/105-112, fetched 2026-10-26
+-[S2] Flux-Limited Diffusion for Multiple Scattering in Participating Media, https://archive.org/details/arxiv-1403.8105, fetched 2026-10-26
+-[S3] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29+[S1] Fast global illumination for interactive volume visualization, https://doi.org/10.1145/2448196.2448205, fetched 2026-10-30
++[S2] Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration, https://doi.org/10.2312/vg/vg-pbg08/105-112, fetched 2026-10-26
++[S3] Flux-Limited Diffusion for Multiple Scattering in Participating Media, https://archive.org/details/arxiv-1403.8105, fetched 2026-10-26
++[S4] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29

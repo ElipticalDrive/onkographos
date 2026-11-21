@@ -1,0 +1,87 @@
+--- v008.md
++++ v009.md
+@@ -1,58 +1,52 @@
+ # Tile-based Rasterization with Radix Sort
+ 
+-Also called: Tile-based Radix Sort Rasterization, Global Radix Sort for Gaussian Splatting
++Also called: Tiled Rasterization, Tile-based Gaussian Rasterization
+ 
+ ## Overview
+-Tile-based Rasterization with Radix Sort is a GPU-parallel rendering method for 3D Gaussian Splatting that replaces per-pixel sorting with a single global radix sort to establish depth ordering within image tiles [S1][S2, unofficial]. It solves the performance bottleneck of evaluating splats against irrelevant pixels and the popping artifacts caused by inconsistent depth orders in per-ray sorting [S1][S2, unofficial][S1]. Unlike [Non-Tiled 2D Gaussian Splatting with Transmittance Culling](2067-non-tiled-2d-gaussian-splatting-with-transmittance-culling.md), which processes pixels individually, this method divides the image into tiles (typically 16x16 or 32x32 pixels) and uses a global sort to bin splats by tile and depth simultaneously, enabling efficient front-to-back compositing [S1][S2, unofficial].
++Tile-based Rasterization with Radix Sort is a GPU-parallel rendering method for 3D Gaussian Splatting that divides the image into tiles to manage memory and processing load, assigning Gaussians to tiles based on their projected axis-aligned bounding boxes [Parent](2061-tiled-2d-gaussian-splatting-rasterization.md). It solves the performance bottleneck of per-pixel sorting by using a single global radix sort to bin splats by tile and sort them by depth simultaneously [S2, unofficial]. Unlike sibling methods that may perform redundant depth sorting or evaluate splats against irrelevant pixels, this method ensures that each tile is processed by one GPU thread block walking a single sorted list, enabling real-time performance for millions of splats [S2, unofficial].
+ 
+ ## Shared principles
+-The method relies on three core mechanisms shared by all child implementations:
++The method operates on a list of $N$ projected 2D Gaussian splats, each defined by center $(x_i, y_i)$, 2D covariance matrix $\Sigma'_i$, color $c_i$, opacity $\alpha_i$, and depth $Z_c$ [S2, unofficial]. The image is divided into a grid of tiles with dimensions $T_w \times T_h$ (typically $16 \times 16$ pixels) [S2, unofficial].
+ 
+-1.  **Tile Assignment:** The image is divided into a grid of tiles with dimensions $T_w \times T_h$ pixels. Each projected 2D Gaussian splat is assigned to every tile its axis-aligned bounding box (AABB) touches. If a splat straddles tile boundaries, it is duplicated into each relevant tile, creating one work item per (Gaussian, tile) pair [S1][S2, unofficial].
+-2.  **Key Packing:** For each (splat, tile) pair, a 64-bit integer sort key is constructed. The key packs the 1D tile ID into the high 32 bits and the camera-space depth $Z_c$ into the low 32 bits [S1][S2, unofficial][S1, G]. The 1D tile ID is calculated as $tile\_id = y_{tile} \times W_{tiles} + x_{tile}$, where $W_{tiles}$ is the number of tiles horizontally [S1, G]. The depth $Z_c$ is cast to a 32-bit unsigned integer (`uint32_t`) [S1][S2, unofficial][S1, G]. The key is formed as:
++The core mechanism involves three phases:
++
++1.  **Tile Assignment:** Each Gaussian is assigned to every tile its projected 2D splat touches. If a splat straddles tile boundaries, it is duplicated into each relevant tile [S2, unofficial]. This creates one work item per (Gaussian, tile) pair [S2, unofficial].
++2.  **Key Packing:** For each (splat, tile) pair, a 64-bit integer sort key is constructed. The tile ID is packed into the high bits, and the splat's depth $Z_c$ is packed into the low bits [S2, unofficial]. Specifically, the key is formed as:
+     $$ \text{key} = (\text{tile\_id} \ll 32) \mid (\text{uint32\_t})Z_c $$
+-    The value associated with the key is the original Gaussian index [S1, G].
+-3.  **Global Radix Sort:** A single parallel radix sort is performed over all (splat, tile) pairs [S1][S2, unofficial][S1, G]. This simultaneously bins splats by tile ID (ensuring contiguity) and sorts them by depth within each tile [S2, unofficial][S1, G]. After sorting, each tile is processed by one GPU thread block that walks the sorted list, performing front-to-back compositing and breaking early when transmittance $T < \epsilon$ [S2, unofficial][S1, G]. The same sorted lists are reused for backpropagation [S1][S1, G].
++    where `tile_id` is the 1D tile index ($y \times \text{grid\_width} + x$) and $Z_c$ is cast to a 32-bit unsigned integer [S2, unofficial].
++3.  **Global Radix Sort:** A single GPU radix sort is performed over all (splat, tile) pairs [S2, unofficial]. This simultaneously bins splats by tile ID (ensuring contiguity) and sorts them by depth within each tile [S2, unofficial].
++
++After sorting, each tile is processed by one GPU thread block that walks the sorted list [S2, unofficial]. For each pixel in a tile, front-to-back compositing is performed using the tile's sorted list of splats, evaluating per-pixel alpha $\alpha_i(\mathbf{x})$ and breaking early when transmittance $T < \epsilon$ [S2, unofficial]. The same sorted lists are reused for backpropagation, allowing gradients to flow to position, shape, opacity, and color without additional sorting [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Tile-Based Culling](2819-tile-based-culling.md)
+-Tile-Based Culling computes a tight, opacity-aware bounding box per Gaussian and iteratively checks each tile within that box to determine if it should be included in the final Gaussian-to-Tile mapping. It solves the problem of overestimating the number of tiles a Gaussian intersects, which occurs when using standard AABBs. Unlike the parent method, which assigns a Gaussian to every tile its projected splat touches, Tile-Based Culling verifies actual overlap by checking if the Gaussian's maximal value within a tile exceeds an opacity threshold. It uses warp-level load balancing to accelerate tile examination.
++Tile-Based Culling is a method for computing a precise mapping between 3D Gaussians and image tiles to eliminate irrelevant tiles during rasterization [2819-tile-based-culling.md]. It solves the problem of overestimating the number of tiles a Gaussian intersects, which occurs when using standard axis-aligned bounding boxes (AABBs) that are overly conservative [2819-tile-based-culling.md]. Unlike the parent method, which assigns a Gaussian to every tile its projected splat touches (potentially including tiles with negligible opacity), Tile-Based Culling iteratively examines candidate tiles to verify actual overlap, thereby reducing the workload for the subsequent radix sort and rendering phases [2819-tile-based-culling.md].
+ 
+ ### [Tile-based Rasteriser](2846-tile-based-rasteriser.md)
+-The tile-based rasteriser is a GPU-optimized rendering component that sorts projected 2D Gaussian splats once per frame to serve both forward rendering and backpropagation. It solves the performance bottleneck of per-pixel sorting by dividing the image into tiles and using a single global radix sort to achieve per-tile depth ordering. Unlike sibling methods that may perform redundant depth sorting, this method ensures that each tile is processed by one GPU thread block walking a single sorted list, enabling real-time performance for millions of splats.
++The tile-based rasteriser is a GPU-optimized rendering component that sorts projected 2D Gaussian splats once per frame to serve both forward rendering and backpropagation [2846-tile-based-rasteriser.md]. It solves the performance bottleneck of per-pixel sorting by dividing the image into tiles and using a single global radix sort to achieve per-tile depth ordering [2846-tile-based-rasteriser.md]. Unlike sibling methods that may perform redundant depth sorting or evaluate splats against irrelevant pixels, this method ensures that each tile is processed by one GPU thread block walking a single sorted list, enabling real-time performance for millions of splats [2846-tile-based-rasteriser.md].
+ 
+ ### [Gaussian Rasterization Key Generation](5133-gaussian-rasterization-key-generation.md)
+-This method generates the key-value pairs required for the tile-based rasterization of 3D Gaussians. It maps each 3D Gaussian to every tile it overlaps, creating one work item per (Gaussian, tile) pair. The keys pack the tile ID and depth to enable a single global radix sort that simultaneously bins splats by tile and sorts them by depth. It differs from [Tile-based Culling](2819-tile-based-culling.md) by generating explicit overlap entries rather than filtering, and from [Tile-based Depth Sorting](8038-tile-based-depth-sorting.md) by handling the key construction logic explicitly before the sort phase.
++This method generates the key-value pairs required for the tile-based rasterization of 3D Gaussians. It maps each 3D Gaussian to every tile it overlaps, creating one work item per (Gaussian, tile) pair. The keys pack the tile ID and depth to enable a single global radix sort that simultaneously bins splats by tile and sorts them by depth [5133-gaussian-rasterization-key-generation.md]. It differs from [Tile-based Culling](2819-tile-based-culling.md) by generating explicit overlap entries rather than filtering, and from [Tile-based Depth Sorting](8038-tile-based-depth-sorting.md) by handling the key construction logic explicitly before the sort phase.
++
++### FlashGS
++FlashGS is a multi-GPU rendering and training method for 3D Gaussian Splatting that accelerates the forward pass by partitioning the screen into finer tiles and scheduling them across a multi-GPU pipeline [7331-flashgs.md]. It differs from single-GPU rasterizers by distributing the tile workload to enable scalability for large scenes, and from primitive-sharding approaches by focusing on screen-space partitioning rather than model-space partitioning [7331-flashgs.md].
+ 
+ ### [Tile-based Depth Sorting](8038-tile-based-depth-sorting.md)
+-Tile-based depth sorting replaces per-ray depth sorting with tile-based sorting to mitigate popping artifacts caused by inconsistent depth orders when viewpoints rotate. It ensures consistent sorting order within local regions by binning and sorting work items globally before rendering.
++Tile-based depth sorting replaces per-ray depth sorting with tile-based sorting to mitigate popping artifacts caused by inconsistent depth orders when viewpoints rotate [8038-tile-based-depth-sorting.md]. It ensures consistent sorting order within local regions by binning and sorting work items globally before rendering [8038-tile-based-depth-sorting.md].
+ 
+-### Opacity-Thresholded Tile Intersection Filtering
+-**step**
+-Filter out Gaussians whose opacity $\tau$ falls below the alpha-threshold $\epsilon$ immediately during tile intersection, as their axis-aligned bounding box is considered empty [S1].
++#### Opacity-Thresholded Tile Intersection Filtering
++- **step**: Filter out Gaussians whose opacity $\tau$ falls below the alpha-threshold $\epsilon$ immediately during tile intersection, as their axis-aligned bounding box is considered empty [S1].
++- **parameter**: Alpha-threshold: $\epsilon$. Gaussians with opacity $\tau < \epsilon$ are filtered [S1].
++- **number**: Combining all modifications decreased rendering time on the Bicycle scene at native resolution by a factor of 3.77 and GPU memory usage by a factor of 2.11 compared to the reference [S1].
+ 
+-**parameter**
+-Alpha-threshold: $\epsilon$. Gaussians with opacity $\tau < \epsilon$ are filtered [S1].
+-
+-**number**
+-Combining all modifications decreased rendering time on the Bicycle scene at native resolution by a factor of 3.77 and GPU memory usage by a factor of 2.11 compared to the reference [S1].
+-
+-### Tile Range Identification
+-**definition**
+-Identifies the start and end indices in the sorted list of Gaussian instances for each tile. Runs once per instanced Gaussian ID after sorting [S2, unofficial].
+-
+-**step**
+-Read the tile ID from the current key: `currtile = key >> 32` [S2, unofficial]. If `idx == 0`, set `ranges[currtile].x = 0` [S2, unofficial]. If `idx > 0`, read `prevtile = point_list_keys[idx - 1] >> 32`. If `currtile != prevtile`, set `ranges[prevtile].y = idx` and `ranges[currtile].x = idx` [S2, unofficial]. If `idx == L - 1`, set `ranges[currtile].y = L` [S2, unofficial].
+-
+-### FlashGS
+-**definition**
+-A method focusing on accelerating the forward process by partitioning the screen into finer tiles and scheduling them on a multi-GPU pipeline [S3, unofficial].
++#### Tile Range Identification
++- **definition**: Identifies the start and end indices in the sorted list of Gaussian instances for each tile. Runs once per instanced Gaussian ID after sorting [S2, unofficial].
++- **step**: Read the tile ID from the current key: `currtile = key >> 32`. If `idx == 0`, set `ranges[currtile].x = 0`. If `idx > 0`, read `prevtile = point_list_keys[idx - 1] >> 32`. If `currtile != prevtile`, set `ranges[prevtile].y = idx` and `ranges[currtile].x = idx`. If `idx == L - 1`, set `ranges[currtile].y = L` [S2, unofficial].
+ 
+ ## Background
+-The method originates from the core 3D Gaussian Splatting rendering pipeline, which utilizes tile-based rasterization to manage memory and processing load [Parent]. The specific use of a global radix sort for tile-based depth ordering was introduced to address the inefficiencies of per-pixel sorting and the visual artifacts of per-ray sorting [S1][S2, unofficial][S1]. Improvements such as opacity-thresholded filtering were later added to reduce the number of duplicated Gaussians and improve render consistency, particularly for large, transparent Gaussians [S1]. The approach is widely used in real-time 3D Gaussian Splatting implementations and survey literature [S3, unofficial].
++The method builds on the standard 3D Gaussian Splatting rasterization pipeline [Parent](2061-tiled-2d-gaussian-splatting-rasterization.md). The specific implementation details regarding key packing and global radix sort are derived from unofficial sources describing the Gaussian Rasterization kernel [S2, unofficial]. Performance improvements via opacity-thresholded filtering were documented in a peer-reviewed study on fast 3D Gaussian Splatting rendering [S1].
+ 
+ ## Sources
+ [S1] Fast 3D Gaussian Splatting Rendering via Easily Integrable Improvements, https://doi.org/10.1109/lsp.2024.3521379, fetched 2026-10-26
+-[S2] NorahCadeJS/GAI-GS, https://github.com/NorahCadeJS/GAI-GS, fetched 2026-10-27 (unofficial)
+-[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)+[S2] NorahCadeJS/GAI-GS, https://github.com/NorahCadeJS/GAI-GS, fetched 2026-10-27 (unofficial)

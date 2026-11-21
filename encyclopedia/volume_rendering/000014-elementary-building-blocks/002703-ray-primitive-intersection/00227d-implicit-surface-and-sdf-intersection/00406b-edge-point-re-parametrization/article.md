@@ -1,0 +1,122 @@
+# Edge Point Re-parametrization
+
+Also called: Implicit Surface Deformation via Re-parametrization, Learned Surface Displacement
+
+## Overview
+Edge Point Re-parametrization is a technique for making the intersection point of a ray with an implicit surface differentiable with respect to the surface's parameters (e.g., Neural SDF weights). It solves the problem that the root of a function $S(x)=0$ is not directly differentiable in standard automatic differentiation frameworks when $x$ is the output of a solver. It sets itself apart from standard SDF raycasting [SDF Raycast Collision Detection](2417-sdf-raycast-collision-detection.md) by providing an explicit, closed-form re-parametrization of the surface point $x$ that allows gradients to flow through the surface geometry during inverse rendering optimization.
+
+## How it works
+**Inputs and Outputs**
+- Input: An initial edge point $x$ (typically the result of a standard ray-marching or Newton step on the SDF), the SDF function $S_{\Theta_s}$ parameterized by $\Theta_s$, and the surface normal $n = \nabla S_{\Theta_s}(x)$.
+- Output: A re-parametrized surface point $x_{\Theta_s}$ that lies on the zero-level set of $S_{\Theta_s}$ and is differentiable with respect to $\Theta_s$.
+
+**Data Structures**
+- $x$: 3D vector $(x, y, z)$.
+- $n$: 3D vector $(n_x, n_y, n_z)$, normalized or unnormalized depending on implementation, but the formula uses the dot product $n^T n$.
+- $S_{\Theta_s}(x)$: Scalar SDF value.
+- $\Theta_s$: Parameters of the implicit surface representation (e.g., MLP weights).
+
+**Steps**
+1. **Define Deformation Direction**: The surface point is assumed to move along the surface normal $n$ from the initial point $x$. The deformed point is defined as:
+   $$x_{\Theta_s} = x + t_{\Theta_s} \cdot n$$
+   where $t_{\Theta_s}$ is a learned scalar displacement.
+
+2. **Initial Condition**: At initialization $\Theta_s = \Theta_s^{(0)}$, the displacement is zero, ensuring the deformed point equals the initial point:
+   $$x_{\Theta_s} \Big|_{\Theta_s = \Theta_s^{(0)}} = x \implies t_{\Theta_s} \Big|_{\Theta_s = \Theta_s^{(0)}} = 0$$
+
+3. **Zero-Level Set Constraint**: The deformed point must satisfy the implicit surface equation:
+   $$S_{\Theta_s}(x_{\Theta_s}) = 0$$
+
+4. **Implicit Differentiation**: Differentiate the constraint with respect to $\Theta_s$:
+   $$\frac{\partial S}{\partial \Theta_s}(x_{\Theta_s}) + \left( \frac{\partial S}{\partial x_{\Theta_s}} \right)^T \frac{\partial x_{\Theta_s}}{\partial \Theta_s} = 0$$
+   Since $\frac{\partial S}{\partial x_{\Theta_s}} = n$ and $\frac{\partial x_{\Theta_s}}{\partial \Theta_s} = n \frac{\partial t}{\partial \Theta_s}$, this becomes:
+   $$\frac{\partial S}{\partial \Theta_s}(x_{\Theta_s}) + n^T n \frac{\partial t}{\partial \Theta_s} = 0$$
+
+5. **Evaluate at Initialization**: At $\Theta_s = \Theta_s^{(0)}$, $x_{\Theta_s} = x$. The gradient of the displacement is:
+   $$\frac{\partial t}{\partial \Theta_s} \Big|_{\Theta_s = \Theta_s^{(0)}} = -\frac{1}{n^T n} \cdot \frac{\partial S}{\Theta_s}(x) \Big|_{\Theta_s = \Theta_s^{(0)}}$$
+
+6. **First-Order Approximation**: The scalar displacement $t_{\Theta_s}$ is approximated using the first-order Taylor expansion around $\Theta_s^{(0)}$:
+   $$t_{\Theta_s} \approx -\frac{1}{n^T n} \cdot S_{\Theta_s}(x)$$
+
+7. **Final Re-parametrization**: Substitute $t_{\Theta_s}$ back into the deformation equation:
+   $$x_{\Theta_s} = x - \frac{n}{n^T n} \cdot S_{\Theta_s}(x)$$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def edge_point_reparametrization(x, S_theta, grad_S_theta_x, n):
+    """
+    Computes the re-parametrized surface point x_theta.
+    
+    Args:
+        x: Initial 3D point (tensor).
+        S_theta: SDF value at x, S_theta(x) (scalar tensor).
+        grad_S_theta_x: Gradient of SDF w.r.t x, n = grad S_theta(x) (3D vector tensor).
+        n: Surface normal vector (3D vector tensor). 
+           Note: In practice, n is often computed as grad_S_theta_x. 
+           If n is normalized, n^T n = 1. If not, n^T n is the squared magnitude.
+    
+    Returns:
+        x_theta: Re-parametrized point on the zero-level set.
+    """
+    # Compute squared magnitude of normal
+    n_dot_n = dot(n, n)
+    
+    # Avoid division by zero if normal is zero (degenerate case)
+    if n_dot_n < 1e-8:
+        return x
+        
+    # Compute displacement scalar
+    # t = - (1 / (n^T n)) * S_theta(x)
+    t = - (S_theta / n_dot_n)
+    
+    # Compute re-parametrized point
+    # x_theta = x + t * n
+    x_theta = x + t * n
+    
+    return x_theta
+```
+
+**Parameters**
+- $x$: Initial intersection estimate.
+- $S_{\Theta_s}(x)$: SDF value.
+- $n$: Normal vector $\nabla S_{\Theta_s}(x)$.
+
+**Edge Cases and Pitfalls**
+- **Degenerate Normals**: If $n$ is zero (e.g., at a singularity or far from the surface), $n^T n$ is zero, leading to division by zero. A guard is required [G].
+- **First-Order Approximation**: The method provides an unbiased first-order gradient with respect to $\Theta_s$. It does not capture higher-order surface curvature effects, which may limit accuracy for highly curved surfaces or large deformations [S1].
+- **Initialization**: The method assumes the initial point $x$ is close enough to the surface such that the first-order approximation is valid.
+
+## Subtopics
+
+### Differentiable Surface Point Reparameterization
+This variant explicitly reparameterizes the surface intersection equation to make the surface point differentiable with respect to the SDF MLP parameters [S2]. It uses the same core formula $x_{\Theta_g} = x - \frac{n}{n^T n} S_{\Theta_g}(x)$ but is often integrated into broader inverse rendering pipelines with additional loss terms (e.g., $L_{rgb}, L_{ssim}, L_{smooth}$) to optimize both geometry and material properties [S2]. It is chosen when differentiable rendering of complex materials and geometry is required simultaneously.
+
+## Operating characteristics
+**Time and Memory Complexity**
+- Time: $O(1)$ per ray, assuming $S_{\Theta_s}(x)$ and $\nabla S_{\Theta_s}(x)$ are computed in $O(1)$ (e.g., via a small MLP).
+- Memory: $O(1)$ additional memory per ray.
+
+**Measured Performance**
+- Not given in the sources.
+
+**Scaling**
+- Scales linearly with the number of rays.
+
+**Strengths and Limitations**
+- **Strengths**: Enables gradient-based optimization of implicit surfaces in inverse rendering. Simple to implement.
+- **Limitations**: First-order approximation may be inaccurate for large displacements. Requires differentiable SDF evaluation.
+
+**When to Use**
+- Use when optimizing neural implicit surfaces (SDFs) for inverse rendering tasks where geometry needs to be updated via gradient descent.
+
+**When Not to Use**
+- Do not use for static rendering where geometry is fixed. Do not use if high-order curvature accuracy is critical and the first-order approximation is insufficient.
+
+## Background
+Originated in the context of inverse rendering and neural implicit surface optimization. The method was introduced in the IRON paper (2022) [S1] to enable differentiable ray-surface intersection for optimizing Neural SDFs and materials from photometric images. It builds on earlier works [76, 85] cited in PIR [S2] that reparameterized surface intersection equations.
+
+## Sources
+[S1] IRON: Inverse Rendering by Optimizing Neural SDFs and Materials from Photometric Images, https://doi.org/10.1109/cvpr52688.2022.00548, fetched 2026-10-26
+[S2] PIR: Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization, https://doi.org/10.1109/3dv66043.2025.00055, fetched 2026-10-26

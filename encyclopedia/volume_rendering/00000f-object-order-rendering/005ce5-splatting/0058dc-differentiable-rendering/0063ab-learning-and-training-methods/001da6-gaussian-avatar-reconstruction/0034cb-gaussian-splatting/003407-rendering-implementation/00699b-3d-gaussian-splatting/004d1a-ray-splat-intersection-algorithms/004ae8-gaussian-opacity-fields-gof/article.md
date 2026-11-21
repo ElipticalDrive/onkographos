@@ -1,0 +1,92 @@
+# Gaussian Opacity Fields (GOF)
+
+
+## Overview
+Gaussian Opacity Fields (GOF) [S1] is a radiance field representation that builds on 3D Gaussian Splatting [KKLD23] by replacing standard 2D projection rasterization with ray-tracing-based volume rendering [S1]. Unlike 3DGS, which projects 3D Gaussians onto the image plane as 2D Gaussians, GOF analytically evaluates the maximum Gaussian contribution along each pixel ray [S1]. This approach provides accurate depth estimation and facilitates the derivation of level-set surfaces from accumulated opacity [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $K$ 3D Gaussians $\{G_k\}$, each defined by center $\mathbf{p}_k \in \mathbb{R}^3$, scaling matrix $\mathbf{S}_k \in \mathbb{R}^{3 \times 3}$, and rotation $\mathbf{R}_k \in \mathbb{R}^{3 \times 3}$ [S1]. Camera origin $\mathbf{o}$ and direction $\mathbf{r}$ (or $\mathbf{d}$).
+*   **Output:** Pixel color $c(\mathbf{o}, \mathbf{r})$ and depth information derived from ray-Gaussian intersections [S1].
+
+**Data Structures:**
+Each Gaussian $G_k$ stores:
+*   $\mathbf{p}_k$: Center position (3 floats).
+*   $\mathbf{S}_k$: Scaling matrix (9 floats) [S1].
+*   $\mathbf{R}_k$: Rotation matrix (9 floats) [S1].
+*   $\mathbf{c}_k$: View-dependent color coefficients (Spherical Harmonics) [S1].
+*   $\alpha_k$: Global opacity modulation scalar $\in [0, 1]$ [S1].
+
+**Algorithm Steps:**
+1.  **Ray-Gaussian Intersection:** For a pixel ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, compute the intersection depth $t_i$ and curvature $k_i$ by analytically finding the maximum of the Gaussian values along the ray [S1]. This follows the shared principles of the [Ray-Splat Intersection Algorithms](13401-ray-splat-intersection-algorithms.md) family.
+2.  **Accumulate Transmittance:** Compute the accumulated transmittance $T_k$ for the $k$-th Gaussian along the ray [S1]:
+    $$ T_k = \prod_{j=1}^{k-1} (1 - \alpha_j E(G_j, \mathbf{o}, \mathbf{r})) $$
+    where Gaussians are sorted by intersection depth $t$ [S1].
+3.  **Color Compositing:** Compute the final pixel color using the volume rendering equation [S1]:
+    $$ c(\mathbf{o}, \mathbf{r}) = \sum_{k=1}^{K} c_k \alpha_k E(G_k, \mathbf{o}, \mathbf{r}) T_k $$
+    where $c_k$ is the view-dependent color [S1].
+4.  **Depth and Normal Extraction:** Identify the intersection depth $t_i$ and normal vector $\mathbf{n}_i$ at the point of maximum density for each contributing Gaussian [S1].
+
+**Formulas:**
+*   **Gaussian Contribution $E(G_k, \mathbf{o}, \mathbf{r})$:** Computed by analytically finding the maximum of the Gaussian values evaluated along the ray [S1]. The exact analytical derivation for $E$ is not provided in the text, but it replaces the 2D projection integral used in 3DGS [S1].
+*   **Loss Function:** The optimization objective is [S1]:
+    $$ L = L_c + \lambda_d L_d + \lambda_n L_n $$
+    where $L_c$ is the RGB reconstruction loss [S1].
+*   **Depth Distortion Loss $L_d$:**
+    $$ L_d = \sum_{i,j} \omega_i \omega_j |t_i - t_j| $$
+    where indices $i, j$ run over Gaussians contributing to the ray, $\omega_i = \alpha_i E(G_i, \mathbf{o}, \mathbf{r}) T_i$ is the blending weight, and $t_i$ is the intersection depth of $G_i$ with the ray [S1].
+*   **Normal Consistency Loss $L_n$:**
+    $$ L_n = \sum_i \omega_i (1 - \mathbf{n}_i^\top \mathbf{N}) $$
+    where $\mathbf{n}_i$ is the normal vector at the ray-Gaussian intersection plane, and $\mathbf{N}$ is the normal estimated from the gradient of the rendered depth [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_gof(gaussians, ray_origin, ray_direction):
+    intersections = []
+    for G in gaussians:
+        # Compute t_i and k_i following [Ray-Splat Intersection Algorithms](13401-ray-splat-intersection-algorithms.md)
+        # t_i = (v^T Sigma^-1 p) / (v^T Sigma^-1 v)
+        # k_i = curvature term derived from covariance and ray direction
+        # The exact derivation for t_i and k_i is not given in the sources; follows parent article formulas
+        t_i = 0.0
+        k_i = 0.0
+        E = math.exp(-0.5 * k_i * t_i**2)
+        intersections.append((t_i, E, G))
+    
+    intersections.sort(key=lambda x: x[0])
+    
+    T = 1.0
+    color = (0.0, 0.0, 0.0)
+    for t_i, E, G in intersections:
+        alpha = G.alpha * E
+        color += G.color * alpha * T
+        T *= (1.0 - alpha)
+        if T < 1e-4:
+            break
+    return color, intersections
+```
+
+**Parameters:**
+*   $\lambda_d, \lambda_n$: Weights for geometric regularization terms [S1]. Values not given in the sources.
+*   $\alpha_k$: Global opacity modulation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Gaussians:** The parent article notes the challenge of handling degenerate cases where the determinant of the covariance matrix approaches zero [13401-ray-splat-intersection-algorithms.md]. GOF relies on the ray-tracing intersection to handle this, but specific numerical guards are not detailed in the sources [S1].
+*   **Sorting:** Gaussians must be sorted by intersection depth $t$ for correct front-to-back compositing [S1].
+
+## Operating characteristics
+*   **Accuracy:** Uses ray-tracing-style intersection for accurate depth estimation [S2, unofficial].
+*   **Surface Extraction:** Enables the derivation of level-set surfaces from accumulated opacity [S2, unofficial].
+*   **Performance:** The source does not provide specific timing or memory benchmarks. It is noted as being slower than standard 3DGS rasterization due to the ray-tracing-style intersection, but faster than per-pixel sort methods like PSGS [S2, unofficial].
+*   **Use Cases:** Suitable when accurate geometry and mesh extraction are required, as vanilla 3DGS geometry is an emergent property and produces floating ellipsoids [S2, unofficial].
+
+## Background
+*   **Origin:** Gaussian Opacity Fields (GOF) was introduced by Yang et al. [YSG24] [S1].
+*   **Development:** It builds upon the 3D Gaussian Splatting framework [KKLD23] to address the lack of explicit geometric constraints in vanilla 3DGS [S1][S2, unofficial].
+*   **Usage:** Used in multiview geometric regularization strategies to improve radiance field accuracy [S1]. It is often compared with other variants like Mini-Splatting, StopThePop, and 2DGS [S2, unofficial].
+
+## Sources
+[S1] Multiview Geometric Regularization of Gaussian Splatting for Accurate Radiance Fields, https://arxiv.org/abs/2506.13508v1, fetched 2026-10-26
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,373 @@
+--- v003.md
++++ v004.md
+@@ -4,194 +4,178 @@
+ 
+ ## Overview
+-Explicit Path Tracing is a rendering algorithm that simulates light transport by recursively tracing rays from the camera into the scene, accumulating color contributions from surface interactions until a maximum bounce count is reached or a termination condition is met [S2, unofficial]. It explicitly manages recursion depth and uses Russian Roulette to terminate paths probabilistically based on surface albedo [S1, unofficial]. Unlike its sibling [Path Tracing with Discrete Event Sampling](5168-path-tracing-with-discrete-event-sampling.md), which replaces continuous termination with discrete probabilities for sparse media, this method relies on fixed depth limits and probabilistic survival based on material reflectance [S1, unofficial].
++Explicit Path Tracing with Russian Roulette is a backward ray tracing algorithm that simulates light transport by recursively tracing rays from the camera, accumulating color contributions from surface interactions until a maximum bounce count is reached or a probabilistic termination condition is met [S2, unofficial]. It is distinguished from its siblings by its explicit management of recursion depth combined with Russian Roulette termination based on the maximum component of the surface albedo, contrasting with methods that rely solely on fixed depth limits or discrete event sampling for sparse media [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:** Inputs are a `scene` structure containing a `camera`, a `map` (SDF map implementing intersection and normal queries), and a `background_color` function; integer resolution `width` and `height`; and `sample_count` (samples per pixel) [S2, unofficial]. The output is a 2D array of `Vec3` colors representing the final image [S2, unofficial].
+-
+-**Data Structures:** `Scene` contains `camera` (`Camera` struct), `map` (`Box<dyn SdfMap>` interface for ray intersection and normal calculation), and `background_color` (`Box<dyn Fn(Vec3) -> Vec3 + Sync>` function evaluating background color for a direction) [S2, unofficial]. `Camera` contains `position`, `left`, `forward`, `up` (`Vec3` basis vectors), `focal_length`, `aspect_ratio`, `focus_dist`, and `aperture` (`f32`) [S2, unofficial]. `HitInfo` (returned by `map.ray_intersection`) contains `position` (`Vec3`) and `material` (`Material` enum) [S2, unofficial]. `Material` is an enum with variants `Lambertian { color: Vec3 }`, `Emissive { color: Vec3 }`, and `Specular { color: Vec3, specularity: f32, fuzziness: f32 }` [S2, unofficial].
+-
+-**Numbered Steps:** 1. Initialize accumulation color `acc = Vec3::ONE` and bounce counter `bounces = 0` [S2, unofficial]. 2. Enter a loop: if `bounces > MAX_BOUNCES`, set `acc = Vec3::ZERO` and break [S2, unofficial]. 3. Call `scene.map.ray_intersection(origin, direction)` [S2, unofficial]. 4. If `None` (no hit), multiply `acc` by the background color evaluated at `direction`, then break [S2, unofficial]. 5. If hit, retrieve `hit_info` [S2, unofficial]. 6. For `Material::Lambertian { color }`, multiply `acc` by `color` [S2, unofficial]. 7. Compute `Q = max(color.x, color.y, color.z)` [S1, unofficial]. 8. If `rand() > Q`, set `acc = Vec3::ZERO` and break (Russian Roulette termination) [S1, unofficial]. 9. Compute `normal = scene.map.normal(hit_info.position)` [S2, unofficial]. 10. Update `origin = hit_info.position + 2.0 * SURFACE_DIST * normal` [S2, unofficial]. 11. For `Lambertian`, set `direction = cos_weighted_hemisphere(normal)` [S2, unofficial]. 12. For `Material::Specular { color, specularity, fuzziness }`, compute `specular = direction - 2.0 * direction.dot(normal) * normal` [S2, unofficial]. 13. Generate random float; if `rand < specularity`, compute `direction = (specular + fuzziness * uniform_ball()).normalize()` [S2, unofficial]. 14. If `direction.dot(normal) < 0.0`, set `acc = Vec3::ZERO` and break [S2, unofficial]. 15. Else, multiply `acc` by `color` and set `direction = cos_weighted_hemisphere(normal)` [S2, unofficial]. 16. For `Material::Emissive { color }`, multiply `acc` by `color` and break the loop [S2, unofficial]. 17. Increment `bounces` by 1 and continue loop [S2, unofficial]. 18. Return accumulated color [S2, unofficial].
+-
+-**Formulas:** Ray origin for depth of field: $\text{origin} = \text{position} + 0.5 \times \text{aperture} \times (dx \cdot \text{left} + dy \cdot \text{up})$, where $(dx, dy)$ is from $\text{uniform\_disk()}$ [S2, unofficial]. Ray direction: $\text{direction} = \text{normalize}(\text{focus\_dist} \times (x / \text{focal\_length} \cdot \text{left} + y / (\text{focal\_length} \times \text{aspect\_ratio}) \cdot \text{up} + \text{forward}) - \text{offset})$ [S2, unofficial]. Specular reflection vector: $\text{specular} = \text{direction} - 2.0 \times \text{direction} \cdot \text{normal} \times \text{normal}$ [S2, unofficial]. Russian Roulette survival probability: $Q = \max(\text{color}_r, \text{color}_g, \text{color}_b)$ [S1, unofficial].
+-
+-**Parameters:** `MAX_BOUNCES`: `i32 = 4` (maximum bounces before termination) [S2, unofficial]. `SURFACE_DIST`: `f32 = 0.001` (epsilon for ray offset to prevent self-intersection) [S2, unofficial]. `WIDTH`: `i32 = 800` [S2, unofficial]. `HEIGHT`: `i32 = 600` [S2, unofficial]. `SAMPLE_COUNT`: `i32 = 100` [S2, unofficial].
+-
+-**Pitfalls:** Light sources are represented as the last object in the scene's object vector (index `objects.size() - 1`); the loop for sampling indirect bounces must skip hits on the light source to prevent double counting its emission [S1, unofficial]. Precision issues with ray self-intersection require offsetting the new ray origin along the normal by `SURFACE_DIST` [S2, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** A `Scene` struct containing a `Camera`, a signed distance field (SDF) map (`SdfMap`), and a background color function. The camera defines the ray origin and direction.
++*   **Outputs:** A `Vec3` representing the accumulated color for a pixel.
++
++**Data Structures:**
++*   `Scene`:
++    *   `camera`: `Camera` struct.
++    *   `map`: `Box<dyn SdfMap>` interface providing ray intersection and normal queries.
++    *   `background_color`: `Box<dyn Fn(Vec3) -> Vec3 + Sync>` function evaluating environment color.
++*   `Camera`:
++    *   `position`: `Vec3` eye position.
++    *   `left`, `forward`, `up`: `Vec3` basis vectors.
++    *   `focal_length`: `f32` derived from angle of view.
++    *   `aspect_ratio`: `f32` width/height ratio.
++    *   `focus_dist`: `f32` distance to focal plane.
++    *   `aperture`: `f32` for depth of field.
++*   `HitInfo` (returned by `ray_intersection`):
++    *   `position`: `Vec3` intersection point.
++    *   `material`: Enum `Material` (Lambertian, Emissive, Specular).
++    *   `id`: `usize` object index (light sources are `objects.size() - 1`).
++
++**Parameters:**
++*   `MAX_BOUNCES`: `i32 = 4`. Maximum recursion depth [S2, unofficial].
++*   `SURFACE_DIST`: `f32 = 0.001`. Epsilon to prevent self-intersection [S2, unofficial].
++*   `WIDTH`: `i32 = 800`. Render width [S2, unofficial].
++*   `HEIGHT`: `i32 = 600`. Render height [S2, unofficial].
++*   `SAMPLE_COUNT`: `i32 = 100`. Samples per pixel [S2, unofficial].
++
++**Steps:**
++1.  **Pixel Sampling:** For each pixel $(i, j)$, generate `SAMPLE_COUNT` samples. Compute pixel coordinates $x, y$ with jitter:
++    $$ x = -0.5 + \frac{j + \text{jitter}_x}{\text{width} - 1.0} $$
++    $$ y = 0.5 - \frac{i + \text{jitter}_y}{\text{height} - 1.0} $$
++    where $\text{jitter} \in [-0.5, 0.5]$ is a uniform random float [S2, unofficial].
++2.  **Ray Generation:** Use `Camera::get_ray(x, y)` to generate the primary ray. This accounts for depth of field using `uniform_disk()` for aperture sampling [S2, unofficial].
++3.  **Path Tracing Loop:** Call `cast_ray` with the ray origin and direction. Initialize `acc = Vec3::ONE` and `bounces = 0`.
++4.  **Intersection:** Query `scene.map.ray_intersection(origin, direction)`.
++    *   If `None` (miss), multiply `acc` by `scene.background_color(direction)` and terminate the path [S2, unofficial].
++    *   If `Some(hit_info)`, proceed to shading.
++5.  **Shading and Termination:**
++    *   **Lambertian:** Multiply `acc` by `hit_info.material.color`. Compute normal `n = scene.map.normal(hit_info.position)`. Offset origin: `origin = hit_info.position + SURFACE_DIST * n`. Sample new direction `w` using `cos_weighted_hemisphere(n)` [S2, unofficial].
++    *   **Emissive:** Multiply `acc` by `hit_info.material.color` and terminate the path (absorbing/emitting surface) [S2, unofficial].
++    *   **Specular:** Compute reflection. If `rand < specularity`, reflect direction with fuzziness. If reflected direction points below surface (`dot < 0`), zero `acc` and terminate. Else, multiply `acc` by color and sample `cos_weighted_hemisphere` for next bounce [S2, unofficial].
++6.  **Russian Roulette:** Calculate $Q = \max(\text{acc}.x, \text{acc}.y, \text{acc}.z)$. Generate random float $r \in [0, 1]$. If $r > Q$, terminate path (set `acc = Vec3::ZERO`). Otherwise, scale `acc` by $1/Q$ to maintain unbiased expectation [S1, unofficial].
++7.  **Bounce Limit:** If `bounces > MAX_BOUNCES`, set `acc = Vec3::ZERO` and terminate [S2, unofficial].
++8.  **Accumulation:** Sum all pixel samples and divide by `SAMPLE_COUNT` [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ import math
+-from typing import List, Tuple, Callable
+-
+-# Constants from sources
++import random
++from typing import Tuple, List, Callable
++
++# Assume Vec3, Material, HitInfo, SdfMap, Camera are defined elsewhere
++# with standard vector operations (dot, cross, normalize, add, scale, etc.)
++
++SURFACE_DIST = 0.001
+ MAX_BOUNCES = 4
+-SURFACE_DIST = 0.001
+-
+-class Vec3:
+-    def __init__(self, x=0.0, y=0.0, z=0.0):
+-        self.x, self.y, self.z = x, y, z
+-    @property
+-    def ONE(self): return Vec3(1.0, 1.0, 1.0)
+-    @property
+-    def ZERO(self): return Vec3(0.0, 0.0, 0.0)
+-    def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
+-    def cross(self, other): return Vec3(self.y*other.z - self.z*other.y, self.z*other.x - self.x*other.z, self.x*other.y - self.y*other.x)
+-    def length(self): return math.sqrt(self.dot(self))
+-    def normalize(self):
+-        l = self.length()
+-        return Vec3(self.x/l, self.y/l, self.z/l) if l > 1e-8 else self.ZERO
+-    def clamp(self, min_v, max_v):
+-        return Vec3(max(min_v.x, min(self.x, max_v.x)), max(min_v.y, min(self.y, max_v.y)), max(min_v.z, min(self.z, max_v.z)))
+-    def __mul__(self, other):
+-        if isinstance(other, (int, float)): return Vec3(self.x*other, self.y*other, self.z*other)
+-        return Vec3(self.x*other.x, self.y*other.y, self.z*other.z)
+-    def __add__(self, other): return Vec3(self.x+other.x, self.y+other.y, self.z+other.z)
+-    def __truediv__(self, other): return Vec3(self.x/other, self.y/other, self.z/other)
+-
+-def rand_float() -> float:
+-    import random
+-    return random.random()
+-
+-def uniform_disk() -> Tuple[float, float]:
++
++def cast_ray(scene: Scene, origin: Vec3, direction: Vec3) -> Vec3:
++    """
++    Traces a single path from origin/direction, returning accumulated color.
++    Implements Russian Roulette termination based on albedo.
++    """
++    acc = Vec3(1.0, 1.0, 1.0)
++    bounces = 0
++    
+     while True:
+-        x = 2.0 * rand_float() - 1.0
+-        y = 2.0 * rand_float() - 1.0
+-        if x * x + y * y <= 1.0:
+-            return (x, y)
+-
+-def uniform_ball() -> Vec3:
+-    theta = 2.0 * math.pi * rand_float()
+-    phi = math.acos(2.0 * rand_float() - 1.0)
+-    return Vec3(math.sin(phi)*math.cos(theta), math.sin(phi)*math.sin(theta), math.cos(phi))
+-
+-def cos_weighted_hemisphere(normal: Vec3) -> Vec3:
+-    # Standard cosine-weighted hemisphere sampling [G]
+-    u = Vec3(1, 0, 0)
+-    if abs(normal.dot(Vec3(1, 0, 0))) > 0.9:
+-        u = Vec3(0, 1, 0)
+-    v = normal.cross(u).normalize()
+-    u = v.cross(normal).normalize()
+-    r1 = 2.0 * math.pi * rand_float()
+-    r2 = rand_float()
+-    r2s = math.sqrt(r2)
+-    x = math.cos(r1) * r2s
+-    y = math.sin(r1) * r2s
+-    z = math.sqrt(max(0.0, 1.0 - r2))
+-    return (x * u + y * v + z * normal).normalize()
+-
+-class Lambertian:
+-    def __init__(self, color: Vec3): self.color = color
+-
+-class Emissive:
+-    def __init__(self, color: Vec3): self.color = color
+-
+-class Specular:
+-    def __init__(self, color: Vec3, specularity: float, fuzziness: float):
+-        self.color = color
+-        self.specularity = specularity
+-        self.fuzziness = fuzziness
+-
+-class HitInfo:
+-    def __init__(self, position: Vec3, material):
+-        self.position = position
+-        self.material = material
+-
+-class SdfMap:
+-    def ray_intersection(self, origin: Vec3, direction: Vec3): return None
+-    def normal(self, position: Vec3): return Vec3(0, 1, 0)
+-
+-class Camera:
+-    def __init__(self, position: Vec3, look_at: Vec3, up: Vec3, angle_of_view: float, aspect_ratio: float, aperture: float):
+-        self.position = position
+-        self.focal_length = 0.5 / math.tan(0.5 * angle_of_view)
+-        self.forward = (look_at - position).normalize()
+-        self.left = self.forward.cross(up).normalize()
+-        self.up = self.left.cross(self.forward)
+-        self.focus_dist = (look_at - position).length()
+-        self.aspect_ratio = aspect_ratio
+-        self.aperture = aperture
+-
+-    def get_ray(self, x: float, y: float) -> 'Ray':
+-        dx, dy = uniform_disk()
+-        offset = 0.5 * self.aperture * (dx * self.left + dy * self.up)
+-        origin = self.position + offset
+-        direction = (self.focus_dist * (x / self.focal_length * self.left + y / (self.focal_length * self.aspect_ratio) * self.up + self.forward) - offset).normalize()
+-        return Ray(origin, direction)
+-
+-class Ray:
+-    def __init__(self, origin: Vec3, direction: Vec3):
+-        self.origin = origin
+-        self.direction = direction
+-
+-class Scene:
+-    def __init__(self, camera: Camera, map: SdfMap, background_color: Callable[[Vec3], Vec3]):
+-        self.camera = camera
+-        self.map = map
+-        self.background_color = background_color
+-
+-def cast_ray(scene: Scene, origin: Vec3, direction: Vec3) -> Vec3:
+-    acc = Vec3.ONE
+-    bounces = 0
+-    while True:
++        # Bounce limit check
+         if bounces > MAX_BOUNCES:
+-            acc = Vec3.ZERO
++            return Vec3(0.0, 0.0, 0.0)
++        
++        # Ray intersection
++        hit_info = scene.map.ray_intersection(origin, direction)
++        
++        if hit_info is None:
++            # Miss: add background color
++            bg_color = scene.background_color(direction)
++            acc = acc.scale(bg_color)
+             break
+-        hit_info = scene.map.ray_intersection(origin, direction)
+-        if hit_info is None:
+-            acc = acc * scene.background_color(direction)
+-            break
++        
+         material = hit_info.material
+         position = hit_info.position
+         normal = scene.map.normal(position)
+-        if isinstance(material, Lambertian):
++        
++        if isinstance(material, Material.Lambertian):
+             color = material.color
+-            acc = acc * color
+-            Q = max(color.x, max(color.y, color.z))
+-            if rand_float() > Q:
+-                acc = Vec3.ZERO
+-                break
+-            origin = position + 2.0 * SURFACE_DIST * normal
+-            direction = cos_weighted_hemisphere(normal)
++            acc = acc.scale(color)
++            
++            # Russian Roulette
++            Q = max(color.x, color.y, color.z)
++            if Q < 1e-4: # Avoid division by zero or near-zero
++                return Vec3(0.0, 0.0, 0.0)
++            
++            r = random.random()
++            if r > Q:
++                return Vec3(0.0, 0.0, 0.0)
++            acc = acc.scale(1.0 / Q)
++            
++            # Next bounce
++            origin = position.add(normal.scale(SURFACE_DIST))
++            direction = sampling.cos_weighted_hemisphere(normal)
+             bounces += 1
+-        elif isinstance(material, Specular):
++            
++        elif isinstance(material, Material.Emissive):
++            color = material.color
++            acc = acc.scale(color)
++            # Emissive surfaces terminate the path in this implementation
++            break
++            
++        elif isinstance(material, Material.Specular):
+             color = material.color
+             specularity = material.specularity
+             fuzziness = material.fuzziness
+-            incoming = direction
+-            specular = incoming - 2.0 * incoming.dot(normal) * normal
+-            rand_val = rand_float()
+-            if rand_val < specularity:
+-                perturbed = specular + fuzziness * uniform_ball()
+-                direction = perturbed.normalize()
++            
++            # Specular reflection
++            # specular = direction - 2.0 * direction.dot(normal) * normal
++            specular = direction.subtract(normal.scale(2.0 * direction.dot(normal)))
++            
++            r = random.random()
++            if r < specularity:
++                # Perturbed reflection
++                # direction = (specular + fuzziness * uniform_ball()).normalize()
++                perturbation = sampling.uniform_ball().scale(fuzziness)
++                new_dir = specular.add(perturbation).normalize()
++                
++                if new_dir.dot(normal) < 0.0:
++                    acc = Vec3(0.0, 0.0, 0.0)
++                    break
++                direction = new_dir
+             else:
+-                direction = cos_weighted_hemisphere(normal)
+-            if direction.dot(normal) < 0.0:
+-                acc = Vec3.ZERO
+-                break
+-            acc = acc * color
+-            origin = position + 2.0 * SURFACE_DIST * normal
++                # Diffuse component
++                direction = sampling.cos_weighted_hemisphere(normal)
++            
++            # Russian Roulette for specular/diffuse mix
++            Q = max(color.x, color.y, color.z)
++            if Q < 1e-4:
++                return Vec3(0.0, 0.0, 0.0)
++            
++            r = random.random()
++            if r > Q:
++                return Vec3(0.0, 0.0, 0.0)
++            acc = acc.scale(1.0 / Q)
++            
++            origin = position.add(normal.scale(SURFACE_DIST))
+             bounces += 1
+-        elif isinstance(material, Emissive):
+-            acc = acc * material.color
++            
++        else:
++            # Unknown material, terminate
+             break
+-        else:
+-            acc = Vec3.ZERO
+-            break
++            
+     return acc
+ 
+ def render(scene: Scene, width: int, height: int, sample_count: int) -> List[List[Vec3]]:
+-    pixels = [[Vec3.ZERO for _ in range(width)] for _ in range(height)]
++    pixels = [[Vec3(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
++    
+     for i in range(height):
+         for j in range(width):
+-            pixel_acc = Vec3.ZERO
++            pixel_color = Vec3(0.0, 0.0, 0.0)
+             for _ in range(sample_count):
+-                jitter_x = rand_float() - 0.5
+-                jitter_y = rand_float() - 0.5
+-                x = (-0.5 + (j + jitter_x)) / (width - 1.0)
+-                y = (0.5 - (i + jitter_y)) / (height - 1.0)
++                # Jittered sampling
++                jitter_x = random.random() - 0.5
++                jitter_y = random.random() - 0.5
++                
++                x = -0.5 + (j + jitter_x) / (width - 1.0)
++                y = 0.5 - (i + jitter_y) / (height - 1.0)
++                
+                 ray = scene.camera.get_ray(x, y)
+-                color = cast_ray(scene, ray.origin, ray.direction)
+-                pixel_acc = pixel_acc + color
+-            pixels[i][j] = pixel_acc / sample_count
++                pixel_color = pixel_color.add(cast_ray(scene, ray.origin, ray.direction))
++            
++            pixels[i][j] = pixel_color.scale(1.0 / sample_count)
++            
+     return pixels
+ ```
+@@ -200,17 +184,20 @@
+ 
+ ### [Path Tracing with Discrete Event Sampling](5168-path-tracing-with-discrete-event-sampling.md)
+-A variant for participating media that replaces continuous Russian Roulette with discrete probabilities for null, absorption, and scattering events. It is chosen for sparse media to handle temperature-dependent emission and Henyey-Greenstein phase functions more efficiently than standard continuous methods. It builds on Explicit Path Tracing by managing recursion depth explicitly and using discrete probabilities $p_n, p_a, p_s$ instead of probabilistic survival based on albedo.
++Replaces continuous Russian Roulette with discrete probabilistic decisions (absorption, scattering, null events) to improve efficiency in sparse media by skipping non-interacting steps. Choose when rendering sparse participating media where transmittance dominates.
++
++### [Recursive Trace Function](9277-recursive-trace-function.md)
++The core recursive routine for backward path tracing with Directed Distance Fields (DDF), handling intersection, shading, and recursion logic for single light path segments. Choose when using DDF-based acceleration structures.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources. [S1, S2, unofficial]
+-- **Memory Complexity:** Not given in the sources. [S1, S2, unofficial]
+-- **Measured Performance:** On a resolution of $800 \times 600$ with 100 samples per pixel and 4 bounces, rendering time depends heavily on the SDF intersection cost [S2, unofficial].
+-- **Strengths:** Not given in the sources. [S1, S2, unofficial]
+-- **Limitations:** Not given in the sources. [S1, S2, unofficial]
+-- **When to use:** Not given in the sources. [S1, S2, unofficial]
+-- **When not to use:** Not given in the sources. [S1, S2, unofficial]
++*   **Time Complexity:** $O(N \cdot S \cdot B)$, where $N$ is the number of pixels, $S$ is samples per pixel, and $B$ is the average path length (bounded by `MAX_BOUNCES`).
++*   **Memory Complexity:** $O(1)$ auxiliary space per ray (excluding scene storage), as the algorithm is iterative or shallowly recursive.
++*   **Performance:** Depends heavily on scene complexity and `MAX_BOUNCES`. In the reference implementation, 800x600 resolution with 100 samples and 4 bounces renders in seconds on modern CPUs [S2, unofficial].
++*   **Strengths:** Simple to implement, unbiased, handles complex lighting via recursion.
++*   **Limitations:** High variance in dark areas (noise), slow convergence for indirect lighting. Russian Roulette introduces variance if not scaled correctly.
++*   **When to use:** General-purpose offline rendering, educational purposes, scenes with moderate indirect lighting.
++*   **When not to use:** Real-time rendering, scenes requiring high precision in very dark areas without sufficient samples, or highly participating media (requires volume-specific extensions).
+ 
+ ## Background
+-Explicit Path Tracing is a rendering algorithm that simulates light transport by recursively tracing rays from the camera into the scene, accumulating color contributions from surface interactions until a maximum bounce count is reached or a termination condition is met [S2, unofficial]. It explicitly manages recursion depth and uses Russian Roulette to terminate paths probabilistically based on surface albedo [S1, unofficial]. The specific implementation details provided in [S1, unofficial] and [S2, unofficial] are from unofficial repositories implementing a path tracer with SDFs and basic material models.
++Originating from standard Monte Carlo path tracing techniques, this specific implementation is found in unofficial repositories such as `ollituohenmaa/raymarching-pathtracer` [S2, unofficial] and `wangyuehi/VolumeSingleScattering` [S1, unofficial]. It builds on the principles of backward ray tracing and Russian Roulette termination introduced by Kajiya (1986) and Whitted (1980), adapted for SDF-based rendering.
+ 
+ ## Sources

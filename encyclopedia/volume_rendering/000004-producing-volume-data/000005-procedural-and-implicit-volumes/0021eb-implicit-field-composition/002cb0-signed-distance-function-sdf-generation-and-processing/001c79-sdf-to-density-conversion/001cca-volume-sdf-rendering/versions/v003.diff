@@ -1,0 +1,305 @@
+--- v002.md
++++ v003.md
+@@ -1,116 +1,160 @@
+ # Volume SDF Rendering
+ 
+-Also called: Neural Volume Rendering (SDF-based), SDF Volume Rendering, SDF → density volume rendering, SDF-based Volume Rendering, Signed Distance Field Volume Rendering, VolumeSDFRenderer
++Also called: Neural Volume Rendering (SDF-based), SDF Volume Rendering, SDF → density volume rendering, SDF-induced volume rendering, Signed Distance Field Volume Rendering, VolumeSDFRenderer
+ 
+ ## Overview
+-Volume SDF Rendering is a neural rendering technique that integrates color and density along rays sampled from an implicit Signed Distance Function (SDF) [S1, unofficial]. It solves the problem of rendering complex 3D geometry from multi-view images by converting the continuous SDF into a volumetric density field, allowing standard volume rendering to capture both surface appearance and thin structures [S2, unofficial]. Unlike standard volume rendering which takes density directly, this method derives density from the distance to the implicit surface, enabling the representation of open surfaces and varying thickness through the Laplace distribution CDF [S1, unofficial]. It differs from standard volume rendering by accepting distance and color from an implicit function and requiring SDF-to-density conversion [S3].
++Volume SDF Rendering is a neural rendering technique that reconstructs 3D geometry and appearance by integrating color and density along rays sampled from an implicit Signed Distance Function (SDF) [S1, unofficial][S5]. It solves the problem of recovering underlying geometry more accurately than direct density encoding by modeling volume density as a transformed function of the SDF [S5]. What sets it apart from standard volume rendering is the explicit conversion of signed distance values to density using a Laplace distribution CDF, which enforces surface priors and sharp transitions [S1, unofficial][S3]. Unlike [VolSDF Volume Rendering](2551-volsdf-volume-rendering.md), which may use different activation strategies, this method strictly adheres to the Laplace-based conversion defined in [S1, S4, unofficial].
+ 
+ ## How it works
+-The method renders an image by casting rays from camera positions, sampling points along these rays, evaluating an implicit SDF to get distance and color, converting the distance to density, and aggregating the color using volume rendering weights [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A `RayBundle` containing ray origins, directions, and sample points; an implicit SDF function (analytic or neural) that returns distance and color/feature vectors; configuration parameters $\alpha$ (scaling) and $\beta$ (sharpness) [S1, S6, unofficial].
++*   **Output:** A rendered color tensor of shape $(H, W, 3)$ and optionally depth/feature maps [S6, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Inputs**:
+-    *   `ray_bundle`: Contains ray origins, directions, and sample points [S5, unofficial].
+-    *   `implicit_fn`: An object or function that computes the signed distance and color (or feature) at any 3D point. It may be analytic (e.g., sphere, box) or a neural network [S5, unofficial].
+-    *   `alpha` ($\alpha$): Scaling factor for the density [S1, unofficial].
+-    *   `beta` ($\beta$): Sharpness/Scale parameter for the SDF-to-density transition [S1, unofficial].
+-    *   `eps`: Small constant for numerical stability in transmittance calculation [S1, unofficial].
+-*   **Outputs**:
+-    *   `color`: A tensor of shape $(H, W, 3)$ representing the rendered RGB image [S5, unofficial].
+-    *   `depth`: (Optional) Depth map associated with the rendering [S5, unofficial].
++**Data Structures:**
++*   **RayBundle:** Contains `origins` (shape $[N, 3]$), `directions` (shape $[N, 3]$), and `sample_points` (shape $[N, D, 3]$) where $N$ is the number of rays and $D$ is the number of samples per ray [S6, unofficial].
++*   **Implicit Function:** A callable or module that takes a ray bundle or points and returns `distance` (shape $[N, D]$) and `color` (shape $[N, D, C]$) [S1, S6, unofficial].
+ 
+-### Data Structures
+-*   **RayBundle**:
+-    *   `origins`: Tensor of shape $(N, 3)$, ray origins in world space [S5, unofficial].
+-    *   `directions`: Tensor of shape $(N, 3)$, normalized ray directions [S5, unofficial].
+-    *   `sample_points`: Tensor of shape $(N, D, 3)$, points sampled along each of the $N$ rays, where $D$ is the number of samples per ray [S5, unofficial].
+-*   **Implicit Function Output**:
+-    *   `distance`: Tensor of shape $(N, D)$, signed distance values at sample points [S1, unofficial].
+-    *   `color`: Tensor of shape $(N, D, 3)$, color or feature values at sample points [S1, unofficial].
++**Parameters:**
++*   $\alpha$: Scaling factor for density. Default from config `cfg.alpha` [S1, S4, unofficial].
++*   $\beta$: Scale parameter for the Laplace distribution (sharpness of the transition). Default from config `cfg.beta` [S1, S4, unofficial].
++*   $\epsilon$: Small constant to prevent numerical instability in exponents, typically $10^{-10}$ [S1, unofficial].
+ 
+-### Numbered Steps
++**Steps:**
++1.  **Ray Sampling:** Generate rays from pixel coordinates and camera intrinsics. Sample points along these rays using a sampler (e.g., StratifiedRaysampler) to obtain `sample_points` and depth values [S1, S6, unofficial].
++2.  **Implicit Evaluation:** Query the implicit SDF function at `sample_points` to get signed distances $d$ and base colors/features $\mathbf{c}$ [S1, S6, unofficial].
++3.  **SDF to Density Conversion:** Convert signed distance $d$ to density $\rho$ using the Laplace distribution CDF [S1, S4, unofficial]:
++    $$
++    \rho = \alpha \cdot \text{CDF}_{\text{Laplace}(0, \beta)}(-d)
++    $$
++    The explicit piecewise formula is [S2, S4, unofficial]:
++    $$
++    \rho = \begin{cases} 
++    0.5 \alpha e^{-d/\beta} & \text{if } d > 0 \\
++    \alpha (1 - 0.5 e^{d/\beta}) & \text{if } d \le 0 
++    \end{cases}
++    $$
++4.  **Segment Length Calculation:** Compute segment lengths $\Delta t$ (deltas) from the depth values. For $D$ samples, concatenate the differences between consecutive depths with a large constant ($10^{10}$) at the end to handle the last segment [S1, S4, S6, unofficial]:
++    $$
++    \Delta t_i = \begin{cases} t_{i+1} - t_i & \text{for } i < D-1 \\ 10^{10} & \text{for } i = D-1 \end{cases}
++    $$
++    This large final delta ensures transmittance decays sufficiently if the ray exits the volume, preventing artifacts [S1, S4, unofficial].
++5.  **Transmittance and Weight Calculation:** Compute transmittance $T$ and weights $w$ for volume rendering [S1, unofficial][S5]:
++    *   Initialize $T_0 = 1$.
++    *   For each sample $i$ from $0$ to $D-1$:
++        $$
++        T_{i+1} = T_i \cdot \exp(-\rho_i \cdot \Delta t_i + \epsilon)
++        $$
++        $$
++        w_i = T_i \cdot (1 - \exp(-\rho_i \cdot \Delta t_i + \epsilon))
++        $$
++    Note: Some implementations derive a final optical density $\sigma$ for specific rendering backends using $\sigma = -\ln(1 - \rho) / \Delta t$ [S2, S4, unofficial], but the standard integration uses $\rho$ directly in the exponential term as shown in [S1, unofficial].
++6.  **Color Aggregation:** Aggregate the final color by summing the product of weights and per-sample colors [S1, S6, unofficial]:
++    $$
++    C = \sum_{i=1}^N w_i \mathbf{c}_i
++    $$
++    If feature rendering is enabled, multiply base color, learnable features, and density before aggregation [S2, unofficial].
+ 
+-1.  **Ray Generation and Sampling**:
+-    For each pixel in the image, generate a ray from the camera center through the pixel [S5, unofficial]. Use a sampler to generate $D$ sample points along each ray within a defined near/far range [S1, unofficial]. Store these as `sample_points` in the `ray_bundle` [S5, unofficial].
++**Pseudocode:**
++```python
++import torch
++import torch.nn.functional as F
+ 
+-2.  **Implicit Function Evaluation**:
+-    Query the implicit function at all sample points to obtain the signed distance and color/feature values [S1, unofficial].
+-    $$ \text{distance}, \text{color} = \text{implicit\_fn}(\text{sample\_points}) $$
+-    Where `distance` has shape $(N, D)$ and `color` has shape $(N, D, 3)$ [S1, unofficial].
+-
+-3.  **Segment Length Calculation**:
+-    Compute the length of each ray segment ($\Delta t$) between consecutive sample points [S3]. For $D$ points, there are $D$ segments [S1, unofficial]. The first $D-1$ segments are the differences between consecutive depth values [S4, unofficial]. The last segment is set to a large constant ($10^{10}$) to ensure rays exiting the volume do not contribute significant density, preventing artifacts from the infinite tail [S1, S4, unofficial].
+-    $$ \Delta t_i = \begin{cases} t_{i+1} - t_i & \text{for } i = 0 \dots D-2 \\ 10^{10} & \text{for } i = D-1 \end{cases} $$
+-    [S1, unofficial].
+-
+-4.  **SDF to Density Conversion**:
+-    Convert the signed distance $d$ to volumetric density $\rho$ using the Cumulative Distribution Function (CDF) of a Laplace distribution with mean 0 and scale $\beta$ [S1, unofficial]. The density is scaled by $\alpha$ [S4, unofficial].
+-    $$ \rho = \alpha \cdot \text{CDF}_{\text{Laplace}(0, \beta)}(-d) $$
+-    The explicit piecewise formula is:
+-    $$ \rho = \begin{cases} 0.5 \alpha e^{-d/\beta} & \text{if } d > 0 \\ \alpha (1 - 0.5 e^{d/\beta}) & \text{if } d \le 0 \end{cases} $$
+-    [S2, S4, unofficial].
+-
+-5.  **Transmittance and Weight Calculation**:
+-    Compute the transmittance $T$ and rendering weights $w$ for each sample [S1, unofficial]. Initialize $T_0 = 1$ [S1, unofficial]. For each sample $i$ from 0 to $D-1$:
+-    $$ T_{i+1} = T_i \cdot \exp(-\rho_i \cdot \Delta t_i + \epsilon) $$
+-    $$ w_i = T_i \cdot (1 - \exp(-\rho_i \cdot \Delta t_i + \epsilon)) $$
+-    Where $\epsilon$ is a small constant ($10^{-10}$) added to the exponent to prevent numerical instability [S1, unofficial]. Some sources define the final density $\sigma$ used in the exponent as $\sigma = -\ln(1 - \rho) / \Delta t$ [S2, S4, unofficial]. However, the standard implementation in the cited code uses $\rho$ directly in the exponent with $\Delta t$ [S1, unofficial].
+-
+-6.  **Color Aggregation**:
+-    Compute the final color by summing the product of the weights and the per-sample colors:
+-    $$ C = \sum_{i=0}^{D-1} w_i \cdot c_i $$
+-    [S1, unofficial]. If a "rainbow" mode is enabled, the base color might be derived from the distance to the SDF center, clamped between 0.02 and 0.98, otherwise it is 1.0 [S2, unofficial]. The final feature output may also multiply base color, learnable feature parameters, and density [S2, unofficial].
+-
+-7.  **Reshaping**:
+-    Reshape the aggregated color tensor from $(N, 3)$ to $(H, W, 3)$ to form the final image [S5, unofficial].
+-
+-### Parameters
+-*   `alpha` ($\alpha$): Scaling factor for density. Default value from config `cfg.alpha.val` [S4, unofficial].
+-*   `beta` ($\beta$): Sharpness parameter for the SDF-to-density transition. Default value from config `cfg.beta.val` [S4, unofficial].
+-*   `eps`: Small constant for numerical stability, value $10^{-10}$ [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Last Segment Delta**: The last segment delta is set to $10^{10}$ to ensure that if a ray does not hit a surface within the sampled range, the transmittance decays sufficiently, preventing artifacts from the infinite tail of the ray [S1, unofficial]. It also prevents division by zero or numerical instability at the end of the ray [S2, unofficial].
+-*   **Numerical Stability**: The small constant $\epsilon$ is added to the exponent in the transmittance calculation to prevent numerical instability [S1, unofficial].
+-
+-### Pseudocode
+-```python
+-import math
+-
+-def render_sdf_volume(origins, directions, near, far, num_samples, implicit_fn, alpha, beta, eps):
+-    # 1. Ray Generation and Sampling
+-    # Generate D sample points along each ray within [near, far]
+-    # depths shape: (N, D)
+-    depths = near + (far - near) * torch.linspace(0, 1, num_samples).view(1, -1)
+-    # sample_points shape: (N, D, 3)
+-    sample_points = origins.view(-1, 1, 3) + directions.view(-1, 1, 3) * depths.view(-1, D, 1)
++def volume_sdf_rendering(ray_bundle, implicit_fn, alpha, beta, eps=1e-10):
++    """
++    ray_bundle: object with .origins (N,3), .directions (N,3), .sample_points (N,D,3)
++    implicit_fn: callable returning (distances (N,D), colors (N,D,C))
++    alpha: float, density scaling
++    beta: float, Laplace scale parameter
++    eps: float, numerical stability constant
++    """
++    # 1. Evaluate implicit function
++    distances, colors = implicit_fn(ray_bundle.sample_points)
+     
+-    # 2. Implicit Function Evaluation
+-    distance, color = implicit_fn(sample_points) # distance: (N, D), color: (N, D, 3)
++    # 2. Convert SDF to density using Laplace CDF
++    # rho = alpha * CDF_Laplace(0, beta)(-d)
++    # CDF_Laplace(x) = 0.5 * exp(-x/beta) for x < 0, 1 - 0.5 * exp(x/beta) for x >= 0
++    # Here we evaluate at -d.
++    # If -d > 0 (i.e., d < 0): 0.5 * exp(d/beta)
++    # If -d <= 0 (i.e., d >= 0): 1 - 0.5 * exp(-d/beta)
+     
+-    # 3. Segment Length Calculation
+-    # deltas shape: (N, D)
+-    deltas = torch.cat((depths[:, 1:] - depths[:, :-1], torch.full_like(depths[:, :1], 1e10)), dim=1)
+-    
+-    # 4. SDF to Density Conversion
+-    # density shape: (N, D)
++    neg_d = -distances
+     density = torch.where(
+-        distance > 0,
+-        0.5 * torch.exp(-distance / beta),
+-        1 - 0.5 * torch.exp(distance / beta),
++        neg_d > 0,
++        0.5 * torch.exp(neg_d / beta),
++        1.0 - 0.5 * torch.exp(neg_d / beta)
+     ) * alpha
+     
+-    # 5. Transmittance and Weight Calculation
+-    T = [torch.ones(len(origins))]
+-    for i in range(num_samples):
+-        T.append(T[-1] * torch.exp(-density[:, i] * deltas[:, i] + eps))
+-    T_tensor = torch.stack(T, dim=1)[:, :-1] # T_0 to T_{D-1}
+-    weights = T_tensor * (1 - torch.exp(-density * deltas + eps))
++    # 3. Compute segment lengths (deltas)
++    # Get depth values from sample_points projected along direction
++    # Assuming ray_bundle.sample_points are already in world space and we need t values
++    # t_i = dot(sample_points[i] - origin, direction)
++    # However, standard samplers often provide depth values directly or we compute deltas from points
++    # Let's assume we extract depths t from sample_points relative to origins
++    origins = ray_bundle.origins.unsqueeze(1) # (N, 1, 3)
++    directions = ray_bundle.directions.unsqueeze(1) # (N, 1, 3)
++    points = ray_bundle.sample_points # (N, D, 3)
+     
+-    # 6. Color Aggregation
+-    color = torch.sum(weights.unsqueeze(2) * color, dim=1) # shape: (N, 3)
++    # Vector from origin to sample points
++    ray_dirs = points - origins
++    # Project onto direction to get depth t
++    depths = torch.sum(ray_dirs * directions, dim=-1) # (N, D)
+     
+-    # 7. Reshaping
+-    return color.view(H, W, 3)
++    # Compute deltas
++    # Concatenate differences with a large value at the end
++    deltas = torch.cat((
++        depths[:, 1:] - depths[:, :-1],
++        torch.ones_like(depths[:, :1]) * 1e10
++    ), dim=-1) # (N, D)
++    
++    # 4. Compute Transmittance and Weights
++    # T_0 = 1
++    # T_{i+1} = T_i * exp(-rho_i * delta_i)
++    # w_i = T_i * (1 - exp(-rho_i * delta_i))
++    
++    # Compute opacity per segment
++    opacities = 1.0 - torch.exp(-density * deltas + eps) # (N, D)
++    
++    # Compute transmittance
++    # T[i] is transmittance BEFORE sample i
++    # T[0] = 1
++    # T[i] = product_{j=0}^{i-1} (1 - opacities[j])
++    
++    # Cumulative product of (1 - opacities)
++    # (1 - opacities) is exp(-rho * delta)
++    transmittance_factors = torch.exp(-density * deltas + eps) # (N, D)
++    
++    # Pad with 1 at the beginning for T_0
++    # T_cum[i] = T[i]
++    # T_cum[0] = 1
++    # T_cum[i] = T_cum[i-1] * transmittance_factors[i-1]
++    
++    # Efficiently compute using cumprod
++    # We want T_i for each i. T_0=1. T_1 = T_0 * f_0. T_2 = T_1 * f_1.
++    # So T_i = prod_{j=0}^{i-1} f_j.
++    
++    # Create tensor for T
++    T = torch.ones_like(transmittance_factors) # (N, D)
++    T[:, 0] = 1.0 # T_0 is always 1
++    
++    # Compute cumulative product for indices 1 to D-1
++    # T[i] = T[i-1] * f[i-1]
++    # We can use cumprod on the factors, shifted.
++    # factors_cum = cumprod(f, dim=1) -> [f0, f0*f1, f0*f1*f2...]
++    # T[i] = factors_cum[i-1] for i>0, T[0]=1
++    
++    factors_cum = torch.cumprod(transmittance_factors, dim=-1) # (N, D)
++    
++    # Shift factors_cum to align with T
++    # T[:, 1:] = factors_cum[:, :-1]
++    T[:, 1:] = factors_cum[:, :-1]
++    
++    # Weights w_i = T_i * (1 - exp(-rho_i * delta_i)) = T_i * opacities_i
++    weights = T * opacities # (N, D)
++    
++    # 5. Aggregate Color
++    # color = sum(weights * colors)
++    rendered_color = torch.sum(weights.unsqueeze(-1) * colors, dim=1) # (N, C)
++    
++    return rendered_color
+ ```
+ 
+@@ -118,25 +162,31 @@
+ 
+ ### [NeUDF](3821-neudf.md)
+-NeUDF is a neural rendering framework that reconstructs surfaces with arbitrary topologies, including open surfaces, from multi-view 2D image supervision by leveraging the Unsigned Distance Function (UDF) as the implicit surface representation. Unlike [Volume SDF Rendering](1344-volume-sdf-rendering.md), which is limited to closed (watertight) surfaces, NeUDF resolves the ambiguity of surface orientation in open structures by introducing a specialized "Udensity" probability density function and a normal regularization strategy. It differs from naive extensions of SDF-based rendering by avoiding spurious surfaces in void regions through an unbiased, occlusion-aware weighting paradigm tailored for UDFs. See [NeUDF](3821-neudf.md).
++NeUDF is a neural rendering framework that reconstructs surfaces with arbitrary topologies, including open surfaces, from multi-view 2D image supervision by leveraging the Unsigned Distance Function (UDF) as the implicit surface representation. Unlike its sibling [Volume SDF Rendering](1344-volume-sdf-rendering.md), which is limited to closed (watertight) surfaces, NeUDF resolves the ambiguity of surface orientation in open structures by introducing a specialized "Udensity" probability density function and a normal regularization strategy. It differs from naive extensions of SDF-based rendering by avoiding spurious surfaces in void regions through an unbiased, occlusion-aware weighting paradigm tailored for UDFs.
++
++### [SRDF-based Volume Rendering](15314-srdf-based-volume-rendering.md)
++SRDF-based Volume Rendering is a neural scene reconstruction technique that models volume density using a Ray-Specific Signed Distance Function (SRDF) rather than a global Signed Distance Function (SDF). It solves the problem of false local maxima in volume density caused by surfaces not intersecting the camera ray, which leads to inaccurate depth and noisy surface reconstruction in multi-object indoor scenes. Unlike standard SDF-based methods where density is derived from a global field, SRDF computes the shortest distance to the surface *along the sampled ray direction*, ensuring that density peaks only around the actual surface intersection. This method is distinct from [NeUDF](3821-neudf.md) by explicitly decoupling the ray-specific density modeling from the global surface representation.
+ 
+ ### Chunked VolSDF Rendering
+-A variant that processes rays in chunks to manage memory usage during rendering [S5, unofficial]. It splits the total number of rays $N$ into chunks of size `chunk_size`, processes each chunk using the parent forward method, and concatenates the results [S5, unofficial]. This is useful for high-resolution images or large batches where memory constraints prevent processing all rays at once [S5, unofficial]. See [VolSDF Volume Rendering](2551-volsdf-volume-rendering.md) for the base method.
++A memory-optimized variant of Volume SDF Rendering that processes rays in chunks to fit within GPU memory limits [S6, unofficial].
++*   **Step:** Get total number of rays $N$ from `ray_bundle.origins.shape[0]`. Initialize an empty list `chunk_colors`. Loop over chunks: for `chunk_start` in `range(0, N, chunk_size)`. Slice `ray_bundle` for the current chunk: `cur_ray_bundle = ray_bundle[chunk_start : chunk_start + chunk_size]`. Call the parent forward method: `cur_color = super().forward(sampler, implicit_fn, cur_ray_bundle)`. Append `cur_color` to `chunk_colors`. Concatenate all chunk colors along dimension 0: `color = torch.cat(chunk_colors, dim=0)`. Return concatenated color [S6, unofficial].
++*   **Parameter:** `chunk_size`: maximum number of rays processed in a single forward pass [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
+-*   **Measured Performance**: Performance depends heavily on the implicit function [S5, unofficial]. Analytic SDFs (sphere, box) are very fast [S5, unofficial]. Neural SDFs require forward passes through the network for every sample point, which is computationally expensive [S5, unofficial].
+-*   **Strengths**: Can represent complex geometry with thin structures and open surfaces (with modifications) [S1, unofficial]. Smooth transitions between surface and volume via $\alpha$ and $\beta$ [S2, unofficial].
+-*   **Limitations**: Requires careful tuning of $\alpha$ and $\beta$ [S5, unofficial]. Sensitive to sampling density [S5, unofficial]. Standard SDF rendering struggles with open surfaces without specific modifications like NeUDF [S1, unofficial].
+-*   **When to use**: When rendering implicit surfaces defined by SDFs, especially when analytic or neural SDFs are available [S5, unofficial]. Useful for fitting geometry from multi-view images [S5, unofficial].
+-*   **When not to use**: When high performance is critical and the geometry is simple (explicit meshes are faster) [S5, unofficial]. When open surfaces are required without using specialized variants like NeUDF [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of rays and $D$ is the number of samples per ray. The SDF evaluation and density conversion are linear in $D$ [S1, unofficial][S5].
++*   **Memory Complexity:** $O(N \cdot D)$ to store intermediate tensors for distances, densities, transmittance, and weights [S1, S6, unofficial]. Chunked rendering reduces peak memory to $O(\text{chunk\_size} \cdot D)$ [S6, unofficial].
++*   **Measured Performance:** Performance depends heavily on the SDF evaluation cost (analytic vs. neural MLP) and the number of samples $D$. Neural SDFs require MLP forward passes for each sample, increasing compute time compared to analytic SDFs [S6, unofficial].
++*   **Strengths:** Better recovery of underlying geometry compared to direct density encoding (NeRF-style) due to the explicit surface prior provided by the SDF [S5]. Sharp surface reconstruction [S1, unofficial].
++*   **Limitations:** Limited to closed (watertight) surfaces in standard SDF formulations; open surfaces require variants like NeUDF [S1, unofficial]. Sensitive to the choice of $\alpha$ and $\beta$ parameters [S4, unofficial].
++*   **When to use:** When high-quality surface reconstruction is required alongside appearance, and the scene geometry is relatively closed or can be approximated as such [S5].
++*   **When not to use:** For scenes with complex open structures (use NeUDF) or when ray-specific density modeling is needed to avoid false positives in multi-object scenes (use SRDF) [S1, unofficial].
+ 
+ ## Background
+-Volume SDF Rendering is a technique used in neural rendering to combine the benefits of implicit surface representations (SDFs) with volume rendering [S5, unofficial]. It was popularized in the context of fitting neural surfaces from multi-view images, such as in the VolSDF method [S5, unofficial]. The approach converts the signed distance field into a density field using a probabilistic model (Laplace distribution CDF) to allow standard volume rendering integrals to capture the surface appearance [S1, unofficial]. It is widely used in academic projects and implementations for neural surface reconstruction and rendering, such as those found in CMU's Learning for 3D Vision course assignments [S5, unofficial].
++Volume SDF Rendering originated from the integration of Signed Distance Fields into neural radiance fields, notably popularized by VolSDF [52] and NeuS [45] as cited in [S5]. It builds on the observation that modeling volume density as a transformed function of an implicit SDF enables better recovery of underlying geometry compared to direct density encoding [S5]. The method converts SDF values to density using a Laplace distribution CDF, a technique detailed in implementations like [S1, S4, unofficial]. It is widely used in neural surface reconstruction and multi-view stereo tasks [S6, unofficial].
+ 
+ ## Sources
+-[S1] Neural Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
+-[S2] Neural Radiance Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
+-[S3] Assignment 3, https://github.com/learning3d/assignment3, fetched 2026-10-26
+-[S4] Volume Rendering and Neural Radiance Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+-[S5] Neural Volume Rendering and Surface Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-07 (unofficial)+[S1] Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
++[S2] Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
++[S3] assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
++[S4] Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
++[S5] Sur$$^{2}$$f: A Hybrid Representation for High-Quality and Efficient Surface Reconstruction from Multi-view Images, https://doi.org/10.1007/978-3-031-73027-6_1, fetched 2026-10-26
++[S6] Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)

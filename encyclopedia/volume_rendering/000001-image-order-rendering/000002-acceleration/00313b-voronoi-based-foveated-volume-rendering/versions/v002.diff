@@ -1,0 +1,120 @@
+--- v001.md
++++ v002.md
+@@ -1,58 +1,54 @@
+ # Voronoi-Based Foveated Volume Rendering
+-
+ Also called: Voronoi Foveated Rendering
+-
+ ## Overview
+-Voronoi-Based Foveated Volume Rendering is a method that accelerates direct volume ray casting by adapting sampling density and reconstruction quality to the human visual acuity fall-off, using gaze tracking to shift a pre-computed sampling mask and reconstructing via Voronoi-based natural neighbor interpolation [S1]. It sets itself apart from sibling methods like [Supersampling](3493-supersampling.md) and [Multi-Sample Anti-Aliasing via Ray Distribution](1219-multi-sample-anti-aliasing-via-ray-distribution.md) by explicitly modeling the non-uniform resolution of the human eye to reduce computational cost in the periphery, while using [Temporal Smoothing for Foveated Rendering](6465-temporal-smoothing-for-foveated-rendering.md) to mitigate the specific undersampling artifacts inherent to sparse peripheral sampling.
+-
++Voronoi-Based Foveated Volume Rendering is a method that adapts sampling density and reconstruction to the human visual system's acuity fall-off, using gaze tracking to shift a pre-computed sampling mask and reconstructing images via Voronoi-based natural neighbor interpolation [S1]. It sets itself apart from standard foveated techniques by mathematically aligning the sampling strategy (Voronoi cells) with the reconstruction kernel (natural neighbor interpolation), ensuring symmetry between how rays are placed and how values are interpolated, while explicitly addressing the undersampling artifacts inherent in sparse peripheral sampling through temporal smoothing [S1].
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** 3D volume texture, user gaze position (from eye tracker), screen resolution, viewing parameters.
++*   **Inputs:** 3D volume texture, user gaze position (from eye tracker), screen resolution, visual acuity model parameters.
+ *   **Outputs:** Rendered 2D image.
+ 
+ **Data Structures:**
+-1.  **Sampling Mask:** A 2D texture with resolution at least twice the screen resolution [S1]. It stores the density of sampling points, with the highest density centered to accommodate gaze-dependent translation [S1].
+-2.  **Neighbor Index Texture:** A 2D texture (same size as sampling mask) storing indices of neighboring Voronoi cells for each pixel [S1].
+-3.  **Weight Texture:** A 2D texture (same size as sampling mask) storing weights for natural neighbor interpolation [S1].
+-4.  **Ray Buffer:** Pre-sorted sampling rays, sorted by Morton order (Z-curve) to optimize spatial locality and caching [S1].
++1.  **Sampling Mask:** A 2D texture with dimensions at least twice the screen resolution in both axes. This size accommodates gaze-dependent translation while keeping the high-density foveal region centered [S1].
++2.  **Neighbor Index Texture:** A 2D texture storing the indices of neighboring Voronoi cells for each sample point [S1].
++3.  **Weight Texture:** A 2D texture storing the weights for natural neighbor interpolation corresponding to the neighbors [S1].
++4.  **Ray List:** A sorted list of sampling rays, pre-sorted by Morton order (Z-curve) to optimize spatial locality and caching behavior [S1].
+ 
+-**Pre-processing (Mask Generation):**
+-1.  **Visual Acuity Model:** Calculate the Minimum Angle of Resolution (MAR) for each screen pixel based on eccentricity $e$ (degrees) from the fovea:
++**Pre-processing (Offline/Setup):**
++1.  **Visual Acuity Modeling:** Approximate the hyperbolic visual acuity fall-off using a 2D Gaussian function based on screen resolution, size, viewing distance, and photoreceptor distribution [S1]. The Minimum Angle of Resolution (MAR) is modeled as:
+     $$ \text{MAR} = \omega_0 + m \cdot e $$
+-    where $\omega_0$ is the smallest resolvable angle and $m$ is the slope [S1].
+-2.  **Weighted Linde-Buzo-Gray (LBG) Algorithm:**
+-    *   Initialize ray positions.
+-    *   Iterate until error is below threshold:
+-        *   Compute cost function $T_r$ (accumulated density over Voronoi cell area) and area $A_r$ for each ray.
+-        *   Measure error $\epsilon$.
+-        *   Adjust ray positions based on three cases using a hysteresis function $A_r \cdot (1 \pm (\epsilon_0 + i \cdot \epsilon_\Delta) / 2)$ for bounds, with $\epsilon_0 = 0.5$ and $\epsilon_\Delta = 0.1$ in iteration $i$ [S1]:
+-            1.  **Move/Relax:** If $T_r \in [A_r - \epsilon, A_r + \epsilon]$.
+-            2.  **Split:** If $T_r > A_r + \epsilon$.
+-            3.  **Delete:** If $T_r < A_r - \epsilon$.
+-    *   Compute neighbors and weights for natural neighbor interpolation for each ray position [S1].
+-    *   Store neighbor indices and weights in the respective textures [S1].
+-    *   Sort rays by Morton order [S1].
++    where $\omega_0$ is the smallest resolvable angle, $e$ is eccentricity in degrees, and $m$ is the slope [S1].
++2.  **Mask Generation:** Use the Weighted Linde-Buzo-Gray (LBG) algorithm to pre-compute the sampling mask based on the visual acuity fall-off [S1].
++    *   The LBG algorithm iteratively adjusts ray positions to minimize error between the cost function $T_r$ and the area $A_r$ occupied by each ray.
++    *   Three adjustment cases are applied per iteration $i$:
++        1.  **Move/Relax:** If $T_r \in [A_r - \epsilon, A_r + \epsilon]$.
++        2.  **Split:** If $T_r > A_r + \epsilon$.
++        3.  **Delete:** If $T_r < A_r - \epsilon$.
++    *   A hysteresis function stabilizes the iteration bounds: $A_r \cdot (1 \pm (\epsilon_0 + i \cdot \epsilon_\Delta) / 2)$, with $\epsilon_0 = 0.5$ and $\epsilon_\Delta = 0.1$ [S1].
++    *   The process repeats until the error is below a threshold or ray count stabilizes [S1].
++3.  **Neighbor/Weight Computation:** Compute the Voronoi cells for the generated ray positions. For each ray, determine its natural neighbors and calculate the interpolation weights [S1]. Store these indices and weights in the Neighbor Index and Weight textures, respectively [S1].
++4.  **Sorting:** Sort the sampling rays according to Morton order (Z-curve) to improve cache locality during runtime [S1].
+ 
+-**Runtime (Volume Ray Casting):**
+-1.  **Gaze Tracking:** Acquire gaze position from a stationary eye-tracking system (e.g., 1200 Hz) [S1].
+-2.  **Mask Shift:** Translate the pre-computed sampling mask texture so that the high-density region aligns with the user's gaze [S1].
+-3.  **Ray Casting:**
+-    *   For each pixel, cast a ray through the 3D volume using perspective projection [S1].
+-    *   **Sampling:** Determine sample positions along the ray based on the shifted sampling mask. The distance between samples is adjusted proportional to the acuity fall-off function in both image and object space [S1].
+-    *   **Interpolation:** Sample density values from the 3D texture using trilinear interpolation [S1].
+-    *   **Shading:** Apply local Phong illumination based on gradients (computed via central differences) [S1].
+-    *   **Compositing:** Perform front-to-back compositing using a post-classification model with linear transfer functions [S1].
+-    *   **Acceleration:** Use early ray termination and empty space skipping [S1].
+-4.  **Reconstruction:**
+-    *   For each pixel, retrieve the neighboring Voronoi cell indices and weights from the pre-computed textures [S1].
+-    *   Perform natural neighbor interpolation using the retrieved indices, weights, and the sampled density values to reconstruct the final pixel color [S1].
++**Runtime (Per Frame):**
++1.  **Gaze Tracking:** Acquire user gaze position from a stationary eye-tracking system (e.g., 1200 Hz sampling rate) [S1].
++2.  **Mask Shift:** Translate the pre-computed sampling mask texture so that the high-density foveal region aligns with the current gaze position [S1].
++3.  **Volume Raycasting:**
++    *   Cast rays through the 3D volume texture using perspective projection [S1].
++    *   Adjust the distance between samples along each ray proportional to the acuity fall-off function, adapting density in both image and object space [S1].
++    *   Sample density values using trilinear interpolation [S1].
++    *   Perform front-to-back compositing using a post-classification model with linear transfer functions [S1].
++    *   Apply acceleration techniques: local Phong illumination (based on central difference gradients), early ray termination, and empty space skipping [S1].
++4.  **Image Reconstruction:**
++    *   For each pixel, retrieve the corresponding sample from the shifted mask.
++    *   Use the pre-computed Neighbor Index and Weight textures to perform natural neighbor interpolation of the sparsely sampled ray values [S1].
+ 5.  **Temporal Smoothing:**
+-    *   Apply a temporal smoothing filter by averaging the current frame with $n$ previous frames (typically $n=8$) [S1].
+-    *   **Condition:** Disable temporal smoothing during image-altering changes (e.g., camera manipulation, transfer function modifications) to avoid motion blur [S1].
++    *   Apply a temporal smoothing filter to the rendered image to attenuate undersampling artifacts in the periphery [S1].
++    *   The filter averages the current frame with $n$ previous frames. The typical value is $n=8$ [S1].
++    *   **Conditional Application:** Do not apply temporal smoothing during rapid image-altering changes (e.g., camera manipulation, transfer function modifications) to avoid motion blur [S1].
+ 
+ **Pitfalls and Edge Cases:**
+-*   **Undersampling Artifacts:** Low sampling density in the periphery causes artifacts near fine structures. Mitigated by temporal smoothing, as peripheral vision is sensitive to contrast changes and movement [S1].
++*   **Undersampling Artifacts:** Low sampling density in peripheral vision causes artifacts near fine structures. This is mitigated by temporal smoothing, as peripheral vision is sensitive to contrast changes and movement [S1].
+ *   **Transition Artifacts:** Rapid eye movements can cause noticeable transitions from blurry to sharp if screen update lags. Temporal smoothing hides this transition [S1].
+-*   **Motion Blur:** Applying temporal smoothing during rapid changes introduces unwanted motion blur. Must be conditionally disabled [S1].
++*   **Motion Blur:** Applying temporal smoothing during camera or data changes introduces unwanted motion blur. The method requires detecting these changes to disable smoothing [S1].
++*   **Eye-Tracker Latency:** The method is robust to low sampling rate eye-trackers due to the smoothing filter, but high-frequency trackers (1200 Hz) provide better alignment [S1].
+ 
+ ## Subtopics
+@@ -62,14 +58,12 @@
+ 
+ ## Operating characteristics
+-*   **Performance:** Substantially improves rendering performance with barely perceptible changes in visual quality [S1]. Measured speedups range from ~74x to ~177x compared to regular rendering on various data sets (Combustion, Supernova, Vortex cascade, Zeiss, Flower, Chameleon) [S1].
+-*   **Complexity:** Pre-processing is offline. Runtime complexity is dominated by ray casting and interpolation, which is reduced due to sparse sampling in the periphery.
+-*   **Strengths:** High performance gains; leverages human visual system properties; natural neighbor interpolation provides smooth reconstruction [S1].
+-*   **Limitations:** Requires eye-tracking hardware; temporal smoothing can introduce latency or blur if not managed correctly; artifacts may occur near fine structures in the periphery if smoothing is insufficient [S1].
+-*   **When to use:** Real-time volume rendering where performance is critical and eye-tracking is available.
+-*   **When not to use:** When eye-tracking is unavailable or when motion blur artifacts are unacceptable during rapid scene changes.
+-
++*   **Performance:** The method substantially improves rendering performance with barely perceptible changes in visual quality [S1]. Measured speedups vary by dataset: Combustion (154.20x), Supernova (105.28x), Vortex cascade (104.87x), Zeiss (177.09x), Flower (74.08x), Chameleon (99.78x) relative to regular rendering [S1].
++*   **Complexity:** Pre-processing is offline. Runtime complexity is dominated by volume raycasting and texture lookups for interpolation. The use of pre-computed weights and indices makes reconstruction efficient.
++*   **Strengths:** High performance gains; mathematically symmetric sampling/reconstruction; handles peripheral undersampling artifacts effectively; robust to eye-tracker latency.
++*   **Limitations:** Requires eye-tracking hardware; temporal smoothing introduces latency and is disabled during interactive changes; pre-computation is dataset and resolution dependent.
++*   **When to use:** Real-time volume visualization where performance is critical and user gaze can be tracked, particularly for large datasets or high resolutions.
++*   **When not to use:** When interactive camera/data manipulation is frequent (due to smoothing latency), or when eye-tracking hardware is unavailable.
+ ## Background
+-The method was presented by Bruder et al. in 2019 [S1]. It builds on the concept of foveated rendering, which adapts rendering quality to the human visual system, and extends it to volume ray casting, which has unique characteristics preventing direct transfer of traditional foveated techniques [S1]. The visual acuity fall-off model used is based on the linear approximation of the Minimum Angle of Resolution (MAR) [S1].
+-
++The method was presented by Bruder et al. in 2019 [S1]. It builds on the principles of foveated rendering, which adapts rendering quality to the human visual system's fall-off in visual acuity [S1]. The approach specifically addresses the challenges of volume raycasting, which prevents the direct transfer of many traditional foveated rendering techniques [S1]. It utilizes the Linde-Buzo-Gray algorithm for sampling and natural neighbor interpolation for reconstruction, concepts rooted in computational geometry and signal processing [S1].
+ ## Sources
+ [S1] Voronoi-Based Foveated Volume Rendering, https://doi.org/10.2312/evs.20191172, fetched 2026-10-26

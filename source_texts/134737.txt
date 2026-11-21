@@ -1,0 +1,382 @@
+Ray marching with SDF: signed distance functions, primitive SDFs, boolean operations, sphere tracing, normal estimation, ambient occlusion and a full GLSL…
+
+﻿
+Ray Marching and Signed Distance Functions — GLSL in the…
+1. What is a Signed Distance Function?
+A Signed Distance Function (SDF) is a function
+d = sdf(p) defined over all of 3D space. It returns the
+signed Euclidean distance from point p to
+the nearest surface of the shape:
+d < 0 — point is inside the shape
+d = 0 — point is on the surface
+d > 0 — point is outside the shape
+The key property exploited by sphere tracing is the
+Lipschitz bound: the scene SDF guarantees that, at
+any point p that is outside all geometry, we can safely
+advance a ray by exactly |sdf(p)| without overshooting
+any surface.
+Not every shape has a closed-form SDF.
+Arbitrary meshes require approximate SDFs (baked into 3D textures or
+SDFs generated from BVH traversal). Primitive shapes and CSG
+combinations of them are exact, efficient, and free of numerical
+noise.
+2. Primitive SDFs
+All standard primitives have elegant one- to five-line GLSL
+implementations. All centre on the origin; translate by passing
+p - centre.
+```
+// Sphere — radius r
+float sdSphere(vec3 p, float r) {
+    return length(p) - r;
+}
+
+// Axis-aligned box — half-extents b
+float sdBox(vec3 p, vec3 b) {
+    vec3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+// Torus — major radius R, tube radius r
+float sdTorus(vec3 p, float R, float r) {
+    vec2 q = vec2(length(p.xz) - R, p.y);
+    return length(q) - r;
+}
+
+// Infinite plane — normal n (normalised), offset d
+float sdPlane(vec3 p, vec3 n, float d) {
+    return dot(p, n) + d;
+}
+
+// Cylinder — radius r, half-height h
+float sdCylinder(vec3 p, float r, float h) {
+    vec2 d = abs(vec2(length(p.xz), p.y)) - vec2(r, h);
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+}
+
+// Capsule — endpoints a, b; radius r
+float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
+    vec3 ab = b - a, ap = p - a;
+    float t = clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0);
+    return length(ap - ab * t) - r;
+}
+```
+Translate by replacing p with
+p - centre inside the call. Rotate by multiplying
+p by an inverse rotation matrix before passing it to the
+SDF. Scale uniformly with sdf(p/s)*s.
+3. SDF operations — CSG in one line
+Boolean constructive solid geometry operations reduce to simple
+arithmetic on SDF values. These are exact for convex shapes and
+approximate for concave geometry, but they are free of artefacts.
+Union
+min(a, b)
+— take the closer of two surfaces.
+Subtraction
+max(-a, b)
+— carve shape A out of shape B.
+Intersection
+max(a, b)
+— keep only the overlap region.
+Smooth Union
+smin(a, b, k)
+— blend with a smooth fillet of
+radius k.
+```
+// Smooth union — polynomial version (Inigo Quilez)
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// Example scene: sphere with a box on top, cylinder subtracted
+float scene(vec3 p) {
+    float sphere = sdSphere(p - vec3(0, 0.5, 0), 0.5);
+    float box    = sdBox   (p - vec3(0, 0,   0), vec3(0.4, 0.4, 0.4));
+    float hole   = sdCylinder(p, 0.2, 1.0);
+    float merged = smin(sphere, box, 0.15); // smooth blend
+    return max(-hole, merged);              // subtract cylinder
+}
+```
+Subtraction artefact: max(-a, b) is
+exact only when the surface of A is entirely contained within B. If A
+pokes through the boundary of B, the resulting SDF is not Lipschitz-1
+and sphere marching may skip surfaces — add a small
+EPSILON correction or tighten the step size in those
+regions.
+4. Sphere marching algorithm
+Classic ray marching advances a fixed step size per iteration —
+expensive and inaccurate. Sphere tracing (developed by John C. Hart,
+1996) exploits the SDF guarantee: we can always step by exactly
+|sdf(pos)|
+without overshooting a surface.
+t = t_near
+loop up to MAX_STEPS times:
+pos = ro + t * rd ← current point on ray
+d = scene(pos) ← safe step distance
+if d < EPSILON → HIT at distance t
+if t > t_far → MISS (sky)
+t += d
+```
+const int   MAX_STEPS = 128;
+const float EPSILON   = 0.001;
+const float T_FAR     = 100.0;
+
+float raymarch(vec3 ro, vec3 rd) {
+    float t = 0.001;
+    for (int i = 0; i < MAX_STEPS; i++) {
+        float d = scene(ro + t * rd);
+        if (d < EPSILON) return t;
+        if (t > T_FAR)   break;
+        t += d;
+    }
+    return T_FAR; // no hit
+}
+```
+Convergence is quadratic near smooth surfaces because the SDF is
+locally linear. The dominant cost is evaluating scene() —
+keep it inexpensive for real-time frame rates.
+Thin geometry caveat: very thin features (e.g. a flat
+disc of thickness 0.01) have a small SDF gradient perpendicular to the
+disc. Sphere tracing will take many tiny steps — set a stricter
+EPSILON and accept slightly more missed hits, or use a capped step
+size for known thin-feature regions.
+5. Normal estimation
+The surface normal at a hit point is the gradient of the SDF field.
+The gold-standard approach is a central-difference tetrahedron sample
+(4 evaluations, not 6):
+```
+// Tetrahedron central-difference normal (Inigo Quilez)
+vec3 calcNormal(vec3 p) {
+    const vec2 k = vec2(1, -1);
+    return normalize(
+        k.xyy * scene(p + k.xyy * 0.001) +
+        k.yyx * scene(p + k.yyx * 0.001) +
+        k.yxy * scene(p + k.yxy * 0.001) +
+        k.xxx * scene(p + k.xxx * 0.001)
+    );
+}
+
+// Simpler 6-sample version (more intuitive, same cost on mobile)
+vec3 calcNormalSimple(vec3 p) {
+    float e = 0.001;
+    return normalize(vec3(
+        scene(p + vec3( e, 0, 0)) - scene(p - vec3( e, 0, 0)),
+        scene(p + vec3( 0, e, 0)) - scene(p - vec3( 0, e, 0)),
+        scene(p + vec3( 0, 0, e)) - scene(p - vec3( 0, 0, e))
+    ));
+}
+```
+The epsilon value 0.001 should match the EPSILON surface threshold.
+Using a larger value produces a "bevel" look; smaller values risk
+numerical noise from floating-point cancellation.
+6. Lighting, shadows and ambient occlusion
+Phong lighting
+Standard Blinn-Phong lighting uses the normal, the view direction and
+the light direction to compute diffuse and specular contributions:
+```
+vec3 shade(vec3 p, vec3 n, vec3 rd, vec3 lPos, vec3 albedo) {
+    vec3  l   = normalize(lPos - p);
+    vec3  h   = normalize(l - rd);           // half-vector
+    float dif = clamp(dot(n, l), 0.0, 1.0);
+    float spc = pow(clamp(dot(n, h), 0.0, 1.0), 32.0);
+    vec3  col = albedo * (0.1 + 0.9 * dif) + 0.4 * spc;
+    return col;
+}
+```
+Soft shadows
+March a secondary ray toward the light, tracking the
+minimum SDF ratio
+along the path to estimate how much of the light is blocked. The
+parameter
+k controls shadow sharpness.
+```
+float softShadow(vec3 ro, vec3 rd, float tMin, float tMax, float k) {
+    float res = 1.0;
+    float t   = tMin;
+    for (int i = 0; i < 64; i++) {
+        float d = scene(ro + t * rd);
+        res = min(res, k * d / t);
+        t  += clamp(d, 0.02, 0.2);
+        if (res < 0.001 || t > tMax) break;
+    }
+    return clamp(res, 0.0, 1.0);
+}
+```
+Ambient occlusion
+Step a short distance along the surface normal and compare the actual
+SDF value with the expected unoccluded value. Small differences mean
+the surface is close to occluding geometry.
+```
+float ambientOcclusion(vec3 p, vec3 n) {
+    float occ = 0.0, weight = 1.0;
+    for (int i = 1; i <= 5; i++) {
+        float dist = 0.08 * float(i);
+        float d    = scene(p + n * dist);
+        occ   += (dist - d) * weight;
+        weight *= 0.7;
+    }
+    return clamp(1.0 - 2.0 * occ, 0.0, 1.0);
+}
+```
+7. Complete GLSL fragment shader
+Below is a self-contained WebGL2 fragment shader (GLSL ES 3.00) that
+renders a floor plane, smooth-union of a sphere and box, with diffuse
+lighting, soft shadows and AO. Drop it into a full-screen quad.
+```
+// Fragment shader — GLSL ES 3.00
+#version 300 es
+precision highp float;
+
+uniform vec2  uResolution;
+uniform float uTime;
+out vec4 fragColor;
+
+// ── SDF primitives ────────────────────────────────────────────────
+float sdSphere(vec3 p, float r) { return length(p) - r; }
+float sdBox(vec3 p, vec3 b) {
+    vec3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+float smin(float a, float b, float k) {
+    float h = clamp(0.5+0.5*(b-a)/k, 0.0, 1.0);
+    return mix(b, a, h) - k*h*(1.0-h);
+}
+
+// ── Scene ─────────────────────────────────────────────────────────
+float scene(vec3 p) {
+    float t   = uTime * 0.5;
+    vec3  sph = p - vec3(sin(t)*0.6, 0.5, cos(t)*0.6);
+    float d1  = sdSphere(sph, 0.45);
+    float d2  = sdBox(p - vec3(0, 0.3, 0), vec3(0.35));
+    float dFloor = p.y + 0.01;
+    return min(smin(d1, d2, 0.2), dFloor);
+}
+
+// ── Sphere tracing ─────────────────────────────────────────────────
+float raymarch(vec3 ro, vec3 rd) {
+    float t = 0.001;
+    for (int i = 0; i < 128; i++) {
+        float d = scene(ro + t * rd);
+        if (d < 0.001) return t;
+        if (t > 100.0) break;
+        t += d;
+    }
+    return 100.0;
+}
+
+// ── Normal, AO, shadows ────────────────────────────────────────────
+vec3 calcNormal(vec3 p) {
+    const vec2 k = vec2(1, -1);
+    return normalize(
+        k.xyy*scene(p+k.xyy*0.001) + k.yyx*scene(p+k.yyx*0.001) +
+        k.yxy*scene(p+k.yxy*0.001) + k.xxx*scene(p+k.xxx*0.001));
+}
+
+float softShadow(vec3 ro, vec3 rd) {
+    float res = 1.0, t = 0.02;
+    for (int i = 0; i < 64; i++) {
+        float d = scene(ro + t*rd);
+        res = min(res, 8.0*d/t);
+        t  += clamp(d, 0.02, 0.2);
+        if (res < 0.001 || t > 20.0) break;
+    }
+    return clamp(res, 0.0, 1.0);
+}
+
+float ao(vec3 p, vec3 n) {
+    float occ = 0.0, w = 1.0;
+    for (int i = 1; i <= 5; i++) {
+        float s = 0.08 * float(i);
+        occ += (s - scene(p + n*s)) * w; w *= 0.7;
+    }
+    return clamp(1.0 - 2.0*occ, 0.0, 1.0);
+}
+
+// ── Camera ─────────────────────────────────────────────────────────
+mat3 lookAt(vec3 eye, vec3 cen, vec3 up) {
+    vec3 f = normalize(cen - eye);
+    vec3 r = normalize(cross(up, f));
+    vec3 u = cross(f, r);
+    return mat3(r, u, f);
+}
+
+// ── Main ───────────────────────────────────────────────────────────
+void main() {
+    vec2  uv  = (gl_FragCoord.xy * 2.0 - uResolution) / uResolution.y;
+    vec3  eye = vec3(3.0*sin(uTime*0.25), 2.0, 3.0*cos(uTime*0.25));
+    mat3  cam = lookAt(eye, vec3(0), vec3(0, 1, 0));
+    vec3  rd  = normalize(cam * vec3(uv, 1.5));
+
+    float t   = raymarch(eye, rd);
+    vec3  col = vec3(0.05, 0.08, 0.14); // sky
+
+    if (t < 100.0) {
+        vec3  p   = eye + t * rd;
+        vec3  n   = calcNormal(p);
+        vec3  lig = normalize(vec3(2, 5, 3));
+        float dif = clamp(dot(n, lig), 0.0, 1.0);
+        float sha = softShadow(p + n*0.01, lig);
+        float occ = ao(p, n);
+
+        // Checkerboard floor colour
+        vec3  alb = mix(vec3(0.9), vec3(0.6, 0.5, 0.8),
+                      step(0.5, fract(p.y + 0.01)));
+        if (p.y < 0.01)
+          alb = mix(vec3(0.9), vec3(0.3),
+                     mod(floor(p.x)+floor(p.z), 2.0));
+
+        col = alb * (0.1 + 0.9 * dif * sha * occ);
+    }
+
+    // Gamma correction
+    col = pow(clamp(col, 0.0, 1.0), vec3(0.4545));
+    fragColor = vec4(col, 1.0);
+}
+```
+8. Advanced: domain repetition, camera, optimisations
+Infinite domain repetition
+Adding a single mod call to the position before
+evaluating the SDF tiles the scene infinitely for essentially zero
+cost:
+```
+// Repeat p in a 2D grid of period (gx, gz), keeping original y
+vec3 repeat(vec3 p, float gx, float gz) {
+    p.xz = mod(p.xz + vec2(gx, gz)*0.5, vec2(gx, gz)) - vec2(gx, gz)*0.5;
+    return p;
+}
+// Usage: sdSphere(repeat(p, 2.0, 2.0), 0.4)
+```
+Camera from orbit
+```
+// Orbit camera: yaw/pitch from mouse delta, radius from scroll
+vec3 orbitCamera(float yaw, float pitch, float radius) {
+    return radius * vec3(
+        cos(pitch) * sin(yaw),
+        sin(pitch),
+        cos(pitch) * cos(yaw)
+    );
+}
+```
+Optimisation tips
+Early-out bounding volumes: surround expensive
+sub-scenes with a fast sphere SDF check. Skip the detail if the
+bounding SDF > marching step.
+Level of detail: reduce MAX_STEPS and increase
+EPSILON for distant geometry — the difference is imperceptible
+beyond 10 scene units.
+Render to half-res, upscale: the most effective
+single optimisation for real-time SDF rendering at larger
+resolutions.
+Over-relaxation: multiply the step
+t += d by a constant 1.1–1.6. Faster on open scenes but
+risks artefacts near concave edges.
+🌌 Galaxy Simulation
+See GLSL in action — thousands of GPU-accelerated star particles
+rendered via WebGL fragment shaders.
+Open Galaxy Sim →
+Related Articles
+Random Walks \u0026 Brownian Motion: From Pollen to Finance
+Rayleigh Scattering: Why the Sky Is Blue \u0026 Sunsets Are Red
+Ray Tracing from Scratch — Rays, Intersections, BVH
+Turing Reaction-Diffusion — Gray-Scott Patterns
+Lotka–Volterra Equations — Predator–Prey Population Cycles

@@ -1,0 +1,63 @@
+# Specific Primitives and Techniques
+
+
+## Overview
+This family covers specialized voxelization algorithms and data structures that deviate from standard surface or solid filling, targeting specific geometric primitives (lines, porous structures) or optimization constraints (local regions, sparse hierarchies). It distinguishes itself from the parent [Voxelization](12-voxelization.md) by focusing on non-cubic or non-uniform generation strategies, such as parametric line decomposition, hash-based porosity filtering, and localized spatial queries, rather than uniform grid filling of closed meshes.
+
+## Shared principles
+The methods in this family share the goal of mapping continuous geometric or logical entities into discrete voxel representations, but they diverge in how the domain is sampled or filtered. Common mechanisms include:
+1.  **Parametric Sampling**: For linear primitives, points are generated along a parameterized path ($t \in [0,1]$) and mapped to voxel indices, ensuring consistent coverage regardless of grid alignment [S1].
+2.  **Stochastic Filtering**: For porous structures, a deterministic hash function of voxel coordinates is used to probabilistically discard voxels, creating a spatially distributed porosity without global connectivity analysis [S1].
+3.  **Local Domain Restriction**: Instead of processing the entire bounding box, methods may restrict computation to a local neighborhood defined by a center point and radius, reducing memory overhead for sparse or large-scale scenes [S1].
+
+## Subtopics
+
+### [Porous Voxelization](4361-porous-voxelization.md)
+A technique that generates sponge-like meshes by selectively discarding voxels during the voxelization process based on a spatial hash of their coordinates. Unlike standard voxelization which retains all computed voxels, this method creates a porous structure while maintaining spatial distribution properties. It is implemented in the `voxelizer-rs` project as part of the `MeshProcessor::voxelize` method.
+
+**When to choose**: Use when a lightweight, non-watertight, or porous representation is required for rendering or simulation, and exact surface continuity is less critical than volumetric density distribution.
+
+**Link**: [Porous Voxelization](4361-porous-voxelization.md)
+
+### [Parametric Line Segment Voxelization](17103-parametric-line-segment-voxelization.md)
+An algorithm for generating a 3D line segment primitive by computing points along the segment using a parameter $t$, then mapping these points to voxels. It is identified as having the best performance characteristics in terms of speed and potential for parallelization in GPGPU implementation compared to other methods like the seven-neighbor search.
+
+**When to choose**: Use for rendering or processing thin, linear features (e.g., wires, fibers) where standard grid-based voxelization might produce jagged or disconnected artifacts due to aliasing.
+
+**Link**: [Parametric Line Segment Voxelization](17103-parametric-line-segment-voxelization.md)
+
+### Local Voxelization
+Voxelize a mesh in the region of a cube around a specific point, rather than globally. Useful to reduce memory cost for small values of pitch as opposed to global voxelization.
+
+**When to choose**: Use when only a small portion of a large mesh needs to be voxelized, or when memory is constrained and global voxelization is infeasible.
+
+**Link**: [Local Voxelization](17103-parametric-line-segment-voxelization.md) *(Note: No specific child article exists for Local Voxelization in the provided list, so it is listed as a minor variant below.)*
+
+### Minor Variants
+#### Local Voxelization
+**Definition**: Voxelize a mesh in the region of a cube around a specific point, rather than globally. Useful to reduce memory cost for small values of pitch as opposed to global voxelization [S1].
+
+**Parameters**:
+- `mesh`: Source geometry, type `trimesh.Trimesh` [S1].
+- `point`: Point in space to voxelize around, shape `(3,)` float [S1].
+- `pitch`: Side length of a single voxel cube [S1].
+- `radius`: Number of voxel cubes to return in each direction [S1].
+- `fill`: Boolean, default `True`. When `True`, uses `proximity.contains` to fill the resulting voxels [S1].
+
+**Layout**: Return type is a `VoxelGrid` instance with resolution $(m, m, m)$ where $m=2 \times \text{radius} + 1$ [S1].
+
+**Code**:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+local_voxelize(mesh, point: ArrayLike, pitch: float | int, radius: float | int, fill: bool = True, **kwargs) -> VoxelGrid | None
+```
+[S1]
+
+**Pitfall**: When `fill=True`, the method uses `proximity.contains` to fill voxels, which may be meaningless for non-watertight meshes [S1].
+
+## Background
+The specific techniques described here originate from various open-source graphics libraries and research implementations. The parametric line voxelization and porous voxelization methods are documented in unofficial notes related to GPGPU optimization and mesh processing libraries like `voxelizer-rs` [S1]. The local voxelization technique is part of the `trimesh` library (version 5.1.1/5.2.0), which provides a Pythonic interface for 3D mesh processing [S1]. These methods address specific gaps in general-purpose voxelization, such as handling non-closed surfaces, optimizing for sparse data, or accelerating linear primitive rendering.
+
+## Sources
+[S1] trimesh.voxel.creation - trimesh 5.1.1 documentation, https://trimesh.org/trimesh.voxel.creation.html, fetched 2026-10-26

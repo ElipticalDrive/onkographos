@@ -1,0 +1,295 @@
+--- v006.md
++++ v007.md
+@@ -4,40 +4,42 @@
+ 
+ ## Overview
+-Conditional Radiance Field Training extends the standard NeRF architecture to model a dataset of multiple 3D instances by learning instance-specific latent codes for shape and appearance [S1]. It solves the problem of generalizing across variations in geometry and texture without requiring separate models per instance, achieving reconstruction quality comparable to independent single-instance NeRFs while sharing network weights [S1]. It differs from sibling methods by explicitly disentangling shape and appearance into separate latent vectors and optimizing them jointly with the network parameters [S1, 2].
++Conditional Radiance Field Training is a method for modeling shape and appearance variations across multiple 3D instances by training a single unified radiance field conditioned on instance-specific latent codes [S1]. It solves the problem of efficiently representing a dataset of diverse objects (e.g., chairs) without training separate NeRF models for each, while maintaining rendering quality comparable to independent per-instance models [S1]. It differs from sibling methods by explicitly decoupling shape and appearance into separate learned codes and utilizing a shared shape branch to enforce geometric consistency across instances [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A dataset of $K$ instances. For each instance $k \in \{1, \dots, K\}$, the method uses a set of training rays $R_k$. Each ray $r$ is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+-*   **Outputs:** Rendered color $\hat{C}(r, \mathbf{z}^{(s)}, \mathbf{z}^{(c)})$ and density $\sigma$ for sampled points along the ray.
++*   **Input:** A dataset of $K$ object instances. For each instance $k$, a set of training rays $R_k$ with corresponding ground truth colors $C(r)$. Two latent codes per instance: a shape code $\mathbf{z}_k^{(s)}$ and a color code $\mathbf{z}_k^{(c)}$.
++*   **Output:** Rendered color $\hat{C}(r)$ for any ray $r$ given instance codes, and optimized network parameters.
+ 
+ **Data Structures:**
+-*   **Network Weights:** Two Multi-Layer Perceptrons (MLPs), $F_{\text{coarse}}$ and $F_{\text{fine}}$, each 4 layers deep with 256 channels width and ReLU activations [S1].
+-*   **Latent Codes:**
+-    *   Shape code $\mathbf{z}^{(s)}_k \in \mathbb{R}^{32}$ for instance $k$ [S1].
+-    *   Color code $\mathbf{z}^{(c)}_k \in \mathbb{R}^{32}$ for instance $k$ [S1].
+-    *   These codes are learnable parameters optimized alongside network weights [S1].
+-*   **Ray Sets:** $R_k$ is the set of all training rays for instance $k$ [S1].
++*   **Shape Code $\mathbf{z}_k^{(s)}$:** A 32-dimensional learned vector for instance $k$.
++*   **Color Code $\mathbf{z}_k^{(c)}$:** A 32-dimensional learned vector for instance $k$.
++*   **Coarse Network $F_{coarse}$:** An MLP with skip connections, taking positional encoding $\gamma(\mathbf{x})$, view direction $\gamma(\mathbf{d})$, shape code $\mathbf{z}_k^{(s)}$, and color code $\mathbf{z}_k^{(c)}$. Outputs density $\sigma$ and color $\mathbf{c}$.
++*   **Fine Network $F_{fine}$:** An MLP with skip connections, taking the same inputs as $F_{coarse}$. Outputs color $\mathbf{c}$.
++*   **Shared Shape Branch:** A component within the networks that processes the shape code $\mathbf{z}_k^{(s)}$ to influence geometry (density) predictions, shared across instances [S1].
+ 
+ **Numbered Steps:**
+-1.  **Initialization:** Initialize $F_{\text{coarse}}$ and $F_{\text{fine}}$ with random weights. Initialize shape codes $\mathbf{z}^{(s)}_k$ and color codes $\mathbf{z}^{(c)}_k$ for all $K$ instances [S1].
+-2.  **Iteration Loop:** Repeat until convergence (average 1M iterations) [S1]:
+-    a.  **Instance Sampling:** Randomly sample an object instance index $k \in \{1, \dots, K\}$ [S1].
+-    b.  **Code Retrieval:** Retrieve the corresponding shape code $\mathbf{z}^{(s)}_k$ and color code $\mathbf{z}^{(c)}_k$ [S1].
+-    c.  **Ray Sampling:** Sample a batch of training rays from the set $R_k$ belonging to instance $k$ [S1].
+-    d.  **Coarse Network Forward Pass:**
+-        i.  For each ray $r$, sample points using stratified sampling [S1].
+-        ii. Inject positional and directional embeddings. Inject $\mathbf{z}^{(s)}_k$ and $\mathbf{z}^{(c)}_k$ wherever positional or directional embeddings are injected in the original NeRF model [S1].
+-        iii. Pass inputs through $F_{\text{coarse}}$ to estimate density $\sigma$ and color $\mathbf{c}$ [S1].
+-        iv. Render $\hat{C}_{\text{coarse}}(r, \mathbf{z}^{(s)}_k, \mathbf{z}^{(c)}_k)$ using alpha compositing [S1].
+-    e.  **Hierarchical Sampling:** Use the density outputs from the coarse network to sample a hierarchical volume (importance sampling) for the fine network [S1].
+-    f.  **Fine Network Forward Pass:**
+-        i.  Pass inputs through $F_{\text{fine}}$ to estimate density $\sigma$ and color $\mathbf{c}$ [S1].
+-        ii. Render $\hat{C}_{\text{fine}}(r, \mathbf{z}^{(s)}_k, \mathbf{z}^{(c)}_k)$ using alpha compositing [S1].
+-    g.  **Loss Calculation:** Compute the photometric loss $L_{\text{train}}$ [S1]:
+-        $$
+-        L_{\text{train}} = \sum_{k=1}^{K} \sum_{r \in R_k} \left( \| \hat{C}_{\text{coarse}}(r, \mathbf{z}^{(s)}_k, \mathbf{z}^{(c)}_k) - C(r) \|_2^2 + \| \hat{C}_{\text{fine}}(r, \mathbf{z}^{(s)}_k, \mathbf{z}^{(c)}_k) - C(r) \|_2^2 \right)
+-        $$
+-        where $C(r)$ is the ground truth color [S1].
+-    h.  **Optimization:** Update network weights and latent codes $\mathbf{z}^{(s)}_k, \mathbf{z}^{(c)}_k$ using the Adam optimizer [S1].
++1.  **Initialization:** Initialize $F_{coarse}$, $F_{fine}$, and the set of shape codes $\{\mathbf{z}_k^{(s)}\}_{k=1}^K$ and color codes $\{\mathbf{z}_k^{(c)}\}_{k=1}^K$.
++2.  **Instance Sampling:** For each training iteration, sample an object instance index $k$ uniformly from $\{1, \dots, K\}$.
++3.  **Code Retrieval:** Retrieve the shape code $\mathbf{z}_k^{(s)}$ and color code $\mathbf{z}_k^{(c)}$ for the sampled instance $k$.
++4.  **Ray Sampling:** Sample a batch of training rays $\{r\}$ from the set $R_k$ associated with instance $k$.
++5.  **Coarse Network Forward Pass:**
++    *   For each ray $r$, sample points using stratified sampling.
++    *   Compute positional encoding $\gamma(\mathbf{x})$ and directional encoding $\gamma(\mathbf{d})$.
++    *   Concatenate $\gamma(\mathbf{x})$, $\gamma(\mathbf{d})$, $\mathbf{z}_k^{(s)}$, and $\mathbf{z}_k^{(c)}$.
++    *   Pass through $F_{coarse}$ to estimate density $\sigma$ and color $\mathbf{c}$.
++    *   Render coarse color $\hat{C}_{coarse}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)})$ using volume rendering with the estimated density.
++6.  **Hierarchical Sampling:** Use the density outputs from $F_{coarse}$ to sample a hierarchical volume of points for the fine network.
++7.  **Fine Network Forward Pass:**
++    *   For each ray $r$, pass the hierarchical samples through $F_{fine}$ using the same concatenated inputs.
++    *   Render fine color $\hat{C}_{fine}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)})$.
++8.  **Loss Calculation:** Compute the photometric loss for the batch:
++    $$
++    L_{train} = \sum_{k=1}^{K} \sum_{r \in R_k} \left( \|\hat{C}_{coarse}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}) - C(r)\|_2^2 + \|\hat{C}_{fine}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}) - C(r)\|_2^2 \right)
++    $$
++9.  **Optimization:** Update network parameters and codes $\mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}$ using the Adam optimizer.
++
++**Formulas:**
++*   **Positional Encoding:** $\gamma(\mathbf{x}, d_1, d_2) = [\mathbf{x}, \sin(2^{d_1}\pi\mathbf{x}), \cos(2^{d_1}\pi\mathbf{x}), \dots, \sin(2^{d_2-1}\pi\mathbf{x}), \cos(2^{d_2-1}\pi\mathbf{x})]$ [Parent].
++*   **Training Loss:** $L_{train} = \sum_{k=1}^{K} \sum_{r \in R_k} (\|\hat{C}_{coarse}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}) - C(r)\|_2^2 + \|\hat{C}_{fine}(r, \mathbf{z}_k^{(s)}, \mathbf{z}_k^{(c)}) - C(r)\|_2^2)$ [S1].
+ 
+ **Parameters:**
+@@ -47,119 +49,88 @@
+ *   **Beta2:** 0.999 [S1].
+ *   **Epsilon:** $10^{-8}$ [S1].
+-*   **Training Duration:** Until convergence, average 1M iterations [S1].
++*   **Training Duration:** Until convergence, averaging 1M iterations [S1].
+ *   **Code Dimension:** 32 dimensions for both shape and color codes [S1].
++*   **Network Width:** Layer width increased in ablations to keep parameter count approximately equal across experiments [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Density Independence:** The density output $\sigma$ is generally independent of the viewing direction $\mathbf{d}$, depending only on position and shape code [S1].
+-*   **Radiance Dependence:** The radiance output $\mathbf{c}$ depends on position, viewing direction, and appearance code [S1].
+-*   **Shared Shape Branch:** Using a shared shape branch improves performance over a single shared code for both shape and color [S1].
+-*   **Parameter Count:** Layer widths in ablations are increased to keep the number of parameters approximately equal across experiments [S1].
++*   **Precision:** Standard float32 is implied by the use of standard NeRF baselines [S1].
++*   **Boundaries:** The method assumes foreground/background separation is handled similarly to the baseline NeRF [S1].
++*   **Degenerate Input:** If an instance has no training rays, it cannot be optimized; the method requires a valid set $R_k$ for each $k$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import numpy as np
++import torch
++import torch.nn as nn
++import torch.optim as optim
+ 
+-def train_conditional_nerf(instances, rays_per_instance, num_iterations=1000000):
+-    """
+-    Train a conditional radiance field on a dataset of instances.
+-    
+-    Args:
+-        instances: List of K instances. Each instance has a set of rays R_k.
+-        rays_per_instance: Number of rays to sample per instance per iteration.
+-        num_iterations: Number of training iterations.
++class ConditionalNeRF:
++    def __init__(self, K, code_dim=32, lr=1e-4):
++        """
++        K: Number of instances
++        code_dim: Dimensionality of shape and color codes
++        """
++        # Initialize networks (architecture details like skip connections omitted for brevity)
++        self.F_coarse = CoarseNetwork()
++        self.F_fine = FineNetwork()
+         
+-    Returns:
+-        F_coarse: Coarse network weights.
+-        F_fine: Fine network weights.
+-        z_s: Shape codes for all instances.
+-        z_c: Color codes for all instances.
+-    """
+-    K = len(instances)
+-    
+-    # Initialize networks (4 layers, 256 channels, ReLU)
+-    F_coarse = initialize_mlp(4, 256)
+-    F_fine = initialize_mlp(4, 256)
+-    
+-    # Initialize latent codes (32-dimensional)
+-    z_s = np.random.randn(K, 32)
+-    z_c = np.random.randn(K, 32)
+-    
+-    # Optimizer state
+-    optimizer = Adam(F_coarse.parameters() + F_fine.parameters() + z_s + z_c, 
+-                     lr=1e-4, beta1=0.9, beta2=0.999, eps=1e-8)
+-    
+-    for iteration in range(num_iterations):
+-        # Sample instance
+-        k = np.random.randint(0, K)
++        # Learnable codes for each instance
++        self.shape_codes = nn.Parameter(torch.randn(K, code_dim))
++        self.color_codes = nn.Parameter(torch.randn(K, code_dim))
+         
+-        # Get codes for instance k
+-        z_s_k = z_s[k]
+-        z_c_k = z_c[k]
++        self.optimizer = optim.Adam(
++            list(self.F_coarse.parameters()) + 
++            list(self.F_fine.parameters()) + 
++            [self.shape_codes, self.color_codes],
++            lr=lr,
++            betas=(0.9, 0.999),
++            eps=1e-8
++        )
+         
+-        # Get rays for instance k
+-        R_k = instances[k].rays
++    def forward(self, rays, instance_indices):
++        """
++        rays: Tensor of shape (batch_size, 3) containing ray origins and directions
++        instance_indices: Tensor of shape (batch_size,) containing instance IDs k
++        """
++        # Get codes for the batch
++        shape_codes = self.shape_codes[instance_indices]
++        color_codes = self.color_codes[instance_indices]
+         
+-        # Sample batch of rays
+-        batch_rays = sample_batch(R_k, rays_per_instance)
++        # Encode positions and directions
++        # Note: gamma function implementation assumed from Parent article
++        pos_enc = positional_encoding(rays[:, :3])
++        dir_enc = positional_encoding(rays[:, 3:])
+         
+-        total_loss = 0.0
++        # Concatenate inputs: pos, dir, shape_code, color_code
++        # The exact concatenation order and injection points are defined in [S1]
++        inputs = torch.cat([pos_enc, dir_enc, shape_codes, color_codes], dim=-1)
+         
+-        for r in batch_rays:
+-            # Stratified sampling for coarse network
+-            points_coarse = stratified_sample_ray(r)
+-            
+-            # Forward pass through coarse network
+-            # Inject embeddings and codes z_s_k, z_c_k
+-            sigma_coarse, color_coarse = F_coarse(points_coarse, r.direction, z_s_k, z_c_k)
+-            
+-            # Render coarse color
+-            C_coarse = render_volume(points_coarse, sigma_coarse, color_coarse)
+-            
+-            # Hierarchical sampling for fine network based on coarse density
+-            points_fine = hierarchical_sample(points_coarse, sigma_coarse)
+-            
+-            # Forward pass through fine network
+-            sigma_fine, color_fine = F_fine(points_fine, r.direction, z_s_k, z_c_k)
+-            
+-            # Render fine color
+-            C_fine = render_volume(points_fine, sigma_fine, color_fine)
+-            
+-            # Ground truth color for ray r
+-            C_gt = instances[k].get_ground_truth_color(r)
+-            
+-            # Compute loss
+-            loss_coarse = np.sum((C_coarse - C_gt) ** 2)
+-            loss_fine = np.sum((C_fine - C_gt) ** 2)
+-            
+-            total_loss += loss_coarse + loss_fine
++        # Sample points for coarse network
++        coarse_points, coarse_weights = sample_stratified(rays, self.F_coarse)
+         
+-        # Backpropagate and update
+-        optimizer.zero_grad()
+-        total_loss.backward()
+-        optimizer.step()
++        # Render coarse color
++        coarse_colors = render_volume(coarse_points, coarse_weights, self.F_coarse, inputs)
+         
+-    return F_coarse, F_fine, z_s, z_c
++        # Sample hierarchical points using coarse density
++        fine_points, fine_weights = sample_hierarchical(coarse_points, coarse_weights, self.F_fine)
++        
++        # Render fine color
++        fine_colors = render_volume(fine_points, fine_weights, self.F_fine, inputs)
++        
++        return coarse_colors, fine_colors
+ 
+-def render_volume(points, sigma, color):
+-    """
+-    Standard volume rendering with alpha compositing.
+-    """
+-    # Compute delta distances between points
+-    deltas = np.diff(points, axis=0)
+-    # Add epsilon to avoid division by zero
+-    deltas = np.maximum(deltas, 1e-10)
+-    
+-    # Compute alpha
+-    alpha = 1.0 - np.exp(-sigma * deltas)
+-    
+-    # Compute transmittance
+-    T = np.cumprod(1.0 - alpha, axis=0)
+-    T = np.concatenate([np.ones((1, 3)), T[:-1]], axis=0)
+-    
+-    # Composite color
+-    weights = alpha * T
+-    C = np.sum(weights * color, axis=0)
+-    
+-    return C
++    def train_step(self, rays, ground_truth_colors, instance_indices):
++        self.optimizer.zero_grad()
++        
++        coarse_pred, fine_pred = self.forward(rays, instance_indices)
++        
++        # Photometric loss
++        loss_coarse = torch.mean((coarse_pred - ground_truth_colors) ** 2)
++        loss_fine = torch.mean((fine_pred - ground_truth_colors) ** 2)
++        
++        loss = loss_coarse + loss_fine
++        loss.backward()
++        self.optimizer.step()
++        
++        return loss.item()
+ ```
+ 
+@@ -167,21 +138,21 @@
+ 
+ ### Conditional Radiance Field with Shared Branch
+-Uses a single shared branch for shape and appearance codes. Chooses this when computational resources are limited and shape/appearance variations are correlated. [Conditional Radiance Field with Shared Branch](15964-conditional-radiance-field-with-shared-branch.md)
++Uses a shared shape branch to enforce geometric consistency across instances, improving performance over separate shape codes [S1]. [Link](15964-conditional-radiance-field-with-shared-branch.md)
+ 
+ ### Conditional NeRF Implementation Details
+-Focuses on specific implementation choices like skip connections and embedding injection strategies. Choose this when implementing the architecture from scratch. [Conditional NeRF Implementation Details](16755-conditional-nerf-implementation-details.md)
++Provides specific implementation details for the conditional NeRF architecture, including layer depths and activation functions [S1]. [Link](16755-conditional-nerf-implementation-details.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is proportional to the number of iterations (average 1M) and the number of instances $K$ [S1].
+-*   **Memory Complexity:** Memory usage scales with the number of instances $K$ due to the storage of latent codes $\mathbf{z}^{(s)}_k$ and $\mathbf{z}^{(c)}_k$ [S1].
+-*   **Performance:** On the PhotoShapes dataset, the method matches the performance of training independent NeRF models for each instance [S1].
+-*   **Scalability:** The method scales well to more training instances. When training with all 626 instances of the PhotoShape dataset, it achieves reconstruction quality comparable to independent models [S1].
+-*   **Strengths:** Accurately models shape and appearance differences across instances; generalizes to unseen views; supports editing [S1].
+-*   **Limitations:** Requires joint optimization of codes and network weights, which can be computationally intensive [S1].
++*   **Time Complexity:** Training time is proportional to the number of instances $K$ and the number of iterations (avg 1M) [S1]. Each iteration processes a batch of rays from one instance.
++*   **Memory Complexity:** Memory usage scales with $K$ due to the storage of $2K$ latent codes (shape and color) [S1]. The network parameters are shared, so memory does not scale linearly with $K$ for the MLPs.
++*   **Measured Performance:** On the PhotoShapes dataset, the method matches the performance of training independent NeRF models for each instance in terms of PSNR and LPIPS [S1].
++*   **Scaling:** The method scales well to more training instances; experiments were conducted with all 626 instances of the PhotoShapes dataset [S1].
++*   **Strengths:** Efficiently models shape and appearance differences across instances; avoids training separate models; generalizes to unseen views [S1].
++*   **Limitations:** Requires a dataset of multiple instances; performance depends on the quality of the learned codes [S1].
++*   **When to use:** When you have a dataset of multiple similar objects (e.g., chairs) and want a single model to represent them all efficiently.
++*   **When not to use:** When you have only a single instance or no shared structure between instances.
+ 
+ ## Background
+-*   **Origin:** Proposed in "Editing Conditional Radiance Fields" (2021) [S1].
+-*   **History:** Builds on the original NeRF paper [45] and extends it to handle multiple instances by introducing latent codes [S1].
+-*   **Usage:** Used for editing 3D objects, generalizing across instances, and rendering multiple views of objects with varying shape and appearance [S1].
++The method was introduced in "Editing Conditional Radiance Fields" (2021) [S1]. It builds on the original NeRF architecture [45] and extends it to handle multiple instances by learning instance-specific codes. The method was evaluated on the PhotoShapes and Aubry chairs datasets [S1].
+ 
+ ## Sources

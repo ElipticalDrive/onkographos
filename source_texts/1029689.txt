@@ -1,0 +1,261 @@
+Hi Would it be possible to supply a small working example of volOctree with full MPI support (partitioning and rebalancing after refinement/coarsening)? Or does voloctree_adaptation_example_00001 already provide that? It seems to me that...
+
+Example for volOctree with refinement and MPI · Issue #424 · optimad/bitpit · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Example for volOctree with refinement and MPI #424
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Example for volOctree with refinement and MPI #424
+Copy link
+Labels
+M - voloctreequestion
+Description
+gitg0n
+opened on Oct 5, 2023
+Issue body actions
+Hi
+Would it be possible to supply a small working example of volOctree with full MPI support (partitioning and rebalancing after refinement/coarsening)?
+Or does voloctree_adaptation_example_00001 already provide that? It seems to me that the current version would cause every partition to generate the grid independently.
+Thanks
+Dave
+Activity
+andrea-iob commented on Oct 9, 2023
+andrea-iob
+on Oct 9, 2023
+Member
+More actions
+You can have a look inside the test directory: "test/integration_tests/voloctree". The files with "parallel" in their name are tests that partition the mesh among the processes.
+andrea-iob
+added
+help wanted
+question
+M - voloctree
+and removed
+help wanted
+on Oct 9, 2023
+andrea-iob commented on Oct 9, 2023
+andrea-iob
+on Oct 9, 2023
+Member
+More actions
+Here a simple example on how the code needed to partition a VolOctree patch:
+```
+	int nProcs;
+	int	rank;
+	MPI_Comm_size(MPI_COMM_WORLD, &nProcs);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+	std::array<double, 3> origin = {{0., 0., 0.}};
+	double length = 20;
+	double dh = 1.0;
+
+	log::cout() << "  >> 3D octree mesh" << "\n";
+
+	// Create the patch
+	VolOctree *patch_3D = new VolOctree(3, origin, length, dh, MPI_COMM_WORLD);
+	patch_3D->getVTK().setName("octree_parallel_uniform_patch_3D");
+	patch_3D->initializeAdjacencies();
+	patch_3D->initializeInterfaces();
+	patch_3D->update();
+
+	// Partition the patch
+	patch_3D->partition(true);
+
+	// Refine the patch on one process
+	if(rank==0){
+		for(const auto& cell:patch_3D->getCells()){
+			patch_3D->markCellForRefinement(cell.getId());
+		}
+	}
+	patch_3D->update(true);
+
+	// Define partitioning weights
+	std::unordered_map<long, double> partitioningWeights;
+	if (rank == 0) {
+		std::size_t counter = 0;
+		for(const Cell &cell : patch_3D->getCells()){
+			partitioningWeights.insert({cell.getId(), 0});
+
+			++counter;
+			if (counter == 0.25 * patch_3D->getInternalCellCount()) {
+				break;
+			}
+		}
+	} else if (rank == 1) {
+		std::size_t counter = 0;
+		for(const Cell &cell : patch_3D->getCells()){
+			++counter;
+			if (counter > 0.5 * patch_3D->getInternalCellCount()) {
+				partitioningWeights.insert({cell.getId(), 5});
+			}
+		}
+	}
+
+	// Balance the patch
+	patch_3D->partition(partitioningWeights, true);
+```
+gitg0n commented on Oct 10, 2023
+gitg0n
+on Oct 10, 2023
+Author
+More actions
+Dear Andrea
+Thank you very much for the example! I completely missed the parallel integration tests.
+I do have a follow-up question, if I may: I am able to run my code in parallel, but I get a
+"Sign of external region not properly identified!" when updating the level set.
+This happens after a few refinment iterations, not immediately.
+I might have to add, that I'm using levelsets to create grids from STL geometries.
+Now I don't think this is a bug, but more likely me not updating things properly.
+The code works without MPI.
+I've added a pseudo-code snippet below that describes the current algorithm.
+I'm a bit confused as to how to use the adaption info properly when combining refinement and partitioning.
+Currently I'm simply overwriting the adaption info from the refinement step with the one from the partitioning,
+assuming the partitioning will generate the most up-to-date information.
+Does this even make sense? Do I need an additional synchronization or update step that I'm missing?
+Thank you for your help!
+```
+//private member
+std::vector<bitpit::adaption::Info> m_adaption_data;
+
+//set up octree
+m_vol_octree = std::make_unique<bitpit::VolOctree>(...);
+m_vol_octree->initializeAdjacencies();
+m_adaption_data = m_vol_octree->update(true);
+#ifdef USING_MPI
+m_adaption_data = m_vol_octree->partition(true);
+#endif 
+
+//refinement loop
+for up_to_max_level {
+    m_levelset->setSizeNarrowBand(some_value_based_on_current_level); 
+    m_levelset->update(m_adaption_data);
+
+    for all_cells{
+        if(some_condition_based_on_levelset) {
+            m_vol_octree->markCellForRefinement(cell_id);
+        }
+    }
+
+    m_adaption_data = m_vol_octree->update(true);
+
+#ifdef USING_MPI
+    m_adaption_data = m_vol_octree->partition(true); 
+#endif 
+}
+```
+andrea-iob commented on Oct 16, 2023
+andrea-iob
+on Oct 16, 2023
+Member
+More actions
+Dear Andrea
+Thank you very much for the example! I completely missed the parallel integration tests. I do have a follow-up question, if I may: I am able to run my code in parallel, but I get a "Sign of external region not properly identified!" when updating the level set. This happens after a few refinment iterations, not immediately. I might have to add, that I'm using levelsets to create grids from STL geometries. Now I don't think this is a bug, but more likely me not updating things properly. The code works without MPI.
+Usually, this type of error means that the input STL has some inconsistencies. For example it's not a closed solid, the normals are not pointing in the same "direction" (some are pointing inwards and some are pointing outwards) or there are some degenerate triangles (e.g., triangles with all three vertices along the same line). Would it be possible for you to perform some checks on the STL?
+andrea-iob commented on Oct 16, 2023
+andrea-iob
+on Oct 16, 2023
+Last edited by andrea-iob
+Member
+More actions
+Also, if you don't need the levelset sign outside the narrow band, you can disable sign propagation using m_levelset->setPropagateSign(false);.
+gitg0n commented on Oct 16, 2023
+gitg0n
+on Oct 16, 2023
+Last edited by gitg0n
+Author
+More actions
+Dear Andrea
+Thank you for your reply. The STL itself is definitely ok, because it works fine when not using MPI.
+I think I'm probably doing something wrong with the way I'm using the adaption info (see the code snippet above). Does the algorithm make sense?
+Depending on how I used the adaption info, I ran into "Sign of external ..." errors or even "out of range" errors for one of the maps. In general, I don't really know how to use the adaption info properly when both refinement and MPI partitioning are being used.
+My code currently doesn't decompose the STL data to different partitions, so every MPI rank should have the full STL data available.
+As for the sign propagation, unfortunately I need the sign to check for inside/outside.
+[edit] The STL I'm trying is a box, consisting of 12 triangles.
+andrea-iob commented on Oct 16, 2023
+andrea-iob
+on Oct 16, 2023
+Member
+More actions
+The levelset should be updated also after the patch has been partitioned, try adding a m_levelset->update(m_adaption_data); after the the two "m_adaption_data = m_vol_octree->partition(true);".
+andrea-iob commented on Oct 16, 2023
+andrea-iob
+on Oct 16, 2023
+Member
+More actions
+I noticed that there were some other updates missing:
+```
+//private member
+std::vector<bitpit::adaption::Info> m_adaption_data;
+
+//set up octree
+m_vol_octree = std::make_unique<bitpit::VolOctree>(...);
+m_vol_octree->initializeAdjacencies();
+m_adaption_data = m_vol_octree->update(true);
+m_levelset->update(m_adaption_data);   // <-----------------------------------
+#ifdef USING_MPI
+m_adaption_data = m_vol_octree->partition(true);
+m_levelset->update(m_adaption_data);  // <-----------------------------------
+#endif 
+
+//refinement loop
+for up_to_max_level {
+    m_levelset->setSizeNarrowBand(some_value_based_on_current_level); 
+     // <----------------------------------- If you want to recalculate the levelset after
+     // <----------------------------------- changing the narrowband you have to clear it
+     // <----------------------------------- and evaluate it from scratch. I don't recommended
+     // <----------------------------------- it. I would only set the new narrow band size and
+     // <----------------------------------- then the next updates should evaluate the levelset
+    // <-----------------------------------  only inside the new narrow band. For the initial
+    // <-----------------------------------  testing I would keep the narrow band size fixed.
+
+    for all_cells{
+        if(some_condition_based_on_levelset) {
+            m_vol_octree->markCellForRefinement(cell_id);
+        }
+    }
+
+    m_adaption_data = m_vol_octree->update(true);
+    m_levelset->update(m_adaption_data);   // <-----------------------------------
+
+#ifdef USING_MPI
+    m_adaption_data = m_vol_octree->partition(true); 
+    m_levelset->update(m_adaption_data); // <-----------------------------------
+#endif 
+}
+```
+gitg0n commented on Oct 16, 2023
+gitg0n
+on Oct 16, 2023
+Author
+More actions
+Ah that makes sense. Thank you very much! I will have to think about my algorithm a bit to account for all the required updates in parallel.
+The variable narrow band works fine by the way, at least in serial.
+Thank you very much for your help!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+M - voloctreequestion
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

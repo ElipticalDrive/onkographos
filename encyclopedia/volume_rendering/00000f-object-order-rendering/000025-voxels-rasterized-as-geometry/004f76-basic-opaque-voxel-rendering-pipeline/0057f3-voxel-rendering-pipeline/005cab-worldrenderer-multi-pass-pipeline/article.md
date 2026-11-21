@@ -1,0 +1,271 @@
+# WorldRenderer Multi-Pass Pipeline
+
+Also called: VoxelKit GPU rendering engine
+
+## Overview
+WorldRenderer is the GPU rendering engine for VoxelKit, implemented as a multi-pass Metal pipeline that draws five distinct world layers (Structure, Object, Zone, IoT, Agent) into a single `MTKView`-backed drawable [S1, unofficial]. It is designed specifically for Apple Silicon hardware (e.g., M1 Pro 16-core GPU) and distinguishes itself through CPU-side frustum culling, hardware-aware quality presets, and instanced rendering of voxel geometry [S1, unofficial]. Unlike generic voxel renderers, it integrates specific application logic such as zone triangulation, IoT billboard sprites, and agent trajectory lines within a unified Metal command buffer [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   **World Data:** `MergedVoxel` buffers (CPU-updated, GPU-read), `ChunkKey` bounding boxes, `Zone` polygons, IoT device anchors, and Agent trajectory points [S1, unofficial].
+*   **Camera State:** View-projection matrix, camera position, viewport size, height cutoff, and fog density [S1, unofficial].
+*   **Hardware Info:** `MTLDevice` name used to select a quality preset [S1, unofficial].
+
+**Outputs:**
+*   A single composited image rendered to the `MTKView` drawable [S1, unofficial].
+
+### Data Structures
+
+**CameraUniforms**
+Passed to all shaders via `setVertexBytes:`. The layout is:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```c
+struct CameraUniforms {
+    float4x4 viewProjection;
+    float3   cameraPosition;
+    float    voxelSize;
+    float2   viewportSize;
+    float    heightCutoff;
+    float    fogDensity;
+};
+```
+[S1, unofficial]
+
+**MergedVoxel Buffer**
+*   **Storage Mode:** `MTLStorageMode.shared` (allows CPU updates and GPU reads of the same physical memory) [S1, unofficial].
+*   **Content:** Center position and half-size of each voxel [S1, unofficial].
+
+**Zone Triangulation Buffer**
+*   **Content:** Vertices for zone polygons, triangulated on the CPU [S1, unofficial].
+*   **Method:** Centroid computed via `Accelerate.vDSP`; fan triangulation for convex polygons, ear-clip for concave [S1, unofficial].
+
+**IoT Icon Atlas**
+*   **Format:** `MTLTexture`, 128×128 pixels [S1, unofficial].
+
+**Hardware Preset Table**
+Used at initialization to map `MTLDevice.name` substrings to quality settings:
+
+| Chip Generation | Preset | Max Instances | LOD Scale |
+| :--- | :--- | :--- | :--- |
+| M4 Pro / M4 Max | ultra | 50M | 1.0 |
+| M3 / M4 | high | 20M | 1.0 |
+| M1 Pro / M2 Pro | high | 10M | 1.0 |
+| M1 / M2 | medium | 5M | 0.8 |
+| iPhone A17 / A18 | medium | 3M | 0.7 |
+| iPhone A15 / A16 | low | 1M | 0.5 |
+
+[S1, unofficial]
+
+### Numbered Steps
+
+1.  **Initialization:**
+    *   Detect chip generation by checking `MTLDevice.name` for substrings (e.g., "M4 Pro", "A17") [S1, unofficial].
+    *   Map result to the Hardware Preset Table to determine LOD aggressiveness, shadow quality, and max instance count [S1, unofficial].
+    *   Create `MTLRenderPipelineDescriptor` for each pass (Structure, Zone, IoT, Agent) with appropriate vertex/fragment functions [S1, unofficial].
+    *   Configure `MTLDepthStencilState`: depth write enabled for Structure/Object passes; disabled for Zone/IoT/Agent passes [S1, unofficial].
+
+2.  **Per-Frame Render Loop (`draw(in view: MTKView)`):**
+    *   Update `CameraUniforms` with current camera state [S1, unofficial].
+    *   **Frustum Culling:** Perform Gribb-Hartmann 6-plane AABB test on CPU for each `ChunkKey` bounding box. Eliminate off-screen chunks to reduce draw calls by ≥ 50% when the camera faces a wall [S1, unofficial].
+    *   **LOD Selection:** Query `ChunkedOctree` at a depth based on `distance(cameraPosition, chunkCenter)` [S1, unofficial].
+    *   **Encode StructurePass:**
+        *   Set vertex buffer with `MergedVoxel` data.
+        *   Issue instanced draw call: `drawPrimitives(type:.triangle, vertexStart:0, vertexCount:36, instanceCount: mergedVoxels.count)` [S1, unofficial].
+    *   **Encode ZonePass:**
+        *   Upload pre-triangulated zone vertices to `MTLBuffer` [S1, unofficial].
+        *   Draw zone polygons.
+    *   **Encode IoTPass:**
+        *   Draw billboard sprites using the 128×128 icon atlas [S1, unofficial].
+        *   Draw labels using textures baked from `CoreText` → `CGContext` [S1, unofficial].
+    *   **Encode AgentPass:**
+        *   Draw pulsing rings (instanced) [S1, unofficial].
+        *   Draw trajectories using `MTLPrimitiveType.lineStrip` [S1, unofficial].
+        *   Draw predicted paths with fading alpha [S1, unofficial].
+    *   **Present:** Present the drawable [S1, unofficial].
+
+3.  **Frame Rate Control:**
+    *   Use `CADisplayLink` with `preferredFrameRateRange` [S1, unofficial].
+    *   **Locked Mode:** Set `minimum = preferred = maximum = targetFps` (options: 30, 45, 60, 75, 90, 120) [S1, unofficial].
+    *   **Adaptive Mode:** Set `minimum = 24`, `preferred = 120`, `maximum = 120` (matches ProMotion) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+def init_renderer(device: MTLDevice):
+    # Detect chip and set preset
+    device_name = device.name
+    if "M4 Pro" in device_name or "M4 Max" in device_name:
+        preset = Preset(ultra, max_instances=50_000_000, lod_scale=1.0)
+    elif "M3" in device_name or "M4" in device_name:
+        preset = Preset(high, max_instances=20_000_000, lod_scale=1.0)
+    elif "M1 Pro" in device_name or "M2 Pro" in device_name:
+        preset = Preset(high, max_instances=10_000_000, lod_scale=1.0)
+    elif "M1" in device_name or "M2" in device_name:
+        preset = Preset(medium, max_instances=5_000_000, lod_scale=0.8)
+    elif "A17" in device_name or "A18" in device_name:
+        preset = Preset(medium, max_instances=3_000_000, lod_scale=0.7)
+    elif "A15" in device_name or "A16" in device_name:
+        preset = Preset(low, max_instances=1_000_000, lod_scale=0.5)
+    else:
+        preset = Preset(low, max_instances=1_000_000, lod_scale=0.5) # [G] Default fallback
+
+    # Create pipeline states
+    structure_pipeline = create_pipeline(structure_vertex, structure_fragment, depth_write=True)
+    zone_pipeline = create_pipeline(zone_vertex, zone_fragment, depth_write=False)
+    iot_pipeline = create_pipeline(iot_vertex, iot_fragment, depth_write=False)
+    agent_pipeline = create_pipeline(agent_vertex, agent_fragment, depth_write=False)
+
+    # Create buffers
+    merged_voxel_buffer = device.new_buffer(size=merged_voxels.count * sizeof(MergedVoxel), 
+                                            options=MTLStorageMode.shared)
+    zone_buffer = device.new_buffer(size=zone_vertices.count * sizeof(float3), options=MTLStorageMode.private)
+    icon_atlas = load_texture("iot_icons_128x128.png")
+
+    # Setup display link
+    display_link = CADisplayLink(target=self, selector="draw:")
+    display_link.preferredFrameRateRange = FrameRateRange(min=24, preferred=120, max=120)
+    display_link.add_to_runloop()
+
+def draw(self, view: MTKView):
+    # 1. Update Uniforms
+    camera_uniforms = CameraUniforms(
+        viewProjection=view.camera.projectionMatrix * view.camera.viewMatrix,
+        cameraPosition=view.camera.position,
+        voxelSize=1.0, # [G] Assumed unit voxel size based on context
+        viewportSize=view.drawableSize,
+        heightCutoff=current_height_cutoff,
+        fogDensity=current_fog_density
+    )
+    command_buffer.set_vertex_bytes(camera_uniforms, offset=0, index=0)
+
+    # 2. Frustum Culling & LOD
+    visible_chunks = []
+    for chunk in all_chunks:
+        if gribb_hartmann_test(chunk.bounding_box, view.camera.frustum_planes):
+            dist = distance(view.camera.position, chunk.center)
+            if dist < 20.0:
+                lod_depth = 5 # 3.125 cm
+            elif dist < 100.0:
+                lod_depth = 3 # 12.5 cm
+            else:
+                lod_depth = 1 # 50 cm
+            
+            # Apply LOD scale from preset
+            effective_lod = lod_depth * preset.lod_scale
+            visible_chunks.append((chunk, effective_lod))
+
+    # 3. Encode Structure Pass
+    encoder = command_buffer.render_command_encoder(pipeline_state=structure_pipeline)
+    encoder.set_vertex_buffer(merged_voxel_buffer, offset=0, index=0)
+    # 36 vertices = 12 triangles = 6 faces of cube
+    encoder.draw_primitives(type=MTLPrimitiveType.Triangle, 
+                            vertex_start=0, 
+                            vertex_count=36, 
+                            instance_count=len(visible_chunks))
+    encoder.end_encoding()
+
+    # 4. Encode Zone Pass
+    # Triangulate on CPU if data changed
+    if zones_changed:
+        zone_vertices = []
+        for zone in zones:
+            centroid = vDSP_compute_centroid(zone.polygon)
+            if is_convex(zone.polygon):
+                zone_vertices.extend(fan_triangulate(zone.polygon, centroid))
+            else:
+                zone_vertices.extend(ear_clip_triangulate(zone.polygon))
+        zone_buffer.replace(range=0, length=len(zone_vertices)*sizeof(float3), 
+                            bytes=zone_vertices)
+    
+    encoder = command_buffer.render_command_encoder(pipeline_state=zone_pipeline)
+    encoder.set_vertex_buffer(zone_buffer, offset=0, index=0)
+    encoder.draw_primitives(type=MTLPrimitiveType.Triangle, vertex_start=0, vertex_count=len(zone_vertices))
+    encoder.end_encoding()
+
+    # 5. Encode IoT Pass
+    encoder = command_buffer.render_command_encoder(pipeline_state=iot_pipeline)
+    encoder.set_vertex_buffer(iot_buffer, offset=0, index=0)
+    encoder.set_fragment_texture(icon_atlas, index=0)
+    encoder.draw_primitives(type=MTLPrimitiveType.Triangle, vertex_start=0, vertex_count=iot_vertex_count)
+    encoder.end_encoding()
+
+    # 6. Encode Agent Pass
+    encoder = command_buffer.render_command_encoder(pipeline_state=agent_pipeline)
+    # Pulsing rings
+    encoder.set_vertex_buffer(agent_ring_buffer, offset=0, index=0)
+    encoder.set_uniform("time", current_time)
+    encoder.draw_primitives(type=MTLPrimitiveType.Triangle, vertex_start=0, vertex_count=ring_vertex_count, 
+                            instance_count=agent_count)
+    # Trajectories
+    encoder.set_vertex_buffer(agent_trajectory_buffer, offset=0, index=0)
+    encoder.draw_primitives(type=MTLPrimitiveType.LineStrip, vertex_start=0, vertex_count=trajectory_vertex_count)
+    encoder.end_encoding()
+
+    command_buffer.present_drawable(view.currentDrawable)
+```
+
+### Formulas
+
+**Exponential Fog Factor**
+$$ \text{fogFactor} = 1 - \exp(-\text{fogDensity} \times \text{depth}) $$
+Where `fogDensity` is from `CameraUniforms` and `depth` is the fragment depth [S1, unofficial].
+
+**Billboard Right Vector**
+$$ \text{right} = \text{cross}(\text{cameraUp}, \text{toCamera}) $$
+Computed in the vertex shader so the sprite always faces the camera [S1, unofficial].
+
+### Parameters
+
+*   **Key Light Direction:** $(0.577, 0.577, 0.577)$ [S1, unofficial].
+*   **Fill Light Direction:** $(-0.577, 0.2, -0.577)$ [S1, unofficial].
+*   **Ambient Light:** $0.3$ [S1, unofficial].
+*   **Zone Alpha:** $0.25$ [S1, unofficial].
+*   **LOD Band 0:** Distance $0–20$ m, Octree depth $5$ (effective $3.125$ cm) [S1, unofficial].
+*   **LOD Band 1:** Distance $20–100$ m, Octree depth $3$ (effective $12.5$ cm) [S1, unofficial].
+*   **LOD Band 2:** Distance $100+$ m, Octree depth $1$ (effective $50$ cm) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+
+*   **Precision:** Use `MTLStorageMode.shared` for `MergedVoxel` buffers to ensure CPU updates and GPU reads access the same physical memory without unnecessary copies [S1, unofficial].
+*   **Boundaries:** The Gribb-Hartmann test must be performed per 1 m³ chunk to effectively cull off-screen geometry [S1, unofficial].
+*   **Degenerate Input:** Zone triangulation must handle both convex (fan) and concave (ear-clip) polygons; failure to distinguish may result in incorrect rendering [S1, unofficial].
+*   **Height Cutoff:** Geometry with `worldPos.y > heightCutoff` is clipped in the fragment shader [S1, unofficial].
+
+## Subtopics
+
+### StructurePass
+Renders the primary voxel geometry using instanced cubes with two-directional diffuse lighting and depth fog. Chosen when rendering the bulk of the world volume. [Link](16079-voxel-rendering-pipeline.md#structurepass)
+
+### ZonePass
+Renders semi-transparent (alpha 0.25) overlapping zone polygons using additive blending. Chosen for area-based metadata visualization. [Link](16079-voxel-rendering-pipeline.md#zonepass)
+
+### IoTPass
+Renders IoT device icons as billboards and text labels. Chosen for sparse, high-priority object markers. [Link](16079-voxel-rendering-pipeline.md#iotpass)
+
+### AgentPass
+Renders agent positions as pulsing rings and trajectories as line strips. Chosen for dynamic entity tracking. [Link](16079-voxel-rendering-pipeline.md#agentpass)
+
+## Operating characteristics
+
+*   **Time Complexity:** Frustum culling is $O(C)$ where $C$ is the number of chunks. LOD query is $O(1)$ per chunk. Rendering is dominated by the number of visible instances.
+*   **Memory Complexity:** $O(V)$ for voxel data, where $V$ is the number of occupied voxels. Zone and Agent data are $O(Z)$ and $O(A)$ respectively.
+*   **Measured Performance:** Designed to render 100,000 occupied voxels at native monitor refresh rate (up to 120 fps) on an M1 Pro 16-core GPU [S1, unofficial].
+*   **Scaling:** Frustum culling reduces draw calls by ≥ 50% when the camera faces a wall (half map off-screen) [S1, unofficial].
+*   **Strengths:** High performance on Apple Silicon via instanced rendering and CPU-side culling. Hardware-aware presets ensure consistent performance across device generations.
+*   **Limitations:** CPU-side triangulation for zones may become a bottleneck for highly complex concave polygons. LOD transitions must be tuned to avoid visual popping [S1, unofficial].
+*   **When to Use:** Real-time visualization of voxel-based worlds on iOS/macOS devices with Metal support.
+*   **When Not to Use:** Non-Apple platforms, or scenes requiring dynamic global illumination beyond simple diffuse lighting.
+
+## Background
+
+WorldRenderer is part of the VoxelKit project, an open-source voxel engine. The specific multi-pass pipeline design was documented in GitHub Issue #14 by user `plagness` in 2024 [S1, unofficial]. It was developed to address the need for efficient rendering of five distinct world layers on mobile and desktop Apple Silicon hardware, leveraging Metal's instancing capabilities and CPU-GPU shared memory features.
+
+## Sources
+
+[S1] WorldRenderer: Metal pipeline for all five map layers, https://github.com/plagness/VoxelKit/issues/14, fetched 2026-10-27 (unofficial)

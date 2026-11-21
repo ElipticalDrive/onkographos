@@ -1,0 +1,74 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Histogram Noise Reduction is a preprocessing step applied to the 3D histogram of a volume dataset to mitigate noise in underrepresented regions where voxel counts are too low for valid classification [S1]. It solves the problem of sparse data causing invalid opacity assignments by artificially increasing sample density through super-sampling and neighborhood expansion [S1]. It sets itself apart from sibling methods like [Histogram Equalization](5642-histogram-equalization.md) by focusing on statistical smoothing of the histogram bin counts rather than redistributing intensity values, and from [Boundary Emphasis](12217-boundary-emphasis.md) by prioritizing the removal of noise over the enhancement of specific features [G].
++Histogram Noise Reduction is a preprocessing step applied to the 3D histogram of a volume dataset to mitigate noise in underrepresented regions where voxel counts are too low for valid classification [S1]. It solves the problem of sparse data causing invalid opacity assignments by artificially increasing sample density through super-sampling and neighborhood expansion [S1]. It sets itself apart from sibling methods like [Histogram Equalization](5642-histogram-equalization.md) by focusing on statistical smoothing of the histogram bin counts rather than redistributing intensity values [G]. It differs from [Boundary Emphasis](12217-boundary-emphasis.md) by prioritizing the removal of noise over the enhancement of specific features [G].
+ 
+ ## How it works
+@@ -15,10 +15,10 @@
+ 
+ **Data Structures:**
+-- The histogram is stored as a 3D array. Let $N_v, N_d, N_{dd}$ be the number of bins for value, 1st derivative, and 2nd derivative respectively [G].
++- The histogram is stored as a 3D array with dimensions $N_v \times N_d \times N_{dd}$ for value, 1st derivative, and 2nd derivative bins respectively [G].
+ - Each bin $H[i, j, k]$ stores an integer count of voxels mapping to that coordinate [G].
+ 
+ **Steps:**
+-1. **Identify Noisy Regions:** Iterate through all bins in $H$. If $H[i, j, k] < T_{noise}$, mark the bin as noisy [S1].
+-2. **Super-sampling:** Generate additional samples by interpolating the volume data. For a super-sampling factor of $S$, each voxel contributes $S^3$ samples to the histogram [S1]. Perform trilinear interpolation to estimate values at the sub-voxel grid points defined by the super-sampling grid [S1]. Increment the corresponding histogram bins for these new samples [S1].
++1. **Identify Noisy Regions:** Iterate through all bins in $H$ [S1]. If $H[i, j, k] < T_{noise}$, mark the bin as noisy [S1].
++2. **Super-sampling:** Generate additional samples by interpolating the volume data [S1]. For a super-sampling factor of $S$, each voxel contributes $S^3$ samples to the histogram [S1]. Perform trilinear interpolation to estimate values at the sub-voxel grid points defined by the super-sampling grid [S1]. Increment the corresponding histogram bins for these new samples [S1].
+ 3. **K-neighborhood Expansion (Alternative or Combined):** For each voxel in the volume, identify its spatial neighbors within a $k$-neighborhood [S1]. Add the voxel's value, 1st derivative, and 2nd derivative to the histogram bins corresponding to the voxel and all its neighbors [S1]. A $k$-neighborhood with $k=1$ increases the number of samples by a factor of 9 [S1].
+ 4. **Combined Approach:** Apply super-sampling and $k$-neighborhood expansion sequentially or simultaneously to achieve sufficient smoothing [S1]. Using both a $k$-neighborhood with $k=2$ and two-times super-sampling smooths noisy regions well while keeping the number of trilinear interpolations reasonable [S1].
+@@ -37,8 +37,11 @@
+     H = [[[0 for _ in range(histogram_bins[2])] for _ in range(histogram_bins[1])] for _ in range(histogram_bins[0])]
+     
++    def clamp(val, min_val, max_val):
++        return max(min_val, min(val, max_val)) [G]
++
+     def trilinear_interpolate(vol, x, y, z):
+         # Standard trilinear interpolation [G]
+         x0, y0, z0 = int(x), int(y), int(z)
+-        x1, y1, z1 = min(x0 + 1, len(vol) - 1), min(y0 + 1, len(vol[0]) - 1), min(z0 + 1, len(vol[0][0]) - 1)
++        x1, y1, z1 = clamp(x0 + 1, 0, len(vol) - 1), clamp(y0 + 1, 0, len(vol[0]) - 1), clamp(z0 + 1, 0, len(vol[0][0]) - 1)
+         dx, dy, dz = x - x0, y - y0, z - z0
+         c00 = vol[x0][y0][z0] * (1 - dx) + vol[x1][y0][z0] * dx
+@@ -50,13 +53,20 @@
+     def calculate_1st_derivative(vol, x, y, z):
+         # Central difference approximation [G]
+-        return (vol[x+1][y][z] - vol[x-1][y][z]) / 2.0
++        x0 = clamp(x - 1, 0, len(vol) - 1)
++        x1 = clamp(x + 1, 0, len(vol) - 1)
++        return (vol[x1][y][z] - vol[x0][y][z]) / 2.0
+ 
+     def calculate_2nd_derivative(vol, x, y, z):
+         # Central difference approximation [G]
+-        return (vol[x+1][y][z] - 2 * vol[x][y][z] + vol[x-1][y][z])
++        x0 = clamp(x - 1, 0, len(vol) - 1)
++        x1 = clamp(x + 1, 0, len(vol) - 1)
++        return vol[x1][y][z] - 2 * vol[x][y][z] + vol[x0][y][z]
+ 
+     def map_to_bins(val, d1, d2, bins):
+         # Normalize and map to bin indices [G]
+-        return (int(val * bins[0]), int(d1 * bins[1]), int(d2 * bins[2]))
++        # Assumes val, d1, d2 are normalized to [0, 1] range before calling
++        return (int(clamp(val * bins[0], 0, bins[0] - 1)), 
++                int(clamp(d1 * bins[1], 0, bins[1] - 1)), 
++                int(clamp(d2 * bins[2], 0, bins[2] - 1)))
+ 
+     # Step 1 & 3: Base histogram with k-neighborhood expansion
+@@ -101,5 +111,5 @@
+ **Edge Cases and Pitfalls:**
+ - **Preprocessing Time:** High super-sampling factors (e.g., $S=4$) dramatically increase preprocessing time due to the large number of trilinear interpolations required [S1].
+-- **Derivative Calculation:** The sources do not specify how derivatives are calculated for super-sampled points or how they are integrated into the histogram bins. Implementers must define this [G].
++- **Derivative Calculation:** The sources do not specify how derivatives are calculated for super-sampled points or how they are integrated into the histogram bins [G].
+ - **Boundary Conditions:** When expanding to $k$-neighborhoods or sampling at grid edges, boundary checks are required to avoid out-of-bounds access [G].
+ 
+@@ -116,5 +126,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the number of trilinear interpolations for super-sampling and the neighborhood expansion. Super-sampling by factor $S$ increases the number of samples by $S^3$ [S1]. K-neighborhood with radius $k=1$ increases the number of samples by a factor of 9 [S1].
++- **Time Complexity:** Dominated by the number of trilinear interpolations for super-sampling and the neighborhood expansion [S1]. Super-sampling by factor $S$ increases the number of samples by $S^3$ [S1]. K-neighborhood with radius $k=1$ increases the number of samples by a factor of 9 [S1].
+ - **Memory Complexity:** Proportional to the size of the histogram and the volume data [G].
+ - **Measured Performance:** Two-times super-sampling ($S=2$) increases samples by a factor of 8, which was found insufficient alone [S1]. Four-times super-sampling ($S=4$) reduced noise sufficiently but increased preprocessing time dramatically [S1]. A combined approach using $k=2$ and $S=2$ provided good smoothing with reasonable preprocessing time [S1].

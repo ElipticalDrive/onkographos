@@ -1,0 +1,131 @@
+# Particle Rendering via Grid Bucketing
+
+Also called: Grid Bucketing Particle Rendering, Particle Visualization, Sphere Rendering
+
+## Overview
+Particle Rendering via Grid Bucketing renders particles as spheres by mapping them to a spatial grid to accelerate ray-sphere intersection tests [S1]. It solves the performance bottleneck of checking every particle against every ray by using a low-resolution grid for coarse culling and neighbor iteration, followed by precise ray-sphere intersection checks [S1]. It differs from [Ray Marching Particle Grid Traversal](5182-ray-marching-particle-grid-traversal.md) by explicitly iterating over particle lists stored in grid buckets rather than marching through a voxel grid to find hits, and from [2D Projection 1D Lookup Particle Cache](8958-2d-projection-1d-lookup-particle-cache.md) by relying on 3D spatial hashing rather than 2D screen-space caching [S1].
+
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$; particle data (positions $\mathbf{x}_j$, radii $r_j$, colors); spatial grid structure mapping cell indices to particle lists.
+**Outputs:** Intersection distance $\lambda$, intersection point $\mathbf{x}_i$, normal $\mathbf{n}_i$, and color.
+
+**Data Structures:**
+The grid maps integer cell indices to lists of particle IDs. Each particle $j$ is assigned to a cell based on its center position $\mathbf{x}_j$. The grid must support retrieval of particles in a cell $c$ and its immediate neighbors.
+
+**Steps:**
+1.  **Ray-Cell Intersection:** Calculate the intersection of the current ray with the current grid cell $c$. This yields the entry distance $\lambda_{min\_c}$ and exit distance $\lambda_{max\_c}$ [S1].
+2.  **Neighbor Iteration:** Identify all particles that can potentially overlap cell $c$. This includes all particles contained within cell $c$ and its neighboring cells [S1].
+3.  **Ray-Sphere Intersection:** For each candidate particle $j$:
+    *   Calculate the ray-sphere intersection distance $\lambda_j$. If an intersection exists, $\lambda_j$ is the distance from the ray origin to the intersection point [S1].
+    *   Check if $\lambda_j \in [\lambda_{min\_c}, \lambda_{max\_c}]$ [S1].
+    *   If the condition is met and $\lambda_j$ is smaller than the current closest intersection distance, store $j$ and $\lambda_j$ as the new closest hit [S1].
+4.  **Result Computation:** If a particle intersection was found:
+    *   Compute the intersection point: $\mathbf{x}_i = \mathbf{o} + \lambda_j \mathbf{d}$ [S1].
+    *   Compute the normal: $\mathbf{n}_i = \mathbf{x}_i - \mathbf{x}_j$ [S1]. Note: This vector is not normalized in the source description, but normals are typically unit vectors. The source states $\mathbf{n}_i = \mathbf{x}_i - \mathbf{x}_j$.
+    *   Determine the color using a color mapping of a quantity associated with particle $j$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_particle_grid_bucketing(ray_o, ray_d, grid, particles):
+    # 1. Find ray-cell intersection for current cell c
+    # Assuming grid provides a method to get the cell containing the ray origin or current step
+    # For simplicity, assume we are processing a cell c defined by bounds [min_c, max_c]
+    # In a full traversal, this would be part of a grid traversal loop.
+    # Here we assume c is the current cell being tested.
+    
+    lambda_min_c, lambda_max_c = intersect_ray_cell(ray_o, ray_d, c)
+    
+    closest_lambda = infinity
+    closest_particle_id = -1
+    
+    # 2. Iterate over particles in neighboring cells of c
+    neighbor_cells = get_neighbor_cells(c)
+    candidate_particles = []
+    
+    for cell in neighbor_cells:
+        if cell in grid:
+            candidate_particles.extend(grid[cell])
+            
+    # 3. Ray-sphere intersection tests
+    for j in candidate_particles:
+        particle = particles[j]
+        center = particle.position
+        radius = particle.radius
+        
+        # Calculate ray-sphere intersection
+        # Ray: P(t) = O + t*D
+        # Sphere: |P(t) - C|^2 = r^2
+        # (O + tD - C) . (O + tD - C) = r^2
+        # Let L = O - C
+        # t^2(D.D) + 2t(D.L) + L.L - r^2 = 0
+        
+        L = ray_o - center
+        a = dot(ray_d, ray_d)
+        b = 2.0 * dot(ray_d, L)
+        c_val = dot(L, L) - radius * radius
+        
+        discriminant = b * b - 4 * a * c_val
+        
+        if discriminant >= 0:
+            sqrt_disc = sqrt(discriminant)
+            t1 = (-b - sqrt_disc) / (2 * a)
+            t2 = (-b + sqrt_disc) / (2 * a)
+            
+            # Use the closest positive intersection
+            if t1 > 0:
+                lambda_j = t1
+            elif t2 > 0:
+                lambda_j = t2
+            else:
+                continue # Intersection is behind the ray origin
+                
+            # Check if intersection is within the cell bounds
+            if lambda_min_c <= lambda_j <= lambda_max_c:
+                if lambda_j < closest_lambda:
+                    closest_lambda = lambda_j
+                    closest_particle_id = j
+                    
+    # 4. Determine intersection point and normal
+    if closest_particle_id != -1:
+        particle = particles[closest_particle_id]
+        x_i = ray_o + closest_lambda * ray_d
+        n_i = x_i - particle.position # As per source [S1]
+        color = get_particle_color(particle)
+        return closest_lambda, x_i, n_i, color
+    else:
+        return infinity, None, None, None
+```
+
+**Parameters:**
+*   Grid resolution: Not given in the sources.
+*   Particle radius: Defined per particle [S1].
+
+**Edge Cases:**
+*   **Precision:** Ray-sphere intersection discriminant calculation may suffer from precision issues for grazing angles or very small radii.
+*   **Boundaries:** The check $\lambda_j \in [\lambda_{min\_c}, \lambda_{max\_c}]$ ensures the intersection is within the current cell's depth range, preventing false positives from particles in the same cell but at different depths if the grid is not perfectly aligned or if particles span multiple cells.
+*   **Degenerate Input:** Particles with zero radius will have no intersection unless the ray origin is exactly at the center.
+
+## Subtopics
+
+### Grid Resolution Selection
+Determines the trade-off between culling efficiency and neighbor list size. Smaller cells reduce neighbor lists but increase grid memory and traversal overhead. Larger cells increase neighbor lists but reduce grid overhead. Not given in the sources.
+
+### Particle Data Structure
+How particle positions, radii, and colors are stored and accessed. Typically a Struct of Arrays (SoA) or Array of Structs (AoS). Not given in the sources.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ in the worst case if all particles are in the same cell or neighbors, but typically $O(1)$ per ray if the grid is well-balanced and particles are uniformly distributed, as only a small constant number of neighbors are checked.
+*   **Memory Complexity:** $O(N + G)$, where $N$ is the number of particles and $G$ is the number of grid cells.
+*   **Strengths:** Efficient culling of non-overlapping particles; simple implementation; supports arbitrary particle shapes (spheres) and sizes.
+*   **Limitations:** Performance degrades with highly clustered particles; requires spatial hashing or grid management overhead.
+*   **When to use:** When rendering large numbers of spherical particles where spatial coherence exists.
+*   **When not to use:** When particles are extremely dense and clustered, leading to large neighbor lists; when non-spherical particles are used without modification.
+
+## Background
+The method is described in the context of Smoothed Particle Hydrodynamics (SPH) simulation and rendering [S1]. It was published by The Authors in *Computer Graphics Forum* published by Eurographics - The European Association for Computer Graphics in 2020 [S1]. The approach leverages multi-level memory structures to efficiently access particle data for visualization [S1].
+
+## Sources
+[S1] Multi‐Level Memory Structures for Simulating and Rendering Smoothed Particle Hydrodynamics, https://doi.org/10.1111/cgf.14090, fetched 2026-10-28
+[S2] quertzuiop/Volumetric-display, https://github.com/quertzuiop/Volumetric-display, fetched 2026-10-26 (unofficial)

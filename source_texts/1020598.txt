@@ -1,0 +1,139 @@
+3D Reconstruction for all. Contribute to ArthurBrussee/brush development by creating an account on GitHub.
+
+Reduce degenerate splats: covariance-aware split, screen-size kill, area regularizer by ArthurBrussee · Pull Request #479 · ArthurBrussee/brush · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ArthurBrussee
+commented
+Jun 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Motivation
+3DGS optimization produces two kinds of splats that break the small-screen-footprint assumption the rasterizer relies on, and project/sort/deform badly:
+Needles — extreme anisotropy (one covariance axis far larger than the others); rotation gradients are ill-defined and they look bad when projected.
+Giant low-α splats — cover a large fraction of the frame and abuse non-continuous depth sorting to cheat a bit of PSNR on tricky views.
+Measured on a stock bonsai run, >25% of splats had aspect ratio >10 and the worst splat spanned ~90× the image dimension; garden: 53% needles, worst splat 3857× the frame. This PR tries to attack both. This in theory has a small PSNR cost but hopefully leads to more "useful" splats.
+Changes
+Different splat split (replaces the old isotropic mirror split + experimental thresholds with one function, no branching). Per-axis shrink k_i = 1 − (1−k)·(s_i²/s_max²) with mass-conserving deterministic ±offset √(1−k_i²)·s_i. A round splat shrinks uniformly (≈ the old split); a needle shrinks + offsets only along its long axis (two half-length children instead of two needles); a pancake is split in-plane. k = 1/√2 (the variance-preserving 2-component value — not a free knob; lower over-shrinks and over-densifies).
+Power-law post-split opacity a' = 1 − (1−a)^(1/√2). Alpha compositing multiplies transmittance (1−a), so the exponent encodes effective child overlap; since the offset children overlap only partially, 1/√2 (the same constant as the split geometry, where the children land ~2 child-stds apart) is the physically-consistent value. Replaces the classic full-overlap 1−√(1−a).
+--kill-at-screen-size (default 0.5) — splats whose max screen extent exceeds this fraction of the image are treated as "poisoned": pruned and the budget resampled, every refine (incl. post-growth). Beats in-place force-splitting and a differentiable penalty for the giant-splat outliers.
+--screen-area-penalty (default 0.05) — small differentiable regularizer; analytic ∂/∂cov of (area_frac − τ)² added to the 2D-covariance gradient in project_backwards (area = π·√det(cov₂d)/(W·H)). A gentle nudge toward small footprints; kill handles the hard outliers.
+lr_scale default 7e-3 → 3.5e-3 — the old default let scales overshoot into anisotropic configs; 3.5e-3 is the shape/PSNR sweet spot.
+Add the 3D filter from Mip splatting to prevent splats going below nyquist.
+New rerun/log instrumentation: per-splat scale/opacity/anisotropy and screen-size distribution stats.
+ArthurBrussee
+force-pushed
+the
+covariance-aware-split
+branch
+from
+9a00d82 to
+a5d6961
+Compare
+June 4, 2026 19:21
+Reduce degenerate splats: covariance-aware split, screen-size kill, a…
+…
+5c9b47b
+```
+…rea regularizer
+```
+ArthurBrussee
+force-pushed
+the
+covariance-aware-split
+branch
+from
+a5d6961 to
+5c9b47b
+Compare
+June 4, 2026 19:28
+ArthurBrussee
+added 5 commits
+June 5, 2026 00:30
+Pass screen-area penalty through the backward render path instead of …
+…
+8392bf3
+```
+…a global
+```
+Tidy screen-area regulariser: configurable distribution logging, drop…
+…
+17224ee
+```
+… threshold, lower default weight
+```
+Set screen_area_penalty default to 0.05
+51fd9fd
+Fix training bench call to render_splats after signature change
+786aac2
+Add always-on Mip 3D scale filter folded into derived scales/opacity;…
+…
+7237b3a
+```
+… lr_scale 5e-3
+```
+Hide details
+View details
+ArthurBrussee
+merged commit 0d62a74
+into
+main
+Jun 5, 2026
+14 of 15 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ArthurBrussee
+added a commit
+that referenced
+this pull request
+Jun 13, 2026
+Fix training dynamics post #479
+8edf055
+sbsoor
+pushed a commit
+to sbsoor/brush
+that referenced
+this pull request
+Jul 31, 2026
+feat: 更新到上游最新 + PSNR/LPIPS 修改适配新架构
+…
+a26581d
+```
+上游 178 个提交更新 (v0.3.0..origin/main):
+- 性能: 最小化数据拷贝开销 (ArthurBrussee#503), 可配置场景批量缓存 (ArthurBrussee#490), 数据集加载加速 (ArthurBrussee#465)
+- 质量: 协方差感知拆分+屏幕尺寸kill+面积正则化 (ArthurBrussee#479), 平滑alpha截断+SH VJP (ArthurBrussee#448)
+- 稳定性: 硬化解析+修复pause死锁 (ArthurBrussee#470), 修复训练动态 (#479后续), C API panic 捕获
+- 大场景: 可配置批量缓存大小 (--max-scene-batch-cache-size)
+- 新格式: RealityCapture/Postshot CSV+PLY 数据集 (ArthurBrussee#478)
+- 重构: brush-cli/brush-app 迁移到 apps/ 目录, Burn 框架升级 (ArthurBrussee#488)
+- 修复: Windows shaders.rs/shaders/mod.rs 模块冲突 (#[path] 消歧)
+
+PSNR/LPIPS 修改重新适配:
+- msg.rs: TrainStepStats 加 train_psnr/train_lpips 字段 (对齐新结构)
+- train.rs: step() 中用 pred_image vs gt_packed 计算 MSE→PSNR + LPIPS
+  适配上游新的 packed u32 GT 格式 (brush_loss::unpack_gt_rgb)
+- train_stream.rs: 在 rerun 日志处加 log::info! 输出
+  'Train iter {iter}: loss {loss}, PSNR {psnr}, LPIPS {lpips}'
+  上游用 indicatif_log_bridge 处理日志冲突, 不需要手动 NO_PROGRESS
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

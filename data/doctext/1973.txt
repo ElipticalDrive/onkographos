@@ -1,0 +1,109 @@
+A Voxel Renderer for Learning C/C++ – Jacco’s Blog
+Skip to content
+Jacco’s Blog
+Links, Code & Articles
+This article describes the construction and optimization of a voxel map renderer. The renderer is designed to run on the GPU, while the CPU is used to update the map for the next frame. It turns out that such a renderer can reach up to 1 billion rays per second for a 1024³ world. The system allows for extensive per-frame modifications to the voxel world.
+The implementation of the renderer can be found on Github. This text occasionally refers to specific source files in this repository.
+Background
+I am a teacher. My topics include graphics (in particular: ray tracing) and software optimization, and hidden between the lines, C/C++ and game development. For newcomers, getting up to speed in these topics is a massive undertaking. Aspiring game developers often turn to easier programming languages, or full-blown engines such as Unity or Unreal. This is fine, but it does take away from the joy of having full low level control over the machine.
+One way to reduce the complexity of the task is to stick with (2D) raster graphics. On a flat screen, Tetris and Snake can be programmed with relatively little effort.
+Perhaps this is also what made Minecraft such a success. Limiting creativity to a coarse 3D grid suddenly turns 3D world building into playing with Legos.
+Not what I meant.
+The goal of the voxel renderer is to offer the aspiring game developer a 3D world to toy with: a fixed-size 3D canvas, that can be edited with simple operations like plot, line, block, sphere. There will be sprites, tiles and bitmap fonts. There will also be some supporting operations such as sprite collision detection. The idea is that with these tools, a 3D Tetris or Pacman or Snake is as easy to build as the 2D original.
+Requirements
+With these goals in mind, let’s formulate some requirements:
+The renderer should be fast enough for games, regardless of the contents of the 3D canvas.
+The renderer should be scalable: ideally it should at least work on older hardware. Young developers not always wield the latest GPUs.
+It should run on the GPU, so the CPU can be used for game logic.
+It should run in parallel with the CPU-side game logic.
+The world should have a fixed size, with a reasonable amount of detail. Let’s go for 1024³, which is admittedly somewhat arbitrary.
+The system should not choke on pretty significant changes to the world.
+Animation just before this screenshot was not fluent.
+With these requirements in mind, it makes sense to use ray tracing rather than rasterization. This may sound counter-intuitive, but there are over 1 billion voxels in the world, and quite a few of them will change per frame. Processing the voxels into triangles could be rather costly. Luckily, ray tracing voxels is an easy task for a GPU. An added benefit is that ray tracing is scalable and easy to use. Once the basic renderer works, shadows and reflections can be added easily.
+Data structures
+The voxels will be stored in a two-level grid, which consists of a coarse 128³ top-level grid, which stores 8³ voxel bricks for a total 1024³ resolution. This data structure (which I first encountered in Fairlight’s 5-Faces demo) has several benefits. For starters, it lets the ray tracer skip over empty bricks. It also allows for easy partial map synchronization between CPU and GPU. And last but not least: most maps can now be stored with automatic compression.
+A top-level grid cell can thus point to a brick, or it can be empty. There is a third option: a grid cell can also store a solid color, which is a cheap replacement for a uniformly colored brick. To make this practical, the lowest bit of the 32-bit grid cell value determines if the cell stores a brick pointer:
+0: the grid cell is solid; solid color is stored in bits 1..31.
+1: the grid cell contains a pointer. The brick index is stored in bits 1..31.
+With this layout, a value of 0 is a ‘solid color’ grid cell with color 0, i.e. transparent. We can thus ‘memset’ the top-level grid to clear the world.
+At the lowest level, the bricks store the voxels. Each voxel will store an 8-bit value, where 0 means transparent. When not transparent, the 8-bit value will be interpreted as a 3-3-2 rgb triplet. This is a significantly lower color resolution than 24-bit RGB, but it does help to keep the memory requirements down. Even with a single byte per voxel, the upper bound is 1GB for 128³ unique bricks, plus 8MB for the 128³ 32-bit values of the top-level grid.
+5 Faces / Fairlight
+Flow
+To make the renderer run on the GPU, I will use OpenCL. There are other options, such as compute shaders, Vulkan and CUDA. A quick investigation reveals that CUDA excludes many GPUs, compute shaders seem to offer insufficient low-level control over the pipeline, and Vulkan is great but also huge. OpenCL turns out to be pretty compatible: even somewhat old IGPUs are supported, as well as recent Android devices. There’s just one caveat: because of limited support for OpenCL on NVIDIA hardware, we have to limit ourselves to OpenCL 1.2.
+The application flow, which is inspired by the Brigade 1 renderer, is illustrated in the following diagram.
+Application flow
+In this flow, CPU code and GPU kernels run in parallel. Once the CPU is done making changes to the world, it starts a parallel copy over this data to the GPU. Obviously, we can’t just overwrite data that is being used by the GPU, so the changes are stored in a staging buffer. The staging buffer is processed once rendering on the GPU completes, in the commit kernel.
+A few details about this process:
+The commit kernel runs for a very short amount of time: it copies data from the staging buffer in GPU memory to other locations in GPU memory. The bandwidth for these transfers is much higher than the bandwidth between CPU and GPU.
+The parallel copy from CPU to staging buffer has very little impact on the time it takes to execute the render kernel. We get this transfer ‘for free’ by hiding it behind GPU compute work.
+Doing the parallel copy successfully requires two OpenCL job queues. This is not hard to set up, but the queues must be carefully synchronized: commit cannot start before the copy completes, render cannot start before commit completes, and the next copy cannot start before commit completes. In OpenCL, this is conveniently achieved using events.
+Frame time is now limited by either the combined runtime of game logic and the parallel copy, or the combined runtime of the commit kernel and the render kernel.
+The implementation of this flow can be found in methods World::Render and World::Commit in world.cpp on Github.
+CPU-side
+Time to dive into the details. Let’s start with the host side of things, in other words: the CPU, and the operations on the data set in system RAM.
+Changes
+To make changes to the world, the CPU can directly access a host-side copy of the data.
+The two-level grid complicates this slightly. To set a voxel, we must first ensure that the corresponding cell in the top-level grid points to a brick. If this is the case, we calculate the position in the brick, and overwrite the value. If not, we assign a brick to the cell first.
+To assign a brick to a cell, we obtain it from an array of unused bricks. Most scenes will not use a unique brick for every cell: we can thus pre-allocate a fraction of the theoretical upper limit. The pre-allocated bricks are added to a circular buffer. Bricks are claimed at the tail, and recycled at the head of this list. By using a power of 2 size for the buffer, the modulo that is needed to wrap around at the end of the available space becomes a cheap bitwise AND.
+When setting a voxel value, there are two more special cases to consider. The first is when we try to set a value that is identical to the existing value for the voxel, either encoded in a brick, or directly in the value for a solid top-level grid cell. Checking for this prevents redundant work, including unnecessary allocation of bricks. The second is when setting a value to 0 results in a completely empty brick. We can detect this situation by keeping track of the number of non-zero voxels in a brick. Empty bricks can now be recycled to the circular buffer. Ultimately, this is required if we don’t want to run out of bricks over time.
+Thread-safe
+The use of voxels encourages multi-threaded code. This is an interesting side effect of the 3D setting: where 2D code running on modern CPUs can assume pretty much unlimited processing power, on modern CPUs, 3D data processing can bring a fast processor to its knees, quickly. For example: adding a solid voxel ball with radius 25 can be implemented by evaluating a cube of 50 ✕ 50 ✕ 50 voxels. That is 125,000 loop iterations, resulting in approx. 73,000 ‘Plot’ operations. A bouncing ball must be deleted at its old location and plotted at a new location, which doubles the effort. Having 50 balls bounding around in 3D suddenly isn’t trivial.
+Without changes, setting voxels is far from thread-safe. Multiple threads may claim a brick before writing its index in the top-level grid, for instance.
+The circular buffer helps. It becomes thread-safe simply by making the head- and tail pointer increments atomic (if we can guarantee it will not be empty). This is a significant improvement over e.g. stacks, for which thread-safety is surprisingly complex. The atomics do not solve all our problems. There’s a subtle source of inefficiencies lurking here: false sharing.
+When two threads recycle bricks to the circular buffer, they will write to successive locations in the buffer. In most cases, these two locations will be in the same 64-byte cache line. This cache line in turn is stored in the L1 caches of the cores that executed the threads. So, even though the two cores wrote to different locations in the cache line, they now need to synchronize the changes: a costly operation.
+We can prevent false sharing by spacing the writes. This can be achieved by allocating a much larger circular buffer, but it is more efficient to take steps of 17.
+Preventing false sharing with primes
+The number 17 is a prime. As shown in the example, stepping through a power-of-2 sized buffer with a prime step size ensures that we visit all elements before we revisit element 0. With a step size of 17 and an element size of 4 bytes, two subsequently visited elements are now 68 bytes apart, which places them in different cache lines.
+With the thread-safe circular buffer everything is not taken care of sadly. It is still possible that two threads try to assign a new brick to a top-level grid cell concurrently. This can be prevented by batching and sorting writes, but for now, I left this unimplemented.
+Plot Complexity
+With all the above information, plotting a single voxel may seem very costly. Luckily, this is not the case: in the majority of cases (roughly 511 out of 512 cases for a 8 ✕ 8 ✕ 8 brick size), plotting is a matter of finding the top-level grid cell, reading the brick index from the cell, determining the offset of the voxel in the brick, and setting the voxel. Although this is obviously more work than directly writing to an array, it is not vastly more expensive.
+The full implementation of the host-side Get and Set methods can be found in world.h in the Github repository.
+GPU-side
+After one or more CPU threads have made changes to the world, it must be synchronized to the GPU for rendering. As explained before, this happens via a staging buffer. To get the data to the staging buffer, a single copy is used.
+The cost of a copy
+Data transfer to and from the GPU is the Achilles heel of many applications that use the GPU for calculations.
+Data travels from CPU RAM to GPU VRAM over the bus. For a PCI 3.0 bus, this happens at a rate of approx. 1GB/s per lane. Commonly 16 lanes are available, for a total of 16GB/s. Although it is clear that at 60fps we cannot send all our voxels to the GPU each frame, we should be able to send a fairly large portion. To reach high throughput however, it is important to limit the number of copies: each individual copy has significant overhead.
+Taking this into account, each frame the following data is send to the GPU:
+The top-level grid: 8MB of data. Considering the bandwidth we have available, finding out which parts of this data have changed is not worth it.
+Changed bricks: we can keep track of which bricks got changed since the last frame. Only these bricks will be send to the GPU. Currently, at max 8192 bricks will be synchronized; this is 512KB of data. A larger budget would probably also be safe.
+The data ends up in a staging buffer on the GPU. From here, a small kernel copies the data to the final destination, which is of course also on the GPU. The bandwidth of these copies is insanely high: about 320GB/s, i.e. 20x more than the PCI 3.0 bus. The commit kernel in practice executes in a flash.
+Ray traversal
+Now that the data is stored in VRAM, we can trace some rays. For this, we use Amanatides and Woo’s 3D-DDA traversal algorithm to step through the top-level grid.
+The layout of the top-level grid matters. On the CPU, we can simulate a 3D array in a chunk of continuous memory: just like a 2D image is a collection of rows stored one after the other in memory, a 3D grid is a collection of 2D images, stored one after the other. We can then access a single element using a simple formula: p=x+y*width+z*width*height. This layout can however be less than optimal. When scanning the grid along the x-axis, subsequent elements are likely to be in a cache line, speeding up access. When scanning along y or z, or simply diagonally, this is no longer the case. We can optimize for all directions by storing data together that is close in space. A basic application of this concept is tiling: by storing 8 ✕ 8 ✕ 8 voxels in a 512-byte brick, we ensure that this data fits in a handful of cache lines. Tracing a ray through the brick will benefit from the cache, regardless of the direction of the ray.
+On the GPU, the ideal layout is hardware-dependent. Luckily, OpenCL knows which layout is best. To benefit from this knowledge, we can simply store our data in a 3D image. The render kernel can then read from this image, which will be slightly faster than accessing a plain array in a naïve format.
+We get the 8MB top-level grid data into a 3D image using a special OpenCL function, clEnqueueCopyBufferToImage. This function will take data that has been placed in the staging buffer, and reformat it while copying it to the 3D image buffer.
+The full ray traversal implementation can be found in kernels.cl on Github.
+Rendering with Rays
+Now that we can trace rays, producing an image is relatively straightforward. For a ray tracer, we trace primary rays through the pixels of a screen plane. The TraceRay function returns the voxel that was found, or 0 if the ray left the scene. It also returns a normal for the intersection point. For a set of voxels, we have only 6 unique normals. For a scene illuminated by a skydome, we thus have only 6 unique shading values, which we obtain by integrating over the 6 unique hemispheres. File common.h contains these precalculated values.
+From here, the sky is the limit. A simple extension that replaces the basic unoccluded skydome illumination by a single diffuse bounce is already in place. These rays are distributed over the hemisphere using blue noise, and have a limited length to reduce their impact on performance. The ray tracer can be further expanded to support shadows for a light source, or reflections for some voxel colors, or depth of field, and so on. And of course, some post processing should be added: TAA, some HDR effects, filtering, … . But all of that is an entirely different playground.
+Summary
+In this article, a number of optimizations were discussed:
+Copying data from CPU to GPU in parallel to running kernels, to effectively hide them entirely;
+Sending all data using a single copy from host to device;
+Using a circular buffer instead of a stack to simplify multithreading;
+Using a large step size for the circular buffer to prevent false sharing;
+Using powers of 2 for efficient modulo calculations in the circular buffer and during two-level grid traversal;
+Storing 3D data in a 3D bitmap for access with better data locality.
+The resulting renderer uses up to 1GRay/s to produce over 60fps at a resolution of 1600×900 pixels on a 2070 laptop GPU.
+Final result
+Questions / suggestions? Mail me at bikker.j@gmail.com.
+Author: jbikker
+2 thoughts on “A Voxel Renderer for Learning C/C++”
+Nice article! I really enjoyed reading about the different optimizations!
+Reply
+Very nice article! It instructed me a lot of cool techniques.
+Any chance to see a follow up about implementing lighting, shadows and reflections?
+I’ve started by adding to your code radiosity based lighting.
+Reply
+Leave a Reply Cancel reply
+This site uses Akismet to reduce spam. Learn how your comment data is processed.
+Recent Posts
+Recent Comments
+Archives
+Categories
+Meta
+Archives
+Pages
+Copyright © 2025 Jacco's Blog
+Design by ThemesDNA.com
+Scroll to Top

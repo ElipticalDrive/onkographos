@@ -1,0 +1,179 @@
+# Greedy Meshing / Face Culling
+
+Also called: Face culling meshing, Face-based Meshing, Block Mesh Generation, Voxel Face Generation, Block Surface Extraction, Voxel Surface Extraction
+
+## Overview
+Greedy Meshing / Face Culling generates a static triangle mesh for a voxel chunk by iterating through occupied voxel positions and emitting geometry only for faces that are adjacent to empty space or transparent blocks [S1, S2, S3, unofficial]. It differs from its parent method, [Greedy face merging](8935-greedy-face-merging.md), by explicitly handling cross-chunk boundary visibility checks to ensure global consistency, and it differs from [Greedy Meshing](52-greedy-meshing.md) by not merging adjacent coplanar faces into larger quads [S1, S2, unofficial]. This approach reduces vertex count and draw calls compared to naive voxel rendering by excluding internal faces [S2, unofficial].
+
+## How it works
+**Inputs:**
+- A voxel volume defined by a function `volume(x, y, z)` returning a material ID or boolean occupancy.
+- Dimensions `dims = (Dx, Dy, Dz)`.
+- Boundary policy: `"air"` (out-of-bounds neighbors are empty, exposing faces) or `"solid"` (out-of-bounds neighbors are solid, hiding faces) [G].
+- Optional merge key function `merge_key(material_id, x, y, z)` returning an integer identifier for grouping [S1, unofficial]. If not provided, defaults to identity.
+
+**Outputs:**
+- A list of quads, each defined by an origin `(x, y, z)`, a normal `n \in \{0, 1, 2\}`, and dimensions `(w, h)`.
+
+**Data Structures:**
+- `mask`: A 2D array of size $D_t \times D_b$ (where $t, b$ are tangent and bitangent axes). Stores the `merge_key` if the face is visible and unprocessed, otherwise $0$.
+
+**Steps:**
+1. **Iterate Normals:** Loop over the three principal axes $n \in \{0, 1, 2\}$ (X, Y, Z).
+2. **Define Axes:** For each normal $n$, compute tangent $t = (n + 1) \pmod 3$ and bitangent $b = (n + 2) \pmod 3$.
+3. **Sweep Slices:** Iterate through each slice index $s$ along the normal axis $n$ from $0$ to $D_n - 1$.
+4. **Build Visibility Mask:** For each cell $(t, b)$ in the slice:
+   - Determine coordinates $(x, y, z)$ corresponding to axes $t, b, n$.
+   - Check neighbors in the normal direction $n \pm 1$.
+   - A face is **exposed** if:
+     - The neighbor voxel has a different material ID, OR
+     - The neighbor is out of bounds and `boundary_policy` is `"air"`.
+   - If exposed, set `mask[b * D_t + t] = merge_key(voxel_val, x, y, z)`. Otherwise, set to $0$.
+5. **Greedy Expansion:** Scan the 2D mask in lexicographic order (row $b$ from $0$ to $D_b-1$, column $t$ from $0$ to $D_t-1$):
+   - Find the first unprocessed non-zero cell $(t_0, b_0)$ with key $K$.
+   - **Expand Width:** Increment $w$ while $t_0 + w < D_t$ and `mask[b_0 * D_t + (t_0 + w)] == K`.
+   - **Expand Height:** Increment $h$ while $b_0 + h < D_b$ and all cells in the rectangle $[t_0, t_0 + w) \times [b_0, b_0 + h)$ have key $K$.
+   - **Emit Quad:** Create a quad with origin $(t_0, b_0, s)$, normal $n$, width $w$, height $h$.
+   - **Mark Processed:** Set all cells in the rectangle $[t_0, t_0 + w) \times [b_0, b_0 + h)$ in the mask to $0$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def greedy_face_culling_meshing(volume, dims, boundary_policy="air", merge_key=None):
+    """
+    volume: function (x, y, z) -> material_id
+    dims: tuple (Dx, Dy, Dz)
+    boundary_policy: "air" (default) or "solid"
+    merge_key: function (material_id, x, y, z) -> int. Default: identity.
+    """
+    if merge_key is None:
+        merge_key = lambda m, x, y, z: m
+
+    quads = []
+    # Iterate over the 3 normal axes: 0=X, 1=Y, 2=Z
+    for n in range(3):
+        t = (n + 1) % 3  # Tangent axis
+        b = (n + 2) % 3  # Bitangent axis
+        dim_t, dim_b, dim_n = dims[t], dims[b], dims[n]
+        
+        # Mask stores the merge key if visible and unprocessed, else 0
+        mask = [0] * (dim_t * dim_b)
+        
+        # Iterate through each slice along the normal axis
+        for s in range(dim_n):
+            # 1. Build Visibility Mask for slice s
+            for y in range(dim_b):
+                for x in range(dim_t):
+                    coords = [0, 0, 0]
+                    coords[n] = s
+                    coords[t] = x
+                    coords[b] = y
+                    voxel_val = volume(*coords)
+                    
+                    exposed = False
+                    # Check both neighbors along the normal axis
+                    for dir in [-1, 1]:
+                        nb_s = s + dir
+                        if 0 <= nb_s < dim_n:
+                            nb_coords = coords.copy()
+                            nb_coords[n] = nb_s
+                            nb_val = volume(*nb_coords)
+                            if voxel_val != nb_val:
+                                exposed = True
+                                break
+                        else:
+                            # Out of bounds neighbor
+                            if boundary_policy == "air":
+                                exposed = True  # Air neighbor implies exposed face
+                                break
+                            else:  # solid
+                                exposed = False  # Solid neighbor implies internal
+                                break
+                    
+                    if exposed:
+                        mask[y * dim_t + x] = merge_key(voxel_val, *coords)
+                    else:
+                        mask[y * dim_t + x] = 0
+
+            # 2. Greedy Expansion on the 2D Mask
+            for y in range(dim_b):
+                for x in range(dim_t):
+                    idx = y * dim_t + x
+                    key = mask[idx]
+                    
+                    if key == 0:
+                        continue
+                    
+                    # Start of a new quad
+                    w = 1
+                    # Expand width
+                    while x + w < dim_t and mask[y * dim_t + (x + w)] == key:
+                        w += 1
+                    
+                    h = 1
+                    # Expand height
+                    while y + h < dim_b:
+                        row_match = True
+                        for k in range(w):
+                            if mask[(y + h) * dim_t + (x + k)] != key:
+                                row_match = False
+                                break
+                        if not row_match:
+                            break
+                        h += 1
+                    
+                    # Emit Quad
+                    origin = [0, 0, 0]
+                    origin[n] = s
+                    origin[t] = x
+                    origin[b] = y
+                    quads.append({
+                        'origin': origin,
+                        'normal': n,
+                        'width': w,
+                        'height': h
+                    })
+                    
+                    # Mark cells as processed (set to 0)
+                    for dy in range(h):
+                        for dx in range(w):
+                            mask[(y + dy) * dim_t + (x + dx)] = 0
+                            
+    return quads
+```
+
+## Subtopics
+
+### [Visible Block Face Meshing](4919-visible-block-face-meshing.md)
+Visible Block Face Meshing is a surface extraction technique that generates a static triangle mesh for a voxel chunk by iterating through occupied voxel positions and emitting geometry only for faces that are adjacent to empty space or transparent blocks. It differs from its parent method, [Voxel Chunk Mesh Generation (Face Culling)](4888-voxel-chunk-mesh-generation-face-culling.md), by explicitly handling cross-chunk boundary visibility checks to ensure global consistency, and it differs from [Greedy Meshing](52-greedy-meshing.md) by not merging adjacent coplanar faces into larger quads. This approach reduces vertex count and draw calls compared to naive voxel rendering by excluding internal faces.
+
+### [Chunk Mesh Generation](8755-chunk-mesh-generation.md)
+Chunk Mesh Generation creates a single vertex buffer for a voxel chunk by iterating through its voxels and generating geometry only for faces exposed to air or transparent blocks. It reduces draw calls by batching all visible faces of a chunk into one mesh, differing from instancing which draws individual block instances. It serves as the foundational geometry step before greedy face merging [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md).
+
+### [Chunk Loading and Mesh Generation](8774-chunk-loading-and-mesh-generation.md)
+This method manages the lifecycle of voxel chunk geometry by loading chunk data from a world, generating its mesh via a mesher, and caching the resulting GPU resources. It solves the problem of efficiently updating visible geometry when chunks are first accessed or when their content changes, ensuring that only chunks with non-empty geometry are rendered. It builds on [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md) for the actual triangle generation.
+
+### Voxel Mesh Synthesis
+Voxel Mesh Synthesis is a post-processing step that converts validated leaf voxels from the octree into standard 3D cube meshes for export [S7, unofficial]. It generates 8 unique corner vertices for the cube, translated by the box's min and max coordinates, and constructs 12 counter-clockwise triangular faces (2 triangles per cube face) ensuring outward-pointing surface normals. It outputs clean, standard Wavefront .obj data compatible with external 3D software [S7, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(V)$, where $V$ is the number of voxels in the chunk. Each voxel is visited a constant number of times (once per face check, and once during mask processing).
+**Memory Complexity:** $O(D_t \times D_b)$ for the temporary mask per slice, plus $O(F)$ for the output quads, where $F$ is the number of exposed faces.
+**Performance:** Significantly reduces vertex and index counts compared to naive voxel rendering (6 faces per block) by culling internal faces [S2, unofficial]. The greedy expansion further reduces draw calls by merging coplanar faces into larger quads [S1, S2, unofficial].
+**Strengths:** Simple to implement, efficient for static or semi-static scenes, reduces GPU draw calls.
+**Limitations:** Does not handle smooth shading or complex topology well without additional processing. The greedy approach is heuristic and may not produce the absolute minimal quad count in all cases, but is generally very effective for blocky terrain.
+**When to use:** Ideal for voxel-based games (e.g., Minecraft-like) where performance is critical and the geometry is composed of axis-aligned cubes.
+**When not to use:** For smooth, organic terrain where vertex interpolation is required, or for highly dynamic scenes where mesh regeneration is too expensive.
+
+## Background
+The technique originated in the context of voxel engine development, particularly for games like Minecraft. It is a fundamental optimization for rendering large voxel worlds by reducing the number of triangles and draw calls. The specific implementation of "greedy face merging" as described in the parent article is a common variant used to further optimize the output of face culling.
+
+## Sources
+[S1] Show HN: Basic voxel engine in WebGL/JavaScript with full source, https://github.com/Lallassu/vox2, fetched 2026-10-26 (unofficial)
+[S2] 3D-Mesh-Voxelizer - GitHub, https://github.com/Talkative-Banana/3D-Mesh-Voxelizer, fetched 2026-10-26 (unofficial)
+[S3] Linirby/HelloVoxel, https://github.com/Linirby/HelloVoxel, fetched 2026-10-27 (unofficial)
+[S4] nnarain/VoxelEngine, https://github.com/nnarain/VoxelEngine, fetched 2026-10-27 (unofficial)
+[S5] Ry645/voxel-terrain-plugin, https://github.com/Ry645/voxel-terrain-plugin, fetched 2026-10-27 (unofficial)
+[S6] FredrikErikJohansson/Proccraft, https://github.com/FredrikErikJohansson/Proccraft, fetched 2026-10-27 (unofficial)
+[S7] Joji0/3D-Object-Surface-Voxelizer, https://github.com/Joji0/3D-Object-Surface-Voxelizer, fetched 2026-10-27 (unofficial)

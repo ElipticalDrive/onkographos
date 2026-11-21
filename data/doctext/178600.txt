@@ -1,0 +1,1034 @@
+Real-time Rendering of Pre-integrated Neural Emitters
+Arno Coomans1
+Floor Verhoeven2
+Edoardo A. Dominici1,2
+Markus Steinberger1,3
+arXiv:2610.06762v1 [cs.GR] 5 Oct 2026
+Graz University of Technology, Austria1
+Huawei Technologies, Switzerland2 , Austria3
+Figure 1: A Neural Emission Field (NEF) pre-integrates illumination around non-trivial emitters into a neural representation that can be
+placed in any scene after training. From left to right: a complex emitter with pre-integrated interreflections; a spatially varying emission
+profile; and a dynamic fireball whose emission changes over time. Querying the NEF in full-HD takes 1.2 ms for the above scenes.
+Abstract
+Direct illumination from non-trivial emitters with occluding housing, high-polygon emissive meshes, spatially varying emission,
+or deformable assemblies is a persistent bottleneck in real-time rendering. Current real-time solutions either rely on simplified
+analytical representations or fall back to runtime sampling. Analytical methods are restricted to simple emitter geometry, pure
+sampling-based estimators need high sampling budgets to be noise-free, and proxy representations still require runtime integration over outgoing radiance around the emitter. We present Neural Emission Fields (NEF), a representation that eliminates
+runtime integration by precomputing the illumination in the volume around the emitter. This neural field is parameterized by
+position, normal, view direction, and material parameters. Using a two-headed diffuse/glossy architecture, it yields noise-free
+unoccluded direct illumination from a single network evaluation per shading point. Because training is performed in the emitter’s local frame, a trained NEF acts as a portable lighting asset reusable across scenes under rigid transforms. Internal
+interreflections, self-occlusion, spatially varying emission, and deformations are absorbed into the learned representation at
+zero additional runtime cost.
+CCS Concepts
+• Computing methodologies → Ray tracing; Neural networks;
+1. Introduction
+Analytical methods like Linearly Transformed Cosines (LTC)
+[HDHN16] are extremely fast but assume 2D polygonal emitters
+and scale linearly with the emitter’s vertex count. For more general
+emitters, Monte Carlo estimators of direct illumination, including
+reservoir methods [BWP∗ 20], support arbitrary emitters but produce noise that must be removed by a denoiser, which often introduces unwanted temporal and spatial artifacts. Proxy-based representations [HKSS98, VADWG15], including recent neural variants [ZBX∗ 21], sidestep both limitations by precomputing the outgoing radiance into a 4D near-field proxy, factoring out the cost
+of sampling paths within the emitter assembly. However, receiver
+points must still integrate over this proxy at runtime.
+Direct illumination is a major cost in real-time rendering pipelines,
+especially when emitters are non-trivial—luminaires with housing
+geometry that occludes the internal filament, emissive meshes with
+thousands of polygons, light sources with spatially varying or textured emission profiles, or deformable emitters that change shape
+over time. While path tracing [Kaj86] handles all of these correctly,
+converging to noise-free direct illumination from non-trivial emitters is incompatible with real-time rendering budgets. Existing alternatives that do meet those rendering budgets typically compromise on generality, accuracy, or noise-free output.
+1
+the Phong distribution [Arv95], and more general glossy reflections [HDHN16, KYM22, LDSM16]. Analytical methods are extremely efficient for low-polygon emitters, but their cost scales linearly with the number of emitter vertices [Arv95], making them
+prohibitively expensive for high-polygon emitters in real-time applications. Furthermore, even on supported geometry they diverge
+from a path-traced reference when receivers are glossy or emission
+is non-uniform [HDHN16]. Our neural approach achieves more accurate shading with respect to a ground truth solution, natively supports non-convex and non-planar emitters, and decouples cost from
+the emitter geometry, drastically reducing shading time for complex emissive meshes.
+Our key insight is that this remaining runtime integration is
+avoidable. Rather than precomputing only the radiance leaving an
+emitter (which still needs to be integrated), we precompute the preintegrated outgoing direct illumination with respect to a receiver
+point (any shaded surface point in the volume around the emitter).
+We represent this as a neural field parameterized by the receiver’s
+position, normal, view direction, and material parameters, learned
+by a neural network conditioned on a material model. By shifting
+the integration to a one-time precomputation phase, a single network evaluation replaces the entire integral over the (proxy) emitter.
+Because the network is trained in the emitter’s local coordinate
+frame, the resulting model functions as a portable lighting asset.
+World-space queries are mapped into the emitter’s frame at shading
+time rather than baked into the network weights, so a trained NEF
+can be translated, rotated, and uniformly scaled at runtime without
+retraining. A single training run therefore amortizes across every
+scene and every instance in which the emitter is placed—much like
+a baked texture or precomputed BRDF.
+Many-Light Sampling. Monte Carlo integration supports estimating direct illumination from any emitter but requires specialized sampling strategies to manage runtime noise. Early techniques
+addressed the many-lights problem by ranking lights according to
+their potential contribution [War94] or by classifying them as important or unimportant to guide sampling [SWZ96]. In complex
+scenes, hierarchical representations [WFA∗ 05, MPC19, Yuk20]
+can be used to enable emitter sampling at sublinear cost. More
+recently, ReSTIR [BWP∗ 20] introduced spatiotemporal reservoir
+resampling, achieving high-quality direct illumination under tight
+sampling budgets. Despite these advancements, the residual variance inherent to all Monte Carlo approaches typically necessitates
+a denoiser. In contrast, NEF avoids runtime sampling entirely, shifting the computational burden to a (one-time) per-emitter offline
+training phase.
+This design facilitates several critical performance advantages
+over traditional methods. Inference cost is fundamentally decoupled from the geometric complexity of the emitter; the computational cost is determined by the network’s size rather than the polygon count of the emitter. Furthermore, because the receiver’s BRDF
+is incorporated into the learning objective, complex emissive effects are absorbed into the representation at no additional runtime
+cost. Finally, since the training phase relies solely on path-traced
+radiance estimates for training data, the same training procedure
+is used for simple planar polygons, complex emissive meshes, and
+deformable emitter assemblies.
+Classical Pre-integration. Precomputation in rendering [Ram09] trades offline computations for runtime cost by
+tabulating light transport over a discretised parameter domain.
+Precomputed radiance transfer (PRT) [SKS02] projects the transfer
+function at each surface point onto a low-order spherical harmonics
+basis, reducing shading under distant lighting to a dot product.
+All-frequency variants require non-linear wavelet approximations
+to keep storage tractable [NRH03]. More fundamentally, PRT
+relies on the distant-lighting assumption, which breaks down for
+near-field emitters whose incident lighting varies with receiver
+position.
+We summarize our contributions as follows:
+• A reformulation of direct illumination as a pre-integrated,
+receiver-aware quantity, eliminating the runtime integration retained by prior analytical, sampling-based, and proxy-based
+methods.
+• A neural emission field employing a two-headed diffuse/glossy
+architecture and reflected-direction encoding, yielding noise-free
+direct illumination and accurate specular highlights from a single
+network evaluation per shading point.
+• Scene-independent training in the emitter’s local coordinate
+frame, so a single pre-trained NEF can be translated, rotated and
+scaled across different scenes without retraining.
+• Extensions to complex emissive assemblies with internal interreflections, spatially varying emission, and deformable emitters
+which are non-trivial or unsupported in state-of-the-art real-time
+methods.
+A complementary line of work stores lighting in a volume rather
+than on surfaces. Irradiance volumes [GSHG98] and their dynamic,
+ray-traced successors [MGNM19] cache irradiance at probes on a
+grid and interpolate between them at runtime. For strongly spatially
+varying signals, such as the near field of a complex emitter, these
+caches require careful probe placement [SL17, WKKN19] and fine
+discretisation to avoid interpolation and light-leaking artifacts.
+These approaches share a common limitation: the storage of a
+tabulated representation grows exponentially with the dimensionality of the signal. Pre-integrated direct illumination around a nearfield emitter depends on receiver position (3D), normal (2D), and
+reflected direction (2D), which is already seven dimensions for a
+single glossy material. Conditioning on roughness to cover a continuous family of materials, as done in this paper, adds an eighth parameter. A regular grid with only 32 samples per dimension would
+already require 328 ≈ 1012 entries. Adding a time parameter for
+dynamic emitters worsens this further: a naive per-keyframe cache
+scales linearly with the number of keyframes, and complex tem-
+2. Related Work
+We categorize previous work into three primary categories: analytical solutions, Monte Carlo estimators, and proxy-based representations. Finally, we discuss the broader context of using neural
+networks in the context of rendering.
+Analytical Solutions. Analytical closed-form solutions for simple emitter geometries (e.g., planar polygons) exist for various receiver types, including diffuse [BRW89] or glossy receivers like
+2
+3.1. Pre-integrated Emitter
+poral variation demands many of them. Like prior neural precomputation methods [RBRD22, CND∗ 26], NEF sidesteps this curse
+of dimensionality by fitting a compact, global representation that
+efficiently captures correlations in the high-dimensional signal.
+Computing the direct illumination Lo with respect to a complex emitter involves two layers of integration: the recursive internal light transport inside the emitter, and the receiver’s shading integral over the hemisphere. Proxy-emitter methods [HKSS98, VADWG15, ZBX∗ 21] already peel away the inner
+layer by precomputing internal transport into a function P defined
+on a bounding surface. The receiver, however, must still integrate
+against P at runtime. We take this idea one step further by absorbing the receiver’s direct illumination integral into the learned field
+Dθ itself:
+Z hZ
+i
+Lo (x, ωo ) =
+· · · dω′i fr (x, ωi , ωo ) (ωi · n) dωi
+Ω
+| Ω {z
+}
+Pre-integrated Emitters. Estimating the radiance emitted by
+complex light sources is non-trivial, particularly when light paths
+are obstructed by housing geometry or undergo multiple internal
+reflections. Early research tackled this by replacing the emitter
+with a 4D proxy geometry. Canned light sources represent the radiance leaving the emitter’s bounding surface as a 4D light field
+slab so that scene points can be illuminated by ray-tracing against
+the proxy rather than the intricate original geometry [HKSS98].
+Later work decoupled a luminaire’s dual roles in rendering: a radiance volume captures its appearance when viewed directly, while
+virtual point lights approximate how it illuminates the surrounding scene [VADWG15]. Neural variants [ZBX∗ 21] reduced the
+storage requirements of these tabulated representations and combined it with a learned importance sampling distribution. Subsequent work learned radiance-field representations of the luminaire
+for faster evaluation [CJ22], or relied on wavelet-compressed light
+fields for fast per-ray reconstruction and hierarchical importance
+sampling [AK25].
+internal transport
+(reference)
+Z
+=
+P(t(x, ωi ), −ωi ) fr (x, ωi , ωo ) (ωi · n) dωi (proxy)
+{z
+}
+Ω|
+baked offline
+≈ Dθ (x̃, ñ, ω̃o , α)
+|
+{z
+}
+(ours)
+baked offline
+where (x, n, ωo ) defines the world-space position, normal and outgoing direction at an intersection point, (x̃, ñ, ω̃o ) are their counterparts expressed in the emitter’s local frame (Section 3.2), ωi is the
+incident direction, t(x, ωi ) returns the point where the ray from x in
+direction ωi intersects the proxy surface, α are the material parameters for the BRDF fr , (ωi · n) is the cosine foreshortening term,
+and Ω denotes the hemispherical integration domain.
+Despite these advances, these methods still treat the proxy as
+an emitter that must be integrated at runtime. Each shading point
+integrates the product of the radiance sampled from the proxy’s
+4D near-field and the material evaluation. In contrast, NEF preintegrates this contribution offline, storing the full outgoing preintegrated direct illumination to be queried at runtime.
+Crucially, a pre-integrated quantity is not a property of the emitter alone. Since the BRDF fr appears inside the direct illumination
+integral, different receivers will observe different values of Dθ at
+the same (x, n). The receiver’s shading model is therefore part of
+what is being learned. We instantiate this using the GGX microfacet model [WMLT07] over a roughness range of α ∈ [0.1, 1]. By
+exposing α as input to the network, a single trained NEF represents the full roughness range for that material. While we restrict
+our scope to GGX in this work, our approach is generic and can be
+extended to other materials, such as Disney or layered BRDFs, by
+extending the conditioning inputs and the training distribution.
+Rendering with Neural Networks. A common use of neural networks in rendering is capturing the radiance distribution during a training phase which amortizes over subsequent
+viewings of the scene. Early work anchored a learned radiance representation to scene geometry for interactive viewing
+from arbitrary directions [RWG∗ 13]. Modern variants extend this
+idea to high-quality static scenes [HCZ21], rotatable environment lighting [RBRD22], scene animations [CDD∗ 24], variable
+scene configurations [DPD22, SDR∗ 24], and volumetric irradiance caching [CND∗ 26]. These methods all rely on offline, scenespecific training. Alternatively, a small neural representation can be
+trained online as a radiance cache [MRNK21] with the additional
+runtime cost of ray tracing and denoising. NEF differs in that it is
+an offline method whose representation is anchored in the emitter’s
+local 3D extent rather than on the 2D scene manifold, making it a
+portable, reusable asset across scenes.
+At runtime, evaluating Dθ requires only a single network inference at the shading point. This eliminates the need for any sampling
+of the proxy P, importance sampling, and denoising.
+Because Dθ is agnostic to the source of the radiance field, all
+the complexity that would otherwise have to be handled at runtime
+is shifted to the offline solver and baked into the network weights.
+This includes complex effects such as self-occlusion, multi-bounce
+transport and non-uniform emission (Section 4.2)—effects that often violate the assumptions made by analytical methods such as
+LTC [HDHN16]. As a result, Dθ can stand in for a path-traced estimate of direct illumination from an emitter, provided the field can
+be trained to faithfully represent it.
+3. Neural Pre-integrated Emitters
+Prior proxy methods reduce the runtime cost of internal emitter
+transport but still leave the receiver-side integral to be evaluated
+per shading point. We close this remaining gap by learning the full
+pre-integrated direct illumination as a neural field around the emitter. Section 3.1 derives this formulation; Section 3.2 defines the
+emitter-local frame that makes the representation portable; Section 3.3 introduces the diffuse/glossy decomposition; Section 3.4
+describes training; and Section 3.5 outlines rendering.
+3.2. Emitter-space
+Our neural field is defined in the emitter’s local frame (see Figure 2). Given a rigid world transform M, we map a world-space
+3
+Emitter-Space
+Outgoing Direction
+Diﬀuse / Glossy
+Normal
+Position
+Inverse
+Transform
+Figure 2: NEF inference and training. Inference (left): G-buffer channels are transformed from world space to the emitter’s local frame using
+M −1 , fed through Dθ in a single evaluation per shading point, and modulated by the diffuse and glossy albedos to yield the final shaded
+image. Training (right): for an emitter placed at the origin of its local frame, we sample receiver configurations (x̃, ñ, ω̃o , α) within the
+emitter-space bounding region and obtain target radiance values ⟨D(x̃, ñ, ω̃o , α)⟩ via offline path tracing. The neural field Dθ is fit to these
+targets by minimising the loss L(θ).
+MC reference
+NEF
+NEF + fall-off
+Quad
+shading configuration (x, n, ωo ) to its local counterpart (x̃, ñ, ω̃o )
+by applying M −1 to the position and the rotational part of M −1 to
+the normal and outgoing directions.
+Pierced sphere
+Pre-integrated direct illumination is only physically meaningful
+within a bounded region around the emitter. Emitted radiance falls
+off with distance, and beyond a certain range an emitter’s contribution becomes negligible. We therefore define the emitter-space as
+an axis-aligned bounding region in the local frame, sized to extend
+20× the emitter’s largest extent on each axis—well beyond the 5×
+threshold at which the inverse-square law becomes an acceptable
+approximation for emitters [Rea00]. Shading points inside this region are evaluated by a direct query of Dθ , which is sufficient for
+all emitters in this work.
+Analytical Fall-off. A simple heuristic to deal with points outside of the emitter-space, consists of clamping outside queries to
+the nearest boundary point and scaling the resulting shading value
+by (dboundary /dactual )2 , where dboundary is the distance from the
+emitter center to the clamped boundary point and dactual is the true
+distance from the emitter center to the shading point. As shown
+in Figure 3, this fall-off approach generates a result that is hard
+to visually distinguish from the ground truth reference. Alternatively, the emitter-space can be enlarged at training time to avoid
+the heuristic, potentially requiring a larger representation to get the
+desired level of accuracy everywhere in the emitter-space.
+Figure 3: Emitters above a diffuse ground plane. The NEF trained
+in a bounded domain (center) drops to zero outside the AABB
+boundary. Applying an analytical fall-off from the boundary value
+(right) extends the field and approximates the reference (left) on areas outside of the NEF training domain.
+would distort the learned angular distribution. A single NEF therefore defines a family of emitters related by similarity transformations, amortizing the training cost across all scenes and instances in
+which the emitter is placed (Figure 4).
+Scene-independent placement. Anchoring the representation
+to the emitter’s local frame yields two practical benefits: sceneindependence and free rigid placement at runtime. The trained NEF
+does not store scene-specific information, so the same parameters
+θ are reusable across scenes. At runtime, world-space shading configurations are mapped through M −1 before being evaluated by Dθ .
+Since M is applied at shading time rather than baked into the network weights, translating or rotating the emitter is essentially free:
+it only changes the transformation applied to each query, not the
+representation itself. Uniform scaling is handled by folding the
+scale factor into M and scaling the emitter-space extent accordingly; non-uniform scaling and shears are not supported, as they
+3.3. Diffuse–Glossy Separation
+Similarly to related work [RBRD22], we decompose our neural representation into separate diffuse fdθ (x̃, ñ) and glossy
+fgθ (x̃, ñ, r(ω̃o , ñ), α) components. We compute the total preintegrated direct illumination Dθ at a given shading point
+(x̃, ñ, ω̃o , α) as their sum:
+Dθ (x̃, ñ, ω̃o , α) = ρd (x) · fdθ (x̃, ñ) + ρg (x) · fgθ (x̃, ñ, r(ω̃o , ñ), α) .
+{z
+} |
+|
+{z
+}
+diffuse
+4
+glossy
+Radiance targets. Target radiance is obtained via offline path
+tracing against the (possibly time-varying) emitter geometry. Bare
+emissive surfaces are handled with standard next-event estimation; emitters with non-emissive housing geometry that causes selfocclusion or internal interreflections (Figure 6) are handled with
+full path tracing inside the emitter assembly, so that higher-order
+transport is naturally absorbed into the training signal. We use 64
+samples per radiance estimate as default across all emitters in this
+paper as we saw diminishing returns beyond this (see supplemental material for an ablation). Targets are generated on-the-fly rather
+than cached, so all reported training timings include the cost of path
+tracing.
+Optimization. We minimize a relative L2 loss [MRNK21] between the network prediction and the path-traced target averaged
+Figure 4: Portability across instances. Six instances of the same
+Pierced Sphere in the Bistro scene at different positions and orientations. A single trained NEF is loaded once; at each shading
+point, the world-space configuration (x, n, ωo ) is transformed into
+the emitter’s local frame via the per-instance M −1 . Figure 12 contains a comparison to reference for this scene.
+(D −⟨L ⟩)2
+o
+θ
+over the batch, L(θ) = sg(D
+, where ϵ = 0.01 and sg denotes a
+2
+θ ) +ϵ
+stop gradient operation. The relative loss prevents bright regions of
+the emitter-space from dominating the gradient and helps the multiresolution hash encoding to allocate capacity uniformly across the
+field. We use Adam [KB14] with a learning rate of 10−3 , a batch
+size of 216 , and use cosine annealing learning rate decay. The number of training iterations for each of our emitter types can be found
+in the supplemental material. Total wall-clock time on an RTX 4090
+ranges from one minute for diffuse receiver with planar emitters to
+three hours for emitters with complex emissive effects, dominated
+by the cost of generating path-traced target values.
+Here, tilde denotes properties in the local emitter-space defined in
+Section 3.2, ρd and ρg are factored-out diffuse and specular textures of the shading point x which retain high-frequency texture
+details [MRNK21], θ are the trainable parameters of the neural
+representation, r(ω̃o , ñ) is the reflected outgoing direction vector
+ω̃o around the normal ñ, and α is the GGX roughness parameter.
+For emitters that are only expected to see diffuse surfaces at runtime, the glossy head fgθ can be omitted during training (and during
+shading).
+3.5. Rendering
+Because NEF stores a pre-integrated estimate of the outgoing
+radiance reflected by the receiver, no integration is required
+at runtime. Unlike methods that integrate with respect to the
+emitter geometry or to a proxy representation of the emitter [HKSS98, VADWG15, ZBX∗ 21], our approach reduces the
+shading process to a single network evaluation per pixel. At render time, we first perform a G-buffer pass to obtain the (x, n, ωo , α)
+channels at each shading point. These are transformed into the
+emitter’s local frame via its current world transform M (Section 3.2), encoded, and fed to Dθ to obtain the outgoing radiance
+contribution pre-integrated with respect to the emitter.
+3
+All network inputs are normalized to [0, 1] , and a learned multiresolution hash encoding [MESK22] is applied to both the position
+x̃ and the reflected direction r(ω̃o , ñ). Encoding the reflected direction is critical for capturing the sharp highlights and complex reflections characteristic of low-roughness receiver geometry (see supplemental material), consistent with findings in the field of novel
+view synthesis [VHM∗ 22]. Both the glossy and diffuse head use a
+4-layer MLP of width 128 with ReLU activations. More details on
+the network architecture can be found in the supplemental material.
+Visibility.
+As
+with
+existing
+analytical
+methods [HDHN16, BRW89], NEF does not inherently capture
+occlusions of the emissive field caused by the surrounding scene.
+For simple emitters, a single shadow ray toward the emitter
+center is often sufficient (Figure 5); for soft shadows, established
+techniques such as shadow mapping [Wil78] or a small ray-tracing
+budget combined with a denoiser [HHM18] apply directly, which
+we implemented in the supplemental material. Crucially, shadow
+rays are only required against non-emitter scene geometry: the
+NEF itself bakes in self-occlusion and internal interreflections
+within the emitter assembly (Figure 6).
+3.4. Training
+A schematic of the training procedure is shown in Figure 2. Training a NEF only requires a reliable estimate of the outgoing radiance Lo for any query within the network’s input domain, making
+the procedure agnostic to the underlying emitter geometry.
+Sample generation. For each training batch, we draw queries
+uniformly from the emitter-space (Section 3.2). For the glossy head
+fgθ , we sample a position x̃ uniformly in the local bounding box, and
+a normal ñ such that the emitter is visible in its hemisphere avoiding
+queries with zero radiance, an outgoing direction ω̃o uniformly on
+the upper hemisphere defined by ñ, and a roughness α uniformly in
+[0.1, 1]. The diffuse head fdθ uses the same procedure restricted to
+(x̃, ñ). For deformable or animated emitters, we additionally sample a time parameter t ∈ [0, 1] corresponding to the emitter’s state,
+encoded with an 8-band Fourier encoding [MST∗ 20] and provided
+as an extra conditioning input.
+4. Results
+We show that NEF matches the quality of analytical solutions (Section 4.1) and extends beyond what they handle, supporting emissive
+meshes and deformable emitters (Section 4.2). We then compare
+5
+Table 1: Isolated direct illumination runtime cost at 1920 × 1080.
+Analytical and LTC scale linearly with vertex count; NEF cost is
+independent of emitter complexity. Times reflect the shading step
+only. We employ a standardized NEF architecture across all emitters rather than tuning hyperparameters for individual cases; consequently, the reported timings are consistent and representative
+across all figures and ran on an RTX 4090.
+Reference (direct)
+Analytical
+Ours (NEF)
+FLIP: 0.0041
+Method
+Figure 5: Comparison to analytical integration [BRW89] for a uniform planar emitter and diffuse receiver. Our method attains comparable accuracy without assuming any specific emitter geometry.
+Throughout the paper a hard shadow relative to the emitter center
+and the scene geometry is applied and FLIP [ANA∗ 20] is computed
+on the LDR renders.
+Analytical [BRW89]
+LTC [HDHN16]
+Ours (NEF)
+Ours (GlossyNEF)
+Quad
+(4 verts)
+Dragon
+(436k verts)
+Diffuse
+Glossy
+Diffuse
+Glossy
+0.03 ms
+0.07 ms
+1.2 ms
+2.5 ms
+1951.4 ms
+3925.6 ms
+1.2 ms
+2.5 ms
+Pierced Sphere
+Lattice Box
+Standard DI
+Dragon
+Component
+against two sampling-based techniques, where NEF’s samplingfree formulation yields a runtime advantage (Section 4.3).
++ Interreflections
+4.1. Planar Emitters
+We compare against analytical integration for diffuse receivers [BRW89] and Linearly Transformed Cosines (LTC) for
+glossy receivers [HDHN16]. As shown in Figure 5, our method
+matches the analytical reference for diffuse receivers under uniform
+emission, confirming its accuracy.
+NEF (ours)
+For glossy receivers (Figure 11), the larger capacity of NEF allows it to achieve lower rendering error across various roughness
+values α compared to LTC, highlighting LTC’s remaining approximation error. The near-mirror regime (α → 0) remains challenging
+for a finite neural representation; we show an example of the increase in error at lower roughness in the supplemental material.
+While analytical methods have lower per-frame shading costs
+for simple polygons, their runtime scales linearly O(V ) with the
+number of emitter vertices V . This linear cost is especially noticeable for large emissive emitters, as highlighted in Table 1. We
+show the crossover point between the analytical methods and our
+GlossyNEF—267 emitter vertices—in the supplemental material.
+The generality and computational efficiency of our approach become especially relevant when extending beyond planar geometry.
+Figure 6: Direct illumination from complex emitter assemblies.
+Top: standard direct illumination without interreflections. Middle:
+emitter-DI reference that includes bounces within the emitter assembly but excludes scene indirect. Bottom: NEF predictions.
+4.2. Complex Emitters
+high-frequency emissive field); for simpler emitters such as the planar quad, a smaller architecture would suffice with no perceptible
+loss in quality (see supplemental material).
+A key advantage of our approach is that inference cost is determined by the complexity of the emissive field, not by the complexity of the underlying geometry. While NEF inference cost does
+scale with emissive field complexity—a highly spatially varying
+emitter benefits from a larger or more expressive network—this
+complexity is typically much lower than that of the geometry itself.
+Naively subdividing an emissive mesh increases its vertex count
+but leaves its emissive field largely unchanged, so the same NEF
+capacity suffices regardless of tessellation. All results in this paper
+share a single network configuration sized for the most demanding
+case (the Pierced Sphere, whose housing interreflections produce a
+Higher-order Emissive Effects. Our NEF formulation can also
+capture higher-order emissive effects arising from multi-bounce
+light transport within the emitter, such as internal reflections toward
+a filament. By replacing direct light-source sampling with path tracing during training, multi-bounce contributions are integrated into
+the training signal. Figure 6 shows three assemblies in which internal interreflections meaningfully shape the emissive field: a Dragon
+mesh acting as a bare emitter, a Pierced Sphere whose shell partially occludes and reflects an internal filament, and a Lattice Box
+which houses a spherical emitter. Obtaining a noise-free reference
+for these assemblies is expensive—on the order of 1M samples per
+6
+1.0
+Time
+Reference
+0.8
+0.6
+0.4
+0.2
+0.0
+NEF
+(a) Surface normals
+(b) Incident radiance Li (ω)
+FLIP: 0.0525
+FLIP: 0.0599
+FLIP ( )
+Oracle proxy (uniform)
+Oracle proxy (IS)
+NEF (ours, 1 eval)
+FLIP: 0.0358
+Figure 7: A textured, time-varying fireball emitter in the whiteroom
+scene at three frames of its animation, with the time parameter t indexing into video frames. Top: path-traced reference. Bottom: NEF
+prediction from a single network evaluation per pixel.
+10 1
+100
+101
+102
+Samples per shading point (N)
+103
+Figure 8: Top: the proxy sampling domain as seen from a receiver
+point, showing (a) surface normals of the pierced-sphere luminaire
+and (b) the incident radiance field Li (ω) that must be integrated.
+The dashed circle marks the proxy sphere extent. Bottom: even importance sampling [ZBX∗ 21] the proxy, requires 734 samples per
+shading point to match a single NEF evaluation (dashed red). Uniform cone sampling requires ten times more samples.
+pixel—because the interior light paths are not captured by simple
+next-event estimation against the bare emissive geometry. The effect varies by assembly: interreflections produce only a mild overall
+brightening on the Dragon, whereas the Pierced Sphere and Lattice
+Box show light diffusing through the apertures, softening cast shadows and noticeably brightening regions that the bare-emitter leaves
+dark. NEF reproduces all three references faithfully.
+Non-uniform emission. Since our NEF representation is agnostic to the emissive profile of the light source, it naturally accommodates spatially varying emission without modification. Figure 1
+(center) shows an emitter with a non-uniform radiance distribution.
+While some prior methods support textured emitters, they rely on
+approximations that introduce error [HDHN16].
+emitter: the lights support global rigid transformations, but are fixed
+relative to each other. A single NEF is trained on this composite.
+We evaluate equal-quality convergence against three baselines:
+path-traced direct illumination, ReSTIR DI (M=32, K=5), and
+ReSTIR DI paired with an OptiX denoiser. To reach NEF’s error
+level, ReSTIR requires ∼256 SPP without denoising, or ∼32 SPP
+with denoising (Figure 9). While both unbiased sampling baselines
+eventually surpass NEF at high sample counts, even the 32 SPP
+denoised case exceeds the typical per-frame budget of real-time
+pipelines. However, ReSTIR remains more general: it handles arbitrary per-light motion at runtime, whereas NEF requires the emitter
+configuration to be fixed at training time. Rigid transforms of the
+entire emitter group and pre-arranged relative motion of the emitters in the composition (via a time parameter, Section 4.2) are supported, but arbitrary independent light motion requires retraining.
+Dynamic and Deformable Emitters. To support dynamic or deformable emitters, we extend NEF with a time-varying parameter
+t. As with the higher-order emissive effects in the previous section, this only requires that training data collection account for the
+time-varying state of the emitter. Figure 7 shows a textured fireball
+whose time parameter indexes into frames of a source video. See
+Figure 12 for an emitter with deformable geometry. We encourage
+the reader to consult the supplemental video for a detailed demonstration of the results.
+Proxy Emitters. Proxy representations—whether using 4D
+light-field slabs [HKSS98], a radiance volume with virtual point
+lights [VADWG15], or neural fields [ZBX∗ 21]—gather radiance
+by sampling and integrating a proxy representation. We compare
+NEF against an oracle proxy: an idealized proxy whose near-field
+queries return a noise-free reference and whose evaluation cost is
+treated as zero. Any sampling-based proxy method is bounded from
+below by this oracle, so the comparison reveals the minimum number of proxy evaluations required to match NEF’s pre-integrated
+estimate, regardless of how the proxy itself is represented.
+4.3. Comparison to Sampling-based Methods
+Both online many-light sampling methods and proxy-based emitters [HKSS98, VADWG15, ZBX∗ 21] require an integration step at
+runtime. We compare against a representative of each category: ReSTIR [BWP∗ 20] and an oracle proxy formulation.
+Many-light Sampling. Unlike ReSTIR, which operates entirely
+at runtime with no precomputation, NEF amortizes work into a
+one-time training phase in exchange for a constant-time per-pixel
+inference cost. To make this trade-off concrete, we construct a Cornell Box scene with 1,000 point lights treated as a single composite
+As shown in Figure 8, for the Pierced Sphere scene (Figure 6),
+7
+Reference
+FLIP
+PT (direct only)
+ReSTIR (M=32, K=5)
+ReSTIR + denoise
+NEF (ours)
+OptiX 1 spp
+OptiX 2 spp
+OptiX 4 spp
+FLIP: 0.0071
+FLIP: 0.0062
+FLIP: 0.0057
+10 1
+100
+101
+Samples per pixel
+102
+Figure 9: Equal-quality convergence on a Cornell box with 1000
+point lights. NEF (dashed) reaches a fixed error level via a single
+network evaluation per pixel; ReSTIR DI and its denoised variant
+require 32 (with denoising) and 256 samples (without) to reach a
+comparable error, well above real-time budgets. Path tracing of direct illumination is included for reference. Training cost is amortized across frames and is not included in the per-frame timings.
+Figure 10: Ratio estimator [HHM18] with the OptiX denoiser. The
+FLIP error map is in range [0, 1]. Even at 1 shadow ray per pixel,
+the combination of NEF’s unshadowed illumination and denoised
+visibility produces perceptually accurate soft shadows.
+ters requires evaluating N independent NEFs and summing their
+contributions (unless emitters are close enough to be represented
+jointly by a single NEF), scaling linearly with N. We see two avenues to mitigate this. First, a shared decoding MLP could learn to
+disentangle latents from multiple emitters; however a naive sumthen-decode scheme retains a linear cost for the latent fetching.
+Second, future work could combine NEF with lighting hierarchies [WFA∗ 05, MPC19] to achieve sub-linear scaling.
+the oracle proxy requires approximately 734 samples per pixel to
+match the accuracy of a single NEF query when combined with
+a learned importance sampling routine from [ZBX∗ 21]. Each of
+those samples still requires a BSDF evaluation at the shading point:
+at 1920 × 1080 resolution, the 734 GGX evaluations alone cost
+2.9 ms per frame in an optimized CUDA kernel. This already exceeds NEF’s total inference cost of 2.5 ms, before any of the proxy
+queries or importance sampling are accounted for. Moreover, the
+cost of those proxy queries is not negligible in practice. As a data
+point, a half-precision torch.compile’d forward pass of the
+evaluation network from [ZBX∗ 21] takes 103 ms per emitter sample per full-HD frame, and 49 ms to output the importance sampling distributions on the same hardware as our NEF timings.
+Sampling training data. We generate training targets by path
+tracing the emitter assembly with next-event estimation. For emitters with housing geometry more intricate than those presented
+in this work—heavily enclosing the emissive surface or admitting
+light only through narrow apertures—this strategy can produce a
+sparse training signal: most paths fail to reach the emitter and contribute zero, leaving the network to learn from a small fraction of
+informative samples. As shown in recent work [FLW∗ 26], light
+tracing [Arv86] can reduce the number of zero-radiance contributions. Orthogonally, when the emissive field around the emitter
+exhibits high-frequency variation, adaptive sampling the training
+loss [DPD22] could training data on the regions that need it most.
+5. Discussion
+Visibility and soft shadows. Similarly to analytical methods and
+proxy emitters, NEF only captures the unoccluded emission field.
+In practice, this is well-addressed by combining NEF shading with
+a small budget of path-traced visibility samples and a denoiser that
+are used as a ratio estimator [HHM18]. This approach yields plausible soft shadows while preserving the noise-free direct illumination
+produced by the NEF. Even 1 shadow ray per pixel yields perceptually accurate soft shadows (see Figure 10), with further samples
+producing diminishing returns. This makes NEF compatible with
+standard real-time visibility pipelines at minimal additional cost.
+6. Conclusion
+We presented Neural Emission Fields, a pre-integrated neural representation of direct illumination from non-trivial emitters. By
+moving the receiver-side integral into an offline training phase,
+NEF reduces shading to a single network evaluation per pixel,
+at a cost independent of the emitter’s geometric complexity. The
+same formulation handles a wide range of lighting scenarios—
+including spatially varying emission, internal interreflections, and
+deformable emitters—within a single, unified training procedure;
+trained models then act as portable lighting assets that can be placed
+in any scene under rigid transforms and uniform scaling. We hope
+NEF proves a useful step toward treating expensive direct illumination as a bakeable, reusable component of real-time rendering
+pipelines.
+Storage and training. All results in this paper were generated
+using a single NEF architecture totaling 15 MB (or 30 MB for the
+glossy variant) per emitter. For simpler emitters, this is often excessive and can be reduced (see supplemental). Training is a one-time
+offline cost, ranging from approximately one minute for simple planar emitters to three hours for emitters with internal interreflections, depending primarily on the cost of generating path-traced
+training samples. Crucially, this cost is incurred once per emitter
+and can be amortized across multiple scenes.
+Multiple emitters in a scene. Currently, a scene with N emit8
+Path traced
+LTC [HDHN16]
+LTC error
+NEF
+NEF error
+α
+0.10
+FLIP (↓): 0.0459
+rMSE (↓): 0.0013
+FLIP (↓): 0.0188
+rMSE (↓): 0.0001
+FLIP (↓): 0.0716
+rMSE (↓): 0.0014
+FLIP (↓): 0.0169
+rMSE (↓): 0.0001
+FLIP (↓): 0.0470
+rMSE (↓): 0.0004
+FLIP (↓): 0.0149
+rMSE (↓): 0.0001
+FLIP (↓): 0.0271
+rMSE (↓): 0.0001
+FLIP (↓): 0.0128
+rMSE (↓): 0.0001
+FLIP (↓): 0.0191
+rMSE (↓): 0.0001
+FLIP (↓): 0.0125
+rMSE (↓): 0.0001
+α
+0.30
+α
+0.50
+α
+0.70
+α
+0.90
+Figure 11: Linearly Transformed Cosines [HDHN16] permits rendering the direct illumination of simple emitters like the polygonal light
+source shown above, for glossy receivers like a GGX specular material [WMLT07], where α is the roughness parameter. However, the
+method’s approximate nature prevents a perfect match with a path-traced solution. By learning the pre-integrated emission around the emitter
+with our NEF, we obtain a better fit without losing generality across supported emitter types. All FLIP maps share a common color scale.
+9
+NEF
+FLIP
+Sponza
+Reference
+Bistro
+FLIP (↓): 0.0137
+Neon NEF
+FLIP (↓): 0.0536
+Whiteroom
+FLIP (↓): 0.0252
+Living Room
+FLIP (↓): 0.0436
+FLIP (↓): 0.0425
+Figure 12: Comparison of NEF predictions against Monte Carlo references across five scenes with different emitter configurations. Sponza
+contains three distinct emitter types (trained individually), Bistro contains six instances of the Pierced Sphere emitter, Neon NEF contains
+three colored emissive meshes as a single emitter, the Fire Ball (in Whiteroom), and a deformable sine wave emitter (in Living Room) change
+as a function of a time parameter t. All FLIP maps share a common color scale.
+10
+References
+[LDSM16] L ECOCQ P., D UFAY A., S OURIMANT G., M ARVIE J.-E.:
+Accurate analytic approximations for real-time specular area lighting.
+In Proceedings of the 20th ACM SIGGRAPH Symposium on Interactive
+3D Graphics and Games (2016), pp. 113–120. 2
+[AK25] ATANASOV A., KOYLAZOV V.: Wavelet representation and sampling of complex luminaires. Computer Graphics Forum 44, 4 (2025).
+3
+[MESK22] M ÜLLER T., E VANS A., S CHIED C., K ELLER A.: Instant
+neural graphics primitives with a multiresolution hash encoding. ACM
+Transactions on Graphics (TOG) 41, 4 (2022), 1–15. 5
+[ANA∗ 20]
+A NDERSSON P., N ILSSON J., A KENINE -M ÖLLER T., O S KARSSON M., Å STRÖM K., FAIRCHILD M. D.: FLIP: A Difference
+Evaluator for Alternating Images. Proceedings of the ACM on Computer
+Graphics and Interactive Techniques 3, 2 (2020), 15:1–15:23. 6
+[MGNM19] M AJERCIK Z., G UERTIN J.-P., N OWROUZEZAHRAI D.,
+M C G UIRE M.: Dynamic diffuse global illumination with ray-traced irradiance fields. Journal of Computer Graphics Techniques 8, 2 (2019).
+2
+[Arv86] A RVO J.: Backward ray tracing. In Developments in Ray Tracing, Computer Graphics, Proc. of ACM SIGGRAPH 86 Course Notes
+(1986), pp. 259–263. 8
+[MPC19] M OREAU P., P HARR M., C LARBERG P.: Dynamic many-light
+sampling for real-time ray tracing. In High Performance Graphics (Short
+Papers) (2019), pp. 21–26. 2, 8
+[Arv95] A RVO J.: Applications of irradiance tensors to the simulation
+of non-lambertian phenomena. In Proceedings of the 22nd annual conference on Computer graphics and interactive techniques (1995), ACM,
+pp. 335–342. 2
+[MRNK21] M ÜLLER T., ROUSSELLE F., N OVÁK J., K ELLER A.: Realtime neural radiance caching for path tracing. ACM Transactions on
+Graphics (TOG) 40, 4 (July 2021). 3, 5
+[BRW89] BAUM D. R., RUSHMEIER H. E., W INGET J. M.: Improved
+radiosity solutions through the use of analytically determined formfactors. In Proceedings of the 16th Annual Conference on Computer
+Graphics and Interactive Techniques (New York, NY, USA, 1989), Association for Computing Machinery, p. 325–334. 2, 5, 6
+[MST∗ 20] M ILDENHALL B., S RINIVASAN P. P., TANCIK M., BARRON
+J. T., R AMAMOORTHI R., N G R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In Computer Vision – ECCV 2020:
+16th European Conference, Glasgow, UK, August 23–28, 2020, Proceedings, Part I (Berlin, Heidelberg, 2020), Springer-Verlag, p. 405–421. 5
+[BWP∗ 20] B ITTERLI B., W YMAN C., P HARR M., S HIRLEY P.,
+L EFOHN A., JAROSZ W.: Spatiotemporal reservoir resampling for realtime ray tracing with dynamic direct lighting. ACM Transactions on
+Graphics (TOG) 39, 4 (2020). 1, 2, 7
+[NRH03] N G R., R AMAMOORTHI R., H ANRAHAN P.: All-frequency
+shadows using non-linear wavelet lighting approximation. In ACM SIGGRAPH 2003 Papers. 2003, pp. 376–381. 2
+[CDD∗ 24] C OOMANS A., D OMINICI E. A., D ÖRING C., M UELLER
+J. H., H LADKY J., S TEINBERGER M.: Real-time neural rendering of
+dynamic light fields. Computer Graphics Forum 43, 2 (2024). 3
+[Ram09] R AMAMOORTHI R.: Precomputation-based rendering. Foundations and Trends in Computer Graphics and Vision 3, 4 (2009), 281–369.
+2
+[CJ22] C ONDOR J., JARABO A.: A learned radiance-field representation
+for complex luminaires. In 33rd Eurographics Symposium on Rendering,
+EGSR (2022), Eurographics Association, pp. 49–58. 3
+[RBRD22] R AINER G., B OUSSEAU A., R ITSCHEL T., D RETTAKIS G.:
+Neural precomputed radiance transfer. In Computer Graphics Forum
+(2022), vol. 41, Wiley Online Library, pp. 365–378. 3, 4
+[CND∗ 26] C OOMANS A., NAZZARO G., D OMINICI E. A., D ÖRING C.,
+V ERHOEVEN F., VARDIS K., S TEINBERGER M.: Real-time rendering with a neural irradiance volume. Computer Graphics Forum 45, 2
+(2026). 3
+[Rea00] R EA M. S.: The iesna lighting handbook: reference & application. 4
+[RWG∗ 13] R EN P., WANG J., G ONG M., L IN S., T ONG X., G UO B.:
+Global illumination with radiance regression functions. ACM Transactions on Graphics (TOG) 32, 4 (2013), 130–1. 3
+[DPD22] D IOLATZIS S., P HILIP J., D RETTAKIS G.: Active exploration
+for neural global illumination of variable scenes. ACM Transactions on
+Graphics (TOG) 41, 5 (2022), 1–18. 3, 8
+[SDR∗ 24] S U R., D ONG H., R EN J., J IN H., C HEN Y., WANG G., L I S.:
+Dynamic neural radiosity with multi-grid decomposition. In SIGGRAPH
+Asia 2024 Conference Papers (2024), pp. 1–12. 3
+[FLW∗ 26] F IGUEIREDO P., L I Z., WANG B., H AŠAN M., K ALANTARI
+N. K.: Purelight: Learning complex luminaires with light tracing. arXiv
+preprint arXiv:2606.04319 (2026). 8
+[SKS02] S LOAN P. J., K AUTZ J., S NYDER J. M.: Precomputed radiance transfer for real-time rendering in dynamic, low-frequency lighting
+environments. ACM Trans. Graph. 21, 3 (2002), 527–536. 2
+[GSHG98] G REGER G., S HIRLEY P., H UBBARD P. M., G REENBERG
+D. P.: The irradiance volume. IEEE Computer Graphics and Applications 18, 2 (1998), 32–43. 2
+[HCZ21] H ADADAN S., C HEN S., Z WICKER M.: Neural radiosity. ACM
+Transactions on Graphics (TOG) 40, 6 (2021), 1–11. 3
+[SL17] S ILVENNOINEN A., L EHTINEN J.: Real-time global illumination
+by precomputed local reconstruction from sparse radiance probes. ACM
+Transactions on Graphics (TOG) 36, 6 (2017), 1–13. 2
+[HDHN16] H EITZ E., D UPUY J., H ILL S., N EUBELT D.: Real-time
+polygonal-light shading with linearly transformed cosines. ACM Transactions on Graphics (TOG) 35, 4 (2016), 1–8. 1, 2, 3, 5, 6, 7, 9, 13
+[SWZ96] S HIRLEY P., WANG C., Z IMMERMAN K.: Monte carlo techniques for direct lighting calculations. ACM Transactions on Graphics
+(TOG) 15, 1 (1996), 1–36. 2
+[HHM18] H EITZ E., H ILL S., M C G UIRE M.: Combining analytic direct illumination and stochastic shadows. In Proceedings of the ACM
+SIGGRAPH symposium on interactive 3D graphics and games (2018),
+pp. 1–11. 5, 8
+[VADWG15] V ELÁZQUEZ -A RMENDÁRIZ E., D ONG Z., WALTER B.,
+G REENBERG D. P.: Complex luminaires: Illumination and appearance
+rendering. ACM Transactions on Graphics (TOG) 34, 3 (2015), 1–15. 1,
+3, 5, 7
+[HKSS98] H EIDRICH W., K AUTZ J., S LUSALLEK P., S EIDEL H.-P.:
+Canned lightsources. In Eurographics Workshop on Rendering Techniques (1998), Springer, pp. 293–300. 1, 3, 5, 7
+[VHM∗ 22] V ERBIN D., H EDMAN P., M ILDENHALL B., Z ICKLER T.,
+BARRON J. T., S RINIVASAN P. P.: Ref-nerf: Structured view-dependent
+appearance for neural radiance fields. In CVF Conference on Computer
+Vision and Pattern Recognition (CVPR) (2022), pp. 5481–5490. 5
+[Kaj86] K AJIYA J. T.: The rendering equation. In Proceedings of the 13th
+annual conference on Computer graphics and interactive techniques
+(1986), pp. 143–150. 1
+[War94] WARD G. J.: Adaptive shadow testing for ray tracing. In Photorealistic Rendering in Computer Graphics: Proceedings of the Second
+Eurographics Workshop on Rendering (1994), Springer, pp. 11–20. 2
+[KB14] K INGMA D. P., BA J.: Adam: A method for stochastic optimization. arXiv preprint arXiv:1412.6980 (2014). 5
+[WFA∗ 05] WALTER B., F ERNANDEZ S., A RBREE A., BALA K.,
+D ONIKIAN M., G REENBERG D. P.: Lightcuts: a scalable approach to
+illumination. In ACM SIGGRAPH 2005 Papers. 2005, pp. 1098–1107.
+2, 8
+[KYM22] K UGE T., YATAGAWA T., M ORISHIMA S.: Real-time shading with free-form planar area lights using linearly transformed cosines.
+Journal of Computer Graphics Techniques (JCGT) 11, 1 (2022), 1–16. 2
+11
+[Wil78] W ILLIAMS L.: Casting curved shadows on curved surfaces. In
+Proceedings of the 5th Annual Conference on Computer Graphics and
+Interactive Techniques (New York, NY, USA, 1978), SIGGRAPH ’78,
+Association for Computing Machinery, p. 270–274. 5
+[WKKN19] WANG Y., K HIAT S., K RY P. G., N OWROUZEZAHRAI D.:
+Fast non-uniform radiance probe placement and tracing. I3D 19, 21-23
+(2019), 1–2. 2
+[WMLT07] WALTER B., M ARSCHNER S. R., L I H., T ORRANCE K. E.:
+Microfacet models for refraction through rough surfaces. EGSR’07, Eurographics Association, p. 195–206. 3, 9
+[Yuk20] Y UKSEL C.: Stochastic lightcuts for sampling many lights.
+IEEE Transactions on Visualization and Computer Graphics 27, 10
+(2020), 4049–4059. 2
+[ZBX∗ 21] Z HU J., BAI Y., X U Z., BAKO S., V ELÁZQUEZ A RMENDÁRIZ E., WANG L., S EN P., H ASAN M., YAN L.-Q.: Neural
+complex luminaires: representation and rendering. ACM Transactions on
+Graphics (TOG) 40, 4 (2021), 57–1. 1, 3, 5, 7, 8
+12
+Appendix C: Architecture Ablation
+As shown in Figure 13, the computational cost of analytical methods like LTC [HDHN16] scales linearly with the number of emitter
+vertices. In contrast, NEF inference time remains constant for a
+given emitter geometry, regardless of the density of its tessellation.
+For glossy receivers, our method reaches a performance crossover
+at 267 emitter vertices. Notably, NEF maintains a constant 2.5ms
+shading time even for highly complex emitters like the Stanford
+Dragon (436k vertices), where analytical methods would be computationally prohibitive.
+We ablate several architecture choices (see Table 3) of our NEF
+by training a GlossyNEF on the same Quad emitter with the same
+number of training iterations.
+Shading time (ms, 1920 × 1080)
+Appendix A: Linear Scaling of Analytical Methods
+Applying the multiresolution hash encoding on the outgoing direction as opposed to the reflected direction, which is a common
+encoding choice for neural representations, reduces quality across
+all roughness values α.
+Splitting the network into a diffuse and glossy head similarly
+performs better than unifying into a single head.
+The original NEF architecture shares the positional encoding between the diffuse and glossy head. Decoupling this multiresolution
+hash table (i.e. diffuse and glossy each use a different one) yields
+no quality improvement, although it adds more capacity and extra
+runtime.
+LTC, linear fit
+NEF (ours)
+4
+3
+2
+Table 3: Ablation of the GlossyNEF architecture. We report FLIP
+(↓) at three roughness levels. The baseline uses two output heads
+with hash-grid encodings on both position x and the reflected view
+direction ωr . The variant marked 2× doubles the capacity of the
+remaining component to control for parameter count.
+1
+0
+0
+100
+200
+300
+Polygon vertices N
+400
+500
+Figure 13: Linear Scaling vs. Constant-Time Inference. Shading
+cost (1080p) for analytical methods scales linearly with vertex
+count N. Our method (NEF) exhibits constant-time performance,
+outperforming the LTC reference [HDHN16] beyond the crossover
+point of 267 vertices.
+α = 0.1
+α = 0.3
+α = 0.8
+Full (ours)
+0.0216
+0.0230
+0.0172
+hash(ωo ) instead of hash(ωr )
+0.0299
+0.0269
+0.0222
+Single head
+Single head, 2× MLP
+0.0359
+0.0324
+0.0302
+0.0252
+0.0249
+0.0204
+Decoupled hash(x)
+0.0246
+0.0240
+0.0195
+Appendix B: Representation Parameters
+We use a single set of hash grid parameters for all encoded inputs. The GlossyNEF architecture shares the positional encoding
+between the diffuse and glossy head. The multiresolution hash√
+table has eight levels, each level increases in size with a rate of 2
+per level, the corresponding latent vector consists of four floats, and
+the hash table uses 219 entries. The additional inputs to the neural
+network, and the overall memory budget in half-precision, are summarized in Table 2.
+Appendix D: Training Budget
+Table 4 reports the training cost for each NEF in the paper, measured on a single RTX 4090 GPU. All timings include the cost
+of generating path-traced radiance targets on-the-fly, which dominates iteration time for the more complex emitters. Iterations and
+per-emitter training time scale with the difficulty of the underlying radiance field: planar emitters with uniform emission converge
+in minutes, bare emissive meshes and spatially varying emitters in
+under fifteen minutes, while configurations involving internal interreflections or temporal variation require several hours, both because the radiance field itself is more complex and because each
+path-traced target costs more to generate.
+Table 2: Network architecture for the diffuse and glossy NEF variants. The glossy model uses a two-head architecture: a diffuse head
+with the same architecture predicts irradiance, while the glossy
+head predicts the glossy component.
+Property
+Diffuse NEF
+Glossy NEF
+Position encoding
+Direction encoding
+Normal
+Roughness
+Hidden layers
+Output
+Storage (FP16)
+Hash grid on x
+—
+n ∈ [−1, 1]3
+—
+4 × 128, ReLU
+3 (RGB), linear
+15.22 MB
+Hash grid on x
+Hash grid on ωr
+n ∈ [−1, 1]3
+α ∈ [0.1, 1]
+4 × 128, ReLU
+3 (RGB), linear
+30.46 MB
+Appendix E: Overspent Capacity
+The default NEF architecture is sized for the most demanding emitter in our set (the Pierced Sphere) and is excessive for simpler emissive fields. We ablate two capacity axes—the MLP and the multiresolution hash encoding—on a simple Quad emitter (Figure 14).
+The two axes have different effects: reducing the MLP size quickly
+degrades quality, as the network loses the capacity to decode the
+encoded latents. Shrinking the hash encoding, in contrast, yields
+the largest reduction in memory footprint at negligible cost in error, since most of the parameter budget lives in the hash tables and
+13
+Table 4: Training budget per NEF on a single RTX 4090 GPU.
+Sample count is the total number of (x̃, ñ, ω̃o , α) queries seen during training (iterations × batch size 216 , expressed in millions or
+billions).
+Iterations
+it/s
+Training time
+Samples
+quad_diffuse
+dragon
+pierced_sphere
+neon NEF
+dynamic_flag
+fire
+pierced_interreflect
+dragon_interreflect
+quad_glossy
+10,000
+100,000
+100,000
+100,000
+250,000
+250,000
+500,000
+500,000
+500,000
+165
+135
+196
+142
+86
+36
+52
+49
+75
+1m 0s
+12m 22s
+8m 29s
+11m 35s
+48m 20s
+1h 55m
+2h 41m
+2h 51m
+1h 51m
+655.4M
+6.6B
+6.6B
+6.6B
+16.4B
+16.4B
+32.8B
+32.8B
+32.8B
+FLIP error
+0.06
+15.1 MB
+MLP size (grid fixed at 219 )
+0.12
+0.10
+0.08
+0.06
+0.00
+15.1 MB
+0.02
+32 × 2
+32 × 4
+64 × 4
+0.0
+0.2
+0.4
+0.6
+Roughness
+0.8
+1.0
+Figure 15: Roughness limitation. As surface roughness α → 0 the
+specular highlight sharpens beyond the network’s representational
+capacity, increasing perceptual error (FLIP) in the highlight region.
+NEF was trained on the extended range of α ∈ [0.01, 1] for this
+figure.
+128 × 4
+Hash grid size (MLP fixed at 128 × 4)
+0.06
+FLIP error
+0.14
+0.02
+15.1 MB
+15.2 MB
+Appendix F: Low-roughness Materials
+While there are no theoretical constraints preventing NEF from being trained on low-roughness receivers, practical results indicate
+a bottleneck as α → 0, as illustrated in Figure 15. This degradation occurs because the specular highlight sharpens into a highfrequency signal that exceeds the network’s representational capacity. Consequently, while training is technically feasible across the
+entire roughness spectrum, the model struggles to resolve the nearsingular gradients of mirror-like reflections, leading to the observed
+increase in approximation error in the highlight regions.
+0.04
+587 KB
+1.7 MB
+5.2 MB
+0.02
+0.00
+NEF (α = 0.01)
+0.04
+0.04
+0.00
+Reference (α = 0.01)
+FLIP ( )
+Configuration
+213
+215
+217
+15.2 MB
+219
+Figure 14: Capacity ablation on a Quad emitter. Reducing the multiresolution hash encoding shrinks the footprint substantially with
+little impact on error, while reducing the MLP causes a rapid quality drop. For simple emissive fields, the default architecture is significantly oversized.
+Appendix G: Impact of Training Data Noise
+The training targets used throughout this paper are generated via
+path tracing with Monte Carlo integration, leaving residual variance
+in the supervision signal. The magnitude of this variance depends
+on the emitter: emitters that are hard to sample yield noisier targets.
+The Pierced Sphere is a particularly challenging case, as its internal interreflections must also be captured during training, making
+it one of the noisiest emitters in our set. In Figure 16 we ablate the
+number of Monte Carlo samples used per training estimate and observe diminishing returns beyond 64 samples. We therefore adopt
+S = 64 for all emitters throughout the paper, noting that this budget
+could safely be reduced for simpler emitters.
+the Quad’s emissive field does not need the default spatial resolution. In practice, simple emitters can therefore be deployed with
+a substantially smaller hash table while keeping the MLP near its
+default size.
+14
+S=1
+S=4
+S = 16
+FLIP 0.082
+FLIP 0.061
+FLIP 0.046
+S = 64
+S = 256
+Reference
+FLIP 0.036
+FLIP 0.029
+FLIP
+0.08
+0.06
+0.04
+S=1
+S=4
+S = 16
+S = 64
+MC samples per radiance estimate (S)
+S = 256
+Figure 16: Ablation on the number of MC samples S per training
+radiance estimate. Pierced-sphere emitter, intermediate training result of 50 k training iterations. Higher S reduces training noise and
+improves the learned field with diminishing returns.
+15

@@ -1,0 +1,130 @@
+--- v001.md
++++ v002.md
+@@ -4,69 +4,81 @@
+ 
+ ## Overview
+-World and Chunk Caching manages the state of a procedurally generated voxel world by maintaining a cache of chunk generation statuses and their associated data [S1, unofficial]. It solves the problem of coordinating asynchronous chunk generation with rendering and physics by decoupling the request for a chunk from its availability [S1, unofficial]. Unlike [Dynamic Chunk Generation with Radius](4002-dynamic-chunk-generation-with-radius.md), which focuses on the spatial radius and lifecycle states (KEEP, DRAW, DONE) for streaming, this method explicitly tracks the generation status (`Generating`, `Generated`, `Empty`) and stores the resulting voxel data structures in a cache for immediate access [S1, unofficial].
++World and Chunk Caching manages the state of a procedurally generated voxel world by maintaining a cache of chunk generation statuses and their associated data [S1, unofficial]. It solves the problem of coordinating asynchronous chunk generation with rendering and network synchronization, ensuring that clients or renderers only access fully generated or currently generating chunks [S1, unofficial]. Unlike its parent method, Dynamic Chunk Generation with Radius, which focuses on the spatial radius and lifecycle states (KEEP, DRAW, DONE) for creation/deletion, this method specifically handles the data structure mapping positions to generation states and the serialization of chunk data for snapshots [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The system takes a world coordinate and zoom level as input to query or update the cache. It outputs the current `ChunkStatus` or the fully generated `ChunkInfo` if generation is complete.
++- Input: World position, zoom level, and optional modification filters.
++- Output: Chunk status enum, serialized chunk data objects (for snapshots).
+ 
+ **Data Structures:**
+-The core data structure is the `World` object, which contains:
+-1.  `generator`: An implementation of `Arc<dyn WorldGen>` responsible for producing chunk data [S1, unofficial].
+-2.  `cache`: An `AHashMap` mapping `(ChunkPosition, ZoomLevel)` to `ChunkStatus` [S1, unofficial].
+-
+-The `ChunkStatus` is an enum with three variants [S1, unofficial]:
+-*   `Empty`: The chunk has not been generated or is explicitly empty.
+-*   `Generating`: The chunk is currently being computed by the generator.
+-*   `Generated(Arc<ChunkInfo>)`: The chunk is fully computed and ready for use.
+-
+-The `ChunkInfo` structure holds the actual voxel data [S1, unofficial]:
+-*   `opaque`: A `Box<Array3Chunk>` containing opaque voxel blocks.
+-*   `translucents`: A `Vec<Array3Chunk>` containing translucent voxel blocks.
+-*   `faces`: A `StaticCopyMap<Direction, ChunkFace>` storing precomputed face data for each of the 6 directions (likely for culling or mesh generation).
++The core state is held in a `World` object [S1, unofficial].
++1.  **World**:
++    -   `generator`: An `Arc<dyn WorldGen>` trait object responsible for generating chunk content [S1, unofficial].
++    -   `chunks`: An `AHashMap` mapping `(ChunkPosition, ZoomLevel)` to `ChunkStatus` [S1, unofficial].
++2.  **ChunkStatus**: An enum with three variants [S1, unofficial]:
++    -   `Generating`: Indicates the chunk is currently being computed.
++    -   `Generated(Arc<ChunkInfo>)`: Indicates the chunk is complete, holding a reference to the data.
++    -   `Empty`: Indicates the chunk is empty or not yet generated.
++3.  **ChunkInfo**: Contains the actual voxel data [S1, unofficial]:
++    -   `opaque`: A `Box<Array3Chunk>` storing opaque voxel blocks.
++    -   `translucents`: A `Vec<Array3Chunk>` storing translucent voxel blocks.
++    -   `faces`: A `StaticCopyMap<Direction, ChunkFace>` storing surface face data for optimization.
+ 
+ **Initialization:**
+ 1.  Create a `World` instance [S1, unofficial].
+-2.  Initialize the `generator` with an `Empty` generator, which returns `None` for any chunk request [S1, unofficial].
+-3.  Initialize the `cache` as an empty `AHashMap` [S1, unofficial].
++2.  Initialize the `generator` with an `Empty` generator implementation, which returns `None` for any chunk request [S1, unofficial].
++3.  Initialize the `chunks` cache as an empty `AHashMap` [S1, unofficial].
+ 
+-**Generation and Caching Logic:**
+-When a chunk is requested at `(pos, zoom)`:
+-1.  Check the `cache` for the key `(pos, zoom)` [S1, unofficial].
+-2.  If the status is `Empty`:
+-    *   Transition status to `Generating` [S1, unofficial].
+-    *   Spawn an asynchronous task or thread to call `generator.generate(pos, zoom)` [S1, unofficial].
+-    *   Upon completion, wrap the result in `ChunkInfo`, create an `Arc<ChunkInfo>`, and update the cache status to `Generated(Arc<ChunkInfo>)` [S1, unofficial].
+-3.  If the status is `Generating`:
+-    *   Return a future or handle to wait for completion, or block until the status changes to `Generated` [S1, unofficial].
+-4.  If the status is `Generated`:
+-    *   Return the `Arc<ChunkInfo>` directly from the cache [S1, unofficial].
++**Chunk Data Transfer for Snapshots (Resync/Late-join):**
++This sub-process serializes chunk contents for network synchronization or snapshot creation [S2, unofficial].
++
++1.  **Filter Chunks**:
++    -   If explicit keys (chunk positions) are provided, map them to entries in `world.chunks` [S2, unofficial].
++    -   If no keys are provided, filter `world.chunks` to include only those where the chunk's `initVersion` mismatches the current client's version [S2, unofficial].
++2.  **Serialize Data**:
++    -   For each selected chunk `c`, create a data object `d` [S2, unofficial]:
++        -   `key`: The chunk position identifier.
++        -   `fill`: The chunk's fill data.
++        -   `fillMat`: The chunk's fill material data.
++        -   `sdf`: If `c.sdf` exists, create a slice `c.sdf.slice()`; otherwise `null` [S2, unofficial].
++        -   `mat`: If `c.mat` exists, create a slice `c.mat.slice()`; otherwise `null` [S2, unofficial].
++3.  **Transfer Buffers**:
++    -   If `d.sdf` is not null, transfer `d.sdf.buffer` [S2, unofficial].
++    -   If `d.mat` is not null, transfer `d.mat.buffer` [S2, unofficial].
++4.  **Return**: Return the list of chunk data objects [S2, unofficial].
++
++**Parameters:**
++-   `modified`: A boolean flag. If `true`, only chunks edited since initialization are returned. Default is `false` [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Concurrency:** The `AHashMap` must be thread-safe or accessed via a mutex, as multiple threads may request the same chunk simultaneously [S1, unofficial].
+-*   **Memory Leaks:** `Arc<ChunkInfo>` must be properly dereferenced when chunks are removed from the cache to avoid holding memory indefinitely [S1, unofficial].
+-*   **Degenerate Input:** The `Empty` generator returns `None`, which must be handled to prevent null pointer exceptions when accessing `ChunkInfo` fields [S1, unofficial].
++-   **Concurrency**: The `AHashMap` and `Arc` usage implies thread-safe access. Implementers must ensure that `ChunkStatus` transitions from `Generating` to `Generated` are atomic or properly locked to prevent race conditions during rendering [G].
++-   **Memory**: `Arc<ChunkInfo>` allows multiple references to the same chunk data. When a chunk is removed from the cache, the data is only freed when the last `Arc` is dropped [G].
++-   **Empty Generator**: The default `Empty` generator returns `None`. Implementers must handle `None` results by setting the cache status to `Empty` or skipping cache insertion [G].
+ 
+ ## Subtopics
+ 
+ ### Chunk Data Transfer for Snapshots
+-Serializes chunk contents (SDF, material, fill, fillMat) for late-join snapshots or resyncs, filtering by explicit keys or modification version [S2, unofficial].
+-*   **Definition:** A mechanism to export chunk data for synchronization or snapshotting [S2, unofficial].
+-*   **Steps:**
+-    1.  Filter chunks: If explicit keys are provided, map them to `world.chunks`; otherwise, filter chunks where `initVersion` mismatches [S2, unofficial].
+-    2.  For each chunk, create an object `{ key, fill, fillMat, sdf: c.sdf ? c.sdf.slice() : null, mat: c.mat ? c.mat.slice() : null }` [S2, unofficial].
+-    3.  If `sdf` exists, transfer `d.sdf.buffer` and `d.mat.buffer` [S2, unofficial].
+-    4.  Return the list of chunk data objects [S2, unofficial].
+-*   **Parameters:** `modified` (boolean, default `false`): If true, return only chunks edited since initialization [S2, unofficial].
++A mechanism for serializing chunk contents (SDF, material, fill, fillMat) to support late-join clients or resynchronization [S2, unofficial]. It filters chunks by explicit keys or by modification version (`initVersion` mismatch) and transfers underlying buffers [S2, unofficial]. Choose this when network synchronization or snapshot creation is required. It differs from the core caching by focusing on serialization and network transfer rather than in-memory state management [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Cache lookup is $O(1)$ average case for `AHashMap` [S1, unofficial]. Generation time depends on the `WorldGen` implementation.
+-*   **Memory Complexity:** Proportional to the number of generated chunks. Each chunk stores opaque, translucent, and face data [S1, unofficial].
+-*   **Strengths:** Decouples generation from rendering; allows asynchronous generation without blocking the main thread [S1, unofficial].
+-*   **Limitations:** Requires careful management of `Arc` references to avoid memory leaks; cache size can grow unbounded if not pruned [S1, unofficial].
+-*   **When to use:** When chunk generation is expensive and asynchronous processing is required [S1, unofficial].
+-*   **When not to use:** For small, static worlds where synchronous generation is sufficient [S1, unofficial].
++**Time and Memory Complexity:**
++-   **Lookup**: $O(1)$ average case for `AHashMap` access by `(ChunkPosition, ZoomLevel)` [S1, unofficial].
++-   **Serialization**: $O(N \cdot V)$ where $N$ is the number of filtered chunks and $V$ is the volume of a chunk, as it slices and transfers SDF and material buffers [S2, unofficial].
++-   **Memory**: Proportional to the number of generated chunks. Each `ChunkInfo` holds `Box<Array3Chunk>` and `Vec<Array3Chunk>`, which scale with chunk size [S1, unofficial].
++
++**Strengths and Limitations:**
++-   **Strengths**: Decouples generation from rendering via the `ChunkStatus` enum. Supports efficient resyncs by filtering only modified chunks [S2, unofficial].
++-   **Limitations**: The `Empty` generator default requires explicit handling for non-empty worlds. Buffer transfer logic is specific to the SDF/material structure [S2, unofficial].
++
++**When to Use:**
++-   Use when managing a dynamic voxel world with asynchronous generation.
++-   Use when network synchronization or snapshot features are required.
++
++**When Not to Use:**
++-   Do not use for static, pre-generated worlds where caching overhead is unnecessary.
++-   Do not use if the underlying data structure does not support `Arc` or thread-safe maps [G].
+ 
+ ## Background
+-Originated in the Infinigen project, which uses a chunk-based spatial partitioning approach for procedural world generation [S1, unofficial]. The method is part of a larger system that includes dynamic chunk generation with radius and chunk lifecycle management [S1, unofficial].
++This method is part of the Infinigen and Voxel Wars voxel engine architectures [S1, unofficial][S2, unofficial]. Infinigen uses it to manage procedural world generation states, while Voxel Wars adapts it for network synchronization and chunk data transfer [S1, unofficial][S2, unofficial]. The approach builds on the dynamic chunk generation radius concept by adding a robust caching layer for status and data [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,147 @@
+Parent: #169. Refs #169. Objective Mean |f(p)| / ||grad f(p)|| (distance to the zero level set). Current CPU path Squared fit followed by a deterministic coordinate polish on the implicit-derivative objective. Why the current GPU LM does...
+
+feat(gpu-fit): implicit-derivative (level-set distance) constants on the GPU · Issue #238 · a-holm/the-rule-and-compass · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(gpu-fit): implicit-derivative (level-set distance) constants on the GPU #238
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+feat(gpu-fit): implicit-derivative (level-set distance) constants on the GPU#238
+Copy link
+Labels
+area:gpuCUDA backendCUDA backendarea:metricsError metrics and fitnessError metrics and fitnessarea:perfPerformance and hardware backendsPerformance and hardware backendsenhancementNew feature or requestNew feature or requestroadmapPlanned work from the engine roadmapPlanned work from the engine roadmap
+Description
+a-holm
+opened on Oct 21, 2026
+Issue body actions
+Parent: #169. Refs #169.
+Objective
+Mean |f(p)| / ||grad f(p)|| (distance to the zero level set).
+Current CPU path
+Squared fit followed by a deterministic coordinate polish on the implicit-derivative objective.
+Why the current GPU LM does not cover it
+It needs the gradient norm at every point; the SSE LM has no such residual/adjoint.
+Research questions
+Analytic forward/reverse AD vs dual numbers vs finite differences on GPU?
+How do we handle ||grad f|| ~ 0 deterministically?
+Can the level-set distance be optimised with a stable LM/IRLS variant?
+Candidate GPU algorithms
+Batched reverse-mode AD or dual-number kernel for grad f, then weighted LM on the distance residual.
+Finite-difference gradient with a deterministic step and singular fallback.
+Squared-distance warm start + exact level-set polish.
+Research report
+arbeidsmappe/crypto-rcsr/gpu-metrics/slope-implicit.md (deep-research agent; summary to be added as a comment).
+Acceptance criteria
+A GPU path matches the configured objective, never silently substitutes SSE or another loss.
+Fixed seed/device is deterministic; f32 search values are followed by an exact CPU f64 finalist refit.
+Paired measurement against the current CPU path on recorded workloads: speed-up, fit-error/quality delta, fallback share and device duty.
+A measured cost model decides GPU vs CPU; every CPU fallback has a labelled cause, never silent.
+Tests cover parity, ill-conditioning/degeneracy, determinism, fallback and the --no-fit no-op.
+--help, schema, README.md, docs/gpu-backend.md and docs/optimisation.md updated.
+Issue is closed only after code/test/measurement/docs evidence is merged; use Refs #169, never Closes.
+Activity
+a-holm
+added
+enhancementNew feature or requestNew feature or request
+roadmapPlanned work from the engine roadmapPlanned work from the engine roadmap
+area:metricsError metrics and fitnessError metrics and fitness
+area:perfPerformance and hardware backendsPerformance and hardware backends
+area:gpuCUDA backendCUDA backend
+on Oct 21, 2026
+a-holm commented on Oct 21, 2026
+a-holm
+on Oct 21, 2026
+OwnerAuthor
+More actions
+Research report: arbeidsmappe/crypto-rcsr/gpu-metrics/slope-implicit.md (~3,950 words body plus a 1,400-word argument tree and sources). No code or tests were written.
+Exact objectives
+Slope: 1/(n-1) * sum |delta_pred - delta_target| over sample rows. No train/test straddle, but a data gap silently becomes a slope, and --fit-rows inserts gaps.
+ImplicitResidual: IRLS-able sum(w |f|) / sum(w) with target 0 and a genuine f == 0 optimum.
+ImplicitDerivative: sum(w |f| / N) / sum(w), whose column derivative needs the mixed term d2f / (dp dc).
+Two structural findings
+J_s = D * J loses one column per additive constant; the additive constant must be frozen.
+The geometric residual is degree-0 homogeneous, so the canonical circle is exactly rank-deficient along the scale gauge. The existing undamped Cholesky gate would label it ill-conditioned and send every circle to the CPU. Fix: project the step orthogonal to c and renormalise. Parity must therefore be gauge-invariant (metric, per-row distances, radius), not raw constants.
+Algorithms
+SSE warm start -> IRLS on differences, with a differenced QR arm for affine trees.
+Residual IRLS with row scale sqrt(w * u).
+Derivative LM with finite-difference-of-residual first (CPU parity), forward-over-reverse AD second.
+VarPro/linear arm is excluded: it returns c = 0.
+GPU mapping
+One kernel family with row_mode in {Row, Pair} and resid_mode in {Level, LevelL1, LevelSet}:
+pair mode needs no index array (implicit pairs, one bit per row of a mask);
+input gradient uses the same reverse loop at OP_VAR;
+the metric must be an owned statistic: the strided ft_sse reduction is not deterministic across the two instantiations.
+Cost model and baseline
+Pass ratios are 2x / 1x / 1 + 2p; kappa (FP64 penalty) is the open variable, and the RTX 3060 evidence argues against 64x. The honest baseline requires hoisting the per-row flatten in input_gradients and the per-probe tree clone first; otherwise the speed-up measures an allocator bug.
+Live correctness gap
+From reading the code: gpu_blocker does not gate --metric slope, while eval_kernel accumulates squares and score_generation stores sse/n. A CUDA slope run therefore appears to rank by MSE. This needs a two-line test before any slope GPU work.
+Tractatus
+133 propositions, 9 pillars, 124 leaves all atomic, completeness 100%, no bundling. Nine unresolved branches are recorded: kappa, the polluted baseline, --fit-rows semantics, admission tuning, dt rate form, gauge projection details, FD step, determinism of the owned statistic, and the slope-vs-MSE test.
+a-holm commented on Oct 31, 2026
+a-holm
+on Oct 31, 2026
+OwnerAuthor
+More actions
+Design decision: no device arm now; CPU hoist first, device design recorded
+Research for this issue is done. No code was changed. Full write-up: arbeidsmappe/crypto-rcsr/research/238-level-set-gpu-fit/decision.md (with question.md and method.md; shared reasoning in ../235-hinge-gpu-fit/tractatus.md).
+Is a GPU fit worth it? Not now.
+Measured on integration/gpu-hardening (012bf82, CPU), --implicit-derivative, 1 500 training rows, pop 64, 10 generations: 4.87 s search with implicit::fit, 0.35 s with --fit-iters 0. The fit dominates, but:
+the CPU arm calls flatten(tree) once per row (inside input_gradients) and clones the tree once per finite-difference probe (base_with), so a device speed-up measured against it would partly measure the allocator;
+implicit workloads are small level-set problems; no recorded workload uses --implicit, and below n ~ 2 000 rows the feat(gpu-fit): absolute (MAE) constants on the GPU #222 cost model keeps the CPU anyway;
+a device arm needs four new kernel features (input gradient at OP_VAR, input-shifted probes, a plan-based scorer that accepts constant-free trees, an implicit-aware gate and refit).
+Decision
+No GPU fit or scorer in this issue. Park the device arm with a recorded design and a revisit trigger.
+CPU hoist (the deliverable): flatten once per candidate in implicit::score/residuals, keep one Flat and a constant vector in implicit::fit (no clone per probe). Must be bit-identical to today; record before/after per-candidate times at 2 000 and 20 000 rows.
+Close a silent no-op trap: fit_weighted_metric(…, ImplicitDerivative) never changes a tree (metric_score is +inf, the guard rejects inf < inf), yet refit_finalists_exact, fit_fallback_jobs and full_data_archive call it. Dispatch it to implicit::fit so every caller is correct. (feat(gpu-fit): implicit residual constants on the GPU #237 fixes the same defect for implicit_residual.)
+Optional CPU Jacobian upgrade (owner decision): by symmetry of mixed partials, sum_k e_k d2f/dp_k dc_j is the directional derivative of the constant adjoint along the unit normal, so J_ij = (sqrt(w)/N)[a_j - d·(a_j(p + eps e) - a_j(p - eps e))/(2 eps)]. That is 3 forward-and-backward passes per row for all constants, against 1 + 2p today. Checked in f64 at 1 000 points on two 3-constant models against a Richardson reference: max relative error 5.6e-10 and 1.0e-9, versus 4.9e-8 and 6.7e-9 for the current central differences.
+Answers to the research questions: (1) for a future device arm, the directional difference of the reverse-mode adjoint beats duals (a second-derivative rule per opcode) and central differences of r (1 + 2p passes, useless in f32 at h = 1e-6); (2) N = 0 or a non-finite value keeps making the whole candidate infeasible, a device arm would label it degenerate_gradient; (3) plain damped LM is stable: since perf(gpu-fit): remove the fit barrier and keep conditioning on the device #286 a rank-deficient system is usable status 4, and the damped step is D-orthogonal to an exact scale-gauge direction, so the report's explicit gauge projection is not needed. Parity is on gauge-invariant quantities.
+Revisit trigger: a recorded workload with --implicit-derivative at N >= 1e5, or a post-hoist CPU fit share >= 50 % at N >= 2e4.
+Acceptance criteria (amended for the CPU scope)
+Hoist merged and bit-identical; before/after timings recorded; the refit trap fixed with a test that would fail today; the Jacobian upgrade only with a parity test and owner approval; docs/implicit.md and docs/gpu-backend.md state that the level-set metric is CPU-only and why. The issue stays open and parked for the device arm; Refs #169, never Closes.
+Minimal tests
+implicit_hoisted_score_is_bit_identical, implicit_hoisted_fit_is_bit_identical, implicit_derivative_refit_through_fit_weighted_metric_moves_constants, existing zero_gradient_is_infeasible_not_perfect; with the upgrade, directional_jacobian_matches_central_differences.
+Owner decisions
+Approve or decline the 3-pass Jacobian on the CPU; confirm parking (not closing) the device arm.
+Refs #169
+a-holm commented on Oct 31, 2026
+a-holm
+on Oct 31, 2026
+OwnerAuthor
+More actions
+Owner decision: no device arm now. The CPU defects (refit no-op through fit_weighted_metric, per-row rebuild and per-probe clone, 3-pass Jacobian) are #398. This issue stays open for the device arm with the revisit trigger in the research comment (a recorded run at 1e5+ rows, or a fit share of at least 50 % at 2e4+ rows after #398).
+a-holm
+added a commit that references this issue on Oct 31, 2026
+fix(fit): level-set refit routes to implicit::fit; one tree per fit; …
+...
+a2422ba
+a-holm commented on Nov 1, 2026
+a-holm
+on Nov 1, 2026
+OwnerAuthor
+More actions
+Decision (2026-11-01): the device arm stays deferred, with the revisit trigger stated above (>= 1e5 rows or fit share >= 50 %). The CPU work is merged (a2422ba).
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:gpuCUDA backendCUDA backendarea:metricsError metrics and fitnessError metrics and fitnessarea:perfPerformance and hardware backendsPerformance and hardware backendsenhancementNew feature or requestNew feature or requestroadmapPlanned work from the engine roadmapPlanned work from the engine roadmap
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,214 @@
+--- v001.md
++++ v002.md
+@@ -4,93 +4,35 @@
+ 
+ ## Overview
+-Section-based mesh generation is a method for constructing surface meshes from large voxel chunks by dividing the volume into smaller, manageable vertical slabs (sections). It solves the performance bottleneck of regenerating an entire large chunk mesh when only a small portion of voxels changes. By isolating geometry generation to specific vertical ranges, the method allows for efficient partial rebuilds, where only the affected sections and their immediate neighbors are regenerated. It differs from full-chunk regeneration by limiting computational scope to a fraction of the total volume, and from region-based dirty-flagging by operating on fixed vertical slices rather than arbitrary 3D bounding boxes.
++Section-based mesh generation renders a large voxel chunk as a vertical stack of smaller, independent sections to enable efficient partial rebuilds when voxels change [S1, unofficial]. It differs from full-chunk rebuilds by limiting computation to the minimal set of sections intersecting the modified voxel, and from adjacency-based chunk rebuilding by operating at the sub-chunk section level within a single chunk [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- **Input**: A voxel chunk defined by dimensions $(W, W, H)$, where $W$ is the width/depth and $H$ is the height. The chunk is logically divided into $N$ vertical sections.
+-- **Input**: A 3D array of block types, padded to accommodate boundary checks.
+-- **Output**: A list of mesh data structures (vertices, indices, normals, UVs, tangents, colors), one per section.
++**Inputs and outputs:**
++- Input: A chunk of voxels (e.g., $16 \times 16 \times 256$), a section side length $S$ (typically 16), and a section ID $id$.
++- Output: A `MeshData` structure containing vertices, indices, normals, UVs, and colors for the specific section, which is uploaded to the rendering component.
+ 
+-**Data Structures**
+-The voxel data is stored in a flattened 1D array representing a 3D grid. To simplify neighbor lookups at section boundaries, the grid includes padding.
+-- **Layout**: The array size is $N \times (W+1) \times (W+1) \times (W+1)$.
+-- **Padding**: An extra row and column are added to the width and depth dimensions to handle edge cases where faces are adjacent to the chunk boundary or adjacent chunks.
+-- **Indexing**: A position $(i, j, k)$ in the logical grid maps to the 1D array index using a helper function `GetIJKFromPositionInTArray`. The exact stride depends on the implementation, but typically follows row-major order for the padded dimensions.
++**Data structures:**
++The chunk's voxel data is stored in a 1D array `blocks` of size $N_{sections} \times (S+1)^3$. The extra dimension $(S+1)$ accounts for boundary padding required for neighbor checks.
++- `blocks`: `TArray<BlockType>` or equivalent flat array.
++- `MeshData`: Contains `vertices`, `Triangles` (indices), `normals`, `UV0`, `vertexColors`, `tangents`.
+ 
+-**Parameters**
+-- `sectionSide`: The width and depth of a section in voxels. Typically 16 [S1, unofficial].
+-- `sectionHeight`: The height of a section in voxels. Typically 16 [S1, unofficial].
+-- `sectionCount`: The number of vertical sections in a chunk, calculated as $H / \text{sectionHeight}$. For a 256-unit high chunk, this is 16 [S1, unofficial].
++**Steps:**
++1. **Calculate Section Bounds:** Determine the range of $i$ indices (height) for the current section.
++   $$ i_{start} = id \times S $$
++   $$ i_{end} = (id + 1) \times S $$
++2. **Iterate Voxel Space:** Iterate through the section's volume. The source code iterates $j$ and $k$ (width/depth) from $0$ to $S$ (inclusive) to cover the full section including boundary padding [S1, unofficial].
++3. **Generate Geometry:** For each voxel, determine visible faces (e.g., adjacent to air) and generate mesh primitives.
++4. **Upload Mesh:** After generating `MeshData` for a section, upload it to the `UProceduralMeshComponent` using `CreateMeshSection_LinearColor` [S1, unofficial].
+ 
+-**Algorithm Steps**
+-1. **Initialize Chunk Data**:
+-   - Determine `sectionSide` and `sectionCount`.
+-   - Allocate the block array with size `sectionCount * (sectionSide + 1)^3` to include padding [S1, unofficial].
+-   - Populate the array with voxel data.
+-
+-2. **Iterate Sections**:
+-   - For each section index `s` from 0 to `sectionCount - 1`:
+-     - Calculate the vertical range of indices for this section. Let `sectionSide` be the height of the section.
+-     - `initialI = s * sectionSide`
+-     - `lastI = (s + 1) * sectionSide`
+-     - Note: The iteration must cover the full section including boundary padding to ensure faces on the top and bottom of the section are correctly generated relative to adjacent sections [S1, unofficial].
+-
+-3. **Generate Mesh Data for Section**:
+-   - Call a mesh generation function (e.g., `GetMeshData`) with the section index, total section count, block array, and section side length.
+-   - Inside the mesh generation function:
+-     - Iterate through the voxels within the section's vertical range.
+-     - For each voxel, check its 6 neighbors.
+-     - If a neighbor is air (or a transparent block type), generate a face.
+-     - Apply neighbor-based face culling to eliminate interior geometry [S1, unofficial].
+-     - Compute vertex positions, indices, normals, UVs (using a texture atlas), and tangents.
+-     - Store the result in a `MeshData` structure.
+-
+-4. **Upload to GPU**:
+-   - For each generated `MeshData` structure:
+-     - Upload the data to the procedural mesh component (e.g., `UProceduralMeshComponent` in Unreal Engine).
+-     - Use a function like `CreateMeshSection_LinearColor` to create a new mesh section with the calculated vertices, indices, normals, UVs, and colors [S1, unofficial].
+-     - Enable physics collision data if required (`ContainsPhysicsTriMeshData(true)`) [S1, unofficial].
+-
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def generate_chunk_mesh(chunk_i, chunk_j, section_side_width, number_of_sections, populate_block_func):
++def generate_section_mesh(chunk_i, chunk_j, section_id, section_side, section_count, blocks):
+     """
+-    Generates mesh data for all sections of a chunk.
++    Generates mesh data for a specific section of a chunk.
+     """
+-    side_width = section_side_width
+-    section_count = number_of_sections
++    # Calculate range of i indices for the current section
++    initial_i = section_id * section_side
++    last_i = (section_id + 1) * section_side
+     
+-    # Allocate block array with padding
+-    side_size = section_side_width + 1
+-    blocks = allocate_array(section_count * side_size * side_size * side_size)
+-    
+-    # Populate blocks
+-    for i in range(section_count * side_size * side_size * side_size):
+-        # Helper to get IJK from 1D index
+-        i_idx, j_idx, k_idx = get_ijk_from_position(i, section_side_width)
+-        blocks[i] = populate_block_func(chunk_i, chunk_j, i_idx, j_idx, k_idx)
+-    
+-    chunk_mesh_data = []
+-    
+-    # Iterate over each vertical section
+-    for section in range(section_count):
+-        # Get mesh data for this specific section
+-        mesh_data = get_mesh_data_for_section(
+-            chunk_i, chunk_j, section, section_count, blocks, section_side_width
+-        )
+-        chunk_mesh_data.append(mesh_data)
+-        
+-    return chunk_mesh_data
+-
+-def get_mesh_data_for_section(chunk_i, chunk_j, section, section_count, blocks, section_side):
+-    """
+-    Generates mesh geometry for a single vertical section.
+-    """
+-    # Calculate vertical range for this section
+-    # Note: The source implies iterating j and k from 0 to sectionSide (inclusive)
+-    # and i based on the section ID.
+-    initial_i = section * section_side
+-    last_i = (section + 1) * section_side
+-    
++    # Initialize mesh data containers
+     vertices = []
+     triangles = []
+@@ -100,40 +42,71 @@
+     tangents = []
+     
+-    # Iterate through the section's volume
+-    # The source mentions iterating j and k from 0 to sectionSide (inclusive)
+-    # This suggests the padding is handled within the iteration bounds or by the neighbor check logic.
+-    for i in range(initial_i, last_i + 1): # +1 to include boundary if needed
+-        for j in range(section_side + 1): # +1 for padding
+-            for k in range(section_side + 1): # +1 for padding
+-                # Get block type at this position
+-                block_type = blocks[get_index(i, j, k, section_side + 1)]
++    # Iterate j and k from 0 to section_side (inclusive) to cover boundary padding
++    for j in range(0, section_side + 1):
++        for k in range(0, section_side + 1):
++            # Iterate i through the section's height range
++            for i in range(initial_i, last_i):
++                # Get block type at (i, j, k)
++                # Note: Index calculation depends on the specific 1D array layout
++                # described in [S1, unofficial], typically involving sideSize = section_side + 1
++                block_type = get_block_at(blocks, i, j, k, section_side)
+                 
+-                # Check neighbors for face generation
+-                # If neighbor is air, add face
+-                # ... (standard marching cubes or face culling logic) ...
+-                pass
++                # Generate faces for visible voxels (e.g., neighbor is air)
++                # This step involves calculating vertex positions, normals, UVs
++                # based on the block type and face direction
++                faces = generate_voxel_faces(block_type, i, j, k)
+                 
+-    return MeshData(vertices, triangles, normals, uvs, colors, tangents)
++                for face in faces:
++                    vertices.append(face.vertex)
++                    triangles.append(face.index_offset)
++                    normals.append(face.normal)
++                    uvs.append(face.uv)
++                    colors.append(face.color)
++                    tangents.append(face.tangent)
++                    
++    # Create MeshData object
++    mesh_data = MeshData(vertices, triangles, normals, uvs, colors, tangents)
++    return mesh_data
++
++def upload_section_to_component(mesh_component, section_id, mesh_data):
++    """
++    Uploads the generated mesh data to the procedural mesh component.
++    """
++    # Use the specific engine function to create/update the section
++    # Arguments: section index, vertices, indices, normals, UVs, colors, tangents
++    mesh_component.CreateMeshSection_LinearColor(
++        section_id, 
++        mesh_data.vertices, 
++        mesh_data.triangles, 
++        mesh_data.normals, 
++        mesh_data.uvs, 
++        mesh_data.colors, 
++        mesh_data.tangents, 
++        True
++    )
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-- **Boundary Padding**: Failure to pad the voxel array by at least one voxel on all sides can lead to out-of-bounds memory access when checking neighbors at the chunk edges [S1, unofficial].
+-- **Section Boundaries**: Faces generated at the top or bottom of a section must be consistent with the adjacent section. The mesh generation for each section must be independent but logically continuous.
+-- **Precision**: Floating-point precision issues may arise when converting voxel coordinates to world space, especially for large chunks. Using integer arithmetic for voxel indices and converting to floats only at the vertex stage is recommended.
++**Parameters:**
++- `sectionSide`: The width/depth of a section in voxels, typically 16 [S1, unofficial].
++- `sectionCount`: The number of vertical sections in a chunk, calculated as $total\_height / sectionSide$ (e.g., $256 / 16 = 16$) [S1, unofficial].
++
++**Edge cases and pitfalls:**
++- **Boundary Padding:** The voxel array must include an extra row/column ($S+1$) to correctly handle neighbor checks for voxels on the section boundary [S1, unofficial].
++- **Index Calculation:** Incorrect mapping from 3D coordinates $(i,j,k)$ to the 1D array index will cause rendering artifacts or crashes.
+ 
+ ## Subtopics
+ 
+ ### [Real-time Voxel Editing with Section Rebuild](4531-real-time-voxel-editing-with-section-rebuild.md)
+-Updating the mesh immediately when a voxel is placed or removed by regenerating the mesh data for the affected section and any adjacent sections if the edit is on a boundary.
++This method enables immediate visual feedback for voxel placement and removal by regenerating mesh data for the affected 16x16x16 section and any adjacent sections if the edit occurs on a section boundary. It differs from full-chunk rebuilds by limiting computation to the minimal set of sections intersecting the modified voxel, and from adjacency-based chunk rebuilding by operating at the sub-chunk section level within a single chunk.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(W^2 \cdot H)$ for full chunk generation, where $W$ is width/depth and $H$ is height. Partial rebuilds are $O(W^2 \cdot \text{sectionHeight})$, offering a significant speedup for small edits.
+-- **Memory Complexity**: $O(W^2 \cdot H)$ for the voxel data structure. The mesh data is proportional to the surface area, which is typically much smaller than the volume.
+-- **Performance**: Efficient for large, tall chunks (e.g., 16x16x256) where only small portions change. The fixed section size (16x16x16) allows for predictable memory allocation and cache-friendly access patterns.
+-- **Strengths**: Enables real-time editing of large voxel worlds. Reduces GPU upload overhead by only updating changed sections.
+-- **Limitations**: Requires careful handling of section boundaries to avoid gaps or overlaps. Not suitable for highly dynamic scenes with frequent, widespread changes, as the overhead of managing multiple sections may outweigh the benefits.
++- **Time Complexity:** $O(S^3)$ per section, where $S$ is the section side length. Partial rebuilds are $O(S^3)$ for the affected section(s) rather than $O(H \cdot W \cdot D)$ for the whole chunk.
++- **Memory Complexity:** $O(N_{sections} \cdot S^3)$ for the voxel data structure with padding.
++- **Performance:** Enables efficient partial updates. Full chunk rebuilds are avoided for minor edits.
++- **Strengths:** Low latency for voxel edits; modular mesh generation.
++- **Limitations:** Requires careful handling of section boundaries and neighbor lookups across section lines.
+ 
+ ## Background
+-This method is derived from implementations in voxel-based games, specifically those aiming to replicate Minecraft-like gameplay in modern game engines like Unreal Engine 5. The approach of splitting large chunks into smaller sections for efficient partial updates is a common optimization technique in voxel rendering. The specific implementation details, such as the use of `UProceduralMeshComponent` and the 16x16x16 section size, are documented in community-driven projects [S1, unofficial].
++Originating from implementations like the UE5 Minecraft Clone [S1, unofficial], this method adapts chunk-based rendering to allow for dynamic voxel modification. It builds on [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md) by decomposing the chunk into manageable vertical slices.
+ 
+ ## Sources

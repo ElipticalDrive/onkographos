@@ -1,0 +1,132 @@
+# Surface Sampling for NeRF Rendering
+
+Also called: Random point sampling on mesh triangles for NeRF input
+
+## Overview
+Generates random points on the surface of a 3D object (specifically on triangles) to be used as input for a neural network reflectance model [S1, unofficial]. It differs from its siblings by focusing on uniform spatial distribution over mesh geometry for training data generation, rather than foot-point projection or edge-based sampling.
+
+## How it works
+**Inputs:** A mesh defined by vertices and triangular faces.
+**Outputs:** A list of 3D points on the surface.
+
+**Data Structures:**
+- `vertices`: Array of shape $(N, 3)$, where $N$ is the number of vertices.
+- `faces`: Array of shape $(M, 3)$, where $M$ is the number of triangles. Each row contains indices into `vertices`.
+
+**Steps:**
+1. For each face in the surface, extract vertices $v_1, v_2, v_3$.
+2. Generate two random numbers $a$ and $b$ between 0 and 1.
+3. If $a + b > 1$, swap them: $a, b = 1 - a, 1 - b$.
+4. Calculate $c = 1 - a - b$.
+5. Compute the point as a convex combination of the vertices: $point = a \cdot v_1 + b \cdot v_2 + c \cdot v_3$.
+6. Append the point to the list.
+7. Repeat for the specified number of samples per face.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def sample_surface_points(vertices, faces, samples_per_face):
+    """
+    Generate random points uniformly distributed on the surface of a mesh.
+    
+    Args:
+        vertices: np.ndarray of shape (N, 3)
+        faces: np.ndarray of shape (M, 3) with vertex indices
+        samples_per_face: int, number of points to sample per triangle
+        
+    Returns:
+        np.ndarray of shape (M * samples_per_face, 3)
+    """
+    all_points = []
+    
+    for face in faces:
+        v1 = vertices[face[0]]
+        v2 = vertices[face[1]]
+        v3 = vertices[face[2]]
+        
+        for _ in range(samples_per_face):
+            # Generate two random numbers between 0 and 1
+            a = np.random.rand()
+            b = np.random.rand()
+            
+            # Ensure uniform distribution over the triangle
+            if a + b > 1:
+                a = 1 - a
+                b = 1 - b
+                
+            c = 1 - a - b
+            
+            # Convex combination
+            point = a * v1 + b * v2 + c * v3
+            all_points.append(point)
+            
+    return np.array(all_points)
+```
+
+**Parameters:**
+- `samples_per_face`: Number of points to generate per triangle. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Precision: Floating point errors in random number generation are negligible for typical mesh scales.
+- Boundaries: The method assumes valid triangle geometry (non-degenerate faces). Degenerate triangles (zero area) will produce points along a line or point, which may bias the distribution if not filtered.
+
+## Subtopics
+
+### Surface Sampling for NeRF Rendering with Spherical Coordinate Encoding
+Creates a training dataset by sampling points on surfaces, computing their colors via ray tracing, and encoding view/light directions as spherical coordinates (theta, phi) [S1, unofficial]. It differs from the base method by adding directional encoding for view and light vectors, enabling the neural network to learn view-dependent reflectance. Choose this when training a NeRF-based reflectance model that requires explicit angular encoding of illumination and viewing geometry.
+
+**Steps:**
+1. For each visible surface, sample 20 points [S1, unofficial].
+2. For each point, compute the color using `ray_tracer.calculate_color_at_point` [S1, unofficial].
+3. Compute camera difference vector $cam\_diff = camera\_position - point$.
+4. Calculate $\theta_{cam}$: $\theta_{cam} = \text{degrees}(\arctan2(cam\_diff[1], cam\_diff[0]))$.
+5. Calculate $\phi_{cam}$: $\phi_{cam} = \text{degrees}(\arctan2(cam\_diff[2], \sqrt{cam\_diff[0]^2 + cam\_diff[1]^2}))$.
+6. Compute light difference vector $light\_diff = light.position - point$.
+7. Calculate $\theta_{light}$: $\theta_{light} = \text{degrees}(\arctan2(light\_diff[1], light\_diff[0]))$.
+8. Calculate $\phi_{light}$: $\phi_{light} = \text{degrees}(\arctan2(light\_diff[2], \sqrt{light\_diff[0]^2 + light\_diff[1]^2}))$.
+9. Append the point, view directions $[\theta_{cam}, \phi_{cam}]$, light directions $[\theta_{light}, \phi_{light}]$, and color to their respective lists.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def encode_spherical_directions(point, camera_position, light_position):
+    """
+    Encode view and light directions as spherical coordinates (theta, phi).
+    
+    Args:
+        point: np.ndarray of shape (3,)
+        camera_position: np.ndarray of shape (3,)
+        light_position: np.ndarray of shape (3,)
+        
+    Returns:
+        tuple: (view_dirs, light_dirs) where each is np.ndarray of shape (2,)
+    """
+    # Camera direction
+    cam_diff = camera_position - point
+    theta_cam = np.degrees(np.arctan2(cam_diff[1], cam_diff[0]))
+    phi_cam = np.degrees(np.arctan2(cam_diff[2], np.sqrt(cam_diff[0]**2 + cam_diff[1]**2)))
+    view_dirs = np.array([theta_cam, phi_cam])
+    
+    # Light direction
+    light_diff = light_position - point
+    theta_light = np.degrees(np.arctan2(light_diff[1], light_diff[0]))
+    phi_light = np.degrees(np.arctan2(light_diff[2], np.sqrt(light_diff[0]**2 + light_diff[1]**2)))
+    light_dirs = np.array([theta_light, phi_light])
+    
+    return view_dirs, light_dirs
+```
+
+## Operating characteristics
+Time and memory complexity: Linear in the number of triangles and samples per triangle. Measured performance: Not given in the sources. Scaling: Scales linearly with mesh complexity. Strengths: Simple, uniform sampling over mesh surfaces. Limitations: Does not account for surface curvature or importance; may require many samples for high-frequency details. When to use: When generating training data for reflectance models where uniform spatial coverage is sufficient. When not: When importance sampling or adaptive sampling is required.
+
+## Background
+Origin: Unofficial implementation in the NeRF-Renderer repository [S1, unofficial]. History and development: Used in the context of training neural reflectance fields by providing surface points with associated view and light directions. Where it is used: In research and experimental implementations of NeRF-based reflectance rendering.
+
+## Sources
+[S1] matthxie/NeRF-Renderer, https://github.com/matthxie/NeRF-Renderer, fetched 2026-10-27 (unofficial)

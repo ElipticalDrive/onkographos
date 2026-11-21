@@ -1,0 +1,145 @@
+# Cluster-level Weighting
+
+Also called: Adaptive Rendering Weighting, Pyramidal Gaussian Weighting
+
+## Overview
+Cluster-level Weighting is a method for adaptively determining the contribution of multi-scale Gaussians in a Pyramidal Gaussian hierarchy during rendering [S1, unofficial]. It solves the problem of balancing detail and performance by assigning unique weight sets to spatial clusters of Gaussians rather than individual splats, thereby incorporating positional context without the computational cost of per-Gaussian weight networks [S1, unofficial]. It differs from sibling methods like Dense Initialization or Structure-Aware Initialization by focusing on the *rendering-time* adaptive weighting of an existing hierarchical structure, rather than the *initialization* of the Gaussian parameters themselves [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of Pyramidal Gaussians $G_{py} = \{G_l \mid 1 \le l \le L\}$, where $G_l$ contains Gaussians at level $l$; a subset of the original point cloud $P$; the number of clusters $K$; the number of levels $L$; and the current camera position $x_{cam}$.
+*   **Output:** A weight vector $w_{k,n} \in \mathbb{R}^L$ for each cluster $k$ and camera view $n$, where $w_{k,n}[l]$ is the weight for level $l$ of cluster $k$.
+
+**Data Structures:**
+1.  **Centroids ($M$):** A set of $K$ 3D vectors $M = \{m_k \mid 1 \le k \le K\}$, where $m_k \in \mathbb{R}^3$.
+2.  **Cluster Indices ($k_{il}$):** For each Gaussian $i$ at level $l$, an integer index $k_{il} \in \{1, \dots, K\}$ indicating the assigned cluster.
+3.  **Cluster Embedding ($E_c$):** A learnable tensor of shape $K \times D$, where $D$ is the feature dimension. $E_c[k]$ is the embedding vector for cluster $k$.
+4.  **Weighting Network ($F_\Theta$):** A Multi-Layer Perceptron (MLP) with parameters $\Theta$.
+
+**Parameters:**
+*   $K$: Total number of clusters. Typical value: Not given in the sources.
+*   $L$: Total number of levels in the Pyramidal Gaussian hierarchy.
+*   $D$: Dimension of the cluster embedding feature.
+*   $P_{subset}$: A subset of the point cloud $P$ used for clustering to reduce computation time.
+
+**Steps:**
+
+1.  **Clustering:**
+    Run a mini-batched K-means algorithm on $P_{subset}$ to compute $K$ centroids $M$ [S1, unofficial].
+    *   *Note:* This step takes approximately 30 seconds [S1, unofficial].
+    *   *Pitfall:* Using the full point cloud significantly increases computation time; a subset is recommended [S1, unofficial].
+
+2.  **Assignment:**
+    For each Gaussian $i$ at level $l$ with center $x_{il}$, assign it to the nearest centroid:
+    $$ k_{il} = \text{NearestNeighbour}(M, x_{il}) $$
+    where $\text{NearestNeighbour}$ returns the index $k$ such that $\|x_{il} - m_k\|$ is minimized [S1, unofficial].
+
+3.  **Weight Computation (Per View):**
+    For a given camera view $n$ with center $x_{cam}$:
+    a. Compute the positional encoding of the camera center: $PE(x_{cam})$ [S1, unofficial].
+    b. For each cluster $k \in \{1, \dots, K\}$:
+       i. Retrieve the cluster embedding $E_c[k]$.
+       ii. Concatenate the embedding and positional encoding: $v_k = \text{Concat}(E_c[k], PE(x_{cam}))$.
+       iii. Pass through the weighting network: $u_k = F_\Theta(v_k)$.
+       iv. Apply Softmax to obtain the level weights:
+       $$ w_{k,n} = \text{Softmax}(u_k) $$
+       The resulting vector $w_{k,n} \in \mathbb{R}^L$ contains the weights for each level $l$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_cluster_weights(G_py, P_subset, K, L, D, F_Theta, PE_func):
+    """
+    G_py: List of lists, G_py[l] contains Gaussians at level l.
+          Each Gaussian has a 'center' attribute (3D vector).
+    P_subset: Array of shape (N, 3) representing the point cloud subset.
+    K: Number of clusters.
+    L: Number of levels.
+    D: Dimension of cluster embedding.
+    F_Theta: Function representing the MLP F_Theta.
+    PE_func: Function computing positional encoding PE(x).
+    
+    Returns:
+    centroids: Array of shape (K, 3)
+    cluster_indices: Dict mapping (level, gaussian_index) -> cluster_index
+    cluster_embeddings: Array of shape (K, D) (initialized randomly or loaded)
+    """
+    # Step 1: Clustering
+    # Use mini-batched K-means on P_subset
+    # Note: Implementation details of mini-batched K-means are external [S1, unofficial]
+    centroids = mini_batched_kmeans(P_subset, K)
+    
+    # Step 2: Assignment
+    cluster_indices = {}
+    for l in range(L):
+        for i, gaussian in enumerate(G_py[l]):
+            x_il = gaussian.center
+            # Find nearest centroid
+            distances = np.linalg.norm(centroids - x_il, axis=1)
+            k_il = np.argmin(distances)
+            cluster_indices[(l, i)] = k_il
+            
+    # Step 3: Initialize Cluster Embeddings
+    # E_c is a learnable tensor of size K x D
+    # In a real implementation, this would be a torch.nn.Parameter or similar
+    E_c = np.random.randn(K, D)
+    
+    return centroids, cluster_indices, E_c
+
+def get_level_weights(centroids, cluster_indices, E_c, F_Theta, PE_func, x_cam, L):
+    """
+    Computes the weight vector for each cluster given a camera position.
+    
+    Returns:
+    weights: Array of shape (K, L)
+    """
+    K = centroids.shape[0]
+    # Compute positional encoding of camera center
+    pe_cam = PE_func(x_cam)
+    
+    weights = np.zeros((K, L))
+    
+    for k in range(K):
+        # Get cluster embedding
+        ec_k = E_c[k]
+        
+        # Concatenate cluster embedding and camera positional encoding
+        # Concat(·) denotes concatenation operation [S1, unofficial]
+        input_vector = np.concatenate([ec_k, pe_cam])
+        
+        # Pass through MLP F_Theta
+        # F_Theta is a small MLP [S1, unofficial]
+        logits = F_Theta(input_vector)
+        
+        # Apply Softmax
+        # Softmax(u) = exp(u) / sum(exp(u))
+        exp_logits = np.exp(logits - np.max(logits)) # Numerical stability
+        softmax_out = exp_logits / np.sum(exp_logits)
+        
+        weights[k, :] = softmax_out
+        
+    return weights
+```
+
+## Subtopics
+
+### Weighting Network
+A small Multi-Layer Perceptron (MLP) $F_\Theta$ that computes level-specific weights for each cluster based on the camera position and cluster embedding [S1, unofficial]. It takes the concatenation of the cluster embedding $E_c[k]$ and the positional encoding of the camera center $PE(x_{cam})$ as input and outputs a vector of size $L$ [S1, unofficial]. The architecture is described as "small" in the source, but specific layer sizes or activation functions (other than ReLU mentioned in the figure caption context) are not detailed in the text [S1, unofficial]. The output is normalized via Softmax to ensure the weights sum to one across levels [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The clustering step (K-means) takes approximately 30 seconds for the subset used [S1, unofficial]. The per-frame weight computation is $O(K \cdot (D + \text{MLP\_cost}))$, which is negligible compared to the rendering cost of the Gaussians themselves.
+*   **Memory Complexity:** Requires storing $K$ centroids, $K$ cluster embeddings of dimension $D$, and the MLP parameters. This is minimal compared to the Gaussian data.
+*   **Strengths:** Balances computational cost and adaptability by assigning weights per cluster rather than per Gaussian, avoiding the "substantial computational cost" of per-Gaussian weighting [S1, unofficial]. Captures positional information of Gaussians [S1, unofficial].
+*   **Limitations:** Relies on the quality of the K-means clustering and the subset selection. The "small" MLP may have limited capacity to model complex view-dependent effects compared to larger networks.
+*   **When to use:** When rendering Pyramidal Gaussians where adaptive multi-scale contribution is needed based on viewpoint and spatial location [S1, unofficial].
+*   **When not to use:** If per-Gaussian adaptive weighting is required for extreme detail, or if computational resources for the clustering step (30s) are prohibitive during initialization.
+
+## Background
+Cluster-level Weighting is part of the PyGS (Pyramidal 3D Gaussian Splatting) method, introduced by the authors of [S1, unofficial]. It builds on the hierarchical structure of Pyramidal Gaussians, where higher levels have larger scales and lower levels have smaller scales [S1, unofficial]. The method was developed to address challenges in large-scale scene modeling, specifically the need to assess contributions from each level of Gaussians adaptively based on the viewpoint [S1, unofficial]. It references the standard 3DGS sorting and rendering pipeline [S1, unofficial].
+
+## Sources
+[S1] PyGS: Large-scale Scene Representation with Pyramidal 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2405.16829, fetched 2026-10-26 (unofficial)

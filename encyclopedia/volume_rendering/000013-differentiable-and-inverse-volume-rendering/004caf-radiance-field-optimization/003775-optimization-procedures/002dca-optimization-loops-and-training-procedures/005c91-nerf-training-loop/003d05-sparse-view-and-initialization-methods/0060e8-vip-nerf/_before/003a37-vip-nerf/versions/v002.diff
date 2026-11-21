@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -4,56 +4,52 @@
+ 
+ ## Overview
+-ViP-NeRF is a training procedure for Neural Radiance Fields (NeRF) that introduces visibility priors to supervise density estimation, specifically designed to improve rendering quality under sparse input view conditions (fewer than 50–100 views) [S1]. It prevents artifacts caused by insufficient training data by estimating whether pixels in a main view are visible in secondary views and using this information to regularize the NeRF density field [S1]. Unlike methods that rely on pre-trained geometric priors or diffusion models, ViP-NeRF computes these priors directly from input images using planar scanned volumes without requiring any pre-training [S1].
++ViP-NeRF is a training procedure for Neural Radiance Fields (NeRF) that introduces visibility priors to supervise density estimation, specifically designed to improve rendering quality under sparse input view conditions (fewer than 50–100 views) [S1]. It prevents artifacts caused by insufficient training data by estimating whether pixels in a main view are visible in secondary views, using this information to regularize the NeRF density field [S1]. Unlike methods that rely on pre-trained geometric priors or diffusion models, ViP-NeRF computes these visibility priors using planar scanned volumes without requiring any pre-training [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ input images (where $N < 50$), their corresponding camera poses, and intrinsic parameters.
+-*   **Outputs:** A trained NeRF model (implicit function mapping 3D coordinates and viewing directions to density $\sigma$ and color $\mathbf{c}$) and a visibility prior map for each main view.
++**Inputs:**
++*   A set of input images with known camera poses.
++*   For each "main view" image, a set of "secondary view" images.
++*   A NeRF model parameterized by $\theta$, mapping 3D coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$.
++
++**Outputs:**
++*   A trained NeRF model.
++*   A visibility prior map for the main view.
+ 
+ **Data Structures:**
+-*   **NeRF Model:** Standard MLP mapping $(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$.
+-*   **Visibility Prior Map:** A 2D tensor of the same resolution as the main view image, containing values indicating the likelihood of visibility (derived from error thresholds).
+-*   **Plane Scan Volume:** A 3D volume or list of warped images representing different depth planes of a secondary view projected onto the main view's coordinate system.
++*   **Plane Scan Volume:** A 3D tensor or list of 2D error maps. For a given main view and secondary view pair, this volume contains error maps corresponding to different depth planes.
++*   **Visibility Prior Map:** A 2D map of the same resolution as the main view image, where each pixel value indicates the likelihood of visibility (derived from thresholded minimum error).
+ 
+-**Algorithm Steps:**
++**Algorithm:**
+ 
+-1.  **Visibility Regularization Setup:** For each training iteration, select a "main view" $I_m$ and a "secondary view" $I_s$ from the input set. The goal is to estimate the visibility of pixels in $I_m$ using $I_s$.
++1.  **Visibility Regularization Setup:** The method integrates a visibility regularization term into the NeRF training loss. This term uses the visibility prior map to supervise the density $\sigma$ of the NeRF [S1].
+ 
+-2.  **Plane Scan Volume Creation:**
+-    *   Define a set of depth planes $D = \{d_1, d_2, ..., d_k\}$ spanning the scene's depth range.
+-    *   For each depth $d_i \in D$, warp the image $I_s$ to the coordinate system of $I_m$ using the known camera poses and the depth $d_i$. Let $W(I_s, d_i)$ be the warped image.
+-    *   This creates a stack of warped images, forming the plane scan volume.
++2.  **Visibility Prior Estimation:** For a specific main view $I_{main}$ and a secondary view $I_{sec}$, estimate the visibility of each pixel in $I_{main}$ by checking if it is visible in $I_{sec}$ [S1].
+ 
+-3.  **Error Map Computation:**
+-    *   Compare each warped image $W(I_s, d_i)$ with the main view image $I_m$.
+-    *   Compute an error map $E_i$ for each depth plane. The error metric is typically the photometric difference (e.g., Mean Squared Error or L1 loss) between corresponding pixels.
+-    *   $$ E_i(\mathbf{u}) = \| I_m(\mathbf{u}) - W(I_s, d_i)(\mathbf{u}) \|^2 $$
+-    *   where $\mathbf{u}$ is the pixel coordinate in the main view.
++3.  **Effective Prediction of Visibility (Planar Scan):**
++    a.  Define a set of depth planes $D = \{d_1, d_2, ..., d_k\}$ relative to the camera frame of the secondary view.
++    b.  For each depth plane $d_i \in D$:
++        i.  Warp the image $I_{sec}$ to the coordinate system of the main view using the known camera poses and the depth $d_i$. Let the warped image be $I_{warped}^{(i)}$.
++        ii. Compute an error map $E^{(i)}$ between the main view $I_{main}$ and the warped image $I_{warped}^{(i)}$. The error can be measured using pixel-wise differences (e.g., L1 or L2 norm) or structural similarity.
++    c.  Find the minimum error for each pixel across all depth planes:
++        $$ E_{min}(u, v) = \min_{i} E^{(i)}(u, v) $$
++        where $(u, v)$ are pixel coordinates in the main view.
++    d.  Threshold the minimum error map $E_{min}$ to obtain the visibility prior map $V_{map}$:
++        $$ V_{map}(u, v) = \begin{cases} 1 & \text{if } E_{min}(u, v) < \tau \\ 0 & \text{otherwise} \end{cases} $$
++        where $\tau$ is a predefined threshold. A value of 1 indicates the pixel is likely visible in the secondary view, and 0 indicates it is likely occluded or not visible [S1].
+ 
+-4.  **Minimum Error Aggregation:**
+-    *   For each pixel $\mathbf{u}$, find the minimum error across all depth planes:
+-    *   $$ E_{min}(\mathbf{u}) = \min_{i} E_i(\mathbf{u}) $$
+-    *   A low $E_{min}(\mathbf{u})$ indicates that the pixel in the main view is likely visible in the secondary view at the corresponding depth.
+-
+-5.  **Visibility Prior Map Generation:**
+-    *   Threshold the minimum error map $E_{min}$ to generate the binary or soft visibility prior map $V_m$:
+-    *   $$ V_m(\mathbf{u}) = \begin{cases} 1 & \text{if } E_{min}(\mathbf{u}) < \tau \\ 0 & \text{otherwise} \end{cases} $$
+-    *   where $\tau$ is a predefined threshold. $V_m(\mathbf{u}) = 1$ implies the pixel is visible; $0$ implies occlusion or invalid depth.
+-
+-6.  **Density Supervision:**
+-    *   During NeRF training, use the visibility prior map $V_m$ to supervise the density $\sigma$ along the rays cast from the main view.
+-    *   If $V_m(\mathbf{u}) = 1$, enforce that the accumulated density along the ray corresponds to a visible surface (e.g., by penalizing density in free space or encouraging density at the expected depth).
+-    *   If $V_m(\mathbf{u}) = 0$, relax the density constraints or penalize density in regions that should be occluded.
+-    *   This regularization is applied in addition to the standard photometric loss between rendered and input images.
++4.  **NeRF Training with Visibility Prior:**
++    a.  Render the main view using the current NeRF model.
++    b.  Compute the standard photometric loss between the rendered image and $I_{main}$.
++    c.  Compute the visibility regularization loss. For pixels where $V_{map}(u, v) = 1$, enforce that the accumulated density along the ray should correspond to a visible surface (e.g., by penalizing high density in empty space or ensuring density peaks align with the visible geometry). For pixels where $V_{map}(u, v) = 0$, the density can be suppressed if the geometry is not consistent with the secondary view's occlusion [S1].
++    d.  Update NeRF parameters $\theta$ using gradient descent.
+ 
+ **Parameters:**
+-*   **Number of Depth Planes ($k$):** Not given in the sources.
+-*   **Threshold ($\tau$):** Not given in the sources.
+-*   **Input View Count:** Fewer than 50–100 views [S1].
++*   $\tau$: Threshold for visibility prior map. Value not given in the sources.
++*   $D$: Set of depth planes. The number of planes and their range are not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Depth Ambiguity:** If the scene has large unobserved regions, the plane scan volume may not cover all relevant depths, leading to incorrect visibility estimates [S1].
+-*   **Textureless Regions:** Photometric error may be low in textureless areas even if the depth is incorrect, leading to false visibility priors [S1].
+-*   **Occlusion Handling:** The method assumes that if a pixel is not visible in a secondary view, it is occluded. This may fail in cases of transparent objects or complex lighting [S1].
++*   **Precision:** The accuracy of the visibility prior depends on the precision of the camera poses and the warping process. Incorrect poses can lead to erroneous visibility maps.
++*   **Boundaries:** The method assumes that the secondary view provides reliable visibility information. If the secondary view is too far or has significant occlusion differences, the visibility prior may be noisy.
++*   **Degenerate Input:** If the main view and secondary view are identical or nearly identical, the visibility prior may be trivial. The method is designed for distinct views.
+ 
+ ## Subtopics
+@@ -63,23 +59,13 @@
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** The visibility prior computation requires warping images for multiple depth planes, which adds computational overhead per training iteration. The complexity depends on the number of depth planes $k$ and the image resolution.
+-*   **Memory:** Requires storing the plane scan volume, which scales with the number of depth planes and image resolution.
+-
+-**Measured Performance:**
+-*   On the RealEstate-10K dataset, ViP-NeRF achieves a PSNR index 3–4 points higher than the latest paper in 2, 3, and 4 input views [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Effective in sparse view scenarios; does not require pre-training; improves density estimation reliability [S1].
+-*   **Limitations:** Sensitive to the choice of threshold $\tau$ and number of depth planes; may struggle with textureless or transparent regions [S1].
+-
+-**When to Use:**
+-*   Use when training data is sparse (fewer than 50 views) and pre-trained geometric priors are unavailable [S1].
+-
+-**When Not to Use:**
+-*   Avoid when temporal consistency is required (e.g., video synthesis) due to potential artifacts from visibility estimation errors [S2].
++*   **Time and Memory Complexity:** The method requires computing planar scanned volumes for each main-secondary view pair during training, which adds computational overhead. The complexity depends on the number of depth planes and the resolution of the images.
++*   **Measured Performance:** On the RealEstate-10K dataset, ViP-NeRF achieves a PSNR index 3-4 points higher than the latest paper in 2, 3, and 4 input views [S1].
++*   **Strengths:** Improves rendering quality under sparse view conditions without pre-training.
++*   **Limitations:** Requires careful tuning of the threshold $\tau$ and the set of depth planes. Performance may degrade if camera poses are inaccurate.
++*   **When to use:** When training NeRFs with very few input views (e.g., 2-4 views) and no external geometric priors are available.
++*   **When not to use:** When temporal consistency is required for video rendering, as related visibility-based interpolation methods are prone to temporal inconsistency [S2].
+ 
+ ## Background
+-ViP-NeRF was introduced to address the challenge of novel view synthesis with sparse input views [S1]. It builds on the idea that visibility information between views can provide a reliable estimate to supervise the density field [S1]. The method was cited in a 2024 survey on methods and strategies for improving NeRF quality [S1].
++ViP-NeRF was introduced to address the challenge of novel view synthesis with sparse input views. It builds on the idea that visibility information from multiple views can provide a reliable estimate to supervise the density of the NeRF [S1]. The method was proposed in the context of improving the rendering quality of synthesized images from new viewpoints under sparse input view conditions [S1].
+ 
+ ## Sources

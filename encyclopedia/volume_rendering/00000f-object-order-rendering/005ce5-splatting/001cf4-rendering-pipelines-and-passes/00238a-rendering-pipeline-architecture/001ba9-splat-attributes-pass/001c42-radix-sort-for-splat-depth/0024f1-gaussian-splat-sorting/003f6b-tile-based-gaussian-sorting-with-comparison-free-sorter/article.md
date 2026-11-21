@@ -1,0 +1,105 @@
+# Tile-based Gaussian Sorting with Comparison-Free Sorter
+
+Also called: Comparison-free key sorter, Stage 2 Gaussian Sorting
+
+## Overview
+This method is a hardware-oriented sorting module designed for 3D Gaussian Splatting (3DGS) that outputs the current maximum depth value in a linear delay, tailored to match the one-point-at-a-time consumption of alpha-blending [S1]. It differs from pipelined heap designs [20] by emitting `<tile-id, depth>` keys and consuming tiles front-to-back, yielding fixed per-output latency and avoiding $O(\log n)$ priority-queue operations [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 15-bit unsigned depth values (sign bit skipped as all numbers are positive) and associated values for Gaussian splats within a tile.
+*   **Output:** The address of the largest element (current maximum depth) every 2 cycles, allowing the renderer to consume the front-most splat [S1].
+
+**Data Structures:**
+*   **Sub-sorter Buffer:** Each of the four parallel sub-sorters has a 4 KB key buffer and a 4 KB value buffer, capable of holding 256 data elements [S1].
+*   **Global Buffer:** A shared 12 KB key buffer and 12 KB value buffer for excess points beyond the local 2000-point limit per tile [S1].
+*   **Bit Grouping:** The 15-bit data is divided into groups of sizes (3, 4, 4, 4) bits [S1].
+
+**Parameters:**
+*   **Tile Size:** 16×16 pixels [S1].
+*   **Sub-sorter Capacity ($N$):** 256 data elements. This value was chosen because a capacity of 512 elements resulted in a critical path delay (N-input OR gate) that limited the frequency to below 500 MHz in a 28 nm process, failing to meet the target of 800 MHz [S1].
+*   **Processing Rate:** One maximum value output every 2 cycles [S1].
+
+**Algorithm Steps:**
+1.  **Partitioning:** Divide the 15-bit depth values into four bit groups: 3 bits, 4 bits, 4 bits, and 4 bits [S1].
+2.  **Clustering:** Send these bit groups to the cluster stage for sorting [S1].
+3.  **Sequencing:** Process the sorted clusters in the sequence stage to determine the address of the largest element [S1].
+4.  **Output:** Emit the address of the maximum value every 2 cycles [S1].
+5.  **Buffer Management:** If a tile contains more than 2000 points (exceeding the 4 KB local buffer capacity), excess points are stored in the shared global buffers (12 KB key/value) to prevent image holes caused by discarding points [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+N = 256  # Sub-sorter capacity
+BIT_GROUPS = [3, 4, 4, 4]  # Bit group sizes for 15-bit data
+TARGET_FREQ_MHZ = 800
+PROCESS_FREQ_MHZ = 800  # Assumed based on target
+
+def sort_gaussian_splats(depth_values_15bit):
+    """
+    Sorts 15-bit depth values using a comparison-free sorter.
+    Returns the address of the maximum element.
+    """
+    # Step 1: Divide 15-bit data into bit groups
+    # Note: Implementation of bit extraction depends on specific hardware encoding.
+    # Assuming standard binary representation.
+    groups = []
+    current_bit = 14
+    for group_size in BIT_GROUPS:
+        mask = (1 << group_size) - 1
+        group_val = (depth_values_15bit >> current_bit) & mask
+        groups.append(group_val)
+        current_bit -= group_size
+    
+    # Step 2: Cluster stage sorting
+    # The cluster stage sorts these groups. 
+    # In a comparison-free sorter, this typically involves radix-like or 
+    # permutation-based logic tailored to the bit groups.
+    sorted_groups = cluster_sort(groups)
+    
+    # Step 3: Sequence stage to find max address
+    # The sequence stage processes the sorted groups to identify the 
+    # address of the largest element.
+    max_address = sequence_stage(sorted_groups)
+    
+    return max_address
+
+def cluster_sort(groups):
+    """
+    Placeholder for the specific hardware logic of the cluster stage.
+    In the context of the source, this stage handles the sorting of the 
+    (3,4,4,4) bit groups.
+    """
+    # The source does not provide the internal algorithm of the cluster stage,
+    # only that it receives the groups and passes to the sequence stage.
+    # [G] Assuming a standard radix or permutation network for fixed-width groups.
+    return sorted(groups, reverse=True) # Simplified logical representation
+
+def sequence_stage(sorted_groups):
+    """
+    Processes sorted groups to get the address of the largest element.
+    """
+    # The source states this stage gets the address of the largest element.
+    # [G] In a comparison-free sorter, this often involves decoding the 
+    # most significant group to identify the max index.
+    return 0 # Placeholder for hardware-specific address generation
+```
+
+**Edge Cases and Pitfalls:**
+*   **High Variability in Point Density:** Gaussian point density per tile varies significantly (from a few hundred to 5000 points) [S1]. Setting a strict upper bound on processed points per tile and discarding the rest causes image "holes" [S1]. The shared global buffer mitigates this [S1].
+*   **Frequency Constraints:** Increasing sub-sorter capacity to 512 elements reduces the maximum operating frequency below 500 MHz in a 28 nm process due to the critical path delay of the N-input OR gate [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear sorting delay for outputting the maximum value, avoiding the $O(\log n)$ operations found in heap-based approaches [S1].
+*   **Memory Complexity:** Each sub-sorter uses 8 KB (4 KB key + 4 KB value) for 256 elements. A global buffer of 24 KB (12 KB key + 12 KB value) is shared among four sub-sorters [S1].
+*   **Performance:** The design targets 800 MHz in a 28 nm process [S1]. It outputs one maximum value every 2 cycles [S1].
+*   **Strengths:** Fixed per-output latency, high sustained throughput, and reduced memory requirements for rasterization compared to heap-based methods [S1]. It aligns well with the one-point-at-a-time consumption of alpha-blending [S1].
+*   **Limitations:** The critical path delay limits the sub-sorter capacity to 256 elements to maintain the target frequency [S1]. Requires shared global buffers to handle high variability in point density, adding complexity to memory management [S1].
+
+## Background
+This method was proposed in a 2026 paper by [S1] as a hardware accelerator for 3D Gaussian Splatting. It addresses the inefficiencies of previous pipelined heap designs [20] which reorder splats by tile index for cache coherence, imposing a cyclic tile scan and extra complexity. The comparison-free sorter is tailored specifically for the monotonic depth consumption of 3DGS alpha-blending [S1].
+
+## Sources
+[S1] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27

@@ -1,0 +1,291 @@
+--- v001.md
++++ v002.md
+@@ -4,88 +4,75 @@
+ 
+ ## Overview
+-Image Resizing Utilities provide a suite of deterministic functions for manipulating image tensors, including resizing (downsampling, upsampling, rescaling), type conversion, and geometric adjustments. They solve the problem of preparing image data for downstream volume rendering or NeRF training pipelines by ensuring consistent data types and dimensions. What sets this implementation apart from general-purpose libraries is its strict adherence to integer-scale operations where possible to avoid interpolation artifacts, and its integration with camera parameter scaling to maintain geometric consistency between resized images and their corresponding camera intrinsics.
++Image Resizing Utilities provide a suite of deterministic functions for manipulating image arrays, including resizing (downsampling, upsampling, rescaling), type conversion, and geometric adjustments. They solve the problem of preparing image data for neural network inputs or downstream processing by ensuring correct data types, dimensions, and divisibility constraints. Unlike generic resizing libraries, these utilities enforce strict integer-scale operations where possible to avoid interpolation artifacts and provide specific helpers like `make_divisible` to align dimensions to hardware or model requirements [S1, unofficial].
+ 
+ ## How it works
+-The module operates on NumPy arrays representing images. Inputs are typically 2D (grayscale) or 3D (H, W, C) arrays. Outputs are arrays of the same rank but potentially different dimensions or data types.
+-
+-### Data Structures
+-- **Image**: A NumPy array.
+-  - Grayscale: shape `(H, W)`, dtype `uint8`, `uint16`, `float32`, or `float64`.
+-  - Color: shape `(H, W, 3)`, same dtypes.
+-- **Scale Factor**: A float or integer.
+-
+-### Algorithms
+-
+-#### 1. `make_divisible`
+-Ensures image dimensions are multiples of a `divisor`. This is critical for neural network architectures requiring specific stride alignments.
+-
+-1.  Let $H$ be height, $W$ be width.
+-2.  If $H \pmod{\text{divisor}} == 0$ and $W \pmod{\text{divisor}} == 0$, return image.
+-3.  Else, compute:
+-    $$ H_{new} = H - (H \pmod{\text{divisor}}) $$
+-    $$ W_{new} = W - (W \pmod{\text{divisor}}) $$
+-4.  Return `image[:H_new, :W_new]`.
+-
+-#### 2. `downsample_image`
+-Reduces image size by an integer factor. Uses area interpolation to preserve average intensity.
+-
+-1.  Let $S$ be the scale factor (integer).
+-2.  If $S == 1$, return image.
+-3.  Check if $H \pmod S == 0$ and $W \pmod S == 0$. If not, raise `ValueError`.
+-4.  Compute output dimensions:
+-    $$ H_{out} = H // S $$
+-    $$ W_{out} = W // S $$
+-5.  Resize using `cv2.resize` with interpolation mode `INTER_AREA`.
+-
+-#### 3. `upsample_image`
+-Increases image size by an integer factor.
+-
+-1.  Let $S$ be the scale factor (integer).
+-2.  If $S == 1$, return image.
+-3.  Compute output dimensions:
+-    $$ H_{out} = H \times S $$
+-    $$ W_{out} = W \times S $$
+-4.  Resize using `cv2.resize` with interpolation mode `INTER_AREA`. [G] *Note: While `INTER_CUBIC` is common for upscaling, this specific utility uses `INTER_AREA` for consistency and speed, though it may appear softer.*
+-
+-#### 4. `rescale_image`
+-General resizing by a float factor.
+-
+-1.  If $S \le 0$, raise `ValueError`.
+-2.  If $S == 1.0$, return image.
+-3.  If $S$ is an integer, call `upsample_image(image, S)`.
+-4.  If $1/S$ is an integer AND the resulting dimensions are integers (i.e., $H \pmod S == 0$ and $W \pmod S == 0$), call `downsample_image(image, int(1/S))`.
+-5.  Else (non-integer scale or non-divisible dimensions):
+-    a. Compute raw target dimensions:
+-       $$ H_{raw} = H \times S $$
+-       $$ W_{raw} = W \times S $$
+-    b. Round up to nearest even integer to ensure compatibility with many downsampling kernels:
+-       $$ H_{out} = \lceil H_{raw} \rceil \text{ adjusted to even} $$
+-       $$ W_{out} = \lceil W_{raw} \rceil \text{ adjusted to even} $$
+-       *Implementation detail*: If $\lceil H_{raw} \rceil$ is odd, add 1.
+-    c. Resize using `cv2.resize` with interpolation mode `INTER_AREA`.
+-    d. Emit a warning that dimensions were adjusted to even numbers.
+-
+-#### 5. Type Conversion Functions
+-These functions normalize data ranges to standard types.
+-
+-**`image_to_uint8`**
+-1.  If `dtype == uint8`, return image.
+-2.  If `dtype` is not floating point, raise `ValueError`.
+-3.  Return `(image * 255).clip(0, 255).astype(uint8)`.
+-
+-**`image_to_uint16`**
+-1.  If `dtype == uint16`, return image.
+-2.  If `dtype` is not floating point, raise `ValueError`.
+-3.  Return `(image * 65535).clip(0, 65535).astype(uint16)`.
+-
+-**`image_to_float32`**
+-1.  If `dtype == float32`, return image.
+-2.  Cast to `float32`.
+-3.  If original `dtype` was `uint8`, divide by 255.
+-4.  If original `dtype` was `uint16`, divide by 65535.
+-5.  If original `dtype` was `float64` or `float16`, return as is (already float32 cast).
+-6.  Else raise `ValueError`.
+-
+-### Pseudocode
++**Inputs and Outputs:**
++- Inputs: NumPy arrays representing images (H, W, C) or (H, W); scaling factors (floats or ints); divisors (int).
++- Outputs: NumPy arrays with modified dimensions, data types, or content.
++
++**Data Structures:**
++- Images are represented as standard NumPy arrays. Common dtypes include `uint8`, `uint16`, `float32`, and `float64`.
++- No complex custom data structures are used; operations are vectorized or use standard library calls.
++
++**Steps and Formulas:**
++
++1.  **make_divisible(image, divisor)**
++    -   Get height $H$ and width $W$ of the image.
++    -   If $H \pmod{\text{divisor}} == 0$ and $W \pmod{\text{divisor}} == 0$, return the original image.
++    -   Else, calculate new dimensions:
++        $$ H_{new} = H - (H \pmod{\text{divisor}}) $$
++        $$ W_{new} = W - (W \pmod{\text{divisor}}) $$
++    -   Return the cropped image `image[:H_new, :W_new]`.
++
++2.  **downsample_image(image, scale)**
++    -   If `scale` == 1, return the image.
++    -   Check if $H \pmod{\text{scale}} == 0$ and $W \pmod{\text{scale}} == 0$. If not, raise `ValueError`.
++    -   Calculate output dimensions:
++        $$ H_{out} = H // \text{scale} $$
++        $$ W_{out} = W // \text{scale} $$
++    -   Resize using `cv2.resize` with interpolation mode `INTER_AREA`.
++
++3.  **upsample_image(image, scale)**
++    -   If `scale` == 1, return the image.
++    -   Calculate output dimensions:
++        $$ H_{out} = H \times \text{scale} $$
++        $$ W_{out} = W \times \text{scale} $$
++    -   Resize using `cv2.resize` with interpolation mode `INTER_AREA`.
++
++4.  **rescale_image(image, scale_factor)**
++    -   If `scale_factor` <= 0, raise `ValueError`.
++    -   If `scale_factor` == 1.0, return the image.
++    -   If `scale_factor` is an integer, call `upsample_image(image, scale_factor)`.
++    -   If $1/\text{scale\_factor}$ is an integer AND the resulting dimensions ($H \times \text{scale\_factor}$, $W \times \text{scale\_factor}$) are integers, call `downsample_image(image, int(1/scale_factor))`.
++    -   Else, warn and compute target dimensions:
++        $$ H_{target} = \lceil H \times \text{scale\_factor} \rceil $$
++        $$ W_{target} = \lceil W \times \text{scale\_factor} \rceil $$
++        Adjust $H_{target}$ and $W_{target}$ to the nearest even numbers.
++    -   Resize using `cv2.resize` with interpolation mode `INTER_AREA`.
++
++5.  **image_to_uint8(image)**
++    -   If `image.dtype` is `uint8`, return the image.
++    -   If `image.dtype` is not a floating-point type, raise `ValueError`.
++    -   Return `(image * 255).clip(0, 255).astype(np.uint8)`.
++
++6.  **image_to_uint16(image)**
++    -   If `image.dtype` is `uint16`, return the image.
++    -   If `image.dtype` is not a floating-point type, raise `ValueError`.
++    -   Return `(image * 65535).clip(0, 65535).astype(np.uint16)`.
++
++7.  **image_to_float32(image)**
++    -   If `image.dtype` is `float32`, return the image.
++    -   Cast to `float32`.
++    -   If original dtype was `uint8`, divide by 255.
++    -   If original dtype was `uint16`, divide by 65535.
++    -   If original dtype was `float64` or `float16`, return as is.
++    -   Else, raise `ValueError`.
++
++8.  **variance_of_laplacian(image)**
++    -   Convert image to grayscale.
++    -   Apply Laplacian filter.
++    -   Return the variance of the resulting pixel values.
++
++**Pseudocode:**
+ 
+ ```python
+@@ -107,8 +94,8 @@
+     h, w = image.shape[:2]
+     if h % scale != 0 or w % scale != 0:
+-        raise ValueError(f"Image dimensions {h}x{w} must be divisible by scale {scale}")
+-    new_h = h // scale
+-    new_w = w // scale
+-    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
++        raise ValueError(f"Image dimensions ({h}x{w}) must be divisible by scale {scale}")
++    out_h = h // scale
++    out_w = w // scale
++    return cv2.resize(image, (out_w, out_h), interpolation=cv2.INTER_AREA)
+ 
+ def upsample_image(image: np.ndarray, scale: int) -> np.ndarray:
+@@ -116,7 +103,7 @@
+         return image
+     h, w = image.shape[:2]
+-    new_h = h * scale
+-    new_w = w * scale
+-    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
++    out_h = h * scale
++    out_w = w * scale
++    return cv2.resize(image, (out_w, out_h), interpolation=cv2.INTER_AREA)
+ 
+ def rescale_image(image: np.ndarray, scale_factor: float) -> np.ndarray:
+@@ -128,9 +115,9 @@
+     h, w = image.shape[:2]
+     
+-    # Integer scale up
++    # Check if scale_factor is an integer
+     if scale_factor == int(scale_factor):
+         return upsample_image(image, int(scale_factor))
+     
+-    # Integer scale down (if divisible)
++    # Check if 1/scale_factor is an integer and dimensions remain integer
+     inv_scale = 1.0 / scale_factor
+     if inv_scale == int(inv_scale):
+@@ -139,18 +126,15 @@
+             return downsample_image(image, int_scale)
+             
+-    # General case
+-    raw_h = h * scale_factor
+-    raw_w = w * scale_factor
+-    
+-    # Round up to nearest even
+-    new_h = int(math.ceil(raw_h))
+-    new_w = int(math.ceil(raw_w))
+-    if new_h % 2 != 0:
+-        new_h += 1
+-    if new_w % 2 != 0:
+-        new_w += 1
++    # Fallback: compute new dimensions
++    target_h = math.ceil(h * scale_factor)
++    target_w = math.ceil(w * scale_factor)
++    
++    # Adjust to even numbers
++    if target_h % 2 != 0:
++        target_h += 1
++    if target_w % 2 != 0:
++        target_w += 1
+         
+-    # Warning omitted for brevity in pure logic, but implied by spec
+-    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
++    return cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+ 
+ def image_to_uint8(image: np.ndarray) -> np.ndarray:
+@@ -173,14 +157,29 @@
+     
+     # Cast to float32 first
+-    img_f32 = image.astype(np.float32)
+-    
+-    if image.dtype == np.uint8:
+-        return img_f32 / 255.0
+-    elif image.dtype == np.uint16:
+-        return img_f32 / 65535.0
+-    elif image.dtype in [np.float64, np.float16]:
+-        return img_f32
++    if np.issubdtype(image.dtype, np.integer):
++        if image.dtype == np.uint8:
++            return image.astype(np.float32) / 255.0
++        elif image.dtype == np.uint16:
++            return image.astype(np.float32) / 65535.0
++        else:
++            raise ValueError("Unsupported integer dtype for float32 conversion")
++    elif np.issubdtype(image.dtype, np.floating):
++        if image.dtype == np.float64 or image.dtype == np.float16:
++            return image.astype(np.float32)
++        else:
++            return image.astype(np.float32)
+     else:
+-        raise ValueError(f"Unsupported dtype {image.dtype} for float32 conversion")
++        raise ValueError("Unsupported dtype for float32 conversion")
++
++def variance_of_laplacian(image: np.ndarray) -> float:
++    # Convert to grayscale if not already
++    if len(image.shape) == 3:
++        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
++    else:
++        gray = image
++        
++    # Apply Laplacian
++    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
++    return np.var(laplacian)
+ ```
+ 
+@@ -188,17 +187,17 @@
+ 
+ ### [Depth Estimation Data Resizing](12247-depth-estimation-data-resizing.md)
+-A preprocessing utility to resize depth estimation samples (image, disparity, mask) to a target size while optionally maintaining aspect ratio and ensuring dimensions are multiples of a specific value.
++A preprocessing utility to resize depth estimation samples (image, disparity, mask) to a target size while optionally maintaining aspect ratio and ensuring dimensions are multiples of a specific value. It differs from generic resizing by enforcing discrete-value preservation for semantic and depth fields and by providing specific aspect-ratio constraints ('lower_bound', 'upper_bound', 'minimal') tailored for neural network input requirements.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(H \times W)$ for all resizing operations, as they involve iterating over pixels. Type conversion is also $O(H \times W)$.
+-- **Memory Complexity**: $O(H \times W)$ for the output array.
+-- **Performance**: `INTER_AREA` is generally faster than `INTER_CUBIC` or `INTER_LANCZOS4` but provides lower quality for significant upsampling. It is optimal for downsampling.
+-- **Strengths**: Deterministic behavior for integer scales; strict type enforcement prevents silent precision loss; integration with camera geometry scaling (see `Camera.rescale`).
+-- **Limitations**: `INTER_AREA` may produce blurry results when upsampling significantly. The "adjust to even" logic in `rescale_image` can introduce slight aspect ratio distortions if not accounted for in downstream processing.
+-- **When to use**: Preprocessing for NeRF/Volume Rendering pipelines where consistent tensor shapes and normalized float ranges are required.
+-- **When not to use**: When high-fidelity artistic upscaling is needed (use `INTER_LANCZOS4`); when exact non-even dimensions are strictly required without cropping.
++- **Time Complexity:** Resizing operations depend on the interpolation method. `INTER_AREA` is generally efficient for downsampling. Complexity is roughly $O(H \times W)$ for the number of pixels processed.
++- **Memory Complexity:** $O(H \times W)$ for the output image.
++- **Performance:** The use of `cv2.resize` with `INTER_AREA` provides a good balance between speed and quality for resizing. Integer-scale operations avoid interpolation entirely, making them very fast.
++- **Strengths:** Deterministic behavior, strict type enforcement, and specific helpers for neural network input preparation (e.g., `make_divisible`).
++- **Limitations:** Relies on OpenCV (`cv2`), which may not be available in all environments. The `rescale_image` function's fallback logic involves warnings and rounding, which may introduce slight inaccuracies compared to exact integer scaling.
++- **When to use:** When preparing images for NeRF or neural network pipelines that require specific dimension constraints or data types.
++- **When not to use:** When high-fidelity interpolation is required for artistic resizing (use `INTER_CUBIC` or `INTER_LANCZOS4` instead of `INTER_AREA`).
+ 
+ ## Background
+-This module originates from the **Nerfies** project by Google [S1, unofficial]. It was developed to handle the specific data preprocessing needs of dynamic NeRF training, where images of varying sizes and types must be normalized and resized while maintaining geometric correspondence with camera parameters. The `make_divisible` and specific resizing logic are tailored to ensure compatibility with neural network architectures that require specific stride alignments (e.g., 8x, 16x).
++The utilities originate from the Google Nerfies project, a library for dynamic NeRF (Neural Radiance Fields) processing [S1, unofficial]. They were developed to handle the specific preprocessing needs of NeRF data, such as resizing images to match camera parameters and ensuring data types are compatible with PyTorch/TensorFlow models. The code is part of the `nerfies` repository, which provides tools for capturing and processing dynamic scenes [S1, unofficial].
+ 
+ ## Sources

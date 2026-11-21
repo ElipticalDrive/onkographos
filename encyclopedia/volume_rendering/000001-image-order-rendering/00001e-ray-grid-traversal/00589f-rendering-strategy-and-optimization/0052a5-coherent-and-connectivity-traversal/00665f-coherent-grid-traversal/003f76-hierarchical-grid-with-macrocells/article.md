@@ -1,0 +1,98 @@
+# Hierarchical Grid with Macrocells
+
+Also called: Macrocell hierarchy, Two-level hierarchy
+
+## Overview
+A hierarchical grid structure that divides densely populated regions of space more finely than empty regions by imposing a coarser grid over the previous level, where each macrocell corresponds to an $M \times M \times M$ block of cells in the underlying level [S1]. It sets itself apart from the original Coherent Grid Traversal (CGT) by replacing simple Boolean empty/non-empty flags with parameter range culling, storing minimum and maximum values for multiple particle properties to enable more aggressive early-out tests [S1].
+
+## How it works
+**Inputs:** Particle dataset containing position, radius, and up to four additional properties; macrocell resolution $M$; grid dimensions [S1].
+**Outputs:** Hierarchical grid structure consisting of macrocells containing bounds for underlying cells [S1].
+
+**Data Structures:**
+1. **Macrocell:** Stores minimum and maximum values for eight parameters: position $x, y, z$, radius, and up to four additional particle properties [S1]. This replaces the Boolean empty/non-empty flag used in the original CGT algorithm [S1].
+2. **Underlying Grid:** Standard CGT grid cells, organized into blocks of size $M \times M \times M$ corresponding to macrocells [S1].
+
+**Construction Algorithm (Sort-Middle):**
+1. Distribute construction tasks for disjoint sections of the grid statically among all system threads [S1].
+2. Each thread performs a coarse parallel bucket sort of particles by their cell location, inserting them into its local set of buckets [S1].
+3. Regions for each bucket are disjoint, avoiding write conflicts and the need for mutexes [S1].
+4. Each thread inserts its particles into the appropriate grid cells within its assigned disjoint region [S1].
+5. Aggregate the grid data to form macrocells by computing the min/max of the eight parameters across all particles contained in each underlying $M \times M \times M$ block of cells [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_hierarchical_grid(particles, M, num_threads, grid_min, grid_max, cell_size):
+    # 1. Static distribution of grid sections to threads
+    thread_ranges = []
+    for t in range(num_threads):
+        start = grid_min + t * (grid_max - grid_min) // num_threads
+        end = grid_min + (t + 1) * (grid_max - grid_min) // num_threads
+        thread_ranges.append((start, end))
+
+    # 2. Parallel bucket sort per thread
+    local_buckets = [[] for _ in range(num_threads)]
+    for particle in particles:
+        cell_idx = int((particle.pos - grid_min) / cell_size)
+        thread_id = 0
+        for t, (start, end) in enumerate(thread_ranges):
+            if start <= cell_idx < end:
+                thread_id = t
+                break
+        local_buckets[thread_id].append(particle)
+
+    # 3. Insert into grid cells
+    num_cells = int((grid_max - grid_min) / cell_size)
+    grid_cells = [[] for _ in range(num_cells)]
+    for t in range(num_threads):
+        for particle in local_buckets[t]:
+            cell_idx = int((particle.pos - grid_min) / cell_size)
+            grid_cells[cell_idx].append(particle)
+
+    # 4. Build Macrocells
+    macrocells = []
+    num_macrocells = num_cells // (M * M * M)
+    for mc_idx in range(num_macrocells):
+        mc_min = [float('inf')] * 8
+        mc_max = [float('-inf')] * 8
+        base_cell = mc_idx * M * M * M
+        for c in range(base_cell, base_cell + M * M * M):
+            for particle in grid_cells[c]:
+                # Parameters: x, y, z, radius, prop1, prop2, prop3, prop4
+                for i in range(8):
+                    val = particle.props[i] if i < len(particle.props) else 0.0
+                    mc_min[i] = min(mc_min[i], val)
+                    mc_max[i] = max(mc_max[i], val)
+        macrocells.append({'min': mc_min, 'max': mc_max})
+
+    return macrocells, grid_cells
+```
+
+**Parameters:**
+*   **Macrocell resolution ($M$):** The size of the macrocell block in cells. Typical value: $6 \times 6 \times 6$ [S1].
+*   **Lambda ($\lambda$):** A parameter affecting performance in modified algorithms. Value $\lambda = 1$ provides best performance for tested datasets [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Write Conflicts:** Avoided by using disjoint regions for each thread during construction [S1].
+*   **Parameter Tuning:** Performance varies widely with $\lambda$ for extremely large particle counts; $\lambda=1$ is recommended [S1].
+*   **Frustum Overlap:** Ray packet size impacts performance; larger packets overlap more cells, increasing intersection cost per step [S1].
+
+## Subtopics
+
+### [Loosely Nested Grids](12774-loosely-nested-grids.md)
+A hierarchical grid building method that handles very complex scenes by organizing primitives into a structure for efficient traversal of empty spaces. Unlike top-down adaptive subdivision, it uses a bottom-up construction via filtering and clustering. It builds upon the hierarchical grid with macrocells concept by structuring the hierarchy through local grid clusters rather than a single global recursive subdivision.
+
+## Operating characteristics
+*   **Time Complexity:** Construction is $O(N)$ with parallel bucket sort, where $N$ is the number of particles, due to disjoint thread regions [S1]. Traversal benefits from parameter range culling, potentially reducing intersection tests compared to Boolean flags [S1].
+*   **Memory Complexity:** Higher than original CGT due to storing 8 min/max values per macrocell instead of a single Boolean flag [S1].
+*   **Performance:** $\lambda = 1$ and $M = 6 \times 6 \times 6$ yield reasonable performance for tested datasets [S1]. Performance is sensitive to $\lambda$ for very large particle counts [S1].
+*   **Strengths:** Efficient traversal via parameter range culling; parallel construction without synchronization [S1].
+*   **Limitations:** Performance sensitivity to $\lambda$ for extremely large particle counts [S1].
+
+## Background
+Originated from the macrocell hierarchy described by Parker et al. [17] and adapted for particle-based simulation data visualization [S1]. The construction algorithm uses the sort-middle approach described by Ize et al. [9] to quickly rebuild the grid each frame [S1]. It builds on the original CGT algorithm but modifies the macrocell data structure to support parameter range culling [S1].
+
+## Sources
+[S1] A coherent grid traversal approach to visualizing particle-based simulation data, https://ieeexplore.ieee.org/abstract/document/4293019/, fetched 2026-10-25

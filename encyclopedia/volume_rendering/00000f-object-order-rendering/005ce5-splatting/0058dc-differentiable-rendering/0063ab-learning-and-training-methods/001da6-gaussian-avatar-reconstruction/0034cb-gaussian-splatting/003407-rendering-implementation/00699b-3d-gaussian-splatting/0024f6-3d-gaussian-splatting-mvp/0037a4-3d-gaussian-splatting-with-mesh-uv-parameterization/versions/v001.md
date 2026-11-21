@@ -1,0 +1,66 @@
+# 3D Gaussian Splatting with Mesh UV Parameterization
+
+Also called: ASH
+
+## Overview
+This method enables real-time and high-quality rendering of animated humans by projecting 3D Gaussian parameters into a 2D texture space via mesh UV parameterization [S1][S2, unofficial]. It distinguishes itself from standard 3D Gaussian Splatting by decoupling appearance storage from 3D spatial coordinates, allowing for compact representation and efficient texture-based rendering of dynamic cloth and accessories [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A template mesh (typically a parametric human model like SMPL) with UV coordinates; a set of 3D Gaussians representing the scene/human.
+- **Output:** A 2D texture map (Gaussian Shell Map) storing Gaussian attributes (e.g., color, opacity, scale) indexed by UV coordinates; a rendering pipeline that projects these 2D attributes back to screen space based on pose.
+
+**Data Structures:**
+- **UV Texture Map:** A 2D image where each pixel corresponds to a UV coordinate on the template mesh. The value at each pixel stores the attributes of the 3D Gaussian(s) projected to that UV location.
+- **Template Mesh:** A static or pose-dependent mesh providing the geometric correspondence between 3D space and 2D UV space.
+
+**Steps:**
+1. **Template Selection:** Choose a parametric human template mesh with a defined UV layout [S1][S2, unofficial].
+2. **Projection:** For each 3D Gaussian, determine its corresponding UV coordinate on the template mesh. This involves mapping the 3D position of the Gaussian to the nearest point on the mesh surface and retrieving the associated UV coordinate [S1][S2, unofficial].
+3. **Attribute Storage:** Store the Gaussian's appearance attributes (color, opacity, etc.) in the 2D texture map at the computed UV coordinate. If multiple Gaussians map to the same UV pixel, they may be aggregated or the most relevant one selected [S1][S2, unofficial].
+4. **Pose Projection:** During rendering, for each frame, apply the current pose (joint rotations/translations) to the template mesh to deform it [S1][S2, unofficial].
+5. **Rendering:** Project the deformed mesh and the stored 2D texture map to screen space. Render the Gaussians by sampling the texture map based on the projected UV coordinates of the deformed mesh vertices [S1][S2, unofficial].
+
+**Formulas:**
+- Let $G_i$ be a 3D Gaussian with position $\mathbf{p}_i$.
+- Let $M$ be the template mesh.
+- Let $UV(\mathbf{p})$ be the function mapping a 3D point on the mesh to its 2D UV coordinate.
+- The stored attribute $A_i$ for Gaussian $i$ is placed in the texture at $UV(\mathbf{p}_i)$.
+- During rendering, for a given pose $P$, the mesh is deformed to $M_P$. The screen-space position of a Gaussian is derived from the projected position of its corresponding mesh point under pose $P$ [S1][S2, unofficial].
+
+**Parameters:**
+- UV resolution: Not given in the sources.
+- Template mesh type: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **UV Overlaps:** If the UV layout has overlaps, multiple 3D regions may map to the same texture pixel, causing artifacts.
+- **Pose Dependency:** The method relies on the template mesh deforming correctly with the pose. Incorrect pose estimation or mesh deformation can lead to misalignment [S1][S2, unofficial].
+
+## Subtopics
+
+### [Gaussian Shell Maps](6134-gaussian-shell-maps.md)
+Combines CNN-based generators with 3DGS for virtual humans with sophisticated details. Choose when high-fidelity clothing details are needed.
+
+### [3DGS-Avatar](6135-3dgs-avatar.md)
+Uses a shallow MLP instead of SH for color and geometry priors for deformation. Choose when pose-dependent cloth deformation and novel pose generalization are required.
+
+### [GaussianBody](6136-gaussianbody.md)
+Uses physically-based priors in canonical space. Choose for dynamic digital human modeling from monocular video to avoid cloth artifacts.
+
+### [GauHuman](6137-gauhuman.md)
+Redesigns prune/split/clone operations. Choose for optimized Gaussian management in human reconstruction.
+
+## Operating characteristics
+- **Time Complexity:** Real-time rendering is enabled, but specific complexity is not given in the sources [S1][S2, unofficial].
+- **Memory Complexity:** Compact representation due to 2D texture storage, but exact memory usage is not given in the sources [S1][S2, unofficial].
+- **Strengths:** Real-time performance, high-quality animated human rendering, efficient storage of appearance details [S1][S2, unofficial].
+- **Limitations:** Dependent on template mesh quality and UV layout; may struggle with non-human subjects or complex deformations not captured by the template [S1][S2, unofficial].
+- **When to Use:** Real-time animated human avatars with detailed clothing and accessories [S1][S2, unofficial].
+- **When Not to Use:** Non-human subjects, scenes without a clear template mesh, or when high-fidelity novel view synthesis without pose dependency is required.
+
+## Background
+The method was introduced in the context of recent advances in 3D Gaussian Splatting for digital human modeling [S1][S2, unofficial]. It builds on the idea of using template-guided parameterization to project 3D Gaussians into a 2D texture space, enabling efficient rendering of animated humans [S1][S2, unofficial]. The approach is part of a broader trend towards compact and efficient representations for dynamic 3D scenes, particularly in the context of virtual humans and digital twins [S1][S2, unofficial].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

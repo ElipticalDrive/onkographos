@@ -1,0 +1,1907 @@
+OpenVDB - Sparse volume data structure and tools. Contribute to AcademySoftwareFoundation/openvdb development by creating an account on GitHub.
+
+nanovdb python: Phase 5 — primitives + quantized/index createNanoGrid by swahtz · Pull Request #2216 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+May 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Closes out Phase 5 of the NanoVDB Python bindings restructure (#2208). Lands all three sub-phases (5a primitives, 5b quantized createNanoGrid overloads, 5c generic createNanoGrid from build::Grid) in one PR.
+Phase 5a — host primitives
+Bind the nine primitives that didn't ship with Phase 0, all for float and double (createPoint* are float-only to keep the runtime dispatch simple):
+Function
+Purpose
+tools.createLevelSetBox
+Narrow-band level set of a solid box
+tools.createLevelSetBBox
+Narrow-band level set of a hollow box wireframe (thickness parameter)
+tools.createLevelSetOctahedron
+Narrow-band level set of an octahedron
+tools.createFogVolumeBox / Octahedron
+Fog-volume counterparts
+tools.createPointSphere / Torus / Box
+PointDataGrid scattered on the surface of the primitive shape
+tools.createPointScatter(srcGrid, ...)
+Scatter a PointDataGrid into the active voxels of a NanoGrid<float> level set or fog volume
+Each non-point primitive uses the same runtime-GridType-switch pattern the existing createLevelSetSphere already does. FpN overloads of the primitives are not bound here — quantization is reachable via Phase 5b's generic path with explicit oracle and dither parameters.
+Phase 5b — quantized createNanoGrid overloads
+tools.AbsDiff(tolerance=-1.0) / tools.RelDiff(tolerance=-1.0) — compression-oracle classes used by FpN. Both expose getTolerance / setTolerance and a truthy __bool__ (true iff the tolerance has been initialized to a non-negative value).
+tools.createNanoGridFp4 / Fp8 / Fp16(src, sMode, cMode, ditherOn, verbose) — quantize a float source into a fixed-bit-width grid.
+tools.createNanoGridFpN(src, oracle, sMode, cMode, ditherOn, verbose) — variable-bit-width quantization. Two overloads: one taking an AbsDiff oracle (default), one taking a RelDiff oracle. Python picks the right one from the argument type.
+The C++ Fp{4,8,16,N}::preProcess templates static_assert(SrcValueT == float), so the binding rejects NanoGrid<double> / build.DoubleGrid sources with a TypeError rather than letting the static assertion trip a hard abort.
+Phase 5c — generic createNanoGrid from build::Grid
+Each conversion entry accepts both NanoGrid<SrcBuildT> and tools::build::Grid<SrcBuildT> as its source. Internally a small template helper tries each source-side BuildT via nb::isinstance (matching the existing tryCreateOnIndexGrid pattern from the Phase 3 follow-up).
+tools.createNanoGridIndex(src, channels=0, includeStats=True, includeTiles=True, verbose=0) — NEW. Bake any supported source into a NanoGrid<ValueIndex> with every voxel given a uint64 sequential index. Original values can be carried as blind data when channels > 0.
+tools.createNanoGridOnIndex(src, ...) — same as Index but only active voxels get a sequential index. Supersedes the Phase 3 follow-up's tools.createOnIndexGrid test scaffold (which is kept alive in PyVoxelBlockManager.cc for backwards compatibility with the VBM tests — new code should prefer createNanoGridOnIndex).
+Source types accepted on the index path are NanoGrid<float | double | int32 | Vec3f> and tools::build::Grid<float | double | int32 | Vec3f>. Same-type bake of build::Grid<T> → NanoGrid<T> remains served by Phase 4a's .to_nanovdb() method.
+Test plan
+25 new test cases in three new TestCase classes:
+TestNewPrimitives (11 cases): every primitive happy path + float/double instantiation + createPointScatter rejects non-float source.
+TestCreateNanoGridQuantized (8 cases): each of Fp4/Fp8/Fp16, FpN with both AbsDiff and RelDiff oracles, oracle default tolerance, double-source rejection, and build::Grid source.
+TestCreateNanoGridIndex (6 cases): Index/OnIndex from float / double / int32 build / Vec3f build, plus None rejection.
+Full pytest_nanovdb suite green locally (136/138; the 2 errors are pre-existing BLOSC-disabled errors in my local config, unrelated).
+CUDA build + link clean.
+Plan status
+This closes Phases 5a (phase5-prim), 5b (phase5-quant), and 5c (phase5-generic) in nanovdb-python-plan.md. Only Phase 6 (docs / examples / migration guide) remains.
+nanovdb python: Phase 5 — primitives + quantized/index createNanoGrid
+…
+9e45d43
+```
+Closes out Phase 5 of the NanoVDB Python bindings restructure (AcademySoftwareFoundation#2208).
+Lands all three sub-phases (5a primitives, 5b quantized createNanoGrid
+overloads, 5c generic createNanoGrid from build::Grid) in one PR.
+
+Phase 5a — Host primitives
+==========================
+
+Bind the nine primitives that didn't ship with Phase 0:
+
+* tools.createLevelSetBox(gridType, width, height, depth, ...) — narrow-
+  band level set of a solid axis-aligned box.
+* tools.createLevelSetBBox(gridType, width, height, depth, thickness, ...) —
+  narrow-band level set of a hollow box wireframe.
+* tools.createLevelSetOctahedron(gridType, scale, ...) — narrow-band
+  level set of an octahedron.
+* tools.createFogVolumeBox(...) and tools.createFogVolumeOctahedron(...) —
+  the fog-volume counterparts of the above.
+* tools.createPointSphere / createPointTorus / createPointBox(gridType,
+  pointsPerVoxel, ...) — PointDataGrids scattered on the surface of each
+  primitive shape.
+* tools.createPointScatter(srcGrid, pointsPerVoxel, ...) — scatter a
+  PointDataGrid into the active voxels of a NanoGrid<float> level set or
+  fog volume. The C++ template also accepts double sources; the binding
+  is float-only for simplicity (the runtime grid pointer carries the
+  source BuildT and adding a per-type dispatch is mechanical follow-up).
+
+Each non-point primitive is instantiated for float and double via the
+same runtime-GridType switch the existing createLevelSetSphere et al.
+already use. The FpN overloads of these primitives are deliberately
+not bound here — quantization is reachable via Phase 5b's generic
+createNanoGrid* path with explicit oracle and dither parameters.
+
+Phase 5b — Quantized createNanoGrid overloads
+=============================================
+
+* tools.AbsDiff(tolerance=-1.0) and tools.RelDiff(tolerance=-1.0) —
+  compression-oracle classes used by FpN. Both expose getTolerance /
+  setTolerance and a truthy __bool__ that returns True iff the
+  tolerance has been initialized (>= 0). The default tolerance of -1
+  matches the C++ "uninitialized — fill in via init()" sentinel.
+
+* tools.createNanoGridFp4 / Fp8 / Fp16(src, sMode, cMode, ditherOn,
+  verbose) — quantize a float source into a fixed-bit-width grid.
+  ditherOn adds sub-quantum noise to break up banding.
+
+* tools.createNanoGridFpN(src, oracle, sMode, cMode, ditherOn, verbose) —
+  variable-bit-width quantization. Two overloads: one accepting an
+  AbsDiff oracle (the default), one accepting a RelDiff oracle. Python
+  picks the right overload from the oracle argument's type.
+
+The C++ Fp{4,8,16,N} preProcess templates static_assert SrcValueT ==
+float, so the binding rejects double sources with a TypeError instead
+of letting the compile-time assertion trip a hard abort.
+
+Phase 5c — Generic createNanoGrid from build::Grid
+==================================================
+
+Each conversion entry accepts both NanoGrid<SrcBuildT> and
+tools::build::Grid<SrcBuildT> as its source. Internally a small
+template helper tries each source-side BuildT in turn (matching the
+existing tryCreateOnIndexGrid pattern from the Phase 3 follow-up) and
+dispatches via nb::isinstance.
+
+* tools.createNanoGridIndex(src, channels=0, includeStats=True,
+  includeTiles=True, verbose=0) — NEW. Bake any supported source into
+  a NanoGrid<ValueIndex> with all voxels (active and inactive) given a
+  uint64 sequential index. Original values can be carried as blind
+  data when channels > 0.
+
+* tools.createNanoGridOnIndex(src, ...) — same as Index but only the
+  active voxels get a sequential index. Supersedes the Phase 3
+  follow-up's tools.createOnIndexGrid test scaffold (which is kept
+  alive in PyVoxelBlockManager.cc for backwards compatibility with
+  the VBM tests; new code should prefer createNanoGridOnIndex).
+
+Source types accepted by the index path are NanoGrid<float | double |
+int32 | Vec3f> and tools::build::Grid<float | double | int32 | Vec3f>.
+The same-type bake of build::Grid<T> -> NanoGrid<T> remains served by
+the Phase 4a .to_nanovdb() method.
+
+Test plan
+=========
+
+Three new TestCase classes covering: every primitive (TestNewPrimitives,
+11 cases), every quantization path including double-source rejection
+and oracle defaults (TestCreateNanoGridQuantized, 8 cases), and every
+index/onindex source type including the build::Grid path
+(TestCreateNanoGridIndex, 6 cases). All 25 new cases pass locally; the
+full pytest_nanovdb suite stays green except for the two pre-existing
+BLOSC-disabled errors in my local build.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from kmuseth
+as a code owner
+May 21, 2026 06:24
+swahtz
+requested a review
+from Copilot
+May 21, 2026 06:25
+Copilot started reviewing on behalf of
+swahtz
+May 21, 2026 06:26
+View session
+Copilot
+AI
+reviewed
+May 21, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR extends the NanoVDB Python bindings to complete Phase 5 of the bindings restructure plan by adding remaining host-side primitive factories and new tools.createNanoGrid* conversion entry points (quantized FpX/FpN and Index/OnIndex), along with corresponding Python test coverage.
+Changes:
+Add bindings for additional host primitives (box/BBox/octahedron, fog variants, and point primitives/scatter).
+Add polymorphic createNanoGridFp4/Fp8/Fp16/FpN and createNanoGridIndex/OnIndex bindings plus AbsDiff/RelDiff oracle classes.
+Add new Python unit tests covering the new primitives and conversion paths.
+Reviewed changes
+Copilot reviewed 5 out of 5 changed files in this pull request and generated 4 comments.
+Show a summary per file
+File
+Description
+nanovdb/nanovdb/python/test/TestNanoVDB.py
+Adds new unittest classes covering Phase 5 primitives and createNanoGrid conversion APIs.
+nanovdb/nanovdb/python/PyTools.cc
+Registers the new createNanoGrid conversion bindings on the nanovdb.tools submodule.
+nanovdb/nanovdb/python/PyPrimitives.cc
+Implements/binds the additional primitive factory functions and point scattering API.
+nanovdb/nanovdb/python/PyCreateNanoGrid.h
+Declares the new conversion-binding entry point for tools module.
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc
+Implements AbsDiff/RelDiff and createNanoGrid* polymorphic conversion bindings.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/python/PyPrimitives.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/python/PyPrimitives.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/python/PyCreateNanoGrid.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nanovdb python: address Copilot review on AcademySoftwareFoundation#2216
+…
+692f45a
+```
+Four items from the Phase 5 review, plus a follow-on segfault fix
+caught while addressing the third item:
+
+1. openToNanoVDB binding accidentally dropped the sMode argument and
+   gave `base` a default of tools::StatsMode::Default — nonsense both
+   semantically (base is an OpenVDB GridBase::Ptr) and structurally
+   (the C++ template expects 4 args, the binding declared 3 keyword
+   args). The CI build broke for openvdb-enabled configs with a
+   "number of nb::arg annotations must match the argument count"
+   static_assert from nanobind. Restore the correct signature: base
+   has no default, sMode/cMode/verbose carry their defaults.
+
+2. Octahedron primitive default name strings carried the upstream C++
+   typo "octadedron" (sic). The C++ side keeps the misspelling for
+   binary compatibility with old grids; correct it on the Python
+   side since the default propagates into help() output and grid
+   metadata where end-users see it.
+
+3. The point primitives took a `gridType` argument that was
+   misleading — it controls the intermediate level-set's precision
+   the scatter starts from, not the returned PointDataGrid's type
+   (which is always UInt32). While investigating the rename, I found
+   that the createPointSphere<double> / createPointTorus<double> /
+   createPointBox<double> code paths actually segfault during scatter
+   with the current C++ implementation (only the float path is
+   exercised by the C++ unit tests). Take Copilot's "remove it and
+   always use float" alternative: drop the argument entirely. The
+   binding now always uses the float intermediate level-set.
+   createPointSphere / Torus / Box no longer have the parameter;
+   their docstrings explicitly note "always returns a UInt32
+   PointDataGrid".
+
+4. The defineCreateNanoGridConversions doc-comment claimed sources
+   were accepted for "every scalar/vector BuildT in BuildTypes.def
+   that tools::createNanoGrid supports", which was wishful — the
+   implementation actually tries a narrower set per destination kind.
+   Spell out the actual matrix: quantized Fp{4,8,16,N} paths accept
+   float only (the C++ preProcess static-asserts SrcValueT == float);
+   the createNanoGridIndex / OnIndex paths accept float / double /
+   int32 / Vec3f. Adding more source types is a one-line extension
+   of the explicit try-each-SrcBuildT chains.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+May 21, 2026 06:41
+Copilot started reviewing on behalf of
+swahtz
+May 21, 2026 06:41
+View session
+Copilot
+AI
+reviewed
+May 21, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 5 out of 5 changed files in this pull request and generated 3 comments.
+Comments suppressed due to low confidence (2)
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc:129
+Same GIL-holding issue as above: tools::createNanoGrid for FpN quantization runs while the GIL is held. Consider resolving the source type and extracting the C++ reference first, then releasing the GIL only for the actual conversion work.
+```
+    if (nb::isinstance<NanoSrcT>(py_src)) {
+        const auto& src = nb::cast<const NanoSrcT&>(py_src);
+        return nb::cast(tools::createNanoGrid<NanoSrcT, FpN, OracleT, HostBuffer>(
+            src, sMode, cMode, ditherOn, verbose, oracle));
+    }
+```
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc:173
+Same GIL-holding issue as above: index/OnIndex conversion can be expensive for large grids but currently runs while holding the GIL. Consider releasing the GIL around tools::createNanoGrid after the source has been type-checked and cast.
+```
+    if (nb::isinstance<NanoSrcT>(py_src)) {
+        const auto& src = nb::cast<const NanoSrcT&>(py_src);
+        return nb::cast(tools::createNanoGrid<NanoSrcT, DstBuildT, HostBuffer>(
+            src, channels, includeStats, includeTiles, verbose));
+    }
+```
+Comment thread
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc
+Outdated
+nb::class_<tools::AbsDiff>(toolsModule, "AbsDiff",
+"Compression oracle for FpN: accept the approximation when "
+"|exact - approx| <= tolerance. A tolerance of -1.0 (the "
+"default) means uninitialized; pass an explicit positive value "
+swahtz
+May 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Addressed in 6b2dfa5: reworded to "any non-negative value (including 0.0) is treated as initialized by the operator bool() check", matching what the C++ AbsDiff::operator bool() const { return mTolerance >= 0.0f; } actually does. RelDiff already had the correct wording ("True iff the tolerance has been initialized (>= 0)").
+Comment thread
+nanovdb/nanovdb/python/test/TestNanoVDB.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nanovdb python: address more Copilot review on AcademySoftwareFoundat…
+…
+6b2dfa5
+```
+…ion#2216 + CI GPU gating
+
+Four items in this round, three from Copilot plus a CI failure caught
+on the linux-clang++ runner.
+
+1. test_validateGrid_on_device_handle was gated only on the cuda
+   submodule being importable, but the linux-clang++ CI runner has a
+   CUDA toolkit installed (so the submodule loads) but no GPU
+   driver. The test then crashed inside the C++ helper with
+   "CUDA error 35: CUDA driver version is insufficient for CUDA
+   runtime version". Switch the gate to the project's existing pair
+   of helpers — nanovdb.isCudaAvailable() (build-time CUDA support)
+   AND nanovdb.isGpuAvailable() (runtime device probe) — matching
+   how TestPointsToGrid / TestSignedFloodFill / TestSampleFromPoints
+   already gate. The test skips cleanly on CPU-only runners and
+   driverless CUDA runners alike.
+
+2. The Phase 5b/5c conversion helpers (tryQuantizeFpX, tryQuantizeFpN,
+   tryIndexify) ran the heavy tools::createNanoGrid traversal while
+   holding the Python GIL. Restructure each helper so the GIL is
+   held only for the isinstance / cast dispatch, then released
+   around the conversion itself (the source data lives in stable
+   C++ storage anchored by the Python wrapper passed in via py_src,
+   so it's safe to read without the GIL). Other Python threads can
+   now make progress during large-grid quantization / indexing.
+
+3. AbsDiff's class docstring said "pass an explicit positive value"
+   for the tolerance, but the C++ operator bool() actually treats
+   any non-negative value (including 0.0) as initialized. Reword to
+   match what the API actually does.
+
+4. The createNanoGridIndex/OnIndex source-rejection test was named
+   test_index_rejects_unsupported_source with a comment about
+   "bool / Boolean grids" but really only exercised the None case.
+   Split into two cases with single, accurate purposes:
+   - test_index_rejects_none — passes None; matches neither the
+     NanoGrid nor the build::Grid isinstance arms.
+   - test_index_rejects_unsupported_buildt — builds a
+     tools.build.Vec3dGrid (structurally valid but a BuildT outside
+     the float/double/int32/Vec3f source set) and confirms the
+     try-each-SrcBuildT chain falls through to a TypeError.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+May 21, 2026 07:31
+Copilot started reviewing on behalf of
+swahtz
+May 21, 2026 07:31
+View session
+Copilot
+AI
+reviewed
+May 21, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 5 out of 5 changed files in this pull request and generated 1 comment.
+Comment thread
+nanovdb/nanovdb/python/PyPrimitives.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nanovdb python: correct createPointScatter docs + add fog-rejection test
+…
+b2baf28
+```
+Copilot noted the createPointScatter binding docstring claimed the
+source could be a "level set or fog volume", but the C++ implementation
+explicitly checks srcGrid.isLevelSet() at line 1679 of
+tools/CreatePrimitives.h and throws std::runtime_error("Expected a
+level set grid") otherwise. Match the actual behavior: the docstring
+now says the source must satisfy srcGrid.isLevelSet() and that
+non-level-set sources (e.g. fog volumes) raise RuntimeError.
+
+Add test_create_point_scatter_rejects_fog_volume to lock in the
+behavior (build a fog volume sphere, confirm createPointScatter raises
+RuntimeError).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+May 21, 2026 11:16
+Copilot started reviewing on behalf of
+swahtz
+May 21, 2026 11:17
+View session
+Copilot
+AI
+reviewed
+May 21, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 5 out of 5 changed files in this pull request and generated 2 comments.
+Comment thread
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+nanovdb/nanovdb/python/PyCreateNanoGrid.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nanovdb python: fully-qualify nanovdb.tools.build.* in 5b/5c docs
+…
+42809be
+```
+Copilot noted the Phase 5b/5c TypeError messages and per-function
+docstrings referred to the mutable build grids as "tools.build.FloatGrid",
+but the actual Python import path is "nanovdb.tools.build.FloatGrid".
+Replace every occurrence so help() / autocomplete / error messages
+point at a path users can actually import.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Hide details
+View details
+swahtz
+merged commit f22bf6a
+into
+AcademySoftwareFoundation:feature/nanovdb_python
+May 21, 2026
+14 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+mentioned this pull request
+May 21, 2026
+NanoVDB Python: restructure to mirror the C++ NanoVDB API
+#2219
+Merged
+3 tasks done
+kmuseth
+pushed a commit
+that referenced
+this pull request
+Aug 18, 2026
+NanoVDB Python: restructure to mirror the C++ NanoVDB API (#2219)
+…
+8a8ed7c
+```
+* nanovdb python: Phase 0 foundation for C++ API mirror (#2209)
+
+* nanovdb python: Phase 0 foundation for C++ API mirror
+
+First slice of the Python bindings restructure tracked in #2208 and
+laid out in nanovdb-python-plan.md. Phase 0 is the mechanical
+groundwork the rest of the plan builds on:
+
+- BuildTypes.def: single X-macro list of currently-bound BuildT types
+  (scalar / vector / point / sampleable). NanoVDBModule.cc, PyMath.cc,
+  PySampleFromVoxels.cc, PyCreateNanoGrid.cc, PyTools.cc, PyGridHandle.h
+  and cuda/PyDeviceGridHandle.cu now drive their per-type instantiations
+  from this one file. Adding a BuildT in Phase 2 becomes one line.
+
+- CMakeLists.txt: under SKBUILD, ship the nanovdb/ headers inside the
+  Python wheel at nanovdb/include/nanovdb/ so downstream extension
+  authors can compile against the same headers the wheel was built with.
+  Also wire nanobind_add_stub so a nanovdb.pyi (and py.typed marker) are
+  emitted into the wheel for IDE / type-checker support; gated behind
+  NANOVDB_BUILD_PYTHON_STUBS and silently skipped on older nanobind.
+
+- __init__.py: add nanovdb.get_include() returning the bundled include
+  dir. Also fix the Windows DLL shim, which referenced an undefined
+  `directory` variable instead of the local `openvdb_dll_directory`.
+
+- Relocate the batched sampleFromVoxels CUDA kernel binding from the
+  phantom nanovdb.math.cuda submodule (which has no C++ counterpart) to
+  nanovdb.tools.cuda, alongside the existing signedFloodFill and
+  pointsToRGBA8Grid kernels. The math.cuda submodule is no longer
+  registered. TestNanoVDB.py updated to match.
+
+- Pre-existing observable bug fixes:
+  * GridHandle.__bool__ returned None (lambda was missing return);
+    it now returns !handle.empty() as intended.
+  * Enable __repr__ on GridType, GridClass and io::Codec via the
+    nanovdb::toStr / strlen<> helpers — previously commented out.
+
+Build + pytest verified locally (CPU-only): 28 tests pass; the single
+pre-existing test_read_write_grid BLOSC failure is unrelated (test
+doesn't wrap the optional codec call in try/except like its sibling
+does).
+
+Part of #2208.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: align Phase 0 X-macros with codingstyle.txt
+
+Audit of the new BuildTypes.def + consumers against
+nanovdb/nanovdb/docs/codingstyle.txt:
+
+- Rename the X-macro family NVDB_PY_FOR_EACH_*_BUILDT to
+  NANOVDB_PY_FOR_EACH_*_BUILDT and the helper sentinels
+  NVDB_PY_LOCAL_DEFINED_* to NANOVDB_PY_LOCAL_DEFINED_* to match the
+  established NANOVDB_ macro prefix used everywhere else in the codebase
+  (NANOVDB_USE_CUDA, NANOVDB_BUILD_PYTHON_MODULE, NANOVDB_HOSTDEV, ...).
+
+- Bring lines under the 100-column limit:
+    * Wrap the long VECTOR_BUILDT lines in BuildTypes.def across two
+      lines each (cleaner alignment, no behavior change).
+    * Rename the consumer macro parameter DeviceHandleMethod to
+      DeviceMethod so the #define line itself fits (was 102 cols).
+    * Reformat the GridHandle __bool__ lambda onto three lines instead
+      of one 119-col line (made worse by the `return` fix in the
+      previous commit).
+
+- Add a top-of-file justification block in BuildTypes.def explaining why
+  this file is a deliberate exception to the codingstyle "avoid macro
+  functions" rule (templates can't emit top-level declarations and
+  explicit instantiations across translation units from a single
+  canonical list).
+
+No functional change. Rebuild + pytest_nanovdb is identical to the
+previous commit: 28 tests pass, 8 CUDA skips, 1 pre-existing BLOSC
+failure.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: only generate .pyi stubs under SKBUILD by default
+
+Fixes the macOS CI failure on #2209. The previous commit defaulted
+NANOVDB_BUILD_PYTHON_STUBS to ON, which made the nanovdb_python_stub
+target fire on every in-tree CI build. The macOS GitHub Actions runner
+wraps the stubgen invocation with
+
+  cmake -E env DYLD_INSERT_LIBRARIES=.../libclang_rt.tsan_osx_dynamic.dylib:
+                                      .../libclang_rt.asan_osx_dynamic.dylib:
+                                      .../libclang_rt.ubsan_osx_dynamic.dylib
+  ASAN_OPTIONS=detect_leaks=0 python stubgen.py -m nanovdb ...
+
+(this preamble is added by the runner / CMake env wrapper — nothing in
+our nanobind_add_stub call sets it, and the .so itself is not built with
+-fsanitize). ThreadSanitizer can only install its interceptors at
+process start; Python loads first and then dlopen's the compiled .so,
+which TSan considers "too late" and aborts:
+
+  ==49907==ERROR: Interceptors are not working. This may be because
+  ThreadSanitizer is loaded too late (e.g. via dlopen).
+
+So the macOS build target failed with exit 2 after the .so itself built
+fine. The other matrix legs (linux-nanovdb Debug/Release for clang/gcc)
+all passed.
+
+Stubs are only useful to wheel consumers — they ship next to the .so in
+the installed package layout under SKBUILD. The in-source OpenVDB CI
+build never consumes them, so making stub generation default ON only
+when SKBUILD is set keeps the wheel build path unchanged and stops the
+macOS CI from invoking stubgen under the sanitizer wrapper. The user can
+still force generation with -DNANOVDB_BUILD_PYTHON_STUBS=ON for local
+dev builds where it's useful.
+
+Verified locally:
+  - in-tree config (SKBUILD unset): no nanovdb_python_stub target
+    defined; `make nanovdb_python_stub` errors with "no rule". Matches
+    desired CI behavior.
+  - SKBUILD=ON config: stub target exists, builds, emits nanovdb.pyi
+    and py.typed into the install layout (28 kB stub file with all the
+    expected GridHandle/GridType/GridClass symbols).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: Phase 1 — polymorphic Grid, GridMetaData, blind data, PointAccessor (#2210)
+
+* nanovdb python: Phase 1 — polymorphic Grid, GridMetaData, blind data, PointAccessor
+
+Second slice of the Python bindings restructure tracked in #2208 and
+laid out in nanovdb-python-plan.md. Phase 1 bundles the three sub-todos
+(1a polymorphic API, 1b type-erased introspection + blind data, 1c
+PointAccessor + handle utilities) into a single change on top of the
+Phase 0 X-macro foundation.
+
+API changes (pre-1.0 breaks called out in the plan):
+
+- Polymorphic accessors. handle.grid(n=0) and handle.deviceGrid(n=0)
+  replace the typed handle.floatGrid()/doubleGrid()/int32Grid()/
+  vec3fGrid()/rgba8Grid() and their device equivalents. Dispatch is
+  driven by gridType(n) through a switch generated from BuildTypes.def;
+  unbound BuildTs route to None rather than throwing.
+
+- Grid base class rename. The Python class previously bound as
+  nanovdb.GridData is now nanovdb.Grid (matching the C++ user-facing
+  class name Grid<TreeT>). All typed grid classes (FloatGrid, ...)
+  inherit from Grid.
+
+- Base-class method lift. version/gridSize/gridIndex/gridCount/voxelSize/
+  map/gridType/gridClass/checksum/isLevelSet/isFogVolume/.../hasMinMax/
+  hasBBox/.../isBreadthFirst/shortGridName move from per-BuildT
+  defineNanoGrid<T> up to defineGrid via lambdas that read GridData data
+  members directly. defineNanoGrid<T> now only binds getAccessor,
+  activeVoxelCount, and isSequential — the BuildT-dependent slice.
+
+Additive surface:
+
+- GridMetaData. Bound as nanovdb.GridMetaData with constructor from a
+  Grid and the full read-only accessor surface (gridType, gridClass,
+  shortGridName, gridSize/Index/Count, map, worldBBox, indexBBox,
+  voxelSize, blindDataCount, activeVoxelCount, activeTileCount(level),
+  nodeCount(level), checksum, version, isValid, isLevelSet/...,
+  hasMinMax/..., isBreadthFirst, rootTableSize, isEmpty). Type-erased
+  introspector — answer "what's in this buffer?" without knowing BuildT.
+
+- Blind data API on Grid. blindDataCount, blindMetaData(n),
+  findBlindData(name), findBlindDataForSemantic(sem), getBlindData(n).
+  getBlindData returns a zero-copy NumPy view typed by mDataType (Float
+  -> 1D float32, Vec3f -> (N, 3) float32, RGBA8 -> (N, 4) uint8, etc.).
+  Out-of-range and unknown-type paths return None / fall back to a flat
+  uint8 byte view.
+
+- Enums: GridBlindDataClass (Unknown/IndexArray/AttributeArray/GridName/
+  ChannelArray/End) and GridBlindDataSemantic (Unknown/PointPosition/
+  PointColor/PointNormal/PointRadius/PointVelocity/PointId/WorldCoords/
+  GridCoords/VoxelCoords/LevelSet/FogVolume/Staggered/End). Bound as
+  nb::enum_ with .export_values() so the names are also top-level
+  attributes of the module.
+
+- GridBlindMetaData struct. Read-only fields valueCount/valueSize/
+  semantic/dataClass/dataType, name() accessor, isValid(),
+  blindDataSize().
+
+- PointAccessor variants. nanovdb.PointIndexAccessor (uint32 indices,
+  used by PointIndex grids) and nanovdb.PointDataAccessor (Vec3f
+  positions, used by PointData grids). Methods gridPoints(),
+  leafPoints(ijk), voxelPoints(ijk) each return a zero-copy NumPy view
+  onto the underlying blind-data buffer, anchored to the accessor
+  lifetime via keep_alive.
+
+- GridHandle utilities. handle.copy() does a deep copy into a freshly
+  allocated buffer of the same buffer type. Module-scope splitGrids(h)
+  -> list[GridHandle] and mergeGrids(handles) -> GridHandle are
+  registered for both host and device handles via the existing
+  defineGridHandleUtilities<BufferT> template (nanobind merges them as
+  an overload set).
+
+Mechanical X-macro changes:
+
+- BuildTypes.def gains a GridTypeEnum column on each row so the
+  polymorphic dispatch in pyHostGrid/pyDeviceGrid can `case
+  nanovdb::GridType::<GridTypeEnum>:` on it. The Point row maps to
+  GridType::PointIndex (there is no GridType::Point).
+- HandleMethod/DeviceMethod columns dropped — the typed handle.fooGrid()
+  accessors no longer exist.
+
+NB_MODULE bind order:
+
+- defineCheckMode + defineChecksum now bind BEFORE defineGrid because
+  Grid.checksum() returns Checksum by value (registration must precede
+  use).
+- defineGridBlindData binds BEFORE defineGrid for the same reason
+  (Grid.findBlindDataForSemantic / blindMetaData reference the new enum
+  and class in their signatures).
+
+Tests (TestNanoVDB.py): all typed-accessor call sites rewritten to
+handle.grid(i)/handle.deviceGrid(i). New test classes cover the new
+surface — TestPolymorphicGridAccess, TestGridBase, TestGridMetaData,
+TestBlindDataEmpty, TestSplitMergeCopy — 11 new tests; the full suite
+is now 48 tests, 39 pass on a minimal CPU build (8 CUDA skip, 1
+pre-existing test_read_write_grid BLOSC failure unrelated to this PR).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: don't expose splitGrids/mergeGrids for DeviceGridHandle
+
+Caught during a real-CUDA verification pass of #2210: calling
+nanovdb.mergeGrids([device_h1, device_h2]) raised std::bad_cast on
+sm_120 (Blackwell, CUDA 13.2). Both the host and device overloads of
+splitGrids/mergeGrids take nb::list, so nanobind's overload resolution
+can't disambiguate by element type — it picks the first match and the
+inner nb::cast<HostHandle&&>(device_h) fails.
+
+The host-only variant is what the Phase 1 plan calls for. A properly
+typed device variant (with its own name, or strongly-typed
+std::vector<HandleT> args via nanobind/stl/vector.h) can land later if
+it's actually needed. handle.copy() on a DeviceGridHandle continues to
+work because copy() is a regular method, no overload resolution
+involved.
+
+Full CUDA pytest now reports 46/48 (the 2 failures are the pre-existing
+test_read_write_grid BLOSC bug, host + device variants — both call
+writeGrid(..., Codec.BLOSC) without try/except, identical to master).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address Copilot review on #2210
+
+Three concrete fixes from Copilot's review of the Phase 1 PR
+(https://github.com/AcademySoftwareFoundation/openvdb/pull/2210):
+
+1) mergeGrids no longer consumes its input handles.
+
+   The previous implementation built a std::vector<HandleT> via
+   nb::cast<HandleT&&>(h), which move-constructs the C++ GridHandle
+   out of the Python wrapper — leaving caller's h1/h2 silently
+   emptied (gridCount went 1 -> 0, size went non-zero -> 0).
+   Reproduced before fix; locked into a regression test
+   (TestSplitMergeCopy.test_merge_does_not_consume_inputs).
+
+   Rewrote the binding to read each handle by const reference and
+   inline the merge concat directly. The nanovdb::mergeGrids C++
+   helper's signature requires a std::vector<GridHandle> (a
+   move-only type), so reusing it from Python without moving from
+   the inputs would have meant deep-copying each handle twice; the
+   inlined version is ~15 lines and does one memcpy per source grid
+   with tools::updateGridCount fixing up the per-grid header.
+
+2) getBlindData validates mValueSize against the implied dtype/shape
+   before building a typed NumPy view.
+
+   A blind-data channel with mDataType=Float but mValueSize != 4
+   (corruption, version mismatch, or an unknown variant of a known
+   tag) would previously be exposed as `count` float32 elements —
+   i.e. count*4 bytes — even though the underlying region is only
+   count*mValueSize bytes. That overruns the channel and returns a
+   view onto unrelated bytes.
+
+   Added a `valueSize == sizeof(...)` (or `dim*sizeof(scalar)` for
+   vector cases) check on every handled GridType. On mismatch the
+   binding falls back to a raw uint8 byte view of mValueCount *
+   mValueSize, which is by definition the actual byte extent and
+   therefore always safe.
+
+3) GridMetaData ctor + safeCast guard against invalid grids before
+   calling into NanoVDB, where NANOVDB_ASSERT(gridData->isValid())
+   would abort debug builds and undefined-behave in release.
+
+   nanobind's type system already rejects Python None at the bind-
+   site (None can't bind to const GridData*), so the literal
+   "GridMetaData(None)" case Copilot called out is a TypeError
+   today — but the broader concern (an otherwise-valid Grid object
+   wrapping a corrupted buffer) is real.
+
+   __init__ now does an explicit `gd == nullptr || !gd->isValid()`
+   check and raises nb::value_error with a descriptive message
+   before calling into nanovdb::GridMetaData. safeCast does the
+   same and returns False on bad input, matching the spirit of
+   "is this safe to cast?".
+
+   New tests: TestGridMetaDataGuards covers the rejection paths and
+   the still-works happy path.
+
+Build + test verified locally on both CPU (52 tests, 43 pass, 8 CUDA
+skip, 1 pre-existing BLOSC) and full CUDA (52 tests, 50 pass, 2 pre-
+existing BLOSC host+device).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: Phase 2 — broaden BuildT coverage to 24 grid types (#2211)
+
+* nanovdb python: Phase 2 — broaden BuildT coverage to 24 grid types
+
+Third slice of the Python bindings restructure tracked in #2208 and
+laid out in nanovdb-python-plan.md. Phase 2 expands the bound BuildT
+list from the six surfaced in Phase 0/1 (float, double, int32_t, Vec3f,
+Rgba8, Point) to seventeen new types, riding the Phase 0 X-macro so
+each addition is a single row in BuildTypes.def plus a polymorphic
+dispatch arm.
+
+New BuildTs by category:
+
+- SCALAR (+4): int16_t, int64_t, uint8_t, uint32_t.
+  Bound exactly like the existing float/double/int32_t — full
+  defineScalarAccessor (with setVoxel) plus defineNodeInfo.
+  Class names follow the GridType enum: Int16Grid, Int64Grid,
+  UInt8Grid, UInt32Grid.
+
+- VECTOR (+5): Vec3d, Vec4f, Vec4d, Vec3u8, Vec3u16.
+  Same shape as the existing Vec3f / Rgba8 — defineVectorAccessor
+  with setVoxel, no NodeInfo. Accessor names use the consistent
+  "<Suffix>ReadAccessor" form (Vec3dReadAccessor, ...); only the
+  legacy Vec3fReadVectorAccessor / RGBA8ReadAccessor names from
+  Phase 0 stay as-is.
+
+- READONLY (new category, +8): bool, Fp4, Fp8, Fp16, FpN,
+  ValueIndex, ValueOnIndex, ValueMask. These all have
+  nanovdb::BuildTraits<T>::is_special == true, which means the C++
+  SetVoxel<T> specialization static_asserts and won't compile.
+  They get a bare defineAccessor<T> binding — getValue() only,
+  no setVoxel, no NodeInfo. Class names: BooleanGrid, Fp4Grid /
+  Fp8Grid / Fp16Grid / FpNGrid (quantized — getValue returns
+  float), IndexGrid / OnIndexGrid (getValue returns uint64), and
+  MaskGrid (getValue returns bool).
+
+The accessor's value type now resolves through
+nanovdb::BuildToValueMap<BuildT>::Type rather than
+DefaultReadAccessor<BuildT>::ValueType. For ordinary types they're
+identical, but for Half / Fp* the accessor decodes to float on read,
+for ValueIndex / OnIndex it returns uint64, and for ValueMask / bool
+it returns bool — the bound probeValue() out-parameter and the
+Python-side return type both want the decoded form. (Without this
+change, probeValue<Half>'s instantiation chain mismatches its own
+ProbeValue<Half>::ValueT = float.)
+
+nanovdb::Half is intentionally NOT bound. The source declares it as
+`class Half{};` (an empty placeholder for IEEE 754 half-precision)
+and the C++ ProbeValue<Half> chain is inconsistent — leaf storage
+carries Half but ProbeValue expects float, so the template doesn't
+instantiate. When the upstream Half implementation lands we can add
+it via the same X-macro path.
+
+Polymorphic dispatch in pyHostGrid / pyDeviceGrid gains a fourth
+arm (NANOVDB_PY_FOR_EACH_READONLY_BUILDT) covering all eight new
+GridType enumerators (Boolean, Fp4/Fp8/Fp16/FpN, Index, OnIndex,
+Mask). handle.grid(n) / handle.deviceGrid(n) now return the right
+typed subclass for these too.
+
+Tests: a single new TestPhase2BuildTCoverage class with 5 methods
+verifies every new BuildT registered, every accessor surface matches
+its category (scalars have setVoxel + getNodeInfo; vectors have
+setVoxel; read-only have neither), and all the new typed grids
+inherit from the polymorphic Grid base. We can't host-construct
+Int16Grid / Fp4Grid / IndexGrid / etc. yet because the C++
+create*Grid factories for those types land in Phase 5 — but the
+registration and the dispatch surface are locked in.
+
+Build + test verified locally:
+- CPU (no CUDA, no OpenVDB, no BLOSC): 57 tests, 48 pass, 8 CUDA
+  skip, 1 pre-existing test_read_write_grid BLOSC failure unrelated
+  to this PR.
+- CUDA sm_120 (Blackwell, CUDA 13.2): 57 tests, 55 pass, 2 pre-
+  existing BLOSC failures (host + device variants).
+
+No new lines over 100 cols.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address Copilot review on #2211
+
+Three concrete fixes from Copilot's review of the Phase 2 PR
+(https://github.com/AcademySoftwareFoundation/openvdb/pull/2211):
+
+1) Bind GridType.UInt8 in the Python enum.
+
+   Real bug — a Phase 0 oversight that was harmless until Phase 2
+   surfaced UInt8Grid. The C++ enumerator nanovdb::GridType::UInt8
+   existed (value 26), and the polymorphic dispatch routes it
+   correctly internally, but the enum binding was missing the
+   `.value("UInt8", GridType::UInt8)` line. Python users therefore
+   couldn't write `handle.gridType(n) == nanovdb.GridType.UInt8` to
+   discriminate UInt8 grids.
+
+   New regression test TestPhase2BuildTCoverage.
+   test_all_grid_type_enums_reachable walks every BuildT we bind
+   and confirms its GridType enumerator is reachable from Python,
+   so the next oversight gets caught at test time.
+
+2) Update pyHostGrid() docstring in PyGridHandle.h. Was claiming
+   "Boolean, Half, Fp16 land in Phase 2" as examples of types that
+   weren't yet Python-visible — those examples are now stale (Phase
+   2 binds Boolean and Fp16; Half stays unbound but for a different
+   reason). Reworded to point at BuildTypes.def as the source of
+   truth so the docstring can't go stale again as Phase 5+ adds
+   more types.
+
+3) Disambiguate "bool for ValueMask and bool" wording in the
+   READONLY macro doc comment in BuildTypes.def. The second "bool"
+   referred to the literal BuildT=bool grid; the phrasing read as
+   redundant. Now: "bool for ValueMask and for the BuildT=bool
+   (Boolean) grid". Same fix also enumerates the quantized types
+   explicitly (Fp4/Fp8/Fp16/FpN) instead of writing "Fp*".
+
+Build + test on CUDA sm_120 with BLOSC + ZLIB: 58/58 pass.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: Phase 3 — tree / nodes / NodeManager / leaf_values (#2212)
+
+* nanovdb python: Phase 3 — tree / nodes / NodeManager / leaf_values
+
+Fourth slice of the Python bindings restructure tracked in #2208 and
+laid out in nanovdb-python-plan.md. Phase 3 makes the tree itself
+walkable from Python: every BuildT now has a bound NanoTree, Root,
+Upper / Lower internal node, Leaf, and a host-side NodeManager. Where
+the leaf actually carries a contiguous T mValues[512] (regular
+scalar BuildTs) we also expose zero-copy NumPy views, including a
+high-level grid.leaf_values() bulk extractor.
+
+Per BuildT we now register six new classes:
+
+- <Suffix>Leaf — origin, bbox, dim, voxelCount, memUsage, flags,
+  isActive(ijk|n), getValue(offset|ijk), getFirstValue, getLastValue,
+  minimum / maximum / average / stdDeviation, valueMask, probeValue,
+  and (for arithmetic non-special ValueTs) values() returning a
+  zero-copy (512,) NumPy view of the leaf's mValues array.
+
+- <Suffix>Upper, <Suffix>Lower — origin, bbox, dim, memUsage,
+  minimum / maximum / average / stdDeviation, valueMask, childMask,
+  getValue, getFirstValue, getLastValue, isActive, probeValue. The
+  two internal node levels share a single defineInternalNodeBase
+  helper since their C++ APIs are identical.
+
+- <Suffix>Root — background, tileCount, getTableSize, isEmpty, bbox,
+  minimum / maximum / average / stdDeviation, memUsage, getValue,
+  isActive, probeValue.
+
+- <Suffix>Tree — root, background, activeVoxelCount,
+  activeTileCount(level), nodeCount(level), totalNodeCount,
+  memUsage, getValue, isActive, probeValue, extrema() (returns
+  (min, max) tuple), getFirstLeaf / getFirstLower / getFirstUpper.
+  Grid.tree() is bound on NanoGrid<T> and returns the typed tree
+  as reference_internal.
+
+- <Suffix>NodeManager — isLinear, memUsage, nodeCount(level),
+  leafCount, lowerCount, upperCount, leaf(i), lower(i), upper(i)
+  returning typed node refs. Constructed via the module-scope
+  nanovdb.createNodeManager(grid) which polymorphically picks the
+  right BuildT and returns a NodeManagerHandle. Handle exposes
+  size(), __bool__(), and mgr() — which itself dispatches by stored
+  gridType to return the right typed NodeManager.
+
+- grid.leaf_values() bulk extractor — for arithmetic non-special
+  BuildTs (float, double, Int16/32/64, UInt8/UInt32), walks the
+  breadth-first leaf array and returns a strided zero-copy
+  (N_leaves, 512) NumPy view. Stride between leaves is sizeof(LeafT)
+  / sizeof(ValueT), reflecting the leaf header between value blocks.
+  Throws ValueError on non-breadth-first grids (createNanoGrid
+  produces breadth-first by default).
+
+Mechanical bits:
+
+- All six bindings driven from BuildTypes.def via the existing
+  X-macro. New file PyTree.h holds the templated definitions; PyTree.cc
+  holds the non-templated NodeManagerHandle + createNodeManager bindings
+  (the latter dispatches over every BuildT via the same X-macro).
+- Tree / node classes are registered BEFORE defineNanoGrid because
+  NanoGrid<T>.tree() returns NanoTree<T>& and nanobind needs the
+  return type registered first.
+
+Skipped / deferred:
+
+- LeafT::variance() is NOT bound. NanoVDB.h line 4388 reads
+  `Pow2(DataType::getDev())` unqualified, which fails ADL for
+  non-float ValueTs (ValueIndex / ValueMask). Same for InternalNode.
+  Users can compute variance from stdDeviation() in Python.
+- VoxelBlockManager (OnIndexGrid-specific) deferred to a follow-up;
+  surface is sizeable enough to merit its own PR.
+- Vector leaf values() (Vec3f / Vec3d / Vec4f / Vec4d / Vec3u8 /
+  Vec3u16 / Rgba8) deferred — these need a flattened
+  (count, dim) component view since nanobind ndarray<Vec3f> isn't
+  well-formed. A future PR can add float[N, 512, 3] views.
+- Tree iterators (beginValueOn etc.) deferred — the bulk leaf_values
+  view + per-leaf valueMask covers the most common use case (mask
+  the bulk array and you have your active values).
+
+Verified locally (BLOSC + ZLIB on so the optional-codec tests pass):
+- CPU build: 58 tests + 8 new TestPhase3TreeNodes — **all 66 pass**.
+- CUDA sm_120 build (RTX PRO 6000 Blackwell, CUDA 13.2):
+  **all 66 pass**.
+- numpy-backed shape/dtype assertions in the new tests confirm the
+  per-leaf values() (512,) float32 and bulk leaf_values()
+  (N_leaves, 512) float32 views. NodeManager.leaf(i).values() is
+  byte-identical to tree.getFirstLeaf().values() for i==0.
+
+No new lines over 100 cols.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: drop phase numbers + reviewer markers from tests and comments
+
+User-facing strings in tests/comments that reference in-flight project
+history (phase numbers, reviewer names) lose their meaning once the
+project merges. Drop them and reword the surrounding text so each name
+and comment self-describes the feature being tested.
+
+- Renamed TestPhase2BuildTCoverage -> TestBuildTRegistrations.
+- Renamed TestPhase3TreeNodes -> TestTreeNodeWalking.
+- Reworded docstrings on TestPolymorphicGridAccess, TestGridBase,
+  TestGridMetaData, TestBlindDataEmpty, TestSplitMergeCopy,
+  TestGridMetaDataGuards to describe the feature instead of the phase.
+- Inline comments referencing "Phase 0", "Phase 1a.3", "Copilot review",
+  etc. reworded into prose about the actual behavior being asserted or
+  the underlying bug being regression-tested.
+- Same cleanup on the cuda/PyDeviceGridHandle.cu note about why we don't
+  register splitGrids/mergeGrids on DeviceBuffer.
+
+No behavior change. 66/66 tests still pass with BLOSC+ZLIB on.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: fix Clang Tree.nodeCount overload + drop exception-driven createNodeManager dispatch
+
+Two real issues caught in CI / review on #2212:
+
+1) Tree.nodeCount(int) binding doesn't compile on Clang.
+
+   PyTree.h used `nb::overload_cast<int>(&TreeT::nodeCount, nb::const_)`
+   to select the non-templated `uint32_t nodeCount(int) const` overload
+   on nanovdb::Tree<RootT>. Tree<RootT> also has a templated
+   `template<typename NodeT> uint32_t nodeCount() const` overload.
+   GCC accepted the overload_cast under SFINAE rules; Clang (used by
+   the linux-nanovdb:cxx:clang++-Debug CI leg) rejects it with
+   `no matching function for call to object of type
+    'const detail::overload_cast_impl<int>'`, repeated once per
+   BuildT instantiation.
+
+   Replaced with a direct static_cast to the function pointer type,
+   which is unambiguous to both compilers:
+
+       static_cast<uint32_t (TreeT::*)(int) const>(&TreeT::nodeCount)
+
+2) createNodeManager dispatch was exception-driven.
+
+   The previous binding tried nb::cast<NanoGrid<T>&>(py_grid) for every
+   BuildT and caught nb::cast_error on each mismatch — so a single call
+   to nanovdb.createNodeManager(grid) threw and caught 22 cast_error
+   exceptions before landing on the matching BuildT. Replaced with an
+   nb::isinstance<GridT>(py_grid) pre-check so the cast is only ever
+   attempted on the matching BuildT.
+
+Both linux-nanovdb:cxx:clang++-Debug should now build, and
+createNodeManager() no longer pays per-call exception overhead.
+Verified locally on CPU and CUDA sm_120 builds: 66/66 tests pass with
+BLOSC + ZLIB on.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: bounds-check + lifetime fixes on #2212
+
+Addresses Copilot review notes on PR #2212. Two real classes of bug.
+
+(1) Out-of-range arguments fell through into raw memory access.
+
+Several entry points on Leaf, Tree, and NodeManager rely on
+NANOVDB_ASSERT in the underlying C++ to catch invalid indices. That
+assertion is a no-op in release builds, so passing an OOB index from
+Python would read off the end of mValueMask / mValues / mNodeOffset[]
+arrays. Wrapped each with an explicit range check that raises a
+Python IndexError or ValueError:
+
+  - Leaf.isActive(n)            n must be < voxelCount()  (512)
+  - Leaf.getValue(offset)       offset must be < voxelCount()
+  - Tree.activeTileCount(level) level must be 1, 2, or 3
+  - Tree.nodeCount(level)       level must be 0, 1, or 2
+  - NodeManager.nodeCount(L)    same as Tree
+  - NodeManager.leaf(i)         i must be < leafCount()
+  - NodeManager.lower(i)        i must be < lowerCount()
+  - NodeManager.upper(i)        i must be < upperCount()
+
+(2) Returned pointers / NumPy views did not actually keep their
+backing buffers alive.
+
+The pattern `nb::cast(value, nb::rv_policy::reference, parent)` was
+used at multiple sites under the assumption that the third argument
+established a Python-level keep_alive linkage between the returned
+object and `parent`. It doesn't — rv_policy::reference is "no
+ownership, no keep_alive" by definition; the parent argument is only
+a hint to the cast machinery, not a lifetime guarantee.
+
+As a result, expressions that drop the intermediate handle would
+silently free the underlying buffer:
+
+    g = nanovdb.tools.createFogVolumeSphere(name='probe').grid()
+    g.gridName()   # SEGFAULT — handle was GC'd
+
+    vals = (nanovdb.tools.createFogVolumeSphere()
+            .grid().tree().getFirstLeaf().values())
+    vals.sum()     # SEGFAULT
+
+    nm = nanovdb.createNodeManager(
+        nanovdb.tools.createFogVolumeSphere().grid()).mgr()
+    nm.leaf(0)     # SEGFAULT — NodeManager holds raw ptr to grid
+
+Added explicit `nb::keep_alive<0, 1>()` to the .def for every
+affected site so the returned value keeps its parent alive:
+
+  - GridHandle.grid(n)              (PyGridHandle.h)
+  - DeviceGridHandle.deviceGrid(n)  (cuda/PyDeviceGridHandle.cu)
+  - NodeManagerHandle.mgr()         (PyTree.cc)
+  - Grid.getBlindData(n)            (NanoVDBModule.cc)
+  - Leaf.values()                   (PyTree.h)
+  - Grid.leaf_values()              (PyTree.h)
+  - PointAccessor.gridPoints / leafPoints / voxelPoints
+                                    (NanoVDBModule.cc)
+  - nanovdb.createNodeManager(grid) keep arg 1 (grid) alive as long
+    as the returned NodeManagerHandle lives — because the underlying
+    NodeManager stores a raw pointer to the grid.
+
+These were pre-existing bugs introduced in Phase 1 (pyHostGrid) and
+inherited by every subsequent zero-copy view; Phase 3 surfaced more
+of them via the new Tree/Leaf/NodeManager bindings.
+
+Two new test classes lock the fixes in:
+
+  - TestBoundsChecks asserts each guarded entry point raises the
+    correct exception type at every boundary and still accepts in-
+    range inputs.
+  - TestZeroCopyViewLifetimes invokes each fixed binding in the
+    chained-temporary form (handle.grid().tree().getFirstLeaf()
+    .values(), createNodeManager(temp).mgr().leaf(0).values(), ...),
+    runs gc.collect(), then touches the returned value. Pre-fix
+    these segfaulted; now they pass cleanly.
+
+CPU + CUDA sm_120 (BLOSC + ZLIB on): 75/75 pass.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address Copilot follow-up review on #2212
+
+Three further Copilot notes on the bounds-check/lifetime commit
+(f6735717), all valid.
+
+(1) PyTree.h relied on transitive includes for std::is_arithmetic_v /
+    std::enable_if. Works on GCC + libstdc++ because <type_traits> is
+    pulled in by <nanobind/nanobind.h> -> standard headers, but MSVC /
+    libc++ may break the chain. Added an explicit
+        #include <type_traits>
+    near the top.
+
+(2) grid.leaf_values() returned None for empty grids (nLeaves == 0 or
+    getFirstLeaf() == nullptr) while its docstring promised an
+    (N_leaves, 512) NumPy view. Callers had to special-case the None
+    sentinel before iterating. Now returns an empty (0, 512) ndarray
+    of the right dtype, so the contract reads cleanly:
+
+        for row in grid.leaf_values(): ...
+
+    works on every grid, empty or not. When nLeaves == 0 we pass a
+    dummy non-null aligned pointer (the grid itself) to nb::ndarray so
+    nanobind has a valid base for the empty array — no data is read
+    since the leading shape is 0. Docstring updated to call out the
+    empty-grid behavior explicitly.
+
+(3) The ValueError raised on a non-breadth-first grid said
+        "rebuild via tools::createNanoGrid(...)"
+    which reads like a C++ symbol. Reworded to the Python-API form
+        "rebuild via nanovdb.tools.createNanoGrid(...)"
+    so Python users see a Python entry point.
+
+New test method TestTreeNodeWalking.test_bulk_leaf_values_empty_grid_returns_empty_array
+constructs a grid with an empty bbox (nLeaves == 0) and asserts
+leaf_values() is an (0, 512) float32 NumPy array (not None).
+
+CPU + CUDA sm_120 (BLOSC + ZLIB on): 76/76 pass.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: VoxelBlockManager (host) — Phase 3 follow-up (#2213)
+
+* nanovdb python: VoxelBlockManager (host) — Phase 3 follow-up
+
+Phase 3 deferred the VoxelBlockManager surface; this picks it up before
+moving on to Phase 4. Adds host-side bindings for everything under
+nanovdb::tools::VoxelBlockManager*, plus a minimal createOnIndexGrid
+scaffold needed to build OnIndex grids from Python (the broader
+createNanoGrid<SrcGridT, DstBuildT> binding lands in Phase 5).
+
+New module surface, all under nanovdb.tools:
+
+- VoxelBlockManagerHandle (host) — owns the firstLeafID + jumpMap
+  metadata buffers; exposes blockCount(), firstOffset(), lastOffset(),
+  reset(), __bool__. Buffers exposed as zero-copy NumPy views:
+    firstLeafID() -> (blockCount,) uint32
+    jumpMap(jump_map_length=1) -> (blockCount, jump_map_length) uint64
+  jumpMap takes a jump_map_length argument because the value depends on
+  log2_block_width (= 1 << (log2_block_width - 6)) and isn't stored on
+  the handle. handle.decodeBlock(grid, i, log2_block_width=6) is a
+  convenience method that slices firstLeafID / jumpMap for block i and
+  calls decodeInverseMaps internally.
+
+- buildVoxelBlockManager(grid, log2_block_width=6, first_offset=0,
+  last_offset=0, n_blocks=0) — runtime switch over Log2BlockWidth ∈
+  {6, 7, 8, 9} (BlockWidth 64/128/256/512) dispatching to the right
+  template instantiation. Rejects non-OnIndex grids with TypeError;
+  rejects out-of-range log2_block_width with ValueError.
+
+- decodeInverseMaps(grid, first_leaf_id, jump_map, block_first_offset,
+  log2_block_width=6) — free function. jump_map is a uint64 NumPy
+  array of length JumpMapLength (= 1 << (log2_block_width - 6));
+  returns (leaf_index, voxel_offset) freshly-allocated NumPy arrays
+  (uint32, uint16) of length BlockWidth.
+
+- createOnIndexGrid(src_grid, channels=0, include_stats=True,
+  include_tiles=True, verbose=0) — minimal test-scaffold factory
+  that binds tools::createNanoGrid<SrcGridT, ValueOnIndex>. Accepts
+  FloatGrid, DoubleGrid, Int32Grid, Vec3fGrid sources. Required for
+  end-to-end VBM testing since no other path produces an OnIndex
+  grid from Python today. The full createNanoGrid<SrcGridT, DstBuildT>
+  surface remains scoped to Phase 5.
+
+Defensive checks:
+
+- decodeBlock validates firstLeafID[block_index] is in [0, leafCount)
+  before passing it into the C++ decodeInverseMaps. The underlying
+  NanoVDB algorithm doesn't always initialize firstLeafID — blocks
+  that no leaf's iteration sweep reaches (e.g. on tile-compressed
+  OnIndex grids where some sequential offsets correspond to tile
+  values rather than leaf voxels) are left with uninitialized memory.
+  Without the guard, decodeInverseMaps would read
+  tree.getFirstNode<0>()[garbage] and crash; the guard converts that
+  into a Python ValueError with a clear message pointing at the
+  workaround (build the source grid voxel-by-voxel via build::Grid
+  so it stays uncompressed).
+
+- All entry points reject out-of-range indices, levels, and grid
+  build types up front (TypeError / ValueError / IndexError).
+
+Tests under TestVoxelBlockManager exercise:
+  - createOnIndexGrid produces an OnIndex / IndexGrid / sequential grid
+  - Buffer shapes and dtypes (firstLeafID, jumpMap default + reshape)
+  - decodeBlock(0) returns (uint32, uint16) arrays of length BlockWidth
+  - decodeInverseMaps free function agrees with handle.decodeBlock
+  - Out-of-range block_index raises IndexError
+  - Out-of-range log2_block_width (5, 10) raises ValueError
+  - Non-OnIndex grid argument raises TypeError
+  - createOnIndexGrid(None) raises TypeError
+
+End-to-end decode verification across every block is intentionally
+deferred until Phase 4's build::Grid bindings land — that's the only
+host-side path to construct a tile-free OnIndex grid where every
+block's firstLeafID is reliably initialized by the current upstream
+algorithm.
+
+Verified locally:
+- CPU build: 84 tests, 75 pass + 8 new VBM tests, 1 pre-existing
+  test_read_write_grid BLOSC env-dependent failure unrelated to this PR.
+- CUDA sm_120 + BLOSC + ZLIB: 84/84 pass.
+
+No new lines over 100 cols.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: skip ndarray tests cleanly when numpy is missing
+
+Windows CI surfaced three test errors on #2213 from
+TestZeroCopyViewLifetimes — the test methods invoked
+.values() / .leaf_values() directly without an `import numpy` guard,
+so on environments without numpy installed (e.g. the Windows runner)
+the bindings raised:
+
+    TypeError: could not export nanobind::ndarray:
+        ModuleNotFoundError: No module named 'numpy'
+
+The other ndarray-touching tests (test_leaf_values_zero_copy,
+test_bulk_leaf_values, test_node_manager_round_trip, the VBM
+test_decode_block_zero, etc.) already guard with `import numpy`
+and call self.skipTest. The three lifetime tests just skipped
+that guard.
+
+Added the same try/except ImportError + skipTest pattern to:
+  - TestZeroCopyViewLifetimes.test_handle_grid_tree_leaf_values_chain
+  - TestZeroCopyViewLifetimes.test_grid_leaf_values_temporary
+  - TestZeroCopyViewLifetimes.test_node_manager_temporary_grid
+
+While I was here, also dropped an unnecessary numpy guard on
+TestVoxelBlockManager.test_create_on_index_grid_rejects_unsupported_source
+— that test only checks TypeError on a non-grid input and doesn't
+touch numpy, so it can run unconditionally.
+
+Verified locally with both a numpy-enabled venv (84/84 pass minus the
+pre-existing BLOSC env failure) and a numpy-less venv (84 ran, 17
+skipped, no new errors).
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: install numpy on Windows CI so ndarray tests run
+
+The Windows job for the NanoVDB workflow was missing the install_numpy
+step that the main openvdb build.yml and weekly.yml workflows already
+run after install_windows.ps1. As a result the vcpkg-supplied Python
+on the Windows runner had no numpy, so every test that touches
+nb::ndarray<nb::numpy, ...> either errored (before #2213's skip
+guards) or now skips silently.
+
+Add the install_numpy step using the existing
+ci/install_windows_numpy.ps1 helper, matching the pattern already in
+build.yml. The Windows runner will then actually execute the
+ndarray-touching VoxelBlockManager / Tree / GridHandle tests instead
+of skipping them.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address Copilot review on #2213
+
+Four issues raised by Copilot on the open VBM follow-up PR, all real:
+
+1. VoxelBlockManagerHandle.jumpMap(jump_map_length) accepted any
+   caller-supplied length and used it to shape a zero-copy NumPy view
+   over hostJumpMap(). Since the underlying buffer was sized as
+   blockCount * JumpMapLength (where JumpMapLength is derived from
+   the log2_block_width the handle was BUILT with), a caller passing
+   a larger value produced an ndarray whose elements lived past the
+   end of the allocated buffer — an OOB read on access.
+
+   Fix: wrap VoxelBlockManagerHandle in a small PyVBMHandle struct
+   that also stores the log2_block_width. jumpMap() takes no
+   arguments and derives JumpMapLength from the stored width, so the
+   returned view always matches the buffer exactly. decodeBlock() no
+   longer accepts a log2_block_width either, removing the equivalent
+   mismatch hazard there. The new PyVBMHandle exposes
+   log2_block_width / block_width / jump_map_length as read-only
+   properties for introspection.
+
+2. decodeInverseMaps() did not validate first_leaf_id against
+   grid.tree().nodeCount(0). VoxelBlockManager::decodeInverseMaps
+   indexes tree.getFirstNode<0>()[first_leaf_id] unconditionally, so
+   a stray ID produced an OOB read of the leaf array. Validate up
+   front and raise IndexError.
+
+3. buildVoxelBlockManager() did not enforce grid.isSequential() (a
+   precondition guarded only by NANOVDB_ASSERT, which is a no-op in
+   release) nor that first_offset == 1 (mod BlockWidth). Validate
+   both at the Python boundary and raise ValueError; the zero
+   first_offset default still flows through unchanged because the
+   C++ helper normalizes it to 1 itself.
+
+4. The zero-copy shape/dtype test exercised
+   vbm.jumpMap(jump_map_length=2) on a handle built with
+   log2_block_width=6 — exactly the OOB case (1) was about. Rewrite
+   the test to build a second handle with log2_block_width=7 and
+   verify its jumpMap shape is (blockCount, 2), confirming the
+   shape now follows the handle. Drop the obsolete
+   log2_block_width=6 kwarg from decodeBlock. Add two new tests:
+   misaligned first_offset is rejected, and an out-of-range
+   first_leaf_id on decodeInverseMaps raises IndexError.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: empty-handle guards + accurate ownership comment
+
+Two follow-up items from Copilot on #2213:
+
+1. firstLeafID() and jumpMap() called hostFirstLeafID() / hostJumpMap()
+   on the underlying VoxelBlockManagerHandle and fed the result straight
+   into nb::ndarray, but both accessors legally return nullptr on a
+   default-constructed or reset() handle (blockCount() == 0). Passing
+   nullptr into nb::ndarray is unsafe even with a zero leading shape.
+   Mirror the pattern PyTree.h uses for the empty-grid leaf_values()
+   case: when the buffer is null, substitute a non-null dummy pointer
+   (the handle itself) so nanobind has something to base the empty
+   ndarray on; nothing is read because the leading shape is 0. Add
+   tests for both default-constructed and reset() handles.
+
+2. The pyDecodeInverseMapsImpl comment described nanobind as allocating
+   "fresh memory through numpy", which doesn't match the implementation
+   (which uses new[] + a capsule with delete[] as deleter). Rewrite the
+   comment to describe the actual ownership model so future maintainers
+   aren't misled.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: VBM exception-safety + firstLeafID sentinel prefill
+
+Two more items from Copilot on #2213:
+
+1. pyDecodeInverseMapsImpl allocated leafIndex / voxelOffset with raw
+   new[] and only wrapped them in nb::capsule after several intervening
+   operations (a second new[], the decodeInverseMaps call itself, and
+   the first capsule's own construction). If anything in that window
+   threw, the half-built state leaked. Hold the raw arrays in
+   std::unique_ptr until each capsule has been constructed, then
+   release() so ownership transfers cleanly; any throw during that
+   sequence now unwinds without leaking.
+
+2. The C++ allocating overload of buildVoxelBlockManager uses
+   HostBuffer::create (uninitialized malloc) for firstLeafID, then
+   touches only the slots its iteration sweep reaches. Blocks the
+   algorithm doesn't visit retain arbitrary values; the existing
+   decodeBlock guard (firstLeafID >= nLeaves) catches values past the
+   leaf array but cannot tell garbage that happens to be < nLeaves
+   from a real leaf id, so a low garbage byte would silently decode
+   against the wrong leaf.
+
+   Switch the Python binding to allocate the metadata buffers itself,
+   prefill every firstLeafID slot with the sentinel value `nLeaves`,
+   then call the in-place buildVoxelBlockManager(grid, handle)
+   overload. The in-place builder zeros the jumpMap and only writes
+   firstLeafID slots it visits, so every untouched slot keeps the
+   sentinel and deterministically trips the decodeBlock guard.
+
+   Add test_untouched_blocks_trip_sentinel_guard, which sweeps every
+   block of the cube VBM and asserts each firstLeafID slot is either
+   a real leaf id (< nLeaves) or exactly the sentinel — never any
+   other value.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: VBM popcount upper-bound + n_blocks validation
+
+Two more items from Copilot on #2213:
+
+1. The decodeBlock guard only checked firstLeafID < nLeaves, but the
+   C++ decodeInverseMaps loops leafID = firstLeafID ..
+   firstLeafID + nExtraLeaves where nExtraLeaves is the popcount of
+   this block's jumpMap (each set bit marks an additional leaf
+   boundary crossed within the block). With a corrupt jumpMap or a
+   handle paired with a different grid, the loop could read past
+   tree.getFirstNode<0>() even with a valid firstLeafID.
+
+   Hoist a popcount-based upper-bound check into
+   pyDecodeInverseMapsImpl: compute nExtraLeaves locally and raise
+   ValueError if firstLeafID + nExtraLeaves >= grid.tree().nodeCount(0).
+   Because both the handle.decodeBlock() and the free-function
+   decodeInverseMaps() funnel through this impl, both paths are
+   covered without per-caller duplication.
+
+2. buildVoxelBlockManager accepted an explicit n_blocks but didn't
+   validate it against the documented precondition
+   n_blocks >= ceil((last_offset - first_offset + 1) / BlockWidth).
+   A smaller value produced a handle whose blockCount() < the
+   coverage implied by lastOffset, silently truncating later
+   decodeBlock sweeps. Validate when nonzero and raise ValueError
+   with the minimum required value in the message.
+
+   New test_build_voxel_block_manager_rejects_undersized_n_blocks
+   covers the n_blocks=1 case on the cube VBM.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: explicit std headers in PyVoxelBlockManager.cc
+
+Copilot noted PyVoxelBlockManager.cc uses std::integral_constant,
+std::string/std::to_string, and std::move but relied on transitive
+includes from nanobind / NanoVDB headers to bring those in. That works
+on the toolchains we currently test but is fragile against stricter
+ones.
+
+Add explicit <string>, <type_traits>, and <utility> includes; drop
+<cstring> and <stdexcept>, neither of which the translation unit
+actually uses now.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: Phase 4a — tools.build.Grid<T> mutable CPU builder (#2214)
+
+* nanovdb python: Phase 4a — tools.build.Grid<T> mutable CPU builder
+
+Bind nanovdb::tools::build::Grid<BuildT>, its ValueAccessor<BuildT>, and
+Tree<BuildT>::WriteAccessor under a new nanovdb.tools.build submodule.
+One set of classes per writable BuildT in BuildTypes.def — every scalar
+(float, double, int16, int32, int64, uint8, uint32) and every vector
+(Vec3f, Vec3d, Vec4f, Vec4d, Vec3u8, Vec3u16, Rgba8). Naming mirrors
+the C++ namespace: nanovdb.tools.build.FloatGrid is the mutable
+counterpart of the read-only nanovdb.FloatGrid.
+
+The binding exposes:
+
+- Grid<T>(background, name='', gridClass=Unknown) — constructor
+- getValue / setValue / setValueOn / isActive (the last two convenience-
+  wrap a fresh ValueAccessor under the hood, since C++ has no
+  setValueOn/isActive on Grid itself)
+- nodeCount, gridType, gridClass, getName/setName, setTransform,
+  .background property
+- getAccessor() / getWriteAccessor() returning the typed Value /
+  WriteAccessor proxies
+- .to_nanovdb(sMode, cMode, verbose) — bakes the build grid into a
+  host NanoGrid<BuildT> handle by calling tools::createNanoGrid
+
+ValueAccessor exposes getValue/setValue/setValueOn/isActive/isValueOn.
+WriteAccessor exposes setValue/setValueOn/merge. Both are wired up so
+the parent grid is kept alive by Python while the accessor lives.
+
+Implementation notes:
+
+- WriteAccessor's defaulted move constructor leaves its internal
+  ValueAccessor::mRoot reference dangling (the reference points into
+  the moved-from WriteAccessor's own mRoot field, which is per-object
+  state — not the parent Tree's mRoot). The Python binding bypasses
+  the move path by heap-allocating via nb::rv_policy::take_ownership
+  so the C++ object's address is stable for its entire lifetime.
+- ValueAccessor doesn't have this hazard because its mRoot reference
+  points at the parent Tree's mRoot (a stable address external to the
+  accessor), so move construction is safe.
+- Read-only special BuildTs (Boolean, Fp4/8/16/N, ValueIndex,
+  ValueOnIndex, ValueMask) and Point are deliberately excluded — they
+  have no SetValue<T> specialization and can't be built voxel-by-voxel.
+
+Test coverage in new TestBuildGrid: constructor defaults, setValue
+marks active, setValueOn preserves background, accessor parity with
+grid, WriteAccessor merge-on-destruction, .to_nanovdb() round-trip
+with metadata preserved, .to_nanovdb() doesn't consume the source,
+Int32Grid + Vec3fGrid spot-checks, and setTransform propagation to
+the baked grid's voxelSize / map.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address Copilot review on #2214
+
+Four items from the Phase 4a review, all valid:
+
+1. Grid<T>.background property read self.mRoot.mBackground directly,
+   touching an internal field even though RootNode exposes a
+   background() accessor. Switch to self.mRoot.background() so the
+   binding doesn't depend on the underlying field name staying put.
+
+2. .to_nanovdb() can be an expensive bake for large grids but held
+   the GIL the whole time. Add nb::call_guard<nb::gil_scoped_release>()
+   so other Python threads can run during the conversion (the lambda
+   only touches C++ state, no Python object handling).
+
+3. nodeCount()'s docstring said the tuple was "internal node counts",
+   but the first element is the leaf (level-0) count — leaves are not
+   internal nodes. Reword to just "(leaf_count, lower_count,
+   upper_count)" and drop the "internal" mislabel.
+
+4. The WriteAccessor merge test was named "merges_on_destruction" but
+   actually called wa.merge() explicitly and never forced the
+   destructor to run. Split into two cases:
+   - test_write_accessor_explicit_merge — calls .merge() explicitly,
+     matching what the original test actually checked
+   - test_write_accessor_merges_on_destruction — drops the only
+     reference (del wa) and runs gc.collect() so the C++ destructor
+     fires, then asserts the change is visible
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: use Vec3f.__eq__ in build::Vec3fGrid test
+
+Copilot noted the component-by-component comparison in
+test_vec3f_build_grid was justified by an out-of-date claim that
+Vec3f equality isn't bound — it is (PyMath.cc defineVec3 wires
+nb::self == nb::self). Use self.assertEqual(got, v) directly.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: Phase 4b + 4c — stats, validation, checksum (#2215)
+
+* nanovdb python: Phase 4b + 4c — stats, validation, checksum
+
+Round out Phase 4 by binding the GridStats, GridValidator, and
+GridChecksum surfaces that didn't ship with Phase 4a.
+
+Phase 4b — Stats
+================
+
+* Per-BuildT `tools.<Suffix>Extrema` and `tools.<Suffix>Stats` classes
+  for every scalar and vector BuildT in `BuildTypes.def`. Extrema
+  exposes `min` / `max` / `add(value)` and a truthy `bool()` for "has
+  at least one sample"; Stats inherits from Extrema and adds `size`,
+  `avg` / `mean`, `var` / `variance`, `std` / `stdDev`. Static
+  predicates `hasMinMax` / `hasAverage` / `hasStdDeviation` /
+  `hasStats` mirror the C++ trait queries.
+
+* `tools.updateGridStats(grid, mode=Default)` — polymorphic dispatch
+  via `callNanoGrid` over an `UpdateGridStatsOp`. Scalar and vector
+  BuildTs route to `tools::updateGridStats<BuildT>`; the special /
+  quantized / index / mask types (`Fp4/8/16/N`, `ValueIndex`,
+  `ValueOnIndex`, `ValueMask`, `Point`) raise `ValueError` because
+  `Stats<ValueT>` isn't meaningful for them. `bool` falls through to
+  the C++ `NoopStats` arm.
+
+* Per-BuildT `tools.getExtrema(grid, bbox)` returning the matching
+  `Extrema`. Restricted to scalar + vector BuildTs (the only ones
+  with an arithmetic ValueType).
+
+Both `updateGridStats` and `getExtrema` release the GIL during the
+traversal.
+
+Phase 4c — Validation & checksum
+================================
+
+* `tools.validateGrid(handle, gridID, mode=Default, verbose=False)`
+  for `GridHandle<HostBuffer>` — single-grid complement of the
+  existing `validateGrids`. Returns `False` (without raising) when
+  the gridID is out of range.
+
+* `tools.checkGrid(grid, mode=Full)` — polymorphic via `callNanoGrid`.
+  Returns `(ok, error_message)`. The 256-byte char buffer the C++
+  helper writes into is hidden inside the binding so Python callers
+  see a `(bool, str)` tuple.
+
+* `tools.isValid(grid, mode=Default, verbose=False)` — polymorphic via
+  `callNanoGrid<IsValidOp>`, equivalent to `checkGrid` + checksum
+  verification rolled into a single bool.
+
+* `tools.evalChecksum(grid, mode=Default)` and
+  `tools.validateChecksum(grid, mode=Default)` — accept any bound
+  NanoGrid via the existing `GridData` Python upcast (every
+  `NanoGrid<T>` Python class is registered with `GridData` as its
+  base, so nanobind handles the dispatch transparently). All three
+  release the GIL.
+
+Test coverage in new `TestGridStats`, `TestGridValidate`, and
+`TestGridChecksum` (11 cases total): Extrema/Stats default-and-add,
+polymorphic `updateGridStats` on a float grid, `updateGridStats`
+rejection on an OnIndex grid, `getExtrema` over a sub-bbox,
+`checkGrid` / `isValid` / `validateGrid` happy paths plus
+out-of-range `gridID` and `CheckMode.Disable` short-circuit, and
+`evalChecksum` → `updateChecksum` → `validateChecksum` round-trip.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address Copilot review on #2215
+
+Four items from the Phase 4b/4c review, all valid:
+
+1. UpdateGridStatsOp rejected every BuildTraits<BuildT>::is_special
+   type unconditionally (except bool), but tools::updateGridStats
+   actually supports StatsMode::BBox on any ValueT via the NoopStats
+   path. Drop directly into NoopStats for special BuildTs when mode
+   is Disable or BBox; only MinMax / All raise (because those would
+   instantiate Stats / Extrema over a non-arithmetic ValueT and the
+   semantics are ill-defined). Update the binding docstring to
+   describe the actual matrix.
+
+2. The test_update_grid_stats_rejects_index_grid case was renamed to
+   test_update_grid_stats_on_index_grid and extended to cover all
+   four StatsMode arms on an OnIndexGrid: MinMax and All raise,
+   BBox and Disable now succeed.
+
+3. validateGrid's docstring didn't mention the CheckMode.Disable
+   short-circuit (which returns True without inspecting the handle
+   or gridID). The Python tests already exercised the short-circuit
+   via test_validateGrid_disable_mode_always_true, so the behavior
+   was correct — just the docstring was missing it.
+
+4. IsValidOp::unknown ignored verbose=True and silently returned
+   false, but the C++ callNanoGrid::unknown arm writes an
+   "Unsupported GridType" message to std::cerr when verbose is set.
+   Mirror that — pull in <iostream> in the binding TU and emit the
+   same diagnostic from C++.
+
+5. test_get_extrema_over_active_bbox used a bbox that exactly equals
+   the root's active bbox, which triggers C++ getExtrema's
+   "bbox contains root.bbox()" short-circuit that unconditionally
+   folds the grid background into the extrema — so the min came
+   back as 0.0 (background), not 1.0 (the smallest active voxel).
+   The test passed but the semantics were muddy: it was really
+   asserting "background gets added in this branch" rather than
+   anything about getExtrema's bbox restriction. Replace with
+   test_get_extrema_strictly_inside_active_region, which uses a
+   bbox strictly inside the active region (so the recursive branch
+   runs) and asserts min/max are exactly the smallest/largest
+   sampled active values.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: bind validateGrid for device handles too
+
+Copilot noted tools.validateGrids was registered for both
+GridHandle<HostBuffer> and GridHandle<cuda::DeviceBuffer> (the
+latter behind NANOVDB_USE_CUDA), but my Phase 4c addition of the
+single-grid tools.validateGrid only covered HostBuffer — leaving
+device handles able to validate the whole bundle but not an
+individual grid.
+
+Add the matching #ifdef NANOVDB_USE_CUDA overload binding
+tools::validateGrid<GridHandle<cuda::DeviceBuffer>>. The C++
+helper does host-side dispatch via callNanoGrid on the
+host-resident gridData() pointer that DeviceGridHandle exposes, so
+the same Python overload pair is appropriate.
+
+New test_validateGrid_on_device_handle exercises the device path
+end-to-end (build a CUDA level-set sphere, validate it, confirm
+the same out-of-range and Disable-mode short-circuits as the host
+overload). The test is gated on cuda module availability so it's
+skipped cleanly on CPU-only builds.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address more Copilot review on #2215
+
+Two more items from the review, both valid:
+
+1. CheckGridOp wrote tools::checkGrid's error message into a 256-byte
+   stack buffer. tools::checkGrid (and its util::sprint / util::strcpy
+   helpers) trust the caller's buffer is large enough — there is no
+   bounds-checked variant. The current error messages are at most ~80
+   characters once GridType and GridClass enumerator names are
+   stringified, so 256 wasn't actually overflowing today, but the
+   margin is uncomfortable and a future error string addition could
+   push past it. Bump to a 4096-byte buffer (named via a constexpr
+   kErrorBufSize) and zero-init the first byte before the call so the
+   ok-detection still works if the helper bails out before writing
+   anything.
+
+2. updateGridStats's docstring claimed special (quantized / index /
+   mask) BuildTs only accept Disable / BBox, but Boolean grids are
+   special yet fall through the if-constexpr filter to the regular
+   tools::updateGridStats path (which routes any mode to NoopStats
+   for ValueT=bool inside the C++ helper). Reword the docstring to
+   call out Boolean as the exception that accepts every StatsMode
+   via the NoopStats internal path.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+---------
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: Phase 5 — primitives + quantized/index createNanoGrid (#2216)
+
+* nanovdb python: Phase 5 — primitives + quantized/index createNanoGrid
+
+Closes out Phase 5 of the NanoVDB Python bindings restructure (#2208).
+Lands all three sub-phases (5a primitives, 5b quantized createNanoGrid
+overloads, 5c generic createNanoGrid from build::Grid) in one PR.
+
+Phase 5a — Host primitives
+==========================
+
+Bind the nine primitives that didn't ship with Phase 0:
+
+* tools.createLevelSetBox(gridType, width, height, depth, ...) — narrow-
+  band level set of a solid axis-aligned box.
+* tools.createLevelSetBBox(gridType, width, height, depth, thickness, ...) —
+  narrow-band level set of a hollow box wireframe.
+* tools.createLevelSetOctahedron(gridType, scale, ...) — narrow-band
+  level set of an octahedron.
+* tools.createFogVolumeBox(...) and tools.createFogVolumeOctahedron(...) —
+  the fog-volume counterparts of the above.
+* tools.createPointSphere / createPointTorus / createPointBox(gridType,
+  pointsPerVoxel, ...) — PointDataGrids scattered on the surface of each
+  primitive shape.
+* tools.createPointScatter(srcGrid, pointsPerVoxel, ...) — scatter a
+  PointDataGrid into the active voxels of a NanoGrid<float> level set or
+  fog volume. The C++ template also accepts double sources; the binding
+  is float-only for simplicity (the runtime grid pointer carries the
+  source BuildT and adding a per-type dispatch is mechanical follow-up).
+
+Each non-point primitive is instantiated for float and double via the
+same runtime-GridType switch the existing createLevelSetSphere et al.
+already use. The FpN overloads of these primitives are deliberately
+not bound here — quantization is reachable via Phase 5b's generic
+createNanoGrid* path with explicit oracle and dither parameters.
+
+Phase 5b — Quantized createNanoGrid overloads
+=============================================
+
+* tools.AbsDiff(tolerance=-1.0) and tools.RelDiff(tolerance=-1.0) —
+  compression-oracle classes used by FpN. Both expose getTolerance /
+  setTolerance and a truthy __bool__ that returns True iff the
+  tolerance has been initialized (>= 0). The default tolerance of -1
+  matches the C++ "uninitialized — fill in via init()" sentinel.
+
+* tools.createNanoGridFp4 / Fp8 / Fp16(src, sMode, cMode, ditherOn,
+  verbose) — quantize a float source into a fixed-bit-width grid.
+  ditherOn adds sub-quantum noise to break up banding.
+
+* tools.createNanoGridFpN(src, oracle, sMode, cMode, ditherOn, verbose) —
+  variable-bit-width quantization. Two overloads: one accepting an
+  AbsDiff oracle (the default), one accepting a RelDiff oracle. Python
+  picks the right overload from the oracle argument's type.
+
+The C++ Fp{4,8,16,N} preProcess templates static_assert SrcValueT ==
+float, so the binding rejects double sources with a TypeError instead
+of letting the compile-time assertion trip a hard abort.
+
+Phase 5c — Generic createNanoGrid from build::Grid
+==================================================
+
+Each conversion entry accepts both NanoGrid<SrcBuildT> and
+tools::build::Grid<SrcBuildT> as its source. Internally a small
+template helper tries each source-side BuildT in turn (matching the
+existing tryCreateOnIndexGrid pattern from the Phase 3 follow-up) and
+dispatches via nb::isinstance.
+
+* tools.createNanoGridIndex(src, channels=0, includeStats=True,
+  includeTiles=True, verbose=0) — NEW. Bake any supported source into
+  a NanoGrid<ValueIndex> with all voxels (active and inactive) given a
+  uint64 sequential index. Original values can be carried as blind
+  data when channels > 0.
+
+* tools.createNanoGridOnIndex(src, ...) — same as Index but only the
+  active voxels get a sequential index. Supersedes the Phase 3
+  follow-up's tools.createOnIndexGrid test scaffold (which is kept
+  alive in PyVoxelBlockManager.cc for backwards compatibility with
+  the VBM tests; new code should prefer createNanoGridOnIndex).
+
+Source types accepted by the index path are NanoGrid<float | double |
+int32 | Vec3f> and tools::build::Grid<float | double | int32 | Vec3f>.
+The same-type bake of build::Grid<T> -> NanoGrid<T> remains served by
+the Phase 4a .to_nanovdb() method.
+
+Test plan
+=========
+
+Three new TestCase classes covering: every primitive (TestNewPrimitives,
+11 cases), every quantization path including double-source rejection
+and oracle defaults (TestCreateNanoGridQuantized, 8 cases), and every
+index/onindex source type including the build::Grid path
+(TestCreateNanoGridIndex, 6 cases). All 25 new cases pass locally; the
+full pytest_nanovdb suite stays green except for the two pre-existing
+BLOSC-disabled errors in my local build.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+
+* nanovdb python: address Copilot review on #2216
+
+Four items from the Phase 5 review, plus a follow-on segfault fix
+caught while addressing the third item:
+
+1. openToNanoVDB binding accidentally dropped the sMode argument and
+   gave `base` a default of tools::StatsMode::Default — nonsense both
+   semantically (base is an OpenVDB GridBase::Ptr) and structurally
+   (the C++ template expects 4 args, the binding declared 3 keyword
+   args). The CI build broke for openvdb-enabled configs with a
+   "number of nb::arg annotations must match the argument count"
+   static_assert from nanobind. Restore the correct signature: base
+   has no default, sMode/cMode/verbose carry their defaults.
+
+2. Octahedron primitive default name strings carried the upstream C++
+   typo "octadedron" (sic). The C++ side keeps the misspelling for
+   binary compatibility with old grids; correct it on the Python
+   side since the default propagates into help() output and grid
+   metadata where end-users see it.
+
+3. The point primitives took a `gridType` argument that was
+   misleading — it controls the intermediate level-set's precision
+   the scatter starts from, not the returned PointDataGrid's type
+   (which is always UInt32). While investigating the rename, I found
+   that the createPointSphere<double> / createPointTorus<double> /
+   createPointBox<double> code paths actually segfault during scatter
+   with the current C++ implementation (only the float path is
+   exercised by the C++ unit tests). Take Copilot's "remove it and
+   always use float" alternative: drop the argument entirely. The
+   binding now always uses the float intermediate level-set.
+   createPointSphere / Torus / Box no longer have the parameter;
+   their docstrings explicitly note "always returns a UInt32
+   PointDataGrid".
+
+4. The defineCreateNanoGridConversions doc-comment claimed sources
+   were accepted for "every scalar/vector BuildT in BuildTypes.def
+   that tools::createNanoGrid supports", whic…
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

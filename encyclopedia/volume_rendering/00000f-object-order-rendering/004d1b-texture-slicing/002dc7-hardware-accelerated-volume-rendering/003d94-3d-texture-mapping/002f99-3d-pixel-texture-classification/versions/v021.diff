@@ -1,0 +1,123 @@
+--- v020.md
++++ v021.md
+@@ -4,62 +4,58 @@
+ 
+ ## Overview
+-3D Pixel Texture Classification is a hardware-accelerated method for applying multi-dimensional transfer functions during direct volume ray casting by encoding classification parameters into a 3D texture lookup [S1]. It solves the problem of high-dimensional transfer function evaluation by mapping scalar volume properties (Data Value, Gradient Magnitude, and Second Derivative) to color and opacity via a single texture fetch [S1]. It differs from standard 1D or 2D lookup tables by explicitly incorporating boundary information (via the second derivative) into the hardware interpolation pipeline, allowing for precise control over material boundaries without requiring complex shader logic [S1].
++3D Pixel Texture Classification is a hardware-accelerated method for evaluating multi-dimensional transfer functions during direct volume ray casting. It solves the problem of efficiently mapping voxel attributes (Data Value, Gradient Magnitude, and Second Derivative) to color and opacity by storing the classification function in a 3D texture [S1]. It differs from standard 1D or 2D lookup tables by explicitly incorporating curvature information (second derivative) to enhance boundary detection, using a specialized "sheet" representation for the signed second derivative axis [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar volume dataset $V$. For each sample point $\mathbf{p}$ along a ray, the method requires three scalar values: the Data Value $D = V(\mathbf{p})$, the Gradient Magnitude $G = \|\nabla V(\mathbf{p})\|$, and the Second Derivative $S = \nabla^2 V(\mathbf{p})$ [S1].
+-*   **Output:** A color $C$ and opacity $\alpha$ pair for the current sample, retrieved from the 3D pixel texture [S1].
++*   **Input:** A 3D scalar volume. For each sample point along a ray, the method computes three attributes: Data Value ($D$), Gradient Magnitude ($G$), and Second Derivative ($S$).
++*   **Output:** Color ($C$) and Opacity ($\alpha$) for the sample.
+ 
+ **Data Structures:**
+-The classification is stored in a 3D texture $T_{\text{VGH}}$ with dimensions $N_D \times N_G \times N_S$ [S1].
+-*   **Axis 1 (Data Value):** Resolution $N_D = 256$ (8-bit) [S1].
+-*   **Axis 2 (Gradient Magnitude):** Resolution $N_G = 256$ (8-bit) [S1].
+-*   **Axis 3 (Second Derivative):** Resolution $N_S$ is limited (not 256) [S1].
++A 3D pixel texture (volume texture) is used to store the transfer function.
++*   **Axis 1 (Data Value):** 8-bit resolution (256 entries).
++*   **Axis 2 (Gradient Magnitude):** 8-bit resolution (256 entries).
++*   **Axis 3 (Second Derivative):** Limited resolution. The axis represents "sheets" corresponding to specific second derivative values.
+ 
+-**Preprocessing and Coordinate Mapping:**
+-1.  **Data Value ($u$):** The scalar value $D$ is normalized to $[0, 1]$ and used directly as the $u$-coordinate [S1].
+-2.  **Gradient Magnitude ($v$):** The gradient magnitude $G$ is normalized to $[0, 1]$ and used as the $v$-coordinate [S1].
+-3.  **Second Derivative ($w$):** The second derivative $S$ is signed [S1]. To maintain the sign during hardware interpolation, a scale and bias are applied to map $S$ to the texture coordinate $w \in [0, 1]$ [S1].
++**Steps:**
++1.  **Attribute Computation:** For a voxel at position $\mathbf{p}$, compute the scalar value $D = V(\mathbf{p})$. Compute the gradient magnitude $G = \|\nabla V(\mathbf{p})\|$. Compute the second derivative $S$. The second derivative is typically the Laplacian or a directional second derivative along the gradient.
++2.  **Sign Maintenance:** Since $S$ is a signed quantity, apply a scale and bias transformation to map the signed range to the texture coordinate range, preserving the sign information for interpolation [S1].
++3.  **Texture Lookup:** Use $(D, G, S')$ as coordinates to sample the 3D pixel texture.
++    *   $D$ and $G$ use full 8-bit indexing.
++    *   $S'$ is the transformed second derivative coordinate.
++4.  **Sheet Representation:** The second derivative axis is structured as three distinct "sheets" or control planes within the texture:
++    *   Sheet 1: Negative second derivative values.
++    *   Sheet 2: Zero second derivative values (center sheet).
++    *   Sheet 3: Positive second derivative values.
++5.  **Opacity Interpolation:** The opacity value retrieved from the texture is modulated by a "boundary emphasis" parameter.
++    *   Let $\alpha_{center}$ be the opacity value at the center sheet (zero second derivative).
++    *   Let $\alpha_{outer}$ be the opacity value at the outer sheets (positive/negative second derivative).
++    *   The opacity on the outer sheets is scaled from the center sheet opacity based on the boundary emphasis slider [S1].
+ 
+-**Classification Logic (The "Sheets" Model):**
+-The third axis ($w$) is structured as discrete "sheets" representing specific second derivative behaviors [S1].
+-*   **Control Points:** Three control points are defined: Negative ($S < 0$), Zero ($S = 0$), and Positive ($S > 0$) [S1].
+-*   **Opacity Control:** The opacity at the center sheet ($S=0$) is directly controlled by classification widgets [S1]. The opacity at the outer sheets ($S \neq 0$) is scaled from the center sheet opacity based on a "boundary emphasis" slider [S1]. This allows linear control over the opacity of second derivative values [S1].
+-
+-**Algorithm Steps:**
+-1.  Compute $D = V(\mathbf{p})$, $G = \|\nabla V(\mathbf{p})\|$, and $S = \nabla^2 V(\mathbf{p})$ for the current sample [S1].
+-2.  Normalize $D$ and $G$ to $[0, 1]$ [S1].
+-3.  Apply scale and bias to $S$ to preserve sign and map to $w \in [0, 1]$ [S1].
+-4.  Perform a trilinear texture lookup $T_{\text{VGH}}(u=D, v=G, w=w)$ [S1].
+-5.  The texture returns the pre-computed color $C$ and opacity $\alpha$ [S1].
++**Parameters:**
++*   **Resolution:** 256x256x$N$ for the texture, where $N$ is the number of second derivative control points (typically small, e.g., 3 sheets) [S1].
++*   **Boundary Emphasis:** A scalar parameter controlling the relative opacity of the outer sheets compared to the center sheet [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def classify_vgh(data_value, gradient_magnitude, second_derivative, texture_vgh, boundary_emphasis):
+-    # 1. Normalize Data Value and Gradient Magnitude to [0, 1]
+-    u = data_value / 255.0
+-    v = gradient_magnitude / 255.0
+-
+-    # 2. Map Second Derivative to w-coordinate
+-    # Scale and bias to maintain sign and fit in [0, 1]
+-    # Evidence states sign must be maintained via scale and bias for proper interpolation [S1]
+-    w = (second_derivative + 1.0) / 2.0  # [G] Standard normalization for signed values
+-
+-    # 3. Texture Lookup
+-    # Represents hardware trilinear fetch of RGBA channels
+-    color, alpha = texture_vgh[u, v, w]
+-
+-    # 4. Apply Boundary Emphasis Scaling
+-    # Opacity on outer sheets (non-zero 2nd deriv) is scaled from center sheet opacity
+-    # according to the boundary emphasis slider [S1]
+-    alpha = alpha * boundary_emphasis
+-
++def classify_voxel(data_value, gradient_magnitude, second_derivative, texture, boundary_emphasis):
++    # 1. Map second derivative to texture coordinate
++    # Scale and bias to maintain sign and fit within texture bounds
++    # Assuming texture depth covers negative, zero, and positive regions
++    s_coord = scale_and_bias(second_derivative)
++    
++    # 2. Sample the 3D texture
++    # D and G use full 8-bit resolution (0-255)
++    # S uses limited resolution (sheet index or normalized coordinate)
++    color, alpha_raw = texture.sample(data_value, gradient_magnitude, s_coord)
++    
++    # 3. Apply boundary emphasis scaling
++    # The opacity on outer sheets is scaled from the center sheet opacity
++    # This logic is implicitly handled by the texture layout and the emphasis slider
++    # If the texture stores raw values, explicit scaling might be:
++    # alpha = alpha_raw * boundary_emphasis_factor
++    
+     return color, alpha
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Using full 8-bit resolution for all three axes would be prohibitively large ($256^3$ entries) [S1]. Limiting the second derivative axis resolution is necessary [S1].
+-*   **Sign Preservation:** Failing to maintain the sign of the second derivative via scale and bias will result in incorrect interpolation across the zero-crossing [S1].
+-*   **Boundary Emphasis:** The "boundary emphasis" slider affects the opacity of the outer sheets relative to the center sheet [S1].
++*Note: The exact scaling formula for boundary emphasis is not provided in the sources, only that outer sheet opacity is scaled from the center sheet opacity [S1].*
+ 
+ ## Subtopics
+@@ -69,11 +65,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per sample for classification, as it reduces to a single texture fetch [G].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Efficient multi-dimensional classification; hardware interpolation handles the "sheets" model effectively [S1].
+-*   **Limitations:** Limited resolution on the second derivative axis; requires careful tuning of the boundary emphasis slider [S1].
++*   **Memory:** The 3D texture size is $256 \times 256 \times N$. With $N$ being small (e.g., 3 sheets), the memory footprint is manageable, but full 8-bit resolution on all three axes would be prohibitively large ($256^3$ entries) [S1].
++*   **Performance:** Hardware-accelerated texture lookups are efficient on GPUs. The method avoids complex shader computations for transfer function evaluation by offloading it to the texture unit [S1].
++*   **Limitations:** The resolution of the second derivative axis is limited, which may reduce the fidelity of curvature-based classification compared to higher-resolution methods [S1].
+ 
+ ## Background
+-The method was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S1]. It addresses the computational cost of evaluating complex transfer functions by leveraging the GPU's texture hardware [S1]. The approach was developed to enable real-time interaction with volumetric data by reducing the classification step to a simple lookup [S1].
++The method was described in the context of interactive volume rendering using multi-dimensional transfer functions [S1]. It leverages the capabilities of 3D pixel textures available in graphics hardware at the time of publication [S1].
+ 
+ ## Sources

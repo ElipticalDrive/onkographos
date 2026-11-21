@@ -1,0 +1,264 @@
+--- v004.md
++++ v005.md
+@@ -4,131 +4,139 @@
+ 
+ ## Overview
+-Ray marching volume rendering is a direct volume rendering technique that visualizes 3D scalar or vector fields by casting a ray through the volume for each pixel, sampling data at fixed intervals, and accumulating color and opacity using front-to-back compositing [S2, unofficial][S3, book][S14, unofficial]. It solves the problem of rendering continuous volumetric data (such as smoke, clouds, or medical scans) on a 2D screen without requiring explicit mesh extraction [S3, book][S15, unofficial]. Unlike isosurfacing, which only reveals sharp boundaries, ray marching reveals internal structures and boundaries for smooth or globally continuous data [S16]. It differs from its sibling [Ray Evaluation Stepping DVR](3461-ray-evaluation-stepping-dvr.md) by using a fixed step size along the ray rather than evaluating the volume integral via adaptive or variable stepping schemes, and from [Density Marching](3462-density-marching.md) by explicitly integrating opacity and color contributions rather than just marching to find density thresholds.
++Ray Marching Volume Rendering is a direct volume rendering technique that visualizes 3D scalar or vector fields by casting a ray through the volume for each pixel, sampling data at fixed intervals, and accumulating color and opacity front-to-back [S3, book][S14, unofficial]. It solves the problem of rendering continuous volumetric data (such as smoke, clouds, or medical scans) where internal structures and boundaries must be visible simultaneously, without requiring explicit mesh generation [S16][S20, unofficial]. Unlike sibling methods that may use adaptive stepping or geometry-based occlusion, this method relies on uniform discretization along the ray, making it straightforward to implement in fragment shaders but computationally intensive due to the large number of samples required [S1, S14, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A 3D volume texture (density field, optionally color/velocity fields), camera parameters (origin, direction, projection matrix), bounding box of the volume, and rendering parameters (step size, max steps, transfer function).
++*   **Inputs:** A 3D volume texture (density field, optionally color/velocity fields), camera parameters (origin, direction, projection matrix), and rendering parameters (step size, max steps, transfer function).
+ *   **Outputs:** A 2D image where each pixel contains the accumulated color and opacity of the ray passing through the volume.
+ 
+ **Data Structures:**
+-*   **Volume Texture:** Typically a 3D texture (`sampler3D`) storing density in one channel (e.g., Red) and color in others [S8, S11, unofficial]. If 3D texture support is unavailable (e.g., WebGL 1.0), the volume is packed into a 2D texture using a specific coordinate mapping formula, where 3D coordinates $(x, y, z)$ are converted to 2D UVs [S10, unofficial].
++*   **Volume Texture:** Typically a 3D texture (`sampler3D`) storing density in the red channel or RGBA [S8, S11, unofficial]. In WebGL 1.0 environments lacking 3D texture support, the volume is packed into a 2D texture using a specific coordinate mapping formula [S10, unofficial].
+ *   **Transfer Function:** A 1D or 2D texture mapping normalized density/intensity values to RGBA color and opacity [S8, S10, unofficial].
+-*   **Ray State:** Origin $\mathbf{o}$, direction $\mathbf{d}$, current position $\mathbf{p}$, accumulated color $C_{acc}$, accumulated opacity $\alpha_{acc}$, and transmittance $T$ [S13, S19, unofficial].
++*   **Ray State:** Per-pixel variables including current position, accumulated color ($C_{acc}$), accumulated alpha ($\alpha_{acc}$), and transmittance ($T$).
+ 
+ **Numbered Steps:**
+ 
+-1.  **Ray Generation:** For each pixel, compute the ray origin $\mathbf{o}$ (camera position) and direction $\mathbf{d}$ in world space.
+-    *   In clip space, construct ray: $\mathbf{r}_{clip} = (uv \cdot 2.0 - 1.0, -1.0, 1.0)$ [S2, unofficial].
+-    *   Transform to eye space: $\mathbf{r}_{eye} = \text{inverse}(\text{projectionMatrix}) \cdot \mathbf{r}_{clip}$, setting $z=-1.0, w=0.0$ [S2, unofficial].
+-    *   Transform to world space: $\mathbf{d} = \text{normalize}((\text{inverse}(\text{modelViewMatrix}) \cdot \mathbf{r}_{eye}).xyz)$ [S2, unofficial].
+-    *   Origin $\mathbf{o}$ is the camera position [S2, unofficial].
++1.  **Ray Generation:** For each pixel, compute the ray origin $\mathbf{o}$ (camera position) and direction $\mathbf{d}$ (normalized vector from camera through the pixel) in world space [S5, S18, unofficial].
++    *   In clip space: $\mathbf{r}_{clip} = (uv_x, uv_y, -1.0, 1.0)$ [S2, unofficial].
++    *   Transform to eye space: $\mathbf{r}_{eye} = \text{inverse}(P) \cdot \mathbf{r}_{clip}$, setting $z=-1, w=0$ [S2, unofficial].
++    *   Transform to world space: $\mathbf{d} = \text{normalize}(\text{inverse}(MV) \cdot \mathbf{r}_{eye}.xyz)$ [S2, unofficial].
+ 
+-2.  **Box Intersection:** Determine the entry ($t_{near}$) and exit ($t_{far}$) points of the ray with the volume's bounding box (AABB).
+-    *   Compute $t_{min/max} = (box_{min/max} - \mathbf{o}) / \mathbf{d}$ [S11, unofficial].
+-    *   $t_{near} = \max(t_{min})$, $t_{far} = \min(t_{max})$ [S11, unofficial].
+-    *   If the ray is inside the box, set $t_{near} = 10^{-4}$ to avoid self-intersection artifacts [S11, unofficial].
++2.  **Box Intersection:** Determine the entry ($t_{near}$) and exit ($t_{far}$) points of the ray with the volume's bounding box (AABB) using the slab method [S11, unofficial]:
++    $$ t_{min/max} = \frac{box_{min/max} - \mathbf{o}}{\mathbf{d}} $$
++    $$ t_{near} = \max(t_{min}), \quad t_{far} = \min(t_{max}) $$
++    If the ray is inside the box, set $t_{near} = 10^{-4}$ to avoid self-intersection artifacts [S11, unofficial].
+ 
+-3.  **Initialization:**
+-    *   Calculate step size $\Delta t$. This can be fixed (e.g., $\Delta t = \text{MAX\_DISTANCE} / \text{NUM\_STEPS}$) [S17, unofficial] or adaptive based on pixel size and volume dimensions [S4, unofficial].
+-    *   Initialize accumulated color $C_{acc} = \mathbf{0}$, accumulated opacity $\alpha_{acc} = 0$, and transmittance $T = 1.0$ [S13, S19, unofficial].
+-    *   Set current position $\mathbf{p} = \mathbf{o} + t_{near} \cdot \mathbf{d}$ [S13, unofficial].
++3.  **Initialization:** Initialize accumulators:
++    *   Accumulated Color: $C_{acc} = (0, 0, 0)$
++    *   Accumulated Alpha: $\alpha_{acc} = 0$
++    *   Transmittance: $T = 1.0$
++    *   Current Position: $\mathbf{p} = \mathbf{o} + t_{near} \cdot \mathbf{d}$ [S13, S17, unofficial].
+ 
+-4.  **Ray Marching Loop:** Iterate from $t_{near}$ to $t_{far}$ with step $\Delta t$.
+-    *   **Termination Check:** If $\alpha_{acc} \ge 1.0$ (or $T < \text{threshold}$, e.g., 0.01), break the loop (Early Ray Termination) [S8, S19, unofficial].
+-    *   **Sampling:** Sample density $\rho$ and color $\mathbf{c}$ from the volume texture at $\mathbf{p}$ using trilinear interpolation [S1, unofficial][S16].
+-        *   If using packed 2D texture, apply coordinate transformation [S10, unofficial].
+-    *   **Transfer Function:** Map $\rho$ to opacity $\alpha_{step}$ and color $\mathbf{c}_{sample}$ using the transfer function [S8, unofficial][S16].
+-        *   $\alpha_{step} = \rho \cdot \Delta t \cdot \text{densityMult}$ [S2, S8, unofficial]. Note: Density is often clamped to 0.0 [S2, unofficial].
+-    *   **Lighting (Optional):** If lighting is enabled, estimate normal via gradient of density and compute diffuse/specular lighting [S14, unofficial]. Calculate light contribution $L$ at $\mathbf{p}$ [S17, unofficial].
+-    *   **Compositing (Front-to-Back):**
+-        *   Update transmittance: $T_{new} = T \cdot (1 - \alpha_{step})$ or $T_{new} = T \cdot e^{-\sigma_t \Delta t}$ [S2, S9, unofficial].
+-        *   Update color: $C_{acc} = C_{acc} + T \cdot \alpha_{step} \cdot \mathbf{c}_{sample}$ [S2, S18, unofficial].
+-        *   Update opacity: $\alpha_{acc} = \alpha_{acc} + T \cdot \alpha_{step}$ [S2, unofficial].
+-        *   Update position: $\mathbf{p} = \mathbf{p} + \mathbf{d} \cdot \Delta t$ [S2, unofficial].
++4.  **Ray Marching Loop:** Iterate from $t_{near}$ to $t_{far}$ with a fixed step size $\Delta t$ (or fixed number of steps $N$) [S6, S17, unofficial]:
++    *   **Sample Density:** Retrieve density $\rho$ from the volume texture at $\mathbf{p}$ using trilinear interpolation [S16].
++    *   **Compute Step Opacity:** Calculate the opacity contribution for this step:
++        $$ \alpha_{step} = \rho \cdot \Delta t \cdot \text{densityMult} $$
++        where $\text{densityMult}$ is a scaling factor (e.g., 50.0) [S2, S5, unofficial]. Clamp $\rho$ to $\ge 0$ [S2, unofficial].
++    *   **Transfer Function:** Map $\rho$ to color $c$ and additional opacity $\alpha_{tf}$ using the transfer function texture [S6, S10, unofficial].
++    *   **Front-to-Back Compositing:** Update accumulators using Beer's Law and alpha blending [S2, S18, unofficial]:
++        $$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{step} \cdot \alpha_{tf} $$
++        $$ C_{out} = C_{in} + (1 - \alpha_{in}) \cdot \alpha_{step} \cdot \alpha_{tf} \cdot c $$
++        Update Transmittance: $T = T \cdot (1 - \alpha_{step} \cdot \alpha_{tf})$ [S19, unofficial].
++    *   **Advance:** $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{d} \cdot \Delta t$ [S17, unofficial].
+ 
+-5.  **Final Composition:**
+-    *   Add background color $\mathbf{c}_{bg}$ multiplied by final transmittance $T$: $C_{final} = C_{acc} + T \cdot \mathbf{c}_{bg}$ [S2, S17, unofficial].
+-    *   If rendering to a format requiring opaque alpha (e.g., WebGL), force $\alpha_{final} = 1.0$ [S6, unofficial].
++5.  **Termination:** Break the loop if:
++    *   $\alpha_{acc} \ge 1.0$ (or a threshold like 0.99) [S2, S8, unofficial].
++    *   $T < \text{stop\_threshold}$ (e.g., 0.01) for early ray termination [S19, unofficial].
++    *   $\mathbf{p}$ exceeds $t_{far}$ [S8, unofficial].
++
++6.  **Final Composition:** Combine the accumulated volume color with the background color $C_{bg}$:
++    $$ C_{final} = C_{acc} + T \cdot C_{bg} $$
++    [S17, S18, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def ray_march_volume_rendering(camera_pos, ray_dir, volume_texture, transfer_func, box_min, box_max, step_size, max_steps):
+-    # 1. Ray-Box Intersection
+-    inv_dir = 1.0 / ray_dir
+-    t_min = (box_min - camera_pos) * inv_dir
+-    t_max = (box_max - camera_pos) * inv_dir
+-    t_near = max(min(t_min), min(t_max))
+-    t_far = min(max(t_min), max(t_max))
++def ray_march_volume_rendering(ray_origin, ray_direction, volume_texture, transfer_function, 
++                               box_min, box_max, step_size, stop_threshold=0.01, density_mult=1.0):
++    # 1. Box Intersection
++    inv_dir = 1.0 / ray_direction
++    t_min = (box_min - ray_origin) * inv_dir
++    t_max = (box_max - ray_origin) * inv_dir
++    t_near = max(min(t_min))
++    t_far = min(max(t_max))
+     
+     if t_near > t_far:
+         return vec3(0.0) # No intersection
+-    
+-    # Ensure we start slightly inside to avoid precision issues
+-    t_start = max(t_near, 1e-4)
+-    t_end = t_far
+-    
++
++    # Adjust t_near if ray starts inside
++    if t_near < 1e-4:
++        t_near = 1e-4
++
+     # 2. Initialization
+-    accumulated_color = vec3(0.0)
+-    accumulated_alpha = 0.0
++    pos = ray_origin + t_near * ray_direction
++    acc_color = vec3(0.0)
++    acc_alpha = 0.0
+     transmittance = 1.0
+-    current_pos = camera_pos + ray_dir * t_start
+     
+     # 3. Marching Loop
+-    for i in range(max_steps):
+-        # Termination conditions
+-        if accumulated_alpha >= 0.99 or transmittance < 0.01:
++    # Calculate number of steps or use fixed step size
++    # Using fixed step size for simplicity as per "Fixed Step" parent
++    current_t = t_near
++    while current_t < t_far:
++        if transmittance < stop_threshold:
+             break
+             
+-        # Check if we have exited the volume
+-        if current_pos.x < box_min.x or current_pos.x > box_max.x or \
+-           current_pos.y < box_min.y or current_pos.y > box_max.y or \
+-           current_pos.z < box_min.z or current_pos.z > box_max.z:
+-            break
+-            
+-        # 4. Sample Volume
+-        # Normalize position to [0, 1] for texture lookup if needed
+-        # density = texture3D(volume_texture, normalized_pos).r
+-        density = sample_volume_at(current_pos, volume_texture)
++        # Sample density
++        density = sample_volume(volume_texture, pos)
++        density = max(density, 0.0) # Clamp negative noise
+         
+-        # Clamp density
+-        density = max(0.0, density)
++        # Compute step opacity
++        alpha_step = density * step_size * density_mult
+         
+-        # 5. Transfer Function
+-        # alpha_step = density * step_size * density_mult
+-        alpha_step = density * step_size
+-        color_sample, alpha_sample = transfer_func(density)
++        # Get color from transfer function based on density
++        # Assuming transfer function maps [0,1] density to RGBA
++        tf_color = sample_transfer_function(transfer_function, density)
++        tf_alpha = tf_color.a
+         
+-        # 6. Compositing
+-        # Beer's law approximation for discrete step
+-        # T_step = exp(-density * step_size) # Alternative to alpha_step
+-        contribution = color_sample * alpha_sample * transmittance
+-        accumulated_color += contribution
+-        accumulated_alpha += alpha_sample * transmittance
+-        transmittance *= (1.0 - alpha_sample)
++        # Effective step opacity
++        step_alpha = alpha_step * tf_alpha
+         
+-        # Advance ray
+-        current_pos += ray_dir * step_size
++        # Front-to-back compositing
++        # C_out = C_in + (1 - alpha_in) * alpha_step * color
++        # alpha_out = alpha_in + (1 - alpha_in) * alpha_step
++        # Note: Standard DVR formula: C = C + T * (1 - exp(-sigma * dt)) * c
++        # Here approximated as linear: alpha_step = sigma * dt
+         
+-    # 7. Final Color
+-    # Assuming background is black or passed as argument
+-    background_color = vec3(0.0) 
+-    final_color = accumulated_color + background_color * transmittance
++        contribution = (1.0 - acc_alpha) * step_alpha * tf_color.rgb
++        acc_color += contribution
++        acc_alpha += (1.0 - acc_alpha) * step_alpha
++        
++        # Update transmittance
++        transmittance *= (1.0 - step_alpha)
++        
++        # Advance
++        current_t += step_size
++        pos = ray_origin + current_t * ray_direction
++        
++    # 4. Final Composition
++    # Background color is assumed to be passed or default
++    background_color = vec3(0.2) 
++    final_color = acc_color + transmittance * background_color
+     
+     return final_color
+ ```
+ 
+-**Parameters with Typical Values:**
+-*   `step_size`: Fixed distance between steps. Typical values: 0.015 [S5, unofficial], or derived from `1 / max(volume_dimensions)` [S4, unofficial]. Smaller values yield higher quality but lower performance [S7].
+-*   `max_steps`: Maximum number of iterations. Typical values: 32 [S14, unofficial], 128 [S5, unofficial], 4096 [S10, unofficial].
+-*   `density_mult`: Multiplier for sampled density. Typical values: 50.0 [S5, unofficial].
+-*   `stop_threshold`: Transmittance threshold for early termination. Typical values: 0.01 [S19, unofficial], 0.99 for alpha accumulation [S2, unofficial].
++**Parameters:**
++*   `step_size` (float): Distance advanced per march step. Typical values: 0.015 [S5, unofficial]. Smaller values yield higher quality but lower performance [S4, unofficial].
++*   `density_mult` (float): Multiplier applied to sampled density. Typical value: 50.0 [S5, unofficial].
++*   `stop_threshold` (float): Transmittance threshold for early termination. Typical value: 0.01 [S19, unofficial].
++*   `MAX_STEPS` (int): Maximum number of iterations. Typical value: 128 [S5, unofficial] or 32 [S14, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Aliasing:** Uniform sampling causes aliasing artifacts (moiré) if step size is too large relative to data smoothness [S15, unofficial][S16]. Jittered stepping or increasing samples helps [S16][S20, unofficial].
+-*   **Over-saturation:** Alpha accumulation can exceed 1.0 due to discrete stepping, causing over-saturation. Early termination breaks the loop when $\alpha_{acc} > 1.0$ [S8, unofficial].
+-*   **Boundary Access:** Gradient calculation for lighting/refraction requires neighbors. Access must be clamped or skipped if at volume boundaries (indices 1 to shape-2) [S4, S6, unofficial].
+-*   **Total Internal Reflection:** In refraction, if $\sin_{new} > 1$, the ray is terminated to prevent invalid directions [S4, unofficial].
+-*   **Precision:** In some environments (e.g., Taichi), lack of `frexp()` requires hard-coded scale factors for exponent extraction [S12, unofficial].
++*   **Aliasing:** Uniform sampling causes moiré artifacts if step size is too large relative to data smoothness [S16].
++*   **Over-saturation:** Alpha accumulation can exceed 1.0 due to discrete stepping; handled by breaking the loop when $\alpha_{acc} > 1.0$ [S8, unofficial].
++*   **Boundary Access:** Refraction gradient calculations require voxels strictly inside the volume (indices 1 to shape-2) to avoid out-of-bounds access [S4, unofficial].
++*   **Total Internal Reflection:** In refractive volumes, if $\sin_{new} > 1$, the ray is terminated to prevent invalid directions [S4, unofficial].
++*   **WebGL 1.0 Limitations:** Lack of 3D texture support requires packing 3D data into 2D textures, increasing shader complexity [S3, book].
+ 
+ ## Subtopics
+@@ -138,21 +146,20 @@
+ 
+ ### [Volumetric Ray Marching for Fire](2578-volumetric-ray-marching-for-fire.md)
+-Volumetric Ray Marching for Fire is a GPU-based technique for rendering fire and smoke simulations by ray marching through 3D volume textures. It decouples the simulation from the rendering pipeline, allowing multiple fire instances to share a fixed pool of simulation resources while rendering them via fragment shaders that sample temperature and smoke density fields. Unlike standard smoke rendering which blends values, this method accumulates emissive fire colors and absorptive smoke alpha to simulate the self-luminous nature of flames. It builds on [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md) by adding specific fire physics (temperature-based emission) and a shared simulation slot architecture.
++Volumetric Ray Marching for Fire is a GPU-based technique for rendering fire and smoke simulations by ray marching through 3D volume textures. It decouples the simulation from the rendering pipeline, allowing multiple fire instances to share a fixed pool of simulation resources while rendering them via fragment shaders that sample temperature and smoke density fields. It composites emissive fire and absorptive smoke using front-to-back alpha blending while using a scene depth buffer for occlusion culling. The final pixel color is calculated as the average of the samples weighted by the length of the ray inside the target volume. It builds on [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md) by adding specific fire physics (temperature-based emission) and a shared simulation slot architecture.
+ 
+ ### [Raycasting with Transfer Function and Shading](3773-raycasting-with-transfer-function-and-shading.md)
+-This method performs direct volume rendering by marching a ray through a 3D scalar field (volume texture) and accumulating color and opacity using front-to-back compositing. It distinguishes itself from basic raycasting by integrating a 1D transfer function for material mapping and gradient-based diffuse shading for surface appearance, while using jittered stepping to reduce aliasing artifacts. It serves as the core rendering loop for real-time GPU volume visualization, building on the discretization and ray setup provided by [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md).
++This method performs direct volume ray casting in a fragment shader, rendering a volume defined by 3D textures using a 1D transfer function and gradient-based diffuse shading. It distinguishes itself from sibling methods by explicitly computing surface normals from pre-stored gradient data to apply Lambertian lighting, rather than relying solely on density accumulation or geometry occlusion. Unlike [Ray Marching Volume Rendering](4877-ray-marching-volume-rendering.md), which focuses on cloud rendering with phase functions, this approach targets solid volumetric data with explicit shading models.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of steps per ray. Performance depends heavily on step size and volume resolution [S3, book].
+-*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels. Additional memory for transfer functions and intermediate buffers [S12, unofficial].
+-*   **Measured Performance:** Up to 66 fps on an NVIDIA 3090 GPU at 800x800 resolution with specific optimizations [S12, unofficial]. Skull volume rendered at 48 fps with 400 marching steps [S15, unofficial].
+-*   **Scaling:** Performance scales linearly with resolution and step count. Decreasing step size improves accuracy but reduces frame rate [S7].
+-*   **Strengths:** Simple to implement, handles arbitrary volume data, supports complex lighting and transfer functions, reveals internal structures [S16].
+-*   **Limitations:** Computationally expensive compared to surface-based methods, prone to aliasing if step size is not tuned, requires 3D texture support (or complex 2D packing) [S1, unofficial][S3, book].
+-*   **When to Use:** Real-time visualization of smoke, clouds, medical data, or fluid simulations where internal structure visibility is required [S3, book][S4, unofficial].
+-*   **When Not to Use:** Scenes with sharp boundaries better suited for isosurfacing, or when performance is critically constrained and low-quality approximations are acceptable [S16].
++*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of steps per ray. Performance scales linearly with resolution and step count [S3, book].
++*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels. Additional memory for transfer functions and intermediate buffers is minimal [S12, unofficial].
++*   **Measured Performance:** Up to 66 fps on an NVIDIA 3090 GPU at 800x800 resolution with 1024 max samples [S12, unofficial]. Skull volume rendered at 48 fps with 400 marching steps [S15, unofficial].
++*   **Strengths:** Simple to implement in shaders; handles complex internal structures; supports lighting, shadows, and refraction [S4, S14, unofficial].
++*   **Limitations:** Computationally expensive compared to surface-based methods; uniform sampling can lead to aliasing or unnecessary samples in empty space [S1, unofficial][S16].
++*   **When to Use:** Real-time visualization of smoke, clouds, or medical data where simplicity and shader compatibility are prioritized [S3, book][S14, unofficial].
++*   **When Not to Use:** Scenes with large empty volumes (use adaptive stepping or hierarchical methods); scenes requiring sharp boundaries (use isosurfacing) [S16].
+ 
+ ## Background
+-Ray marching volume rendering originated as a fundamental technique in direct volume rendering, allowing high-quality visualization of volumetric effects like smoke, clouds, and fire [S7]. It was developed to overcome the limitations of surface-based rendering for continuous data. Early implementations used software ray casting, but the advent of GPU programmable shaders enabled real-time ray marching in fragment shaders [S3, book][S14, unofficial]. The technique has been widely adopted in scientific visualization (e.g., CT scans [S20, unofficial]), computer graphics (e.g., cloud rendering [S11, unofficial]), and real-time engines (e.g., Unity [S20, unofficial], Taichi [S4, unofficial]). It builds on the mathematical foundation of the volume rendering integral, discretized via fixed-step integration [S18, unofficial].
++Ray Marching Volume Rendering originated as a fundamental technique in direct volume rendering, leveraging the parallel nature of GPU fragment shaders to process rays independently [S3, book]. It was popularized in the early 2000s with the advent of programmable graphics pipelines, allowing for real-time visualization of volumetric data such as CT scans and fluid simulations [S3, book][S7]. The method is widely used in scientific visualization, medical imaging, and real-time graphics engines (e.g., Unity, Unreal, WebGL) for rendering effects like fog, smoke, and clouds [S4, S5, S14, unofficial].
+ 
+ ## Sources

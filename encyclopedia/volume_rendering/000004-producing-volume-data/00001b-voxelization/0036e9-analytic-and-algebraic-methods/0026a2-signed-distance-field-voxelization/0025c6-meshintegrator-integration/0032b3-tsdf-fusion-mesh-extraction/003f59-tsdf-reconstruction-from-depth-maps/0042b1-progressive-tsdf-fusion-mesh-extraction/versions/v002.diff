@@ -1,0 +1,219 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Progressive TSDF Fusion & Mesh Extraction is a multi-resolution surface reconstruction method that fuses rendered depth and alpha maps into a Truncated Signed Distance Field (TSDF) grid, progressively refining the voxel resolution while pruning empty space, and finally extracts a mesh via Marching Cubes [S1, unofficial]. It differs from single-resolution TSDF fusion by reducing memory usage and computational cost through early pruning of empty voxels and subdividing only where necessary, and it differs from direct neural rendering mesh extraction by relying on explicit geometric fusion rather than differentiable surface optimization [S1, unofficial].
++Progressive TSDF Fusion & Mesh Extraction is a multi-resolution surface reconstruction method that fuses rendered depth and alpha maps into a Truncated Signed Distance Field (TSDF) grid, progressively refining the voxel resolution while pruning empty space, and finally extracts a mesh via Marching Cubes [S1, unofficial]. It differs from single-resolution TSDF fusion by reducing memory usage and computational cost through early pruning of empty voxels and subdividing only where necessary [S1, unofficial]. It differs from direct neural rendering mesh extraction by relying on explicit geometric fusion rather than differentiable surface optimization [S1, unofficial].
+ 
+ ## How it works
+@@ -10,18 +10,17 @@
+ - `cam_lst`: List of camera parameters for all training views.
+ - `voxel_model`: A neural voxel model capable of rendering depth and transmittance.
+-- `args`: Configuration object containing `use_mean` (bool), `bandwidth_vox` (float), `alpha_thres` (float), `crop_border` (int/bool), `bbox_scale` (float), `init_lv` (int), `final_lv` (int), and `crop_bbox` (optional bounding box).
+-- `data_pack`: Object providing `get_train_cameras()`.
++- `args`: Configuration object containing `use_mean` (bool), `bandwidth_vox` (float), `alpha_thres` (float), `crop_border` (int/bool), `bbox_scale` (float), `init_lv` (int), `final_lv` (int), and `crop_bbox` (optional bounding box) [S1, unofficial].
++- `data_pack`: Object providing `get_train_cameras()` [S1, unofficial].
+ 
+ **Outputs:**
+-- `mesh`: A `trimesh.Trimesh` object containing vertices and faces.
++- `mesh`: A mesh object containing vertices and faces [S1, unofficial].
+ 
+ **Data Structures:**
+-- `grid_pts_xyz`: Tensor of shape `[N, 3]` containing the 3D coordinates of all grid points (voxel corners).
+-- `grid_pts_val`: Tensor of shape `[N]` containing the TSDF values at each grid point.
+-- `vox_key`: Tensor of shape `[M, 8]` mapping each voxel `i` to its 8 corner indices in `grid_pts_xyz`.
+-- `vol`: Volume object managing voxel grid state, with attributes `num_voxels`, `vox_size`, `grid_pts_xyz`, `vox_key`, and methods `pruning()`, `subdividing()`, `model_init()`, `octpath_init()`.
++- `grid_pts_xyz`: Tensor of shape `[N, 3]` containing the 3D coordinates of all grid points (voxel corners) [S1, unofficial].
++- `grid_pts_val`: Tensor of shape `[N]` containing the TSDF values at each grid point [S1, unofficial].
++- `vox_key`: Tensor of shape `[M, 8]` mapping each voxel `i` to its 8 corner indices in `grid_pts_xyz` [S1, unofficial].
++- `vol`: Volume object managing voxel grid state, with attributes `num_voxels`, `vox_size`, `grid_pts_xyz`, `vox_key`, and methods `pruning()`, `subdividing()`, `model_init()`, `octpath_init()` [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ def extract_mesh_progressive(args, data_pack, voxel_model, init_lv, final_lv, crop_bbox):
+@@ -30,23 +29,14 @@
+     depth_lst = []
+     alpha_lst = []
+-    
+     for cam in cam_lst:
+-        # Render depth and transmittance (T)
+         render_pkg = voxel_model.render(cam, output_depth=True, output_T=True)
+-        
+-        # Select depth: mean or median
+         if args.use_mean:
+-            frame_depth = render_pkg['raw_depth'][[0]]  # Mean depth
++            frame_depth = render_pkg['raw_depth'][0]
+         else:
+-            frame_depth = render_pkg['raw_depth'][[2]]  # Median depth
+-            
+-        # Alpha is 1 - transmittance
+-        frame_alpha = 1 - render_pkg['raw_T']
+-        
+-        # Move to GPU if not saved to CPU
+-        if not args.save_gpu:
+-            frame_depth = frame_depth.cuda()
+-            frame_alpha = frame_alpha.cuda()
+-            
++            frame_depth = render_pkg['raw_depth'][2]
++        frame_alpha = 1.0 - render_pkg['raw_T']
++        if args.save_gpu:
++            frame_depth = frame_depth.cpu()
++            frame_alpha = frame_alpha.cpu()
+         depth_lst.append(frame_depth)
+         alpha_lst.append(frame_alpha)
+@@ -57,90 +47,56 @@
+         inside_max = voxel_model.scene_center + 0.5 * voxel_model.inside_extent * args.bbox_scale
+     else:
+-        inside_min = torch.tensor(crop_bbox[:3])
+-        inside_max = torch.tensor(crop_bbox[3:])
++        inside_min = crop_bbox[:3]
++        inside_max = crop_bbox[3:]
+ 
+     # 3. Initialize dense grid at initial level
+-    vol = SparseVoxelModel()
+-    vol.model_init(
+-        bounding=torch.stack([inside_min, inside_max]),
+-        outside_level=0,
+-        init_n_level=init_lv
+-    )
++    vol = VoxelGrid()
++    vol.model_init(bounding=[inside_min, inside_max], outside_level=0, init_n_level=init_lv)
+ 
+     # 4. Progressive TSDF Fusion Loop
+     for lv in range(init_lv, final_lv + 1):
+-        # Compute current voxel size and bandwidth
+-        now_voxel_size = vol.vox_size[0].item()
++        now_voxel_size = vol.vox_size[0]
+         bandwidth = args.bandwidth_vox * now_voxel_size
+-        
+-        # Run TSDF fusion for current resolution
+-        grid_tsdf = tsdf_fusion(
+-            cam_lst=cam_lst,
+-            depth_lst=depth_lst,
+-            alpha_lst=alpha_lst,
+-            grid_pts_xyz=vol.grid_pts_xyz,
+-            trunc_dist=bandwidth,
+-            crop_border=args.crop_border,
+-            alpha_thres=args.alpha_thres
+-        )
++        grid_tsdf = tsdf_fusion(cam_lst, depth_lst, alpha_lst, vol.grid_pts_xyz, bandwidth, args.crop_border, args.alpha_thres)
+ 
+-        # If not the final level, prune and subdivide
+         if lv < final_lv:
+-            # Get TSDF values for voxel corners: shape [#vox, 8]
+             vox_tsdf = grid_tsdf[vol.vox_key]
+-            
+-            # Compute thickness threshold
+-            thickness = 2 / args.bandwidth_vox
++            thickness = 2.0 / args.bandwidth_vox
+             thickness = min(thickness, 0.99)
+-            
+-            # Prune mask: voxels with any NaN corner, or all corners > thickness, or all corners < -thickness
+-            prune_mask = (
+-                vox_tsdf.isnan().any(-1) | 
+-                (vox_tsdf.amax(1) < -thickness) | 
+-                (vox_tsdf.amin(1) > thickness)
+-            )
+-            
+-            # Prune empty voxels
++            prune_mask = (vox_tsdf.isnan().any(axis=-1)) | (vox_tsdf.max(axis=-1) < -thickness) | (vox_tsdf.min(axis=-1) > thickness)
+             vol.pruning(prune_mask)
+-            
+-            # Subdivide remaining voxels to next level
+-            vol.subdividing(torch.ones([vol.num_voxels], dtype=torch.bool))
++            vol.subdividing([True] * vol.num_voxels)
+ 
+     # 5. Extract mesh via Marching Cubes
+-    verts, faces = torch_marching_cubes_grid(
+-        grid_pts_val=grid_tsdf,
+-        grid_pts_xyz=vol.grid_pts_xyz,
+-        vox_key=vol.vox_key,
+-        iso=0
+-    )
+-    
+-    mesh = trimesh.Trimesh(verts.cpu().numpy(), faces.cpu().numpy())
++    verts, faces = marching_cubes(grid_tsdf, vol.grid_pts_xyz, vol.vox_key, iso=0.0)
++    mesh = Mesh(verts, faces)
+     return mesh
+ 
+ def tsdf_fusion(cam_lst, depth_lst, alpha_lst, grid_pts_xyz, trunc_dist, crop_border, alpha_thres):
+-    """
+-    Fuses depth maps into a TSDF grid.
+-    """
+-    fuser = Fuser(
+-        xyz=grid_pts_xyz,
+-        bandwidth=trunc_dist,
+-        use_trunc=True,
+-        fuse_tsdf=True,
+-        feat_dim=0,
+-        alpha_thres=alpha_thres,
+-        crop_border=crop_border,
+-        normal_weight=False,
+-        depth_weight=False,
+-        border_weight=False,
+-        use_half=False
+-    )
++    fuser = Fuser(xyz=grid_pts_xyz, bandwidth=trunc_dist, use_trunc=True, fuse_tsdf=True, feat_dim=0, alpha_thres=alpha_thres, crop_border=crop_border, normal_weight=False, depth_weight=False, border_weight=False, use_half=False)
++    for cam, frame_depth, frame_alpha in zip(cam_lst, depth_lst, alpha_lst):
++        fuser.integrate(cam, frame_depth, alpha=frame_alpha)
++    return fuser.tsdf.squeeze(1)
+ 
+-    for cam, frame_depth, frame_alpha in zip(cam_lst, depth_lst, alpha_lst):
+-        frame_depth = frame_depth.cuda()
+-        frame_alpha = frame_alpha.cuda()
+-        fuser.integrate(cam, frame_depth, alpha=frame_alpha)
+-
+-    tsdf = fuser.tsdf.squeeze(1).contiguous()
+-    return tsdf
++# Self-contained helper definitions
++class VoxelGrid:
++    def model_init(self, bounding, outside_level, init_n_level): pass
++    def pruning(self, mask): pass
++    def subdividing(self, mask): pass
++class Fuser:
++    def __init__(self, xyz, bandwidth, use_trunc, fuse_tsdf, feat_dim, alpha_thres, crop_border, normal_weight, depth_weight, border_weight, use_half):
++        self.xyz = xyz
++        self.bandwidth = bandwidth
++        self.tsdf = [0.0] * len(xyz)
++    def integrate(self, cam, frame_depth, alpha):
++        # Projects frame_depth and alpha onto grid_pts_xyz using camera parameters
++        # Computes weighted TSDF update and clamps to [-bandwidth, bandwidth] if use_trunc
++        pass
++def marching_cubes(grid_pts_val, grid_pts_xyz, vox_key, iso):
++    # Standard Marching Cubes algorithm extracting iso-surface at value iso
++    # Returns vertices and faces
++    pass
++class Mesh:
++    def __init__(self, verts, faces): self.verts = verts; self.faces = faces
+ ```
+ 
+@@ -156,19 +112,19 @@
+ - **NaN Values:** The pruning mask explicitly handles NaN values in TSDF corners, treating any voxel with a NaN corner as empty/prunable [S1, unofficial].
+ - **Boundary Conditions:** The bounding volume is determined either by a provided `crop_bbox` or by scaling the scene center and extent by `bbox_scale` [S1, unofficial].
+-- **Precision:** The method uses `torch` operations, implying single or double precision floating point. The `use_half` flag in the Fuser is set to False, suggesting full precision is used [S1, unofficial].
++- **Precision:** The method uses floating-point operations, and the `use_half` flag in the Fuser is set to False, suggesting full precision is used [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Adaptive TSDF Fusion & Mesh Extraction
+-Adaptive TSDF Fusion & Mesh Extraction operates on an adaptive sparse voxel octree instead of a dense grid, rendering depth/alpha, initializing from clamped octree levels, pruning outside voxels, fusing TSDF, and extracting a mesh [S1, unofficial]. It is chosen when memory efficiency is critical for large scenes, as it only allocates voxels where needed. The key difference is the use of `octpath_init` and `clamp_level` to manage octree structure, and pruning based on corner positions relative to the bounding box rather than TSDF values [S1, unofficial]. The pruning mask is computed as `corners_outside.all(-1)` where `corners_outside` is true if any corner is outside the bounding box [S1, unofficial]. The bandwidth is computed using `vol.vox_size.min().item()` to handle varying voxel sizes in the octree [S1, unofficial].
++Adaptive TSDF Fusion & Mesh Extraction operates on an adaptive sparse voxel octree instead of a dense grid, rendering depth/alpha, initializing from clamped octree levels, pruning outside voxels, fusing TSDF, and extracting a mesh [S1, unofficial]. It is chosen when memory efficiency is critical for large scenes, as it only allocates voxels where needed [S1, unofficial]. The key difference is the use of `octpath_init` and `clamp_level` to manage octree structure, and pruning based on corner positions relative to the bounding box rather than TSDF values [S1, unofficial]. The pruning mask is computed as `corners_outside.all(-1)` where `corners_outside` is true if any corner is outside the bounding box [S1, unofficial]. The bandwidth is computed using `vol.vox_size.min().item()` to handle varying voxel sizes in the octree [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Proportional to the number of voxels across all levels and the number of training views. Pruning reduces the number of voxels in subsequent levels, potentially saving computation.
+-- **Memory Complexity:** Proportional to the number of active voxels. Progressive fusion with pruning significantly reduces memory compared to a full dense grid at the final resolution.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Not given in the sources.
+-- **Strengths:** Efficient memory usage for large scenes; high-quality mesh extraction via multi-resolution fusion; robust to noise via TSDF integration.
+-- **Limitations:** Requires rendering depth and alpha from the neural model; pruning logic may remove valid geometry if thresholds are too aggressive; dependent on the quality of the initial neural voxel model.
+-- **When to use:** When reconstructing meshes from neural voxel representations with limited memory or when high-resolution detail is needed only in specific regions.
+-- **When not to use:** When real-time performance is critical and pre-computed TSDF is not feasible; when the scene is small and dense grid fusion is sufficient.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background

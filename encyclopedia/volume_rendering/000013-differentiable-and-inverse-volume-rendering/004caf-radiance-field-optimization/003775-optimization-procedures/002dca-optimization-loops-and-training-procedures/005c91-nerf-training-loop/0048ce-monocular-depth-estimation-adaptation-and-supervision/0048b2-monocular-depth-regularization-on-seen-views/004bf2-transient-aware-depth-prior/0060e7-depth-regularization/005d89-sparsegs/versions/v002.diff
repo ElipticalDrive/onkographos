@@ -1,0 +1,236 @@
+--- v001.md
++++ v002.md
+@@ -4,50 +4,42 @@
+ 
+ ## Overview
+-SparseGS is a training optimization method for 3D Gaussian Splatting (3DGS) designed to solve the problem of sparse-view 3D reconstruction, specifically addressing issues such as misplaced Gaussians ("floaters"), geometry collapse, and texture noise that arise when input view coverage is insufficient [S1]. It distinguishes itself from sibling methods by combining a novel depth rendering bias (softmax-scaling) with external priors: monocular depth estimation and Score Distillation Sampling (SDS) from a diffusion model, whereas siblings like DNGaussian rely on depth-normal regularizers and FSGS uses Gaussian unpooling [S1][S2, unofficial].
++SparseGS is a method for sparse-view 3D reconstruction using 3D Gaussian Splatting (3DGS) to address issues such as misplaced Gaussians ("floaters"), geometry collapse, and texture noise [S1]. It differs from sibling methods like FSGS, which relies on Gaussian unpooling, and DNGaussian, which uses depth-normal regularizers, by combining monocular depth priors with diffusion-based Score Distillation Sampling (SDS) to stabilize training under extreme sparsity (~3 to 12 views) [S2, unofficial].
+ 
+ ## How it works
+-SparseGS extends the standard 3DGS training loop by introducing an auxiliary regularization loss $\mathcal{L}_{reg}$ and a post-processing pruning step. The method operates on a set of 3D Gaussians defined by centers $\mu$, scales $s$, rotations $q$, opacities $\alpha$, and spherical harmonic coefficients for colors $c$ [S1].
++**Inputs and Outputs:**
++- **Inputs:** Sparse set of input images (typically ~3 to 12 views), camera poses, and intrinsics. A pre-trained monocular depth estimation model provides initial depth priors. A pre-trained Stable Diffusion model (version 2.1) provides generative priors [S1].
++- **Outputs:** A set of 3D Gaussian primitives (position, covariance, opacity, spherical harmonics coefficients) and a rendered image/depth map.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   A sparse set of $N$ input images (typically $\sim 3$ to 12 views) with known camera poses [S1].
+-*   A pre-trained monocular depth estimation model to generate reference depth maps for input views [S1].
+-*   A pre-trained diffusion model (e.g., Stable Diffusion v2.1) for SDS priors [S1].
++**Data Structures:**
++- **3D Gaussian Primitives:** Standard 3DGS representation. Each Gaussian $i$ is defined by:
++  - Mean position $\mu_i \in \mathbb{R}^3$.
++  - Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$, parameterized by a rotation matrix $R_i$ and a scaling vector $s_i$.
++  - Opacity $\alpha_i \in [0, 1]$.
++  - Spherical Harmonics (SH) coefficients for view-dependent color.
++- **Depth Map:** Rendered depth is computed per pixel.
+ 
+-**Outputs:**
+-*   Optimized 3D Gaussian parameters $\theta$ representing the scene geometry and appearance [S1].
++**Numbered Steps:**
+ 
+-### Data Structures
+-The method maintains the standard 3DGS Gaussian attributes. Additionally, it computes rendered depth maps $D_{rendered}$ and reference depth maps $D_{ref}$ for loss calculation [S1].
++1. **Initialization:** Initialize Gaussians from the input point cloud or sparse reconstruction. [G] Standard 3DGS initialization is assumed.
++2. **Softmax-Scaling Depth Rendering:** To reduce misplaced Gaussians caused by alpha-blending depth averaging, replace standard alpha-blending depth with a softmax-scaled depth rendering. This constrains depth convergence [S1].
++   - Let $d_i$ be the depth of the $i$-th Gaussian along the ray.
++   - Let $\alpha_i$ be the opacity.
++   - The rendered depth $D$ is computed using a softmax-weighted average rather than a linear alpha-composite average, biasing towards the mode of the depth distribution [S1].
++3. **Depth Correlation Loss:** Apply a Pearson Correlation Loss between the rendered depth and the monocular depth estimate.
++   - Compute local and global Pearson correlation coefficients between the rendered depth map and the reference monocular depth map.
++   - Loss weights: Local Pearson loss weight = 0.15; Global Pearson loss weight = 0.15 [S1].
++4. **Unseen Viewpoints Regularization (UVR):** To prevent overfitting and reduce high-frequency artifacts in sparse settings, render images from viewpoints away from the training set and apply a consistency loss. This improves PSNR by an average of 0.33 dB [S1].
++5. **Score Distillation Sampling (SDS) and Depth Warping:** For regions with insufficient input coverage, leverage SDS and depth warping to reduce geometry collapse and texture noise while preserving fine details.
++   - Enable SDS after two-thirds of the total training iterations, once the scene structure is stable [S1].
++   - SDS Loss weight: $5 \times 10^{-4}$ [S1].
++   - Depth Warping Loss weight: 0.05 [S1].
++6. **Floater Pruning:** Identify and remove low-opacity Gaussians that are misplaced (floaters). This heuristic cleans the scene, making the image and depth map sharper. This boosts PSNR by 0.28 dB [S1].
+ 
+-### Steps
+-1.  **Depth Rendering with Softmax-Scaling:**
+-    Standard 3DGS renders depth via alpha blending, which averages depth values weighted by opacity, leading to "floaters" (misplaced low-opacity Gaussians) in sparse settings. SparseGS replaces this with a softmax-scaling depth rendering technique [S1].
+-    The depth $D_{rendered}(x)$ at pixel $x$ is computed as:
+-    $$ D_{rendered}(x) = \sum_{i \in \mathcal{N}(x)} \beta_i \cdot z_i $$
+-    where $\mathcal{N}(x)$ is the set of Gaussians splatting to pixel $x$, $z_i$ is the depth of Gaussian $i$, and $\beta_i$ is the softmax-weighted contribution:
+-    $$ \beta_i = \frac{\exp(\alpha_i \cdot \tau)}{\sum_{j \in \mathcal{N}(x)} \exp(\alpha_j \cdot \tau)} $$
+-    Here, $\alpha_i$ is the opacity of Gaussian $i$, and $\tau$ is a temperature parameter [G: The source does not specify the exact value of $\tau$ or the precise formulation of the mode-selection bias mentioned in the abstract, but implies this softmax weighting reduces the averaging effect of alpha blending] [S1].
++**Pseudocode:**
+ 
+-2.  **Depth Correlation Loss (Pearson Loss):**
+-    To constrain the geometry, a Pearson correlation loss is applied between the rendered depth $D_{rendered}$ and the reference depth $D_{ref}$ from the monocular estimator. This is computed locally and globally [S1].
+-    $$ \mathcal{L}_{depth} = \mathcal{L}_{Pearson}(D_{rendered}, D_{ref}) $$
+-    The weights for local and global Pearson losses are both set to 0.15 [S1].
+-
+-3.  **Unseen Viewpoints Regularization (UVR):**
+-    To prevent overfitting to the sparse input views and reduce high-frequency artifacts, regularization is applied at viewpoints away from the training set. This involves rendering at random or held-out viewpoints and comparing against diffusion priors or depth consistency [S1]. This component improves PSNR by an average of 0.33dB [S1].
+-
+-4.  **Score Distillation Sampling (SDS) and Depth Warping:**
+-    In regions with insufficient input coverage, geometry collapse and texture noise occur. SparseGS leverages SDS from a diffusion model (Stable Diffusion v2.1) to guide the appearance and structure. SDS is enabled after two-thirds of the total training iterations, once the scene structure has stabilized [S1].
+-    Additionally, a depth warping loss is applied to ensure consistency between rendered depth and reference depth across views. The weight for the depth warping loss is 0.05 [S1]. The SDS loss weight is set to $5 \times 10^{-4}$ [S1].
+-
+-5.  **Floater Pruning:**
+-    After training, a heuristic process identifies and removes low-opacity Gaussians that are identified as "floaters" (misplaced Gaussians not contributing to coherent geometry). This step sharpens both the image and the depth map, boosting PSNR by 0.28dB [S1].
+-
+-### Pseudocode
+ ```python
+ def train_sparsegs(input_images, camera_poses, num_iterations):
+-    # Initialize 3D Gaussians from SfM points
+-    gaussians = initialize_gaussians_from_sfm(input_images, camera_poses)
++    # Initialize Gaussians
++    gaussians = initialize_gaussians(input_images, camera_poses)
+     
+     # Load pre-trained models
+@@ -56,78 +48,97 @@
+     
+     # Hyperparameters
+-    lambda_depth_pearson = 0.15
+-    lambda_depth_warping = 0.05
+-    lambda_sds = 5e-4
++    weight_depth_pearson_local = 0.15
++    weight_depth_pearson_global = 0.15
++    weight_sds = 5e-4
++    weight_depth_warping = 0.05
+     sds_start_iter = int(num_iterations * 2/3)
+     
+     for iter in range(num_iterations):
+-        # 1. Sample a random camera pose from input views
+-        cam_idx = random_sample(input_images)
+-        image = input_images[cam_idx]
+-        pose = camera_poses[cam_idx]
++        # 1. Forward Pass: Render Image and Depth
++        # Use softmax-scaling for depth to reduce floaters
++        rendered_image, rendered_depth = render_gaussians(
++            gaussians, camera_poses, use_softmax_depth=True
++        )
+         
+-        # 2. Render RGB and Depth
+-        # Use softmax-scaling for depth rendering
+-        rgb_rendered, depth_rendered = render_gaussians_softmax(gaussians, pose)
++        # 2. Compute Losses
++        loss = 0.0
+         
+-        # 3. Get reference depth from monocular estimator
+-        depth_ref = depth_estimator(image)
++        # Image Reconstruction Loss (e.g., L1 or LPIPS)
++        # loss += image_loss(rendered_image, input_image)
+         
+-        # 4. Compute Depth Correlation Loss (Pearson)
+-        # Compute local and global Pearson correlation
+-        loss_depth = lambda_depth_pearson * (pearson_loss(depth_rendered, depth_ref) + 
+-                                             pearson_loss_global(depth_rendered, depth_ref))
++        # Depth Correlation Loss (Pearson)
++        ref_depth = depth_estimator(input_image)
++        local_corr = pearson_correlation(rendered_depth, ref_depth, local_window=True)
++        global_corr = pearson_correlation(rendered_depth, ref_depth, local_window=False)
++        loss += weight_depth_pearson_local * (1.0 - local_corr)
++        loss += weight_depth_pearson_global * (1.0 - global_corr)
+         
+-        # 5. Compute RGB Loss (standard 3DGS)
+-        loss_rgb = compute_rgb_loss(rgb_rendered, image)
++        # Unseen Viewpoints Regularization (UVR)
++        # Render from random unseen viewpoints and compare
++        unseen_view = sample_unseen_view(camera_poses)
++        rendered_unseen = render_gaussians(gaussians, unseen_view, use_softmax_depth=True)
++        # loss += unseen_view_loss(rendered_unseen)
+         
+-        # 6. Compute Unseen Viewpoints Regularization (UVR)
+-        # Render at a random unseen viewpoint and apply regularization
+-        unseen_pose = random_unseen_pose()
+-        rgb_unseen, depth_unseen = render_gaussians_softmax(gaussians, unseen_pose)
+-        loss_uvr = compute_uvr_loss(rgb_unseen, depth_unseen, diffusion_model)
++        # SDS and Depth Warping (after 2/3 iterations)
++        if iter > sds_start_iter:
++            # Score Distillation Sampling
++            # Sample noise, predict clean image from diffusion model
++            # Compute gradient w.r.t. rendered image
++            sds_grad = compute_sds_gradient(rendered_image, diffusion_model)
++            loss += weight_sds * sds_grad
++            
++            # Depth Warping
++            # Warp reference depth from input view to current view
++            warped_depth = warp_depth(ref_depth, camera_poses)
++            depth_warp_loss = depth_consistency_loss(rendered_depth, warped_depth)
++            loss += weight_depth_warping * depth_warp_loss
++            
++        # 3. Backpropagate and Update
++        gradients = compute_gradients(loss, gaussians)
++        update_gaussians(gaussians, gradients)
+         
+-        # 7. Compute SDS and Depth Warping (after 2/3 iterations)
+-        loss_sds = 0
+-        loss_warping = 0
+-        if iter > sds_start_iter:
+-            # SDS Loss using diffusion model
+-            loss_sds = lambda_sds * compute_sds_loss(gaussians, diffusion_model, unseen_pose)
+-            
+-            # Depth Warping Loss
+-            # Warp reference depth from input view to unseen view and compare
+-            depth_warped = warp_depth(depth_ref, pose, unseen_pose)
+-            loss_warping = lambda_depth_warping * mse_loss(depth_warped, depth_unseen)
++        # 4. Floater Pruning (Periodic)
++        # Remove low-opacity Gaussians
++        gaussians = prune_floaters(gaussians, threshold=0.01)
+         
+-        # 8. Total Loss and Backpropagation
+-        loss_total = loss_rgb + loss_depth + loss_uvr + loss_sds + loss_warping
+-        loss_total.backward()
+-        optimizer.step()
+-        
+-    # 9. Floater Pruning
+-    gaussians = prune_floaters(gaussians, threshold=low_opacity_threshold)
+-    
+     return gaussians
+ ```
+ 
+-### Parameters
+-*   **Depth Warping Loss Weight:** 0.05 [S1].
+-*   **SDS Loss Weight:** $5 \times 10^{-4}$ [S1].
+-*   **Local/Global Pearson Loss Weight:** 0.15 [S1].
+-*   **SDS Activation:** Enabled after 2/3 of total iterations [S1].
++**Parameters:**
++- SDS loss weight: $5 \times 10^{-4}$ [S1].
++- Depth warping loss weight: 0.05 [S1].
++- Local and Global Pearson loss weights: 0.15 [S1].
++- SDS activation: After 2/3 of total iterations [S1].
+ 
+-### Edge Cases and Pitfalls
+-*   **Monocular Depth Accuracy:** The method relies on the quality of the monocular depth estimator. Inaccurate reference depths can mislead the Pearson loss [S1].
+-*   **SDS Timing:** Enabling SDS too early may destabilize training; it is specifically enabled after 2/3 of iterations when structure is stable [S1].
+-*   **Floaters:** Without softmax-scaling and pruning, alpha-blended depth rendering produces misplaced low-opacity Gaussians [S1].
++**Edge Cases and Pitfalls:**
++- **Precision:** Softmax-scaling depth rendering is critical to avoid the averaging artifacts of standard alpha-blending which cause floaters [S1].
++- **Boundaries:** The method is designed for forward-facing datasets (LLFF, DTU) and unbounded scenes (Mip-NeRF360) [S1].
++- **Degenerate Input:** In regions with very little coverage, standard 3DGS fails; SDS and depth warping are specifically enabled to handle this [S1].
++
++## Subtopics
++
++### FSGS Training and Densification
++Uses Gaussian unpooling for few-shot reconstruction. Excels in fine details but fails on background geometry. [Link](6420-fsgs-training-and-densification.md)
++
++### DNGaussian Training and Depth Regularization
++Uses depth-normal regularizers. Renders coherent backgrounds but may prune foreground objects incorrectly. [Link](7399-dngaussian.md)
++
++### Edge-Aware Disparity Regularization
++Focuses on edge-aware constraints for disparity. [Link](9140-edge-aware-disparity-regularization.md)
+ 
+ ## Operating characteristics
+-*   **Performance:** On the Mip-NeRF360 dataset (12-view setting), SparseGS improves PSNR by 1.37dB over standard 3DGS (using softmax-scaling), by an average of 0.33dB with UVR, and by 0.28dB with floater pruning [S1].
+-*   **Comparison:** SparseGS outperforms NeRF-based methods and concurrent works FSGS and DNGaussian in both 12-view and 24-view settings [S1]. FSGS preserves fine details but fails on background geometry; DNGaussian renders coherent backgrounds but prunes foreground objects incorrectly. SparseGS reconstructs high-frequency geometry and preserves sharp boundaries [S1].
+-*   **Strengths:** Effective in sparse-view settings (~3 to 12 views); reduces floaters and geometry collapse; produces cleaner, more coherent scenes [S1].
+-*   **Limitations:** Requires pre-trained monocular depth and diffusion models; training time may increase due to SDS and UVR computations [S1].
++- **Time and Memory Complexity:** Standard 3DGS complexity, plus overhead for monocular depth estimation and SDS gradient computation. SDS is enabled only after 2/3 of iterations, reducing early training cost [S1].
++- **Measured Performance:** On Mip-NeRF360 (12-view setting):
++  - Baseline (Alpha-blending): PSNR 17.49, LPIPS 0.431, SSIM 0.499.
++  - + Softmax-scaling: PSNR 18.45.
++  - + UVR: PSNR 18.86.
++  - + Pruning: PSNR 19.09.
++  - Full SparseGS: PSNR 19.37, LPIPS 0.398, SSIM 0.577 [S1].
++- **Scaling:** Outperforms NeRF-based methods and concurrent works (FSGS, DNGaussian) in both 12-view and 24-view settings [S1].
++- **Strengths:** Effectively reconstructs high-frequency geometry and preserves sharp boundaries. Cleaner and more coherent scene structure than DNGaussian. Less background collapse than FSGS [S1].
++- **Limitations:** Relies on pre-trained monocular depth and diffusion models, which may introduce biases if the priors are inaccurate. SDS computation is expensive.
+ 
+ ## Background
+-SparseGS was proposed to tackle the challenges of sparse-view 3D reconstruction using 3D Gaussian Splatting. It addresses the limitations of standard 3DGS, which suffers from floaters and geometry collapse when input views are sparse [S1]. The method builds on the principles of Depth Regularization, using differentiable auxiliary losses to guide Gaussian parameters [Parent]. It was evaluated on forward-facing datasets (LLFF, DTU) and the Mip-NeRF360 dataset [S1].
++SparseGS was proposed to tackle sparse-view 3D reconstruction using 3D Gaussian Splatting. It addresses the limitations of original 3DGS, where alpha-blending depth rendering leads to misplaced Gaussians (floaters), and the tendency of 3DGS to place isolated Gaussians in under-covered regions, resulting in high-frequency noise [S1]. The method builds on the observation that NeRF-based methods often produce overly smooth appearances in sparse settings, while 3DGS-based representations gravitate towards isolated, noisy Gaussians [S1]. It utilizes Stable Diffusion v2.1 for generative priors [S1].
+ 
+ ## Sources

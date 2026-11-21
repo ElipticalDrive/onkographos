@@ -1,0 +1,1292 @@
+FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis
+Seunghyeon Seo Yeonjin Chang Nojun Kwak
+Seoul National Univeristy
+arXiv:2306.17723v4 [cs.CV] 14 Aug 2023
+{zzzlssh, yjean8315, nojunk}@snu.ac.kr
+Abstract
+Neural Radiance Field (NeRF) has been a mainstream in
+novel view synthesis with its remarkable quality of rendered
+images and simple architecture. Although NeRF has been
+developed in various directions improving continuously its
+performance, the necessity of a dense set of multi-view images still exists as a stumbling block to progress for practical application. In this work, we propose FlipNeRF, a novel
+regularization method for few-shot novel view synthesis by
+utilizing our proposed flipped reflection rays. The flipped
+reflection rays are explicitly derived from the input ray directions and estimated normal vectors, and play a role of
+effective additional training rays while enabling to estimate
+more accurate surface normals and learn the 3D geometry
+effectively. Since the surface normal and the scene depth are
+both derived from the estimated densities along a ray, the
+accurate surface normal leads to more exact depth estimation, which is a key factor for few-shot novel view synthesis.
+Furthermore, with our proposed Uncertainty-aware Emptiness Loss and Bottleneck Feature Consistency Loss, FlipNeRF is able to estimate more reliable outputs with reducing floating artifacts effectively across the different scene
+structures, and enhance the feature-level consistency between the pair of the rays cast toward the photo-consistent
+pixels without any additional feature extractor, respectively.
+Our FlipNeRF achieves the SOTA performance on the multiple benchmarks across all the scenarios. The codes and
+more qualitative results are available in our project page:
+https://shawn615.github.io/flipnerf/.
+(a) Sparse training views
+mip-NeRF [1]
+Ref-NeRF [36]
+MixNeRF [31]
+FlipNeRF (Ours)
+(b) Synthesized unseen views
+Figure 1: Synthesis results from sparse inputs. Our FlipNeRF significantly improves rendering quality compared to
+other baselines. Compared to the vanilla mip-NeRF [1] and
+MixNeRF [31], which is the state-of-the-art regularization
+method, ours reduces the noises and floating artifacts noticeably with superior surface normal estimation. Although
+Ref-NeRF [36] estimates smooth normal vectors, it shows
+much inferior rendering results to ours with a large chunk
+of noise under the few-shot setting.
+1. Introduction
+Neural Radiance Field (NeRF) [24] has achieved great
+success in rendering photo-realistic images from novel
+viewpoints. However, the necessity of a dense set of training images remains as a practical bottleneck since it suffers from significant performance degradation when trained
+with sparse views.
+There are two mainstreams for few-shot novel view synthesis: pre-training and regularization methods, both of
+which focus on learning the 3D geometry efficiently from
+sparse inputs. The pre-training methods [43, 5, 6, 39, 20,
+12, 19, 29, 35, 14] require large-scale datasets consisting of
+different scenes with multi-view images for injecting prior
+knowledge during the pre-training, while the regularization
+methods [25, 31, 15, 11, 30, 8, 17] are optimized per scene,
+1
+exploiting additional training resources, e.g. unseen viewpoints [25, 15, 17], depth map generation [8, 30], off-theshelf models [11, 25], and so on, for an effective regularization to alleviate overfitting. Although the prior arts achieved
+promising results in novel view synthesis from sparse inputs, there still exist hurdles to overcome. The large-scale
+datasets, which are used for pre-training methods, are expensive to collect and the NeRF model is prone to performance degradation for the out-of-distribution dataset. On
+the other hand, the regularization methods heavily rely on
+additional training resources which might not always be
+available and require many heuristic factors, e.g. the choice
+of off-the-shelf models, the hyperparameters for sampling
+unseen viewpoints, and so on.
+In this paper, we propose FlipNeRF, which is an effective regularization method exploiting the flipped reflection
+rays1 as additional training resources with filtering the ineffective newly generated rays. We derive a batch of flipped
+reflection rays from the original ray directions and estimated surface normals so that they are cast toward the
+same target pixels of the original input ray. Compared to
+the existing regularization methods which have mainly focused on the accurate depth estimation from limited input
+views [31, 25, 15, 30, 8], our FlipNeRF is trained to reconstruct surface normals accurately by learning to generate
+effective reflection rays to be used in training. Since both
+estimated surface normals and depths are derived from the
+volume densities representing underlying 3D geometry, accurately estimating the surface normals of an object naturally leads to more accurate depth maps.
+Furthermore, we propose an effective regularization loss,
+Uncertainty-aware Emptiness Loss (UE Loss), to reduce
+the floating artifacts effectively while considering the uncertainty of the model’s outputs by using the estimated
+scale parameters for mixture models. Since our FlipNeRF is
+built upon MixNeRF [31], which is a regularization method
+achieving promising results by modeling input rays with
+mixture density models [2], we are able to apply our proposed loss without any modification of the architecture by
+using the estimated scale parameters of each sample along
+a ray, which stand for the uncertainty of the samples’ estimated probability density distributions.
+Additionally, inspired by [6, 11, 15] which address the
+feature-level consistency of targets under the sparse input
+setting, we encourage the consistency for the pairs of bottleneck features between the original input rays and flipped
+reflection rays. We leverage a Jensen-Shannon Divergence,
+which is based on the similarity between the probability distributions, to make the pairs of bottleneck feature distributions of original and flipped reflection rays more similar to
+each other improving feature consistency.
+We demonstrate the effectiveness of our proposed FlipNeRF through the experiments on the multiple benchmarks, e.g. Realistic Synthetic 360◦ [24], DTU [13], and
+LLFF [23]. Our method achieves state-of-the-art (SOTA)
+performances compared to other baselines. Especially, ours
+outperforms other baselines by a large margin with more accurate surface normals under the extremely sparse settings
+such as 3/4-view setting which are the most challenging
+ones. Our contributions are summarized as follows:
+• We propose an effective training framework for NeRF
+with sparse training views, called FlipNeRF. It leverages
+flipped reflection rays to provide additional training resources, resulting in more precise surface normals with
+our proposed masking strategy to filter the ineffective
+rays.
+• We also propose an effective regularization loss,
+Uncertainty-aware Emptiness Loss (UE Loss), which reduces floating artifacts with considering the uncertainty
+of outputs, leading to more reliable estimation.
+• We enhance the consistency of bottleneck features between the original input rays and flipped reflection rays by
+Jensen-Shannon Divergence, coined as Bottleneck Feature Consistency Loss (BFC Loss), improving the robustness for rendering from unseen viewpoints.
+• Our FlipNeRF achieves SOTA performance over the
+multiple benchmarks. Especially, ours outperforms other
+baselines by a large margin in more challenging scenarios, e.g. 3/4-view.
+2. Related Works
+2.1. Neural Radiance Field
+Recently, Neural Radiance Field (NeRF) [24] has shown
+impressive performance and potential in the novel view synthesis task. NeRF represents a scene with an MLP, mapping
+coordinates and viewing directions to its colors and volume
+density, and then creates a novel view through volume rendering. Subsequent studies have developed NeRF in several
+directions, e.g. using conical frustums instead of rays [1],
+reparameterizing an input viewing direction as its reflection
+direction [36], and so on. These works have made significant progress by addressing the various issues in novel view
+synthesis, but there still exists a limitation in that NeRF requires a dense set of training images and a lengthy training
+time. Many studies have addressed these issues [10, 28, 5],
+including the utilization of various data structures for faster
+training and inference [9, 42] and attempts to train NeRF
+with only a few training images. Our work focuses on enhancing the performance of NeRF when a sparse set of
+views are provided as training images.
+1 The term ‘flipped’ is used because the reflected ray has an opposite
+direction (from an object to a camera).
+2
+flipped reflection ray
+original input ray
+Figure 2: Overall framework of FlipNeRF. Our FlipNeRF utilize the newly generated flipped reflection rays with our
+proposed UE Loss and BFC Loss as well as existing MSE, NLL and Orientation losses. See Sec. 3 and Fig. 3 for more details
+about generation process of flipped reflection rays and the loss terms.
+2.2. Few-Shot Novel View Synthesis
+the few-shot novel view synthesis problem with focusing on
+the surface normals, which is another critical factor for an
+effective learning of 3D scene geometry. To the best of our
+knowledge, our work is the first attempt to focus on the surface normal estimation for few-shot novel view synthesis.
+There are two main approaches for a few-shot novel view
+synthesis: the pre-training and the regularization method.
+The pre-training methods require a large dataset of multiview scenes to provide prior knowledges of 3D geometry
+to a NeRF model and then optionally finetune on the target scene [5, 6, 12, 19, 29, 35, 39, 43]. On the contrary, the
+regularization methods [31, 15, 11, 25, 8, 30, 17] are optimized per scene without pre-training process by exploiting
+additional training resources, e.g. depth maps [8, 30] and
+semantic consistency [11], as an extra supervision. Among
+them, [25, 15, 17] adopt an unseen viewpoint sampling
+strategy to make up for insufficient training views. However, these sampling processes require many hand-designed
+factors such as the ranges of rotation, translation, jittering,
+and so on, which can introduce artificial biases. Our work
+proposes a novel regularization approach to derive a set of
+flipped reflection rays from estimated surface normals and
+utilizes these for regularization, which does not require a
+heuristic factor to be finetuned, resulting in more effective
+training strategy with limited inputs.
+3. Method
+In this work, we propose an effective regularization
+method for few-shot novel view synthesis with flipped reflection rays. Our FlipNeRF is built upon MixNeRF [31]
+which leverages a mixture model framework (Sec. 3.1). We
+derive a batch of flipped reflection rays and cast them toward the identical target pixels as additional training rays
+(Sec. 3.2). Furthermore, we propose the Uncertainty-aware
+Emptiness Loss and Bottleneck Feature Consistency Loss to
+alleviate the floating artifacts adaptively based on the uncertainty and enhance the consistency between the bottleneck feature distributions of the original and flipped reflection rays, respectively (Sec. 3.3 and Sec. 3.4). Finally, our
+FlipNeRF is trained to minimize the MSE and NLL losses
+as well as the proposed regularization loss terms with their
+corresponding balancing weights (Sec. 3.5). Fig. 2 shows an
+overview of our FlipNeRF.
+2.3. Surface Normal Reconstruction
+There is a line of research to recover accurate textures
+and lighting conditions of objects with NeRF [26, 41, 38, 7,
+34, 44, 3]. Although these earlier studies successfully reconstruct the high-quality isosurfaces derived from the scene
+representations, their rendering quality for novel views is
+still inferior to the NeRF-like models. Meanwhile, RefNeRF [36] achieved superior performance with remarkable
+quality of surface normals compared to the existing NeRF
+models. Since the normal vectors utilized in NeRF framework are derived from the negative normalized density gradients [34, 3, 36], which represent the underlying geometry
+of 3D scenes, learning an accurate density distribution along
+a ray is a key factor for surface normal reconstruction. However, for the few-shot novel view synthesis, the prior works
+mostly focus on the accurate depth estimation without attention to the surface normals, both of which are derived from
+the estimated volume densities. In this work, we approach
+3.1. Preliminaries
+NeRF. The NeRF [24], which is an MLP-based neural
+network, represents a 3D scene as a continuous radiance
+field of RGB color and volume density. For every point sampled along a ray, the 3D coordinates x = (x, y, z) and viewing directions (θ, ϕ) are mapped to the colors c = (r, g, b)
+and densities σ:
+F(\gamma (\mathbf {x}), \gamma (\hat {\mathbf {d}})) \to (\mathbf {c}, \sigma ), \label {eq:nerf}
+(1)
+where F (·), γ(·), and d̂ indicate an MLP, the positional encoding for the inputs, and the 3D Cartesian unit vector used
+as an input viewing direction in practice, respectively.
+The volumetric radiance field is rendered by alpha compositing the RGB values along an input ray r(t) = o +
+td [22], where o and d denote the camera origin and unnormalized direction vector, i.e. d = ∥d∥2 · d̂, respectively.
+3
+sample, and scale parameter βi ∈ {βir , βig , βib }. The mixture coefficient πi is derived from the estimated volume
+density σi as follows:
+\pi _{i} = \frac {w_i}{\sum _{m=1}^{M} w_m} = \frac {T_i(1-\exp (-\sigma _{i}\delta _{i}))}{\sum _{m=1}^{M} T_m(1-\exp (-\sigma _{m}\delta _{m}))}, \label {eq:mix_coef} (5)
+photo-consistency
+where wi and δi indicate the alpha blending weight and
+sample interval, respectively. Thanks to the mixture model’s
+capacity of representing complex distributions, MixNeRF
+learns the density distribution effectively with sparse inputs
+by minimizing the negative log-likelihood (NLL) in Eq. 4.
+Our FlipNeRF is built upon MixNeRF leveraging the
+mixture modeling framework while achieving superior rendering quality with noticeably fewer artifacts and more accurate surface normals to MixNeRF.
+original input ray
+flipped reflection ray
+3.2. Auxiliary Flipped Reflection Ray
+As shown in Fig. 3, we exploit a batch of flipped reflection rays r′ ∈ R′ as extra training resources, which are derived from the original input ray directions d and estimated
+surface normals n̂. First, we derive a flipped reflection direction d′ from d and n̂:
+Figure 3: Flipped reflection ray generation. Our FlipNeRF generates the flipped reflection ray r′ from the estimated normal vector n̂ and original input ray direction d.
+With our masking strategy, r′2 is filtered out since it does
+not satisfy the photo-consistency condition, i.e. θ2 is bigger
+than 90◦ . The smaller θ is, the more photo-consistent the
+target pixel is, where the pair of r and r′ are cast.
+\mathbf {d}' = 2(\mathbf {d} \cdot \hat {\mathbf {n}})\hat {\mathbf {n}} - \mathbf {d}, \label {eq:ref}
+where n̂ denotes the weighted sum of blendingPweights and
+M
+estimated normal vectors along a ray, i.e. n̂ = i=1 wi ni . 2
+Note that we use the gradient of volume density as estimated
+surface normals following [3, 34, 36].
+To generate the additional training rays based on d′ , we
+need a set of imaginary ray origins o′ located in a suitable
+space considering the hitting point and the original input ray
+origins o. Since the vanilla NeRF models, which are trained
+with a dense set of images, tend to have the blending weight
+distribution whose peak is located on the point around the
+object surface ps = o + ts d [8, 31], i.e. the s-th sample
+whose blending weight is the highest along a ray. Therefore,
+we place o′ so that the s-th sample of r′ is ps :
+The volume rendering integrals are denoted as follows:
+\mathbf {\hat {c}(r)} = \int _{t_n}^{t_f} T(t)\sigma (\mathbf {r}(t))\mathbf {c}(\mathbf {r}(t), \hat {\mathbf {d}}) \,dt,
+(2)
+Rt
+where T (t) = exp(− tn σ(s) ds) indicates the degree of
+transparency. In practice, it is approximated with numerical
+quadrature [24] by sampling points along a ray.
+The radiance field is trained to minimize the mean
+squared error (MSE) between rendered and GT pixels:
+\mathcal {L}_\text {MSE} = \sum _{\mathbf {r} \in \mathcal {R}} || \mathbf {\hat {c}(r)} - \mathbf {c^\text {GT}(r)} ||^2_2\,, \label {eq:mse}
+(3)
+\mathbf {o}' = \mathbf {p}_s - t_s\mathbf {d}', \label {eq:ref_cam_org}
+where R is denoted as a set of rays.
+(7)
+resulting in our proposed flipped reflection ray, r′ (t) =
+o′ + td′ . Compared to the previous unseen viewpoint sampling strategies [15, 25, 17], our proposed strategy does not
+rely on the randomness of unseen viewpoint sampling and
+reduces the heuristic factors for sampling schemes, e.g. the
+range of rotation, translation, and so on. Furthermore, since
+our newly generated r′ are cast on the identical object surfaces where the original input rays r are cast, i.e. the target
+pixels are photo-consistent for the pair of r and r′ without
+MixNeRF. Built upon mip-NeRF [1], which leveraged a
+cone tracing method and proposed an integrated positional
+encoding to address an aliasing problem, MixNeRF [31] estimates the joint probability distribution of color values and
+models a ray with a mixture of densities:
+p(\mathbf {c}|\mathbf {r}) = \sum _{i=1}^{M} \pi _{i}\mathcal {F}(\mathbf {c}; \mu _{i}^\mathbf {c}, \beta _{i}), \label {eq:mixture_pdf}
+(6)
+(4)
+2 Technically, n̂ is not guaranteed to be a unit vector without an explicit
+where M is the number of sampled points, F(c; µci , βi ) denotes the Laplacian distribution of RGB c with location parameter µci ∈ {µri , µgi , µbi }, i.e. estimated RGB values of
+normalization process. However, we empirically found that the normalization rather destabilizes the training and leads to the performance degradation. Kindly refer to our supplementary material for related experiments.
+4
+any sophisticated viewpoint sampling process, we are able
+to train r′ effectively with the same GT pixels of r.
+However, since n̂, which are used to derive d′ , are not the
+ground truth but the estimation, there exists a concern that
+even miscreated r′ , which do not satisfy photo-consistency,
+can be used for training. As a result, it might lead to performance degradation while providing misleading training
+cues. To address this problem, we mask the ineffective r′
+by considering the angle θ between n̂ and −d̂ as follows:
+M(\mathbf {r}') = \begin {cases} 1 & \text {if~} \arccos {(-(\hat {\mathbf {d}} \cdot \hat {\mathbf {n}}))} < \tau \\ 0 & \text {otherwise} \end {cases}, \label {eq:masking}
+However, the naive application of existing regularization techniques with limited training views might not be
+consistently helpful across the different scenes due to the
+scene-by-scene different structure, resulting in overall performance degradation. To address this problem, we propose Uncertainty-aware Emptiness Loss (UE Loss) developed upon the Emptiness Loss, which reduces the floating
+artifacts consistently over the different scenes by considering the output uncertainty:
+\begin {split} l_{\text {UE}}(\mathbf {r}) = \frac {1}{M} \sum _{i=1}^{M} \log (1 + \rho \cdot \eta \cdot w_i), \\ \text {where} \quad \rho = \frac {1}{3} \sum _{c}^{\{r,g,b\}} \sum _{i=1}^{M} \beta _i^c . \label {eq:ue_loss} \end {split}
+(8)
+(12)
+where −(d̂ · n̂) amounts to cos θ of original input rays
+and normal vectors, and τ indicates the threshold for filtering the invalid rays, which we set as 90◦ unless specified. Through this masking process, only r′ which are cast
+toward the photo-consistent point can be remained as we intend. Finally, our proposed flipped reflection rays are modeled by mixture density like the original input rays:
+p(\mathbf {c}|\mathbf {r}') = \sum _{i=1}^{M} \pi _{i}'\mathcal {F}(\mathbf {c}; \mu _{i}^\mathbf {c}{'}, \beta _{i}'). \label {eq:mixture_pdf2}
+ρ amounts to the average of the summation of estimated
+scale parameters of RGB color distributions from all samples along a ray, which we use as the uncertainty of a ray. By
+our proposed UE Loss, we are able to regularize the blending weights adaptively, i.e. the more uncertain a ray is, the
+more penalized the blending weights along the ray are. It
+is able to reduce floating artifacts consistently across the
+scenes with different structures and enables to synthesize
+more reliable outputs by considering uncertainty.
+(9)
+Additionally, we leverage the Orientation Loss proposed
+in Ref-NeRF [36] to penalize the backward-facing normal
+vectors for learning accurate surface normals:
+l_{\text {Ori.}}(\mathbf {r}) = \sum _{i=1}^{M} w_i\max (0, \mathbf {n}_{i} \cdot \hat {\mathbf {d}})^2. \label {eq:ori_loss}
+3.4. Bottleneck Feature Consistency
+Motivated by previous works addressing the featurelevel consistency of multiple views for few-shot novel view
+synthesis [6, 11, 15], we encourage the consistency of bottleneck feature distributions between r and r′ , which are
+intermediate feature vectors, i.e. outputs of the spatial MLP
+of NeRF, by Jensen-Shannon Divergence (JSD):
+(10)
+Unlike Ref-NeRF, we penalize underlying density gradient
+normal ni instead of predicted normals.
+Note that our FlipNeRF is fundamentally different compared to Ref-NeRF since ours generates additional training
+rays through the derivation of reflection direction without
+modification to original representations while Ref-NeRF replaced the input viewing direction with its reflection direction, reparameterizing the outgoing radiance.
+l_{\text {BFC}}(\mathbf {r}, \mathbf {r}') = JSD(\psi (\mathbf {b}), \psi (\mathbf {b}')), \label {eq:con_loss}
+where ψ(·), b and b denote the softmax function, the bottleneck features of r and r′ , respectively. While the existing methods [6, 11] rely on off-the-shelf feature extractors
+like 2D CNN or CLIP [27] to address high-level feature
+consistency, we regulate the pair of features effectively by
+enhancing consistency between bottleneck features without
+depending on additional feature extractors.
+3.3. Uncertainty-aware Regularization
+3.5. Total Loss
+Several regularization techniques have been proposed to
+reduce the floating artifacts present in synthesized images,
+which is one of the major problems of NeRF. Among them,
+we leverage the Emptiness Loss [37] which penalizes the
+small blending weights along a ray as follows:
+l_{\text {Emp.}}(\mathbf {r}) = \frac {1}{M} \sum _{i=1}^{M} \log (1 + \eta \cdot w_i), \label {eq:emp_loss}
+(13)
+′
+Our FlipNeRF is not only trained to maximize the loglikelihood of the target pixel cGT for a set of original input
+rays R, but also for flipped reflection rays R′M , where the
+ineffective rays are excluded from the total flipped reflection
+rays R′ by our masking strategy in Eq. 8. Likewise, the UE
+Losses are applied for both R and R′M .
+Aggregating all, our total loss over a batch is as follows:
+(11)
+\begin {split} \mathcal {L}_\text {Total} &= \mathcal {L}_\text {MSE} + \lambda _{1}\mathcal {L}_\text {NLL} + \lambda _{2}\mathcal {L}_\text {NLL}' \\ &+ \lambda _{3}\mathcal {L}_\text {UE} + \lambda _{4}\mathcal {L}_\text {UE}' + \lambda _{5}\mathcal {L}_\text {BFC} + \lambda _{6}\mathcal {L}_\text {Ori.}, \label {eq:total_loss} \end {split}
+where the bigger η is, the steeper the loss function becomes
+around 0.
+5
+(14)
+τ
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Average Err. ↓
+30◦
+60◦
+90◦
+180◦ (No masking)
+18.62
+18.12
+19.55
+18.76
+0.747
+0.723
+0.767
+0.755
+0.206
+0.237
+0.180
+0.190
+0.121
+0.126
+0.101
+0.111
+with a black background, we conduct experiments on the 15
+specific scenes under the scenarios of 3, 6, and 9-view, following the experimental protocol of [43]. We also conduct
+a series of experiments for the analysis of FlipNeRF under 3-view setting as well as comparison against other baselines. Additionally, we compare our FlipNeRF against other
+baselines on LLFF consisting of real forward-facing scenes,
+which is often tested as an out-of-distribution dataset for
+pre-training methods. Following [24], every 8th image of
+each scene is used for a held-out test set and the training
+views are evenly selected from the remaining images. Like
+DTU, we report our results of the 3, 6, and 9-view scenarios,
+following [43].
+For the quantitative evaluation for rendered images, we
+adopt the mean of PSNR, SSIM [40], LPIPS [45], and the
+geometric average [1]. Furthermore, we also adopt the mean
+angular error (MAE◦ ) [36] and NLL [33, 32, 21, 18] for
+evaluating the surface normals and uncertainty, respectively.
+Specifically, following [33], we compute the NLL by deriving the probability of the GT pixel values given a Gaussian
+distribution with the estimated RGB values as mean and the
+uncertainty as variance, which is derived from the weighted
+sum of the blending weights and estimated scale parameters along a ray in our FlipNeRF. For DTU, we report the
+results evaluated by masked metrics to prevent background
+bias, following [25, 31].
+Table 1: Comparison of masking conditions. Our masking
+strategy with τ of 90◦ achieves the best results, filtering out
+the ineffective flipped reflection rays successfully.
+Ratio of effective r'
+initial phase
+final phase
+threshold
+for masking
+Training iterations
+(a) Effective r′ ratio by τ
+(b) Distribution of θ
+Figure 4: Analysis of the masking strategy.
+where a set of λ’s are balancing weight terms for the losses.
+4. Experiments
+4.1. Experimental Settings
+Implementation details. Our FlipNeRF is built upon
+MixNeRF [31] based on the JAX codebase [4], which is developed upon mip-NeRF [1]. The overall training scheme
+follows [25, 31]. We adopt a scene space annealing strategy
+for the early training phase. Also, we apply the exponential decay and warm up for the learning rate. The Adam
+optimizer [16] and the gradient clippings by value at 0.1
+and norm at 0.1 are used. We train our FlipNeRF for 500
+pixel epochs with a batch size of 4,096 on 4 NVIDIA RTX
+3090. Additionally, since the LLFF dataset [23] consists
+of scenes with much more static movement of viewpoints
+compared to other datasets, we set the threshold (τ ) of our
+masking strategy as 30◦ for the experiments on LLFF. More
+detailed hyperparameters and our loss balancing terms by
+the datasets and the number of training views are provided
+in the supplementary material.
+Baselines. We compare our FlipNeRF against the SOTA
+regularization methods [11, 15, 25, 31] on Realistic Synthetic 360◦ as well as the vanilla mip-NeRF [1] and RefNeRF [36], which is known for achieving promising results
+with accurate surface normals. Furthermore, we compare
+ours against the representative pre-training methods [5, 6,
+43] as well as regularization methods on DTU and LLFF.
+The pre-training baselines exploit the DTU and LLFF as
+pre-training dataset and out-of-distribution test set, respectively, while the regularization methods, mip-NeRF and
+Ref-NeRF are optimized per scene. Note that we report the
+quantitative results of other baselines on DTU and LLFF
+from [25], which achieved better results than its original papers by the modified training scheme, and those on Realistic
+Synthetic 360◦ from [31], which trained the baselines with
+the identical training views for a fair comparison.
+Datasets and metrics. We evaluate the performance of
+our FlipNeRF and baselines on the representative benchmarks: Realistic Synthetic 360◦ [24], DTU [13], and
+LLFF [23]. Realistic Synthetic 360◦ contains 8 synthetic
+scenes, each consisting of 400 multi-view rendered images
+with white background. To compare against other representative baselines [15, 11, 31, 25, 1], we evaluate our FlipNeRF under the scenarios of 4 and 8 views. For a fair comparison, we sample the first n-image of the training set for the
+n-view scenario so that the identical images are provided
+for training different methods following [31]. We use 200
+images of the test set for evaluation. For DTU, which provide various scenes including objects put on a white table
+4.2. Analysis of FlipNeRF
+Analysis of flipped reflection rays. As shown in Tab. 1,
+our masking strategy of filtering out the ineffective flipped
+reflection rays with the threshold (τ ) of 90◦ achieves the
+best performance among different options. With τ of 30◦
+and 60◦ , the rendering quality is rather degraded since the
+newly generated rays are overly-filtered and do not provide
+enough additional supervision as demonstrated in Fig. 4a.
+On the other hand, when we exploit all the flipped reflec6
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Average ↓
+NLL ↓
+MixNeRF [31]
+18.95
+0.744
+0.203
+0.113
+9.99
+FlipNeRF (Ours)
+w/o LEmp. or LUE
+w/ LEmptiness
+w/ LUE
+19.30
+18.62
+19.55
+0.758
+0.749
+0.767
+0.196
+0.204
+0.180
+0.108
+0.118
+0.101
+4.88
+4.92
+2.56
+Table 2: Effectiveness of LUE . Our proposed LUE improves
+the rendering quality consistently across the scenes with
+considering the uncertainty.
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Average Err. ↓
+w/o LBFC
+18.79
+0.755
+0.200
+0.115
+w/ LBFC
+MSE on b
+Cos. Sim. on b
+JSD on bd̂
+JSD on b
+18.83
+18.77
+18.43
+19.55
+0.755
+0.755
+0.749
+0.767
+0.197
+0.193
+0.204
+0.180
+0.113
+0.115
+0.120
+0.101
+MixNeRF
+Table 3: Comparison of different strategies for LBFC . Our
+LBFC achieves a significant performance gain compared to
+other regularization schemes for feature consistency.
+FlipNeRF (Ours)
+LNLL
+RGB Image
+RGB Std.
+Depth Map
+Depth Std.
+(1)
+✓
+(2)
+(3)
+(4)
+(5)
+(6)
+(7)
+✓
+✓
+✓
+✓
+✓
+✓
+L′NLL
+✓
+✓
+✓
+✓
+✓
+✓
+LUE †
+✓
+✓
+✓
+✓
+LBFC
+LOri.
+✓
+✓
+✓
+✓
+✓
+✓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Average ↓
+17.44
+0.729
+0.187
+0.130
+16.94
+17.89
+19.01
+18.79
+19.30
+19.55
+0.727
+0.736
+0.755
+0.755
+0.758
+0.767
+0.217
+0.206
+0.181
+0.200
+0.196
+0.180
+0.143
+0.130
+0.107
+0.115
+0.108
+0.101
+Table 4: Ablation study. † indicate that the losses are applied to both r and r′ .
+Figure 5: Comparison of FlipNeRF and MixNeRF. Our
+FlipNeRF renders the images from novel views with much
+fewer artifacts and more accurate depth maps than MixNeRF. Considering the standard deviation of RGB and
+depths, our FlipNeRF is able to estimate more reliable outputs than MixNeRF. For the std. map, the darker the pixel
+is, the more certain the output is.
+lead to overall performance degradation due to the sceneby-scene various structures. As illustrated in Fig. 5, with our
+proposed LUE , ours improves both of the rendering quality
+and the reliability of the model outputs by a large margin
+compared to MixNeRF.
+tion rays without masking, there exists a little improvement
+of performance compared to 30◦ and 60◦ masking, but it is
+still much inferior to 90◦ due to the negative impact from
+the ineffective rays. Additionally, Fig. 4b shows the distribution of θ, i.e. angles between the input viewing directions and normal vectors. As the smaller θ is, the more
+photo-consistent the target pixel is, i.e. the more effective
+the newly generated flipped reflection rays are for training.
+Since our FlipNeRF is trained to estimate the accurate normal vectors, we are able to exploit a set of more effective
+flipped reflection rays through the training, which are cast
+on the more photo-consistent target pixels. Furthermore, at
+the initial training phase, the invalid additional rays are filtered effectively by our masking strategy, leading to highquality supervision and stabilizing the training.
+Bottleneck feature consistency. As shown in Tab. 3,
+there is no significant impact on the performance with regularizing the bottleneck feature b using MSE or cosine similarity. By our proposed LBFC with JSD, we achieve a considerable performance improvement. Interestingly, the performance rather degrades when we apply LBFC with JSD to
+bd̂ , i.e. the bottleneck feature conditioned with input viewing direction d̂. We conjecture that the reduced feature dimension of bd̂ reduces the capacity of feature representations and prevents the model from improving robustness.
+4.3. Ablation Study
+The quantitative results of our ablation study are reported
+in Tab. 4. With only additionally exploiting our proposed
+flipped reflection rays, our FlipNeRF achieves more degenerate results compared to the baseline ((1) → (2)). However,
+we are able to achieve performance improvement by a large
+margin with our proposed LUE and LBFC ((2) → (3) → (4)).
+(5) → (7) shows that enhancing the consistency of bottleneck features between the pair of original and flipped reflection rays is considerably effective. Additionally, by leveraging LOri. from Ref-NeRF, we are able to estimate more
+accurate normal vectors, leading to more effective flipped
+reflection rays and performance gain ((4) → (7)).
+Uncertainty-aware regularization. Tab. 2 shows the effectiveness of our proposed UE Loss. Compared to MixNeRF [31] which models a ray with mixture of distributions
+as our FlipNeRF, ours consistently achieves more reliable
+rendering results with much lower NLL. Without LEmp. [37]
+or our proposed LUE , ours already outperforms MixNeRF
+by a large margin. However, ours with naively leveraged
+LEmp. rather shows inferior results to MixNeRF. It shows
+that naive application of the existing regularization technique for reducing artifacts under the few-shot setting can
+7
+PSNR ↑
+4-view 8-view
+SSIM ↑
+4-view 8-view
+LPIPS ↓
+4-view 8-view
+Average Err. ↓
+4-view 8-view
+MAE◦ ↓
+4-view 8-view
+mip-NeRF [1]
+Ref-NeRF [36]
+14.12
+18.09
+18.74
+24.00
+0.722
+0.764
+0.828
+0.879
+0.382
+0.269
+0.238
+0.106
+0.221
+0.150
+0.121
+0.058
+96.05
+65.62
+101.21
+57.93
+DietNeRF [11]
+InfoNeRF [15]
+RegNeRF [25]
+MixNeRF [31]
+FlipNeRF (Ours)
+15.42
+18.44
+13.71
+18.99
+20.60
+21.31
+22.01
+19.11
+23.84
+24.38
+0.730
+0.792
+0.786
+0.807
+0.822
+0.847
+0.852
+0.841
+0.878
+0.883
+0.314
+0.223
+0.346
+0.199
+0.159
+0.153
+0.133
+0.200
+0.103
+0.095
+0.201
+0.119
+0.210
+0.113
+0.091
+0.086
+0.073
+0.122
+0.060
+0.055
+62.78
+70.90
+58.72
+60.37
+62.04
+57.17
+Table 5: Quantitative results on Realistic Synthetic 360◦ . Our FlipNeRF achieves the SOTA performance among other
+baselines across all the scenarios and metrics.
+mip-NeRF [1]
+3-view
+PSNR ↑
+6-view 9-view
+3-view
+SSIM ↑
+6-view
+9-view
+3-view
+LPIPS ↓
+6-view 9-view
+Average Error ↓
+3-view 6-view 9-view
+8.68
+16.54
+23.58
+0.571
+0.741
+0.879
+0.353
+0.198
+0.092
+0.323
+0.148
+0.056
+16.82
+18.95
+15.32
+15.68
+18.63
+18.54
+19.11
+20.56
+17.54
+18.87
+20.70
+20.49
+20.40
+21.83
+18.35
+20.75
+22.40
+22.22
+0.695
+0.710
+0.671
+0.698
+0.769
+0.769
+0.745
+0.753
+0.730
+0.757
+0.823
+0.822
+0.768
+0.781
+0.752
+0.785
+0.853
+0.853
+0.270
+0.269
+0.304
+0.281
+0.197
+0.197
+0.232
+0.223
+0.250
+0.225
+0.156
+0.155
+0.220
+0.203
+0.232
+0.205
+0.135
+0.135
+0.147
+0.125
+0.171
+0.162
+0.113
+0.113
+0.115
+0.104
+0.132
+0.114
+0.088
+0.089
+0.100
+0.090
+0.120
+0.093
+0.068
+0.069
+11.85
+18.89
+18.95
+19.55
+20.63
+22.20
+22.30
+22.45
+23.83
+24.93
+25.03
+25.12
+0.633
+0.745
+0.744
+0.767
+0.778
+0.841
+0.835
+0.839
+0.823
+0.884
+0.879
+0.882
+0.314
+0.190
+0.203
+0.180
+0.201
+0.117
+0.102
+0.098
+0.173
+0.089
+0.065
+0.062
+0.243
+0.112
+0.113
+0.101
+0.101
+0.071
+0.066
+0.064
+0.068
+0.047
+0.042
+0.041
+Pre-training.
+PixelNeRF [43]
+PixelNeRF† [43]
+SRF [6]
+SRF† [6]
+MVSNeRF [5]
+MVSNeRF† [5]
+Regularization.
+DietNeRF [11]
+RegNeRF [25]
+MixNeRF [31]
+FlipNeRF (Ours)
+Table 6: Comparison with baselines on DTU. Our FlipNeRF outperforms all the pre-training and regularization methods in
+every scenario, especially by a large margin under the 3-view setting. † indicates fine-tuning.
+mip-NeRF [1]
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Average Err. ↓
+14.62
+0.351
+0.495
+0.246
+7.93
+16.17
+12.34
+17.07
+17.25
+17.88
+0.272
+0.438
+0.250
+0.436
+0.557
+0.584
+0.682
+0.512
+0.591
+0.529
+0.356
+0.327
+0.461
+0.217
+0.313
+0.203
+0.171
+0.157
+14.94
+19.08
+19.27
+19.34
+0.370
+0.587
+0.629
+0.631
+0.496
+0.336
+0.236
+0.235
+0.240
+0.146
+0.124
+0.123
+improves the performance by a large margin. Noticeably,
+our FlipNeRF estimates more accurate surface normals than
+other baselines, leading to the performance gain with better
+reconstructed fine details from limited input views as shown
+in Fig. 6a. Additionally, the vanilla Ref-NeRF, which shows
+great performance with accurate normal vectors, achieves
+comparable or even better performance than other regularization methods except ours. From this result, we are able
+to expect that estimating the accurate surface normals is one
+of the key factors for learning 3D geometry with sparse inputs. Note that the comparable MAE◦ of RegNeRF results
+from the overly-smoothed depth estimation, not indicating
+the high-quality of rendering results, as shown in Fig. 6a.
+Pre-training.
+PixelNeRF [43]
+PixelNeRF† [43]
+SRF [6]
+SRF† [6]
+MVSNeRF [5]
+MVSNeRF† [5]
+Regularization.
+DietNeRF [11]
+RegNeRF [25]
+MixNeRF [31]
+FlipNeRF (Ours)
+Table 7: Comparison with baselines on LLFF 3-view. †
+indicates fine-tuning.
+DTU. Our FlipNeRF achieves the best results across all
+the scenarios and most of the evaluation metrics on DTU as
+shown in Tab. 6. Remarkably, ours trained with 6-view outperforms all the pre-training methods trained with 9-view
+in every metric except SSIM. Furthermore, ours trained
+with 3-view still outperforms PixelNeRF [43] and SRF [6]
+trained with 6-view. Similar to the results on Realistic Synthetic 360◦ , ours outperforms other baselines by a large
+4.4. Comparison with other SOTA Methods
+Realistic Synthetic 360◦ . As demonstrated in Tab. 5, our
+FlipNeRF achieves the SOTA performance across all the
+evaluation metrics. Compared to MixNeRF which leverages a mixture model framework as ours, our FlipNeRF
+8
+mip-NeRF [1]
+Ref-NeRF [36]
+RegNeRF [25]
+MixNeRF [31]
+FlipNeRF (Ours)
+Ground Truth
+FlipNeRF (Ours)
+Ground Truth
+(a) Realistic Synthetic 360◦ 4-view
+mip-NeRF [1]
+PixelNeRF [43]
+RegNeRF [25]
+MixNeRF [31]
+(b) DTU 3-view
+Figure 6: Qualitative results on Realistic Synthetic 360◦ and DTU. More results are provided in the supp. material.
+certainty, leading to more reliable outputs. Also, our proposed BFC Loss enhances the bottleneck feature consistency between the rays cast on the photo-consistent pixels
+without leveraging the off-the-shelf feature extractor, leading to performance improvement under the few-shot setting.
+Our FlipNeRF achieves the SOTA performance with limited
+input views among the other few-shot baselines and vanilla
+NeRF-like models. We expect that our work is able to open
+another meaningful direction for the research of few-shot
+novel view synthesis.
+margin especially under the 3-view, which is the most challenging scenario, with reducing the floating artifacts successfully as shown in Fig. 6b. Since the flipped reflection
+rays are effective training resources for unseen views, the
+fewer the training views are provided, the more performance gain is expected.
+LLFF. Table 7 compares our FlipNeRF against other
+baselines on LLFF, which is a real forward-facing dataset.
+Although ours achieves the SOTA performance among
+other baselines, it is much more marginal than those on Realistic Synthetic 360◦ and DTU. We conjecture the reason
+for the marginal improvement of our proposed method can
+be the fact that a set of flipped reflection rays, which are able
+to widely cover the unseen views, are not very useful for the
+scenes in LLFF, where a set of camera poses are much less
+dynamic than other datasets. In other words, our FlipNeRF
+is able to not only achieve a competitive performance for
+the scenes consisting of a set of simple camera poses, but
+also render the novel views in much higher quality for more
+dynamically captured scenes with only a few shots. The rendered images are provided in the supp. material.
+Limitations and future work. Our FlipNeRF exploits
+the flipped reflection rays as a set of additional training
+rays, leading to more accurate surface normal estimation.
+Although Ref-NeRF achieved promising results with the
+high-quality surface reconstruction, we use mip-NeRF representation instead of Ref-NeRF for a fair comparison with
+other methods which are based on mip-NeRF. However, as
+shown in Tab. 6 and Fig. 6a, Ref-NeRF shows promising results without any additional consideration for few-shot setting compared to the vanilla mip-NeRF. Like our FlipNeRF,
+the accurate surface normal estimation leads to the competitive performance of Ref-NeRF even in the few-shot scenarios. Therefore, a combination of our FlipNeRF training
+framework with the Ref-NeRF representation or further exploration with regard to the view-dependent appearance for
+the few-shot novel view synthesis can be interesting directions for future research.
+5. Conclusion
+In this work, we have focused on accurate surface normals, which is another key factor for the few-shot novel
+view synthesis. Our proposed FlipNeRF utilizes a set of
+flipped reflection rays as additional training resources,
+which are simply derived from the estimated normal vectors and the input ray directions. Since it does not require
+any heuristic factor for unseen view generation, we are able
+to exploit these additional training resources with much less
+burden. Furthermore, with our proposed UE Loss, FlipNeRF reduces the floating artifacts consistently across the
+different scene structures while considering the output un-
+Acknowledgements. This work was supported by NRF
+(2021R1A2C3006659) and IITP (2021-0-01343) both
+funded by Korean Government. It was also supported by
+Samsung Electronics (IO201223-08260-01).
+9
+References
+[13] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 406–413, 2014.
+[14] Mohammad Mahdi Johari, Yann Lepoittevin, and François
+Fleuret. Geonerf: Generalizing nerf with geometry priors.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 18365–18375, 2022.
+[15] Mijeong Kim, Seonguk Seo, and Bohyung Han. Infonerf:
+Ray entropy minimization for few-shot neural volume rendering. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 12912–
+12921, 2022.
+[16] Diederik P Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. arXiv preprint arXiv:1412.6980,
+2014.
+[17] Minseop Kwak, Jiuhn Song, and Seungryong Kim. Geconerf: Few-shot neural radiance fields via geometric consistency. arXiv preprint arXiv:2301.10941, 2023.
+[18] Balaji Lakshminarayanan, Alexander Pritzel, and Charles
+Blundell. Simple and scalable predictive uncertainty estimation using deep ensembles. Advances in neural information
+processing systems, 30, 2017.
+[19] Jiaxin Li, Zijian Feng, Qi She, Henghui Ding, Changhu
+Wang, and Gim Hee Lee. Mine: Towards continuous depth
+mpi with nerf for novel view synthesis. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision, pages 12578–12588, 2021.
+[20] Yuan Liu, Sida Peng, Lingjie Liu, Qianqian Wang, Peng
+Wang, Christian Theobalt, Xiaowei Zhou, and Wenping
+Wang. Neural rays for occlusion-aware image-based rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 7824–7833,
+2022.
+[21] Antonio Loquercio, Mattia Segu, and Davide Scaramuzza. A
+general framework for uncertainty estimation in deep learning. IEEE Robotics and Automation Letters, 5(2):3153–
+3160, 2020.
+[22] Nelson Max. Optical models for direct volume rendering.
+IEEE Transactions on Visualization and Computer Graphics,
+1(2):99–108, 1995.
+[23] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions
+on Graphics (TOG), 38(4):1–14, 2019.
+[24] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+[25] Michael Niemeyer, Jonathan T Barron, Ben Mildenhall,
+Mehdi SM Sajjadi, Andreas Geiger, and Noha Radwan. Regnerf: Regularizing neural radiance fields for view synthesis
+from sparse inputs. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+5480–5490, 2022.
+[26] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+[1] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5855–5864,
+2021.
+[2] Christopher M Bishop. Mixture density networks. 1994.
+[3] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. Nerd: Neural reflectance
+decomposition from image collections. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision, pages 12684–12694, 2021.
+[4] James Bradbury, Roy Frostig, Peter Hawkins,
+Matthew James Johnson, Chris Leary, Dougal Maclaurin, George Necula, Adam Paszke, Jake VanderPlas, Skye
+Wanderman-Milne, et al. Jax: composable transformations
+of python+ numpy programs. Version 0.2, 5:14–24, 2018.
+[5] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
+Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 14124–14133, 2021.
+[6] Julian Chibane, Aayush Bansal, Verica Lazova, and Gerard
+Pons-Moll. Stereo radiance fields (srf): Learning view synthesis for sparse views of novel scenes. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 7911–7920, 2021.
+[7] François Darmon, Bénédicte Bascle, Jean-Clément Devaux,
+Pascal Monasse, and Mathieu Aubry. Improving neural implicit surfaces geometry with patch warping. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6260–6269, 2022.
+[8] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and faster training for free. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 12882–
+12891, 2022.
+[9] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5501–5510, 2022.
+[10] Stephan J Garbin, Marek Kowalski, Matthew Johnson, Jamie
+Shotton, and Julien Valentin. Fastnerf: High-fidelity neural
+rendering at 200fps. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14346–
+14355, 2021.
+[11] Ajay Jain, Matthew Tancik, and Pieter Abbeel. Putting nerf
+on a diet: Semantically consistent few-shot view synthesis.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 5885–5894, 2021.
+[12] Wonbong Jang and Lourdes Agapito. Codenerf: Disentangled neural radiance fields for object categories. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 12949–12958, 2021.
+10
+[38] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+arXiv preprint arXiv:2106.10689, 2021.
+[39] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P
+Srinivasan, Howard Zhou, Jonathan T Barron, Ricardo
+Martin-Brualla, Noah Snavely, and Thomas Funkhouser. Ibrnet: Learning multi-view image-based rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 4690–4699, 2021.
+[40] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004.
+[41] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural Information Processing Systems, 34:4805–4815, 2021.
+[42] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
+Angjoo Kanazawa. Plenoctrees for real-time rendering of
+neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5752–
+5761, 2021.
+[43] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelnerf: Neural radiance fields from one or few images.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 4578–4587, 2021.
+[44] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and
+Noah Snavely. Physg: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5453–5462, 2021.
+[45] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 586–595, 2018.
+fields for multi-view reconstruction. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 5589–5599, 2021.
+[27] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya
+Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry,
+Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning transferable visual models from natural language supervision. In International Conference on Machine Learning,
+pages 8748–8763. PMLR, 2021.
+[28] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14335–
+14345, 2021.
+[29] Konstantinos Rematas, Ricardo Martin-Brualla, and Vittorio
+Ferrari. Sharf: Shape-conditioned radiance fields from a single view. In International Conference on Machine Learning,
+pages 8948–8958. PMLR, 2021.
+[30] Barbara Roessle, Jonathan T Barron, Ben Mildenhall,
+Pratul P Srinivasan, and Matthias Nießner. Dense depth priors for neural radiance fields from sparse input views. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12892–12901, 2022.
+[31] Seunghyeon Seo, Donghoon Han, Yeonjin Chang, and Nojun
+Kwak. Mixnerf: Modeling a ray with mixture density for
+novel view synthesis from sparse inputs. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 20659–20668, 2023.
+[32] Jianxiong Shen, Antonio Agudo, Francesc Moreno-Noguer,
+and Adria Ruiz. Conditional-flow nerf: Accurate 3d modelling with reliable uncertainty quantification. In Computer
+Vision–ECCV 2022: 17th European Conference, Tel Aviv, Israel, October 23–27, 2022, Proceedings, Part III, pages 540–
+557. Springer, 2022.
+[33] Jianxiong Shen, Adria Ruiz, Antonio Agudo, and Francesc
+Moreno-Noguer. Stochastic neural radiance fields: Quantifying uncertainty in implicit 3d representations. In 2021 International Conference on 3D Vision (3DV), pages 972–981.
+IEEE, 2021.
+[34] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang, Matthew
+Tancik, Ben Mildenhall, and Jonathan T Barron. Nerv: Neural reflectance and visibility fields for relighting and view
+synthesis. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 7495–
+7504, 2021.
+[35] Alex Trevithick and Bo Yang. Grf: Learning a general radiance field for 3d representation and rendering. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 15182–15192, 2021.
+[36] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T Barron, and Pratul P Srinivasan. Ref-nerf: Structured view-dependent appearance for neural radiance fields.
+In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 5481–5490. IEEE, 2022.
+[37] Haochen Wang, Xiaodan Du, Jiahao Li, Raymond A Yeh,
+and Greg Shakhnarovich. Score jacobian chaining: Lifting pretrained 2d diffusion models for 3d generation. arXiv
+preprint arXiv:2212.00774, 2022.
+11
+Real. Syn. 360◦ [24]
+4-view
+8-view
+DTU [13]
+6-view
+3-view
+[1e−3, 1e−5]
+Learning Rate
+Warm-up Step
+512
+9-view
+LLFF [23]
+3-view
+[2e−3, 2e−5]
+1024
+512
+1024
+Delay Multiplier
+1e−2
+λ1 (for LNLL )
+[4.0, 1e−3]
+512
+λ2 (for L′NLL )
+[4e−1, 1e−4]
+[4e−2, 1e−5]
+[4e−1, 1e−4]
+[4e−2, 1e−5]
+[4e−3, 1e−6]
+[4e−3, 1e−6]
+λ3 (for LUE )
+[1e−4, 1e−1]
+[1e−5, 1e−2]
+[1e−4, 1e−1]
+[1e−5, 1e−2]
+[1e−6, 1e−3]
+[1e−6, 1e−3]
+λ4 (for L′UE )
+1e−2
+1e−3
+1e−3
+1e−4
+1e−5
+1e−5
+λ5 (for LBFC )
+1e−1
+1e−2
+1e−1
+1e−2
+1e−3
+1e−3
+λ6 (for LOri. )
+1e−1
+1e−2
+1e−1
+1e−2
+1e−3
+1e−3
+Table A: Details of hyperparameters and loss balancing terms. For each dataset, the more training views are provided,
+the smaller λ’s we set to prevent over-regularization, except λ1 for LNLL . [a, b] indicates the annealing from a to b.
+initial phase
+final phase
+PSNR: 16.72
+w/ explicit normalization
+22.24
+w/o explicit normalization
+Figure A: Comparison between FlipNeRF using n̂ with
+and without an explicit normalization. With explicitly
+normalized n̂ (left), our FlipNeRF suffers from the training instability and achieves degenerate results. We are able
+to achieve much superior rendering quality with our proposed surface normals (right), which are trained to approximate unit vectors, thanks to our regularization techniques
+and masking strategy.
+Figure B: Distribution of ∥n̂∥2 without an explicit normalization process. At an initial training stage, the estimated surface normals n̂ are not unit vectors as most of
+∥n̂∥2 are far from 1. However, our proposed n̂ is trained to
+be a unit vector naturally through the training without an
+explicit normalization process, and most of ∥n̂∥2 are concentrated close to 1 after the training, which indicates that
+n̂ is successfully approximated to a unit vector.
+A. Implementation Details
+The detailed hyperparameters and our loss balancing
+terms by the datasets and the number of training views are
+provided in Tab. A.
+malization provides wrong supervisory signals, especially
+during the initial training stage when the surface normals
+are not accurately estimated. Furthermore, as illustrated in
+Fig. B, n̂ is trained naturally to approximate the unit vector through the training without an explicit normalization
+process. With our proposed loss terms and regularization
+techniques for accurate normal estimation, we are able to
+use n̂ as the surface normal vector without any additional
+normalization process.
+B. Explicit Normalization for the Estimated
+Surface Normals
+As mentioned in Sec. 3.2, we use the weighted sum of
+blending weights
+PM and estimated normal vectors along a ray,
+i.e. n̂ = i=1 wi ni , as the surface normals n̂ to derive a
+flipped reflection direction d′ . In this formulation, n̂ is not
+guaranteed to be a unit vector without an explicit normalization process. However, we empirically found that the normalization rather destabilizes the training and leads to the
+performance degradation as shown in Fig. A. We conjecture that the inaccurately generated r′ with an explicit nor-
+C. Additional Qualitative Results
+The additional qualitative comparisons are provided in
+Fig. C, Fig. D, and Fig. E. Furthermore, we provide more
+12
+qualitative results of our FlipNeRF in Fig. F, Fig. G, and
+Fig. H. Our FlipNeRF shows superior rendering quality
+compared to other baselines.
+13
+mip-NeRF [1]
+Ref-NeRF [36]
+RegNeRF [25]
+MixNeRF [31]
+FlipNeRF (Ours)
+Ground Truth
+(a) 4-view
+(b) 8-view
+Figure C: Additional qualitative comparisons on Realistic Synthetic 360◦ .
+mip-NeRF [1]
+PixelNeRF [43]
+RegNeRF [25]
+MixNeRF [31]
+FlipNeRF (Ours)
+Ground Truth
+(a) 3-view
+(b) 6-view
+(c) 9-view
+Figure D: Additional qualitative comparisons on DTU.
+mip-NeRF [1]
+DietNeRF [11]
+RegNeRF [25]
+MixNeRF [31]
+FlipNeRF (Ours)
+Figure E: Qualitative comparisons on LLFF 3-view.
+14
+Ground Truth
+(a) 4-view
+(b) 8-view
+Figure F: Additional qualitative results of our FlipNeRF on Realistic Synthetic 360◦ .
+15
+(a) 3-view
+(b) 6-view
+(c) 9-view
+Figure G: Additional qualitative results of our FlipNeRF on DTU.
+16
+Figure H: Additional qualitative results of our FlipNeRF on LLFF 3-view.
+17

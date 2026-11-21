@@ -1,0 +1,140 @@
+# Shadow Mapping
+
+Also called: Depth Pass FBO Setup, Shadow FBO Initialization, Shadow Map Setup, Shadow Mapping for Cast Shadows
+
+## Overview
+Shadow Mapping is a technique to detect cast shadows by rendering a depth map from the light's viewpoint and comparing it with the 3D points obtained from the camera's depth map [S1][S2, S3, S4, S5, unofficial]. It solves the problem of determining visibility between a surface point and a light source without the computational cost of ray casting for every fragment [G]. It sets itself apart from [Shadow Ray Casting](2796-shadow-ray-casting.md) by using a pre-rendered depth texture (shadow map) for batched visibility tests, and from [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by operating in screen space rather than object space [S2, unofficial].
+
+## How it works
+**Inputs:** Scene geometry, light source parameters (position, direction, projection type), camera parameters [G].
+**Outputs:** A shadow map (depth texture) and a final image with shadow occlusion values [G].
+
+**Data Structures:**
+1.  **Shadow Map Texture:**
+    *   Type: `GL_TEXTURE_2D` [S3, unofficial].
+    *   Internal Format: `GL_DEPTH_COMPONENT` [S3, unofficial].
+    *   Data Type: `GL_FLOAT` (32-bit) [S3, unofficial].
+    *   Dimensions: Square, `SizeTextureShadowMap` × `SizeTextureShadowMap` (typically 4096×4096, alternatives 1024, 2048, 8192) [S3, unofficial].
+    *   Wrap Mode S/T: `GL_CLAMP_TO_BORDER` (border color `{1.0f, 1.0f, 1.0f, 1.0f}`) [S3, unofficial] or `GL_CLAMP_TO_EDGE` [S5, unofficial].
+    *   Filtering: `GL_NEAREST` for min/mag filters [S3, S5, unofficial].
+2.  **Shadow Map FBO (Framebuffer Object):**
+    *   Contains a single `GL_DEPTH_ATTACHMENT` bound to the Shadow Map Texture [S3, S5, unofficial].
+    *   Draw Buffer: `GL_NONE` [S3, S5, unofficial].
+    *   Read Buffer: `GL_NONE` [S3, S5, unofficial].
+    *   Status: Must be `GL_FRAMEBUFFER_COMPLETE` [S3, S5, unofficial].
+
+**Steps:**
+1.  **Initialize Shadow Map FBO:** Generate an FBO ID and a 2D texture ID. Bind the texture and allocate memory with `TexImage2D` using `GL_DEPTH_COMPONENT` and `GL_FLOAT`. Set texture parameters (wrap mode, `GL_NEAREST` filtering). Bind the FBO. Attach the texture to `GL_DEPTH_ATTACHMENT`. Set draw and read buffers to `GL_NONE`. Validate framebuffer completeness; throw an exception if incomplete. Unbind FBO [S3, S5, unofficial].
+2.  **Generate Light Projection Matrix:** For a spotlight, compute the `up` vector by crossing the light direction with a reference axis, selecting `(0,0,1)` if the dot product magnitude is below 0.99, otherwise `(1,0,0)`. Create the view matrix using `lookAt` from the light position along its direction. Create the perspective projection matrix using the light's aperture angle, aspect ratio, and near/far planes. Combine into a single model-view-projection matrix [S4, unofficial].
+3.  **Render Shadow Map (Depth Pass):** Bind the shadow map FBO. Set the viewport to the shadow map resolution. Clear the depth buffer. Render the scene geometry using a depth-only shader and the light's projection matrix. This stores the closest depth value from the light's perspective in the shadow map texture [S1][S3, unofficial].
+4.  **Sample Shadow Map (Main Pass):** For each fragment, transform its world position into light space, perform perspective division, and convert to normalized texture coordinates. Sample the stored depth from the shadow map. Compare the fragment's light-space depth with the stored depth plus a bias. Return 1.0 if occluded, 0.0 otherwise [S4, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_shadow_map(width, height):
+    """Creates and configures the FBO and depth texture."""
+    fbo_id = glGenFramebuffers(1)
+    tex_id = glGenTextures(1)
+    
+    glBindTexture(GL_TEXTURE_2D, tex_id)
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, None)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_id)
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex_id, 0)
+    glDrawBuffer(GL_NONE)
+    glReadBuffer(GL_NONE)
+    
+    if glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE:
+        raise RuntimeError("Shadow map FBO incomplete")
+    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    return fbo_id, tex_id
+
+def compute_spotlight_matrix(light_pos, light_dir, angle, aspect, near, far):
+    """Generates the projection matrix for a spotlight."""
+    ref_axis = (0, 0, 1) if abs(dot(light_dir, (0, 0, 1))) < 0.99 else (1, 0, 0)
+    up = normalize(cross(ref_axis, light_dir))
+    view = lookAt(light_pos, light_pos + light_dir, up)
+    proj = perspective(radians(angle), aspect, near, far)
+    return multiply(proj, view)
+
+def render_shadow_map(fbo_id, light_matrix, scene_geometry):
+    """Depth-only pass to populate the shadow map."""
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo_id)
+    glViewport(0, 0, shadow_map_width, shadow_map_height)
+    glClear(GL_DEPTH_BUFFER_BIT)
+    for mesh in scene_geometry:
+        draw_depth_only(mesh, light_matrix)
+    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+def sample_shadow_map(light_matrix, fragment_world_pos, shadow_map_texture, bias):
+    """Performs visibility test for a single fragment."""
+    light_space = multiply(light_matrix, fragment_world_pos)
+    ndc = (light_space.x / light_space.w, light_space.y / light_space.w, light_space.z / light_space.w)
+    tex_coords = (ndc.x * 0.5 + 0.5, ndc.y * 0.5 + 0.5)
+    stored_depth = texture(shadow_map_texture, tex_coords).r
+    return 1.0 if ndc.z >= stored_depth + bias else 0.0
+```
+
+**Parameters:**
+*   **Bias:** A small positive value added to the depth comparison to avoid shadow acne caused by quantization errors [S4, unofficial]. Value not given in the sources.
+*   **Shadow Map Resolution ($N$):** Square texture size. Typical values: 4096 [S3, unofficial], 1024, 2048, 8192 [S3, unofficial].
+*   **IsShadow:** Boolean flag enabling or disabling shadow rendering [S3, unofficial].
+*   **CountChunkShadowMap:** Number of chunks reviewed for shadow mapping. Value: 45 (calculated as a 7×7 square minus corners) [S3, unofficial].
+*   **SizeOrthShadowMap:** Size of the orthogonal matrix/projection for the shadow map. Value: 64 [S3, unofficial].
+*   **BlockBrightness:** Brightness multiplier for blocks when shadows are enabled (0.3f) or disabled (0.15f) [S3, unofficial].
+*   **EntityBrightness:** Brightness multiplier for entities. Value: 0.3f [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Framebuffer Incomplete:** If the framebuffer status is not `GL_FRAMEBUFFER_COMPLETE` after attachment, an exception is thrown [S3, unofficial].
+*   **Shadow Acne:** Caused by precision/quantization errors in depth comparison. Mitigated by applying a bias offset [S4, unofficial].
+*   **Boundary Artifacts:** Texture wrapping modes (`GL_CLAMP_TO_EDGE` or `GL_CLAMP_TO_BORDER`) must be configured to handle fragments outside the light's view frustum [S3, S5, unofficial].
+*   **Perspective Distortion:** Not given in the sources.
+
+## Subtopics
+
+### [Shadow Receiving for Volumes](956-shadow-receiving-for-volumes.md)
+Shadow Receiving for Volumes allows volumetric data to receive shadows cast by polygonal actors without rendering the volume twice. It integrates shadow occlusion checks directly into the view-space ray traversal against a pre-computed shadow map, solving the performance bottleneck of double traversal. Choose this when rendering volumes that interact with external geometry shadows.
+
+### [Variance Shadow Mapping for NeRFs](3561-variance-shadow-mapping-for-nerfs.md)
+This technique renders cast shadows in neural radiance fields by leveraging depth statistics from a light-source viewpoint. It avoids cumulative transmittance costs by comparing depth inconsistencies between camera and light views, producing soft shadows with continuous visibility values in $[0, 1]$. Choose this for NeRFs requiring soft shadows.
+
+### [Variance Shadow Mapping](5686-variance-shadow-mapping.md)
+VSM smoothens depth values to calculate the probability of occlusion using Chebyshev's inequality, producing soft shadow edges instead of abrupt 0/1 values. It requires storing and filtering two depth maps. Choose this when soft shadows are needed with minimal overhead.
+
+### [Reflective Shadow Maps](9391-reflective-shadow-maps.md)
+RSM approximates single-bounce indirect illumination by reusing shadow map data, storing surface properties (albedo, normal, direct illumination) alongside depth. It treats texels as virtual point lights during shading, providing diffuse interreflection without volumetric storage or ray-tracing costs. Choose this for global illumination effects.
+
+### [Shadow Caching](9725-shadow-caching.md)
+Shadow Caching exploits coherence of shadow rays for point lights occluded by the same object, storing results in a spatial data structure to avoid redundant ray casting. Unlike Shadow Mapping, it stores the traversal result itself. Choose this for scenes with high ray coherence.
+
+### [PCF Shadow Lookup with Slope Scaling and Edge Fade](10994-pcf-shadow-lookup-with-slope-scaling-and-edge-fade.md)
+This method computes sun shadow occlusion using Percentage-Closer Filtering (PCF) on a shadow map, augmented with slope-scaled depth bias and distance-based edge fading. It solves shadow acne/peter-panning and harsh shadow boundaries at map edges. Choose this for high-quality sun shadows.
+
+### Moment-Based Order-Independent Transparency
+A method for compact storage and fast reconstruction of depth-dependent transmittance per pixel, allowing compositing of transparent surfaces in arbitrary order [S7, unofficial]. It works with the logarithm of transmittance for additive accumulation, using moments (4, 6, 8 power, or trigonometric) for reconstruction [S7, unofficial]. It is completely order-independent and works for participating media [S7, unofficial]. Choose this for order-independent transparency in volumes.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** $O(N^2)$ for the shadow map texture [S3, unofficial].
+*   **Performance:** On an RTX 3050, rendering 5,000,000 blocks with a 4096×4096 shadow map achieved over 200 fps [S5, unofficial].
+*   **Strengths:** Efficient for static scenes; hardware-accelerated depth comparison; simple to implement [S1][S3, S4, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to Use:** Not given in the sources.
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+Shadow Mapping was introduced by Lance Williams in 1978 [S1][S6, unofficial]. It is a standard technique in real-time graphics for rendering cast shadows [S1][S2, S3, S4, S5, unofficial]. It is widely used in voxel engines and general 3D rendering pipelines [S3, S4, S5, unofficial].
+
+## Sources
+[S1] Photometric Stereo Using Gaussian Splatting And Inverse Rendering, https://hal.science/hal-05553367v1, fetched 2026-10-26
+[S2] Stéréophotométrie par Gaussian Splatting et rendu inverse, https://hal.science/hal-05151330v1, fetched 2026-10-26 (unofficial)
+[S3] SuperAnt30/Vge, https://github.com/SuperAnt30/Vge, fetched 2026-10-27 (unofficial)
+[S4] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)
+[S5] Creating a Voxel Engine with OpenGL | Walker McGilvary, https://theslabby.github.io/2023/12/24/start-voxelengine.html, fetched 2026-10-28 (unofficial)
+[S6] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)
+[S7] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)

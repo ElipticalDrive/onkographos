@@ -1,0 +1,270 @@
+--- v002.md
++++ v003.md
+@@ -4,115 +4,195 @@
+ 
+ ## Overview
+-This method determines whether a set of query points lies inside a set of tetrahedra by solving for barycentric coordinates, processing points in chunks for memory efficiency [S1, unofficial]. It serves as a geometric containment primitive for tetrahedral volume rendering [G].
++This method determines whether a set of query points lies inside a set of tetrahedra by solving for barycentric coordinates. It serves as the core geometric primitive for [Ray-Tetrahedron Intersection](2525-ray-tetrahedron-intersection.md), allowing volume rendering engines to identify which cells contain sample points for density accumulation. Unlike [Plücker-based Tetrahedral Cell Intersection](1767-pl-cker-based-tetrahedral-cell-intersection.md) which operates on ray primitives, this method operates on explicit point positions, making it suitable for post-intersection validation or direct point-in-volume queries.
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-- `points`: A tensor of shape $(P, 3)$ containing $P$ query points in 3D space [S1, unofficial].
+-- `vertices`: A tensor of shape $(V, 3)$ containing the 3D coordinates of the mesh vertices [S1, unofficial].
+-- `tetrahedra`: A tensor of shape $(T, 4)$ containing indices into `vertices`, defining $T$ tetrahedra [S1, unofficial].
++- `points`: Tensor of shape $(P, 3)$ containing $P$ query points in 3D space.
++- `vertices`: Tensor of shape $(V, 3)$ containing the vertices of the tetrahedral mesh.
++- `tetrahedra`: Tensor of shape $(T, 4)$ containing indices into `vertices` defining $T$ tetrahedra.
+ 
+ **Outputs:**
+-- `inside_tet`: A tensor of shape $(P,)$ containing the index of the first containing tetrahedron for each point, or $-1$ if no containing tetrahedron is found [S1, unofficial].
+-- `barycentric_coords`: A tensor of shape $(P, 4)$ containing the barycentric weights $[\lambda_0, \lambda_1, \lambda_2, \lambda_3]$ for each point relative to its containing tetrahedron, or zeros if the point is outside [S1, unofficial].
++- `inside_tet`: Tensor of shape $(P,)$ storing the index of the first tetrahedron containing each point, or $-1$ if no containing tetrahedron exists.
++- `barycentric_coords`: Tensor of shape $(P, 4)$ storing the barycentric weights $(\lambda_0, \lambda_1, \lambda_2, \lambda_3)$ for each point within its containing tetrahedron, or zeros if outside.
+ 
+ ### Data Structures
+-The algorithm processes points in chunks of size `chunk_size` to manage memory usage [S1, unofficial]. Temporary tensors store edge vectors and point vectors relative to a reference vertex [S1, unofficial].
++The implementation relies on dense tensor layouts optimized for batched linear algebra operations (e.g., CUDA kernels or vectorized CPU instructions).
++- `mat`: A $(3, 3, K)$ tensor representing the system of linear equations for a chunk of $K$ points.
++- `d`: A $(K, 3, 1)$ tensor representing the vector from the reference vertex to the query points.
+ 
+ ### Algorithm Steps
+-1. **Initialization**: Initialize `inside_tet` with $-1$ and `barycentric_coords` with $0$ [S1, unofficial].
+-2. **Chunking**: Loop over points in chunks: for `start` in `range(0, num_points, chunk_size)`, set `end = min(start + chunk_size, num_points)` [S1, unofficial].
+-3. **Vertex Retrieval**: Retrieve tetrahedron vertices: `tets_vertices = vertices[tetrahedra]`; unpack into $v_0, v_1, v_2, v_3$ [S1, unofficial].
+-4. **Edge Vector Computation**: Compute edge vectors originating from $v_3$: $a = v_0 - v_3$, $b = v_1 - v_3$, $c = v_2 - v_3$ [S1, unofficial].
+-5. **Point Vector Computation**: Compute vectors from $v_3$ to query points: $d = \text{chunk\_points}.\text{unsqueeze}(1) - v_3.\text{unsqueeze}(0)$ [S1, unofficial].
+-6. **Barycentric Solve**: Construct matrix $M = [a, b, c]$; solve $M \lambda = d$ using a linear solver [S1, unofficial].
+-7. **Lambda Extraction**: Extract $\lambda_0, \lambda_1, \lambda_2$ from the solution; compute $\lambda_3 = 1 - \lambda_0 - \lambda_1 - \lambda_2$ [S1, unofficial].
+-8. **Containment Check**: Evaluate $\text{inside} = (\lambda_0 \ge 0) \land (\lambda_1 \ge 0) \land (\lambda_2 \ge 0) \land (\lambda_3 \ge 0)$ [S1, unofficial].
+-9. **Selection**: Find first containing tetrahedron: $\text{valid\_tet\_exists} = \text{inside}.\text{any}(\text{dim}=1)$; $\text{chunk\_inside\_tet} = \text{where}(\text{valid\_tet\_exists}, \text{argmax}(\text{inside}, \text{dim}=1), -1)$ [S1, unofficial].
+-10. **Output Update**: Get $\text{chunk\_valid\_mask} = \text{nonzero}(\text{valid\_tet\_exists})[0]$; get $\text{valid\_tet\_idx} = \text{chunk\_inside\_tet}[\text{chunk\_valid\_mask}]$; set `barycentric_coords[start:end, 0:3][chunk_valid_mask]` to corresponding lambda values; set `inside_tet[start:end] = chunk_inside_tet` [S1, unofficial].
++1. **Initialization**: Initialize `inside_tet` with $-1$ and `barycentric_coords` with $0$.
++2. **Chunking**: To manage memory efficiency, process points in chunks of size `chunk_size`. Iterate `start` from $0$ to $P$ with step `chunk_size`. Let `end = min(start + chunk_size, P)`.
++3. **Vertex Extraction**: For the current chunk, extract the vertices of all tetrahedra. Let $v_0, v_1, v_2, v_3$ be the vertices of a specific tetrahedron $t$.
++4. **Edge Vector Computation**: Compute edge vectors relative to vertex $v_3$ (the reference vertex):
++   $$ \mathbf{a} = \mathbf{v}_0 - \mathbf{v}_3 $$
++   $$ \mathbf{b} = \mathbf{v}_1 - \mathbf{v}_3 $$
++   $$ \mathbf{c} = \mathbf{v}_2 - \mathbf{v}_3 $$
++5. **Point Vector Computation**: Compute the vector from $v_3$ to the query point $\mathbf{p}$:
++   $$ \mathbf{d} = \mathbf{p} - \mathbf{v}_3 $$
++6. **Barycentric Solving**: Solve the linear system $\mathbf{M} \boldsymbol{\lambda}_{0:2} = \mathbf{d}$ for the first three barycentric coordinates, where $\mathbf{M} = [\mathbf{a}, \mathbf{b}, \mathbf{c}]$.
++   $$ \begin{bmatrix} \lambda_0 \\ \lambda_1 \\ \lambda_2 \end{bmatrix} = \mathbf{M}^{-1} \mathbf{d} $$
++   The fourth coordinate is derived by the constraint $\sum \lambda_i = 1$:
++   $$ \lambda_3 = 1 - \lambda_0 - \lambda_1 - \lambda_2 $$
++7. **Inside Test**: A point is inside the tetrahedron if all barycentric coordinates are non-negative:
++   $$ \text{inside} = (\lambda_0 \ge 0) \land (\lambda_1 \ge 0) \land (\lambda_2 \ge 0) \land (\lambda_3 \ge 0) $$
++8. **Selection**: For each point, identify the first tetrahedron satisfying the inside condition. If no tetrahedron contains the point, the result is $-1$.
+ 
+ ### Pseudocode
+ ```python
+-def point_in_tetrahedron(points, vertices, tetrahedra, chunk_size):
++def point_in_tetrahedron(points, vertices, tetrahedra, chunk_size=1024):
++    """
++    Determines if points lie inside tetrahedra using barycentric coordinates.
++    
++    Args:
++        points: Tensor (P, 3)
++        vertices: Tensor (V, 3)
++        tetrahedra: Tensor (T, 4)
++        chunk_size: Integer, number of points to process per batch
++        
++    Returns:
++        inside_tet: Tensor (P,) index of containing tetrahedron or -1
++        barycentric_coords: Tensor (P, 4) barycentric weights
++    """
+     P = points.shape[0]
+-    inside_tet = full((P,), -1, dtype=int64)
+-    barycentric_coords = zeros((P, 4), dtype=float32)
++    inside_tet = torch.full((P,), -1, dtype=torch.int64)
++    barycentric_coords = torch.zeros((P, 4), dtype=torch.float32)
+     
+-    tets_vertices = vertices[tetrahedra]
++    # Pre-fetch vertex data for all tetrahedra to avoid repeated indexing
++    # tet_vertices shape: (T, 4, 3)
++    tet_vertices = vertices[tetrahedra]
+     
+-    for start in range(0, P, chunk_size):
++    num_chunks = (P + chunk_size - 1) // chunk_size
++    
++    for i in range(num_chunks):
++        start = i * chunk_size
+         end = min(start + chunk_size, P)
+-        chunk_points = points[start:end]
++        chunk_points = points[start:end] # Shape: (K, 3)
++        K = chunk_points.shape[0]
+         
+-        v0, v1, v2, v3 = tets_vertices[:, 0], tets_vertices[:, 1], tets_vertices[:, 2], tets_vertices[:, 3]
++        # Initialize chunk outputs
++        chunk_inside_tet = torch.full((K,), -1, dtype=torch.int64)
++        chunk_bary_coords = torch.zeros((K, 4), dtype=torch.float32)
+         
++        # Iterate over tetrahedra to find the first containing one
++        # Note: In practice, this loop might be optimized or parallelized
++        # depending on the specific acceleration structure (e.g., BVH)
++        # Here we assume a naive search or that tetrahedra are pre-filtered.
++        # For a complete implementation, one would typically use a spatial
++        # accelerator to reduce T. Without it, we check all T.
++        
++        # However, the source [S1, unofficial] implies a direct solve per tetrahedron
++        # or a batched solve. The source code snippet suggests solving
++        # for all tetrahedra simultaneously or in a vectorized manner.
++        # Let's follow the source logic: solve for all tetrahedra for the chunk.
++        
++        # Reshape tet_vertices for broadcasting: (T, 4, 3) -> (T, 1, 4, 3)
++        # chunk_points: (K, 3) -> (1, K, 3)
++        
++        # Extract vertices v0, v1, v2, v3 for all T
++        v0 = tet_vertices[:, 0, :] # (T, 3)
++        v1 = tet_vertices[:, 1, :] # (T, 3)
++        v2 = tet_vertices[:, 2, :] # (T, 3)
++        v3 = tet_vertices[:, 3, :] # (T, 3)
++        
++        # Edge vectors a, b, c: (T, 3)
+         a = v0 - v3
+         b = v1 - v3
+         c = v2 - v3
+         
+-        d = chunk_points.unsqueeze(1) - v3.unsqueeze(0)
++        # Matrix M: (T, 3, 3) where columns are a, b, c
++        M = torch.stack([a, b, c], dim=1) # (T, 3, 3)
+         
+-        M = stack([a, b, c], dim=-1)
+-        d_perm = permute(d, axes=(1, 2, 0))
+-        sol = solve(M, d_perm)
+-        chunk_bary_coords = permute(sol, axes=(2, 0, 1))
++        # Point vectors d relative to v3: (K, 3)
++        # We need to solve M * lambda = d for each T and each K
++        # This requires broadcasting M and d.
++        # M is (T, 3, 3), d is (K, 3)
++        # We want result lambda (T, K, 3)
+         
+-        lambda_0, lambda_1, lambda_2 = unbind(chunk_bary_coords, dim=-1)
+-        lambda_3 = 1.0 - lambda_0 - lambda_1 - lambda_2
++        # Reshape for solve:
++        # M_inv @ d
++        # torch.linalg.solve expects (..., N, N) and (..., N, M)
++        # We need to align dimensions.
++        # Let's transpose M to (T, 3, 3) -> columns are edges.
++        # d needs to be (T, K, 3) or solved in a loop/vectorized way.
+         
+-        inside = (lambda_0 >= 0) & (lambda_1 >= 0) & (lambda_2 >= 0) & (lambda_3 >= 0)
++        # Efficient vectorized solve:
++        # d_expanded: (T, K, 3)
++        d_expanded = chunk_points.unsqueeze(0) - v3.unsqueeze(1) # (T, K, 3)
+         
+-        valid_tet_exists = any(inside, dim=1)
+-        chunk_inside_tet = where(valid_tet_exists, argmax(inside.float(), dim=1), -1)
++        # Solve M @ x = d for each T, K
++        # M is (T, 3, 3), d_expanded is (T, K, 3)
++        # Result lambda_012 is (T, K, 3)
++        lambda_012 = torch.linalg.solve(M, d_expanded) # (T, K, 3)
+         
+-        chunk_valid_mask = nonzero(valid_tet_exists, as_tuple=True)[0]
++        # lambda_3 = 1 - sum(lambda_012)
++        lambda_3 = 1.0 - lambda_012.sum(dim=2, keepdim=True) # (T, K, 1)
+         
+-        if len(chunk_valid_mask) > 0:
+-            valid_tet_idx = chunk_inside_tet[chunk_valid_mask]
+-            inside_tet[start:end][chunk_valid_mask] = valid_tet_idx
+-            
+-            barycentric_coords[start:end, 0][chunk_valid_mask] = lambda_0[chunk_valid_mask, valid_tet_idx]
+-            barycentric_coords[start:end, 1][chunk_valid_mask] = lambda_1[chunk_valid_mask, valid_tet_idx]
+-            barycentric_coords[start:end, 2][chunk_valid_mask] = lambda_2[chunk_valid_mask, valid_tet_idx]
+-            barycentric_coords[start:end, 3][chunk_valid_mask] = lambda_3[chunk_valid_mask, valid_tet_idx]
+-            
++        # Combine: (T, K, 4)
++        all_lambdas = torch.cat([lambda_012, lambda_3], dim=2) # (T, K, 4)
++        
++        # Inside condition: all lambdas >= 0
++        inside_mask = (all_lambdas >= 0).all(dim=2) # (T, K)
++        
++        # Find first T for each K
++        # inside_mask shape (T, K). We want argmax along T for each K
++        # But we need the *first* True.
++        # torch.argmax returns the first index of the max value.
++        # Since True=1, False=0, argmax gives the first True if any exist.
++        valid_tet_exists = inside_mask.any(dim=0) # (K,)
++        
++        # Get indices
++        tet_indices = inside_mask.argmax(dim=0) # (K,)
++        
++        # If no tet is valid, argmax returns 0, which is incorrect.
++        # We must mask these out.
++        chunk_inside_tet = torch.where(valid_tet_exists, tet_indices, torch.full((K,), -1, dtype=torch.int64))
++        
++        # Update barycentric coords for valid points
++        # We need to gather the lambdas for the selected tetrahedra
++        # tet_indices is (K,)
++        # all_lambdas is (T, K, 4)
++        # We want all_lambdas[tet_indices[k], k, :] for each k
++        
++        # Create index tensor for gathering
++        # indices shape (K, 4)
++        # We can use advanced indexing
++        k_indices = torch.arange(K, device=chunk_points.device)
++        
++        # Gather lambdas
++        # all_lambdas[tet_indices, k_indices, :] -> (K, 4)
++        # Note: tet_indices might be -1 for invalid points.
++        # We should only gather for valid points or handle -1 gracefully.
++        # Let's gather all, then zero out invalid ones.
++        
++        gathered_lambdas = all_lambdas[tet_indices, k_indices, :] # (K, 4)
++        
++        # Zero out invalid points
++        gathered_lambdas = torch.where(valid_tet_exists.unsqueeze(1), gathered_lambdas, torch.zeros_like(gathered_lambdas))
++        
++        # Update global outputs
++        inside_tet[start:end] = chunk_inside_tet
++        barycentric_coords[start:end] = gathered_lambdas
++        
+     return inside_tet, barycentric_coords
+ ```
+ 
+ ### Parameters
+-- `chunk_size`: Controls the batch size for memory efficiency [S1, unofficial].
++- `chunk_size`: Controls memory usage during the batched solve. Typical values range from 1024 to 4096 depending on available GPU memory [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-- **Degenerate Tetrahedra**: If the tetrahedron volume is zero (coplanar vertices), the matrix $M$ is singular and the linear solver will fail or produce NaNs [G]. Implementers should check for zero volume or use a pseudo-inverse if degenerate cases are expected [G].
+-- **Precision**: Barycentric coordinates should sum to $1.0$. Floating-point errors may cause slight deviations [G]. The condition $\lambda_i \ge 0$ is robust, but strict equality checks for $\sum \lambda_i = 1$ are not required if $\lambda_3$ is computed as $1 - \sum_{i=0}^2 \lambda_i$ [G].
+-- **Boundary Conditions**: Points exactly on the boundary have $\lambda_i = 0$. The condition $\ge 0$ includes them as "inside" [G].
+-
+-## Subtopics
+-
+-### [Plücker-based Tetrahedral Cell Intersection](1767-pl-cker-based-tetrahedral-cell-intersection.md)
+-Uses Plücker coordinates for intersection tests. Choose when working with line geometry primitives directly [G].
+-
+-### [Tetrahedron Face Extraction](3742-tetrahedron-face-extraction.md)
+-Extracts triangular faces from tetrahedral meshes. Choose when face-based rendering or shading is required [G].
+-
+-### [Skeleton Parameter Minimization for Ray Intersection](3975-skeleton-parameter-minimization-for-ray-intersection.md)
+-Optimizes ray intersection via skeleton parameters. Choose for skeleton-based representations [G].
+-
+-### [Mesh Shader Tetrahedron Intersection Optimization](5174-mesh-shader-tetrahedron-intersection-optimization.md)
+-Optimizes tetrahedron intersection on mesh shaders. Choose for GPU mesh shader pipelines [G].
+-
+-### [Raytracing Cell-Organized Irregular Volumes](5257-raytracing-cell-organized-irregular-volumes.md)
+-Handles cell-organized irregular volumes. Choose for structured irregular grids [G].
++- **Degenerate Tetrahedra**: If the volume of the tetrahedron is zero (coplanar vertices), the matrix $\mathbf{M}$ is singular and the solve will fail or produce NaNs. [G] Implementers should check for zero volume or use a pseudo-inverse with a tolerance threshold.
++- **Precision**: Barycentric coordinates sum to 1. Floating-point errors may cause $\sum \lambda_i \neq 1$ exactly. [G] It is recommended to renormalize $\lambda_3 = 1 - \lambda_0 - \lambda_1 - \lambda_2$ after solving for the first three, as done in the algorithm, to ensure the constraint is satisfied.
++- **Boundary Conditions**: Points exactly on the face or edge have $\lambda_i = 0$. The condition $\lambda_i \ge 0$ includes boundaries.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(P \cdot T)$ in the worst case if checking all tetrahedra per point, but typically $O(P)$ if spatial acceleration structures (like BVH or grid) are used to limit $T$ to a small constant [G]. The linear solve is $O(1)$ per point per tetrahedron [G].
+-- **Memory Complexity**: $O(P + T)$ for storing inputs and outputs. Chunking reduces peak memory to $O(\text{chunk\_size} \cdot T)$ [G].
+-- **Strengths**: Vectorizable, numerically stable for non-degenerate tetrahedra, easy to implement with standard linear algebra libraries [G].
+-- **Limitations**: Requires solving a linear system for each tetrahedron-point pair, which can be expensive without acceleration structures. Degenerate tetrahedra cause numerical instability [G].
+-- **When to Use**: When high precision is needed for point containment in tetrahedral meshes, and acceleration structures are available to limit the search space [G].
+-- **When Not to Use**: For degenerate tetrahedra or when memory is extremely constrained and chunking is not feasible [G].
++- **Time Complexity**: $O(P \cdot T)$ for a naive implementation checking all tetrahedra, where $P$ is the number of points and $T$ is the number of tetrahedra. With spatial acceleration (e.g., BVH), this reduces to $O(P \log T)$ or better. The linear algebra solve is $O(T \cdot K)$ per chunk for $K$ points.
++- **Memory Complexity**: $O(T \cdot K)$ for the intermediate matrices in the chunked solve.
++- **Strengths**: Simple to implement, numerically stable for non-degenerate tetrahedra, easily vectorizable.
++- **Limitations**: Naive search is slow for large $T$. Requires a spatial accelerator for performance in dense volumes.
+ 
+ ## Background
+-The method is a standard computational geometry technique for point-in-polyhedron tests [G]. It is implemented in the TetWeave project for resampling and optimization in tetrahedral grids [S1, unofficial].
++This method is a standard geometric technique used in computer graphics and scientific visualization. It is employed in [TetWeave](https://github.com/AlexandreBinninger/TetWeave) for resampling and interpolation in 3D reconstruction pipelines [S1, unofficial].
+ 
+ ## Sources

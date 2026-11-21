@@ -1,0 +1,172 @@
+--- v004.md
++++ v005.md
+@@ -4,44 +4,44 @@
+ 
+ ## Overview
+-Level of Detail Calculation maps a continuous spatial or view-dependent metric to a discrete resolution level within a multiresolution hierarchy [S1]. It computes a fractional level index and its bounding integer levels with associated weights to enable interpolation or selection across the hierarchy [S1].
++Level of Detail Calculation determines the specific resolution level within a multiresolution hierarchy to render for a given voxel or brick based on its projected size or distance from the viewer. It solves the problem of balancing rendering performance with visual fidelity by selecting the coarsest representation that satisfies a threshold error or screen-space size constraint. It differs from sibling methods like [LoD Selection via Projected Width](7837-lod-selection-via-projected-width.md) by explicitly computing a continuous fractional level index to enable smooth interpolation between discrete resolution tiers, rather than selecting a single discrete integer level immediately.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: $MaxLevels$, the total number of available resolution levels in the hierarchy [S1].
+-*   Input: $width$, the metric determining the required detail [S1].
+-*   Output: $level$, the fractional target level index [S1].
+-*   Output: $level0$, the upper integer level index [S1].
+-*   Output: $plevel0$, the fractional weight for the upper level [S1].
+-*   Output: $level1$, the lower integer level index [S1].
+-*   Output: $plevel1$, the fractional weight for the lower level [S1].
++*   **Input:** `width`: The projected width of the voxel/brick in pixels (or a normalized metric representing screen-space extent). `MaxLevels`: The total number of available resolution levels in the hierarchy (integer).
++*   **Output:** `level0`: The lower integer LOD index. `plevel0`: The fractional weight for the lower level. `level1`: The upper integer LOD index. `plevel1`: The fractional weight for the upper level.
+ 
+ **Data Structures:**
+-No complex data structures are required; the calculation operates on scalar values [S1].
++No complex data structures are required for the calculation itself. The method operates on scalar values. The hierarchy is assumed to be a linear array of levels indexed from $0$ (finest) to $MaxLevels - 1$ (coarsest), or vice versa, depending on convention. Based on the formula $level = MaxLevels - 1 + \log_2(width)$, if $width=1$ (1 pixel), $level = MaxLevels - 1$. If $width < 1$, $level < MaxLevels - 1$. This implies Level 0 is the finest resolution (smallest voxel) and Level $MaxLevels-1$ is the coarsest.
+ 
+ **Steps:**
+-1. Calculate the raw fractional level index using the logarithmic relationship between the maximum levels and the input width [S1].
+-2. Compute the upper integer level and its corresponding fractional weight [S1].
+-3. Compute the lower integer level and its corresponding fractional weight [S1].
++1.  Calculate the continuous fractional LOD index using the logarithmic relationship between projected width and the hierarchy depth.
++2.  Determine the two adjacent integer levels surrounding the fractional index.
++3.  Compute the interpolation weights (fractions) for these two levels.
+ 
+ **Formulas:**
+-The base calculation for the fractional level is:
+-$$ level = MaxLevels - 1 + \log_2(width) \quad (19) $$
++Let $M$ be `MaxLevels` and $w$ be `width`.
+ 
+-The upper integer level $level0$ and its weight $plevel0$ are:
+-$$ level0 = \lceil level \rceil $$
+-$$ plevel0 = level - level0 \quad (20) $$
++1.  Calculate continuous level:
++    $$ level = M - 1 + \log_2(w) $$
++    [S1]
+ 
+-The lower integer level $level1$ and its weight $plevel1$ are:
+-$$ level1 = \lfloor level \rfloor $$
+-$$ plevel1 = level1 - level \quad (21) $$
++2.  Calculate lower integer level and its weight:
++    $$ level_0 = \lceil level \rceil $$
++    $$ plevel_0 = level - level_0 $$
++    [S1]
++
++3.  Calculate upper integer level and its weight:
++    $$ level_1 = \lfloor level \rfloor $$
++    $$ plevel_1 = level_1 - level $$
++    [S1]
+ 
+ **Parameters:**
+-*   $MaxLevels$: The total number of resolution levels in the hierarchy [S1].
+-*   $width$: The continuous metric determining the required detail [S1].
++*   `MaxLevels`: Typically 3 to 8 for real-time applications, depending on memory constraints and the dynamic range of the scene [S1].
++*   `width`: Derived from the projection matrix and the voxel's world-space dimensions.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Negative or Zero Width:** $\log_2(width)$ is undefined for $width \le 0$. Implementers must clamp $width$ to a minimum positive value [G].
+-*   **Index Bounds:** The resulting $level0$ and $level1$ may exceed the valid hierarchy range if $width$ is outside the expected bounds. Clamping the final integer indices is required [G].
+-*   **Precision:** Floating-point precision in $\log_2$ can cause jitter in level selection for very small changes in $width$ [G].
++*   **Width Zero or Negative:** $\log_2(0)$ is undefined. If a voxel projects to zero or negative width (behind the camera or degenerate), it should be culled before this calculation.
++*   **Level Bounds:** If $level < 0$, the voxel is larger than the finest resolution. Clamp $level_0$ and $level_1$ to $0$. If $level > M - 1$, the voxel is smaller than the coarsest resolution. Clamp to $M - 1$.
++*   **Precision:** Floating-point precision in $\log_2$ can cause jitter in $plevel$ values for very small changes in $width$. [G] In practice, dithering or smoothing may be applied to $plevel$ to prevent visual popping during camera movement.
+ 
+ **Pseudocode:**
+@@ -49,31 +49,52 @@
+ import math
+ 
+-def calculate_lod(max_levels: int, width: float) -> tuple:
++def calculate_lod(width: float, max_levels: int) -> tuple:
+     """
+-    Calculate Level of Detail indices and weights.
++    Calculates the fractional LOD level for a voxel of projected width.
+     
+     Args:
+-        max_levels: Total number of levels in the hierarchy (integer).
+-        width: The metric determining detail (float, must be > 0).
++        width: Projected width in pixels. Must be > 0.
++        max_levels: Total number of levels in the hierarchy.
+         
+     Returns:
+-        A tuple (level0, plevel0, level1, plevel1) where:
+-        - level0: Upper integer level index
+-        - plevel0: Weight for level0
+-        - level1: Lower integer level index
+-        - plevel1: Weight for level1
++        (level0, plevel0, level1, plevel1)
+     """
+-    if width <= 0.0:
+-        width = 1.0
+-        
++    if width <= 0:
++        # Handle degenerate case: cull or use finest level
++        return (0, 0.0, 0, 0.0)
++
++    # Step 1: Continuous level
++    # Formula: level = MaxLevels - 1 + log2(width)
+     level = (max_levels - 1) + math.log2(width)
+-    
++
++    # Step 2: Lower integer level and weight
++    # level0 = ceil(level)
++    # plevel0 = level - level0
+     level0 = math.ceil(level)
+     plevel0 = level - level0
+-    
++
++    # Step 3: Upper integer level and weight
++    # level1 = floor(level)
++    # plevel1 = level1 - level
+     level1 = math.floor(level)
+     plevel1 = level1 - level
++
++    # Clamp levels to valid range [0, max_levels - 1]
++    # Note: Depending on hierarchy definition, 0 might be finest or coarsest.
++    # Based on formula, if width=1, level = max_levels - 1.
++    # If width < 1, level < max_levels - 1.
++    # If width > 1, level > max_levels - 1.
++    # Assuming 0 is finest, max_levels-1 is coarsest.
+     
+-    return level0, plevel0, level1, plevel1
++    level0 = max(0, min(level0, max_levels - 1))
++    level1 = max(0, min(level1, max_levels - 1))
++    
++    # Recalculate weights if clamping occurred to ensure they sum to 1 or are valid
++    # If both levels are clamped to the same value, plevel0 should be 1.0
++    if level0 == level1:
++        plevel0 = 1.0
++        plevel1 = 0.0
++
++    return (level0, plevel0, level1, plevel1)
+ ```
+ 
+@@ -81,22 +102,17 @@
+ 
+ ### [Multiresolution Terrain Quantization and Prediction](9998-multiresolution-terrain-quantization-and-prediction.md)
+-This method assigns quantization precision to terrain vertices in a multiresolution hierarchy to minimize bitstream size while maintaining visual fidelity. It sets itself apart from generic quantization methods by leveraging the geometric connectivity of patch neighbors to derive shifts for boundary vertices from their children, thereby reducing the number of stored parameters.
++Assigns quantization precision to terrain vertices in a multiresolution hierarchy to minimize bitstream size while maintaining visual fidelity. It sets itself apart by leveraging geometric connectivity of patch neighbors to derive shifts for boundary vertices from their children, thereby reducing the number of stored parameters.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-The calculation requires $O(1)$ time and $O(1)$ memory complexity, involving a constant number of arithmetic operations and a logarithm [G].
+-
+-**Measured Performance:**
+-Not given in the sources.
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Simple computation with direct mapping to hierarchical indices [G].
+-*   **Limitations:** Requires careful input clamping to avoid invalid indices and assumes a geometric progression of resolutions [G].
+-
+-**When to Use:**
+-Use when a continuous metric needs to be mapped to a discrete multiresolution hierarchy with interpolation support [G].
++*   **Time Complexity:** $O(1)$ per voxel/brick. The calculation involves a logarithm and basic arithmetic operations.
++*   **Memory Complexity:** $O(1)$ auxiliary memory.
++*   **Performance:** The raster approach for LOD generation is noted to be faster in some contexts, but the logarithmic calculation is suitable for real-time applications [S1].
++*   **Strengths:** Provides smooth transitions between LODs via fractional weights, reducing popping artifacts. Simple to implement.
++*   **Limitations:** Requires accurate projection of voxel width. Does not account for content complexity (e.g., high-frequency details might require finer LOD even if projected size is small).
++*   **When to Use:** When smooth LOD transitions are desired and the hierarchy is based on geometric resolution.
++*   **When Not to Use:** When content-based error metrics are more important than geometric size, or when hardware limitations prevent fractional blending.
+ 
+ ## Background
+-The method is presented in the context of fast voxelization and level of detail for microgeometry rendering [S1]. It is applied to handle anisotropic microgeometries where naive averaging at coarse resolutions produces poor visual results [S1].
++The method originates from research into fast voxelization and level of detail for microgeometry rendering, specifically in the context of rendering anisotropic materials and complex microstructures [S1]. The logarithmic relationship between projected size and LOD index is a standard technique in texture mipmapping and volume rendering, adapted here for voxel-based microgeometry. The specific formulation with fractional weights allows for pre-integration or blending between resolution levels, improving visual quality at coarse resolutions compared to naive averaging [S1].
+ 
+ ## Sources

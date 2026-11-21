@@ -1,0 +1,767 @@
+# FunctionRenderer
+CSG and implicit function-based models are rendered using Sphere Tracing
+
+Curved surface fidelty is independent of the number of meshes, only depends on the resolution of rendering image.
+
+<img src="result/sphere.png" width="256px" alt="sphere" border="1"><img src="result/cylinder.png" width="256px" alt="sphere" border="1"><img src="result/torus.png" width="256px" alt="sphere" border="1">
+
+
+Boolean operation to represent more complex shapes.
+
+<img src="result/union.png" width="256px" alt="sphere" border="1"><img src="result/intersection.png" width="256px" alt="sphere" border="1"><img src="result/difference.png" width="256px" alt="sphere" border="1">
+
+Available to use quadric surfaces. If you know first derivative, you can add another function
+
+<img src="result/quadric.png" width="256px" alt="sphere" border="1">
+
+## execute
+```
+$ git clone <this repository>
+$ cd FunctionRenderer
+$ mkdir build && cd build
+$ cmake ..
+$ make
+$ ./function_renderer
+```
+## Modeling
+- Implement some primitives and quadric surfaces
+- Each model needs the function to return SDF(signed distance function) and normal for rendering
+- Some models are difficult to compute SDF analytically, so substitute for first-order approximation
+## Rendering
+- When rendering the implicit function-based model, sphere tracing is used for collision judgement and normal computation insted of ray tracing for polygonal meshes
+- First, decide the direction of the ray for each camera pixels (perspective)
+- Second, sphere tracing to decide the collision point by marching the ray as much as the distance to the surface of models step by step
+- When the distance is highly small, the ray is judged as hit and compute the normal of the surface at the point
+- If the number of steps exceeds threshold, end the marching and judged as no-hit
+- Finally, for all hit points, texturing using material capture shaders
+
+# Reference
+- [Taubin 1994 "Distance approximations for rasterizing implicit curves"](https://dl.acm.org/doi/10.1145/174462.174531)
+- [Hart 1995 "Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces"](https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces)
+- [Inigo Quilez computer graphics, mathematics, shaders, fractals, demoscene and more](https://iquilezles.org/articles/distfunctions/)
+- [Takikawa et al. 2021 "Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes"](https://github.com/nv-tlabs/nglod)
+
+### boolean.h
+```
+/*
+    Boolean operation is available for these models.
+    Reference: https://iquilezles.org/articles/distfunctions/
+*/
+
+#include "model.h"
+
+class Union : public Model {
+public:
+    Union(Model* m1, Model* m2): m1(m1), m2(m2) {}
+    double sdf(Vector3 v){
+        return std::min(m1->sdf(v), m2->sdf(v));
+    }
+    Vector3 normal(Vector3 v){
+        if(m1->sdf(v) > m2->sdf(v)) return m2->normal(v);
+        else return m1->normal(v);
+    }
+private:
+    Model *m1, *m2;
+};
+
+class Intersection : public Model {
+public:
+    Intersection(Model* m1, Model* m2): m1(m1), m2(m2) {}
+    double sdf(Vector3 v){
+        return std::max(m1->sdf(v), m2->sdf(v));
+    }
+    Vector3 normal(Vector3 v){
+        if(m1->sdf(v) > m2->sdf(v)) return m2->normal(v);
+        else return m1->normal(v);
+    }
+private:
+    Model *m1, *m2;
+};
+
+class Difference : public Model {
+    // m1 - m2
+public:
+    Difference(Model* m1, Model* m2): m1(m1), m2(m2) {}
+    double sdf(Vector3 v){
+        return std::max(m1->sdf(v), -m2->sdf(v));
+    }
+    Vector3 normal(Vector3 v){
+        if(m1->sdf(v) > m2->sdf(v)) return m2->normal(v);
+        else return m1->normal(v);
+    }
+private:
+    Model *m1, *m2;
+};
+```
+
+### interaction.cpp
+```
+/*
+    Behavior after moving the mouse is set as OpenCV's mouse callback fucntion
+
+    left-click: rotating the camera origin around the camera destination according to Arcball operation
+    shift-key + left-click: scaling, expanding when up the mouse and shrinking when down
+    right-click: translating the camera
+
+    Behavior while moving the mouse will be implemented as low resolution preview
+*/
+
+#include "interaction.h"
+
+bool translating = false;
+bool scaling = false;
+bool rotating = false;
+int ix = -1; int iy = -1;
+
+Vector3 rotate_any_axis(const Vector3 &n, const double angle, const Vector3 &v){
+    // Rodrigues' rotation formula
+    Vector3 R1 = Vector3(
+        n.x * n.x * (1 - std::cos(angle)) + std::cos(angle),
+        n.x * n.y * (1 - std::cos(angle)) - n.z * std::sin(angle),
+        n.x * n.z * (1 - std::cos(angle)) + n.y * std::sin(angle)
+    );
+    Vector3 R2 = Vector3(
+        n.y * n.x * (1 - std::cos(angle)) + n.z * std::sin(angle),
+        n.y * n.y * (1 - std::cos(angle)) + std::cos(angle),
+        n.y * n.z * (1 - std::cos(angle)) - n.x * std::sin(angle)
+    );
+    Vector3 R3 = Vector3(
+        n.z * n.x * (1 - std::cos(angle)) - n.y * std::sin(angle),
+        n.z * n.y * (1 - std::cos(angle)) + n.x * std::sin(angle),
+        n.z * n.z * (1 - std::cos(angle)) + std::cos(angle)
+    );
+    return Vector3(R1.dot(v), R2.dot(v), R3.dot(v));
+}
+
+void changePerspective(int event, int x, int y, int flag, void* userdata){
+    TracerData* td = (TracerData*)userdata;
+
+    // translation
+    if(event == cv::EVENT_RBUTTONDOWN){
+        translating = true; ix = x; iy = y;
+    }
+    else if(event == cv::EVENT_RBUTTONUP && translating){
+        double dx = (double)(x - ix) / td->img->rows;
+        double dy = (double)(y - iy) / td->img->cols;
+
+        Vector3 v_view = camera_t - camera_o;
+        Vector3 v_right = (v_view.x != 0 || v_view.y != 0) ? Vector3(-v_view.y, v_view.x, 0).normalize() : Vector3(1, 0, 0);
+        Vector3 v_up = v_right.cross(v_view).normalize();
+        camera_o -= v_right * dx + v_up * dy;
+        camera_t -= v_right * dx + v_up * dy;
+
+        render(*(td->img), *(td->model), *(td->matcap_img), false);
+        translating = false; ix = -1; iy = -1;
+    }
+    // scale
+    else if(event == cv::EVENT_LBUTTONDOWN && (flag & cv::EVENT_FLAG_SHIFTKEY)){
+        scaling = true; iy = y;
+    }
+    else if(event == cv::EVENT_LBUTTONUP && (flag & cv::EVENT_FLAG_SHIFTKEY) && scaling){
+        double dy = (double)(y - iy) / td->img->cols;
+
+        Vector3 v_view = camera_t - camera_o;
+        camera_t += v_view * dy;
+
+        render(*(td->img), *(td->model), *(td->matcap_img), false);
+        scaling = false; iy = -1;
+    }
+    // rotate
+    else if(event == cv::EVENT_LBUTTONDOWN){
+        rotating = true; ix = x; iy = y;
+    }
+    else if(event == cv::EVENT_LBUTTONUP && rotating){
+        double x0 = (double)ix; double y0 = (double)iy;
+        double x1 = (double)x; double y1 = (double)y;
+        double W = td->img->cols; double H = td->img->rows;
+        if((x - ix) * (x - ix) + (y - iy) * (y - iy) <= 100) return; 
+
+        Vector3 v0 = Vector3(2 * x0 / W - 1.0, -(2 * y0 / H - 1.0), 0);
+        Vector3 v1 = Vector3(2 * x1 / W - 1.0, -(2 * y1 / H - 1.0), 0);
+        if(v0.x * v0.x + v0.y * v0.y < 1.0) v0.z = std::sqrt(1.0 - (v0.x * v0.x + v0.y * v0.y));
+        else v0 = v0.normalize();
+        if(v1.x * v1.x + v1.y * v1.y < 1.0) v1.z = std::sqrt(1.0 - (v1.x * v1.x + v1.y * v1.y));
+        else v1 = v1.normalize();
+
+        Vector3 v_view = (camera_t - camera_o).normalize();
+        Vector3 v_right = (v_view.x != 0 || v_view.y != 0) ? Vector3(-v_view.y, v_view.x, 0).normalize() : Vector3(1, 0, 0);
+        Vector3 v_up = v_right.cross(v_view).normalize();
+        // Vector3 v0 = (v_right * v0.x + v_up * v0.y + v_view * v0.z).normalize();
+        // Vector3 v1 = (v_right * v1.x + v_up * v1.y + v_view * v1.z).normalize();
+        v0.print(); v1.print();
+        std::cout << "dot: " << v0.dot(v1) << std::endl;
+        double alpha = std::acos(v0.dot(v1));
+        Vector3 axis_ = v0.cross(v1).normalize();
+        Vector3 axis = (v_right * v0.x + v_up * v0.y + v_view * v0.z).normalize();
+        std::cout << "angle: " << alpha << std::endl; axis_.print(); axis.print();
+        Vector3 rotate_v = rotate_any_axis(axis, alpha, (camera_o - camera_t));
+        camera_o = camera_t + rotate_v;
+
+        render(*(td->img), *(td->model), *(td->matcap_img), true);
+        rotating = false; ix = -1; iy = -1;
+    }
+
+    // else if(event == cv::EVENT_MOUSEMOVE){
+    //     if(translating){
+
+    //     }
+    //     if(scaling){
+
+    //     }
+    //     if(rotating){
+
+    //     }
+    // }
+}
+```
+
+### interaction.h
+```
+#include <opencv4/opencv2/opencv.hpp>
+
+#include "vector3.h"
+#include "model.h"
+#include "render.h"
+
+#ifndef _INTERACTION_H_
+#define _INTERACTION_H_
+
+struct TracerData{
+    cv::Mat* img;
+    Model* model;
+    cv::Mat* matcap_img;
+};
+
+Vector3 rotate_any_axis(const Vector3 &n, const double angle, const Vector3 &v);
+
+void changePerspective(int event, int x, int y, int flag, void* userdata);
+
+#endif
+```
+
+### main.cpp
+```
+#include <algorithm>
+#include <assert.h>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <opencv4/opencv2/opencv.hpp>
+
+#include "boolean.h"
+#include "interaction.h"
+#include "model.h"
+#include "render.h"
+#include "vector3.h"
+
+void init_camera(void){
+    camera_o = Vector3(3, 3, 3);
+    camera_t = Vector3(0, 0, 0);
+}
+
+int main(int argc, char **argv){
+    int width, height;
+    if(argc == 3){
+        width = std::stoi(argv[1]);
+        height = std::stoi(argv[2]);
+    }
+    else if(argc == 2){
+        width = std::stoi(argv[1]);
+        height = std::stoi(argv[1]);
+    }
+    else{
+        width = 512; height = 512;
+    }
+
+    cv::Mat image(cv::Size(width, height), CV_8UC3);
+    const std::string matcap_path = "matcap/green.png";  // Takikawa et al. 2021
+    cv::Mat matcap_img = cv::imread(matcap_path, -1);
+    assert(!matcap_img.empty());
+
+    init_camera();
+
+    // model creation TODO: separate function
+    // Model model;
+    // Torus torus = Torus(1, 0.3);
+    Sphere sphere = Sphere(Vector3(0, 0, 0), 1);
+    Rectangular rect = Rectangular(Vector3(0, 0, 0), 0.5, 1, 1.5);
+    // Quadric quad = Quadric(1, 2, 3, 0, 0, 0, 0, 0, 0, -1);
+    Difference model = Difference(&rect, &sphere);
+
+    TracerData tracer_data = { &image, &model, &matcap_img };
+    render(image, model, matcap_img, true);
+
+    cv::imwrite("result/result.png", image);
+    cv::namedWindow("Result", cv::WINDOW_AUTOSIZE);
+    cv::setMouseCallback("Result", changePerspective, (void*)&tracer_data);
+    while(1){
+        cv::imshow("Result", image);
+        int key = cv::waitKey(1) & 0xFF;
+        if(key == 27) break;
+        if(key == 114){ // press 'r'
+            init_camera();
+            render(image, model, matcap_img, true);
+        }
+        if(key == 115){ // press 's'
+            cv::imwrite("result/result0.png", image);
+        }
+    }
+    cv::destroyWindow("Result");
+    return 0;
+}
+```
+
+### model.cpp
+```
+/*
+    Each model has
+        parameters (member variable) to determine the shape
+        constructor to register paramters  
+        SDF (member function) used in sphere tracing 
+        normal (member function) used in texturing
+    Torus and Quadric are difficult to compute SDF analytically, so first-order approximation is implemented
+    Reference: https://iquilezles.org/articles/distfunctions/
+               Taubin 1994
+*/
+
+#include <array>
+#include <assert.h>
+#include <vector>
+
+#include "model.h"
+
+Sphere::Sphere(double x, double y, double z, double r) : 
+    c(Vector3(x, y, z)), r(r) {}
+Sphere::Sphere(Vector3 c, double r) : c(c), r(r) {}
+double Sphere::sdf(Vector3 v) {
+    return v.dist(c) - r;
+}
+Vector3 Sphere::normal(Vector3 v) {
+    // analytical
+    return Vector3(2 * (v.x - c.x), 2 * (v.y - c.y), 2 * (v.z - c.z)).normalize();
+}
+
+Rectangular::Rectangular(Vector3 o, double len): o(o), a(Vector3(o.x + len, o.y, o.z)),
+    b(Vector3(o.x, o.y + len, o.z)), c(Vector3(o.x, o.y, o.z + len)) {}
+Rectangular::Rectangular(Vector3 o, double w, double d, double h): o(o), a(Vector3(o.x + w, o.y, o.z)),
+    b(Vector3(o.x, o.y + d, o.z)), c(Vector3(o.x, o.y, o.z + h)) {}
+double Rectangular::sdf(Vector3 v) {
+    double d_x = std::max(v.x - a.x, o.x - v.x);
+    double d_y = std::max(v.y - b.y, o.y - v.y);
+    double d_z = std::max(v.z - c.z, o.z - v.z);
+    if(d_x < 0.0 && d_y < 0.0 && d_z < 0.0){  // inside
+        return std::max(std::max(d_x, d_y), d_z);
+    }
+    else{  // outside
+        d_x = std::max(d_x, 0.0);
+        d_y = std::max(d_y, 0.0);
+        d_z = std::max(d_z, 0.0);
+        return Vector3(d_x, d_y, d_z).norm();
+    }
+}
+Vector3 Rectangular::normal(Vector3 v) {
+    if(std::abs(v.z - c.z) < EPSILON) return Vector3(0, 0, 1);
+    else if(std::abs(v.z - o.z) < EPSILON) return Vector3(0, 0, -1);
+    else if(std::abs(v.y - b.y) < EPSILON) return Vector3(0, 1, 0);
+    else if(std::abs(v.y - o.y) < EPSILON) return Vector3(0, -1, 0);
+    else if(std::abs(v.x - a.x) < EPSILON) return Vector3(1, 0, 0);
+    else if(std::abs(v.x - o.x) < EPSILON) return Vector3(-1, 0, 0);
+    else return Vector3(0, 0, 0);
+}
+
+Cylinder::Cylinder(Vector3 c1, Vector3 c2, double r): c1(c1), c2(c2), r(r) {}
+double Cylinder::sdf(Vector3 v) {
+    Vector3 dir = c2 - c1;
+    double height = dir.norm();
+    /* compute the intersection of line and plane
+        line: x = c1 + t * d
+        plane: d・(v - x) = 0 */
+    double t = dir.dot(v - c1) / (dir.dot(dir));
+    double side_dist = v.dist(c1 + dir * t) - r;
+    
+    if(t >= 0 && t <= 1){
+        return side_dist >= 0 ? side_dist : std::min(side_dist, std::min(height * t, height * (1-t)));
+    }
+    else{
+        if(t > 1){
+            return side_dist >= 0 ? std::sqrt(side_dist * side_dist + height * (t-1) * height * (t-1)) : height * (t-1);
+        }
+        else{
+            return side_dist >= 0 ? std::sqrt(side_dist * side_dist + height * (0-t) * height * (0-t)) : height * (0-t);
+        }
+    }
+}
+Vector3 Cylinder::normal(Vector3 v) {
+    // analytical
+    Vector3 dir = c2 - c1;
+    double t = dir.dot(v - c1) / (dir.dot(dir));
+    if(t >= 1)
+        return dir.normalize();
+    else if(t <= 0)
+        return (-dir).normalize();
+    else{
+        Vector3 n1 = dir.cross(Vector3(1, 0, 0)).normalize();
+        Vector3 n2 = n1.cross(dir).normalize();
+        double x2, y2, z2, xy, yz, zx;
+        x2 = n1.x * n1.x + n2.x * n2.x;
+        y2 = n1.y * n1.y + n2.y * n2.y;
+        z2 = n1.z * n1.z + n2.z * n2.z;
+        xy = 2 * n1.x * n1.y + 2 * n2.x * n2.y;
+        yz = 2 * n1.y * n1.z + 2 * n2.y * n2.z;
+        zx = 2 * n1.z * n1.x + 2 * n2.z * n2.x;
+        
+        return Vector3(
+            2 * x2 * v.x + xy * v.y + zx * v.z,
+            2 * y2 * v.y + yz * v.z + xy * v.x,
+            2 * z2 * v.z + zx * v.x + yz * v.y
+        ).normalize();
+    }
+}
+
+Torus::Torus(double R, double r): R(R), r(r) {}
+double Torus::sdf(Vector3 v) {
+    double p = (v.x * v.x + v.y * v.y + v.z * v.z + R * R - r * r);
+    double f0 = p * p - 4 * R * R * (v.x * v.x + v.y * v.y);
+    double dx = 4 * v.x * p - 8 * R * R * v.x;
+    double dy = 4 * v.y * p - 8 * R * R * v.y;
+    double dz = 4 * v.z * p;
+    double f1 = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return f0 / f1;
+}
+Vector3 Torus::normal(Vector3 v) {
+    double p = (v.x * v.x + v.y * v.y + v.z * v.z + R * R - r * r);
+    double dx = 4 * v.x * p - 8 * R * R * v.x;
+    double dy = 4 * v.y * p - 8 * R * R * v.y;
+    double dz = 4 * v.z * p;
+    return Vector3(dx, dy, dz).normalize();
+}
+
+Quadric::Quadric(double a, double b, double c, double d, double e, double f, double g, double h, double i, double j):
+    a(a), b(b), c(c), d(d), e(e), f(f), g(g), h(h), i(i), j(j) {}
+Quadric::Quadric(std::array<double, 10> arr): a(arr[0]), b(arr[1]), c(arr[2]), d(arr[3]), e(arr[4]),
+    f(arr[5]), g(arr[6]), h(arr[7]), i(arr[8]), j(arr[9]) {}
+double Quadric::sdf(Vector3 v) {
+    // first-order approximation
+    double f0 = a * v.x * v.x + b * v.y * v.y + c * v.z * v.z + d * v.x * v.y + 
+        e * v.y * v.z + f * v.z * v.x + g * v.x + h * v.y + i * v.z + j;
+    double dx = 2*a*v.x + d*v.y + f*v.z + g;
+    double dy = 2*b*v.y + e*v.z + d*v.x + h;
+    double dz = 2*c*v.z + f*v.x + e*v.y + i;
+    double f1 = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return f0 / f1;
+}
+Vector3 Quadric::normal(Vector3 v) {
+    return Vector3(
+        2*a*v.x + d*v.y + f*v.z + g,
+        2*b*v.y + e*v.z + d*v.x + h,
+        2*c*v.z + f*v.x + e*v.y + i
+    ).normalize();
+}
+```
+
+### model.h
+```
+#include "vector3.h"
+
+#ifndef _MODEL_H_
+#define _MODEL_H_
+
+class Model {
+public:
+    Model(){}
+    virtual double sdf(Vector3 v) {}
+    virtual Vector3 normal(Vector3 v) {}
+};
+
+class Sphere : public Model {
+public:
+    Sphere(double x, double y, double z, double r);
+    Sphere(Vector3 c, double r);
+    double sdf(Vector3 v) override;
+    Vector3 normal(Vector3 v) override;
+private:
+    Vector3 c;
+    double r;
+};
+
+class Rectangular : public Model {
+// axis aligned only
+public:
+    Rectangular(Vector3 o, double len);
+    Rectangular(Vector3 o, double w, double d, double h);
+    double sdf(Vector3 v) override;
+    Vector3 normal(Vector3 v) override;
+private:
+    Vector3 o, a, b, c;
+};
+
+class Cylinder : public Model {
+public:
+    Cylinder(Vector3 c1, Vector3 c2, double r);
+    double sdf(Vector3 v) override;
+    Vector3 normal(Vector3 v) override;
+private:
+    Vector3 c1, c2;
+    double r;
+};
+
+class Torus : public Model {
+// origin center is only available
+public:
+    Torus(double R, double r);
+    double sdf(Vector3 v) override;
+    Vector3 normal(Vector3 v) override;
+private:
+    double R, r;
+};
+
+class Quadric : public Model {
+// f(x, y, z) = ax^2 + by^2 + cz^2 + dxy + eyz + fzx + gx + hy + iz + j = 0
+public:
+    Quadric(double a, double b, double c, double d, double e, double f, double g, double h, double i, double j);
+    Quadric(std::array<double, 10> arr);
+    double sdf(Vector3 v) override;
+    Vector3 normal(Vector3 v) override;
+private:
+    double a, b, c, d, e, f, g, h, i, j;
+};
+
+#endif
+```
+
+### render.cpp
+```
+/*
+    Rendering of function-based model is implemented as this:
+        1. decide each pixels ray direction : O(WH)
+        2. Sphere Tracing from Hart 1995 to judge whether the ray hits the model or not and compute the normal at point when hitting
+            : O(WHS) (S denotes the number of step)
+        3. Matcap Texturing using ray direction and the normal of the model, with reference to Takikawa et al. 2021 : O(WH)
+    These computation can be accelerated by parallel processing such as OpenMP or CUDA
+*/
+
+#include "render.h"
+
+const int MAX_STEP = 100;
+const double FINISH_MINIMUM = 0.001;
+const double FINISH_MAXIMUM = 100;
+
+Vector3 camera_o = Vector3(1, 1, 1);
+Vector3 camera_t = Vector3(0, 0, 0);
+
+void decide_ray_direction(std::vector<std::vector<Vector3>> &ray_d, int width, int height){
+    Vector3 v_view = camera_t - camera_o;
+    Vector3 v_right = (v_view.x != 0 || v_view.y != 0) ? Vector3(-v_view.y, v_view.x, 0).normalize() : Vector3(1, 0, 0);
+    Vector3 v_up = v_right.cross(v_view).normalize();
+
+    double real_h = 5;
+    double real_w = real_h * width / height;
+    for(int i = 0; i < height; i++){
+        Vector3 h_translate = v_up * (real_h * (i-height/2) / height);
+        for(int j = 0; j < width; j++){
+            Vector3 w_translate = v_right * (real_w * (j-width/2) / width);
+            ray_d[i][j] = ((camera_t + h_translate + w_translate) - camera_o).normalize();
+        }
+    }
+}
+
+void sphere_tracing(Model &model, std::vector<std::vector<Vector3>> &ray_d, std::vector<std::vector<Vector3>> &nrms, 
+    std::vector<std::vector<bool>> &collided, int width, int height){
+    // Sphere Tracer TODO: use cuda
+    std::vector<std::vector<Vector3>> coords(height, std::vector<Vector3>(width, camera_o));
+
+    long total_step = 0;
+    for(int i = 0; i < height; i++){
+        for(int j = 0; j < width; j++){
+            // John C. Hart 1995
+            double sdf = model.sdf(coords[i][j]);
+            double old_sdf = 1e18;
+            int step = 0;
+            while(step < MAX_STEP && sdf > FINISH_MINIMUM && (sdf - old_sdf) < FINISH_MAXIMUM){
+                // printf("\rtimes: %04d : %04d : %04d : %09ld", i, j, step, total_step);
+                // fflush(stdout);
+                coords[i][j] += ray_d[i][j] * sdf;
+                old_sdf = sdf;
+                sdf = model.sdf(coords[i][j]);
+                step += 1;
+                total_step += 1;
+            }
+            coords[i][j] += ray_d[i][j] * sdf;
+            if(std::abs(sdf) <= FINISH_MINIMUM){
+                collided[i][j] = true;
+                nrms[i][j] = model.normal(coords[i][j]);
+            }
+        }
+        
+    }
+    // printf("\n");
+}
+
+void matcap_texture(cv::Mat &image, cv::Mat &matcap_img, std::vector<std::vector<Vector3>> &ray_d,
+    std::vector<std::vector<Vector3>> &nrms, std::vector<std::vector<bool>> &collided, int width, int height){
+    for(int i = 0; i < height; i++){
+        for(int j = 0; j < width; j++){
+            if(collided[i][j]){
+                // Takikawa et al. 2021
+                Vector3 ray_d_sc = Vector3(ray_d[i][j].x, ray_d[i][j].y, -ray_d[i][j].z);
+                double ray_d_n_dot = nrms[i][j].dot(ray_d_sc);
+                Vector3 r = ray_d_sc - nrms[i][j] * ray_d_n_dot * 2.0;
+                r.z -= 1.0;
+                double m = 2 * r.norm();
+                double x = r.x / m + 0.5;
+                double y = r.y / m + 0.5;
+                x = 1 - x; y = 1 - y;
+                if(x < 0) x = 0; if (x > 1) x = 1;
+                if(y < 0) y = 0; if (y > 1) y = 1;
+                int x_ = (int)std::round(x * matcap_img.cols);
+                int y_ = (int)std::round(y * matcap_img.rows);
+
+                image.at<cv::Vec3b>(i, j)[0] = matcap_img.at<cv::Vec3b>(y_, x_)[0];
+                image.at<cv::Vec3b>(i, j)[1] = matcap_img.at<cv::Vec3b>(y_, x_)[1];
+                image.at<cv::Vec3b>(i, j)[2] = matcap_img.at<cv::Vec3b>(y_, x_)[2];
+            }
+            else{
+                image.at<cv::Vec3b>(i, j)[0] = 255;
+                image.at<cv::Vec3b>(i, j)[1] = 255;
+                image.at<cv::Vec3b>(i, j)[2] = 255;
+            }
+        }
+    }
+}
+
+void render(cv::Mat &image, Model &model, cv::Mat &matcap_img, bool logger){
+    clock_t start = clock();
+    if(logger){
+        std::cout << "camera_o: "; camera_o.print();
+        std::cout << "camera_t: "; camera_t.print();
+    }
+    int height = image.rows;
+    int width = image.cols;
+
+    std::vector<std::vector<Vector3>> ray_d(height, std::vector<Vector3>(width, Vector3(0,0,0)));
+    decide_ray_direction(ray_d, width, height);
+
+    std::vector<std::vector<Vector3>> nrms(height, std::vector<Vector3>(width, Vector3(0, 0, 0)));
+    std::vector<std::vector<bool>> collided(height, std::vector<bool>(width, false));
+    sphere_tracing(model, ray_d, nrms, collided, width, height);
+
+    matcap_texture(image, matcap_img, ray_d, nrms, collided, width, height);
+
+    clock_t end = clock();
+    if(logger) std::cout << "time: " << (double)(end - start) / CLOCKS_PER_SEC << std::endl;
+}
+```
+
+### render.h
+```
+#include <opencv4/opencv2/opencv.hpp>
+
+#include "model.h"
+
+#ifndef _RENDER_H_
+#define _RENDER_H_
+
+extern Vector3 camera_o;
+extern Vector3 camera_t;
+
+void decide_ray_direction(std::vector<std::vector<Vector3>> &ray_d, int width, int height);
+
+void sphere_tracing(Model &model, std::vector<std::vector<Vector3>> &ray_d, std::vector<std::vector<Vector3>> &nrms, 
+    std::vector<std::vector<bool>> &collided, int width, int height);
+
+void matcap_texture(cv::Mat &image, cv::Mat &matcap_img, std::vector<std::vector<Vector3>> &ray_d,
+    std::vector<std::vector<Vector3>> &nrms, std::vector<std::vector<bool>> &collided, int width, int height);
+
+void render(cv::Mat &image, Model &model, cv::Mat &matcap_img, bool logger);
+
+#endif
+```
+
+### vector3.h
+```
+/*
+    Basic vector operation, overloading some operators, implementing dot product, cross product, and so on.
+*/
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+
+#ifndef _VECTOR3_H_
+#define _VECTOR3_H_
+
+const double EPSILON = 1.0e-3;
+
+class Vector3{
+public:
+    Vector3(double x, double y, double z): x(x), y(y), z(z) {}
+    
+    Vector3 operator+(const Vector3 &other){
+        Vector3 ret = Vector3(x + other.x, y+other.y, z+other.z);
+        return ret;
+    };
+    Vector3& operator+=(const Vector3 &other){
+        this->x += other.x;
+        this->y += other.y;
+        this->z += other.z;
+        return *this;
+    }
+    Vector3 operator-(const Vector3 &other){
+        Vector3 ret = Vector3(x - other.x, y-other.y, z-other.z);
+        return ret;
+    }
+    Vector3 operator-() const {
+        return Vector3(-x, -y, -z);
+    }
+    Vector3& operator-=(const Vector3 &other){
+        this->x -= other.x;
+        this->y -= other.y;
+        this->z -= other.z;
+        return *this;
+    }
+    Vector3 operator*(const double c){
+        return Vector3(x * c, y * c, z * c);
+    }
+    Vector3 operator/(const double c){
+        if(c == 0){
+            // std::cout << "Warning: 0 division is done." << std::endl;
+            return Vector3(0, 0, 0);
+        } 
+        return Vector3(x / c, y / c, z / c);
+    }
+    bool operator==(const Vector3 &other) const {
+        return std::abs(x - other.x) < EPSILON && std::abs(y - other.y) < EPSILON && std::abs(z - other.z) < EPSILON;
+    }
+    Vector3 cross(const Vector3 &other){
+        Vector3 ret = Vector3(
+            y * other.z - z * other.y,
+            z * other.x - x * other.z,
+            x * other.y - y * other.x
+        );
+        return ret;
+    };
+    double dot(const Vector3 &other){
+        double ret = x * other.x + y * other.y + z * other.z;
+        return ret;
+    }
+    double norm(){
+        return std::sqrt(x * x + y * y + z * z);
+    };
+    double dist(const Vector3 &other){
+        Vector3 diff = *this - other;
+        return diff.norm();
+    }
+    Vector3 normalize(){
+        double length = this->norm();
+        return *this / length;
+    }
+    void print(){
+        std::cout << "x: " << x << " y: " << y << " z: " << z << std::endl;
+    }
+
+    double x, y, z;
+};
+
+#endif
+```

@@ -1,0 +1,607 @@
+Summary
+Temporal anti-aliasing: setRendering(.antiAliasing(.taa)) and .msaaTaa (4× MSAA on the G-buffer plus the temporal resolve).
+Why now: with foveation on (#1342) the Vision Pro draws each eye at full panel density where the eyes look, and the remaining visible aliasing is sub-pixel detail flickering in the periphery, where the compositor's rate map spans several screen pixels per texel and moves with the gaze: a dartboard's 1.4 mm wires and the embossed PET of the flights shimmer slightly until you look straight at them. That is temporal noise, and temporal accumulation is the general fix — for any model, instead of fattening wires or softening normal maps asset by asset.
+How it works (TemporalAntiAliasing.swift, TAAShader.metal)
+
+Before each frame's graph is built, applyJitter offsets the projection by a sub-pixel Halton (2, 3) amount — in the projection's third column, so for a perspective projection it is a constant NDC shift — after taking last frame's offset out (the macOS projection persists across frames; projectionDidChange resets the bookkeeping where the projection is set afresh). The offset is measured in screen pixels, which under a rate map is the map's screen size, not the texture's.
+After the look pass, the taa resolve (FXAA's slot) reprojects each pixel through the depth buffer and the unjittered view-projections of this frame and the history's, clips the history colour to the YCoCg box of the pixel's 3×3 neighbourhood — the mean ± TAAParams.shared.clipGamma (1.25) standard deviations, variance clipping, so a pixel-thin wire or line of text survives the jittered frames that miss it — and blends with TAAParams.shared.historyWeight (0.9). One pass writes both the anti-aliasing texture and the eye's next history texture (two colour targets); the history is per eye, ping-ponged, and invalidated by a resize or a mode change.
+Foveated XR frames: the colour, depth and history textures are in physical space and every frame's rate map differs, so the reprojection goes physical → screen (this frame's map) → world → previous screen → previous physical (the history frame's map) through both maps' decoders, using the map the history was drawn with. The history's weight is also cut by the ratio of the two maps' local rates, taken per axis on the axis where the history is coarsest: a spot the gaze has just moved onto has a history from the periphery, coarser than the new frame, and at full weight it showed as a blurry shadow fading over twenty frames (first headset round). The compositor's rates are quantized per axis, so a zone can be 2.4× coarser in y with the same x rate as the frame before; a single-axis comparison judged such a history equal and let it wipe thin edges on alternate frames (third round, below).
+The history is sampled with a Catmull-Rom filter (nine bilinear taps), which resampling every frame smears less than bilinear. A pixel at the clear depth — the background pass, a transparent quad over passthrough — has no position to reproject from and keeps its own frame; reprojected from the far plane it ghosted or vanished under a moving camera (the HUD pill and label of the test app flickered on and off).
+Only the primary drawable advances the eye's history and the depth pyramid: visionOS 26 can hand a second, capture drawable per frame (TemporalAntiAliasing.historyUpdatesEnabled), and rendering it fully overwrote each eye's history from the capture's pose every frame.
+Camera motion is handled through the reprojection; objects moving on their own rely on the clip (no motion vectors yet — the natural next step if ghosting on fast objects shows).
+The rate map on renderInfo.xrFoveation now also goes on the scene passes of the macOS path, so the foveated resolve is testable on a Mac.
+
+Device result (Vision Pro, visionOS 26, Oche with foveation on, render quality 1.0, .msaaTaa)
+
+Log: ✓ TAA resolve: 2624×2560, history weight 0.88, clip gamma 1.25 (variance clip), rate-map reprojection, rate-weighted history.
+Round 1 (plain clip, full-weight history): the flights stopped shimmering and the inner wires improved, but whatever the gaze landed on carried a fading blurry shadow (coarse peripheral history blended at full weight), and the HUD's pixel-thin label flickered on and off at distance (a min/max clip wiping it). Fixed by the variance clip and the rate-weighted history.
+Round 2: the developer's words — the darts "look awesome", "the external circle and the number are sharper like never before"; inner wires much softer than with MSAA alone, a slight shimmer far away remains. One artefact left: the HUD pill vanished on alternate frames at one medium distance.
+Round 3: that blink reproduced on a Mac with a rate map coarse in both axes (the moving-map test now asserts, with the jitter off, that no lit pixel loses its colour through the moving maps; it failed before the per-axis ratio and passes after). On the headset the pill now holds at every distance.
+GPU time per frame: 12 ms on average, 9 ms to 18 ms (whole command buffer, render quality 1.0, 2624×2560 per eye, .msaaTaa); the 90 Hz budget is 11.1 ms.
+
+Builds on #1342 (the rate map plumbing it reuses); its commits appear here until that lands, after which this rebases to the one commit.
+Checklist
+This project follows the Engineering Principles.
+
+ Relevant tests have been added or updated — TemporalAntiAliasingTests: the jitter sequence, the jitter going into and out of the projection (and leaving it untouched when the mode is not temporal), a resolve on a still scene that settles (frame-to-frame mean difference under 0.4 %) while staying within 2 % of the single-sample frame, a still scene drawn through a real rate map whose dense zone jumps every frame (the history reprojected through both maps lands where the new map puts the scene: residual at the held-still floor), and a camera moving every frame in both temporal modes (residual at the floor, no shadow of earlier poses). The reserved-pass-ID test covers the new modes.
+ Existing functionality and API compatibility have been considered — two new enum cases (.taa, .msaaTaa, also in the scene serializer), TAAParams; other modes unchanged.
+ Relevant builds and tests pass locally — kernels rebuilt for every platform, swift build --build-tests, the post-FX, MSAA, graph and serializer suites, xcodebuild of UntoldEngineXR for the visionOS simulator.
+ Recoverable failures are handled appropriately — a missing texture, pipeline or camera skips the resolve with the usual error; the first frame after a history invalidation outputs the frame as is.
+ Significant architectural changes and trade-offs are explained below
+ Documentation has been updated where necessary — docs/Architecture/renderingSystem.md, docs/API/UsingEngineAPI.md.
+ Performance-sensitive changes have been measured — one full-screen pass (3×3 neighbourhood, nine history taps, two rate map decodes). GPU time per frame on the headset (Oche, foveation on, render quality 1.0, 2624×2560 per eye, .msaaTaa, the whole command buffer as the Controls line reports it): 12 ms on average, 9 ms to 18 ms; the compositor's 90 Hz budget is 11.1 ms, so quality 1.0 with 4× MSAA and the temporal resolve sits at the edge of it and the game's render quality setting is what trades it off.
+
+Architectural notes / trade-offs
+
+Tonemapped-space resolve. The resolve runs on the look output rather than on linear HDR colour: it needs no extra HDR history, and fireflies are already compressed, at the cost of slightly less accurate averaging of very bright edges.
+Clip instead of motion vectors. The G-buffer has no velocity target; adding one touches every geometry pass and the memoryless tile layout. The neighbourhood clip keeps ghosting on moving objects small; motion vectors are the follow-up if it is not small enough.
+One history per eye, not per drawable target. A capture drawable of a different size is presented cleared by the XR path; one of the eye's size is resolved against the eye's history without advancing it, so recording never disturbs what the wearer sees.
+
+[Feature] Temporal anti-aliasing by miogds · Pull Request #1343 · untoldengine/UntoldEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Feature] Temporal anti-aliasing
+#1343
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Closed
+miogds
+wants to merge
+10
+commits into
+untoldengine:develop
+from
+miolabs:feature/taa
+Uh oh!
+There was an error while loading. Please reload this page.
+Closed
+[Feature] Temporal anti-aliasing
+#1343
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+10 commits
+Select commit
+Hold shift + click to select a range
+4590f9a
+[Feature] Draw the XR frame through the compositor's rasterization ra…
+Oct 10, 2026
+444c308
+[Bugfix] Query the frame's drawables with queryDrawables on visionOS 26
+Oct 10, 2026
+9ed204a
+[Bugfix] Leave the render target size to the attachments while a rate…
+Oct 10, 2026
+baed0e4
+[Feature] Temporal anti-aliasing (.taa and .msaaTaa)
+Oct 10, 2026
+9876375
+[Patch] TAA: variance clipping and a history weight that follows the …
+Oct 10, 2026
+551e8b4
+[Chores] Log the temporal resolve's parameters once
+Oct 10, 2026
+271edfd
+[Patch] TAA: keep depth-less pixels, Catmull-Rom history, moving-map …
+Oct 10, 2026
+edb7f83
+[Chores] TAA: a jitter scale for diagnosis (TAAParams.jitterScale)
+Oct 10, 2026
+0e1c7ae
+[Bugfix] XR: a capture drawable does not advance the temporal history…
+Oct 11, 2026
+5cea34c
+[Bugfix] TAA: take the rate ratio on the axis where the history is co…
+Oct 11, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+[Feature] Temporal anti-aliasing (.taa and .msaaTaa)
+```
+The projection is jittered by a sub-pixel Halton offset before each frame's
+graph is built, and a resolve pass after the look pass blends the frame with
+the eye's history, reprojected through the depth buffer and the two frames'
+unjittered view-projections and clipped to the colour box of the pixel's
+neighbourhood. Sub-pixel detail a single sample flickers on — thin wires,
+fine normal maps, the periphery of a foveated frame where a texel spans
+several screen pixels — averages out over frames. Under a rasterization
+rate map the reprojection goes physical → screen → world → previous screen →
+previous physical through both frames' maps. Camera motion is handled;
+moving objects rely on the clip. Kernels rebuilt for every platform.
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+Javier Segura
+committed
+Oct 10, 2026
+commit baed0e4adc75f2474a90ee4e74f0d7f9f44c91a7
+There are no files selected for viewing
+32 changes: 32 additions & 0 deletions
+32
+Sources/CShaderTypes/ShaderTypes.h
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -1363,6 +1363,38 @@ typedef enum{
+fxaaPassSplatCoverageTextureIndex = 1
+}FXAATextureIndices;
+// MARK: - Temporal anti-aliasing (TAAShader.metal)
+/// The resolve's inputs: the eye's unjittered matrices for this frame and the frame its
+/// history holds, and the rasterization rate maps of both when the frames were foveated
+/// (XR): the history is laid out in its own frame's physical space, so a pixel goes
+/// physical → screen → world → previous screen → previous physical before the history is read.
+typedef struct {
+matrix_float4x4 invViewProjection; // this frame, unjittered, scene root included
+matrix_float4x4 prevViewProjection; // the history's frame, unjittered, scene root included
+simd_float4 rateMapSizes; // this frame's map: screen size xy, physical size zw; x <= 0 when drawn uniformly
+simd_float4 prevRateMapSizes; // the history frame's map, same layout
+simd_float2 physicalSize; // the colour, depth and history textures' size in pixels
+float historyWeight; // share of the clipped history in the output (0.9)
+uint32_t historyValid; // 0 on the first frame, after a resize or a mode change: the output is the current frame
+uint32_t reverseZ;
+uint32_t pad0;
+uint32_t pad1;
+uint32_t pad2;
+} TAAConstants; // 176 bytes
+typedef enum{
+taaPassConstantsIndex = 0, // TAAConstants
+taaPassRateMapDataIndex, // rasterization_rate_map_data of this frame (read only when rateMapSizes.x > 0; a placeholder otherwise)
+taaPassPrevRateMapDataIndex // rasterization_rate_map_data of the history's frame (read only when prevRateMapSizes.x > 0)
+}TAABufferIndices;
+typedef enum{
+taaPassColorTextureIndex = 0, // this frame's look output
+taaPassHistoryTextureIndex, // the previous resolve of this eye
+taaPassDepthTextureIndex // this frame's opaque depth
+}TAATextureIndices;
+typedef enum{
+smaaPassTexelSizeIndex,
+smaaPassEdgeThresholdIndex,
+Expand Down
+15 changes: 15 additions & 0 deletions
+15
+Sources/UntoldEngine/Renderer/Pipelines/RenderPipeLines.swift
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -963,6 +963,20 @@ public func InitFXAAPipeline() -> RenderPipeline? {
+)
+}
+/// The temporal resolve: the look output and the eye's history into the anti-aliasing
+/// texture and the eye's next history, two colour targets of the look format.
+public func InitTAAPipeline() -> RenderPipeline? {
+CreatePipeline(
+vertexShader: "vertexTAAShader",
+fragmentShader: "fragmentTAAShader",
+vertexDescriptor: createPostProcessVertexDescriptor(),
+colorFormats: [renderInfo.colorPipeline.working.lookOutput, renderInfo.colorPipeline.working.lookOutput],
+depthFormat: .invalid,
+depthEnabled: false,
+name: "TAA Pipeline"
+)
+}
+public func InitFXAAEdgeDebugPipeline() -> RenderPipeline? {
+CreatePipeline(
+vertexShader: "vertexFXAAShader",
+Expand Down
+Expand Up
+@@ -1176,6 +1190,7 @@ public func DefaultPipeLines() -> [(RenderPipelineType, RenderPipelineInitBlock)
+(.look, InitLookPipeline),
+(.fxaa, InitFXAAPipeline),
+(.fxaaEdgeDebug, InitFXAAEdgeDebugPipeline),
+(.taa, InitTAAPipeline),
+(.smaaEdges, InitSMAAEdgesPipeline),
+(.smaaBlendWeights, InitSMAABlendWeightsPipeline),
+(.smaaNeighborhood, InitSMAANeighborhoodPipeline),
+Expand Down
+1 change: 1 addition & 0 deletions
+1
+Sources/UntoldEngine/Renderer/Pipelines/RenderPipelineType.swift
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -57,6 +57,7 @@ public extension RenderPipelineType {
+static let outputTransform: RenderPipelineType = "outputTransform"
+static let fxaa: RenderPipelineType = "fxaa"
+static let fxaaEdgeDebug: RenderPipelineType = "fxaaEdgeDebug"
+static let taa: RenderPipelineType = "taa"
+static let smaaEdges: RenderPipelineType = "smaaEdges"
+static let smaaBlendWeights: RenderPipelineType = "smaaBlendWeights"
+static let smaaNeighborhood: RenderPipelineType = "smaaNeighborhood"
+Expand Down
+4 changes: 2 additions & 2 deletions
+4
+Sources/UntoldEngine/Renderer/RenderInitializer.swift
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -118,11 +118,11 @@ func requestedOpaqueSampleCount() -> Int {
+return 1
+#else
+switch antiAliasingMode {
+case .msaa:
+case .msaa, .msaaTaa:
+let preferredSampleCount = 4
+guard let device = renderInfo.device else { return 1 }
+return device.supportsTextureSampleCount(preferredSampleCount) ? preferredSampleCount : 1
+case .none, .fxaa, .smaa:
+case .none, .fxaa, .smaa, .taa:
+return 1
+}
+#endif
+Expand Down
+258 changes: 258 additions & 0 deletions
+258
+Sources/UntoldEngine/Renderer/TemporalAntiAliasing.swift
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,258 @@
+//
+// TemporalAntiAliasing.swift
+// UntoldEngine
+//
+// Temporal anti-aliasing: the projection is jittered by a sub-pixel amount each frame, and
+// the resolve pass after the look pass blends the frame with the eye's reprojected, clipped
+// history (TAAShader.metal). Sub-pixel detail a single sample flickers on — thin wires, fine
+// normal maps, the periphery of a foveated frame where a pixel spans several screen pixels —
+// averages out over frames. The reprojection follows the camera through the depth buffer;
+// what moves on its own is covered by the neighbourhood clip, not by motion vectors.
+//
+// State is per eye (XR renders the two eyes through the same passes): a history texture
+// ping-pong, the unjittered view-projection of the frame the history holds, and that frame's
+// rasterization rate map when it was foveated — the history is laid out in that map's
+// physical space, so the resolve maps through both frames' maps.
+//
+// Copyright (C) Untold Engine Studios
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+import CShaderTypes
+import Metal
+import simd
+/// Tunables of the temporal resolve.
+public final class TAAParams: @unchecked Sendable {
+public static let shared = TAAParams()
+private let lock = NSLock()
+private var historyWeightValue: Float = 0.9
+/// The share of the (clipped) history in each resolved pixel: higher converges further
+/// and reacts slower. Clamped to [0, 0.98]; the default is 0.9.
+public var historyWeight: Float {
+get { lock.withLock { historyWeightValue } }
+set { lock.withLock { historyWeightValue = min(max(newValue, 0), 0.98) } }
+}
+}
+/// Sub-pixel offsets, in pixels, of the Halton (2, 3) sequence centred on the pixel: eight
+/// of them, so the average over a short window sits at the pixel centre.
+let taaJitterSequence: [simd_float2] = (1 ... 8).map { index in
+func halton(_ index: Int, _ base: Int) -> Float {
+var result: Float = 0
+var fraction: Float = 1
+var i = index
+while i > 0 {
+fraction /= Float(base)
+result += fraction * Float(i % base)
+i /= base
+}
+return result
+}
+return simd_float2(halton(index, 2) - 0.5, halton(index, 3) - 0.5)
+}
+/// Whether a mode runs the temporal resolve.
+extension AntiAliasingMode {
+var isTemporal: Bool {
+switch self {
+case .taa, .msaaTaa:
+return true
+case .none, .fxaa, .smaa, .msaa:
+return false
+}
+}
+}
+final class TemporalAntiAliasing: @unchecked Sendable {
+static let shared = TemporalAntiAliasing()
+/// What one eye carries from frame to frame.
+struct EyeHistory {
+var textures: [MTLTexture] = []
+var readIndex = 0
+var viewProjection = matrix_identity_float4x4
+var rateMapData: XRRasterizationRateMapData?
+var valid = false
+}
+private(set) var eyes: [EyeHistory] = [EyeHistory(), EyeHistory()]
+private var jitterIndex = 0
+/// The jitter currently added to `renderInfo.perspectiveSpace`, in NDC, so it can be
+/// taken out before the next one goes in (the macOS projection persists across frames).
+private(set) var appliedJitter = simd_float2.zero
+/// The jitter of this frame in pixels of the screen, for diagnostics and tests.
+private(set) var currentJitterPixels = simd_float2.zero
+private var eyeIndex: Int {
+renderInfo.isXRStereoMode ? min(max(renderInfo.currentEye, 0), 1) : 0
+}
+/// The projection was set afresh (a resize, a new eye): nothing of the old jitter is in it.
+func projectionDidChange() {
+appliedJitter = .zero
+}
+/// Before a frame's graph is built: takes last frame's jitter out of the projection and
+/// puts this frame's in — or just takes it out when the mode is not temporal. The offset
+/// lives in the projection's third column: for a perspective projection, whose clip w is
+/// the view-space depth, it shifts every point by a constant amount in NDC.
+func applyJitter() {
+var projection = renderInfo.perspectiveSpace
+projection.columns.2.x -= appliedJitter.x
+projection.columns.2.y -= appliedJitter.y
+appliedJitter = .zero
+currentJitterPixels = .zero
+if antiAliasingMode.isTemporal, let screen = screenSize(), screen.x > 0, screen.y > 0 {
+let pixels = taaJitterSequence[jitterIndex % taaJitterSequence.count]
+jitterIndex += 1
+let ndc = simd_float2(2 * pixels.x / screen.x, 2 * pixels.y / screen.y)
+projection.columns.2.x += ndc.x
+projection.columns.2.y += ndc.y
+appliedJitter = ndc
+currentJitterPixels = pixels
+}
+renderInfo.perspectiveSpace = projection
+}
+/// The size of the screen the projection maps to: the rate map's under foveation, the
+/// textures' otherwise.
+private func screenSize() -> simd_float2? {
+if let foveation = renderInfo.xrFoveation {
+return foveation.screenSize
+}
+return renderInfo.viewPort
+}
+/// This frame's projection without its jitter.
+var unjitteredProjection: simd_float4x4 {
+var projection = renderInfo.perspectiveSpace
+projection.columns.2.x -= appliedJitter.x
+projection.columns.2.y -= appliedJitter.y
+return projection
+}
+/// Forgets every eye's history: the next resolve of each eye outputs its frame as is.
+func invalidateHistory() {
+for index in eyes.indices {
+eyes[index].valid = false
+}
+}
+/// The eye's history textures at the current viewport, made or remade when needed (a
+/// remake invalidates the history).
+private func historyTextures(for eye: Int) -> [MTLTexture]? {
+let width = max(1, Int(renderInfo.viewPort.x))
+let height = max(1, Int(renderInfo.viewPort.y))
+if eyes[eye].textures.count == 2, eyes[eye].textures[0].width == width, eyes[eye].textures[0].height == height {
+return eyes[eye].textures
+}
+guard let device = renderInfo.device else { return nil }
+var textures: [MTLTexture] = []
+for slot in 0 ..< 2 {
+guard let texture = createTexture(
+device: device,
+label: "TAA History Eye \(eye) \(slot)",
+pixelFormat: renderInfo.colorPipeline.working.lookOutput,
+width: width,
+height: height,
+usage: [.shaderRead, .renderTarget],
+storageMode: .private
+) else { return nil }
+textures.append(texture)
+}
+eyes[eye].textures = textures
+eyes[eye].readIndex = 0
+eyes[eye].valid = false
+return textures
+}
+/// The resolve: the look output and the eye's history into the anti-aliasing texture and
+/// the eye's other history texture, then the frame's matrices and map become the history's.
+func encodeResolve(_ commandBuffer: MTLCommandBuffer) {
+guard let source = textureResources.lookTexture,
+let destination = textureResources.antiAliasingTexture,
+let depth = textureResources.depthMap,
+let pipeline = PipelineManager.shared.renderPipelinesByType[.taa],
+pipeline.success,
+let pipelineState = pipeline.pipelineState,
+let camera = CameraSystem.shared.activeCamera,
+let cameraComponent = scene.get(component: CameraComponent.self, for: camera)
+else {
+handleError(.renderPassCreationFailed, "TAA Pass: missing texture, pipeline or camera")
+return
+}
+let eye = eyeIndex
+guard let textures = historyTextures(for: eye) else {
+handleError(.renderPassCreationFailed, "TAA Pass: history textures")
+return
+}
+let readTexture = textures[eyes[eye].readIndex]
+let writeTexture = textures[1 - eyes[eye].readIndex]
+let view = SceneRootTransform.shared.effectiveViewMatrix(cameraComponent.viewSpace)
+let viewProjection = simd_mul(unjitteredProjection, view)
+let currentRateMap = renderInfo.xrFoveation?.rateMapData
+var constants = TAAConstants()
+constants.invViewProjection = simd_inverse(viewProjection)
+constants.prevViewProjection = eyes[eye].viewProjection
+constants.rateMapSizes = rateMapSizes(currentRateMap)
+constants.prevRateMapSizes = rateMapSizes(eyes[eye].rateMapData)
+constants.physicalSize = simd_float2(Float(source.width), Float(source.height))
+constants.historyWeight = TAAParams.shared.historyWeight
+constants.historyValid = eyes[eye].valid ? 1 : 0
+constants.reverseZ = renderInfo.reverseZEnabled ? 1 : 0
+let descriptor = MTLRenderPassDescriptor()
+descriptor.colorAttachments[0].texture = destination
+descriptor.colorAttachments[0].loadAction = .dontCare
+descriptor.colorAttachments[0].storeAction = .store
+descriptor.colorAttachments[1].texture = writeTexture
+descriptor.colorAttachments[1].loadAction = .dontCare
+descriptor.colorAttachments[1].storeAction = .store
+guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+handleError(.renderPassCreationFailed, "TAA Pass")
+return
+}
+encoder.label = "TAA Pass"
+encoder.pushDebugGroup("TAA Pass")
+encoder.setRenderPipelineState(pipelineState)
+encoder.waitForFence(renderInfo.fence, before: .fragment)
+encoder.setVertexBuffer(bufferResources.quadVerticesBuffer, offset: 0, index: 0)
+encoder.setVertexBuffer(bufferResources.quadTexCoordsBuffer, offset: 0, index: 1)
+encoder.setFragmentTexture(source, index: Int(taaPassColorTextureIndex.rawValue))
+encoder.setFragmentTexture(readTexture, index: Int(taaPassHistoryTextureIndex.rawValue))
+encoder.setFragmentTexture(depth, index: Int(taaPassDepthTextureIndex.rawValue))
+encoder.setFragmentBytes(&constants, length: MemoryLayout<TAAConstants>.stride, index: Int(taaPassConstantsIndex.rawValue))
+// The maps' sizes are in the constants; the shader reads a map's parameters only when
+// its sizes say there is one, so a placeholder stands in for a uniform frame.
+let placeholder = rateMapPlaceholderBuffer()
+encoder.setFragmentBuffer(currentRateMap?.buffer ?? placeholder, offset: 0, index: Int(taaPassRateMapDataIndex.rawValue))
+encoder.setFragmentBuffer(eyes[eye].rateMapData?.buffer ?? placeholder, offset: 0, index: Int(taaPassPrevRateMapDataIndex.rawValue))
+encoder.drawIndexedPrimitivesTracked(
+type: .triangle,
+indexCount: 6,
+indexType: .uint16,
+indexBuffer: bufferResources.quadIndexBuffer!,
+indexBufferOffset: 0
+)
+encoder.updateFence(renderInfo.fence, after: .fragment)
+encoder.popDebugGroup()
+encoder.endEncoding()
+eyes[eye].readIndex = 1 - eyes[eye].readIndex
+eyes[eye].viewProjection = viewProjection
+eyes[eye].rateMapData = currentRateMap
+eyes[eye].valid = true
+}
+}
+/// The graph's temporal resolve pass, in the slot FXAA or SMAA otherwise take.
+let taaRenderPass: RenderPasses.RenderPassExecution = { commandBuffer in
+TemporalAntiAliasing.shared.encodeResolve(commandBuffer)
+}
+2 changes: 2 additions & 0 deletions
+2
+Sources/UntoldEngine/Renderer/UntoldEngine.swift
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -727,6 +727,7 @@ public class UntoldRenderer: NSObject, MTKViewDelegate {
+: matrixPerspectiveRightHand(fovyRadians: degreesToRadians(degrees: fov), aspectRatio: aspect, nearZ: near, farZ: far)
+renderInfo.perspectiveSpace = projectionMatrix
+TemporalAntiAliasing.shared.projectionDidChange()
+let viewPortSize: simd_float2 = simd_make_float2(Float(size.width), Float(size.height))
+renderInfo.viewPort = viewPortSize
+Expand Down
+Expand Up
+@@ -830,6 +831,7 @@ public class UntoldRenderer: NSObject, MTKViewDelegate {
+eyeIndex: Int
+) {
+renderInfo.perspectiveSpace = projectionMatrix
+TemporalAntiAliasing.shared.projectionDidChange()
+guard let camera = CameraSystem.shared.activeCamera, let cameraComponent = scene.get(component: CameraComponent.self, for: camera) else {
+handleError(.noActiveCamera)
+Expand Down
+2 changes: 1 addition & 1 deletion
+2
+Sources/UntoldEngine/Renderer/XRFoveation.swift
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -170,7 +170,7 @@ func bindRateMap(_ data: XRRasterizationRateMapData?, toFragmentsOf encoder: MTL
+}
+/// A small shared buffer bound wherever a shader declares a rate map it will not read.
+private func rateMapPlaceholderBuffer() -> MTLBuffer? {
+func rateMapPlaceholderBuffer() -> MTLBuffer? {
+if let buffer = bufferResources.rateMapPlaceholder {
+return buffer
+}
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

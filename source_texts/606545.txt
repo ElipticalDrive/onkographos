@@ -1,0 +1,171 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - Keep the viewer responsive with large camera sets by MrNeRF · Pull Request #3970 · MrNeRF/LichtFeld-Studio
+
+Keep the viewer responsive with large camera sets by MrNeRF · Pull Request #3970 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MrNeRF
+commented
+Nov 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Problem
+With a COLMAP model of 47,691 cameras the viewport stalled:
+Hover picking rebuilt and projected every camera's frustum on each mouse move: 54 ms per move, up to 94 ms.
+Every view change rebuilt the frustum overlays on one thread: 27 ms.
+A point cloud shown without Gaussians rebuilt the scene render state every frame (5.4 ms), because the single cloud path always made a copy.
+Fix
+RasterRenderingEngine::pickCameraFrustum keeps each camera's frustum points while the camera object, its calibration (size, FoVy, model) and its scene transform are unchanged, so undistortion applied in place rebuilds the affected frustums. Each frustum is projected once per pick and skipped when the cursor lies farther than the hit radius from its projected bounds. Distances are computed in parallel, then the original ordered selection runs over all cameras, so results and tie handling are unchanged. CameraFrustumPickRequest::scene_transforms is now a span.
+CameraInteractionService uses the scene's cached camera snapshot and converts the scene transforms only when that snapshot changes.
+The frustum overlay rebuild culls, colors and projects cameras in parallel, each camera writing only its own slots. Instances, thumbnail quads and equirectangular lines are appended afterwards in camera order, so the output equals the sequential pass.
+SceneManager::buildRenderState references a single visible point cloud instead of copying it, so its cached render state is reused. A merge of several clouds still rebuilds.
+Tests
+CameraFrustumPickTest.CachedFrustumsFollowEveryInputChange (lichtfeld_visualizer_tests, cameras of the bicycle scene): picks over a cursor grid must equal those of an uncached engine after a change of scale, scene transforms, camera set and in-place undistortion, and must repeat exactly when nothing changes. Removing the calibration comparison makes it fail. It skips without CUDA or without the dataset.
+One-off check against a copy of the previous picking algorithm (not committed): 1,931,868 cursor and view combinations over perspective and orthographic views and three frustum scales, including 269,532 cursors placed 0 to 12.001 px from frustum corners. All results identical.
+ctest -R lichtfeld_visualizer_tests: 620 tests passed.
+GUI smoke run: frustums and thumbnails render, no errors in the log.
+Measurements
+Picking with 47,691 cameras, same machine, release build, warm cache, 400 cursor positions:
+Before
+After
+Mean per pick
+71 to 74 ms
+1.7 to 2.1 ms
+p95 per pick
+2.1 to 2.8 ms
+The first pick after a camera, transform or scale change rebuilds the frustums (41 to 43 ms). Picks are throttled to one per 50 ms.
+The overlay and render state timings come from the first version of this change, whose overlay and render state code is functionally the same: overlay rebuild 27 ms to below 2 ms, render state 5.4 ms to 0.6 ms, about 4 ms per frame with all cameras shown.
+MrNeRF
+added 2 commits
+November 1, 2026 15:57
+Speed up viewer interaction with large camera sets
+dbb9f72
+Fix viewer cache invalidation and regression coverage
+45427b5
+Copilot
+AI
+balanced review requested due to automatic review settings
+November 1, 2026 16:47
+Copilot started reviewing on behalf of
+MrNeRF
+November 1, 2026 16:47
+View session
+Copilot
+AI
+reviewed
+Nov 1, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+The test setup can fail without CUDA because the text loader constructs GPU-backed cameras, and cached pose pointers can bypass stale-view validation after parent reallocation.
+2 open issues
+Cached tensor views bypass stale-view validation after parent reallocation · New
+Text-model loader still requires CUDA during camera construction · New
+What changed in this PR
+This PR reduces CPU work in LichtFeld Studio’s viewer for large camera sets through geometry caching, parallel picking and overlay calculations, and single-point-cloud render-state reuse.
+Changes:
+Cache camera geometry and converted scene transforms while preserving ordered picking behavior.
+Parallelize overlay projection and coloring, with ordered output and cleared visibility flags.
+Add regression tests for cache invalidation, picking equivalence, overlays, and point-cloud state reuse.
+File
+Description
+tests/​viewer_scale_reference.hpp
+Adds reference picking and sequential overlay implementations.
+tests/​test_viewer_scale.cpp
+Adds 13 viewer-scale regression tests and camera fixtures.
+tests/​CMakeLists.txt
+Registers the tests and required rendering/TBB dependencies.
+src/​visualizer/​scene/​scene_manager.hpp
+Grants the test fixture access to cached render state.
+src/​visualizer/​scene/​scene_manager.cpp
+Enables render-state reuse for one visible point cloud.
+src/​visualizer/​rendering/​camera_interaction_service.hpp
+Exports the service and adds snapshot/transform cache fields.
+src/​visualizer/​rendering/​camera_interaction_service.cpp
+Reuses camera snapshots and converted transforms.
+src/​visualizer/​gui/​gui_manager.cpp
+Delegates overlay construction to shared geometry helpers.
+src/​visualizer/​gui/​camera_frustum_geometry.hpp
+Extracts helpers and parallelizes overlay calculations.
+src/​rendering/​raster_rendering_engine.cpp
+Caches frustum geometry and parallelizes picking work.
+src/​rendering/​include/​rendering/​rendering.hpp
+Uses a transform span and adds a camera-generation key.
+src/​core/​include/​core/​camera.hpp
+Grants the test fixture access for CPU camera construction.
+Review effort: Balanced
+Comment thread
+src/rendering/raster_rendering_engine.cpp
+Outdated
+tensor.numel() < values.size())
+return false;
+if (tensor.device() == lfs::core::Device::CPU) {
+const bool cacheable = tensor.is_contiguous() && !tensor.has_zero_stride();
+Comment thread
+tests/test_viewer_scale.cpp
+Outdated
+static void loadRealCameras(const std::filesystem::path& model) {
+using Model = lfs::core::CameraModelType;
+if (!std::filesystem::exists(model / "cameras.bin")) {
+auto loaded = lfs::io::read_colmap_cameras_only(model);
+Reduce the large camera set changes to what they need
+…
+0f78f08
+```
+Picking keeps a camera's frustum while the camera object, its
+calibration and its scene transform are unchanged, so undistortion
+applied in place rebuilds it without a new scene generation. Selection
+still runs over every camera in order, so ties resolve as before. The
+overlay pass keeps its per camera code where it was and runs it in
+parallel before the ordered append.
+
+The moved geometry header, the test access to Camera internals and the
+reference copies go away. One test on real cameras compares cached
+picks with an uncached engine after each kind of input change.
+```
+MrNeRF
+marked this pull request as ready for review
+November 1, 2026 18:05
+Hide details
+View details
+MrNeRF
+merged commit 23fb4b4
+into
+master
+Nov 1, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MrNeRF
+deleted the
+viewer-large-camera-sets
+branch
+November 1, 2026 18:07
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

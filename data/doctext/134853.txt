@@ -1,0 +1,457 @@
+# 概要
+任意の3Dモデルを突っ込んだらいい感じにボクセル化してくれるシェーダーを作りました。
+計算はGPU上で行っており、リアルタイムで毎フレーム実行させても実用的な速度で動いてくれます。
+
+![_voxel_animation.gif](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/12b19de3-7c50-3db8-9833-33c1253bcce4.gif)
+
+ボクセルのメッシュは好きなものに置き換えられるので、下記動画のようにレゴブロック風にすることもできます。
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/1wkureUdaCQ" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+
+
+サンプルソースは以下に置きました。
+
+https://github.com/seyakara/UnityRealtimeVoxelizer
+
+# 環境
+Unity 2021.2.5f1 URP
+
+# 動機
+まあこれがやりたかったわけです。
+
+<iframe width="560" height="315" src="https://www.youtube-nocookie.com/embed/fTH71AAxXmM" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+
+
+# 原理
+![principle.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/fe473a25-29d4-ea83-d33f-768cbfbae3ca.jpeg)
+- 低解像度のレンダーテクスチャを用意し、ボクセル化したいモデルを平行投影で描画します。
+- ピクセルシェーダーにて、ラスタライズ後の各ピクセルからワールド座標とカラーを取得し、GraphicsBufferに格納します。
+- あとはGPUパーティクルの要領で、GraphicsBufferの情報をもとに立方体のメッシュをインスタンシング描画します。
+
+重要な処理をいくつか端折っていますが、基本的な考えはこんな感じです。
+「これだとカメラに映った手前の面しかボクセル化されないのでは？」と思うかもしれませんが、レンダーテクスチャへの描画時に裏面カリングOFF、デプス比較OFFとすることで奥側のポリゴンも描画されるため、無事にピクセルシェーダーが発動してボクセル化できます。
+
+# 穴あき対策
+とりあえず深く考えずにこの原理だけで実装してみると以下のようになります。
+![ss00.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/b0df25ad-75e4-7c97-f091-76b48eb279ea.jpeg)
+パッと見いい感じですが、元のモデルと比べるとなんだか痩せてる気がしますね。
+また正面から見ると問題なさそうですが、別視点で見るとこんな感じで穴が開いていたりします。
+![ss01.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/eab2b3a3-56d5-370f-f0f3-1b87b218956d.jpeg)
+こうなってしまう理由ですが、この手法ではラスタライズされたポリゴンしかボクセル化されないので、逆に言うとラスタライズされないポリゴン――髪の毛のように細いポリゴンや、カメラから見て真横・真上を向いているポリゴン（今回の場合は胴体の輪郭部分のポリゴン）などはボクセル化の対象から除外されてしまうためです。
+
+これを解決する方法が下記リンク先で解説されています。
+
+https://developer.nvidia.com/content/basics-gpu-voxelization
+
+まず真横や真上を向いているポリゴンについては、シェーダー内で頂点をクリッピング空間に投影するときに、XYZの各軸から見てポリゴンが最も面積が大きく見える方向に投影するようにします。
+これにはポリゴンの面の法線と各軸のベクトルで内積をとって最も値の大きい軸を採用することで判定できます。
+頂点シェーダーではポリゴン単位の処理はできないので、この処理には必然的にジオメトリシェーダーを利用することになります。
+この軸方向からの投影ですが、シェーダーに3方向ぶんのビュープロジェクション行列を渡すのもありですが、平行投影ならばクリッピング空間座標のxyz成分を入れ替えるだけで簡単に同じことができるので、こちらを採用します。
+
+
+ポリゴンが小さすぎてラスタライズされない件については、真面目にやるならジオメトリシェーダーでポリゴンを無理やり1ピクセル以上の面積に拡大するという手法があるようですが、余計な計算が増えるのと、描画面積も増えて余計なピクセルシェーダーが起動してしまうのがネックです。
+リンク先の資料ではレンダーターゲットにMSAAを適用することでこの問題を解決しています。
+ポリゴンが小さくても、MSAAのサブピクセルのいずれかに引っかかっていればラスタライズ化され、しかも起動するピクセルシェーダーはサブピクセルの数にかかわらず1回だけで済む、ということで、速度と品質を兼ね備えたいい感じの解決法のようです。今回の手法でもこちらを採用していきます。
+
+# 実装
+では実装していきます。レンダリングパイプラインはURPを使います。
+
+## ボクセル変換カメラ
+まずはモデルを描画し、ボクセルに変換する専用のレンダーパスを追加します。URPなのでScriptableRendererFeatureを追加すればよいですが、コードを一から書くのは中々にしんどいのでここは古典的にカメラとレンダーテクスチャを追加する方法で手短に済ませます。URPではレンダーテクスチャへのレンダリングは画面のレンダリングより必ず先に行われるそうなので、モデル描画をそれ以外の描画よりも先に持っていきたいならモデルの描画先をレンダーテクスチャにするだけで済みます。
+さてカメラを追加し、視野範囲を設定します。この視野範囲に入ったモデルがレンダーターゲットに描かれる＝ボクセル化の対象になります。また投影法は透視投影だと遠近でボクセルの解像度が不ぞろいになってしまうので、平行投影にします。
+![ss02.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/2a1b110f-a0d1-1b78-9a44-b0cac74c2088.jpeg)
+次にボクセル化したいモデルだけをカメラに映したいので、専用のレイヤ`Voxel`を追加し、カメラのCullingMaskでこの`Voxel`のみを表示対象に設定します。逆にMainCameraのCullingMaskからはこのレイヤを外してしまいます。
+当然ながら、ボクセル化したいモデルのレイヤのほうも`Voxel`に変更しておきます。
+![ss03.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/e4acf988-4585-6407-d6e0-5adea062dde0.jpeg)
+
+
+## レンダーテクスチャ
+スクリプト側でモデル描画先のレンダーテクスチャを作成し、追加したほうのカメラに設定します。
+ここで決めたテクスチャ解像度がそのままボクセルの解像度になります（1ピクセル1ボクセル）。ボクセル然とした見た目にするならあんまり高解像度にしなくても大丈夫ですね。
+また前述のとおりMSAAを有効にしています。今回は8xで設定してみました。
+
+```Voxelizer.cs
+m_renderTexture = new RenderTexture(m_gridWidth, m_gridWidth, 0, RenderTextureFormat.ARGB32);
+m_renderTexture.filterMode = FilterMode.Point;
+m_renderTexture.antiAliasing = 8;
+m_renderTexture.useMipMap = false;
+m_renderTexture.Create(); 
+
+m_voxelCamera = GetComponentInChildren<Camera>();
+m_voxelCamera.cullingMask = m_targetLayer;
+m_voxelCamera.targetTexture = m_renderTexture;
+```
+
+## モデル描画前・描画後イベント
+モデルの描画前後でシェーダーにパラメータを渡したり、GraphicsBufferのバインド・アンバインドをしてやる必要がありますが、これをどこでやるかというと、URPでは`RenderPipelineManager`の`beginCameraRendering`、`endCameraRendering`にコールバックを渡すとカメラのレンダリングの前後で呼んでくれるようなのでこれを使います。これはMainCameraも含めて全カメラの数ぶん呼び出されるので、引数で渡ってきたカメラがモデル描画用のカメラかどうかを判別して、その時だけシェーダーパラメータをセット、といった使い方をしています。
+コールバックは`OnEnable`,` OnDisable`で設定・解除しています。
+
+```Voxelizer.cs
+void OnEnable()
+{
+        RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
+        RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
+        // 略
+}
+
+void OnDisable()
+{
+        RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
+        RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+        // 略
+}
+
+void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
+{
+        if (m_voxelCamera.enabled && camera == m_voxelCamera)
+        {
+                Graphics.SetRandomWriteTarget(1, m_colorBuffer, false);
+        }
+        // 略
+}
+
+void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
+{
+        if (m_voxelCamera.enabled && camera == m_voxelCamera)
+        {
+                Graphics.ClearRandomWriteTargets();
+                // 略
+        }
+}
+```
+
+
+## ボクセル化シェーダー
+ここからはシェーダーの解説です。
+せっかくURPで実装しているのでShaderGraphを使いたいところですが、ジオメトリシェーダーはShaderGraphに対応していないので、やむなくコード直書きでいきます。
+
+ボクセル化シェーダーではモデルを低解像度のレンダーターゲットに描画し、各ピクセルをボクセル情報（座標と色）に変換して結果をGraphicsBufferに格納します。
+モデルのマテリアルにVoxelizerシェーダーを突っ込んでおけば、モデルの描画時にこの変換処理が実行されるようになります。
+
+### シェーダー定義
+```Voxelizer.shader
+	SubShader
+	{
+		Tags {"RenderType" = "Opaque" "IgnoreProjector" = "True" "RenderPipeline" = "UniversalPipeline" "ShaderModel" = "5.0"}
+		LOD 100
+
+		ZWrite Off
+		Cull Off
+		ZTest Always
+		ColorMask 0
+```
+
+原理で説明した通り裏面カリングとデプス比較はOFFにします。
+またレンダーターゲットの描画結果も実は必要ない（結果がGraphicsBufferに出力できてればよい）ので、`ColorMask 0`とします。
+
+```Voxelizer.shader
+			#pragma vertex vert
+			#pragma require geometry
+			#pragma geometry geom 
+			#pragma fragment frag
+```
+
+ジオメトリシェーダーを使うので、`#pragma require geometry`を入れておきます。
+
+### 頂点シェーダー
+```Voxelizer.shader
+struct VoxelAttributes
+{
+	float4 vertex : POSITION;
+	float3 normal : NORMAL;
+	float2 uv : TEXCOORD0;
+};
+
+struct VoxelVaryings
+{
+	float4 positionCS : SV_POSITION;
+	float2 uv		: TEXCOORD0;
+	centroid float3 positionWS : TEXCOORD1;
+};
+
+VoxelAttributes vert(VoxelAttributes input)
+{
+	VoxelAttributes output = input;
+	output.vertex = mul(unity_ObjectToWorld, input.vertex);
+	output.normal = mul((float3x3)UNITY_MATRIX_MV, input.normal);
+	output.uv = TRANSFORM_TEX(input.uv, _BaseMap);
+	return output;
+}
+```
+
+頂点シェーダーですが、この時点では特別なことはやっておらず、
+頂点座標のワールド座標系変換と法線のビュー座標系変換を行っているだけです。
+このあとジオメトリシェーダーに渡すのでinputとoutputの型は同じですね。
+ちなみにoutputのほうの`positionWS`ですが、MSAAで変な補間が効いてしまうとまずいので`centroid`つけてます。
+
+### ジオメトリシェーダー
+```Voxelizer.shader
+[maxvertexcount(3)]
+void geom(triangle VoxelAttributes input[3], inout TriangleStream<VoxelVaryings> outStream)
+{
+	const float3	zAxis = float3(0.f, 0.f, 1.f);
+	const float3	xAxis = float3(1.f, 0.f, 0.f);
+	const float3	yAxis = float3(0.f, 1.f, 0.f);
+
+	// 3つの頂点の法線からポリゴン面法線を求める
+	float3 faceNrm = normalize(input[0].normal + input[1].normal + input[2].normal);
+
+	// XYZ各軸との内積をとる
+	float dotprduct0 = abs(dot(faceNrm, xAxis));
+	float dotprduct1 = abs(dot(faceNrm, yAxis));
+	float dotprduct2 = abs(dot(faceNrm, zAxis));
+
+	// 内積の一番大きな軸を採用する
+	float maximum = max(max(dotprduct0, dotprduct1), dotprduct2);
+	// 0 : ZY
+	// 1 : XZ
+	// 2 : XY
+	int axisIdx = 0;
+	if (maximum == dotprduct0)
+		axisIdx = 0;
+	else if (maximum == dotprduct1)
+		axisIdx = 1;
+	else
+		axisIdx = 2;
+
+
+	[unroll]
+	for (int i = 0; i < 3; i++)
+	{
+		// ワールド座標をクリッピング座標に変換
+		float4 positionCS = TransformWorldToHClip(input[i].vertex.xyz);
+		float w = positionCS.w;
+
+		// 一旦正規化する
+		positionCS.xyz /= w;
+		// Zだけ0～1なので、-1～1にする
+		if (UNITY_NEAR_CLIP_VALUE >= 0) {
+			positionCS.z = positionCS.z * 2.0 - 1.0;
+		}
+
+		// 投影面に応じてxyzを入れ替える
+		if (axisIdx == 0)
+		{
+			positionCS.xyz = positionCS.zyx;
+		}
+		else if (axisIdx == 1)
+		{
+			positionCS.xyz = positionCS.xzy;
+		}
+
+		// Zを0～1に戻す
+		if (UNITY_NEAR_CLIP_VALUE >= 0) {
+			positionCS.z = positionCS.z * 0.5 + 0.5;
+		}
+		positionCS.xyz *= w;
+		VoxelVaryings o;
+		o.positionCS = positionCS;
+		o.positionWS = input[i].vertex.xyz;
+		o.uv = TRANSFORM_TEX(input[i].uv, _BaseMap);
+		outStream.Append(o);
+	}
+
+	outStream.RestartStrip();
+}
+
+```
+
+ジオメトリシェーダーです。
+前半ではXYZ各軸とポリゴン面法線との内積をとり、最も大きかった値の軸をクリッピング空間の投影方向としています。
+後半では採用した投影方向に応じてクリッピング座標のxyzを入れ替えています。
+この状態で普通に描画するとかなりおかしな見た目になるはずですが、前述のとおり描画結果は使用しないので問題ありません。
+（レンダーテクスチャのどこかしらにポリゴンがラスタライズされ、ピクセルシェーダーが起動しさえすればOK）
+outputには変換後のクリッピング座標とともに、頂点シェーダーから渡されたワールド座標（こっちがキモ）も別途出力します。
+
+### ピクセルシェーダー
+```Voxelizer.shader
+RWStructuredBuffer<uint> _ColorBuffer : register(u1); 
+
+half4 frag(VoxelVaryings input) : SV_Target
+{
+	// テクスチャカラー取得
+	float4 color = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, input.uv);
+	if (color.a < 0.5) {
+		discard;
+	}
+	color *= _BaseColor;
+
+	// カラーのRGBを整数値にしてビットシフト後、uintのカラーマスクに格納
+	uint3 iColor = uint3(color.xyz*255.0);
+	uint colorMask = (iColor.r << 16u) | (iColor.g << 8u) | iColor.b;
+
+	// RGBから輝度を求める。この輝度はカラーマスクの最上位8ビットに格納
+	uint Y = (0.299*color.r + 0.587*color.g + 0.114*color.b) * 255.0;
+	colorMask |= max(1, Y) << 24u;
+
+	// ワールド座標からボクセルのグリッド上の位置を求める。
+	// ボクセルの大きさの整数倍の位置にスナップさせるだけ。
+	int3 grid = (input.positionWS - _BasePos) / _BlockSize;
+
+	if (grid.x >= 0 && grid.x < _GridWidth && grid.y >= 0 && grid.y < _GridWidth && grid.z >= 0 && grid.z < _GridWidth) {
+		// グリッド座標を1次元配列のインデックスに変換
+		uint grididx = grid.z * _GridWidth * _GridWidth + grid.y * _GridWidth + grid.x;
+
+		// カラー格納用のバッファにカラーマスクを格納
+		InterlockedMax(_ColorBuffer[grididx], colorMask);
+	}
+
+	return color;
+}
+```
+
+ジオメトリシェーダーから渡ってきたワールド座標がどのボクセルに収まるかを求め、テクスチャ及びベースカラーから取得した色を出力用のバッファに格納する処理を行っています。
+ボクセルの位置は、ワールド座標を1ボクセルのサイズで割った整数値で表します。ここで求めた値がそのまま３次元配列のインデックスになります。このインデックスが示すバッファ上の位置にカラー情報を格納することで３次元のボクセル群を表現できます。インデックスそのものがボクセル座標を表すことになるため、バッファに格納するのはカラーだけでよくなります。実際にはバッファは一次元配列なので、格納時はインデックスを一次元の値に変換しています。
+
+カメラ奥行き方向に薄く重なったポリゴンがある場合などは、それぞれのポリゴンのボクセル座標が被ってしまい、同じボクセルに複数のカラーが格納されてしまうことはあり得ます。しかし一つのボクセルに入れられるカラーは一つだけで、どのカラーが格納されるかは毎回不定なので、そのままではちらつきの原因となります。これを防ぐためにRGBから輝度値を求め、最も輝度の高いカラーをボクセルに格納するようにしています。
+ここは`InterlockedMax`を使用してアトミックに比較と格納をやっています。
+
+以上のやり方で、ボクセルの座標とカラーが得られました。この情報をボクセル描画用シェーダーに渡してボクセルを描画していきますが、３次元配列のバッファには色の入らなかったボクセルもあるので、それらも含んだ配列を丸ごとシェーダーに渡して処理させるのは無駄があるような気がします（計測してなくて勘で言ってますが）。そこでコンピュートシェーダーでひと手間かけてデータを整形することにします。
+
+### コンピュートシェーダー
+```VoxelList.compute
+struct VoxelData
+{
+	float3 position;
+	float4 color;
+};
+RWStructuredBuffer<uint> _ColorBuffer;
+RWStructuredBuffer<VoxelData> _ResultBuffer;
+
+[numthreads(8, 8, 8)]
+void MakeList(uint3 id : SV_DispatchThreadID)
+{
+	// インデックスの復元
+	uint grididx = id.z * _GridWidth * _GridWidth + id.y * _GridWidth + id.x;
+
+	uint encodedcolor = _ColorBuffer[grididx];
+
+	// 輝度が格納されたグリッドのみ処理
+	if ((encodedcolor & 0xFF000000) > 0) {
+		// カラーの復元
+		float4 color;
+		color.r = (encodedcolor >> 16u) & 0x000000ff;
+		color.g = (encodedcolor >> 8u) & 0x000000ff;
+		color.b = (encodedcolor) & 0x000000ff;
+		color.a = 255.0;
+		color /= 255.0;
+
+		// 結果格納用バッファの配列長をインクリメント
+		// orgidxにはインクリメントする前のインデックスが渡される
+		uint orgidx = _ResultBuffer.IncrementCounter();
+
+		float3 gridIdx = id;
+		// グリッド座標の復元
+		VoxelData data;
+		data.position = _BasePos + gridIdx * float3(_BlockSize, _BlockSize*_HeightScale, _BlockSize);
+		data.color = color;
+
+		// 結果を格納
+		_ResultBuffer[orgidx] = data;
+
+		// カラー格納用バッファはこのタイミングでリセット
+		_ColorBuffer[grididx] = 0;
+	}
+}
+```
+
+やってることは先ほどピクセルシェーダーで出力したバッファの各要素を読み込んで、カラーが入っていたらボクセル座標をワールド座標に変換して、別途用意した可変長バッファの末尾に格納するというものです。
+この可変長バッファにはCounterBufferを利用しています。（AppendStructuredBufferでもいいと思いますが）
+
+https://docs.unity3d.com/ScriptReference/ComputeBufferType.Counter.html
+
+このようにして描画すべきボクセルだけが格納された配列が出来上がりました。
+
+## ボクセル描画処理
+コンピュートシェーダーが出力したボクセル情報をもとに、メッシュをGPUインスタンシングで描画していきます。
+
+### C#  
+```Voxelizer.cs
+void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
+{
+        if (m_voxelCamera.enabled && camera == m_voxelCamera)
+        {
+                Graphics.ClearRandomWriteTargets();
+
+                m_voxelBuffer.SetCounterValue(0);
+
+                uint x, y, z;
+                m_computShader.GetKernelThreadGroupSizes(m_kernel_makelist, out x, out y, out z);
+                m_computShader.Dispatch(m_kernel_makelist, m_gridWidth / (int)x, m_gridWidth / (int)y, m_gridWidth / (int)z);
+                GraphicsBuffer.CopyCount(m_voxelBuffer, m_argsBuffer, 4);
+        }
+}
+```
+
+ボクセル化実行直後の処理です。コンピュートシェーダーを`Dispatch`したあと、処理結果の入ったバッファの配列長を`GraphicsBuffer.CopyCount`で`m_argsBuffer`にコピーしています。
+これをそのままGPUインスタンシングのインスタンス数として`Graphics.DrawMeshInstancedIndirect`に渡します。
+Indirect系はGPU側のパラメータをCPU側に戻すことなくそのまま描画に渡せるのでオーバーヘッドが減ります。
+
+```Voxelizer.cs
+void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
+{
+        if (m_voxelCamera.enabled && camera == m_voxelCamera)
+        {
+                Graphics.SetRandomWriteTarget(1, m_colorBuffer, false);
+        }
+        else
+        {
+                Graphics.DrawMeshInstancedIndirect(m_mesh, 0, m_material, new Bounds(Vector3.zero, new Vector3(100.0f, 100.0f, 100.0f)), m_argsBuffer);
+        }
+}
+```
+
+### ボクセル描画シェーダー
+ボクセル描画用のシェーダーはURPのlitシェーダーをコピーしてインスタンシング用に改造しました。
+元のlitシェーダーもインスタンシングには対応していると思うのですが、自分のやり方ではうまくインスタンスIDが取得できなかったため、SV_InstanceIDを引数に追加して渡す方式としました。
+
+https://notargs.hateblo.jp/entry/lwrp_particle
+
+```Blocks.shader
+struct VoxelData
+{
+	float3 position;
+	float4 color;
+};
+StructuredBuffer<VoxelData> _VoxelBuffer;
+
+// 頂点シェーダ
+Varyings LitPassVertex_Instanced(Attributes input, inout uint instanceID : SV_InstanceID)
+{
+	// 中略
+	input.positionOS.xyz += _VoxelBuffer[instanceID].position;
+	// 中略
+}
+
+// ピクセルシェーダ
+half4 LitPassFragment_Instanced(Varyings input, uint instanceID : SV_InstanceID) : SV_Target
+{
+	// 中略
+	surfaceData.albedo = _VoxelBuffer[instanceID].color.rgb;
+	half4 color = UniversalFragmentPBR(inputData, surfaceData);
+	// 中略
+}
+```
+ボクセル情報がStructuredBufferで渡されるようになっています。
+頂点シェーダー、ピクセルシェーダーそれぞれから、インスタンスIDをインデックスとしてStructuredBufferの配列要素にアクセスし、ボクセルの座標と色を取得しています。
+
+## 完成
+非常に長くなりましたが、これでボクセルが画面に描画されました。
+![ss04.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/4ab629a4-bb81-5d56-16d4-624a8a459434.jpeg)
+あとはボクセルメッシュを好きなものに置き換えて、適当にポストエフェクトをかけて完成です。
+![ss05.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/910143/b03f77f0-6be7-0d71-0537-36a5cd3c6437.jpeg)
+シェーダーを書いた時点で力尽きてしまったのでメッシュは素直に有料アセットを買いました。
+
+https://assetstore.unity.com/packages/3d/props/hyper-casual-bricks-170560
+
+# おわりに
+原理自体は簡単なのに、きれいに見せようと思ったらジオメトリシェーダーやらコンピュートシェーダーやら持ち出す羽目になってしまい、思いのほか大変でした。
+
+# 参考
+
+https://developer.nvidia.com/content/basics-gpu-voxelization
+
+http://hd-prg.com/RVGlobalIllumination.html
+
+![ユニティちゃんライセンス](http://unity-chan.com/images/imageLicenseLogo.png "ユニティちゃんライセンス")
+このコンテンツは<a href=”http://unity-chan.com/contents/license_jp/” target=”_blank”>ユニティちゃんライセンス条項</a>の元に提供されています</p>

@@ -1,0 +1,296 @@
+--- v006.md
++++ v007.md
+@@ -4,130 +4,199 @@
+ 
+ ## Overview
+-Gaussian Initialization and Warm-up establishes the initial state of 3D Gaussians for radiance-field optimization, solving the problem of poor convergence and incorrect placement caused by naive random initialization. It sets apart from standard 3D Gaussian Splatting by introducing a static warm-up phase and specific biasing strategies (low reflectivity, background perturbation) to ensure Gaussians are placed in useful positions before complex dynamics or densification are introduced [S1].
++Gaussian Initialization and Warm-up establishes a valid initial state for 3D Gaussians ($\mu_i, \Sigma_i, \alpha_i, C_i$) to facilitate stable optimization in differentiable volume rendering. It solves the problem of slow convergence and sub-optimal local minima that arise from poor starting positions or attribute values. It sets itself apart from its siblings by focusing on the *initial placement* and *static pre-training* phase rather than iterative refinement (Recurrent Gaussian Update) or uniform density generation (Dense Initialization). It builds on [Sparse and Efficient Initialization](12944-sparse-and-efficient-initialization.md).
+ 
+ ## How it works
+-**Inputs:** Camera poses (intrinsics/extrinsics), near/far plane distances, initial image data (e.g., C-ToF quarts or RGB), and optional color sequences.
+-**Outputs:** A set of 3D Gaussians with initialized means $\mu_i$, covariances $\Sigma_i$, opacities $\alpha_i$, and spherical harmonic coefficients $C_i$.
+-
+-**Data Structures:**
+-*   **Gaussian Set:** A list of $N$ Gaussians.
+-*   **Gaussian Fields:**
+-    *   $\mu_i \in \mathbb{R}^3$: Mean position.
+-    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized as rotation $R_i \in SO(3)$ and scale $s_i \in \mathbb{R}^3$).
+-    *   $\alpha_i \in [0, 1]$: Opacity.
+-    *   $C_i$: Spherical Harmonic coefficients.
+-
+-**Steps:**
+-
+-1.  **Random Placement within Frustum:**
+-    Sample Gaussian means $\mu_i$ uniformly within the camera frustum, bounded by the near and far planes [S1].
+-    *   *Note:* If using real-world units, coordinates may be large. Rescale input coordinates to any associated MLP using the unambiguous depth range to ensure most values lie within $[0, 1]$ [S1].
+-
+-2.  **Low Reflectivity Bias Initialization:**
+-    Initialize opacity/reflectivity $\alpha_i$ to a low value, typically between $0.01$ and $0.1$ [S1].
+-    *   *Rationale:* High initial reflectivity (e.g., $0.5$) combined with occupancy bias causes Gaussians in low-reflectivity regions to be incorrectly placed far from the camera due to inverse-square falloff assumptions. This leads to multiple opacity peaks and interference from closer splats before reflectivity can be corrected. Low initial reflectivity allows Gaussians to be placed more correctly, closer to the true scene depth [S1].
+-    *   *Comparison:* Combining occupancy and low-reflectivity biases is effective for both low and high reflectivity regions. Using only occupancy bias harms low-reflectivity regions [S1].
+-
+-3.  **Static Warm-up Phase:**
+-    Run an initial optimization stage for a fixed number of iterations (typically $2,000$) assuming the scene is static [S1].
+-    *   *Purpose:* This places Gaussians into useful positions before introducing dynamics or densification [S1].
+-
+-4.  **Background Perturbation (Optional/Conditional):**
+-    For sensitive low-reflectivity areas, randomly change the background signal $q_{bg}$ uniformly between $-1$ and $1$ at each optimization iteration [S1].
+-    *   *Rationale:* A low background contribution can cause Gaussians to fail to place on surfaces because the background already reproduces the signal, resulting in only low-contributing Gaussians [S1].
+-
+-5.  **Fine-tuning/Recoloring Initialization (If Voxelization is Used):**
+-    If Gaussian means are fixed via voxelization, initialize remaining attributes ($\Sigma_i, C_i, \alpha_i$) by averaging attributes within each voxel [S3].
+-    *   Initialize DC colors $C_i^{(dc)}$, high-frequency SH coefficients $C_i^{(ac)}$, and opacities $\alpha_i$ by averaging within the voxel [S3].
+-    *   Initialize covariance $\Sigma_i$ using the largest volume Gaussian in the voxel [S3].
+-    *   *Pitfall:* Initializing attributes to zero takes more iterations and often results in sub-optimal rendering quality because Gaussian splitting and merging are disabled during retraining [S3].
+-    *   *Performance:* This initialization requires approximately $8,000$ iterations to approach ground-truth PSNR, whereas fine-tuning without initialization requires $30,000$ iterations and may fail to recover ground-truth PSNR at higher compression rates [S3].
+-
+-**Pseudocode:**
++The method combines spatial sampling, attribute biasing, and a static optimization phase to prepare the Gaussian set for dynamic or complex scene reconstruction.
++
++### Inputs and Outputs
++*   **Inputs:** Camera poses (view matrices, intrinsics), near/far plane distances, optional input point cloud or voxel grid, and scene reflectivity characteristics.
++*   **Outputs:** A set of $N$ 3D Gaussians with initialized means $\mu_i$, covariances $\Sigma_i$, opacities $\alpha_i$, and spherical harmonic coefficients $C_i$.
++
++### Data Structures
++The Gaussian set is typically stored as a list or array of structures. Each Gaussian $i$ contains:
++*   $\mu_i \in \mathbb{R}^3$: Mean position.
++*   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized by rotation $R \in SO(3)$ and scale $s \in \mathbb{R}^3$).
++*   $\alpha_i \in [0, 1]$: Opacity.
++*   $C_i$: Spherical Harmonic coefficients for color.
++
++### Steps
++
++1.  **Spatial Initialization (Frustum Sampling):**
++    Initialize Gaussian means $\mu_i$ by sampling uniformly within the camera frustum, bounded by the near and far planes [S1]. This ensures all primitives are potentially visible [S1].
++
++2.  **Coordinate Rescaling (MLP-specific):**
++    If a deformation MLP is used, rescale input coordinates using the unambiguous depth range to ensure most values lie within $[0, 1]$. This eases optimization for large real-world coordinate values [S1].
++
++3.  **Attribute Initialization:**
++    *   **Opacity/Reflectivity:** Initialize $\alpha_i$ (or reflectivity) to a low value, typically between $0.01$ and $0.1$ [S1]. High initial reflectivity (e.g., 0.5) causes Gaussians in low-reflectivity regions to be incorrectly placed far from the camera due to inverse-square falloff assumptions, leading to multiple opacity peaks and interference [S1].
++    *   **Covariance:** If initializing from voxelized means, initialize $\Sigma_i$ using the largest volume Gaussian found in the corresponding voxel [S3].
++    *   **Color/SH:** If initializing from voxelized means, initialize DC colors $C_i^{(dc)}$, high-frequency SH coefficients $C_i^{(ac)}$, and opacities $\alpha_i$ by averaging the attributes of points within each voxel [S3].
++
++4.  **Warm-up Stage:**
++    Run an initial optimization phase for a fixed number of iterations (typically 2,000) assuming the scene is static [S1]. This places Gaussians into useful positions before introducing dynamics or densification [S1].
++
++5.  **Background Signal Perturbation (Optional):**
++    For sensitive low-reflectivity areas, randomly change the background signal (uniformly between -1 and 1) at each optimization iteration. This prevents Gaussians from being placed on a surface unnecessarily when the background already reproduces the signal [S1].
++
++### Pseudocode
+ 
+ ```python
+-def initialize_gaussians(cameras, images, num_gaussians, warmup_iters=2000):
+-    """
+-    Initialize 3D Gaussians for radiance field optimization.
++import numpy as np
++
++def initialize_gaussians(cameras, num_gaussians, near_plane, far_plane, use_voxel_init=False, voxel_data=None):
++    """
++    Initialize 3D Gaussians for volume rendering.
+     
+     Args:
+-        cameras: List of camera objects with intrinsics and extrinsics.
+-        images: List of input images (e.g., C-ToF quarts or RGB).
++        cameras: List of camera objects with 'near', 'far', and projection methods.
+         num_gaussians: Number of Gaussians to initialize.
+-        warmup_iters: Number of static warm-up iterations.
++        near_plane: Near clipping plane distance.
++        far_plane: Far clipping plane distance.
++        use_voxel_init: If True, initialize attributes from voxel data.
++        voxel_data: Dictionary containing voxelized attributes if use_voxel_init is True.
+         
+     Returns:
+-        gaussians: Initialized Gaussian parameters.
++        gaussians: List of initialized Gaussian parameters.
+     """
+     gaussians = []
+     
+-    # Step 1: Random Placement within Frustum
++    # Step 1: Spatial Initialization
++    # Sample means uniformly within the camera frustum
++    # Note: Exact frustum sampling depends on camera projection. 
++    # Simplified: Sample in view space and transform, or sample in world space within bounds.
++    # Here we assume a helper to sample within the union of frustums or a single reference frustum.
++    means = sample_uniform_in_frustum(cameras, num_gaussians, near_plane, far_plane)
++    
++    # Step 2: Attribute Initialization
++    if use_voxel_init and voxel_data:
++        # Step 3b: Covariance from largest volume Gaussian in voxel
++        covariances = [voxel_data['largest_cov'][get_voxel_index(mu)] for mu in means]
++        
++        # Step 3c: Color and Opacity by averaging within voxel
++        opacities = [voxel_data['avg_opacity'][get_voxel_index(mu)] for mu in means]
++        colors = [voxel_data['avg_color'][get_voxel_index(mu)] for mu in means]
++    else:
++        # Standard initialization
++        # Step 3a: Low reflectivity bias
++        # Initialize opacity to a low value (0.01 to 0.1)
++        opacities = np.random.uniform(0.01, 0.1, num_gaussians)
++        
++        # Initialize covariance (e.g., isotropic small scale)
++        # Not explicitly defined in sources for standard init, but typically small random scales
++        scales = np.random.uniform(0.01, 0.1, (num_gaussians, 3))
++        covariances = [scale_to_covariance(s) for s in scales]
++        
++        # Initialize colors (e.g., random or mean scene color)
++        colors = np.random.uniform(0, 1, (num_gaussians, 3))
++
++    # Step 4: Coordinate Rescaling (if MLP is used)
++    # Rescale means if they are fed into an MLP
++    # This is handled during the forward pass or by storing a scale factor
++    # For this initialization step, we just store the raw means.
++    
++    # Construct Gaussian objects
+     for i in range(num_gaussians):
+-        # Sample mean uniformly within camera frustum (near to far plane)
+-        mu = sample_random_point_in_frustum(cameras[0]) # Assuming first camera for initial placement
+-        
+-        # Step 2: Low Reflectivity Bias
+-        # Initialize opacity to low value [0.01, 0.1]
+-        alpha = random.uniform(0.01, 0.1)
+-        
+-        # Initialize covariance (e.g., small isotropic)
+-        # Sigma = diag(s^2) where s is small
+-        scale = random.uniform(0.01, 0.1)
+-        sigma = scale * np.eye(3)
+-        
+-        # Initialize SH coefficients (e.g., zero or small random)
+-        sh_coeffs = np.zeros(num_sh_bases)
+-        
+         gaussians.append({
+-            'mu': mu,
+-            'alpha': alpha,
+-            'sigma': sigma,
+-            'sh_coeffs': sh_coeffs
++            'mu': means[i],
++            'Sigma': covariances[i],
++            'alpha': opacities[i],
++            'C': colors[i]
+         })
+         
+-    # Step 3: Static Warm-up Phase
+-    # Assume scene is static for warmup_iters
+-    for iteration in range(warmup_iters):
+-        # Render current Gaussians
+-        rendered_images = render_gaussians(gaussians, cameras)
+-        
+-        # Step 4: Background Perturbation (for sensitive low-reflectivity areas)
+-        # Randomly change background signal uniformly between -1 and 1
+-        # This is applied to the target or background model during loss calculation
+-        background_noise = random.uniform(-1, 1)
+-        
+-        # Compute Loss (e.g., L2/SSIM between rendered and input images)
+-        loss = compute_loss(rendered_images, images, background_noise)
+-        
+-        # Backpropagate and update Gaussians (positions, opacities, etc.)
+-        update_gaussians(gaussians, loss)
+-        
++    return gaussians
++
++def warm_up_optimization(gaussians, cameras, iterations=2000, static_scene=True):
++    """
++    Run a static warm-up phase to place Gaussians in useful positions.
++    
++    Args:
++        gaussians: List of Gaussian parameters.
++        cameras: List of camera poses.
++        iterations: Number of warm-up iterations.
++        static_scene: If True, assume no deformation.
++        
++    Returns:
++        Updated gaussians.
++    """
++    # Placeholder for optimization loop
++    # In practice, this involves rendering, computing loss (L2/SSIM), and backpropagating
++    # to update mu, Sigma, alpha, C.
++    
++    for step in range(iterations):
++        # 1. Render images for all cameras
++        rendered_images = []
++        for cam in cameras:
++            # Project Gaussians to 2D
++            # Rasterize
++            # Alpha blend
++            img = render_gaussians(gaussians, cam)
++            rendered_images.append(img)
++            
++        # 2. Compute Loss
++        # L = alpha * L_q + L_c + beta * L_f
++        # For warm-up, typically just photorealistic loss against input images
++        loss = compute_loss(rendered_images, ground_truth_images)
++        
++        # 3. Backpropagate and Update
++        # Only update attributes if static_scene is True (no deformation MLP updates)
++        if static_scene:
++            update_gaussians(gaussians, loss)
++            
++        # Optional: Background Signal Perturbation for low-reflectivity areas
++        # Perturb background signal in loss calculation
++        if step % 10 == 0: # Example frequency
++            perturb_background_signal()
++            
+     return gaussians
+ ```
+ 
++### Parameters
++*   **Initial Opacity:** $0.01$ to $0.1$ [S1].
++*   **Warm-up Iterations:** $2,000$ [S1].
++*   **Background Perturbation Range:** Uniform $[-1, 1]$ [S1].
++*   **MLP Weight Initialization:** Xavier normal, except final layer $N(0, 10^{-5})$ [S1].
++*   **Transformation Matrix Initialization (APMGSRN):** Diagonals $N(1, 0.05)$, off-diagonals $N(0, 0.05)$ [S2].
++*   **Feature Grid Initialization (APMGSRN):** $U(-0.0001, 0.0001)$ [S2].
++
++### Edge Cases and Pitfalls
++*   **High Initial Reflectivity:** Causes Gaussians in low-reflectivity regions to be placed too far away due to inverse-square falloff, leading to interference from closer splats and multiple opacity peaks [S1].
++*   **Zero Initialization:** Initializing attributes to zero takes more iterations (e.g., 30K vs 8K) and often results in sub-optimal rendering quality because splitting/merging are disabled during retraining [S3].
++*   **Coordinate Scale:** Large real-world coordinate values can hinder optimization; rescaling to $[0, 1]$ for MLP inputs is recommended [S1].
++
+ ## Subtopics
+ 
++### [Dense Initialization (DI)](10026-dense-initialization-di.md)
++Dense Initialization (DI) generates millions of small Gaussians to densely cover all visible surfaces at the outset, rather than starting with a sparse set and progressively refining it. It solves the problem of slow convergence and the computational overhead of iterative densification stages used in standard 3D Gaussian Splatting. DI sets itself apart from its sibling, Recurrent Gaussian Update, by eliminating the need for densification entirely through high-density matching, which also benefits ray tracing performance by reducing the workload of irrelevant primitives. [Dense Initialization (DI)](10026-dense-initialization-di.md)
++
++### [Recurrent Gaussian Update](10974-recurrent-gaussian-update.md)
++Recurrent Gaussian Update is a gradient-free, feed-forward refinement method that iteratively corrects initial 3D Gaussian predictions by predicting incremental updates to Gaussian parameters and hidden states based on rendering errors from input views. It solves the problem of inaccurate initial reconstructions in single-step feed-forward models by establishing a feedback loop that progressively refines the Gaussian set without requiring backpropagation or gradient computation. Unlike standard differentiable optimization which relies on iterative gradient descent, this method uses a learned recurrent network to map rendering errors directly to parameter updates, enabling convergence in a fixed number of iterations (typically 4) rather than thousands. [Recurrent Gaussian Update](10974-recurrent-gaussian-update.md)
++
++### [Structure-Aware Initialization](13704-structure-aware-initialization.md)
++Structure-Aware Initialization is a strategy that adapts primitive placement and scale to local image complexity using local variance. It solves the problem of inefficient coverage in radiance-field optimization by ensuring dense, fine-grained primitives in complex regions and sparse, coarse coverage in smooth areas. Unlike Dense Initialization, which distributes primitives uniformly, this method accelerates convergence and improves final fidelity, particularly when using high primitive counts. [Structure-Aware Initialization](13704-structure-aware-initialization.md)
++
++### [Cluster-level Weighting](17081-cluster-level-weighting.md)
++Cluster-level Weighting is a method for adaptively determining the contribution of multi-scale Gaussians in a Pyramidal Gaussian hierarchy during rendering. It solves the problem of balancing detail and performance by assigning unique weight sets to spatial clusters of Gaussians rather than individual splats, thereby incorporating positional context without the computational cost of per-Gaussian weight networks. It differs from sibling methods like Dense Initialization or Structure-Aware Initialization by focusing on the *rendering-time* adaptive weighting of an existing hierarchical structure, rather than the *initialization* of the Gaussian parameters themselves. [Cluster-level Weighting](17081-cluster-level-weighting.md)
++
+ ### Low-Reflectivity Bias
+-A specific initialization heuristic where Gaussian reflectivity (opacity) is set to a low value (0.01 to 0.1) [S1]. It prevents Gaussians in low-reflectivity regions from being incorrectly placed far from the camera due to inverse-square falloff assumptions, which would otherwise lead to multiple opacity peaks and interference from closer splats [S1]. Low initial reflectivity allows Gaussians to be placed more correctly, closer to the true scene depth [S1]. Combining this with occupancy bias is effective for both low and high reflectivity regions, whereas using only occupancy bias harms low-reflectivity regions [S1].
++A specific heuristic within the initialization process that addresses the inverse-square falloff issue in low-reflectivity regions. High initial reflectivity (e.g., 0.5) causes Gaussians to be incorrectly placed far from the camera, leading to interference. Initializing reflectivity to a low value (0.01 to 0.1) allows Gaussians to be placed more correctly. Combining this with occupancy bias is effective for both low and high reflectivity regions, whereas using only occupancy bias harms low-reflectivity regions [S1].
+ 
+ ### APMGSRN Initialization
+-A method for initializing transformation matrices and feature grids in multi-grid scene representation networks [S2]. Transformation matrices are initialized to cover a near global domain with small random shears, rotations, and translations. Diagonals are sampled from $N(1, 0.05)$, and remaining entries in the first three rows are sampled from $N(0, 0.05)$ [S2]. This ensures each entry is non-zero, guaranteeing gradients can update each entry [S2]. Feature grids are initialized from $U(-0.0001, 0.0001)$, and decoder weights follow Glorot and Bengio [S2].
++A specialized initialization for Adaptively Placed Multi-Grid Scene Representation Networks. Transformation matrices are initialized to cover a near global domain with small random shears, rotations, and translations. Diagonals are sampled from $N(1, 0.05)$, and remaining entries in the first three rows from $N(0, 0.05)$. Feature grids are initialized from $U(-0.0001, 0.0001)$, and decoder weights follow Glorot and Bengio [S2]. This ensures each entry in the transformation matrix is non-zero, guaranteeing gradients can update each entry [S2].
+ 
+ ### Fine-tuning/Recoloring with Initialization
+-A constrained retraining process that fixes Gaussian means after voxelization and fine-tunes remaining attributes ($\Sigma, C, \alpha$) [S3]. Attributes are initialized by averaging within each voxel, with covariance initialized from the largest volume Gaussian in the voxel [S3]. This reduces fine-tuning iterations from 30K to ~8K and prevents sub-optimal quality associated with zero-initialization [S3].
++A constrained retraining process that fixes Gaussian means after voxelization and fine-tunes the remaining attributes ($\Sigma_i, C_i, \alpha_i$) to minimize training loss [S3]. Attributes are initialized by averaging within voxels (colors, opacities) or taking the largest volume Gaussian (covariance). This approach requires approximately 8K iterations to approach ground-truth PSNR, compared to 30K iterations and failure to recover PSNR without initialization [S3].
+ 
+ ### Appearance-aware Rendering with Color Correction
+-A mechanism to handle lighting variations by applying per-cluster color correction $\Delta c_i$ based on camera appearance embedding and cluster embedding [S4, unofficial]. The correction is computed as $\Delta c_i = F_\phi (\text{Concat}(E_c[k_i], E_{app}[n]))$ [S4, unofficial]. The final color is blended using $\hat{C} = \sum_{i=1}^{N} \frac{(c_i + \Delta c_i) \cdot w_{k_i,n}[l_i] \cdot \alpha_i}{\prod_{j=1}^{i-1} (1 - w_{k_j,n}[l_j] \cdot \alpha_j)}$ [S4, unofficial].
++A mechanism to handle lighting variations by applying a per-cluster color correction $\Delta c_i$ based on camera appearance embedding and cluster embedding [S4, unofficial]. The correction is computed as $\Delta c_i = F_\phi (\text{Concat}(E_c[k_i], E_{app}[n]))$. The final color is rendered using $\hat{C} = \sum_{i=1}^{N} \frac{(c_i + \Delta c_i) \cdot w_{k_i,n}[l_i] \cdot \alpha_i}{\prod_{j=1}^{i-1} (1 - w_{k_j,n}[l_j] \cdot \alpha_j)}$, where $E_{app} \in \mathbb{R}^{N_{cam} \times D}$ is a learnable tensor [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The warm-up phase adds a fixed cost of $O(I_{warmup} \cdot N \cdot P)$, where $I_{warmup}$ is the number of warm-up iterations (typically 2,000), $N$ is the number of Gaussians, and $P$ is the number of pixels [S1].
+-*   **Memory Complexity:** Initialization requires storing the initial parameters for $N$ Gaussians. No additional significant memory overhead compared to standard initialization [S1].
+-*   **Performance:** The warm-up stage significantly improves convergence speed and final reconstruction quality by placing Gaussians in useful positions early [S1]. Low-reflectivity bias prevents incorrect placement in low-reflectivity regions, improving fidelity [S1].
+-*   **Strengths:** Robust to initial placement errors; handles low-reflectivity regions better than standard initialization; reduces total training time by avoiding early misplacement [S1].
+-*   **Limitations:** Requires additional iterations for warm-up; background perturbation may introduce noise if not tuned correctly [S1].
+-*   **When to Use:** When initializing 3D Gaussians for radiance fields, especially in dynamic scenes or scenes with varying reflectivity [S1].
++*   **Time Complexity:** The warm-up stage adds a fixed cost (e.g., 2,000 iterations) to the total training time [S1]. Fine-tuning with proper initialization reduces convergence time significantly (8K vs 30K iterations) [S3].
++*   **Memory Complexity:** Initialization does not significantly increase memory overhead compared to the final Gaussian set size. Voxel-based initialization may require temporary storage for voxel attributes [S3].
++*   **Performance:** Proper initialization (low reflectivity, voxel averaging) leads to faster convergence and higher final PSNR [S1, S3]. Poor initialization (high reflectivity, zero attributes) leads to sub-optimal local minima and longer training times [S1, S3].
++*   **Strengths:** Stabilizes optimization, prevents early divergence, and reduces the number of iterations needed for convergence.
++*   **Limitations:** Requires careful tuning of initial parameters (e.g., opacity range). Voxel-based initialization depends on the quality of the voxelization step [S3].
+ 
+ ## Background
+-The method originates from work on optimizing depth indirectly in dynamic radiance fields using 3D Gaussians, specifically in the context of Time-of-Flight (C-ToF) data [S1]. The warm-up stage and low-reflectivity bias were introduced to address the challenges of initializing Gaussians for dynamic scenes and low-reflectivity regions, which are common in C-ToF imaging [S1]. The fine-tuning/recoloring initialization was introduced in the context of adaptive voxelization for transform coding of 3D Gaussian Splatting data [S3]. The appearance-aware rendering with color correction was introduced in PyGS, a large-scale scene representation method using pyramidal 3D Gaussian Splatting [S4, unofficial].
++The concept of initializing Gaussians within the camera frustum and using a warm-up stage originates from dynamic radiance field optimization, specifically in the context of Time-of-Flight (ToF) data [S1]. The low-reflectivity bias heuristic was introduced to address specific artifacts in ToF optimization [S1]. Voxel-based initialization for fine-tuning was proposed in the context of compressing 3D Gaussian Splatting data [S3]. Appearance-aware color correction was introduced in PyGS for large-scale scene representation [S4, unofficial].
+ 
+ ## Sources

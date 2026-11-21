@@ -1,0 +1,72 @@
+# HoloVAM
+
+Also called: Holographic tomographic volumetric additive manufacturing
+
+## Overview
+HoloVAM is a volumetric additive manufacturing technique that uses holographic phase modulation to project light patterns into a photocurable resin, improving light efficiency and allowing 3D digital control of the light beam (e.g., depth of focus, scattering mitigation) compared to amplitude-based TVAM [S1]. It builds on [TVAM Integrator](6814-tvam-integrator.md) by replacing standard amplitude modulation with phase-encoded computer-generated holograms (CGH) displayed on a spatial light modulator (SLM/DMD) in a Fourier configuration [S1]. Unlike [CornerIntegrator](7445-cornerintegrator.md) and [Radon Integrator](7470-radon-integrator.md), which typically rely on intensity modulation, HoloVAM encodes both the projection pattern and the point spread function (PSF) into the phase, enabling higher light efficiency and extended depth of focus [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Target 3D shape (voxel grid or mesh); optical parameters (wavelength $\lambda$, DMD resolution, lens focal length); material properties (polymerization dose threshold).
+*   **Output:** A sequence of hologram frames displayed on the DMD, synchronized with the rotation of the resin vial.
+
+**Data Structures:**
+*   **Tomographic Projections:** A set of 2D intensity images $I_\theta(x,y)$ for each projection angle $\theta$, computed via reverse tomography (e.g., Filtered Back Projection, FBP) [S1].
+*   **Hologram Frame:** A 2D array of phase values $\phi(x,y)$ mapped to the DMD pixel grid. The DMD is a binary spatial light modulator; phase is encoded using Lee holograms (carrier frequency modulation) [S1].
+*   **HoloTile Structure:** Each frame consists of a tiled arrangement of smaller holograms. The structure superimposes:
+    1.  A smaller hologram of the desired projection pattern, spatially tiled on the full area of the SLM [S1].
+    2.  A second hologram (PSF hologram) that defines the shape of each reconstructed pixel in the image plane [S1].
+
+**Numbered Steps:**
+1.  **Compute Tomographic Projections:** Generate 2D projection patterns for the target 3D shape using reverse tomography (e.g., FBP) [S1].
+2.  **Apply Positive Constraint:** Ensure intensity patterns are non-negative, as physical light intensity cannot be negative [S1].
+3.  **Generate Computer-Generated Holograms (CGH):** For each projection angle, generate a CGH using iterative algorithms (e.g., Gerchberg–Saxton) to encode the phase pattern on the DMD [S1]. The DMD is used as a phase modulator via Lee holograms [S1].
+4.  **Apply HoloTile Tiling (Speckle Mitigation):** To mitigate speckle noise inherent in holographic projection, apply the HoloTile method [S1]:
+    *   Superimpose the first smaller hologram of the desired projection pattern, spatially tiled on the full area of the SLM [S1].
+    *   Superimpose the second hologram (PSF hologram) that defines the shape of each reconstructed pixel in the image plane [S1].
+    *   Use time-multiplexing and spatial tiling to further mitigate speckle noise [S1].
+5.  **Optical Configuration Setup:**
+    *   Collimate and expand a single spatial-mode laser (405 nm) to fit the active area of the DMD [S1].
+    *   Arrange the DMD in a Fourier configuration [S1].
+    *   Use a Fourier lens to reconstruct the hologram at its Fourier plane, which is located within the rotatory photoresin container [S1].
+6.  **Synchronize and Irradiate:** Display holograms synchronously with the rotation of the resin vial [S1]. Irradiate the resin volume from multiple angles until the polymerization dose threshold is reached [S1].
+
+**Formulas:**
+*   **Light Efficiency of a Pattern:**
+    $$ \eta_{patt} = \frac{\sum_{g=0}^{g_{max}} n_g g}{N_{pixels} g_{max}} \eta_{DMD} $$
+    Where:
+    *   $n_g$ is the number of pixels with gray level $g$ [S1].
+    *   $g_{max}$ is the maximum gray level (255 for 8-bit images) [S1].
+    *   $N_{pixels}$ is the total number of pixels [S1].
+    *   $\eta_{DMD}$ is the pixel reflectivity (65% at 405 nm) [S1].
+
+*   **Phase Encoding Advantage:** Phase encoding yields substantially higher light efficiency because all pixels contribute to the projected intensity via interference, whereas amplitude encoding loses most light because most pixels are dark (sparse intensity) [S1]. HoloVAM showed a 28.6X improvement in light efficiency for the Benchy boat projection compared to amplitude TVAM [S1].
+
+**Parameters:**
+*   **Wavelength:** 405 nm [S1].
+*   **Light Source:** Single continuous-wave laser diode [S1].
+*   **Power:** 40 mW (coupled with 33% efficiency in a single mode fiber) [S1].
+*   **Modulator:** Digital Micromirror Device (DMD) used as a phase modulator via Lee holograms [S1].
+*   **Resolution:** Negative features (holes) of 31.35 μm [S1].
+*   **Printing Time:** < 60 seconds [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Speckle Noise:** Inherent in holographic projection due to CGH design, pixelated structure, spurious unmodulated reflection, and optical aberrations [S1]. Mitigated using HoloTile (spatial/temporal tiling) and PSF shaping [S1].
+*   **Blurring Artifacts:** In conventional TVAM, blurring occurs if the vial’s diameter is much larger than the depth of focus of the imaging system [S1]. HoloVAM mitigates this by using phase modulation to modify the Point Spread Function (PSF), e.g., using an Axicon phase for Bessel beams (increased depth of focus) or Fresnel lens phases for multi-plane projections [S1].
+*   **Power Efficiency:** Single-mode lasers have less optical power than multimode lasers, making light engine efficiency critical to keep printing times short (~60 s) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Printing time is dominated by the rotation speed and the number of projection angles required for tomographic reconstruction. Typical printing times are tens of seconds for cm-scale prints [S1]. HoloVAM achieves < 60 seconds for millimeter-scale objects [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Achieved negative features (holes) of 31.35 μm reliably [S1]. Light efficiency improved by 28.6X for the Benchy boat projection compared to amplitude TVAM [S1].
+*   **Scaling:** The technique is limited by the space-bandwidth product of the light source, which determines the depth of focus [S1]. Larger vials require extended depth of focus (e.g., via Axicon phases) to avoid blurring [S1].
+*   **Strengths:** High light efficiency (all pixels contribute via interference); 3D digital control of the light beam (depth of focus, scattering mitigation); layer-less fabrication [S1].
+*   **Limitations:** Speckle noise requires mitigation (HoloTile); requires precise synchronization between DMD and rotation stage; limited to materials compatible with 405 nm wavelength [S1].
+*   **When to use:** When high light efficiency is critical (e.g., with low-power single-mode lasers); when printing in scattering materials (e.g., cell-laden hydrogels); when extended depth of focus is needed [S1].
+*   **When not to use:** When high-power multimode lasers are available and scattering is not an issue; when simpler amplitude-based TVAM suffices for non-scattering materials [S1].
+
+## Background
+HoloVAM was proposed in a 2025 paper published in *Nature Communications* by researchers from the Laboratory of Applied Photonics Devices at EPFL and SDU Centre for Photonics [S1]. It extends the concept of Tomographic Volumetric Additive Manufacturing (TVAM) by harnessing the phase properties of light, addressing the low light efficiency and limited depth of focus of conventional amplitude-based TVAM [S1]. The technique uses Lee holograms to encode phase on a DMD, a method previously used in two-photon lithography to control multiple foci [S1]. HoloVAM has been demonstrated for printing in acrylates and scattering materials like soft cell-laden hydrogels (GelMA) with a concentration of 0.5 million cells per mL [S1].
+
+## Sources
+[S1] Holographic tomographic volumetric additive manufacturing, https://doi.org/10.1038/s41467-025-56852-4, fetched 2026-10-26

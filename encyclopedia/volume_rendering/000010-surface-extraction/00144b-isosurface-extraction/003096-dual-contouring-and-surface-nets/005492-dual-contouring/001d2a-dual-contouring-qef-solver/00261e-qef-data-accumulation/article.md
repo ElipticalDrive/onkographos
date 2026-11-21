@@ -1,0 +1,145 @@
+# QEF Data Accumulation
+
+Also called: QEF Accumulation, QEF Accumulator, QEF Data Structure, QefData, QefData struct, QefSolver.add
+
+## Overview
+QEF Data Accumulation is a data structure for accumulating the components of a Quadratic Error Function (QEF) from multiple plane constraints without storing individual points and normals [S2, unofficial]. It enables the downstream [Dual Contouring QEF Solver](1424-dual-contouring-qef-solver.md) to reconstruct the optimal vertex position from the accumulated normal equations [S1, unofficial]. The method maintains only the pre-computed sums required for the least-squares solution and supports merging accumulators from different sources via element-wise addition [S2, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+The method accepts a plane constraint defined by a point $p = (p_x, p_y, p_z)$ and a normal vector $n = (n_x, n_y, n_z)$, or another `QefData` instance for merging [S2, unofficial]. It outputs an updated `QefData` structure containing the accumulated quadratic form components [S2, unofficial].
+
+### Data Structures
+The core data structure is `QefData`, which stores the coefficients of the normal equations $A^T A x = A^T b$ derived from the QEF minimization problem [S1, unofficial]. The matrix $A^T A$ is symmetric, so only the upper triangle is stored [S2, unofficial]. The structure consists of the following fields [S1, S2, unofficial]:
+
+| Field Name | Type | Description |
+| :--- | :--- | :--- |
+| `ata_00` | `float` | Element $(0,0)$ of $A^T A$ |
+| `ata_01` | `float` | Element $(0,1)$ of $A^T A$ |
+| `ata_02` | `float` | Element $(0,2)$ of $A^T A$ |
+| `ata_11` | `float` | Element $(1,1)$ of $A^T A$ |
+| `ata_12` | `float` | Element $(1,2)$ of $A^T A$ |
+| `ata_22` | `float` | Element $(2,2)$ of $A^T A$ |
+| `atb_x` | `float` | Element $x$ of $A^T b$ |
+| `atb_y` | `float` | Element $y$ of $A^T b$ |
+| `atb_z` | `float` | Element $z$ of $A^T b$ |
+| `btb` | `float` | Scalar $b^T b$ |
+| `massPoint_x` | `float` | Accumulated sum of $p_x$ |
+| `massPoint_y` | `float` | Accumulated sum of $p_y$ |
+| `massPoint_z` | `float` | Accumulated sum of $p_z$ |
+| `numPoints` | `int` | Count of added constraints |
+
+### Numbered Steps
+To add a new plane constraint to an existing accumulator, perform the following steps [S1, S2, unofficial]:
+1. Normalize the input normal: compute $n_{norm} = \frac{n}{\|n\|}$ and extract components $n_x, n_y, n_z$ [S2, unofficial].
+2. Compute the dot product $d = n_x p_x + n_y p_y + n_z p_z$ [S2, unofficial].
+3. Update $A^T A$ by adding the outer product components: `ata_00 += n_x * n_x`, `ata_01 += n_x * n_y`, `ata_02 += n_x * n_z`, `ata_11 += n_y * n_y`, `ata_12 += n_y * n_z`, `ata_22 += n_z * n_z` [S1, S2, unofficial].
+4. Update $A^T b$ by adding $d \cdot n_{norm}$: `atb_x += d * n_x`, `atb_y += d * n_y`, `atb_z += d * n_z` [S2, unofficial].
+5. Update $b^T b$ by adding $d^2$: `btb += d * d` [S2, unofficial].
+6. Update the mass point sum: `massPoint_x += p_x`, `massPoint_y += p_y`, `massPoint_z += p_z` [S2, unofficial].
+7. Increment the constraint count: `numPoints += 1` [S2, unofficial].
+8. Mark the solver's solution as invalid: `hasSolution = false` [S2, unofficial].
+
+To merge two accumulators `lhs` and `rhs`, add corresponding fields element-wise [S1, S2, unofficial]: `lhs.ata_ij += rhs.ata_ij`, `lhs.atb_k += rhs.atb_k`, `lhs.btb += rhs.btb`, `lhs.massPoint_k += rhs.massPoint_k`, and `lhs.numPoints += rhs.numPoints` [S2, unofficial].
+
+### Formulas
+The QEF minimizes the sum of squared distances to plane constraints: $\sum_i (n_i \cdot (x - p_i))^2$ [S1, unofficial]. Expanding this yields the normal equations $A^T A x = A^T b$, where $A$ is a matrix with rows equal to the normals $n_i$, and $b$ is a vector with elements $b_i = n_i \cdot p_i$ [S1, unofficial]. The accumulator stores $A^T A$ in `ata`, $A^T b$ in `atb`, and $b^T b$ in `btb` [S1, unofficial]. The mass point sum accumulates $\sum_i p_i$ [S2, unofficial].
+
+### Parameters
+Typical values are not specified in the sources. The fields use 32-bit floating-point numbers (`float`) and a 32-bit integer (`int`) [S1, S2, unofficial].
+
+### Edge Cases and Pitfalls
+Precision: Accumulating many constraints in `float` fields may cause precision loss; the sources specify `float` [S1, S2, unofficial]. Symmetry: The `ata` matrix is symmetric, so only the upper triangle is updated, and the solver must account for this symmetry when solving the linear system [S2, unofficial]. Degenerate input: The sources do not specify fallback behavior for zero-length normals [S2, unofficial].
+
+### Pseudocode
+The following Python-like pseudocode implements the `QefData` structure and its operations [S1, S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class QefData:
+    def __init__(self):
+        self.clear()
+
+    def clear(self):
+        """Initialize all fields to zero."""
+        self.ata_00 = 0.0; self.ata_01 = 0.0; self.ata_02 = 0.0
+        self.ata_11 = 0.0; self.ata_12 = 0.0; self.ata_22 = 0.0
+        self.atb_x = 0.0; self.atb_y = 0.0; self.atb_z = 0.0
+        self.btb = 0.0
+        self.massPoint_x = 0.0; self.massPoint_y = 0.0; self.massPoint_z = 0.0
+        self.numPoints = 0
+
+    def add_constraint(self, px, py, pz, nx, ny, nz):
+        """Add a plane constraint defined by point (px, py, pz) and normal (nx, ny, nz)."""
+        # 1. Normalize normal
+        length = math.sqrt(nx*nx + ny*ny + nz*nz)
+        nx_n = nx / length; ny_n = ny / length; nz_n = nz / length
+
+        # 2. Compute dot product d = n . p
+        dot = nx_n * px + ny_n * py + nz_n * pz
+
+        # 3. Update A^T A
+        self.ata_00 += nx_n * nx_n
+        self.ata_01 += nx_n * ny_n
+        self.ata_02 += nx_n * nz_n
+        self.ata_11 += ny_n * ny_n
+        self.ata_12 += ny_n * nz_n
+        self.ata_22 += nz_n * nz_n
+
+        # 4. Update A^T b
+        self.atb_x += dot * nx_n
+        self.atb_y += dot * ny_n
+        self.atb_z += dot * nz_n
+
+        # 5. Update b^T b
+        self.btb += dot * dot
+
+        # 6. Update mass point sum
+        self.massPoint_x += px
+        self.massPoint_y += py
+        self.massPoint_z += pz
+
+        # 7. Increment count
+        self.numPoints += 1
+
+    def merge(self, rhs):
+        """Merge another QefData accumulator into this one."""
+        self.ata_00 += rhs.ata_00; self.ata_01 += rhs.ata_01; self.ata_02 += rhs.ata_02
+        self.ata_11 += rhs.ata_11; self.ata_12 += rhs.ata_12; self.ata_22 += rhs.ata_22
+        self.atb_x += rhs.atb_x; self.atb_y += rhs.atb_y; self.atb_z += rhs.atb_z
+        self.btb += rhs.btb
+        self.massPoint_x += rhs.massPoint_x; self.massPoint_y += rhs.massPoint_y; self.massPoint_z += rhs.massPoint_z
+        self.numPoints += rhs.numPoints
+```
+
+## Operating characteristics
+
+### Time and Memory Complexity
+Memory: The `QefData` structure has a fixed size of 14 floats and 1 integer, totaling 60 bytes (assuming 32-bit floats and 32-bit int) [S1, S2, unofficial]. Time per Constraint: Adding a constraint involves a constant number of arithmetic operations [S2, unofficial]. Merge Time: Merging two accumulators is $O(1)$, involving a fixed number of additions [S2, unofficial].
+
+### Measured Performance
+Not given in the sources.
+
+### Scaling
+The method scales linearly with the number of constraints added to a single cell, but the memory footprint remains constant [S2, unofficial].
+
+### Strengths and Limitations
+Strengths: The method provides constant memory overhead per cell and supports merging accumulators [S2, unofficial]. Limitations: It does not store the original points or normals, so it cannot be used to re-evaluate the QEF with different weights [S1, unofficial].
+
+### When to Use
+Use when implementing Dual Contouring to efficiently aggregate plane constraints within a grid cell [S2, unofficial].
+
+### When Not to Use
+Do not use if you need to retain the original point cloud data for other purposes [S1, unofficial].
+
+## Background
+QEF Data Accumulation is a component of the Dual Contouring algorithm, specifically part of the QEF Solver stage [S1, S2, unofficial]. Reference implementations in C++ and C# were provided by Nick Gildaea and Tuckbone, respectively [S1, S2, unofficial]. The approach relies on the mathematical property that the normal equations for a least-squares problem can be accumulated incrementally [S1, unofficial].
+
+## Sources
+
+[S1] nickgildea/DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
+[S2] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

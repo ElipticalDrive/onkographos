@@ -1,0 +1,29 @@
+# Rendering Pipeline Architecture
+
+
+## Overview
+Rendering Pipeline Architecture refers to the structural organization of volume rendering stages into distinct, sequential logical blocks that process data or image states [S1, S3, unofficial]. It solves the problem of managing complex data transformations by separating geometric projection from visual appearance, allowing for independent optimization of shading, classification, and compositing [S3, unofficial]. It differs from monolithic ray-marching approaches by explicitly decomposing the rendering task into reusable passes, such as attribute accumulation, depth occlusion, and normalization, which can be combined in various configurations like the [Splat Attributes Pass](1066-splat-attributes-pass.md) or the [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md).
+
+## Shared principles
+The rendering pipeline family operates on the principle of stage separation, where each stage performs a specific transformation on the data or image state. Common mechanisms include:
+
+1.  **Stage Decomposition:** The rendering process is divided into logical stages such as Data Traversal, Interpolation, Gradient Computation, Classification, Shading, and Compositing [S1, S3, unofficial]. This allows for independent optimization of visual appearance (shading/classification) and geometric projection (compositing) [S3, unofficial].
+2.  **Intermediate Storage:** Pipelines utilize intermediate framebuffers or data structures (e.g., fragment lists, G-buffers) to store per-pixel or per-voxel attributes (color, normal, depth, opacity) between stages [S1, S2, unofficial]. For example, [Custom Pass Rendering](3629-custom-pass-rendering.md) uses multiple FBOs to store hit positions, normals, and material IDs [S1, unofficial].
+3.  **Sequential Execution:** Stages are executed in a defined order. For instance, [Fragment List-Based Rendering](3488-fragment-list-based-rendering-pipeline.md) follows a Clear, Construction, Insertion, and Evaluation sequence [S1, unofficial].
+4.  **Accumulation and Blending:** Final image generation involves accumulating contributions from multiple samples or primitives, often using alpha blending or weighted summation [S1, S3, unofficial].
+
+## Subtopics
+
+### [Splat Attributes Pass](1066-splat-attributes-pass.md)
+A fragment-shader-based stage that computes per-pixel geometric and photometric attributes for point-sampled primitives by evaluating their intersection with the view ray. It solves the problem of correctly occluding back faces of spherical splats while accumulating weighted data into a G-buffer. It differs from the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md) by explicitly separating attribute accumulation into a dedicated pass, and from the [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md) by relying on fragment-level depth testing against a pre-computed depth buffer rather than explicit sorting.
+
+### [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md)
+A real-time pipeline combining splat and mesh rendering to enable high-quality shader effects in a single pass. It differs from the [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md) by replacing screen-space blending with object-space attribute interpolation on regular grid patches, allowing for complex lighting without multi-pass artifacts.
+
+### [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md)
+A hardware-accelerated method separating depth occlusion, color accumulation, and normalization into distinct stages. It solves the problem of correctly blending overlapping splats with varying filter weights on standard hardware. Unlike the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md), it uses an intermediate depth buffer to resolve occlusion before accumulating color, ensuring correct weighting of front-most contributions. It differs from the [Splat Attributes Pass](1066-splat-attributes-pass.md) by explicitly handling weight normalization in a final dedicated pass.
+
+## Background
+The concept of separating rendering into distinct stages originates from the general evolution of graphics pipelines, moving from fixed-function hardware to programmable shaders. The specific application of multi-pass architectures for volume splatting and point rendering has been developed to address the limitations of single-pass blending, such as sorting artifacts and limited shading capabilities. Key implementations include the [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md) for hardware-accelerated point clouds and the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md) for high-quality surface rendering.
+
+## Sources

@@ -1,0 +1,92 @@
+# 2D Gaussian Evaluation (Rotated/Anisotropic)
+Also called: 2D Gaussian Evaluation with Rotation, Brush stroke texture generation via Gaussian combination
+
+## Overview
+This method computes the alpha component of a rotated, anisotropic 2D Gaussian function at specific 2D texture coordinates, primarily for generating brush-stroke textures in stroke-based splatting. It differs from standard isotropic splatting by applying a rotation matrix to the coordinate system before evaluating the decay, allowing for directional brush strokes. It builds on [2D Gaussian Evaluation](4728-2d-gaussian-evaluation.md) by adding explicit rotational transformation of the input coordinates.
+
+## How it works
+**Inputs:**
+- $P = (u, v)$: The 2D texture coordinates of the fragment being evaluated.
+- $A$: Amplitude of the Gaussian function (controls overall opacity).
+- $P_0 = (x_0, y_0)$: The center of the Gaussian function in texture space.
+- $\sigma_x, \sigma_y$: Decay parameters along the local x and y axes.
+- $\lambda$: Shape exponent controlling roundness (Note: Source [S1] defines $\lambda$ but does not explicitly include it in the provided formula snippet; see [G] below).
+- $\theta$: Orientation angle in texture space.
+
+**Outputs:**
+- $z$: The resulting alpha value in RGBA space.
+
+**Data Structures:**
+No complex data structures are required for the evaluation itself. The parameters ($A, P_0, \sigma_x, \sigma_y, \theta$) are typically passed as uniforms or varyings from the geometry shader to the fragment shader.
+
+**Steps:**
+1. Calculate the displacement vector from the center: $\Delta u = u - x_0$, $\Delta v = v - y_0$.
+2. Rotate the displacement vector by angle $\theta$ to obtain local coordinates $(x_\theta, y_\theta)$:
+   $$x_\theta = \cos \theta \cdot \Delta u - \sin \theta \cdot \Delta v + x_0$$
+   $$y_\theta = \sin \theta \cdot \Delta u + \cos \theta \cdot \Delta v + y_0$$
+   *Note: The source formulas [S1] add $x_0$ and $y_0$ back to the rotated components. This effectively rotates the point around the origin and then translates, or rotates the vector and re-centers. Standard rotation of a vector $(\Delta u, \Delta v)$ yields $(\cos \theta \Delta u - \sin \theta \Delta v, \sin \theta \Delta u + \cos \theta \Delta v)$. The source adds $x_0$ to the x-component and $y_0$ to the y-component. This implies the formula evaluates the Gaussian at a point that has been rotated relative to the center, but the final coordinates used in the decay term are $x_\theta$ and $y_\theta$ as defined.*
+3. Evaluate the Gaussian decay using the rotated coordinates. The source formula [S1] is garbled but reconstructs to:
+   $$z = A \cdot e^{-\frac{1}{2} \left( \frac{x_\theta - x_0}{\sigma_x} \right)^2} \cdot e^{-\frac{1}{2} \left( \frac{y_\theta - y_0}{\sigma_y} \right)^2}$$
+   *Correction/Clarification*: The source text shows `greenx` and `greey` which are OCR errors for $x_\theta$ and $y_\theta$ (or similar). The denominator in the source snippet shows $\sigma_x$ for both terms in the garbled text, but the text description explicitly states $\sigma_x$ and $\sigma_y$ are decay along x and y axes respectively. We assume anisotropic decay $\sigma_x$ and $\sigma_y$.
+4. Return $z$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_rotated_gaussian(u, v, A, x0, y0, sigma_x, sigma_y, theta):
+    # Step 1: Displacement
+    delta_u = u - x0
+    delta_v = v - y0
+    
+    # Step 2: Rotation
+    cos_theta = cos(theta)
+    sin_theta = sin(theta)
+    
+    # The source formula adds x0/y0 back. 
+    # Mathematically, if we rotate the vector (du, dv), we get (du', dv').
+    # The source defines x_theta = cos*du - sin*dv + x0.
+    # This means the term (x_theta - x0) simplifies to (cos*du - sin*dv).
+    # Let's compute the rotated displacement components directly.
+    rot_u = cos_theta * delta_u - sin_theta * delta_v
+    rot_v = sin_theta * delta_u + cos_theta * delta_v
+    
+    # Step 3: Gaussian Evaluation
+    # Using anisotropic sigma as described in text
+    exponent_x = -0.5 * (rot_u / sigma_x) ** 2
+    exponent_y = -0.5 * (rot_v / sigma_y) ** 2
+    
+    z = A * exp(exponent_x) * exp(exponent_y)
+    
+    return z
+```
+
+**Parameters:**
+- $A$: User-defined, controls opacity.
+- $\sigma_x, \sigma_y$: User-defined, controls spread. Can be adjusted based on cluster shape (e.g., longer brushes for longer clusters) [S1].
+- $\theta$: Modified by a noise function based on point coordinates and normals to introduce variation between neighboring patches [S1].
+- $\lambda$: Shape exponent. Source [S1] lists it as a parameter but the provided formula snippet does not explicitly contain $\lambda$. It is likely used to modify the exponent power (e.g., $e^{-\dots^\lambda}$) or scale the sigmas, but the exact integration into the formula is not given in the snippet [G].
+- Grid Disposition: Typically 6 to 9 Gaussians on a 3x3 grid are used. Separation is controlled by `dev` [S1].
+
+**Edge Cases and Pitfalls:**
+- **Precision**: Standard floating-point precision is sufficient for the exponential decay.
+- **Boundaries**: The Gaussian extends infinitely; in practice, values below a threshold (e.g., 0.01) can be clamped to 0 for performance.
+- **Degenerate Input**: If $\sigma_x$ or $\sigma_y$ is 0, the function is undefined (division by zero). [G] Implementation should clamp sigmas to a minimum epsilon.
+
+## Subtopics
+
+### Generalized Gaussian Particles
+Uses a shape exponent $\lambda$ to control the tail behavior of the Gaussian. Choose when non-Gaussian tails are needed for artistic control. See [Generalized Gaussian Particles](9164-generalized-gaussian-particles.md).
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per Gaussian evaluation. Constant number of trigonometric and exponential operations.
+- **Memory Complexity**: $O(1)$ per fragment. Parameters are passed via varyings.
+- **Performance**: Implemented in real-time using geometry and fragment shaders. Performance impact is negligible even when doubling the number of Gaussians for two-layer painting [S1].
+- **Strengths**: Efficiently generates directional, anisotropic brush strokes. Simple to implement in shaders.
+- **Limitations**: The formula provided is specific to the brush-stroke context. The role of $\lambda$ is not explicitly defined in the formula.
+
+## Background
+Originated in the context of stroke-based splatting for point cloud visualization and artistic rendering. The method was introduced by R. K. dos Anjos et al. in "Stroke-based splatting: an efficient multi-resolution point cloud visualization technique" [S1]. It is used to simulate brush textures by combining multiple rotated Gaussian functions, where the resulting alpha value represents the transparency of the brush stroke.
+
+## Sources
+[S1] Stroke-based splatting: an efficient multi-resolution point cloud visualization technique, https://doi.org/10.1007/s00371-017-1420-7, fetched 2026-10-26

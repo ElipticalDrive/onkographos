@@ -1,0 +1,421 @@
+--- v002.md
++++ v003.md
+@@ -4,22 +4,46 @@
+ 
+ ## Overview
+-ActiveNeRF extends the standard NeRF architecture by incorporating uncertainty estimation directly into the neural network's output, allowing the model to predict not only volume density and color but also the prediction variance for each sampled point [S1]. This modification enables active view selection strategies by quantifying where the model is uncertain, distinguishing it from standard NeRF which outputs only deterministic RGB and density values [S1].
++ActiveNeRF extends the standard NeRF architecture [S1] by incorporating uncertainty estimation into the radiance field representation. While standard NeRF predicts volume density $\sigma$ and view-dependent color $\mathbf{c}$, ActiveNeRF additionally predicts a prediction variance (uncertainty) for each point along the ray. This modification allows the model to quantify its confidence in the rendered output, which is critical for active view selection and robust scene reconstruction. It differs from siblings like [DoF-NeRF](9432-dof-nerf.md) or [Aleth-NeRF](13764-aleth-nerf.md) by explicitly modeling the predictive variance of the MLP outputs as a distinct scalar field alongside density and color, rather than relying solely on ensemble methods or auxiliary geometric constraints for uncertainty.
+ 
+ ## How it works
+-The ActiveNeRF model is a multi-layer perceptron (MLP) that processes positional-encoded 3D coordinates and viewing directions to predict volume density, color, and prediction variance [S1].
+-
+-**Inputs and Outputs**
+-*   **Input:** 3D spatial coordinates $\mathbf{x} = (x, y, z)$ and viewing direction $\mathbf{d} = (d_x, d_y, d_z)$.
+-*   **Outputs:** Volume density $\sigma$, RGB color $\mathbf{c}$, and prediction variance $\alpha^2$ [S1].
+-
+-**Data Structures and Layout**
+-The network consists of two main branches originating from the encoded 3D coordinates:
+-1.  **Density and Variance Branch:** An 8-layer MLP with a residual connection on the 4th layer processes the encoded coordinates. The output of this MLP is passed through two separate fully connected (FC) layers:
+-    *   One FC layer outputs the volume density $\sigma$.
+-    *   One FC layer with a softplus activation function outputs the prediction variance $\alpha^2$ [S1].
+-2.  **Color Branch:** The latent feature vector from the 8-layer MLP is concatenated with the encoded viewing directions. This concatenated vector is passed through a final FC layer to predict the RGB color $\mathbf{c}$ [S1].
+-
+-**Positional Encoding**
+-Both 3D coordinates and viewing directions are encoded using a sinusoidal positional encoding function $\gamma(p)$ [S1]:
++The ActiveNeRF model $F_\Theta$ maps a 3D spatial position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$ to three outputs: volume density $\sigma \in \mathbb{R}$, RGB color $\mathbf{c} \in \mathbb{R}^3$, and prediction variance $\nu \in \mathbb{R}$. The architecture builds on the shared principles of [Model Architecture Modifications](11313-model-architecture-modifications.md) by modifying the output head and adding a specific branch for variance estimation.
++
++### Inputs and Outputs
++*   **Inputs**:
++    *   $\mathbf{x} = (x, y, z)$: 3D coordinates of a point on the ray.
++    *   $\mathbf{d} = (d_x, d_y, d_z)$: Viewing direction vector.
++*   **Outputs**:
++    *   $\sigma$: Volume density.
++    *   $\mathbf{c}$: View-dependent color (RGB).
++    *   $\nu$: Predicted variance (uncertainty) of the color/density prediction.
++
++### Data Structures and Layout
++The network consists of two main components: a Position MLP and a Shading MLP, with a specific modification for variance.
++
++1.  **Positional Encoding**:
++    *   Input $\mathbf{x}$ is encoded using $\gamma_{pos}$ with $L=10$ frequency bands.
++    *   Input $\mathbf{d}$ is encoded using $\gamma_{dir}$ with $L=4$ frequency bands.
++    *   The encoded vectors are concatenated with the original inputs (standard NeRF convention implied by [S1] "follow the configurations in NeRF").
++2.  **Position MLP ($\Phi_{pos}$)**:
++    *   Input: Encoded $\mathbf{x}$.
++    *   Structure: 8 Fully Connected (FC) layers.
++    *   Residual Connection: Added to the output of the 4th layer.
++    *   Output: A latent feature vector $\mathbf{h}$.
++3.  **Density Head**:
++    *   Input: Latent feature $\mathbf{h}$.
++    *   Structure: Single FC layer.
++    *   Output: Volume density $\sigma$.
++4.  **Variance Head**:
++    *   Input: Latent feature $\mathbf{h}$.
++    *   Structure: Single FC layer.
++    *   Activation: Softplus.
++    *   Output: Variance $\nu$.
++5.  **Color Head**:
++    *   Input: Concatenation of latent feature $\mathbf{h}$ and encoded viewing direction $\gamma_{dir}(\mathbf{d})$.
++    *   Structure: Single FC layer.
++    *   Output: RGB color $\mathbf{c}$.
++
++### Positional Encoding Formula
++The positional encoding function $\gamma(p)$ for an input $p$ with $L$ bands is defined as [S1]:
+ 
+ $$
+@@ -27,208 +51,165 @@
+ $$
+ 
+-where $p$ is the input component (coordinate or direction) and $L$ is the number of frequency bands [S1].
+-
+-**Parameters**
+-*   $L=10$: Number of frequency bands for 3D coordinates [S1].
+-*   $L=4$: Number of frequency bands for viewing directions [S1].
+-
+-**Algorithm**
+-The following pseudocode describes the forward pass of the ActiveNeRF model. It assumes standard vector operations and a basic MLP block.
++This is applied separately to the 3D coordinates $\mathbf{x}$ and the viewing direction $\mathbf{d}$.
++
++### Parameters
++*   $L_{pos} = 10$: Number of frequency bands for 3D coordinates [S1].
++*   $L_{dir} = 4$: Number of frequency bands for viewing directions [S1].
++*   MLP Depth: 8 layers for the position MLP [S1].
++*   Residual Connection: Applied after the 4th layer [S1].
++
++### Pseudocode
++The following Python-like pseudocode implements the ActiveNeRF forward pass. It assumes standard vector operations and `torch.nn`-style layer definitions for clarity, but is self-contained in logic.
+ 
+ ```python
+ import math
+-import numpy as np
+-
+-def positional_encoding(p, L):
+-    """
+-    Applies sinusoidal positional encoding to input p.
+-    p: array-like of shape (..., D)
+-    L: int, number of frequency bands
+-    Returns: array of shape (..., D * 2 * L)
+-    """
+-    # p is expected to be a numpy array
+-    # Reshape to handle batch dimensions if necessary, but here we assume
+-    # p is (N, D) where N is number of points and D is 3 or 3.
+-    # We need to expand dimensions to compute frequencies.
+-    
+-    # Create frequency bands
+-    # freq_bands = 2^0, 2^1, ..., 2^(L-1)
+-    freq_bands = np.array([2**i for i in range(L)])
+-    
+-    # Expand p to (N, D, 1) and freq_bands to (1, 1, L)
+-    # Resulting shape for argument: (N, D, L)
+-    arg = np.expand_dims(p, axis=-1) * np.expand_dims(freq_bands * np.pi, axis=0)
+-    
+-    # Compute sin and cos
+-    # arg shape: (N, D, L)
+-    sin_vals = np.sin(arg)
+-    cos_vals = np.cos(arg)
+-    
+-    # Concatenate along the last axis
+-    # Output shape: (N, D, 2*L)
+-    encoded = np.concatenate([sin_vals, cos_vals], axis=-1)
+-    
+-    # Flatten the last two dimensions to (N, D * 2 * L)
+-    return encoded.reshape(p.shape[0], -1)
+-
+-class ActiveNeRF:
+-    def __init__(self, hidden_dim=256):
+-        """
+-        Initializes the ActiveNeRF model.
+-        hidden_dim: int, dimension of hidden layers.
+-        """
+-        self.hidden_dim = hidden_dim
+-        # Note: In a real implementation, weights would be learned parameters.
+-        # Here we define the structure.
+-        
+-        # 8-layer MLP for 3D coordinates
+-        # Layer 1: Input_dim -> hidden_dim
+-        # Layers 2-3: hidden_dim -> hidden_dim
+-        # Layer 4: hidden_dim -> hidden_dim (with residual)
+-        # Layers 5-8: hidden_dim -> hidden_dim
+-        self.mlp_weights = []
+-        self.mlp_biases = []
+-        
+-        # Initialize weights (placeholder for actual initialization logic)
+-        # Layer 1
+-        self.mlp_weights.append(np.random.randn(24, hidden_dim)) # 24 = 3 * 2 * 10
+-        self.mlp_biases.append(np.zeros(hidden_dim))
+-        
+-        # Layers 2-8
+-        for _ in range(7):
+-            self.mlp_weights.append(np.random.randn(hidden_dim, hidden_dim))
+-            self.mlp_biases.append(np.zeros(hidden_dim))
+-            
+-        # Density head: 1 FC layer
+-        self.density_weight = np.random.randn(hidden_dim, 1)
+-        self.density_bias = np.zeros(1)
+-        
+-        # Variance head: 1 FC layer with softplus
+-        self.variance_weight = np.random.randn(hidden_dim, 1)
+-        self.variance_bias = np.zeros(1)
+-        
+-        # Color head: 1 FC layer
+-        # Input: hidden_dim + (3 * 2 * 4) = hidden_dim + 24
+-        self.color_weight = np.random.randn(hidden_dim + 24, 3)
+-        self.color_bias = np.zeros(3)
+-
+-    def mlp_forward(self, x_encoded):
+-        """
+-        Forward pass through the 8-layer MLP with residual connection on layer 4.
+-        x_encoded: (N, 24)
+-        Returns: latent feature (N, hidden_dim)
+-        """
+-        h = x_encoded
+-        for i in range(8):
+-            # Linear transformation
+-            h = h @ self.mlp_weights[i] + self.mlp_biases[i]
+-            
+-            # ReLU activation (standard for NeRF MLPs, implied by "MLP" in context of NeRF)
+-            h = np.maximum(0, h)
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class ActiveNeRFModel(nn.Module):
++    def __init__(self):
++        super(ActiveNeRFModel, self).__init__()
++        
++        # Positional Encoding parameters
++        self.L_pos = 10
++        self.L_dir = 4
++        
++        # Position MLP: 8 FC layers
++        # Layer 0 to 7
++        self.pos_mlp_layers = nn.ModuleList([
++            nn.Linear(6 * self.L_pos, 256), # Input dim: 2*L_pos (sin/cos)
++            nn.Linear(256, 256),
++            nn.Linear(256, 256),
++            nn.Linear(256, 256),
++            nn.Linear(256, 256),
++            nn.Linear(256, 256),
++            nn.Linear(256, 256),
++            nn.Linear(256, 256)
++        ])
++        
++        # Density Head: 1 FC layer
++        self.density_layer = nn.Linear(256, 1)
++        
++        # Variance Head: 1 FC layer with Softplus activation
++        self.variance_layer = nn.Linear(256, 1)
++        
++        # Color Head: Concatenates latent feature (256) + encoded direction (2*L_dir)
++        # Input dim: 256 + 2 * 4 = 264
++        self.color_layer = nn.Linear(256 + 2 * self.L_dir, 3)
++
++    def positional_encoding(self, x, L):
++        """
++        Applies positional encoding to input x with L bands.
++        x shape: (..., 3) for coordinates or (..., 3) for directions.
++        Returns shape: (..., 2*L)
++        """
++        # Reshape to handle batch dimensions
++        original_shape = x.shape
++        x_flat = x.view(-1, 3)
++        
++        freq_bands = 2.0 ** torch.arange(0, L, device=x.device).float()
++        # freq_bands shape: (L,)
++        
++        # Expand freq_bands to match x dimensions
++        # x_flat shape: (N, 3)
++        # freq_bands shape: (L,) -> (1, L)
++        # We want to compute sin(2^i * pi * x) for each band i
++        
++        # Create frequency bands tensor: (1, L)
++        freq_bands = freq_bands.view(1, -1)
++        
++        # Scale input: (N, 3) * (1, L) -> (N, 3, L)
++        scaled_x = x_flat.unsqueeze(-1) * (math.pi * freq_bands)
++        
++        # Compute sin and cos: (N, 3, L)
++        sin_vals = torch.sin(scaled_x)
++        cos_vals = torch.cos(scaled_x)
++        
++        # Concatenate along last dim: (N, 3, 2*L)
++        encoded = torch.cat([sin_vals, cos_vals], dim=-1)
++        
++        # Reshape back to original shape with encoded dim
++        # New last dim size is 2*L
++        new_shape = list(original_shape[:-1]) + [2 * L]
++        return encoded.view(new_shape)
++
++    def forward(self, x, d):
++        """
++        x: (N, 3) 3D coordinates
++        d: (N, 3) Viewing directions
++        """
++        # 1. Positional Encoding
++        # NeRF standard: concatenate original input with encoded input
++        # However, the note says "encoding function is formulated as... separately applied".
++        # Standard NeRF [S1 reference] uses: [x, gamma(x)].
++        # Let's follow standard NeRF practice implied by "follow the configurations in NeRF".
++        
++        x_enc = self.positional_encoding(x, self.L_pos)
++        d_enc = self.positional_encoding(d, self.L_dir)
++        
++        # Concatenate original and encoded
++        x_input = torch.cat([x, x_enc], dim=-1) # (N, 3 + 20) = (N, 23)
++        # Note: Standard NeRF uses 3 + 2*10 = 23 dims for x.
++        
++        # 2. Position MLP
++        h = x_input
++        for i, layer in enumerate(self.pos_mlp_layers):
++            h = layer(h)
++            if i < 7: # ReLU activation for hidden layers
++                h = F.relu(h)
+             
+             # Residual connection on the 4th layer (index 3)
++            # The note says "residual connection on the 4th layer".
++            # In a sequence of 8 layers (0-7), the 4th layer is index 3.
++            # Typically, residual means h_new = h_old + layer(h_old).
++            # Or h_new = layer(h_old) + h_skip.
++            # Standard NeRF residual: h = layer(h) + h_skip.
+             if i == 3:
+-                h = h + x_encoded # Note: x_encoded is the input to the MLP, not the previous layer's output?
+-                # Correction based on standard NeRF residual: usually residual is added to the output of the layer.
+-                # The source says "residual connection on the 4th layer".
+-                # In standard NeRF [20], the residual is added to the input of the 4th layer? 
+-                # Actually, standard NeRF adds the input of the block to the output.
+-                # Let's assume the residual is added to the output of the 4th layer, 
+-                # where the input to the 4th layer is the output of the 3rd.
+-                # However, the source says "residual connection on the 4th layer".
+-                # Usually this means: output_4 = relu(W * output_3 + b) + input_3? 
+-                # Or output_4 = relu(W * output_3 + b) + input_MLP?
+-                # The source [S1] says "MLP with 8 fully-connected layers ... with residual connection on the 4th layer".
+-                # Standard NeRF implementation adds the input of the layer to the output of the layer for layers 4-8?
+-                # No, standard NeRF adds the input of the *block* (which is the input to the first layer of the block) 
+-                # to the output of the last layer of the block.
+-                # But here it's a single 8-layer MLP.
+-                # Let's stick to the most common interpretation: 
+-                # Layer 4 output = ReLU(W4 * h3 + b4) + h3? Or + x_encoded?
+-                # Given the ambiguity, and that standard NeRF uses residual connections between layers 4-8 
+-                # where the input to layer 4 is added to the output of layer 8? No.
+-                # Standard NeRF: h = ReLU(W * h + b). If layer index >= 4, h = h + h_prev?
+-                # Let's assume the residual is added to the output of the 4th layer from the input of the 4th layer.
+-                # But we don't store h_prev easily in a loop without care.
+-                # Let's assume the residual is added to the output of the 4th layer, 
+-                # where the "input" for the residual is the output of the 3rd layer.
++                # The input to this layer was h_prev.
++                # We need to store h before the layer operation.
++                # Since we are iterating, we need to adjust logic.
++                # Let's restructure slightly for clarity in pseudocode.
+                 pass 
+         
+-        # Refined Residual Logic for 8-layer MLP:
+-        # The source says "residual connection on the 4th layer".
+-        # This likely means the standard NeRF residual structure:
+-        # For layers 4, 5, 6, 7, 8: output = ReLU(W * input + b) + input
+-        # But wait, standard NeRF has a specific structure.
+-        # Let's implement the standard NeRF residual:
+-        # h = ReLU(W * h + b)
+-        # if layer_index >= 4: h = h + h_prev (where h_prev is the output of layer 3 for layer 4, etc?)
+-        # Actually, in standard NeRF, the residual is added to the *input* of the layer.
+-        # h_new = ReLU(W * h_old + b) + h_old? No, that's just identity if W=0.
+-        # It is: h_new = ReLU(W * h_old + b) + h_prev?
+-        # Let's look at the standard NeRF code.
+-        # h = F.relu(self.fc1(x))
+-        # h = F.relu(self.fc2(h))
+-        # h = F.relu(self.fc3(h))
+-        # h = F.relu(self.fc4(h)) + h # Residual here?
+-        # No, standard NeRF adds the input of the *block* to the output of the *block*.
+-        # But here it is a single MLP.
+-        # Let's assume the residual is added to the output of the 4th layer from the input of the 4th layer.
+-        # This is a common "residual connection on layer 4" interpretation.
+-        
+-        # Re-implementing with explicit storage for residual
+-        h = x_encoded
+-        h_prev = None
+-        for i in range(8):
+-            h_prev = h
+-            h = h @ self.mlp_weights[i] + self.mlp_biases[i]
+-            h = np.maximum(0, h)
+-            if i == 3: # 4th layer (0-indexed)
+-                h = h + h_prev
+-        
+-        return h
+-
+-    def forward(self, x, d):
+-        """
+-        Forward pass of ActiveNeRF.
+-        x: (N, 3) 3D coordinates
+-        d: (N, 3) viewing directions
+-        Returns: sigma (N, 1), alpha_sq (N, 1), color (N, 3)
+-        """
+-        # 1. Positional Encoding
+-        x_enc = positional_encoding(x, L=10) # (N, 24)
+-        d_enc = positional_encoding(d, L=4)  # (N, 24)
+-        
+-        # 2. Process 3D coordinates through MLP
+-        latent = self.mlp_forward(x_enc) # (N, hidden_dim)
+-        
+-        # 3. Predict Density
+-        sigma = latent @ self.density_weight + self.density_bias # (N, 1)
+-        
+-        # 4. Predict Variance
+-        var_out = latent @ self.variance_weight + self.variance_bias # (N, 1)
+-        alpha_sq = np.exp(var_out) # Softplus is approximated by exp for variance? 
+-        # Source says "softplus activation function to predict the corresponding variance".
+-        # Softplus(x) = log(1 + exp(x)).
+-        # Let's use softplus explicitly.
+-        alpha_sq = np.log(1 + np.exp(var_out))
+-        
+-        # 5. Predict Color
+-        # Concatenate latent feature with encoded viewing directions
+-        color_input = np.concatenate([latent, d_enc], axis=1) # (N, hidden_dim + 24)
+-        color = color_input @ self.color_weight + self.color_bias # (N, 3)
+-        
+-        return sigma, alpha_sq, color
++        # Re-implementing MLP loop with residual logic properly
++        h = x_input
++        for i, layer in enumerate(self.pos_mlp_layers):
++            h_in = h
++            h = layer(h)
++            if i < 7:
++                h = F.relu(h)
++            if i == 3:
++                # Residual connection: add input of this layer to output
++                h = h + h_in
++        
++        # 3. Density Head
++        sigma = self.density_layer(h) # (N, 1)
++        
++        # 4. Variance Head
++        variance = self.variance_layer(h) # (N, 1)
++        variance = F.softplus(variance) # Ensure positive variance
++        
++        # 5. Color Head
++        # Concatenate latent feature h with encoded direction
++        color_input = torch.cat([h, d_enc], dim=-1) # (N, 256 + 8) = (N, 264)
++        color = self.color_layer(color_input) # (N, 3)
++        
++        return sigma.squeeze(-1), color, variance.squeeze(-1)
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Variance Prediction:** The variance output uses a softplus activation, ensuring the predicted variance is always positive [S1].
+-*   **Residual Connection:** The residual connection is specifically applied on the 4th layer of the 8-layer MLP [S1].
+-*   **Encoding Bands:** The number of bands $L$ differs for coordinates (10) and directions (4), which must be handled separately during encoding [S1].
++### Edge Cases and Pitfalls
++*   **Variance Positivity**: The variance output must be non-negative. The use of the Softplus activation function in the variance head ensures this [S1].
++*   **Residual Connection Placement**: The residual connection is specifically applied after the 4th layer of the 8-layer Position MLP. Misplacing this connection can degrade training stability [S1].
++*   **Encoding Dimensions**: The input dimension to the Position MLP is $3 + 2 \times 10 = 23$. The input dimension to the Color Head is $256 + 2 \times 4 = 264$. Incorrect dimensionality in concatenation will cause shape mismatches.
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Complexity**: The computational complexity is dominated by the 8-layer MLP for position encoding and the final FC layers. The addition of the variance head adds negligible overhead (one FC layer).
++*   **Memory**: The model size is slightly larger than standard NeRF due to the extra output head. The latent feature size remains 256.
++*   **Performance**: ActiveNeRF provides uncertainty estimates that can guide active view selection, potentially reducing the number of views needed for high-quality reconstruction compared to standard NeRF. However, training may require careful tuning of the variance loss term to prevent the network from predicting trivially large variances.
++*   **Hardware**: The original implementation used a single RTX 2080 Ti GPU [S1].
+ 
+ ## Background
+-ActiveNeRF was introduced in the paper "ActiveNeRF: Learning Where to See with Uncertainty Estimation" [S1]. The model architecture is similar to the original NeRF [20], but extends it to support active view selection by predicting uncertainty [S1]. The initial training set consists of 4 images, with 4 new perceptions captured every 40,000 iterations [S1]. The model is trained using the Adam optimizer with an initial learning rate of $5 \times 10^{-4}$, decaying exponentially to $5 \times 10^{-5}$, using a batch size of 1024 rays on a single RTX 2080 Ti GPU [S1].
++ActiveNeRF was introduced in the paper "ActiveNeRF: Learning Where to See with Uncertainty Estimation" [S1]. It builds upon the original NeRF architecture [S1] by integrating uncertainty estimation. The motivation is to enable active learning strategies where the system can select the most informative camera views to capture next, based on the model's uncertainty. This is particularly useful in scenarios where capturing all views is expensive or impractical. The architecture closely follows the original NeRF design but adds a specific branch for variance prediction.
+ 
+ ## Sources

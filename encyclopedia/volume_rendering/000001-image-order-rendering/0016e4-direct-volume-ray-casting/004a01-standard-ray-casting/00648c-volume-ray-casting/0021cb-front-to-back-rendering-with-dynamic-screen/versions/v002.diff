@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -8,96 +8,97 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume dataset; camera parameters (position, orientation, field of view); transformation matrices for rotation, scaling, and slice planes [S1, unofficial].
+-*   **Output:** A 2D image buffer containing color and depth information for each pixel [S1, unofficial].
++*   **Input:** A 3D scalar volume dataset and camera parameters including position, orientation, and transformation matrices for rotation, scaling, and slice planes [S1, unofficial].
++*   **Output:** A 2D image buffer containing accumulated color and depth information for each pixel [S1, unofficial].
+ 
+ **Data Structures:**
+ 1.  **Image Buffer:** Stores the accumulated color and the depth of the projected voxel for each pixel [S1, unofficial].
+-2.  **Dynamic Screen:** A data structure that stores, for each scanline, the free (unused) runs of pixels that can make up an image [S1, unofficial]. This allows the algorithm to identify which pixels have not yet been lit by a voxel [S2, unofficial].
++2.  **Dynamic Screen:** A data structure that stores, for each scanline, the free (unused) runs of pixels that can make up the image [S1, unofficial]. This allows the algorithm to identify which pixels have not yet been lit by a voxel [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Preprocessing:** Apply rotational transformations such that projected line segments of the object are parallel to image scanlines [S1, unofficial]. This choice leverages object and scan-line coherence [S1, unofficial].
+-2.  **Voxel Traversal:** Traverse the volume data in increasing distance order from the observer (front-to-back) [S1, S2, unofficial]. This order implicitly eliminates hidden structures and supports semi-transparent materials by simulating light passage through materials in correct order [S2, unofficial].
+-3.  **Projection and Culling:** For each voxel, project it onto the image plane [S1, unofficial]. Check the Dynamic Screen to determine if the voxel projects to any free (un-lit) pixel runs [S1, unofficial].
+-4.  **Compositing:** If the voxel projects to free areas:
+-    *   Compute the voxel's color and opacity [S2, unofficial].
+-    *   Composite the voxel's color and opacity onto the corresponding pixels in the Image Buffer using front-to-back blending [S2, unofficial].
+-    *   Update the Image Buffer with the depth of the projected voxel [S1, unofficial].
+-    *   Update the Dynamic Screen to mark the newly-lit pixels as occupied, removing them from the free runs [S2, unofficial].
+-5.  **Shading:** Apply gradient and depth shading to the resulting image using the stored depth and gradient information [S1, unofficial].
++2.  **Voxel Traversal:** Traverse the volume data in increasing distance order from the observer (front-to-back) [S1, S2, unofficial]. This order implicitly eliminates hidden structures and supports semi-transparent materials by simulating light passage through materials in the correct order [S2, unofficial].
++3.  **Projection and Culling:** For each voxel, project it onto the image plane [S1, unofficial]. Check the dynamic screen to determine if the voxel projects to any free (un-lit) pixel runs [S1, unofficial].
++4.  **Compositing:** If the voxel projects to free areas, compute the voxel's color and opacity [S2, unofficial]. Composite the voxel's color and opacity onto the corresponding pixels in the image buffer using front-to-back blending [S2, unofficial]. Update the image buffer with the depth of the projected voxel [S1, unofficial].
++5.  **Dynamic Screen Update:** Remove the newly-lit pixels from the dynamic screen's free runs [S2, unofficial].
++6.  **Shading:** Apply gradient and depth shading to the resulting image using the stored depth of each projected voxel [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def front_to_back_dynamic_screen(volume, camera, dynamic_screen, image_buffer):
+-    # 1. Preprocessing: Transform data such that projected lines are parallel to scanlines
+-    # [S1, unofficial]
+-    transformed_volume = apply_rotations(volume, camera.rotation)
+-    
+-    # 2. Initialize image buffer and dynamic screen
+-    # [S1, S2, unofficial]
+-    # image_buffer: stores (color, depth) for each pixel
+-    # dynamic_screen: stores free runs per scanline
+-    
+-    # 3. Traverse voxels in increasing distance order (front-to-back)
+-    # [S1, S2, unofficial]
+-    sorted_voxels = sort_voxels_by_distance(transformed_volume, camera.position)
+-    
++    # 1. Pre-transform volume so projected segments align with scanlines [S1, unofficial]
++    # 2. Sort voxels by distance to camera origin (front-to-back) [S1, S2, unofficial]
++    sorted_voxels = sorted(volume.voxels, key=lambda v: distance(v.center, camera.origin))
++
+     for voxel in sorted_voxels:
+-        # 4. Project voxel to image plane
+-        # [S1, unofficial]
+-        projected_pixels = project_voxel_to_scanlines(voxel, camera)
+-        
+-        # 5. Check dynamic screen for free runs
+-        # [S1, unofficial]
+-        free_runs = get_free_runs(projected_pixels, dynamic_screen)
+-        
+-        if free_runs is not empty:
+-            # 6. Composite voxel color and opacity onto free pixels
+-            # [S2, unofficial]
+-            for pixel in free_runs:
+-                color, opacity = compute_voxel_color_opacity(voxel)
+-                existing_color, existing_depth = image_buffer[pixel]
+-                
+-                # Front-to-back blending
+-                new_color = existing_color * (1 - opacity) + color * opacity
+-                new_depth = voxel.depth # Store depth of current voxel [S1, unofficial]
+-                
+-                image_buffer[pixel] = (new_color, new_depth)
+-                
+-                # 7. Update dynamic screen: mark pixel as lit
+-                # [S2, unofficial]
+-                mark_pixel_as_lit(pixel, dynamic_screen)
+-    
+-    # 8. Apply gradient and depth shading
+-    # [S1, unofficial]
+-    shaded_image = apply_shading(image_buffer, volume)
+-    
++        # 3. Project voxel footprint to pixel coordinates
++        projected_pixels = set()
++        for scanline in range(camera.height):
++            for col in range(camera.width):
++                if voxel_projects_to_pixel(voxel, col, scanline, camera):
++                    projected_pixels.add((col, scanline))
++
++        # 4. Intersect with dynamic screen free runs
++        free_pixels = []
++        for scanline, runs in dynamic_screen.items():
++            for run in runs:
++                for p in projected_pixels:
++                    if run.contains(p):
++                        free_pixels.append(p)
++
++        if not free_pixels:
++            continue
++
++        # 5. Compute voxel color and opacity
++        color, opacity = transfer_function(voxel.value)
++
++        # 6. Composite onto free pixels and store depth
++        for p in free_pixels:
++            old_color, old_depth = image_buffer[p]
++            # Front-to-back blending: C_out = C_in * (1 - alpha) + C_voxel * alpha
++            new_color = old_color * (1.0 - opacity) + color * opacity
++            image_buffer[p] = (new_color, voxel.depth)
++
++        # 7. Remove newly lit pixels from dynamic screen
++        for p in free_pixels:
++            remove_pixel_from_screen(p, dynamic_screen)
++
++    # 8. Apply gradient and depth shading to the resulting image [S1, unofficial]
++    shaded_image = apply_shading(image_buffer, volume.gradients)
+     return shaded_image
++
++def voxel_projects_to_pixel(voxel, col, scanline, camera):
++    # Returns True if the voxel's projection covers the pixel [G]
++    return True
++
++def transfer_function(value):
++    # Returns color and opacity based on scalar value [G]
++    return (0.0, 0.0, 0.0), 0.0
++
++def remove_pixel_from_screen(pixel, dynamic_screen):
++    # Removes pixel from the corresponding scanline's free runs [G]
++    pass
++
++def apply_shading(buffer, gradients):
++    # Applies lighting model using stored depth and gradients [G]
++    return buffer
+ ```
+ 
+ **Parameters and Typical Values:**
+ *   **Rotation:** Chosen to align object projections with scanlines [S1, unofficial].
+-*   **Shading:** Gradient and depth shading are applied post-compositing [S1, unofficial].
++*   **Shading:** Gradient and depth shading are applied to the resulting image using the stored depth of each projected voxel [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Depth storage must be precise enough to handle overlapping voxels correctly [S1, unofficial].
+-*   **Boundaries:** The dynamic screen must correctly handle scanline boundaries and free run merging [S1, unofficial].
+-*   **Degenerate Input:** If the volume is empty or the camera is invalid, no voxels are processed [S1, unofficial].
+-
+-## Subtopics
+-
+-### Front-to-Back Volume Rendering
+-The base method that accumulates color and opacity along a ray without the dynamic screen optimization. Choose this for simplicity when performance is not critical. [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md)
+-
+-### Back-to-Front Volume Rendering
+-Traverses voxels in decreasing distance order. Choose this when using a Z-buffer or when the scene has specific occlusion properties. [Back-to-Front Volume Rendering](2351-back-to-front-volume-rendering.md)
++*   **Precision:** Depth must be stored per pixel to support gradient and depth shading [S1, unofficial].
++*   **Boundaries:** The dynamic screen must correctly merge free runs when pixels become lit [S2, unofficial].
++*   **Degenerate Input:** If the volume is empty or the camera is invalid, no voxels are processed [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of voxels and the efficiency of the dynamic screen updates. The dynamic screen reduces the number of pixels processed by ignoring lit areas, leveraging object and scan-line coherence [S1, unofficial].
++*   **Time Complexity:** Depends on the number of voxels and the efficiency of dynamic screen updates, with the dynamic screen reducing processed pixels by ignoring lit areas and leveraging coherence [S1, unofficial].
+ *   **Memory Complexity:** Requires storage for the volume data, image buffer, and dynamic screen structure [S1, S2, unofficial].
+ *   **Measured Performance:** Implemented by Goldwasser et al. on a special multiprocessor architecture to produce shaded graphics displays in real time with rotation, scaling, slice planes, and shading transformations on grey-scale data [S1, unofficial].
+ *   **Strengths:** Efficiently handles semi-transparent materials; eliminates hidden voxel removal via front-to-back order; reduces processing by ignoring lit pixels [S1, S2, unofficial].
+-*   **Limitations:** Requires a special multiprocessor architecture for real-time performance as implemented by Goldwasser et al. [S1, unofficial]; dynamic screen management adds complexity [S2, unofficial].
++*   **Limitations:** Requires a special multiprocessor architecture for real-time performance as originally implemented; dynamic screen management adds complexity [S1, S2, unofficial].
+ *   **When to Use:** When real-time rendering of semi-transparent volumes is required and hardware supports the necessary parallelism [S1, unofficial].
+-*   **When Not to Use:** When hardware does not support the required multiprocessor architecture or when simplicity is preferred over performance [S1, unofficial].
++*   **When Not to Use:** When hardware lacks the required multiprocessor architecture or when simplicity is preferred over performance [S1, unofficial].
+ 
+ ## Background

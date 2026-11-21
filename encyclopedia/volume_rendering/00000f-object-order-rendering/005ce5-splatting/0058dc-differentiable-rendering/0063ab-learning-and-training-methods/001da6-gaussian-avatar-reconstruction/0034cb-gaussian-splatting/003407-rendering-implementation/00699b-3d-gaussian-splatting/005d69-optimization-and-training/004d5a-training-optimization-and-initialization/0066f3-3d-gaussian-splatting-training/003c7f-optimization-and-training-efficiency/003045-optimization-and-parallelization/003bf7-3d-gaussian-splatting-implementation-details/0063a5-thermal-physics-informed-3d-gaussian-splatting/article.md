@@ -1,0 +1,170 @@
+# Thermal-Physics-Informed 3D Gaussian Splatting
+
+Also called: TPI-GS
+
+## Overview
+Thermal-Physics-Informed 3D Gaussian Splatting (TPI-GS) is a framework that embeds infrared radiative transfer modeling into the 3D Gaussian Splatting (3DGS) representation, transforming Gaussian primitives into thermophysical radiative elements to enable physically interpretable infrared scene representation and novel view synthesis [S1]. Unlike standard 3DGS, which relies on view-dependent color blending via spherical harmonics to approximate photometric appearance, TPI-GS replaces this with physics-driven radiance integration based on Planck’s law, explicitly modeling atmospheric attenuation and sensor response [S1]. This approach bridges classical infrared simulation theory with neural point-based rendering, allowing for joint optimization of geometric structure and thermal radiation fields under multi-view supervision [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view infrared images of a scene; initial 3D Gaussian point cloud (position, covariance, opacity) derived from Structure-from-Motion (SfM) or similar initialization [S1].
+*   **Outputs:** A set of 3D Gaussian primitives parameterized by geometric attributes and thermophysical fields, capable of rendering novel-view infrared images with radiometric coherence [S1].
+
+**Data Structures:**
+Each 3D Gaussian primitive $i$ is augmented with the following learnable parameters in addition to the standard 3DGS geometric parameters (position $\mathbf{p}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$):
+1.  **Emissivity ($\epsilon_i$):** A scalar or vector parameter modeling surface thermal radiation properties [S1].
+2.  **Temperature ($T_i$):** A scalar parameter modeling the thermal state of the primitive [S1].
+3.  **Thermal Texture ($\mathbf{t}_i$):** A parameter (typically a low-frequency coefficient or texture map value) modeling spatial thermal variations [S1].
+
+**Step-by-Step Method:**
+
+1.  **Thermophysical Parameterization:**
+    Initialize each Gaussian primitive with learnable emissivity $\epsilon_i$, temperature $T_i$, and thermal texture $\mathbf{t}_i$. These parameters are optimized jointly with geometric parameters [S1].
+
+2.  **Spectral Radiant Exitance Calculation:**
+    For each Gaussian primitive, compute the spectral radiant exitance $M_\lambda$ using Planck’s law. The spectral radiance $L_\lambda$ emitted by the primitive is derived from this exitance, accounting for the emissivity $\epsilon_i$ [S1]:
+    $$ L_\lambda = \epsilon_i \cdot \frac{2hc^2}{\lambda^5} \frac{1}{e^{\frac{hc}{\lambda k_B T_i}} - 1} $$
+    Where:
+    *   $h$ is Planck’s constant.
+    *   $c$ is the speed of light.
+    *   $k_B$ is Boltzmann’s constant.
+    *   $\lambda$ is the wavelength of the infrared radiation.
+    *   $T_i$ is the temperature of the primitive.
+    *   $\epsilon_i$ is the emissivity of the primitive.
+    [S1]
+
+3.  **Radiance Accumulation (Rendering):**
+    Render the infrared image by accumulating radiance along the viewing ray. Unlike standard 3DGS which blends spherical harmonic coefficients, TPI-GS performs physics-driven radiance integration. The total radiance $L_{total}$ reaching the camera is computed by summing the contributions of all splatted Gaussians, modified by atmospheric attenuation and sensor response [S1]:
+    $$ L_{total} = \sum_{i \in \text{front-to-back}} \alpha_i \cdot L_{\lambda, i} \cdot \tau_{atm} + L_{background} $$
+    Where:
+    *   $\alpha_i$ is the opacity of the $i$-th Gaussian.
+    *   $L_{\lambda, i}$ is the spectral radiance of the $i$-th Gaussian (from Step 2).
+    *   $\tau_{atm}$ is the atmospheric transmittance factor, explicitly modeled to account for path-dependent attenuation [S1].
+    *   $L_{background}$ accounts for background radiance and sensor noise/response [S1].
+    [S1]
+
+4.  **Frequency-Domain Supervision:**
+    To mitigate the inherent smoothing effect of Gaussian splatting and improve high-frequency texture fidelity, apply a Discrete Wavelet Transform (DWT) to the rendered infrared images and the ground truth. Compute a loss in the frequency domain to supervise the reconstruction [S1].
+
+5.  **Joint Optimization:**
+    Optimize the geometric parameters ($\mathbf{p}_i, \mathbf{q}_i, \mathbf{s}_i, \alpha_i$) and thermophysical parameters ($\epsilon_i, T_i, \mathbf{t}_i$) simultaneously using gradient descent. The loss function combines photometric error (in infrared space) and the DWT-based frequency supervision loss, under multi-view constraints [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import pywt  # PyWavelets for DWT
+
+def planck_radiance(wavelength, temperature, emissivity):
+    """
+    Computes spectral radiance using Planck's law.
+    wavelength: float or tensor, wavelength in meters.
+    temperature: float or tensor, temperature in Kelvin.
+    emissivity: float or tensor, emissivity value.
+    """
+    h = 6.62607015e-34  # Planck's constant
+    c = 299792458.0     # Speed of light
+    k_B = 1.380649e-23  # Boltzmann constant
+    
+    exponent = (h * c) / (wavelength * k_B * temperature)
+    # Avoid division by zero or overflow
+    exponent = torch.clamp(exponent, max=700) 
+    spectral_exitance = (2 * h * c**2) / (wavelength**5) / (torch.exp(exponent) - 1)
+    return emissivity * spectral_exitance
+
+def render_tpi_gs(gaussians, camera_params, wavelength, atmospheric_model):
+    """
+    Renders an infrared image using TPI-GS principles.
+    gaussians: List of Gaussian primitives with attributes:
+               - position (N, 3)
+               - rotation (N, 4)
+               - scale (N, 3)
+               - opacity (N, 1)
+               - emissivity (N, 1)
+               - temperature (N, 1)
+               - thermal_texture (N, 1) # Simplified as a scalar modifier for this example
+    camera_params: Camera intrinsic and extrinsic matrices.
+    wavelength: float, central wavelength of the IR sensor.
+    atmospheric_model: Function or object providing transmittance tau(d) for distance d.
+    """
+    # 1. Project Gaussians to 2D and sort by depth (standard 3DGS rasterization)
+    # This step is implementation-specific to the 3DGS backend.
+    # Assume 'rasterized_gaussians' contains the sorted list of visible Gaussians
+    # with their projected 2D centers, covariances, and depths.
+    rasterized_gaussians = project_and_sort(gaussians, camera_params)
+    
+    image_height, image_width = camera_params.image_size
+    
+    # Initialize output image
+    rendered_image = torch.zeros((image_height, image_width), device=gaussians.position.device)
+    
+    # 2. Accumulate Radiance
+    for g in rasterized_gaussians:
+        # Compute spectral radiance from thermophysical parameters
+        # Note: In practice, this might be precomputed or interpolated from a texture
+        L_lambda = planck_radiance(wavelength, g.temperature, g.emissivity)
+        
+        # Apply thermal texture modifier if applicable
+        # L_lambda = L_lambda * g.thermal_texture
+        
+        # Compute atmospheric attenuation based on depth
+        tau = atmospheric_model.get_transmittance(g.depth)
+        
+        # Effective radiance reaching the sensor
+        L_effective = L_lambda * tau
+        
+        # Splat the Gaussian to the image plane with opacity and effective radiance
+        # This is a simplified representation of the 3DGS splatting operation
+        rendered_image = splat_gaussian(rendered_image, g, L_effective, g.opacity)
+        
+    return rendered_image
+
+def compute_loss(rendered_image, ground_truth_image):
+    """
+    Computes the total loss including photometric and frequency-domain terms.
+    """
+    # Photometric loss (e.g., L1 or L2 in IR space)
+    photometric_loss = torch.mean(torch.abs(rendered_image - ground_truth_image))
+    
+    # Frequency-domain supervision using DWT
+    # Decompose both images
+    coeffs_rendered = pywt.dwt2(rendered_image.detach().cpu().numpy(), 'haar')
+    coeffs_gt = pywt.dwt2(ground_truth_image.detach().cpu().numpy(), 'haar')
+    
+    # Compute loss on wavelet coefficients (high-frequency details)
+    # Approximation coefficients (cA) and detail coefficients (cH, cV, cD)
+    loss_freq = 0
+    for cr, cg in zip(coeffs_rendered, coeffs_gt):
+        loss_freq += torch.mean(torch.abs(torch.tensor(cr) - torch.tensor(cg)))
+        
+    total_loss = photometric_loss + 0.1 * loss_freq # Weight for frequency loss
+    return total_loss
+```
+
+**Parameters:**
+*   **Wavelength ($\lambda$):** Central wavelength of the infrared sensor. Typical values depend on the sensor (e.g., 8-14 $\mu$m for long-wave infrared) [S1].
+*   **Atmospheric Model:** Parameters for transmittance $\tau_{atm}$, which may depend on distance and atmospheric conditions [S1].
+*   **DWT Weight:** Weighting factor for the frequency-domain supervision loss [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Planck’s law involves exponential terms that can overflow or underflow for extreme temperatures or wavelengths. Clamping or careful numerical handling is required [S1].
+*   **Degenerate Input:** If emissivity is zero, the primitive contributes no radiance. If temperature is zero, radiance is zero. Initialization strategies (e.g., material priors) are needed to avoid degenerate states [S1].
+*   **Smoothing:** Gaussian splatting inherently smooths high-frequency details. Without DWT supervision, the rendered infrared images may lack sharp thermal boundaries [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is comparable to standard 3DGS, maintaining real-time efficiency, as the core rasterization pipeline is unchanged [S1]. The additional computation for Planck’s law and atmospheric attenuation is negligible per pixel [S1].
+*   **Memory Complexity:** Increased memory usage due to the addition of emissivity, temperature, and thermal texture parameters per Gaussian primitive [S1].
+*   **Performance:** Achieves superior infrared rendering quality with improved radiometric coherence and structural consistency compared to photometric-only methods [S1].
+*   **Strengths:** Physically interpretable, enables cross-view infrared rendering, maintains real-time efficiency, mitigates smoothing effects via DWT [S1].
+*   **Limitations:** Requires multi-view infrared images for training; assumes known or estimable atmospheric conditions; complexity of joint optimization [S1].
+*   **When to Use:** When physically accurate infrared scene representation and novel view synthesis are required, especially for remote sensing or thermal analysis applications [S1].
+*   **When Not to Use:** For visible-light rendering where photometric appearance is sufficient and physical thermal properties are irrelevant [S1].
+
+## Background
+TPI-GS was proposed to address the limitation of existing neural rendering frameworks like 3DGS, which primarily model photometric appearance and lack explicit thermophysical interpretability for infrared image formation [S1]. It embeds infrared radiative transfer modeling directly into the Gaussian representation, transforming 3DGS from a purely photometric renderer into a structured infrared scene representation [S1]. The method bridges classical infrared simulation theory with modern neural point-based scene representation [S1].
+
+## Sources
+[S1] Thermal-physics-informed 3D Gaussian Splatting for infrared images rendering, https://doi.org/10.1016/j.infrared.2026.106593, fetched 2026-10-27

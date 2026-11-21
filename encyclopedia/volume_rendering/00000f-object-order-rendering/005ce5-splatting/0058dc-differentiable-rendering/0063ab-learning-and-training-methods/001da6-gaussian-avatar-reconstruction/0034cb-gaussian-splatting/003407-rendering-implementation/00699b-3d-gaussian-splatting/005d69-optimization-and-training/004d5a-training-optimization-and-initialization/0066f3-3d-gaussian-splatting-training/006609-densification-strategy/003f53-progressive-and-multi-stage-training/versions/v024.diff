@@ -1,0 +1,107 @@
+--- v023.md
++++ v024.md
+@@ -1,58 +1,70 @@
+ # Progressive and Multi-stage Training
+ 
+-Also called: Coarse-to-fine training, Curriculum learning for 3DGS, Stage-wise optimization
++Also called: Coarse-to-fine training, Curriculum learning for 3DGS, Multi-stage optimization
+ 
+ ## Overview
+-Progressive and Multi-stage Training refers to a family of optimization strategies that decompose the 3D Gaussian Splatting (3DGS) training process into sequential phases or stages, rather than optimizing the entire radiance field from a single initialization [S1, unofficial]. This approach solves the problem of training instability, local minima, and insufficient initial coverage by decoupling the learning of global geometric structure from local appearance details or specific attributes [S1, unofficial][S3]. It sets itself apart from single-stage training by ensuring that the representation evolves from sparse/coarse to dense/fine in a controlled manner, preventing the optimizer from getting stuck in poor local minima caused by insufficient initial coverage or conflicting gradients [S1, unofficial].
++Progressive and Multi-stage Training refers to strategies that refine a 3D Gaussian representation through iterative densification or distinct optimization phases, rather than optimizing a single static initialization. It solves the instability, poor convergence, and artifact generation associated with initializing dense point clouds or optimizing complex radiance fields from scratch [S1, unofficial]. Compared to single-stage training, these methods yield higher rendering quality by progressively adding detail or decoupling difficult optimization tasks (such as depth or pose estimation) from the final rendering optimization [S1, unofficial].
+ 
+ ## Shared principles
+-All methods in this family share the core mechanism of temporal decoupling: the optimization landscape is simplified by fixing or restricting the update of certain parameters (geometry, appearance, depth, or pose) during specific intervals [S1, unofficial][S2, S3][S4, unofficial]. Common principles include:
+-1.  **Sequential Initialization:** Starting with a simplified representation (e.g., sparse points, coarse depth, or fixed geometry) that is refined in subsequent stages [S1, unofficial][S3].
+-2.  **Parameter Freezing/Unfreezing:** Locking specific components (e.g., camera poses, depth networks, or geometry) during early stages to stabilize learning, then unfreezing them for joint optimization [S3][S4, unofficial].
+-3.  **Curriculum Scheduling:** Alternating between supervision signals that target different scales of detail (e.g., global voxel structure vs. local slice details) to ensure stability [S1, unofficial].
+-4.  **Progressive Densification:** Expanding the Gaussian cloud or increasing its density in a structured manner (e.g., fronto-parallel or error-driven) rather than all at once [S1, unofficial].
++All methods in this family operate on a set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, where each $g_k$ is defined by a mean position $\mu_k \in \mathbb{R}^3$, a covariance matrix $\Sigma_k$ (parameterized by scale $s_k$ and rotation $q_k$), opacity $\alpha_k$, and spherical harmonic coefficients $\mathbf{c}_k$ [S8, unofficial].
++
++The core mechanism involves periodic evaluation of a metric per Gaussian to determine if the current representation is insufficient or redundant in a specific region. Common metrics include:
++1.  **Gradient Magnitude:** The accumulated 2D positional gradient $\tau_k = \frac{1}{N_{\text{views}}} \sum_{v} \| \frac{\partial L}{\partial \mu_v^k} \|_2$ [S4, S8, unofficial]. High gradients indicate that the Gaussian's position is not adequately minimizing the loss, suggesting a need for refinement or replacement.
++2.  **Opacity:** Low opacity $\alpha_k < \alpha_{\min}$ indicates a primitive contributes negligibly to the rendered image and is a candidate for pruning [S1, unofficial][S2].
++3.  **Scale:** Excessively large scales $max(s_k)$ relative to the scene extent $e_{scene}$ indicate coarse approximations that may blur details or occlude nearby geometry [S8, unofficial].
++
++Densification operations are typically triggered every $N$ iterations (e.g., `refineEvery` = 100) to allow the optimizer to stabilize [S5, S8, unofficial]. The primary operations are:
++*   **Splitting:** Replacing a parent Gaussian $g_k$ with $N_{children}$ children. The children's means $\mu_{child}$ are sampled from a normal distribution $\mathcal{N}(\mu_k, \Sigma_k)$ [S8, unofficial]. The scale is typically reduced, e.g., $s_{child} = s_k \cdot \frac{5}{4} \cdot \frac{1}{\sqrt{N_{children}}}$, to increase local density [S8, unofficial].
++*   **Cloning:** Creating an exact copy of $g_k$ (same $\mu, \Sigma, \alpha, \mathbf{c}$) to increase sampling frequency in high-error regions without changing the spatial footprint [S8, unofficial].
++*   **Pruning:** Removing Gaussians that fail to meet opacity or significance thresholds [S1, unofficial][S2].
++
++Buffer management is critical: pruned or split Gaussians require buffer compaction or flag-based marking to maintain contiguous memory access for rasterization [Parent].
+ 
+ ## Subtopics
+ 
+ ### [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md)
+-A training strategy that improves rendering quality by refining a point cloud or mesh representation through multiple sequential stages, rather than optimizing the entire structure in a single stage. It sets itself apart from single-stage training by decoupling the initialization of coarse structures from the fine-grained densification, preventing the optimizer from getting stuck in poor local minima caused by insufficient initial coverage. This approach builds on the principles of [Progressive and Multi-stage Training](9966-progressive-and-multi-stage-training.md) by ensuring that the geometric representation evolves from sparse to dense in a controlled manner. See [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md).
++A training strategy that refines a point-based radiance field representation through multiple stages of densification, rather than optimizing a fixed or single-stage point cloud. It addresses the instability and poor convergence of initializing dense point clouds from scratch by starting with a sparse, structured representation and progressively adding detail. Compared to single-stage training, it yields significantly higher rendering quality, particularly in preserving fine geometric details and reducing artifacts.
+ 
+ ### [Training Objective and Densification](7448-training-objective-and-densification.md)
+-This method defines the loss functions and densification protocols for **MeshGS**, a variant of 3D Gaussian Splatting that aligns primitives with an explicit mesh surface. It solves the problem of Gaussian splats drifting away from geometry or expanding uncontrollably by introducing surface-aware regularization and projection losses. It differs from standard 3DGS [22] by splitting the primitive population into **tightly-bound** ($G^t$) and **loosely-bound** ($G^l$) sets, applying distinct densification rules and loss terms to each, and enforcing proximity to the mesh surface. See [Training Objective and Densification](7448-training-objective-and-densification.md).
++This method defines the loss function and densification strategy for **MeshGS**, a variant of 3D Gaussian Splatting that aligns primitives with an explicit mesh surface. It solves the problem of Gaussian splats drifting away from geometry or expanding excessively by introducing surface-aware regularization and projection losses. It differs from standard 3DGS [22] by splitting the Gaussian cloud into **tightly-bound** ($G^t$) and **loosely-bound** ($G^l$) subsets, applying mesh-aligned constraints only to the former, while retaining the original densification logic for the latter.
+ 
+ ### [Fine-tuning](9138-fine-tuning.md)
+-Fine-tuning in 3D Gaussian Splatting (3DGS) refers to the optimization phase that refines a pre-initialized set of 3D Gaussian primitives to achieve high-fidelity reconstruction or specific appearance properties. It solves the problem of initializing the radiance field by leveraging pretrained priors or coarse estimates to accelerate convergence and reduce memory consumption compared to training from scratch. It sets itself apart from standard training by often decoupling geometry and appearance optimization, enabling dynamic densification (growing/pruning) during the refinement phase, and employing specialized loss functions for tasks like inverse rendering or stylization. See [Fine-tuning](9138-fine-tuning.md).
++Fine-tuning in 3D Gaussian Splatting (3DGS) refers to the optimization phase that follows an initial initialization or pre-training step, where the full set of Gaussian primitives (geometry, color, and opacity) is jointly optimized to minimize reconstruction error. It solves the problem of initializing a high-fidelity radiance field by leveraging pretrained priors or feed-forward predictions to accelerate convergence and reduce memory consumption compared to training from scratch. It sets itself apart from standard training by often decoupling the initialization (e.g., via a feed-forward network) from the subsequent differentiable rasterization optimization, and by explicitly enabling dynamic densification (growing/pruning) during this phase to refine the primitive distribution.
+ 
+ ### [Curriculum Learning with Slice and Voxel Supervision](12921-curriculum-learning-with-slice-and-voxel-supervision.md)
+-This method addresses the instability and local minima traps in 3D Gaussian Splatting training by decoupling the optimization of global volumetric structure from local planar details. It sets itself apart from sibling methods like [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md) by explicitly alternating between sparse voxel supervision for global consistency and structured slice supervision for local geometric continuity, leveraging the alignment with shear-warp rendering pipelines. See [Curriculum Learning with Slice and Voxel Supervision](12921-curriculum-learning-with-slice-and-voxel-supervision.md).
++This method stabilizes the optimization of 3D Gaussian representations for volumetric data by alternating between local planar constraints and global volumetric guidance. It solves the instability caused by random sampling in dense volumes by first establishing local structural continuity via slice supervision, then anchoring the global geometry with sparse voxel supervision. It differs from sibling methods by explicitly leveraging the alignment between the training sampling strategy and the shear-warp rendering pipeline, ensuring the learned representation is optimized for the specific rendering process.
+ 
+-### Progressive Propagation Strategy
+-- **Definition:** Introduces a progressive propagation strategy to expand the Gaussian cloud, ensuring smooth expansion and better coverage [S1, unofficial]. It expands the Gaussian cloud in a fronto-parallel manner, densifying only in regions where SSIM falls below a dynamic threshold, significantly improving detail in visually salient areas [S1, unofficial].
++#### Progressive Propagation Strategy
++- [S1, unofficial] Introduces a progressive propagation strategy to expand the Gaussian cloud, ensuring smooth expansion and better coverage.
+ 
+-### Interleaved Densification
+-- **Step:** Alternates between spatial and temporal densification every 2 epochs to avoid Gaussians failing to reconstruct either motion or appearance detail [S2]. This is necessary because deciding whether a Gaussian needs spatial or temporal densification at every iteration can lead to failure in reconstructing either aspect [S2].
++#### Interleaved Densification
++- [S2] Alternate between spatial and temporal densification every 2 epochs to avoid Gaussians failing to reconstruct either motion or appearance detail.
+ 
+-### Two-Stage Training Scheme for FWD-U
+-- **Definition:** A training strategy that decouples depth network initialization from full model training to improve stability and performance [S3]. The intuition is that jointly training the depth network and other components from scratch is unstable [S3].
+-- **Step:**
+-    1.  **Stage 1:** Construct RGB point clouds for each input view. Project the constructed point clouds to the target view using the differentiable point cloud renderer. Aggregate all point clouds from the various input views to render RGB images at the target view. Optimize the depth network using a photometric loss between the rendered target views and the ground truth target images [S3].
+-    2.  **Stage 2:** Freeze or continue training the initialized depth network and jointly train the entire model (spatial feature network, MLP, renderer, transformer, refinement module) [S3].
+-- **Parameter:** Performance improvement: approximately 0.4 dB PSNR gain [S3].
+-- **Pitfall:** Jointly training the depth network and other components from scratch causes instability [S3].
++#### Two-Stage Training Scheme for FWD-U
++- [S3] A training strategy that decouples depth network initialization from full model training to improve stability and performance.
++- [S3] Stage 1: Construct RGB point clouds for each input view.
++- [S3] Stage 1: Project the constructed point clouds to the target view using the differentiable point cloud renderer.
++- [S3] Stage 1: Aggregate all point clouds from the various input views to render RGB images at the target view.
++- [S3] Stage 1: Optimize the depth network using a photometric loss between the rendered target views and the ground truth target images.
++- [S3] Stage 2: Freeze or continue training the initialized depth network and jointly train the entire model (spatial feature network, MLP, renderer, transformer, refinement module).
++- [S3] Performance improvement: approximately 0.4 dB PSNR gain.
++- [S3] Jointly training the depth network and other components from scratch causes instability.
+ 
+-### Multi-stage Training with Pose Prediction
+-- **Step:**
+-    1.  **Training Phase 1 (Stage 1):** Train pixel-aligned Gaussian prediction for 120K iterations. Replace with patch-aligned decoder, fine-tune on 8 GPUs for 80K iterations. Use camera losses on predicted poses/intrinsics [S4, unofficial].
+-    2.  **Training Phase 2 (Stage 2):** Freeze Stage 1. Train Stage 2 with ground-truth cameras. Supervise output at every step $T=4$. Loss averaged over steps. Detach tokens between steps [S4, unofficial].
+-    3.  **Training Phase 3 (End-to-end):** Unfreeze all parameters. Fine-tune full model in pose-free setting (predicted context/target cameras, no camera loss). Supervise Stage-1 Gaussians. Loss averaged over steps $i=0...T$. 10K iterations on 8 GPUs [S4, unofficial].
+-- **Parameter:**
+-    -   Training loss parameter $\lambda = 0.2$, weight for perceptual loss in Stage 2 and Stage 1 [S4, unofficial].
+-    -   Optimization parameters: AdamW with $\beta_1=0.9$, $\beta_2=0.95$, weight decay 0.05 (multi-dimensional params only), gradient clipping max norm 1.0, bfloat16 mixed precision [S4, unofficial].
+-    -   Stage 1 learning rate: $2 \times 10^{-5}$, no warm-up, cosine decay to zero [S4, unofficial].
+-    -   Stage 2 learning rate: $1 \times 10^{-4}$, 200-iteration linear warm-up, constant until 80% training, cosine decay to zero over remaining 20% [S4, unofficial].
+-    -   End-to-end learning rate: $2 \times 10^{-5}$ for all parameters, 200-iteration linear warm-up, cosine decay to zero [S4, unofficial].
++#### Multi-stage Training with Pose Prediction
++- [S4, unofficial] Training phase 1 (Stage 1): Train pixel-aligned Gaussian prediction for 120K iterations. Replace with patch-aligned decoder, fine-tune on 8 GPUs for 80K iterations. Use camera losses on predicted poses/intrinsics.
++- [S4, unofficial] Training phase 2 (Stage 2): Freeze Stage 1. Train Stage 2 with ground-truth cameras. Supervise output at every step T=4. Loss averaged over steps. Detach tokens between steps.
++- [S4, unofficial] Training phase 3 (End-to-end): Unfreeze all parameters. Fine-tune full model in pose-free setting (predicted context/target cameras, no camera loss). Supervise Stage-1 Gaussians. Loss averaged over steps i=0...T. 10K iterations on 8 GPUs.
++- [S4, unofficial] Training loss parameter lambda: 0.2, weight for perceptual loss in Stage 2 and Stage 1.
++- [S4, unofficial] Optimization parameters: AdamW with beta1=0.9, beta2=0.95, weight decay 0.05 (multi-dimensional params only), gradient clipping max norm 1.0, bfloat16 mixed precision.
++- [S4, unofficial] Stage 1 learning rate: 2e-5, no warm-up, cosine decay to zero.
++- [S4, unofficial] Stage 2 learning rate: 1e-4, 200-iteration linear warm-up, constant until 80% training, cosine decay to zero over remaining 20%.
++- [S4, unofficial] End-to-end learning rate: 2e-5 for all parameters, 200-iteration linear warm-up, cosine decay to zero.
+ 
+ ## Background
+-The concept of multi-stage training in 3D Gaussian Splatting emerged as a response to the sensitivity of the optimization landscape to initialization and the complexity of jointly optimizing geometry, appearance, and camera parameters. Early works like **GaussianPro** [77] introduced progressive propagation to ensure smooth expansion [S1, unofficial]. **FWD-U** [S3] demonstrated that decoupling depth network initialization from full model training improves stability. **MeshGS** [S1, unofficial] and **FineSplat** [S4, unofficial] utilized stage-wise freezing and unfreezing to handle specific constraints like mesh alignment and pose prediction. **Interleaved Densification** [S2] addressed the specific challenge of spatio-temporal optimization in dynamic scenes. The approach is widely used in novel view synthesis, inverse rendering, and dynamic scene reconstruction where standard single-stage training often fails to converge to high-fidelity solutions.
++The concept of progressive training in 3D Gaussian Splatting emerged as a response to the instability of initializing dense Gaussian clouds directly from sparse Structure-from-Motion (SfM) points, which often leads to poor convergence and artifacts [S1, unofficial]. GaussianPro [77] introduced a progressive propagation strategy to expand the Gaussian cloud in a fronto-parallel manner, ensuring smooth expansion and better coverage [S1, unofficial].
++
++The need for multi-stage training is particularly evident in methods that integrate additional components like depth networks or pose estimators. For instance, FWD-U employs a two-stage training scheme to stabilize the optimization, as jointly training the depth network and other components from scratch is unstable [S3]. Similarly, FineSplat utilizes a three-phase multi-stage training process to decouple pose prediction from Gaussian refinement, improving the quality of novel view synthesis [S4, unofficial].
++
++In volumetric data, curriculum learning strategies have been developed to handle the complexity of 3D structures, alternating between local slice supervision and global voxel guidance to prevent instability [S1, unofficial]. Additionally, for dynamic scenes, interleaved densification strategies have been proposed to balance spatial and temporal detail reconstruction [S2].
+ 
+ ## Sources

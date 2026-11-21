@@ -1,0 +1,350 @@
+--- v004.md
++++ v005.md
+@@ -1,200 +1,173 @@
+ # Chunked Voxel Mesh Generation with Face Culling and Quad Expansion
+ 
+-Also called: Chunk-based Greedy Meshing, Greedy Meshing with Chunked Processing
++Also called: Chunk-based Greedy Meshing, FrontGreedyMesh, Greedy Meshing with Chunked Processing, TopGreedyMesh
+ 
+ ## Overview
+-Chunked Voxel Mesh Generation with Face Culling and Quad Expansion is a surface extraction algorithm that processes a 3D voxel chunk to generate a simplified triangle mesh by merging adjacent coplanar faces of identical voxel types into larger quads [S1, S4, unofficial]. It solves the problem of high vertex and draw call counts in naive voxel rendering by reducing the primitive count significantly compared to one-quad-per-face approaches [S1, S2, unofficial]. It differs from its siblings by explicitly handling neighbor chunk references to determine visibility across chunk boundaries and using a packed integer format for vertex attributes to minimize memory bandwidth [S4, unofficial]. Unlike [Binary Greedy Meshing with Packed Quads](3312-binary-greedy-meshing-with-packed-quads.md) which focuses on binary occupancy, this method supports multiple voxel types and ambient occlusion [S3, unofficial].
++Chunked Voxel Mesh Generation with Face Culling and Quad Expansion is a CPU-based algorithm that converts discrete 3D voxel data into optimized triangle meshes by merging adjacent coplanar faces of identical voxel types into larger quads [S1, S2, S4, S6, unofficial]. It solves the problem of excessive vertex and draw call counts in voxel worlds by reducing primitive density while preserving sharp, axis-aligned surfaces suitable for architectural geometry [S6, unofficial]. It differs from standard face culling (which only removes hidden faces) by actively merging contiguous blocks into maximal axis-aligned rectangles, and it differs from Marching Cubes by maintaining discrete voxel boundaries rather than smoothing surfaces [S2, S6, unofficial]. This method builds on [Greedy Meshing](3519-greedy-meshing.md) by processing data in fixed-size chunks and handling inter-chunk visibility.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A `Chunk` object containing a 1D array of voxel data (`data`), neighbor chunk pointers (`cXN`, `cXP`, `cYN`, `cYP`, `cZN`, `cZP`), chunk world position (`chunkPosX`, `chunkPosY`, `chunkPosZ`), and heightmaps (`minAltitude`, `maxAltitude`) [S1, S4, unofficial].
+-- Output: A vertex buffer (`vertexBuffer`) containing packed vertex attributes and an index buffer (or triangle list) defining the mesh geometry [S3, S4, unofficial].
++*   **Input:** A 1D array of voxel data representing a chunk (e.g., `blockArray1D`), neighbor chunk data for boundary checks, and metadata (chunk size, block size, world offset) [S1, S5, S6, unofficial].
++*   **Output:** A mesh structure containing vertices, indices, and optionally UVs/normals [S2, S6, unofficial].
+ 
+ **Data Structures:**
+-1.  **Voxel Array:** A 1D array of size `CHUNK_VOL = CHUNK_SIZE^3`. Access index for local coordinates $(i, j, k)$ is:
+-    $$ \text{access} = j + (i \times \text{CHUNK\_SIZE}) + (k \times \text{CHUNK\_SIZE}^2) $$
+-    Strides: `ACCESS_STEP_X = CHUNK_SIZE`, `ACCESS_STEP_Y = 1`, `ACCESS_STEP_Z = CHUNK_SIZE^2` [S1, S4, unofficial].
+-2.  **Visit Arrays:** Six boolean arrays (`visitXN`, `visitXP`, `visitYN`, `visitYP`, `visitZN`, `visitZP`) of size `CHUNK_VOL`, initialized to false, tracking which faces have been meshed to prevent duplicates [S1, S4, unofficial].
+-3.  **Vertex Buffer:** A sequential array of integers. Each quad generates 6 integers (2 triangles $\times$ 3 vertices). Each integer packs vertex attributes [S3, S4, unofficial]:
+-    -   **Format:** `uint32`
+-    -   **Layout:**
+-        -   Bits 0-1: `flip_id` (1 bit)
+-        -   Bits 2-3: `ao_id` (2 bits)
+-        -   Bits 4-6: `face_id` (3 bits)
+-        -   Bits 7-14: `voxel_id` (8 bits)
+-        -   Bits 15-20: `z` (6 bits)
+-        -   Bits 21-26: `y` (6 bits)
+-        -   Bits 27-31: `x` (6 bits)
+-    -   **Face Normal Encoding:** The upper bits of the vertex integer also encode the face normal via `FaceTypeShifted`: `yp=0<<27`, `yn=1<<27`, `xp=2<<27`, `xn=3<<27`, `zp=4<<27`, `zn=5<<27` [S3, S4, unofficial].
+-    -   **Packing Function:**
+-        ```python
+-        def pack_data(x, y, z, voxel_id, face_id, ao_id, flip_id):
+-            x_bits, y_bits, z_bits = 6, 6, 6
+-            voxel_bits = 8
+-            face_bits = 3
+-            ao_bits = 2
+-            flip_bits = 1
+-            
+-            shift_flip = 0
+-            shift_ao = shift_flip + flip_bits
+-            shift_face = shift_ao + ao_bits
+-            shift_voxel = shift_face + face_bits
+-            shift_z = shift_voxel + voxel_bits
+-            shift_y = shift_z + z_bits
+-            shift_x = shift_y + y_bits
+-            
+-            return (x << shift_x) | (y << shift_y) | (z << shift_z) | \
+-                   (voxel_id << shift_voxel) | (face_id << shift_face) | \
+-                   (ao_id << shift_ao) | (flip_id << shift_flip)
+-        ```
++*   **Voxel Array:** A 1D array where each element represents a voxel. The index is calculated as $index = j + (i \times ChunkSize) + (k \times ChunkSize^2)$, where $i$ is X, $j$ is Y, and $k$ is Z [S1, S4, unofficial].
++*   **Visit Arrays:** Boolean arrays (e.g., `visitXN`, `visitXP`, `visitYN`, `visitYP`, `visitZN`, `visitZP`) of size $ChunkSize^3$ to track which faces have already been merged into a quad, preventing double-counting [S1, S4, unofficial].
++*   **Vertex Packing (Optional):** Vertices can be packed into a single 32-bit integer to save memory. Layout: x (6 bits), y (6 bits), z (6 bits), voxel_id (8 bits), face_id (3 bits), ao_id (2 bits), flip_id (1 bit) [S3, unofficial]. Alternatively, explicit structs with position, normal, color, and material are used [S6, unofficial].
++*   **Face Type Encoding:** Face normals can be encoded in the upper bits of vertex attributes (e.g., `yp=0<<27`, `yn=1<<27`, etc.) [S4, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Allocate `vertexBuffer` and reset `visit` arrays to false [S3, S4, unofficial].
+-2.  **Voxel Iteration:** Iterate through the chunk using nested loops. The order is $k$ (Z), $i$ (X), $j$ (Y). Optimization: Use `minAltitude` and `maxAltitude` heightmaps to skip empty columns [S1, S4, unofficial].
+-    ```python
+-    for k in range(CHUNK_SIZE):
+-        for i in range(CHUNK_SIZE):
+-            min_j = min_altitude[i + k * CHUNK_SIZE]
+-            max_j = max_altitude[i + k * CHUNK_SIZE]
+-            
+-            for j in range(min_j, max_j + 1):
+-                access = j + (i * CHUNK_SIZE) + (k * CHUNK_SIZE * CHUNK_SIZE)
+-                voxel = data[access]
+-                
+-                if voxel.index == 0: # Air
++
++1.  **Initialization:**
++    *   Initialize empty vertex and index lists [S2, S6, unofficial].
++    *   Initialize `visit` arrays to false [S1, S4, unofficial].
++    *   If using heightmaps, initialize min/max altitude arrays to optimize Y-range iteration [S1, unofficial].
++
++2.  **Voxel Iteration:**
++    *   Iterate through all voxels in the chunk. The order varies by implementation:
++        *   Z (k), X (i), Y (j) [S1, unofficial].
++        *   Z, Y, X [S2, unofficial].
++        *   X, Y, Z [S3, S6, unofficial].
++    *   For each voxel at $(i, j, k)$, check if it is solid (index > 0) [S1, S3, S6, unofficial].
++
++3.  **Face Visibility Check:**
++    *   For each of the 6 face directions (±X, ±Y, ±Z), determine if the face is visible. A face is visible if:
++        *   The adjacent voxel is empty (index == 0) [S1, S3, S6, unofficial].
++        *   **Boundary Handling:** If the voxel is at a chunk boundary, check the neighbor chunk.
++            *   If the neighbor chunk is null or outside the world bounds, the face is visible [S4, S6, unofficial].
++            *   If the neighbor chunk exists, check the corresponding voxel in the neighbor chunk. For example, for the X- face at chunk boundary $X=0$, check `neighborChunk.data[31 * ChunkSize + j + k * ChunkSize^2]` [S4, unofficial].
++            *   **Exception:** For the Top (Y+) face, do not cull based on the maximum Y chunk boundary, as players may move above the map [S4, unofficial].
++
++4.  **Face Culling and Merging (Quad Expansion):**
++    *   If a face is visible and not yet visited (check `visit` array):
++        *   Mark the current voxel's face as visited [S1, S4, unofficial].
++        *   **Expand along the secondary axis:**
++            *   For X-faces (±X), expand along the Z-axis (and then Y-axis) [S1, S4, unofficial].
++            *   For Y-faces (±Y), expand along the X-axis (and then Z-axis) [S4, unofficial].
++            *   For Z-faces (±Z), expand along the X-axis (and then Y-axis) [S4, unofficial].
++            *   *Note:* Some implementations only expand along one axis (e.g., Z for top faces) [S5, unofficial].
++        *   **Expansion Logic:**
++            *   Iterate in the secondary direction (e.g., for X- face, iterate Z from $k$ to $ChunkSize$).
++            *   Check if the neighbor voxel has the same type (and health/texture) [S4, unofficial].
++            *   Check if the neighbor's face in the same direction is also visible and not visited [S1, S4, unofficial].
++            *   If both conditions are met, mark the neighbor's face as visited and continue [S1, S4, unofficial].
++            *   If not, stop expansion. The length of the merge is the number of consecutive matching voxels [S1, S4, S5, unofficial].
++        *   **Generate Quad:**
++            *   Create a quad spanning the merged area.
++            *   Calculate vertices based on the start position, the merged width/length, and the face normal [S5, S6, unofficial].
++            *   Calculate UVs and normals [S2, S6, unofficial].
++            *   Add vertices and indices to the mesh. Indices are typically two triangles forming a quad: `[0, 1, 2, 0, 2, 3]` or `[2, 1, 0, 3, 2, 0]` depending on winding order [S2, S5, unofficial].
++
++5.  **Finalization:**
++    *   Convert lists to arrays [S2, unofficial].
++    *   Recalculate normals and tangents if necessary [S2, unofficial].
++    *   Optimize the mesh (e.g., vertex cache optimization) [S2, unofficial].
++
++**Pseudocode:**
++
++```python
++def generate_chunk_mesh(chunk_voxels, chunk_size, neighbor_chunks):
++    vertices = []
++    indices = []
++    # Initialize visit arrays for all 6 faces
++    visit = {
++        'xn': [False] * (chunk_size ** 3),
++        'xp': [False] * (chunk_size ** 3),
++        'yn': [False] * (chunk_size ** 3),
++        'yp': [False] * (chunk_size ** 3),
++        'zn': [False] * (chunk_size ** 3),
++        'zp': [False] * (chunk_size ** 3)
++    }
++
++    # Iterate through all voxels
++    for k in range(chunk_size):  # Z
++        for i in range(chunk_size):  # X
++            for j in range(chunk_size):  # Y
++                voxel = chunk_voxels[i + j * chunk_size + k * chunk_size ** 2]
++                if voxel.index == 0:
+                     continue
+-                    
+-                process_voxel(voxel, i, j, k, access)
+-    ```
+-3.  **Face Processing (`process_voxel`):** For each solid voxel, check the 6 face directions. For each direction, if the face is visible and not yet visited, expand it into a quad [S1, S4, unofficial].
+-    -   **Visibility Check:** Call `DrawFace` function for the specific direction (e.g., `DrawFaceXN`).
+-        -   If at chunk boundary (e.g., `i == 0` for X-), check neighbor chunk pointer.
+-        -   If null or neighbor voxel is air (index 0), face is visible. If neighbor is solid, face is hidden.
+-        -   If not at boundary, check adjacent voxel in current chunk. If air, visible; if solid, hidden.
+-        -   **Special Case (Y+):** Do not cull Y+ faces at the top chunk boundary because players can move above the map [S4, unofficial].
+-    -   **Quad Expansion:**
+-        -   **Primary Axis Expansion:** Iterate along the first axis perpendicular to the face normal (e.g., for X- faces, iterate along Y).
+-        -   Continue while the neighbor voxel is identical (same index and health) and the face is not yet visited. Mark visited faces. Calculate `length_a` [S1, S4, unofficial].
+-        -   **Secondary Axis Expansion:** Iterate along the second axis perpendicular to the face normal (e.g., for X- faces, iterate along Z).
+-        -   Check if the entire row of `length_a` voxels is identical and unvisited. If so, increment `length_b` and mark all faces in that row as visited [S1, S4, unofficial].
+-    -   **Vertex Generation:** Call `AppendQuad` function with the calculated dimensions (`length_a`, `length_b`) and coordinates.
+-        -   Generate 6 vertex integers for 2 triangles.
+-        -   Calculate Ambient Occlusion (AO) values for the corners based on neighboring solid voxels [S3, unofficial].
+-        -   Determine `flip_id` based on AO symmetry: `flip_id = (ao[1] + ao[3] > ao[0] + ao[2])` [S3, unofficial].
+-        -   Pack vertex data and write to `vertexBuffer` [S3, S4, unofficial].
+ 
+-**Pseudocode for Face Expansion (X- Face Example):**
+-```python
+-def generate_mesh(chunk_data, chunk_size, min_altitude, max_altitude, neighbor_chunks, chunk_pos):
+-    CHUNK_VOL = chunk_size ** 3
+-    ACCESS_STEP_X = chunk_size
+-    ACCESS_STEP_Y = 1
+-    ACCESS_STEP_Z = chunk_size ** 2
++                # Check X- face
++                if is_face_visible(i, j, k, 'xn', chunk_voxels, chunk_size, neighbor_chunks):
++                    if not visit['xn'][i + j * chunk_size + k * chunk_size ** 2]:
++                        length_z, length_y = expand_face(i, j, k, 'xn', chunk_voxels, chunk_size, visit['xn'])
++                        add_quad_to_mesh(vertices, indices, i, j, k, 'xn', length_z, length_y, voxel)
++                        mark_visited(i, j, k, 'xn', chunk_voxels, chunk_size, visit['xn'], length_z, length_y)
+ 
+-    visitXN = [False] * CHUNK_VOL
+-    visitXP = [False] * CHUNK_VOL
+-    visitYN = [False] * CHUNK_VOL
+-    visitYP = [False] * CHUNK_VOL
+-    visitZN = [False] * CHUNK_VOL
+-    visitZP = [False] * CHUNK_VOL
++                # Check other 5 faces similarly...
++                # (Code omitted for brevity, follows same pattern)
+ 
+-    vertex_buffer = []
++    return vertices, indices
+ 
+-    def different_block(access_a, access_b):
+-        return chunk_data[access_a].index != chunk_data[access_b].index or \
+-               chunk_data[access_a].health != chunk_data[access_b].health
++def is_face_visible(i, j, k, face, voxels, size, neighbors):
++    # Determine neighbor coordinates
++    if face == 'xn':
++        if i == 0:
++            if neighbors['xn'] is None: return True
++            # Check neighbor chunk voxel
++            return neighbors['xn'].get_voxel(31, j, k).index == 0
++        else:
++            return voxels[i - 1 + j * size + k * size ** 2].index == 0
++    # ... handle other faces similarly
++    return False
+ 
+-    def is_visible_xn(i, j, k, access):
+-        if i == 0:
+-            if chunk_pos.x == 0: return False
+-            if neighbor_chunks.xn is None: return True
+-            return neighbor_chunks.xn.data[31 * chunk_size + j + k * ACCESS_STEP_Z].index == 0
+-        return chunk_data[access - ACCESS_STEP_X].index == 0
++def expand_face(i, j, k, face, voxels, size, visit_array):
++    # Example for X- face, expanding along Z then Y
++    length_z = 1
++    while k + length_z < size:
++        neighbor_idx = i + j * size + (k + length_z) * size ** 2
++        if voxels[neighbor_idx].index != voxels[i + j * size + k * size ** 2].index:
++            break
++        if visit_array[neighbor_idx]:
++            break
++        length_z += 1
++    
++    length_y = 1
++    while j + length_y < size:
++        # Check if the entire column in Z matches
++        for dz in range(length_z):
++            neighbor_idx = i + (j + length_y) * size + (k + dz) * size ** 2
++            if voxels[neighbor_idx].index != voxels[i + j * size + k * size ** 2].index:
++                return length_z, length_y
++            if visit_array[neighbor_idx]:
++                return length_z, length_y
++        length_y += 1
++        
++    return length_z, length_y
+ 
+-    def append_quad_xn(buf, i, j, k, length_a, length_b, voxel):
+-        # Generates 6 vertex integers for 2 triangles [S1, unofficial]
+-        # Vertices are packed with face normal and texture health [S4, unofficial]
+-        # Layout: vertex 0 = yR|kL|shared, vertex 1&4 = yL|kL|shared, 
+-        #         vertex 2&3 = yR|kR|shared, vertex 5 = yL|kR|shared
+-        # Shared = x|textureHealth|normal
+-        shared = pack_data(i, voxel.index, 3, 0, 0) # x, voxel_id, face_id, ao_id, flip_id
+-        yR, kL = j + length_a, k
+-        yL, kR = j, k + length_b
+-        
+-        buf.append(pack_data(yR, kL, 0, 0, 0, 0) | shared)
+-        buf.append(pack_data(yL, kL, 0, 0, 0, 0) | shared)
+-        buf.append(pack_data(yR, kR, 0, 0, 0, 0) | shared)
+-        buf.append(pack_data(yL, kL, 0, 0, 0, 0) | shared)
+-        buf.append(pack_data(yL, kL, 0, 0, 0, 0) | shared)
+-        buf.append(pack_data(yL, kR, 0, 0, 0, 0) | shared)
++def add_quad_to_mesh(vertices, indices, i, j, k, face, length_z, length_y, voxel):
++    # Calculate world positions
++    # ...
++    # Add 4 vertices
++    # Add 6 indices
++    pass
+ 
+-    # Main iteration
+-    for k in range(chunk_size):
+-        for i in range(chunk_size):
+-            min_j = min_altitude[i + k * chunk_size]
+-            max_j = max_altitude[i + k * chunk_size]
+-            for j in range(min_j, max_j + 1):
+-                access = j + (i * chunk_size) + (k * ACCESS_STEP_Z)
+-                voxel = chunk_data[access]
+-                if voxel.index == 0: continue
+-
+-                # X- Face
+-                if not visitXN[access] and is_visible_xn(i, j, k, access):
+-                    visitXN[access] = True
+-                    length_a = 1
+-                    current_access = access + ACCESS_STEP_Y
+-                    while j + length_a < chunk_size:
+-                        if visitXN[current_access] or different_block(current_access, access):
+-                            break
+-                        visitXN[current_access] = True
+-                        length_a += 1
+-                        current_access += ACCESS_STEP_Y
+-
+-                    length_b = 1
+-                    current_z_access = access + ACCESS_STEP_Z
+-                    while k + length_b < chunk_size:
+-                        strip_match = True
+-                        temp_access = current_z_access
+-                        for g in range(length_a):
+-                            if visitXN[temp_access] or different_block(temp_access, access):
+-                                strip_match = False
+-                                break
+-                            temp_access += ACCESS_STEP_Y
+-                        if not strip_match: break
+-                        temp_access = current_z_access
+-                        for g in range(length_a):
+-                            visitXN[temp_access] = True
+-                            temp_access += ACCESS_STEP_Y
+-                        length_b += 1
+-                        current_z_access += ACCESS_STEP_Z
+-                    append_quad_xn(vertex_buffer, i, j, k, length_a, length_b, voxel)
+-
+-                # Repeat visibility checks and expansion for XP, YN, YP, ZN, ZP faces
+-                # using their respective visit arrays, boundary conditions, and strides
++def mark_visited(i, j, k, face, voxels, size, visit_array, length_z, length_y):
++    # Mark all visited voxels in the merged area
++    for dy in range(length_y):
++        for dz in range(length_z):
++            idx = i + (j + dy) * size + (k + dz) * size ** 2
++            visit_array[idx] = True
+ ```
+-
+-**Edge Cases and Pitfalls:**
+--   **Boundary Culling:** Faces on chunk boundaries must check neighbor chunks. If a neighbor chunk is not loaded (null pointer), the face is considered visible [S4, unofficial].
+--   **Top Boundary:** Y+ faces at the top of the world chunk must not be culled even if at the chunk boundary, to allow visibility from above [S4, unofficial].
+--   **Neighbor Offsets:** Accessing neighbor chunk data requires precise offset calculations based on the chunk's memory layout (e.g., X- neighbor offset involves `31 * CHUNK_SIZE` due to the 1D array mapping) [S4, unofficial].
+--   **Precision:** Using `uint32` packing limits coordinate resolution to 64x64x64 per chunk (6 bits). This matches the standard chunk size [S3, S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Chunk-based Marching Cubes with Face Combination](4158-chunk-based-marching-cubes-with-face-combination.md)
+-Extends this method by applying Marching Cubes for smooth surfaces within chunks, then combining coplanar triangles into quads. Choose when smooth terrain is required instead of blocky voxels.
++Processes chunks to generate triangle meshes and combines adjacent coplanar faces into quads. Chosen when smooth surfaces are needed but draw calls must be reduced.
+ 
+-### [Chunk Mesh Preparation](4265-chunk-mesh-preparation.md)
+-Pre-processes a chunk by padding it with neighbor data to simplify boundary visibility checks. Choose when neighbor chunk access is expensive or when simplifying the meshing loop logic is prioritized over memory overhead.
++### [Greedy Meshing (Front Face)](16000-greedy-meshing-front-face.md)
++Generates quads specifically for the front-facing (positive Z) surfaces of a voxel chunk. Chosen when only front-facing optimization is required or for specific rendering passes.
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(V)$ where $V$ is the number of voxels in the chunk. The expansion steps are amortized constant time per voxel because each face is visited and marked exactly once [S1, S4, unofficial].
+--   **Memory Complexity:** $O(V)$ for the voxel data and $O(V)$ for the visit arrays. The vertex buffer size is proportional to the surface area, typically much smaller than $V$ for dense terrain [S3, S4, unofficial].
+--   **Performance:** Significantly reduces triangle count compared to naive meshing (5-15x reduction) [S2, unofficial]. The packed vertex format reduces memory bandwidth during rendering [S3, S4, unofficial]. A 64³ voxel chunk produces ~50-100K triangles in ~2ms on CPU [S5, unofficial].
+--   **Strengths:** Fast, cache-friendly due to linear iteration and packed data. Handles large chunks efficiently.
+--   **Limitations:** Only produces axis-aligned quads. Merges only faces with identical voxel index and health [S4, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, as each voxel is visited a constant number of times. The merging step adds overhead but reduces the final mesh size.
++*   **Memory Complexity:** $O(N)$ for the voxel data and $O(F)$ for the output mesh, where $F$ is the number of faces. The visit arrays add $O(N)$ memory [S1, S4, unofficial].
++*   **Performance:** On a CPU, a 64³ chunk (~50-100K triangles) can be generated in ~2ms [S6, unofficial].
++*   **Strengths:** Significantly reduces vertex and triangle count for large solid volumes compared to naive face culling [S2, unofficial]. Produces sharp, axis-aligned surfaces ideal for architectural voxel art [S6, unofficial].
++*   **Limitations:** Does not smooth surfaces, making it less suitable for organic shapes [S6, unofficial]. Requires careful handling of chunk boundaries and neighbor data [S4, unofficial]. The greedy approach may not produce the globally optimal mesh (e.g., it might miss merges that require a different iteration order) [S2, unofficial].
++*   **When to Use:** Static voxel worlds, architectural designs, terrain generation where performance is critical and sharp edges are desired.
++*   **When Not to Use:** Organic terrain requiring smooth surfaces (use Marching Cubes), dynamic scenes with frequent voxel changes where re-meshing overhead is prohibitive.
+ 
+ ## Background
+-The method originates from implementations in voxel game engines such as Vercidium and various open-source greedy meshing projects [S1, S2, S4, unofficial]. It builds on the core concept of greedy meshing, adapting it for chunk-based rendering architectures where neighbor visibility is critical [S1, S4, unofficial].
++The algorithm originates from the need to optimize voxel rendering in games like Minecraft. It extends 2D greedy meshing techniques to 3D by processing voxel chunks. Key implementations include the Vercidium Engine [S1, S4, unofficial], Unity-based voxel engines [S2, S5, unofficial], and Python-based renderers [S3, S6, unofficial]. The method is widely used in voxel game development to balance visual fidelity with rendering performance.
+ 
+ ## Sources
+@@ -203,3 +176,4 @@
+ [S3] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+ [S4] Vercidium/voxel-mesh-generation, https://github.com/Vercidium/voxel-mesh-generation, fetched 2026-10-26 (unofficial)
+-[S5] elyssov/prometheus-engine, https://github.com/elyssov/prometheus-engine, fetched 2026-10-28 (unofficial)+[S5] BloodyFish/UnityVoxelEngine, https://github.com/BloodyFish/UnityVoxelEngine, fetched 2026-10-27 (unofficial)
++[S6] elyssov/prometheus-engine, https://github.com/elyssov/prometheus-engine, fetched 2026-10-28 (unofficial)

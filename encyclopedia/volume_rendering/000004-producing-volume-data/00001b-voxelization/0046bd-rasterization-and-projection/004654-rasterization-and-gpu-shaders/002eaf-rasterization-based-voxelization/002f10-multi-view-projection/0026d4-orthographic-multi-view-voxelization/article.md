@@ -1,0 +1,172 @@
+# Orthographic Multi-View Voxelization
+
+Also called: 3-Direction Rasterization, 3-View Voxelization, Directional Sheet Buffer Voxelization, Orthographic 3D Texture Rasterization, Voxelization via Orthographic Projection, Worksheet Voxelization
+
+## Overview
+Orthographic Multi-View Voxelization rasterizes scene geometry into a 3D texture using three orthographic cameras aligned with the scene's bounding box axes to create a voxelized representation for subsequent volume rendering [S1, unofficial]. It differs from [Single 2D Projection Voxelization](3482-single-2d-projection-voxelization.md) by using three orthogonal views to ensure complete coverage and from [3-Pass Voxelization](5300-3-pass-voxelization.md) by utilizing intermediate "sheet buffers" and a final "worksheet" synthesis to handle discrete voxel encoding efficiently on GPU hardware [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Triangle mesh geometry, scene axis-aligned bounding box (AABB) defined by `bb_min` and `bb_max`, and target voxel grid resolution $R = (R_x, R_y, R_z)$.
+*   **Output:** A 3D texture (or 2D worksheet texture encoding 3D data) representing the voxelized volume.
+
+**Data Structures:**
+1.  **3D Texture (Direct Method):** A `std::vector<GLfloat>` of size $4 \times R_x \times R_y \times R_z$, initialized to `0.0f`, representing RGBA32F voxel data [S1, unofficial].
+2.  **Sheet Buffers (Indirect Method):** Three 2D buffers representing parts of the discrete voxel space, one for each axis direction (X, Y, Z) [S2, unofficial].
+3.  **Worksheet (Indirect Method):** A 2D texture of resolution $2^W \times 2^H$. It encodes the discrete voxel space ($2^L \times 2^M \times 2^N$) such that $2^L \times 2^M \times 2^N = 2^W \times 2^H \times C$, where $C$ is the number of voxels encoded in a single texel (e.g., $C=32$ for binary voxelization with four 8-bit components) [S2, unofficial].
+
+**Parameters:**
+*   `voxelTextureSize`: Default resolution, e.g., `glm::uvec3(64, 64, 64)` [S1, unofficial].
+*   `offset`: Camera extension distance beyond the bounding box, fixed at `0.2f` [S1, unofficial].
+*   `projection_scale`: Frustum expansion factor applied to range, fixed at `1.02f` (passed as `0.51f` to half-width) [S1, unofficial].
+*   `C`: Voxels per texel in the worksheet method [S2, unofficial].
+
+**Steps:**
+
+1.  **Bounding Box and Camera Setup:**
+    Calculate the scene bounding box min/max. Compute the range $Range = bb_{max} - bb_{min}$. Set the camera offset to `0.2f` beyond the max bounds along each axis [S1, unofficial]. Configure three orthographic cameras looking towards the scene's AABB along the X, Y, and Z axes. Set the orthographic projection frustum bounds to $1.02 \times Range$ on the viewing planes, with near plane at `0.1f` and far plane at $1.2 \times Range + offset$ [S1, unofficial].
+
+2.  **Rasterization (Stage 1):**
+    For each of the three views (X, Y, Z):
+    *   Pass the corresponding view-projection matrix to the voxelization shader uniform `viewProject[i]` [S1, unofficial].
+    *   For each triangle, determine the axis direction along which it has the maximum projection area. Rasterize the triangle against this axis direction to avoid degenerate line segments caused by 2D linear interpolation when the triangle is parallel to the view [S2, unofficial].
+    *   If using the **Direct Method**: Clear the 3D texture to RGBA(0,0,0,0), disable multisampling, depth testing, and face culling. Bind the texture as a read-write image buffer. Rasterize triangles directly into the 3D texture using atomic operations for occupancy [S1, unofficial].
+    *   If using the **Indirect Method**: Rasterize triangles into the corresponding 2D Sheet Buffer. Only triangles intersecting the current slab are processed [S2, unofficial].
+
+3.  **Texelization (Stage 2 - Indirect Method Only):**
+    Transform voxel positions to 3D volume coordinates immediately. Use these coordinates to find the correct position in the worksheet. Add voxels to the worksheet via a blending operation at the corresponding location [S2, unofficial].
+
+4.  **Synthesis (Stage 3 - Indirect Method Only):**
+    Transcode the three directional sheet buffers to the final worksheet. Transform each element to discrete voxel space, then encode to the appropriate texel in the worksheet [S2, unofficial].
+    *   **Voxel Access Logic:** To access a voxel at coordinates $(p_x, p_y, p_z)$:
+        1.  Determine the patch by dividing $p_z$ by $C$.
+        2.  Access the texel at $(p_x, p_y)$ in the found patch.
+        3.  Determine the bit offset within the texel component using $p_z$ and $C$.
+        4.  Use a lookup table to facilitate accessing bits from the component [S2, unofficial].
+
+5.  **Finalization:**
+    Generate mipmaps for the filled 3D texture (Direct Method) or the final worksheet (Indirect Method) to enable multi-resolution cone tracing [S1, unofficial].
+
+**Pseudocode (Direct Method):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def orthographic_multi_view_voxelization(mesh, bb_min, bb_max, voxel_size):
+    """
+    Voxelizes a mesh into a 3D texture using 3 orthographic views.
+    """
+    # 1. Setup
+    range_vec = bb_max - bb_min
+    offset = 0.2f
+    scale = voxel_size / range_vec
+    
+    # Initialize 3D texture (RGBA32F)
+    texture_size = voxel_size.x * voxel_size.y * voxel_size.z * 4
+    voxel_texture = [0.0f] * texture_size
+    
+    # Disable depth testing, culling, multisampling
+    # Bind voxel_texture as read-write image buffer
+    
+    # 2. Define Cameras
+    # Camera 0: Look along X axis
+    # Camera 1: Look along Y axis
+    # Camera 2: Look along Z axis
+    # Frustum bounds: 1.02 * range_vec
+    # Near: 0.1f, Far: 1.2 * range_vec + offset
+    
+    view_projects = [
+        compute_view_projection_matrix(axis=0, bb_min=bb_min, range_vec=range_vec, offset=offset),
+        compute_view_projection_matrix(axis=1, bb_min=bb_min, range_vec=range_vec, offset=offset),
+        compute_view_projection_matrix(axis=2, bb_min=bb_min, range_vec=range_vec, offset=offset)
+    ]
+    
+    # 3. Rasterize
+    for i in range(3):
+        set_shader_uniform("viewProject", view_projects[i])
+        set_shader_uniform("scale", scale)
+        set_shader_uniform("boxMin", bb_min)
+        
+        # Rasterize mesh triangles into voxel_texture
+        # Using atomic OR for occupancy
+        rasterize_triangles(mesh, voxel_texture, view_projects[i], scale, bb_min)
+        
+    # 4. Finalize
+    generate_mipmaps(voxel_texture)
+    return voxel_texture
+```
+
+**Pseudocode (Indirect/Worksheet Method):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def worksheet_voxelization(mesh, bb_min, bb_max, voxel_res, texel_voxels_c):
+    """
+    Voxelizes a mesh into a 2D worksheet texture using 3 sheet buffers.
+    """
+    # 1. Setup
+    range_vec = bb_max - bb_min
+    offset = 0.2f
+    
+    # Determine worksheet resolution 2^W x 2^H
+    # such that 2^L * 2^M * 2^N = 2^W * 2^H * C
+    # where C = texel_voxels_c
+    
+    sheet_buffers = [create_2d_buffer() for _ in range(3)]
+    
+    # 2. Rasterization Stage
+    for i in range(3):
+        # Determine rasterization direction for each triangle
+        # Choose axis with max projection area
+        for triangle in mesh.triangles:
+            axis = get_max_projection_axis(triangle)
+            if axis == i:
+                rasterize_triangle_sheet(triangle, sheet_buffers[i], axis, bb_min, range_vec, offset)
+                
+    # 3. Synthesis Stage
+    worksheet = create_2d_worksheet()
+    
+    for i in range(3):
+        for element in sheet_buffers[i]:
+            # Transform to discrete voxel space
+            voxel_coords = transform_to_voxel_space(element, i, bb_min, range_vec)
+            
+            # Encode to worksheet
+            px, py, pz = voxel_coords
+            patch_index = pz // texel_voxels_c
+            texel_coords = (px, py)
+            
+            # Access texel and update bits
+            update_worksheet_texel(worksheet, texel_coords, patch_index, pz, texel_voxels_c)
+            
+    generate_mipmaps(worksheet)
+    return worksheet
+```
+
+## Subtopics
+
+### [Shadow Volume Voxelization](5629-shadow-volume-voxelization.md)
+Shadow Volume Voxelization generates a 3D shadow volume texture by voxelizing scene geometry into a 3D grid, where each voxel stores a bitmask representing which of its 8 constituent sub-voxels are occluded. It replaces standard occupancy flags with a bitmask per coarse voxel to enable multi-resolution shadow representation through mipmaps.
+
+### [Orthographic Volume Rendering](14715-orthographic-volume-rendering.md)
+Orthographic Volume Rendering generates a high-quality orthographic projection of a 3D volume by temporarily configuring a parallel projection camera, rendering to a full-resolution buffer, and resampling the result to the target resolution. It differs from perspective-based volume rendering by eliminating depth-dependent distortion, ensuring that object sizes remain consistent regardless of their distance from the camera, which is critical for medical imaging and scientific visualization where metric accuracy is required.
+
+### Slicing-based voxelization
+Slicing-based voxelization rasterizes the model the same number of times as the resolution of the volume along the z-direction [S2, unofficial]. This feature (rendering to 3D textures) has not been supported in consumer graphics hardware of PC platform at the time of writing [S2, unofficial]. It is significantly slower than the proposed 2D texture method; for the Blade model at $256^3$, it takes ~5 seconds compared to ~100ms for the proposed method [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot V)$, where $N$ is the number of triangles and $V$ is the number of views (3). The indirect method adds a synthesis step proportional to the number of fragments.
+*   **Memory Complexity:** $O(R_x R_y R_z)$ for the direct method. The indirect method uses $O(R_x R_y)$ for sheet buffers and $O(R_x R_y / C)$ for the worksheet, reducing memory footprint.
+*   **Performance:** The worksheet method is significantly faster than slicing-based voxelization. For a $256^3$ resolution, the worksheet method takes ~100ms, while slicing-based takes ~5 seconds [S2, unofficial].
+*   **Strengths:** Hardware-accelerated, real-time capable, handles complex models efficiently.
+*   **Limitations:** Requires careful handling of degenerate triangles (parallel to rasterization direction). The indirect method requires additional synthesis pass and lookup logic.
+*   **When to use:** Real-time volume rendering, shadow volume generation.
+*   **When not to use:** When high-precision solid voxelization is required without post-processing (requires 3D scan-filling) [S2, unofficial].
+
+## Background
+The method was introduced in "Real-time Voxelization for Complex Models" [S2, unofficial] as a scheme to solve the problem of fast voxelization for interactive graphics applications by representing the resultant volume as 2D textures. The direct method implementation is found in "Voxel Cone Tracing" [S1, unofficial].
+
+## Sources
+[S1] KyrieWei/VoxelConeTracing, https://github.com/KyrieWei/VoxelConeTracing, fetched 2026-10-26 (unofficial)
+[S2] (PDF) Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)

@@ -1,0 +1,174 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Adaptive Marching Cubes is an extension of the standard Marching Cubes algorithm designed to extract isosurfaces from Adaptive Resolution (AR) octree data [S1, unofficial]. It solves the problem of topological inconsistencies and geometric artifacts that arise when adjacent cubes in the mesh have different resolutions [S1, unofficial]. Unlike uniform marching cubes, it handles missing vertices and discontinuities by deferring the processing of coarser nodes that conflict with finer neighbors, ensuring a watertight mesh across resolution boundaries [S1, unofficial].
++Adaptive Marching Cubes is an extension of the standard Marching Cubes algorithm designed to extract isosurfaces from Adaptive Resolution (AR) octree data [S1, unofficial]. It solves the problem of topological inconsistencies and geometric artifacts that arise when adjacent cubes in the mesh have different resolutions [S1, unofficial]. It handles missing vertices and isosurface discontinuities by deferring the processing of coarser nodes that conflict with finer neighbors, ensuring consistent triangle vertex interpolation across resolution boundaries [S1, unofficial]. Builds on [Marching Cubes with Octree](1259-marching-cubes-with-octree.md) and differs from [Linear Hashed Marching Cubes](1294-linear-hashed-marching-cubes.md) and [Adaptive Resolution Isosurface Rendering with Two-Pass Discontinuity Handling](1340-adaptive-resolution-isosurface-rendering-with-two-pass-disco.md) by using a two-pass octree traversal with deferred vertex lists.
+ 
+ ## How it works
+@@ -10,103 +10,87 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** An adaptive resolution octree representing a volume dataset. Each node contains voxel values at its specific resolution level.
+-*   **Output:** A triangle mesh representing the isosurface.
++*   **Input:** An adaptive resolution octree representing a volume dataset [S1, unofficial].
++*   **Output:** A triangle mesh representing the isosurface [S1, unofficial].
+ 
+ ### Data Structures
+ Each octree node maintains the following fields:
+-1.  **Triangle List:** A list of triangles generated for this node. Each triangle references vertices in the global Intersection List.
+-2.  **Intersection List:** A global vertex array storing edge intersection points. Vertices in this list may be updated later during the second pass [S1, unofficial].
+-3.  **Second Pass List:** A list of octree nodes that require post-processing. Nodes are added to this list if they have missing vertices relative to finer neighbors [S1, unofficial].
++1.  **Triangle List:** A list of triangles generated for this node [S1, unofficial].
++2.  **Fine Edge Vertex List:** A per-edge list storing deferred intersection vertices for coarser nodes [S1, unofficial].
++3.  **Resolution Level:** The octree depth indicating the node's voxel sampling rate [S1, unofficial].
++Exact sizes and bit packing are not given in the sources. A global **Intersection List** serves as a vertex array referenced by triangle lists, storing edge intersection points which may be updated later [S1, unofficial]. A **Second Pass List** holds octree nodes requiring post-processing for subdivision or final triangle generation [S1, unofficial].
+ 
+ ### Algorithm Steps
+-
+-**First Pass: Standard MC with Conflict Detection**
+-1.  Traverse the octree in any order (typically depth-first or breadth-first).
+-2.  For each node, perform standard Marching Cubes using the node's voxel values.
+-3.  For every edge intersection found:
+-    *   Check if the adjacent neighbor (if it exists and is coarser) has a corresponding vertex on that edge.
+-    *   If the coarser neighbor has no vertex on the shared edge (i.e., its coarse vertices are on the same side of the isosurface), but the current finer cube finds an intersection:
+-        *   Create a new entry in the coarser neighbor's fine edge vertex list (stored in the global Intersection List) [S1, unofficial].
+-        *   Add the coarser neighbor node to the **Second Pass List** [S1, unofficial].
+-    *   If the coarser neighbor already has a vertex, use it to ensure consistency.
+-4.  Generate triangles for the current node using the standard MC lookup table, referencing vertices from the Intersection List.
+-
+-**Second Pass: Subdivision and Finalization**
+-1.  Process all nodes in the **Second Pass List**.
+-2.  For each node in the list:
+-    *   Check if it has two vertices on the same edge in its fine edge vertex list (indicating a conflict where the coarse resolution failed to capture the isosurface crossing) [S1, unofficial].
+-    *   If such a conflict exists, **subdivide** the coarser cube. This involves interpolating between the known cube vertex values at the coarser resolution to create finer children, which are then processed using the standard MC algorithm [S1, unofficial].
+-    *   If no subdivision is needed but the node has facial vertices that were deferred, generate the triangles [S1, unofficial].
++1.  **First Pass:** Traverse all cubes in the AR representation and generate triangles using the standard MC algorithm [S1, unofficial].
++2.  **Handle Missing Vertices:** If a finer cube finds an intersection on an edge but the coarser neighbor has no vertex on that edge (coarse vertices are on the same side of the isosurface), create a new entry in the coarser neighbor's fine edge vertex list [S1, unofficial].
++3.  **Queue for Post-Processing:** Add the coarser neighbor node to the Second Pass List [S1, unofficial].
++4.  **Second Pass Trigger:** After the entire octree has been processed, process all octree nodes on the Second Pass List [S1, unofficial].
++5.  **Subdivision Check:** If a coarser resolution node on the Second Pass List discovers it has two vertices on the same edge of its edge vertex list, subdivide the cube [S1, unofficial].
+ 
+ ### Pseudocode
++```python
++def adaptive_marching_cubes(root_node, isovalue):
++    intersection_list = []  # Global vertex array storing edge intersection points
++    second_pass_list = []   # List of octree nodes requiring post-processing
+ 
+-```python
+-# Global data structures
+-intersection_list = []  # Array of vertex positions
+-second_pass_list = []   # List of octree nodes requiring post-processing
++    # First Pass: Traverse octree and generate initial triangles
++    traverse_octree(root_node, isovalue, intersection_list, second_pass_list)
+ 
+-def adaptive_marching_cubes(root_node, isovalue):
+-    # First Pass
+-    process_node(root_node, isovalue, is_second_pass=False)
+-    
+-    # Second Pass
+-    while second_pass_list is not empty:
++    # Second Pass: Process deferred nodes
++    while second_pass_list:
+         node = second_pass_list.pop()
+-        process_node(node, isovalue, is_second_pass=True)
++        process_deferred_node(node, isovalue, intersection_list, second_pass_list)
+ 
+-def process_node(node, isovalue, is_second_pass):
+-    if is_second_pass:
+-        # Check for conflicts requiring subdivision
+-        if node.has_edge_conflict():
+-            # Subdivide the coarse cube
++def traverse_octree(node, isovalue, intersection_list, second_pass_list):
++    if node.is_leaf():
++        # Standard MC lookup table generates triangles referencing intersection_list
++        triangles = standard_mc_lookup(node, isovalue, intersection_list)
++        node.triangle_list.extend(triangles)
++        # Check coarser neighbors for missing vertices
++        for edge in node.edges:
++            neighbor = node.get_coarser_neighbor(edge)
++            if neighbor is not None and not neighbor.has_vertex_on_edge(edge):
++                vertex = interpolate_edge(edge, isovalue)
++                neighbor.fine_edge_vertices[edge].append(vertex)
++                if neighbor not in second_pass_list:
++                    second_pass_list.append(neighbor)
++    else:
++        for child in node.children:
++            traverse_octree(child, isovalue, intersection_list, second_pass_list)
++
++def process_deferred_node(node, isovalue, intersection_list, second_pass_list):
++    # Check if coarser node has two vertices on the same edge
++    for edge, vertices in node.fine_edge_vertices.items():
++        if len(vertices) >= 2:
++            # Subdivide the coarse cube by interpolating between known cube vertex values
+             children = node.subdivide()
+             for child in children:
+-                process_node(child, isovalue, is_second_pass=False)
++                traverse_octree(child, isovalue, intersection_list, second_pass_list)
+             return
+-    
+-    # Standard Marching Cubes logic
+-    triangles = []
+-    for edge in node.edges:
+-        # Determine if isosurface crosses this edge
+-        if isovalue_between(node.vertices[edge.v1], node.vertices[edge.v2]):
+-            # Check for consistency with coarser neighbor
+-            neighbor = node.get_coarser_neighbor(edge)
+-            if neighbor is not None:
+-                if not neighbor.has_vertex_on_edge(edge):
+-                    # Missing vertex in coarser neighbor
+-                    # Create new vertex in intersection list
+-                    vertex = interpolate_intersection(edge, isovalue)
+-                    neighbor.add_fine_vertex(edge, vertex)
+-                    # Add coarser neighbor to second pass list if not already there
+-                    if neighbor not in second_pass_list:
+-                        second_pass_list.append(neighbor)
+-                else:
+-                    vertex = neighbor.get_vertex_on_edge(edge)
+-            else:
+-                vertex = interpolate_intersection(edge, isovalue)
+-            
+-            # Store vertex reference for triangle generation
+-            edge.vertex = vertex
++    # No conflict: generate triangles using deferred vertices
++    triangles = standard_mc_lookup(node, isovalue, intersection_list)
++    node.triangle_list.extend(triangles)
+ 
+-    # Generate triangles based on MC case
+-    triangles = generate_mc_triangles(node, isovalue)
+-    node.triangle_list.extend(triangles)
++def standard_mc_lookup(node, isovalue, intersection_list):
++    # Standard MC lookup table implementation [G]
++    pass
++
++def interpolate_edge(edge, isovalue):
++    # Linear interpolation between edge vertex values to find isosurface crossing
++    t = (isovalue - edge.v1_value) / (edge.v2_value - edge.v1_value)
++    return edge.v1 + t * (edge.v2 - edge.v1)
+ ```
+ 
+ ### Parameters and Edge Cases
+-*   **Isosurface Value:** The threshold value for extraction.
+-*   **Edge Cases:**
+-    *   **Missing Vertices:** Occur when a finer cube intersects an edge that a coarser neighbor does not. Handled by creating deferred vertices and subdividing the coarser node [S1, unofficial].
+-    *   **Precision:** Floating-point precision issues may cause inconsistent edge crossings. Standard MC robustness techniques should be applied [S1, unofficial].
+-    *   **Boundary Conditions:** Nodes at the boundary of the volume have no coarser neighbors in certain directions; these are handled as standard uniform nodes [S1, unofficial].
++*   **Isosurface Value:** The threshold value for extraction [S1, unofficial].
++*   **Missing Vertices:** Occur when a finer cube intersects an edge that a coarser neighbor does not, handled by creating deferred vertices and subdividing the coarser node [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the octree depth and the number of conflicts. In the worst case, many coarser nodes may be subdivided, approaching the cost of uniform high-resolution marching cubes. However, large uninteresting regions are skipped, reducing computation [S1, unofficial].
+-*   **Memory Complexity:** Higher than uniform MC due to the octree structure and the need to store deferred vertices and the second pass list. The intersection list grows dynamically [S1, unofficial].
+-*   **Strengths:** Efficiently handles large datasets by focusing resolution where needed; produces watertight meshes across resolution boundaries [S1, unofficial].
+-*   **Limitations:** The two-pass nature and potential for frequent subdivision can complicate implementation and reduce performance in highly heterogeneous data [S1, unofficial].
++*   **Time Complexity:** Depends on octree depth and conflict frequency, but unnecessary computation is avoided by skipping large sets of volume data deemed uninteresting [S1, unofficial].
++*   **Memory Complexity:** Higher than uniform MC due to the octree structure and deferred vertices, but memory space is saved by leaving uninteresting voxels out of the octree data structure [S1, unofficial].
++*   **Strengths:** Efficiently handles large datasets by focusing resolution where needed and produces consistent meshes across resolution boundaries [S1, unofficial].
++*   **Limitations:** The two-pass design and potential for frequent subdivision in highly heterogeneous data add implementation complexity and overhead [S1, unofficial].
+ 
+ ## Background
+-The Adaptive Marching Cubes algorithm was introduced by Westermann et al. as part of their work on isosurface rendering of adaptive resolution data [S1, unofficial]. It addresses the limitations of standard marching cubes when applied to multiresolution data structures, specifically the topological inconsistencies at resolution boundaries [S1, unofficial]. The method has been cited in subsequent works on implicit surface rendering and interactive visualization [S2, unofficial].
++The algorithm was implemented by Westermann et al. on multiresolution octree data [S2, unofficial]. It addresses the limitations of standard marching cubes when applied to multiresolution data structures, specifically topological inconsistencies at resolution boundaries [S1, unofficial]. The isosurface generation algorithm is derived from The Visualization Toolkit by Schroeder [S1, unofficial]. It has been cited in subsequent works on implicit surface rendering and interactive visualization [S2, unofficial]. Multiresolution data generation typically samples every other data point in each dimension to build coarser levels, with level 0 being the finest resolution containing a 128^3 representation where each cube contains eight vertices [S1, unofficial].
+ 
+ ## Sources

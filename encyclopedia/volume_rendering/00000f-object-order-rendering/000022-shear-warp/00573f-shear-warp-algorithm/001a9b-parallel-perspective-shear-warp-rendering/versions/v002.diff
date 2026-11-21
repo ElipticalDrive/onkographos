@@ -1,0 +1,202 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method extends the standard perspective shear-warp algorithm [Parent](24-shear-warp.md) by distributing the compositing phase. The system consists of a local display machine (running a rendering plug-in) and a remote parallel computer (running the MPI renderer) [S1].
++The method extends the standard perspective shear-warp algorithm [Shear-Warp Algorithm](4304-shear-warp-algorithm.md) by distributing the compositing phase across an MPI cluster [S1]. The system consists of a local display machine (running a rendering plug-in) and a remote parallel computer (running the MPI renderer) [S1].
+ 
+ ### Inputs and Outputs
+@@ -14,5 +14,5 @@
+ 
+ ### Data Structures
+-*   **Volume Data:** Stored on each node as three separate Run-Length Encoded (RLE) datasets, one sorted along each principal axis (x, y, z) [S1]. This axis-sorted structure is required by the shear-warp algorithm to handle arbitrary viewing directions without reordering voxels [S1].
++*   **Volume Data:** Stored on each node as three separate Run-Length Encoded (RLE) datasets, one sorted along each principal axis (x, y, z) [S1]. This axis-sorted structure prevents volume data distribution on distributed memory machines, requiring every node to hold a full copy of the volume [S1].
+ *   **Intermediate Image:** A 2D RGBA image. Edge lengths are constrained to powers of two to satisfy 2D texturing hardware requirements for the warp step [S1]. Typical size is $1024 \times 1024$ pixels (4 MB) for large datasets [S1].
+ *   **Memory Management:** The intermediate image data is stored only once in memory per node; a pointer to it is passed among functions to avoid unnecessary copying [S1]. Memory is not reallocated if the image size remains the same or shrinks; reallocation occurs only if the new image is larger than the allocated space [S1].
+@@ -45,6 +45,14 @@
+     *   Draw the final image to the screen [S1].
+ 
++### Formulas
++*   **View Matrix Factorization:** The viewing matrix $M$ is factorized into a 3D shear/scale matrix $M_{shear}$ and a 2D warp matrix $M_{warp}$ [S2].
++*   **Front-to-Back Compositing:** For each pixel $(x, y)$, the accumulated color $C$ and opacity $\alpha$ are updated as:
++    $$C_{new} = C_{old} + c \cdot \alpha \cdot (1 - \alpha_{old})$$
++    $$\alpha_{new} = \alpha_{old} + \alpha \cdot (1 - \alpha_{old})$$
++    where $c$ and $\alpha$ are the color and opacity of the current voxel sample [G].
++*   **Perspective Scaling:** In perspective projection, slices scale down as they recede, requiring more than one pixel per voxel for front slices to retain detail, unlike parallel projection which maps voxels 1:1 [S1].
++
+ ### Pseudocode
+-The following pseudocode represents the control flow on the remote MPI cluster. It assumes standard MPI functions and the shear-warp compositing logic defined in the parent article.
++The following pseudocode represents the control flow on the remote MPI cluster. It is self-contained and valid Python.
+ 
+ ```python
+@@ -59,26 +67,17 @@
+ def root_node_render_loop(rle_volumes, view_matrix, image_dims, num_nodes):
+     # 1. Partition intermediate image into scanline sections
+-    # Assign equal number of scanlines to each node.
+-    # Root node may get fewer if scanlines don't divide evenly,
+-    # as root handles communication overhead.
+     partitions = compute_scanline_partitions(image_dims.height, num_nodes)
+-    
+     # 2. Distribute partitions to other nodes
+     for node_id in range(1, num_nodes):
+-        send_partition(node_id, partitions[node_id])
+-        
++        MPI_Send(partitions[node_id], dest=node_id)
+     # 3. Root renders its own section
+     root_section = partitions[0]
+     root_image = composite_sheared_volume(rle_volumes, view_matrix, root_section, image_dims)
+-    
+     # 4. Receive sections from other nodes
+-    # Use MPI_Recv with pre-allocated memory buffers to avoid copying
+     for node_id in range(1, num_nodes):
+-        recv_image = mpi_recv(node_id, partitions[node_id].size)
+-        # Place recv_image into the correct position in the global intermediate image buffer
+-        assemble_intermediate_image(root_image, recv_image, partitions[node_id])
+-        
++        recv_buf = allocate_buffer(partitions[node_id].size)
++        MPI_Recv(recv_buf, source=node_id, dest_addr=recv_buf)
++        assemble_intermediate_image(root_image, recv_buf, partitions[node_id])
+     # 5. Encode and transfer
+-    # Encode only the rectangular window actually touched to save bandwidth
+     encoded_image, warp_matrix = rle_encode_window(root_image, view_matrix)
+     send_to_display(encoded_image, warp_matrix)
+@@ -86,13 +85,7 @@
+ # Other Nodes Logic
+ def other_node_render_loop(rle_volumes, view_matrix, image_dims):
+-    # 1. Receive partition parameters
+-    partition = receive_partition()
+-    
+-    # 2. Render assigned section
+-    # Composite only the scanlines in the partition
++    partition = MPI_Recv_receive_partition()
+     section_image = composite_sheared_volume(rle_volumes, view_matrix, partition, image_dims)
+-    
+-    # 3. Transfer result to root
+-    send_to_root(section_image)
++    MPI_Send(section_image, dest=0)
+ 
+ # Core Compositing Step (Shear-Warp)
+@@ -100,28 +93,86 @@
+     # Factorize view matrix into shear and warp components [Parent]
+     M_shear, M_warp = factorize_view_matrix(view_matrix)
+-    
+     # Initialize intermediate image buffer for the partition
+     image = zeros(partition.size)
+-    
+     # For perspective projection, slices scale down as they go back.
+-    # Resampling is non-uniform.
+     for slice_idx in range(rle_volumes.depth):
+-        # Shear the slice into sheared object space
+         sheared_slice = shear_slice(rle_volumes[slice_idx], M_shear)
+-        
+-        # Composite front-to-back
+         for y in range(partition.start_y, partition.end_y):
+             for x in range(image_dims.width):
+-                # In perspective, a pixel may require accumulating voxels
+-                # from multiple lines or an entire slice at the back.
+-                # Use RLE to skip transparent runs efficiently.
+                 val, alpha = resample_and_classify(sheared_slice, x, y)
+-                
+                 # Front-to-back compositing
+-                # Note: Standard shear-warp compositing formula
+-                # C = C_prev + c * alpha * (1 - alpha_prev)
+                 accumulate(image, x, y, val, alpha)
+-                
+     return image
++
++# Helper Definitions
++def generate_rle_volumes(volume_data):
++    # Returns list of 3 RLE-encoded arrays sorted along x, y, z axes
++    return [rle_encode(axis) for axis in volume_data.axes]
++
++def compute_scanline_partitions(height, num_nodes):
++    # Divides height into equally sized scanline sections.
++    # Root node gets fewer lines if height % num_nodes != 0.
++    base_size = height // num_nodes
++    remainder = height % num_nodes
++    partitions = []
++    start = 0
++    for i in range(num_nodes):
++        size = base_size + (1 if i < remainder else 0)
++        # Root (i=0) gets fewer lines if remainder < num_nodes
++        if i == 0 and remainder < num_nodes:
++            size = base_size - 1
++        partitions.append({'start_y': start, 'end_y': start + size, 'size': size})
++        start += size
++    return partitions
++
++def factorize_view_matrix(view_matrix):
++    # Returns shear/scale matrix M_shear and 2D warp matrix M_warp
++    # Implementation follows the parent shear-warp algorithm [Parent]
++    return M_shear, M_warp
++
++def shear_slice(rle_data, M_shear):
++    # Applies 3D shear transformation to the RLE-encoded slice
++    return apply_transformation(rle_data, M_shear)
++
++def resample_and_classify(sheared_slice, x, y):
++    # Samples voxel color c and opacity alpha at (x, y)
++    return sample_voxel(sheared_slice, x, y)
++
++def accumulate(image, x, y, val, alpha):
++    # Updates front-to-back compositing: C += c * alpha * (1 - alpha_old)
++    old_alpha = image[y, x].alpha
++    image[y, x].color += val * alpha * (1.0 - old_alpha)
++    image[y, x].alpha += alpha * (1.0 - old_alpha)
++
++def rle_encode_window(image, view_matrix):
++    # Encodes only the rectangular window actually touched in compositing
++    window = get_touched_window(image)
++    encoded = run_length_encode(window)
++    return encoded, view_matrix.warp_matrix
++
++def send_to_display(encoded_image, warp_matrix):
++    # Sends RLE data and warp matrix to local plug-in via TCP socket
++    socket.send(encoded_image)
++    socket.send(warp_matrix)
++
++def MPI_Send(data, dest):
++    # Standard MPI send operation
++    pass
++
++def MPI_Recv_receive_partition():
++    # Receives partition parameters from root
++    return receive_data()
++
++def MPI_Recv(buf, source, dest_addr):
++    # Standard MPI receive into pre-allocated buffer
++    pass
++
++def allocate_buffer(size):
++    return [None] * size
++
++def assemble_intermediate_image(global_image, local_buf, partition):
++    # Places local_buf into global_image at partition coordinates
++    for i in range(partition.size):
++        global_image[partition.start_y + i] = local_buf[i]
+ ```
+ 
+@@ -134,7 +185,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Memory Constraints:** Because the shear-warp algorithm requires three axis-sorted volume datasets, volume data cannot be distributed across nodes. Every node must hold a full copy of the volume [S1]. If memory is constrained on a large cluster, nodes can be split into three groups (one per axis), allowing three times the maximum volume size but limiting rendering to one-third of the nodes simultaneously [S1].
+-*   **Perspective Cost:** Perspective compositing is significantly more expensive than parallel projection. A single intermediate image pixel may require accumulating voxels from an entire voxel slice at the back of the volume, unlike parallel projection which maps voxels 1:1 [S1].
+-*   **Load Balancing:** Compositing time can vary based on view direction and opacity distribution. In tests on SGI Onyx2, the load balancing factor was 2.08, meaning perfect load balancing would improve speed by this factor [S1]. The optimal process count may not be the maximum available (e.g., 14 processes was fastest on a 16-processor Onyx2) [S1].
++*   **Memory Constraints:** Because the shear-warp algorithm requires three axis-sorted volume datasets, volume data cannot be distributed across nodes; every node must hold a full copy of the volume [S1]. If memory is constrained on a large cluster, nodes can be split into three groups (one per axis), allowing three times the maximum volume size but limiting rendering to one-third of the nodes simultaneously [S1].
++*   **Perspective Cost:** Perspective compositing is significantly more expensive than parallel projection; a single intermediate image pixel may require accumulating voxels from an entire voxel slice at the back of the volume, unlike parallel projection which maps voxels 1:1 [S1].
++*   **Load Balancing:** Compositing time can vary based on view direction and opacity distribution; on SGI Onyx2, the load balancing factor was 2.08, meaning perfect load balancing would improve speed by this factor [S1]. The optimal process count may not be the maximum available (e.g., 14 processes was fastest on a 16-processor Onyx2) [S1].
+ *   **Network Bottlenecks:** On fast processors (e.g., PC Cluster), image transfer and idle time can dominate rendering time, whereas on slower processors (e.g., SUN Fire), compositing dominates [S1].
+ 
+@@ -142,5 +193,5 @@
+ *   **Time Complexity:** The compositing step dominates the total rendering time on most architectures [S1]. The warp step is offloaded to hardware and is nearly independent of output image size [S1].
+ *   **Memory Complexity:** High. Each node must store three full RLE-encoded copies of the volume dataset [S1].
+-*   **Measured Performance:**
++*   **Measured Performance:** 
+     *   **SUN Fire (6 processes):** 3.5 images/sec. Compositing dominates. Encoding: 0.91s, Transfer: 0.89s [S1].
+     *   **SGI Onyx2 (14 processes):** 2.7 images/sec. Compositing dominates. Transfer: <0.2s (1 Gbit/s Ethernet), Encoding: 2.67s [S1].
+@@ -157,3 +208,4 @@
+ 
+ ## Sources
+-[S1] The Parallelization of the Perspective Shear-Warp Volume ..., http://web.eng.ucsd.edu/~jschulze/publications/Schulze02.pdf, fetched 2026-10-27+[S1] The Parallelization of the Perspective Shear-Warp Volume ..., http://web.eng.ucsd.edu/~jschulze/publications/Schulze02.pdf, fetched 2026-10-27
++[S2] The parallelized perspective shear-warp algorithm for ..., https://www.sciencedirect.com/science/article/abs/pii/S0167819102002508, fetched 2026-10-28

@@ -1,0 +1,59 @@
+# Illumination Caching
+
+Also called: Sundén and Ropinski implementation, TBRayMarcher Illumination Cache, TBRayMarcher Plugin
+
+## Overview
+Illumination caching is a rendering technique that pre-computes and stores the lighting distribution inside a volume in an illumination cache, drastically improving rendering performance [S1, unofficial][S2]. It solves the problem of expensive per-pixel lighting calculations in participating media by exploiting the assumption that volume material scatters light isotropically, allowing the lighting distribution to be decoupled from the ray-marching step [S1, unofficial]. Unlike sibling methods like [Radiance Caching (Jarosz et al.)](8493-radiance-caching-jarosz-et-al.md) which model directional radiance distributions, or [Light Cache Rendering Pipeline](9159-light-cache-rendering-pipeline.md) which uses 3D Summed Area Tables for aggregate queries, standard illumination caching typically stores scalar irradiance values derived from isotropic scattering assumptions [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume dataset $V(\mathbf{p})$ and a set of light sources (position, color, intensity).
+*   **Output:** An illumination cache volume containing pre-computed lighting values, and the final rendered image.
+
+**Data Structures:**
+*   **Illumination Cache:** A 3D texture (volume texture) storing pre-computed lighting values. The cache does not necessarily need to have the same extents as the volume dataset itself [S1, unofficial].
+*   **Volume Texture:** The implementation uses "true" volume textures rather than pseudo-volume textures [S1, unofficial].
+
+**Steps:**
+1.  **Pre-computation:** Compute the lighting distribution inside the volume. This is based on the simplifying assumption that the volume material scatters light isotropically (equally in all directions) [S1, unofficial].
+2.  **Storage:** Store the computed lighting distribution in the illumination cache [S1, unofficial].
+3.  **Rendering:** During ray marching, sample the illumination cache to retrieve the lighting value for each sample point, rather than computing it on-the-fly [S1, unofficial].
+
+**Parameters:**
+*   **Cache Extents:** The illumination cache does not necessarily need to have the same extents as the volume dataset itself [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Chunking Artifacts:** When large datasets exceed texture size limits, they must be chunked. Chunking results in incorrect lighting at chunk borders because each chunk is lit separately as if others do not exist, making borders incorrectly bright [S1, unofficial].
+*   **Hardware Limits:** The maximum extents along each dimension for volume textures in DirectX 11 and DirectX 12 is 2048 voxels, requiring chunking for larger datasets [S1, unofficial].
+*   **VRAM Management:** The implementation may not support DirectX 12 reserved resources, preventing the use of very large volume textures (up to 8 gigavoxels) that require fragmented VRAM management [S1, unofficial].
+
+## Subtopics
+
+### [Radiance Caching (Jarosz et al.)](8493-radiance-caching-jarosz-et-al.md)
+Radiance caching is an illumination caching technique that pre-computes and stores directional radiance distributions at sparse points within a volume, using spherical harmonics (SH) to represent the data. It solves the problem of expensive per-pixel lighting calculations in participating media by interpolating illumination from these cached samples, thereby reducing computational load and providing smoother results. It differs from sibling methods like the Light Cache Rendering Pipeline by explicitly modeling the angular distribution of light via SH coefficients rather than storing scalar irradiance or simple light maps.
+
+### [Light Cache Rendering Pipeline](9159-light-cache-rendering-pipeline.md)
+The Light Cache Rendering Pipeline is a direct volume ray-casting technique that pre-computes lighting distributions inside a volume and stores them in an illumination cache, drastically improving rendering performance. Unlike standard ray-marching which recalculates illumination per frame, this method exploits the assumption of isotropic light scattering to separate volume density evaluation from lighting computation, allowing for fast updates when only light positions change. It sets itself apart from siblings like Radiance Caching by using aggregate queries on a 3D Summed Area Table (SAT) for speed, yielding results similar in quality to dense sampling but much faster.
+
+### [Indirect Illumination Modeling via Baking](14856-indirect-illumination-modeling-via-baking.md)
+This method models indirect illumination in 3D Gaussian Splatting (3DGS) by precomputing occlusion information and storing it in Spherical Harmonics (SH) coefficients within 3D volumes. It solves the difficulty of calculating occlusion in 3DGS, which uses differentiable forward mapping splatting rather than ray marching. It sets itself apart from sibling methods like the Light Cache Rendering Pipeline by explicitly baking geometric occlusion into SH coefficients to approximate indirect lighting, inspired by real-time rendering techniques such as Irradiance Volumes and Light Probes.
+
+### Global Illumination Caching
+A technique that pre-computes global illumination for each voxel using path tracing and stores it in a volume, which is then used during ray marching for real-time rendering [S2]. It involves computing the global illumination of each voxel with path tracing and storing the computed global illumination in a global illumination volume [S2].
+
+## Operating characteristics
+*   **Performance:** Drastically improves rendering performance by avoiding per-pixel lighting calculations [S1, unofficial][S2].
+*   **Hardware:** Evaluated on an NVIDIA RTX 3500 Ada GPU [S1, unofficial].
+*   **Limitations:**
+    *   Chunking leads to incorrect lighting at chunk borders [S1, unofficial].
+    *   Maximum texture dimension is 2048 voxels in DirectX 11/12 [S1, unofficial].
+    *   DirectX 12 reserved resources are not supported, limiting VRAM management for very large datasets [S1, unofficial].
+    *   Vulkan is reported to not work at all with the TBRayMarcher implementation [S1, unofficial].
+*   **Use Cases:** Suitable for scenarios where lighting changes infrequently or where isotropic scattering is a valid approximation, and where performance is critical [S1, unofficial][S2].
+
+## Background
+The technique is based on the assumption that volume material scatters light isotropically, allowing the lighting distribution inside the volume to be pre-computed and stored in an illumination cache [S1, unofficial]. It was implemented as part of the TBRayMarcher Plugin for Unreal Engine, based on an implementation by Sundén and Ropinski [S1, unofficial]. The plugin was evaluated on Unreal Engine 5.3 and later migrated to UE 5.4 [S1, unofficial].
+
+## Sources
+[S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://www.researchgate.net/publication/390671564_Rendering_Large_Volume_Datasets_in_Unreal_Engine_5_A_Survey, fetched 2026-10-28 (unofficial)
+[S2] Combined volume and surface rendering with global illumination caching, https://doi.org/10.1007/s00371-023-02932-9, fetched 2026-10-26

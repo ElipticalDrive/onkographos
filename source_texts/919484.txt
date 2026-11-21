@@ -1,0 +1,1396 @@
+Xarray extension for unstructured climate and global weather data analysis and visualization. - Screen bounding-box subset candidates on node coordinates before computing bounds by rajeeja · Pull Request #1779 · UXARRAY/uxarray
+
+Screen bounding-box subset candidates on node coordinates before computing bounds by rajeeja · Pull Request #1779 · UXARRAY/uxarray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rajeeja
+commented
+Sep 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Closes #1778 (its first point; the face_node_connectivity cost is a reader problem and stays open in #1778's discussion).
+Overview
+subset.bounding_box computed Grid.bounds for every face before testing which fall inside the box, so a small crop of a large mesh cost memory and time proportional to the mesh.
+It now screens faces on their node coordinates first: a face's bounds contain each of its nodes, so a face can only lie inside the box if all its nodes do. Bounds are computed for those candidates only, on the nodes they use. The screen needs no margin and makes no assumption about face size or shape. The result is identical to the whole-mesh path, and cached bounds are used when present.
+Along the way, the bounds kernel dropped a node from its own face's bounds when both adjacent edges bulge poleward (70 faces in geoflow-small); fixed in the first commit, since the screen relies on bounds containing the nodes.
+faces_within_lon_bounds / faces_within_lat_bounds docstrings now say what they do (containment, not overlap).
+Measured
+12-corner SCRIP mesh from the #1778 MCVE, crop of ~0.007% of faces:
+n_face
+before
+after
+400,000
+0.19 GiB, 0.77 s
+0.003 GiB, 0.00 s
+1,600,000
+0.78 GiB, 2.77 s
+0.003 GiB, 0.02 s
+HEALPix zoom 8 (786k faces), Texas box: 88 MB / 973 ms → 13 MB / 11 ms.
+Testing
+TestBoundingBoxSubset compares the screened path against the whole-mesh path on 7 grids × 12 boxes (polar, antimeridian-crossing, whole globe, empty), asserts bounds is never populated, counts the faces the bounds kernel sees, checks cached bounds are used, that faces straddling a box edge are excluded, nodes on the box edge, antimeridian and pole faces explicitly, and an empty region on a partial grid. test_face_bounds_contain_every_node pins the kernel fix.
+New benchmarks/subset.py: time_ and track_peakmem_ for bounding_box on fresh oQU and HEALPix grids.
+PR Checklist
+General
+An issue is created and linked
+Added appropriate labels
+Filled out Overview and Expected Usage (if applicable) sections
+Testing & Benchmarking
+There is adequate test coverage of changes from this PR
+If this PR could affect performance, ran ASV benchmarks and confirmed they show expected behavior (added benchmarks/subset.py)
+Documentation and Examples
+Docstrings updated with any function changes, and included in all new functions
+[N/A] User (public) functions added to docs/api.rst
+[N/A] If touched any notebook files, cleared the output of all cells before committing
+[N/A] If added new notebook files, put into appropriate directories and referenced in appropriate files
+AI Disclosure
+AI Usage: Claude
+I have tested and take responsibility for all AI-generated content in my PR.
+rajeeja
+added 2 commits
+September 22, 2026 03:45
+Filter a bounding-box subset on face latitudes before computing bounds
+…
+d7eebe7
+```
+subset.bounding_box asked for Grid.bounds, which builds a per-face box for
+every face in the mesh -- materializing the node coordinate and connectivity
+arrays to do it -- and only then tested which faces fall inside the region.
+The cost was proportional to the mesh rather than the crop, so cropping a
+few hundred faces out of a large grid needed memory proportional to the
+whole grid. On a 300M-face SCRIP mesh that exceeds the machine, and the
+subset is not slow but impossible (#1778).
+
+Face latitudes are already resident, so they now discard faces that cannot
+be in the result before any bounds are computed; exact bounds are built for
+the survivors only. Measured on a 12-corner SCRIP mesh, crop ~0.007% of the
+faces:
+
+  1,600,000 faces   0.84 GiB, 2.6 s  ->  0.00 GiB, 0.8 s
+  3,200,000 faces   1.48 GiB, 5.1 s  ->  0.00 GiB, 1.6 s
+
+Two things measurement settled that reasoning got wrong. The first attempt
+filtered longitude on face centres too, with a margin sized from the mean
+face area; that is unsafe near the poles, where a face is recorded as
+spanning every longitude and its bounds sit up to 354 degrees from its own
+centre on a HEALPix z3 grid. No finite margin covers that, so longitude is
+left to the exact stage. The second attempt kept a latitude margin for the
+same reason -- and it is unnecessary, because faces_within_lat_bounds keeps
+a face only when its bounds are fully contained in the interval, despite the
+docstring saying "overlap". A contained face has a contained centre, so the
+filter is conservative by equality rather than by a fudge factor.
+
+The exact path is unchanged below a million faces and whenever bounds are
+already computed, since the filter cannot repay itself there.
+
+Tests compare the filtered and exact paths across three resolutions and
+eight boxes including antimeridian-spanning and polar cases, and pin the two
+measurements the design rests on: that longitude bounds reach far beyond a
+face centre, and that the latitude test is containment rather than overlap.
+If either stops being true the pre-filter is wrong and these fail.
+```
+Add a longitude prefilter to the bounding-box subset
+…
+bdadb0e
+```
+The latitude prefilter alone leaves a global belt: every face at the crop's
+latitude, at every longitude. On a HEALPix mesh a Texas-sized box still kept
+8.3% of the faces.
+
+Longitude needs a margin where latitude did not, and the margin has to widen
+towards the poles because meridians converge -- a fixed-area face spans more
+longitude the higher it sits. Normalising the measured reach by 1/cos(lat)
+collapses it to a constant 4.39 face widths across zooms 4, 5 and 6, which is
+what makes the bound derivable rather than tuned. Eight face widths,
+latitude-corrected, had zero violations from zoom 3 through 7.
+
+Two kinds of face cannot be filtered on a centre at all and are always kept:
+one whose bounds are stored min > max crosses the antimeridian, so its centre
+is not between them, and one containing a pole is recorded as spanning every
+longitude. Both are under 1% of faces by zoom 6.
+
+Texas candidates fall from 8.3% to 0.5% of the mesh, improving with
+resolution. 44 of 44 boxes return exactly what the unfiltered path returns,
+including antimeridian-spanning and polar queries.
+```
+rajeeja
+mentioned this pull request
+Sep 22, 2026
+Bounding-box subset allocates memory proportional to the whole mesh, not the crop
+#1778
+Open
+rajeeja
+requested review from
+Sevans711,
+cmdupuis3 and
+erogluorhan
+September 22, 2026 17:29
+Sevans711
+added
+scalability
+Related to scalability & performance efforts
+run-benchmark
+Run ASV benchmark workflow
+labels
+Sep 23, 2026
+github-actions
+Bot
+commented
+Sep 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+ASV Benchmarking
+Benchmark Comparison Results
+Benchmarks that have improved:
+Change
+Before [f67dba7]
+After [d2f0ff4]
+Ratio
+Benchmark (Parameter)
+-
+2.13M
+1.89M
+0.89
+face_bounds.FaceBounds.track_peakmem_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/mpas/QU/oQU480.231010.nc'))
+-
+2.09M
+1.89M
+0.9
+face_bounds.FaceBounds.track_peakmem_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/scrip/outCSne8/outCSne8.nc'))
+-
+60.2±1ms
+6.12±0.7ms
+0.1
+subset.BoundingBox.time_bounding_box('120km')
+-
+8.69±0.5ms
+3.14±0.2ms
+0.36
+subset.BoundingBox.time_bounding_box('480km')
+-
+3.38M
+2.38M
+0.7
+subset.BoundingBox.track_peakmem_bounding_box('120km')
+-
+330k
+203k
+0.61
+subset.BoundingBox.track_peakmem_bounding_box('480km')
+-
+77.6±2ms
+3.17±0.3ms
+0.04
+subset.BoundingBoxHealpix.time_bounding_box(6)
+-
+1.18±0.02s
+12.7±0.7ms
+0.01
+subset.BoundingBoxHealpix.time_bounding_box(8)
+-
+5.53M
+2.31M
+0.42
+subset.BoundingBoxHealpix.track_peakmem_bounding_box(6)
+-
+88.3M
+13.2M
+0.15
+subset.BoundingBoxHealpix.track_peakmem_bounding_box(8)
+Benchmarks that have stayed the same:
+Change
+Before [f67dba7]
+After [d2f0ff4]
+Ratio
+Benchmark (Parameter)
+678±20μs
+729±30μs
+1.08
+connectivity.Connectivity.time_edge_face('120km')
+245±10μs
+249±20μs
+1.02
+connectivity.Connectivity.time_edge_face('480km')
+3.52±0.2ms
+3.98±0.8ms
+~1.13
+connectivity.Connectivity.time_edge_node('120km')
+584±20μs
+632±50μs
+1.08
+connectivity.Connectivity.time_edge_node('480km')
+32.7±6μs
+41.7±8μs
+~1.27
+connectivity.Connectivity.time_face_edge('120km')
+30.3±6μs
+34.9±5μs
+~1.15
+connectivity.Connectivity.time_face_edge('480km')
+407±10μs
+411±10μs
+1.01
+connectivity.Connectivity.time_face_face('120km')
+230±7μs
+255±20μs
+~1.11
+connectivity.Connectivity.time_face_face('480km')
+31.1±7μs
+37.0±10μs
+~1.19
+connectivity.Connectivity.time_face_node('120km')
+29.6±5μs
+33.6±8μs
+~1.13
+connectivity.Connectivity.time_face_node('480km')
+241±20μs
+275±40μs
+~1.14
+connectivity.Connectivity.time_n_nodes_per_face('120km')
+191±10μs
+222±30μs
+~1.16
+connectivity.Connectivity.time_n_nodes_per_face('480km')
+663±20μs
+688±30μs
+1.04
+connectivity.Connectivity.time_node_edge('120km')
+225±10μs
+244±10μs
+1.09
+connectivity.Connectivity.time_node_edge('480km')
+40.5±2ms
+49.5±6ms
+~1.22
+connectivity.Connectivity.time_node_face('120km')
+2.53±0.03ms
+2.79±0.1ms
+~1.10
+connectivity.Connectivity.time_node_face('480km')
+1.42M
+1.42M
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_edge_face('120km')
+105k
+105k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_edge_face('480km')
+6.48M
+6.48M
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_edge_node('120km')
+419k
+419k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_edge_node('480km')
+2.05k
+2.05k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_face_edge('120km')
+2.05k
+2.05k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_face_edge('480km')
+1.6M
+1.6M
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_face_face('120km')
+101k
+101k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_face_face('480km')
+2.18k
+2.18k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_face_node('120km')
+2.18k
+2.18k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_face_node('480km')
+240k
+240k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_n_nodes_per_face('120km')
+26k
+26k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_n_nodes_per_face('480km')
+1.9M
+1.9M
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_node_edge('120km')
+127k
+127k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_node_edge('480km')
+11.9M
+11.9M
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_node_face('120km')
+747k
+747k
+1.00
+connectivity.ConnectivityTracemalloc.track_peakmem_node_face('480km')
+5.08±0.1ms
+5.61±0.9ms
+~1.11
+face_bounds.FaceBounds.time_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/mpas/QU/oQU480.231010.nc'))
+1.55±1ms
+1.84±0.5ms
+~1.19
+face_bounds.FaceBounds.time_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/scrip/outCSne8/outCSne8.nc'))
+7.27±0.6ms
+7.12±2ms
+0.98
+face_bounds.FaceBounds.time_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/geoflow-small/grid.nc'))
+785±50μs
+766±30μs
+0.98
+face_bounds.FaceBounds.time_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/quad-hexagon/grid.nc'))
+57.3k
+57.3k
+1.00
+face_bounds.FaceBounds.track_nbytes_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/mpas/QU/oQU480.231010.nc'))
+12.3k
+12.3k
+1.00
+face_bounds.FaceBounds.track_nbytes_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/scrip/outCSne8/outCSne8.nc'))
+123k
+123k
+1.00
+face_bounds.FaceBounds.track_nbytes_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/geoflow-small/grid.nc'))
+128
+128
+1.00
+face_bounds.FaceBounds.track_nbytes_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/quad-hexagon/grid.nc'))
+1.27M
+1.27M
+1.00
+face_bounds.FaceBounds.track_nbytes_grid_with_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/mpas/QU/oQU480.231010.nc'))
+50.1k
+50.1k
+1.00
+face_bounds.FaceBounds.track_nbytes_grid_with_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/scrip/outCSne8/outCSne8.nc'))
+1.48M
+1.48M
+1.00
+face_bounds.FaceBounds.track_nbytes_grid_with_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/geoflow-small/grid.nc'))
+712
+712
+1.00
+face_bounds.FaceBounds.track_nbytes_grid_with_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/quad-hexagon/grid.nc'))
+2.25M
+2.05M
+0.91
+face_bounds.FaceBounds.track_peakmem_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/geoflow-small/grid.nc'))
+35.3k
+35.3k
+1.00
+face_bounds.FaceBounds.track_peakmem_face_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/quad-hexagon/grid.nc'))
+621±30ns
+621±9ns
+1.00
+geometry_kernels.AccucrossKernels.time_accucross
+1.29±0.03μs
+1.34±0.03μs
+1.04
+geometry_kernels.AccucrossKernels.time_accucross_pair
+255±10ns
+281±40ns
+~1.10
+geometry_kernels.EFTPrimitives.time_acc_sqrt_re
+240±10ns
+271±40ns
+~1.13
+geometry_kernels.EFTPrimitives.time_diff_of_products
+210±8ns
+216±8ns
+1.03
+geometry_kernels.EFTPrimitives.time_two_prod
+210±9ns
+220±20ns
+1.05
+geometry_kernels.EFTPrimitives.time_two_sum
+351±10ns
+365±10ns
+1.04
+geometry_kernels.GCAConstLatIntersection.time_accux_constlat_kernel
+456±10ns
+456±10ns
+1.00
+geometry_kernels.GCAConstLatIntersection.time_gca_const_lat_intersection
+466±20ns
+466±10ns
+1.00
+geometry_kernels.GCAConstLatIntersection.time_try_gca_const_lat_intersection
+605±20ns
+619±40ns
+1.02
+geometry_kernels.GCAGCAIntersection.time_accux_gca_kernel
+883±40ns
+827±40ns
+0.94
+geometry_kernels.GCAGCAIntersection.time_gca_gca_intersection
+890±60ns
+973±20ns
+1.09
+geometry_kernels.GCAGCAIntersection.time_try_gca_gca_intersection
+33.8±0.5μs
+32.2±0.5μs
+0.95
+geometry_kernels.OrientPredicates.time_on_minor_arc
+32.8±0.2μs
+33.2±0.3μs
+1.01
+geometry_kernels.OrientPredicates.time_orient3d_on_sphere
+3.49±0ms
+3.50±0.01ms
+1.00
+geometry_samebody.SameBodyConstLat.time_accux_dispatch
+605±2μs
+637±3μs
+1.05
+geometry_samebody.SameBodyConstLat.time_accux_kernel
+3.39±0.01ms
+3.36±0ms
+0.99
+geometry_samebody.SameBodyConstLat.time_fp64_dispatch
+92.2±0.2μs
+91.8±0.3μs
+1.00
+geometry_samebody.SameBodyConstLat.time_fp64_kernel
+44.3±0.1ms
+44.3±0.1ms
+1.00
+geometry_samebody_gcagca.SameBodyGcaGca.time_accux_dispatch
+4.12±0.01ms
+4.16±0.03ms
+1.01
+geometry_samebody_gcagca.SameBodyGcaGca.time_accux_kernel
+40.7±0.01ms
+40.7±0.03ms
+1.00
+geometry_samebody_gcagca.SameBodyGcaGca.time_fp64_dispatch
+517±10μs
+538±10μs
+1.04
+geometry_samebody_gcagca.SameBodyGcaGca.time_fp64_kernel
+715±3ms
+713±7ms
+1.00
+import.Imports.timeraw_import_uxarray
+1
+1
+1.00
+lazy_grid_construction.LazyGridConstruction.track_computes_isel
+2
+2
+1.00
+lazy_grid_construction.LazyGridConstruction.track_computes_open_grid_chunked
+68.8±0.2ms
+69.7±0.6ms
+1.01
+lazy_grid_construction.OpenGridChunked.time_open_grid('120km')
+92.6±0.5ms
+94.9±0.7ms
+1.02
+lazy_grid_construction.OpenGridChunked.time_open_grid('480km')
+2M
+2.01M
+1.01
+lazy_grid_construction.OpenGridChunked.track_peakmem_open_grid('120km')
+2.31M
+2.11M
+0.91
+lazy_grid_construction.OpenGridChunked.track_peakmem_open_grid('480km')
+1.41±0.01ms
+1.39±0.02ms
+0.99
+mpas_ocean.CheckNorm.time_check_norm('120km')
+1.07±0.01ms
+1.14±0.03ms
+1.07
+mpas_ocean.CheckNorm.time_check_norm('480km')
+524±3μs
+517±9μs
+0.99
+mpas_ocean.ConnectivityConstruction.time_face_face_connectivity('120km')
+273±4μs
+288±80μs
+1.06
+mpas_ocean.ConnectivityConstruction.time_face_face_connectivity('480km')
+344±7μs
+333±3μs
+0.97
+mpas_ocean.ConnectivityConstruction.time_n_nodes_per_face('120km')
+289±4μs
+286±10μs
+0.99
+mpas_ocean.ConnectivityConstruction.time_n_nodes_per_face('480km')
+3.22±0.01ms
+3.21±0.01ms
+1.00
+mpas_ocean.ConstructFaceLatLon.time_cartesian_averaging('120km')
+2.35±0.01ms
+2.34±0.01ms
+1.00
+mpas_ocean.ConstructFaceLatLon.time_cartesian_averaging('480km')
+86.6±0.2ms
+85.0±0.3ms
+0.98
+mpas_ocean.ConstructFaceLatLon.time_welzl('120km')
+7.39±0.01ms
+7.59±0.2ms
+1.03
+mpas_ocean.ConstructFaceLatLon.time_welzl('480km')
+16.3±0.05ms
+16.2±0.1ms
+0.99
+mpas_ocean.ConstructTreeStructures.time_ball_tree('120km')
+792±10μs
+795±7μs
+1.00
+mpas_ocean.ConstructTreeStructures.time_ball_tree('480km')
+8.11±0.06ms
+8.12±0.03ms
+1.00
+mpas_ocean.ConstructTreeStructures.time_kd_tree('120km')
+471±10μs
+469±10μs
+0.99
+mpas_ocean.ConstructTreeStructures.time_kd_tree('480km')
+405±2ms
+418±3ms
+1.03
+mpas_ocean.CrossSections.time_const_lat('120km', 1)
+207±3ms
+205±0.8ms
+0.99
+mpas_ocean.CrossSections.time_const_lat('120km', 2)
+106±0.2ms
+106±2ms
+1.00
+mpas_ocean.CrossSections.time_const_lat('120km', 4)
+361±1ms
+361±2ms
+1.00
+mpas_ocean.CrossSections.time_const_lat('480km', 1)
+187±3ms
+179±0.3ms
+0.96
+mpas_ocean.CrossSections.time_const_lat('480km', 2)
+92.3±0.2ms
+93.6±0.9ms
+1.01
+mpas_ocean.CrossSections.time_const_lat('480km', 4)
+16.5±0.04ms
+16.4±0.2ms
+1.00
+mpas_ocean.DualMesh.time_dual_mesh_construction('120km')
+1.63±0.03ms
+1.64±0.03ms
+1.01
+mpas_ocean.DualMesh.time_dual_mesh_construction('480km')
+8.08±1ms
+10.4±0.6ms
+~1.29
+mpas_ocean.FaceAreas.time_face_areas('120km')
+2.05±0.08ms
+2.43±0.2ms
+~1.19
+mpas_ocean.FaceAreas.time_face_areas('480km')
+229k
+229k
+1.00
+mpas_ocean.FaceAreas.track_nbytes_face_areas('120km')
+14.3k
+14.3k
+1.00
+mpas_ocean.FaceAreas.track_nbytes_face_areas('480km')
+2.12M
+2.12M
+1.00
+mpas_ocean.FaceAreas.track_peakmem_face_areas('120km')
+735k
+735k
+1.00
+mpas_ocean.FaceAreas.track_peakmem_face_areas('480km')
+33.9±0.6ms
+34.6±0.7ms
+1.02
+mpas_ocean.GeoDataFrame.time_to_geodataframe('120km', 'exclude')
+93.4±1ms
+97.1±1ms
+1.04
+mpas_ocean.GeoDataFrame.time_to_geodataframe('120km', 'split')
+3.38±0.08ms
+3.35±0.1ms
+0.99
+mpas_ocean.GeoDataFrame.time_to_geodataframe('480km', 'exclude')
+17.9±0.2ms
+17.9±0.2ms
+1.00
+mpas_ocean.GeoDataFrame.time_to_geodataframe('480km', 'split')
+10.8±0.04ms
+10.9±0.05ms
+1.01
+mpas_ocean.Gradient.time_gradient('120km')
+1.75±0ms
+1.77±0.01ms
+1.01
+mpas_ocean.Gradient.time_gradient('480km')
+457k
+457k
+1.00
+mpas_ocean.Gradient.track_nbytes_gradient('120km')
+28.7k
+28.7k
+1.00
+mpas_ocean.Gradient.track_nbytes_gradient('480km')
+3.44M
+3.44M
+1.00
+mpas_ocean.Gradient.track_peakmem_gradient('120km')
+226k
+226k
+1.00
+mpas_ocean.Gradient.track_peakmem_gradient('480km')
+148±0.8μs
+160±4μs
+1.08
+mpas_ocean.HoleEdgeIndices.time_construct_hole_edge_indices('120km')
+68.7±3μs
+72.1±3μs
+1.05
+mpas_ocean.HoleEdgeIndices.time_construct_hole_edge_indices('480km')
+79.9±2μs
+85.4±0.9μs
+1.07
+mpas_ocean.Integrate.time_integrate('120km')
+74.3±1μs
+78.9±0.9μs
+1.06
+mpas_ocean.Integrate.time_integrate('480km')
+18.4M
+18.4M
+1.00
+mpas_ocean.Integrate.track_nbytes_integrate('120km')
+1.2M
+1.2M
+1.00
+mpas_ocean.Integrate.track_nbytes_integrate('480km')
+78.9±1ms
+77.7±1ms
+0.98
+mpas_ocean.MatplotlibConversion.time_dataarray_to_polycollection('120km', 'exclude')
+79.2±2ms
+79.0±2ms
+1.00
+mpas_ocean.MatplotlibConversion.time_dataarray_to_polycollection('120km', 'include')
+78.7±1ms
+78.5±1ms
+1.00
+mpas_ocean.MatplotlibConversion.time_dataarray_to_polycollection('120km', 'split')
+5.48±0.1ms
+5.55±0.08ms
+1.01
+mpas_ocean.MatplotlibConversion.time_dataarray_to_polycollection('480km', 'exclude')
+5.72±0.7ms
+5.50±0.1ms
+0.96
+mpas_ocean.MatplotlibConversion.time_dataarray_to_polycollection('480km', 'include')
+5.47±0.07ms
+5.40±0.2ms
+0.99
+mpas_ocean.MatplotlibConversion.time_dataarray_to_polycollection('480km', 'split')
+176±5ms
+176±1ms
+1.00
+mpas_ocean.NeighborhoodBuild.time_build('120km', 1.0)
+356±5ms
+368±7ms
+1.03
+mpas_ocean.NeighborhoodBuild.time_build('120km', 5.0)
+9.80±1ms
+9.56±0.08ms
+0.98
+mpas_ocean.NeighborhoodBuild.time_build('480km', 1.0)
+11.5±0.3ms
+11.8±0.4ms
+1.03
+mpas_ocean.NeighborhoodBuild.time_build('480km', 5.0)
+168±0.6ms
+170±0.9ms
+1.01
+mpas_ocean.NeighborhoodBuild.time_query_radius('120km', 1.0)
+343±1ms
+371±10ms
+1.08
+mpas_ocean.NeighborhoodBuild.time_query_radius('120km', 5.0)
+8.89±0.07ms
+9.02±0.2ms
+1.01
+mpas_ocean.NeighborhoodBuild.time_query_radius('480km', 1.0)
+11.1±0.08ms
+11.2±0.04ms
+1.01
+mpas_ocean.NeighborhoodBuild.time_query_radius('480km', 5.0)
+612.76
+612.76
+1.00
+mpas_ocean.NeighborhoodBuild.track_mean_neighbors('120km', 15.0)
+74.17
+74.17
+1.00
+mpas_ocean.NeighborhoodBuild.track_mean_neighbors('120km', 5.0)
+37.29
+37.29
+1.00
+mpas_ocean.NeighborhoodBuild.track_mean_neighbors('480km', 15.0)
+6.57
+6.57
+1.00
+mpas_ocean.NeighborhoodBuild.track_mean_neighbors('480km', 5.0)
+141M
+141M
+1.00
+mpas_ocean.NeighborhoodBuild.track_nbytes_neighbors('120km', 15.0)
+17.4M
+17.4M
+1.00
+mpas_ocean.NeighborhoodBuild.track_nbytes_neighbors('120km', 5.0)
+563k
+563k
+1.00
+mpas_ocean.NeighborhoodBuild.track_nbytes_neighbors('480km', 15.0)
+123k
+123k
+1.00
+mpas_ocean.NeighborhoodBuild.track_nbytes_neighbors('480km', 5.0)
+145M
+145M
+1.00
+mpas_ocean.NeighborhoodBuild.track_peakmem_build('120km', 15.0)
+21.5M
+21.5M
+1.00
+mpas_ocean.NeighborhoodBuild.track_peakmem_build('120km', 5.0)
+824k
+824k
+1.00
+mpas_ocean.NeighborhoodBuild.track_peakmem_build('480km', 15.0)
+384k
+384k
+1.00
+mpas_ocean.NeighborhoodBuild.track_peakmem_build('480km', 5.0)
+29.0±0.5ms
+29.2±0.09ms
+1.01
+mpas_ocean.NeighborhoodDask.time_mean('120km', 'grid_chunks')
+13.2±0.2ms
+13.0±0.2ms
+0.98
+mpas_ocean.NeighborhoodDask.time_mean('120km', 'numpy')
+26.6±0.2ms
+27.0±0.3ms
+1.02
+mpas_ocean.NeighborhoodDask.time_mean('120km', 'time_chunks')
+7.50±0.05ms
+7.42±0.06ms
+0.99
+mpas_ocean.NeighborhoodDask.time_mean('480km', 'grid_chunks')
+454±7μs
+445±10μs
+0.98
+mpas_ocean.NeighborhoodDask.time_mean('480km', 'numpy')
+5.26±0.04ms
+5.17±0.05ms
+0.98
+mpas_ocean.NeighborhoodDask.time_mean('480km', 'time_chunks')
+5.9M
+5.82M
+0.99
+mpas_ocean.NeighborhoodDask.track_peakmem_mean('120km', 'grid_chunks')
+2.75M
+2.75M
+1.00
+mpas_ocean.NeighborhoodDask.track_peakmem_mean('120km', 'numpy')
+5.67M
+5.68M
+1.00
+mpas_ocean.NeighborhoodDask.track_peakmem_mean('120km', 'time_chunks')
+754k
+755k
+1.00
+mpas_ocean.NeighborhoodDask.track_peakmem_mean('480km', 'grid_chunks')
+177k
+177k
+1.00
+mpas_ocean.NeighborhoodDask.track_peakmem_mean('480km', 'numpy')
+528k
+534k
+1.01
+mpas_ocean.NeighborhoodDask.track_peakmem_mean('480km', 'time_chunks')
+3.24±0.04s
+3.26±0.03s
+1.01
+mpas_ocean.NeighborhoodReduce.time_dataset_reduce('120km', 'mean')
+3.27±0.03s
+3.37±0.01s
+1.03
+mpas_ocean.NeighborhoodReduce.time_dataset_reduce('120km', 'median')
+84.3±0.3ms
+83.9±2ms
+1.00
+mpas_ocean.NeighborhoodReduce.time_dataset_reduce('480km', 'mean')
+84.9±2ms
+86.2±0.4ms
+1.02
+mpas_ocean.NeighborhoodReduce.time_dataset_reduce('480km', 'median')
+364±3ms
+371±2ms
+1.02
+mpas_ocean.NeighborhoodReduce.time_neighborhood_reduce('120km', 'mean')
+382±2ms
+396±1ms
+1.04
+mpas_ocean.NeighborhoodReduce.time_neighborhood_reduce('120km', 'median')
+11.5±0.1ms
+11.7±0.03ms
+1.02
+mpas_ocean.NeighborhoodReduce.time_neighborhood_reduce('480km', 'mean')
+11.8±0.2ms
+12.0±0.1ms
+1.02
+mpas_ocean.NeighborhoodReduce.time_neighborhood_reduce('480km', 'median')
+2.40±0.06ms
+2.53±0.05ms
+1.05
+mpas_ocean.NeighborhoodReduce.time_reduce('120km', 'mean')
+26.8±0.4ms
+27.6±0.2ms
+1.03
+mpas_ocean.NeighborhoodReduce.time_reduce('120km', 'median')
+111±2μs
+115±0.7μs
+1.04
+mpas_ocean.NeighborhoodReduce.time_reduce('480km', 'mean')
+345±7μs
+345±3μs
+1.00
+mpas_ocean.NeighborhoodReduce.time_reduce('480km', 'median')
+234k
+234k
+1.00
+mpas_ocean.NeighborhoodReduce.track_peakmem_reduce('120km', 'mean')
+235k
+235k
+1.00
+mpas_ocean.NeighborhoodReduce.track_peakmem_reduce('120km', 'median')
+19.5k
+19.5k
+1.00
+mpas_ocean.NeighborhoodReduce.track_peakmem_reduce('480km', 'mean')
+19.6k
+19.6k
+1.00
+mpas_ocean.NeighborhoodReduce.track_peakmem_reduce('480km', 'median')
+270±10μs
+261±8μs
+0.97
+mpas_ocean.PointInPolygon.time_face_search_lonlat('120km')
+248±20μs
+238±10μs
+0.96
+mpas_ocean.PointInPolygon.time_face_search_lonlat('480km')
+242±4μs
+245±6μs
+1.01
+mpas_ocean.PointInPolygon.time_face_search_xyz('120km')
+219±3μs
+217±1μs
+0.99
+mpas_ocean.PointInPolygon.time_face_search_xyz('480km')
+59.3±0.8ms
+62.6±0.7ms
+1.06
+mpas_ocean.RemapDownsample.time_bilinear_remapping
+10.2±0.1ms
+10.5±0.2ms
+1.03
+mpas_ocean.RemapDownsample.time_inverse_distance_weighted_remapping
+9.34±0.04ms
+9.50±0.1ms
+1.02
+mpas_ocean.RemapDownsample.time_nearest_neighbor_remapping
+689±3ms
+687±6ms
+1.00
+mpas_ocean.RemapUpsample.time_bilinear_remapping
+20.0±0.1ms
+19.9±0.07ms
+0.99
+mpas_ocean.RemapUpsample.time_inverse_distance_weighted_remapping
+7.78±0.02ms
+7.81±0.1ms
+1.00
+mpas_ocean.RemapUpsample.time_nearest_neighbor_remapping
+4.55±0.05ms
+4.63±0.1ms
+1.02
+mpas_ocean.ZonalAverage.time_zonal_average('120km')
+2.35±0.5ms
+2.42±0.05ms
+1.03
+mpas_ocean.ZonalAverage.time_zonal_average('480km')
+1.0193779277215917
+1.0400243651584855
+1.02
+nogil_scaling.GILScaling.track_gil_scaling
+738±4μs
+753±10μs
+1.02
+open_dataset.OpenDataset.time_open_dataset('dataset', 'dataset')
+1.58±0.02ms
+1.61±0.01ms
+1.02
+open_dataset.OpenDataset.time_open_dataset('dataset', 'file')
+3.31±0.01ms
+3.29±0.01ms
+0.99
+open_dataset.OpenDataset.time_open_dataset('file', 'dataset')
+4.10±0.01ms
+4.08±0.04ms
+1.00
+open_dataset.OpenDataset.time_open_dataset('file', 'file')
+148±10μs
+151±5μs
+1.02
+open_dataset.OpenDataset.time_open_dataset('grid', 'dataset')
+948±20μs
+945±6μs
+1.00
+open_dataset.OpenDataset.time_open_dataset('grid', 'file')
+227±2ms
+224±2ms
+0.99
+plots.PlotHealpix.time_default_plot(6)
+2.16±0.01s
+2.15±0.01s
+1.00
+plots.PlotHealpix.time_default_plot(8)
+28M
+28M
+1.00
+plots.PlotHealpix.track_peakmem_default_plot(6)
+443M
+443M
+1.00
+plots.PlotHealpix.track_peakmem_default_plot(8)
+5.61±0.1ms
+5.46±0.07ms
+0.97
+quad_hexagon.QuadHexagon.time_open_dataset
+4.76±0.02ms
+4.61±0.06ms
+0.97
+quad_hexagon.QuadHexagon.time_open_grid
+408
+408
+1.00
+quad_hexagon.QuadHexagon.track_nbytes_open_dataset
+392
+392
+1.00
+quad_hexagon.QuadHexagon.track_nbytes_open_grid
+69.9k
+70k
+1.00
+quad_hexagon.QuadHexagon.track_peakmem_open_dataset
+69.6k
+69.7k
+1.00
+quad_hexagon.QuadHexagon.track_peakmem_open_grid
+497±4ms
+494±2ms
+0.99
+to_raster.ToRaster.time_to_raster((10000.0, 10.0))
+1.03±0s
+1.04±0s
+1.00
+to_raster.ToRaster.time_to_raster((10000.0, 100.0))
+1.21±0s
+1.22±0.01s
+1.01
+to_raster.ToRaster.time_to_raster((100000.0, 100.0))
+270M
+270M
+1.00
+to_raster.ToRaster.track_peakmem((10000.0, 10.0))
+680M
+680M
+1.00
+to_raster.ToRaster.track_peakmem((10000.0, 100.0))
+765M
+765M
+1.00
+to_raster.ToRaster.track_peakmem((100000.0, 100.0))
+Benchmarks that have got worse:
+Change
+Before [f67dba7]
+After [d2f0ff4]
+Ratio
+Benchmark (Parameter)
++
+305M
+386M
+1.27
+face_bounds.FaceBoundsColdStartRss.track_peakmem_open_and_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/mpas/QU/oQU480.231010.nc'))
++
+305M
+386M
+1.27
+face_bounds.FaceBoundsColdStartRss.track_peakmem_open_and_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/scrip/outCSne8/outCSne8.nc'))
++
+305M
+386M
+1.27
+face_bounds.FaceBoundsColdStartRss.track_peakmem_open_and_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/geoflow-small/grid.nc'))
++
+305M
+386M
+1.27
+face_bounds.FaceBoundsColdStartRss.track_peakmem_open_and_bounds(PosixPath('/home/runner/work/uxarray/uxarray/test/meshfiles/ugrid/quad-hexagon/grid.nc'))
++
+305M
+386M
+1.27
+import.Imports.track_peakmem_import_uxarray
++
+322M
+386M
+1.2
+mpas_ocean.CrossSectionsPeakMem.track_peakmem_const_lat('120km', 1)
++
+322M
+386M
+1.2
+mpas_ocean.CrossSectionsPeakMem.track_peakmem_const_lat('120km', 2)
++
+322M
+386M
+1.2
+mpas_ocean.CrossSectionsPeakMem.track_peakmem_const_lat('120km', 4)
++
+305M
+386M
+1.27
+mpas_ocean.CrossSectionsPeakMem.track_peakmem_const_lat('480km', 1)
++
+305M
+386M
+1.27
+mpas_ocean.CrossSectionsPeakMem.track_peakmem_const_lat('480km', 2)
++
+305M
+386M
+1.27
+mpas_ocean.CrossSectionsPeakMem.track_peakmem_const_lat('480km', 4)
++
+317M
+386M
+1.22
+mpas_ocean.GradientColdStartRss.track_peakmem_gradient('120km')
++
+305M
+386M
+1.27
+mpas_ocean.GradientColdStartRss.track_peakmem_gradient('480km')
++
+324M
+386M
+1.19
+mpas_ocean.ZonalAveragePeakMem.track_peakmem_zonal_average('120km')
++
+307M
+386M
+1.26
+mpas_ocean.ZonalAveragePeakMem.track_peakmem_zonal_average('480km')
+Sevans711
+requested changes
+Sep 23, 2026
+View reviewed changes
+Sevans711
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This is a great idea. It definitely still needs some work before it is ready to merge; see inline comments. Two more notes here:
+(1) This doesn't fully close the original issue; #1778 is scoped to include the face_node_connectivity issue too. The original message in this PR should be updated accordingly, to avoid the "Closes #XXX" pattern. (EDIT: actually, upon a more careful read through of 1778, it's a bit unclear to me what the intent was. The title seems to indicate it is scoped just to the bounding-box subset issue, but the text seems to include the connectivity. If you meant to scope it only to the former, please clarify, and then feel free to keep this PR marked as "would close 1778"!)
+(2) The ASV benchmarks suite does not show any relevant improvements. Can benchmarks be added which show improvement from this PR? Ideally, at least one showing memory improvement, and at least one showing speed improvement. That would help prevent performance degradation in the future.
+Comment thread
+test/test_subset.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/test_subset.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/test_subset.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/test_subset.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/test_subset.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+uxarray/subset/grid_accessor.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+uxarray/subset/grid_accessor.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+uxarray/subset/grid_accessor.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+uxarray/subset/grid_accessor.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+uxarray/subset/grid_accessor.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+rajeeja
+added 4 commits
+September 24, 2026 17:53
+Merge branch 'main' into rajeeja/bbox-subset-prefilter
+a057275
+Include every node in face bounds
+…
+7e577f7
+```
+Each edge contributed either its interior latitude extreme or its first
+node, never both, so a face whose edges all bulge poleward lost its lowest
+node from its own bounds. geoflow-small has 70 such faces.
+```
+Screen bounding-box candidates on node coordinates
+…
+ef0db71
+```
+A face's bounds contain each of its nodes, so a face can only lie inside
+the box if all its nodes do. Bounds are then computed for those candidates
+alone, on the nodes they use, so the cost follows the region rather than
+the mesh. Replaces the centre-based filter and its tuned margins.
+```
+Benchmark bounding_box on fresh grids
+dd351b0
+rajeeja
+changed the title
+Filter a bounding-box subset on face latitudes before computing bounds
+Screen bounding-box subset candidates on node coordinates before computing bounds
+Sep 24, 2026
+rajeeja
+commented
+Sep 24, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@Sevans711 Reworked in 7e577f7..dd351b0: the centre filter is replaced by a node-coordinate screen with no margins, the bounds kernel now includes every node (it was dropping some), tests rewritten to check what they say, and benchmarks/subset.py added for time and peak memory. Description updated; #1778's connectivity point stays open there. Could you re-review?
+rajeeja
+requested a review
+from Sevans711
+September 24, 2026 22:35
+Merge branch 'main' into rajeeja/bbox-subset-prefilter
+65f1789
+Sevans711
+requested changes
+Sep 28, 2026
+View reviewed changes
+Sevans711
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Getting much closer! Some small inline comments.
+The ASV benchmarks look good and show the relevant changes, which addresses my previous comment (2).
+For my previous comment (1), your updated description is actually even more confusing to me. Do you think the connectivity point is in scope or out of scope for the original issue? (in scope --> this PR shouldn't close the issue. out of scope --> this PR should close the issue.)
+Comment thread
+uxarray/subset/grid_accessor.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/test_subset.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+test/grid/geometry/test_bounds.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+rajeeja
+added 2 commits
+October 5, 2026 11:55
+Merge remote-tracking branch 'origin/main' into pr1779
+a69c027
+Address review: top-level imports, test docstrings, clarify antimerid…
+…
+513c6a6
+```
+…ian logic
+
+- Move bounds/intersections/coordinates imports to module scope; no
+  circular import. Monkeypatch targets in the tests move with them.
+- Add a docstring to each test in TestBoundingBoxSubset saying what it
+  pins and why.
+- Spell out the lon_min > lon_max case in _faces_with_nodes_within_box:
+  the box is the union of two intervals, so a node is outside only in
+  the gap between them.
+- test_face_bounds_contain_every_node: say the behaviour it pins is
+  relative to main, fixed in this PR's first commit.
+```
+rajeeja
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Updated with latest main (brings in #1767) and pushed 513c6a6 addressing all four open threads: imports moved to module scope, a docstring on every test in TestBoundingBoxSubset, the antimeridian "either half" logic spelled out in the docstring with an example, and the "used to" in test_face_bounds_contain_every_node now says it is relative to main.
+Locally: test/test_subset.py, test/grid, test/core = 797 passed, pre-commit clean.
+@Sevans711 ready for another look when you have time.
+rajeeja
+requested a review
+from Sevans711
+October 5, 2026 17:05
+Merge remote-tracking branch 'origin/main' into rajeeja/bbox-subset-p…
+…
+234f388
+```
+…refilter
+```
+Sevans711
+reviewed
+Oct 20, 2026
+View reviewed changes
+Sevans711
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Looking great overall. Still one minor nit (see the last remaining unresolved inline comment from prior review).
+My only other question now is whether the increase to the nogil_scaling.GILScaling.track_gil_scaling benchmark is something we should be concerned about. @cmdupuis3 do you have any insights about what to expect from this benchmark in this PR? Is it an issue with the PR itself, or more likely to be noise?
+Aside from those points, I think I would be ready to approve!
+Merge branch 'main' into rajeeja/bbox-subset-prefilter
+a2dcd80
+cmdupuis3
+requested changes
+Oct 28, 2026
+View reviewed changes
+cmdupuis3
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Overall it seems good, the improvements are verified. I think there is more optimization work that can be done, but I think there are a few tradeoffs of peakmem vs speed that I didn't want to impose on this PR. Basically, np.intersect1d dominates in _faces_in_bounding_box, and there's a related np.unique that implements a sort we don't need. I'm also curious if some of the caching on main can be salvaged if the bounding box is relatively large compared to the grid.
+Comment thread
+uxarray/grid/bounds.py
+Outdated
+return bounds_lon
+@njit(cache=True, parallel=True, nogil=True)
+cmdupuis3
+Oct 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Suggested change
+@njit(cache=True, parallel=True, nogil=True)
+@parallel_njit
+Merge main and address bounds subset review feedback
+3ad8825
+rajeeja
+requested review from
+Sevans711 and
+cmdupuis3
+November 3, 2026 21:50
+Sevans711
+approved these changes
+Nov 4, 2026
+View reviewed changes
+Sevans711
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+All my previous comments have been addressed, and the nogil_scaling benchmark even stopped showing a big degradation (I'm still not sure if it was real or just noise before, anyway), so I'm happy to approve this one!
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+run-benchmark
+Run ASV benchmark workflow
+scalability
+Related to scalability & performance efforts
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

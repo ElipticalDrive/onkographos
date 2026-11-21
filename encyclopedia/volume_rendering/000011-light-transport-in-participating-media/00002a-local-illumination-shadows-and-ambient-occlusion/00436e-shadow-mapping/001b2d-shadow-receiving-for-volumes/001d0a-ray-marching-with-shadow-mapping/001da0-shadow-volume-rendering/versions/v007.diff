@@ -1,0 +1,212 @@
+--- v006.md
++++ v007.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Shadow Volume Rendering computes lighting shadows for volume rendering by precomputing a 3D texture (the shadow volume) that stores the accumulated opacity (transmittance) along rays cast from each voxel toward the light source [S1, unofficial][S3]. This allows the renderer to sample the shadow volume during the main volume integration pass to determine self-occlusion, avoiding the per-sample ray marching cost of calculating shadow at render time [S3]. It differs from [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md) by decoupling shadow calculation from the view-dependent ray march, trading memory bandwidth for reduced compute during the final image pass [S1, unofficial]. It is distinct from [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md) which accumulates light attenuation in a screen-space buffer, and [Deep Shadow Maps](2166-deep-shadow-maps.md) which store transmittance distributions in 2D textures rather than a 3D volume [S3].
++Shadow Volume Rendering computes lighting shadows for volume rendering by casting rays from each voxel toward the light source and accumulating opacity along the path to determine shadow intensity [S1, unofficial]. It precomputes a 3D texture storing the amount of light arriving at each sample after attenuation by intervening material [S3]. During rendering, interpolated values from this shadow volume are multiplied by colors from the transfer function [S3]. It differs from [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md) by precomputing shadow data in a 3D volume rather than using an opacity shadow map, and from [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md) which accumulates attenuation in a screen-space buffer [S3].
+ 
+ ## How it works
+-The method consists of two phases: precomputing the shadow volume using a compute shader, and sampling it during the final volume rendering pass.
++The method consists of two phases: precomputing the shadow volume using a compute shader, and sampling it during the final volume rendering pass [S1, unofficial][S3].
+ 
+ ### Inputs and Outputs
+@@ -14,5 +14,5 @@
+ *   `_TFTex`: `Texture2D` containing the 1D transfer function (TF), mapping density to color/alpha [S1, unofficial].
+ *   `_LightDirection`: `float3` defining the direction of the light source (assumed directional for the basic implementation) [S1, unofficial].
+-*   `_Dimension`: `int3` specifying the resolution of the output shadow volume [S1, unofficial].
++*   `_Dimension`: `int3` specifying the dimensions of the input density grid [S1, unofficial].
+ *   `_MinVal`, `_MaxVal`: `float` thresholds for density culling [S1, unofficial].
+ *   `_TextureSize`: `float3` resolution of the input volume texture [S1, unofficial].
+@@ -30,5 +30,5 @@
+ 
+ #### Phase 1: Shadow Volume Precomputation
+-1.  **Dispatch**: Launch a compute shader with one thread per voxel in the `_Dimension` grid.
++1.  **Dispatch**: Launch a compute shader with one thread per voxel in the `_Dimension` grid [S1, unofficial].
+ 2.  **Ray Initialization**: For thread ID $(i, j, k)$:
+     *   Calculate normalized position:
+@@ -42,5 +42,5 @@
+     *   **Boundary Check**: If any component of $\text{currPos}$ is $< 0.0$ or $> 1.0$, break the loop [S1, unofficial].
+     *   **Density Sampling**:
+-        $$ \text{density} = \text{TrilinearInterpolate}(\text{_VolumeTexture}, \text{currPos}) $$ [S1, G, unofficial].
++        $$ \text{density} = \text{interpolateTricubicFast}(\text{_VolumeTexture}, \text{sampler}, \text{currPos}, \text{_TextureSize}) $$ [S1, unofficial].
+     *   **Culling**:
+         *   If $\text{density} < \text{_MinVal}$ or $\text{density} > \text{_MaxVal}$, continue to next step [S1, unofficial].
+@@ -57,5 +57,5 @@
+ #### Phase 2: Rendering (Sampling)
+ 1.  **Ray Marching**: During the standard volume rendering ray march (see [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md)), for each sample point $P$ along the view ray:
+-2.  **Shadow Lookup**: Sample the `_ShadowVolume` at $P$ using the same light direction.
++2.  **Shadow Lookup**: Sample the `_ShadowVolume` at $P$ using the same light direction [S3].
+ 3.  **Illumination**: Multiply the incoming light color by the sampled shadow value (transmittance) before adding to the accumulated color [S3].
+ 
+@@ -63,67 +63,40 @@
+ 
+ ```python
+-# Phase 1: Compute Shader for Shadow Volume Generation
++class float3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, other): return float3(self.x + other.x, self.y + other.y, self.z + other.z)
++    def __mul__(self, s): return float3(self.x * s, self.y * s, self.z * s)
+ 
+-def compute_shadow_volume(thread_id: int3, volume_tex: Texture3D, tf_tex: Texture2D, 
+-                          light_dir: float3, dimension: int3, min_val: float, 
+-                          max_val: float, num_steps: int = 32) -> float:
+-    """
+-    Computes the shadow volume for a single voxel.
+-    """
+-    # 1. Initialize ray origin from thread ID
+-    # Assuming volume is normalized to [0, 1]^3
+-    ray_origin = float3(
+-        thread_id.x / float(dimension.x),
+-        thread_id.y / float(dimension.y),
+-        thread_id.z / float(dimension.z)
+-    )
+-    
+-    # 2. Initialize accumulator
++class float4:
++    def __init__(self, r, g, b, a): self.r, self.g, self.b, self.a = r, g, b, a
++
++class int3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++
++class RWTexture3D:
++    def __init__(self, dim): self.dim = dim; self.data = [0.0] * (dim.x * dim.y * dim.z)
++    def __getitem__(self, idx): return self.data[idx.x * self.dim.y * self.dim.z + idx.y * self.dim.z + idx.z]
++    def __setitem__(self, idx, val): self.data[idx.x * self.dim.y * self.dim.z + idx.y * self.dim.z + idx.z] = val
++
++def compute_shadow_volume(thread_id: int3, volume_tex, tf_tex, light_dir: float3, dimension: int3, min_val: float, max_val: float, num_steps: int = 32) -> float:
++    ray_origin = float3(thread_id.x / float(dimension.x), thread_id.y / float(dimension.y), thread_id.z / float(dimension.z))
+     col = float4(0.0, 0.0, 0.0, 0.0)
+-    
+-    # 3. Calculate step size
+-    # Reference assumes unit cube traversal of 0.25 units over 32 steps
+     step_size = 0.25 / num_steps
+-    
+-    # 4. March from step 1 to numSteps-1
+     for i_step in range(1, num_steps):
+-        # Calculate current position
+         curr_pos = ray_origin + light_dir * step_size * i_step
+-        
+-        # Boundary check
+-        if any(c < 0.0 or c > 1.0 for c in curr_pos):
++        if curr_pos.x < 0.0 or curr_pos.x > 1.0 or curr_pos.y < 0.0 or curr_pos.y > 1.0 or curr_pos.z < 0.0 or curr_pos.z > 1.0:
+             break
+-            
+-        # Sample density
+-        density = sample_trilinear(volume_tex, curr_pos)
+-        
+-        # Density culling
++        density = tricubic_interpolate(volume_tex, curr_pos, dimension)
+         if density < min_val or density > max_val:
+             continue
+-            
+-        # Evaluate Transfer Function
+-        # Assuming TF maps density [0,1] to color/alpha
+-        src = tf_tex.sample_level(0, float2(density, 0.0), 0)
+-        
+-        # Alpha check
++        src = tf_sample_level(tf_tex, density, 0)
+         if src.a == 0.0:
+             continue
+-            
+-        # Modulate RGB by alpha
+-        src.rgb *= src.a
+-        
+-        # Front-to-back accumulation
+-        col = (1.0 - col.a) * src + col
+-        
++        src.r *= src.a; src.g *= src.a; src.b *= src.a
++        col = float4((1.0 - col.a) * src.r + col.r, (1.0 - col.a) * src.g + col.g, (1.0 - col.a) * src.b + col.b, (1.0 - col.a) * src.a + col.a)
+     return col.a
+ 
+-def generate_shadow_volume(volume_tex: Texture3D, tf_tex: Texture2D, light_dir: float3, 
+-                           dimension: int3, min_val: float, max_val: float) -> RWTexture3D:
+-    """
+-    Dispatches compute shader to fill the shadow volume.
+-    """
+-    shadow_vol = RWTexture3D<float>(dimension)
+-    
+-    # Pseudocode for dispatch logic
++def generate_shadow_volume(volume_tex, tf_tex, light_dir: float3, dimension: int3, min_val: float, max_val: float) -> RWTexture3D:
++    shadow_vol = RWTexture3D(dimension)
+     for x in range(dimension.x):
+         for y in range(dimension.y):
+@@ -131,51 +104,24 @@
+                 id = int3(x, y, z)
+                 shadow_vol[id] = compute_shadow_volume(id, volume_tex, tf_tex, light_dir, dimension, min_val, max_val)
+-                
+     return shadow_vol
+ 
+-# Phase 2: Rendering Integration
+-
+-def render_volume_with_shadow(view_ray_origin: float3, view_ray_dir: float3, 
+-                              shadow_vol: Texture3D, light_dir: float3, 
+-                              volume_tex: Texture3D, tf_tex: Texture2D, 
+-                              num_steps: int = 32) -> float4:
+-    """
+-    Standard volume ray march using precomputed shadow volume.
+-    """
++def render_volume_with_shadow(view_ray_origin: float3, view_ray_dir: float3, shadow_vol: RWTexture3D, light_dir: float3, volume_tex, tf_tex, num_steps: int = 32) -> float4:
+     accumulated_color = float4(0.0, 0.0, 0.0, 0.0)
+     accumulated_alpha = 0.0
+-    step_size = 1.0 / num_steps # Assuming unit length ray for simplicity
+-    
++    step_size = 1.0 / num_steps
+     for i in range(num_steps):
+         pos = view_ray_origin + view_ray_dir * step_size * i
+-        
+-        # Sample density
+-        density = sample_trilinear(volume_tex, pos)
+-        
+-        # Evaluate TF
+-        src = tf_tex.sample_level(0, float2(density, 0.0), 0)
+-        
++        density = tricubic_interpolate(volume_tex, pos, dimension)
++        src = tf_sample_level(tf_tex, density, 0)
+         if src.a == 0.0:
+             continue
+-            
+-        # Get shadow intensity from precomputed volume
+-        # Note: Shadow volume stores attenuation FROM light TO voxel.
+-        # Transmittance = 1 - ShadowIntensity (if ShadowIntensity is accumulated opacity)
+-        # Or directly use shadow value if it stores transmittance.
+-        # Based on S1, col.a is accumulated opacity. Transmittance = 1 - col.a.
+-        shadow_intensity = shadow_vol.sample(pos).r
++        shadow_intensity = shadow_vol[get_index(pos, dimension)]
+         transmittance = 1.0 - shadow_intensity
+-        
+-        # Modulate light contribution
+-        light_contribution = src.rgb * transmittance
+-        
+-        # Front-to-back blending
++        light_contribution = float4(src.r * transmittance, src.g * transmittance, src.b * transmittance, 0.0)
+         weight = src.a * (1.0 - accumulated_alpha)
+-        accumulated_color += light_contribution * weight
++        accumulated_color = float4(accumulated_color.r + light_contribution.r * weight, accumulated_color.g + light_contribution.g * weight, accumulated_color.b + light_contribution.b * weight, accumulated_color.a)
+         accumulated_alpha += weight
+-        
+         if accumulated_alpha >= 1.0:
+             break
+-            
+     return accumulated_color
+ ```
+@@ -194,8 +140,8 @@
+ 
+ ### Transmittance Function Mapping
+-TFM approximates the transmittance function using orthogonal basis functions (e.g., Fourier series) to calculate self-shadowing more efficiently than ray marching [S4, unofficial]. It generates a shadow map (e.g., 512x512x3 R11G11B10) storing Fourier coefficients (e.g., first 9) [S4, unofficial]. During rendering, coefficients are combined linearly with basis functions to reconstruct optical depth [S4, unofficial]. TFM efficiency is roughly equivalent to Ray Marching with 1-2 steps but provides more accurate results than 2-step RM, though it may produce banding artifacts [S4, unofficial]. Choose TFM for cloud rendering where high-frequency detail is less critical than performance.
++TFM approximates the transmittance function using orthogonal basis functions (e.g., Fourier series) to calculate self-shadowing more efficiently than ray marching [S4, unofficial]. It generates a shadow map (e.g., 512x512x3 R11G11B10) storing Fourier coefficients (e.g., first 9) [S4, unofficial]. During rendering, coefficients are combined linearly with basis functions to reconstruct optical depth [S4, unofficial]. TFM efficiency is roughly equivalent to Ray Marching with 1-2 steps but provides more accurate results than 2-step RM, though it may produce banding artifacts [S4, unofficial]. Choose TFM for cloud rendering where high-frequency detail is less critical than performance [S4, unofficial].
+ 
+ ### Cloud Shadow Map Directional Consistency Fix
+-This variant fixes incorrect cloud shadows for non-parallel lights. In standard implementations, every consumer looks up the shadow map in the light's own basis, causing a second non-parallel sun to read the first one's optical depths as a displaced, wrongly oriented shadow [S5, unofficial]. The fix ensures the cloud shadow map is traced along the view's first directional light, but consumers look it up in that light's own basis. For non-parallel lights, the cloud layer is marched toward the light using `cloud_far_transmittance` in atmosphere passes, while meshes remain unshadowed by clouds for those lights [S5, unofficial]. Choose this when rendering scenes with multiple directional lights (e.g., sun and moon) interacting with volumetric clouds.
++This variant fixes incorrect cloud shadows for non-parallel lights [S5, unofficial]. In standard implementations, every consumer looks up the shadow map in the light's own basis, causing a second non-parallel sun to read the first one's optical depths as a displaced, wrongly oriented shadow [S5, unofficial]. The fix ensures the cloud shadow map is traced along the view's first directional light, but consumers look it up in that light's own basis [S5, unofficial]. For non-parallel lights, the cloud layer is marched toward the light using `cloud_far_transmittance` in atmosphere passes, while meshes remain unshadowed by clouds for those lights [S5, unofficial]. Choose this when rendering scenes with multiple directional lights (e.g., sun and moon) interacting with volumetric clouds [S5, unofficial].
+ 
+ ## Operating characteristics
+@@ -205,6 +151,6 @@
+ *   **Strengths**: Decouples shadow calculation from view, allowing for efficient rendering of complex scenes with many view rays [S1, unofficial]. Enables pre-filtering and sparse representations (SVR) [S1, unofficial].
+ *   **Limitations**: High memory usage for high-resolution volumes [S3]. Blurry shadows due to interpolation and fixed resolution [S3]. Artifacts from fixed step sizes and boundary assumptions [S1, unofficial]. Banding artifacts in TFM [S4, unofficial].
+-*   **When to Use**: When the volume is static or changes slowly, and memory is available. Ideal for precomputed lighting in offline rendering or high-end real-time applications with sufficient VRAM.
+-*   **When Not to Use**: For dynamic volumes with rapid changes, or memory-constrained environments.
++*   **When to Use**: When the volume is static or changes slowly, and memory is available [S3]. Ideal for precomputed lighting in offline rendering or high-end real-time applications with sufficient VRAM [S3].
++*   **When Not to Use**: For dynamic volumes with rapid changes, or memory-constrained environments [S3].
+ 
+ ## Background

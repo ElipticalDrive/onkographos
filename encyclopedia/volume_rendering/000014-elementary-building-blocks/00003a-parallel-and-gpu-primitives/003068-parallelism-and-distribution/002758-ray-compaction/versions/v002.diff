@@ -1,0 +1,108 @@
+--- v001.md
++++ v002.md
+@@ -3,68 +3,67 @@
+ 
+ ## Overview
+-Ray Compaction is a parallelism optimization technique used in volume rendering to manage the dynamic set of "alive" rays during image-order rendering. It solves the problem of sparse, irregular ray termination by compacting a list of active rays into a contiguous array, removing those that have terminated (e.g., reached opacity threshold or exited the volume). It sets itself apart from sibling methods like [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) by operating on the ray level rather than the voxel/segment level, ensuring that subsequent parallel kernels (such as marching steps) process only valid work units, thereby improving occupancy and reducing divergence.
++Ray Compaction is a GPU primitive that filters a list of active rays by removing terminated ones, producing a compacted array of valid ray indices and parameters. It solves the problem of sparse ray activity in volume rendering, where many rays terminate early due to opacity thresholds or volume boundaries, leaving gaps in the processing queue. It differs from its siblings [Parallel Ray Casting with Segment Lists](2565-parallel-ray-casting-with-segment-lists.md) by focusing on index management rather than spatial tiling, and from [In-Kernel Stream Compaction (InK-Compact)](6991-in-kernel-stream-compaction-ink-compact.md) by relying on global atomic operations rather than internal warp-level ballot primitives for offset calculation.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: `rays_alive_old` (array of ray identifiers or state), `rays_t_old` (array of ray parametric positions), `N` (number of input rays).
+-- Output: `rays_alive` (contiguous array of alive rays), `rays_t` (contiguous array of corresponding positions), `alive_count` (total number of alive rays).
++- Input: `rays_t_old` (array of floats, length $N$), `rays_alive_old` (array of indices/structs, length $N$).
++- Output: `rays_t` (array of floats, length $M \le N$), `rays_alive` (array of indices/structs, length $M$).
++- State: `alive_counter` (atomic integer, initialized to 0).
+ 
+ **Data Structures:**
+-- `rays_alive_old`: Array of size $N$. Elements are valid ray IDs if the ray is alive, or a sentinel value (e.g., -1) if terminated.
+-- `rays_t_old`: Array of size $N$. Stores the current parametric position $t$ for each ray.
+-- `rays_alive`: Array of size $N$ (or dynamically resized). Stores only alive ray IDs.
+-- `rays_t`: Array of size $N$. Stores $t$ values for alive rays.
++- `rays_t_old[n]`: Termination parameter. If $< 0$, the ray is dead.
++- `rays_alive_old[n]`: Ray identifier or state.
++- `alive_counter`: Global atomic counter tracking the number of valid rays compacted so far.
+ 
+ **Steps:**
+-1. Initialize an atomic counter `alive_counter` to 0.
+-2. For each thread $n$ (corresponding to ray $n$):
+-   a. Check if `rays_t_old[n] >= 0`. This condition indicates the ray is alive.
+-   b. If alive, atomically increment `alive_counter` to obtain a new unique index `idx`.
+-   c. Write `rays_alive_old[n]` to `rays_alive[idx]`.
+-   d. Write `rays_t_old[n]` to `rays_t[idx]`.
+-3. After all threads complete, `alive_counter` holds the total number of alive rays.
++1. Initialize `alive_counter` to 0.
++2. Launch a CUDA kernel with $N$ threads, one per ray.
++3. Each thread $n$ checks if `rays_t_old[n] >= 0`.
++4. If alive, thread $n$ atomically increments `alive_counter` to obtain its new compacted index $idx$.
++5. Thread $n$ writes `rays_alive_old[n]` to `rays_alive[idx]` and `rays_t_old[n]` to `rays_t[idx]`.
+ 
+ **Pseudocode:**
+ ```python
+-def ray_compact(rays_alive_old, rays_t_old, N):
+-    # Initialize output arrays
+-    rays_alive = [0] * N
+-    rays_t = [0] * N
++def ray_compact_kernel(rays_t_old, rays_alive_old, rays_t, rays_alive, alive_counter):
++    n = cuda.thread_idx()
++    N = len(rays_t_old)
+     
+-    # Atomic counter for compacted indices
+-    alive_counter = 0
+-    
+-    # Parallel loop (conceptual)
+-    for n in range(N):
++    if n < N:
++        # Check if ray is alive
+         if rays_t_old[n] >= 0:
+-            # Atomically increment and get index
++            # Atomically get the next compacted index
+             idx = atomic_add(alive_counter, 1)
+             
+-            # Compact data
++            # Write to compacted output arrays
+             rays_alive[idx] = rays_alive_old[n]
+             rays_t[idx] = rays_t_old[n]
+-            
+-    return rays_alive, rays_t, alive_counter
+ ```
+ 
+ **Parameters:**
+-- Sentinel value: -1 (indicates termination) [S1, unofficial].
++- $N$: Total number of rays.
++- $M$: Number of alive rays (result of `alive_counter`).
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Parametric positions $t$ must be compared against 0 with care if floating-point errors are significant. However, the source uses a simple `>= 0` check [S1, unofficial].
+-- **Boundaries:** The output arrays must be pre-allocated to size $N$ to handle the worst case where all rays survive.
+-- **Degenerate Input:** If all rays terminate, `alive_counter` is 0, and subsequent kernels must handle empty workloads.
++**Edge Cases:**
++- All rays terminated: `alive_counter` remains 0, output arrays are empty.
++- No rays terminated: `rays_t` and `rays_alive` are identical to inputs.
++- Precision: `rays_t` values must be compared against 0 with appropriate epsilon if floating-point noise is expected [G].
+ 
+ ## Subtopics
+ 
++### [Ray Buffer Reordering](4073-ray-buffer-reordering.md)
++A CUDA kernel step within the Ray Compaction pipeline that physically moves the indices of "alive" rays from the current buffer to the next buffer in a ping-pong memory scheme. It solves the problem of maintaining a contiguous, compacted list of active rays for subsequent processing stages (such as ray marching or feature sampling) while preserving the parallel atomicity required on GPU architectures. It differs from its sibling [In-Kernel Stream Compaction](6991-in-kernel-stream-compaction-ink-compact.md) by explicitly managing a double-buffered index array with atomic counters rather than performing in-place compaction or using shared memory scan primitives.
++
++### [In-Kernel Stream Compaction (InK-Compact)](6991-in-kernel-stream-compaction-ink-compact.md)
++InK-Compact is a stream compaction method that completes the compaction process within the same GPU kernel execution context, rather than requiring the kernel to exit and launch separate prefix-sum and scatter kernels. It generates a smaller output stream $Y[0...M-1]$ from an input stream $X[0...N-1]$ by filtering elements based on a predicate, while strictly preserving the relative input-output data ordering. Unlike conventional methods such as Thrust or Chag::PP, which require leaving the kernel to compute global offsets and scatter data, InK-Compact computes thread, warp, and block offsets internally using bit-decomposition and balloting, thereby eliminating kernel synchronization overhead and temporary array management for invalid elements.
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of input rays. Each ray is processed once.
+-- **Memory Complexity:** $O(N)$ for input and output arrays.
+-- **Performance:** Improves parallel efficiency by reducing thread divergence in subsequent kernels. The use of `atomicAdd` can cause contention if many rays terminate simultaneously, but this is generally outweighed by the benefit of compacted memory access patterns.
+-- **Strengths:** Simple to implement on GPUs; effective for dynamic ray termination.
+-- **Limitations:** Requires atomic operations; does not reorder rays spatially (see [Ray Buffer Reordering](4073-ray-buffer-reordering.md)).
++- **Time Complexity:** $O(N)$ for the compaction pass, where $N$ is the number of input rays. The atomic operations may cause contention, leading to $O(N \cdot C)$ effective time where $C$ is a contention factor [G].
++- **Memory Complexity:** $O(N)$ for input and output arrays. No additional temporary storage is required beyond the atomic counter.
++- **Performance:** Performance degrades with high termination rates if atomic contention is high. It is efficient for moderate termination rates.
++- **Strengths:** Simple implementation, minimal memory overhead.
++- **Limitations:** Atomic contention can bottleneck performance on large $N$ with high alive ratios. Not suitable for in-place compaction without careful handling.
+ 
+ ## Background
+-Ray Compaction is a standard technique in GPU-based volume rendering, particularly in CUDA implementations. It is often used in conjunction with other parallelism strategies to maintain high occupancy. The specific implementation using `atomicAdd` for compaction is documented in unofficial resources [S1, unofficial].
++Ray Compaction is a standard technique in GPU-based volume rendering and ray tracing to manage active ray lists. It is often used in conjunction with other parallel primitives to optimize memory access patterns and reduce unnecessary computations on terminated rays.
+ 
+ ## Sources

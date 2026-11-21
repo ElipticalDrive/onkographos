@@ -1,0 +1,168 @@
+--- v002.md
++++ v003.md
+@@ -1,115 +1,91 @@
+ # MCMC Densification
+-
+ Also called: Stochastic Gradient Langevin Dynamic (SGLD) Densification
+ 
+ ## Overview
+-MCMC Densification is a Bayesian strategy for adjusting the number and distribution of 3D Gaussians during training, reformulating the densification process as a Stochastic Gradient Langevin Dynamic (SGLD) update rule [S1, unofficial]. Unlike traditional adaptive density control methods that rely on deterministic thresholds for cloning and splitting based on gradient magnitude, MCMC densification treats the set of 3D Gaussians as Markov Chain Monte Carlo (MCMC) samples [S2, unofficial]. It replaces explicit splitting and pruning steps with a re-localization scheme that adds noise to Gaussian center locations, allowing the system to explore the parameter space and converge to an optimal density distribution [S1, unofficial]. This approach reduces reliance on the initial point cloud, allows for specifying the target number of Gaussians prior to optimization, and generally leads to improved rendering quality [S2, unofficial].
++MCMC Densification is a Bayesian strategy for adjusting the number and distribution of 3D Gaussians during training, reformulating the densification process as a Stochastic Gradient Langevin Dynamic (SGLD) update rule [S1, S2, unofficial]. Unlike traditional adaptive density control methods that rely on heuristic thresholds for cloning and splitting based on gradient magnitude, MCMC densification treats the set of Gaussians as Markov Chain Monte Carlo (MCMC) samples [S2, unofficial]. It adds noise to the center locations of Gaussians to explore the parameter space, allowing for the specification of the target number of Gaussians prior to optimization and reducing reliance on the initial point cloud [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Set of 3D Gaussians $\mathcal{G}$, where each Gaussian $n$ is defined by mean $\mu_n$, covariance $\Sigma_n$, opacity $\alpha_n$, and spherical harmonics coefficients.
+-- Current camera view $I$ and corresponding image.
+-- Hyperparameters: learning rate $\lambda_{lr}$, noise scale $\lambda_{noise}$.
+-
+-**Outputs:**
+-- Updated set of 3D Gaussians $\mathcal{G}'$ with modified parameters, particularly the center locations $\mu_n$.
++**Inputs and Outputs:**
++*   **Input:** Current set of Gaussians $\mathcal{G}$, learning rate $\lambda_{lr}$, noise scale $\lambda_{noise}$, and the gradient of the total loss with respect to the Gaussian parameters.
++*   **Output:** Updated set of Gaussians $\mathcal{G}'$ with modified centers and other parameters.
+ 
+ **Data Structures:**
+-- The Gaussian parameters are stored in a structure accessible for gradient computation. The noise term $\epsilon$ is typically drawn from a standard normal distribution $\mathcal{N}(0, I)$ for each dimension of the mean vector $\mu_n$.
++The method operates on the standard 3D Gaussian representation:
++*   $\mu_n \in \mathbb{R}^3$: Center location of the $n$-th Gaussian.
++*   $\Sigma_n \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often parameterized as rotation $R$ and scale $S$).
++*   $\alpha_n \in [0, 1]$: Opacity.
++*   $\mathbf{c}_n$: Color coefficients.
+ 
+ **Steps:**
+-1. **Rasterization and Loss Computation:** Render the current view using the rasterizer. Compute the total loss $\mathcal{L}_{\text{total}}$ (e.g., combining L1, SSIM, and potentially regularization terms) between the rendered image and the ground truth [S1, unofficial].
+-2. **Gradient Computation:** Compute the gradient of the loss with respect to the Gaussian parameters $\mathcal{G}$, specifically focusing on the gradients with respect to the mean locations $\nabla_{\mu_n} \mathcal{L}_{\text{total}}$ [S1, unofficial].
+-3. **SGLD Update:** Update the Gaussian parameters using the SGLD rule. The update for the mean $\mu_n$ is given by:
+-   $$ \mu_n \leftarrow \mu_n - \lambda_{lr} \cdot \nabla_{\mu_n} \mathcal{L}_{\text{total}} + \lambda_{noise} \cdot \epsilon_n $$
+-   where $\epsilon_n \sim \mathcal{N}(0, I)$ is a noise vector added to the center location [S1, unofficial].
+-4. **Re-localization:** The noise injection effectively acts as a re-localization step. Gaussians that are in regions of high loss gradient are pushed away from their current position, while the noise helps escape local minima and explore the space [S2, unofficial].
+-5. **Parameter Update:** Apply the updated parameters to the Gaussian set. Other parameters (covariance, opacity, SH coefficients) are updated via standard gradient descent or other optimization steps as defined in the base training loop [S1, unofficial].
++1.  **Compute Gradients:** Calculate the gradient of the total loss $\mathcal{L}_{\text{total}}$ with respect to the Gaussian parameters $\mathcal{G}$ for the current batch of images $\mathcal{I}$ [S1, unofficial].
++    $$ \nabla_{\mathcal{G}} \mathbf{E}_{\mathcal{I}} [\mathcal{L}_{\text{total}} (\mathcal{G}; \mathbf{I})] $$
++2.  **SGLD Update:** Update the Gaussian parameters using the SGLD rule. This involves a standard gradient descent step followed by the addition of noise [S1, unofficial].
++    $$ \mathcal{G} \leftarrow \mathcal{G} - \lambda_{\text{lr}} \cdot \nabla_{\mathcal{G}} \mathbf{E}_{\mathcal{I}} [\mathcal{L}_{\text{total}} (\mathcal{G}; \mathbf{I})] + \lambda_{\text{noise}} \cdot \epsilon $$
++    Where:
++    *   $\lambda_{lr}$ is the learning rate hyperparameter [S1, unofficial].
++    *   $\lambda_{noise}$ is the noise scale hyperparameter [S1, unofficial].
++    *   $\epsilon$ is a noise term, typically drawn from a standard normal distribution $\mathcal{N}(0, I)$ [S1, unofficial].
++    *   The noise is specifically applied to the center locations $\mu$ of the Gaussians [S1, unofficial].
++3.  **Re-localization (Implicit):** The noise injection effectively performs a re-localization scheme that preserves the sample probability, replacing the explicit splitting, cloning, and pruning steps of standard adaptive density control [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def mcmc_densification_step(gaussians, camera_view, lambda_lr, lambda_noise):
++def mcmc_densification_step(gaussians, gradients, lambda_lr, lambda_noise):
+     """
+     Performs one step of MCMC densification.
+     
+     Args:
+-        gaussians: List of Gaussian objects with attributes .mu, .cov, .opacity, .sh.
+-        camera_view: Camera parameters for rasterization.
+-        lambda_lr: Learning rate for gradient descent.
+-        lambda_noise: Scale of the noise added to means.
++        gaussians: Object containing Gaussian parameters (mu, sigma, alpha, color).
++        gradients: Dictionary of gradients with respect to Gaussian parameters.
++        lambda_lr: Learning rate for the gradient descent step.
++        lambda_noise: Scale of the noise added to the center locations.
+         
+     Returns:
+-        Updated list of Gaussian objects.
++        Updated gaussians object.
+     """
+-    # 1. Rasterize and compute loss
+-    rendered_image = rasterize(gaussians, camera_view)
+-    ground_truth = get_ground_truth(camera_view)
+-    loss = compute_loss(rendered_image, ground_truth)
++    # 1. Gradient Descent Step
++    # Update all parameters based on gradients
++    for param in gaussians.parameters():
++        if param in gradients:
++            param -= lambda_lr * gradients[param]
++            
++    # 2. Noise Injection (SGLD)
++    # Add noise specifically to the center locations mu
++    # epsilon is drawn from N(0, I)
++    noise = torch.randn_like(gaussians.mu)
++    gaussians.mu += lambda_noise * noise
+     
+-    # 2. Compute gradients
+-    # Note: In practice, this is done via automatic differentiation.
+-    # We assume a function that returns gradients for all Gaussian parameters.
+-    grads = compute_gradients(loss, gaussians)
+-    
+-    # 3. Update Gaussians using SGLD
+-    for i, gaussian in enumerate(gaussians):
+-        # Gradient for the mean
+-        grad_mu = grads[i].mu
+-        
+-        # Draw noise from standard normal distribution
+-        # Dimension of mu is typically 3 (x, y, z)
+-        noise = np.random.normal(0, 1, size=grad_mu.shape)
+-        
+-        # SGLD Update for mean
+-        gaussian.mu = gaussian.mu - lambda_lr * grad_mu + lambda_noise * noise
+-        
+-        # Update other parameters using standard gradient descent
+-        # (Assuming grads[i] contains gradients for cov, opacity, sh as well)
+-        gaussian.cov = gaussian.cov - lambda_lr * grads[i].cov
+-        gaussian.opacity = gaussian.opacity - lambda_lr * grads[i].opacity
+-        gaussian.sh = gaussian.sh - lambda_lr * grads[i].sh
+-        
+     return gaussians
+ ```
+ 
+ **Parameters:**
+-- $\lambda_{lr}$: Learning rate for the gradient descent step. Typical values depend on the overall training schedule.
+-- $\lambda_{noise}$: Noise scale hyperparameter applied to the center locations $\mu$. This controls the exploration capability of the MCMC process.
+-- $\epsilon$: Noise term drawn from $\mathcal{N}(0, I)$.
++*   $\lambda_{lr}$: Learning rate. Typical values depend on the overall training schedule.
++*   $\lambda_{noise}$: Noise scale. Controls the magnitude of the perturbation to Gaussian centers.
++*   Target Number of Gaussians: Unlike standard 3DGS, MCMC allows specifying the target number of Gaussians prior to optimization [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The addition of noise can lead to numerical instability if the learning rate or noise scale is too large. Careful tuning is required to ensure convergence [S1, unofficial].
+-- **Boundaries:** Gaussians may be pushed outside the scene bounds. Clamping or re-initialization strategies may be needed [G].
+-- **Degenerate Input:** If the initial point cloud is sparse, the noise injection helps in exploring the space, but convergence may be slower [S2, unofficial].
++*   **Noise Scale:** If $\lambda_{noise}$ is too large, Gaussians may diverge or become unstable. If too small, the method may behave similarly to standard gradient descent without the benefits of MCMC exploration [S1, unofficial].
++*   **Initial Point Cloud:** While MCMC reduces reliance on the initial point cloud, poor initialization can still lead to suboptimal convergence [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [HYDRA Densification](11088-hydra-densification.md)
+-A densification strategy that decomposes complex primitives into simpler constituents within the MCMC framework, enabling generalizable planar primitives to operate within MCMC [11088-hydra-densification.md].
++HYDRA is a densification strategy for 3D Gaussian Splatting that decomposes complex, multi-lobed primitives into simpler constituents within the MCMC framework. It solves the problem of undersampled regions by subdividing primitives with high positional gradients while preserving the target distribution $P(g_{\text{new}}) \approx P(g_{\text{old}})$. It distinguishes itself from standard splitting by using a learned decomposition for large primitives, enabling generalizable planar primitives to operate effectively within MCMC.
+ 
+ ### Fast MCMC Densification
+-An optimized implementation of the MCMC densification approach from 3DGS-MCMC [39], which treats 3D Gaussians as MCMC samples and uses SGLD updates [S2, unofficial]. It fuses the noise injection step into a single CUDA kernel to reduce the training time bottleneck [S2, unofficial]. On the Mip-NeRF360 dataset, the optimized version achieves 28.00 PSNR, 6m17s training time, and 7.2GiB VRAM, compared to the original 27.83 PSNR, 27m22s training time, and 8.9GiB VRAM [S2, unofficial]. The target number of Gaussians for the nine Mip-NeRF360 scenes (alphabetical order) are: 6131954, 1244819, 1222956, 3636448, 5834784, 1852335, 1593376, 4961797, 3783761 [S2, unofficial].
++An optimized implementation of the MCMC densification approach from 3DGS-MCMC [39], which treats 3D Gaussians as MCMC samples and uses SGLD updates [S2, unofficial]. It fuses the noise injection step into a single CUDA kernel to reduce training time bottleneck [S2, unofficial]. On the Mip-NeRF360 dataset, the optimized version achieves 28.00 PSNR, 6m17s training time, and 7.2GiB VRAM, compared to the original 27.83 PSNR, 27m22s training time, and 8.9GiB VRAM [S2, unofficial]. The optimized version is significantly faster and uses less VRAM than the original implementation [39], while achieving similar or slightly better quality [S2, unofficial]. Target number of Gaussians for nine Mip-NeRF360 scenes (alphabetical order): 6131954, 1244819, 1222956, 3636448, 5834784, 1852335, 1593376, 4961797, 3783761 [S2, unofficial].
+ 
+ ### Dynamic LoD Hierarchy Densification
+-A novel hierarchy densification strategy that allows Gaussian Level-of-Detail (LoD) hierarchies to evolve continuously during optimization, supporting stable refinement and restructuring without post-training hierarchy construction [S3, unofficial]. It maintains the hierarchy throughout training as Gaussian parameters and spatial distribution evolve dynamically, unlike methods that construct the hierarchy post-training [S3, unofficial].
++A novel hierarchy densification strategy that allows Gaussian LoD hierarchies to evolve continuously during optimization, supporting stable refinement and restructuring without post-training hierarchy construction [S3, unofficial]. It maintains the hierarchy throughout training as Gaussian parameters and spatial distribution evolve dynamically [S3, unofficial]. Unlike methods that construct the hierarchy post-training, this method evolves the hierarchy continuously during optimization [S3, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- The base MCMC densification step involves computing gradients and adding noise, which is comparable in complexity to standard gradient descent but with the overhead of noise generation [S1, unofficial].
+-- The Fast MCMC Densification variant significantly reduces training time by fusing operations into a single CUDA kernel [S2, unofficial].
+-
+-**Measured Performance:**
+-- On the Mip-NeRF360 dataset, the optimized Fast MCMC Densification achieves 28.00 PSNR with 6m17s training time and 7.2GiB VRAM, outperforming the original implementation in speed and memory usage while maintaining similar or slightly better quality [S2, unofficial].
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Reduces reliance on the initial point cloud, allows for specifying the number of Gaussians prior to optimization, and leads to improved rendering quality [S2, unofficial].
+-- **Limitations:** Requires careful tuning of hyperparameters ($\lambda_{lr}$, $\lambda_{noise}$) to ensure stability and convergence [S1, unofficial].
+-
+-**When to Use:**
+-- Use when the initial point cloud is sparse or when a specific target number of Gaussians is desired [S2, unofficial].
+-- Use when computational resources are limited, and the optimized version is available [S2, unofficial].
++*   **Time Complexity:** The basic SGLD update is $O(N)$ where $N$ is the number of Gaussians. However, the original implementation can be a training time bottleneck due to separate noise injection steps [S2, unofficial]. The optimized "Fast MCMC" version significantly reduces training time by fusing operations into a single CUDA kernel [S2, unofficial].
++*   **Memory Complexity:** $O(N)$ for storing Gaussian parameters. The optimized version uses less VRAM (7.2GiB vs 8.9GiB on Mip-NeRF360) [S2, unofficial].
++*   **Performance:** On Mip-NeRF360, the optimized MCMC densification achieves 28.00 PSNR, comparable to or slightly better than the original 27.83 PSNR [S2, unofficial].
++*   **Strengths:** Reduces reliance on the initial point cloud, allows specifying the number of Gaussians prior to optimization, and can lead to improved rendering quality [S2, unofficial].
++*   **Limitations:** Requires careful tuning of noise scale $\lambda_{noise}$ and learning rate $\lambda_{lr}$ [S1, unofficial]. The original implementation is slower than standard 3DGS adaptive density control [S2, unofficial].
+ 
+ ## Background
+-MCMC Densification was introduced by Kheradmand et al. (2024) as an alternative Bayesian perspective to the densification strategy in Gaussian Splatting [S1, unofficial]. It reformulates the densification process as a Stochastic Gradient Langevin Dynamic (SGLD) update rule, adding noise to center locations to explore the parameter space [S1, unofficial]. This approach is part of the broader effort to improve the efficiency and quality of 3D Gaussian Splatting training [S2, unofficial].
++MCMC Densification was introduced by Kheradmand et al. (2024) in the context of 3D Gaussian Splatting [S1, unofficial]. It adopts a Bayesian perspective to reformulate the densification strategy as a Stochastic Gradient Langevin Dynamic (SGLD) update rule [S1, unofficial]. This approach was further optimized in works such as Faster-GS [S2, unofficial] and integrated into frameworks for ultra-large scale reconstruction [S3, unofficial].
+ 
+ ## Sources

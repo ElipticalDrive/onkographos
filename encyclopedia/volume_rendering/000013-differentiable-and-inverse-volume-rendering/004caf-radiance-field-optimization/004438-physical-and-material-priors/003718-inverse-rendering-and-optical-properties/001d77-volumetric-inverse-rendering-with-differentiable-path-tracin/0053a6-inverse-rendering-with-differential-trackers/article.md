@@ -1,0 +1,94 @@
+# Inverse Rendering with Differential Trackers
+
+Also called: Differential ratio tracking, Unbiased inverse volume rendering
+
+## Overview
+Inverse Rendering with Differential Trackers is an unbiased method for estimating gradients with respect to the parameters of scattering volumes (density $\sigma_t$, albedo $\alpha$) to minimize a re-rendering objective function in inverse rendering [S1]. It sets itself apart from standard free-flight sampling by using differential ratio tracking with a majorant of $1.01 \sigma_t$, which avoids the need for a separate medium control density hyperparameter and reduces computation cost [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Reference images, initial values for medium properties (density $\sigma_t$, albedo $\alpha$, emission $L_e$), camera parameters, illumination conditions, and an isotropic phase function.
+*   **Outputs:** Optimized medium properties ($\sigma_t, \alpha$) that minimize the difference between rendered and reference images.
+
+**Data Structures:**
+*   **Medium Properties:** Stored on a regular grid. Fields include extinction coefficient $\sigma_t$, scattering albedo $\alpha$, and emission $L_e$.
+*   **Path State:** Stores the current position, direction, throughput, and accumulated optical depth along the path.
+
+**Algorithm Steps:**
+1.  **Initialization:** Use a coarse-to-fine approach for initialization unless specified otherwise [S1].
+2.  **Stage 1 (Emissive Fit):** Optimize only for emission $L_e$ to fit a nonphysical, emissive volume [S1].
+3.  **Stage 2 (Albedo Fit):** Set medium emission $L_e$ to zero and optimize for scattering albedo $\alpha$ such that all color originates from lighting and the reconstructed albedo [S1].
+4.  **Gradient Estimation:** Use differential ratio tracking with a majorant of $1.01 \sigma_t$ to compute gradients [S1]. This involves tracing one additional recursive path for each training path [S1].
+5.  **Optimization:** Use gradient-based optimization (Adam or SGD with momentum) to update medium properties [S1].
+
+**Formulas:**
+*   **Majorant:** $M = 1.01 \sigma_t$ [S1].
+*   **Objective:** Minimize $L(\theta) = \| I_{rendered}(\theta) - I_{reference} \|^2$, where $\theta$ represents medium parameters [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_rendering_with_differential_trackers(reference_images, initial_sigma_t, initial_alpha, num_iterations=1000):
+    # Initialize medium properties
+    sigma_t = initial_sigma_t
+    alpha = initial_alpha
+    L_e = initial_alpha * sigma_t # Initial emissive guess
+    
+    # Stage 1: Fit emissive volume
+    for i in range(num_iterations // 2):
+        # Render image with current L_e
+        rendered_image = render_with_emission(sigma_t, alpha, L_e)
+        # Compute gradient w.r.t L_e using differential ratio tracking
+        grad_L_e = compute_gradient_differential_tracking(rendered_image, reference_images, sigma_t, alpha, L_e)
+        # Update L_e
+        L_e = L_e - learning_rate * grad_L_e
+        
+    # Stage 2: Optimize albedo
+    L_e = 0.0 # Set emission to zero
+    for i in range(num_iterations // 2, num_iterations):
+        # Render image with current alpha
+        rendered_image = render_with_emission(sigma_t, alpha, L_e)
+        # Compute gradient w.r.t alpha using differential ratio tracking
+        grad_alpha = compute_gradient_differential_tracking(rendered_image, reference_images, sigma_t, alpha, L_e)
+        # Update alpha
+        alpha = alpha - learning_rate * grad_alpha
+        
+    return sigma_t, alpha
+
+def compute_gradient_differential_tracking(rendered_image, reference_images, sigma_t, alpha, L_e):
+    # Trace primary path
+    primary_path = trace_path(sigma_t, alpha, L_e, max_length=64)
+    # Trace recursive path for gradient estimation using majorant 1.01 * sigma_t
+    recursive_path = trace_path(1.01 * sigma_t, alpha, L_e, max_length=64)
+    # Compute gradient using path replay backpropagation
+    gradient = path_replay_backpropagation(primary_path, recursive_path, rendered_image, reference_images)
+    return gradient
+```
+
+**Parameters:**
+*   **Maximum path length:** 64 vertices [S1].
+*   **Majorant factor:** 1.01 [S1].
+*   **Optimizer:** Adam or SGD with momentum [S1].
+
+**Edge Cases and Pitfalls:**
+*   **High gradient variance:** Free-flight sampling gradients are prone to large outliers, causing persistent thin 'haze' artifacts around reconstructed volumes when using Adam optimizer [S1].
+*   **Defensive sampling:** Eliminates large outliers but does not sufficiently reduce overall variance, exposing similar haze artifacts [S1].
+*   **Optimizer choice:** SGD fails to converge due to gradient outliers, filling empty regions with artifacts. Adam suppresses these outliers via adaptive step sizes, allowing convergence despite high variance [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear time complexity in path length [S1].
+*   **Memory Complexity:** Constant memory complexity [S1].
+*   **Performance:** The recursive path amounts to an overhead of ~20% compared to pure free-flight sampling in the path replay backpropagation framework [S1].
+*   **Strengths:** Unbiased gradient estimation, no need for medium control density hyperparameter, efficient parallel optimization of millions of parameters [S1].
+*   **Limitations:** High gradient variance can lead to artifacts if not handled by appropriate optimizer (Adam) or initialization scheme [S1].
+*   **When to use:** When unbiased gradient estimation is required for inverse rendering of participating media, and computational resources allow for the ~20% overhead of recursive path tracing [S1].
+*   **When not to use:** When real-world, imperfect data is used without domain-specific assumptions, as the method focuses on synthetic scenes with known parameters [S1].
+
+## Background
+*   **Origin:** Based on Path Replay Backpropagation framework by Vicini et al. [2021b] [S1].
+*   **History:** Developed to address severe issues in existing gradient estimation methods, which led to biased and high-variance gradients [S1].
+*   **Usage:** Implemented in Mitsuba 2 [Nimier-David et al. 2019] [S1].
+
+## Sources
+[S1] Unbiased inverse volume rendering with differential trackers, https://doi.org/10.1145/3528223.3530073, fetched 2026-11-01

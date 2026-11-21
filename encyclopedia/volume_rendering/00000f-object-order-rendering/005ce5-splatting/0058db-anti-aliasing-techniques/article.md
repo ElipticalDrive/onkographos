@@ -1,0 +1,26 @@
+# Anti-Aliasing Techniques
+## Overview
+Anti-aliasing techniques for splatting address sample-rate aliasing artifacts (pre-aliasing) that occur when the integration grid sampling frequency is insufficient relative to the volume raster during resampling [G]. Unlike volume ray-casting, which performs reconstruction in eye space and naturally adapts kernel size as rays diverge, splatting performs reconstruction in perspective space, requiring explicit mechanisms to maintain the Nyquist criterion [G]. These methods distinguish themselves from sibling techniques by either dynamically scaling splat size and energy for distant voxels [Splatting for Anti-aliasing Small Cells](829-splatting-for-anti-aliasing-small-cells.md), or by hybridizing polygonal slicing with ellipsoidal splats to handle geometric detail and low-density regions simultaneously [Threshold Slicing and Anti-Aliasing](1447-threshold-slicing-and-anti-aliasing.md).
+
+## Shared principles
+Builds on the splatting family's shared mechanism of treating volumetric data as geometric or parametric primitives transformed and rasterized [G]. See [Splatting](23-splatting.md) for details.
+
+## Subtopics
+
+### [Splatting for Anti-aliasing Small Cells](829-splatting-for-anti-aliasing-small-cells.md)
+Prevents loss of geometric detail in adaptive mesh volume rendering by replacing small, easily missed polyhedral cells with anti-aliased ellipsoidal splats. It sets itself apart by explicitly using ellipsoidal splats convolved with a Gaussian presampling filter to handle anti-aliasing, rather than relying solely on polygon rasterization. Choose this when rendering unstructured or curvilinear grids with significant cell size variation.
+
+### [Threshold Slicing and Anti-Aliasing](1447-threshold-slicing-and-anti-aliasing.md)
+A hybrid technique for curvilinear and unstructured grids that partitions cells based on a scalar value threshold to balance geometric precision and performance. It solves aliasing in large datasets by rendering high-value cells as exact projected polygons and low-value cells as anti-aliased ellipsoidal splats. Choose this when exact boundaries for significant features are required alongside smooth representation of low-density regions.
+
+### [Anti-Aliasing for Splatting](4471-anti-aliasing-for-splatting.md)
+Prevents sample-rate aliasing artifacts during resampling by dynamically scaling splat size and attenuating energy for splats beyond a critical distance $k$. It distinguishes itself by maintaining constant energy per unit area on the view plane and satisfying the Nyquist criterion for the integration grid. Choose this for standard volume rasters where perspective projection causes sampling rate mismatches at depth.
+
+### Crest Antialiasing
+A technique to smooth edges by alpha blending pixels at mountain crests, identified during the wave surfing process [S1, unofficial]. During wave surfing, if a voxel column is projected below the previous one, a crest is detected. The lowest pixel of the new span is then alpha blended with the highest pixel of the previous span, using an alpha coefficient equal to the fractional part of the Y coordinate projected onto the screen [S1, unofficial].
+
+## Background
+The problem of aliasing in volume rendering, particularly during resampling, was formally addressed in the context of splatting by Westover [G]. The distinction between eye-space reconstruction (ray casting) and perspective-space reconstruction (splatting) highlights the unique challenges of maintaining the Nyquist criterion in splatting-based pipelines [G]. Subsequent developments introduced hybrid approaches combining polygonal slicing with splatting to handle unstructured grids and adaptive meshes, such as those by Kindlmann and Westover and later refinements by others [G].
+
+## Sources
+[S1] Realtime Voxel Landscape Engines - Part 5 - Quality Improvement, https://www.flipcode.com/archives/Realtime_Voxel_Landscape_Engines-Part_5_Quality_Improvement.shtml, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,205 @@
+--- v004.md
++++ v005.md
+@@ -1,107 +1,132 @@
+ # Debug Voxel Visualization
+ 
+-Also called: DisplayVolume, Voxel Sphere Debug
++Also called: DisplayVolume, Voxel Debug Rendering, Voxel Sphere Debug, VoxelMap::visualize
+ 
+ ## Overview
+-Debug Voxel Visualization converts scalar field data into geometric primitives (spheres) for spatial inspection, allowing developers to verify voxel occupancy and intensity distribution [S1, unofficial]. It differs from sibling methods like [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md) by using volumetric primitives rather than empty bounding boxes, providing a denser visual representation of the data's internal structure.
++Debug Voxel Visualization renders a 3D voxel grid as individual geometric primitives (typically cubes or spheres) for each active voxel by iterating through the voxel data array and drawing a pre-loaded model at every non-transparent position [S2, unofficial]. It solves the problem of visualizing the discrete structure and spatial distribution of voxel data in a scene, distinct from surface extraction methods. It differs from [Axis-Aligned Bounding Box Geometry](1317-axis-aligned-bounding-box-geometry.md) and [Bounding Box Drawing](2733-bounding-box-drawing.md) by rendering individual voxel instances rather than aggregate bounding volumes, allowing for per-voxel inspection [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A 3D scalar field (voxel grid) containing intensity values.
+-- `VolumeMetadata`: A JSON structure containing dimensions and metadata, validated to ensure exactly 3 dimensions [S1, unofficial].
+-
+-**Outputs:**
+-- A set of sphere primitives submitted to the graphics pipeline [G].
++**Inputs and Outputs:**
++*   **Input:** A 1D array of voxel data (typically RGBA bytes), metadata defining the grid dimensions ($w, h, d$), a threshold value for voxel activation, and a pre-loaded geometric model (cube or sphere) [S1, S2, unofficial].
++*   **Output:** A set of transformed geometric primitives submitted to the graphics pipeline, positioned at their respective grid coordinates [S2, unofficial].
+ 
+ **Data Structures:**
+-- `VolumeMetadata`: JSON object with fields `dimensions` (array of 3 integers) and other metadata.
+-- `Sphere`: Defined by position $(x, y, z)$ and radius $r$.
++*   **Voxel Data:** A 1D array of `GLubyte` (RGBA) with size $w \times h \times d \times 4$ bytes [S2, unofficial].
++*   **VolumeMetadata:** Parsed from a JSON file (e.g., in `StreamingAssets`), containing dimensions and validation checks ensuring the dimension length is exactly 3 [S1, unofficial].
++*   **Voxel Model:** A pre-loaded 3D cube or sphere mesh, centered at the origin [S2, unofficial].
+ 
+ **Parameters:**
+-- `intensityThreshold`: Float in $[0.0, 1.0]$. Voxels with intensity below this value are skipped [S1, unofficial].
+-- `sphereRadius`: Float in mm units before scaling. Default: $0.5$ [S1, unofficial].
+-- `maxSpheres`: Integer safety cap for spawned debug spheres. Default: $5000$ [S1, unofficial].
++*   `intensityThreshold` (float, 0.0–1.0): Voxels with alpha below this value are skipped [S1, unofficial].
++*   `dontDraw` (float, default 0.0f): Alternative alpha threshold for skipping voxels [S2, unofficial].
++*   `sphereRadius` (float, default 0.5f): Radius of the debug sphere in mm before scaling [S1, unofficial].
++*   `voxelOffset` (vec3): Offset applied to align the centered cube model origin to the voxel grid position. Calculated as $(1.0f / voxelmap\_size, 1.0f / voxelmap\_size, 1.0f / voxelmap\_size)$ [S2, unofficial].
++*   `maxSpheres` (int, default 5000): Safety cap for spawned debug spheres [S1, unofficial].
+ 
+ **Steps:**
+-1. **Load and Validate:** Load `VolumeMetadata` from the source (e.g., `StreamingAssets`). Validate that the dimension array length is exactly 3 [S1, unofficial].
+-2. **Normalize Intensity:** Normalize the voxel grid to $[0, 1]$ using percentile-based scaling to handle sparse or non-uniform data [S1, unofficial]:
+-   - Compute $p_1$ (1st percentile) and $p_{99}$ (99th percentile) of the voxel values.
+-   - If $p_{99} - p_1 < 10^{-12}$, set all normalized values to $0$.
+-   - Otherwise, compute $v_{norm} = \text{clip}\left(\frac{v - p_1}{p_{99} - p_1}, 0, 1\right)$ for each voxel $v$.
+-   - For sparse channels, only consider voxels where $v > 0$ for percentile calculation [S1, unofficial].
+-3. **Spawn Spheres:** Iterate through the normalized voxel grid:
+-   - If $v_{norm} < \text{intensityThreshold}$, skip the voxel.
+-   - If the number of spawned spheres reaches `maxSpheres`, stop.
+-   - Otherwise, spawn a sphere at the voxel's center with `sphereRadius`.
+-4. **Render:** Submit the generated spheres to the graphics pipeline [G].
++1.  Load metadata JSON and parse into `VolumeMetadata`. Validate that the dimension length is 3 [S1, unofficial].
++2.  Iterate through the voxel grid coordinates $x \in [0, w-1]$, $y \in [0, h-1]$, $z \in [0, d-1]$ [S2, unofficial].
++3.  Calculate the 1D array index for the current voxel using row-major ordering:
++    $$ arrayPos = 4 \times (x + y \times voxelmap\_size + z \times voxelmap\_size \times voxelmap\_size) $$
++    where $voxelmap\_size$ is the dimension size (assuming a cubic grid where $w=h=d=size$) [S2, unofficial].
++4.  Extract the alpha channel from the RGBA byte at index $arrayPos + 3$ [S2, unofficial].
++5.  If the alpha value exceeds the threshold (`intensityThreshold` or `dontDraw`):
++    a. Normalize the RGB values by dividing by 255.0f [S2, unofficial].
++    b. Set the shader color to the normalized RGB values [S2, unofficial].
++    c. Compute the world position using the voxel offset and grid coordinates:
++        $$ \mathbf{p}_{world} = \mathbf{voxelOffset} + \text{vC\_to\_wC}(\text{glm::vec3}(x, y, z), voxelmap\_size) $$
++        where $\text{vC\_to\_wC}$ converts voxel coordinates to world coordinates based on the grid size [S2, unofficial].
++    d. Draw the voxel model at $\mathbf{p}_{world}$ with the set color [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def debug_voxel_visualization(grid: np.ndarray, metadata: dict, intensity_threshold: float = 0.0, sphere_radius: float = 0.5, max_spheres: int = 5000) -> list:
++def debug_voxel_visualize(voxel_data: list, metadata: dict, threshold: float, model: Mesh):
+     """
+-    grid: 3D numpy array of float32 voxel intensities
+-    metadata: dict with 'dimensions' key (list of 3 ints)
+-    Returns: list of sphere objects (dict with 'pos' and 'radius')
++    Renders active voxels as geometric primitives.
++    
++    Args:
++        voxel_data: 1D list of RGBA bytes (GLubyte).
++        metadata: Dict with 'width', 'height', 'depth', 'size'.
++        threshold: Alpha threshold for activation (0.0-1.0).
++        model: Pre-loaded geometric mesh (cube/sphere).
+     """
+-    # Validate metadata
+-    assert len(metadata['dimensions']) == 3, "Metadata must have exactly 3 dimensions"
++    w = metadata['width']
++    h = metadata['height']
++    d = metadata['depth']
++    size = metadata['size'] # Assuming cubic grid for index formula
+     
+-    # Normalize intensity
+-    p1 = np.percentile(grid, 1)
+-    p99 = np.percentile(grid, 99)
+-    
+-    if p99 - p1 < 1e-12:
+-        grid_norm = np.zeros_like(grid, dtype=np.float32)
+-    else:
+-        grid_norm = (grid - p1) / (p99 - p1)
+-        grid_norm = np.clip(grid_norm, 0, 1).astype(np.float32)
+-        
+-    spheres = []
+-    dims = metadata['dimensions']
+-    
+-    for x in range(dims[0]):
+-        for y in range(dims[1]):
+-            for z in range(dims[2]):
+-                if len(spheres) >= max_spheres:
+-                    break
++    # Validate dimensions
++    if len([w, h, d]) != 3:
++        raise ValueError("Metadata must contain exactly 3 dimensions")
++
++    # Calculate voxel offset for centering
++    voxel_offset = (1.0 / size, 1.0 / size, 1.0 / size)
++
++    # Iterate through all voxels
++    for z in range(d):
++        for y in range(h):
++            for x in range(w):
++                # Calculate 1D array index (row-major, 4 bytes per pixel)
++                array_pos = 4 * (x + y * size + z * size * size)
+                 
+-                if grid_norm[x, y, z] >= intensity_threshold:
+-                    # Assuming voxel centers are at integer coordinates
+-                    pos = (x, y, z)
+-                    spheres.append({'pos': pos, 'radius': sphere_radius})
+-        if len(spheres) >= max_spheres:
+-            break
+-    return spheres
++                # Extract alpha channel (RGBA layout)
++                alpha = voxel_data[array_pos + 3]
++                
++                # Check threshold
++                if alpha > threshold:
++                    # Normalize RGB
++                    r = voxel_data[array_pos] / 255.0
++                    g = voxel_data[array_pos + 1] / 255.0
++                    b = voxel_data[array_pos + 2] / 255.0
++                    
++                    # Compute world position
++                    # vC_to_wC converts voxel coords to world coords
++                    # Assuming simple scaling for demonstration
++                    voxel_coords = (x, y, z)
++                    world_pos = (
++                        voxel_offset[0] + voxel_coords[0] * (1.0 / size),
++                        voxel_offset[1] + voxel_coords[1] * (1.0 / size),
++                        voxel_offset[2] + voxel_coords[2] * (1.0 / size)
++                    )
++                    
++                    # Draw model
++                    draw_model(model, position=world_pos, color=(r, g, b))
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** If $p_{99} \approx p_1$, the normalization denominator becomes zero, resulting in all zeros [S1, unofficial].
+-- **Boundaries:** The algorithm assumes voxel centers are at integer coordinates. Scaling must be applied consistently between `sphereRadius` (in mm) and the grid coordinates [S1, unofficial].
+-- **Degenerate Input:** Empty grids or grids with all zero values result in no spheres being spawned [S1, unofficial].
++*   **Precision:** Floating-point precision issues may arise when converting voxel coordinates to world space if the grid size is very large.
++*   **Boundaries:** The `voxelOffset` calculation assumes a specific alignment; incorrect offsets may cause voxels to be misaligned or clipped.
++*   **Degenerate Input:** If the voxel data array is empty or dimensions are invalid, the loop will not execute or may throw errors. Validation of metadata is crucial [S1, unofficial].
++*   **Performance:** Iterating through all voxels and drawing individual models can be expensive for large grids. The `maxSpheres` cap helps prevent excessive draw calls [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Voxel Edges
+-A visual effect that draws outlines of the voxel shapes on the grid with a specified width [S2, unofficial]. It uses the `voxel_edges <width>` parameter to define the outline thickness, providing a wireframe-like inspection of the voxel structure without filling the volume [S2, unofficial].
++A visual effect that draws outlines of the voxel shapes on the grid with a specified width [S3, unofficial]. It differs from solid voxel rendering by highlighting the boundaries between voxels, useful for inspecting grid structure. Parameter: `width` (float) defining the edge thickness [S3, unofficial].
+ 
+ ### Central Slice Visualization
+-A technique for inspecting dense voxel grids by plotting central slices along the X, Y, and Z axes, optionally overlaying hierarchy information [S3, unofficial]. It involves building an octree from the voxel grid (`build_voxel_octree`) and then plotting the central slices (`plot_central_slices`), which can highlight occupied voxels with red hierarchy overlays from the octree [S3, unofficial].
++A technique for inspecting dense voxel grids by plotting central slices along X, Y, and Z axes, optionally overlaying hierarchy information from an octree [S4, unofficial]. It differs from full-volume rendering by reducing visual clutter and focusing on specific cross-sections. Steps: Load voxel grid, build octree (`max_depth=8`), plot central slices (`max_depth=5`) with optional red hierarchy overlays [S4, unofficial].
+ 
+-### Wireframe Block Highlighter
+-Draws a wireframe outline around a target voxel block using 12 LineRenderer components [S4, unofficial]. It calculates block bounds with padding (`min -= padding`, `max += padding`), computes 8 corners, and assigns line endpoints using a predefined Edges array of 12 corner index pairs (e.g., `{0,1}, {1,2}, ...`) [S4, unofficial]. Parameters include a line width of $0.025$ and an outline padding of $0.01$ [S4, unofficial].
++### CSG FieldMutation & Portal X-Ray
++A real-time debug overlay highlighting active Constructive Solid Geometry (CSG) field mutations and non-Euclidean portal throats using concentric distance rings [S5, unofficial]. It differs from standard voxel visualization by focusing on SDF-based CSG operations and portal effects. Formula: `max(dTrack, -dSphere)` for CSG union operations [S5, unofficial]. Parameters: `uPortalsA/B` for portal throats [S5, unofficial].
++
++### Live Curtain Sweep
++An animated vertical laser scanner curtain used to sweep across the scene for SDF X-Ray visualization [S5, unofficial]. It differs from static visualization by providing a dynamic, animated view of the internal structure. Step: Render an animated vertical curtain sweeping across the viewport [S5, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the total number of voxels, as each voxel is checked once. The normalization step is also $O(N)$.
+-- **Memory Complexity:** $O(N)$ for storing the normalized grid and the list of spheres. The `maxSpheres` cap limits the output size but not the input processing.
+-- **Performance:** Performance is limited by the number of spheres spawned. The default `maxSpheres` of 5000 ensures a manageable draw call count for debug purposes [S1, unofficial].
+-- **Strengths:** Provides a direct visual mapping of intensity values to spatial occupancy, useful for debugging scalar field data [S1, unofficial].
+-- **Limitations:** Not suitable for large-scale rendering due to the high number of primitives. The threshold-based approach may hide low-intensity features if the threshold is set too high [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N = w \times h \times d$, as every voxel must be checked [S2, unofficial].
++*   **Memory Complexity:** $O(N)$ for storing the voxel data array [S2, unofficial].
++*   **Performance:** Performance degrades linearly with grid size. The `maxSpheres` cap limits draw calls but may truncate visualization for large grids [S1, unofficial].
++*   **Strengths:** Simple to implement, provides direct per-voxel visibility, easy to debug individual voxel states [S2, unofficial].
++*   **Limitations:** High draw call overhead for large grids, not suitable for real-time visualization of very large volumes without instancing or culling [S1, S2, unofficial].
++*   **When to Use:** Debugging voxel data integrity, small-scale voxel worlds, educational purposes [S2, unofficial].
++*   **When Not to Use:** Large-scale production rendering, real-time visualization of massive voxel grids [S1, unofficial].
+ 
+ ## Background
+-Debug Voxel Visualization is part of the VRDF SDK, an unofficial toolset for volume rendering and debugging [S1, unofficial]. It was developed to provide developers with a simple way to visualize voxel data during the development process, leveraging standard graphics pipeline primitives [S1, unofficial].
++Debug Voxel Visualization is a fundamental technique in voxel-based applications, originating from the need to inspect discrete volumetric data. It is commonly used in voxel editors, game engines, and scientific visualization tools. The method described here is based on implementations in open-source projects like VXCT [S2, unofficial] and VRDF SDK [S1, unofficial].
+ 
+ ## Sources
+ [S1] guillaume-schneider/vrdf-sdk, https://github.com/guillaume-schneider/vrdf-sdk, fetched 2026-10-26 (unofficial)
+-[S2] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
+-[S3] hsafari68/Voxelerate, https://github.com/hsafari68/Voxelerate, fetched 2026-10-26 (unofficial)
+-[S4] philip2012/voxel-forge, https://github.com/philip2012/voxel-forge, fetched 2026-10-27 (unofficial)+[S2] Helliaca/VXCT, https://github.com/Helliaca/VXCT, fetched 2026-10-26 (unofficial)
++[S3] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
++[S4] hsafari68/Voxelerate, https://github.com/hsafari68/Voxelerate, fetched 2026-10-26 (unofficial)
++[S5] feat(sdf-wizard): [W] 20-Second SDF X-Ray & Measurement Wizard (uDebugVizMode 1..5 + live caliper), https://github.com/bourkefloyd/gemini-4-argon-sfhackathon-2026/pull/23, fetched 2026-10-26 (unofficial)

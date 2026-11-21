@@ -1,0 +1,102 @@
+# VoxelGrid Preview Rendering
+
+Also called: Debug Voxel Rendering
+
+## Overview
+VoxelGrid Preview Rendering converts a voxel grid into explicit geometric primitives for rasterization [G]. It serves as a diagnostic tool for inspecting occupancy and spatial bounds [G]. Unlike production rendering, it prioritizes structural clarity using false colors and wireframes [S1, S3, unofficial].
+
+## How it works
+The method converts discrete voxel data into visible geometry [G]. It operates in solid mesh rendering for occupancy and wireframe/gizmo rendering for structural inspection [S1, S3, unofficial].
+
+### Inputs and Outputs
+*   **Input**: A voxel grid data structure, typically defined by a boundary box ($P_{min}, P_{max}$) and dimensions ($N_{dim}$) [G]. It may include density values per voxel and metadata such as selection states or iso-levels [S1, S3, unofficial].
+*   **Output**: Rasterized primitives (triangles for meshes, lines for edges, points/spheres for density) on the screen [G].
+
+### Data Structures
+The implementation relies on lightweight coordinate structures to manage voxel positions [G]. A common representation is a 3D integer point structure (`Point3i`) using 16-bit signed integers (`short`) for X, Y, and Z components, occupying 12 bytes total [S1, unofficial]. This allows for a coordinate range of -32767 to 32767 [S1, unofficial].
+
+### Steps
+1.  **Mesh Cache Construction**: Convert the voxel grid to a mesh [S1, unofficial]. Ensure the mesh cache is built before drawing [S1, unofficial]. Iterate through all meshes in the cache [S1, unofficial].
+2.  **Solid Rendering**: Draw each mesh using false colors [S1, unofficial]. Add a fake shadow to the mesh [S1, unofficial].
+3.  **Wireframe and Line Rendering**: Generate preview lines for the grid [S1, unofficial]. Ensure the line cache is built before drawing wires [S1, unofficial]. Determine wire color based on selection state [S1, unofficial]. Draw the solid line cache [S1, unofficial]. Draw the dotted line cache [S1, unofficial]. Draw the mesh cache again in wireframe mode [S1, unofficial].
+4.  **Gizmo and Density Visualization**: Iterate through the 3D grid of generated mesh objects using indices $i$, $j$, $k$ up to `numberOfGeneratedMeshObject.x/y/z` [S3, unofficial]. Calculate the offset for the current voxel based on `boundaryWorldPos` [S3, unofficial]. Draw a wireframe cube centered at `centre + offset` with size `centre * 2` [S3, unofficial]. If `_pointsDensity` is valid and `showGizmos` is true, check `showVoxelDensity` [S3, unofficial]. If true, calculate the index `id` for the current voxel grid position and draw two spheres representing voxel corners [S3, unofficial]. If false, iterate through all `_pointsDensity` entries [S3, unofficial]. If the density value (`.w`) is greater than or equal to `isoLevel`, draw a sphere at the point's position (`.x, .y, .z`) with radius `_voxel.size/8` and color based on density [S3, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_voxel_grid_preview(voxel_grid, camera_view, show_wireframe=True, show_density=False, show_gizmos=False, show_voxel_density=True, iso_level=0.5, points_density=None, boundary_world_pos=Vector3(0,0,0), number_of_generated_mesh_object=Vector3(10,10,10), points_density_valid=True, corner_positions=None, small_radius=0.1):
+    # 1. Build Mesh Cache
+    mesh_cache = []
+    for i in range(voxel_grid.dim_x):
+        for j in range(voxel_grid.dim_y):
+            for k in range(voxel_grid.dim_z):
+                if voxel_grid.is_occupied(i, j, k):
+                    world_pos = voxel_grid.P_min + Vector3(i, j, k) * voxel_grid.voxel_size
+                    mesh_cache.append(generate_cube_geometry(world_pos, voxel_grid.voxel_size))
+
+    # 2. Draw Solid Mesh with False Colors
+    for mesh in mesh_cache:
+        apply_false_color_shader(mesh)
+        add_fake_shadow_to_mesh(mesh)
+
+    # 3. Draw Wireframes and Lines
+    if show_wireframe:
+        wire_color = get_selection_state_color()
+        generate_preview_lines_for_grid(voxel_grid)
+        ensure_line_cache_built()
+        draw_line_cache(line_cache_solid, wire_color)
+        draw_line_cache(line_cache_dotted, wire_color)
+        for mesh in mesh_cache:
+            draw_mesh_in_wireframe(mesh, wire_color)
+
+    # 4. Draw Gizmos and Density Indicators
+    if show_density or show_gizmos:
+        for i in range(number_of_generated_mesh_object.x):
+            for j in range(number_of_generated_mesh_object.y):
+                for k in range(number_of_generated_mesh_object.z):
+                    offset = boundary_world_pos + Vector3(i, j, k) * voxel_grid.voxel_size
+                    center = offset
+                    draw_wireframe_cube(center, size=voxel_grid.voxel_size * 2)
+                    if show_gizmos and points_density_valid:
+                        if show_voxel_density:
+                            id = get_voxel_grid_index(i, j, k)
+                            draw_sphere(corner_positions[id], radius=small_radius)
+                        else:
+                            density_val = get_density_at(i, j, k)
+                            if density_val >= iso_level:
+                                draw_sphere(
+                                    position=points_density[i, j, k].xyz,
+                                    radius=voxel_grid.size / 8,
+                                    color=density_to_color(density_val)
+                                )
+```
+
+### Parameters and Edge Cases
+*   **IsoLevel**: The threshold for density visualization. Values below this are not drawn in density mode [S3, unofficial].
+*   **Voxel Size**: Determines the radius of density spheres (`size/8`) and the scale of wireframe cubes [S3, unofficial].
+*   **Selection State**: Influences wire color, allowing users to distinguish selected vs. unselected volumes [S1, unofficial].
+*   **Precision**: Using `short` (16-bit) for voxel coordinates limits the grid size to ~32k per dimension. Larger grids require 32-bit integers or sparse addressing [S1, unofficial].
+*   **Performance**: Rendering every voxel as a cube is expensive for large grids. Culling (frustum and back-face) is essential [G].
+
+## Subtopics
+
+### Soft Shadows via Cone Integration
+An approximation of soft shadows for volumetric sources. Instead of traditional shadow maps, it represents rays towards the light source as a single cone. The blocking contribution of the object inside this cone is estimated by accumulating opacity, using the same mipmapping mechanism as eye-ray traversal to approximate cone integration. The resulting opacity value represents the amount of occlusion. This provides cheap, plausible soft shadows without multisampling [S2].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Performance**: Not given in the sources.
+*   **Strengths**: Not given in the sources.
+*   **Limitations**: Not given in the sources.
+*   **When to use**: Not given in the sources.
+*   **When not to use**: Not given in the sources.
+
+## Background
+VoxelGrid Preview Rendering is a standard technique in voxel-based software development [G]. The concept of using mipmaps for soft shadows in voxel grids was introduced in the GigaVoxels pipeline [S2]. The specific implementation details regarding mesh caching, line drawing, and density gizmos are found in community-driven tools and unofficial repositories [S1, S3, unofficial].
+
+## Sources
+[S1] voxeltool, https://github.com/arendvw/voxeltools, fetched 2026-10-29 (unofficial)
+[S2] Beyond Triangles : GigaVoxels Effects In Video Games, https://doi.org/10.1145/1597990.1598068, fetched 2026-10-26
+[S3] sachPico/lineBasedCave_Simplex, https://github.com/sachPico/lineBasedCave_Simplex, fetched 2026-10-27 (unofficial)

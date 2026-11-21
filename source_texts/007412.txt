@@ -1,0 +1,112 @@
+Previously I noted that since Voxel global illumination involves calculation of direct lighting, it would actually be possible to do away with shadow maps altogether, and use voxels for direct and global illumination. This can eliminate the problems of image-based shadows like shadow acne and adj...
+
+Sparse Voxel Octrees - Development Blog - Leadwerks Community - Best game engine for VR optimized for fastest virtual reality performance
+Jump to content
+☰
+˟
+Sign In
+Create Account
+Game Engine
+Store
+Services
+News
+Forum
+Blogs
+Gallery
+Videos
+Downloads
+Learn
+Development Blog
+Previously I noted that since Voxel global illumination involves calculation of direct lighting, it would actually be possible to do away with shadow maps altogether, and use voxels for direct and global illumination. This can eliminate the problems of image-based shadows like shadow acne and adjusting the shadow map size. I also believe this method will turn out a lot faster than shadow map rendering, and you know how I like fast performance.
+The sparse voxel octree node structure consumes 48 bytes and looks like this:
+```
+struct SparseVoxelOctreeTreeNode
+{
+	uint32_t index, parent, color, emission;
+	uint32_t child[2][2][2];
+}
+```
+It might be possible to eliminate the index and parent values, but the structure size has to be aligned to 16 bytes in GPU memory anyways, so I don't see it getting any smaller.
+In my test scenario, the sparse voxel octree creates 353,345 voxels, which consumes 14% the memory of the uncompressed data, but is only a little bit smaller than compressed volume textures, and I could see the SVO data being bigger than a compressed 3D texture.
+Uncompressed, diffuse + emission
+256*256*256*4 + 256*256*256*3 = 67108864 + 50331648 = 117440512 bytes = 112 Mb
+DXT5 compressed diffuse + DXT1 compressed emission
+16777216 + 8388608 = 25165824 bytes = 24 Mb
+Sparse Voxel Octree
+353345 * 48 = 16.2 Mb
+That's just for the voxelized triangles' diffuse color. We still need size textures to store direct lighting, one for each direction on each axis. Since these are rendered to in a shader, I don't see any texture compression happening here:
+256 * 256 * 256 * 4 * 6 bytes = 384 Mb
+If we store the lit sparse voxels in a 1024x512 RGBA textures (x6), that consumes a lot less memory:
+1024 * 512 * 4 * 6 = 12 Mb
+So overall, we do see a very significant reduction in memory usage when we make the octree sparse. It's also going to be A LOT more efficient to render to one 512x1024 texture buffer (with six color attachments), instead of rendering 256 separate slices of a volume texture.
+Looking up a single value in a sparse voxel octree is more complex than a simple texture sampler, because it has to iterate through all the levels of the tree, down to the terminal node. However, ray traversal should be much faster with the sparse voxel octree, because the algorithm can efficiently skip over large empty spaces. An interesting challenge is the fact that GLSL does not support recursive function calls, so recursive functions have to be written in creative ways. This one isn't too bad, but when you hav branching pathways in a ray traversal, it can get pretty complicated:
+```
+bool SVOTGetNodeColor(in uint x, in uint y, in uint z, out vec4 diffuse, out vec3 emission)
+{
+    diffuse = vec4(0,0,0,0);
+    uint index = 1;
+    int maxlevels = 10;
+    uint size = 256;
+    if (x >= size || y >= size || z >= size) return true;
+    uint hsize;
+    uint px,py,pz,childindex;
+
+    for (int n = 0; n < maxlevels - 1; n++)
+    {
+        hsize = size / 2;
+        px = uint(x >= hsize);
+        py = uint(y >= hsize);
+        pz = uint(z >= hsize);
+        index = svotnodes[index - 1].child[px * 4 + py * 2 + pz];
+        if (index == 0) return false;
+        x -= px * hsize;
+        y -= py * hsize;
+        z -= pz * hsize;
+        size = hsize;
+    }
+    diffuse = SVOTNodeGetDiffuse(index);
+    return true;
+}
+```
+In this shot, I am rendering the original mesh geometry and doing a texture lookup in the sparse voxel octree to find the color stored for the voxel at each point. There's a few places where the surface appears black, meaning that the point being rendered lies outside the bounds of any voxel saved. Maybe there is a problem with the precision of the triangle voxelization routine, I will have to look into this further.
+The important point is that this image is being rendered without the use of a volume texture. You are seeing the sparse voxel octree being successfully sent to and navigated within in the fragment shader.
+The next step will be to take the diffuse colors and render direct lighting into a separate texture. That means my clustered forward rendering implementation will not get used, but developing that did prepare me for what I must do next. Instead of placing all the lights into a grid oriented around the camera frustum, I need to place them in a grid in world space, with the camera at the center of the grid. This is actually quite a lot simpler.
+3
+Share
+https://www.leadwerks.com/community/blogs/entry/2736-sparse-voxel-octrees/
+More sharing options...
+Followers
+1
+5 Comments
+Recommended Comments
+Copyright © 2006-2026 Leadwerks Software.
+All rights reserved.
+×
+Sign In
+Create Account
+Browse
+Back
+Blogs
+Forums
+Staff
+Online Users
+Activity
+Back
+All Activity
+My Activity Streams
+Back
+Recent Activity
+Search
+Pages
+Store
+Back
+Store
+Support
+Back
+Support
+Gift Cards
+Gallery
+Videos
+Downloads
+×
+Create New...

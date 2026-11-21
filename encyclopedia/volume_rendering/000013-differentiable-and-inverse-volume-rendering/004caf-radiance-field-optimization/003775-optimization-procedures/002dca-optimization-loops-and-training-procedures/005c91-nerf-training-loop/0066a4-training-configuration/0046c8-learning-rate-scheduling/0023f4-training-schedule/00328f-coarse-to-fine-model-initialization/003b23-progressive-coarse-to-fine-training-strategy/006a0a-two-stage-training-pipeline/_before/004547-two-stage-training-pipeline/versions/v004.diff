@@ -1,0 +1,179 @@
+--- v003.md
++++ v004.md
+@@ -4,73 +4,131 @@
+ 
+ ## Overview
+-A coarse-to-fine training strategy that first recovers global shape at low resolution, then refines fine details at high resolution [S2, unofficial]. It sets itself apart from single-resolution training by decoupling structural coherence from high-frequency detail recovery, allowing the model to converge to a stable global geometry before committing computational resources to fine-grained optimization [S2, unofficial].
++The Two-Stage Training Pipeline is a coarse-to-fine optimization strategy that first recovers global shape at low resolution and then refines fine details at high resolution [S2, unofficial][S3]. It solves the problem of geometric artifacts and slow convergence that occur when training directly at high resolution by establishing a coherent global structure before fitting high-frequency features [S2, unofficial][S3]. It differs from standard full-resolution training by deferring the fitting of fine features until the global geometry is established [S2, unofficial][S2, unofficial], and differs from simple two-stage pipelines by potentially using continuous or multi-stage resolution scaling rather than a single abrupt switch [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Inputs:** A coarse radiance field model $M_T$ (initialized from Stage 1), an image database $\{I_i\}_{i=0}^T$ containing training views, total fine-stage iterations $N$, and sampling interval $m$ [S1, unofficial].
+-- **Outputs:** A refined fine radiance field model $M_f$ [S1, unofficial].
++The method consists of two distinct phases: a coarse training phase to establish global geometry and a fine training phase to recover high-frequency details. The specific implementation varies by application domain (e.g., general radiance fields vs. human reconstruction), but the core logic follows the coarse-to-fine paradigm.
+ 
+-**Data Structures:**
+-- $M_T$: Coarse model parameters representing the global shape [S1, unofficial].
+-- $M_f$: Fine model parameters, initialized from $M_T$, optimized to capture high-frequency details [S1, unofficial].
+-- $\{I_i\}_{i=0}^T$: Set of $T+1$ training images [S1, unofficial].
++### Inputs and Outputs
++*   **Inputs:**
++    *   Training images (low-resolution for pre-training/coarse stage, high-resolution for fine stage).
++    *   Camera poses for training images.
++    *   Initial model parameters (often random or from a previous coarse stage).
++*   **Outputs:**
++    *   Optimized radiance field or surface field model ($M_f$ or fine-tuned network).
+ 
+-**Numbered Steps:**
+-1. **Initialization:** Initialize the coarse model $M_T$ and the image database $\{I_i\}_{i=0}^T$ [S1, unofficial].
+-2. **Iteration Loop:** Iterate $k$ from $0$ to $N$ [S1, unofficial].
+-3. **Ray Sampling:** If $k \mod m == 0$, sample training pixels (rays) from the image database $\{I_i\}_{i=0}^T$ [S1, unofficial].
+-4. **Optimization:** Optimize Differentiable Voxel Grid Optimization (DVGO) to refine the fine model $M_f$ [S1, unofficial].
+-5. **Termination:** After $N$ iterations, the final $M_f$ represents the high-resolution reconstruction [S1, unofficial].
++### Data Structures
++The implementation relies on specific data structures depending on the variant:
++1.  **Voxel Grid:** Used in DVGO-based methods [S1, S2, unofficial]. The resolution is increased from coarse to fine. Typical resolutions mentioned are $128^3$, $192^3$, $256^3$, and $320^3$ [S2, unofficial].
++2.  **Image Database:** A collection of training images $\{I_i\}_{i=0}^T$ used for sampling rays [S1, unofficial].
++3.  **Model Components:**
++    *   **DVGO Model:** Contains a coarse model $M_T$ and a fine model $M_f$ [S1, unofficial].
++    *   **DoubleField Network:** Comprises a transformer, geometry MLP, and color MLP [S3].
+ 
+-**Formulas:**
+-- Spatial sampling loss: $L_g = \frac{1}{N_g} \sum_{i=1}^{N_g} \|s(x_i) - s^*(x_i)\|_2^2$, where $s^*$ is ground truth occupancy and $N_g$ is the number of spatial sampling points [S3].
+-- Geometric regularization loss: $L_r = \frac{1}{N_r} \sum_{i=1}^{N_r} \|\nabla s(x_i) - n^*(x_i)\|_1$, where $n^*$ is ground truth normal and $N_r$ is the number of sampling points for regularization [S3].
+-- Appearance loss: $L_c = \frac{1}{N_c} \sum_{i=1}^{N_c} |\hat{C}(r_i) - C^*(r_i)|$, where $\hat{C}(r_i)$ is rendered color, $C^*(r_i)$ is ground truth color, and $N_c$ is the number of sampling rays [S3].
+-- Total loss: $L = \lambda_g L_g + \lambda_r L_r + \lambda_c L_c$, where $\lambda$ terms balance loss components [S3].
++### Numbered Steps
+ 
+-**Parameters:**
+-- $N$: Total number of fine-stage optimization iterations [S1, unofficial].
+-- $m$: Interval frequency for sampling new training pixels; new pixels are added every $m$ iterations [S1, unofficial].
+-- $M_T$: Coarse radiance field model initialized at the start of the fine stage [S1, unofficial].
+-- $M_f$: Fine radiance field model refined during each iteration of the loop [S1, unofficial].
+-- $N_g, N_r, N_c$: Number of sampling points for spatial sampling, geometric regularization, and sampling rays, respectively [S3].
++#### Variant 1: DVGO-based ActiveRMAP/Voxurf Approach [S1, S2, unofficial]
++This variant uses a voxel grid representation and optimizes the density/opacity field.
+ 
+-**Pseudocode:**
++1.  **Coarse Stage Initialization:** Initialize the coarse radiance field model $M_T$ and the image database $\{I_i\}_{i=0}^T$ [S1, unofficial].
++2.  **Coarse Training:** Train the model using a low-resolution voxel grid to obtain a coherent global shape [S2, unofficial].
++    *   *Note:* Some implementations apply a 3D convolution with a Gaussian kernel during coarse training and post-processing to improve visualization quality, though this may slightly increase Chamfer Distance (CD) error [S2, unofficial].
++3.  **Fine Stage Initialization:** Initialize the fine DVGO model $M_f$ using the coarse model $M_T$ as a starting point [S1, unofficial].
++4.  **Fine Stage Optimization Loop:** Iterate $k$ from $0$ to $N$ (total fine-stage iterations) [S1, unofficial]:
++    1.  **Ray Sampling:** If $k \mod m == 0$, sample training pixels (rays) from the image database $\{I_i\}_{i=0}^T$ [S1, unofficial]. Here, $m$ is the interval frequency for sampling new training pixels [S1, unofficial].
++    2.  **Optimization:** Optimize the DVGO model to refine $M_f$ [S1, unofficial]. This involves minimizing the rendering loss between predicted and ground-truth colors.
++5.  **Resolution Scaling:** The voxel grid resolution is increased for the fine stage. Default resolution is often $256^3$ [S2, unofficial].
++
++#### Variant 2: DoubleField Human Reconstruction Approach [S3]
++This variant uses a neural network with separate geometry and color components, leveraging large-scale pre-training.
++
++1.  **Large-Scale Pre-training (Coarse):**
++    *   Use a large dataset (e.g., Twindom, 1,500 models) with low-resolution images ($512 \times 512$) [S3].
++    *   Adopt spatial sampling strategy for geometry learning and surface-guided sampling for appearance learning [S3].
++    *   **Loss Functions:**
++        *   Geometry Loss ($L_g$):
++            $$ L_g = \frac{1}{N_g} \sum_{i=1}^{N_g} \| s(x_i) - s^*(x_i) \|_2^2 $$
++            where $s^*(x_i)$ is the ground truth occupancy, $s(x_i)$ is the predicted occupancy, and $N_g$ is the number of spatial sampling points [S3].
++        *   Geometric Regularization Loss ($L_r$):
++            $$ L_r = \frac{1}{N_r} \sum_{i=1}^{N_r} \| \nabla s(x_i) - n^*(x_i) \|_1 $$
++            where $n^*(x_i)$ is the ground truth normal, and $N_r$ is the number of sampling points for regularization [S3].
++        *   Appearance Loss ($L_c$):
++            $$ L_c = \frac{1}{N_c} \sum_{i=1}^{N_c} | \hat{C}(r_i) - C^*(r_i) | $$
++            where $\hat{C}(r_i)$ is the rendered color along ray $r_i$, $C^*(r_i)$ is the ground truth color, and $N_c$ is the number of sampling rays [S3].
++        *   **Total Loss:**
++            $$ L = \lambda_g L_g + \lambda_r L_r + \lambda_c L_c $$
++            where $\lambda$ terms balance the loss components [S3].
++    *   **Learning Rate:** $1 \times 10^{-5}$ [S3].
++2.  **Finetuning Phase (Fine):**
++    *   Input ultra-high-resolution images from sparse multi-view of a specific subject [S3].
++    *   **Step 2a:** Fix the transformer and color MLP. Finetune the geometry MLP for 2,000 iterations [S3].
++    *   **Step 2b:** Fix the double MLP and geometry MLP. Finetune the color MLP for 2,000 iterations [S3].
++    *   **Sampling:** Randomly select one view as ground truth and others as input in each iteration [S3].
++    *   **Loss:** Use only the appearance loss $L_c$ (Eq. 9 in [S3]) [S3].
++    *   **Learning Rate:** $1 \times 10^{-6}$ [S3].
++
++### Pseudocode (DVGO Variant)
+ ```python
+-def two_stage_fine_training(M_T, image_database, N, m):
+-    # Initialize fine model M_f from coarse model M_T
+-    M_f = M_T.copy()
++def two_stage_training_coarse_to_fine(image_database, coarse_model_M_T, N, m):
++    """
++    Implements the fine stage of the Two-Stage Training Pipeline for DVGO.
++    
++    Args:
++        image_database: List of training images {I_i}
++        coarse_model_M_T: Pre-trained coarse radiance field model
++        N: Total number of fine-stage optimization iterations
++        m: Interval frequency for sampling new training pixels
++        
++    Returns:
++        M_f: Refined fine radiance field model
++    """
++    # Initialize fine model from coarse model
++    M_f = initialize_fine_model_from_coarse(coarse_model_M_T)
+     
+     for k in range(N):
+-        # Periodically sample new training rays to ensure view diversity
++        # Sample training pixels (rays) periodically
+         if k % m == 0:
+-            # [G] Standard ray casting or random pixel sampling from image_database
+-            rays = sample_training_pixels(image_database)
++            rays = sample_training_rays(image_database)
+         
+-        # Optimize the fine model using DVGO
+-        # [G] Standard differentiable rendering gradient descent step
+-        M_f = optimize_dvgo(M_f, rays)
++        # Optimize DVGO to refine M_f
++        # This step typically involves:
++        # 1. Rendering colors from M_f along rays
++        # 2. Computing loss against ground truth images
++        # 3. Backpropagating to update M_f parameters
++        M_f = optimize_dvgo_step(M_f, rays)
+         
+     return M_f
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Resolution Scaling:** Increasing voxel grid resolution significantly increases training time. For example, moving from $128^3$ to $256^3$ increases training time from 11 minutes to 15 minutes [S2, unofficial].
+-- **Post-processing:** Removing Gaussian kernel smoothing during coarse training or post-processing can increase Chamfer Distance (CD) error from 0.715 to 0.720 or 0.72 to 0.74, respectively, indicating that smoothing aids in structural consistency [S2, unofficial].
++### Parameters
++*   **$N$:** Total number of fine-stage optimization iterations [S1, unofficial].
++*   **$m$:** Interval frequency for sampling new training pixels; new pixels are added every $m$ iterations [S1, unofficial].
++*   **$M_T$:** Coarse radiance field model initialized at the start of the fine stage [S1, unofficial].
++*   **$M_f$:** Fine radiance field model refined during each iteration of the loop [S1, unofficial].
++*   **Learning Rate:** $1 \times 10^{-5}$ for pre-training, $1 \times 10^{-6}$ for finetuning (DoubleField) [S3].
++*   **Voxel Grid Resolution:** Default $256^3$ [S2, unofficial]. Other tested resolutions: $128^3$, $192^3$, $320^3$ [S2, unofficial].
++*   **$N_g, N_r, N_c$:** Number of sampling points for spatial sampling, geometric regularization, and rays, respectively [S3].
++
++### Edge Cases and Pitfalls
++*   **Resolution Scaling:** Increasing voxel grid resolution from $128^3$ to $192^3$ and $192^3$ to $256^3$ consistently lowers Chamfer Distance (CD) but increases training time. $320^3$ achieves similar CD to $256^3$ but with higher cost [S2, unofficial].
++*   **Gaussian Kernel:** Removing the Gaussian kernel during coarse training increases CD error from 0.72 to 0.74. Removing it during post-processing slightly reduces CD from 0.720 to 0.715, but post-processing improves visualization quality [S2, unofficial].
++*   **Precision:** Finetuning requires a lower learning rate ($10^{-6}$) to ensure stable performance [S3].
+ 
+ ## Subtopics
+ 
++### [Progressive Training Strategy](16791-progressive-training-strategy.md)
++Progressive training is a method that gradually increases the resolution of the rendered output during optimization to stabilize convergence and prevent geometric artifacts. It solves the problem of complex loss landscapes and sparse initialization errors that occur when training directly at high resolution. It differs from standard full-resolution training by deferring the fitting of fine features until the global geometry is established, and differs from simple two-stage pipelines by potentially using continuous or multi-stage resolution scaling rather than a single abrupt switch.
++
+ ### Magic3D
+-A method targeting issues caused by low-resolution diffusion images using a two-stage coarse-fine approach [S4]. In the coarse stage, Magic3D uses Instant-NGP as the NeRF model trained from images generated from text prompts using the image diffusion model eDiff-I [S4]. In the fine stage, the coarse geometry extracted from Instant-NGP is placed on a mesh, which is optimized over in the fine stage using images generated with a latent diffusion model [S4]. Experiments over 397 prompts generated objects, each rated by three users, showed a preference toward Magic3D over DreamFusion [S4].
++Magic3D is a method targeting issues caused by low-resolution diffusion images using a two-stage coarse-fine approach [S4]. In the coarse stage, Instant-NGP is used as the NeRF model trained from images generated from text prompts using the image diffusion model eDiff-I [S4]. In the fine stage, the coarse geometry extracted from Instant-NGP is placed on a mesh, which is optimized over in the fine stage using images generated with a latent diffusion model [S4]. Experiments over 397 prompts generated objects, each rated by three users, showed a preference toward Magic3D over DreamFusion [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Training time scales with voxel grid resolution. For a default resolution of $256^3$, training takes approximately 15 minutes, compared to 11 minutes for $128^3$, 12 minutes for $192^3$, and 17 minutes for $320^3$ [S2, unofficial].
+-- **Memory Complexity:** Memory usage is proportional to the voxel grid resolution. Higher resolutions ($320^3$) require more memory but offer diminishing returns in Chamfer Distance (CD) error compared to $256^3$ [S2, unofficial].
+-- **Performance:** The two-stage approach yields a coherent global shape in Stage 1, which is then refined for high-frequency details in Stage 2, resulting in lower CD errors than single-resolution methods [S2, unofficial].
+-- **Strengths:** Effective at recovering both global structure and fine details; robust to low-resolution input images when combined with diffusion models (as in Magic3D) [S2, unofficial][S4].
+-- **Limitations:** Requires careful tuning of resolution and sampling interval $m$; post-processing steps (e.g., Gaussian smoothing) may slightly sacrifice quantitative performance for visual quality [S2, unofficial].
++*   **Time Complexity:** Training time scales with voxel grid resolution. For DVGO-based methods, training times are approximately 11 mins for $128^3$, 12 mins for $192^3$, 15 mins for $256^3$, and 17 mins for $320^3$ [S2, unofficial].
++*   **Memory Complexity:** Depends on the voxel grid resolution and the number of parameters in the MLPs. Higher resolutions require more memory for the voxel grid [S2, unofficial].
++*   **Performance:** The two-stage approach yields lower Chamfer Distance (CD) errors compared to single-stage training at low resolution, and better quality than single-stage training at high resolution which may suffer from artifacts [S2, unofficial].
++*   **Strengths:** Stabilizes convergence, prevents geometric artifacts, allows for high-resolution detail recovery without getting stuck in local minima associated with complex loss landscapes [S2, unofficial][S3].
++*   **Limitations:** Requires more complex implementation (managing two stages, resolution switching). DoubleField requires a large-scale dataset for pre-training [S3].
+ 
+ ## Background
+-The two-stage training pipeline was introduced in ActiveRMAP (2022) as part of a radiance field-based active mapping and planning framework [S1, unofficial]. It was further explored in Voxurf (2022) for voxel-based efficient and accurate neural surface reconstruction, where it was shown to improve Chamfer Distance metrics by separating coarse shape recovery from fine detail refinement [S2, unofficial]. The approach has also been adapted in Magic3D (2022) for text-to-3D generation, leveraging coarse-fine optimization to mitigate artifacts from low-resolution diffusion images [S4].
++The Two-Stage Training Pipeline originates from the need to efficiently train high-fidelity 3D representations. It was notably used in Voxurf for voxel-based efficient and accurate neural surface reconstruction [S2, unofficial], ActiveRMAP for radiance field active mapping [S1, unofficial], and DoubleField for high-fidelity human reconstruction [S3]. Magic3D adapted this strategy for text-to-3D generation to mitigate issues with low-resolution diffusion images [S4].
+ 
+ ## Sources

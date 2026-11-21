@@ -1,0 +1,167 @@
+# Volume Ray Casting and Clipping
+
+Also called: Clip interval assembly and integration, Two-pass volume clipping
+
+## Overview
+Volume Ray Casting and Clipping is a two-pass ray tracing technique for volume rendering that supports arbitrarily many overlapping clip regions with arbitrary geometry types [S1]. It solves the problem of occluding specific parts of a volume dataset using external geometry (such as opaque surfaces rendered in a previous pass) or internal clip objects [S1]. Unlike standard ray casting which integrates along the entire ray segment within the volume bounds, this method assembles a set of valid clip intervals in the first pass and integrates the volume density only over the remaining segments in the second pass [S1]. It is distinguished by its ability to handle concavities and complex intersection geometries by using surface normals to determine valid entry/exit pairs for clipping [S1].
+
+## How it works
+The method operates in two logical passes, which can be combined into a single compute kernel to avoid regenerating viewing rays [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** Viewing position, viewing direction, volume dataset with axis-aligned bounding box (AABB), set of active clip objects, optional depth buffer from a previous render pass [S1].
+*   **Outputs:** Rendered image where volume density is integrated only outside the defined clip intervals [S1].
+
+**Data Structures:**
+*   **Clip Intervals ($C$):** A set of intervals $[t_{start}, t_{end}]$ representing ray parameter ranges where the volume should *not* be evaluated.
+*   **Intersection List:** A sorted list of intersection distances $t$ and corresponding geometric normals $N$ for all active clip objects intersected by a ray [S1].
+
+**Numbered Steps:**
+
+1.  **Ray Generation and Volume Bounds:** Generate primary viewing rays from the viewing position. Determine $t_{near}$ and $t_{far}$, the distances from the ray's origin to the nearest and farthest intersection positions with the volume's AABB [S1].
+2.  **Depth Buffer Integration (Optional):** If a depth buffer from a previous render pass exists, convert individual depth buffer entries to the volume coordinate system using the transformation outlined in [14] (not provided in [S1]). Transform these to ray parameter space using vector operations to obtain $t_d$ [S1].
+3.  **Update Ray Bounds:** Update the ray bounds to respect the depth buffer:
+    $$ t_{near} := \max(t_d, t_{near}) $$
+    $$ t_{max} := \min(t_d, t_{far}) $$
+    These bounds remain valid for the subsequent clip interval assembly [S1].
+4.  **Clip Object Intersection:** If the test against $t_{near}$ and $t_{far}$ yields a valid intersection, intersect the viewing ray with all active clip objects. Collect all intersection points. Let $M$ be the total number of intersections for a ray. Sort these intersections by distance from the ray origin [S1].
+5.  **Interval Assembly:** For each ray, determine valid clip interval pairs using the geometric normal of the surface at intersection positions to handle concavities [S1]. Let $V$ be the normalized direction vector of the viewing ray. Let $\{N_{i-1}, N_i, N_{i+1}, N_{i+2}\}$ be the geometric normals at consecutive intersection indices [S1].
+
+    Let indices be $1 \leq \dots \leq i-1 < i < i+1 < i+2 \leq \dots \leq M$ and distances be $t_1 \leq \dots \leq t_{i-1} \leq t_i \leq t_{i+1} \leq t_{i+2} \leq \dots \leq t_M$ [S1].
+
+    The set of valid clip intervals $L$ is constructed by considering the dot product $V \cdot N$. The source provides a partial definition for $L_j$ based on the normal at $i-1$ and $i+1$ relative to the ray direction [S1]. The specific cases provided are:
+    *   If $V \cdot N_{i-1} > 0$: Add $[t_{i-1}, t_i]$ and $[t_{i+1}, t_{i+2}]$ to $L$.
+    *   If $V \cdot N_{i-1} \leq 0$ and $i=2$: Add $[-\infty, t_{-1}]$ and $[t_i, t_{i+1}]$ to $L$.
+    *   If $V \cdot N_{i+1} \dots$ (Source text cuts off): The logic implies checking normals to determine if the ray is entering or exiting the clip object, thereby identifying which segments between intersections are "inside" the clip volume and should be excluded from rendering [S1].
+
+    The final set of clip intervals $C$ is the union of all such valid intervals $L$ for the ray [S1].
+
+6.  **Integration (Pass 2):** Integrate over the volume density with respect to the clip intervals. The rendering integral is computed only for ray segments that are *not* covered by the intervals in $C$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_ray_casting_and_clipping(viewing_pos, viewing_dir, volume_aabb, clip_objects, depth_buffer=None):
+    # 1. Generate Ray
+    ray_origin = viewing_pos
+    ray_direction = viewing_dir
+    
+    # 2. Intersect with Volume AABB
+    t_near, t_far = intersect_aabb(ray_origin, ray_direction, volume_aabb)
+    
+    # 3. Handle Depth Buffer
+    if depth_buffer is not None:
+        # Convert depth buffer entry to volume coordinates and then to ray parameter space
+        # Transformation details from [14] are not provided in [S1]
+        t_d = transform_depth_to_ray_param(depth_buffer, ray_origin, ray_direction)
+        t_near = max(t_d, t_near)
+        t_far = min(t_d, t_far)
+    
+    # If ray misses volume, return background
+    if t_near >= t_far:
+        return background_color
+
+    # 4. Intersect with Clip Objects
+    intersections = []
+    for clip_obj in clip_objects:
+        hits = intersect_ray_with_object(ray_origin, ray_direction, clip_obj)
+        for hit in hits:
+            if t_near <= hit.t <= t_far:
+                intersections.append({
+                    't': hit.t,
+                    'normal': hit.normal
+                })
+    
+    # Sort intersections by distance t
+    intersections.sort(key=lambda x: x['t'])
+    
+    # 5. Assemble Clip Intervals
+    clip_intervals = []
+    M = len(intersections)
+    
+    # Iterate through intersections to find valid pairs based on normals
+    # The source defines logic for indices i-1, i, i+1, i+2
+    # We iterate i from 1 to M-2 to access i-1, i, i+1, i+2
+    for i in range(1, M - 1):
+        n_prev = intersections[i-1]['normal']
+        n_curr = intersections[i]['normal']
+        n_next = intersections[i+1]['normal']
+        n_next2 = intersections[i+2]['normal'] if i+2 < M else None
+        
+        t_prev = intersections[i-1]['t']
+        t_curr = intersections[i]['t']
+        t_next = intersections[i+1]['t']
+        t_next2 = intersections[i+2]['t'] if i+2 < M else None
+        
+        # Check dot products
+        dot_prev = dot(viewing_dir, n_prev)
+        dot_next = dot(viewing_dir, n_next)
+        
+        # Logic derived from source [S1]
+        # Case 1: V . N_{i-1} > 0
+        if dot_prev > 0:
+            clip_intervals.append([t_prev, t_curr])
+            if n_next2 is not None:
+                clip_intervals.append([t_next, t_next2])
+        
+        # Case 2: V . N_{i-1} <= 0 and i == 2 (index 2 in 1-based, so i=1 in 0-based if starting from 1? 
+        # Source uses 1-based indexing for equations. Let's assume i in source is 1-based index of the middle intersection)
+        # If source i=2, then we are looking at intersections 1, 2, 3, 4.
+        # In 0-based list, this is index 1.
+        if i == 1 and dot_prev <= 0:
+            # Source says [-inf, t_{-1}] which is likely a typo for t_0 or t_prev?
+            # Source: [-\infty, t_{-1}]
+            # Given t_{-1} is not defined, and t_0 is the first intersection, 
+            # this likely refers to the segment before the first intersection if it's a clip.
+            # However, standard clipping usually defines intervals *between* intersections.
+            # We will assume this refers to the segment [0, t_prev] if the ray starts outside.
+            # But the source explicitly writes [-\infty, t_{-1}]. 
+            # We will implement the interval [0, t_prev] as a conservative estimate for "before first hit" if needed,
+            # but strictly following source text is impossible due to undefined t_{-1}.
+            # [G] Assuming t_{-1} refers to the ray origin or previous boundary, we skip undefined symbol.
+            pass 
+            
+        # Case 3: V . N_{i+1} ... (Source cuts off)
+        # We cannot implement the full logic for concavities without the complete condition for N_{i+1} and N_{i+2}.
+        # [G] The source text is incomplete. We assume standard entry/exit logic:
+        # If ray enters (V . N < 0) and exits (V . N > 0), the segment between is inside.
+        # If the source implies complex concavity handling, it is not fully specified.
+        
+    # 6. Integrate
+    # The rendering integral is computed over segments NOT in clip_intervals
+    # This requires subtracting clip_intervals from [t_near, t_far]
+    # and integrating over the remaining sub-segments.
+    
+    segments_to_render = subtract_intervals([t_near, t_far], clip_intervals)
+    
+    color = background_color
+    for seg in segments_to_render:
+        color += integrate_volume_density(ray_origin, ray_direction, seg[0], seg[1], volume_data)
+        
+    return color
+```
+
+**Parameters:**
+*   **Clip Objects:** Arbitrary geometry types. Organized using BVHs for efficient traversal [S1].
+*   **Depth Buffer:** Optional. Requires transformation to volume coordinate system [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Concavities:** The method specifically addresses rays hitting concavities by using geometric normals to determine valid interval pairs [S1].
+*   **Incomplete Source Logic:** The source text for the interval assembly logic cuts off at the condition involving $N_{i+1}$ and $N_{i+2}$ [S1]. Implementers must infer the remaining cases or consult the original paper for the complete normal-based interval selection logic.
+*   **Undefined Symbols:** The source uses $t_{-1}$ in a case where $i=2$, which is not defined in the provided equations [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by ray-object intersection tests. Using BVHs for clip objects, the intersection cost is $O(\log N)$ per ray per object, where $N$ is the number of clip objects [S1].
+*   **Memory Complexity:** Requires storage for the volume data, clip object BVHs, and the depth buffer if used [S1].
+*   **Strengths:** Supports arbitrarily many overlapping clip regions and arbitrary geometry types. Interoperable with OpenGL rendering via depth buffer [S1].
+*   **Limitations:** Requires two passes (or a complex single kernel). Logic for complex concavities is partially unspecified in the source text.
+*   **When to Use:** When precise clipping of volume data using complex external geometry is required.
+*   **When Not to Use:** When simple box clipping is sufficient, or when hardware does not support the required ray tracing primitives efficiently.
+
+## Background
+The method was proposed in "Ray Traced Volume Clipping Using Multi-Hit BVH Traversal" [S1]. It builds on the concept of two-pass ray marching but extends it to handle arbitrary clip geometry and depth buffer interoperability [S1].
+
+## Sources
+[S1] Ray Traced Volume Clipping Using Multi-Hit BVH Traversal, https://doi.org/10.2352/issn.2470-1173.2017.1.vda-392, fetched 2026-10-24

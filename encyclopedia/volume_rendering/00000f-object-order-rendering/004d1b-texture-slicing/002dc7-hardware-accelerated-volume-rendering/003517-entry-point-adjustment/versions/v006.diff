@@ -1,0 +1,262 @@
+--- v005.md
++++ v006.md
+@@ -4,160 +4,136 @@
+ 
+ ## Overview
+-Entry Point Adjustment is a hardware-accelerated technique for direct volume ray casting that enables the camera to move inside the volume's bounding box without the view disappearing or clipping artifacts. It solves the problem of ray origin placement when the viewer penetrates the front face of the volume by dynamically shifting the ray entry point forward along the ray direction based on a scale coefficient, allowing the user to "flow through" the volume [S1, unofficial]. Unlike standard ray casting which assumes the camera is always outside the front face, this method maintains visual continuity by adjusting the start of the ray march to remain within the volume bounds defined by the exit point [S1, unofficial].
++Entry Point Adjustment is a hardware-accelerated technique for direct volume ray casting that enables the camera to move inside the volume's bounding box without the view disappearing or clipping artifacts. It solves the problem of standard ray generation failing when the camera origin exceeds the back face of the volume by dynamically shifting the ray's entry point forward along the ray direction based on a scale coefficient [S1, unofficial]. Unlike standard methods that assume the camera is always outside the volume, this approach maintains visual continuity as the viewer "flows through" the volume [S1, unofficial].
+ 
+ ## How it works
+-The method operates in a two-pass rendering pipeline using framebuffer objects (FBOs) and fragment shaders. It relies on the geometric relationship between the front and back faces of the volume's bounding box.
++The method operates in a two-pass rendering pipeline using framebuffer objects (FBOs) and fragment shaders. It relies on the Shared principles of the parent family [5616-hardware-accelerated-volume-rendering.md], specifically ray generation, sampling, classification, and compositing.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   `VolumeTex`: A 3D texture containing the scalar field data.
+-    *   `TransferFunc`: A 1D texture mapping scalar values to RGBA colors.
+-    *   `ExitPoints`: A 2D texture storing the 3D exit coordinates of rays passing through the back face of the volume.
+-    *   `ScreenSize`: A uniform `vec2` representing the resolution of the screen/FBO.
+-    *   `StepSize`: A uniform `float` controlling the distance between samples along the ray.
+-    *   `AlphaReduce`: A uniform `float` multiplier applied to alpha to increase transparency.
+-    *   `scaleCoeff`: A uniform `float` representing the scaling factor of the volume, used to determine the camera's penetration depth.
+-*   **Outputs:**
+-    *   `FragColor`: The final composited RGBA color for each pixel.
++**Inputs:**
++*   `VolumeTex`: A 3D texture containing the scalar volume data [S1, unofficial].
++*   `TransferFunc`: A 1D texture mapping scalar values to RGBA color and opacity [S1, unofficial].
++*   `ExitPoints`: A 2D texture storing the exit coordinates of rays passing through the back face of the volume [S1, unofficial].
++*   `ScreenSize`: A uniform vector $(W, H)$ representing the resolution of the viewport [S1, unofficial].
++*   `StepSize`: A uniform float controlling the distance between samples along the ray [S1, unofficial].
++*   `AlphaReduce`: A uniform float multiplier applied to alpha to increase transparency [S1, unofficial].
++*   `scaleCoeff`: A uniform float representing the scaling factor of the volume, used to determine if the camera is inside [S1, unofficial].
++
++**Outputs:**
++*   `FragColor`: The final accumulated color for each pixel [S1, unofficial].
+ 
+ ### Data Structures
+-1.  **ExitPoints Texture**: A 2D texture where each texel at normalized screen coordinates $(u, v)$ stores the 3D world-space coordinates $(x, y, z)$ of the ray's exit point from the volume's back face.
+-2.  **VolumeTex**: A 3D texture sampled at normalized coordinates $(s, t, r)$ corresponding to the ray's current position.
+-3.  **TransferFunc**: A 1D texture sampled using the alpha channel of the volume scalar value to retrieve the final color.
++*   **ExitPoints Texture**: A 2D texture where each texel at normalized screen coordinates $(u, v)$ stores the 3D world-space exit point $(x, y, z)$ of the ray passing through that pixel's back-face intersection [S1, unofficial].
++*   **Volume Texture**: A 3D texture storing scalar values. Sampling returns a `vec4` where the alpha channel typically holds the scalar value for transfer function lookup [S1, unofficial].
+ 
+-### Algorithm Steps
+-1.  **Back-Face Rendering (Pre-pass):** Render the back face of the volume's bounding box into an FBO bound to the `ExitPoints` texture. The vertex color or position is used to store the 3D exit coordinates for each fragment.
+-2.  **Front-Face Rendering (Main Pass):** Render the front face of the volume's bounding box to the screen. Pass the original entry point (front face vertex position) to the fragment shader.
+-3.  **Exit Point Retrieval:** In the fragment shader, retrieve the exit point from the `ExitPoints` texture using the current fragment's screen coordinates normalized by `ScreenSize`.
+-4.  **Visibility Check:** If the retrieved exit point is identical to the entry point, discard the fragment. This indicates the ray does not pass through the volume or the camera is positioned such that no volume is visible [S1, unofficial].
+-5.  **Ray Direction Calculation:** Compute the ray direction by normalizing the vector from the entry point to the exit point.
+-6.  **Entry Point Adjustment:**
+-    *   If `scaleCoeff` $\ge 2.7$, calculate a temporary shift factor:
+-        $$ tmp = \min((scaleCoeff - 2.7) \times 0.1, 1.0) $$
+-    *   Shift the entry point forward:
+-        $$ \text{AdjustedEntryPoint} = \text{EntryPoint} + tmp \times (\text{ExitPoint} - \text{EntryPoint}) $$
+-    *   If `scaleCoeff` $< 2.7$, use the original `EntryPoint` [S1, unofficial].
+-7.  **Ray Marching Initialization:**
+-    *   Set `currentPosition` to the adjusted entry point.
+-    *   Initialize `colorSum` (accumulated color) and `color` (current sample) to zero.
+-    *   Calculate `Step` vector: $\text{Step} = \text{rayDirection} \times \text{StepSize}$.
+-    *   Calculate `stepLength`: $|\text{Step}|$.
+-    *   Calculate `Length`: $|\text{ExitPoint} - \text{EntryPoint}|$.
+-    *   Initialize `LengthSum` to 0.
+-8.  **Ray Marching Loop:** Iterate up to 16,000 times (or until termination conditions are met):
+-    *   Sample `VolumeTex` at `currentPosition.xyz` to get `value`.
+-    *   Sample `TransferFunc` using `value.a` to get `color`.
+-    *   Apply transparency reduction: `color.a *= AlphaReduce`.
+-    *   Perform front-to-back blending:
+-        $$ \text{colorSum} = (1.0 - \text{colorSum.a}) \times \text{color} + \text{colorSum} $$
+-        *(Note: `color.rgb` is multiplied by `color.a` before addition in the source code)*.
+-    *   Accumulate length: `LengthSum += stepLength`.
+-    *   Terminate if `colorSum.a >= 0.95` or `LengthSum >= Length`.
+-    *   Advance position: `currentPosition.xyz += Step`.
+-9.  **Output:** Write `colorSum` to `FragColor` [S1, unofficial].
++### Steps
++1.  **Back-Face Rendering (Pre-pass)**: Render the back face of the volume's axis-aligned bounding box into an FBO bound to the `ExitPoints` texture. The fragment shader outputs the world-space coordinates of the intersection point. This captures where rays exit the volume [S1, unofficial].
++2.  **Front-Face Rendering (Main Pass)**: Render the front face of the volume's bounding box to the screen. Pass the entry point (camera origin or front-face intersection) as a varying `EntryPoint` to the fragment shader [S1, unofficial].
++3.  **Ray Direction Calculation**: In the fragment shader, retrieve the exit point from `ExitPoints` using normalized screen coordinates:
++    $$ \mathbf{p}_{exit} = \text{texture}(\text{ExitPoints}, \frac{\mathbf{gl\_FragCoord.st}}{\text{ScreenSize}}).xyz $$
++    If the entry point equals the exit point, the ray does not pass through the volume (or the camera is outside in a way that misses the volume), and the fragment is discarded [S1, unofficial].
++    Calculate the ray direction:
++    $$ \mathbf{d} = \text{normalize}(\mathbf{p}_{exit} - \mathbf{p}_{entry}) $$
++4.  **Entry Point Adjustment**: Determine the effective entry point $\mathbf{p}_{eff}$ based on `scaleCoeff`. If `scaleCoeff` $\ge 2.7$, shift the entry point forward to simulate being inside the volume:
++    $$ \tau = \min((\text{scaleCoeff} - 2.7) \times 0.1, 1.0) $$
++    $$ \mathbf{p}_{eff} = \mathbf{p}_{entry} + \tau (\mathbf{p}_{exit} - \mathbf{p}_{entry}) $$
++    Otherwise, $\mathbf{p}_{eff} = \mathbf{p}_{entry}$ [S1, unofficial].
++5.  **Ray Marching Initialization**:
++    *   Set current position $\mathbf{p}_{curr} = \mathbf{p}_{eff}$ [S1, unofficial].
++    *   Initialize accumulated color $C_{sum} = (0, 0, 0, 0)$ and opacity $\alpha_{sum} = 0$ [S1, unofficial].
++    *   Calculate step vector $\mathbf{s} = \mathbf{d} \times \text{StepSize}$ [S1, unofficial].
++    *   Calculate total ray length $L = \|\mathbf{p}_{exit} - \mathbf{p}_{entry}\|$ [S1, unofficial].
++    *   Initialize accumulated length $L_{acc} = 0$ [S1, unofficial].
++6.  **Loop**: Iterate up to a maximum number of steps (e.g., 16,000) [S1, unofficial]:
++    *   Sample volume: $v = \text{texture}(\text{VolumeTex}, \mathbf{p}_{curr})$ [S1, unofficial].
++    *   Classify: $c = \text{texture}(\text{TransferFunc}, v.a)$ [S1, unofficial].
++    *   Adjust opacity: $c.a = c.a \times \text{AlphaReduce}$ [S1, unofficial].
++    *   Composite (Front-to-Back):
++        $$ C_{sum} = (1 - C_{sum}.a) \times (c.rgb \times c.a) + C_{sum} $$
++        $$ \alpha_{sum} = C_{sum}.a $$
++    *   Update position: $\mathbf{p}_{curr} += \mathbf{s}$ [S1, unofficial].
++    *   Update length: $L_{acc} += \|\mathbf{s}\|$ [S1, unofficial].
++    *   Termination: Break if $\alpha_{sum} \ge 0.95$ or $L_{acc} \ge L$ [S1, unofficial].
++7.  **Output**: Write $C_{sum}$ to `FragColor` [S1, unofficial].
+ 
+ ### Pseudocode
+-The following pseudocode represents the fragment shader logic described in the source. It assumes standard vector and matrix operations are available.
+-
+ ```python
+-# Inputs
+-EntryPoint: vec3          # From vertex shader (front face position)
+-ExitPointCoord: vec4      # Not directly used, screen coords used instead
+-ExitPoints: sampler2D     # Texture storing exit points
+-VolumeTex: sampler3D      # 3D volume data
+-TransferFunc: sampler1D   # 1D transfer function
+-StepSize: float           # Uniform
+-AlphaReduce: float        # Uniform
+-ScreenSize: vec2          # Uniform (width, height)
+-
+-# Output
+-FragColor: vec4
+-
+-def main():
+-    # 1. Retrieve exit point from texture
+-    # Normalize screen coordinates to [0, 1]
+-    uv = gl_FragCoord.xy / ScreenSize
+-    exitPoint = texture(ExitPoints, uv).xyz
+-
+-    # 2. Visibility check
+-    # If entry equals exit, the ray does not pass through the volume
+-    if EntryPoint == exitPoint:
++# Fragment Shader Logic
++def fragment_shader(entry_point: vec3, screen_coord: vec2, screen_size: vec2, 
++                    exit_points_tex: sampler2D, volume_tex: sampler3d, 
++                    transfer_func: sampler1d, step_size: float, 
++                    alpha_reduce: float, scale_coeff: float) -> vec4:
++    
++    # 1. Retrieve exit point
++    uv = screen_coord / screen_size
++    exit_point = texture(exit_points_tex, uv).xyz
++    
++    # 2. Check if ray passes through volume
++    if entry_point == exit_point:
+         discard()
+-
++        
+     # 3. Calculate ray direction
+-    rayDirection = normalize(exitPoint - EntryPoint)
+-
+-    # 4. Entry Point Adjustment
+-    # Determine if we need to shift the entry point based on scaleCoeff
+-    # Note: scaleCoeff is assumed to be a uniform passed to the shader
+-    if scaleCoeff >= 2.7:
+-        tmp = min((scaleCoeff - 2.7) * 0.1, 1.0)
+-        adjustedEntryPoint = EntryPoint + tmp * (exitPoint - EntryPoint)
++    ray_direction = normalize(exit_point - entry_point)
++    
++    # 4. Adjust entry point if inside volume
++    if scale_coeff >= 2.7:
++        tmp = min((scale_coeff - 2.7) * 0.1, 1.0)
++        effective_entry = entry_point + tmp * (exit_point - entry_point)
+     else:
+-        adjustedEntryPoint = EntryPoint
+-
++        effective_entry = entry_point
++        
+     # 5. Initialize variables
+-    currentPosition = adjustedEntryPoint
+-    colorSum = vec4(0.0, 0.0, 0.0, 0.0)
+-    color = vec4(0.0, 0.0, 0.0, 0.0)
++    current_pos = effective_entry
++    color_sum = vec4(0.0, 0.0, 0.0, 0.0)
++    step_vector = ray_direction * step_size
++    step_length = length(step_vector)
++    total_length = length(exit_point - entry_point)
++    accumulated_length = 0.0
+     
+-    Step = rayDirection * StepSize
+-    stepLength = length(Step)
+-    Length = length(exitPoint - EntryPoint)
+-    LengthSum = 0.0
+-
+-    # 6. Ray Marching Loop
++    # 6. Ray marching loop
+     for i in range(16000):
+-        # Sample volume
+-        value = texture(VolumeTex, currentPosition)
+-        
+-        # Sample transfer function
+-        color = texture(TransferFunc, value.a)
++        # Sample volume and classify
++        value = texture(volume_tex, current_pos)
++        color = texture(transfer_func, value.a)
+         
+         # Reduce alpha for transparency
+-        color.a *= AlphaReduce
++        color.a *= alpha_reduce
+         
+-        # Front-to-back blending
+-        # Source code: color.rgb *= color.a; colorSum = (1.0 - colorSum.a) * color + colorSum;
+-        color.rgb *= color.a
+-        colorSum = (1.0 - colorSum.a) * color + colorSum
++        # Front-to-back compositing
++        # Note: color.rgb is multiplied by alpha before adding to sum
++        contribution = color.rgb * color.a
++        color_sum = (1.0 - color_sum.a) * contribution + color_sum
+         
+-        # Accumulate length
+-        LengthSum += stepLength
++        # Advance
++        current_pos += step_vector
++        accumulated_length += step_length
+         
+         # Termination conditions
+-        if colorSum.a >= 0.95:
++        if color_sum.a >= 0.95:
+             break
+-        if LengthSum >= Length:
++        if accumulated_length >= total_length:
+             break
+             
+-        # Advance position
+-        currentPosition += Step
+-
+-    FragColor = colorSum
++    return color_sum
+ ```
+ 
+-### Parameters and Typical Values
+-*   **StepSize**: Controls sampling density. Not given in the sources.
+-*   **AlphaReduce**: Multiplier for alpha. Not given in the sources.
+-*   **scaleCoeff**: Threshold for entry point shift. The source uses a hardcoded threshold of `2.7` [S1, unofficial].
+-*   **Max Iterations**: 16,000 [S1, unofficial].
+-*   **Termination Alpha**: 0.95 [S1, unofficial].
++### Parameters
++*   `scaleCoeff`: Threshold for entering the volume. Values $\ge 2.7$ trigger adjustment [S1, unofficial].
++*   `StepSize`: Controls sampling density. Not given in the sources.
++*   `AlphaReduce`: Transparency multiplier. Not given in the sources.
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision**: Comparing `EntryPoint == exitPoint` for discarding fragments may suffer from floating-point precision issues. [G] In practice, a small epsilon tolerance should be used for this comparison.
+-*   **Boundary Conditions**: The method assumes the volume is a convex bounding box. If the volume has complex geometry, the simple front/back face rasterization may not accurately represent the true entry/exit points, leading to artifacts.
+-*   **Scale Coefficient**: The shift logic is linear and hardcoded. If `scaleCoeff` is very large, the entry point shift is capped at 1.0, which may cause the ray to start too close to the exit point, resulting in insufficient sampling.
++*   **Precision**: Comparing `EntryPoint == exitPoint` for discarding fragments may suffer from floating-point precision issues. [G] A small epsilon tolerance should be used in practice.
++*   **Boundary Conditions**: The method assumes the volume is enclosed by a bounding box. If the volume is not axis-aligned or the bounding box is loose, the exit point texture may contain invalid data for rays that miss the volume.
++*   **Scale Coefficient**: The formula `(scaleCoeff - 2.7) * 0.1` is empirical. Values significantly above 2.7 may shift the entry point too far, causing the ray to start inside the volume and potentially miss front-face details or create visual artifacts if the shift exceeds the volume bounds.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear with respect to the number of samples per ray ($O(N)$), where $N$ is the number of steps in the ray march. The pre-pass is $O(F)$ where $F$ is the number of fragments in the back face.
+-*   **Memory Complexity**: $O(V)$ for the 3D volume texture and $O(R \times H)$ for the 2D exit points texture, where $R, H$ are resolution dimensions.
+-*   **Strengths**: Allows seamless navigation inside the volume without clipping. Simple to implement on standard graphics hardware using FBOs.
+-*   **Limitations**: The "flowing through" effect is an approximation and may not perfectly simulate being "surrounded" by the volume. The hardcoded thresholds (2.7, 0.1) are arbitrary and may not work for all volume scales. [S1, unofficial]
+-*   **When to use**: When interactive navigation inside the volume is required and the volume can be approximated by a bounding box.
+-*   **When not to use**: When high accuracy of entry/exit points is required for non-convex volumes, or when the "surrounded" effect is critical.
++*   **Time Complexity**: Linear with respect to the number of samples per ray ($N$) and the number of pixels ($P$). $O(P \times N)$. The loop runs up to 16,000 times, but early termination reduces average cost [S1, unofficial].
++*   **Memory Complexity**: Requires storage for the `ExitPoints` texture ($W \times H \times 4$ bytes) and the `VolumeTex` ($D_x \times D_y \times D_z \times 4$ bytes) [S1, unofficial].
++*   **Performance**: Dependent on GPU fragment shader execution speed. The two-pass approach adds overhead but allows for efficient ray marching in the second pass [S1, unofficial].
++*   **Strengths**: Enables immersive "inside-the-volume" viewing without complex ray-triangle intersection calculations for every sample. Simple to implement on standard graphics hardware [S1, unofficial].
++*   **Limitations**: The entry point adjustment is heuristic and may not perfectly represent the physical camera position inside the volume. It is specific to convex, box-like volumes [S1, unofficial].
+ 
+ ## Background
+-The method was discussed in a Stack Overflow post by user "imo" in April 2016, as a solution to a problem with OpenGL ray casting where the view disappeared when the camera moved inside the volume [S1, unofficial]. The code was based on a GitHub repository "toolchainX/Volume_Rendering_Using_GLSL". It is presented as an alternative to plane clipping for handling visibility when the camera penetrates the volume [S1, unofficial].
++The method was discussed in the context of implementing volume rendering using GLSL and OpenTK, specifically addressing the issue of "flowing through the volume" [S1, unofficial]. It was presented as a solution to the problem where the view disappears when the camera position exceeds the back face of the volume [S1, unofficial]. The approach contrasts with Plane Clipping, which was suggested as an alternative for handling visibility through the volume [S1, unofficial].
+ 
+ ## Sources

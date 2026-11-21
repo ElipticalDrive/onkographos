@@ -1,0 +1,124 @@
+# Mask Cache Lookup with Ray Bounding Box Check
+
+Also called: DVGO Hit Coarse Geometry, DVGO Hit Coarse Geometry Check
+
+## Overview
+This method determines which rays intersect with the currently solved coarse geometry mask by combining bounding box containment checks with a 3D boolean grid lookup. It serves as a pre-filtering step in volume rendering pipelines, identifying valid sampling points before expensive density or color computations. Unlike the parent [Mask Cache Lookup](6434-mask-cache-lookup.md) which handles general occupancy queries, this variant explicitly manages ray geometry and bounding box boundaries to optimize the lookup process for unbounded scenes.
+
+## How it works
+**Inputs:**
+- `rays_o`: Ray origins, shape $[N, 3]$.
+- `rays_d`: Ray directions, shape $[N, 3]$.
+- `xyz_min`: Minimum corner of the bounding box, shape $[3]$.
+- `xyz_max`: Maximum corner of the bounding box, shape $[3]$.
+- `near`: Near clipping plane distance.
+- `far`: Far clipping plane distance.
+- `stepsize`: Base step size for sampling.
+- `voxel_size`: Physical size of a single voxel in the grid.
+- `mask_cache`: A 3D boolean grid (or tensor) storing occupancy information.
+
+**Outputs:**
+- `hit`: A boolean tensor of shape $[N]$, where `hit[i]` is `True` if ray `i` intersects the coarse geometry within the bounding box.
+
+**Data Structures:**
+- `mask_cache`: A 3D boolean grid. The implementation assumes this supports indexing with world coordinates converted to grid indices.
+- `ray_pts`: Tensor of sampled points on rays, shape $[N, K, 3]$, where $K$ is the number of samples per ray.
+- `mask_outbbox`: Boolean tensor of shape $[N, K]$, `True` if the point is outside the bounding box.
+- `ray_id`: Tensor mapping each sampled point back to its source ray index, shape $[N, K]$.
+
+**Parameters:**
+- `far`: Set to $10^9$ to prevent early stopping at the scene bounding box, allowing rays to extend indefinitely for unbounded scene representation [S1, unofficial].
+
+**Steps:**
+1.  Reshape `rays_o` and `rays_d` to shape $[-1, 3]$ and ensure they are contiguous in memory [S1, unofficial].
+2.  Calculate the effective step distance: $stepdist = stepsize \times voxel\_size$ [S1, unofficial].
+3.  Sample points along each ray using the bounding box limits and step distance. This yields:
+    -   `ray_pts`: Coordinates of sampled points.
+    -   `mask_outbbox`: Boolean mask indicating points outside the bounding box.
+    -   `ray_id`: Indices identifying which ray each point belongs to.
+4.  Identify points inside the bounding box: $mask\_inbbox = \neg mask\_outbbox$ [S1, unofficial].
+5.  Initialize a boolean tensor `hit` of zeros with length equal to the number of rays $N$ [S1, unofficial].
+6.  For points inside the bounding box, query the `mask_cache` using their world coordinates. The coordinates are converted to grid indices internally by the `mask_cache` lookup function.
+7.  Mark rays as hit if the corresponding query points are inside the bounding box and pass the mask cache check:
+    $$ hit[ray\_id[mask\_inbbox][mask\_cache(ray\_pts[mask\_inbbox])]] = 1 $$
+    This operation sets `hit[i] = 1` if any sample point on ray `i` is inside the bounding box and marked as occupied in the coarse geometry mask [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hit_coarse_geo(rays_o, rays_d, xyz_min, xyz_max, near, far, stepsize, voxel_size, mask_cache):
+    """
+    Checks whether rays intersect with the currently solved coarse geometry mask.
+    
+    Args:
+        rays_o: Tensor of ray origins [N, 3]
+        rays_d: Tensor of ray directions [N, 3]
+        xyz_min: Tensor of bounding box minimum [3]
+        xyz_max: Tensor of bounding box maximum [3]
+        near: Float, near clipping distance
+        far: Float, far clipping distance (typically 1e9 for unbounded)
+        stepsize: Float, base step size
+        voxel_size: Float, physical size of a voxel
+        mask_cache: Object or function that maps world coordinates to boolean occupancy
+        
+    Returns:
+        hit: Boolean tensor [N], True if ray intersects coarse geometry
+    """
+    # Reshape rays to [-1, 3] and make contiguous
+    rays_o = rays_o.reshape(-1, 3).contiguous()
+    rays_d = rays_d.reshape(-1, 3).contiguous()
+    
+    # Set far distance to prevent early stopping at scene bbox
+    far_val = 1e9
+    
+    # Calculate step distance
+    stepdist = stepsize * voxel_size
+    
+    # Sample points on rays
+    # This function returns ray_pts [N, K, 3], mask_outbbox [N, K], ray_id [N, K]
+    ray_pts, mask_outbbox, ray_id = sample_pts_on_rays(
+        rays_o, rays_d, xyz_min, xyz_max, near, far_val, stepdist
+    )
+    
+    # Identify points inside the bounding box
+    mask_inbbox = ~mask_outbbox
+    
+    # Initialize hit tensor of zeros (length N)
+    hit = torch.zeros(rays_o.shape[0], dtype=torch.bool)
+    
+    # Filter points inside bounding box
+    pts_in_bbox = ray_pts[mask_inbbox]
+    ids_in_bbox = ray_id[mask_inbbox]
+    
+    # Query mask cache for points inside bounding box
+    # mask_cache(pts) returns boolean mask of occupied points
+    occupied_mask = mask_cache(pts_in_bbox)
+    
+    # Mark rays as hit if corresponding points are occupied
+    # Note: This assumes mask_cache returns a boolean tensor aligned with pts_in_bbox
+    hit[ids_in_bbox[occupied_mask]] = 1
+    
+    return hit
+```
+
+**Edge Cases and Pitfalls:**
+-   **Precision:** Ensure `rays_o` and `rays_d` are contiguous to avoid performance penalties or errors in CUDA kernels [S1, unofficial].
+-   **Bounding Box:** The `far` distance must be large enough (e.g., $10^9$) to avoid premature termination for unbounded scenes [S1, unofficial].
+-   **Empty Rays:** If no points are inside the bounding box or no points are occupied, the `hit` tensor remains all zeros.
+-   **Multiple Hits:** If multiple points on a single ray are occupied, the ray is marked as hit only once.
+
+## Operating characteristics
+-   **Time Complexity:** Dominated by the ray sampling and mask cache lookup. Sampling is $O(N \times K)$ where $N$ is the number of rays and $K$ is the number of samples per ray. Mask cache lookup is $O(M)$ where $M$ is the number of points inside the bounding box.
+-   **Memory Complexity:** $O(N \times K)$ for storing ray points and masks.
+-   **Strengths:** Efficiently filters out rays that do not intersect the coarse geometry, reducing the number of points processed in subsequent volume rendering steps.
+-   **Limitations:** Depends on the accuracy of the coarse geometry mask. If the mask is too sparse or too dense, it may lead to missed details or unnecessary computations.
+-   **When to Use:** When rendering unbounded scenes with a coarse geometry mask, and when computational efficiency is critical.
+-   **When Not to Use:** When high-frequency details are required and the coarse mask is insufficient, or when the scene is bounded and simpler ray-box intersection tests suffice.
+
+## Background
+This method is part of the Deep Voxel Grid (DVGO) framework, specifically used in implementations like UnboundedNeRFPytorch [S1, unofficial]. It addresses the challenge of efficiently querying occupancy in unbounded scenes by combining ray sampling with a 3D boolean grid lookup. The approach allows for scalable volume rendering by pre-filtering rays based on coarse geometry.
+
+## Sources
+[S1] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)

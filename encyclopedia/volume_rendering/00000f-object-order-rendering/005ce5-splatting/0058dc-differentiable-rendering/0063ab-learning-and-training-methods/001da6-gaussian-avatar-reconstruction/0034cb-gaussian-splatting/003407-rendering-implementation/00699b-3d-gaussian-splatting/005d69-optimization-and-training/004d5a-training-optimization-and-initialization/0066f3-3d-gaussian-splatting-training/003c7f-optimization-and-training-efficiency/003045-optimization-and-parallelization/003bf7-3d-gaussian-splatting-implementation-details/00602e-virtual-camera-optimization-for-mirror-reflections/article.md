@@ -1,0 +1,200 @@
+# Virtual Camera Optimization for Mirror Reflections
+
+Also called: GSIM, Gaussian Splatting in Mirrors
+
+## Overview
+Virtual Camera Optimization for Mirror Reflections (GSIM) is a method for rendering physically accurate mirror reflections in 3D Gaussian Splatting (3D-GS) by modeling reflections as images captured by virtual cameras positioned symmetrically to the real camera across the mirror plane [S1, unofficial]. It solves the problem of multi-view inconsistencies and blurriness caused by 3D-GS misinterpreting reflections as virtual 3D space behind the mirror [S1, unofficial]. Unlike NeRF-based methods that use ray tracing, this method maintains real-time rendering speeds by using standard rasterization from the virtual camera pose [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A trained 3D-GS scene representation (Gaussians), real camera poses $[R|t]$, intrinsics $K$, and ground truth images.
+*   **Outputs:** Final rendered image $\hat{C}_{pred,f}$, optimized mirror plane parameters $[n, o]$, and virtual camera pose $[R'|t']$.
+
+**Data Structures**
+*   **Gaussian Scene:** Each Gaussian $i$ is defined by mean $\mu_i$, covariance $\Sigma_i$, opacity $O_i$, and spherical harmonic coefficients $C_i \in \mathbb{C}^{N_{sh}}$ [S1, unofficial].
+*   **Mirror Plane:** Defined by normal vector $n \in \mathbb{R}^3$ and origin point $o \in \mathbb{R}^3$ in world coordinates, denoted as $[n, o]$ [S1, unofficial].
+*   **Virtual Camera Extrinsic:** A $3 \times 4$ matrix $[R'|t'] \in \mathbb{R}^{3 \times 4}$ [S1, unofficial].
+*   **Mirror Mask:** A binary mask identifying pixels $P_M$ belonging to the mirror region within the set of all pixels $P_{cam}$ [S1, unofficial].
+
+**Numbered Steps**
+
+1.  **Depth and Normal Rasterization:** Extend standard 3D-GS rasterization to render depth and normal maps for the current view.
+    *   **Depth Map ($\hat{D}$):** Rendered via alpha-compositing of Gaussian centers' z-depths $d_i$ [S1, unofficial]:
+        $$ \hat{D} = \sum_{i \in N} d_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    *   **Normal Map ($\hat{N}$):** Rendered via alpha-compositing of Gaussian shortest axis normals $n_i$ [S1, unofficial]:
+        $$ \hat{N} = \sum_{i \in N} n_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+        where $n_i$ is the normalized vector of the shortest axis of the $i$-th Gaussian's covariance matrix [S1, unofficial].
+
+2.  **Mirror Plane Prediction:** Estimate the mirror plane $[n, o]$ in world coordinates using the rendered depth and normal maps.
+    *   **Color Optimization:** Replace mirror region colors in the ground truth image with a constant color to reconstruct the mirror surface geometry without texture interference [S1, unofficial].
+    *   **Depth Regularization:** Apply a smoothness loss $L_{smooth}$ to ensure depth consistency, weighted by color similarity [S1, unofficial]:
+        $$ L_{smooth} = \sum_{k \in P_{cam}} \sum_{q \in N(k)} \exp(-\gamma \| C'_{gt}(k) - C'_{gt}(q) \|) | \hat{D}_{pred,r}(k) - \hat{D}_{pred,r}(q) | $$
+        where $k$ and $q$ are pixels, $N(k)$ are 4-connected neighbors, $C'_{gt}$ is the modified ground truth color, and $\gamma$ is a hyper-parameter controlling color influence [S1, unofficial].
+    *   **Normal Consistency:** Use depth estimates to supervise normal consistency [S1, unofficial].
+
+3.  **Virtual Camera Pose Computation:** Compute the virtual camera extrinsic matrix $[R'|t']$ symmetric to the real camera $[R|t]$ about the mirror plane $[n, o]$ [S1, unofficial]:
+    $$ \begin{bmatrix} R' & t' \\ 0 & 1 \end{bmatrix} = \begin{bmatrix} I - 2nn^T & 2o \times n \\ 0 & 1 \end{bmatrix} \begin{bmatrix} R & t \\ 0 & 1 \end{bmatrix} $$
+    where $I$ is the identity matrix and $o \times n$ denotes the cross product [S1, unofficial].
+
+4.  **Virtual Camera Rendering:** Render the scene from the virtual camera using standard 3D-GS forward rasterization to obtain the reflected image $\hat{C}_{pred,v}$ [S1, unofficial].
+
+5.  **Image Fusion:** Fuse the virtual camera render and the real camera render $\hat{C}_{pred,r}$ using the mirror mask [S1, unofficial]:
+    $$ \hat{C}_{pred,f}(k) = \begin{cases} \hat{C}_{pred,v}(k), & \text{if } k \in P_{cam} \cap P_M \\ \hat{C}_{pred,r}(k), & \text{if } k \in P_{cam} \setminus P_M \end{cases} $$
+    where $P_M$ is the set of pixels in the masked mirror region [S1, unofficial].
+
+6.  **Optimization:** Refine the mirror plane parameters $[n, o]$ (and thus the virtual camera pose) via gradient descent during training to enhance reflection quality and resolve imperfections in the initial plane estimate [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_virtual_camera_extrinsic(real_extrinsic, mirror_normal, mirror_origin):
+    """
+    Computes the virtual camera extrinsic matrix [R'|t'] given the real camera
+    extrinsic [R|t] and mirror plane [n, o].
+    
+    Args:
+        real_extrinsic: 3x4 matrix [R|t]
+        mirror_normal: 3x1 vector n
+        mirror_origin: 3x1 vector o
+        
+    Returns:
+        virtual_extrinsic: 3x4 matrix [R'|t']
+    """
+    R = real_extrinsic[:, :3]
+    t = real_extrinsic[:, 3]
+    
+    n = mirror_normal.flatten()
+    o = mirror_origin.flatten()
+    
+    # Compute reflection matrix components
+    # I - 2*n*n^T
+    reflection_rot = np.eye(3) - 2.0 * np.outer(n, n)
+    
+    # 2 * (o x n)
+    translation_offset = 2.0 * np.cross(o, n)
+    
+    # Construct the 4x4 transformation matrix for the mirror reflection
+    # [ I - 2nn^T   2o x n ]
+    # [     0           1  ]
+    mirror_transform = np.eye(4)
+    mirror_transform[:3, :3] = reflection_rot
+    mirror_transform[:3, 3] = translation_offset
+    
+    # Append 1 to t to make it homogeneous
+    t_hom = np.append(t, 1.0)
+    
+    # Apply mirror transform to the real camera pose
+    # The formula in the paper is: [R' t'; 0 1] = MirrorTransform * [R t; 0 1]
+    # Note: The paper's formula implies matrix multiplication of the 4x4 homogeneous matrices.
+    real_cam_hom = np.eye(4)
+    real_cam_hom[:3, :3] = R
+    real_cam_hom[:3, 3] = t
+    
+    virtual_cam_hom = mirror_transform @ real_cam_hom
+    
+    # Extract 3x4 extrinsic
+    virtual_extrinsic = virtual_cam_hom[:3, :]
+    
+    return virtual_extrinsic
+
+def render_depth_and_normals(gaussians, camera_extrinsic, camera_intrinsics):
+    """
+    Renders depth and normal maps from 3D-GS scene.
+    This is a simplified representation of the alpha-compositing process.
+    """
+    # Project Gaussians to screen space
+    # This step involves standard 3D-GS projection logic
+    screen_gaussians = project_gaussians(gaussians, camera_extrinsic, camera_intrinsics)
+    
+    # Sort by z-depth
+    screen_gaussians.sort(key=lambda g: g.z_depth)
+    
+    # Initialize maps
+    height, width = screen_gaussians[0].image_shape
+    depth_map = np.zeros((height, width))
+    normal_map = np.zeros((height, width, 3))
+    alpha_map = np.zeros((height, width))
+    
+    # Alpha compositing
+    for g in screen_gaussians:
+        # Get Gaussian properties in screen space
+        alpha = g.alpha
+        depth = g.z_depth
+        normal = g.shortest_axis_normal # Normalized vector of shortest scaling axis
+        
+        # Update depth and normal using alpha compositing
+        # D_new = D_old * (1 - alpha) + depth * alpha
+        # N_new = N_old * (1 - alpha) + normal * alpha
+        # Note: The paper uses the standard alpha compositing formula for accumulation
+        # D = sum(d_i * alpha_i * prod(1-alpha_j))
+        
+        # For implementation, iterate pixels covered by the 2D Gaussian
+        for y, x in g.screen_coverage:
+            transmittance = 1.0 - alpha_map[y, x]
+            depth_map[y, x] = depth_map[y, x] * (1 - alpha) + depth * alpha
+            normal_map[y, x] = normal_map[y, x] * (1 - alpha) + normal * alpha
+            alpha_map[y, x] = alpha_map[y, x] + alpha * (1 - alpha_map[y, x])
+            
+    return depth_map, normal_map
+
+def optimize_mirror_plane(depth_map, normal_map, gt_color, mirror_mask, gamma):
+    """
+    Estimates mirror plane [n, o] from depth and normal maps.
+    """
+    # This step typically involves fitting a plane to the depth/normal data
+    # or optimizing parameters n and o to minimize reconstruction error.
+    # The paper mentions using L_smooth for depth regularization.
+    
+    # Placeholder for plane fitting/optimization logic
+    # n, o = fit_plane(depth_map, normal_map)
+    
+    # Apply smoothness loss if needed
+    # L_smooth = sum(exp(-gamma * ||C_gt(k) - C_gt(q)||) * |D(k) - D(q)|)
+    
+    return n, o
+
+def render_with_virtual_camera(gaussians, virtual_extrinsic, camera_intrinsics):
+    """
+    Renders the scene using the virtual camera.
+    """
+    # Standard 3D-GS rasterization
+    return standard_gs_rasterize(gaussians, virtual_extrinsic, camera_intrinsics)
+
+def fuse_images(real_render, virtual_render, mirror_mask):
+    """
+    Fuses real and virtual renders based on the mirror mask.
+    """
+    final_image = np.where(mirror_mask, virtual_render, real_render)
+    return final_image
+```
+
+**Parameters**
+*   $\gamma$: Hyper-parameter for the RGB-weighted depth smoothness regularization loss [S1, unofficial].
+*   $n$: Normal vector of the mirror plane in world coordinates [S1, unofficial].
+*   $o$: Origin point of the mirror plane in world coordinates [S1, unofficial].
+*   $P_M$: Set of pixels belonging to the masked mirror region [S1, unofficial].
+*   $P_{cam}$: Set of all pixels in the rendered image [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Misinterpretation of Reflections:** Standard 3D-GS treats reflections as virtual 3D space, causing blurriness and multi-view inconsistencies [S1, unofficial].
+*   **Imperfect Plane Estimates:** Initial mirror plane estimates may be inaccurate, necessitating the optimization step to refine the virtual camera pose [S1, unofficial].
+*   **Textureless Areas:** Depth predictions may be unreliable in textureless regions, requiring the color replacement strategy during optimization [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time rendering speeds are maintained, comparable to standard 3D-GS, as it avoids the computational expense of ray tracing [S1, unofficial].
+*   **Memory Complexity:** Requires storing additional depth and normal maps during training, but no significant increase in scene representation size [S1, unofficial].
+*   **Performance:** Achieves comparable or superior results to state-of-the-art methods while significantly reducing training time compared to NeRF-based approaches like Mirror-NeRF [S1, unofficial].
+*   **Strengths:** Physically-based reflection rendering, real-time capability, no need for additional depth supervision tailored specifically for mirrors (unlike Mirror-3DGS) [S1, unofficial].
+*   **Limitations:** Relies on accurate mirror plane estimation; performance may degrade if the mirror mask is inaccurate [S1, unofficial].
+*   **When to Use:** Scenes with mirrors where high-quality, multi-view consistent reflections are required, and real-time rendering is desired [S1, unofficial].
+*   **When Not to Use:** Scenes without reflective surfaces, or where computational resources are extremely limited and even the overhead of depth/normal rendering is prohibitive [S1, unofficial].
+
+## Background
+The method was proposed by Zihan Wang, Shuzhe Wang, Matias Turkulainen, Junyuan Fang, and Juho Kannala from Aalto University, University of Oulu, and ETH Zurich [S1, unofficial]. It was published in the BMVC 2024 paper "Gaussian Splatting in Mirrors: Reflection-Aware Rendering via Virtual Camera Optimization" [S1, unofficial]. The work addresses the limitations of 3D-GS in handling specular reflections, which prior NeRF-based methods like Mirror-NeRF attempted to solve using ray tracing, but at the cost of training time and rendering speed [S1, unofficial]. The method builds on the observation that mirror reflections can be modeled as images from a virtual camera symmetric to the real camera [S1, unofficial].
+
+## Sources
+[S1] Gaussian Splatting in Mirrors: Reflection-Aware Rendering via Virtual Camera Optimization, https://doi.org/10.48550/arxiv.2410.01614, fetched 2026-10-26 (unofficial)

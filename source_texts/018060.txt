@@ -1,0 +1,101 @@
+Replace flat chunk arrays with an SVO spatial hierarchy to dynamically adjust level-of-detail (LOD) based on camera distance, slashing memory footprint for 64+ chunk render distances. Motivation Today's world storage is a flat hash map w...
+
+Add Sparse Voxel Octree (SVO) Spatial Partitioning and LOD Management · Issue #6 · amodhakal/linterra · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add Sparse Voxel Octree (SVO) Spatial Partitioning and LOD Management #6
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Add Sparse Voxel Octree (SVO) Spatial Partitioning and LOD Management#6
+Copy link
+Labels
+M19Spatial Partitioning & LODSpatial Partitioning & LOD
+Milestone
+Milestone M19 — Spatial Partitioning & LOD
+Description
+amodhakal
+opened on Jul 25, 2026
+Issue body actions
+Replace flat chunk arrays with an SVO spatial hierarchy to dynamically adjust level-of-detail (LOD) based on camera distance, slashing memory footprint for 64+ chunk render distances.
+Motivation
+Today's world storage is a flat hash map with no spatial structure, no distance-based detail selection, and a per-frame full-grid scan.
+Flat containers. ChunkManager holds four parallel containers (src/manager.h:105-109):
+m_ProcessedChunks — unordered_map<ivec2, Chunk>, every meshed chunk
+m_ProcessingPositions — unordered_set<ivec2>, positions with a task in flight
+m_ProcessingChunks — unordered_map<ivec2, TaskResult>, the in-flight work itself
+m_ProcessingMutex guarding the last two
+Keys are chunk coordinates with a custom std::hash<glm::ivec2> specialization (src/manager.h:64-70). There is no hierarchy, so nothing can be traversed by proximity — "which chunks are near the camera" is only ever answered by visiting everything.
+The per-frame spawn scan. ChunkManager::render (src/manager.cpp:150-214) walks the full (2 * RENDER_DISTANCE_CHUNKS + 1)^2 grid — with RENDER_DISTANCE_CHUNKS = 32 (src/config.h:61) that is 65 x 65 = 4225 positions, every frame, unconditionally. Each iteration costs a getChunkDistanceSquared call (src/manager.cpp:32-39) plus a std::lock_guard on m_ProcessingMutex and two hash lookups (contains on each container). This happens regardless of whether the player moved. The comment at src/manager.h:98-102 notes the 4225 figure when justifying kMaxPendingTasks, but the scan itself is unconditional.
+No LOD. Every chunk is meshed at full resolution regardless of distance. Constants::Chunk::LENGTH = 16 and HEIGHT = 256 (src/config.h:59-60), and Chunk::generateMeshData / generateMesh produce the complete mesh. Heightmaps are likewise always full size: m_HeightMap[16][16] and the m_ExtendedHeightMap[18][18] neighbour halo (src/chunk.h:102-105), on both the GPU SSBO path (kGpuSlots * kExtSide * kExtSide per src/manager.cpp:57-58) and the CPU FBM path. There is no distance tier anywhere, so a chunk 500 blocks away costs exactly as much as one underfoot.
+Memory context. The README (Milestone 4) records that vertex compression plus dropping greedy meshing cut memory at a 64-chunk render distance from 3.2 GB to 1.5 GB. That is the number an SVO/LOD scheme is meant to attack: 1.5 GB is still dominated by full-detail chunks far outside the fog end, and FOG_END is RENDER_DISTANCE_BLOCKS = 512 blocks (src/config.h:62-64) — geometry far past it is fully resident but fully fogged out.
+Proposed design
+An octree root spanning the world. Each node holds either a single Chunk (leaf) or eight children, subdividing by chunk coordinate as the camera approaches. Two independent axes of savings:
+Spatial hierarchy for traversal. Replaces the 4225-position grid scan with a descent that visits only nodes whose bounding volume intersects the region of interest. Combined with frustum culling (src/manager.cpp:222) at each level, an entire subtree outside the view cone is skipped without touching its chunks.
+LOD keyed to camera distance. A LevelOfDetail describing resolution, with two complementary strategies:
+Intra-chunk: drop sub-quadrants of the chunk that are present, so a distant chunk keeps only its coarse silhouette and heightmap. Natural fit for the existing m_ExtendedHeightMap halo — coarser sampling just means a wider step through it.
+Inter-chunk: collapse distant chunks to a coarser heightmap-only representation (or a single merged mesh spanning several chunks), so the leaf count drops as well as the per-leaf detail.
+Transitions must be hysteresis-guarded so a player walking a chunk boundary does not thrash a subtree between two LODs.
+Integration points
+ChunkManager::render (src/manager.cpp:67) — the traversal/cull loop becomes a tree walk. Currently it does three separate full passes over the containers: the eviction sweep (74-84), the promote-from-m_ProcessingChunks pass (86-143), and the draw loop (219-240). An octree changes all three.
+ChunkManager::getPositionHighestY (src/manager.cpp:243-270) — currently does a direct m_ProcessedChunks.contains(chunkPosition) then .at(chunkPosition) (263-264). With an octree this needs a locate() descent. It is called from the player/collision path, so it is latency-sensitive and should stay O(tree depth), not O(log n) with a large constant.
+Heightmap generation — both paths produce a full 18x18 map today (Chunk::kExtSide = LENGTH + 2, src/chunk.h:86-87): the GPU path dispatches into a shared SSBO of kGpuSlots * kExtSide * kExtSide (src/manager.cpp:54-58), the CPU path fills m_HeightMap directly. A coarser LOD tier means the SSBO slot sizing and the compute dispatch's uExtSide uniform (src/manager.cpp:48) both need to become LOD-dependent.
+Frustum culling at src/manager.cpp:222 — Frustum::isChunkInside takes a single chunk position. Hierarchical culling wants a variant that takes an arbitrary AABB so whole subtrees can be tested without instantiating nodes. isChunkInside currently hardcodes the chunk extents at src/frustum.cpp:31-37.
+Prerequisites and risks
+Do the culling correctness fixes first. This issue builds directly on frustum culling, and that culling is currently wrong in a way that will corrupt any LOD work stacked on top of it:
+Frustum side planes are computed with degrees instead of radians, wasting draws and collapsing at low FOV #127 — src/frustum.cpp:6 computes side planes with tan(m_Fov * 0.5) treating degrees as radians. Measured at the default FOV 45 the frustum keeps 2812 chunks where a correct one keeps 2103; at FOV 30 the plane normals invert and it culls 1382 of 1383 genuinely visible chunks. An LOD tier selected by distance, but gated by a frustum that rejects or over-admits chunks, will pick the wrong tier for the wrong reasons — and the visible artifact will be blamed on the LOD rather than on Frustum side planes are computed with degrees instead of radians, wasting draws and collapsing at low FOV #127.
+Update the camera aspect ratio on window resize #12 — m_Aspect is hardcoded to 800/600 at src/camera.cpp:18 and handleResizeCallback never updates it, so the cull cone and projection cone drift on resize. Hierarchical culling amplifies this: a wrong subtree-level decision discards many chunks at once instead of one.
+GPU SSBO slots are recycled before deferred readback, so chunks read another chunk's heightmap #126 / The uSlot compute uniform is never registered, so every GPU chunk writes SSBO slot 0 #125 — GPU SSBO slot lifetime. m_NextGpuSlot++ % kGpuSlots (src/manager.cpp:184) recycles a slot before the deferred readback has necessarily consumed it, and uSlot is never registered as a compute uniform (src/manager.cpp:45-52 registers uChunkPos but not uSlot), so every dispatch may target slot 0. Since an SVO makes slot demand LOD-dependent, this must be correct before slot pressure becomes a function of tree structure.
+Land the cheap spawn-scan win first. Most of the per-frame cost in the spawn loop is addressable without any octree: only rescan when the player crosses a chunk boundary, and/or precompute the offset spiral so the scan is ordered by distance and can stop early once past the render radius. That is a small, self-contained change worth landing on its own — see #46 (precompute spiral offsets and gate the spawn scan), which already scopes it. It captures a large fraction of the per-frame win at a fraction of the risk, and gives the SVO a clean baseline to be measured against. Consider also #52 (consolidate the double processing/processed bookkeeping), since four parallel containers are a large part of the surface an octree would need to restructure.
+Other risks. Node lifetime and GPU resource ownership become non-trivial: Chunk owns a VBO/EBO/VAO (src/chunk.h:93-97), and a TaskResult is mutated by a worker thread while the main thread reads it (src/manager.h:19-56). An octree with subtree refcounting will interact with m_ProcessingMutex and the TaskResult move semantics, and node eviction must not free a node a worker still holds a reference to. Subtree splitting/merging also needs to be coordinated with in-flight tasks, not just with the mesh store. Greedy meshing (#79) is orthogonal but interacts with any per-chunk mesh compression, since LOD tiers change mesh sizes and therefore compression ratios.
+Acceptance criteria
+Memory at a 64-chunk render distance drops meaningfully from the README's 1.5 GB Milestone 4 figure. A concrete target should be agreed up front; "meaningfully" alone is not verifiable in review. Tiers must demonstrably apply, not just exist in the type system.
+Per-frame spawn work becomes proportional to the number of newly visible chunks rather than a constant 4225. Walking forward without crossing a chunk boundary should cost O(1) traversal, not a full-grid rescan. Measurable via an instrumented counter asserted in a test.
+LOD transitions are not visible. No popping or terrain shimmer at tier boundaries under continuous camera motion; verified by flying a camera through a tier boundary and inspecting frames.
+Culling is conservative. Anything the projection matrix puts on screen must survive both the frustum test and the octree descent. Needs the reference-frustum invariant from Frustum side planes are computed with degrees instead of radians, wasting draws and collapsing at low FOV #127 — this is the property that makes a hierarchical cull safe to trust, and it does not exist in tests/test_frustum.cpp today.
+No regression in load or frame time at the current 32-chunk render distance, measured before and after.
+Related
+Precompute spiral offsets and gate the spawn scan #46 — precompute spiral offsets and gate the spawn scan (cheaper first step)
+Consolidate double bookkeeping of processing/processed chunks #52 — consolidate double bookkeeping of processing/processed chunks
+Add chunk unload throttling and hysteresis #87 — add chunk unload throttling and hysteresis
+Implement greedy meshing 2.0 #79 — implement greedy meshing 2.0 (interacts with per-chunk mesh compression under LOD)
+Frustum side planes are computed with degrees instead of radians, wasting draws and collapsing at low FOV #127 — frustum side planes computed with degrees instead of radians (must land first)
+Update the camera aspect ratio on window resize #12 — update the camera aspect ratio on window resize (must land first)
+The uSlot compute uniform is never registered, so every GPU chunk writes SSBO slot 0 #125, GPU SSBO slots are recycled before deferred readback, so chunks read another chunk's heightmap #126 — GPU SSBO slot correctness (must land first)
+Reactions are currently unavailable
+Activity
+amodhakal
+added this to the Milestone M19 — Spatial Partitioning & LOD milestone on Sep 30, 2026
+amodhakal
+added
+M19Spatial Partitioning & LODSpatial Partitioning & LOD
+on Sep 30, 2026
+amodhakal
+added a commit that references this issue on Oct 2, 2026
+Cull whole subtrees against the frustum, and prove it conservative
+...
+66edffa
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+M19Spatial Partitioning & LODSpatial Partitioning & LOD
+Projects
+No projects
+Milestone
+Milestone M19 — Spatial Partitioning & LODNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,185 @@
+# Interactive Isocontouring of High-Order Surfaces (iHOS)
+Also called: iHOS
+
+## Overview
+iHOS is a GPU-based hybrid rendering method for the interactive visualization of isosurfaces defined by high-order multivariate polynomials, such as those arising from hp-adaptive finite element simulations [S1, book]. It solves the problem of achieving interactive frame rates for complex, high-degree implicit surfaces by dividing the workload into an object-space pre-processing phase and an image-space ray-casting phase [S1, book]. Unlike pure ray-tracing methods that require expensive per-pixel root finding, iHOS uses gradient-guided seed projection in object space to generate initial surface samples, which are then refined via accelerated root finding in image space [S1, book]. This approach allows for efficient early-z culling and avoids the overhead of inclusion arithmetic used in robust implicit renderers [S1, book].
+
+## How it works
+The method operates in two distinct phases: Object Space (pre-processing) and Image Space (rendering) [S1, book].
+
+### Inputs and Outputs
+**Inputs:**
+*   A mesh $M$ composed of $N$ convex cells (e.g., hexahedra, tetrahedra) [S1, book].
+*   For each cell, a scalar field defined by a multivariate polynomial $P(\mathbf{x})$ of degree $n$ [S1, book].
+*   An isovalue $\tau$ defining the isosurface $P(\mathbf{x}) = \tau$ [S1, book].
+*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) for each pixel [G].
+
+**Outputs:**
+*   A rendered image of the isosurface with depth information (though depth is not strictly updated for early-z optimization, see Pitfalls) [S1, book].
+
+### Data Structures
+*   **Interval Tree (CPU):** Stores the extrema (min/max) of the scalar field for each cell [S1, book]. Used for early cell culling to determine if a cell contains the isovalue [S1, book].
+*   **VBO_unproj (GPU):** Vertex Buffer Object storing unprojected seeds. Each seed has 4 components: $(x, y, z, w)$, where $w$ stores the Finite-Time Lyapunov Exponent (FTLE) value [S1, book].
+*   **VBO_quads (GPU):** Vertex Buffer Object storing the generated surface-tangent quadrilaterals (quads) [S1, book].
+*   **BUBOs (GPU):** Bindable Uniform Buffer Objects. Due to size limits (typically 64KB), a separate BUBO is created for each cell, containing read-only polynomial coefficients, gradient data, and cell boundary information [S1, book].
+*   **Shader Versions:** Separate shader programs are maintained for each polynomial degree to allow compiler loop unrolling [S1, book].
+
+### Polynomial Definition
+The scalar field in the reference space is defined as:
+$$ P(\mathbf{x}) = \sum_{i+j+k \le n} c_{ijk} x^i y^j z^k $$
+where $i,j,k \in \mathbb{N}_0$, $n$ is the maximum order, $c_{ijk}$ are coefficients, and $x,y,z$ are reference space coordinates [S1, book].
+
+### Phase 1: Object Space Pre-processing
+This phase generates an initial approximation of the isosurface [S1, book]. The heuristic is executed once per dataset and does not depend on the isovalue [S1, book]. The object-space phase (seed projection) is re-executed when the isovalue changes [S1, book].
+
+1.  **Seeding:** Place $n_s$ seeds uniformly distributed inside each cell [S1, book].
+2.  **Gradient Integration:** Integrate the gradient field $\nabla P$ from each seed position for $n_i$ steps to guide the seeds towards the isosurface [S1, book].
+3.  **Newton-Raphson Refinement:** Apply $n_{N1}$ Newton-Raphson iterations to project the integrated seeds precisely onto the isosurface $P(\mathbf{x}) = \tau$ [S1, book].
+4.  **Heuristic (FTLE & Neighbor Exclusion):**
+    *   Compute the FTLE for each seed to estimate the "stretching" of the gradient flow, which correlates with the required quad size [S1, book].
+    *   **Neighbor Exclusion:** To prevent disjoint surfaces from influencing quad size, exclude neighbors if the minimum angle $a_{min}$ between the segment connecting the seed to the neighbor and the gradient exceeds a threshold (typically 0.5) [S1, book].
+    *   Formula for $a_{min}$:
+        $$ a_{min} = \max_{t \in [0,1]} \frac{|s_n \cdot \nabla s(\mathbf{x} + t s_n)|}{||s_n|| \, ||\nabla s(\mathbf{x} + t s_n)||} $$
+        where $s_n$ is the segment from $\mathbf{x}$ to neighbor $n$ [S1, book].
+5.  **Quad Generation:** For each successfully projected seed, generate a surface-tangent, seed-centered quadrilateral (quad) [S1, book]. The size of the quad is scaled by the FTLE value [S1, book].
+6.  **Transform Feedback:** Record the generated quads into `VBO_quads` [S1, book].
+
+### Phase 2: Image Space Ray Casting
+This phase refines the isosurface representation using the quads from Phase 1 [S1, book].
+
+1.  **Cell Selection and Sorting:** Select cells containing the isovalue (using the Interval Tree) [S1, book]. Sort them front-to-back (fast, inexact sort) to optimize early-z culling [S1, book].
+2.  **Rasterization:** Rasterize the quads in `VBO_quads` [S1, book]. The vertex shader redirects vertices to rasterization [S1, book].
+3.  **Fragment Processing (Ray Casting):** For each fragment generated:
+    *   Use the fragment's position as an initial guess for ray casting [S1, book].
+    *   Perform $n_{N2}$ Newton-Raphson iterations to refine the intersection point on the isosurface [S1, book].
+    *   **Noise Reduction:** Compare the angle of the polynomial gradient vector at the fragment position before and after projection. If the angle difference exceeds a threshold, discard the fragment (assumed jump to another surface) [S1, book].
+    *   **Shading:** Shade the fragment at the refined position. **Crucially**, do not update the depth coordinate in the depth buffer [S1, book]. This allows the early-z test to cull occluded fragments from subsequent cells/quad sets, significantly boosting performance [S1, book].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ihos_render(mesh, isovalue, camera):
+    active_cells = []
+    for cell in mesh:
+        if cell.min_val <= isovalue <= cell.max_val:
+            active_cells.append(cell)
+            
+    # Phase 1: Object Space Pre-processing
+    for cell in active_cells:
+        bind_bubo(cell)
+        n_seeds = NS_SMALL if cell.is_small else NS_LARGE
+        seeds = generate_uniform_seeds(cell, n_seeds)
+        
+        for seed in seeds:
+            pos = seed.pos
+            for _ in range(NI):
+                grad = gradient_poly(cell.poly, *pos)
+                pos = pos + grad * step_size
+            seed.pos = pos
+            
+        for seed in seeds:
+            pos = seed.pos
+            for _ in range(NN1):
+                val = evaluate_poly(cell.poly, *pos) - isovalue
+                if abs(val) < EPS1:
+                    break
+                grad = gradient_poly(cell.poly, *pos)
+                pos = pos - (val / dot(grad, grad)) * grad
+            seed.pos = pos
+            
+        quads = []
+        for seed in seeds:
+            val = evaluate_poly(cell.poly, *seed.pos) - isovalue
+            if abs(val) < EPS1:
+                ftle = compute_ftle(cell.poly, seed.pos)
+                neighbors = get_neighbors(seed.pos)
+                valid_neighbors = []
+                for n in neighbors:
+                    seg = n.pos - seed.pos
+                    min_angle = 0.0
+                    for t in [0.0, 0.5, 1.0]:
+                        g = gradient_poly(cell.poly, *(seed.pos + t * seg))
+                        angle = abs(dot(seg, g)) / (length(seg) * length(g))
+                        if angle > min_angle:
+                            min_angle = angle
+                    if min_angle < THRESHOLD_ANGLE:
+                        valid_neighbors.append(n)
+                quad = generate_surface_tangent_quad(seed.pos, ftle, valid_neighbors)
+                quads.append(quad)
+        store_quads(quads)
+
+    # Phase 2: Image Space Ray Casting
+    active_cells.sort(key=lambda c: distance_to_camera(c.center))
+    for cell in active_cells:
+        bind_bubo(cell)
+        bind_shaders_for_degree(cell.poly.degree)
+        fragments = rasterize(VBO_quads)
+        for frag in fragments:
+            ray_origin = frag.position
+            ray_dir = frag.ray_direction
+            pos = ray_origin
+            old_grad = gradient_poly(cell.poly, *pos)
+            for _ in range(NN2):
+                val = evaluate_poly(cell.poly, *pos) - isovalue
+                if abs(val) < EPS2:
+                    break
+                grad = gradient_poly(cell.poly, *pos)
+                denom = dot(grad, ray_dir)
+                if abs(denom) < 1e-8:
+                    break
+                t = val / denom
+                new_pos = pos - ray_dir * t
+                new_grad = gradient_poly(cell.poly, *new_pos)
+                cos_angle = dot(old_grad, new_grad) / (length(old_grad) * length(new_grad))
+                angle_diff = acos(clamp(cos_angle, -1.0, 1.0))
+                if angle_diff > THRESHOLD_ANGLE:
+                    break
+                pos = new_pos
+                old_grad = new_grad
+            color = phong_shading(pos, gradient_poly(cell.poly, *pos), camera)
+            framebuffer[frag.id] = color
+```
+
+### Parameters
+*   **Isovalue:** Triggers Phase 1 re-execution.
+*   **$n_s$:** Number of initial seeds. Typical: $10^3$ (small) or $8^3$ (large) [S1, book].
+*   **$n_i$:** Integration steps. Typical: 50 [S1, book].
+*   **$n_{N1}$:** NR steps in Phase 1. Typical: 10 [S1, book].
+*   **$\epsilon_1$:** NR error in Phase 1. Typical: $10^{-3}$ [S1, book].
+*   **$n_{N2}$:** NR steps in Phase 2. Typical: 3 [S1, book].
+*   **$s_q$:** Quad size scale factor. Typical: 0.5 to 1.5 [S1, book].
+*   **$\epsilon_2$:** NR error in Phase 2. Typical: $10^{-4}$ [S1, book].
+*   **Neighbor Exclusion Threshold:** Typical: 0.5 [S1, book].
+
+### Edge Cases and Pitfalls
+*   **Holes and Overdraw:** Poor seed density can cause holes. The FTLE heuristic mitigates this but can be conservative [S1, book].
+*   **Shader Loop Unrolling:** General polynomial evaluation requires loops. Solution: Maintain separate shader versions for each polynomial degree [S1, book].
+*   **Thread Synchronization:** Dynamic iteration counts hinder GPU synchronization. Solution: Keep integration and NR iterations static [S1, book].
+*   **Noise from Early-Z:** Not updating depth causes noise if a closer fragment projects to a far surface. Mitigated by gradient angle comparison [S1, book].
+*   **FTLE Conservatism:** FTLE considers distances between seeds on disjoint surfaces, leading to overly large quads. Mitigated by neighbor exclusion heuristic [S1, book].
+
+## Subtopics
+
+### [Object Space Sampling via Gradient Integration and Directional Newton-Raphson](11984-object-space-sampling-via-gradient-integration-and-direction.md)
+A two-step process to find isosurface points for polynomial data. First, uniformly distributed seeds are guided along the gradient field via integration to get closer to the isosurface. Second, Directional Newton-Raphson (NR) is applied to refine the projection onto the isosurface.
+
+## Operating characteristics
+*   **Time Complexity:** Pre-processing is $O(1)$ with respect to isovalue changes (done once per dataset for the heuristic, re-run for seed projection) [S1, book]. Rendering cost does not grow linearly with the number of cells due to early-z culling and front-to-back ordering [S1, book].
+*   **Memory Complexity:** Requires storage for seeds, quads, and per-cell BUBOs. BUBO size is limited (typically 64KB), requiring one per cell [S1, book].
+*   **Performance:**
+    *   Small Dataset (119 cells, deg 5-6): 45 fps ($s_q=0.75$), 39 fps ($s_q=1.0$), 29 fps ($s_q=1.25$) at 1024x1024 [S1, book].
+    *   Large Dataset (34,535 cells, deg 3): 21 fps ($s_q=0.5$), 14 fps ($s_q=0.75$), 12.5 fps ($s_q=1.0$) at 1024x1024 [S1, book].
+    *   Culling Efficiency: Processes ~7-9% of total cells [S1, book].
+    *   Recomputation Time: < 2 seconds for isovalue change; < 1 second for seed projection in small datasets [S1, book].
+*   **Strengths:** Interactive frame rates for high-order data; efficient GPU mapping; no need for inter-element connectivity; handles unstructured meshes [S1, book].
+*   **Limitations:** Approximate method (no error bounds like inclusion arithmetic); potential for noise due to early-z optimization; conservative quad sizing without heuristic [S1, book].
+*   **When to use:** Interactive exploration of high-order finite element data where speed is prioritized over rigorous error bounds [S1, book].
+*   **When not to use:** When guaranteed error bounds are required, or for very low-degree polynomials where simpler methods may suffice [S1, book].
+
+## Background
+iHOS was introduced by C. Pagot, J. Vollrath, F. Sadlo, D. Weiskopf, T. Ertl, and J.L.D. Comba [S1, book]. It addresses the limitations of existing isocontouring techniques for hp-adaptive finite element data, which typically do not support interactive exploration [S1, book]. The method builds on the principles of image-order rendering and isosurface detection, specifically leveraging GPU parallelism and hybrid object/image-space processing [S1, book]. It is compared against methods like Knoll et al., which use inclusion arithmetic for robustness but at the cost of performance [S1, book].
+
+## Sources
+[S1] Interactive Isocontouring of High-Order Surfaces, https://doi.org/10.4230/dfu.vol2.sciviz.2011.276, fetched 2026-10-29 (book)

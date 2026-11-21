@@ -1,0 +1,152 @@
+--- v007.md
++++ v008.md
+@@ -4,101 +4,71 @@
+ 
+ ## Overview
+-Deformable 3DGS extends static 3D Gaussian Splatting to handle dynamic scenes by introducing time-dependent parameters for each Gaussian primitive [S1, S2, unofficial]. It solves the problem of reconstructing and rendering non-rigid motion (e.g., moving people, fluids) from multi-view video by mapping a static canonical representation to a time-varying state [S2, unofficial]. Unlike static methods, it predicts deformation deltas via a neural network or explicit trajectory functions conditioned on time $t$, enabling real-time rendering of 4D content [S1, S2, unofficial]. It differs from sibling [Sparse-Controlled 3D Gaussian Splatting](6145-sparse-controlled-3d-gaussian-splatting.md) by using per-Gaussian feature networks rather than sparse control points to drive deformation [S2, unofficial].
++Deformable 3DGS extends static 3D Gaussian Splatting to dynamic scenes by modeling time-dependent geometric and appearance parameters [S1, S2, unofficial]. It solves the problem of reconstructing and rendering moving subjects (e.g., people, fluids) from multi-view video by decomposing the 4D representation into a static canonical set of Gaussians and a deformation function that predicts their state at any time $t$ [S2, unofficial]. It distinguishes itself from sibling methods like Sparse-Controlled 3D Gaussian Splatting by using a direct MLP-based deformation network on per-Gaussian features rather than sparse control points, and from HexPlane-based variants by its specific architectural choice for feature-to-deformation mapping [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Inputs:** Multi-view synchronized video frames (or sparse views), camera poses $(\mathbf{R}_t, \mathbf{t}_t)$, and timestamps $t \in [0, 1]$.
+-- **Outputs:** A set of time-varying 3D Gaussians $\mathcal{G}(t)$ rendered into images.
++**Inputs:** Multi-view video frames with known camera poses and timestamps $t \in [0, 1]$.
++**Outputs:** A set of time-varying 3D Gaussians $\mathcal{G}(t)$ rendered into images.
+ 
+ **Data Structures:**
+-The method maintains a canonical set of Gaussians $\mathcal{G}_{canon}$ (see [Gaussian Data Structure](52-gaussian-data-structure.md)). Each Gaussian $i$ stores static base parameters and learnable features used by the deformation network:
+-- $\boldsymbol{\mu}_i \in \mathbb{R}^3$: Canonical mean position.
+-- $\mathbf{q}_i \in \mathbb{R}^4$: Canonical rotation quaternion.
+-- $\mathbf{s}_i \in \mathbb{R}^3$: Canonical scale vector.
+-- $\alpha_i \in \mathbb{R}$: Opacity.
+-- $\mathbf{c}_{SH,i}$: Spherical harmonic coefficients.
+-- $\mathbf{f}_i \in \mathbb{R}^d$: Per-Gaussian feature vector (learnable embedding) used as input to the deformation network [S2, unofficial].
++1.  **Canonical Gaussians $\mathcal{G}_{canon}$:** Each Gaussian $i$ stores static base parameters:
++    *   Mean $\boldsymbol{\mu}_i \in \mathbb{R}^3$
++    *   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (unit quaternion)
++    *   Scale $\mathbf{s}_i \in \mathbb{R}^3$
++    *   Opacity $\alpha_i \in \mathbb{R}$
++    *   Spherical Harmonics coefficients $\mathbf{c}_{SH,i}$
++2.  **Deformation Network $f_\theta$:** An MLP that takes canonical features and time $t$ as input.
++    *   Input: Concatenation of per-Gaussian latent features (or position) and time $t$.
++    *   Output: Deltas $\Delta\boldsymbol{\mu}_i, \Delta\mathbf{q}_i, \Delta\mathbf{s}_i$.
+ 
+-**Deformation Mechanism:**
+-The core innovation is the deformation function $f_\theta$ that predicts deltas $(\Delta\boldsymbol{\mu}_i, \Delta\mathbf{q}_i, \Delta\mathbf{s}_i)$ based on canonical features and time $t$ [S1, S2, unofficial]. The time-varying parameters are computed as:
+-$$ \boldsymbol{\mu}_i(t) = \boldsymbol{\mu}_i + \Delta\boldsymbol{\mu}_i $$
+-$$ \mathbf{q}_i(t) = \text{Normalize}(\mathbf{q}_i \otimes \Delta\mathbf{q}_i) $$
+-$$ \mathbf{s}_i(t) = \mathbf{s}_i + \Delta\mathbf{s}_i $$
+-where $\otimes$ is quaternion multiplication and normalization prevents drift [G].
++**Algorithm:**
++1.  **Initialization:** Initialize $\mathcal{G}_{canon}$ using standard 3DGS initialization from static reconstruction or SfM points [S1, unofficial].
++2.  **Deformation Prediction:** For each Gaussian $i$ and time $t$:
++    $$ \Delta\boldsymbol{\mu}_i = f_\theta(\boldsymbol{\mu}_i, t) $$
++    $$ \Delta\mathbf{q}_i = f_\theta(\mathbf{q}_i, t) $$
++    $$ \Delta\mathbf{s}_i = f_\theta(\mathbf{s}_i, t) $$
++    *Note: Specific implementations may use different input features (e.g., latent codes $l$) [S4].*
++3.  **Time-Varying Parameter Update:**
++    $$ \boldsymbol{\mu}_i(t) = \boldsymbol{\mu}_i + \Delta\boldsymbol{\mu}_i $$
++    $$ \mathbf{q}_i(t) = \text{Normalize}(\mathbf{q}_i \otimes \Delta\mathbf{q}_i) $$
++    $$ \mathbf{s}_i(t) = \mathbf{s}_i + \Delta\mathbf{s}_i $$
++    where $\otimes$ is quaternion multiplication [S1, unofficial].
++4.  **Rendering:** Rasterize $\mathcal{G}(t)$ using standard differentiable rasterization with camera pose and time $t$ [S1, unofficial].
++5.  **Optimization:** Minimize photometric loss $\mathcal{L} = \mathcal{L}_{rec} + \lambda \mathcal{L}_{reg}$, updating canonical parameters, features, and network weights via SGD [S1, unofficial].
+ 
+-**Implementation Variants:**
+-Sources describe several implementations for $f_\theta$ [S1, unofficial]:
+-1. **MLP Deformation Network (Deformable 3DGS):** An MLP takes the per-Gaussian feature $\mathbf{f}_i$ and time $t$ as input to predict deltas [S2, unofficial].
+-2. **HexPlane Decomposition (4D Gaussian Splatting):** Uses a compact hex-plane encoder to predict deformations, offering a trade-off between memory and accuracy [S2, unofficial].
+-3. **Polynomial Bases / Trajectories:** Explicit polynomial functions or per-Gaussian temporal trajectories model the motion [S1, unofficial].
++**Parameters:**
++*   Learning rate: Not given in the sources.
++*   $\lambda$ (regularization weight): Not given in the sources.
+ 
+-**Optimization:**
+-The network parameters $\theta$, canonical parameters, and features are optimized by minimizing photometric loss:
+-$$ \mathcal{L} = \mathcal{L}_{rec} + \lambda \mathcal{L}_{reg} $$
+-where $\mathcal{L}_{rec}$ is the reconstruction error (e.g., L1 + SSIM) and $\mathcal{L}_{reg}$ is a regularization term (e.g., on deformation magnitudes or feature smoothness) [S1, unofficial]. Gradients flow through the deformation network to update canonical parameters via SGD [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def deform_gaussian(gaussian, time_t, deformation_network):
+-    """
+-    Computes time-varying parameters for a single Gaussian.
+-    gaussian: dict with keys 'mu', 'q', 's', 'f' (feature vector)
+-    time_t: float in [0, 1]
+-    deformation_network: callable f(feat, t) -> (d_mu, d_q, d_s)
+-    """
+-    # Predict deltas using the deformation network
+-    d_mu, d_q, d_s = deformation_network(gaussian['f'], time_t)
+-    
+-    # Update mean
+-    mu_t = gaussian['mu'] + d_mu
+-    
+-    # Update rotation (quaternion multiplication and normalization)
+-    q_t = quaternion_multiply(gaussian['q'], d_q)
+-    q_t = normalize_quaternion(q_t)
+-    
+-    # Update scale
+-    s_t = gaussian['s'] + d_s
+-    
+-    return {
+-        'mu': mu_t,
+-        'q': q_t,
+-        's': s_t,
+-        'alpha': gaussian['alpha'],
+-        'c_SH': gaussian['c_SH']
+-    }
+-
+-def render_dynamic_scene(gaussians, camera, time_t, deformation_network):
+-    """
+-    Renders a frame for a specific time t.
+-    """
+-    # Deform all Gaussians for the current time step
+-    dynamic_gaussians = []
+-    for g in gaussians:
+-        dynamic_gaussians.append(deform_gaussian(g, time_t, deformation_network))
+-    
+-    # Rasterize using standard 3DGS rasterizer
+-    image = rasterize(dynamic_gaussians, camera)
+-    return image
+-```
++**Edge Cases:**
++*   Quaternion normalization prevents drift in rotation updates [G].
++*   Precision issues may arise if $\Delta\mathbf{s}_i$ causes negative scales; clipping or absolute value may be required [G].
+ 
+ ## Subtopics
+ 
+ ### SplineGS
+-SplineGS replaces the discrete per-frame deformation prediction with a smooth spline that models the trajectory of each primitive's center and rotation as a function of time [S3, unofficial]. It ensures physically plausible, smooth motion with fewer parameters by representing the mean position as:
++A method that replaces discrete per-frame deformation with a smooth spline modeling the trajectory of each primitive's center and rotation as a function of time, ensuring physically plausible, smooth motion with fewer parameters [S3, unofficial]. It uses B-spline basis functions $\mathbf{B}_k(t)$ and control points $\mathbf{p}_{i,k}$:
+ $$ \mu_i(t) = \sum_{k=0}^K \mathbf{B}_k(t) \mathbf{p}_{i,k} $$
+-where $\mathbf{B}_k$ are B-spline basis functions and $\mathbf{p}_{i,k}$ are learnable control points [S3, unofficial]. This approach reduces the number of parameters compared to MLP-based deformation networks [S3, unofficial].
++[S3, unofficial].
++
++### MLP Architecture for Local Deformation
++A neural network that takes local body pose and latent codes to predict residual transformations (translation, rotation) and shading for Gaussians [S4]. Input is the concatenation of local body pose vector $\theta_t$ and per-Gaussian learnable latent features $l$ [S4]. Hidden layers: 2 layers, 64 neurons each, ReLU activations [S4]. Output heads: 3 separate heads, each with 2 layers, outputting: 1) Translation vector $t_{mlp}$, 2) Rotation quaternion $q_{mlp}$, 3) Scaling factor $s$ [S4]. Using latent codes $l$ instead of position leads to better performance [S4]. The final observed position and orientation are computed as:
++$$ \mathbf {p}_{\text {obs}} = \mathbf {p}_{\text {lbs}} + (\mathbf {R}_{t}\mathbf {t}_{\text {mlp}}) $$
++$$ \mathbf {q}_{\text {obs}} = \mathbf {q}_{\text {mlp}} \circ \mathbf {q}_{\text {lbs}} $$
++[S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Real-time rendering is maintained if the deformation network is lightweight (e.g., small MLP or HexPlane) [S2, unofficial]. Complexity per frame is $O(N)$ for $N$ Gaussians, plus the cost of the deformation network evaluation [S1, unofficial].
+-- **Memory Complexity:** Higher than static 3DGS due to stored per-Gaussian features $\mathbf{f}_i$ and network weights [S2, unofficial]. HexPlane variants offer more compact memory usage than full MLPs [S2, unofficial].
+-- **Performance:** Suitable for dynamic scenes with moderate non-rigid motion [S1, unofficial]. Performance degrades if the deformation network is too complex or if motion is highly erratic [S2, unofficial].
+-- **Strengths:** Real-time rendering of dynamic scenes; no need for explicit mesh extraction [S1, unofficial].
+-- **Limitations:** Requires careful regularization to prevent artifacts in deformation; memory overhead for features [S2, unofficial].
++*   **Time Complexity:** Depends on the deformation network size and number of Gaussians. Real-time rendering is feasible if the deformation network is lightweight [S3, unofficial].
++*   **Memory Complexity:** Stores canonical Gaussians plus deformation network weights. More compact than storing full 4D Gaussians for every frame [S2, unofficial].
++*   **Strengths:** Handles dynamic scenes (people moving, fluids) [S1, unofficial]. Can achieve real-time rendering [S3, unofficial].
++*   **Limitations:** Performance depends on the deformation network's capacity. May struggle with complex, non-rigid deformations if the network is too simple [S3, unofficial].
++*   **When to use:** Dynamic scene reconstruction and rendering [S1, unofficial].
++*   **When not to use:** Static scenes (use standard 3DGS) or scenes requiring explicit control via sparse points (use SC-GS) [S2, unofficial].
+ 
+ ## Background
+-Deformable 3DGS was introduced by Yang et al. in CVPR'24 as "Deformable 3DGS" [S2, unofficial]. Concurrently, "4D Gaussian Splatting" by Wu et al. (CVPR'24) proposed a similar concept using HexPlane decompositions [S2, unofficial]. The method builds on the static 3D Gaussian Splatting framework [S1, unofficial]. It is primarily used for dynamic scene reconstruction and rendering, such as moving people and fluids [S1, unofficial].
++Introduced by Yang et al. in CVPR'24 [S2, unofficial]. It is part of the broader effort to extend 3D Gaussian Splatting to 4D (spatiotemporal) representations [S2, unofficial].
+ 
+ ## Sources
+ [S1] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+ [S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+-[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)+[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
++[S4] Human Gaussian Splatting: Real-Time Rendering of Animatable Avatars, https://doi.org/10.1109/cvpr52733.2024.00081, fetched 2026-10-26

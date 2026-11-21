@@ -1,0 +1,169 @@
+NOTE: This blog post assumes knowledge of GPU programming, GPU-driven rendering, D3D12 and systems programming.
+
+How sparse resources helped my GPU-driven renderer memory usage
+Zino
+SubscribeSign in
+How sparse resources helped my GPU-driven renderer memory usage
+Zino
+Sep 11, 2026
+Share
+NOTE: This blog post assumes knowledge of GPU programming, GPU-driven rendering, D3D12 and systems programming.
+This post focuses on D3D12 but it applies for most graphics APIs.
+Thanks for reading! Subscribe for free to receive new posts and support my work.
+Introduction
+A GPU-driven renderer requires many data structures to handle scenes GPU-side: dynamic arrays, bit arrays, I’ve seen some using hashtables, and managing memory for those can be tricky !
+Our games get more and more complex, and so do their memory requirements, we need systems that can scale properly to large scenes and many devices without exploding budgets. In my renderer, I have quite a few buffers, here’s a non-exhaustive list:
+Instance buffer
+Mesh buffer
+Material buffer
+Streaming buffer
+ToCull meshlets
+Visible meshlets
+Various large bookkeeping buffers
+They can be small (a few KiB) or very large (up to 2 GiB for the instance buffer). Managing the reallocation strategy and suballocation inside these becomes very important… Especially as some of the buffers are persistent and not refilled every frame.
+The road to the ultimate memory management strategy
+How do we actually handle persistent buffers properly?
+A grow-or-shrink buffer approach is the one you might default to: when you exceed the capacity, create a new buffer, copy the existing data into the new buffer. The old buffer can then be freed once the GPU no longer needs it. This approach is simple, but it increases peak memory usage due to the need to keep the previous buffer around for some time. Plus, if you have objects referenced by D3D12_GPU_VIRTUAL_ADDRESS stored in such buffers, like acceleration structures, they may get invalidated after reallocation and need to be copied/updated with the appropriate APIs. Finally, it is prone to external fragmentation depending on the chosen sub allocator:
+```
+[ tree ][ FREE ][ FREE ][ FREE ][ rock ]
+```
+rock prevents the buffer from shrinking, So at some point you may need to perform defragmentation…
+An alternative, which I recommend for most buffers, is to have a static buffer. Pick a maximum capacity and make sure you never exceed it. This works great for buffers such as those storing instance counts, culled meshlet counts, and, more generally, anything under a few MB that does not scale significantly. No reallocation, stable addresses, and external fragmentation does not impact the peak memory usage.
+This was the approach I took for my buffers. I wanted a simple thing, and it served well at the start but as I needed to handle more complex scenes with many more instances and materials I quickly realized that the maximum capacity of my buffers was much larger than the typical amount of data stored. Specifically, I had a map with an extremely dense location with ~1M resident instances, whereas the average instance count in other places was 10~30K.
+So I started looking for a new way of handling memory dynamically... I thought about allocating my buffers in fixed-size blocks. Being more fine-grained than the grow-or-shrink method, it lowers the peak memory usage while preserving some benefits of the static allocation strategy: stable addresses and no reallocation.
+External fragmentation can still affect the peak memory usage, you can free blocks that are filled with free space, potentially greatly minimizing its impact.
+The main disadvantage is that you lose a contiguous address space, managing a single logical buffer across multiple buffers is a bit cumbersome as you need to handle crossing block boundaries. This is easy to handle for buffers with a fixed stride, but trickier for a heterogeneous buffer (like my instance buffer). Still, it is a great memory management strategy that universally works well in many cases and would be my recommendation if sparse resources are not an option.
+While searching, I asked myself: how would I have solved this on CPU?
+By using arrays backed by a big virtual allocation. You VirtualAlloc() the maximum possible, and commit/decommit memory as needed. It allows stable pointers (like a block-based approach would) as well as a contiguous virtual address space (which is extremely useful!), you still keep a hard limit, but it does not allocate for the peak memory usage. This approach effectively replaced the block-based strategy I was considering. You can find an example implementation of a linear allocator backed by virtual memory I wrote months ago here to get an idea.
+What I really wanted was a VirtualAlloc() like API to handle my GPU buffers.
+Introducing Sparse Resources
+A sparse resource (or tiled/reserved in D3D terminology) is a GPU resource that can be bound to multiple memory allocations ( VkDeviceMemory, ID3D12Heap ). It is given its own virtual address space, divided in pages (called tiles in D3D12), and you control the page table by mapping/unmapping pages to memory by placing them in heaps. Not all pages must be resident in D3D12 in order to use the resource, so it functions a lot like virtual memory on the CPU that your OS provides!
+Usage
+Instead of creating a placed or committed resource, we create a reserved resource, in this example we assume a desc representing a buffer:
+```
+HRESULT hr = device->CreateReservedResource(
+        &desc,
+        D3D12_RESOURCE_STATE_COMMON,
+        nullptr,
+        IID_PPV_ARGS(&buffer));
+```
+As you see, compared to CreatePlacedResource we don’t specify any backing memory. It has effectively zero physical memory mapped by default.
+To map a range of pages, we need to call UpdateTileMappings , which is called on a command queue, it triggers a queue operation that updates the resource page table:
+```
+void UpdateTileMappings(
+  [in]           ID3D12Resource                        *pResource,
+                 UINT                                  NumResourceRegions,
+  [in, optional] const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
+  [in, optional] const D3D12_TILE_REGION_SIZE          *pResourceRegionSizes,
+  [in, optional] ID3D12Heap                            *pHeap,
+                 UINT                                  NumRanges,
+  [in, optional] const D3D12_TILE_RANGE_FLAGS          *pRangeFlags,
+  [in, optional] const UINT                            *pHeapRangeStartOffsets,
+  [in, optional] const UINT                            *pRangeTileCounts,
+                 D3D12_TILE_MAPPING_FLAGS              Flags
+);
+```
+You give it the resource you want to update, the number of regions (covering pages) to update, which heap you want to map to if you perform a map operation, and finally for each range its flags and destination offset in the heap. Note that sizes and offsets are expressed in tiles and not bytes throughout the tiled resource API.
+For this example, we’ll map the first tile to the start of our heap.
+```
+ID3D12Heap* heap = ...;
+ID3D12Resource* buffer = ...;
+
+// maps the first page (at X = 0) of our buffer to the heap at offset 0
+D3D12_TILED_RESOURCE_COORDINATE coord { .X = 0, .Y = 0, .Z = 0, .Subresource = 0 };
+D3D12_TILE_REGION_SIZE region {
+    .NumTiles = 1,
+    .UseBox   = FALSE,
+    .Width    = 0,
+    .Height   = 0,
+    .Depth    = 0,
+};
+D3D12_TILE_RANGE_FLAGS range_flag = D3D12_TILE_RANGE_FLAG_NONE;
+UINT heap_range_start_offset = 0;
+UINT range_tile_count = 1;
+queue->UpdateTileMappings(
+    buffer,
+    1,     
+    &coord,
+    &region,
+    heap,
+    1,
+    &range_flag,
+    &heap_range_start_offset,
+    &range_tile_count,
+    D3D12_TILE_MAPPING_FLAG_NONE
+);
+```
+For buffers, the API is quite simple to use; textures are more complicated as you need to handle packed mipmaps: they are stored in a HW-specific format, and need to be mapped together all at once if you want to touch a packed mip. You can query this with GetResourceTiling. We’ll only cover buffers for this blogpost.
+Unmapping memory is almost identical to mapping it, the difference being that you pass D3D12_TILE_RANGE_FLAG_NULL for each range you want to unmap, Providing the heap is optional if you only perform unmapping in the call.
+```
+// ...
+D3D12_TILE_RANGE_FLAGS range_flag = D3D12_TILE_RANGE_FLAG_NULL;
+queue->UpdateTileMappings(
+    buffer,
+    1,     
+    &coord,
+    &region,
+    nullptr, // < we don't map any region in this call, no need to provide a heap
+    1,
+    &range_flag,
+    &heap_range_start_offset,
+    &range_tile_count,
+    D3D12_TILE_MAPPING_FLAG_NONE
+);
+```
+Side note for Vulkan
+In Vulkan, the device must have sparseResidencyBuffer to support sparse resources with unmapped pages, otherwise it requires all pages to be mapped before accessing the resource whereas D3D12 does not make such distinction.
+Application to my renderer
+I replaced all my large buffers with sparse resources.
+I have a SparseBuffer type that wraps the reserved resource with internal metadata to refcount “pages” and “backing heaps”. The type gives you a VirtualAlloc()-style API where you can commit/decommit a range of bytes, and it handles the rest: padding to page boundaries, allocating/deallocating backing memory, and mapping pages.
+Backing memory is allocated in chunks of pages from my GPU memory allocator, just like other resources. Pages are reference-counted, and when a backing allocation is no longer used, it can be freed automatically. Using my GPU memory allocator rather than dedicated D3D12 heaps is an arbitrary choice; I haven’t encountered any issues with the current design, so I didn’t bother testing both.
+SparseBuffer pages are also refcounted by commit()/decommit() calls. When a page is no longer referenced, it isn’t actually unmapped but simply marked as logically unmapped. I assume no further memory access will be performed on it, so its backing memory can be freed. This is highly unsafe though :)
+On D3D12_TILED_RESOURCES_TIER_2 devices, writes to NULL pages are discarded and reads return zero.
+SparseBuffer effectively allows me to:
+Dynamically grow memory until a certain limit without reallocations
+Preserve a contiguous virtual address space, meaning shaders work as-is without changes
+Reduce the physical memory cost of external fragmentation by decommitting completely unused pages. A sole instance at a high address is therefore much less of a concern, making defragmentation less important (I don’t defrag my persistent buffers)
+Things to be aware of
+Synchronization
+Page table updates are queue operations therefore you must ensure that a command isn’t touching the pages you’re updating. It is valid to read/write other pages.
+Only the CPU can map pages
+It saddens me a bit, but at some point you'll still need CPU-GPU readback or cooperation to map pages. I don’t know on PC what limitations would prevent us from generating page table update commands directly on the GPU through a device-generated command API.
+We could have an API inspired by DXR2.0 / RTX Mega Geometry where we can allocate actual D3D12 heaps, get their pointers, etc.. but I may be asking for too much :)
+Page table update performance
+For a long time, sparse resources on PC were not reliable enough performance-wise. I remember in 2020 when I experimented with them for virtual textures that UpdateTileMappings took milliseconds on the CPU to fully map a 4K texture, which is insane.
+The situation got much better on W11 and latest drivers though as you can see here , I’ve not reproduced any big stalls in my renderer on multiple NVIDIA & AMD GPUs , my renderer rarely calls UpdateTileMappings and when it does so, it takes microseconds.
+Page granularity
+D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES is 64 KiB. The waste for small buffers/textures can be great, IMO you shouldn’t use a sparse resource to begin with for such small sizes, still, it is a constraint to know.
+Update (2026/09/17): On NVIDIA GPUs, using 64 KiB physical pages may be suboptimal, 2 MiB or larger is recommended:
+Currently, all x86_64 CPUs use a default physical page size of 4KiB. Arm CPUs support multiple physical page sizes - 4KiB, 16KiB, 32KiB and 64KiB - depending on the exact CPU. Finally, NVIDIA GPUs support multiple physical page sizes, but prefer 2MiB physical pages or larger. Note that these sizes are subject to change in future hardware.
+https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html
+Going further
+What cool things could we do with sparse resources that we couldn’t do before?
+More persistence using stable pointers
+Imagine a Nanite-inspired hierarchical LoD mesh pipeline where meshlets are streamed in and out depending on their projected screen size. Those meshlets may reference other meshlets or hierarchy nodes through pointers or indices.
+With a regular GPU buffer where we suballocate memory from, streamed meshlets may end up at different offsets depending on where free space is available. References therefore need to be relocated or fixed up when the data is loaded.
+With a sparse resource, each meshlet, or more realistically each streaming page, can be assigned a fixed virtual address ahead of time, e.g during asset cooking. Streaming a page then just means mapping physical memory to that virtual range and uploading the data. Because the virtual address stays the same, references inside the page stay valid and don’t need to be fixed up.
+This removes most of the relocation work from streaming. Only residency-dependent data, such as the hierarchy and/or residency metadata needs to be updated.
+This could make a good follow-up to the post, as I’ll most likely implement this next.
+Cheap binning using a big memory map
+At some point in your renderer you will need to bin things. Usually it is done in three passes: 1) count kinds of elements 2) allocate ranges per kind 3) scatter elements to their ranges. It is generally very fast but requires a separate buffer to hold the scattered elements and two passes (count & scatter) that iterate over all elements.
+As an optimization, one can cut the elements buffer into a set of predefined ranges by kind: [0..200 MiB] for A, [200..400 MiB] for B and [400..2 GiB] for C, alongside a separate buffer for counts: with both you can insert & bin in one pass with write_idx = range_starts[kind] + atomic_add(counts[kind], nb), dropping the scattered element buffer altogether.
+With sparse resources, those predefined ranges can be made to only consume virtual address space upfront. Physical memory usage can be kept in control by mapping range pages when needed, and giving realistic budgets per range.
+Though the tradeoff is more CPU-GPU communication to map as needed. You need to read the counts on the CPU, and on the GPU discard elements that exceed the currently mapped capacity, if doing so is valid for your use case.
+Conclusion
+Sparse resources solved the exact problem I set out with: no reallocations, no lost contiguous address space, and no more paying for peak capacity I rarely hit, that 1M-instance buffer now costs what it actually uses, not what it might use. The API overhead turned out to be a non-issue in practice; a few microseconds per UpdateTileMappings call is nothing compared to what I feared going in.
+That said, they’re definitely not the ultimate solution. For small, bounded buffers (a few MB and under), a good old placed allocation is still simpler. Sparse resources earn their complexity on large, persistent buffers with a big gap between peak and average usage, which, if your scenes are getting denser and more varied like mine, is becoming the common case rather than the exception.
+I wrote this post because I’ve rarely seen anyone using sparse resources for buffers rather than virtual texturing, and I think that’s a missed opportunity. Maybe I just didn’t search enough. If you try them, I’d genuinely like to hear how it goes and there’s more to explore here, like using them for GPU-driven allocators.
+Acknowledgments
+Théo Le Goc, Ludwig Dubos for reviewing this and providing feedback
+Christoph Kubisch for pointing out the potential performance implications of using small pages on NVIDIA GPUs https://bsky.app/profile/pixeljetstream.bsky.social/post/3mvf6g54kck2x
+Thanks for reading! Subscribe for free to receive new posts and support my work.
+Share
+Discussion about this post
+CommentsRestacks
+TopLatestDiscussions
+Ready for more?
+© 2026 Zino · Privacy ∙ Terms ∙ Collection notice
+Start your SubstackGet the app
+Substack is the home for great culture

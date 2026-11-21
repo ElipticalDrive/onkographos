@@ -1,0 +1,123 @@
+# Progressive Coarse-to-Fine Training Strategy
+
+Also called: Coarse-to-Fine Training
+
+## Overview
+Progressive Coarse-to-Fine Training is a strategy that gradually introduces finer levels of detail during optimization to ensure stable convergence and prevent overfitting [S2]. It solves the problem of geometric artifacts and slow convergence that occur when training directly at high resolution by establishing a coherent global structure before fitting high-frequency features [S2][S3, unofficial]. It differs from standard full-resolution training by deferring the fitting of fine features until the global geometry is established [S2], and differs from simple two-stage pipelines by potentially using continuous or multi-stage resolution scaling rather than a single abrupt switch [S1][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of training images (potentially with associated camera poses), a target scene geometry (often represented as an octree or voxel grid), and hyperparameters controlling the progression schedule.
+*   **Outputs:** A trained radiance field model (e.g., Gaussian Splatting or NeRF) with optimized parameters for color, density, and geometry.
+
+**Data Structures:**
+*   **Octree/Level Structure:** A hierarchical representation where each level $l$ corresponds to a specific spatial resolution. The base level is determined by scene dimensions, and higher levels provide finer granularity [S2].
+*   **Progressive Schedule:** A set of `coarse_intervals` that specify the training iteration at which each new octree level is introduced [S2].
+
+**Parameters:**
+*   `init_level`: The starting octree level for training. Typically set to the middle of the available range [S2].
+*   `progressive`: A boolean flag to enable or disable progressive training [S2].
+*   `max_level`: The highest octree level to be used in the final model [S2].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Construct the octree structure based on scene dimensions and point cloud data [S2].
+    *   Determine the `init_level` (typically the middle of the range) [S2].
+    *   Calculate `coarse_intervals` using a geometric progression of training steps to determine when to introduce each new level [S2].
+    *   Set the current maximum level `current_max_level` to `init_level`.
+
+2.  **Coarse Stage (Global Geometry):**
+    *   Initialize the model parameters at `init_level`.
+    *   In some implementations (e.g., dynamic scenes), set color features to be the color itself, ignoring ray direction dependency, to simplify the initial optimization [S1].
+    *   Compute a smaller bounding box using proxy geometry learned during this stage to filter empty space [S1].
+    *   Train the model using only levels up to `current_max_level`.
+    *   If incremental mapping is used, insert new observations into the training set at regular intervals (e.g., every 50 iterations) [S3, unofficial].
+
+3.  **Progressive Refinement:**
+    *   Iterate through training steps.
+    *   At each step, check if the current iteration matches a value in `coarse_intervals`.
+    *   If a new level is due, increment `current_max_level` by 1.
+    *   Continue training with the extended set of levels (from `init_level` to `current_max_level`) [S2].
+    *   This creates a continuous transition rather than a sudden switch between different LOD levels [S2].
+
+4.  **Fine Stage (High-Frequency Details):**
+    *   Once `current_max_level` reaches `max_level`, the model includes all levels.
+    *   Switch to high-dimensional features and model ray direction dependency explicitly (e.g., using a specific network branch $F_{\theta4}$) [S1].
+    *   Perform final refinement iterations to optimize high-frequency details [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def progressive_coarse_fine_training(scene_data, hyperparams):
+    # 1. Initialization
+    octree = build_octree(scene_data.points, hyperparams.scene_dims)
+    init_level = hyperparams.init_level  # Typically middle of range
+    max_level = hyperparams.max_level
+    coarse_intervals = calculate_coarse_intervals(init_level, max_level)
+    
+    current_max_level = init_level
+    model = initialize_model(octree, current_max_level)
+    
+    # 2. Training Loop
+    for iteration in range(total_iterations):
+        # Check if we need to increase resolution
+        if iteration in coarse_intervals and current_max_level < max_level:
+            current_max_level += 1
+            model.update_octree_levels(current_max_level)
+            
+        # Sample rays based on current level constraints
+        rays = sample_rays(scene_data, current_max_level)
+        
+        # Forward pass and loss computation
+        # In coarse stage, directionality might be ignored [S1]
+        # In fine stage, directionality is modeled [S1]
+        predictions = model.forward(rays)
+        loss = compute_loss(predictions, rays.targets)
+        
+        # Backward pass and update
+        optimizer.step(loss)
+        
+        # Incremental observation insertion (if applicable) [S3, unofficial]
+        if hyperparams.incremental and iteration % 50 == 0:
+            scene_data.add_new_observations()
+            
+    return model
+```
+
+## Subtopics
+
+### [Two-Stage Training Pipeline](11433-two-stage-training-pipeline.md)
+The Two-Stage Training Pipeline is a coarse-to-fine optimization strategy that first recovers global shape at low resolution and then refines fine details at high resolution. It solves the problem of geometric artifacts and slow convergence that occur when training directly at high resolution by establishing a coherent global structure before fitting high-frequency features. It differs from standard full-resolution training by deferring the fitting of fine features until the global geometry is established, and differs from simple two-stage pipelines by potentially using continuous or multi-stage resolution scaling rather than a single abrupt switch.
+
+### Incremental Mapping Optimization
+A variant where new observations are inserted into the training set incrementally during the coarse stage [S3, unofficial].
+*   **Steps:** Sample 8,192 rays from input images; train coarse models for 5,000 iterations; perform refinement for 20,000 iterations; insert new observations every 50 iterations during the coarse stage [S3, unofficial].
+*   **Parameters:** Ray sample count: 8,192; Coarse iterations: 5,000; Refinement iterations: 20,000; Observation insertion interval: 50 iterations; Optimizer: Adam; Initial learning rate: $10^{-1}$ [S3, unofficial].
+
+### Progressive Reconstruction
+A technique that restrains the model's ability to reconstruct complex scenes at early stages to enforce consistency across different supervision viewpoints, providing stability with simple training [S4, unofficial]. Introduced in FreeNeRF and Nerfies [S4, unofficial].
+
+### Gaussian Scale-Space Coarse-to-Fine
+A coarse-to-fine training procedure that smooths input images with a Gaussian kernel during NeRF training to improve pose estimation robustness [S5, unofficial].
+*   **Steps:** Smooth input images using a Gaussian kernel with standard deviation $\sigma = 4 \times (1 - \gamma_i)$. Apply a linear schedule to increase $\gamma_i$ from 0 to 1 during the first half of training [S5, unofficial].
+*   **Parameters:** $\sigma = 4 \times (1 - \gamma_i)$; $\gamma_i$ linearly increases from 0 to 1 in the first half of training [S5, unofficial].
+*   **Pitfall:** Gets stuck in local minima for pose estimation in very homogeneous scenes [S5, unofficial].
+*   **Comparison:** Outperforms the baseline in 12/14 and 11/14 cases for rotation and translation estimation respectively, but fails in homogeneous scenes where direct alignment alone may struggle less with texture loss [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is distributed across multiple resolution levels. The coarse stages are faster due to lower resolution, but the total time includes the sum of iterations for all levels. Incremental mapping adds overhead for observation insertion [S3, unofficial].
+*   **Memory Complexity:** Memory usage scales with the highest octree level reached. Progressive introduction helps manage memory by not allocating fine-level structures until necessary [S2].
+*   **Performance:** Provides stable convergence and prevents overfitting compared to single-resolution training [S2]. Improves pose estimation robustness in textured scenes when combined with Gaussian scale-space smoothing [S5, unofficial].
+*   **Strengths:** Stabilizes optimization for complex scenes; handles incremental data addition; reduces geometric artifacts.
+*   **Limitations:** Can get stuck in local minima in homogeneous scenes if scale-space smoothing is used [S5, unofficial]. Requires careful tuning of `init_level` and `coarse_intervals` [S2].
+
+## Background
+The concept of coarse-to-fine training has been applied in various forms in radiance field optimization. Progressive training strategies that start with coarse geometry and refine details are used to address convergence issues in high-dimensional optimization spaces [S2][S3, unofficial]. The specific technique of restraining model capacity in early stages to enforce cross-view consistency was introduced in FreeNeRF and Nerfies [S4, unofficial]. Gaussian scale-space coarse-to-fine methods were explored in the context of direct alignment for robust NeRF learning [S5, unofficial].
+
+## Sources
+[S1] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26
+[S2] Level of Detail System | city-super/Octree-GS | DeepWiki, https://deepwiki.com/city-super/Octree-GS/2.3-level-of-detail-system, fetched 2026-10-28
+[S3] ActiveRMAP: Radiance Field for Active Mapping And Planning, https://doi.org/10.48550/arxiv.2211.12656, fetched 2026-10-26 (unofficial)
+[S4] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S5] ACCV 2024 Open Access Repository, https://openaccess.thecvf.com/content/ACCV2024/html/Garg_Direct_Alignment_for_Robust_NeRF_Learning_ACCV_2024_paper.html, fetched 2026-10-29 (unofficial)

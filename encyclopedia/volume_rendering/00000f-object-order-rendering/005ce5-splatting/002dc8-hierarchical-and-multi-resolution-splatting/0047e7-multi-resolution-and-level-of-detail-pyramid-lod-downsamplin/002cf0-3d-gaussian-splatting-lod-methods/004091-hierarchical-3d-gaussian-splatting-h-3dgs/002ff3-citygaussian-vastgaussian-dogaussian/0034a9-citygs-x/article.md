@@ -1,0 +1,126 @@
+# CityGS-X
+
+Also called: Anchor-Based Octree 3D Gaussian Splatting (Baseline), CityGS-X backbone, UrbanGS
+
+## Overview
+CityGS-X is a large-scale urban reconstruction method that extends block-based partitioning with a geometry-aware architecture, refining block boundaries according to building footprints to achieve high accuracy [S1, unofficial]. It targets urban scenes by combining semantic segmentation to allocate Gaussians specifically on building facades and road surfaces, avoiding unnecessary density in empty space [S1, unofficial]. Unlike its siblings which may use fixed grids or proxy meshes, CityGS-X uses an anchor-based octree where visible anchors generate "Neural Gaussians" via shared MLPs, decoupling spatial hierarchy from feature optimization to improve memory efficiency and rendering speed [S2, unofficial].
+
+## How it works
+**Inputs:** Sparse point cloud from Structure-from-Motion (SfM); semantic segmentation maps (for urban context); camera poses and intrinsics.
+**Outputs:** Rasterized image; optimized anchor features and Gaussian parameters.
+
+**Data Structures:**
+1.  **Octree:** Branching factor $b$. Levels $l \in \{0, 1, \dots, L_{max}\}$, where $l=0$ is the coarsest. Voxel side length at level $l$ is $v_l = v_0 / b^l$, where $v_0$ is determined by scene scale [S2, unofficial].
+2.  **Anchors:** Each non-empty voxel instantiates one anchor. Total anchors $N$.
+    *   **Layout per anchor $a_i$:**
+        *   $f_i \in \mathbb{R}^d$: Learnable feature vector.
+        *   $p_i \in \mathbb{R}^3$: Position at voxel center.
+        *   $l_i$: Level index.
+        *   $\{\delta^k_i\}_{k=1}^K$: Set of $K$ learnable offset vectors.
+        *   Per-anchor scaling, rotation, and opacity parameters (base attributes).
+    *   *Note:* The sources state that existing methods optimize $f_i$ independently across levels, but CityGS-X (as the baseline for TopoGS) retains this structure for the definition of the anchor generation [S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Octree Construction:** Build an octree with branching factor $b$ over the scene bounding volume using the SfM sparse point cloud [S2, unofficial].
+2.  **Anchor Instantiation:** For every non-empty voxel at every level $l$, instantiate an anchor at the voxel center. This yields $N$ anchors organized into $L_{max} + 1$ levels [S2, unofficial].
+3.  **Visibility Filtering (Per Camera):**
+    *   **Level-of-Detail (LoD) Filtering:** For a training camera $c$, retain anchor $a_i$ at level $l_i$ only if $l_i \leq \hat{l}(p_i, c)$. The threshold $\hat{l}$ depends on the anchor-to-camera distance and a scene-dependent reference distance [S2, unofficial].
+    *   **View-Frustum Culling:** Remove anchors outside the camera frustum.
+    *   Let $V$ be the resulting visible anchor set. Let $m_v \in \{0, 1\}^N$ be the Boolean mask selecting visible anchors [S2, unofficial].
+4.  **Neural Gaussian Generation:** For each visible anchor $a_i \in V$:
+    *   Compute viewing direction $d_i$ and camera-relative distance.
+    *   Decode attributes for $K$ Neural Gaussians using three shared Multi-Layer Perceptrons (MLPs):
+        *   $MLP_{op}$: Decodes opacity.
+        *   $MLP_{cov}$: Decodes covariance (scaling/rotation).
+        *   $MLP_{col}$: Decodes color.
+    *   Inputs to MLPs: Anchor feature $f_i$, viewing direction $d_i$, and camera-relative distance. The offsets $\{\delta^k_i\}$ likely modulate these base attributes to create the $K$ variants [S2, unofficial].
+5.  **Rasterization:** Rasterize the generated Gaussians via differentiable tile-based splatting to produce the final image [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def citygs_x_render(anchors, camera, mlp_op, mlp_cov, mlp_col):
+    """
+    anchors: List of Anchor objects.
+    camera: Camera object with pose and intrinsics.
+    mlp_op, mlp_cov, mlp_col: Shared MLPs.
+    """
+    visible_anchors = []
+    
+    # Step 3: Visibility Filtering
+    for anchor in anchors:
+        # LoD Filter
+        # l_hat depends on distance(anchor.pos, camera.pos) and scene_ref_dist
+        if anchor.level > compute_lod_threshold(anchor.pos, camera, scene_ref_dist):
+            continue
+            
+        # Frustum Cull
+        if not is_in_frustum(anchor.pos, camera):
+            continue
+            
+        visible_anchors.append(anchor)
+
+    gaussians = []
+    
+    # Step 4: Neural Gaussian Generation
+    for anchor in visible_anchors:
+        # Compute view direction and relative distance
+        view_dir = normalize(anchor.pos - camera.pos)
+        rel_dist = distance(anchor.pos, camera.pos)
+        
+        # Decode base attributes from shared MLPs
+        # Note: The exact input concatenation to MLPs is not fully specified, 
+        # but typically involves f_i, view_dir, and rel_dist.
+        base_opacity = mlp_op(anchor.feature, view_dir, rel_dist)
+        base_cov = mlp_cov(anchor.feature, view_dir, rel_dist)
+        base_color = mlp_col(anchor.feature, view_dir, rel_dist)
+        
+        # Generate K Neural Gaussians using offsets
+        for k in range(anchor.num_offsets):
+            offset = anchor.offsets[k]
+            
+            # Apply offset to base attributes
+            # [G] Specific combination of offset with base cov/opacity is not detailed in sources.
+            # Assuming additive or multiplicative modulation.
+            final_cov = apply_offset(base_cov, offset) 
+            final_opacity = apply_offset(base_opacity, offset)
+            final_color = apply_offset(base_color, offset)
+            
+            gaussians.append(Gaussian(
+                pos=anchor.pos,
+                cov=final_cov,
+                opacity=final_opacity,
+                color=final_color
+            ))
+            
+    # Step 5: Rasterization
+    image = tile_based_splatting(gaussians, camera)
+    return image
+```
+
+**Parameters:**
+*   $b$: Octree branching factor. Not given in the sources.
+*   $L_{max}$: Maximum octree depth. Not given in the sources.
+*   $v_0$: Initial voxel side length. Determined by scene scale [S2, unofficial].
+*   $K$: Number of Neural Gaussians per anchor. Not given in the sources.
+*   $d$: Dimension of anchor feature vector $f_i$. Not given in the sources.
+
+**Edge Cases:**
+*   **Empty Voxels:** Anchors are only instantiated in non-empty voxels, reducing memory overhead [S2, unofficial].
+*   **Far-away Anchors:** LoD filtering prevents rendering sub-pixel Gaussians for distant anchors, improving performance [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time depends on the number of visible anchors $|V|$ and the number of Neural Gaussians $K$ per anchor. $O(|V| \cdot K)$. LoD filtering reduces $|V|$ significantly for distant views [S2, unofficial].
+*   **Memory Complexity:** Proportional to the total number of anchors $N$ and the feature dimension $d$. $O(N \cdot d)$. The octree structure allows sparse storage [S2, unofficial].
+*   **Strengths:** High accuracy in urban reconstruction due to geometry-aware block refinement and semantic allocation. Efficient rendering via LoD and frustum culling. Decoupled feature optimization allows for hierarchical management [S1, unofficial][S2, unofficial].
+*   **Limitations:** Relies on SfM sparse point cloud for initialization, which may be sparse in textureless urban areas. Independent optimization of features across levels may lead to inconsistencies (a problem TopoGS aims to solve) [S2, unofficial].
+*   **When to use:** Large-scale urban scenes with distinct building facades and road surfaces. When high geometric accuracy is required for urban planning or autonomous driving simulations.
+*   **When not to use:** Indoor scenes or scenes with complex dynamic objects not covered by semantic segmentation (use StreetGaussians or Momentum-GS instead) [S1, unofficial].
+
+## Background
+CityGS-X originates from the need to scale 3D Gaussian Splatting to city-scale environments. It builds on block-based partitioning methods like VastGaussian and CityGaussian, which divide scenes into overlapping tiles [S1, unofficial]. CityGS-X extends this by incorporating geometry-aware architecture and semantic segmentation to refine block boundaries and allocate Gaussians only on relevant surfaces (facades, roads) [S1, unofficial]. It serves as the baseline for "Anchor-Based Octree 3D Gaussian Splatting" methods, where anchors in an octree tree generate Gaussians via neural networks [S2, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] TopoGS: Topology-Aware Anchor Feature Aggregation for Large-Scale 3D Gaussian Splatting, https://arxiv.org/abs/2609.27868, fetched 2026-10-30 (unofficial)

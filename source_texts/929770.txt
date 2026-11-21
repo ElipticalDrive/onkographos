@@ -1,0 +1,383 @@
+Armed Bear Common Lisp <git+https://github.com/armedbear/abcl/> <--> <svn+https://abcl.org/svn> Bridge - Add EXT:COMPARE-AND-SWAP: lock-free CAS on VarHandles, with a lock fallback on Java 8 by genworks · Pull Request #766 · armedbear/abcl
+
+Add EXT:COMPARE-AND-SWAP: lock-free CAS on VarHandles, with a lock fallback on Java 8 by genworks · Pull Request #766 · armedbear/abcl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+genworks
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Closes #92. Supersedes #602: this adds the tests and the conditional
+load asked for there.
+What it adds
+A compare-and-swap protocol following SBCL's (SB-EXT:COMPARE-AND-SWAP
+and friends), in EXTENSIONS:
+ext:compare-and-swap place old new stores NEW in PLACE if PLACE
+holds a value EQL to OLD, and returns the value PLACE held before. As
+in SBCL, the swap happened if and only if that value is EQ to OLD.
+Places: car, cdr, first, rest, svref, the accessors of the
+writable slots of a defstruct (without :type), symbol-value and
+special variables (the current thread's innermost dynamic binding if
+it has one, the global value otherwise), slot-value, and
+mop:standard-instance-access.
+ext:get-cas-expansion, ext:define-cas-expander and ext:defcas
+to add places, with SBCL's signatures.
+ext:atomic-update, ext:atomic-incf, ext:atomic-decf,
+ext:atomic-push and ext:atomic-pop, built on it.
+ext:atomic-incf/decf return the old value, as in SBCL, and work on
+any CAS place holding a number; unlike SBCL they do not wrap at the
+fixnum boundary.
+ext:compare-and-swap-implementation returns :varhandle or
+:lock (below).
+ext:cas is deliberately not exported: CL-USER uses EXT on ABCL, and
+a three-letter name there is likely to collide with user code.
+EQL, not EQ
+ABCL boxes fixnums outside [0, 256), so (eq 1000 1000) is false and
+two EQL fixnums need not be EQ. Code written for implementations with
+immediate fixnums expects (compare-and-swap (car x) 1000 1001) to
+succeed when the car is 1000. So the primitives compare with EQL: when
+the place holds a value EQL to OLD but not EQ to it, the swap is retried
+against that value, and on success OLD itself is returned, so the
+caller's EQ test (the SBCL idiom) still succeeds. A swap whose OLD is
+EQ to the place's value, which includes every CAS loop that read the
+place first, never takes that path.
+How
+Atomic.java: the primitives (sys:%compare-and-swap-car, -cdr,
+-svref, -structure-ref, -standard-instance-access,
+-slot-value, -symbol-value) and their static entry points, over a
+Strategy chosen once at class initialization.
+AtomicVarHandles.java: the lock-free strategy,
+VarHandle.compareAndExchange on the existing fields (Cons.car,
+Cons.cdr, Symbol.value) and on LispObject[] elements (simple
+vectors, structure slots, standard-object slots). The fields stay
+non-volatile; VarHandle access modes do not need them to be.
+Java 8. build.xml compiles AtomicVarHandles.java only when
+<available classname="java.lang.invoke.VarHandle"/> holds, and
+Atomic loads it by name, falling back to 64 striped locks when the
+class is missing (a Java 8 build) or cannot be linked (a Java 9+ build
+run on Java 8). So one jar built on openjdk21 with
+-source 1.8 -target 1.8 (as ci/create-abcl-properties.bash sets
+for 11 and later) runs lock-free on 21 and on locks on 8; this was
+checked both ways. Under the lock fallback a swap is atomic with
+respect to other swaps, but a plain setf racing a swap of the same
+place can be lost.
+Compiler. p2-compare-and-swap compiles each primitive to an
+invokestatic on Atomic. Without it, at the default SPEED and
+DEBUG every swap is a full call through LispThread.execute with a
+stack frame, about 45 ns, which made an uncontended swap three times
+slower than taking a global lock.
+defstruct records, for each writable slot accessor of a
+structure-object type, the structure name, index and slot type in
+the accessor's plist; the expander uses them. Read-only slots are
+refused at macroexpansion.
+slot-value swaps the slot's storage directly (instance or class
+allocation), bypassing slot-value-using-class, and calls
+slot-unbound/slot-missing as slot-value does.
+Tests
+test/lisp/abcl/cas-tests.lisp, 25 tests in the RT suite: every place,
+success and failure, the EQL case, type and bounds errors, read-only
+slots, defcas, define-cas-expander, compiled code, the atomic
+macros, and four contention tests (4 threads x 50000 updates to one
+place through atomic-incf, a raw CAS loop on a structure slot,
+svref, and atomic-push; none may be lost).
+openjdk 21.0.13: all 25 pass (:varhandle).
+openjdk 1.8.0: all 25 pass (:lock).
+The whole abcl/test/lisp suite: the same 31 failures as on master
+fc3d78e, none new; 647 tests against 622.
+Shinmera's Atomics library, with ABCL arms added (to be offered
+upstream there once this lands), passes its own test suite: 13 tests,
+106 checks, on both Javas. On master it stops at
+IMPLEMENTATION-NOT-SUPPORTED.
+Benchmarks
+Compiled, best of 3, default optimization settings, nanoseconds per
+operation; 1e7 operations each. x86-64, 22 cores, WSL2, with other
+work on the host (load average 3-4 throughout). The global lock is
+threads:with-thread-lock around an EQ test and setf, which is what
+code has had to do on ABCL so far.
+kernel
+ABCL native, openjdk21
+ABCL global lock, openjdk21 (master)
+ABCL, openjdk8 (lock fallback)
+SBCL 2.6.10
+CCL 1.14
+empty loop (baseline)
+2.9
+3.0
+2.5
+0.7
+1.6
+swap a cons's car, uncontended
+5.5
+15.2
+15.9
+4.8
+6.3
+incf through a CAS loop
+10.6
+17.7
+17.8
+7.4
+9.3
+atomic-incf
+12.1
+—
+16.4
+6.3
+—
+4 threads, CAS-loop incf of one shared cons
+127
+189
+187
+138
+39
+4 threads, each on its own cons
+3.6
+68
+6.5
+1.9
+3.0
+CCL's column uses ccl::%rplaca-conditional; SBCL's,
+sb-ext:compare-and-swap and sb-ext:atomic-incf. The ABCL incf rows
+include allocating a fixnum box per increment above 255. The benchmark
+is a single portable file (bench-cas.lisp, in full at the end).
+bench-cas.lisp
+```
+;;; bench-cas.lisp -- compare-and-swap on a cons, across implementations
+;;;
+;;; Loaded by drive-cas.lisp, which compile-files it.  Each kernel is run
+;;; best of 3 and prints
+;;;   RESULT <impl> <kernel> <ops> <seconds> <ns/op>
+;;;
+;;; The CAS operation (MY-CAS c old new => the value found) is, per
+;;; implementation:
+;;;   ABCL native : ext:compare-and-swap (car c)      [feature :abcl-native-cas]
+;;;   ABCL lock   : one global threads:with-thread-lock around EQ test + setf,
+;;;                 the shape Gendl's paused ABCL port used for cas-car
+;;;   SBCL        : sb-ext:compare-and-swap (car c)
+;;;   CCL         : ccl::%rplaca-conditional (boolean, adapted to return old)
+
+(defpackage :bench-cas (:use :cl))
+(in-package :bench-cas)
+
+#+abcl (defvar *lock* (threads:make-thread-lock))
+
+(defmacro lock-cas (c old new)
+  #+abcl
+  `(let ((c ,c) (o ,old) (n ,new))
+     (threads:with-thread-lock (*lock*)
+       (let ((w (car c)))
+         (when (eq w o) (setf (car c) n))
+         w)))
+  #-abcl (declare (ignore c old new)))
+
+(defmacro native-cas (c old new)
+  #+abcl-native-cas `(ext:compare-and-swap (car ,c) ,old ,new)
+  #+sbcl `(sb-ext:compare-and-swap (car ,c) ,old ,new)
+  #+ccl `(let ((c ,c) (o ,old))
+           (if (ccl::%rplaca-conditional c o ,new) o (car c)))
+  #-(or abcl-native-cas sbcl ccl) (declare (ignore c old new)))
+
+(defun spawn (fn)
+  #+abcl (threads:make-thread fn)
+  #+sbcl (sb-thread:make-thread fn)
+  #+ccl (ccl:process-run-function "worker" fn))
+
+(defun join (thread)
+  #+abcl (threads:thread-join thread)
+  #+sbcl (sb-thread:join-thread thread)
+  #+ccl (ccl:join-process thread))
+
+(defun seconds-since (start)
+  (/ (- (get-internal-real-time) start)
+     (float internal-time-units-per-second 1d0)))
+
+(defmacro define-kernels (prefix cas)
+  "Define the four CAS kernels for one CAS operator."
+  (flet ((name (suffix) (intern (format nil "~A-~A" prefix suffix))))
+    `(progn
+       ;; Two successful swaps per iteration, no contention.
+       (defun ,(name "swap") (n)
+         (let ((c (list :a)))
+           (dotimes (i n) (,cas c :a :b) (,cas c :b :a))
+           (car c)))
+       ;; INCF through a CAS loop, no contention.
+       (defun ,(name "incf") (n)
+         (let ((c (list 0)))
+           (dotimes (i n)
+             (loop for old = (car c)
+                   until (eq old (,cas c old (1+ old)))))
+           (car c)))
+       ;; THREADS threads, N/THREADS increments each, one shared cons.
+       (defun ,(name "incf-shared") (n threads)
+         (let* ((c (list 0)) (go (list nil)) (per (floor n threads))
+                (workers (loop repeat threads
+                               collect (spawn
+                                        (lambda ()
+                                          (loop until (car go))
+                                          (dotimes (i per)
+                                            (loop for old = (car c)
+                                                  until (eq old (,cas c old (1+ old))))))))))
+           (setf (car go) t)
+           (mapc #'join workers)
+           (assert (= (car c) (* per threads)))
+           (car c)))
+       ;; THREADS threads, each on its own cons: scaling, no sharing.
+       (defun ,(name "incf-private") (n threads)
+         (let* ((go (list nil)) (per (floor n threads))
+                (workers (loop repeat threads
+                               collect (spawn
+                                        (lambda ()
+                                          (let ((c (list 0)))
+                                            (loop until (car go))
+                                            (dotimes (i per)
+                                              (loop for old = (car c)
+                                                    until (eq old (,cas c old (1+ old)))))
+                                            (assert (= (car c) per))))))))
+           (setf (car go) t)
+           (mapc #'join workers)
+           per)))))
+
+#+(or abcl-native-cas sbcl ccl) (define-kernels native native-cas)
+#+abcl (define-kernels lock lock-cas)
+
+(defun empty-loop (n)
+  (let ((x 0))
+    (dotimes (i n) (setf x i))
+    x))
+
+#+abcl-native-cas
+(defun native-atomic-incf (n)
+  (let ((c (list 0)))
+    (dotimes (i n) (ext:atomic-incf (car c)))
+    (car c)))
+
+#+sbcl
+(defun native-atomic-incf (n)
+  (let ((c (list 0)))
+    (dotimes (i n) (sb-ext:atomic-incf (car c)))
+    (car c)))
+
+(defun best-of-3 (impl kernel ops fn)
+  (let ((best most-positive-double-float))
+    (dotimes (i 3)
+      (let ((start (get-internal-real-time)))
+        (funcall fn)
+        (setf best (min best (seconds-since start)))))
+    (format t "~&RESULT ~A ~A ~D ~,3F ~,1F~%"
+            impl kernel ops best (/ (* best 1d9) ops))
+    (finish-output)))
+
+(defun run (impl &key (n 10000000) (threads 4))
+  (best-of-3 impl "empty-loop" n (lambda () (empty-loop n)))
+  (macrolet ((suite (prefix)
+               (flet ((name (suffix) (intern (format nil "~A-~A" prefix suffix))))
+                 `(progn
+                    (best-of-3 impl ,(format nil "~(~A~)-swap" prefix) (* 2 n)
+                               (lambda () (,(name "swap") n)))
+                    (best-of-3 impl ,(format nil "~(~A~)-incf" prefix) n
+                               (lambda () (,(name "incf") n)))
+                    (best-of-3 impl (format nil "~(~A~)-incf-shared-~Dt" ',prefix threads) n
+                               (lambda () (,(name "incf-shared") n threads)))
+                    (best-of-3 impl (format nil "~(~A~)-incf-private-~Dt" ',prefix threads) n
+                               (lambda () (,(name "incf-private") n threads)))))))
+    #+(or abcl-native-cas sbcl ccl) (suite native)
+    #+(or abcl-native-cas sbcl)
+    (best-of-3 impl "native-atomic-incf" n (lambda () (native-atomic-incf n)))
+    #+abcl (suite lock)))
+```
+🤖 Generated with Claude Code
+genworks
+mentioned this pull request
+Nov 1, 2026
+Compile closures made by toplevel DEFVAR, DEFPARAMETER, (SETF FDEFINITION), (SETF GET)
+#775
+Open
+genworks
+and others
+added 2 commits
+November 2, 2026 03:50
+Tests for: Add EXT:COMPARE-AND-SWAP: lock-free CAS on VarHandles, loc…
+…
+0d5adcf
+```
+…ks on Java 8
+
+The tests of the next commit, alone.  They do not load here: they use
+the operators the next commit adds to EXT ("The symbol
+"COMPARE-AND-SWAP-IMPLEMENTATION" was not found in package EXT."), so
+the test system stops at this file.  After the next commit all 25 of
+them pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Add EXT:COMPARE-AND-SWAP: lock-free CAS on VarHandles, locks on Java 8
+…
+988fddd
+```
+Adds compare-and-swap following SBCL's protocol (armedbear#92):
+EXT:COMPARE-AND-SWAP on CAR, CDR, FIRST, REST, SVREF, the writable
+slots of a DEFSTRUCT, SYMBOL-VALUE and special variables, SLOT-VALUE
+and MOP:STANDARD-INSTANCE-ACCESS; EXT:GET-CAS-EXPANSION,
+EXT:DEFINE-CAS-EXPANDER and EXT:DEFCAS to extend it; and
+EXT:ATOMIC-UPDATE, ATOMIC-INCF, ATOMIC-DECF, ATOMIC-PUSH and
+ATOMIC-POP on top of it.  As in SBCL, the swap returns the value it
+found, so it succeeded if and only if that value is EQ to OLD.
+
+The comparison is EQL rather than EQ: ABCL boxes fixnums outside
+[0, 256), so two EQL fixnums need not be EQ, and code written for
+immediate fixnums expects (compare-and-swap (car x) 1000 1001) to
+succeed when the car is 1000.  On an EQL but not EQ witness the swap
+is retried against the witness, and on success OLD itself is returned.
+
+Atomic.java holds the primitives (SYS:%COMPARE-AND-SWAP-CAR and
+siblings) over a Strategy chosen once at class initialization.
+AtomicVarHandles.java, compiled only when the JDK provides
+java.lang.invoke.VarHandle (an <available> check in build.xml), does
+the swaps with compareAndExchange on the existing non-volatile fields
+and array elements.  Without it, on openjdk8, Atomic falls back to
+striped locks, atomic with respect to other swaps.  The choice is made
+at runtime by loading the class by name, so a jar built on openjdk21
+with -source/-target 1.8 runs lock-free on 21 and on locks on 8.
+EXT:COMPARE-AND-SWAP-IMPLEMENTATION reports :VARHANDLE or :LOCK.
+
+The compiler emits a static call to Atomic for each primitive
+(P2-COMPARE-AND-SWAP) rather than a full call, which at the default
+SPEED and DEBUG costs about 45 ns.  With it an uncontended swap on a
+cons costs 5.5 ns on openjdk21 (SBCL 2.6.10: 4.8 ns; CCL 1.14: 6.3
+ns), against 15 ns for a swap under one global THREADS:WITH-THREAD-LOCK,
+and four threads each incrementing their own cons run at 3.6 ns per
+operation against 80 ns under that lock.
+
+DEFSTRUCT records each writable slot accessor's structure, index and
+type for the expander.  New tests in test/lisp/abcl/cas-tests.lisp,
+including N threads x M updates to one place under contention, pass
+on openjdk21 and openjdk8; the rest of the suite is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+genworks
+force-pushed
+the
+native-cas
+branch
+from
+165475d to
+988fddd
+Compare
+November 2, 2026 10:42
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,177 @@
+# Sparse Point Probability Octree
+
+Also called: Implicit Neural Point Clouds (INPC) probability octree, Sparse octree for point probability
+
+## Overview
+The Sparse Point Probability Octree is a hierarchical spatial data structure that replaces explicit persistent point positions with a probabilistic volume representation for radiance field rendering [S1]. It solves the problem of managing a fixed budget of sampled points by allowing point clouds to be extracted on demand from a multinomial distribution defined by leaf node probabilities [S1]. It differs from sibling methods like [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md) by dynamically updating, subdividing, and pruning nodes based on rendering feedback (blending weights) rather than static geometric occupancy, and from [Octree-based Level of Detail and Culling](1079-octree-based-level-of-detail-and-culling.md) by focusing on probability mass distribution for sampling rather than view-dependent detail levels.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A sparse octree structure where each leaf node $i$ maintains a probability $p_i$ and a subdivision metric $q_i$. The structure is initialized from a uniform 3D voxel grid or an optional point cloud prior [S1].
+- **Output:** An updated octree with refined leaf nodes, used to sample point positions for rendering [S1].
+
+**Data Structures:**
+- **Sparse Octree:** A tree where each node has a bounding volume and up to eight children.
+- **Leaf Node Fields:**
+  - $p_i$: Float, point probability for leaf $i$.
+  - $q_i$: Float, subdivision metric for leaf $i$.
+  - Children: List of up to 8 child nodes (or null if leaf).
+
+**Numbered Steps:**
+
+1. **Initialization:**
+   - Create a uniform 3D voxel grid as the initial set of leaf nodes [S1].
+   - Set $p_i$ to a uniform value for all leaves to ensure equal sampling probability [S1].
+   - Set $q_i = 0$ for all initial leaves [S1].
+   - Optionally, incorporate a point cloud prior to improve initial convergence [S1].
+
+2. **Rendering and Weight Extraction:**
+   - For each leaf node $i$, extract $n$ points [S1].
+   - Compute the transmitted blending weight $b_j$ for each point $j$ using the rasterizer: $b_j = \alpha_j T_j$, where $\alpha_j$ is the opacity and $T_j$ is the transmittance [S1].
+   - Let $\{b_0, ..., b_n\}$ be the set of these weights for leaf $i$ [S1].
+
+3. **Probability Update (Eq. 2):**
+   - If the current iteration is less than 100, skip probability updates [S1].
+   - Otherwise, update $p_i$ using exponential decay and the maximum blending weight:
+     $$p_i = \max (\lambda_u \cdot p_i, \max (\{b_0, ..., b_n\}))$$
+   - Here, $\lambda_u$ is the exponential decay factor [S1]. This imposes a visibility prior where occluded points (lower $T_j$) receive less probability mass [S1].
+
+4. **Subdivision Metric Update (Eq. 3):**
+   - Update $q_i$ to track the difference between the largest and smallest blending weights:
+     $$q_i = \max (\lambda_u \cdot q_i, \max (\{b_0, ..., b_n\}) - \min (\{b_0, ..., b_n\}))$$
+   - This identifies partially unoccupied voxels [S1].
+
+5. **Subdivision:**
+   - If the current iteration is a multiple of 500:
+     - For each leaf node $i$ where $q_i > \tau_s$:
+       - Check if the resulting number of leaves after subdivision is less than $256^3$. If not, skip subdivision due to numerical precision limits in multinomial sampling [S1].
+       - Subdivide leaf $i$ into 8 new children [S1].
+       - Set the initial $p_{child} = p_i$ for all new children [S1].
+       - Set the initial $q_{child} = 0$ for all new children [S1].
+
+6. **Pruning:**
+   - If the current iteration is a multiple of 100 and greater than 500:
+     - For each leaf node $i$ where $p_i < \tau_p$:
+       - Remove leaf node $i$ from the octree [S1].
+       - The parent node may become a leaf or remain an internal node depending on its other children.
+
+**Parameters:**
+- $\lambda_u$: Exponential decay factor. Typical value: 0.9968 [S1].
+- $\tau_s$: Threshold for subdivision. Typical value: 0.5 [S1].
+- $\tau_p$: Threshold for pruning. Typical value: 0.01 [S1].
+
+**Pitfalls:**
+- **Numerical Precision:** Multinomial sampling has precision limitations. Do not subdivide if the total number of leaves exceeds $256^3$ [S1].
+- **Early Iterations:** Skip probability updates for the first 100 iterations because the appearance network lacks reliable information [S1].
+- **Pruning Stability:** Do not start pruning until after the first 500 iterations to ensure stability [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_sparse_point_probability_octree(octree, iteration, lambda_u, tau_s, tau_p):
+    """
+    Updates the sparse point probability octree based on rendering feedback.
+    
+    Args:
+        octree: The root node of the sparse octree.
+        iteration: Current optimization iteration number.
+        lambda_u: Exponential decay factor (0.9968).
+        tau_s: Subdivision threshold (0.5).
+        tau_p: Pruning threshold (0.01).
+    """
+    MAX_LEAVES = 256**3
+    
+    # Helper to get blending weights for a leaf
+    def get_blending_weights(leaf):
+        # Extract n points from the leaf node
+        points = extract_points_from_leaf(leaf)
+        # Compute transmitted blending weight b_j = alpha_j * T_j for each point
+        weights = []
+        for point in points:
+            alpha = point.opacity
+            transmittance = point.transmittance
+            weights.append(alpha * transmittance)
+        return weights
+
+    # Helper to update a leaf's probability and metric
+    def update_leaf(leaf):
+        weights = get_blending_weights(leaf)
+        if not weights:
+            return
+        
+        max_b = max(weights)
+        min_b = min(weights)
+        
+        # Probability Update (Eq. 2)
+        # Skip updates during the first 100 iterations
+        if iteration >= 100:
+            leaf.p = max(lambda_u * leaf.p, max_b)
+        
+        # Subdivision Metric Update (Eq. 3)
+        leaf.q = max(lambda_u * leaf.q, max_b - min_b)
+
+    # Helper to subdivide a leaf
+    def subdivide_leaf(leaf):
+        # Check numerical precision limit
+        if count_total_leaves(octree) + 7 >= MAX_LEAVES:
+            return
+        
+        # Create 8 new children
+        children = []
+        for _ in range(8):
+            new_leaf = LeafNode()
+            new_leaf.p = leaf.p  # Inherit parent's probability
+            new_leaf.q = 0       # Initial q is 0
+            children.append(new_leaf)
+        
+        # Replace leaf with internal node containing children
+        leaf.is_leaf = False
+        leaf.children = children
+
+    # Helper to prune a leaf
+    def prune_leaf(leaf, parent):
+        # Remove leaf from parent's children list
+        if parent:
+            parent.children.remove(leaf)
+            # If parent has no children, it becomes a leaf (not handled here, 
+            # but typically the tree structure manages this)
+            pass
+
+    # Traverse and update all leaves
+    leaves = get_all_leaves(octree)
+    for leaf in leaves:
+        update_leaf(leaf)
+
+    # Subdivision step (every 500 iterations)
+    if iteration > 0 and iteration % 500 == 0:
+        leaves_to_subdivide = [leaf for leaf in leaves if leaf.q > tau_s]
+        for leaf in leaves_to_subdivide:
+            subdivide_leaf(leaf)
+            # Update leaves list after subdivision as structure changes
+            leaves = get_all_leaves(octree)
+
+    # Pruning step (every 100 iterations, after 500)
+    if iteration > 500 and iteration % 100 == 0:
+        leaves_to_prune = [leaf for leaf in leaves if leaf.p < tau_p]
+        for leaf in leaves_to_prune:
+            # Find parent to remove from
+            parent = find_parent(octree, leaf)
+            prune_leaf(leaf, parent)
+```
+
+## Operating characteristics
+- **Time Complexity:** Updating probabilities and metrics is $O(N)$ where $N$ is the number of leaves. Subdivision and pruning are triggered periodically (every 500 and 100 iterations respectively) and depend on the number of leaves meeting the criteria.
+- **Memory Complexity:** The memory usage is proportional to the number of leaves, capped at $256^3$ due to numerical precision constraints [S1].
+- **Measured Performance:** The method allows for accurate reconstruction of fine geometric structures by refining partially unoccupied voxels [S1].
+- **Strengths:** Replaces explicit point positions with a probabilistic representation, enabling on-demand sampling and efficient memory usage [S1]. The visibility prior helps in handling occluded points [S1].
+- **Limitations:** Limited by the $256^3$ leaf count due to multinomial sampling precision [S1]. Requires careful tuning of thresholds $\tau_s$ and $\tau_p$ [S1].
+- **When to use:** When rendering radiance fields with a fixed budget of sampled points and needing to reconstruct fine geometry [S1].
+- **When not to use:** When the scene requires more than $256^3$ distinct leaf nodes for accurate representation [S1].
+
+## Background
+The Sparse Point Probability Octree was introduced in the INPC (Implicit Neural Point Clouds) method for radiance field rendering [S1]. It addresses the limitations of fixed voxel size in regular occupancy grids by using a sparse octree to store point probabilities [S1]. The method builds on the idea of sampling high-quality point clouds using an implicit octree-based point position estimator [S1]. It was developed to overcome the aliasing artifacts associated with per-pixel camera ray sampling in prior NeRF methods while maintaining the favorable optimization properties of implicit volumetric models [S1].
+
+## Sources
+[S1] INPC: Implicit Neural Point Clouds for Radiance Field Rendering, https://doi.org/10.1109/3dv66043.2025.00021, fetched 2026-10-26

@@ -1,0 +1,159 @@
+# Sphere Tracing with Shading
+
+Also called: Sphere Tracing with Shading | ronja-tutorials/ShaderTutorials
+
+## Overview
+Sphere Tracing with Shading is a method for computing diffuse illumination on surfaces defined by Signed Distance Fields (SDFs) during the ray marching process. It extends basic sphere tracing by estimating surface normals via finite differences and applying a Lambertian lighting model in world space. Unlike [Sphere Tracing Basics](52-sphere-tracing-basics.md), which returns a flat base color, this method calculates per-pixel lighting intensity based on the angle between the surface normal and the light direction. It builds on [Lambertian Lighting in SDF](2023-lambertian-lighting-in-sdf.md) by providing the specific implementation details for normal estimation and integration within the Unity shader pipeline.
+
+## How it works
+The method operates within a fragment shader that performs ray marching. It differs from the basic version only in the output calculation upon a successful hit; the traversal loop remains identical.
+
+### Inputs and Outputs
+**Inputs:**
+- `localPosition`: The local-space position of the vertex on the proxy mesh.
+- `viewDirection`: The view vector in local space.
+- `_Color`: A `float4` representing the object's base diffuse color.
+- `_LightColor0`: A `float4` representing the main directional light's color and intensity (provided by `Lighting.cginc`).
+- `_WorldSpaceLightPos0`: A `float4` where `.xyz` is the light direction for a directional light.
+
+**Outputs:**
+- `fragColor`: The final `float4` color with alpha.
+
+### Data Structures and Constants
+The shader defines three compile-time constants that control precision and performance:
+
+| Constant | Type | Value | Role |
+|---|---|---|---|
+| `MAX_STEPS` | `int` | 10 | Maximum ray marching iterations. |
+| `THICKNESS` | `float` | 0.01 | SDF distance threshold for a surface hit. |
+| `NORMAL_EPSILON` | `float` | 0.01 | Offset distance used in finite-difference normal sampling. |
+
+The scene is defined by the SDF function `scene(pos)`, which returns the signed distance from a point `pos` to a unit sphere of radius 0.5 centered at the origin:
+$$ \text{scene}(pos) = \|pos\| - 0.5 $$
+
+### Algorithm Steps
+
+1.  **Ray Initialization**:
+    Construct the ray origin `pos` from the vertex's local position and the ray direction `dir` from the normalized view direction. Initialize `progress` to 0.
+
+2.  **Ray Marching Loop**:
+    Iterate `iter` from 0 to `MAX_STEPS`:
+    a. Calculate the sample point: `samplePoint = pos + dir * progress`.
+    b. Evaluate the SDF: `distance = scene(samplePoint)`.
+    c. **Hit Test**: If `distance < THICKNESS`, the ray has intersected the surface. Proceed to **Shading**.
+    d. **Advance**: Update `progress += distance`.
+    e. **Miss Test**: If `iter` exceeds `MAX_STEPS`, discard the fragment (return transparent/black).
+
+3.  **Shading (on hit)**:
+    a. **Normal Estimation**: Compute the surface normal using central finite differences in local space, then transform to world space.
+    b. **Lighting Calculation**: Compute the Lambertian diffuse term using the world-space normal and world-space light direction.
+    c. **Material Composition**: Multiply the base color by the lighting intensity.
+
+### Normal Estimation
+The surface normal is the normalized gradient of the SDF. Since the SDF is analytic, the gradient is approximated using central differences with offset `NORMAL_EPSILON` ($\epsilon$).
+
+1.  Compute changes in local space:
+    $$ \Delta_x = \text{scene}(pos + (\epsilon, 0, 0)) - \text{scene}(pos - (\epsilon, 0, 0)) $$
+    $$ \Delta_y = \text{scene}(pos + (0, \epsilon, 0)) - \text{scene}(pos - (0, \epsilon, 0)) $$
+    $$ \Delta_z = \text{scene}(pos + (0, 0, \epsilon)) - \text{scene}(pos - (0, 0, \epsilon)) $$
+    
+    Let $g_{local} = (\Delta_x, \Delta_y, \Delta_z)$.
+
+2.  Transform to world space. The gradient is a direction vector, so the translation component of the transformation matrix must be excluded (w=0).
+    $$ g_{world} = \text{normalize}\left( \text{mul}(\text{unity\_ObjectToWorld}, (g_{local}.x, g_{local}.y, g_{local}.z, 0)) \right) $$
+
+### Lighting Calculation
+The diffuse lighting intensity is computed in world space.
+
+1.  Retrieve the light direction $L$ from `_WorldSpaceLightPos0.xyz`.
+2.  Compute the dot product of the world-space normal $N = g_{world}$ and the light direction $L$:
+    $$ \text{diffuseIntensity} = \max(0, N \cdot L) $$
+    This is implemented as `saturate(dot(surfaceNormal, lightDirection))`.
+3.  Compute the final lighting contribution:
+    $$ \text{lightColor} = \text{diffuseIntensity} \times \text{_LightColor0.rgb} $$
+
+### Material Composition
+The final color is the product of the object's base color and the computed lighting:
+$$ \text{output} = \text{_Color.rgb} \times \text{lightColor} $$
+The alpha channel is typically preserved from the base color or set to 1.0 depending on the material setup.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+MAX_STEPS = 10
+THICKNESS = 0.01
+NORMAL_EPSILON = 0.01
+
+# SDF Function
+def scene(pos):
+    return length(pos) - 0.5
+
+# Normal Calculation
+def get_normal(pos):
+    # Central differences in local space
+    change_x = scene(pos + float3(NORMAL_EPSILON, 0, 0)) - scene(pos - float3(NORMAL_EPSILON, 0, 0))
+    change_y = scene(pos + float3(0, NORMAL_EPSILON, 0)) - scene(pos - float3(0, NORMAL_EPSILON, 0))
+    change_z = scene(pos + float3(0, 0, NORMAL_EPSILON)) - scene(pos - float3(0, 0, NORMAL_EPSILON))
+    
+    gradient_local = float3(change_x, change_y, change_z)
+    
+    # Transform to world space (direction vector, w=0)
+    gradient_world = mul(unity_ObjectToWorld, float4(gradient_local, 0))
+    
+    return normalize(gradient_world)
+
+# Lighting Calculation
+def light_color(position):
+    normal = get_normal(position)
+    light_dir = _WorldSpaceLightPos0.xyz
+    diffuse = saturate(dot(normal, light_dir))
+    return diffuse * _LightColor0.rgb
+
+# Fragment Shader
+def frag(v2f_input):
+    pos = v2f_input.localPosition
+    dir = normalize(v2f_input.viewDirection)
+    progress = 0
+    
+    for i in range(MAX_STEPS):
+        sample_point = pos + dir * progress
+        distance = scene(sample_point)
+        
+        if distance < THICKNESS:
+            # Hit: compute shading
+            return _Color * light_color(sample_point)
+        
+        progress += distance
+    
+    # Miss or max steps exceeded
+    return float4(0, 0, 0, 0)
+```
+
+### Parameters and Edge Cases
+- **`NORMAL_EPSILON`**: A value of 0.01 is used. If too small, precision errors may cause noisy normals; if too large, the normal approximation becomes inaccurate for high-curvature areas.
+- **`THICKNESS`**: A value of 0.01 defines the hit threshold. It must be larger than the numerical precision errors of the SDF evaluation but small enough to avoid visible gaps.
+- **Batching**: Static and dynamic batching must be disabled (`DisableBatching="True"`). The vertex shader relies on `unity_WorldToObject`, which is only valid per-object and breaks when multiple objects are batched into a single draw call.
+- **Depth Buffer**: The shader must use `Queue="Transparent"` and `ZWrite Off`. Sphere-traced geometry does not write correct hardware depth values. Placing it in the transparent queue prevents it from incorrectly occluding rasterized geometry or being occluded by it based on the proxy mesh's depth.
+
+## Subtopics
+
+### Local Shading with Smooth Mirrors
+A shading technique for Kernel-Reflection Sequences (KRS) that uses surface normals derived from the gradient of distance functions, with a smoothing method for discontinuities at mirror planes [S2]. It computes the shading normal using the gradient of the distance function at the sphere-traced surface point and performs lighting computation in either world space or kernel space [S2]. If computing in world space, the transformation matrix for the complete chain must be maintained throughout the iteration to transform kernel gradients to world space [S2]. Discontinuities are smoothed by interpolating between the kernel-to-world-space matrices on the two sides of a mirror when the shaded point is found near a mirror plane during iteration [S2]. The shading algorithm runs only once, after sphere tracing has found the intersection point [S2]. A key pitfall is visible discontinuity of surface normals where the plane of reflection intersects the mirrored geometry if kernel separation is not upheld [S2].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$, where $N$ is the number of ray marching steps (bounded by `MAX_STEPS`). Each step involves one SDF evaluation. Normal estimation adds 6 additional SDF evaluations per hit pixel.
+- **Memory Complexity**: $O(1)$ auxiliary memory. No large textures or buffers are required beyond standard shader registers.
+- **Performance**: The method is computationally lightweight compared to path tracing or complex shadow casting. The primary cost is the 6 extra SDF evaluations for normal estimation on hit pixels.
+- **Strengths**: Simple to implement; provides soft, physically plausible diffuse lighting for procedural geometry; no external texture lookups required.
+- **Limitations**: Normals are approximate (finite differences), which can lead to slight inaccuracies in grazing angles or near singularities. No shadows are cast by the object itself. Performance degrades linearly with `MAX_STEPS`.
+- **When to use**: Real-time rendering of procedural objects where diffuse lighting is sufficient and shadows are handled by other means or omitted.
+- **When not to use**: When accurate shadows, specular highlights, or complex material interactions are required.
+
+## Background
+This method is documented in the "ShaderTutorials" series by Ronja, specifically in the tutorial "5.2 Sphere Tracing with Shading" [S1, unofficial]. It serves as a direct extension of "Sphere Tracing Basics" and "Lambertian Lighting in SDF" within the Unity engine context. The approach leverages Unity's built-in lighting variables (`_LightColor0`, `_WorldSpaceLightPos0`) and standard shader includes (`Lighting.cginc`) to integrate procedural geometry into the engine's forward rendering pipeline.
+
+## Sources
+[S1] Sphere Tracing with Shading, https://deepwiki.com/ronja-tutorials/ShaderTutorials/5.2-sphere-tracing-with-shading, fetched 2026-10-27 (unofficial)
+[S2] Kernel-Reflection Sequences, https://doi.org/10.2312/stag.20161364, fetched 2026-10-26

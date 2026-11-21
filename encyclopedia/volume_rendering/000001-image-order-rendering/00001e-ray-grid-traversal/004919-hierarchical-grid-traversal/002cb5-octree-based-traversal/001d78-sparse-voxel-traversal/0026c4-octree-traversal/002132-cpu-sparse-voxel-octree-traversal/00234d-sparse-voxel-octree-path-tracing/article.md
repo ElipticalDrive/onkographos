@@ -1,0 +1,164 @@
+# Sparse Voxel Octree Path Tracing
+
+Also called: CPU-based SVO rendering, Octree path tracing
+
+## Overview
+Sparse Voxel Octree Path Tracing is a rendering technique that traverses a Sparse Voxel Octree (SVO) structure on the CPU to perform path tracing, writing results to a texture displayed via OpenGL [S1, unofficial]. It differs from GPU-based SVO rendering by performing all ray marching and shading calculations on the host processor, using a linear block structure for the octree and a stack-based traversal mechanism [S1, unofficial]. It builds on [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md) by integrating the traversal logic into a full path tracing loop that handles light bounces and material reflectivity.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A generated Sparse Voxel Octree stored in a flat array `_tree` of `uint32_t` [S1, unofficial]. Ray origin `rayOrigin` and direction `rayDirection` [S1, unofficial].
+*   **Output:** Hit point `r_hit`, surface normal `r_normal`, hit index `r_idx`, and depth `r_depth` [S1, unofficial]. Pixel buffer of size `_vwidth * _vheight` with `Pixel` structs (RGB) [S1, unofficial]. Depth buffer of size `_vwidth * _vheight` with `float` values [S1, unofficial].
+
+**Data Structures:**
+*   **Octree Array (`_tree`):** A `std::vector<uint32_t>` [S1, unofficial]. Each node is a 32-bit integer:
+    *   Bits 0–16 (17 bits): Child pointer offset [S1, unofficial].
+    *   Bits 17–31 (15 bits): Mask or type indicator [S1, unofficial].
+    *   Internal Node Value: `0x0000FFFF` (binary `0000 0000 0000 0000 1111 1111 1111 1111`) [S1, unofficial].
+    *   Leaf Node Value: `0x00004200` (binary `0000 0000 0000 0000 0100 0010 0000 0000`) [S1, unofficial].
+*   **Ray Stack:** An array `StackEntry rayStack[MaxScale + 1]` where `MaxScale = 23` [S1, unofficial]. `StackEntry` contains `uint64_t offset` and `float maxT` [S1, unofficial].
+*   **Pixel Buffer:** Array of `Pixel` structs, cleared to `{0, 0, 0}` [S1, unofficial].
+*   **Depth Buffer:** Array of `float`, initialized to `FLT_MAX` [S1, unofficial].
+
+**Parameters:**
+*   `maxDepth`: Maximum octree depth. Set to 3 in the generation function [S1, unofficial].
+*   `NumSamples`: Samples per pixel. UI slider range 0–250 [S1, unofficial].
+*   `MaxBounces`: Maximum light bounces per path. UI slider range 0–100 [S1, unofficial].
+*   `Reflectivity`: Material reflectivity. UI slider range 0.0f–1.0f [S1, unofficial].
+
+**Tree Generation:**
+The octree is generated using a stack-based approach [S1, unofficial].
+1.  Initialize `index = 0`, `depth = 0`, `offset = 0` [S1, unofficial].
+2.  Push root entry `{index: 0, depth: 0}` to stack [S1, unofficial].
+3.  Push root node `0x0000FFFF` to `_tree` [S1, unofficial].
+4.  While stack is not empty:
+    a.  Pop current entry [S1, unofficial].
+    b.  Calculate `offset = _tree.size() - index` [S1, unofficial].
+    c.  Update `_tree[index]` by OR-ing the offset shifted left by 17 bits: `_tree[index] |= offset << 17` [S1, unofficial].
+    d.  Increment `index` by `offset` [S1, unofficial].
+    e.  If `depth < maxDepth` (3):
+        i.  Increment `depth` [S1, unofficial].
+        ii. Push 8 children to `_tree` with value `0x0000FFFF` [S1, unofficial].
+        iii. Push 8 stack entries with indices `index + (8 - i)` for `i` in 0..7 and current `depth` [S1, unofficial].
+    f.  Else (leaf):
+        i.  Push 8 children to `_tree` with value `0x00004200` [S1, unofficial].
+        ii. Retrieve current entry from stack top [S1, unofficial].
+
+**Ray Traversal (Raymarch):**
+The traversal uses a parametric approach with a stack to manage scale levels [S1, unofficial].
+1.  Adjust ray origin: `ro = rayOrigin - OctreeLoc` [S1, unofficial].
+2.  Clamp ray direction components if near zero: if `fabs(dx) < 1e-4f`, set `dx = 1e-4f` (same for `dy`, `dz`) [S1, unofficial].
+3.  Initialize ray stack with `offset` and `maxT` [S1, unofficial].
+4.  Iterate through scale levels (up to `MaxScale = 23`) [S1, unofficial]:
+    a.  Determine current voxel boundaries based on position and scale [S1, unofficial].
+    b.  Calculate intersection distances `minT`, `maxT` with voxel faces [S1, unofficial].
+    c.  Update position and index based on which face is hit first (`centerTX > minT`, etc.) [S1, unofficial].
+    d.  Update `idx` (voxel index) by XOR-ing with step mask [S1, unofficial].
+    e.  Calculate `differingBits` to determine scale reduction if crossing voxel boundaries [S1, unofficial].
+    f.  Check if current node is a leaf or internal node using the bit layout [S1, unofficial].
+    g.  If leaf, record hit and return [S1, unofficial].
+    h.  If internal, push new stack entry and continue [S1, unofficial].
+
+**Path Tracing Loop:**
+1.  For each pixel, initialize `rayOrigin` and `rayDirection` [S1, unofficial].
+2.  For `bounce` from 0 to `MaxBounces`:
+    a.  Call `Raymarch` to find hit point [S1, unofficial].
+    b.  If no hit, break [S1, unofficial].
+    c.  Accumulate color based on `Reflectivity` and light contribution [S1, unofficial].
+    d.  Update `rayOrigin` to hit point, `rayDirection` to new reflection/refraction direction [S1, unofficial].
+3.  Write accumulated color to pixel buffer [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_octree(max_depth=3):
+    tree = []
+    stack = []
+    stack.append({'index': 0, 'depth': 0})
+    tree.append(0x0000FFFF)
+    index = 0
+    depth = 0
+    
+    while stack:
+        current = stack.pop()
+        index = current['index']
+        depth = current['depth']
+        
+        offset = len(tree) - index
+        tree[index] |= offset << 17
+        index += offset
+        
+        if depth < max_depth:
+            depth += 1
+            for i in range(8):
+                tree.append(0x0000FFFF)
+                stack.append({'index': index + (8 - i), 'depth': depth})
+        else:
+            for i in range(8):
+                tree.append(0x00004200)
+            if stack:
+                current = stack[-1]
+                index = current['index']
+                depth = current['depth']
+                stack.pop()
+    return tree
+
+def raymarch(ray_origin, ray_direction, tree, octree_loc):
+    ro = ray_origin - octree_loc
+    rd = ray_direction
+    dx, dy, dz = rd.x, rd.y, rd.z
+    
+    if abs(dx) < 1e-4: dx = 1e-4
+    if abs(dy) < 1e-4: dy = 1e-4
+    if abs(dz) < 1e-4: dz = 1e-4
+    
+    ox, oy, oz = ro.x, ro.y, ro.z
+    max_scale = 23
+    ray_stack = [{'offset': 0, 'maxT': 0.0}] * (max_scale + 1)
+    
+    # Simplified traversal logic based on source description
+    # Actual implementation requires detailed parametric intersection math
+    # not fully provided in source text.
+    # Placeholder for complex traversal logic.
+    pass
+
+def path_trace(width, height, max_bounces, num_samples, reflectivity):
+    pixel_buffer = [{'r': 0, 'g': 0, 'b': 0} for _ in range(width * height)]
+    depth_buffer = [float('inf')] * (width * height)
+    
+    for y in range(height):
+        for x in range(width):
+            for s in range(num_samples):
+                ray_origin = get_ray_origin(x, y, s)
+                ray_direction = get_ray_direction(x, y, s)
+                color = vec3(0, 0, 0)
+                
+                for bounce in range(max_bounces):
+                    hit_point, normal, hit_idx, depth = raymarch(ray_origin, ray_direction, tree, octree_loc)
+                    if not hit_point:
+                        break
+                    color += reflectivity * shade(hit_point, normal, ray_direction)
+                    ray_origin = hit_point
+                    ray_direction = reflect(ray_direction, normal)
+                
+                pixel_buffer[y * width + x] += color
+            pixel_buffer[y * width + x] /= num_samples
+            
+    return pixel_buffer
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels traversed per ray and the number of bounces [S1, unofficial].
+*   **Memory Complexity:** Linear with respect to the number of nodes in the octree [S1, unofficial].
+*   **Performance:** Demonstrated with 12 samples + 12 bounces and 50 samples + 50 bounces [S1, unofficial].
+*   **Strengths:** CPU-based implementation allows for flexible data structures and easier debugging [S1, unofficial].
+*   **Limitations:** Primitive path tracing implementation; no light sources currently supported [S1, unofficial].
+*   **When to use:** Educational purposes, learning SVO traversal and path tracing fundamentals [S1, unofficial].
+*   **When not to use:** Production rendering requiring high performance or complex lighting [S1, unofficial].
+
+## Background
+The technique is implemented as a project to learn about Sparse Voxel Octrees and path tracing [S1, unofficial]. It references "Ray Tracing in One Weekend" [S1, unofficial]. The project uses OpenGL, GLFW, and ImGUI for windowing and UI [S1, unofficial]. Future work includes importing models, voxelizing them into the SVO, and adding light sources [S1, unofficial].
+
+## Sources
+[S1] cianjinks/Sparse-Voxel-Octree, https://github.com/cianjinks/Sparse-Voxel-Octree, fetched 2026-10-26 (unofficial)

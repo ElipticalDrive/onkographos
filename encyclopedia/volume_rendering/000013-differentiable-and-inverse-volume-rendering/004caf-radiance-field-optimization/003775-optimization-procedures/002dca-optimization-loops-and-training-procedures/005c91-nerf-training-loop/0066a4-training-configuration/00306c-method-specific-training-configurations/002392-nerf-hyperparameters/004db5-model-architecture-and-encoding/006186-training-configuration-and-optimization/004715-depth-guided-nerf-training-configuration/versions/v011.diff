@@ -1,0 +1,200 @@
+--- v010.md
++++ v011.md
+@@ -4,72 +4,152 @@
+ 
+ ## Overview
+-This configuration defines the training protocol for Neural Radiance Fields (NeRF) that incorporate depth supervision to improve geometry reconstruction and training stability. It modifies the standard NeRF architecture by adding regularization and integrates a depth loss term into the optimization objective. It is distinguished from sibling methods by its specific use of Earth Mover’s Distance (EMD) for depth evaluation and a fixed dropout regularization scheme on the positional encoding layers, rather than architectural changes to the density/color networks themselves or alternative loss formulations like binary cross-entropy.
++This configuration defines the training protocol for a Neural Radiance Field (NeRF) model that incorporates depth priors to improve reconstruction quality, particularly in sparse-view or noisy-pose scenarios. It extends the standard NeRF architecture [Parent](13550-model-architecture-and-encoding.md) by adding specific regularization and loss terms related to depth consistency. The method is distinguished by its use of an Earth Mover’s Distance (EMD) based depth loss and specific architectural dropout modifications to prevent overfitting when depth supervision is introduced.
+ 
+ ## How it works
+-The method builds on the standard NeRF [Parent](13550-model-architecture-and-encoding.md) framework, mapping 3D coordinates and viewing directions to density and color. The training process is modified to include depth priors.
+-
+ **Inputs:**
++*   3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ and viewing directions $\mathbf{d} \in \mathbb{R}^3$ as defined in [Parent](13550-model-architecture-and-encoding.md).
++*   Ground truth depth maps $D$ corresponding to the input views.
+ *   Camera poses and intrinsics.
+-*   RGB images.
+-*   Ground truth depth maps (optional but required for the depth loss).
+-*   Scene-specific depth bounds ($min\_depth$, $max\_depth$).
+ 
+ **Outputs:**
+-*   Trained NeRF model parameters (MLP weights).
+-*   Rendered RGB images and depth maps.
++*   Rendered RGB images.
++*   Predicted depth maps.
++*   Trained NeRF parameters (MLP weights).
+ 
+ **Data Structures:**
+-*   **NeRF Model:** Two Multi-Layer Perceptrons (MLPs) as defined in [Parent](13550-model-architecture-and-encoding.md).
+-    *   **Architecture Modification:** Dropout layers with probability $p=0.1$ are inserted after each of the first eight fully connected ReLU-activated layers in the positional encoding network.
+-*   **Optimizer State:** Adam optimizer state variables (first and second moment estimates).
++The model builds upon the standard two-MLP NeRF structure [Parent](13550-model-architecture-and-encoding.md). The key modification is in the density network's initialization and regularization:
++*   **Density Network:** The first eight fully connected ReLU-activated layers that process the positional encoding $\gamma(\mathbf{x})$ are followed by Dropout layers.
++*   **Dropout Probability:** $p = 0.1$.
++*   **Depth Scale Parameter:** A learnable scalar parameter used to align the predicted depth scale with the ground truth, optimized with a specific learning rate.
++
++**Training Steps:**
++1.  **Initialization:** Initialize the NeRF MLPs. Add dropout layers with probability 0.1 after each of the first eight fully connected ReLU-activated layers in the density network [S1]. Initialize a depth scale parameter.
++2.  **Sampling:** For each training iteration, sample rays from the input images. Sample points along each ray using stratified sampling or importance sampling.
++3.  **Forward Pass:**
++    *   Encode positions $\mathbf{x}$ and directions $\mathbf{d}$ using positional encoding $\gamma(\cdot)$ [Parent](13550-model-architecture-and-encoding.md).
++    *   Compute raw density $\sigma$ and feature vector $\mathbf{e}$ via the density MLP. Apply dropout to the first eight layers.
++    *   Compute color $\mathbf{c}$ via the color MLP using $\mathbf{e}$ and $\gamma(\mathbf{d})$.
++    *   Render color $C(\mathbf{r})$ and depth $D_{pred}(\mathbf{r})$ using volume rendering [Parent](13550-model-architecture-and-encoding.md).
++4.  **Loss Calculation:**
++    *   Compute RGB loss (e.g., MSE) between rendered and ground truth colors.
++    *   Compute Depth Loss. The depth evaluation metrics are defined as:
++        $$ \text{RMSE}(d, \hat{d}) = \sqrt{\frac{1}{K} \sum_{k=1}^K (d_k - \hat{d}_k)^2} $$
++        $$ \text{RMSE}_{\log}(d, \hat{d}) = \sqrt{\frac{1}{K} \sum_{k=1}^K (\log d_k - \log \hat{d}_k)^2} $$
++        $$ \text{AbsRel}(d, \hat{d}) = \frac{1}{K} \sum_{k=1}^K \frac{|d_k - \hat{d}_k|}{d_k} $$
++        $$ \text{SqRel}(d, \hat{d}) = \frac{1}{K} \sum_{k=1}^K \frac{(d_k - \hat{d}_k)^2}{d_k} $$
++        where $K$ is the number of valid pixels [S1].
++    *   The total loss includes a depth loss term weighted by $\lambda$ and an uncertainty term weighted by $\gamma$.
++5.  **Optimization:**
++    *   Update weights using the Adam optimizer.
++    *   Apply weight decay.
++    *   Adjust learning rate according to the schedule.
++
++**Formulas:**
++*   **Threshold for Depth Uncertainty:**
++    $$ \tau = (\text{max\_depth} - \text{min\_depth}) \cdot 0.0001 $$
++    For ScanNet, $\text{max\_depth} = 10$ and $\text{min\_depth} = 0.001$ [S1].
++*   **Total Loss:**
++    $$ \mathcal{L} = \mathcal{L}_{\text{rgb}} + \lambda \mathcal{L}_{\text{depth}} + \gamma \mathcal{L}_{\text{uncertainty}} $$
++    (Specific formulation of $\mathcal{L}_{\text{depth}}$ and $\mathcal{L}_{\text{uncertainty}}$ relies on the EMD framework described in the source, but the weights are explicit) [S1].
+ 
+ **Parameters:**
+-*   Depth loss weight: $\lambda = 0.007$ for most scenes; $\lambda = 0.02$ for scene 710 [S1].
+-*   Uncertainty weight: $\gamma = 1$ [S1].
+-*   Optimizer: Adam [S1].
+-*   Initial learning rate: $5 \times 10^{-4}$ [S1].
+-*   Learning rate schedule: Reduce to $5 \times 10^{-5}$ after 80% of total steps [S1].
+-*   Weight decay: $1 \times 10^{-6}$ [S1].
+-*   Total training steps: 500,000 [S1].
+-*   Depth scale learning rate: $1 \times 10^{-7}$ [S1].
+-*   Depth threshold $\tau$: Computed per scene as $\tau = (max\_depth - min\_depth) \cdot 0.0001$ [S1]. For ScanNet, $max\_depth = 10$ and $min\_depth = 0.001$ [S1].
++*   **Depth Loss Weight ($\lambda$):** 0.007 for most scenes; 0.02 for scene 710 [S1].
++*   **Uncertainty Weight ($\gamma$):** 1 [S1].
++*   **Optimizer:** Adam [S1].
++*   **Initial Learning Rate:** $5 \times 10^{-4}$ [S1].
++*   **Learning Rate Schedule:** Reduce to $5 \times 10^{-5}$ after 80% of total steps [S1].
++*   **Weight Decay:** $1 \times 10^{-6}$ [S1].
++*   **Total Training Steps:** 500,000 [S1].
++*   **Depth Scale Learning Rate:** $1 \times 10^{-7}$ [S1].
+ 
+-**Algorithm:**
++**Pseudocode:**
++```python
++def train_depth_guided_nerf(model, data_loader, config):
++    # Initialize optimizer
++    optimizer = Adam(model.parameters(), lr=config['initial_lr'], weight_decay=config['weight_decay'])
++    
++    # Specific learning rate for depth scale parameter if separate
++    if config['has_depth_scale']:
++        optimizer.add_param_group({'params': model.depth_scale, 'lr': config['depth_scale_lr']})
+ 
+-1.  **Initialization:** Initialize NeRF MLPs. Initialize Adam optimizer with learning rate $5 \times 10^{-4}$ and weight decay $1 \times 10^{-6}$. Initialize depth scale parameter with learning rate $1 \times 10^{-7}$ [S1].
+-2.  **Sampling:** For each training step, sample a batch of rays. For each ray, sample points along the ray segment defined by near and far planes.
+-3.  **Forward Pass:**
+-    *   Encode spatial coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ using positional encoding.
+-    *   Pass encoded features through the modified MLPs (with dropout $p=0.1$ on the first 8 FC layers of the encoding network) to predict volume density $\sigma$ and color $\mathbf{c}$ [S1].
+-    *   Compute the rendered color $\hat{C}$ using standard volume rendering integration [Parent](13550-model-architecture-and-encoding.md).
+-    *   Compute the rendered depth $\hat{D}$ using the sampled depths and weights [S1].
+-4.  **Loss Calculation:**
+-    *   Compute RGB loss (e.g., MSE) between rendered color $\hat{C}$ and ground truth color $C$.
+-    *   Compute Depth Loss. The specific formulation (e.g., Earth Mover’s Distance) is implied by the source title [S1], but the evaluation metrics provided are RMSE, Log-RMSE, AbsRel, and SqRel [S1]. The training loss typically involves a weighted sum of RGB and depth errors.
+-    *   Total Loss $L = L_{rgb} + \lambda L_{depth}$ [S1].
+-5.  **Optimization:**
+-    *   Compute gradients of $L$ with respect to MLP weights and depth scale.
+-    *   Update parameters using Adam optimizer [S1].
+-    *   Apply learning rate decay: if current step $> 0.8 \times 500,000$, set learning rate to $5 \times 10^{-5}$ [S1].
+-6.  **Iteration:** Repeat steps 2-5 for 500,000 steps [S1].
++    total_steps = config['total_steps']
++    lr_reduction_step = int(total_steps * 0.8)
++    initial_lr = config['initial_lr']
++    reduced_lr = 5e-5
++    
++    for step in range(total_steps):
++        # Learning rate schedule
++        if step >= lr_reduction_step:
++            for param_group in optimizer.param_groups:
++                param_group['lr'] = reduced_lr
++        
++        # Get batch
++        rays, gt_colors, gt_depths = next(data_loader)
++        
++        # Forward pass
++        # model returns rendered colors, depths, and optionally uncertainty
++        pred_colors, pred_depths, uncertainty = model(rays)
++        
++        # Compute losses
++        rgb_loss = mse_loss(pred_colors, gt_colors)
++        
++        # Depth loss calculation
++        # Note: The source mentions EMD-based depth loss, but provides evaluation metrics.
++        # We assume a standard L1 or L2 depth loss weighted by lambda for implementation clarity,
++        # or the specific EMD loss if available in the library.
++        # Here we use a placeholder for the specific depth loss function from the source.
++        depth_loss = compute_depth_loss(pred_depths, gt_depths) 
++        
++        # Uncertainty loss
++        uncertainty_loss = compute_uncertainty_loss(uncertainty)
++        
++        # Total loss
++        lambda_d = config['depth_loss_weight'] # 0.007 or 0.02
++        gamma_u = config['uncertainty_weight'] # 1
++        
++        total_loss = rgb_loss + lambda_d * depth_loss + gamma_u * uncertainty_loss
++        
++        # Backward pass
++        optimizer.zero_grad()
++        total_loss.backward()
++        optimizer.step()
++        
++        # Logging
++        if step % 100 == 0:
++            log_metrics(rgb_loss, depth_loss, total_loss)
++
++def compute_depth_loss(pred_depths, gt_depths):
++    # Mask valid pixels
++    valid_mask = gt_depths > 0
++    pred = pred_depths[valid_mask]
++    gt = gt_depths[valid_mask]
++    
++    # Example: L1 Loss (common in depth-guided NeRF)
++    # The source cites RMSE, AbsRel, SqRel as evaluation metrics.
++    # The training loss is likely similar or EMD-based.
++    # Without explicit training loss formula, we use L1 as a standard proxy for depth consistency.
++    return torch.mean(torch.abs(pred - gt))
++```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Scene 710:** Requires a higher depth loss weight ($\lambda = 0.02$) compared to other scenes ($\lambda = 0.007$) [S1].
+-*   **Depth Threshold:** The threshold $\tau$ for evaluating depth uncertainty is scene-dependent and calculated based on the depth range [S1].
+-*   **Overfitting:** The dropout regularization is critical to prevent overfitting, especially given the limited data in some scenarios [S1].
++*   **Depth Scale:** The depth scale parameter requires a significantly lower learning rate ($1e-7$) to ensure stable convergence [S1].
++*   **Thresholding:** The uncertainty evaluation uses a threshold $\tau$ derived from the depth range. If the depth range is not properly normalized, this threshold may be ineffective [S1].
+ 
+ ## Subtopics
+ 
+ ### DS-NeRF Depth Loss Integration
+-This variant involves integrating the depth loss implementation from the official DS-NeRF codebase into the training pipeline. It requires re-training on specific datasets (LLFF, DTU) using released configuration files, as original publication results may use different train/test splits or unreleased architectural tricks (e.g., reduced positional encoding frequency) to prevent overfitting [S2].
++This variant involves integrating the depth loss implementation from the official DS-NeRF codebase into the training pipeline. It is chosen when leveraging established depth loss formulations from DS-NeRF. Note that original publication results for LLFF used a different train/test split, and DTU results could not be reproduced with released config files, suggesting potential undocumented architectural tricks (e.g., reduced positional encoding frequency) [S2]. Re-training on standard splits is recommended for reproducibility [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training takes 500,000 steps [S1]. The exact time per step depends on hardware and scene complexity, but the addition of depth loss computation adds minimal overhead compared to RGB loss.
+-*   **Memory Complexity:** Standard NeRF memory usage plus storage for ground truth depth maps if used during training [S1].
+-*   **Strengths:** Improves geometric accuracy and training stability through depth supervision. The dropout regularization helps prevent overfitting [S1].
+-*   **Limitations:** Requires ground truth depth maps for training. Performance may vary across scenes, necessitating scene-specific hyperparameter tuning (e.g., scene 710) [S1]. Reproducing results from other works (like DS-NeRF) may be difficult due to missing configuration files or undocumented architectural modifications [S2].
++*   **Time Complexity:** Training requires 500,000 steps [S1]. The addition of depth loss and uncertainty computation increases per-step cost compared to standard NeRF.
++*   **Memory Complexity:** The dropout layers do not significantly increase memory usage. The depth scale parameter adds negligible memory overhead.
++*   **Strengths:** Improves geometry reconstruction, especially in areas with sparse views or noisy poses, by leveraging depth priors. The dropout regularization helps prevent overfitting to noisy depth data.
++*   **Limitations:** Requires ground truth depth maps for training. Performance is sensitive to the depth loss weight $\lambda$ and the depth scale learning rate.
++*   **When to Use:** When depth information is available and geometry accuracy is critical.
++*   **When Not to Use:** When depth data is unavailable or unreliable.
+ 
+ ## Background
+-This configuration was introduced in the context of Depth-Guided NeRF training using Earth Mover’s Distance [S1]. It builds upon the original NeRF architecture [Parent](13550-model-architecture-and-encoding.md) and incorporates insights from DS-NeRF regarding depth loss integration [S2]. The method is particularly relevant for applications where accurate 3D geometry is crucial, such as in ScanNet and DTU datasets [S1, S2].
++This configuration originates from the work on Depth-Guided NeRF Training via Earth Mover’s Distance [S1]. It builds upon the original NeRF architecture [Parent](13550-model-architecture-and-encoding.md) and incorporates insights from DS-NeRF [S2]. The method was developed to address challenges in reconstructing scenes with sparse or noisy camera poses by providing additional geometric supervision through depth maps.
+ 
+ ## Sources

@@ -1,0 +1,3546 @@
+# tsplat
+
+> Run Gaussian Splatting in your terminal, CPU only, even works over SSH
+
+![demo screenshot](./assets/view.png)
+
+tsplat renders [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) scenes directly in your terminal using Unicode half-blocks or any supported graphics protocol. written in rust and is CPU only for now, doesn't require GPU or display servers and it even works over SSH
+
+## Installation
+
+Requires Rust
+```sh
+cargo install --git https://github.com/darshanmakwana412/tsplat
+```
+
+Or clone and build locally:
+
+```sh
+git clone https://github.com/darshanmakwana412/tsplat
+cd tsplat
+cargo build --release
+```
+
+## Quick start
+
+You need an INRIA 3DGS `.ply` scene. The [pretrained garden scene](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) is a good first test:
+
+```sh
+tsplat path/to/scene.ply
+
+# Raise or remove the default 200 k splat cap
+tsplat path/to/scene.ply --max-splats 500000
+tsplat path/to/scene.ply --no-cap
+
+# Scene looks washed-out when
+tsplat path/to/scene.ply --raw-opacity
+```
+
+> Note: If you terminal does not support any graphics protocol it will fallback to half block rendering which might look minecrafty
+
+## Controls
+
+| Key | Action |
+|-----|--------|
+| `W` `A` `S` `D` | Pan (camera-relative) |
+| `J` / `K` or left/right arrows | Yaw left / right |
+| `H` / `L` or up/down arrows | Pitch up / down |
+| `+` / `-` or mouse scroll | Zoom in / out |
+| `O` | Toggle **auto-orbit** (smooth yaw loop, ideal for recordings) |
+| `Tab` | Toggle HUD — arrows navigate rows and adjust values while open |
+| `q` / `Esc` / `Ctrl-C` | Quit |
+
+## Benchmarks
+
+```sh
+cargo run --release --bin bench_forward
+cargo run --release --bin bench_forward -- --threads 1,2,4,8 --splats 200000
+cargo run --release --bin bench_forward -- --ply path/to/scene.ply
+```
+
+---
+
+## Tutorial on Gaussian Splatting
+
+I recently discovered some of my notes related to it and decided to digitize it this weekend, along the way I reimplemented the forward rasterization pass in rust and decided it would be fun to write a tutorial explaining gaussian splatting to everyone, so here it is
+
+- [What is a gaussian splat?](#what-is-a-gaussian-splat)
+- [The forward pass pipeline](#the-forward-pass-pipeline)
+- [Step 1: Projecting Splats](#step-1-projecting-splats)
+  - [1.1: building the 3D covariance matrix](#11-building-the-3d-covariance-matrix)
+  - [1.2: transforming into view space](#12-transforming-into-view-space)
+  - [1.3: projecting to 2D](#13-projecting-to-2d)
+- [Step 2: computing bounding boxes](#step-2-computing-bounding-boxes)
+- [Step 3: depth sort](#step-3-depth-sort)
+- [Step 4: tile binning](#step-4-tile-binning)
+- [Step 5: alpha compositing](#step-5-alpha-compositing)
+  - [tiled parallel compositing](#tiled-parallel-compositing)
+- [Optimizations](#optimizations)
+  - [fast approximate exp](#fast-approximate-exp)
+  - [row-level early-out](#row-level-early-out)
+  - [scratch buffer reuse](#scratch-buffer-reuse)
+
+## what is a gaussian splat?
+
+a 3D Gaussian splat is an oriented ellipsoid in space that carries some color and opacity. you can think of it as a fuzzy colored blob. a scene is made of hundreds of thousands of these blobs, and when you look at them from a particular viewpoint, they overlap and blend to form the final image
+
+We represent each gaussian with these attributes:
+
+```rust
+pub struct Splat {
+    pub pos: Vec3,      // center position in world space
+    pub scale: Vec3,    // size along each local axis
+    pub rot: Quat,      // orientation as a unit quaternion
+    pub color: Vec3,    // RGB color (already decoded from spherical harmonics)
+    pub opacity: f32,   // how opaque this blob is, in [0, 1]
+}
+```
+
+scales are stored in log space, opacities as logits, colors as spherical harmonics coefficients and quaternions are normzlied to unit length to ensure the values lie within their respective range
+
+![single gaussian splat](./assets/single_splat.png)
+
+spherical harmonic (SH) coefficients are just a frequency-domain representation of a color function defined over the unit sphere, now why spherical harmonics? because in the real world, the color of a surface depends on the viewing direction. SH coefficients encode this view-dependent appearance compactly.
+
+SH functions are organized in bands (like octaves in music), as you go higher up in the bands you have more coefficients and thus they capture more finer details, the INRIA 3DGS format stores up to band 3 (48 coefficients per splat for RGB)
+
+To decode bash 0, the band-0 SH basis function is $Y_0^0 = \frac{1}{2\sqrt{\pi}} \approx 0.282$. the conversion from SH coefficient to RGB is:
+
+$$\text{color} = \text{clamp}\left(0.5 + C_0 \cdot f_{dc},\ 0,\ 1\right)$$
+
+where $C_0 = Y_0^0$ and $f_{dc}$ is the 3-component DC coefficient from the file.
+
+```rust
+pub const SH_C0: f32 = 0.28209479177387814;
+
+pub fn sh_band0_to_rgb(f_dc: Vec3) -> Vec3 {
+    (Vec3::splat(0.5) + SH_C0 * f_dc).clamp(Vec3::ZERO, Vec3::ONE)
+}
+```
+
+## the forward pass pipeline
+
+the forward pass turns a list of 3D Gaussians + a camera into a 2D image. here is an overview of the rendering pipeline:
+
+![pipeline](./assets/pipeline.png)
+
+## Step 1: Projecting Splats
+
+### 1.1: building the 3D covariance matrix
+
+for each splat given the raw `(scale, rotation)` pairs we need to construct a 3D covariance matrix $\Sigma$ that describes the shape and orientation of the Gaussian in world space. the formula is:
+
+$$\Sigma = R \cdot S \cdot S^T \cdot R^T$$
+
+where R is the 3×3 rotation matrix from the quaternion, and S is a diagonal matrix of scales. if we let M = R·S, this simplifies to:
+
+$$\Sigma = M \cdot M^T$$
+
+```rust
+let r_mat = Mat3::from_quat(s.rot);
+let s_mat = Mat3::from_diagonal(s.scale);
+let m = r_mat * s_mat;
+let cov3d = m * m.transpose();
+```
+
+---
+
+**Note: why dowe decompose the covariance this way?**
+
+Covariance matrices have physical meaning only when they are **positive semi-definite**. gradient descent cannot easily be constrained to produce valid matrices, by expressing the covariance as $M \cdot M^T$, it is guaranteed to be positive semi-definite, a matrix of the form $A^T A$ always is. this is a reparametrization trick: we optimize `scale` and `rotation` separately, which are unconstrained, and the covariance we derive from them is always valid
+
+---
+
+what does this matrix actually look like? for a splat with `scale = (0.1, 0.05, 0.02)` and identity rotation:
+
+$$
+\Sigma =
+\begin{pmatrix}
+0.01 & 0 & 0 \\
+0 & 0.0025 & 0 \\
+0 & 0 & 0.0004
+\end{pmatrix}
+\quad
+\begin{aligned}
+&= \text{diag}(0.1^2,\; 0.05^2,\; 0.02^2)
+\end{aligned}
+$$
+
+with identity rotation, it is just the squared scales on the diagonal, an axis-aligned ellipsoid
+
+### 1.2: transforming into view space
+
+the 3D covariance we just computed lives in world space. to project it onto the camera's image plane, we first need to rotate it into view space, the coordinate system where the camera is at the origin, looking down −z
+
+for the splat center, this is just a matrix-vector multiply with the 4×4 view matrix:
+
+```rust
+let p_view4 = view * Vec4::new(s.pos.x, s.pos.y, s.pos.z, 1.0);
+let p_view = Vec3::new(p_view4.x, p_view4.y, p_view4.z);
+if p_view.z > -znear || p_view.z < -zfar {
+    return None;
+}
+let zc = -p_view.z;
+```
+
+note `zc = -p_view.z`. our view space is right-handed with the camera looking down **−z**, so points in front of the camera have negative z. we use `zc` (positive in front) as the depth for sorting and projection.
+
+for the covariance, we rotate it by the 3×3 part of the view matrix W:
+
+$$\Sigma_{view} = W \cdot \Sigma \cdot W^T$$
+
+```rust
+let w_mat = Mat3::from_mat4(view);
+let w_mat_t = w_mat.transpose();
+
+let cov3d_view = w_mat * cov3d * w_mat_t;
+```
+
+this is just the standard basis-change formula for a covariance matrix. the shape of the ellipsoid does not change due to this infact we are only re-expressing it in the camera's coordinate system.
+
+### 1.3: projecting to 2D
+
+now we have a 3D Gaussian in view space and we need to project it onto the 2D image plane. the projection is perspective, which means a 3D Gaussian does not project to an exact 2D Gaussian because perspective is a nonlinear transform. but we can locally linearize it using the Jacobian of the projection function, and the result is close enough.
+
+the projection function maps a 3D point (x, y, z) in view space to pixel coordinates (u, v):
+
+$$u = f_x \cdot \frac{x}{z_c} + c_x$$
+$$v = f_y \cdot \frac{y}{z_c} + c_y$$
+
+where $f_x, f_y$ are the focal lengths and $c_x, c_y$ are the principal point (image center). for simplicity of calcuations we can also assume, $f_x = f_y$
+
+the Jacobian J of this projection evaluated at the splat center is:
+
+$$J = \begin{bmatrix} \frac{f_x}{z_c} & 0 & \frac{f_x \cdot x_v}{z_c^2} \\ 0 & \frac{f_y}{z_c} & \frac{f_y \cdot y_v}{z_c^2} \\ 0 & 0 & 0 \end{bmatrix}$$
+
+the structure of this matrix is very sparse, only 4 of the 9 entries are nonzero.we can just do the full $JC J^T$ with two 3×3 matrix multiplies (~54 scalar multiplies). but because we only need the top-left $2\times 2$ of $J$ Cov3D_view $J^T$, since the third row of $J$ is all zeros. and the first two rows of J each have only two nonzero entries. so instead of two full matrix multiplies, we can compute the 2D covariance with ~20 scalar multiplies by expanding the product by hand:
+
+---
+
+```rust
+let c = &cov3d_view;
+let inv_zc = 1.0 / zc;
+let inv_zc2 = inv_zc * inv_zc;
+
+let j00 = fx * inv_zc;
+let j02 = fx * xv * inv_zc2;
+let j11 = fy * inv_zc;
+let j12 = fy * yv * inv_zc2;
+
+// Row 0 of J * C: [j00*c00 + j02*c20, j00*c01 + j02*c21, j00*c02 + j02*c22]
+let t0x = j00 * c.x_axis.x + j02 * c.z_axis.x;
+let t0y = j00 * c.y_axis.x + j02 * c.z_axis.y;
+let t0z = j00 * c.x_axis.z + j02 * c.z_axis.z;
+
+// Row 1 of J * C: [j11*c10 + j12*c20, j11*c11 + j12*c21, j11*c12 + j12*c22]
+let t1y = j11 * c.y_axis.y + j12 * c.z_axis.y;
+let t1z = j11 * c.y_axis.z + j12 * c.z_axis.z;
+
+// 2D cov = (J*C) * J^T, top-left 2x2:
+let cov2d_00 = t0x * j00 + t0z * j02 + eps2d;
+let cov2d_01 = t0y * j11 + t0z * j12;
+let cov2d_11 = t1y * j11 + t1z * j12 + eps2d;
+```
+
+notice the eps2d on the diagonal entries. that is a small dilation (default 0.3) added for numerical stability, it just ensures the 2D covariance is strictly positive definite (not just semi-definite), which means it is always invertible.
+
+---
+
+**Note: why the eps2d trick works**
+
+by construction, the 2D covariance $JCJ^T$ is only positive semi-definite ($A^T A$ form). but we need to invert it later (for evaluating the Gaussian at each pixel). a singular matrix is not invertible.
+
+adding eps2d to the diagonal means adding $\lambda I$ to the matrix. for any vector x:
+
+$$x^T \cdot (A^T A + \lambda I) \cdot x = \|Ax\|^2 + \lambda \|x\|^2 > 0$$
+
+this is strictly positive for any nonzero x, which is the definition of positive definite, invertible, with all eigenvalues strictly positive
+
+---
+
+next we invert the $2\times 2$ covariance. for a $2\times 2$ matrix the inverse has a closed form:
+
+$$\begin{bmatrix} a & b \\ b & d \end{bmatrix}^{-1} = \frac{1}{ad - b^2} \begin{bmatrix} d & -b \\ -b & a \end{bmatrix}$$
+
+```rust
+let det = cov2d_00 * cov2d_11 - cov2d_01 * cov2d_01;
+if det <= 0.0 {
+    return None;
+}
+
+let inv_det = 1.0 / det;
+let cov2d_inv = Mat2::from_cols(
+    Vec2::new(cov2d_11 * inv_det, -cov2d_01 * inv_det),
+    Vec2::new(-cov2d_01 * inv_det, cov2d_00 * inv_det),
+);
+```
+
+and the screen position is a standard perspective divide:
+
+```rust
+let sx = fx * xv * inv_zc + cx;
+let sy = fy * yv * inv_zc + cy;
+```
+
+at this point, for each splat we have: screen position `(sx, sy)`, depth `zc`, and the inverse 2D covariance matrix `cov2d_inv`. this is everything we need to evaluate the Gaussian at any pixel on screen.
+
+## step 2: computing bounding boxes
+
+We would now have to evalute the splat at every pixel in the screen because the 2D gaussian has infinite support, it never truly reaches zero, but we can compute a bounding box that encloses the region where the gaussian has any visible effect and only evalute pixels inside this bounding box
+
+the original 3DGS code computes the two eigenvalues $\lambda_1$, $\lambda_2$ of the 2D covariance (the variances along the two principal axes of the ellipse), takes $r = 3\sqrt{max(\lambda_1, \lambda_2)}$ (the 3-sigma rule, covering 99.7% of the Gaussian), and uses a circle of that radius as the bounding box
+
+this is simple but wasteful. when a Gaussian is elongated (one eigenvalue much larger than the other), the bounding circle will also include a lot of empty space
+
+![bounding box](./assets/bb.png)
+
+We can create a tighter bounding box by observing that:
+
+1. the extent along each axis is $k\sqrt{\Sigma_{ii}}$ where $\Sigma_{ii}$ is the diagonal entry of the 2D covariance for that axis. for an elongated ellipse, the short-axis extent is much smaller than the long-axis extent, so the bounding box is tighter.
+
+2. the classic $3\sigma$ rule is conservative. a faint splat (low opacity) does not need $3\sigma$ because its contribution drops below the visibility threshold much sooner. the cutoff distance $k$ can be computed when our splat's opacity falls below certain threshold $\tau$
+
+based on this each pixel gets
+
+$$\alpha = \text{opacity} \cdot \exp(-\tfrac{1}{2} \cdot \mathbf{d}^T \Sigma^{-1} \mathbf{d})$$
+
+we want $\alpha \geq \tau$, which rearranges to:
+
+$$\mathbf{d}^T \Sigma^{-1} \mathbf{d} \leq 2 \ln\left(\frac{\text{opacity}}{\tau}\right) = k^2$$
+
+for a near-opaque splat (opacity = 1), $k^2 = 2ln(255) = 11.1$, which is close to the $3\sigma$ value of 9. for a faint splat (opacity = 0.1), $k^2 = 2ln(255) = 11.1$, so the box and computation shrinks substantially.
+
+```rust
+if s.opacity <= alpha_threshold {
+    return None;
+}
+let k2 = (2.0 * (s.opacity / alpha_threshold).ln()).min(max_k2);
+if !(k2 > 0.0) {
+    return None;
+}
+
+let rx_f = (k2 * cov2d_00).sqrt();
+let ry_f = (k2 * cov2d_11).sqrt();
+if !rx_f.is_finite() || !ry_f.is_finite() || rx_f < 1.0 || ry_f < 1.0 {
+    return None;
+}
+
+let x0 = (sx - rx_f).floor() as i32;
+let y0 = (sy - ry_f).floor() as i32;
+let x1 = (sx + rx_f).ceil() as i32;
+let y1 = (sy + ry_f).ceil() as i32;
+
+// Clip to framebuffer.
+let x0 = x0.max(0);
+let y0 = y0.max(0);
+let x1 = x1.min(w_i - 1);
+let y1 = y1.min(h_i - 1);
+if x0 > x1 || y0 > y1 {
+    return None;
+}
+```
+
+Also because each splat is independent of each other the projection computation is embarassingly parallel, we use rayon's `par_iter().filter_map()` to project all splats across all cores:
+
+```rust
+pub fn project(
+    splats: &[Splat],
+    camera: &OrbitCamera,
+    params: &RenderParams,
+    pool: &Option<rayon::ThreadPool>,
+) -> Vec<Projected> {
+    // ... precompute view matrix, intrinsics, etc (once per frame) ...
+
+    let do_project = || {
+        splats
+            .par_iter()
+            .filter_map(|s| {
+                // ... all the math above, returning Some(Projected) or None ...
+            })
+            .collect()
+    };
+
+    match pool.as_ref() {
+        Some(p) => p.install(do_project),
+        None => do_project(),
+    }
+}
+```
+
+we can now just pack everything into a `Projected` struct
+
+```rust
+pub struct Projected {
+    pub screen: Vec2,       // pixel center (sx, sy)
+    pub depth: f32,         // zc (positive in front)
+    pub cov2d_inv: Mat2,    // inverse 2D covariance
+    pub bbox: [i32; 4],     // inclusive: x0, y0, x1, y1
+    pub color: Vec3,        // RGB
+    pub opacity: f32,       // [0, 1]
+}
+```
+
+## step 3: depth sort
+
+For alpha compositing we use [painter's algorithm in reverse](https://en.wikipedia.org/wiki/Painter's_algorithm). this means we need the projected splats sorted by depth before compositing. the order matters here, if a close splat occludes a far one, it must be composited first so it has more weight in the blending process. because all depths are positive (we culled anything behind the camera), so the bit pattern of an `f32` preserves float ordering when reinterpreted as a `u32`. this lets us use `depth.to_bits()` as a sort key
+
+for the actual sorting, we use a simple 2-pass 16-bit radix sort. this is faster than comparison-based sorting (like Rust's `sort_unstable_by_key`) for our input sizes (~100k–200k elements) and it runs in O(n) time with small constants. 2 passes of 16 bits seemed to have worked better instead of 4 passes of 8 bits, fewer passes means fewer data traversals and also the 65536-entry histograms (256KB each) fit comfortably in my laptops L2 cache. at 200k splats this is consistently 2 times faster than Rust's comparison sort.
+
+```rust
+pub fn sort_by_depth(projected: &mut [Projected], scratch: &mut ScratchBuffers) {
+    let n = projected.len();
+    if n <= 1 {
+        return;
+    }
+
+    scratch.sort_aux.clear();
+    scratch.sort_aux.reserve(n.saturating_sub(scratch.sort_aux.capacity()));
+    unsafe { scratch.sort_aux.set_len(n); }
+    let aux = &mut scratch.sort_aux;
+
+    // Both histograms can be computed in a single pass over the keys.
+    // Stack-allocated to avoid heap alloc.
+    let mut counts_lo = [0u32; 65536];
+    let mut counts_hi = [0u32; 65536];
+    for p in projected.iter() {
+        let k = p.depth.to_bits();
+        counts_lo[(k & 0xFFFF) as usize] += 1;
+        counts_hi[(k >> 16) as usize] += 1;
+    }
+
+    // Pass 1: sort by low 16 bits
+    {
+        let mut offsets = [0u32; 65536];
+        let mut sum = 0u32;
+        for i in 0..65536 {
+            offsets[i] = sum;
+            sum += counts_lo[i];
+        }
+        for p in projected.iter() {
+            let bucket = (p.depth.to_bits() & 0xFFFF) as usize;
+            let pos = offsets[bucket] as usize;
+            offsets[bucket] += 1;
+            aux[pos] = *p;
+        }
+    }
+
+    // Pass 2: sort by high 16 bits
+    {
+        let mut offsets = [0u32; 65536];
+        let mut sum = 0u32;
+        for i in 0..65536 {
+            offsets[i] = sum;
+            sum += counts_hi[i];
+        }
+        for p in aux.iter() {
+            let bucket = (p.depth.to_bits() >> 16) as usize;
+            let pos = offsets[bucket] as usize;
+            offsets[bucket] += 1;
+            projected[pos] = *p;
+        }
+    }
+}
+```
+
+```rust
+pub fn sort_by_depth_parallel(
+    projected: &mut [Projected],
+    scratch: &mut ScratchBuffers,
+    pool: &Option<rayon::ThreadPool>,
+) {
+    if projected.len() < 50_000 || pool.is_none() {
+        sort_by_depth(projected, scratch);
+        return;
+    }
+    pool.as_ref().unwrap().install(|| {
+        projected.par_sort_unstable_by_key(|p| p.depth.to_bits());
+    });
+}
+```
+
+## step 4: tile binning
+
+we now have a depth-sorted list of projected splats. the naive approach to compositing would be: for each splat, iterate every pixel in its bounding box and accumulate color. this works but it is cache-hostile because different splats touch overlapping pixel regions in unpredictable order.
+
+the original 3DGS implementation divides the image into tiles (16×16 pixel blocks) and builds an index that tells each tile exactly which splats overlap it. then each tile composites only its own splats, in order, touching only its own pixels
+
+the binning uses a count-then-scatter two-pass approach. in pass 1 for each splat, count how many tiles its bbox touches then build a per-tile count array. in pass 2, prefix-sum the counts into offsets (so `offsets[i]` = start of tile i's bucket). then scatter each splat's index into its tile buckets using a cursor that advances. now because we iterate splats in depth-sorted order, each tile's bucket ends up automatically depth-sorted so no additional per-tile sort needed
+
+```rust
+pub fn bin_splats(
+    projected: &[Projected],
+    width: u32,
+    height: u32,
+    bins: &mut TileBins,
+) {
+    let num_tiles_x = ((width as i32) + TILE_W - 1) / TILE_W;
+    let num_tiles_y = ((height as i32) + TILE_H - 1) / TILE_H;
+    let num_tiles = (num_tiles_x * num_tiles_y) as usize;
+
+    // offsets is used first as a count array, then prefix-summed in place.
+    bins.offsets.clear();
+    bins.offsets.resize(num_tiles + 1, 0);
+
+    // Pass 1: count tile touches per splat.
+    for p in projected {
+        let [x0, y0, x1, y1] = p.bbox;
+        let tx0 = (x0 / TILE_W).max(0);
+        let ty0 = (y0 / TILE_H).max(0);
+        let tx1 = (x1 / TILE_W).min(num_tiles_x - 1);
+        let ty1 = (y1 / TILE_H).min(num_tiles_y - 1);
+        if tx0 > tx1 || ty0 > ty1 {
+            continue;
+        }
+        for ty in ty0..=ty1 {
+            let row = (ty * num_tiles_x) as usize;
+            for tx in tx0..=tx1 {
+                bins.offsets[row + tx as usize + 1] += 1;
+            }
+        }
+    }
+
+    // Prefix sum: offsets[i] = start of bucket i.
+    for i in 1..=num_tiles {
+        bins.offsets[i] += bins.offsets[i - 1];
+    }
+    let total = bins.offsets[num_tiles] as usize;
+
+    bins.splat_indices.clear();
+    bins.splat_indices.resize(total, 0);
+
+    // Cursor starts at each bucket's begin and advances as we scatter.
+    bins.cursor.clear();
+    bins.cursor.extend_from_slice(&bins.offsets[..num_tiles]);
+
+    // Pass 2: scatter splat indices into their tile buckets.
+    for (idx, p) in projected.iter().enumerate() {
+        let [x0, y0, x1, y1] = p.bbox;
+        let tx0 = (x0 / TILE_W).max(0);
+        let ty0 = (y0 / TILE_H).max(0);
+        let tx1 = (x1 / TILE_W).min(num_tiles_x - 1);
+        let ty1 = (y1 / TILE_H).min(num_tiles_y - 1);
+        if tx0 > tx1 || ty0 > ty1 {
+            continue;
+        }
+        for ty in ty0..=ty1 {
+            let row = (ty * num_tiles_x) as usize;
+            for tx in tx0..=tx1 {
+                let tile = row + tx as usize;
+                let pos = bins.cursor[tile] as usize;
+                bins.splat_indices[pos] = idx as u32;
+                bins.cursor[tile] += 1;
+            }
+        }
+    }
+}
+```
+
+let me show what the data structure looks like for a small example. say we have 4 splats (A, B, C, D) then after depth sorting we will get something like this
+
+![tile binning](./assets/tile_binning.png)
+
+## step 5: alpha compositing
+
+now for each tile, we iterate its splats front-to-back, and for each pixel in the splat's bounding box (clipped to the tile), we evaluate the 2D Gaussian and blend the color.
+
+for a pixel at position $(px, py)$ and a splat centered at $(sx, sy)$, the displacement is $d = (px - sx, py - sy)$. the Gaussian exponent is:
+
+$$\text{power} = -\tfrac{1}{2} \cdot \mathbf{d}^T \cdot \Sigma^{-1} \cdot \mathbf{d}$$
+
+expanding for a 2×2 symmetric inverse covariance with entries $(a, b; b, d)$:
+
+$$\text{power} = -\tfrac{1}{2} \cdot (a \cdot dx^2 + 2b \cdot dx \cdot dy + d \cdot dy^2)$$
+
+the alpha for this splat at this pixel is:
+
+$$\alpha = \text{opacity} \cdot \exp(\text{power})$$
+
+we now composite front-to-back. the framebuffer stores `(rgb_accum, alpha_accum)` per pixel, both starting at zero. for each splat, the contribution is:
+
+$$T = 1 - \alpha_{accum}$$
+$$\text{contrib} = T \cdot \alpha$$
+$$\text{rgb}_{accum} \mathrel{+}= \text{contrib} \cdot \text{color}$$
+$$\alpha_{accum} \mathrel{+}= \text{contrib}$$
+
+here $T$ is the transmittance i.e how much light can still pass through. once `alpha_accum` reaches the saturation threshold (0.999), the pixel is considered opaque and we skip further splats on it.
+
+the inner pixel loop is the hottest code in the entire rasterizer. to make it as fast as possible, we hoist row-constant terms outside the inner (column) loop. for a fixed row $p_y$, $d_y = p_y - s_y$ is constant, so we precompute everything else and then the inner loop becomes a simple quadratic in dx with all coefficients precomputed
+
+```rust
+fn composite_splat(p: &Projected, fb: &mut [(Vec3, f32)], w: usize, params: &RenderParams) {
+    let [x0, y0, x1, y1] = p.bbox;
+
+    // Extract the inverse covariance matrix elements.
+    let a = p.cov2d_inv.x_axis.x; // (0,0)
+    let b = p.cov2d_inv.x_axis.y; // (0,1) = (1,0) since symmetric
+    let d = p.cov2d_inv.y_axis.y; // (1,1)
+
+    // Coefficients for the decomposed quadratic.
+    let dx_coeff = -0.5 * a;
+    let dy_coeff = -0.5 * d;
+    let cross_coeff = -b; // -0.5 * 2 * b
+
+    let saturation = params.saturation;
+    let alpha_threshold = params.alpha_threshold;
+    let opacity = p.opacity;
+    let color = p.color;
+    let sx = p.screen.x;
+    let sy = p.screen.y;
+
+    for py in y0..=y1 {
+        let dy = py as f32 - sy;
+        let row_base = dy_coeff * dy * dy;
+        let row_slope = cross_coeff * dy;
+        let row_offset = py as usize * w;
+
+        for px in x0..=x1 {
+            let idx = row_offset + px as usize;
+            let cell = &mut fb[idx];
+            if cell.1 >= saturation {
+                continue;
+            }
+            let dx = px as f32 - sx;
+            let power = dx_coeff * dx * dx + row_slope * dx + row_base;
+            if power > 0.0 {
+                continue;
+            }
+            let alpha = (opacity * fast_exp(power)).min(0.999);
+            if alpha < alpha_threshold {
+                continue;
+            }
+            let t = 1.0 - cell.1;
+            let contrib = t * alpha;
+            cell.0 += contrib * color;
+            cell.1 += contrib;
+        }
+    }
+}
+```
+
+### tiled parallel compositing
+
+now because each tile owns a disjoint pixel sets so we can composite all tiles in parallel with zero synchronization, no atomics and no locks, this becomes very effective on CPU
+
+we use rayon's `par_iter` over tile indices, and raw-pointer writes to give each tile direct access to its pixel rectangle without violating Rust's `&mut` aliasing rules:
+
+```rust
+pub fn composite_tiled(
+    projected: &[Projected],
+    bins: &TileBins,
+    fb: &mut [(Vec3, f32)],
+    width: u32,
+    height: u32,
+    params: &RenderParams,
+    pool: &Option<rayon::ThreadPool>,
+) {
+    let w = width as usize;
+    let h_i = height as i32;
+    let w_i = width as i32;
+    let num_tiles_x = bins.num_tiles_x;
+    let num_tiles = bins.num_tiles();
+    let fb_ptr = FbPtr(fb.as_mut_ptr());
+
+    let do_composite = || {
+        (0..num_tiles).into_par_iter().for_each(move |tile_idx| {
+            let fbp = fb_ptr;
+            let tile_x = (tile_idx as i32) % num_tiles_x;
+            let tile_y = (tile_idx as i32) / num_tiles_x;
+            let px0 = tile_x * TILE_W;
+            let py0 = tile_y * TILE_H;
+            let px1 = (px0 + TILE_W - 1).min(w_i - 1);
+            let py1 = (py0 + TILE_H - 1).min(h_i - 1);
+            if px0 > px1 || py0 > py1 {
+                return;
+            }
+
+            let start = bins.offsets[tile_idx] as usize;
+            let end = bins.offsets[tile_idx + 1] as usize;
+            if start == end {
+                return;
+            }
+            let splat_ids = &bins.splat_indices[start..end];
+
+            for &sid in splat_ids {
+                let p = unsafe { projected.get_unchecked(sid as usize) };
+                let [bx0, by0, bx1, by1] = p.bbox;
+                let x0 = bx0.max(px0);
+                let y0 = by0.max(py0);
+                let x1 = bx1.min(px1);
+                let y1 = by1.min(py1);
+                if x0 > x1 || y0 > y1 {
+                    continue;
+                }
+                unsafe {
+                    composite_splat_region(p, fbp.0, w, x0, y0, x1, y1, params);
+                }
+            }
+        });
+    };
+
+    match pool.as_ref() {
+        Some(p) => p.install(do_composite),
+        None => do_composite(),
+    }
+}
+```
+
+---
+**Note: the `FbPtr` trick**
+
+Rust's borrow checker does not let multiple threads hold `&mut` references to the same buffer. but we know that each tile writes to a disjoint pixel rectangle the geometry guarantees it. so we wrap the raw pointer in a `Send + Sync` newtype and give each tile direct access:
+
+```rust
+struct FbPtr(*mut (Vec3, f32));
+unsafe impl Send for FbPtr {}
+unsafe impl Sync for FbPtr {}
+```
+
+this is the one place in the rasterizer where we need `unsafe`. the safety argument is spatial here and tile `(tx, ty)` only writes to pixels `[tx*16..(tx+1)*16, ty*16..(ty+1)*16]`, and no two tiles share the same `(tx, ty)`.
+
+---
+
+## optimizations
+
+Here are some additional optimizations that can be applied to make it fast for realtime use on CPU
+
+### fast approximate exp
+
+the `exp()` function in the inner loop is by far the most expensive operation — it dominates everything else, if we don't need 64-bit libm precision. the Schraudolph trick reinterprets a scaled float as an IEEE 754 bit pattern:
+
+```rust
+fn fast_exp(x: f32) -> f32 {
+    let x = x.max(-87.0);
+    let v = (12102203.0f32 * x + 1065353216.0) as i32;
+    f32::from_bits(v as u32)
+}
+```
+
+### row-level early-out
+
+in the tiled compositor, before entering the inner pixel loop for a row, we check whether the peak of the Gaussian along that row is below the visibility threshold. the Gaussian exponent along a row is a concave quadratic in dx:
+
+$$\text{power}(dx) = \text{dx\_coeff} \cdot dx^2 + \text{row\_slope} \cdot dx + \text{row\_base}$$
+
+the peak of this quadratic (at the vertex) is:
+
+$$\text{row\_peak} = \text{row\_base} + \frac{\text{row\_slope}^2}{2 \cdot a}$$
+
+if even the peak is below `ln(alpha_threshold / opacity)`, the entire row is invisible and we skip it:
+
+```rust
+let row_peak_cutoff = (alpha_threshold / opacity).ln();
+let inv_a = 1.0 / a;
+
+for py in y0..=y1 {
+    let dy = py as f32 - sy;
+    let row_base = dy_coeff * dy * dy;
+    let row_slope = cross_coeff * dy;
+    let row_peak = row_base + 0.5 * row_slope * row_slope * inv_a;
+    if row_peak < row_peak_cutoff {
+        continue;    // entire row is below threshold, skip it
+    }
+    // ... inner pixel loop ...
+}
+```
+
+a subtlety: the peak is at the vertex of the quadratic, not at $dx = 0$. using `row_base` alone (which is the value at $dx = 0$) would miss peaks that sit off-center and could incorrectly skip visible rows for elongated, tilted Gaussians.
+
+### scratch buffer reuse
+
+the radix sort needs an auxiliary buffer the same size as the input. allocating this every frame would be wasteful. instead we allocate it once and reuse it across frames via a `ScratchBuffers` struct:
+
+```rust
+pub struct ScratchBuffers {
+    pub sort_aux: Vec<Projected>,
+    pub tiles: TileBins,
+}
+```
+
+the `sort_aux` vec grows to fit the first frame and never shrinks this enables us to do zero per-frame heap allocation once the system has warmed up.
+
+## acknowledgments
+
+- the original [3D Gaussian Splatting paper](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) by Kerbl et al.
+- the [LichtFeld-Studio](https://github.com/LichtFeld-Studio) C++ reference implementation
+
+## License
+
+> MIT License
+
+### benches/forward_pass.rs
+```
+use std::path::PathBuf;
+
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use glam::Vec3;
+
+use tsplat::camera::OrbitCamera;
+use tsplat::framebuffer::render_halfblocks;
+use tsplat::rasterize::{RenderParams, ScratchBuffers, composite, project, sort_by_depth};
+use tsplat::splat::load_ply;
+
+const BENCH_WIDTH: u32 = 120;
+const BENCH_HEIGHT: u32 = 80;
+
+fn scene_path() -> PathBuf {
+    let local = PathBuf::from("data/garden/point_cloud.ply");
+    if local.exists() {
+        return local;
+    }
+    let home =
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("datasets/3dgs/garden.ply");
+    if home.exists() {
+        return home;
+    }
+    panic!(
+        "No garden scene found. Expected at data/garden/point_cloud.ply or ~/datasets/3dgs/garden.ply"
+    );
+}
+
+fn bench_camera() -> OrbitCamera {
+    let mut cam = OrbitCamera::new(BENCH_WIDTH, BENCH_HEIGHT);
+    cam.yaw = -0.080;
+    cam.pitch = 0.353;
+    cam.radius = 52.161;
+    cam.fov_y = 55.0_f32.to_radians();
+    cam.target = Vec3::new(4.14, -11.97, -38.58);
+    cam
+}
+
+fn bench_project(c: &mut Criterion) {
+    let (splats, _total) = load_ply(&scene_path(), true, 200_000).expect("failed to load scene");
+    let camera = bench_camera();
+    let params = RenderParams::default();
+    let pool = None;
+
+    c.bench_function("project_200k", |b| {
+        b.iter(|| {
+            let projected = project(
+                black_box(&splats),
+                black_box(&camera),
+                black_box(&params),
+                black_box(&pool),
+            );
+            black_box(projected);
+        });
+    });
+}
+
+fn bench_sort(c: &mut Criterion) {
+    let (splats, _total) = load_ply(&scene_path(), true, 200_000).expect("failed to load scene");
+    let camera = bench_camera();
+    let params = RenderParams::default();
+    let pool = None;
+    let base_projected = project(&splats, &camera, &params, &pool);
+
+    let mut scratch = ScratchBuffers::new();
+    c.bench_function("sort_by_depth_200k", |b| {
+        b.iter_batched(
+            || base_projected.clone(),
+            |mut projected| {
+                sort_by_depth(black_box(&mut projected), black_box(&mut scratch));
+                black_box(projected);
+            },
+            criterion::BatchSize::LargeInput,
+        );
+    });
+}
+
+fn bench_composite(c: &mut Criterion) {
+    let (splats, _total) = load_ply(&scene_path(), true, 200_000).expect("failed to load scene");
+    let camera = bench_camera();
+    let params = RenderParams::default();
+    let pool = None;
+    let mut projected = project(&splats, &camera, &params, &pool);
+    let mut scratch = ScratchBuffers::new();
+    sort_by_depth(&mut projected, &mut scratch);
+
+    c.bench_function("composite_200k", |b| {
+        let mut fb = vec![(Vec3::ZERO, 0.0f32); (BENCH_WIDTH * BENCH_HEIGHT) as usize];
+        b.iter(|| {
+            for c in fb.iter_mut() {
+                *c = (Vec3::ZERO, 0.0);
+            }
+            composite(
+                black_box(&projected),
+                black_box(&mut fb),
+                BENCH_WIDTH,
+                BENCH_HEIGHT,
+                black_box(&params),
+            );
+            black_box(&fb);
+        });
+    });
+}
+
+fn bench_halfblocks(c: &mut Criterion) {
+    let (splats, _total) = load_ply(&scene_path(), true, 200_000).expect("failed to load scene");
+    let camera = bench_camera();
+    let params = RenderParams::default();
+    let pool = None;
+    let mut scratch = ScratchBuffers::new();
+    let mut projected = project(&splats, &camera, &params, &pool);
+    sort_by_depth(&mut projected, &mut scratch);
+    let mut fb = vec![(Vec3::ZERO, 0.0f32); (BENCH_WIDTH * BENCH_HEIGHT) as usize];
+    composite(&projected, &mut fb, BENCH_WIDTH, BENCH_HEIGHT, &params);
+
+    c.bench_function("render_halfblocks", |b| {
+        let mut out = String::with_capacity(256 * 1024);
+        b.iter(|| {
+            render_halfblocks(
+                black_box(&fb),
+                BENCH_WIDTH,
+                BENCH_HEIGHT,
+                black_box(&mut out),
+            );
+            black_box(&out);
+        });
+    });
+}
+
+fn bench_full_pipeline(c: &mut Criterion) {
+    let (splats, _total) = load_ply(&scene_path(), true, 200_000).expect("failed to load scene");
+    let camera = bench_camera();
+    let params = RenderParams::default();
+    let pool = None;
+
+    let mut scratch = ScratchBuffers::new();
+    c.bench_function("full_pipeline_200k", |b| {
+        let mut fb = vec![(Vec3::ZERO, 0.0f32); (BENCH_WIDTH * BENCH_HEIGHT) as usize];
+        let mut out = String::with_capacity(256 * 1024);
+        b.iter(|| {
+            for c in fb.iter_mut() {
+                *c = (Vec3::ZERO, 0.0);
+            }
+            let mut projected = project(&splats, &camera, &params, &pool);
+            sort_by_depth(&mut projected, &mut scratch);
+            composite(&projected, &mut fb, BENCH_WIDTH, BENCH_HEIGHT, &params);
+            render_halfblocks(&fb, BENCH_WIDTH, BENCH_HEIGHT, &mut out);
+            black_box(&out);
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_project,
+    bench_sort,
+    bench_composite,
+    bench_halfblocks,
+    bench_full_pipeline,
+);
+criterion_main!(benches);
+```
+
+### src/camera.rs
+```
+use glam::{Mat4, Quat, Vec3};
+
+pub struct OrbitCamera {
+    pub target: Vec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub radius: f32,
+    pub fov_y: f32,
+    pub width: u32,
+    pub height: u32,
+    pub znear: f32,
+    pub zfar: f32,
+}
+
+fn view_right_world(view_fwd: Vec3, yaw_fallback: f32) -> Vec3 {
+    let right = view_fwd.cross(Vec3::Y);
+    if right.length_squared() < 1e-12 {
+        let (sy, cy) = yaw_fallback.sin_cos();
+        Vec3::new(cy, 0.0, -sy)
+    } else {
+        right.normalize()
+    }
+}
+
+impl OrbitCamera {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            target: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            radius: 5.0,
+            fov_y: 60.0_f32.to_radians(),
+            width,
+            height,
+            znear: 0.05,
+            zfar: 1000.0,
+        }
+    }
+
+    pub fn position(&self) -> Vec3 {
+        let (sy, cy) = self.yaw.sin_cos();
+        let (sp, cp) = self.pitch.sin_cos();
+        let dir = Vec3::new(cp * sy, sp, cp * cy);
+        self.target + dir * self.radius
+    }
+
+    pub fn view(&self) -> Mat4 {
+        Mat4::look_at_rh(self.position(), self.target, Vec3::Y)
+    }
+
+    pub fn intrinsics(&self) -> (f32, f32, f32, f32) {
+        let fy = 0.5 * self.height as f32 / (0.5 * self.fov_y).tan();
+        let fx = fy;
+        let cx = self.width as f32 * 0.5;
+        let cy = self.height as f32 * 0.5;
+        (fx, fy, cx, cy)
+    }
+
+    pub fn orbit(&mut self, dyaw: f32, dpitch: f32) {
+        if dyaw.abs() < 1e-20 && dpitch.abs() < 1e-20 {
+            return;
+        }
+        let lim = 89.0_f32.to_radians();
+        let max_y = lim.sin();
+
+        let eye = self.position();
+        let mut dir = eye - self.target;
+        let len_sq = dir.length_squared();
+        if len_sq < 1e-20 {
+            return;
+        }
+        dir /= len_sq.sqrt();
+
+        let view_fwd = -dir;
+        let up = view_right_world(view_fwd, self.yaw)
+            .cross(view_fwd)
+            .normalize();
+        if dyaw != 0.0 {
+            dir = Quat::from_axis_angle(up, dyaw).mul_vec3(dir).normalize();
+        }
+
+        let view_fwd = -dir;
+        let right = view_right_world(view_fwd, self.yaw);
+        if dpitch != 0.0 {
+            dir = Quat::from_axis_angle(right, dpitch)
+                .mul_vec3(dir)
+                .normalize();
+        }
+
+        let y = dir.y.clamp(-max_y, max_y);
+        let xz_sq = dir.x * dir.x + dir.z * dir.z;
+        if xz_sq > 1e-12 {
+            let xz_scale = ((1.0 - y * y).max(0.0) / xz_sq).sqrt();
+            dir = Vec3::new(dir.x * xz_scale, y, dir.z * xz_scale);
+        } else {
+            let (sy, cy) = self.yaw.sin_cos();
+            let xz = (1.0 - y * y).max(0.0).sqrt();
+            dir = Vec3::new(cy * xz, y, sy * xz);
+        }
+
+        let pitch = dir.y.clamp(-1.0, 1.0).asin();
+        self.pitch = pitch;
+        self.yaw = if pitch.cos().abs() > 1e-5 {
+            dir.x.atan2(dir.z)
+        } else {
+            self.yaw
+        };
+    }
+
+    pub fn zoom(&mut self, factor: f32) {
+        self.radius = (self.radius * factor).max(1e-3);
+    }
+
+    pub fn pan(&mut self, dx: f32, dz: f32) {
+        let eye = self.position();
+        let mut view_fwd = self.target - eye;
+        let len_sq = view_fwd.length_squared();
+        if len_sq < 1e-20 {
+            return;
+        }
+        view_fwd /= len_sq.sqrt();
+        let right = view_right_world(view_fwd, self.yaw);
+        self.target += right * dx + view_fwd * dz;
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
+}
+```
+
+### src/display.rs
+```
+use glam::Vec3;
+use std::io::{self, Read, Write};
+use std::time::Duration;
+
+use crate::framebuffer;
+
+const KITTY_IMG_Z_UNDER_UI: i32 = -1_073_741_825;
+
+#[cfg(unix)]
+fn open_tty_for_read() -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open("/dev/tty")
+}
+
+#[cfg(unix)]
+fn tty_poll_readable(fd: std::os::unix::io::RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let n = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(n > 0 && (pfd.revents & libc::POLLIN) != 0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    HalfBlock,
+    Kitty,
+}
+
+impl Backend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Backend::HalfBlock => "halfblock",
+            Backend::Kitty => "kitty",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CellSize {
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Default for CellSize {
+    fn default() -> Self {
+        Self { w: 1, h: 2 }
+    }
+}
+
+pub fn probe_kitty_support() -> bool {
+    #[cfg(not(unix))]
+    {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        let mut tty_in = match open_tty_for_read() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        use std::os::unix::io::AsRawFd;
+        let tty_fd = tty_in.as_raw_fd();
+
+        let mut stdout = io::stdout().lock();
+
+        let probe = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+        if stdout.write_all(probe).is_err() || stdout.flush().is_err() {
+            return false;
+        }
+
+        let mut buf = [0u8; 256];
+        let mut filled = 0usize;
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+
+        while std::time::Instant::now() < deadline && filled < buf.len() {
+            if !tty_poll_readable(tty_fd, 50).unwrap_or(false) {
+                continue;
+            }
+            match tty_in.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    filled += n;
+                    let so_far = &buf[..filled];
+                    if contains_kitty_ok(so_far) {
+                        return true;
+                    }
+                    if contains_da1_response(so_far) {
+                        return false;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        false
+    }
+}
+
+fn contains_kitty_ok(buf: &[u8]) -> bool {
+    let st_backslash = b"\x1b_Gi=31;OK\x1b\\";
+    let st_string_term = b"\x1b_Gi=31;OK\x9c";
+    buf.windows(st_backslash.len()).any(|w| w == st_backslash)
+        || buf
+            .windows(st_string_term.len())
+            .any(|w| w == st_string_term)
+        || contains_subseq(buf, b"i=31;OK")
+}
+
+fn contains_subseq(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn contains_da1_response(buf: &[u8]) -> bool {
+    for i in 0..buf.len().saturating_sub(3) {
+        if buf[i] == 0x1b
+            && buf[i + 1] == b'['
+            && buf[i + 2] == b'?'
+            && buf.iter().skip(i + 3).any(|&b| b == b'c')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn query_cell_size() -> Option<CellSize> {
+    #[cfg(not(unix))]
+    {
+        return None;
+    }
+
+    #[cfg(unix)]
+    {
+        let mut tty_in = open_tty_for_read().ok()?;
+        use std::os::unix::io::AsRawFd;
+        let tty_fd = tty_in.as_raw_fd();
+
+        let mut stdout = io::stdout().lock();
+
+        let query = b"\x1b[16t\x1b[c";
+        if stdout.write_all(query).is_err() || stdout.flush().is_err() {
+            return None;
+        }
+
+        let mut buf = [0u8; 256];
+        let mut filled = 0usize;
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+
+        while std::time::Instant::now() < deadline && filled < buf.len() {
+            if !tty_poll_readable(tty_fd, 50).unwrap_or(false) {
+                continue;
+            }
+            match tty_in.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    filled += n;
+                    if let Some(cs) = parse_cell_size_response(&buf[..filled]) {
+                        let mut drain = [0u8; 256];
+                        if tty_poll_readable(tty_fd, 20).unwrap_or(false) {
+                            let _ = tty_in.read(&mut drain);
+                        }
+                        return Some(cs);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        None
+    }
+}
+
+fn parse_cell_size_response(buf: &[u8]) -> Option<CellSize> {
+    for i in 0..buf.len().saturating_sub(6) {
+        if buf[i] == 0x1b && buf[i + 1] == b'[' && buf[i + 2] == b'6' && buf[i + 3] == b';' {
+            let rest = &buf[i + 4..];
+            if let Some(t_pos) = rest.iter().position(|&b| b == b't') {
+                let params = &rest[..t_pos];
+                let s = std::str::from_utf8(params).ok()?;
+                let mut parts = s.split(';');
+                let h: u32 = parts.next()?.parse().ok()?;
+                let w: u32 = parts.next()?.parse().ok()?;
+                if w > 0 && h > 0 {
+                    return Some(CellSize { w, h });
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn cell_size_from_ioctl(_cols: u32, _rows: u32) -> Option<CellSize> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    let pw = ws.width as u32;
+    let ph = ws.height as u32;
+    let cols = ws.columns as u32;
+    let rows = ws.rows as u32;
+    if pw == 0 || ph == 0 || cols == 0 || rows == 0 {
+        return None;
+    }
+    Some(CellSize {
+        w: pw / cols,
+        h: ph / rows,
+    })
+}
+
+pub struct Display {
+    pub backend: Backend,
+    pub detected_backend: Backend,
+    pub cols: u32,
+    pub rows: u32,
+    pub cell_size: CellSize,
+    pub pixel_density: f32,
+    frame: String,
+    kitty_img_id: u32,
+    pending_text_clear: bool,
+}
+
+impl Display {
+    pub fn new(cols: u32, rows: u32) -> Self {
+        let kitty_supported = probe_kitty_support();
+
+        let cell_size = query_cell_size()
+            .or_else(|| cell_size_from_ioctl(cols, rows))
+            .unwrap_or_default();
+
+        let detected = if kitty_supported {
+            Backend::Kitty
+        } else {
+            Backend::HalfBlock
+        };
+
+        Self {
+            backend: detected,
+            detected_backend: detected,
+            cols,
+            rows,
+            cell_size,
+            pixel_density: 1.0,
+            frame: String::with_capacity(512 * 1024),
+            kitty_img_id: 1000,
+            pending_text_clear: false,
+        }
+    }
+
+    pub fn framebuffer_size(&self) -> (u32, u32) {
+        match self.backend {
+            Backend::HalfBlock => (self.cols, self.rows * 2),
+            Backend::Kitty => {
+                let w = ((self.cols * self.cell_size.w) as f32 * self.pixel_density) as u32;
+                let h = ((self.rows * self.cell_size.h) as f32 * self.pixel_density) as u32;
+                (w.max(1), h.max(1))
+            }
+        }
+    }
+
+    pub fn resize(&mut self, cols: u32, rows: u32) {
+        self.cols = cols;
+        self.rows = rows;
+        if let Some(cs) = cell_size_from_ioctl(cols, rows) {
+            self.cell_size = cs;
+        }
+    }
+
+    pub fn render(&mut self, fb: &[(Vec3, f32)], width: u32, height: u32) {
+        match self.backend {
+            Backend::HalfBlock => {
+                framebuffer::render_halfblocks(fb, width, height, &mut self.frame);
+            }
+            Backend::Kitty => {
+                self.render_kitty(fb, width, height);
+            }
+        }
+        if self.pending_text_clear {
+            self.frame.insert_str(0, "\x1b[2J");
+            self.pending_text_clear = false;
+        }
+    }
+
+    pub fn overlay_string(&mut self) -> &mut String {
+        &mut self.frame
+    }
+
+    pub fn queue_text_clear(&mut self) {
+        self.pending_text_clear = true;
+    }
+
+    pub fn flush(&self) -> io::Result<()> {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(self.frame.as_bytes())?;
+        stdout.flush()
+    }
+
+    pub fn kitty_cleanup(&mut self) {
+        if self.backend == Backend::Kitty || self.detected_backend == Backend::Kitty {
+            let mut stdout = io::stdout().lock();
+            let _ =
+                stdout.write_all(format!("\x1b_Ga=d,d=I,i={}\x1b\\", self.kitty_img_id).as_bytes());
+            let _ = stdout.flush();
+        }
+    }
+
+    fn render_kitty(&mut self, fb: &[(Vec3, f32)], width: u32, height: u32) {
+        self.frame.clear();
+
+        let pixel_count = (width * height) as usize;
+
+        let mut rgb = Vec::with_capacity(pixel_count * 3);
+        for &(color, _) in &fb[..pixel_count] {
+            rgb.push((color.x * 255.0).clamp(0.0, 255.0) as u8);
+            rgb.push((color.y * 255.0).clamp(0.0, 255.0) as u8);
+            rgb.push((color.z * 255.0).clamp(0.0, 255.0) as u8);
+        }
+
+        self.frame.push_str("\x1b[H");
+
+        let mut b64 = Vec::with_capacity(rgb.len() * 4 / 3 + 4);
+        base64_encode_into(&rgb, &mut b64);
+
+        const CHUNK: usize = 4096;
+        let total = b64.len().div_ceil(CHUNK);
+
+        for (ci, chunk) in b64.chunks(CHUNK).enumerate() {
+            let is_last = ci == total - 1;
+            let m = if is_last { 0 } else { 1 };
+
+            if ci == 0 {
+                use std::fmt::Write;
+                let _ = write!(
+                    self.frame,
+                    "\x1b_Ga=T,f=24,t=d,s={},v={},c={},r={},i={},p=1,q=2,C=1,z={},m={};",
+                    width, height, self.cols, self.rows, self.kitty_img_id, KITTY_IMG_Z_UNDER_UI, m,
+                );
+            } else {
+                use std::fmt::Write;
+                let _ = write!(self.frame, "\x1b_Gm={};", m);
+            }
+            unsafe {
+                self.frame.as_mut_vec().extend_from_slice(chunk);
+            }
+            self.frame.push_str("\x1b\\");
+        }
+    }
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode_into(data: &[u8], out: &mut Vec<u8>) {
+    let mut i = 0;
+    let len = data.len();
+    while i + 2 < len {
+        let b0 = data[i] as u32;
+        let b1 = data[i + 1] as u32;
+        let b2 = data[i + 2] as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64[((triple >> 18) & 0x3F) as usize]);
+        out.push(B64[((triple >> 12) & 0x3F) as usize]);
+        out.push(B64[((triple >> 6) & 0x3F) as usize]);
+        out.push(B64[(triple & 0x3F) as usize]);
+        i += 3;
+    }
+    let remaining = len - i;
+    if remaining == 1 {
+        let b0 = data[i] as u32;
+        out.push(B64[(b0 >> 2) as usize]);
+        out.push(B64[((b0 & 0x03) << 4) as usize]);
+        out.push(b'=');
+        out.push(b'=');
+    } else if remaining == 2 {
+        let b0 = data[i] as u32;
+        let b1 = data[i + 1] as u32;
+        out.push(B64[(b0 >> 2) as usize]);
+        out.push(B64[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]);
+        out.push(B64[((b1 & 0x0F) << 2) as usize]);
+        out.push(b'=');
+    }
+}
+```
+
+### src/framebuffer.rs
+```
+use glam::Vec3;
+
+static BYTE_STRINGS: [[u8; 3]; 256] = {
+    let mut table = [[0u8; 3]; 256];
+    let mut i: u16 = 0;
+    while i < 256 {
+        let v = i as u8;
+        if v >= 100 {
+            table[i as usize] = [b'0' + v / 100, b'0' + (v / 10) % 10, b'0' + v % 10];
+        } else if v >= 10 {
+            table[i as usize] = [0, b'0' + v / 10, b'0' + v % 10];
+        } else {
+            table[i as usize] = [0, 0, b'0' + v];
+        }
+        i += 1;
+    }
+    table
+};
+
+#[inline(always)]
+fn push_u8_decimal(buf: &mut Vec<u8>, v: u8) {
+    let entry = &BYTE_STRINGS[v as usize];
+    if v >= 100 {
+        buf.push(entry[0]);
+        buf.push(entry[1]);
+        buf.push(entry[2]);
+    } else if v >= 10 {
+        buf.push(entry[1]);
+        buf.push(entry[2]);
+    } else {
+        buf.push(entry[2]);
+    }
+}
+
+pub fn render_halfblocks(fb: &[(Vec3, f32)], width: u32, height: u32, out: &mut String) {
+    out.clear();
+
+    let w = width as usize;
+    let rows = (height / 2) as usize;
+
+    let buf = unsafe { out.as_mut_vec() };
+    buf.reserve(rows * w * 28 + 64);
+
+    buf.extend_from_slice(b"\x1b[H");
+
+    for row in 0..rows {
+        if row > 0 {
+            buf.extend_from_slice(b"\x1b[0m\r\n");
+        }
+        let top_base = 2 * row * w;
+        let bot_base = (2 * row + 1) * w;
+        for col in 0..w {
+            let (tr, tg, tb) = to_u8(fb[top_base + col].0);
+            let (br, bg, bb) = to_u8(fb[bot_base + col].0);
+
+            buf.extend_from_slice(b"\x1b[38;2;");
+            push_u8_decimal(buf, tr);
+            buf.push(b';');
+            push_u8_decimal(buf, tg);
+            buf.push(b';');
+            push_u8_decimal(buf, tb);
+            buf.extend_from_slice(b";48;2;");
+            push_u8_decimal(buf, br);
+            buf.push(b';');
+            push_u8_decimal(buf, bg);
+            buf.push(b';');
+            push_u8_decimal(buf, bb);
+            buf.push(b'm');
+            buf.extend_from_slice(b"\xe2\x96\x80");
+        }
+    }
+    buf.extend_from_slice(b"\x1b[0m");
+}
+
+#[inline]
+fn to_u8(c: Vec3) -> (u8, u8, u8) {
+    let r = (c.x * 255.0).clamp(0.0, 255.0) as u8;
+    let g = (c.y * 255.0).clamp(0.0, 255.0) as u8;
+    let b = (c.z * 255.0).clamp(0.0, 255.0) as u8;
+    (r, g, b)
+}
+```
+
+### src/hud.rs
+```
+use std::fmt::Write;
+
+use crossterm::event::KeyCode;
+
+use crate::camera::OrbitCamera;
+use crate::display::{Backend, CellSize, Display};
+use crate::rasterize::RenderParams;
+
+pub struct DisplayInfo {
+    pub fb_w: u32,
+    pub fb_h: u32,
+    pub cell_size: CellSize,
+    pub cols: u32,
+    pub rows: u32,
+    pub detected_backend: Backend,
+}
+
+impl DisplayInfo {
+    pub fn from_display(d: &Display) -> Self {
+        let (fb_w, fb_h) = d.framebuffer_size();
+        Self {
+            fb_w,
+            fb_h,
+            cell_size: d.cell_size,
+            cols: d.cols,
+            rows: d.rows,
+            detected_backend: d.detected_backend,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HudAction {
+    None,
+    ValueChanged,
+    ReloadSplats,
+    BackendChanged,
+    DensityChanged,
+}
+
+#[derive(Clone, Copy)]
+enum HudItem {
+    MaxSplats,
+    Sigmoid,
+    NumThreads,
+    RenderBackend,
+    PixelDensity,
+    FovY,
+    TranslateSpeed,
+    RotationSpeed,
+    ZoomStep,
+    Eps2d,
+    AlphaThreshold,
+    ExtendSigma,
+    Saturation,
+}
+
+struct Entry {
+    group: Option<&'static str>,
+    item: HudItem,
+    label: &'static str,
+}
+
+const ITEMS: &[Entry] = &[
+    Entry {
+        group: Some("Splats"),
+        item: HudItem::MaxSplats,
+        label: "max_splats",
+    },
+    Entry {
+        group: None,
+        item: HudItem::Sigmoid,
+        label: "sigmoid",
+    },
+    Entry {
+        group: Some("Display"),
+        item: HudItem::RenderBackend,
+        label: "backend",
+    },
+    Entry {
+        group: None,
+        item: HudItem::PixelDensity,
+        label: "px density",
+    },
+    Entry {
+        group: Some("Perf"),
+        item: HudItem::NumThreads,
+        label: "threads",
+    },
+    Entry {
+        group: Some("Camera"),
+        item: HudItem::FovY,
+        label: "fov_y",
+    },
+    Entry {
+        group: None,
+        item: HudItem::TranslateSpeed,
+        label: "move spd",
+    },
+    Entry {
+        group: None,
+        item: HudItem::RotationSpeed,
+        label: "rot spd",
+    },
+    Entry {
+        group: None,
+        item: HudItem::ZoomStep,
+        label: "zoom spd",
+    },
+    Entry {
+        group: Some("Render"),
+        item: HudItem::Eps2d,
+        label: "eps2d",
+    },
+    Entry {
+        group: None,
+        item: HudItem::AlphaThreshold,
+        label: "alpha thr",
+    },
+    Entry {
+        group: None,
+        item: HudItem::ExtendSigma,
+        label: "sigma ext",
+    },
+    Entry {
+        group: None,
+        item: HudItem::Saturation,
+        label: "saturation",
+    },
+];
+
+const HUD_WIDTH: usize = 32;
+
+pub struct HudState {
+    pub visible: bool,
+    cursor: usize,
+
+    pub max_splats: usize,
+    pub total_splats: usize,
+    pub apply_sigmoid: bool,
+
+    pub num_threads: usize,
+
+    pub backend: Backend,
+    pub detected_backend: Backend,
+    pub pixel_density: f32,
+
+    pub fov_y_deg: f32,
+    pub translate_speed: f32,
+    pub rotation_speed: f32,
+    pub zoom_step: f32,
+
+    pub render_params: RenderParams,
+}
+
+impl HudState {
+    pub fn new(
+        max_splats: usize,
+        total_splats: usize,
+        apply_sigmoid: bool,
+        fov_y_rad: f32,
+        display: &Display,
+    ) -> Self {
+        let max_splats = if max_splats == 0 || max_splats > total_splats {
+            total_splats
+        } else {
+            max_splats
+        };
+        Self {
+            visible: false,
+            cursor: 0,
+            max_splats,
+            total_splats,
+            apply_sigmoid,
+            num_threads: 4,
+            backend: display.backend,
+            detected_backend: display.detected_backend,
+            pixel_density: display.pixel_density,
+            fov_y_deg: fov_y_rad.to_degrees(),
+            translate_speed: 0.02,
+            rotation_speed: 0.035,
+            zoom_step: 0.06,
+            render_params: RenderParams::default(),
+        }
+    }
+
+    pub fn toggle(&mut self) {
+        self.visible = !self.visible;
+    }
+
+    pub fn handle_key(&mut self, code: KeyCode) -> HudAction {
+        match code {
+            KeyCode::Up | KeyCode::PageUp => {
+                if self.cursor == 0 {
+                    self.cursor = ITEMS.len() - 1;
+                } else {
+                    self.cursor -= 1;
+                }
+                HudAction::None
+            }
+            KeyCode::Down | KeyCode::PageDown => {
+                self.cursor = (self.cursor + 1) % ITEMS.len();
+                HudAction::None
+            }
+            KeyCode::Left | KeyCode::Char(',') | KeyCode::Char('<') => self.adjust(-1),
+            KeyCode::Right | KeyCode::Char('.') | KeyCode::Char('>') => self.adjust(1),
+            _ => HudAction::None,
+        }
+    }
+
+    fn adjust(&mut self, dir: i8) -> HudAction {
+        let item = ITEMS[self.cursor].item;
+        match item {
+            HudItem::MaxSplats => {
+                let new_val = if dir > 0 {
+                    (self.max_splats.saturating_mul(2)).min(self.total_splats.max(1_000))
+                } else {
+                    (self.max_splats / 2).max(1_000)
+                };
+                if new_val == self.max_splats {
+                    return HudAction::None;
+                }
+                self.max_splats = new_val;
+                HudAction::ReloadSplats
+            }
+            HudItem::Sigmoid => {
+                self.apply_sigmoid = !self.apply_sigmoid;
+                HudAction::ReloadSplats
+            }
+            HudItem::NumThreads => {
+                let max_cpus = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(16);
+                if dir > 0 {
+                    self.num_threads = (self.num_threads + 1).min(max_cpus);
+                } else {
+                    self.num_threads = self.num_threads.saturating_sub(1);
+                }
+                HudAction::ValueChanged
+            }
+            HudItem::RenderBackend => {
+                self.backend = match self.backend {
+                    Backend::HalfBlock => {
+                        if self.detected_backend == Backend::Kitty {
+                            Backend::Kitty
+                        } else {
+                            Backend::HalfBlock
+                        }
+                    }
+                    Backend::Kitty => Backend::HalfBlock,
+                };
+                HudAction::BackendChanged
+            }
+            HudItem::PixelDensity => {
+                self.pixel_density = (self.pixel_density + dir as f32 * 0.05).clamp(0.10, 1.0);
+                self.pixel_density = (self.pixel_density * 20.0).round() / 20.0;
+                HudAction::DensityChanged
+            }
+            HudItem::FovY => {
+                self.fov_y_deg = (self.fov_y_deg + dir as f32 * 5.0).clamp(10.0, 150.0);
+                HudAction::ValueChanged
+            }
+            HudItem::TranslateSpeed => {
+                self.translate_speed =
+                    (self.translate_speed + dir as f32 * 0.005).clamp(0.01, 0.25);
+                HudAction::ValueChanged
+            }
+            HudItem::RotationSpeed => {
+                self.rotation_speed = (self.rotation_speed + dir as f32 * 0.01).clamp(0.01, 0.50);
+                HudAction::ValueChanged
+            }
+            HudItem::ZoomStep => {
+                self.zoom_step = (self.zoom_step + dir as f32 * 0.05).clamp(0.05, 0.50);
+                HudAction::ValueChanged
+            }
+            HudItem::Eps2d => {
+                self.render_params.eps2d =
+                    (self.render_params.eps2d + dir as f32 * 0.05).clamp(0.0, 2.0);
+                HudAction::ValueChanged
+            }
+            HudItem::AlphaThreshold => {
+                self.render_params.alpha_threshold = if dir > 0 {
+                    (self.render_params.alpha_threshold * 2.0).min(0.1)
+                } else {
+                    (self.render_params.alpha_threshold * 0.5).max(1.0 / 1020.0)
+                };
+                HudAction::ValueChanged
+            }
+            HudItem::ExtendSigma => {
+                self.render_params.extend_sigma =
+                    (self.render_params.extend_sigma + dir as f32 * 0.5).clamp(1.0, 6.0);
+                HudAction::ValueChanged
+            }
+            HudItem::Saturation => {
+                self.render_params.saturation =
+                    (self.render_params.saturation + dir as f32 * 0.001).clamp(0.9, 1.0);
+                HudAction::ValueChanged
+            }
+        }
+    }
+
+    fn format_value(&self, item: HudItem) -> String {
+        match item {
+            HudItem::MaxSplats => {
+                let label = if self.max_splats >= 1_000_000 {
+                    format!("{:.1}M", self.max_splats as f32 / 1_000_000.0)
+                } else {
+                    format!("{}k", self.max_splats / 1_000)
+                };
+                if self.total_splats > 0 && self.max_splats >= self.total_splats {
+                    format!("all/{label}")
+                } else {
+                    label
+                }
+            }
+            HudItem::Sigmoid => {
+                if self.apply_sigmoid {
+                    "ON".into()
+                } else {
+                    "OFF".into()
+                }
+            }
+            HudItem::NumThreads => {
+                if self.num_threads == 0 {
+                    "all".into()
+                } else {
+                    self.num_threads.to_string()
+                }
+            }
+            HudItem::RenderBackend => {
+                let name = self.backend.name();
+                if self.detected_backend == Backend::Kitty {
+                    name.to_string()
+                } else {
+                    format!("{} (only)", name)
+                }
+            }
+            HudItem::PixelDensity => {
+                if self.backend == Backend::Kitty {
+                    format!("{:.0}%", self.pixel_density * 100.0)
+                } else {
+                    "n/a".into()
+                }
+            }
+            HudItem::FovY => format!("{:.0}", self.fov_y_deg),
+            HudItem::TranslateSpeed => format!("{:.3}", self.translate_speed),
+            HudItem::RotationSpeed => format!("{:.2}", self.rotation_speed),
+            HudItem::ZoomStep => format!("{:.2}", self.zoom_step),
+            HudItem::Eps2d => format!("{:.2}", self.render_params.eps2d),
+            HudItem::AlphaThreshold => format!("{:.4}", self.render_params.alpha_threshold),
+            HudItem::ExtendSigma => format!("{:.1}", self.render_params.extend_sigma),
+            HudItem::Saturation => format!("{:.3}", self.render_params.saturation),
+        }
+    }
+
+    pub fn render(&self, camera: &OrbitCamera, di: &DisplayInfo, out: &mut String) {
+        if !self.visible {
+            return;
+        }
+
+        let mut row: usize = 1;
+
+        write_hud_line(out, row, "\x1b[1;97;40m", " [HUD] Tab to close");
+        row += 1;
+
+        for (i, entry) in ITEMS.iter().enumerate() {
+            if let Some(group) = entry.group {
+                let header = format!(" -- {} ", group);
+                let padded = format!("{:-<width$}", header, width = HUD_WIDTH);
+                write_hud_line(out, row, "\x1b[90;40m", &padded);
+                row += 1;
+            }
+
+            let value = self.format_value(entry.item);
+            let marker = if i == self.cursor { ">" } else { " " };
+            let content = format!(" {} {:<12} {:>8}", marker, entry.label, value);
+            let sgr = if i == self.cursor {
+                "\x1b[30;107m"
+            } else {
+                "\x1b[97;40m"
+            };
+            write_hud_line(out, row, sgr, &content);
+            row += 1;
+        }
+
+        let header = format!("{:-<width$}", " -- Display Info ", width = HUD_WIDTH);
+        write_hud_line(out, row, "\x1b[90;40m", &header);
+        row += 1;
+
+        let info_rows: &[(&str, String)] = &[
+            ("resolution", format!("{} x {}", di.fb_w, di.fb_h)),
+            (
+                "cell size",
+                format!("{} x {} px", di.cell_size.w, di.cell_size.h),
+            ),
+            ("terminal", format!("{} x {} cells", di.cols, di.rows)),
+            ("detected", di.detected_backend.name().to_string()),
+        ];
+        for (label, value) in info_rows {
+            let content = format!("   {:<12} {:>8}", label, value);
+            write_hud_line(out, row, "\x1b[97;40m", &content);
+            row += 1;
+        }
+
+        let header = format!("{:-<width$}", " -- Camera State ", width = HUD_WIDTH);
+        write_hud_line(out, row, "\x1b[90;40m", &header);
+        row += 1;
+
+        let pos = camera.position();
+        let cam_rows: &[(&str, String)] = &[
+            ("yaw", format!("{:>+8.3} rad", camera.yaw)),
+            ("pitch", format!("{:>+8.3} rad", camera.pitch)),
+            ("radius", format!("{:>8.3}", camera.radius)),
+            ("fov_y", format!("{:>7.1} deg", camera.fov_y.to_degrees())),
+            ("pos x", format!("{:>+8.2}", pos.x)),
+            ("pos y", format!("{:>+8.2}", pos.y)),
+            ("pos z", format!("{:>+8.2}", pos.z)),
+            ("tgt x", format!("{:>+8.2}", camera.target.x)),
+            ("tgt y", format!("{:>+8.2}", camera.target.y)),
+            ("tgt z", format!("{:>+8.2}", camera.target.z)),
+        ];
+        for (label, value) in cam_rows {
+            let content = format!("   {:<12} {:>8}", label, value);
+            write_hud_line(out, row, "\x1b[97;40m", &content);
+            row += 1;
+        }
+    }
+}
+
+fn write_hud_line(out: &mut String, row: usize, sgr: &str, text: &str) {
+    let display: String = if text.len() >= HUD_WIDTH {
+        text[..HUD_WIDTH].to_string()
+    } else {
+        format!("{:<width$}", text, width = HUD_WIDTH)
+    };
+    let _ = write!(out, "\x1b[{};1H{}{}\x1b[0m", row, sgr, display);
+}
+```
+
+### src/lib.rs
+```
+pub mod camera;
+pub mod framebuffer;
+pub mod rasterize;
+pub mod sh;
+pub mod splat;
+```
+
+### src/main.rs
+```
+use std::io::{Write, stdout};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use clap::Parser as ClapParser;
+use crossterm::{
+    cursor,
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
+    execute, terminal,
+};
+use glam::Vec3;
+
+mod camera;
+mod display;
+mod framebuffer;
+mod hud;
+mod rasterize;
+mod sh;
+mod splat;
+
+use camera::OrbitCamera;
+use display::{Backend, Display};
+use hud::{DisplayInfo, HudAction, HudState};
+use rasterize::{
+    ScratchBuffers, build_thread_pool, composite_parallel, project, sort_by_depth_parallel,
+};
+use splat::{Splat, load_ply};
+
+const AUTO_ORBIT_RAD_PER_SEC_AT_DEFAULT_ROT_SPEED: f32 = 0.5;
+const AUTO_ORBIT_ROT_SPEED_REF: f32 = 0.035;
+
+#[derive(ClapParser, Debug)]
+#[command(
+    name = "tsplat",
+    about = "Terminal 3D Gaussian Splatting (CPU, half-block)"
+)]
+struct Args {
+    ply: PathBuf,
+    #[arg(long, default_value_t = 200_000)]
+    max_splats: usize,
+    #[arg(long, default_value_t = false)]
+    no_cap: bool,
+    #[arg(long, default_value_t = false)]
+    raw_opacity: bool,
+    #[arg(long, default_value_t = false)]
+    dump_stats: bool,
+}
+
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn new() -> Result<Self> {
+        terminal::enable_raw_mode()?;
+        execute!(
+            stdout(),
+            terminal::EnterAlternateScreen,
+            cursor::Hide,
+            EnableMouseCapture
+        )?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = execute!(
+            stdout(),
+            DisableMouseCapture,
+            cursor::Show,
+            terminal::LeaveAlternateScreen
+        );
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+fn scene_bounds(splats: &[Splat]) -> (Vec3, f32) {
+    if splats.is_empty() {
+        return (Vec3::ZERO, 1.0);
+    }
+    let mut mn = Vec3::splat(f32::INFINITY);
+    let mut mx = Vec3::splat(f32::NEG_INFINITY);
+    for s in splats {
+        mn = mn.min(s.pos);
+        mx = mx.max(s.pos);
+    }
+    let center = (mn + mx) * 0.5;
+    let radius = (mx - mn).length() * 0.5;
+    (center, radius.max(1.0))
+}
+
+fn apply_hud_key_action(
+    action: HudAction,
+    hud: &HudState,
+    camera: &mut OrbitCamera,
+    display: &mut Display,
+    needs_reload: &mut bool,
+    needs_fb_resize: &mut bool,
+) {
+    match action {
+        HudAction::ReloadSplats => *needs_reload = true,
+        HudAction::ValueChanged => {
+            camera.fov_y = hud.fov_y_deg.to_radians();
+        }
+        HudAction::BackendChanged => {
+            display.backend = hud.backend;
+            display.kitty_cleanup();
+            display.queue_text_clear();
+            *needs_fb_resize = true;
+        }
+        HudAction::DensityChanged => {
+            display.pixel_density = hud.pixel_density;
+            display.queue_text_clear();
+            *needs_fb_resize = true;
+        }
+        HudAction::None => {}
+    }
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let cap = if args.no_cap { 0 } else { args.max_splats };
+    eprintln!(
+        "loading {} (cap: {}) ...",
+        args.ply.display(),
+        if cap == 0 {
+            "none".into()
+        } else {
+            cap.to_string()
+        }
+    );
+    let (mut splats, total_splats) = load_ply(&args.ply, !args.raw_opacity, cap)?;
+    eprintln!("loaded {} / {} splats", splats.len(), total_splats);
+
+    if args.dump_stats {
+        return Ok(());
+    }
+
+    let _guard = TerminalGuard::new()?;
+
+    let (cols, rows) = terminal::size()?;
+    let cols = cols as u32;
+    let rows = rows as u32;
+
+    let mut display = Display::new(cols, rows);
+
+    let (mut width, mut height) = display.framebuffer_size();
+
+    let mut camera = OrbitCamera::new(width, height);
+    let (center, radius) = scene_bounds(&splats);
+    camera.target = center;
+    camera.radius = radius * 2.5;
+
+    let mut hud = HudState::new(cap, total_splats, !args.raw_opacity, camera.fov_y, &display);
+
+    let mut fb: Vec<(Vec3, f32)> = vec![(Vec3::ZERO, 0.0); (width * height) as usize];
+
+    let mut frames_since_report = 0u32;
+    let mut last_fps_report = Instant::now();
+    let mut fps = 0.0_f32;
+    let mut needs_reload = false;
+    let mut needs_fb_resize = false;
+    let mut needs_redraw = true;
+    let mut thread_pool = build_thread_pool(hud.num_threads);
+    let mut last_num_threads = hud.num_threads;
+    let mut scratch = ScratchBuffers::new();
+    let mut auto_orbit = false;
+    let mut last_wallclock = Instant::now();
+
+    loop {
+        if needs_fb_resize {
+            let (new_w, new_h) = display.framebuffer_size();
+            width = new_w;
+            height = new_h;
+            camera.resize(width, height);
+            fb = vec![(Vec3::ZERO, 0.0); (width * height) as usize];
+            needs_fb_resize = false;
+        }
+
+        if needs_reload {
+            {
+                let mut so = stdout().lock();
+                so.write_all(b"\x1b[1;1H\x1b[97;41m Loading... \x1b[0m")?;
+                so.flush()?;
+            }
+            let (new_splats, _total) = load_ply(&args.ply, hud.apply_sigmoid, hud.max_splats)?;
+            splats = new_splats;
+            needs_reload = false;
+            display.queue_text_clear();
+            needs_redraw = true;
+        }
+
+        let now = Instant::now();
+        let mut dt = now.duration_since(last_wallclock).as_secs_f32();
+        last_wallclock = now;
+        dt = dt.min(0.25);
+        if auto_orbit {
+            let omega = hud.rotation_speed
+                * (AUTO_ORBIT_RAD_PER_SEC_AT_DEFAULT_ROT_SPEED / AUTO_ORBIT_ROT_SPEED_REF);
+            camera.orbit(omega * dt, 0.0);
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            unsafe {
+                std::ptr::write_bytes(fb.as_mut_ptr(), 0, fb.len());
+            }
+            if hud.num_threads != last_num_threads {
+                thread_pool = build_thread_pool(hud.num_threads);
+                last_num_threads = hud.num_threads;
+            }
+
+            let render_params = &hud.render_params;
+            let mut projected = project(&splats, &camera, render_params, &thread_pool);
+            sort_by_depth_parallel(&mut projected, &mut scratch, &thread_pool);
+            composite_parallel(
+                &projected,
+                &mut fb,
+                width,
+                height,
+                render_params,
+                &mut scratch,
+                &thread_pool,
+            );
+
+            display.render(&fb, width, height);
+
+            frames_since_report += 1;
+            let now = Instant::now();
+            let elapsed = now.duration_since(last_fps_report).as_secs_f32();
+            if elapsed >= 0.5 {
+                fps = frames_since_report as f32 / elapsed;
+                frames_since_report = 0;
+                last_fps_report = now;
+            }
+            let fps_str = if auto_orbit {
+                format!(" FPS {:5.1} ORBIT ", fps)
+            } else {
+                format!(" FPS {:5.1} ", fps)
+            };
+            let col = (display.cols as usize)
+                .saturating_sub(fps_str.chars().count())
+                .max(0)
+                + 1;
+            {
+                let di = DisplayInfo::from_display(&display);
+                let out = display.overlay_string();
+                use std::fmt::Write as _;
+                let _ = write!(out, "\x1b[1;{}H\x1b[97;40m{}\x1b[0m", col, fps_str);
+
+                hud.render(&camera, &di, out);
+            }
+
+            display.flush()?;
+            needs_redraw = false;
+        }
+
+        let poll_wait = if auto_orbit {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(33)
+        };
+        if !event::poll(poll_wait)? {
+            continue;
+        }
+
+        while event::poll(Duration::from_millis(0))? {
+            match event::read()? {
+                Event::Key(k) => match k.code {
+                    KeyCode::Char('q') => {
+                        display.kitty_cleanup();
+                        return Ok(());
+                    }
+                    KeyCode::Esc => {
+                        if hud.visible {
+                            hud.toggle();
+                            if display.backend == Backend::Kitty {
+                                display.queue_text_clear();
+                            }
+                            needs_redraw = true;
+                        } else {
+                            display.kitty_cleanup();
+                            return Ok(());
+                        }
+                    }
+                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        display.kitty_cleanup();
+                        return Ok(());
+                    }
+                    KeyCode::Tab => {
+                        let was_visible = hud.visible;
+                        hud.toggle();
+                        if was_visible && !hud.visible && display.backend == Backend::Kitty {
+                            display.queue_text_clear();
+                        }
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('h') | KeyCode::Char('H') => {
+                        camera.orbit(0.0, hud.rotation_speed);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('l') | KeyCode::Char('L') => {
+                        camera.orbit(0.0, -hud.rotation_speed);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('j') | KeyCode::Char('J') => {
+                        camera.orbit(-hud.rotation_speed, 0.0);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('k') | KeyCode::Char('K') => {
+                        camera.orbit(hud.rotation_speed, 0.0);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        camera.zoom(1.0 - hud.zoom_step);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        camera.zoom(1.0 + hud.zoom_step);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('w') | KeyCode::Char('W') => {
+                        let step = camera.radius * hud.translate_speed;
+                        camera.pan(0.0, step);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        let step = camera.radius * hud.translate_speed;
+                        camera.pan(0.0, -step);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        let step = camera.radius * hud.translate_speed;
+                        camera.pan(-step, 0.0);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                        let step = camera.radius * hud.translate_speed;
+                        camera.pan(step, 0.0);
+                        needs_redraw = true;
+                    }
+                    KeyCode::Char('o') | KeyCode::Char('O') => {
+                        auto_orbit = !auto_orbit;
+                        last_wallclock = Instant::now();
+                        needs_redraw = true;
+                    }
+                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+                        if hud.visible {
+                            let action = hud.handle_key(k.code);
+                            apply_hud_key_action(
+                                action,
+                                &hud,
+                                &mut camera,
+                                &mut display,
+                                &mut needs_reload,
+                                &mut needs_fb_resize,
+                            );
+                            needs_redraw = true;
+                        } else {
+                            match k.code {
+                                KeyCode::Left => camera.orbit(-hud.rotation_speed, 0.0),
+                                KeyCode::Right => camera.orbit(hud.rotation_speed, 0.0),
+                                KeyCode::Up => camera.orbit(0.0, hud.rotation_speed),
+                                KeyCode::Down => camera.orbit(0.0, -hud.rotation_speed),
+                                _ => {}
+                            }
+                            needs_redraw = true;
+                        }
+                    }
+                    KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Char(',')
+                    | KeyCode::Char('.')
+                    | KeyCode::Char('<')
+                    | KeyCode::Char('>') => {
+                        if hud.visible {
+                            let action = hud.handle_key(k.code);
+                            apply_hud_key_action(
+                                action,
+                                &hud,
+                                &mut camera,
+                                &mut display,
+                                &mut needs_reload,
+                                &mut needs_fb_resize,
+                            );
+                            needs_redraw = true;
+                        }
+                    }
+                    _ => {}
+                },
+                Event::Resize(new_cols, new_rows) => {
+                    display.resize(new_cols as u32, new_rows as u32);
+                    display.queue_text_clear();
+                    needs_fb_resize = true;
+                    needs_redraw = true;
+                }
+                Event::Mouse(me) => match me.kind {
+                    MouseEventKind::ScrollUp => {
+                        camera.zoom(1.0 - hud.zoom_step);
+                        needs_redraw = true;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        camera.zoom(1.0 + hud.zoom_step);
+                        needs_redraw = true;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+}
+```
+
+### src/rasterize.rs
+```
+use glam::{Mat2, Mat3, Vec2, Vec3, Vec4};
+use rayon::prelude::*;
+
+use crate::camera::OrbitCamera;
+use crate::splat::Splat;
+
+pub struct ScratchBuffers {
+    pub sort_aux: Vec<Projected>,
+    pub tiles: TileBins,
+}
+
+impl ScratchBuffers {
+    pub fn new() -> Self {
+        Self {
+            sort_aux: Vec::new(),
+            tiles: TileBins::new(),
+        }
+    }
+}
+
+impl Default for ScratchBuffers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub const TILE_W: i32 = 16;
+pub const TILE_H: i32 = 16;
+
+pub struct TileBins {
+    pub num_tiles_x: i32,
+    pub num_tiles_y: i32,
+    pub offsets: Vec<u32>,
+    pub splat_indices: Vec<u32>,
+    cursor: Vec<u32>,
+}
+
+impl TileBins {
+    pub fn new() -> Self {
+        Self {
+            num_tiles_x: 0,
+            num_tiles_y: 0,
+            offsets: Vec::new(),
+            splat_indices: Vec::new(),
+            cursor: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn num_tiles(&self) -> usize {
+        (self.num_tiles_x * self.num_tiles_y) as usize
+    }
+}
+
+impl Default for TileBins {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn bin_splats(projected: &[Projected], width: u32, height: u32, bins: &mut TileBins) {
+    let num_tiles_x = ((width as i32) + TILE_W - 1) / TILE_W;
+    let num_tiles_y = ((height as i32) + TILE_H - 1) / TILE_H;
+    let num_tiles = (num_tiles_x * num_tiles_y) as usize;
+    bins.num_tiles_x = num_tiles_x;
+    bins.num_tiles_y = num_tiles_y;
+
+    bins.offsets.clear();
+    bins.offsets.resize(num_tiles + 1, 0);
+
+    for p in projected {
+        let [x0, y0, x1, y1] = p.bbox;
+        let tx0 = (x0 / TILE_W).max(0);
+        let ty0 = (y0 / TILE_H).max(0);
+        let tx1 = (x1 / TILE_W).min(num_tiles_x - 1);
+        let ty1 = (y1 / TILE_H).min(num_tiles_y - 1);
+        if tx0 > tx1 || ty0 > ty1 {
+            continue;
+        }
+        for ty in ty0..=ty1 {
+            let row = (ty * num_tiles_x) as usize;
+            for tx in tx0..=tx1 {
+                bins.offsets[row + tx as usize + 1] += 1;
+            }
+        }
+    }
+
+    for i in 1..=num_tiles {
+        bins.offsets[i] += bins.offsets[i - 1];
+    }
+    let total = bins.offsets[num_tiles] as usize;
+
+    bins.splat_indices.clear();
+    bins.splat_indices.resize(total, 0);
+
+    bins.cursor.clear();
+    bins.cursor.extend_from_slice(&bins.offsets[..num_tiles]);
+
+    for (idx, p) in projected.iter().enumerate() {
+        let [x0, y0, x1, y1] = p.bbox;
+        let tx0 = (x0 / TILE_W).max(0);
+        let ty0 = (y0 / TILE_H).max(0);
+        let tx1 = (x1 / TILE_W).min(num_tiles_x - 1);
+        let ty1 = (y1 / TILE_H).min(num_tiles_y - 1);
+        if tx0 > tx1 || ty0 > ty1 {
+            continue;
+        }
+        for ty in ty0..=ty1 {
+            let row = (ty * num_tiles_x) as usize;
+            for tx in tx0..=tx1 {
+                let tile = row + tx as usize;
+                let pos = bins.cursor[tile] as usize;
+                bins.splat_indices[pos] = idx as u32;
+                bins.cursor[tile] += 1;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn fast_exp(x: f32) -> f32 {
+    let x = x.max(-87.0);
+    let v = (12102203.0f32 * x + 1065353216.0) as i32;
+    f32::from_bits(v as u32)
+}
+
+#[derive(Clone, Copy)]
+pub struct Projected {
+    pub screen: Vec2,
+    pub depth: f32,
+    pub cov2d_inv: Mat2,
+    pub bbox: [i32; 4],
+    pub color: Vec3,
+    pub opacity: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RenderParams {
+    pub eps2d: f32,
+    pub alpha_threshold: f32,
+    pub extend_sigma: f32,
+    pub saturation: f32,
+}
+
+impl Default for RenderParams {
+    fn default() -> Self {
+        Self {
+            eps2d: 0.3,
+            alpha_threshold: 1.0 / 255.0,
+            extend_sigma: 3.0,
+            saturation: 0.999,
+        }
+    }
+}
+
+pub fn project(
+    splats: &[Splat],
+    camera: &OrbitCamera,
+    params: &RenderParams,
+    pool: &Option<rayon::ThreadPool>,
+) -> Vec<Projected> {
+    let view = camera.view();
+    let w_mat = Mat3::from_mat4(view);
+    let (fx, fy, cx, cy) = camera.intrinsics();
+    let w_i = camera.width as i32;
+    let h_i = camera.height as i32;
+    let znear = camera.znear;
+    let zfar = camera.zfar;
+    let w_mat_t = w_mat.transpose();
+    let eps2d = params.eps2d;
+    let max_k2 = params.extend_sigma * params.extend_sigma;
+    let alpha_threshold = params.alpha_threshold;
+
+    let do_project = || {
+        splats
+            .par_iter()
+            .filter_map(|s| {
+                let p_view4 = view * Vec4::new(s.pos.x, s.pos.y, s.pos.z, 1.0);
+                let p_view = Vec3::new(p_view4.x, p_view4.y, p_view4.z);
+                if p_view.z > -znear || p_view.z < -zfar {
+                    return None;
+                }
+                let zc = -p_view.z;
+                let xv = p_view.x;
+                let yv = p_view.y;
+
+                let r_mat = Mat3::from_quat(s.rot);
+                let s_mat = Mat3::from_diagonal(s.scale);
+                let m = r_mat * s_mat;
+                let cov3d = m * m.transpose();
+
+                let cov3d_view = w_mat * cov3d * w_mat_t;
+
+                let c = &cov3d_view;
+                let inv_zc = 1.0 / zc;
+                let inv_zc2 = inv_zc * inv_zc;
+
+                let j00 = fx * inv_zc;
+                let j02 = fx * xv * inv_zc2;
+                let j11 = fy * inv_zc;
+                let j12 = fy * yv * inv_zc2;
+
+                let t0x = j00 * c.x_axis.x + j02 * c.z_axis.x;
+                let t0y = j00 * c.y_axis.x + j02 * c.z_axis.y;
+                let t0z = j00 * c.x_axis.z + j02 * c.z_axis.z;
+
+                let t1y = j11 * c.y_axis.y + j12 * c.z_axis.y;
+                let t1z = j11 * c.y_axis.z + j12 * c.z_axis.z;
+
+                let cov2d_00 = t0x * j00 + t0z * j02 + eps2d;
+                let cov2d_01 = t0y * j11 + t0z * j12;
+                let cov2d_11 = t1y * j11 + t1z * j12 + eps2d;
+
+                let det = cov2d_00 * cov2d_11 - cov2d_01 * cov2d_01;
+                if det <= 0.0 {
+                    return None;
+                }
+
+                if s.opacity <= alpha_threshold {
+                    return None;
+                }
+                let k2 = (2.0 * (s.opacity / alpha_threshold).ln()).min(max_k2);
+                if k2.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+                    return None;
+                }
+
+                let rx_f = (k2 * cov2d_00).sqrt();
+                let ry_f = (k2 * cov2d_11).sqrt();
+                if !rx_f.is_finite() || !ry_f.is_finite() || rx_f < 1.0 || ry_f < 1.0 {
+                    return None;
+                }
+
+                let inv_det = 1.0 / det;
+                let cov2d_inv = Mat2::from_cols(
+                    Vec2::new(cov2d_11 * inv_det, -cov2d_01 * inv_det),
+                    Vec2::new(-cov2d_01 * inv_det, cov2d_00 * inv_det),
+                );
+
+                let sx = fx * xv * inv_zc + cx;
+                let sy = fy * yv * inv_zc + cy;
+
+                let x0 = (sx - rx_f).floor() as i32;
+                let y0 = (sy - ry_f).floor() as i32;
+                let x1 = (sx + rx_f).ceil() as i32;
+                let y1 = (sy + ry_f).ceil() as i32;
+
+                let x0 = x0.max(0);
+                let y0 = y0.max(0);
+                let x1 = x1.min(w_i - 1);
+                let y1 = y1.min(h_i - 1);
+                if x0 > x1 || y0 > y1 {
+                    return None;
+                }
+
+                Some(Projected {
+                    screen: Vec2::new(sx, sy),
+                    depth: zc,
+                    cov2d_inv,
+                    bbox: [x0, y0, x1, y1],
+                    color: s.color,
+                    opacity: s.opacity,
+                })
+            })
+            .collect()
+    };
+
+    match pool.as_ref() {
+        Some(p) => p.install(do_project),
+        None => do_project(),
+    }
+}
+
+pub fn sort_by_depth_parallel(
+    projected: &mut [Projected],
+    scratch: &mut ScratchBuffers,
+    pool: &Option<rayon::ThreadPool>,
+) {
+    if projected.len() < 50_000 || pool.is_none() {
+        sort_by_depth(projected, scratch);
+        return;
+    }
+    pool.as_ref().unwrap().install(|| {
+        projected.par_sort_unstable_by_key(|p| p.depth.to_bits());
+    });
+}
+
+pub fn sort_by_depth(projected: &mut [Projected], scratch: &mut ScratchBuffers) {
+    let n = projected.len();
+    if n <= 1 {
+        return;
+    }
+
+    scratch.sort_aux.clear();
+    scratch
+        .sort_aux
+        .reserve(n.saturating_sub(scratch.sort_aux.capacity()));
+    // Radix passes overwrite every element; avoid zeroing for allocation cost.
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        scratch.sort_aux.set_len(n);
+    }
+    let aux = &mut scratch.sort_aux;
+
+    let mut counts_lo = [0u32; 65536];
+    let mut counts_hi = [0u32; 65536];
+    for p in projected.iter() {
+        let k = p.depth.to_bits();
+        counts_lo[(k & 0xFFFF) as usize] += 1;
+        counts_hi[(k >> 16) as usize] += 1;
+    }
+
+    {
+        let mut offsets = [0u32; 65536];
+        let mut sum = 0u32;
+        for i in 0..65536 {
+            offsets[i] = sum;
+            sum += counts_lo[i];
+        }
+        for p in projected.iter() {
+            let bucket = (p.depth.to_bits() & 0xFFFF) as usize;
+            let pos = offsets[bucket] as usize;
+            offsets[bucket] += 1;
+            aux[pos] = *p;
+        }
+    }
+
+    {
+        let mut offsets = [0u32; 65536];
+        let mut sum = 0u32;
+        for i in 0..65536 {
+            offsets[i] = sum;
+            sum += counts_hi[i];
+        }
+        for p in aux.iter() {
+            let bucket = (p.depth.to_bits() >> 16) as usize;
+            let pos = offsets[bucket] as usize;
+            offsets[bucket] += 1;
+            projected[pos] = *p;
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn composite(
+    projected: &[Projected],
+    fb: &mut [(Vec3, f32)],
+    width: u32,
+    _height: u32,
+    params: &RenderParams,
+) {
+    let w = width as usize;
+    for p in projected {
+        composite_splat(p, fb, w, params);
+    }
+}
+
+#[inline]
+#[allow(dead_code)]
+fn composite_splat(p: &Projected, fb: &mut [(Vec3, f32)], w: usize, params: &RenderParams) {
+    let [x0, y0, x1, y1] = p.bbox;
+
+    let a = p.cov2d_inv.x_axis.x;
+    let b = p.cov2d_inv.x_axis.y;
+    let d = p.cov2d_inv.y_axis.y;
+
+    let dx_coeff = -0.5 * a;
+    let dy_coeff = -0.5 * d;
+    let cross_coeff = -b;
+
+    let saturation = params.saturation;
+    let alpha_threshold = params.alpha_threshold;
+    let opacity = p.opacity;
+    let color = p.color;
+    let sx = p.screen.x;
+    let sy = p.screen.y;
+
+    for py in y0..=y1 {
+        let dy = py as f32 - sy;
+        let row_base = dy_coeff * dy * dy;
+        let row_slope = cross_coeff * dy;
+        let row_offset = py as usize * w;
+
+        for px in x0..=x1 {
+            let idx = row_offset + px as usize;
+            let cell = &mut fb[idx];
+            if cell.1 >= saturation {
+                continue;
+            }
+            let dx = px as f32 - sx;
+            let power = dx_coeff * dx * dx + row_slope * dx + row_base;
+            if power > 0.0 {
+                continue;
+            }
+            let alpha = (opacity * fast_exp(power)).min(0.999);
+            if alpha < alpha_threshold {
+                continue;
+            }
+            let t = 1.0 - cell.1;
+            let contrib = t * alpha;
+            cell.0 += contrib * color;
+            cell.1 += contrib;
+        }
+    }
+}
+
+pub fn build_thread_pool(num_threads: usize) -> Option<rayon::ThreadPool> {
+    if num_threads > 0 {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .expect("failed to build rayon thread pool"),
+        )
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FbPtr(*mut (Vec3, f32));
+unsafe impl Send for FbPtr {}
+unsafe impl Sync for FbPtr {}
+
+pub fn composite_parallel(
+    projected: &[Projected],
+    fb: &mut [(Vec3, f32)],
+    width: u32,
+    height: u32,
+    params: &RenderParams,
+    scratch: &mut ScratchBuffers,
+    pool: &Option<rayon::ThreadPool>,
+) {
+    bin_splats(projected, width, height, &mut scratch.tiles);
+    composite_tiled(projected, &scratch.tiles, fb, width, height, params, pool);
+}
+
+pub fn composite_tiled(
+    projected: &[Projected],
+    bins: &TileBins,
+    fb: &mut [(Vec3, f32)],
+    width: u32,
+    height: u32,
+    params: &RenderParams,
+    pool: &Option<rayon::ThreadPool>,
+) {
+    let w = width as usize;
+    let h_i = height as i32;
+    let w_i = width as i32;
+    let num_tiles_x = bins.num_tiles_x;
+    let num_tiles = bins.num_tiles();
+    let fb_ptr = FbPtr(fb.as_mut_ptr());
+
+    let do_composite = || {
+        (0..num_tiles).into_par_iter().for_each(move |tile_idx| {
+            let fbp = fb_ptr;
+            let tile_x = (tile_idx as i32) % num_tiles_x;
+            let tile_y = (tile_idx as i32) / num_tiles_x;
+            let px0 = tile_x * TILE_W;
+            let py0 = tile_y * TILE_H;
+            let px1 = (px0 + TILE_W - 1).min(w_i - 1);
+            let py1 = (py0 + TILE_H - 1).min(h_i - 1);
+            if px0 > px1 || py0 > py1 {
+                return;
+            }
+
+            let start = bins.offsets[tile_idx] as usize;
+            let end = bins.offsets[tile_idx + 1] as usize;
+            if start == end {
+                return;
+            }
+            let splat_ids = &bins.splat_indices[start..end];
+
+            for &sid in splat_ids {
+                let p = unsafe { projected.get_unchecked(sid as usize) };
+                let [bx0, by0, bx1, by1] = p.bbox;
+                let x0 = bx0.max(px0);
+                let y0 = by0.max(py0);
+                let x1 = bx1.min(px1);
+                let y1 = by1.min(py1);
+                if x0 > x1 || y0 > y1 {
+                    continue;
+                }
+                unsafe {
+                    composite_splat_region(p, fbp.0, w, x0, y0, x1, y1, params);
+                }
+            }
+        });
+    };
+
+    match pool.as_ref() {
+        Some(p) => p.install(do_composite),
+        None => do_composite(),
+    }
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn composite_splat_region(
+    p: &Projected,
+    fb_ptr: *mut (Vec3, f32),
+    w: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    params: &RenderParams,
+) {
+    let a = p.cov2d_inv.x_axis.x;
+    let b = p.cov2d_inv.x_axis.y;
+    let d = p.cov2d_inv.y_axis.y;
+    let dx_coeff = -0.5 * a;
+    let dy_coeff = -0.5 * d;
+    let cross_coeff = -b;
+
+    let saturation = params.saturation;
+    let alpha_threshold = params.alpha_threshold;
+    let opacity = p.opacity;
+    let color = p.color;
+    let sx = p.screen.x;
+    let sy = p.screen.y;
+
+    let row_peak_cutoff = (alpha_threshold / opacity).ln();
+    let inv_a = 1.0 / a;
+
+    for py in y0..=y1 {
+        let dy = py as f32 - sy;
+        let row_base = dy_coeff * dy * dy;
+        let row_slope = cross_coeff * dy;
+        let row_peak = row_base + 0.5 * row_slope * row_slope * inv_a;
+        if row_peak < row_peak_cutoff {
+            continue;
+        }
+        let row_offset = py as usize * w;
+
+        for px in x0..=x1 {
+            let idx = row_offset + px as usize;
+            let cell = unsafe { &mut *fb_ptr.add(idx) };
+            if cell.1 >= saturation {
+                continue;
+            }
+            let dx = px as f32 - sx;
+            let power = dx_coeff * dx * dx + row_slope * dx + row_base;
+            if power > 0.0 {
+                continue;
+            }
+            let alpha = (opacity * fast_exp(power)).min(0.999);
+            if alpha < alpha_threshold {
+                continue;
+            }
+            let t = 1.0 - cell.1;
+            let contrib = t * alpha;
+            cell.0 += contrib * color;
+            cell.1 += contrib;
+        }
+    }
+}
+```
+
+### src/sh.rs
+```
+use glam::Vec3;
+
+pub const SH_C0: f32 = 0.282_094_8;
+
+#[inline]
+pub fn sh_band0_to_rgb(f_dc: Vec3) -> Vec3 {
+    (Vec3::splat(0.5) + SH_C0 * f_dc).clamp(Vec3::ZERO, Vec3::ONE)
+}
+```
+
+### src/splat.rs
+```
+use anyhow::{Context, Result, anyhow, bail};
+use glam::{Quat, Vec3};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
+
+use crate::sh::sh_band0_to_rgb;
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub struct Rng(u64);
+
+#[allow(dead_code)]
+impl Rng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed.wrapping_add(0x9E37_79B9_7F4A_7C15))
+    }
+
+    #[inline]
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    #[inline]
+    pub fn f32(&mut self) -> f32 {
+        ((self.next_u64() >> 40) as u32 as f32) * (1.0 / (1u32 << 24) as f32)
+    }
+
+    #[inline]
+    pub fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (hi - lo) * self.f32()
+    }
+
+    #[inline]
+    pub fn normal(&mut self) -> f32 {
+        let u1 = self.f32().max(f32::MIN_POSITIVE);
+        let u2 = self.f32();
+        (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+    }
+}
+
+#[allow(dead_code)]
+pub fn random_scene(n: usize, seed: u64, bounds: f32) -> Vec<Splat> {
+    let mut rng = Rng::new(seed);
+    let mut splats = Vec::with_capacity(n);
+    for _ in 0..n {
+        let pos = Vec3::new(
+            rng.range(-bounds, bounds),
+            rng.range(-bounds, bounds),
+            rng.range(-bounds, bounds),
+        );
+        let scale = Vec3::new(
+            (-3.0 + 0.7 * rng.normal()).exp(),
+            (-3.0 + 0.7 * rng.normal()).exp(),
+            (-3.0 + 0.7 * rng.normal()).exp(),
+        );
+        let (x, y, z, w) = {
+            let mut u1;
+            let mut u2;
+            let mut s1;
+            loop {
+                u1 = rng.range(-1.0, 1.0);
+                u2 = rng.range(-1.0, 1.0);
+                s1 = u1 * u1 + u2 * u2;
+                if s1 < 1.0 {
+                    break;
+                }
+            }
+            let mut u3;
+            let mut u4;
+            let mut s2;
+            loop {
+                u3 = rng.range(-1.0, 1.0);
+                u4 = rng.range(-1.0, 1.0);
+                s2 = u3 * u3 + u4 * u4;
+                if s2 < 1.0 {
+                    break;
+                }
+            }
+            let f = ((1.0 - s1) / s2).sqrt();
+            (u1, u2, u3 * f, u4 * f)
+        };
+        let rot = Quat::from_xyzw(x, y, z, w).normalize();
+        let color = Vec3::new(rng.f32(), rng.f32(), rng.f32());
+        let u = rng.f32();
+        let opacity = (u * u).clamp(0.01, 0.99);
+        splats.push(Splat {
+            pos,
+            scale,
+            rot,
+            color,
+            opacity,
+        });
+    }
+    splats
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Splat {
+    pub pos: Vec3,
+    pub scale: Vec3,
+    pub rot: Quat,
+    pub color: Vec3,
+    pub opacity: f32,
+}
+
+#[inline]
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+pub fn load_ply(
+    path: &Path,
+    apply_sigmoid_opacity: bool,
+    max_splats: usize,
+) -> Result<(Vec<Splat>, usize)> {
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(4 * 1024 * 1024, file);
+
+    let mut vertex_count: usize = 0;
+    let mut prop_names: Vec<String> = Vec::new();
+    let mut in_vertex = false;
+
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).context("reading PLY header")?;
+        if line.is_empty() {
+            bail!("unexpected EOF inside PLY header");
+        }
+        let t = line.trim_end();
+
+        if t == "end_header" {
+            break;
+        }
+        if t.starts_with("format") {
+            if !t.contains("binary_little_endian") {
+                bail!("only binary_little_endian PLY is supported (got: {t})");
+            }
+        } else if t.starts_with("element vertex") {
+            in_vertex = true;
+            vertex_count = t
+                .split_whitespace()
+                .last()
+                .and_then(|s| s.parse().ok())
+                .with_context(|| format!("cannot parse vertex count from: {t}"))?;
+        } else if t.starts_with("element") {
+            in_vertex = false;
+        } else if in_vertex && t.starts_with("property float") {
+            let name = t
+                .split_whitespace()
+                .nth(2)
+                .ok_or_else(|| anyhow!("property line has no name: {t}"))?
+                .to_string();
+            prop_names.push(name);
+        }
+    }
+
+    if vertex_count == 0 {
+        bail!("PLY has no vertex element or vertex count is 0");
+    }
+
+    let stride = prop_names.len() * 4;
+
+    let offsets: HashMap<&str, usize> = prop_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i * 4))
+        .collect();
+
+    let get = |key: &str| -> Result<usize> {
+        offsets
+            .get(key)
+            .copied()
+            .with_context(|| format!("PLY is missing required property '{key}'"))
+    };
+
+    let off_x = get("x")?;
+    let off_y = get("y")?;
+    let off_z = get("z")?;
+    let off_f0 = get("f_dc_0")?;
+    let off_f1 = get("f_dc_1")?;
+    let off_f2 = get("f_dc_2")?;
+    let off_s0 = get("scale_0")?;
+    let off_s1 = get("scale_1")?;
+    let off_s2 = get("scale_2")?;
+    let off_rw = get("rot_0")?;
+    let off_rx = get("rot_1")?;
+    let off_ry = get("rot_2")?;
+    let off_rz = get("rot_3")?;
+    let off_op = get("opacity")?;
+
+    let (step, capacity) = if max_splats == 0 || vertex_count <= max_splats {
+        (1usize, vertex_count)
+    } else {
+        (vertex_count / max_splats, max_splats)
+    };
+
+    let mut splats = Vec::with_capacity(capacity);
+
+    let mut record = vec![0u8; stride];
+
+    for i in 0..vertex_count {
+        reader
+            .read_exact(&mut record)
+            .with_context(|| format!("reading vertex {i}"))?;
+
+        if i % step != 0 {
+            continue;
+        }
+        if max_splats > 0 && splats.len() >= max_splats {
+            break;
+        }
+
+        let f = |off: usize| f32::from_le_bytes(record[off..off + 4].try_into().unwrap());
+
+        let pos = Vec3::new(f(off_x), f(off_y), f(off_z));
+        let scale = Vec3::new(f(off_s0).exp(), f(off_s1).exp(), f(off_s2).exp());
+        let rot = Quat::from_xyzw(f(off_rx), f(off_ry), f(off_rz), f(off_rw)).normalize();
+        let color = sh_band0_to_rgb(Vec3::new(f(off_f0), f(off_f1), f(off_f2)));
+        let opacity = if apply_sigmoid_opacity {
+            sigmoid(f(off_op))
+        } else {
+            f(off_op).clamp(0.0, 1.0)
+        };
+
+        splats.push(Splat {
+            pos,
+            scale,
+            rot,
+            color,
+            opacity,
+        });
+    }
+
+    Ok((splats, vertex_count))
+}
+```
+
+### src/bin/bench_forward.rs
+```
+use std::path::PathBuf;
+use std::time::Instant;
+
+use glam::Vec3;
+
+use tsplat::camera::OrbitCamera;
+use tsplat::framebuffer::render_halfblocks;
+use tsplat::rasterize::{
+    RenderParams, ScratchBuffers, build_thread_pool, composite_parallel, project,
+    sort_by_depth_parallel,
+};
+use tsplat::splat::{Splat, load_ply, random_scene};
+
+struct BenchArgs {
+    frames: usize,
+    warmup: usize,
+    splats: usize,
+    width: u32,
+    height: u32,
+    threads: Vec<usize>,
+    seed: u64,
+    ply: Option<PathBuf>,
+}
+
+impl Default for BenchArgs {
+    fn default() -> Self {
+        Self {
+            frames: 120,
+            warmup: 10,
+            splats: 200_000,
+            width: 120,
+            height: 80,
+            threads: vec![1, 2, 4, 8],
+            seed: 0xC0FFEE,
+            ply: None,
+        }
+    }
+}
+
+fn parse_args() -> BenchArgs {
+    let mut args = BenchArgs::default();
+    let raw: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < raw.len() {
+        match raw[i].as_str() {
+            "--frames" | "-n" => {
+                i += 1;
+                args.frames = raw[i].parse().expect("invalid --frames");
+            }
+            "--warmup" => {
+                i += 1;
+                args.warmup = raw[i].parse().expect("invalid --warmup");
+            }
+            "--splats" | "--max-splats" => {
+                i += 1;
+                args.splats = raw[i].parse().expect("invalid --splats");
+            }
+            "--width" => {
+                i += 1;
+                args.width = raw[i].parse().expect("invalid --width");
+            }
+            "--height" => {
+                i += 1;
+                args.height = raw[i].parse().expect("invalid --height");
+            }
+            "--seed" => {
+                i += 1;
+                args.seed = raw[i].parse().expect("invalid --seed");
+            }
+            "--threads" => {
+                i += 1;
+                args.threads = raw[i]
+                    .split(',')
+                    .map(|s| s.trim().parse().expect("invalid thread count"))
+                    .collect();
+            }
+            "--ply" => {
+                i += 1;
+                args.ply = Some(PathBuf::from(&raw[i]));
+            }
+            "--help" | "-h" => {
+                eprintln!("Usage: bench_forward [OPTIONS]");
+                eprintln!("  --frames N       Frames per thread setting (default: 120)");
+                eprintln!("  --warmup N       Warmup frames (default: 10)");
+                eprintln!("  --splats N       Number of synthetic gaussians (default: 200000)");
+                eprintln!("  --width W        Framebuffer width in pixels (default: 120)");
+                eprintln!("  --height H       Framebuffer height in pixels (default: 80)");
+                eprintln!("  --seed S         Synthetic scene PRNG seed (default: 0xC0FFEE)");
+                eprintln!("  --threads LIST   Comma-separated thread sweep (default: 1,2,4,8)");
+                eprintln!("  --ply PATH       Use a real .ply scene instead of synthetic");
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("Unknown argument: {other}. Use --help for usage.");
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+    args
+}
+
+fn bench_camera(width: u32, height: u32) -> OrbitCamera {
+    let mut cam = OrbitCamera::new(width, height);
+    cam.target = Vec3::ZERO;
+    cam.yaw = 0.6;
+    cam.pitch = 0.35;
+    cam.radius = 55.0;
+    cam.fov_y = 55.0_f32.to_radians();
+    cam
+}
+
+fn load_scene(args: &BenchArgs) -> Vec<Splat> {
+    if let Some(path) = &args.ply {
+        let (splats, _) = load_ply(path, true, args.splats).expect("failed to load .ply");
+        splats
+    } else {
+        random_scene(args.splats, args.seed, 20.0)
+    }
+}
+
+#[derive(Default)]
+struct Timings {
+    project: Vec<f64>,
+    sort: Vec<f64>,
+    composite: Vec<f64>,
+    halfblocks: Vec<f64>,
+    total: Vec<f64>,
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn mean(v: &[f64]) -> f64 {
+    v.iter().sum::<f64>() / v.len() as f64
+}
+
+fn print_stats(label: &str, values: &mut [f64]) {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let m = mean(values);
+    let min = values[0];
+    let max = values[values.len() - 1];
+    let p50 = percentile(values, 50.0);
+    let p95 = percentile(values, 95.0);
+    let p99 = percentile(values, 99.0);
+    println!(
+        "  {:<12} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}",
+        label, m, min, max, p50, p95, p99,
+    );
+}
+
+struct RunResult {
+    threads: usize,
+    frames: usize,
+    total_mean_us: f64,
+    project_mean_us: f64,
+    sort_mean_us: f64,
+    composite_mean_us: f64,
+    halfblocks_mean_us: f64,
+    fps: f64,
+}
+
+fn run_one(threads: usize, splats: &[Splat], args: &BenchArgs) -> RunResult {
+    let camera = bench_camera(args.width, args.height);
+    let params = RenderParams::default();
+    let fb_size = (args.width * args.height) as usize;
+    let mut fb = vec![(Vec3::ZERO, 0.0f32); fb_size];
+    let mut out = String::with_capacity(256 * 1024);
+    let pool = build_thread_pool(threads);
+    let mut scratch = ScratchBuffers::new();
+
+    for _ in 0..args.warmup {
+        unsafe {
+            std::ptr::write_bytes(fb.as_mut_ptr(), 0, fb.len());
+        }
+        let mut projected = project(splats, &camera, &params, &pool);
+        sort_by_depth_parallel(&mut projected, &mut scratch, &pool);
+        composite_parallel(
+            &projected,
+            &mut fb,
+            args.width,
+            args.height,
+            &params,
+            &mut scratch,
+            &pool,
+        );
+        render_halfblocks(&fb, args.width, args.height, &mut out);
+    }
+
+    let mut t = Timings::default();
+    let wall_start = Instant::now();
+
+    for _ in 0..args.frames {
+        unsafe {
+            std::ptr::write_bytes(fb.as_mut_ptr(), 0, fb.len());
+        }
+        let f0 = Instant::now();
+
+        let t0 = Instant::now();
+        let mut projected = project(splats, &camera, &params, &pool);
+        let t1 = Instant::now();
+
+        sort_by_depth_parallel(&mut projected, &mut scratch, &pool);
+        let t2 = Instant::now();
+
+        composite_parallel(
+            &projected,
+            &mut fb,
+            args.width,
+            args.height,
+            &params,
+            &mut scratch,
+            &pool,
+        );
+        let t3 = Instant::now();
+
+        render_halfblocks(&fb, args.width, args.height, &mut out);
+        let t4 = Instant::now();
+
+        t.project.push((t1 - t0).as_micros() as f64);
+        t.sort.push((t2 - t1).as_micros() as f64);
+        t.composite.push((t3 - t2).as_micros() as f64);
+        t.halfblocks.push((t4 - t3).as_micros() as f64);
+        t.total.push((t4 - f0).as_micros() as f64);
+    }
+
+    let wall = wall_start.elapsed().as_secs_f64();
+
+    println!();
+    println!("=== threads = {} ===", threads);
+    println!(
+        "  {:<12} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "stage", "mean(us)", "min(us)", "max(us)", "p50(us)", "p95(us)", "p99(us)",
+    );
+    println!("  {}", "-".repeat(78));
+    print_stats("project", &mut t.project);
+    print_stats("sort", &mut t.sort);
+    print_stats("composite", &mut t.composite);
+    print_stats("halfblocks", &mut t.halfblocks);
+    println!("  {}", "-".repeat(78));
+    print_stats("TOTAL", &mut t.total);
+    println!("  wall={:.2}s  FPS={:.1}", wall, args.frames as f64 / wall);
+
+    RunResult {
+        threads,
+        frames: args.frames,
+        total_mean_us: mean(&t.total),
+        project_mean_us: mean(&t.project),
+        sort_mean_us: mean(&t.sort),
+        composite_mean_us: mean(&t.composite),
+        halfblocks_mean_us: mean(&t.halfblocks),
+        fps: args.frames as f64 / wall,
+    }
+}
+
+fn main() {
+    let args = parse_args();
+    let splats = load_scene(&args);
+
+    println!();
+    println!("=== tsplat forward-pass benchmark ===");
+    match &args.ply {
+        Some(p) => println!("  scene:      {} (real)", p.display()),
+        None => println!("  scene:      synthetic (seed=0x{:X})", args.seed),
+    }
+    println!("  splats:     {}", splats.len());
+    println!(
+        "  resolution: {}x{} ({}x{} terminal cells)",
+        args.width,
+        args.height,
+        args.width,
+        args.height / 2,
+    );
+    println!(
+        "  frames:     {} per config (+{} warmup)",
+        args.frames, args.warmup,
+    );
+    println!("  threads:    {:?}", args.threads);
+
+    let results: Vec<RunResult> = args
+        .threads
+        .iter()
+        .map(|&t| run_one(t, &splats, &args))
+        .collect();
+
+    println!();
+    println!("=== thread scaling summary ===");
+    println!(
+        "  {:>7} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "threads", "fps", "total_us", "proj", "sort", "comp", "halfbl",
+    );
+    println!("  {}", "-".repeat(72));
+    let baseline_fps = results.first().map(|r| r.fps).unwrap_or(1.0);
+    for r in &results {
+        println!(
+            "  {:>7} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1} {:>10.1}  ({:.2}x)",
+            r.threads,
+            r.fps,
+            r.total_mean_us,
+            r.project_mean_us,
+            r.sort_mean_us,
+            r.composite_mean_us,
+            r.halfblocks_mean_us,
+            r.fps / baseline_fps,
+        );
+    }
+    println!();
+    let _ = (results.first().map(|r| r.frames), baseline_fps);
+}
+```

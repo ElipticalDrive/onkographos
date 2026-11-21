@@ -1,0 +1,4158 @@
+![alt tag](screenshots/1.png)
+
+![alt tag](screenshots/2.png)
+
+### VolumeStyleRendering/CubicSpline.cpp
+```
+#include "CubicSpline.h"
+using namespace glm;
+
+CubicSpline::CubicSpline(vec3 a, vec3 b, vec3 c, vec3 d)
+{
+    this->a = a;
+    this->b = b;
+    this->c = c;
+    this->d = d;
+}
+
+vec3 CubicSpline::getPointOnSpline(float s) const
+{
+    return (((d * s) + c) * s + b) * s + a;
+}
+
+std::vector<CubicSpline> CubicSpline::CalculateCubicSpline(std::vector<vec3> points)
+{
+    auto n = points.size() - 1;
+    auto& v = points;
+    std::vector<vec3> gamma(n + 1);
+    std::vector<vec3> delta(n + 1);
+    std::vector<vec3> D(n + 1);
+
+    int i;
+    /* We need to solve the equation
+    * taken from: http://mathworld.wolfram.com/CubicSpline.html
+    [2 1       ] [D[0]]   [3(v[1] - v[0])  ]
+    |1 4 1     | |D[1]|   |3(v[2] - v[0])  |
+    |  1 4 1   | | .  | = |      .         |
+    |    ..... | | .  |   |      .         |
+    |     1 4 1| | .  |   |3(v[n] - v[n-2])|
+    [       1 2] [D[n]]   [3(v[n] - v[n-1])]
+
+    by converting the matrix to upper triangular.
+    The D[i] are the derivatives at the control points.
+    */
+
+    //this builds the coefficients of the left matrix
+    gamma[0] = vec3(0);
+    gamma[0].x = 1.0f / 2.0f;
+    gamma[0].y = 1.0f / 2.0f;
+    gamma[0].z = 1.0f / 2.0f;
+
+    for (i = 1; i < n; i++)
+    {
+        gamma[i] = vec3(1) / ((4.0f * vec3(1)) - gamma[i - 1]);
+    }
+
+    gamma[n] = vec3(1) / ((2.0f * vec3(1)) - gamma[n - 1]);
+
+    delta[0] = 3.0f * (v[1] - v[0]) * gamma[0];
+
+    for (i = 1; i < n; i++)
+    {
+        delta[i] = (3.0f * (v[i + 1] - v[i - 1]) - delta[i - 1]) * gamma[i];
+    }
+
+    delta[n] = (3.0f * (v[n] - v[n - 1]) - delta[n - 1]) * gamma[n];
+
+    D[n] = delta[n];
+
+    for (i = n - 1; i >= 0; i--)
+    {
+        D[i] = delta[i] - gamma[i] * D[i + 1];
+    }
+
+    // now compute the coefficients of the cubics 
+    std::vector<CubicSpline> C(n);
+
+    for (i = 0; i < n; i++)
+    {
+        C[i] = CubicSpline(v[i], D[i], 3.0f * (v[i + 1] - v[i]) - 2.0f * D[i] - D[i + 1], 2.0f * (v[i] - v[i + 1]) + D[i] + D[i + 1]);
+    }
+
+    return C;
+}
+```
+
+### VolumeStyleRendering/CubicSpline.h
+```
+#pragma once
+#include <cinder/CinderGlm.h>
+#include <vector>
+
+class CubicSpline
+{
+    public:
+        CubicSpline() = default;
+        CubicSpline(glm::vec3 a, glm::vec3 b, glm::vec3 c, glm::vec3 d);
+        //evaluate the point using a cubic equation
+        glm::vec3 getPointOnSpline(float s) const;
+        static std::vector<CubicSpline> CalculateCubicSpline(std::vector<glm::vec3> points);
+    private:
+        glm::vec3 a;
+        glm::vec3 b;
+        glm::vec3 c;
+        glm::vec3 d;
+};
+```
+
+### VolumeStyleRendering/Light.h
+```
+#pragma once
+#include <cinder/CinderMath.h>
+
+class Light
+{
+public:
+    glm::vec3 direction;
+    glm::vec3 diffuse;
+    glm::vec3 ambient;
+
+    Light() : direction(0.0f, 0.0f, 1.0f), diffuse(1.0f, 1.0f, 1.0f), ambient(0.1f, 0.1f, 0.1f) {}
+};
+```
+
+### VolumeStyleRendering/Postprocess.cpp
+```
+#include <cinder/app/AppBase.h>
+#include <cinder/Log.h>
+#include <random>
+
+#include "PostProcess.h"
+#include "RenderingParams.h"
+
+using namespace ci;
+using namespace glm;
+using namespace app;
+
+void PostProcess::displayTexture(const gl::Texture2dRef colorTex) const
+{
+    const gl::ScopedTextureBind scopedTextureBind(colorTex ? colorTex : getColorTexture(), 0);
+    const gl::ScopedViewport scopedViewport(ivec2(0), toPixels(getWindowSize()));
+    const gl::ScopedMatrices scopedMatrices;
+    const gl::ScopedDepth depth(false);
+    gl::clear();
+
+    // translate to center and scale to fit whole screen
+    gl::translate(getWindowCenter());
+    gl::scale(getWindowSize());
+
+    // draw quad with mapped texture
+    textureRect->draw();
+}
+
+void PostProcess::displayFXAA(const gl::Texture2dRef& texture) const
+{
+    const gl::ScopedTextureBind scopedTextureBind(texture ? texture : getColorTexture(), 0);
+    const gl::ScopedViewport scopedViewport(ivec2(0), toPixels(getWindowSize()));
+    const gl::ScopedMatrices scopedMatrices;
+    const gl::ScopedDepth depth(false);
+    gl::clear();
+
+    // custom uniforms
+    auto& prog = fxaaRect->getGlslProg();
+    prog->uniform("pixelSize", vec2(1.0f) / vec2(toPixels(getWindowSize())));
+
+    // translate to center and scale to fit whole screen
+    gl::translate(getWindowCenter());
+    gl::scale(getWindowSize());
+
+    // draw quad with mapped texture
+    fxaaRect->draw();
+}
+
+void PostProcess::toneMapping(const gl::Texture2dRef& hdrBuffer, bool local) const
+{
+    if (local) Start();
+
+    const gl::ScopedTextureBind scopedTextureBind(hdrBuffer ? hdrBuffer : getColorTexture(), 0);
+
+    // custom uniforms
+    auto& prog = toneMappingRect->getGlslProg();
+    prog->uniform("gamma", RenderingParams::GetGamma());
+    prog->uniform("exposure", RenderingParams::GetExposure());
+
+    // draw quad with mapped texture
+    toneMappingRect->draw();
+
+    if (local) End();
+}
+
+void PostProcess::blurHorizontal(int blurType, const gl::Texture2dRef& texture, bool local) const
+{
+    if (local) Start();
+
+    const gl::ScopedTextureBind scopedTextureBind(texture ? texture : getColorTexture(), 0);
+
+    // custom uniforms
+    auto& prog = blurRect->getGlslProg();
+    prog->uniform("blurDirection", vec2(1.0f / static_cast<float>(currentFbo->getSize().x), 0.0f));
+    prog->uniform("blurType", blurType);
+
+    // first pass blur
+    blurRect->draw();
+
+    if (local) End();
+}
+
+void PostProcess::blurVertical(int blurType, const gl::Texture2dRef& texture, bool local) const
+{
+    if (local) Start();
+
+    const gl::ScopedTextureBind scopedTextureBind(texture ? texture : getColorTexture(), 0);
+
+    // custom uniforms
+    auto& prog = blurRect->getGlslProg();
+    prog->uniform("blurDirection", vec2(0.0f, 1.0f / static_cast<float>(currentFbo->getSize().y)));
+    prog->uniform("blurType", blurType);
+
+    // first pass blur
+    blurRect->draw();
+
+    if (local) End();
+}
+
+void PostProcess::inverse(const gl::Texture2dRef& texture, bool local) const
+{
+    if (local) Start();
+
+    const gl::ScopedTextureBind scopedTextureBind(texture ? texture : getColorTexture(), 0);
+
+    // draw quad with mapped texture
+    inverseRect->draw();
+
+    if (local) End();
+}
+
+void PostProcess::multiply(const gl::Texture2dRef& texture0, const gl::Texture2dRef& texture1, bool local) const
+{
+    if (local) Start();
+
+    const gl::ScopedTextureBind scopedTextureBind0(texture0, 0);
+    const gl::ScopedTextureBind scopedTextureBind1(texture1 ? texture1 : getColorTexture(), 1);
+
+    // draw quad with mapped texture
+    multiplyRect->draw();
+
+    if (local) End();
+}
+
+void PostProcess::average(const gl::Texture2dRef& texture, bool local) const
+{
+    if (local) Start();
+
+    auto& tex = texture ? texture : getColorTexture();
+    const gl::ScopedTextureBind scopedTextureBind0(tex, 0);
+
+    // custom uniforms
+    auto& prog = averageRect->getGlslProg();
+    prog->uniform("texelSize", 1.0f / static_cast<vec2>(tex->getSize()));
+
+    // draw quad with mapped texture
+    averageRect->draw();
+
+    if (local) End();
+}
+
+void PostProcess::SSAO(const gl::Texture2dRef& position, const gl::Texture2dRef& normal, const Camera& camera, bool local)
+{
+    if (local) Start();
+
+    const gl::ScopedTextureBind scopedTextureBind0(normal, 0);
+    const gl::ScopedTextureBind scopedTextureBind1(position, 1);
+    const gl::ScopedTextureBind scopedTextureBind2(ssaoNoiseTexture, 2);
+
+    // custom uniforms
+    auto& prog = ssaoRect->getGlslProg();
+    prog->uniform("projectionMatrix", camera.getProjectionMatrix());
+    prog->uniform("radius", RenderingParams::SSAORadius());
+    prog->uniform("bias", RenderingParams::SSAOBias());
+    prog->uniform("power", RenderingParams::SSAOPower());
+
+    for (int i = 0; i < ssaoKernel.size(); i++)
+    {
+        prog->uniform("ssaoKernel[" + std::to_string(i) + "]", ssaoKernel[i]);
+    }
+
+    gl::setDefaultShaderVars();
+
+    // draw quad with mapped texture
+    ssaoRect->draw();
+
+    if (local) End();
+}
+
+void PostProcess::Start()
+{
+    gl::context()->pushFramebuffer(instance().currentFbo);
+    gl::context()->pushViewport({ivec2(0), instance().currentFbo->getSize()});
+    gl::pushMatrices();
+    gl::context()->pushBoolState(GL_DEPTH_TEST, false);
+    gl::context()->pushDepthMask(false);
+    gl::clear();
+
+    // translate to center and scale to fit whole screen
+    gl::translate(getWindowCenter());
+    gl::scale(getWindowSize());
+}
+
+void PostProcess::End()
+{
+    gl::context()->popFramebuffer();
+    gl::context()->popViewport();
+    gl::popMatrices();
+    gl::context()->popBoolState(GL_DEPTH_TEST);
+    gl::context()->popDepthMask();
+
+    // swap current fbo for write
+    instance().swapFbo();
+}
+
+const gl::Texture2dRef& PostProcess::getColorTexture() const
+{
+    // returns the color texture of the fbo before swap
+    return currentFbo == auxiliaryFbo ? colorTexture : auxiliaryTexture;
+}
+
+void PostProcess::resizeFbos()
+{
+    // temporal accumulated texture
+    gl::Texture2d::Format colorAccFormat = gl::Texture2d::Format().internalFormat(GL_RGB16F)
+                                                                  .magFilter(GL_NEAREST)
+                                                                  .minFilter(GL_NEAREST)
+                                                                  .wrap(GL_REPEAT);
+    const ivec2 winSize = getWindowSize();
+    const int32_t h = winSize.y;
+    const int32_t w = winSize.x;
+
+    try
+    {
+        // create temporal texture
+        colorTexture = gl::Texture2d::create(w, h, colorAccFormat);
+        auxiliaryTexture = gl::Texture2d::create(w, h, colorAccFormat);
+
+        // post process result fbo 
+        gl::Fbo::Format colorFormat;
+        colorFormat.attachment(GL_COLOR_ATTACHMENT0, colorTexture);
+        colorFormat.depthBuffer();
+        colorFbo = gl::Fbo::create(w, h, colorFormat);
+
+        // post process auxiliary result fbo
+        gl::Fbo::Format auxColorFormat;
+        auxColorFormat.attachment(GL_COLOR_ATTACHMENT0, auxiliaryTexture);
+        auxColorFormat.depthBuffer();
+        auxiliaryFbo = gl::Fbo::create(w, h, auxColorFormat);
+    }
+    catch (const Exception& e)
+    {
+        CI_LOG_EXCEPTION("Fbo/Renderbuffer create", e);
+    }
+}
+
+PostProcess& PostProcess::instance()
+{
+    static PostProcess postProcess;
+    return postProcess;
+}
+
+void PostProcess::swapFbo()
+{
+    currentFbo = currentFbo == auxiliaryFbo ? colorFbo : auxiliaryFbo;
+}
+
+PostProcess::PostProcess()
+{
+    // create fbos
+    resizeFbos();
+    // post process programs 
+    auto toneMappingProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/fs_quad.vert"))
+        .fragment(loadAsset("shaders/tonemapping.frag")));
+    auto fxaaProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/fs_quad.vert"))
+        .fragment(loadAsset("shaders/fxaa.frag")));
+    auto blurProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/fs_quad.vert"))
+        .fragment(loadAsset("shaders/blur.frag")));
+    auto inverseProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/fs_quad.vert"))
+        .fragment(loadAsset("shaders/inverse.frag")));
+    auto multiplyProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/fs_quad.vert"))
+        .fragment(loadAsset("shaders/multiply.frag")));
+    auto ssaoProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/fs_quad.vert"))
+        .fragment(loadAsset("shaders/ssao.frag")));
+    auto averageProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/fs_quad.vert"))
+        .fragment(loadAsset("shaders/average.frag")));
+    // create fs quad for single texture display
+    const gl::GlslProgRef stockTexture = gl::context()->getStockShader(gl::ShaderDef().texture(GL_TEXTURE_2D));
+    const gl::VboMeshRef rect = gl::VboMesh::create(geom::Rect());
+    textureRect = gl::Batch::create(rect, stockTexture);
+    toneMappingRect = gl::Batch::create(rect, toneMappingProg);
+    fxaaRect = gl::Batch::create(rect, fxaaProg);
+    blurRect = gl::Batch::create(rect, blurProg);
+    inverseRect = gl::Batch::create(rect, inverseProg);
+    multiplyRect = gl::Batch::create(rect, multiplyProg);
+    ssaoRect = gl::Batch::create(rect, ssaoProg);
+    averageRect = gl::Batch::create(rect, averageProg);
+    // sets targets
+    currentFbo = colorFbo;
+
+    // SSAO setup
+    std::uniform_real_distribution<GLfloat> randomFloats(0.0, 1.0); // random floats between 0.0 - 1.0
+    std::default_random_engine generator;
+
+    // Create random sampling kernel
+    for (GLuint i = 0; i < 64; ++i)
+    {
+        vec3 sample
+        (
+            randomFloats(generator) * 2.0 - 1.0,
+            randomFloats(generator) * 2.0 - 1.0,
+            randomFloats(generator)
+        );
+        sample = glm::normalize(sample);
+        sample *= randomFloats(generator);
+        GLfloat scale = GLfloat(i) / 64.0;
+        scale = lerp(0.1f, 1.0f, scale * scale);
+        sample *= scale;
+        ssaoKernel.push_back(sample);
+    }
+
+    // Random kernel rotations
+    std::vector<vec3> ssaoNoise;
+    for (GLuint i = 0; i < 16; i++)
+    {
+        vec3 noise
+        (
+            randomFloats(generator) * 2.0 - 1.0,
+            randomFloats(generator) * 2.0 - 1.0,
+            0.0f
+        );
+        ssaoNoise.push_back(noise);
+    }
+
+    auto noiseFormat = gl::Texture2d::Format()
+            .magFilter(GL_NEAREST)
+            .minFilter(GL_NEAREST)
+            .wrap(GL_REPEAT)
+            .internalFormat(GL_RGB);
+    noiseFormat.dataType(GL_FLOAT);
+    ssaoNoiseTexture = gl::Texture2d::create(ssaoNoise.data(), GL_RGB, 4, 4, noiseFormat);
+}
+```
+
+### VolumeStyleRendering/Postprocess.h
+```
+#pragma once
+#include <cinder/gl/gl.h>
+
+class PostProcess
+{
+public:
+    /**
+     * \brief Displays the given texture on a full screen quad. If colorTex is 
+     * null then it displays the color output of the last post-process effect
+     * \param colorTex The texture to display
+     */
+    void displayTexture(const ci::gl::Texture2dRef colorTex = nullptr) const;
+    /**
+    * \brief Displays the given texture with fast approximate anti-aliasing post effect
+    * \param texture The color buffer texture
+    */
+    void displayFXAA(const ci::gl::Texture2dRef &texture = nullptr) const;
+    /**
+     * \brief Reinhard tonemapping and gamma correction
+     * \param hdrBuffer An unclampled (floating point) color buffer
+     * \param local if true will call Start and End at the beginning and the end of function respectively
+     */
+    void toneMapping(const ci::gl::Texture2dRef& hdrBuffer = nullptr, bool local = true) const;
+    /**
+     * \brief Horizontal pass to generate a gaussian blurred texture from the given texture
+     * \param texture The source texture to blur, if null uses the current color texture
+     * \param local if true will call Start and End at the beginning and the end of function respectively
+     */
+    void blurHorizontal(int blurType = 1, const ci::gl::Texture2dRef& texture = nullptr, bool local = true) const;
+    /**
+    * \brief Horizontal pass to generate a gaussian blurred texture from the given texture
+    * \param texture The source texture to blur, if null uses the current color texture
+    * \param local if true will call Start and End at the beginning and the end of function respectively
+    */
+    void blurVertical(int blurType = 1, const ci::gl::Texture2dRef& texture = nullptr, bool local = true) const;
+    /**
+     * \brief Generates de inverse of the given texture
+     * \param texture The source texture, if null uses the current color texture
+     * \param local if true will call Start and End at the beginning and the end of function respectively
+     */
+    void inverse(const ci::gl::Texture2dRef& texture = nullptr, bool local = true) const;
+    /**
+     * \brief Multiplies the given textures
+     * \param texture0 The right source texture for multiplication
+     * \param texture0 The left source texture for multiplication, if null uses the current color texture
+     * \param local if true will call Start and End at the beginning and the end of function respectively
+     */
+    void multiply(const ci::gl::Texture2dRef& texture0, const ci::gl::Texture2dRef& texture1 = nullptr, bool local = true) const;
+    /**
+     * \brief 4x4 Average gaussian filter
+     * \param texture Texture to blur
+     * \param local if true will call Start and End at the beginning and the end of function respectively
+     */
+    void average(const ci::gl::Texture2dRef& texture = nullptr, bool local = true) const;
+    /**
+     * \brief Generates the ambient occlusion approximation using screen space ambient occlusion
+     * \param position Source positions texture
+     * \param normal Source normals texture
+     * \param camera Current rendering camera
+     * \param local if true will call Start and End at the beginning and the end of function respectively 
+     */
+    void SSAO(const ci::gl::Texture2dRef& position, const ci::gl::Texture2dRef& normal, const ci::Camera &camera, bool local = true);
+    /**
+     * \brief Sets the appropiate flags for fullscreen effects and binds the internal Fbo for drawing
+     */
+    static void Start();
+    /**
+     * \brief Restores the previous rendering flags and unbinds the internal Fbo
+     */
+    static void End();
+    /**
+     * \brief The temporal color texture contains the output color result of
+     * the last post-process effect executed
+     * \return The temporal color texture
+     */
+    const ci::gl::Texture2dRef &getColorTexture() const;
+    /**
+     * \brief Resizes the created framebuffers to the actual window's size
+     */
+    void resizeFbos();
+    /**
+     * \brief PostProcess follows a singleton pattern
+     * \return The unique PostProcess instance
+     */
+    static PostProcess& instance();
+private:
+    // fs screen effects
+    ci::gl::BatchRef textureRect;
+    ci::gl::BatchRef toneMappingRect;
+    ci::gl::BatchRef fxaaRect;
+    ci::gl::BatchRef blurRect;
+    ci::gl::BatchRef inverseRect;
+    ci::gl::BatchRef multiplyRect;
+    ci::gl::BatchRef ssaoRect;
+    ci::gl::BatchRef averageRect;
+
+    // current color texture
+    ci::gl::Texture2dRef colorTexture;
+    ci::gl::FboRef colorFbo;
+    // auxiliary for when trying to write to itself
+    ci::gl::Texture2dRef auxiliaryTexture;
+    ci::gl::FboRef auxiliaryFbo;
+
+    // draw to this fbo
+    ci::gl::FboRef currentFbo;
+
+    // SSAO
+    std::vector<glm::vec3> ssaoKernel;
+    ci::gl::Texture2dRef ssaoNoiseTexture;
+
+    void swapFbo();
+    PostProcess();
+};
+```
+
+### VolumeStyleRendering/RaycastVolume.cpp
+```
+#include <cinder/app/AppBase.h>
+#include <cinder/Log.h>
+
+#include "RaycastVolume.h"
+#include "StyleTransferFunction.h"
+#include "RenderingParams.h"
+#include "PostProcess.h"
+
+using namespace ci;
+using namespace glm;
+using namespace app;
+
+RaycastVolume::RaycastVolume() : aspectRatios(1), scaleFactor(vec3(1)), stepScale(1), shadowStepScale(3)
+{
+    // positions shader
+    positionsProg = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/positions.vert"))
+        .fragment(loadAsset("shaders/positions.frag")));
+    // raycast shader
+    raycastShaderRendertargets = gl::GlslProg::create(gl::GlslProg::Format()
+        .vertex(loadAsset("shaders/raycast.vert"))
+        .fragment(loadAsset("shaders/raycast_rendertargets.frag")));
+    // histogram calculation 
+    histogramCompute = gl::GlslProg::create(gl::GlslProg::Format()
+        .compute(loadAsset("shaders/histogram.comp")));
+    // gradient computation
+    gradientsCompute = gl::GlslProg::create(gl::GlslProg::Format()
+        .compute(loadAsset("shaders/gradients.comp")));
+    smoothGradientsCompute = gl::GlslProg::create(gl::GlslProg::Format()
+        .compute(loadAsset("shaders/smooth_gradients.comp")));
+    // noise texture to reduce volume banding artifacts
+    noiseTexture = gl::Texture2d::create(loadImage(loadAsset("images/noise.png")), gl::Texture2d::Format()
+                                         .wrapS(GL_REPEAT)
+                                         .wrapT(GL_REPEAT)
+                                         .magFilter(GL_NEAREST)
+                                         .minFilter(GL_NEAREST));
+    // create clockwise bbox for volume rendering
+    createCubeVbo();
+    // create frame buffer object
+    resizeFbos();
+}
+
+RaycastVolume::~RaycastVolume() {}
+
+vec3 RaycastVolume::centerPoint() const
+{
+    return vec3(0.5) * scaleFactor;
+}
+
+const float& RaycastVolume::getStepScale() const
+{
+    return stepScale;
+}
+
+void RaycastVolume::setStepScale(const float& value)
+{
+    stepScale = max(value, 0.1f);
+}
+
+const float& RaycastVolume::getShadowStepScale() const
+{
+    return shadowStepScale;
+}
+
+void RaycastVolume::setShadowStepScale(const float& value)
+{
+    shadowStepScale = max(value, 0.5f);
+}
+
+const vec3& RaycastVolume::getAspectRatios() const
+{
+    return aspectRatios;
+}
+
+void RaycastVolume::setAspectratios(const vec3& value)
+{
+    aspectRatios = max(value, vec3(0));
+    // volume scale
+    scaleFactor = vec3(1) / ((vec3(1) * maxSize) / (dimensions * aspectRatios));
+}
+
+void RaycastVolume::createCubeVbo()
+{
+    cubeMesh = TriMesh::create(geom::Cube());
+
+    // move cube to 0 - 1 coordinates
+    for (auto& pos : cubeMesh->getBufferPositions()) { pos += .5; }
+
+    cubeVao = gl::Vao::create();
+    // bind vertex buffer object
+    gl::ScopedVao scopedVao(cubeVao);
+    {
+        cubeVerticesBuffer = gl::Vbo::create(GL_ARRAY_BUFFER, sizeof(vec3) * cubeMesh->getNumVertices(),
+                                                            cubeMesh->getPositions<3>(), GL_STATIC_DRAW);
+        {
+            gl::ScopedBuffer scopedBuffer(cubeVerticesBuffer);
+            gl::vertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, static_cast<const GLvoid*>(nullptr));
+            gl::enableVertexAttribArray(0);
+        }
+        cubeIndicesBuffer = gl::Vbo::create<uint32_t>(GL_ELEMENT_ARRAY_BUFFER, cubeMesh->getIndices(), GL_STATIC_DRAW);
+        {
+            gl::ScopedBuffer scopedBuffer(cubeIndicesBuffer);
+        }
+    }
+}
+
+void RaycastVolume::readVolumeFromFile8(const std::string filepath)
+{
+    // open file and read
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+
+    // error opening given filepath
+    if (!file.good()) return;
+
+    // determine volume size
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    // reserve space for data
+    std::vector<uint8_t> buffer(size);
+
+    if (file.read(reinterpret_cast<char*>(buffer.data()), size))
+    {
+        // create 3D texture
+        auto format = gl::Texture3d::Format().magFilter(GL_LINEAR)
+                                             .minFilter(GL_LINEAR)
+                                             .wrapS(GL_CLAMP_TO_BORDER)
+                                             .wrapR(GL_CLAMP_TO_BORDER)
+                                             .wrapT(GL_CLAMP_TO_BORDER);
+        format.setDataType(GL_UNSIGNED_BYTE);
+        format.setInternalFormat(GL_RED);
+        format.setSwizzleMask(GL_RED, GL_RED, GL_RED, GL_RED);
+        volumeTexture = gl::Texture3d::create(buffer.data(), GL_RED,
+                                              dimensions.x, dimensions.y, dimensions.z, format);
+        // finally has drawable data
+        isDrawable = true;
+    }
+
+    file.close();
+}
+
+void RaycastVolume::readVolumeFromFile16(const std::string filepath)
+{
+    // open file and read
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+
+    // error opening given filepath
+    if (!file.good()) return;
+
+    // determine volume size
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    // reserve space for data
+    std::vector<uint16_t> buffer(size);
+
+    if (file.read(reinterpret_cast<char*>(buffer.data()), size))
+    {
+        // create 3D texture
+        auto format = gl::Texture3d::Format().magFilter(GL_LINEAR)
+                                             .minFilter(GL_LINEAR)
+                                             .wrapS(GL_CLAMP_TO_BORDER)
+                                             .wrapR(GL_CLAMP_TO_BORDER)
+                                             .wrapT(GL_CLAMP_TO_BORDER);
+        format.setDataType(GL_UNSIGNED_SHORT);
+        format.setInternalFormat(GL_RED);
+        format.setSwizzleMask(GL_RED, GL_RED, GL_RED, GL_RED);
+        volumeTexture = gl::Texture3d::create(buffer.data(), GL_RED,
+                                              dimensions.x, dimensions.y, dimensions.z, format);
+        // finally has drawable data
+        isDrawable = true;
+    }
+
+    file.close();
+}
+
+void RaycastVolume::loadFromFile(const vec3& dimensions, const vec3& ratios, const std::string filepath,
+                                 bool is16Bits)
+{
+    // compute step size and number of iterations for the given volume dimensions
+    this->dimensions = dimensions;
+    maxSize = max(dimensions.x, max(dimensions.y, dimensions.z));
+    stepSize = vec3(1.0f / (dimensions.x * (maxSize / dimensions.x)),
+                    1.0f / (dimensions.y * (maxSize / dimensions.y)),
+                    1.0f / (dimensions.z * (maxSize / dimensions.z)));
+    setAspectratios(ratios);
+    // create volume texture
+    is16Bits ? readVolumeFromFile16(filepath) : readVolumeFromFile8(filepath);
+    // histogram compute
+    extractHistogram();
+    // gradients
+    generateGradients();
+}
+
+void RaycastVolume::drawCubeFaces() const
+{
+    gl::ScopedDepth depth(true);
+    // draw front face
+    {
+        gl::ScopedFramebuffer scopedFramebuffer(frontFbo);
+        gl::ScopedViewport scopedViewport(ivec2(0), frontFbo->getSize());
+        gl::ScopedFaceCulling faceCulling(true, GL_BACK);
+        // draw front face cube positions to render target 
+        gl::clear();
+        positionsProg->bind();
+        positionsProg->uniform("renderingFront", true);
+        gl::setDefaultShaderVars();
+        gl::drawElements(gl::toGl(cubeMesh->getPrimitive()), cubeMesh->getNumIndices(),
+                         GL_UNSIGNED_INT, static_cast<GLuint *>(nullptr));
+    }
+    // draw back face
+    {
+        gl::ScopedFramebuffer scopedFramebuffer(backFbo);
+        gl::ScopedViewport scopedViewport(ivec2(0), backFbo->getSize());
+        gl::ScopedFaceCulling faceCulling(true, GL_FRONT);
+        // draw back face cube positions to render target
+        gl::clear();
+        gl::drawElements(gl::toGl(cubeMesh->getPrimitive()), cubeMesh->getNumIndices(),
+                         GL_UNSIGNED_INT, static_cast<GLuint *>(nullptr));
+    }
+}
+
+void RaycastVolume::drawVolume(const Camera& camera)
+{
+    if (!isDrawable) return;
+
+    // volume raycast
+    {
+        gl::ScopedMatrices scopedMatrices;
+        gl::ScopedVao scopedCubeVao(cubeVao);
+        gl::ScopedBuffer scopedCubeIndicesBuffer(cubeIndicesBuffer);
+
+        // set model matrix for model
+        gl::setMatrices(camera);
+        gl::rotate(modelRotation);
+        gl::translate(modelPosition);
+        gl::scale(scaleFactor);
+
+        // draw cube positions
+        drawCubeFaces();
+
+        // ray cast cube
+        auto program = raycastShaderRendertargets;
+        gl::ScopedGlslProg scopedProg(program);
+        gl::ScopedBlend blend(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gl::ScopedDepth depth(false);
+
+        // bind  textures
+        gl::ScopedTextureBind frontTex(frontTexture, 0);
+        gl::ScopedTextureBind backTex(backTexture, 1);
+        gl::ScopedTextureBind volumeTex(volumeTexture, 2);
+        gl::ScopedTextureBind gradientTex(gradientTexture, 3);
+        gl::ScopedTextureBind noiseTex(noiseTexture, 4);
+        gl::ScopedTextureBind colorTex(transferFunction->getColorMappingTexture(), 5);
+        gl::ScopedTextureBind transferTex(transferFunction->getTransferFunctionTexture(), 6);
+        gl::ScopedTextureBind indexTex(transferFunction->getIndexFunctionTexture(), 7);
+        gl::ScopedTextureBind styleTex(transferFunction->getStyleFunctionTexture(), 8);
+        gl::ScopedTextureBind ambientOcclusionTex(volumeAO, 9);
+
+        // raycast parameters
+        program->uniform("threshold", vec2(transferFunction->getThreshold()) / 255.0f);
+        program->uniform("stepSize", stepSize * stepScale);
+        program->uniform("shadowStepSize", stepSize * shadowStepScale);
+        program->uniform("stepScale", stepScale);
+        program->uniform("iterations", static_cast<int>(maxSize * (1.0f / stepScale) * 2.0f));
+
+        // lighting
+        program->uniform("raycastShadows", RenderingParams::ShadowsEnabled());
+        program->uniform("diffuseShading", RenderingParams::DiffuseShadingEnabled());
+        program->uniform("ambientOcclusion", RenderingParams::SSAOEnabled());
+        program->uniform("light.direction", light.direction);
+        program->uniform("light.ambient", light.ambient);
+        program->uniform("light.diffuse", light.diffuse);
+        gl::setDefaultShaderVars();
+
+        // draw volume to render targets
+        {
+            const gl::ScopedFramebuffer scopedFramebuffer(volumeRBuffer);
+            {
+                const static GLenum buffers[] =
+                {
+                    GL_COLOR_ATTACHMENT0,
+                    GL_COLOR_ATTACHMENT1,
+                    GL_COLOR_ATTACHMENT2,
+                    GL_COLOR_ATTACHMENT3
+                };
+                gl::drawBuffers(4, buffers);
+            }
+            const gl::ScopedViewport scopedViewport(ivec2(0), volumeRBuffer->getSize());
+            gl::clear();
+
+            // draw cube
+            gl::drawElements(gl::toGl(cubeMesh->getPrimitive()), cubeMesh->getNumIndices(),
+                             GL_UNSIGNED_INT, static_cast<GLuint *>(nullptr));
+        }
+    }
+    // post-process
+    {
+        // ambient occlusion
+        {
+            PostProcess::instance().SSAO(volumePosition, volumeNormal, camera);
+            // write blurred result
+            {
+                const gl::ScopedViewport scopedViewport(ivec2(0), volumeAOFbo->getSize());
+                const gl::ScopedMatrices matrices;
+                const gl::ScopedDepth depth(false);
+                const gl::ScopedFramebuffer scopedFramebuffer(volumeAOFbo);
+
+                // translate to center and scale to fit whole screen
+                gl::translate(getWindowCenter());
+                gl::scale(getWindowSize());
+
+                // gaussian filter
+                PostProcess::instance().average(nullptr, false);
+            }
+        }
+
+        // shadow mapping
+        if (RenderingParams::ShadowsEnabled())
+        {
+            // invert the shadow color map so shadower areas are black
+            {
+                PostProcess::instance().inverse(volumeShadows);
+            }
+            // blur to avoid aliasing
+            {
+                PostProcess::instance().blurHorizontal();
+                PostProcess::instance().blurVertical();
+            }
+            // final shadowing
+            {
+                PostProcess::instance().multiply(volumeColor);
+            }
+            
+            // do tonemapping with resulting postprocess's texture
+            PostProcess::instance().toneMapping();
+        }
+        else // tonemapping with volume's texture
+        {
+            PostProcess::instance().toneMapping(volumeColor);
+        }
+
+        // anti aliasing
+        if (RenderingParams::FXAAEnabled())
+        {
+            PostProcess::instance().displayFXAA();
+        }
+        else
+        {
+            PostProcess::instance().displayTexture();
+        }
+    }
+}
+
+void RaycastVolume::resizeFbos()
+{
+    gl::Texture2d::Format hdrFormat = gl::Texture2d::Format().internalFormat(GL_RGBA16F)
+                                                             .magFilter(GL_NEAREST)
+                                                             .minFilter(GL_NEAREST)
+                                                             .wrap(GL_REPEAT)
+                                                             .dataType(GL_FLOAT);
+    gl::Texture2d::Format dataFormat = gl::Texture2d::Format().internalFormat(GL_RGB16F)
+                                                              .magFilter(GL_NEAREST)
+                                                              .minFilter(GL_NEAREST)
+                                                              .wrap(GL_REPEAT)
+                                                              .dataType(GL_FLOAT);
+    gl::Texture2d::Format sFormat = gl::Texture2d::Format().internalFormat(GL_R8)
+                                                           .magFilter(GL_LINEAR)
+                                                           .minFilter(GL_LINEAR)
+                                                           .wrap(GL_REPEAT)
+                                                           .dataType(GL_UNSIGNED_BYTE)
+                                                           .swizzleMask(GL_RED, GL_RED, GL_RED, GL_RED);
+
+    const ivec2 winSize = getWindowSize();
+    const int32_t h = winSize.y;
+    const int32_t w = winSize.x;
+
+    try
+    {
+        // cube positions rendering
+        gl::Fbo::Format frontFormat, backFormat;
+        frontTexture = gl::Texture2d::create(w, h, dataFormat);
+        backTexture = gl::Texture2d::create(w, h, dataFormat);
+        volumeColor = gl::Texture2d::create(w, h, hdrFormat);
+        volumeNormal = gl::Texture2d::create(w, h, dataFormat);
+        volumeShadows = gl::Texture2d::create(w, h, sFormat);
+        volumePosition = gl::Texture2d::create(w, h, dataFormat);
+        volumeAO = gl::Texture2d::create(w, h, sFormat);
+
+        // front fbo
+        frontFormat.attachment(GL_COLOR_ATTACHMENT0, frontTexture);
+        frontFormat.depthBuffer();
+        frontFbo = gl::Fbo::create(w, h, frontFormat);
+
+        // back fbo
+        backFormat.attachment(GL_COLOR_ATTACHMENT0, backTexture);
+        backFormat.depthBuffer();
+        backFbo = gl::Fbo::create(w, h, backFormat);
+
+        // raycast rendering rendertargets
+        gl::Fbo::Format gBufferFormat;
+        gBufferFormat.attachment(GL_COLOR_ATTACHMENT0, volumeColor);
+        gBufferFormat.attachment(GL_COLOR_ATTACHMENT1, volumeNormal);
+        gBufferFormat.attachment(GL_COLOR_ATTACHMENT2, volumeShadows);
+        gBufferFormat.attachment(GL_COLOR_ATTACHMENT3, volumePosition);
+        gBufferFormat.depthBuffer();
+        volumeRBuffer = gl::Fbo::create(w, h, gBufferFormat);
+
+        // ambient occlusion
+        gl::Fbo::Format aoFormat;
+        aoFormat.attachment(GL_COLOR_ATTACHMENT0, volumeAO);
+        aoFormat.depthBuffer();
+        volumeAOFbo = gl::Fbo::create(w, h, aoFormat);
+    }
+    catch (const Exception& e)
+    {
+        CI_LOG_EXCEPTION("Fbo/Renderbuffer create", e);
+    }
+}
+
+void RaycastVolume::extractHistogram()
+{
+    std::array<uint32_t, 256> histogramData = {0};
+    // create shader storage buffer
+    histogramSsbo = gl::Ssbo::create(256 * sizeof(uint32_t), histogramData.data(), GL_DYNAMIC_COPY);
+    histogramSsbo->bindBase(1);
+
+    // compute histogram
+    {
+        // bind histogram compute shader
+        histogramCompute->bind();
+        // volume texture
+        glBindImageTexture(0, volumeTexture->getId(), 0, true, 0, GL_READ_ONLY, GL_R8UI);
+        bindBufferBase(histogramSsbo->getTarget(), 1, histogramSsbo);
+        // compute histogram
+        gl::dispatchCompute(1, 1, 1);
+        // block to ensure completion
+        gl::memoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    }
+
+    // extract histogram values
+    uint32_t* ssboValues = reinterpret_cast<uint32_t*>(histogramSsbo->map(GL_WRITE_ONLY));
+    memcpy(histogramData.data(), ssboValues, 256 * sizeof(uint32_t));
+    histogramSsbo->unmap();
+    // convert to normalized floating values
+    auto maxValue = max_element(histogramData.begin(), histogramData.end());
+
+    // normalize and insert values
+    for (int i = 0; i < 256; i++)
+    {
+        histogram[i] = static_cast<float>(histogramData[i]) / *maxValue;
+    }
+}
+
+void RaycastVolume::generateGradients()
+{
+    auto format = gl::Texture3d::Format().magFilter(GL_LINEAR)
+                                         .minFilter(GL_LINEAR)
+                                         .wrapS(GL_CLAMP_TO_BORDER)
+                                         .wrapR(GL_CLAMP_TO_BORDER)
+                                         .wrapT(GL_CLAMP_TO_BORDER)
+                                         .internalFormat(GL_RG16F);
+    format.setDataType(GL_FLOAT);
+    gradientTexture = gl::Texture3d::create(dimensions.x, dimensions.y, dimensions.z, format);
+
+    // compute gradients
+    {
+        gradientsCompute->bind();
+        // pass textures
+        glBindImageTexture(0, volumeTexture->getId(), 0, true, 0, GL_READ_ONLY, GL_R8UI);
+        glBindImageTexture(1, gradientTexture->getId(), 0, true, 0, GL_WRITE_ONLY, GL_RG16F);
+        // compute gradients
+        gl::dispatchCompute(ceil(dimensions.x / 8), ceil(dimensions.y / 8), ceil(dimensions.z / 8));
+    }
+    // smooth gradients
+    {
+        smoothGradientsCompute->bind();
+        // pass textures
+        glBindImageTexture(0, gradientTexture->getId(), 0, true, 0, GL_READ_WRITE, GL_RG16F);
+        // compute gradients
+        gl::dispatchCompute(ceil(dimensions.x / 8), ceil(dimensions.y / 8), ceil(dimensions.z / 8));
+    }
+}
+
+const std::array<float, 256>& RaycastVolume::getHistogram() const
+{
+    return histogram;
+}
+
+void RaycastVolume::setTransferFunction(const std::shared_ptr<StyleTransferFunction>& transferFunction)
+{
+    this->transferFunction = transferFunction;
+}
+
+void RaycastVolume::setLight(vec3 direction, vec3 ambient, vec3 diffuse)
+{
+    light.direction = direction;
+    light.ambient = ambient;
+    light.diffuse = diffuse;
+}
+
+const Light& RaycastVolume::getLight() const { return light; }
+
+const quat& RaycastVolume::getRotation() const { return modelRotation; }
+
+void RaycastVolume::setRotation(const quat& rotation) { modelRotation = rotation; }
+
+const vec3& RaycastVolume::getPosition() const { return modelPosition; }
+
+void RaycastVolume::setPosition(const vec3& position) { modelPosition = position; }
+
+const gl::Texture2dRef& RaycastVolume::getColorTexture() const
+{
+    return volumeColor;
+}
+
+const gl::Texture2dRef& RaycastVolume::getNormalTexture() const
+{
+    return volumeNormal;
+}
+
+const gl::Texture2dRef& RaycastVolume::getDepthTexture() const
+{
+    return volumeRBuffer->getDepthTexture();
+}
+```
+
+### VolumeStyleRendering/RaycastVolume.h
+```
+#pragma once
+#include <cinder/gl/gl.h>
+#include "Light.h"
+
+class StyleTransferFunction;
+
+/**
+ * \brief Defines a volume rendered with volume raycasting
+ */
+class RaycastVolume
+{
+public:
+    /**
+     * \brief Loads the raw data from the given filepath into a 3d texture
+     * \param dimensions The volume dimensions
+     * \param ratios The volume aspect ratios
+     * \param filepath The volume's raw data filepath
+     * \param is16Bits Determines if the volume is 8 o 16 bits depth
+     */
+    void loadFromFile(const glm::vec3& dimensions, const glm::vec3& ratios, const std::string filepath, bool is16Bits = false);
+    /**
+     * \brief Renders the volume using raycasting to the specified output
+     * \param camera Main rendering camera
+     * \param toRendertargets If true it renders the raycasting result to color, normal and depth render targets
+     */
+
+    void drawVolume(const cinder::Camera& camera);
+    /**
+     * \brief Updates frame buffer objects to the current size of the main window
+     */
+    void resizeFbos();
+
+    explicit RaycastVolume();
+    ~RaycastVolume();
+
+    // getters and setters
+    /**
+     * \brief The volume resides inside a 0-1 bouding box, this returns the post-scale center point
+     * \return The volume center point
+     */
+    glm::vec3 centerPoint() const;
+    /**
+     * \brief Raycasting's step scale
+     * \return The step scale of the raycasting ray
+     */
+    const float &getStepScale() const;
+    /**
+     * \brief Sets the volume raycasting's ray step scale
+     * \param value The new step scale
+     */
+    void setStepScale(const float& value);
+    /**
+    * \brief Raycasting's step scale for the occlusion check ray
+    * \return The step scale of the raycasting ray
+    */
+    const float &getShadowStepScale() const;
+    /**
+    * \brief Sets the volume raycasting's ray step scale for the occlusion check ray
+    * \param value The new step scale
+    */
+    void setShadowStepScale(const float& value);
+    /**
+     * \brief Volume's aspect ratios per axis
+     * \return Volume's aspect ratios
+     */
+    const glm::vec3 &getAspectRatios() const;
+    /**
+     * \brief Sets the volume's aspect ratio
+     * \param value The new aspect ratio
+     */
+    void setAspectratios(const glm::vec3& value);
+    /**
+     * \brief The volume's histogram contains the normalized [0..1] frequencies of each opacity value
+     * \return The volume's data histogram
+     */
+    const std::array<float, 256> &getHistogram() const;
+    /**
+     * \brief Sets the color mapping transfer function, used to set the color of each opacity value
+     * \param transferFunction Color transfer function
+     */
+    void setTransferFunction(const std::shared_ptr<StyleTransferFunction>& transferFunction);
+    /**
+     * \brief Sets the volume raycast directional light
+     * \param direction Light's direction
+     * \param ambient Light's ambient color
+     * \param diffuse Light's diffuse color
+     */
+    void setLight(glm::vec3 direction, glm::vec3 ambient, glm::vec3 diffuse);
+    /**
+     * \brief Directional light used for simple lighting in the volume raycasting
+     * \return The volume raycast's directional light
+     */
+    const Light &getLight() const;
+    /**
+     * \brief The volume's model rotation
+     * \return Model quaternion rotation
+     */
+    const glm::quat &getRotation() const;
+    /**
+     * \brief Sets the volume's model rotation
+     * \param rotation The new rotation
+     */
+    void setRotation(const glm::quat& rotation);
+    /**
+     * \brief The volume's model position
+     * \return 3d position in world space
+     */
+    const glm::vec3 &getPosition() const;
+    /**
+     * \brief Sets the volume's model position in world space
+     * \param position The new volume position in world space
+     */
+    void setPosition(const glm::vec3& position);
+
+    /**
+     * \brief When rendering is done to render targets this texture contains the color output
+     * \return The color output render target
+     */
+    const ci::gl::Texture2dRef &getColorTexture() const;
+    /**
+     * \brief When rendering is done to render targets this texture contains the normal output
+     * \return The normal output render target 
+     */
+    const cinder::gl::Texture2dRef &getNormalTexture() const;
+    /**
+     * \brief When rendering is done to render targets this texture contains the depth output 
+     * \return The depth output render target  
+     */
+    const cinder::gl::Texture2dRef &getDepthTexture() const;
+private:
+    // histogram data
+    std::array<float, 256> histogram;
+
+    // cube for positions
+    ci::TriMeshRef cubeMesh;
+    ci::gl::VboRef cubeVerticesBuffer;
+    ci::gl::VboRef cubeIndicesBuffer;
+    ci::gl::VaoRef cubeVao;
+
+    // volume texture
+    ci::gl::Texture3dRef gradientTexture;
+    ci::gl::Texture3dRef volumeTexture;
+
+    // fbos
+    ci::gl::FboRef frontFbo;
+    ci::gl::FboRef backFbo;
+    ci::gl::FboRef volumeRBuffer;
+    ci::gl::FboRef volumeAOFbo;
+
+    // volume raycast
+    ci::gl::GlslProgRef raycastShaderRendertargets;
+    ci::gl::GlslProgRef positionsProg;
+    std::shared_ptr<StyleTransferFunction> transferFunction;
+
+    // lighting
+    ci::gl::GlslProgRef applyBlurredShadows;
+    Light light;
+
+    // compute shaders
+    ci::gl::SsboRef histogramSsbo;
+    ci::gl::GlslProgRef histogramCompute;
+    ci::gl::GlslProgRef gradientsCompute;
+    ci::gl::GlslProgRef smoothGradientsCompute;
+
+    // render targets
+    ci::gl::Texture2dRef frontTexture;
+    ci::gl::Texture2dRef backTexture;
+    ci::gl::Texture2dRef volumeNormal;
+    ci::gl::Texture2dRef volumeColor;
+    ci::gl::Texture2dRef volumeShadows;
+    ci::gl::Texture2dRef volumePosition;
+    ci::gl::Texture2dRef volumeAO;
+
+    // raycast parameters
+    ci::gl::Texture2dRef noiseTexture;
+    glm::vec3 dimensions;
+    glm::vec3 stepSize;
+    glm::vec3 aspectRatios;
+    glm::vec3 scaleFactor;
+    float stepScale;
+    float shadowStepScale;
+    float maxSize;
+
+    // model
+    bool isDrawable;
+    glm::quat modelRotation;
+    glm::vec3 modelPosition;
+
+    /**
+     * \brief Draws the bounding cube back and front face to the position Rendertargets
+     */
+    void drawCubeFaces() const;
+    /**
+     * \brief Creates the bounding cube vertex buffer object, used for drawing
+     */
+    void createCubeVbo();
+    /**
+     * \brief Reads the raw data at filepath and creates a 3d texture
+     * \param filepath The 8 bits depth raw file path 
+     */
+    void readVolumeFromFile8(const std::string filepath);
+    /**
+     * \brief Reads the raw data at filepath and creates a 3d texture
+     * \param filepath The 18 bits depth raw file path
+     */
+    void readVolumeFromFile16(const std::string filepath);
+    /**
+     * \brief Uses a compute shader to extract the frequency of each opacity value within the volume
+     * and creates a normalized histogram with this data
+     */
+    void extractHistogram();
+    /**
+     * \brief Creates a 3d texture containing the gradient at each voxel and smooths the values using
+     * a 3x3x3 average filter
+     */
+    void generateGradients();
+};
+```
+
+### VolumeStyleRendering/RenderingParams.cpp
+```
+#include <cinder/CinderGlm.h>
+
+#include "RenderingParams.h"
+
+using namespace glm;
+
+float RenderingParams::gammaValue = 2.2f;
+float RenderingParams::exposureValue = 1.0f;
+bool RenderingParams::fxaa = true;
+bool RenderingParams::diffuseShading = true;
+bool RenderingParams::shadows = true;
+bool RenderingParams::ssao = true;
+float RenderingParams::ssaoBias = 0.025f;
+float RenderingParams::ssaoRadius = 0.5f;
+float RenderingParams::ssaoPower = 1.0f;
+
+float RenderingParams::GetExposure() 
+{
+    return exposureValue;
+}
+
+void RenderingParams::SetExposure(const float exposure)
+{
+    exposureValue = min(max(epsilon<float>(), exposure), 8.0f);
+}
+
+float RenderingParams::GetGamma()
+{
+    return gammaValue;
+}
+
+void RenderingParams::SetGamma(const float gamma)
+{
+    gammaValue = min(max(epsilon<float>(), gamma), 10.0f);
+}
+
+void RenderingParams::FXAAEnabled(const bool enabled)
+{
+    fxaa = enabled;
+}
+
+bool RenderingParams::FXAAEnabled()
+{
+    return fxaa;
+}
+
+void RenderingParams::DiffuseShadingEnabled(const bool enabled)
+{
+    diffuseShading = enabled;
+}
+
+bool RenderingParams::DiffuseShadingEnabled()
+{
+    return diffuseShading;
+}
+
+void RenderingParams::ShadowsEnabled(const bool enabled)
+{
+    shadows = enabled;
+}
+
+bool RenderingParams::ShadowsEnabled()
+{
+    return shadows;
+}
+
+void RenderingParams::SSAOEnabled(const bool enabled)
+{
+    ssao = enabled;
+}
+
+bool RenderingParams::SSAOEnabled()
+{
+    return ssao;
+}
+
+void RenderingParams::SSAOBias(const float bias)
+{
+    ssaoBias = clamp(bias, 0.0f, 0.5f);
+}
+
+float RenderingParams::SSAOBias()
+{
+    return ssaoBias;
+}
+
+void RenderingParams::SSAORadius(const float radius)
+{
+    ssaoRadius = clamp(radius, 0.001f, 8.0f);
+}
+
+float RenderingParams::SSAORadius()
+{
+    return ssaoRadius;
+}
+
+void RenderingParams::SSAOPower(const float power)
+{
+    ssaoPower = clamp(power, 0.0f, 32.0f);
+}
+
+float RenderingParams::SSAOPower()
+{
+    return ssaoPower;
+}
+```
+
+### VolumeStyleRendering/RenderingParams.h
+```
+#pragma once
+class RenderingParams
+{
+public:
+    static float GetExposure();
+    static void SetExposure(const float exposure);
+    static float GetGamma();
+    static void SetGamma(const float gamma);
+    static void FXAAEnabled(const bool enabled);
+    static bool FXAAEnabled();
+    static void DiffuseShadingEnabled(const bool enabled);
+    static bool DiffuseShadingEnabled();
+    static void ShadowsEnabled(const bool enabled);
+    static bool ShadowsEnabled();
+    static void SSAOEnabled(const bool enabled);
+    static bool SSAOEnabled();
+    static void SSAOBias(const float bias);
+    static float SSAOBias();
+    static void SSAORadius(const float radius);
+    static float SSAORadius();
+    static void SSAOPower(const float power);
+    static float SSAOPower();
+private:
+    static float gammaValue;
+    static float exposureValue;
+    static bool fxaa;
+    static bool diffuseShading;
+    static bool shadows;
+    static bool ssao;
+    static float ssaoBias;
+    static float ssaoRadius;
+    static float ssaoPower;
+};
+```
+
+### VolumeStyleRendering/StyleTransferFunction.cpp
+```
+#include "StyleTransferFunction.h"
+#include <cinder/ip/Resize.h>
+#include <cinder/app/AppBase.h>
+using namespace glm;
+using namespace ci;
+using namespace app;
+std::vector<Style> Style::styles(0);
+
+StylePoint::StylePoint(): styleIndex(-1) {}
+
+StylePoint::StylePoint(int isoValue, unsigned styleIndex): TransferFunctionPoint(isoValue),
+                                                           styleIndex(styleIndex) {}
+
+int StylePoint::getStyleIndex() const { return styleIndex; }
+
+const Style& StylePoint::getStyle() const
+{
+    if (styleIndex < 0 || styleIndex >= Style::GetAvailableStyles().size()) { return Style::GetDefaultStyle(); }
+
+    return Style::GetAvailableStyles()[styleIndex];
+}
+
+void StylePoint::setStyle(unsigned int index)
+{
+    if (Style::GetAvailableStyles().empty()) { styleIndex = -1; }
+
+    styleIndex = clamp(static_cast<int>(index), 0, static_cast<int>(Style::GetAvailableStyles().size()) - 1);
+}
+
+void Style::AddStyle(const std::string& name, const std::string& filepath)
+{
+    // max number of styles
+    if (styles.size() > 127) { return; }
+
+    // check if filepath has been already loaded
+    for (auto& s : styles) { if (s.filepath == filepath) return; }
+
+    // resize image to fit within 2d array of textures
+    Surface baseImage = loadImage(filepath);
+    Surface resizedImage(512, 512, true, SurfaceChannelOrder::RGBA);
+    ip::resize(baseImage, &resizedImage);
+    auto texture = gl::Texture2d::create(resizedImage, gl::Texture2d::Format()
+                                         .wrap(GL_CLAMP_TO_BORDER)
+                                         .minFilter(GL_LINEAR)
+                                         .magFilter(GL_LINEAR)
+                                         .internalFormat(GL_RGBA8));
+    auto style = Style(name, resizedImage, texture, filepath);
+
+    styles.push_back(style);
+    styles.back().name = style.name.substr(0, 32);
+}
+
+void Style::RemoveStyle(const int index)
+{
+    if (index <= 0 || index >= styles.size()) { return; }
+
+    styles.erase(styles.begin() + index);
+}
+
+void Style::RenameStyle(const int index, const std::string& name)
+{
+    if (index <= 0 || index >= styles.size() || name.empty()) { return; }
+
+    styles[index].name = name.substr(0, 32);
+}
+
+const std::vector<Style>& Style::GetAvailableStyles()
+{
+    if (styles.empty()) { GetDefaultStyle(); }
+
+    return styles;
+}
+
+StyleTransferFunction::StyleTransferFunction(): textureDataChanged(false)
+{
+    transferFunction.resize(256);
+    // transfer function texture has a fixed size initialize at once
+    transferFunctionTexture = gl::Texture1d::create(256, gl::Texture1d::Format()
+                                                    .internalFormat(GL_RG16F)
+                                                    .wrap(GL_REPEAT)
+                                                    .minFilter(GL_LINEAR)
+                                                    .magFilter(GL_LINEAR));
+    // styles function texture has a fixed max size initialize at once
+    auto stylesFormat = gl::Texture3d::Format().target(GL_TEXTURE_2D_ARRAY)
+                                               .magFilter(GL_LINEAR)
+                                               .minFilter(GL_LINEAR)
+                                               .wrap(GL_CLAMP_TO_EDGE)
+                                               .internalFormat(GL_RGBA);
+    styleFunctionTexture = gl::Texture3d::create(512, 512, 128, stylesFormat);
+}
+
+StyleTransferFunction::~StyleTransferFunction() {}
+
+void StyleTransferFunction::addStylePoint(const StylePoint& style)
+{
+    if (style.getIsoValue() <= 0 || style.getIsoValue() >= 255 || stylePoints.size() > 255) { return; }
+
+    // sorted insert
+    stylePoints.insert(upper_bound(stylePoints.begin(), stylePoints.end(), style), style);
+    updateFunction();
+}
+
+void StyleTransferFunction::removeStylePoint(const int index)
+{
+    // off limits
+    if (index < 0 || index >= stylePoints.size()) { return; }
+
+    stylePoints.erase(stylePoints.begin() + index);
+    updateFunction();
+}
+
+void StyleTransferFunction::setStylePoint(const int index, const int styleIndex)
+{
+    // off limits
+    if (index < 0 || index >= stylePoints.size()) { return; }
+
+    stylePoints[index].setStyle(clamp(styleIndex, 0, static_cast<int>(Style::GetAvailableStyles().size()) - 1));
+    updateFunction();
+}
+
+void StyleTransferFunction::updateFunction()
+{
+    // call base method to update splines
+    TransferFunction::updateFunction();
+
+    // build style transfer function data
+    indexFunction.clear();
+    // first point no texture
+    indexFunction.push_back(-1);
+
+    for (auto& p : stylePoints) { indexFunction.push_back(p.getStyleIndex()); }
+    for (int i = 0; i < transferFunction.size(); i++) { transferFunction[i].y = getColor(i).a; }
+
+    if (!stylePoints.empty())
+    {
+        int limit = stylePoints.front().getIsoValue();
+        // zero to first control point iso value linear interpolation
+        for (int i = 0; i < limit; i++)
+        {
+            float start = 0.0f;
+            float end = 1.0f;
+            float t = static_cast<float>(i) / limit;
+            transferFunction[i].x = lerp(start, end, t);
+        }
+
+        for (int j = 0; j < stylePoints.size() - 1; j++)
+        {
+            int limitStart = stylePoints[j].getIsoValue();
+            int limitEnd = stylePoints[j + 1].getIsoValue();
+
+            for (int i = limitStart; i < limitEnd; i++)
+            {
+                float start = j + 1;
+                float end = j + 2;
+                float t = static_cast<float>(i - limitStart) / (limitEnd - limitStart);
+                transferFunction[i].x = lerp(start, end, t);
+            }
+        }
+
+        limit = stylePoints.back().getIsoValue();
+        // last control point to last iso value linear interpolation
+        for (int i = limit; i < 256; i++)
+        {
+            float start = stylePoints.size();
+            float end = stylePoints.size() + 1;
+            float t = (float)(i - limit) / (255 - limit);
+            transferFunction[i].x = lerp(start, end, t);
+        }
+    }
+
+    // last point
+    indexFunction.push_back(-1);
+    // needs to update textures 
+    textureDataChanged = true;
+}
+
+const std::vector<StylePoint>& StyleTransferFunction::getStylePoints() const
+{
+    return stylePoints;
+}
+
+void StyleTransferFunction::setStylePointIsoValue(const int index, const int isoValue)
+{
+    // off limits
+    if (index < 0 || index >= stylePoints.size()) { return; }
+
+    // off limits iso val
+    if (isoValue <= 0 || isoValue >= 255) { return; }
+
+    stylePoints[index].setIsoValue(isoValue);
+
+    // function points may need sorting after modiying sorting token, isoValue
+    bool needSorting = !is_sorted(stylePoints.begin(), stylePoints.end());
+
+    if (needSorting) { sort(stylePoints.begin(), stylePoints.end()); }
+
+    updateFunction();
+}
+
+void StyleTransferFunction::updateTextures()
+{
+    // update tft with new data
+    transferFunctionTexture->update(transferFunction.data(), GL_RG, GL_FLOAT, 0, 256, 0);
+
+    // create ift according to size
+    static auto iftFormat = gl::Texture1d::Format().minFilter(GL_NEAREST)
+                                                   .magFilter(GL_NEAREST)
+                                                   .wrap(GL_CLAMP_TO_BORDER)
+                                                   .internalFormat(GL_R32I);
+    iftFormat.setDataType(GL_INT);
+    indexFunctionTexture = gl::Texture1d::create(indexFunction.data(), GL_RED_INTEGER, indexFunction.size(),
+                                                 iftFormat);
+
+    // update styles function
+    int index = 0;
+
+    for (auto& style : Style::GetAvailableStyles())
+    {
+        styleFunctionTexture->update(style.getSurface().getData(), GL_RGBA, GL_UNSIGNED_BYTE, 0, 512, 512, 1,
+                                     0, 0, index++);
+    }
+
+    textureDataChanged = false;
+}
+
+const gl::Texture1dRef& StyleTransferFunction::getTransferFunctionTexture()
+{
+    if (textureDataChanged)
+    {
+        updateTextures();
+    }
+
+    return transferFunctionTexture;
+}
+
+const gl::Texture1dRef& StyleTransferFunction::getIndexFunctionTexture()
+{
+    if (textureDataChanged)
+    {
+        updateTextures();
+    }
+
+    return indexFunctionTexture;
+}
+
+const gl::Texture3dRef& StyleTransferFunction::getStyleFunctionTexture()
+{
+    if (textureDataChanged)
+    {
+        updateTextures();
+    }
+
+    return styleFunctionTexture;
+}
+
+void StyleTransferFunction::reset()
+{
+    stylePoints.clear();
+    TransferFunction::reset();
+}
+
+const Style& Style::GetDefaultStyle()
+{
+    if (styles.empty())
+    {
+        Surface baseImage = loadImage(loadAsset("images/default.png"));
+        Surface resizedImage(512, 512, true, SurfaceChannelOrder::RGBA);
+        ip::resize(baseImage, &resizedImage);
+        auto texture = gl::Texture2d::create(resizedImage);
+        styles.push_back(Style("Default", resizedImage, texture, getAssetPath("images/default.png").string()));
+
+        return styles.back();
+    }
+
+    return styles[0];
+}
+```
+
+### VolumeStyleRendering/StyleTransferFunction.h
+```
+#pragma once
+#include <cinder/gl/gl.h>
+#include "TransferFunction.h"
+
+class Style
+{
+public:
+    static void AddStyle(const std::string &name, const std::string &filepath);
+    static void RemoveStyle(const int index);
+    static void RenameStyle(const int index, const std::string& name);
+    static const std::vector<Style> &GetAvailableStyles();
+    static const Style &GetDefaultStyle();
+
+    const std::string &getName() const { return name; }
+    const std::string &getFilepath() const { return filepath; }
+    const ci::gl::Texture2dRef &getTexture() const { return litsphereTexture; }
+    const ci::Surface &getSurface() const { return litsphere; }
+
+    Style() = default;
+    Style(const std::string &name, const ci::Surface &surface, const ci::gl::Texture2dRef &texture, const std::string &filepath)
+    {
+        this->name = name;
+        this->litsphere = surface;
+        this->litsphereTexture = texture;
+        this->filepath = filepath;
+    }
+private:
+    std::string name;
+    ci::Surface litsphere;
+    ci::gl::Texture2dRef litsphereTexture;
+    std::string filepath;
+    static std::vector<Style> styles;
+};
+
+class StylePoint : public TransferFunctionPoint
+{
+public:
+    StylePoint();
+    StylePoint(int isoValue, unsigned styleIndex);
+    int getStyleIndex() const;
+    const Style &getStyle() const;
+    void setStyle(unsigned int index);
+private:
+    int styleIndex;
+};
+
+class StyleTransferFunction : public TransferFunction
+{
+public:
+    StyleTransferFunction();
+    ~StyleTransferFunction();
+
+    void addStylePoint(const StylePoint& style);
+    void removeStylePoint(const int index);
+    void setStylePoint(const int index, const int styleIndex);
+    void updateFunction() override;
+    const std::vector<StylePoint> &getStylePoints() const;
+    void setStylePointIsoValue(const int index, const int isoValue);
+    void updateTextures();
+    const ci::gl::Texture1dRef &getTransferFunctionTexture();
+    const ci::gl::Texture1dRef &getIndexFunctionTexture();
+    const ci::gl::Texture3dRef &getStyleFunctionTexture();
+    void reset() override;
+private:
+    std::vector<StylePoint> stylePoints;
+    std::vector<glm::vec2> transferFunction;
+    std::vector<int> indexFunction;
+    bool textureDataChanged;
+
+    ci::gl::Texture1dRef transferFunctionTexture;
+    ci::gl::Texture1dRef indexFunctionTexture;
+    ci::gl::Texture3dRef styleFunctionTexture;
+};
+```
+
+### VolumeStyleRendering/StyleTransferFunctionUi.cpp
+```
+#include <CinderImGui.h>
+#include <cinder/ip/Resize.h>
+
+#include "StyleTransferFunctionUi.h"
+#include "RaycastVolume.h"
+
+using namespace glm;
+using namespace ci;
+
+void StyleTransferFunctionUi::drawThresholdControl() const
+{
+    // draw threshold indicator
+    const ImVec2 p = ui::GetCursorScreenPos();
+    ImDrawList* drawList = ui::GetWindowDrawList();
+    auto width = ui::GetContentRegionAvailWidth();
+    ImU32 gray = ImColor(0.5f, 0.5f, 0.5f, 0.5f);
+    float x = p.x;
+    float y = p.y - 35.0f - 4.0f;
+    float steps = width / 255;
+    ImGuiStyle& style = ui::GetStyle();
+    auto threshold = transferFunction->getThreshold();
+
+    if (threshold.x > 0)
+    {
+        drawList->AddRectFilled(ImVec2(x, y - 120), ImVec2(x + threshold.x * steps, y), gray, style.FrameRounding);
+    }
+
+    if (threshold.y < 255)
+    {
+        drawList->AddRectFilled(ImVec2(x + threshold.y * steps, y - 120), ImVec2(x + 255 * steps, y), gray,
+                                style.FrameRounding);
+    }
+
+    // draw threshold controls
+    ui::BeginGroup();
+    ui::PushItemWidth(-2.0f);
+
+    if (ui::SliderInt2("##Threshold", value_ptr(threshold), 0, 255))
+    {
+        transferFunction->setThreshold(threshold.x, threshold.y);
+        transferFunction->updateFunction();
+    }
+
+    ui::PopItemWidth();
+    ui::EndGroup();
+}
+
+void StyleTransferFunctionUi::drawUi(bool& open, const RaycastVolume& volume)
+{
+    if (open)
+    {
+        if(!ui::Begin("Transfer Function", &open, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ui::End();
+            return;
+        }
+
+        drawHistogram(volume);
+        drawControlPointsUi();
+        drawThresholdControl();
+        drawControlPointCreationUi();
+        ui::End();
+    }
+
+    drawTransferFunctionsManager();
+}
+
+JsonTree StyleTransferFunctionUi::buildTransferFunctionJSON() const
+{
+    JsonTree functionJson;
+    functionJson.addChild(JsonTree("threshold", "")
+        .addChild(JsonTree("x", transferFunction->getThreshold().x))
+        .addChild(JsonTree("y", transferFunction->getThreshold().y)));
+
+    auto jAlphaP = JsonTree::makeArray("alpha_points");
+
+    for (auto& p : transferFunction->getAlphaPoints())
+    {
+        JsonTree aPoint;
+        aPoint.addChild(JsonTree("iso_value", p.getIsoValue()))
+              .addChild(JsonTree("alpha", p.getAlpha()));
+        jAlphaP.addChild(aPoint);
+    }
+
+    functionJson.addChild(jAlphaP);
+    auto jColorP = JsonTree::makeArray("color_points");
+
+    for (auto& p : transferFunction->getColorPoints())
+    {
+        auto& color = p.getColor();
+        JsonTree cPoint;
+        cPoint.addChild(JsonTree("iso_value", p.getIsoValue()));
+        cPoint.addChild(JsonTree::makeArray("color")
+            .addChild(JsonTree("", color.x))
+            .addChild(JsonTree("", color.y))
+            .addChild(JsonTree("", color.z)));
+        jColorP.addChild(cPoint);
+    }
+
+    functionJson.addChild(jColorP);
+    auto jStyleP = JsonTree::makeArray("style_points");
+
+    for (auto& p : transferFunction->getStylePoints())
+    {
+        JsonTree sPoint;
+        sPoint.addChild(JsonTree("iso_value", p.getIsoValue()))
+              .addChild(JsonTree("style", "")
+              .addChild(JsonTree("path", p.getStyle().getFilepath()))
+              .addChild(JsonTree("name", p.getStyle().getName())));
+        jStyleP.addChild(sPoint);
+    }
+
+    functionJson.addChild(jStyleP);
+
+    return functionJson;
+}
+
+void StyleTransferFunctionUi::loadTransferFunctionJSON(const JsonTree& second) const
+{
+    transferFunction->setThreshold(second["threshold"]["x"].getValue<int>(),
+                                   second["threshold"]["y"].getValue<int>());
+
+    // clear the transfer function control points
+    transferFunction->reset();
+
+    for (auto& aP : second["alpha_points"].getChildren())
+    {
+        int isoVal = aP["iso_value"].getValue<int>();
+
+        if (isoVal > 0 && isoVal < 256)
+        {
+            transferFunction->addAlphaPoint(aP["alpha"].getValue<float>(), isoVal);
+        }
+        else
+        {
+            transferFunction->setAlpha(isoVal == 0 ? 0 : transferFunction->getAlphaPoints().size() - 1,
+                                       aP["alpha"].getValue<float>());
+        }
+    }
+
+    for (auto& cP : second["color_points"].getChildren())
+    {
+        vec3 color;
+        int i = 0;
+        int isoVal = cP["iso_value"].getValue<int>();
+
+        for (auto& c : cP["color"].getChildren())
+        {
+            color[i++] = c.getValue<float>();
+        }
+
+        if (isoVal > 0 && isoVal < 256)
+        {
+            transferFunction->addColorPoint(color, isoVal);
+        }
+        else
+        {
+            transferFunction->setColor(isoVal == 0 ? 0 : transferFunction->getAlphaPoints().size() - 1,
+                                       color);
+        }
+    }
+
+    auto& styles = Style::GetAvailableStyles();
+
+    for (auto& sP : second["style_points"].getChildren())
+    {
+        auto isoVal = sP["iso_value"].getValue<int>();
+        auto name = sP["style"]["name"].getValue();
+        auto path = sP["style"]["path"].getValue();
+        auto styleIndex = -1;
+
+        auto sourceRef = loadImage(path);
+
+        if(sourceRef)
+        {
+            Style::AddStyle(name, path);
+
+            for (int i = 0; i < styles.size(); i++)
+            {
+                if (styles[i].getFilepath() == path)
+                {
+                    styleIndex = i;
+                    break;
+                }
+            }
+
+            transferFunction->addStylePoint(StylePoint(isoVal, styleIndex));
+        }
+        else { transferFunction->addStylePoint(StylePoint(isoVal, 0)); }
+    }
+}
+
+StyleTransferFunctionUi::StyleTransferFunctionUi() : showTFManager(false)
+{
+    transferFunction = std::make_shared<StyleTransferFunction>();
+    // build initial data for json tree
+    buildTransferFunctionJSON();
+}
+
+StyleTransferFunctionUi::~StyleTransferFunctionUi() {}
+
+const std::shared_ptr<StyleTransferFunction>& StyleTransferFunctionUi::getTranferFunction() const
+{
+    return transferFunction;
+}
+
+void StyleTransferFunctionUi::drawHistogram(const RaycastVolume& volume) const
+{
+    ui::BeginGroup();
+    auto& histogram = volume.getHistogram();
+    ui::PlotHistogram("##histogram", histogram.data(), histogram.size(), 0, nullptr, 0.0f, 1.0f, ImVec2(520, 120));
+    ui::EndGroup();
+}
+
+int StyleTransferFunctionUi::stylesManagerPopup() const
+{
+    auto selectedStyle = -2;
+    auto styleCount = "   (" + std::to_string(Style::GetAvailableStyles().size()) + "/128)";
+
+    if (ui::BeginPopupModal("Styles Manager", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ui::BeginChild("##styleList", ImVec2(app::getWindowWidth() * .3, app::getWindowHeight() * .7), true);
+        static ImU32 gray = ImColor(0.5f, 0.5f, 0.5f, 0.5f);
+        ImDrawList* drawList = ui::GetWindowDrawList();
+        ImGuiStyle& uiStyle = ui::GetStyle();
+
+        // copy vector of styles
+        auto styles = Style::GetAvailableStyles();
+
+        for (int i = 0; i < styles.size(); i++)
+        {
+            auto& style = styles[i];
+            auto cursor = ui::GetCursorScreenPos();
+            auto name = style.getName();
+
+            // background rect for style
+            drawList->AddRectFilled(cursor, ImVec2(cursor.x + ui::GetContentRegionAvailWidth(), cursor.y + 76),
+                                    gray, uiStyle.FrameRounding);
+
+            ui::Dummy(ImVec2(0, 4));
+            ui::BeginGroup();
+            ui::Indent(4);
+            ui::Image(style.getTexture(), ImVec2(64, 64));
+
+            if (ui::IsItemHovered())
+            {
+                ui::SetTooltip(style.getFilepath().c_str());
+            }
+
+            ui::Unindent(4);
+            ui::EndGroup();
+            ui::SameLine();
+            ui::PushID(style.getFilepath().c_str());
+            ui::BeginGroup();
+
+            if (ui::InputText("Name", &name)) { Style::RenameStyle(i, name); }
+
+            int inputHeight = ui::GetItemRectSize().y;
+            int width = ui::GetContentRegionAvailWidth();
+
+            if (ui::Button("Select", ImVec2(width * .5 - 6, 64 - inputHeight)))
+            {
+                ui::CloseCurrentPopup();
+                selectedStyle = i;
+            }
+
+            ui::SameLine();
+
+            if (i > 0 && ui::Button("Delete", ImVec2(width * .5 - 6, 64 - inputHeight)))
+            {
+                Style::RemoveStyle(i--);
+            }
+
+            ui::EndGroup();
+            ui::PopID();
+            ui::Dummy(ImVec2(ui::GetContentRegionAvailWidth(), 4));
+        }
+
+        ui::EndChild();
+        ui::TextDisabled(styleCount.c_str());
+
+        if (ui::Button("Load Litsphere / Matcap", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+        {
+            static fs::path fsPath;
+            fsPath = app::getOpenFilePath(fsPath, {"png", "jpg", "bmp"});
+
+            if (!fsPath.empty())
+            {
+                Style::AddStyle(fsPath.filename().string(), fsPath.string());
+            }
+        }
+
+        if (ui::Button("Cancel", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+        {
+            ui::CloseCurrentPopup();
+            selectedStyle = -1;
+        }
+
+        ui::EndPopup();
+    }
+
+    return selectedStyle;
+}
+
+void StyleTransferFunctionUi::drawControlPointsUi() const
+{
+    const ImVec2 p = ui::GetCursorScreenPos();
+    ImDrawList* drawList = ui::GetWindowDrawList();
+    int width = ui::GetContentRegionAvailWidth() - 4.0f;
+    ImU32 white = ImColor(1.0f, 1.0f, 1.0f, 1.0f);
+    ImU32 black = ImColor(0.0f, 0.0f, 0.0f, 1.0f);
+    float sz = 20.0f;
+    float x = p.x + 4.0f;
+    float y = p.y + 4.0f;
+    float step = static_cast<float>(width) / 256;
+    auto& colorPoints = transferFunction->getColorPoints();
+    auto& alphaPoints = transferFunction->getAlphaPoints();
+    auto& stylePoints = transferFunction->getStylePoints();
+
+    for (int i = 0; i < 256; i++)
+    {
+        const auto& color = transferFunction->getColor(i);
+        ImU32 col32 = ImColor(color);
+        // draw color transfer function
+        drawList->AddLine(ImVec2(x, y), ImVec2(x, y + sz), col32, 2.0f * step);
+        x += step;
+    }
+
+    for (auto& colorP : colorPoints)
+    {
+        const auto& color = colorP.getColor();
+        ImU32 col32 = ImColor(color.r, color.g, color.b, 1.0f);
+        ImU32 invCol32 = ImColor(1.0f - color.r, 1.0f - color.g, 1.0f - color.b, 1.0f);
+        drawList->AddCircleFilled(ImVec2(p.x + step * colorP.getIsoValue() + 4.0f, y + sz), 5, col32, 24);
+        drawList->AddCircle(ImVec2(p.x + step * colorP.getIsoValue() + 4.0f, y + sz), 5, invCol32, 24);
+    }
+    
+    for (auto& styleP : stylePoints)
+    {
+        const auto img = (void*)(intptr_t)styleP.getStyle().getTexture()->getId();
+        drawList->AddImage(img, ImVec2(p.x + step * styleP.getIsoValue() + 4.0f - 8, y - 8),
+                           ImVec2(p.x + step * styleP.getIsoValue() + 4.0f + 16 - 8, y + 16 - 8));
+    }
+
+    for (int i = 0; i < 255; i++)
+    {
+        auto aBegin = clamp(1.0f - transferFunction->getColor(i).a, 0.0f, 1.0f);
+        auto aEnd = clamp(1.0f - transferFunction->getColor(i + 1).a, 0.0f, 1.0f);
+        drawList->AddLine(ImVec2(p.x + step * i + 4.0f, y - 124.0f + aBegin * 120),
+                          ImVec2(p.x + step * (i + 1) + 4.0f, y - 124.0f + aEnd * 120), white, 2);
+    }
+
+    for (auto& alphaP : alphaPoints)
+    {
+        const auto& alpha = 1.0f - alphaP.getAlpha();
+        ImU32 opacity = ImColor(1.0f - vec4(alpha));
+        drawList->AddCircleFilled(ImVec2(p.x + step * alphaP.getIsoValue() + 4.0f, y - 124.0f + alpha * 120),
+                                  5, opacity, 24);
+        drawList->AddCircle(ImVec2(p.x + step * alphaP.getIsoValue() + 4.0f, y - 124.0f + alpha * 120),
+                            5, black, 24);
+    }
+
+    ui::Dummy(ImVec2(width, sz + 15.0f));
+}
+
+void StyleTransferFunctionUi::drawPointIsoValueControl(const TransferFunctionPoint& p, const int index, int pointType) const
+{
+    int pIso = p.getIsoValue();
+    ui::SameLine();
+    ui::PushItemWidth(-30);
+
+    if (p.getIsoValue() != 0 && p.getIsoValue() != 255)
+    {
+        if (ui::SliderInt("##isoValA", &pIso, 1, 254))
+        {
+            pIso = min(max(pIso, 1), 254);
+            pointType == 0 ? transferFunction->setAlphaPointIsoValue(index, pIso)
+                : pointType == 1 ? transferFunction->setColorPointIsoValue(index, pIso)
+                : transferFunction->setStylePointIsoValue(index, pIso);
+        }
+    }
+    else if (p.getIsoValue() == 0 || p.getIsoValue() == 255)
+    {
+        ui::PushStyleColor(ImGuiCol_Button, ImVec4(vec4(0.5f)));
+        ui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(vec4(0.5f)));
+        ui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(vec4(0.5f)));
+        ui::Button(std::to_string(p.getIsoValue()).c_str(),
+                   ImVec2(ui::GetContentRegionAvailWidth() - 30, 0));
+        ui::PopStyleColor(3);
+    }
+
+    ui::PopItemWidth();
+}
+
+void StyleTransferFunctionUi::drawAlphaPointList() const
+{
+    for (auto i = 0; i < transferFunction->getAlphaPoints().size(); i++)
+    {
+        auto& alphaP = transferFunction->getAlphaPoints()[i];
+        auto pAlpha = alphaP.getAlpha();
+
+        ui::PushID(&alphaP);
+        ui::PushItemWidth(ui::GetContentRegionAvailWidth() * 0.5f);
+
+        if (ui::DragFloat("##alpha", &pAlpha, 0.01f, 0.0f, 1.0f))
+        {
+            transferFunction->setAlpha(i, pAlpha);
+        }
+
+        ui::PopItemWidth();
+        drawPointIsoValueControl(alphaP, i, 0);
+
+        if (alphaP.getIsoValue() != 0 && alphaP.getIsoValue() != 255)
+        {
+            ui::SameLine();
+
+            if (ui::Button("X", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+            {
+                transferFunction->removeAlphaPoint(i--);
+            }
+        }
+
+        ui::PopID();
+    }
+}
+
+void StyleTransferFunctionUi::drawColorPointList() const
+{
+    for (auto i = 0; i < transferFunction->getColorPoints().size(); i++)
+    {
+        auto& colorP = transferFunction->getColorPoints()[i];
+        auto pColor = colorP.getColor();
+
+        ui::PushID(&colorP);
+        ui::PushItemWidth(ui::GetContentRegionAvailWidth() * 0.5f);
+
+        if (ui::ColorEdit3("##color", value_ptr(pColor)))
+        {
+            transferFunction->setColor(i, pColor);
+        }
+
+        ui::PopItemWidth();
+        drawPointIsoValueControl(colorP, i, 1);
+
+        if (colorP.getIsoValue() != 0 && colorP.getIsoValue() != 255)
+        {
+            ui::SameLine();
+
+            if (ui::Button("X", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+            {
+                transferFunction->removeColorPoint(i--);
+            }
+        }
+
+        ui::PopID();
+    }
+}
+
+void StyleTransferFunctionUi::drawStylePointList() const
+{
+    static bool showStyleManager = false;
+    static int stylePointChangeIndex = -1;
+    static int height = 1;
+
+    for (auto i = 0; i < transferFunction->getStylePoints().size(); i++)
+    {
+        auto& styleP = transferFunction->getStylePoints()[i];
+        // copy style struct
+        auto style = styleP.getStyle();
+
+        ui::PushID(&styleP);
+        ui::Image(style.getTexture(), ImVec2(height, height));
+        ui::SameLine();
+        ui::PushItemWidth(ui::GetContentRegionAvailWidth() * 0.4f - 32);
+
+        auto name = style.getName();
+
+        if (ui::InputText("##name", &name)) { Style::RenameStyle(styleP.getStyleIndex(), name); }
+
+        ui::PopItemWidth();
+        ui::SameLine();
+
+        if (ui::Button("Change Style"))
+        {
+            showStyleManager = true;
+            stylePointChangeIndex = i;
+        }
+
+        height = ui::GetItemRectSize().y;
+        drawPointIsoValueControl(styleP, i, 2);
+        ui::SameLine();
+
+        if (ui::Button("X", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+        {
+            transferFunction->removeStylePoint(i--);
+        }
+
+        ui::PopID();
+    }
+
+    if (showStyleManager && stylePointChangeIndex >= 0)
+    {
+        ui::OpenPopup("Styles Manager");
+        auto styleIndex = stylesManagerPopup();
+        showStyleManager = styleIndex == -2;
+
+        if (styleIndex >= 0)
+        {
+            transferFunction->setStylePoint(stylePointChangeIndex, styleIndex);
+            stylePointChangeIndex = -1;
+        }
+    }
+}
+
+void StyleTransferFunctionUi::drawControlPointList(int pointType) const
+{
+    // draw control point list
+    if (pointType == 0 ? ui::TreeNode("Alpha Points")
+            : pointType == 1 ? ui::TreeNode("Color Points")
+            : ui::TreeNode("Style Points"))
+    {
+        ui::BeginGroup();
+        ui::BeginChild(ui::GetID((void*)(intptr_t)pointType), ImVec2(ui::GetContentRegionAvailWidth(), 120), true);
+
+        if (pointType == 0)
+        {
+            drawAlphaPointList();
+        }
+        else if (pointType == 1)
+        {
+            drawColorPointList();
+        }
+        else if (pointType == 2)
+        {
+            drawStylePointList();
+        }
+
+        ui::EndChild();
+        ui::EndGroup();
+        ui::TreePop();
+    }
+}
+
+void StyleTransferFunctionUi::drawTransferFunctionsManager()
+{
+    if (showTFManager)
+    {
+        if(!ui::Begin("Transfer Functions", &showTFManager, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ui::End();
+            return;
+        }
+
+        ui::BeginChild("##functions", ImVec2(250, 300), true);
+        static int selectedIndex = 0;
+        int selectedId = 0;
+        int removeIndex = -1;
+
+        for (auto& f : savedTransferFunctions)
+        {
+            ui::PushID(&f);
+            ui::BeginGroup();
+            ui::InputText("##name", &f.first);
+            ui::SameLine();
+
+            if (ui::RadioButton("##select", &selectedIndex, selectedId++))
+            {
+                loadTransferFunctionJSON(f.second);
+            }
+
+            ui::SameLine();
+
+            if (ui::Button("X")) { removeIndex = selectedId - 1; }
+
+            ui::EndGroup();
+            ui::PopID();
+        }
+
+        ui::EndChild();
+
+        if (ui::Button("Add"))
+        {
+            savedTransferFunctions.push_back({"New Function", buildTransferFunctionJSON()});
+        }
+
+        ui::SameLine();
+
+        if (ui::Button("Save"))
+        {
+            static fs::path fsPath;
+            fsPath = app::getSaveFilePath(fsPath, {"stf"});
+
+            if (!fsPath.empty())
+            {
+                if (!fsPath.has_extension()) fsPath += ".stf";
+
+                buildTransferFunctionJSON().write(fsPath);
+            }
+        }
+
+        ui::SameLine();
+
+        if (ui::Button("Load"))
+        {
+            static fs::path fsPath;
+            fsPath = app::getOpenFilePath(fsPath, {"stf"});
+
+            if (!fsPath.empty())
+            {
+                savedTransferFunctions.push_back({fsPath.filename().string(), JsonTree(loadFile(fsPath))});
+                loadTransferFunctionJSON(savedTransferFunctions.back().second);
+                selectedIndex = savedTransferFunctions.size() - 1;
+            }
+        }
+
+        ui::End();
+
+        if (removeIndex >= 0) { savedTransferFunctions.erase(savedTransferFunctions.begin() + removeIndex); }
+    }
+}
+
+void StyleTransferFunctionUi::drawControlPointCreationUi()
+{
+    // creation bar
+    static int pointType = 0;
+    static int isoValue = 127;
+    static float alpha;
+    static vec3 color;
+    static bool showStylesManager = false;
+    static StylePoint stylePoint;
+
+    ui::BeginGroup();
+    ui::Separator();
+    ui::Text("Point Type: ");
+    ui::SameLine();
+    ui::RadioButton("Alpha", &pointType, 0);
+    ui::SameLine();
+    ui::RadioButton("Color", &pointType, 1);
+    ui::SameLine();
+    ui::RadioButton("Style", &pointType, 2);
+
+    // iso value bar
+    ui::SliderInt("Iso Value", &isoValue, 1, 254);
+    ImVec2 sliderSize = ui::GetItemRectSize();
+
+    // alpha point
+    if (pointType == 0)
+    {
+        ui::DragFloat("Alpha", &alpha, 0.01f, 0.0f, 1.0f);
+    }
+    else if (pointType == 1) // color point
+    {
+        ui::ColorEdit3("Color", value_ptr(color));
+    }
+    else if (pointType == 2) // style point
+    {
+        if (stylePoint.getStyleIndex() >= 0)
+        {
+            stylePoint.setIsoValue(isoValue);
+            auto& style = stylePoint.getStyle();
+            ui::Image(style.getTexture(), ImVec2(sliderSize.y, sliderSize.y));
+            ui::SameLine();
+
+            if (ui::Button(style.getName().c_str(), ImVec2(sliderSize.x - sliderSize.y - 2, sliderSize.y)))
+            {
+                showStylesManager = true;
+            }
+        }
+        else
+        {
+            if (ui::Button("Select Style", sliderSize)) { showStylesManager = true; }
+        }
+    }
+
+    ui::EndGroup();
+    ui::SameLine();
+    ui::BeginGroup();
+
+    if (pointType == 2 && stylePoint.getStyleIndex() < 0)
+    {
+        ui::PushStyleColor(ImGuiCol_Button, ImVec4(vec4(0.5f)));
+        ui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(vec4(0.5f)));
+        ui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(vec4(0.5f)));
+    }
+
+    if (ui::Button("Add Point", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+    {
+        pointType == 0 ? transferFunction->addAlphaPoint(alpha, isoValue)
+            : pointType == 1 ? transferFunction->addColorPoint(color, isoValue) : 0;
+
+        if (pointType == 2 && stylePoint.getStyleIndex() >= 0) { transferFunction->addStylePoint(stylePoint); }
+    }
+
+    if (pointType == 2 && stylePoint.getStyleIndex() < 0) { ui::PopStyleColor(3); }
+
+    if (ui::Button("Styles Manager", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+    {
+        showStylesManager = true;
+    }
+
+    if (ui::Button("Functions Manager", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+    {
+        showTFManager = !showTFManager;
+    }
+
+    if (showStylesManager)
+    {
+        ui::OpenPopup("Styles Manager");
+        auto selectedStyleIndex = stylesManagerPopup();
+        showStylesManager = selectedStyleIndex == -2;
+
+        if (selectedStyleIndex >= 0) stylePoint = StylePoint(isoValue, selectedStyleIndex);
+    }
+
+    ui::EndGroup();
+    drawControlPointList(pointType);
+}
+```
+
+### VolumeStyleRendering/StyleTransferFunctionUi.h
+```
+#pragma once
+#include <cinder/Json.h>
+
+#include "StyleTransferFunction.h"
+
+class RaycastVolume;
+
+class StyleTransferFunctionUi
+{
+public:
+    void drawUi(bool& open, const RaycastVolume& volume);
+    StyleTransferFunctionUi();
+    ~StyleTransferFunctionUi();
+
+    const std::shared_ptr<StyleTransferFunction> &getTranferFunction() const;
+private:
+    std::vector<std::pair<std::string, ci::JsonTree>> savedTransferFunctions;
+    std::shared_ptr<StyleTransferFunction> transferFunction;
+    bool showTFManager;
+    void drawHistogram(const RaycastVolume& volume) const;
+    ci::JsonTree buildTransferFunctionJSON() const;
+    void loadTransferFunctionJSON(const cinder::JsonTree& second) const;
+
+    int stylesManagerPopup() const;
+    void drawThresholdControl() const;
+    void drawControlPointsUi() const;
+    void drawPointIsoValueControl(const TransferFunctionPoint& p, const int index, int pointType) const;
+    void drawAlphaPointList() const;
+    void drawColorPointList() const;
+    void drawStylePointList() const;
+    void drawControlPointList(int pointType) const;
+    void drawTransferFunctionsManager();
+    void drawControlPointCreationUi();
+};
+```
+
+### VolumeStyleRendering/TransferFunction.cpp
+```
+#include <CinderImGui.h>
+#include <cinder/ip/Resize.h>
+
+#include "TransferFunction.h"
+#include "RaycastVolume.h"
+
+using namespace glm;
+using namespace cinder;
+
+TransferFunction::TransferFunction() : threshold(vec2(0, 255)), updateColorTexture(false)
+{
+    colorPoints.push_back(TransferFunctionColorPoint(vec3(1), 0));
+    colorPoints.push_back(TransferFunctionColorPoint(vec3(1), 255));
+
+    alphaPoints.push_back(TransferFunctionAlphaPoint(1.0, 0));
+    alphaPoints.push_back(TransferFunctionAlphaPoint(1.0, 255));
+}
+
+TransferFunction::~TransferFunction() {}
+
+void TransferFunction::addColorPoint(const vec3& color, const int isoValue)
+{
+    // inserted point is off limits
+    if (isoValue <= 0 || isoValue >= colorPoints.back().getIsoValue() || colorPoints.size() > 255) { return; }
+
+    auto ctrlP = TransferFunctionColorPoint(color, isoValue);
+    // sorted insert
+    colorPoints.insert(upper_bound(colorPoints.begin(), colorPoints.end(), ctrlP), ctrlP);
+    updateFunction();
+}
+
+void TransferFunction::addAlphaPoint(const float alpha, const int isoValue)
+{
+    // inserted point is off limits
+    if (isoValue <= 0 || isoValue >= alphaPoints.back().getIsoValue() || colorPoints.size() > 255) { return; }
+
+    auto ctrlP = TransferFunctionAlphaPoint(alpha, isoValue);
+    // sorted insert
+    alphaPoints.insert(upper_bound(alphaPoints.begin(), alphaPoints.end(), ctrlP), ctrlP);
+    updateFunction();
+}
+
+void TransferFunction::removeColorPoint(const int index)
+{
+    // off limits
+    if (index <= 0 || index >= colorPoints.size() - 1) { return; }
+
+    colorPoints.erase(colorPoints.begin() + index);
+    updateFunction();
+}
+
+void TransferFunction::removeAlphaPoint(const int index)
+{
+    // off limits
+    if (index <= 0 || index >= alphaPoints.size() - 1) { return; }
+
+    alphaPoints.erase(alphaPoints.begin() + index);
+    updateFunction();
+}
+
+void TransferFunction::setAlpha(const int index, const float alpha)
+{
+    // off limits
+    if (index < 0 || index >= alphaPoints.size()) { return; }
+
+    alphaPoints[index].setAlpha(clamp(alpha, 0.0f, 1.0f));
+    updateFunction();
+}
+
+void TransferFunction::setThreshold(int minIso, int maxIso)
+{
+    minIso = clamp(minIso, 0, maxIso - 1);
+    maxIso = clamp(maxIso, minIso + 1, 255);
+
+    threshold.x = minIso;
+    threshold.y = maxIso;
+}
+
+const ivec2& TransferFunction::getThreshold() const
+{
+    return threshold;
+}
+
+vec4 TransferFunction::getColor(const float t)
+{
+    float alpha = 0;
+    vec3 color = vec3(0);
+    int i = 0;
+    int isoValue = t * 255;
+
+    for (auto it = alphaPoints.cbegin(); it != --alphaPoints.cend() && i < alphaSpline.size();)
+    {
+        int currentIso = it->getIsoValue();
+        int nextIso = (++it)->getIsoValue();
+
+        // find cubic index
+        if (isoValue >= currentIso && isoValue <= nextIso)
+        {
+            auto& currentCubic = alphaSpline[i];
+            float evalAt = static_cast<float>(isoValue - currentIso) / (nextIso - currentIso);
+            alpha = currentCubic.getPointOnSpline(evalAt).r;
+            break;
+        }
+
+        i++;
+    }
+
+    i = 0;
+
+    for (auto it = colorPoints.cbegin(); it != --colorPoints.cend() && i < colorSpline.size();)
+    {
+        int currentIso = it->getIsoValue();
+        int nextIso = (++it)->getIsoValue();
+
+        // find cubic index
+        if (isoValue >= currentIso && isoValue <= nextIso)
+        {
+            auto& currentCubic = colorSpline[i];
+            float evalAt = static_cast<float>(isoValue - currentIso) / (nextIso - currentIso);
+            color = currentCubic.getPointOnSpline(evalAt);
+            break;
+        }
+
+        i++;
+    }
+
+    return vec4(color.r, color.g, color.b, alpha);
+}
+
+vec4 TransferFunction::getColor(const int isoValue)
+{
+    if (isoValue < 0 || isoValue > 255) return vec4(-1);
+
+    return indexedTransferFunction[isoValue];
+}
+
+void TransferFunction::updateFunction()
+{
+    std::vector<vec3> alphaCtrPoints(alphaPoints.size());
+    std::vector<vec3> colorCtrPoints(colorPoints.size());
+
+    for (int i = 0; i < alphaCtrPoints.size(); i++)
+    {
+        alphaCtrPoints[i] = vec3(alphaPoints[i].getAlpha());
+    }
+
+    for (int i = 0; i < colorCtrPoints.size(); i++)
+    {
+        colorCtrPoints[i] = colorPoints[i].getColor();
+    }
+
+    alphaSpline = move(CubicSpline::CalculateCubicSpline(alphaCtrPoints));
+    colorSpline = move(CubicSpline::CalculateCubicSpline(colorCtrPoints));
+
+    // update fast access transfer function
+    for (int i = 0; i < indexedTransferFunction.size(); i++)
+    {
+        indexedTransferFunction[i] = getColor(static_cast<float>(i) / 255);
+    }
+
+    // update texture needs to be update on next query
+    updateColorTexture = true;
+}
+
+const std::vector<TransferFunctionColorPoint> &TransferFunction::getColorPoints() const
+{
+    return colorPoints;
+}
+
+const std::vector<TransferFunctionAlphaPoint> &TransferFunction::getAlphaPoints() const
+{
+    return alphaPoints;
+}
+
+const std::array<vec4, 256> &TransferFunction::getIndexedTransferFunction() const
+{
+    return indexedTransferFunction;
+}
+
+const gl::Texture1dRef& TransferFunction::getColorMappingTexture()
+{
+    // update texture
+    if (!colorMappingTexture)
+    {
+        updateFunction();
+        auto format = gl::Texture1d::Format().minFilter(GL_LINEAR)
+            .magFilter(GL_LINEAR)
+            .wrapS(GL_CLAMP_TO_EDGE)
+            .internalFormat(GL_RGBA);
+        format.setDataType(GL_FLOAT);
+        colorMappingTexture = gl::Texture1d::create(getIndexedTransferFunction().data(), GL_RGBA, 256, format);
+    }
+    else if(updateColorTexture)
+    {
+        colorMappingTexture->update(getIndexedTransferFunction().data(), GL_RGBA, GL_FLOAT, 0, 256, 0);
+        updateColorTexture = true;
+    }
+
+    return colorMappingTexture;
+}
+
+void TransferFunction::setColor(const int index, const vec3& color)
+{
+    // off limits
+    if (index < 0 || index >= colorPoints.size()) { return; }
+
+    colorPoints[index].setColor(clamp(color, vec3(0), vec3(1)));
+    updateFunction();
+}
+
+void TransferFunction::setAlphaPointIsoValue(const int index, const int isoValue)
+{
+    // off limits
+    if (index <= 0 || index >= alphaPoints.size() - 1) { return; }
+
+    // off limits iso val
+    if (isoValue <= 0 || isoValue >= 255) { return; }
+
+    alphaPoints[index].setIsoValue(isoValue);
+    
+    // function points may need sorting after modiying sorting token, isoValue
+    bool needSorting = !is_sorted(alphaPoints.begin(), alphaPoints.end());
+
+    if (needSorting) { sort(alphaPoints.begin(), alphaPoints.end()); }
+
+    updateFunction();
+}
+
+void TransferFunction::setColorPointIsoValue(const int index, const int isoValue)
+{
+    // off limits
+    if (index <= 0 || index >= colorPoints.size() - 1) { return; }
+
+    // off limits iso val
+    if (isoValue <= 0 || isoValue >= 255) { return; }
+
+    colorPoints[index].setIsoValue(isoValue);
+
+    // function points may need sorting after modiying sorting token, isoValue
+    bool needSorting = !is_sorted(colorPoints.begin(), colorPoints.end());
+
+    if (needSorting) { sort(colorPoints.begin(), colorPoints.end()); }
+
+    updateFunction();
+}
+
+void TransferFunction::reset()
+{
+    colorPoints.clear();
+    alphaPoints.clear();
+
+    colorPoints.push_back(TransferFunctionColorPoint(vec3(1), 0));
+    colorPoints.push_back(TransferFunctionColorPoint(vec3(1), 255));
+
+    alphaPoints.push_back(TransferFunctionAlphaPoint(1.0, 0));
+    alphaPoints.push_back(TransferFunctionAlphaPoint(1.0, 255));
+
+    updateFunction();
+}
+```
+
+### VolumeStyleRendering/TransferFunction.h
+```
+#pragma once
+#include <cinder/gl/gl.h>
+
+#include "TransferFunctionPoint.h"
+#include "CubicSpline.h"
+
+class RaycastVolume;
+
+class TransferFunction
+{
+public:
+    TransferFunction();
+    virtual ~TransferFunction();
+    glm::vec4 getColor(const float t /* t=[0..1] */);
+    glm::vec4 getColor(const int isoValue /* isoValue=[0..255] */);
+    virtual void updateFunction();
+    void addColorPoint(const glm::vec3& color, const int isoValue);
+    void addAlphaPoint(const float alpha, const int isoValue);
+    void removeColorPoint(const int index);
+    void removeAlphaPoint(const int index);
+    void setAlpha(const int index, const float alpha);
+    void setColor(const int index, const glm::vec3 &color);
+    void setAlphaPointIsoValue(const int index, const int isoValue);
+    void setColorPointIsoValue(const int index, const int isoValue);
+    void setThreshold(int minIso, int maxIso);
+    virtual void reset();
+    const glm::ivec2 &getThreshold() const;
+    const std::vector<TransferFunctionColorPoint> &getColorPoints() const;
+    const std::vector<TransferFunctionAlphaPoint> &getAlphaPoints() const;
+    const std::array<glm::vec4, 256> &getIndexedTransferFunction() const;
+    const cinder::gl::Texture1dRef &getColorMappingTexture();
+private:
+    glm::ivec2 threshold;
+    std::vector<TransferFunctionColorPoint> colorPoints;
+    std::vector<TransferFunctionAlphaPoint> alphaPoints;
+    std::vector<CubicSpline> alphaSpline;
+    std::vector<CubicSpline> colorSpline;
+    std::array<glm::vec4, 256> indexedTransferFunction;
+    bool updateColorTexture;
+
+    cinder::gl::Texture1dRef colorMappingTexture;
+};
+```
+
+### VolumeStyleRendering/TransferFunctionPoint.cpp
+```
+#include "TransferFunctionPoint.h"
+
+TransferFunctionPoint::TransferFunctionPoint(const int isoValue)
+{
+    this->isoValue = isoValue;
+}
+
+const int &TransferFunctionPoint::getIsoValue() const
+{
+    return isoValue;
+}
+
+void TransferFunctionPoint::setIsoValue(const int value)
+{
+    this->isoValue = value;
+}
+
+TransferFunctionPoint::~TransferFunctionPoint() {}
+
+bool TransferFunctionPoint::operator<(const TransferFunctionPoint& rhs) const
+{
+    return this->isoValue < rhs.getIsoValue();
+}
+
+bool TransferFunctionPoint::operator==(const TransferFunctionPoint& rhs) const
+{
+    return this->isoValue == rhs.getIsoValue();
+}
+
+const glm::vec3 &TransferFunctionColorPoint::getColor() const
+{
+    return color;
+}
+
+void TransferFunctionColorPoint::setColor(const glm::vec3& value)
+{
+    this->color = value;
+}
+
+TransferFunctionColorPoint::TransferFunctionColorPoint(const glm::vec3& color, const int iso) : TransferFunctionPoint(iso)
+{
+    this->color = color;
+}
+
+bool TransferFunctionColorPoint::operator<(const TransferFunctionColorPoint& rhs) const
+{
+    return TransferFunctionPoint::operator<(rhs) ? true : TransferFunctionPoint::operator==(rhs) && length2(this->color) < length2(rhs.color);
+}
+
+bool TransferFunctionColorPoint::operator==(const TransferFunctionColorPoint& rhs) const
+{
+    return TransferFunctionPoint::operator==(rhs) && length2(this->color) == length2(rhs.color);
+}
+
+const float &TransferFunctionAlphaPoint::getAlpha() const
+{
+    return alpha;
+}
+
+void TransferFunctionAlphaPoint::setAlpha(const float value)
+{
+    this->alpha = value;
+}
+
+TransferFunctionAlphaPoint::TransferFunctionAlphaPoint(const float alpha, const int iso) : TransferFunctionPoint(iso)
+{
+    this->alpha = alpha;
+}
+
+bool TransferFunctionAlphaPoint::operator<(const TransferFunctionAlphaPoint& rhs) const
+{
+    return TransferFunctionPoint::operator<(rhs) ? true : TransferFunctionPoint::operator==(rhs) && this->alpha < rhs.alpha;
+}
+
+bool TransferFunctionAlphaPoint::operator==(const TransferFunctionAlphaPoint& rhs) const
+{
+    return TransferFunctionPoint::operator==(rhs) && this->alpha == rhs.alpha;
+}
+```
+
+### VolumeStyleRendering/TransferFunctionPoint.h
+```
+#pragma once
+#include <cinder/CinderMath.h>
+
+class TransferFunctionPoint
+{
+protected:
+    TransferFunctionPoint() = default;
+    explicit TransferFunctionPoint(const int isoValue);
+    int isoValue;
+public:
+    const int &getIsoValue() const;
+    void setIsoValue(const int value);
+    ~TransferFunctionPoint();
+
+    bool operator<(const TransferFunctionPoint& rhs) const;
+    bool operator==(const TransferFunctionPoint& rhs) const;
+};
+
+class TransferFunctionColorPoint : public TransferFunctionPoint
+{
+public:
+    const glm::vec3 &getColor() const;
+    void setColor(const glm::vec3& value);
+    TransferFunctionColorPoint() = default;
+    TransferFunctionColorPoint(const glm::vec3& color, const int iso);
+    bool operator<(const TransferFunctionColorPoint& rhs) const;
+    bool operator==(const TransferFunctionColorPoint& rhs) const;
+private:
+    glm::vec3 color;
+};
+
+class TransferFunctionAlphaPoint : public TransferFunctionPoint
+{
+public:
+    const float &getAlpha() const;
+    void setAlpha(const float value);
+    TransferFunctionAlphaPoint() = default;
+    TransferFunctionAlphaPoint(const float alpha, const int iso);
+    bool operator<(const TransferFunctionAlphaPoint& rhs) const;
+    bool operator==(const TransferFunctionAlphaPoint& rhs) const;;
+private:
+    float alpha;
+};
+```
+
+### VolumeStyleRendering/VolumeRenderingApp.cpp
+```
+#include <cinder/app/App.h>
+#include <cinder/app/RendererGl.h>
+#include <cinder/gl/gl.h>
+#include <CinderImGui.h>
+
+#include "RaycastVolume.h"
+#include "PostProcess.h"
+#include "VolumeRenderingAppUi.h"
+
+using namespace ci;
+using namespace app;
+
+class VolumeRenderingApp : public App
+{
+public:
+    static void prepareSettings(Settings* settings);
+    void setup() override;
+    void update() override;
+    void draw() override;
+    void resize() override;
+    void mouseWheel(MouseEvent event) override;
+    void mouseDrag(MouseEvent event) override;
+    void mouseDown(MouseEvent event) override;
+private:
+    vec2 dragStart;
+    RaycastVolume volume;
+    CameraPersp camera;
+    CameraPersp initialCamera;
+    float dragPivotDistance{0.0f};
+};
+
+void VolumeRenderingApp::prepareSettings(Settings* settings)
+{
+    settings->setWindowSize(1280, 720);
+}
+
+void VolumeRenderingApp::setup()
+{
+    auto options = ui::Options();
+    options.font(app::getAssetPath("fonts/DroidSans.ttf"), 16);
+    ui::initialize(options);
+    // set camera initial setup
+    camera.lookAt(vec3(0, 0, -4), vec3(0), vec3(0, 1, 0));
+}
+
+void VolumeRenderingApp::update()
+{
+    VolumeRenderingAppUi::DrawUi(volume);
+}
+
+void VolumeRenderingApp::draw()
+{
+    gl::clear();
+    // volume raycasting
+    {
+        volume.setPosition(-volume.centerPoint());
+        volume.drawVolume(camera);
+    }
+}
+
+void VolumeRenderingApp::resize()
+{
+    camera.setAspectRatio(getWindowAspectRatio());
+    // update frame buffers
+    volume.resizeFbos();
+    PostProcess::instance().resizeFbos();
+}
+
+void VolumeRenderingApp::mouseWheel(MouseEvent event)
+{
+    float increment = event.getWheelIncrement();
+    float multiplier = powf(1.2f, increment);
+    // move camera
+    vec3 translate = camera.getViewDirection() * (camera.getPivotDistance() * (1.0f - multiplier));
+    camera.setEyePoint(camera.getEyePoint() + translate);
+    camera.setPivotDistance(camera.getPivotDistance() * multiplier);
+}
+
+void VolumeRenderingApp::mouseDrag(MouseEvent event)
+{
+    if (event.isLeftDown())
+    {
+        vec2 dragCurrent = event.getPos();
+        float deltaX = (dragCurrent.x - dragStart.x) / -100.0f;
+        float deltaY = (dragCurrent.y - dragStart.y) / 100.0f;
+        vec3 viewDirection = normalize(initialCamera.getViewDirection());
+        bool invertMotion = (initialCamera.getOrientation() * initialCamera.getWorldUp()).y < 0.0f;
+
+        vec3 rightDirection = normalize(cross(initialCamera.getWorldUp(), viewDirection));
+
+        if (invertMotion)
+        {
+            deltaX = -deltaX;
+            deltaY = -deltaY;
+        }
+
+        console() << deltaX << ", " << deltaY << std::endl;
+
+        vec3 rotated = angleAxis(deltaY, rightDirection) * (-initialCamera.getViewDirection() * dragPivotDistance);
+        rotated = angleAxis(deltaX, initialCamera.getWorldUp()) * rotated;
+
+        camera.setEyePoint(initialCamera.getEyePoint() + initialCamera.getViewDirection() * dragPivotDistance + rotated);
+        camera.setOrientation(angleAxis(deltaX, initialCamera.getWorldUp()) * angleAxis(deltaY, rightDirection) * initialCamera.getOrientation());
+    }
+}
+
+void VolumeRenderingApp::mouseDown(MouseEvent event)
+{
+    if (event.isLeftDown())
+    {
+        dragStart = event.getPos();
+        initialCamera = camera;
+        dragPivotDistance = camera.getPivotDistance();
+    }
+}
+
+CINDER_APP (VolumeRenderingApp, RendererGl, &VolumeRenderingApp::prepareSettings)
+```
+
+### VolumeStyleRendering/VolumeRenderingAppUi.cpp
+```
+#include <CinderImGui.h>
+
+#include "VolumeRenderingAppUi.h"
+#include "RaycastVolume.h"
+#include "StyleTransferFunctionUi.h"
+#include "RenderingParams.h"
+
+using namespace glm;
+
+bool VolumeRenderingAppUi::loadNewVolume = false;
+bool VolumeRenderingAppUi::showVolumeOptions = false;
+bool VolumeRenderingAppUi::showRendering = false;
+bool VolumeRenderingAppUi::showTransferFunction = false;
+bool VolumeRenderingAppUi::showRotationControls = false;
+bool VolumeRenderingAppUi::showLightingSetup = false;
+std::string VolumeRenderingAppUi::path;
+
+void VolumeRenderingAppUi::DrawUi(RaycastVolume& volume)
+{
+    // menu bar
+    DrawMainMenuBar(volume);
+    // rotation controls
+    DrawRotationControls(volume);
+    // model lighting setup
+    DrawLightingSetup(volume);
+    // volume controls
+    DrawRenderingOptions(volume);
+
+    // open modal dialog for volume parameters
+    if (loadNewVolume)
+    {
+        ui::OpenPopup("Volume Parameters");
+        bool isClosed = VolumeLoadPopup(volume);
+        loadNewVolume = !isClosed;
+        showVolumeOptions = isClosed;
+    }
+
+    // initialize transfer function ui
+    static std::shared_ptr<StyleTransferFunctionUi> transferFunctionUi = nullptr;
+
+    if(!transferFunctionUi)
+    {
+        transferFunctionUi = std::make_shared<StyleTransferFunctionUi>();
+        volume.setTransferFunction(transferFunctionUi->getTranferFunction());
+    }
+    else
+    {
+        transferFunctionUi->drawUi(showTransferFunction, volume);
+    }
+}
+
+void VolumeRenderingAppUi::DrawRenderingOptions(RaycastVolume& volume)
+{
+    static bool showFps = true;
+
+    if (showFps)
+    {
+        static ImVec2 rectSize;
+        ui::SetNextWindowPos(ImVec2(ci::app::getWindowWidth() - rectSize.x * 1.55, ci::app::getWindowHeight() - rectSize.y * 2.25));
+        ui::Begin("##FPS", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ui::Text("Framerate: (%.1f)", ui::GetIO().Framerate);
+        rectSize = ui::GetItemRectSize();
+        ui::End();
+    }
+
+    if (showRendering)
+    {
+        if (!ui::Begin("Rendering", &showRendering, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ui::End();
+            return;
+        }
+        
+        static float stepScale = volume.getStepScale();
+        static float sStepScale = volume.getShadowStepScale();
+        static vec3 aspectRatios = volume.getAspectRatios();
+        static int renderingPath = 0;
+        static float exposure = RenderingParams::GetExposure();
+        static float gamma = RenderingParams::GetGamma();
+
+        stepScale = volume.getStepScale();
+        aspectRatios = volume.getAspectRatios();
+
+        if (ui::SliderFloat("Step Scale", &stepScale, 0.1, 8))
+        {
+            volume.setStepScale(stepScale);
+        }
+
+        if (ui::SliderFloat("Shadow Step Scale", &sStepScale, 0.2, 16))
+        {
+            volume.setShadowStepScale(sStepScale);
+        }
+
+        if (ui::InputFloat3("Aspect", value_ptr(aspectRatios)))
+        {
+            volume.setAspectratios(aspectRatios);
+        }
+
+        if(ui::SliderFloat("Gamma", &gamma, 0.01f, 10.0f))
+        {
+            RenderingParams::SetGamma(gamma);
+        }
+
+        if (ui::SliderFloat("Exposure", &exposure, 0.01f, 8.0f))
+        {
+            RenderingParams::SetExposure(exposure);
+        }
+        
+        ui::Checkbox("Show FPS", &showFps);
+
+        ui::Separator();
+        ui::Text("Post-effects");
+
+        if(ui::TreeNode("FXAA"))
+        {
+            static bool fxaa = RenderingParams::FXAAEnabled();
+
+            if (ui::Checkbox("Enable", &fxaa))
+            {
+                RenderingParams::FXAAEnabled(fxaa);
+            }
+
+            ui::TreePop();
+        }
+
+        if (ui::TreeNode("SSAO"))
+        {
+            static bool ssao = RenderingParams::SSAOEnabled();
+            static float ssaoRadius = RenderingParams::SSAORadius();;
+            static float ssaoBias = RenderingParams::SSAOBias();;
+            static float ssaoPower = RenderingParams::SSAOPower();;
+
+            if (ui::Checkbox("Enable", &ssao))
+            {
+                RenderingParams::SSAOEnabled(ssao);
+            }
+
+            if(ui::SliderFloat("Radius", &ssaoRadius, 0.001f, 8.0f))
+            {
+                RenderingParams::SSAORadius(ssaoRadius);
+            }
+
+            if (ui::SliderFloat("Bias", &ssaoBias, 0.0f, 0.5f))
+            {
+                RenderingParams::SSAOBias(ssaoBias);
+            }
+
+            if (ui::SliderFloat("Power", &ssaoPower, 0.0f, 32.0f))
+            {
+                RenderingParams::SSAOPower(ssaoPower);
+            }
+
+            ui::TreePop();
+        }
+
+        ui::End();
+    }
+}
+
+void VolumeRenderingAppUi::DrawLightingSetup(RaycastVolume& volume)
+{
+    if (showLightingSetup)
+    {
+        if(!ui::Begin("Lighting", &showLightingSetup, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ui::End();
+            return;
+        }
+
+        static Light light = volume.getLight();
+        static float lightIntensity = 1.0f;
+        static vec3 rotation;
+        static bool doShading = true;
+        static bool shadows = true;;
+        bool changed = false;
+
+        if (ui::Checkbox("Enable Diffuse Shading", &doShading))
+        {
+            RenderingParams::DiffuseShadingEnabled(doShading);
+        }
+
+        if (ui::Checkbox("Enable Shadows", &shadows))
+        {
+            RenderingParams::ShadowsEnabled(shadows);
+        }
+
+        changed |= ui::SliderFloat3("Rotation", value_ptr(rotation), -180, 180);
+        changed |= ui::DragFloat3("Ambient", value_ptr(light.ambient), 0.01, 0, 1);
+        changed |= ui::DragFloat3("Diffuse", value_ptr(light.diffuse), 0.01, 0, 1);
+        changed |= ui::DragFloat("Intensity", &lightIntensity, 0.1, 0, 32);
+
+        if (changed)
+        {
+            vec3 rads = radians(rotation);
+            light.direction = vec3(0, 0, 1) * mat3(eulerAngleXYZ(rads.x, rads.y, rads.z));
+            volume.setLight(light.direction, light.ambient, light.diffuse * lightIntensity);
+        }
+
+        ui::End();
+    }
+}
+
+void VolumeRenderingAppUi::DrawRotationControls(RaycastVolume& volume)
+{
+    if (showRotationControls)
+    {
+        if(!ui::Begin("Rotate", &showRotationControls, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ui::End();
+            return;
+        }
+
+        static vec3 angles = vec3(0);
+        bool changed = false;
+        changed |= ui::SliderAngle("X", &angles.x);
+        changed |= ui::SliderAngle("Y", &angles.y);
+        changed |= ui::SliderAngle("Z", &angles.z);
+
+        if (changed)
+        {
+            volume.setRotation(toQuat(eulerAngleXYZ(angles.x, angles.y, angles.z)));
+        }
+
+        ui::End();
+    }
+}
+
+bool VolumeRenderingAppUi::VolumeLoadPopup(RaycastVolume& volume)
+{
+    bool isClosed = false;
+
+    if (ui::BeginPopupModal("Volume Parameters", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        static ivec3 slices = ivec3(1);
+        static vec3 ratios = vec3(1);
+        static int bits = 0;
+        // volume dimensions
+        ui::InputInt3("Slices", value_ptr(slices));
+        // volume aspectRatios
+        ui::InputFloat3("Aspect", value_ptr(ratios));
+        // node bit size
+        ui::RadioButton("8 bits", &bits, 0);
+        ui::SameLine();
+        ui::Dummy(ImVec2(ui::GetContentRegionAvailWidth() / 3, 0));
+        ui::SameLine();
+        ui::RadioButton("16 bits", &bits, 1);
+        // slices has to be positive
+        slices = max(slices, ivec3(1));
+
+        if (ui::Button("Load", ImVec2(ui::GetContentRegionAvailWidth(), 0)))
+        {
+            volume.loadFromFile(slices, ratios, path, bits == 1);
+            ui::CloseCurrentPopup();
+            isClosed = true;
+        }
+
+        ui::EndPopup();
+    }
+
+    return isClosed;
+}
+
+void VolumeRenderingAppUi::DrawMainMenuBar(RaycastVolume& volume)
+{
+    static bool showFps = true;
+
+    // menu bar on top
+    {
+        ui::ScopedMainMenuBar menuBar;
+
+        if (ui::BeginMenu("File"))
+        {
+            if (ui::MenuItem("Open"))
+            {
+                auto fspath = cinder::app::getOpenFilePath(path, { "raw" });
+
+                if (!fspath.empty())
+                {
+                    path = fspath.string();
+                    loadNewVolume = true;
+                }
+            }
+            ui::EndMenu();
+        }
+
+        if (ui::BeginMenu("Volume", showVolumeOptions))
+        {
+            ui::MenuItem("Rotate", nullptr, &showRotationControls);
+            ui::MenuItem("Rendering", nullptr, &showRendering);
+            ui::MenuItem("Lighting", nullptr, &showLightingSetup);
+            ui::MenuItem("Transfer Function", nullptr, &showTransferFunction);
+
+            ui::EndMenu();
+        }
+    }
+}
+```
+
+### VolumeStyleRendering/VolumeRenderingAppUi.h
+```
+#pragma once
+class RaycastVolume;
+
+class VolumeRenderingAppUi
+{
+public:
+    static void DrawUi(RaycastVolume &volume);
+private:
+    static bool VolumeLoadPopup(RaycastVolume &volume);
+    static void DrawRenderingOptions(RaycastVolume &volume);
+    static void DrawLightingSetup(RaycastVolume &volume);
+    static void DrawRotationControls(RaycastVolume &volume);
+    static void DrawMainMenuBar(RaycastVolume &volume);
+
+    static bool loadNewVolume;
+    static bool showVolumeOptions;
+    static bool showRendering;
+    static bool showTransferFunction;
+    static bool showRotationControls;
+    static bool showLightingSetup;
+    static std::string path;
+};
+```
+
+### VolumeStyleRendering/assets/shaders/average.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D source;
+
+uniform vec2 texelSize;
+
+in vec2 uvs;
+out vec4 oColor;
+
+void main() {
+    vec4 result = vec4(0.0);
+
+    for (int x = -2; x < 2; ++x) 
+    {
+        for (int y = -2; y < 2; ++y) 
+        {
+            vec2 offset = vec2(float(x), float(y)) * texelSize;
+            result += texture(source, uvs + offset);
+        }
+    }
+
+    oColor = result / 16.0;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/blur.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D source;
+
+uniform int blurIntensity;
+uniform vec2 blurDirection;
+
+in vec2 uvs;
+out vec4 oColor;
+
+vec4 blur13() 
+{
+	vec4 color = vec4(0.0);
+	vec2 off1 = vec2(1.411764705882353) * blurDirection;
+	vec2 off2 = vec2(3.2941176470588234) * blurDirection;
+	vec2 off3 = vec2(5.176470588235294) * blurDirection;
+	color += texture(source, uvs) * 0.1964825501511404;
+	color += texture(source, uvs + off1) * 0.2969069646728344;
+	color += texture(source, uvs - off1) * 0.2969069646728344;
+	color += texture(source, uvs + off2) * 0.09447039785044732;
+	color += texture(source, uvs - off2) * 0.09447039785044732;
+	color += texture(source, uvs + off3) * 0.010381362401148057;
+	color += texture(source, uvs - off3) * 0.010381362401148057;
+	return color;
+}
+
+vec4 blur5() 
+{
+	vec4 color = vec4(0.0);
+	vec2 off1 = vec2(1.3333333333333333) * blurDirection;
+	color += texture(source, uvs) * 0.29411764705882354;
+	color += texture(source, uvs + off1) * 0.35294117647058826;
+	color += texture(source, uvs - off1) * 0.35294117647058826;
+	return color; 
+}
+
+vec4 blur9() {
+	vec4 color = vec4(0.0);
+	vec2 off1 = vec2(1.3846153846) * blurDirection;
+	vec2 off2 = vec2(3.2307692308) * blurDirection;
+	color += texture(source, uvs) * 0.2270270270;
+	color += texture(source, uvs + off1) * 0.3162162162;
+	color += texture(source, uvs - off1) * 0.3162162162;
+	color += texture(source, uvs + off2) * 0.0702702703;
+	color += texture(source, uvs - off2) * 0.0702702703;
+	return color;
+}
+
+void main()
+{
+	if(blurIntensity == 1) 
+		oColor = blur5();
+	else if(blurIntensity == 2) 
+		oColor = blur9();
+	else if(blurIntensity == 3) 
+		oColor = blur13();
+	else 
+		oColor = blur5();
+}
+```
+
+### VolumeStyleRendering/assets/shaders/fs_quad.vert
+```
+#version 420
+uniform mat4 ciModelViewProjection;
+
+in vec4 ciPosition;
+in vec2 ciTexCoord0;
+
+out vec2 uvs;
+
+void main()
+{
+    // fs quad uv coords
+    uvs = ciTexCoord0;
+    // final drawing pos
+    gl_Position = ciModelViewProjection * ciPosition;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/fxaa.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D colorBuffer;
+
+uniform vec2 pixelSize;
+
+in vec2     uvs;
+out vec4 	oColor;
+
+void main( void )
+{
+	float fxaaSpanMax	= 8.0;
+	float fxaaReduceMul	= 1.0 / fxaaSpanMax;
+	float fxaaReduceMin	= 1.0 / 128.0;
+
+	vec3 rgbNW	= texture( colorBuffer, uvs + vec2( -1.0, -1.0 ) * pixelSize ).xyz;
+	vec3 rgbNE	= texture( colorBuffer, uvs + vec2(  1.0, -1.0 ) * pixelSize ).xyz;
+	vec3 rgbSW	= texture( colorBuffer, uvs + vec2( -1.0,  1.0 ) * pixelSize ).xyz;
+	vec3 rgbSE	= texture( colorBuffer, uvs + vec2(  1.0,  1.0 ) * pixelSize ).xyz;
+	vec3 rgbM	= texture( colorBuffer, uvs ).xyz;
+
+	vec3 luma = vec3( 0.299, 0.587, 0.114 );
+	float lumaNW = dot(rgbNW, luma);
+	float lumaNE = dot(rgbNE, luma);
+	float lumaSW = dot(rgbSW, luma);
+	float lumaSE = dot(rgbSE, luma);
+	float lumaM  = dot(rgbM,  luma);
+	
+	float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+	float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+	
+	vec2 dir;
+	dir.x = -((lumaNW + lumaNE) - (lumaSW + lumaSE));
+	dir.y =  ((lumaNW + lumaSW) - (lumaNE + lumaSE));
+
+	float dirReduce = max((lumaNW + lumaNE + lumaSW + lumaSE) *
+						(0.25 * fxaaReduceMul), fxaaReduceMin);
+	
+	float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+	dir = min(vec2(fxaaSpanMax), max(vec2(-fxaaSpanMax), dir * rcpDirMin)) * pixelSize;
+
+	vec3 color0 = 0.5 * (
+		texture(colorBuffer, uvs + dir * (1.0 / 3.0 - 0.5)).rgb +
+		texture(colorBuffer, uvs + dir * (2.0 / 3.0 - 0.5)).rgb );
+	vec3 color1 = color0 * 0.5 + 0.25 * (
+		texture(colorBuffer, uvs + dir * -0.5).rgb +
+		texture(colorBuffer, uvs + dir *  0.5).rgb );
+	
+	float lumaB = dot(color1, luma);
+
+	vec4 color = vec4(color1, 1.0);
+
+	if (lumaB < lumaMin || lumaB > lumaMax) 
+    {
+		color.rgb = color0;
+	}
+
+	oColor = color;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/gradients.comp
+```
+#version 430
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(binding=0, r8ui) uniform readonly uimage3D volume;
+layout(binding=1, rg16f) uniform writeonly image3D gradients;
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec4 encode (vec3 n)
+{
+    return vec4(normalize(n.xy) * sqrt(n.z * 0.5 + 0.5), 0, 0);
+}
+
+void main()
+{
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+    vec3 s1 = vec3(0); 
+    vec3 s2 = s1;
+
+    s1.x = imageLoad(volume, ivec3(pos.x - 1, pos.y, pos.z)).r;
+    s2.x = imageLoad(volume, ivec3(pos.x + 1, pos.y, pos.z)).r;
+
+    s1.y = imageLoad(volume, ivec3(pos.x, pos.y - 1, pos.z)).r;
+    s2.y = imageLoad(volume, ivec3(pos.x, pos.y + 1, pos.z)).r;
+
+    s1.z = imageLoad(volume, ivec3(pos.x, pos.y, pos.z - 1)).r;
+    s2.z = imageLoad(volume, ivec3(pos.x, pos.y, pos.z + 1)).r;
+
+    imageStore(gradients, pos, encode(normalize(s2 - s1)));
+}
+```
+
+### VolumeStyleRendering/assets/shaders/histogram.comp
+```
+#version 430 compatibility
+#extension GL_ARB_shader_image_load_store : require
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(binding=0, r8ui) uniform readonly uimage3D volume;
+layout(std430, binding=1) coherent buffer Histogram
+{
+    uint histogramData[256];
+};
+
+shared uint sharedHistogram[256];
+
+void main()
+{
+    // initialize shared variable and set global to zeroes
+    sharedHistogram[gl_LocalInvocationID.x] = 0;
+
+    // synchronize
+    barrier();
+    memoryBarrierShared();
+
+    // calculate sharedHistogram values
+    uvec3 volumeSize = imageSize(volume);
+    uint totalSize = volumeSize.x * volumeSize.y * volumeSize.z;
+    uint workLoadPerThread = uint(ceil(totalSize / 256));
+    uint begin = gl_LocalInvocationID.x * workLoadPerThread;
+    uint end = min(begin + workLoadPerThread, totalSize);
+
+    for(uint i = begin; i < end; i++)
+    {
+        ivec3 uvs;
+        uvs.x = int(i % volumeSize.x);
+		uvs.y = int(((i - uvs.x) / volumeSize.x) % volumeSize.y);
+		uvs.z = int((i - uvs.x) / (volumeSize.y * volumeSize.x));
+
+        uint value = imageLoad(volume, uvs).r;
+        atomicAdd(sharedHistogram[value], 1);
+    }
+
+    // synchronize
+    barrier();
+    memoryBarrierShared();
+
+    // save to global sharedHistogram
+    atomicAdd(histogramData[gl_LocalInvocationID.x], sharedHistogram[gl_LocalInvocationID.x]);
+}
+```
+
+### VolumeStyleRendering/assets/shaders/inverse.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D color0;
+
+in vec2 uvs;
+out vec4 oColor;
+
+void main()
+{
+    vec4 srcColor = texture(color0, uvs);
+    oColor = 1.0 - srcColor;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/multiply.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D color0;
+layout(binding=1) uniform sampler2D color1;
+
+in vec2 uvs;
+out vec4 oColor;
+
+void main()
+{
+    vec4 srcColor0 = texture(color0, uvs);
+    vec4 srcColor1 = texture(color1, uvs);
+    oColor = srcColor0 * srcColor1;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/positions.frag
+```
+#version 330
+in vec3 modelPosition;
+
+layout (location=0) out vec3 positions;
+
+void main(void)
+{
+    positions = modelPosition;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/positions.vert
+```
+#version 330
+uniform mat4 ciModelViewProjection;
+
+layout(location = 0) in vec3 position;
+
+out vec3 modelPosition;
+
+void main(void)
+{
+    gl_Position = ciModelViewProjection * vec4(position, 1);
+    modelPosition = position;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/raycast.vert
+```
+#version 420
+uniform mat4 ciModelViewProjection;
+layout(location = 0) in vec3 v_position;
+out vec4 position;
+
+void main(void)
+{
+    gl_Position = ciModelViewProjection * vec4(v_position, 1);
+    position = gl_Position;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/raycast_rendertargets.frag
+```
+#version 420
+struct Light 
+{
+    vec3 direction;
+    vec3 ambient;
+    vec3 diffuse;
+};
+
+layout(binding=0) uniform sampler2D cubeFront;
+layout(binding=1) uniform sampler2D cubeBack;
+layout(binding=2) uniform sampler3D volume;
+layout(binding=3) uniform sampler3D gradients;
+layout(binding=4) uniform sampler2D bakedNoise;
+layout(binding=5) uniform sampler1D colorMappingFunction;
+layout(binding=6) uniform sampler1D transferFunction;
+layout(binding=7) uniform isampler1D indexFunction;
+layout(binding=8) uniform sampler2DArray styleFunction;
+layout(binding=9) uniform sampler2D volumeAO;
+
+uniform mat4 ciModelView;
+uniform mat3 ciNormalMatrix;
+uniform mat3 ciModelMatrixInverseTranspose;
+uniform Light light;
+
+uniform vec2 threshold;
+uniform vec3 stepSize;
+uniform vec3 shadowStepSize;
+uniform int iterations;
+uniform bool diffuseShading;
+uniform bool raycastShadows;
+uniform bool ambientOcclusion;
+uniform float stepScale;
+
+in vec4 position;
+
+layout (location=0) out vec4 oColor;
+layout (location=1) out vec3 oNormal;
+layout (location=2) out float oShadow;
+layout (location=3) out vec3 oPosition;
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec3 decode(vec2 enc)
+{
+    vec3 n;
+    n.z = dot(enc, enc) * 2.0 - 1.0;
+    n.xy = normalize(enc.xy) * sqrt(1.0 - n.z * n.z);
+    return n;
+}
+
+vec2 litsphere(vec3 eye, vec3 normal) 
+{
+    vec3 reflected = reflect(eye, normal);
+
+    float m = 2.0 * sqrt
+    (
+        pow(reflected.x, 2.0) +
+        pow(reflected.y, 2.0) +
+        pow(reflected.z + 1.0, 2.0)
+    );
+
+    return reflected.xy / m + 0.5;
+}
+
+vec4 styleMapping(vec3 eye, vec3 normal, float opacity)
+{
+    // apply litsphere
+    float index = texture(transferFunction, opacity).x;
+
+    // obtain index function index and interop weight
+    int index0 = int(floor(index));
+    int index1 = index0 + 1;
+    float weight = index - index0;
+
+    // style function texture index
+    int styleIndex0 = texelFetch(indexFunction, index0, 0).x;
+    int styleIndex1 = texelFetch(indexFunction, index1, 0).x;
+
+    // no style just take base color
+    if(styleIndex0 < 0 && styleIndex1 < 0) return vec4(1);
+
+    // obtain style color at view normal, -1 means no style to interop
+    vec4 style0 = texture(styleFunction, vec3(litsphere(eye, normal), styleIndex0));
+    vec4 style1 = texture(styleFunction, vec3(litsphere(eye, normal), styleIndex1));
+    
+    // interpolate
+    return styleIndex0 < 0 ? style1 : styleIndex1 < 0 ? style0 : mix(style0, style1, weight);
+}
+
+float voxelOcclusion(vec3 rayStart, vec3 rayDir)
+{
+    vec3 step = rayDir * shadowStepSize;
+    vec3 pos = rayStart + step;
+
+    for(int i = 0; i < iterations; i++)
+    {
+        float opacity = texture(volume, pos).x;
+
+        if(opacity >= threshold.x && opacity <= threshold.y)
+        {
+            // assigned color from transfer function for this density
+            vec4 src = texture(colorMappingFunction, opacity);
+
+            // voxel is occluded
+            if(src.a >= 0.2) return 1.0;
+        }
+
+        pos += step;
+
+        // out of bounds
+        if (pos.x >= 1.0 || pos.y >= 1.0 || pos.z >= 1.0) 
+            return 0.0;
+    }
+
+    return 0.0;
+}
+
+void main(void)
+{
+    vec2 texC = position.xy / position.w;
+    texC.x = 0.5 * texC.x + 0.5;
+    texC.y = 0.5 * texC.y - 0.5;
+
+    vec3 front = texture(cubeFront, texC).xyz;
+    vec3 back = texture(cubeBack, texC).xyz;
+    
+    vec3 dir = normalize(back - front);
+    vec3 pos = front;
+
+    vec4 dst = vec4(0, 0, 0, 0);
+    vec4 src = vec4(0, 0, 0, 0);
+
+    vec4 value = vec4(0);
+
+    vec3 step = dir * stepSize;
+    
+    // jitter ray starting position to reduce artifacts
+    pos += step * texture(bakedNoise, gl_FragCoord.xy / 256).x;
+
+    for(int i = 0; i < iterations; i++)
+    {
+        value.a = texture(volume, pos).x;
+
+        if(value.a >= threshold.x && value.a <= threshold.y)
+        {
+            float aOcclusion = 1.0;
+            // assigned color from transfer function for this density
+            src = texture(colorMappingFunction, value.a);
+
+            // gradient value
+            value.xyz = decode(texture(gradients, pos).xy);
+            vec3 wsNormal = normalize(ciModelMatrixInverseTranspose * value.xyz);
+
+            // style transfer, view space calculation
+            vec3 eye = normalize((ciModelView * vec4(pos, 1.0))).xyz;
+            vec3 vsNormal = normalize(ciNormalMatrix * value.xyz);
+            src *= styleMapping(eye, vsNormal, value.a);
+
+            // opacity correction
+            src.a = 1 - pow((1 - src.a), stepScale / 0.5);
+
+            if(ambientOcclusion) 
+            {
+                aOcclusion = texelFetch(volumeAO, ivec2(gl_FragCoord.xy), 0).x;
+            }
+
+            if(diffuseShading)
+            {
+                // diffuse shading + fake ambient light
+                vec3 lightDir = normalize(-light.direction);
+                float lambert = max(dot(wsNormal, lightDir), 0.0);
+                vec3 diffuse = light.diffuse * lambert * src.rgb;
+                vec3 ambient = light.ambient * src.rgb;
+                src.rgb = aOcclusion * ambient + diffuse;
+            }
+            else 
+            {
+                src.rgb *= aOcclusion;
+            }
+
+            // front to back blending
+            src.rgb *= src.a;
+            dst = (1.0 - dst.a) * src + dst;
+
+            // optimization: break from loop on high enough alpha value
+            if(dst.a >= 0.95) 
+                break;
+        }
+
+        pos += step;
+
+        // out of bounds
+        if (pos.x > 1.0 || pos.y > 1.0 || pos.z > 1.0) 
+            break;
+    }
+
+    if(raycastShadows)
+    {
+        // use world direction in this case since raycast is done in world space
+        vec3 lightDir = normalize(-light.direction);
+        oShadow = voxelOcclusion(pos, -lightDir) * 0.5;
+    }
+
+    oColor = dst;
+    // store normal and position in view-space
+    oNormal = ciNormalMatrix * value.xyz;
+    oPosition = (ciModelView * vec4(pos, 1.0)).xyz;
+}
+```
+
+### VolumeStyleRendering/assets/shaders/smooth_gradients.comp
+```
+#version 430
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(binding=1, rg16f) uniform volatile image3D gradients;
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec4 encode (vec3 n)
+{
+    return vec4(normalize(n.xy) * sqrt(n.z * 0.5 + 0.5), 0, 0);
+}
+
+// Spheremap Transform for normal encoding. Used in Cry Engine 3, presented by 
+// Martin Mittring in "A bit more Deferred", p. 13
+// http://www.crytek.com/sites/default/files/A_bit_more_deferred_-_CryEngine3.ppt
+vec3 decode (vec2 enc)
+{
+    vec3 n;
+    n.z = dot(enc, enc) * 2.0 - 1.0;
+    n.xy = normalize(enc.xy) * sqrt(1.0 - n.z * n.z);
+    return n;
+}
+
+void main()
+{
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+    uvec3 volumeSize = imageSize(gradients);
+    vec3 average = vec3(0);
+    int sampleCount = 0;
+
+    // average neighbor values
+    for (int k = pos.z - 3; k <= pos.z + 3; k++)
+    {
+        for (int j = pos.y - 3; j <= pos.y + 3; j++)
+        {
+            for (int i = pos.x - 3; i <= pos.x + 3; i++)
+            {
+                // in bounds
+                if((i >= 0 && i < volumeSize.x) && 
+                   (j >= 0 && j < volumeSize.y) && 
+                   (k >= 0 && k < volumeSize.z))
+                {
+                    average += decode(imageLoad(gradients, ivec3(i, j, k)).rg);
+                    sampleCount++;
+                }
+            }
+        }
+    }
+
+    average /= float(sampleCount);
+
+    // synchronize
+    barrier();
+    memoryBarrierShared();
+
+    // save smoothed gradient
+    imageStore(gradients, pos, encode(normalize(average)));
+}
+```
+
+### VolumeStyleRendering/assets/shaders/ssao.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D gNormal;
+layout(binding=1) uniform sampler2D gPosition;
+layout(binding=2) uniform sampler2D ssaoNoise;
+
+uniform vec3 ssaoKernel[64];
+uniform ivec2 ciWindowSize;
+uniform mat4 projectionMatrix;
+
+// parameters
+uniform float radius = 0.5;
+uniform float bias = 0.025;
+uniform float power = 1.0;
+
+in vec2 uvs;
+out vec4 oColor;
+
+void main()
+{
+    vec3 pos = texture(gPosition, uvs).xyz;
+    vec3 normal = texture(gNormal, uvs).xyz;
+    vec3 randomVec = texture(ssaoNoise, uvs * 0.25 * ciWindowSize).xyz;
+
+    // build tanget space matrix
+    vec3 tangent   = normalize(randomVec - normal * dot(randomVec, normal));
+    vec3 bitangent = cross(normal, tangent);
+    mat3 TBN       = mat3(tangent, bitangent, normal);
+
+    float occlusion = 0.0;
+
+    for(int i = 0; i < 64; ++i)
+    {
+        // get sample position
+        vec3 kernelSample = TBN * ssaoKernel[i];        // from tangent to view-space
+        kernelSample = pos + kernelSample * radius; 
+        
+        vec4 offset = vec4(kernelSample, 1.0);
+        offset = projectionMatrix * offset;             // from view to clip-space
+        offset.xyz /= offset.w;                         // perspective divide
+        offset.xyz  = offset.xyz * 0.5 + 0.5;           // transform to range 0.0 - 1.0
+
+        float offsetDepth = texture(gPosition, offset.xy).z;  
+        float rangeCheck = smoothstep(0.0, 1.0, radius / abs(pos.z - offsetDepth));
+        occlusion += (offsetDepth >= kernelSample.z + bias ? 1.0 : 0.0) * rangeCheck;   
+    }
+
+    occlusion = 1.0 - (occlusion / 64);
+    oColor = vec4(pow(occlusion, power)); 
+}
+```
+
+### VolumeStyleRendering/assets/shaders/tonemapping.frag
+```
+#version 420
+layout(binding=0) uniform sampler2D hdrBuffer;
+
+uniform float gamma;
+uniform float exposure;
+
+in vec2 uvs;
+out vec4 oColor;
+
+vec3 ACESFilm( vec3 x )
+{
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+}
+
+void main()
+{
+    vec3 hdrColor = texture(hdrBuffer, uvs).rgb;
+  
+    // Exposure tone mapping
+    vec3 mapped = ACESFilm(hdrColor * exposure);
+    // Gamma correction 
+    mapped = pow(mapped, vec3(1.0 / gamma));
+  
+    oColor = vec4(mapped, 1.0);
+}
+```

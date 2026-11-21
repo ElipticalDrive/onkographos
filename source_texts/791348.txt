@@ -1,0 +1,528 @@
+Radzen Blazor is a set of 70+ free native Blazor UI components packed with DataGrid, Scheduler, Charts and robust theming including Material design and FluentUI. - RadzenDataGrid: reduce value-access and render-path allocation by pianomanjh · Pull Request #1 · pianomanjh/radzen-blazor
+
+RadzenDataGrid: reduce value-access and render-path allocation by pianomanjh · Pull Request #1 · pianomanjh/radzen-blazor · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pianomanjh
+commented
+Aug 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Allocation- and CPU-focused optimizations for RadzenDataGrid on the value-access
+and per-cell/per-row render hot paths. No public API changes. Output is
+identical except for one deliberate, documented behaviour change: in-memory
+case-insensitive string filtering becomes ordinal (§7).
+Method
+Measure-first: BenchmarkDotNet ([MemoryDiagnoser], --job short) for isolated
+hot paths plus a full-grid render, and dotnet-trace (GC/AllocationTick) to
+attribute allocation. Render-path figures for §5–§6 use a headless
+BenchmarkRenderer — a bare Blazor Renderer that discards the render batch (no
+bUnit, no AngleSharp DOM), so the measured allocation is the component
+render-tree build+diff itself, not the test harness. Every change below is backed
+by a measured before/after; allocation figures are exact. Runs on .NET 10.
+Changes & measured impact
+1. Cached compiled value/sort getters
+Per-cell value reads used reflection on a string path
+(PropertyAccess.GetValue → path.Split('.') + PropertyInfo.GetValue) every
+render, and in-memory sort did the same per row. Now a compiled getter cached per
+(item type, property), rebuilt when the bound Property changes; reflection
+kept only as a fallback. A new PropertyAccess.NullSafeGetter (isolated from the
+widely-shared Getter) preserves the reflection path's null-intermediate →
+empty-cell behaviour, including nullable-value-type intermediates.
+Value getter, one column
+Before
+After
+1,000 nested
+115.4 µs / 112 KB
+3.7 µs / 0 B
+31×
+100,000 nested
+12,877 µs / 11.2 MB
+1,185 µs / 0 B
+11×
+100,000 flat
+5,209 µs / 3.2 MB
+804 µs / 0 B
+6.5×
+Full 10-col render, 100k rows
+100.6 ms / 50.8 MB
+68.5 ms / 28.1 MB
+−32% time / −45% alloc
+2. Memoized cell style + CSS class
+GetStyle rebuilt a List+joined string per cell; GetCellClass
+allocated a string (Enum.GetName+ToLower) per cell. Both depend only on column
+config, so both are memoized (style list allocated lazily → empty cells allocate
+nothing).
+Per column, N cells
+Before
+After
+GetStyle 1,000
+268.6 µs / 312.5 KB
+55.8 µs / 0 B
+−79% / −100%
+GetStyle 10,000
+2,661 µs / 3,125 KB
+568 µs / 0 B
+−79% / −100%
+GetCellClass 1,000
+327.9 µs / 343.8 KB
+157.9 µs / 0 B
+−52% / −100%
+GetCellClass 10,000
+3,405 µs / 3.44 MB
+1,523 µs / 0 B
+−55% / −100%
+3. Memoized GetFilterOperators
+Called ~16× per column per render, each running Enum.GetValues + a re-evaluated
+LINQ query. The default/computed set is constant per column → computed once and
+cached (caller-provided FilterOperators are returned live).
+Before
+After
+SimpleWithMenu render
+54.7 ms
+48.2 ms
+~12% faster (alloc unchanged)
+4. O(1) row membership + lazy attributes + constant row classes
+Row membership in selectedItems/editedItems/expandedItems used
+Keys.Any(i => ItemEquals(i, item)) — an O(selected) scan + closure, 2–3× per
+row. Now O(1) ContainsKey when no KeyProperty (the default). Event-arg
+attribute dictionaries are allocated lazily (shared empty when no
+CellRender/RowRender); row classes are interned constants; the virtualized
+edit-context lookup is a single TryGetValue.
+Row membership, 50 selected
+Before
+After
+1,000 rows
+178.8 µs / 128 KB
+6.7 µs / 0 B
+27×
+10,000 rows
+1,841 µs / 1.28 MB
+163 µs / 0 B
+11×
+5. Cut per-cell allocations in the data-cell render path
+RenderCell allocated, per cell per render: an empty Dictionary for the content
+span's attributes even with no tooltip, a ReadOnlyDictionary wrapper only to pass
+the cell attributes to @attributes, and a fresh List+Where+string.Join for
+the cell CSS class. The span dictionary is now a shared empty instance (allocated
+only when a title is set), the wrapper is gone (the underlying dictionary is passed
+directly), and the row-independent cell class is memoized on the column — a column
+with a CalculatedCssClass or a per-row attribute class still takes the original
+per-row path. Output is identical.
+Headless re-render, 500×10
+Before
+After
+allocation
+28.9 MB
+27.0 MB
+−6.6% (~12% faster)
+6. Raise the row click once per row instead of once per cell
+Every cell wired its own onclick — unconditionally, on every render — that raised
+both the cell click and the row click, forcing a per-cell attribute dictionary on
+all N cells. It is now a single onclick on the <tr>, added in RowAttributes
+only when a row-level click/selection callback is set; a cell keeps its own
+onclick only when CellClick is set. A cell click bubbles to the row, so the row
+click still fires from a cell as before — a click on row area outside any cell now
+raises it too (a minor, intended broadening). A consumer onclick from RowRender
+is preserved: a delegate is chained to run after the built-in row click (so it still
+observes post-click selection state), and any other value (e.g. a string handler) is
+kept as-is. Removing the unconditional per-cell onclick also lets the shared empty
+cell-attribute path from §5 apply, so most cells stop allocating a dictionary.
+Headless re-render, 500×10, RowClick set
+Before
+After
+allocation
+27.0 MB
+21.8 MB
+−19% (~20% faster)
+7. Case-insensitive in-memory string filters skip the per-row ToLower
+A case-insensitive string filter built x.Property.ToLower().Contains(value) (and
+the same for the other string operators). Over an in-memory source the ToLower
+runs for every row on every filter pass, allocating a lowered copy per row. For an
+in-memory (EnumerableQuery) source the string operators now compare with
+StringComparison.OrdinalIgnoreCase, which needs no per-row allocation. The choice
+is gated on the source being an EnumerableQuery: a provider such as EF Core cannot
+translate the StringComparison overloads and still gets the ToLower form so it
+maps to SQL LOWER().
+Behaviour note: this makes in-memory case-insensitive matching ordinal
+(culture-independent) rather than the previous current-culture ToLower. For
+ordinary identifier/text data the result is unchanged; it can differ for
+culture-specific casing (e.g. Turkish dotted/dotless i). EF-backed grids are
+unaffected — they keep the ToLower→SQL LOWER() path and the database collation.
+In-memory filter, 5,000 rows, Contains (all match)
+Before
+After
+per evaluation
+574.8 KB
+141.9 KB
+−75% (~35% faster)
+Aggregate — full grid render vs master (worst case: no selection, no CellRender, 2/10 nested)
+Rows
+Before
+After
+100
+14.87 MB / 51.9 ms
+13.45 MB / 51.4 ms
+−10% alloc (§1–4)
+500
+46.53 MB / 145 ms
+39.92 MB / 129 ms
+−14% alloc / −11% time (§1–4)
+§5–§6 cut a further ~7 MB per re-render on a 500×10 grid (headless), on top of the above.
+Testing
+Adds regression coverage: value access (nested and nullable null-intermediates,
+incl. an explicit nullable .Value in the path), a rebuilt getter on Property
+change, cell style/class memo output, filter-operator cache and live
+caller-provided operators, membership with/without KeyProperty,
+CellRender/RowRender, in-place-mutation-then-Reload, the cell-class memo and
+its invalidation, row-click dispatch (row vs cell, a preserved RowRender
+onclick, no handler → no row onclick), and the ordinal in-memory filter across
+operators (with the EF path still lowering). Full suite green; builds on net8/9/10.
+Benchmark harness
+The BenchmarkDotNet harness that produced these numbers — a
+Radzen.Blazor.Benchmarks
+project, including the headless BenchmarkRenderer — lives on a linked branch,
+tech/radzen-grid-optimizations.
+Happy to fold it into this PR or keep it linked — whichever fits the repo.
+pianomanjh
+force-pushed
+the
+tech/radzen-grid-optimizations
+branch
+from
+76e6a12 to
+9b3a2fd
+Compare
+August 25, 2026 00:51
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/RadzenDataGridColumn.razor.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/RadzenDataGridColumn.razor.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/PropertyAccess.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+pianomanjh
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review verdict: changes requested based on the three inline correctness regressions above. The PR's 26 targeted tests pass, but temporary regression tests reproduce the stale property getter, stale in-place FilterOperators mutation, and nullable .Value exception.
+pianomanjh
+force-pushed
+the
+tech/radzen-grid-optimizations
+branch
+from
+9b3a2fd to
+4034db9
+Compare
+August 25, 2026 18:45
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/RadzenDataGridColumn.razor.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+pianomanjh
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-review verdict: changes still requested for the remaining PropertyExpression lifecycle issue noted inline. The live FilterOperators and nullable .Value findings are fixed; all 36 PR-focused tests and CI pass, while two focused expression-reassignment regression tests still fail.
+pianomanjh
+force-pushed
+the
+tech/radzen-grid-optimizations
+branch
+from
+4034db9 to
+604281f
+Compare
+August 25, 2026 19:21
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/RadzenDataGridColumn.razor.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pianomanjh
+force-pushed
+the
+tech/radzen-grid-optimizations
+branch
+from
+604281f to
+01b8037
+Compare
+August 25, 2026 19:38
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/RadzenDataGridColumn.razor.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+DataGrid: route cell/sort value access through cached compiled getters
+…
+9ffa6d8
+```
+Every data cell read its value via reflection on a string path
+(PropertyAccess.GetValue -> path.Split('.') + PropertyInfo.GetValue), and
+in-memory sorting did the same per row. Both now use a compiled getter cached
+per (item type, property); nested ("Address.City") and indexer ("it[key]")
+paths are handled by the getter, with reflection kept only as a fallback for
+columns that cannot be compiled. The getter is rebuilt when the bound Property
+changes, so a reused column instance that swaps Property does not go stale.
+
+A null reference part-way along a dotted path must still render an empty cell,
+as the reflection path did. PropertyAccess.Getter is shared with charts and
+other components, so its semantics are left untouched; instead a new
+PropertyAccess.NullSafeGetter (own cache) propagates a null intermediate to
+null rather than the leaf type's default - including nullable-value-type
+intermediates (a null DateTime? in "ShippedDate.Year" renders blank, not 0).
+
+Benchmarks (net10, BenchmarkDotNet --job short; Allocated is exact):
+
+  Value getter over N items, one column
+    1,000 nested     115.4 us / 112 KB  -> 3.7 us / 0 B    (31x, -112 KB)
+    100,000 nested   12,877 us / 11.2 MB -> 1,185 us / 0 B  (11x, -11.2 MB)
+    100,000 flat     5,209 us / 3.2 MB   -> 804 us / 0 B    (6.5x, -3.2 MB)
+
+  Full 10-column grid render (only 2 columns nested)
+    100,000 rows     100.6 ms / 50.8 MB  -> 68.5 ms / 28.1 MB  (-32% time, -45% alloc; 22.7 MB less per pass)
+
+Tests cover flat and nested rendering, a rebuilt getter on Property change, and
+null intermediates over reference-, value-, and nullable-value-type leaves
+(including an explicit nullable .Value in the path).
+```
+pianomanjh
+force-pushed
+the
+tech/radzen-grid-optimizations
+branch
+2 times, most recently
+from
+a2c3e5b to
+9bffbdc
+Compare
+August 25, 2026 20:48
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/RadzenDataGridColumn.razor.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pianomanjh
+force-pushed
+the
+tech/radzen-grid-optimizations
+branch
+from
+9bffbdc to
+ad6bf47
+Compare
+August 25, 2026 22:13
+claude
+added 3 commits
+August 25, 2026 22:32
+DataGrid: memoize the row-independent cell style and CSS class
+…
+9d43f0b
+```
+GetStyle rebuilt a List<string> and joined it into a string for every data
+cell on every render - even though the vast majority of cells contribute no
+style at all - and GetCellClass allocated a fresh string (Enum.GetName +
+ToLower) per cell. Both outputs depend only on the column's own configuration,
+not on the row, so both are memoized: GetStyle allocates its list lazily (an
+empty cell allocates nothing) and caches the joined data-cell style keyed on
+width / alignment / min / max / column-group; GetCellClass caches keyed on
+WhiteSpace. The column-group scan runs only when a width is set. Output is
+byte-for-byte identical to before.
+
+Benchmarks (net10, BenchmarkDotNet --job short; Allocated is exact):
+
+  GetStyle, one column over N cells
+    1,000    268.6 us / 312.5 KB -> 55.8 us / 0 B   (-79% time, -100% alloc)
+    10,000   2,661 us / 3,125 KB -> 568 us / 0 B     (-79% / -100%)
+
+  GetCellClass, one column over N cells
+    1,000    327.9 us / 343.8 KB -> 157.9 us / 0 B  (-52% time, -100% alloc)
+    10,000   3,405 us / 3.44 MB  -> 1,523 us / 0 B   (-55% / -100%)
+
+Tests assert style/class output is unchanged across width, alignment, frozen,
+min/max-width, and white-space variations.
+```
+DataGrid: memoize GetFilterOperators
+…
+adbdc53
+```
+In the filter operator menu, GetFilterOperators() was called ~16x per column
+per render, each call running Enum.GetValues<FilterOperator>() plus a LINQ
+filter - a lazy query re-evaluated on every enumeration. The set of operators
+is constant per column (a function only of the FilterOperators list and
+FilterPropertyType), so it is now computed once by ComputeFilterOperators and
+cached, invalidated only when those inputs change.
+
+Benchmark (net10): a SimpleWithMenu-mode render goes 54.7 ms -> 48.2 ms
+(~12% faster); allocation is essentially unchanged (the operator arrays are
+small). A CPU cleanup on the filter path, not an allocation win.
+
+Test asserts the cached operator set matches the computed one and tracks
+changes to FilterOperators / FilterPropertyType.
+```
+DataGrid: O(1) row membership, lazy event-arg attributes, constant ro…
+…
+266fdc0
+```
+…w classes
+
+Render-path allocation and per-row work in RadzenDataGrid:
+
+- Membership. For every row on every render the grid tested selectedItems /
+  editedItems / expandedItems via items.Keys.Any(i => ItemEquals(i, item)) - an
+  O(selected) scan plus a LINQ closure, run 2-3x per row (row style,
+  aria-selected, edit mode, expansion). A ContainsItemKey helper does an O(1)
+  ContainsKey when no KeyProperty is set (the default) and a closure-free loop
+  otherwise. The virtualized row path's edit-context lookup, which used the same
+  Keys.Any(ItemEquals) scan plus a second indexer read, becomes a single
+  TryGetValue.
+
+- Lazy event-arg attributes. RowRenderEventArgs / GroupRowRenderEventArgs and
+  the cell-attribute methods allocated a Dictionary (plus a ReadOnlyDictionary
+  wrapper, and for cells an args object) per row/cell per render even with no
+  RowRender/CellRender handler attached. A HasAttributes fast path now returns a
+  shared empty instance; the dictionary is created only when a handler adds one.
+
+- Constant row classes. RowStyle returns interned class-name constants
+  (selected x editing) instead of interpolating a per-row string, and the
+  row-independent frozen-column class helper drops an unused per-cell
+  visibleColumns list argument (it had allocated columns.Where(...).ToList() per
+  cell) and early-returns "" for the common non-frozen cell.
+
+Benchmarks (net10, BenchmarkDotNet --job short; Allocated is exact):
+
+  Row membership test over N rows, 50 selected (ran 2-3x per row)
+    1,000    178.8 us / 128 KB  -> 6.7 us / 0 B    (27x, -128 KB)
+    10,000   1,841 us / 1.28 MB -> 163 us / 0 B     (11x, -1.28 MB)
+
+  Aggregate full-grid render, all grid changes vs master (worst case: no
+  selection, no CellRender, 2 of 10 columns nested)
+    100 rows   14.87 MB / 51.9 ms -> 13.45 MB / 51.4 ms  (-10% alloc)
+    500 rows   46.53 MB / 145 ms  -> 39.92 MB / 129 ms   (-14% alloc, -11% time)
+
+A per-row ShouldRender was evaluated and rejected: rows render mutable item
+data, so an in-place mutation + Reload must re-render; the regression test
+InPlaceMutation_ThenReload_UpdatesCell locks that in. Virtualization remains the
+lever for re-render cost.
+
+Follow-up (not included): with KeyProperty set, membership is still
+O(items x selected) - a linear ItemEquals scan. Indexing selection/edit/expand
+state by key value would make it O(1) as well (measured 29-36x, ~50x less
+allocation), but that is a broader change to selection state and is left for a
+separate change.
+
+Tests: regression coverage for value access, cell/row styling, membership with
+and without KeyProperty, CellRender/RowRender callbacks, and in-place mutation.
+```
+pianomanjh
+force-pushed
+the
+tech/radzen-grid-optimizations
+branch
+from
+ad6bf47 to
+266fdc0
+Compare
+August 25, 2026 22:35
+pianomanjh
+commented
+Aug 25, 2026
+View reviewed changes
+Comment thread
+Radzen.Blazor/PropertyAccess.cs
+/// <param name="type">Type of the object.</param>
+/// <returns>A function which returns the specified property, or null if an intermediate member is null.</returns>
+[RequiresUnreferencedCode(TrimMessages.ExpressionTreeReflection)]
+public static Func<TItem, object> NullSafeGetter<TItem>(string propertyName, Type? type = null)
+pianomanjh
+Aug 25, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+[P2] Keep the null-safe getter out of the public API
+NullSafeGetter is only used internally by RadzenDataGridColumn, yet it is declared public despite this PR promising no public API changes. This unnecessarily expands the supported API surface. Please make it internal or private; its delegate should also return object?, since null is an intentional result.
+pianomanjh
+closed this
+Aug 26, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

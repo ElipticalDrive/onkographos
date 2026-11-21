@@ -1,0 +1,48 @@
+# Vector Quantization for Time-Varying Fields
+
+Also called: Bernardon et al. Vector Quantization, Vector Quantization for Time-Varying Data, temporal compression, vector quantization approach
+
+## Overview
+A compression technique extending vector quantization to encode scalar fields of time-varying unstructured grids based on temporal coherence in a hierarchical data structure [S1, unofficial][S2, unofficial]. It dynamically decodes the scalar field for each time step, enabling integration with hardware-assisted ray casters or CPU-based rendering systems with minimal performance overhead [S1, unofficial][S2, unofficial]. It sets itself apart from static compression methods by explicitly exploiting temporal coherence across time steps on unstructured grids [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:** Time-varying scalar field data on an unstructured grid [S2, unofficial].
+**Outputs:** Compressed representation and dynamically decoded scalar values for each time step [S1, unofficial].
+
+**Data Structures:**
+*   Hierarchical data structure: Stores scalar field values organized to exploit temporal coherence [S1, unofficial][S2, unofficial].
+
+**Steps:**
+1.  **Encoding:** Encode the scalar field based on temporal coherence within the hierarchical data structure [S1, unofficial][S2, unofficial].
+2.  **Decoding:** Dynamically decode the scalar field for each time step [S1, unofficial][S2, unofficial].
+3.  **Rendering Integration:**
+    *   **GPU Path:** Integrate the decoding into a hardware-assisted ray caster by decoding each time step and updating the texture containing scalar values using a fragment shader [S1, unofficial][S2, unofficial].
+    *   **CPU Path:** Alternatively, update scalar values for each time step directly on the CPU within the HAVS system [S1, unofficial][S2, unofficial].
+
+**Parameters:** Not given in the sources [S1, unofficial][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Time-varying topology: The more difficult case of time-varying topology has not been addressed for unstructured grids and remains an open topic of research [S1, unofficial][S2, unofficial].
+*   Brute force rendering: Currently, meshes with time-varying topology are rendered in a brute force manner [S1, unofficial][S2, unofficial].
+
+## Subtopics
+
+### [Time-Varying Scalar Field (TVSF) Rendering with Vector Quantization (HAVS)](7965-time-varying-scalar-field-tvsf-rendering-with-vector-quantiz.md)
+A GPU-based volume rendering method for time-varying scalar fields on unstructured tetrahedral meshes that uses Vector Quantization to compress scalar data and a paging mechanism to handle arbitrary time steps without rendering stalls. It sets itself apart from its sibling by specifically integrating the HAVS sorting algorithm and pre-integrated volume integrals for efficient compositing on unstructured grids. When to choose: rendering time-varying scalar fields on unstructured meshes with arbitrary time steps.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+*   **Measured Performance:** The resulting visualizations incur very little performance overhead to rendering the data statically on hardware-assisted ray casters or CPU-based HAVS systems [S1, unofficial][S2, unofficial].
+*   **Scaling:** Not given in the sources [S1, unofficial][S2, unofficial].
+*   **Strengths:** Minimal performance overhead during rendering and effective handling of time-varying scalar fields on unstructured grids through temporal coherence [S1, unofficial][S2, unofficial].
+*   **Limitations:** Does not address time-varying topology [S1, unofficial][S2, unofficial].
+*   **When to use:** Rendering time-varying scalar fields on unstructured grids where temporal coherence exists and minimal rendering overhead is desired [S1, unofficial][S2, unofficial].
+*   **When not to use:** When the grid topology changes over time, as this case is not addressed [S1, unofficial][S2, unofficial].
+
+## Background
+The approach extends vector quantization to time-varying unstructured grids by exploiting temporal coherence in a hierarchical data structure [S1, unofficial][S2, unofficial]. It builds on ideas originally used in the structured case [S1, unofficial][S2, unofficial]. The method is integrated into hardware-assisted ray casters and CPU-based HAVS systems for GPU-based volume rendering of unstructured grids [S1, unofficial][S2, unofficial]. The case of time-varying topology remains an open research topic [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S2] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)

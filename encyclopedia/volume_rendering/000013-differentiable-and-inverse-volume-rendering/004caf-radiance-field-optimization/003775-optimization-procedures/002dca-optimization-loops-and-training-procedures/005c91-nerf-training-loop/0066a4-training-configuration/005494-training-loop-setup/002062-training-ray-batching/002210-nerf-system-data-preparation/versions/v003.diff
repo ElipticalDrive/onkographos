@@ -1,0 +1,348 @@
+--- v002.md
++++ v003.md
+@@ -4,175 +4,204 @@
+ 
+ ## Overview
+-This method prepares training and validation data for Neural Radiance Fields (NeRF) by loading synthetic scenes (typically Blender datasets), parsing camera metadata, and precomputing ray origins and directions [S1, unofficial]. It differs from general volume rendering by handling specific coordinate conventions (e.g., OpenCV to NeRF's camera space) and background compositing for synthetic data [S1, unofficial]. It builds on [Training Ray Batching](2252-training-ray-batching.md) by providing the structured ray tensors that are subsequently shuffled and sampled [S2, unofficial].
++This method prepares training and validation data for Neural Radiance Fields (NeRF) by loading synthetic Blender dataset scenes, parsing JSON metadata for camera poses and images, and precomputing rays and RGB values [S1, S2, unofficial]. It differs from [LLFF Dataset Loading](2818-llff-dataset-loading.md) by assuming known, precise camera poses provided in JSON rather than estimating them, and by using a fixed scene bounding box [S1, S2, unofficial]. It differs from [NeRF Dataset Loading](3084-nerf-dataset-loading.md) by explicitly handling the specific preprocessing steps for the Blender synthetic dataset, including focal length computation from `camera_angle_x` and RGBA compositing [S1, S2, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Inputs:** Image files and metadata files (`transforms_{split}.json`) [S1, S3, unofficial]. Configuration parameters: `near`, `far`, `WHITE_BG`, `background_color` [S1, S2, unofficial].
+-**Outputs:** A tensor of rays with shape `(N, 6)` where the first 3 dimensions are ray origins $(o_x, o_y, o_z)$ and the next 3 are normalized ray directions $(d_x, d_y, d_z)$ [S2, unofficial]. Target RGB values with shape `(N, 3)` [S1, unofficial]. (Optional) Foreground masks with shape `(N, 1)` or `(N, 3)` [S2, unofficial].
+-
+-### Data Structures
+-`transforms_{split}.json`: Contains a list of `frames`. Each frame has `file_path`, `transform_matrix` (4x4), and optionally `foreground_mask` [S1, unofficial]. `camera_angle_x`: Horizontal field of view in radians [S1, S3, unofficial].
+-
+-### Steps
+-1. **Load Metadata and Compute Focal Length:** For Blender datasets, load `transforms_{split}.json` [S1, unofficial]. Extract `camera_angle_x` and compute the focal length $f$: $f = \frac{0.5 \cdot W}{\tan(0.5 \cdot \text{camera\_angle\_x})}$ [S1, S3, unofficial].
+-2. **Preprocess Images and Poses:** For each frame in the split, load the image and convert to RGBA [S1, unofficial]. Resize to dimensions $(W, H)$ [S1, unofficial]. Composite onto a white background if `WHITE_BG` is true: $\text{rgb} = \text{rgba}_{:3} \cdot \text{rgba}_{3:} + (1 - \text{rgba}_{3:})$ [S1, unofficial]. Extract the camera-to-world matrix $C2W$ from the frame's `transform_matrix` [S1, unofficial].
+-3. **Generate Ray Origins and Directions:** For each camera pose $C2W$, generate rays for every pixel $(i, j)$ in the image grid [S1, unofficial]. Create pixel coordinate grids $i \in [0, W-1]$ and $j \in [0, H-1]$ [S1, unofficial]. Compute camera-space directions (OpenCV convention: z-forward, y-down, x-right): $d_{cam} = \begin{bmatrix} \frac{i - C_x}{f} \\ -\frac{j - C_y}{f} \\ -1 \end{bmatrix}$ where $C_x = W/2$ and $C_y = H/2$ [S1, unofficial]. Transform directions to world space: $d_{world} = d_{cam} \cdot C2W_{0:3, 0:3}^T$ [S1, unofficial]. Set ray origins to the camera center: $o_{world} = C2W_{0:3, 3}$ [S1, unofficial].
+-4. **Sample Rays for Training:** During training, not all rays are used per iteration to save memory and compute [S2, unofficial]. Determine the number of rays to sample (`N_rand`) [S2, unofficial]. Select random image indices. If `batch_image_sampling` is enabled, sample `train_num_rays` indices from the dataset; otherwise, sample 1 index [S2, unofficial]. For the selected images, sample random pixel coordinates $(x, y)$ [S2, unofficial]. Extract the corresponding ray origins and directions from the precomputed arrays [S2, unofficial]. Normalize the ray directions: $d_{norm} = \frac{d}{\|d\|_2}$ [S2, unofficial]. Concatenate origins and normalized directions into a tensor of shape `(N_rand, 6)` [S2, unofficial].
+-5. **Handle Background Color:** Set the model's background color based on configuration: if `background_color` is 'white', initialize as `torch.ones((3,))`; if 'random', initialize with random values [S2, unofficial].
+-
+-### Pseudocode
++**Inputs:**
++- `transforms_{split}.json`: JSON file containing metadata for a specific split (train/val/test).
++- Image files: Corresponding to the paths in the JSON.
++- Configuration parameters: `batch_image_sampling` (boolean), `train_num_rays` (integer), `background_color` (string: 'white' or 'random').
++
++**Outputs:**
++- `rays`: Tensor of shape `(N, 6)` containing ray origins `(N, 3)` and normalized directions `(N, 3)`.
++- `rgb`: Tensor of shape `(N, 3)` containing target RGB colors.
++- `fg_mask`: Tensor of shape `(N, 1)` containing foreground masks (optional, depending on implementation).
++- `background_color`: Tensor of shape `(3,)` for compositing.
++
++**Data Structures:**
++- `rays`: Concatenated `[ray_o, ray_d]` where `ray_o` is origin and `ray_d` is unit direction.
++- `c2w`: Camera-to-world transformation matrix, typically `(4, 4)` or `(3, 4)`.
++
++**Steps:**
++
++1. **Load Metadata and Compute Focal Length:**
++   Parse `transforms_{split}.json`. Extract `camera_angle_x` (in radians). Compute focal length $f$:
++   $$ f = \frac{0.5 \times W}{\tan(0.5 \times \text{camera\_angle\_x})} $$
++   where $W$ is the image width [S1, unofficial].
++
++2. **Select Images:**
++   - If stage is 'train' and `batch_image_sampling` is true: Sample `train_num_rays` random indices from `self.dataset.all_images` [S2, unofficial].
++   - If stage is 'train' and `batch_image_sampling` is false: Sample 1 random index [S2, unofficial].
++   - If stage is 'val' or 'test': Use the first camera for the index [S2, unofficial].
++
++3. **Load and Preprocess Images:**
++   - Load the image for the selected index.
++   - Convert to RGBA.
++   - Resize to $(W, H)$ [S1, unofficial].
++   - Composite onto a white background:
++     $$ \text{rgb} = \text{rgba}[:, :, :3] \times \text{rgba}[:, :, 3:] + (1 - \text{rgba}[:, :, 3:]) $$
++     [S1, unofficial].
++
++4. **Generate Rays:**
++   - Get camera-to-world matrix `c2w` for the selected index [S2, unofficial].
++   - Generate ray origins `ray_o` and directions `ray_d` using `get_rays_np(H, W, focal, c2w)` [S1, unofficial].
++     - `get_rays_np` computes pixel coordinates $(i, j)$, camera-space directions, and transforms them to world space using `c2w` [S1, unofficial].
++   - Normalize ray directions:
++     $$ \text{ray\_d} = \text{normalize}(\text{ray\_d}) $$
++     [S2, unofficial].
++   - Concatenate origins and directions:
++     $$ \text{rays} = \text{concat}([\text{ray\_o}, \text{ray\_d}], \text{dim}=-1) $$
++     [S2, unofficial].
++
++5. **Sample Pixels (Training):**
++   - If training, sample random pixel coordinates $(x, y)$ within image dimensions $w, h$ [S2, unofficial].
++   - Extract RGB values and foreground masks for these pixels using the precomputed rays [S2, unofficial].
++   - If validation/testing, use all directions and full image RGB/masks [S2, unofficial].
++
++6. **Set Background Color:**
++   - If `background_color` is 'white', set `self.model.background_color` to `torch.ones((3,), dtype=torch.float32)` [S2, unofficial].
++   - If 'random', initialize randomly [S2, unofficial].
++
++**Parameters:**
++- `near`: 2.0 [S1, unofficial].
++- `far`: 6.0 [S1, unofficial].
++- `WHITE_BG`: Always True for Blender dataset [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
++import torch
+ import numpy as np
+-import torch
+ import json
+-import os
+-import cv2
+-
+-def load_blender_data(data_dir, split='train', white_bg=True):
++from PIL import Image
++
++def load_blender_data(json_path, split, config):
+     """
+-    Loads and preprocesses Blender dataset.
+-    Returns: rays (N, 6), rgbs (N, 3), masks (N, 1) or None
++    Loads and preprocesses Blender dataset data.
++    
++    Args:
++        json_path: Path to transforms_{split}.json
++        split: 'train', 'val', or 'test'
++        config: Configuration object with batch_image_sampling, train_num_rays, background_color
++        
++    Returns:
++        rays: Tensor (N, 6)
++        rgb: Tensor (N, 3)
++        fg_mask: Tensor (N, 1) or None
+     """
+-    with open(os.path.join(data_dir, f'transforms_{split}.json'), 'r') as f:
++    with open(json_path, 'r') as f:
+         meta = json.load(f)
+     
++    # Compute focal length
+     W = meta['w']
+     H = meta['h']
+-    focal = 0.5 * W / np.tan(0.5 * meta['camera_angle_x'])
+-    
+-    rays_o_list = []
+-    rays_d_list = []
+-    rgbs_list = []
+-    masks_list = []
+-    
++    camera_angle_x = meta['camera_angle_x']
++    focal = 0.5 * W / np.tan(0.5 * camera_angle_x)
++    
++    # Load images and poses
++    images = []
++    poses = []
+     for frame in meta['frames']:
+-        # Load image
+-        img_path = os.path.join(data_dir, frame['file_path'])
+-        img = cv2.imread(img_path)
+-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+-        img = cv2.resize(img, (W, H))
+-        
+-        if img.shape[2] == 4:
+-            rgba = img
+-            # Composite on white background
+-            rgb = rgba[:, :, :3] * rgba[:, :, 3:] + (1 - rgba[:, :, 3:])
+-            mask = rgba[:, :, 3:]
++        img_path = frame['file_path']
++        img = Image.open(img_path).convert('RGBA')
++        img = img.resize((W, H), Image.Resampling.LANCZOS)
++        images.append(np.array(img))
++        poses.append(np.array(frame['transform_matrix'], dtype=np.float32))
++    
++    images = np.array(images)
++    poses = np.array(poses)
++    
++    # Select indices
++    if split == 'train':
++        if config.batch_image_sampling:
++            indices = np.random.choice(len(images), config.train_num_rays, replace=False)
+         else:
+-            rgb = img
+-            mask = np.ones((H, W, 1))
+-        
+-        # Get C2W
+-        c2w = np.array(frame['transform_matrix'])
+-        
+-        # Generate rays
++            indices = np.random.choice(len(images), 1, replace=False)
++    else:
++        indices = np.array([0]) # Use first camera for val/test
++    
++    # Precompute rays for all pixels in selected images
++    all_rays_o = []
++    all_rays_d = []
++    all_rgb = []
++    all_fg_mask = []
++    
++    for idx in indices:
++        c2w = poses[idx]
++        img = images[idx]
++        
++        # Generate rays for the entire image
+         ray_o, ray_d = get_rays_np(H, W, focal, c2w)
+         
+-        rays_o_list.append(ray_o)
+-        rays_d_list.append(ray_d)
+-        rgbs_list.append(rgb)
+-        masks_list.append(mask)
+-        
+-    rays_o = np.concatenate(rays_o_list, axis=0)
+-    rays_d = np.concatenate(rays_d_list, axis=0)
+-    rgbs = np.concatenate(rgbs_list, axis=0)
+-    masks = np.concatenate(masks_list, axis=0)
+-    
+-    return rays_o, rays_d, rgbs, masks
+-
+-def get_rays_np(H, W, focal, c2w):
+-    """
+-    Generates ray origins and directions for a single image.
+-    """
++        # Normalize directions
++        ray_d_norm = ray_d / np.linalg.norm(ray_d, axis=-1, keepdims=True)
++        
++        # Composite RGBA to RGB
++        rgba = img.astype(np.float32) / 255.0
++        rgb = rgba[:, :, :3] * rgba[:, :, 3:] + (1 - rgba[:, :, 3:])
++        
++        all_rays_o.append(ray_o)
++        all_rays_d.append(ray_d_norm)
++        all_rgb.append(rgb)
++        all_fg_mask.append(rgba[:, :, 3:])
++    
++    # Stack all rays
++    rays_o = np.concatenate(all_rays_o, axis=(0, 1)) # (N*H*W, 3)
++    rays_d = np.concatenate(all_rays_d, axis=(0, 1)) # (N*H*W, 3)
++    rgb_all = np.concatenate(all_rgb, axis=(0, 1))   # (N*H*W, 3)
++    fg_mask_all = np.concatenate(all_fg_mask, axis=(0, 1)) # (N*H*W, 1)
++    
++    # Reshape to (N*H*W, 6)
++    rays = np.concatenate([rays_o, rays_d], axis=-1)
++    
++    # Convert to tensors
++    rays = torch.from_numpy(rays).float()
++    rgb = torch.from_numpy(rgb_all).float()
++    fg_mask = torch.from_numpy(fg_mask_all).float()
++    
++    return rays, rgb, fg_mask
++
++def get_rays_np(H, W, focal, c2w, cx=None, cy=None):
++    """NumPy version for dataset preprocessing."""
++    if cx is None: cx = W / 2.0
++    if cy is None: cy = H / 2.0
++    
+     i, j = np.meshgrid(np.arange(W, dtype=np.float32),
+-                       np.arange(H, dtype=np.float32), indexing="xy")
+-    cx = W / 2.0
+-    cy = H / 2.0
+-    
+-    # Camera space directions
++                       np.arange(H, dtype=np.float32),
++                       indexing='xy')
++    
++    # Camera-space direction (OpenCV convention: z-forward, y-down, x-right)
+     dirs = np.stack([
+         (i - cx) / focal,
+-        -(j - cy) / focal,
+-        -np.ones_like(i)
+-    ], -1)
+-    
+-    # Transform to world space
+-    ray_d = np.einsum("hwc,kc->hwk", dirs, c2w[:3, :3])
+-    ray_o = np.broadcast_to(c2w[:3, 3], ray_d.shape)
+-    
++        -(j - cy) / focal,    # flip y (image y-down -> camera y-up)
++        -np.ones_like(i),     # looking down -z in camera space (Blender/NeRF convention)
++    ], axis=-1)  # (H, W, 3)
++    
++    # Rotate directions to world space
++    ray_d = (dirs @ c2w[:3, :3].T)   # (H, W, 3)
++    # All rays share the camera centre as origin
++    ray_o = np.broadcast_to(c2w[:3, 3], (H, W, 3))                         # (H, W, 3)
+     return ray_o, ray_d
+-
+-def sample_training_rays(rays_o, rays_d, rgbs, masks, N_rand, batch_image_sampling=False):
+-    """
+-    Samples random rays for a training iteration.
+-    """
+-    H, W, _ = rays_o.shape
+-    N = H * W
+-    
+-    if batch_image_sampling:
+-        # Sample multiple images
+-        num_images = min(N_rand // (H * W), len(rays_o) // (H * W))
+-        img_indices = np.random.choice(len(rays_o) // (H * W), size=num_images, replace=False)
+-        rays_o_s = rays_o[img_indices].reshape(-1, 3)
+-        rays_d_s = rays_d[img_indices].reshape(-1, 3)
+-        rgbs_s = rgbs[img_indices].reshape(-1, 3)
+-        masks_s = masks[img_indices].reshape(-1, 1)
+-    else:
+-        # Sample 1 image
+-        img_idx = np.random.randint(0, len(rays_o) // (H * W))
+-        rays_o_s = rays_o[img_idx].reshape(-1, 3)
+-        rays_d_s = rays_d[img_idx].reshape(-1, 3)
+-        rgbs_s = rgbs[img_idx].reshape(-1, 3)
+-        masks_s = masks[img_idx].reshape(-1, 1)
+-        
+-    # Sample random pixel coordinates
+-    x = np.random.randint(0, W, size=N_rand)
+-    y = np.random.randint(0, H, size=N_rand)
+-    
+-    # Flatten indices for the selected image(s)
+-    flat_idx = y * W + x
+-    
+-    # Extract rays
+-    rays_o_sampled = rays_o_s[flat_idx]
+-    rays_d_sampled = rays_d_s[flat_idx]
+-    rgbs_sampled = rgbs_s[flat_idx]
+-    masks_sampled = masks_s[flat_idx]
+-    
+-    # Normalize directions
+-    rays_d_sampled = rays_d_sampled / np.linalg.norm(rays_d_sampled, axis=-1, keepdims=True)
+-    
+-    # Concatenate origins and normalized directions
+-    rays = np.concatenate([rays_o_sampled, rays_d_sampled], axis=-1)
+-    
+-    return rays, rgbs_sampled, masks_sampled
+ ```
+ 
+-### Parameters
+-- `near`: 2.0 for Blender [S1, unofficial].
+-- `far`: 6.0 for Blender [S1, unofficial].
+-- `WHITE_BG`: True for Blender [S1, unofficial].
+-- `background_color`: 'white' or 'random' [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+-- **Coordinate Conventions:** Blender uses a right-handed coordinate system with Y-up, while NeRF's internal ray generation assumes a specific camera space [S1, unofficial]. The flip in the y-direction of the ray direction is critical [S1, unofficial].
+-- **Background Compositing:** Synthetic Blender datasets often have transparent backgrounds [S1, unofficial]. Failing to composite onto a white background before training can lead to incorrect color predictions [S1, unofficial].
+-- **Ray Sampling:** Random pixel sampling reduces memory usage but requires careful indexing to map 2D coordinates to 1D ray arrays [S2, unofficial].
+-
+ ## Subtopics
+ 
+ ### [LLFF Dataset Loading](2818-llff-dataset-loading.md)
+-Loads real-world LLFF dataset scenes, parsing colmap poses from `poses_bounds.npy`, correcting axis conventions, and applying NDC normalization. Unlike Blender data, LLFF data does not use a white background (`WHITE_BG=False`) and requires NDC transformation for uniform sampling.
++Loads real-world LLFF (Local Light Field Fusion) dataset scenes, parsing COLMAP poses from `poses_bounds.npy`, correcting axis conventions, and applying NDC (Normalized Device Coordinates) normalization. It differs from general NeRF dataset loading by enforcing forward-facing scene assumptions and specific axis corrections required for the LLFF capture rig.
++
++### [NeRF Dataset Loading](3084-nerf-dataset-loading.md)
++This method loads the NeRF-Synthetic (Blender) dataset by parsing JSON metadata for camera poses and images, handling half-resolution resizing, and returning normalized RGBA images and camera parameters. It differs from [LLFF Dataset Loading](2818-llff-dataset-loading.md) by assuming known, precise camera poses provided in JSON rather than estimating them from images, and by using a fixed scene bounding box.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot H \cdot W)$ for preprocessing, where $N$ is the number of images [S1, unofficial]. Ray generation is linear in the number of pixels [S1, unofficial].
+-- **Memory Complexity:** $O(N \cdot H \cdot W \cdot 6)$ to store all ray origins and directions [S1, unofficial]. This can be significant for high-resolution images [S1, unofficial].
+-- **Performance:** Precomputing rays allows for fast training iterations, as ray generation is moved out of the training loop [S2, unofficial].
+-- **Strengths:** Handles both synthetic and real-world data formats [S1, unofficial]. Efficient batching via precomputed rays [S2, unofficial].
+-- **Limitations:** High memory usage for large datasets [S1, unofficial]. NDC normalization is only suitable for forward-facing scenes [S1, unofficial].
++- **Time Complexity:** Linear with respect to the number of pixels in the selected images for preprocessing. Sampling is constant time per batch.
++- **Memory Complexity:** Proportional to the number of rays in the batch. Precomputed rays for all images can be large for high-resolution datasets.
++- **Strengths:** Efficient for synthetic datasets with known poses. Simple preprocessing pipeline.
++- **Limitations:** Assumes known camera poses. Not suitable for real-world datasets without pose estimation.
++- **When to use:** When training NeRF on synthetic Blender datasets.
++- **When not to use:** When training on real-world datasets with unknown poses (use [LLFF Dataset Loading](2818-llff-dataset-loading.md) or similar).
+ 
+ ## Background
+-NeRF (Neural Radiance Fields) was introduced by Mildenhall et al. in 2020 [S1, S2, unofficial]. The data preparation methods described here are based on the official NeRF implementation and subsequent popular open-source repositories like `nerf-from-scratch` and `instant-nsr-pl` [S1, S2, unofficial]. The Blender dataset is a standard synthetic benchmark, while the LLFF dataset is a standard real-world forward-facing benchmark [S1, S2, unofficial].
++Originated with the NeRF paper [S1, S2, unofficial]. Used for training NeRF on synthetic Blender datasets [S1, S2, unofficial].
+ 
+ ## Sources
+ [S1] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+-[S2] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+-[S3] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)+[S2] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)

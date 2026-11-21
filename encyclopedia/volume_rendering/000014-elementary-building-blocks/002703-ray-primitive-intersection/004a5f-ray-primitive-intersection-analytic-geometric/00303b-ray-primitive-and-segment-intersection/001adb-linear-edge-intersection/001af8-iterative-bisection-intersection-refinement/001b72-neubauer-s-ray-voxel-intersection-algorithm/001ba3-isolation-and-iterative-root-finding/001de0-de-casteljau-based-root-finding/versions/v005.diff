@@ -1,0 +1,228 @@
+--- v004.md
++++ v005.md
+@@ -4,77 +4,176 @@
+ 
+ ## Overview
+-A root finding algorithm for polynomials in Bernstein form that finds the first intersection of a viewing ray with an isosurface by subdividing the control polygon using the de Casteljau algorithm at its intersection with the zero axis [S1]. It differs from knot insertion methods like [MR07] by providing quadratic convergence speed and constant memory usage without index operations, making it significantly faster on GPU architectures [S1].
++This method finds the intersection of a viewing ray with an isosurface defined by a trivariate polynomial in Bernstein form by iteratively subdividing the control polygon using the de Casteljau algorithm at the intersection with the zero axis [S1]. It distinguishes itself from sibling methods like [Neubauer Iterative Root Finder](2422-neubauer-iterative-root-finder.md) and [Knot insertion root finding](#knot-insertion-root-finding) by offering quadratic convergence speed and constant memory usage without index operations, making it significantly faster and more suitable for GPU architectures than linear-convergence knot insertion approaches [S1].
+ 
+ ## How it works
+-**Inputs and outputs:** The method takes a polynomial $P(t)$ in Bernstein basis of degree $n$ defined by control points $\mathbf{b}_0, \dots, \mathbf{b}_n$, and an isovalue $c$ [S1]. It solves $f(t) = P(t) - c = 0$ for $t \in [0, 1]$ [S1]. The output is the parameter $t$ corresponding to the first root [S1].
++**Inputs:**
++*   Polynomial coefficients in Bernstein basis defining the distance field or implicit function $f(t)$ along the ray parameter $t \in [0, 1]$.
++*   Isosurface value $c$ (typically 0 for normalized distance fields).
++*   Maximum number of iterations $N_{iter}$ (typically 3 to 7) [S1].
+ 
+-**Data structures:** The algorithm operates on the Bernstein control polygon and can be implemented with constant memory usage and without index operations [S1].
++**Outputs:**
++*   The smallest root $t^* \in [0, 1]$ such that $f(t^*) - c = 0$.
++
++**Data Structures:**
++The algorithm operates on the control polygon of the Bernstein polynomial. For a polynomial of degree $d$, the control polygon consists of $d+1$ control points $P_i$. In the context of volume rendering, the polynomial is often univariate along the ray, derived from the trivariate field. The values are represented as scalars $b_i$ corresponding to the Bernstein coefficients.
+ 
+ **Steps:**
+-1. Subdivide the control polygon using the de Casteljau algorithm at the intersection of the control polygon with the zero axis [S1].
+-2. Repeat the subdivision step for a fixed number of iterations $k$ (typically 3 to 7, depending on the interpolation type) [S1].
+-3. After $k$ iterations, the remaining control polygon is sufficiently small to approximate the root [S1].
+-
+-**Formulas:** The de Casteljau algorithm for a parameter $t$ and control points $\mathbf{b}_i^{(0)} = \mathbf{b}_i$ computes the left sub-polygon control points as:
+-$$ \mathbf{b}_i^{(r)} = (1-t) \mathbf{b}_{i-1}^{(r-1)} + t \mathbf{b}_i^{(r-1)} $$
+-for $r=1, \dots, n$ and $i=r, \dots, n$ [G]. The intersection parameter $t_{\text{split}}$ between adjacent control points $\mathbf{b}_i$ and $\mathbf{b}_{i+1}$ is found via linear interpolation: $t_{\text{split}} = t_{\text{start}} + (t_{\text{end}} - t_{\text{start}}) \frac{|\mathbf{b}_i|}{|\mathbf{b}_i| + |\mathbf{b}_{i+1}|}$ [G].
+-
+-**Parameters:** Number of iterations $k$: 3 to 7 [S1].
+-
+-**Edge cases and pitfalls:** The method assumes the root is isolated or that the first root is sought [S1]. For isolated roots, simpler methods like regula falsi or binary search can be used, but the isolation step causes diverging branches on CUDA architectures [S1]. The Bernstein form offers a control polygon with a variation diminishing property [S1].
++1.  **Initialization:** Let the current control points be $P_i^{(0)} = b_i$ for $i = 0, \dots, d$. Let the current parameter interval be $[t_{min}, t_{max}] = [0, 1]$.
++2.  **Iteration Loop:** Repeat for $k = 1$ to $N_{iter}$:
++    a.  **Find Intersection:** Identify the index $j$ where the control polygon crosses the zero axis (or the value $c$). Specifically, find $j$ such that $P_j^{(k-1)}$ and $P_{j+1}^{(k-1)}$ have opposite signs relative to the target value, or simply find the point closest to zero if the polygon is convex and contains the root. The source specifies subdividing "at the intersection of the control polygon with the zero axis" [S1]. In practice, this often means finding the midpoint of the segment crossing zero or using the de Casteljau subdivision at the parameter value corresponding to the crossing. However, the standard LR81 approach described implies a specific subdivision strategy. The text states it subdivides *using* the de Casteljau algorithm *at* the intersection. A common implementation (and the one implied by "constant memory" and "no index operations" in a fixed loop) is to subdivide the control polygon at the parameter $t$ where the linear interpolation between the control points closest to zero crosses the axis, or simply to subdivide the entire polygon at $t=0.5$ if the root is isolated and the polygon is well-behaved. However, the text explicitly says "subdividing... at the intersection". Let us define the subdivision point $t_{sub}$ as the root of the linear function defined by the two control points $P_i, P_{i+1}$ that bracket the zero crossing. If no bracket is found, the root is not in the current interval or the polygon is degenerate.
++    b.  **De Casteljau Subdivision:** Perform the de Casteljau algorithm to split the control polygon at $t_{sub}$. This generates two new sets of control points: left polygon $P^{(L)}$ and right polygon $P^{(R)}$.
++    c.  **Selection:** Select the sub-polygon ($P^{(L)}$ or $P^{(R)}$) that contains the root. This is determined by checking the signs of the control points or the value of the polynomial at the endpoints.
++    d.  **Update:** Set the current control points to the selected sub-polygon. Update $[t_{min}, t_{max}]$ to the corresponding sub-interval.
++3.  **Result:** The root is approximated by the value of the control point closest to the zero axis in the final polygon, or the midpoint of the final interval.
+ 
+ **Pseudocode:**
+ ```python
+-def de_casteljau_root_finding(control_points, isovalue, num_iterations):
++def de_casteljau_root_finding(bernstein_coeffs, target_value, max_iterations):
+     """
+-    Find the root of P(t) - isovalue = 0 using de Casteljau subdivision.
++    Finds the root of a polynomial in Bernstein form using de Casteljau subdivision.
++    
++    Args:
++        bernstein_coeffs: List of float coefficients b_0, ..., b_d.
++        target_value: The isosurface value c (e.g., 0).
++        max_iterations: Integer, typically 3-7.
++        
++    Returns:
++        float: Approximate root t in [0, 1].
+     """
+-    cp = list(control_points)
+-    t_start, t_end = 0.0, 1.0
+-    n = len(cp) - 1
+-
+-    for _ in range(num_iterations):
+-        # Find intersection of control polygon with zero axis
+-        t_split = 0.5  # Fallback if no crossing found
+-        for i in range(n):
+-            if cp[i] * cp[i+1] < 0:
+-                t_split = t_start + (t_end - t_start) * (abs(cp[i]) / (abs(cp[i]) + abs(cp[i+1])))
++    # Current control points
++    p = list(bernstein_coeffs)
++    degree = len(p) - 1
++    
++    # Interval bounds
++    t_min = 0.0
++    t_max = 1.0
++    
++    for _ in range(max_iterations):
++        # 1. Find the segment crossing the target value
++        # We look for i such that (p[i] - target) and (p[i+1] - target) have different signs
++        crossing_index = -1
++        for i in range(degree):
++            val_i = p[i] - target_value
++            val_next = p[i+1] - target_value
++            if val_i * val_next <= 0:
++                crossing_index = i
+                 break
+         
+-        # Compute de Casteljau triangle to extract left control polygon
+-        left_cp = [cp[0]]
+-        b = list(cp)
+-        for r in range(1, n + 1):
+-            new_b = []
+-            for i in range(len(b) - 1):
+-                new_b.append((1 - t_split) * b[i] + t_split * b[i+1])
+-            b = new_b
+-            left_cp.append(b[0])
++        # If no crossing found, the root might be at the boundary or the polygon is entirely on one side.
++        # In a robust implementation, we might check the sign of the first/last point.
++        # For this method, we assume the root is isolated and contained.
++        if crossing_index == -1:
++            # Fallback: if all points are positive, return t_min; if all negative, return t_max?
++            # Or simply return the midpoint of the last interval.
++            return (t_min + t_max) / 2.0
++            
++        # 2. Calculate subdivision parameter t_sub at the intersection
++        # Linear interpolation between p[crossing_index] and p[crossing_index+1]
++        # t_sub is the fraction along the segment where value equals target_value
++        v1 = p[crossing_index] - target_value
++        v2 = p[crossing_index+1] - target_value
+         
+-        # Update to the left segment for the first root
+-        cp = left_cp
+-        t_end = t_split
++        # Avoid division by zero
++        denom = v1 - v2
++        if abs(denom) < 1e-12:
++            t_sub = 0.5
++        else:
++            t_sub = v1 / denom
++            
++        # 3. Perform de Casteljau subdivision at t_sub
++        # We need to split the control polygon p into left and right parts at t_sub
++        # Standard de Casteljau algorithm computes the point and the new control polygons
++        
++        # Initialize temporary array for de Casteljau
++        # We only need to compute the new control points for the selected side
++        # However, to keep it simple and "constant memory" without complex indexing,
++        # we can compute the full de Casteljau triangle or just the necessary parts.
++        # Since degree is small (e.g., 9), we can compute the new polygon for the side containing the root.
++        
++        # Let's compute the new control points for the LEFT side (t in [0, t_sub])
++        # and RIGHT side (t in [t_sub, 1]).
++        # We select the side where the root lies.
++        
++        # To determine which side contains the root, we check the sign of the control points
++        # relative to the target value in the new polygons, or simply the sign of the function
++        # at the endpoints of the new intervals.
++        
++        # Compute Left Polygon P_L
++        p_left = [0.0] * (degree + 1)
++        p_left[0] = p[0]
++        for j in range(1, degree + 1):
++            p_left[j] = p_left[j-1] * (1 - t_sub) + p[j] * t_sub
++            
++        # Compute Right Polygon P_R
++        p_right = [0.0] * (degree + 1)
++        p_right[degree] = p[degree]
++        for j in range(degree - 1, -1, -1):
++            p_right[j] = p_right[j+1] * t_sub + p[j] * (1 - t_sub)
++            
++        # Determine which side contains the root
++        # Check if the root is in [t_min, t_sub] or [t_sub, t_max]
++        # We can check the sign of the function at the endpoints of the sub-intervals
++        # or the signs of the control points.
++        # A robust check: evaluate the polynomial at t_sub? No, that's expensive.
++        # Check signs of p_left[0] and p_left[degree] vs target?
++        # Actually, the crossing_index logic already told us which segment crossed.
++        # The subdivision point t_sub is within the segment [crossing_index, crossing_index+1].
++        # The root is between t_min and t_max.
++        # We need to know if the root is to the left or right of t_sub.
++        # We can check the sign of the control points in the new polygons.
++        
++        # Simple heuristic: if the control point at the crossing in the left polygon
++        # has the same sign as the target difference, the root is in the right.
++        # Let's use the sign of the value at the midpoint of the new intervals?
++        # Or simply: if p_left[degree] (which is the point at t_sub) has the same sign
++        # as p_left[0] relative to target, then the root is in the right polygon?
++        
++        # Better: Check the sign of (p_left[degree] - target_value) and (p_left[0] - target_value).
++        # If they have different signs, the root is in the left polygon.
++        # If they have the same sign, the root is in the right polygon.
++        
++        val_left_start = p_left[0] - target_value
++        val_left_end = p_left[degree] - target_value # This is the value at t_sub
++        
++        if val_left_start * val_left_end <= 0:
++            # Root is in the left polygon
++            p = p_left
++            t_max = t_sub
++        else:
++            # Root is in the right polygon
++            p = p_right
++            t_min = t_sub
++            
++    # Return the midpoint of the final interval
++    return (t_min + t_max) / 2.0
++```
+ 
+-    return (t_start + t_end) / 2
+-```
++**Parameters:**
++*   `max_iterations`: 3 to 7, depending on the interpolation type [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** Floating-point precision errors can cause the control polygon to fail to bracket the root correctly.
++*   **Boundaries:** If the root is exactly at 0 or 1, the sign check might fail if not handled carefully.
++*   **Multiple Roots:** The method assumes an isolated root. If multiple roots exist in the interval, the control polygon may not cross the zero axis in a simple manner, or the method may converge to one of them. The isolation step (from the parent article) is crucial here.
++*   **CUDA Divergence:** While LR81 itself is well-suited for CUDA, combined methods using Regula Falsi for isolation may suffer from diverging branches [S1].
+ 
+ ## Subtopics
+ 
+ ### Knot insertion root finding
+-A root finding algorithm based on knot insertion with linear convergence speed and linear complexity per step [S1]. It requires index operations and memory usage grows with every iteration step, limiting the maximum number of iterations [S1]. For degree 9 (tri-cubic), it has a relative execution time of 1.0, MSE of 0.034, and max error of 0.85 [S1]. It is more than 10 times slower than de Casteljau-based root finding [S1].
++A root finding algorithm based on knot insertion. It has linear convergence speed and linear complexity per step. It requires index operations and memory usage grows with every iteration step, limiting the maximum number of iterations. For degree 9 (tri-cubic), it has an execution time of 1.0 (relative) and MSE 0.034, max err 0.85. It is more than 10 times slower than LR81 [S1].
+ 
+ ### Regula Falsi with De Casteljau
+-A root finding method using Regula Falsi combined with De Casteljau subdivision for root isolation [S1]. While the second phase (Regula Falsi) can outperform de Casteljau-based root finding for isolated roots, the isolation step is not well suited for CUDA due to diverging branches [S1].
++A root finding method using Regula Falsi combined with De Casteljau subdivision for root isolation. Although the second phase (Regula Falsi) outperforms LR81 when a root is isolated, the isolation step is not well suited for CUDA due to diverging branches [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Quadratic complexity per step due to the de Casteljau algorithm [S1].
+-- **Convergence:** Quadratic convergence speed [S1].
+-- **Memory:** Constant memory usage, no index operations required [S1].
+-- **Performance:** For degree 9 (tri-cubic), relative execution time is 0.076, MSE is 0.003, and max error is 0.66 [S1]. It is more than 10 times faster than the MR07 knot insertion algorithm [S1].
+-- **Strengths:** Fast, constant memory, suitable for GPU (CUDA) due to lack of diverging branches and index operations [S1].
+-- **Limitations:** Fixed number of iterations required; not optimal for isolated roots where simpler methods like Regula Falsi could be faster in the refinement phase [S1].
++*   **Time Complexity:** Quadratic complexity per step due to the de Casteljau algorithm [S1].
++*   **Convergence:** Quadratic convergence speed [S1].
++*   **Memory Complexity:** Constant memory usage. It can be implemented without index operations [S1].
++*   **Performance:** For degree 9 (tri-cubic), execution time is 0.076 (relative to worst result 1.0), MSE 0.003, max err 0.66 [S1]. It is more than 10 times faster than the MR07 (knot insertion) algorithm [S1].
++*   **Strengths:** Fast, constant memory, no index operations, suitable for GPU (CUDA) [S1].
++*   **Limitations:** Requires a fixed number of iterations (3-7) which must be chosen based on interpolation type. Not suitable for non-isolated roots without prior isolation [S1].
+ 
+ ## Background
+-Originated from the work cited as [LR81] in the context of volume rendering using wavelet-based multiresolution isosurface rendering [S1]. It is used as a primary root finding method in GPU-based volume rendering pipelines due to its efficiency and suitability for parallel architectures [S1].
++The method is based on the idea of subdividing the control polygon using the de Casteljau algorithm at the intersection of the control polygon with the zero axis. It is referenced as [LR81] in the literature. It is used in volume rendering for finding the first intersection of a viewing ray with an isosurface defined by trivariate polynomials in Bernstein form [S1].
+ 
+ ## Sources

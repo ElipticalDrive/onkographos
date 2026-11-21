@@ -1,0 +1,103 @@
+# Bounding Ellipsoids from SDFs
+
+Also called: Ellipsoid Bounding Volume, Minimum-Volume Enclosing Ellipsoid for SDFs
+
+## Overview
+This method generates a conservative Signed Distance Function (SDF) for a shape by approximating its geometry with a minimum-volume enclosing ellipsoid. It serves as an alternative to convex polyhedra or oriented bounding boxes within the Sphere Carving pipeline [S1, S2]. Unlike convex hulls which require $n$ scalar products for $n$ faces, ellipsoids offer a more compact memory footprint and constant-time evaluation complexity, making them suitable for real-time applications where geometric fidelity is balanced against computational cost [S1, S2].
+
+## How it works
+**Inputs:**
+- A set of points $P$ representing the surface of the target shape [S1, S2].
+- The center of the ellipsoid $c$ [S1, S2].
+
+**Outputs:**
+- A 1-Lipschitz (conservative) SDF function $d(\mathbf{p}, \mathcal{E})$ [S1, S2].
+- Ellipsoid parameters: center $c$, rotation matrix $R$, diagonal scaling matrix $D$, and axis lengths $a, b, c$ [S1, S2].
+
+**Data Structures:**
+- **Center ($c$):** A 3D vector $(c_x, c_y, c_z)$ [S1, S2].
+- **Rotation Matrix ($R$):** A $3 \times 3$ orthogonal matrix defining the orientation of the ellipsoid axes [S1, S2].
+- **Diagonal Matrix ($D$):** A $3 \times 3$ diagonal matrix containing the inverse axis lengths [S1, S2].
+- **Axis Lengths:** Scalars $a, b, c$ representing the semi-axis lengths, ordered such that $a < b < c$ [S1, S2].
+
+**Algorithm Steps:**
+1. **Generate Point Set:** Obtain a point set $P$ close to the shape surface. This is typically achieved via the approximate convex decomposition or sphere carving iterations described in the parent method [S1, S2].
+2. **Compute Minimum-Volume Enclosing Ellipsoid (MVEE):** Replace the standard convex hull generation step with an MVEE algorithm applied to point set $P$ [S1, S2]. This yields the center $c$, rotation $R$, and axis lengths $a, b, c$ [S1, S2].
+3. **Construct Matrices:**
+   - Define the diagonal matrix $D$ with entries $1/a, 1/b, 1/c$ on the diagonal [S1, S2].
+   - Compute the transformation matrix $\mathbf{A} = D R^T$ [S1, S2].
+4. **Evaluate SDF:** For any query point $\mathbf{p}$, compute the distance using the formula below [S1, S2].
+
+**Formula:**
+The signed distance function for an ellipsoid $\mathcal{E}$ is defined as [S1, S2]:
+
+$$d(\mathbf{p}, \mathcal{E}) = a (\|\mathbf{A}(\mathbf{p} - \mathbf{c})\| - 1)$$
+
+Where:
+- $\mathbf{p}$ is the query point [S1, S2].
+- $a$ is the smallest semi-axis length [S1, S2].
+- $\mathbf{c}$ is the center of the ellipsoid [S1, S2].
+- $\mathbf{A} = \mathbf{D}(1/a, 1/b, 1/c) \mathbf{R}^T$ [S1, S2].
+- $\|\cdot\|$ denotes the Euclidean norm [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ellipsoid_sdf(p, c, R, a, b, c_axis):
+    """
+    Computes the conservative SDF for an ellipsoid.
+    
+    Args:
+        p: Query point (vec3)
+        c: Ellipsoid center (vec3)
+        R: Rotation matrix (3x3)
+        a: Smallest semi-axis length
+        b: Middle semi-axis length
+        c_axis: Largest semi-axis length (note: distinct from center c)
+        
+    Returns:
+        Conservative signed distance
+    """
+    # Step 1: Translate point to ellipsoid space
+    diff = p - c
+    
+    # Step 2: Rotate point into ellipsoid's local frame
+    # R is the rotation matrix defining axes. 
+    # We need R^T applied to diff.
+    # Assuming R is stored as rows or columns, standard matrix-vector mult:
+    rotated_diff = R.transpose() @ diff
+    
+    # Step 3: Scale by inverse axis lengths
+    # D = diag(1/a, 1/b, 1/c_axis)
+    scaled_x = rotated_diff[0] / a
+    scaled_y = rotated_diff[1] / b
+    scaled_z = rotated_diff[2] / c_axis
+    
+    # Step 4: Compute norm
+    norm_val = sqrt(scaled_x**2 + scaled_y**2 + scaled_z**2)
+    
+    # Step 5: Apply scaling factor 'a' and offset
+    distance = a * (norm_val - 1.0)
+    
+    return distance
+```
+
+**Edge Cases and Pitfalls:**
+- **Conservatism:** The function is 1-Lipschitz, meaning it is conservative (overestimates distance). The degree of conservatism depends on the relative axis lengths $a, b, c$ [S1, S2]. Highly elongated ellipsoids may be less accurate approximations of complex shapes compared to convex polyhedra [S1, S2].
+- **Axis Ordering:** The formula assumes $a < b < c$. If the MVEE algorithm returns axes in a different order, they must be sorted and the corresponding matrix entries adjusted to maintain correctness [S1, S2].
+- **Precision:** The evaluation involves a square root and multiple scalar products. Standard floating-point precision is sufficient, but extreme aspect ratios may introduce minor inaccuracies in the norm calculation [S1, S2].
+
+## Operating characteristics
+- **Time Complexity:** Evaluation requires approximately 4 scalar products and one square root [S1, S2]. This is constant time $O(1)$ with respect to the number of faces, unlike convex polyhedra which require $n$ scalar products for $n$ faces [S1, S2].
+- **Memory Complexity:** Ellipsoids are more compact in memory than convex polyhedra, requiring only storage for the center, rotation matrix, and three axis lengths [S1, S2].
+- **Performance:** The GPU implementation performs well for most models. However, overly conservative SDFs (e.g., ship models) may require more iterations in the parent Sphere Carving algorithm to converge, similar to slow Sphere Tracing [S1, S2].
+- **Strengths:** Computational efficiency, low memory footprint, simplicity of implementation [S1, S2].
+- **Limitations:** Potentially less geometric fidelity than convex polyhedra or k-dops, especially for shapes with high curvature variations or thin features [S1, S2].
+
+## Background
+This method is described in the context of "Sphere Carving: Bounding Volumes for Signed Distance Fields" [S1, S2]. It is presented as one of several bounding volume types (alongside OBBs, k-dops, and convex polyhedra) that can be generated from a point set $P$ [S1, S2]. The approach leverages the mathematical properties of ellipsoids to provide a smooth, conservative distance field suitable for voxel-based rendering and physics [S1, S2].
+
+## Sources
+[S1] Sphere Carving: Bounding Volumes for Signed Distance Fields, https://doi.org/10.1145/3730845, fetched 2026-10-27
+[S2] Sphere Carving: Bounding Volumes for Signed Distance ..., https://research.adobe.com/publication/sphere-carving-bounding-volumes-for-signed-distance-fields/, fetched 2026-11-05

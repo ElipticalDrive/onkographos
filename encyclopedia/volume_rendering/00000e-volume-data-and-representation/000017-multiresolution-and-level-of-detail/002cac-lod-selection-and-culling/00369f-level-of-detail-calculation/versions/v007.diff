@@ -1,0 +1,164 @@
+--- v006.md
++++ v007.md
+@@ -4,36 +4,49 @@
+ 
+ ## Overview
+-Level of Detail Calculation determines the specific resolution level (mip level) of a voxelized or hierarchical volume representation required to render a primitive or region at a given screen position. It solves the problem of mapping continuous screen-space metrics (such as projected width) to discrete data hierarchy indices, ensuring that rendering resources are allocated proportional to visual importance. It sets itself apart from sibling methods by providing the fundamental arithmetic mapping from geometric extent to LOD index, which other methods like [Focus Point Based Brick LOD Selection](5282-focus-point-based-brick-lod-selection.md) or [LoD Selection via Projected Width](7837-lod-selection-via-projected-width.md) use as a core component of their broader selection strategies.
++Level of Detail Calculation determines the specific resolution level within a multiresolution hierarchy required to render a voxel or brick at a given screen position, ensuring visual fidelity while minimizing computational cost. It sets itself apart from sibling methods by explicitly mapping the projected size of a volume element to a discrete hierarchy index using logarithmic scaling, rather than relying solely on distance thresholds or error metrics. This method serves as the foundational step for [LOD Selection and Culling](5338-lod-selection-and-culling.md), providing the target resolution before traversal or culling decisions are made.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** `MaxLevels` (integer, total number of resolution levels in the hierarchy, typically $\ge 1$), `width` (float, the projected width of the target primitive or voxel in screen-space units, or a normalized metric derived from it).
+-*   **Output:** `level0` (integer, the lower LOD index), `plevel0` (float, the fractional part for interpolation), `level1` (integer, the upper LOD index), `plevel1` (float, the fractional part for interpolation).
++The method calculates a continuous LOD level based on the projected width of the voxel in screen space, then interpolates between the two nearest integer levels to determine the final sampling rate.
++
++**Inputs:**
++*   $M$: The maximum number of levels in the hierarchy (integer).
++*   $w$: The projected width of the voxel/brick in screen space (pixels).
++
++**Outputs:**
++*   $level$: The continuous target LOD level (float).
++*   $level0$: The ceiling integer level.
++*   $plevel0$: The fractional weight for $level0$.
++*   $level1$: The floor integer level.
++*   $plevel1$: The fractional weight for $level1$.
+ 
+ **Data Structures:**
+-No complex data structures are required. The method operates on scalar values. If used within a shader, these are typically uniform variables or computed per-vertex/per-pixel attributes.
++No complex data structures are required for the calculation itself. The hierarchy is assumed to be pre-computed with uniform scaling factors (typically powers of 2).
+ 
+ **Steps:**
+-1.  Compute the continuous LOD level using the logarithmic relationship between the maximum hierarchy depth and the projected width.
+-2.  Determine the lower integer LOD index (`level0`) and its fractional remainder (`plevel0`).
+-3.  Determine the upper integer LOD index (`level1`) and its fractional remainder (`plevel1`).
++1.  Calculate the continuous level using the logarithmic relationship between the maximum levels and the projected width.
++2.  Determine the integer ceiling and floor levels.
++3.  Compute the fractional weights for interpolation between the two levels.
+ 
+ **Formulas:**
+ The continuous level is calculated as [S1]:
+-$$ \text{level} = \text{MaxLevels} - 1 + \log_2(\text{width}) $$
++$$ level = M - 1 + \log_2(w) $$
+ 
+-The lower LOD index and its weight are [S1]:
+-$$ \text{level0} = \lceil \text{level} \rceil $$
+-$$ \text{plevel0} = \text{level} - \text{level0} $$
++The ceiling level and its weight are [S1]:
++$$ level0 = \lceil level \rceil $$
++$$ plevel0 = level - level0 $$
+ 
+-The upper LOD index and its weight are [S1]:
+-$$ \text{level1} = \lfloor \text{level} \rfloor $$
+-$$ \text{plevel1} = \text{level1} - \text{level} $$
++The floor level and its weight are [S1]:
++$$ level1 = \lfloor level \rfloor $$
++$$ plevel1 = level1 - level $$
+ 
+-*Note on Weights:* In standard linear interpolation, the weight for `level0` would typically be `1 - plevel0` and for `level1` would be `plevel1`. However, the source defines `plevel0` and `plevel1` directly as the differences. Specifically, `plevel0` represents how far `level` is above `level0` (if `level0` is ceiling, this is negative or zero? Let's check: if level=2.3, ceil=3, plevel0 = 2.3-3 = -0.7. This suggests `plevel0` is not a standard interpolation weight in the [0,1] range unless interpreted differently. The source defines these variables explicitly. Implementation should follow the source definitions exactly. `plevel1` for level=2.3, floor=2, plevel1 = 2-2.3 = -0.3. Both are negative. This implies these variables might be used for specific offset calculations or the source implies `level` is defined differently in context. However, we must stick to the source formulas. [S1] defines them exactly as above.
++Note: $plevel0$ and $plevel1$ represent the interpolation factors. Typically, the rendering sample is taken from $level0$ with probability $plevel0$ and $level1$ with probability $plevel1$, or values are interpolated linearly if the data supports it.
+ 
+ **Parameters:**
+-*   `MaxLevels`: The depth of the mip-chain. Typical values depend on the volume resolution (e.g., 10 for 1024^3).
+-*   `width`: The projected width. If `width` is 0, $\log_2(0)$ is undefined. Edge case: Clamp `width` to a minimum epsilon (e.g., $10^{-6}$) to prevent NaNs.
++*   $M$: Defined by the pre-computed hierarchy depth. Typical values depend on the volume resolution (e.g., 8–16 for large-scale scenes).
++
++**Edge Cases and Pitfalls:**
++*   **Width < 1:** If $w < 1$, $\log_2(w)$ is negative. The level may drop below 0. The implementation must clamp $level$ to the range $[0, M-1]$.
++*   **Width > 2^{M-1}:** If the voxel projects to a size larger than the finest resolution allows, the level may exceed $M-1$. Clamp to $M-1$.
++*   **Precision:** Floating-point precision in $\log_2$ can cause jitter at boundaries where $w$ is a power of 2. [G] Use epsilon comparisons or integer arithmetic for power-of-two widths if stability is critical.
+ 
+ **Pseudocode:**
+@@ -41,34 +54,42 @@
+ import math
+ 
+-def calculate_lod_level(max_levels: int, width: float) -> tuple:
++def calculate_lod(M: int, width: float) -> dict:
+     """
+-    Calculates LOD indices and fractional parts based on projected width.
++    Calculate LOD level based on projected width.
+     
+     Args:
+-        max_levels: Total number of levels in the hierarchy (integer).
+-        width: Projected width of the primitive (float).
++        M: Maximum number of levels in the hierarchy.
++        width: Projected width of the voxel in screen space.
+         
+     Returns:
+-        A tuple (level0, plevel0, level1, plevel1) as defined in [S1].
++        Dictionary containing level, level0, plevel0, level1, plevel1.
+     """
+-    # Guard against zero or negative width which causes log domain error
+-    if width <= 0.0:
+-        width = 1e-9
+-        
++    # Clamp width to avoid log(0) or negative logs for very small projections
++    # Assuming minimum meaningful width is 0.5 pixels to prevent extreme levels
++    if width <= 0:
++        width = 0.5
++    
+     # Step 1: Calculate continuous level
+-    # Formula: level = MaxLevels - 1 + log2(width)
+-    level = (max_levels - 1) + math.log2(width)
++    # Formula: level = M - 1 + log2(width)
++    level = (M - 1) + math.log2(width)
+     
+-    # Step 2: Calculate lower LOD index and plevel0
+-    # Formula: level0 = ceil(level), plevel0 = level - level0
++    # Clamp level to valid range [0, M-1]
++    level = max(0.0, min(float(M - 1), level))
++    
++    # Step 2: Calculate ceiling level and weight
+     level0 = math.ceil(level)
+     plevel0 = level - level0
+     
+-    # Step 3: Calculate upper LOD index and plevel1
+-    # Formula: level1 = floor(level), plevel1 = level1 - level
++    # Step 3: Calculate floor level and weight
+     level1 = math.floor(level)
+     plevel1 = level1 - level
+     
+-    return level0, plevel0, level1, plevel1
++    return {
++        "level": level,
++        "level0": level0,
++        "plevel0": plevel0,
++        "level1": level1,
++        "plevel1": plevel1
++    }
+ ```
+ 
+@@ -76,25 +97,19 @@
+ 
+ ### [Multiresolution Terrain Quantization and Prediction](9998-multiresolution-terrain-quantization-and-prediction.md)
+-This method assigns quantization precision to terrain vertices in a multiresolution hierarchy to minimize bitstream size while maintaining visual fidelity. It sets itself apart from generic quantization methods by leveraging the geometric connectivity of patch neighbors to derive shifts for boundary vertices from their children, thereby reducing the number of stored parameters.
++Assigns quantization precision to terrain vertices to minimize bitstream size. It differs by leveraging geometric connectivity of patch neighbors to derive shifts for boundary vertices, reducing stored parameters. Choose for terrain streaming.
+ 
+ ### [LOD Level Tree Traversal](16320-lod-level-tree-traversal.md)
+-LOD Level Tree Traversal is a raycasting method for 4D sparse voxel octrees that determines the visual output of a pixel by terminating the tree traversal based on specific criteria (data presence, maximum depth, or projected size) and then mapping the traversal state to a color value. It differs from standard volume rendering by decoupling the traversal termination logic from the final color computation, allowing the same traversal engine to render density, normals, or traversal complexity (stack depth) by swapping only the final color calculation step. It builds on [Level of Detail Calculation](7836-level-of-detail-calculation.md) by using the calculated LOD limits to prune the search space.
++A raycasting method for 4D sparse voxel octrees that terminates traversal based on projected size and maps state to color. It differs by decoupling traversal termination from color computation. Choose for sparse voxel rendering.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-The calculation itself is $O(1)$ time complexity, involving a logarithm, ceiling, and floor operations. Memory complexity is $O(1)$ as it requires only scalar storage.
+-
+-**Measured Performance:**
+-The source [S1] notes that raster-based approaches for LOD generation are faster in specific contexts but have hardware limitations due to OpenGL architecture. The arithmetic calculation is negligible compared to the cost of data fetching or traversal.
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Provides a deterministic, continuous mapping from screen space to data resolution. Simple to implement.
+-*   **Limitations:** Sensitive to the definition of `width`. If `width` is not properly normalized or clamped, it leads to invalid LOD indices. The source formulas result in negative fractional parts (`plevel0`, `plevel1`), which may require specific interpretation or post-processing by the caller to be used as interpolation weights in the range [0, 1].
+-
+-**When to Use:**
+-Use when a direct logarithmic mapping from projected size to mip level is required, particularly in microgeometry rendering or voxel-based systems where the hierarchy is power-of-two based.
++*   **Time Complexity:** $O(1)$ per voxel/brick, involving a logarithm and basic arithmetic operations.
++*   **Memory Complexity:** $O(1)$ auxiliary memory.
++*   **Strengths:** Fast, deterministic, and suitable for real-time applications [S1]. Provides smooth transitions between levels via fractional weights.
++*   **Limitations:** Assumes uniform scaling in the hierarchy. Does not account for data variance or occlusion, only projected size.
++*   **When to use:** When a uniform multiresolution hierarchy (e.g., mipmaps, bricks) is available and screen-space coverage is the primary driver for LOD.
++*   **When not to use:** For non-uniform hierarchies or when data-dependent error metrics are required.
+ 
+ ## Background
+-The method originates from research into fast voxelization and level of detail for microgeometry rendering [S1]. It is specifically cited in the context of SGGX-H models and raster-based LOD generation, aiming to balance accuracy and sampling control for large models [S1].
++The method originates from microgeometry rendering techniques, specifically in the context of fast voxelization and level of detail for rendering detailed surfaces [S1]. It is part of a broader family of techniques that map screen-space metrics to data-space resolutions to balance quality and performance.
+ 
+ ## Sources

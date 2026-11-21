@@ -1,0 +1,96 @@
+The problem Every mask build tests each receiver-by-facet pair on its own, so its cost is n_receivers × n_facets × (cost per test) however coherent the scene is. The records show a lot of coherence going unused: Outside(chamber, inlet, r...
+
+Radiation: decide the shadow mask a block at a time — conservative shaft certificates between receiver blocks and facet clusters · Issue #554 · DeGrootResearchGroup/aquaflux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Radiation: decide the shadow mask a block at a time — conservative shaft certificates between receiver blocks and facet clusters #554
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Radiation: decide the shadow mask a block at a time — conservative shaft certificates between receiver blocks and facet clusters#554
+Copy link
+Description
+ctdegroot
+opened on Sep 25, 2026
+Issue body actions
+The problem
+Every mask build tests each receiver-by-facet pair on its own, so its cost is n_receivers × n_facets × (cost per test) however coherent the scene is. The records show a lot of coherence going unused:
+Outside(chamber, inlet, riser) on Sozzi: 81.1% of cell-centre pairs lie inside one convex region and so are clear by convexity alone. The recorded Sozzi measurement notes that the test does not skip them — every pair pays the full covering test.
+Pipe cells are 52% blocked, and every disputed pair in the faceted-vs-ideal comparison sat in a thin band at the pipe rim. Shadow boundaries are thin; most (cell, patch of lamp) combinations are wholly lit or wholly dark.
+The silhouette cone cull keeps only 7–12% of pairs, a share that falls as the mesh refines.
+The triangulated mask (grid ray walk) extrapolates to ~88 h on the full Sozzi mesh, about 600× everything else in the calculation. The analytic Outside mask extrapolates to ~595 s (an extrapolation, flagged as one in the record).
+The idea: hierarchical visibility, conservative first
+Group receivers into spatially compact blocks and facets into spatially compact clusters. Every segment from a facet centroid in cluster F to a receiver in block R lies inside the convex hull conv(R ∪ centroids(F)), the shaft. If a body provably misses the shaft, every pair of that tile is clear, with no per-pair test. Only tiles the certificate cannot decide are tested pair by pair, as now.
+This combines both directions of coherence (the "coarse emitter" and "nearby receiver" ideas). It is the standard shaft culling of Haines & Wallace (1991), used hierarchically as in Hanrahan, Salzman & Aupperle (1991).
+The certificate must be conservative. A test from the cluster centroid to the block centroid is not, and would light up shadows silently. Here a certificate may only say "clear" or "don't know", and the result must be bit-identical to the brute-force mask.
+A contract that composes: convex witnesses
+A body offers witness functions w_i(x) whose sublevel sets {x : w_i(x) < 0} are convex and disjoint from the body. If all points of a group have w_i < 0 for one i, then so does their hull, and no segment between them meets the body. A group's summary is max over its points of w_i, and two groups merge by elementwise max. So the tile certificate factorizes into one summary per block plus one per cluster: any_i max(W_R[i], W_F[i]) < 0, with no per-pair work at all.
+Outside(regions): w_r = signed_distance of each convex region. The sublevel set is the region, which lies in the fluid, so it is exact.
+A convex primitive (sleeve, baffle, box, sphere): separating half-spaces from its support function h(n) = max_{x∈B} n·x over a fixed set of axes, w_n(x) = h(n) − n·x + slack.
+CSG: Union support is the max of its members', Intersection is bounded by the min, Difference by its body's.
+Any other body (host/triangulated): no witnesses, so it is never certified and always tested as now.
+The witnesses belong on aquaflux/solids/ (generic geometry, names no radiation). The blocking/clustering and the per-tile fallback belong in radiation/visibility.py.
+Phases
+A. Prototype (this issue's first PR): "fully visible" only, analytic bodies only.
+Witnesses on Body (empty by default), ConvexSolid primitives via support, CSG, and Outside.
+A culling strategy for the analytic-body layer of the mask: Morton-ordered receiver blocks and facet clusters within each pass, certificates per tile, pair-by-pair blocks only on undecided tiles. Off by default (it changes cost, not answers), like TriangleGrid.
+Tests: bit equality with the brute-force mask on scenes with real shadow boundaries (sleeves, Outside with pipes, including degenerate / grazing configurations); unit tests of each support function against dense sampling; mutation-checked.
+Measurement: validation/ harness on the Sozzi Outside scene (cell-centre receivers, case STL lamp) reporting the share of pairs decided by certificate, and wall clock against the brute-force build, both arms in one process, alternating passes, with repeat spread and the full configuration.
+B. Triangulated occluders. A certificate from TriangleGrid: if every voxel the shaft's bounding box overlaps is empty, the tile is clear. This is sound because a triangle is registered in every voxel its bounding box spans. This is where the 88 h lives. It depends on #510 (no public occluder takes a triangle mesh) for the receiver path, and on self-occlusion for the surface path.
+C. "Fully hidden" certificates. A tile inside the shadow of one convex blocker; this is easy for Outside/primitives and hard for triangle soups (occluder fusion). With this, the gather could skip wholly-dark tiles too.
+D. (Separate, and changes answers.) Distance-based level of detail for the gather. A facet cluster stands in for its children where width/distance allows (the subdivide.py criterion), with exitance as the area-weighted sum, so it stays linear and differentiable. This needs an error bound and a measurement against the fine gather. The lamp-resolution study already shows far receivers need 3–5× fewer facets.
+Notes
+The mask is frozen and off the gradient tape, so culling touches no gradient. Only D would.
+Host orchestration, traced tile tests. The lesson from TriangleGrid is that a structure whose value is the work it skips should be built on the host. The per-tile blocks evaluation stays compiled, on compacted and power-of-two-padded tile batches.
+Block and cluster sizes trade the certificate's hit rate (smaller shafts decide more) against fallback granularity. Sizes are to be measured, not assumed.
+Activity
+ctdegroot
+added 3 commits that reference this issue on Sep 26, 2026
+Radiation: measure phase B, default to a three-level ladder (#554)
+...
+6986f46
+Record why shaft culling keeps one ladder rather than a depth per body
+...
+25e5d73
+Count the pairs a fully-hidden certificate could leave untested
+...
+01bdb4b
+ctdegroot commented on Oct 16, 2026
+ctdegroot
+on Oct 16, 2026 – with Claude
+MemberAuthor
+More actions
+Status check against main @ 1937b3b:
+Phase A, done (14f78a4). ShaftCulling has been the default since 2026-09-26. Its masks are bit-identical to EveryPair. On the whole Sozzi mesh with the cylinders it is 1.50x.
+Phase B, done for the receiver path. That covers TriangleBody (Radiation: no public occluder takes a triangle mesh, so the grid is only reachable as self-occlusion #510), the coarse-to-fine (32, 8, 2) ladder and Body.vouches (61f87f5, 6986f46). Not done for the facet-to-facet ray mask (self-occlusion): its shafts start on the wall they are tested against, and no design exists yet.
+Phase C, not built. Its ceiling has been measured. On the cylinders, fully blocked tiles hold 50-72% of the undecided pairs. On the triangulated wall they hold only ≤12.9-15.1%. A port-plane certificate, which would decide crossing pairs of both kinds, is sketched in the radiation design record but not designed.
+Phase D, superseded. Its level-of-detail idea became Radiation: cluster the emitters for the gather with an error bound (the "many lights" problem: lightcuts, low-rank sampling) #565, which was declined in favour of exact back-face skipping.
+What remains is phase C and the self-occlusion culling. Suggest splitting those into their own issues and closing this one.
+Generated by Claude Code
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

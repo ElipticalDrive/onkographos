@@ -1,0 +1,300 @@
+--- v004.md
++++ v005.md
+@@ -4,67 +4,62 @@
+ 
+ ## Overview
+-This method prevents the loss of geometric detail in adaptive meshes by rendering small cells as anti-aliased ellipsoidal splats instead of polygons [S1, S2][S3, unofficial]. It solves the problem where small cells are missed between slice planes or by pixel samples during scan conversion, which would otherwise result in missing important high-gradient features [S1, S2][S3, unofficial]. Unlike sibling methods that rely on post-processing filters or motion blur, this approach integrates anti-aliasing directly into the object-order rendering pipeline by convolving the splat footprint with a Gaussian presampling filter [S1, S2][S3, unofficial].
++This method prevents the loss of geometric detail in adaptive meshes by rendering small volumetric cells as anti-aliased ellipsoidal splats instead of polygons, addressing the problem where small cells are missed between slice planes or by pixel samples during scan conversion [S1, S2][S3, unofficial]. It distinguishes itself from sibling methods by replacing complex filtered polygon rendering with hardware-accelerated texture-mapped Gaussian splats, ensuring that high-gradient regions in unstructured grids contribute to the image without the bandwidth overhead of small polygons [S1, S2][S3, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+ **Inputs:**
+-*   A set of polyhedral cells from an adaptive mesh [S1, S2][S3, unofficial].
+-*   A volume threshold $V_{th}$ [S1, S2][S3, unofficial].
+-*   A transfer function mapping cell properties to RGBA color and opacity [S1, S2][S3, unofficial].
+-*   A slicing direction and a set of parallel slice planes [S1, S2][S3, unofficial].
+-*   A camera view and image resolution [S1, S2][S3, unofficial].
++*   Unstructured or curvilinear grid cells $\{C_i\}$.
++*   Cell properties: volume $V_i$, center of gravity $\mathbf{c}_i$, and scalar value $\phi_i$.
++*   Transfer function $T(\phi)$ mapping scalar value to RGBA color and opacity.
++*   Camera parameters (view and projection matrices).
++*   Slicing planes $\{P_j\}$ perpendicular to the view direction.
++*   Volume threshold $V_{thresh}$ for splitting cells into "large" (polygon) and "small" (splat) categories [S1, S2][S3, unofficial].
+ 
+ **Outputs:**
+-*   A composited image where small cells are rendered as smooth, anti-aliased splats and large cells as polygons [S1, S2][S3, unofficial].
++*   Final composited image.
+ 
+-### Data Structures
+-*   **Cell:** Contains vertex coordinates, volume $V$, and center of gravity (centroid) $C$ [S1, S2][S3, unofficial].
+-*   **Splat:** Defined by its centroid $C$, a Gaussian ellipsoid shape approximating the cell, and an enlarged 2D footprint [S1, S2][S3, unofficial].
+-*   **Texture Map:** A 2D texture object containing a sequence of textured rectangles from consecutive slices, created per slicing direction [S1, S2][S3, unofficial].
+-*   **Stencil Buffer:** A buffer recording the presence of large cell polygons to prevent splat overlap [S1, S2][S3, unofficial].
++**Data Structures:**
++*   **Small Cell List:** A list of cells identified as "small" ($V_i < V_{thresh}$).
++*   **Texture Maps:** 2D textures containing pre-computed splat rectangles for each slicing direction. Each texture map contains a sequence of textured rectangles from consecutive slices [S1, S2][S3, unofficial].
++*   **Stencil Buffer:** Used to track regions occupied by large cell polygons [S1, S2][S3, unofficial].
+ 
+-### Parameters
+-*   **Volume Threshold ($V_{th}$):** Cells with volume $V < V_{th}$ are splatted; others are sliced [S1, S2][S3, unofficial]. The exact value is not specified in the sources [G].
+-*   **Gaussian Presampling Filter:** A Gaussian filter applied in the image plane to enlarge the splat footprint for anti-aliasing [S1, S2][S3, unofficial]. The standard deviation is not specified [G].
++**Steps:**
+ 
+-### Steps
++1.  **Classification:** For each cell $C_i$, compare its volume $V_i$ to the threshold $V_{thresh}$. If $V_i \ge V_{thresh}$, classify as large. If $V_i < V_{thresh}$, classify as small [S1, S2][S3, unofficial].
+ 
+-1.  **Classification:** For each cell, compare its volume $V$ to the threshold $V_{th}$ [S1, S2][S3, unofficial].
+-    *   If $V \ge V_{th}$, mark as **Large**.
+-    *   If $V < V_{th}$, mark as **Small** [S1, S2][S3, unofficial].
++2.  **Assignment:** Assign each small cell $C_i$ to the closest slicing plane $P_j$ [S1, S2][S3, unofficial].
+ 
+-2.  **Assignment:** For each Small cell, assign it to the closest slice plane [S1, S2][S3, unofficial].
++3.  **Ellipsoid Fitting:** Fit each small cell $C_i$ with a Gaussian ellipsoid that approximates its shape. In curvilinear grids with a slowly varying Jacobian derivative matrix, these splats sum to near unity at any point, ensuring smooth interpolation of the scalar field [S1, S2][S3, unofficial].
++    *   *Note:* The exact mathematical formulation for fitting the ellipsoid to an arbitrary polyhedron is not provided in the sources [G]. The ellipsoid is defined by its center (cell center of gravity) and covariance matrix derived from the cell geometry [G].
+ 
+-3.  **Splat Fitting:** Fit each Small cell with a Gaussian ellipsoid that approximates its shape [S1, S2][S3, unofficial].
+-    *   *Note:* In a curvilinear grid with a slowly varying Jacobian derivative matrix, these splats sum to near unity at any point, smoothly interpolating the scalar field [S1, S2][S3, unofficial].
++4.  **Footprint Projection and Anti-aliasing:**
++    *   Project the 3D Gaussian ellipsoid onto the image plane to obtain an elliptical footprint [S1, S2][S3, unofficial].
++    *   Convolve this footprint with a Gaussian pre-sampling filter in the image plane to create an enlarged 2D splat for anti-aliasing [S1, S2][S3, unofficial]. This step corresponds to the EWA splatting principle described in [S10, abstract only, unofficial] and [S5] (Zwicker et al.).
++    *   Calculate the 2D circular Gaussian texture value for the enlarged splat [S1, S2][S3, unofficial].
+ 
+-4.  **Footprint Enlargement:** Convolve the "footprint" projection of each splat with a Gaussian presampling filter in the image plane to create an enlarged 2D splat [S1, S2][S3, unofficial].
+-
+-5.  **Preprocessing (Texture Map Creation):**
+-    a.  Sort Small cells closest to each slice by the depth of their centers of gravity [S1, S2][S3, unofficial].
+-    b.  Splat them into an image in back-to-front order [S1, S2][S3, unofficial].
+-    c.  Read back the image and determine a rectangle enclosing its non-zero values [S1, S2][S3, unofficial].
+-    d.  Create texture maps per slicing direction, containing as many textured rectangles from consecutive slices as would fit [S1, S2][S3, unofficial].
+-    e.  Load these texture maps into texture objects [S1, S2][S3, unofficial].
++5.  **Preprocessing (Offline/Static):**
++    *   Sort small cells closest to each slice by the depth of their centers of gravity [S1, S2][S3, unofficial].
++    *   Splat these sorted cells into an image in back-to-front order [S1, S2][S3, unofficial].
++    *   Read back the image and determine a bounding rectangle enclosing the non-zero values of the splatted image for each slice [S1, S2][S3, unofficial].
++    *   Create texture maps per slicing direction. Each map contains as many of these textured rectangles (from consecutive slices) as would fit in the texture memory [S1, S2][S3, unofficial].
++    *   The RGBA color for each splat rectangle is determined by the transfer function $T(\phi_i)$, the cell volume $V_i$, and the enlarged footprint size [S1, S2][S3, unofficial].
+ 
+ 6.  **Interactive Rendering:**
+-    a.  Bind the texture map for the current slicing direction [S1, S2][S3, unofficial].
+-    b.  Render polygons for Large cells in the current slice, recording their presence in a stencil buffer [S1, S2][S3, unofficial].
+-    c.  Position the rectangle representing the Small cell splats on the slice plane [S1, S2][S3, unofficial].
+-    d.  Composite the splats using texture mapping, applying a stencil test restricted to regions where polygons are absent [S1, S2][S3, unofficial].
+-    e.  The splat color is determined by multiplying a 2D circular Gaussian texture by an RGBA color derived from the transfer function, cell volume, and enlarged footprint size [S1, S2][S3, unofficial].
++    *   Load the texture maps for the current slicing direction into texture objects [S1, S2][S3, unofficial].
++    *   Render the large cells (polygons) for the current slice. Record the presence of these polygons in a stencil buffer [S1, S2][S3, unofficial].
++    *   Position the rectangle representing the small cell splats on the slice plane [S1, S2][S3, unofficial].
++    *   Composite the splats using texture mapping. Apply a stencil test restricted to regions where polygons are absent (i.e., stencil value is 0) [S1, S2][S3, unofficial]. This prevents splats from overlapping fully opaque polygon regions, avoiding double-counting opacity [S1, S2][S3, unofficial].
+ 
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def render_small_cells(cells, slice_planes, transfer_function, threshold, image_size):
++def render_small_cells_small_cells(grid_cells, slicing_planes, threshold, transfer_function):
+     """
+-    Renders small cells as anti-aliased splats.
++    Renders small cells using anti-aliased ellipsoidal splats.
+     """
+     small_cells = []
+     large_cells = []
+     
+-    # Step 1: Classification
+-    for cell in cells:
++    # 1. Classification
++    for cell in grid_cells:
+         if cell.volume < threshold:
+             small_cells.append(cell)
+@@ -72,102 +67,118 @@
+             large_cells.append(cell)
+             
+-    # Step 2 & 3: Assignment and Fitting
+-    # Assign small cells to closest slice plane and fit with Gaussian ellipsoid
+-    splats = []
++    # 2. Preprocessing (Offline)
++    # Group small cells by closest slice
++    slice_groups = {}
+     for cell in small_cells:
+-        closest_plane = find_closest_slice_plane(cell.centroid, slice_planes)
+-        # Fit Gaussian ellipsoid approximating cell shape
+-        ellipsoid = fit_gaussian_ellipsoid(cell)
+-        splats.append({
+-            'cell': cell,
+-            'plane': closest_plane,
+-            'ellipsoid': ellipsoid,
+-            'centroid': cell.centroid
+-        })
++        closest_plane = find_closest_slice(cell.center, slicing_planes)
++        if closest_plane not in slice_groups:
++            slice_groups[closest_plane] = []
++        slice_groups[closest_plane].append(cell)
+         
+-    # Step 4: Footprint Enlargement
+-    # Convolve footprint with Gaussian presampling filter
+-    for splat in splats:
+-        splat.footprint = convolve_gaussian(splat.ellipsoid.projection, gaussian_filter)
++    # Sort and create texture maps
++    texture_maps = {}
++    for plane, cells in slice_groups.items():
++        # Sort by depth of center of gravity
++        cells.sort(key=lambda c: depth_of(c.center))
+         
+-    # Step 5: Preprocessing
+-    # Sort by depth of centroid
+-    splats.sort(key=lambda s: s.centroid.depth)
++        # Splat into image to find bounding box
++        # Note: This step requires a temporary render target
++        temp_image = create_empty_image()
++        for cell in cells:
++            # Fit ellipsoid and project
++            ellipsoid = fit_gaussian_ellipsoid(cell)
++            footprint = project_footprint(ellipsoid, camera)
++            
++            # Anti-aliasing: Convolve with Gaussian presampling filter
++            enlarged_footprint = convolve_gaussian(footprint, sigma)
++            
++            # Determine bounding rectangle
++            rect = get_bounding_rect(enlarged_footprint)
++            
++            # Calculate color
++            rgba = transfer_function(cell.scalar_value)
++            rgba *= cell.volume * footprint_area(enlarged_footprint)
++            
++            # Store splat data for texture creation
++            store_splat_for_texture(rect, rgba, enlarged_footprint)
++            
++        # Create texture map from stored splats
++        tex_map = create_texture_map_from_splats(cells, slicing_direction)
++        texture_maps[plane] = tex_map
++        
++    return large_cells, texture_maps
++
++def render_interactive(large_cells, texture_maps, current_slice_plane):
++    """
++    Renders large cells and composites small cell splats.
++    """
++    # Clear stencil buffer
++    clear_stencil_buffer()
+     
+-    # Splat into image to find bounding rectangles
+-    # Note: This step implies a software render or simulation to find bounds
+-    texture_maps = []
+-    for plane in slice_planes:
+-        plane_splats = [s for s in splats if s.plane == plane]
+-        # Determine rectangle enclosing non-zero values of splats on this plane
+-        rect = find_bounding_rectangle(plane_splats)
+-        # Create texture map entry
+-        texture_maps.append({
+-            'plane': plane,
+-            'rect': rect,
+-            'splats': plane_splats
+-        })
++    # 6. Interactive Rendering
++    # Render large cells and record in stencil
++    for cell in large_cells:
++        polygon = project_polygon(cell)
++        render_polygon(polygon)
++        write_stencil(polygon) # Mark region as occupied
+         
+-    # Create texture objects
+-    texture_objects = create_texture_objects(texture_maps)
+-    
+-    # Step 6: Interactive Rendering
+-    for plane in slice_planes:
+-        # Bind texture map for current plane
+-        bind_texture(texture_objects[plane])
++    # Composite small cell splats
++    if current_slice_plane in texture_maps:
++        tex_map = texture_maps[current_slice_plane]
+         
+-        # Render large cells and record in stencil buffer
+-        render_large_cells(large_cells, plane, stencil_buffer=ON)
++        # Bind texture
++        bind_texture(tex_map)
+         
+-        # Render small cell splats
+-        for splat in plane_splats:
+-            # Calculate RGBA color from transfer function, volume, footprint
+-            color = transfer_function(splat.cell.volume, splat.footprint.size)
++        # Render splat rectangles with stencil test
++        for splat_rect in tex_map.rectangles:
++            # Position rectangle on slice plane
++            screen_rect = project_to_screen(splat_rect, current_slice_plane)
+             
+-            # Render rectangle with Gaussian texture and stencil test
+-            render_rectangle(
+-                rect=splat.rect,
+-                texture=GaussianTexture,
+-                color=color,
+-                stencil_test=STENCIL_TEST_ARENA_POLYGONS_ABSENT
+-            )
++            # Draw with stencil test: only draw where stencil is 0 (no polygon)
++            set_stencil_test(equal_to_zero)
++            render_rectangle(screen_rect)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Precision:** The method relies on accurate calculation of cell volume and centroid depth [S1, S2][S3, unofficial].
++**Parameters:**
++*   $V_{thresh}$: Volume threshold for splitting cells. Typical values are not given in the sources [G].
++*   $\sigma$: Standard deviation for the Gaussian pre-sampling filter. Not given in the sources [G].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** The method relies on accurate subpixel location of the center of gravity to compute splat weights [S1].
+ *   **Boundaries:** The stencil test ensures splats do not overlap fully opaque polygon regions, preventing double-counting of opacity [S1, S2][S3, unofficial].
+-*   **Curvilinear Grids:** The assumption that splats sum to near unity holds only if the Jacobian derivative matrix varies slowly [S1, S2][S3, unofficial].
++*   **Degenerate Input:** If a cell has zero volume, it is classified as small and splatted. The ellipsoid fitting must handle degenerate geometries gracefully [G].
+ 
+ ## Subtopics
+ 
+-### [Motion-Blurred Splats](1343-motion-blurred-splats.md)
+-Handles temporal aliasing by blurring splats along motion vectors. Choose when objects move significantly between frames.
++### Motion-Blurred Splats
++Handles temporal anti-aliasing by blurring splats along the motion vector. Choose when objects are moving rapidly. [Motion-Blurred Splats](1343-motion-blurred-splats.md)
+ 
+-### [Threshold Slicing and Anti-Aliasing](1447-threshold-slicing-and-anti-aliasing.md)
+-Uses thresholding on slice polygons to reduce aliasing. Choose for simpler polygon-based rendering without splatting.
++### Threshold Slicing and Anti-Aliasing
++Uses thresholding on scalar values to determine slice planes. Choose when scalar field discontinuities are important. [Threshold Slicing and Anti-Aliasing](1447-threshold-slicing-and-anti-aliasing.md)
+ 
+-### [Prefiltering](2928-prefiltering.md)
+-Pre-filters the volume data before slicing. Choose when pre-processing time is acceptable to reduce runtime aliasing.
++### Prefiltering
++Applies a filter to the volume data before rendering. Choose when pre-processing is acceptable and data is static. [Prefiltering](2928-prefiltering.md)
+ 
+-### [PseudoSeparable Cross Bilateral Filter](8374-pseudoseparable-cross-bilateral-filter.md)
+-Applies a bilateral filter to preserve edges while smoothing. Choose for edge-preserving anti-aliasing.
++### PseudoSeparable Cross Bilateral Filter
++A post-processing filter that preserves edges. Choose when high-quality edge preservation is needed after rendering. [PseudoSeparable Cross Bilateral Filter](8374-pseudoseparable-cross-bilateral-filter.md)
+ 
+-### [Separable Ping-Pong Blur Post-Processing](8804-separable-ping-pong-blur-post-processing.md)
+-Uses post-processing blurs. Choose for simplicity and when object-order complexity is high.
++### Separable Ping-Pong Blur Post-Processing
++A standard post-processing blur. Choose for general anti-aliasing when object-order methods are insufficient. [Separable Ping-Pong Blur Post-Processing](8804-separable-ping-pong-blur-post-processing.md)
+ 
+-### [Screen-Space Image Filtering](9037-screen-space-image-filtering.md)
+-Filters the final image. Choose for hardware-accelerated, resolution-independent anti-aliasing.
++### Screen-Space Image Filtering
++Filters the final image in screen space. Choose for simple anti-aliasing without modifying the rendering pipeline. [Screen-Space Image Filtering](9037-screen-space-image-filtering.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing involves sorting and texture map creation, which is $O(N \log N)$ for $N$ small cells [S1, S2][S3, unofficial]. Interactive rendering is efficient as it uses texture mapping and stencil tests [S1, S2][S3, unofficial].
+-*   **Memory Complexity:** Requires storing texture maps for all slicing directions and stencil buffers [S1, S2][S3, unofficial].
+-*   **Performance:** Reduces the number of polygons rendered, saving bandwidth and processing time [S1, S2][S3, unofficial].
+-*   **Strengths:** Prevents loss of small details in adaptive meshes; integrates anti-aliasing naturally [S1, S2][S3, unofficial].
+-*   **Limitations:** Requires preprocessing; relies on accurate cell volume and centroid calculations [S1, S2][S3, unofficial].
+-*   **When to Use:** When rendering adaptive meshes with small cells that might be missed by slicing [S1, S2][S3, unofficial].
+-*   **When Not to Use:** When cells are uniformly large or when preprocessing time is prohibitive [S1, S2][S3, unofficial].
++*   **Time Complexity:** Preprocessing is $O(N)$ where $N$ is the number of small cells, involving sorting and texture map creation. Interactive rendering is $O(M)$ where $M$ is the number of large cells plus the number of splat rectangles, leveraging hardware rasterization.
++*   **Memory Complexity:** Requires storage for texture maps, which scale with the number of slices and the size of the splat footprints.
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Scales well with parallelization of the preprocessing steps (cell projection and sorting) [S1, S2][S3, unofficial].
++*   **Strengths:** Prevents loss of detail in adaptive meshes; avoids the complexity of rendering filtered polygons; leverages hardware acceleration.
++*   **Limitations:** Requires preprocessing; relies on accurate ellipsoid fitting; may introduce artifacts if the Gaussian approximation is poor.
++*   **When to use:** When rendering adaptive meshes with small cells that might be missed by slice planes.
++*   **When not to use:** When cells are uniformly large and easily captured by slice planes.
+ 
+ ## Background
+-This method was developed for volume rendering of curvilinear and unstructured grids [S1, S2][S3, unofficial]. It builds on the work of Williams et al. [8] and Zwicker et al. [5] [S1, S2][S3, unofficial]. The technique is used in scientific visualization to handle adaptive meshes where small cells contain important high-gradient features [S1, S2][S3, unofficial].
++This method was developed by Silva et al. and presented in the paper "Volume rendering for curvilinear and unstructured grids" [S1, S2][S3, unofficial]. It addresses the limitations of standard slicing techniques for unstructured grids, particularly in the context of adaptive meshes where small cells contain critical information [S1, S2][S3, unofficial]. The approach builds on EWA splatting principles [S5, S10, abstract only, unofficial] to provide anti-aliasing for small geometric primitives.
+ 
+ ## Sources

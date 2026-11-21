@@ -1,0 +1,85 @@
+--- v004.md
++++ v005.md
+@@ -25,15 +25,20 @@
+ **Steps:**
+ 1. **Initialization:** Flatten ray origins and directions to 2D tensors of shape $(N, 3)$ where $N = H \times W$ [S1, unofficial][S2, unofficial][S6, unofficial]. Initialize empty lists for results [S5, unofficial][S6, unofficial][S8, unofficial].
+-2. **Chunk Generation:** Determine the number of chunks: $N_{chunks} = \lceil N / \text{chunk\_size} \rceil$ [S2, unofficial][S9, unofficial]. Generate start indices: $\text{idx0s} = \text{range}(0, N, \text{chunk\_size})$ [S2, unofficial].
++2. **Chunk Generation:** Determine the number of chunks: $N_{\text{chunks}} = \lceil N / \text{chunk\_size} \rceil$ [S2, unofficial][S9, unofficial]. Generate start indices: $\text{idx0s} = \text{range}(0, N, \text{chunk\_size})$ [S2, unofficial].
+ 3. **Iteration:** For each start index `idx0` in `idx0s`:
+-    a. **Slice:** Extract the chunk of rays: $\mathbf{o}_{chunk} = \mathbf{o}[\text{idx0} : \text{idx0} + \text{chunk\_size}]$, $\mathbf{d}_{chunk} = \mathbf{d}[\text{idx0} : \text{idx0} + \text{chunk\_size}]$ [S2, unofficial][S5, unofficial][S8, unofficial].
++    a. **Slice:** Extract the chunk of rays: $\mathbf{o}_{\text{chunk}} = \mathbf{o}[\text{idx0} : \text{idx0} + \text{chunk\_size}]$, $\mathbf{d}_{\text{chunk}} = \mathbf{d}[\text{idx0} : \text{idx0} + \text{chunk\_size}]$ [S2, unofficial][S5, unofficial][S8, unofficial].
+     b. **Padding (Distributed):** If rendering across multiple devices, calculate the actual chunk size. If `actual_chunk_size % device_count != 0`, pad the chunk with edge-mode values (e.g., repeating the last ray) to make the number of rays divisible by `device_count` [S2, unofficial][S3, unofficial]. Track the padding amount [S3, unofficial].
+-    c. **Sharding (Distributed):** Shard the chunk across hosts and devices. Calculate `rays_per_host = chunk_rays.origins.shape[0] // jax.process_count()`. Determine start and stop indices for the current host. Shard the chunk using a utility like `utils.shard(r[start:stop])` [S2, unofficial].
++    c. **Sharding (Distributed):** Shard the chunk across hosts and devices. Calculate `rays_per_host = chunk_rays.origins.shape[0] // jax.process_count()` [S2, unofficial]. Determine start and stop indices for the current host [S2, unofficial]. Shard the chunk using a framework-specific utility [S2, unofficial].
+     d. **Forward Pass:** Call the rendering function: `results_chunk = model_fn(rays_o=chunk_o, rays_d=chunk_d, ...)` [S2, unofficial][S4, unofficial][S5, unofficial][S8, unofficial][S9, unofficial]. If `cuda_ray` is enabled, staging is disabled, and the entire batch is processed at once [S8, unofficial].
+-    e. **Unsharding (Distributed):** Unreplicate and unshard the results from devices back to the host. Remove the previously added padding from the results to avoid corrupting image dimensions [S2, unofficial][S3, unofficial].
++    e. **Unsharding (Distributed):** Unreplicate and unshard the results from devices back to the host [S2, unofficial]. Remove the previously added padding from the results to avoid corrupting image dimensions [S2, unofficial][S3, unofficial].
+     f. **Accumulate:** Append the results (e.g., `rgb_chunk`, `depth_chunk`) to the result lists [S4, unofficial][S5, unofficial][S8, unofficial][S9, unofficial].
+-4. **Concatenation:** Concatenate all accumulated results along axis 0: $\mathbf{R}_{total} = \text{concat}(\mathbf{R}_1, \mathbf{R}_2, \dots)$ [S2, unofficial][S4, unofficial][S5, unofficial][S8, unofficial][S9, unofficial].
++4. **Concatenation:** Concatenate all accumulated results along axis 0: $\mathbf{R}_{\text{total}} = \text{concat}(\mathbf{R}_1, \mathbf{R}_2, \dots)$ [S2, unofficial][S4, unofficial][S5, unofficial][S8, unofficial][S9, unofficial].
+ 5. **Reshaping:** Reshape the concatenated results from $(N, C)$ back to $(H, W, C)$ [S2, unofficial][S3, unofficial].
+ 6. **Visualization Subset (Optional):** If extracting a subset of rays for visualization, generate a deterministic random index set and subset the final rendering [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Padding Removal:** Padding must be tracked and removed during unsharding to avoid corrupting image dimensions [S3, unofficial].
++- **CUDA Raymarching:** Staging is disabled when `cuda_ray` is True; the entire ray batch is processed at once, bypassing chunking [S8, unofficial].
++- **Non-Square Images:** Flattening $(H, W, 3)$ to $(N, 3)$ requires storing $H$ and $W$ separately to correctly reshape results [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -42,5 +47,6 @@
+ import numpy as np
+ 
+-def chunked_ray_rendering(rays_o, rays_d, model_fn, chunk_size=4096, device_count=1, white_bkgd=True, perturb=False):
++def chunked_ray_rendering(rays_o, rays_d, model_fn, chunk_size=4096, device_count=1, 
++                          H=None, W=None, device='cuda', white_bkgd=True, perturb=False):
+     """
+     Render rays in chunks to manage memory and enable distributed sharding.
+@@ -52,4 +58,6 @@
+         chunk_size: Number of rays per chunk.
+         device_count: Number of devices for sharding.
++        H, W: Image dimensions. Required if rays_o is 2D.
++        device: Target device string.
+         white_bkgd: Background compositing flag.
+         perturb: Perturbation flag.
+@@ -61,10 +69,12 @@
+     # Extract dimensions and flatten to (N, 3)
+     if rays_o.dim() == 3:
+-        H, W, _ = rays_o.shape
++        H_in, W_in, _ = rays_o.shape
+         rays_o = rays_o.reshape(-1, 3)
+         rays_d = rays_d.reshape(-1, 3)
++        H, W = H_in, W_in
+     else:
+         N, _ = rays_o.shape
+-        H, W = int(np.sqrt(N)), int(np.sqrt(N))  # Assumes square image if not provided
++        if H is None or W is None:
++            raise ValueError("H and W must be provided when rays_o is 2D.")
+         
+     N = rays_o.shape[0]
+@@ -91,10 +101,10 @@
+             chunk_d = torch.cat([chunk_d, last_ray_d], dim=0)
+             
+-        # Move to device (framework-agnostic placement assumed)
+-        chunk_o = chunk_o.cuda()
+-        chunk_d = chunk_d.cuda()
++        # Move to device
++        chunk_o = chunk_o.to(device)
++        chunk_d = chunk_d.to(device)
+         
+         # Forward pass
+-        # Note: In distributed settings, sharding/unsharding happens here or before/after
++        # Note: Sharding/unsharding logic is framework-specific (e.g., JAX pmap, PyTorch DDP) [S2, unofficial]
+         with torch.no_grad():
+             out = model_fn(chunk_o, chunk_d, white_bkgd=white_bkgd, perturb=perturb)
+@@ -137,9 +147,9 @@
+ - **Strengths:** Enables rendering of high-resolution images and large scenes on consumer-grade GPUs. Supports multi-host distributed rendering by sharding chunks across devices [S2, unofficial][S3, unofficial].
+ - **Limitations:** Slightly slower than full-batch rendering due to overhead. Requires careful tuning of `chunk_size` to balance memory and speed [G]. Padding overhead is minimal but non-zero [S2, unofficial].
+-- **When to use:** When rendering large images or using large neural networks that exceed VRAM capacity. Essential for distributed rendering setups [S2, unofficial][S3, unofficial].
++- **When to use:** When rendering large images or using large neural networks that exceed VRAM capacity [S1, unofficial][S3, unofficial][S5, unofficial][S8, unofficial]. Essential for distributed rendering setups [S2, unofficial][S3, unofficial].
+ - **When not to use:** When `cuda_ray` is enabled, as staging is disabled and the entire batch is processed at once [S8, unofficial]. For very small scenes where full-batch rendering fits in memory, chunking adds unnecessary overhead [G].
+ 
+ ## Background
+-Chunked Ray Rendering originated as a practical necessity in the development of Neural Radiance Fields (NeRF) and related neural rendering techniques. As NeRF models grew in complexity and image resolutions increased, the memory requirements for processing all rays in an image simultaneously exceeded the capacity of available GPUs. Early implementations in libraries like `nerfies` [S2, unofficial] and `multinerf` [S1, unofficial] introduced chunking to manage memory and enable distributed training and rendering. It is particularly important in distributed settings where rays are sharded across multiple hosts and devices [S2, unofficial].
++Chunked Ray Rendering originated as a practical necessity in the development of Neural Radiance Fields (NeRF) and related neural rendering techniques [S2, unofficial][S3, unofficial]. As NeRF models grew in complexity and image resolutions increased, the memory requirements for processing all rays in an image simultaneously exceeded the capacity of available GPUs [G]. Early implementations in libraries like `nerfies` [S3, unofficial] and `multinerf` [S2, unofficial] introduced chunking to manage memory and enable distributed training and rendering. It is particularly important in distributed settings where rays are sharded across multiple hosts and devices [S2, unofficial].
+ 
+ ## Sources

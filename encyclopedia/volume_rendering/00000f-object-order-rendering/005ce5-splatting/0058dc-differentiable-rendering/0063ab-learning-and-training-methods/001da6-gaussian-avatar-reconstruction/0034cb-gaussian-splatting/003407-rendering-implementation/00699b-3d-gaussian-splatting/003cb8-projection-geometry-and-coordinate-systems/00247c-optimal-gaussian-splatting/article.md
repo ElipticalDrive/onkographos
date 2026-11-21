@@ -1,0 +1,174 @@
+# Optimal Gaussian Splatting
+
+Also called: Optimal Projection, Unit Sphere Based Rasterizer
+
+## Overview
+Optimal Gaussian Splatting is a rendering method that reduces projection error by radially projecting each 3D Gaussian primitive onto a unique tangent plane perpendicular to the line connecting the Gaussian mean to the camera center, rather than projecting all Gaussians onto a single plane $z=1$ [S1]. Unlike the standard 3D Gaussian Splatting rasterization which uses a fixed perspective plane, this method adapts the projection geometry per primitive to minimize the discrepancy between the 3D Gaussian density and its 2D rasterized approximation [S1]. It achieves higher-quality rendering with smaller projection errors compared to the original approach [S1].
+
+## How it works
+**Inputs:**
+*   3D Gaussian primitive defined by mean $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$ in world coordinates [S1].
+*   Camera extrinsic matrix (World-to-Camera transformation) [S1].
+*   Camera intrinsic parameters: principal point $(c_x, c_y)$ and focal lengths $(f_x, f_y)$ [S1].
+*   Pixel coordinates $(u, v)$ [S1].
+
+**Outputs:**
+*   2D Gaussian value $G_{2D}(\mathbf{x}_{2D})$ for alpha blending at pixel $(u, v)$ [S1].
+
+**Data Structures:**
+*   $\boldsymbol{\mu}'$: 3D mean in camera coordinates [S1].
+*   $\boldsymbol{\Sigma}'$: 3D covariance in camera coordinates [S1].
+*   $\mathbf{x}_p$: Projection point on the unit sphere (3D vector) [S1].
+*   $\mathbf{J}_p$: $3 \times 3$ Jacobian matrix of the optimal projection function [S1].
+*   $\mathbf{Q}$: Invertible $3 \times 3$ matrix used to handle rank deficiency in the covariance inverse [S1].
+
+**Steps:**
+
+1.  **Transform to Camera Space:**
+    Transform the Gaussian mean $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$ from world coordinates to camera coordinates, resulting in $\boldsymbol{\mu}'$ and $\boldsymbol{\Sigma}'$ [S1].
+
+2.  **Compute Projection Point on Unit Sphere:**
+    Calculate the point $\mathbf{x}_p$ where the line from the camera center to the Gaussian mean intersects the unit sphere [S1]:
+    $$
+    \mathbf{x}_{\mathbf{p}} = \boldsymbol{\mu}' \left( \boldsymbol{\mu}'^{\top} \boldsymbol{\mu}' \right)^{-1/2}
+    $$
+    This defines the normal of the tangent plane [S1].
+
+3.  **Define Optimal Projection Plane:**
+    The projection plane is tangent to the unit sphere at $\mathbf{x}_p$ [S1]. Its equation is:
+    $$
+    \mathbf{x}_{\mathbf{p}}^T \cdot \left( \mathbf{x}' - \mathbf{x}_{\mathbf{p}} \right) = 0
+    $$
+    [S1].
+
+4.  **Compute Ray Direction and Project to Tangent Plane:**
+    For a pixel $(u, v)$, construct the ray direction in camera space using pinhole intrinsics [S1]:
+    $$
+    \mathbf{d} = \begin{bmatrix} (u - c_x) / f_x \\ (v - c_y) / f_y \\ 1 \end{bmatrix}
+    $$
+    [S1].
+    Project this ray direction onto the tangent plane defined by $\mathbf{x}_p$ using the optimal projection function $\varphi_p$ [S1]:
+    $$
+    \varphi_p \left( \mathbf{x}' \right) = \mathbf{x}' \left( \mathbf{x}_p^\top \mathbf{x}' \right)^{-1}
+    $$
+    [S1].
+    The resulting 2D coordinate on the tangent plane is:
+    $$
+    \mathbf{x}_{2D} = \varphi_p \left( \mathbf{d} \right)
+    $$
+    [S1]. Note that $\mathbf{x}_{2D}$ is a 3D vector lying on the tangent plane, but for the 2D Gaussian evaluation, it is treated as the coordinate relative to the projection of the mean [S1].
+
+5.  **Compute Jacobian Matrix $\mathbf{J}_p$:**
+    Compute the Jacobian of the projection function $\varphi_p$ evaluated at the mean $\boldsymbol{\mu}'$ [S1]:
+    $$
+    \mathbf{J}_p = \frac{\partial \varphi_p}{\partial \mathbf{x}'} \left( \boldsymbol{\mu}' \right) = \mathbb{I} \left( \mathbf{x}_p^\top \boldsymbol{\mu}' \right)^{-1} - \boldsymbol{\mu}' \left( \mathbf{x}_p^\top \boldsymbol{\mu}' \right)^{-1} \left( \boldsymbol{\mu}'^\top \mathbf{x}_p \right)^{-1} \mathbf{x}_p^\top
+    $$
+    [S1].
+    Explicitly, for $\boldsymbol{\mu}' = [\mu_x, \mu_y, \mu_z]^\top$ and $N = \mu_x^2 + \mu_y^2 + \mu_z^2$, the matrix elements are derived from the source [S1]. The source provides a specific form for $\mathbf{J}_p$ where the diagonal elements involve terms like $\frac{\mu_y^2 + \mu_z^2}{N^{3/2}}$ and off-diagonals involve $\frac{\mu_x \mu_y}{N^{3/2}}$ [S1].
+
+6.  **Handle Rank Deficiency with Matrix $\mathbf{Q}$:**
+    The Jacobian $\mathbf{J}_p$ has a rank of 2 [S1]. The resulting matrix $\mathbf{J}_p \boldsymbol{\Sigma}' \mathbf{J}_p^\top$ has non-zero third row and column entries, unlike the standard projection Jacobian $\mathbf{J} \boldsymbol{\Sigma}' \mathbf{J}^\top$ where these are zero [S1]. To correctly invert the covariance for the 2D Gaussian, an invertible matrix $\mathbf{Q}$ is introduced [S1].
+    The matrix $\mathbf{Q}$ is defined as:
+    $$
+    \mathbf{Q} = \left[ \begin{array}{c} \frac{\mu_z}{\sqrt{\mu_x^2 + \mu_z^2}} \\ \frac{\mu_x \mu_y}{\sqrt{\mu_x^2 + \mu_z^2} \sqrt{\mu_x^2 + \mu_y^2 + \mu_z^2}} \\ \frac{\mu_x}{\sqrt{\mu_x^2 + \mu_z^2} + \mu_y^2 + \mu_z^2} \end{array} \right] \cdot \left[ \begin{array}{c} 0 \\ \frac{\sqrt{\mu_x^2 + \mu_z^2}}{\sqrt{\mu_x^2 + \mu_y^2 + \mu_z^2}} - \frac{\mu_x}{\sqrt{\mu_x^2 + \mu_z^2}} \\ \frac{\mu_y \mu_z}{\sqrt{\mu_x^2 + \mu_z^2} \sqrt{\mu_x^2 + \mu_y^2 + \mu_z^2}} \\ \frac{\mu_z}{\sqrt{\mu_x^2 + \mu_y^2 + \mu_z^2}} \end{array} \right]
+    $$
+    [S1].
+
+7.  **Evaluate 2D Gaussian:**
+    Compute the 2D Gaussian value for alpha blending [S1]:
+    $$
+    G_{2D}(\mathbf{x}_{2D}) = \exp \left\{ -1/2 \left( \mathbf{x}_{2D} - \varphi_p(\boldsymbol{\mu}') \right)^T \left( \mathbf{J}_p \boldsymbol{\Sigma}' \mathbf{J}_p^\top \right)^{-1} \left( \mathbf{x}_{2D} - \varphi_p(\boldsymbol{\mu}') \right) \right\}
+    $$
+    [S1].
+    The inverse covariance matrix is obtained by skipping the third row and column of $\mathbf{J}_p \boldsymbol{\Sigma}' \mathbf{J}_p^\top$ after applying the transformation involving $\mathbf{Q}$ to ensure the equation holds [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def optimal_gaussian_splatting(mu_world, sigma_world, extrinsic, intrinsic, u, v):
+    """
+    Computes the 2D Gaussian value for a single pixel and Gaussian primitive.
+    
+    Args:
+        mu_world: Tensor [3], Gaussian mean in world coordinates.
+        sigma_world: Tensor [3, 3], Gaussian covariance in world coordinates.
+        extrinsic: Tensor [4, 4], World-to-Camera transformation matrix.
+        intrinsic: Tuple (cx, cy, fx, fy), Camera intrinsics.
+        u, v: Float, Pixel coordinates.
+        
+    Returns:
+        Tensor [1], The 2D Gaussian value G_2D.
+    """
+    # 1. Transform to Camera Space
+    R = extrinsic[:3, :3]
+    t = extrinsic[:3, 3]
+    mu_cam = (R @ mu_world + t).squeeze()
+    sigma_cam = R @ sigma_world @ R.T
+    
+    cx, cy, fx, fy = intrinsic
+    
+    # 2. Compute Projection Point on Unit Sphere (x_p)
+    mu_norm_sq = torch.dot(mu_cam, mu_cam)
+    mu_norm = torch.sqrt(mu_norm_sq)
+    x_p = mu_cam / mu_norm
+    
+    # 3. Compute Ray Direction in Camera Space
+    d = torch.tensor([(u - cx) / fx, (v - cy) / fy, 1.0])
+    
+    # 4. Project Ray Direction to Tangent Plane (x_2D)
+    dot_xp_d = torch.dot(x_p, d)
+    x_2D = d / dot_xp_d
+    
+    # Project Mean to Tangent Plane
+    dot_xp_mu = torch.dot(x_p, mu_cam)
+    mu_proj = mu_cam / dot_xp_mu
+    
+    # 5. Compute Jacobian J_p
+    # J_p = I * (x_p^T * mu')^-1 - mu' * (x_p^T * mu')^-1 * (mu'^T * x_p)^-1 * x_p^T
+    inv_dot = 1.0 / dot_xp_mu
+    J_p = inv_dot * torch.eye(3) - inv_dot * inv_dot * torch.outer(mu_cam, x_p)
+    
+    # 6. Compute 2D Covariance and Inverse
+    # Sigma_2D_raw = J_p @ Sigma_cam @ J_p^T
+    Sigma_2D_raw = J_p @ sigma_cam @ J_p.T
+    
+    # Handle Rank Deficiency: Skip third row and column as per source [S1]
+    # Note: The source's Equation 18 for matrix Q contains formatting inconsistencies.
+    # The implementer should reconstruct Q or use the standard 2D subspace extraction.
+    Sigma_2D_inv = Sigma_2D_raw[:2, :2].inverse()
+    
+    # 7. Evaluate Gaussian
+    # Project 3D tangent plane vectors to 2D coordinates for the quadratic form
+    # Construct an orthonormal basis for the tangent plane
+    if abs(mu_cam[2]) < 0.99:
+        u_axis = torch.cross(x_p, torch.tensor([0.0, 0.0, 1.0]))
+        u_axis = u_axis / torch.norm(u_axis)
+    else:
+        u_axis = torch.tensor([1.0, 0.0, 0.0])
+    v_axis = torch.cross(x_p, u_axis)
+    
+    x_2D_2d = torch.tensor([torch.dot(x_2D, u_axis), torch.dot(x_2D, v_axis)])
+    mu_proj_2d = torch.tensor([torch.dot(mu_proj, u_axis), torch.dot(mu_proj, v_axis)])
+    
+    diff = x_2D_2d - mu_proj_2d
+    exponent = -0.5 * torch.dot(diff, Sigma_2D_inv @ diff)
+    
+    return torch.exp(exponent)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Achieves higher rendering quality with smaller projection errors compared to the original 3D-GS [S1].
+*   **Strengths:** Reduces projection artifacts, especially for Gaussians far from the camera center or at oblique angles [S1].
+*   **Limitations:** More complex implementation requiring custom CUDA kernels for efficiency [S1].
+
+## Background
+Optimal Gaussian Splatting was introduced to address the error analysis of 3D Gaussian Splatting [S1]. It is based on the theoretical finding that the error function attains its minimum when the projection of the Gaussian mean on the plane coincides with the projection from the camera center to the plane [S1]. The method was implemented based on the PyTorch framework in 3D-GS with custom CUDA kernels [S1]. It was tested on 13 real scenes, including those from Mip-NeRF360 [S1].
+
+## Sources
+[S1] On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy, https://doi.org/10.1007/978-3-031-72643-9_15, fetched 2026-10-29

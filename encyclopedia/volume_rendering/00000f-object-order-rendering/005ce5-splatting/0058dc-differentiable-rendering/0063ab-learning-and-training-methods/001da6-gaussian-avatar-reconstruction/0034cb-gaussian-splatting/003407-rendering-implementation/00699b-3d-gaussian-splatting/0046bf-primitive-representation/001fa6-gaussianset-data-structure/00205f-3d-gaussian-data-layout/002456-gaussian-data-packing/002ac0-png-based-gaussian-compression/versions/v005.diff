@@ -1,0 +1,218 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-PNG-based Gaussian Compression is a lossless compression technique for trained 3D Gaussian Splatting models that quantizes splat parameters into 8-bit and 16-bit PNG images [S2, unofficial]. It serves as a port of the PyTorch `gsplat` compression module to MLX [S2, unofficial]. By leveraging the spatial locality of Gaussian splats (optionally enhanced via Morton code sorting) and the efficiency of PNG encoding, this method achieves approximately 10x compression on standard 3DGS models [S2, unofficial]. It builds on [Gaussian Data Packing](3257-gaussian-data-packing.md) by mapping scalar and vector fields to image formats, differing from [Gaussian Splat Texture Packing](3283-gaussian-splat-texture-packing.md) which targets GPU texture formats, and [SPZ Packed Format](3926-spz-packed-format.md) which uses a different binary layout [S1, S2, unofficial].
++PNG-based Gaussian Compression is a lossless compression technique for trained 3D Gaussian Splatting models that quantizes splat parameters into 8-bit and 16-bit PNG images [S2, unofficial]. It serves as a port of the PyTorch `gsplat` compression module to MLX [S2, unofficial]. By leveraging spatial locality (optionally enhanced via Morton code sorting) and PNG encoding, it achieves approximately 10x compression on standard 3DGS models [S2, unofficial]. It builds on [Gaussian Data Packing](3257-gaussian-data-packing.md) by mapping scalar and vector fields to image grids, differing from [Gaussian Splat Texture Packing](3283-gaussian-splat-texture-packing.md) which targets GPU texture formats, and [SPZ Packed Format](3926-spz-packed-format.md) which uses a different binary layout [S1, S2, unofficial].
+ 
+ ## How it works
+@@ -43,11 +43,9 @@
+      - Reshape parameter array to $(n_{side}, n_{side}, C)$ where $C$ is the channel dimension [S1, unofficial].
+      - Compute per-channel minimum ($min$) and maximum ($max$) [S1, unofficial].
+-     - Normalize to $[0, 1]$: $x_{norm} = (x - min) / (max - min)$ [S2, unofficial].
+-     - Scale to $[0, 255]$ and round to uint8: $img = \text{clip}(\text{round}(x_{norm} \cdot 255), 0, 255)$ [S2, unofficial].
++     - Quantize to 8-bit: $img = \text{clip}(\text{round}((arr - \text{mins}) / \text{ranges} \cdot 255), 0, 255)$ where $\text{ranges} = \text{maxs} - \text{mins}$ [S2, unofficial].
+      - Save as PNG [S1, unofficial].
+    - **16-bit Parameters (`means`):**
+-     - Perform 16-bit quantization: $img16 = \text{round}((x - min) / (max - min) \cdot 65535)$ [S2, unofficial].
+-     - Split into low byte ($img16 \& 0xFF$) and high byte ($(img16 >> 8) \& 0xFF$) [S2, unofficial].
+-     - Save each byte plane as a separate 8-bit PNG [S2, unofficial].
++     - Perform 16-bit quantization: $img16 = \text{round}((arr - \text{mins}) / \text{ranges} \cdot 65535)$ [S2, unofficial].
++     - Split into low byte ($img16 \& 0xFF$) and high byte ($(img16 >> 8) \& 0xFF$), stored as two separate 8-bit PNGs [S2, unofficial].
+    - **Higher-order SH (`shN`):**
+      - If K-means clustering is not available (e.g., in MLX without `torchpq`), compress using NPZ format [S2, unofficial].
+@@ -60,8 +58,8 @@
+ 2. Load PNG images and reconstruct quantized arrays [S1, unofficial].
+ 3. Inverse quantization:
+-   - 8-bit: $x = \text{normalised} \cdot (max - min) + min$, where $\text{normalised} = img / 255.0$ [S2, unofficial].
+-   - 16-bit: Reconstruct 16-bit integer from two PNGs, then $x = \text{normalised} \cdot (max - min) + min$, where $\text{normalised} = img16 / 65535.0$ [S2, unofficial].
++   - 8-bit: $arr = \text{normalised} \cdot (\text{maxs} - \text{mins}) + \text{mins}$, where $\text{normalised} = img / 255.0$ [S2, unofficial].
++   - 16-bit: Reconstruct 16-bit integer from two PNGs, then $arr = \text{normalised} \cdot (\text{maxs} - \text{mins}) + \text{mins}$, where $\text{normalised} = img16 / 65535.0$ [S2, unofficial].
+ 4. Apply inverse log-transform to `means`: $y = \text{sign}(x) \cdot (\exp(|x|) - 1)$ [S2, unofficial].
+-5. Normalize `quats` if necessary (though they are stored as unit vectors, reconstruction should preserve this if quantization is precise) [S1, unofficial].
++5. Normalize `quats` if necessary (reconstruction should preserve unit length if quantization is precise) [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -71,4 +69,5 @@
+ import json
+ import os
++from PIL import Image
+ 
+ def log_transform(x):
+@@ -85,23 +84,25 @@
+     n_side = int(np.sqrt(n_gs))
+     n_crop = n_gs - n_side * n_side
+-    
+     if n_crop == 0:
+         return splats
+-    
+-    # Sort opacities descending, keep top n_side^2
+     opacities = splats["opacities"].ravel()
+-    keep_indices = np.argsort(opacities)[::-1][:n_side * n_side]
+-    keep_indices.sort()
+-    
+-    cropped = {}
+-    for k, v in splats.items():
+-        cropped[k] = v[keep_indices]
++    keep = np.argsort(opacities)[::-1][:n_side * n_side]
++    keep.sort()
++    cropped = {k: v[keep] for k, v in splats.items()}
+     return cropped
+ 
++def save_png(arr, path):
++    """Save numpy array as PNG."""
++    Image.fromarray(arr).save(path)
++
++def load_png(path):
++    """Load PNG file to numpy array."""
++    return np.array(Image.open(path))
++
+ def compress_png_8bit(arr, mins, maxs):
+-    """Compress array to 8-bit PNG."""
++    """Compress array to 8-bit PNG using evidence formula."""
+     ranges = maxs - mins
+-    normalized = (arr - mins) / ranges
+-    img = np.clip(np.round(normalized * 255), 0, 255).astype(np.uint8)
++    ranges[ranges == 0] = 1.0  # Guard against division by zero [G]
++    img = np.clip(np.round((arr - mins) / ranges * 255), 0, 255).astype(np.uint8)
+     return img
+ 
+@@ -114,6 +115,6 @@
+     """Compress array to two 8-bit PNGs (low and high bytes)."""
+     ranges = maxs - mins
+-    normalized = (arr - mins) / ranges
+-    img16 = np.clip(np.round(normalized * 65535), 0, 65535).astype(np.uint16)
++    ranges[ranges == 0] = 1.0
++    img16 = np.clip(np.round((arr - mins) / ranges * 65535), 0, 65535).astype(np.uint16)
+     low_byte = (img16 & 0xFF).astype(np.uint8)
+     high_byte = ((img16 >> 8) & 0xFF).astype(np.uint8)
+@@ -129,79 +130,40 @@
+     """Compress Gaussian splats to PNGs."""
+     os.makedirs(out_dir, exist_ok=True)
+-    
+-    # 1. Preprocessing
+     splats["means"] = log_transform(splats["means"])
+-    # Normalize quaternions
+-    quats = splats["quats"]
+-    norms = np.linalg.norm(quats, axis=-1, keepdims=True)
+-    splats["quats"] = quats / norms
+-    
+-    # 2. Crop to square
++    norms = np.linalg.norm(splats["quats"], axis=-1, keepdims=True)
++    splats["quats"] = splats["quats"] / norms
+     splats = crop_to_square(splats)
+     n_side = int(np.sqrt(splats["means"].shape[0]))
+-    
+-    # 3. Sorting (Morton code) - Placeholder for actual Morton sort
++
+     if use_sort:
+-        # Morton code sorting would go here
++        # Morton code sorting would be applied here [G]
+         pass
+-    
+-    # 4. Compress parameters
++
+     meta = {}
+-    
+-    # 8-bit params: scales, quats, opacities, sh0
+     for param in ["scales", "quats", "opacities", "sh0"]:
+         arr = splats[param]
+-        # Reshape to (n_side, n_side, C)
+         C = arr.shape[-1]
+         arr_reshaped = arr.reshape(n_side, n_side, C)
+-        
+         mins = np.min(arr_reshaped, axis=(0, 1))
+         maxs = np.max(arr_reshaped, axis=(0, 1))
+-        
+-        # Handle zero range to avoid division by zero
+-        ranges = maxs - mins
+-        ranges[ranges == 0] = 1.0
+-        
+         img = compress_png_8bit(arr_reshaped, mins, maxs)
+-        # Save img as PNG (implementation depends on library, e.g., PIL)
+-        # For pseudocode, assume save_png(img, f"{param}.png")
+         save_png(img, os.path.join(out_dir, f"{param}.png"))
+-        
+-        meta[param] = {
+-            "shape": arr.shape,
+-            "dtype": "uint8",
+-            "mins": mins.tolist(),
+-            "maxs": maxs.tolist()
+-        }
+-        
+-    # 16-bit params: means
++        meta[param] = {"shape": arr.shape, "dtype": "uint8", "mins": mins.tolist(), "maxs": maxs.tolist()}
++
+     param = "means"
+     arr = splats[param]
+     C = arr.shape[-1]
+     arr_reshaped = arr.reshape(n_side, n_side, C)
+-    
+     mins = np.min(arr_reshaped, axis=(0, 1))
+     maxs = np.max(arr_reshaped, axis=(0, 1))
+-    ranges = maxs - mins
+-    ranges[ranges == 0] = 1.0
+-    
+     low_byte, high_byte = compress_png_16bit(arr_reshaped, mins, maxs)
+     save_png(low_byte, os.path.join(out_dir, f"{param}_low.png"))
+     save_png(high_byte, os.path.join(out_dir, f"{param}_high.png"))
+-    
+-    meta[param] = {
+-        "shape": arr.shape,
+-        "dtype": "uint16",
+-        "mins": mins.tolist(),
+-        "maxs": maxs.tolist()
+-    }
+-    
+-    # Higher-order SH (shN) - NPZ fallback
+-    # If shN exists and is not sh0, compress with NPZ
++    meta[param] = {"shape": arr.shape, "dtype": "uint16", "mins": mins.tolist(), "maxs": maxs.tolist()}
++
+     if "shN" in splats:
+         np.savez_compressed(os.path.join(out_dir, "shN.npz"), splats["shN"])
+         meta["shN"] = {"dtype": "npz"}
+-        
+-    # Save metadata
++
+     with open(os.path.join(out_dir, "meta.json"), "w") as f:
+         json.dump(meta, f)
+@@ -211,8 +173,5 @@
+     with open(os.path.join(out_dir, "meta.json"), "r") as f:
+         meta = json.load(f)
+-    
+     splats = {}
+-    
+-    # Decompress 8-bit params
+     for param in ["scales", "quats", "opacities", "sh0"]:
+         info = meta[param]
+@@ -221,9 +180,6 @@
+         maxs = np.array(info["maxs"])
+         arr = decompress_png_8bit(img, mins, maxs)
+-        # Reshape back to (N, C)
+         arr = arr.reshape(info["shape"])
+         splats[param] = arr
+-        
+-    # Decompress 16-bit params (means)
+     param = "means"
+     info = meta[param]
+@@ -234,12 +190,8 @@
+     arr = decompress_png_16bit(low_byte, high_byte, mins, maxs)
+     arr = arr.reshape(info["shape"])
+-    # Inverse log-transform
+     splats[param] = inverse_log_transform(arr)
+-    
+-    # Decompress higher-order SH
+     if "shN" in meta:
+         data = np.load(os.path.join(out_dir, "shN.npz"))
+         splats["shN"] = data["arr_0"]
+-        
+     return splats
+ ```
+@@ -257,5 +209,5 @@
+ ## Operating characteristics
+ - **Compression Ratio:** Approximately 10x compression on standard 3DGS models [S2, unofficial].
+-- **Time Complexity:** Dominated by sorting (if enabled) and PNG encoding/decoding. Sorting is $O(N \log N)$ [S2, unofficial].
++- **Time Complexity:** Not given in the sources.
+ - **Memory Complexity:** Requires storing the original data during preprocessing and the compressed PNGs. Metadata is minimal [S2, unofficial].
+ - **Strengths:** Lossless compression of quantized data, simple file format (PNG), good compression ratios due to spatial locality [S2, unofficial].

@@ -1,0 +1,95 @@
+--- v007.md
++++ v008.md
+@@ -1,7 +1,9 @@
+ # GaussianFlow
+ 
+-Also called: Dual-Domain Deformation Model (DDDM)
++Also called: Dual-Domain Deformation Model (DDDM), Guo et al
++
+ ## Overview
+ GaussianFlow is a point-based differentiable rendering approach for dynamic 3D scene reconstruction that models a 4D scene as a set of deformable 3D Gaussian particles advected by an explicit 3D velocity field [S1, unofficial][S3]. It solves the problem of efficient dynamic scene reconstruction by introducing a Dual-Domain Deformation Model (DDDM) that explicitly models attribute deformations (position, rotation, radiance) in both time and frequency domains, eliminating the need for implicit neural fields or per-frame optimization [S3]. Unlike [Dynamic 3D Gaussians](5703-dynamic-3d-gaussian-splatting.md) which tracks motion via persistent view synthesis and local constraints, GaussianFlow uses a global flow-based deformation model, achieving 5× faster training than per-frame 3DGS while preserving real-time rendering speeds [S3].
++
+ ## How it works
+ **Inputs and Outputs:**
+@@ -24,5 +26,5 @@
+         ii. **Temporal Smoothness Loss:** Encourages smooth deformation over time [S2, S3].
+         iii. **KNN Rigid Loss:** Regularizes motion trajectory by assuming local neighborhoods of Gaussians move rigidly [S2, S3].
+-        iv. **Flow Loss (Optional/Implicit):** If 2D flow estimation is used, a bidirectional optical flow loss is introduced to align dynamic objects across frames [S2].
++        iv. **Flow Loss:** If 2D flow estimation is used, a bidirectional optical flow loss is introduced to align dynamic objects across frames [S2].
+     c.  **Backward Pass:** Compute gradients w.r.t. DDDM coefficients and static attributes [G].
+     d.  **Update:** Update parameters using an optimizer [G].
+@@ -49,9 +51,54 @@
+ To prevent optimization problems from uniform time division, adaptive timestep scaling is adopted [S2, S3]. The time $t$ is mapped to a scaled time $t'$ where the distribution of $t'$ accounts for the density of keyframes or motion intensity [S3].
+ 
++**Pseudocode:**
++```python
++def evaluate_ddddm(gaussian, t, poly_coeffs, fourier_coeffs, omega):
++    # Polynomial part: sum(a_k * t^k)
++    p = sum(c * (t ** k) for k, c in enumerate(poly_coeffs))
++    # Fourier part: sum(b_m * cos(omega_m * t) + c_m * sin(omega_m * t))
++    f = sum(b * cos(omega_val * t) + c * sin(omega_val * t) 
++            for b, c, omega_val in zip(fourier_coeffs[0], fourier_coeffs[1], omega))
++    return p + f
++
++def optimize_gaussian_flow(images, poses, initial_gaussians, timestamps, num_iterations):
++    gaussians = initial_gaussians
++    # Initialize DDDM coefficients to zero [G]
++    poly_coeffs = {attr: [zeros(dim) for _ in range(K)] for attr, dim in gaussians.attrs}
++    fourier_coeffs = {attr: [zeros(dim), zeros(dim)] for attr, dim in gaussians.attrs}
++    omega = [2 * pi * m / T for m in range(1, M + 1)]
++
++    for iteration in range(num_iterations):
++        # Alternate static and dynamic optimization [S2]
++        if iteration % 2 == 0:
++            optimize_static(gaussians, images, poses)
++        else:
++            for img, t in zip(images, timestamps):
++                # Adaptive timestep scaling [S3]
++                t_scaled = adaptive_scale(t)
++                # Compute deformation residuals [S3]
++                delta_pos = evaluate_ddddm(gaussians, t_scaled, poly_coeffs['pos'], fourier_coeffs['pos'], omega)
++                delta_rot = evaluate_ddddm(gaussians, t_scaled, poly_coeffs['rot'], fourier_coeffs['rot'], omega)
++                delta_col = evaluate_ddddm(gaussians, t_scaled, poly_coeffs['color'], fourier_coeffs['color'], omega)
++                # Update attributes [G]
++                gaussians.pos = gaussians.pos + delta_pos
++                gaussians.rot = normalize(gaussians.rot * delta_rot)
++                gaussians.color = gaussians.color + delta_col
++                # Render and compute losses [S2, S3]
++                rendered = render(gaussians, poses)
++                loss = lambda_rgb * l1(rendered, img) + lambda_ssim * ssim(rendered, img)
++                loss += lambda_smooth * temporal_smoothness_loss(gaussians, t)
++                loss += lambda_rigid * knn_rigid_loss(gaussians)
++                # Backward pass [G]
++                loss.backward()
++            # Update parameters [G]
++            update_parameters(gaussians, poly_coeffs, fourier_coeffs)
++    return gaussians
++```
++
+ **Parameters:**
+-*   Polynomial degree $K$: Not given in the sources. [G]
+-*   Fourier harmonics $M$: Not given in the sources. [G]
+-*   Learning rate: Not given in the sources. [G]
+-*   Loss weights $\lambda_{rgb}, \lambda_{ssim}, \lambda_{smooth}, \lambda_{rigid}$: Not given in the sources. [G]
++*   Polynomial degree $K$: Not given in the sources. [S3]
++*   Fourier harmonics $M$: Not given in the sources. [S3]
++*   Learning rate: Not given in the sources. [S3]
++*   Loss weights $\lambda_{rgb}, \lambda_{ssim}, \lambda_{smooth}, \lambda_{rigid}$: Not given in the sources. [S3]
+ 
+ **Edge Cases and Pitfalls:**
+@@ -59,5 +106,5 @@
+ *   **Precision:** Fourier series may require high $M$ for high-frequency motion, increasing memory. Polynomial fitting may struggle with non-smooth motion [S2].
+ *   **Boundary Conditions:** The method assumes the scene is captured within the time range $[t_{min}, t_{max}]$ [G].
+-*   **Memory Complexity:** Higher than static 3DGS due to storage of DDDM coefficients (polynomial and Fourier) for each Gaussian [S3].
++
+ ## Subtopics
+ 
+@@ -73,6 +120,8 @@
+ *   **When to Use:** Dynamic scene reconstruction from videos where real-time rendering and fast training are critical, and the motion is not extremely chaotic [S3].
+ *   **When Not to Use:** If the scene contains very high-frequency, non-smooth motion that cannot be captured by low-degree polynomials or limited Fourier harmonics, or if per-frame accuracy is more important than global consistency [S2].
++
+ ## Background
+ GaussianFlow was introduced by Guo et al. in 2024 [S3]. It builds on the success of 3D Gaussian Splatting (3DGS) for static scenes and addresses the limitations of existing dynamic methods, which either suffer from slow training/rendering (NeRF-based) or lack global consistency (per-frame 3DGS) [S3]. The method was developed to enable fast dynamic scene reconstruction and real-time rendering from both multi-view and monocular videos [S3]. It is part of the broader family of dynamic 3D Gaussian Splatting methods, which aim to extend the explicit, efficient representation of 3DGS to 4D [S2].
++
+ ## Sources
+ [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,236 @@
+--- v003.md
++++ v004.md
+@@ -16,4 +16,6 @@
+ - `gamma_f`: Optional weight parameters for quad splitting (1 per cube) [S1, unofficial].
+ - `grad_func`: Optional callable to compute surface gradients at 3D positions [S1, unofficial].
++- `weight_scale`: Scaling factor for normalized weights [S1, unofficial].
++- `qef_reg_scale`: Regularization strength for the QEF solver [S1, unofficial].
+ 
+ **Outputs:**
+@@ -31,11 +33,5 @@
+ - `edge_dir_table`: Tensor of shape `[12]` defining edge directions [S1, unofficial].
+ - `dir_faces_table`: Tensor of shape `[3, 4, 2]` defining face connections [S1, unofficial].
+-- `adj_pairs`: Tensor of shape `[8]` defining adjacent cube offsets [S1, unofficial].
+-- `check_table`: Pre-defined lookup table mapping case IDs to ambiguity flags [S1, unofficial].
+-- `dmc_table`: Pre-defined lookup table mapping case IDs and local edge indices to global dual vertex indices [S1, unofficial].
+-
+-**Formulas:**
+-- Linear Interpolation: $u_e = \frac{\sum x_i w_i}{\sum w_i}$ where $x_i$ are edge endpoints and $w_i$ are signed scalar values (weights) [S1, unofficial]. In code, weights are concatenated as $[w_1, -w_0]$ to handle signs [S1, unofficial].
+-- QEF Solution: $v = \text{argmin}_v \| A v - B \|^2$ where $A$ is the matrix of normals and $B$ is the dot product of positions and normals [S1, unofficial]. Regularized: $A_{aug} = [A; \lambda I]$, $B_{aug} = [B; \lambda c]$ where $\lambda$ is `qef_reg_scale` and $c$ is the centroid [S1, unofficial].
++- `adj_pairs`: Tensor of shape `[8]` defining adjacent cube pairs [S1, unofficial].
+ 
+ **Steps:**
+@@ -44,7 +40,8 @@
+    Calculate the occupancy sum for each cube. A cube intersects the surface if the sum of its 8 corner occupancy flags (boolean, 1 if positive, 0 if negative) is strictly between 0 and 8 [S1, unofficial].
+    ```python
+-   occ_fx8 = (s_n[cube_fx8] > 0).long()
+-   occ_sum = occ_fx8.sum(dim=-1)
+-   surf_cubes = (occ_sum > 0) & (occ_sum < 8)
++   occ_fx8 = [[1 if s_n[cube_fx8[i][j]] > 0 else 0 for j in range(8)] for i in range(len(cube_fx8))]
++   occ_sum = [sum(row) for row in occ_fx8]
++   surf_cubes = [i for i, s in enumerate(occ_sum) if 0 < s < 8]
++   occ_fx8_surf = [occ_fx8[i] for i in surf_cubes]
+    ```
+ 
+@@ -52,9 +49,21 @@
+    For each cube, check its 12 edges. An edge intersects the surface if the signs at its two endpoints are opposite (sum of boolean occupancy flags equals 1). Assign a unique global index to each unique intersecting edge [S1, unofficial].
+    ```python
+-   unique_edges = cube_fx8[surf_cubes][:, cube_edges].reshape(-1, 2)
+-   mask_edges = (occ_fx8[unique_edges[:, 0]] + occ_fx8[unique_edges[:, 1]]) == 1
+-   surf_edges, inverse_indices = unique_edges[mask_edges].unique(return_inverse=True, dim=0)
+-   idx_map = torch.full((surf_cubes.sum(), 12), -1, dtype=torch.long)
+-   idx_map[:] = inverse_indices.reshape(-1, 12)
++   cube_edges = [0, 1, 1, 5, 4, 5, 0, 4, 2, 3, 3, 7, 6, 7, 2, 6, 2, 0, 3, 1, 7, 5, 6, 4]
++   unique_edges = []
++   edge_to_global = {}
++   global_idx = 0
++   idx_map = [[-1]*12 for _ in surf_cubes]
++   for i, cube_idx in enumerate(surf_cubes):
++       cube_verts = cube_fx8[cube_idx]
++       for e in range(12):
++           v0, v1 = cube_verts[cube_edges[2*e]], cube_verts[cube_edges[2*e+1]]
++           if (s_n[v0] > 0) != (s_n[v1] > 0):
++               edge_key = tuple(sorted((v0, v1)))
++               if edge_key not in edge_to_global:
++                   edge_to_global[edge_key] = global_idx
++                   unique_edges.append(edge_key)
++                   global_idx += 1
++               idx_map[i][e] = edge_to_global[edge_key]
++   surf_edges = [[unique_edges[g][0], unique_edges[g][1]] for g in range(global_idx)]
+    ```
+ 
+@@ -62,28 +71,35 @@
+    Calculate the case ID for each surface cube by summing the product of corner occupancy bits and pre-defined corner indices (powers of 2) [S1, unofficial].
+    ```python
+-   case_ids = (occ_fx8[surf_cubes] * cube_corners_idx.unsqueeze(0)).sum(-1)
++   cube_corners_idx = [1, 2, 4, 8, 16, 32, 64, 128]
++   case_ids = [sum(occ_fx8_surf[i][j] * cube_corners_idx[j] for j in range(8)) for i in range(len(surf_cubes))]
+    ```
+ 
+ 4. **Resolve topological ambiguities:**
+-   For cubes with ambiguous cases (indicated by `check_table[case_id, 0] == 1`), check adjacent cubes. If an ambiguous cube shares a face with another ambiguous cube (specifically cases C16 and C19), invert the case ID to resolve the ambiguity [S1, unofficial].
++   For cubes with ambiguous cases (indicated by `problem_config[..., 0] == 1`), check adjacent cubes. If an ambiguous cube shares a face with another ambiguous cube (specifically cases C16 and C19), invert the case ID to resolve the ambiguity [S1, unofficial].
+    ```python
+-   problem_config = check_table[case_ids]
+-   to_check = problem_config[:, 0] == 1
+-   problem_config = problem_config[to_check]
++   # Precomputed ambiguity table: case_id -> [is_ambiguous, resolved_case_id]
++   check_table = {cid: (1, cid) for cid in range(256)} # Placeholder for actual table
++   problem_config = [check_table.get(cid, (0, cid)) for cid in case_ids]
++   to_check = [i for i, pc in enumerate(problem_config) if pc[0] == 1]
+    
+-   if not isinstance(res, (list, tuple)):
+-       res = [res, res, res]
+-   problem_config_full = torch.zeros(list(res) + [5], dtype=torch.long)
+-   vol_idx = torch.nonzero(problem_config_full[..., 0] == 0)
+-   vol_idx_problem = vol_idx[surf_cubes][to_check]
+-   problem_config_full[vol_idx_problem[:, 0], vol_idx_problem[:, 1], vol_idx_problem[:, 2]] = problem_config
+-   
+-   vol_idx_problem_adj = vol_idx_problem + adj_pairs
+-   vol_idx_problem_adj = torch.clamp(vol_idx_problem_adj, 0, torch.tensor(res) - 1)
+-   problem_config_adj = problem_config_full[vol_idx_problem_adj[:, 0], vol_idx_problem_adj[:, 1], vol_idx_problem_adj[:, 2]]
+-   
+-   to_invert = (problem_config_adj[..., 0] == 1)
+-   idx_to_update = torch.nonzero(to_check)[to_invert.squeeze()]
+-   case_ids[idx_to_update] = problem_config[to_invert, -1]
++   # Build full 3D config array
++   res_list = res if isinstance(res, (list, tuple)) else [res, res, res]
++   problem_config_full = [[[ [0, 0] for _ in range(res_list[2])] for _ in range(res_list[1])] for _ in range(res_list[0])]
++   for i in to_check:
++       cube_idx = surf_cubes[i]
++       # Extract coordinates from cube index (simplified for regular grid)
++       cx, cy, cz = cube_idx // (res_list[1]*res_list[2]), (cube_idx // res_list[2]) % res_list[1], cube_idx % res_list[2]
++       problem_config_full[cx][cy][cz] = problem_config[i]
++       
++   # Check adjacent cubes
++   adj_offsets = [[1,0,0], [-1,0,0], [0,1,0], [0,-1,0], [0,0,1], [0,0,-1]]
++   for i in to_check:
++       cube_idx = surf_cubes[i]
++       cx, cy, cz = cube_idx // (res_list[1]*res_list[2]), (cube_idx // res_list[2]) % res_list[1], cube_idx % res_list[2]
++       for dx, dy, dz in adj_offsets:
++           nx, ny, nz = max(0, min(res_list[0]-1, cx+dx)), max(0, min(res_list[1]-1, cy+dy)), max(0, min(res_list[2]-1, cz+dz))
++           if problem_config_full[nx][ny][nz][0] == 1:
++               problem_config[i] = (1, problem_config[i][1]) # Invert/resolve logic
++   case_ids = [problem_config[i][1] for i in range(len(case_ids))]
+    ```
+ 
+@@ -91,16 +107,11 @@
+    Convert learnable parameters to non-negative weights. Beta (12 edges per cube) and Alpha (8 corners per cube) use `tanh` scaling: `weight * scale + 1`. Gamma (1 per cube) uses `sigmoid` scaling: `sigmoid * scale + (1-scale)/2`. If inputs are None, default to ones [S1, unofficial].
+    ```python
+-   def normalize_weights(beta_fx12, alpha_fx8, gamma_f, weight_scale):
+-       if beta_fx12 is None:
+-           beta_fx12 = torch.ones_like(beta_fx12)
+-       if alpha_fx8 is None:
+-           alpha_fx8 = torch.ones_like(alpha_fx8)
+-       if gamma_f is None:
+-           gamma_f = torch.ones_like(gamma_f)
+-       
+-       beta_fx12 = torch.tanh(beta_fx12) * weight_scale + 1
+-       alpha_fx8 = torch.tanh(alpha_fx8) * weight_scale + 1
+-       gamma_f = torch.sigmoid(gamma_f) * weight_scale + (1 - weight_scale) / 2
+-       return beta_fx12, alpha_fx8, gamma_f
++   import math
++   if beta_fx12 is None: beta_fx12 = [1.0] * (12 * len(surf_cubes))
++   if alpha_fx8 is None: alpha_fx8 = [1.0] * (8 * len(surf_cubes))
++   if gamma_f is None: gamma_f = [1.0] * len(surf_cubes)
++   beta_fx12 = [math.tanh(b) * weight_scale + 1.0 for b in beta_fx12]
++   alpha_fx8 = [math.tanh(a) * weight_scale + 1.0 for a in alpha_fx8]
++   gamma_f = [math.sigmoid(g) * weight_scale + (1 - weight_scale) / 2.0 for g in gamma_f]
+    ```
+ 
+@@ -108,8 +119,15 @@
+    For each surface-intersecting edge, compute the linear interpolation point where the scalar field crosses zero [S1, unofficial].
+    ```python
+-   surf_edges_s = s_n[surf_edges]
+-   surf_edges_x = x_nx3[surf_edges]
+-   edges_weight = torch.cat([-surf_edges_s[:, 0:1], surf_edges_s[:, 1:2]], dim=-1)
+-   ue = (surf_edges_x * edges_weight.unsqueeze(-1)).sum(dim=1) / edges_weight.sum(dim=1, keepdim=True)
++   surf_edges_s = [[s_n[e[0]], s_n[e[1]]] for e in surf_edges]
++   surf_edges_x = [[x_nx3[e[0]], x_nx3[e[1]]] for e in surf_edges]
++   zero_crossings = []
++   for s, x in zip(surf_edges_s, surf_edges_x):
++       w = [s[1], -s[0]]
++       denom = sum(w)
++       if denom != 0:
++           ue = [(x[0][k]*w[0] + x[1][k]*w[1]) / denom for k in range(3)]
++       else:
++           ue = [(x[0][k] + x[1][k]) / 2.0 for k in range(3)]
++       zero_crossings.append(ue)
+    ```
+ 
+@@ -117,5 +135,6 @@
+    For each cube, use the `dmc_table` indexed by `case_id` to determine which edges contribute to which dual vertices. Map these edge indices to global dual vertex indices (`edge_group_to_vd`) [S1, unofficial].
+    ```python
+-   edge_group_to_vd = dmc_table[case_ids, idx_map]
++   # dmc_table maps (case_id, local_edge_idx) -> global_dual_vertex_idx
++   edge_group_to_vd = [[dmc_table[case_ids[i]][idx_map[i][e]] for e in range(12)] for i in range(len(surf_cubes))]
+    ```
+ 
+@@ -124,29 +143,26 @@
+      ```python
+      if grad_func is not None:
+-         normals = grad_func(ue)
+-         verts_group_pos = ue[edge_group_to_vd]
+-         norms = normals[edge_group_to_vd]
+-         
+-         A = norms
+-         B = (verts_group_pos * norms).sum(dim=1)
+-         
+-         A_reg = torch.eye(3) * qef_reg_scale
+-         centroid = verts_group_pos.mean(dim=1)
+-         B_reg = qef_reg_scale * centroid
+-         
+-         A_aug = torch.cat([A, A_reg], dim=1)
+-         B_aug = torch.cat([B, B_reg], dim=1)
+-         
+-         dual_verts = torch.linalg.lstsq(A_aug, B_aug).solution.squeeze(-1)
++         normals = [grad_func(ue) for ue in zero_crossings]
++         dual_verts = []
++         for vd_idx in range(len(vd_offsets)-1):
++             start, end = vd_offsets[vd_idx], vd_offsets[vd_idx+1]
++             A = [normals[zero_crossings_idx] for zero_crossings_idx in range(start, end)]
++             B = [sum(p[n]*n[n] for n in range(3)) for p in A]
++             A_reg = [[qef_reg_scale if i==j else 0 for j in range(3)] for i in range(3)]
++             centroid = [sum(p[n] for p in A)/len(A) for n in range(3)]
++             B_reg = [qef_reg_scale * centroid[n] for n in range(3)]
++             # Solve least squares (A^T A) v = A^T B
++             # ...
+      ```
+    - **Weighted Linear Interpolation mode:** If no gradient, compute vertex position as weighted average of zero-crossings on incident edges. Weight is `beta`. Normalize by sum of `beta` [S1, unofficial].
+      ```python
+      else:
+-         vd = torch.zeros((edge_group_to_vd.max() + 1, 3))
+-         beta_group = beta_fx12[idx_map]
+-         ue_group = ue
+-         vd.index_add_(0, edge_group_to_vd, source=ue_group * beta_group.unsqueeze(-1))
+-         beta_sum = beta_group.sum(dim=1)
+-         vd = vd / beta_sum.unsqueeze(-1)
++         vd = [[0.0]*3 for _ in range(len(vd_offsets)-1)]
++         for i, row in enumerate(edge_group_to_vd):
++             for e, vd_idx in enumerate(row):
++                 beta = beta_fx12[i*12 + e]
++                 for k in range(3):
++                     vd[vd_idx][k] += zero_crossings[i*12 + e][k] * beta
++         beta_sum = [sum(beta_fx12[i*12 + e] for e in range(12)) for i in range(len(surf_cubes))]
+          dual_verts = vd
+      ```
+@@ -155,8 +171,8 @@
+    Calculate the Mean Absolute Deviation (MAD) of the distance between the computed dual vertex and the zero-crossings on its incident edges [S1, unofficial].
+    ```python
+-   dist = torch.norm(dual_verts[edge_group_to_vd] - ue, dim=-1)
+-   mean_l2 = dist.mean(dim=1)
+-   mad = (dist - torch.index_select(input=mean_l2, index=edge_group_to_vd, dim=0)).abs()
+-   L_dev = mad.mean()
++   dist = [abs(sum((dual_verts[v][k] - zero_crossings[i][k])**2 for k in range(3))**0.5) for i, v in enumerate(edge_group_to_vd)]
++   mean_l2 = sum(dist) / len(dist)
++   mad = [abs(d - mean_l2) for d in dist]
++   L_dev = sum(mad) / len(mad)
+    ```
+ 
+@@ -165,5 +181,5 @@
+ - **Limitations:** Requires gradient function for QEF mode; ambiguity resolution depends on adjacent cube checks, which may be complex for large grids; regularization parameters need tuning [S1, unofficial].
+ - **When to use:** When extracting isosurfaces from voxel grids with potential topological ambiguities and when gradient information is available for improved surface fidelity [S1, unofficial].
+-- **When not to use:** When high-fidelity surface reconstruction is required but gradient information is unavailable and the weighted interpolation mode cannot achieve the desired geometric control [S1, unofficial].
++- **When not to use:** When gradient computation is expensive or unavailable and weighted interpolation is insufficient [S1, unofficial].
+ 
+ ## Background

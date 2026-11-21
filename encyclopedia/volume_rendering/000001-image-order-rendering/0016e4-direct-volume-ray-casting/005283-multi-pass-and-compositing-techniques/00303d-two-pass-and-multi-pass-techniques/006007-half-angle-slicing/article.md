@@ -1,0 +1,187 @@
+# Half-angle slicing
+
+Also called: Half angle slice axis, Halfway vector slicing, Kniss et al, Two-pass slice rendering for lighting, Volumetric lighting using half-angle slicing
+
+## Overview
+Half-angle slicing is a two-pass per-slice rendering technique that synchronizes the slicing axis with the illumination computation to integrate volumetric lighting, including hard shadows and indirect scattering, within interactive applications [S1, S2][S3, unofficial]. It solves the problem of computing accurate volumetric shadows without the memory overhead of pre-computed 3D shadow maps by orienting slice planes perpendicular to the half-angle vector between the eye and light directions [S4, unofficial][S5][S7, unofficial]. This orientation allows a single slice to be rendered from both the observer's and the light source's viewpoints, decoupling light transport from data volume resolution [S8, book]. Unlike standard view-aligned slicing, it minimizes the number of slices required to resolve lighting details such as specular highlights and avoids attenuation leakage artifacts common in 2D shadow buffer approaches [S7, unofficial][S8, book].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Volume dataset (scalar field), transfer function (density, color, opacity), camera position and projection, light direction (directional) or position (point), bounding box of the volume [S1, S5][S8, book].
+*   **Outputs:** Final composited image in the eye buffer [S4, unofficial].
+
+**Data Structures:**
+*   **Light Buffer:** A 2D texture (render target) storing light transmissivity/attenuation. Format: 16-bit floating point per channel (e.g., `R16G16B16A16Sfloat`) to preserve HDR values [S4, unofficial]. Resolution: 30%–50% higher than the frame buffer to mitigate shadow boundary artifacts [S8, book]. Initialized to $1 - \text{light intensity}$ (or an arbitrary image for spotlights) [S8, book].
+*   **Eye Buffer:** A 2D texture (render target) for accumulating the final composited color. Format: Same as Light Buffer [S4, unofficial].
+*   **Push Constants:**
+    *   `LightPC`: `lightMVP` (4x4 matrix, 64 bytes), `opacityCorrection` (float, 4 bytes), `densityMin` (float, 4 bytes), `densityMax` (float, 4 bytes). Total: 76 bytes [S4, unofficial].
+    *   `EyePC`: `eyeMVP` (4x4 matrix, 64 bytes), `lightMVP` (4x4 matrix, 64 bytes), `opacityCorrection` (float, 4 bytes), `ambient` (float, 4 bytes), `densityMin` (float, 4 bytes), `densityMax` (float, 4 bytes). Total: 144 bytes [S4, unofficial]. Note: Vulkan guarantees only 128 bytes for push constants; this requires a driver supporting $\ge 256$ bytes [S4, S7, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Compute Half-Angle Vector:**
+    Calculate the normalized camera vector pointing from the camera to the object ($\vec{v}$) and the normalized light vector ($\vec{l}$) in the object's local space [S7, unofficial].
+    $$ \vec{v} = \text{normalize}(\text{objectPos} - \text{cameraPos}) $$
+    $$ \vec{l} = \text{normalize}(\text{lightDirection}) $$
+    Compute the dot product $d = \vec{l} \cdot \vec{v}$ [S8, book].
+    *   If $d > 0$: The half-angle vector $\vec{h}$ is halfway between $\vec{l}$ and $\vec{v}$ [S1, S5][S8, book].
+        $$ \vec{h} = \text{normalize}(\vec{l} + \vec{v}) $$
+    *   If $d < 0$: The light is behind the volume relative to the view. The half-angle vector $\vec{h}$ is halfway between $\vec{l}$ and the inverted view direction ($-\vec{v}$) [S1, S5][S8, book].
+        $$ \vec{h} = \text{normalize}(\vec{l} - \vec{v}) $$
+
+2.  **Determine Slice Bounds and Count:**
+    Project the 8 vertices of the volume's bounding box onto $\vec{h}$ to find the minimum ($min\_dist$) and maximum ($max\_dist$) extents [S7, unofficial].
+    $$ min\_dist = \min_{i=0..7} (\vec{h} \cdot \text{boxVertex}_i) $$
+    $$ max\_dist = \max_{i=0..7} (\vec{h} \cdot \text{boxVertex}_i) $$
+    Calculate the total length along the half-vector: $L = |max\_dist - min\_dist|$ [S7, unofficial].
+    Determine the number of slices $N$ (e.g., default 256 [S4, unofficial]) and the step size:
+    $$ stepSize = \frac{L}{N} $$
+    [S7, unofficial][S8, book]
+
+3.  **Iterate Slices:**
+    For each slice index $s$ from $0$ to $N-1$:
+    
+    a. **Generate Slice Geometry:**
+    Calculate the center of the slice plane:
+    $$ C = \text{origin} + \vec{h} \cdot (min\_dist + s \cdot stepSize + \frac{stepSize}{2}) $$
+    Intersect the slice plane with the volume bounding box to get a polygon of vertices. Sort these vertices counter-clockwise around $C$ using the cross-product test with $\vec{h}$:
+    ```python
+    def compare_vertices(A, B, C, normal):
+        # Returns 1 if B is clockwise from A relative to C, else -1
+        if dot(normal, cross(A - C, B - C)) <= 0:
+            return 1
+        else:
+            return -1
+    ```
+    Construct a mesh by adding a central vertex (centroid of intersection points) and connecting it to the sorted boundary vertices to form triangles. Handle winding order based on whether the view is inverted ($d < 0$) [S7, unofficial][S8, book].
+
+    b. **Light Pass (Light's Point of View):**
+    Render the slice geometry from the light's perspective.
+    *   **Shader Logic:** Compute the opacity of the current sample using the transfer function. Accumulate this opacity into the Light Buffer using the "over" operator (alpha blending) [S4, S6, unofficial][S8, book].
+    *   **Order:** Render in front-to-back order with respect to the light [S6, unofficial][S8, book].
+    *   **Result:** The Light Buffer stores the transmissivity (amount of light remaining) after passing through previous slices [S4, unofficial][S8, book].
+
+    c. **Eye Pass (Observer's Point of View):**
+    Render the same slice geometry from the camera's perspective.
+    *   **Shader Logic:**
+        1.  Sample the Light Buffer at the current fragment's screen coordinates to retrieve the accumulated light transmissivity $T$ [S4, unofficial][S8, book].
+        2.  Compute the incoming light $L_i$ at the current voxel position $\vec{x}$:
+            $$ L_i(\vec{x}, \vec{\omega}_i) = L_l \cdot T(\vec{x}_l, \vec{x}) $$
+            where $L_l$ is light intensity and $T$ is the transmissivity from the Light Buffer [S1].
+        3.  For multiple scattering, add an indirect component:
+            $$ L_i(\vec{x}, \vec{\omega}_i) = L_l \cdot T(\vec{x}_l, \vec{x}) + L_l \cdot T(\vec{x}_l, \vec{x}) \cdot \text{Blur}(\theta) $$
+            where $\theta$ is a user-defined cone angle and $\text{Blur}$ is an angle-dependent blur function [S1].
+        4.  Compute surface shading factor $S(\vec{x})$ (derived from gradient magnitude or user-defined) to weight emission and surface shading:
+            $$ C(\vec{x}, \vec{\omega}_i, \vec{\omega}_o) = L_e(\vec{x}) \cdot (1 - S(\vec{x})) + s(\vec{x}, \vec{\omega}_i, \vec{\omega}_o) \cdot S(\vec{x}) $$
+            where $L_e$ is emission and $s$ is surface shading [S1].
+        5.  Combine with the phase function $p$:
+            $$ L_i(\vec{x}, \vec{\omega}_i) = L_l \cdot p(\vec{x}, \vec{\omega}_i, \vec{\omega}_o) \cdot T(\vec{x}_l, \vec{x}) + L_l \cdot T(\vec{x}_l, \vec{x}) \cdot \text{Blur}(\theta) $$
+        6.  Modulate the classified color by the computed light amount and composite into the Eye Buffer using the "over" operator [S4, unofficial][S8, book].
+    *   **Order:**
+        *   If $d > 0$: Render front-to-back with respect to the observer [S8, book].
+        *   If $d < 0$: Render back-to-front with respect to the observer [S8, book].
+    [S4, S6, unofficial][S8, book]
+
+4.  **Final Composition:**
+    Copy the Eye Buffer to the screen [S4, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def half_angle_slicing(volume, camera, light, box_vertices, num_slices=256):
+    # 1. Compute half-angle vector
+    v = normalize(camera.position - volume.center)
+    l = normalize(light.direction)
+    d = dot(l, v)
+    h = normalize(l + v) if d > 0 else normalize(l - v)
+    
+    # 2. Determine slice bounds
+    projections = [dot(h, v) for v in box_vertices]
+    min_dist, max_dist = min(projections), max(projections)
+    L = abs(max_dist - min_dist)
+    step_size = L / num_slices
+    
+    # Initialize buffers
+    light_buffer = Texture2D(width=frame_width*1.4, height=frame_height*1.4, format=HDR)
+    light_buffer.clear(1.0 - light.intensity)
+    eye_buffer = Texture2D(width=frame_width, height=frame_height, format=HDR)
+    eye_buffer.clear(0.0)
+    
+    # 3. Iterate slices
+    for s in range(num_slices):
+        t = min_dist + s * step_size + step_size / 2
+        center = volume.center + h * t
+        
+        # Intersect plane with bounding box
+        slice_vertices = intersect_plane_box(center, h, box_vertices)
+        if len(slice_vertices) < 3: continue
+        
+        # Sort vertices counter-clockwise around center
+        centroid = sum(slice_vertices) / len(slice_vertices)
+        slice_vertices.sort(key=lambda p: atan2(dot(cross(p - centroid, h), cross(slice_vertices[0] - centroid, h)), dot(p - centroid, h)))
+        
+        # Fan triangulate
+        indices = []
+        for i in range(1, len(slice_vertices) - 1):
+            if d < 0:
+                indices.extend([0, i + 1, i])
+            else:
+                indices.extend([0, i, i + 1])
+        mesh = Mesh(vertices=slice_vertices + [centroid], indices=indices)
+        
+        # Light pass
+        render(mesh, light.view_matrix, light.projection_matrix)
+        accumulate_opacity(light_buffer, "over")
+        
+        # Eye pass
+        render(mesh, camera.view_matrix, camera.projection_matrix)
+        T = sample(light_buffer, screen_coords)
+        color = modulate_classified_color(T)
+        composite(eye_buffer, color, "over")
+        
+    # 4. Final composition
+    copy_to_screen(eye_buffer)
+```
+
+**Parameters:**
+*   `kReferenceSlices`: Default number of slices (256) [S4, unofficial].
+*   `kLightSize`: Resolution of the light buffer (512) [S4, unofficial].
+*   `kHDR`: Buffer format (16-bit float) [S4, unofficial].
+*   `opacityCorrection`: Scalar for adjusting opacity accumulation [S4, unofficial].
+*   `densityMin`, `densityMax`: Density range for transfer function mapping [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Attenuation Leakage:** If view and light directions are perpendicular, a 2D shadow buffer approach causes blurry shadows and dark surfaces due to coarse resolution interpolation [S8, book]. Half-angle slicing mitigates this by decoupling light transport resolution from volume resolution, but artifacts may still appear at shadow boundaries where opacity jumps sharply [S8, book].
+*   **Push Constants Size:** The Eye Pass push constants total 144 bytes, exceeding the Vulkan minimum guarantee of 128 bytes. Requires drivers supporting $\ge 256$ bytes [S4, S7, unofficial].
+*   **Single Light Source:** Supports only one directional or point light source located outside the volume [S1].
+*   **Slice Spacing:** To maintain consistent visual density, the slice spacing along the half-vector ($d_s$) must be adjusted based on the angle $\theta$ between view and light directions ($d_v$):
+    $$ d_s = \frac{d_v}{\cos(\theta/2)} $$
+    [S8, book]
+
+## Subtopics
+
+### [Multiple-Scattering Angular Distribution Estimation](15670-multiple-scattering-angular-distribution-estimation.md)
+Extends half-angle slicing to approximate the angular distribution of light after multiple scattering events by convolving the particle phase function with itself, handling gradual angular spreading rather than just unscattered or diffuse light.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of slices and $R$ is the resolution of the slice proxy geometry (typically constant per frame). Two passes per slice [S1][S8, book].
+*   **Memory Complexity:** $O(W \cdot H)$ for the Light and Eye buffers, where $W, H$ are buffer dimensions. Significantly less than 3D shadow maps [S8, book].
+*   **Performance:** Enables interactive frame rates for volumetric shadows [S1, S2]. Performance is limited by the cost of generating proxy geometry and two rasterization passes per slice [S1][S8, book].
+*   **Strengths:** Produces hard, well-defined shadows; supports indirect lighting and multiple scattering; avoids pre-computation of shadow maps; efficient memory usage compared to 3D shadow volumes/maps [S1, S5][S8, book].
+*   **Limitations:** Limited to single light sources; artifacts at shadow boundaries with sharp opacity transitions; requires high-resolution light buffers to minimize leakage; push constant size constraints on some GPUs [S1][S4, unofficial][S8, book].
+*   **When to use:** Interactive applications requiring dynamic volumetric shadows and translucent material rendering [S1, S2].
+*   **When not to use:** Scenes with multiple dynamic light sources or complex global illumination requiring full 3D light transport storage [S1].
+
+## Background
+Half-angle slicing was introduced by Kniss et al. in 2002 [S1, S2][S8, book]. It was the first slice-based approach to synchronize rendering with illumination computation, integrating volumetric illumination models including indirect lighting and scattering within interactive applications [S1]. It builds on the concept of the half-angle vector for volume shadow computation [S5]. The technique is described in detail in "Interactive Translucent Volume Rendering and Procedural Modeling" [S5] and "Multi-Dimensional Transfer Functions for Volume Rendering" [S8, book]. It is often cited as Kniss et al. [51] or [14] in literature [S2][S3, unofficial].
+
+## Sources
+[S1] Interactive Volume Rendering with Volumetric Illumination, https://doi.org/10.2312/conf/eg2012/stars/053-074, fetched 2026-10-26
+[S2] About the Influence of Illumination Models on Image Comprehension in Direct Volume Rendering, https://doi.org/10.1109/tvcg.2011.161, fetched 2026-11-01
+[S3] Enhanced perception in volume visualization, https://doi.org/10.5821/dissertation-2117-94929, fetched 2026-10-26 (unofficial)
+[S4] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
+[S5] PDF Interactive Translucent Volume Rendering and Procedural Modeling, https://courses.cs.duke.edu/spring03/cps296.8/papers/kniss_volumeshading02.pdf, fetched 2026-10-26
+[S6] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S7] dokipen3d/HalfAngleSlicing, https://github.com/dokipen3d/HalfAngleSlicing, fetched 2026-10-27 (unofficial)
+[S8] PDF 9 Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)

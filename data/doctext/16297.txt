@@ -1,0 +1,970 @@
+Grid-Free Out-Of-Core Voxelization to Sparse Voxel Octrees on GPU
+Martin Pätzold and Andreas Kolb∗
+Computer Graphics and Multimedia Systems Group,
+University of Siegen, Germany
+Figure 1: San Miguel scene voxelized at a resolution of 81923 . Using our grid-free out-of-core approach, the scene is created in 44.3 seconds.
+The color attributes of the SVO hierarchy levels ranging from 5123 (left) to 81923 (right) are shown.
+Abstract
+tions of a scene are one promising possibility to increase the levelof-detail for massive scenes by keeping the memory consumption
+low and the rendering performance high. Recent works like efficient
+Sparse Voxel Octrees (SVOs) [Laine and Karras 2010], Gigavoxels
+[Crassin et al. 2009] or Sparse Voxel DAGs [Kämpe et al. 2013],
+prove the benefit of using voxels in rendering systems. They all
+have in common that the sparsity of a scene is exploited. Empty
+and filled spaces can be efficiently encoded in a hierarchical manner to store more detailed information of the scene geometry. The
+voxelization of triangle meshes is still the main method to generate
+such an SVO structure.
+In this paper, we present the first grid-free, out-of-core GPU voxelization method. Our method combines efficient parallel triangle
+voxelization on GPU with out-of-core technologies in order to allow the processing of scenes with large triangle counts at a high
+resolution. We directly generate the voxelized data in a sparse
+voxel octree (SVO) representation, without any intermediate grid
+structure (“grid-free”). We apply triangle preprocessing and avoid
+atomic operations, thus leading to an optimized balanced GPU
+workload and efficient parallel triangle processing. Compared to existing out-of-core CPU approaches, we manage a proper handling
+of voxel attributes, i.e. all triangle attributes contributing to a voxel
+are accessible when calculating the voxel attribute.
+In-core GPU methods, like the approach by Schwarz and Seidel [2010], perform very well. However, in-core GPU-based methods for voxelization rapidly reach their limit in terms of available
+memory if highly detailed models with high voxel resolution are to
+be voxelized. On the other hand, generating SVOs with in-core CPU
+voxelization techniques, as presented by Laine and Karras [2011],
+allows the processing of much larger scenes at higher resolution.
+However, these methods are far less performance efficient, as specific hardware functionalities of the GPU are not exploited. Both,
+in-core GPU and CPU methods can handle triangle attributes such
+as color and normals properly on a per-voxel level, as all triangle
+attribute contributions to a voxel can be held in-core.
+We test and compare our approach to state-of-the-art methods and
+demonstrate its viability in terms of speed, input triangle count, resolution and output quality.
+CR Categories: I.3.6 [Computer Graphics]: Methodology and
+Techniques—Graphics data structures and data types I.3.7 [Computer Graphics]: Three-Dimensional Graphics and Realism—
+Color, shading, shadowing, and texture;
+Keywords: Grid-Free, Out-Of-Core, Voxelization, Sparse Voxel
+Octree, GPU
+1
+Recently, Baert et al. [2013] introduced an out-of-core CPU voxelization approach. It allows to efficiently generate SVOs independently from the input triangle count, desired grid resolution or size
+of the resulting SVO. In a follow-up paper, the authors incorporate the creation of voxel attributes during voxelization into their
+system [Baert et al. 2014]. However, the attributes are created as
+constant per-triangle values, where only the first processed triangle contributes to the attribute values. Thus, the resulting per-voxel
+attribute quality is restricted.
+Introduction
+Representing massively large and highly detailed scenes is one of
+the main goals in computer graphics. Currently, voxel representa∗ e-mail:{martin.paetzold, andreas.kolb } @uni-siegen.de
+Permission to make digital or hard copies of part or all of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for commercial advantage and that copies bear this notice and the full citation on the
+first page. Copyrights for components of this work owned by others than ACM must be
+honored. Abstracting with credit is permitted. To copy otherwise, to republish, to post on
+servers, or to redistribute to lists, requires prior specific permission and/or a fee.
+Request permissions from permissions@acm.org.
+High Performance Graphics 2015, August 7 – 9, 2015, Los Angeles, CA.
+Copyright © ACM 978-1-4503-3707-6/15/08 $15.00
+http://dx.doi.org/10.1145/2790060.2790067
+In this paper, we present an out-of-core GPU voxelization method
+which bridges the gap between out-of-core CPU voxelization with
+comparably poor performance for higher voxel resolutions and limited attribute handling on the one hand and in-core voxelization
+with sophisticated attribute creation of SVOs on the other hand.
+Thus, our system is more performant than in-core or out-of-core
+95
+CPU methods and can handle larger models than in-core GPU
+methods, while allowing a proper handling of voxel attributes with
+all contributing triangle attributes available.
+The core technical contributions of our approach are the following:
+tries well enough.
+Kämpe et al. [2013] improve the memory usage of SVOs by transforming that tree structure to a directed acyclic graph (DAG), thus
+being able to represent larger SVOs, that do not fit into memory.
+Subtrees of the SVO are transformed into sub-DAGs to avoid a construction of the complete SVO at once. The final DAG is obtained
+by assembling the sub-DAGs. The tree construction has the same
+limitations in respect to out-of-core processing as Laine and Karras [2011] because all triangles, the intermediate SVO, and the final
+DAG need to fit into memory.
+• A grid-free voxel handling that makes an out-of-core voxelization feasible for GPU processing and removes the need
+of processing empty voxels in the SVO creation,
+• Parallel triangle voxelization on GPU which is optimized for
+a balanced workload, avoiding any atomic operations as commonly used in grid-based parallel triangle voxelization approaches, and
+• Maintenance of all triangle properties on a per-voxel level to
+allow a post-order attribute determination for the voxel and
+the resulting nodes of the SVO.
+2
+The out-of-core CPU method presented by
+Baert et al. [2013] uses an efficient streaming approach for voxelization and SVO creation. First, the final grid is partitioned into
+smaller grids that fit into memory. Then, all subgrids are sequentially processed by voxelizing the triangle stream and creating the
+corresponding part of the SVO. An optimized SVO creation that
+removes the need for processing a large number of empty subtrees
+is proposed. In a subsequent work, Baert et al. [2014] suggest the
+direct use of a voxel list, which improves the performance, but does
+not remove the need of maintaining the full grid because there is
+no estimation how large the voxel list can get for the subgrid. The
+attributes of the voxels are created independently of the triangle
+position, i.e. of the voxel’s barycentric coordinates with respect to
+the triangle. Furthermore, the voxel attribute is generated by the
+first triangle intersecting the voxel. In general, extending this approach to allow arbitrary attribute computation would require maintaining all triangle contributions per voxel and functionalities like
+texture lookups re-implemented on CPU, leading to significant performance loss.
+Out-of-Core CPU
+Related Work
+Commonly, voxelization can be categorized into surface and solid
+voxelization. While solid voxelization is meant to fill all voxels inside a watertight geometry, surface voxelization only fills voxels on
+the boundary of the object. Our proposed method creates a surface
+voxelization and uses the conservative voxelization of Schwarz and
+Seidel [2010] to create a similar SVO structure to Laine and Karras [2010], but without contour information. Therefore, we focus
+on methods that create an SVO from a surface voxelization. For a
+recent in-depth discussion about voxelization, we refer the reader
+to Laine [2013].
+Schwarz and Seidel [2010] present a surface and
+solid voxelization on the full grid, as well as a solid voxelization
+method to an SVO representation. In all cases, they do not utilize
+the GPU rasterizer. They exploit the sparsity in the voxelization by
+determining and processing lists of active nodes in the octree construction. The octree structure is determined in a bottom-up fashion
+starting from the parent nodes of the finest level to fill the leaf nodes
+with the voxel data afterwards which means that the octree structure
+and triangle data need to be stored completely in memory. The attributes of the generated voxels only contain binary information or
+a scalar representing the coverage factor, while we store voxel color
+and normal.
+In-Core GPU
+Our grid-free out-of-core GPU approach is similar to
+Baert et al. [2013; 2014], as we also use triangle and voxel
+streaming. However, in our approach all triangle attributes
+per voxel are accessible while computing the voxel attributes.
+Furthermore, we do not use subgrid-partitioning but triangle
+sorting in order to be more flexible and grid-free. In contrast to
+Baert et al. [2013; 2014], we use the conservative voxelization
+instead of the surface voxelization, both proposed by Schwarz and
+Seidel [2010], and we perform the voxelization on GPU rather than
+CPU. In contrast to Schwarz and Seidel [2010], we create the leaf
+voxels directly and create parts of the SVO bottom-up in a single
+pass, making out-of-core processing possible.
+A sparse voxelization on GPU that uses the hardware rasterizer is
+proposed by Crassin and Green [2012]. The voxel generation is
+done with a conservative rasterization. The tree generation is done
+top-down by determining the octree-nodes that contain the generated voxels of the finest level. The resulting leaf nodes are filled
+with the attributes from the voxel fragment list and averaged to the
+coarser levels bottom-up. In terms of memory, this approach is limited to the available GPU memory for storing the complete voxel
+fragment list and the resulting octree-structure.
+3
+Overview
+Our method comprises two processing stages, the Triangle Stream
+Processing stage and the Voxel Stream Processing stage. Figure 2
+gives a schematic overview of the processing. Pseudo-code for the
+individual stages of the approach is provided in the supplemental
+material.
+Laine and Karras [2011] give a detailed introduction to SVOs. To generate the SVO, they apply a top-down approach
+on CPU that determines independent slices containing parent-child
+relations and the needed triangles for the subtree. This method
+would allow an out-of-core voxelization and SVO creation, but especially the root node would need to contain all triangles for processing. Therefore, the SVO creation is limited to the number of
+triangles and the size of the resulting SVO that can fit into memory.
+One main difference to other voxelization techniques is the triangle
+processing for voxelization on every level of the tree. This allows an
+attribute creation on all levels directly from the original input. Using
+the available triangle data on each level, Laine and Karras [2011]
+proposed a contour creation and early determination of subtrees in
+the voxelization, if the contours approximate the triangle geomeIn-Core CPU
+This stage consists of three parts.
+First, we apply a subdivision scheme on the triangles to improve
+spatial locality of the triangles, voxel handling efficiency and processing performance on GPU (Sec. 4.1).
+Triangle Stream Processing
+Next, we use triangle sorting in order to achieve a voxel prediction,
+which determines the position of the triangle in the sorted triangle
+set for the creation of the SVO, and estimate how many triangles per
+iteration can be processed in parallel (Sec. 4.2). To describe these
+sets of triangles per iteration, the term (triangle) batch is used in
+the following.
+After defining the triangle batches, the sequential processing of
+batches starts with the voxelization and attribute creation (Sec. 4.3).
+96
+The second step is the SVO Creation (Sec. 5.2). Starting with the
+leaf nodes, the new parts of the SVO are built hierarchically in
+a bottom-up manner. Leaf node attributes can be calculated using
+the current voxel attribute set. On higher hierarchy levels, nodes
+can only be created if all attribute information from their descendents are available. Therefore, an additional stitch queue buffer is
+introduced to maintain the advancing front of incomplete hierarchy
+nodes which will be finalized by subsequent batches. The creation
+of the SVO is finished on CPU by iterating over all remaining nodes
+in the stitch queue buffer after all batches have been processed.
+4
+Triangle Stream Processing
+The main goal of the triangle processing is to prepare the given triangle set {Ti } in such a way, that parallelized batch processing can
+efficiently be performed on GPU. Therefore, we apply a subdivision
+scheme on the triangles (Sec. 4.1), sort the triangles appropriately
+and determine an upper bound of voxels generated by each triangle
+(Sec. 4.2).
+4.1
+Subdivision of Triangles
+The first step of our algorithm consists of pre-processing that sequentially consumes triangles to apply a subdivision scheme. The
+main goal is to create triangles which are as homogeneous as possible with respect to the following criteria:
+• The number of voxels generated per triangle Nvox/tri (Ti )
+should be as equal as possible among all triangles
+• The range of Morton indices m generated for the voxels of a
+triangle determines how long a triangle stays active in the outof-core voxelization scheme. Thus, the Morton indices should
+be as compact as possible, i.e.
+(mmax (Ti ) − mmin (Ti ))/Nvox/tri (Ti ) → min!,
+where mmin (Ti ) and mmax (Ti ) denote the minimum and maximal Morton index generated by triangle Ti , respectively.
+Figure 2: Overview of the proposed approach showing the steps of
+Triangle Stream Processing and Voxel Stream Processing
+Of course, we have to prevent the trivial solution of 1 voxel per
+triangle, i.e. Nvox/tri (Ti ) should not be too small, because the I/O
+time for transferring a higher triangle count would increase while
+the computation time for processing less voxels per thread would
+decrease. Therefore, the voxelization would not benefit from GPU
+processing.
+From the voxelization of a batch of triangles, we obtain a voxel attribute set, which is a list of voxel-attribute pairs containing nonunique Morton indices and attribute values of triangles at voxel positions. The Morton index [Morton 1966] is used to represent the
+voxel indices because it allows to map multidimensional data to a
+linear index that preserves locality, which is needed for the creation
+of octree structures like the SVO.
+Both criteria mainly depend on the size and shape of the triangles.
+Additionally, the Morton-range criterion depends strongly on the
+specific spatial location of the triangle and a determination of compacted Morton ranges would basically require voxelization already.
+Therefore, we try to approximate both criteria by applying purely
+geometric subdivision rules. While these rules can not avoid triangles that span a large Morton range, they limit the number of resulting voxels that need to be maintained during batch processing.
+The second stage consists of two
+parts. The first part includes a handling of voxels that allows for
+SVO creation in a streaming manner (Sec. 5.1) while the second
+step creates parts of the SVO (Sec. 5.2).
+We address the Morton-range criterion solely by preventing long
+thin triangles (Fig. 3 case 1 and case 2). In order to estimate the
+number of voxels generated for triangle Ti , a canonical approach
+would be to project a triangle along the dominant coordinate axis
+of its normal, and relate the projected triangle size Aproj (Ti ) to area
+of a voxelface Avox . However, in our experiments we found, that it
+is advantageous to use the area of the projected bounding box of the
+triangle Abbox (Ti ), which additionally penalizes long thin triangles.
+Thus, the final subdivision rule is
+Voxel Stream Processing
+Since we need to avoid subsequent triangles intersecting alreadycreated SVO nodes, we maintain voxels that can not be finally
+processed yet. For this purpose, we use a Morton queue. It stores
+all voxel-attribute pairs from the current batch and all unprocessed
+voxel-attribute pairs from previous batches to allow an extraction of
+voxels that can be used for the SVO creation in the current iteration.
+These voxel-attribute pairs represent the current voxel attribute set
+until the next batch of triangles will be voxelized.
+max
+Abbox (Ti ) ≤ Kvox/tri
+· Avox ,
+(1)
+max
+where Kvox/tri
+is a user defined parameter. If Abbox (Ti ) does not ful-
+fill Eq. 1, the triangle is subdivided.
+97
+processed in parallel without atomic operations, we need to
+max
+determine an upper bound Nvox/tri
+(Ti ) of voxels generated by
+triangle Ti , in order to pre-allocate the memory for batch Bj ,
+as well as the write-offsets for each triangle Ti .
+• We need to determine, which voxels will be completed by the
+current triangle batch, as we need to stream out the part of the
+SVO that is finalized in order to prevent memory overflow.
+Algorithm 1: Triangle subdivision.
+// Input
+{Ti }
+max
+Kvox/tri
+L
+Avox ← L2
+Q ← {Ti }
+R←∅
+// triangle soup
+// max. voxels per triangle
+// length of a voxel
+// area of a voxelface
+// Initialize input queue
+// Initialize result queue
+For the structuring and sorting of triangles, we use the properties of
+the Morton order [Morton 1966]. It provides a linear order as if an
+SVO is traversed in depth-first post-order. In the context of Bounding Volume Hierarchy (BVH) construction, Lauterbach et al. [2009]
+use the same method of sorting primitives according to one representative position of the triangle. While Lauterbach et al. [2009]
+take the barycenter of the triangle bounding box, we would like to
+know the minimal Morton index mmin (Ti ) of triangle Ti , as this indicates that the voxel with Morton index mmin (Ti ) − 1 is finalized
+after processing all triangles T1 , . . . , Ti−1 . As already stated above,
+computing mmin (Ti ) is hardly possible, as it would require voxelization already at this stage. Therefore, we calculate the bounding boxes of the triangles and calculate the smallest Morton index
+m
+e min (Ti ) of the bounding box as lower bound of mmin (Ti ). From
+this index we also know the earliest possible point in time when
+the triangle needs to be voxelized. Hence, we sort the triangles to
+m
+e min (Ti ) and store e
+mmin (Tjmin ) as a stop index. This index of the
+first triangle of each batch can be interpreted as a stopping criterion for extracting the voxel attribute set from the Morton queue
+(cf. Sec. 5.1), as it determines the first voxel in the prior batch that
+cannot be used for node creation of the SVO.
+// Process the triangle soup
+while Q 6= ∅ do
+T ← Q.dequeue()
+// Apply subdivision scheme if area of bbox too large
+max
+if Abbox (T ) ≤ Kvox/tri
+· Avox then
+√
+◦
+// Case 1: T.a ≤ T.b
+√
+T.c, angles larger ∼ 90 ( 2)
+if (T.a + T.b) < 2 · T.c then
+Q.append(T.split())
+// Case 2: T.a
+T.b ≤ T.c, angles smaller ∼ 20◦ (3)
+else if 3 · T.a < T.b then
+Q.enqueue(T.subdivide())
+// Case 3: regular split
+else
+R.enqueue(T.regSubdiv())
+{Ti } ← R // Resulting set of triangles satisfies Eq. 1.
+We sequentially process all triangles on CPU and check for three
+different cases, depicted in Fig. 3 (see also Alg. 1). Assuming
+the three edges of triangle T are sorted according to their length
+T.a ≤ T.b ≤ T.c, case 1, i.e. two short and one long edge, and
+case 2, i.e. two long and one short edge, can be determined with
+T.a ≤ T.b
+T.c and T.a
+T.b ≤ T.c, respectively. Initially,
+all triangles are stored in a queue Q. Case 1 is handled by simply splitting the triangle in two, resulting in cases 2 or 3. In case
+2 we generate approximately equilateral triangles by cutting the
+short edge length T.a off the long edges and splitting the resulting
+quadrilateral into two triangles. This process is repeated until the
+remaining part of the triangle fulfills Eq. 1. In case 3 we directly
+subdivide the triangle such that itmfulfills Eq. 1 by simply computl
+p
+max
+ing
+Abbox (T )/(Kvox/tri
+· Avox ) as subdivision factor. After this
+subdivision, the remaining triangles comply with Eq. 1.
+max
+In order to determine the upper bound Nvox/tri
+(Ti ) for the voxels
+generated by triangle Ti , we have a closer look at the conservative
+voxelization of Schwarz and Seidel [2010], which we apply further on. Schwarz and Seidel [2010] project each triangle along the
+dominant axis direction of the triangle normal. We discretize the
+projected bounding box of the triangle to the voxel resolution and
+determine the count of enclosed projected voxels. Since the triangle
+is planar, a maximum of three voxels along the projection direction
+max
+will be created [Schwarz and Seidel 2010], i.e. Nvox/tri
+(Ti ) is given
+by the “planar” voxel count per triangle multiplied by the factor of
+three.
+Naively, one would try to process the largest batches possible. However, the question of an “optimal” batch-size is very hard to answer
+and strongly depends on the specific dataset. Processing very small
+batches results in poor utilization of the GPU processing power,
+whereas rather large batches may lead to a “fragmentation” of the
+Morton queue (see Sec. 5.1), which has to handle all voxel-attribute
+pairs for non finalized voxels, finally leading to a memory overmax
+flow. Therefore, we introduce a second user-defined value Kvox/batch
+as upper bound for the voxel count generated per batch. Since we
+max
+know the maximum voxels Nvox/tri
+(Ti ) per triangle Ti in the batch,
+an upper bound for the voxel count per batch can be determined by
+Figure 3: Triangle subdivision: The two cases of elongated triangles (case 1 and 2) and the regular case 3.
+jmax
+X
+4.2
+Triangle Sorting and Voxel Count Prediction
+max
+max
+Nvox/tri
+(Ti ) ≤ Kvox/batch
+(2)
+i=jmin
+If Eq. 2 is not fulfilled by Ti , the current batch Bj =
+{Tjmin , . . . , Tjmax−1 } is finished and a new batch Bj+1 is created.
+The batch determination is done on CPU by sequentially processing the sorted list of triangles. Alg. 2 in the supplemental material
+provides more implementation details.
+In general we assume, that the SVO and the triangle data do not
+completely fit into memory for global processing, therefore we require a structuring of the triangles that allows to process only parts,
+i.e. batches of triangles, and respective parts of the SVO. Batches
+are processed sequentially, which requires to have all relevant SVO
+data on GPU for a subtree creation.
+4.3
+There are two main challenges in the Voxel Stream Processing,
+which we need to prepare the triangles for (see Sec. 5):
+Voxelization and Attribute Creation
+After the determination of triangle batches, the triangles are voxelized. We use the triangle-parallel conservative voxelization of
+• As the triangles in each batch Bj = {Tjmin , . . . , Tjmax } are
+98
+Schwarz and Seidel [2010]. With the summation in Eq. 2, we can
+define separate memory ranges in a per-triangle voxel memory to
+create voxels of each triangle independently. After the voxelization
+of the triangle batch, the empty slots of the per-triangle voxel memory are removed with a parallel stream compaction, and the list of
+valid voxel-attribute pairs, i.e. the voxel attribute set, is copied into
+the Morton queue. This procedure prevents the usage of atomic operations which is usually required for grid-based parallel voxelization.
+upper nodes that contain this leaf voxel in the hierarchy. The Morton index is divided by the child count of a node, i.e. 8 for the SVO,
+to obtain the Morton index of the parent node. On each hierarchy
+level, we determine the parent indices for all nodes, compact them
+to unique parent indices, and use them for a parallel node creation.
+Each GPU thread processes all child nodes of one unique parent
+index and calculates voxel attributes and bitmasks for the specific
+SVO structure (cf. ”valid masks” in [Laine and Karras 2010]). The
+bitmasks represent non-empty child nodes with 1 and empty child
+nodes with 0. To obtain this representation, each thread executes a
+modulo division by 8 for all Morton indices of its child nodes. The
+threads are scheduled by the sorted list of Morton indices of the
+processable nodes, because the sorting order needs to be preserved
+over the hierarchy levels.
+The attribute creation is taking place at the same time as the voxelization. In our implementation we process and store triangle normals and optionally color information. Color is provided via textures. The (u, v)-coordinates for the texture lookup are determined
+with the barycentric coordinates of the projected voxel center. If
+the voxel center is not projected to the triangle we clamp the (u, v)coordinates to the nearest edge of the triangle. Afterwards, the texture lookup is performed. At this stage, we could even perform
+dependent texture lookups to retrieve more visual attributes used
+for the current voxel. Therefore, the attribute creation can be much
+more sophisticated than the attribute creation on a per-trianglebasis, as proposed by Baert et al. [2014].
+5
+This method of a breadth-first bottom-up creation of the tree is used
+by Zhou et al. [2011] and Schwarz and Seidel [2010]. Further details on our implementation can be found in Alg. 4 in the supplemental material.
+Voxel Stream Processing
+The voxel stream processing focusses on the GPU-based handling
+of voxel-attribute pairs in the Morton queue, as they result from the
+voxelization of the sorted triangles, and the subtree creation of the
+SVO.
+5.1
+Figure 4: The stitch queue buffer maintains intermediate SVO
+nodes in a queue on each hierarchy level between the processing
+of triangle batches to allow a post-order attribute creation. An example for processing nodes of a quadtree for a given voxel attribute
+set is shown.
+Morton Queueing
+The Morton indices of the voxel grid directly determine the order
+of node creation of the SVO. When the triangles are voxelized, we
+can not ensure that all generated voxels can be directly consumed
+for SVO creation, because the Morton index range covered by a
+triangle may be large. Thus, these voxel-attribute pairs need to be
+processed in the SVO creation much later. As voxel-attribute pairs
+can not be skipped, we use the Morton queue in order to maintain all
+generated voxel-attribute pairs from previous batches which have
+not been processed yet. Therefore, the size of the Morton queue
+varies according to the number of remaining voxel-attribute pairs
+in each iteration.
+Since our intention is to provide arbitrary, even order-dependent or
+multi-pass operations in the attribute computation of an SVO node,
+a node can only be finalized, if all child nodes have themselves been
+finalized. Therefore, we use a stitch queue buffer that always stores
+those SVO nodes and their attributes in a ”stitch queue” which are
+required for processing the last immediate parent node on the current hierarchy level. Fig. 4 shows an example for the processing of a
+voxel attribute set. A quadtree is used for simplicity. The parent indices of the bottom level are determined by an integer division of 4
+(quadtree nodes). The child nodes 32 and 33 belong to the last parent node 8 and need to be stored in the stitch queue buffer, because
+future triangle batches may create further child nodes, e.g node 34.
+All other child nodes, e.g. 3, 17, 25, 26 and 29, are processed and
+pushed to the next higher level. Again, the parent indices are determined. The nodes 4, 6 and 7 are moved to the stitch queue buffer,
+because they belong to the largest parent index 1.
+After adding the voxel attribute set of a batch to the Morton queue
+and sorting the resulting queue, we determine the new voxel attribute set, which is usable for SVO creation, by splitting the Morton queue at the stop index (see Sec. 4.2 and Fig. 2) and an extraction of all voxels with a smaller Morton index. Using this method,
+we ensure that no further triangle will intersect any voxel of the
+extracted voxel attribute set, i.e. all future Morton indices will be
+equal to or greater than the stop index.
+Since the remaining voxel-attribute pairs block memory in the Morton queue, the number of elements in the Morton queue should be
+kept small. The subdivision of triangles in Sec. 4.1 tries to limit
+the Morton index range of the triangles to minimize the number of
+voxels remaining in the Morton queue over a longer time. However,
+this does not guarantee the prevention of overflow in extreme cases,
+e.g. when a huge number of triangles contributes to a single voxel
+or a large number of triangles spans very large Morton ranges.
+5.2
+In the next iteration, the sorted stitch queue for the respective hierarchy level is moved from the stitch queue buffer to the front of
+the current voxel attribute set per level and processed like all other
+nodes (see ”post-order attribute creation” of Alg. 4 in the supplemental material). As we only store intermediate SVO nodes, the
+stitch queue buffer is fixed in size and contains at most 8 nodes
+per level. The voxel-attribute pairs belonging to the last leaf node
+(stop index, see Fig. 2), remain in the Morton queue, whereas the
+attributes of the other leaf nodes can be generated using the full list
+of associated voxel-attribute pairs.
+SVO Creation
+After the extraction of the voxel attribute set, we are able to create
+nodes of the SVO bottom-up, because the Morton index of a leaf
+voxel directly allows the determination of all Morton indices for the
+Although the ”SVO Builder queues” of Baert et al. [2013] and the
+stitch queue buffer have the same size, the functionality is different.
+The SVO Builder queues are used to construct the whole tree and
+99
+represent a consistent tree over the levels while the stitch queues
+do not respresent a subtree over the levels and are only used for
+maintaining unprocessable nodes between the iterations.
+we increased the number of allowed CPU threads to the maximum
+available threads of the used CPU and created voxels without contour information. For Baert et al. [2014] we increased the maximum
+allowed memory to the available memory, but the approach does
+not benefit from more memory, if the next larger subgrid cannot be
+fully represented, e.g. the memory limit of 8 GB leads to the same
+partitioning as a memory limit of 63 GB because 64 GB would be
+needed to subdivide the grid to the next octree level. For the performance evaluation we set the user parameter “voxel per triangle”
+max
+max
+Kvox/tri
+to 100 and “voxels per batch” Kvox/batch
+to 10 M (see Sec. 4).
+The influences of these two parameters are discussed in Sec. 7.3.
+After the last batch is processed, the stitch queue buffer still holds
+the information for all last nodes on each hierarchy level. We finish
+the SVO creation on CPU, because a parallel processing of a few
+nodes per level does not make much sense at this stage. Therefore,
+we process all nodes per hierarchy level sequentially and copy the
+information of new nodes to the next higher level of the stitch queue
+buffer.
+6
+The result of the performance comparison is shown in Tab. 1. Additional information regarding memory requirements and a performance breakdown of our approach can be found in the supplemental
+material. The timings include the whole process including hard disk
+I/O for Baert et al. [2014] and our approach. The loading time of the
+triangle mesh from hard disk to RAM is omitted for Laine and Karras [2011] due to restrictions of the available file-import. Adding
+the import timings would have been more unfair than omitting timings because the loading of all scenes (except the Atlas scene) in a
+binary format needed less than 2 seconds.
+Implementation Details
+The proposed voxelization method is implemented in CUDA. For
+the Morton queue handling and the triangle sorting, we use the
+Thrust library1 . We sort the triangles on GPU, but if the sorting
+data does not fit to GPU, Thrust allows us to easily switch to the
+fallback of CPU sorting.
+To achieve a more memory efficient storage of the voxel attributes
+(Sec. 5.2), we encode color to the 16 bit RGB565 format, and
+the normals to 16 bit, with the fast octahedron compression of
+Cigolle et al. [2014], directly after the completed attribute creation
+of one hierarchy level.
+The Hairball scene leads to the longest processing time with a resolution of 8192, despite the comparably low triangle count. Apparently, the scene complexity in terms of sparsity has a much
+larger influence on performance than the triangle count, because
+more voxels contribute to the final tree. In comparison to Laine
+and Karras [2011] we process the Hairball at resolution 8192 in
+roughly half the time while we are nearly four times faster than
+Baert et al. [2014].
+For rendering the SVO, we use the method proposed in Laine and
+Karras [2010]. They use specific bitmasks for an optimized access
+of non-empty child nodes, preventing the storage of empty child
+nodes. The traversal approach does not process empty nodes at all.
+The linear ordering of voxel values that is needed for storing only
+one pointer to find all children linearly in memory is implicitly assured by the sorted Morton order of the child nodes. The pointers,
+represented as linear indices in an array, are created after the batch
+processing just by counting and exclusively scanning the set bits in
+the created bitmasks for the finished tree in a breadth-first order (see
+”Create SVO Structure” of Alg. 4 and Alg. 5 in the supplemental
+material).
+7
+In the Lucy scene, the triangle availability on all levels of Laine
+and Karras [2011] gets disadvantageous. Baert et al. [2014] and our
+approach voxelize the scene between one and two orders of magnitude faster, because only the leaf nodes use the triangles directly.
+Furthermore, our approach is voxelizing this scene at a resolution
+of 8192 faster than all other scenes, which is due to the high regularity of the input mesh leading to a good load-balance for our GPU
+processing.
+Results
+The Atlas dataset has the largest triangle count of the test scenes.
+We could not process the scene with the framework of Laine and
+Karras [2011]. This dataset is the only one for which our triangle
+sorting cannot be done on GPU, i.e. CPU sorting was applied here.
+We encountered large variation in the timings, thus we give average timings over three runs for each resolution. The minimum timings for the resolutions 2048, 4096 and 8192 are 254.8 s, 231.7 s
+and 300.5 s, respectively. Additionally, the sorting of triangles for
+the resolution of 2048 were around 40 seconds slower than for the
+resolution of 4096. We assume that the used radix sort needs larger
+buckets due to less Morton indices for the same triangle count in the
+limited available memory, leading to memory fragmentation. The
+voxelization of the Atlas with resolution of 2048 is the only case
+where we perform slower than Baert et al. [2014]. In this scene, the
+triangle partitioning to a voxel grid with low resolution is beneficial
+in comparison to triangle sorting of a high triangle count.
+To evaluate our method, we compare the performance (Sec. 7.1)
+and the quality of the created attributes (Sec. 7.2) with the work
+of Baert et al. [2014]2 and Laine and Karras [2011]3 , who thankfully made the source code publicly available for evaluation. Furthermore, we discuss the influence of the user-defined parameters
+max
+max
+Kvox/tri
+and Kvox/batch
+for restricting the voxels per triangle and per
+batch (see Sec. 7.3). All tests are performed on an Intel Xeon E52623 (3.0GHz) with 64 GB of RAM and a NVIDIA GeForce GTX
+TITAN Black with 6 GB of memory.
+7.1
+Performance
+We compare the performance of creating voxel representations at
+resolutions of 2048, 4096 and 8192 isotropic voxels along the
+largest extent of six scenes with different characteristics. The test
+scenes Hairball, Lucy and Atlas have different scene complexities
+and triangle counts, while Buddha, Sponza and San Miguel, give a
+direct comparison between the voxelization with and without color
+attributes (see Fig. 5).
+The comparison for color creation in the scenes Buddha, Sponza
+and San Miguel shows a performance decrease by a factor of
+two to three between the voxelization with and without color of
+Baert et al. [2014]. The method from Laine and Karras [2011] and
+ours have a smaller performance drop between voxelization with
+and without color, but we are three to fives times faster than Laine
+and Karras [2011]. For Sponza and San Miguel at the resolution of
+2048, it seems that we have a performance drop by a factor of two
+as well, but here only the time for loading the textures as a constant
+value adds to the voxelization time which is roughly the same in
+To provide a fair comparison, we adjusted a few of the default parameters of the compared frameworks. For Laine and Karras [2011]
+1 https://thrust.github.io/
+2 https://github.com/Forceflow/ooc svo builder
+3 https://code.google.com/p/efficient-sparse-voxel-octrees/
+100
+Figure 5: The test scenes for our evaluation are shown. From left to right: Hairball, Lucy, Atlas, Buddha, Sponza, San Miguel.
+Hairball (2.8 M triangles)
+2048
+4096
+8192
+274.4 s 763.7 s 2657.8 s
+134.4 s 759.2 s 4459.9 s
+83.0 s
+281.9 s 1195.5 s
+Lucy (28.0 M triangles)
+2048
+4096
+8192
+964.3 s 1001.9 s 1097.4 s
+17.5 s
+40.7 s
+97.9 s
+11.7 s
+16.9 s
+30.3 s
+Atlas (506.5 M triangles)
+2048
+4096
+8192
+223.3 s
+351.4 s
+676.3 s
+270.0 s*
+239.8 s*
+345.7 s*
+Scene
+Resolution
+Laine & Karras [2011]
+Baert et al. [2014]
+Our algorithm
+Buddha (30.3 K triangles)
+2048
+4096
+8192
+14.3 s
+59.9 s
+243.2 s
+15.4 s
+66.6 s
+372.1 s
+4.4 s
+14.0 s
+49.4 s
+Sponza (262.3 K triangles)
+2048
+4096
+8192
+24.8 s
+92.1 s
+364.2 s
+23.1 s
+83.6 s
+437.1 s
+6.8 s
+24.1 s
+97.9 s
+San Miguel (10.1 M triangles)
+2048
+4096
+8192
+(140.6 s) (153.39 s) (165.9 s)
+9.5 s
+26.5 s
+107.4 s
+6.2 s
+12.0 s
+32.6 s
+16.5 s
+55.4 s
+5.1 s
+31.3 s
+52.1 s
+11.0 s
+(171.7 s)
+13.0 s
+13.2 s
+w col.
+w/o col.
+Scene
+Resolution
+Laine & Karras [2011]
+Baert et al. [2014]
+Our algorithm
+Laine & Karras [2011]
+Baert et al. [2014]
+Our algorithm
+65.3 s
+166.3 s
+17.9 s
+262.6 s
+611.6 s
+50.4 s
+112.4 s
+363.7 s
+30.8 s
+428.7 s
+1416.9 s
+111.6 s
+(187.5 s)
+37.6 s
+20.4 s
+(203.9 s)
+228.3 s
+44.3 s
+Table 1: Timing comparison for different scenes (depicted in Fig. 5) at different resolutions: The three scenes in the upper row have strongly
+varying triangle counts, mesh attributes and scene complexity. The three scenes in the bottom row allow a direct comparison between a
+voxelization with and without color creation. ∗ : Average over three runs; (. . .): Scene could be voxelized, but not rendered.
+this case. For higher voxel resolutions of the scenes, it can be seen
+that this effect is alleviated.
+If we compare the timings for Sponza and San Miguel, we again
+see, that the sparsity of the scene has a larger influence on the timing than the triangle count, because even if San Miguel has roughly
+40 times more triangles, it creates a sparser scene due to large triangles surrounding the building. At a resolution of 8192, around
+164 M voxels in the finest level were created for San Miguel and
+636 M voxels for the Sponza. Furthermore, the Sponza with color
+attributes at 8192 shows the largest performance gain in comparison to Baert et al. [2014]. Here, the sparsity of the scene and
+the color creation are responsible for the performance drop of
+Baert et al. [2014]. Unfortunately, we ran into difficulties when voxelizing San Miguel with the approach of Laine and Karras [2011].
+The processing was done without error but rendering the generated
+output failed. Thus, the result is potentially corrupted.
+7.2
+Figure 6: Comparison between the attribute creation methods that
+shows wireframe (a), rasterization (b), contour information per
+voxel, illumination and image filtering of Laine and Karras [2011]
+(c), attribute creation of Baert et al. [2014] (d), our attribute creation (e) and unfiltered voxel structure of Laine and Karras [2011]
+(f)
+Attribute Creation
+To show the different results regarding attribute creation, we extracted a plant model with an alpha channel in its texture from the
+San Miguel scene and voxelized it separately (see Fig. 6). It is obvious that the approach of Baert et al. [2014] (Fig. 6 (d)) clearly
+lacks visual quality, since all voxels of a triangle are assigned the
+same average triangle color. The best and the worst result achieved
+by Laine and Karras [2011] can be seen in Fig. 6 (c) and (f), respectively. Fig. 6 (c) shows the voxelization with contour and postfiltering, while Fig. 6 (f) shows the voxelization without contour
+information and without image-based postprocessing. The texture
+attributes are considered and a sophisticated attribute creation is
+possible. For comparison, we use a simple (texture) color averaging (see Fig. 6 (e)). In general, both methods have the same prop-
+erties for attribute creation on the leaf levels. The main difference
+to Laine and Karras [2011] is, that they have access to all triangles
+also at higher levels, which is not possible for out-of-core methods,
+as the root node would need access to all triangles.
+101
+Hairball (2.8 M)
+Sponza (262.3 K)
+10
+90.4 M
+35.2 M
+50
+28.9 M
+7.9 M
+100
+18.6 M
+4.2 M
+200
+12.1 M
+2.4 M
+Table 2: Resulting triangle counts after subdivision for different
+max
+values of Kvox/tri
+.
+max
+Kvox/tri
+after subdivision in order to see the correlation between the
+triangle count after subdivision and the timings. The performance of
+max
+the triangle pre-processing solely depends on Kvox/tri
+and decreases
+if the triangles need a stronger subdivision. The performance of the
+max
+voxelization improves if Kvox/batch
+gets higher, because more triangles can be processed in parallel and the count of sequentially processed batches reduces. Except for the value of 10 which leads to a
+max
+much larger number of triangles (cf. Table 2), Kvox/tri
+does not seem
+to influence the voxelization performance much. The timing of SVO
+max
+creation is mainly influenced by Kvox/batch
+, because the tree conmax
+struction is processing voxels. For the Hairball scene with Kvox/batch
+max
+of 5 M and Kvox/tri
+of 10, the performance differs. This worst case
+max
+value of Kvox/tri
+created 3 times more triangles than for the value
+of 50 (cf. Table 2). Therefore, the number of triangles per voxel in
+the post-order attribute creation gets more heterogeneous leading to
+idle threads that process less triangles per voxel.
+max
+max
+Figure 8: Influence of the parameters Kvox/tri
+and Kvox/batch
+to the
+timings in seconds for the steps pre-processing, voxelization and
+SVO creation. “x”: memory overflow.
+7.3
+Batch Parameters
+In the following, we investigate the influence of the two userdefined parameters of our voxelization, i.e. “voxel per triangle”
+max
+max
+Kvox/tri
+and “voxels per batch” Kvox/batch
+(see Sec.4.1 and Sec.4.2,
+respectively). We evaluate the influence of the parameters for the
+Hairball scene at resolution of 2048 and the Sponza scene with
+color creation at a resolution of 4096 with respect to memory usage,
+triangle statistics and timing. While we adjust the values to worst
+case scenarios for evaluation purposes, it is not recommendable to
+use them in these ranges because the out-of-core property gets unreliable (see Sec. 8). Therefore, only an empirically determined range
+max
+max
+of Kvox/tri
+and Kvox/batch
+ensures the out-of-core property.
+8
+Conclusion, Limitations and Future Work
+We presented an out-of-core voxelization method that processes
+batches of triangles and creates sophisticated voxel attributes in
+parallel on the GPU, and maintains the currently relevant part of
+the SVO in GPU memory. In Triangle Stream Processing, triangles are subdivided in order to achieve better load balancing on the
+GPU. The voxel processing on the GPU is steered by grouping a
+sorted triangle list into batches and determining upper bounds for
+created voxels. In Voxel Stream Processing, the intermediate voxel
+and SVO data is maintained in a Morton queue and a stitch queue
+buffer on GPU, respectively, which is the core concept for out-ofcore processing. Our approach allows for sophisticated computation of voxel attributes, as all contributing triangles are accessible
+at leaf node level. It performs very well for complex scenes with
+various surface and material attributes and scales well in terms of
+resolution for these kinds of scenes (see Tab. 1).
+max
+Fig. 7 (left) shows the influence of varying values of Kvox/tri
+and
+max
+Kvox/batch
+to memory usage per batch. Minimum, median and maximum memory size of the batches per test are shown. Intuitively, it
+max
+max
+can be seen that Kvox/tri
+has less influence than Kvox/batch
+, because
+max
+max
+Kvox/batch acts as a global voxel counter. The smaller Kvox/tri
+gets,
+the more triangle data are stored in memory for voxelization. This
+leads to the higher memory usage for all configurations with a limit
+max
+max
+to 10 for Kvox/tri
+. If Kvox/tri
+is set higher, a nearly constant behavmax
+max
+ior can be deduced. For Kvox/batch
+= 50 M voxel and Kvox/tri
+= 10
+in the Sponza scene, we get a memory overflow, since the global
+voxel counter does not take into account the memory needed for
+the triangle data stored at the same time for the batch. The 4 meamax
+surements of the Sponza scene for Kvox/batch
+= 50 M voxel do not
+seem to follow a pattern like the other configurations. The strong
+variation of the memory usage of the batches can be explained by
+the large Morton index ranges which result from a large batch size
+which vary more strongly for large triangles or triangle sets. Thus,
+the locality of the generated voxels in terms of Morton indices is
+harder to ensure and more voxels remain in the Morton queue until
+they can be processed for SVO creation.
+The presented approach is currently one to two orders of magnitude
+slower than a pure in-core GPU technique, like [Crassin and Green
+2012]. This is mainly due to the maintenance of created but unprocessable voxels for order-dependent attribute creation and out-ofcore handling of triangles. Future research may improve on this.
+For example, applying an in-core GPU approach in a divide-andconquer manner based on partitioning the voxel grid, voxelizing the
+subgrids and merging the subtrees could lead to performance gains.
+Since streaming of the full triangle set for voxelization on each subgrid would be inefficient, a Bounding Volume Hierarchy could be
+used to reduce the number of triangles streamed to the GPU for
+the voxelization of each partition. However, it is difficult to estimate the computational overhead for allowing an order-dependent
+attribute generation and out-of-core voxelization in the subgrids,
+i.e. the selection and streaming of the contributing triangles for each
+partition.
+Triangles per batch are shown in Fig. 7 (middle) and created triangle voxel pairs are shown in Fig. 7 (right). Logically, more triangles
+max
+max
+are used if Kvox/batch
+is increased or Kvox/tri
+is decreased. Automatically, this leads to the creation of more voxel-attribute pairs. The
+smaller variation of median and maximum voxel-attribute pairs for
+the Hairball scene in comparison to the Sponza scene is explainable
+by the differing triangle shapes. The Hairball has a huge number of
+elongated triangles, while the Sponza has more differing triangles
+shapes leading to more varying voxel counts per triangle.
+A potential conceptual drawback is the usage of the two usermax
+max
+defined parameters Kvox/tri
+and Kvox/batch
+. While our evaluation
+max
+shows, that using a mid-range value for Kvox/tri
+≈ 50 − 100 is a
+max
+good choice, Kvox/batch is a more critical parameter. Large values
+max
+of Kvox/batch
+lead to better performance values, but bear the risk of
+running out of memory.
+max
+max
+The influence of Kvox/tri
+and Kvox/batch
+on the performance is shown
+in Fig. 8. Tab. 2 additionally gives the generated triangle count of
+102
+max
+max
+Figure 7: Influence of the parameters Kvox/tri
+with [10, 50, 100, 200] and Kvox/batch
+with [5M, 10M, 50M] to the GPU memory usage in GB
+(left), to the triangles per batch in M (middle) and the number of created voxel-attribute pairs per batch in M (right). “x”: memory overflow.
+The fundamental cause of violating the out-of-core property is the
+order-dependent attribute generation. From a geometric point-ofview the out-of-core property could be guaranteed by reducing
+max
+max
+Kvox/batch
+and Kvox/tri
+to achieve small triangles. The implemented
+attribute creation, on the other hand, requires the access to all triangle attributes per voxel. This list of voxel-attribute pairs can grow
+larger than the available memory in case a huge amount of triangles
+intersects a single voxel.
+C RASSIN , C., AND G REEN , S. 2012. Octree-based sparse voxelization using the gpu hardware rasterizer. In OpenGL Insights,
+P. Cozzi and C. Riccio, Eds. CRC Press, July, 303–319.
+C RASSIN , C., N EYRET, F., L EFEBVRE , S., AND E ISEMANN , E.
+2009. Gigavoxels: Ray-guided streaming for efficient and detailed voxel rendering. In Proceedings of the 2009 Symposium
+on Interactive 3D Graphics and Games, ACM, New York, NY,
+USA, I3D ’09, 15–22.
+max
+Regarding future work, an adaptive choice of Kvox/batch
+, e.g. depending on the current “fill rate” of the Morton queue might reduce the
+out of memory risk. In general, our method can be extended to a
+three-tier out-of-core technique, including the hard disk as a third
+layer. Beside this, some minor technical improvements would help
+to further increase the performance of the system. For example, currently all textures are globally available, reducing the GPU memory
+available for voxelization. Here a dynamic texture loading on batch
+level would be advantageous. Currently, we switch between GPU
+and CPU sorting of the triangle Morton indices. Out-of-core GPUCPU sorting would be beneficial.
+K ÄMPE , V., S INTORN , E., AND A SSARSSON , U. 2013. High
+resolution sparse voxel dags. ACM Trans. Graph. 32, 4 (July),
+101:1–101:13.
+L AINE , S., AND K ARRAS , T. 2010. Efficient sparse voxel octrees.
+In Proceedings of the 2010 ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games, ACM, New York, NY, USA,
+I3D ’10, 55–63.
+L AINE , S., AND K ARRAS , T. 2011. Efficient sparse voxel octrees.
+Visualization and Computer Graphics, IEEE Transactions on 17,
+8 (Aug), 1048–1059.
+L AINE , S. 2013. A topological approach to voxelization. In
+Proceedings of the Eurographics Symposium on Rendering, Eurographics Association, Aire-la-Ville, Switzerland, Switzerland,
+EGSR ’13, 77–86.
+Acknowledgements
+Hairball is courtesy of Nvidia Research. Lucy is courtesy of the
+Stanford 3D Scanning Repository. Atlas is courtesy of The Digital Michelangelo Project. Buddha is courtesy of Kun Zhou. Crytek Sponza is courtesy of Frank Meinl. San Miguel is courtesy of
+Guillermo M. Leal Llaguno. We would like to thank the anonymous
+reviewers. We would like to thank Ulrich Schipper and Jan-Marco
+Hütwohl for giving technical support.
+L AUTERBACH , C., G ARLAND , M., S ENGUPTA , S., L UEBKE , D.,
+AND M ANOCHA , D. 2009. Fast bvh construction on gpus. Computer Graphics Forum 28, 2, 375–384.
+M ORTON , G. M. 1966. A Computer Oriented Geodetic Data Base
+and a New Technique in File Sequencing. International Business
+Machines Company.
+The research project is funded by the German Research Foundation
+(DFG) as part of the research training group GRK 1564 ”Imaging
+New Modalities”
+S CHWARZ , M., AND S EIDEL , H.-P. 2010. Fast parallel surface
+and solid voxelization on gpus. ACM Trans. Graph. 29, 6 (Dec.),
+179:1–179:10.
+References
+Z HOU , K., G ONG , M., H UANG , X., AND G UO , B. 2011. Dataparallel octrees for surface reconstruction. Visualization and
+Computer Graphics, IEEE Transactions on 17, 5 (May), 669–
+681.
+BAERT, J., L AGAE , A., AND D UTR É , P. 2013. Out-of-core construction of sparse voxel octrees. In Proceedings of the 5th HighPerformance Graphics Conference, ACM, New York, NY, USA,
+HPG ’13, 27–32.
+BAERT, J., L AGAE , A., AND D UTR É , P. 2014. Out-of-core construction of sparse voxel octrees. Computer Graphics Forum 33,
+6, 220–227.
+C IGOLLE , Z. H., D ONOW, S., E VANGELAKOS , D., M ARA , M.,
+M C G UIRE , M., AND M EYER , Q. 2014. A survey of efficient
+representations for independent unit vectors. Journal of Computer Graphics Techniques (JCGT) 3, 2 (April), 1–30.
+103

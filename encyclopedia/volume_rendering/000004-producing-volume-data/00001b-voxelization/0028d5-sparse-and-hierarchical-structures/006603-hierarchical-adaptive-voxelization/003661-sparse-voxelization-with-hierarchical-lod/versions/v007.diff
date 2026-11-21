@@ -1,0 +1,172 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method is a voxelization pipeline designed for high-frequency sparse geometric objects (fibers, hair, thin planes) that processes volumetric data into multiple Levels of Detail (LoD), preserving appearance information by separating geometric/directional data from material properties [S1]. It differs from general-purpose voxelizers by explicitly handling microgeometry via subsampling and encoding directional distributions into SGGX functions, rather than relying on simple occupancy or fixed-resolution grids [S1].
++This method is a voxelization pipeline designed for high-frequency sparse geometric objects (fibers, hair, thin planes) that processes volumetric data into multiple Levels of Detail (LoD), preserving appearance information by separating geometric/directional data from material properties [S1]. It differs from general-purpose voxelizers by explicitly handling microgeometry via deterministic subsampling and encoding directional distributions into SGGX functions, rather than relying on simple occupancy or fixed-resolution grids [S1].
+ 
+ ## How it works
+@@ -36,5 +36,5 @@
+     $$ P_{volume} = P_{normalized} * Resolution $$
+     [S1]
+-3.  **Block Filtering (GPU Kernel 1):** Generate maximum nodes for first-level blocks. Identify and discard empty blocks by checking control nodes using a distance function. For a block with position $P_{block}$ and 3D index $I_{block}$, compute the node position relative to the block $P_{relative}$:
++3.  **Block Filtering (GPU Kernel 1):** Generate maximum nodes for first-level blocks [S1]. Identify and discard empty blocks by checking control nodes using a distance function [S1]. For a block with position $P_{block}$ and 3D index $I_{block}$, compute the node position relative to the block $P_{relative}$:
+     $$ P_{block} = S_{block} * I_{block} $$
+     $$ P_{relative} = P_{volume} - P_{block} $$
+@@ -42,5 +42,5 @@
+     $$ D = \| \max(Q, 0) \| + \min(\max(Q_x, Q_y, Q_z), 0) $$
+     Discard nodes where $D \ge \delta^2$ [S1].
+-4.  **Mask Generation:** Initialize a CPU flat array with space for the number of nodes per block and an extra counter. Use a kernel to write the number of valid nodes and their IDs for each block. Copy the mask to CPU to identify empty first-level blocks and generate an axis-aligned stencil for volumetric path tracing [S1].
++4.  **Mask Generation:** Initialize a CPU flat array with space for the number of nodes per block and an extra counter [S1]. Use a kernel to write the number of valid nodes and their IDs for each block [S1]. Copy the mask to CPU to identify empty first-level blocks and generate an axis-aligned stencil for volumetric path tracing [S1].
+ 5.  **Sparse Data Sampling (Kernels 2-4, for non-empty blocks only):**
+     *   **Prepare Initial Nodes:** Reorder, duplicate, or generate additional data to ensure consecutive samples are accessible [S1].
+@@ -48,9 +48,9 @@
+         *   *For Splines (Catmull-Rom):* Define the spline from 4 points and generate additional samples using linear spline interpolation [S1].
+         *   *For Triangles:* Generate additional points on the surface using barycentric coordinates [S1].
+-        *   *Distribution:* Distribute samples equally based on kernel indices (not random). For triangles, weight sample count by relative area to the largest triangle in the model [S1].
++        *   *Distribution:* Distribute samples equally based on kernel indices (not random) [S1]. For triangles, weight sample count by relative area to the largest triangle in the model [S1].
+     *   **Generate Voxel Nodes:** Create voxel nodes from the new samples [S1].
+-6.  **Sample Gathering:** Move samples to a grid-like structure. Save only the last sample generated at each voxel asynchronously to avoid implicit ordering of draw calls [S1].
+-7.  **Block Aggregation:** Order samples by second-level block ID. Use a kernel to detect vector positions where the ID changes to determine block start positions and sample counts [S1].
+-8.  **Directional Data Encoding:** Compute a distribution histogram for directional data (normals/tangents) at every voxel with density $> 0$. Fit each computed histogram to an SGGX function [18] to encode the distribution using 6 values [S1].
++6.  **Sample Gathering:** Move samples to a grid-like structure [S1]. Save only the last sample generated at each voxel asynchronously to avoid implicit ordering of draw calls [S1].
++7.  **Block Aggregation:** Order samples by second-level block ID [S1]. Use a kernel to detect vector positions where the ID changes to determine block start positions and sample counts [S1].
++8.  **Directional Data Encoding:** Compute a distribution histogram for directional data (normals/tangents) at every voxel with density $> 0$ [S1]. Fit each computed histogram to an SGGX function [18] to encode the distribution using 6 values [S1].
+ 
+ **Pseudocode:**
+@@ -59,5 +59,5 @@
+ import math
+ 
+-def sparse_voxelization_hierarchical_lod(nodes, resolution, delta, S_block):
++def sparse_voxelization_hierarchical_lod(nodes, resolution, delta, S_block, max_triangle_area):
+     # 1. Global Setup
+     b_min = [min(n.position[i] for n in nodes) for i in range(3)]
+@@ -69,6 +69,7 @@
+         return [p * resolution for p in P_norm]
+ 
+-    # 3. Block Filtering
+-    valid_blocks = {}
++    # 3. Block Filtering & Distance Check
++    # Initialize CPU flat array for node counts per block and an extra counter
++    block_data = {}
+     for node in nodes:
+         P_vol = transform_to_volume(node.position)
+@@ -81,52 +82,51 @@
+         D = math.sqrt(sum(q**2 for q in Q_pos)) + min(max(Q[0], Q[1], Q[2]), 0.0)
+         if D < delta**2:
+-            if block_id not in valid_blocks:
+-                valid_blocks[block_id] = []
+-            valid_blocks[block_id].append(node)
++            if block_id not in block_data:
++                block_data[block_id] = []
++            block_data[block_id].append(node.id)
+ 
+     # 4. Mask Generation
+-    block_counts = {bid: 0 for bid in valid_blocks}
+-    block_ids_list = {bid: [] for bid in valid_blocks}
+-    for bid, nlist in valid_blocks.items():
+-        block_counts[bid] = len(nlist)
+-        block_ids_list[bid] = [n.id for n in nlist]
+-    empty_blocks = [bid for bid in valid_blocks if block_counts[bid] == 0]
+-    stencil = set(valid_blocks.keys())
++    # Copy mask to CPU to identify empty first-level blocks and generate axis-aligned stencil
++    empty_blocks = [bid for bid in block_data if len(block_data[bid]) == 0]
++    stencil = set(block_data.keys())
+ 
+     # 5. Sparse Data Sampling (for non-empty blocks)
+     voxel_samples = []
+-    max_area = max((n.area if hasattr(n, 'area') else 1.0) for n in nodes)
++    for block_id, node_ids in block_data.items():
++        # 5.1 Prepare Initial Nodes
++        prepared_nodes = [n for n in nodes if n.id in node_ids]
++        subsampled_points = []
+ 
+-    for block_id, block_nodes in valid_blocks.items():
+-        # 5.1 Prepare Initial Nodes
+-        prepared_nodes = sorted(block_nodes, key=lambda n: n.id)
+-        subsampled_points = []
+-        
+         # 5.2 Subsample
+-        for node in prepared_nodes:
++        for idx, node in enumerate(prepared_nodes):
+             if node.is_spline:
+                 pts = node.spline_points
+                 for i in range(len(pts) - 1):
++                    # Linear spline interpolation between consecutive points
+                     subsampled_points.append(pts[i])
+                     subsampled_points.append(pts[i+1])
+             elif node.is_triangle:
+-                area_weight = node.area / max_area if max_area > 0 else 1.0
++                # Distribute samples equally based on kernel indices (not random)
++                # Weight sample count by relative area to the largest triangle
++                area_weight = node.area / max_triangle_area if max_triangle_area > 0 else 1.0
+                 num_samples = int(10 * area_weight)
+-                for _ in range(num_samples):
+-                    r1 = math.sqrt(math.random())
+-                    r2 = math.random()
++                for k in range(num_samples):
++                    # Deterministic barycentric sampling based on kernel index k
++                    r1 = math.sqrt(k / num_samples)
++                    r2 = (k / num_samples) % 1.0
+                     u = 1.0 - r1
+                     v = r2 * r1
+                     w = 1.0 - u - v
+-                    subsampled_points.append(node.barycentric_point(u, v, w))
++                    v0, v1, v2 = node.vertices
++                    subsampled_points.append([v0[i]*u + v1[i]*v + v2[i]*w for i in range(3)])
+ 
+         # 5.3 Generate Voxel Nodes
+         for pt in subsampled_points:
+-            P_vol = transform_to_volume(pt.position)
++            P_vol = transform_to_volume(pt)
+             voxel_samples.append({
+                 'position': P_vol,
+-                'normal': pt.normal,
+-                'tangent': pt.tangent,
+-                'material_id': pt.material_id,
++                'normal': node.normal,
++                'tangent': node.tangent,
++                'material_id': node.material_id,
+                 'block_id': block_id
+             })
+@@ -136,7 +136,9 @@
+     for sample in voxel_samples:
+         voxel_key = tuple(int(math.floor(sample['position'][i])) for i in range(3))
++        # Save only the last sample generated at each voxel asynchronously
+         voxel_grid[voxel_key] = sample
+ 
+     # 7. Block Aggregation
++    # Order samples by second-level block ID
+     samples_by_block = {}
+     for sample in voxel_grid.values():
+@@ -145,10 +147,13 @@
+             samples_by_block[bid] = []
+         samples_by_block[bid].append(sample)
++
++    # Use kernel to detect vector positions where ID changes to determine block start positions and sample counts
++    sorted_blocks = sorted(samples_by_block.keys())
+     block_boundaries = []
+-    sorted_blocks = sorted(samples_by_block.keys())
+-    for i, bid in enumerate(sorted_blocks):
+-        start_idx = sum(len(samples_by_block[b]) for b in sorted_blocks[:i])
++    current_start = 0
++    for bid in sorted_blocks:
+         count = len(samples_by_block[bid])
+-        block_boundaries.append((bid, start_idx, count))
++        block_boundaries.append((bid, current_start, count))
++        current_start += count
+ 
+     # 8. Directional Data Encoding
+@@ -156,8 +161,10 @@
+     for bid, samples in samples_by_block.items():
+         if len(samples) > 0:
++            # Compute distribution histogram for directional data (normals/tangents)
+             hist = [0.0] * 36
+             for s in samples:
++                # Bin normal/tangent into histogram
+                 pass
+-            # Fit histogram to SGGX function [18] to encode distribution using 6 values
++            # Fit each computed histogram to an SGGX function [18] to encode the distribution using just 6 values
+             # Sources do not provide the SGGX fitting algorithm details [G]
+             sggx_params = [0.0] * 6

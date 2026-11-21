@@ -1,0 +1,159 @@
+--- v002.md
++++ v003.md
+@@ -1,8 +1,8 @@
+ # Path Replay Backpropagation
+ 
+-Also called: Reverse-mode differentiation benchmark
++Also called: Radiative Backpropagation (RB), Reverse-mode differentiation benchmark (PRB)
+ 
+ ## Overview
+-Path Replay Backpropagation (PRB) is an adjoint-based differentiable rendering method that computes gradients of a scalar loss function with respect to scene parameters without storing the full Monte Carlo computation graph [S2, S3, unofficial]. It solves the quadratic runtime complexity of its sibling, Radiative Backpropagation (RB), by using a two-pass approach: a primal pass to generate samples and store state, followed by an adjoint pass that replays the path using the same random seed to recover incident radiance [S1][S3, unofficial]. Unlike RB, which requires an intertwined simulation of adjoint and primal radiance leading to quadratic complexity, PRB achieves linear time complexity in path length [S3, unofficial].
++Path Replay Backpropagation (PRB) is an adjoint-based differentiable rendering method that computes gradients of a scalar loss function with respect to scene parameters without storing the full Monte Carlo computation graph [S2, S3, unofficial]. It solves the quadratic runtime complexity of its sibling Radiative Backpropagation (RB) by using a two-pass approach: a primal pass to generate samples and store state, followed by an adjoint pass that replays the path using the same random seed to recover incident radiance [S1][S3, unofficial]. Unlike RB, which requires an intertwined simulation of adjoint and primal radiance leading to quadratic complexity, PRB achieves linear time complexity in path length [S3, unofficial].
+ 
+ ## How it works
+@@ -10,17 +10,16 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Scene parameters $\pi$ (e.g., density, albedo, BRDF parameters), camera parameters, loss function $L(I)$, and a random seed $\bar{\boldsymbol{p}}$.
+-*   **Outputs:** Gradient $\frac{\partial L}{\partial \pi}$.
++*   **Inputs:** Scene parameters $\pi$ (e.g., density, albedo, BRDF parameters), camera configuration, scalar loss function $L(I)$, and a random seed [S1][S2, unofficial].
++*   **Outputs:** Gradient $\frac{\partial L}{\partial \pi}$ with respect to $\pi$ [S2, unofficial].
+ 
+ ### Data Structures
+ The method is decomposed into three self-contained megakernels [S1]:
+-1.  **Megakernel #1 (Primal Path Tracer):** Generates Monte Carlo samples. Implicitly depends on scene parameters. Outputs a primal rendering $I$ and stores per-ray information (vertex positions, directions, BSDF evaluations) in a state array [S1][S3, unofficial].
+-2.  **Megakernel #2 (Replay Sampler):** Regenerates the same set of samples using the same random seed but a different pseudorandom sequence. Outputs a per-sample state array containing the specific random numbers used for each path segment [S1].
++1.  **Megakernel #1 (Primal Path Tracer):** Generates Monte Carlo samples with dynamic dispatch to scene objects. Implicitly depends on scene parameters. Outputs a primal rendering $I$ and stores per-ray state (vertices, directions, BSDF evaluations) in a state array [S1][S3, unofficial].
++2.  **Megakernel #2 (Replay Sampler):** Regenerates the same set of samples using the same initial random seed but a different pseudorandom sequence. Outputs a per-sample state array containing the exact random numbers used for each path segment [S1].
+ 3.  **Megakernel #3 (Adjoint Megakernel):** Contains adjoint versions of all rendering steps. Takes the state array from Megakernel #2 and the primal rendering from Megakernel #1. Accumulates scene parameter gradients [S1].
+ 
+ ### Numbered Steps
+-
+ 1.  **Primal Pass (Megakernel #1):** Trace rays from the camera. For each ray, generate a path $\bar{\boldsymbol{p}}$ using a PRNG. Store the path estimate $\hat{f}(\bar{\boldsymbol{p}})$ and per-ray information (vertices, directions, BSDF values) [S2, S3, unofficial]. Compute the image $I$ and the loss $L(I)$ [S1].
+-2.  **Replay Pass (Megakernel #2):** Regenerate the path $\bar{\boldsymbol{p}}$ using the same initial random seed to ensure the same sequence of vertices and intersections is visited. Store the specific random numbers used for each segment $n$ [S2, unofficial].
++2.  **Replay Pass (Megakernel #2):** Regenerate the path $\bar{\boldsymbol{p}}$ using the same initial random seed to ensure the same sequence of vertices and intersections is visited. Store the specific random numbers used for each segment $n$ [S1][S2, unofficial].
+ 3.  **Adjoint Pass (Megakernel #3):**
+     *   Compute the adjoint radiance in image space: $\frac{\partial L}{\partial I}$ [S1].
+@@ -53,5 +52,5 @@
+ ### Pseudocode
+ ```python
+-def path_replay_backpropagation(scene, camera, params, loss_fn, seed):
++def path_replay_backpropagation(scene, camera, params, loss_fn, seed, num_paths, path_length):
+     """
+     Implements Path Replay Backpropagation (PRB).
+@@ -61,52 +60,72 @@
+     loss_fn: Scalar loss function L(I).
+     seed: Random seed for path generation.
++    num_paths: Number of Monte Carlo samples per pixel.
++    path_length: Number of segments in a path (covers 0 to 2N-1).
+     """
+     # Pass 1: Primal Path Tracing (Megakernel #1)
+-    # Generate paths and store per-ray information
+-    paths, path_estimates, ray_info = trace_primal_paths(scene, camera, params, seed)
++    rng = PRNG(seed)
++    path_estimates = []
++    ray_info = []
++    image = np.zeros(camera.resolution)
+     
+-    # Compute image and loss
+-    image = reconstruct_image(paths, path_estimates)
++    for _ in range(num_paths):
++        path_segments = []
++        estimate = 1.0
++        for n in range(path_length):
++            # Sample next vertex and compute segment weight g_n
++            g_n = compute_segment_weight(scene, camera, params, rng, n)
++            estimate *= g_n
++            path_segments.append(g_n)
++        path_estimates.append(estimate)
++        ray_info.append(path_segments)
++        accumulate_into_image(estimate, camera)
++        
+     loss = loss_fn(image)
+     
+     # Pass 2: Replay Sampling (Megakernel #2)
+-    # Regenerate paths with same seed to get specific random numbers used
+-    # This ensures we visit the same vertices but can access the RNG state
+-    replay_rng_states = replay_rng_states(seed, ray_info)
+-    
+-    # Pass 3: Adjoint Path Tracing (Megakernel #3)
+-    # Initialize gradient accumulator
+-    grad_params = zeros_like(params)
+-    
+-    # Compute adjoint radiance at the sensor
+-    adjoint_radiance = compute_adjoint_radiance(loss, image)
+-    
+-    for path_idx in range(num_paths):
+-        # Replay the path using stored RNG states to get segment weights
+-        # and the specific random numbers used for each segment
++    replay_rng = PRNG(seed)
++    replay_segments = []
++    for _ in range(num_paths):
+         segments = []
+         for n in range(path_length):
+-            rng_state = replay_rng_states[path_idx][n]
+-            # Re-evaluate segment n using the same random numbers
+-            # This allows computing g_n and its derivative d(g_n)/d(pi)
+-            segment_weight, segment_deriv = compute_segment_and_deriv(
+-                scene, camera, params, path_idx, n, rng_state
+-            )
+-            segments.append((segment_weight, segment_deriv))
++            # Re-sample using same RNG state to get exact g_n values
++            g_n = compute_segment_weight(scene, camera, params, replay_rng, n)
++            segments.append(g_n)
++        replay_segments.append(segments)
+         
+-        # Compute total path estimate for normalization
+-        total_estimate = path_estimates[path_idx]
++    # Pass 3: Adjoint Path Tracing (Megakernel #3)
++    grad_params = np.zeros_like(params)
++    adjoint_radiance = compute_adjoint_radiance(loss, image)  # [G]
++    
++    for p_idx in range(num_paths):
++        total_est = path_estimates[p_idx]
++        segments = replay_segments[p_idx]
+         
+-        # Accumulate gradients using the product rule formula
+-        # d(L)/d(pi) = sum_n ( d(g_n)/d(pi) * (total_estimate / g_n) )
+         for n in range(path_length):
+-            g_n, dg_n_dpi = segments[n]
++            g_n = segments[n]
+             if g_n != 0:
+-                # Contribution from segment n
+-                contribution = dg_n_dpi * (total_estimate / g_n)
+-                # Backpropagate to parameters
++                # Compute derivative of segment n w.r.t params [G]
++                dg_n_dpi = compute_segment_derivative(scene, camera, params, n)
++                # Product rule: d(L)/d(pi) = sum ( dg_n/dpi * (total_est / g_n) )
++                contribution = dg_n_dpi * (total_est / g_n)
+                 grad_params += contribution
+                 
+     return grad_params
++
++def compute_segment_weight(scene, camera, params, rng, n):
++    # Standard path tracing step: sample BSDF, compute geometry term, etc.
++    return 1.0  # Placeholder for standard Monte Carlo weight computation
++
++def compute_segment_derivative(scene, camera, params, n):
++    # Standard auto-diff or analytical derivative of segment n w.r.t params
++    return 0.0  # Placeholder for standard derivative computation
++
++def accumulate_into_image(estimate, camera):
++    # Scatter weighted sample into image buffer
++    pass
++
++def compute_adjoint_radiance(loss, image):
++    # Compute dL/dI from the loss function
++    return np.zeros_like(image)
+ ```
+ 
+@@ -118,7 +137,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear in path length [S3, unofficial]. RB is quadratic [S3, unofficial].
++*   **Time Complexity:** PRB achieves linear time complexity in path length, whereas its sibling RB suffers from quadratic complexity due to recursive light path integral computation at each intersection [S3, unofficial].
+ *   **Memory Complexity:** Constant memory complexity, avoiding the storage of per-bounce data required by standard AD [S3, unofficial].
+-*   **Performance:** In the Veach Door scene (480x270, 16 spp primal, 4 spp adjoint), PRB peak memory was 3.00 GiB and gradient computation time was 2.46s, compared to RB's 3.51 GiB and 2.52s [S3, unofficial]. On CPU, megakernel-style evaluation provides speedups reaching ~166x compared to baseline [S1]. GPU speedups from redundancy elimination reach 3.3x [S1].
++*   **Performance:** In the Veach Door scene (480x270 resolution, 16 spp primal, 4 spp adjoint), PRB peak memory was 3.00 GiB and gradient computation time was 2.46s, compared to RB's 3.51 GiB and 2.52s [S3, unofficial]. On CPU, megakernel-style evaluation provides speedups reaching ~166x compared to baseline [S1]. GPU speedups from redundancy elimination reach 3.3x [S1].
+ *   **Strengths:** Unbiased gradients, low memory usage, linear complexity.
+ *   **Limitations:** Requires careful handling of visibility discontinuities. The method is write-heavy, accumulating gradients rather than querying scene representation [S1].

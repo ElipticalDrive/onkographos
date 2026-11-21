@@ -1,0 +1,49 @@
+--- v001.md
++++ v002.md
+@@ -1,26 +1,23 @@
+ # Distributed Training and Sharding
+ 
+-Also called: Primitive Sharding, Index-Parity Sharding, Spatial Block Partitioning
++Also called: Primitive Sharding, Index-Parity Sharding
+ 
+ ## Overview
+-Distributed training and sharding address the memory and compute bottlenecks of training 3D Gaussian Splatting (3DGS) on large-scale scenes by distributing the Gaussian population and rendering workload across multiple GPUs. Unlike spatial block partitioning, which suffers from boundary redundancy and imbalanced shards, this family primarily utilizes index-parity sharding to distribute a global Gaussian model evenly across devices, minimizing communication overhead and eliminating cross-block visibility waste [S2, unofficial].
++Distributed training and sharding techniques enable the training of large-scale 3D Gaussian Splatting (3DGS) models across multiple GPUs by partitioning the global Gaussian set or the rendering workload. Unlike spatial block partitioning, which suffers from boundary redundancy and load imbalance, modern methods like BlitzGS use index-parity sharding to distribute Gaussians evenly across devices [S2, unofficial]. This family addresses the computational bottleneck of processing overly dense primitive sets by combining distributed data parallelism with importance-based pruning and view-level filtering [S1].
+ 
+ ## Shared principles
+-The core mechanism involves partitioning the global set of 3D Gaussian primitives $\mathcal{G}$ across $M$ GPUs. Each GPU $m$ maintains a shard $\mathcal{G}^{(m)}$. The training loop proceeds as follows:
+-1.  **Distribution:** Gaussians are assigned to GPUs.
+-2.  **Projection:** Each GPU projects its local shard into the camera space.
+-3.  **Communication:** Projected Gaussians are routed to the GPUs responsible for the image tiles they cover.
+-4.  **Rasterization:** Each GPU composites the tiles it owns using the received Gaussians.
+-5.  **Update:** Gradients are aggregated and parameters are updated.
+-
+-The critical shared constraint is that the final rendered image must be identical to a single-GPU renderer on the full set $\mathcal{G}$ [S2, unofficial].
++The family shares the goal of reducing the active Gaussian workload per iteration to accelerate training or inference. The core mechanism involves distributing the global set of 3D Gaussians $\mathcal{G}$ across $M$ GPUs. Each GPU maintains a local shard $\mathcal{G}^{(m)}$ and its corresponding optimizer state. The training loop typically follows these distributed steps:
++1.  **Local Projection:** Each GPU projects only its local shard into camera space [S1].
++2.  **Communication:** Projected Gaussians are routed to the GPUs responsible for the image tiles they cover, often via an all-to-all exchange [S2, unofficial].
++3.  **Filtering:** The active set of Gaussians is reduced using importance scoring, pruning, and distance-based Level-of-Detail (LOD) filtering [S1].
++4.  **Rasterization and Update:** Each GPU composites pixels for its assigned tiles and updates parameters using gradients reweighted by importance signals [S1].
+ 
+ ## Subtopics
+ 
+ ### [BlitzGS](15088-blitzgs.md)
+-BlitzGS is a distributed 3DGS framework that accelerates city-scale training by reducing the active Gaussian workload at system, model, and view levels. It solves the problem of excessive storage, communication, and rasterization overhead caused by processing overly dense primitive sets where only a small fraction contributes to the loss. Unlike spatial block partitioning which incurs cross-block visibility waste and imbalanced shards, BlitzGS uses index parity sharding and importance-based filtering to achieve nearly an order-of-magnitude speedup while maintaining high reconstruction quality. See [BlitzGS](15088-blitzgs.md).
++BlitzGS is a distributed 3DGS framework designed to accelerate city-scale training by reducing the active Gaussian workload across system, model, and view levels. It addresses the inefficiency of existing methods where every iteration preprocesses, communicates, and rasterizes an overly dense set of primitives, most of which contribute negligibly to the loss. Unlike spatial block partitioning which incurs cross-block visibility waste and imbalanced shards, BlitzGS shards by index parity and couples this with importance-based pruning and distance-based LOD filtering to achieve nearly an order-of-magnitude speedup while maintaining high reconstruction quality. See [BlitzGS](15088-blitzgs.md) for implementation details.
+ 
+ ### [GS-Cache Inference Framework](15588-gs-cache-inference-framework.md)
+-GS-Cache is a holistic rendering framework designed to support real-time rendering of large-scale 3D Gaussian Splatting (3DGS) models at the city level, achieving >72 FPS at binocular 2K resolution by using a cache-centric de-redundancy pipeline and elastic parallel scheduling. It specifically targets 'Structured Gaussian derivation methods' (like Scaffold-GS and Octree-GS) which use anchors to derive neural Gaussians, addressing the bottleneck of the 'Gaussian Derivation Stage' (decoding anchor features) which dominates computation time. Unlike native 3DGS or unstructured methods, GS-Cache optimizes the inter-frame redundancy in the derivation stage while maintaining full rasterization quality, as slight perspective changes significantly affect occlusion in the rasterization stage. See [GS-Cache Inference Framework](15588-gs-cache-inference-framework.md).
++GS-Cache is a holistic rendering framework designed to support real-time rendering of large-scale 3DGS models, specifically targeting city-level scenes. It achieves an average frame rate exceeding 72 FPS at binocular 2K resolution by employing a cache-centric de-redundancy pipeline and elastic parallel scheduling. Unlike native 3DGS or unstructured methods, GS-Cache specifically targets "Structured Gaussian derivation methods" (such as Scaffold-GS and Octree-GS) that use anchors to derive neural Gaussians, addressing the computational bottleneck of the Gaussian Derivation Stage. It sets itself apart from siblings like BlitzGS by focusing on inter-frame redundancy elimination in the anchor decoding phase rather than just intra-frame rasterization optimization. See [GS-Cache Inference Framework](15588-gs-cache-inference-framework.md) for implementation details.
+ 
+ ### LS-Gaussian Accelerator Architecture
+@@ -39,8 +36,8 @@
+ - **Step:** Assign each Gaussian primitive to a GPU rank using index parity. During rendering, distribute each step through balanced tile allocation across GPUs. Route projected Gaussians to tile owners via all-to-all communication. Train using a single global camera stream. Each camera enters training once per iteration with no cross-block duplication. Only distributed cost is the all-to-all exchange inside each render step [S2, unofficial].
+ - **Number:** On a 4-GPU setup (Building scene, 1,920 cameras), communication cost for routing projected Gaussians to tile owners is 3–5 ms per iteration, staying under 7% of total iteration time [S2, unofficial].
+-- **Comparison:** Unlike spatial block partitioning, it eliminates boundary reassignment, cross-block visibility overlap, and the final single-GPU merge step. Storage and per-step rendering remain evenly distributed as the GPU count grows [S2, unofficial].
++- **Comparison:** Unlike spatial block partitioning, it eliminates boundary reassignment, cross-block visibility overlap, and the final single-GPU merge step. Storage and per-step rendering remain evenly distributed as GPU count grows [S2, unofficial].
+ 
+ ## Background
+-The need for distributed training in 3DGS arises from the quadratic growth of Gaussian primitives with scene complexity, particularly in city-scale datasets. Early attempts to parallelize 3DGS relied on spatial partitioning, which proved inefficient due to the non-uniform distribution of camera views and Gaussian density. The introduction of index-parity sharding, notably in BlitzGS, demonstrated that distributing the model globally rather than spatially could eliminate boundary artifacts and communication bottlenecks associated with spatial blocks [S2, unofficial]. Concurrently, inference-focused frameworks like GS-Cache and LS-Gaussian have extended sharding and caching concepts to real-time rendering, addressing inter-frame and inter-tile redundancies respectively [S1].
++The need for distributed training in 3DGS arises from the quadratic growth of Gaussian primitives required for high-fidelity city-scale reconstruction, which exceeds the memory and compute capacity of single GPUs. Early attempts at spatial partitioning revealed significant inefficiencies due to boundary effects and redundant optimization [S2, unofficial]. BlitzGS introduced index-parity sharding to solve these issues, demonstrating that distributing the global model by index parity avoids the geometric constraints of spatial blocks [S2, unofficial]. Concurrently, research into inference acceleration, such as GS-Cache and LS-Gaussian, has focused on reducing redundancy in structured Gaussian representations and hardware-aware workload balancing [S1].
+ 
+ ## Sources

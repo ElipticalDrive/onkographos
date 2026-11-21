@@ -1,0 +1,220 @@
+--- v001.md
++++ v002.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-The Extended Tandem Algorithm is a parallel, block-wise extension of the Tandem Algorithm [3675-tandem-algorithm.md] designed to extract and simplify large isosurfaces while minimizing memory consumption. It solves the scalability limits of the sequential tandem algorithm by combining on-the-fly simplification with a component-based dumping strategy and a hierarchical block splitting mechanism. Unlike the parent method, which processes a single volume sequentially, this method distributes the workload across multiple workers using a manager-worker architecture, allowing it to handle datasets that exceed available RAM by dumping completed surface components to disk.
++The Extended Tandem Algorithm is a parallel, block-wise extension of the Tandem Algorithm [3675-tandem-algorithm.md] that simplifies an isosurface on the fly while minimizing memory consumption via block splitting/merging and component dumping [S1]. It solves the scalability limits of the sequential tandem algorithm by combining on-the-fly simplification with a component-based dumping strategy and a hierarchical block splitting mechanism [S1]. Unlike the parent method, which processes a single volume sequentially, this method distributes the workload across multiple workers using a manager-worker architecture, allowing it to handle datasets that exceed available RAM by dumping completed surface components to disk [S1].
+ 
+ ## How it works
+-The algorithm operates on a distributed dataset split into blocks. It uses a worker-manager architecture to dynamically dispatch tasks, ensuring that adjacent blocks are processed together to maintain mesh continuity while keeping memory usage low.
++The algorithm operates on a distributed dataset split into blocks [S1]. It uses a worker-manager architecture to dynamically dispatch tasks, ensuring that adjacent blocks are processed together to maintain mesh continuity while keeping memory usage low [S1].
+ 
+ ### Inputs and Outputs
+-- **Input**: A volumetric dataset $V$ of size $D_x \times D_y \times D_z$, an isosurface value $I$, and an error threshold $E_0$ for simplification.
+-- **Output**: A simplified isosurface mesh, potentially split into multiple components stored on disk with a meta-data index.
++- **Input**: A volumetric dataset $V$, an isosurface value, and an error threshold $E_0$ for simplification [S1].
++- **Output**: A simplified isosurface mesh, split into components stored on disk with a meta-data index (oriented bounding box, volume, etc.) [S1].
+ 
+ ### Data Structures
+@@ -17,28 +17,22 @@
+ Each task sent from the manager to a worker is a tuple containing:
+ - `type`: Enum {EXTRACT, SEND, MERGE, FINISHED}
+-- `worker_id`: Integer ID of the target worker (for SEND tasks) or the requesting worker (for others).
+-- `block_id`: Integer ID of the block to extract (for EXTRACT tasks).
++- `worker_id`: Integer ID of the target worker (for SEND tasks) or the requesting worker (for others) [S1].
++- `block_id`: Integer ID of the block to extract (for EXTRACT tasks) [S1].
+ 
+ **Worker State**:
+-Each worker maintains a `current_surface`, which is the aggregate of semi-simplified meshes extracted locally and merged from neighbors.
++Each worker maintains a `current_surface`, which is the aggregate of semi-simplified meshes extracted locally and merged from neighbors [S1].
+ 
+ ### Algorithm Steps
+-
+-1.  **Dataset Splitting**: The input volume is recursively split into blocks. These blocks are assigned to compute nodes (workers).
+-2.  **Worker Loop**: Each worker runs an infinite loop requesting tasks from the manager until a `FINISHED` task is received.
+-3.  **Task Execution**:
+-    -   **EXTRACT**: The worker extracts a local isosurface from a sub-block using the Tandem Algorithm. To handle block boundaries, a "time lag" technique is applied: sub-block boundaries (except dataset boundaries) prevent edge collapse in their neighborhood. The extracted surface is appended to the worker's `current_surface`.
+-    -   **SEND**: The worker sends its `current_surface` to a target worker (specified in the task). After sending, the worker's `current_surface` is emptied.
+-    -   **MERGE**: The worker merges its `current_surface` with a mesh received from another worker. After merging, the new surface is simplified, and finished components are dumped.
+-    -   **FINISHED**: The worker stops execution.
+-4.  **Manager Dispatching**: The worker manager iterates as long as the global surface is not totally extracted. For each worker request, it checks conditions in the following priority order:
+-    1.  If the worker has a waiting surface (`has_waiting_surface(id)`), send a `MERGE` task.
+-    2.  Else if the worker has a neighbor worker with restricted adjacency (`has_neighbor_worker(id)`), send a `SEND` task with the target ID.
+-    3.  Else if there is an unprocessed block with restricted adjacency (`has_unprocessed_block(blockId)`), send an `EXTRACT` task.
+-    4.  Else, send a `FINISHED` task.
+-5.  **Component Dumping**: As soon as a surface component is detected as terminated (fully extracted and simplified), it is saved to disk along with meta-data (oriented bounding box, volume, etc.) and cleared from memory.
++1. **Dataset Splitting**: The input volume is recursively split into blocks and assigned to compute nodes (workers) [S1].
++2. **Worker Loop**: Each worker runs an infinite loop requesting tasks from the manager until a `FINISHED` task is received [S1].
++3. **Task Execution**:
++   - **EXTRACT**: The worker extracts a local isosurface from a sub-block using the Tandem Algorithm. Sub-block boundaries (except dataset boundaries) prevent edge collapse in their neighborhood using time lag. The extracted surface is appended to the worker's `current_surface` [S1].
++   - **SEND**: The worker sends its `current_surface` to a target worker. After sending, the worker's `current_surface` is emptied [S1].
++   - **MERGE**: The worker merges its `current_surface` with a mesh received from another worker. After merging, the new surface is simplified, and finished components are dumped [S1].
++   - **FINISHED**: The worker stops execution [S1].
++4. **Manager Dispatching**: The worker manager iterates as long as the global surface is not totally extracted. For each worker request, it checks conditions in priority order: if the worker has a waiting surface (`has_waiting_surface(id)`), send a `MERGE` task; else if the worker has a neighbor worker with restricted adjacency (`has_neighbor_worker(id)`), send a `SEND` task with the target ID; else if there is an unprocessed block with restricted adjacency (`has_unprocessed_block(blockId)`), send an `EXTRACT` task; else send a `FINISHED` task [S1].
++5. **Component Dumping**: As soon as a surface component is detected as terminated (fully extracted and simplified), it is saved to disk along with meta-data and cleared from memory [S1].
+ 
+ ### Formulas
+-
+ **Triangle Aspect Ratio**:
+ The quality of a triangle $t$ with vertices $a, b, c$ is measured by its aspect ratio $\rho(t)$:
+@@ -46,52 +40,44 @@
+ where $\lambda_1 \ge \lambda_2$ are the greatest eigenvalues of the inertia matrix $M_t$:
+ $$ M_t = \frac{1}{3}[(a - \hat{t})(a - \hat{t})^T + (b - \hat{t})(b - \hat{t})^T + (c - \hat{t})(c - \hat{t})^T] $$
+-and $\hat{t}$ is the centroid of triangle $t$. $\rho(t) = 1$ for equilateral triangles and $\rho(t) = 0$ for flat triangles.
++and $\hat{t}$ is the centroid of triangle $t$ [S1]. $\rho(t) = 1$ for equilateral triangles and $\rho(t) = 0$ for flat triangles [S1].
+ 
+ **Mesh Anisotropy**:
+ The global anisotropy (skewness) of a triangulation $K$ with $n$ triangles is:
+ $$ anisotropy(K) = 1 - \frac{1}{n} \sum_{t \in K} \rho(t) $$
+-The range is $0 \le anisotropy(K) \le 1$, where 0 indicates all triangles are equilateral.
++The range is $0 \le anisotropy(K) \le 1$, where $0$ indicates all triangles are equilateral [S1].
+ 
+ ### Parameters
+--   **$E_0$**: The error threshold used in the tandem algorithm's edge collapse operations. It determines the maximum allowed deviation for collapsed edges.
+--   **$\alpha$**: The isotropy parameter in the mesh quality cost function. It balances the cost between shape quality and distance from the original surface. A value of $\alpha = 0.4$ is recommended as a good compromise. Values $> 0.9$ ignore shape criteria, leading to degenerate triangles rejected by $E_0$ [S1].
++- **$E_0$**: The error threshold used in the tandem algorithm's edge collapse operations. It determines the maximum allowed deviation for collapsed edges [S1].
++- **$\alpha$**: The isotropy parameter in the mesh quality cost function. It balances the cost between shape quality and distance from the original surface. A value of $\alpha = 0.4$ is recommended as a good compromise. Values $> 0.9$ ignore shape criteria, leading to degenerate triangles rejected by $E_0$ [S1].
+ 
+ ### Pseudocode
+-
+ ```python
+ # Worker Algorithm
+ def worker(E0: float):
+     finished = False
+-    current_surface = Mesh()
+-    
++    current_surface = []
++    waiting_mesh = None
++
+     while not finished:
+         task = get_task()
+-        
+-        if task.type == EXTRACT:
+-            # Extract surface from sub-block using Tandem Algorithm
+-            # Apply time lag at sub-block boundaries to prevent invalid edge collapses
++
++        if task.type == "EXTRACT":
+             local_mesh = tandem(E0, task.block_id)
+             current_surface = merge(current_surface, local_mesh)
+-            
+-        elif task.type == SEND:
+-            # Send current surface to target worker
++
++        elif task.type == "SEND":
+             send_mesh(task.target, current_surface)
+-            current_surface = Mesh() # Empty current surface
+-            
+-        elif task.type == MERGE:
+-            # Merge received mesh with current surface
+-            received_mesh = get_received_mesh()
++            current_surface = []
++
++        elif task.type == "MERGE":
++            received_mesh = waiting_mesh if waiting_mesh else get_received_mesh()
++            waiting_mesh = None
+             current_surface = merge(current_surface, received_mesh)
+-            
+-            # Simplify the merged surface
+             simplify(current_surface, E0)
+-            
+-            # Dump finished components
+             dumping(current_surface)
+-            
+-        elif task.type == FINISHED:
+-            # Final merge and dump before stopping
+-            received_mesh = get_received_mesh()
+-            current_surface = merge(current_surface, received_mesh)
++
++        elif task.type == "FINISHED":
++            if waiting_mesh:
++                current_surface = merge(current_surface, waiting_mesh)
+             simplify(current_surface, E0)
+             dumping(current_surface)
+@@ -100,20 +86,25 @@
+ # Worker Manager Algorithm
+ def worker_manager():
++    global_extraction_finished = False
++    waiting_surfaces = {}
++    neighbor_map = {}
++    unprocessed_blocks = {}
++
+     while not global_extraction_finished:
+         id = get_task_request_id()
+-        
++
+         if has_waiting_surface(id):
+-            send_task(id, MERGE)
+-        elif has_neighbor_worker(id):
+-            target_id = get_neighbor_id(id)
+-            send_task(id, SEND, target_id)
+-        elif has_unprocessed_block(id):
+-            block_id = get_best_block(id)
+-            send_task(id, EXTRACT, block_id)
++            send_task(id, "MERGE")
++        elif has_neighbor_worker(id) is not False:
++            target_id = has_neighbor_worker(id)
++            send_task(id, "SEND", target_id)
++        elif has_unprocessed_block(id) is not False:
++            block_id = has_unprocessed_block(id)
++            send_task(id, "EXTRACT", block_id)
+         else:
+-            send_task(id, FINISHED)
++            send_task(id, "FINISHED")
+ 
+ # Dumping Function
+-def dumping(surface: Mesh):
++def dumping(surface):
+     for component in surface.components:
+         if is_component_finished(component):
+@@ -121,21 +112,13 @@
+             clear_component(surface, component)
+ 
+-# Helper Functions for Manager
++# Manager helper functions
+ def has_waiting_surface(id: int) -> bool:
+-    # Returns true if worker 'id' has a surface waiting to be merged
+-    return surface_in_queue(id) is not None
++    return id in waiting_surfaces
+ 
+ def has_neighbor_worker(id: int) -> int:
+-    # Returns ID of a worker dealing with a node fulfilling restricted adjacency
+-    # with the querying worker's aggregate surfaces, or false if none
+-    neighbor = find_adjacent_worker(id)
+-    return neighbor
++    return neighbor_map.get(id, False)
+ 
+ def has_unprocessed_block(id: int) -> int:
+-    # Finds the best next block to extract.
+-    # Prioritizes blocks with restricted adjacency to current aggregate.
+-    # If none, returns any unprocessed block. If none, returns false.
+-    block = find_best_block(id)
+-    return block
++    return unprocessed_blocks.get(id, False)
+ ```
+ 
+@@ -143,16 +126,16 @@
+ 
+ ### Extended Tandem Algorithm with Dumping
+-This variant refers to the core sequential extension of the tandem algorithm that introduces the component dumping mechanism. It processes cross-sections sequentially, activating them one by one, simplifying the mesh, and dumping finished components. The loop runs from $k=1$ to $N-1$ (number of cross-sections), activating cross-section $k$, simplifying with $E_0$, and dumping. Finally, it activates all remaining components with infinity and simplifies again. This variant is the foundation for the parallel version but lacks the distributed task dispatching and block splitting [S1].
++This variant refers to the core sequential extension of the tandem algorithm that introduces the component dumping mechanism. It processes cross-sections sequentially, activating them one by one, simplifying the mesh, and dumping finished components. The loop runs from $k=1$ to $N-1$ (number of cross-sections), activating cross-section $k$, simplifying with $E_0$, and dumping. Finally, it activates all remaining components with infinity and simplifies again [S1].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: The parallel version significantly reduces extraction time compared to the sequential tandem algorithm. On a seismic dataset of size $1626 \times 7028 \times 2000$ (40 GB), extraction takes 5 minutes with 56 processors, compared to over three hours for the sequential tandem algorithm [S1].
+--   **Memory Complexity**: By dumping completed components and processing blocks, the algorithm minimizes memory consumption. It avoids storing the entire isosurface in memory, which is critical for large datasets where the sequential algorithm fails due to memory limits (e.g., generating 1,250,000 triangles per layer in noisy datasets) [S1].
+--   **Scalability**: The algorithm scales well with the number of processors, limited primarily by the communication overhead between workers and the manager. The hierarchical block splitting allows efficient load balancing [S1].
+--   **Mesh Quality**: The parallel algorithm produces a mesh with equivalent quality (anisotropy variation) to the sequential approach. The use of time lag at block boundaries ensures that the mesh quality is not degraded by the parallel processing [S1].
+--   **Strengths**: Handles very large datasets that exceed RAM; reduces memory footprint via dumping; maintains high mesh quality; enables interactive exploration via component indexing.
+--   **Limitations**: Requires a manager-worker infrastructure; complex task scheduling logic; performance depends on the distribution of surface components across blocks.
++- **Time Complexity**: The parallel version significantly reduces extraction time compared to the sequential tandem algorithm. On a seismic dataset of size $1626 \times 7028 \times 2000$ (40 GB), extraction takes 5 minutes with 56 processors, compared to over three hours for the sequential tandem algorithm [S1].
++- **Memory Complexity**: By dumping completed components and processing blocks, the algorithm minimizes memory consumption. It avoids storing the entire isosurface in memory, which is critical for large datasets where the sequential algorithm fails due to memory limits (e.g., generating 1,250,000 triangles per layer in noisy datasets) [S1].
++- **Scalability**: The algorithm scales well with the number of processors, limited primarily by the communication overhead between workers and the manager. The hierarchical block splitting allows efficient load balancing [S1].
++- **Mesh Quality**: The parallel algorithm produces a mesh with equivalent quality (anisotropy variation) to the sequential approach. The use of time lag at block boundaries ensures that the mesh quality is not degraded by the parallel processing [S1].
++- **Strengths**: Handles very large datasets that exceed RAM; reduces memory footprint via dumping; maintains high mesh quality; enables interactive exploration via component indexing [S1].
++- **Limitations**: Requires a manager-worker infrastructure; complex task scheduling logic; performance depends on the distribution of surface components across blocks [S1].
+ 
+ ## Background
+-The Extended Tandem Algorithm was introduced by Guilhem Dupuy and Bruno Jobard in 2009 [S1]. It addresses the limitations of the original Tandem Algorithm [3675-tandem-algorithm.md], which, while effective for large datasets, suffered from limited scalability on very large, noisy datasets due to high memory consumption during queue updates and simplification. The extension was motivated by the need to process geophysical datasets (such as seismic cubes) that are often large and contain numerous small, disconnected components. The method builds on the tandem algorithm's simplification strategy and incorporates component dumping and parallel block processing to enable the extraction of isosurfaces from datasets exceeding available memory.
++The Extended Tandem Algorithm was introduced by Guilhem Dupuy and Bruno Jobard in 2009 [S1]. It addresses the limitations of the original Tandem Algorithm [3675-tandem-algorithm.md], which, while effective for large datasets, suffered from limited scalability on very large, noisy datasets due to high memory consumption during queue updates and simplification [S1]. The extension was motivated by the need to process geophysical datasets (such as seismic cubes) that are often large and contain numerous small, disconnected components [S1]. The method builds on the tandem algorithm's simplification strategy and incorporates component dumping and parallel block processing to enable the extraction of isosurfaces from datasets exceeding available memory [S1].
+ 
+ ## Sources

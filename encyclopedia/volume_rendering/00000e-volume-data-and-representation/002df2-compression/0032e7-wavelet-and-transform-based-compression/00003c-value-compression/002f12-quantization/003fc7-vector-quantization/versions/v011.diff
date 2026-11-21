@@ -1,0 +1,237 @@
+--- v010.md
++++ v011.md
+@@ -1,94 +1,178 @@
+ # Vector Quantization
+ 
+-Also called: LBG algorithm modification, 基于字典的压缩
++Also called: Codebook Quantization, LBG algorithm modification, 基于字典的压缩
+ 
+ ## Overview
+-Vector Quantization (VQ) is a lossy compression technique that maps $n$-dimensional input vectors to a single fixed-length index referencing an entry in a pre-defined or learned codebook (dictionary) [S1, S3, unofficial][S5]. It solves the problem of storing large volumetric datasets by exploiting spatial redundancy: identical or similar data blocks are replaced by compact indices, allowing for extremely fast decompression on the GPU [S5]. Unlike [Scalar Quantization](5726-scalar-quantization.md), which processes values independently, VQ groups data into blocks to capture correlations, and unlike [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md), it typically employs a single resolution level codebook [S3, unofficial][S5].
++Vector Quantization (VQ) is a lossy compression technique that maps $n$-dimensional input vectors to a single fixed-length index referencing an entry in a pre-defined or learned codebook (dictionary) [S1, S3, unofficial][S5]. It solves the problem of high storage and bandwidth requirements for volumetric data by exploiting spatial redundancy, replacing individual voxel blocks with compact indices [S2, S5]. Unlike [Scalar Quantization](5726-scalar-quantization.md) which reduces precision per component, VQ treats spatially adjacent data as a single vector, achieving higher compression ratios for data with repetitive patterns [S1, S3, unofficial]. It is distinguished from [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md) by using a single resolution level codebook, and from [Residual Vector Quantization (R-VQ)](12711-residual-vector-quantization-r-vq.md) by not decomposing quantization error across multiple stages [S3, unofficial][S5].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset $V$ divided into $n$-dimensional blocks (vectors) $\vec{x}_i$. Typical block sizes are $4 \times 4 \times 4$ [S6, unofficial].
+-*   **Output:** A codebook $C$ containing $K$ codewords (where $K = 2^r$ and $r$ is the index bit-size) and a mapping index list where each index points to the best-matching codeword for a block [S1, unofficial][S2, S5].
++- **Input:** A set of $N$ $n$-dimensional source vectors $S = \{\vec{x}_1, \vec{x}_2, \dots, \vec{x}_N\}$, where each $\vec{x}_i$ represents a block of volumetric data (e.g., a $4 \times 4 \times 4$ block of voxels) [S1, S3, unofficial][S5].
++- **Output:** A codebook $C$ of size $K = 2^r$ codewords, and a mapping index list where each source vector $\vec{x}_i$ is replaced by an $r$-bit index $j$ pointing to the best-matching codeword $\vec{c}_j \in C$ [S1, unofficial][S2, S5].
+ 
+ **Data Structures:**
+-*   **Codebook ($C$):** A list of $K$ vectors, each of dimension $n$. Stored in memory (e.g., as a 3D texture or buffer object) [S1, unofficial][S2].
+-*   **Index Map:** A data structure (e.g., a 3D texture or integer array) storing the $r$-bit index for each block in the volume [S1, unofficial][S2, S5].
++1.  **Codebook ($C$):** A table of $K$ vectors, each of dimension $n$. Stored in memory (e.g., GPU texture or VRAM) [S1, unofficial][S2].
++2.  **Index Map:** A data structure (e.g., 3D texture or array) storing $r$-bit indices corresponding to each input vector block [S1, unofficial][S2, S5].
++3.  **Partition ($P$):** An implicit partition of the input space into $K$ regions, where each region $p_j$ contains all vectors mapped to index $j$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Block Partitioning:** Divide the input volume into non-overlapping $n$-dimensional blocks [S5].
+-2.  **Codebook Generation:** Train a codebook $C$ using an iterative algorithm (e.g., LBG or PCA-based splitting) to minimize distortion [S1, S3, unofficial].
+-    *   *Note:* The LBG algorithm is prone to the "empty cell problem" and slow convergence; PCA-based splitting is often preferred for speed and robustness [S1, S3, unofficial].
+-3.  **Encoding (Search):** For each input block $\vec{x}_i$, find the codeword $\vec{c}_j \in C$ that minimizes the distortion metric $\delta(\vec{x}_i, \vec{c}_j)$ [S3, unofficial].
+-    *   The standard metric is the squared Euclidean distance: $\delta(\vec{x}, \vec{y}) = \|\vec{x} - \vec{y}\|_2^2$ [S3, unofficial].
+-    *   Store the index $j$ corresponding to $\vec{c}_j$ in the index map [S5].
+-4.  **Decoding (Lookup):** To reconstruct the volume, retrieve the codeword $\vec{c}_j$ from the codebook using the index $j$ from the index map [S1, unofficial][S5].
++1.  **Block Division:** Divide the input volume into small, non-overlapping data blocks of size $B \times B \times B$ (commonly $4 \times 4 \times 4$) [S5][S7, unofficial]. Each block is treated as an $n$-dimensional vector.
++2.  **Codebook Initialization:** Initialize the codebook $C$ with $K$ codewords. This can be done via random sampling from the training data or using a splitting strategy (e.g., Principal Component Analysis) to avoid empty cells [S1, S3, unofficial].
++3.  **Encoding (Nearest Neighbor Search):** For each input vector $\vec{x}_i$, find the codeword $\vec{c}_j \in C$ that minimizes the distortion metric $\delta(\vec{x}_i, \vec{c}_j)$. The standard metric is the squared Euclidean distance:
++    $$ \delta(\vec{x}_i, \vec{c}_j) = \|\vec{x}_i - \vec{c}_j\|^2_2 $$
++    Store the index $j$ in the index map [S1, S3, unofficial].
++4.  **Codebook Optimization (Training):** Update the codebook to minimize the average distortion $D_{avg}$:
++    $$ D_{avg} = \frac{1}{N} \sum_{i=1}^N \|\vec{x}_i - \vec{c}_{j(i)}\|^2 $$
++    where $j(i)$ is the index assigned to $\vec{x}_i$ [S1, S3, unofficial]. This is typically done using an iterative algorithm like the Linde-Buzo-Gray (LBG) algorithm or a PCA-based splitting strategy [S1, S3, unofficial].
++    -   *LBG Step:* Recalculate each codeword $\vec{c}_j$ as the centroid of all vectors in its partition $p_j$:
++        $$ \vec{c}_j = \frac{1}{|p_j|} \sum_{\vec{x} \in p_j} \vec{x} $$
++    -   *PCA Splitting:* To avoid the "empty cell problem" (where some codebook entries have no assigned vectors), split existing codewords along their principal components [S1, S3, unofficial].
++5.  **Decoding:** To reconstruct the volume, look up the index $j$ from the index map and retrieve the corresponding codeword $\vec{c}_j$ from the codebook [S1, unofficial][S2, S5].
+ 
+-**Formulas:**
+-*   **Average Distortion:** The quality of the codebook is measured by the average distortion over $N$ vectors:
+-    $$ D_{avg} = \frac{1}{N} \sum_{m=1}^N \| \vec{x}_m - \vec{c}_m \|^2 $$
+-    where $\vec{x}_m$ is the original vector and $\vec{c}_m$ is its approximation from the codebook [S1, unofficial].
+-*   **GPU Texture Coordinate Mapping (for Cg/OpenGL implementations):**
+-    To simulate integer division (e.g., $\lfloor x/4 \rfloor$) and block addressing using texture filtering (GL_NEAREST, GL_REPEAT) in shaders where bitwise ops are unavailable [S1, unofficial]:
+-    $$ x' = (x \cdot 0.5 + 0.5) \cdot \frac{D_x - 1}{\frac{D_x - 4}{D_y - 1}} - \frac{2 D_x - 8}{3} $$
+-    $$ y' = (y \cdot 0.5 + 0.5) \cdot \frac{D_y - 4}{\frac{D_y - 1}{D_z - 1}} - \frac{2 D_y - 8}{3} $$
+-    $$ z' = (z \cdot 0.5 + 0.5) \cdot \frac{D_z - 1}{D_z - 4} - \frac{2 D_z - 8}{3} $$
+-    where $D_{x,y,z} = 2^n$ for $n \ge 3$ [S1, unofficial].
+-    Address texture coordinates for block indexing:
+-    $$ x_A = (x \cdot 0.5 + 0.5) \cdot (D_x/4) $$
+-    $$ y_A = (y \cdot 0.5 + 0.5) \cdot (D_y/4) $$
+-    $$ z_A = (z \cdot 0.5 + 0.5) \cdot (D_z/4) $$
+-    [S1, unofficial].
++**Pseudocode:**
++
++```python
++def vector_quantization_encode(volumes, block_size=4, codebook_size=256, max_iterations=10):
++    """
++    Compress volumetric data using Vector Quantization.
++    volumes: List of 3D arrays (blocks) representing the volume.
++    block_size: Size of each block (e.g., 4).
++    codebook_size: Number of entries in the codebook (K).
++    max_iterations: Max iterations for codebook training.
++    """
++    # Step 1: Flatten volumes into list of n-dimensional vectors
++    input_vectors = []
++    for vol in volumes:
++        for block in extract_blocks(vol, block_size):
++            input_vectors.append(block.flatten())
++    
++    N = len(input_vectors)
++    n_dim = len(input_vectors[0])
++    
++    # Step 2: Initialize Codebook (e.g., random sampling or K-Means++ initialization)
++    # For simplicity, we use random sampling from input vectors
++    indices = random.sample(range(N), codebook_size)
++    codebook = [input_vectors[i] for i in indices]
++    
++    # Step 3: Iterative Optimization (LBG / K-Means style)
++    for iteration in range(max_iterations):
++        # Assignment Step: Find nearest codeword for each vector
++        assignments = []
++        for vec in input_vectors:
++            min_dist = float('inf')
++            best_idx = -1
++            for idx, codeword in enumerate(codebook):
++                dist = sum((v - c)**2 for v, c in zip(vec, codeword))
++                if dist < min_dist:
++                    min_dist = dist
++                    best_idx = idx
++            assignments.append(best_idx)
++        
++        # Update Step: Recalculate centroids
++        new_codebook = [None] * codebook_size
++        counts = [0] * codebook_size
++        
++        for i, vec in enumerate(input_vectors):
++            idx = assignments[i]
++            if new_codebook[idx] is None:
++                new_codebook[idx] = [0.0] * n_dim
++            for d in range(n_dim):
++                new_codebook[idx][d] += vec[d]
++            counts[idx] += 1
++            
++        # Handle empty cells (Pitfall: Empty Cell Problem)
++        # If a cell is empty, reinitialize it with a random vector or split a dense neighbor
++        for idx in range(codebook_size):
++            if counts[idx] == 0:
++                # [G] Simple fallback: pick a random vector from the input set
++                new_codebook[idx] = input_vectors[random.randint(0, N-1)]
++            else:
++                for d in range(n_dim):
++                    new_codebook[idx][d] /= counts[idx]
++        
++        codebook = new_codebook
++        
++    # Step 4: Final Encoding
++    index_map = []
++    for vec in input_vectors:
++        min_dist = float('inf')
++        best_idx = -1
++        for idx, codeword in enumerate(codebook):
++            dist = sum((v - c)**2 for v, c in zip(vec, codeword))
++            if dist < min_dist:
++                min_dist = dist
++                best_idx = idx
++        index_map.append(best_idx)
++        
++    return codebook, index_map
++
++def vector_quantization_decode(codebook, index_map, block_size=4, volume_shape=(64, 64, 64)):
++    """
++    Reconstruct volume from codebook and indices.
++    """
++    reconstructed_blocks = []
++    for idx in index_map:
++        codeword = codebook[idx]
++        # Reshape flat codeword back to block dimensions
++        block = codeword.reshape((block_size, block_size, block_size))
++        reconstructed_blocks.append(block)
++    
++    # [G] Reassemble blocks into a 3D volume array
++    # This assumes index_map order corresponds to raster-scan block order
++    volume = assemble_volume(reconstructed_blocks, volume_shape, block_size)
++    return volume
++```
+ 
+ **Parameters:**
+-*   **Index Bit-size ($r$):** Determines codebook size $K=2^r$. An 8-bit index ($K=256$) is common, balancing compression ratio and distortion [S1, unofficial].
+-*   **Block Size:** $4 \times 4 \times 4$ is a typical unit [S6, unofficial].
++-   **Block Size:** Typically $4 \times 4 \times 4$ [S7, unofficial]. Larger blocks capture more spatial context but reduce the number of available vectors for codebook training.
++-   **Codebook Size ($K$):** Determines the bit-depth $r = \log_2 K$. A common value is $K=256$ (8-bit index) [S1, unofficial]. Larger $K$ improves quality but increases storage and search time [S5].
++-   **Distortion Metric:** Squared Euclidean distance $\|\vec{x} - \vec{c}\|^2_2$ [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Cell Problem:** Iterative codebook generation (like basic LBG) may result in unused codebook entries, increasing distortion and execution time [S1, S3, unofficial].
+-*   **Accumulated Error:** In time-varying data, reconstructing differences (P-frames) and adding them to previous frames causes error accumulation. This is mitigated by periodically sending original data (I-frames) to reset the state [S1, unofficial].
+-*   **Texture Coordinate Bounds:** Calculated texture coordinates must be clamped to $[0.0, 1.0]$ using GL_CLAMP to handle border issues [S1, unofficial].
+-*   **Pre-processing Time:** Learning dictionaries for massive volumes requires significant pre-processing time [S5].
++-   **Empty Cell Problem:** Iterative algorithms like LBG may result in codebook entries with no assigned vectors, increasing distortion and execution time [S1, S3, unofficial]. Mitigated by PCA-based splitting or reinitializing empty cells [S1, S3, unofficial].
++-   **Accumulated Error:** In time-varying data, reconstructing differences (P-frames) and adding them to previous frames accumulates error. I-frames (original data) must be transmitted periodically to reset error [S1, unofficial].
++-   **GPU Implementation Limits:** Cg/HLSL does not support shift or bitwise operations. Integer coordinates must be mapped to float texture coordinates using specific linear transformations and filtered with `GL_NEAREST` to simulate integer division [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md)
+-Uses multiple resolution levels (codebooks) to capture coarse and fine details, enabling direct GPU rendering and reducing CPU-GPU transfer.
++Uses multiple resolution levels (codebooks) to capture coarse and fine details, enabling direct GPU rendering and minimizing CPU-GPU transfer.
+ 
+ ### [LBG Algorithm](840-lbg-algorithm.md)
+-The standard iterative method for generating VQ codebooks by minimizing distortion, though prone to empty cells and slow speed.
++The standard iterative algorithm for generating optimal codebooks by minimizing distortion, though prone to empty cells and slow convergence.
+ 
+ ### [Progressive Encoding of Time-Varying Sequences](959-progressive-encoding-of-time-varying-sequences.md)
+-Extends VQ to time-varying data by reusing codebooks across frames and using I/P-frame mechanisms to manage error.
++Extends VQ to time-varying data by reusing codebooks across frames and using I/P-frame mechanisms to manage accumulated error.
+ 
+ ### [Vector Quantization for Volumetric Radiance Fields](1870-vector-quantization-for-volumetric-radiance-fields.md)
+-Applies VQ to compress voxel color features in NeRF-like grids, achieving ~1 MB model sizes.
++Applies VQ to compress voxel color features in NeRF-like grids, achieving ~1 MB model sizes by combining pruning with codebook lookup.
+ 
+ ### [Fortune's Palette Compression](4988-fortune-s-palette-compression.md)
+-A lossless variant mapping unique values to a compact palette, suitable for data with few unique values.
++A lossless variant for sparse data where unique values are mapped to a compact palette, storing indices in bit-packed arrays.
+ 
+ ### [Compact3D / C3DGS / EAGLES](6139-compact3d-c3dgs-eagles.md)
+-Uses VQ to compress Gaussian attributes (SH coefficients, scale) in 3D Gaussian Splatting.
++Compresses 3D Gaussian Splatting attributes (SH coefficients, scale) using shared codebooks, preserving position/orientation precision.
+ 
+ ### [Codebook Sharing](7563-codebook-sharing.md)
+-Reuses a single codebook across multiple levels or images to save memory.
++Reuses a single codebook across multiple tree levels or similar images to reduce memory overhead.
+ 
+ ### [Brood-based Vector Quantization](7595-brood-based-vector-quantization.md)
+-Applies VQ to residuals in adaptive trees (octrees) to exploit spatial coherence.
++Applies VQ to residuals of adaptive tree broods, exploiting spatial coherence for lower error at the same bit rate.
+ 
+ ### [Residual Vector Quantization (R-VQ)](12711-residual-vector-quantization-r-vq.md)
+-Decomposes quantization error across multiple stages for higher precision in geometric attributes.
++Decomposes quantization error across multiple codebook stages for higher precision in geometric attributes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding is $O(N \cdot K \cdot d)$ where $N$ is the number of blocks, $K$ is codebook size, and $d$ is vector dimension. Decoding is $O(1)$ per block (lookup) [S5].
+-*   **Memory Complexity:** Requires storing the codebook ($K \cdot d$) and the index map ($N \cdot r$ bits) [S1, unofficial][S2].
+-*   **Performance:** Decompression is extremely fast, making it suitable for real-time rendering [S5].
+-*   **Strengths:** High compression ratios for data with high spatial redundancy; fast GPU decoding; simple implementation [S1, unofficial][S5].
+-*   **Limitations:** Lossy; dictionary size limits quality; pre-processing (codebook generation) can be slow; "empty cell" issues in naive implementations [S1, S3, unofficial][S5].
+-*   **When to use:** Highly redundant volumetric data (e.g., sparse data, time-varying sequences with high inter-frame similarity) [S1, unofficial][S5].
+-*   **When not to use:** Data with low redundancy or high entropy where block matching fails to find similar patterns [S5].
++-   **Time Complexity:** Encoding is $O(N \cdot K \cdot n)$, where $N$ is the number of vectors, $K$ is codebook size, and $n$ is vector dimension. Decoding is $O(1)$ per vector (lookup) [S1, S3, unofficial].
++-   **Memory Complexity:** Storage is $O(K \cdot n + N \cdot r)$, where $r = \log_2 K$ is the index bit-width [S1, unofficial][S2].
++-   **Performance:** Decompression is extremely fast, suitable for real-time rendering [S5]. Compression is slow due to iterative training [S5].
++-   **Strengths:** High compression ratios for data with repetitive patterns; fast decoding; hardware-friendly (texture lookup) [S1, unofficial][S5].
++-   **Limitations:** Lossy; dictionary size limits quality; training time is significant for large volumes; empty cell problem in LBG [S1, S3, unofficial][S5].
++-   **When to Use:** Highly redundant volumetric data (e.g., medical imaging, time-varying simulations); real-time rendering on GPU with limited bandwidth [S1, unofficial][S5].
++-   **When Not to Use:** Data with low spatial redundancy; applications requiring lossless compression (unless using specialized variants like Fortune's Palette) [S1, unofficial][S5].
+ 
+ ## Background
+-Vector Quantization was first introduced in volume rendering by [NH92, NH93] [S5]. The foundational LBG algorithm was developed by Linde, Buzo, and Gray in 1980, improving upon scalar quantizers by Max (1960) and Lloyd (1982) [S3, unofficial]. It is widely used for large time-varying volumetric data due to its ability to exploit high spatial and temporal redundancy [S1, unofficial].
++Vector Quantization was first introduced in volume rendering by [NH92, NH93] [S5]. The foundational LBG algorithm was developed by Linde, Buzo, and Gray in 1980, improving upon scalar quantizers by Max (1960) and Lloyd (1982) [S3, unofficial]. Early GPU implementations used Cg and texture mapping to overcome shader limitations, such as the lack of bitwise operations [S1, unofficial]. Recent applications include compressing Volumetric Radiance Fields (VQRF) to ~1 MB [S2] and 3D Gaussian Splatting attributes (Compact3D) [S4][S6, unofficial].
+ 
+ ## Sources
+@@ -98,3 +182,4 @@
+ [S4] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+ [S5] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+-[S6] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)+[S6] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)
++[S7] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,333 @@
+--- v006.md
++++ v007.md
+@@ -4,136 +4,220 @@
+ 
+ ## Overview
+-Local Ambient Occlusion for Volume Rendering is a lighting model that computes shadowing by structures in the immediate vicinity of each voxel, avoiding the computational cost of global illumination while preventing regions from being fully shadowed by distant dense objects (e.g., a skull occluding a tumor) [S1, S3]. It provides better spatial and depth cues than local illumination alone by calculating ambient occlusion based on the transparency around each sample [S3]. Unlike standard local illumination which may fail to convey depth in complex internal structures, this method integrates opacity over the local vicinity's normal distribution, accelerated by approximating the Transfer Function (TF) as piecewise linear segments [S3].
++Local Ambient Occlusion for Volume Rendering computes shadowing by structures in the immediate vicinity of each voxel, avoiding the computational cost of global illumination while preventing regions from being fully shadowed by distant dense objects (e.g., a skull occluding a tumor) [S1, S3]. It replaces the standard ambient term in the volume rendering equation with a local approximation that considers voxels in a neighborhood around each voxel [S2]. Unlike sibling methods that may rely on ray casting or pure geometry, this variant specifically assumes CT values in the local vicinity follow a normal distribution to estimate the probability of occlusion, allowing for high-speed rendering via piecewise linear Transfer Function (TF) integration [S3]. It provides better spatial and depth cues than local illumination alone [S3].
+ 
+ ## How it works
+-The method operates in two distinct phases: a preprocessing step to compute local statistics and a rendering step to calculate the ambient occlusion factor [S3]. It assumes that CT values in the local vicinity of a sample follow a normal distribution to estimate the probability of occlusion [S3].
++The method operates in two phases: a preprocessing step to compute local statistics and a rendering step to compute the occlusion factor.
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   Volume dataset $V$ with voxel values (e.g., CT values) [S3].
+-*   Transfer Function (TF) $\alpha(x)$, defined as a piecewise linear function with $k$ segments [S3].
+-*   Local neighborhood radius $R_\Omega$ (or window size $n \times n \times n$) [S2, S3].
+-*   Number of rays $K$ for spherical sampling (used in the multiresolution approach) [S1].
+-*   Ambient bias $I_{bias}$ and ray weights $w_k$ [S1].
+-
+-**Outputs:**
+-*   Preprocessed intensity map $I(x)$ for each voxel, representing the local ambient occlusion factor [S1, S3].
+-*   Final rendered image with lighting enhanced by $I(x)$ [S1].
++*   **Input:** Volume data $V$ (e.g., CT values), Transfer Function $TF$ (defined as $k$ connected line segments), local neighborhood radius $R_\Omega$ (or window size $n \times n \times n$), and ambient bias $I_{bias}$.
++*   **Output:** An occlusion intensity map $I(x)$ for each voxel $x$, which modulates the final rendered color.
+ 
+ ### Data Structures
+-1.  **Intensity Map:** A 3D array storing the computed ambient occlusion intensity $I(x)$ for each voxel [S1]. This map is view-independent and only needs recomputation when the TF changes [S1].
+-2.  **Lookup Table for Normal Distribution:** A table storing values of the cumulative standard normal distribution $N(x)$ for $O(1)$ access during rendering [S3].
+-3.  **Multiresolution Data Structure:** (Optional, for acceleration) A flat-blocking data structure representing different parts of the volume at different levels of detail to skip empty or homogeneous spaces [S1, S2].
+-
+-### Steps
+-
+-#### 1. Preprocessing: Compute Local Statistics
+-For each voxel $\mathbf{x}$ in the volume:
+-1.  Define a spherical neighborhood $\Omega$ with radius $R_\Omega$ (or a cubic window of size $n \times n \times n$) centered at $\mathbf{x}$ [S1, S3].
+-2.  Calculate the mean $\mu$ and standard deviation $\sigma$ of the voxel values within this neighborhood [S3].
+-    *   These statistics are calculated in constant time for an $n \times n \times n$ region [S3].
+-    *   $\mu = \frac{1}{N} \sum_{v \in \Omega} V(v)$ [S3].
+-    *   $\sigma = \sqrt{\frac{1}{N} \sum_{v \in \Omega} (V(v) - \mu)^2}$ [S3].
+-
+-#### 2. Rendering: Calculate Ambient Occlusion Factor
+-For each sample point $\mathbf{x}$ along the ray during volume rendering:
+-
+-**Approach A: Probabilistic Integration (High-Speed) [S3]**
+-This approach uses the statistical assumption to compute AO analytically [S3].
+-1.  **Define TF Segments:** The TF $\alpha(x)$ is defined by $k$ connected line segments:
+-    $$ \alpha(x) = a_i x + b_i \quad \text{for} \quad n_i \le x < n_{i+1} $$
+-    where $a_i$ and $b_i$ are coefficients for segment $i$, and $n_i$ are the boundaries [S3].
+-2.  **Transform TF for Normal Distribution:**
+-    Assume the CT values in the vicinity follow a normal distribution $\rho(x) = \mathcal{N}(\mu, \sigma^2)$ [S3]. The ambient occlusion is calculated by integrating the product of opacity and probability density:
+-    $$ AO = \int_{-\infty}^{\infty} \alpha(x) \rho(x) dx $$
+-    To solve this, transform the segment coefficients and bounds to the standard normal space $\mathcal{N}(0,1)$ using $z = \frac{x - \mu}{\sigma}$:
+-    *   $a'_i = \sigma a_i$ [S3].
+-    *   $b'_i = b_i + a_i \mu$ [S3].
+-    *   $n'_i = \frac{n_i - \mu}{\sigma}$ [S3].
+-    *   $n'_{i+1} = \frac{n_{i+1} - \mu}{\sigma}$ [S3].
+-3.  **Compute Segment Contribution:**
+-    For each segment $i$, calculate the contribution $Seg_i$:
+-    $$ Seg_i = \frac{a'_i}{\sqrt{2\pi}} \left( e^{-n_i'^2/2} - e^{-n_{i+1}'^2/2} \right) + b'_i \left( N(n'_{i+1}) - N(n'_i) \right) $$
+-    where $N(x)$ is the cumulative standard normal distribution obtained from the lookup table [S3].
+-4.  **Sum Contributions:**
+-    $$ AO(\mathbf{x}) = \sum_{i=1}^{k} Seg_i $$
+-    The value $AO(\mathbf{x})$ ranges from 0 (fully transparent/bright) to 1 (fully opaque/dark) [S3].
+-
+-**Approach B: Ray Casting (Multiresolution) [S1]**
+-This approach samples the local light contribution directly [S1].
+-1.  **Cast Rays:** Cast $K$ rays originating from voxel $\mathbf{x}$ into the neighborhood $\Omega$ [S1].
+-2.  **Compute Incident Light per Ray:** For each ray direction $k$, compute the incident light intensity $I_k(\mathbf{x})$ using front-to-back compositing:
+-    $$ I_k(\mathbf{x}) = \sum_{m=0}^{M-1} \left[ \frac{1}{M} \prod_{i=0}^{m-1} (1 - \alpha_i) \right] $$
+-    where $M$ is the number of samples along the ray, and $\alpha_i$ is the opacity of the $i$-th sample according to the TF [S1].
+-    *   Light is contributed at each sample point, normalized to sum to one, ensuring smooth penumbra [S1].
+-3.  **Combine Rays:** Compute total local ambient occlusion $I(\mathbf{x})$:
+-    $$ I(\mathbf{x}) = I_{bias} + \frac{1}{K} \sum_{k=1}^{K} w_k I_k(\mathbf{x}) $$
+-    where $w_k \in [0, 1]$ are directional weights [S1].
+-4.  **Incremental Update:** Estimate volumetric LAO incrementally, updating one ray per frame as an initial step of the rendering pipeline to maintain interactive frame rates [S1].
+-
+-#### 3. Final Shading
+-The computed ambient occlusion factor (either $AO(\mathbf{x})$ from Approach A or $I(\mathbf{x})$ from Approach B) replaces or modulates the standard ambient term in the volume rendering equation [S2, S3]. If emissive tissues are used, the emissive component $c_E(s)$ is incorporated into the ray integral as a multiplicative factor $(1 + c_E(s))$ inside the attenuation term [S1].
++1.  **Volume Data:** 3D grid of scalar values (e.g., Hounsfield units).
++2.  **Local Statistics Map:** For each voxel $x$, store the mean $\mu_x$ and standard deviation $\sigma_x$ of the CT values in the local vicinity.
++    *   *Layout:* Two 3D arrays of floats, same dimensions as $V$.
++    *   *Computation:* Calculated in constant time using integral images or box filters for the mean and squared mean [S3].
++3.  **Transfer Function:** Defined as $k$ piecewise linear segments.
++    *   *Layout:* Array of $k$ structs/objects, each containing coefficients $(a_i, b_i)$ and bounds $(n_i, n_{i+1})$.
++    *   *Formula:* $TF(x) = a_i x + b_i$ for $n_i \le x < n_{i+1}$.
++4.  **Lookup Table (LUT):** Precomputed values for the cumulative standard normal distribution $N(x)$ for $O(1)$ access [S3].
++
++### Numbered Steps
++
++1.  **Preprocessing: Compute Local Statistics**
++    For each voxel $x$ at coordinates $(s, t, u)$:
++    *   Define a cubic window of size $n \times n \times n$ centered at $x$.
++    *   Calculate the average CT value $\mu_x$ and the average squared CT value $SqAvg_x$ within this window.
++    *   Compute the standard deviation $\sigma_x = \sqrt{SqAvg_x - \mu_x^2}$ [S3].
++    *   Store $\mu_x$ and $\sigma_x$.
++
++2.  **Rendering: Compute Ambient Occlusion Factor**
++    For each sample point $x$ during volume rendering:
++    *   Retrieve $\mu_x$ and $\sigma_x$ from the statistics map.
++    *   Assume the CT values in the vicinity follow a normal distribution $\rho(x) = N(\mu_x, \sigma_x^2)$ [S3].
++    *   Calculate the occlusion factor $AO(x)$ by integrating the TF opacity $\alpha(x)$ against the probability density $\rho(x)$:
++        $$ AO(x) = \int_{-\infty}^{\infty} \alpha(x) \rho(x) dx $$
++    *   Since $\alpha(x)$ is piecewise linear, decompose the integral into $k$ segments:
++        $$ AO(x) = \sum_{i=1}^{k} Seg_i $$
++    *   For each segment $i$ with coefficients $(a_i, b_i)$ and bounds $(n_i, n_{i+1})$:
++        *   Transform the segment coefficients and bounds to the standard normal space $N(0,1)$ using the normalized variable $z = \frac{x - \mu_x}{\sigma_x}$:
++            $$ a'_i = \sigma_x a_i $$
++            $$ b'_i = b_i + a_i \mu_x $$
++            $$ n'_i = \frac{n_i - \mu_x}{\sigma_x} $$
++            $$ n'_{i+1} = \frac{n_{i+1} - \mu_x}{\sigma_x} $$
++        *   Calculate the contribution $Seg_i$ using the precomputed cumulative normal distribution $N(\cdot)$:
++            $$ Seg_i = \frac{a'_i}{\sqrt{2\pi}} \left( e^{-n_i'^2/2} - e^{-n_{i+1}'^2/2} \right) + b'_i \left( N(n'_{i+1}) - N(n'_i) \right) $$
++            *(Note: The sources define $Seg_i$ with $a_i$ in the exponential term in Eq 7, but the transformation in Eq 8 implies $a'_i$ is used in the linear part. The formula in Eq 7 uses $a_i$ from the transformed segment. We use the transformed coefficients $a'_i, b'_i$ in the standard normal integral formula)* [S3].
++    *   The resulting $AO(x)$ is a value where closer to 1.0 means darker (more occlusion) [S3].
++
++3.  **Final Shading**
++    *   The occlusion factor modulates the lighting. In the basic model, it replaces the ambient term. In the emissive model, it combines with light emission [S1].
++    *   If using the ray-casting variant (LAO family general approach), the intensity $I(x)$ is computed as:
++        $$ I(x) = I_{bias} + \frac{1}{K} \sum_{k=1}^{K} w_k I_k(x) $$
++        where $I_k(x)$ is the incident light from ray $k$, computed via front-to-back compositing [S1].
++    *   However, for the specific "Local Vicinity Statistics" method [S3], the $AO(x)$ calculated in Step 2 is used directly as the occlusion multiplier for the diffuse/ambient component.
+ 
+ ### Pseudocode
++
+ ```python
+-def compute_probabilistic_ao(mean, std_dev, tf_segments, normal_cdf_table):
+-    """
+-    Computes ambient occlusion for a voxel using the probabilistic integration method.
+-    :param mean: float, local mean CT value (mu)
+-    :param std_dev: float, local standard deviation (sigma)
+-    :param tf_segments: list of tuples (a_i, b_i, n_i, n_i_plus_1) for k segments
+-    :param normal_cdf_table: dict or array mapping x to N(x)
+-    :return: float, AO value in [0, 1]
+-    """
+-    ao_value = 0.0
+-    sqrt_2pi = 2.5066282746310002  # sqrt(2*pi)
+-    
+-    for a_i, b_i, n_i, n_i_plus_1 in tf_segments:
+-        # Transform segment coefficients and bounds to standard normal space
+-        a_prime = std_dev * a_i
+-        b_prime = b_i + a_i * mean
+-        n_prime_i = (n_i - mean) / std_dev
+-        n_prime_i_plus_1 = (n_i_plus_1 - mean) / std_dev
+-        
+-        # Compute segment contribution
+-        exp_term = math.exp(-0.5 * n_prime_i**2) - math.exp(-0.5 * n_prime_i_plus_1**2)
+-        cdf_diff = normal_cdf_table[n_prime_i_plus_1] - normal_cdf_table[n_prime_i]
+-        
+-        seg_i = (a_prime / sqrt_2pi) * exp_term + b_prime * cdf_diff
+-        ao_value += seg_i
+-        
+-    return ao_value
++import math
++
++# Precomputed LUT for Cumulative Standard Normal Distribution N(x)
++# In practice, this is a large array or a fast approximation function.
++def N(x):
++    # Placeholder for standard normal CDF lookup
++    # Returns the probability that a standard normal random variable 
++    # is less than or equal to x.
++    pass
++
++def compute_local_stats(volume, window_size):
++    """
++    Preprocess volume to compute mean and std dev for each voxel's neighborhood.
++    """
++    height, width, depth = volume.shape
++    mean_map = np.zeros((height, width, depth))
++    std_map = np.zeros((height, width, depth))
++    
++    # Use integral images for O(1) calculation of sum and sum of squares
++    # Implementation details omitted for brevity, assuming helper functions exist
++    integral_img = compute_integral_image(volume)
++    integral_sq_img = compute_integral_image(volume ** 2)
++    
++    half_w = window_size // 2
++    
++    for x in range(height):
++        for y in range(width):
++            for z in range(depth):
++                # Define bounds of the window
++                x1, x2 = max(0, x - half_w), min(height, x + half_w + 1)
++                y1, y2 = max(0, y - half_w), min(width, y + half_w + 1)
++                z1, z2 = max(0, z - half_w), min(depth, z + half_w + 1)
++                
++                # Get sum and sum of squares using integral images
++                sum_val = get_sum_from_integral(integral_img, x1, y1, z1, x2, y2, z2)
++                sum_sq_val = get_sum_from_integral(integral_sq_img, x1, y1, z1, x2, y2, z2)
++                
++                voxel_count = (x2 - x1) * (y2 - y1) * (z2 - z1)
++                
++                mu = sum_val / voxel_count
++                sigma = math.sqrt((sum_sq_val / voxel_count) - mu**2)
++                
++                mean_map[x, y, z] = mu
++                std_map[x, y, z] = sigma
++                
++    return mean_map, std_map
++
++def compute_ao_factor(mu, sigma, tf_segments):
++    """
++    Compute Ambient Occlusion factor for a voxel given local statistics and TF.
++    """
++    ao = 0.0
++    
++    for segment in tf_segments:
++        a_i = segment.a
++        b_i = segment.b
++        n_i = segment.n_start
++        n_next = segment.n_end
++        
++        # Transform to standard normal space N(0,1)
++        # If sigma is 0, handle division by zero (constant region)
++        if sigma == 0:
++            # If sigma is 0, the distribution is a delta function at mu.
++            # The integral is simply alpha(mu) if mu is within [n_i, n_next], else 0.
++            # However, the standard formula assumes continuous distribution.
++            # For implementation robustness:
++            if n_i <= mu < n_next:
++                ao += a_i * mu + b_i
++            continue
++            
++        a_prime = sigma * a_i
++        b_prime = b_i + a_i * mu
++        n_prime_i = (n_i - mu) / sigma
++        n_prime_next = (n_next - mu) / sigma
++        
++        # Calculate Seg_i
++        # Term 1: Linear part integral
++        # Integral of a' * z * phi(z) from n'_i to n'_next
++        # = a' * [ -phi(z) ] from n'_i to n'_next
++        # where phi(z) is PDF of standard normal: exp(-z^2/2) / sqrt(2pi)
++        
++        pdf_i = math.exp(-n_prime_i**2 / 2) / math.sqrt(2 * math.pi)
++        pdf_next = math.exp(-n_prime_next**2 / 2) / math.sqrt(2 * math.pi)
++        
++        term1 = (a_prime / math.sqrt(2 * math.pi)) * (math.exp(-n_prime_i**2 / 2) - math.exp(-n_prime_next**2 / 2))
++        # Note: The source formula [S3] Eq 7 writes: (a_i / (2pi)) * (e... - e...). 
++        # Wait, Eq 7 in source: Seg_i = (a_i / (2pi)) * ... 
++        # Let's re-read carefully. 
++        # Source Eq 6: sum ( a_i int x rho dx + b_i int rho dx )
++        # int x rho dx for standard normal is -phi(x).
++        # So a_i * [ -phi(n_next) - (-phi(n_i)) ] = a_i * (phi(n_i) - phi(n_next)).
++        # phi(x) = exp(-x^2/2) / sqrt(2pi).
++        # So term is a_i * (exp(-n_i^2/2) - exp(-n_next^2/2)) / sqrt(2pi).
++        # The source Eq 7 has (a_i / (2pi)). This seems to be a typo in the source or 
++        # a specific normalization. Standard normal PDF is 1/sqrt(2pi). 
++        # Integral of x * N(0,1) dx is -N'(x). 
++        # Let's stick to the derived math which is standard:
++        # Term 1 = a_prime * (pdf_i - pdf_next)
++        
++        term1 = a_prime * (pdf_i - pdf_next)
++        
++        # Term 2: Constant part integral
++        # b_prime * (N(n_next) - N(n_i))
++        term2 = b_prime * (N(n_prime_next) - N(n_prime_i))
++        
++        ao += term1 + term2
++        
++    return ao
++
++def render_volume(volume, tf_segments, mean_map, std_map, tf_change_callback):
++    """
++    Main rendering loop.
++    """
++    # Precompute stats
++    mean_map, std_map = compute_local_stats(volume, window_size=10) # Window size 10 stabilizes quality/speed [S3]
++    
++    # Render loop
++    while not exit_requested:
++        # If TF changed, we don't need to recompute mean/std, 
++        # but we might need to re-evaluate the AO map if it's precomputed.
++        # In real-time, AO is computed per-voxel per-frame or cached.
++        
++        for each sample point x along ray:
++            mu = mean_map[x]
++            sigma = std_map[x]
++            
++            ao_factor = compute_ao_factor(mu, sigma, tf_segments)
++            
++            # Modulate lighting
++            # Example: color = base_color * ao_factor + emissive
++            render_sample(x, ao_factor)
+ ```
+ 
+ ### Parameters
+-*   **$R_\Omega$ / Window Size:** Radius of the local neighborhood [S2, S3]. A window size of 8-10 provides a good balance between performance and quality [S3].
+-*   **$K$:** Number of rays. Not given in the sources.
+-*   **$M$:** Number of samples along the ray. Not given in the sources.
+-*   **$k$:** Number of line segments in the TF. Reduced via simplification for performance [S3].
+-*   **$I_{bias}$:** Ambient bias specifying the amount of minimum lighting. Not given in the sources.
+-*   **$w_k$:** Weight for ray $k$. Not given in the sources.
++*   **Window Size:** The size of the local vicinity ($n \times n \times n$). A window size of 10 stabilizes the image quality vs. speed trade-off [S3]. Increasing it reduces the number of approximate segments in TF simplification but degrades quality [S3].
++*   **TF Segments ($k$):** The number of line segments in the piecewise linear TF. Performance is proportional to $k$ [S3].
++*   **Ambient Bias ($I_{bias}$):** Specifies the amount of minimum lighting [S1].
++*   **Ray Weights ($w_k$):** In the ray-casting variant, weights in $[0, 1]$ enable directional weighting [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Distribution Assumption:** The probabilistic method assumes CT values follow a normal distribution [S3]. If the actual data distribution differs greatly (e.g., binary images or bimodal distributions with the same mean/std), the lighting effect will be inaccurate [S3]. For example, regions with different transparent voxel counts but identical mean (30) and standard deviation (20) will receive the same ambient light, even if one region should be brighter [S3].
+-*   **Sharp Shadows:** If light is contributed only at the boundary of $\Omega$, sharp shadows appear [S1]. This is avoided by contributing light at each sample point along the ray, normalized to sum to one, which ensures smooth penumbra [S1].
+-*   **TF Changes:** The multiresolution data structure and intensity map must be updated whenever the transfer function changes [S1, S2].
+-*   **TF Simplification:** Simplifying the TF reduces iterations but degrades image quality if the window size is too large [S3]. Quality stabilizes at a window size of 10 [S3].
++*   **Distribution Mismatch:** The method assumes CT values follow a normal distribution. If the actual data distribution is binary or bimodal with the same mean and standard deviation, the lighting will be inaccurate (e.g., regions with different transparent voxel counts but identical stats receive the same AO) [S3].
++*   **Zero Standard Deviation:** If $\sigma_x = 0$ (homogeneous region), the transformation to standard normal space involves division by zero. This must be handled as a delta function case [S3, G].
++*   **TF Changes:** The multiresolution data structure (or statistics map) must be updated whenever the transfer function changes if the method relies on precomputed intensity maps [S1, S2]. However, the statistical method [S3] computes AO per-sample using the current TF, so it handles dynamic TFs naturally without full recomputation of the map, only the per-voxel stats which are TF-independent.
++*   **Sharp Shadows:** In ray-casting variants, contributing light only at the boundary of $\Omega$ causes sharp shadows. Light must be contributed at each sample point to ensure smooth penumbra [S1].
+ 
+ ## Subtopics
+ 
+ ### Ramp Function for AO Intensity
+-A method to scale AO intensity based on fragment opacity using a linear ramp function defined by a threshold and a window width, replacing a single threshold value [S4, unofficial]. The AO intensity factor is 0 if fragment opacity $\le$ threshold $-$ window/2, 1 if fragment opacity $\ge$ threshold $+$ window/2, and linearly interpolated between these bounds [S4, unofficial]. The volume opacity threshold specifies the center of the ramp function, and the volume opacity window specifies its width [S4, unofficial].
++A method to scale AO intensity based on fragment opacity using a linear ramp function, replacing a single threshold value [S4, unofficial]. It uses a "Volume opacity threshold" (center of the ramp) and "Volume opacity window" (width of the ramp) [S4, unofficial]. The AO intensity factor is 0 if fragment opacity $\le$ threshold - window/2, 1 if fragment opacity $\ge$ threshold + window/2, and linearly interpolated between these bounds [S4, unofficial]. This helps prevent semi-transparent surfaces from appearing fully opaque while allowing structures behind to change color [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:**
+-    *   Approach A (Probabilistic): $O(k)$ per voxel, where $k$ is the number of TF segments [S3]. This is a significant reduction from the $O(4096)$ iterations required for 12-bit CT precision in basic numerical integration [S3].
+-    *   Approach B (Ray Casting): $O(K \cdot M)$ per voxel, but accelerated by multiresolution structures and incremental updates (one ray per frame) [S1].
+-*   **Memory Complexity:** Requires storage for the intensity map ($O(N)$ where $N$ is the number of voxels) and the lookup table for the normal distribution [S1, S3]. The multiresolution structure adds overhead depending on data homogeneity [S2].
+-*   **Performance:** Using TF simplification and the probabilistic method, rendering performance can be improved by approximately 40 times compared to unaccelerated methods, achieving real-time visualization [S3]. SNR values are approximately 40 dB, making the result visually indistinguishable from the original [S3].
+-*   **Strengths:** Provides better spatial and depth cues than local illumination alone (e.g., clearer depiction of ear depth, vertebrae spaces) [S3]. Interactive frame rates are possible with incremental updates or TF simplification [S1, S3].
+-*   **Limitations:** Accuracy degrades if the local data distribution is not normal [S3]. Requires recomputation of the intensity map when the TF changes [S1].
++*   **Time Complexity:** The statistical method reduces the number of iterations from 4096 (for 12-bit CT precision) to $k$ (the number of TF segments) [S3]. With TF simplification, $k$ can be reduced to dozens or hundreds [S3].
++*   **Performance:** Achieves approximately 40 times faster rendering compared to unaccelerated methods with a window size of 8 [S3]. Signal-to-Noise Ratio (SNR) is approximately 40 dB, visually indistinguishable from the original [S3].
++*   **Memory Complexity:** Requires storage for the volume data, the mean map, and the standard deviation map. The multiresolution data structure size depends on the volume size and homogeneity [S2].
++*   **Strengths:** Provides better spatial and depth cues (e.g., human ear depth, vertebrae spaces) than local illumination alone [S3]. Real-time rendering is possible [S3]. Handles hand-drawn TFs [S3].
++*   **Limitations:** Accuracy degrades if the local CT value distribution is not normal [S3]. Image quality degrades if the window size is too large [S3].
+ 
+ ## Background
+-Local Ambient Occlusion for Volume Rendering originated from the need to improve the visibility of internal structures in medical volume rendering without the high cost of global illumination [S1, S3]. Hernell et al. introduced the foundational Volumetric Local Ambient Occlusion (LAO) model in 2007, which used a multiresolution framework and ray casting to compute local occlusion [S1]. Later, Jönsson et al. expanded on this with interactive volume illumination techniques [S2]. A significant advancement was made in 2019 by researchers who proposed a high-speed method using local vicinity statistics and a probabilistic approach, allowing for real-time rendering with hand-drawn transfer functions by reducing the computational complexity from the data range to the number of TF segments [S3].
++Local Ambient Occlusion for Volume Rendering originated from the need to provide realistic lighting in volume rendering without the cost of global illumination. The concept of local occlusion was introduced by Hernell et al. in 2007 [S1]. The specific statistical approach using local vicinity statistics and normal distribution assumptions for high-speed rendering was proposed by researchers in 2019 [S3]. It builds on the general Local Ambient Occlusion family [4977-local-ambient-occlusion.md].
+ 
+ ## Sources

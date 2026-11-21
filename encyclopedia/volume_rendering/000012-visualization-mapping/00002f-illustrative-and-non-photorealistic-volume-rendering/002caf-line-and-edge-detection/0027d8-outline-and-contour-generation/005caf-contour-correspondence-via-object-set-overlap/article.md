@@ -1,0 +1,114 @@
+# Contour Correspondence via Object Set Overlap
+
+Also called: Contour Correspondence Test, Definition 1
+
+## Overview
+This method determines if a contour $C_k^t$ at time $t$ corresponds to a contour $C_{k'}^{t+1}$ at time $t+1$ by verifying that their associated upper and lower object sets overlap. It solves the problem of tracking contour evolution (merging, splitting, or moving) in time-varying scalar fields without constructing higher-dimensional interpolations. It differs from interpolation-based methods by avoiding undesirable matchings caused by large inter-distances between contours, offering flexibility via an overlap threshold $\epsilon$ [S1].
+
+## How it works
+**Inputs:**
+- Scalar field $f_t$ at time $t$ and $f_{t+1}$ at time $t+1$.
+- Isosurface value $w$.
+- Contour $C_k^t$ at time $t$, defined by its bordering upper object $X_{at}$ and lower object $Y_{bt}$.
+- Contour $C_{k'}^{t+1}$ at time $t+1$, defined by its bordering upper object $X_{a't+1}$ and lower object $Y_{b't+1}$.
+- Threshold $\epsilon$ (typical value: 0.3) [S1].
+
+**Outputs:**
+- Boolean correspondence: $C_{k'}^{t+1} \leftarrow C_k^t$ (true if corresponding, false otherwise).
+
+**Data Structures:**
+- **Object Set:** A set of voxels (or points) belonging to a connected component.
+  - Upper object $X$: $\{x \mid f(x) \ge w\}$.
+  - Lower object $Y$: $\{x \mid f(x) \le w\}$.
+- **Volume Calculation:** $V(O)$ denotes the volume (number of voxels or integral measure) of object $O$.
+
+**Steps:**
+1. **Identify Bordering Objects:** For contour $C_k^t$, identify the unique upper object $X_{at}$ and lower object $Y_{bt}$ that have $C_k^t$ on their border. Similarly, identify $X_{a't+1}$ and $Y_{b't+1}$ for $C_{k'}^{t+1}$ [S1].
+2. **Check Upper Object Overlap:** Calculate the intersection volume $V(X_{at} \cap X_{a't+1})$.
+3. **Check Lower Object Overlap:** Calculate the intersection volume $V(Y_{bt} \cap Y_{b't+1})$.
+4. **Evaluate Significant Overlap:** Compute the normalized overlap ratios for both upper and lower objects. The correspondence holds if both ratios exceed $\epsilon$:
+   $$ \frac{V(X_{at} \cap X_{a't+1})}{\min(V(X_{at}), V(X_{a't+1}))} > \epsilon $$
+   $$ \frac{V(Y_{bt} \cap Y_{b't+1})}{\min(V(Y_{bt}), V(Y_{b't+1}))} > \epsilon $$
+   [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def check_contour_correspondence(contour_t, contour_t_plus_1, epsilon):
+    """
+    Determines if contour_t at time t corresponds to contour_t_plus_1 at time t+1.
+    
+    Args:
+        contour_t: Object containing references to its upper object X_at and lower object Y_bt.
+        contour_t_plus_1: Object containing references to its upper object X_a't+1 and lower object Y_b't+1.
+        epsilon: Threshold for significant overlap (e.g., 0.3).
+        
+    Returns:
+        bool: True if contours correspond, False otherwise.
+    """
+    # 1. Retrieve bordering objects
+    X_at = contour_t.upper_object
+    Y_bt = contour_t.lower_object
+    X_a_t1 = contour_t_plus_1.upper_object
+    Y_b_t1 = contour_t_plus_1.lower_object
+    
+    # 2. Calculate intersection volumes
+    # Note: Implementation of volume_intersection depends on data structure (e.g., voxel grid)
+    vol_upper_intersection = volume_intersection(X_at, X_a_t1)
+    vol_lower_intersection = volume_intersection(Y_bt, Y_b_t1)
+    
+    # 3. Calculate minimum volumes of the objects themselves
+    vol_X_at = volume(X_at)
+    vol_X_a_t1 = volume(X_a_t1)
+    vol_Y_bt = volume(Y_bt)
+    vol_Y_b_t1 = volume(Y_b_t1)
+    
+    # Guard against zero-volume objects to avoid division by zero [G]
+    if vol_X_at == 0 or vol_X_a_t1 == 0 or vol_Y_bt == 0 or vol_Y_b_t1 == 0:
+        return False
+        
+    # 4. Compute normalized overlap ratios
+    upper_overlap_ratio = vol_upper_intersection / min(vol_X_at, vol_X_a_t1)
+    lower_overlap_ratio = vol_lower_intersection / min(vol_Y_bt, vol_Y_b_t1)
+    
+    # 5. Check against threshold
+    return (upper_overlap_ratio > epsilon) and (lower_overlap_ratio > epsilon)
+
+def volume_intersection(obj_a, obj_b):
+    """
+    Computes the volume of the intersection of two object sets.
+    Assumes objects are represented as sets of voxel indices or boolean masks.
+    """
+    # Implementation detail: Count voxels present in both obj_a and obj_b
+    return count_common_voxels(obj_a, obj_b)
+
+def volume(obj):
+    """
+    Computes the total volume of an object set.
+    """
+    return count_voxels(obj)
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero Volume:** If an object has zero volume, the denominator becomes zero. The method should return false or handle this as a degenerate case [G].
+- **Threshold Selection:** A low $\epsilon$ may link contours with minimal overlap, potentially causing incorrect tracking. A high $\epsilon$ may fail to link contours that have moved slightly but are topologically consistent. The typical value is 0.3 [S1].
+- **Discrete vs. Continuous:** The volume calculation depends on the discretization of the scalar field. Inconsistent voxelization between $t$ and $t+1$ can affect overlap accuracy.
+
+## Subtopics
+
+### [Time-Varying Contour Correspondence Computation](17255-time-varying-contour-correspondence-computation.md)
+Computes correspondence between time-varying contours by labeling edges in the contour tree of $t+1$ with sets of edges from the contour tree of $t$. It uses Join Trees and Split Trees to efficiently determine overlaps, solving the problem of tracking contour evolution (merge/split) without direct geometric comparison.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the cost of computing object volumes and intersections. For voxel-based data, this is linear in the number of voxels in the objects.
+- **Memory Complexity:** Requires storing the object sets (upper and lower) for each contour.
+- **Strengths:** Avoids the computational cost and potential artifacts of constructing higher-dimensional interpolations ($f_{t,t+1}$). Provides flexibility via $\epsilon$ to control matching strictness.
+- **Limitations:** Requires explicit identification of upper and lower objects for each contour. May fail if the time sampling is too coarse, leading to insufficient overlap even for corresponding contours.
+- **When to Use:** When tracking contours in time-varying scalar fields where topological consistency is important and interpolation is undesirable or expensive.
+
+## Background
+Originated in the paper "Time-varying contour topology" [S1]. The method is based on the observation that corresponding objects in successive timesteps have significant overlap. It extends feature correspondence to contour correspondence by focusing on the overlap of the upper and lower objects bounding the contours.
+
+## Sources
+[S1] Time-varying contour topology, https://doi.org/10.1109/tvcg.2006.16, fetched 2026-11-08

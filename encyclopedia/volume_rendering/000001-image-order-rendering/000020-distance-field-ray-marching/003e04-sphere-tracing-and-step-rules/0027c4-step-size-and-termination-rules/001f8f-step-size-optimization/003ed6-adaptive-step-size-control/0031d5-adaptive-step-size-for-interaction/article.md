@@ -1,0 +1,108 @@
+# Adaptive Step Size for Interaction
+
+Also called: Interactive Step Size Increase, Variable Step Size, Volume Step Rate Adjustment, Volume shadow step rate
+
+## Overview
+Adaptive Step Size for Interaction is a performance optimization technique that dynamically increases the ray marching step size during user interaction (e.g., viewpoint changes) to maintain frame rate, then restores smaller step sizes for high-quality final image generation [S1, unofficial]. It differs from continuous adaptive methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by decoupling the step size from local geometric features during the interaction phase, relying instead on a global state switch to trade visual fidelity for speed [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$, scene function $f(\mathbf{p})$ (SDF or volume texture), maximum distance $t_{max}$, maximum iterations $N_{max}$, interaction flag $\phi \in \{0, 1\}$, base step size $\Delta t_{base}$, interaction step size $\Delta t_{int}$, minimum step size $\Delta t_{min}$, maximum step size $\Delta t_{max}$.
+*   **Output:** Intersection status, final distance $t$, accumulated color/opacity.
+
+**Data Structures:**
+*   `scene_func(p)`: Evaluates the density or SDF at position $\mathbf{p}$.
+*   `is_hit(val, epsilon)`: Returns true if surface is intersected.
+*   `is_early_exit(val, t)`: Returns true if accumulated opacity is sufficient.
+
+**Parameters:**
+*   $\Delta t_{base}$: Standard step size for high-quality rendering. Typical value depends on volume resolution (e.g., 1-2 voxels).
+*   $\Delta t_{int}$: Step size during interaction. Typically $2\times$ to $4\times$ $\Delta t_{base}$ [S1, unofficial].
+*   $\phi$: Boolean flag. True during mouse drag/view rotation; False during idle/render.
+
+**Numbered Steps:**
+1.  Initialize $t = 0.0$, accumulated opacity $\alpha_{acc} = 0.0$, and color $C_{acc} = (0,0,0,0)$.
+2.  Loop for $i$ from $0$ to $N_{max}-1$:
+    a. Check termination: If $t > t_{max}$, return miss.
+    b. Compute position: $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
+    c. Evaluate scene: $val = f(\mathbf{p})$.
+    d. Check hit: If `is_hit(val, epsilon)`, return hit at $t$.
+    e. Check early exit: If `is_early_exit(val, t)`, return accumulated color.
+    f. Compute step size $\Delta t$:
+       i. If $\phi$ is true (interaction mode), set $\Delta t = \Delta t_{int}$.
+       ii. If $\phi$ is false (render mode), set $\Delta t = \Delta t_{base}$.
+    g. Clamp step size: $\Delta t = \max(\Delta t, \Delta t_{min})$.
+    h. Advance ray: $t \leftarrow t + \Delta t$.
+    i. Accumulate contribution (if volume rendering): Update $\alpha_{acc}$ and $C_{acc}$ using front-to-back compositing with the sample at $\mathbf{p}$ and step $\Delta t$.
+3.  Return miss.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_interaction_march(ray_origin, ray_direction, scene_func, 
+                               max_dist, max_steps, epsilon, 
+                               is_interacting, base_step, interact_step, 
+                               min_step, max_step):
+    t = 0.0
+    alpha_acc = 0.0
+    color_acc = (0.0, 0.0, 0.0, 0.0)
+    
+    # Determine step size based on interaction state
+    if is_interacting:
+        step_size = interact_step
+    else:
+        step_size = base_step
+        
+    # Clamp step size to prevent skipping features or infinite loops
+    step_size = max(step_size, min_step)
+    step_size = min(step_size, max_step)
+
+    for i in range(max_steps):
+        if t > max_dist:
+            return False, t, color_acc
+        
+        p = ray_origin + ray_direction * t
+        val = scene_func(p)
+        
+        # Termination: Hit
+        if is_hit(val, epsilon):
+            return True, t, color_acc
+        
+        # Termination: Early Exit (Volume specific)
+        if is_early_exit(val, t, alpha_acc):
+            return False, t, color_acc
+            
+        # Volume Accumulation (if applicable)
+        density, color = evaluate_volume_sample(val, p)
+        alpha = 1.0 - exp(-density * step_size)
+        color_acc = color_acc + color * alpha * (1.0 - alpha_acc)
+        alpha_acc = alpha_acc + alpha * (1.0 - alpha_acc)
+        
+        # Advance
+        t += step_size
+        
+    return False, t, color_acc
+```
+
+**Edge Cases and Pitfalls:**
+*   **Skipping Features:** If $\Delta t_{int}$ is too large, significant geometric features (e.g., "big mountains" in heightmaps) may be completely skipped, leading to holes or artifacts [S3, unofficial].
+*   **Shadow Detail Loss:** In volume rendering, increasing step size (or "Volume step rate") can cause loss of shadow detail and make volumes appear more transparent compared to increasing pixel samples [S2].
+*   **State Synchronization:** The transition between interaction and render modes must be handled carefully to avoid visual popping. The renderer should switch back to $\Delta t_{base}$ immediately after interaction ends [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of steps. During interaction, $N$ is reduced by a factor of $\frac{\Delta t_{base}}{\Delta t_{int}}$.
+*   **Memory Complexity:** $O(1)$ auxiliary memory (excluding the volume texture/SDF storage).
+*   **Performance:** Significantly improves frame rate during viewport navigation by reducing sample count per ray [S1, unofficial].
+*   **Strengths:** Simple to implement; requires no additional data structures; effective for maintaining interactivity in real-time applications [S1, unofficial].
+*   **Limitations:** Visual quality degrades during interaction; large steps can cause aliasing or missed geometry [S3, unofficial]; not suitable for final image production [S1, unofficial].
+*   **When to use:** Real-time volume rendering where user interaction (rotation, zoom) is frequent.
+*   **When not to use:** Final offline rendering or when high geometric accuracy is required at all times.
+
+## Background
+The technique was described by Hadwiger and Rezk Salama in 2004 [S1, unofficial]. It is a common trick in direct volume rendering to balance the trade-off between computational effort and visual artifacts during interactive exploration [S1, unofficial]. The concept of discarding information as distance increases or taking bigger steps to reduce computation is also discussed in the context of realtime voxel landscape engines [S3, unofficial].
+
+## Sources
+[S1] PDF Direct Volume Rendering - KTH, https://www.kth.se/social/files/565e35dff27654457fb84363/08_VolumeRendering.pdf, fetched 2026-10-27 (unofficial)
+[S2] Rendering volumes - SideFX, https://www.sidefx.com/docs/houdini/render/volumes.html, fetched 2026-10-29
+[S3] flipcode - Realtime Voxel Landscape Engines, https://www.flipcode.com/archives/Realtime_Voxel_Landscape_Engines-Part_4_Level_of_Detail_and_Optimisation.shtml, fetched 2026-10-30 (unofficial)

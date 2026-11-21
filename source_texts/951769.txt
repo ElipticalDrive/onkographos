@@ -1,0 +1,393 @@
+Context
+Ticket number:  12989432126
+Volume3D interactive fidelity (Target FPS + fixed sample-distance LOD)
+Target: Improve interaction of Volume3D on all hardware classes.
+
+Adds an adaptive resolution feature that is managed by the renderer - not by the tools.
+Kept backward compatibility for tool based interactive resolution configuration
+
+Target FPS is an opt-in interactive quality mode for legacy Volume3D.
+While the user is dragging, the viewport measures present-frame time (EMA), maintains a pixel budget (budgetPx), and maps that budget to LOD: prefer cutting ray-cast steps first, then reduce present scale (down to ~0.35) so ContextPool draws a smaller GL rect and blits it up to the full on-screen size.
+Sample distance is adjusted to match the step LOD.
+On interaction end, full-quality sample distance is restored and the last good budget can be reused on the next drag.
+Configure with setVolume3DTargetFpsEnabled / setVolume3DTargetFps (default target 10 FPS, clamped 1–60).
+When disabled, policy falls back to fixedSampleDistance.
+Changes & Results
+
+Adds viewport-owned interactive LOD for legacy VolumeViewport3D with two policies:
+
+fixedSampleDistance (default): multiplies baseline sample distance during drag
+targetFps: adaptive budget LOD (ray steps, then present scale) steered toward a Target FPS
+
+
+Tools arm LOD via armVolume3DInteraction → beginVolume3DInteraction (TrackballRotate, VolumeCropping, Pan, Zoom). ContextPool renders/blits a smaller present rect while Target FPS is active.
+Under fixed policy, TrackballRotateTool / VolumeCroppingTool configuration.rotateSampleDistanceFactor is applied when it is a finite number > 0; otherwise default ×2. Under Target FPS, that tool key is ignored. Pan/Zoom use the default ×2 with no tool factor.
+Target FPS is clamped to 1–60; state is unregistered on viewport disableElement so the same viewportId does not reuse stale budgets/mappers.
+Updates the volumeViewport3D example (2×2 MPR + 3D, IFD checkbox/slider, LOD overlay). Documents policy vs rotateSampleDistanceFactor in 5.x migration notes.
+
+Testing
+
+ volume3d example, IFD off: rotate → fixed ×2 (or configured rotateSampleDistanceFactor); full quality on mouseup
+ Enable Interactive fidelity degradation + change Target FPS: overlay updates; tool factor does not drive LOD
+ Pan/zoom on 3D still arms interactive quality; disableElement + re-enable same id does not keep stale Target FPS state
+ pnpm test:unit:no-coverage --testPathPatterns=normalizeTargetFps
+ pnpm test:unit:no-coverage --testPathPatterns=resolveFixedSampleDistanceFactor
+
+Checklist
+PR
+
+
+[] My Pull Request title is descriptive, accurate and follows the
+semantic-release format and guidelines.
+
+Code
+
+ My code has been well-documented (function documentation, inline comments,
+etc.)
+
+Public Documentation Updates
+
+
+[] The documentation page has been updated as necessary for any public API
+additions or removals.
+
+Tested Environment
+Low end and regular hardware
+
+Feat/t14 interactive fidelity degradation by mbellehumeur · Pull Request #2922 · cornerstonejs/cornerstone3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Feat/t14 interactive fidelity degradation
+#2922
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Open
+mbellehumeur
+wants to merge
+7
+commits into
+cornerstonejs:main
+base:
+main
+Branches
+Tags
+Loading
+Loading
+from
+mbellehumeur:feat/T14-InteractiveFidelityDegradation
++1,369
+−164
+Open
+Feat/t14 interactive fidelity degradation
+#2922
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+7 commits
+Select commit
+Hold shift + click to select a range
+ff19726
+feat(volumeViewport3D): enhance 3D rendering with MPR layout and inte…
+mbellehumeur Sep 21, 2026
+30eef31
+refactor(core): remove unnecessary min/max range check
+mbellehumeur Sep 21, 2026
+a84a0b9
+Update packages/core/src/RenderingEngine/helpers/volume3DTargetFps.ts
+mbellehumeur Sep 21, 2026
+230ecfc
+Clamp the normalized FPS to range 1-60 as per coderabbit request
+mbellehumeur Sep 23, 2026
+f755805
+Merge branch 'feat/T14-InteractiveFidelityDegradation' of https://git…
+mbellehumeur Sep 23, 2026
+a818eb1
+fix(rendering): unregister volume 3D target FPS before viewport destr…
+mbellehumeur Sep 23, 2026
+37b0c10
+feat(rendering):continue support of rotateSamplingDistance configura…
+mbellehumeur Sep 23, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+feat(rendering):continue support of rotateSamplingDistance configurat…
+```
+…ion in cornerstone tools
+```
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+mbellehumeur
+committed
+Sep 23, 2026
+commit 37b0c10d0f569b3e83e17e202e77f2aa1b1848f9
+Some comments aren't visible on the classic Files Changed page.
+There are no files selected for viewing
+42 changes: 35 additions & 7 deletions
+42
+packages/core/src/RenderingEngine/helpers/volume3DTargetFps.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -249,8 +249,25 @@ function resolveSampleDistance(
+return 0;
+}
+function applyFixedSampleDistanceFactor(entry: Volume3DTargetFpsEntry) {
+const factor = VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR;
+/**
+* Resolve the fixed-policy interactive sample-distance multiplier.
+* Accepts a finite number > 0; otherwise returns the default ×2.
+*/
+export function resolveFixedSampleDistanceFactor(
+sampleDistanceFactor?: number
+): number {
+const factor = Number(sampleDistanceFactor);
+if (Number.isFinite(factor) && factor > 0) {
+return factor;
+}
+return VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR;
+}
+function applyFixedSampleDistanceFactor(
+entry: Volume3DTargetFpsEntry,
+sampleDistanceFactor?: number
+) {
+const factor = resolveFixedSampleDistanceFactor(sampleDistanceFactor);
+for (const { mapper, baselineSampleDistance } of entry.baselineMappers) {
+mapper.setSampleDistance?.(baselineSampleDistance * factor);
+}
+Expand Down
+Expand Up
+@@ -355,8 +372,10 @@ export function getVolume3DTargetFps(viewportId: string): number | undefined {
+/**
+* Set interactive quality policy for a legacy Volume3D viewport.
+* `fixedSampleDistance` (default) applies ×2 during drag; `targetFps` uses
+* adaptive budget LOD when also enabled via setVolume3DTargetFpsEnabled.
+* `fixedSampleDistance` (default) applies a fixed sample-distance multiplier
+* during drag (tool `rotateSampleDistanceFactor` when provided, else ×2);
+* `targetFps` uses adaptive budget LOD when also enabled via
+* setVolume3DTargetFpsEnabled.
+*/
+export function setVolume3DInteractiveQualityPolicy(
+viewportId: string,
+Expand Down
+Expand Up
+@@ -423,9 +442,18 @@ export function getVolume3DTargetFpsEnabled(
+/**
+* Begin interactive LOD for a legacy Volume3D viewport.
+* Returns true when interaction quality was armed (fixed ×2 or Target FPS).
+* Returns true when interaction quality was armed (fixed sample-distance
+* factor or Target FPS).
+*
+* Under `fixedSampleDistance`, optional `sampleDistanceFactor` (e.g. from
+* tool `rotateSampleDistanceFactor`) multiplies baseline sample distance when
+* it is a finite number > 0; otherwise the default ×2 is used.
+* Under `targetFps`, the factor is ignored.
+*/
+export function beginVolume3DInteraction(viewportId: string): boolean {
+export function beginVolume3DInteraction(
+viewportId: string,
+options?: { sampleDistanceFactor?: number }
+): boolean {
+const entry = ensureEntry(viewportId);
+const viewport = resolveViewport(viewportId);
+if (!entry || !viewport) {
+Expand Down
+Expand Up
+@@ -463,7 +491,7 @@ export function beginVolume3DInteraction(viewportId: string): boolean {
+applySampleDistanceForLod(entry, entry.lastLod);
+} else {
+// fixedSampleDistance (default)
+applyFixedSampleDistanceFactor(entry);
+applyFixedSampleDistanceFactor(entry, options?.sampleDistanceFactor);
+entry.lastLod = {
+scale: 1,
+steps: INTERACTIVE_FULL_STEPS,
+Expand Down
+33 changes: 33 additions & 0 deletions
+33
+packages/core/test/resolveFixedSampleDistanceFactor.jest.js
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -0,0 +1,33 @@
+import {
+resolveFixedSampleDistanceFactor,
+VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR,
+} from '../src/RenderingEngine/helpers/volume3DTargetFps';
+describe('resolveFixedSampleDistanceFactor', () => {
+it('returns the default for missing, non-positive, or non-finite input', () => {
+expect(resolveFixedSampleDistanceFactor()).toBe(
+VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR
+);
+expect(resolveFixedSampleDistanceFactor(undefined)).toBe(
+VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR
+);
+expect(resolveFixedSampleDistanceFactor(0)).toBe(
+VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR
+);
+expect(resolveFixedSampleDistanceFactor(-1)).toBe(
+VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR
+);
+expect(resolveFixedSampleDistanceFactor(NaN)).toBe(
+VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR
+);
+expect(resolveFixedSampleDistanceFactor(Infinity)).toBe(
+VOLUME_3D_DEFAULT_INTERACTIVE_SAMPLE_DISTANCE_FACTOR
+);
+});
+it('returns finite positive factors unchanged', () => {
+expect(resolveFixedSampleDistanceFactor(1)).toBe(1);
+expect(resolveFixedSampleDistanceFactor(2)).toBe(2);
+expect(resolveFixedSampleDistanceFactor(4.5)).toBe(4.5);
+});
+});
+8 changes: 6 additions & 2 deletions
+8
+packages/tools/src/tools/TrackballRotateTool.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -35,6 +35,8 @@ class TrackballRotateTool extends BaseTool {
+supportedInteractionTypes: ['Mouse', 'Touch'],
+configuration: {
+rotateIncrementDegrees: 2,
+// Applied under fixedSampleDistance policy; ignored under targetFps.
+rotateSampleDistanceFactor: 2,
+},
+}
+) {
+Expand All
+@@ -45,8 +47,10 @@ class TrackballRotateTool extends BaseTool {
+preMouseDownCallback = (evt: EventTypes.InteractionEventType) => {
+const { element } = evt.detail;
+// Viewport policy owns interactive LOD (fixed ×2 or Target FPS).
+armVolume3DInteraction(element);
+// Viewport policy owns interactive LOD; tool may supply fixed multiplier.
+armVolume3DInteraction(element, {
+sampleDistanceFactor: this.configuration.rotateSampleDistanceFactor,
+});
+return true;
+};
+Expand Down
+6 changes: 4 additions & 2 deletions
+6
+packages/tools/src/tools/VolumeCroppingTool.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -453,8 +453,10 @@ class VolumeCroppingTool extends BaseTool {
+}
+}
+// Rotate path: viewport policy owns interactive LOD (fixed ×2 or Target FPS).
+armVolume3DInteraction(element);
+// Rotate path: viewport policy owns interactive LOD; tool may supply fixed multiplier.
+armVolume3DInteraction(element, {
+sampleDistanceFactor: this.configuration.rotateSampleDistanceFactor,
+});
+if (this.cleanUp !== null) {
+document.removeEventListener('mouseup', this.cleanUp);
+Expand Down
+10 changes: 8 additions & 2 deletions
+10
+packages/tools/src/utilities/armVolume3DInteraction.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -8,18 +8,24 @@ import {
+* Arms legacy Volume3D interactive quality for the element (fixed sample-
+* distance factor or Target FPS, per viewport policy), and restores full
+* quality on mouseup / touchend / touchcancel.
+*
+* Under `fixedSampleDistance`, optional `sampleDistanceFactor` is applied
+* when it is a finite number > 0; otherwise the default ×2 is used.
+* Under `targetFps`, the factor is ignored.
+*
+* Returns true when interaction quality was armed.
+*/
+export default function armVolume3DInteraction(
+element: HTMLDivElement
+element: HTMLDivElement,
+options?: { sampleDistanceFactor?: number }
+): boolean {
+const enabledElement = getEnabledElement(element);
+if (!enabledElement?.viewport) {
+return false;
+}
+const { viewport } = enabledElement;
+if (!beginVolume3DInteraction(viewport.id)) {
+if (!beginVolume3DInteraction(viewport.id, options)) {
+return false;
+}
+Expand Down
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

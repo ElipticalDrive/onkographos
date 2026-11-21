@@ -1,0 +1,184 @@
+# Tensor Times Matrix (TTM) Reconstruction
+
+Also called: CUDA TTM Reconstruction, CUDA Tensor Times Matrix (TTM) Reconstruction, GPU Tensor Reconstruction via TTM, TTM Reconstruction, TTM-based decoding, n-mode product reconstruction
+
+## Overview
+
+Tensor Times Matrix (TTM) Reconstruction is a GPU-accelerated method for reconstructing volume data bricks from their Tucker decomposition, specifically designed to optimize computational cost and memory hierarchy usage on GPGPUs [S2]. It solves the problem of high memory bandwidth and computational complexity associated with naive tensor reconstruction by refactoring the core tensor and factor matrix multiplications into three sequential, memory-efficient kernel calls [S2]. Unlike simple reconstruction which requires cubic complexity $O(R^3)$ and full core tensor availability in each thread, TTM reconstruction reduces per-voxel complexity to linear growth $O(R)$ with respect to the rank $R$ [S2]. It builds on [Tensor Approximation](5362-tensor-approximation.md) by implementing the specific n-mode product formulation of the Tucker model.
+
+## How it works
+
+**Inputs and Outputs**
+*   **Input:** A core tensor $B$ of size $R_1 \times R_2 \times R_3$, and three factor matrices $U^{(1)}$ ($I_1 \times R_1$), $U^{(2)}$ ($I_2 \times R_2$), and $U^{(3)}$ ($I_3 \times R_3$). The data is typically quantized (e.g., 16-bit) [S2].
+*   **Output:** A reconstructed volume brick $A_f$ of size $I_1 \times I_2 \times I_3$ (typically $B^3$ voxels, e.g., $32^3$) [S2].
+
+**Data Structures**
+*   **Core Tensor $B$:** Stored as a 3D array of size $R_1 \times R_2 \times R_3$.
+*   **Factor Matrices $U^{(n)}$:** Stored as 2D arrays. $U^{(1)}$ is $I_1 \times R_1$, $U^{(2)}$ is $I_2 \times R_2$, $U^{(3)}$ is $I_3 \times R_3$.
+*   **Intermediate Tensors:**
+    *   $B'$: Size $I_1 \times R_2 \times R_3$ (output of TTM1, input to TTM2).
+    *   $B''$: Size $I_1 \times I_2 \times R_3$ (output of TTM2, input to TTM3).
+*   **Shared Memory:** Used per thread block to store slices of factor matrices and core tensors to avoid global memory latency. Bank conflicts are avoided by dequantizing data to 32-bit floating-point words before uploading to shared memory [S2].
+
+**Formulas**
+The reconstruction is defined by the sequential n-mode products [S1, S2]:
+$$ A_f = B \times_1 U^{(1)} \times_2 U^{(2)} \times_3 U^{(3)} $$
+
+Where $\times_n$ denotes the n-mode product. The sequential steps are:
+1.  $B' = B \times_1 U^{(1)}$
+2.  $B'' = B' \times_2 U^{(2)}$
+3.  $A_f = B'' \times_3 U^{(3)}$
+
+**Parameters**
+*   **Brick Size:** Typically $32^3$ voxels [S2].
+*   **Rank:** Typically $(16, 16, 16)$ for tested configurations [S2].
+*   **Quantization:** 16-bit for factor matrices and core tensor in tested configurations [S2].
+*   **Shared Memory Limits:** 16 KB for CUDA 1.x, 48 KB for CUDA 2.x per multiprocessor [S2].
+
+**Algorithm Steps**
+The reconstruction is performed on the GPU using three successive kernel calls (TTM1, TTM2, TTM3). One thread block is assigned per decoded brick. Within a block, one thread computes one voxel of the output brick [S2].
+
+1.  **TTM1 (Mode 1):**
+    *   Load $U^{(1)}$ and a slice of $B$ into shared memory.
+    *   Dequantize elements to 32-bit floats.
+    *   Compute $B'(i_1, r_2, r_3) = \sum_{r_1=1}^{R_1} U^{(1)}(i_1, r_1) \cdot B(r_1, r_2, r_3)$.
+    *   Store result in $B'$.
+2.  **TTM2 (Mode 2):**
+    *   Load $U^{(2)}$ and a slice of $B'$ into shared memory.
+    *   Dequantize elements.
+    *   Compute $B''(i_1, i_2, r_3) = \sum_{r_2=1}^{R_2} U^{(2)}(i_2, r_2) \cdot B'(i_1, r_2, r_3)$.
+    *   Store result in $B''$.
+3.  **TTM3 (Mode 3):**
+    *   Load $U^{(3)}$ and a slice of $B''$ into shared memory.
+    *   Dequantize elements.
+    *   Compute $A_f(i_1, i_2, i_3) = \sum_{r_3=1}^{R_3} U^{(3)}(i_3, r_3) \cdot B''(i_1, i_2, r_3)$.
+    *   Add the contribution of the "hot-corner" coefficient $B(0,0,0)$ directly from its unquantized value [S2].
+    *   Store $A_f$ in a decoding buffer.
+4.  **Post-Reconstruction:**
+    *   Perform a device-to-device copy of the decoded brick to the GPU texture cache (bound to a CUDA array) for rendering [S2].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global constants
+BRICK_SIZE = 32
+RANK = 16
+# Note: I1, I2, I3 correspond to the dimensions of the brick, typically equal to BRICK_SIZE
+# R1, R2, R3 correspond to the Tucker ranks
+
+def ttm_reconstruct(core_tensor_B, factor_U1, factor_U2, factor_U3, hot_corner_val):
+    """
+    Reconstructs a volume brick using sequential TTM kernels.
+    Inputs:
+        core_tensor_B: 3D array [R1, R2, R3]
+        factor_U1: 2D array [I1, R1]
+        factor_U2: 2D array [I2, R2]
+        factor_U3: 2D array [I3, R3]
+        hot_corner_val: float, unquantized value of B(0,0,0)
+    Output:
+        brick: 3D array [I1, I2, I3]
+    """
+    I1, R1 = factor_U1.shape
+    I2, R2 = factor_U2.shape
+    I3, R3 = factor_U3.shape
+    
+    # Step 1: TTM1 -> B' = B x1 U1
+    # B' shape: [I1, R2, R3]
+    B_prime = zeros((I1, R2, R3))
+    
+    # Parallelization: One thread block per brick slice or voxel group.
+    # For implementation clarity, we show the voxel-wise logic performed by threads.
+    # In GPU, this is done via shared memory tiling.
+    for i1 in range(I1):
+        for r2 in range(R2):
+            for r3 in range(R3):
+                sum_val = 0.0
+                for r1 in range(R1):
+                    # Dequantize U1 and B if necessary
+                    u1_val = dequantize(factor_U1[i1, r1])
+                    b_val = dequantize(core_tensor_B[r1, r2, r3])
+                    sum_val += u1_val * b_val
+                B_prime[i1, r2, r3] = sum_val
+
+    # Step 2: TTM2 -> B'' = B' x2 U2
+    # B'' shape: [I1, I2, R3]
+    B_double_prime = zeros((I1, I2, R3))
+    
+    for i1 in range(I1):
+        for i2 in range(I2):
+            for r3 in range(R3):
+                sum_val = 0.0
+                for r2 in range(R2):
+                    u2_val = dequantize(factor_U2[i2, r2])
+                    b_prime_val = B_prime[i1, r2, r3]
+                    sum_val += u2_val * b_prime_val
+                B_double_prime[i1, i2, r3] = sum_val
+
+    # Step 3: TTM3 -> Af = B'' x3 U3
+    # Af shape: [I1, I2, I3]
+    Af = zeros((I1, I2, I3))
+    
+    for i1 in range(I1):
+        for i2 in range(I2):
+            for i3 in range(I3):
+                sum_val = 0.0
+                for r3 in range(R3):
+                    u3_val = dequantize(factor_U3[i3, r3])
+                    b_double_prime_val = B_double_prime[i1, i2, r3]
+                    sum_val += u3_val * b_double_prime_val
+                
+                # Add hot-corner contribution
+                # The hot-corner B(0,0,0) is handled separately to avoid special case in loop
+                # It corresponds to i1=0, i2=0, i3=0 in the final sum if indices align,
+                # but the source specifies adding it directly to the voxel.
+                # Based on Alg 3, it is added to the voxel being computed.
+                # Assuming standard Tucker indexing where B(0,0,0) contributes to the first voxel
+                # or is a bias term. The source says "add contribution of hot-corner core value to voxel".
+                # We add it to all voxels? No, typically B(0,0,0) is just one element.
+                # However, the source says "encode a zero quantized coefficient... unquantized value is added directly".
+                # This implies the loop sum excludes B(0,0,0) or it's added as a constant offset for the specific voxel (0,0,0).
+                # Given the phrasing "add contribution... to voxel", and the context of avoiding special cases,
+                # it likely means the voxel at (0,0,0) gets this extra value, or it's a global bias.
+                # Let's assume it's added to the specific voxel (0,0,0) based on standard tensor indexing.
+                if i1 == 0 and i2 == 0 and i3 == 0:
+                    sum_val += hot_corner_val
+                    
+                Af[i1, i2, i3] = sum_val
+                
+    return Af
+
+def dequantize(val):
+    """Placeholder for dequantization logic. In GPU, this converts 16-bit to 32-bit float."""
+    # Implementation detail: Linear dequantization using min/max values extracted from data
+    return val # Simplified for pseudocode completeness
+```
+
+*Note: The pseudocode above illustrates the mathematical operations. The actual GPU implementation uses shared memory tiling and parallel thread blocks as described in the sources [S2]. Specifically, TTM2 and TTM3 split the matrix-matrix multiplication into two blocks to optimize shared memory usage, loading only half of the factor matrix per block [S2].*
+
+## Subtopics
+
+### [Partial Decoding](14061-partial-decoding.md)
+A technique for visualizing 4D Tensor Train volumes that enables interactive time access by avoiding full 4D tensor reconstruction. It differs from TTM by focusing on skipping data blocks for time-series data, whereas TTM focuses on the algebraic reconstruction of 3D spatial bricks.
+
+### [Incremental Tensor Reconstruction](15431-incremental-tensor-reconstruction.md)
+A GPU-based method that optimizes the sequential application of TTM kernels by rearranging the summation order to reduce floating-point operations. It builds directly on TTM Reconstruction but improves upon its computational complexity from $O(R^3)$ to $O(R)$ per voxel via algebraic rearrangement.
+
+## Operating characteristics
+
+*   **Time Complexity:** The computational complexity per reconstructed voxel grows linearly with the rank $R$, i.e., $O(R)$, compared to $O(R^3)$ for simple reconstruction [S2].
+*   **Memory Complexity:** The method is memory efficient. It does not require the complete core tensor to be available in each thread. Intermediate tensors $B'$ and $B''$ are stored in global memory between kernel calls [S2].
+*   **Performance:** On a GeForce GTX 480, interactive rendering frame rates average 50-100Hz, with a minimum of 12Hz in demanding situations [S2]. Tensor reconstruction constitutes negligible overhead compared to ray-casting and data transfer [S2].
+*   **Preprocessing:** Preprocessing time is significant. For a 2GB chameleon dataset, preprocessing took 25 minutes 15 seconds; for a 17GB tooth dataset, it took 8 hours 45 minutes [S2].
+*   **Strengths:** High interactivity, low memory footprint per thread, optimized for GPGPU memory hierarchy (shared memory usage) [S2].
+*   **Limitations:** Requires three sequential kernel calls, introducing some overhead. The final copy to texture cache is the most costly part of the reconstruction process [S2].
+
+## Background
+
+The method was introduced in the context of interactive multiscale tensor reconstruction for multiresolution volume rendering [S2]. It addresses the limitations of simple tensor reconstruction, which suffers from cubic complexity and high memory requirements [S2]. The approach leverages the CUDA framework to optimize the n-mode product operations inherent in Tucker decomposition [S2].
+
+## Sources
+
+[S1] An Algorithm for Choosing Optimal Rank in Tensor Approximation of Multi-Resolution Volume Rendering, https://doi.org/10.12677/csa.2018.811183, fetched 2026-10-26
+[S2] Interactive Multiscale Tensor Reconstruction for Multiresolution Volume Rendering, https://ics.uci.edu/~gopi/SamplePubs/MultiscaleTensorVis.pdf, fetched 2026-10-26

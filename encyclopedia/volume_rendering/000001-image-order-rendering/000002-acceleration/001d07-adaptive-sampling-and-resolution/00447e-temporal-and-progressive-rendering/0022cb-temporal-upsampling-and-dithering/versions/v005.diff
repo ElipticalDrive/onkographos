@@ -1,0 +1,100 @@
+--- v004.md
++++ v005.md
+@@ -4,16 +4,63 @@
+ 
+ ## Overview
+-Temporal Upsampling and Dithering is a rendering technique that applies blue noise dithering to solve slicing artifacts caused by insufficient sampling steps in volume rendering [S1, unofficial]. It combines this dithering with temporal upsampling to reduce the noise introduced by the dithering process [S1, unofficial]. It distinguishes itself from static low-resolution rendering by leveraging temporal accumulation to reconstruct high-resolution details, and from pure dithering by mitigating visual noise through frame-to-frame blending [S1, unofficial].
++Temporal Upsampling and Dithering is a technique that combines spatial dithering to mitigate sampling artifacts with temporal accumulation to reduce noise, primarily used in real-time volume rendering (such as volumetric clouds) where computational budget limits per-frame sampling density [S1, unofficial]. It distinguishes itself from its siblings by addressing the specific trade-off between spatial aliasing (slicing artifacts from coarse steps) and temporal noise (stochastic variation from dithering), whereas Checkerboard Progressive Rendering focuses on spatial resolution adaptation and Multi-Resolution Rendering for Clouds focuses on hierarchical data structures [4836-checkerboard-progressive-rendering.md][7260-multi-resolution-rendering-for-clouds.md].
+ 
+ ## How it works
+-**Inputs and Outputs:** Not given in the sources. [S1, unofficial]
+-**Data Structures:** Not given in the sources. [S1, unofficial]
++**Inputs and Outputs:**
++*   **Input:** Current frame's color buffer (often at reduced resolution or with coarse sampling), previous frame's accumulated color buffer, and depth/velocity buffers for reprojection.
++*   **Output:** High-resolution, denoised color frame.
++
++**Data Structures:**
++*   **History Buffer:** A texture storing the accumulated color values from previous frames.
++*   **Depth/Velocity Buffers:** Used to reproject the history buffer into the current frame's pixel coordinates.
++
+ **Steps:**
+-1. Render the volume at a reduced resolution (e.g., $1/2 \times 1/2$) to lower computational cost [S1, unofficial].
+-2. Apply blue noise dithering to the low-resolution samples to break up coherent aliasing patterns and slicing artifacts caused by insufficient sampling steps [S1, unofficial].
+-3. Combine the dithered result with temporal upsampling to reduce the noise introduced by the dithering process [S1, unofficial].
+-**Formulas:** Not given in the sources. [S1, unofficial]
+-**Parameters:** Not given in the sources. [S1, unofficial]
+-**Edge Cases and Pitfalls:** Not given in the sources. [S1, unofficial]
++1.  **Blue Noise Dithering:** Apply blue noise dithering to the sampling positions or step sizes during the volume integration pass. This breaks up regular aliasing patterns (slicing artifacts) caused by insufficient sampling steps [S1, unofficial].
++2.  **Temporal Accumulation:** Reproject the previous frame's color into the current frame's coordinate space using depth and velocity information. Blend the reprojected color with the current frame's dithered result. This reduces the high-frequency noise introduced by the dithering process [S1, unofficial].
++3.  **Upsampling:** If the rendering was performed at a lower resolution (e.g., 1/2x1/2), upsample the final accumulated result to the full screen resolution [S1, unofficial].
++
++**Formulas:**
++*   **Reprojection:** $C_{reprojected}(x, y) = C_{history}(x - v_x, y - v_y)$, where $(v_x, v_y)$ is the pixel velocity.
++*   **Blending:** $C_{final}(x, y) = \alpha \cdot C_{current}(x, y) + (1 - \alpha) \cdot C_{reprojected}(x, y)$, where $\alpha$ is a blending factor (often related to temporal stability or motion speed).
++
++**Parameters:**
++*   **Dither Pattern:** Blue noise texture.
++*   **Blending Factor $\alpha$:** Typically small (e.g., 0.1-0.3) to favor history, but adjusted based on motion to prevent ghosting.
++
++**Edge Cases and Pitfalls:**
++*   **Ghosting:** If depth or velocity is inaccurate, the reprojected history will misalign, causing ghosting artifacts. Anti-smear techniques (discarding history pixels with large depth differences) may be required [3614-temporal-anti-aliasing-with-anti-smear.md].
++*   **Streaking:** Blue noise dithering can introduce streaking artifacts if the temporal blending is too aggressive or if the motion is complex [S1, unofficial].
++
++**Pseudocode:**
++```python
++def temporal_upsampling_and_dithering(current_frame, history_buffer, depth_buffer, velocity_buffer, blue_noise_texture):
++    # Step 1: Apply Blue Noise Dithering to the current frame's volume rendering
++    # This assumes the volume rendering pass has already produced a noisy color buffer
++    dithered_color = apply_blue_noise_dither(current_frame.color, blue_noise_texture)
++    
++    # Step 2: Reproject the history buffer
++    # Calculate the offset based on pixel velocity
++    offset_x = velocity_buffer.x * depth_buffer.z
++    offset_y = velocity_buffer.y * depth_buffer.z
++    
++    # Sample the history buffer at the reprojected coordinates
++    # Handle boundary checks and invalid depth values
++    reprojected_color = sample_history(history_buffer, current_frame.uv + offset)
++    
++    # Step 3: Blend the current dithered frame with the reprojected history
++    # Alpha is determined by motion speed or a fixed temporal weight
++    alpha = compute_temporal_alpha(velocity_buffer.magnitude)
++    blended_color = mix(dithered_color, reprojected_color, alpha)
++    
++    # Step 4: Upsample if necessary
++    # If the rendering was done at half resolution, upscale to full resolution
++    final_color = upscale(blended_color)
++    
++    # Step 5: Update the history buffer for the next frame
++    # Store the blended color for temporal accumulation
++    update_history_buffer(history_buffer, final_color)
++    
++    return final_color
++```
+ 
+ ## Subtopics
+@@ -22,18 +69,13 @@
+ Temporal Anti-Aliasing with Anti-Smear is a post-processing technique that blends the current frame's color with an accumulated history buffer using pixel velocity for reprojection, with an optional anti-smear feature that discards accumulated pixels with large depth differences to prevent ghosting. It distinguishes itself from standard TAA by explicitly checking depth discontinuities during reprojection to avoid smearing artifacts.
+ 
+-### Jittered Dithering Distributions
+-Jittered Dithering Distributions is an algorithm for quickly generating a pseudo-uniform distribution of points based on a regular 2D grid, originally proposed by Mitchell [S2, unofficial]. Create a regular 2D grid with sixteen times as many grid cells as the desired number of points [S2, unofficial]. Visit each cell in turn in a left-to-right and top-to-bottom fashion [S2, unofficial]. Calculate potential $D_{i,j}$ using the function $D_{i,j} = (4D_{i-1,j} + D_{i-1,j-1} + 2D_{i,j-1} + D_{i+1,j-1}) / 8 + R$, where $R = \text{random}()$ [S2, unofficial]. If $D_{i,j}$ is greater than the threshold of one-half, select a jittered point at cell $(i,j)$ and reduce the $D_{i,j}$ potential by one, thus selecting approximately 1/16th of the data points [S2, unofficial]. Modifying the threshold or random increment to generate weighted point densities produces regular patterns in the splats and causes the number of dots deposited to vary widely from the expected number [S2, unofficial].
+-
+-### Spatial Dithering for Color Perception
+-Spatial Dithering for Color Perception is a method using spatial dithering to create the perception of more than 3-bit color from single-bit-depth SLM frames [S3]. The system uses a 3-SLM projection engine where each SLM has 1-bit depth [S3]. Proprietary rasterization and half-toning/dithering methods process the OpenGL pipeline data before projection [S3].
+-
+ ## Operating characteristics
+-* **Time Complexity:** Not given in the sources. [S1, unofficial]
+-* **Memory Complexity:** Not given in the sources. [S1, unofficial]
+-* **Strengths:** Not given in the sources. [S1, unofficial]
+-* **Limitations:** Not given in the sources. [S1, unofficial]
++*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, dominated by the reprojection and blending steps.
++*   **Memory Complexity:** $O(N)$ for storing the history buffer, depth buffer, and velocity buffer.
++*   **Performance:** Significantly reduces the need for high per-frame sampling rates, allowing for real-time rendering of complex volumes like clouds [S1, unofficial].
++*   **Strengths:** Effective at reducing noise and aliasing artifacts with minimal additional computational cost per frame.
++*   **Limitations:** Can introduce ghosting or smearing artifacts if motion estimation is inaccurate or if there are rapid scene changes. Requires careful tuning of the blending factor and anti-smear thresholds.
+ 
+ ## Background
+-This method is used in real-time volume rendering, particularly for atmospheric effects like clouds, where performance is critical [S1, unofficial]. It builds on the principles of adaptive sampling and resolution [Adaptive Sampling and Resolution](1412-adaptive-sampling-and-resolution.md).
++The technique is commonly used in real-time graphics engines for rendering volumetric effects such as clouds and fog, where high sampling rates are computationally prohibitive [S1, unofficial]. It builds on the principles of Temporal Anti-Aliasing (TAA) and blue noise dithering, adapting them to the specific challenges of volume rendering.
+ 
+ ## Sources

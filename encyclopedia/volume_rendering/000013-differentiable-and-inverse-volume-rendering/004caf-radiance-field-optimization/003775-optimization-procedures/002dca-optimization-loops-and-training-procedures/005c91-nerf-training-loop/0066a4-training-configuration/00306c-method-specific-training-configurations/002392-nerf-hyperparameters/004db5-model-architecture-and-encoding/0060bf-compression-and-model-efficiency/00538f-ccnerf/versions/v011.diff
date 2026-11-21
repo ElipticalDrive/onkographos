@@ -1,0 +1,330 @@
+--- v010.md
++++ v011.md
+@@ -1,52 +1,30 @@
+ # CCNeRF
+-
+-Also called: Compressible-Composable NeRF, Rank-residual Decomposition NeRF
++Also called: Rank-residual Decomposition NeRF
+ 
+ ## Overview
+-CCNeRF is a neural field representation that enables efficient compression and composition of 3D scenes by learning a hybrid tensor rank decomposition of the scene without using neural networks for rendering [S1]. Unlike NeRF variants that rely on a shared MLP renderer (e.g., NSVF) or hybrid tensor-MLP approaches (e.g., TensoRF), CCNeRF models the radiance field *only* with tensor rank decomposition, preserving low-rank approximation properties to allow dynamic model size adjustment via rank truncation and arbitrary composition via rank concatenation [S1].
++CCNeRF is a neural field representation that enables efficient compression and composition of 3D scenes by learning a hybrid tensor rank decomposition of the scene without using neural networks for rendering [S1]. Unlike NeRF variants that rely on a shared MLP renderer (e.g., NSVF) or hybrid tensor-MLP approaches (e.g., TensoRF), CCNeRF models the radiance field *only* with tensor rank decomposition, preserving the low-rank approximation properties necessary for dynamic size adjustment and arbitrary composition [S1].
+ 
+ ## How it works
+-**Inputs:**
+-*   3D spatial coordinate $\mathbf{x} = (x, y, z)$.
+-*   Viewing direction $\mathbf{d} = (\theta, \phi)$ (spherical coordinates).
+-*   Target rank $R$ (for compression) or set of rank components (for composition).
+-
+-**Outputs:**
+-*   Volume density $\sigma \in \mathbb{R}$.
+-*   Color $\mathbf{c} \in \mathbb{R}^3$.
++**Inputs and Outputs:**
++*   **Input:** A set of 2D images with known camera poses $(o, d)$ and a target rank configuration (vector-based vs. matrix-based components).
++*   **Output:** A compressed radiance field representation consisting of factor matrices/vectors, a core tensor (or weight matrix), and per-object transformation matrices. The rendering output is the pixel color $\hat{C}(r)$ for a ray $r$.
+ 
+ **Data Structures:**
+-The model consists of two main parts:
+-1.  **Rank Weights Matrix ($W$):** A matrix storing weights for different feature channels. If the total rank is $R_{total}$ and the feature dimension is $F$, $W \in \mathbb{R}^{R_{total} \times F}$.
+-2.  **Rank Components ($\mathcal{U}$):** A set of decomposed rank components. Each component is either:
+-    *   **Vector-based (CP):** Factor matrices $U^x \in \mathbb{R}^{H \times R_{vec}}, U^y \in \mathbb{R}^{W \times R_{vec}}, U^z \in \mathbb{R}^{D \times R_{vec}}$.
+-    *   **Matrix-based (Triple Plane):** Factor matrices $U^{xy} \in \mathbb{R}^{H \times W \times R_{mat}}, U^{xz} \in \mathbb{R}^{H \times D \times R_{mat}}, U^{yz} \in \mathbb{R}^{W \times D \times R_{mat}}$.
+-    *   The total rank $R_{total} = R_{vec} + R_{mat}$. The ratio of vector- to matrix-based components is controllable [S1].
++The model structure consists of two main parts [S1]:
++1.  **Rank Components:** A set of decomposed components that are either vector-based (CP decomposition) or matrix-based (triple plane variant). The ratio of vector- to matrix-based components is controllable.
++    *   *Vector-based (CP):* Factor matrices $U^x \in \mathbb{R}^{H \times R_{vec}}$, $U^y \in \mathbb{R}^{W \times R_{vec}}$, $U^z \in \mathbb{R}^{D \times R_{vec}}$.
++    *   *Matrix-based (Triple Plane):* Factor matrices $U^{xy} \in \mathbb{R}^{H \times W \times R_{mat}}$, $U^{xz} \in \mathbb{R}^{H \times D \times R_{mat}}$, $U^{yz} \in \mathbb{R}^{W \times D \times R_{mat}}$.
++2.  **Weight Matrix:** A matrix storing rank weights for different feature channels, denoted as $S$ (core tensor) or a weight matrix mapping the decomposed components to the final feature vector.
+ 
+ **Querying a 3D Coordinate:**
+-To query density $\sigma$ and color $\mathbf{c}$ at $\mathbf{x}$ and $\mathbf{d}$:
+-1.  **Project Coordinate:** Project $\mathbf{x}$ onto the decomposed vectors or matrices.
+-    *   For vector-based components: Compute dot products $\mathbf{u}^x_i = U^x_i \cdot \mathbf{x}$, $\mathbf{u}^y_i = U^y_i \cdot \mathbf{x}$, $\mathbf{u}^z_i = U^z_i \cdot \mathbf{x}$.
+-    *   For matrix-based components: Interpolate values from the planes $U^{xy}, U^{xz}, U^{yz}$ at coordinates $(x,y), (x,z), (y,z)$ respectively.
+-2.  **Weighted Interpolation:** Combine the projected values using the rank weights $W$. The specific combination depends on the decomposition type (CP or Triple Plane), but generally involves summing the weighted contributions of all rank components [S1].
+-3.  **Output Generation:** The aggregated feature vector is passed through a simple linear layer (or directly used, depending on implementation details not fully specified in the abstract, but implied to be non-MLP) to produce $\sigma$ and $\mathbf{c}$. Note: The paper emphasizes *no neural networks* for rendering, implying the final mapping from aggregated features to $\sigma, \mathbf{c}$ is likely a simple linear transformation or direct readout, distinct from the MLPs in standard NeRF [S1].
+-
+-**Volume Rendering:**
+-The final pixel color is computed by integrating along a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$:
+-$$ \hat{C}(r) = \sum_{i=1}^N T_i \alpha_i c_i $$
+-where:
+-*   $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity.
+-*   $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ is the transmittance.
+-*   $\delta_i = t_{i+1} - t_i$ is the distance between sample points.
+-*   $\sigma_i$ and $c_i$ are the density and color queried at sample point $i$ [S1].
+-
+-**Compression (Rank Truncation):**
+-1.  **Rank-Residual Learning:** During training, a rank-residual learning strategy is employed to encourage lower ranks to preserve more important information of the whole scene [S1].
+-2.  **Sort-and-Truncate:** An empirical sort-and-truncate strategy is used to achieve near-optimal low-rank approximation at any targeted rank. Components are sorted by importance (derived from weights $W$ or singular values if HOSVD is used) and truncated [S1].
+-3.  **Dynamic Adjustment:** The number of components kept determines the model size and detail level. Lower ranks preserve primary information [S1].
++To query a 3D coordinate $\mathbf{x}$ for density $\sigma$ and color $\mathbf{c}$:
++1.  Project the coordinate $\mathbf{x}$ to the decomposed vectors or matrices.
++2.  Perform weighted interpolation using the stored rank weights [S1].
+ 
+ **Composition:**
+-1.  **Concatenation:** Different models are composed by concatenating their rank components along the rank dimension. If Model A has ranks $R_A$ and Model B has ranks $R_B$, the composed model has ranks $R_A + R_B$ [S1].
+-2.  **Transformation:** A transformation matrix is recorded for each object to control its position and orientation in the scene. This matrix is applied to the 3D coordinates before querying the rank components [S1].
++Different models are composed by concatenating their rank components along the rank dimension. A transformation matrix is recorded for each object to control its position and orientation [S1].
++
++**Compression:**
++Model size is dynamically adjusted by rank truncation. An empirical sort-and-truncate strategy is used to achieve near-optimal low-rank approximation at any targeted rank, allowing trade-off between model size and rendering quality without retraining [S1].
+ 
+ **Pseudocode:**
+@@ -55,173 +33,103 @@
+ import numpy as np
+ 
+-class CCNeRF:
+-    def __init__(self, R_vec, R_mat, H, W, D, F):
+-        """
+-        Initialize CCNeRF model.
+-        R_vec: Number of vector-based (CP) ranks.
+-        R_mat: Number of matrix-based (Triple Plane) ranks.
+-        H, W, D: Dimensions of the 3D grid.
+-        F: Feature dimension for output (density + color).
+-        """
+-        self.R_vec = R_vec
+-        self.R_mat = R_mat
+-        self.R_total = R_vec + R_mat
+-        self.F = F
+-        
+-        # Initialize Rank Components
+-        # Vector-based (CP)
+-        self.U_x = np.random.randn(H, R_vec)
+-        self.U_y = np.random.randn(W, R_vec)
+-        self.U_z = np.random.randn(D, R_vec)
+-        
+-        # Matrix-based (Triple Plane)
+-        self.U_xy = np.random.randn(H, W, R_mat)
+-        self.U_xz = np.random.randn(H, D, R_mat)
+-        self.U_yz = np.random.randn(W, D, R_mat)
+-        
+-        # Initialize Rank Weights
+-        # Shape: (R_total, F)
+-        self.W = np.random.randn(self.R_total, F)
++def tucker_decompose(tensor, rank):
++    """
++    Computes a Tucker decomposition of a 3D tensor.
++    Returns core tensor S and factor matrices Ux, Uy, Uz.
++    Note: Truncated HOSVD is used, which is quasi-optimal [S1].
++    """
++    # Implementation detail: Use truncated Higher-Order SVD (HOSVD)
++    # S, Ux, Uy, Uz = np.linalg.svd(tensor, full_matrices=False) # Simplified 1D case
++    # For 3D, use tensor decomposition libraries or iterative ALS
++    # The sources state standard truncated HOSVD yields a quasi-optimal solution [S1]
++    raise NotImplementedError("Specific HOSVD implementation details not provided in sources.")
+ 
+-    def query_vector_component(self, x, y, z, idx):
+-        """Query a single vector-based rank component."""
+-        # Project coordinate to vectors
+-        val_x = self.U_x[int(x), idx]
+-        val_y = self.U_y[int(y), idx]
+-        val_z = self.U_z[int(z), idx]
+-        # Combine (e.g., element-wise product or sum, standard CP is product)
+-        # Note: Standard CP decomposition uses product of factors.
+-        return val_x * val_y * val_z
++def query_ccnerf(x, Ux, Uy, Uz, S, weights):
++    """
++    Queries the radiance field at coordinate x using CP decomposition.
++    x: (3,) array [x, y, z]
++    Ux, Uy, Uz: Factor matrices
++    S: Core tensor
++    weights: Rank weights
++    """
++    # 1. Project coordinate to decomposed vectors
++    # Interpolate values from factor matrices at coordinate x
++    val_x = interpolate_1d(Ux, x[0])
++    val_y = interpolate_1d(Uy, x[1])
++    val_z = interpolate_1d(Uz, x[2])
++    
++    # 2. Combine using core tensor and weights
++    # This step involves weighted interpolation using stored rank weights [S1]
++    # The exact combination formula for hybrid CP/VM is not explicitly detailed in the provided text
++    # but generally involves contracting the projected vectors with the core tensor S
++    feature_vector = contract_core(val_x, val_y, val_z, S)
++    
++    # Apply weights
++    final_feature = feature_vector * weights
++    
++    return final_feature
+ 
+-    def query_matrix_component(self, x, y, z, idx):
+-        """Query a single matrix-based rank component."""
+-        # Interpolate from planes
+-        # Assuming bilinear interpolation for continuous coordinates
+-        val_xy = interpolate(self.U_xy, x, y, idx)
+-        val_xz = interpolate(self.U_xz, x, z, idx)
+-        val_yz = interpolate(self.U_yz, y, z, idx)
+-        # Combine (e.g., sum)
+-        return val_xy + val_xz + val_yz
++def compress_model(Ux, Uy, Uz, S, target_rank):
++    """
++    Compresses the model by truncating ranks.
++    Uses an empirical sort-and-truncate strategy [S1].
++    """
++    # 1. Compute importance scores for each rank component
++    # The sources mention "rank-residual learning strategy to encourage the preservation 
++    # of primary information in lower ranks" [S1]
++    # 2. Sort components by importance
++    # 3. Truncate to target_rank
++    # Note: The specific sorting metric is not given in the sources [S1]
++    raise NotImplementedError("Sort-and-truncate metric not specified in sources.")
+ 
+-    def query(self, x, y, z, theta, phi):
+-        """
+-        Query density and color at 3D coordinate (x,y,z) and direction (theta, phi).
+-        """
+-        features = np.zeros(self.F)
+-        
+-        # Query vector-based components
+-        for i in range(self.R_vec):
+-            val = self.query_vector_component(x, y, z, i)
+-            features += self.W[i, :] * val
+-            
+-        # Query matrix-based components
+-        for i in range(self.R_mat):
+-            val = self.query_matrix_component(x, y, z, i)
+-            features += self.W[self.R_vec + i, :] * val
+-            
+-        # Map features to density and color
+-        # Assuming a simple linear mapping or direct readout as per "no neural networks" claim
+-        # Density is usually the first element or a specific combination
+-        sigma = np.exp(features[0]) # Ensure non-negative
+-        color = np.sigmoid(features[1:]) # Bound to [0,1]
+-        
+-        return sigma, color
++def compose_models(models):
++    """
++    Composes multiple CCNeRF models into one scene.
++    Concatenates rank components along the rank dimension [S1].
++    """
++    # Concatenate Ux, Uy, Uz, S along the rank dimension
++    # Store transformation matrices for each object
++    pass
+ 
+-    def compress(self, target_rank):
+-        """
+-        Compress the model by truncating ranks.
+-        target_rank: New total rank.
+-        """
+-        if target_rank >= self.R_total:
+-            return # No compression needed
+-        
+-        # Sort ranks by importance (e.g., based on weights W)
+-        # This is a simplified heuristic; actual implementation may use HOSVD or singular values
+-        importance = np.linalg.norm(self.W, axis=1)
+-        sorted_indices = np.argsort(importance)[::-1]
+-        
+-        # Keep top target_rank ranks
+-        keep_indices = sorted_indices[:target_rank]
+-        
+-        # Update model
+-        self.W = self.W[keep_indices, :]
+-        
+-        # Update rank components
+-        # This requires re-indexing the components. 
+-        # For simplicity, we assume we can slice the components.
+-        # In practice, this might involve re-optimizing or complex re-indexing if R_vec and R_mat change.
+-        # The paper mentions "empirical sort-and-truncate", implying a direct truncation of the sorted list.
+-        # We need to split the new ranks back into R_vec and R_mat if the ratio is fixed, 
+-        # or allow dynamic ratio. The paper says "ratio ... is controllable", so we might fix it.
+-        
+-        # For this pseudocode, we assume we just truncate the list of components
+-        # and adjust U matrices accordingly. This is a high-level representation.
+-        # Actual implementation would need to handle the split between R_vec and R_mat.
+-        
+-        # Placeholder for component truncation logic
+-        # self.U_x = self.U_x[:, keep_indices_vec] ... etc.
+-        pass
+-
+-    def compose(self, other_model, transform_matrix):
+-        """
+-        Compose another CCNeRF model into this one.
+-        other_model: Another CCNeRF instance.
+-        transform_matrix: 4x4 transformation matrix for the other model.
+-        """
+-        # Concatenate weights
+-        self.W = np.concatenate([self.W, other_model.W], axis=0)
+-        
+-        # Concatenate rank components
+-        self.U_x = np.concatenate([self.U_x, other_model.U_x], axis=1)
+-        self.U_y = np.concatenate([self.U_y, other_model.U_y], axis=1)
+-        self.U_z = np.concatenate([self.U_z, other_model.U_z], axis=1)
+-        
+-        self.U_xy = np.concatenate([self.U_xy, other_model.U_xy], axis=2)
+-        self.U_xz = np.concatenate([self.U_xz, other_model.U_xz], axis=2)
+-        self.U_yz = np.concatenate([self.U_yz, other_model.U_yz], axis=2)
+-        
+-        self.R_total += other_model.R_total
+-        self.R_vec += other_model.R_vec
+-        self.R_mat += other_model.R_mat
+-        
+-        # Store transform matrix for the new components
+-        # This would be stored in a list of transforms corresponding to the rank indices
+-        # For simplicity, we assume the transform is applied during query
+-        self.transforms.append(transform_matrix)
+-
+-def interpolate(tensor, x, y, idx):
+-    """Bilinear interpolation for a single channel of a 3D tensor."""
+-    # Implementation details omitted for brevity
++def render_ray(r, scene_components, transform_matrices):
++    """
++    Renders a pixel color for ray r.
++    Uses standard volume rendering equation [S1].
++    """
++    # Sample points along ray r
++    # Query density and color from scene_components
++    # Apply volume rendering equation:
++    # C(r) = sum_i T_i * alpha_i * c_i
++    # T_i = product_{j<i} (1 - alpha_i)
++    # alpha_i = 1 - exp(-sigma_i * delta_i)
+     pass
+ ```
+ 
++**Formulas:**
++*   **Volume Rendering Equation:**
++    $$ \hat{C}(r) = \sum_i T_i \alpha_i c_i $$
++    where $T_i = \prod_{j<i} (1 - \alpha_i)$, $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, and $\delta_i = t_{i+1} - t_i$. Here $\sigma_i$ is density, $c_i$ is color, and $t_i$ is sample position along ray $r$ from origin $o$ with direction $d$ [S1].
++
++*   **Tucker Decomposition:**
++    For a 3D tensor $T \in \mathbb{R}^{H \times W \times D}$:
++    $$ T_{i,j,k} = \sum_{p=1}^P \sum_{q=1}^Q \sum_{r=1}^R S_{p,q,r} U^x_{i,p} U^y_{j,q} U^z_{k,r} $$
++    where $S$ is the core tensor and $U^x, U^y, U^z$ are factor matrices [S1].
++
+ **Parameters:**
+-*   $R_{vec}$: Number of vector-based (CP) ranks. Typical values not given in sources.
+-*   $R_{mat}$: Number of matrix-based (Triple Plane) ranks. Typical values not given in sources.
+-*   $R_{total} = R_{vec} + R_{mat}$: Total rank. Determines model size [S1].
+-*   $F$: Feature dimension. Not given in sources.
+-*   $H, W, D$: Grid dimensions. Not given in sources.
++*   **Rank ($R$):** The number of components kept in the decomposition determines the model size and detail level. Lower ranks preserve primary information due to rank-residual learning [S1].
++*   **Hybrid Ratio:** The ratio of vector-based (CP) to matrix-based (triple plane) components is controllable to trade off between model size and performance [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Truncated HOSVD:** Standard truncated Higher-Order SVD (HOSVD) does not hold the optimal property of truncated SVD, but yields a quasi-optimal solution sufficient for practical use [S1].
+-*   **Rank Ratio:** The ratio of vector- to matrix-based components is controllable and affects the trade-off between model size and performance [S1].
+-*   **Composition Growth:** Composing many objects can lead to large model size, mitigated by compressing unimportant objects [S1].
++*   **Truncation Optimality:** Standard truncated HOSVD does not hold the optimal property of truncated SVD, but yields a quasi-optimal solution sufficient for practical use [S1].
++*   **MLP Dependency:** Unlike TensoRF, CCNeRF avoids MLPs in the rendering path to preserve low-rank approximation properties; introducing MLPs would prevent compression or composition [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Querying is $O(R_{total} \cdot F)$, where $R_{total}$ is the total rank and $F$ is the feature dimension. This is generally faster than MLP-based rendering as it avoids multiple layers of non-linear activations [S1].
+-*   **Memory Complexity:** Memory usage is proportional to $R_{total} \cdot (H \cdot W + H \cdot D + W \cdot D + F)$. Compression reduces this by reducing $R_{total}$ [S1].
++*   **Compression:** Model size can be dynamically adjusted by rank truncation without retraining, achieving near-optimal compression [S1].
++*   **Composition:** Supports arbitrary composition of different models by concatenating rank components, with no compatibility constraints or retraining required [S1].
+ *   **Performance:** Achieves comparable rendering quality to state-of-the-art methods while enabling extra capabilities of compression and composition [S1].
+-*   **Strengths:**
+-    *   No neural networks for rendering, allowing arbitrary composition without retraining [S1].
+-    *   Dynamic model size adjustment via rank truncation without retraining [S1].
+-    *   Near-optimal compression [S1].
+-*   **Limitations:**
+-    *   Quasi-optimal compression due to HOSVD limitations [S1].
+-    *   Composition can lead to large model sizes if not compressed [S1].
+-*   **When to use:** When compression and composition of 3D scenes are required, and computational efficiency during rendering is a priority.
+-*   **When not to use:** When maximum possible rendering quality is required and compression is not a concern, or when the scene has very high-frequency details that are not well-captured by low-rank approximations.
++*   **Limitations:** The specific computational complexity of the sort-and-truncate strategy and the exact trade-off curves for the hybrid ratio are not provided in the sources [S1].
+ 
+ ## Background
+-CCNeRF was introduced by Jiaxiang Tang, Xiaokang Chen, Jingbo Wang, and Gang Zeng from Peking University and Chinese University of Hong Kong in 2022 [S1]. It addresses the difficulty in manipulating NeRF models, such as compression and composition, which are typically restricted by shared renderer networks or suffer from large model sizes [S1]. The method is motivated by the low-rank approximation property of the SVD algorithm and proposes a rank-residual learning strategy [S1].
++CCNeRF was introduced by Jiaxiang Tang, Xiaokang Chen, Jingbo Wang, and Gang Zeng from Peking University and Chinese University of Hong Kong in 2022 [S1]. The paper addresses the difficulty of manipulating implicit NeRF representations compared to explicit mesh representations. While recent advances in NeRF manipulation are often restricted by shared renderer networks or suffer from large model sizes, CCNeRF circumvents these hurdles by learning a hybrid tensor rank decomposition without neural networks [S1]. It is motivated by the low-rank approximation property of the SVD algorithm and proposes a rank-residual learning strategy to encourage the preservation of primary information in lower ranks [S1].
+ 
+ ## Sources

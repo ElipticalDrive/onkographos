@@ -1,0 +1,1959 @@
+CATRF: Codec-Adaptive TriPlane Radiance Fields for Volumetric Content
+Delivery
+Tung-I Chen
+Lingdong Wang
+Subhransu Maji
+Ramesh K. Sitaraman
+University of Massachusetts Amherst
+arXiv:2605.18054v1 [eess.IV] 18 May 2026
+https://tung-i.github.io/catrf-cvpr-findings-2026/
+Abstract
+(a) Codec-Agnostic (CA)
+Volumetric media promises next-generation content delivery applications, but its bandwidth demand remains
+a key bottleneck. Implicit and hybrid volumetric representations reduce model sizes, yet still require careful coding to reach 2D video-like bitrates. We present
+CATRF, a standard-codec-in-the-loop compression framework for plane-factorized radiance fields. During training, we quantize and pack 2D feature planes into
+codec-friendly canvases, run a standard codec round
+trip (JPEG/VP9/HEVC/AV1), then unpack and dequantize the decoded features before volume rendering. We
+use a straight-through estimator (STE) to insert the nondifferentiable, standard codec pipeline into the training
+loop, allowing radiance-field features to adapt directly to
+the real, client-side codec distortions without introducing
+any learned codec parameters. On both static and dynamic benchmarks, CATRF consistently achieves a better
+rate-distortion trade-off over codec-agnostic and learnedcodec-in-the-loop baselines, and also outperforms recent
+compressed 3DGS methods in both compression efficiency
+and decoding speed. These results highlight a practical
+path toward low-bitrate, compression-resilient volumetric
+representations for free-viewpoint video streaming.
+1. Introduction
+Modern 2D video compression and streaming standards are
+mature and widely deployed, serving high-quality videos
+at scale and forming the backbone of today’s content platforms [4, 46]. However, the dynamic world we perceive is
+inherently 3D rather than 2D. Beyond conventional videos,
+there is growing interest in free-viewpoint media, where
+users can view a scene at any time and from any viewpoint. Volumetric content delivery [5, 13, 23], if realized,
+has the potential to transform content platforms by enabling
+an immersive viewing experience, such as 3D video playback, free-viewpoint sports, and telepresence.
+Radiance
+Fields
+Standard
+Codec Enc.
+Backpropagation
+Standard
+Codec Dec.
+Radiance
+Fields
+Testing Path
+Training Path
+Volume
+Rendering
+(b) Learned-Codec-in-the-Loop (LCL)
+Radiance
+Fields
+Learned
+Codec Enc.
+Learned
+Codec Dec.
+Radiance
+Fields
+Volume
+Rendering
+Radiance
+Fields
+Volume
+Rendering
+(c) Standard-Codec-in-the-Loop (SCL)
+Radiance
+Fields
+Standard
+Codec Enc.
+Standard
+Codec Dec.
+Figure 1. Overview of codec-integrated NeRF compression
+pipelines. (a) Codec-agnostic (CA) approaches optimize planefactorized NeRFs without exposure to codec-induced distortions;
+when compressed afterward, codec artifacts disrupt feature semantics and degrade quality at low bitrates. (b) Learned-codec-inthe-loop (LCL) methods insert a differentiable learned codec into
+training to optimize the rate-distortion (RD) trade-off end-to-end.
+However, they require shipping a content-specific decoder and
+running ML inference on the client to reconstruct NeRF models.
+(c) Our standard-codec-in-the-loop (SCL) approach combines the
+practicality of CA with the benefits of LCL by executing standard
+codec round trips during training and passing gradients through a
+straight-through estimator (STE).
+Delivering 3D content is bandwidth-hungry. For example, Microsoft’s Holoportation reports Gbps-scale rates
+for streaming a full 3D human [40]. Explicit representations such as point clouds and 3D Gaussian Splatting
+(3DGS) render efficiently but store many per-point attributes. Even with state-of-the-art compression techniques,
+streaming these representations often remains in the hundreds of Mbps [11, 39, 43, 53], whereas today’s streaming systems typically budget only tens of Mbps per user.
+In contrast, implicit or hybrid representations (e.g., NeRFs
+and TriPlane [8, 9, 37]) encode scenes as compact neural
+features. When factorized and coded properly, storage per
+frame can drop to tens of KB [20, 55].
+Recent work shows that the rate-distortion (RD) tradeoff of NeRF-based representations can be improved by integrating a learned, differentiable codec into the training
+objective [10, 20, 26, 32, 59]. These learned-codec-in-theloop (LCL) frameworks employ a learned entropy model
+or neural codec to encode neural features into bitstreams,
+which are then used at decoding time to reconstruct the
+3D representation. Such frameworks are effective at reducing feature bitrate while preserving reconstruction quality. However, when codec parameters are trained per scene,
+they must also be transmitted to the client for decoding, akin
+to neural-enhanced video streaming where ML models are
+shipped with the content [57, 58]. A content-specific decoder must then be distributed and maintained on devices,
+incurring non-negligible bandwidth overhead and deployment complexity (see Tab. 2).
+Another line of work converts 3D representations into
+2D signals that standard codecs compress extremely well.
+For instance, MPEG’s video-based point cloud compression (V-PCC) projects point attributes to patch videos, enabling HEVC/AV1 coding and delivery through adaptive
+bitrate (ABR) streaming standards [18, 42, 46]. Inspired
+by this 3D-via-2D idea, recent NeRF compression methods
+use factorized tensor planes as the representation to operate on 2D feature maps [27, 51, 52, 55]. In these codecagnostic (CA) compression pipelines, feature planes are optimized with spatial-temporal consistency losses and compressed afterward with off-the-shelf codecs. While being
+hardware- and ABR-friendly, CA representations degrade
+significantly at low bitrates because feature planes never see
+the real codec-induced distortions during optimization and
+therefore remain vulnerable to quantization, block transforms, and in-loop filtering (see Fig. 5 and Fig. 6).
+We present Codec-Adaptive TriPlane Radiance Fields
+(CATRF), the first standard-codec-in-the-loop (SCL) training framework for plane-factorized NeRFs. A prevailing
+assumption in codec-integrated training is that the codec
+itself must be differentiable. Accordingly, prior work either replaces a standard codec with a differentiable proxy
+that approximates codec behavior [21, 22, 29] or jointly
+optimizes a neural encoder-decoder pair so gradients can
+flow end-to-end [24, 32]. CATRF overturns this assumption: instead of making the codec differentiable, we treat
+the real VP9/HEVC/AV1 round trip as a black box and use a
+straight-through estimator (STE) to pass gradients through
+the full encode-decode process. Specifically, we quantize
+and pack multi-channel appearance planes and the density
+grid into 2D canvases before the codec round trip, then render from the decoded features when computing reconstruction loss. To optimize RD trade-off, we regularize features
+with spatial total-variation and temporal-consistency terms
+that encourage smoother, codec-friendly patterns. We fur-
+Plane-factorized NeRF
+Quantization
+Bitstream
+Codec decoding
+(HEVC/AV1)
+Packing
+Unpacking
+Codec encoding
+(HEVC/AV1)
+Dequantization
+Bitstream
+Plane-factorized NeRF
+Figure 2. Illustration of the encode–decode codec round trip. In
+a streaming setting, the client receives and renders the decoded
+NeRF model reconstructed from the encoded bitstream.
+ther introduce a caching mechanism that reuses decoded
+planes across steps, avoiding per-minibatch codec round
+trips and substantially improving training efficiency.
+We evaluate CATRF on both static and dynamic 3D
+benchmarks with diverse baselines. On static scenes,
+CATRF-JPEG achieves a 43% BD-rate reduction over stateof-the-art LCL compression methods. On dynamic scenes,
+CATRF paired with VP9/HEVC/AV1 consistently outperforms codec-agnostic TeTriRF [55] across different codec
+configurations, with the largest gains at low bitrates. Beyond NeRF baselines, CATRF also outperforms the stateof-the-art compressed 3DGS methods: it achieves 17% bitrate savings over HAC++ [12] and 39% BD-rate reduction
+over GIFStream [28], while providing substantially faster
+reconstruction of 3D representations from the encoded bitstreams through standard-codec decoding (see Tab. 5).
+To summarize, our key contributions are:
+• We present the first standard-codec-in-the-loop training
+framework for plane-factorized radiance fields, where
+neural features are optimized in the decoded space
+produced by a real codec. Our design is practical:
+it works with off-the-shelf JPEG/VP9/HEVC/AV1 encoders/decoders, and requires no learned neural codecs
+or learned entropy-models.
+• We study key design choices for neural feature compression, including quantization, packing layouts, and
+a caching strategy that amortizes codec round-trip overhead during training.
+• Through extensive experiments on both static and dynamic benchmarks, we show that CATRF achieves up to
+63% BD-rate reduction over state-of-the-art NeRF compression methods and outperforms state-of-the-art 3DGS
+baselines in both bitrate savings and decoding speed.
+2. Related Work
+2.1. Memory-Efficient Volumetric Representations
+A major direction in compact 3D scene representation is to
+encode scenes into lightweight neural features together with
+a small decoder MLP. TriPlane Radiance Fields employ
+a hybrid explicit–implicit representation that represents a
+scene with three orthogonal feature planes [8, 15, 38, 49].
+TensoRF compresses neural volumes via matrix–vector factorizations [9]; K-Planes extends plane factorization across
+space–time to exploit temporal redundancy [16]; BiRF further improves rate-distortion by binarizing INGP hash embeddings [38, 44]. A parallel line of work studies compressed 3D Gaussian Splatting (3DGS). Static 3DGS can be
+compressed by encoding anchor-based Gaussian attributes
+with compact latent features [11, 12]. For dynamic 3DGS,
+the number of parameters can be further reduced by exploiting the residual information between frames [17, 28,
+34, 50]. However, reducing parameter count alone does
+not guarantee a low-bitrate streaming representation. Practical payloads can still remain on the order of megabytes per
+frame. This motivates subsequent work that couples compact volumetric representations with explicit coding modules for more bitrate savings [20, 59, 60].
+2.2. Neural Feature Compression
+Compared with other volumetric representations, TriPlane
+features have an inherent 2D structure, making them
+compatible with standard 2D neural networks and mature image-processing pipelines [19, 27, 31, 32, 45].
+TeTriRF [55] shows that feature planes can be compressed
+with standard video codecs to achieve compact storage (10100 KB/frame), suggesting a promising features-as-video
+paradigm. However, neural features are much more sensitive than natural images to codec distortions. When training does not account for reconstruction errors introduced
+by the codec-induced distortions, low-bitrate compression
+causes severe rendering degradation. A complementary
+line of work replaces standard codecs with learned differentiable codecs to enable codec-in-the-loop optimization [10, 20, 32, 60]. CNC [10] learns a context model over
+3D hash embeddings for entropy reduction, while NeRFCodec [32] learns content-specific adaptors around a pretrained neural codec. However, when an entropy model or
+neural codec is trained per scene, its parameters must also
+be transmitted for decoding and should therefore be counted
+in the total bandwidth budget. Moreover, hardware support
+for neural decoding remains much less ubiquitous than that
+of standard codecs on consumer devices, resulting in limited practicality in real-world applications.
+2.3. Straight-Through Estimators
+The Straight-Through Estimator (STE) enables training
+with discrete or non-differentiable operations by using the
+true operation in the forward pass and an approximate gradient in the backward pass [3]. In the field of neuralbased compression, it is widely used to bypass quantization
+and any non-differentiable components during optimization [1, 2, 7, 14]. For codec-aware training, prior work usually relies on a differentiable virtual codec, where prediction, transform, and entropy coding are modeled by custom
+surrogate modules instead of running a real standard codec
+in the loop. This design appears broadly in neural codec
+literature, such as sandwiched video compression [21] and
+the DCVC family of neural codecs [22, 29]. By contrast,
+we execute a full off-the-shelf codec (HEVC/AV1) inside
+training and use STE to backpropagate through the entire
+real encode-decode process. This makes CATRF the first
+standard-codec-in-the-loop framework for plane-factorized
+radiance fields to optimize through a real deployed codec
+rather than a differentiable proxy.
+3. Method
+Our goal is simple: make the decoded radiance field features that the client will actually render be the ones optimized during training. In each training step, we (i) quantize
+and pack plane-factorized radiance-fields into 2D canvases
+(i.e, images with integer pixel values), (ii) run a codec round
+trip, encoding and decoding the canvases, (iii) unpack and
+dequantize the reconstructed features, and (iv) render the
+radiance-fields to compute the reconstruction loss. Unlike
+previous LCL frameworks which are restricted to differentiable encoders and decoders, we propose to pass gradients
+across the entire codec roundtrip using a straight-through
+estimator (STE), ensuring no neural decoders or entropy
+model parameters must be shipped for client-side decoding.
+3.1. Background and Notation
+Many recent NeRF variants represent a scene with planefactorized features and an explicit 3D density grid for efficient rendering [8, 9, 16, 49]. This design is attractive
+for compression, since the Euclidean structure of these tensors maps naturally to image/video codecs. We denote the
+three orthogonal feature planes of TriPlane radiance fields
+by P = {P xy , P xz , P yz } with P ax ∈ RC×H×W , where
+ax ∈ [xy, xz, yz] and C is the channel dimension. The
+3D density grid is denoted by D ∈ RDy ×Dx ×Dz . We
+denote the lightweight neural renderer that decodes aggregated features and view direction into color and density by
+fϕ . For a camera pose π, we write the rendering call as
+R(P, D, π; ϕ), which produces a rendered image I. In a
+streaming setting, the data that must be transmitted include
+the encoded radiance-field bitstreams, the neural renderer
+NeRF Synthetic
+Tanks&Temples
+HAC++ BiRF
+CNC
+CATRFJPEG
+INGP
+ECRF
+TensoRF-VM
+VQ-TensoRF
+TensoRF-High
+Masked-Wavelet
+NeRFCodec
+PPNG
+TensoRF-CP
+CATRF-JPEG
+CNC
+BiRF
+TensoRF-VM
+DVGO
+ECRF
+VQ-TensoRF
+TensoRF-High
+K-Planes
+DVGO
+Plenoxels
+INGP
+MaskedWavelet
+NeRFCodec
+K-Planes
+PPNG
+TensoRF-CP
+Plenoxels
+Figure 3. Comparison with baselines on the NeRF Synthetic (left) and Tanks and Temples (right) benchmarks. On NeRF Synthetic,
+CATRF-JPEG achieves average bitrate savings of 23% and 17% at matched PSNR over CNC [10] and HAC++ [12], respectively.
+Ground Truth
+31.82dB / 1.81MB
+32.99dB / 0.65MB
+35.55dB / 1.09MB
+34.74dB / 0.33MB
+35.79dB / 0.73MB
+33.39dB / 1.86MB
+32.72dB / 0.76MB
+33.64dB / 1.13MB
+31.86dB / 0.51MB
+33.42dB / 0.85MB
+NeRFCodec
+CNC
+HAC++
+CATRF-JPEG (low)
+CATRF-JPEG (high)
+Figure 4. Qualitative comparisons on Chair from NeRF Synthetic and Family from Tanks and Temples. Compared with recent learnedcodec and 3DGS compression baselines, CATRF-JPEG offers a flexible operating range: it can achieve substantially lower bitrate with
+only modest quality loss, or deliver sharper details and fewer artifacts at a slightly higher rate.
+weights ϕ, and any parameters required to retrieve (P, D).
+3.2. Volume Rendering
+Plane factorization stores features on axis-aligned 2D
+planes and queries them by bilinear sampling bi(·). For a
+3D location x = (x, y, z), we define its 2D projections as
+u = (x, y), v = (x, z), and w = (y, z). The tri-plane
+feature at x is
+where σ(x) is the volume density and c(x, vview ) ∈ R3 is
+the view-dependent RGB color at location x. For a camera
+ray r(t) = o + t d with samples {tk }K
+k=1 and ∆k = tk+1 −
+tk , we evaluate (σk , ck ) at 3D locations xk = r(tk ) using
+(P, D) and fϕ . Given that αk = 1−exp(−σk ∆k ), the final
+pixel color C can be computed by alpha compositing:
+T_k = \exp \!\Big (-\sum _{j<k} \sigma _j \Delta _j\Big ), \mathbf {C} = \sum _{k=1}^{K} T_k\,\alpha _k\,\mathbf {c}_k.
+\mathbf {f}_a(\mathbf {x}) = \big [ &\mathrm {bi}(P^{xy}, \mathbf {u}),\; \mathrm {bi}(P^{xz}, \mathbf {v}),\; \mathrm {bi}(P^{yz}, \mathbf {w}) \big ],
+where the three sampled vectors are aggregated (e.g., by
+summation or concatenation) into a single feature vector
+fa (x). The density feature is obtained by trilinear sampling
+from the 3D grid, s(x) = trilinear(D, x).
+Given a view direction vview ∈ R3 , the renderer fϕ decodes per-sample density and color:
+\sigma (\mathbf {x}),\,\mathbf {c}(\mathbf {x},\mathbf {v}_{\text {view}}) \;=\; f_\phi \!\big (\mathbf {f}_a(\mathbf {x}),\, s(\mathbf {x}),\, \mathbf {v}_{\text {view}}\big ),
+3.3. Quantization and Packing
+Standard codecs accept fixed-precision image/video inputs
+(e.g., 8/10/12-bit integers) in specific pixel formats, whereas
+the factorized feature planes of NeRF models are multichannel, floating-point tensors. We therefore have to quantize features into a normalized range [0, 1] and pack multichannel tensors into 2D canvases with either 1 or 3 channels (grayscale or RGB). In implementation, canvases in
+Neural 3D Video Dataset
+Zoom-in
+NHR Dataset
+BD-rate: -40.5%
+BD-rate: -63.3%
+BD-rate: -51.8%
+Figure 5. Rate-distortion (RD) curves. We compare CATRF with codec-agnostic TeTriRF [55] across different codecs and target bitrates.
+CATRF consistently outperforms TeTriRF on both benchmarks with substantial BD-rate reductions. CATRF-AV1 also outperforms the
+state-of-the-art dynamic 3DGS baseline, GIFStream [28], achieving 39% BD-rate savings.
+Ground Truth
+30.22dB / 3.9Mbps
+24.71dB / 0.4Mbps
+28.56dB / 1.9Mbps
+31.28dB / 4.4Mbps
+GIFStream (low)
+TeTriRF-AV1 (low)
+TeTriRF-AV1 (medium)
+TeTriRF-AV1 (high)
+31.58dB / 248Mbps
+31.75dB / 8.1Mbps
+29.55dB / 0.7Mbps
+31.0dB / 2.9Mbps
+31.37dB / 3.8Mbps
+K-Planes
+GIFStream (high)
+CATRF-AV1 (low)
+CATRF-AV1 (medium)
+CATRF-AV1 (high)
+Figure 6. Qualitative comparisons on the Neural 3D Video benchmark. At high bitrate, both CA and SCL methods produce comparable
+visual quality. However, as compression becomes more aggressive, the CA baseline exhibits severe blurring and artifacts, whereas CATRF
+preserves sharper details and cleaner geometry. Compared with the 3DGS baseline, CATRF also achieves comparable or better visual
+quality at substantially lower bitrate. The bitrate is computed at 30 FPS.
+[0, 1] are linearly mapped to 8-bit integers before encoding
+and converted back to [0, 1] after decoding. Let X denote
+a tensor plane from the radiance fields, and consider two
+schemes, AbsMax and Channelwise to map floating-point
+tensors to [0, 1]. For AbsMax (absolute max quantization),
+we use a pre-defined, fixed range [α, β] shared by all channels. For Channelwise, we estimate a per-channel central
+95% range for each channel, and use the resulting lower and
+upper bound [α, β] of each channel to perform channel-wise
+quantization.
+X_{01} &= \mathrm {clip}\!\left (\frac {X-\alpha }{\beta -\alpha },\,0,1\right ) && \text {(quantization)}\\ \widehat {X} &= X_{01}(\beta -\alpha )+\alpha && \text {(dequantization)}.
+Standard image/video codecs, however, operate on 1- or
+3-channel images, so we have to pack the multi-channel
+tensor X01 into a codec-friendly canvas Y = pack(X01 )
+′
+′
+with Y ∈ RCout ×H ×W and Cout ∈ {1, 3}. We consider
+three packing strategies for appearance planes P. Take
+[C = 48, H, W ] as an example. FlattenGray (no crosschannel mixing) stacks all channels spatially into a single monochrome canvas, i.e., [1, 6H, 8W ]; FlattenRGB
+(grouped channels) arranges channels into three groups of
+16, resulting in a layout [3, 4H, 4W ]; PixelShuffle (spaceto-depth) rearranges channels into spatial neighborhoods,
+resulting in [3, 4H, 4W ] as well. We provide an ablation study in Tab. 3 to compare the impact of each packing
+choice. For the density grid D that directly controls opacity,
+we tile it into a single monochrome canvas and encode it as
+grayscale to avoid mixing across channels.
+3.4. Caching for Efficient Training
+Given the three appearance canvases and the density
+monochrome canvas, we invoke a standard codec on each
+canvas to encode it into a separate bitstream and then decode it back to simulate client-side decoding in a streaming
+scenario:
+(\widehat {Y},\, b) = \mathcal {C}_q(Y),
+where Cq (.) denotes the codec round trip operation (i.e.,
+encode-then-decode); b is the encoded bit count and q is
+the codec parameters for rate-control, such as a quantization parameter (QP). After unpacking and dequantization,
+the reconstructed features ( b
+P, b
+D) are fed to the renderer.
+Since naively invoking Cq on every batch would dominate
+training time, we propose to maintain a cache of the decoded ( b
+P, b
+D). The cache is refreshed only when (i) a fixed
+number M of global steps has elapsed, or (ii) the current
+frame has drifted too far from the snapshot stored at the last
+refresh, determined by a small threshold ϵ. When the cache
+is up to date, we reuse the cached ( b
+P, b
+D) to render and compute the reconstruction loss. The detailed caching algorithm
+is presented in Sec. A of the supplementary.
+3.5. Standard-Codec-in-the-Loop (SCL)
+Prior codec-in-the-loop frameworks rely on differentiable
+codec proxies or learned codecs/entropy models to pass
+gradients [10, 32]. Our approach removes this restriction by employing a straight-through estimator (STE) to
+bypass the entire codec roundtrip during backpropagation, which allows us to insert standard, non-differentiable
+codecs (JPEG/HEVC/AV1) directly into the training loop
+of neural radiance fields. We define a stop-gradient operator detach(·) that is identical to the identity in the forward pass but blocks gradients, i.e., detach(X) = X and
+∂
+bax and D
+b denote the recon∂X detach(X) = 0. Let P
+structed feature planes and density grids. We form the STE
+overrides as:
+\widetilde {P}^{ax} &= \widehat {P}^{ax} + \big (P^{ax} - \texttt {detach}(P^{ax})\big ), \\ \widetilde {D} &= \widehat {D} + \big (D - \texttt {detach}(D)\big ).
+e D)
+e to render images, which are
+The forward pass uses (P,
+numerically equal to the decoded features ( b
+P, b
+D), but in
+backpropagation we have
+\frac {\partial \widetilde {P}^{ax}}{\partial P^{ax}} = \mathbf {I},\qquad \frac {\partial \widetilde {D}}{\partial D} = \mathbf {I},
+so gradients bypass the codec and flow directly to the
+pre-codec features (P, D). We evaluate several gradientsurrogate choices for propagating gradients through the
+non-differentiable codec round trip, including vanilla
+STE [3], modified STE [36], and a hybrid STE+SPSA estimator [48]. The gradient-surrogate ablation is presented in
+Tab. 6 of the supplementary, which shows STE provides the
+best robustness. The pseudo-code below summarizes each
+training step of the proposed SCL pipeline:
+1. For each axis ax ∈ {xy, xz, yz}:
+(a) X01 ← Q(P ax ); Y ← pack(X01 ).
+(b) (Yb , bits) ← Cq (Y ); Pbax ← Q−1 (unpack(Yb )).
+
+(c) Peax ← Pbax + P ax − detach(P ax ) .
+2. Process density via quantization and mono tiling. Then,
+e ←D
+b + D − detach(Dt ) .
+D
+3. Render: I ← R( e
+P, e
+D, π; ϕ); compute L and update
+(P, D, ϕ).
+3.6. Loss Functions
+To optimize CATRF for a given camera π and the groundtruth image I ∗ , we define the total objective as:
+\mathcal {L} = \lambda _{\text {rec}}\, \underbrace {\big \| \mathcal {R}(\widetilde {\mathcal {P}},\widetilde {D},\pi ;\phi )-I^* \big \|_1}_{\text {image reconstruction}} \;+\; \lambda _{\text {tv}}\, \underbrace {\big (\mathrm {TV}(\mathcal {P})+\mathrm {TV}(D)\big )}_{\text {spatial smoothness for bitrate}}.
+This total-variation [9] encourages spatial smoothness of
+the packed canvases, reducing high-frequency residuals that
+would otherwise inflate the bitrate. For dynamic scenes, we
+additionally incorporate intra-group and inter-group regularization as proposed in [55] to ensure temporal consistency. Unlike previous compression methods that require
+a rate-loss to optimize the RD trade-off of their learned
+entropy models [20, 59, 60], CATRF does not employ
+an explicit rate term. This design choice stems from the
+fact that our entropy model and rate-control strategies are
+well-established by fixed, industry-standard codecs. These
+codecs have been optimized over decades for near-optimal
+RD trade-off. Consequently, minimizing reconstruction distortion at a fixed standard codec configuration implicitly
+drives the features toward the most efficient point of the RD
+curve. In our experiments, adding additional rate-related
+losses does not provide measurable gains.
+4. Experiments
+Datasets. Previous work tends to focus exclusively on
+either static or dynamic benchmark, while our SCL can
+be evaluated across both settings by integrating with
+static/dynamic plane-factorized NeRF backbones [9, 55].
+For static benchmarks, we use NeRF Synthetic [37]
+and Tanks and Temples [35] with the standard train/test
+splits. For dynamic benchmarks, we use Neural 3D Video
+(N3D) [33] and NHR [54], following the same evaluation
+protocol as prior dynamic NeRF compression work [55].
+Baselines. We compare CATRF against four groups of
+baselines: (1) parameter-efficient radiance fields that reduce model size without explicit RD optimization, such as
+Instant-NGP, Plenoxels, and BiRF [9, 15, 16, 38, 44, 49];
+(2) learned-codec-in-the-loop methods, such as CNC, NeRFCodec, NeRFPlayer, and VRVVC [10, 20, 26, 32, 47]; (3)
+PSNR↑ SSIM↑ LPIPS↓ Size↓ Bitrate↓
+(VGG) (MB) (Mbps)
+K-Planes [16]
+StreamRF [30]
+NeRFPlayer [47]
+TeTriRF [55]
+3DGStream [50]
+SpaceTimeGS [34]
+QUEEN [17]
+GIFStream (high) [28]
+GIFStream (low) [28]
+CATRF-AV1 (high)
+CATRF-AV1 (medium)
+CATRF-AV1 (low)
+CATRF-DCVC (high)
+CATRF-DCVC (medium)
+CATRF-DCVC (low)
+31.58
+30.68
+30.29
+30.43
+31.58
+32.05
+32.19
+31.75
+30.22
+31.37
+31.00
+29.55
+31.18
+30.63
+29.81
+0.941
+0.910
+0.906
+0.941
+0.946
+0.946
+0.938
+0.934
+0.919
+0.910
+0.870
+0.919
+0.904
+0.890
+0.14
+0.31
+0.25
+0.14
+0.14
+0.15
+0.17
+0.22
+0.24
+0.34
+0.24
+0.28
+0.31
+1.0
+31.4
+17.1
+0.062
+7.8
+6.7
+0.75
+0.026
+0.016
+0.016
+0.012
+0.003
+0.013
+0.008
+0.005
+248
+7536
+4104
+14.9
+1872
+1608
+180
+8.1
+3.9
+3.8
+2.9
+0.7
+3.1
+1.9
+1.2
+Table 1. Quantitative results on the N3D Video dataset. ”Size”
+denotes the average client-side payload per frame, and ”Bitrate” is
+computed at 30 FPS.
+codec-agnostic methods that compress radiance fields with
+off-the-shelf codecs after training, including TeTriRF and
+PPNG [25, 55]; and (4) compressed 3DGS baselines, including HAC++ [12] for static scenes and GIFStream [28]
+for dynamic scenes.
+Metrics.
+In addition to PSNR/SSIM/LPIPS versus
+model sizes, we additionally use BD-rate [6] to quantify
+rate–distortion (RD) performance. BD-rate measures the
+average bitrate difference between two RD curves at the
+same reconstruction quality. A lower BD-rate indicates
+fewer bits are required to achieve comparable quality. When
+reporting model size and overall bitrate, we count any
+parameters required for decoding 3D models at a client,
+including the learned, scene-specific codec/entropy-model
+parameters. All sizes are measured after quantization and
+entropy coding. Details on how we encode these parameters are presented in Sec. B of the supplementary.
+Implementation details. To ensure fair comparison across
+different TriPlane quality-size trade-offs, we build CATRF
+directly on top of each baseline’s released implementation.
+For static scenes, we use TensoRF [9] as the backbone,
+matching NeRFCodec [32]. For dynamic scenes, we use the
+spatio-temporal DVGO backbone from TeTriRF [49, 55].
+Following prior work [32], we adopt a two-stage pipeline:
+we first train the vanilla backbone for each scene or a
+video segment to convergence, and finetune the radiance
+fields with SCL under a fixed codec configuration. We
+use a single NVIDIA V100 for both training and evaluation. Because STE treats the codec round trip as a
+forward-only operation, encoding and decoding need not be
+part of the GPU computation graph. For CATRF-HEVC,
+we use PyNvVideoCodec, NVIDIA’s Python-based library
+of Video Codec SDK, to measure the highest achievable
+hardware-accelerated decoding throughput for Tab. 5. For
+TensoRF
+Encoded feature planes 69.95MB
+Encoded feature vectors
+0.05MB
+Encoded hash embeddings
+Neural codec parameters
+Entropy model parameters
+Encoded anchor features
+MLPs (decoding)
+MLPs (rendering)
+0.04MB
+Total
+70.04MB
+NeRFCodec
+0.05MB
+0.05MB
+1.56MB
+0.03MB
+1.69MB
+CNC
+HAC++ CATRF
+0.34MB
+0.05MB
+0.58MB
+0.01MB
+1.15MB
+0.21MB
+0.18MB
+0.03MB
+0.77MB 1.36MB 0.42MB
+Table 2. Memory breakdown on the NeRF Synthetic dataset.
+Learned-codec compression methods incur substantial client-side
+overhead because their scene-specific decoding parameters must
+be delivered together with the content. 3DGS compression methods require high-capacity features to represent the multiple attributes associated with each anchor point. In contrast, CATRF
+maintains a compact volumetric representation while eliminating
+the need to transmit any scene-specific decoding parameters.
+CATRF-AV1, we employ PyAV built on FFmpeg in CPU
+since V100 does not provide hardware AV1 support.
+Static Benchmarks. For static scenes, we pair CATRF with
+JPEG to form CATRF-JPEG, where rate control is achieved
+by varying the JPEG quality parameter. As shown in
+Fig. 3, CATRF-JPEG forms a strong Pareto frontier against
+prior NeRF compression baselines. On NeRF Synthetic, it
+achieves an average 23% bitrate reduction over CNC [10] at
+matched PSNR, confirming that directly adapting features
+to a standard codec can remain competitive with specialized
+learned compressors. Compared with HAC++ [12], CATRF
+requires only 0.42 MB total client-side payload, whereas
+HAC++ requires 1.36 MB at similar quality. The detailed
+memory breakdown is presented in Tab. 2, and the perscene RD trade-off can be found in Tab. 7 of the supplementary. On the more challenging Tanks and Temples dataset,
+CATRF-JPEG shows even larger gains, attaining an average
+43% bitrate saving over CNC [10] at matched PSNR and
+outperforming other baselines over a broad range of operating points. In Fig. 4, we show that CATRF-JPEG offers a
+flexible operating range by adapting to various JPEG quality. It can operate at much lower bitrate with only modest
+loss of detail, or spend more bits to recover sharper edges
+and fewer artifacts than LCL and 3DGS methods at similar
+or lower rates. In contrast, previous pipelines that employ
+standard codecs are sensitive to codec artifacts, and therefore often need to operate at high-bitrate or even lossless
+settings, as exemplified by PPNG [25].
+Dynamic Benchmarks. We pair both TeTriRF [55] and
+CATRF with off-the-shelf video codecs (VP9/HEVC/AV1)
+and report RD curves together with BD-rate improvements.
+We also evaluate the state-of-the-art dynamic 3DGS compression method, GIFStream [28], on the N3D dataset. Our
+framework can also integrate learned video codecs by freezing codec parameters during SCL finetuning. When we
+replace the standard codec with DCVC-RT [22], CATRF-
+Packing
+Quantization
+M
+λtv
+PSNR↑
+LPIPS↓
+Mbps↓
+Packing
+Quantization
+M
+PSNR↑
+LPIPS↓
+Mbps↓
+Training
+FlattenGray
+FlattenGray
+FlattenRGB
+FlattenRGB
+PixelShuffle
+PixelShuffle
+FlattenGray
+FlattenGray
+FlattenGray
+FlattenRGB
+PixelShuffle
+AbsMax
+Channelwise
+AbsMax
+Channelwise
+AbsMax
+Channelwise
+AbsMax
+AbsMax
+AbsMax
+AbsMax
+AbsMax
+128
+128
+128
+128
+128
+128
+128
+128
+128
+128
+128
+5e-6
+5e-4
+5e-5
+5e-5
+5e-5
+31.19
+31.47
+30.92
+31.38
+30.67
+31.39
+31.23
+30.41
+30.75
+30.43
+30.08
+0.272
+0.260
+0.289
+0.262
+0.313
+0.265
+0.275
+0.316
+0.298
+0.312
+0.341
+3.15
+14.29
+2.41
+9.82
+2.82
+15.79
+2.91
+1.59
+1.83
+1.69
+2.11
+FlattenGray
+FlattenGray
+FlattenGray
+FlattenGray
+FlattenGray
+AbsMax
+AbsMax
+AbsMax
+AbsMax
+AbsMax
+16
+32
+64
+128
+256
+31.45
+31.13
+30.75
+30.71
+30.67
+0.273
+0.285
+0.298
+0.297
+0.302
+3.33
+2.37
+1.92
+1.83
+1.84
+11h 57m
+7h 53m
+5h 25m
+2h 33m
+1h 53m
+Table 3. Ablation results. Our main experiments adopt FlattenGray with AbsMax quantization as the default configuration.
+The results are obtained using CATRF-AV1.
+DCVC further improves the RD trade-off over CATRFAV1 at comparable quality levels, pushing the frontier to
+lower bitrates (see Fig. 5). However, this configuration
+reintroduces a neural decoder on the client side, making deployment less lightweight than the purely standardcodec setting. On N3D, CATRF consistently outperforms
+TeTriRF across all three standard codecs, achieving BDrate reductions of 40.5% (AV1), 63.3% (HEVC), and 51.8%
+(VP9). Compared with GIFStream [28], CATRF-AV1
+reaches matched quality at substantially lower bitrate. The
+quantitative results are presented in Tab. 1 and Fig. 5. On
+NHR, CATRF again strictly dominates TeTriRF, achieving
+higher quality at all tested bitrates and substantial bitrate
+savings. These results show that the SCL framework remains effective for dynamic scenes as well.
+Runtime Efficiency. The SCL framework does not modify
+the rendering pipeline of the underlying radiance-field backbone, so the rendering FPS of CATRF is identical to that of
+the chosen backbone (e.g., TensoRF [9] and DVGO [49]).
+End-to-end client-side throughput, however, also depends
+on reconstruction from the received bitstreams. As shown in
+Tab. 5, the client-side decoding stage is the main bottleneck
+for compressed 3DGS methods: although GIFStream and
+HAC++ enjoy superior rendering FPS once reconstructed,
+they require MLP inference to recover Gaussian attributes.
+In contrast, the radiance fields reconstruction of CATRF is
+neural-free, relying on standard-codec decoding only. This
+enables CATRF-HEVC to reconstruct radiance fields at 138
+FPS, versus 2.94 FPS/0.35 FPS for GIFStream/HAC++. As
+a result, CATRF achieves the highest end-to-end throughput
+despite the limited rendering speed of NeRF backbones.
+Ablation study. Tab. 3 ablates the main design choices
+of CATRF, including feature-plane packing, quantization
+scheme, and total-variation (TV) regularization. FlattenGray consistently yields the best RD trade-off, while
+FlattenRGB and PixelShuffle achieve similar or lower quality at only slightly lower bitrates. This suggests that avoiding cross-channel mixing makes codec artifacts less harmful
+Table 4. Ablation on the caching refresh interval M . Larger M
+substantially reduces training time and bitrate with only a modest
+quality degradation.
+MLP for Recon. Decoding Rendering End-to-end
+NeRFCodec [32]
+CNC [10]
+HAC++ [12]
+GIFStream [28]
+CATRF-HEVC
+Yes
+No
+Yes
+Yes
+No
+0.08 FPS
+0.98 FPS
+0.35 FPS
+2.94 FPS
+138 FPS
+1.56 FPS
+5.16 FPS
+169 FPS
+268 FPS
+5.86 FPS
+0.07 FPS
+0.82 FPS
+0.35 FPS
+2.91 FPS
+5.62 FPS
+Table 5. Decoding and rendering speed comparison. We report decoding FPS, rendering FPS, and end-to-end throughput including
+both stages. CATRF does not require any ML inference to retrieve
+3D representations from the encoded bitstreams.
+to radiance-field semantics. Although channelwise quantization improves fidelity, it increases bitrate by roughly 45×, making it unsuitable for the streaming regime. We
+therefore use FlattenGray with AbsMax quantization in our
+main experiments. Tab. 3 also varies the TV weight λtv .
+Moderate TV regularization improves codec compatibility
+without overly blurring high-frequency details. In Tab. 4,
+we ablate the cache refresh interval M under a fixed TV
+weight (λtv = 5 × 10−5 ). We empirically observed that
+M =128 reduces training time and bitrate with only modest
+quality degradation, so we configured M =128 in the main
+experiments.
+5. Conclusion
+We presented CATRF, a standard-codec-in-the-loop compression framework for plane-factorized radiance fields. By
+quantizing and packing feature planes into codec-friendly
+canvases, running a real JPEG/VP9/HEVC/AV1 round trip,
+and propagating gradients with a straight-through estimator,
+CATRF directly optimizes the decoded radiance fields that
+clients actually render, without requiring any per-scene neural codec or entropy-model parameters. Across static and
+dynamic benchmarks, CATRF consistently improves the
+rate–distortion trade-off over codec-agnostic and learnedcodec-in-the-loop baselines, achieving up to 63.3% BD-rate
+reduction. It also outperforms state-of-the-art compressed
+3DGS methods in both compression efficiency and decoding speed, highlighting a practical path toward low-bitrate,
+compression-resilient volumetric media streaming.
+Acknowledgments
+This work was supported in part by the National Science Foundation (NSF) under Grants CNS 2106463 and CNS 1901137.
+References
+[1] Johannes Ballé, Valero Laparra, and Eero P. Simoncelli.
+End-to-end optimized image compression. In ICLR, 2017.
+3
+[2] Johannes Ballé, David Minnen, Saurabh Singh, Sung
+Jin Hwang Johnston, and Eero P. Simoncelli. Variational image compression with a scale hyperprior. IEEE Transactions
+on Image Processing, 2018. 3
+[3] Yoshua Bengio, Nicholas Léonard, and Aaron Courville.
+Estimating or propagating gradients through stochastic
+neurons for conditional computation.
+arXiv preprint
+arXiv:1308.3432, 2013. 3, 6, 4
+[4] Abdelhak Bentaleb, Zhengdao Zhan, Farzad Tashtarian, May
+Lim, Saad Harous, Christian Timmerer, Hermann Hellwagner, and Roger Zimmermann. Low latency live streaming
+implementation in dash and hls. In Proceedings of the 30th
+ACM International Conference on Multimedia, pages 7343–
+7346, 2022. 1
+[5] Abdelhak Bentaleb, May Lim, Sarra Hammoudi, Saad
+Harous, and Roger Zimmermann. Solutions, challenges, and
+opportunities in volumetric video streaming: an architectural
+perspective. ACM Transactions on Multimedia Computing,
+Communications and Applications, 21(7):1–35, 2025. 1
+[6] Gisle Bjontegaard. Calculation of average psnr differences
+between rd-curves. ITU-T SG16, Doc. VCEG-M33, 2001. 7
+[7] Han Cai, Ligeng Zhu, and Song Han. Proxylessnas: Direct
+neural architecture search on target task and hardware. In
+ICLR, 2019. 3
+[8] Eric R Chan, Connor Z Lin, Matthew A Chan, Koki Nagano,
+Boxiao Pan, Shalini De Mello, Orazio Gallo, Leonidas J
+Guibas, Jonathan Tremblay, Sameh Khamis, et al. Efficient
+geometry-aware 3d generative adversarial networks. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 16123–16133, 2022. 1, 3
+[9] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. Tensorf: Tensorial radiance fields. In European conference on computer vision, pages 333–350. Springer, 2022.
+1, 3, 6, 7, 8, 5
+[10] Yihang Chen, Qianyi Wu, Mehrtash Harandi, and Jianfei
+Cai. How far can we compress instant-ngp-based nerf? In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20321–20330, 2024. 2,
+3, 4, 6, 7, 8, 1, 5
+[11] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi,
+and Jianfei Cai. Hac: Hash-grid assisted context for 3d
+gaussian splatting compression. In European Conference on
+Computer Vision, pages 422–438. Springer, 2024. 1, 3
+[12] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi,
+and Jianfei Cai. Hac++: Towards 100x compression of 3d
+gaussian splatting. IEEE Transactions on Pattern Analysis
+and Machine Intelligence, 2025. 2, 3, 4, 7, 8, 5
+[13] Alvaro Collet, Ming Chuang, Pat Sweeney, Don Gillett, Dennis Evseev, David Calabrese, Hugues Hoppe, Adam Kirk,
+and Steve Sullivan. High-quality streamable free-viewpoint
+video. ACM Transactions on Graphics (ToG), 34(4):1–13,
+2015. 1
+[14] Matthieu Courbariaux, Yoshua Bengio, and Jean-Pierre
+David. Binaryconnect: Training deep neural networks with
+binary weights during propagations. In NeurIPS, 2015. 3
+[15] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5501–5510, 2022. 3, 6
+[16] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk
+Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes:
+Explicit radiance fields in space, time, and appearance. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12479–12488, 2023. 3,
+6, 7
+[17] Sharath Girish, Tianye Li, Amrita Mazumdar, Abhinav Shrivastava, Shalini De Mello, et al. Queen: Quantized efficient
+encoding of dynamic gaussians for streaming free-viewpoint
+videos. Advances in Neural Information Processing Systems,
+37:43435–43467, 2024. 3, 7
+[18] Danillo Graziosi, Ohji Nakagami, Satoru Kuma, Alexandre
+Zaghetto, Teruhiko Suzuki, and Ali Tabatabai. An overview
+of ongoing point cloud compression standardization activities: Video-based (v-pcc) and geometry-based (g-pcc). APSIPA Transactions on Signal and Information Processing, 9:
+e13, 2020. 2
+[19] Anchit Gupta, Wenhan Xiong, Yixin Nie, Ian Jones, and Barlas Oğuz. 3dgen: Triplane latent diffusion for textured mesh
+generation. arXiv preprint arXiv:2303.05371, 2023. 3
+[20] Qiang Hu, Houqiang Zhong, Zihan Zheng, Xiaoyun Zhang,
+Zhengxue Cheng, Li Song, Guangtao Zhai, and Yanfeng
+Wang. Vrvvc: Variable-rate nerf-based volumetric video
+compression. In Proceedings of the AAAI Conference on Artificial Intelligence, pages 3563–3571, 2025. 2, 3, 6
+[21] Berivan Isik, Onur G Guleryuz, Danhang Tang, Jonathan
+Taylor, and Philip A Chou. Sandwiched video compression:
+Efficiently extending the reach of standard codecs with neural wrappers. In 2023 IEEE International Conference on Image Processing (ICIP), pages 2055–2059. IEEE, 2023. 2,
+3
+[22] Zhaoyang Jia, Bin Li, Jiahao Li, Wenxuan Xie, Linfeng Qi,
+Houqiang Li, and Yan Lu. Towards practical real-time neural
+video compression. In Proceedings of the Computer Vision
+and Pattern Recognition Conference, pages 12543–12552,
+2025. 2, 3, 7
+[23] Yili Jin, Kaiyuan Hu, Junhua Liu, Fangxin Wang, and Xue
+Liu. From capture to display: A survey on volumetric video.
+arXiv preprint arXiv:2309.05658, 2023. 1
+[24] Gyeongjin Kang, Younggeun Lee, Seungjun Oh, and Eunbyung Park. Codecnerf: Toward fast encoding and decoding,
+compact, and high-quality novel-view synthesis. In Proceedings of the AAAI Conference on Artificial Intelligence, pages
+4203–4211, 2025. 2
+[25] Jae Yong Lee, Yuqun Wu, Chuhang Zou, Derek Hoiem, and
+Shenlong Wang. Plenoptic png: Real-time neural radiance
+fields in 150 kb. In 2025 International Conference on 3D
+Vision (3DV), pages 502–511. IEEE, 2025. 7
+[26] Soonbin Lee, Fangwen Shu, Yago Sanchez, Thomas Schierl,
+and Cornelius Hellge. Ecrf: Entropy-constrained neural radiance fields compression with frequency domain optimization. In 2024 IEEE 26th International Workshop on Multimedia Signal Processing (MMSP), pages 1–6. IEEE, 2024.
+2, 6, 5
+[27] Soonbin Lee, Fangwen Shu, Yago Sanchez, Thomas Schierl,
+and Cornelius Hellge. Compression of 3d gaussian splatting
+with optimized feature planes and standard video codecs.
+arXiv preprint arXiv:2501.03399, 2025. 2, 3
+[28] Hao Li, Sicheng Li, Xiang Gao, Abudouaihati Batuer, Lu
+Yu, and Yiyi Liao. Gifstream: 4d gaussian-based immersive
+video with feature stream. In Proceedings of the Computer
+Vision and Pattern Recognition Conference, pages 21761–
+21770, 2025. 2, 3, 5, 7, 8
+[29] Jiahao Li, Bin Li, and Yan Lu. Neural video compression
+with feature modulation. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 26099–26108, 2024. 2, 3
+[30] Lingzhi Li, Zhen Shen, Zhongshu Wang, Li Shen, and
+Ping Tan. Streaming radiance fields for 3d video synthesis. Advances in Neural Information Processing Systems, 35:
+13485–13498, 2022. 7
+[31] Ming Li, Pan Zhou, Jia-Wei Liu, Jussi Keppo, Min Lin,
+Shuicheng Yan, and Xiangyu Xu. Instant3d: Instant textto-3d generation. International Journal of Computer Vision,
+132(10):4456–4472, 2024. 3
+[32] Sicheng Li, Hao Li, Yiyi Liao, and Lu Yu. Nerfcodec:
+Neural feature compression meets neural radiance fields for
+memory-efficient scene representation. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 21274–21283, 2024. 2, 3, 6, 7, 8, 1, 5
+[33] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon
+Green, Christoph Lassner, Changil Kim, Tanner Schmidt,
+Steven Lovegrove, Michael Goesele, Richard Newcombe,
+et al. Neural 3d video synthesis from multi-view video. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 5521–5531, 2022. 6
+[34] Zhan Li, Zhang Chen, Zhong Li, and Yi Xu. Spacetime gaussian feature splatting for real-time dynamic view synthesis.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 8508–8520, 2024. 3,
+7
+[35] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural sparse voxel fields. Advances
+in Neural Information Processing Systems, 33:15651–15663,
+2020. 6
+[36] Wolfgang Mack, Ahmed Mustafa, Rafał Łaganowski, and
+Samer Hijazy. Efficient evaluation of quantization-effects in
+neural codecs. arXiv preprint arXiv:2502.04770, 2025. 6, 3,
+4
+[37] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 1,
+6, 5
+[38] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM transactions on graphics
+(TOG), 41(4):1–15, 2022. 3, 6
+[39] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3d gaussian splatting for accelerated
+novel view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+10349–10358, 2024. 1
+[40] Sergio Orts-Escolano, Christoph Rhemann, Sean Fanello,
+Wayne Chang, Adarsh Kowdle, Yury Degtyarev, David Kim,
+Philip L Davidson, Sameh Khamis, Mingsong Dou, et al.
+Holoportation: Virtual 3d teleportation in real-time. In Proceedings of the 29th annual symposium on user interface
+software and technology, pages 741–754, 2016. 1
+[41] Marco A Martı́nez Ramı́rez, Oliver Wang, Paris Smaragdis,
+and Nicholas J Bryan. Differentiable signal processing with
+black-box audio effects. In ICASSP 2021-2021 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), pages 66–70. IEEE, 2021. 3
+[42] Yusuf Sani, Andreas Mauthe, and Christopher Edwards.
+Adaptive bitrate selection: A survey. IEEE Communications
+Surveys & Tutorials, 19(4):2985–3014, 2017. 2
+[43] Richard Shaw, Michal Nazarczuk, Jifei Song, Arthur
+Moreau, Sibi Catley-Chandar, Helisa Dhamo, and Eduardo
+Pérez-Pellitero. Swings: sliding windows for dynamic 3d
+gaussian splatting. In European Conference on Computer
+Vision, pages 37–54. Springer, 2024. 1
+[44] Seungjoo Shin and Jaesik Park. Binary radiance fields. Advances in neural information processing systems, 36:55919–
+55931, 2023. 3, 6
+[45] J Ryan Shue, Eric Ryan Chan, Ryan Po, Zachary Ankner,
+Jiajun Wu, and Gordon Wetzstein. 3d neural field generation
+using triplane diffusion. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 20875–20886, 2023. 3
+[46] Iraj Sodagar. The mpeg-dash standard for multimedia
+streaming over the internet. IEEE multimedia, 18(4):62–67,
+2011. 1, 2
+[47] Liangchen Song, Anpei Chen, Zhong Li, Zhang Chen, Lele
+Chen, Junsong Yuan, Yi Xu, and Andreas Geiger. Nerfplayer: A streamable dynamic scene representation with decomposed neural radiance fields. IEEE Transactions on Visualization and Computer Graphics, 29(5):2732–2742, 2023.
+6, 7
+[48] James C Spall. An overview of the simultaneous perturbation method for efficient optimization. Johns Hopkins apl
+technical digest, 19(4):482–492, 1998. 6, 3, 4
+[49] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 5459–
+5469, 2022. 3, 6, 7, 8
+[50] Jiakai Sun, Han Jiao, Guangyuan Li, Zhanjie Zhang, Lei
+Zhao, and Wei Xing. 3dgstream: On-the-fly training of
+3d gaussians for efficient streaming of photo-realistic freeviewpoint videos. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+20675–20685, 2024. 3, 7
+[51] Liao Wang, Kaixin Yao, Chengcheng Guo, Zhirui Zhang,
+Qiang Hu, Jingyi Yu, Lan Xu, and Minye Wu. Videorf: Rendering dynamic radiance fields as 2d feature video streams.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 470–481, 2024. 2
+[52] Penghao Wang, Zhirui Zhang, Liao Wang, Kaixin Yao,
+Siyuan Xie, Jingyi Yu, Minye Wu, and Lan Xu. Vˆ 3: Viewing volumetric videos on mobiles via streamable 2d dynamic
+gaussians. ACM Transactions on Graphics (TOG), 43(6):1–
+13, 2024. 2
+[53] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng
+Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Xinggang Wang.
+4d gaussian splatting for real-time dynamic scene rendering.
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 20310–20320, 2024. 1
+[54] Minye Wu, Yuehao Wang, Qiang Hu, and Jingyi Yu.
+Multi-view neural human rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 1682–1691, 2020. 6
+[55] Minye Wu, Zehao Wang, Georgios Kouros, and Tinne Tuytelaars. Tetrirf: Temporal tri-plane radiance fields for efficient
+free-viewpoint video. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+6487–6496, 2024. 2, 3, 5, 6, 7
+[56] Ningfeng Yang and Tor M Aamodt. Improving the straightthrough estimator with zeroth-order information. arXiv
+preprint arXiv:2510.23926, 2025. 3
+[57] Hyunho Yeo, Youngmok Jung, Jaehong Kim, Jinwoo Shin,
+and Dongsu Han. Neural adaptive content-aware internet
+video delivery. In 13th USENIX Symposium on Operating
+Systems Design and Implementation (OSDI 18), pages 645–
+661, 2018. 2
+[58] Hyunho Yeo, Chan Ju Chong, Youngmok Jung, Juncheol Ye,
+and Dongsu Han. Nemo: enabling neural-enhanced video
+streaming on commodity mobile devices. In Proceedings of
+the 26th Annual International Conference on Mobile Computing and Networking, pages 1–14, 2020. 2
+[59] Zhiyu Zhang, Guo Lu, Huanxiong Liang, Zhengxue Cheng,
+Anni Tang, and Li Song. Rate-aware compression for nerfbased volumetric video. In Proceedings of the 32nd ACM
+International Conference on Multimedia, pages 3974–3983,
+2024. 2, 3, 6, 1
+[60] Zihan Zheng, Houqiang Zhong, Qiang Hu, Xiaoyun Zhang,
+Li Song, Ya Zhang, and Yanfeng Wang. Jointrf: end-toend joint optimization for dynamic neural radiance field representation and compression. In 2024 IEEE International
+Conference on Image Processing (ICIP), pages 3292–3298.
+IEEE, 2024. 3, 6
+CATRF: Codec-Adaptive TriPlane Radiance Fields for Volumetric Content
+Delivery
+Supplementary Material
+A. Caching for SCL Training
+If we naively invoke the codec round trip Cq on every mini-batch,
+the encoding cost quickly dominates training time, especially for
+dynamic scenes where a video codec must operate on a sequence
+of frames (see Tab. 4). To make our standard-codec-in-the-loop
+(SCL) training practical, we maintain a per-frame cache of deb D),
+b and only recoded feature planes and density volumes (P,
+fresh this cache when necessary. For each frame t and each axis
+ax ∈ {xy, xz, yz} we cache the decoded TriPlane Pbtax and a snapshot of the raw plane Ptax at the time of refresh. We do the same
+for the density grid Dt . Our refresh policy consists of two cases:
+Step-based refresh. We keep track of the last refresh step gcache
+and the current global step g. Every M training steps, i.e., when
+g − gcache ≥ M , we re-run the codec over the entire video segment
+to update the cache.
+Change-based refresh. Step-based refresh alone may lag behind rapid parameter changes early in training. We therefore also
+monitor how much the current TriPlane has drifted from the last
+cached snapshot. If the relative change between the current planes
+and their cached snapshots exceeds a threshold ϵ (measured by
+a normalized ℓ2 difference), we trigger an early refresh even if
+g − gcache < M . In practice, this makes the cache more responsive at the beginning of training while keeping codec round trips
+infrequent once the model stabilizes.
+Putting these pieces together, the SCL training loop with
+caching can be summarized as:
+1. Sample a frame index t, rays {(o, d)}, and camera pose π.
+2. If the cache is empty or g − gcache ≥ M , mark refresh as true.
+3. If the relative change between the current (Ptax , Dt ) and their
+cached snapshots exceeds a threshold ϵ, also mark refresh as
+true.
+4. If refresh is true, then run the encode–decode codec round trip
+(as illustrated in Fig. 2) for the video segment.
+5. Update gcache ← g.
+6. STE substitution using cached reconstructions:
+(a) For each axis ax ∈ {xy, xz, yz}:
+\widehat {P}^{ax}_t \leftarrow \text {cached decoded plane},
+\widetilde {P}^{ax}_t \leftarrow \widehat {P}^{ax}_t + \big (P^{ax}_t - \texttt {detach}(P^{ax}_t)\big ).
+(b) For density:
+\widehat {D}_t \leftarrow \text {cached decoded density},
+\widetilde {D}_t \leftarrow \widehat {D}_t + \big (D_t - \texttt {detach}(D_t)\big ).
+7. Render and compute losses:
+I\leftarrow \mathcal {R}(\widetilde {\mathcal {P}}_t,\widetilde {D}_t,\pi ;\phi ),
+Tab. 4 shows that increasing the refresh interval M yields a
+favorable trade-off between accuracy and training efficiency. It
+suggests that relatively infrequent cache updates (e.g., M = 128)
+already capture most of the benefit of SCL training, while keeping
+the overhead of expensive codec round trips manageable.
+FlattenGray
+FlattenRGB
+PixelShuffle
+Figure 7. Visualization of appearance-plane canvases under different packing strategies. All three layouts represent the same
+TriPlane features, but they induce different spatial statistics and
+texture patterns, which affect how well standard codecs exploit redundancy and preserve feature semantics after compression.
+B. Decoder-Side Payload of Baseline Methods
+In a streaming scenario, NeRF compression methods that
+train a scene-specific codec (e.g., NeRFCodec [32], Rate-aware
+NeRF [59], and CNC [10]) must transmit not only the encoded
+radiance-field representation but also the decoder-side codec parameters required to reconstruct NeRFs at the client. While prior
+work typically reports only the feature bitstream or backbone
+model size, in our evaluation these decoder parameters are part of
+the content payload and therefore must be included in the bitrate
+budget. In contrast, CATRF is encoded and decoded using standard codecs that are ubiquitous on commodity devices, avoiding
+this additional overhead (see Tab. 2 in the main paper).
+Observed
+payload for NeRFCodec. For NeRFCodec [32], we adopt their official implementation, which
+uses Cheng2020Anchor neural image codec from CompressAI. Empirically, we observed that the following decoder-side
+modules are fine-tuned together with the radiance-field backbone
+on a per-scene basis, and thus must be transmitted alongside the
+encoded NeRFs for decoding:
+• decoder adaptor
+• context prediction
+• entropy parameters
+• entropy bottleneck.quantiles
+Note that NeRFCodec employs two separate neural image
+codecs for the appearance and density streams, respectively.
+Encoder-side modules, although also fine-tuned, are excluded
+from the bitrate budget since they are not required at the client for
+decoding. The authors of NeRFCodec do not release their bitrate
+budget estimation code. Rather than reporting the raw parameter
+size, we apply per-tensor quantization and entropy coding to estimate a more realistic compressed size:
+1. Per-tensor quantization. For each tensor, we collect its values x ∈ R and compute
+x_{\min } = \min (x), \quad x_{\max } = \max (x).
+We quantize to qbits bits (we use qbits = 8 in our experiments).
+Let L = 2qbits and
+\mathrm {scale} = \frac {x_{\max } - x_{\min }}{L - 1}.
+Each element is mapped to an integer level
+q = \mathrm {round}\!\left (\frac {x - x_{\min }}{\mathrm {scale}}\right ),
+and clamped to [0, L − 1].
+2. Entropy estimate. We compute a histogram over the quantized levels and derive the empirical PMF pi over {0, . . . , L −
+1}. The Shannon bound gives an idealized bit cost
+H_{\text {bits}} \;=\; N \sum _{i} -p_i \log _2 p_i,
+where N is the number of elements and the sum is taken over
+non-zero probabilities.
+3. Per-tensor header. To reconstruct a tensor from its quantized form, the decoder also needs lightweight side information: (xmin , xmax ), qbits , and the tensor shape. We therefore
+add a small header
+\mathrm {header\_bits} = 2 \cdot 32 \;+\; 8 \;+\; 32 \cdot d,
+where d is the number of dimensions.
+The total bit cost for a tensor is therefore
+\mathrm {bits} = H_{\text {bits}} + \mathrm {header\_bits},
+which is how we estimate the bitrate budget required for NeRFCodec’s decoder-side parameters.
+The compression procedure described above yields a raw decoder payload of roughly 24 MB in total (about 11.9 MB for the
+density codec and 12.8 MB for the appearance codec). After compression, this reduces to about 1.6 MB. These quantities are what
+we report as NeRFCodec’s memory footprint, which represents the
+actual payload in a streaming application if we use NeRFCodec as
+the 3D representation.
+Observed payload for CNC. For CNC [10], we directly
+reuse the bitrate estimation utilities provided in their official implementation, which have already included quantization and entropy coding. The difference between the sizes reported in our
+evaluation and those in the original paper stems from whether one
+includes the compressed MLP sizes and entropy model parameters
+in the total bitrate budget.
+Figure 8. Training diagnostics of CATRF with STE as the gradient
+surrogate through the codec round trip. We plot the reconstruction
+MSE, gradient ℓ2 norm of the feature plane parameters, the scalenormalized gradient magnitude, and the 99th-percentile absolute
+gradient magnitude (computed from 200k sampled parameters).
+All metrics remain bounded while the loss decreases, indicating
+stable optimization without exploding or vanishing gradients.
+C. More Implementation Details
+For the radiance-field backbone, we train for 30k iterations and
+adopt progressive scaling widely used in the literature. The plane
+resolutions (and line vectors) are bilinearly upsampled at steps
+[2000, 3000, 4000, 5500, 7000], and the alpha-mask is recomputed on a schedule [2000, 4000, 6000, 11000, 16000, 21000,
+26000]. The MLP render has two hidden layers (128 units, ReLU)
+and a 3-channel head with sigmoid. Optimization uses Adam
+with learning rates lr = 0.02 for the radiance-field model and
+lr = 0.001 for the renderer MLP. When employing AbsMax (absolute max) quantization, we employ hard-coded upper and lower
+bounds. For the static branch (TensoRF backbone), density and
+appearance planes are globally quantized within preset ranges,
+[−25, 25] and [−5, 5], respectively. For the dynamic branch
+(DVGO backbone), density and appearance planes are both globally quantized within the preset range, [−20, 20]. For our STEbased caching, the change-based refresh uses a threshold ϵ = 0.05
+(5% normalized ℓ2 drift) to trigger early codec refreshes.
+D. Gradient Diagnostics
+The core of CATRF is treating the entire codec encoding-decoding
+round trip as a black box and using a Straight-Through Estimator (STE) as its gradient surrogate. While this enables backpropagation, the resulting gradients are biased: standard codecs introduce non-linear distortions that an identity STE does not explicitly model, potentially causing gradient mismatch and training instability. Given the complexity of standard codecs (e.g.,
+quantization, block transforms, entropy coding, and in-loop filtering), providing a formal convergence proof is intractable. Instead, we provide empirical evidence that STE yields stable and
+useful surrogate gradients in our training setup. Specifically, we
+Lego
+Drums
+xy plane
+xz plane
+yz plane
+TensoRF
+xy plane
+xz plane
+yz plane
+CATRF-JPEG
+Figure 9. Comparison of visualized appearance planes packed with FlattenRGB. For a given scene, we show the xy, xz, and yz planes of
+vanilla TensoRF (left) and our CATRF-JPEG model (right). The CATRF canvases exhibit richer high-frequency structure than the vanilla
+TensoRF planes, reflecting that our SCL training explicitly adapts feature planes to the codec round trip. Because the codec’s transform,
+quantization, and in-loop filtering tend to smooth the canvases, CATRF learns to encode more detail pre-encoding. Consequently, after
+decoding, the decoded patterns still preserve the underlying feature semantics needed for high-quality rendering.
+log four statistics throughout training: (1) MSE, the reconstruction
+loss between rendered RGB and ground-truth images; (2) grad
+L2 norm, the ℓ2 norm of gradients on the feature-plane parameters; (3) grad over param, a scale-normalized gradient magnitude
+∥∇θ L∥2 /(∥θ∥2 + ϵ); and (4) grad p99 abs, the 99th percentile
+of |∇θ L| computed from a random sample of 200,000 gradient
+entries. As shown in Fig. 8, these metrics remain bounded (with
+no NaN/Inf entries) while the MSE decreases smoothly, indicating
+that optimization proceeds normally under STE despite the biased
+gradients. This diagnostic supports our design choice that an STEthrough-codec surrogate is sufficient for stable SCL training.
+E. Gradient-Surrogate Ablation
+Surrogate-gradient design for non-differentiable operators is a
+long-standing problem in quantized and discrete optimization. Beyond the vanilla identity Straight-Through Estimator (STE), many
+alternatives have been proposed to reduce gradient bias or better
+approximate the local effect of quantization. Since CATRF treats
+the full codec round trip as a black box, it is natural to ask whether
+a more sophisticated surrogate than vanilla STE would further improve optimization. We therefore compare three strategies: vanilla
+STE [3], modified STE (mSTE) [36], and a hybrid STE+SPSA
+estimator inspired by black-box gradient approximation [41, 48].
+Tab. 6 reports rate–distortion performance (PSNR/SSIM/LPIPS),
+compressed size, and training time.
+Vanilla STE uses the identity surrogate in the backward pass,
+i.e., the gradient is copied directly to the pre-codec feature plane.
+Although this surrogate is biased, recent work has noted that STE
+can nevertheless provide high-quality biased gradients in practice [56]. Our results are consistent with this observation. Vanilla
+STE provides the most robust optimization overall, particularly
+in the low-bitrate regime where codec-induced distortions are
+strongest. We therefore use vanilla STE as the default gradient
+surrogate in all main experiments.
+The modified STE (mSTE) rescales the detached codec error
+using the standard deviation of the quantization error. Let ϵ =
+P̂−P denote the codec-induced perturbation between the decoded
+feature plane P̂ and the pre-codec feature plane P. mSTE takes
+the form
+\widetilde {\mathbf {P}} = \mathbf {P} + \operatorname {sg}(\epsilon ) \cdot \frac {\sigma (\epsilon )}{\operatorname {sg}(\sigma (\epsilon ))},
+where sg(·) is the stop-gradient operator and σ(ϵ) is the standard
+deviation of the perturbation. Intuitively, this preserves the STE
+forward pass while modulating the backward signal using the observed perturbation scale. In our experiments, mSTE performs
+competitively at high bitrate, but degrades noticeably at low bitrate. A plausible reason is that, under stronger codec distortion,
+the perturbation becomes less like a small local quantization residual and more strongly reflects the non-linear artifacts from the
+black-box codec. Thus, a standard-deviation reweighting can become a poor proxy for the true local sensitivity instead, making
+optimization less stable and less effective than plain identity STE.
+We also evaluate SPSA, a gradient estimator based on symmetric random perturbations [48]. For an objective Cq (.), SPSA
+estimates its gradient by running two function evaluations:
+\hat {g}_i(\mathbf {P}) = \frac { \mathcal {C}_q(\mathbf {P} + \epsilon \Delta ) - \mathcal {C}_q(\mathbf {P} - \epsilon \Delta ) }{ 2 \epsilon \Delta _i },
+where ∆ is a random perturbation vector sampled from a symmetric Bernoulli distribution, i.e., ∆i = ±1 with probability of
+0.5; ϵ is a small perturbation scale. In our implementation, we
+use a hybrid STE+SPSA scheme, where STE is used on cached
+steps, while SPSA is applied only when the codec cache is refreshed. This design keeps the method computationally feasible,
+since applying SPSA at every step would require multiple additional codec round trips per iteration and would be prohibitively
+expensive in our setting. Empirically, STE+SPSA yields the worst
+reconstruction quality and the highest training time. We attribute
+this to the high variance of zeroth-order estimates and the poor
+signal-to-noise ratio introduced by severe codec non-linearity. Although SPSA is less biased in principle, its gradient estimates can
+be substantially noisier for a complex, black-box codec roundtrip,
+making them less aligned with the descent direction needed for
+radiance-field optimization.
+PSNR SSIM LPIPS
+STE (high-rate) [3]
+STE (low-rate) [3]
+mSTE (high-rate) [36]
+mSTE (low-rate) [36]
+STE+SPSA (high-rate) [48]
+STE+SPSA (low-rate) [48]
+33.56
+31.91
+33.62
+30.96
+29.63
+27.94
+0.969
+0.957
+0.968
+0.948
+0.930
+0.909
+0.182
+0.267
+0.195
+0.368
+0.459
+0.650
+Size
+Training
+0.27 MB
+0.13 MB
+0.32 MB
+0.17 MB
+0.14 MB
+0.07 MB
+1h 14m
+1h 9m
+1h 25m
+1h 28m
+3h 18m
+3h 18m
+Table 6. Ablation of gradient-surrogate methods for SCL training.
+STE demonstrates superior robustness at low rates, whereas mSTE
+degrades under heavy quantization. STE+SPSA yields suboptimal
+R-D performance and incurs substantial training latency due to
+repeated codec round-trips.
+Overall, this ablation shows that reducing bias in the surrogate
+gradient does not necessarily improve optimization for SCL TriPlane training. Instead, vanilla STE offers the best trade-off between stability, RD performance, and efficiency.
+F. More Quantitative and Qualitative Results
+In this section, we present detailed quantitative and qualitative results that complement the main paper. First, we report per-scene
+quantitative results for the NeRF Synthetic and Tanks and Temples benchmarks, allowing a more fine-grained comparison across
+individual scenes (see Tab. 7 and Tab. 8). We then provide extra
+qualitative visualizations for both static and dynamic benchmarks
+to further illustrate how CATRF behaves across a wide range of
+operating points and scene types (see Fig. 10 and Fig. 11).
+Method
+chair
+drums
+TensoRF [9]
+NeRFCodec [32]
+CNC [10] (F = 8, λ = 4e − 3)
+CNC [10] (F = 8, λ = 2e − 3)
+CNC [10] (F = 8, λ = 7e − 4)
+HAC++ [12] (λ = 3e − 3)
+HAC++ [12] (λ = 2e − 3)
+HAC++ [12] (λ = 1e − 3)
+CATRF-JPEG (QP=20)
+CATRF-JPEG (QP=35)
+CATRF-JPEG (QP=65)
+35.89
+34.28
+32.99
+34.45
+35.56
+34.42
+34.89
+35.55
+34.74
+35.06
+35.79
+26.39
+25.77
+25.33
+25.43
+26.18
+26.28
+26.34
+26.49
+26.03
+26.10
+26.24
+TensoRF [9]
+NeRFCodec [32]
+CNC [10] (F = 8, λ = 4e − 3)
+CNC [10] (F = 8, λ = 2e − 3)
+CNC [10] (F = 8, λ = 7e − 4)
+HAC++ [12] (λ = 3e − 3)
+HAC++ [12] (λ = 2e − 3)
+HAC++ [12] (λ = 1e − 3)
+CATRF-JPEG (QP=20)
+CATRF-JPEG (QP=35)
+CATRF-JPEG (QP=65)
+0.983
+0.976
+0.980
+0.982
+0.984
+0.980
+0.982
+0.985
+0.974
+0.978
+0.981
+0.931
+0.923
+0.941
+0.942
+0.942
+0.951
+0.951
+0.952
+0.925
+0.928
+0.930
+TensoRF [9]
+NeRFCodec✝ [32]
+NeRFCodec [32]
+CNC [10] (F = 8, λ = 4e − 3)✝
+CNC [10] (F = 8, λ = 2e − 3)✝
+CNC [10] (F = 8, λ = 7e − 4)✝
+CNC [10] (F = 8, λ = 4e − 3)
+CNC [10] (F = 8, λ = 2e − 3)
+CNC [10] (F = 8, λ = 7e − 4)
+HAC++ [12] (λ = 3e − 3)
+HAC++ [12] (λ = 2e − 3)
+HAC++ [12] (λ = 1e − 3)
+CATRF-JPEG (QP=20)
+CATRF-JPEG (QP=35)
+CATRF-JPEG (QP=65)
+69.19
+0.525
+1.819
+0.406
+0.511
+0.689
+0.652
+0.668
+0.847
+0.707
+0.830
+1.098
+0.332
+0.453
+0.731
+69.26
+0.602
+1.896
+0.488
+0.649
+1.003
+0.641
+0.802
+1.130
+1.220
+1.546
+1.787
+0.364
+0.509
+0.840
+ficus hotdog
+PSNR
+34.34 36.76
+33.25 35.07
+32.31 35.66
+33.27 35.92
+32.88 37.39
+34.46 36.76
+34.55 37.00
+34.68 37.52
+33.75 36.15
+34.18 36.38
+34.43 36.71
+SSIM
+0.983 0.981
+0.978 0.968
+0.983 0.978
+0.984 0.980
+0.984 0.982
+0.985 0.981
+0.986 0.982
+0.986 0.983
+0.977 0.973
+0.979 0.975
+0.982 0.978
+Size (MB)
+72.02 85.24
+0.563 0.521
+1.863 1.721
+0.365 0.332
+0.444 0.367
+0.588 0.470
+0.595 0.518
+0.622 0.553
+0.703 0.656
+0.766 0.620
+0.917 0.721
+1.219 0.802
+0.368 0.362
+0.501 0.477
+0.797 0.767
+lego
+materials
+mic
+ship
+Avg.
+34.98
+35.28
+32.96
+34.50
+34.64
+34.36
+34.71
+35.10
+33.08
+33.61
+34.59
+30.96
+29.08
+29.95
+30.06
+30.27
+29.99
+30.21
+30.33
+30.52
+30.78
+31.02
+34.68
+34.16
+34.78
+36.62
+36.59
+34.90
+35.54
+35.80
+34.55
+34.77
+35.11
+30.43
+30.63
+29.61
+29.65
+31.83
+30.49
+30.70
+30.70
+30.02
+30.77
+31.22
+33.05
+32.19
+31.70
+32.49
+33.16
+32.71
+32.99
+33.27
+32.17
+32.49
+33.13
+0.978
+0.974
+0.978
+0.980
+0.982
+0.977
+0.978
+0.980
+0.958
+0.963
+0.970
+0.957
+0.950
+0.958
+0.959
+0.960
+0.961
+0.963
+0.964
+0.954
+0.957
+0.970
+0.988
+0.988
+0.991
+0.992
+0.993
+0.989
+0.991
+0.991
+0.983
+0.985
+0.987
+0.888
+0.877
+0.901
+0.909
+0.915
+0.902
+0.903
+0.903
+0.874
+0.881
+0.886
+0.961
+0.954
+0.964
+0.966
+0.968
+0.966
+0.967
+0.968
+0.952
+0.956
+0.961
+17.99
+0.555
+1.849
+0.377
+0.454
+0.602
+0.545
+0.622
+0.770
+0.892
+1.223
+1.434
+0.138
+0.186
+0.370
+86.14
+0.556
+1.850
+0.485
+0.610
+0.851
+0.647
+0.772
+1.013
+1.027
+1.166
+1.498
+0.473
+0.636
+1.049
+67.96
+0.553
+1.847
+0.332
+0.366
+0.471
+0.524
+0.744
+1.486
+0.574
+0.654
+0.868
+0.335
+0.408
+0.559
+72.24
+0.593
+1.887
+0.560
+0.717
+1.106
+0.780
+0.938
+1.327
+1.256
+1.541
+2.150
+0.481
+0.664
+1.001
+67.51
+0.559
+1.842
+0.418
+0.515
+0.722
+0.613
+0.715
+0.991
+0.883
+1.075
+1.357
+0.357
+0.479
+0.764
+Table 7. Per-scene quantitative results on the NeRF Synthetic dataset [37]. When computing the model size, we include all scene-specific
+codec and entropy-model parameters required to decode the radiance fields at the client. We also report the size of the encoded radiance
+fields alone, indicated by ✝. For per-scene results of other baselines, please refer to ECRF [26].
+Method
+TensoRF [9]
+NeRFCodec [32]
+CNC (F = 8, λ = 8e − 3) [10]
+CNC (F = 8, λ = 4e − 3) [10]
+CNC (F = 8, λ = 2e − 3) [10]
+CNC (F = 8, λ = 7e − 4) [10]
+CATRF-JPEG (QP=20)
+CATRF-JPEG (QP=35)
+CATRF-JPEG (QP=50)
+CATRF-JPEG (QP=65)
+TensoRF [9]
+NeRFCodec [32]
+CNC (F = 8, λ = 8e − 3) [10]
+CNC (F = 8, λ = 4e − 3) [10]
+CNC (F = 8, λ = 2e − 3) [10]
+CNC (F = 8, λ = 7e − 4) [10]
+CATRF-JPEG (QP=20)
+CATRF-JPEG (QP=35)
+CATRF-JPEG (QP=50)
+CATRF-JPEG (QP=65)
+TensoRF [9]
+NeRFCodec✝ [32]
+NeRFCodec [32]
+CNC (F = 8, λ = 8e − 3)✝ [10]
+CNC (F = 8, λ = 4e − 3)✝ [10]
+CNC (F = 8, λ = 2e − 3)✝ [10]
+CNC (F = 8, λ = 7e − 4)✝ [10]
+CNC (F = 8, λ = 8e − 3) [10]
+CNC (F = 8, λ = 4e − 3) [10]
+CNC (F = 8, λ = 2e − 3) [10]
+CNC (F = 8, λ = 7e − 4) [10]
+CATRF-JPEG (QP=20)
+CATRF-JPEG (QP=35)
+CATRF-JPEG (QP=50)
+CATRF-JPEG (QP=65)
+Barn Caterpillar Family Ignatius Truck Avg.
+PSNR
+29.48
+26.84
+33.69
+28.64 26.88 29.11
+28.35
+25.12
+33.39
+27.26 25.45 27.91
+28.15
+25.85
+32.48
+27.52 26.38 28.08
+28.56
+25.70
+32.68
+27.20 26.42 28.11
+28.75
+26.22
+32.72
+27.53 26.23 28.29
+28.82
+26.44
+32.86
+28.02 27.12 28.65
+28.69
+25.94
+31.86
+28.37 26.10 28.19
+29.02
+26.30
+32.21
+28.45 26.44 28.48
+29.45
+26.86
+33.42
+28.52 26.60 28.97
+29.67
+26.88
+33.72
+28.48 26.76 29.10
+SSIM
+0.901
+0.913
+0.965
+0.949 0.903 0.926
+0.849
+0.891
+0.957
+0.940 0.863 0.901
+0.866
+0.911
+0.955
+0.941 0.910 0.917
+0.872
+0.914
+0.959
+0.944 0.914 0.921
+0.879
+0.917
+0.961
+0.946 0.917 0.924
+0.884
+0.920
+0.965
+0.947 0.921 0.927
+0.893
+0.895
+0.968
+0.946 0.892 0.919
+0.904
+0.905
+0.971
+0.949 0.900 0.926
+0.909
+0.908
+0.973
+0.951 0.904 0.929
+0.923
+0.918
+0.976
+0.956 0.916 0.938
+Size (MB)
+82.06
+73.22
+68.42
+68.18 78.52 74.08
+0.574
+0.625
+0.561
+0.552 0.613 0.584
+1.867
+1.925
+1.861
+1.852 1.913 1.884
+0.546
+0.579
+0.384
+0.432 0.511 0.490
+0.726
+0.824
+0.455
+0.559 0.708 0.654
+0.976
+1.067
+0.543
+0.721 0.992 0.860
+1.465
+1.652
+0.710
+1.146 1.539 1.302
+0.807
+0.799
+0.598
+0.671 0.726 0.720
+0.987
+1.044
+0.669
+0.798 0.923 0.884
+1.237
+1.287
+0.757
+0.960 1.207 1.090
+1.726
+1.872
+0.924
+1.385 1.754 1.532
+0.368
+0.356
+0.501
+0.296 0.365 0.377
+0.504
+0.483
+0.671
+0.393 0.486 0.507
+0.675
+0.626
+0.851
+0.501 0.634 0.657
+0.816
+0.746
+1.008
+0.599 0.755 0.785
+Table 8. Per-scene results on the Tanks and Temples dataset [35]. When computing the model size, we include all scene-specific codec and
+entropy-model parameters required to decode the radiance fields at the client. We also report the size of the encoded radiance fields alone,
+indicated by ✝. For per-scene results of other baselines, please refer to ECRF [26]
+Lego
+35.28dB / 1.85MB
+32.96dB / 0.55MB
+33.08dB / 0.14MB
+34.59dB / 0.37MB
+25.77dB / 1.89MB
+25.33dB / 0.64MB
+26.03dB / 0.36MB
+26.24dB / 0.84MB
+29.08dB / 1.85MB
+29.95dB / 0.65MB
+30.52dB / 0.47MB
+31.02dB / 1.05MB
+34.16dB / 1.84MB
+34.78dB / 0.52MB
+34.55dB / 0.33MB
+35.11dB / 0.56MB
+30.63dB / 1.88MB
+29.61dB / 0.78MB
+30.02dB / 0.48MB
+31.22dB / 1.00MB
+25.12dB / 1.92MB
+25.70dB / 1.04MB
+25.94dB / 0.35MB
+26.88dB / 0.75MB
+Ignatius
+27.26dB / 1.85MB
+27.20dB / 0.79MB
+28.37dB / 0.29MB
+28.48dB / 0.60MB
+Truck
+25.45dB / 1.91MB
+26.42dB / 0.92MB
+26.10dB / 0.36MB
+26.76dB / 0.75MB
+NeRFCodec
+CNC
+(F=8, λ=4e-3)
+CATRF-JPEG
+(QP=20)
+CATRF-JPEG
+(QP=65)
+Drums
+Materials
+Mic
+Ship
+Caterpillar
+Ground Truth
+Figure 10. More qualitative comparisons of NeRF Synthetic and Tanks and Temples benchmarks.
+Ground Truth
+Ground Truth
+24.64dB / 0.64Mbps
+28.47dB / 1.77Mbps
+30.97dB / 6.05Mbps
+TeTriRF-AV1 (QP=56)
+TeTriRF-AV1 (QP=50)
+TeTriRF-AV1 (QP=32)
+29.52dB / 0.98Mbps
+30.66dB / 2.45Mbps
+31.33dB / 7.02Mbps
+CATRF-AV1 (QP=56)
+CATRF-AV1 (QP=50)
+CATRF-AV1 (QP=32)
+23.76dB / 0.74Mbps
+28.19dB / 2.02Mbps
+30.94dB / 6.79Mbps
+TeTriRF-AV1 (QP=56)
+TeTriRF-AV1 (QP=50)
+TeTriRF-AV1 (QP=32)
+29.45dB / 1.15Mbps
+30.65dB / 2.79Mbps
+31.20dB / 7.84Mbps
+CATRF-AV1 (QP=50)
+CATRF-AV1 (QP=32)
+CATRF-AV1 (QP=56)
+Ground Truth
+26.51dB / 0.19Mbps
+29.37dB / 0.48Mbps
+30.32dB / 0.72Mbps
+TeTriRF-AV1 (QP=60)
+TeTriRF-AV1 (QP=50)
+TeTriRF-AV1 (QP=44)
+30.56dB / 0.21Mbps
+31.78dB / 0.44Mbps
+32.60dB / 0.62Mbps
+CATRF-AV1 (QP=60)
+CATRF-AV1 (QP=50)
+CATRF-AV1 (QP=44)
+Figure 11. More qualitative comparisons of Neural 3D Video and NHR benchmarks.

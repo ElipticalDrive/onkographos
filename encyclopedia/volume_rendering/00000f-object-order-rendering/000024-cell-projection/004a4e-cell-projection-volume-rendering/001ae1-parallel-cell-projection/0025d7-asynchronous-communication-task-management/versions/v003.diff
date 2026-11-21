@@ -1,0 +1,223 @@
+--- v002.md
++++ v003.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A parallel volume rendering dataset (e.g., unstructured grid), a target image resolution, and configuration parameters for polling interval and buffer depth.
+-*   **Output:** A rendered image where ray segments from all processors are correctly merged.
++*   **Input:** A parallel volume rendering dataset, a target image resolution, and configuration parameters for polling interval and buffer depth [S1].
++*   **Output:** A rendered image where ray segments from all processors are correctly merged [S1].
+ 
+ **Data Structures:**
+ *   **Ray Segment Buffers:** Two or more buffers are allocated for each destination processor [S1].
+-    *   **Layout:** Each buffer holds a collection of ray segments. The exact internal layout of a ray segment (e.g., start/end coordinates, opacity, color) is not specified in the sources, but it must be sufficient for image compositing [S1].
++    *   **Layout:** Each buffer holds a collection of ray segments sufficient for image compositing [S1].
+     *   **Purpose:** While a send operation is pending for a full buffer, scan conversion places additional segments in the companion buffer [S1].
+ 
+@@ -19,5 +19,5 @@
+ *   **Polling Interval:** The number of cells processed before checking for incoming ray segments [S1].
+     *   **Typical Values:** Not given in the sources.
+-    *   **Guidance:** Should be selected in accordance with buffer size. Polling should be performed more frequently with smaller buffer sizes or larger numbers of processors [S1].
++    *   **Guidance:** Should be selected in accordance with buffer size; polling should be performed more frequently with smaller buffer sizes or larger numbers of processors [S1].
+ *   **Buffer Depth:** The number of ray segments accumulated before an asynchronous send is posted [S1].
+     *   **Typical Values:** Not given in the sources.
+@@ -25,139 +25,93 @@
+ 
+ **Steps:**
+-1.  **Initialization:** Allocate two or more ray segment buffers for each destination processor [S1]. Initialize local termination counters.
++1.  **Initialization:** Allocate two or more ray segment buffers for each destination processor [S1]. Initialize local termination counters and buffer state flags [G].
+ 2.  **Main Loop (Per Processor):**
+     a.  **Scan Conversion:** Process a batch of cells (size determined by Polling Interval) to generate ray segments [S1].
+     b.  **Buffering:** Place generated ray segments into the current buffer for the appropriate destination [S1].
+-    c.  **Check Buffer Fullness:** If the current buffer is full:
+-        i.  Post an asynchronous send operation for the full buffer [S1].
+-        ii. Switch to the companion buffer for subsequent segment placement [S1].
++    c.  **Check Buffer Fullness:** If the current buffer is full, post an asynchronous send operation for it and switch to the companion buffer for subsequent segment placement [S1].
+     d.  **Polling:** After processing the batch of cells, check for incoming ray segments from other processors [S1].
+     e.  **Ray Merging:** If incoming segments are available, process them (merge into the image) [S1].
+-    f.  **Deadlock Prevention:** If both buffers for a particular destination are full and the first send has not completed, switch exclusively to the ray merging task to process incoming segments while waiting for outbound congestion to clear [S1]. This step is essential to prevent deadlock [S1].
+-    g.  **Repeat:** Continue until all cells are processed.
+-3.  **Termination:**
+-    a.  A designated node coordinates termination by collecting local termination messages from all processors [S1].
+-    b.  The designated node broadcasts a global termination signal [S1].
+-    c.  A final global synchronization operation ends the overall rendering process [S1].
++    f.  **Deadlock Prevention:** If both buffers for a particular destination fill up before the first send completes, switch exclusively to the ray merging task to process incoming segments while waiting for outbound congestion to clear [S1]. This step is essential to prevent deadlock [S1].
++    g.  **Repeat:** Continue until all cells are processed [S1].
++3.  **Termination:** A designated node coordinates termination by collecting local termination messages from all processors [S1]. The designated node broadcasts a global termination signal [S1]. A final global synchronization operation ends the overall rendering process [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for a single processor in the parallel system
+-# Assumes global variables: num_destinations, polling_interval, buffer_depth
+-# Assumes functions: process_cells(n), generate_ray_segments(), 
+-#                   async_send(buffer, dest), check_incoming_segments(), 
+-#                   merge_segments(segments), is_termination_signal(), 
+-#                   collect_local_termination(), broadcast_termination()
+-
+-# Data structures
+-# buffers[dest][0] and buffers[dest][1] are the two buffers for each destination
+-# current_buffer_index[dest] tracks which buffer is currently being filled (0 or 1)
+-# buffer_full[dest] tracks if the current buffer is full
+-
+-def run_asynchronous_rendering():
+-    # Initialization
+-    for dest in range(num_destinations):
+-        buffers[dest][0] = allocate_buffer(buffer_depth)
+-        buffers[dest][1] = allocate_buffer(buffer_depth)
+-        current_buffer_index[dest] = 0
+-        buffer_full[dest] = False
++def run_asynchronous_rendering(num_destinations, polling_interval, buffer_depth, total_cells):
++    # Data structures
++    # buffers[dest][0] and buffers[dest][1] are the two buffers for each destination
++    # current_buffer_index[dest] tracks which buffer is currently being filled (0 or 1)
++    # send_pending[dest] tracks if an asynchronous send is active for the current buffer
++    buffers = [[[], []] for _ in range(num_destinations)]
++    current_buffer_index = [0] * num_destinations
++    send_pending = [False] * num_destinations
+ 
+     cells_processed = 0
+-    total_cells = get_total_cells()
+-
+     while cells_processed < total_cells:
+         # Step 2a: Scan Conversion
+         batch_size = min(polling_interval, total_cells - cells_processed)
+-        new_segments = process_cells(batch_size)
++        new_segments = process_cells(batch_size)  # [G] standard scan conversion
+         cells_processed += batch_size
+ 
+         # Step 2b: Buffering
+         for segment in new_segments:
+-            dest = get_destination(segment)
+-            if buffer_full[dest]:
++            dest = get_destination(segment)  # [G] standard routing
++            if send_pending[dest]:
+                 # Step 2c: Check Buffer Fullness
+-                # If full, switch to companion buffer
++                # If send is pending, switch to companion buffer
+                 current_buffer_index[dest] = 1 - current_buffer_index[dest]
+-                buffer_full[dest] = False
+-            
+-            # Place segment in current buffer
+-            add_segment(buffers[dest][current_buffer_index[dest]], segment)
+-            
++                send_pending[dest] = False
++
++            buffers[dest][current_buffer_index[dest]].append(segment)
++
+             # Check if buffer is now full
+             if len(buffers[dest][current_buffer_index[dest]]) >= buffer_depth:
+-                buffer_full[dest] = True
++                # Post asynchronous send for the full buffer
++                async_send(buffers[dest][current_buffer_index[dest]], dest)  # [G] standard non-blocking send
++                send_pending[dest] = True
++                # Switch to companion buffer for subsequent segments
++                current_buffer_index[dest] = 1 - current_buffer_index[dest]
+ 
+         # Step 2d: Polling
+-        incoming_segments = check_incoming_segments()
++        incoming_segments = check_incoming_segments()  # [G] standard non-blocking receive check
+ 
+         # Step 2e: Ray Merging
+         if incoming_segments:
+-            merge_segments(incoming_segments)
++            merge_segments(incoming_segments)  # [G] standard compositing
+ 
+         # Step 2f: Deadlock Prevention
+-        # Check if any destination has both buffers full and pending sends
++        # If both buffers for a destination fill up before the first send completes,
++        # switch to ray merging task to process incoming segments while waiting
+         deadlock_risk = False
+         for dest in range(num_destinations):
+-            if buffer_full[dest] and is_send_pending(dest):
+-                # Check if the companion buffer is also full
++            if send_pending[dest]:
+                 companion_index = 1 - current_buffer_index[dest]
+                 if len(buffers[dest][companion_index]) >= buffer_depth:
+                     deadlock_risk = True
+                     break
+-        
++
+         if deadlock_risk:
+-            # Switch to ray merging task exclusively
++            # Process incoming segments until outbound congestion clears
+             while True:
+                 incoming = check_incoming_segments()
+                 if incoming:
+                     merge_segments(incoming)
+-                # Check if congestion cleared (simplified check)
+-                if not any(is_send_pending(d) for d in range(num_destinations)):
++                # Check if congestion cleared (simplified send completion check)
++                if not any(send_pending[d] and len(buffers[d][1 - current_buffer_index[d]]) >= buffer_depth for d in range(num_destinations)):
+                     break
+-            # Reset buffer states after clearing congestion
++            # Reset states after clearing congestion
+             for dest in range(num_destinations):
+-                if is_send_pending(dest):
+-                    # In a real implementation, this would involve checking send completion
+-                    # and potentially re-queuing or handling the buffer state
+-                    pass 
+-
+-        # Step 2c (continued): Post asynchronous sends for full buffers
+-        for dest in range(num_destinations):
+-            if buffer_full[dest] and not is_send_pending(dest):
+-                async_send(buffers[dest][current_buffer_index[dest]], dest)
+-                buffer_full[dest] = False # Buffer is now being sent, logically empty for new data? 
+-                                          # Note: The source says "While a send operation is pending... scan conversion places additional segments in its companion buffer."
+-                                          # This implies the buffer being sent is no longer available for filling.
+-                                          # The companion buffer is the one being filled.
+-                                          # So, if we just switched, current_buffer_index points to the companion.
+-                                          # If we are sending, the other buffer is the one being filled.
+-                                          # Let's refine the logic based on source:
+-                                          # "While a send operation is pending for a full buffer, scan conversion places additional ray segments in its companion buffer."
+-                                          # This means:
+-                                          # 1. Buffer A is full. Send A.
+-                                          # 2. Now filling Buffer B.
+-                                          # 3. If Buffer B fills, Send B.
+-                                          # 4. Now filling Buffer A (if send A is done? No, send is async).
+-                                          # The source says "While a send operation is pending...".
+-                                          # So if Send A is pending, we fill B.
+-                                          # If B fills, we send B. Now both A and B are pending sends?
+-                                          # "In the event that both buffers for a particular destination fill up before the first send completes..."
+-                                          # This implies we can have two pending sends? Or we switch to merging?
+-                                          # The deadlock prevention says: "switch to the ray merging task... while we wait for the outbound congestion to clear".
+-                                          # This suggests we stop sending and start merging.
+-                                          # So, we only post a send if the buffer is full AND we are not in a deadlock state?
+-                                          # Or we post the send, and if the *other* buffer fills up, we enter deadlock prevention.
+-                                          # Let's stick to the source's explicit steps.
+-                                          pass
++                if send_pending[dest]:
++                    send_pending[dest] = False
++                    current_buffer_index[dest] = 1 - current_buffer_index[dest]
+ 
+     # Step 3: Termination
+-    local_termination = is_all_cells_processed()
+-    collect_local_termination(local_termination)
++    local_termination = cells_processed >= total_cells
++    collect_local_termination(local_termination)  # [G] standard reduction
+     if is_designated_node():
+-        global_termination = check_all_terminations()
++        global_termination = check_all_terminations()  # [G] standard barrier/allreduce
+         if global_termination:
+-            broadcast_termination()
+-    
+-    global_sync()
++            broadcast_termination()  # [G] standard broadcast
++    global_sync()  # [G] standard barrier
+ ```
+ 
+@@ -170,5 +124,5 @@
+ 
+ ### [Asynchronous Communication with Double-Buffering](4280-asynchronous-communication-with-double-buffering.md)
+-A communication strategy that uses double-buffering in conjunction with asynchronous send and receive operations to reduce overheads and overlap communication of ray segments with rendering calculations. It sets itself apart from synchronous cell projection by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering. Choose this when minimizing communication overhead and maximizing processor utilization is critical.
++A communication strategy that uses double-buffering in conjunction with asynchronous send and receive operations to reduce overheads and overlap communication of ray segments with rendering calculations. It sets itself apart from synchronous alternatives by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering.
+ 
+ ## Operating characteristics
+@@ -178,7 +132,5 @@
+ *   **Scaling:** The effectiveness depends on the number of processors, number of ray segments, and target architecture characteristics [S1].
+ *   **Strengths:** Overlaps computation and communication, hides data transfer overheads, spreads communication load over time, reduces data copying overheads in message-passing systems, and decouples sending and receiving tasks [S1].
+-*   **Limitations:** Requires careful tuning of polling interval and buffer depth. Improper tuning can lead to excessive overhead or buffer clogging [S1].
+-*   **When to Use:** When communication costs are significant and can be hidden by overlapping with computation.
+-*   **When Not to Use:** When the overhead of managing asynchronous operations and buffers outweighs the benefits, or when the system is not bandwidth-limited.
++*   **Limitations:** Requires careful tuning of polling interval and buffer depth; improper tuning can lead to excessive overhead or buffer clogging [S1].
+ 
+ ## Background

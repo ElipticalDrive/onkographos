@@ -1,0 +1,84 @@
+--- v004.md
++++ v005.md
+@@ -41,5 +41,5 @@
+ 6. **Fusion:** Concatenate the sampled features, the intrinsic feature $s_{fi}$, the positional encoding of $X_i$, and the dynamic appearance feature $d_{fi}$. Apply 0.1 dropout to $d_{fi}$ during training. Pass this concatenated vector through Fusion Network $M_f$ (MLP 1: $[128, 96, 64]$; MLP 2: $[48, 48]$) to produce a fused appearance feature [S1].
+ 7. **Color Prediction:** Pass the fused appearance feature through Color MLP $M_c$ (1 hidden layer, 48 units) to predict the final color $C_i$ [S1].
+-8. **Training Updates:** Update U-Net weights with learning rate decaying from $2 \times 10^{-3}$ to $2 \times 10^{-5}$. Update MLP weights with fixed learning rate $5 \times 10^{-4}$. Update Gaussian positions with learning rate decaying from $1.6 \times 10^{-4}$ to $1.6 \times 10^{-7}$. Densify Gaussians between iterations 500 and 15,000 with a gradient threshold of $4 \times 10^{-4}$ [S1].
++8. **Training Updates:** Update U-Net weights with learning rate decaying from $2 \times 10^{-3}$ to $2 \times 10^{-5}$ [S1]. Update MLP weights with fixed learning rate $5 \times 10^{-4}$ [S1]. Update Gaussian positions with learning rate decaying from $1.6 \times 10^{-4}$ to $1.6 \times 10^{-7}$ [S1]. Densify Gaussians between iterations 500 and 15,000 with a gradient threshold of $4 \times 10^{-4}$ [S1].
+ 
+ **Pseudocode:**
+@@ -50,8 +50,7 @@
+ 
+ class GS_W_Network:
+-    def __init__(self, K, encoder_channels=256):
++    def __init__(self, K, encoder_channels=256, d_fi_dim=64):
+         self.K = K
+         # U-Net Encoder: Pre-trained ResNet-18 first 8 subconvolution modules
+-        # In practice, load a pre-trained ResNet-18 and extract the first 8 conv blocks.
+         self.encoder = self._load_pretrained_resnet18_encoder()
+         
+@@ -74,5 +73,7 @@
+         
+         # Fusion Network Mf
+-        self.mf1 = nn.Sequential(nn.Linear(16 * K + 48 + 20, 128), nn.ReLU(),
++        # Input: K sampled features (16*K) + s_fi (48) + pos_enc (20) + d_fi (d_fi_dim)
++        fusion_input_dim = 16 * K + 48 + 20 + d_fi_dim
++        self.mf1 = nn.Sequential(nn.Linear(fusion_input_dim, 128), nn.ReLU(),
+                                  nn.Linear(128, 96), nn.ReLU(),
+                                  nn.Linear(96, 64), nn.ReLU())
+@@ -111,5 +112,5 @@
+         
+         # Step 3: Visibility Prediction
+-        visibility_tensor = self.decoder_visibility(encoder_features) # [B, 1, H', W']
++        visibility_tensor = self.decoder_visibility(encoder_features) # [B, 1, H'', W'']
+         
+         # Step 4 & 5: Feature Sampling
+@@ -118,9 +119,16 @@
+         
+         sampled_features = []
++        # Normalize sampling coordinates to [-1, 1] for grid_sample
++        coords = gaussians['sc'] # [N, K, 2]
++        coords_norm = 2.0 * coords - 1.0 # Assuming coords are in [0, 1]
++        coords_norm = coords_norm.unsqueeze(1).unsqueeze(1) # [N, 1, 1, K, 2]
++        
+         for k in range(self.K):
+             fmap_k = feature_maps_reshaped[:, k, :, :, :] # [B, 16, H', W']
+-            coords = gaussians['sc'][:, k, :] # [N, 2]
+-            grid = coords.unsqueeze(1).unsqueeze(1) # [N, 1, 1, 2]
+-            fmap_k_expanded = fmap_k.expand(N, -1, -1, -1)
++            # Expand to match N gaussians
++            fmap_k_expanded = fmap_k.unsqueeze(0).expand(N, -1, -1, -1, -1) if fmap_k.shape[0] == 1 else fmap_k.unsqueeze(0)
++            # grid_sample expects grid [B, H_out, W_out, 2]
++            # We sample at single points, so H_out=1, W_out=1
++            grid = coords_norm[:, :, :, k, :] # [N, 1, 1, 2]
+             sampled = F.grid_sample(fmap_k_expanded, grid, align_corners=True) # [N, 16, 1, 1]
+             sampled_features.append(sampled.squeeze(-1).squeeze(-1)) # [N, 16]
+@@ -130,5 +138,5 @@
+         # Step 6: Fusion
+         pos_enc = self._positional_encoding(gaussians['positions'], num_frequencies=10) # [N, 20]
+-        d_fi = gaussians['d_fi'] # [N, D]
++        d_fi = gaussians['d_fi'] # [N, d_fi_dim]
+         d_fi_dropped = F.dropout(d_fi, p=0.1, training=self.training)
+         
+@@ -141,5 +149,5 @@
+         
+         # Step 8: Visibility
+-        visibility_map = visibility_tensor # [B, 1, H', W']
++        visibility_map = visibility_tensor # [B, 1, H'', W'']
+         
+         return colors, visibility_map
+@@ -159,11 +167,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The U-Net encoder uses a pre-trained ResNet-18, which is efficient. The decoders are small (4 and 3 up-sampling convs). The MLPs are small (max 128 units). The main cost is sampling $K$ coordinates per Gaussian from $K+1$ feature maps [S1].
++- **Time Complexity:** Not given in the sources.
+ - **Memory Complexity:** Stores $K+1$ feature maps (16 channels each) and the visibility map. Gaussian attributes include $s_{fi}$ (48 dims), $d_{fi}$, and $sc$ ($K \times 2$ dims) [S1].
+ - **Performance:** On Brandenburg, Sacre, and Trevi scenes, GS-W achieves PSNR of 24.70, SSIM of 0.8655, and LPIPS of 0.1242, with 50.7 FPS and 122.7 MB size [S1]. This outperforms global feature (PSNR 22.43) and K-planes-hybrid (PSNR 22.40) methods [S1].
+ - **Strengths:** Captures local highlights and avoids artifacts from transient objects [S1]. Adjusts scene appearance in a manner aligned with human perception by weighting features from reference images [S1].
+-- **Limitations:** Requires reference images. Computationally more complex than static 3DGS due to the U-Net and sampling [S1].
++- **Limitations:** Not given in the sources.
+ - **When to use:** Unconstrained image collections where view-dependent appearance is important and reference images are available [S1].
+-- **When not to use:** Real-time applications with strict latency constraints where FPS > 50 is required, or when no reference images are available [S1].
++- **When not to use:** Not given in the sources.
+ 
+ ## Background

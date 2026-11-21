@@ -1,0 +1,203 @@
+--- v004.md
++++ v005.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-Coarse-to-Fine Optimization with Pruning is a hierarchical training strategy for optimizing 3D radiance fields represented as sparse voxel grids. It solves the problem of initializing and maintaining an efficient voxel structure that adapts to scene complexity during training, preventing overfitting in unobserved regions while refining detail where needed [S1]. It sets itself apart from static grid methods by dynamically pruning low-visibility voxels and subdividing high-error voxels based on gradient signals [S1], building on the general framework of [Plenoxels](7440-plenoxels.md).
++Coarse-to-Fine Optimization with Pruning is a hierarchical training strategy for optimizing 3D radiance fields represented as sparse voxel grids [S1]. It solves the problem of initializing and maintaining an efficient voxel structure that adapts to scene complexity during training, preventing overfitting in unobserved regions while refining detail where needed [S1]. It sets itself apart from static grid methods by dynamically pruning low-visibility voxels using a weight or density threshold, and subdividing remaining voxels to increase resolution [S1], building on the general framework of [Plenoxels](7440-plenoxels.md).
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A scene with training views, a target final resolution (e.g., $512^3$), and initial coarse resolution (e.g., $256^3$).
+-- Output: An optimized voxel grid containing density and spherical harmonic coefficients for the radiance field.
++- Input: A scene with training views, an initial coarse resolution (e.g., $256^3$), and a target final resolution (e.g., $512^3$) [S1].
++- Output: An optimized voxel grid containing density and spherical harmonic (SH) coefficients for the radiance field [S1].
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A 3D array storing per-voxel attributes. In the base Plenoxels implementation, this includes density ($\sigma$) and spherical harmonic (SH) coefficients for color.
+-- **Pruning Mask:** A boolean or weight-based metric indicating voxel occupancy.
++- **Voxel Grid:** A 3D array storing per-voxel attributes. In the base Plenoxels implementation, this includes density ($\sigma$) and spherical harmonic (SH) coefficients for color [S1].
++- **Pruning Mask:** A boolean or weight-based metric indicating voxel occupancy, derived from the maximum weight $T_i(1-\exp(-\bar{\sigma}_i\bar{\delta}_i))$ over all training rays or directly from the density value [S1].
+ 
+ **Parameters:**
+@@ -23,5 +23,5 @@
+ **Steps:**
+ 
+-1. **Initialize:** Start with a dense voxel grid at the lower resolution $T_{init}$ (e.g., $256^3$). Initialize density and SH coefficients [S1].
++1. **Initialize:** Start with a dense voxel grid at the lower resolution $T_{init}$ (e.g., $256^3$) [S1]. Initialize density and SH coefficients [S1].
+ 
+ 2. **Optimize:** Train the grid parameters using the loss function defined in [S1]:
+@@ -41,42 +41,99 @@
+ 5. **Initialize New Values:** Use trilinear interpolation to initialize the grid values for the new, finer resolution based on the coarser grid [S1]. Trilinear interpolation at resolution $128^3$ has been observed to outperform nearest neighbor interpolation at $256^3$ [S1].
+ 
+-6. **Repeat:** Continue optimizing at the new resolution. Repeat steps 2-5 until the target resolution $T_{final}$ is reached [S1].
++6. **Repeat:** Continue optimizing at the new resolution. Repeat steps 2–5 until the target resolution $T_{final}$ is reached [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def coarse_to_fine_optimization(scene_data, T_init, T_final, tau_prune):
++def coarse_to_fine_optimization(scene_data, T_init, T_final, tau_prune, lambda_tv):
+     # Step 1: Initialize
+-    grid = VoxelGrid(resolution=T_init)
+-    grid.initialize_parameters(scene_data)
+-    
++    grid = create_grid(resolution=T_init)
++    initialize_parameters(grid)
+     current_res = T_init
+-    
++
+     while current_res < T_final:
+         # Step 2: Optimize
+-        optimize_grid(grid, scene_data, lambda_tv=0.01) # lambda_tv is a typical value
+-        
++        optimize_parameters(grid, scene_data.rays, lambda_tv)
++
+         # Step 3: Prune
+-        # Calculate max weight for each voxel over all training rays
+         voxel_weights = compute_max_voxel_weights(grid, scene_data.rays)
+-        
+-        # Apply dilation to prevent boundary artifacts
+         is_unoccupied = voxel_weights < tau_prune
++        # Apply dilation: voxel is pruned only if itself and all 26 neighbors are unoccupied
+         dilated_unoccupied = apply_dilation(is_unoccupied, grid.shape)
+-        
+-        # Remove unoccupied voxels
+-        grid.prune(dilated_unoccupied)
+-        
++        prune_voxels(grid, dilated_unoccupied)
++
+         # Step 4: Refine
+         new_res = current_res * 2
+-        grid.subdivide()
+-        
++        subdivide_grid(grid, new_res)
++
+         # Step 5: Initialize New Values
+-        # Trilinear interpolation from old grid to new finer grid
+-        grid.interpolate_from_coarser()
+-        
++        interpolate_from_coarser(grid, current_res, new_res)
++
+         current_res = new_res
+-        
++
+     return grid
++
++def create_grid(resolution):
++    return {"density": zeros(resolution**3), "sh_coeffs": zeros(resolution**3, 3)}
++
++def initialize_parameters(grid):
++    grid["density"][:] = 0.0
++    grid["sh_coeffs"][:] = 0.0
++
++def optimize_parameters(grid, rays, lambda_tv):
++    # Standard gradient descent step minimizing L = L_recon + lambda_tv * L_TV
++    for ray in rays:
++        render_ray(grid, ray)
++    compute_gradients(grid, lambda_tv)
++    apply_gradients(grid)
++
++def compute_max_voxel_weights(grid, rays):
++    max_weights = zeros(grid["density"].shape)
++    for ray in rays:
++        for voxel in ray.voxels:
++            transmittance = compute_transmittance(ray, voxel)
++            avg_sigma = voxel.avg_density
++            avg_delta = voxel.avg_step_size
++            weight = transmittance * (1.0 - exp(-avg_sigma * avg_delta))
++            max_weights[voxel.id] = max(max_weights[voxel.id], weight)
++    return max_weights
++
++def apply_dilation(is_unoccupied, shape):
++    dilated = zeros(shape, dtype=bool)
++    for i in range(shape[0]):
++        for j in range(shape[1]):
++            for k in range(shape[2]):
++                if is_unoccupied[i, j, k]:
++                    neighbor_unoccupied = True
++                    for di in [-1, 0, 1]:
++                        for dj in [-1, 0, 1]:
++                            for dk in [-1, 0, 1]:
++                                ni, nj, nk = i+di, j+dj, k+dk
++                                if not (0 <= ni < shape[0] and 0 <= nj < shape[1] and 0 <= nk < shape[2]):
++                                    neighbor_unoccupied = False
++                                    break
++                                if not is_unoccupied[ni, nj, nk]:
++                                    neighbor_unoccupied = False
++                                    break
++                            if not neighbor_unoccupied: break
++                        if not neighbor_unoccupied: break
++                    if neighbor_unoccupied:
++                        dilated[i, j, k] = True
++    return dilated
++
++def prune_voxels(grid, mask):
++    grid["density"][mask] = 0.0
++    grid["sh_coeffs"][mask] = 0.0
++
++def subdivide_grid(grid, new_res):
++    new_density = zeros(new_res**3)
++    new_sh = zeros(new_res**3, 3)
++    grid["density"] = new_density
++    grid["sh_coeffs"] = new_sh
++
++def interpolate_from_coarser(grid, old_res, new_res):
++    for voxel in new_grid_voxels:
++        voxel.density = trilinear_interpolate(grid["density"], old_res, voxel.pos)
++        voxel.sh_coeffs = trilinear_interpolate(grid["sh_coeffs"], old_res, voxel.pos)
+ ```
+ 
+@@ -90,36 +147,36 @@
+ 
+ **Definition:**
+-This stage focuses on a smaller subspace to reconstruct surface details and view-dependent effects, freezing the optimized coarse geometry grid $V^{(density)(c)}$ [S2].
++This stage focuses on a smaller subspace to reconstruct surface details and view-dependent effects, freezing the optimized coarse geometry grid $V^{(\text{density})(c)}$ [S2].
+ 
+ **Steps:**
+-1. **Freeze Coarse Grid:** The optimized $V^{(density)(c)}$ from the coarse stage is frozen [S2].
+-2. **Define Known Free Space:** A query point is in known free space if the post-activated alpha value from $V^{(density)(c)}$ is less than threshold $\tau^{(c)}$. Otherwise, it is in unknown space [S2].
+-3. **Fine Voxels Allocation:** Densely query $V^{(density)(c)}$ to find a BBox tightly enclosing the unknown space, with lengths $L_x^{(f)}, L_y^{(f)}, L_z^{(f)}$. Derive voxel size $s^{(f)}$ and grid dimensions $N_x^{(f)}, N_y^{(f)}, N_z^{(f)}$ from expected total voxels $M^{(f)}$ [S2].
+-4. **Fine-stage Points Sampling:** Filter out rays not intersecting known free space. Adjust near/far bounds $t^{(near)}$ and $t^{(far)}$ to ray-box intersection endpoints. Do not adjust $t^{(near)}$ if $x_0$ is already inside the BBox [S2].
++1. **Freeze Coarse Grid:** The optimized $V^{(\text{density})(c)}$ from the coarse stage is frozen [S2].
++2. **Define Known Free Space:** A query point is in known free space if the post-activated alpha value from $V^{(\text{density})(c)}$ is less than threshold $\tau^{(c)}$. Otherwise, it is in unknown space [S2].
++3. **Fine Voxels Allocation:** Densely query $V^{(\text{density})(c)}$ to find a BBox tightly enclosing the unknown space, with lengths $L_x^{(f)}, L_y^{(f)}, L_z^{(f)}$. Derive voxel size $s^{(f)}$ and grid dimensions $N_x^{(f)}, N_y^{(f)}, N_z^{(f)}$ from expected total voxels $M^{(f)}$ [S2].
++4. **Fine-stage Points Sampling:** Filter out rays not intersecting known free space. Adjust near/far bounds $t^{(\text{near})}$ and $t^{(\text{far})}$ to ray-box intersection endpoints. Do not adjust $t^{(\text{near})}$ if $x_0$ is already inside the BBox [S2].
+ 
+ **Parameters:**
+ - $M^{(f)}$: Hyperparameter for the expected total number of voxels in the fine stage [S2].
+-- $D$: Hyperparameter for feature-space dimension in the feature voxel grid $V^{(feat)(f)}$ [S2].
++- $D$: Hyperparameter for feature-space dimension in the feature voxel grid $V^{(\text{feat})(f)}$ [S2].
+ 
+ **Representation:**
+-The fine stage uses a higher-resolution density voxel grid $V^{(density)(f)} \in \mathbb{R}^{1 \times N_x^{(f)} \times N_y^{(f)} \times N_z^{(f)}}$ with post-activated interpolation [S2]. For view-dependent color, a hybrid representation is used:
+-- A feature voxel grid $V^{(feat)(f)} \in \mathbb{R}^{D \times N_x^{(f)} \times N_y^{(f)} \times N_z^{(f)}}$.
++The fine stage uses a higher-resolution density voxel grid $V^{(\text{density})(f)} \in \mathbb{R}^{1 \times N_x^{(f)} \times N_y^{(f)} \times N_z^{(f)}}$ with post-activated interpolation [S2]. For view-dependent color, a hybrid representation is used:
++- A feature voxel grid $V^{(\text{feat})(f)} \in \mathbb{R}^{D \times N_x^{(f)} \times N_y^{(f)} \times N_z^{(f)}}$.
+ - A shallow MLP parameterized by $\Theta^{(f)}$.
+ 
+-Queries for 3D points $x$ and viewing direction $d$ are performed by:
+-$$ \vec{\phi}^{(f)} = \text{interp} \left( \boldsymbol{x}, \boldsymbol{V}^{(\text{density})(f)} \right) $$
++Queries for 3D points $\mathbf{x}$ and viewing direction $\mathbf{d}$ are performed by:
++$$ \vec{\phi}^{(f)} = \text{interp} \left( \mathbf{x}, \mathbf{V}^{(\text{density})(f)} \right) $$
+ $$ \mathbf{c}^{(\mathbf{f})} = \text{MLP}_{\Theta^{(\mathbf{f})}}(\text{interp}(\mathbf{x}, \mathbf{V}^{(\text{feat})(\mathbf{f})}), \mathbf{x}, \mathbf{d}) $$
+-where $\mathbf{c}^{(f)} \in \mathbb{R}^3$ is the view-dependent color emission and $\sigma^{(f)} \in \mathbb{R}$ is the raw volume density [S2]. Positional embedding is applied on $x, d$ for the MLP [S2].
++where $\mathbf{c}^{(f)} \in \mathbb{R}^3$ is the view-dependent color emission and $\sigma^{(f)} \in \mathbb{R}$ is the raw volume density [S2]. Positional embedding is applied on $\mathbf{x}, \mathbf{d}$ for the MLP [S2].
+ 
+ **Progressive Scaling:**
+-Inspired by NSVF, the voxel grids $V^{(density)(f)}$ and $V^{(feat)(f)}$ are progressively scaled. Let $p_{g\_ckpt}$ be the set of checkpoint steps. The initial number of voxels is set to $\lfloor M^{(f)} / 2^{|p_{g\_ckpt}|} \rfloor$. When reaching a training step in $p_{g\_ckpt}$, the number of voxels is doubled such that the final number is $M^{(f)}$. At each checkpoint, the voxel grids are resized by trilinear interpolation [S2].
++Inspired by NSVF, the voxel grids $V^{(\text{density})(f)}$ and $V^{(\text{feat})(f)}$ are progressively scaled. Let $p_{g\_ckpt}$ be the set of checkpoint steps. The initial number of voxels is set to $\lfloor M^{(f)} / 2^{|p_{g\_ckpt}|} \rfloor$. When reaching a training step in $p_{g\_ckpt}$, the number of voxels is doubled such that the final number is $M^{(f)}$. At each checkpoint, the voxel grids are resized by trilinear interpolation [S2].
+ 
+ **Efficiency:**
+-Free space skipping is used. Points in known free space (checked via $V^{(density)(c)}$) are skipped during training and testing to improve efficiency, as querying $V^{(density)(c)}$ is faster than querying $V^{(density)(f)}$ or computing view-dependent colors [S2].
++Free space skipping is used. Points in known free space (checked via $V^{(\text{density})(c)}$) are skipped during training and testing to improve efficiency, as querying $V^{(\text{density})(c)}$ is faster than querying $V^{(\text{density})(f)}$ or computing view-dependent colors [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The coarse-to-fine approach reduces training time compared to optimizing a high-resolution grid from scratch, as the initial coarse grid converges faster. However, the subdivision and interpolation steps add overhead. The fine detail reconstruction stage adds additional computational cost due to the hybrid explicit-implicit representation and MLP queries [S2].
+-- **Memory Complexity:** Pruning reduces memory usage by removing unoccupied voxels. The fine stage requires additional memory for the higher-resolution grid and feature grid, but the BBox allocation limits this to the unknown space [S2].
+-- **Performance:** Trilinear interpolation at lower resolutions (e.g., $128^3$) can outperform nearest neighbor at higher resolutions (e.g., $256^3$) [S1]. The method achieves fast convergence for radiance field reconstruction [S2].
++- **Time Complexity:** The coarse-to-fine approach reduces training time compared to optimizing a high-resolution grid from scratch, as the initial coarse grid converges faster [S1]. The fine detail reconstruction stage adds additional computational cost due to the hybrid explicit-implicit representation and MLP queries [S2].
++- **Memory Complexity:** Pruning reduces memory usage by removing unoccupied voxels [S1]. The fine stage requires additional memory for the higher-resolution grid and feature grid, but the BBox allocation limits this to the unknown space [S2].
++- **Performance:** Trilinear interpolation at lower resolutions (e.g., $128^3$) can outperform nearest neighbor at higher resolutions (e.g., $256^3$) [S1].
+ - **Strengths:** Adapts to scene complexity, prevents overfitting in unobserved regions, and enables high-resolution detail reconstruction [S1, S2].
+ - **Limitations:** Naive pruning can cause artifacts near surfaces if not handled with dilation [S1]. The fine stage requires careful tuning of hyperparameters like $M^{(f)}$ and $\tau^{(c)}$ [S2].

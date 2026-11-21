@@ -1,0 +1,188 @@
+# Inverse Tomographic Display
+
+Also called: TomoLit
+
+## Overview
+Inverse Tomographic Display (ITD) is a volumetric rendering method that generates 3D images in mid-air by projecting controlled light rays from multiple emitters surrounding a scattering volume [S1]. Unlike methods that scan a single beam or use holographic interference, ITD relies on the additive intersection of rays from different angles to form visible voxels in a fog or laminar steam [S1]. It is distinguished by its "inverse" nature: instead of capturing data, it calculates the specific intensity each emitter must emit at each angle to reconstruct a target central image, enabling direct user interaction (e.g., hand insertion) without breaking the rendered geometry [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Target 2D or 3D image data (intensity distribution); emitter geometry parameters (number of emitters, angular resolution, intensity levels); scattering medium properties.
+*   **Output:** Control signals for emitters (intensity values per angle); physical projection of rays into the scattering medium.
+
+**Data Structures**
+*   **Emitter Control Buffer:** An array of 256 positions storing ray intensity values for each projection angle [S1].
+    *   *Layout:* 1D array, size 256.
+    *   *Content:* Intensity values (quantized levels).
+    *   *Update Mechanism:* Transmitted via standard serial communication (e.g., Arduino Serial port) to microcontrollers managing individual emitters [S1].
+
+**Algorithm Steps**
+1.  **Define Emitter Geometry:** Arrange $N$ emitters around the display area. Common configurations include circular, semi-circular, or linear arrangements [S1].
+2.  **Calculate Required Intensities (Inverse Tomography):** For each target voxel in the central image, determine which emitters contribute to its visibility. Calculate the required intensity $I_{e,\theta}$ for each emitter $e$ at each angle $\theta$ such that the superposition of all rays produces the target brightness [S1].
+    *   *Note:* The sources do not provide a specific mathematical inversion formula (e.g., filtered back-projection or algebraic reconstruction). The process is described as using tomographic techniques to "find out what intensity each laser has to emit" [S1].
+3.  **Quantize Intensities:** Map calculated continuous intensity values to discrete levels.
+    *   *Prototype:* 60 levels [S1].
+    *   *Simulation Trade-off:* 16 levels [S1].
+4.  **Populate Control Buffer:** Store the quantized intensity values for all emitters and angles into the 256-position buffer [S1].
+5.  **Transmit Control Data:** Send the buffer data to the emitter hardware [S1].
+6.  **Project and Intersect:** Emitters project rays into the scattering medium. The additive intersection of these rays forms the visible image [S1].
+
+**Formulas**
+*   **Brightness Addition:** The perceived brightness $B$ is not linear with respect to luminosity $L$. The relationship follows:
+    $$ B = L^3 $$
+    This non-linear additive behavior is vital for the correct functioning of the display [S1].
+
+**Parameters**
+*   **Number of Emitters ($N$):**
+    *   Prototype: 32 [S1].
+    *   Simulation Trade-off: 16 [S1].
+*   **Intensity Levels:**
+    *   Prototype: 60 [S1].
+    *   Simulation Trade-off: 16 [S1].
+*   **Angular Resolution:**
+    *   Prototype: $0.35^\circ$ [S1].
+    *   Simulation Trade-off: $1^\circ$ [S1].
+*   **Buffer Size:** 256 positions [S1].
+*   **Rotation Speed:** 60 rotations per second (for spinning mirror prototypes) [S1].
+*   **Update Rate:** Estimated at 24 frames per second for 32 emitters using standard Arduino Serial port [S1].
+
+**Pitfalls and Edge Cases**
+*   **Obstruction:** Insertion of hands or objects into the display area does not break the rendering. Circular or semi-circular geometries project images around the obstruction, enabling augmented reality interactions [S1].
+*   **Scattering Medium:** Requires a material that scatters laser beams with minimum diffusion (e.g., ultrasonically-generated fog) [S1].
+*   **Non-linearity:** The $B=L^3$ relationship must be accounted for when calculating target intensities to avoid incorrect brightness perception [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inverse Tomographic Display Control Logic
+# Note: Specific inversion algorithm for intensity calculation is not provided in sources [S1].
+# This pseudocode outlines the data flow and hardware control based on available details.
+
+def initialize_emitters(num_emitters, buffer_size=256):
+    """
+    Initialize the emitter control system.
+    """
+    # Buffer to store intensity values for all emitters/angles
+    # Size 256 as per source [S1]
+    control_buffer = [0] * buffer_size
+    return control_buffer
+
+def calculate_inverse_tomography(target_image, emitter_geometry):
+    """
+    Calculate required intensities for each emitter at each angle.
+    The specific mathematical inversion method is not detailed in [S1].
+    This function represents the conceptual step of determining I_e_theta.
+    """
+    # Placeholder for the tomographic inversion algorithm
+    # Inputs: Target image data, emitter positions (circular, linear, etc.)
+    # Output: Matrix of required intensities
+    required_intensities = None # Not given in the sources.
+    return required_intensities
+
+def quantize_intensities(intensities, num_levels=60):
+    """
+    Quantize continuous intensity values to discrete levels.
+    Prototype uses 60 levels; simulation suggests 16 [S1].
+    """
+    # Normalize intensities to [0, 1]
+    max_val = max(intensities) if intensities else 1
+    normalized = [i / max_val for i in intensities]
+    
+    # Quantize to num_levels
+    quantized = [int(level * num_levels) for level in normalized]
+    return quantized
+
+def apply_brightness_non_linearity(quantized_levels):
+    """
+    Adjust for the non-linear brightness addition rule: Brightness = Luminosity^3 [S1].
+    This step ensures the perceived brightness matches the target.
+    """
+    # Inverse operation: To achieve target luminosity L, we need input level L^(1/3)
+    # However, the source states brightness follows L^3, implying the physical
+    # response is cubic. The control system must pre-distort or account for this.
+    # Exact pre-distortion formula is not explicitly given, but the relationship is key [S1].
+    adjusted_levels = []
+    for level in quantized_levels:
+        # Assuming linear input to physical luminosity L
+        # Perceived B = L^3. If we want linear perceived brightness, 
+        # we need L = B^(1/3).
+        # This is a conceptual implementation of the non-linearity constraint.
+        normalized_level = level / 60.0 # Assuming 60 levels
+        # Pre-compensation for L^3 response
+        compensated = normalized_level ** (1/3)
+        adjusted_levels.append(int(compensated * 60))
+    return adjusted_levels
+
+def update_buffer(control_buffer, data):
+    """
+    Update the 256-position buffer with new intensity data.
+    """
+    for i in range(len(data)):
+        if i < len(control_buffer):
+            control_buffer[i] = data[i]
+    return control_buffer
+
+def transmit_to_hardware(buffer, num_emitters=32):
+    """
+    Send buffer data to emitters via serial port.
+    Estimated update rate: 24 fps for 32 emitters [S1].
+    """
+    # Simulate serial transmission
+    # In practice, this involves Arduino Serial.write() calls
+    pass
+
+def main():
+    # Configuration
+    num_emitters = 32 # Prototype value [S1]
+    intensity_levels = 60 # Prototype value [S1]
+    angular_resolution = 0.35 # Degrees [S1]
+    
+    # 1. Get target image
+    target_image = get_target_image()
+    
+    # 2. Define emitter geometry (e.g., circular)
+    emitter_geometry = define_circular_geometry(num_emitters, angular_resolution)
+    
+    # 3. Calculate required intensities (Inverse Tomography)
+    raw_intensities = calculate_inverse_tomography(target_image, emitter_geometry)
+    
+    # 4. Quantize
+    quantized = quantize_intensities(raw_intensities, intensity_levels)
+    
+    # 5. Apply non-linearity compensation (B = L^3)
+    compensated = apply_brightness_non_linearity(quantized)
+    
+    # 6. Initialize and update buffer
+    buffer = initialize_emitters(num_emitters)
+    buffer = update_buffer(buffer, compensated)
+    
+    # 7. Transmit to hardware
+    transmit_to_hardware(buffer, num_emitters)
+
+if __name__ == "__main__":
+    main()
+```
+
+## Subtopics
+
+### Emitter Geometries
+Circular arrangements provide the best image quality, while open-top (semi-circle) geometries allow easier access for interaction, and line geometries approximate planar emitters projecting 3D content [S1].
+
+### Scattering Media
+Ultrasonically-generated fog is used to scatter laser beams with minimal diffusion, enabling the additive intersection of rays [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly defined in terms of algorithmic complexity. The bottleneck is hardware communication; updating 32 emitters takes approximately 1/24th of a second (24 fps) via standard Arduino Serial port [S1].
+*   **Memory Complexity:** Low. Requires a buffer of 256 positions for intensity data [S1].
+*   **Performance:** Prototype achieves 60 rotations per second with 32 emitters [S1]. Simulation suggests 16 emitters, 16 intensity levels, and $1^\circ$ angular resolution offer a viable trade-off for image quality and complexity [S1].
+*   **Strengths:** Enables direct user interaction (hand insertion) without breaking the image; uses low-cost off-the-shelf components; supports augmented reality by rendering around obstructions [S1].
+*   **Limitations:** Relies on a scattering medium (fog/film); non-linear brightness response ($B=L^3$) complicates intensity control; limited resolution compared to holographic methods; potential difficulties with lightfield displays due to low-light intensity and alignment [S1].
+*   **When to Use:** For interactive mid-air 3D visualization where user presence is expected and low-cost hardware is preferred.
+*   **When Not to Use:** When high-resolution, full-color, or glare-free (no fog) images are required.
+
+## Background
+The Inverse Tomographic Display, also known as TomoLit, was developed as a concept for volumetric data visualizers and mid-air graphics [S1]. It draws inspiration from a Hackio concept that proposed using lasers and spinning mirrors [S1]. The prototype was implemented using low-cost components, including an Arduino Nano microcontroller, DC motors, and rotating mirrors with attached lasers [S1]. The work highlights the potential for direct manipulation of 3D content and augmented reality applications where the display volume is transparent to the user's physical presence [S1].
+
+## Sources
+[S1] Volumetric Reach-through Displays for Direct Manipulation of 3D Content, https://doi.org/10.1145/3380867.3427410, fetched 2026-10-26

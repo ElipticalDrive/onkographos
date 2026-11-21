@@ -1,0 +1,235 @@
+# Voxel Fragment Shader Rendering
+
+
+## Overview
+Voxel Fragment Shader Rendering is a fragment-shader-based technique that renders voxels as solid cubes by performing ray-AABB (Axis-Aligned Bounding Box) intersection in screen space [S1, unofficial]. It computes surface normals, samples colors, and applies fog effects entirely within the fragment shader, bypassing the need for explicit geometry generation for every voxel face [S1, unofficial]. This method distinguishes itself from sibling approaches like ClearView Vertex Shader by deferring the geometric intersection logic to the fragment stage, allowing for per-fragment precision in ray-casting against voxel bounds [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `vColor` (`vec3`): Vertex color [S1, unofficial].
+- `vVert` (`vec3`): Voxel center coordinates in world space [S1, unofficial].
+- `ndotl` (`float`): Dot product of the normal and light direction [S1, unofficial].
+- `u_inv_proj_view_rot` (`mat4`): Inverse projection-view rotation matrix [S1, unofficial].
+- `u_far` (`float`): Far plane distance of the camera [S1, unofficial].
+- `uViewport` (`vec2`): Viewport dimensions (width, height) [S1, unofficial].
+- `u_lod` (`float`): Level of detail or voxel size parameter [S1, unofficial].
+
+**Outputs:**
+- `out_Color` (`vec4`): Final fragment color [S1, unofficial].
+
+### Data Structures
+The method operates on standard GLSL types. The voxel is defined implicitly by its center `vxl` (derived from `vVert`) and size `u_lod`. The AABB bounds are:
+$$
+minV = vxl - 0.5 \times u\_lod
+$$
+$$
+maxV = vxl + 0.5 \times u\_lod
+$$
+
+### Steps
+1.  **Ray Direction Calculation**: Compute the world-space ray direction from the fragment's screen coordinates. Normalize screen coordinates to $[0,1]$ using `uViewport`. Convert to clip space $[-1,1]$ with $z=-1$. Transform by `u_inv_proj_view_rot` and normalize the resulting vector [S1, unofficial].
+2.  **Ray-AABB Intersection**: Perform ray-AABB intersection against the voxel defined by `minV` and `maxV`. The ray origin is $(0,0,0)$ in the local voxel space [S1, unofficial].
+3.  **Hit Point Calculation**: Calculate the hit point `hit` relative to the voxel center. The hit point is in the range $[-0.5 \times u\_lod, 0.5 \times u\_lod]$ [S1, unofficial].
+4.  **Normal Determination**: Determine the surface normal by finding the maximum absolute component of `hit`. The normal is a unit vector along the axis corresponding to the maximum absolute dimension, signed by the sign of the hit coordinate [S1, unofficial].
+5.  **Texture Coordinate Calculation**: Calculate texture coordinates `uv` based on the normal. Offset `uv` by 0.5 [S1, unofficial].
+6.  **Depth Setting**: Set the fragment depth to `result.x / u_far` [S1, unofficial].
+7.  **Fog Application**: Apply fog by calculating a fog factor based on depth and mixing the calculated color with a fog color $(0.5, 0.5, 0.7)$ [S1, unofficial].
+
+### Formulas
+**Ray Direction:**
+$$
+ray = \text{normalize}\left( \frac{(u\_inv\_proj\_view\_rot \times vec4(x \times 2 - 1, y \times 2 - 1, -1, 1)).xyz}{(u\_inv\_proj\_view\_rot \times vec4(x \times 2 - 1, y \times 2 - 1, -1, 1)).w} \right)
+$$
+where $x$ and $y$ are normalized screen coordinates [S1, unofficial].
+
+**AABB Intersection:**
+$$
+invR = 1.0 / ray
+$$
+$$
+tbot = (minV - ro) \times invR
+$$
+$$
+ttop = (maxV - ro) \times invR
+$$
+$$
+tmin = \min(ttop, tbot)
+$$
+$$
+tmax = \max(ttop, tbot)
+$$
+$$
+t0 = \max(\max(tmin.x, tmin.y), tmin.z)
+$$
+$$
+t1 = \min(\min(tmax.x, tmax.y), tmax.z)
+$$
+Hit if $t0 \le t1$ [S1, unofficial].
+
+**Hit Point:**
+$$
+hit = vxl - ray \times result.x
+$$
+where `result.x` is the intersection distance $t0$ [S1, unofficial].
+
+**UV Coordinates:**
+- If $normal.y \neq 0$: $uv.y = hit.x$, $uv.x = hit.z \times normal.y$
+- If $normal.x \neq 0$: $uv.y = hit.y$, $uv.x = hit.z \times normal.x$
+- If $normal.z \neq 0$: $uv.y = hit.y$, $uv.x = hit.x \times -normal.z$
+Finally, $uv = uv + 0.5$ [S1, unofficial].
+
+**Fog:**
+$$
+fog\_start = 256.0 / u\_far
+$$
+$$
+fog = \text{pow}(\max(gl\_FragDepth - fog\_start, 0.0001), 0.5)
+$$
+$$
+out\_Color = \text{mix}(calculated\_color, vec4(0.5, 0.5, 0.7, 1.0), fog)
+$$
+[S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Fragment Shader Logic for Voxel Fragment Shader Rendering
+
+def fragment_shader(v_color, v_vert, ndotl, u_inv_proj_view_rot, u_far, u_viewport, u_lod):
+    """
+    Renders a voxel as a solid cube using ray-AABB intersection in screen space.
+    
+    Args:
+        v_color (vec3): Vertex color.
+        v_vert (vec3): Voxel center in world space.
+        ndotl (float): Dot product of normal and light.
+        u_inv_proj_view_rot (mat4): Inverse projection-view rotation matrix.
+        u_far (float): Far plane distance.
+        u_viewport (vec2): Viewport dimensions (width, height).
+        u_lod (float): Voxel size parameter.
+        
+    Returns:
+        vec4: Final fragment color.
+    """
+    
+    # 1. Compute screen coordinates normalized to [0, 1]
+    # Assuming gl_FragCoord is available in the shader environment
+    x = gl_FragCoord.x / u_viewport.x
+    y = gl_FragCoord.y / u_viewport.y
+    
+    # 2. Convert to clip space [-1, 1] with z = -1
+    clip_pos = vec4(x * 2 - 1, y * 2 - 1, -1, 1)
+    
+    # 3. Transform by inverse projection-view rotation
+    # Note: The source uses u_inv_proj_view_rot directly. 
+    # In a standard pipeline, this might be invProj * invView, but we follow the source.
+    transformed = u_inv_proj_view_rot * clip_pos
+    
+    # 4. Calculate ray direction
+    ray = normalize(transformed.xyz / transformed.w)
+    
+    # 5. Define voxel AABB bounds
+    vxl = v_vert
+    min_v = vxl - 0.5 * u_lod
+    max_v = vxl + 0.5 * u_lod
+    
+    # 6. Ray-AABB Intersection
+    # Ray origin is (0,0,0) in local voxel space
+    ro = vec3(0, 0, 0)
+    inv_r = 1.0 / ray
+    
+    tbot = (min_v - ro) * inv_r
+    ttop = (max_v - ro) * inv_r
+    
+    tmin = min(ttop, tbot)
+    tmax = max(ttop, tbot)
+    
+    t0 = max(max(tmin.x, tmin.y), tmin.z)
+    t1 = min(min(tmax.x, tmax.y), tmax.z)
+    
+    # Check for hit
+    if t0 > t1:
+        # No hit, discard or return background color
+        return vec4(0.0, 0.0, 0.0, 0.0)
+    
+    result_x = t0
+    
+    # 7. Calculate hit point relative to voxel center
+    hit = vxl - ray * result_x
+    
+    # 8. Determine surface normal
+    # Find the maximum absolute component
+    abs_hit = abs(hit)
+    if abs_hit.x >= abs_hit.y and abs_hit.x >= abs_hit.z:
+        normal = vec3(sign(hit.x), 0.0, 0.0)
+    elif abs_hit.y >= abs_hit.x and abs_hit.y >= abs_hit.z:
+        normal = vec3(0.0, sign(hit.y), 0.0)
+    else:
+        normal = vec3(0.0, 0.0, sign(hit.z))
+        
+    # 9. Calculate texture coordinates (uv)
+    uv = vec2(0.0, 0.0)
+    if normal.y != 0.0:
+        uv.y = hit.x
+        uv.x = hit.z * normal.y
+    elif normal.x != 0.0:
+        uv.y = hit.y
+        uv.x = hit.z * normal.x
+    else: # normal.z != 0.0
+        uv.y = hit.y
+        uv.x = hit.x * -normal.z
+        
+    uv = uv + 0.5
+    
+    # 10. Set fragment depth
+    gl_FragDepth = result_x / u_far
+    
+    # 11. Calculate color (simplified, as texture sampling is commented out in source)
+    # Using vertex color and ndotl as a placeholder for actual color calculation
+    # In a real implementation, sample texture using uv
+    color = v_color * (0.5 + 0.5 * ndotl) # Simple diffuse lighting approximation
+    
+    # 12. Apply fog
+    fog_start = 256.0 / u_far
+    fog_factor = pow(max(gl_FragDepth - fog_start, 0.0001), 0.5)
+    fog_color = vec4(0.5, 0.5, 0.7, 1.0)
+    
+    out_color = mix(color, fog_color, fog_factor)
+    
+    return out_color
+```
+
+### Parameters
+- `u_inv_proj_view_rot`: Inverse projection-view rotation matrix [S1, unofficial].
+- `u_far`: Far plane distance of the camera [S1, unofficial].
+- `uViewport`: Viewport dimensions (width, height) [S1, unofficial].
+- `uTex`: Texture sampler (declared but commented out in color calculation) [S1, unofficial].
+- `u_lod`: Level of detail or size parameter used to define the voxel bounds relative to its center `vxl` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Precision**: The ray direction calculation involves division by the w-component of the transformed clip coordinate. If this value is near zero, it may cause instability.
+- **Boundaries**: The AABB intersection assumes the ray origin is at $(0,0,0)$ in the local voxel space. If the voxel is not centered at the origin in its local coordinate system, the intersection logic will fail.
+- **Degenerate Input**: If `u_lod` is zero or negative, the voxel bounds will be invalid.
+- **Fog Calculation**: The fog factor uses `gl_FragDepth`, which must be set before the fog calculation to ensure correct depth-based fogging.
+
+## Operating characteristics
+- **Time Complexity**: The fragment shader performs a constant number of operations per fragment, including ray-AABB intersection and normal calculation. The complexity is $O(1)$ per fragment.
+- **Memory Complexity**: The method requires minimal memory, primarily storing the voxel center and size parameters. No additional geometry buffers are needed.
+- **Performance**: Performance depends on the number of fragments processed. Since each voxel is rendered as a cube, the number of fragments is proportional to the surface area of the voxel grid visible to the camera.
+- **Strengths**: 
+  - No need to generate explicit geometry for each voxel face.
+  - Per-fragment precision in ray-casting allows for accurate surface detection.
+  - Simple implementation within the fragment shader.
+- **Limitations**:
+  - May be slower than vertex-based methods for large voxel grids due to the high number of fragment shader invocations.
+  - Limited to solid voxels; transparency requires additional handling (e.g., back-to-front rendering).
+- **When to Use**: Suitable for real-time rendering of voxel-based scenes where geometry generation overhead is a concern, and per-fragment precision is beneficial.
+- **When Not to Use**: Not ideal for scenes with high transparency requirements or when vertex-based culling is more efficient.
+
+## Background
+Voxel Fragment Shader Rendering is an unofficial technique described in the `voxplat` repository by kosshi-net [S1, unofficial]. It leverages modern GPU capabilities to perform ray-casting in the fragment shader, providing a flexible approach to voxel rendering. The method is part of a broader family of shader-based rendering techniques for voxels.
+
+## Sources
+[S1] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)

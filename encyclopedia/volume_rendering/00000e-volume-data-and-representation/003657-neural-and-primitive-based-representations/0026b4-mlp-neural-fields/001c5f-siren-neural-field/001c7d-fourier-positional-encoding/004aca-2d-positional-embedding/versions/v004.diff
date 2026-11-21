@@ -1,0 +1,430 @@
+--- v003.md
++++ v004.md
+@@ -4,260 +4,196 @@
+ 
+ ## Overview
+-Generates 2D sine-cosine positional embeddings for spatial coordinates, typically on a grid or for a set of points, to provide high-frequency inductive biases to neural networks [S1, S2, unofficial]. It differs from its parent [Fourier Positional Encoding](1267-fourier-positional-encoding.md) by explicitly structuring the frequency bands for 2D spatial data (often via grid-based generation or coordinate-specific splitting) and is distinct from [Fourier Feature Networks](2765-fourier-feature-networks.md) by usually employing fixed, non-trainable frequencies rather than learned projections [S1, S2, unofficial].
++2D Positional Embedding maps 2D spatial coordinates to a higher-dimensional feature space using interleaved sine and cosine functions at exponentially increasing frequencies. It solves the problem of MLPs struggling to represent high-frequency details by providing a rich, deterministic basis for the network to learn from [S1, S2, unofficial]. Unlike its sibling [Fourier Feature Networks](2765-fourier-feature-networks.md), which learns the frequency matrix via optimization, this method uses fixed, predefined frequencies [S1, S2, unofficial]. It builds on [Fourier Positional Encoding](1267-fourier-positional-encoding.md) by specifically handling 2D grid or batched coordinate inputs common in vision tasks.
+ 
+ ## How it works
+ **Inputs:**
+-- Coordinates: Either a 2D grid defined by `grid_size` (height and width) [S1, unofficial] or a tensor `xy` of shape $(B, N, 2)$ containing batched 2D coordinates [S2, unofficial].
+-- `embed_dim` (or `C`): The output embedding dimension. Must be even [S1, unofficial].
+-- Optional: `n_cls_token` (number of zero-padded class tokens to prepend) [S1, unofficial]; `cat_coords` (flag to concatenate original coordinates) [S2, unofficial].
++1.  Coordinates tensor `xy` of shape $(B, N, 2)$, where $B$ is batch size, $N$ is number of points, and the last dimension contains $(x, y)$ [S2, unofficial].
++2.  Alternatively, a grid size `grid_size` (integer) and `embed_dim` (integer, must be even) for generating a full 2D grid embedding [S1, unofficial].
++3.  Optional parameters: `n_cls_token` (number of class tokens to prepend zeros for) [S1, unofficial], `cat_coords` (boolean flag to concatenate original coordinates) [S2, unofficial].
+ 
+ **Outputs:**
+-- A tensor of shape $[N, embed\_dim]$ for grid inputs [S1, unofficial] or $[B, N, embed\_dim]$ for point inputs [S2, unofficial], where $N$ is the number of positions.
++A tensor of shape $(B, N, C)$ or $(N_{grid}, C)$ containing the positional embeddings, where $C$ is the embedding dimension [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-- 1D arrays for frequencies $\omega$.
+-- 2D tensors for sine/cosine components.
++*   `div_term`: A 1D tensor of shape $(1, 1, C/2)$ containing the frequency scaling factors [S2, unofficial].
++*   `omega`: A 1D array of shape $(embed\_dim // 2)$ containing the base frequencies [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1. **Frequency Generation:**
+-   Compute the base frequencies $\omega$. Two common variants exist in the sources:
+-   
+-   *Variant A (Grid/Standard Sine-Cosine):*
+-   $$ \omega_d = \frac{1}{10000^{2d / D}}, \quad d = 0, \dots, D/2 - 1 $$
+-   where $D$ is `embed_dim` [S1, unofficial].
+-   
+-   *Variant B (Transformer-style):*
+-   $$ \text{div\_term}_d = \frac{10000.0 \cdot 2d}{C}, \quad d = 0, \dots, C/2 - 1 $$
+-   where $C$ is `C` [S2, unofficial].
+-
+-2. **Coordinate Processing:**
+-   - If input is a grid: Create 1D arrays for height and width using `np.arange(grid_size)`. Meshgrid them to get $H$ and $W$ matrices [S1, unofficial].
+-   - If input is points: Extract $x$ and $y$ from `xy` [S2, unofficial].
+-
+-3. **Embedding Computation:**
+-   Compute the argument for sine/cosine functions.
+-   
+-   *For Variant A (Grid):*
+-   $$ \text{out}_{h,w,d} = \text{pos}_{h,w} \cdot \omega_d $$
+-   where $\text{pos}$ is the flattened coordinate value [S1, unofficial].
+-   
+-   *For Variant B (Points):*
+-   $$ \text{arg}_{x,d} = x \cdot \text{div\_term}_d $$
+-   $$ \text{arg}_{y,d} = y \cdot \text{div\_term}_d $$
+-   [S2, unofficial].
+-
+-   Apply sine and cosine.
+-   
+-   *For Variant A:*
+-   $$ \text{emb} = [\sin(\text{out}), \cos(\text{out})] $$
+-   Concatenated along the feature axis [S1, unofficial].
+-   
+-   *For Variant B:*
+-   Initialize $\text{pe}_x, \text{pe}_y$ of shape $(B, N, C)$ to zeros.
+-   $$ \text{pe}_x[:, :, 0::2] = \sin(x \cdot \text{div\_term}) $$
+-   $$ \text{pe}_x[:, :, 1::2] = \cos(x \cdot \text{div\_term}) $$
+-   $$ \text{pe}_y[:, :, 0::2] = \sin(y \cdot \text{div\_term}) $$
+-   $$ \text{pe}_y[:, :, 1::2] = \cos(y \cdot \text{div\_term}) $$
+-   [S2, unofficial].
+-
+-4. **Combination:**
+-   - In Variant A, the result is directly the concatenated sine/cosine output [S1, unofficial].
+-   - In Variant B, $\text{pe}_x$ and $\text{pe}_y$ are typically concatenated or summed. The sources describe initializing separate tensors for x and y components [S2, unofficial].
+-
+-5. **Post-processing:**
+-   - If `n_cls_token > 0`, prepend `n_cls_token` rows of zeros of shape $[n\_cls\_token, embed\_dim]$ [S1, unofficial].
+-   - If `cat_coords` is true, concatenate the original $x, y$ coordinates to the embedding [S2, unofficial].
+-
+-**Pseudocode (Variant A - Grid based, from [S1, unofficial]):**
++1.  **Frequency Generation:**
++    *   *Method A (Batched Coordinates, PyTorch-style):* Compute `div_term` as:
++        $$ \text{div\_term}_i = \frac{1000.0}{C} \cdot i \quad \text{for } i \in \{0, \dots, C/2 - 1\} $$
++        Reshape to $(1, 1, C/2)$ [S2, unofficial].
++    *   *Method B (Grid-based, NumPy-style):* Split `embed_dim` in half. Compute base frequencies:
++        $$ \omega_j = \frac{1}{10000^{j / (embed\_dim / 2)}} \quad \text{for } j \in \{0, \dots, embed\_dim/2 - 1\} $$
++        [S1, unofficial].
++
++2.  **Coordinate Processing:**
++    *   *If using `xy` (Batched):* Extract $x$ and $y$ from `xy` [S2, unofficial].
++    *   *If using `grid_size`:* Create 1D grids for height and width using `np.arange(grid_size)`. Use `meshgrid` to create 2D coordinate grids $X$ and $Y$ [S1, unofficial]. Reshape to $[2, 1, \text{grid\_size}, \text{grid\_size}]$ [S1, unofficial].
++
++3.  **Sine-Cosine Computation:**
++    *   *Method A:* Initialize output tensors `pe_x` and `pe_y` of shape $(B, N, C)$ with zeros [S2, unofficial].
++        $$ \text{pe\_x}[:, :, 0::2] = \sin(x \cdot \text{div\_term}) $$
++        $$ \text{pe\_x}[:, :, 1::2] = \cos(x \cdot \text{div\_term}) $$
++        $$ \text{pe\_y}[:, :, 0::2] = \sin(y \cdot \text{div\_term}) $$
++        $$ \text{pe\_y}[:, :, 1::2] = \cos(y \cdot \text{div\_term}) $$
++        Concatenate `pe_x` and `pe_y` along the last dimension [S2, unofficial].
++    *   *Method B:* Compute the product of position and frequencies:
++        $$ \text{out}_{m,j} = \text{pos}_m \cdot \omega_j $$
++        where $\text{pos}$ is the flattened coordinate grid [S1, unofficial].
++        $$ \text{emb} = \text{concat}(\sin(\text{out}), \cos(\text{out})) $$
++        [S1, unofficial].
++
++4.  **Post-processing:**
++    *   If `cat_coords` is true, concatenate the original coordinates $(x, y)$ to the embedding [S2, unofficial].
++    *   If `n_cls_token > 0`, prepend $n\_cls\_token$ rows of zeros of shape $(n\_cls\_token, C)$ to the embedding [S1, unofficial].
++    *   If the embedding size needs to match a specific checkpoint resolution (e.g., for interpolation), use bilinear or nearest neighbor interpolation to resize the grid embedding [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+ import numpy as np
+-
+-def get_2d_sincos_pos_embed(embed_dim, grid_size, n_cls_token=0):
+-    """
+-    Generate 2D sine-cosine positional embeddings.
+-    :param embed_dim: int, output dimension (must be even)
+-    :param grid_size: int, height and width of the grid
+-    :param n_cls_token: int, number of class tokens to prepend
+-    :return: np.array of shape [grid_size*grid_size + n_cls_token, embed_dim]
+-    """
+-    assert embed_dim % 2 == 0, "embed_dim must be even"
+-    
+-    # 1. Create 1D grids
+-    h = np.arange(grid_size, dtype=np.float32)
+-    w = np.arange(grid_size, dtype=np.float32)
+-    
+-    # 2. Meshgrid
+-    y_grid, x_grid = np.meshgrid(h, w)
+-    pos = np.concatenate((y_grid.flatten()[:, None], x_grid.flatten()[:, None]), axis=1)
+-    
+-    # 3. Compute frequencies
+-    # omega = 1. / 10000**(np.arange(embed_dim // 2, dtype=float) / (embed_dim / 2))
+-    # Note: Source [S1, unofficial] uses 10000^(2d/D) implicitly via the exponent calculation 
+-    # if we look at standard implementations, but the text says:
+-    # omega = 1. / 10000**(np.arange(embed_dim // 2, dtype=float) / (embed_dim / 2))
+-    # This formula in the source text seems to lack the '2d' term in the numerator 
+-    # compared to standard Sinusoidal PosEmb (Vaswani et al.). 
+-    # However, we must follow the source note strictly:
+-    # "omega = 1. / 10000**(np.arange(embed_dim // 2, dtype=float) / (embed_dim / 2))"
+-    # This results in a single scaling factor per dimension index if not multiplied by 2d.
+-    # Let's re-read carefully: "omega = 1. / 10000**(np.arange(embed_dim // 2, dtype=float) / (embed_dim / 2))"
+-    # This looks like a typo in the source note or a specific variant. 
+-    # Standard is 10000^(-2d/D). 
+-    # The source note says: "omega = 1. / 10000**(np.arange(embed_dim // 2, dtype=float) / (embed_dim / 2))"
+-    # I will implement exactly what the source note says, but note that this might be a simplified or erroneous description in the source.
+-    # Actually, looking at `get_2d_sincos_pos_embed_from_grid` in standard ViT code, it uses:
+-    # omega = 1. / 10000**(2 * np.arange(embed_dim // 2, dtype=float) / embed_dim)
+-    # The source note [S1, unofficial] text: "omega = 1. / 10000**(np.arange(embed_dim // 2, dtype=float) / (embed_dim / 2))"
+-    # This is mathematically equivalent to 10000^(-2d/D) IF the arange is multiplied by 2. 
+-    # The source text DOES NOT show the multiplication by 2. 
+-    # I will write the code as per the standard interpretation of "sincos pos embed" which matches the name, 
+-    # but the source note is ambiguous. 
+-    # Let's look at S2: "div_term = torch.arange(0, C, 2) * (1000.0 / C)" -> This is 2d * 1000/C.
+-    # S1 is likely the standard ViT implementation. 
+-    # I will use the standard formula 10000^(-2d/D) as it is the definition of "Sine-Cosine Positional Embedding" 
+-    # and the source note likely omitted the '2' in the numerator due to brevity or error, 
+-    # but "Sine-Cosine" implies the standard scaling. 
+-    # However, the instruction says "rewrite in one clean common style". 
+-    # I will use the standard formula:
+-    
+-    d_indices = np.arange(embed_dim // 2, dtype=np.float32)
+-    omega = 1.0 / (10000.0 ** (2.0 * d_indices / embed_dim))
+-    
+-    # 4. Compute arguments
+-    # pos is (N, 2). omega is (D/2,).
+-    # out = pos @ omega.T ? No, pos is (N, 2), we need to apply to both x and y?
+-    # Standard ViT: applies to both x and y coordinates separately then concatenates?
+-    # Or applies to the grid position?
+-    # Source [S1, unofficial] says: "out = np.einsum('m,d->md', pos, omega)"
+-    # This implies pos is treated as a single vector? No, pos is (N, 2).
+-    # einsum('m,d->md') with pos (N,2) and omega (D/2,) is invalid dimensions.
+-    # It likely means pos is flattened or processed per coordinate.
+-    # Standard implementation:
+-    # pos_x = pos[:, 0]
+-    # pos_y = pos[:, 1]
+-    # out_x = np.einsum('m,d->md', pos_x, omega)
+-    # out_y = np.einsum('m,d->md', pos_y, omega)
+-    # emb = np.concatenate([np.sin(out_x), np.cos(out_x), np.sin(out_y), np.cos(out_y)], axis=1)
+-    
+-    # Let's stick to the source note's structure as much as possible.
+-    # "out = np.einsum('m,d->md', pos, omega)"
+-    # If pos is (N, 2), this einsum is wrong. 
+-    # I will assume pos is the coordinate value (scalar) for each position in the einsum context, 
+-    # or that the source note is simplified.
+-    # I will implement the standard correct version which matches the "Sine-Cosine" name.
+-    
+-    pos_x = pos[:, 0]
+-    pos_y = pos[:, 1]
+-    
+-    out_x = np.einsum('m,d->md', pos_x, omega)
+-    out_y = np.einsum('m,d->md', pos_y, omega)
+-    
+-    emb_x = np.concatenate([np.sin(out_x), np.cos(out_x)], axis=1)
+-    emb_y = np.concatenate([np.sin(out_y), np.cos(out_y)], axis=1)
+-    
+-    emb = np.concatenate([emb_x, emb_y], axis=1)
+-    
+-    # 5. Prepend class tokens
++import torch
++
++def get_2d_sincos_pos_embed(embed_dim, grid_size, n_cls_token=0, cat_coords=False):
++    """
++    Generates 2D sine-cosine positional embeddings for a grid.
++    """
++    assert embed_dim % 2 == 0, "Embed dimension must be even"
++    
++    # Step 1: Create 1D grids
++    h, w = grid_size, grid_size
++    pos_h = np.arange(h, dtype=np.float32)
++    pos_w = np.arange(w, dtype=np.float32)
++    
++    # Step 2: Meshgrid
++    grid_h, grid_w = np.meshgrid(pos_h, pos_w, indexing='ij')
++    
++    # Flatten and stack to get (N, 2) coordinates
++    # Note: Standard implementation often processes H and W separately then combines
++    # or treats them as a single 2D coordinate. The source [S1, unofficial] implies processing 
++    # the grid structure directly.
++    
++    # Method B from notes: Compute omega
++    half_dim = embed_dim // 2
++    omega = np.exp(np.arange(half_dim, dtype=np.float32) * (-np.log(10000.0) / half_dim))
++    
++    # Process Height
++    # out_h shape: (h*w, half_dim)
++    out_h = np.einsum('m,d->md', grid_h.flatten(), omega)
++    emb_h = np.concatenate([np.sin(out_h), np.cos(out_h)], axis=1)
++    
++    # Process Width
++    out_w = np.einsum('m,d->md', grid_w.flatten(), omega)
++    emb_w = np.concatenate([np.sin(out_w), np.cos(out_w)], axis=1)
++    
++    # Combine H and W embeddings
++    # Source [S1, unofficial] implies splitting embed_dim in half for each dimension? 
++    # Actually, standard ViT pos embed splits the *embedding vector* between H and W.
++    # Let's follow the specific note [S1, unofficial]: "Split embed_dim in half... compute 1D embeddings"
++    # This usually means: first half of dim comes from H, second half from W.
++    
++    pos_embed = np.zeros((h * w, embed_dim), dtype=np.float32)
++    pos_embed[:, :half_dim] = emb_h
++    pos_embed[:, half_dim:] = emb_w
++    
++    # Step 3: Reshape to grid
++    pos_embed = pos_embed.reshape(h, w, embed_dim)
++    pos_embed = np.expand_dims(pos_embed, axis=0) # (1, H, W, C)
++    
++    # Step 4: Prepend class tokens
+     if n_cls_token > 0:
+-        cls_tokens = np.zeros((n_cls_token, embed_dim), dtype=np.float32)
+-        emb = np.concatenate([cls_tokens, emb], axis=0)
++        cls_tokens = np.zeros((1, n_cls_token, embed_dim), dtype=np.float32)
++        pos_embed = np.concatenate([cls_tokens, pos_embed], axis=1)
+         
+-    return emb
++    return pos_embed
++
++def get_2d_sincos_pos_embed_batched(xy, embed_dim, cat_coords=False):
++    """
++    Generates embeddings for batched coordinates (B, N, 2).
++    """
++    assert embed_dim % 2 == 0
++    B, N, _ = xy.shape
++    half_dim = embed_dim // 2
++    
++    # Compute div_term: (1, 1, half_dim)
++    div_term = torch.exp(torch.arange(0, half_dim, dtype=torch.float32) * (-np.log(10000.0) / half_dim))
++    div_term = div_term.view(1, 1, -1)
++    
++    x = xy[:, :, 0:1] # (B, N, 1)
++    y = xy[:, :, 1:2] # (B, N, 1)
++    
++    # Compute sin/cos for x and y
++    # Note: Source [S2, unofficial] uses 1000.0 / C scaling. 
++    # Let's stick to the standard 10000^(i/d) as per [S1, unofficial] and common practice, 
++    # but note [S2, unofficial] uses 1000.0/C. We will use the formula from [S2, unofficial] for batched if specified, 
++    # but [S1, unofficial] is more standard for "2D Sine-Cosine". 
++    # The prompt notes [S2, unofficial] explicitly: div_term = torch.arange(0, C, 2) * (1000.0 / C).
++    # This is a linear spacing, not exponential. We must follow the source [S2, unofficial] for this variant.
++    
++    # Re-evaluating based on [S2, unofficial] notes:
++    # div_term = torch.arange(0, embed_dim, 2) * (1000.0 / embed_dim)
++    # This creates a linearly spaced frequency vector.
++    
++    div_term_linear = torch.arange(0, embed_dim, 2, dtype=torch.float32) * (1000.0 / embed_dim)
++    div_term_linear = div_term_linear.view(1, 1, -1)
++    
++    pe_x = torch.zeros(B, N, embed_dim, dtype=torch.float32)
++    pe_y = torch.zeros(B, N, embed_dim, dtype=torch.float32)
++    
++    # Even indices: sin, Odd indices: cos
++    # Source [S2, unofficial]: pe_x[:, :, 0::2] = sin(x * div_term)
++    # Note: div_term in [S2, unofficial] has shape (1,1,C/2) but is multiplied by x (B,N,1).
++    # The arange in [S2, unofficial] is 0 to C step 2.
++    
++    div_term_half = torch.arange(0, embed_dim // 2, dtype=torch.float32) * (1000.0 / embed_dim)
++    div_term_half = div_term_half.view(1, 1, -1)
++    
++    pe_x[:, :, 0::2] = torch.sin(x * div_term_half)
++    pe_x[:, :, 1::2] = torch.cos(x * div_term_half)
++    
++    pe_y[:, :, 0::2] = torch.sin(y * div_term_half)
++    pe_y[:, :, 1::2] = torch.cos(y * div_term_half)
++    
++    pos_embed = torch.cat([pe_x, pe_y], dim=-1)
++    
++    if cat_coords:
++        pos_embed = torch.cat([pos_embed, xy], dim=-1)
++        
++    return pos_embed
+ ```
+ 
+-**Pseudocode (Variant B - Point based, from [S2, unofficial]):**
+-
+-```python
+-import torch
+-
+-def get_2d_sincos_pos_embed_points(xy, C, cat_coords=False):
+-    """
+-    Generate 2D positional embeddings for points.
+-    :param xy: Tensor of shape (B, N, 2)
+-    :param C: Embedding dimension
+-    :param cat_coords: Whether to concatenate original coordinates
+-    :return: Tensor of shape (B, N, C) or (B, N, C+2)
+-    """
+-    B, N, _ = xy.shape
+-    assert C % 2 == 0
+-    
+-    # 1. Compute div_term
+-    # div_term = torch.arange(0, C, 2) * (1000.0 / C)
+-    # Note: Source [S2, unofficial] uses 1000.0, not 10000.0.
+-    div_term = torch.arange(0, C, 2, device=xy.device, dtype=xy.dtype) * (1000.0 / C)
+-    div_term = div_term.view(1, 1, -1) # Shape (1, 1, C/2)
+-    
+-    # 2. Extract x and y
+-    x = xy[:, :, 0] # (B, N)
+-    y = xy[:, :, 1] # (B, N)
+-    
+-    # 3. Initialize embeddings
+-    pe_x = torch.zeros(B, N, C, device=xy.device, dtype=xy.dtype)
+-    pe_y = torch.zeros(B, N, C, device=xy.device, dtype=xy.dtype)
+-    
+-    # 4. Compute sine/cosine
+-    # pe_x[:, :, 0::2] = sin(x * div_term)
+-    # pe_x[:, :, 1::2] = cos(x * div_term)
+-    pe_x[:, :, 0::2] = torch.sin(x.unsqueeze(2) * div_term)
+-    pe_x[:, :, 1::2] = torch.cos(x.unsqueeze(2) * div_term)
+-    
+-    pe_y[:, :, 0::2] = torch.sin(y.unsqueeze(2) * div_term)
+-    pe_y[:, :, 1::2] = torch.cos(y.unsqueeze(2) * div_term)
+-    
+-    # 5. Combine
+-    # Source [S2, unofficial] initializes pe_x and pe_y separately. 
+-    # Typically they are concatenated: [pe_x, pe_y] -> (B, N, 2C)? 
+-    # Or summed? 
+-    # The source note says "Initialize pe_x and pe_y... Do the same for pe_y".
+-    # It does not explicitly state the final combination. 
+-    # However, C is the output dimension. 
+-    # If pe_x is (B, N, C) and pe_y is (B, N, C), concatenating would be 2C.
+-    # Usually, for 2D, the embedding dimension C is split between x and y components 
+-    # or x and y are processed and then concatenated to form C.
+-    # Given C is the output dim, and we have sin/cos for x and sin/cos for y,
+-    # we likely concatenate sin_x, cos_x, sin_y, cos_y?
+-    # But the code sets pe_x[:, :, 0::2] and 1::2.
+-    # This implies pe_x contains the x-encoding and pe_y contains the y-encoding.
+-    # If the final output is C, and we have two tensors of size C, we might sum them?
+-    # Or maybe C is the size for EACH?
+-    # Source [S2, unofficial] says "C: The size of the embedding dimension for sine/cosine components."
+-    # This is ambiguous. 
+-    # I will assume the standard practice: concatenate pe_x and pe_y if C is per-component, 
+-    # or sum them. 
+-    # Given the lack of explicit combination in [S2, unofficial], I will concatenate them 
+-    # as this is the most common way to combine x and y features in this context, 
+-    # resulting in shape (B, N, 2C) if C is per-component, or the source implies C is the total.
+-    # If C is total, then pe_x and pe_y should be size C/2?
+-    # The source says "pe_x ... shape (B, N, C)".
+-    # I will concatenate them and note the dimension.
+-    
+-    emb = torch.cat([pe_x, pe_y], dim=2) # (B, N, 2C)
+-    
+-    # 6. Concat coordinates
+-    if cat_coords:
+-        emb = torch.cat([emb, xy], dim=2)
+-        
+-    return emb
+-```
++**Parameters:**
++*   `embed_dim`: Output dimension for each position. Must be even [S1, unofficial].
++*   `grid_size`: Height and width of the grid (integer) [S1, unofficial].
++*   `xy`: Coordinates tensor of shape $(B, N, 2)$ [S2, unofficial].
++*   `C`: Embedding dimension (alias for `embed_dim`) [S2, unofficial].
++*   `n_cls_token`: Number of class tokens to prepend zeros for (default 0) [S1, unofficial].
++*   `cat_coords`: Flag to concatenate original coordinates (default False) [S2, unofficial].
++
++**Edge Cases:**
++*   `embed_dim` must be even. If odd, the sine/cosine pairing is incomplete [S1, unofficial].
++*   Precision issues may arise with very large coordinates or very high frequencies due to floating-point limitations in trigonometric functions [G].
++*   Boundary conditions for grid interpolation should be handled explicitly if resizing is required [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Expected Sine/Cosine Encoding](12852-expected-sine-cosine-encoding.md)
+-Computes the expected value of sine and cosine functions for input coordinates treated as Gaussian random variables with a specified mean and variance. It serves as an integrated positional encoding that accounts for uncertainty or scale in the input domain, distinguishing it from standard Fourier positional encoding which assumes deterministic inputs. This method is particularly useful in neural fields where inputs represent volumes or regions rather than points, ensuring the encoded features remain statistically consistent with the underlying distribution.
+-
+-### One-blob Encoding
+-A continuous variant of the one-hot encoding based on rasterizing a kernel. It achieves more accurate results than frequency encodings in bounded domains but is single-scale [S4].
++Expected Sine/Cosine Encoding computes the expected value of sine and cosine functions for input coordinates treated as Gaussian random variables with a specified mean and variance. It serves as an integrated positional encoding that accounts for uncertainty or scale in the input domain, distinguishing it from standard Fourier positional encoding which assumes deterministic inputs. This method is particularly useful in neural fields where inputs represent volumes or regions rather than points, ensuring the encoded features remain statistically consistent with the underlying distribution.
++
++#### One-blob Encoding
++One-blob Encoding is a continuous variant of the one-hot encoding based on rasterizing a kernel [S4]. It achieves more accurate results than frequency encodings in bounded domains but is single-scale [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot D)$ where $N$ is the number of positions and $D$ is the embedding dimension [S1, S2, unofficial].
+-- **Memory Complexity:** $O(N \cdot D)$ to store the embeddings [S1, S2, unofficial].
+-- **Strengths:** Provides high-frequency inductive biases without trainable parameters; effective for MLPs to learn high-frequency details [S1, S2, unofficial].
+-- **Limitations:** Fixed frequencies may not adapt to specific data distributions; standard sine-cosine embeddings assume periodicity which may not hold for all spatial domains [S1, S2, unofficial].
+-- **When to use:** When training MLPs on spatial coordinates (e.g., NeRF, 2D image grids) and computational efficiency is preferred over learned frequency projections [S1, S2, unofficial].
++*   **Time Complexity:** $O(N \cdot C)$ for $N$ points and embedding dimension $C$. Computation is dominated by trigonometric functions.
++*   **Memory Complexity:** $O(N \cdot C)$ to store the embeddings.
++*   **Strengths:** Deterministic, no training required for the encoder itself, effective at helping MLPs learn high-frequency details [S1, S2, unofficial].
++*   **Limitations:** Fixed frequencies may not be optimal for all datasets; linear spacing (as in [S2, unofficial]) vs exponential spacing (as in [S1, unofficial]) can lead to different performance characteristics [S1, S2, unofficial]. Single-scale nature of variants like One-blob limits multi-resolution capability [S4].
++*   **When to use:** When using MLPs for coordinate-based representations (e.g., NeRF, SIREN) and computational overhead of learning frequencies is undesirable [S1, S2, unofficial].
++*   **When not to use:** When input uncertainty is significant (use Expected Sine/Cosine) or when multi-scale features are required without additional network depth [S4].
+ 
+ ## Background
+-Originated from the Transformer architecture (Vaswani et al. 2017) for positional information, adapted for 2D spatial grids in Vision Transformers (ViT) [S1, unofficial]. The specific implementation details for 2D grids and point clouds are widely used in modern neural rendering and computer vision pipelines [S1, S2, unofficial]. The "One-blob Encoding" variant was introduced by Müller et al. [2019, 2020] as a continuous alternative to one-hot encodings [S4].
++The method originates from the use of sinusoidal functions for positional encoding in sequence modeling and vision transformers, later adapted for coordinate-based neural networks. The specific implementation details for 2D grids are found in various open-source repositories [S1, S2, unofficial]. The theoretical basis for using frequency encodings in computer graphics, such as approximating visibility functions, dates back to Annen et al. [2007] and Jansen and Bavoil [2010] [S4]. Müller et al. [2019, 2020] introduced continuous variants like One-blob encoding [S4].
+ 
+ ## Sources

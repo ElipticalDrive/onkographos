@@ -1,0 +1,445 @@
+--- v004.md
++++ v005.md
+@@ -1,72 +1,58 @@
+ # Filtered Back-Projection (FBP)
+ 
+-Also called: Filter Back Projection, Inverse Radon Transform, RamLak Reconstruction, Rétroprojection des projections filtrées, Transformée inverse de Radon
++Also called: Filter Back Projection, RamLak Reconstruction
+ 
+ ## Overview
+-Filtered Back-Projection (FBP) is a direct tomographic reconstruction algorithm that recovers a 2D image from its measured projections (sinogram) by filtering the projection profiles in the frequency domain and then integrating them back into the image space [S1, S3, S4, unofficial]. It solves the inverse Radon transform problem, which standard back-projection alone cannot do accurately because simple back-projection induces a low-pass filtering effect (blurring) [S3, unofficial]. FBP compensates for this by applying a high-pass ramp filter, positioning it as a computationally efficient alternative to Fourier-based reconstruction methods that require complex grid interpolation [S3, S4, unofficial].
++Filtered Back-Projection (FBP) is a direct tomographic reconstruction algorithm that recovers a 2D image (or 3D volume in orthographic mode) from its measured projection profiles (sinogram) [S1, S3, S4, unofficial]. It solves the inverse Radon transform problem by applying a high-pass frequency-domain filter to the projections to correct for the inherent low-pass blurring of simple back-projection, followed by integrating the filtered data along sine-shaped paths [S1, S4, unofficial]. Unlike Fourier-based reconstruction methods which require interpolation between Cartesian and polar grids (leading to $O(N^2)$ complexity or interpolation artifacts), FBP operates directly on the projections with a time complexity of $O(N \log N)$ due to the use of Fast Fourier Transforms (FFT) [S4, S5, unofficial]. It is the most popular algorithm for computed tomography due to its speed and direct closed-form solution, though it requires projections over a full hemisphere and can produce artifacts if data is inconsistent or undersampled [S2, S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Sinogram $R_\theta(\rho)$: A 2D array where rows correspond to projection angles $\theta$ and columns to radial positions $\rho$.
+-*   Angles $\Theta$: Array of projection angles in radians, typically spanning $[0, \pi)$ [S3, unofficial].
+-*   Radial sampling step $d_\rho$: Distance between samples in the projection [S3, unofficial].
+-*   Image dimensions $W \times H$: Width and height of the output image grid [S3, unofficial].
+-*   Filter type: e.g., 'ramp', 'hann', 'hamming' [S4, unofficial].
++- Sinogram $R$: A 2D array of shape $(N_\rho, N_\theta)$, where $N_\rho$ is the number of radial samples per projection and $N_\theta$ is the number of projection angles.
++- Angles $\Theta$: An array of $N_\theta$ angles, typically spanning $[0, \pi)$ radians.
++- Radial sampling step $d_\rho$: The distance between adjacent samples in the projection domain.
++- Filter type: e.g., 'ramp', 'hann', 'hamming', 'shepp-logan', 'cosine' [S5, S8, unofficial].
++- Pixel kernel: The interpolation function used during back-projection (e.g., Dirac, Linear, Area) [S4, unofficial].
+ 
+ **Outputs:**
+-*   Reconstructed image $I(x, y)$: A 2D array of grey-values/attenuation coefficients [S1, S3, unofficial].
++- Reconstructed image $I$: A 2D array of shape $(N, N)$, where $N$ is the image grid size.
+ 
+ **Data Structures:**
+-*   `sinogram`: 2D float array of shape $(N_\theta, N_\rho)$.
+-*   `angles`: 1D float array of shape $(N_\theta)$.
+-*   `image`: 2D float array of shape $(H, W)$.
++- The sinogram is stored as a contiguous 2D array.
++- The frequency domain filter is a 1D array of length $N_\rho$.
+ 
+ **Steps:**
+ 
+-1.  **Compute Nyquist Frequency:**
+-    Calculate the Nyquist frequency based on the radial sampling step $d_\rho$:
+-    $$ \nu_{Nyquist} = \frac{1}{2 d_\rho} $$
+-    [S3, unofficial]
++1.  **Generate Frequency Filter:**
++    Compute the 1D frequency bins corresponding to the projection width. For a projection of length $N_\rho$, the frequencies $\nu$ range from $-\nu_{Nyquist}$ to $\nu_{Nyquist}$, where $\nu_{Nyquist} = \frac{1}{2 d_\rho}$ [S4, unofficial].
++    Construct the base filter $H(\nu)$. The standard "Ram-Lak" filter is the ramp function $|\nu|$. To reduce high-frequency noise, this is often multiplied by a window function $W(\nu)$ [S1, S4, unofficial].
++    The combined filter is:
++    $$ H_{total}(\nu) = |\nu| \cdot W(\nu) $$
++    Common windows include Hann and Hamming [S4, unofficial]:
++    $$ W(\nu) = \begin{cases} a + (1-a)\cos\left(\frac{\pi\nu}{\nu_{Nyquist}}\right) & \text{if } |\nu| < \nu_{Nyquist} \\ 0 & \text{otherwise} \end{cases} $$
++    Where $a = 0.5$ for Hann and $a = 0.54$ for Hamming [S4, unofficial].
++    Other filters like Shepp-Logan or Cosine are defined differently [S8, unofficial]. For 'shepp-logan', the filter is $\text{sinc}(\omega)$ where $\omega = \pi \times \text{fftfreq}$ [S8, unofficial]. For 'cosine', it is $\text{FFTshift}(\sin(\text{linspace}(0, \pi, \text{size}+1)[:-1]))$ [S8, unofficial]. If no filter is specified, the filter is all ones [S8, unofficial].
+ 
+ 2.  **Filter Projections:**
+-    For each projection angle $\theta \in \Theta$:
+-    a. Compute the 1D Fast Fourier Transform (FFT) of the projection profile $R_\theta$:
+-    $$ \hat{R}_\theta(\nu) = \mathcal{F}_{1D}\{R_\theta(\rho)\} $$
+-    [S3, unofficial]
+-    b. Define the filter kernel $H(\nu)$. The base filter is the ramp filter $|\nu|$. To reduce high-frequency noise, this is often multiplied by a window function $W(\nu)$:
+-    $$ H(\nu) = |\nu| \cdot W(\nu) $$
+-    [S3, unofficial]
+-    
+-    The window function $W(\nu)$ is defined as:
+-    $$ W(\nu) = \begin{cases} a + (1-a)\cos\left(\frac{\pi\nu}{\nu_{Nyquist}}\right) & \text{if } |\nu| < \nu_{Nyquist} \\ 0 & \text{otherwise} \end{cases} $$
+-    [S3, unofficial]
+-    
+-    Parameters for common windows [S3, unofficial]:
+-    *   **Hann:** $a = 0.5$
+-    *   **Hamming:** $a = 0.54$
+-    *   **Ram-Lak (No window):** $W(\nu) = 1$ for $|\nu| < \nu_{Nyquist}$ [S3, unofficial]
+-    
+-    c. Apply the filter in the frequency domain:
+-    $$ \hat{R}_\theta^{BF}(\nu) = \hat{R}_\theta(\nu) \cdot H(\nu) $$
+-    [S3, unofficial]
+-    d. Compute the inverse 1D FFT to obtain the filtered projection:
+-    $$ R_\theta^{BF}(\rho) = \mathcal{F}_{1D}^{-1}\{\hat{R}_\theta^{BF}(\nu)\} $$
+-    [S3, unofficial]
+-
+-3.  **Back-Projection:**
+-    Initialize the output image $I(x, y)$ to zeros. For each pixel $(x, y)$ in the image grid:
+-    a. Initialize accumulator $sum = 0$.
+-    b. For each angle $\theta \in \Theta$:
+-    i. Calculate the radial coordinate $\rho$ corresponding to $(x, y)$ at angle $\theta$:
+-    $$ \rho = x \cos \theta + y \sin \theta $$
+-    [S3, unofficial]
+-    ii. Sample the filtered projection $R_\theta^{BF}$ at $\rho$. Since $\rho$ rarely aligns with integer grid indices, interpolation is required. Common kernels include Dirac (nearest neighbor), Linear, Spline, or Area [S3, unofficial].
+-    iii. Add the interpolated value to $sum$.
+-    c. Assign $I(x, y) = sum$ (or scaled by $\pi/N_\theta$ depending on normalization conventions, though the integral definition implies summation over $[0, \pi)$) [S3, unofficial].
+-
+-    The mathematical definition of the inverse Radon transform (back-projection) is:
+-    $$ f(x,y) = \int_{0}^{\pi} \int_{-\infty}^{\infty} R_\theta(\rho) \delta(\rho - x \cos \theta - y \sin \theta) \, d\rho \, d\theta $$
+-    [S3, unofficial]
+-    In the discrete FBP implementation, the inner integral is resolved by filtering, and the outer integral is approximated by the summation over angles.
++    For each projection angle $\theta_i \in \Theta$:
++    a. Compute the 1D Discrete Fourier Transform (DFT) of the projection profile $R_{\theta_i}$:
++       $$ \hat{R}_{\theta_i} = \text{FFT}(R_{\theta_i}) $$
++    b. Multiply the spectrum by the frequency filter $H_{total}$:
++       $$ \hat{R}_{\theta_i}^{filtered}[\nu] = \hat{R}_{\theta_i}[\nu] \cdot H_{total}[\nu] $$
++    c. Compute the inverse 1D DFT to obtain the filtered projection $R_{\theta_i}^{BF}$:
++       $$ R_{\theta_i}^{BF} = \text{IFFT}(\hat{R}_{\theta_i}^{filtered}) $$
++       Note: The result should be taken as the real part, as the imaginary part should be negligible due to symmetry [S8, unofficial].
++
++3.  **Back-Project:**
++    Initialize the reconstructed image $I$ to zeros.
++    For each filtered projection $R_{\theta_i}^{BF}$ and angle $\theta_i$:
++    For each pixel $(x, y)$ in the image grid:
++    a. Calculate the radial coordinate $\rho$ corresponding to the pixel's position at angle $\theta_i$:
++       $$ \rho = x \cos \theta_i + y \sin \theta_i $$
++    b. Sample the value from the filtered projection $R_{\theta_i}^{BF}$ at $\rho$. Since $\rho$ rarely aligns exactly with the discrete grid indices of the sinogram, interpolation is required. The choice of interpolation kernel (pixel kernel) affects quality. The 'Area' kernel provides the best SSIM and most uniform Point Spread Function (PSF) [S4, unofficial].
++    c. Add the sampled value to the image pixel:
++       $$ I(x, y) \leftarrow I(x, y) + R_{\theta_i}^{BF}(\rho) $$
++
++4.  **Normalization:**
++    Depending on the implementation, the accumulated values may need to be normalized by the number of projections or the angular step size $d\theta$ to maintain correct intensity scaling [S2, S4, unofficial].
+ 
+ **Pseudocode:**
+@@ -75,119 +61,164 @@
+ import numpy as np
+ 
+-def filtered_back_projection(sinogram, angles, d_rho, image_shape):
++def filtered_back_projection(sinogram, angles, d_rho, filter_type='ramp', window_param=0.5):
+     """
+     Reconstructs an image from a sinogram using Filtered Back-Projection.
+     
+-    Args:
+-        sinogram: np.ndarray of shape (N_theta, N_rho)
+-        angles: np.ndarray of shape (N_theta,) in radians
+-        d_rho: float, radial sampling step
+-        image_shape: tuple (H, W)
+-        
++    Parameters:
++    sinogram: ndarray of shape (N_rho, N_theta)
++    angles: ndarray of shape (N_theta,), in radians, range [0, pi)
++    d_rho: float, radial sampling step
++    filter_type: str, type of filter ('ramp', 'hann', 'hamming', etc.)
++    window_param: float, parameter for window function (e.g., 0.5 for Hann)
++    
+     Returns:
+-        image: np.ndarray of shape (H, W)
++    image: ndarray of shape (N, N)
+     """
+-    N_theta, N_rho = sinogram.shape
+-    H, W = image_shape
+-    
+-    # 1. Compute Nyquist Frequency
+-    nu_nyquist = 1.0 / (2.0 * d_rho)
+-    
+-    # 2. Define Frequency Axis for 1D FFT
+-    # FFT output frequencies: 0, 1, ..., N/2, -N/2+1, ..., -1
+-    freqs = np.fft.fftfreq(N_rho, d=d_rho)
+-    
+-    # 3. Define Filter Kernel (Ram-Lak with Hann Window as example)
+-    # Using Hann window parameters: a = 0.5
+-    a = 0.5
+-    abs_freqs = np.abs(freqs)
+-    
+-    # Window function H(ν)
+-    # Condition: |ν| < ν_Nyquist
+-    mask = abs_freqs < nu_nyquist
+-    window = np.zeros_like(freqs)
+-    window[mask] = a + (1 - a) * np.cos(np.pi * abs_freqs[mask] / nu_nyquist)
+-    
+-    # Ramp filter |ν|
+-    ramp = abs_freqs
+-    
+-    # Combined filter
+-    filter_kernel = ramp * window
+-    
+-    # 4. Filter Projections
++    N_rho, N_theta = sinogram.shape
++    # Assume square image with same number of pixels as radial samples for simplicity
++    # In practice, N might differ, but reconstruction grid usually matches sinogram width
++    N = N_rho 
++    
++    # 1. Generate Frequency Filter
++    # Frequency bins for FFT of length N_rho
++    # fftfreq returns frequencies in cycles per sample. 
++    # We need to scale by 1/d_rho to get physical frequency if d_rho is in physical units.
++    # However, for reconstruction, relative frequencies matter. 
++    # Nyquist frequency in cycles per sample is 0.5.
++    freqs = np.fft.fftfreq(N_rho, d=1.0) # d=1.0 because we work in sample indices
++    
++    # Normalize frequencies to range [-0.5, 0.5)
++    # The ramp filter is |nu|
++    ramp_filter = np.abs(freqs)
++    
++    # Apply window if necessary
++    if filter_type == 'hann':
++        # Hann window: 0.5 - 0.5 * cos(2*pi*n/(N-1))
++        # In frequency domain, this corresponds to the formula in [S4, unofficial]
++        # H(nu) = a + (1-a)cos(pi*nu/nu_Nyquist)
++        # nu_Nyquist corresponds to freq 0.5
++        window = window_param + (1 - window_param) * np.cos(np.pi * freqs / 0.5)
++        # Zero out frequencies beyond Nyquist (should be 0 already due to cos argument, but ensure)
++        window[freqs < -0.5] = 0
++        window[freqs > 0.5] = 0
++        filter_kernel = ramp_filter * window
++    elif filter_type == 'hamming':
++        window = window_param + (1 - window_param) * np.cos(np.pi * freqs / 0.5)
++        window[freqs < -0.5] = 0
++        window[freqs > 0.5] = 0
++        filter_kernel = ramp_filter * window
++    elif filter_type == 'ramp':
++        filter_kernel = ramp_filter
++    elif filter_type == 'shepp-logan':
++        # Shepp-Logan filter: sinc(omega) * |nu| ? Or just sinc?
++        # [S8, unofficial] says for shepp-logan, multiply frequencies by sinc(omega)
++        # omega = pi * fftfreq
++        omega = np.pi * freqs
++        sinc_filter = np.sinc(omega / np.pi) # sinc(x) = sin(pi*x)/(pi*x)
++        filter_kernel = ramp_filter * sinc_filter
++    elif filter_type == 'cosine':
++        # [S8, unofficial] FFTshift(sin(linspace(0, pi, size+1)[:-1]))
++        # This is a specific implementation detail. 
++        # A simpler cosine filter is often just cos(pi*nu/2) for |nu|<1
++        filter_kernel = np.cos(np.pi * freqs / 2)
++        filter_kernel[freqs < -1] = 0
++        filter_kernel[freqs > 1] = 0
++    else:
++        filter_kernel = np.ones(N_rho)
++
++    # 2. Filter Projections
+     filtered_sinogram = np.zeros_like(sinogram)
+-    for i, theta in enumerate(angles):
+-        # 1D FFT of the projection
+-        proj_fft = np.fft.fft(sinogram[i, :])
+-        # Apply filter
++    for i in range(N_theta):
++        proj = sinogram[:, i]
++        # FFT
++        proj_fft = np.fft.fft(proj)
++        # Multiply by filter
+         proj_fft_filtered = proj_fft * filter_kernel
+-        # Inverse 1D FFT
+-        filtered_proj = np.fft.ifft(proj_fft_filtered).real
+-        filtered_sinogram[i, :] = filtered_proj
+-        
+-    # 5. Back-Projection
+-    image = np.zeros((H, W))
+-    
+-    # Precompute pixel coordinates relative to center
+-    # Assuming image center is at (W/2, H/2)
+-    y_coords, x_coords = np.meshgrid(np.arange(H) - H/2, np.arange(W) - W/2, indexing='ij')
+-    
+-    for i, theta in enumerate(angles):
+-        # Calculate rho for all pixels
+-        rho = x_coords * np.cos(theta) + y_coords * np.sin(theta)
+-        
+-        # Interpolate filtered projection at rho values
+-        # rho values are continuous; map to indices in filtered_sinogram[i, :]
+-        # Indices range from 0 to N_rho - 1
+-        # Center of sinogram is at N_rho / 2
+-        # rho = 0 corresponds to index N_rho / 2
+-        
+-        # Shift rho to be relative to the center of the sinogram array
+-        rho_centered = rho + N_rho / 2.0
+-        
+-        # Clip to valid range to avoid out-of-bounds, though interpolation handles boundaries
+-        # Simple linear interpolation or nearest neighbor can be used here.
+-        # For implementation completeness, we use a generic interpolation function.
+-        # Note: In a real implementation, scipy.interpolate.interp1d or similar is used.
+-        
+-        # Create 1D array of indices for the current projection
+-        indices = np.arange(N_rho)
+-        
+-        # Interpolate
+-        # Using linear interpolation for robustness
+-        from scipy.interpolate import interp1d
+-        f_interp = interp1d(indices, filtered_sinogram[i, :], kind='linear', 
+-                            bounds_error=False, fill_value=0)
+-        
+-        projection_values = f_interp(rho_centered)
+-        
+-        # Accumulate
+-        image += projection_values
+-        
+-    # Normalize by number of angles (approximation of integral over [0, pi))
+-    # The integral is over 0 to pi. Summation is over N_theta angles.
+-    # Scaling factor depends on specific discretization. 
+-    # Standard simple backprojection sums over all angles.
+-    # FBP typically divides by pi or N_theta depending on normalization of sinogram.
+-    # Based on S3, the integral is defined directly. 
+-    # A common normalization is dividing by the number of angles if angles are uniform.
+-    image = image / N_theta
++        # IFFT
++        filtered_proj = np.fft.ifft(proj_fft_filtered)
++        filtered_sinogram[:, i] = np.real(filtered_proj)
++
++    # 3. Back-Project
++    image = np.zeros((N, N))
++    
++    # Precompute cos and sin for angles
++    cos_angles = np.cos(angles)
++    sin_angles = np.sin(angles)
++    
++    # Create coordinate grids
++    # Center the image at (0,0)
++    y, x = np.meshgrid(np.arange(N) - N/2 + 0.5, np.arange(N) - N/2 + 0.5, indexing='ij')
++    
++    for i in range(N_theta):
++        theta = angles[i]
++        c = cos_angles[i]
++        s = sin_angles[i]
++        
++        # Calculate rho for each pixel
++        rho = x * c + y * s
++        
++        # Interpolate from filtered_sinogram[:, i]
++        # rho is in physical units relative to d_rho. 
++        # Index in sinogram = rho / d_rho
++        # We assume sinogram indices are 0 to N_rho-1
++        # Center of sinogram is at N_rho/2
++        # So index = (rho / d_rho) + N_rho/2
++        
++        # However, d_rho is often normalized to 1 in discrete implementations
++        # If d_rho is not 1, we must scale.
++        # Let's assume d_rho is the spacing between samples.
++        # The sinogram array indices correspond to rho values:
++        # index 0 -> rho = -N_rho/2 * d_rho
++        # index k -> rho = (-N_rho/2 + k) * d_rho
++        
++        # So, index = rho / d_rho + N_rho/2
++        
++        indices = rho / d_rho + N_rho / 2
++        
++        # Clip indices to valid range
++        indices = np.clip(indices, 0, N_rho - 1)
++        
++        # Linear interpolation
++        idx0 = np.floor(indices).astype(int)
++        idx1 = np.ceil(indices).astype(int)
++        w = indices - idx0
++        
++        # Handle boundary cases where idx1 might be out of bounds
++        idx1_safe = np.minimum(idx1, N_rho - 1)
++        
++        val0 = filtered_sinogram[idx0, i]
++        val1 = filtered_sinogram[idx1_safe, i]
++        
++        interpolated_val = val0 + w * (val1 - val0)
++        
++        image += interpolated_val
++
++    # 4. Normalization
++    # Standard backprojection sums N_theta contributions.
++    # To get the correct density, we divide by N_theta (or pi if angles are uniform and cover pi)
++    # [S4, unofficial] implies direct summation. 
++    # Common normalization is dividing by N_theta
++    image /= N_theta
+     
+     return image
+ ```
+ 
++**Parameters:**
++- $N_\theta$: Number of projection angles. SSIM plateaus when $N_\theta \ge 40$ for a $512^2$ image [S4, unofficial].
++- $d_\rho$: Radial sampling step. SSIM increases for $d_\rho > 1$ (undersampling) and becomes constant when $d_\rho \le 1$ (standard/oversampling) [S4, unofficial].
++- Filter: 'ramp', 'shepp-logan', 'cosine', 'hamming', 'hann' [S5, unofficial].
++- Window parameter $a$: 0.54 for Hamming, 0.5 for Hann [S4, unofficial].
++- Pixel Kernel: 'Area' kernel provides best SSIM and PSF uniformity [S4, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Interpolation:** Points on the back-projection paths do not align with measured grid locations, requiring interpolation. Low-resolution interpolation (e.g., Dirac/nearest neighbor) causes visible artifacts [S1, S3, unofficial]. The Area kernel provides the best SSIM and most uniform Point Spread Function (PSF) [S3, unofficial].
+-*   **Noise Amplification:** The ramp filter amplifies high frequencies, which are often dominated by noise. Windowed filters (Hann, Hamming) are necessary to attenuate these frequencies [S1, S3, unofficial].
+-*   **Sampling:** 
+-    *   Under-sampling (large $d_\rho$) maximizes SNR but degrades sharpness [S3, unofficial].
+-    *   High radial resolution ($N_\rho$) without sufficient angular coverage ($N_\theta < 40$ for $512^2$ images) causes loss of contrast and luminance [S3, unofficial].
+-    *   SSIM plateaus when $N_\theta \ge 40$ for a $512^2$ image [S3, unofficial].
+-*   **Boundary Conditions:** Overscan convolution filters can be used to handle boundary conditions and ensure symmetry, typically adding 30% extra pixels [S5, unofficial].
++- **Interpolation:** Points on the backprojection paths do not align with measured grid locations, requiring interpolation. Low resolution (e.g., 512x512) can cause visible artifacts [S1, unofficial].
++- **Noise Amplification:** The ramp filter amplifies high frequencies, which are sources of noise. Windowed filters (Hann, Hamming) are used to attenuate these very high frequencies to reduce artifacts [S4, unofficial].
++- **Undersampling:** High radial resolution ($N_\rho$ increase) without sufficient angular coverage ($N_\theta < 40$) causes complete loss of contrast and luminance [S4, unofficial].
++- **Inconsistent Data:** FBP can produce negative values in the presence of inconsistent data [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Discrete Inverse Radon Transform](14348-discrete-inverse-radon-transform.md)
+-The Discrete Inverse Radon Transform (DIRT) is a method to estimate an attenuation map $\tilde{\mu}(x, y)$ or an image $I$ from a set of projections (sinogram) $p(u, a)$ or $R_\theta(\rho)$. It is conventionally implemented via filtered backprojection, where the inverse operation sums projection values back into the image domain. Unlike iterative reconstruction methods which handle inconsistent projections over limited angles via optimization, DIRT provides a direct, closed-form estimate.
++The Discrete Inverse Radon Transform reconstructs a 2D image from its Radon transform (sinogram) by summing projection values into image pixels, assuming parallel beam geometry. It is conventionally implemented via Filtered Back-Projection (FBP), which applies a frequency-domain filter to the sinogram before backprojecting to correct for the blurring inherent in simple summation. Unlike iterative methods, it provides a direct, closed-form solution but requires projections over a full hemisphere and can produce negative values in the presence of inconsistent data.
+ 
+ ### [Iterative Reconstruction with Basis Expansion](16502-iterative-reconstruction-with-basis-expansion.md)
+@@ -195,43 +226,41 @@
+ 
+ ### Overscan Convolution Filter Generation
+-A method to generate a convolution filter for tomographic reconstruction that includes an overscan border (typically 30% extra pixels) to handle boundary conditions and ensure symmetry [S5, unofficial]. It calculates overscan dimensions as $w_{over} = \lceil w \times 0.3 \rceil$ and $h_{over} = \lceil h \times 0.3 \rceil$ before building the filter [S5, unofficial]. This preserves the parity (even/odd nature) of dimensions compared to non-overscanned filters, ensuring pixel alignment consistency [S5, unofficial].
++A method to generate a convolution filter for tomographic reconstruction that includes an overscan border (typically 30% extra pixels) to handle boundary conditions and ensure symmetry [S6, unofficial]. It calculates overscan dimensions ($w_{over} = \lceil w \cdot 0.3 \rceil$) and calls a filter builder with these dimensions. Overscanned filters preserve the parity (even/odd nature) of dimensions compared to non-overscanned filters, ensuring pixel alignment consistency [S6, unofficial].
+ 
+ ### Ramp Filter
+-A frequency-domain filter applied to projections before backprojection to correct for the blurring inherent in simple backprojection [S6, unofficial]. It is implemented by computing the FFT of the projection $p$, computing the frequency bins, and multiplying the FFT result by the absolute value of the frequency bins $|\nu|$ [S6, unofficial].
++A frequency-domain filter applied to projections before backprojection to correct for the blurring inherent in simple backprojection [S7, unofficial]. It is computed by multiplying the FFT of the projection by the absolute value of the frequency bins [S7, unofficial].
+ 
+ ### Fourier Slice Theorem
+-The mathematical foundation of FBP, stating that the 1D Fourier transform of a projection $R_\theta$ at angle $\theta$ corresponds to a radial line in the 2D Fourier transform of the image $f$ at the same angle $\theta$ [S3, unofficial]. Specifically, $F_\theta(\nu) = F^{2D}(\psi, \nu)|_{\psi=\theta}$ [S3, unofficial]. Reconstruction involves combining these 1D transforms to fill the 2D Fourier space and applying a 2D inverse Fourier transform [S3, unofficial].
++The mathematical foundation of FBP. It states that the 1D Fourier transform of a projection $R_\theta$ at angle $\theta$ is equal to a radial slice of the 2D Fourier transform of the original image $f(x,y)$ at the same angle $\theta$ [S4, unofficial]. This allows reconstruction by combining 1D Fourier transforms of all projections to fill the 2D Fourier space, which is then inverted [S4, unofficial].
+ 
+ ### Filtered Backprojection Noise Shaping
+-(No specific details provided in sources beyond general noise discussion in FBP section).
++Models and shapes CT noise from Poisson-distributed photon counting to a frequency-dependent Gaussian distribution via ramp filtering and interpolation during backprojection [S1, unofficial]. The ideal ramp filter amplifies high-frequency noise. Windowed ramp filters (Hanning, Hamming, Butterworth) create a band-pass noise spectrum. Re-sampling profiles during backprojection using interpolation (e.g., linear) further shapes the noise spectrum. The re-sampling rate can be increased via zoom reconstruction [S1, unofficial].
+ 
+ ### CT Noise Filtering and Modeling
+-Models CT noise, which originates from Poisson-distributed photon counting (white noise) [S1, unofficial]. The ideal ramp filter attenuates low-frequency noise but amplifies high-frequency noise. Windowed ramp filters (Hanning, Hamming, Butterworth) create a band-pass noise spectrum, reducing high-frequency noise artifacts [S1, unofficial]. Re-sampling during backprojection (e.g., via zoom reconstruction) further shapes the noise spectrum and can reduce aliasing by increasing the sampling frequency [S1, unofficial].
++Models and shapes CT noise from Poisson-distributed photon counting to a frequency-dependent Gaussian distribution via ramp filtering and interpolation during backprojection [S1, unofficial].
++
++### 1D Fourier Filter Generation
++Generates a 1D frequency domain filter kernel for use in filtered backprojection [S8, unofficial]. For 'shepp-logan', it multiplies frequencies by $\text{sinc}(\omega)$. For 'cosine', it uses a shifted sine function. For 'hamming' or 'hann', it uses the respective window function. The base ramp filter array $f$ is defined as $f[0] = 0.25$, $f[1::2] = -1 / (\pi \times n)^2$, where $n = [1, 3, ..., \text{size}//2] \text{ concatenated with } [\text{size}//2-1, ..., 1]$. The filter is $2 \times \text{real}(\text{FFT}(f))$ [S8, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \log N)$, primarily due to the use of FFTs for filtering and the linear cost of back-projection [S3, S4, unofficial]. This makes it competitive with Fourier-based methods [S3, unofficial].
+-*   **Memory Complexity:** Requires storage for the sinogram, filtered sinogram, and output image. $O(N_\theta N_\rho + H W)$.
+-*   **Measured Performance:** On the Shepp-Logan phantom with a ramp filter, the RMS reconstruction error is approximately 0.0283 [S4, unofficial].
+-*   **Strengths:** 
+-    *   Fast execution speed [S4, unofficial].
+-    *   Simple implementation [S3, unofficial].
+-    *   GPU-parallelizable due to independent pixel contributions in back-projection [S3, unofficial].
+-    *   High SSIM (>0.8 in most cases with Area kernel) and uniform PSF [S3, unofficial].
+-*   **Limitations:**
+-    *   Sensitive to noise; requires windowing [S3, unofficial].
+-    *   Artifacts from under-sampling (angular or radial) [S3, unofficial].
+-    *   Less robust to noise than some Fourier methods or iterative techniques [S3, unofficial].
+-    *   Assumes consistent projections; fails with limited angles or inconsistent data without modification [S1, unofficial].
+-*   **When to Use:** Standard 2D CT slice reconstruction from full or near-full angular coverage projection data [S1, unofficial].
+-*   **When Not to Use:** Limited-angle tomography, highly noisy data without advanced filtering, or when iterative regularization is required for consistency [S1, S3, unofficial].
++- **Time Complexity:** $O(N \log N)$, making it competitive with Fourier methods [S4, unofficial].
++- **Memory Complexity:** $O(N^2)$ for storing the sinogram and the reconstructed image.
++- **Measured Performance:** FBP rms reconstruction error on Shepp-Logan phantom with ramp filter is 0.0283 [S5, unofficial].
++- **Scaling:** The method is highly parallelizable because pixel contributions are independent, allowing for efficient GPU implementation [S4, unofficial].
++- **Strengths:** Fast, direct closed-form solution, good conservation of contrast, and uniform PSF [S4, unofficial].
++- **Limitations:** Requires projections over a full hemisphere ($\pi$ radians). Sensitive to noise (amplified by ramp filter) and undersampling. Can produce negative values with inconsistent data. Less robust to noise than iterative methods or Fourier methods with specific interpolations [S2, S4, unofficial].
++- **When to Use:** Standard reconstruction for 2D CT slices from projection data when speed is critical and data is complete and consistent [S1, unofficial].
++- **When Not to Use:** When projections are limited in angle or inconsistent, or when noise is extremely high and iterative regularization is preferred [S2, unofficial].
+ 
+ ## Background
+-FBP was introduced by Ramachandran and Lakshiminarayanan (hence "Ram-Lak") as a computationally efficient alternative to Fourier reconstruction methods [S3, S4, unofficial]. It is based on the inversion of the Radon transform and the Fourier Slice Theorem [S3, S4, unofficial]. It is widely used in medical imaging (CT) and other tomographic applications [S1, S3, unofficial]. The method is considered one of the most used direct reconstruction methods in tomography [S3, unofficial].
++Filtered Back-Projection is the most popular algorithm for computed tomography [S3, unofficial]. It is based on the inversion of the Radon transform [S4, unofficial]. The method was introduced by Ramachandran and Lakshiminarayanan, hence the name "Ram-Lak" filter [S4, unofficial]. It is widely used in tomography and is cited as one of the most used direct methods [S4, unofficial]. In 3D, Feldkamp’s (FDK) algorithm is a popular extension for cone-beam CT, which acts as a 3D extension of 2D FBP in orthographic mode [S3, unofficial].
+ 
+ ## Sources
+ [S1] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)
+ [S2] guibo-tech/Tomographic-Reconstruction, https://github.com/guibo-tech/Tomographic-Reconstruction, fetched 2026-10-26 (unofficial)
+-[S3] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)
+-[S4] plot_radon_transform.rst.txt, https://scikit-image.org/docs/stable/_sources/auto_examples/transform/plot_radon_transform.rst.txt, fetched 2026-10-30 (unofficial)
+-[S5] simon-frankau/rediscovering-tomography, https://github.com/simon-frankau/rediscovering-tomography, fetched 2026-10-26 (unofficial)
+-[S6] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)+[S3] GPU-Accelerated D2VR, https://doi.org/10.2312/vg/vg06/023-030, fetched 2026-10-26 (unofficial)
++[S4] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)
++[S5] plot_radon_transform.rst.txt, https://scikit-image.org/docs/stable/_sources/auto_examples/transform/plot_radon_transform.rst.txt, fetched 2026-10-30 (unofficial)
++[S6] simon-frankau/rediscovering-tomography, https://github.com/simon-frankau/rediscovering-tomography, fetched 2026-10-26 (unofficial)
++[S7] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)
++[S8] tomluetjen/torchskradon, https://github.com/tomluetjen/torchskradon, fetched 2026-10-27 (unofficial)

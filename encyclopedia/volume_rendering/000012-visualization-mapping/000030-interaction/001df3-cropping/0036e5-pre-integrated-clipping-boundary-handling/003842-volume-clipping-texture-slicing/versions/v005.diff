@@ -1,0 +1,108 @@
+--- v004.md
++++ v005.md
+@@ -8,20 +8,21 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume texture (3D), `SculptMap` texture (3D, stores clipping state), `PolygonCoord` texture (2D, stores projection coordinates), `clipPlane` (4D vector), `ProjPlane` (4x4 projection matrix) [S3].
+-*   **Output:** Rendered color/alpha buffer with clipped regions.
++*   **Input:** Volume texture (3D), `SculptMap` texture (3D, stores clipping state), `PolygonCoord` texture (2D, stores projection coordinates), `clipPlane` (4D vector), `ProjPlane` (4x4 projection matrix), and tool point `P` (4D vector) [S3].
++*   **Output:** Rendered color/alpha buffer with clipped regions [S3].
+ 
+ **Data Structures:**
+-*   `SculptMap`: A 3D texture where each voxel stores a mask value. Voxels inside the clip geometry are initialized to 0 (transparent), and remaining voxels are set to 1 (opaque) [S1, unofficial].
++*   `SculptMap`: A 3D texture where each voxel stores a mask value, with voxels inside the clip geometry initialized to 0 (transparent) and remaining voxels set to 1 (opaque) [S1, unofficial].
+ *   `PolygonCoord`: A 2D texture mapping fragment coordinates to 3D projection space [S3].
+ *   `ProjPlane`: A uniform 4x4 matrix representing the projection transformation required to map texture coordinates to clip space [S3].
+ *   `clipPlane`: A uniform `float4` defining the clipping plane equation [S3].
++*   `P`: A uniform `float4` where $P_{xyz}$ represents a 3D point and $P_a$ represents the tool radius [S3].
+ 
+ **Steps:**
+-1.  **Texture Sampling:** Sample the `SculptMap` at the current fragment's texture coordinates to retrieve the current alpha mask value [S3].
+-2.  **Coordinate Projection:** Sample the `PolygonCoord` texture to obtain 3D texture coordinates. Subtract 0.5 from the xyz components to center the coordinates, then transform them using the `ProjPlane` matrix [S3].
+-3.  **Perspective Division:** Perform a perspective divide on the transformed plane coordinates by their w-component to normalize them [S3].
+-4.  **Distance Calculation:** Calculate the 2D Euclidean distance $D$ between the projected point $P$ (derived from the tool or clipper definition) and the current fragment's plane coordinates, normalized by $P.z$ [S3].
+-5.  **Alpha Update:** If the calculated distance $D$ is less than the current alpha value of the `SculptMap` sample, update the alpha value to $D$ [S3]. This effectively erodes or defines the boundary based on proximity [S3].
+-6.  **Final Compositing:** Combine the volume color with the updated alpha mask. If the alpha is 0, the voxel is transparent; otherwise, it is rendered [S3].
++1.  **Coordinate Projection:** Sample the `PolygonCoord` texture at the input fragment coordinates to obtain 3D texture coordinates [S3].
++2.  **Mask Sampling:** Sample the `SculptMap` texture at the obtained 3D coordinates to retrieve the current alpha mask value [S3].
++3.  **Coordinate Transformation:** Subtract 0.5 from the 3D coordinate components, append 1.0, and multiply by the `ProjPlane` matrix [S3].
++4.  **Perspective Division:** Divide the transformed vector's $x$, $y$, and $z$ components by its $w$ component [S3].
++5.  **Distance Calculation:** Compute the 2D Euclidean distance $D = \frac{\| \text{PlaneCoordinates}_{xy} - P_{xy} \|}{P_z}$, where $P_{xy}$ and $P_z$ are components of the tool point vector [S3].
++6.  **Alpha Update:** If $D$ is less than the current alpha value, update the alpha value to $D$ [S3].
+ 
+ **Pseudocode:**
+@@ -29,33 +30,28 @@
+ import math
+ 
+-def mul(v, m):
+-    """Matrix-vector multiplication: m is a 4x4 matrix stored as list of 4 lists."""
+-    return [sum(v[i] * m[i][j] for i in range(4)) for j in range(4)]
++def mul_row_vec_mat(vec, mat):
++    """Multiplies a row vector by a 4x4 matrix."""
++    return [sum(vec[i] * mat[i][j] for i in range(4)) for j in range(4)]
+ 
+-def length(v):
+-    """Euclidean norm of a vector."""
+-    return math.sqrt(sum(x**2 for x in v))
+-
+-def FSClipper(v2f_Tex0, SculptMap, PolygonCoord, ProjPlane, clipPlane, P):
+-    # 1. Sample SculptMap (3D texture lookup)
+-    Col = SculptMap.sample(v2f_Tex0)
+-    
+-    # 2. Sample PolygonCoord and Project
++def FSClipper(v2f_Tex0, SculptMap, PolygonCoord, ProjPlane, P):
++    # 1. Coordinate Projection
+     texCoord = PolygonCoord.sample(v2f_Tex0)
+     
+-    # Transform centered coordinates
++    # 2. Mask Sampling
++    Col = SculptMap.sample(texCoord[:3])
++    
++    # 3. Coordinate Transformation
+     centered = [texCoord[0] - 0.5, texCoord[1] - 0.5, texCoord[2] - 0.5, 1.0]
+-    PlaneCoordinates = mul(centered, ProjPlane)
++    PlaneCoordinates = mul_row_vec_mat(centered, ProjPlane)
+     
+-    # 3. Perspective Divide
++    # 4. Perspective Division
+     PlaneCoordinates[0] /= PlaneCoordinates[3]
+     PlaneCoordinates[1] /= PlaneCoordinates[3]
+     PlaneCoordinates[2] /= PlaneCoordinates[3]
+     
+-    # 4. Calculate 2D Euclidean Distance
+-    # P.xy is the projected point center, P.z is the depth factor
+-    D = length([PlaneCoordinates[0] - P[0], PlaneCoordinates[1] - P[1]]) / P[2]
++    # 5. Distance Calculation
++    D = math.sqrt((PlaneCoordinates[0] - P[0])**2 + (PlaneCoordinates[1] - P[1])**2) / P[2]
+     
+-    # 5. Update Alpha if within distance threshold
++    # 6. Alpha Update
+     if D < Col[3]:
+         Col[3] = D
+@@ -68,10 +64,10 @@
+ *   **Clipping Mode 2:** The part outside the clipping geometry is the clipped object (removed) [S1, unofficial].
+ *   **Clipping Mode 3:** Initializes the clipped volume model and attaches it to the clipping geometry [S1, unofficial].
+-*   **Tool Radius:** Stored in $P.a$, defines the effective radius of the clipping tool [S3].
++*   **Tool Radius:** Stored in $P_a$, defines the effective radius of the clipping tool [S3].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Multi-volume Clipping:** Issuing the same clipping operation twice does not realize multi-volume clipping directly. A clipping-geometry-list must be created to arrange different clipping geometries [S1, unofficial].
++*   **Multi-volume Clipping:** Issuing the same clipping operation twice does not realize multi-volume clipping directly; a clipping-geometry-list must be created to arrange different clipping geometries [S1, unofficial].
+ *   **Performance:** Multi-model clipping can seriously affect the interactive rate at runtime if not optimized [S1, unofficial].
+-*   **Occlusion:** There is unavailability of volume-based depth buffering. The final rendered frame with multiple volume models cannot always show correct occlusions like wireframe ones [S1, unofficial].
++*   **Occlusion:** There is unavailability of volume-based depth buffering, meaning the final rendered frame with multiple volume models cannot always show correct occlusions like wireframe ones [S1, unofficial].
+ 
+ ## Subtopics
+@@ -81,9 +77,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of slices and the cost of texture sampling and distance calculation per fragment. High-quality shading for clip boundaries adds computational cost [S4, unofficial].
++*   **Time Complexity:** Depends on the number of slices and the cost of texture sampling and distance calculation per fragment [S4, unofficial].
+ *   **Memory Complexity:** Requires storage for the `SculptMap` texture, which scales with the volume resolution [S3].
+ *   **Performance:** Multi-step slicing with oversampling (e.g., four-times) yields the best quality-performance tradeoff due to increased cache coherency [S4, unofficial].
+-*   **Strengths:** Allows arbitrary clip geometry (polygons, voxelized, iso-surface); high-quality shading for clip boundaries [S4, unofficial].
+-*   **Limitations:** Multi-model clipping impacts interactive rate; lack of volume-based depth buffering leads to incorrect occlusions in multi-volume scenes [S1, unofficial].
++*   **Strengths:** Allows arbitrary clip geometry (polygons, voxelized, iso-surface) and provides high-quality shading for clip boundaries [S4, unofficial].
++*   **Limitations:** Multi-model clipping impacts interactive rate and lack of volume-based depth buffering leads to incorrect occlusions in multi-volume scenes [S1, unofficial].
+ 
+ ## Background

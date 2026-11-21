@@ -1,0 +1,273 @@
+Contribute to openvdb/fvdb-core development by creating an account on GitHub.
+
+Generalize volume_render to N channels by swahtz · Pull Request #636 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Apr 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Generalize volume_render to N channels
+Extend the volume_render forward and backward kernels to support an arbitrary number of radiance channels (1..MAX_VOLUME_RENDER_CHANNELS, with MAX set to 16) instead of the previous hardcoded 3. This is needed for spectral rendering pipelines that want to composite K wavelength samples per ray.
+Changes in src/fvdb/detail/ops/VolumeRender.cu:
+Add MAX_VOLUME_RENDER_CHANNELS = 16 and thread numChannels through volumeRenderFwdCallback as a parameter.
+Replace channel-specific r/g/b accumulators in volumeRenderBwdCallback with bounded stack arrays sized by MAX_VOLUME_RENDER_CHANNELS; loop over numChannels for both the running partial sum and the per-sample gradient accumulation into out_dLdRgbs.
+Allocate outRgb / dLdRgbs host-side tensors with shape (numRays, rgbs.size(1)) instead of a hardcoded 3.
+Add a TORCH_CHECK that rgbs.size(1) is in [1, MAX_VOLUME_RENDER_CHANNELS] with a clear error message.
+Tests in tests/unit/test_ray_marching.py:
+test_volume_render_nchannel runs a 4-channel volume_render and asserts that its output (rgb, depth, opacity, weights) and gradients match the concatenation of two independent 2-channel runs over the same sample topology; skips float16 due to error accumulation.
+test_volume_render_rejects_too_many_channels verifies a RuntimeError is raised when rgbs has more than MAX_VOLUME_RENDER_CHANNELS columns.
+No changes to the public Python API; existing 3-channel callers and all pre-existing TestVolumeRender cases continue to pass unchanged.
+Correctness fixes
+Additionally this PR fixes two ray/sample kernel correctness bugs and adds regression tests
+VolumeRender.cu: move numSamples increment before the transmittance break check so outTotalSamples counts the sample that triggered early termination (that sample is already composited into outRGB, outDepth, outOpacity and outWs).
+SampleRaysUniform.cu: use ceil instead of floor when snapping t0 to the first step inside an HDDA segment in the count callback, matching the generate callback. Under cone tracing (coneAngle > 0) stepSize depends on t0, so a floor/ceil mismatch silently under-allocated the output buffer and let the generate pass OOB write into adjacent rays' slots.
+tests/unit/test_ray_marching.py: regression tests for both fixes.
+TestVolumeRender verifies outTotalSamples matches the non-zero prefix of outWs under early termination. TestRayMarching verifies uniform_ray_samples under cone tracing with include_end_segments matches a ceil-rounded Python reference in both count and per-sample boundaries.
+Generalize volume_render to N channels
+…
+2b15764
+```
+Extend the volume_render forward and backward kernels to support
+an arbitrary number of radiance channels (1..MAX_VOLUME_RENDER_CHANNELS,
+with MAX set to 16) instead of the previous hardcoded 3. This is needed
+for spectral rendering pipelines that want to composite K wavelength
+samples per ray.
+
+Changes in src/fvdb/detail/ops/VolumeRender.cu:
+  * Add MAX_VOLUME_RENDER_CHANNELS = 16 and thread numChannels through
+    volumeRenderFwdCallback as a parameter.
+  * Replace channel-specific r/g/b accumulators in volumeRenderBwdCallback
+    with bounded stack arrays sized by MAX_VOLUME_RENDER_CHANNELS; loop
+    over numChannels for both the running partial sum and the per-sample
+    gradient accumulation into out_dLdRgbs.
+  * Allocate outRgb / dLdRgbs host-side tensors with shape (numRays,
+    rgbs.size(1)) instead of a hardcoded 3.
+  * Add a TORCH_CHECK that rgbs.size(1) is in [1, MAX_VOLUME_RENDER_CHANNELS]
+    with a clear error message.
+
+Tests in tests/unit/test_ray_marching.py:
+  * test_volume_render_nchannel runs a 4-channel volume_render and asserts
+    that its output (rgb, depth, opacity, weights) and gradients match
+    the concatenation of two independent 2-channel runs over the same
+    sample topology; skips float16 due to error accumulation.
+  * test_volume_render_rejects_too_many_channels verifies a RuntimeError
+    is raised when rgbs has more than MAX_VOLUME_RENDER_CHANNELS columns.
+
+No changes to the public Python API; existing 3-channel callers and
+all pre-existing TestVolumeRender cases continue to pass unchanged.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added this to the
+v0.5 milestone
+Apr 22, 2026
+swahtz
+requested a review
+from a team
+as a code owner
+April 22, 2026 02:33
+swahtz
+added
+the
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+label
+Apr 22, 2026
+swahtz
+requested review from
+areidmeyer and
+blackencino
+April 22, 2026 02:33
+swahtz
+added 2 commits
+April 22, 2026 14:34
+code style
+…
+c183218
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Fix two ray/sample kernel correctness bugs and add regression tests
+…
+26b1cd5
+```
+- VolumeRender.cu: move numSamples increment before the transmittance
+  break check so outTotalSamples counts the sample that triggered
+  early termination (that sample is already composited into outRGB,
+  outDepth, outOpacity and outWs).
+
+- SampleRaysUniform.cu: use ceil instead of floor when snapping t0
+  to the first step inside an HDDA segment in the count callback,
+  matching the generate callback. Under cone tracing (coneAngle > 0)
+  stepSize depends on t0, so a floor/ceil mismatch silently
+  under-allocated the output buffer and let the generate pass OOB
+  write into adjacent rays' slots.
+
+- tests/unit/test_ray_marching.py: regression tests for both fixes.
+  TestVolumeRender verifies outTotalSamples matches the non-zero
+  prefix of outWs under early termination. TestRayMarching verifies
+  uniform_ray_samples under cone tracing with include_end_segments
+  matches a ceil-rounded Python reference in both count and
+  per-sample boundaries.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+April 22, 2026 05:35
+Copilot started reviewing on behalf of
+swahtz
+April 22, 2026 05:36
+View session
+Copilot
+AI
+reviewed
+Apr 22, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR generalizes the volume_render CUDA/CPU forward+backward kernels from hardcoded RGB (3 channels) to an arbitrary channel count (1..16) to support spectral / multi-channel compositing, and includes two kernel correctness fixes with new regression tests.
+Changes:
+Generalize volume_render forward/backward accumulation to numChannels (bounded by MAX_VOLUME_RENDER_CHANNELS=16) and allocate outputs/gradients with dynamic channel width.
+Fix outTotalSamples off-by-one under early termination and add a regression test.
+Fix uniform_ray_samples cone-tracing count/generate rounding mismatch (floor→ceil) and add a regression test to prevent OOB writes.
+Reviewed changes
+Copilot reviewed 3 out of 3 changed files in this pull request and generated 3 comments.
+File
+Description
+src/fvdb/detail/ops/VolumeRender.cu
+Adds max-channel bound + threads numChannels through kernels; fixes early-termination sample counting; adjusts output/grad tensor shapes and adds channel validation.
+src/fvdb/detail/ops/SampleRaysUniform.cu
+Fixes count-path rounding to match generate-path under cone tracing to prevent under-allocation/OOB.
+tests/unit/test_ray_marching.py
+Adds N-channel volume_render test, channel-limit rejection test, and two regression tests for the kernel fixes.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/fvdb/detail/ops/VolumeRender.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/ops/VolumeRender.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/unit/test_ray_marching.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 2 commits
+April 22, 2026 17:53
+Update tests/unit/test_ray_marching.py
+…
+a8b5223
+```
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+addressing review notes
+…
+9d790d6
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+harrism
+approved these changes
+Apr 22, 2026
+View reviewed changes
+harrism
+requested a review
+from Copilot
+April 22, 2026 09:43
+Copilot started reviewing on behalf of
+harrism
+April 22, 2026 09:44
+View session
+Copilot
+AI
+reviewed
+Apr 22, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 3 out of 3 changed files in this pull request and generated 1 comment.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/fvdb/detail/ops/VolumeRender.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Addressing notes
+…
+05fa61b
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+enabled auto-merge (squash)
+April 22, 2026 19:16
+Hide details
+View details
+swahtz
+merged commit 4381d20
+into
+openvdb:main
+Apr 22, 2026
+39 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+deleted the
+js/volume_render_n_channels
+branch
+April 22, 2026 20:07
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

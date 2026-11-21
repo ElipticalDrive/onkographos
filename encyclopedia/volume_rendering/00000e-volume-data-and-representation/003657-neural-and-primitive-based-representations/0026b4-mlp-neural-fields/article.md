@@ -1,0 +1,47 @@
+# MLP Neural Fields
+
+Also called: Neural Implicit Representation
+
+## Overview
+MLP Neural Fields define a continuous scene function $F_\Theta: \mathbb{R}^d \rightarrow \mathbb{R}^k$ using a Multi-Layer Perceptron (MLP) to map spatial coordinates (and optionally viewing direction) to signal values such as density and color [G]. This family solves the problem of implicit scene representation by storing network parameters instead of explicit voxels, allowing for infinite resolution reconstruction with memory usage constant relative to spatial resolution [G]. It sets itself apart from sibling methods like [Explicit Neural Feature Volume](1838-explicit-neural-feature-volume.md) and [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md) by relying entirely on the MLP's capacity to learn high-frequency details, whereas those siblings use auxiliary data structures (grids, hash tables) to accelerate queries or store features [G].
+
+## Shared principles
+
+## Subtopics
+
+### [NeRF MLP Architecture](910-nerf-mlp-architecture.md)
+The NeRF MLP Architecture is a multi-layer perceptron that implicitly represents a 3D scene as a continuous volumetric function, mapping 3D spatial coordinates and viewing directions to volume density and view-dependent color. It solves the problem of novel view synthesis by optimizing a neural network to minimize the photometric error between rendered images and ground truth observations. It sets itself apart from its siblings, such as [Scene Representation Networks (SRN)](1150-scene-representation-networks-srn.md) which uses a single network for both geometry and appearance without explicit view-dependent bottlenecks, and [SIREN Neural Field](1250-siren-neural-field.md) which uses periodic sine activations, by employing a two-stage architecture with ReLU activations, positional encoding, and a specific skip-connection structure to enforce multiview consistency (view-independent density, view-dependent color).
+
+### [Scene Representation Networks (SRN)](1150-scene-representation-networks-srn.md)
+Scene Representation Networks (SRN) represent a continuous scene as an opaque surface implicitly defined by a Multi-Layer Perceptron (MLP) that maps 3D coordinates to a feature vector. Unlike standard volume rendering methods that integrate density and color along a ray, SRN uses a Recurrent Neural Network (RNN) to march along the ray, predicting step sizes until the surface is found, then decoding the final feature vector into a single color. This approach is distinct from its siblings, such as [NeRF MLP Architecture](910-nerf-mlp-architecture.md), which models volumetric density and view-dependent color continuously, whereas SRN models a single opaque surface per ray.
+
+### [SIREN Neural Field](1250-siren-neural-field.md)
+SIREN (Sinusoidal Representation Networks) is a coordinate-based implicit neural representation that maps continuous spatial coordinates to signal values (e.g., voxel intensity, density, or color) using a Multi-Layer Perceptron (MLP) with sinusoidal activation functions. It solves the problem of representing high-frequency details and computing well-behaved derivatives in neural fields, which standard ReLU-based MLPs fail to do due to spectral bias and zero second derivatives. Unlike [MLP Neural Fields](3854-mlp-neural-fields.md) which typically use ReLU or tanh, SIREN’s periodic activations allow it to capture intricate volumetric structures and fine details that would otherwise be smoothed away.
+
+### [MLP Neural Field](1256-mlp-neural-field.md)
+A plain MLP neural field maps continuous spatial coordinates to signal values (such as density and color) using a standard Multi-Layer Perceptron with ReLU activations. It serves as the fundamental baseline for coordinate-based neural representations, contrasting with specialized architectures like SIREN that use sinusoidal activations to overcome spectral bias. Unlike voxel-based methods, it offers constant memory usage relative to spatial resolution, enabling infinite-resolution reconstruction.
+
+### [Neural Confidence Field](11343-neural-confidence-field.md)
+The Neural Confidence Field is a method that augments a standard Neural Radiance Field (NeRF) with an additional output predicting a confidence score $\zeta$ for every sampled point and viewing direction. It solves the problem of joint optimization instability in Structure-from-Motion (SfM) scenarios, particularly when camera poses are unknown or inaccurate, by providing a metric to weigh the contribution of rays and poses during training. Unlike standard NeRF which treats all observations equally, this method distinguishes between reliable and unreliable data, allowing for incremental pose registration and robust optimization.
+
+### Neural Dependence Fields (NDFs)
+NDFs learn the statistical dependencies between spatial locations across ensemble members by mapping pairs of 3D coordinates to Pearson correlation or mutual information values [S2, unofficial]. On a 1000-member weather ensemble (250 × 352 × 20), NDFs achieved 87.63 dB PSNR for self-correlation fields with 9 ms inference, 26× faster than GPU-computed Pearson correlation and five orders of magnitude faster than CPU mutual information estimation, at over 6,000× compression relative to storing all pairwise correlations [S2, unofficial]. The method operates on a single time step and tends to smooth fine-scale correlation structures due to hash table capacity constraints [S2, unofficial].
+
+### Perturbation Field Modeling
+This method introduces a parametrized perturbation field $D$ to reparameterize the MLP input coordinates, allowing uncertainty estimation by measuring maximum tolerated perturbation without retraining the base model [S3]. The mode of the posterior distribution is $\omega = 0$, which corresponds to the original unperturbed model performance [S3]. Perturbation field parameters $\omega$ have shape $R^{M \times D}$, where $M$ is the grid size storing displacement vectors and $D$ is the vector dimension [S3]. Medium density and color are assumed constant and are not affected by perturbations [S3].
+
+### Dictionary Fields
+Dictionary Fields factor a neural field into a spatial coefficient field times a shared basis field, using periodic coordinate warping [S4]. This enables multi-signal learning and few-shot or sparse-view reconstruction because the basis captures reusable structure while coefficients remain scene-specific [S4].
+
+### DreamEditor
+DreamEditor is a mesh-based representation method for local editing [S5]. It converts the original neural field into a mesh-based representation, back-projects the 2D mask onto the mesh to identify editing regions, and utilizes SDS loss to optimize color and geometry features and vertex positions within the selected regions, facilitating precise local adjustments [S5].
+
+## Background
+The concept of a neural field is defined as a field that is parameterized fully or in part by a neural network, mapping spatio-temporal coordinates to a physical quantity [S1, unofficial]. Feed spatio-temporal coordinates into the neural network to produce the physical quantity [S1, unofficial]. The foundational work on MLP Neural Fields includes Scene Representation Networks (SRN) [S1, unofficial], which used an MLP and RNN for surface representation, and the baseline MLP Neural Field [S1, unofficial], which demonstrated the spectral bias limitations of standard ReLU networks.
+
+## Sources
+[S1] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S3] Bayesian uncertainty analysis for underwater 3D reconstruction with neural radiance fields, https://doi.org/10.1016/j.apm.2024.115806, fetched 2026-10-29
+[S4] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S5] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

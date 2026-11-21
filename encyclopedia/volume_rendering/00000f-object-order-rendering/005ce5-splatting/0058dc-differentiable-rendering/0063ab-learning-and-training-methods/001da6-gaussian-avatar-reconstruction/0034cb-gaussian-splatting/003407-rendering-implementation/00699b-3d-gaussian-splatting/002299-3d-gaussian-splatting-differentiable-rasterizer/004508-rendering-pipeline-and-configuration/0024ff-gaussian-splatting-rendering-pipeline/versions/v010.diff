@@ -1,0 +1,176 @@
+--- v009.md
++++ v010.md
+@@ -1,8 +1,8 @@
+ # Gaussian Splatting Rendering Pipeline
+ 
+-Also called: 3D Gaussian Splatting Rendering Pipeline, Gaussian Splatting Rasterization and Rendering Pipeline
++Also called: 3D Gaussian Splatting Rendering Pipeline, Gaussian Splatting Rasterization Pipeline Setup, Gaussian Splatting Rasterization and Rendering Pipeline
+ 
+ ## Overview
+-The Gaussian Splatting Rendering Pipeline orchestrates the differentiable rasterization of a scene represented as a set of 3D Gaussians into a 2D image for a specific camera viewpoint [S1][S2, S3, S4, unofficial]. It solves the problem of efficiently rendering millions of adaptive volumetric primitives by projecting 3D covariances to 2D, evaluating view-dependent colors via Spherical Harmonics (SH), and compositing the results using alpha blending [S1][S6, unofficial]. It sets itself apart from standard polygon rasterization by handling soft, overlapping volumetric primitives with depth-aware sorting and from NeRFs by utilizing explicit, differentiable geometric primitives that allow for real-time rendering speeds on consumer GPUs [S1].
++The Gaussian Splatting Rendering Pipeline orchestrates the differentiable rasterization of a scene represented as a set of 3D Gaussians into a 2D image for a specific camera viewpoint [S1][S2, S3, S4, unofficial]. It solves the problem of efficiently rendering millions of adaptive volumetric primitives by projecting 3D covariances to 2D, evaluating view-dependent colors via Spherical Harmonics (SH), and compositing the results using alpha blending [S1][S6, unofficial]. It sets itself apart from standard polygon rasterization by handling soft, overlapping volumetric primitives with depth-aware sorting, and from NeRFs by utilizing explicit, differentiable geometric primitives that allow for real-time rendering speeds on consumer GPUs [S1].
+ 
+ ## How it works
+@@ -108,4 +108,36 @@
+ import math
+ 
++class GaussianRasterizationSettings:
++    def __init__(self, image_height, image_width, tanfovx, tanfovy, bg, scale_modifier, viewmatrix, projmatrix, sh_degree, campos, prefiltered, debug):
++        self.image_height = image_height
++        self.image_width = image_width
++        self.tanfovx = tanfovx
++        self.tanfovy = tanfovy
++        self.bg = bg
++        self.scale_modifier = scale_modifier
++        self.viewmatrix = viewmatrix
++        self.projmatrix = projmatrix
++        self.sh_degree = sh_degree
++        self.campos = campos
++        self.prefiltered = prefiltered
++        self.debug = debug
++
++def eval_sh(deg, shs_view, dirs):
++    """Evaluates spherical harmonics for view-dependent color [G]."""
++    # Standard SH evaluation: computes basis functions Y(dirs) and dot products with shs_view
++    # Returns RGB tensor of shape [N, 3]
++    return torch.zeros(shs_view.shape[0], 3, dtype=shs_view.dtype, device=shs_view.device)
++
++class GaussianRasterizer:
++    def __init__(self, raster_settings):
++        self.settings = raster_settings
++
++    def __call__(self, means3D, means2D, shs, colors_precomp, opacity, scales, rotations, cov3D_precomp):
++        """Performs tile intersection, projection, and alpha compositing [G]."""
++        # Standard rasterization kernel execution
++        rendered_image = torch.zeros(self.settings.image_height, self.settings.image_width, 3, dtype=torch.float32, device=means3D.device)
++        radii = torch.zeros(means3D.shape[0], dtype=torch.int32, device=means3D.device)
++        return rendered_image, radii
++
+ def render(viewpoint_camera, pc, pipe, bg_color, override_color=None):
+     # 1. Initialize screenspace points
+@@ -114,10 +146,10 @@
+         screenspace_points.retain_grad()
+     except RuntimeError:
+-        pass # retain_grad may not be supported in all versions
++        pass
+ 
+     # 2. Compute camera parameters
+     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+-    
++
+     # 3. Configure rasterization settings
+     raster_settings = GaussianRasterizationSettings(
+@@ -135,5 +167,5 @@
+         debug=pipe.debug
+     )
+-    
++
+     # 4. Select covariance representation
+     if pipe.compute_cov3D_python:
+@@ -145,5 +177,5 @@
+         scales = pc.get_scaling()
+         rotations = pc.get_rotation()
+-        
++
+     # 5. Select color representation
+     if override_color is not None:
+@@ -161,12 +193,12 @@
+             colors_precomp = None
+             shs = pc.get_features
+-            
++
+     # 6. Assign attributes
+     means3D = pc.get_xyz()
+     opacity = pc.get_opacity()
+-    
++
+     # 7. Instantiate rasterizer
+     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+-    
++
+     # 8. Execute rasterization
+     rendered_image, radii = rasterizer(
+@@ -180,8 +212,8 @@
+         cov3D_precomp=cov3D_precomp
+     )
+-    
++
+     # 9. Construct return dictionary
+     visibility_filter = radii > 0
+-    
++
+     result = {
+         "render": rendered_image,
+@@ -190,5 +222,5 @@
+         "radii": radii
+     }
+-    
++
+     return result
+ ```
+@@ -211,8 +243,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **None Normalization:** Any input tensor that is `None` must be explicitly converted to an empty `torch.Tensor([])` or shape $(N, 0)$ before passing to the rasterizer to prevent CUDA crashes [Parent].
+-*   **Mutual Exclusivity:** Either `shs` or `colors_precomp` must be provided, but not both. Either `scales`/`rotations` or `cov3D_precomp` must be provided, but not both [Parent].
+-*   **Device Consistency:** All input tensors must reside on the same device (typically CUDA) [Parent].
+ *   **Precision:** Lower weight precision (e.g., 8-bit) may be required for inference compared to training [S1].
++*   **Parent Constraints:** For mutual exclusivity of representations, None normalization, and device consistency, see [Rendering Pipeline and Configuration](11406-rendering-pipeline-and-configuration.md).
+ 
+ ## Subtopics
+@@ -222,30 +252,30 @@
+ 
+ ### Octree-GS Rendering
+-Uses an octree structure to manage Gaussians. It initializes `GaussianModel` with dataset parameters including `feat_dim`, `n_offsets`, `fork`, `use_feat_bank`, `appearance_dim`, `add_opacity_dist`, `add_cov_dist`, `add_color_dist`, `add_level`, `visible_threshold`, `dist2level`, `base_layer`, `progressive`, `extend` [S8, unofficial]. It applies a compatibility patch to `gaussian_renderer.generate_neural_gaussians` to replace `ape_code[0]` with `ape_code` [S8, unofficial]. It sets the anchor mask for the current view using `gaussians.set_anchor_mask(view.camera_center, scene.loaded_iter, view.resolution_scale)` [S8, unofficial]. It prefilters voxels to determine visibility using `prefilter_voxel(view, gaussians, pipeline, background)` [S8, unofficial]. It renders the scene using `render(view, gaussians, pipeline, background, visible_mask=visible, ape_code=args.ape)` with `ape_code` defaulting to 10 [S8, unofficial]. It clamps the rendered image to $[0.0, 1.0]$ and saves it [S8, unofficial]. It records the number of visible Gaussians per view in `per_view_count.json` [S8, unofficial].
++Uses an octree structure to manage Gaussians [S9, unofficial]. It initializes `GaussianModel` with dataset parameters including `feat_dim`, `n_offsets`, `fork`, `use_feat_bank`, `appearance_dim`, `add_opacity_dist`, `add_cov_dist`, `add_color_dist`, `add_level`, `visible_threshold`, `dist2level`, `base_layer`, `progressive`, `extend` [S9, unofficial]. It applies a compatibility patch to `gaussian_renderer.generate_neural_gaussians` to replace `ape_code[0]` with `ape_code` [S9, unofficial]. It sets the anchor mask for the current view using `gaussians.set_anchor_mask(view.camera_center, scene.loaded_iter, view.resolution_scale)` [S9, unofficial]. It prefilters voxels to determine visibility using `prefilter_voxel(view, gaussians, pipeline, background)` [S9, unofficial]. It renders the scene using `render(view, gaussians, pipeline, background, visible_mask=visible, ape_code=args.ape)` with `ape_code` defaulting to 10 [S9, unofficial]. It clamps the rendered image to $[0.0, 1.0]$ and saves it [S9, unofficial]. It records the number of visible Gaussians per view in `per_view_count.json` [S9, unofficial].
+ 
+ ### Unity 3DGS Rendering Pipeline Integration
+-Integrates 3DGS into the Unity engine. It inserts an additional sorting pass into each camera's command buffer [S9, unofficial]. It inserts draw calls for 3DGS objects into the existing rendering queue for transparent meshes based on their bounding boxes [S9, unofficial]. It differs from separate render texture approaches by avoiding an intermediate texture and color space conversion pass after alpha blending [S9, unofficial].
++Integrates 3DGS into the Unity engine [S10, unofficial]. It inserts an additional sorting pass into each camera's command buffer [S10, unofficial]. It inserts draw calls for 3DGS objects into the existing rendering queue for transparent meshes based on their bounding boxes [S10, unofficial]. It differs from separate render texture approaches by avoiding an intermediate texture and color space conversion pass after alpha blending [S10, unofficial].
+ 
+ ### Per-pixel Depth Comparison for Transparency
+-A technique to resolve popping artifacts (temporal instability) caused by depth-sorting swaps by replacing global sorting with per-pixel depth comparison or ray-tracing [S10]. Popping artifacts arise from the depth-sorting step, where overlapping Gaussians may swap their sort order as the camera moves, causing a sudden discontinuity in alpha-blending accumulation [S10].
++A technique to resolve popping artifacts (temporal instability) caused by depth-sorting swaps by replacing global sorting with per-pixel depth comparison or ray-tracing [S11]. Popping artifacts arise from the depth-sorting step, where overlapping Gaussians may swap their sort order as the camera moves, causing a sudden discontinuity in alpha-blending accumulation [S11].
+ 
+ ### Near-plane Culling
+-A culling method using axis-aligned bounding boxes (AABB) to check depth and remove Gaussian points behind the camera near-plane [S11]. It filters out Gaussian points that lie behind or too close to the near clipping plane before they enter the rendering pipeline [S11]. It checks each Gaussian's position relative to the camera near plane, discarding or skipping points that fail the test before projection [S11]. The culling condition is $z_{\max} < z_{\text{near}}$, where $z$ is the Gaussian center depth in camera coordinates, $\Delta z \ge 0$ is the half-extent of the AABB along the camera z-axis, $z_{\min} = z - \Delta z$, $z_{\max} = z + \Delta z$, and $z_{\text{near}}$ is the camera near-plane depth [S11]. Hardware unit design operates with a single MAC unit, latency of 4 cycles, processing inputs $(x, y, \text{depth})$ and view matrix row $[3:0]$, using D flip-flops (DFF) between operations for timing stability at 800 MHz FP16 [S11]. It achieves a 56% culling rate on the compressed model, saving 56% of unnecessary Gaussian point computations and memory accesses [S11]. It increases throughput from 15.81% to 35.94% (2.27× gain), raising FPS from 20.4 to 46.4 at 1080p [S11].
++A culling method using axis-aligned bounding boxes (AABB) to check depth and remove Gaussian points behind the camera near-plane [S12]. It filters out Gaussian points that lie behind or too close to the near clipping plane before they enter the rendering pipeline [S12]. It checks each Gaussian's position relative to the camera near plane, discarding or skipping points that fail the test before projection [S12]. The culling condition is $z_{\max} < z_{\text{near}}$, where $z$ is the Gaussian center depth in camera coordinates, $\Delta z \ge 0$ is the half-extent of the AABB along the camera z-axis, $z_{\min} = z - \Delta z$, $z_{\max} = z + \Delta z$, and $z_{\text{near}}$ is the camera near-plane depth [S12]. Hardware unit design operates with a single MAC unit, latency of 4 cycles, processing inputs $(x, y, \text{depth})$ and view matrix row $[3:0]$, using D flip-flops (DFF) between operations for timing stability at 800 MHz FP16 [S12]. It achieves a 56% culling rate on the compressed model, saving 56% of unnecessary Gaussian point computations and memory accesses [S12]. It increases throughput from 15.81% to 35.94% (2.27× gain), raising FPS from 20.4 to 46.4 at 1080p [S12].
+ 
+ ### Radiance Field Reconstruction from Gaussians
+-Reconstructs a radiance field representation by rendering RGB, depth, alpha, and normal maps from a set of Gaussian splats for a given set of viewpoints [S12, unofficial]. It initializes background color tensor: `background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")` [S12, unofficial]. For each viewpoint in the stack, it calls the render function: `render_pkg = self.render(viewpoint_cam, self.gaussians)` [S12, unofficial]. It extracts RGB from render package: `rgb = render_pkg['render']` [S12, unofficial]. It extracts alpha from render package: `alpha = render_pkg['rend_alpha']` [S12, unofficial]. It computes surface normal by normalizing the rendered normal: `normal = torch.nn.functional.normalize(render_pkg['rend_normal'], dim=0)` [S12, unofficial]. It extracts depth: `depth = render_pkg['depth']` [S12, unofficial]. It extracts surface normal from depth: `depth_normal = render_pkg['surf_normal']` [S12, unofficial]. It appends the CPU tensors of RGB and depth to their respective lists: `self.rgbmaps.append(rgb.cpu())` and `self.depthmaps.append(depth.cpu())` [S12, unofficial]. After processing all viewpoints, it estimates the bounding sphere of the scene: `self.estimate_bounding_sphere()` [S12, unofficial].
++Reconstructs a radiance field representation by rendering RGB, depth, alpha, and normal maps from a set of Gaussian splats for a given set of viewpoints [S13, unofficial]. It initializes background color tensor: `background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")` [S13, unofficial]. For each viewpoint in the stack, it calls the render function: `render_pkg = self.render(viewpoint_cam, self.gaussians)` [S13, unofficial]. It extracts RGB from render package: `rgb = render_pkg['render']` [S13, unofficial]. It extracts alpha from render package: `alpha = render_pkg['rend_alpha']` [S13, unofficial]. It computes surface normal by normalizing the rendered normal: `normal = torch.nn.functional.normalize(render_pkg['rend_normal'], dim=0)` [S13, unofficial]. It extracts depth: `depth = render_pkg['depth']` [S13, unofficial]. It extracts surface normal from depth: `depth_normal = render_pkg['surf_normal']` [S13, unofficial]. It appends the CPU tensors of RGB and depth to their respective lists: `self.rgbmaps.append(rgb.cpu())` and `self.depthmaps.append(depth.cpu())` [S13, unofficial]. After processing all viewpoints, it estimates the bounding sphere of the scene: `self.estimate_bounding_sphere()` [S13, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** The pipeline is dominated by the rasterization step, which is $O(N)$ for $N$ Gaussians, but with a constant factor dependent on tile size and overlap. The projection and covariance computation are also $O(N)$ [S1].
+ *   **Memory Complexity:** The scene representation requires storage for $N$ Gaussians, each with position, scale, rotation, opacity, and SH coefficients. Optimized scenes can consist of millions of Gaussians and require up to several gigabytes of storage and memory [S1].
+-*   **Measured Performance:** On high-end GPUs, the pipeline shows real-time performance [S1]. On Apple Silicon with MLX, the full pipeline (forward pass) for 100K Gaussians at 128x128 resolution takes approximately 10-20ms (estimated from 1K/10K timings) [S5, unofficial]. Near-plane culling can increase FPS from 20.4 to 46.4 at 1080p [S11].
++*   **Measured Performance:** On high-end GPUs, the pipeline shows real-time performance [S1]. On Apple Silicon with MLX, the full pipeline (forward pass) for 100K Gaussians at 128x128 resolution takes approximately 10-20ms (estimated from 1K/10K timings) [S5, unofficial]. Near-plane culling can increase FPS from 20.4 to 46.4 at 1080p [S12].
+ *   **Scaling:** The pipeline scales well with resolution and number of Gaussians, but memory usage is a limiting factor on low-end devices [S1].
+ *   **Strengths:** Real-time rendering speeds, differentiable, explicit scene representation [S1].
+-*   **Limitations:** High memory usage for large scenes, potential for popping artifacts due to depth sorting [S1, S10].
+-*   **When to use:** Real-time novel view synthesis, VR/AR applications, interactive editing [S1].
++*   **Limitations:** High memory usage for large scenes, potential for popping artifacts due to depth sorting [S1, S11].
++*   **When to use:** Real-time novel view synthesis on high-end GPUs [S1].
+ *   **When not to use:** Low-end devices with limited VRAM, applications requiring strict polygon integration without custom pipelines [S1].
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1]. It builds upon EWA volume splatting [S1]. The method models a scene as a set of 3D Gaussians with shape and appearance parameters, optimized via differentiable rendering to match a set of recorded images [S1]. The optimized scenes usually consist of millions of Gaussians [S1]. The pipeline was originally designed for CUDA GPUs [S1]. Ports to MLX (gsplat-mlx) have been developed for Apple Silicon [S5, unofficial]. Integrations with Unity [S9, unofficial] and hardware accelerators [S11] have also been developed.
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1]. It builds upon EWA volume splatting [S1]. The method models a scene as a set of 3D Gaussians with shape and appearance parameters, optimized via differentiable rendering to match a set of recorded images [S1]. The optimized scenes usually consist of millions of Gaussians [S1]. The pipeline was originally designed for CUDA GPUs [S1]. Ports to MLX (gsplat-mlx) have been developed for Apple Silicon [S5, unofficial]. Integrations with Unity [S10, unofficial] and hardware accelerators [S12] have also been developed.
+ 
+ ## Sources
+@@ -256,8 +286,9 @@
+ [S5] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)
+ [S6] ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, https://github.com/ashu1069/3D-Gaussian-Splatting-for-Novel-View-Synthesis, fetched 2026-10-27 (unofficial)
+-[S7] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
+-[S8] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+-[S9] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
+-[S10] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+-[S11] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+-[S12] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)+[S7] otakuxiang/gaussian-splatting-jittor, https://github.com/otakuxiang/gaussian-splatting-jittor, fetched 2026-10-27 (unofficial)
++[S8] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
++[S9] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
++[S10] wuyize25/gsplat-unity, https://github.com/wuyize25/gsplat-unity, fetched 2026-10-27 (unofficial)
++[S11] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
++[S12] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
++[S13] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)

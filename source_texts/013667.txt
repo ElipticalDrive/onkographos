@@ -1,0 +1,424 @@
+All backends trace rays in software: a two-level DDA through 16³ bricks. GPUs with ray-tracing hardware (NVIDIA RTX, AMD RDNA2+, Apple M3 and later) could trace many times faster. Options wgpu ray queries (EXPERIMENTAL_RAY_QUERY) on Vulk...
+
+Research: hardware ray tracing (wgpu ray queries / OptiX) · Issue #4 · stellarfeline/lumenwright · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Research: hardware ray tracing (wgpu ray queries / OptiX) #4
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Research: hardware ray tracing (wgpu ray queries / OptiX)#4
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+stellarfeline
+opened on Oct 15, 2026
+Issue body actions
+All backends trace rays in software: a two-level DDA through 16³ bricks. GPUs with ray-tracing hardware (NVIDIA RTX, AMD RDNA2+, Apple M3 and later) could trace many times faster.
+Options
+wgpu ray queries (EXPERIMENTAL_RAY_QUERY) on Vulkan, Metal and DX12. This needs a BLAS/TLAS of block-model instances and entity quads instead of, or alongside, the brick grid.
+OptiX for the CUDA backend, as a separate path from the shared Rust kernel.
+Considerations
+Keep the brick-grid path as the portable fallback (the M2 Pro has no RT hardware).
+Parity tests across both paths.
+This is a research spike: measure a prototype before committing to it.
+Reactions are currently unavailable
+Activity
+stellarfeline
+added
+enhancementNew feature or requestNew feature or request
+on Oct 15, 2026
+stellarfeline commented on Oct 16, 2026
+stellarfeline
+on Oct 16, 2026
+OwnerAuthor
+More actions
+Assessed on an RTX 4070 Ti SUPER under WSL2. Nothing was built.
+wgpu ray queries: wgpu finds no hardware Vulkan adapter under WSL2. Mesa's dzn driver exposes no ray-query or acceleration-structure extension. wgpu's DX12 backend is Windows-only. The estimate is 400 to 700 changed lines (BLAS/TLAS from the scene's quads, plus a rayQuery loop with alpha-cutout confirmation in place of the DDA). No speed-up can be measured here, and the M2 Pro has no ray-tracing hardware.
+OptiX: the headers are LicenseRef-NvidiaProprietary, so OptiX cannot enter a GPL-3.0 crate. It would also take more than 1,000 lines.
+Next step, if wanted: a native Windows or Linux host with a hardware Vulkan driver, to measure the wgpu route.
+🤖 Generated with Claude Code
+stellarfeline commented on Oct 19, 2026
+stellarfeline
+on Oct 19, 2026
+OwnerAuthor
+More actions
+Research result. The full prototype patch is attached below.
+Verdict. In code it is not very hard: about two rounds. On an RTX 4070 Ti SUPER used through WSL2 it is blocked. Mesa dzn (25.2.8, driver 616.92) reports EXPERIMENTAL_RAY_QUERY: false. wgpu's DX12 backend does not exist on Linux, and the only WSL adapter that reports ray query is llvmpipe. Native Windows (DX12, DXR 1.1 / SM 6.5) or native Linux Vulkan would reach the RT cores; this was not measured.
+Not pursued for the first release.
+Routes at wgpu 30.0.1
+EXPERIMENTAL_RAY_QUERY is reported by Vulkan, DX12 and Metal (macOS 15+). The M2 Pro reports true.
+Procedural AABB BLAS geometry is available.
+OptiX is excluded: cudarc has no bindings, and the OptiX SDK licence forbids use that subjects it to an open-source licence.
+The prototype (261 added lines, scratch only)
+It replaces trace() in pathtrace.wgsl with a ray query over one AABB per world-space quad. Each candidate runs the kernel's own test_quad, which covers cutout alpha, translucent alpha and front-only.
+Determinism needs a tie-break on equal t: the lower original quad index wins. With it, repeated renders are byte-identical. The CPU kernel needs the same tie-break.
+Parity, CPU against RT on Metal (showcase, 160×90, 16 spp): 0.009% mean luminance difference, 0.097% of pixels off by more than 16/255.
+Timings (showcase, 1280×720, 256 spp)
+M2 Pro, 4 bounces: DDA 11.05 s, RT 9.6 s.
+M2 Pro, 0 bounces: DDA 1.31 s, RT 0.97 s.
+4070 through dzn, DDA only: 1.07 s with 4 bounces, 0.151 s with 0.
+Work left to land it
+Gate the RT path on the adapter feature, with the DDA as the fallback.
+Cull faces buried between opaque neighbours: the showcase already makes 513,907 AABBs.
+Respect buffer and BLAS limits.
+Add the tie-break to the Rust kernel.
+Add CPU-against-RT parity and determinism tests, and update the docs.
+rt-prototype.patch
+```
+diff --color -ruN orig/crates/lumenwright/src/render/gpu/mod.rs lw-rt/crates/lumenwright/src/render/gpu/mod.rs
+--- orig/crates/lumenwright/src/render/gpu/mod.rs	2026-10-19 16:07:49
++++ lw-rt/crates/lumenwright/src/render/gpu/mod.rs	2026-10-19 18:03:05
+@@ -3,6 +3,7 @@
+ 
+ mod pathtrace;
+ mod quick;
++mod rt;
+ 
+ use anyhow::{Context, Result, anyhow, bail};
+ use wgpu::util::DeviceExt;
+@@ -67,9 +68,16 @@
+         let limits = adapter.limits();
+         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+             label: Some("lumenwright"),
+-            required_features: wgpu::Features::empty(),
++            required_features: if std::env::var_os("LW_RT").is_some()
++                && adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
++            {
++                wgpu::Features::EXPERIMENTAL_RAY_QUERY
++            } else {
++                wgpu::Features::empty()
++            },
+             required_limits: limits,
+-            experimental_features: wgpu::ExperimentalFeatures::default(),
++            // SAFETY: prototype only.
++            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+             memory_hints: wgpu::MemoryHints::Performance,
+             trace: wgpu::Trace::Off,
+         }))
+diff --color -ruN orig/crates/lumenwright/src/render/gpu/pathtrace.rs lw-rt/crates/lumenwright/src/render/gpu/pathtrace.rs
+--- orig/crates/lumenwright/src/render/gpu/pathtrace.rs	2026-10-19 16:07:49
++++ lw-rt/crates/lumenwright/src/render/gpu/pathtrace.rs	2026-10-19 18:03:05
+@@ -21,10 +21,18 @@
+     let (w, h) = (f.params.frame[0], f.params.frame[1]);
+     let spp = f.spp.max(1);
+ 
++    let rt = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
++    let src: String = if rt {
++        let base = include_str!("pathtrace.wgsl").replace("fn trace(", "fn trace_dda(");
++        format!("enable wgpu_ray_query;\n{base}\n{}", include_str!("rt.wgsl"))
++    } else {
++        include_str!("pathtrace.wgsl").to_string()
++    };
+     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+         label: Some("pathtrace.wgsl"),
+-        source: wgpu::ShaderSource::Wgsl(include_str!("pathtrace.wgsl").into()),
++        source: wgpu::ShaderSource::Wgsl(src.into()),
+     });
++    let rtres = if rt { Some(super::rt::build(gpu, f)?) } else { None };
+     let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
+         label: Some("params"),
+         size: std::mem::size_of::<lumenwright_kernel::Params>() as u64,
+@@ -52,9 +60,7 @@
+         },
+         count: None,
+     };
+-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+-        label: Some("pt bgl"),
+-        entries: &[
++    let mut bgl_entries = vec![
+             wgpu::BindGroupLayoutEntry {
+                 binding: 0,
+                 visibility: wgpu::ShaderStages::COMPUTE,
+@@ -70,12 +76,22 @@
+             storage(3, true),
+             storage(4, true),
+             storage(5, false),
+-        ],
++        ];
++    if rt {
++        bgl_entries.push(wgpu::BindGroupLayoutEntry {
++            binding: 6,
++            visibility: wgpu::ShaderStages::COMPUTE,
++            ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
++            count: None,
++        });
++        bgl_entries.push(storage(7, true));
++        bgl_entries.push(storage(8, true));
++    }
++    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
++        label: Some("pt bgl"),
++        entries: &bgl_entries,
+     });
+-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+-        label: Some("pt bg"),
+-        layout: &bgl,
+-        entries: &[
++    let mut bg_entries = vec![
+             wgpu::BindGroupEntry {
+                 binding: 0,
+                 resource: ubuf.as_entire_binding(),
+@@ -100,7 +116,16 @@
+                 binding: 5,
+                 resource: accum.as_entire_binding(),
+             },
+-        ],
++        ];
++    if let Some(r) = &rtres {
++        bg_entries.push(wgpu::BindGroupEntry { binding: 6, resource: r.tlas.as_binding() });
++        bg_entries.push(wgpu::BindGroupEntry { binding: 7, resource: r.wquads.as_entire_binding() });
++        bg_entries.push(wgpu::BindGroupEntry { binding: 8, resource: r.wsrc.as_entire_binding() });
++    }
++    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
++        label: Some("pt bg"),
++        layout: &bgl,
++        entries: &bg_entries,
+     });
+     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+         label: Some("pt layout"),
+diff --color -ruN orig/crates/lumenwright/src/render/gpu/rt.rs lw-rt/crates/lumenwright/src/render/gpu/rt.rs
+--- orig/crates/lumenwright/src/render/gpu/rt.rs	1969-12-31 19:00:00
++++ lw-rt/crates/lumenwright/src/render/gpu/rt.rs	2026-10-19 18:03:30
+@@ -0,0 +1,158 @@
++//! PROTOTYPE: hardware ray-query acceleration structure over the HQ scene.
++//! One AABB per world-space quad; the shader runs the kernel's own quad test on
++//! each candidate, so the hit it commits is the one the DDA would compute.
++
++use std::time::Instant;
++
++use anyhow::Result;
++use lumenwright_kernel::scene::{GpuQuad, SceneView};
++use wgpu::util::DeviceExt;
++
++use super::GpuBackend;
++use crate::render::HqFrame;
++
++pub struct RtRes {
++    pub tlas: wgpu::Tlas,
++    pub wquads: wgpu::Buffer,
++    pub wsrc: wgpu::Buffer,
++    _blas: wgpu::Blas,
++}
++
++pub fn build(gpu: &GpuBackend, f: &HqFrame) -> Result<RtRes> {
++    let t0 = Instant::now();
++    let s = f.scene;
++    let view = SceneView {
++        params: &f.params,
++        grid: &s.grid,
++        models: &s.models,
++        quads: &s.quads,
++        atlas: &s.atlas,
++    };
++    let model_end = s
++        .models
++        .iter()
++        .map(|m| m.quad_offset + m.quad_count)
++        .max()
++        .unwrap_or(0) as usize;
++    let mut wquads: Vec<GpuQuad> = Vec::new();
++    let mut wsrc: Vec<u32> = Vec::new();
++    let d = f.params.grid_dims;
++    let (gx, gy, gz) = ((d[0] * 16) as i32, (d[1] * 16) as i32, (d[2] * 16) as i32);
++    for y in 0..gy {
++        for z in 0..gz {
++            for x in 0..gx {
++                let m = view.voxel(x, y, z);
++                if m == 0 {
++                    continue;
++                }
++                let model = s.models[m as usize];
++                for i in 0..model.quad_count {
++                    let qi = model.quad_offset + i;
++                    let mut q = s.quads[qi as usize];
++                    q.p0[0] += x as f32;
++                    q.p0[1] += y as f32;
++                    q.p0[2] += z as f32;
++                    wquads.push(q);
++                    wsrc.push(qi);
++                }
++            }
++        }
++    }
++    let block_quads = wquads.len();
++    for qi in model_end..s.quads.len() {
++        wquads.push(s.quads[qi]);
++        wsrc.push(qi as u32);
++    }
++    let mut aabbs: Vec<[f32; 6]> = Vec::with_capacity(wquads.len());
++    for q in &wquads {
++        let p0 = [q.p0[0], q.p0[1], q.p0[2]];
++        let eu = [q.eu[0], q.eu[1], q.eu[2]];
++        let ev = [q.ev[0], q.ev[1], q.ev[2]];
++        let mut lo = p0;
++        let mut hi = p0;
++        for c in [
++            [p0[0] + eu[0], p0[1] + eu[1], p0[2] + eu[2]],
++            [p0[0] + ev[0], p0[1] + ev[1], p0[2] + ev[2]],
++            [p0[0] + eu[0] + ev[0], p0[1] + eu[1] + ev[1], p0[2] + eu[2] + ev[2]],
++        ] {
++            for a in 0..3 {
++                lo[a] = lo[a].min(c[a]);
++                hi[a] = hi[a].max(c[a]);
++            }
++        }
++        // Conservative: a flat quad has zero thickness on one axis.
++        let pad = 1e-3;
++        aabbs.push([
++            lo[0] - pad,
++            lo[1] - pad,
++            lo[2] - pad,
++            hi[0] + pad,
++            hi[1] + pad,
++            hi[2] + pad,
++        ]);
++    }
++    let n = aabbs.len() as u32;
++    let device = &gpu.device;
++    let aabb_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
++        label: Some("rt aabbs"),
++        contents: bytemuck::cast_slice(&aabbs),
++        usage: wgpu::BufferUsages::BLAS_INPUT,
++    });
++    let size = wgpu::BlasAABBGeometrySizeDescriptor {
++        primitive_count: n,
++        flags: wgpu::AccelerationStructureGeometryFlags::empty(),
++    };
++    let blas = device.create_blas(
++        &wgpu::CreateBlasDescriptor {
++            label: Some("rt blas"),
++            flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
++            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
++        },
++        wgpu::BlasGeometrySizeDescriptors::AABBs {
++            descriptors: vec![size.clone()],
++        },
++    );
++    let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
++        label: Some("rt tlas"),
++        max_instances: 1,
++        flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
++        update_mode: wgpu::AccelerationStructureUpdateMode::Build,
++    });
++    tlas[0] = Some(wgpu::TlasInstance::new(
++        &blas,
++        [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
++        0,
++        0xFF,
++    ));
++    let mut enc = device.create_command_encoder(&Default::default());
++    enc.build_acceleration_structures(
++        &[wgpu::BlasBuildEntry {
++            blas: &blas,
++            geometry: wgpu::BlasGeometries::AabbGeometries(vec![wgpu::BlasAabbGeometry {
++                size: &size,
++                stride: 24,
++                aabb_buffer: &aabb_buf,
++                primitive_offset: 0,
++            }]),
++        }],
++        [&tlas],
++    );
++    gpu.queue.submit([enc.finish()]);
++    device
++        .poll(wgpu::PollType::wait_indefinitely())
++        .map_err(|e| anyhow::anyhow!("GPU poll failed: {e}"))?;
++    let wq = gpu.storage_buffer("rt wquads", bytemuck::cast_slice(&wquads))?;
++    let ws = gpu.storage_buffer("rt wsrc", bytemuck::cast_slice(&wsrc))?;
++    log::info!(
++        "rt: {} block quads + {} entity quads as AABBs, built in {:.2?}",
++        block_quads,
++        wquads.len() - block_quads,
++        t0.elapsed()
++    );
++    Ok(RtRes {
++        tlas,
++        wquads: wq,
++        wsrc: ws,
++        _blas: blas,
++    })
++}
+diff --color -ruN orig/crates/lumenwright/src/render/gpu/rt.wgsl lw-rt/crates/lumenwright/src/render/gpu/rt.wgsl
+--- orig/crates/lumenwright/src/render/gpu/rt.wgsl	1969-12-31 19:00:00
++++ lw-rt/crates/lumenwright/src/render/gpu/rt.wgsl	2026-10-19 18:06:45
+@@ -0,0 +1,54 @@
++// PROTOTYPE: trace() over a hardware acceleration structure of per-quad AABBs.
++@group(0) @binding(6) var acc: acceleration_structure;
++@group(0) @binding(7) var<storage, read> wquads: array<Quad>;
++@group(0) @binding(8) var<storage, read> wsrc: array<u32>;
++
++// test_quad on the world-space copy; reports the original quad index.
++fn test_wquad(wi: u32, o: vec3<f32>, d: vec3<f32>, tmin: f32, best: ptr<function, Hit>) {
++    let q = wquads[wi];
++    let eu = q_eu(q);
++    let ev = q_ev(q);
++    let n = cross(eu, ev);
++    let denom = dot(n, d);
++    if (abs(denom) < 1e-12) { return; }
++    let p0 = q_p0(q);
++    let t = dot(n, p0 - o) / denom;
++    if (!(t > tmin && t <= (*best).t)) { return; }
++    if (t == (*best).t && wsrc[wi] >= (*best).quad) { return; }
++    let p = o + d * t - p0;
++    let nn = dot(n, n);
++    let s = dot(cross(p, ev), n) / nn;
++    let tt = dot(cross(eu, p), n) / nn;
++    if (s < 0.0 || s > 1.0 || tt < 0.0 || tt > 1.0) { return; }
++    if ((q_flags(q) & FLAG_FRONT_ONLY) != 0u && dot(q_normal(q), d) >= 0.0) { return; }
++    let sc = min(max(s, 0.0005), 0.9995);
++    let tc = min(max(tt, 0.0005), 0.9995);
++    let u = q.uv.x + sc * q.uv.z + tc * q.uvt.x;
++    let v = q.uv.y + sc * q.uv.w + tc * q.uvt.y;
++    let tex = texel_at(u, v);
++    let alpha = tex >> 24u;
++    let mode = q_flags(q) & 3u;
++    if ((mode == ALPHA_CUTOUT && alpha < 128u) || (mode == ALPHA_TRANSLUCENT && alpha == 0u)) { return; }
++    (*best) = Hit(t, wsrc[wi], tex);
++}
++
++fn trace(o: vec3<f32>, d: vec3<f32>, tmin: f32, tmax: f32) -> Hit {
++    var best = Hit(min(tmax, INF), NO_QUAD, 0u);
++    var rq: ray_query;
++    rayQueryInitialize(&rq, acc, RayDesc(RAY_FLAG_NONE, 0xFFu, max(tmin, 0.0), min(tmax, INF), o, d));
++    while (rayQueryProceed(&rq)) {
++        let c = rayQueryGetCandidateIntersection(&rq);
++        if (c.kind == RAY_QUERY_INTERSECTION_AABB) {
++            let before = best.quad;
++            test_wquad(c.primitive_index, o, d, tmin, &best);
++            let now = best.t;
++            if (best.quad != before) {
++                rayQueryGenerateIntersection(&rq, now);
++            }
++        }
++    }
++    if (best.quad == NO_QUAD) {
++        best.t = INF;
++    }
++    return best;
++}
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,108 @@
+# Vox-Surf
+
+Also called: Voxel-based Implicit Surface Representation
+
+## Overview
+Vox-Surf is a voxel-based neural implicit surface representation that combines explicit sparse voxel structures with neural implicit surface representations to enable efficient surface reconstruction and realistic rendering from multi-view posed images [S1]. It differs from dense neural implicit methods (like NeuS) by dividing the scene into bounded voxels, thereby reducing sampling and learning in empty areas, and from traditional voxel-based methods by storing only trainable embeddings at voxel vertices rather than explicit SDF or color values in every voxel [S1]. This approach allows for finer surface representation with larger voxels and a lightweight network, while maintaining memory efficiency through progressive pruning and splitting [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multiple posed RGB images (and optionally depth maps), camera poses, and an initial bounding volume.
+*   **Outputs:** A sparse octree of voxels with vertex embeddings, a rendered image for a given camera pose, and an extractable mesh surface.
+
+**Data Structures:**
+*   **Voxel Structure:** The scene is divided into a set of coarse voxels $V = \{V_1, ..., V_k\}$ forming the leaf nodes of a sparse hierarchical octree [S1].
+*   **Vertex Embeddings:** Each voxel has eight corner vertices. Each vertex stores a fixed-length optimizable embedding vector $e \in \mathbb{R}^{L_e}$ containing encoded geometry and appearance information [S1]. Adjacent voxels share 4 vertices and their corresponding embeddings [S1].
+*   **Networks:**
+    *   Geometry Extractor $F_\sigma: \mathbb{R}^{L_e} \rightarrow \mathbb{R}^{1+L_f}$: Maps an embedding to a signed distance value $\sigma \in \mathbb{R}$ (first output) and a geometry feature vector $f \in \mathbb{R}^{L_f}$ (remaining outputs) [S1].
+    *   Appearance Extractor $F_c$: Maps concatenated features to color [S1].
+
+**Query Mechanism:**
+For any 3D point $p$ within a voxel $V_i$, its embedding $e$ is retrieved via the retrieval function $\Gamma: \mathbb{R}^3 \rightarrow \mathbb{R}^{L_e}$ [S1]. This function performs trilinear interpolation of the embeddings from the eight voxel corners based on $p$'s coordinates [S1].
+
+**Numbered Steps:**
+
+1.  **Voxel Initialization:**
+    *   Divide the bounding area into uniformly spaced coarse voxels [S1].
+    *   Build a sparse hierarchical octree with these voxels as leaf nodes [S1].
+    *   Assign each vertex a random $L_e$-dimensional trainable embedding [S1].
+
+2.  **Ray Generation & AABB Culling:**
+    *   Generate rays $r=(o,d)$ for each image pixel [S1].
+    *   Perform axis-aligned bounding box (AABB) intersection tests with the octree [S1].
+    *   Cull rays that do not intersect any voxels [S1].
+    *   For remaining rays, calculate the distance $m_{V_i}$ inside each intersected voxel [S1].
+
+3.  **Surface-Aware Sampling:**
+    *   **Step 1 (Uniform Voxel Sampling):** Uniformly sample points $p$ on rays inside the intersected voxels [S1].
+    *   **Step 2 (Cross-Surface Voxel Searching):** Compute SDF values using $F_\sigma(\Gamma(p))$. Find points $p_i, p_{i+1}$ where the SDF changes sign (positive to negative). Mark voxels containing these points as "important voxels" [S1].
+    *   **Step 3 (Resampling):** Increase sampling probability in important voxels. Normalize probabilities along the ray. Resample rays with a fixed total point count. Two variants exist: 'full' (all important voxels) for unstable shapes, and 'first' (only the first important voxel) for fine details on stable shapes [S1].
+    *   **Boundary Handling:** To prevent cross-voxel accumulation (where sampling spacing exceeds voxel boundaries due to interpolation independence), cut off intervals near voxel boundaries and recalculate sample points $t_i$ and $t_j$ [S1].
+
+4.  **Geometry Extraction:**
+    *   Retrieve embedding $e = \Gamma(p)$ for each sampled point [S1].
+    *   Compute SDF $\sigma = F_\sigma(e)[0]$ and geometry feature $f = F_\sigma(e)[1:]$ [S1].
+    *   Compute normal $n$ via automatic differentiation (double backpropagation) on the SDF output: $n = \frac{d F_\sigma(\Gamma(p))[0]}{dp}$ [S1].
+
+5.  **Appearance Extraction:**
+    *   Concatenate geometry feature $f$, ray direction $d$, and point embedding $e$ [S1].
+    *   Feed into appearance extractor $F_c$ to obtain color $c$ [S1].
+    *   Positional encoding is applied to both $e$ and $d$ before feeding into the networks [S1].
+
+6.  **Volume Rendering:**
+    *   Convert SDF to density using the S-density function $\phi_s(\sigma)$:
+        $$ \phi_s(\sigma) = \frac{s e^{-s\sigma}}{(1 + e^{-s\sigma})^2} $$
+        where $s$ is a scale parameter [S1].
+    *   Compute discrete volume density weight $\alpha(t_i)$:
+        $$ \alpha(t_i) = \text{ReLU}\left( \frac{\Phi_s(F_\sigma(\Gamma(r(t_i)))[0]) - \Phi_s(F_\sigma(\Gamma(r(t_{i+1})))[0])}{\Phi_s(F_\sigma(\Gamma(r(t_i)))[0])} \right) $$
+        where $\Phi_s(\sigma) = (1 + e^{-s\sigma})^{-1}$ is the Sigmoid function [S1].
+    *   Compute discrete accumulated transmittance $T(t_i)$:
+        $$ T(t_i) = \prod_{j=1}^{i-1} (1 - \alpha(t_j)) $$
+        [S1].
+    *   Render color $C(r)$:
+        $$ C(r) = \sum_i T(t_i)\alpha(t_i)c_i $$
+        [S1].
+
+7.  **Progressive Training (Pruning & Splitting):**
+    *   **Voxel Pruning:** Uniformly sample $N_p$ points inside each voxel. Compute SDF values. If any point $p$ inside voxel $V_i$ has $|F_\sigma(\Gamma(p))[0]| < \tau$ (distance threshold $\tau$), keep the voxel ($K=1$); otherwise, prune it ($K=0$) [S1].
+    *   **Voxel Splitting:** Periodically split existing voxels into 8 sub-voxels and insert them into the octree. Compute initial embeddings for new vertices using $\Gamma$. Optimize these embeddings independently of parent nodes [S1].
+
+**Loss Functions:**
+*   **Color Loss:** $L_{color} = \sum_r ||\hat{C}(r) - C(r)||_1$ [S1].
+*   **Eikonal Loss:** $L_{eikonal} = \sum_i (||\nabla F_\sigma(\Gamma(p_i))[0]||_2 - 1)^2$ [S1].
+*   **Depth Loss (if depth data available):**
+    *   Occupancy function: $occ(t) = \text{Sigmoid}(-scale \cdot F_\sigma(\Gamma(r(t)))[0])$ [S1].
+    *   $L_{outside} = \sum_{t < \hat{t}-\delta t} ||1 - occ(t)||_2^2$ [S1].
+    *   $L_{near} = \sum_{\hat{t}-\delta t \le t \le \hat{t}+\delta t} ||F_\sigma(\Gamma(r(t)))[0]||_2^2$ [S1].
+    *   $L_{inside} = \sum_{t > \hat{t}+\delta t} ||occ(t)||_2^2$ [S1].
+    *   $L_{depth} = L_{outside} + L_{near} + L_{inside}$ [S1].
+    *   $\delta t$ is a small noise tolerance depth range depending on sensor confidence [S1].
+
+**Parameters:**
+*   $L_e$: Embedding dimension. Not given in the sources.
+*   $L_f$: Geometry feature dimension. Not given in the sources.
+*   $s$: Scale parameter for S-density. Not given in the sources.
+*   $\tau$: Distance threshold for voxel pruning. Not given in the sources.
+*   $N_p$: Number of points sampled per voxel for pruning. Not given in the sources.
+*   $scale$: Scale factor for occupancy function. Not given in the sources.
+*   $\delta t$: Noise tolerance for depth loss. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Cross-voxel Accumulation:** Because voxels are independent due to interpolation, sampling spacing cannot exceed voxel boundaries. Failure to handle this leads to incorrect accumulation. The method cuts off intervals near boundaries and recalculates points [S1].
+*   **Empty Voxels:** Pruning is essential to remove empty space and reduce memory pressure. Early-stage pruning might cause surface missing if sampling density is insufficient [S1].
+*   **Unstable Shapes:** When shapes are unstable, 'full' surface-aware resampling is preferred to optimize all possible surfaces. For stable shapes, 'first' resampling is used to reconstruct fine details [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Faster than dense neural implicit methods due to sparse voxel structure and reduced sampling in empty areas [S1].
+*   **Memory Complexity:** Lower than dense methods as it only reconstructs occupied space via a sparse octree [S1].
+*   **Performance:** Experiments show it learns fine surface details and accurate colors with less memory and faster rendering than previous methods [S1]. It can approach real-time at low resolution [S1].
+*   **Strengths:** Efficient surface reconstruction, realistic rendering, memory efficiency, suitability for 3D interactions (collision detection) and scene editing [S1].
+*   **Limitations:** Requires multiple-view images with poses and approximate scene extent [S1]. Performance depends on the confidence of depth sensor data if used [S1].
+*   **When to use:** When efficient surface reconstruction and rendering from multi-view images is required, especially for 3D interactive applications [S1].
+*   **When not to use:** When dense volumetric representation (e.g., for transparent scenes) is needed, as Vox-Surf focuses on explicit surfaces [S1].
+
+## Background
+Vox-Surf was proposed in the paper "Vox-Surf: Voxel-Based Implicit Surface Representation" [S1]. It builds on the idea of combining voxel-based representations with neural implicit surface representations. The method was developed to address the limitations of traditional voxel-based methods (which store explicit SDF/color in tiny voxels) and dense neural implicit methods (which define the entire space in a single network) [S1]. The source code is publicly available at https://github.com/zju3dv/Vox-Surf [S1].
+
+## Sources
+[S1] Vox-Surf: Voxel-Based Implicit Surface Representation, https://doi.org/10.1109/tvcg.2022.3225844, fetched 2026-10-26

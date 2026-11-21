@@ -1,0 +1,465 @@
+--- v005.md
++++ v006.md
+@@ -4,35 +4,70 @@
+ 
+ ## Overview
+-Batched Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU [S1, S3, unofficial]. It differs from full-batch rendering by partitioning the ray query set, and from splatting pipelines by evaluating volumetric or neural fields per-ray rather than per-primitive [S3, unofficial].
++Batched Ray Rendering is a memory-management pipeline for object-order volume rendering that processes rays in fixed-size mini-batches (chunks) to prevent Out-Of-Memory (OOM) errors on GPU accelerators [S1, S2, S3, unofficial]. It solves the problem where the number of rays in an image or the size of the neural network model exceeds the available VRAM [S3, unofficial]. It sets itself apart from its parent, Ray-Centric and Hardware-Accelerated Rendering, by explicitly sharding the ray batch into sequential chunks rather than processing the full image in a single forward pass [S1, S2, S3, unofficial].
+ 
+ ## How it works
+-The method decomposes a full image ray batch into smaller sub-batches, renders each sub-batch through the volume representation (typically a neural field), and concatenates the results [S3, unofficial].
+-
+ **Inputs and Outputs:**
+-*   **Input:** A tensor of rays with shape $(B, 11)$, where $B$ is the total number of rays. The 11 components are: `rays_o` (origin, 3 floats), `rays_d` (direction, 3 floats), `near` (near plane distance, 1 float), `far` (far plane distance, 1 float), and `viewdirs` (view direction, 3 floats) [S3, unofficial].
+-*   **Output:** A dictionary of tensors (e.g., `rgb_map`, `disp_map`, `acc_map`) reshaped to match the original batch dimensions, excluding the last dimension which corresponds to the sample dimension [S3, unofficial].
++*   **Input:** A tensor of rays with shape $(B, 11)$, where $B$ is the total number of rays. The components are: `rays_o` (origin, 3 floats), `rays_d` (direction, 3 floats), `near` (near plane distance, 1 float), `far` (far plane distance, 1 float), and `viewdirs` (view direction, 3 floats) [S3, unofficial].
++*   **Output:** A dictionary of tensors (e.g., `rgb_map`, `disp_map`, `acc_map`) with shapes matching the input batch dimensions, concatenated along the ray dimension [S3, unofficial].
+ 
+ **Data Structures:**
+ *   `rays_flat`: Tensor of shape $(B, 11)$ containing all ray parameters [S3, unofficial].
+-*   `all_ret`: A dictionary mapping output keys (e.g., `'rgb_map'`) to lists of tensors. Each list accumulates the results from each chunk [S3, unofficial].
++*   `all_ret`: Dictionary mapping output keys to lists of tensors, one list entry per chunk [S2, S3, unofficial].
+ 
+ **Parameters:**
+-*   `chunk`: Integer, size of the mini-batch. Default is $1024 \times 32 = 32768$ [S3, unofficial].
+-*   `N_samples`: Integer, number of samples per ray for the coarse pass [S3, unofficial].
+-*   `N_importance`: Integer, number of additional samples for the fine pass. If 0, hierarchical sampling is skipped [S3, unofficial].
+-*   `lindisp`: Boolean. If false, samples are linear in depth. If true, samples are linear in disparity (inverse depth). Default is false [S3, unofficial].
+-*   `perturb`: Float. Amount of noise added for stratified sampling. Default is 0. (often overridden to 1.0 during training) [S3, unofficial].
++*   `chunk`: Integer size of the mini-batch. Default is $1024 \times 32 = 32768$ [S1, S3, unofficial].
++*   `N_samples`: Number of samples per ray for the coarse pass [S3, unofficial].
++*   `N_importance`: Number of additional samples for the fine pass. If 0, hierarchical sampling is skipped [S3, unofficial].
++*   `lindisp`: Boolean. If `False`, sampling is linear in depth. If `True`, sampling is linear in disparity (inverse depth). Default `False` [S3, unofficial].
++*   `perturb`: Float. Amount of noise added for stratified sampling. Default `0.` (often overridden to `1.0` during training) [S3, unofficial].
+ *   `raw_noise_std`: Float. Standard deviation for noise added to raw sigma values [S3, unofficial].
+-
+-**Steps:**
+-1.  **Preprocessing:** Reshape `rays_o` and `rays_d` to $(-1, 3)$ and float type [S3, unofficial]. Broadcast scalar `near` and `far` values to match the shape of `rays_d[..., :1]` [S3, unofficial]. Concatenate `rays_o`, `rays_d`, `near`, and `far` along the last dimension [S3, unofficial]. If `use_viewdirs` is true, concatenate `viewdirs` to form the base ray tensor of shape $(B, 11)$ [S3, unofficial].
+-2.  **Chunking Loop:** Initialize `all_ret` as an empty dictionary [S3, unofficial]. Iterate through the ray batch in chunks of size `chunk` [S3, unofficial]. For each chunk `i` from $0$ to $B$ with step `chunk`:
+-    a. Extract `ray_batch = rays_flat[i : i+chunk]` [S3, unofficial].
+-    b. Call `render_rays(ray_batch, ...)` with the specified parameters [S3, unofficial].
+-    c. For each key `k` in the returned dictionary:
+-        i. If `k` is not in `all_ret`, initialize `all_ret[k]` as an empty list [S3, unofficial].
+-        ii. Append the tensor `ret[k]` to `all_ret[k]` [S3, unofficial].
+-3.  **Concatenation:** For each key `k` in `all_ret`, concatenate the list of tensors along dimension 0 to form the final output tensor for that key [S3, unofficial].
+-4.  **Reshaping:** Reshape all output tensors in `all_ret` to match the original batch dimensions (excluding the last dimension which corresponds to the sample dimension) [S3, unofficial].
++*   `network_fn`: Function to query the coarse neural network [S3, unofficial].
++*   `network_fine`: Function to query the fine neural network. If `None`, `network_fn` is reused [S3, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Preprocessing:**
++    *   Reshape `rays_o` and `rays_d` to $(-1, 3)$ and cast to float [S3, unofficial].
++    *   Broadcast `near` and `far` scalars to match the shape of `rays_d[..., :1]` (shape $(B, 1)$) [S3, unofficial].
++    *   Concatenate `rays_o`, `rays_d`, `near`, and `far` along the last dimension to form a base tensor of shape $(B, 8)$ [S3, unofficial].
++    *   If `use_viewdirs` is true, concatenate `viewdirs` (shape $(B, 3)$) to the base tensor, resulting in `rays_flat` of shape $(B, 11)$ [S3, unofficial].
++
++2.  **Batching (`batchify_rays`):**
++    *   Initialize an empty dictionary `all_ret` [S3, unofficial].
++    *   Iterate through `rays_flat` in chunks of size `chunk`. Let $i$ range from $0$ to $B$ with step `chunk` [S3, unofficial].
++    *   For each chunk, extract `ray_batch = rays_flat[i : i+chunk]` [S3, unofficial].
++    *   Call `render_rays(ray_batch, ...)` with the specified parameters [S3, unofficial].
++    *   For each key $k$ in the returned dictionary `ret`:
++        *   If $k$ is not in `all_ret`, initialize `all_ret[k]` as an empty list [S3, unofficial].
++        *   Append `ret[k]` to `all_ret[k]` [S3, unofficial].
++    *   After all chunks are processed, concatenate the lists in `all_ret` along dimension 0 (the batch dimension) to form the final output tensors [S2, S3, unofficial].
++
++3.  **Ray Rendering (`render_rays`):**
++    *   Unpack `rays_o`, `rays_d`, `viewdirs`, `near`, and `far` from `ray_batch` [S3, unofficial].
++    *   Generate `t_vals` as a linear space from $0.$ to $1.$ with `N_samples` steps [S3, unofficial].
++    *   Compute sample depths `z_vals`:
++        *   If `lindisp` is `False`: $z_{\text{vals}} = \text{near} \cdot (1. - t_{\text{vals}}) + \text{far} \cdot t_{\text{vals}}$ [S3, unofficial].
++        *   If `lindisp` is `True`: $z_{\text{vals}} = 1. / (1./\text{near} \cdot (1. - t_{\text{vals}}) + 1./\text{far} \cdot t_{\text{vals}})$ [S3, unofficial].
++    *   Expand `z_vals` to shape $(N_{\text{rays}}, N_{\text{samples}})$ to apply to all rays in the batch [S3, unofficial].
++    *   **Stratified Sampling (if `perturb > 0.`):**
++        *   Calculate midpoints: $mids = 0.5 \cdot (z_{\text{vals}}[..., 1:] + z_{\text{vals}}[..., :-1])$ [S3, unofficial].
++        *   Calculate upper bounds: $upper = \text{concat}(mids, z_{\text{vals}}[..., -1:])$ [S3, unofficial].
++        *   Calculate lower bounds: $lower = \text{concat}(z_{\text{vals}}[..., :1], mids)$ [S3, unofficial].
++        *   Generate random noise $t_{\text{rand}}$ with shape $(N_{\text{rays}}, N_{\text{samples}})$ [S3, unofficial].
++        *   Update $z_{\text{vals}} = lower + (upper - lower) \cdot t_{\text{rand}}$ [S3, unofficial].
++        *   *Note:* This implementation deviates from theory by making the first and last bins half the size of others to fit $N$ samples into $[0,1]$ [S3, unofficial].
++    *   Compute point positions: $pts = rays_o[..., \text{None}, :] + rays_d[..., \text{None}, :] \cdot z_{\text{vals}}[..., :, \text{None}]$ [S3, unofficial].
++    *   Query the network: `raw = network_query_fn(pts, viewdirs, network_fn)` [S3, unofficial].
++    *   Process `raw` using `raw2outputs` to get `rgb_map`, `disp_map`, `acc_map`, `weights`, and `depth_map` [S3, unofficial].
++    *   **Hierarchical Sampling (if `N_importance > 0`):**
++        *   Store coarse outputs with suffix `_0` (e.g., `rgb_map_0`) [S3, unofficial].
++        *   Calculate midpoints of coarse samples: $z_{\text{vals\_mid}} = 0.5 \cdot (z_{\text{vals}}[..., 1:] + z_{\text{vals}}[..., :-1])$ [S3, unofficial].
++        *   Sample fine depths $z_{\text{samples}}$ using `sample_pdf` on $z_{\text{vals\_mid}}$ and weights $weights[..., 1:-1]$ [S3, unofficial].
++        *   Detach $z_{\text{samples}}$ from the computation graph to break gradient flow to the coarse pass: $z_{\text{samples}} = z_{\text{samples}}.\text{detach}()$ [S3, unofficial].
++        *   Concatenate coarse $z_{\text{vals}}$ and fine $z_{\text{samples}}$, then sort them to form the final $z_{\text{vals}}$ [S3, unofficial].
++        *   Recompute $pts$ using the new sorted $z_{\text{vals}}$ [S3, unofficial].
++        *   Query the fine network (or coarse if `network_fine` is `None`): `raw = network_query_fn(pts, viewdirs, network_fine)` [S3, unofficial].
++        *   Process `raw` using `raw2outputs` to get the final outputs [S3, unofficial].
++    *   Return the results dictionary [S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -40,14 +75,10 @@
+ ```python
+ import torch
++import math
+ 
+ def batchify_rays(rays_flat, chunk=32768, **kwargs):
+     """
+     Renders rays in smaller mini-batches to avoid OOM.
+-    Args:
+-        rays_flat: Tensor of shape (B, 11).
+-        chunk: Size of mini-batches.
+-        **kwargs: Arguments passed to render_rays.
+-    Returns:
+-        Dictionary of output tensors with shape (B, ...).
++    rays_flat: Tensor of shape (B, 11)
+     """
+     all_ret = {}
+@@ -56,11 +87,7 @@
+     # Iterate through rays in chunks
+     for i in range(0, num_rays, chunk):
+-        # Extract chunk
+         ray_batch = rays_flat[i : i + chunk]
+-        
+-        # Render the chunk
+         ret = render_rays(ray_batch, **kwargs)
+         
+-        # Accumulate results
+         for k in ret:
+             if k not in all_ret:
+@@ -68,55 +95,29 @@
+             all_ret[k].append(ret[k])
+             
+-    # Concatenate results along the batch dimension (dim 0)
+-    for k in all_ret:
+-        all_ret[k] = torch.cat(all_ret[k], dim=0)
+-        
+-    return all_ret
+-
+-def render_rays(ray_batch,
+-                network_fn,
+-                network_query_fn,
+-                N_samples=64,
+-                retraw=False,
+-                lindisp=False,
+-                perturb=0.0,
+-                N_importance=0,
+-                network_fine=None,
+-                white_bkgd=False,
+-                raw_noise_std=0.0,
+-                verbose=False,
+-                pytest=False):
++    # Concatenate results along dimension 0
++    final_ret = {k: torch.cat(all_ret[k], 0) for k in all_ret}
++    return final_ret
++
++def render_rays(ray_batch, network_fn, network_query_fn, N_samples, 
++                retraw=False, lindisp=False, perturb=0., N_importance=0, 
++                network_fine=None, raw_noise_std=0., white_bkgd=False):
+     """
+     Renders a single batch of rays.
+-    Args:
+-        ray_batch: Tensor of shape (N_rays, 11).
+-        network_fn: Coarse network function.
+-        network_query_fn: Function to query network with pts and viewdirs.
+-        N_samples: Number of coarse samples.
+-        lindisp: Use disparity sampling.
+-        perturb: Noise for stratified sampling.
+-        N_importance: Number of fine samples.
+-        network_fine: Fine network function.
+-    Returns:
+-        Dictionary with keys: rgb_map, disp_map, acc_map, etc.
++    ray_batch: Tensor of shape (N_rays, 11)
+     """
+     N_rays = ray_batch.shape[0]
+     
+     # Unpack ray parameters
+-    rays_o = ray_batch[:, 0:3]      # (N_rays, 3)
+-    rays_d = ray_batch[:, 3:6]      # (N_rays, 3)
+-    
+-    # Viewdirs are the last 3 components if present
++    rays_o = ray_batch[:, 0:3]
++    rays_d = ray_batch[:, 3:6]
+     viewdirs = ray_batch[:, -3:] if ray_batch.shape[-1] > 8 else None
+     
+-    # Bounds
+-    bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])
+-    near = bounds[..., 0]  # (N_rays, 1)
+-    far = bounds[..., 1]   # (N_rays, 1)
+-    
+-    # Generate t_vals
+-    t_vals = torch.linspace(0., 1., steps=N_samples, device=ray_batch.device)
+-    
+-    # Compute z_vals (sample depths)
++    # Extract near/far bounds
++    bounds = ray_batch[..., 6:8].reshape([-1, 1, 2])
++    near = bounds[..., 0]
++    far = bounds[..., 1]
++    
++    # Generate sample depths
++    t_vals = torch.linspace(0., 1., steps=N_samples)
+     if not lindisp:
+         z_vals = near * (1. - t_vals) + far * t_vals
+@@ -124,49 +125,34 @@
+         z_vals = 1. / (1./near * (1. - t_vals) + 1./far * t_vals)
+         
+-    # Expand z_vals to [N_rays, N_samples]
++    # Expand to (N_rays, N_samples)
+     z_vals = z_vals.expand([N_rays, N_samples])
+     
+     # Stratified sampling
+     if perturb > 0.:
+-        mids = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
++        mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+         upper = torch.cat([mids, z_vals[..., -1:]], -1)
+         lower = torch.cat([z_vals[..., :1], mids], -1)
+-        t_rand = torch.rand(z_vals.shape, device=ray_batch.device)
+-        
+-        # Pytest override for deterministic results
+-        if pytest:
+-            torch.manual_seed(0)
+-            t_rand = torch.rand(z_vals.shape, device=ray_batch.device)
+-            
++        t_rand = torch.rand(z_vals.shape)
+         z_vals = lower + (upper - lower) * t_rand
+         
+     # Compute 3D points
+-    # pts shape: (N_rays, N_samples, 3)
+     pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+     
+-    # Query network
++    # Query coarse network
+     raw = network_query_fn(pts, viewdirs, network_fn)
+-    
+-    # Process raw output to get rgb, weights, etc.
+-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+-        raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest
+-    )
++    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd)
+     
+     # Hierarchical sampling
+     if N_importance > 0:
+-        # Store coarse outputs
+         rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
+         
+-        # Calculate midpoints of coarse samples
+-        z_vals_mid = .5 * (z_vals[..., 1:] + z_vals[..., :-1])
+-        
+-        # Sample fine depths based on weights
+-        z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], N_importance, 
+-                               det=(perturb==0.), pytest=pytest)
+-        
+-        # Detach to break gradient flow from fine to coarse [G]
++        z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
++        # sample_pdf is assumed to be defined elsewhere or implemented as standard inverse CDF sampling
++        z_samples = sample_pdf(z_vals_mid, weights[..., 1:-1], N_importance, det=(perturb==0.))
++        
++        # Detach to break gradient flow from fine to coarse
+         z_samples = z_samples.detach()
+         
+-        # Concatenate and sort
++        # Combine and sort
+         z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+         
+@@ -178,56 +164,70 @@
+         raw = network_query_fn(pts, viewdirs, run_fn)
+         
+-        # Process fine output
+-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+-            raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest
+-        )
+-        
+-    ret = {'rgb_map': rgb_map, 'disp_map': disp_map, 'acc_map': acc_map}
+-    
+-    if retraw:
+-        ret['raw'] = raw
+-        
+-    if N_importance > 0:
+-        ret['rgb_map_0'] = rgb_map_0
+-        ret['disp_map_0'] = disp_map_0
+-        ret['acc_map_0'] = acc_map_0
+-        
+-    return ret
+-
+-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0.0, white_bkgd=False, pytest=False):
+-    """
+-    Converts raw network output (rgb, sigma) to final image components.
+-    Implements standard volume rendering compositing [G].
+-    """
+-    # raw shape: (N_rays, N_samples, 4) -> (rgb, sigma)
++        # Process fine outputs
++        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd)
++        
++        # Return coarse outputs if needed (implementation detail varies, here we assume standard NeRF return)
++        # Note: The source code returns a dict. We construct it here.
++        ret = {
++            'rgb_map': rgb_map,
++            'disp_map': disp_map,
++            'acc_map': acc_map,
++            'rgb_map_0': rgb_map_0,
++            'disp_map_0': disp_map_0,
++            'acc_map_0': acc_map_0
++        }
++        if retraw:
++            ret['raw'] = raw
++            
++        return ret
++    else:
++        ret = {
++            'rgb_map': rgb_map,
++            'disp_map': disp_map,
++            'acc_map': acc_map
++        }
++        if retraw:
++            ret['raw'] = raw
++        return ret
++
++def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0., white_bkgd=False, pytest=False):
++    """
++    Converts raw network output (rgb, sigma) to volume rendering outputs.
++    raw: Tensor of shape (..., 4) -> (rgb, sigma)
++    """
++    # Extract rgb and sigma
+     rgb = raw[..., :3]
+     sigma = raw[..., 3:4]
+     
+     # Add noise to sigma
+-    noise = 0.
+-    if sigma.shape[-1] > 0:
+-        noise = torch.randn(sigma.shape, device=raw.device) * raw_noise_std
+-    sigma = sigma + noise
+-    
+-    # Compute delta (distance between samples)
++    noise_std = raw_noise_std
++    if noise_std > 0 and not pytest:
++        noise = torch.randn(sigma.shape) * noise_std
++        sigma = sigma + noise
++        
++    # Compute deltas (distances between samples)
+     deltas = z_vals[..., 1:] - z_vals[..., :-1]
+-    # Approximate last delta to avoid boundary issues
+-    deltas = torch.cat([deltas, torch.ones_like(deltas[..., :1]) * 1e10], dim=-1)
+-    
+-    # Compute alpha
+-    alpha = 1.0 - torch.exp(-torch.relu(sigma) * deltas)
+-    
+-    # Transmittance
+-    T = torch.cumsum(1. - alpha, dim=-1)
+-    T = torch.cat([torch.ones_like(T[..., :1]), T[..., :-1]], dim=-1)
+-    
+-    # Weights
++    # Handle the last delta (far plane)
++    delta_inf = 1e10
++    deltas = torch.cat([deltas, delta_inf * torch.ones_like(z_vals[..., :1])], -1)
++    
++    # Compute transmittance
++    alpha = 1. - torch.exp(-torch.relu(sigma) * deltas)
++    T = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1. - alpha + 1e-10], -1), -1)[:, :-1]
++    
++    # Compute weights
+     weights = alpha * T
+     
+-    # Compositing
+-    rgb_map = torch.sum(weights[..., None] * rgb, dim=-2)
+-    acc_map = torch.sum(weights, dim=-1)
+-    depth_map = torch.sum(weights * z_vals, dim=-1) / (acc_map + 1e-10)
+-    disp_map = 1. / (depth_map + 1e-10)
++    # Compute RGB map
++    rgb_map = torch.sum(weights[..., None] * rgb, -2)
++    
++    # Compute depth map
++    depth_map = torch.sum(weights * z_vals, -1)
++    
++    # Compute accumulated transmittance (acc_map)
++    acc_map = torch.sum(weights, -1)
++    
++    # Compute disparity map
++    disp_map = 1. / torch.maximum(1e-10 * torch.ones_like(depth_map), depth_map)
+     
+     return rgb_map, disp_map, acc_map, weights, depth_map
+@@ -235,65 +235,40 @@
+ def sample_pdf(z_vals_mid, weights, N_importance, det=False, pytest=False):
+     """
+-    Hierarchical sampling: sample N_importance points from the distribution defined by weights [G].
+-    """
+-    # weights shape: (N_rays, N_samples-1)
+-    # z_vals_mid shape: (N_rays, N_samples-1)
+-    
+-    # Get pdf
+-    pdf = weights / (weights.sum(dim=-1, keepdim=True) + 1e-10)
+-    cdf = torch.cumsum(pdf, dim=-1)
+-    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+-    
+-    # Uniform samples
+-    if det:
+-        u = torch.linspace(0., 1., N_importance, device=weights.device)
+-        u = u.expand([weights.shape[0], N_importance])
+-    else:
+-        u = torch.rand([weights.shape[0], N_importance], device=weights.device)
+-        
+-    # Inverse CDF
+-    indices = torch.searchsorted(cdf, u, right=True)
+-    indices = torch.clamp(indices, 0, cdf.shape[-1] - 2)
+-    
+-    # Linear interpolation within bins
+-    z0 = z_vals_mid[torch.arange(weights.shape[0]), indices]
+-    z1 = z_vals_mid[torch.arange(weights.shape[0]), indices + 1]
+-    c0 = cdf[torch.arange(weights.shape[0]), indices]
+-    c1 = cdf[torch.arange(weights.shape[0]), indices + 1]
+-    
+-    # Avoid division by zero
+-    denom = c1 - c0
+-    denom = torch.where(denom < 1e-10, torch.ones_like(denom), denom)
+-    
+-    t = (u - c0) / denom
+-    z_samples = z0 + t * (z1 - z0)
+-    
+-    return z_samples
++    Performs PDF sampling for hierarchical sampling.
++    z_vals_mid: Tensor of shape (N_rays, N_samples-1)
++    weights: Tensor of shape (N_rays, N_samples-1)
++    """
++    # This is a placeholder for the specific PDF sampling logic (e.g., inverse CDF)
++    # The source code calls sample_pdf but does not provide its implementation.
++    # Standard implementation involves normalizing weights, computing CDF, and inverse sampling.
++    # For the purpose of this article, we assume this function exists and returns 
++    # a tensor of shape (N_rays, N_importance).
++    # [G] Implementation note: Normalize weights, compute cumulative sum, sample uniform randoms, 
++    # and interpolate z_vals_mid based on the randoms and CDF.
++    pass
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Stratified Sampling Deviation:** The implementation of stratified sampling deviates from theory: the first and last bins are half the size of others to fit $N$ samples into $[0,1]$, whereas theory assumes equal bin lengths [S3, unofficial].
+-*   **Numerical Errors:** NaN or Inf values in outputs should be checked and printed if DEBUG mode is enabled [S3, unofficial].
+-*   **Gradient Flow:** In hierarchical sampling, `z_samples` are detached from the computation graph (`z_samples.detach()`) to break the gradient flow from the fine pass to the coarse pass, creating a static compute graph for the coarse-to-fine connection [S3, unofficial].
+-
+ ## Subtopics
+ 
+ ### [Chunked Trilinear Volume Rendering](2557-chunked-trilinear-volume-rendering.md)
+-Chunked Trilinear Volume Rendering evaluates a neural field or trilinear volume by processing rays in fixed-size batches. It prevents memory overflow by iterating over subsets of rays rather than evaluating the full batch at once. Choose it when rendering large trilinear grids or neural fields where the full ray batch exceeds available VRAM.
++Chunked Trilinear Volume Rendering evaluates a neural field or trilinear volume by processing rays in fixed-size batches. It prevents memory overflow by iterating over subsets of rays rather than evaluating the full batch at once.
+ 
+ ### [Chunked Ray Rendering](2764-chunked-ray-rendering.md)
+-Chunked Ray Rendering is a memory-management strategy for object-order volume rendering that processes large batches of rays in smaller, fixed-size chunks to prevent Out-Of-Memory (OOM) errors on the GPU. It is primarily used during validation and inference phases where full-resolution images must be generated without training-time optimizations like CUDA-accelerated raymarching. It differs from Chunked Trilinear Volume Rendering by chunking the *rays* (the query set) rather than the *volume data* (the lookup grid).
++Chunked Ray Rendering is a memory-management strategy for object-order volume rendering that processes rays in fixed-size batches (chunks) rather than all at once. It solves the Out-Of-Memory (OOM) errors that occur when the number of rays in an image exceeds the capacity of the accelerator's VRAM or when the neural network model is too large for a full-batch forward pass. It sets itself apart from its parent, Batched Ray Rendering, by explicitly handling the sharding of these chunks across multiple hosts and devices in distributed settings, ensuring that partial results are correctly concatenated and reshaped into the final image.
++
++### [Hybrid Splatting/Raycasting with Smooth Transition](14147-hybrid-splatting-raycasting-with-smooth-transition.md)
++This method renders volumetric datasets as a collection of overlapping 3D detailed kernels, combining GPU-accelerated splatting for coarse structure with raycasting for local detail. It solves the trade-off between the speed of splatting and the accuracy of raycasting by using a hierarchical representation where each node contains a 3D texture. Unlike pure splatting, it enhances each footprint with raycasted details along the kernel's extent, and unlike pure raycasting, it batches these operations per fragment.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [G]. The chunking does not change the asymptotic time complexity but adds overhead from loop iteration and concatenation [G].
+-*   **Memory Complexity:** Not given in the sources [G]. By reducing `chunk`, memory usage is reduced linearly, allowing rendering of larger images on GPUs with limited VRAM [G].
+-*   **Measured Performance:** The default chunk size is $1024 \times 32 = 32768$ rays [S3, unofficial]. This value balances memory usage and GPU utilization [G]. Smaller chunks may lead to underutilization of the GPU due to kernel launch overhead, while larger chunks risk OOM errors [G].
+-*   **Strengths:** Enables rendering of high-resolution images and large neural fields on consumer-grade GPUs by preventing OOM errors [G]. Simple to implement as a wrapper around the core rendering function [G].
+-*   **Limitations:** Adds overhead from Python loop iteration and tensor concatenation. Does not optimize the computational cost of the ray marching itself [G].
+-*   **When to Use:** Use during validation, inference, or training when the full image batch exceeds available VRAM [G]. Use when the bottleneck is memory rather than compute [G].
+-*   **When Not to Use:** Use when VRAM is sufficient, as the overhead of chunking is unnecessary [G]. Use when real-time performance is critical and the overhead of chunking is unacceptable [G].
++*   **Time Complexity:** Linear with respect to the number of rays $B$ and the number of chunks $C = \lceil B / \text{chunk} \rceil$. The total time is proportional to $C \times T_{\text{render}}$, where $T_{\text{render}}$ is the time to render one chunk.
++*   **Memory Complexity:** Dominated by the largest chunk size. Memory usage is proportional to $\text{chunk} \times N_{\text{samples}} \times \text{network\_size}$, rather than $B \times N_{\text{samples}} \times \text{network\_size}$. This allows rendering high-resolution images or using large networks on GPUs with limited VRAM [S1, S3, unofficial].
++*   **Measured Performance:** Default chunk size is $1024 \times 32 = 32768$ rays [S3, unofficial].
++*   **Strengths:** Prevents OOM errors; enables training and rendering with large neural networks and high-resolution images on consumer hardware [S3, unofficial].
++*   **Limitations:** Sequential processing of chunks may underutilize GPU parallelism compared to a single large batch if the chunk size is too small; overhead from list concatenation and dictionary management [S2, S3, unofficial].
++*   **When to use:** When VRAM is insufficient for a full-batch forward pass [S3, unofficial].
++*   **When not to use:** When VRAM is sufficient, as a single large batch may be faster due to reduced kernel launch overhead and better memory coalescing [S2, unofficial].
+ 
+ ## Background
+-Batched Ray Rendering is a standard practice in neural rendering pipelines to handle the memory requirements of evaluating large neural networks for every sample point along every ray in an image [S3, unofficial].
++Batched Ray Rendering is a core component of the NeRF (Neural Radiance Fields) pipeline, introduced by Mildenhall et al. in 2020 [S3, unofficial]. It was designed to handle the memory requirements of rendering millions of rays through a deep neural network [S3, unofficial]. The method is widely used in NeRF-based implementations, including HashNeRF-pytorch [S1, unofficial] and nerf-mlp [S2, unofficial].
+ 
+ ## Sources

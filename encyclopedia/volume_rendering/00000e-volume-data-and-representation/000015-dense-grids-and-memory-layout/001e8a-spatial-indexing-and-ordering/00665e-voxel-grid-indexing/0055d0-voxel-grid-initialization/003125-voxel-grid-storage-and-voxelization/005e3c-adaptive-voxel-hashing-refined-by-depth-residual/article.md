@@ -1,0 +1,182 @@
+# Adaptive Voxel Hashing Refined by Depth Residual
+
+Also called: Adaptive resolution built from existing infrastructure, tsdf::AdaptiveGrid
+
+## Overview
+Adaptive Voxel Hashing Refined by Depth Residual is a hierarchical volume representation that fuses depth data into a stack of uniform voxel grids with halving voxel sizes, refining only those blocks where the depth systematically deviates from the coarser surface [S1, unofficial]. It replaces the retired octree trial by using depth residuals to drive dynamic allocation, allowing finer resolution (e.g., 5 mm) only where necessary while maintaining free-space carving across all levels [S1, unofficial]. Unlike uniform grids, it reduces memory usage and meshing overhead by concentrating detail, and unlike octrees, it leverages existing uniform grid infrastructure for stamps, garbage collection, and extraction [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sequence of `FrameInput` sets, each containing host or device depth maps and optional color data. The depth maps are pre-registered to a world coordinate system.
+*   **Output:** A stack of `VoxelBlockGrid` instances, one per level, containing TSDF (Truncated Signed Distance Function) values and color. The grid exposes `owned_blocks(level)` for meshing.
+
+**Data Structures:**
+The core structure is `tsdf::AdaptiveGrid`, a Pimpl, move-only class [S1, unofficial].
+*   **Level Stack:** A vector of `VoxelBlockGrid` objects. Default voxel sizes are 2 cm, 1 cm, and 5 mm [S1, unofficial].
+*   **Block Hashing:** Each level uses a hash map to store active blocks. A block's parent in a coarser level is identified by halving its coordinate key (`key / 2`) in the coarser hash; no explicit parent pointers are stored [S1, unofficial].
+*   **Residual Grid Attribute:** Each coarse level maintains a `residual` grid attribute associated with its blocks. This attribute stores the sum of residuals and the count of samples per 2×2×2-voxel cell to track systematic offsets [S1, unofficial].
+*   **Refinement Flags:** Tagged with the block's coordinate, indicating whether a block is refined, coarsening, or stable [S1, unofficial].
+
+**Parameters:**
+*   **Voxel Sizes:** Default stack: 2 cm, 1 cm, 5 mm [S1, unofficial].
+*   **Sensor Floor:** The median offset of the coarsest level's blocks, representing the baseline sensor noise/bias [S1, unofficial].
+*   **Refine Offset:** A threshold added to the sensor floor to trigger refinement [S1, unofficial].
+*   **Calm Checks:** The number of consecutive checks below `floor + half_refine_offset` required to trigger coarsening [S1, unofficial].
+*   **Dynamic TSDF Weight Cap:** 20 by default in live mode [S1, unofficial].
+*   **Color Resolution:** Optional, e.g., 3840x2160 [S1, unofficial].
+*   **Min Cells:** Must be between 1 and 64; zero depth is treated as missing [S1, unofficial].
+*   **Sample Limit:** Cells stop accumulating samples at 8192 to prevent integer overflow in sum-of-squares calculations [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Create `tsdf::AdaptiveGrid` with device, allocator, and `AdaptiveGridConfig` specifying voxel sizes and thresholds [S1, unofficial].
+2.  **Coarsest Level Fusion:** The coarsest level (e.g., 2 cm) fuses every incoming frame. It integrates the full depth map, carving free space and updating TSDF values [S1, unofficial].
+3.  **Residual Calculation (Per Set):**
+    *   For each depth point, compute the residual: $R = \frac{TSDF_{coarse}(p)}{||\nabla TSDF_{coarse}(p)||}$, where $p$ is the depth point and the denominator is the gradient length (distance along the normal) [S1, unofficial].
+    *   Accumulate residuals per 2×2×2-voxel cell in the coarse level's residual grid attribute [S1, unofficial].
+    *   Update cell statistics:
+        *   Let $n$ be the sample count, $S_1$ be the sum of residuals, and $S_2$ be the sum of squared residuals.
+        *   If $n > 8192$, do not update [S1, unofficial].
+        *   To maintain mean accuracy when halving counts (e.g., during GC or growth), halve the count and scale sums by the same ratio [S1, unofficial].
+4.  **Systematic Offset Check:**
+    *   For each cell, compute the systematic offset: $O = \bar{R}^2 - \frac{\sigma^2}{n}$, where $\bar{R}$ is the mean residual and $\sigma^2$ is the variance [S1, unofficial]. This formula cancels out sensor noise [S1, unofficial].
+    *   Determine the sensor floor as the median offset of all coarsest blocks [S1, unofficial].
+5.  **Refinement Decision:**
+    *   A block refines if its offset $O$ exceeds $Floor + RefineOffset$ and the remaining noise is below a threshold [S1, unofficial].
+    *   If a block refines, allocate it in the next finer level. The finer level integrates the full depth map, but only allocates blocks masked by the refined coarser blocks (GPU mask) [S1, unofficial].
+6.  **Coarsening Decision:**
+    *   A block coarsens if its offset stays below $Floor + \frac{1}{2}RefineOffset$ for `calm_checks` consecutive checks [S1, unofficial].
+    *   A block also coarsens if its surface is gone (cleared by Dynamic TSDF updates) [S1, unofficial].
+    *   Coarsening removes the finer blocks associated with the coarsened parent [S1, unofficial].
+    *   Blocks merely out of view retain their detail [S1, unofficial].
+7.  **Integration:** Each level allocates and integrates once per set. The finer levels integrate the whole frame to carve free space, using the mask to limit allocation [S1, unofficial].
+8.  **Growth:** If a level's hash map fills, it grows. The residual grid attribute is kept with the blocks to preserve history during removal, clearing, GC, and growth [S1, unofficial].
+9.  **Extraction:** `owned_blocks(level)` lists the blocks to be meshed for each level. The viewer meshes each level's owned blocks and draws them together [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class AdaptiveGrid:
+    def __init__(self, device, allocator, config):
+        self.levels = []
+        self.sensor_floor = 0.0
+        self.refine_offset = config.refine_offset
+        self.calm_checks = config.calm_checks
+        # Initialize coarsest level with config.voxel_sizes[0]
+        self.levels.append(VoxelBlockGrid(config.voxel_sizes[0], device, allocator))
+        # Initialize finer levels if specified
+        for size in config.voxel_sizes[1:]:
+            self.levels.append(VoxelBlockGrid(size, device, allocator))
+
+    def fuse(self, frame_inputs):
+        # frame_inputs is a list of FrameInput sets
+        for frame_set in frame_inputs:
+            self._fuse_coarsest(frame_set)
+            self._check_residuals()
+            self._decide_refinement_coarsening()
+            self._fuse_finer_levels(frame_set)
+
+    def _fuse_coarsest(self, frame_set):
+        # Fuse the coarsest level (index 0) with the full depth map
+        self.levels[0].integrate(frame_set.depth, frame_set.color)
+
+    def _check_residuals(self):
+        # Calculate residuals and systematic offsets for the coarsest level
+        coarsest = self.levels[0]
+        residual_grid = coarsest.residual_attribute
+        
+        # Compute sensor floor from median offset of all blocks
+        offsets = []
+        for block in coarsest.blocks():
+            cell_offsets = []
+            for cell in block.residual_cells():
+                if cell.n > 0:
+                    mean_r = cell.sum_r / cell.n
+                    var_r = (cell.sum_r2 / cell.n) - (mean_r ** 2)
+                    offset = (mean_r ** 2) - (var_r / cell.n)
+                    cell_offsets.append(offset)
+            if cell_offsets:
+                offsets.append(mean(cell_offsets))
+        
+        self.sensor_floor = median(offsets)
+        
+        # Update refinement flags based on offsets
+        for block in coarsest.blocks():
+            block_offset = mean([cell.offset for cell in block.residual_cells()])
+            if block_offset > self.sensor_floor + self.refine_offset:
+                block.refine = True
+            elif block_offset < self.sensor_floor + (self.refine_offset / 2):
+                block.calm_count += 1
+                if block.calm_count >= self.calm_checks:
+                    block.coarsen = True
+            else:
+                block.calm_count = 0
+                block.coarsen = False
+                block.refine = False
+
+    def _decide_refinement_coarsening(self):
+        # Refine blocks in finer levels
+        for i in range(1, len(self.levels)):
+            coarse_level = self.levels[i-1]
+            fine_level = self.levels[i]
+            
+            # Create mask from refined blocks in coarse level
+            mask = self._create_gpu_mask(coarse_level.refined_blocks())
+            
+            # Allocate and integrate fine level only where masked
+            fine_level.integrate_with_mask(self.frame_set.depth, self.frame_set.color, mask)
+            
+            # Coarsen blocks in fine level if parent coarsens
+            for block in fine_level.blocks():
+                parent_key = block.key // 2
+                parent = coarse_level.get_block(parent_key)
+                if parent and parent.coarsen:
+                    fine_level.remove_block(block.key)
+                elif parent and parent.refine:
+                    # Ensure fine block exists and is marked for refinement
+                    if not fine_level.has_block(block.key):
+                        fine_level.allocate_block(block.key)
+
+    def _create_gpu_mask(self, refined_blocks):
+        # Create a GPU mask from the list of refined block keys
+        # This mask is used to limit allocation in finer levels
+        return GPUBuffer(refined_blocks)
+
+    def owned_blocks(self, level_index):
+        return self.levels[level_index].get_owned_blocks()
+
+    def stats(self, level_index):
+        return self.levels[level_index].get_stats()
+
+    def sensor_floor(self):
+        return self.sensor_floor
+
+    def set_refine_offset(self, offset):
+        self.refine_offset = offset
+```
+
+**Edge Cases and Pitfalls:**
+*   **Calibration Error:** Refinement cannot distinguish between calibration errors (e.g., stale camera calibration) and actual shape changes. This can cause overlapping floors to refine incorrectly [S1, unofficial].
+*   **Block Boundaries:** Small objects cut by block boundaries split their evidence, as a block is judged from only two sampled cells [S1, unofficial].
+*   **Seams:** Seams between levels are not stitched; the viewer textures from the set's first camera only [S1, unofficial].
+*   **Performance:** Each level submits its own allocate/integrate; `owned_blocks` compacts on the host, which can add latency [S1, unofficial].
+*   **Sample Limit:** Cells stop at 8192 samples to prevent integer overflow in sum-of-squares calculations [S1, unofficial].
+*   **Zero Depth:** Zero depth is treated as missing [S1, unofficial].
+*   **Min Cells:** `min_cells` must be between 1 and 64; invalid values are refused [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Per-frame host time is dominated by fusion and remeshing. On an Apple M5 Max, 7.2 ms per fused frame with 171 remeshes for 400 preloaded frames across three levels [S1, unofficial]. On a four-camera rig, ~24–29 sets/s, with ~16 ms per set at 1280×720 color and ~23 ms at 4K [S1, unofficial].
+*   **Memory Complexity:** Reduces voxel count compared to uniform grids. In an offline prototype, it used 0.86× the voxels of a uniform 1 cm grid [S1, unofficial].
+*   **Accuracy:** Mesh accuracy is within 0.26 mm (accuracy) and 0.46 mm (coverage p95) of a uniform 5 mm grid, compared to 0.79 mm and 0.86 mm for a uniform 1 cm grid [S1, unofficial].
+*   **Strengths:** Dynamic resolution adapts to scene complexity; leverages existing uniform grid infrastructure; reduces memory and meshing overhead.
+*   **Limitations:** Seams between levels; sensitivity to calibration errors; small objects at block boundaries; host-side compaction latency.
+*   **When to Use:** When memory and meshing performance are critical, and the scene has varying detail levels.
+*   **When Not to Use:** When high precision is required across all levels without seams, or when calibration is unstable.
+
+## Background
+Adaptive Voxel Hashing Refined by Depth Residual was introduced as part of the `tsdf::AdaptiveGrid` tier API in the `volumetric_kit_recon` project [S1, unofficial]. It replaces the retired octree trial (#138–#155) due to the complexity and overhead of octree-based approaches [S1, unofficial]. The method was promoted from a viewer prototype to the main `tsdf` tier, leveraging existing `VoxelBlockGrid` infrastructure for stamps, garbage collection, and extraction [S1, unofficial]. It is used in `adaptive_viewer` and drives end-to-end reconstruction on Replica, single-camera (Orbbec), and four-camera rigs [S1, unofficial].
+
+## Sources
+[S1] feat(tsdf): adaptive voxel hashing refined by depth residual, with a live viewer, https://github.com/taojin-6/volumetric_kit_recon/pull/169, fetched 2026-10-28 (unofficial)

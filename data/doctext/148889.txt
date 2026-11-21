@@ -1,0 +1,1832 @@
+ViewFormer: NeRF-free Neural Rendering
+from Few Images Using Transformers
+Jonáš Kulhánek1,2 , Erik Derner1 , Torsten Sattler1 , and Robert
+Babuška1,3
+arXiv:2203.10157v2 [cs.CV] 21 Jul 2022
+1
+Czech Institute of Informatics, Robotics and Cybernetics,
+Czech Technical University in Prague
+2
+Faculty of Electrical Engineering, Czech Technical University in Prague
+3
+Cognitive Robotics, Faculty of 3mE, Delft University of Technology
+Abstract. Novel view synthesis is a long-standing problem. In this work,
+we consider a variant of the problem where we are given only a few context views sparsely covering a scene or an object. The goal is to predict
+novel viewpoints in the scene, which requires learning priors. The current
+state of the art is based on Neural Radiance Field (NeRF), and while
+achieving impressive results, the methods suffer from long training times
+as they require evaluating millions of 3D point samples via a neural network for each image. We propose a 2D-only method that maps multiple
+context views and a query pose to a new image in a single pass of a
+neural network. Our model uses a two-stage architecture consisting of a
+codebook and a transformer model. The codebook is used to embed individual images into a smaller latent space, and the transformer solves the
+view synthesis task in this more compact space. To train our model efficiently, we introduce a novel branching attention mechanism that allows
+us to use the same model not only for neural rendering but also for camera pose estimation. Experimental results on real-world scenes show that
+our approach is competitive compared to NeRF-based methods while not
+reasoning explicitly in 3D, and it is faster to train.
+Keywords: Novel view synthesis; Neural rendering; Localization
+1
+Introduction
+Image-based novel view synthesis, i.e., rendering a 3D scene from a novel viewpoint given a set of context views (images and camera poses), is a long-standing
+problem in computer graphics with applications ranging from robotics (e.g. planning to grasp objects) to augmented and virtual reality (e.g. interactive virtual
+meetings). Recently, the field has gained a lot of popularity thanks to Neural
+Radiance Field (NeRF) methods [2, 44] that were successfully applied to the
+problem and outperformed prior approaches. We distinguish between two variants of the view synthesis problem. The first variant renders a novel view from
+multiple context images taken from similar viewpoints [44, 75]. Only a (very)
+sparse set of context images is provided in the second variant [56,80], i.e., larger
+2
+J. Kulhánek et al.
+context images
+GT
+generated context images
+GT
+generated
+Fig. 1. Our novel view synthesis method renders images of previously unseen objects
+based on a few context images. It operates in 2D space without any explicit 3D reasoning (as opposed to NeRF-based approaches [56, 80]). The results are shown on the
+CO3D [56] (right) and InteriorNet [35] (left) datasets rendered for unseen scenes
+viewpoint variations and missing observations need to be handled. The latter
+task is much more difficult as it is necessary to learn suitable priors that can be
+used to predict unseen scene parts. This paper focuses on the second variant.
+Recently, generalizable NeRF-based approaches have been proposed to tackle
+this problem by learning priors for a class of objects and scenes [56, 80]. Instead
+of learning a radiance field for each scene, they use context views captured
+from the target scene to construct the radiance field on the fly by projecting
+the image features from all context views into 3D. Highly optimized NeRF approaches [23, 47, 55, 79] can be sped up by tuning or caching the radiance field
+representation [47], although often requiring lots of images per scene. To the best
+of our knowledge, these techniques do not apply to generalizable NeRF-based
+methods that do not learn a scene-specific radiance field, and take thousands
+of GPU-hours to train [56]. In contrast, 2D-only feed-forward networks can be
+highly efficient. However, explicitly encoding 3D geometric principles in them
+can be challenging. In our work, we thus pose the question: Is reasoning in
+3D necessary for high-quality novel view synthesis, or can a purely image-based
+method achieve a competitive performance?
+Recently, Rombach et al. [59] successfully tackled single-view novel view synthesis, where the model was able to predict novel views without explicit 3D
+reasoning. Inspired by these findings, we tackle the more complex problem of
+multi-view novel view synthesis. To answer the question, we propose a method
+with no explicit 3D reasoning able to predict novel views using multiple context
+images in a forward pass of a neural network. We train our model on a large
+collection of diverse scenes to enable the model to learn 3D priors implicitly.
+Our approach is able to render a view in a novel scene, unseen at training time,
+three orders of magnitude faster than state-of-the-art (SoTA) NeRF-based approaches [56], while also being ten times faster to train. Furthermore, we are able
+to train a single model to render multiple classes of scenes (see Fig. 1), whereas
+the SoTA NeRF-based approaches typically train per-class models [56].
+ViewFormer: NeRF-free Neural Rendering from Few Images
+3
+Our model uses a two-stage architecture consisting of a Vector QuantizedVariational Autoencoder (VQ-VAE) codebook [49] and a transformer model. The
+codebook model is used to embed individual images into a smaller latent space.
+The transformer solves the novel view synthesis task in this latent space before
+the image is recovered via a decoder. This enables the codebook to focus on
+finer details in images while the transformer operates on shorter input sequences,
+reducing the quadratic memory complexity of its attention layer.
+For training, we pass a sequence of views into the transformer and optimize
+it for all context sizes at the same time, effectively utilizing all images in the
+training batch, which is different from other methods [21, 22, 50, 53] that train
+only one query view. Unlike autoregressive models [22, 50, 53], we do not decode
+images token-by-token but all tokens are decoded at once which is both faster
+and mathematically exact (while autoregressive models rely on greedy strategies). Our approach can be considered a combination of autoregressive [51, 74]
+and masked [18] transformer models. With the standard attention mechanism,
+the complexity would be quadratic in the number of views, because we would
+have to stack different query views corresponding to different context sizes along
+the batch dimension. Therefore, we propose a novel attention mechanism called
+branching attention with constant overhead regardless of how many query views
+we optimize. Our attention mechanism also allows us to optimize the same model
+for the camera pose estimation task – predicting the query image’s camera pose
+given a set of context views. Since this task can be considered an “inverse” of
+the novel view synthesis task [78], we consider the ability to perform both tasks
+via the same model to be an intriguing property. Even though the localization
+results are not yet competitive with state-of-the-art localization pipelines, we
+achieve a similar level of pose accuracy as comparable methods such as [1, 65].
+In summary, this paper makes the following contributions: 1) We propose
+an efficient novel view synthesis approach that does not use explicit 3D reasoning. Our two-stage method consisting of a codebook model and a transformer
+is competitive with state-of-the-art NeRF-based approaches while being more
+efficient to train. Compared to similar methods that do not use explicit 3D
+reasoning [15, 21, 71], our approach is not only evaluated on synthetic data but
+performs well on real-world scenes. 2) Our transformer model is a combination of
+an autoregressive and a masked transformer. We propose a novel attention mechanism called branching attention that allows us to optimize for multiple context
+sizes at once with a constant memory overhead. 3) Thanks to the branching
+attention, our model can both render a novel view from a given pose and predict the pose for a given image. 4) Our source code and pre-trained models are
+publicly available at https://github.com/jkulhanek/viewformer.
+2
+Related work
+Novel view synthesis has a long history [12, 68]. Recently, deep learning
+techniques have been applied with great success, enabling higher realism [16, 26,
+42,57,58]. Some approaches use explicit reconstructed geometry to warp context
+4
+J. Kulhánek et al.
+images into the target view [16,26,57,58,70]. In our approach, we do not require
+any proxy geometry and only operate on 2D images.
+Neural Radiance Field methods [2,29,39,42,44,55,79] use neural networks to
+represent the continuous volumetric scene function. To render a view, for each
+pixel in the image plane, they project a ray into 3D space and query the radiance field in 3D points along each ray. The radiance field is trained for each scene
+separately. Some methods generalize to new scenes by conditioning the continuous volumetric function on the context images [60, 69], which allows them to
+utilize trained priors and render views from scenes on which the model was not
+trained, much like our approach. Other approaches remove the trainable continuous volumetric scene function altogether. Instead, they reproject the context
+image’s features into the 3D space and apply the NeRF-based rendering pipeline
+on top of this representation [27, 56, 73, 75, 80]. Similarly to these methods, our
+approach also utilizes few context views (less than 20), and it also generalizes to
+unseen objects. However, we do not use the continuous volumetric function nor
+the reprojection into the 3D space. A different approach, IBRNet [75], learns
+to copy existing colors from context views, effectively interpolating the context
+views. Unlike ours, it thus cannot be applied to the settings where the object is
+not covered enough by the context views [27, 56, 73, 80].
+A different line of work directly maps 2D context images to the 2D query
+image using an end-to-end neural network [15, 21, 71]. GQN-based methods
+[15, 21, 71] apply a CNN to context images and camera poses and combine the
+resulting features. While some GQN methods [15, 21] do not use any explicit 3D
+reasoning (same as our approach), Tobin et al. [71] uses an epipolar attention
+to aggregate the features from the context views. We optimize our model on all
+context images and fully utilize the training sequences, whereas GQN methods
+optimize only a single query view.
+A recent work by Rombach et al. [59] proposed an approach for novel view
+synthesis without explicit 3D modeling. They used a codebook and a transformer
+model to map a single context view to a novel view from a different pose. Their
+approach is limited in its scope to mostly forward-facing scenes where it is easier
+to render the novel view given a single context view and the poses have to be
+close to one another. It cannot be extended to more views due to the limit on the
+sequence size of the transformer model. In contrast, in our approach, we focus on
+using multiple context views, which we tackle through the proposed branching
+attention. Furthermore, we can jointly train the same model for both the novel
+view synthesis and camera pose estimation and our decoding is faster because
+we decode the output at once instead of autoregressive decoding.
+Visual localization. There is an enormous body of work tackling the problem
+of localization, where the goal is to output the camera pose given the camera
+image. Structure-based approaches use correspondences between 2D pixel positions and 3D scene coordinates for camera pose estimation [6,11,37,41,61,63,67].
+Our method does not explicitly reason in 3D space, and the camera pose is instead predicted by the network. Simple image retrieval (IR) approaches store
+a database of all images with camera poses and for each query image they try
+ViewFormer: NeRF-free Neural Rendering from Few Images
+5
+to find the most similar images [9, 10, 17, 28, 64, 82] and use them to estimate
+the pose of the query. IR methods can also be used to select relevant images for
+accurate pose estimation [4, 28, 61, 82, 83].
+Pose regression methods train a convolutional neural network (CNN) to
+regress the camera pose of an input image. There are two categories: absolute
+pose regression (APR) methods [5,8,14,30,32,36,45,65] and relative pose regression (RPR) methods [1, 19, 34, 36, 43]. It was shown [64] that APR is often not
+(much) more accurate than IR. RPR methods do not train a CNN per scene or
+a set of scenes, but instead, condition the CNN on a set of context views. While
+our approach performs relative pose regression, the main focus of our method
+is on the novel view synthesis. Some pose regression methods use novel view
+synthesis methods [14, 45, 46, 48], however, they assume there is a method that
+generates images, whereas our method performs both the novel view synthesis
+and camera pose regression in a single model. Iterative refinement pose regression methods [62, 78] start with an initial camera pose estimate and refine it
+by an iterative process, however, our approach generates novel views and the
+camera pose estimates in a single forward pass.
+3
+Method
+In this work, we tackle the problem of image-based novel view synthesis – given
+a set of context views, the algorithm has to generate the image it would most
+likely observe from a query camera pose. We focus on the case where the number
+of context views is small, and the views sparsely cover the 3D scene. Thus,
+the algorithm must hallucinate parts of the scene in a manner consistent with
+the context views. Therefore, it is necessary to learn a prior over a class of
+scenes (e.g., all indoor environments) and use this prior for novel scenes. Besides
+rendering novel views, our model can also perform camera pose estimation, i.e.,
+the “inverse” of the view synthesis task: given a set of context views and a query
+image, the model outputs the camera pose from which the image was taken.
+Our framework consists of two components: a codebook model and a transformer model. The codebook is used to map images to a smaller discrete latent
+space (code space), and back to the image space. In the code space, each image
+is represented by a sequence of tokens. For the novel view synthesis task, the
+transformer is given a set of context views in the code space and the query camera pose, and it generates an image in the code space. The codebook then maps
+the image tokens back to the image space. See Fig. 2 for an overview. For the
+camera pose estimation task, the transformer is given the set of context views
+and the query image in the code space, and it generates the camera pose using a
+regression head attached to the output of the transformer corresponding to the
+query image tokens.
+Having the codebook and the transformer as separate components was inspired by the recent work on image generation [22, 53, 59]. The main motivation
+is to decrease it sequence size, because the required memory grows quadrati-
+6
+J. Kulhánek et al.
+context images
+xi
+si
+generated image
+Transformer
+EEEθθ
+θ
+Dθ
+(si )
+(ci )
++
+context
+query
+Fig. 2. Inference pipeline. The context images xi are encoded by the codebook’s encoder Eθ to the code representation si . We embed all tokens in si , and add the transformed camera pose ci . The transformer generates the image tokens which are decoded
+by the codebook’s decoder Dθ
+cally with it. It also allows us to separate image generation and view synthesis,
+enabling us to train the transformer more efficiently in a simpler space.
+Codebook model is a VQ-VAE [49,54], which is a variational autoencoder with
+a categorical distribution over the latent space. The model consists of two parts:
+the encoder Eθ and decoder Dθ . The encoder first reduces the dimension of the
+input image from 128 × 128 pixels to 8 × 8 tokens by several strided convolution
+layers. The convolutional part is followed by a quantization layer, which maps
+the resulting feature map to a discrete space. The quantization layer stores nlat
+embedding vectors of the same dimension as the feature vectors returned by the
+convolutional part of the encoder. It encodes each point of the feature map by
+returning the index of the closest embedding vector. The output of the encoder
+at position (i, j) for image x is:
+\label {eq:codebook} \argmin _k \, \lVert (f^{(enc)}_\theta (x))_{i, j} - W^{(emb)}_k \rVert _2\enspace ,
+(1)
+(emb)
+where W (emb) ∈ Rnlat ×dlat is the embedding matrix with rows Wk
+of length
+(enc)
+dlat and fθ
+is the convolutional part of the encoder. The decoder then performs an inverse operation by first encoding the indices back to the embedding
+vectors by using W (emb) followed by several convolutional layers combined with
+upscaling to increase the spatial dimension back to the original image size.
+Since the operation in Eq. (1) is not differentiable, we approximate the gradient with a straight-through estimator [3] and copy the gradients from the decoder
+input to the encoder output. The final loss for the codebook is a weighted sum of
+three parts: the pixel-wise mean absolute error (MAE) between the input image
+and the reconstructed image, the perceptual loss between the input and reconstructed image [22], and the commitment loss [49, 54] Lc , which encourages the
+output of the encoder to stay close to the chosen embedding vector to prevent
+it from fluctuating too frequently from one vector to another:
+\mathcal {L}_c = \min _{k} \,|| f_{\theta }^{(enc)}(x)_{i, j} - \text {sg}(W_k^{(emb)})||_2^2 \enspace ,
+(2)
+...
+s5 ,c5
+pure context
+∅,c7
+s6 ,c6
+s7 ,c7
+s6 ,∅
+s7 ,∅
+∅,cn
+...
+sn ,cn
+sn ,∅
+localization
+s1 ,c1
+∅,c6
+7
+image gen.
+ViewFormer: NeRF-free Neural Rendering from Few Images
+output part
+Fig. 3. Branching attention mechanism: the nodes represent parts of the processed
+sequence. Starting in any node and tracing the arrows backwards gives the sequence
+over which the attention is computed, e.g., node s7 , ∅ attends to s1 , c1 , s2 , c2 , . . . , s7 , ∅.
+Blue and red nodes in the last transformer block are used in the loss computation
+where sg is the stop-gradient operation [49]. We use the exponential moving average updates for the codebook [49]. See [49, 54] for more details on the codebook,
+and the supp. mat. for the architecture details.
+Transformer. We first describe the case of image generation and extend the
+approach to camera pose estimation later. We optimize the transformer for multiple context sizes and multiple query views in the batch at the same time. This
+has two benefits: it will allow the trained model to handle different context sizes,
+and the model will fully utilize the training batch (multiple images will be targets
+in the loss function). Each training batch consists of a set of n views. Let (xi )ni=1
+be the sequence of images under a random ordering and (ci )ni=1 be the sequence
+of the associated camera poses. Let us also define the sequence of images transformed by the encoder Eθ parametrized by θ as si = Eθ (xi ), i = 1, . . . , n. Note
+that each si is itself a sequence of tokens. With this formulation, we generate
+the next image in the sequence given all the previous views, effectively optimizing all different context sizes at once. Therefore, we model the probability
+p(si |s<i , c≤i ). Note that we do not optimize the first nmin views (called the pure
+context), because they usually do not provide enough information for the task.
+In practice, we need to replace the tokens corresponding to each query view
+with mask tokens to allow the transformer to decode them in a single forward
+pass. For the image generation task, the tokens of the last image in the sequence
+are replaced with special mask tokens λ, and, for the localization task, the tokens
+of the last image do not include the camera pose (denoted as ∅). However, if
+we replaced the tokens in the training batch, the next query image would not
+be able to perceive the original tokens. Therefore, we have to process both the
+original and the masked tokens. For the i-th query image, we need the sequence
+of i − 1 context views ending with masked tokens at the i-th position. We can
+represent the sequences as a tree (see Fig. 3) where different endings branch
+off the shared trunk. By following a leaf node back to the root of the tree, we
+recover the original sequence corresponding to the particular query view.
+For localization, we train the model to output the camera pose ci given s≤i
+and c<i . For image generation, this leads to n − nmin sequences. We attach a
+regression head to the hidden representation of all tokens of the last image in
+8
+J. Kulhánek et al.
+the sequence. The query image tokens form the input, and we mask the camera
+poses by replacing the camera pose representation with a single trainable vector.
+Branching attention. In this section, we introduce the branching attention
+which computes attention over the tree shown in Fig. 3, and allows us to optimize
+the transformer model for all context sizes and tasks very efficiently. Note that
+we have to forward all tree nodes through all layers of the transformer. Therefore,
+the memory and time complexity is proportional to the number of nodes in the
+tree and thus to the number of views and tasks.
+The input to the branching attention is a sequence of triplets of keys, values,
+p
+and queries: (K (i) , Q(i) , V (i) ) i=0 for p = 2, because we train the model on two
+tasks. Each element in the sequence corresponds to a single row in Fig. 3 and
+i = 0 is the middle row. All K (i) , Q(i) , V (i) have the size (nk 2 ) × dm where dm is
+the dimensionality of the model and k is the size of the image
+p in the latent space.
+The output of the branching attention is a sequence R(i) i=0 . The case of R(0)
+is handled differently because it corresponds to the trunk shared for all tasks
+and context sizes. Let us define a lower triangular matrix M ∈ Rn×n , where
+mi,j = 1 if i ≤ j. We compute the causal block attention as:
+R^{(0)} = (\text {softmax}(Q^{(0)} (K^{(0)})^T) \odot M \otimes \mathbf {1}^{k^2 \times k^2}) V^{(0)}\enspace , \label {eqn:block_att}
+(3)
+where ⊗ and ⊙ are the Kronecker and element-wise product, respectively, and
+1m×n is a matrix of ones. Eq. (3) is similar to normal masked attention [74] with
+the only difference in the causal mask. In this case, we allow the model to attend
+to all previous images and all other vectors from the same image. For i > 0 we
+can compute R(i) as follows:
+D &= Q^{(i)} (K^{(0)})^T\enspace ,\\ C &= \begin {bmatrix} Q_{1:k^2}^{(i)} (K_{1:k^2}^{(i)})^T\\ \vdots \\ Q_{(n - 1) \cdot k^2 + 1:n \cdot k^2}^{(i)} (K_{(n - 1) \cdot k^2 + 1:n \cdot k^2}^{(i)})^T \end {bmatrix}\enspace ,\\ S &= \text {softmax}([D, C]) \odot [(M - I) \otimes \mathbf {1}^{k^2 \times k^2}), \mathbf {1}^{nk^2 \times k^2}]\enspace ,\\ S' &= S_{\cdot , 1:n \cdot k^2}\,, S'' = S_{\cdot , n \cdot k^2 + 1: (n + 1) \cdot k^2}\enspace ,\\ R^{(i)} &= S' V^{(0)} + \begin {bmatrix} S''_{1:k^2} V^{(i)}_{1:k^2}\\ \vdots \\ S''_{n \cdot k^2 + 1: (n + 1) \cdot k^2} V^{(i)}_{n \cdot k^2 + 1:(n+1) \cdot k^2}\\ \end {bmatrix}\enspace .
+(8)
+Matrix D represents the unmasked raw attention scores between i-th queries
+and keys from all previous images. Matrix C contains the raw pairwise attention
+scores between i-th queries and i-th keys (the ending of each sequence). Then,
+the softmax is computed to normalize the attention scores and the causal mask is
+applied to the result, yielding the attention matrix S, and the respective values
+are weighted by the computed scores. In particular, the scores contained in the
+last k 2 columns of the attention matrix are redistributed back to the associated
+ViewFormer: NeRF-free Neural Rendering from Few Images
+9
+i-th values. The result R(0) corresponds to the nodes in the middle row in Fig. 3,
+whereas R(i) , i > 0 are the other nodes.
+Transformer input and training. To build the input for the transformer,
+we first embed all image tokens into trainable vector embeddings of length dm .
+Before passing camera poses to the network, we express all camera poses relative
+to the first context camera pose in the sequence. We represent camera poses
+by concatenating the 3D position with the normalized orientation quaternion (a
+unit quaternion with a positive real part). Finally, we transform the camera poses
+with a trainable feed-forward neural network in order to increase the dimension
+to the same size as image token embeddings dm in order to be able to sum them.
+Similarly to [51], we also add the positional embeddings by summing the
+input sequence with a sequence of trainable vectors. However, our positional
+embeddings are shared for all images in the sequence, i.e., the i-th token of
+every image will share the same positional embedding.
+The output of the last transformer block is passed to an affine layer followed
+by a softmax layer, and it is trained using the cross-entropy loss to recover the
+last k 2 tokens (sj,1 , . . . , sj,k2 ). For the localization task, the output is passed
+through a two-layer feed-forward neural network, and it is trained using the
+mean square error to match the ground-truth camera pose of the last k 2 tokens.
+Note that we compute the losses over position and orientation separately and
+add them together without weighing.4 Since we attach the pose prediction head
+to the hidden representation of all tokens of the query image, we obtain multiple
+pose estimates. During inference, we simply average them.
+4
+Experiments
+To answer the question of whether explicit 3D reasoning is really needed for novel
+view synthesis, we designed a series of experiments evaluating the proposed approach. First, we evaluate the codebook, whose performance is the upper bound
+on what we can achieve with the full pipeline. We next compare our method to
+GQN-based methods [14,21,71] that also do not use continuous volumetric scene
+representations. We continue by evaluating our approach on other synthetic data.
+Then, we compare our approach to state-of-the-art NeRF-based approaches on
+a real-world dataset. Finally, we show our model’s localization performance.
+We evaluate our approach on both real and synthetic datasets: a) ShepardMetzler-7-Parts (SM7) [21,66] is a synthetic dataset, where objects composed
+of 7 cubes of different colors are rotated in space. b) ShapeNet [13] is a synthetic dataset of simple objects. We use 128 × 128 pixel images rendered by [69]
+containing two categories: cars and chairs. c) InteriorNet [35] is a collection
+of interior environments designed by 1,100 professional designers. We used the
+publicly available part of the dataset (20k scenes with 20 images each). While
+the dataset is synthetic, the renderings are similar to real-world environments.
+The first 600 environments serve as our test set. d) Common Objects in
+4
+We tried dynamic weighting as described in [31], but it performed worse.
+10
+J. Kulhánek et al.
+GT
+generated
+(a) InteriorNet [35]
+GT
+generated
+(b) CO3D [56]
+GT
+not-finetuned
+finetuned
+(c) 7-Scenes [24]
+Fig. 4. Codebook evaluation on multiple datasets comparing the ground truth (GT)
+with the reconstructed image. For the 7-Scenes dataset, we compare the model finetuned and not-finetuned on the 7-Scenes dataset
+context images
+GT
+GQN STR-GQN Ours
+Fig. 5. Results on the SM7 dataset. We compare against GQN [21] and STR-GQN [15]
+3D (CO3D) [56] is a real-world dataset containing 1.5 million images showing almost 19k objects from 51 MS-COCO [38] categories (e.g., apple, donut,
+vase, etc.). The capture of the dataset was crowd-sourced. e) 7-Scenes [24] is
+a real-world dataset depicting 7 indoor scenes as captured by a Kinect RGB-D
+camera. The dataset consists of 44 sequences of 500–1,000 frames each and it is
+a standard benchmark for visual localization [1, 8, 32, 34, 43].
+Codebook evaluation. First, we evaluate the quality of our codebooks by
+measuring the quality of the images generated by the encoder-decoder architecture without the transformer. We trained codebooks of size 1,024 using the same
+hyperparameters for all experiments using an architecture very similar to [22].
+The training took roughly 480 GPU-hours. A detailed description of the model
+and the hyperparameters is given in supp. mat. as well as in the published code.
+Examples of reconstructed images are shown in Fig. 4. As can be seen, although losing some details and image sharpness, the codebooks can recover the
+overall shape well. The results show that using the codebook leads to good results, even though we use only 8×8 codes to represent an image. In some images,
+there are noticeable artifacts. In our analysis, we pinpointed the perceptual loss
+ViewFormer: NeRF-free Neural Rendering from Few Images
+GT
+generated
+GT
+11
+generated
+Fig. 6. Evaluation of our method on the InteriorNet dataset with the context size 19
+to be the cause, but removing the perceptual loss led to more blurry images.
+Further analysis of the codebooks is included in the supp. mat.
+Full method evaluation. The transformer is trained using only the tokens
+generated by the codebook. Having verified that our codebooks work as intended,
+we evaluate our complete approach in the context of image synthesis. The architecture of our transformer model is based on GPT2 [51]. We give more details
+on the architecture, the motivation, and the hyperparameters in the supp. mat.
+The SM7 dataset was used to compare our approach to other methods that
+only operate in 2D image space [15, 21, 71]. Our method achieved the best mean
+absolute error (MAE) of 1.61, followed by E-GQN [71] with 2.14, STR-GQN [14]
+with 3.11 and the original GQN [21] method with MAE 3.13. The results were
+averaged over 1,000 scenes (context size was 3) and computed on images with
+size 64 × 64 pixels. A qualitative comparison is shown in Fig. 5.
+We use the InteriorNet dataset because of its large size and realistic appearance. The models pre-trained on it are also used in other experiments. Since each
+scene provides 20 images, we use 19 context views. Fig. 6 shows images generated
+by the model trained for both the localization and novel view synthesis tasks.
+ShapeNet evaluation. We used the InteriorNet pre-trained model and we finetuned it on the ShapeNet dataset. We trained a single model for both categories
+(cars and chairs) using 3 context views. The training details and additional
+results are given in supp. mat. We show the qualitative comparison with PixelNeRF [80] in Fig. 7. PixelNeRF trained a different model for each category.
+The results show that our method achieves good visual quality overall, especially on the cars dataset. However, the geometry is slightly distorted on the
+chairs. Compared to PixelNeRF, it prefers to hallucinate a part of the scene
+instead of rendering a blurry image. This can cause some neighboring views to
+have a different color or shape in places where the scene is less covered by context
+views. However, this problem can be reduced by simply adding the previously
+generated view to the set of context views. See the video in the supp. mat.
+Common Objects in 3D. In order to show that we can transfer a model pretrained on synthetic data to real-world scenes, we evaluate our method on the
+CO3D dataset [56]. We compare our approach with NeRF-based methods using
+12
+J. Kulhánek et al.
+context views
+GT
+PixelNeRF ViewFormer
+Fig. 7. ShapeNet qualitative comparison with PixelNeRF [80] using 2 context views
+Table 1. Novel view synthesis results on the CO3D dataset [56] on all categories
+and 10 categories from [56]. We compare ViewFormer with and without localization
+(‘no-loc’) trained on all categories (‘@ all cat.’) and 10 selected categories (‘@ 10 cat.’).
+We show the PSNR and LPIPS for seen and unseen scenes (‘train’ and ‘test’) and test
+PSNR with varying context size. The best value is bold; the second is underlined
+avg. test
+10 categories
+all categories
+EC Method
+avg. train
+3D PSNR↑ LPIPS↓ PSNR↑ LPIPS↓
+PSNR↑ @ # ctx. size
+9
+7
+5
+3
+1
+ViewFormer @ all cat.
+ViewFormer no-loc @ all cat.
+✗
+✗
+15.3
+15.4
+0.23
+0.23
+15.6
+15.8
+0.22
+0.22
+16.1
+16.2
+15.9
+16.0
+15.5
+15.6
+15.1
+15.2
+13.7
+13.8
+NerFormer [56]
+SRN+WCE
+SRN+WCE+γ
+NeRF+WCE [27]
+✗
+✗
+✗
+✗
+15.7
+14.2
+13.7
+11.6
+0.24
+0.27
+0.28
+0.27
+16.5
+16.3
+17.1
+12.6
+0.24
+0.25
+0.25
+0.27
+16.7
+14.4
+14.0
+11.9
+16.4
+14.3
+13.8
+11.8
+16.1
+14.3
+13.9
+11.8
+15.5
+14.2
+13.7
+11.6
+13.9
+13.5
+13.2
+10.8
+ViewFormer @ 10 cat.
+ViewFormer no-loc @ 10 cat.
+ViewFormer @ all cat.
+ViewFormer no-loc @ all cat.
+✗
+✗
+✗
+✗
+15.6
+15.6
+16.0
+16.1
+0.25
+0.25
+0.25
+0.25
+16.6
+17.1
+16.4
+16.6
+0.23
+0.22
+0.24
+0.23
+16.5
+16.5
+17.0
+17.0
+16.3
+16.2
+16.7
+16.8
+15.8
+15.8
+16.3
+16.3
+15.3
+15.3
+15.7
+15.8
+14.0
+14.0
+14.3
+14.3
+NerFormer [56]
+SRN+WCE+γ
+SRN+WCE
+NeRF+WCE [27]
+IPC+WCE
+P3DMesh
+NV+WCE
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+17.6
+14.4
+14.6
+13.8
+13.5
+12.4
+11.6
+0.27
+0.27
+0.27
+0.27
+0.37
+0.26
+0.35
+17.9
+17.6
+16.6
+14.3
+14.1
+17.2
+12.3
+0.26
+0.24
+0.26
+0.27
+0.36
+0.23
+0.34
+18.9
+14.6
+14.9
+12.6
+13.8
+12.6
+11.7
+18.6
+14.5
+14.8
+14.5
+13.8
+12.5
+11.6
+18.1
+14.6
+14.8
+14.4
+13.7
+12.5
+11.6
+17.1
+14.5
+14.6
+14.2
+13.6
+12.5
+11.6
+15.1
+13.9
+13.9
+13.8
+12.6
+12.1
+11.3
+the results reported in [56]. Unfortunately, we tried to train the PixelNeRF [80]
+on the CO3D dataset, but were not able to obtain good results. Therefore we
+omit it from the comparison. While the baselines are trained separately per
+category, we train two transformer models: one on the 10 categories used for
+ViewFormer: NeRF-free Neural Rendering from Few Images
+GT
+generated
+GT
+13
+generated
+Fig. 8. Evaluation of our method on the CO3D dataset [56] with the context size 9
+evaluation in [56] and one for all dataset categories. We fine-tune the model
+trained on the InteriorNet dataset. The context size is 9. Additional details and
+hyperparameters are given in supp. mat.
+The testing set of each category in the CO3D dataset is split into two subsets:
+‘train’ and ‘test’ containing unseen images of objects seen and unseen during
+training respectively. We use the evaluation procedure provided by Reizenstein
+et al. [56]. It evaluates the model on 1,000 sequences from each category with
+context sizes 1, 3, 5, 7, 9. The PSNR) and the LPIPS distance [81] are reported.
+Note that the PSNR is calculated only on foreground pixels. For more details on
+the evaluation procedure and the details of compared methods, please see [56].
+Tab. 1 shows results of the evaluation on all CO3D categories and on the 10
+categories used for evaluation in [56]. Our method is competitive even though it
+does not explicitly reason in 3D as other baselines, does not utilize object masks,
+and even though we trained a single model for all categories while other baselines
+are trained per category. Note that on the whole dataset, the top-performing
+method, NerFormer [56], was trained for about 8400 GPU-hours while training
+our codebook took 480 GPU-hours, training the transformer on InteriorNet took
+280 GPU-hours, and fine-tuning the transformer took 90 GPU-hours, giving a
+total of 850 GPU-hours. Also, note that rendering a single view takes 178 s for
+the NerFormer and only 93 ms for our approach.
+The results show that our model has a large capacity (it is able to learn all
+categories while the baselines are only trained on a single category), and it benefits from more training data as can be seen when comparing models trained on
+10 and all categories. We also observe that models achieve a higher performance
+on 10 categories than on all categories, suggesting that the categories selected by
+the authors of the dataset are easier to learn or of higher quality. All our models
+outperform all baselines in terms of LPIPS, which indicates that the images can
+look more realistic while possibly not matching the real images very precisely.
+Fig. 1 and 8 show qualitative results. Our method is able to generalize well
+to unseen object instances, although it tends to lose some details. To answer the
+original question if explicit 3D reasoning is needed for novel view synthesis, based
+on our results, we claim that even without explicit 3D reasoning, we can achieve
+similar results, especially when the data are noisy, e.g. a real-world dataset.
+14
+J. Kulhánek et al.
+Evaluating localization accuracy on 7-Scenes. We compare the localization part of our approach to methods from the literature on the 7-Scenes
+dataset [24]. Due to space constraints, here we only summarize the results of the
+comparisons. Detailed results can be found in the supp. mat.
+Our approach performs similar to existing APR and RPR techniques that also
+use only a single forward pass in a network [1, 8, 32, 65], but worse than iterative
+approaches such as [19] or methods that use more densely spaced synthetic
+views as additional input [45]. Note that these approaches that do not use 3D
+scene geometry are less accurate than state-of-the-art methods based on 2D-3D
+correspondences [7,61,63]. Overall, the results show that our approach achieves a
+similar level of pose accuracy as comparable methods. Furthermore, our approach
+is able to perform both localization and novel view synthesis in a simple forward
+pass, while other methods can only be used for localization.
+5
+Conclusions & future work
+This paper presents a two-stage approach to novel view synthesis from a few
+sparsely distributed context images. We train our model on classes of similar 3D
+scenes to be able to generalize to a novel scene with only a handful of images
+as opposed to NeRF and similar methods that are trained per scene. The model
+consists of a VQ-VAE codebook [49] and a transformer model. To efficiently
+train the transformer, we propose a novel branching attention module. Our approach, ViewFormer, can render a view from a previously unseen scene in 93 ms
+without any explicit 3D reasoning and we train a single model to render multiple categories of objects, whereas NeRF-based approaches train per-category
+models [56]. We show that our method is competitive with SoTA NeRF-based
+approaches especially on real-world data, even without any explicit 3D reasoning.
+This is an intriguing result because it implies that either current NeRF-based
+methods are not utilizing the 3D priors effectively or that a 2D-only model is
+able to learn it on its own without explicit 3D modeling. The experiments also
+show that ViewFormer outperforms other 2D-only multi-view methods.
+One limitation of our approach is the large amount of data needed, which we
+tackle through pre-training on a large synthetic dataset. Also, we need to finetune both the codebook and the transformer to achieve high-quality results on
+new datasets, which could be resolved by utilizing a larger codebook trained on
+more data. Using more tokens to represent images should increase the rendering
+quality and pose accuracy. We also want to experiment with a simpler architecture with no codebook and larger scenes, possibly of outdoor environments.
+Acknowledgements. This work was supported by the European Regional Development Fund under projects IMPACT (reg. no. CZ.02.1.01/0.0/0.0/15 003/
+0000468) and Robotics for Industry 4.0 (reg. no. CZ.02.1.01/0.0/0.0/15 003/
+0000470), the EU Horizon 2020 project RICAIP (grant agreement No 857306),
+the Grant Agency of the Czech Technical University in Prague (grant no. SGS22/
+112/OHK3/2T/13), and the Ministry of Education, Youth and Sports of the
+Czech Republic through the e-INFRA CZ (ID:90140).
+ViewFormer: NeRF-free Neural Rendering from Few Images
+15
+References
+1. Balntas, V., Li, S., Prisacariu, V.: RelocNet: Continuous metric learning relocalisation using neural nets. In: Proceedings of the European Conference on Computer
+Vision (ECCV). pp. 751–767 (2018) 3, 5, 10, 14, 25, 27
+2. Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R., Srinivasan, P.P.: Mip-NeRF: A multiscale representation for anti-aliasing neural radiance fields. In: Proceedings of the IEEE/CVF International Conference on Computer Vision. pp. 5855–5864 (2021) 1, 4
+3. Bengio, Y., Léonard, N., Courville, A.: Estimating or propagating gradients through stochastic neurons for conditional computation. arXiv preprint
+arXiv:1308.3432 (2013) 6
+4. Bhayani, S., Sattler, T., Barath, D., Beliansky, P., Heikkilä, J., Kukelova, Z.: Calibrated and partially calibrated semi-generalized homographies. In: Proceedings of
+the IEEE/CVF International Conference on Computer Vision (ICCV) (2021) 5
+5. Blanton, H., Greenwell, C., Workman, S., Jacobs, N.: Extending absolute pose
+regression to multiple scenes. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition Workshops. pp. 38–39 (2020) 5
+6. Brachmann, E., Rother, C.: Visual camera re-localization from RGB and RGB-D
+images using DSAC. IEEE Transactions on Pattern Analysis and Machine Intelligence pp. 1–1 (2021) 4, 27
+7. Brachmann, E., Rother, C.: Visual camera re-localization from RGB and RGB-D
+images using DSAC. IEEE Transactions on Pattern Analysis and Machine Intelligence (2021) 14, 25
+8. Brahmbhatt, S., Gu, J., Kim, K., Hays, J., Kautz, J.: Geometry-aware learning of
+maps for camera localization. In: Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition. pp. 2616–2625 (2018) 5, 10, 14, 25, 27
+9. Camposeco, F., Cohen, A., Pollefeys, M., Sattler, T.: Hybrid camera pose estimation. In: Proceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition. pp. 136–144 (2018) 5
+10. Cao, S., Snavely, N.: Graph-based discriminative learning for location recognition.
+In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. pp. 700–707 (2013) 5
+11. Cavallari, T., Golodetz, S., Lord, N.A., Valentin, J., Prisacariu, V.A., Di Stefano,
+L., Torr, P.H.S.: Real-time RGB-D camera pose estimation in novel scenes using a relocalisation cascade. IEEE transactions on pattern analysis and machine
+intelligence 42(10), 2465–2477 (2019) 4
+12. Chan, S., Shum, H.Y., Ng, K.T.: Image-based rendering and synthesis. IEEE Signal
+Processing Magazine 24(6), 22–33 (2007) 3
+13. Chang, A.X., Funkhouser, T., Guibas, L., Hanrahan, P., Huang, Q., Li, Z.,
+Savarese, S., Savva, M., Song, S., Su, H., et al.: ShapeNet: An information-rich
+3D model repository. arXiv preprint arXiv:1512.03012 (2015) 9
+14. Chen, S., Wang, Z., Prisacariu, V.: Direct-posenet: Absolute pose regression with
+photometric consistency. arXiv preprint arXiv:2104.04073 (2021) 5, 9, 11, 33
+15. Chen, W.C., Hu, M.C., Chen, C.S.: STR-GQN: Scene representation and rendering
+for unknown cameras based on spatial transformation routing. In: Proceedings
+of the IEEE/CVF International Conference on Computer Vision. pp. 5966–5975
+(2021) 3, 4, 10, 11, 30, 33
+16. Choi, I., Gallo, O., Troccoli, A., Kim, M.H., Kautz, J.: Extreme view synthesis.
+In: Proceedings of the IEEE/CVF International Conference on Computer Vision.
+pp. 7781–7790 (2019) 3, 4
+16
+J. Kulhánek et al.
+17. Derner, E., Gomez, C., Hernandez, A.C., Barber, R., Babuška, R.: Change detection using weighted features for image-based localization. Robotics and Autonomous Systems 135, 103676 (2021) 5
+18. Devlin, J., Chang, M.W., Lee, K., Toutanova, K.: BERT: Pre-training of deep
+bidirectional transformers for language understanding. In: Proceedings of the 2019
+Conference of the North American Chapter of the Association for Computational
+Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers).
+pp. 4171–4186. Association for Computational Linguistics, Minneapolis, Minnesota
+(Jun 2019) 3, 28
+19. Ding, M., Wang, Z., Sun, J., Shi, J., Luo, P.: CamNet: Coarse-to-fine retrieval for
+camera re-localization. In: Proceedings of the IEEE/CVF International Conference
+on Computer Vision. pp. 2871–2880 (2019) 5, 14, 25, 27
+20. Engilberge, M., Collins, E., Susstrunk, S.: Color representation in deep neural networks. In: Proceedings of the IEEE International Conference on Image Processing.
+pp. 2786–2790 (2017) 25
+21. Eslami, S.A., Rezende, D.J., Besse, F., Viola, F., Morcos, A.S., Garnelo, M., Ruderman, A., Rusu, A.A., Danihelka, I., Gregor, K., et al.: Neural scene representation
+and rendering. Science 360(6394), 1204–1210 (2018) 3, 4, 9, 10, 11, 30, 33, 34, 35
+22. Esser, P., Rombach, R., Ommer, B.: Taming transformers for high-resolution image
+synthesis. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition. pp. 12873–12883 (2021) 3, 5, 6, 10, 28, 34, 36
+23. Garbin, S.J., Kowalski, M., Johnson, M., Shotton, J., Valentin, J.: FastNeRF:
+High-fidelity neural rendering at 200FPS. In: Proceedings of the IEEE/CVF International Conference on Computer Vision. pp. 14346–14355 (2021) 2
+24. Glocker, B., Izadi, S., Shotton, J., Criminisi, A.: Real-time RGB-D camera relocalization. In: 2013 IEEE International Symposium on Mixed and Augmented Reality
+(ISMAR). pp. 173–179. IEEE (2013) 10, 14, 21, 25, 26, 34
+25. He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition. In:
+Proceedings of the IEEE conference on computer vision and pattern recognition.
+pp. 770–778 (2016) 36
+26. Hedman, P., Philip, J., Price, T., Frahm, J.M., Drettakis, G., Brostow, G.: Deep
+blending for free-viewpoint image-based rendering. ACM Transactions on Graphics
+(TOG) 37(6), 1–15 (2018) 3, 4
+27. Henzler, P., Reizenstein, J., Labatut, P., Shapovalov, R., Ritschel, T., Vedaldi, A.,
+Novotny, D.: Unsupervised learning of 3D object categories from videos in the wild.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 4700–4709 (2021) 4, 12
+28. Irschara, A., Zach, C., Frahm, J.M., Bischof, H.: From structure-from-motion point
+clouds to fast location recognition. In: 2009 IEEE Conference on Computer Vision
+and Pattern Recognition. pp. 2599–2606. IEEE (2009) 5
+29. Jain, A., Tancik, M., Abbeel, P.: Putting nerf on a diet: Semantically consistent
+few-shot view synthesis. In: Proceedings of the IEEE/CVF International Conference on Computer Vision. pp. 5885–5894 (2021) 4
+30. Kendall, A., Cipolla, R.: Modelling uncertainty in deep learning for camera relocalization. In: 2016 IEEE International Conference on Robotics and Automation
+(ICRA). pp. 4762–4769. IEEE (2016) 5
+31. Kendall, A., Cipolla, R.: Geometric loss functions for camera pose regression with
+deep learning. In: Proceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition. pp. 5974–5983 (2017) 9
+ViewFormer: NeRF-free Neural Rendering from Few Images
+17
+32. Kendall, A., Grimes, M., Cipolla, R.: PoseNet: A convolutional network for realtime 6-DOF camera relocalization. In: Proceedings of the IEEE International Conference on Computer Vision. pp. 2938–2946 (2015) 5, 10, 14, 25, 27
+33. Kingma, D.P., Ba, J.: Adam: A method for stochastic optimization. In: ICLR
+(Poster) (2015) 34
+34. Laskar, Z., Melekhov, I., Kalia, S., Kannala, J.: Camera relocalization by computing pairwise relative poses using convolutional neural network. In: Proceedings of
+the IEEE International Conference on Computer Vision Workshops. pp. 929–938
+(2017) 5, 10
+35. Li, W., Saeedi, S., McCormac, J., Clark, R., Tzoumanikas, D., Ye, Q., Huang,
+Y., Tang, R., Leutenegger, S.: InteriorNet: Mega-scale multi-sensor photo-realistic
+indoor scenes dataset. In: British Machine Vision Conference (BMVC) (2018) 2,
+9, 10, 21, 22, 27, 28, 29, 30, 34
+36. Li, X., Ling, H.: TransCamP: Graph transformer for 6-DoF camera pose estimation.
+ArXiv abs/2105.14065 (2021) 5
+37. Li, Y., Snavely, N., Huttenlocher, D.P., Fua, P.: Worldwide Pose Estimation Using
+3D Point Clouds. In: ECCV (2012) 4
+38. Lin, T.Y., Maire, M., Belongie, S., Hays, J., Perona, P., Ramanan, D., Dollár,
+P., Zitnick, C.L.: Microsoft COCO: Common objects in context. In: European
+Conference on Computer Vision. pp. 740–755. Springer (2014) 10
+39. Liu, L., Gu, J., Zaw Lin, K., Chua, T.S., Theobalt, C.: Neural sparse voxel fields.
+Advances in Neural Information Processing Systems 33 (2020) 4
+40. Loshchilov, I., Hutter, F.: Decoupled weight decay regularization. In: International
+Conference on Learning Representations (2018) 35
+41. Lynen, S., Zeisl, B., Aiger, D., Bosse, M., Hesch, J., Pollefeys, M., Siegwart, R.,
+Sattler, T.: Large-scale, real-time visual–inertial localization revisited. The International Journal of Robotics Research 39(9), 1061–1084 (2020) 4
+42. Martin-Brualla, R., Radwan, N., Sajjadi, M.S., Barron, J.T., Dosovitskiy, A., Duckworth, D.: NeRF in the wild: Neural radiance fields for unconstrained photo collections. In: Proceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition. pp. 7210–7219 (2021) 3, 4
+43. Melekhov, I., Ylioinas, J., Kannala, J., Rahtu, E.: Relative camera pose estimation
+using convolutional neural networks. In: International Conference on Advanced
+Concepts for Intelligent Vision Systems. pp. 675–687. Springer (2017) 5, 10
+44. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: NeRF: Representing scenes as neural radiance fields for view synthesis. In:
+European Conference on Computer Vision. pp. 405–421. Springer (2020) 1, 4
+45. Moreau, A., Piasco, N., Tsishkou, D., Stanciulescu, B., de La Fortelle, A.: LENS:
+Localization enhanced by NeRF synthesis. In: 5th Annual Conference on Robot
+Learning (2021) 5, 14, 25, 27
+46. Mueller, M.S., Sattler, T., Pollefeys, M., Jutzi, B.: Image-to-image translation for
+enhanced feature matching, image retrieval and visual localization. ISPRS Annals
+of the Photogrammetry, Remote Sensing and Spatial Information Sciences 4, 111–
+119 (2019) 5
+47. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989 (2022) 2
+48. Ng, T., Lopez-Rodriguez, A., Balntas, V., Mikolajczyk, K.: Reassessing the Limitations of CNN Methods for Camera Pose Regression. arXiv:2108.07260 (2021)
+5
+18
+J. Kulhánek et al.
+49. van den Oord, A., Vinyals, O., kavukcuoglu, k.: Neural discrete representation
+learning. In: Guyon, I., Luxburg, U.V., Bengio, S., Wallach, H., Fergus, R., Vishwanathan, S., Garnett, R. (eds.) Advances in Neural Information Processing Systems. vol. 30. Curran Associates, Inc. (2017) 3, 6, 7, 14
+50. Parmar, N., Vaswani, A., Uszkoreit, J., Kaiser, L., Shazeer, N., Ku, A., Tran, D.:
+Image transformer. In: International Conference on Machine Learning. pp. 4055–
+4064. PMLR (2018) 3, 28
+51. Radford, A., Wu, J., Child, R., Luan, D., Amodei, D., Sutskever, I.: Language
+models are unsupervised multitask learners (2019) 3, 9, 11, 28, 35
+52. Ramachandran, P., Zoph, B., Le, Q.V.: Searching for activation functions. arXiv
+preprint arXiv:1710.05941 (2017) 36
+53. Ramesh, A., Pavlov, M., Goh, G., Gray, S., Voss, C., Radford, A., Chen, M.,
+Sutskever, I.: Zero-shot text-to-image generation. arXiv preprint arXiv:2102.12092
+(2021) 3, 5, 28, 34, 36
+54. Razavi, A., van den Oord, A., Vinyals, O.: Generating diverse high-fidelity images
+with vq-vae-2. In: Wallach, H., Larochelle, H., Beygelzimer, A., d'Alché-Buc, F.,
+Fox, E., Garnett, R. (eds.) Advances in Neural Information Processing Systems.
+vol. 32. Curran Associates, Inc. (2019) 6, 7
+55. Reiser, C., Peng, S., Liao, Y., Geiger, A.: KiloNeRF: Speeding up neural radiance
+fields with thousands of tiny MLPs. In: Proceedings of the IEEE/CVF International Conference on Computer Vision. pp. 14335–14345 (2021) 2, 4
+56. Reizenstein, J., Shapovalov, R., Henzler, P., Sbordone, L., Labatut, P., Novotny,
+D.: Common objects in 3D: Large-scale learning and evaluation of real-life 3D category reconstruction. In: Proceedings of the IEEE/CVF International Conference
+on Computer Vision. pp. 10901–10911 (2021) 1, 2, 4, 10, 11, 12, 13, 14, 21, 22, 23,
+34, 35
+57. Riegler, G., Koltun, V.: Free view synthesis. In: European Conference on Computer
+Vision. pp. 623–640. Springer (2020) 3, 4
+58. Riegler, G., Koltun, V.: Stable view synthesis. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. pp. 12216–12225 (2021)
+3, 4
+59. Rombach, R., Esser, P., Ommer, B.: Geometry-free view synthesis: Transformers
+and no 3d priors. In: Proceedings of the IEEE/CVF International Conference on
+Computer Vision. pp. 14356–14366 (2021) 2, 4, 5
+60. Saito, S., Huang, Z., Natsume, R., Morishima, S., Kanazawa, A., Li, H.: PIFu:
+Pixel-aligned implicit function for high-resolution clothed human digitization. In:
+Proceedings of the IEEE/CVF International Conference on Computer Vision. pp.
+2304–2314 (2019) 4
+61. Sarlin, P.E., Cadena, C., Siegwart, R., Dymczyk, M.: From coarse to fine: Robust
+hierarchical localization at large scale. In: CVPR (2019) 4, 5, 14, 25, 27
+62. Sarlin, P.E., Unagar, A., Larsson, M., Germain, H., Toft, C., Larsson, V., Pollefeys,
+M., Lepetit, V., Hammarstrand, L., Kahl, F., et al.: Back to the feature: Learning
+robust camera localization from pixels to pose. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. pp. 3247–3257 (2021) 5
+63. Sattler, T., Leibe, B., Kobbelt, L.: Efficient & effective prioritized matching for
+large-scale image-based localization. IEEE Transactions on Pattern Analysis and
+Machine Intelligence 39(9), 1744–1756 (2016) 4, 14, 25, 27
+64. Sattler, T., Zhou, Q., Pollefeys, M., Leal-Taixe, L.: Understanding the limitations
+of CNN-based absolute camera pose regression. In: Proceedings of the IEEE/CVF
+Conference On computer Vision and Pattern Recognition. pp. 3302–3312 (2019)
+5, 25, 27
+ViewFormer: NeRF-free Neural Rendering from Few Images
+19
+65. Shavit, Y., Ferens, R., Keller, Y.: Learning multi-scene absolute pose regression
+with transformers. arXiv preprint arXiv:2103.11468 (2021) 3, 5, 14, 25, 27
+66. Shepard, R.N., Metzler, J.: Mental rotation of three-dimensional objects. Science
+171(3972), 701–703 (1971) 9, 30, 34, 35
+67. Shotton, J., Glocker, B., Zach, C., Izadi, S., Criminisi, A., Fitzgibbon, A.: Scene
+Coordinate Regression Forests for Camera Relocalization in RGB-D Images. In:
+CVPR (2013) 4
+68. Shum, H., Kang, S.B.: Review of image-based rendering techniques. In: Visual
+Communications and Image Processing 2000. vol. 4067, pp. 2–13. International
+Society for Optics and Photonics (2000) 3
+69. Sitzmann, V., Zollhöfer, M., Wetzstein, G.: Scene representation networks: Continuous 3D-structure-aware neural scene representations. Advances in Neural Information Processing Systems 32 (2019) 4, 9, 29, 30
+70. Thies, J., Zollhöfer, M., Theobalt, C., Stamminger, M., Nießner, M.: Image-guided
+neural object rendering. In: 8th International Conference on Learning Representations. OpenReview. net (2020) 4
+71. Tobin, J., Zaremba, W., Abbeel, P.: Geometry-aware neural rendering. Advances
+in Neural Information Processing Systems 32, 11559–11569 (2019) 3, 4, 9, 11, 30,
+33
+72. Torii, A., Arandjelovic, R., Sivic, J., Okutomi, M., Pajdla, T.: 24/7 place recognition by view synthesis. In: Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition. pp. 1808–1817 (2015) 25
+73. Trevithick, A., Yang, B.: GRF: Learning a general radiance field for 3d representation and rendering. In: Proceedings of the IEEE/CVF International Conference
+on Computer Vision. pp. 15182–15192 (2021) 4
+74. Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A.N., Kaiser,
+L., Polosukhin, I.: Attention is all you need. In: Advances in neural information
+processing systems. pp. 5998–6008 (2017) 3, 8, 28
+75. Wang, Q., Wang, Z., Genova, K., Srinivasan, P.P., Zhou, H., Barron, J.T., MartinBrualla, R., Snavely, N., Funkhouser, T.: IBRNET: Learning multi-view imagebased rendering. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 4690–4699 (2021) 1, 4
+76. Wang, Z., Bovik, A.C.: Mean squared error: Love it or leave it? a new look at signal
+fidelity measures. IEEE signal processing magazine 26(1), 98–117 (2009) 29
+77. Wu, Y., He, K.: Group normalization. In: Proceedings of the European conference
+on computer vision (ECCV). pp. 3–19 (2018) 36
+78. Yen-Chen, L., Florence, P., Barron, J.T., Rodriguez, A., Isola, P., Lin, T.Y.: iNeRF:
+Inverting neural radiance fields for pose estimation. In: IEEE/RSJ International
+Conference on Intelligent Robots and Systems (IROS) (2021) 3, 5
+79. Yu, A., Li, R., Tancik, M., Li, H., Ng, R., Kanazawa, A.: PlenOctrees for real-time
+rendering of neural radiance fields. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision. pp. 5752–5761 (2021) 2, 4
+80. Yu, A., Ye, V., Tancik, M., Kanazawa, A.: pixelNeRF: Neural radiance fields from
+one or few images. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition. pp. 4578–4587 (2021) 1, 2, 4, 11, 12, 22, 29, 30,
+31, 32
+81. Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O.: The unreasonable
+effectiveness of deep features as a perceptual metric. In: Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition. pp. 586–595 (2018) 13,
+29, 34
+20
+J. Kulhánek et al.
+82. Zhang, W., Kosecka, J.: Image based localization in urban environments. In: Third
+international symposium on 3D data processing, visualization, and transmission
+(3DPVT’06). pp. 33–40. IEEE (2006) 5
+83. Zhou, Q., Sattler, T., Pollefeys, M., Leal-Taixé, L.: To learn or not to learn: Visual
+localization from essential matrices. In: 2020 IEEE International Conference on
+Robotics and Automation (ICRA). pp. 3319–3326 (2020) 5
+ViewFormer: NeRF-free Neural Rendering
+from Few Images Using Transformers
+–
+Supplementary Material
+Jonáš Kulhánek1,2 , Erik Derner1 , Torsten Sattler1 , and Robert
+Babuška1,3
+1
+Czech Institute of Informatics, Robotics and Cybernetics,
+Czech Technical University in Prague
+2
+Faculty of Electrical Engineering, Czech Technical University in Prague
+3
+Cognitive Robotics, Faculty of 3mE, Delft University of Technology
+https://jkulhanek.github.io/viewformer
+In this supplementary material, we give more details on the results presented
+in the main paper and provide more details on the network architecture. First,
+in Sec. A, we present additional qualitative results on various datasets. We also
+show examples of context views used to render the final view. The attached
+video is described in Sec. B. We include the camera pose estimation results on
+the 7-Scenes dataset [24] in Sec. C, and we also show qualitative results of the
+novel view synthesis task on the same dataset. In Sec. D, we present an ablation
+study. We also show how the performance increases with larger context sizes. In
+Sections E and F, we include additional results on the ShapeNet dataset and
+the Shepard-Metzler-Parts-7 (SM7) dataset, respectively. Quantitative results of
+the codebook model are given in Sec. G. Finally, we give details on the training
+hyperparameters and architecture of the models in Sections H and I.
+A
+Qualitative results
+We add qualitative results to the ones presented in the paper (see Fig. 1, 6,
+and 8 in the main paper). We show the context views together with the rendered
+images on the InteriorNet [35], the Common Objects in 3D (CO3D) [56], and
+the 7-Scenes [24] datasets. The generated images are displayed in Fig. 9, Fig. 10,
+and Fig. 12, respectively. We also show images generated with full context sizes
+in Fig. 11. It is important to note that all the visualizations, including the video,
+were rendered on previously unseen scenes (objects).
+The images rendered on the largest and most complex dataset – InteriorNet,
+although slightly blurry, resemble the ground truth (GT) images well. For the
+7-Scenes dataset, the trained model overfitted the data, and the quality of the
+generated images was not as good as on other datasets. Notice how the image
+rendered on CO3D is smoother than the ground truth image. In the case of the
+flower pot (Fig. 10), we can see that the model could not represent the particular
+shape and used a simpler shape instead. This is an intriguing property of the
+22
+J. Kulhánek et al.
+context images
+GT
+generated
+Fig. 9. Visualization of the model trained on the InteriorNet dataset [35]. We show the
+images generated with context size 8 while the model was trained with context size 19
+model which in the case of incomplete information uses its large prior to achieve
+more realistic renderings at the cost of being less similar to the real object.
+B
+Attached video
+We attach a video file4 showing the generated images on various datasets. The
+video contains the results generated on the ShapeNet, CO3D, InteriorNet, and
+7-Scenes datasets. On the ShapeNet dataset, we compare our model with PixelNeRF [80]. We render video sequences of rotating objects using the same three
+context views. For the CO3D dataset, we show video sequences of rotating objects using 9 context views. We also show how the model changes its prediction given more context views. Unfortunately, we cannot compare with PixelNeRF [80] because the method was not able to converge properly on the dataset
+(see Sec. 4 in the main paper). Also, we cannot compare with NerFormer [56]
+because the source code is not publicly available. Finally, we show the results on
+the InteriorNet dataset as well as on all scenes from the 7-Scenes dataset.
+One might expect that with the discrete codebook codes the learned representation would be quantized and an arbitrary pose could not be represented
+by the model. However, from the sequences generated on the ShapeNet dataset,
+we can see that this problem does not occur and the model is able to capture
+the motion, smoothly transitioning between the true poses. Therefore, although
+the codes are discrete, they can represent a continuous range of objects’ orientations and positions. It is interesting to see that our approach is occasionally
+4
+https://jkulhanek.com/viewformer/video.html
+ViewFormer – Supplementary Material
+ctx. images
+GT
+23
+generated
+Fig. 10. Visualization of the model trained on the CO3D dataset [56]. We show the
+images generated with context sizes 1, 4, and 8 while the model was trained with
+context size 9
+24
+J. Kulhánek et al.
+GT
+generated
+GT
+generated
+Fig. 11. Images generated on the InteriorNet dataset (left) with context size 19 and
+the CO3D dataset (right) with context size 9. For the CO3D evaluation, we used the
+model trained on all categories
+ViewFormer – Supplementary Material
+25
+Table 2. Camera pose estimation accuracy on the 7-Scenes dataset [24], reported as
+the mean median position (in meters) and orientation (in degrees) errors over all scenes.
+We report results with an InteriorNet pre-trained codebook (‘-in’) and a codebook
+fine-tuned on 7-Scenes (‘-7s’). We further compare a simple decoding scheme (random
+context views) with a variant that uses the top-10 most similar training images for
+each query view (‘top10’), identified via image retrieval
+All
+Pos/Ori
+Chess
+Pos/Ori
+Fire
+Pos/Ori
+ViewFormer-in
+ViewFormer-in-top10
+ViewFormer-7s
+ViewFormer-7s-top10
+0.24/10.49
+0.19/7.82
+0.23/8.46
+0.17/6.68
+0.16/8.03
+0.13/6.36
+0.15/6.31
+0.12/4.85
+0.24/11.35 0.17/13.23 0.25/10.33 0.23/8.20
+0.22/10.27 0.17/10.85 0.17/6.42 0.19/6.26
+0.23/10.03 0.19/12.68 0.23/7.69 0.19/5.59
+0.20/8.65 0.17/10.41 0.15/5.11 0.16/4.78
+0.31/11.01 0.30/11.28
+0.21/6.62 0.21/7.97
+0.27/7.75 0.31/9.18
+0.18/5.01 0.22/7.93
+Oracle-top10
+0.21/10.01
+0.18/9.16
+0.27/10.37 0.12/11.44 0.22/8.33
+0.24/8.20
+0.26/9.72
+0.19/12.85
+PoseNet [32]
+MapNet [8]
+LENS [45]
+MS-Transformer [65]
+RelocNet [1]
+CamNet [19]
+DenseVLAD [64, 72]
+DenseVLAD+Int. [64]
+0.44/10.4
+0.18/6.56
+0.05/2.5
+0.18/7.28
+0.21/6.72
+0.04/1.69
+0.26/13.1
+0.24/11.7
+0.32/8.12
+0.09/3.24
+0.04/2.0
+0.11/4.66
+0.12/4.14
+0.04/1.73
+0.21/12.5
+0.18/10.0
+0.47/14.4
+0.20/9.29
+0.03/1.5
+0.24/9.6
+0.26/10.4
+0.03/1.74
+0.33/13.8
+0.33/12.4
+0.29/12.0 0.48/7.68
+0.12/8.45 0.19/5.45
+0.02/1.5
+0.09/3.6
+0.14/12.19 0.17/5.66
+0.14/10.5 0.18/5.32
+0.05/1.98 0.04/1.62
+0.15/14.9 0.28/11.2
+0.14/14.3 0.25/10.1
+0.47/8.42
+0.19/3.96
+0.08/3.1
+0.18/4.44
+0.26/4.17
+0.04/1.64
+0.31/11.3
+0.26/9.42
+0.59/8.64
+0.20/4.94
+0.07/3.4
+0.17/5.94
+0.23/5.0
+0.04/1.63
+0.30/12.3
+0.27/11.1
+0.47/13.8
+0.27/10.57
+0.03/2.2
+0.26/8.45
+0.28/7.53
+0.04/1.51
+0.25/15.8
+0.24/14.7
+DSAC* [7]
+hloc [61]
+Active Search [63]
+0.03/1.36
+0.03/1.09
+0.04/1.18
+0.02/1.10
+0.02/0.85
+0.03/0.87
+0.02/1.24
+0.02/0.94
+0.02/1.01
+0.01/1.82
+0.01/0.75
+0.01/0.82
+0.04/1.34
+0.05/1.30
+0.07/1.69
+0.04/1.68
+0.04/1.40
+0.05/1.72
+0.03/1.16
+0.05/1.47
+0.04/1.01
+Method
+Heads
+Pos/Ori
+Office
+Pos/Ori
+0.03/1.15
+0.03/0.92
+0.04/1.15
+Pumpkin
+Pos/Ori
+Kitchen
+Pos/Ori
+Stairs
+Pos/Ori
+not color consistent from frame to frame, e.g., see the police car at time 0:07.
+We believe that the cause of this problem may stem from the codebook. It was
+trained using a perceptual loss, which might be less sensitive to colors [20]. On
+the InteriorNet dataset (time 3:02), look at the pictures on the wall. The model
+first generates a window in place of the pictures, and with more context views,
+it replaces the window with two pictures. This illustrates well how the model
+improves its prediction given more context views.
+C
+7-Scenes evaluation
+In order to evaluate the performance of our approach on the task of camera
+pose estimation, we present the results on a localization benchmark dataset –
+7-Scenes [24] (cf. Sec. 4 in the main paper). We trained two models – one with a
+fine-tuned codebook and the other one with the InteriorNet-trained codebook.
+For all models, we used context size 19. We have evaluated the method on all
+views from the test set of each of the 7 scenes and used the views from the
+training set as context images. Generated images can be seen in Fig. 12.
+For localization, we have experimented with different strategies for obtaining
+the context view required by our approach: by default, we simply randomly select
+19 training images as context for each test image. We further evaluate a variant
+that uses the top-10 most similar images identified via image retrieval with
+DenseVLAD [72] descriptors (indicated as “-top10”). The remaining 9 context
+images are randomly selected from the training images. We also experimented
+with using the top-19 retrieved images but found this approach to work worse.
+We attribute this to the fact that the images of the 7-Scenes datasets are taken
+26
+J. Kulhánek et al.
+GT
+interiornet-cb
+7scenes-cb
+Fig. 12. Evaluation of the transformer model on the 7-Scenes dataset [24]. We display
+the ground-truth image (GT), the image generated using a codebook trained only on
+the InteriorNet dataset (interiornet-cb) and the image generated by a model with
+codebook fine-tuned on the 7-Scenes (7scenes-cb). For the visualization the context
+size was set to 19
+ViewFormer – Supplementary Material
+27
+in sequences and that there is little viewpoint variation between the top-19
+retrieved images.
+We evaluate variants where the codebook is trained only on InteriorNet (indicated as “-in”) and where the codebook is fine-tuned on the training images of
+7-Scenes (“-7s“). As can be seen in Tab. 2, using a fine-tuned codebook improves
+performance. Similarly, using the top-10 retrieved images leads to more accurate
+camera poses. For evaluation, we follow the common practice and report the
+median position and orientation error per scene, as well as the mean median
+position and mean median orientation error over all the scenes.
+To better understand the performance of our approach, we compare it against
+an oracle. Given the top-10 retrieved images via DenseVLAD, the oracle selects
+the retrieved image with the smallest position and the smallest orientation error.
+As shown in Tab. 2, our approach outperforms the oracle on most scenes. This
+implies that the model is able to interpolate the context views such that it
+generates a pose that is closer to the query than any other in the context.
+Tab. 2 also includes comparison with various baselines. Absolute pose regression techniques [8, 32, 45, 65] train a CNN to directly regress the camera pose
+for a given input image. Our approach performs similarly well or better than
+these baselines, with the exception of LENS [45], which uses additional training
+data in the form of images rendered from novel viewpoints. Our approach also
+typically outperforms the two image retrieval-based baselines (DenseVLAD and
+DenseVLAD + Int.) They were proposed in [64] as a form of sanity check for
+absolute pose regression approaches.
+Similar to our approach, relative pose regression approaches [1, 19] estimate
+the pose of the test image wrt. a set of context views. These context views are
+obtained by finding the most similar training images using image retrieval. Our
+approach performs similarly well (and often better) as RelocNet [1], which also
+uses a single forward pass to regress relative poses (between pairs of images).
+CamNet [19] uses a more complicated pipeline consisting of coarse and fine
+relative pose regression stages, which results in higher accuracy.
+Structure-based approaches use 2D-3D matches between pixels in a test image and 3D scene points [6, 61, 63]. These approaches currently represent the
+state-of-the-art in terms of pose accuracy and are more accurate than pose
+regression-based techniques. In contrast to the other baselines, they store the
+3D structure of the scene. Overall, the results show that our approach achieves
+a similar level of pose accuracy as comparable methods.
+D
+Ablation study
+We compare our model with alternative architectures to validate the design
+choices we made. We also demonstrate how the quality of predictions improves
+with larger context sizes. The InteriorNet dataset [35] was used for all evaluations
+because of its large size. The context size was 19.
+Different model variants. We compare variants of our approach trained for
+only one of the two tasks – image generation and localization – on the Interi-
+28
+J. Kulhánek et al.
+orNet dataset [35]. We also evaluate the importance of the proposed branching
+attention by training alternative language models (LMs) that do not use it. As
+discussed in Sec. 1 in the main paper, one way to train the transformer without
+the branching attention is to have a purely autoregressive (causal) LM [51, 74].
+These models were successfully applied to similar tasks [22,50,53]. We also train
+another alternative – masked LMs – that benefits from the same inference speed
+as our method [18]. In particular, the following models are compared:
+– ViewFormer – our approach with both localization and image generation
+enabled.
+– ViewFormer no-loc – our approach without localization.
+– ViewFormer no-imagen – our approach without image generation.
+– Causal LM – the same transformer model with autoregressive decoding.
+Instead of decoding all tokens at once, we model the probability distribution
+over the next image token given all previous tokens [51, 74].
+– Causal LM + masked loc. – causal LM with added localization. For the
+localization, we mask the poses of three random views from the training
+batch and attach a regression head to the last token of each image.
+– Masked LM – the same transformer model with masked decoding (without
+the branching attention). We randomly mask three views from the training
+sequence and train the model to recover it. Note that the model is optimized
+for a single context size (previous variants optimized for all context sizes).
+– Masked LM + masked loc. – masked LM with added localization. For
+the localization, we mask the poses of three random views from the training
+batch and attach a regression head to all image tokens. The resulting poses
+are averaged in the same way as in ViewFormer.
+The results (averaged over all test scenes) are shown in Tab. 3. We also
+include a qualitative comparison in Fig. 13. As can be seen, training without
+the localization task improves image quality, whereas there is little difference in
+terms of pose accuracy between training with or without the generation.
+Our method outperforms both causal LM and masked LM in image generation performance and localization accuracy. Note that our decoding is much
+faster compared to causal LM because we decode all tokens at once (see Section 1 in the main paper). For a causal LM, generating a single view takes 10 s
+even when using cache. Compare this to 93 ms for the ViewFormer. Compared
+to masked LM, our model has the same inference speed, but the added benefit
+of being optimized for all context sizes. Masked LM can be optimized for one
+context size only.
+Increasing the context size. We show the effect of increasing the context size
+on localization and image generation performance. The image generation performance (measured with PSNR) and the localization accuracy (median Euclidean
+distance between the predicted camera position and the ground truth) are shown
+in Fig. 14. The results were computed on all scenes from the test set.
+We can see that the performance of both novel view synthesis and camera
+pose estimation increases with more context views. The change is most prominent in the first five views, but after that it keeps increasing as well.
+ViewFormer – Supplementary Material
+GT
+ViewFormer
+ViewFormer
+no-loc
+Causal LM
+Causal LM
+masked loc.
+Masked LM
+29
+Masked LM
+masked loc.
+Fig. 13. Examples generated by alternative architectures described in Sec. D. The
+examples were generated on the test set of the InteriorNet dataset using context size
+19.
+Table 3. Ablation study evaluated on the InteriorNet dataset [35]. See Sec. D for a
+description of the compared variants. We show the PSNR, the pixel-wise MAE, and
+the LPIPS distance [81]. For localization, we show the median position error in meters
+and the median orientation error in degrees computed over all scenes.
+Image generation
+E
+Localization
+Method
+PSNR↑ MAE↓ LPIPS↓
+Pos/Ori↓
+ViewFormer
+ViewFormer no-loc
+ViewFormer no-imagen
+18.53
+19.10
+-
+23.35
+21.56
+-
+0.33
+0.32
+-
+0.19/4.22
+0.19/4.34
+Causal LM
+Causal LM + masked loc.
+Masked LM
+Masked LM + masked loc.
+16.75
+16.67
+18.76
+14.51
+29.88
+30.22
+22.91
+42.89
+0.39
+0.39
+0.32
+0.51
+0.22/6.24
+0.32/29.65
+ShapeNet evaluation
+In this section, we give more details on the ShapeNet results from the main paper
+(Fig. 7). We include quantitative and additional qualitative results. We trained
+our model on ShapeNet dataset rendered by SRN [69]. The context size used for
+training was three. We compare ViewFormer with SRN [69] and PixelNeRF [80].
+We show the PSNR and SSIM [76] averaged across color channels for both car
+30
+J. Kulhánek et al.
+1.4
+18
+1.2
+Pos. error
+PSNR
+16
+14
+12
+10
+1.0
+0.8
+0.6
+0.4
+8
+0.2
+0
+5
+10
+15
+0
+5
+Context size
+10
+15
+Context size
+Fig. 14. This plot shows the effect of increasing the context size on the PSNR (left)
+and the position error (right) evaluated on the InteriorNet dataset [35]
+Table 4. ShapeNet results comparing ViewFormer with SRN [69] and PixelNeRF [80].
+We show the results for both car and chair category with one or two context views
+cars 1 view
+Method
+cars 2 views
+chairs 1 view
+chairs 2 views
+3D PSNR↑ SSIM↑ PSNR↑ SSIM↑ PSNR↑ SSIM↑ PSNR↑ SSIM↑
+ViewFormer
+✗ 19.03
+0.83
+20.09
+0.85
+14.74
+0.79
+17.20
+0.84
+SRN [69]
+PixelNeRF [80]
+✓ 22.25
+✓ 23.72
+0.89
+0.91
+24.84
+26.20
+0.92
+0.94
+22.89
+23.17
+0.89
+0.90
+24.48
+25.66
+0.92
+0.94
+and chair categories with one or two context views. The results are presented in
+Tab. 4. We also extend Fig. 7 from the paper with additional qualitative results
+on cars and chairs in Fig. 15 and 16.
+From the results, we can see that our method performs worse than both
+SRN [69] and PixelNeRF [80] in terms of the quantitative results. This is expected because our method was designed for more views (more than 10) and
+was evaluated using one or two views. However, compared to PixelNeRF our
+method is able to recover more detail, whereas PixelNeRF produces blurry output, especially on the car category. Based on the qualitative results, we argue
+that although our approach has worse quantitative numbers, our results look
+more realistic. A possible cause for this observation could be that blurring the
+edges of an object can hide the unprecise geometry rendered by the model and
+increase PSNR. However, it loses fine detail in the images.
+F
+Shepard-Metzler-Parts-7 evaluation
+We evaluated our model on the Shepard-Metzler-Parts-7 dataset [21,66] to compare our approach to other methods that only operate in 2D [15, 21, 71]. For the
+ViewFormer – Supplementary Material
+context views
+GT
+31
+PixelNeRF ViewFormer
+Fig. 15. Additional ShapeNet cars qualitative comparison with PixelNeRF [80] using
+two context views
+32
+J. Kulhánek et al.
+context views
+GT
+PixelNeRF ViewFormer
+Fig. 16. Additional ShapeNet chairs qualitative comparison with PixelNeRF [80]
+using two context views
+ViewFormer – Supplementary Material
+context images
+GQN STR-GQN
+GT
+33
+ours
+Fig. 17. Qualitative results on the SM7 dataset [21]. We compare against GQN [21]
+and STR-GQN [15]
+Table 5. Comparison with GQN-based methods [14, 21, 71] on the SM7 dataset. We
+show the MAE, RMSE, and the position and orientation errors (Pos, Ori)
+Image generation Localization
+Method
+MAE↓
+RMSE↓
+Pos/Ori↓
+ViewFormer 1.61
+GQN [21]
+3.13
+E-GQN [71]
+2.14
+STR-GQN [14] 3.11
+7.02
+9.97
+5.63
+10.56
+0.21/3.48
+-
+evaluation, we used the context size three. The additional qualitative results,
+presented in Fig. 17, extend Fig. 5 from the main paper. Unfortunately, in the
+qualitative analysis, we cannot compare with E-GQN [71] because the authors
+did not make the generated images or models public.
+Tab. 5 presents quantitative results (averaged over 1000 scenes). As our
+method uses images of sizes 128 × 128 pixels, we rescaled the images before
+training the codebook. For evaluation, we used the original image size 64 × 64
+pixels of the dataset. We report the pixel-wise mean absolute error (MAE) and
+root mean square error (RMSE). For reference, we also show the localization
+accuracy. The position error (Pos) is the median euclidean distance between the
+predicted positions and the ground-truth camera positions, and the orientation
+error (Ori) is the median of the angular distances in degrees.
+As can be seen, our method clearly outperforms the baselines in terms of the
+MAE. E-GQN performs best in terms of the RMSE as it is trained to optimize
+this metric, whereas our method uses MAE and perceptual loss.
+34
+J. Kulhánek et al.
+Table 6. Codebook evaluation on the SM7 [21, 66], InteriorNet [35], CO3D [56], and
+7-Scenes [24] datasets. We report the PSNR, MAE, and LPIPS metrics averaged over
+1000 sampled images. The codebooks were evaluated with image size 128 × 128, except
+for ‘CO3D@400’, which was evaluated with image size 400 × 400 pixels
+dataset
+SM7
+InteriorNet
+CO3D
+CO3D@400
+7-Scenes (fine-tuned)
+7-Scenes
+ShapeNet-cars
+ShapeNet-chairs
+G
+PSNR↑ MAE↓ LPIPS↓
+36.96
+24.86
+25.14
+25.34
+19.29
+19.00
+23.50
+27.43
+1.06
+11.01
+5.70
+5.63
+17.51
+19.22
+5.46
+2.75
+0.0075
+0.1966
+0.0994
+0.1670
+0.2937
+0.3621
+0.0734
+0.0425
+Codebook evaluation
+In this section, we add more details on the codebook’s representation capabilities
+(see Fig. 4 in the main paper) by showing quantitative results. We evaluated the
+codebook models on each dataset’s test set. We report the peak signal-to-noise
+ratio (PSNR), mean absolute error computed in the RGB image space (MAE),
+and the LPIPS distance [81]. All codebooks were evaluated with image size
+128 × 128 pixels except for ‘CO3D@400’, which was evaluated with image size
+400 × 400 pixels to be comparable with [56]. The metrics are averaged over 1000
+randomly sampled images. The results can be seen in Tab. 6.
+Before training the final codebook, we experimented with different codebook
+models. We also trained the DALL·E codebook [53], which yielded slightly blurry
+images even when we used a codebook of size 8192 (normally, we use a codebook
+of size 1024). We observed a similar outcome with our codebook when we did
+not use the perceptual loss. We also tried to use a GAN loss for the codebook,
+as described in [22]. However, the generated images did not look geometrically
+consistent.
+H
+Training details
+To allow our results to be reproduced, we give the details on the architecture of
+our method as well as the training hyperparameters.
+All our codebook models were trained using the same set of hyperparameters.5 We trained codebooks of size 1024. The architecture is very similar to [22]
+and is summarized in Sec. I. We used the Adam optimizer [33] with learning
+rate6 1.584 × 10−3 to train for 200k steps (roughly 480 GPU-hours) with a batch
+size of 352. For the CO3D dataset, we trained on the same 10 object categories as
+5
+6
+Except for the SM7 dataset, where we only fine-tuned an existing model.
+The learning rate was rescaled from prior experiments; 1.6 × 10−3 would work too.
+ViewFormer – Supplementary Material
+35
+in [56] as well as on the full dataset. For the 7-Scenes dataset, due to not having
+enough images to train from scratch, we finetuned an InteriorNet pre-trained
+model. Therefore, we used only 20k batch updates with the same hyperparameters.
+The architecture of our transformer model is based on GPT2-base [51],
+and has 12 transformer blocks, 12 attention heads, and the hidden size is 768.
+The model design was chosen based on its successes in other domains and because
+its size fits well on our hardware. We trained our transformer models using the
+AdamW optimizer [40]; we used the cosine schedule for the learning rate with a
+2k step linear warmup.
+For the InteriorNet dataset, we used the mixed-precision training with
+learning rate 8 × 10−5 , batch size 40, and learning rate decay 0.01. The context
+size was 19, but we did not optimize the first four views. The weight of the
+localization loss term was 5. In all other experiments, the localization loss weight
+was 1 unless stated otherwise.
+For the Shepard-Metzler-7-Parts (SM7) [21, 66] dataset, we trained
+the transformer for 120k steps with the context size 5, batch size 128, and the
+learning rate 10−4 (cosine decay, warmup). Before passing camera poses into the
+transformer, we normalized the positions by multiplying them by 0.2. We also
+gradually increased the weight of the localization term from 0 to 1 using the
+cosine schedule.7
+For the CO3D dataset, we fine-tuned the model trained on the InteriorNet
+dataset. For the 10 categories, we optimized the model for 40k gradient steps
+with learning rate 10−4 (cosine decayed with a 2,000 step warmup), weight decay
+0.05, and batch size 80, employing mixed-precision training. The context size was
+9, and the batch size was 80. We scaled the camera positions by 0.05 in order for
+the positions to have a similar range as the pre-trained model. We also trained
+a model on all dataset categories using 100k gradient steps with the batch size
+40, without using mixed-precision training, and when using the localization, we
+further used gradient clipping with the norm 1 to improve stability.
+For the 7-Scenes dataset, we used a single InteriorNet pre-trained model
+which we fine-tuned on all 7-Scenes scenes. Same as in the original model, the
+context size was 19, but we did not optimize the first four views. The transformer
+was fine-tuned for 10k gradient steps with learning rate 10−5 (cosine schedule,
+warmup). We rescaled the positions by multiplying them by 5 to be in the same
+range as InteriorNet.
+Finally, for the ShapeNet dataset, we fine-tuned InteriorNet pre-trained
+model as well. We trained a single model for both categories: cars and chairs with
+the context size 3. We did not use mixed-precision training and the batch size
+was 64. The transformer was fine-tuned for 100k gradient steps with learning rate
+10−4 (cosine schedule, warmup), weight decay was 0.05, and we used gradient
+clipping with the norm 1.
+7
+The schedule is not needed for the training to work and in newer experiments, we
+use a constant instead.
+36
+J. Kulhánek et al.
+Table 7. Codebook architecture details: the encoder (top left), the decoder (right),
+and the residual block (bottom left). For each layer, we list the number of output
+features (Num. features) and their sizes (Out. size). We denote kernel size as ‘ks’, stride
+as ‘s’, and the number of groups as ‘g’. We use nearest neighbor for the Upsample 2D
+layer. Note that the output of the residual block is added to its input as in ResNets [25].
+If the number of input channels is not equal to the number of output channels, the
+residual connection is implemented by applying an affine transformation to the input
+features position-wise before summing them with the output of this block
+Layer type
+Num. features
+Out. size
+128
+128
+Conv 2D (ks: 3)
+ResBlock
+ResBlock
+Conv 2D (ks: 3, s: 2)
+128
+128
+128
+128
+128
+64
+ResBlock
+ResBlock
+Conv 2D (ks: 3, s: 2)
+128
+128
+128
+64
+64
+32
+ResBlock
+ResBlock
+Conv 2D (ks: 3, s: 2)
+256
+256
+256
+32
+32
+16
+ResBlock
+Attention 2D
+ResBlock
+Attention 2D
+Conv 2D (ks: 3, s: 2)
+256
+256
+256
+256
+256
+16
+16
+16
+16
+8
+ResBlock
+ResBlock
+512
+512
+8
+8
+ResBlock
+Attention 2D
+ResBlock
+512
+512
+512
+8
+8
+8
+GroupNorm 2D [77] (g: 32)
+Swish [52]
+Conv 2D (ks: 3)
+Conv 2D (ks: 1)
+512
+512
+256
+256
+8
+8
+8
+8
+(a) Encoder
+Layer
+Num. features
+GroupNorm [77] (g: 32)
+Swish [52]
+Conv 2D (ks: 3)
+GroupNorm [77] (g: 32)
+Swish [52]
+Conv 2D (ks: 3)
+in
+in
+out
+out
+out
+out
+(b) ResBlock
+I
+Layer type
+Num. features
+Out. size
+Conv 2D (ks: 1)
+Conv 2D (ks: 3)
+256
+512
+8
+8
+ResBlock
+Attention 2D
+ResBlock
+512
+512
+512
+8
+8
+8
+ResBlock
+ResBlock
+ResBlock
+Upsample 2D
+Conv 2D (ks: 3)
+512
+512
+512
+512
+512
+8
+8
+8
+16
+16
+ResBlock
+Attention 2D
+ResBlock
+Attention 2D
+ResBlock
+Attention 2D
+Upsample 2D
+Conv 2D (ks: 3)
+256
+256
+256
+256
+256
+256
+256
+256
+16
+16
+16
+16
+16
+16
+32
+32
+ResBlock
+ResBlock
+ResBlock
+Upsample 2D
+Conv 2D (ks: 3)
+256
+256
+256
+256
+256
+32
+32
+32
+64
+64
+ResBlock
+ResBlock
+ResBlock
+Upsample 2D
+Conv 2D (ks: 3)
+128
+128
+128
+128
+128
+64
+64
+64
+128
+128
+ResBlock
+ResBlock
+ResBlock
+128
+128
+128
+128
+128
+128
+GroupNorm 2D [77] (g: 32)
+Swish [52]
+Conv 2D (ks: 3)
+128
+128
+128
+128
+128
+3
+(c) Decoder
+Codebook architecture
+In Tab. 7 we give the details on the codebook architecture (cf. Sec. 3 in the
+main paper). The codebook model architecture was taken from [22] and modified slightly to downscale the images into two times smaller latent space. We
+have chosen this architecture because it had shown promising results for image
+generation in combination with transformers [22]. The other architecture we had
+considered was DALL·E [53], but from our experiments, it performed worse.

@@ -1,0 +1,114 @@
+# Voxel Grid Initialization & Clamping
+
+Also called: Voxel Grid Construction with Capacity Limits
+
+## Overview
+This method initializes the dimensions and vertex counts of a uniform voxel grid while enforcing hardware vertex limits to prevent GPU buffer overflows. It differs from its parent, [Voxel Grid Construction from AABB](12627-voxel-grid-construction-from-aabb.md), by focusing on numerical stability and resource constraints rather than spatial mapping; it takes the target resolution and clamps it to fit within a maximum vertex budget, ensuring the grid can be processed by downstream algorithms like marching cubes or ray marching.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Target voxel dimensions ($N_x, N_y, N_z$), maximum allowed vertex count ($V_{max}$), and physical voxel size ($s$).
+- **Output:** Clamped voxel dimensions ($N'_x, N'_y, N'_z$), vertex counts ($V'_x, V'_y, V'_z$), total voxel count ($T_V$), and total vertex count ($T_{Vtx}$).
+
+**Data Structures:**
+The implementation relies on a `Voxel` class or struct containing the following fields [S1, unofficial]:
+- `voxelPosition`: `Vector3` (world position of the grid origin).
+- `voxelGrid`: `Vector3Int` (physical grid dimensions).
+- `boundaryCenter`: `Vector3` (center of the bounding box).
+- `boundaryWorldPos`: `Vector3` (world position of the boundary).
+- `numVoxel`: `Vector3Int` (number of voxels per axis, $N_x, N_y, N_z$).
+- `numVertex`: `Vector3Int` (number of vertices per axis, $N_x+1, N_y+1, N_z+1$).
+- `totalVoxel`: `long` (total number of voxels, $N_x \times N_y \times N_z$).
+- `totalVertex`: `int` (total number of vertices, $(N_x+1)(N_y+1)(N_z+1)$).
+- `voxelNodes`: `Node[8]` (array of 8 neighbor nodes).
+
+**Parameters:**
+- $V_{max}$: Maximum allowed vertex count. Default value is 858,993,459 [S1, unofficial]. This limit prevents integer overflow and GPU buffer exhaustion.
+- $s$: Physical size of a single voxel unit [S1, unofficial].
+
+**Steps:**
+1. **Store Previous Dimensions:** Save the current target voxel dimensions $(N_x, N_y, N_z)$ as $(N^{old}_x, N^{old}_y, N^{old}_z)$ [S1, unofficial].
+2. **Clamp Dimensions:** Clamp each dimension to a minimum of 1 and a maximum derived from $V_{max}$ and the other two dimensions. The maximum for a dimension is calculated as $\lfloor \frac{V_{max}}{N^{old}_j \times N^{old}_k} \rfloor - 2$, where $j, k$ are the other two axes. This ensures that the resulting vertex count $(N_x+1)(N_y+1)(N_z+1)$ does not exceed $V_{max}$ [S1, unofficial].
+   $$ N'_i = \text{clamp}(N^{old}_i, 1, \lfloor \frac{V_{max}}{N^{old}_j \times N^{old}_k} \rfloor - 2) $$
+   where $i \in \{x, y, z\}$ and $\{i, j, k\} = \{x, y, z\}$.
+3. **Clamp Coordinates:** Ensure voxel grid coordinates are within valid ranges [S1, unofficial].
+4. **Calculate Vertex Counts:** Compute the number of vertices per axis as $V'_i = N'_i + 1$. Clamp $V'_i$ between 2 and 65,535 to ensure valid grid topology and fit within 16-bit index buffers if used [S1, unofficial].
+5. **Compute Totals:** Calculate total voxels $T_V = N'_x \times N'_y \times N'_z$ and total vertices $T_{Vtx} = V'_x \times V'_y \times V'_z$ [S1, unofficial].
+6. **Final Validation:** If $T_{Vtx} > V_{max}$, log an error and adjust the Y-dimension ($N'_y$) downwards until the constraint is satisfied [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_voxel_grid(num_voxel: Vector3Int, max_vertex: int = 858993459) -> VoxelGrid:
+    # Step 1: Store previous dimensions
+    old_num_voxel = num_voxel
+    
+    # Step 2: Clamp dimensions based on vertex limit
+    # Max for X: max_vertex / (old_Y * old_Z) - 2
+    max_x = max_vertex // (old_num_voxel.y * old_num_voxel.z) - 2
+    num_voxel.x = clamp(old_num_voxel.x, 1, max_x)
+    
+    # Max for Y: max_vertex / (old_X * old_Z) - 2
+    max_y = max_vertex // (old_num_voxel.x * old_num_voxel.z) - 2
+    num_voxel.y = clamp(old_num_voxel.y, 1, max_y)
+    
+    # Max for Z: max_vertex / (old_Y * old_X) - 2
+    max_z = max_vertex // (old_num_voxel.y * old_num_voxel.x) - 2
+    num_voxel.z = clamp(old_num_voxel.z, 1, max_z)
+    
+    # Step 3: Clamp voxel grid coordinates (assumed handled by clamp above or specific coordinate logic)
+    # [G] Ensure coordinates are within valid world bounds if applicable
+    
+    # Step 4: Calculate numVertex as numVoxel + 1, clamped between 2 and 65535
+    num_vertex = Vector3Int(
+        clamp(num_voxel.x + 1, 2, 65535),
+        clamp(num_voxel.y + 1, 2, 65535),
+        clamp(num_voxel.z + 1, 2, 65535)
+    )
+    
+    # Step 5: Compute totalVoxel and totalVertex
+    total_voxel = num_voxel.x * num_voxel.y * num_voxel.z
+    total_vertex = num_vertex.x * num_vertex.y * num_vertex.z
+    
+    # Step 6: If totalVertex exceeds maxVertex, adjust Y-dimension
+    if total_vertex > max_vertex:
+        # Log error
+        print("Error: Total vertices exceed maxVertex. Adjusting Y-dimension.")
+        # Adjust Y until constraint is met
+        while total_vertex > max_vertex and num_voxel.y > 1:
+            num_voxel.y -= 1
+            num_vertex.y = clamp(num_voxel.y + 1, 2, 65535)
+            total_vertex = num_vertex.x * num_vertex.y * num_vertex.z
+            
+    return VoxelGrid(
+        num_voxel=num_voxel,
+        num_vertex=num_vertex,
+        total_voxel=total_voxel,
+        total_vertex=total_vertex
+    )
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero or Negative Input:** If initial dimensions are $\le 0$, the clamp to 1 ensures valid grid creation.
+- **Integer Overflow:** Using 32-bit integers for vertex counts can overflow for large grids; $V_{max}$ is set to prevent this.
+- **Degenerate Grids:** Clamping to minimum 1 voxel ensures the grid is never empty.
+
+## Subtopics
+
+### [ASTRA Volume Geometry Creation](13909-astra-volume-geometry-creation.md)
+ASTRA Volume Geometry Creation constructs a volume geometry dictionary that defines the grid dimensions and spatial bounding box for 2D or 3D volume reconstruction in the ASTRA toolbox. It solves the problem of mapping detector parameters (count and spacing) to a voxel grid's physical extent, ensuring the volume bounds encompass the entire projection data. It differs from generic grid initialization by deriving spatial bounds directly from detector geometry rather than user-defined coordinates, specifically targeting parallel beam reconstruction setups.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$, as it involves a fixed number of arithmetic operations and clamps.
+- **Memory Complexity:** $O(1)$, storing only a few integer vectors.
+- **Strengths:** Prevents GPU crashes due to buffer overflows; ensures numerical stability for downstream rendering algorithms.
+- **Limitations:** May reduce resolution significantly if the target grid is too large for the hardware limit.
+- **When to Use:** Always before initializing voxel grids for GPU-based rendering or reconstruction to ensure safety.
+- **When Not to Use:** Not applicable; this is a safety step required for robust implementation.
+
+## Background
+This method originates from the `lineBasedCave_Simplex` project by sachPico, which implements density generation and marching cubes in Unity [S1, unofficial]. It addresses the practical challenge of handling large voxel grids in real-time graphics engines where GPU memory and vertex buffer limits are strict constraints.
+
+## Sources
+[S1] sachPico/lineBasedCave_Simplex, https://github.com/sachPico/lineBasedCave_Simplex, fetched 2026-10-27 (unofficial)

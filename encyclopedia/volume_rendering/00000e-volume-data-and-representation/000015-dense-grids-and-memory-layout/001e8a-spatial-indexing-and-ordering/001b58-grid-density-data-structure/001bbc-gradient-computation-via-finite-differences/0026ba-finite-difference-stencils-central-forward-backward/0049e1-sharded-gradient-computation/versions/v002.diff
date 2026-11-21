@@ -1,0 +1,260 @@
+--- v001.md
++++ v002.md
+@@ -3,142 +3,143 @@
+ 
+ ## Overview
+-Sharded Gradient Computation computes the spatial gradients $(G_x, G_y, G_z)$ of a volume partitioned into shards across multiple devices (GPUs/CPU), specifically handling boundary conditions between shards for the z-dimension [S1, unofficial]. It builds on [Finite Difference Stencils (Central/Forward/Backward)](3858-finite-difference-stencils-central-forward-backward.md) by applying forward differences within local shards and explicitly bridging inter-shard boundaries for the primary axis of partitioning.
++Sharded Gradient Computation computes the spatial gradients ($g_x, g_y, g_z$) of a volumetric dataset partitioned into shards across multiple devices (GPUs or CPUs), specifically handling boundary conditions between shards in the z-dimension [S1, unofficial]. It differs from standard gradient methods by distributing the memory and computation load of large volumes across a cluster, requiring explicit inter-shard communication for gradients that cross shard boundaries [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A volume $V$ partitioned into $N$ shards along the z-axis. Each shard $S_i$ is a 3D array with shape $(H_i, W, D)$, where $H_i$ is the height (z-dimension size) of shard $i$, $W$ is the width (y-dimension), and $D$ is the depth (x-dimension). Note: The source implementation uses a specific memory layout where the first dimension corresponds to the shard axis (z), the second to y, and the third to x.
+-- Output: Three gradient shards $G_x, G_y, G_z$, each matching the input volume structure.
++- Input: A volume $V$ partitioned into $N$ shards along the z-dimension. Each shard $i$ contains a 3D array $A_i$ of shape $(H_i, W, D)$, where $H_i$ is the height (z-dimension size) of the shard, $W$ is the width (y-dimension), and $D$ is the depth (x-dimension). Note: The source code uses `array[..., :-1]` for x-gradient, implying the last dimension is x, middle is y, first is z. Let's align with the source's indexing: `array[z, y, x]`.
++- Output: Three gradient shards $G_x, G_y, G_z$, each matching the input volume structure (same number of shards and local shapes).
+ 
+ **Data Structures:**
+-- `shards`: A list or array of device-specific arrays. `shards[i]` holds the data for the $i$-th shard.
+-- `xp`: A device-agnostic array manipulation module (e.g., `cupy` for GPU, `numpy` for CPU) that handles memory management and array operations on the current device context.
++- `shards`: A list of arrays, where `shards[i]` is the data for shard $i$.
++- `xp`: The array library (e.g., NumPy, CuPy) used for computation.
++- `device`: The current device context (GPU/CPU).
+ 
+-**Numbered Steps:**
+-1.  **Initialization:** Initialize output gradient shards $G_x, G_y, G_z$ with zeros, matching the shape of the input volume shards.
+-2.  **Iteration:** Iterate over each shard index $i$ from $0$ to $N-1$.
+-3.  **Device Context:** Set the active device context to the device holding shard $S_i$.
+-4.  **X-Gradient ($G_x$):** Compute the gradient along the x-axis (last dimension of the shard array) using forward differences:
+-    $$ G_{x,i}[:, :, :-1] = S_i[:, :, 1:] - S_i[:, :, :-1] $$
+-    This computes the difference between adjacent voxels along the x-axis. The last column of $G_{x,i}$ remains zero (or undefined, depending on boundary handling requirements, but the source sets it via slicing which leaves it as initialized zero).
+-5.  **Y-Gradient ($G_y$):** Compute the gradient along the y-axis (middle dimension of the shard array) using forward differences:
+-    $$ G_{y,i}[:, :-1, :] = S_i[:, 1:, :] - S_i[:, :-1, :] $$
+-    This computes the difference between adjacent voxels along the y-axis. The last row of $G_{y,i}$ remains zero.
+-6.  **Z-Gradient ($G_z$) Internal:** Compute the gradient along the z-axis (first dimension of the shard array) for internal rows. If the shard height $H_i > 1$:
+-    $$ G_{z,i}[:-1, :, :] = S_i[1:, :, :] - S_i[:-1, :, :] $$
+-    This computes the difference between adjacent voxels along the z-axis within the shard. The last row of $G_{z,i}$ is not yet computed.
+-7.  **Z-Gradient ($G_z$) Boundary:** Handle the boundary between shard $i$ and shard $i+1$. If $i + 1 < N$:
+-    a. Switch device context to the device holding shard $S_{i+1}$.
+-    b. Extract the first row (lowest z-index) of shard $S_{i+1}$:
+-       $$ \text{next\_first} = S_{i+1}[0, :, :] $$
+-    c. Switch device context back to the device holding shard $S_i$.
+-    d. Compute the last row of $G_{z,i}$ using the first row of the next shard:
+-       $$ G_{z,i}[-1, :, :] = \text{next\_first} - S_i[-1, :, :] $$
+-    This ensures continuity of the gradient across the shard boundary.
+-8.  **Final Shard Boundary:** If $i + 1 == N$ (last shard), the last row of $G_{z,i}$ remains zero (or requires a separate boundary condition not specified in the core algorithm, typically zero-padding or clamping).
+-
+-**Formulas:**
+-The forward difference approximation for the partial derivatives is:
+-$$ G_x = V(x+1, y, z) - V(x, y, z) $$
+-$$ G_y = V(x, y+1, z) - V(x, y, z) $$
+-$$ G_z = V(x, y, z+1) - V(x, y, z) $$
+-Note: The source implementation does not divide by voxel spacing $h$. It assumes $h=1$ or returns unnormalized differences. If physical units are required, division by $h$ must be applied post-computation.
+-
+-**Parameters:**
+-- `shard_count`: Number of shards along the z-axis. Can be "auto" or an integer [S1, unofficial].
+-- `device_ids`: List of device IDs for each shard.
+-
+-**Edge Cases and Pitfalls:**
+-- **Single Voxel Shards:** If a shard has height $H_i = 1$, the internal z-gradient step is skipped. The boundary step must still handle the connection to the next shard if it exists.
+-- **Device Switching:** Switching device contexts (e.g., GPU to GPU) incurs overhead. Minimizing the number of switches is critical for performance.
+-- **Memory Coherence:** When accessing `next_first` from the next shard, ensure the data is fully computed and visible on the target device before switching back.
+-- **Boundary Conditions:** The algorithm leaves the gradient at the very top of the last shard and the very bottom of the first shard (if not handled by a previous shard) as zero. This is a form of zero-padding.
++**Steps:**
++1. Initialize output gradient shards $G_x, G_y, G_z$ with zeros, matching the shape of each input shard.
++2. Iterate over each shard index $i$ from $0$ to $N-1$:
++   a. Let $A$ be `shards[i]`.
++   b. Compute $G_x$ for the current shard using forward differences along the last dimension (x-axis):
++      $$ G_x[i, :, :, :-1] = A[:, :, 1:] - A[:, :, :-1] $$
++      (Note: The source uses `gx_arr[..., :-1] = array[..., 1:] - array[..., :-1]`. This implies the gradient is defined on the edges or shifted. Standard forward difference for derivative at node $k$ is $V_{k+1} - V_k$. The source assigns to `:-1`, suggesting the gradient array might be one element smaller in the x-dimension, or it's a specific implementation detail. We follow the source exactly.)
++   c. Compute $G_y$ for the current shard using forward differences along the middle dimension (y-axis):
++      $$ G_y[i, :, :-1, :] = A[:, 1:, :] - A[:, :-1, :] $$
++   d. Compute $G_z$ for the internal rows of the current shard using forward differences along the first dimension (z-axis):
++      If $A.shape[0] > 1$:
++      $$ G_z[i, :-1, :, :] = A[1:, :, :] - A[:-1, :, :] $$
++   e. Handle the boundary between shard $i$ and shard $i+1$ for the $G_z$ gradient:
++      If $i + 1 < N$:
++      i. Switch device context to the device holding shard $i+1$.
++      ii. Extract the first row (z-index 0) of shard $i+1$: $A_{next\_first} = \text{shards}[i+1][0, :, :]$.
++      iii. Compute the last row of the current shard's $G_z$ using the first row of the next shard:
++          $$ G_z[i, -1, :, :] = A_{next\_first} - A[-1, :, :] $$
++      iv. Switch device context back to the current shard's device.
+ 
+ **Pseudocode:**
+ ```python
+-def compute_sharded_gradients(shards, xp):
++def compute_sharded_gradients(shards, xp, devices):
+     """
+-    Compute gradients for a volume sharded along the first dimension (z-axis).
+-    
+-    Args:
+-        shards: List of arrays, where shards[i] is the i-th shard.
+-        xp: Array manipulation module (e.g., cupy, numpy).
+-        
+-    Returns:
+-        gx, gy, gz: List of gradient shards, same structure as input.
++    shards: list of 3D arrays [z, y, x]
++    xp: array library (e.g., numpy, cupy)
++    devices: list of device contexts corresponding to each shard
+     """
+-    n_shards = len(shards)
+-    if n_shards == 0:
+-        return [], [], []
+-        
+-    # Initialize output gradients with zeros
+-    gx = [xp.zeros_like(s) for s in shards]
+-    gy = [xp.zeros_like(s) for s in shards]
+-    gz = [xp.zeros_like(s) for s in shards]
+-    
+-    for i in range(n_shards):
+-        # Set device context to current shard's device
+-        # Note: In practice, this might involve setting the current device
+-        # or using context managers. Here we assume xp operations are device-aware
+-        # or we explicitly set the device.
+-        current_shard = shards[i]
+-        current_gx = gx[i]
+-        current_gy = gy[i]
+-        current_gz = gz[i]
+-        
+-        # Compute Gx (x-direction, last axis)
+-        # Forward difference: V[x+1] - V[x]
+-        # Shape: (H, W, D) -> (H, W, D-1) assigned to (H, W, D-1)
+-        if current_shard.shape[2] > 1:
+-            current_gx[:, :, :-1] = current_shard[:, :, 1:] - current_shard[:, :, :-1]
+-            
+-        # Compute Gy (y-direction, middle axis)
+-        # Forward difference: V[y+1] - V[y]
+-        # Shape: (H, W, D) -> (H, W-1, D) assigned to (H, W-1, D)
+-        if current_shard.shape[1] > 1:
+-            current_gy[:, :-1, :] = current_shard[:, 1:, :] - current_shard[:, :-1, :]
+-            
+-        # Compute Gz (z-direction, first axis)
+-        # Internal differences
+-        if current_shard.shape[0] > 1:
+-            current_gz[:-1, :, :] = current_shard[1:, :, :] - current_shard[:-1, :, :]
+-            
+-        # Handle boundary with next shard for Gz
+-        if i + 1 < n_shards:
+-            next_shard = shards[i + 1]
+-            # Extract first row of next shard
+-            # We need to ensure we are on the correct device to access next_shard
+-            # If next_shard is on a different device, we must copy or switch context
+-            # Assuming xp handles device placement or we switch explicitly
+-            next_first = next_shard[0, :, :]
+-            
+-            # Compute last row of current shard's Gz
+-            # Gz[-1] = V[z+1] - V[z] where V[z+1] is from next shard
+-            current_gz[-1, :, :] = next_first - current_shard[-1, :, :]
+-            
+-    return gx, gy, gz
++    num_shards = len(shards)
++    # Initialize output gradient shards with zeros
++    gx_shards = [xp.zeros_like(s) for s in shards]
++    gy_shards = [xp.zeros_like(s) for s in shards]
++    gz_shards = [xp.zeros_like(s) for s in shards]
++
++    for i in range(num_shards):
++        A = shards[i]
++        gx = gx_shards[i]
++        gy = gy_shards[i]
++        gz = gz_shards[i]
++
++        # Compute gx (x-direction) using forward differences on the last dimension
++        # Source: gx_arr[..., :-1] = array[..., 1:] - array[..., :-1]
++        # This reduces the x-dimension size by 1.
++        if A.shape[2] > 1:
++            gx[..., :-1] = A[..., 1:] - A[..., :-1]
++
++        # Compute gy (y-direction) using forward differences on the middle dimension
++        # Source: gy_arr[:, :-1, :] = array[:, 1:, :] - array[:, :-1, :]
++        # This reduces the y-dimension size by 1.
++        if A.shape[1] > 1:
++            gy[:, :-1, :] = A[:, 1:, :] - A[:, :-1, :]
++
++        # Compute gz (z-direction) for internal rows
++        # Source: gz_arr[:-1, :, :] = array[1:, :, :] - array[:-1, :, :]
++        # This reduces the z-dimension size by 1 for internal rows.
++        if A.shape[0] > 1:
++            gz[:-1, :, :] = A[1:, :, :] - A[:-1, :, :]
++
++        # Handle boundary between current shard and next shard for gz
++        if i + 1 < num_shards:
++            # Switch device context to the next shard's device
++            with devices[i + 1]:
++                # Extract the first row (z=0) of the next shard
++                next_first = shards[i + 1][0, :, :]
++
++            # Compute the last row of the current shard's gz gradient
++            # Source: gz_arr[-1, :, :] = next_first - array[-1, :, :]
++            # Note: This requires accessing the next shard's data. 
++            # If the next shard is on a different device, we must have copied 
++            # next_first to the current device's memory or use a unified memory system.
++            # The source implies `next_first` is available on the current device 
++            # after switching context or via unified memory.
++            # We assume `next_first` is on the current device for the subtraction.
++            gz[-1, :, :] = next_first - A[-1, :, :]
++
++    return gx_shards, gy_shards, gz_shards
+ ```
++
++**Parameters:**
++- Shard count: Configurable via `config.zsharded_admm.shard_count` [S1, unofficial].
++- Device context: Managed via `devices` list [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Precision: Inter-shard communication may introduce precision issues if data types differ or if synchronization is not handled correctly [G].
++- Boundaries: The method assumes a contiguous volume. If shards are not contiguous in z, the gradient calculation is invalid [G].
++- Degenerate Input: If a shard has size 1 in any dimension, the corresponding gradient component for that dimension will be all zeros (or undefined if not handled) [G].
+ 
+ ## Subtopics
+ 
++### [Neumann Gradient](3342-neumann-gradient.md)
++Uses zero-gradient boundary conditions. Choose when smooth boundaries are expected.
++
++### [Forward Difference Gradient](3362-forward-difference-gradient.md)
++Simple first-order approximation. Choose for speed and simplicity.
++
++### [4th-Order Finite Difference Gradient](4889-4th-order-finite-difference-gradient.md)
++Higher accuracy. Choose when precision is critical.
++
++### [Gradient Selection](5889-gradient-selection.md)
++Selects optimal gradient method. Choose for adaptive accuracy.
++
++### [Gauss-Seidel with Successive Over-Relaxation (SOR)](6904-gauss-seidel-with-successive-over-relaxation-sor.md)
++Iterative solver. Choose for solving Poisson equations.
++
+ ### [Brick-local Gradient Estimation](8810-brick-local-gradient-estimation.md)
+-Computes gradients within local bricks, potentially reducing inter-device communication by processing larger contiguous blocks. Choose when memory bandwidth is the bottleneck and bricks fit in cache.
++Local brick-based computation. Choose for hierarchical data.
+ 
+ ### [Sobel-based Gradient Estimation](9967-sobel-based-gradient-estimation.md)
+-Uses Sobel filters for gradient estimation, providing noise reduction and smoother gradients. Choose when noise robustness is more important than sharp edge preservation.
++Edge detection. Choose for image processing.
+ 
+ ### [Central Difference Stencils](9968-central-difference-stencils.md)
+-Uses central differences for higher accuracy ($O(h^2)$). Choose when precision is critical and boundary effects can be managed.
++Second-order accuracy. Choose for balanced accuracy and cost.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot H \cdot W \cdot D)$, where $N$ is the number of shards and $H, W, D$ are the dimensions of each shard. The complexity is linear with respect to the total number of voxels.
+-- **Memory Complexity:** $O(N \cdot H \cdot W \cdot D)$ for storing the input and output gradients. Additional memory is required for temporary arrays during device switching.
+-- **Measured Performance:** Performance depends heavily on the efficiency of device switching and memory bandwidth. In distributed GPU setups, minimizing the number of device switches is crucial. The source implementation uses `cupy` for GPU acceleration, which provides high throughput for array operations [S1, unofficial].
+-- **Strengths:** Scalable to large volumes by partitioning across multiple devices. Handles inter-shard boundaries explicitly.
+-- **Limitations:** Device switching overhead can be significant. The forward difference scheme is only first-order accurate ($O(h)$). Boundary conditions at the global volume boundaries are not explicitly defined beyond zero-padding.
+-- **When to Use:** Large-scale volume rendering or reconstruction tasks where the volume does not fit in a single device's memory.
+-- **When Not to Use:** Small volumes that fit in a single device, or when higher-order accuracy is required.
++- Time Complexity: $O(N)$ where $N$ is the total number of voxels, with a constant factor for inter-shard communication [S1, unofficial].
++- Memory Complexity: $O(N)$ for storing the volume and gradients, plus overhead for shard management [S1, unofficial].
++- Measured Performance: Not given in the sources.
++- Scaling: Scales with the number of shards and devices [S1, unofficial].
++- Strengths: Enables processing of volumes larger than a single device's memory [S1, unofficial].
++- Limitations: Requires inter-shard communication, which can be a bottleneck [S1, unofficial].
++- When to use: When the volume is too large for a single device [S1, unofficial].
++- When not to use: When the volume fits in a single device, as the overhead may not be justified [G].
+ 
+ ## Background
+-Sharded Gradient Computation is part of the TomoAnchor-V3 project, a tool for tomographic reconstruction [S1, unofficial]. It was developed to handle large volumes in distributed computing environments, specifically addressing the challenges of gradient computation across shard boundaries in a multi-GPU setup. The method is used in the context of iterative reconstruction algorithms, such as those based on ADMM (Alternating Direction Method of Multipliers), where gradient computation is a key step [S1, unofficial].
++Origin: Introduced in the TomoAnchor-V3 project by alidarbandi [S1, unofficial].
++History: Developed to support large-scale tomographic reconstruction on GPU clusters [S1, unofficial].
++Usage: Used in tomographic reconstruction pipelines [S1, unofficial].
+ 
+ ## Sources

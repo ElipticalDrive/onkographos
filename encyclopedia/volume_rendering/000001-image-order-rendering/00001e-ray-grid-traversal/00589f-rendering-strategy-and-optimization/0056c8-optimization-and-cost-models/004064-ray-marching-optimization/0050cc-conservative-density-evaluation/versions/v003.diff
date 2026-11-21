@@ -1,0 +1,145 @@
+--- v002.md
++++ v003.md
+@@ -2,100 +2,75 @@
+ 
+ Also called: Conservative Density
++
+ ## Overview
+-Conservative Density Evaluation is a ray marching optimization that uses a cheaply evaluated scalar or vector field to gate the execution of expensive volumetric material graphs (such as albedo, emissive color, and extinction calculations). It solves the performance bottleneck of evaluating full material logic for every sample point in a participating medium, particularly atmospheric clouds, by skipping expensive computations where the medium is known to be empty. It differs from sibling methods like [Voxel Ray Marching with Traversal Order Optimization](1251-voxel-ray-marching-with-traversal-order-optimization.md) or [Tiled Ray Marching with Grid Sampling](2586-tiled-ray-marching-with-grid-sampling.md) by operating at the material evaluation stage rather than the geometric traversal stage; it does not change *where* the ray steps, but rather *what* is computed at those steps.
++Conservative Density Evaluation is a ray marching optimization technique that uses a user-specified, inexpensive-to-evaluate "conservative density" to gate the execution of expensive material graphs (such as Albedo, Emissive Color, and Extinction calculations) [S1]. It solves the performance bottleneck of evaluating full volumetric material logic for every sample along a ray, particularly in atmospheric cloud rendering, by skipping expensive computations when the conservative density indicates no participating medium exists [S1]. Unlike standard material evaluation which runs for every sample, this method uses a cheap scalar/vector check to gate the expensive evaluation, saving performance when cloud density is zero [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A "Conservative Density" value, typically provided as a 3-component vector ($\mathbf{v} \in \mathbb{R}^3$). The method specifically inspects the X-component ($v_x$).
+-*   **Output:** A decision to either evaluate the full "Main Material" graph (returning Albedo, Emissive Color, Extinction) or to skip this evaluation and proceed to the next ray marching sample with default/zero values.
++*   **Input:** A `Vector3` conservative density value, typically computed via a separate, inexpensive graph (e.g., a top-down 2D texture lookup or simple geometric check) [S1]. The X component of this vector represents the participating medium conservative density [S1].
++*   **Output:** The final material properties (Albedo, Emissive Color, Extinction) if density > 0; otherwise, the sample is skipped or treated as empty [S1].
+ 
+ **Data Structures:**
+-The implementation relies on the specific node structure found in Unreal Engine's material system:
+-1.  **Volumetric Advanced Output Node:** Accepts the Conservative Density input.
+-2.  **Volumetric Advanced Input Node:** Used to retrieve the values computed in the Advanced Output node during the expensive evaluation phase.
+-3.  **Main Material Node:** Contains the expensive logic (Albedo, Emissive Color, Extinction).
++*   **Conservative Density Vector:** A 3-component floating-point vector (`Vector3`) [S1].
++    *   `X`: The scalar conservative density value used for the branching decision [S1].
++    *   `Y`, `Z`: Unused for the branching logic in the standard implementation described [S1].
+ 
+-**Algorithm:**
+-The method implements a two-step evaluation process for each ray marching sample when the Conservative Density input is connected:
+-
+-1.  **Evaluate Conservative Density:** Compute the value of the graph plugged into the "Conservative Density" input of the Volumetric Advanced Output node. Let this result be $\mathbf{v} = (v_x, v_y, v_z)$.
+-2.  **Gate Check:** Evaluate the condition $v_x > 0$.
+-    *   **If True ($v_x > 0$):**
+-        1.  Evaluate the expensive material graph plugged into the Main Material node. This computes Albedo, Emissive Color, and Extinction.
+-        2.  Access the results of this expensive evaluation using the Volumetric Advanced Input node. This node references the computation performed in this step, avoiding redundant calculation of the conservative density or other shared inputs if they were part of the main graph (though the primary gain is skipping the main graph entirely when false).
+-    *   **If False ($v_x \le 0$):**
+-        1.  Skip the evaluation of the Main Material node entirely.
+-        2.  Proceed to the next ray marching sample. The contribution of this sample to the final color is effectively zero or handled by the background/sky.
++**Numbered Steps:**
++1.  **Evaluate Conservative Density:** Compute the conservative density input graph. This graph must be inexpensive to evaluate [S1]. The result is stored in a `Vector3` variable [S1].
++2.  **Check Density Threshold:** Inspect the X component of the conservative density vector [S1].
++3.  **Conditional Material Evaluation:**
++    *   If `ConservativeDensity.X > 0`: Proceed to evaluate the expensive material graph plugged into the Main Material node. This graph computes Albedo, Emissive Color, and Extinction [S1].
++    *   If `ConservativeDensity.X <= 0`: Skip the expensive material evaluation entirely and proceed to the next ray marching sample [S1].
++4.  **Access Material Values:** If the expensive graph was evaluated, access its output values using the Volumetric Advanced Input node. This node retrieves the values computed in Step 3 without recomputing the conservative density [S1].
+ 
+ **Pseudocode:**
+-The following Python-like pseudocode illustrates the logic flow. Note that this assumes a material graph environment where "dynamic branching" is not natively supported, necessitating this explicit gate.
+-
+ ```python
+ def evaluate_volumetric_sample(ray_sample_position):
+-    """
+-    Evaluates a single sample along a ray using Conservative Density Evaluation.
+-    
+-    Args:
+-        ray_sample_position: The 3D world position of the current ray march step.
+-        
+-    Returns:
+-        tuple: (albedo, emissive_color, extinction)
+-    """
+-    # Step 1: Evaluate the cheap conservative density graph
+-    # This graph is designed to be inexpensive (e.g., a simple texture lookup or noise check)
++    # Step 1: Evaluate the inexpensive conservative density graph
++    # This graph might be a simple texture lookup or geometric check
+     conservative_density_vector = evaluate_conservative_density_graph(ray_sample_position)
+     
+-    # Extract the X component, which acts as the trigger
++    # Step 2: Check the X component of the conservative density
+     density_x = conservative_density_vector.x
+     
+-    # Step 2: Check if density is present
++    # Step 3: Conditional branching based on density
+     if density_x > 0:
+-        # Step 3: Evaluate the expensive material graph
++        # Step 3a: Evaluate the expensive material graph
+         # This computes Albedo, Emissive Color, and Extinction
+-        # The Volumetric Advanced Input node is used to access these values
+-        # which were computed in this branch.
+-        albedo = evaluate_expensive_material_albedo(ray_sample_position)
+-        emissive_color = evaluate_expensive_material_emissive(ray_sample_position)
+-        extinction = evaluate_expensive_material_extinction(ray_sample_position)
++        material_output = evaluate_expensive_material_graph(ray_sample_position)
+         
+-        return (albedo, emissive_color, extinction)
++        # Step 4: Access values from the expensive evaluation
++        # The Volumetric Advanced Input node retrieves these values
++        albedo = material_output.albedo
++        emissive_color = material_output.emissive_color
++        extinction = material_output.extinction
+     else:
+-        # Step 4: Skip expensive evaluation
+-        # Return zero or default values to indicate no contribution
+-        # The ray marcher proceeds to the next sample
+-        return (0.0, 0.0, 0.0)
++        # Step 3b: Skip expensive evaluation
++        # The sample is treated as empty/non-participating
++        albedo = vec3(0.0)
++        emissive_color = vec3(0.0)
++        extinction = 0.0
++        
++    return albedo, emissive_color, extinction
+ ```
+ 
+ **Parameters:**
+-*   **Conservative Density Threshold:** The threshold is fixed at $0$. The condition is strictly $v_x > 0$. If $v_x \le 0$, the material is skipped.
+-*   **Conservative Density Graph:** The user must provide a graph that outputs a Vector 3. The X component must be $> 0$ wherever cloud/participating medium exists. It must be "conservative," meaning it should not return $> 0$ where there is no cloud (to avoid false positives), but it may return $0$ where there is cloud (false negatives are acceptable for performance, though they result in visual artifacts). Typical implementations use a top-down 2D texture or a simple noise function.
++*   **Conservative Density Threshold:** The threshold is implicitly `0.0`. If `X > 0`, the material is evaluated; otherwise, it is skipped [S1].
++*   **Conservative Density Graph:** The specific implementation of the inexpensive graph is user-defined but must satisfy the condition that it is greater than 0 where cloud/participating medium exists [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Alpha Holdout Interaction:** If post-processing features like `r.PostProcessing.PropagateAlpha` are enabled, or if features such as Exponential Height Fog, Volumetric Cloud, or Sky Atmosphere have "alpha holdout" enabled, the system may bypass the conservative density check and use the expensive path regardless of the density value [S1].
+-*   **Lack of Dynamic Branching:** This method is specifically required in environments (like Unreal Engine's material editor) that do not support native dynamic branching in material graphs. Without this explicit input gate, the expensive graph would be evaluated for every sample, negating the optimization [S1].
+-*   **False Positives:** If the conservative density graph incorrectly returns $> 0$ in empty space, the expensive material will be evaluated unnecessarily, reducing performance gains.
+-*   **False Negatives:** If the conservative density graph returns $0$ in areas where cloud exists, the cloud will be visually missing in those areas.
++*   **Alpha Holdout Interaction:** Cloud rendering will use the expensive path (i.e., skip the optimization) when `r.PostProcessing.PropagateAlpha` is enabled and when any features, such as Exponential Height Fog, Volumetric Cloud, and Sky Atmosphere, have alpha holdout enabled [S1].
++*   **Dynamic Branching Limitation:** Unreal Engine material graphs do not support dynamic branching natively [S1]. The Conservative Density input is required to enable this skipping behavior; without it, the expensive material graph would be evaluated for every sample [S1].
++*   **Ray Tracing Limitations:** The cloud system does not support Ray Tracing features for volumetric clouds; they are only taken into account as rendered into the Sky Light [S1].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** The method reduces the average cost per sample from $O(C_{material})$ to $O(C_{cheap} + p \cdot C_{material})$, where $C_{cheap}$ is the cost of evaluating the conservative density graph, $C_{material}$ is the cost of the full material graph, and $p$ is the probability that $v_x > 0$ (i.e., the fraction of samples that hit cloud). In clear sky, $p \approx 0$, making the cost $O(C_{cheap})$.
+-*   **Memory:** Adds negligible memory overhead, requiring only the storage of the conservative density graph's output vector for the current sample.
+-
+-**Measured Performance:**
+-Specific performance metrics (e.g., milliseconds saved) are not provided in the sources for general hardware. However, the source notes that without this optimization, evaluating the full cloud material graph for every sample "quickly becomes too expensive" [S1]. The optimization is described as "cost-efficient" [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Significant performance improvement in scenes with large areas of empty sky or non-cloud space. It allows for complex, expensive material graphs to be used without prohibitive performance costs.
+-*   **Limitations:** It is specific to the material evaluation stage and does not optimize ray traversal. It requires user-provided "conservative" data. It is bypassed by certain engine features (alpha holdout, propagate alpha). It is a workaround for the lack of native dynamic branching in material graphs.
+-
+-**When to Use:**
+-Use this method when ray marching participating media (like clouds or fog) in an environment that lacks native dynamic branching in its material system, and when a significant portion of the ray samples fall outside the medium.
+-
+-**When Not to Use:**
+-Do not use if the engine supports native dynamic branching in material graphs, as this method becomes obsolete. Do not use if alpha holdout or propagate alpha is enabled, as the optimization will be bypassed.
++*   **Performance:** Significantly reduces cost when cloud density is zero by avoiding expensive material graph evaluations [S1]. The optimization is effective because the conservative density check is "inexpensively reasonable to evaluate" compared to the full material graph [S1].
++*   **Limitations:** The optimization is bypassed when alpha holdout is enabled on relevant features or when `r.PostProcessing.PropagateAlpha` is active [S1]. It does not apply to ray-traced reflections, as volumetric clouds do not support ray tracing for reflections [S1].
++*   **When to use:** Use when rendering atmospheric clouds or participating media where large portions of the ray march through empty space, and the engine/material system lacks native dynamic branching support [S1].
++*   **When not to use:** Do not use if alpha holdout is required for the specific volumetric features, as the optimization will be disabled [S1].
+ 
+ ## Background
+-Conservative Density Evaluation was introduced as part of the Volumetric Cloud system in Unreal Engine. It addresses the performance challenges of rendering atmospheric clouds, where the material graph (calculating albedo, emissive color, and extinction) is computationally expensive. The method leverages the fact that cloud density is often sparse or can be approximated by a cheaper function. It is documented in the Unreal Engine 5.8 documentation for the Volumetric Cloud Component [S1].
++Conservative Density Evaluation was introduced in Unreal Engine as an optimization for the Volumetric Cloud system [S1]. It addresses the limitation of Unreal Engine's material graph system, which does not support dynamic branching natively [S1]. The feature allows technical artists to manually implement dynamic branching logic by using the Conservative Density input to gate expensive material evaluations [S1]. It is part of the broader Volumetric Cloud Component in Unreal Engine [S1].
+ 
+ ## Sources
+-[S1] Volumetric Cloud Component in Unreal Engine  | Unreal Engine 5.8 Documentation | Epic Developer Community, https://dev.epicgames.com/documentation/en-us/unreal-engine/volumetric-cloud-component-in-unreal-engine, fetched 2026-10-30+[S1] Volumetric Cloud Component in Unreal Engine | Unreal Engine 5.8 Documentation | Epic Developer Community, https://dev.epicgames.com/documentation/en-us/unreal-engine/volumetric-cloud-component-in-unreal-engine, fetched 2026-10-30

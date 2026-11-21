@@ -1,0 +1,144 @@
+# Surface Modeling via Boundary Tracking and Marching Cubes
+
+Also called: Boundary Surface Extraction, Boundary Surface Extraction via Region Growing, Feature Modeling
+
+## Overview
+This method constructs compact, hole-free boundary surfaces for extracted features in volumetric data, followed by optional smoothing via isosurface extraction [S1][S2, unofficial]. It addresses the failure of standard binary isosurface extraction on noisy data with small, fine features by first using region growing to segment the volume, then tracking the boundary of the segmented voxels to create a precise volumetric feature representation [S1]. Unlike direct marching cubes on raw data, which may include unwanted surrounding parts or fail due to noise, this approach isolates the feature topology before generating a smooth surface [S2, unofficial].
+
+## How it works
+**Inputs:** A segmented volume (binary mask or labeled regions) derived from region growing, and optionally the original scalar field values for isovalue calculation.
+**Outputs:** A smooth, hole-free triangular mesh representing the feature boundary.
+
+**Data Structures:**
+1.  **Segmented Volume:** A 3D grid where each voxel is marked as "extracted" (part of the feature) or "background".
+2.  **Boundary Faces:** A set of planar faces (typically quadrilaterals or triangles) that enclose the extracted voxels. Each face is defined by its geometric position and normal vector.
+3.  **Internal Voxels:** The set of voxels located strictly inside the identified boundary.
+
+**Steps:**
+
+1.  **Boundary Tracking:**
+    Apply a boundary tracking algorithm [Artzy et al. 1981] to the segmented volume to identify all boundary faces enclosing the extracted voxels [S1][S2, unofficial]. This step locates the interface between extracted and non-extracted voxels.
+
+2.  **Locate Internal Voxels:**
+    Identify voxels that are internal to the boundary faces identified in Step 1. This creates a clean volumetric feature representation, ensuring the boundary is closed and hole-free [S1].
+
+3.  **Filter High-Frequency Artifacts (Optional):**
+    Apply a spatial filter to the boundary cells to remove noise. A Box filter or Gaussian filter is used, chosen according to the characteristics of the features [S1]. This step reduces high-frequency artifacts on the boundary faces [S2, unofficial].
+
+4.  **Compute Isovalue:**
+    Calculate the isovalue for the marching cubes step. The isovalue is set to the average of the scalar values of the voxels located on the boundary faces [S1][S2, unofficial].
+    $$ I_{iso} = \frac{1}{N} \sum_{v \in \text{BoundaryFaces}} V(v) $$
+    Where $N$ is the number of voxels on the boundary faces, and $V(v)$ is the scalar value of voxel $v$ in the original data.
+
+5.  **Extract Isosurface:**
+    Use the Marching Cubes algorithm [Lorensen and Cline 1987] on the segmented volume (or the filtered boundary representation) using the computed isovalue $I_{iso}$ to generate the final smooth surface [S1][S2, unofficial]. This preserves the main topological information while smoothing the geometry [S2, unofficial].
+
+6.  **Assess Surface Quality (Optional):**
+    Perform hardware-accelerated superimposed rendering of the boundary surface and the extracted voxels. Voxels outside the boundary surface are colored blue to visualize uncertainty and parts left out of the surface representation [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def surface_modeling_via_boundary_tracking(segmented_volume, original_scalar_field):
+    """
+    segmented_volume: 3D array, 1 if voxel is part of feature, 0 otherwise.
+    original_scalar_field: 3D array, scalar values for all voxels.
+    Returns: Triangular mesh (vertices, faces).
+    """
+    
+    # Step 1: Boundary Tracking
+    # Identify all boundary faces enclosing the extracted voxels.
+    # Uses Artzy et al. boundary tracking algorithm.
+    boundary_faces = boundary_tracking(segmented_volume)
+    
+    # Step 2: Locate Internal Voxels
+    # Identify voxels internal to the boundary to create a clean volumetric representation.
+    # This ensures the boundary is closed and hole-free.
+    internal_voxels = locate_internal_voxels(segmented_volume, boundary_faces)
+    
+    # Step 3: Filter High-Frequency Artifacts (Optional)
+    # Apply Box or Gaussian filter to boundary cells.
+    # Filter choice depends on feature characteristics.
+    filtered_boundary_faces = filter_boundary_faces(boundary_faces, filter_type="Gaussian")
+    
+    # Step 4: Compute Isovalue
+    # Average of scalar values of voxels on the boundary faces.
+    boundary_voxel_values = []
+    for face in filtered_boundary_faces:
+        # Get voxels associated with this face
+        voxels_on_face = get_voxels_on_face(face, segmented_volume)
+        for v in voxels_on_face:
+            boundary_voxel_values.append(original_scalar_field[v])
+            
+    if not boundary_voxel_values:
+        raise ValueError("No voxels found on boundary faces.")
+        
+    isovalue = sum(boundary_voxel_values) / len(boundary_voxel_values)
+    
+    # Step 5: Extract Isosurface using Marching Cubes
+    # Generate smooth surface preserving topological information.
+    mesh = marching_cubes(segmented_volume, isovalue)
+    
+    return mesh
+
+def boundary_tracking(volume):
+    """
+    Implements Artzy et al. boundary tracking.
+    Returns a list of boundary faces.
+    """
+    # Not given in the sources. Standard implementation involves
+    # traversing the interface between 1 and 0 voxels.
+    pass
+
+def locate_internal_voxels(volume, boundary_faces):
+    """
+    Identifies voxels strictly inside the boundary.
+    """
+    # Not given in the sources. Typically involves flood fill or ray casting
+    # from a known internal point.
+    pass
+
+def filter_boundary_faces(faces, filter_type):
+    """
+    Applies spatial filtering to boundary faces.
+    """
+    # Not given in the sources. Applies Box or Gaussian convolution
+    # to the positions or normals of the faces.
+    pass
+
+def get_voxels_on_face(face, volume):
+    """
+    Returns voxels that constitute the face.
+    """
+    # Not given in the sources. Depends on the specific geometry
+    # of the boundary faces (e.g., voxels sharing the face).
+    pass
+```
+
+## Subtopics
+
+### Region Growing Iso-surface Extraction
+Uses region growing to segment the volume before boundary tracking. Chosen when the feature has distinct intensity ranges but is noisy. [7568-region-growing-iso-surface-extraction.md]
+
+### Marching Cubes Lookup and Configuration
+The core algorithm used in Step 5. Chosen for its speed and widespread support. [2518-marching-cubes-lookup-and-configuration.md]
+
+### Dual Contouring and Surface Nets
+An alternative to Marching Cubes for Step 5 if vertex position optimization is needed. Chosen when higher geometric accuracy is required at the cost of complexity. [6319-dual-contouring-and-surface-nets.md]
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the boundary tracking and the final Marching Cubes step. Filtering can become time-consuming for large volumes [S1].
+*   **Memory Complexity:** Requires storage for the segmented volume, boundary faces, and the resulting mesh.
+*   **Strengths:** Produces compact, hole-free surfaces; preserves topological information; handles noisy data better than direct isosurface extraction; allows visualization of uncertainty [S1][S2, unofficial].
+*   **Limitations:** Requires a prior segmentation step (region growing); filtering can be slow for large datasets; the quality of the final surface depends on the accuracy of the boundary tracking and the chosen isovalue [S1][S2, unofficial].
+*   **When to Use:** When extracting features from noisy CT/MRI data where standard isosurface extraction fails or includes unwanted artifacts [S1][S2, unofficial].
+*   **When Not to Use:** When real-time performance is critical and segmentation is not feasible; when the feature topology is simple and noise is low.
+
+## Background
+The method was developed to address limitations in visualizing industrial CT volume data for nondestructive testing applications [S1]. Standard isosurface extraction based on binary decisions fails on noisy CT data with small, fine features [S1]. The approach combines boundary tracking (Artzy et al. 1981) with region growing and Marching Cubes (Lorensen and Cline 1987) to create smooth, topologically correct surfaces [S1][S2, unofficial]. It is used in medical imaging (e.g., lung extraction from MRI/CT) and industrial CT analysis [S1][S2, unofficial].
+
+## Sources
+[S1] Visualizing industrial CT volume data for nondestructive testing applications, https://doi.org/10.1109/visual.2003.1250418, fetched 2026-10-27
+[S2] RGVis: Region Growing Based Visualization Techniques for Volume Visualization, https://escholarship.org/uc/item/3td71868, fetched 2026-11-03 (unofficial)

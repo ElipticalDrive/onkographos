@@ -1,0 +1,92 @@
+# Fast Shaded Isosurfaces
+
+Also called: Westermann and Ertl method, rasterization-based isosurface shading
+
+## Overview
+Fast Shaded Isosurfaces is an efficient algorithm for displaying shaded isosurfaces by exploiting standard rasterization hardware to evaluate local illumination equations [S1]. It sets itself apart from software-based shading or complex one-pass texture interpolation methods by decomposing the shading computation into multiple rasterization passes, specifically using a two-pass technique to achieve interactive frame rates on PC hardware [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset (scalar field).
+*   **Output:** A shaded 2D image of the isosurface.
+*   **Constraints:** Restricted to a single light source and monochrome display [S1].
+
+**Data Structures:**
+*   **3D Texture:** Used to store voxel data.
+    *   **RGB Components:** Store the three components of the voxel gradient vector (isosurface normal).
+    *   **Alpha Component:** Store the scalar intensity values of the volume.
+*   **Frame Buffer:** Stores the rendered output. In the first pass, it contains the voxel gradient coded in RGB components for visible pixels.
+
+**Numbered Steps:**
+
+1.  **Gradient and Intensity Encoding:** Compute the voxel gradient vector $\tilde{n}$ for the volume. Store the components of $\tilde{n}$ in the RGB components of a 3D-texture. Store the scalar intensity values in the alpha-component of the same 3D-texture [S1].
+
+2.  **First Pass (Isosurface Selection):** Render the volume into the frame buffer using rasterization hardware. Use the OpenGL alpha-test to display only the specified isovalue. This step effectively selects the isosurface pixels. The resulting frame buffer contains the voxel gradient vectors (in RGB) for the visible isosurface points [S1].
+
+3.  **Second Pass (Shading):** Reinsert the frame buffer (containing the voxel gradient in RGB) into the rasterization pipeline. Use the OpenGL color matrix to compute the dot-product between the stored normal vector and the light direction vector [S1]. This computes the diffuse lighting component.
+
+**Formula:**
+The local illumination equation evaluated is [S1]:
+$$ I = I_a + I_d \times (\tilde{n} \cdot \tilde{l}) $$
+Where:
+*   $I$ is the final intensity.
+*   $I_a$ is the ambient intensity.
+*   $I_d$ is the diffuse intensity.
+*   $\tilde{n}$ is the normal of the isosurface, which coincides with the volume gradient.
+*   $\tilde{l}$ is the direction of the light.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Step 1: Prepare 3D Texture
+# Compute gradient n = (nx, ny, nz) for each voxel
+# Store n.x, n.y, n.z in RGB channels
+# Store scalar value v in Alpha channel
+texture_3d = create_3d_texture(volume_data)
+
+# Step 2: First Pass - Render Isosurface
+# Set OpenGL state:
+#   - Enable alpha test with threshold equal to isovalue
+#   - Disable blending
+# Render the 3D texture (e.g., via volume raycasting or slice rendering 
+# that respects alpha test) into frame_buffer.
+# Result: frame_buffer contains gradient vectors (RGB) for isosurface pixels.
+
+# Step 3: Second Pass - Compute Shading
+# Rebind frame_buffer as input texture (or use framebuffer object as source)
+# Set OpenGL color matrix M to perform dot product with light vector l:
+#   M = [ lx, ly, lz, 0 ]
+#       [ 0,  0,  0,  0 ]
+#       [ 0,  0,  0,  0 ]
+#       [ 0,  0,  0,  1 ]
+# Note: OpenGL color matrix multiplication applies to the RGB color.
+# If current color is (nx, ny, nz), result is (nx*lx + ny*ly + nz*lz, 0, 0)
+# Add ambient light Ia to the result.
+render_shaded_image(frame_buffer, light_direction_l, ambient_intensity_Ia)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Single Light Source:** The method is restricted to a single light source because the OpenGL color matrix approach computes a single dot product [S1].
+*   **Monochrome Display:** The method is restricted to monochrome display because the shading result is computed in a single color channel via the color matrix, losing color information [S1].
+*   **Precision:** The gradient vectors must be normalized or handled correctly within the dot product to ensure correct lighting intensity. The sources do not specify normalization steps, but the dot product $\tilde{n} \cdot \tilde{l}$ assumes unit vectors for correct cosine weighting [G].
+
+## Subtopics
+
+### [Multi-pass shaded isosurfaces](13612-multi-pass-shaded-isosurfaces.md)
+Multi-pass shaded isosurfaces is a fast approach to display shaded isosurfaces by exploiting rasterization hardware, avoiding the performance loss associated with software-based shading or complex one-pass texture interpolation methods. It sets itself apart from Dachille et al.'s one-pass approach, which relies on 3D texture hardware interpolation combined with software shading and classification, by decomposing the shading computation into multiple rasterization passes.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The method allows efficient rendering of shaded isosurfaces at interactive frame rates [S1].
+*   **Strengths:** Exploits rasterization hardware for efficiency; avoids software-based shading overhead [S1].
+*   **Limitations:** Restricted to a single light source and monochrome display [S1].
+*   **When to use:** When interactive frame rates are required for shaded isosurfaces on standard PC graphics hardware with simple lighting requirements [S1].
+*   **When not to use:** When multiple light sources or color shading are required [S1].
+
+## Background
+The method was introduced by Westermann and Ertl [S1]. It is designed for efficient volume rendering on standard PC graphics hardware, leveraging the capabilities of rasterization pipelines [S1].
+
+## Sources
+[S1] Interactive Volume Rendering on Standard PC Graphics ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/VolVisforPCHardware.pdf, fetched 2026-10-28

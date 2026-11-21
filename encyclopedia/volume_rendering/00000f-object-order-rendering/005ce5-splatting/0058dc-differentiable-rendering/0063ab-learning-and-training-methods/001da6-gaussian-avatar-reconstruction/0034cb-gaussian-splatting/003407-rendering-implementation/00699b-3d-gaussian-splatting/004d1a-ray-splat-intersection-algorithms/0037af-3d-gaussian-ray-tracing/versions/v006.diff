@@ -1,0 +1,233 @@
+--- v005.md
++++ v006.md
+@@ -1,138 +1,117 @@
+ # 3D Gaussian Ray Tracing
+ 
+-Also called: 3DGRT, Point-based Ray Tracing on 3D Gaussians
++Also called: 3DGRT, BVH Ray Tracing for 3D Gaussians, Point-based Ray Tracing on 3D Gaussians, Ray-Splat Intersection via BVH, Splat BVH Traversal
+ 
+ ## Overview
+-3D Gaussian Ray Tracing (3DGRT) is a rendering technique that replaces the tile-based rasterization of standard 3D Gaussian Splatting with hardware-accelerated ray tracing to evaluate semi-transparent Gaussian primitives [S1, unofficial][S3]. Unlike rasterization methods that project all Gaussians overlapping a screen tile to every pixel within it (linear scaling with tile size), 3DGRT uses a Bounding Volume Hierarchy (BVH) to traverse only the Gaussians intersected by each specific ray, enabling logarithmic scaling in dense scenes [S1, unofficial]. It addresses the computational inefficiency of evaluating non-intersecting primitives while maintaining the volumetric appearance of the Gaussian splats [S1, unofficial].
++3D Gaussian Ray Tracing is a rendering method that replaces the tile-based rasterization of standard 3D Gaussian Splatting with hardware-accelerated ray tracing to correctly handle semi-transparent Gaussians and complex lighting [S1, unofficial][S4]. Unlike rasterization, which evaluates all Gaussians overlapping a screen tile for every pixel (linear scaling in dense scenes), this method uses a Bounding Volume Hierarchy (BVH) to traverse only the Gaussians intersected by each ray, enabling logarithmic scaling and correct volumetric transparency [S1, unofficial][S4]. It solves the problem of implausible transparency effects and the violation of physical absorption-emission models inherent in standard alpha-blending splatting [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color; a camera ray defined by origin $\boldsymbol{r_o}$ and direction $\boldsymbol{r_d}$; and a transmittance threshold $T_{min}$ for early termination.
+-**Outputs:** The accumulated color and transmittance for the pixel.
++The method renders 3D Gaussians by treating them as semi-transparent volumetric primitives. It constructs a spatial acceleration structure (BVH) to efficiently query which Gaussians intersect a given ray, then computes the accumulated color and transmittance along the ray path.
+ 
+-**Data Structures:**
+-1.  **Binary Radix Tree BVH:** A hierarchical structure where leaf nodes represent tight bounding boxes of individual Gaussians, and internal nodes represent the bounding boxes of their children [S2]. This structure is constructed using an in-place algorithm designed for parallelism [S2].
+-2.  **Proxy Triangle Mesh:** Each 3D Gaussian is bound by a proxy triangle mesh to facilitate hardware-accelerated intersection tests [S3].
++### Inputs and Outputs
++*   **Inputs:** A set of $N$ 3D Gaussians, each defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color/appearance. Camera ray origins $\boldsymbol{r_o}$ and directions $\boldsymbol{r_d}$.
++*   **Outputs:** A 2D image buffer with accumulated color and opacity per pixel.
+ 
+-**Algorithm Steps:**
+-1.  **BVH Construction:** Construct a binary radix tree from the set of 3D Gaussians. Leaf nodes store the tight bounding box of a Gaussian, and internal nodes store the bounding box of their two children [S2].
+-2.  **Ray Traversal:** Traverse the BVH recursively from the root node. Perform intersection tests between the ray and the bounding volumes of each node's children [S2].
+-3.  **Leaf Identification:** Upon reaching a leaf node, identify the associated Gaussian [S2].
+-4.  **Equivalent Intersection Point:** Calculate the point along the ray where the Gaussian's contribution peaks, defined as the equivalent intersection point $\boldsymbol{r_x}$ [S2]:
+-    $$ \boldsymbol{r_x} = \boldsymbol{r_o} + t_j \boldsymbol{r_d} $$
+-    where $t_j$ is calculated as:
++### Data Structures
++The implementation relies on two primary textures for BVH storage and Gaussian data, optimized for GPU texture sampling [S3, unofficial]:
++
++1.  **Triangle Texture (`tTriangleTexture`)**:
++    *   **Type:** `highp usampler2D`
++    *   **Size:** $2048 \times 2048$ texels (`TRI_TEXTURE_SIZE`).
++    *   **Layout:** Each Gaussian (splat) occupies two consecutive texels (`id*2` and `id*2+1`).
++        *   `vd0.x, y, z`: Position $\boldsymbol{pos}$ (decoded via `uintBitsToFloat`).
++        *   `vd0.w, vd1.x`: First axis vector $\boldsymbol{au}$ components (decoded via `unpackHalf2x16`).
++        *   `vd1.y`: Second component of $\boldsymbol{au}$.
++        *   `vd1.z, w`: RGBA color (`z`=RGB, `w`=Alpha).
++
++2.  **AABB Texture (`tAABBTexture`)**:
++    *   **Type:** `highp usampler2D`
++    *   **Size:** $4096 \times 4096$ texels (`AABB_TEXTURE_SIZE`).
++    *   **Layout:** Each BVH node is stored as one `uvec4`.
++        *   `x`: Node ID. Negative for inner nodes, positive for leaf splat IDs.
++        *   `y`: Min/Max X of AABB (decoded via `unpackHalf2x16`).
++        *   `z`: Min/Max Y of AABB.
++        *   `w`: Min/Max Z of AABB.
++
++### Algorithm Steps
++
++1.  **BVH Construction**:
++    Construct a binary radix tree from the 3D Gaussians. Leaf nodes represent tight bounding boxes of individual Gaussians. Internal nodes denote the bounding box of their two children. This structure is stored in `tAABBTexture` [S2].
++
++2.  **Ray Traversal**:
++    For each pixel, cast a ray $\boldsymbol{r}(t) = \boldsymbol{r_o} + t\boldsymbol{r_d}$. Traverse the BVH recursively from the root:
++    *   Perform Axis-Aligned Bounding Box (AABB) intersection tests between the ray and the bounding volumes of child nodes [S2][S3, unofficial].
++    *   **AABB Intersection Logic**: Compute near/far $t$ values for x, y, z axes. Let $t_{min}$ and $t_{max}$ be the intersection intervals for each axis.
++        $$ t_0 = \max(\max(t_{min}.x, t_{min}.y), t_{min}.z) $$
++        $$ t_1 = \min(\min(t_{max}.x, t_{max}.y), t_{max}.z) $$
++        The ray intersects the box if $\max(t_0, 0.0) \le t_1$ [S3, unofficial].
++    *   If the node is an inner node (ID < 0), push children to the traversal stack. Sort children such that the closer child (by $t_0$) is processed first for closest-hit, or the farther child (by $t_1$) for any-hit [S3, unofficial].
++    *   If the node is a leaf (ID $\ge$ 0), fetch the Gaussian data from `tTriangleTexture` and perform a Splat Intersection test [S3, unofficial].
++
++3.  **Splat Intersection**:
++    For a leaf Gaussian with position $\boldsymbol{pos}$ and axes $\boldsymbol{au}$ (and implied orthogonal axis), solve for the intersection parameters $u, v, t$ in the local coordinate system:
++    $$ [\boldsymbol{au}, \boldsymbol{av}, \boldsymbol{r_d}] \cdot [u, v, -t]^T = \boldsymbol{r_o} - \boldsymbol{pos} $$
++    Let the solution vector be $\boldsymbol{uvt} = [u, v, t]$. The hit is valid if $t > 0$ and $u^2 + v^2 < 1.0$ (inside the unit circle in local space) [S3, unofficial].
++
++4.  **Mode Selection**:
++    The traversal supports two modes [S3, unofficial]:
++    *   **Closest-Hit (`USE_ANYHIT=0`)**: Finds the nearest splat. Used for single-bounce or opaque-like rendering.
++    *   **Any-Hit (`USE_ANYHIT=1`)**: Collects all splats intersected by the ray. Used for correct alpha blending of semi-transparent layers.
++
++5.  **Radiance Accumulation**:
++    *   **Closest-Hit Mode**: Loop up to 8 bounces.
++        *   Intersect ray. If hit, accumulate color:
++            $$ \text{cumColor} += T \cdot \text{hitOpacity} \cdot \text{hitColor} $$
++        *   Update transmittance:
++            $$ T *= 1.0 - \text{hitOpacity} $$
++        *   Shift ray origin: $\boldsymbol{r_o} \leftarrow \boldsymbol{r_o} + (t + 10^{-6})\boldsymbol{r_d}$.
++        *   Break if $T < 0.05$ [S3, unofficial].
++    *   **Any-Hit Mode**:
++        *   Collect all hits into a sorted array `intersects[N_INT]` (max size 32) using insertion sort by depth $d$ [S3, unofficial].
++        *   If the array is full (`intersectPtr >= N_INT`), return early [S3, unofficial].
++        *   Sort collected intersections by depth.
++        *   Loop through sorted hits:
++            $$ \text{cumColor} += T \cdot \text{rgba}.w \cdot \text{rgba}.xyz $$
++            $$ T *= 1.0 - \text{rgba}.w $$
++
++6.  **Alternative Volumetric Approach (S2)**:
++    Some implementations approximate the Gaussian contribution as a point sample at an "equivalent intersection point" $\boldsymbol{r_x}$ [S2]:
++    $$ \boldsymbol{r_x} = \boldsymbol{r_o} + t_j\boldsymbol{r_d} $$
+     $$ t_j = \frac{(\boldsymbol{\mu} - \boldsymbol{r_o})^T \boldsymbol{\Sigma} \boldsymbol{r_d}}{\boldsymbol{r_d}^T \boldsymbol{\Sigma} \boldsymbol{r_d}} $$
+-    Here, $\boldsymbol{r_o}$ is the ray origin, $\boldsymbol{r_d}$ is the ray direction, $\boldsymbol{\mu}$ is the Gaussian mean, and $\boldsymbol{\Sigma}$ is the covariance matrix [S2].
+-5.  **Contribution Approximation:** Approximate the Gaussian's contribution to the ray as its opacity $\alpha_j$ evaluated at $\boldsymbol{r_x}$ [S2].
+-6.  **Transmittance Update:** Progressively attenuate the ray's transmittance $T$ as it passes through the Gaussians. The transmittance is updated using the formula:
++    The contribution is approximated as $\alpha_j$ at $\boldsymbol{r_x}$. Transmittance is attenuated progressively:
+     $$ T_i = (1 - \alpha_{i-1})T_{i-1}, \quad \text{for } i = 1, \ldots, j-1 \text{ with } T_1 = 1 $$
+-    Note that the order in which Gaussians are encountered along the ray does not impact the overall transmittance [S2].
+-7.  **Batching and Accumulation:** To optimize performance and avoid register spilling on hardware, batch the evaluation of Gaussians. Accumulate contributions in fixed-size groups of $N$ Gaussians, requiring repeated BVH traversals for each batch [S3].
+-8.  **Early Termination:** If the ray's transmittance drops below a predefined threshold $T_{min}$, terminate the ray tracing process early [S2].
++    Early termination occurs if transmittance drops below a threshold $T_{min}$ [S2].
+ 
+-**Pseudocode:**
+-```python
+-def trace_gaussian_ray(ray_origin, ray_direction, gaussians, bvh, t_min):
+-    """
+-    Trace a single ray against a set of 3D Gaussians using a BVH.
+-    
+-    Args:
+-        ray_origin: 3D vector, origin of the ray.
+-        ray_direction: 3D vector, direction of the ray.
+-        gaussians: List of Gaussian objects with attributes:
+-                   - mu: 3D vector (mean)
+-                   - Sigma: 3x3 matrix (covariance)
+-                   - alpha: float (opacity)
+-        bvh: Binary Radix Tree structure for efficient visibility querying.
+-        t_min: Float, threshold for early termination of transmittance.
+-        
+-    Returns:
+-        accumulated_color: 3D vector, final color of the pixel.
+-        final_transmittance: Float, remaining transmittance.
+-    """
+-    accumulated_color = [0.0, 0.0, 0.0]
+-    current_transmittance = 1.0
+-    
+-    # Get list of intersected Gaussians via BVH traversal
+-    # The BVH traversal recursively tests intersection between ray and 
+-    # bounding volumes until leaf nodes (Gaussians) are reached [S2].
+-    intersected_gaussians = bvh.query(ray_origin, ray_direction)
+-    
+-    # Sort is not strictly required for transmittance calculation as order 
+-    # does not affect overall transmittance [S2], but batching requires 
+-    # grouping [S3].
+-    
+-    # Process Gaussians in batches to avoid register spilling [S3]
+-    batch_size = N # Implementation detail, e.g., 32 or 64
+-    for batch_start in range(0, len(intersected_gaussians), batch_size):
+-        batch = intersected_gaussians[batch_start : batch_start + batch_size]
+-        
+-        for gaussian in batch:
+-            # Calculate equivalent intersection parameter t_j [S2]
+-            # t_j = ((mu - r_o)^T * Sigma * r_d) / (r_d^T * Sigma * r_d)
+-            numerator = dot(sub(gaussian.mu, ray_origin), multiply(gaussian.Sigma, ray_direction))
+-            denominator = dot(ray_direction, multiply(gaussian.Sigma, ray_direction))
+-            
+-            if denominator == 0:
+-                continue # Avoid division by zero
+-            
+-            t_j = numerator / denominator
+-            
+-            # Calculate equivalent intersection point r_x [S2]
+-            # r_x = r_o + t_j * r_d
+-            r_x = add(ray_origin, multiply_scalar(ray_direction, t_j))
+-            
+-            # Approximate contribution as alpha_j at r_x [S2]
+-            alpha_j = gaussian.alpha
+-            
+-            # Update transmittance [S2]
+-            # T_i = (1 - alpha_{i-1}) * T_{i-1}
+-            current_transmittance = current_transmittance * (1 - alpha_j)
+-            
+-            # Accumulate color [S2]
+-            # Color contribution is approximated by alpha * color * transmittance
+-            # Note: Standard 3DGS color is often stored as SH coefficients or 
+-            # spherical harmonics. For simplicity, assume gaussian.color is 
+-            # the base color at this point.
+-            color_contribution = multiply_scalar(gaussian.color, alpha_j * current_transmittance)
+-            accumulated_color = add(accumulated_color, color_contribution)
+-            
+-            # Early termination if transmittance is too low [S2]
+-            if current_transmittance < t_min:
+-                break
+-        
+-        if current_transmittance < t_min:
+-            break
+-            
+-    return accumulated_color, current_transmittance
+-```
++### Parameters
++*   **N_INT**: Maximum number of splat intersections stored in any-hit mode. Value: 32 [S3, unofficial].
++*   **INFINITY**: Large float value for no-hit. Value: 1048576.0 [S3, unofficial].
++*   **Tmin**: Threshold for early termination of ray tracing if transmittance drops below this value [S2].
++*   **Batch Size**: Fixed-size groups of $N$ Gaussians for evaluation to avoid register spilling [S4].
+ 
+-**Parameters:**
+-*   $T_{min}$: Threshold for early termination of ray tracing if transmittance drops below this value. Typical values are not specified in the sources, but standard ray tracing thresholds (e.g., $10^{-4}$ to $10^{-6}$) are implied by the context of "early termination" [S2].
+-*   Batch Size ($N$): Fixed-size group of Gaussians for accumulation to avoid register spilling. The exact value is not specified, but it is a hardware-dependent optimization parameter [S3].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Computational Complexity:** Online visibility querying via ray tracing is computationally expensive [S2]. This is mitigated by pre-computing visibility for static scenes in a separate stage [S2].
+-*   **Register Spilling:** Evaluating too many Gaussians per ray without batching can lead to register spilling on GPU hardware, degrading performance [S3].
+-*   **Order Independence:** The order of encounter of Gaussians along a ray does not affect the overall transmittance, which simplifies the traversal logic but requires careful handling of color accumulation if depth-dependent effects are needed [S2].
++### Edge Cases and Pitfalls
++*   **Precision**: BVH traversal uses float for stack pointers and IDs. Inner nodes have negative IDs, leaves have positive. The check `id < 0.0` distinguishes them. Floating point comparison `currentStackData.t0 >= t` is used for pruning [S3, unofficial].
++*   **Complexity**: Online visibility querying is computationally expensive. For static scenes, visibility is often pre-computed in a separate stage [S2].
++*   **Register Spilling**: Large batches of Gaussians can cause register spilling in shaders. Batching evaluation into fixed-size groups mitigates this [S4].
+ 
+ ## Subtopics
+ 
+ ### [GRay](10042-gray.md)
+-GRay is a fast ray-tracing method for 3D Gaussian Splatting (3DGS) designed to close the performance gap between ray tracing and rasterization by leveraging the algorithmic advantage of ray tracing: it evaluates only intersected Gaussians, allowing logarithmic scaling in dense scenes with tiny Gaussians. Unlike 3DGS rasterization which operates on tiles and evaluates all Gaussians overlapping a tile for every pixel (linear scaling), GRay uses a Bounding Volume Hierarchy (BVH) to select and evaluate exactly the set of Gaussians intersecting each pixel. It builds on [3D Gaussian Ray Tracing](8101-3d-gaussian-ray-tracing.md), [EPBRR](8102-epbrr.md), and [EDGS](8103-edgs.md).
++A fast ray-tracing method for 3D Gaussian Splatting (3DGS) designed to close the performance gap between ray tracing and rasterization by leveraging the algorithmic advantage of ray tracing: it evaluates only intersected Gaussians, allowing logarithmic scaling in dense scenes with tiny Gaussians. Unlike 3DGS rasterization which operates on tiles and evaluates all Gaussians overlapping a tile for every pixel (linear scaling), GRay uses a Bounding Volume Hierarchy (BVH) to select and evaluate exactly the set of Gaussians intersecting each pixel. It builds on [3D Gaussian Ray Tracing](8101-3d-gaussian-ray-tracing.md), [EPBRR](8102-epbrr.md), and [EDGS](8103-edgs.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Logarithmic scaling with respect to the number of Gaussians in dense scenes, as it evaluates only intersected primitives via BVH traversal [S1, unofficial]. In contrast, rasterization scales linearly with the number of Gaussians overlapping a tile [S1, unofficial].
+-*   **Memory Complexity:** Requires storage for the BVH structure and proxy triangle meshes for each Gaussian [S1, unofficial][S3].
+-*   **Measured Performance:** On tested hardware, 3DGRT optimizes about 9× slower than a recent version of 3DGS rasterization, despite quality reductions [S3].
+-*   **Strengths:** Efficient visibility querying for semi-transparent particles; avoids evaluating non-intersecting Gaussians; suitable for dense scenes with tiny Gaussians [S1, unofficial].
+-*   **Limitations:** Slower than rasterization in current implementations; computational complexity of online visibility querying for dynamic scenes [S2, S3].
+-*   **When to Use:** Dense scenes with many small Gaussians where rasterization tile overlap is high; static scenes where visibility can be pre-computed [S1, unofficial][S2].
+-*   **When Not to Use:** Real-time applications requiring maximum frame rates where rasterization is sufficient; dynamic scenes requiring frequent online visibility updates [S2, S3].
++*   **Time Complexity**: Logarithmic scaling with respect to the number of Gaussians in dense scenes, as only intersected Gaussians are evaluated via BVH traversal [S1, unofficial]. This contrasts with the linear scaling of rasterization in dense regions.
++*   **Memory Complexity**: Requires storage for the BVH structure (AABB texture) and Gaussian data (Triangle texture). The BVH construction is done in-place or via parallel radix tree algorithms [S2].
++*   **Performance**: On tested hardware, 3DGRT optimizes about 9× slower than a recent version of 3DGS rasterization [S4]. However, it provides physically plausible transparency and shadow effects that rasterization struggles with [S1, unofficial][S2].
++*   **Strengths**: Correct handling of semi-transparent objects, volumetric accuracy, support for complex lighting (shadows, reflections) via ray tracing [S1, unofficial][S2].
++*   **Limitations**: Slower than rasterization, computational complexity of online visibility querying for dynamic scenes [S2], precision issues in BVH traversal [S3, unofficial].
++*   **When to use**: Scenes requiring high-fidelity transparency, shadows, or complex lighting interactions with 3D Gaussians [S1, unofficial][S2].
++*   **When not to use**: Real-time applications where rasterization speed is critical and transparency artifacts are acceptable [S4].
+ 
+ ## Background
+-3D Gaussian Ray Tracing was first studied by Moenne-Loccoz et al. [2024] as a hardware-accelerated alternative for rendering 3D Gaussians using OptiX [S3]. The method builds on the concept of point-based ray tracing for semi-transparent particles [S1, unofficial]. It was developed to address the inefficiencies of rasterization in dense scenes and to provide a more physically plausible volumetric rendering approach for 3D Gaussian Splatting [S1, unofficial][S2].
++3D Gaussian Ray Tracing was first studied as a hardware-accelerated alternative to rasterization for rendering 3D Gaussians by Moenne-Loccoz et al. [2024] using OptiX [S4]. It addresses the limitations of standard 3D Gaussian Splatting, which violates physical absorption-emission models for heterogeneous transparent media [S1, unofficial]. Subsequent work, such as Relightable 3D Gaussians, introduced point-based ray tracing for realistic point cloud relighting with BRDF decomposition [S2]. More recently, methods like GRay have optimized this approach to close the performance gap with rasterization [S1, unofficial].
+ 
+ ## Sources
+ [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+ [S2] Relightable 3D Gaussians: Realistic Point Cloud Relighting with BRDF Decomposition and Ray Tracing, https://doi.org/10.1007/978-3-031-72995-9_5, fetched 2026-10-26
+-[S3] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29+[S3] notlasandu/spirulae-splat, https://github.com/notlasandu/spirulae-splat, fetched 2026-10-27 (unofficial)
++[S4] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29

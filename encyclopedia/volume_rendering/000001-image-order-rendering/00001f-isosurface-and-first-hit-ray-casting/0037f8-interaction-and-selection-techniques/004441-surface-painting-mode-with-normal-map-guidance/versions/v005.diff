@@ -1,0 +1,131 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Surface Painting Mode with Normal Map Guidance is an interactive volume rendering technique that allows users to paint volumetric envelopes (metaballs) directly on the visible surface of a volumetric object [S1, unofficial]. It solves the problem of manually positioning brush tips to follow complex 3D curvature by automatically overriding the brush's depth and orientation based on the underlying isosurface [S1, unofficial]. Unlike standard ray casting which renders the final image, this method generates auxiliary 2D buffers (position and normal maps) to guide the placement of new metaballs, ensuring they align with the object's geometry [S1, unofficial].
++Surface Painting Mode with Normal Map Guidance is an interactive volume rendering technique that allows users to paint volumetric envelopes (metaballs) directly on the visible surface of a volumetric object [S1, unofficial]. It solves the problem of manually positioning brush tips to follow complex 3D curvature by automatically overriding the brush's depth and orientation based on the underlying isosurface [S1, unofficial]. Unlike standard ray casting which renders the final image, this method generates auxiliary 2D buffers (position and normal maps) to guide the placement of new metaballs, ensuring they align with the object's geometry [S1, unofficial]. It builds on [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md).
+ 
+ ## How it works
+@@ -15,5 +15,5 @@
+ 
+ ### Algorithm Steps
+-1. **Surface Detection:** For each pixel $(u, v)$, construct a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ originating from the camera through $(u, v)$ [G]. Perform MIDA ray casting [S1, unofficial]. Sample the volume along the ray and stop evaluation immediately upon encountering the first non-transparent voxel [S1, unofficial]. Apply a 5-step refinement routine to the detected intersection position [S1, unofficial]. Subdivide the current ray stepping size into increasingly smaller values and probe the volume space in both directions from the current position to find a finer matching isosurface [S1, unofficial]. Compute the surface normal at the refined position [G]. Store the ray's position and the object's normal value in two separate 2D buffers corresponding to screen plane points [S1, unofficial].
++1. **Surface Detection:** For each pixel $(u, v)$, construct a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ originating from the camera through $(u, v)$ [G]. Perform MIDA ray casting [S1, unofficial]. Sample the volume along the ray and stop evaluation immediately upon encountering the first non-transparent voxel [S1, unofficial]. Apply a 5-step refinement routine to the detected intersection position [S1, unofficial]. Subdivide the current ray stepping size into increasingly smaller values and probe the volume space in both directions from the current position to find a finer matching isosurface [S1, unofficial]. Compute the surface normal at the refined position [S1, unofficial]. Store the ray's position and the object's normal value in two separate 2D buffers corresponding to screen plane points [S1, unofficial].
+ 2. **Normal Map Filtering:** Apply a convolution operation with a Gaussian blurring kernel to the normal map [S1, unofficial]. This step mitigates abrupt orientation changes in superquadratic metaballs [S1, unofficial].
+ 3. **Interactive Painting:** When the user paints at screen position $(u, v)$, map the mouse cursor position to the corresponding pair of values in the 2D buffers to override the current brush tip's depth [S1, unofficial]. For superquadratic metaballs, use the direction of the normal at the current position to calculate the rotation matrix of the metaball [S1, unofficial]. A cylindrical brush tip orients itself perpendicular to the surface of the volumetric object [S1, unofficial]. The depth of the object’s surface penetration by the brush tip can be adjusted [S1, unofficial]. Add the metaball to the envelope series, where metaballs merge based on size, proximity, and field function [S1, unofficial].
+@@ -24,7 +24,12 @@
+ 
+ class Camera:
+-    def get_ray(self, x, y):
+-        # [G] Standard camera ray generation
+-        return [0.0, 0.0, 5.0], [x, y, -5.0]
++    def get_ray(self, x, y, width, height, fov=1.0):
++        # [G] Standard perspective ray generation from screen coordinates
++        ndc_x = (2.0 * x / width) - 1.0
++        ndc_y = (2.0 * y / height) - 1.0
++        origin = [0.0, 0.0, 5.0]
++        direction = [ndc_x * fov, ndc_y * fov, -5.0]
++        length = math.sqrt(sum(c*c for c in direction))
++        return origin, [d/length for d in direction]
+ 
+ class Volume:
+@@ -46,5 +51,5 @@
+     for y in range(height):
+         for x in range(width):
+-            ray_origin, ray_dir = camera.get_ray(x, y)
++            ray_origin, ray_dir = camera.get_ray(x, y, width, height)
+             hit_pos = None
+             hit_normal = None
+@@ -108,9 +113,9 @@
+ def gaussian_blur(buffer, kernel_size=3):
+     """Applies a 2D Gaussian convolution to the normal buffer."""
+-    filtered = [[None] * len(buffer[0]) for _ in range(len(buffer))]
+-    # Standard normalized 3x3 Gaussian kernel [G]
++    # [G] Standard 3x3 Gaussian kernel approximation
+     kernel = [[1.0/16.0, 2.0/16.0, 1.0/16.0],
+               [2.0/16.0, 4.0/16.0, 2.0/16.0],
+               [1.0/16.0, 2.0/16.0, 1.0/16.0]]
++    filtered = [[None] * len(buffer[0]) for _ in range(len(buffer))]
+     for y in range(len(buffer)):
+         for x in range(len(buffer[0])):
+@@ -128,5 +133,5 @@
+     return filtered
+ 
+-def paint_metaball(mouse_x, mouse_y, pos_buffer, norm_buffer, brush_params, ray_origin, ray_dir):
++def paint_metaball(mouse_x, mouse_y, pos_buffer, norm_buffer, brush_params):
+     """Places a metaball guided by the surface buffers."""
+     target_pos = pos_buffer[mouse_y][mouse_x]
+@@ -136,10 +141,6 @@
+         return  # [G] Handle missing surface data
+ 
+-    # Compute depth (t) along the ray
+-    # [G] Assuming ray_origin is at camera, t is scalar distance
+-    t = math.sqrt(sum((target_pos[i] - ray_origin[i])**2 for i in range(3))) / math.sqrt(sum(ray_dir[i]**2 for i in range(3)))
+-
+     # Override depth
+-    brush_depth = t
++    brush_depth = target_pos
+ 
+     # Determine orientation
+@@ -160,25 +161,28 @@
+ def align_to_vector(normal):
+     """Creates a rotation matrix aligning the Z-axis with the normal."""
+-    # [G] Standard basis alignment
+-    n = normal / math.sqrt(sum(x*x for x in normal))
+-    z = [0, 0, 1]
+-    # Simple rotation matrix construction [G]
+-    return [[1,0,0],[0,1,0],[0,0,1]] # Placeholder for full matrix math [G]
++    # [G] Standard basis alignment using Gram-Schmidt
++    z = normal
++    x = [1.0, 0.0, 0.0]
++    if abs(z[0]) > 0.9:
++        x = [0.0, 1.0, 0.0]
++    x = [x[i] - sum(x[j]*z[j] for j in range(3))*z[i] for i in range(3)]
++    x_len = math.sqrt(sum(c*c for c in x))
++    x = [c/x_len for c in x]
++    y = [x[1]*z[2]-x[2]*z[1], x[2]*z[0]-x[0]*z[2], x[0]*z[1]-x[1]*z[0]]
++    return [x, y, z]
+ 
+ def perpendicular_to(normal):
+     """Returns a vector perpendicular to the normal."""
+     # [G] Cross product with arbitrary vector
+-    arbitrary = [1, 0, 0]
+-    if abs(normal[0]) > 0.9: arbitrary = [0, 1, 0]
+-    cross = [normal[1]*arbitrary[2] - normal[2]*arbitrary[1],
+-             normal[2]*arbitrary[0] - normal[0]*arbitrary[2],
+-             normal[0]*arbitrary[1] - normal[1]*arbitrary[0]]
+-    norm = math.sqrt(sum(x*x for x in cross))
+-    if norm > 0: return [x/norm for x in cross]
+-    return [1, 0, 0]
++    arbitrary = [1.0, 0.0, 0.0]
++    if abs(normal[0]) > 0.9:
++        arbitrary = [0.0, 1.0, 0.0]
++    return [normal[1]*arbitrary[2]-normal[2]*arbitrary[1],
++            normal[2]*arbitrary[0]-normal[0]*arbitrary[2],
++            normal[0]*arbitrary[1]-normal[1]*arbitrary[0]]
+ 
+ def add_metaball(pos, size, orientation):
+     """Adds a metaball primitive to the envelope series."""
+-    pass # [G] Metaball addition logic
++    pass # [G] Metaball addition logic not specified in sources
+ ```
+ 
+@@ -191,6 +195,6 @@
+ ### Edge Cases and Pitfalls
+ *   **Normal Noise:** Volumetric datasets produce noisy normal maps, causing abrupt orientation changes in superquadratic metaballs [S1, unofficial]. Mitigated by 5-step refinement and Gaussian blurring [S1, unofficial].
+-*   **Transparent Voxels:** The algorithm stops at the *first* non-transparent voxel. If the volume has internal structures, only the outermost surface is captured [S1, unofficial].
+-*   **Missing Surface Data:** If the ray does not hit the volume (e.g., background pixels), the buffers may contain undefined values. Implementation should handle these as "no paint" or use default values [G].
++*   **Transparent Voxels:** The algorithm stops at the *first* non-transparent voxel [S1, unofficial]. If the volume has internal structures, only the outermost surface is captured [S1, unofficial].
++*   **Missing Surface Data:** If the ray does not hit the volume (e.g., background pixels), the buffers may contain undefined values [S1, unofficial]. Implementation should handle these as "no paint" or use default values [G].
+ 
+ ## Subtopics
+@@ -203,6 +207,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [G].
+-*   **Memory Complexity:** Not given in the sources [G].
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Performance:** Not given in the sources.
+ *   **Strengths:** Provides intuitive surface-following painting; eliminates manual depth adjustment; supports complex orientations via normals [S1, unofficial].

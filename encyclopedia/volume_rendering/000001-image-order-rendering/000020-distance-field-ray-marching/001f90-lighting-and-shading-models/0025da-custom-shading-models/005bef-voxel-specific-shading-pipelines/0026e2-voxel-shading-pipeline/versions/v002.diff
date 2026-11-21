@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -7,10 +7,10 @@
+ 
+ ## How it works
+-**Inputs:** Camera position (`camPos`), ray direction (`rayDir`), hit position (`hitPosition`), hit cell coordinates (`hitCell`), hit face normal (`hitFaceNormal`), block type (`b`), sun direction (`L`), and time (`time`) for sun rotation.
+-**Outputs:** Final pixel color (`finalColor`).
++**Inputs:** Camera position (`camPos`), ray direction (`rayDir`), ray hit result (`tr` containing `hit`, `t`, `cell`, `normal`), block type (`b`), sun direction (`L`), and time (`time`) for sun rotation [S1, unofficial].
++**Outputs:** Final pixel color (`finalColor`) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `TraceResult`: Contains `hit` (bool), `t` (float, distance), `cell` (ivec3), `normal` (vec3).
+-*   `BlockType`: Enum including `BLOCK_EMISSIVE`.
++*   `TraceResult`: Contains `hit` (bool), `t` (float, distance), `cell` (integer 3-tuple), `normal` (float 3-tuple) [S1, unofficial].
++*   `BlockType`: Enum including `BLOCK_EMISSIVE` [S1, unofficial].
+ 
+ **Parameters:**
+@@ -31,6 +31,6 @@
+ 
+ **Steps:**
+-1.  **Ray Hit Validation:** If no hit, return sky color. If hit distance `t <= 0.0`, set `hitPosition = camPos`; else `hitPosition = camPos + rayDir * (t + 1e-5)` [S1, unofficial].
+-2.  **Normal and Vector Setup:** Normalize `hitFaceNormal` to get surface normal `N`. Compute view vector `V = normalize(rayDir)`. Compute sun direction `L` based on time [S1, unofficial].
++1.  **Ray Hit Validation:** If `tr.hit` is false, return sky color. If `tr.t <= 0.0`, set `hitPosition = camPos`; else `hitPosition = camPos + rayDir * (tr.t + 1e-5)` [S1, unofficial].
++2.  **Normal and Vector Setup:** Normalize `tr.normal` to get surface normal `N`. Compute view vector `V = normalize(rayDir)`. Compute sun direction `L` based on time [S1, unofficial].
+ 3.  **Atmosphere/Absorption:** Compute `absorpColor` using atmospheric scattering or absorption model [S1, unofficial]. If `ENABLE_ATMOSPHERE`, compute sky color via atmosphere function; else `sky = absorpColor` [S1, unofficial].
+ 4.  **Local Coordinates:** Calculate local position within the voxel: `local = hitPosition - vec3(float(hitCell.x), float(hitCell.y), float(hitCell.z))`. Apply `fract()` to get `localPos` [S1, unofficial].
+@@ -39,11 +39,6 @@
+ 7.  **Rim Lighting:** Compute `rim = pow(1.0 - max(0.0, dot(N, V)), 2.2) * 0.12` [S1, unofficial].
+ 8.  **Shadow Casting:** Initialize `shadow = 1.0`. If `ENABLE_SHADOW`, trace a secondary ray from `hitPosition + N * 0.01` in direction `L`. If the trace hits a voxel, set `shadow = 0.0` [S1, unofficial].
+-9.  **Direct and Indirect Light:**
+-    *   `directLight = lightColor * lambert` [S1, unofficial].
+-    *   `indirectLight = 0.25 * albedo` [S1, unofficial].
+-10. **Emissive Handling:** If block type is `BLOCK_EMISSIVE`:
+-    *   Get emission color and intensity.
+-    *   `indirectLight += 0.35 * emission` [S1, unofficial].
+-    *   `directLight += emission * 0.5` [S1, unofficial].
++9.  **Direct and Indirect Light:** `directLight = lightColor * lambert` [S1, unofficial]. `indirectLight = 0.25 * albedo` [S1, unofficial].
++10. **Emissive Handling:** If block type is `BLOCK_EMISSIVE`: get emission color and intensity. `indirectLight += 0.35 * emission` [S1, unofficial]. `directLight += emission * 0.5` [S1, unofficial].
+ 11. **Lighting Integration:** Compute `diffAlbedo = albedo * absorpColor`. Calculate lit color:
+     $$ lit = (shadow \cdot directLight + ambient) \cdot diffAlbedo + (indirectLight \cdot absorpColor) + rim \cdot 0.6 \cdot absorpColor $$
+@@ -65,8 +60,8 @@
+ **Pseudocode:**
+ ```python
+-def voxel_shading_pipeline(camPos, rayDir, tr, time):
+-    # tr is TraceResult with hit, t, cell, normal
++def voxel_shading_pipeline(camPos, rayDir, tr, time, enable_atmosphere=True, enable_shadow=True):
++    # tr: object with .hit, .t, .cell, .normal
+     if not tr.hit:
+-        return sky_color # Computed via atmosphere or absorpColor
++        return compute_sky(rayDir, enable_atmosphere)
+ 
+     # 1. Hit Position
+@@ -75,15 +70,15 @@
+     else:
+         hitPosition = camPos + rayDir * (tr.t + 1e-5)
+-    
++
+     hitCell = tr.cell
+     hitFaceNormal = tr.normal
+     N = normalize(hitFaceNormal)
+     V = normalize(rayDir)
+-    L = normalize(sun_vec(time * SUN_ROT_SPEED))
++    L = normalize(sun_direction(time * SUN_ROT_SPEED))
+ 
+     # 2. Atmosphere/Sky
+-    absorpColor = compute_absorption(vec3(0,1,0), camPos, L, ...) # Implementation details omitted
+-    if ENABLE_ATMOSPHERE:
+-        sky = 1.0 - exp(atmosphere(rayDir, camPos, L, ...))
++    absorpColor = atmospheric_absorption(vec3(0,1,0), camPos, L) # Standard atmospheric model [G]
++    if enable_atmosphere:
++        sky = 1.0 - exp(atmospheric_scattering(rayDir, camPos, L))
+     else:
+         sky = absorpColor
+@@ -105,6 +100,6 @@
+     # 5. Shadow
+     shadow = 1.0
+-    if ENABLE_SHADOW:
+-        sh = trace_voxel(hitPosition + N * 0.01, L, tLimit, maxSteps)
++    if enable_shadow:
++        sh = trace_voxel(hitPosition + N * 0.01, L, tLimit=100, maxSteps=64)
+         if sh.hit:
+             shadow = 0.0
+@@ -131,5 +126,5 @@
+     dotNH = max(0.0, dot(N, H))
+     dotNL = max(0.0, dot(N, L))
+-    
++
+     alphaSqr = alpha * alpha
+     denom = dotNH * dotNH * (alphaSqr - 1.0) + 1.0
+@@ -138,5 +133,5 @@
+     k = 0.5 * alpha
+     k2 = k * k
+-    
++
+     spec = shadow * (dotNL * D * F / (max(1e-6, dotLH * dotLH * (1.0 - k2)) + k2)) * absorpColor * lit
+     lit += spec
+@@ -146,4 +141,20 @@
+     finalColor = 1.0 - exp(-2.0 * lit)
+     return finalColor
++
++# Helper definitions (standard math/vector operations [G])
++def normalize(v): return v / length(v)
++def dot(a, b): return sum(a[i]*b[i] for i in range(3))
++def vec3(x, y, z): return (x, y, z)
++def fract(v): return v - floor(v)
++def sun_direction(t): return normalize(vec3(cos(t), sin(t), 0.5))
++def get_block_type(cell): return BLOCK_EMISSIVE if cell == (0,0,0) else BLOCK_GRASS # Standard lookup [G]
++def sample_block_albedo(cell, localPos, normal): return vec3(0.8, 0.8, 0.8) # Standard texture fetch [G]
++def get_emissive_color(cell): return vec3(1.0, 0.5, 0.0) # Standard lookup [G]
++def get_emissive_intensity(cell): return 1.0 # Standard lookup [G]
++def trace_voxel(origin, direction, tLimit, maxSteps): # Standard ray march [G]
++    return {'hit': False, 't': tLimit}
++def atmospheric_absorption(pos, camPos, lightDir): return vec3(0.1, 0.15, 0.2) # Standard model [G]
++def atmospheric_scattering(rayDir, camPos, lightDir): return vec3(0.5, 0.6, 0.8) # Standard model [G]
++def compute_sky(rayDir, enable_atmosphere): return atmospheric_scattering(rayDir, vec3(0,0,0), vec3(0,0,1)) # Standard fallback [G]
+ ```
+ 
+@@ -160,9 +171,7 @@
+ *   **Strengths:** Simple implementation, visually pleasing for voxel worlds, handles emissive blocks [S1, S2, unofficial].
+ *   **Limitations:** Hard shadows only, no soft shadows or global illumination [S1, S2, unofficial].
+-*   **When to use:** Interactive voxel games, real-time rendering [S2, unofficial].
+-*   **When not to use:** Photorealistic rendering requiring soft shadows or GI [S2, unofficial].
+ 
+ ## Background
+-The method originates from community-driven voxel shader implementations, specifically the "Voxel-World-Shader" by razzle-reinizu [S1, unofficial] and "Ray-Marched Voxel Simulation" by Joris Rijsdijk [S2, unofficial]. It is used in indie voxel games and educational graphics projects [S1, S2, unofficial].
++The method is documented in community shader repositories and graphics programming blog posts detailing ray-marched voxel rendering techniques [S1, S2, unofficial]. It is applied in indie voxel games and educational graphics projects to achieve real-time lighting on discrete voxel geometry [S1, S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,2830 @@
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Yixiong Yang1,* , Sisheng Zhang1,* , Qingsong Yan2 , Shaohuai Shi1 , Qiang Wang1,†
+1
+Harbin Institute of Technology, Shenzhen, China, 2 XGRIDS, China, * Equal contribution, † Corresponding author
+arXiv:2609.03334v1 [cs.CV] 3 Sep 2026
+Abstract
+rasterization, dramatically improving training and rendering
+efficiency, reducing optimization time from days to minutes
+while enabling real-time rendering. Owing to its favorable
+quality–speed balance, 3DGS has quickly become a backbone for a broad range of downstream tasks (Chen & Wang,
+2025; Huang et al., 2024a; Zuo et al., 2025; Huang et al.,
+2024b; Matsuki et al., 2024; Guo et al., 2025).
+A key bottleneck in 3D Gaussian Splatting training is the continual growth of Gaussian primitives, which increases optimization cost and
+slows convergence, especially at high resolutions. We propose Laplacian Frequency Hierarchies, a simple yet efficient 3DGS scheme
+that combines Laplacian image decomposition
+with coarse-to-fine, frequency-staged training. After fitting lower-frequency structure, we archive
+the corresponding Gaussian field so that subsequent fields can optimize higher-frequency residuals without carrying the full primitive burden,
+and we compose the rendered components in
+the image domain via a Laplacian-style reconstruction at inference time. This design reduces
+the number of active Gaussians during training,
+thereby lowering optimization overhead and accelerating training. The proposed scheme is plugand-play and orthogonal to prior 3DGS accelerations: it can be directly combined with strong
+backbones such as Taming-3DGS and FastGS
+to improve training speed with competitive reconstruction quality. It achieves average training
+speedups of 1.73× and 1.21× at 1K, and 1.74×
+and 1.33× at 4K on Taming-3DGS and FastGS,
+with larger gains on more challenging scenes
+and increasingly pronounced benefits at higher
+resolutions. The project page and source code
+are available at https://sorenzhang574.
+github.io/Laplacian-GS/.
+Despite these advances, efficiency in practical applications
+remains a bottleneck. As scene complexity and target resolution increase, 3DGS typically requires more Gaussian
+primitives and incurs heavier Gaussian–tile interactions, increasing computation and peak memory usage. This has
+motivated acceleration methods based on rasterization optimization, scheduling, and primitive control. Taming 3DGS
+(Mallick et al., 2024) improves tile-level parallelization,
+while DashGaussian (Chen et al., 2025) uses resolution
+and primitive schedulers to delay expensive phases. MiniSplatting (Fang & Wang, 2024) and FastGS (Ren et al.,
+2025) reduce training cost by controlling densification, pruning, or adaptive density. Taken together, these approaches
+aim to reduce the average Gaussian workload during training, e.g., by shrinking the Gaussian set, reducing Gaussian–tile pairs, or postponing expensive iterations.
+However, many existing approaches do not fully eliminate a
+structural inefficiency. They still rely on a single Gaussian
+set to cover both coarse and fine image components across
+the entire optimization. Frequency-based methods (Chen
+et al., 2025; Nguyen et al., 2025; Zhang et al., 2024a; Zeng
+et al., 2025) typically use frequency cues to schedule supervision, for instance by changing the supervision order or
+adjusting the resolution. This changes the training curriculum but does not fundamentally decouple the representation,
+so the rendering workload can still grow with scene complexity and resolution. Crucially, coarse components that
+converge early are still carried through later training, leading
+to avoidable overhead when the optimization focuses on
+high-frequency details. This observation also resonates with
+recent explorations of Laplacian decomposition in Gaussianbased representations. Frequency hierarchies (Zhu et al.,
+2025) have shown promising gains in speed and quality for
+2D Gaussian image representation (Zhang et al., 2024b),
+while Lavi et al. (Lavi et al., 2025) explored Laplacian decomposition in 3DGS for interpretability and artistic appli-
+1. Introduction
+Novel view synthesis (NVS) is a foundational problem
+in 3D reconstruction and scene representation, aiming to
+render photorealistic views of a scene from previously unseen camera poses. Starting from Neural Radiance Fields
+(NeRF) (Mildenhall et al., 2021), implicit representations
+have achieved impressive fidelity but often at the cost of
+expensive optimization and slow rendering. In contrast, 3D
+Gaussian Splatting (3DGS) (Kerbl et al., 2023) introduces
+an explicit primitive-based representation with differentiable
+1
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Figure 1. We propose Laplacian Frequency Hierarchies, a frequency-factorized scheme for efficient 3D Gaussian Splatting training. We
+adopt a Laplacian image decomposition to split supervision into a low-frequency base and high-frequency residuals, and train a sequence
+of smaller, frequency-specific Gaussian fields. The framework is plug-and-play with strong accelerated backbones such as Taming-3DGS
+(Mallick et al., 2024) and FastGS (Ren et al., 2025), yielding faster optimization while maintaining comparable reconstruction quality.
+domain summation of the base rendering and residual renderings (see Fig. 1). This decomposition naturally enables
+a frequency-staged training scheme. We train the hierarchy
+from coarse to fine and archive each lower-frequency field
+once its training stage finishes. Each subsequent stage then
+focuses on the next frequency band without carrying the
+full primitive burden. Crucially, only the Gaussians of the
+current band are actively optimized at a time, leading to
+fewer active Gaussians during later iterations (Fig. 2) and
+reducing overall training workload. Beyond efficiency, this
+Laplacian-style factorization provides an interpretable view
+of the representation across frequencies and can support dynamic level-of-detail (LOD) rendering and frequency-aware
+artistic filtering, as explored in prior work (Lavi et al., 2025).
+Figure 2. Number of Gaussians across training iterations on the
+’treehill’ scene of Mip-NeRF 360 (Barron et al., 2022). Since
+earlier stages are archived, our method maintains substantially
+fewer active Gaussians in later iterations.
+We demonstrate that Laplacian Frequency Hierarchies are
+plug-and-play and orthogonal to existing 3DGS accelerations across multiple backbones. Our framework does not
+alter the core rasterizer or density-control designs, and can
+be directly stacked onto strong implementations such as
+Taming-3DGS (Mallick et al., 2024) and FastGS (Ren et al.,
+2025). At 1K resolution, our framework matches state-ofthe-art reconstruction quality while providing a noticeable
+efficiency gain. Notably, the efficiency gains become more
+pronounced at higher resolutions. On 2K and 4K scenes, our
+method delivers larger speedups while maintaining comparable reconstruction quality, demonstrating strong scalability
+to high-resolution settings. Overall, our results suggest that
+frequency decomposition can serve as an effective training
+and optimization strategy for reducing the active Gaussian
+workload in 3DGS training. In summary, we make the
+following contributions:
+cations. Yet the role of Laplacian factorization as a practical
+strategy for improving training efficiency in 3DGS remains
+underexplored. This motivates us to revisit Laplacian factorization as a mechanism for reducing the active optimization
+burden during training.
+In this work, we propose Laplacian Frequency Hierarchies, a frequency-decomposed framework for efficient 3D
+Gaussian Splatting. Our key observation is that NVS ultimately produces an image-plane signal with naturally structured frequency components. Low-frequency components
+capture global appearance and illumination, while highfrequency components primarily encode edges, textures,
+and fine details. Instead of forcing one Gaussian set to bear
+all frequencies at all times, we perform a Laplacian decomposition of the supervision signal and reformulate 3DGS
+as a hierarchy consisting of (i) a low-frequency base Gaussian field and (ii) multiple high-frequency residual Gaussian
+fields. Novel-view synthesis is then obtained by rendering
+each level and composing the final image via an image-
+• We propose Laplacian Frequency Hierarchies, a
+Laplacian-inspired training scheme for 3DGS that decomposes image supervision into a low-frequency base
+2
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+component and high-frequency residual components,
+which are optimized by frequency-specific Gaussian
+fields and composed in the image domain for NVS.
+Gaussians using a Hessian approximation aggregated across
+training views. FastGS (Ren et al., 2025) designs densification and pruning rules based on multi-view consistency
+and achieves strong efficiency–quality trade-offs. (iv) System and parallelization. System-oriented efforts explore
+parallel and distributed training (Zhao et al., 2024) as well
+as deployment-oriented designs for resource-constrained
+devices. Orthogonally, high-resolution settings introduce
+additional scalability challenges, motivating methods tailored for large images, such as (Liu et al., 2025a; Dhiman
+et al., 2024; Li et al., 2025). Our method is most closely
+related to frequency-based approaches. Unlike prior work
+that primarily uses frequency for scheduling or reweighting, we incorporate frequency at the representation level
+by decomposing the 3DGS scene into frequency-specific
+fields and composing their renderings in the image domain
+via a Laplacian-style reconstruction. This improves training
+efficiency and scales better to high-resolution settings.
+• We develop a coarse-to-fine frequency-staged training scheme that archives earlier levels and trains each
+subsequent level within its corresponding frequency
+band, reducing training workload and peak memory
+usage.
+• Our method shows plug-and-play compatibility across
+multiple 3DGS backbones. It improves training efficiency in the 1K setting while maintaining competitive
+rendering quality, and becomes increasingly favorable
+at 2K and 4K, yielding larger training speedups.
+2. Related Work
+Novel view synthesis. NVS has long been a central problem
+in 3D vision. NeRF established neural implicit representations for this task, followed by efforts to improve their
+efficiency (Mildenhall et al., 2021; Müller et al., 2022). 3D
+Gaussian Splatting (3DGS) (Kerbl et al., 2023) further advances efficient NVS with explicit Gaussian primitives and
+differentiable splatting, enabling GPU-friendly rasterization.
+Its efficiency has enabled adoption in large-scale reconstruction (Liu et al., 2025b), avatars (Yang et al., 2024), surface
+reconstruction (Guédon & Lepetit, 2024; Wolf et al., 2024),
+world modeling (Zuo et al., 2025), SLAM (Matsuki et al.,
+2024; Hu & Han, 2025), and digital twinning (Guo et al.,
+2025).
+Frequency-based methods in 3DGS. Several recent works
+exploit frequency or multi-scale priors to improve 3DGS
+training and rendering. FreGS (Zhang et al., 2024a) regularizes 3DGS in the Fourier domain to improve NVS fidelity
+and mitigate over-reconstruction artifacts. Opti3DGS and
+AutoOpti3DGS (Farooq et al., 2025; Nguyen et al., 2025)
+employ frequency-aware coarse-to-fine supervision while
+retaining a single Gaussian field. Zeng et al. (Zeng et al.,
+2025) introduce frequency-aware densification and deletion
+to allocate finer Gaussians to high-frequency regions, improving fidelity with fewer Gaussians. Lavi et al. (Lavi
+et al., 2025) use Laplacian subbands for LOD rendering
+and frequency-aware editing. In contrast, we factorize the
+scene into frequency-specific Gaussian fields and archive
+completed fields, so later stages optimize only the active frequency band, directly reducing the optimization workload
+for faster training.
+Acceleration for 3DGS training. Existing efforts to accelerate 3DGS training can be broadly grouped into several
+directions. (i) Backpropagation and optimizers. Taming
+3DGS (Mallick et al., 2024) replaces per-pixel backpropagation with a per-splat parallelization scheme, yielding
+substantial speedups with strong generality. Other works
+revisit optimizers and update rules, such as 3DGS-LM
+(Höllein et al., 2025), which replaces Adam with Levenberg–
+Marquardt to accelerate convergence, and 3DGS2 (Lan et al.,
+2025), which explores second-order optimization for faster
+training. (ii) Scheduling and frequency-aware training. A
+related line improves efficiency by progressively changing
+the training signal or workload, including resolution or frequency scheduling and coarse-to-fine strategies (Chen et al.,
+2025; Farooq et al., 2025). DashGaussian (Chen et al.,
+2025) introduces resolution and primitive schedulers that
+defer rapid primitive growth to later iterations, reducing the
+total training cost. (iii) Densification control and pruning.
+Many methods explicitly manage densification and pruning
+to curb the growth of Gaussian primitives. Mini-Splatting
+(Fang & Wang, 2024) removes a large portion of Gaussians via simplification based on intersection preservation
+and sampling. Speedy-Splat (Hanson et al., 2025) prunes
+3. Methodology
+3.1. Preliminaries.
+3D Gaussian Splatting (3DGS) represents a scene using a
+set of anisotropic Gaussian primitives G = {Gi }N
+i=1 (Kerbl
+et al., 2023). Each primitive is parameterized by a 3D
+mean µi ∈ R3 , an opacity σi ∈ (0, 1), a covariance matrix Σi ∈ R3×3 (e.g., Σi = Ri Si Si⊤ Ri⊤ with rotation Ri
+and diagonal scale Si = diag(si )), and view-dependent
+appearance parameters. The Gaussian density is
+
+
+1
+⊤ −1
+Gi (x) = exp − (x − µi ) Σi (x − µi )
+(1)
+2
+To render an image from a camera view, 3DGS projects each
+3D Gaussian onto the image plane using an affine approximation of the perspective projection, yielding an elliptical
+3
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Render
+Resolution pyramid (Target)
+Upsample
+Render
+Laplacian image decomposition
+Upsample
+Laplacian pyramid
+Render
+Gaussian fields
+Output
+Training process
+Inference (Laplacian Reconstruction)
+Figure 3. Overview of our method. We decompose each training image into a resolution pyramid and the corresponding Laplacian
+residual pyramid. During training, a sequence of Gaussian fields G L−1 , G L−2 , . . . , G 0 is optimized in a coarse-to-fine manner, with each
+field learning a specific frequency component. At inference time, the fields are rendered separately and their outputs are composed via
+Laplacian reconstruction to produce the full-resolution result.
+2D footprint whose contribution at pixel coordinate p is
+weighted by a 2D Gaussian kernel G2D
+i (p). Each primitive
+contributes an alpha value αi (p) = σi G2D
+i (p) and a viewdependent color ci (d). Given depth-sorted primitives along
+the viewing ray, the pixel color is computed by standard
+alpha compositing:
+ˆ =
+I(p)
+N
+X
+Ti (p) αi (p) ci (d),
+Resolution pyramid and Laplacian decomposition. Our
+image-space decomposition and reconstruction follow the
+classical Laplacian pyramid formulation (Burt & Adelson,
+1983). Let I 0 denote the full-resolution ground-truth image
+for a training view. We construct an L-level resolution pyramid {I ℓ }L−1
+ℓ=0 with an anti-aliased downsampling operator
+Down(·) (Gaussian filtering and subsampling), and define
+Up(·) as the paired upsampling operator used to construct
+the Laplacian residual targets {Rℓ }L−2
+ℓ=0 and to perform the
+subsequent reconstruction. The corresponding relations are:
+(2)
+i=1
+
+Qi−1
+where Ti (p) = j=1 1 − αj (p) denotes the accumulated transmittance. For view-dependent appearance, 3DGS
+models color using spherical harmonics (SH) coefficients.
+Specifically, each primitive stores SH coefficients {ai,ℓm },
+and we evaluate
+ci (d) =
+Lsh X
+k
+X
+ai,km Ykm (d),
+I ℓ+1 = Down(I ℓ ),
+Rℓ = I ℓ − Up(I ℓ+1 ),
+(4)
+where ℓ ∈ {0, . . . , L − 2} indexes pyramid levels (level 0 is
+full resolution and larger ℓ is coarser). In practice, we apply
+the same decomposition to every training view v, yielding
+a resolution pyramid (also referred to as a Gaussian image pyramid) {Iv0 , Iv1 , . . . , IvL−1 } and Laplacian pyramids
+{Rv0 , Rv1 , . . . , RvL−2 , IvL−1 }.
+(3)
+k=0 m=−k
+where d denotes the viewing direction, Ykm are SH basis functions, and Lsh is the maximum SH degree. As
+the number of Gaussian primitives N grows and the rendering resolution increases, both the per-iteration rendering/backpropagation cost and the peak memory footprint
+rise substantially, which becomes a key bottleneck for efficient training.
+Frequency-specific Gaussian fields. We represent the
+scene with a hierarchy of Gaussian fields {G L−1 , . . . , G 0 }
+aligned with the Laplacian components. The coarsest field
+G L−1 models the low-frequency content at level L−1 (target
+I L−1 ), while each field G ℓ for ℓ ∈ {0, . . . , L − 2} models
+the residual band Rℓ . A practical difference between the
+base and residual targets is their value range: I L−1 lies in
+[0, 1], whereas each residual Rℓ is signed and lies in [−1, 1].
+Standard 3DGS rasterizers assume non-negative color outputs and commonly apply a post-processing step to map the
+predicted SH color to [0, 1], e.g., by shifting and clamping:
+
+crgb
+(5)
+i (d) = clamp ci (d) + 0.5, 0, 1 .
+3.2. Laplacian Frequency Hierarchy
+Fig. 3 illustrates our Laplacian frequency hierarchy. Our
+goal is to reduce the training workload of 3DGS by factorizing a single scene representation into multiple frequencyspecific Gaussian fields and composing their renderings in
+the image domain.
+To support residual learning, we modify the rasterizer for
+4
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+residual fields by removing the shift and clamp, so that the
+rendered color can take signed values and match the range.
+Algorithm 1 Frequency-staged Training with Archiving for
+Laplacian Frequency Hierarchies
+Given a view v, we render each field using the corresponding
+splatting renderer and denote the resulting image by
+1: Precompute pyramids. For each training view v, build the
+resolution pyramid {Ivℓ }L−1
+ℓ=0 .
+2: Initialize an empty cache for accumulated predictions {Iˆvℓ }.
+3: for ℓ = L − 1, L − 2, . . . , 0 do
+4: Initialize Gaussian field.
+5: if ℓ = L − 1 then
+6:
+Initialize G L−1 from COLMAP (default 3DGS init).
+7: else
+8:
+Initialize G ℓ from the previous stage field G ℓ+1 .
+9: end if
+10:
+for each training iteration do
+11:
+Sample a training view v.
+12:
+if ℓ = L − 1 then
+13:
+Render Iˆvℓ ← Renderbase (G L−1 ; v).
+14:
+else
+15:
+Load cached Iˆvℓ+1 and compute Up(Iˆvℓ+1 ).
+16:
+Render residual R̂vℓ ← Renderres (G ℓ ; v).
+17:
+Reconstruct Iˆvℓ ← Up(Iˆvℓ+1 ) + R̂vℓ .
+18:
+end if
+
+
+19:
+Compute photometric loss Lphoto Iˆvℓ , Ivℓ .
+20:
+Backpropagate and update parameters.
+21:
+Apply densification and pruning.
+22: end for
+23: Cache the accumulated predictions Iˆvℓ for the next stage.
+24: Save the trained Gaussian field G ℓ and archive it.
+25: end for
+IˆL−1 (v) = Renderbase (G L−1 ; v),
+R̂ℓ (v) = Renderres (G ℓ ; v),
+(6)
+where Renderbase uses the standard color mapping in
+Eq. (5), and Renderres outputs signed residuals with the
+modified rasterizer.
+Image-domain composition. We synthesize the final fullresolution image by composing the rendered coarsest level
+and residuals in the image domain via a Laplacian-style
+reconstruction:
+Iˆvℓ = Up(Iˆvℓ+1 ) + R̂vℓ ,
+ℓ = L − 2, . . . , 0,
+(7)
+where Iˆv0 is the full-resolution prediction for view v.
+3.3. Frequency-staged training with archiving
+Coarse-to-fine training has been widely adopted in 3DGS to
+improve optimization efficiency (Chen et al., 2025; Farooq
+et al., 2025), since low-frequency structures typically converge earlier than high-frequency details. Building upon our
+Laplacian decomposition, we further introduce an archiving
+mechanism: once a frequency level has finished, we remove
+its Gaussian field from further optimization and memory residency. Unlike simple freezing, archiving allows a trained
+field to be moved off GPU memory (and optionally stored on
+CPU/disk), so that subsequent stages can dedicate computation and memory to the next frequency band. This reduces
+the number of Gaussians that remain active on the GPU
+at each stage, improving training throughput and lowering
+peak VRAM usage. The training procedure is summarized
+in Algorithm 1.
+correct target resolution and reduces error accumulation
+across levels.
+Initialization and inheritance. For the coarsest field G L−1 ,
+we follow standard 3DGS and initialize Gaussian positions
+from the COLMAP point cloud. When moving from level
+ℓ + 1 to ℓ, we initialize the new field G ℓ by inheriting Gaussians from the previous level. Concretely, we copy only the
+3D positions while reinitializing the remaining attributes
+such as scale, opacity, and colors, since different frequency
+bands exhibit different statistics. We also introduce an inheritance ratio ρ ∈ (0, 1]: when ρ = 1.0 all Gaussians are
+inherited, and when ρ < 1.0 we randomly inherit a subset.
+Inheritance analysis is provided in Sec. B of the supplement.
+Stage-wise training objectives. A naive strategy is to train
+each field to directly match its Laplacian target, i.e., IˆL−1 (v)
+to IvL−1 and R̂ℓ (v) to Rvℓ . In practice, we find that perlevel approximation errors can accumulate across levels and
+lead to degraded final reconstruction quality. To mitigate
+this issue, we supervise each stage using the reconstructed
+image at the corresponding resolution level. Specifically,
+after training the coarsest field G L−1 , we proceed from
+coarse to fine. For each finer level ℓ ∈ {L − 2, . . . , 0},
+we render the residual field to obtain R̂vℓ and reconstruct
+Iˆvℓ using Eq. 7 together with the previous-level prediction
+Iˆvℓ+1 . In practice, we only cache Iˆvℓ+1 in the dataloader,
+so the archived Gaussian field does not need to remain in
+memory. We then optimize G ℓ by comparing Iˆvℓ with the
+ground truth at the same pyramid level Ivℓ using the standard
+3DGS photometric loss (e.g., a weighted combination of
+ℓ1 and SSIM). This supervision anchors each stage to the
+4. Experiments
+4.1. Experimental Setup
+4.1.1. DATASETS AND M ETRICS .
+Following vanilla 3DGS and prior work, we evaluate our
+method on three real-world benchmarks: Mip-NeRF 360
+(Barron et al., 2022), Deep Blending (Hedman et al., 2018),
+and Tanks&Temples (Knapitsch et al., 2017). For MipNeRF 360, prior methods typically resize images to width
+1600, which we refer to as the 1K setting. We also evaluate
+on full-resolution images (average width 4185), referred
+to as the 4K setting. We also include an intermediate 2K
+setting by resizing each scene to the midpoint between width
+5
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Table 1. Quantitative comparison on three datasets (1K setting). Time is measured in minutes. NGS denotes the number of Gaussians (in
+millions). The top-3 results in each column are highlighted with best , second-best , and third-best .
+Mip-NeRF 360
+Method
+Deep Blending
+Tanks & Temples
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M)↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M)↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M)↓ FPS↑
+Original 3DGS 14.69 27.58
+Opti3DGS
+21.07 27.44
+Mini-Splatting 19.66 27.36
+Speedy-Splat 16.05 26.92
+Taming-3DGS 8.88 27.73
+DashGaussian 5.25 27.40
+FastGS
+4.82 27.96
+0.814
+0.807
+0.822
+0.782
+0.810
+0.797
+0.820
+0.220
+0.241
+0.216
+0.294
+0.228
+0.249
+0.216
+2.66
+2.23
+0.53
+0.30
+2.29
+2.00
+1.17
+116 12.20 29.83
+122 18.40 29.62
+172 14.15 30.01
+145 12.90 29.67
+97 6.84 29.29
+93 4.18 29.60
+198 3.34 30.24
+0.907
+0.906
+0.908
+0.904
+0.899
+0.905
+0.911
+0.238
+0.246
+0.253
+0.267
+0.246
+0.256
+0.240
+2.47
+2.12
+0.35
+0.25
+2.23
+1.64
+0.65
+156 9.47 23.82
+131 10.23 23.58
+231 10.55 23.28
+311 8.88 23.42
+123 6.33 24.36
+126 4.22 24.14
+237 3.44 24.34
+0.853
+0.843
+0.835
+0.820
+0.860
+0.850
+0.858
+0.169
+0.191
+0.203
+0.240
+0.165
+0.185
+0.173
+1.58
+1.23
+0.20
+0.18
+1.49
+1.15
+0.53
+157
+174
+250
+169
+142
+148
+208
+Ours(Taming) 5.13 27.39 0.797 0.245 1.13/1.47 96 3.61 29.38 0.900 0.243 1.02/1.20 127 3.91 23.93 0.841 0.197 0.57/0.88 110
+Ours(FastGS) 3.96 27.67 0.809 0.233 0.71/0.87 122 3.04 30.16 0.907 0.257 0.37/0.29 173 3.13 24.03 0.842 0.205 0.24/0.36 124
+Figure 4. Qualitative results on the “garden” scene (Mip-NeRF 360), the “playroom” scene (Deep Blending), and the “truck” scene
+(Tanks & Temples) under the 1K setting. For space constraints, we show only the top five methods by training time. Complete results and
+additional qualitative comparisons for the 2K/4K settings are provided in Sec. E of the supplementary material.
+1600 and its full resolution (average width 2893).
+4.2. Comparison with Fast Optimization Methods
+For NVS quality, we report the PSNR (peak signal-to-noise
+ratio), SSIM (Wang et al., 2004), and LPIPS (Zhang et al.,
+2018) on each dataset. To measure optimization efficiency,
+we report average training time and the number of primitives
+NGS , with stage-wise counts for our method. The reported
+training time measures iterative optimization for all methods.
+A detailed runtime breakdown and timing boundary are
+provided in Sec. G of the supplement.
+4.2.1. BASELINES .
+We compare against recent fast-training methods, including
+vanilla 3DGS (Kerbl et al., 2023), Opti3DGS (Farooq et al.,
+2025), Mini-Splatting (Fang & Wang, 2024), Speedy-Splat
+(Hanson et al., 2025), Taming-3DGS (Mallick et al., 2024),
+DashGaussian (Chen et al., 2025), and FastGS (Ren et al.,
+2025). These baselines represent different directions for
+accelerating 3DGS training. Taming-3DGS denotes the
+variant with the efficient backward implementation and the
+Sparse Adam optimizer. FastGS uses the “Big” setting from
+the original paper for a fairer comparison. EfficientGS (Liu
+et al., 2025a) is additionally included for high-resolution
+comparisons.
+4.1.2. I MPLEMENTATION D ETAILS .
+We implement our method on top of two backbones, Taming3DGS (Mallick et al., 2024) and FastGS (Ren et al., 2025).
+Taming-3DGS is a widely used and competitive backbone,
+while FastGS is a recent state-of-the-art baseline. Unless otherwise stated, all methods are run with their default settings
+for 30K training iterations using Adam (Kingma, 2014).
+Experiments in the 1K setting are conducted on an NVIDIA
+L40 GPU, while 2K and 4K experiments are run on an
+NVIDIA Pro6000 GPU to avoid out-of-memory failures for
+some methods. We use a two-level Laplacian decomposition with an iteration split of 10K/20K. Sec. 4.3.2 analyzes
+levels and iteration allocation.
+4.2.2. C OMPARISON WITH OTHER M ETHODS ON 1K
+SETTING .
+Tab. 1 reports quantitative comparisons on three datasets under the 1K setting. Our Laplacian framework improves training efficiency on both Taming-3DGS and FastGS backbones
+while largely preserving reconstruction quality. On MipNeRF 360, Ours(Taming) reduces training time from 8.88
+6
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+to 5.13 minutes, yielding a 1.73× speedup with only a 0.34
+dB PSNR drop. On the FastGS backbone, Ours(FastGS)
+further reduces time from 4.82 to 3.96 minutes, with a 0.29
+dB PSNR drop. Changes in SSIM and LPIPS remain within
+a comparable range. On Deep Blending, Ours(Taming) is
+both faster and improves over the Taming baseline in quality
+metrics, while Ours(FastGS) also accelerates training with
+only minor metric degradation. Tanks & Temples shows
+a similar trend. Our method achieves the fastest training
+time across these benchmarks. We note that slight metric
+degradation can occur in some cases, which we attribute to
+additional approximation error introduced by the hierarchical rendering and composition.
+Fig. 4 presents qualitative comparisons. Despite being faster,
+our method preserves comparable quality and in some cases
+produces better renderings than prior methods. For example,
+in the second row, the zoomed-in view shows clearer edges
+and finer details in our results. In addition to static comparisons, we provide trajectory videos in the supplement
+to inspect temporal stability under continuous viewpoint
+changes. The videos demonstrate stable rendering, with no
+flickering artifacts introduced by the image-domain Laplacian composition. An edge-preservation analysis is also
+provided in Sec. C of the supplement. Additional scenewise results are provided in Sec. D and Sec. E.
+Figure 5. Training Time vs NGS (paired before→after our method)
+on the Mip-NeRF 360 dataset. For our method, the NGS is computed as an iteration-weighted average under the iteration split.
+Tab. 1 also reports the number of Gaussian primitives NGS .
+For our method, we provide the stage-wise counts for each
+level. Compared to the original backbones, our training
+is split into two smaller Gaussian fields, which reduces
+GPU memory requirements and is better suited to resourceconstrained settings. We report the peak Gaussian count
+and peak GPU memory in Sec. F of the supplement. The
+table further includes inference FPS. Since the final image
+is reconstructed from separately rendered frequency fields,
+the overall FPS can decrease despite the smaller size of
+each field. All reported FPS values for our method are measured using sequential rendering of the frequency fields. We
+include this metric to make the inference trade-off explicit.
+Figure 6. PSNR versus training time on the counter scene of MipNeRF 360 under the 4K setting. Our method reaches comparable
+reconstruction quality earlier than the original backbones. The inset zooms into the early stage to highlight convergence differences.
+workload and explaining the efficiency gains observed in
+our experiments.
+4.2.4. A NALYSIS OF TRAINING TIME VS . G AUSSIAN
+COUNT.
+Fig. 5 shows the paired changes in training time and average Gaussian count when applying our method on top of
+Taming-3DGS and FastGS. Each arrow connects a baseline
+run to the corresponding result with our method. Together
+with Tab. 10 of the supplement, we observe that the speedup
+depends on scene complexity, and scenes with more Gaussians tend to obtain larger time reductions. For example,
+under the Taming backbone, the bicycle scene is accelerated
+from 11.65 minutes to 6.70 minutes. Under the FastGS backbone, the garden scene is accelerated from 8.82 minutes
+to 5.92 minutes. When the average Gaussian count becomes sufficiently small, further reducing primitives yields
+a less noticeable speedup, suggesting diminishing returns
+for acceleration strategies that rely primarily on controlling
+Gaussian count. This points to an interesting direction for
+4.2.3. A NALYSIS OF THE NUMBER OF G AUSSIANS
+ACROSS TRAINING .
+Fig. 2 visualizes how the Gaussian count NGS evolves during training. The arrows indicate the shift in NGS when
+our framework is applied on top of two different backbones.
+We observe that in the early iterations, our curves closely
+follow the corresponding backbones, since the optimization behaves similarly before the densification of the first
+stage is completed. After densification is stopped at the
+base stage, the curves begin to diverge, and our method
+maintains a substantially lower Gaussian count thereafter.
+Thus, our approach yields a much lower NGS trajectory than
+the original backbones, reflecting reduced effective training
+7
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Table 2. Mip-NeRF 360 results under the 2K setting.
+Method
+Table 4. Ablation study over the iteration allocation between two
+stages on the Mip-NeRF 360 dataset.
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M)↓ FPS↑
+Taming-3DGS 10.37
+DashGaussian 5.66
+FastGS
+6.18
+EfficientGS
+33.35
+Ours(Taming) 6.17
+Ours(FastGS) 4.82
+27.14
+26.76
+27.53
+27.07
+26.87
+27.38
+0.787
+0.774
+0.804
+0.803
+0.776
+0.794
+0.313
+0.332
+0.282
+0.283
+0.325
+0.300
+1.93
+1.70
+1.67
+1.26
+1.10/1.04
+1.22/0.70
+62
+60
+121
+76
+71
+107
+Table 3. Mip-NeRF 360 results under the 4K setting.
+Method
+26.81
+26.45
+27.37
+26.96
+26.70
+27.22
+0.795
+0.786
+0.812
+0.812
+0.790
+0.807
+0.361
+0.374
+0.327
+0.327
+0.366
+0.337
+1.57
+1.43
+1.73
+1.24
+1.00/0.79
+1.47/0.53
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+(10000, 20000)
+(15000, 15000)
+(20000, 10000)
+3.96
+4.10
+4.02
+27.67
+27.79
+27.87
+0.809
+0.811
+0.813
+0.233
+0.233
+0.234
+0.71/0.87
+0.79/0.83
+0.83/0.79
+122
+138
+136
+is effectively delegated to the next stage. Thus, moderate
+reallocations of iterations mainly shift where the error is corrected rather than fundamentally changing the final quality.
+In our experiments, we adopt (10000, 20000) as the default
+since it achieves the fastest training time with comparable
+metrics.
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M)↓ FPS↑
+Taming-3DGS 17.37
+DashGaussian 8.37
+FastGS
+8.74
+EfficientGS
+68.07
+Ours(Taming) 9.96
+Ours(FastGS) 6.57
+Iteration Split
+45
+40
+105
+60
+48
+95
+4.3.2. A NALYSIS OF THE NUMBER OF L APLACIAN
+LEVELS .
+future work on reducing fixed rendering and optimization
+overheads in low-primitive regimes.
+We investigate the effect of the number of Laplacian levels L
+under both the 1K and 4K settings, as summarized in Tab. 5.
+Under the 1K setting, a two-level hierarchy achieves the
+best balance between training efficiency and reconstruction
+quality. While increasing the number of levels leads to faster
+training, it consistently degrades reconstruction quality. We
+attribute this degradation to the accumulation of structural
+misalignment errors across multiple frequency bands when
+using deeper hierarchies. This result is consistent with prior
+studies (Zhu et al., 2025) on 2D Gaussian splatting for images (Zhang et al., 2024b), which also report a two-level
+design as the most effective configuration.
+4.2.5. C OMPARISONS ON HIGH - RESOLUTION SETTINGS
+(2K AND 4K)
+Tabs 2 and 3 report quantitative comparisons on the MipNeRF 360 dataset under the 2K and 4K settings. The overall trend is consistent with the 1K results, while the efficiency advantage of our method becomes more pronounced
+at higher resolutions and the quality gaps become negligible. This is expected because the rendering workload in
+3DGS grows rapidly with image resolution due to heavier Gaussian–tile interactions. In particular, the number of
+pixel–tile evaluations increases approximately quadratically
+with resolution, leading to significantly higher computation
+and memory pressure at 2K/4K. By reducing the effective
+training workload through our frequency hierarchy, our approach scales more favorably to high-resolution settings,
+achieving faster optimization while maintaining comparable reconstruction quality. The relative inference FPS gap
+becomes smaller at higher resolutions, especially under the
+4K setting. More results can be found in the supplement.
+Under the 4K setting, the quality degradation caused by
+deeper hierarchies becomes less pronounced, while the training speedup is significantly amplified. In particular, using
+four levels reduces the peak number of Gaussians from
+1.74M (2 levels) to 0.49M, resulting in substantial savings
+in both memory usage and training time. These results indicate that our method benefits more evidently from deeper
+Laplacian hierarchies at higher resolutions, highlighting its
+scalability to high-resolution reconstruction.
+Overall, these results suggest that shallow hierarchies are
+often the most effective choice in our current setting. Although deeper hierarchies can further reduce memory usage
+and training time, they also tend to introduce greater quality
+degradation. This degradation becomes less pronounced at
+higher resolutions. Additional results and analyses can be
+found in Sec. H of the supplement.
+Fig. 6 plots PSNR against training time under the 4K setting.
+Our method reaches comparable quality earlier on both
+backbones. These results show that the proposed framework improves not only the final training time, but also the
+convergence efficiency throughout optimization. Additional
+convergence results are provided in Sec. I of the supplement.
+4.3. Ablation study
+4.3.3. L OSS DESIGN .
+4.3.1. I TERATION ALLOCATION .
+We study different supervision designs for the residual levels.
+As shown in line 19 of Algorithm 1, our default design
+adopts reconstructed-image supervision, which optimizes
+Lℓrec = Lphoto (Iˆvℓ , Ivℓ ). Alternatively, the loss can be applied
+directly to the rendered residual output R̂vℓ . We consider
+Tab. 4 evaluates different iteration splits between the two
+stages. It shows that performance is relatively insensitive
+to this split. This is consistent with our loss design, where
+the remaining reconstruction error from the previous stage
+8
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Table 5. Ablation studies on the number of Laplacian levels on the
+Mip-NeRF 360 dataset (1K and 4K settings). For better convergence, the 4K setting here uses 45,000 iterations.
+L
+Iteration Split
+Time↓ PSNR↑ SSIM↑ LPIPS↓
+NGS (M ) ↓
+27.67
+27.37
+26.90
+0.809
+0.796
+0.781
+0.233
+0.71/0.87
+0.255
+0.31/0.39/0.82
+0.274 0.13/0.18/0.33/0.71
+2
+(15000, 30000)
+10.61 27.39
+4K 3
+(15000, 7500, 22500)
+8.65 27.27
+4 (15000, 7500, 7500, 15000) 7.54 26.97
+0.810
+0.803
+0.795
+0.331
+1.74/0.54
+0.353
+1.07/0.63/0.38
+0.370 0.49/0.46/0.47/0.35
+2
+(10000, 20000)
+1K 3
+(10000, 5000, 15000)
+4 (10000,5000,5000,10000)
+3.96
+3.59
+3.31
+fields, which are independent at inference, could be rendered in parallel. Further systems-level optimization may
+also improve inference efficiency, which we leave for future
+work.
+6. Conclusion
+We presented Laplacian Frequency Hierarchies, a simple
+and effective framework for accelerating 3DGS training by
+Table 6. Ablation studies over the loss design on Mip-NeRF 360.
+factorizing a scene into a low-frequency base field and a set
+of high-frequency residual fields. By combining Laplacian
+Method
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+image decomposition with coarse-to-fine, frequency-staged
+Reconstructed-image supervision 3.96 27.67 0.809 0.233 0.71/0.87 122
+training and archiving, our method reduces the number of
+Online residual supervision
+4.07 27.70 0.781 0.250 0.71/0.79 136
+GT Laplacian supervision
+4.11 27.54 0.804 0.247 0.71/0.80 136
+Gaussians that remain active during optimization, improving training throughput and lowering peak GPU memory usage. The proposed framework is plug-and-play with strong
+two such variants. Online residual supervision compares the
+3DGS backbones, and experiments on multiple real-world
+rendered residual with an online residual target computed
+benchmarks show consistent speed improvements while
+from the previous prediction:
+maintaining comparable reconstruction quality. The gains
+ℓ
+ℓ
+become more pronounced at higher resolutions (2K/4K),
+R̃v,online
+= Ivℓ −Up(Iˆvℓ+1 ),
+Lℓonline-res = Lphoto (R̂vℓ , R̃v,online
+).
+highlighting the practical scalability of our approach. Overall, our results suggest that frequency-factorized 3DGS is a
+GT Laplacian supervision directly compares the rendered
+practical direction for improving training efficiency, and we
+residual with the fixed ground-truth Laplacian residual Rvℓ
+hope this work provides a useful basis for future exploration
+defined in Eq. 4:
+of frequency-aware 3DGS representations.
+Lℓgt-lap = Lphoto (R̂vℓ , Rvℓ ).
+Acknowledgments
+The results are shown in Tab. 6. They show that
+reconstructed-image supervision yields the best overall performance. Both residual-supervision variants underperform
+our default design, indicating that directly fitting the residual is less effective than supervising the final reconstructed
+image. These results support our choice of supervising
+the reconstructed image at each level rather than fitting the
+residual alone.
+This work was supported in part by the National Natural Science Foundation of China (NSFC) under Grant
+No. 62606123 and the Shenzhen Science and Technology
+Program under Grant No. KJZD20240903104103005.
+References
+Barron, J. T., Mildenhall, B., Verbin, D., Srinivasan, P. P.,
+and Hedman, P. Mip-nerf 360: Unbounded anti-aliased
+neural radiance fields. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition,
+pp. 5470–5479, 2022.
+5. Discussion and Limitations
+Our method is motivated by the observation that, in standard
+3DGS training, coarse and low-frequency structures may
+converge earlier but still remain active and continue consuming optimization resources in later stages. This makes
+frequency-factorized training a meaningful direction for improving efficiency. However, the gain is not obtained for
+free. Reducing the active workload of coarse structures must
+be balanced against the extra cost introduced by cross-level
+bridging and high-frequency residual modeling. Our results
+also clarify both the gain and the boundary of this design
+space. In particular, deeper hierarchies tend to make finer
+residuals harder to represent efficiently with 3DGS, which
+may reduce the overall gain and lead to quality degradation.
+Our results therefore suggest that relatively shallow hierarchies already provide a better balance between speed and
+quality. To mitigate the inference overhead, the frequency
+Burt, P. and Adelson, E. The laplacian pyramid as a compact
+image code. IEEE Transactions on Communications, 31
+(4):532–540, 1983. doi: 10.1109/TCOM.1983.1095851.
+Chen, G. and Wang, W. A survey on 3d gaussian splatting, 2025. URL https://arxiv.org/abs/2401.
+03890.
+Chen, Y., Jiang, J., Jiang, K., Tang, X., Li, Z., Liu, X., and
+Nie, Y. Dashgaussian: Optimizing 3d gaussian splatting
+in 200 seconds. arXiv preprint arXiv:2503.18402, 2025.
+Dhiman, A., Lu, T., Srinath, R., Arslan, E., Xing, A., Xiangli, Y., Babu, R. V., and Sridhar, S. Turbo-gs: Acceler9
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+ating 3d gaussian fitting for high-quality radiance fields.
+arXiv preprint arXiv:2412.13547, 2024.
+Kerbl, B., Kopanas, G., Leimkühler, T., and Drettakis,
+G. 3d gaussian splatting for real-time radiance field
+rendering. ACM Transactions on Graphics, 42(4),
+July 2023. URL https://repo-sam.inria.fr/
+fungraph/3d-gaussian-splatting/.
+Fang, G. and Wang, B. Mini-splatting: Representing scenes
+with a constrained number of gaussians. In European
+Conference on Computer Vision, pp. 165–181. Springer,
+2024.
+Kingma, D. P. Adam: A method for stochastic optimization.
+arXiv preprint arXiv:1412.6980, 2014.
+Farooq, U., Guillemaut, J.-Y., Thomas, G., Hilton, A., and
+Volino, M. Optimized 3d gaussian splatting using coarseto-fine image frequency modulation. In Proceedings of
+the 22nd ACM SIGGRAPH European Conference on Visual Media Production, pp. 1–10, 2025.
+Knapitsch, A., Park, J., Zhou, Q.-Y., and Koltun, V. Tanks
+and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics (ToG), 36(4):1–13,
+2017.
+Guédon, A. and Lepetit, V. Sugar: Surface-aligned gaussian
+splatting for efficient 3d mesh reconstruction and highquality mesh rendering. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pp. 5354–5363, June 2024.
+Lan, L., Shao, T., Lu, Z., Zhang, Y., Jiang, C., and Yang,
+Y. 3dgs2: Near second-order converging 3d gaussian
+splatting. In Proceedings of the Special Interest Group
+on Computer Graphics and Interactive Techniques Conference Conference Papers, pp. 1–10, 2025.
+Guo, J., Xin, Y., Liu, G., Xu, K., Liu, L., and Hu, R. Articulatedgs: Self-supervised digital twin modeling of articulated objects using 3d gaussian splatting. In Proceedings
+of the Computer Vision and Pattern Recognition Conference, pp. 27144–27153, 2025.
+Lavi, Y., Segre, L., and Avidan, S. Frequency-aware
+gaussian splatting decomposition, 2025. URL https:
+//arxiv.org/abs/2503.21226.
+Li, C., Zhu, H., Chen, H., Zhang, J., Chen, T., Yang, S.,
+Shao, S., Dong, W., and Zhang, B. Hrgs: Hierarchical
+gaussian splatting for memory-efficient high-resolution
+3d reconstruction. arXiv preprint arXiv:2506.14229,
+2025.
+Hanson, A., Tu, A., Lin, G., Singla, V., Zwicker, M., and
+Goldstein, T. Speedy-splat: Fast 3d gaussian splatting
+with sparse pixels and sparse primitives. In Proceedings
+of the Computer Vision and Pattern Recognition Conference (CVPR), pp. 21537–21546, June 2025. URL
+https://speedysplat.github.io/.
+Liu, W., Guan, T., Zhu, B., Xu, L., Song, Z., Li, D., Wang,
+Y., and Yang, W. Efficientgs: Streamlining gaussian splatting for large-scale high-resolution scene representation.
+IEEE MultiMedia, 2025a.
+Hedman, P., Philip, J., Price, T., Frahm, J.-M., Drettakis,
+G., and Brostow, G. Deep blending for free-viewpoint
+image-based rendering. ACM Transactions on Graphics
+(ToG), 37(6):1–15, 2018.
+Liu, Y., Luo, C., Fan, L., Wang, N., Peng, J., and Zhang, Z.
+Citygaussian: Real-time high-quality large-scale scene
+rendering with gaussians. In European Conference on
+Computer Vision, pp. 265–282. Springer, 2025b.
+Höllein, L., Božič, A., Zollhöfer, M., and Nießner, M. 3dgslm: Faster gaussian-splatting optimization with levenbergmarquardt. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), 2025.
+Mallick, S. S., Goel, R., Kerbl, B., Steinberger, M., Carrasco,
+F. V., and De La Torre, F. Taming 3dgs: High-quality
+radiance fields with limited resources. In SIGGRAPH
+Asia 2024 Conference Papers, pp. 1–11, 2024.
+Hu, P. and Han, Z. Vtgaussian-slam: Rgbd slam for large
+scale scenes with splatting view-tied 3d gaussians. In
+Proceedings of the 42nd International Conference on
+Machine Learning, 2025.
+Matsuki, H., Murai, R., Kelly, P. H., and Davison, A. J.
+Gaussian splatting slam. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pp. 18039–18048, 2024.
+Huang, B., Yu, Z., Chen, A., Geiger, A., and Gao, S.
+2d gaussian splatting for geometrically accurate radiance fields. In SIGGRAPH 2024 Conference Papers.
+Association for Computing Machinery, 2024a. doi:
+10.1145/3641519.3657428.
+Mildenhall, B., Srinivasan, P. P., Tancik, M., Barron, J. T.,
+Ramamoorthi, R., and Ng, R. Nerf: Representing scenes
+as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+Huang, Y., Zheng, W., Zhang, Y., Zhou, J., and Lu, J. Gaussianformer: Scene as gaussians for vision-based 3d semantic occupancy prediction. In European Conference
+on Computer Vision, pp. 376–393. Springer, 2024b.
+Müller, T., Evans, A., Schied, C., and Keller, A. Instant
+neural graphics primitives with a multiresolution hash
+encoding. ACM Trans. Graph., 41(4):102:1–102:15, July
+10
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+2022. doi: 10.1145/3528223.3530127. URL https:
+//doi.org/10.1145/3528223.3530127.
+Zhu, L., Lin, G., Chen, J., Zhang, X., Jin, Z., Wang, Z., and
+Yu, L. Large images are gaussians: High-quality large
+image representation with levels of 2d gaussian splatting. In Proceedings of the AAAI Conference on Artificial
+Intelligence, volume 39, pp. 10977–10985, 2025.
+Nguyen, H., Le, A., Li, B. R., and Nguyen, T. From coarse
+to fine: Learnable discrete wavelet transforms for efficient
+3d gaussian splatting. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pp. 3139–
+3148, 2025.
+Zuo, S., Zheng, W., Huang, Y., Zhou, J., and Lu, J. Gaussianworld: Gaussian world model for streaming 3d occupancy
+prediction. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, pp. 6772–6781, 2025.
+Ren, S., Wen, T., Fang, Y., and Lu, B. Fastgs: Training
+3d gaussian splatting in 100 seconds. arXiv preprint
+arXiv:2511.04283, 2025.
+Wang, Z., Bovik, A. C., Sheikh, H. R., and Simoncelli, E. P.
+Image quality assessment: from error visibility to structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004.
+Wolf, Y., Bracha, A., and Kimmel, R. GS2Mesh: Surface
+reconstruction from Gaussian splatting via novel stereo
+views. In European Conference on Computer Vision
+(ECCV), 2024.
+Yang, Z., Gao, X., Zhou, W., Jiao, S., Zhang, Y., and Jin,
+X. Deformable 3d gaussians for high-fidelity monocular
+dynamic scene reconstruction. In Proceedings of the
+IEEE/CVF conference on computer vision and pattern
+recognition, pp. 20331–20341, 2024.
+Zeng, Z., Wang, Y., Ju, L., and Guan, T. Frequency-aware
+density control via reparameterization for high-quality
+rendering of 3d gaussian splatting. In Proceedings of the
+AAAI Conference on Artificial Intelligence, volume 39,
+pp. 9833–9841, 2025.
+Zhang, J., Zhan, F., Xu, M., Lu, S., and Xing, E. Fregs:
+3d gaussian splatting with progressive frequency regularization. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pp. 21424–
+21433, 2024a.
+Zhang, R., Isola, P., Efros, A. A., Shechtman, E., and Wang,
+O. The unreasonable effectiveness of deep features as a
+perceptual metric. In Proceedings of the IEEE conference
+on computer vision and pattern recognition, pp. 586–595,
+2018.
+Zhang, X., Ge, X., Xu, T., He, D., Wang, Y., Qin, H., Lu,
+G., Geng, J., and Zhang, J. Gaussianimage: 1000 fps
+image representation and compression by 2d gaussian
+splatting. In European Conference on Computer Vision,
+pp. 327–345. Springer, 2024b.
+Zhao, H., Weng, H., Lu, D., Li, A., Li, J., Panda, A., and
+Xie, S. On scaling up 3d gaussian splatting training, 2024.
+URL https://arxiv.org/abs/2406.18533.
+11
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Supplementary Material
+A. Implementation Details and Reproducibility
+For reproducibility, we consolidate the main implementation settings here. Our framework is implemented on top of Taming3DGS and FastGS. Unless otherwise stated, all experiments use 30K training iterations. Our default configuration uses a
+two-level Laplacian hierarchy with a 10K/20K iteration split. When transitioning between stages, we inherit only Gaussian
+positions with ρ = 1.0 and reinitialize the remaining attributes. Each finer stage is supervised using the reconstructed
+image rather than directly fitting the Laplacian residual. Experiments in the 1K setting are conducted on an NVIDIA L40
+GPU, while the 2K and 4K settings use an NVIDIA Pro6000 GPU. Compared methods follow their default settings unless
+otherwise specified in the main paper. The source code, configurations, reproduction instructions, and supplementary video
+are publicly available at https://sorenzhang574.github.io/Laplacian-GS/.
+The supplementary video contains trajectory comparisons for several scenes under continuous viewpoint changes, which
+are used to inspect the temporal stability of the image-domain Laplacian composition. The results show stable rendering
+without visible flickering. The video includes:
+• a brief overview of the proposed frequency-staged training pipeline;
+• trajectory comparisons on representative scenes;
+• visualizations of the low-frequency, residual, and reconstructed components.
+B. Ablation Studies on Inheritance Design
+This section presents ablation studies on the inheritance design, including the inheritance strategy and inheritance ratio.
+B.1. Inheritance strategy: xyz-only vs. full inheritance.
+We study how different inheritance strategies affect performance when transitioning between levels. Specifically, we
+compare an xyz-only strategy with a full inheritance strategy that retains all parameters (e.g., scale, rotation, and optimizer
+states). Overall, the final reconstruction quality is relatively insensitive to this choice, which we attribute to the fact that
+subsequent optimization can largely correct differences in initialization. Nevertheless, the xyz-only strategy consistently
+yields slightly better results, so we adopt it as the default setting.
+B.2. Analysis of the inheritance ratio ρ.
+We evaluate the impact of the inheritance ratio ρ on rendering quality and efficiency. As ρ decreases, training becomes faster
+because fewer Gaussians are inherited and optimized in the next stage. However, this speedup comes at the cost of fidelity.
+Smaller ρ leads to a clear drop in reconstruction quality, since the model has fewer primitives to represent fine details. We
+therefore use ρ = 1.0 by default, which yields the best trade-off between efficiency and rendering performance.
+Table 7. Ablation studies on inheritance design on Mip-NeRF 360.
+Setting
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Inheritance strategy (with ρ = 1.0)
+xyz-only (default)
+full inheritance
+3.96
+4.02
+27.67
+27.59
+0.809
+0.806
+0.233
+0.239
+0.71/0.87
+0.71/0.89
+122
+141
+0.245
+0.256
+0.267
+0.71/0.77
+0.71/0.68
+0.71/0.59
+138
+141
+141
+Inheritance ratio ρ (with xyz-only strategy)
+ρ = 0.5
+ρ = 0.25
+ρ = 0.125
+3.86
+3.70
+3.56
+27.59
+27.56
+27.46
+0.803
+0.795
+0.785
+12
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+C. Edge Preservation at Object Boundaries
+We provide enlarged boundary regions to examine whether our method preserves sharp object boundaries rather than
+achieving stable rendering at the cost of boundary quality. As shown in Fig. 7, although the low-frequency prediction
+Iˆ1 is smoother around object boundaries, the high-frequency residual R̂0 restores the missing edge details. The final
+reconstruction therefore preserves boundary sharpness and contrast comparable to those in FastGS and the GT across the
+three test views.
+Although the image-space Laplacian is not a strictly view-invariant 3D property, Fig. 7 shows consistent boundary quality
+across different test views, while the video results in Sec. A show stable reconstruction without visible flickering under
+continuous viewpoint changes. In our training mechanism, each field retains the view-dependent appearance modeling
+of 3DGS. At each finer stage, the rendered residual is added to the cached prediction from the previous level, and the
+reconstructed image is directly supervised. Errors from previous levels, including viewpoint-dependent errors, can therefore
+be corrected by the current field. Tab. 6 further supports this design, as reconstructed-image supervision outperforms direct
+Laplacian-residual supervision.
+D. Scene-wise Quantitative Results
+Tab. 10, Tab. 11, and Tab. 12 report scene-wise quantitative comparisons on three datasets, Mip-NeRF 360 (Barron et al.,
+2022), Deep Blending (Hedman et al., 2018), and Tanks&Temples (Knapitsch et al., 2017), under the 1K setting. These
+results complement Tab. 1 in the main paper by exposing per-scene behavior. We observe that our method tends to perform
+better on more challenging scenes that require a larger number of Gaussians, such as garden.
+Tab. 13 and Tab. 14 provide scene-wise results on Mip-NeRF 360 for the 2K and 4K settings, complementing Tab. 2 and
+Tab. 3, respectively. Compared to the 1K setting, our method exhibits little performance degradation at higher resolutions,
+and in many scenes the reconstruction metrics remain comparable or improve. Meanwhile, the acceleration gains become
+more pronounced, indicating that the proposed method is particularly effective when resolution increases and the training
+workload becomes heavier. We attribute this trend to splitting optimization into smaller Gaussian fields, which reduces the
+per-stage training burden and helps stabilize training at high resolutions. Overall, these results suggest that our approach not
+only scales well, but also tends to benefit more from higher-resolution settings.
+E. Scene-wise Qualitative Results
+Qualitative comparisons for the 1K, 2K, and 4K settings are shown in Fig. 8, Fig. 9, and Fig. 10, respectively. Across all
+settings, our method consistently maintains high visual quality. These results suggest that composing the final rendering by
+accumulating a sequence of components is a viable strategy and does not introduce noticeable artifacts in practice.
+F. Analysis of peak Gaussian count and peak GPU memory
+In Tab. 8, we report the average peak number of Gaussians and the average peak GPU memory usage during training on the
+Mip-NeRF 360 dataset. Note that we measure only the memory footprint of the 3DGS training pipeline and exclude memory
+used to store the dataset on the GPU. Overall, peak GPU memory usage is positively correlated with peak Gaussian count.
+Among all methods, Ours(FastGS) achieves the lowest peak Gaussian number and the lowest peak GPU memory usage.
+Table 8. Average peak Gaussian count and average peak GPU memory usage during training on Mip-NeRF 360.
+Method
+Taming-3DGS
+DashGaussian
+FastGS
+Ours(Taming)
+Ours(FastGS)
+Average Peak NGS ↓
+Average Peak GPU (MB)↓
+2,294,880
+1,996,751
+1,477,507
+1,621,565
+1,230,462
+4,320
+4,021
+2,623
+3,144
+2,198
+13
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Table 9. Runtime breakdown of a 30K-iterations Ours(FastGS) run on the garden scene. Percentages are measured relative to the iterative
+optimization time.
+Component
+Time (ms/iter.)
+Percentage
+Forward rendering
+Composition + loss
+Backward propagation
+Densification + pruning
+Optimizer step
+Other
+2.198
+0.418
+6.810
+0.785
+1.722
+0.128
+18.2%
+3.5%
+56.5%
+6.5%
+14.3%
+1.0%
+Total
+12.061
+100%
+G. Runtime Breakdown and Timing Boundary
+We profile a full Ours(FastGS) run of 30K iterations on the garden scene using CUDA events. The iterative optimization
+takes 361.84 s in total, corresponding to 12.061 ms per iteration. Table 9 reports the runtime breakdown per iteration.
+Backward propagation accounts for the largest portion (56.5%), followed by forward rendering (18.2%) and the optimizer
+step (14.3%). Composition and loss computation account for only 3.5% of the optimization time.
+The training times reported in the main paper measure iterative optimization only. Pyramid preprocessing and archive I/O to
+disk are excluded. During iterative optimization, Laplacian calculation is included in the composition and loss time. The
+additional operations performed once consist of pyramid construction (0.018 s), construction of the stage cache in memory,
+including rendering and upsampling (0.405 s), and inheritance (0.136 s), totaling only 0.559 s, or 0.15% of the iterative
+optimization time.
+Archive I/O to disk is also excluded from the reported training times, consistent with excluding model saving and checkpoint
+I/O for the compared methods. For reference, the two archive writes take 16.72 s in total.
+H. Additional analysis on Laplacian levels and training iterations
+We provide additional ablation results on the number of Laplacian levels and training iterations in Tabs. 15 and 16. Tab. 15
+reports detailed results under the 1K setting. Consistent with the main paper, a two-level hierarchy achieves the best overall
+trade-off, while deeper hierarchies reduce training time but lead to a gradual degradation in reconstruction quality and
+rendering speed.
+Tab. 16 further investigates the effect of increasing the total training iterations under the 4K setting. We report results with
+both 30k and 45k iterations, where the two settings share identical split ratios across levels. We include 45k iterations to
+ensure better convergence in the high-resolution setting. As the iteration budget increases, reconstruction quality slightly
+improves across all level choices, while the relative trends among different hierarchies remain consistent. In particular,
+deeper Laplacian hierarchies consistently reduce the peak number of Gaussians and training time, and the associated
+degradation in rendering quality becomes less noticeable at higher resolutions. These results further support our observation
+that the proposed Laplacian decomposition is especially effective in high-resolution regimes.
+I. Additional results for PSNR versus training time
+In the main paper, we present the PSNR versus training time curves under the 4K setting in Fig. 6. Due to space constraints,
+we provide the corresponding results for the 1K and 2K settings in Fig. 11. Similar to the 4K case, our method reaches
+comparable reconstruction quality earlier than the original backbones on both Taming-3DGS and FastGS. Together with the
+4K result in the main paper, the advantage is more evident at higher resolutions, where the training workload is heavier and
+the benefit of reducing the active Gaussian workload is more pronounced. These results further support the convergence
+efficiency of the proposed framework throughout optimization.
+14
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Table 10. Results of the 1K setting. Scene-wise quantitative results over Mip-NeRF 360 dataset. Time is measured in minutes. NGS
+denotes the number of Gaussians (in millions).
+bicycle
+Method
+bonsai
+counter
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Original 3DGS
+Opti3DGS
+Mini-Splatting
+Speedy-Splat
+Taming-3DGS
+DashGaussian
+FastGS
+Ours (Taming)
+Ours (FastGS)
+23.27
+30.37
+18.26
+19.87
+11.65
+6.96
+4.86
+6.70
+4.44
+25.18
+25.08
+25.22
+24.72
+25.01
+24.91
+25.26
+24.76
+25.00
+0.748
+0.734
+0.764
+0.704
+0.731
+0.723
+0.755
+0.720
+0.742
+0.242
+0.277
+0.241
+0.333
+0.269
+0.284
+0.245
+0.282
+0.267
+4.78
+4.26
+0.59
+0.58
+3.84
+3.78
+1.59
+1.74/2.57
+1.11/1.45
+79
+60
+137
+130
+76
+71
+72
+72
+116
+8.02
+15.63
+19.27
+13.16
+6.12
+3.87
+4.19
+3.85
+3.58
+32.40
+32.03
+31.41
+31.28
+32.73
+32.01
+33.08
+32.17
+32.43
+0.947
+0.944
+0.944
+0.926
+0.948
+0.941
+0.954
+0.942
+0.948
+flowers
+Method
+0.180
+0.186
+0.176
+0.227
+0.180
+0.192
+0.160
+0.188
+0.171
+1.07
+0.97
+0.36
+0.13
+1.11
+0.80
+0.84
+0.87/0.64
+0.74/0.52
+123
+199
+174
+185
+117
+122
+115
+115
+117
+9.10
+16.35
+22.59
+13.81
+7.27
+4.31
+3.56
+4.02
+3.23
+29.17
+29.03
+28.61
+28.30
+29.43
+28.94
+29.60
+29.22
+29.43
+garden
+0.916
+0.910
+0.912
+0.877
+0.916
+0.907
+0.918
+0.908
+0.913
+0.183
+0.194
+0.181
+0.258
+0.183
+0.202
+0.177
+0.198
+0.189
+1.05
+0.79
+0.41
+0.10
+0.98
+0.72
+0.47
+0.58/0.51
+0.39/0.29
+104
+160
+143
+128
+109
+96
+103
+103
+146
+kitchen
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Original 3DGS
+Opti3DGS
+Mini-Splatting
+Speedy-Splat
+Taming-3DGS
+DashGaussian
+FastGS
+Ours (Taming)
+Ours (FastGS)
+14.58
+21.53
+19.35
+16.20
+8.62
+5.75
+4.29
+4.97
+3.65
+21.38
+21.61
+21.31
+21.17
+21.52
+21.18
+21.63
+21.04
+21.02
+0.588
+0.595
+0.614
+0.560
+0.590
+0.564
+0.604
+0.547
+0.556
+0.358
+0.359
+0.340
+0.418
+0.361
+0.386
+0.338
+0.400
+0.383
+2.85
+2.62
+0.64
+0.34
+2.52
+2.35
+1.15
+1.17/1.70
+0.74/0.95
+138
+110
+268
+135
+107
+98
+209
+102
+134
+22.83
+22.73
+18.44
+19.72
+12.42
+6.33
+8.82
+7.43
+5.92
+27.36
+27.11
+26.84
+26.74
+27.48
+27.17
+27.61
+27.35
+27.56
+0.858
+0.835
+0.840
+0.815
+0.854
+0.836
+0.865
+0.849
+0.862
+room
+Method
+0.122
+0.171
+0.161
+0.213
+0.130
+0.165
+0.110
+0.143
+0.121
+4.21
+3.05
+0.67
+0.52
+3.47
+2.53
+2.63
+1.10/2.74
+0.93/1.99
+98
+83
+239
+134
+72
+74
+163
+79
+86
+11.93
+18.50
+22.43
+15.16
+10.86
+5.05
+6.63
+5.20
+4.94
+31.56
+31.33
+31.41
+29.94
+31.82
+31.53
+32.39
+31.51
+32.27
+stump
+0.933
+0.928
+0.931
+0.895
+0.932
+0.925
+0.939
+0.927
+0.938
+0.116
+0.126
+0.120
+0.194
+0.117
+0.131
+0.104
+0.129
+0.108
+1.55
+1.00
+0.43
+0.11
+1.58
+1.07
+1.18
+0.81/0.67
+0.82/0.84
+133
+153
+187
+162
+86
+94
+185
+87
+123
+treehill
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Original 3DGS
+Opti3DGS
+Mini-Splatting
+Speedy-Splat
+Taming-3DGS
+DashGaussian
+FastGS
+Ours (Taming)
+Ours (FastGS)
+8.92
+17.17
+19.72
+13.89
+6.45
+4.04
+3.34
+3.46
+3.13
+31.86
+31.50
+31.41
+30.95
+32.04
+31.72
+32.14
+31.45
+31.54
+0.928
+0.922
+0.929
+0.904
+0.926
+0.919
+0.930
+0.921
+0.928
+0.196
+0.212
+0.189
+0.256
+0.201
+0.217
+0.189
+0.211
+0.194
+1.26
+1.03
+0.39
+0.11
+1.12
+0.79
+0.57
+0.58/0.57
+0.40/0.19
+161
+163
+185
+201
+103
+100
+264
+125
+136
+18.36
+24.07
+17.77
+17.17
+8.28
+4.94
+3.81
+5.22
+3.53
+26.66
+26.74
+27.35
+26.70
+26.53
+26.05
+27.16
+26.00
+26.80
+0.768
+0.767
+0.806
+0.765
+0.760
+0.733
+0.786
+0.733
+0.767
+0.243
+0.262
+0.215
+0.288
+0.259
+0.301
+0.240
+0.282
+0.263
+4.04
+3.40
+0.66
+0.47
+3.46
+3.06
+1.05
+1.97/2.06
+0.78/0.83
+104
+77
+99
+114
+96
+87
+163
+86
+108
+15.16
+23.28
+19.09
+15.46
+8.25
+6.04
+3.84
+5.29
+3.26
+22.67
+22.55
+22.68
+22.46
+22.99
+23.08
+22.81
+23.01
+22.99
+0.637
+0.625
+0.656
+0.590
+0.637
+0.629
+0.632
+0.623
+0.629
+0.345
+0.380
+0.326
+0.463
+0.354
+0.368
+0.377
+0.375
+0.400
+3.08
+2.91
+0.63
+0.33
+2.49
+2.89
+1.04
+1.37/1.76
+0.48/0.56
+103
+91
+117
+115
+105
+95
+207
+95
+136
+Table 11. Results of the 1K setting. Scene-wise quantitative results over Deep Blending dataset. Time is measured in minutes. NGS
+denotes the number of Gaussians (in millions).
+drjohnson
+Method
+playroom
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Original 3DGS
+Opti3DGS
+Mini-Splatting
+Speedy-Splat
+Taming-3DGS
+DashGaussian
+FastGS
+Ours (Taming)
+Ours (FastGS)
+14.69
+21.58
+15.25
+14.26
+7.89
+4.54
+3.39
+3.72
+2.96
+29.49
+29.22
+29.55
+29.18
+29.37
+29.18
+29.74
+29.06
+29.60
+0.905
+0.903
+0.904
+0.900
+0.904
+0.903
+0.907
+0.897
+0.901
+0.236
+0.244
+0.256
+0.266
+0.241
+0.253
+0.244
+0.246
+0.266
+3.12
+2.71
+0.38
+0.31
+2.81
+2.21
+0.71
+1.23/1.33
+0.42/0.26
+141
+94
+293
+303
+107
+109
+265
+120
+182
+9.71
+15.22
+13.04
+11.54
+5.78
+3.82
+3.29
+3.49
+3.12
+30.16
+30.02
+30.47
+30.16
+29.21
+30.02
+30.75
+29.69
+30.73
+0.909
+0.909
+0.912
+0.907
+0.893
+0.908
+0.915
+0.902
+0.913
+0.241
+0.247
+0.249
+0.268
+0.251
+0.259
+0.237
+0.240
+0.248
+1.83
+1.52
+0.32
+0.19
+1.66
+1.07
+0.58
+0.82/1.06
+0.32/0.33
+170
+168
+169
+320
+139
+156
+210
+134
+164
+Table 12. Results of the 1K setting. Scene-wise quantitative results over Tanks & Temples dataset. Time is measured in minutes. NGS
+denotes the number of Gaussians (in millions).
+train
+Method
+truck
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Original 3DGS
+Opti3DGS
+Mini-Splatting
+Speedy-Splat
+Taming-3DGS
+DashGaussian
+FastGS
+Ours (Taming)
+Ours (FastGS)
+7.65
+8.83
+10.64
+7.91
+5.83
+4.37
+3.35
+3.52
+3.19
+22.17
+21.69
+21.47
+21.71
+22.80
+22.46
+22.58
+22.28
+22.43
+0.821
+0.806
+0.797
+0.773
+0.832
+0.819
+0.828
+0.801
+0.805
+0.196
+0.221
+0.246
+0.291
+0.189
+0.209
+0.207
+0.239
+0.244
+1.09
+0.78
+0.19
+0.11
+1.10
+0.94
+0.45
+0.47/0.47
+0.22/0.26
+15
+159
+218
+338
+192
+147
+140
+235
+110
+130
+11.29
+11.62
+10.45
+9.85
+6.83
+4.07
+3.52
+4.30
+3.07
+25.47
+25.47
+25.08
+25.12
+25.93
+25.83
+26.10
+25.59
+25.63
+0.885
+0.879
+0.873
+0.867
+0.887
+0.881
+0.889
+0.880
+0.880
+0.142
+0.161
+0.160
+0.190
+0.141
+0.162
+0.140
+0.155
+0.166
+2.06
+1.68
+0.21
+0.25
+1.89
+1.36
+0.61
+0.67/1.29
+0.26/0.46
+154
+130
+161
+146
+136
+156
+180
+109
+118
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+FastGS
+Ours (Final)
+Ours Î 1
+Ours R̂ 0
+View 3
+View 2
+View 1
+Ground Truth
+Figure 7. Edge preservation at object boundaries on the garden scene. We show three test views with enlarged boundary regions.
+Although the low-frequency prediction Iˆ1 is smoother, the high-frequency residual R̂0 restores the missing edge details, producing final
+reconstructions comparable to FastGS and the GT.
+16
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Figure 8. Qualitative results of the 1K setting. Rendering results on the ”garden” scene (Mip-NeRF 360), the ”playroom” scene (Deep
+Blending), and the ”truck” scene (Tanks & Temples).
+17
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Table 13. Results of the 2K setting. Scene-wise quantitative results over Mip-NeRF 360 dataset. Time is measured in minutes. NGS
+denotes the number of Gaussians (in millions).
+bicycle
+Method
+bonsai
+counter
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+EfficientGS
+Ours (Taming)
+Ours (FastGS)
+13.18
+6.51
+6.44
+42.72
+7.24
+5.52
+24.10
+23.88
+24.69
+24.73
+23.85
+24.46
+0.673
+0.665
+0.727
+0.735
+0.662
+0.702
+0.394
+0.398
+0.311
+0.293
+0.392
+0.337
+2.87
+2.76
+2.10
+2.18
+1.52/1.51
+2.31/0.88
+47
+38
+108
+53
+54
+104
+7.02
+4.70
+4.96
+19.25
+4.69
+4.17
+32.47
+31.72
+32.71
+31.53
+32.13
+32.28
+0.940
+0.933
+0.945
+0.933
+0.935
+0.940
+flowers
+Method
+0.244
+0.255
+0.223
+0.253
+0.254
+0.236
+1.04
+0.78
+1.08
+0.36
+0.89/0.58
+1.01/0.42
+91
+78
+153
+121
+97
+136
+7.92
+4.88
+4.41
+23.19
+4.81
+3.82
+29.24
+28.77
+29.48
+28.65
+29.14
+29.39
+garden
+0.912
+0.904
+0.916
+0.903
+0.905
+0.910
+0.241
+0.259
+0.230
+0.257
+0.257
+0.247
+0.94
+0.71
+0.56
+0.30
+0.62/0.43
+0.50/0.23
+73
+79
+126
+83
+94
+132
+kitchen
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+EfficientGS
+Ours (Taming)
+Ours (FastGS)
+11.30
+6.11
+6.27
+40.76
+6.93
+5.18
+20.45
+20.05
+20.97
+21.20
+20.38
+20.82
+0.540
+0.517
+0.564
+0.580
+0.526
+0.546
+0.453
+0.476
+0.423
+0.392
+0.463
+0.441
+2.00
+1.96
+1.62
+1.77
+1.13/1.18
+1.32/0.68
+53
+48
+97
+55
+61
+101
+15.06
+6.85
+11.92
+47.52
+8.56
+6.82
+26.48
+25.99
+26.55
+26.58
+26.33
+26.72
+0.794
+0.763
+0.817
+0.808
+0.783
+0.809
+0.232
+0.284
+0.180
+0.210
+0.249
+0.212
+room
+Method
+3.84
+2.88
+5.18
+2.25
+1.62/2.35
+2.23/2.25
+44
+44
+99
+58
+45
+74
+9.98
+5.02
+6.42
+25.09
+5.37
+5.03
+31.57
+31.22
+32.17
+31.07
+31.13
+32.13
+stump
+0.923
+0.915
+0.932
+0.918
+0.916
+0.930
+0.164
+0.181
+0.146
+0.172
+0.184
+0.155
+1.54
+1.02
+1.43
+0.50
+0.88/0.51
+1.14/0.71
+73
+83
+164
+100
+84
+139
+treehill
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+EfficientGS
+Ours (Taming)
+Ours (FastGS)
+7.68
+4.74
+4.15
+22.00
+4.14
+3.55
+31.63
+31.39
+31.86
+31.03
+31.20
+31.56
+0.916
+0.911
+0.923
+0.918
+0.911
+0.920
+0.266
+0.278
+0.244
+0.256
+0.276
+0.256
+1.08
+0.81
+0.71
+0.40
+0.60/0.46
+0.54/0.28
+83
+75
+139
+108
+102
+120
+10.12
+5.84
+5.57
+36.95
+6.62
+4.78
+25.76
+25.42
+26.90
+26.90
+25.31
+26.61
+0.751
+0.734
+0.785
+0.790
+0.730
+0.770
+0.379
+0.402
+0.332
+0.318
+0.394
+0.348
+2.39
+2.49
+1.25
+1.56
+1.60/1.31
+1.30/0.52
+49
+48
+108
+48
+54
+81
+11.11
+6.28
+5.46
+42.69
+7.13
+4.49
+22.55
+22.42
+22.42
+21.92
+22.40
+22.43
+0.636
+0.624
+0.633
+0.643
+0.618
+0.623
+0.441
+0.456
+0.452
+0.396
+0.453
+0.465
+1.67
+1.92
+1.11
+2.03
+1.08/1.00
+0.66/0.34
+48
+45
+92
+58
+59
+79
+Table 14. Results of the 4K setting. Scene-wise quantitative results over Mip-NeRF 360 dataset. Time is measured in minutes. NGS
+denotes the number of Gaussians (in millions).
+bicycle
+Method
+bonsai
+counter
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+EfficientGS
+Ours (Taming)
+Ours (FastGS)
+23.28
+9.92
+9.55
+91.55
+12.16
+8.38
+23.66
+23.52
+24.53
+24.66
+23.65
+24.43
+0.686
+0.683
+0.734
+0.743
+0.683
+0.729
+0.441
+0.445
+0.366
+0.347
+0.437
+0.358
+2.19
+2.16
+1.92
+2.04
+1.25/1.06
+2.78/0.68
+29
+25
+109
+36
+35
+83
+9.80
+6.02
+6.20
+33.48
+6.50
+4.94
+32.07
+31.49
+32.74
+31.01
+31.91
+31.98
+0.935
+0.930
+0.942
+0.930
+0.930
+0.935
+flowers
+Method
+0.293
+0.300
+0.271
+0.298
+0.301
+0.284
+0.96
+0.78
+1.24
+0.37
+0.88/0.53
+1.22/0.41
+72
+64
+122
+96
+65
+78
+11.21
+6.37
+5.56
+39.86
+6.68
+4.55
+28.95
+28.50
+29.43
+28.52
+29.03
+29.39
+garden
+0.910
+0.904
+0.916
+0.904
+0.905
+0.912
+0.286
+0.298
+0.270
+0.294
+0.297
+0.286
+0.88
+0.69
+0.60
+0.31
+0.62/0.40
+0.58/0.20
+65
+56
+129
+65
+67
+144
+kitchen
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+EfficientGS
+Ours (Taming)
+Ours (FastGS)
+21.16
+9.58
+9.66
+89.80
+12.22
+7.62
+20.07
+19.62
+20.76
+21.19
+20.01
+20.53
+0.567
+0.552
+0.587
+0.606
+0.561
+0.577
+0.486
+0.506
+0.461
+0.426
+0.493
+0.466
+1.52
+1.54
+1.57
+1.76
+0.97/0.86
+1.53/0.52
+33
+28
+107
+48
+37
+94
+25.96
+10.83
+17.47
+104.86
+14.16
+9.69
+26.04
+25.63
+26.60
+26.41
+26.02
+26.47
+0.774
+0.754
+0.810
+0.802
+0.770
+0.798
+room
+Method
+0.310
+0.339
+0.227
+0.260
+0.307
+0.266
+3.20
+2.69
+5.93
+2.39
+1.67/1.76
+3.15/1.51
+29
+26
+80
+41
+33
+71
+13.86
+6.61
+7.94
+42.52
+7.42
+5.74
+31.22
+30.83
+31.94
+31.02
+31.16
+31.99
+stump
+0.918
+0.911
+0.928
+0.915
+0.913
+0.926
+0.204
+0.219
+0.182
+0.209
+0.224
+0.196
+1.45
+0.98
+1.53
+0.53
+0.91/0.46
+1.35/0.56
+61
+59
+113
+87
+61
+110
+treehill
+Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑ Time↓ PSNR↑ SSIM↑ LPIPS↓ NGS (M ) ↓ FPS↑
+Taming-3DGS
+DashGaussian
+FastGS
+EfficientGS
+Ours (Taming)
+Ours (FastGS)
+10.84
+6.42
+5.28
+37.69
+5.53
+4.17
+31.49
+31.20
+31.35
+30.98
+31.05
+31.43
+0.912
+0.908
+0.917
+0.915
+0.909
+0.916
+0.306
+0.312
+0.282
+0.293
+0.312
+0.297
+1.04
+0.80
+0.77
+0.42
+0.61/0.40
+0.65/0.20
+60
+51
+115
+99
+71
+143
+18.40
+9.81
+8.44
+79.42
+11.85
+7.20
+25.51
+25.04
+26.71
+26.88
+25.08
+26.55
+0.779
+0.766
+0.806
+0.812
+0.767
+0.801
+18
+0.438
+0.457
+0.395
+0.376
+0.444
+0.392
+1.72
+1.79
+1.09
+1.47
+1.26/0.99
+1.33/0.46
+33
+28
+94
+39
+35
+58
+21.79
+9.80
+8.54
+93.48
+13.08
+6.81
+22.31
+22.24
+22.26
+22.01
+22.41
+22.22
+0.673
+0.665
+0.671
+0.684
+0.669
+0.670
+0.481
+0.490
+0.485
+0.440
+0.480
+0.487
+1.20
+1.42
+0.88
+1.87
+0.84/0.69
+0.63/0.25
+27
+25
+78
+33
+32
+78
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Figure 9. Qualitative results of the 2K setting. Rendering results on the ”garden”, ”kitchen” and ”treehill” scenes of Mip-NeRF 360.
+19
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+Figure 10. Qualitative results of the 4K setting. Rendering results on the ”garden”, ”counter” and ”room” scenes of Mip-NeRF 360.
+20
+Laplacian Frequency Hierarchies for Efficient 3D Gaussian Splatting Training
+(a) 1K setting (treehill)
+(b) 2K setting (garden)
+Figure 11. PSNR versus training time under the 1K and 2K settings on Mip-NeRF 360 scenes. Similar to the 4K case in the main paper,
+our method reaches comparable reconstruction quality earlier than the original backbones.
+Table 15. Ablation studies over the number of Laplacian levels on the Mip-NeRF 360 dataset. (1K setting)
+Method
+Iteration Split
+Two-level (10000, 20000)
+Three-level (10000, 5000, 15000)
+Four-level (10000,5000,5000,10000)
+NGS (M ) ↓
+FPS↑
+0.71/0.87
+0.31/0.39/0.82
+0.13/0.18/0.33/0.71
+122
+107
+89
+Time↓ PSNR↑ SSIM↑ LPIPS↓
+3.96
+3.59
+3.31
+27.67
+27.37
+26.90
+0.809
+0.796
+0.781
+0.233
+0.255
+0.274
+Table 16. Effects of Laplacian levels and training iterations under the 4K setting on the Mip-NeRF 360 dataset. We report results with 30k
+iterations, and additionally with 45k iterations to improve convergence. Both settings use the same split ratios across levels.
+Levels
+Iteration Iteration Split
+Time↓ PSNR↑ SSIM↑ LPIPS↓
+NGS (M ) ↓
+FPS↑
+Two-level 30k
+Three-level 30k
+Four-level 30k
+(10000, 20000)
+(10000, 5000, 15000)
+(10000, 5000, 5000, 10000)
+6.57
+5.99
+5.09
+27.22
+27.17
+26.84
+0.807
+0.801
+0.792
+0.337
+0.358
+0.376
+1.47/0.53
+0.94/0.69/0.40
+0.45/0.46/0.48/0.35
+95
+97
+74
+Two-level 45k
+Three-level 45k
+Four-level 45k
+(15000, 30000)
+(15000, 7500, 22500)
+(15000, 7500, 7500, 15000)
+10.61
+8.65
+7.54
+27.39
+27.27
+26.97
+0.810
+0.803
+0.795
+0.331
+0.353
+0.370
+1.74/0.54
+1.07/0.63/0.38
+0.49/0.46/0.47/0.35
+98
+88
+80
+21

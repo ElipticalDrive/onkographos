@@ -1,0 +1,278 @@
+--- v009.md
++++ v010.md
+@@ -4,134 +4,131 @@
+ 
+ ## Overview
+-Rasterization-based Voxelization converts a continuous triangle mesh into a discrete volumetric representation by projecting the mesh geometry onto a 3D grid using graphics pipeline primitives or CPU-side scanline algorithms [S1][S3, S4, unofficial]. It solves the problem of generating a voxelized surface (shell) or point cloud from polygonal data without performing explicit surface reconstruction or interior filling [S1][S2, S4, unofficial]. It differs from ray-tracing methods by leveraging rasterization coverage to determine occupancy, and from dense voxelization by often employing sparse hash-table data structures to store only occupied voxel coordinates, making it memory-efficient for sparse scenes [S3, S4, unofficial].
++Rasterization-based Voxelization converts a continuous triangle mesh into a discrete volumetric representation by projecting the mesh geometry onto a 3D grid using rasterization primitives [S1][S4, S5, unofficial]. It solves the problem of generating a voxelized surface (shell) or volume from polygonal data without performing explicit ray-triangle intersection tests for every voxel [S1][S5, unofficial]. It differs from [Voxel Carving](1213-voxel-carving.md) by using constructive rasterization rather than destructive projection, and from [Analytic and Algebraic Methods](7913-analytic-and-algebraic-methods.md) by relying on discrete sampling of rasterized fragments rather than solving geometric equations [S5, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A triangle mesh defined by vertices $V$ and faces $F$ (indices), a voxel size $vs = (vs_x, vs_y, vs_z)$, an origin $o$ (bottom-left-back corner of the $[0,0,0]$ voxel), and a precision factor $p$ [S1][S2, S4, unofficial].
+-*   **Output:** A set of occupied voxel coordinates (integer indices $ijk$), a sparse voxel grid, or a generated mesh/point cloud representing the voxelized surface [S1][S2, S4, unofficial].
++*   **Input:** A triangle mesh defined by vertices $V$ and faces $F$ [S1][S4, unofficial].
++*   **Output:** A set of occupied voxel coordinates (sparse grid) [S1][S3, unofficial], or a generated mesh of cubes/point cloud representing the voxelized surface [S2, S4, unofficial].
+ 
+ **Data Structures:**
+-1.  **Hash Table (Sparse Voxel Grid):** Used to store occupied voxels to avoid 3D array allocation. Keys are voxel coordinates; values contain position and optional color [S3, S4, unofficial].
+-    *   *Layout (C-style from [S4, unofficial]):*
+-        ```c
+-        typedef struct {
+-            vx_vec3_t position; // Center of the voxel
+-            vx_color_t color;   // Optional interpolated color
+-        } vx_voxel_data_t;
+-
+-        typedef struct {
+-            vx_voxel_data_t** elements; // Array of buckets
+-            size_t size;                // Number of buckets
+-        } vx_hash_table_t;
+-        ```
+-2.  **Output Mesh (Optional):** If generating a cube mesh, the structure includes arrays for vertices, normals, colors, and indices [S4, unofficial].
+-    *   *Layout (from [S4, unofficial]):*
+-        ```c
+-        typedef struct {
+-            vx_vertex_t* vertices;      // Size: voxels * 8
+-            vx_vec3_t* normals;         // Size: 6 (predefined)
+-            vx_color_t* colors;         // Size: voxels * 8 or NULL
+-            unsigned int* indices;      // Size: voxels * VOXELIZER_INDICES_SIZE
+-            unsigned int* normalindices;// Size: voxels * VOXELIZER_INDICES_SIZE
+-            size_t nvertices, nindices, nnormals;
+-        } vx_mesh_t;
+-        ```
++*   **Sparse Voxel Storage:** A hash table or hash set mapping voxel coordinates to data (e.g., color, occupancy) [S3, S4, unofficial]. In Python, a `set` of tuples is used [S3, unofficial]. In C, a hash table with linked-list buckets is used [S4, unofficial].
++*   **Voxel Grid Parameters:**
++    *   `vox_size`: Voxel dimensions $(v_x, v_y, v_z)$ [S1][S4, unofficial].
++    *   `vox_origin`: The world-space coordinate of the $(0,0,0)$ voxel corner [S1].
++    *   `hvs`: Half-voxel size, calculated as $hvs = \frac{1}{2} \times vox\_size$ [S4, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Compute half-voxel sizes $hvs = vs \times 0.5$ [S4, unofficial]. Initialize a hash table for occupied voxels [S4, unofficial].
+-2.  **Triangle Rasterization:** For each triangle in the mesh:
+-    *   Determine the bounding box of the triangle in voxel space.
+-    *   Iterate through all integer voxel coordinates $(i, j, k)$ within this bounding box [S1][S5, unofficial].
+-    *   Test if the triangle intersects the voxel cell. In GPU implementations, this is done via hardware rasterization of the triangle into a 3D texture or buffer [S6, S5, unofficial]. In CPU implementations (e.g., madcad), a `PositionMap` hasher maps triangle points to voxel grid keys [S3, unofficial]. In the C library, an internal rasterizer `vx__voxelize` performs triangle clipping/intersection with tolerance $p$ [S4, unofficial].
+-    *   If occupied, insert the voxel coordinate into the hash table. If the voxel already exists, update its attributes (e.g., average color) [S3, S4, unofficial].
++1.  **Initialization:** Load the input mesh vertices and faces [S1][S4, unofficial]. Allocate a hash table for storing occupied voxels [S4, unofficial].
++2.  **Iteration:** For each triangle face $f$ in the mesh:
++    a.  Determine the bounding box of the triangle in voxel space.
++    b.  Rasterize the triangle to identify all voxel centers $(i, j, k)$ that intersect or are covered by the triangle [S3, S4, unofficial].
++    c.  For each identified voxel center, compute its world-space position or grid index.
++    d.  Insert the voxel index into the hash table [S3, S4, unofficial].
+ 3.  **Geometry Generation (Optional):** If a mesh output is required:
+-    *   Allocate output arrays based on the number of unique voxels $N_v$ [S4, unofficial].
+-    *   Define the 8 corner offsets for a cube centered at the origin using $hvs$ [S4, unofficial]:
++    a.  Iterate through the hash table of occupied voxels [S4, unofficial].
++    b.  For each occupied voxel, generate a cube geometry centered at the voxel's world position.
++    c.  The cube vertices are defined relative to the center using the half-voxel size $hvs$:
+         $$
+-        \text{offsets} = \{ (\pm hvs_x, \pm hvs_y, \pm hvs_z) \}
++        \begin{aligned}
++        &(-hvs_x, hvs_y, hvs_z), (-hvs_x, -hvs_y, hvs_z), (hvs_x, -hvs_y, hvs_z), (hvs_x, hvs_y, hvs_z), \\
++        &(-hvs_x, hvs_y, -hvs_z), (-hvs_x, -hvs_y, -hvs_z), (hvs_x, -hvs_y, -hvs_z), (hvs_x, hvs_y, -hvs_z)
++        \end{aligned}
+         $$
+-    *   For each occupied voxel in the hash table:
+-        *   Retrieve the voxel center $C$ and color $Col$ [S4, unofficial].
+-        *   Generate 8 vertices by adding offsets to $C$ [S4, unofficial].
+-        *   Assign predefined face normals (6 unique normals for a cube) [S4, unofficial].
+-        *   Generate indices to form the 6 faces of the cube [S4, unofficial].
+-        *   Assign colors to vertices if color data is present [S4, unofficial].
+-4.  **Cleanup:** Free the hash table and intermediate structures [S4, unofficial].
++        [S4, unofficial].
++    c.  Assign normals and indices to form the cube mesh [S4, unofficial].
+ 
+-**Pseudocode (CPU Hash-Based Variant):**
++**Pseudocode:**
+ ```python
+-def rasterization_based_voxelization(mesh, voxel_size, origin, precision):
++def rasterization_voxelization(vertices, faces, voxel_size, origin, precision=0.01):
+     """
+-    mesh: list of triangles, each triangle is a list of 3 vertices (vec3)
+-    voxel_size: float or vec3 (vs_x, vs_y, vs_z)
+-    origin: vec3 (x, y, z)
+-    precision: float (tolerance for intersection)
++    Voxelize a triangle mesh using rasterization principles.
++    Returns a set of occupied voxel coordinates (i, j, k).
+     """
+-    occupied_voxels = {} # Hash map: (i, j, k) -> color (optional)
++    occupied_voxels = set()
+     
+-    # Precompute half voxel sizes
+-    hvs_x = voxel_size[0] / 2.0
+-    hvs_y = voxel_size[1] / 2.0
+-    hvs_z = voxel_size[2] / 2.0
++    # Precompute half-voxel size for cube generation if needed
++    hvs = [s / 2.0 for s in voxel_size]
+     
+-    for triangle in mesh:
+-        # 1. Compute bounding box in world space
+-        min_x = min(v[0] for v in triangle)
+-        max_x = max(v[0] for v in triangle)
+-        min_y = min(v[1] for v in triangle)
+-        max_y = max(v[1] for v in triangle)
+-        min_z = min(v[2] for v in triangle)
+-        max_z = max(v[2] for v in triangle)
++    for face in faces:
++        # Get the three vertices of the triangle
++        v0, v1, v2 = vertices[face[0]], vertices[face[1]], vertices[face[2]]
+         
+-        # 2. Convert to voxel indices
+-        min_i = floor((min_x - origin[0]) / voxel_size[0])
+-        max_i = floor((max_x - origin[0]) / voxel_size[0])
+-        min_j = floor((min_y - origin[1]) / voxel_size[1])
+-        max_j = floor((max_y - origin[1]) / voxel_size[1])
+-        min_k = floor((min_z - origin[2]) / voxel_size[2])
+-        max_k = floor((max_z - origin[2]) / voxel_size[2])
++        # Determine the bounding box of the triangle in voxel indices
++        # This involves mapping world coordinates to voxel indices
++        # min_idx = floor((min(v0, v1, v2) - origin) / voxel_size)
++        # max_idx = floor((max(v0, v1, v2) - origin) / voxel_size)
+         
+-        # 3. Iterate over candidate voxels
+-        for i in range(min_i, max_i + 1):
+-            for j in range(min_j, max_j + 1):
+-                for k in range(min_k, max_k + 1):
+-                    # 4. Test intersection
+-                    # Note: Exact triangle-voxel intersection is complex.
+-                    # Simplified: Check if triangle center is close to voxel center
+-                    # or use a library function like madcad's hasher or pcu's rasterizer.
+-                    # Here we assume a helper function exists.
+-                    if triangle_intersects_voxel(triangle, i, j, k, origin, voxel_size, precision):
+-                        # 5. Store in hash table
+-                        key = (i, j, k)
+-                        if key not in occupied_voxels:
+-                            # Compute average color of triangle vertices if needed
+-                            avg_color = average_triangle_color(triangle)
+-                            occupied_voxels[key] = avg_color
+-                            
++        # Rasterize the triangle to find covered voxel centers
++        # This step typically uses a scanline algorithm or GPU rasterization logic
++        # to determine which voxel centers lie within the triangle projection
++        covered_voxels = rasterize_triangle(v0, v1, v2, voxel_size, origin, precision)
++        
++        for voxel in covered_voxels:
++            occupied_voxels.add(voxel)
++            
+     return occupied_voxels
+ 
+-def triangle_intersects_voxel(triangle, i, j, k, origin, voxel_size, precision):
++def generate_voxel_mesh(occupied_voxels, voxel_size, origin):
+     """
+-    Placeholder for exact geometric test.
+-    In practice, this uses the internal rasterizer logic [S4, unofficial] or 
+-    hardware rasterization [S6, unofficial].
++    Generate a mesh of cubes from the occupied voxel coordinates.
+     """
+-    # [G] A robust implementation would use Separating Axis Theorem (SAT) 
+-    # or barycentric coordinate checks against the voxel AABB.
+-    # For the purpose of this article, we assume the existence of a 
+-    # precise intersection test provided by the underlying library.
+-    return True # Simplified for structure
++    vertices = []
++    indices = []
++    normals = [
++        0, 0, 1,  0, 0, 1,  0, 0, 1,  0, 0, 1,  # Front
++        0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, # Back
++        0, 1, 0,  0, 1, 0,  0, 1, 0,  0, 1, 0,  # Top
++        0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, # Bottom
++        1, 0, 0,  1, 0, 0,  1, 0, 0,  1, 0, 0,  # Right
++        -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0  # Left
++    ]
++    
++    hvs = [s / 2.0 for s in voxel_size]
++    
++    # Cube corner offsets relative to center
++    cube_offsets = [
++        (-hvs[0], hvs[1], hvs[2]), (-hvs[0], -hvs[1], hvs[2]),
++        (hvs[0], -hvs[1], hvs[2]), (hvs[0], hvs[1], hvs[2]),
++        (-hvs[0], hvs[1], -hvs[2]), (-hvs[0], -hvs[1], -hvs[2]),
++        (hvs[0], -hvs[1], -hvs[2]), (hvs[0], hvs[1], -hvs[2])
++    ]
++    
++    # Standard cube face indices (8 vertices, 12 triangles)
++    # Simplified for brevity: 36 indices for 12 triangles
++    cube_face_indices = [
++        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6, 
++        4, 5, 1, 4, 1, 0, 3, 2, 6, 3, 6, 7,
++        5, 6, 2, 5, 2, 1, 4, 0, 3, 4, 3, 7
++    ]
++    
++    vertex_offset = 0
++    for voxel in occupied_voxels:
++        # Calculate world center of the voxel
++        center_x = origin[0] + (voxel[0] + 0.5) * voxel_size[0]
++        center_y = origin[1] + (voxel[1] + 0.5) * voxel_size[1]
++        center_z = origin[2] + (voxel[2] + 0.5) * voxel_size[2]
++        
++        # Add 8 vertices for this cube
++        for offset in cube_offsets:
++            vertices.append((center_x + offset[0], center_y + offset[1], center_z + offset[2]))
++            
++        # Add indices for this cube
++        for idx in cube_face_indices:
++            indices.append(vertex_offset + idx)
++            
++        vertex_offset += 8
++        
++    return vertices, indices, normals
+ ```
+ 
+ **Parameters:**
+-*   `voxel_size`: Physical dimension of a voxel. Typical values: 0.75, 0.5, 0.2, 0.1 units [S2, unofficial]. In Point Cloud Utils, $1/256.0$ is used [S1].
+-*   `origin`: Bottom-left-back corner of the $[0,0,0]$ voxel. Typically $[0,0,0]$ [S1].
+-*   `precision`: Factor to reduce "holes" artifacts. Typical value: $0.01$ [S2, S4, unofficial].
+-*   `gap_fraction`: Spacing between cubes in generated geometry. Typical value: $0.02$ [S1].
++*   `vox_size`: Typically $1/256.0$ or between $0.1$ and $0.75$ units depending on scene scale [S1][S2, unofficial].
++*   `precision`: A tolerance factor to reduce holes; typical value $0.01$ [S2, S4, unofficial].
++*   `gap_fraction`: Spacing between cubes in generated geometry; typical value $0.02$ [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Holes:** Standard rasterization only covers pixels/voxels whose centers lie inside the triangle, leading to gaps [S6, unofficial]. Mitigated by precision factors or conservative rasterization [S2, S6, unofficial].
+-*   **Performance:** Output mesh size scales with voxel density. A torus (441 vertices, 800 faces) with voxel size 0.75 results in 61,312 vertices and 91,968 faces [S2, unofficial].
+-*   **Memory:** Using dense 3D arrays is inefficient for sparse meshes; hash tables are preferred [S3, S4, unofficial].
++*   **Holes:** Standard rasterization may leave gaps if triangle centers do not align with voxel centers. A precision parameter or conservative rasterization is required to fill these [S2, S6, unofficial].
++*   **Performance:** The output mesh size scales with voxel density. A torus with 800 faces can result in >140,000 vertices at small voxel sizes [S2, unofficial].
++*   **Sparse vs Dense:** Using a hash set avoids memory allocation for empty space but adds lookup overhead [S3, unofficial].
+ 
+ ## Subtopics
+@@ -152,7 +149,4 @@
+ GPU Voxelization converts a triangle mesh into a regular voxel grid by leveraging the GPU's hardware rasterization pipeline to map fragments directly to 3D grid cells. It solves the performance bottleneck of CPU-based ray-tracing voxelization by parallelizing the intersection test across the rasterizer. It differs from [3D Grid Rasterization](903-3d-grid-rasterization.md) by using a 3D texture UAV or SSBO as the direct write target rather than a 2D accumulation buffer, and from [GPU Volume Kernel Voxelization](1496-gpu-volume-kernel-voxelization.md) by relying on standard triangle rasterization rather than volume kernels.
+ 
+-### [Mesh-to-Voxel Geometry Shader](2800-mesh-to-voxel-geometry-shader.md)
+-The Mesh-to-Voxel Geometry Shader is a real-time DirectX technique that converts mesh objects into voxel-like cubes by iterating over integer grid positions within a triangle's bounding box and emitting explicit cube geometry for grid cells close to the triangle plane. Unlike rasterization-based voxelization which fills pixels or conservative voxelization which determines occupancy, this method explicitly generates the 3D geometry of every intersecting voxel, resulting in significantly higher vertex and triangle counts.
+-
+ ### [CPU Mesh Voxelization](3137-cpu-mesh-voxelization.md)
+ CPU Mesh Voxelization converts a triangle mesh into a 3D grid of voxels by iterating over the bounding box of each triangle and testing each voxel center against the triangle's plane and edge constraints. It differs from its parent [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by explicitly rasterizing triangles into a hash table of voxel centers and colors, then generating a cube mesh for each occupied voxel, whereas CPU Mesh Voxelization typically outputs a binary occupancy grid or bit-packed table. It differs from [3D Grid Rasterization](903-3d-grid-rasterization.md) by using exact geometric overlap tests (SAT or plane/projection) rather than simple grid cell intersection, and from [Voxelization via Triangle Scattering](3779-voxelization-via-triangle-scattering.md) by iterating cells against triangles rather than scattering triangles into cells.
+@@ -170,21 +164,21 @@
+ This family of techniques converts 3D geometric data into voxel grids by projecting or transferring information into 2D image space (textures) before reconstructing the 3D volume. Unlike direct 3D rasterization, these methods leverage the GPU's fixed-function rasterizer or image load/store operations on 2D textures to determine voxel occupancy, often trading memory bandwidth for computational simplicity. They are distinguished from direct triangle rasterization by operating on pre-computed surface samples or 2D texture slices, ensuring connectivity or enabling real-time performance insensitive to scene complexity.
+ 
+-#### Rasterization-based Volume Modeling
++### Rasterization-based Volume Modeling
+ The process of building volume data voxel-by-voxel, considered the third layer in the voxel modeling abstraction hierarchy [S5, unofficial]. It solves the problem of assigning density values to voxels based on primitive contributions. It differs from instantiation-based modeling by pulling values into a voxel (similar to raytracing), whereas instantiation-based modeling pushes values into voxels (similar to micropolygon rendering) [S5, unofficial]. The main rasterization loop iterates over voxels in the discrete bounding box, transforms voxel position to world space, samples the primitive, and adds the value to the buffer if positive [S5, unofficial].
+ 
+-#### Single-Pass Voxelization
+-A voxelization approach that utilizes the geometry shader to reduce draw calls by selecting the axis from which each triangle has the largest overall projection for fragment generation [S6, unofficial]. It solves the problem of multiple draw calls for objects with the same material. It employs conservative rasterization to generate fragments as long as there is something inside the pixel, not only if its center is covered [S6, unofficial]. It uses an MSAA render target to solve the issue of incorrectly filling empty cells caused by conservative rasterization generating too many fragments [S6, unofficial]. Hardware support for conservative rasterization is available on Nvidia Maxwell architecture and later; RTX driver support is available for Turing and Pascal architecture GPUs [S6, unofficial]. A pitfall is that GPUs only generate fragments if a pixel's center is covered by a triangle, leading to small cracks at the edges of triangles [S6, unofficial].
++### Single-Pass Voxelization
++A voxelization approach that utilizes the geometry shader to reduce draw calls by selecting the axis from which each triangle has the largest overall projection for fragment generation [S6, unofficial]. It solves the problem of multiple draw calls in multi-pass approaches. It differs from standard rasterization by using conservative rasterization to generate fragments as long as there is something inside the pixel, not only if its center is covered [S6, unofficial]. Hardware support for conservative rasterization is available on Nvidia Maxwell architecture and later; RTX driver support is available for Turing and Pascal architecture GPUs [S6, unofficial]. A pitfall is that GPUs only generate fragments if a pixel's center is covered by a triangle, leading to small cracks at the edges of triangles, and conservative rasterization may incorrectly fill empty cells [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of triangles $N_t$ and the number of voxels $N_v$ in the bounding box. For sparse hash-based methods, complexity is roughly $O(N_t \cdot B + N_v)$, where $B$ is the average number of voxels per triangle bounding box [S3, S4, unofficial].
+-*   **Memory Complexity:** $O(N_v)$ for sparse hash tables, significantly less than $O(R_x R_y R_z)$ for dense grids [S3, S4, unofficial].
+-*   **Performance:** GPU-based methods offer significant speedups (e.g., 50x) for high-resolution grids compared to CPU implementations [S1]. CPU methods are simpler to implement but slower for large meshes [S1][S3, unofficial].
+-*   **Strengths:** Efficient for sparse data; leverages existing graphics hardware; produces clean surface meshes [S1][S2, S4, unofficial].
+-*   **Limitations:** Output mesh size can be very large (e.g., 144,968 vertices for a simple torus with voxel size 0.5) [S2, unofficial]; prone to holes without conservative rasterization or precision tuning [S2, S6, unofficial]; requires careful handling of precision to avoid artifacts [S2, S4, unofficial].
+-*   **When to use:** When a surface mesh representation of a voxelized object is needed, or when memory efficiency is critical for sparse scenes [S1][S3, S4, unofficial].
+-*   **When not to use:** When interior density information is required (deep voxelization) [S2, unofficial]; when exact topological correctness is critical without multi-view passes [S6, unofficial].
++*   **Time Complexity:** Linear with respect to the number of triangles and the number of voxels covered by those triangles [S1][S5, unofficial].
++*   **Memory Complexity:** Linear with respect to the number of occupied voxels when using sparse hash structures [S3, S4, unofficial].
++*   **Performance:** GPU-based variants offer significant speedups (e.g., 50x) over CPU implementations for high-resolution grids [S1].
++*   **Strengths:** Fast generation of surface voxel shells; leverages existing graphics hardware (GPU) or efficient CPU rasterization algorithms [S1][S4, unofficial].
++*   **Limitations:** Output mesh size can be very large compared to the input mesh (e.g., 100x increase in vertices) [S2, unofficial]. Standard rasterization may produce holes if precision is not handled [S2, S6, unofficial].
++*   **When to use:** When a surface representation (shell) is needed for voxel art or collision detection, and performance is critical [S2, unofficial].
++*   **When not to use:** When deep volumetric data (interior density) is required without additional filling steps, or when memory bandwidth is severely constrained by the output mesh size [S2, S5, unofficial].
+ 
+ ## Background
+-Rasterization-based voxelization originated from the need to efficiently convert polygonal models into volumetric data for rendering and simulation. The Point Cloud Utils library popularized a Python/C++ interface for this task [S1]. The C library `voxelizer` by Karim Naaji provided a header-only solution for shell voxelization, demonstrating the trade-offs in mesh size [S2, unofficial]. The `madcad` library introduced the `PositionMap` hasher for efficient sparse voxelization in Python [S3, unofficial]. Theoretical foundations are discussed in production volume rendering literature, which categorizes rasterization as a "pull" method for volume modeling [S5, unofficial]. Real-time applications have explored GPU acceleration via compute shaders and geometry shaders to overcome CPU bottlenecks [S1][S6, unofficial].
++Originated from the need to convert polygonal models into voxel formats for real-time rendering and volume processing. The Point-Cloud-Utils library popularized the Python-based rasterization approach [S1]. The C-based voxelizer library demonstrated the generation of cube meshes from rasterized voxels [S4, unofficial]. The technique is widely used in voxel art tools, collision detection systems, and as a preprocessing step for ray-traced voxel global illumination [S2, S6, unofficial].
+ 
+ ## Sources

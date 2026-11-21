@@ -1,0 +1,393 @@
+--- v009.md
++++ v010.md
+@@ -4,272 +4,159 @@
+ 
+ ## Overview
+-`GaussianRasterizationSettings` is a configuration container (typically a `NamedTuple` or struct) that encapsulates the camera parameters, rendering constraints, and mode flags required to invoke the differentiable 3D Gaussian splatting rasterizer. It solves the problem of translating high-level scene and camera state into the specific numerical formats expected by the CUDA backend, ensuring mutual exclusivity of input representations (e.g., spherical harmonics vs. precomputed colors) and device consistency [S1, S2, S3, unofficial]. It differs from the rasterizer itself by handling the setup of state and memory layout rather than the pixel-wise projection and blending logic [S1, unofficial].
++`GaussianRasterizationSettings` is a configuration structure (typically a `NamedTuple` or struct) that defines the camera parameters, scene constraints, and rendering flags required to invoke the differentiable 3D Gaussian rasterizer. It solves the problem of translating high-level camera intrinsics/extrinsics and scene representation choices into the specific numerical formats expected by the underlying CUDA kernel. It differs from the rasterizer itself by handling the setup of state and memory layout rather than the pixel-wise projection and blending logic [S1, unofficial].
+ 
+ ## How it works
+-The settings object serves as the bridge between the Python-level scene representation and the C++/CUDA rasterization kernel (`_C.rasterize_gaussians`). It validates inputs, normalizes `None` values to empty tensors, and structures arguments for the forward and backward passes.
++The settings object serves as the primary input interface for the `GaussianRasterizer`. It validates mutual exclusivity of representations (color and geometry) and ensures device consistency before passing arguments to the CUDA backend `_C.rasterize_gaussians` (forward) and `_C.rasterize_gaussians_backward` (backward).
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Camera matrices (`viewmatrix`, `projmatrix`), field of view (`tanfovx`, `tanfovy`), image dimensions (`image_height`, `image_width`), background color (`bg`), and mode flags (`sh_degree`, `rot_4d`, `debug`, etc.).
+-*   **Outputs**: The settings object itself is passed to the rasterizer. The rasterizer returns rendered tensors (color, depth, flow, etc.) and buffers for the backward pass.
++*   **Inputs**: Camera matrices (`viewmatrix`, `projmatrix`), intrinsics (`tanfovx`, `tanfovy`, `cx`, `cy`), image dimensions (`image_height`, `image_width`), background color (`bg`), and flags for 4D dynamics, SH degree, and debugging.
++*   **Outputs**: The settings object itself is not an output; it is consumed by the rasterizer to produce rendered images, gradients, and auxiliary buffers.
+ 
+ ### Data Structures
+-The layout varies slightly between implementations (3D GS vs. 4D GS vs. variants), but generally includes:
++The layout varies slightly between implementations (3D GS vs. 4D GS vs. variants). The core fields are:
+ 
+ **Standard 3D GS Layout [S1, S3, unofficial]:**
+ *   `image_height`: `int`
+ *   `image_width`: `int`
+-*   `tanfovx`: `float` (Tangent of half horizontal FOV)
+-*   `tanfovy`: `float` (Tangent of half vertical FOV)
+-*   `cx`: `float` (Principal point x, optional in some variants)
+-*   `cy`: `float` (Principal point y, optional in some variants)
+-*   `bg`: `torch.Tensor` (Background color, shape `(3,)` or `(4,)`)
++*   `tanfovx`: `float` ($\tan(\text{FoVx}/2)$)
++*   `tanfovy`: `float` ($\tan(\text{FoVy}/2)$)
++*   `cx`: `float` (Principal point x, often extracted from intrinsic matrix)
++*   `cy`: `float` (Principal point y, often extracted from intrinsic matrix)
++*   `bg`: `torch.Tensor` (Background color, typically 3-channel float)
+ *   `scale_modifier`: `float` (Multiplicative scalar for Gaussian scales)
+-*   `viewmatrix`: `torch.Tensor` (4x4 view matrix)
+-*   `projmatrix`: `torch.Tensor` (4x4 projection matrix)
+-*   `sh_degree`: `int` (Degree of spherical harmonics)
+-*   `campos`: `torch.Tensor` (Camera position)
++*   `viewmatrix`: `torch.Tensor` ($4 \times 4$ view transformation matrix)
++*   `projmatrix`: `torch.Tensor` ($4 \times 4$ projection matrix)
++*   `sh_degree`: `int` (Spherical Harmonics degree)
++*   `campos`: `torch.Tensor` (Camera position in world space)
+ *   `prefiltered`: `bool`
++*   `backward_geometry`: `bool` (Enable geometry gradients)
++*   `computer_pseudo_normal`: `bool` (Enable pseudo-normal computation)
+ *   `debug`: `bool`
+-*   `backward_geometry`: `bool` (Enable geometry gradients [S1, unofficial])
+-*   `computer_pseudo_normal`: `bool` (Enable pseudo-normal computation [S1, unofficial])
+ 
+ **4D GS Layout [S2, unofficial]:**
+-*   Includes all 3D GS fields plus:
++Extends the 3D layout with time-varying parameters:
+ *   `sh_degree_t`: `int` (Time-varying SH degree)
+-*   `timestamp`: `float`
+-*   `time_duration`: `float`
+-*   `rot_4d`: `bool` (Enable 4D rotation/velocity)
+-*   `gaussian_dim`: `int`
+-*   `force_sh_3d`: `bool`
++*   `timestamp`: `float` (Current time step)
++*   `time_duration`: `float` (Total time duration)
++*   `rot_4d`: `bool` (Enable 4D rotation)
++*   `gaussian_dim`: `int` (Dimensionality of Gaussian representation)
++*   `force_sh_3d`: `bool` (Force 3D SH even in 4D mode)
+ 
+ **FastGS Layout [S3, unofficial]:**
+-*   Includes `mult`: `float`, `get_flag`: `bool`, `metric_map`: `torch.Tensor`.
++*   `mult`: `float`
++*   `get_flag`: `bool`
++*   `metric_map`: `torch.Tensor`
+ 
+ ### Numbered Steps
+ 
+-1.  **Initialization**: Create the settings object with camera parameters.
+-    *   Compute `tanfovx = math.tan(camera.FoVx * 0.5)` and `tanfovy = math.tan(camera.FoVy * 0.5)` [S1, unofficial].
+-    *   Extract principal points `cx = intrinsic[0, 2]`, `cy = intrinsic[1, 2]` if supported [S1, unofficial].
+-2.  **Input Normalization (Guard)**: Before invoking the rasterizer, ensure all optional input tensors that are `None` are converted to empty `torch.Tensor` objects to prevent CUDA crashes [Parent, S2].
+-    *   If `shs` is `None`, set `shs = torch.Tensor([])`.
+-    *   If `colors_precomp` is `None`, set `colors_precomp = torch.Tensor([])`.
+-    *   If `flow_2d` is `None`, set `flow_2d = torch.Tensor([])`.
+-    *   If `ts` is `None`, set `ts = torch.Tensor([])`.
+-    *   If `scales` is `None`, set `scales = torch.Tensor([])`.
+-    *   If `scales_t` is `None`, set `scales_t = torch.Tensor([])`.
+-    *   If `rotations` is `None`, set `rotations = torch.Tensor([])`.
+-    *   If `rotations_r` is `None`, set `rotations_r = torch.Tensor([])`.
+-    *   If `cov3D_precomp` is `None`, set `cov3D_precomp = torch.Tensor([])` [S2, unofficial].
+-3.  **Validation (Mutual Exclusivity)**:
+-    *   Check color input: Exactly one of `shs` or `colors_precomp` must be provided. If neither or both are provided, raise `Exception 'Please provide excatly one of either SHs or precomputed colors!'` [S2, unofficial].
+-    *   Check geometry input: Either (`scales` and `rotations`) OR `cov3D_precomp` must be provided, but not both. If the condition is violated, raise `Exception 'Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!'` [S2, unofficial].
+-    *   Check 4D constraints: If `rot_4d` is `True` and `cov3D_precomp` is `None`, then `rotations_r`, `scales_t`, and `ts` must all be non-None. Otherwise, raise `Exception 'Please provide exactly rotations_r and scales_t and ts if rot_4d and cov3D_precomp is None!'` [S2, unofficial].
+-4.  **Argument Restructuring (Forward)**: Construct the `args` tuple in the exact order expected by `_C.rasterize_gaussians`:
+-    `args = (raster_settings.bg, means3D, colors_precomp, flow_2d, opacities, ts, scales, scales_t, rotations, rotations_r, raster_settings.scale_modifier, cov3Ds_precomp, prefilter_var, raster_settings.viewmatrix, raster_settings.projmatrix, raster_settings.tanfovx, raster_settings.tanfovy, raster_settings.image_height, raster_settings.image_width, sh, raster_settings.sh_degree, raster_settings.sh_degree_t, raster_settings.campos, raster_settings.timestamp, raster_settings.time_duration, raster_settings.rot_4d, raster_settings.gaussian_dim, raster_settings.force_sh_3d, raster_settings.prefiltered, raster_settings.debug)` [S2, unofficial].
+-5.  **Execution (Forward)**:
+-    *   If `raster_settings.debug` is `True`, deep-copy `args` to CPU (`cpu_args`) for potential snapshotting [S2, S6, unofficial].
+-    *   Call `num_rendered, color, flow, depth, T, radii, geomBuffer, binningBuffer, imgBuffer, covs_com, out_means3D = _C.rasterize_gaussians(*args)` [S2, unofficial].
+-    *   If an exception occurs and debug is on, save `cpu_args` to `'snapshot_fw.dump'` and re-raise [S2, unofficial].
+-6.  **Context Saving**: Save tensors for the backward pass: `raster_settings`, `num_rendered`, `prefilter_var`, `colors_precomp`, `means3D`, `out_means3D`, `scales`, `rotations`, `cov3Ds_precomp`, `radii`, `sh`, `flow_2d`, `opacities`, `ts`, `scales_t`, `rotations_r`, `geomBuffer`, `binningBuffer`, `imgBuffer` [S2, unofficial].
+-7.  **Return (Forward)**: Return `(color, radii, depth, 1-T, flow, covs_com)` [S2, unofficial].
++1.  **Input Validation**:
++    *   **Color Exclusivity**: If `shs` is `None` and `colors_precomp` is `None`, or if both are provided, raise `Exception 'Please provide excatly one of either SHs or precomputed colors!'` [S2, unofficial].
++    *   **Geometry Exclusivity**: If `(scales is None or rotations is None) and cov3D_precomp is None`, or if `((scales is not None or rotations is not None) and cov3D_precomp is not None)`, raise `Exception 'Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!'` [S2, unofficial].
++    *   **4D Geometry Check**: If `rot_4d` is `True` and `cov3D_precomp` is `None`, then `rotations_r`, `scales_t`, and `ts` must all be non-`None`; otherwise raise `Exception 'Please provide exactly rotations_r and scales_t and ts if rot_4d and cov3D_precomp is None!'` [S2, unofficial].
+ 
+-### Backward Pass Steps
+-1.  **Argument Restructuring (Backward)**: Construct `args` tuple for `_C.rasterize_gaussians_backward`:
+-    `args = (raster_settings.bg, means3D, out_means3D, radii, colors_precomp, flow_2d, opacities, ts, scales, scales_t, rotations, rotations_r, raster_settings.scale_modifier, cov3Ds_precomp, prefilter_var, raster_settings.viewmatrix, raster_settings.projmatrix, raster_settings.tanfovx, raster_settings.tanfovy, grad_out_color, grad_depth, grad_alpha, grad_flow, sh, raster_settings.sh_degree, raster_settings.sh_degree_t, raster_settings.campos, raster_settings.timestamp, raster_settings.time_duration, raster_settings.rot_4d, raster_settings.gaussian_dim, raster_settings.force_sh_3d, geomBuffer, num_rendered, binningBuffer, imgBuffer, raster_settings.debug)` [S2, unofficial].
+-2.  **Execution (Backward)**:
+-    *   If debug, copy `args` to CPU [S2, unofficial].
+-    *   Call `grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, grad_sh, grad_flows, grad_ts, grad_scales, grad_scales_t, grad_rotations, grad_rotations_r = _C.rasterize_gaussians_backward(*args)` [S2, unofficial].
+-3.  **Return (Backward)**: Return `(grad_means3D, grad_means2D, grad_sh, grad_colors_precomp, grad_flows, grad_opacities, grad_ts, grad_scales, grad_scales_t, grad_rotations, grad_rotations_r, grad_cov3Ds_precomp, None, None)` [S2, unofficial].
++2.  **None Normalization**:
++    *   Convert any `None` input tensors to empty `torch.Tensor` objects to prevent CUDA kernel crashes [S2, S3, unofficial].
++    *   Examples:
++        ```python
++        if shs is None: shs = torch.Tensor([])
++        if colors_precomp is None: colors_precomp = torch.Tensor([])
++        if flow_2d is None: flow_2d = torch.Tensor([])
++        if ts is None: ts = torch.Tensor([])
++        if scales is None: scales = torch.Tensor([])
++        if scales_t is None: scales_t = torch.Tensor([])
++        if rotations is None: rotations = torch.Tensor([])
++        if rotations_r is None: rotations_r = torch.Tensor([])
++        if cov3D_precomp is None: cov3D_precomp = torch.Tensor([])
++        ```
++    *   [S2, unofficial]
++
++3.  **Argument Restructuring (Forward)**:
++    *   Construct the `args` tuple in the exact order expected by `_C.rasterize_gaussians`:
++        ```python
++        args = (
++            raster_settings.bg, means3D, colors_precomp, flow_2d, opacities, ts,
++            scales, scales_t, rotations, rotations_r, raster_settings.scale_modifier,
++            cov3Ds_precomp, prefilter_var, raster_settings.viewmatrix, raster_settings.projmatrix,
++            raster_settings.tanfovx, raster_settings.tanfovy, raster_settings.image_height,
++            raster_settings.image_width, sh, raster_settings.sh_degree,
++            raster_settings.sh_degree_t, raster_settings.campos, raster_settings.timestamp,
++            raster_settings.time_duration, raster_settings.rot_4d, raster_settings.gaussian_dim,
++            raster_settings.force_sh_3d, raster_settings.prefiltered, raster_settings.debug
++        )
++        ```
++    *   [S2, unofficial]
++
++4.  **Forward Execution**:
++    *   If `raster_settings.debug` is `True`, deep-copy `args` to CPU (`cpu_args`) to allow snapshotting on error [S2, S6, unofficial].
++    *   Call `_C.rasterize_gaussians(*args)`.
++    *   If an exception occurs in debug mode, save `cpu_args` to `'snapshot_fw.dump'` and re-raise [S2, unofficial].
++    *   Return: `num_rendered`, `color`, `flow`, `depth`, `T`, `radii`, `geomBuffer`, `binningBuffer`, `imgBuffer`, `covs_com`, `out_means3D` [S2, unofficial].
++
++5.  **Context Saving (Backward)**:
++    *   Save `raster_settings`, `num_rendered`, `prefilter_var`.
++    *   Save tensors for backward pass: `colors_precomp`, `means3D`, `out_means3D`, `scales`, `rotations`, `cov3Ds_precomp`, `radii`, `sh`, `flow_2d`, `opacities`, `ts`, `scales_t`, `rotations_r`, `geomBuffer`, `binningBuffer`, `imgBuffer` [S2, unofficial].
++
++6.  **Forward Return**:
++    *   Return `color`, `radii`, `depth`, `1-T`, `flow`, `covs_com` [S2, unofficial].
++
++7.  **Backward Argument Restructuring**:
++    *   Construct `args` tuple for `_C.rasterize_gaussians_backward`:
++        ```python
++        args = (
++            raster_settings.bg, means3D, out_means3D, radii, colors_precomp, flow_2d,
++            opacities, ts, scales, scales_t, rotations, rotations_r,
++            raster_settings.scale_modifier, cov3Ds_precomp, prefilter_var,
++            raster_settings.viewmatrix, raster_settings.projmatrix, raster_settings.tanfovx,
++            raster_settings.tanfovy, grad_out_color, grad_depth, grad_alpha, grad_flow,
++            sh, raster_settings.sh_degree, raster_settings.sh_degree_t, raster_settings.campos,
++            raster_settings.timestamp, raster_settings.time_duration, raster_settings.rot_4d,
++            raster_settings.gaussian_dim, raster_settings.force_sh_3d, geomBuffer,
++            num_rendered, binningBuffer, imgBuffer, raster_settings.debug
++        )
++        ```
++    *   [S2, unofficial]
++
++8.  **Backward Execution**:
++    *   If `raster_settings.debug` is `True`, copy `args` to CPU [S2, unofficial].
++    *   Call `_C.rasterize_gaussians_backward(*args)`.
++    *   If exception occurs in debug mode, save `cpu_args` to `'snapshot_bw.dump'` and re-raise [S2, unofficial].
++    *   Return: `grad_means2D`, `grad_colors_precomp`, `grad_opacities`, `grad_means3D`, `grad_cov3Ds_precomp`, `grad_sh`, `grad_flows`, `grad_ts`, `grad_scales`, `grad_scales_t`, `grad_rotations`, `grad_rotations_r` [S2, unofficial].
++
++9.  **Backward Return**:
++    *   Return gradients tuple: `grad_means3D`, `grad_means2D`, `grad_sh`, `grad_colors_precomp`, `grad_flows`, `grad_opacities`, `grad_ts`, `grad_scales`, `grad_scales_t`, `grad_rotations`, `grad_rotations_r`, `grad_cov3Ds_precomp`, `None`, `None` [S2, unofficial].
++
++10. **Visibility Marking**:
++    *   Call `_C.mark_visible(positions, raster_settings.viewmatrix, raster_settings.projmatrix)` with `torch.no_grad()` to return a visible boolean tensor [S2, unofficial].
+ 
+ ### Parameters with Typical Values
++*   `tanfovx`, `tanfovy`: Computed as `math.tan(camera.FoVx * 0.5)` and `math.tan(camera.FoVy * 0.5)` [S1, unofficial].
++*   `cx`, `cy`: Extracted from intrinsic matrix `intrinsic[0, 2]` and `intrinsic[1, 2]` [S1, unofficial].
+ *   `scale_modifier`: Default `1.0` [S1, unofficial].
+-*   `tanfovx`, `tanfovy`: Computed from camera FOV [S1, unofficial].
+-*   `sh_degree`: Typically 0-3, increased during training [S2, unofficial].
+-*   `debug`: `False` during training, `True` for debugging [S2, unofficial].
++*   `bg`: Typically `[1, 1, 1]` for white background or `[0, 0, 0]` for black [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **None Handling**: Passing `None` directly to the CUDA kernel causes crashes; must be converted to `torch.Tensor([])` [Parent, S2].
+-*   **Mutual Exclusivity**: Providing both SH and precomputed colors, or both scale/rotation and precomputed covariance, raises an exception [S2, unofficial].
+-*   **4D Consistency**: If `rot_4d` is enabled, specific time-dependent parameters (`ts`, `scales_t`, `rotations_r`) must be provided [S2, unofficial].
+-*   **Debug Snapshots**: In debug mode, arguments are copied to CPU, which may impact performance [S2, S6, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-import torch
+-import math
+-
+-class GaussianRasterizationSettings:
+-    def __init__(self, image_height, image_width, tanfovx, tanfovy, bg, scale_modifier, 
+-                 viewmatrix, projmatrix, sh_degree, campos, prefiltered=False, 
+-                 debug=False, sh_degree_t=0, timestamp=0.0, time_duration=0.0, 
+-                 rot_4d=False, gaussian_dim=0, force_sh_3d=False, 
+-                 backward_geometry=False, computer_pseudo_normal=False, 
+-                 cx=0.0, cy=0.0, mult=1.0, get_flag=False, metric_map=None):
+-        self.image_height = image_height
+-        self.image_width = image_width
+-        self.tanfovx = tanfovx
+-        self.tanfovy = tanfovy
+-        self.cx = cx
+-        self.cy = cy
+-        self.bg = bg
+-        self.scale_modifier = scale_modifier
+-        self.viewmatrix = viewmatrix
+-        self.projmatrix = projmatrix
+-        self.sh_degree = sh_degree
+-        self.campos = campos
+-        self.prefiltered = prefiltered
+-        self.backward_geometry = backward_geometry
+-        self.computer_pseudo_normal = computer_pseudo_normal
+-        self.debug = debug
+-        self.sh_degree_t = sh_degree_t
+-        self.timestamp = timestamp
+-        self.time_duration = time_duration
+-        self.rot_4d = rot_4d
+-        self.gaussian_dim = gaussian_dim
+-        self.force_sh_3d = force_sh_3d
+-        self.mult = mult
+-        self.get_flag = get_flag
+-        self.metric_map = metric_map
+-
+-def validate_and_normalize_inputs(shs, colors_precomp, scales, rotations, cov3D_precomp, 
+-                                  flow_2d, ts, scales_t, rotations_r, rot_4d):
+-    # Normalize None to empty tensors
+-    if shs is None: shs = torch.Tensor([])
+-    if colors_precomp is None: colors_precomp = torch.Tensor([])
+-    if flow_2d is None: flow_2d = torch.Tensor([])
+-    if ts is None: ts = torch.Tensor([])
+-    if scales is None: scales = torch.Tensor([])
+-    if scales_t is None: scales_t = torch.Tensor([])
+-    if rotations is None: rotations = torch.Tensor([])
+-    if rotations_r is None: rotations_r = torch.Tensor([])
+-    if cov3D_precomp is None: cov3D_precomp = torch.Tensor([])
+-
+-    # Mutual Exclusivity Checks
+-    sh_provided = len(shs.shape) > 0 and shs.numel() > 0
+-    color_provided = len(colors_precomp.shape) > 0 and colors_precomp.numel() > 0
+-    if not (sh_provided ^ color_provided):
+-        raise Exception('Please provide excatly one of either SHs or precomputed colors!')
+-
+-    scale_rot_provided = (len(scales.shape) > 0 and scales.numel() > 0) and \
+-                         (len(rotations.shape) > 0 and rotations.numel() > 0)
+-    cov_provided = len(cov3D_precomp.shape) > 0 and cov3D_precomp.numel() > 0
+-    
+-    if (scale_rot_provided and not cov_provided) or (not scale_rot_provided and cov_provided):
+-        pass # Valid
+-    else:
+-        raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
+-
+-    if rot_4d and not cov_provided:
+-        if not (len(rotations_r.shape) > 0 and rotations_r.numel() > 0 and \
+-                len(scales_t.shape) > 0 and scales_t.numel() > 0 and \
+-                len(ts.shape) > 0 and ts.numel() > 0):
+-            raise Exception('Please provide exactly rotations_r and scales_t and ts if rot_4d and cov3D_precomp is None!')
+-            
+-    return shs, colors_precomp, scales, rotations, cov3D_precomp, flow_2d, ts, scales_t, rotations_r
+-
+-def forward_gaussian_rasterization(raster_settings, means3D, colors_precomp, flow_2d, 
+-                                   opacities, ts, scales, scales_t, rotations, rotations_r, 
+-                                   cov3Ds_precomp, prefilter_var, sh):
+-    # 1. Normalize and Validate
+-    colors_precomp, flow_2d, ts, scales, scales_t, rotations, rotations_r, cov3Ds_precomp = \
+-        validate_and_normalize_inputs(None, colors_precomp, None, rotations, cov3Ds_precomp, 
+-                                      flow_2d, ts, scales_t, rotations_r, raster_settings.rot_4d)
+-    
+-    # Note: shs is handled separately in the args tuple as 'sh'
+-    # Assuming 'sh' is the SH tensor if colors_precomp is empty, or None if colors_precomp is used.
+-    # The validation above checks colors_precomp vs shs. 
+-    # For pseudocode clarity, we assume 'sh' is passed directly.
+-    
+-    # 2. Construct Args
+-    args = (
+-        raster_settings.bg, means3D, colors_precomp, flow_2d, opacities, ts, 
+-        scales, scales_t, rotations, rotations_r, raster_settings.scale_modifier, 
+-        cov3Ds_precomp, prefilter_var, raster_settings.viewmatrix, raster_settings.projmatrix, 
+-        raster_settings.tanfovx, raster_settings.tanfovy, raster_settings.image_height, 
+-        raster_settings.image_width, sh, raster_settings.sh_degree, 
+-        raster_settings.sh_degree_t, raster_settings.campos, raster_settings.timestamp, 
+-        raster_settings.time_duration, raster_settings.rot_4d, raster_settings.gaussian_dim, 
+-        raster_settings.force_sh_3d, raster_settings.prefiltered, raster_settings.debug
+-    )
+-    
+-    # 3. Execute
+-    cpu_args = None
+-    if raster_settings.debug:
+-        cpu_args = tuple(x.cpu().detach() if isinstance(x, torch.Tensor) else x for x in args)
+-        
+-    try:
+-        num_rendered, color, flow, depth, T, radii, geomBuffer, binningBuffer, imgBuffer, covs_com, out_means3D = \
+-            _C.rasterize_gaussians(*args)
+-    except Exception as e:
+-        if raster_settings.debug and cpu_args is not None:
+-            import pickle
+-            with open('snapshot_fw.dump', 'wb') as f:
+-                pickle.dump(cpu_args, f)
+-        raise e
+-        
+-    # 4. Save for Backward (Simulated)
+-    # In real implementation, ctx.save_for_backward(...)
+-    
+-    # 5. Return
+-    return color, radii, depth, 1 - T, flow, covs_com
+-
+-def backward_gaussian_rasterization(raster_settings, means3D, out_means3D, radii, 
+-                                    colors_precomp, flow_2d, opacities, ts, scales, 
+-                                    scales_t, rotations, rotations_r, cov3Ds_precomp, 
+-                                    prefilter_var, sh, geomBuffer, num_rendered, 
+-                                    binningBuffer, imgBuffer, grad_out_color, 
+-                                    grad_depth, grad_alpha, grad_flow):
+-    # 1. Construct Args
+-    args = (
+-        raster_settings.bg, means3D, out_means3D, radii, colors_precomp, flow_2d, 
+-        opacities, ts, scales, scales_t, rotations, rotations_r, raster_settings.scale_modifier, 
+-        cov3Ds_precomp, prefilter_var, raster_settings.viewmatrix, raster_settings.projmatrix, 
+-        raster_settings.tanfovx, raster_settings.tanfovy, grad_out_color, grad_depth, 
+-        grad_alpha, grad_flow, sh, raster_settings.sh_degree, raster_settings.sh_degree_t, 
+-        raster_settings.campos, raster_settings.timestamp, raster_settings.time_duration, 
+-        raster_settings.rot_4d, raster_settings.gaussian_dim, raster_settings.force_sh_3d, 
+-        geomBuffer, num_rendered, binningBuffer, imgBuffer, raster_settings.debug
+-    )
+-    
+-    # 2. Execute
+-    cpu_args = None
+-    if raster_settings.debug:
+-        cpu_args = tuple(x.cpu().detach() if isinstance(x, torch.Tensor) else x for x in args)
+-        
+-    try:
+-        grad_means2D, grad_colors_precomp, grad_opacities, grad_means3D, grad_cov3Ds_precomp, \
+-        grad_sh, grad_flows, grad_ts, grad_scales, grad_scales_t, grad_rotations, grad_rotations_r = \
+-            _C.rasterize_gaussians_backward(*args)
+-    except Exception as e:
+-        if raster_settings.debug and cpu_args is not None:
+-            import pickle
+-            with open('snapshot_bw.dump', 'wb') as f:
+-                pickle.dump(cpu_args, f)
+-        raise e
+-        
+-    # 3. Return
+-    return (grad_means3D, grad_means2D, grad_sh, grad_colors_precomp, grad_flows, 
+-            grad_opacities, grad_ts, grad_scales, grad_scales_t, grad_rotations, 
+-            grad_rotations_r, grad_cov3Ds_precomp, None, None)
+-```
++*   **Device Mismatch**: All input tensors must reside on the same device (typically CUDA) as the rasterizer's expected output. Mismatched devices cause undefined behavior or errors [Parent].
++*   **None Handling**: Passing `None` directly to CUDA kernels causes crashes; must be converted to empty tensors [Parent, S2].
++*   **Debug Snapshots**: In debug mode, arguments are deep-copied to CPU before calling the C++ routine to allow saving a snapshot for debugging if an exception occurs [S6, unofficial].
+ 
+ ## Subtopics
+ 
+ ### 3D Half-Gaussian Rasterization
+-A variant that splits a 3D Gaussian kernel into two halves using a plane through its center, allowing distinct opacity values ($\alpha_1, \alpha_2$) for each half to better represent sharp edges and planar surfaces [S4]. It uses three unused normal parameters in the 3D-GS kernel to store the splitting plane normal $\mathbf{n}$ [S4].
++A rasterization technique that represents a 3D Gaussian kernel as two halves split by a plane through its center, allowing distinct opacity values for each half to better represent sharp edges and planar surfaces [S4]. It sets itself apart by introducing a learned splitting plane normal $\mathbf{n} = [n_1, n_2, n_3]^T$ (stored in unused normal parameters) and two opacity parameters $\alpha_1$ (for $\mathbf{n}^T(\mathbf{x}-\boldsymbol{\mu}) \ge 0$) and $\alpha_2$ (for $\mathbf{n}^T(\mathbf{x}-\boldsymbol{\mu}) < 0$) [S4]. Choose this when accurate representation of sharp edges and planar surfaces is critical, accepting a modest increase in learned parameters [S4].
+ 
+ ### Restricting Gaussian Kernel Support
+-Techniques to reduce Gaussian footprints and superfluous ray-Gaussian intersections using a generalized kernel exponent and adaptive alpha clamping [S5]. The generalized kernel is $\exp \left[ -\frac{1}{2n_{\text{expo}}} ((x - \mu)^T \Sigma^{-1} (x - \mu))^{n_{\text{expo}}} \right]$ [S5]. 3DGRT uses $4.5 n_{\text{expo}}$ in the denominator, while GRay uses $1 2^{n_{\text{expo}}}$ for less sensitive initialization [S5].
++A technique to reduce Gaussian footprints and superfluous ray-Gaussian intersections using a generalized kernel exponent and adaptive alpha clamping [S5]. It replaces the standard Gaussian kernel with $\exp \left[ -\frac{1}{2n_{\text{expo}}} ((x - \mu)^T \Sigma^{-1} (x - \mu))^{n_{\text{expo}}} \right]$ where $n_{\text{expo}}$ controls bulkiness [S5]. Choose this when reducing computational load from large Gaussians is necessary. Pitfall: 3DGRT uses $4.5 n_{\text{expo}}$ in the denominator, while GRay uses $1 2^{n_{\text{expo}}}$ for less sensitive initialization [S5]. Dynamic clamping can cause visible artifacts for large Gaussians [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear in the number of Gaussians $N$ and pixels $P$, dominated by the sorting and blending steps in the CUDA kernel.
+-*   **Memory Complexity**: Linear in $N$ for storing Gaussian parameters and buffers (`geomBuffer`, `binningBuffer`, `imgBuffer`) [S2, unofficial].
+-*   **Performance**: Real-time rendering on modern GPUs (e.g., RTX 4090) for typical scene sizes [S5].
+-*   **Strengths**: Differentiable, fast, supports dynamic scenes (4D GS) [S2, unofficial].
+-*   **Limitations**: Sensitive to input validation errors (None handling, mutual exclusivity) [S2, unofficial]. Debug mode incurs CPU copy overhead [S2, unofficial].
++*   **Time Complexity**: Linear with respect to the number of Gaussians $N$ and pixels $P$, dominated by the CUDA kernel execution.
++*   **Memory Complexity**: Linear with respect to $N$ for storing Gaussian parameters and buffers (`geomBuffer`, `binningBuffer`, `imgBuffer`).
++*   **Measured Performance**: Real-time rendering on modern GPUs (e.g., RTX 4090) for scenes with millions of Gaussians [S5].
++*   **Strengths**: Differentiable, real-time, supports dynamic scenes (4D) [S2, unofficial].
++*   **Limitations**: Sensitive to initialization of scales and exponents; dynamic clamping artifacts for large Gaussians [S5].
++*   **When to Use**: Real-time differentiable rendering, neural rendering training.
++*   **When Not to Use**: Non-differentiable offline rendering where ray tracing is preferred for accuracy [S5].
+ 
+ ## Background
+-Originated from the 3D Gaussian Splatting paper [Parent] and extended to 4D Gaussian Splatting for dynamic scenes by Yang et al. (ICLR 2024) [S2, unofficial]. The `GaussianRasterizationSettings` structure is part of the `diff_gaussian_rasterization` CUDA extension [S2, S6, unofficial].
++Originated from the 3D Gaussian Splatting paper [Kerbl et al., 2023] and extended to 4D Gaussian Splatting [Yang et al., ICLR 2024] [S2, unofficial]. It is used in real-time photorealistic dynamic scene representation and rendering [S2, unofficial].
+ 
+ ## Sources

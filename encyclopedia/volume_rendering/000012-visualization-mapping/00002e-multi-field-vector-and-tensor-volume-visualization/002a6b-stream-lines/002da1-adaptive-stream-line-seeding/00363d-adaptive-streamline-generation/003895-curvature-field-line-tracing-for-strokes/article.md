@@ -1,0 +1,132 @@
+# Curvature Field Line Tracing for Strokes
+
+Also called: Stroke generation via RK4(3)
+
+## Overview
+Curvature Field Line Tracing for Strokes generates hatching strokes in volume illustration by tracing paths from seed points along maximal curvature directions in object space [S1, unofficial]. It differs from standard streamline tracing by following the principal direction of the scalar field's curvature rather than a velocity vector, and by employing an adaptive step size controlled by a deviation threshold to ensure strokes remain visually coherent and front-facing [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Scalar field $f(\mathbf{x})$ [S1, unofficial].
+- A set of seed points $\mathbf{x}_0$ [S1, unofficial].
+- A deviation threshold angle $\theta_{\max}$ [S1, unofficial].
+
+**Outputs:**
+- A set of strokes, where each stroke is a line strip (sequence of points) [S1, unofficial].
+- Each point in a stroke stores:
+  - Vertex coordinates $\mathbf{p}_i$ [S1, unofficial].
+  - Gray-scale gradient $\nabla f(\mathbf{p}_i)$ interpolated from the scalar field [S1, unofficial].
+  - Texture coordinate $t_i$, defined as the distance from the seed point relative to the total stroke length [S1, unofficial].
+
+**Data Structures:**
+- **Curvature Field:** Derived from the scalar field. The direction of tracing is the "maximal curvature direction" in object space [S1, unofficial]. The exact mathematical definition (e.g., Hessian eigenvector) is not explicitly detailed in the source, but it is treated as a vector field $\mathbf{V}(\mathbf{x})$ [S1, unofficial].
+- **Stroke Point:** A struct containing position, gradient, and texture coordinate [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialization:** For each seed point $\mathbf{x}_0$, determine the initial hatch direction $\mathbf{d}_0$ as the maximal curvature direction at $\mathbf{x}_0$ [S1, unofficial]. Initialize current position $\mathbf{p} = \mathbf{x}_0$ and current direction $\mathbf{d} = \mathbf{d}_0$ [G]. Initialize stroke point list $S = [\mathbf{p}]$ [G].
+2. **Integration Loop:** While the stroke is not terminated:
+   a. Compute the curvature direction $\mathbf{V}(\mathbf{p})$ at the current position [S1, unofficial].
+   b. Use RK4(3) integration with adaptive step size control to advance the position along $\mathbf{V}(\mathbf{p})$ [S1, unofficial]. The adaptive step size reduces the number of intermediate points when the field is smooth [S1, unofficial]. Tri-linear interpolation is used for the curvature field [S1, unofficial].
+   c. Let the new position be $\mathbf{p}_{\text{new}}$ and the new direction be $\mathbf{d}_{\text{new}} = \mathbf{V}(\mathbf{p}_{\text{new}})$ [G].
+   d. **Termination Check:** Calculate the angle $\alpha$ between the current hatch direction $\mathbf{d}_{\text{new}}$ and the original hatch direction $\mathbf{d}_0$ [S1, unofficial]. If $\alpha > \theta_{\max}$, terminate the stroke [S1, unofficial].
+   e. **Lighting and Culling Prep:** Interpolate the gray-scale gradient $\nabla f(\mathbf{p}_{\text{new}})$ from the scalar field [S1, unofficial].
+   f. **Store Point:** Add $\mathbf{p}_{\text{new}}$ to $S$ [S1, unofficial]. Compute texture coordinate $t = \text{dist}(\mathbf{p}_{\text{new}}, \mathbf{x}_0) / \text{total\_length}$ [S1, unofficial].
+   g. Update $\mathbf{p} = \mathbf{p}_{\text{new}}$ and $\mathbf{d} = \mathbf{d}_{\text{new}}$ [G].
+3. **Post-processing:** Compute a cone of normals from the set of all gradients in the stroke to cull back-facing strokes [S1, unofficial]. Render the stroke as a line strip using the stored points, gradients, and texture coordinates [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+def mag(v):
+    return math.sqrt(dot(v, v))
+
+def dist(a, b):
+    return mag([x - y for x, y in zip(a, b)])
+
+def normalize(v):
+    m = mag(v)
+    return [x / m for x in v] if m > 0 else [0.0, 0.0, 0.0]
+
+def rk43_step(field, p, h):
+    # Standard RK4(3) step with adaptive error estimation [G].
+    # Sources do not specify the exact coefficients or controller formula.
+    k1 = field(p)
+    k2 = field([p[i] + h * k1[i] / 2.0 for i in range(3)])
+    k3 = field([p[i] + h * k2[i] / 2.0 for i in range(3)])
+    k4 = field([p[i] + h * k3[i] for i in range(3)])
+    return [p[i] + h * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]) / 6.0 for i in range(3)]
+
+def generate_stroke(seed, curvature_field, scalar_field, theta_max):
+    # 1. Initialization
+    original_dir = normalize(curvature_field(seed))
+    current_pos = list(seed)
+    stroke_points = []
+    stroke_points.append({'pos': list(current_pos), 'grad': scalar_field.gradient(current_pos), 't': 0.0})
+    total_len = 0.0
+    prev_pos = current_pos
+
+    # 2. Integration Loop
+    while True:
+        # Adaptive step size control [G]
+        h = 0.1  # Initial step size; controller adjusts based on local error
+        next_pos = rk43_step(curvature_field, current_pos, h)
+        next_dir = normalize(curvature_field(next_pos))
+
+        # Termination Check
+        angle = math.acos(max(-1.0, min(1.0, dot(next_dir, original_dir))))
+        if angle > theta_max:
+            break
+
+        # Lighting and Culling Prep
+        grad = scalar_field.gradient(next_pos)
+
+        # Update length
+        seg_len = dist(prev_pos, next_pos)
+        total_len += seg_len
+
+        # Store Point
+        stroke_points.append({'pos': list(next_pos), 'grad': grad, 't': dist(seed, next_pos)})
+        prev_pos = next_pos
+        current_pos = next_pos
+
+    # Normalize texture coordinates relative to total stroke length [G]
+    if total_len > 0:
+        for pt in stroke_points:
+            pt['t'] /= total_len
+
+    return stroke_points
+```
+
+**Parameters:**
+- **Deviation Threshold ($\theta_{\max}$):** A constant angle deviation from the original hatch direction that terminates the stroke. No specific value is given in the sources [S1, unofficial].
+- **Integration Method:** RK4(3) with adaptive step size [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **High Curvature Variations:** The deviation threshold prevents stepping into regions where the curvature field shows high variations, which could otherwise lead to erratic strokes [S1, unofficial].
+- **Back-facing Strokes:** Strokes that turn away from the viewer may be back-facing; the method computes a cone of normals from gradients to cull these [S1, unofficial].
+- **Interpolation Accuracy:** Although tri-linear interpolation is used for the curvature field, the RK4(3) method ensures high accuracy in field line computation [S1, unofficial].
+
+## Subtopics
+
+### [Integral Surface](11268-integral-surface.md)
+An integral surface is a geometric construct that generalizes streamlines and pathlines to two dimensions by sweeping a seeding curve through a vector field. It serves as a surface representation of flow, where the surface is generated by integrating the trajectories of all points along a one-dimensional seeding curve (also called a rake). It sets itself apart from single streamline tracing by providing a continuous surface topology that captures the collective behavior of a flow region, and from streaklines by tracking particles released simultaneously from the curve rather than continuously over time.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of seed points and the average stroke length [S1, unofficial]. Adaptive step size reduces the number of intermediate points, improving performance in smooth regions [S1, unofficial].
+- **Memory Complexity:** Proportional to the total number of points in all strokes [S1, unofficial]. Each point stores position, gradient, and texture coordinate [S1, unofficial].
+- **Strengths:** High accuracy in field line computation despite simple tri-linear interpolation [S1, unofficial]. Efficient encoding of strokes using a small number of line segments due to adaptive step size [S1, unofficial]. Effective culling of back-facing strokes using gradient-based normal cones [S1, unofficial].
+- **Limitations:** Requires computation of curvature field, which may be more expensive than velocity field evaluation [G]. Termination is based on deviation from the original direction, which may not be suitable for all visualization goals [G].
+- **When to Use:** When generating hatching strokes for volume illustration that need to follow the structural curvature of the scalar field and maintain visual coherence [S1, unofficial].
+- **When Not to Use:** When velocity-based flow visualization is required, or when the curvature field is noisy or ill-defined [G].
+
+## Background
+The method was introduced in the context of interactive volume illustration [S1, unofficial]. It is described in the paper "Interactive volume illustration" [S1, unofficial]. The approach leverages the fact that strokes placed entirely in front of a selected surface can effectively illustrate the volume's structure [S1, unofficial]. The use of RK4(3) with adaptive step size is chosen to balance accuracy and performance, allowing for high-quality strokes with minimal computational overhead [S1, unofficial].
+
+## Sources
+[S1] Interactive volume illustration, https://openalex.org/W2147354080, fetched 2026-10-27 (unofficial)

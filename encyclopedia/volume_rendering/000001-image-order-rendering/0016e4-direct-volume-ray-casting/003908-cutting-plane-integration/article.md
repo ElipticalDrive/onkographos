@@ -1,0 +1,155 @@
+# Cutting Plane Integration
+
+Also called: CuttingPlaneRender, Interactive Cutting Plane
+
+## Overview
+Cutting Plane Integration is an interactive volume rendering technique that dynamically slices a 3D dataset using a semi-transparent geometric plane to reveal internal structures [S1, unofficial]. It builds on [Direct volume ray casting](19-direct-volume-ray-casting.md) by modifying the ray traversal and compositing stages to respect the cutting plane boundary.
+
+## How it works
+The method integrates a cutting plane into the ray casting loop. The plane is defined by a position and orientation, and optionally a near-clip constraint.
+
+**Inputs and Outputs:**
+*   **Input:** Volume data $V$, camera parameters ($\mathbf{o}, \mathbf{d}$), transfer function $T$, cutting plane definition (position $\mathbf{g}_0$, normal $\mathbf{n}$, rotation angles), and near-clip plane definition (optional) [S2].
+*   **Output:** Final pixel color $\mathbf{C}_{out}$ and opacity $\alpha_{out}$ [G].
+
+**Data Structures:**
+*   **Volume:** 3D grid of scalar values [G].
+*   **Cutting Plane:** Defined by a world-space point $\mathbf{g}_0$ and normal vector $\mathbf{n}$ [S2]. The position is mapped from a normalized height parameter $h \in [0, 1]$ [S1, unofficial].
+*   **Ray State:** Current position $\mathbf{p}$, accumulated color $\mathbf{C}_{acc}$, accumulated opacity $\alpha_{acc}$ [G].
+
+**Numbered Steps:**
+
+1.  **Initialize Ray:** For each pixel, define ray $r(t) = \mathbf{o} + t\mathbf{d}$ and intersect with the volume bounding box to find entry $t_{near}$ and exit $t_{far}$ [G].
+2.  **Define Cutting Plane:**
+    *   Map normalized height $h$ to world Z position: $z_{plane} = 200 - 400 \cdot h$ [S1, unofficial].
+    *   Apply rotation: convert degrees to radians and add a $\pi$ radian offset to the Y-rotation if `renderAbove` is true [S1, unofficial].
+    *   The plane equation is $\mathbf{n} \cdot (\mathbf{x} - \mathbf{g}_0) = 0$ [S2].
+3.  **Ray Marching Loop:** Iterate $i$ from $0$ to $N-1$:
+    *   Calculate sample position $\mathbf{p}_i = \mathbf{o} + t_i \mathbf{d}$ [G].
+    *   **Cutting Plane Check:** Let $\mathbf{g}_{in} = \mathbf{p}_i$ and $\mathbf{g}_{out} = \mathbf{p}_{i+1}$ in world space. If $(\mathbf{n} \cdot (\mathbf{g}_{in} - \mathbf{g}_0))$ and $(\mathbf{n} \cdot (\mathbf{g}_{out} - \mathbf{g}_0))$ have opposite signs, the ray intersects the plane [S2].
+    *   Calculate the exact intersection point $\mathbf{g}^*$ using linear interpolation [S2].
+    *   Find the corresponding volume-space point $\mathbf{p}^*$ by solving $\phi(\mathbf{p}^*) - \mathbf{g}^* = 0$ using a root-finding algorithm [S2].
+    *   **Near-Clip Plane Check (Optional):** If defined, count ray-surface intersections; an odd count indicates the near plane is inside the volume [S2].
+    *   **Sampling:** Retrieve $V(\mathbf{p}_i)$ and compute $\mathbf{c}_i, \alpha_i$ using the transfer function [G].
+    *   **Compositing:** Update accumulators:
+        $$
+        \mathbf{C}_{acc} \leftarrow \mathbf{C}_{acc} + (1 - \alpha_{acc}) \cdot \mathbf{c}_i \cdot \alpha_i
+        $$
+        $$
+        \alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha_i
+        $$
+4.  **Output:** Set $\mathbf{C}_{out} = \mathbf{C}_{acc}$, $\alpha_{out} = \alpha_{acc}$ [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cutting_plane_integration(volume_data, volume_bounds, camera_origin, camera_dir, plane_height, plane_rot_x, plane_rot_y, render_above, transfer_fn, num_samples):
+    # 1. Define cutting plane geometry
+    z_plane = 200.0 - 400.0 * plane_height
+    g0 = [0.0, 0.0, z_plane]
+    n = [0.0, 0.0, 1.0]
+    
+    # Apply rotation around X axis
+    cos_x, sin_x = math.cos(plane_rot_x), math.sin(plane_rot_x)
+    n = [n[0], n[1]*cos_x - n[2]*sin_x, n[1]*sin_x + n[2]*cos_x]
+    
+    # Apply rotation around Y axis
+    rot_y = plane_rot_y
+    if render_above:
+        rot_y += math.pi
+    cos_y, sin_y = math.cos(rot_y), math.sin(rot_y)
+    n = [n[0]*cos_y + n[2]*sin_y, n[1], -n[0]*sin_y + n[2]*cos_y]
+    
+    # Normalize normal
+    norm = math.sqrt(n[0]**2 + n[1]**2 + n[2]**2)
+    n = [n[0]/norm, n[1]/norm, n[2]/norm]
+
+    # 2. Ray casting loop
+    c_acc = [0.0, 0.0, 0.0]
+    a_acc = 0.0
+
+    # Intersect ray with volume bounding box
+    t_near, t_far = intersect_aabb(camera_origin, camera_dir, volume_bounds)
+    if t_near > t_far:
+        return c_acc, a_acc
+
+    dt = (t_far - t_near) / num_samples
+
+    for i in range(num_samples):
+        t = t_near + i * dt
+        p_curr = [camera_origin[j] + camera_dir[j] * t for j in range(3)]
+        t_next = t + dt
+        p_next = [camera_origin[j] + camera_dir[j] * t_next for j in range(3)]
+
+        # Cutting plane check
+        val_curr = n[0]*(p_curr[0]-g0[0]) + n[1]*(p_curr[1]-g0[1]) + n[2]*(p_curr[2]-g0[2])
+        val_next = n[0]*(p_next[0]-g0[0]) + n[1]*(p_next[1]-g0[1]) + n[2]*(p_next[2]-g0[2])
+
+        if val_curr * val_next < 0:
+            # Intersection found, clip ray at intersection
+            t_int = t + dt * (val_curr / (val_curr - val_next))
+            t_far = t_int
+            break
+
+        # Sample volume (standard trilinear interpolation) [G]
+        v_val = sample_volume(volume_data, volume_bounds, p_curr)
+        color, alpha = transfer_fn(v_val)
+
+        # Compositing
+        c_acc = [c_acc[j] + (1.0 - a_acc) * color[j] * alpha for j in range(3)]
+        a_acc = a_acc + (1.0 - a_acc) * alpha
+
+    return c_acc, a_acc
+
+def intersect_aabb(origin, direction, bounds):
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < bounds[i*2] or origin[i] > bounds[i*2+1]:
+                return -1, -1
+        else:
+            t1 = (bounds[i*2] - origin[i]) / direction[i]
+            t2 = (bounds[i*2+1] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+    if t_max < t_min:
+        return -1, -1
+    return t_min, t_max
+
+def sample_volume(data, bounds, point):
+    # Maps point to voxel coordinates and performs trilinear interpolation [G]
+    return 0.5
+```
+
+**Parameters:**
+*   `planeHeight`: Normalized float $[0, 1]$ mapping to the Z-axis position [S1, unofficial].
+*   `planeRotX`, `planeRotY`: Rotation angles in degrees around the X and Y axes [S1, unofficial].
+*   `renderAbove`: Boolean flag that flips the plane 180° around Y when true [S1, unofficial].
+
+**Edge Cases:**
+*   **Precision:** Root finding for near-clip planes requires careful initialization (e.g., $x_0 = p_{in} + \epsilon \frac{p_{out} - p_{in}}{\|p_{out} - p_{in}\|_{L2}}$) to ensure convergence [S2].
+*   **Boundaries:** Large pixel frustums may cause ray-surface intersections at block boundaries; root finding methods remain pixel-accurate in these cases [S2].
+
+## Subtopics
+
+### [Region of Interest (ROI) Rendering](10737-region-of-interest-roi-rendering.md)
+Region of Interest (ROI) rendering is a technique to visualize internal features by defining a specific region and rendering only that portion of the dataset. It solves the problem where full opacity is obtained before reaching internal structures of interest, such as seeds within pulp, by isolating the target volume. Unlike standard clipping which often uses global planes, ROI rendering supports arbitrary geometric envelopes, masks, and intensity-based automatic detection.
+
+### Cutting and Near Clip Planes
+This variant uses a root-finding based method to realize cutting planes and near-clip planes during volume rendering compositing [S2]. For near-clip planes, since rendering is water-tight, an odd number of ray-surface intersections indicates the near plane is inside the volume [S2]. The intersection point $g^* \in G$ is determined using trivial formulas, and the corresponding point $p^* \in P$ is found by solving $\phi(p^*) - g^* = 0$ using a root-finding algorithm (e.g., Newton-Raphson) [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray $N$ and the number of pixels [G].
+*   **Memory Complexity:** Linear with respect to the volume size for storage [G].
+*   **Strengths:** Real-time interactivity and simple plane intersection test [S1, unofficial].
+*   **Limitations:** Limited to planar cuts; root finding requires proper initialization [S2].
+
+## Background
+The theoretical basis for pixel-accurate cutting and near-clipping using root-finding methods is described in research on isogeometric volume visualization [S2]. Implementation details regarding normalized height mapping and interactive plane manipulation are documented in unofficial projects [S1, unofficial].
+
+## Sources
+[S1] SubairProject1/Volume-Rendering-Visualization-Project, https://github.com/SubairProject1/Volume-Rendering-Visualization-Project, fetched 2026-10-26 (unofficial)
+[S2] Interactive Isogeometric Volume Visualization with Pixel-Accurate Geometry, https://doi.org/10.1109/tvcg.2015.2430337, fetched 2026-10-28

@@ -1,0 +1,89 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method mitigates reconstruction artifacts from transient objects (e.g., moving pedestrians or cars) by using a 2D visibility map to weight the photometric loss, preventing the model from reconstructing transient geometry [S1]. It sets itself apart from standard static scene reconstruction by explicitly segmenting dynamic regions to avoid floating artifacts or depth map inconsistencies [S1, S2]. It builds on [Visibility-Based Photometric Loss](2917-visibility-based-photometric-loss.md) by introducing an explicit visibility mask rather than relying solely on geometric consistency or fixed thresholds.
++This method mitigates reconstruction artifacts from transient objects (e.g., moving pedestrians or cars) by using a 2D visibility map to weight the photometric loss, preventing the model from reconstructing transient geometry [S1]. It sets itself apart from standard static scene reconstruction by explicitly segmenting dynamic regions to avoid floating artifacts or depth map inconsistencies [S1, S2]. It builds on [Visibility-Based Photometric Loss](2917-visibility-based-photometric-loss.md) by introducing an explicit visibility mask rather than relying solely on geometric consistency or fixed thresholds [S1].
+ 
+ ## How it works
+@@ -15,4 +15,5 @@
+ - **Reference Image ($I_{gt}$):** The ground-truth input image [S1].
+ - **Rendered Image ($I_r$):** The image rendered by the current model state [S1].
++- **U-Net Architecture:** Used for generating $V_M$ [S1].
+ 
+ **Numbered Steps:**
+@@ -42,41 +43,35 @@
+ ```python
+ def transient_object_handling_loss(I_gt, I_r, V_M, reg_weight=1.0):
+-    """
+-    Computes the weighted photometric loss and regularization loss for transient object handling.
+-    
+-    Args:
+-        I_gt: Reference image tensor (H, W, C) or (1, H, W, C).
+-        I_r: Rendered image tensor (H, W, C) or (1, H, W, C).
+-        V_M: Visibility map tensor (1, H, W). Values in [0, 1].
+-        reg_weight: Weight for the visibility map regularization loss.
+-        
+-    Returns:
+-        total_loss: Combined loss value.
+-        L_vm: Regularization loss value.
+-    """
+-    # Broadcast V_M to match I_gt/I_r dimensions for Hadamard product
+-    if len(V_M.shape) < len(I_gt.shape):
+-        V_M_expanded = V_M.repeat(1, 1, I_gt.shape[-1])
++    # I_gt, I_r: list of lists of lists of shape (H, W, C)
++    # V_M: list of lists of shape (1, H, W)
++    # reg_weight: scalar weight for regularization loss
++
++    # Broadcast V_M to match image channels for Hadamard product
++    if len(V_M) < len(I_gt):
++        V_M_expanded = [V_M for _ in range(I_gt[0][0])]
+     else:
+         V_M_expanded = V_M
+-        
++
+     # Compute weighted photometric error (L2 norm over pixels)
+-    weighted_diff = (I_r - I_gt) * V_M_expanded
+-    L_photometric = mean(weighted_diff ** 2)
++    weighted_diff = []
++    for h in range(len(I_gt)):
++        row_diff = []
++        for w in range(len(I_gt[0])):
++            pixel_diff = []
++            for c in range(len(I_gt[0][0])):
++                pixel_diff.append((I_gt[h][w][c] - I_r[h][w][c]) * V_M_expanded[h][w])
++            row_diff.append(pixel_diff)
++        weighted_diff.append(row_diff)
+     
++    L_photometric = sum(val**2 for row in weighted_diff for pixel in row for val in pixel) / len(weighted_diff)
++
+     # Compute regularization loss: L2 distance between V_M and ones
+-    ones_tensor = ones_like(V_M)
+-    L_vm = mean((V_M - ones_tensor) ** 2)
+-    
++    ones_tensor = [[1.0 for _ in range(len(V_M[0]))] for _ in range(len(V_M))]
++    L_vm = sum((V_M[h][w] - 1.0)**2 for h in range(len(V_M)) for w in range(len(V_M[0]))) / len(V_M)
++
+     # Combine losses
+     total_loss = L_photometric + reg_weight * L_vm
+-    
++
+     return total_loss, L_vm
+-
+-def mean(tensor):
+-    return sum(val for row in tensor for val in row.flatten()) / len(tensor.flatten())
+-
+-def ones_like(tensor):
+-    return [[1.0 for _ in range(tensor.shape[1])] for _ in range(tensor.shape[0])]
+ ```
+ 
+@@ -90,6 +85,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Adds the inference time of the U-Net or segmentation model for generating $V_M$ per training step. The loss computation itself is $O(H \times W)$ due to the Hadamard product and L2 norms [S1].
+-- **Memory Complexity:** Requires storing the visibility map $V_M$ of size $H \times W$ per image. The U-Net or segmentation model weights are also loaded into memory [S1].
++- **Time Complexity:** Adds the inference time of the U-Net or segmentation model for generating $V_M$ per training step [G]. The loss computation itself is $O(H \times W)$ due to the Hadamard product and L2 norms [G].
++- **Memory Complexity:** Requires storing the visibility map $V_M$ of size $H \times W$ per image [G]. The U-Net or segmentation model weights are also loaded into memory [G].
+ - **Measured Performance:** The method outperforms previous methods (including 3DGS) on PhotoTourism scenes (Brandenburg, Gate, Sacre Coeur, Trevi, Fountain) in terms of PSNR, SSIM, and LPIPS [S1].
+ - **Strengths:** Effectively reduces artifacts from moving objects (floating points) and improves generalization by preventing the reconstruction of non-static geometry [S1, S2].

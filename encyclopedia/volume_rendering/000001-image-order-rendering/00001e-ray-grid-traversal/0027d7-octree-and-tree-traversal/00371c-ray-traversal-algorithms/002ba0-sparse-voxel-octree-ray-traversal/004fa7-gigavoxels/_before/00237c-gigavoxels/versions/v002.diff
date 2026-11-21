@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset (e.g., 3D scans, hypertextured meshes, or fractals) with resolutions such as $8192^3$ or $16384^3$ [S1, unofficial].
+-*   **Output:** A rendered image at interactive rates (20-90 fps) [S1, unofficial].
++* Input: A volumetric dataset (e.g., 3D scans, hypertextured meshes, or fractals) with resolutions such as $8192^3$ or $16384^3$ [S1, unofficial].
++* Output: A rendered image at interactive rates (20-90 fps) [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -15,96 +15,81 @@
+ 
+ **Parameters:**
+-*   **Resolution:** Examples include $8192^3$ for 3D scans and $16384^3$ for hypertextured meshes [S1, unofficial].
+-*   **Quality/Performance Trade-off:** The system allows a trade-off between quality and performance, exploiting temporal coherence [S1, unofficial].
+-*   **Opacity Threshold:** Rays stop when a certain opacity level is reached [S1, unofficial].
++* Resolution: Examples include $8192^3$ for 3D scans and $16384^3$ for hypertextured meshes [S1, unofficial].
++* Quality/Performance Trade-off: The system allows a trade-off between quality and performance, exploiting temporal coherence [S1, unofficial].
++* Opacity Threshold: Rays stop when a certain opacity level is reached [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Ray Casting:** Cast rays from the eye through the pixel extent.
+-2.  **Ray-Guided Streaming:** Guide data production and streaming directly based on information extracted during rendering [S1, unofficial]. This involves loading only the necessary octree nodes into GPU memory based on the ray's path [S1, unofficial].
+-3.  **Adaptive Traversal:** Traverse the sparse octree. The resolution adapts continuously to the current view and occlusion information [S1, unofficial].
+-4.  **Mipmapping Filtering:** When traversing to larger steps (proportional to distance from the observer), read from the mipmap hierarchy. Reading from a mipmap delivers the integrated value of a small volume, approximating the cone integral defined by the eye and pixel extent [S1, unofficial].
+-5.  **Early Termination:** Stop rays when a certain opacity level is reached or when traversing empty space [S1, unofficial].
+-6.  **Procedural Enrichment:** (Optional) Create additional details through procedural methods to enrich the dataset [S1, unofficial].
++1. Ray Casting: Cast rays from the eye through the pixel extent [S1, unofficial].
++2. Ray-Guided Streaming: Guide data production and streaming directly based on information extracted during rendering [S1, unofficial]. This involves loading only the necessary octree nodes into GPU memory based on the ray's path [S1, unofficial].
++3. Adaptive Traversal: Traverse the sparse octree [S1, unofficial]. The resolution adapts continuously to the current view and occlusion information [S1, unofficial].
++4. Mipmapping Filtering: When traversing to larger steps (proportional to distance from the observer), read from the mipmap hierarchy [S1, unofficial]. Reading from a mipmap delivers the integrated value of a small volume, approximating the cone integral defined by the eye and pixel extent [S1, unofficial].
++5. Early Termination: Stop rays when a certain opacity level is reached or when traversing empty space [S1, unofficial].
++6. Procedural Enrichment: Create additional details through procedural methods to enrich the dataset [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_gigavoxels(camera, scene):
+-    # Initialize output buffer
+-    image = create_empty_image(camera.resolution)
++def render_gigavoxels(camera, scene, opacity_threshold=0.95):
++    height, width = camera.resolution
++    image = [[vec3(0.0) for _ in range(width)] for _ in range(height)]
+     
+-    for each pixel in image:
+-        ray = camera.generate_ray(pixel)
+-        accumulated_color = vec3(0.0)
+-        accumulated_opacity = 0.0
+-        
+-        # Ray-guided streaming: load nodes as needed
+-        node = scene.get_root_node()
+-        
+-        while not ray_terminated and node is not None:
+-            # Adaptive traversal: determine LOD based on view and occlusion
+-            # The structure adapts resolution continuously [S1, unofficial]
+-            child_nodes = node.get_children()
++    for py in range(height):
++        for px in range(width):
++            ray = camera.generate_ray(px, py)
++            accumulated_color = vec3(0.0)
++            accumulated_opacity = 0.0
++            ray_terminated = False
++            node = scene.get_root_node()
+             
+-            # Check for empty space or occlusion
+-            if node.is_empty():
+-                ray.step_forward(node.size)
+-                node = None
+-                continue
++            while not ray_terminated and node is not None:
++                if node.is_empty():
++                    ray.origin += ray.direction * node.size
++                    node = None
++                    continue
++                
++                next_node = find_intersecting_child(node, ray)
++                if next_node is None:
++                    ray.origin += ray.direction * node.size
++                    node = None
++                    continue
++                
++                distance = length(ray.origin - camera.position)
++                step_size = next_node.size
++                
++                if distance > threshold:
++                    volume_value = next_node.read_mipmap(ray.direction, ray.origin)
++                else:
++                    volume_value = next_node.read_voxel(ray.direction, ray.origin)
++                
++                alpha = volume_value.alpha
++                color = volume_value.color
++                weight = alpha * (1.0 - accumulated_opacity)
++                accumulated_color += color * weight
++                accumulated_opacity += weight
++                
++                if accumulated_opacity > opacity_threshold:
++                    ray_terminated = True
++                    break
++                
++                ray.origin += ray.direction * step_size
++                node = next_node
+             
+-            # Find intersecting child
+-            next_node = find_intersecting_child(node, ray)
+-            
+-            if next_node is None:
+-                ray.step_forward(node.size)
+-                node = None
+-                continue
+-            
+-            # Mipmapping filtering: if step size is large, use mipmap
+-            # Step size is proportional to distance from observer [S1, unofficial]
+-            if ray.distance_to_origin > threshold:
+-                # Read integrated value from mipmap
+-                # This approximates the cone integral [S1, unofficial]
+-                volume_value = next_node.read_mipmap(ray.direction, ray.origin)
+-            else:
+-                # Read raw voxel data
+-                volume_value = next_node.read_voxel(ray.direction, ray.origin)
+-            
+-            # Accumulate color and opacity
+-            # Standard volume rendering integration
+-            alpha = volume_value.alpha
+-            color = volume_value.color
+-            
+-            # Pre-multiplied alpha blending
+-            weight = alpha * (1.0 - accumulated_opacity)
+-            accumulated_color += color * weight
+-            accumulated_opacity += weight
+-            
+-            # Early termination based on opacity
+-            if accumulated_opacity > opacity_threshold:
+-                ray_terminated = True
+-                break
+-            
+-            # Advance ray
+-            ray.step_forward(next_node.size)
+-            node = next_node
+-            
+-        image[pixel] = accumulated_color
+-        
++            image[py][px] = accumulated_color
+     return image
+ ```
++*Note: `find_intersecting_child`, `read_mipmap`, `read_voxel`, `vec3`, and `length` are standard vector/math operations or octree traversal helpers [G].*
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Aliasing:** Appears because pixel value should be defined by integration along a cone, not just ray accumulation [S1, unofficial]. Mipmapping addresses this by smoothing results and allowing larger step sizes proportional to distance [S1, unofficial].
+-*   **Memory Budget:** The method respects the limited GPU memory budget by streaming only necessary data [S1, unofficial].
+-*   **Temporal Coherence:** The system exploits temporal coherence to maintain quality and performance [S1, unofficial].
++* Aliasing: Appears because pixel value should be defined by integration along a cone, not just ray accumulation [S1, unofficial]. Mipmapping addresses this by smoothing results and allowing larger step sizes proportional to distance [S1, unofficial].
++* Memory Budget: The method respects the limited GPU memory budget by streaming only necessary data [S1, unofficial].
++* Temporal Coherence: The system exploits temporal coherence to maintain quality and performance [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Performance:** 20-90 fps on current generation hardware [S1, unofficial].
+-*   **Memory:** Respects limited GPU memory budget by streaming data [S1, unofficial].
+-*   **Scalability:** Handles volumes exceeding GPU memory capacities, with resolutions up to $16384^3$ or theoretically infinite for fractals [S1, unofficial].
+-*   **Strengths:** Real-time to interactive rates, inherent anti-aliasing, adaptive resolution, efficient handling of "sparse-twice" data structures [S1, unofficial].
+-*   **Limitations:** Increases memory consumption due to mipmap hierarchy and makes tree updates more challenging [S1, unofficial].
+-*   **When to use:** When rendering large volumetric datasets (billions of voxels) on hardware with limited GPU memory, especially for computer graphics scenes with dense clusters in free space [S1, unofficial].
+-*   **When not to use:** When view-independent structures are sufficient, or when procedural content generation is not required [S1, unofficial].
++* Performance: 20-90 fps on current generation hardware [S1, unofficial].
++* Memory: Respects limited GPU memory budget by streaming data [S1, unofficial].
++* Scalability: Handles volumes exceeding GPU memory capacities, with resolutions up to $16384^3$ or theoretically infinite for fractals [S1, unofficial].
++* Strengths: Real-time to interactive rates, inherent anti-aliasing, adaptive resolution, efficient handling of "sparse-twice" data structures [S1, unofficial].
++* Limitations: Increases memory consumption due to mipmap hierarchy and makes tree updates more challenging [S1, unofficial].
++* When to use: When rendering large volumetric datasets (billions of voxels) on hardware with limited GPU memory, especially for computer graphics scenes with dense clusters in free space [S1, unofficial].
++* When not to use: When view-independent structures are sufficient, or when procedural content generation is not required [S1, unofficial].
+ 
+ ## Background

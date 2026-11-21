@@ -1,0 +1,112 @@
+# GPU Marching Cubes with Atomic Counter Emission
+
+Also called: atomic-counter MC, indirect-draw MC, r=mesh
+
+## Overview
+A real-time isosurface meshing technique that uses one compute thread per grid cell to classify density, reserve vertex slots via atomic addition on indirect draw arguments, and write vertices directly into a capped pool, avoiding prefix sums [S1, unofficial]. It sets itself apart from sibling methods like [Marching Cubes with Gaussian Deformation](3769-marching-cubes-with-gaussian-deformation.md) or [GPU Marching Cubes Terrain Pipeline with Indirect Rendering](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md) by eliminating the scan/compact phase entirely, using the indirect-draw argument buffer itself as the atomic counter to reserve output space [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Tent-blurred density grid (shared with volume/voxel modes) [S1, unofficial].
+*   Isosurface threshold parameter `?iso=` [S1, unofficial].
+*   Grid dimensions (e.g., $128^3$) [S1, unofficial].
+
+**Outputs:**
+*   A mesh rendered via `drawIndirect`, depth-tested against a raytraced scene background [S1, unofficial].
+
+**Data Structures:**
+1.  **Indirect Draw Args:** A buffer containing standard `drawIndirect` parameters (vertex count, instance count, first vertex, first instance). An overflow flag is stored in word 4 (offset 16 bytes past the standard 4-word structure) [S1, unofficial].
+2.  **Vertex Pool:** A buffer storing vertex positions and gradient normals. Size is capped at 1.5 million vertices (48 MB) [S1, unofficial]. Accessed via vertex pulling [S1, unofficial].
+3.  **MC Triangle Table:** Generated at load time rather than hardcoded. Created by deriving marching squares faces per cube, forming closed loops, and applying fan triangulation with a rotation-invariant ambiguity rule to ensure crack-free results [S1, unofficial].
+
+**Steps:**
+1.  **Dispatch:** Launch one compute thread per grid cell [S1, unofficial].
+2.  **Classification:** Each thread classifies the 8 corner densities of its cell against the `?iso=` threshold to determine the 256-case index [S1, unofficial].
+    *   *Pitfall:* `mcEmit` treats out-of-range lattice samples as density 0 to cap the isosurface against the walls [S1, unofficial].
+    *   *Pitfall:* Lattice 0 is treated as outside density (in addition to the high shell $c \ge GRID$) to cap the isosurface on all six walls. Blur bleed outside the walls (cells $2 \dots GRID-2$) is discarded [S1, unofficial].
+3.  **Edge Lookup:** Use the case index to look up the pre-generated triangle table to determine which edges are cut [S1, unofficial].
+4.  **Slot Reservation:** Reserve vertex slots in the indirect-draw argument buffer using `atomicAdd` [S1, unofficial].
+    *   *Pitfall:* The overflow flag is placed in args word 4, not `firstInstance`, because a non-zero `firstInstance` no-ops the indirect draw without the `indirect-first-instance` feature [S1, unofficial].
+5.  **Vertex Emission:** For each cut edge, compute the interpolated vertex position and the gradient normal [S1, unofficial].
+    *   The implementation caches interpolated position + normal per unique cut edge instead of recomputing per triangle-corner [S1, unofficial].
+    *   Write the vertex data (position and normal) into the 1.5M-vertex pool buffer [S1, unofficial].
+6.  **Finalize:** Run a finalize kernel with one thread to clamp the vertex count to the pool cap (1.5M) [S1, unofficial].
+    *   If the pre-clamp vertex count exceeds the cap, the finalize kernel raises an overflow flag in the indirect-draw args [S1, unofficial].
+    *   The count is clamped to the cap to ensure only whole triangles are drawn and no garbage is rendered [S1, unofficial].
+7.  **Render:** Render the mesh using `drawIndirect`, pulling vertices from the pool buffer [S1, unofficial].
+8.  **Shading:**
+    *   Depth-test the mesh against the raytraced scene background in the same pass [S1, unofficial].
+    *   Shade the mesh using Fresnel reflection over the analytic scene along one refracted ray [S1, unofficial].
+    *   Apply Beer-Lambert absorption using 6 interior density taps [S1, unofficial].
+    *   Add momentum foam effects [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Compute Shader: One thread per cell (thread_id = cell_index)
+
+# 1. Load corner densities
+# Note: Out-of-range samples are treated as density 0 [S1, unofficial]
+densities = [0.0] * 8
+for i in range(8):
+    corner_pos = get_cell_corner_position(thread_id, i)
+    densities[i] = sample_density(corner_pos)
+
+# 2. Classify cell
+case_index = 0
+for i in range(8):
+    if densities[i] >= iso_threshold:
+        case_index |= (1 << i)
+
+# 3. Look up cut edges from load-time generated table
+cut_edges = mc_table[case_index] # Returns list of edge indices
+
+# 4. Reserve slots in indirect-draw args buffer
+# The indirect-draw args buffer is stored in global memory
+# Word 0: vertex_count
+# Word 4: overflow_flag
+new_count = atomic_add(&indirect_draw_args[0], len(cut_edges) * 3) # 3 verts per triangle
+
+# 5. Emit vertices
+write_offset = new_count
+for edge_idx in cut_edges:
+    # Compute interpolated position and gradient normal
+    # Cache lookup for unique cut edges is implied by optimization [S1, unofficial]
+    pos, normal = interpolate_edge(edge_idx, densities)
+    
+    # Write to vertex pool
+    vertex_pool[write_offset].position = pos
+    vertex_pool[write_offset].normal = normal
+    write_offset += 1
+
+# Finalize Kernel: One thread total
+# Clamp vertex count to cap (1.5M)
+current_count = indirect_draw_args[0]
+if current_count > 1500000:
+    indirect_draw_args[0] = 1500000
+    indirect_draw_args[4] = 1 # Set overflow flag
+else:
+    indirect_draw_args[4] = 0 # Clear overflow flag
+```
+
+## Subtopics
+
+### Q-criterion Isosurface Extraction
+A technique to show vortex structures in a 3D view as a Q-criterion isosurface [S2, unofficial]. It is listed in the 3D spec's Out of scope section as a follow-up that needs its own spec [S2, unofficial]. FluidX3D skips compaction: each cell runs marching cubes on its $2\times2\times2$ Q stencil and emits its triangles directly [S2, unofficial]. Tiling the velocities in local memory cuts the loads per cell from 32 to 2.6 [S2, unofficial]. The WebGPU route computes Q into a scalar buffer once, then emits triangles with `atomicAdd` into a buffer drawn with `drawIndirect`, and binds it read-only in the vertex stage (noting that read-write storage is invisible to vertex shaders) [S2, unofficial]. The render cost competes with the solver for bandwidth, so the steps/s floor ($\ge 480$ at defaults on the M5) still has to hold [S2, unofficial]. Compared to classic WebGPU marching cubes (mark, scan, compact, emit) which takes 40.8–54.4 ms on an M2 Max for $256^3$ resolution, this method scales to 2M cells in roughly 5–7 ms, which is considered too much to spend every frame [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of grid cells, as it uses one thread per cell with no prefix sum or compaction phase [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for the density grid and vertex pool. The vertex pool is capped at 1.5 million vertices (48 MB) [S1, unofficial].
+*   **Measured Performance:** 4.12 ms/frame at $128^3$ resolution and $384^2$ screen size on M-series hardware [S1, unofficial].
+*   **Strengths:** Avoids the latency and complexity of prefix sums and compaction kernels required by other GPU MC methods [S1, unofficial]. Generates the MC triangle table at load time to ensure crack-free, rotation-invariant results without transcribing large constant tables [S1, unofficial].
+*   **Limitations:** The vertex pool is capped; if the isosurface is too complex, vertices are discarded (clamped), potentially causing visual artifacts or overflow flags [S1, unofficial]. WebGL2 falls back to the ssf (screen-space fluid) path for this renderer [S1, unofficial].
+*   **When to use:** Real-time visualization where performance is critical and the mesh complexity can be bounded by the vertex pool size [S1, unofficial].
+*   **When not to use:** When exact topological preservation is required for arbitrarily complex surfaces exceeding 1.5M vertices [S1, unofficial].
+
+## Background
+Originated in the 'waterfall' WebGL2 fluid simulation project as the `r=mesh` renderer [S1, unofficial]. The method was implemented by nikolai3d in Pull Request #17 to the `nikolai3d/waterfall` repository [S1, unofficial]. It was designed to provide a real-time isosurface mesh for MLS-MPM GPU fluid simulations, leveraging WebGPU features like `drawIndirect` and atomic operations [S1, unofficial]. The triangle table generation logic was developed to replace the classic 256x16 constant transcription with a load-time generated table based on marching squares faces and closed loops [S1, unofficial].
+
+## Sources
+[S1] Renderer: marching-cubes isosurface mesh (r=mesh, WebGPU), https://github.com/nikolai3d/waterfall/pull/17, fetched 2026-10-27 (unofficial)
+[S2] 3D: Q-criterion isosurface view, https://github.com/slowernet/cells/issues/14, fetched 2026-10-26 (unofficial)

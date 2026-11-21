@@ -1,0 +1,515 @@
+--- v004.md
++++ v005.md
+@@ -4,211 +4,330 @@
+ 
+ ## Overview
+-This configuration specifies the optimizer settings, learning rate schedule, and selective L2 regularization used in differentiable volume rendering training [S1][S2, unofficial]. It distinguishes itself by applying Adam with a staircase exponential decay schedule and masking L2 decay on positional encodings and appearance embeddings to prevent divergence [S2, unofficial].
++This configuration defines the standard training loop for neural radiance fields and implicit surface representations, combining the Adam optimizer with a staircase exponential learning rate schedule and selective L2 weight decay. It addresses the instability of training coordinate-based neural fields by providing robust convergence parameters, particularly for noisy real-world scan data or complex geometric priors [S2, unofficial]. It sets itself apart from generic optimization loops by explicitly integrating domain-specific augmentations and specific regularization techniques (like CVT for discretization stability) into the core training loop [S1][S2, unofficial].
+ 
+ ## How it works
+-The method configures the optimization loop by initializing specific optimizers for different parameter groups, defining a learning rate schedule, and applying selective L2 regularization during the update step [S1][S2, unofficial].
++The method initializes a scene representation and iteratively updates parameters using a composite optimizer setup. The core mechanism involves sampling rays, computing gradients via automatic differentiation, and applying parameter updates with specific learning rate schedules and regularization masks.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   `lr`: Initial learning rate scalar [S1][S2, unofficial].
+-    *   `params`: Dictionary of scene parameters (e.g., MLP weights, positional encodings, appearance embeddings) [S1][S2, unofficial].
+-    *   `loss`: Scalar loss value computed from the rendering equation [S1].
+-    *   `step`: Current optimization step index [S2, unofficial].
+-*   **Outputs:**
+-    *   `params`: Updated parameters after one optimization step [S2, unofficial].
++**Inputs:**
++*   Scene representation parameters (e.g., MLP weights for density and color, appearance embeddings) [S1][S2, unofficial].
++*   Camera poses and intrinsics [S1, S3].
++*   Target images (color and/or depth) [S1, S3].
++*   Hyperparameters: Initial learning rate ($lr$), decay rate, transition steps, and L2 regularization coefficient [S2, unofficial].
++
++**Outputs:**
++*   Optimized scene representation parameters [S1][S2, unofficial].
++*   Rendered images matching the targets [S1].
+ 
+ ### Data Structures
+-1.  **Optimizer Configuration (`opt_config`):**
+-    *   `lr_sch`: Learning rate schedule object [S2, unofficial].
+-    *   `optimizer_network`: Adam optimizer instance for network weights [S2, unofficial].
+-    *   `optimizer_ae`: Adam optimizer instance for appearance embeddings [S2, unofficial].
+-    *   `param_labels`: Dictionary mapping parameter names to optimizer targets [S2, unofficial].
+-        *   Layout: `{"nerf": "network", "bg": "network", "appearance_embeddings": "ae"}` [S2, unofficial].
+-    *   `mask`: Boolean mask dictating where L2 decay is applied [S2, unofficial].
+-        *   Layout: `{"nerf": {"density_mlp": True, "rgb_mlp": True, "position_encoder": False}, "bg": True, "appearance_embeddings": False}` [S2, unofficial].
+-    *   `weight_decay`: L2 regularization coefficient [S2, unofficial].
+-
+-2.  **Learning Rate Schedule (`optax.exponential_decay`):**
+-    *   `init_value`: `lr` [S2, unofficial].
++**Optimizer Configuration:**
++*   `param_labels`: A dictionary mapping parameter names to optimizer targets.
++    *   Layout: `{"nerf": "network", "bg": "network", "appearance_embeddings": "ae"}` [S2, unofficial].
++*   `mask`: A boolean mask dictating where L2 decay is applied.
++    *   Layout: `{"nerf": {"density_mlp": True, "rgb_mlp": True, "position_encoder": False}, "bg": True, "appearance_embeddings": False}` [S2, unofficial].
++*   `optimizer_network`: Adam optimizer instance for network weights [S2, unofficial].
++    *   Parameters: `learning_rate=lr_sch`, `b1=0.9`, `b2=0.99`, `eps=1e-15`, `eps_root=1e-15` [S2, unofficial].
++*   `optimizer_ae`: Adam optimizer instance for appearance embeddings [S2, unofficial].
++    *   Parameters: `learning_rate=1e-4`, `b1=0.9`, `b2=0.99`, `eps=1e-8`, `eps_root=0` [S2, unofficial].
++*   `combined_optimizer`: Multi-transform optimizer combining the above [S2, unofficial].
++    *   Mapping: `transforms={"network": optimizer_network, "ae": optimizer_ae}` [S2, unofficial].
++
++**Training State:**
++*   `lr_sch`: Learning rate schedule instance [S2, unofficial].
++    *   Parameters: `init_value=lr`, `transition_steps=10_000`, `decay_rate=1/3`, `staircase=True`, `transition_begin=10_000`, `end_value=lr/100` [S2, unofficial].
++*   `step`: Current optimization step counter [S2, unofficial].
++
++### Numbered Steps
++1.  **Initialization:**
++    *   Translate and scale the scene to lie within a $[-1, 1]^3$ bounding cube [S1].
++    *   Initialize the learning rate schedule with `staircase=True` [S2, unofficial].
++    *   Initialize the combined optimizer with the specified parameters [S2, unofficial].
++    *   Set the initial step counter to 0 [G].
++
++2.  **Ray Sampling:**
++    *   Randomly select $|P_b| = 1024$ rays per iteration [S1].
++    *   For each ray, compute sample points:
++        *   Fixed samples: $S'_f = 16$ [S1].
++        *   Variable samples: $S'_c$ is chosen such that there is on average one sample for every 1.5 cm of ray length [S1].
++    *   Apply positional encoding: 8 bands for point coordinates, 4 bands for view direction vector [S1].
++
++3.  **Forward Pass:**
++    *   Compute the radiance field values (density $\sigma$, color $\mathbf{c}$) for the sampled points using the current network parameters [S1].
++    *   Render the image using the standard emission-absorption model (see [Parent](5622-optimization-loops-and-training-procedures.md)) [S1].
++    *   If applicable, apply distortion correction using a 6-layer MLP (width 128) on 2D camera pixel space [S1].
++
++4.  **Loss Computation:**
++    *   Compute the loss between rendered and target images.
++    *   Loss weights: $\lambda_1 = 0.1$, $\lambda_2 = 10$, $\lambda_3 = 6 \times 10^3$ [S1].
++    *   For inverse rendering setups, use L2 loss [S3].
++
++5.  **Gradient Computation:**
++    *   Compute gradients with respect to the scene parameters using the specified loss weights and positional encodings [S1].
++    *   Use reverse-mode automatic differentiation [44-radiance-field-optimization.md].
++
++6.  **Parameter Update:**
++    *   Update the learning rate based on the current step:
++        *   If `staircase=True`, the learning rate is held constant for `transition_begin` steps, then decays by `decay_rate` every `transition_steps` steps [S2, unofficial].
++        *   Note: `staircase=True` combined with `transition_begin=10_000` delays the first learning rate drop to step 20,000 [S2, unofficial].
++    *   Apply the Adam update rule to the parameters, respecting the `mask` for L2 regularization:
++        *   L2 decay coefficient: $1 \times 10^{-6}$ [S2, unofficial].
++        *   L2 decay is applied to `density_mlp`, `rgb_mlp`, and `bg` parameters, but **not** to `position_encoder` or `appearance_embeddings` [S2, unofficial].
++    *   Increment the step counter.
++
++7.  **Iteration:**
++    *   Repeat steps 2-6 until convergence or maximum iterations reached.
++
++### Pseudocode
++```python
++import jax.numpy as jnp
++from jax import grad, value_and_grad
++
++def initialize_optimizer(lr, param_labels, mask):
++    """
++    Initialize the combined optimizer and learning rate schedule.
++    """
++    # Learning rate schedule: optax.exponential_decay
++    lr_sch = {
++        'init_value': lr,
++        'transition_steps': 10_000,
++        'decay_rate': 1/3,
++        'staircase': True,
++        'transition_begin': 10_000,
++        'end_value': lr / 100
++    }
++    
++    # Network optimizer: optax.adam
++    optimizer_network = {
++        'name': 'adam',
++        'learning_rate': lr_sch,
++        'b1': 0.9,
++        'b2': 0.99,
++        'eps': 1e-15,
++        'eps_root': 1e-15
++    }
++    
++    # Appearance embedding optimizer: optax.adam
++    optimizer_ae = {
++        'name': 'adam',
++        'learning_rate': 1e-4,
++        'b1': 0.9,
++        'b2': 0.99,
++        'eps': 1e-8,
++        'eps_root': 0
++    }
++    
++    # Combined optimizer: optax.multi_transform
++    combined_optimizer = {
++        'transforms': {
++            'network': optimizer_network,
++            'ae': optimizer_ae
++        },
++        'param_labels': param_labels
++    }
++    
++    return lr_sch, combined_optimizer
++
++def compute_learning_rate(step, lr_sch):
++    """
++    Compute the current learning rate based on the schedule.
++    """
++    if lr_sch['staircase']:
++        # Staircase decay: hold for transition_begin, then decay every transition_steps
++        if step < lr_sch['transition_begin']:
++            return lr_sch['init_value']
++        else:
++            # Number of decay steps
++            decay_steps = (step - lr_sch['transition_begin']) // lr_sch['transition_steps']
++            lr = lr_sch['init_value'] * (lr_sch['decay_rate'] ** decay_steps)
++            return max(lr, lr_sch['end_value'])
++    else:
++        # Continuous decay (not used in the specified config)
++        return lr_sch['init_value'] * (lr_sch['decay_rate'] ** (step / lr_sch['transition_steps']))
++
++def apply_l2_decay(params, mask, l2_coeff):
++    """
++    Apply L2 regularization to parameters based on the mask.
++    """
++    l2_loss = 0.0
++    for key, value in params.items():
++        if key in mask:
++            if isinstance(mask[key], bool):
++                if mask[key]:
++                    l2_loss += jnp.sum(value ** 2)
++            elif isinstance(mask[key], dict):
++                for sub_key, sub_mask in mask[key].items():
++                    if sub_mask:
++                        l2_loss += jnp.sum(params[key][sub_key] ** 2)
++    return l2_loss * l2_coeff
++
++def train_step(params, images, cameras, lr_sch, combined_optimizer, mask, l2_coeff):
++    """
++    Perform one training step.
++    """
++    step = combined_optimizer['step']
++    
++    # 1. Ray Sampling
++    rays = sample_rays(images, cameras, num_rays=1024)
++    
++    # 2. Forward Pass
++    rendered_images = render_rays(params, rays)
++    
++    # 3. Loss Computation
++    # Using L2 loss for inverse rendering [S3] or weighted loss [S1]
++    loss = jnp.mean((rendered_images - images) ** 2)
++    
++    # 4. Gradient Computation
++    grad_fn = value_and_grad(lambda p: loss + apply_l2_decay(p, mask, l2_coeff))
++    current_loss, grads = grad_fn(params)
++    
++    # 5. Parameter Update
++    current_lr = compute_learning_rate(step, lr_sch)
++    
++    # Apply Adam update (simplified representation)
++    # In practice, this would use the specific Adam implementation from optax
++    updated_params = adam_update(params, grads, current_lr, b1=0.9, b2=0.99, eps=1e-15)
++    
++    # 6. Increment Step
++    combined_optimizer['step'] = step + 1
++    
++    return updated_params, current_loss
++
++def sample_rays(images, cameras, num_rays):
++    """
++    Sample rays from the images and cameras.
++    """
++    # Randomly select num_rays
++    indices = jnp.random.choice(images.shape[0], num_rays, replace=False)
++    rays = []
++    for idx in indices:
++        # Generate ray from camera pose and pixel coordinates
++        ray = generate_ray(cameras[idx])
++        rays.append(ray)
++    return jnp.stack(rays)
++
++def render_rays(params, rays):
++    """
++    Render rays using the radiance field.
++    """
++    # Positional encoding
++    points = rays['points']
++    directions = rays['directions']
++    encoded_points = positional_encoding(points, num_bands=8)
++    encoded_directions = positional_encoding(directions, num_bands=4)
++    
++    # MLP forward pass
++    density, color = mlp_forward(params['network'], encoded_points, encoded_directions)
++    
++    # Volume rendering
++    rendered_colors = volume_rendering(density, color, rays['t_near'], rays['t_far'])
++    return rendered_colors
++
++def positional_encoding(x, num_bands):
++    """
++    Apply positional encoding.
++    """
++    # Sine and cosine functions
++    frequencies = 2 ** jnp.arange(num_bands) * jnp.pi
++    encoded = jnp.concatenate([jnp.sin(f * x) for f in frequencies], axis=-1)
++    return encoded
++
++def volume_rendering(density, color, t_near, t_far):
++    """
++    Standard emission-absorption volume rendering.
++    """
++    # Sample points along the ray
++    t_vals = jnp.linspace(t_near, t_far, num_samples)
++    deltas = t_vals[1:] - t_vals[:-1]
++    
++    # Transmittance
++    alpha = 1 - jnp.exp(-density * deltas)
++    T = jnp.cumprod(1 - alpha + 1e-10, axis=-1)
++    
++    # Color
++    weights = alpha * T
++    rendered_color = jnp.sum(weights * color, axis=-2)
++    return rendered_color
++```
++
++### Parameters
++*   **Optimizer:** Adam [S1, S3].
++*   **Initial Learning Rate ($lr$):** Passed to the optimizer factory [S2, unofficial]. Specific value: $5 \times 10^{-4}$ [S1].
++*   **Learning Rate Schedule:** Exponential decay [S1][S2, unofficial].
+     *   `transition_steps`: 10,000 [S2, unofficial].
+-    *   `decay_rate`: $1/3$ [S2, unofficial].
+-    *   `staircase`: `True` [S2, unofficial].
++    *   `decay_rate`: 1/3 [S2, unofficial].
++    *   `staircase`: True [S2, unofficial].
+     *   `transition_begin`: 10,000 [S2, unofficial].
+-    *   `end_value`: `lr / 100` [S2, unofficial].
+-
+-3.  **Adam Optimizer Parameters:**
++    *   `end_value`: $lr / 100$ [S2, unofficial].
++*   **Adam Parameters:**
+     *   `b1`: 0.9 [S2, unofficial].
+     *   `b2`: 0.99 [S2, unofficial].
+-    *   `eps`: $10^{-15}$ (for network) or $10^{-8}$ (for appearance embeddings) [S2, unofficial].
+-    *   `eps_root`: $10^{-15}$ (for network) or $0$ (for appearance embeddings) [S2, unofficial].
+-
+-### Numbered Steps
+-1.  **Initialize Learning Rate Schedule:** Create an exponential decay schedule with `init_value=lr`, `transition_steps=10_000`, `decay_rate=1/3`, `staircase=True`, `transition_begin=10_000`, and `end_value=lr/100` [S2, unofficial].
+-2.  **Initialize Network Optimizer:** Create an Adam optimizer with `learning_rate=lr_sch`, `b1=0.9`, `b2=0.99`, `eps=1e-15`, `eps_root=1e-15` [S2, unofficial].
+-3.  **Initialize Appearance Embedding Optimizer:** Create an Adam optimizer with `learning_rate=1e-4`, `b1=0.9`, `b2=0.99`, `eps=1e-8`, `eps_root=0` [S2, unofficial].
+-4.  **Combine Optimizers:** Use `optax.multi_transform` to map parameters to optimizers based on `param_labels` [S2, unofficial].
+-5.  **Compute Current Learning Rate:** Calculate `current_lr` using the schedule [S2, unofficial]. If `staircase=True`, use integer division for step calculation [S2, unofficial].
+-6.  **Compute Gradients:** Compute gradients of the loss with respect to all parameters [S1][S2, unofficial].
+-7.  **Apply Selective L2 Decay:** For each parameter group, apply L2 regularization only if the corresponding mask entry is `True` [S2, unofficial]. The update includes a term $-\lambda \cdot w$ where $\lambda = 10^{-6}$ [S2, unofficial].
+-8.  **Update Parameters:** Apply the Adam update rule using the computed gradients, current learning rate, and L2 decay terms [S2, unofficial].
+-
+-### Formulas
+-The Adam update for a parameter $w$ with gradient $g$ is:
+-$$
+-m_t = \beta_1 m_{t-1} + (1 - \beta_1) g_t
+-$$
+-$$
+-v_t = \beta_2 v_{t-1} + (1 - \beta_2) g_t^2
+-$$
+-$$
+-\hat{m}_t = \frac{m_t}{1 - \beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1 - \beta_2^t}
+-$$
+-$$
+-w_{t+1} = w_t - \eta_t \cdot \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} - \lambda \cdot w_t \cdot \mathbb{I}_{\text{mask}}
+-$$
+-where $\eta_t$ is the current learning rate, $\lambda = 10^{-6}$ is the weight decay, and $\mathbb{I}_{\text{mask}}$ is 1 if the parameter is masked for decay, 0 otherwise [S2, unofficial].
+-
+-The learning rate schedule is:
+-$$
+-\eta_t = \max\left(\text{end\_value}, \text{init\_value} \cdot \text{decay\_rate}^{\lfloor \frac{t - \text{transition\_begin}}{\text{transition\_steps}} \rfloor}\right)
+-$$
+-if `staircase=True`, otherwise continuous [S2, unofficial].
+-
+-### Parameters
+-*   `lr`: Initial learning rate [S1]. Typical value: $5 \times 10^{-4}$ [S1].
+-*   `transition_steps`: 10,000 [S2, unofficial].
+-*   `decay_rate`: $1/3$ [S2, unofficial].
+-*   `transition_begin`: 10,000 [S2, unofficial].
+-*   `end_value`: `lr / 100` [S2, unofficial].
+-*   `weight_decay`: $10^{-6}$ [S2, unofficial].
+-*   `b1`: 0.9 [S2, unofficial].
+-*   `b2`: 0.99 [S2, unofficial].
+-*   `eps`: $10^{-15}$ (network), $10^{-8}$ (appearance) [S2, unofficial].
+-*   `eps_root`: $10^{-15}$ (network), $0$ (appearance) [S2, unofficial].
++    *   `eps`: $1 \times 10^{-15}$ [S2, unofficial].
++    *   `eps_root`: $1 \times 10^{-15}$ [S2, unofficial].
++*   **Appearance Embedding Optimizer:**
++    *   `learning_rate`: $1 \times 10^{-4}$ [S2, unofficial].
++    *   `eps`: $1 \times 10^{-8}$ [S2, unofficial].
++    *   `eps_root`: 0 [S2, unofficial].
++*   **L2 Regularization:**
++    *   Coefficient: $1 \times 10^{-6}$ [S2, unofficial].
++    *   Applied to: `density_mlp`, `rgb_mlp`, `bg` [S2, unofficial].
++    *   Not applied to: `position_encoder`, `appearance_embeddings` [S2, unofficial].
++*   **Ray Sampling:**
++    *   Number of rays per iteration: 1024 [S1].
++    *   Fixed samples: 16 [S1].
++    *   Variable samples: 1 sample per 1.5 cm of ray length [S1].
++*   **Positional Encoding:**
++    *   Point coordinates: 8 bands [S1].
++    *   View direction: 4 bands [S1].
++*   **Loss Weights:**
++    *   $\lambda_1 = 0.1$ [S1].
++    *   $\lambda_2 = 10$ [S1].
++    *   $\lambda_3 = 6 \times 10^3$ [S1].
++*   **Distortion Correction:**
++    *   6-layer MLP, width 128 [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Delayed Decay:** `staircase=True` combined with `transition_begin=10_000` delays the first learning rate drop to step 20,000, as the initial LR is held for the first 10k steps before the staircase division triggers [S2, unofficial].
+-*   **Divergence Risk:** Applying L2 decay to position encoders or appearance embeddings is explicitly disabled to prevent divergence or suboptimal convergence during long training runs [S2, unofficial].
+-*   **Precision:** Use `eps_root=0` for appearance embeddings to avoid numerical instability when gradients are small [S2, unofficial].
+-
+-### Pseudocode
+-```python
+-import math
+-
+-def initialize_optimizer(lr, param_labels, mask):
+-    init_value = lr
+-    transition_steps = 10000
+-    decay_rate = 1.0 / 3.0
+-    staircase = True
+-    transition_begin = 10000
+-    end_value = lr / 100.0
+-    b1 = 0.9
+-    b2 = 0.99
+-    eps_network = 1e-15
+-    eps_root_network = 1e-15
+-    eps_ae = 1e-8
+-    eps_root_ae = 0.0
+-    weight_decay = 1e-6
+-    return {
+-        'init_value': init_value, 'transition_steps': transition_steps,
+-        'decay_rate': decay_rate, 'staircase': staircase,
+-        'transition_begin': transition_begin, 'end_value': end_value,
+-        'b1': b1, 'b2': b2, 'eps_network': eps_network,
+-        'eps_root_network': eps_root_network, 'eps_ae': eps_ae,
+-        'eps_root_ae': eps_root_ae, 'weight_decay': weight_decay,
+-        'param_labels': param_labels, 'mask': mask
+-    }
+-
+-def compute_learning_rate(step, config):
+-    init_value = config['init_value']
+-    transition_steps = config['transition_steps']
+-    decay_rate = config['decay_rate']
+-    staircase = config['staircase']
+-    transition_begin = config['transition_begin']
+-    end_value = config['end_value']
+-    if staircase:
+-        exponent = max(0, (step - transition_begin) // transition_steps)
+-    else:
+-        exponent = max(0, (step - transition_begin) / transition_steps)
+-    lr = init_value * (decay_rate ** exponent)
+-    return max(lr, end_value)
+-
+-def check_mask_decay(param_name, mask):
+-    if param_name in mask:
+-        val = mask[param_name]
+-        if isinstance(val, bool):
+-            return val
+-        if isinstance(val, dict):
+-            for key, enabled in val.items():
+-                if key in param_name and enabled:
+-                    return True
+-    return False
+-
+-def apply_adam_update(params, grads, step, config, m=None, v=None):
+-    b1 = config['b1']
+-    b2 = config['b2']
+-    weight_decay = config['weight_decay']
+-    param_labels = config['param_labels']
+-    mask = config['mask']
+-    lr = compute_learning_rate(step, config)
+-    if m is None:
+-        m = {k: 0.0 for k in params}
+-    if v is None:
+-        v = {k: 0.0 for k in params}
+-    updated_params = {}
+-    for key in params:
+-        p = params[key]
+-        g = grads[key]
+-        label = param_labels.get(key, 'network')
+-        eps = config['eps_ae'] if label == 'ae' else config['eps_network']
+-        eps_root = config['eps_root_ae'] if label == 'ae' else config['eps_root_network']
+-        m[key] = b1 * m[key] + (1 - b1) * g
+-        v[key] = b2 * v[key] + (1 - b2) * g**2
+-        m_hat = m[key] / (1 - b1**step)
+-        v_hat = v[key] / (1 - b2**step)
+-        update = m_hat / (math.sqrt(v_hat) + eps)
+-        should_decay = check_mask_decay(key, mask)
+-        if should_decay:
+-            update += weight_decay * p
+-        updated_params[key] = p - lr * update
+-    return updated_params, m, v
+-
+-def optimize_step(params, grads, step, config):
+-    new_params, m, v = apply_adam_update(params, grads, step, config)
+-    return new_params, m, v
+-```
++*   **Learning Rate Schedule Delay:** `staircase=True` combined with `transition_begin=10_000` delays the first learning rate drop to step 20,000, as the initial LR is held for the first 10k steps before the staircase division triggers [S2, unofficial].
++*   **L2 Decay on Encodings:** Applying L2 decay to position encoders or appearance embeddings is explicitly disabled to prevent divergence or suboptimal convergence during long training runs [S2, unofficial].
++*   **Numerical Stability:** Small epsilon values ($1 \times 10^{-15}$) are used in Adam to prevent division by zero in the adaptive learning rate calculation [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Gradient Descent Solver](3280-gradient-descent-solver.md)
+-The Gradient Descent Solver is a matrix-free optimization method used to update voxel grid parameters in differentiable volume rendering, specifically for computing optimal transfer functions. It solves the problem of ill-conditioned linear systems by providing stable behavior for large or nearly rank-deficient problems, serving as a robust alternative to direct solvers like CGLS. It distinguishes itself from its siblings by supporting both constant learning rates and the Adam optimizer, while offering a choice between $l_2$-norm (least squares) and $l_1$-norm (least absolute deviations) loss functions.
++The Gradient Descent Solver is a matrix-free optimization method used to update voxel grid parameters in differentiable volume rendering, such as in DiffVox. It supports both constant update rates and the Adam optimizer, providing stable behavior for ill-conditioned systems. It distinguishes itself from second-order methods like [Newton's Method](6442-newton-s-method.md) by avoiding Hessian computation, and from direct least-squares solvers like [CGLS Solver](3285-cgls-solver-conjugate-gradient-least-squares.md) by minimizing the residual via iterative gradient steps rather than solving normal equations directly.
++
++### [BFGS Solver with Moreau Envelope](3781-bfgs-solver-with-moreau-envelope.md)
++This method solves inverse problems, specifically tomographic reconstruction, by minimizing a composite objective function consisting of a data fidelity term and a regularizer. It sets itself apart by using the BFGS quasi-Newton algorithm to handle the non-smooth L1 regularization via its Moreau envelope, providing a differentiable approximation that allows second-order optimization steps. This contrasts with first-order Gradient Descent solvers and avoids the explicit projection steps required by constrained material solvers.
+ 
+ ### [Training Protocol](4528-training-protocol.md)
+-The Training Protocol defines the standard optimization procedure for neural networks in volume rendering, encompassing optimizer settings, learning rate scheduling, and data augmentation strategies. It addresses the problem of stabilizing gradient descent and preventing convergence failure during the reconstruction of implicit fields or radiance fields from noisy or sparse inputs. It differs from general optimization loops by explicitly integrating specific regularization priors (such as density priors) and staged training phases (such as pilot networks) to handle early-stage feature integration issues.
+-
+-#### BFGS Solver with Moreau Envelope
+-This variant uses the BFGS solver with a Moreau envelope for regularization [S3, unofficial]. It computes the operator norm using `odl.power_method_opnorm`, initializes the Hessian inverse estimate as `0.5 / opnorm ** 2`, and defines the objective as the sum of L2 data discrepancy and a smoothed L1 regularizer [S3, unofficial]. The smoothing parameter `sigma` is 0.03, max iterations are 200, and 10 vectors are stored for limited memory BFGS [S3, unofficial]. A pitfall is that the FBP pseudoinverse must use the 'Hann' filter [S3, unofficial].
+-
+-#### Inverse Rendering Optimization Setup
+-This setup uses Adam with L2 loss for inverse rendering of implicit surfaces [S4]. It uses 8 views, a batch size of 2, and runs for 30-90 minutes (64-256 epochs) on an NVIDIA RTX 4090 [S4].
+-
+-#### Euclidean Projection for Material Constraints
+-After each Adam update step for material parameters, a Euclidean projection onto the RGB cube $[0,1]^3$ is applied component-wise to ensure physical color values remain valid [S5]. The projection is $\Pi_{[0,1]^3}(c_i) = \max(0, \min(1, c_i))$ for each channel $c_i \in \{r, g, b\}$ [S5]. Initial albedo values are drawn uniformly at random from $[0,1]^3$ [S5].
++The Training Protocol defines the standard optimization procedure for neural networks in differentiable volume rendering, encompassing optimizer settings, learning rate scheduling, and data augmentation strategies. It addresses the instability of training coordinate-based neural fields by providing a robust configuration for convergence, particularly when dealing with noisy real-world scan data or complex geometric priors. It sets itself apart from generic optimization loops by explicitly integrating domain-specific augmentations (such as Gaussian noise for point clouds) and specific regularization techniques (like CVT for discretization stability) into the core training loop.
++
++### [Euclidean Projection for Material Constraints](7899-euclidean-projection-for-material-constraints.md)
++This method enforces physical validity on material parameters during differentiable rendering optimization by projecting updated values back into their feasible domain after each optimizer step. It specifically addresses the problem of unconstrained gradient updates (e.g., from Adam) driving color or BSDF parameters outside physically plausible ranges, which causes numerical instability or non-physical reflectance. It differs from its siblings by being a post-update constraint enforcement mechanism rather than a solver or training schedule; it builds on [Optimization Configuration (Adam + Exponential Decay + Selective L2)](2133-optimization-configuration-adam-exponential-decay-selective-.md) by applying a hard boundary check after the parameter update.
++
++### Inverse Rendering Optimization Setup
++*   **Optimizer:** Adam [Kingma and Ba 2014] [S3].
++*   **Loss Function:** L2 loss [S3].
++*   **Number of Views:** 8 [S3].
++*   **Batch Size:** 2 [S3].
++*   **Runtime:** 30 to 90 minutes per optimization, typically 64 to 256 epochs [S3].
++*   **Hardware:** NVIDIA RTX 4090 GPU [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The Adam optimizer has $O(1)$ per parameter per step [G]. The exponential decay schedule is $O(1)$ to compute [G]. Total time per step is linear in the number of parameters [G].
+-*   **Memory Complexity:** Adam requires storing two momentum buffers per parameter [G].
+-*   **Measured Performance:** Convergence takes 9 to 13 hours on a single NVIDIA RTX 3090 GPU for typical scenes [S1]. Inverse rendering optimizations take 30 to 90 minutes on an NVIDIA RTX 4090 [S4].
+-*   **Strengths:** Stable convergence for ill-conditioned problems [G]. Selective L2 decay prevents over-regularization of encodings [S2, unofficial]. Delayed decay allows initial exploration [S2, unofficial].
+-*   **When to Use:** Standard training for neural radiance fields and implicit volume representations [S1][S2, unofficial].
+-*   **When Not to Use:** When memory is extremely constrained (use SGD) [G]. When position encodings need regularization (disable mask) [S2, unofficial].
++*   **Time Complexity:** Convergence time is between 9 and 13 hours on a single NVIDIA RTX 3090 GPU, depending on scene size [S1]. For inverse rendering setups, runtime is typically 30 to 90 minutes per optimization [S3].
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Robust convergence for coordinate-based neural fields; stable behavior for ill-conditioned systems; explicit handling of domain-specific augmentations and regularization [S1][S2, unofficial].
++*   **Limitations:** High memory usage for reverse-mode AD if not optimized; sensitive to learning rate schedule parameters [S2, unofficial].
++*   **When to Use:** Standard training for neural radiance fields and implicit surface representations; noisy real-world scan data; complex geometric priors [S1][S2, unofficial].
++*   **When Not to Use:** When second-order methods are required for faster convergence; when constrained optimization is needed [S2, unofficial].
+ 
+ ## Background
+-This configuration originates from implementations in differentiable volume rendering and inverse rendering pipelines [S1][S2, unofficial][S4]. It combines the Adam optimizer with exponential learning rate decay and selective L2 regularization [S1][S2, unofficial]. The specific parameters (e.g., $5 \times 10^{-4}$ LR, $10^{-1}$ decay over $2.5 \times 10^5$ iterations) are from [S1], while the staircase decay and selective mask are from [S2, unofficial]. The method is widely used in differentiable volume rendering for its stability and ease of implementation [S1][S2, unofficial].
++*   **Origin:** The Adam optimizer was introduced by Kingma and Ba in 2014 [S3]. The specific configuration of Adam with exponential decay and selective L2 regularization is used in various neural radiance field and implicit surface reconstruction methods [S1][S2, unofficial][S3].
++*   **History and Development:** The method has been widely adopted in differentiable volume rendering due to its effectiveness in training large neural networks [S1][S2, unofficial].
++*   **Usage:** Used in neural RGB-D surface reconstruction [S1], JAX-based neural graphics primitives [S2, unofficial], and path-space differentiable rendering of implicit surfaces [S3].
+ 
+ ## Sources
+ [S1] Neural RGB-D Surface Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00619, fetched 2026-10-26
+ [S2] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
+-[S3] adler-j/learned_gradient_tomography, https://github.com/adler-j/learned_gradient_tomography, fetched 2026-10-27 (unofficial)
+-[S4] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30
+-[S5] Optimizing 3D Scene Reconstruction with Differentiable Ray Tracing, https://doi.org/10.31224/5014, fetched 2026-10-29+[S3] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30

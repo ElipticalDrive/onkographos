@@ -1,0 +1,40 @@
+# Light Field and Lumigraph Methods
+
+Also called: Light Field Rendering, Lumigraph Rendering
+
+## Overview
+Light Field and Lumigraph Methods synthesize novel views by leveraging the dense sampling of light rays from multiple viewpoints, either through explicit discretization of the light field or by optimizing implicit neural representations of geometry and appearance. They differ from global implicit field methods like [Neural Radiance Fields](4972-neural-radiance-fields.md) by often relying on explicit multi-plane structures or unstructured texture blending to handle view-dependent effects and real-time rasterization, rather than pure volumetric ray marching through a single dense grid [1124-local-light-field-fusion.md][7369-neural-lumigraph-rendering.md].
+
+## Shared principles
+All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps [44-radiance-field-optimization.md]. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses) [44-radiance-field-optimization.md].
+
+The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [44-radiance-field-optimization.md]:
+
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+$$
+
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [44-radiance-field-optimization.md].
+
+Differentiation strategies fall into three main categories [44-radiance-field-optimization.md]:
+1. **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [44-radiance-field-optimization.md].
+2. **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [44-radiance-field-optimization.md].
+3. **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [44-radiance-field-optimization.md].
+
+## Subtopics
+
+### [Local Light Field Fusion](1124-local-light-field-fusion.md)
+Local Light Field Fusion (LLFF) is a method designed to produce photorealistic novel views for well-sampled, forward-facing scenes by predicting a discretized frustum-sampled RGB$\alpha$ grid (Multiplane Image or MPI) for each input view [1124-local-light-field-fusion.md]. It differs from its siblings, such as [Neural Lumigraph Rendering](7369-neural-lumigraph-rendering.md), by explicitly optimizing a separate scene representation (the MPI) per input image rather than learning a global implicit function, trading storage efficiency for rapid processing times [1124-local-light-field-fusion.md].
+
+### [Neural Lumigraph Rendering](7369-neural-lumigraph-rendering.md)
+Neural Lumigraph Rendering (NLR) is a neural rendering framework that jointly optimizes an implicit signed distance function (SDF) for shape and a radiance field for appearance, supervised exclusively by posed 2D images [7369-neural-lumigraph-rendering.md]. It enables the export of view-dependent textured meshes for real-time rasterization, achieving rendering rates approximately 10 times higher than NeRF while maintaining comparable state-of-the-art image quality [7369-neural-lumigraph-rendering.md]. Unlike standard neural volume rendering which outputs images via ray marching, NLR converts the learned implicit representation into an explicit triangular mesh and projective textures, leveraging unstructured lumigraph rendering to preserve view-dependent effects in a traditional graphics pipeline [7369-neural-lumigraph-rendering.md].
+
+### Light Field Representation
+#### definition
+- A technique to generate high-quality light field representation and integrate it into the GPU-based raycasting pipeline to provide novice audiences access to interactive volume renditions [S1].
+
+## Background
+The concept of light fields was introduced to capture the 4D plenoptic function, allowing for novel view synthesis from sparse or dense camera arrays. Early implementations focused on interpolation of captured light fields. In the context of volume rendering, light field techniques have been adapted to handle volumetric data, providing interactive capabilities for novice users by integrating high-quality light field representations into GPU-based raycasting pipelines [S1].
+
+## Sources
+[S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

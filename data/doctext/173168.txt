@@ -1,0 +1,1937 @@
+# Model Voxelizer
+
+A 3D model voxelization tool that converts mesh models into voxel representations. This application allows you to import 3D models, convert them to voxels with adjustable resolution, edit the voxel structure, and export the result as an OBJ file.
+
+## Features
+
+- Import 3D models in various formats (OBJ, FBX, etc.) using Assimp
+- Convert models to voxel representation using octree spatial partitioning
+- Adjust voxelization detail level (octree depth)
+- Interactive camera controls for model inspection
+- Edit mode for adding and removing individual voxels
+- Export voxelized models as OBJ files
+
+## Usage Guide
+
+### Navigation
+
+- **Left Mouse Button + Drag**: Rotate camera
+- **Right Mouse Button + Drag**: Pan camera
+- **Scroll Wheel**: Zoom in/out
+
+### Rendering Modes
+
+- **1**: Display model only
+- **2**: Display voxels only
+- **3**: Display both model and voxels (default)
+
+### Voxel Control
+
+- **+/=**: Increase octree depth (more detailed voxelization)
+- **-**: Decrease octree depth (less detailed voxelization)
+- **E**: Toggle edit mode (add/remove voxels)
+  - In edit mode: Left click to remove voxel
+  - In edit mode: Right click to add voxel
+
+### Export
+
+- **O**: Export voxelized model as OBJ file
+
+### Exit
+
+- **ESC**: Exit application
+
+### include/camera.h
+```
+#pragma once
+
+#include <glm/glm.hpp>
+#include <GL/glew.h>
+#include <glm/gtc/matrix_transform.hpp>
+
+class Camera
+{
+public:
+  Camera(float aspectRatio)
+      : position(0.0f, 0.0f, 3.0f),
+        target(0.0f, 0.0f, 0.0f),
+        up(0.0f, 1.0f, 0.0f),
+        worldUp(0.0f, 1.0f, 0.0f),
+        yaw(-90.0f),
+        pitch(0.0f),
+        zoomLevel(45.0f),
+        aspectRatio(aspectRatio)
+  {
+    updateCameraVectors();
+  }
+
+  void setAspectRatio(float ratio)
+  {
+    aspectRatio = ratio;
+  }
+
+  void rotate(float xoffset, float yoffset)
+  {
+    xoffset *= 0.2f;
+    yoffset *= -0.2f;
+
+    yaw += xoffset;
+    pitch += yoffset;
+
+    if (pitch > 89.0f)
+      pitch = 89.0f;
+    if (pitch < -89.0f)
+      pitch = -89.0f;
+
+    updatePosition();
+  }
+
+  void pan(float xoffset, float yoffset)
+  {
+    xoffset *= -0.005f;
+    yoffset *= 0.005f;
+
+    glm::vec3 movement = right * xoffset + up * yoffset;
+    position += movement;
+    target += movement;
+  }
+
+  void zoom(float yoffset)
+  {
+    zoomLevel -= yoffset * 2.0f;
+    if (zoomLevel < 1.0f)
+      zoomLevel = 1.0f;
+    if (zoomLevel > 45.0f)
+      zoomLevel = 45.0f;
+
+    float distance = glm::length(position - target);
+    distance -= yoffset * 0.1f * distance;
+    if (distance < 0.1f)
+      distance = 0.1f;
+
+    position = target - front * distance;
+  }
+
+  void applyViewMatrix() const
+  {
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    gluLookAt(
+        position.x, position.y, position.z,
+        target.x, target.y, target.z,
+        up.x, up.y, up.z);
+  }
+
+  void applyProjectionMatrix() const
+  {
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(zoomLevel, aspectRatio, 0.1f, 100.0f);
+  }
+
+  // Get ray from camera position through screen coordinates
+  void getRay(float screenX, float screenY, glm::vec3& rayOrigin, glm::vec3& rayDir) const
+  {
+    // Convert screen coordinates to normalized device coordinates (NDC)
+    float x = (2.0f * screenX) / width - 1.0f;
+    float y = 1.0f - (2.0f * screenY) / height;
+    
+    // Get perspective projection and view matrices
+    glm::mat4 projection = glm::perspective(glm::radians(zoomLevel), aspectRatio, 0.1f, 100.0f);
+    glm::mat4 view = glm::lookAt(position, target, up);
+    
+    // Calculate inverse matrices
+    glm::mat4 invProjection = glm::inverse(projection);
+    glm::mat4 invView = glm::inverse(view);
+    
+    // Calculate ray in world space
+    glm::vec4 rayClip = glm::vec4(x, y, -1.0f, 1.0f);
+    glm::vec4 rayEye = invProjection * rayClip;
+    rayEye = glm::vec4(rayEye.x, rayEye.y, -1.0f, 0.0f);
+    glm::vec4 rayWorld = invView * rayEye;
+    
+    rayOrigin = position;
+    rayDir = glm::normalize(glm::vec3(rayWorld));
+  }
+
+  void setScreenSize(int width, int height)
+  {
+    this->width = width;
+    this->height = height;
+    aspectRatio = static_cast<float>(width) / static_cast<float>(height);
+  }
+
+private:
+  glm::vec3 position;
+  glm::vec3 target;
+  glm::vec3 front;
+  glm::vec3 up;
+  glm::vec3 right;
+  glm::vec3 worldUp;
+
+  float yaw;
+  float pitch;
+  float zoomLevel;
+  float aspectRatio;
+  int width = 800;
+  int height = 600;
+
+  void updateCameraVectors()
+  {
+    front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
+    front.y = sin(glm::radians(pitch));
+    front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
+    front = glm::normalize(front);
+
+    right = glm::normalize(glm::cross(front, worldUp));
+    up = glm::normalize(glm::cross(right, front));
+  }
+
+  void updatePosition()
+  {
+    updateCameraVectors();
+
+    float distance = glm::length(position - target);
+    position = target - front * distance;
+  }
+};
+```
+
+### include/input.h
+```
+#pragma once
+
+#include "camera.h"
+#include "renderer.h"
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <string>
+
+class InputHandler
+{
+public:
+  InputHandler(Camera &camera, Renderer &renderer, const std::string &modelPath)
+      : camera(camera), renderer(renderer), modelPath(modelPath),
+        leftMousePressed(false), rightMousePressed(false),
+        lastX(0.0f), lastY(0.0f), firstMouse(true), editMode(false) {}
+
+  void setCallbacks(GLFWwindow *window)
+  {
+    glfwSetWindowUserPointer(window, this);
+
+    glfwSetCursorPosCallback(window, [](GLFWwindow *window, double xpos, double ypos)
+                             {
+            InputHandler* handler = static_cast<InputHandler*>(glfwGetWindowUserPointer(window));
+            if (handler) handler->mouseCallback(xpos, ypos); });
+
+    glfwSetMouseButtonCallback(window, [](GLFWwindow *window, int button, int action, int mods)
+                               {
+            InputHandler* handler = static_cast<InputHandler*>(glfwGetWindowUserPointer(window));
+            if (handler) handler->mouseButtonCallback(button, action); });
+
+    glfwSetScrollCallback(window, [](GLFWwindow *window, double xoffset, double yoffset)
+                          {
+            InputHandler* handler = static_cast<InputHandler*>(glfwGetWindowUserPointer(window));
+            if (handler) handler->scrollCallback(xoffset, yoffset); });
+
+    glfwSetKeyCallback(window, [](GLFWwindow *window, int key, int scancode, int action, int mods)
+                       {
+            InputHandler* handler = static_cast<InputHandler*>(glfwGetWindowUserPointer(window));
+            if (handler) handler->keyCallback(key, action); });
+
+    glfwSetFramebufferSizeCallback(window, [](GLFWwindow *window, int width, int height)
+                                   {
+            InputHandler* handler = static_cast<InputHandler*>(glfwGetWindowUserPointer(window));
+            if (handler) handler->framebufferSizeCallback(width, height); });
+  }
+
+private:
+  Camera &camera;
+  Renderer &renderer;
+  std::string modelPath;
+  bool leftMousePressed;
+  bool rightMousePressed;
+  float lastX, lastY;
+  bool firstMouse;
+  bool editMode;
+
+  void mouseCallback(double xpos, double ypos)
+  {
+    if (firstMouse)
+    {
+      lastX = static_cast<float>(xpos);
+      lastY = static_cast<float>(ypos);
+      firstMouse = false;
+    }
+
+    float xoffset = static_cast<float>(xpos) - lastX;
+    float yoffset = static_cast<float>(ypos) - lastY;
+
+    lastX = static_cast<float>(xpos);
+    lastY = static_cast<float>(ypos);
+
+    // Update hovered voxel in edit mode
+    if (editMode) {
+        glm::vec3 rayOrigin, rayDir;
+        camera.getRay(lastX, lastY, rayOrigin, rayDir);
+        renderer.updateHoveredVoxel(rayOrigin, rayDir);
+    }
+    // Only allow camera movement when not in edit mode
+    else {
+        if (leftMousePressed)
+        {
+            camera.rotate(xoffset, yoffset);
+        }
+
+        if (rightMousePressed)
+        {
+            camera.pan(xoffset, yoffset);
+        }
+    }
+  }
+
+  void mouseButtonCallback(int button, int action)
+  {
+    if (button == GLFW_MOUSE_BUTTON_LEFT)
+    {
+      if (action == GLFW_PRESS)
+      {
+        leftMousePressed = true;
+        // In edit mode, remove voxel on left click
+        if (editMode)
+        {
+          glm::vec3 rayOrigin, rayDir;
+          camera.getRay(lastX, lastY, rayOrigin, rayDir);
+          renderer.editVoxel(rayOrigin, rayDir, false); // false = remove voxel
+          
+          // Update hover information again after edit operation
+          // This ensures we can immediately select voxels behind removed ones
+          camera.getRay(lastX, lastY, rayOrigin, rayDir);
+          renderer.updateHoveredVoxel(rayOrigin, rayDir);
+        }
+      }
+      else if (action == GLFW_RELEASE)
+        leftMousePressed = false;
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
+      if (action == GLFW_PRESS)
+      {
+        rightMousePressed = true;
+        // In edit mode, add voxel on right click
+        if (editMode)
+        {
+          glm::vec3 rayOrigin, rayDir;
+          camera.getRay(lastX, lastY, rayOrigin, rayDir);
+          renderer.editVoxel(rayOrigin, rayDir, true); // true = add voxel
+          
+          // Update hover information again after edit operation
+          camera.getRay(lastX, lastY, rayOrigin, rayDir);
+          renderer.updateHoveredVoxel(rayOrigin, rayDir);
+        }
+      }
+      else if (action == GLFW_RELEASE)
+        rightMousePressed = false;
+    }
+  }
+
+  void scrollCallback(double xoffset, double yoffset)
+  {
+    // Only allow zooming when not in edit mode
+    if (!editMode)
+    {
+      camera.zoom(static_cast<float>(yoffset));
+    }
+  }
+
+  void keyCallback(int key, int action)
+  {
+    if (key == GLFW_KEY_1 && action == GLFW_PRESS)
+      renderer.setRenderMode(RenderMode::MODEL);
+    else if (key == GLFW_KEY_2 && action == GLFW_PRESS)
+      renderer.setRenderMode(RenderMode::VOXEL);
+    else if (key == GLFW_KEY_3 && action == GLFW_PRESS)
+      renderer.setRenderMode(RenderMode::BOTH);
+    else if (key == GLFW_KEY_MINUS && action == GLFW_PRESS)
+      renderer.decreaseOctreeDepth();
+    else if (key == GLFW_KEY_EQUAL && action == GLFW_PRESS)
+      renderer.increaseOctreeDepth();
+    else if (key == GLFW_KEY_O && action == GLFW_PRESS)
+      renderer.exportVoxelModel(modelPath);
+    else if (key == GLFW_KEY_E && action == GLFW_PRESS)
+    {
+      // Toggle edit mode
+      editMode = !editMode;
+      renderer.setEditMode(editMode);
+      
+      // When entering edit mode, update hover immediately
+      if (editMode) {
+          glm::vec3 rayOrigin, rayDir;
+          camera.getRay(lastX, lastY, rayOrigin, rayDir);
+          renderer.updateHoveredVoxel(rayOrigin, rayDir);
+      }
+      
+      std::cout << (editMode ? "Edit mode enabled" : "Edit mode disabled") << std::endl;
+    }
+  }
+
+  void framebufferSizeCallback(int width, int height)
+  {
+    renderer.resize(width, height);
+    camera.setAspectRatio(static_cast<float>(width) / static_cast<float>(height));
+  }
+};
+```
+
+### include/mesh.h
+```
+#pragma once
+
+#include <vector>
+#include <glm/glm.hpp>
+#include <GL/glew.h>
+
+struct Vertex
+{
+  glm::vec3 position;
+  glm::vec3 normal;
+};
+
+class Mesh
+{
+public:
+  std::vector<Vertex> vertices;
+  std::vector<unsigned int> indices;
+
+  Mesh(const std::vector<Vertex> &vertices, const std::vector<unsigned int> &indices)
+      : vertices(vertices), indices(indices)
+  {
+    setupMesh();
+  }
+
+  void draw() const
+  {
+    glBindVertexArray(vao);
+    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, 0);
+    glBindVertexArray(0);
+  }
+
+  // Update GPU buffer with current vertex data
+  void updateVertexBuffer()
+  {
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+  }
+
+private:
+  unsigned int vao, vbo, ebo;
+
+  void setupMesh()
+  {
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+    glGenBuffers(1, &ebo);
+
+    glBindVertexArray(vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
+
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(3, GL_FLOAT, sizeof(Vertex), (void *)0);
+
+    glEnableClientState(GL_NORMAL_ARRAY);
+    glNormalPointer(GL_FLOAT, sizeof(Vertex), (void *)offsetof(Vertex, normal));
+
+    glBindVertexArray(0);
+  }
+};
+```
+
+### include/model.h
+```
+#pragma once
+
+#include "mesh.h"
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+#include <string>
+#include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+
+class Model
+{
+public:
+  Model(const std::string &path)
+  {
+    loadModel(path);
+    normalizeModel();
+  }
+
+  void draw() const
+  {
+    for (const auto &mesh : meshes)
+    {
+      mesh.draw();
+    }
+  }
+
+  // Export model to OBJ file using standard C++ streams
+  static bool exportToObj(const std::string &outputPath, const std::vector<aiVector3D> &vertices,
+                          const std::vector<aiFace> &faces, const std::string &info = "")
+  {
+    std::cout << "Exporting model to: " << outputPath << std::endl;
+    if (!info.empty())
+    {
+      std::cout << "Info: " << info << std::endl;
+    }
+
+    std::ofstream outFile(outputPath);
+    if (!outFile.is_open())
+    {
+      std::cerr << "Failed to open file for writing: " << outputPath << std::endl;
+      return false;
+    }
+
+    // Write OBJ file header
+    outFile << "# OBJ model exported from model_voxelizer\n";
+    outFile << "# " << info << "\n\n";
+
+    // Write vertices
+    for (const auto &v : vertices)
+    {
+      outFile << "v " << v.x << " " << v.y << " " << v.z << "\n";
+    }
+    outFile << "\n";
+
+    // Write faces (OBJ uses 1-based indexing)
+    for (const auto &face : faces)
+    {
+      outFile << "f ";
+      for (unsigned int i = 0; i < face.mNumIndices; i++)
+      {
+        outFile << (face.mIndices[i] + 1) << " ";
+      }
+      outFile << "\n";
+    }
+
+    outFile.close();
+    std::cout << "Export complete: " << faces.size() / 12 << " voxels written" << std::endl;
+    return true;
+  }
+
+  std::vector<Mesh> meshes;
+  glm::vec3 minBounds;
+  glm::vec3 maxBounds;
+
+private:
+  std::string directory;
+
+  void loadModel(const std::string &path)
+  {
+    Assimp::Importer importer;
+    const aiScene *scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_CalcTangentSpace);
+
+    if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode)
+    {
+      std::cerr << "ERROR::ASSIMP::" << importer.GetErrorString() << std::endl;
+      return;
+    }
+
+    directory = path.substr(0, path.find_last_of('/'));
+    processNode(scene->mRootNode, scene);
+
+    minBounds = glm::vec3(std::numeric_limits<float>::max());
+    maxBounds = glm::vec3(std::numeric_limits<float>::lowest());
+
+    for (const auto &mesh : meshes)
+    {
+      for (const auto &vertex : mesh.vertices)
+      {
+        minBounds.x = std::min(minBounds.x, vertex.position.x);
+        minBounds.y = std::min(minBounds.y, vertex.position.y);
+        minBounds.z = std::min(minBounds.z, vertex.position.z);
+
+        maxBounds.x = std::max(maxBounds.x, vertex.position.x);
+        maxBounds.y = std::max(maxBounds.y, vertex.position.y);
+        maxBounds.z = std::max(maxBounds.z, vertex.position.z);
+      }
+    }
+  }
+
+  void processNode(aiNode *node, const aiScene *scene)
+  {
+    for (unsigned int i = 0; i < node->mNumMeshes; i++)
+    {
+      aiMesh *mesh = scene->mMeshes[node->mMeshes[i]];
+      meshes.push_back(processMesh(mesh, scene));
+    }
+
+    for (unsigned int i = 0; i < node->mNumChildren; i++)
+    {
+      processNode(node->mChildren[i], scene);
+    }
+  }
+
+  Mesh processMesh(aiMesh *mesh, const aiScene *scene)
+  {
+    std::vector<Vertex> vertices;
+    std::vector<unsigned int> indices;
+
+    for (unsigned int i = 0; i < mesh->mNumVertices; i++)
+    {
+      Vertex vertex;
+
+      vertex.position.x = mesh->mVertices[i].x;
+      vertex.position.y = mesh->mVertices[i].y;
+      vertex.position.z = mesh->mVertices[i].z;
+
+      if (mesh->HasNormals())
+      {
+        vertex.normal.x = mesh->mNormals[i].x;
+        vertex.normal.y = mesh->mNormals[i].y;
+        vertex.normal.z = mesh->mNormals[i].z;
+      }
+
+      vertices.push_back(vertex);
+    }
+
+    for (unsigned int i = 0; i < mesh->mNumFaces; i++)
+    {
+      aiFace face = mesh->mFaces[i];
+      for (unsigned int j = 0; j < face.mNumIndices; j++)
+      {
+        indices.push_back(face.mIndices[j]);
+      }
+    }
+
+    return Mesh(vertices, indices);
+  }
+
+  void normalizeModel()
+  {
+    glm::vec3 center = (minBounds + maxBounds) * 0.5f;
+    float scale = 0.0f;
+
+    glm::vec3 dimensions = maxBounds - minBounds;
+    scale = std::max(dimensions.x, std::max(dimensions.y, dimensions.z)) * 0.5f;
+
+    // Scale vertices to exactly fit in [-1,1] range
+    for (auto &mesh : meshes)
+    {
+      for (auto &vertex : mesh.vertices)
+      {
+        vertex.position = (vertex.position - center) / scale;
+      }
+      
+      // Update GPU buffers with the normalized vertex data
+      mesh.updateVertexBuffer();
+    }
+
+    // Verify the model bounds actually reach -1 to 1
+    minBounds = glm::vec3(std::numeric_limits<float>::max());
+    maxBounds = glm::vec3(std::numeric_limits<float>::lowest());
+
+    for (const auto &mesh : meshes)
+    {
+      for (const auto &vertex : mesh.vertices)
+      {
+        minBounds.x = std::min(minBounds.x, vertex.position.x);
+        minBounds.y = std::min(minBounds.y, vertex.position.y);
+        minBounds.z = std::min(minBounds.z, vertex.position.z);
+
+        maxBounds.x = std::max(maxBounds.x, vertex.position.x);
+        maxBounds.y = std::max(maxBounds.y, vertex.position.y);
+        maxBounds.z = std::max(maxBounds.z, vertex.position.z);
+      }
+    }
+  }
+};
+```
+
+### include/renderer.h
+```
+#pragma once
+
+#include "model.h"
+#include "voxel.h"
+#include "camera.h"
+#include <GL/glew.h>
+#include <string>
+
+enum class RenderMode
+{
+  MODEL,
+  VOXEL,
+  BOTH
+};
+
+class Renderer
+{
+public:
+  Renderer(int width, int height)
+      : width(width), height(height), renderMode(RenderMode::BOTH),
+        voxelGrid(nullptr), editMode(false)
+  {
+    setupGL();
+  }
+
+  void resize(int width, int height)
+  {
+    this->width = width;
+    this->height = height;
+    glViewport(0, 0, width, height);
+  }
+
+  void setRenderMode(RenderMode mode)
+  {
+    renderMode = mode;
+  }
+
+  void setVoxelGrid(VoxelGrid *grid)
+  {
+    voxelGrid = grid;
+  }
+
+  void increaseOctreeDepth()
+  {
+    if (voxelGrid)
+    {
+      voxelGrid->increaseDepth();
+    }
+  }
+
+  void decreaseOctreeDepth()
+  {
+    if (voxelGrid)
+    {
+      voxelGrid->decreaseDepth();
+    }
+  }
+
+  void setEditMode(bool enabled)
+  {
+    editMode = enabled;
+  }
+
+  // Update the hovered voxel using ray from screen position
+  void updateHoveredVoxel(const glm::vec3& rayOrigin, const glm::vec3& rayDir)
+  {
+    if (voxelGrid && editMode) {
+        voxelGrid->updateHoveredVoxel(rayOrigin, rayDir);
+    }
+  }
+
+  // Edit voxel based on ray intersection
+  bool editVoxel(const glm::vec3& rayOrigin, const glm::vec3& rayDir, bool add)
+  {
+    if (!voxelGrid || !editMode) return false;
+    
+    glm::vec3 hitPosition, hitNormal;
+    
+    // Perform ray-voxel intersection using hover information
+    if (voxelGrid->raycastVoxel(rayOrigin, rayDir, hitPosition, hitNormal, !add))
+    {
+      // Perform the edit action
+      bool success = false;
+      if (add)
+      {
+        success = voxelGrid->addVoxel(hitPosition);
+      }
+      else
+      {
+        const auto& hoverInfo = voxelGrid->getHoverInfo();
+        if (hoverInfo.node && hoverInfo.node->isActive) {
+            success = voxelGrid->removeVoxel(hoverInfo.node->position);
+        }
+      }
+      
+      // Force update hover information immediately after edit
+      // This ensures removed voxels don't remain selectable
+      voxelGrid->updateHoveredVoxel(rayOrigin, rayDir);
+      
+      return success;
+    }
+    
+    return false;
+  }
+
+  void renderScene(const Model &model, const VoxelGrid &voxelGrid, const Camera &camera)
+  {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    camera.applyProjectionMatrix();
+    camera.applyViewMatrix();
+
+    setupLighting();
+
+    // Only draw the bounding box in edit mode
+    if (editMode)
+    {
+      drawBoundingBox();
+    }
+
+    if (renderMode == RenderMode::MODEL || renderMode == RenderMode::BOTH)
+    {
+      glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+      
+      // Draw the model with its current vertex data
+      model.draw();
+    }
+
+    if (renderMode == RenderMode::VOXEL || renderMode == RenderMode::BOTH)
+    {
+      glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+      voxelGrid.draw();
+      
+      // Draw hover highlight if in edit mode
+      if (editMode) {
+          drawHoverHighlight(voxelGrid);
+      }
+    }
+  }
+
+  void exportVoxelModel(const std::string &modelPath)
+  {
+    if (voxelGrid)
+    {
+      if (voxelGrid->exportToObj(modelPath))
+      {
+        std::cout << "Voxel model successfully exported" << std::endl;
+      }
+      else
+      {
+        std::cerr << "Failed to export voxel model" << std::endl;
+      }
+    }
+    else
+    {
+      std::cerr << "No voxel grid available for export." << std::endl;
+    }
+  }
+
+private:
+  int width, height;
+  RenderMode renderMode;
+  VoxelGrid *voxelGrid; // Pointer to VoxelGrid for depth control
+  bool editMode;
+
+  void setupGL()
+  {
+    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glEnable(GL_NORMALIZE);
+    glShadeModel(GL_SMOOTH);
+
+    // Enable more advanced shading features
+    glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+    glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, GL_TRUE);
+
+    // Enable blending for shadow effects
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  }
+
+  void setupLighting()
+  {
+    // Enhanced lighting for better shadows
+    float ambientLight[] = {0.15f, 0.15f, 0.15f, 1.0f};
+    float diffuseLight[] = {0.9f, 0.9f, 0.9f, 1.0f};
+    float specularLight[] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+    // Position light higher and more angled for better shadows
+    float position[] = {2.0f, 3.0f, 2.0f, 1.0f};
+
+    // Add spot direction for more directional lighting
+    float direction[] = {-0.5f, -1.0f, -0.5f};
+    float spotCutoff = 60.0f;
+    float spotExponent = 15.0f;
+
+    glLightfv(GL_LIGHT0, GL_AMBIENT, ambientLight);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, diffuseLight);
+    glLightfv(GL_LIGHT0, GL_SPECULAR, specularLight);
+    glLightfv(GL_LIGHT0, GL_POSITION, position);
+
+    // Set up spotlight parameters
+    glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, direction);
+    glLightf(GL_LIGHT0, GL_SPOT_CUTOFF, spotCutoff);
+    glLightf(GL_LIGHT0, GL_SPOT_EXPONENT, spotExponent);
+
+    // Add attenuation for more realistic lighting
+    glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 1.0f);
+    glLightf(GL_LIGHT0, GL_LINEAR_ATTENUATION, 0.05f);
+    glLightf(GL_LIGHT0, GL_QUADRATIC_ATTENUATION, 0.01f);
+  }
+
+  // Draw a semi-transparent bounding box to visualize the [-1,1] range
+  void drawBoundingBox()
+  {
+    // Save GL state
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+
+    // Setup for transparency
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Draw the bounding box in wireframe
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    glDisable(GL_LIGHTING);
+
+    // Set color to red with 50% transparency
+    glColor4f(1.0f, 0.0f, 0.0f, 0.5f);
+    glLineWidth(2.0f);
+
+    // Draw a cube from (-1,-1,-1) to (1,1,1)
+    glBegin(GL_LINES);
+
+    // Bottom face edges
+    glVertex3f(-1.0f, -1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, 1.0f);
+    glVertex3f(1.0f, -1.0f, 1.0f);
+    glVertex3f(-1.0f, -1.0f, 1.0f);
+    glVertex3f(-1.0f, -1.0f, 1.0f);
+    glVertex3f(-1.0f, -1.0f, -1.0f);
+
+    // Top face edges
+    glVertex3f(-1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, 1.0f, 1.0f);
+    glVertex3f(1.0f, 1.0f, 1.0f);
+    glVertex3f(-1.0f, 1.0f, 1.0f);
+    glVertex3f(-1.0f, 1.0f, 1.0f);
+    glVertex3f(-1.0f, 1.0f, -1.0f);
+
+    // Connecting edges
+    glVertex3f(-1.0f, -1.0f, -1.0f);
+    glVertex3f(-1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, -1.0f);
+    glVertex3f(1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, 1.0f);
+    glVertex3f(1.0f, 1.0f, 1.0f);
+    glVertex3f(-1.0f, -1.0f, 1.0f);
+    glVertex3f(-1.0f, 1.0f, 1.0f);
+
+    glEnd();
+
+    // Restore GL state
+    glPopAttrib();
+  }
+
+  // Draw highlight for hovered voxel
+  void drawHoverHighlight(const VoxelGrid &voxelGrid) 
+  {
+    const auto& hoverInfo = voxelGrid.getHoverInfo();
+    if (!hoverInfo.hasHit) return;
+    
+    // Save GL state
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    
+    // Setup for semi-transparent highlight
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_LIGHTING);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+    
+    // Set color to yellow with transparency
+    glColor4f(1.0f, 1.0f, 0.0f, 0.8f);
+    glLineWidth(3.0f);
+    
+    // Calculate voxel size
+    float scale = 1.0f;
+    if (hoverInfo.node) {
+        scale = hoverInfo.node->size.x * 0.5f;
+    } else {
+        // If no specific node, use size based on current depth
+        scale = 1.0f / (1 << (hoverInfo.depth-1));
+    }
+    
+    // Get position
+    glm::vec3 pos = hoverInfo.position;
+    if (hoverInfo.node) {
+        pos = hoverInfo.node->position;
+    }
+    
+    // Draw highlighted cube
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    glScalef(scale * 1.01f, scale * 1.01f, scale * 1.01f); // Slightly larger for visibility
+    
+    // Draw complete cube wireframe with all 12 edges
+    glBegin(GL_LINES);
+    // Bottom face edges (4 edges)
+    glVertex3f(-1.0f, -1.0f, -1.0f); glVertex3f(1.0f, -1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, -1.0f); glVertex3f(1.0f, -1.0f, 1.0f);
+    glVertex3f(1.0f, -1.0f, 1.0f); glVertex3f(-1.0f, -1.0f, 1.0f);
+    glVertex3f(-1.0f, -1.0f, 1.0f); glVertex3f(-1.0f, -1.0f, -1.0f);
+    
+    // Top face edges (4 edges)
+    glVertex3f(-1.0f, 1.0f, -1.0f); glVertex3f(1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, 1.0f, -1.0f); glVertex3f(1.0f, 1.0f, 1.0f);
+    glVertex3f(1.0f, 1.0f, 1.0f); glVertex3f(-1.0f, 1.0f, 1.0f);
+    glVertex3f(-1.0f, 1.0f, -1.0f); glVertex3f(-1.0f, 1.0f, 1.0f);
+    
+    // Connecting edges (4 edges)
+    glVertex3f(-1.0f, -1.0f, -1.0f); glVertex3f(-1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, -1.0f); glVertex3f(1.0f, 1.0f, -1.0f);
+    glVertex3f(1.0f, -1.0f, 1.0f); glVertex3f(1.0f, 1.0f, 1.0f);
+    glVertex3f(-1.0f, -1.0f, 1.0f); glVertex3f(-1.0f, 1.0f, 1.0f);
+    glEnd();
+    
+    // Also draw the face that would be interacted with
+    glColor4f(1.0f, 0.5f, 0.0f, 0.5f); // Orange for the active face
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    
+    glm::vec3 normal = hoverInfo.normal;
+    glBegin(GL_QUADS);
+    
+    // Draw the appropriate face based on the normal
+    if (normal.x > 0.5f) { // Right face (+X)
+        glVertex3f(1.0f, -1.0f, -1.0f);
+        glVertex3f(1.0f, 1.0f, -1.0f);
+        glVertex3f(1.0f, 1.0f, 1.0f);
+        glVertex3f(1.0f, -1.0f, 1.0f);
+    } 
+    else if (normal.x < -0.5f) { // Left face (-X)
+        glVertex3f(-1.0f, -1.0f, -1.0f);
+        glVertex3f(-1.0f, -1.0f, 1.0f);
+        glVertex3f(-1.0f, 1.0f, 1.0f);
+        glVertex3f(-1.0f, 1.0f, -1.0f);
+    }
+    else if (normal.y > 0.5f) { // Top face (+Y)
+        glVertex3f(-1.0f, 1.0f, -1.0f);
+        glVertex3f(-1.0f, 1.0f, 1.0f);
+        glVertex3f(1.0f, 1.0f, 1.0f);
+        glVertex3f(1.0f, 1.0f, -1.0f);
+    }
+    else if (normal.y < -0.5f) { // Bottom face (-Y)
+        glVertex3f(-1.0f, -1.0f, -1.0f);
+        glVertex3f(1.0f, -1.0f, -1.0f);
+        glVertex3f(1.0f, -1.0f, 1.0f);
+        glVertex3f(-1.0f, -1.0f, 1.0f);
+    }
+    else if (normal.z > 0.5f) { // Front face (+Z)
+        glVertex3f(-1.0f, -1.0f, 1.0f);
+        glVertex3f(1.0f, -1.0f, 1.0f);
+        glVertex3f(1.0f, 1.0f, 1.0f);
+        glVertex3f(-1.0f, 1.0f, 1.0f);
+    }
+    else if (normal.z < -0.5f) { // Back face (-Z)
+        glVertex3f(-1.0f, -1.0f, -1.0f);
+        glVertex3f(-1.0f, 1.0f, -1.0f);
+        glVertex3f(1.0f, 1.0f, -1.0f);
+        glVertex3f(1.0f, -1.0f, -1.0f);
+    }
+    
+    glEnd();
+    glPopMatrix();
+    
+    // Restore GL state
+    glPopAttrib();
+  }
+};
+```
+
+### include/voxel.h
+```
+#pragma once
+
+#include "model.h"
+#include <vector>
+#include <glm/glm.hpp>
+#include <memory>
+#include <algorithm>
+#include <string>
+#include <filesystem>
+#include <assimp/scene.h>
+
+struct Voxel
+{
+    glm::vec3 position;
+    glm::vec3 color;
+    bool isActive;
+};
+
+// Octree node structure
+struct OctreeNode
+{
+    bool isLeaf;
+    bool isActive;
+    glm::vec3 position; // Node center position
+    glm::vec3 size;     // Node dimensions
+    glm::vec3 color;
+    OctreeNode *children[8]; // Eight children nodes
+
+    OctreeNode() : isLeaf(true), isActive(false), color(0.7f, 0.7f, 0.7f)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            children[i] = nullptr;
+        }
+    }
+
+    ~OctreeNode()
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            delete children[i];
+        }
+    }
+};
+
+class VoxelGrid
+{
+public:
+    VoxelGrid(int currentDepth = 6, int maxDepth = 10) : maxDepth(maxDepth), currentDepth(currentDepth), currentModel(nullptr)
+    {
+        root = new OctreeNode();
+        root->position = glm::vec3(0.0f);
+        root->size = glm::vec3(2.0f); // Range from -1 to 1
+    }
+
+    ~VoxelGrid()
+    {
+        delete root;
+    }
+
+    void increaseDepth()
+    {
+        if (currentDepth < maxDepth)
+        {
+            currentDepth++;
+            std::cout << "Octree depth increased to: " << currentDepth << std::endl;
+            // Re-voxelize with new depth
+            if (currentModel)
+            {
+                voxelizeModel(*currentModel);
+            }
+        }
+    }
+
+    void decreaseDepth()
+    {
+        if (currentDepth > 1)
+        {
+            currentDepth--;
+            std::cout << "Octree depth decreased to: " << currentDepth << std::endl;
+            // Re-voxelize with new depth
+            if (currentModel)
+            {
+                voxelizeModel(*currentModel);
+            }
+        }
+    }
+
+    void voxelizeModel(const Model &model)
+    {
+        // Store reference to current model
+        currentModel = &model;
+        
+        // Clear the old octree
+        delete root;
+        root = new OctreeNode();
+        root->position = glm::vec3(0.0f);
+        root->size = glm::vec3(2.0f);
+
+        for (const auto &mesh : model.meshes)
+        {
+            for (size_t i = 0; i < mesh.indices.size(); i += 3)
+            {
+                glm::vec3 v0 = mesh.vertices[mesh.indices[i]].position;
+                glm::vec3 v1 = mesh.vertices[mesh.indices[i + 1]].position;
+                glm::vec3 v2 = mesh.vertices[mesh.indices[i + 2]].position;
+
+                // Recursively check triangle intersection with octree nodes
+                voxelizeTriangle(root, v0, v1, v2, 1);
+            }
+        }
+    }
+
+    void draw() const
+    {
+        drawOctreeNode(root, 1);
+    }
+
+    // Export to OBJ file
+    bool exportToObj(const std::string& inputPath) const
+    {
+        // Generate output filename
+        std::filesystem::path inPath(inputPath);
+        std::string filename = inPath.stem().string() + ".voxel.obj";
+        
+        // Prepare metadata
+        std::string info = "Voxelized model from " + inPath.filename().string() + 
+                          " at octree depth " + std::to_string(currentDepth);
+        
+        // Collect voxel data for export
+        std::vector<aiVector3D> vertices;
+        std::vector<aiFace> faces;
+        
+        collectVoxelsForExport(root, 1, vertices, faces);
+        
+        return Model::exportToObj(filename, vertices, faces, info);
+    }
+
+    // Add a voxel at the specified position
+    bool addVoxel(const glm::vec3& position)
+    {
+        // Create or find the appropriate node at current depth
+        return placeVoxel(root, position, 1, true);
+    }
+
+    // Remove a voxel at the specified position
+    bool removeVoxel(const glm::vec3& position)
+    {
+        // Find and deactivate the appropriate node
+        return placeVoxel(root, position, 1, false);
+    }
+
+    // Ray-voxel intersection test
+    bool raycastVoxel(const glm::vec3& rayOrigin, const glm::vec3& rayDir, 
+                      glm::vec3& hitPosition, glm::vec3& hitNormal, bool forRemoval)
+    {
+        float tMin = -std::numeric_limits<float>::max();
+        float tMax = std::numeric_limits<float>::max();
+        
+        // Check intersection with [-1,1] bounding box first
+        glm::vec3 boxMin(-1.0f);
+        glm::vec3 boxMax(1.0f);
+        if (!rayBoxIntersection(rayOrigin, rayDir, boxMin, boxMax, tMin, tMax))
+            return false;
+        
+        // If we have a current hover, use that information
+        if (hoverInfo.hasHit)
+        {
+            hitPosition = hoverInfo.position;
+            hitNormal = hoverInfo.normal;
+            
+            // For removal, use the node directly
+            if (forRemoval)
+            {
+                return hoverInfo.node && hoverInfo.node->isActive;
+            }
+            
+            // For adding, offset by normal
+            hitPosition += hitNormal * 0.01f;
+            return true;
+        }
+        
+        return false;
+    }
+
+    // Track the currently hovered voxel for highlighting
+    struct HoverInfo {
+        bool hasHit;
+        OctreeNode* node;
+        glm::vec3 position;
+        glm::vec3 normal;
+        int depth;
+        
+        HoverInfo() : hasHit(false), node(nullptr), depth(0) {}
+    };
+    
+    // Update hovered voxel information
+    void updateHoveredVoxel(const glm::vec3& rayOrigin, const glm::vec3& rayDir)
+    {
+        hoverInfo.hasHit = false;
+        raycastOctreeForHover(root, rayOrigin, rayDir, 1);
+    }
+    
+    // Get current hover information
+    const HoverInfo& getHoverInfo() const {
+        return hoverInfo;
+    }
+
+private:
+    OctreeNode *root;
+    int maxDepth;
+    int currentDepth;
+    const Model* currentModel; // Store current model for re-voxelization
+    HoverInfo hoverInfo;
+
+    // Check if triangle intersects with a bounding box
+    bool triangleIntersectsBox(const glm::vec3 &v0, const glm::vec3 &v1, const glm::vec3 &v2,
+                               const glm::vec3 &boxMin, const glm::vec3 &boxMax)
+    {
+        // Simplified check: test if triangle AABB intersects node AABB
+        glm::vec3 triMin = glm::min(glm::min(v0, v1), v2);
+        glm::vec3 triMax = glm::max(glm::max(v0, v1), v2);
+
+        // Check for AABB intersection
+        return !(triMin.x > boxMax.x || triMax.x < boxMin.x ||
+                 triMin.y > boxMax.y || triMax.y < boxMin.y ||
+                 triMin.z > boxMax.z || triMax.z < boxMin.z);
+    }
+
+    // Recursive triangle voxelization
+    void voxelizeTriangle(OctreeNode *node, const glm::vec3 &v0, const glm::vec3 &v1,
+                          const glm::vec3 &v2, int depth)
+    {
+        if (!node)
+            return;
+
+        glm::vec3 halfSize = node->size * 0.5f;
+        glm::vec3 boxMin = node->position - halfSize;
+        glm::vec3 boxMax = node->position + halfSize;
+
+        // Check if triangle intersects the current node
+        if (!triangleIntersectsBox(v0, v1, v2, boxMin, boxMax))
+        {
+            return;
+        }
+
+        // If we reached the current specified depth, mark node as active
+        if (depth >= currentDepth)
+        {
+            node->isLeaf = true;
+            node->isActive = true;
+            return;
+        }
+
+        // Continue subdivision
+        node->isLeaf = false;
+
+        // Create 8 child nodes
+        for (int i = 0; i < 8; i++)
+        {
+            if (node->children[i] == nullptr)
+            {
+                node->children[i] = new OctreeNode();
+
+                // Calculate child node position
+                glm::vec3 offset = glm::vec3(
+                    (i & 1) ? halfSize.x * 0.5f : -halfSize.x * 0.5f,
+                    (i & 2) ? halfSize.y * 0.5f : -halfSize.y * 0.5f,
+                    (i & 4) ? halfSize.z * 0.5f : -halfSize.z * 0.5f);
+
+                node->children[i]->position = node->position + offset;
+                node->children[i]->size = halfSize;
+            }
+
+            // Recursively check child nodes
+            voxelizeTriangle(node->children[i], v0, v1, v2, depth + 1);
+        }
+    }
+
+    // Recursive octree rendering
+    void drawOctreeNode(OctreeNode *node, int depth) const
+    {
+        if (!node)
+            return;
+
+        // Render leaf nodes that are active or nodes at current depth
+        if ((node->isLeaf && node->isActive) || depth >= currentDepth)
+        {
+            // Only render active nodes
+            if (node->isActive || (depth >= currentDepth && isNodeActive(node)))
+            {
+                glPushMatrix();
+                glTranslatef(node->position.x, node->position.y, node->position.z);
+
+                // Node size at current depth
+                float scale = node->size.x * 0.5f; // Half edge length
+                glScalef(scale, scale, scale);
+
+                glColor3f(node->color.r, node->color.g, node->color.b);
+
+                // Draw voxel cube
+                glBegin(GL_QUADS);
+
+                // Front face
+                glNormal3f(0.0f, 0.0f, 1.0f);
+                glVertex3f(-1.0f, -1.0f, 1.0f);
+                glVertex3f(1.0f, -1.0f, 1.0f);
+                glVertex3f(1.0f, 1.0f, 1.0f);
+                glVertex3f(-1.0f, 1.0f, 1.0f);
+
+                // Back face
+                glNormal3f(0.0f, 0.0f, -1.0f);
+                glVertex3f(-1.0f, -1.0f, -1.0f);
+                glVertex3f(-1.0f, 1.0f, -1.0f);
+                glVertex3f(1.0f, 1.0f, -1.0f);
+                glVertex3f(1.0f, -1.0f, -1.0f);
+
+                // Top face
+                glNormal3f(0.0f, 1.0f, 0.0f);
+                glVertex3f(-1.0f, 1.0f, -1.0f);
+                glVertex3f(-1.0f, 1.0f, 1.0f);
+                glVertex3f(1.0f, 1.0f, 1.0f);
+                glVertex3f(1.0f, 1.0f, -1.0f);
+
+                // Bottom face
+                glNormal3f(0.0f, -1.0f, 0.0f);
+                glVertex3f(-1.0f, -1.0f, -1.0f);
+                glVertex3f(1.0f, -1.0f, -1.0f);
+                glVertex3f(1.0f, -1.0f, 1.0f);
+                glVertex3f(-1.0f, -1.0f, 1.0f);
+
+                // Right face
+                glNormal3f(1.0f, 0.0f, 0.0f);
+                glVertex3f(1.0f, -1.0f, -1.0f);
+                glVertex3f(1.0f, 1.0f, -1.0f);
+                glVertex3f(1.0f, 1.0f, 1.0f);
+                glVertex3f(1.0f, -1.0f, 1.0f);
+
+                // Left face
+                glNormal3f(-1.0f, 0.0f, 0.0f);
+                glVertex3f(-1.0f, -1.0f, -1.0f);
+                glVertex3f(-1.0f, -1.0f, 1.0f);
+                glVertex3f(-1.0f, 1.0f, 1.0f);
+                glVertex3f(-1.0f, 1.0f, -1.0f);
+
+                glEnd();
+
+                glPopMatrix();
+            }
+            return;
+        }
+
+        // Recursively draw child nodes
+        for (int i = 0; i < 8; i++)
+        {
+            if (node->children[i])
+            {
+                drawOctreeNode(node->children[i], depth + 1);
+            }
+        }
+    }
+
+    // Check if node or any of its children are active
+    bool isNodeActive(OctreeNode *node) const
+    {
+        if (!node)
+            return false;
+        if (node->isActive)
+            return true;
+
+        for (int i = 0; i < 8; i++)
+        {
+            if (node->children[i] && isNodeActive(node->children[i]))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Collect voxels for export
+    void collectVoxelsForExport(OctreeNode* node, int depth, std::vector<aiVector3D>& vertices, 
+                              std::vector<aiFace>& faces) const
+    {
+        if (!node) return;
+        
+        // Export active nodes at current depth or active leaf nodes
+        if ((node->isLeaf && node->isActive) || (depth >= currentDepth && isNodeActive(node)))
+        {
+            // Skip nodes that aren't active
+            if (!node->isActive && !(depth >= currentDepth && isNodeActive(node)))
+                return;
+                
+            // Calculate half size for this node
+            float halfSize = node->size.x * 0.5f;
+            
+            // Get vertex base index
+            unsigned int baseIdx = static_cast<unsigned int>(vertices.size());
+            
+            // Add cube vertices (8 corners)
+            aiVector3D v0(node->position.x - halfSize, node->position.y - halfSize, node->position.z - halfSize);
+            aiVector3D v1(node->position.x + halfSize, node->position.y - halfSize, node->position.z - halfSize);
+            aiVector3D v2(node->position.x + halfSize, node->position.y - halfSize, node->position.z + halfSize);
+            aiVector3D v3(node->position.x - halfSize, node->position.y - halfSize, node->position.z + halfSize);
+            aiVector3D v4(node->position.x - halfSize, node->position.y + halfSize, node->position.z - halfSize);
+            aiVector3D v5(node->position.x + halfSize, node->position.y + halfSize, node->position.z - halfSize);
+            aiVector3D v6(node->position.x + halfSize, node->position.y + halfSize, node->position.z + halfSize);
+            aiVector3D v7(node->position.x - halfSize, node->position.y + halfSize, node->position.z + halfSize);
+            
+            // Add vertices to the array
+            vertices.push_back(v0);
+            vertices.push_back(v1);
+            vertices.push_back(v2);
+            vertices.push_back(v3);
+            vertices.push_back(v4);
+            vertices.push_back(v5);
+            vertices.push_back(v6);
+            vertices.push_back(v7);
+            
+            // Create 12 triangular faces (6 sides, 2 triangles each)
+            // Each face uses 3 indices
+            unsigned int faceIndices[12][3] = {
+                // Bottom face
+                {baseIdx, baseIdx+1, baseIdx+2},
+                {baseIdx, baseIdx+2, baseIdx+3},
+                // Top face
+                {baseIdx+4, baseIdx+5, baseIdx+6},
+                {baseIdx+4, baseIdx+6, baseIdx+7},
+                // Front face
+                {baseIdx+3, baseIdx+2, baseIdx+6},
+                {baseIdx+3, baseIdx+6, baseIdx+7},
+                // Back face
+                {baseIdx+1, baseIdx+0, baseIdx+4},
+                {baseIdx+1, baseIdx+4, baseIdx+5},
+                // Left face
+                {baseIdx+0, baseIdx+3, baseIdx+7},
+                {baseIdx+0, baseIdx+7, baseIdx+4},
+                // Right face
+                {baseIdx+2, baseIdx+1, baseIdx+5},
+                {baseIdx+2, baseIdx+5, baseIdx+6}
+            };
+            
+            // Add faces to the array
+            for (int i = 0; i < 12; ++i) {
+                aiFace face;
+                face.mNumIndices = 3;
+                face.mIndices = new unsigned int[3];
+                face.mIndices[0] = faceIndices[i][0];
+                face.mIndices[1] = faceIndices[i][1];
+                face.mIndices[2] = faceIndices[i][2];
+                faces.push_back(face);
+            }
+            
+            return;
+        }
+        
+        // Recursively process children
+        if (!node->isLeaf && depth < currentDepth) {
+            for (int i = 0; i < 8; i++) {
+                if (node->children[i]) {
+                    collectVoxelsForExport(node->children[i], depth + 1, vertices, faces);
+                }
+            }
+        }
+    }
+
+    // Add or remove a voxel at the specified position
+    bool placeVoxel(OctreeNode* node, const glm::vec3& position, int depth, bool activate)
+    {
+        if (!node) return false;
+        
+        // Check if position is within node bounds
+        glm::vec3 halfSize = node->size * 0.5f;
+        glm::vec3 boxMin = node->position - halfSize;
+        glm::vec3 boxMax = node->position + halfSize;
+        
+        if (position.x < boxMin.x || position.x > boxMax.x || 
+            position.y < boxMin.y || position.y > boxMax.y ||
+            position.z < boxMin.z || position.z > boxMax.z)
+        {
+            return false;
+        }
+        
+        // If at target depth, set active state
+        if (depth >= currentDepth)
+        {
+            bool changed = node->isActive != activate;
+            node->isActive = activate;
+            return changed;
+        }
+        
+        // Otherwise, continue down the tree
+        node->isLeaf = false;
+        
+        // Determine which child contains the position
+        int childIdx = 0;
+        if (position.x >= node->position.x) childIdx |= 1;
+        if (position.y >= node->position.y) childIdx |= 2;
+        if (position.z >= node->position.z) childIdx |= 4;
+        
+        // Create child if it doesn't exist
+        if (!node->children[childIdx])
+        {
+            node->children[childIdx] = new OctreeNode();
+            
+            // Calculate child node position
+            glm::vec3 offset = glm::vec3(
+                (childIdx & 1) ? halfSize.x * 0.5f : -halfSize.x * 0.5f,
+                (childIdx & 2) ? halfSize.y * 0.5f : -halfSize.y * 0.5f,
+                (childIdx & 4) ? halfSize.z * 0.5f : -halfSize.z * 0.5f);
+            
+            node->children[childIdx]->position = node->position + offset;
+            node->children[childIdx]->size = halfSize;
+        }
+        
+        // Continue to child node
+        return placeVoxel(node->children[childIdx], position, depth + 1, activate);
+    }
+
+    // Ray-box intersection helper function
+    bool rayBoxIntersection(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
+                           const glm::vec3& boxMin, const glm::vec3& boxMax,
+                           float& tMin, float& tMax)
+    {
+        // Calculate intersection with each slab
+        glm::vec3 invDir = 1.0f / rayDir;
+        glm::vec3 t1 = (boxMin - rayOrigin) * invDir;
+        glm::vec3 t2 = (boxMax - rayOrigin) * invDir;
+        
+        // Find min and max t values for each dimension
+        glm::vec3 tMinVec = glm::min(t1, t2);
+        glm::vec3 tMaxVec = glm::max(t1, t2);
+        
+        // Find overall min and max
+        tMin = std::max(tMin, std::max(tMinVec.x, std::max(tMinVec.y, tMinVec.z)));
+        tMax = std::min(tMax, std::min(tMaxVec.x, std::min(tMaxVec.y, tMaxVec.z)));
+        
+        return tMax >= tMin && tMax > 0;
+    }
+
+    // Recursive ray-octree intersection test
+    bool raycastOctree(OctreeNode* node, const glm::vec3& rayOrigin, const glm::vec3& rayDir,
+                     glm::vec3& hitPosition, glm::vec3& hitNormal, bool& hitAdd, int depth)
+    {
+        if (!node) return false;
+        
+        // Check ray-box intersection
+        float tMin = -std::numeric_limits<float>::max();
+        float tMax = std::numeric_limits<float>::max();
+        
+        glm::vec3 halfSize = node->size * 0.5f;
+        glm::vec3 boxMin = node->position - halfSize;
+        glm::vec3 boxMax = node->position + halfSize;
+        
+        if (!rayBoxIntersection(rayOrigin, rayDir, boxMin, boxMax, tMin, tMax))
+            return false;
+        
+        // If at current depth or a leaf node, and node is active, we have a hit
+        if ((depth >= currentDepth || node->isLeaf) && node->isActive)
+        {
+            // Compute hit position
+            hitPosition = rayOrigin + rayDir * tMin;
+            
+            // Compute normal based on which face was hit
+            glm::vec3 centerToHit = hitPosition - node->position;
+            float maxComp = std::max(std::abs(centerToHit.x/halfSize.x), 
+                                   std::max(std::abs(centerToHit.y/halfSize.y), 
+                                          std::abs(centerToHit.z/halfSize.z)));
+            
+            // Determine face normal (based on which component is at the maximum)
+            hitNormal = glm::vec3(0.0f);
+            if (maxComp == std::abs(centerToHit.x/halfSize.x))
+                hitNormal.x = centerToHit.x > 0 ? 1.0f : -1.0f;
+            else if (maxComp == std::abs(centerToHit.y/halfSize.y))
+                hitNormal.y = centerToHit.y > 0 ? 1.0f : -1.0f;
+            else
+                hitNormal.z = centerToHit.z > 0 ? 1.0f : -1.0f;
+            
+            // If we hit an existing voxel, we want to add a new one next to it
+            hitAdd = !node->isActive;
+            
+            return true;
+        }
+        
+        // If not at max depth and not a leaf, check children
+        if (!node->isLeaf && depth < currentDepth)
+        {
+            // Check intersection with children in order of distance
+            // This is a simple approach - just iterate through all children
+            for (int i = 0; i < 8; i++)
+            {
+                if (node->children[i] && 
+                    raycastOctree(node->children[i], rayOrigin, rayDir, hitPosition, hitNormal, hitAdd, depth + 1))
+                {
+                    return true;
+                }
+            }
+        }
+        
+        // If we hit the node but it's not active, we can add to it
+        if (depth >= currentDepth || node->isLeaf)
+        {
+            hitPosition = rayOrigin + rayDir * tMin;
+            
+            // Compute normal based on which face was hit
+            glm::vec3 centerToHit = hitPosition - node->position;
+            float maxComp = std::max(std::abs(centerToHit.x/halfSize.x), 
+                                   std::max(std::abs(centerToHit.y/halfSize.y), 
+                                          std::abs(centerToHit.z/halfSize.z)));
+            
+            hitNormal = glm::vec3(0.0f);
+            if (maxComp == std::abs(centerToHit.x/halfSize.x))
+                hitNormal.x = centerToHit.x > 0 ? 1.0f : -1.0f;
+            else if (maxComp == std::abs(centerToHit.y/halfSize.y))
+                hitNormal.y = centerToHit.y > 0 ? 1.0f : -1.0f;
+            else
+                hitNormal.z = centerToHit.z > 0 ? 1.0f : -1.0f;
+            
+            // We hit an empty space, we can add a voxel here
+            hitAdd = true;
+            
+            return true;
+        }
+        
+        return false;
+    }
+
+    // Raycast to find the hovered voxel
+    bool raycastOctreeForHover(OctreeNode* node, const glm::vec3& rayOrigin, const glm::vec3& rayDir, int depth)
+    {
+        if (!node) return false;
+        
+        // Check ray-box intersection
+        float tMin = -std::numeric_limits<float>::max();
+        float tMax = std::numeric_limits<float>::max();
+        
+        glm::vec3 halfSize = node->size * 0.5f;
+        glm::vec3 boxMin = node->position - halfSize;
+        glm::vec3 boxMax = node->position + halfSize;
+        
+        if (!rayBoxIntersection(rayOrigin, rayDir, boxMin, boxMax, tMin, tMax))
+            return false;
+        
+        // Track closest hit distance to prefer front voxels
+        static float closestHitDistance = std::numeric_limits<float>::max();
+        static float closestEmptyDistance = std::numeric_limits<float>::max();
+        static bool foundActiveVoxel = false;
+        
+        // Reset closest distance and flags on top-level call
+        if (depth == 1) {
+            closestHitDistance = std::numeric_limits<float>::max();
+            closestEmptyDistance = std::numeric_limits<float>::max();
+            foundActiveVoxel = false;
+            hoverInfo.hasHit = false;
+            hoverInfo.node = nullptr;
+        }
+        
+        // Use distance to entry point for priority
+        float hitDistance = tMin;
+        
+        // If active voxel at target depth or leaf, this is a potential hit
+        if ((depth >= currentDepth || node->isLeaf) && node->isActive)
+        {
+            // If this is the closest hit so far, record it
+            if (hitDistance < closestHitDistance) {
+                // Compute hit position and store hover information
+                glm::vec3 hitPosition = rayOrigin + rayDir * tMin;
+                
+                // Compute normal based on which face was hit
+                glm::vec3 centerToHit = hitPosition - node->position;
+                float maxComp = std::max(std::abs(centerToHit.x/halfSize.x), 
+                                      std::max(std::abs(centerToHit.y/halfSize.y), 
+                                             std::abs(centerToHit.z/halfSize.z)));
+                
+                glm::vec3 hitNormal = glm::vec3(0.0f);
+                if (maxComp == std::abs(centerToHit.x/halfSize.x))
+                    hitNormal.x = centerToHit.x > 0 ? 1.0f : -1.0f;
+                else if (maxComp == std::abs(centerToHit.y/halfSize.y))
+                    hitNormal.y = centerToHit.y > 0 ? 1.0f : -1.0f;
+                else
+                    hitNormal.z = centerToHit.z > 0 ? 1.0f : -1.0f;
+                
+                // Save this as the hovered voxel
+                hoverInfo.hasHit = true;
+                hoverInfo.node = node;
+                hoverInfo.position = hitPosition;
+                hoverInfo.normal = hitNormal;
+                hoverInfo.depth = depth;
+                closestHitDistance = hitDistance;
+                foundActiveVoxel = true;
+            }
+        }
+        
+        // Always check children if not at max depth and not a leaf, 
+        // even if we already found a hit - this ensures we find the closest active voxel
+        if (!node->isLeaf && depth < currentDepth)
+        {
+            // Sort children by distance from entry point along ray
+            struct ChildDistance {
+                int index;
+                float distance;
+                
+                bool operator<(const ChildDistance& other) const {
+                    return distance < other.distance;
+                }
+            };
+            
+            std::vector<ChildDistance> sortedChildren;
+            for (int i = 0; i < 8; i++) {
+                if (node->children[i]) {
+                    ChildDistance cd;
+                    cd.index = i;
+                    
+                    // Calculate entry point distance for this child
+                    glm::vec3 childHalfSize = node->children[i]->size * 0.5f;
+                    glm::vec3 childMin = node->children[i]->position - childHalfSize;
+                    glm::vec3 childMax = node->children[i]->position + childHalfSize;
+                    
+                    float childTMin = -std::numeric_limits<float>::max();
+                    float childTMax = std::numeric_limits<float>::max();
+                    
+                    if (rayBoxIntersection(rayOrigin, rayDir, childMin, childMax, childTMin, childTMax)) {
+                        // Only process children that might be closer than our current closest hit
+                        if (!foundActiveVoxel || childTMin < closestHitDistance) {
+                            cd.distance = childTMin;  // Use entry point distance for sorting
+                            sortedChildren.push_back(cd);
+                        }
+                    }
+                }
+            }
+            
+            // Sort by distance (closest first)
+            std::sort(sortedChildren.begin(), sortedChildren.end());
+            
+            // Check children in order from closest to farthest
+            for (const auto& child : sortedChildren) {
+                raycastOctreeForHover(node->children[child.index], rayOrigin, rayDir, depth + 1);
+            }
+        }
+        
+        // If we didn't find an active voxel but are at target depth, conditionally record empty space
+        // Only do this if we haven't found any active voxel yet
+        if (!foundActiveVoxel && depth >= currentDepth && hitDistance < closestEmptyDistance) {
+            // Only record empty space if we haven't found any active node
+            // and this is the closest empty space
+            
+            // Compute hit position for potential placement
+            glm::vec3 hitPosition = rayOrigin + rayDir * tMin;
+            
+            // Compute normal based on entry face
+            glm::vec3 centerToHit = hitPosition - node->position;
+            float maxComp = std::max(std::abs(centerToHit.x/halfSize.x), 
+                                  std::max(std::abs(centerToHit.y/halfSize.y), 
+                                         std::abs(centerToHit.z/halfSize.z)));
+            
+            glm::vec3 hitNormal = glm::vec3(0.0f);
+            if (maxComp == std::abs(centerToHit.x/halfSize.x))
+                hitNormal.x = centerToHit.x > 0 ? 1.0f : -1.0f;
+            else if (maxComp == std::abs(centerToHit.y/halfSize.y))
+                hitNormal.y = centerToHit.y > 0 ? 1.0f : -1.0f;
+            else
+                hitNormal.z = centerToHit.z > 0 ? 1.0f : -1.0f;
+            
+            // Save as hover info for empty space only if no active voxels have been found
+            hoverInfo.hasHit = true;
+            hoverInfo.node = node; // Store node for position reference
+            hoverInfo.position = hitPosition;
+            hoverInfo.normal = hitNormal;
+            hoverInfo.depth = depth;
+            closestEmptyDistance = hitDistance;
+        }
+        
+        return hoverInfo.hasHit;
+    }
+};
+```
+
+### src/main.cpp
+```
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#include <iostream>
+#include <string>
+
+#include "model.h"
+#include "voxel.h"
+#include "camera.h"
+#include "renderer.h"
+#include "input.h"
+
+const unsigned int SCR_WIDTH = 800;
+const unsigned int SCR_HEIGHT = 600;
+
+void printUsageGuide()
+{
+  std::cout << "=== Model Voxelizer - Usage Guide ===" << std::endl;
+  std::cout << "Navigation:" << std::endl;
+  std::cout << "  Left Mouse Button + Drag: Rotate camera" << std::endl;
+  std::cout << "  Right Mouse Button + Drag: Pan camera" << std::endl;
+  std::cout << "  Scroll Wheel: Zoom in/out" << std::endl;
+  std::cout << std::endl;
+  std::cout << "Rendering Modes:" << std::endl;
+  std::cout << "  1: Display model only" << std::endl;
+  std::cout << "  2: Display voxels only" << std::endl;
+  std::cout << "  3: Display both model and voxels (default)" << std::endl;
+  std::cout << std::endl;
+  std::cout << "Voxel Control:" << std::endl;
+  std::cout << "  +/=: Increase octree depth (more detailed voxelization)" << std::endl;
+  std::cout << "  -: Decrease octree depth (less detailed voxelization)" << std::endl;
+  std::cout << "  E: Toggle edit mode (add/remove voxels)" << std::endl;
+  std::cout << "    - In edit mode: Left click to remove voxel" << std::endl;
+  std::cout << "    - In edit mode: Right click to add voxel" << std::endl;
+  std::cout << std::endl;
+  std::cout << "Export:" << std::endl;
+  std::cout << "  O: Export voxelized model as OBJ file" << std::endl;
+  std::cout << std::endl;
+  std::cout << "Exit:" << std::endl;
+  std::cout << "  ESC: Exit application" << std::endl;
+  std::cout << "===================================" << std::endl;
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc < 2)
+  {
+    std::cerr << "Usage: " << argv[0] << " <model_path>" << std::endl;
+    return -1;
+  }
+
+  if (!glfwInit())
+  {
+    std::cerr << "Failed to initialize GLFW" << std::endl;
+    return -1;
+  }
+
+  GLFWwindow *window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Model Voxelizer", NULL, NULL);
+  if (!window)
+  {
+    std::cerr << "Failed to create GLFW window" << std::endl;
+    glfwTerminate();
+    return -1;
+  }
+
+  glfwMakeContextCurrent(window);
+
+  if (glewInit() != GLEW_OK)
+  {
+    std::cerr << "Failed to initialize GLEW" << std::endl;
+    return -1;
+  }
+
+  Camera camera(static_cast<float>(SCR_WIDTH) / static_cast<float>(SCR_HEIGHT));
+  camera.setScreenSize(SCR_WIDTH, SCR_HEIGHT);
+  
+  Renderer renderer(SCR_WIDTH, SCR_HEIGHT);
+
+  std::string modelPath = argv[1];
+  Model model(modelPath);
+
+  // Initialize VoxelGrid with starting depth of 6
+  VoxelGrid voxelGrid(6);
+  voxelGrid.voxelizeModel(model);  // Initial voxelization
+  
+  // Print usage guide in console
+  printUsageGuide();
+
+  renderer.setVoxelGrid(&voxelGrid);
+
+  // Pass model path to the InputHandler for export functionality
+  InputHandler inputHandler(camera, renderer, modelPath);
+  inputHandler.setCallbacks(window);
+
+  while (!glfwWindowShouldClose(window))
+  {
+    renderer.renderScene(model, voxelGrid, camera);
+
+    glfwSwapBuffers(window);
+    glfwPollEvents();
+
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+      glfwSetWindowShouldClose(window, true);
+  }
+
+  glfwTerminate();
+
+  return 0;
+}
+```

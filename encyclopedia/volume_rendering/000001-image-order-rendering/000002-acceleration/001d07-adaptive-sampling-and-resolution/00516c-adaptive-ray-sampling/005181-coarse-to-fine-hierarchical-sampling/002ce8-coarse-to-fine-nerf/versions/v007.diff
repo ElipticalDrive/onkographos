@@ -1,0 +1,360 @@
+--- v006.md
++++ v007.md
+@@ -4,55 +4,45 @@
+ 
+ ## Overview
+-Coarse-to-Fine NeRF is a hierarchical sampling strategy that improves the learning of high-frequency details in Neural Radiance Fields by decoupling the search for opaque regions from the detailed reconstruction of those regions [S1, S4, unofficial]. It solves the problem of inefficient uniform sampling, which wastes computation on empty space and misses fine structures, by first using a coarse network to identify where the scene is opaque and then clustering a second set of samples around those opaque locations to train a fine network [S1, S4, unofficial]. It sets itself apart from standard uniform sampling by adaptively concentrating samples based on learned opacity, and from its sibling [TermiNeRF](8828-terminerf.md) by not explicitly modeling the termination of rays but rather refining the density estimation within the sampled intervals [S4, unofficial].
++Coarse-to-Fine NeRF is a hierarchical sampling strategy that improves the detail and accuracy of neural radiance field (NeRF) rendering by using two distinct networks: a coarse network and a fine network [S1, unofficial][S2][S3, unofficial]. It solves the problem of inefficient uniform sampling, where many samples fall in empty space, by first estimating the opacity distribution of the scene with a coarse pass and then concentrating fine samples in regions of high opacity [S1, S4, unofficial]. Unlike standard uniform sampling, this two-tier approach clusters additional samples near opaque locations, allowing the model to learn high-frequency details without the computational cost of uniformly dense sampling across the entire ray [S1, S4, unofficial]. It sets itself apart from its siblings by establishing the foundational two-stage pipeline where the coarse network's output directly guides the probability density function (PDF) for the fine network's sampling distribution [S2][S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes ray origins $\mathbf{o}$ and directions $\mathbf{d}$ as input. It outputs rendered RGB images and depth maps for both the coarse and fine passes. The core data structures are two Multi-Layer Perceptrons (MLPs): a coarse network ($\text{MLP}_{coarse}$) and a fine network ($\text{MLP}_{fine}$) [S3, S4, unofficial]. Both networks typically share the same architecture (hidden dimensions, number of layers) but maintain separate parameters [S3, unofficial].
++The method processes rays defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   **Coarse Network ($\text{MLP}_{coarse}$):** Takes 3D positions and view directions, outputs raw color and volume density.
++*   **Fine Network ($\text{MLP}_{fine}$):** Takes 3D positions and view directions, outputs raw color and volume density.
++*   **Output:** Final rendered color $\mathbf{C}(\mathbf{r})$, depth, and accumulation maps for both coarse and fine passes.
+ 
+ **Data Structures:**
+-*   **Coarse Network:** Takes positional encoding of 3D points and view direction, outputs raw color (3 channels) and volume density (1 channel) [S5, unofficial].
+-*   **Fine Network:** Identical architecture to coarse, separate weights [S3, unofficial].
+-*   **Sample Points:** 3D coordinates along the ray, computed as $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{d}$, where $t$ is the depth value [S5, unofficial].
++*   **Ray Parameters:** Near bound $t_n$, far bound $t_f$.
++*   **Sample Depths:** 1D tensors $t$ of size $N$ (coarse) or $N_F$ (fine).
++*   **Raw Outputs:** Tensor of shape $(N, 4)$, where the first 3 channels are RGB (sigmoided) and the 4th channel is volume density $\sigma$ [S5, unofficial].
++*   **Weights:** Tensor of shape $(N,)$ representing the contribution of each sample to the final color [S5, unofficial].
+ 
+ **Parameters:**
+-*   $N_c$: Number of coarse samples per ray. Default: 64 [S4, unofficial].
+-*   $N_f$: Number of fine samples per ray. Default: 128 [S4, unofficial].
+-*   `perturb`: Boolean flag to enable jittering of uniform samples during the coarse pass to break symmetry and reduce aliasing. Default: True [S4, unofficial].
+-*   `raw_noise_std`: Standard deviation of uniform noise added to volume density before ReLU activation. Default: 0 [S5, unofficial].
+-*   `white_bkgd`: Boolean flag. If True, adds unaccounted transmittance to the RGB map, assuming a white background [S5, unofficial].
+-*   `pos_levels`: Number of frequency octaves for positional encoding. Default: 10 [S3, unofficial].
+-*   `dir_levels`: Number of frequency octaves for directional encoding. Default: 4 [S3, unofficial].
+-
+-**Step-by-Step Method:**
+-
+-1.  **Coarse Sampling:**
+-    Generate $N_c$ depth values $t_c$ uniformly distributed between the near ($t_n$) and far ($t_f$) bounds of the ray [S4, unofficial]. If `perturb` is enabled, add stratified noise to these values to break symmetry [S4, S3, unofficial].
+-    $$ t_c^{(i)} \in [t_n, t_f] $$
+-    Convert these depth values to 3D points $\mathbf{p}_c$ using the ray origin $\mathbf{o}$ and direction $\mathbf{d}$:
+-    $$ \mathbf{p}_c = \mathbf{o} + t_c \cdot \mathbf{d} $$
+-
+-2.  **Coarse Network Query:**
+-    Query $\text{MLP}_{coarse}$ with $\mathbf{p}_c$ and view direction $\mathbf{d}$ to obtain raw outputs $\mathbf{raw}_c$. The raw output has shape $(N_c, 4)$, where the first 3 channels are raw RGB and the 4th channel is raw volume density $\sigma_c$ [S5, unofficial].
+-
+-3.  **Coarse Volume Rendering:**
+-    Convert raw outputs to alpha compositing weights $w_c$ using the `raw2outputs` procedure (defined below) [S5, unofficial]. This involves:
+-    *   Calculating segment distances $\delta_i = t_{i+1} - t_i$, appending an infinite distance ($10^{10}$) to the last segment to force the final opacity to 1 [S5, unofficial].
+-    *   Applying ReLU to density: $\hat{\sigma} = \text{ReLU}(\sigma + \mathcal{U}[0, 1] \cdot \text{raw\_noise\_std})$ [S5, unofficial].
+-    *   Computing alpha: $\alpha = 1 - \exp(-\hat{\sigma} \cdot \delta)$ [S5, unofficial].
+-    *   Computing transmittance $T$: $T_i = \exp(-\sum_{j=1}^{i-1} \hat{\sigma}_j \delta_j)$, prepended with 1 [S5, unofficial].
+-    *   Computing weights: $w_i = \alpha_i T_i$ [S5, unofficial].
+-    *   Rendering coarse color: $\mathbf{C}_{coarse} = \sum w_i \mathbf{c}_i$ [S5, unofficial].
+-
+-4.  **Hierarchical (Fine) Sampling:**
+-    Use the coarse weights $w_c$ as a probability density function (PDF) to sample $N_f$ new depth values $t_f$ [S4, unofficial]. This is typically done via inverse transform sampling from the cumulative distribution function (CDF) derived from $w_c$ [S6].
+-    *   **Crucial Implementation Detail:** The coarse samples $t_c$ and weights $w_c$ must be detached from the computational graph (e.g., using `.detach()`) before this step to prevent gradients from flowing back through the non-differentiable sampling process to the coarse network [S4, S5, unofficial].
+-
+-5.  **Fine Network Query:**
+-    Concatenate the coarse samples $t_c$ and the newly sampled fine depths $t_f$ into a single sorted list $t_{fine} = \text{sort}([t_c, t_f])$ [S4, S5, unofficial].
+-    Convert $t_{fine}$ to 3D points $\mathbf{p}_{fine}$ [S5, unofficial].
+-    Query $\text{MLP}_{fine}$ with $\mathbf{p}_{fine}$ and $\mathbf{d}$ to obtain raw outputs $\mathbf{raw}_{fine}$ [S5, unofficial].
+-
+-6.  **Fine Volume Rendering:**
+-    Apply the same `raw2outputs` procedure to $\mathbf{raw}_{fine}$ and $t_{fine}$ to compute fine weights $w_{fine}$ and render the final color $\mathbf{C}_{fine}$ [S5, unofficial].
++*   $N_C$: Number of coarse samples per ray. Default: 64 [S4, unofficial].
++*   $N_F$: Number of fine samples per ray. Default: 128 [S4, unofficial].
++*   `perturb`: Boolean flag to enable jittering of coarse samples. Default: True [S4, unofficial].
++*   `raw_noise_std`: Standard deviation of noise added to $\sigma$ before ReLU. Default: 0 [S5, unofficial].
++*   `white_bkgd`: Boolean flag to assume a white background. Default: False [S5, unofficial].
++*   `pos_levels`: Frequency octaves for positional encoding. Default: 10 [S3, unofficial].
++*   `dir_levels`: Frequency octaves for directional encoding. Default: 4 [S3, unofficial].
++
++**Steps:**
++
++1.  **Coarse Sampling:** Generate $N_C$ sample depths $t_c$ uniformly along the ray between $t_n$ and $t_f$. If `perturb` is True, add uniform noise $\mathcal{U}[0, 1]$ to break symmetry and reduce aliasing [S4, unofficial].
++    $$ t_c^{(i)} = t_n + (t_f - t_n) \frac{i + \mathcal{U}[0,1]}{N_C}, \quad i = 0, \dots, N_C-1 $$
++2.  **Coarse Network Query:** Query $\text{MLP}_{coarse}$ at positions $\mathbf{x}_c = \mathbf{o} + t_c \mathbf{d}$ to obtain raw outputs $\mathbf{raw}_c \in \mathbb{R}^{N_C \times 4}$ [S4, unofficial].
++3.  **Coarse Volume Rendering:** Convert $\mathbf{raw}_c$ to weights $w_c$ using alpha compositing [S5, unofficial]:
++    *   Calculate segment distances $\delta_i = t_{c}^{(i+1)} - t_{c}^{(i)}$. Append $\delta_{N_C} = 10^{10}$ to the end [S5, unofficial].
++    *   Apply ReLU to density: $\hat{\sigma}_i = \text{ReLU}(\sigma_i + \mathcal{N}(0, \text{raw\_noise\_std}^2))$ [S5, unofficial].
++    *   Compute opacity: $\alpha_i = 1 - \exp(-\hat{\sigma}_i \delta_i)$ [S5, unofficial].
++    *   Compute transmittance: $T_i = \exp(-\sum_{j=1}^{i-1} \hat{\sigma}_j \delta_j)$, with $T_1 = 1$ [S5, unofficial].
++    *   Compute weights: $w_i = \alpha_i T_i$ [S5, unofficial].
++4.  **Hierarchical Sampling (Fine):** Use $w_c$ as a PDF to sample $N_F$ new depths $t_f$ via inverse transform sampling [S4, S5, unofficial].
++    *   Compute midpoints $t_{mid}^{(i)} = (t_c^{(i)} + t_c^{(i+1)}) / 2$ [S5, unofficial].
++    *   Sample $t_f$ from the distribution defined by $w_c$ and $t_{mid}$ [S5, unofficial].
++    *   **Crucial:** Detach $t_c$ and $w_c$ from the computation graph to prevent gradients from flowing back through the non-differentiable sampling step to the coarse network [S4, S5, unofficial].
++5.  **Fine Network Query:** Concatenate coarse and fine depths $t_{fine} = \text{sort}([t_c, t_f])$. Query $\text{MLP}_{fine}$ at $\mathbf{x}_{fine} = \mathbf{o} + t_{fine} \mathbf{d}$ to obtain $\mathbf{raw}_{fine}$ [S4, S5, unofficial].
++6.  **Fine Volume Rendering:** Convert $\mathbf{raw}_{fine}$ to final color $\mathbf{C}_{fine}$ using the same alpha compositing logic as Step 3 [S5, unofficial].
+ 
+ **Pseudocode:**
+@@ -64,6 +54,6 @@
+ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False):
+     """
+-    Converts raw network outputs to radiance, depth, and weights.
+-    raw: (ray_count, sample_count, 4) -> RGB (sigmoided) and sigma
++    Converts raw network outputs to volume rendering components.
++    raw: (ray_count, sample_count, 4) -> RGB (sigmoided) + sigma
+     z_vals: (ray_count, sample_count)
+     rays_d: (ray_count, 3)
+@@ -71,28 +61,31 @@
+     # Calculate distances between samples
+     dists = z_vals[..., 1:] - z_vals[..., :-1]
+-    # Append infinite distance to the last segment to ensure last alpha is 1
++    # Append infinite distance for the last segment to force opacity 1
+     dists = torch.cat([dists, torch.full_like(dists[..., :1], 1e10)], dim=-1)
+-    # Scale by ray direction norm (usually 1 for normalized rays)
++    # Scale by ray direction norm
+     dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+     
+-    # Sigmoid raw RGB to [0, 1]
++    # Extract RGB and Sigma
+     rgb = torch.sigmoid(raw[..., :3])
+-    
+-    # Add noise to density if specified
+-    noise = 0.
+-    if raw_noise_std > 0.:
+-        noise = torch.randn(raw[..., 3].shape) * raw_noise_std
++    sigma = raw[..., 3]
++    
++    # Add noise to sigma if specified
++    if raw_noise_std > 0:
++        noise = torch.randn_like(sigma) * raw_noise_std
++        sigma = sigma + noise
+         
+-    # ReLU density and compute alpha
+-    sigma = raw[..., 3] + noise
+-    alpha = 1. - torch.exp(-F.relu(sigma) * dists)
+-    
+-    # Compute transmittance T: product of (1 - alpha)
+-    # Prepend 1.0 for T_0
+-    ones = torch.ones_like(alpha[..., :1])
+-    accum_one_minus_alpha = torch.cat([ones, 1. - alpha + 1e-10], dim=-1)
+-    T = torch.cumprod(accum_one_minus_alpha, dim=-1)[..., :-1]
+-    
+-    # Weights: alpha * transmittance
++    # Apply ReLU to sigma
++    sigma = F.relu(sigma)
++    
++    # Compute alpha
++    alpha = 1.0 - torch.exp(-sigma * dists)
++    
++    # Compute transmittance T
++    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    # Equivalent to cumulative product of (1 - alpha)
++    transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha + 1e-10], dim=-1), dim=-1)
++    T = transmittance[..., :-1]
++    
++    # Compute weights
+     weights = alpha * T
+     
+@@ -102,13 +95,12 @@
+     acc_map = torch.sum(weights, dim=-1)
+     
++    # Handle white background
+     if white_bkgd:
+-        rgb_map = rgb_map + (1. - acc_map[..., None])
++        rgb_map = rgb_map + (1.0 - acc_map[..., None])
+         
+-    return rgb_map, depth_map, weights
+-
+-def render_rays_coarse_to_fine(rays_o, rays_d, near, far, 
+-                               n_coarse=64, n_fine=128, 
+-                               coarse_net=None, fine_net=None,
+-                               perturb=True, raw_noise_std=0, white_bkgd=False):
++    return rgb_map, depth_map, acc_map, weights, T
++
++def render_rays_coarse_fine(rays_o, rays_d, near, far, n_coarse, n_fine, 
++                            coarse_mlp, fine_mlp, perturb=True, raw_noise_std=0):
+     """
+     Implements the Coarse-to-Fine NeRF rendering pipeline.
+@@ -120,48 +112,54 @@
+     
+     if perturb:
+-        mid = (t_vals[..., :-1] + t_vals[..., 1:]) / 2
++        mid = (t_vals[..., :-1] + t_vals[..., 1:]) / 2.0
+         upper = torch.cat([mid, t_vals[..., -1:]], dim=-1)
+         lower = torch.cat([t_vals[..., :1], mid], dim=-1)
+         t_vals = lower + (upper - lower) * torch.rand_like(t_vals)
+         
+-    # Convert to 3D points
++    # Query Coarse MLP
+     pts_coarse = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_vals.unsqueeze(2)
+-    
+-    # 2. Query Coarse Network
+-    # Assume coarse_net takes (pts, dirs) and returns (rgb_raw, sigma_raw)
+-    # This is a placeholder for the actual MLP forward pass structure
+-    raw_coarse = coarse_net(pts_coarse, rays_d) 
+-    
+-    # 3. Render Coarse
+-    rgb_coarse, depth_coarse, weights_coarse = raw2outputs(
+-        raw_coarse, t_vals, rays_d, raw_noise_std, white_bkgd
++    # Assume MLP takes (pts, dirs) and returns raw outputs
++    raw_coarse = coarse_mlp(pts_coarse, rays_d.unsqueeze(1).expand_as(pts_coarse))
++    
++    # Render Coarse
++    rgb_coarse, depth_coarse, acc_coarse, weights_coarse, _ = raw2outputs(
++        raw_coarse, t_vals, rays_d, raw_noise_std
+     )
+     
+-    # 4. Hierarchical Sampling (Fine)
+-    # Detach to break gradient flow from fine to coarse sampling distribution
++    # 2. Hierarchical Sampling for Fine Pass
++    # Compute midpoints for importance sampling
++    t_mid = (t_vals[..., :-1] + t_vals[..., 1:]) / 2.0
++    
++    # Sample from weights_coarse using inverse transform sampling
++    # Note: weights_coarse must be detached to break gradient flow
+     weights_coarse_detached = weights_coarse.detach()
+     t_vals_detached = t_vals.detach()
+     
+-    # Sample fine points based on coarse weights (Inverse Transform Sampling)
+-    # Note: In a real implementation, this uses torch.searchsorted or similar
+-    # on the CDF of weights_coarse_detached.
+-    # Here we simulate the result of sampling N_f points from the distribution.
+-    # We assume a helper function sample_pdf exists which returns t_fine.
+-    t_fine = sample_pdf(t_vals_detached, weights_coarse_detached, n_fine, detach=True)
+-    
+-    # 5. Concatenate and Sort
+-    t_fine = t_fine.detach() # Ensure no gradients flow back to sampling logic
+-    t_all = torch.cat([t_vals, t_fine], dim=-1)
+-    t_all, _ = torch.sort(t_all, dim=-1)
+-    
+-    # Convert to 3D points
+-    pts_fine = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_all.unsqueeze(2)
+-    
+-    # 6. Query Fine Network
+-    raw_fine = fine_net(pts_fine, rays_d)
+-    
+-    # 7. Render Fine
+-    rgb_fine, depth_fine, weights_fine = raw2outputs(
+-        raw_fine, t_all, rays_d, raw_noise_std, white_bkgd
++    # Simple inverse transform sampling from the discrete distribution
++    # In practice, this often uses a helper like sample_pdf
++    # Here we simulate the logic: draw uniform randoms and map to t_mid bins weighted by weights
++    u = torch.rand_like(t_vals_detached)
++    # Normalize weights to sum to 1 for each ray
++    weights_norm = weights_coarse_detached / (weights_coarse_detached.sum(dim=-1, keepdim=True) + 1e-10)
++    # Cumulative sum
++    cumsum_weights = torch.cumsum(weights_norm, dim=-1)
++    # Find indices where u falls
++    indices = torch.searchsorted(cumsum_weights, u, side='right')
++    # Clamp indices
++    indices = torch.clamp(indices, 0, n_coarse - 2)
++    # Interpolate within bins
++    t_fine = t_mid.gather(1, indices) + torch.rand_like(t_vals) * (t_vals[..., 1:] - t_vals[..., :-1]).gather(1, indices)
++    
++    # 3. Concatenate and Sort
++    t_fine_samples = torch.cat([t_vals, t_fine], dim=-1)
++    t_fine_samples, _ = torch.sort(t_fine_samples, dim=-1)
++    
++    # 4. Query Fine MLP
++    pts_fine = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_fine_samples.unsqueeze(2)
++    raw_fine = fine_mlp(pts_fine, rays_d.unsqueeze(1).expand_as(pts_fine))
++    
++    # 5. Render Fine
++    rgb_fine, depth_fine, acc_fine, weights_fine, _ = raw2outputs(
++        raw_fine, t_fine_samples, rays_d, raw_noise_std
+     )
+     
+@@ -172,73 +170,13 @@
+         'depth_fine': depth_fine
+     }
+-
+-def sample_pdf(bins, weights, N_samples, detach=False):
+-    """
+-    Performs inverse transform sampling from the PDF defined by weights on bins.
+-    bins: (B, N_c) sorted depth values
+-    weights: (B, N_c) importance weights
+-    N_samples: int, number of fine samples
+-    """
+-    # Get PDF by normalizing weights
+-    pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
+-    # Get CDF by cumulative sum
+-    cdf = torch.cumsum(pdf, dim=-1)
+-    # Ensure CDF ends at 1.0
+-    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+-    cdf = torch.clamp(cdf, min=0.0, max=1.0)
+-    
+-    # Sample uniform values in [0, 1]
+-    u = torch.rand(*cdf.shape[:-1], N_samples, device=bins.device)
+-    
+-    # Inverse transform: find where u falls in the CDF
+-    # torch.searchsorted returns indices where u would be inserted to maintain order
+-    indices = torch.searchsorted(cdf, u, side='left')
+-    
+-    # Clamp indices to valid range
+-    indices = torch.clamp(indices, 0, cdf.shape[-1] - 2)
+-    
+-    # Interpolate within the bin
+-    bin_low = bins[torch.arange(cdf.shape[0]), indices]
+-    bin_high = bins[torch.arange(cdf.shape[0]), indices + 1]
+-    cdf_low = cdf[torch.arange(cdf.shape[0]), indices]
+-    cdf_high = cdf[torch.arange(cdf.shape[0]), indices + 1]
+-    
+-    # Linear interpolation
+-    t = (u - cdf_low) / (cdf_high - cdf_low + 1e-10)
+-    samples = bin_low + t * (bin_high - bin_low)
+-    
+-    if detach:
+-        samples = samples.detach()
+-        
+-    return samples
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Gradient Flow:** The sampling step is non-differentiable. Gradients must not flow back through the hierarchical sampling step to the coarse model's density predictions. This is achieved by detaching the coarse samples and weights before passing them to the fine sampling logic [S4, S5, unofficial].
+-*   **Compute Graph Cycles:** The coarse-to-fine edge must be cut to prevent cyclic definitions in the compute graph, which would cause backpropagation to fail [S5, unofficial].
+-*   **Precision:** The infinite distance ($10^{10}$) appended to the last segment ensures that the transmittance after the last sample is effectively zero, forcing the opacity of the last segment to 1, which correctly handles the ray termination [S5, unofficial].
+-
+ ## Subtopics
+ 
+-### [Hexagonal Multisampling Pattern Derivation](3498-hexagonal-multisampling-pattern-derivation.md)
+-Constructs a multisampling pattern for a conical frustum by warping a cylindrical pattern to match analytical mean and covariance, ensuring uniform distribution along the ray and in angles while minimizing sample count.
+-
+-### [DONeRF Depth Oracle Filtering](4472-donerf-depth-oracle-filtering.md)
+-A preprocessing step for depth oracle training targets that smooths classification targets in image and depth space to improve surface detection consistency.
+-
+-### [Hierarchical Sampling for Hemispherical Wavefronts](4691-hierarchical-sampling-for-hemispherical-wavefronts.md)
+-A differentiable hierarchical sampling scheme for 2D hemispherical wavefronts in Non-Line-of-Sight imaging, distinct from 1D ray sampling.
+-
+-### [Mip-NeRF 360 Proposal Sampling](5408-mip-nerf-360-proposal-sampling.md)
+-Uses a cascade of proposal networks and Gaussian casting to reduce aliasing in unbounded scenes, differing from standard NeRF by concurrently optimizing a proposal network and using midpoints for fine interval boundaries.
+-
+-### [ENeRF](7184-enerf.md)
+-Replaces uniform ray sampling with geometry-aware sampling guided by a cascade cost volume, reducing sample points by up to 128× while maintaining accuracy.
+-
+ ### Single Multiscale MLP Architecture
+-A variant that uses a single MLP with parameters $\Theta$ for both coarse and fine sampling stages, enabled by Integrated Positional Encoding (IPE) features which explicitly encode scale into input features [S6]. Unlike standard NeRF which uses two distinct MLPs because PE features only model one scale, this approach allows one MLP to learn a multiscale representation [S6]. The optimization problem balances coarse and fine losses with a hyperparameter $\lambda$ (default 0.1) [S6].
++A variant that uses a single MLP with parameters $\Theta$ for both coarse and fine stages, enabled by Integrated Positional Encoding (IPE) which explicitly encodes scale into input features [S6]. Unlike standard NeRF which requires two distinct MLPs because PE features only model one scale, this approach allows one MLP to learn a multiscale representation [S6]. The optimization balances coarse and fine losses with a hyperparameter $\lambda$ (default 0.1) [S6].
+ 
+ ### Segmented Sampling
+-A strategy that selectively increases the sampling rate only within the bounding box of an object area to ensure detailed sampling without significantly increasing overall computational cost [S7]. It addresses the pitfall of direct composition leading to missing areas of the object due to sparse sampling points on small objects relative to the scene [S7].
++A strategy that selectively increases the sampling rate only within the bounding box of an object area to ensure detailed sampling without significantly increasing overall computational cost [S7]. It addresses the pitfall where standard uniform sampling results in sparse points on small objects relative to the scene, causing parts of the object to fall between sampled points and leading to inaccurate PDFs in the fine stage [S7].
+ 
+ ### DONeRF PDF Sampling
+@@ -246,14 +184,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires two network queries per ray: one for $N_c$ coarse samples and one for $N_c + N_f$ fine samples. Total evaluations per ray: $N_c + (N_c + N_f) = 2N_c + N_f$. With default values ($N_c=64, N_f=128$), this is 256 evaluations per ray, compared to 192 for uniform sampling with similar total points if only one network were used, but providing higher quality [S4, unofficial].
+-*   **Memory Complexity:** Requires storing parameters for two MLPs (coarse and fine) and intermediate tensors for coarse weights during the fine sampling step. Memory usage is roughly double that of a single-network NeRF implementation [S3, unofficial].
+-*   **Performance:** Significantly improves detail learning and reduces aliasing compared to uniform sampling by clustering samples in opaque regions [S1, unofficial]. It is more computationally expensive than single-pass methods but offers a better quality-speed trade-off than dense uniform sampling [S2].
+-*   **Strengths:** Efficiently captures high-frequency details; prevents dense sampling in empty space; simple to implement with standard differentiable rendering pipelines [S1, S4, unofficial].
+-*   **Limitations:** Requires careful handling of gradient flow (detaching samples); two networks increase memory footprint; performance depends on the quality of the coarse network's opacity estimation [S4, S5, unofficial].
+-*   **When to use:** When high-frequency detail is important and uniform sampling is too sparse or inefficient.
+-*   **When not to use:** When memory is extremely constrained or real-time inference speed is the primary concern without hardware acceleration [S2].
++*   **Time Complexity:** $O(N_C + N_F)$ MLP evaluations per ray, where $N_C$ and $N_F$ are the number of coarse and fine samples. Typically $N_C=64, N_F=128$ [S4, unofficial].
++*   **Memory Complexity:** $O(N_C + N_F)$ per ray to store sample positions, raw outputs, and weights [S5, unofficial].
++*   **Performance:** Improves rendering quality by focusing computational budget on opaque regions, reducing aliasing and missing details compared to uniform sampling [S1, S4, unofficial].
++*   **Strengths:** Efficiently captures high-frequency details; reduces noise in rendered images [S1, S4, unofficial].
++*   **Limitations:** Requires two network passes per ray; non-differentiable sampling step requires careful gradient management (detaching) [S4, S5, unofficial].
++*   **When to use:** When high-quality detail is required and uniform sampling is too sparse or computationally prohibitive to increase density globally [S1, S4, unofficial].
++*   **When not to use:** In extremely unbounded scenes where the far bound is very large, as uniform coarse sampling may miss all opaque regions if $N_C$ is small [S1, unofficial].
+ 
+ ## Background
+-Coarse-to-Fine NeRF, also known as Hierarchical Rendering, was introduced in the original NeRF paper by Mildenhall et al. in 2020 [S2, S8]. It was designed to improve computational efficiency and rendering quality by using two networks: a coarse network to guide sampling and a fine network for detailed reconstruction [S2]. The method has become a standard component in many subsequent NeRF variants, including Mip-NeRF and ENeRF, which build upon this hierarchical sampling concept [S1, unofficial][S6].
++Coarse-to-Fine NeRF, also known as Hierarchical Rendering, was introduced in the original NeRF paper by Mildenhall et al. [S2][S5, unofficial]. It was designed to improve computational efficiency and rendering quality by using a coarse network to guide the sampling of a fine network [S2]. The method has become a standard component in many NeRF variants and acceleration techniques [S2].
+ 
+ ## Sources

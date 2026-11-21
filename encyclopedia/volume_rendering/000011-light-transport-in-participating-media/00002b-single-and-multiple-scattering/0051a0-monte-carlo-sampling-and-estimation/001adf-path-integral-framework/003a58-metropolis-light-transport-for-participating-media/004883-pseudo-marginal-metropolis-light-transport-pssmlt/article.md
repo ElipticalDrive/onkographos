@@ -1,0 +1,230 @@
+# Pseudo-marginal Metropolis Light Transport (PSSMLT)
+
+Also called: PSSMLT with ratio tracking, Pseudo-marginal ERPT, Pseudo-marginal MCMC for rendering, Unbiased estimator-based MH
+
+## Overview
+Pseudo-marginal Metropolis Light Transport (PSSMLT) is a Monte Carlo method that enables Metropolis-Hastings sampling in scenes with heterogeneous participating media by replacing the intractable exact light path contribution function with a non-negative, unbiased estimator [S1]. Unlike methods that use biased approximations (such as deterministic ray-marching) which fail to target the correct density, PSSMLT constructs an extended target distribution in an auxiliary space to ensure the marginal distribution of sampled paths remains exact [S1]. It distinguishes itself from standard PSSMLT implementations that rely on delta tracking by utilizing ratio tracking, which is significantly faster and allows for longer Markov chains and better path space exploration [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Current light path $\bar{x}_i$ in path space [S1].
+*   Current auxiliary variable $u_i$ representing the random quantities used to estimate the contribution of $\bar{x}_i$ [S1].
+*   Scene description including heterogeneous extinction coefficients $\sigma_t(x)$, scattering coefficients, and phase functions [S1].
+*   Proposal distribution $q(\bar{x}_{i+1} | \bar{x}_i)$ for perturbing light paths [S1].
+*   Parameter $M$: The number of averaged ratio trackings used to estimate the transmission (typically $M=1$) [S1].
+*   Parameter $\gamma$: Scale parameter for medium vertex perturbation (typical values 50 and 100) [S1].
+
+**Outputs:**
+*   A sequence of light paths $\{\bar{x}_i\}_{i \ge 1}$ distributed according to the exact target density $\pi(\bar{x}) = L(\bar{x})/Z$ [S1].
+
+### Data Structures
+The state of the Markov chain is maintained as a pair $(\bar{x}_i, \hat{L}_i)$, where:
+*   $\bar{x}_i$: The current light path, defined as a sequence of vertices $\{x_0, x_1, \dots, x_k\}$ and interaction types [S1].
+*   $\hat{L}_i$: A scalar floating-point value representing the unbiased estimate of the path contribution $L(\bar{x}_i)$, computed using $M$ independent ratio tracking samples [S1].
+
+### Algorithm Steps
+
+1.  **Initialization**: Generate an initial light path $\bar{x}_0$ using a standard path tracing technique [G]. Compute the initial unbiased contribution estimate $\hat{L}_0$ using $M$ independent ratio tracking samples [G]. Set $i=0$ [G].
+2.  **Proposal**: Given the current state $(\bar{x}_i, \hat{L}_i)$, propose a new light path $\bar{x}_{i+1}$ using the proposal distribution $q(\bar{x}_{i+1} | \bar{x}_i)$ [S1].
+    *   *Vertex Perturbation in Media*: To update a medium vertex $x_j$, perturb it with uniform probability forward or backward along the current edge [S1]. The perturbation distance $d$ is drawn from a distribution proportional to $\gamma \sigma_t(x_j) \exp(-\gamma \sigma_t(x_j))$, where $\sigma_t(x_j)$ is the extinction coefficient at the vertex and $\gamma$ is a scale parameter [S1]. In practice, a mixture of perturbations with different $\gamma$ values (e.g., 50 and 100) is used [S1].
+    *   *Bidirectional Mutation*: For bidirectional path mutation in media, use delta tracking to propose new vertices [S1].
+3.  **Estimation**: Generate a new auxiliary variable $u_{i+1}$ by computing a new unbiased estimate $\hat{L}(\bar{x}_{i+1})$ independently of previous estimates [S1]. This involves generating $M$ independent ratio tracking samples to estimate the transmittance terms along the path segments [S1].
+4.  **Acceptance**: Calculate the acceptance probability $\alpha$:
+    $$
+    \alpha = \min \left( 1, \frac{\hat{L}(\bar{x}_{i+1})}{\hat{L}(\bar{x}_i)} \cdot \frac{q(\bar{x}_i | \bar{x}_{i+1})}{q(\bar{x}_{i+1} | \bar{x}_i)} \right)
+    $$
+    The terms related to the auxiliary variable distribution $g(u|\bar{x})$ cancel out in the ratio because the new estimate is generated independently of previous estimates [S1]. The proposal densities cancel if delta tracking is used with respect to the luminance of transmission [S1].
+5.  **Update**:
+    *   If $\alpha \ge \text{random}[0,1]$, accept the new path: set $\bar{x}_{i+1}$ as the current path and $\hat{L}_{i+1}$ as the current estimate [S1].
+    *   Otherwise, reject the proposal: keep $\bar{x}_i$ and $\hat{L}_i$ [S1].
+    *   Increment $i$ [G].
+
+### Formulas
+
+**Extended Target Distribution:**
+The method relies on an extended target distribution $\phi(\bar{x}, u)$ in the joint space of paths and auxiliary variables:
+$$
+\phi(\bar{x}, u) = \frac{\hat{L}(\bar{x})}{Z} g(u | \bar{x})
+$$
+where $\hat{L}(\bar{x})$ is the unbiased estimator, $Z$ is the normalization constant, and $g(u | \bar{x})$ is the distribution of the random quantities used to generate the estimate [S1].
+
+**Unbiased Estimator for Total Path Contribution:**
+For a path $\bar{x}_j$ with vertices $x_0, \dots, x_k$, the estimator $\hat{L}_u(\bar{x}_j)$ is:
+$$
+\hat{L}_u(\bar{x}_j) = L_e \cdot \prod_{i=0}^{k-1} G(x_i, x_{i+1}) \cdot \hat{T}_i(x_i, x_{i+1}) \cdot \rho(x_i) \cdot \prod_{j=1}^{k-1} \hat{T}_j(x_j, x_{j+1})
+$$
+where:
+*   $L_e$ is the emitted radiance [S1].
+*   $G(x_i, x_{i+1})$ is the geometric term [S1].
+*   $\rho(x_i)$ is the scattering density or albedo [S1].
+*   $\hat{T}_i(x_i, x_{i+1})$ are independent unbiased estimators of transmission obtained via ratio tracking [S1].
+
+**Acceptance Probability (General Form):**
+$$
+\alpha = \min \left( 1, \frac{\hat{L}(\bar{x}_{i+1}) q(\bar{x}_i | \bar{x}_{i+1}) g(u_i | \bar{x}_i)}{\hat{L}(\bar{x}_i) q(\bar{x}_{i+1} | \bar{x}_i) g(u_{i+1} | \bar{x}_{i+1})} \cdot \frac{u_{i+1}}{u_i} \right)
+$$
+However, since $u$ represents the random seed for the estimator and the new estimate is generated independently, the standard implementation simplifies to the ratio of the estimates and proposal densities [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def geometric_term(x1, x2):
+    """Standard geometric term G(x1, x2) = cos(theta1)cos(theta2) / r^2 [G]."""
+    dx = x2[0] - x1[0]
+    dy = x2[1] - x1[1]
+    dz = x2[2] - x1[2]
+    r2 = dx*dx + dy*dy + dz*dz
+    if r2 == 0:
+        return 0.0
+    return 1.0 / r2
+
+def scattering_density(x):
+    """Returns scattering coefficient or albedo at vertex x [G]."""
+    # Scene-specific lookup
+    return 1.0
+
+def extinction_coefficient(x, scene):
+    """Returns extinction coefficient sigma_t(x) at vertex x [G]."""
+    # Scene-specific lookup
+    return 1.0
+
+def ratio_tracking_transmittance(x_start, x_end, scene, M):
+    """Computes unbiased transmittance estimate using M averaged ratio trackings [G].
+    Standard ratio tracking samples interaction points uniformly along the segment,
+    computes weights w = sigma_t(x) / p(x), and estimates transmittance as
+    (1/M) * sum( exp(-int_0^x sigma_t) * sigma_t(x) / w ).
+    """
+    total_weight = 0.0
+    L = math.sqrt((x_end[0]-x_start[0])**2 + (x_end[1]-x_start[1])**2 + (x_end[2]-x_start[2])**2)
+    if L == 0:
+        return 1.0
+    p_uniform = 1.0 / L
+    for _ in range(M):
+        t = random.random()
+        x_sample = (x_start[0] + t*(x_end[0]-x_start[0]),
+                    x_start[1] + t*(x_end[1]-x_start[1]),
+                    x_start[2] + t*(x_end[2]-x_start[2]))
+        sigma_t = extinction_coefficient(x_sample, scene)
+        w = sigma_t / p_uniform
+        # Approximate transmittance to sample point using constant sigma_t for simplicity
+        # In practice, integrate sigma_t along the segment [G]
+        sigma_t_avg = (extinction_coefficient(x_start, scene) + sigma_t) / 2.0
+        T_to_sample = math.exp(-sigma_t_avg * t * L)
+        total_weight += T_to_sample * sigma_t / w
+    return total_weight / M
+
+def propose_path(current_path, scene, gamma_values):
+    """Proposes a new path by perturbing a medium vertex [S1]."""
+    new_vertices = [list(v) for v in current_path]
+    
+    vertex_index = random.randint(1, len(new_vertices) - 2)
+    vertex = new_vertices[vertex_index]
+    
+    sigma_t = extinction_coefficient(vertex, scene)
+    gamma = random.choice(gamma_values)
+    
+    u = random.random()
+    d = -math.log(1.0 - u) / (gamma * sigma_t)
+    
+    direction = 1 if random.random() < 0.5 else -1
+    edge_vector = [new_vertices[vertex_index + 1][k] - new_vertices[vertex_index - 1][k] for k in range(3)]
+    norm = math.sqrt(sum(c*c for c in edge_vector))
+    if norm == 0:
+        return current_path
+    edge_vector = [c / norm for c in edge_vector]
+    
+    new_vertices[vertex_index] = [vertex[k] + direction * d * edge_vector[k] for k in range(3)]
+    return new_vertices
+
+def compute_unbiased_contribution(path, scene, M):
+    """Computes unbiased estimator L_hat(path) using ratio tracking [S1]."""
+    contribution = 1.0
+    for i in range(len(path) - 1):
+        x_i = path[i]
+        x_next = path[i+1]
+        
+        G = geometric_term(x_i, x_next)
+        contribution *= G
+        
+        rho = scattering_density(x_i)
+        contribution *= rho
+        
+        T_hat = ratio_tracking_transmittance(x_i, x_next, scene, M)
+        contribution *= T_hat
+        
+    return contribution
+
+def compute_proposal_ratio(old_path, new_path, scene, gamma_values):
+    """Computes q(old|new)/q(new|old). Returns 1.0 if delta tracking is used [S1]."""
+    return 1.0
+
+def pseudo_marginal_mlt_step(current_path, current_estimate, scene, gamma_values, M):
+    """Performs one iteration of PSSMLT [S1]."""
+    proposed_path = propose_path(current_path, scene, gamma_values)
+    new_estimate = compute_unbiased_contribution(proposed_path, scene, M)
+    
+    proposal_ratio = compute_proposal_ratio(current_path, proposed_path, scene, gamma_values)
+    ratio = (new_estimate / current_estimate) * proposal_ratio
+    
+    if random.random() < min(1.0, ratio):
+        return proposed_path, new_estimate
+    else:
+        return current_path, current_estimate
+```
+
+### Parameters
+*   **$M$**: The number of averaged ratio trackings used to estimate the transmission. A value of $M=1$ is recommended for complex scenes to allow longer Markov chains [S1].
+*   **$\gamma$**: A scale parameter for medium vertex perturbation. Typical values used are 50 and 100, mixed with uniform probability [S1].
+
+### Edge Cases and Pitfalls
+*   **Poor Mixing**: If $M$ is too low, the mixing of the marginal subchain can be poor [S1]. Overestimation of the exact quantity can cause the chain to get stuck at the current light path, leading to long series of rejected samples [S1]. A rule of thumb is to choose $M$ so that the variance of $\log(\hat{L}(\bar{x}))$ is approximately one, though this assumption often does not hold in practice [S1].
+*   **Bias**: Using a biased estimate of the transmission (e.g., deterministic ray-marching) causes the resulting Markov chain to not necessarily target the desired density $\pi(\bar{x})$ [S1].
+*   **Precision**: The unbiased estimator must be non-negative to satisfy the pseudo-marginal framework [S1].
+
+## Subtopics
+
+### PSSMLT with Ratio Tracking
+*   **What it is**: An implementation of PSSMLT that uses ratio tracking [Novák et al. 2014] to generate unbiased estimates of transmittance in heterogeneous media.
+*   **Difference**: It is significantly faster than PSSMLT with delta tracking [Raab et al. 2008] and produces less image noise than ERPT with Simpson quadrature ray-marching by enabling longer Markov chains.
+*   **When to choose**: Use when rendering heterogeneous participating media and efficiency is critical. It is preferred over delta tracking for speed and over ray-marching for unbiasedness.
+*   **Link**: [PSSMLT with Ratio Tracking](52-pssmlt-ratio-tracking.md)
+
+### PSSMLT with Delta Tracking
+*   **What it is**: An earlier implementation of PSSMLT that uses delta tracking to estimate transmittance.
+*   **Difference**: Slower than ratio tracking due to the higher number of samples required for delta tracking in heterogeneous media.
+*   **When to choose**: Use only if ratio tracking is not applicable or for comparison purposes.
+*   **Link**: [PSSMLT with Delta Tracking](52-pssmlt-delta-tracking.md)
+
+### Pseudo-marginal ERPT
+*   **What it is**: The application of the pseudo-marginal framework to Energy Redistribution Path Tracing (ERPT).
+*   **Difference**: ERPT allows for more efficient local path perturbations compared to PSSMLT, leading to better exploration of path space in some scenes.
+*   **When to choose**: Use when local perturbations are effective for the scene's light paths.
+*   **Link**: [Pseudo-marginal ERPT](52-pseudo-marginal-erpt.md)
+
+## Operating characteristics
+
+*   **Time Complexity**: The cost per iteration is dominated by the computation of the unbiased estimator $\hat{L}(\bar{x})$ [S1]. Ratio tracking is significantly faster than ray-marching, allowing for more iterations per unit time [S1].
+*   **Memory Complexity**: Low. Only the current path and its estimate need to be stored [G].
+*   **Measured Performance**: In heterogeneous media scenes (e.g., glass cube with isotropic media, anisotropic media in Veach's scene), PSSMLT with ratio tracking produces less noise than ERPT with ray-marching and performs slightly better than PSSMLT with delta tracking [S1].
+*   **Scaling**: Performance scales with the complexity of the media. The method is particularly effective in scenes where traditional path tracing produces very noisy results due to complex light paths [S1].
+*   **Strengths**: Unbiased estimation ensures the correct target distribution. Ratio tracking provides computational efficiency [S1].
+*   **Limitations**: PSSMLT lacks the ability to use the efficient local path perturbations exploited by ERPT algorithms, which can restrict path space exploration in some scenes [S1]. The mixing of the chain is sensitive to the choice of $M$ [S1].
+*   **When to use**: Rendering scenes with heterogeneous participating media where unbiasedness is required and local perturbations are not sufficient or applicable [S1].
+*   **When not to use**: When biased approximations are acceptable and faster convergence is needed, or when the scene is homogeneous and standard path tracing is sufficient [G].
+
+## Background
+
+*   **Origin**: The method was introduced by Joel Kronander, Thomas B. Schön, and Jonas Unger in 2015 [S1].
+*   **History**: It builds on the pseudo-marginal MCMC methods developed for Bayesian inference with intractable likelihoods by Beaumont [2003] and Andrieu and Roberts [2009] [S1]. Previous MCMC methods for participating media, such as those by Kelemen et al. [2002] (PSSMLT) and Raab et al. [2008], used biased approximations (ray-marching) or less efficient estimators (delta tracking) [S1].
+*   **Usage**: Implemented in the Mitsuba renderer [Jakob 2010] [S1].
+
+## Sources
+
+[S1] Pseudo-marginal metropolis light transport, https://doi.org/10.1145/2820903.2820922, fetched 2026-10-30

@@ -1,0 +1,112 @@
+# Newton Refinement
+Also called: Post-bisection refinement
+## Overview
+Newton Refinement is an optional post-processing step applied after the bisection phase of robust iso-surface rendering to achieve sub-pixel hit-point accuracy [S1, unofficial]. It improves the precision of the intersection point $t$ found by the bisection tracer by iteratively applying Newton's method using directional derivatives [S1, unofficial]. Unlike the bisection method, which guarantees convergence within a bounded interval but may leave a residual error proportional to the voxel size or iteration limit, Newton Refinement converges quadratically near the root, reducing the error significantly with few iterations [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: The approximate hit position $t_{approx}$ (scalar) and position $p_{approx}$ (3D vector) from the bisection step, the ray origin $o$, the ray direction $d$, the implicit function $f(x)$, and its gradient $\nabla f(x)$.
+- Output: Refined hit position $t_{new}$ and $p_{new}$.
+
+**Data Structures:**
+- $t$: Scalar float64 representing the ray parameter.
+- $p$: Vector $(x, y, z)$ float64 representing the 3D position.
+- $f$: Function evaluating the implicit field value at a point.
+- $\nabla f$: Function evaluating the gradient vector at a point.
+
+**Parameters:**
+- `newton_iter`: Number of Newton refinement iterations to perform. Default value is 3. Set to 0 to disable [S1, unofficial].
+
+**Steps:**
+1. Initialize $t = t_{approx}$ and $p = p_{approx}$.
+2. For $i$ from 0 to `newton_iter` - 1:
+   a. Evaluate the implicit function value at the current position: $val = f(p)$.
+   b. Evaluate the gradient at the current position: $grad = \nabla f(p)$.
+   c. Compute the directional derivative along the ray: $f' = grad \cdot d$.
+   d. If $|f'| < \epsilon$ (where $\epsilon$ is a small threshold, e.g., $10^{-12}$), break the loop to avoid division by zero or divergence [G].
+   e. Compute the Newton step: $\Delta t = -val / f'$.
+   f. Update $t = t + \Delta t$.
+   g. Update $p = o + t \cdot d$.
+3. Return $t$ and $p$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def newton_refine(t, origin, direction, f, grad_f, max_iter=3, eps=1e-12):
+    """
+    Refine hit point t using Newton's method.
+    
+    Args:
+        t: Initial ray parameter from bisection.
+        origin: Ray origin (3D vector).
+        direction: Ray direction (3D vector, assumed normalized).
+        f: Function returning scalar field value at 3D point.
+        grad_f: Function returning gradient vector at 3D point.
+        max_iter: Number of iterations.
+        eps: Minimum absolute directional derivative to avoid division by zero.
+        
+    Returns:
+        Refined t and position p.
+    """
+    p = origin + t * direction
+    
+    for _ in range(max_iter):
+        val = f(p)
+        g = grad_f(p)
+        
+        # Directional derivative
+        fdot = np.dot(g, direction)
+        
+        # Guard against zero or near-zero derivative
+        if abs(fdot) < eps:
+            break
+            
+        # Newton step
+        dt = -val / fdot
+        t = t + dt
+        p = origin + t * direction
+        
+    return t, p
+```
+
+**Edge Cases and Pitfalls:**
+- If the gradient is not available or is zero, Newton's method may fail or diverge [S1, unofficial].
+- The method assumes the implicit function is differentiable at the hit point [S1, unofficial].
+- Grazing rays (where the ray is nearly tangent to the surface) result in small directional derivatives, leading to large steps and potential divergence [S1, unofficial].
+- The method is optional and not implemented in all core loops; it must be explicitly called after bisection [S1, unofficial].
+
+## Subtopics
+
+### [Predictive Newton Termination](3710-predictive-newton-termination.md)
+Predictive Newton Termination is a Newton iteration mode that terminates a vertex step if the predicted next error falls below a tenth of the tolerance, avoiding a confirming function evaluation. It differs from Newton Refinement by using a heuristic error prediction instead of a direct convergence check, and from Guaranteed Interval-Based Refinement Test by relying on local derivative estimates rather than interval arithmetic. The method trades a slight increase in residual error for fewer evaluations per vertex.
+
+### Ray Marching with Newton Localization
+Ray Marching with Newton Localization is a ray tracing approach to find the first parameter along a ray where the field value equals the isovalue $c$, by isolating the root via sign change detection and localizing it precisely [S2]. The behavior is highly correlated to the chosen step size: small steps make the method computationally expensive, while larger step sizes can miss isosurface crossings [S2].
+
+### Newton Marching
+Newton Marching is a new method designed for this project, based on the Newton method to intersect flat surfaces more quickly [S3, unofficial].
+
+### Forward Newton Marching
+Forward Newton Marching is a new method designed for this project, based on the Newton method to intersect flat surfaces more quickly [S3, unofficial].
+
+### Newton Projection Step for Mesh Refinement
+The Newton Projection Step for Mesh Refinement is a technique used in Primal Adaptive Meshing to collapse points to the 0.5-isosurface of the vacancy function $v$ [S4]. It defines an auxiliary function $f(x) = (0.5 - v(x))^2$, linearizes it around $x_i$, and restricts updates to the gradient direction [S4]. The update rule is $x_{i+1} = x_i + \frac{0.5 - v(x_i)}{2} \mathcal{N}(x_i)$, where $\mathcal{N}(x) = \nabla v(x)/\|\nabla v(x)\|^2$ [S4]. The scalar step is $t = \frac{0.5 - v(x_i)}{2\|\nabla v(x_i)\|^2}$ [S4]. The target isosurface value is 0.5 [S4].
+
+## Operating characteristics
+- **Time Complexity:** $O(k)$ where $k$ is the number of Newton iterations (typically 3) [S1, unofficial]. Each iteration requires one function evaluation and one gradient evaluation.
+- **Memory Complexity:** $O(1)$ additional memory per ray [G].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of rays and iterations [G].
+- **Strengths:** Provides sub-pixel accuracy, fast convergence near the root [S1, unofficial].
+- **Limitations:** Requires differentiable implicit functions, may diverge on grazing rays or if gradients are zero [S1, unofficial].
+- **When to use:** When high precision is required and the implicit function is smooth and differentiable [S1, unofficial].
+- **When not to use:** When the gradient is unavailable or the surface is non-differentiable [S1, unofficial].
+
+## Background
+Newton Refinement was introduced as part of the `isoray` library for robust iso-surface rendering [S1, unofficial]. It is an optional feature that can be enabled by setting `newton_iter` to a positive value [S1, unofficial]. The method builds on the standard Newton-Raphson root-finding algorithm, adapted for ray tracing by using the directional derivative along the ray [S1, unofficial].
+
+## Sources
+[S1] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)
+[S2] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26
+[S3] Modelado de geometría mediante "Signed Distance Functions" y desarrollo de algoritmos para su intersección, https://core.ac.uk/download/478827061.pdf, fetched 2026-10-30 (unofficial)
+[S4] From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians, https://doi.org/10.1007/978-3-032-37095-2_4, fetched 2026-10-29

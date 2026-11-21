@@ -1,0 +1,59 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Rendering Pipelines and Passes define the structural organization of volume rendering tasks into distinct, sequential logical blocks or stages, separating geometric projection from visual appearance to allow independent optimization of shading, classification, and compositing [S3, unofficial]. This family solves the problem of managing complex data transformations by decomposing the rendering task into reusable passes (e.g., attribute accumulation, depth occlusion, normalization) that can be combined in various configurations, distinguishing it from monolithic ray-marching or single-shader approaches [S3, unofficial]. It sets itself apart from sibling methods like [Splatting Without the Blur](1157-splatting-without-the-blur.md) by focusing on the orchestration of rendering stages rather than the specific primitive rasterization or filtering techniques.
++Rendering Pipelines and Passes refer to the structural organization of volume rendering tasks into distinct, sequential logical blocks or stages that process data or image states [S1, S3, unofficial]. It solves the problem of managing complex data transformations by separating geometric projection from visual appearance, allowing for independent optimization of shading, classification, and compositing [S3, unofficial]. Unlike monolithic ray-marching approaches, this family explicitly decomposes the rendering task into reusable passes (such as attribute accumulation, depth occlusion, and normalization) which can be combined in various configurations [S3, unofficial]. It differs from specialized implementations like [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) by its explicit separation of traversal and lighting into discrete render passes, and from [Fragment List-Based Rendering Pipeline](3488-fragment-list-based-rendering-pipeline.md) by its reliance on screen-space fragment buffers rather than explicit primitive lists [S1, S2, unofficial].
+ 
+ ## Shared principles
+@@ -17,5 +17,5 @@
+ 
+ ### [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md)
+-This method provides a modular interface for efficient ray marching and differentiable volumetric rendering, allowing users to plug any user-defined radiance field into a standardized acceleration pipeline. It distinguishes itself from specialized implementations like Instant-NGP by offering a Python API built on PyTorch, which facilitates easier extension to dynamic and unbounded scenes while maintaining high performance. Choose this when differentiable training of arbitrary radiance fields is required.
++This method provides a modular interface for efficient ray marching and differentiable volumetric rendering, allowing users to plug any user-defined radiance field into a standardized acceleration pipeline. It distinguishes itself from specialized implementations like Instant-NGP by offering a Python API built on PyTorch, which facilitates easier extension to dynamic and unbounded scenes while maintaining high performance.
+ 
+ ### [Volume Rendering Pipeline](1318-volume-rendering-pipeline.md)
+@@ -23,8 +23,11 @@
+ 
+ ### [Time-Sliced Pipelined Architecture](1435-time-sliced-pipelined-architecture.md)
+-The Time-Sliced Pipelined Architecture is a hardware design methodology for volume rendering that achieves real-time performance by time-slicing functional blocks to allow the simultaneous processing of multiple tasks. It solves the latency and throughput bottlenecks of sequential rendering by overlapping execution stages, enabling continuous communication between hardware components and software control. It sets itself apart from standard pipelined approaches by explicitly reusing embedded sub-cores across different pipeline stages via a shared context memory, rather than dedicating fixed hardware to a single stage.
++The Time-Sliced Pipelined Architecture is a hardware design methodology for volume rendering systems that achieves real-time performance by time-slicing functional blocks to allow the simultaneous processing of multiple tasks. It solves the bottleneck of sequential hardware execution by overlapping pipeline stages, enabling continuous communication between hardware components and software interfaces. Unlike general-purpose DSP-based solutions that require multiple chips for similar volumes, this architecture integrates the entire rendering pipeline into a single system using reusable sub-cores, allowing for efficient layout and configuration based on specific processing requirements.
++
++### [Slice-by-Slice (Sheet Buffer) Splatting](2110-slice-by-slice-sheet-buffer-splatting.md)
++Slice-by-Slice (Sheet Buffer) Splatting is a volume rendering optimization that improves image quality over standard "splat-every-sample" compositing by correctly handling visibility through depth-ordered accumulation. It sets itself apart from its parent method, [Splatting](23-splatting.md), by organizing splats into 2D cache-sheets aligned with the volume axis most parallel to the image plane, compositing these sheets slice-by-slice in depth order, and then blending the result into the final image. Unlike [EWA Splatting](1069-ewa-splatting.md), which handles perspective distortion per-splat, this method primarily addresses the "sparkling" artifacts of list-based accumulation by ensuring correct occlusion, though it introduces its own "popping" artifacts if the view angle crosses specific thresholds.
+ 
+ ### [Screen Quad Rendering](2435-screen-quad-rendering.md)
+-Screen Quad Rendering is the final presentation stage in a volume rendering pipeline, responsible for transferring computed volume data from off-screen render targets to the default framebuffer or current context texture for display. It differs from standard blits by explicitly managing multiple draw buffers and allowing fragment shaders to sample intermediate textures for final compositing or debugging overlays.
++Screen Quad Rendering is the final compositing stage in a multi-pass volume rendering pipeline, responsible for displaying the accumulated volume data (stored in intermediate framebuffers) onto the screen. It solves the problem of transferring rendered results from off-screen render targets to the default framebuffer while allowing for post-processing effects such as cross-section slicing or debug overlays. It differs from sibling methods like [DirectXSplat Renderer API](8504-directxsplat-renderer-api.md) by explicitly separating the volume traversal/compositing logic from the final screen presentation, and from [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) by relying on hardware-accelerated rasterization of a fullscreen primitive rather than software-based ray traversal for the final image generation.
+ 
+ ### [Rendering Pipeline Architecture](3059-rendering-pipeline-architecture.md)
+@@ -43,16 +46,20 @@
+ Ray-centric rendering computes the color of each pixel by tracing a ray from the camera through the volume and accumulating contributions from sampled points along the ray path. It differs from object-order splatting by avoiding the sorting and blending overheads required for dense volumes, though it is computationally heavier per pixel than texture-based splatting [G]. It preserves internal volume information, distinguishing it from isosurface extraction methods like [Marching Cubes](53-marching-cubes.md).
+ 
+-#### Eye/Light/Composite Pass Pipeline
+-*   **Definition:** Renders volumetric data in three sequential passes: eye pass (direct lighting/color), light pass (opacity accumulation for shadows), and composite pass (blends results) [S2, unofficial].
+-*   **Steps:**
+-    1.  **Eye pass:** Render volume to `m_eyeBuffer` with direct lighting, using `m_eyePipeline` and `m_eyeSet` [S2, unofficial].
+-    2.  **Light pass:** Accumulate opacity into `m_lightBuffer` using `m_lightPipeline` and `m_volSet`, transitioning layout from `ColorAttachmentOptimal` to `ShaderReadOnlyOptimal` [S2, unofficial].
+-    3.  **Composite pass:** Bind `m_compositePipeline` and `m_compSet`, draw 3 triangles (full-screen quad) using `m_eyeBuffer` as a sampled texture [S2, unofficial].
+-*   **Layout:** Buffers include `m_eyeBuffer` (eye pass output), `m_lightBuffer` (light pass opacity accumulation), `m_volumeTex` (3D volume data, R8G8Unorm), and `m_tfTex` (transfer function) [S2, unofficial].
++### Eye/Light/Composite Pass Pipeline
++- **Definition:** Renders volumetric data in three sequential passes: eye pass (direct lighting/color), light pass (opacity accumulation for shadows), and composite pass (blends results) [S2, unofficial].
++- **Steps:**
++    1.  **Eye Pass:** Render volume to `m_eyeBuffer` with direct lighting, using `m_eyePipeline` and `m_eyeSet` [S2, unofficial].
++    2.  **Light Pass:** Accumulate opacity into `m_lightBuffer` using `m_lightPipeline` and `m_volSet`, transitioning layout from `ColorAttachmentOptimal` to `ShaderReadOnlyOptimal` [S2, unofficial].
++    3.  **Composite Pass:** Bind `m_compositePipeline` and `m_compSet`, draw 3 triangles (full-screen quad) using `m_eyeBuffer` as a sampled texture [S2, unofficial].
++- **Layout:** Buffers include `m_eyeBuffer` (eye pass output), `m_lightBuffer` (light pass opacity accumulation), `m_volumeTex` (3D volume data, `R8G8Unorm`), and `m_tfTex` (transfer function) [S2, unofficial].
++
++### Image-order Splatting
++- **Steps:** Use an image-order approach to improve accuracy when using a perspective projection [S3, unofficial].
+ 
+ ## Background
+-The concept of decomposing rendering into stages originates from early direct volume rendering implementations that sought to separate the visualization of scalar fields from the geometric projection [S3, unofficial]. The specific "Render Forward Pass" or "msplat_render" terminology is associated with modern 3D Gaussian Splatting implementations, such as the `msplat` project, which aims for efficient training and rendering on native hardware (e.g., Metal) [S1, unofficial]. The family encompasses diverse approaches, from hardware-level time-slicing [S1, unofficial] to high-level API abstractions like DirectXSplat [S1, unofficial] and Python-based differentiable pipelines [S1, unofficial].
++The concept of decomposing rendering into passes originates from the need to handle complex lighting and transparency effects that cannot be achieved in a single rasterization pass. Early volume rendering pipelines, such as those described in [Volume Rendering Pipeline](1318-volume-rendering-pipeline.md), established the logical separation of data traversal, classification, and compositing [S1, unofficial]. The advent of GPU programmability allowed for the implementation of multi-pass architectures like [Custom Pass Rendering](3629-custom-pass-rendering.md) and [Screen Quad Rendering](2435-screen-quad-rendering.md), which leverage Frame Buffer Objects (FBOs) to store intermediate states [S1, S2, unofficial]. The [DirectXSplat Renderer API](8504-directxsplat-renderer-api.md) represents a modern application of these principles in the context of 3D Gaussian Splatting, optimizing resource management for real-time performance [S1, unofficial].
+ 
+ ## Sources
+ [S1] Show HN: Msplat – 3D Gaussian Splatting training in ~90s on M4 Max, native Metal, https://github.com/rayanht/msplat, fetched 2026-10-26 (unofficial)
+-[S2] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)+[S2] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
++[S3] DTIC ADA606342: An Anti-Aliasing Technique for Splatting, https://archive.org/details/DTIC_ADA606342, fetched 2026-10-26 (unofficial)

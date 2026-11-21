@@ -1,0 +1,53 @@
+# NLR Baseline
+
+Also called: Neural Lumigraph Representation Baseline
+
+## Overview
+The NLR Baseline serves as a foundational reference for differentiable volume rendering by implementing the Neural Lumigraph Representation (NLR) [S1, unofficial]. It solves the problem of novel view synthesis by learning a continuous radiance field parameterized by neural networks, distinct from grid-based or explicit mesh representations. Unlike [NeRF Training Setup](13271-nerf-training-setup.md) which uses a static MLP, NLR employs a specific architecture optimized for learning light fields, and unlike [NeRF-GT Baseline Training Setup](11349-nerf-gt-baseline-training-setup.md), it focuses on the baseline performance of the original NLR formulation without meta-learning enhancements.
+
+## How it works
+The method builds on the core differentiable volume rendering pipeline defined in [NeRF Training Loop](1522-training-loop-setup.md).
+
+**Inputs and Outputs:**
+*   **Input:** A set of calibrated camera poses and corresponding RGB images.
+*   **Output:** A trained neural network model capable of rendering novel views.
+
+**Data Structures:**
+The source does not specify the exact internal memory layout or bit-packing of the NLR network weights or intermediate tensors. It is noted that NLR++ variants use feature processing networks, implying a structured parameterization, but the baseline NLR structure details are not given in the sources.
+
+**Algorithm Steps:**
+1.  **Ray Sampling:** Generate rays from camera poses as defined in the parent pipeline.
+2.  **Network Query:** Evaluate the NLR neural network at sample points along the ray to obtain volume density $\sigma$ and color $\mathbf{c}$. The specific architecture is not detailed in the provided text, but it differs from the standard NeRF MLP.
+3.  **Volume Rendering:** Compute the pixel color $\hat{\mathbf{C}}(\mathbf{r})$ using the discretized integral:
+    $$ \hat{\mathbf{C}}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance and $\delta_i$ is the distance between samples.
+4.  **Loss Computation:** Calculate the photometric loss (typically Mean Squared Error) between the rendered image $\hat{\mathbf{C}}$ and the ground truth image $\mathbf{C}$.
+5.  **Optimization:** Update network parameters using gradient descent.
+
+**Parameters:**
+*   **Resolution:** Training and testing views are processed at 800x600 resolution [S1, unofficial].
+*   **Training Time:** Approximately 2.21 seconds per iteration [S1, unofficial].
+*   **Rendering Time:** Approximately 0.025 seconds per frame [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Convergence Speed:** NLR iterations are slower than NeRF (2.21s vs 0.40s) but may require fewer iterations to converge in meta-learning contexts [S1, unofficial].
+*   **Implementation Access:** The baseline implementation was accessed directly from the authors [S1, unofficial].
+
+## Subtopics
+
+### MetaNLR Baseline
+MetaNLR is a variant that wraps the NLR implementation with an outer meta-learning loop using Reptile [S1, unofficial]. It learns the initialization of the shape and color networks to enable rapid specialization to new scenes. It is chosen when few-shot novel view synthesis is required. It uses a meta-learning rate of $5 \times 10^{-2}$ [S1, unofficial]. Unlike the baseline, it performs meta-training and meta-testing on the same scenes, specializing via inner-loop updates on training/testing views at 800x600 resolution [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training iteration time is 2.21 seconds [S1, unofficial]. This is significantly higher than NeRF (0.40s) and IDR (0.2s) [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Rendering time is 0.025 seconds per frame [S1, unofficial].
+*   **Scaling:** MetaNLR++ variants (which build on NLR) require significantly larger ray-batch sizes, leading to longer iteration times (7.69s with shape optimization) but fewer total iterations to converge [S1, unofficial].
+*   **Strengths:** Provides a baseline for neural light field representations; MetaNLR enables fast adaptation to new scenes.
+*   **Limitations:** Slower per-iteration training time compared to NeRF and IDR [S1, unofficial].
+
+## Background
+NLR (Neural Lumigraph Representation) was introduced as a method for novel view synthesis using neural networks [S1, unofficial]. The baseline implementation was provided by the original authors [S1, unofficial]. MetaNLR was developed to improve few-shot learning capabilities by applying Reptile meta-learning to the NLR initialization [S1, unofficial].
+
+## Sources
+[S1] Fast Training of Neural Lumigraph Representations using Meta Learning, https://doi.org/10.48550/arxiv.2106.14942, fetched 2026-10-26 (unofficial)

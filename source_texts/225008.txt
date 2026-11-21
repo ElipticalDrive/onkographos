@@ -1,0 +1,123 @@
+Bug Description In differentiable mode (SimOptions(requires_grad=True)), gradients only cross between torch and the scene through gs.Tensor, the torch.Tensor subclass in genesis/grad/tensor.py: Inputs. During the reverse pass, process_in...
+
+[Bug]: Differentiable mode only works through gs.Tensor: plain torch inputs crash in backward and closed-loop rollouts hit RecursionError · Issue #3585 · Genesis-Embodied-AI/genesis-world · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Bug]: Differentiable mode only works through gs.Tensor: plain torch inputs crash in backward and closed-loop rollouts hit RecursionError #3585
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#3592
+#3586
+Closed
+[Bug]: Differentiable mode only works through gs.Tensor: plain torch inputs crash in backward and closed-loop rollouts hit RecursionError#3585
+#3592
+#3586
+Copy link
+Description
+Kashu7100
+opened on Oct 22, 2026
+Issue body actions
+Bug Description
+In differentiable mode (SimOptions(requires_grad=True)), gradients only cross between torch and the scene through gs.Tensor, the torch.Tensor subclass in genesis/grad/tensor.py:
+Inputs. During the reverse pass, process_input_grad pushes each input's gradient back with tensor._backward_from_qd(...), a method that only gs.Tensor has. The rigid entity tapes its inputs as passed, so any rigid setter input that is a plain torch.Tensor with requires_grad=True crashes in loss.backward() with AttributeError: 'Tensor' object has no attribute '_backward_from_qd'. This includes the output of a policy whose parameters are ordinary nn.Parameters and are not mixed with a queried state, and action buffers in an RL framework. The deformable entities avoid the crash only by rewrapping every input as a gs.Tensor (to_gs_tensor).
+Outputs. The reverse pass only starts because gs.Tensor.backward is overridden to call scene._backward() when the tensor carries a .scene. A loss reaches it only if it is still a gs.Tensor. torch.autograd.backward(loss) and other entry points that don't go through the method never unroll the scene.
+Closed loop. When a control input is computed from a queried state, the input is itself a gs.Tensor with a .scene. Its _backward_from_qd then calls gs.Tensor.backward, which re-enters scene._backward() from inside the reverse pass. The rest of the unroll runs nested inside that call. Results are correct at short horizons, but the recursion grows with the horizon. At 400 steps of a 1-DOF arm it raises RecursionError: maximum recursion depth exceeded.
+The subclass also costs every torch op on a Genesis tensor a Python __torch_function__ round trip. There is already a FIXME about unbind being slow because of it.
+Steps to Reproduce
+```
+import xml.etree.ElementTree as ET
+
+import torch
+
+import genesis as gs
+
+gs.init(backend=gs.cpu, precision="64")
+
+mjcf = ET.Element("mujoco", model="revolute")
+body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="arm")
+ET.SubElement(body, "joint", type="hinge", axis="0 1 0", stiffness="2.0")
+ET.SubElement(body, "inertial", mass="0.5", pos="0.1 0 0", diaginertia="0.01 0.01 0.01")
+ET.SubElement(body, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", contype="0", conaffinity="0")
+scene = gs.Scene(
+    sim_options=gs.options.SimOptions(dt=0.01, substeps=2, requires_grad=True),
+    rigid_options=gs.options.RigidOptions(enable_collision=False, disable_constraint=True),
+)
+arm = scene.add_entity(gs.morphs.MJCF(file=ET.tostring(mjcf, encoding="unicode")))
+scene.build(n_envs=2)
+target = torch.tensor([[0.4], [-0.3]], dtype=gs.tc_float, device=gs.device)
+
+# 1. Open loop, plain torch input -> AttributeError: 'Tensor' object has no attribute '_backward_from_qd'
+w = torch.tensor([1.5], dtype=gs.tc_float, device=gs.device, requires_grad=True)
+scene.reset()
+for t in range(8):
+    arm.control_dofs_force(torch.sin(w * t).expand(2, 1))
+    scene.step()
+((scene.rigid_solver.get_state().qpos - target) ** 2).sum().backward()
+
+# 2. Closed loop, 400 steps -> RecursionError: maximum recursion depth exceeded
+gains = torch.tensor([8.0, 0.5], dtype=gs.tc_float, device=gs.device, requires_grad=True)
+scene.reset()
+for _ in range(400):
+    state = scene.rigid_solver.get_state()
+    arm.control_dofs_force(gains[0] * (target - state.qpos) - gains[1] * state.dofs_vel)
+    scene.step()
+((scene.rigid_solver.get_state().qpos - target) ** 2).sum().backward()
+```
+Expected Behavior
+Differentiable mode should work with plain torch tensors on both sides. Setter inputs should get their gradient whatever produced them: a leaf, a policy output, or a tensor computed from an earlier queried state. A plain loss.backward() should unroll the scene once, for any horizon.
+Proposed change
+Remove gs.Tensor and bridge torch autograd and the scene's tape with standard autograd hooks:
+Outputs: each tensor of a queried state is a leaf with a register_post_accumulate_grad_hook. Once torch has accumulated a gradient into it, the hook queues scene._backward() for the end of that backward pass, using the engine's final-callback queue as DDP and FSDP do. It is queued once per pass, however many state tensors the loss reaches.
+Inputs: backward_from_qd(tensor, kernel, *args) computes the gradient with the kernel and calls torch.autograd.backward(tensor, grad, retain_graph=True). This works for any torch.Tensor.
+Closed loop: while the reverse pass runs, the hook of a state that an input's graph reaches does not queue another pass. The reverse pass already collects each queried state's gradient when it reaches that state's step, after it has processed the later steps' inputs. So the closed-loop gradient is complete, with no recursion.
+I have this implemented and tested: gradients are identical to main wherever main works, both reproducers above pass and match finite differences, and tests/grad passes on CPU and CUDA. A PR follows.
+API impact: gs.tensor / gs.zeros / gs.from_torch / … return plain torch.Tensors, and gs.Tensor with its methods is removed. Only .zero_grad() and .sceneless() were in use in the repo (one example, one test); their torch replacements are x.grad = None and dropping the call.
+Screenshots/Videos
+No response
+Relevant log output
+```
+  File "genesis/engine/entities/rigid_entity/rigid_entity.py", line 527, in process_input_grad
+    force._backward_from_qd(
+AttributeError: 'Tensor' object has no attribute '_backward_from_qd'
+
+RecursionError: exception while trying to ensure compiled <function kernel_get_state_grad at 0x...>:
+maximum recursion depth exceeded
+```
+Environment
+OS: Ubuntu, Linux 7.0
+GPU/CPU: NVIDIA RTX 3080 / AMD Ryzen 9 9900X (both reproduce on gs.cpu and gs.gpu)
+torch 2.10.0+cu128, quadrants 1.3.3, Python 3.12
+Release version or Commit ID
+main @ 6d1af2e
+Additional Context
+Found while running differentiable rollouts through an RL environment layer whose action buffers are plain torch tensors. Every torque-controlled action term crashed in backward().
+Activity
+duburcqa
+closed this as completedin #3586on Oct 22, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

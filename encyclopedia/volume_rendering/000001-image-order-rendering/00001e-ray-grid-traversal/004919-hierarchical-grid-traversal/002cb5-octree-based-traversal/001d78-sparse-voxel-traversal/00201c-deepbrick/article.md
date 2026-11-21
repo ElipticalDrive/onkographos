@@ -1,0 +1,183 @@
+# DeepBrick
+
+Also called: Deep Volume Raytracing
+
+## Overview
+DeepBrick is a ray-marching kernel designed for deep volume raytracing within sparse voxel octrees (specifically VDB structures) that utilizes hierarchical "brick" data structures [S1, unofficial]. It solves the problem of efficiently rendering volumetric data by combining empty space skipping with front-to-back alpha blending, while handling variable step sizes and hierarchical resolution differences via a sample ratio [S1, unofficial]. It is distinguished from standard sparse voxel traversal by its explicit support for "deep" rendering (accumulating depth and transmittance for post-processing) and its specific handling of brick-level data loading and evaluation [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin, ray direction, world position increment (`wpt`), voxel delta (`gvdb->vdel[0]`), and a pointer to the VDB leaf node.
+*   **Output:** A buffer (`outBuf`) containing 10 floats per pixel: indices 0-2 for color, 3 for mask, 4-6 for normal, 7 for depth, 8-9 for flow [S1, unofficial].
+
+**Data Structures:**
+*   **VDB Leaf Node:** Accessed via `getNode`. Contains voxel data.
+*   **Sample Point (`p`):** Index coordinates derived from world position.
+*   **Accumulators:**
+    *   `val`: Vector holding voxel properties (density, color components).
+    *   `clr`: Accumulated color and transmittance.
+    *   `hit`: Structure storing front hit point (`hit.x`) and weighted mean depth (`hit.y`) [S1, unofficial].
+
+**Parameters:**
+*   `SCN_MINVAL`: Threshold for skipping empty voxels during initial traversal [S1, unofficial].
+*   `SCN_ALPHACUT`: Threshold for stopping color accumulation based on current transtransmittance [S1, unofficial].
+*   `MAX_ITER`: Maximum iterations per ray [S1, unofficial].
+*   `SCN_EXTINCT`: Extinction coefficient [S1, unofficial].
+*   `SCN_ALBEDO`: Albedo multiplier [S1, unofficial].
+*   `SCN_PSTEP`: Step size [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Get the VDB leaf node using `getNode`.
+    *   Compute the sample point in index coordinates `p` from the world position `wp` and voxel delta `gvdb->vdel[0]`.
+    *   Compute the world position increment `wpt`.
+    *   Initialize `val` and `hclr` (hit color) to zero.
+    *   Initialize `clr` (accumulated color/transmittance) to zero.
+    *   Record the front hit point `hit.x` if it is zero.
+
+2.  **Empty Space Skipping:**
+    *   Loop while `val.w >= SCN_MINVAL` is false, `iter < MAX_ITER`, and `p` is within bounds:
+        *   Fetch voxel value.
+        *   Update `val.w` (density).
+        *   If `val.w < SCN_MINVAL`, advance `p`, `wp`, and `t.x` (ray parameter).
+        *   Increment `iter`.
+    *   *Note:* This loop skips voxels with negligible density [S1, unofficial].
+
+3.  **Color Accumulation (Ray Marching):**
+    *   Loop while `clr.w > SCN_ALPHACUT`, `iter < MAX_ITER`, and `p` is within bounds:
+        *   **Depth Buffer Test:** Perform an optional depth buffer test to cull rays that have already been occluded [S1, unofficial].
+        *   **Transfer Voxel Value:** Fetch the current voxel's properties into `val`.
+        *   **Compute Transmittance:** Calculate the transmittance through the current voxel step:
+            $$val.w = \exp(SCN\_EXTINCT \cdot val.w \cdot SCN\_PSTEP)$$
+            Where $val.w$ is the voxel density, $SCN\_EXTINCT$ is the extinction coefficient, and $SCN\_PSTEP$ is the step size [S1, unofficial].
+        *   **Update Weighted Mean Depth:** Update `hit.y` using the transmittance and step size [S1, unofficial].
+        *   **Fetch Color:** Fetch the voxel color into `hclr`.
+        *   **Accumulate Color:** Update the accumulated color `clr`:
+            $$clr.x += val.x \cdot clr.w \cdot (1 - val.w) \cdot SCN\_ALBEDO \cdot hclr.x$$
+            Where $val.x$ is the voxel color component, $clr.w$ is the current transmittance, and $SCN\_ALBEDO$ is the albedo multiplier [S1, unofficial].
+        *   **Update Transmittance:** Update `clr.w` by multiplying with the new voxel transmittance `val.w`.
+        *   **Advance Ray:** Increment `p`, `wp`, and `t.x`.
+        *   Increment `iter`.
+
+4.  **Finalization:**
+    *   Clamp the final color and alpha values [S1, unofficial].
+    *   Write results to `outBuf` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def deep_brick_raycast(ray_origin, ray_direction, vdb_leaf, out_buf, pixel_idx):
+    # Constants
+    SCN_MINVAL = 1e-6
+    SCN_ALPHACUT = 0.01
+    MAX_ITER = 1000
+    SCN_EXTINCT = 1.0
+    SCN_ALBEDO = 1.0
+    
+    # Initialization
+    voxel_delta = vdb_leaf.vdel[0]
+    wp = ray_origin
+    wpt = ray_direction * voxel_delta # World position increment per step
+    
+    # Compute initial index coordinates
+    p = (wp - vdb_leaf.origin) / voxel_delta
+    
+    val = vec4(0.0)
+    clr = vec4(0.0) # clr.w is transmittance
+    hclr = vec4(0.0)
+    hit = vec2(0.0) # hit.x = front hit, hit.y = weighted mean depth
+    
+    iter_count = 0
+    
+    # Step 1: Empty Space Skipping
+    # Fetch initial voxel to check density
+    val = fetch_voxel(vdb_leaf, p)
+    
+    while val.w < SCN_MINVAL and iter_count < MAX_ITER and is_within_bounds(p, vdb_leaf):
+        p += vec3(1.0) # Advance index
+        wp += wpt
+        iter_count += 1
+        val = fetch_voxel(vdb_leaf, p)
+        
+    # Step 2: Color Accumulation
+    while clr.w > SCN_ALPHACUT and iter_count < MAX_ITER and is_within_bounds(p, vdb_leaf):
+        # Optional depth buffer test
+        if depth_buffer_test(hit.y):
+            break
+            
+        # Transfer voxel value
+        val = fetch_voxel(vdb_leaf, p)
+        
+        # Compute transmittance
+        # val.w is density
+        transmittance = exp(SCN_EXTINCT * val.w * SCN_PSTEP)
+        
+        # Update weighted mean depth
+        # hit.y update logic depends on specific depth accumulation formula
+        # Assuming standard weighted depth accumulation
+        hit.y = hit.y * clr.w + (1.0 - transmittance) * wp.z # Simplified depth update
+        
+        # Fetch color
+        hclr = fetch_color(vdb_leaf, p)
+        
+        # Accumulate color
+        # clr.w is current transmittance
+        # val.x is color component
+        clr.x += val.x * clr.w * (1.0 - transmittance) * SCN_ALBEDO * hclr.x
+        
+        # Update transmittance
+        clr.w *= transmittance
+        
+        # Advance
+        p += vec3(1.0)
+        wp += wpt
+        iter_count += 1
+        
+    # Finalization
+    clr.xyz = clamp(clr.xyz, 0.0, 1.0)
+    
+    # Write to output buffer
+    # Layout: 0-2 color, 3 mask, 4-6 normal, 7 depth, 8-9 flow
+    out_buf[pixel_idx * 10 + 0] = clr.x
+    out_buf[pixel_idx * 10 + 1] = clr.y
+    out_buf[pixel_idx * 10 + 2] = clr.z
+    out_buf[pixel_idx * 10 + 3] = 1.0 - clr.w # Mask
+    out_buf[pixel_idx * 10 + 7] = hit.y # Depth
+```
+
+## Subtopics
+
+### [Brick Traversal](4170-brick-traversal.md)
+A ray-marching kernel that samples a volumetric brick texture, adjusts alpha and RGB values for variable step sizes, and composites the result into a destination color using front-to-back alpha blending. It accounts for a "sample ratio" ($r$) between the ray step and the brick's internal resolution to adjust sampling density across hierarchical levels.
+
+### Node Processing Rules
+Defines behavior based on node type [S2, unofficial]:
+*   **Loaded Brick**: If the node is a brick with available data, perform regular ray-marching inside its data.
+*   **Unloaded Brick**: If the brick is not loaded (e.g., dynamic loading failure), use the average color stored in the node and accumulate it based on the distance the ray travels through the brick (using pre-integration).
+*   **Empty Node**: If the node is empty, ignore it (skip processing).
+
+### Brick Evaluation
+A GPU-based process for constructing distance fields within bricks [S3, unofficial]:
+*   **Process**: Each brick is processed by one thread group (size $8^3 = 512$ threads). Each thread evaluates the edit list once to obtain a single sample.
+*   **Evaluation**: Iterates through the index buffer of the brick, evaluating each edit at the thread's corresponding location in space. Results are combined according to the CSG operation of each edit.
+*   **Memory Optimization**: Edits are loaded into group-shared memory in chunks of 256 to speed up evaluation, as 1024 edits do not fit in shared memory. Larger chunks limit occupancy; smaller chunks limit parallelism [S3, unofficial].
+*   **Precision**: Brick pool format is 8-bit signed normalized values (256 possible values per voxel). Distance range is [-4, 4] voxels, where magnitude 1 corresponds to 4 voxels. Surface representation precision is 1/32 of the brick size [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Linear with respect to the number of voxels traversed along the ray, but optimized by empty space skipping and hierarchical brick structures.
+*   **Memory Complexity**: Depends on the brick pool size and shared memory usage. Shared memory usage is constrained to chunks of 256 edits to maintain occupancy [S3, unofficial].
+*   **Strengths**: Efficient handling of sparse data via empty space skipping; support for deep rendering (depth/flow output); flexible handling of unloaded bricks via pre-integration [S1, unofficial][S2, unofficial].
+*   **Limitations**: Requires careful tuning of thresholds (`SCN_MINVAL`, `SCN_ALPHACUT`); brick evaluation stalls if hierarchical construction is not complete [S3, unofficial]; shared memory constraints in brick evaluation limit parallelism [S3, unofficial].
+*   **When to Use**: Suitable for real-time volume rendering of sparse, hierarchical voxel data where depth information is required.
+*   **When Not to Use**: Not suitable for dense voxel grids where empty space skipping provides little benefit, or when high-precision distance fields are required beyond 8-bit normalized limits [S3, unofficial].
+
+## Background
+DeepBrick is associated with deep volume raytracing techniques, often implemented in conjunction with VDB (Volume Database) structures [S1, unofficial]. The concept of "brick" traversal and hierarchical processing is detailed in research on interactive exploration of procedural volumes [S2, unofficial]. The specific brick evaluation method for signed distance fields (SDFs) was developed for real-time rendering applications, as described in dissertation work on modifiable SDFs [S3, unofficial].
+
+## Sources
+[S1] Learning adaptive sampling and reconstruction for Volume Visualization, https://github.com/shamanDevel/AdaptiveSampling, fetched 2026-10-27 (unofficial)
+[S2] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+[S3] PDF Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)

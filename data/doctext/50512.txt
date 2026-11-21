@@ -1,0 +1,313 @@
+# Radial Dual Contouring
+
+Abstract
+
+RadialDC (Radial Dual Contouring) is a method of large scale world mesh generation.
+Like Dual Contouring it divides space up into voxels and uses density functions to determine, place, and connect vertexes of the world mesh.
+See https://www.cs.rice.edu/~jwarren/papers/dualcontour.pdf for more details on dual contouring.
+RadialDC implements all the primary features of Dual Contouring but extends the algoririthm in two ways: Dynamic Voxel Sizing and Dynamic Voxel Density Evaluation.
+
+Dynamic Voxel Sizing
+
+One of the limits of Dual Contouring are the size and detail of the world are limited by the time it taxes to process and individual voxel can limit the size and/or detail of the world.
+Dynamic Voxel Sizing allows for faster, more effcient, mesh creation by chaing the size of the voxel being evaluated based on its distance from the player, thereby speeding things up by not evaluating unnessary details.
+This technique is called Radial DC because in order to ensure a crack free mesh over changing voxel sizes, the voxel is generated outwards from the detailed center of the mesh, and uses a set of rules to ensure no cracks or duplication of work.
+
+Dynamic Voxel Density Evaluation
+
+Dynamic Voxel Density Evaluation exitends this further by changing the density evaluation equations used depending on the detail level assigned to the voxel.
+For example a high detail assigned voxel, closer to the player, may have several levels of evaluations such a multiple octaves of simplex noise, while voxel farther away may be assigned a lower lelve of detail and simpler evaluation function.
+
+Core and Outer Voxels
+
+In order to best faciliate large detailed worlds the code is divided into the generation of Core Voxels, which make up several tiers of the highest detial, and Outer Voxels, which more expand the size of the voxel in each layers as they move away to the player until theh hit a preset limit.
+For both Core and Outer Voxels, the process is split into 3 sections: (1) the creation of the voxels and there positions, (2) evaluation of voxel vertecies, (3) using voxel verticies to generate mesh data (including triangle arrays).
+This process is repeated for both COre and Outer Voxels.
+
+Setup
+
+A setup set is done to set the smallest voxel sixe, the size of the detail tiers, and other specifications for the world mesh.
+These are currently coded into the system, but could be set at any time before generation.
+Addtionally another step is used to set all the flags used for the control flow used in the multi-threading execution.
+
+Multi-Threading
+
+In order to obtain the maximum amount of speed, as well as allow for a seemless transition for the player as new world meshes are generated, the code has been multi-threaded.
+Of these steps (1) and (3) require a single core to generate data arrays, and are merely run on a seperate core which does not faciliate the players current state.
+Step (2) is run in full parallel, with each voxel evaualted as a seperate thread and then spread across as many cores in parallel as the system is capable.
+Because the Unity Engine used to run this particular version of the code requires a main thread to continually run and only check on the other threads, the code was written in a 'flow gate' style.
+This means that the main thread runs the functions to check and, if possible, advance the process to next stage once every frame.
+Finally a thread is created to generate the mesh using the various mesh data arrays (position, normal, uv, triangles) and pointer to the new mesh is returned along with a boolean statign whether the all tasks have been complete.
+
+Mesh Regeneration
+
+To keep players in the high detail area, a new world mesh is generated whenever a player is over half the distance from the center of the high detail area to it's edge.
+When a new world mesh is generated, a new center is chosen closest to the player. Because this is done off the main thread and before the player can be away from the high detail areas, the player experiences no loading times or interruption in the detail of the world.
+This mesh regeneration is displayed in the testing code, which allows for simple movement in the world and seemless rengeration around the player.
+
+Recipe Blocks
+
+Recipe Blocks are an abstraction which allows for design of the world using density functions.
+For example density function could be 'painted', or more effciently such 'painting' movements could be recorded and stored in reciple block units. These units are then drawn from for the density evualtion.
+For now, only simple Reciple Blocks are generated, but the system could be extended to allow much deeper levels of semi or fully procedural world design.
+
+Results
+
+Currently this system allows for generating a roughly 4 mile cube in 1-2 seconds.
+This should be sufficient for many types of play experiences.
+
+### WorldMeshPositionDebugger.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using System.Threading.Tasks;
+using Unity.Jobs;
+using UnityEngine.Jobs;
+using Unity.Collections;
+
+public class WorldMeshPositionDebugger : MonoBehaviour
+{
+    [System.NonSerialized] int groundMask;
+
+    [System.NonSerialized] bool worldStarted;
+    [System.NonSerialized] Vector3 startingPosition;
+    [System.NonSerialized] Vector3 currentCenterPosition;
+    [System.NonSerialized] Vector3Int coreVoxCenter;
+
+    [System.NonSerialized] bool generatingNewMesh;
+    [System.NonSerialized] int counterRDCMT;
+    [System.NonSerialized] float speed = 2.5f;
+   
+    [System.NonSerialized] GameObject currentCenterVoxGO;
+    [System.NonSerialized] GameObject worldMeshGO;
+    [System.NonSerialized] MeshFilter worldMeshFilter;
+    [System.NonSerialized] Mesh meshRef;
+
+    [System.NonSerialized] MeshGeneratorDebugGOs debugGOs;
+    [System.NonSerialized] bool generatedDebugCubes;
+    [System.NonSerialized] int debugTexture;
+    System.Diagnostics.Stopwatch st;
+
+    // Start is called before the first frame update
+    void Start()
+    {
+        startingPosition = new Vector3(0f, 0f, 0f);
+        groundMask = NodeUtil.groundBitMask;
+
+        if (GameObject.Find("WorldMesh") != null)
+        {
+            DestroyImmediate(GameObject.Find("WorldMesh"));
+        }
+        worldMeshGO = new GameObject("WorldMesh");
+        worldMeshFilter = worldMeshGO.AddComponent<MeshFilter>();
+        worldMeshGO.AddComponent<MeshRenderer>();
+        worldMeshGO.layer = 9;
+
+        GameObject meshDebug = GameObject.Find("MeshGeneratorDebug");
+        debugGOs = meshDebug.GetComponent<MeshGeneratorDebugGOs>();
+
+        st = new System.Diagnostics.Stopwatch();
+        meshRef = new Mesh();
+        worldStarted = false;
+        generatingNewMesh = true;
+        counterRDCMT = 0;
+        RadialDC_MT.SetDCVariables();
+        RadialDC_MT.MakeRecipeBlocks(startingPosition);
+        RadialDC_MT.SetCreationFlags();
+        MakeNewMesh();
+        worldMeshGO.AddComponent<MeshCollider>();
+
+        transform.position = startingPosition;
+        coreVoxCenter = new Vector3Int(coreVoxCenter.x, coreVoxCenter.y, coreVoxCenter.z);
+        generatedDebugCubes = false;
+        debugTexture = 1;
+    }
+
+    // Update is called once every frame
+    void Update()
+    {
+        if (worldStarted)
+        {
+            //Simple player input controls for debugging
+            Vector3 position = transform.position;
+            if (Input.GetKey("a") || Input.GetKey(KeyCode.LeftArrow))
+            {
+                position.x -= speed * Time.deltaTime;
+            }
+            if (Input.GetKey("a") || Input.GetKey(KeyCode.RightArrow))
+            {
+                position.x += speed * Time.deltaTime;
+            }
+            if (Input.GetKey("s") || Input.GetKey(KeyCode.DownArrow))
+            {
+                position.z -= speed * Time.deltaTime;
+            }
+            if (Input.GetKey("w") || Input.GetKey(KeyCode.UpArrow))
+            {
+                position.z += speed * Time.deltaTime;
+            }
+            transform.position = position;
+            Camera.main.transform.position = new Vector3(position.x, Camera.main.transform.position.y, position.z);
+
+            //Simple 'gravity' for inclined terrain
+            SetOnGround();
+           
+            //Either create new mesh or check if one needs to be created
+            if (generatingNewMesh)
+                MakeNewMesh();
+            else
+                CheckIfGeneratingNewMesh();
+        }
+        else
+        {
+            MakeNewMesh();
+        }
+    }
+
+    //SetOnGround just repositions the player on the ground as he moves over inclines
+    void SetOnGround()
+    {
+        RaycastHit hit;
+        Vector3 scanPosition = new Vector3(transform.position.x, transform.position.y + 500f, transform.position.z);
+
+        Debug.DrawRay(scanPosition, scanPosition + Vector3.down * 1000f, Color.red);
+
+        if (Physics.Raycast(scanPosition, Vector3.down, out hit, Mathf.Infinity, groundMask))
+        {
+            transform.position = new Vector3(hit.point.x, hit.point.y + 1.0f, hit.point.z);
+        }
+        else
+            Debug.Log("Nothing Hit for scan...");
+    }
+
+    //CheckIfGeneratingNewMesh checks if player is closed enough to the bounds of the high detail area to being gnerating a new mesh
+    bool CheckIfGeneratingNewMesh()
+    {
+        Vector3[,,] possibleRecenterPoints = RadialDC_MT.recenterPoints;
+        Vector3 currentPos = transform.position;
+        Vector3 curentCenterPoint = possibleRecenterPoints[1, 1, 1];
+        float minDist = Vector3.Distance(possibleRecenterPoints[1,1,1], currentPos);
+        bool foundCloserVox = false;
+
+        for(int x = 0; x < possibleRecenterPoints.GetLength(0); ++x)
+        {
+            for (int y = 0; y < possibleRecenterPoints.GetLength(1); ++y)
+            {
+                for (int z = 0; z < possibleRecenterPoints.GetLength(2); ++z)
+                {
+                    if (!(x == 1 && y == 1 && z == 1))
+                    {
+                        float checkMin = Vector3.Distance(possibleRecenterPoints[x, y, z], currentPos);
+                        if (minDist > checkMin)
+                        {
+                            foundCloserVox = true;
+                            curentCenterPoint = possibleRecenterPoints[x, y, z];
+                            minDist = checkMin;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (foundCloserVox)
+        {
+            ++debugTexture;
+            if (debugTexture > 3)
+                debugTexture = 0;
+            Debug.Log("Generating new mesh...");
+            st.Restart();
+            generatedDebugCubes = false;
+
+            currentCenterPosition = curentCenterPoint;
+
+            generatingNewMesh = true;
+            counterRDCMT = 0;
+
+            RadialDC_MT.MakeRecipeBlocks(currentCenterPosition);
+            RadialDC_MT.SetCreationFlags();
+
+            if (GameObject.Find("CurrentCenter") != null)
+            {
+                DestroyImmediate(GameObject.Find("CurrentCenter"));
+            }
+            GameObject centerGO = Instantiate(debugGOs.vertexTestGreen, RadialDC_MT.worldCenter, Quaternion.identity);
+            centerGO.name = "CurrentCenter";
+        }
+
+        return generatingNewMesh;
+    }
+
+    //MakeNewMesh access the RadialDC to create a new mesh. Once complete it sets into the current world mesh object.
+    void MakeNewMesh()
+    {
+        if (generatingNewMesh)
+        {
+            generatingNewMesh = RadialDC_MT.RecenterWorldMT(ref meshRef);
+            ++counterRDCMT;
+            if (counterRDCMT > 10000)
+                generatingNewMesh = false;
+        }
+        if (!generatingNewMesh)
+        {
+            st.Stop();
+           
+            worldStarted = true;
+            generatingNewMesh = false;
+            worldMeshFilter.sharedMesh = meshRef;
+            worldMeshGO.GetComponent<MeshFilter>().mesh.RecalculateBounds();
+            worldMeshGO.GetComponent<MeshCollider>().sharedMesh = worldMeshFilter.mesh;
+
+            if (counterRDCMT > 10000)
+                Debug.Log("RDCMT World Problem");
+            else if (generatingNewMesh)
+                Debug.Log("RDCMT World Created");
+            Debug.Log("World created in " + st.Elapsed);
+            st.Restart();
+
+            MeshRenderer meshRenderer = worldMeshGO.GetComponent<MeshRenderer>();
+            meshRenderer.sharedMaterial = debugGOs.testMaterial;
+            if (debugTexture == 0)
+                meshRenderer.sharedMaterial = debugGOs.testMaterial;
+            else if (debugTexture == 1)
+                meshRenderer.sharedMaterial = debugGOs.testMaterial2;
+            else if (debugTexture == 2)
+                meshRenderer.sharedMaterial = debugGOs.testMaterial3;
+            else if (debugTexture == 3)
+                meshRenderer.sharedMaterial = debugGOs.testMaterial4;
+
+            ShowRecenterPoints(RadialDC_MT.recenterPoints);
+        }
+    }
+
+    //ShowRecenterPoints shows the bounds of the high detail area for debugging purposes.
+    void ShowRecenterPoints(Vector3[,,] possibleRecenterPoints)
+    {
+        if (GameObject.Find("PossibleRecenterPoints") != null)
+        {
+            DestroyImmediate(GameObject.Find("PossibleRecenterPoints"));
+        }
+        GameObject recenterPosGO = new GameObject("PossibleRecenterPoints");
+
+        Color transparent = new Color(1.0f, 1.0f, 0.1f, 0.5f);
+
+        for (int x = 0; x < possibleRecenterPoints.GetLength(0); ++x)
+        {
+            for (int y = 0; y < possibleRecenterPoints.GetLength(1); ++y)
+            {
+                for (int z = 0; z < possibleRecenterPoints.GetLength(2); ++z)
+                {
+                    if (!(x == 1 && y == 1 && z == 1))
+                    {
+                        GameObject possibleRecenterVoxGO = Instantiate(debugGOs.vertexTestCubeTransparent, possibleRecenterPoints[x, y, z], Quaternion.identity);
+                        possibleRecenterVoxGO.name = "RecenterVox|" + x + "|" + y + "|" + z;
+                        possibleRecenterVoxGO.transform.localScale = new Vector3(4f, 4f, 4f);
+                        possibleRecenterVoxGO.transform.parent = recenterPosGO.transform;
+                        possibleRecenterVoxGO.GetComponent<MeshRenderer>().material.color = transparent;
+                    }
+                }
+            }
+        }
+    }
+}
+```

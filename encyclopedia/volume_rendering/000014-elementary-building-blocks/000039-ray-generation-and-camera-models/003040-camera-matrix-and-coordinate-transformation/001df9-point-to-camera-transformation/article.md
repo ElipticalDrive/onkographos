@@ -1,0 +1,97 @@
+# Point to Camera Transformation
+
+Also called: ptstocam
+
+## Overview
+The Point to Camera Transformation maps 3D points from world coordinates into the camera's local coordinate system given a camera-to-world matrix [S1, unofficial]. It builds on [Camera Matrix and Coordinate Transformation](6231-camera-matrix-and-coordinate-transformation.md) by utilizing the camera pose to define the target frame.
+
+## How it works
+**Inputs:**
+*   $\mathbf{P}_{world}$: A 3D point in world coordinates.
+*   $M_{c2w}$: The $4 \times 4$ Camera-to-World transformation matrix [S1, unofficial].
+
+**Outputs:**
+*   $\mathbf{P}_{cam}$: The 3D point in camera coordinates [S1, unofficial].
+
+**Data Structures:**
+*   $M_{c2w}$: A $4 \times 4$ matrix where the upper-left $3 \times 3$ submatrix $R$ represents rotation and the upper-right $3 \times 1$ submatrix $T$ represents the camera origin in world space [G].
+
+**Steps:**
+1.  **Translate**: Compute the difference between the world point and the camera origin [S1, unofficial].
+    $$ \mathbf{v} = \mathbf{P}_{world} - T $$
+2.  **Rotate**: Multiply the translated vector by the transpose of the rotation part of $M_{c2w}$ [S1, unofficial].
+    $$ \mathbf{P}_{cam} = R^T \mathbf{v} $$
+    Explicitly, each camera coordinate is the dot product of the corresponding column of $R$ with $\mathbf{v}$:
+    $$ x_{cam} = \mathbf{r}_0 \cdot \mathbf{v}, \quad y_{cam} = \mathbf{r}_1 \cdot \mathbf{v}, \quad z_{cam} = \mathbf{r}_2 \cdot \mathbf{v} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def point_to_camera(P_world: vec3, M_c2w: mat4) -> vec3:
+    # Extract camera origin (translation part of c2w matrix)
+    # Assumes standard column-major storage where M[i][j] is row i, column j
+    cam_origin = vec3(M_c2w[3][0], M_c2w[3][1], M_c2w[3][2])
+    # Extract rotation matrix (upper-left 3x3)
+    R = mat3(
+        M_c2w[0][0], M_c2w[1][0], M_c2w[2][0],
+        M_c2w[0][1], M_c2w[1][1], M_c2w[2][1],
+        M_c2w[0][2], M_c2w[1][2], M_c2w[2][2]
+    )
+    # Step 1: Compute difference between point and camera origin
+    v = P_world - cam_origin
+    # Step 2: Multiply by transpose of rotation part
+    # R^T rows are R's columns
+    cam_x = dot(vec3(R[0][0], R[0][1], R[0][2]), v)
+    cam_y = dot(vec3(R[1][0], R[1][1], R[1][2]), v)
+    cam_z = dot(vec3(R[2][0], R[2][1], R[2][2]), v)
+    return vec3(cam_x, cam_y, cam_z)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision**: For large scenes, subtracting large world coordinates from the camera origin may cause floating-point precision loss [G].
+
+## Subtopics
+
+### [3D Point Projection to 2D](3148-3d-point-projection-to-2d.md)
+This method transforms 3D points from world coordinates into 2D image coordinates, computing both the pixel location and a visibility mask indicating whether the point lies in front of the camera. It solves the problem of determining the 2D pixel location and visibility of 3D geometry for a specific camera view. It differs from orthographic projection by incorporating depth-dependent scaling (perspective division) and from stereo projection by generating a single view frustum rather than correlated pairs. Choose it when rendering pipelines require batched multi-view projection and visibility masking rather than depth map generation or occlusion resolution.
+
+### World to Clip Space Conversion
+Converts a world position to camera clip space coordinates (2D), used for sampling textures or determining pixel locations in camera space [S2, unofficial].
+
+**Steps:**
+1.  **Basis Construction**: Calculate camera right and up vectors from the forward vector and world up $(0,1,0)$ [S2, unofficial].
+    $$ \mathbf{camRight} = \text{normalize}(\text{cross}(\mathbf{camForward}, \text{vec3}(0.0, 1.0, 0.0))) $$
+    $$ \mathbf{camUp} = \text{normalize}(\text{cross}(\mathbf{camRight}, \mathbf{camForward})) $$
+2.  **View Space Position**: Compute the position relative to the camera [S2, unofficial].
+    $$ \mathbf{camToWorldPos} = \mathbf{worldPosition} - \mathbf{camPos} $$
+    $$ \text{viewX} = \text{dot}(\mathbf{camRight}, \mathbf{camToWorldPos}) $$
+    $$ \text{viewY} = \text{dot}(\mathbf{camUp}, \mathbf{camToWorldPos}) $$
+    $$ \text{viewZ} = \text{dot}(\mathbf{camForward}, \mathbf{camToWorldPos}) $$
+3.  **Perspective Projection**:
+    $$ \text{scale} = \tan\left(\frac{\text{radians}(\text{cameraData.fov})}{2.0}\right) $$
+    $$ \text{clipX} = \frac{\text{viewX}}{\text{viewZ} \times \text{scale} \times \text{cameraData.aspectRatio}} $$
+    $$ \text{clipY} = \frac{\text{viewY}}{\text{viewZ} \times \text{scale}} $$
+4.  **Offset and Normalize**:
+    $$ \text{clipX} \times= \left(1 - \frac{1.0}{\text{sceneData.screenWidth}}\right) $$
+    $$ \text{clipY} \times= \left(1 - \frac{1.0}{\text{sceneData.screenHeight}}\right) $$
+    $$ \text{clipX} = \frac{\text{clipX}}{2.0} + 0.5 $$
+    $$ \text{clipY} = \frac{\text{clipY}}{2.0} + 0.5 $$
+5.  **Pixel Coordinates**:
+    $$ \text{pixelX} = \text{clipX} \times (\text{sceneData.screenWidth} - 1) $$
+    $$ \text{pixelY} = \text{clipY} \times (\text{sceneData.screenHeight} - 1) $$
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per point [G].
+*   **Memory Complexity**: $O(1)$ auxiliary space [G].
+*   **Measured Performance**: Not given in the sources.
+*   **Strengths**: Computationally inexpensive; essential for early-z culling, visibility checks, and texture lookups in screen-space techniques [G].
+*   **Limitations**: Does not account for perspective division or clipping planes directly (unless extended to Clip Space Conversion) [G]. Requires the camera matrix to be correctly constructed [G].
+*   **When to use**: When determining if a 3D point is within the camera's view frustum or when mapping world positions to screen-space coordinates for post-processing [G].
+
+## Background
+The transformation of points between world and camera spaces is a fundamental concept in computer graphics, originating from the standard graphics pipeline defined in early OpenGL and DirectX specifications [G]. In the context of neural radiance fields (NeRF) and modern ray marching, this transformation is critical for aligning sampled points with the camera's viewing direction [S1, unofficial]. The variant involving explicit basis construction and clip space conversion is often found in custom GPU raymarching shaders [S2, unofficial].
+
+## Sources
+[S1] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
+[S2] jamestkiernan/webgpu-voxel-raymarching, https://github.com/jamestkiernan/webgpu-voxel-raymarching, fetched 2026-10-24 (unofficial)

@@ -1,0 +1,431 @@
+--- v006.md
++++ v007.md
+@@ -4,212 +4,256 @@
+ 
+ ## Overview
+-Cluster Culling is a hierarchical frustum culling and Level of Detail (LOD) selection mechanism for 3D Gaussian Splatting, designed to emulate the spatial clustering and culling efficiency of Nanite. It operates on pre-computed Gaussian clusters, testing their bounding volumes against the view frustum and selecting the appropriate LOD based on screen-space error metrics. It distinguishes itself from sibling methods by integrating visibility culling, LOD selection, and indirect draw argument generation into a unified GPU compute pipeline, optimizing for high-performance rendering of large-scale Gaussian scenes.
++Cluster Culling is a hierarchical spatial culling and Level of Detail (LOD) selection mechanism for 3D Gaussian Splatting, designed to emulate the efficiency of Nanite-style virtual geometry systems. It operates on pre-computed clusters of Gaussians, performing frustum culling and screen-space error-based LOD selection to determine which clusters and which LOD levels are visible for rendering. It differs from sibling methods by focusing on the *culling and selection* phase of a hierarchical structure rather than the merging algorithm itself, relying on a specific compute shader pipeline for visibility determination.
+ 
+ ## How it works
++The method operates in two distinct compute shader passes: a reset pass and a culling/selection pass. It assumes a hierarchical structure of clusters where leaf clusters contain raw Gaussians and internal nodes contain merged representatives, organized for efficient spatial traversal.
++
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Cluster Data:** A structured buffer of Gaussian clusters (`FGaussianGPUCluster`), containing position, scale, rotation, opacity, color, and bounding sphere information for each cluster [S1, unofficial].
+-*   **View Frustum:** Defined by 6 plane vectors (`FrustumPlanes`) in world space [S1, unofficial].
+-*   **Transforms:** Local-to-World (`LocalToWorld`) and World-to-Clip (`WorldToClip`) matrices [S1, unofficial].
+-*   **Camera Parameters:** Camera position (`CameraPosition`), screen height (`ScreenHeight`) [S1, unofficial].
+-*   **Culling Parameters:** `ErrorThreshold` for LOD selection, `LODBias`, `MaxDrawDistance`, `UseLODRendering` flag, and `DebugForceLODLevel` [S1, unofficial].
++*   **Cluster Data:** A structured buffer `ClusterBuffer` containing `FGaussianGPUCluster` objects. Each cluster must define its spatial extent (typically a bounding sphere or box) and its LOD hierarchy.
++*   **Camera State:** View frustum planes (`FrustumPlanes[6]`), camera position (`CameraPosition`), and projection matrix (`WorldToClip`).
++*   **Parameters:** `ErrorThreshold` for LOD selection, `LODBias`, `MaxDrawDistance`, and `ScreenHeight` for screen-space error calculation.
+ 
+ **Outputs:**
+-*   **Visible Clusters:** A buffer (`VisibleClusterBuffer`) containing indices of clusters passing culling [S1, unofficial].
+-*   **Visibility Bitmap:** A bitfield (`ClusterVisibilityBitmap`) indicating cluster visibility status [S1, unofficial].
+-*   **Indirect Draw Args:** A buffer (`IndirectDrawArgsBuffer`) containing the count and instance data required for indirect drawing [S1, unofficial].
+-*   **LOD Buffers:** Buffers (`LODClusterBuffer`, `LODClusterCountBuffer`, `LODClusterSelectedBitmap`) managing LOD-specific cluster selection and counts [S1, unofficial].
++*   **Visibility Bitmaps:** `ClusterVisibilityBitmap` and `LODClusterSelectedBitmap` indicating which clusters and LOD levels are visible.
++*   **Indirect Draw Arguments:** `IndirectDrawArgsBuffer` and `VisibleClusterCountBuffer` for issuing draw calls.
++*   **LOD Buffers:** `LODClusterBuffer`, `LODClusterCountBuffer`, and `LODSplatTotalBuffer` organizing visible clusters by LOD level for efficient batching.
+ 
+ ### Data Structures
+-The core data structure is `FGaussianGPUCluster`. While the exact field layout is not fully specified in the provided sources, it must contain at minimum:
+-*   Position ($\mathbf{p}$)
+-*   Scale/Rotation (defining the bounding sphere)
+-*   Opacity ($\alpha$)
+-*   Color ($c$)
+-*   Bounding Sphere Radius ($r$) [G: Inferred from frustum culling requirement]
+-
+-The compute shaders operate on several `RWStructuredBuffer<uint>` and `StructuredBuffer` types:
+-*   `VisibleClusterCountBuffer`: Stores the total count of visible clusters.
+-*   `IndirectDrawArgsBuffer`: Stores `uint3` (count, first index, stride) for indirect draw calls.
+-*   `ClusterVisibilityBitmap`: Bitmask for cluster visibility.
+-*   `SelectedClusterBuffer`: Indices of selected clusters for rendering.
+-*   `LODClusterBuffer`, `LODClusterCountBuffer`, `LODClusterSelectedBitmap`: Buffers for LOD-specific management.
++The core data structure is `FGaussianGPUCluster`. While the exact field layout is implementation-specific, it must contain:
++*   Spatial bounds (e.g., center and radius for a bounding sphere).
++*   LOD level information (parent/child pointers or level index).
++*   Reference to the underlying Gaussian data (for leaf clusters) or merged parameters (for internal nodes).
+ 
+ ### Steps
+-1.  **Reset State:** Execute `FClusterCullingResetCS` to initialize counters, indirect draw arguments, and visibility bitmaps to zero or default states. This prepares the buffers for the current frame's culling pass [S1, unofficial].
+-2.  **Frustum Culling and LOD Selection:** Execute `FClusterCullingCS`. For each cluster:
+-    *   **Bounding Sphere Test:** Test the cluster's bounding sphere against the 6 frustum planes. If the sphere is completely outside any plane, the cluster is culled [S1, unofficial].
+-    *   **Distance Check:** If within `MaxDrawDistance`, proceed; otherwise, cull [S1, unofficial].
+-    *   **LOD Selection:** Calculate the screen-space error or size of the cluster. Compare this against `ErrorThreshold` adjusted by `LODBias`. Select the appropriate LOD level. If `DebugForceLODLevel` is set (-1 for auto, 0 for leaf, 1+ for specific), override the calculated LOD [S1, unofficial].
+-    *   **Visibility Output:** Mark the cluster as visible in `ClusterVisibilityBitmap` and append its index to `VisibleClusterBuffer` [S1, unofficial].
+-3.  **Indirect Draw Argument Generation:** Use the count of visible clusters to populate `IndirectDrawArgsBuffer` for the subsequent rendering pass [S1, unofficial].
++
++1.  **Reset Visibility State:**
++    *   Execute `FClusterCullingResetCS`.
++    *   Reset `VisibleClusterCountBuffer` to 0.
++    *   Reset `IndirectDrawArgsBuffer` to 0.
++    *   Reset `ClusterVisibilityBitmap` to 0.
++    *   Reset `LODClusterSelectedBitmap` to 0.
++    *   Reset `LODSplatTotalBuffer` to 0.
++    *   Reset `LODSplatOutputCountBuffer` to 0.
++    *   [G] Ensure all UAVs are cleared before the culling pass to prevent stale data.
++
++2.  **Frustum Culling and LOD Selection:**
++    *   Execute `FClusterCullingCS` with `THREADGROUP_SIZE = 64`.
++    *   For each cluster `C_k` in `ClusterBuffer`:
++        a.  **Frustum Test:** Test the cluster's bounding sphere against the 6 view frustum planes. If the sphere is entirely outside any plane, mark the cluster as invisible and skip further processing.
++        b.  **Distance Culling:** Calculate the distance from `CameraPosition` to the cluster center. If the distance exceeds `MaxDrawDistance`, mark the cluster as invisible.
++        c.  **LOD Selection:** If the cluster is visible, calculate the screen-space error for each LOD level in the cluster's hierarchy.
++            *   Project the cluster's bounding sphere to screen space to determine its radius in pixels.
++            *   Calculate the screen-space error metric. The sources do not provide the exact formula for screen-space error, but it typically involves comparing the projected size of the cluster against a threshold derived from `ErrorThreshold` and `LODBias`.
++            *   Select the highest LOD level (coarsest granularity) that satisfies the error threshold. If `DebugForceLODLevel` is set, use that level instead.
++        d.  **Record Visibility:**
++            *   Set the corresponding bit in `ClusterVisibilityBitmap`.
++            *   If the selected LOD level is a leaf level, add the cluster to the `VisibleClusterBuffer`.
++            *   If the selected LOD level is an internal level, add the cluster to the `LODClusterBuffer` and update `LODClusterCountBuffer`.
++            *   Update `LODSplatTotalBuffer` with the number of splats in the selected LOD representation.
++        e.  **Update Counts:**
++            *   Increment `VisibleClusterCountBuffer`.
++            *   Update `IndirectDrawArgsBuffer` with the total count of visible clusters and splats.
+ 
+ ### Pseudocode
++
+ ```python
+ # FClusterCullingResetCS
+-def FClusterCullingResetCS(
+-    VisibleClusterCountBuffer: RWStructuredBuffer<uint>,
+-    IndirectDrawArgsBuffer: RWStructuredBuffer<uint>,
+-    ClusterVisibilityBitmap: RWStructuredBuffer<uint>,
+-    SelectedClusterBuffer: RWStructuredBuffer<uint>,
+-    LODClusterBuffer: RWStructuredBuffer<uint>,
+-    LODClusterCountBuffer: RWStructuredBuffer<uint>,
+-    LODClusterSelectedBitmap: RWStructuredBuffer<uint>,
+-    LODSplatTotalBuffer: RWStructuredBuffer<uint>,
+-    LODSplatOutputCountBuffer: RWStructuredBuffer<uint>,
+-    ClusterVisibilityBitmapSize: uint,
+-    LeafClusterCount: uint,
+-    DebugForceLODLevel: int
++def reset_visibility(
++    visible_cluster_count: RWBuffer<uint>,
++    indirect_draw_args: RWBuffer<uint>,
++    cluster_visibility_bitmap: RWBuffer<uint>,
++    lod_cluster_buffer: RWBuffer<uint>,
++    lod_cluster_count: RWBuffer<uint>,
++    lod_cluster_selected_bitmap: RWBuffer<uint>,
++    lod_splat_total: RWBuffer<uint>,
++    lod_splat_output_count: RWBuffer<uint>,
++    cluster_visibility_bitmap_size: uint,
++    leaf_cluster_count: uint,
++    debug_force_lod_level: int
+ ):
+-    # Initialize counters to zero
+-    VisibleClusterCountBuffer[0] = 0
+-    IndirectDrawArgsBuffer[0] = 0 # Count
+-    IndirectDrawArgsBuffer[1] = 0 # First Index
+-    IndirectDrawArgsBuffer[2] = 0 # Stride (assumed constant or pre-set)
+-    
+-    # Reset visibility bitmap
+-    for i in range(0, ClusterVisibilityBitmapSize):
+-        ClusterVisibilityBitmap[i] = 0
+-        
++    # Reset counters
++    visible_cluster_count[0] = 0
++    indirect_draw_args[0] = 0
++    indirect_draw_args[1] = 0
++    indirect_draw_args[2] = 0
++    indirect_draw_args[3] = 0
++    
++    # Reset bitmaps
++    for i in range(cluster_visibility_bitmap_size):
++        cluster_visibility_bitmap[i] = 0
++    lod_cluster_selected_bitmap[0] = 0
++    
+     # Reset LOD buffers
+-    LODClusterCountBuffer[0] = 0
+-    LODSplatTotalBuffer[0] = 0
+-    LODSplatOutputCountBuffer[0] = 0
+-    
+-    # SelectedClusterBuffer and LODClusterSelectedBitmap are implicitly cleared or managed by subsequent steps
++    lod_cluster_count[0] = 0
++    lod_splat_total[0] = 0
++    lod_splat_output_count[0] = 0
+ 
+ # FClusterCullingCS
+-def FClusterCullingCS(
+-    ClusterBuffer: StructuredBuffer<FGaussianGPUCluster>,
+-    VisibleClusterBuffer: RWStructuredBuffer<uint>,
+-    VisibleClusterCountBuffer: RWStructuredBuffer<uint>,
+-    IndirectDrawArgsBuffer: RWStructuredBuffer<uint>,
+-    ClusterVisibilityBitmap: RWStructuredBuffer<uint>,
+-    SelectedClusterBuffer: RWStructuredBuffer<uint>,
+-    LODClusterBuffer: RWStructuredBuffer<uint>,
+-    LODClusterCountBuffer: RWStructuredBuffer<uint>,
+-    LODClusterSelectedBitmap: RWStructuredBuffer<uint>,
+-    LODSplatTotalBuffer: RWStructuredBuffer<uint>,
+-    LODSplatOutputCountBuffer: RWStructuredBuffer<uint>,
+-    LocalToWorld: FMatrix44f,
+-    WorldToClip: FMatrix44f,
+-    ClusterCount: uint,
+-    LeafClusterCount: uint,
+-    FrustumPlanes: FVector4f[6], # Each plane: (normal_x, normal_y, normal_z, distance)
+-    CameraPosition: FVector3f,
+-    ScreenHeight: float,
+-    ErrorThreshold: float,
+-    LODBias: float,
+-    MaxDrawDistance: float,
+-    UseLODRendering: uint,
+-    DebugForceLODLevel: int
++def cull_and_select_lod(
++    cluster_buffer: Buffer<FGaussianGPUCluster>,
++    visible_cluster_buffer: RWBuffer<uint>,
++    visible_cluster_count: RWBuffer<uint>,
++    indirect_draw_args: RWBuffer<uint>,
++    cluster_visibility_bitmap: RWBuffer<uint>,
++    selected_cluster_buffer: RWBuffer<uint>,
++    lod_cluster_buffer: RWBuffer<uint>,
++    lod_cluster_count: RWBuffer<uint>,
++    lod_cluster_selected_bitmap: RWBuffer<uint>,
++    lod_splat_total: RWBuffer<uint>,
++    local_to_world: Matrix44f,
++    world_to_clip: Matrix44f,
++    cluster_count: uint,
++    leaf_cluster_count: uint,
++    frustum_planes: Array<Vector4f, 6>,
++    camera_position: Vector3f,
++    screen_height: float,
++    error_threshold: float,
++    lod_bias: float,
++    max_draw_distance: float,
++    use_lod_rendering: uint,
++    debug_force_lod_level: int
+ ):
+-    thread_id = get_thread_id()
+-    if thread_id >= ClusterCount:
++    # Each thread handles one cluster
++    cluster_idx = get_global_thread_id()
++    if cluster_idx >= cluster_count:
+         return
+ 
+-    cluster = ClusterBuffer[thread_id]
+-    
+-    # Transform cluster position to world space if not already
+-    world_pos = LocalToWorld * cluster.position
+-    
+-    # Frustum Culling
+-    is_visible = True
+-    for plane in FrustumPlanes:
+-        # Plane equation: dot(normal, point) + distance <= 0 for inside
+-        # Assuming FrustumPlanes are stored as (normal, distance)
+-        dist = dot(plane.xyz, world_pos) + plane.w
+-        if dist < 0:
+-            is_visible = False
++    cluster = cluster_buffer[cluster_idx]
++    
++    # 1. Frustum Culling
++    is_visible = true
++    for plane in frustum_planes:
++        # Test sphere against plane
++        # distance = dot(cluster.center, plane.xyz) + plane.w
++        # if distance < -cluster.radius: is_visible = false; break
++        if not is_sphere_in_frustum(cluster.bounding_sphere, plane):
++            is_visible = false
+             break
+-            
++    
+     if not is_visible:
+         return
+ 
+-    # Distance Culling
+-    dist_to_camera = length(world_pos - CameraPosition)
+-    if dist_to_camera > MaxDrawDistance:
++    # 2. Distance Culling
++    dist = length(cluster.center - camera_position)
++    if dist > max_draw_distance:
+         return
+ 
+-    # LOD Selection
+-    lod_level = 0 # Default to leaf
+-    if UseLODRendering:
+-        # Calculate screen-space size/error
+-        # Project world_pos to clip space
+-        clip_pos = WorldToClip * float4(world_pos, 1.0)
+-        if clip_pos.w > 0:
+-            ndc_pos = clip_pos.xyz / clip_pos.w
+-            # Screen space position
+-            screen_x = (ndc_pos.x + 1.0) * 0.5 * ScreenWidth # ScreenWidth not provided, assume derived or constant
+-            screen_y = (1.0 - (ndc_pos.y + 1.0) * 0.5) * ScreenHeight
+-            
+-            # Estimate screen-space radius of the cluster
+-            # This requires cluster scale/rotation to be transformed and projected
+-            # Simplified: use bounding sphere radius projected to screen
+-            # [G] Exact projection of rotated bounding sphere is complex; 
+-            # sources imply a screen-space error calculation.
+-            screen_radius = cluster.radius * (ScreenHeight / (2.0 * dist_to_camera)) # Approximation
+-            
+-            # Calculate error metric
+-            error = screen_radius / ErrorThreshold
+-            
+-            # Select LOD based on error and bias
+-            lod_level = calculate_lod_from_error(error, LODBias)
+-        else:
+-            lod_level = 0 # Behind camera or invalid projection
+-            
+-    if DebugForceLODLevel != -1:
+-        lod_level = DebugForceLODLevel
+-
+-    # Mark as visible
+-    bitmap_index = thread_id // 32
+-    bitmap_bit = thread_id % 32
+-    ClusterVisibilityBitmap[bitmap_index] |= (1 << bitmap_bit)
+-    
+-    # Append to visible buffer
+-    count = atomic_add(VisibleClusterCountBuffer[0], 1)
+-    VisibleClusterBuffer[count] = thread_id
+-    
+-    # Update LOD buffers if LOD rendering is enabled
+-    if UseLODRendering:
+-        lod_count = atomic_add(LODClusterCountBuffer[lod_level], 1)
+-        LODClusterBuffer[lod_level * ClusterCount + lod_count] = thread_id
+-        lod_bitmap_index = lod_count // 32
+-        lod_bitmap_bit = lod_count % 32
+-        LODClusterSelectedBitmap[lod_level * (ClusterCount // 32) + lod_bitmap_index] |= (1 << lod_bitmap_bit)
+-
+-    # Update Indirect Draw Args
+-    # [G] Indirect draw args usually need total count and first index.
+-    # This is typically done in a separate pass or after all clusters are processed.
+-    # Here, we assume VisibleClusterCountBuffer holds the final count.
+-    # IndirectDrawArgsBuffer[0] = VisibleClusterCountBuffer[0]
+-    # IndirectDrawArgsBuffer[1] = 0
+-    # IndirectDrawArgsBuffer[2] = stride
++    # 3. LOD Selection
++    selected_lod_level = 0
++    if debug_force_lod_level >= 0:
++        selected_lod_level = debug_force_lod_level
++    else:
++        # Calculate screen-space error for each LOD level
++        # Project cluster center to screen space
++        clip_pos = world_to_clip * float4(cluster.center, 1.0)
++        ndc_pos = clip_pos.xyz / clip_pos.w
++        screen_pos = (ndc_pos.xy + 1.0) * 0.5 * float2(screen_width, screen_height)
++        
++        # Project bounding sphere radius to screen space
++        # screen_radius = cluster.radius * (screen_height / (2.0 * clip_pos.w))
++        screen_radius = calculate_screen_radius(cluster.bounding_sphere, world_to_clip, screen_height)
++        
++        # Select highest LOD level where error < threshold
++        # Error metric is not explicitly defined in sources [S1, unofficial]
++        # Typically: error = screen_radius / some_reference_size
++        # If error > error_threshold * (1.0 + lod_bias), go to next LOD
++        for lod_level in range(cluster.max_lod_level, -1, -1):
++            if is_lod_level_valid(cluster, lod_level, screen_radius, error_threshold, lod_bias):
++                selected_lod_level = lod_level
++                break
++
++    # 4. Record Visibility
++    # Set bit in visibility bitmap
++    bitmap_index = cluster_idx / 32
++    bit_offset = cluster_idx % 32
++    cluster_visibility_bitmap[bitmap_index] |= (1 << bit_offset)
++    
++    # Determine if this is a leaf cluster or internal LOD
++    if selected_lod_level == 0 or use_lod_rendering == 0:
++        # Leaf cluster or no LOD rendering
++        # Add to visible cluster buffer
++        count = atomic_add(visible_cluster_count, 1)
++        visible_cluster_buffer[count] = cluster_idx
++    else:
++        # Internal LOD cluster
++        # Add to LOD cluster buffer
++        lod_count = atomic_add(lod_cluster_count, 1)
++        lod_cluster_buffer[lod_count] = cluster_idx
++        lod_cluster_selected_bitmap[0] = 1 # Mark that LOD rendering is active
++        
++        # Update splat counts
++        # lod_splat_total[selected_lod_level] += cluster.splat_count
++        lod_splat_total[selected_lod_level] += get_splat_count_for_lod(cluster, selected_lod_level)
++
++    # 5. Update Indirect Draw Args
++    # indirect_draw_args[0] = total visible clusters
++    # indirect_draw_args[1] = total splats
++    # indirect_draw_args[2] = first cluster index
++    # indirect_draw_args[3] = stride
++    total_clusters = atomic_add(visible_cluster_count, 0) # Read current count
++    total_splats = sum(lod_splat_total) # Sum all LOD splat counts
++    indirect_draw_args[0] = total_clusters
++    indirect_draw_args[1] = total_splats
++    indirect_draw_args[2] = 0
++    indirect_draw_args[3] = 0
++
++def is_sphere_in_frustum(sphere: BoundingSphere, plane: Vector4f) -> bool:
++    dist = dot(sphere.center, plane.xyz) + plane.w
++    return dist >= -sphere.radius
++
++def calculate_screen_radius(sphere: BoundingSphere, world_to_clip: Matrix44f, screen_height: float) -> float:
++    # Project center
++    clip_center = world_to_clip * float4(sphere.center, 1.0)
++    # Project a point on the sphere's edge (simplified)
++    # In practice, this requires projecting the sphere's extent in view space
++    # This is a placeholder for the actual projection math
++    return sphere.radius * (screen_height / (2.0 * clip_center.w))
++
++def is_lod_level_valid(cluster: FGaussianGPUCluster, lod_level: int, screen_radius: float, error_threshold: float, lod_bias: float) -> bool:
++    # Placeholder for LOD selection logic
++    # The sources do not specify the exact error metric
++    # Typically: if screen_radius * lod_scale_factor < error_threshold * (1.0 + lod_bias)
++    return screen_radius < error_threshold * (1.0 + lod_bias)
+ ```
+ 
+ ### Parameters
+-*   `FrustumPlanes`: Array of 6 `FVector4f` defining the view frustum planes [S1, unofficial].
+-*   `ErrorThreshold`: Threshold for screen-space error calculation for LOD selection [S1, unofficial].
+-*   `LODBias`: Bias applied to LOD selection [S1, unofficial].
+-*   `MaxDrawDistance`: Maximum distance for cluster visibility [S1, unofficial].
+-*   `DebugForceLODLevel`: Debug parameter to force a specific LOD level (-1 = auto, 0 = leaf, 1+ = specific level) [S1, unofficial].
+-*   `THREADGROUP_SIZE`: Compilation define set to 64 for `FClusterCullingCS` [S1, unofficial].
++*   **FrustumPlanes:** Array of 6 plane vectors (normal and distance) defining the view frustum.
++*   **ErrorThreshold:** Threshold for screen-space error calculation for LOD selection. [S1, unofficial]
++*   **LODBias:** Bias applied to LOD selection. [S1, unofficial]
++*   **MaxDrawDistance:** Maximum distance for cluster visibility. [S1, unofficial]
++*   **DebugForceLODLevel:** Debug parameter to force a specific LOD level (-1 = auto, 0 = leaf, 1+ = specific level). [S1, unofficial]
++*   **THREADGROUP_SIZE:** Compilation define set to 64 for `FClusterCullingCS`. [S1, unofficial]
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Frustum culling using floating-point plane tests can suffer from precision issues near the frustum boundaries. [G] Use a small epsilon for plane tests.
+-*   **Degenerate Input:** Clusters with zero radius or invalid transforms should be handled to avoid division by zero or invalid projections.
+-*   **Boundary Conditions:** Clusters exactly on the frustum plane boundary should be considered visible to avoid flickering.
++*   **Precision:** Screen-space error calculation must handle near-plane clipping and perspective distortion correctly. [G]
++*   **Boundaries:** Clusters on the frustum boundary must be handled consistently to avoid flickering. [G]
++*   **Degenerate Input:** Empty clusters or clusters with zero radius should be handled gracefully. [G]
++
++## Subtopics
++
++### K-wise moment-matched merging with L2-optimal amplitude
++Focuses on the merging algorithm for creating cluster representatives, optimizing amplitude to minimize error. [Link](5440-k-wise-moment-matched-merging-with-l2-optimal-amplitude.md)
++
++### Hierarchical Gaussian Merging
++Builds a tree structure for merging, allowing for multi-resolution representations. [Link](8358-hierarchical-gaussian-merging.md)
++
++### LOD Generation for 3DGS
++General techniques for generating LOD levels for 3D Gaussian Splatting. [Link](8408-lod-generation-for-3dgs.md)
++
++### World Space Clustering
++Groups Gaussians based on world-space proximity, forming the basis for the hierarchical structure. [Link](13206-world-space-clustering.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of clusters, as each cluster is processed in parallel by the compute shader.
+-*   **Memory Complexity:** $O(N)$ for storing visibility bitmaps and cluster buffers.
+-*   **Performance:** Highly efficient on GPU due to parallel processing. The use of indirect draw calls reduces CPU-GPU synchronization overhead.
+-*   **Strengths:** Efficient culling and LOD selection for large-scale Gaussian scenes. Integrates well with hierarchical clustering.
+-*   **Limitations:** Requires pre-computed cluster data. LOD selection accuracy depends on the screen-space error metric.
+-*   **When to Use:** When rendering large-scale 3D Gaussian Splatting scenes with significant variation in cluster density and distance.
+-*   **When Not to Use:** For small scenes where the overhead of compute shaders outweighs the benefits, or when LOD is not required.
++*   **Time Complexity:** O(N) for culling, where N is the number of clusters. LOD selection is O(L) per cluster, where L is the number of LOD levels.
++*   **Memory Complexity:** O(N) for storing cluster data and visibility bitmaps.
++*   **Performance:** Highly efficient on GPU due to parallel compute shader execution. The use of indirect draw calls minimizes CPU-GPU synchronization overhead.
++*   **Strengths:** Enables real-time rendering of large-scale scenes with high Gaussian counts by reducing the number of draw calls and splats processed.
++*   **Limitations:** Requires pre-computation of the hierarchical cluster structure. LOD selection quality depends on the accuracy of the screen-space error metric.
++*   **When to use:** When rendering large scenes with many Gaussians and needing efficient LOD and frustum culling.
++*   **When not to use:** For small scenes where the overhead of hierarchical culling outweighs the benefits.
+ 
+ ## Background
+-Cluster Culling is part of the OpenSplat4D project, an unofficial implementation of 4D Gaussian Splatting. It draws inspiration from Nanite's spatial clustering and culling techniques, adapting them for Gaussian splats. The method is implemented using NVIDIA Niagara compute scripts, leveraging GPU compute shaders for efficient processing.
++Cluster Culling (Nanite-style) is implemented in the OpenSplat4D project by YuanBaoSMadLab. It is designed to bring Nanite-like virtual geometry efficiency to 3D Gaussian Splatting, allowing for the rendering of massive scenes with high fidelity. The method leverages compute shaders for visibility determination and LOD selection, integrating with the Niagara particle system in Unreal Engine.
+ 
+ ## Sources

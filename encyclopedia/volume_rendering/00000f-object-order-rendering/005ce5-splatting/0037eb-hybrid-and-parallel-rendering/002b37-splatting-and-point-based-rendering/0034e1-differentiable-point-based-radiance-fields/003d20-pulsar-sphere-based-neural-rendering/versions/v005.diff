@@ -1,0 +1,99 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Pulsar is an efficient, sphere-based differentiable renderer that maps a 3D scene representation of spheres to a feature image, enabling end-to-end optimization of scene geometry, features, and camera parameters [S1]. It solves the problem of slow rendering and topological inconsistencies inherent in mesh-based or voxel-based neural rendering by using a sparse, explicit sphere representation that naturally culls empty space without acceleration structures [S1]. Unlike its siblings, Pulsar parallelizes over pixels rather than spheres to avoid synchronization overhead, and it decouples geometry projection from appearance via a neural shading network, allowing unlimited spheres to contribute to color while restricting gradient propagation to the first few spheres to avoid high-frequency artifacts [S1].
++Pulsar is an efficient, sphere-based differentiable renderer that maps a 3D scene representation of spheres to a feature image, enabling end-to-end optimization of scene geometry, features, and camera parameters [S1]. It solves the problem of slow rendering and topological inconsistencies inherent in mesh-based or voxel-based neural rendering by using a sparse, explicit sphere representation that naturally culls empty space without acceleration structures [S1]. Unlike its siblings, Pulsar parallelizes over pixels rather than spheres to avoid synchronization overhead, and it decouples geometry projection from appearance via a neural shading network, allowing unlimited spheres to contribute to color while restricting gradient propagation to the first few spheres to avoid high-frequency artifacts [S1]. It builds on [Differentiable Point-Based Radiance Fields](7366-differentiable-point-based-radiance-fields.md).
+ 
+ ## How it works
+@@ -26,8 +26,8 @@
+ 1.  **Scene Representation:** Each sphere $i$ is defined by position $\mathbf{p}_i \in \mathbb{R}^3$, neural feature vector $\mathbf{f}_i \in \mathbb{R}^d$, radius $r_i \in \mathbb{R}$, and opacity $o_i \in \mathbb{R}$ [S1].
+ 2.  **Step 0: Enclosing Rectangle Calculation:**
+-    *   Parallelized over spheres using the full GPU.
++    *   Parallelized over spheres using the full GPU [S1].
+     *   Compute the bounding box projection of each sphere on the sensor plane using $\mathbf{K}$, $\mathbf{p}_i$, and $r_i$ [S1].
+     *   Robustify boundaries: Ensure every sphere is rendered with at least a size of one pixel to prevent spheres from being 'lost' between pixel rays and to ensure every sphere receives gradients [S1].
+-    *   Store results in `Intersection Information` and `Draw Information` structs.
++    *   Store results in `Intersection Information` and `Draw Information` structs [S1].
+     *   Store the earliest possible intersection depth in a separate array (infinity if outside sensor) [S1].
+     *   Sort both arrays by earliest intersection depth using a parallel sorting library (e.g., CUB) [S1].
+@@ -39,5 +39,5 @@
+     *   **Early Stopping:** Stop the sphere intersection search for a pixel when the first tested sphere has a depth greater than an upper bound calculated using the current aggregated weights and Eq. 1. This ensures no remaining sphere can have a notable impact [S1].
+ 4.  **Feature Aggregation (Blending):**
+-    *   Compute the feature image $\mathbf{F}$ by aggregating sphere features using blending weights $w_i$.
++    *   Compute the feature image $\mathbf{F}$ by aggregating sphere features using blending weights $w_i$ [S1].
+     *   Allow unlimited spheres to contribute to pixel color (or set a bound based on minimum contribution) to avoid high-frequency artifacts in complex scenes [S1].
+     *   Use only the first few spheres for gradient propagation to avoid high-frequency artifacts [S1].
+@@ -78,4 +78,9 @@
+     
+     # Step 0: Enclosing Rectangle Calculation
++    # [S1] Parallelized over spheres. Computes bounding box projection on sensor plane using K, p_i, r_i.
++    # [S1] Robustifies boundaries to ensure minimum 1 pixel size.
++    # [S1] Stores results in Intersection Information (8 bytes) and Draw Information (32 bytes) structs.
++    # [S1] Stores earliest intersection depth in separate array (infinity if outside sensor).
++    # [S1] Sorts both arrays by earliest intersection depth using CUB library.
+     intersection_info, draw_info, depths = compute_enclosing_rectangles(spheres, camera_params['K'])
+     sorted_indices = torch.argsort(depths)
+@@ -89,5 +94,5 @@
+     feature_image = torch.zeros(H, W, feature_dim, device=device)
+     
+-    # Process image in 9 parts (empirically derived)
++    # [S1] Divide image into nine parts (empirically derived). Process sequentially.
+     part_h, part_w = H // 3, W // 3
+     for py in range(3):
+@@ -96,5 +101,5 @@
+             x_start, x_end = px * part_w, (px + 1) * part_w
+             
+-            # Find relevant spheres for this part
++            # [S1] Use full GPU to iterate over intersection info to find relevant spheres (parallelized over spheres).
+             relevant_mask = check_sphere_overlap(intersection_info, y_start, y_end, x_start, x_end)
+             relevant_indices = torch.where(relevant_mask)[0]
+@@ -107,5 +112,5 @@
+             rel_depths = depths[relevant_indices]
+             
+-            # Parallelize over pixels in the part
++            # [S1] Parallelize over pixels using thread blocks (16x16=256 threads) and warps.
+             for y in range(y_start, y_end):
+                 for x in range(x_start, x_end):
+@@ -121,4 +126,5 @@
+                         z_i = calculate_normalized_depth(p, r, camera_params)
+                         
++                        # [S1] Early stopping: stop when first tested sphere depth > upper bound from aggregated weights and Eq. 1.
+                         if z_i > calculate_early_stop_bound(current_weight_sum, gamma, xi):
+                             break
+@@ -140,27 +146,14 @@
+                     feature_image[y, x] = aggregated_feature
+                     
++    # [S1] Neural shading: Convert 2D screen space feature map F to output color image using neural network N.
+     color_image = shading_net(feature_image)
+     return color_image
+ 
+-def compute_enclosing_rectangles(spheres, K):
+-    # [G] Computes bounding boxes for spheres on the sensor plane using K, sphere position p, and radius r.
+-    # Robustifies boundaries to ensure a minimum size of 1 pixel.
+-    pass
+-
+-def calculate_normalized_depth(p, r, camera_params):
+-    # [G] Projects sphere center to camera space, adds/subtracts radius for depth range, and normalizes to [0, 1] (0=max depth, 1=min depth).
+-    pass
+-
+-def check_sphere_overlap(intersection_info, y_start, y_end, x_start, x_end):
+-    # Compares intersection_info min/max x/y with part boundaries to find overlaps.
+-    pass
+-
+-def calculate_early_stop_bound(current_weight_sum, gamma, xi):
+-    # [G] Calculates upper bound for sphere depth to have notable impact based on Eq. 1 and current aggregated weights.
+-    pass
+-
+-def get_ray_direction(x, y, K):
+-    # [G] Standard pinhole camera ray direction calculation from pixel coordinates and intrinsic matrix K.
+-    pass
++# [S1] Implementation details for low-level GPU kernels (bounding box projection, CUB sorting, ray casting) are not provided in the sources.
++def compute_enclosing_rectangles(spheres, K): pass
++def calculate_normalized_depth(p, r, camera_params): pass
++def check_sphere_overlap(intersection_info, y_start, y_end, x_start, x_end): pass
++def calculate_early_stop_bound(current_weight_sum, gamma, xi): pass
++def get_ray_direction(x, y, K): pass
+ ```
+ 

@@ -1,0 +1,106 @@
+# LOD Assignment Algorithm
+
+
+## Overview
+The LOD Assignment Algorithm is a greedy method for assigning levels of detail (LOD) to subvolumes to minimize error density subject to a maximum working set size constraint ($S_{max}$) [S1]. It builds on [Error-based and Statistical Prediction](15224-error-based-and-statistical-prediction.md) by using precomputed histogram spectra to estimate sampling error and heuristic values to prioritize assignments. It sets itself apart from its siblings by providing a specific, efficient greedy implementation that approximates the solution to the underlying nonlinear integer programming problem, offering near-optimal results with significantly lower computational complexity than general solvers [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sorted list $L$ of potential LOD assignments, an array $B$ mapping subvolume block indices to their current LOD levels, the total number of subvolumes $N_{subvols}$, and the maximum working set size $S_{max}$ [S1].
+*   **Output:** Updated array $B$ containing the final LOD assignment for each subvolume [S1].
+
+**Data Structures:**
+*   **List $L$:** Contains entries sorted in ascending order of the heuristic $A_{i,j}$ (error density). Each entry represents a potential assignment of a specific LOD level to a specific block [S1].
+*   **Array $B$:** Maps each subvolume block index to its current assigned LOD level [S1].
+*   **Size Function:** `getSubVolSizeForLOD(lod)` returns the memory size (in bytes) of a subvolume at the specified LOD level [S1].
+
+**Parameters:**
+*   $N_{subvols}$: Total number of subvolumes [S1].
+*   $S_{max}$: Maximum allowed working set size in bytes [S1].
+*   $A_{i,j}$: Heuristic value for subvolume $i$ at LOD $j$, defined as $E(a_j) / S_{i,j}$, where $E(a_j)$ is the predicted error and $S_{i,j}$ is the size of the LOD [S1].
+
+**Algorithm Steps:**
+1.  Initialize the total current size $S_{total}$ by multiplying the number of subvolumes by the size of LOD level 1 for each subvolume:
+    $$ S_{total} := N_{subvols} \times \text{getSubVolSizeForLOD}(1) $$
+2.  Iterate through the sorted list $L$ with index $i$ from $1$ to $L.length$. Continue the loop only if $S_{total} > S_{max}$ [S1].
+3.  Inside the loop, check if the current LOD assigned to block $L[i].block$ is lower than the proposed LOD $L[i].lod$. If $B[L[i].block] < L[i].lod$, proceed to update [S1].
+4.  Subtract the size of the current LOD for block $L[i].block$ from $S_{total}$:
+    $$ S_{total} -= \text{getSubVolSizeForLOD}(B[L[i].block]) $$
+5.  Update the assignment for block $L[i].block$ to the new LOD:
+    $$ B[L[i].block] := L[i].lod $$
+6.  Add the size of the new LOD for block $L[i].block$ to $S_{total}$:
+    $$ S_{total} += \text{getSubVolSizeForLOD}(B[L[i].block]) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def assign_lod(L, B, N_subvols, S_max, get_subvol_size):
+    """
+    L: List of tuples (block_index, lod_level), sorted by heuristic A_i,j ascending.
+    B: Array mapping block_index to current lod_level.
+    N_subvols: Total number of subvolumes.
+    S_max: Maximum working set size in bytes.
+    get_subvol_size: Function returning size of a subvolume at a given lod_level.
+    """
+    # Initialize total size assuming all blocks start at LOD 1
+    S_total = N_subvols * get_subvol_size(1)
+    
+    # Iterate through sorted potential assignments
+    for i in range(len(L)):
+        # Stop if within size constraint
+        if S_total <= S_max:
+            break
+            
+        block_idx = L[i].block
+        new_lod = L[i].lod
+        current_lod = B[block_idx]
+        
+        # Only upgrade if the new LOD is higher (finer) than current
+        if current_lod < new_lod:
+            # Remove old size
+            S_total -= get_subvol_size(current_lod)
+            
+            # Assign new LOD
+            B[block_idx] = new_lod
+            
+            # Add new size
+            S_total += get_subvol_size(new_lod)
+            
+    return B
+```
+
+**Edge Cases and Pitfalls:**
+*   If $S_{max}$ is too low for a feasible solution (i.e., even the lowest detail level exceeds the constraint), the algorithm gracefully results in the lowest detail level being specified for all blocks [S1].
+*   The algorithm assumes that $S_{total}$ starts with the largest possible size (LOD 1) and attempts to reduce it by assigning higher LOD indices (which typically represent coarser data in this context, or vice versa depending on indexing; the logic relies on $B[L[i].block] < L[i].lod$ implying a transition to a state with different size) [S1]. Note: The source defines the heuristic as error density, and the loop condition $S_{total} > S_{max}$ implies we are trying to fit into $S_{max}$. The comparison $B[L[i].block] < L[i].lod$ suggests that higher LOD indices correspond to smaller sizes or that the list $L$ contains upgrades from a baseline. The source explicitly states $S_{total}$ is initialized with LOD 1 size, and the loop reduces $S_{total}$ by swapping $B[L[i].block]$ to $L[i].lod$. If $L[i].lod$ is "higher" in index but "lower" in detail (smaller size), the size decreases. The source text says "if B[L[i].block] < L[i].lod", implying $L[i].lod$ is a larger integer index. The size change logic subtracts old and adds new. This implies the algorithm is selecting from a list of *potential* assignments, likely upgrades from a base state, or the list contains all possible swaps. The source simplifies this to "sort by heuristic then assign". The pseudocode above reflects the literal steps provided [S1].
+
+## Subtopics
+
+### Greedy LOD Assignment
+The greedy variant is the primary implementation of the LOD Assignment Algorithm. It sorts potential assignments by the heuristic $A_{i,j}$ and assigns levels of detail sequentially [S1]. Its running time is unaffected by the target interval of interest [S1]. The computational complexity is $O(N \lg N)$, where $N$ is linearly proportional to the number of subvolumes [S1]. On the QVAPOR dataset, it took 0.1s compared to GLPK's 7625.6s; on MIXFRAC, 0.2s vs 142.1s [S1]. It substantially outperforms general integer programming methods (like GLPK) because those are exponential in the worst case, while the greedy approach is polynomial [S1]. The results are consistently very close to the optimal solution produced by direct integer programming [S1].
+
+### Multivariate LOD Assignment
+This extension handles $C$ guiding variables simultaneously. The objective function is the sum of univariate objective functions, and constraints are the logical conjunction of univariate constraint sets [S1].
+**Formula:**
+Minimize:
+$$ \sum_{k=1}^{C} \sum_{i=1}^{N_k} \sum_{j=1}^{M} E_{k,i}(a_{k,j}) H_{k,i,j} $$
+Subject to:
+$$ \sum_{k=1}^{C} \sum_{i=1}^{N_k} \sum_{j=1}^{M} H_{k,i,j} S_{k,i,j} \le S_{max} $$
+$$ \sum_{j=1}^{M} H_{k,i,j} = 1; \quad 1 \le i \le N; i \in \mathbb{Z}; 1 \le k \le C; k \in \mathbb{Z} $$
+$$ 1 \le L_{k,i} \le M; L_{k,i} \in \mathbb{Z} $$
+Where $S_{k,i,j}$ is the load size of LOD $j$ of block $i$ of variable $k$, $N_k$ is the number of subvolumes in variable $k$, $M$ is the number of LODs, and $C$ is the number of variables [S1]. If $S_{max}$ is too low, it results in the lowest detail level for all blocks [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \lg N)$, where $N$ is linearly proportional to the number of subvolumes [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On the QVAPOR dataset, the greedy algorithm took 0.1s; on MIXFRAC, 0.2s [S1]. In contrast, GLPK took 7625.6s and 142.1s respectively [S1].
+*   **Strengths:** Substantially faster than general integer programming solvers; results are very close to optimal; running time is unaffected by the target interval of interest [S1].
+*   **Limitations:** Approximation method; relies on the accuracy of the histogram spectrum error prediction [S1].
+*   **When to use:** When a near-optimal LOD assignment is needed quickly for large datasets where general integer programming is too slow [S1].
+*   **When not to use:** When the absolute optimal solution is required and computational time is not a constraint, or when the error prediction model is inaccurate [S1].
+
+## Background
+The LOD Assignment Algorithm was introduced in the context of multivariate time-varying volume LOD selection [S1]. It addresses the challenge of visualizing multiple variables (e.g., clouds and water vapor) where high detail is needed to minimize error in any guiding variable [S1]. The method extends univariate histogram spectrum-based error prediction to a multivariate setting using a greedy approximation of a binary linear integer programming problem [S1].
+
+## Sources
+[S1] Histogram spectra for multivariate time-varying volume LOD selection, https://zenodo.org/records/1275223, fetched 2026-10-26

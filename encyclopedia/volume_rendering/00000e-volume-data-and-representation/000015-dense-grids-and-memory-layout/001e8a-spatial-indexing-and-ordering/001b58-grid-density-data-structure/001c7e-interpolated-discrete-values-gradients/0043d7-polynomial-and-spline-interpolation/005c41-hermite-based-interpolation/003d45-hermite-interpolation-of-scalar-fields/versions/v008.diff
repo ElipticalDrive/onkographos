@@ -1,0 +1,233 @@
+--- v007.md
++++ v008.md
+@@ -4,63 +4,194 @@
+ 
+ ## Overview
+-Hermite interpolation of scalar fields renders scalar-valued functions (such as height fields or signed distance fields) by storing partial derivatives alongside function values on a regular grid [S1, unofficial]. Unlike standard trilinear interpolation which yields only $C^0$ continuity, this method guarantees a globally $C^1$-continuous result by using the stored gradients to construct cubic Hermite basis functions [S1, unofficial]. It serves as a storage-efficient replacement for normal mapping, as surface normals can be derived directly from the reconstructed field's exact derivatives without requiring separate normal map textures [S1, unofficial].
++Hermite interpolation of scalar fields is a technique for rendering scalar-valued functions, such as height fields and signed distance fields (SDFs), by storing partial derivatives alongside function values and using Hermite interpolation between samples to guarantee a globally $C^1$-continuous result [S1, unofficial]. It differs from standard voxel interpolation [12781-voxel-data-interpolation-and-sampling.md] by explicitly modeling gradient information, allowing the exact normals of the reconstructed surface to be used as shading normals, which provides a storage-efficient replacement for normal mapping with richer visual appearance [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-1.  A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$, where $C=4$ for 3D fields (1 value + 3 partial derivatives) [S1, unofficial].
+-2.  A query point $\mathbf{p} = (x, y, z) \in \mathbb{R}^3$.
+-
+-**Outputs:**
+-1.  The interpolated scalar value $f(\mathbf{p})$.
+-2.  The interpolated gradient $\nabla f(\mathbf{p})$ (optional, for shading) [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$, where $C$ includes the scalar function value and its partial derivatives (e.g., $\partial f/\partial x, \partial f/\partial y, \partial f/\partial z$) [S1, unofficial][S2].
++*   **Output:** An interpolated scalar value $f(\mathbf{p})$ and its gradient $\nabla f(\mathbf{p})$ at a query point $\mathbf{p} \in \mathbb{R}^3$.
+ 
+ **Data Structures:**
+-The grid stores tuples $(v, \partial_x v, \partial_y v, \partial_z v)$ at each integer lattice point. The derivatives are the exact partial derivatives of the underlying scalar function [S1, unofficial].
++The grid stores values at integer coordinates. For a 3D field, each voxel stores the function value $f$ and the three partial derivatives $f_x, f_y, f_z$. In 2D height fields, this would be $f, f_x, f_y$.
+ 
+-**Steps:**
+-1.  **Index Mapping:** Determine the integer grid indices $(i, j, k)$ such that $i \le x < i+1$, $j \le y < j+1$, $k \le z < k+1$. Compute local coordinates $u = x - i$, $v = y - j$, $w = z - k$, where $u, v, w \in [0, 1]$ [S1, unofficial][S2].
+-2.  **Data Gathering:** Retrieve the 8 corner values and their associated gradients from the grid cell defined by $(i, j, k)$. Let $V_{ijk}$ be the value at corner $(i+\delta_x, j+\delta_y, k+\delta_z)$ where $\delta \in \{0,1\}$. Let $\mathbf{g}_{ijk} = (\partial_x V, \partial_y V, \partial_z V)_{ijk}$ be the gradient vector at that corner [S1, unofficial].
+-3.  **Mixed Partial Derivative Approximation:** For 3D fields, mixed partial derivatives (e.g., $\partial_{xy} V$) are required for full cubic Hermite interpolation. These are approximated using a method akin to Adini's method for parametric surface patches [S1, unofficial]. The sources do not provide the explicit formula for this approximation [S1, unofficial]. [G: In standard 3D Hermite interpolation, mixed derivatives are often approximated by finite differences of the stored gradients or by averaging adjacent gradients, but the specific Adini-like formula is not detailed in the provided text.]
+-4.  **Basis Evaluation:** Compute the 1D cubic Hermite basis functions for each dimension $t \in \{u, v, w\}$:
++**Algorithm:**
++1.  **Locate Support:** Given query point $\mathbf{p} = (x, y, z)$, compute integer indices $i = \lfloor x \rfloor, j = \lfloor y \rfloor, k = \lfloor z \rfloor$ and fractional coordinates $u = x - i, v = y - j, w = z - k$ where $u, v, w \in [0, 1)$ [S1, unofficial][S2].
++2.  **Gather Data:** Retrieve the 8 corner values and their derivatives from the grid. Let $V_{ijk}$ be the value at corner $(i,j,k)$ and $D_{ijk}^x, D_{ijk}^y, D_{ijk}^z$ be the partial derivatives. Boundary conditions (clamping) are applied if indices fall outside $[0, D_d-1]$ [S1, unofficial][S2].
++3.  **Approximate Mixed Derivatives (3D):** For 3D fields, mixed partial derivatives ($f_{xy}, f_{xz}, f_{yz}, f_{xyz}$) are required for full cubic Hermite interpolation. These are approximated using a method akin to Adini's method for parametric surface patches [S1, unofficial].
++    *   *Note:* The specific formula for Adini's approximation is not provided in the sources [G]. Implementers must derive or source the standard Adini finite difference approximation for mixed derivatives on a grid.
++4.  **Basis Evaluation:** Compute the 1D Hermite basis functions for each dimension. For a local coordinate $t \in [0,1]$, the basis functions for value and derivative are:
+     $$
+-    H_0(t) = 2t^3 - 3t^2 + 1
++    h_{00}(t) = 2t^3 - 3t^2 + 1
+     $$
+     $$
+-    H_1(t) = t^3 - 2t^2 + t
++    h_{10}(t) = t^3 - 2t^2 + t
+     $$
+     $$
+-    H_2(t) = -2t^3 + 3t^2
++    h_{01}(t) = -2t^3 + 3t^2
+     $$
+     $$
+-    H_3(t) = t^3 - t^2
++    h_{11}(t) = t^3 - t^2
+     $$
+-    These basis functions interpolate between a value and a derivative [S1, unofficial].
+-5.  **Weighted Summation:** Compute the interpolated value $f(\mathbf{p})$ using the tensor product of the basis functions and the gathered data (values and derivatives). The exact 3D tensor product formula involves 64 terms (8 values $\times$ 8 derivative combinations) if mixed derivatives are included, or 16 terms if only pure derivatives are used. The sources confirm the use of Hermite interpolation between samples but do not provide the explicit expanded 3D formula [S1, unofficial]. [G: The standard 3D Hermite interpolation formula is $f(u,v,w) = \sum_{a,b,c \in \{0,1\}} \sum_{d,e,f \in \{0,1\}} B_{ade}(u) B_{bef}(v) B_{cfg}(w) \cdot D_{def} V_{abc}$, where $B$ are the basis functions and $D$ are the derivative orders.]
+-6.  **Shading Normals:** Compute the gradient $\nabla f(\mathbf{p})$ by differentiating the interpolated polynomial. These exact normals are used for shading [S1, unofficial].
+-7.  **Boundary Handling:** Apply clamping, periodic wrapping, or constant padding to indices $(i, j, k)$ that fall outside the grid domain $[0, D_d-1]$ [S1, unofficial][S2].
++    These are extended to 3D via tensor product.
++5.  **Weighted Summation:** Combine the gathered values and derivatives with the basis weights to compute $f(\mathbf{p})$ and $\nabla f(\mathbf{p})$. The gradient $\nabla f(\mathbf{p})$ can be computed analytically from the derivative of the basis functions [S2].
+ 
+-**Parameters:**
+-*   Grid resolution $(D_x, D_y, D_z)$: Not given in the sources.
+-*   Derivative storage: 3 components per value [S1, unofficial].
++**Pseudocode:**
++```python
++def hermite_basis(t):
++    """Returns (h00, h10, h01, h11) for 1D Hermite interpolation."""
++    t2 = t * t
++    t3 = t2 * t
++    h00 = 2 * t3 - 3 * t2 + 1
++    h10 = t3 - 2 * t2 + t
++    h01 = -2 * t3 + 3 * t2
++    h11 = t3 - t2
++    return h00, h10, h01, h11
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Mixed Derivatives:** The approximation of mixed partial derivatives in 3D is critical for $C^1$ continuity but is not explicitly defined in the sources [S1, unofficial].
+-*   **Gradient Accuracy:** The quality of the interpolation depends on the accuracy of the stored partial derivatives. If derivatives are noisy or approximated poorly, $C^1$ continuity may be visually compromised [S1, unofficial].
++def interpolate_hermite_3d(grid, p):
++    """
++    Interpolate scalar field and gradient at p using Hermite interpolation.
++    grid: 4D array [Dx, Dy, Dz, C] where C=4 (value, fx, fy, fz)
++    p: tuple (x, y, z)
++    """
++    x, y, z = p
++    i, j, k = int(x), int(y), int(z)
++    u, v, w = x - i, y - j, z - k
++    
++    # Boundary clamping [S1, unofficial][S2]
++    i = max(0, min(i, grid.shape[0] - 1))
++    j = max(0, min(j, grid.shape[1] - 1))
++    k = max(0, min(k, grid.shape[2] - 1))
++    
++    # Gather 8 corners. Each corner has [val, fx, fy, fz]
++    # Note: Mixed derivatives are not stored in this basic structure.
++    # If mixed derivatives are needed for full C1 continuity in 3D,
++    # they must be approximated (e.g., Adini's method) [S1, unofficial].
++    # This implementation assumes only first-order partials are stored
++    # and uses tensor product of 1D Hermite, which guarantees C1
++    # continuity for the function value but may not fully capture
++    # mixed derivative continuity without explicit storage/approximation.
++    
++    corners = []
++    for di in [0, 1]:
++        for dj in [0, 1]:
++            for dk in [0, 1]:
++                idx_i = i + di
++                idx_j = j + dj
++                idx_k = k + dk
++                # Clamp indices for gathering
++                idx_i = max(0, min(idx_i, grid.shape[0] - 1))
++                idx_j = max(0, min(idx_j, grid.shape[1] - 1))
++                idx_k = max(0, min(idx_k, grid.shape[2] - 1))
++                corners.append(grid[idx_i, idx_j, idx_k])
++                
++    # Compute 1D basis weights
++    h_u = hermite_basis(u)
++    h_v = hermite_basis(v)
++    h_w = hermite_basis(w)
++    
++    # Tensor product weights for 8 corners
++    # Order: (0,0,0), (0,0,1), (0,1,0), (0,1,1), (1,0,0), (1,0,1), (1,1,0), (1,1,1)
++    weights = []
++    for di in [0, 1]:
++        for dj in [0, 1]:
++            for dk in [0, 1]:
++                # h00 for value, h10 for derivative at start, h01 for value at end, h11 for derivative at end
++                # Weight for value: h00(di)*h00(dj)*h00(dk)
++                # Weight for fx: h10(di)*h00(dj)*h00(dk)
++                # etc.
++                # We need to separate value and derivative contributions
++                pass
++                
++    # Simplified: Compute value and gradient components separately
++    # Value f(p)
++    f_val = 0.0
++    for di in [0, 1]:
++        for dj in [0, 1]:
++            for dk in [0, 1]:
++                w_val = h_u[di] * h_v[dj] * h_w[dk] # h00 is index 0
++                # Correction: h_u[0] is h00, h_u[1] is h10? No, hermite_basis returns tuple.
++                # Let's use explicit indices:
++                # h00_u = h_u[0], h10_u = h_u[1], h01_u = h_u[2], h11_u = h_u[3]
++                pass
++
++    # Re-writing loop for clarity
++    h00_u, h10_u, h01_u, h11_u = h_u
++    h00_v, h10_v, h01_v, h11_v = h_v
++    h00_w, h10_w, h01_w, h11_w = h_w
++    
++    f_val = 0.0
++    grad_x = 0.0
++    grad_y = 0.0
++    grad_z = 0.0
++    
++    # Indices mapping: 0->(0,0,0), 1->(0,0,1), 2->(0,1,0), 3->(0,1,1), 4->(1,0,0), 5->(1,0,1), 6->(1,1,0), 7->(1,1,1)
++    # This mapping is complex. Let's iterate explicitly.
++    
++    for di in [0, 1]:
++        for dj in [0, 1]:
++            for dk in [0, 1]:
++                # Get corner data
++                idx_i = i + di
++                idx_j = j + dj
++                idx_k = k + dk
++                idx_i = max(0, min(idx_i, grid.shape[0] - 1))
++                idx_j = max(0, min(idx_j, grid.shape[1] - 1))
++                idx_k = max(0, min(idx_k, grid.shape[2] - 1))
++                
++                val = grid[idx_i, idx_j, idx_k, 0]
++                fx = grid[idx_i, idx_j, idx_k, 1]
++                fy = grid[idx_i, idx_j, idx_k, 2]
++                fz = grid[idx_i, idx_j, idx_k, 3]
++                
++                # Basis weights for this corner
++                # Value weight
++                w_v = h00_u * h00_v * h00_w if di==0 else h01_u * h00_v * h00_w
++                w_v = w_v * (h00_v if dj==0 else h01_v)
++                w_v = w_v * (h00_w if dk==0 else h01_w)
++                
++                # FX weight (derivative w.r.t x)
++                w_fx = h10_u * h00_v * h00_w if di==0 else h11_u * h00_v * h00_w
++                w_fx = w_fx * (h00_v if dj==0 else h01_v)
++                w_fx = w_fx * (h00_w if dk==0 else h01_w)
++                
++                # FY weight
++                w_fy = h00_u * h10_v * h00_w if di==0 else h01_u * h10_v * h00_w
++                w_fy = w_fy * (h00_v if dj==0 else h01_v) # Wait, h10_v is for derivative at start
++                # Correct logic:
++                # If di=0, we use h00 for value, h10 for deriv. If di=1, h01 for value, h11 for deriv.
++                
++                # Let's use a cleaner approach
++                basis_u = [h00_u, h01_u]
++                deriv_u = [h10_u, h11_u]
++                basis_v = [h00_v, h01_v]
++                deriv_v = [h10_v, h11_v]
++                basis_w = [h00_w, h01_w]
++                deriv_w = [h10_w, h11_w]
++                
++                w_val = basis_u[di] * basis_v[dj] * basis_w[dk]
++                w_fx = deriv_u[di] * basis_v[dj] * basis_w[dk]
++                w_fy = basis_u[di] * deriv_v[dj] * basis_w[dk]
++                w_fz = basis_u[di] * basis_v[dj] * deriv_w[dk]
++                
++                f_val += w_val * val
++                grad_x += w_fx * fx
++                grad_y += w_fy * fy
++                grad_z += w_fz * fz
++                
++    return f_val, (grad_x, grad_y, grad_z)
++```
+ 
+ ## Subtopics
+ 
+ ### Floating Scale Surface Reconstruction (FSSR) Integration
+-In Floating Scale Surface Reconstruction (FSSR), Hermite interpolation is used to improve surface reconstruction accuracy [S2]. The original FSSR weighting function is not $C^1$-continuous; it is replaced with $w(r) = \frac{1}{12} (r - 3)^{12} (r + 1)^4$ to ensure $C^1$ continuity [S2]. This cubic interpolation improves mean and RMS error and visual appearance compared to quadratic methods, although maximum error can remain large [S2].
++In FSSR, cubic Hermite interpolation improves mean and RMS error as well as visual appearance compared to quadratic methods, although maximum error can remain large [S2]. To ensure $C^1$ continuity, the original FSSR weighting function is replaced with $w(r) = \frac{1}{12} (r - 3)^{12} \cdot (r + 1)^4$ [S2]. Hermite interpolation methods were implemented in FSSR to leverage the analytic gradients computed from the implicit function [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Higher than trilinear interpolation due to the evaluation of cubic basis functions and the gathering of derivative data. The exact complexity depends on the number of terms in the tensor product (16 or 64) [S1, unofficial].
+-*   **Memory Complexity:** Requires storing 4 values per grid point (1 scalar + 3 derivatives) instead of 1, increasing memory usage by 4x [S1, unofficial].
+-*   **Strengths:** Provides $C^1$ continuity, resulting in smoother surfaces and more accurate shading normals. It is a storage-efficient replacement for normal mapping if normals are already part of the discrete field [S1, unofficial].
+-*   **Limitations:** Requires accurate gradient data. Mixed partial derivatives in 3D are difficult to approximate accurately [S1, unofficial].
+-*   **When to use:** When smooth shading and $C^1$ continuity are required, and gradient data is available or can be computed analytically (e.g., in PSR or FSSR) [S1, unofficial][S2].
+-*   **When not to use:** When memory is constrained and $C^0$ continuity is sufficient, or when gradient data is unavailable and expensive to compute [S1, unofficial].
++*   **Complexity:** Time complexity is $O(1)$ per query as it involves a fixed number of arithmetic operations on 8 grid corners. Memory complexity is $O(N \cdot C)$ where $N$ is the number of voxels and $C$ is the number of stored channels (value + derivatives).
++*   **Performance:** Provides a storage-efficient replacement for normal mapping if surface normals are already part of the discrete field of samples, as it merely requires a different basis to store the same data [S1, unofficial].
++*   **Strengths:** Guarantees globally $C^1$-continuous results, enabling the use of exact normals of the reconstructed cubic Hermite surface as shading normals [S1, unofficial].
++*   **Limitations:** Requires storage of derivatives. In 3D, full $C^1$ continuity may require approximation of mixed partial derivatives (e.g., Adini's method), which adds complexity [S1, unofficial].
+ 
+ ## Background
+-Hermite interpolation of scalar fields was proposed to accelerate sphere tracing and improve the visual quality of rendered scalar fields [S1, unofficial]. It generalizes the concept of storing normals to storing full gradients, allowing the reconstruction of a $C^1$-continuous surface from discrete samples [S1, unofficial]. The method has been applied in height field and signed distance field rendering [S1, unofficial]. It has also been integrated into surface reconstruction algorithms like Poisson Surface Reconstruction (PSR) and Floating Scale Surface Reconstruction (FSSR) to improve interpolation accuracy [S2].
++The technique was proposed to address the $C^0$ approximation limitations of standard bi- or trilinear filtering in real-time computer graphics [S1, unofficial]. It generalizes to arbitrary orders and dimensions and has been demonstrated in height field and signed distance field rendering [S1, unofficial]. It has also been integrated into surface reconstruction algorithms like Poisson Surface Reconstruction (PSR) and Floating Scale Surface Reconstruction (FSSR) to analyze the impact of Hermite interpolation on real surface reconstruction [S2].
+ 
+ ## Sources

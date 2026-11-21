@@ -1,0 +1,70 @@
+# Ray-Tetrahedron Intersection
+
+
+## Overview
+This family covers algorithms for determining the intersection of a ray with a tetrahedron, a fundamental operation in volume rendering on unstructured grids and tetrahedral mesh rendering. It solves the problem of finding the entry and exit points (and their parametric distances) of a ray as it traverses a tetrahedral cell. The methods differ in their geometric representation (Plücker coordinates, barycentric coordinates, plane equations) and optimization strategies (early exits, GPU wave intrinsics, connectivity-based traversal). Key distinctions include the use of Plücker coordinates to avoid explicit plane intersections [1767-pl-cker-based-tetrahedral-cell-intersection.md], the use of linear algebra for point containment [2591-point-in-tetrahedron-test-via-barycentric-coordinates.md], and the use of mesh shaders for parallel evaluation [5174-mesh-shader-tetrahedron-intersection-optimization.md].
+
+## Shared principles
+All methods in this family operate on a ray defined by an origin $P$ and a direction $L$ (or $d$), and a tetrahedron defined by four vertices $V_0, V_1, V_2, V_3$. The core geometric primitive is the tetrahedron, a convex polyhedron with four triangular faces. The output is typically the parametric distances $t_{enter}$ and $t_{leave}$ along the ray, the intersection points $P_{enter}$ and $P_{leave}$, and often the barycentric coordinates at these points.
+
+A common challenge is handling degenerate cases, such as rays parallel to a face, rays passing through an edge or vertex, and degenerate tetrahedra with zero volume. Most robust implementations require checking for these conditions or using numerical tolerances.
+
+The orientation of the tetrahedron faces is critical. Faces are often indexed by the vertex opposite to them (e.g., $F_0$ is opposite $V_0$). The outward-pointing normal of face $F_i$ is directed away from vertex $V_i$. This orientation is used to determine whether a ray is entering or exiting the tetrahedron.
+
+## Subtopics
+
+### [Plücker-based Tetrahedral Cell Intersection](1767-pl-cker-based-tetrahedral-cell-intersection.md)
+This method uses Plücker coordinates to represent lines and determine ray-triangle intersections without explicit plane intersection calculations. It sets itself apart by directly providing scaled barycentric coordinates from Plücker tests, avoiding division until the final normalization step. It outperforms Moller/Trumbore-based algorithms in all tested cases.
+
+### [Point-in-Tetrahedron Test via Barycentric Coordinates](2591-point-in-tetrahedron-test-via-barycentric-coordinates.md)
+This method determines whether query points lie inside tetrahedra by solving for barycentric coordinates using linear algebra. It serves as the geometric core for containment checks after a ray has potentially intersected the tetrahedral volume. Unlike edge-based or Plücker methods, it uses direct matrix inversion or solving, allowing for efficient vectorized processing of point clouds.
+
+### [Tetrahedron Face Extraction](3742-tetrahedron-face-extraction.md)
+This method computes the four planar faces (unit normals and distances to the origin) from a four-vertex description. It serves as a preprocessing step for ray-clipping algorithms, converting vertex-based topology into half-space representations. It differs from Plücker-based methods by using explicit plane equations and from barycentric methods by outputting boundary definitions rather than containment tests.
+
+### [Skeleton Parameter Minimization for Ray Intersection](3975-skeleton-parameter-minimization-for-ray-intersection.md)
+This method computes the intersection of a ray with a Scale-Invariant Integral Surface (SCALIS) by minimizing the squared distance from the ray to the skeleton curve, normalized by the local radius. It replaces complex sphere-cone intersection logic with a robust root-finding procedure on a rational function, offering superior numerical stability and computational efficiency.
+
+### [Mesh Shader Tetrahedron Intersection Optimization](5174-mesh-shader-tetrahedron-intersection-optimization.md)
+This method optimizes ray-tetrahedron intersections by leveraging mesh shader wave intrinsics to share geometric data between the four vertices of a single tetrahedron. It reduces redundant memory loads and arithmetic operations, achieving a runtime cost of only 12 FLOPs for the intersection logic by precomputing plane parameters in the mesh shader and interpolating them in the fragment shader.
+
+### [Raytracing Cell-Organized Irregular Volumes](5257-raytracing-cell-organized-irregular-volumes.md)
+This method enables efficient ray traversal through irregular volumetric datasets composed of non-uniform cells by maintaining a current cell and stepping through adjacent cells via shared faces. It solves the problem of navigating complex, potentially concave geometries where standard grid-based traversal fails. Unlike isolated primitive tests, it explicitly manages cell connectivity to minimize redundant intersection tests.
+
+### Subgrid-style Intersection Query
+- **definition**: An interface method that computes edge intersection t-values and normals for a tetrahedron in a subgrid context [S1, unofficial].
+- **parameter**: `useRobust`: bool, default false. Enables robust intersection computation when true. `recordNormals`: bool, default true. When false, skips normal calculation to save computation [S1, unofficial].
+- **layout**: Input: `std::array<Vector3,4> tet_positions` (or `tet_indices` + positions). Output: `std::array<std::vector<double>,6> edge_isect_ts` and `std::array<std::vector<Vector3>,6> edge_isect_normals`. Each array has size 6, corresponding to the tetrahedron edges [S1, unofficial].
+- **code**: `virtual void query_intersections(const std::array<Vector3,4>& tet_positions, std::array<std::vector<double>,6>& edge_isect_ts, std::array<std::vector<Vector3>,6>& edge_isect_normals, bool useRobust = false, bool recordNormals = true) = 0;` [S1, unofficial].
+
+### Fast Convex Polygon Wrapper (FCPW) Accelerator
+- **step**: In `MeshQueryHandler` constructor, build an FCPW accelerator structure using `accel = get_fcpw_accel(polygons, positions)`. In `query_intersections`, call `find_single_tet_edge_intersections_fcpw` with tetrahedron positions, the accelerator, output arrays for intersection times and normals, and flags `useRobust` and `recordNormals`. In `query_normal`, call `closest_point_fcpw(q, accel, closest_point, normal)` to find the closest point on the mesh to query point `q` and compute the normal [S1, unofficial].
+
+### Barycentric Region Ray-Tetrahedron Intersection
+- **definition**: A method that uses the geometric property that if a ray misses the first face ($F_3$), it intersects the supporting plane in one of six regions defined by edge lines, determining potential entry/exit faces based on barycentric coordinates [S2, unofficial].
+- **step**: If the ray does not intersect $F_3$ ($V_0V_1V_2$), determine which of the six regions (A-F) on the supporting plane the intersection point lies in, based on barycentric coordinates. Determine if the ray 'enters' the plane using the test: $\sum_{j=0}^2 (\pi_r \odot \pi_{3j}) > 0$, which is equivalent to $L \cdot N < 0$ where $N$ is the face normal. Based on the region and ray direction, restrict potential entry/exit faces; e.g., entering in region (E) allows entry only through $F_1$ ($V_2V_3V_0$), entering in region (A) allows exit only through $F_0$ ($V_3V_2V_1$) [S2, unofficial].
+- **number**: The modifications of Section 3.3 have a negative impact on performance compared to the optimized Section 3.2 algorithm [S2, unofficial].
+- **comparison**: This method is slower than the Section 3.2 algorithm because it requires computing all three products $\pi_r \odot \pi_{3j}$ and involves an involved examination of barycentric coordinates [S2, unofficial].
+
+### Polyhedron-Tetrahedron Clipping
+- **definition**: Clips a polyhedron against four clip planes, effectively finding its intersection with a tetrahedron defined by those planes [S3, unofficial].
+- **parameter**: `poly`: The polyhedron to be clipped. The distances to the clip plane and bit flags in `poly.verts[...].orient` must be set prior to calling. `andcmp`: A set of bit flags. Face `f` will be skipped if `andcmp & (1 << f)` evaluates to true [S3, unofficial].
+
+### Deformed element ray intersection
+- **definition**: A method to determine ray segments intersecting deformed finite elements, where the mapping from standard element shape to physical space is non-linear [S4, book].
+- **pitfall**: A ray can intersect a deformed element in more than one segment. An inverse map is needed to evaluate the scalar function at a point on the ray [S4, book].
+
+## Background
+Ray-tetrahedron intersection is a critical component in volume rendering on unstructured grids, scientific visualization, and tetrahedral mesh rendering. The problem was addressed early in the context of finite element analysis and ray tracing. The Plücker coordinate-based approach, described in [S2, unofficial], offers a robust and efficient method for intersection testing, outperforming traditional Möller-Trumbore-based algorithms in various benchmarks. The use of Plücker coordinates allows for the direct computation of barycentric coordinates and avoids the numerical instability associated with plane intersection calculations.
+
+The development of GPU-based methods, such as the mesh shader optimization described in [S1, unofficial], has further improved performance by leveraging parallelism and shared data within wavefronts. These methods are particularly relevant in real-time rendering and large-scale volume visualization.
+
+The handling of deformed elements, as discussed in [S4, book], highlights the complexity of ray intersection in non-linear mappings, where inverse mappings and multiple intersection segments must be considered. This is crucial for accurate volume rendering in simulations involving large deformations.
+
+The subgrid marching and FCPW accelerator methods described in [S1, unofficial] provide specialized interfaces for querying intersections in complex mesh structures, optimizing for specific use cases like surface mesh generation and closest point queries.
+
+## Sources
+[S1] hbaktash/subgrid-marching, https://github.com/hbaktash/subgrid-marching, fetched 2026-10-27 (unofficial)
+[S2] Fast Ray–Tetrahedron Intersection using Plücker ..., https://users.uop.gr/~nplatis%20/files/PlatisTheoharisRayTetra.pdf, fetched 2026-10-29 (unofficial)
+[S3] devonmpowell/r3d, https://github.com/devonmpowell/r3d, fetched 2026-10-27 (unofficial)
+[S4] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)

@@ -1,0 +1,153 @@
+--- v002.md
++++ v003.md
+@@ -12,7 +12,7 @@
+ **Data Structures:**
+ *   **Rays:** Tensors of shape $(N_{rays}, 3)$ for origins and directions.
+-*   **Coarse Samples:** $t_{c} \in \mathbb{R}^{N_{rays} \times N_c}$, $\mathbf{pts}_{c} \in \mathbb{R}^{N_{rays} \times N_c \times 3}$, $\mathbf{rgb}_{c} \in \mathbb{R}^{N_{rays} \times N_c \times 3}$, $\sigma_{c} \in \mathbb{R}^{N_{rays} \times N_c \times 1}$ [S2, unofficial].
++*   **Coarse Samples:** $t_{c} \in \mathbb{R}^{N_{rays} \times (N_c + 1)}$, $\mathbf{pts}_{c} \in \mathbb{R}^{N_{rays} \times (N_c + 1) \times 3}$, $\mathbf{rgb}_{c} \in \mathbb{R}^{N_{rays} \times (N_c + 1) \times 3}$, $\sigma_{c} \in \mathbb{R}^{N_{rays} \times (N_c + 1) \times 1}$ [S2, unofficial].
+ *   **Fine Samples:** $t_{f} \in \mathbb{R}^{N_{rays} \times N_f}$, $\mathbf{pts}_{f} \in \mathbb{R}^{N_{rays} \times N_f \times 3}$, $\mathbf{rgb}_{f} \in \mathbb{R}^{N_{rays} \times N_f \times 3}$, $\sigma_{f} \in \mathbb{R}^{N_{rays} \times N_f \times 1}$ [S2, unofficial].
+-*   **Merged Samples:** $t_{all} \in \mathbb{R}^{N_{rays} \times (N_c + N_f)}$ [S1, unofficial].
++*   **Merged Samples:** $t_{all} \in \mathbb{R}^{N_{rays} \times (N_c + 1 + N_f)}$ [S1, unofficial].
+ 
+ **Parameters:**
+@@ -25,5 +25,5 @@
+ **Steps:**
+ 
+-1.  **Coarse Sampling:** Generate $N_c$ samples uniformly along the ray between $t_{near}$ and $t_{far}$. If $\epsilon > 0$, apply stratified sampling by adding noise to the sample positions [S1, unofficial][S2, unofficial].
++1.  **Coarse Sampling:** Generate $N_c$ samples uniformly along the ray between $t_{near}$ and $t_{far}$. If $\epsilon > 0$, apply stratified sampling by adding noise to the sample positions [S1, unofficial].
+ 2.  **Coarse Evaluation:** Evaluate the coarse neural network on $\mathbf{pts}_{c}$ in chunks of size $netchunk$ to obtain color $\mathbf{rgb}_{c}$ and density $\sigma_{c}$ [S1, unofficial][S2, unofficial].
+ 3.  **Coarse Volume Rendering:** Compute weights $w_{c}$ and accumulated color $\mathbf{C}_c$, depth $D_c$, and opacity $\alpha_c$ using standard volume rendering integration [S1, unofficial][S2, unofficial].
+@@ -39,5 +39,6 @@
+     # 1. Coarse Sampling
+     t_c = stratified_sample(rays_o, rays_d, near, far, N_c, perturb)
+-    pts_c = rays_o[:, None, :] + rays_d[:, None, :] * t_c[:, :, None]
++    pts_c = [rays_o[i][0] + rays_d[i][0] * t_c[i][j][0] for i in range(len(rays_o)) for j in range(len(t_c[i])) for k in range(3)]
++    pts_c = reshape(pts_c, (len(rays_o), len(t_c[0]), 3))
+     
+     # 2. Coarse Evaluation
+@@ -50,5 +51,6 @@
+     # 4. Fine Sampling
+     t_f = importance_sample(t_c, weights_c, N_f, perturb)
+-    pts_f = rays_o[:, None, :] + rays_d[:, None, :] * t_f[:, :, None]
++    pts_f = [rays_o[i][0] + rays_d[i][0] * t_f[i][j][0] for i in range(len(rays_o)) for j in range(len(t_f[i])) for k in range(3)]
++    pts_f = reshape(pts_f, (len(rays_o), len(t_f[0]), 3))
+     
+     # 5. Fine Evaluation
+@@ -57,5 +59,6 @@
+     # 6. Merge and Sort
+     t_all = sort(concatenate([t_c, t_f], axis=1), axis=1)
+-    pts_all = rays_o[:, None, :] + rays_d[:, None, :] * t_all[:, :, None]
++    pts_all = [rays_o[i][0] + rays_d[i][0] * t_all[i][j][0] for i in range(len(rays_o)) for j in range(len(t_all[i])) for k in range(3)]
++    pts_all = reshape(pts_all, (len(rays_o), len(t_all[0]), 3))
+     
+     # Re-evaluate fine model on all merged points
+@@ -68,42 +71,57 @@
+ 
+ def stratified_sample(rays_o, rays_d, near, far, N, perturb):
+-    t_vals = linspace(0.0, 1.0, N + 1)
+-    t_vals = near + (far - near) * t_vals
++    N_rays = len(rays_o)
++    t_vals_1d = linspace(0.0, 1.0, N + 1)
++    t_vals_1d = [near + (far - near) * t for t in t_vals_1d]
++    t_vals = [t_vals_1d[:] for _ in range(N_rays)]
+     if perturb > 0:
+-        mids = 0.5 * (t_vals[:, 1:] + t_vals[:, :-1])
+-        upper = concatenate([mids, t_vals[:, -1:]], axis=1)
+-        lower = concatenate([t_vals[:, :1], mids], axis=1)
+-        rand_vals = random_uniform(t_vals.shape) * perturb
+-        t_vals = lower + (upper - lower) * rand_vals
++        mids = [0.5 * (t_vals[i][j+1] + t_vals[i][j]) for i in range(N_rays) for j in range(N)]
++        mids = [mids[j*N:(j+1)*N] for j in range(N_rays)]
++        upper = [mids[i] + [t_vals[i][-1]] for i in range(N_rays)]
++        lower = [[t_vals[i][0]] + mids[i] for i in range(N_rays)]
++        rand_vals = random_uniform((N_rays, N)) * perturb
++        t_vals = [lower[i][j] + (upper[i][j] - lower[i][j]) * rand_vals[i][j] for i in range(N_rays) for j in range(N+1)]
++        t_vals = [t_vals[j*(N+1):(j+1)*(N+1)] for j in range(N_rays)]
+     return t_vals
+ 
+ def volume_render(rgb, sigma, t_vals, rays_d, far, white_bg):
+-    deltas = concatenate([t_vals[:, 1:] - t_vals[:, :-1],
+-                          (far - t_vals[:, -1:]).reshape(-1, 1)], axis=1)
+-    alpha = 1.0 - exp(-sigma * deltas)
+-    # Transmittance T_i = product_{j<i} (1 - alpha_j)
+-    T = ones_like(alpha[:, :1])
+-    T = concatenate([T, cumprod(1.0 - alpha, axis=1)[:, :-1]], axis=1)
+-    weights = alpha * T
+-    rgb_map = sum(weights[:, :, None] * rgb, axis=1)
+-    depth = sum(weights[:, :, None] * t_vals, axis=1)
+-    acc = sum(weights, axis=1)
++    N_rays = len(t_vals)
++    N = len(t_vals[0]) - 1
++    deltas = []
++    for i in range(N_rays):
++        row_deltas = [t_vals[i][j+1] - t_vals[i][j] for j in range(N)]
++        row_deltas.append(far - t_vals[i][-1])
++        deltas.append(row_deltas)
++    alpha = [[1.0 - exp([-sigma[i][j][0] * deltas[i][j] for j in range(N+1)])] for i in range(N_rays)]
++    alpha = [[1.0 - a for a in row] for row in alpha]
++    T = ones_like(alpha)
++    for i in range(N_rays):
++        T[i][0] = 1.0
++        for j in range(1, N+1):
++            T[i][j] = T[i][j-1] * (1.0 - alpha[i][j-1])
++    weights = [[alpha[i][j] * T[i][j] for j in range(N+1)] for i in range(N_rays)]
++    rgb_map = [sum([weights[i][j] * rgb[i][j][k] for j in range(N+1)]) for i in range(N_rays) for k in range(3)]
++    depth = [sum([weights[i][j] * t_vals[i][j] for j in range(N+1)]) for i in range(N_rays)]
++    acc = [sum(weights[i]) for i in range(N_rays)]
+     if white_bg:
+-        rgb_map = rgb_map + (1.0 - acc[:, None]) * 1.0
++        rgb_map = [rgb_map[i] + (1.0 - acc[i]) * 1.0 for i in range(N_rays)]
+     return {"rgb_map": rgb_map, "depth": depth, "acc": acc, "weights": weights}
+ 
+ def importance_sample(t_c, weights, N_f, perturb):
+-    cumsum = cumsum(weights, axis=1)
+-    cumsum = cumsum / cumsum[:, -1:]
+-    u = random_uniform((t_c.shape[0], N_f))
++    N_rays = len(t_c)
++    cumsum = [[sum(weights[i][:j+1]) for j in range(len(weights[i]))] for i in range(N_rays)]
++    for i in range(N_rays):
++        norm = cumsum[i][-1] if cumsum[i][-1] > 0 else 1.0
++        cumsum[i] = [x / norm for x in cumsum[i]]
++    u = random_uniform((N_rays, N_f))
+     if perturb > 0:
+-        u = u * (1.0 - 1e-5) + 1e-5
++        u = [[u[i][j] * (1.0 - 1e-5) + 1e-5 for j in range(N_f)] for i in range(N_rays)]
+     indices = searchsorted(cumsum, u, side='right')
+-    indices = clamp(indices, 0, t_c.shape[1] - 1)
++    indices = clamp(indices, 0, [len(t_c[i]) - 1 for i in range(N_rays)])
+     t_f = gather(t_c, 1, indices)
+     return t_f
+ 
+ def evaluate_chunks(model_fn, pts, dirs, chunk):
+-    N = pts.shape[0]
++    N = len(pts)
+     rgb_list = []
+     sigma_list = []
+@@ -129,9 +147,6 @@
+ 
+ def sort(arr, axis):
+-    return sorted(arr, key=lambda x: x[axis])
+-
+-def cumsum(arr, axis):
+     if axis == 1:
+-        return [[sum(arr[i][:j+1]) for j in range(len(arr[i]))] for i in range(len(arr))]
++        return [sorted(row) for row in arr]
+     return arr
+ 
+@@ -163,12 +178,11 @@
+     return [[math.exp(x) for x in row] for row in arr]
+ 
+-def sum(arr, axis):
+-    if axis == 1:
+-        return [sum(row) for row in arr]
+-    return arr
++def reshape(arr, shape):
++    # Simplified reshape for pseudocode clarity
++    return [arr[i*shape[1]:(i+1)*shape[1]] for i in range(shape[0])]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Degenerate Input:** If $N_c=0$, importance sampling fails. Ensure $N_c \ge 1$ [S1, unofficial][S2, unofficial].
++*   **Degenerate Input:** If $N_c=0$, importance sampling fails. Ensure $N_c \ge 1$ [G].
+ *   **Memory:** Large $N_c$ and $N_f$ combined with high-resolution rays can exceed GPU memory. Use `chunk` size to limit simultaneous evaluations [S1, unofficial][S2, unofficial].
+ *   **Precision:** When computing transmittance, use a small epsilon (e.g., `1e-10`) to avoid `log(0)` or `exp(-inf)` issues in dense regions [G].

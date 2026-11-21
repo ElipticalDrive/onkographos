@@ -1,0 +1,243 @@
+--- v002.md
++++ v003.md
+@@ -1,139 +1,126 @@
+ # Multi-stage Training Protocol
+ 
+-Also called: Pretrain and Joint Train Strategy, Training Scheme
++Also called: Pretrain and Joint Train Strategy
+ 
+ ## Overview
+-This protocol structures the optimization of inverse rendering models into sequential phases to ensure stable convergence of coupled components. It addresses the dependency of lighting estimation on accurate geometry and appearance by decoupling the training of Direct Prediction (geometry/appearance) and Lighting Joint Prediction modules. Unlike end-to-end training which may suffer from gradient conflicts or poor initialization, this method progressively introduces complexity, starting with isolated component training before joint optimization and final refinement.
++The Multi-stage Training Protocol is a progressive optimization strategy designed to stabilize the training of complex, multi-component neural inverse rendering models. It addresses the instability caused by jointly optimizing interdependent modules (such as geometry, appearance, and lighting) by decoupling them into sequential phases. Unlike standard end-to-end training which optimizes all parameters simultaneously, this method pre-trains foundational components to provide reasonable initial values, then progressively integrates additional modules, and finally performs a global fine-tuning. This approach is distinct from single-stage optimization by ensuring that dependent modules receive valid inputs before they are activated, thereby preventing gradient explosion or convergence to poor local minima.
+ 
+ ## How it works
+-The method optimizes a model comprising three submodules: a Direct Prediction Module ($h_{DP}$) producing albedo ($A$), normal ($N$), and depth ($D$); a Lighting Joint Prediction Module; and a Joint Re-prediction Module. The goal is to recover HDR lighting from LDR images while predicting physically plausible surface properties.
++The protocol consists of four distinct stages. The inputs are the training dataset of images and the model architecture comprising three sub-modules: the Direct Prediction Module ($h_{DP}$), the Lighting Joint Prediction Module, and the Joint Re-prediction Module. The outputs are the optimized weights for all modules and the final rendered images with estimated albedo ($\hat{A}$), normals ($\hat{N}$), depth ($\hat{D}$), and lighting ($\hat{L}$).
+ 
+-**Inputs:**
+-- LDR input images.
+-- Camera poses and intrinsics.
+-- Initial visible surface volume and VSG lighting grid (resolution $128^3$) [S1].
++### Data Structures
++The model maintains weights for three sub-modules:
++1.  **Direct Prediction Module ($h_{DP}$)**: Contains branches for albedo, normal, and depth prediction.
++2.  **Lighting Joint Prediction Module**: Depends on outputs from $h_{DP}$.
++3.  **Joint Re-prediction Module**: Refines albedo, normals, and depth.
+ 
+-**Outputs:**
+-- Predicted albedo ($\hat{A}$), normal ($\hat{N}$), depth ($\hat{D}$), and lighting ($\hat{L}$).
+-- Intermediate re-predicted albedo ($\tilde{A}$), normal ($\tilde{N}$), and depth ($\tilde{D}$).
++### Numbered Steps
+ 
+-**Data Structures:**
+-- **Direct Prediction Module ($h_{DP}$):** Neural network branches for $A, N, D$.
+-- **Lighting Joint Prediction Module:** Neural network dependent on outputs of $h_{DP}$.
+-- **Joint Re-prediction Module:** Neural network for refining $A, N, D$.
+-- **Lighting Grid:** 3D voxel grid of resolution $128^3$ for VSG lighting [S1].
++**Stage 1: Pretrain Direct Prediction Module**
++Pre-train the albedo, normal, and depth branches of $h_{DP}$ independently. This ensures that the Lighting Joint Prediction Module receives reasonable initial values for its dependencies.
++*   **Loss**: Standard reconstruction losses for albedo, normal, and depth.
++*   **Action**: Update weights of $h_{DP}$ only.
+ 
+-**Loss Function:**
+-The multi-task loss $L$ used in joint stages is defined as [S1]:
+-$$
+-L = \lambda_A L_{albedo} + \lambda_N L_{normal} + \lambda_D L_{depth} + \lambda_L L_{light} + \lambda_{visible} L_{visible} + \lambda_{reg} L_{reg} + \lambda_{rerender} L_{rerender}
+-$$
+-where $\lambda$ terms are weighting hyperparameters.
++**Stage 2: Joint Train Direct and Lighting Modules**
++Jointly train the Direct Prediction Module and the Lighting Joint Prediction Module.
++*   **Loss**: The multi-task loss $L$ is defined as:
++    $$ L = \lambda_A L_{albedo} + \lambda_N L_{normal} + \lambda_D L_{depth} + \lambda_L L_{light} + \lambda_{visible} L_{visible} + \lambda_{reg} L_{reg} + \lambda_{rerender} L_{rerender} $$
++    where $\lambda$ terms are hyperparameters balancing the different loss components [S1].
++*   **Action**: Update weights of $h_{DP}$ and the Lighting Joint Prediction Module.
+ 
+-**Steps:**
++**Stage 3: Train Joint Re-prediction Module**
++Freeze the weights of the Direct Prediction Module and the Lighting Joint Prediction Module. Train only the Joint Re-prediction Module for albedo, normals, and depth.
++*   **Loss**: Reconstruction losses for albedo, normals, and depth on the re-prediction outputs.
++*   **Action**: Update weights of the Joint Re-prediction Module only.
+ 
+-1.  **Pretrain Direct Prediction Module:**
+-    Train only the albedo, normal, and depth branches of $h_{DP}$ using available supervision. This ensures reasonable initial values for the subsequent lighting module, which depends on these properties [S1].
++**Stage 4: End-to-End Finetune**
++Jointly finetune all three modules end-to-end.
++*   **Loss**: The multi-task loss $L$ is computed on both the joint prediction outputs $(\hat{A}, \hat{N}, \hat{D}, \hat{L})$ and the intermediate outputs $(\tilde{A}, \tilde{N}, \tilde{D})$ from the Direct Prediction Module.
++*   **Action**: Update weights of all modules simultaneously.
+ 
+-2.  **Joint Train Direct and Lighting Modules:**
+-    Unfreeze the Lighting Joint Prediction Module. Jointly train $h_{DP}$ and the Lighting Joint Prediction Module using the full multi-task loss $L$ [S1].
++### Pseudocode
++```python
++def multi_stage_training(model, dataset, hyperparameters):
++    # Stage 1: Pretrain Direct Prediction Module
++    model.freeze_lighting_module()
++    model.freeze_reprediction_module()
++    for epoch in range(pretrain_epochs):
++        for batch in dataset:
++            albedo, normal, depth = model.direct_prediction(batch)
++            loss = compute_reconstruction_loss(albedo, normal, depth, batch)
++            model.update_gradients(loss, model.direct_prediction_module)
++    
++    # Stage 2: Joint Train Direct and Lighting Modules
++    model.freeze_reprediction_module()
++    for epoch in range(joint_train_epochs):
++        for batch in dataset:
++            # Forward pass through Direct and Lighting modules
++            intermediate_outputs = model.direct_prediction(batch)
++            joint_outputs = model.lighting_module(intermediate_outputs)
++            
++            # Compute multi-task loss
++            loss = (hyperparameters.lambda_A * loss_albedo(joint_outputs.albedo, batch) +
++                    hyperparameters.lambda_N * loss_normal(joint_outputs.normal, batch) +
++                    hyperparameters.lambda_D * loss_depth(joint_outputs.depth, batch) +
++                    hyperparameters.lambda_L * loss_light(joint_outputs.light, batch) +
++                    hyperparameters.lambda_visible * loss_visible(joint_outputs, batch) +
++                    hyperparameters.lambda_reg * loss_reg(model) +
++                    hyperparameters.lambda_rerender * loss_rerender(joint_outputs, batch))
++            
++            model.update_gradients(loss, [model.direct_prediction_module, model.lighting_module])
+ 
+-3.  **Train Joint Re-prediction Module:**
+-    Freeze the weights of the Direct Prediction Module and the Lighting Joint Prediction Module. Train only the Joint Re-prediction Module to predict albedo, normals, and depth [S1].
++    # Stage 3: Train Joint Re-prediction Module
++    model.freeze_direct_module()
++    model.freeze_lighting_module()
++    for epoch in range(reprediction_epochs):
++        for batch in dataset:
++            # Forward pass through Direct (frozen) and Re-prediction
++            intermediate_outputs = model.direct_prediction(batch)
++            reprediction_outputs = model.reprediction_module(intermediate_outputs)
++            
++            loss = compute_reconstruction_loss(reprediction_outputs, batch)
++            model.update_gradients(loss, model.reprediction_module)
+ 
+-4.  **End-to-End Finetune:**
+-    Unfreeze all modules. Jointly finetune all three modules end-to-end. The loss is computed on both the joint prediction outputs $(\hat{A}, \hat{N}, \hat{D}, \hat{L})$ and the intermediate re-prediction outputs $(\tilde{A}, \tilde{N}, \tilde{D})$ [S1].
++    # Stage 4: End-to-End Finetune
++    model.unfreeze_all()
++    for epoch in range(finetune_epochs):
++        for batch in dataset:
++            # Forward pass through all modules
++            intermediate_outputs = model.direct_prediction(batch)
++            joint_outputs = model.lighting_module(intermediate_outputs)
++            reprediction_outputs = model.reprediction_module(intermediate_outputs)
++            
++            # Compute loss on both joint and intermediate outputs
++            loss_joint = compute_multi_task_loss(joint_outputs, batch)
++            loss_intermediate = compute_reconstruction_loss(reprediction_outputs, batch)
++            loss = loss_joint + loss_intermediate
++            
++            model.update_gradients(loss, model.all_modules)
++```
+ 
+-**Pseudocode:**
++### Parameters
++*   $\lambda_A, \lambda_N, \lambda_D, \lambda_L, \lambda_{visible}, \lambda_{reg}, \lambda_{rerender}$: Weights for the respective loss terms in the multi-task loss [S1].
++*   Resolution of initialized visible surface volume and predicted VSG lighting: $128^3$ [S1].
+ 
+-```python
+-def multi_stage_training(model, data_loader, hyperparams):
+-    # model contains: direct_pred_module, lighting_joint_module, joint_repred_module
+-    
+-    # Step 1: Pretrain Direct Prediction Module
+-    # Freeze lighting_joint_module and joint_repred_module
+-    for epoch in range(pretrain_epochs):
+-        for batch in data_loader:
+-            # Forward pass through direct_pred_module only
+-            A_pred, N_pred, D_pred = model.direct_pred_module(batch)
+-            
+-            # Compute loss using only albedo, normal, depth terms from L
+-            # Note: Specific terms L_albedo, L_normal, L_depth are used
+-            loss = compute_partial_loss(A_pred, N_pred, D_pred, batch)
+-            
+-            # Backpropagate and update direct_pred_module weights
+-            optimizer_direct.step()
+-            
+-    # Step 2: Joint Train Direct and Lighting Modules
+-    # Unfreeze lighting_joint_module
+-    # Keep joint_repred_module frozen
+-    for epoch in range(joint_train_epochs):
+-        for batch in data_loader:
+-            # Forward pass
+-            A_pred, N_pred, D_pred = model.direct_pred_module(batch)
+-            L_pred = model.lighting_joint_module(A_pred, N_pred, D_pred)
+-            
+-            # Compute full multi-task loss L
+-            loss = hyperparams.lambda_A * L_albedo(A_pred, batch) + \
+-                   hyperparams.lambda_N * L_normal(N_pred, batch) + \
+-                   hyperparams.lambda_D * L_depth(D_pred, batch) + \
+-                   hyperparams.lambda_L * L_light(L_pred, batch) + \
+-                   hyperparams.lambda_visible * L_visible(batch) + \
+-                   hyperparams.lambda_reg * L_reg(L_pred) + \
+-                   hyperparams.lambda_rerender * L_rerender(L_pred, batch)
+-            
+-            # Backpropagate and update direct_pred_module and lighting_joint_module weights
+-            optimizer_joint.step()
+-            
+-    # Step 3: Train Joint Re-prediction Module
+-    # Freeze direct_pred_module and lighting_joint_module
+-    # Unfreeze joint_repred_module
+-    for epoch in range(repred_epochs):
+-        for batch in data_loader:
+-            # Forward pass through direct_pred_module (frozen)
+-            A_pred, N_pred, D_pred = model.direct_pred_module(batch)
+-            
+-            # Forward pass through joint_repred_module
+-            A_repred, N_repred, D_repred = model.joint_repred_module(A_pred, N_pred, D_pred)
+-            
+-            # Compute loss for re-prediction outputs
+-            # Specific loss terms for A, N, D re-prediction
+-            loss = compute_repred_loss(A_repred, N_repred, D_repred, batch)
+-            
+-            # Backpropagate and update joint_repred_module weights
+-            optimizer_repred.step()
+-            
+-    # Step 4: End-to-End Finetune
+-    # Unfreeze all modules
+-    for epoch in range(finetune_epochs):
+-        for batch in data_loader:
+-            # Forward pass
+-            A_pred, N_pred, D_pred = model.direct_pred_module(batch)
+-            L_pred = model.lighting_joint_module(A_pred, N_pred, D_pred)
+-            A_repred, N_repred, D_repred = model.joint_repred_module(A_pred, N_pred, D_pred)
+-            
+-            # Compute loss on both joint predictions and intermediate re-predictions
+-            loss = hyperparams.lambda_A * (L_albedo(A_pred, batch) + L_albedo(A_repred, batch)) + \
+-                   hyperparams.lambda_N * (L_normal(N_pred, batch) + L_normal(N_repred, batch)) + \
+-                   hyperparams.lambda_D * (L_depth(D_pred, batch) + L_depth(D_repred, batch)) + \
+-                   hyperparams.lambda_L * L_light(L_pred, batch) + \
+-                   hyperparams.lambda_visible * L_visible(batch) + \
+-                   hyperparams.lambda_reg * L_reg(L_pred) + \
+-                   hyperparams.lambda_rerender * L_rerender(L_pred, batch)
+-            
+-            # Backpropagate and update all weights
+-            optimizer_all.step()
+-```
++### Edge Cases and Pitfalls
++*   **Precision**: The use of HDR lighting recovery from LDR images requires careful handling of dynamic range during the lighting estimation phase [S1].
++*   **Freezing**: Incorrectly unfreezing modules during Stage 3 can lead to gradient interference. The weights of the first two submodules must remain fixed during Stage 3.
+ 
+ ## Subtopics
+ 
++### [MobileNeRF Staged Training](15503-mobilenerf-staged-training.md)
++MobileNeRF Staged Training is a multi-stage optimization protocol designed to train the MobileNeRF neural field representation efficiently on mobile hardware constraints. It addresses the challenge of jointly optimizing geometry (vertices), appearance (MLPs), and acceleration structures (grids) by decoupling them into sequential phases. Unlike standard NeRF training which optimizes all parameters simultaneously, this method fixes geometry and acceleration structures in later stages to stabilize convergence and reduce computational overhead during the final refinement of appearance features.
++
++### [Multi-resolution Feature Grid Pre-train](17802-multi-resolution-feature-grid-pre-train.md)
++Multi-resolution Feature Grid Pre-train is a method that constructs a multi-resolution ground feature plane representation for large urban scenes, capturing density and appearance separately to reduce memory footprint and guide subsequent NeRF sampling. It differs from standard NeRF training by decoupling the initial scene representation into a compact, low-rank tensor factorization (the grid branch) that is pre-trained before joint optimization with a full 3D NeRF branch. This approach leverages the planar nature of urban environments to achieve robust performance with sparse view data.
++
+ ## Operating characteristics
+-- **Stability:** Decoupling prevents gradient instability caused by the strong dependency of lighting estimation on geometry/appearance initialization [S1].
+-- **Convergence:** Progressive training ensures the lighting module receives reasonable inputs, avoiding local minima associated with random initialization [S1].
+-- **Complexity:** The method requires multiple optimization phases, increasing total training time compared to single-stage training.
+-- **Hardware:** The lighting grid resolution is fixed at $128^3$ [S1].
++*   **Time Complexity**: The total training time is the sum of the time taken for each stage. While this increases the total wall-clock time compared to single-stage training, it often reduces the number of iterations required for convergence in each stage due to better initialization.
++*   **Memory Complexity**: Memory usage is comparable to standard training as the same model parameters are stored, but the freezing of modules in later stages allows for potential memory optimizations in gradient storage.
++*   **Strengths**: Stabilizes training for complex inverse rendering tasks; ensures logical dependency order (geometry before lighting); improves final reconstruction quality.
++*   **Limitations**: Requires careful tuning of stage durations and loss weights; not suitable for simple forward rendering tasks where dependencies are minimal.
+ 
+ ## Background
+-Originated in the context of indoor inverse rendering with 3D spatially-varying lighting. The protocol was introduced to handle the complexity of jointly optimizing geometry, appearance, and lighting from LDR images, enabling the recovery of HDR lighting [S1].
++The Multi-stage Training Protocol was introduced in the context of indoor inverse rendering with 3D spatially-varying lighting. It was proposed to handle the complexity of jointly estimating albedo, normals, depth, and lighting from low-dynamic-range (LDR) images. The method was developed to ensure that the lighting estimation module receives reasonable geometric inputs, which is critical for accurate inverse rendering.
+ 
+ ## Sources

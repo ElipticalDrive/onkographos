@@ -1,0 +1,124 @@
+# Octree-GS / Scaffold-GS
+
+Also called: Anchor-based Gaussian Splatting
+
+## Overview
+Octree-GS and Scaffold-GS are hierarchical level-of-detail (LoD) methods that anchor scene content to a sparse voxel grid or octree, using the structure as a scaffold to allocate 3D Gaussians only in occupied regions [S1, unofficial][S2][S4, unofficial]. This approach naturally adapts to view distance, significantly improving memory efficiency and reducing redundancy compared to flat Gaussian representations [S1, unofficial][S2]. Unlike [LinPrim Population Control](2295-linprim-population-control.md) which dynamically splits/merges primitives based on screen space, these methods pre-organize primitives into a spatial hierarchy, enabling efficient culling and streaming for large-scale scenes [S1, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Sparse Structure-from-Motion (SfM) point cloud; camera poses; training images.
+*   **Output:** A set of "anchor" primitives (voxel centers) with features, and a decoder (MLP or fixed function) that generates child Gaussians on the fly.
+
+**Data Structures:**
+1.  **Sparse Voxel Grid / Octree:**
+    *   Initialized from SfM points.
+    *   Each node (anchor) stores:
+        *   Position: Voxel center coordinates.
+        *   Learnable Scale: A scalar or vector defining the anchor's spatial extent [S2].
+        *   Feature Vector: A latent vector used by the decoder to predict child Gaussian attributes [S2][S4, unofficial].
+2.  **Child Gaussians (Generated):**
+    *   Generated per visible anchor.
+    *   Attributes: Position (offset from anchor), Opacity, Color, Scale, Quaternion [S2].
+
+**Parameters:**
+*   $\tau_\alpha$: Opacity threshold. Gaussians with opacity $\alpha < \tau_\alpha$ are not rasterized [S2].
+*   $k$: Number of Gaussians generated from each visible anchor [S2]. Typical value $k=4$ [S2].
+*   Voxel Size: Grid resolution. Typical value $0.001$ for anchor grids in modified variants [S5].
+
+**Steps:**
+1.  **Initialization:** Construct a sparse voxel grid from the input SfM points. Place an anchor at each occupied voxel center. Assign a learnable scale to each anchor [S2].
+2.  **Feature Learning:** Optimize the anchor features (and anchor scales) using reconstruction loss (L1, SSIM, and optionally volume regularization $L_{vol}$) [S2, S5].
+3.  **Gaussian Generation (Decoding):**
+    *   For each camera view, identify visible anchors within the frustum.
+    *   For each visible anchor, generate $k$ child Gaussians.
+    *   The position of each child is defined by an offset $O_i$ from the anchor center.
+    *   Attributes (opacity, color, scale, quaternion) are decoded from the anchor's feature vector using a small MLP or neural field [S2][S3, S4, unofficial].
+4.  **Filtering:** Discard any generated Gaussian where opacity $\alpha < \tau_\alpha$ [S2].
+5.  **Rasterization:** Render the remaining significant Gaussians using standard alpha-blending [S2].
+6.  **Optimization:** Update anchor features and scales to minimize the difference between the rendered image and the ground truth [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Anchor-based Gaussian Generation and Rendering
+def render_scaffold_gs(anchors, camera, k, tau_alpha, decoder):
+    """
+    anchors: List of Anchor objects.
+    camera: Camera parameters (view/projection matrices).
+    k: Number of Gaussians per anchor.
+    tau_alpha: Opacity threshold for culling.
+    decoder: Function MLP(feature) -> [offsets, opacities, colors, scales, quaternions]
+    """
+    visible_gaussians = []
+    
+    for anchor in anchors:
+        # Check if anchor is visible in camera frustum
+        if not is_visible(anchor.position, camera.frustum):
+            continue
+            
+        # Decode child Gaussians from anchor feature
+        # decoder returns k sets of attributes
+        decoded = decoder(anchor.feature)
+        
+        for i in range(k):
+            # Extract attributes for the i-th child
+            offset = decoded.offsets[i]
+            opacity = decoded.opacities[i]
+            color = decoded.colors[i]
+            scale = decoded.scales[i]
+            quaternion = decoded.quaternions[i]
+            
+            # Calculate final position
+            position = anchor.position + offset
+            
+            # Cull low-opacity Gaussians
+            if opacity < tau_alpha:
+                continue
+                
+            # Create Gaussian primitive
+            gaussian = Gaussian(
+                position=position,
+                opacity=opacity,
+                color=color,
+                scale=scale,
+                quaternion=quaternion
+            )
+            visible_gaussians.append(gaussian)
+            
+    # Rasterize visible Gaussians
+    image = rasterize(visible_gaussians, camera)
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Anchor positions are fixed to voxel centers, which may introduce quantization errors if the voxel size is too large [S5].
+*   **Degenerate Input:** If SfM points are sparse, the voxel grid may have large empty regions, leading to wasted computation if not properly pruned [S2].
+*   **Extrapolation:** While anchor-based methods generalize better to extrapolated views than vanilla 3DGS, extreme extrapolation may still fail if no anchors exist in the region [S4, unofficial].
+
+## Subtopics
+
+### [Context-GS](7355-context-gs.md)
+Context-GS is a structured compression method that enhances representational capacity by explicitly modeling hierarchical relationships among anchor primitives. Unlike flat compression approaches, it employs a context-aware encoding scheme where higher-level anchors rely on context from coarser-level anchors for both encoding and decoding. This builds on the anchor-based representation introduced in [Octree-GS / Scaffold-GS](6142-octree-gs-scaffold-gs.md) by using sparse anchors as reference points to predict attributes of dependent Gaussians, thereby reducing redundancy and improving coding efficiency.
+
+### Anchor-2D-GS / Anchor-3D-GS
+Modified versions of 2D-GS and 3D-GS that employ an anchor grid structure to organize Gaussian primitives more efficiently, reducing redundancy and storage overhead [S5]. They voxelize input SfM points to anchors and assign each of them 2D or 3D Gaussians, maintaining the same densification strategy as Scaffold-GS [S5]. The voxel size for the anchor grid is typically set to 0.001 [S5]. These variants achieve competitive rendering quality with fewer file storage than original methods, demonstrating that the anchor design organizes primitives more efficiently [S5].
+
+## Operating characteristics
+*   **Memory:** Uses approximately 5x less memory than vanilla 3DGS at the same quality [S3, unofficial].
+*   **Performance:** Enables real-time rendering of very large datasets (e.g., city-scale scenes) by dynamically selecting appropriate levels of detail and culling distant/irrelevant Gaussians [S1, S3, unofficial].
+*   **Strengths:** High memory efficiency; natural adaptation to view distance; better generalization to extrapolated views compared to vanilla 3DGS [S4, unofficial].
+*   **Limitations:** Requires initial SfM reconstruction; complexity of managing hierarchical structures; potential for quantization errors if voxel size is not chosen carefully [S5].
+*   **When to use:** Large-scale scenes (e.g., urban environments) where memory and streaming efficiency are critical [S3, unofficial].
+*   **When not to use:** Small-scale scenes where the overhead of hierarchical management may not be justified, or when high-frequency details require denser, non-hierarchical representations.
+
+## Background
+Originating from the need to scale 3D Gaussian Splatting to large environments, Scaffold-GS and Octree-GS were introduced to address the memory and rendering bottlenecks of flat Gaussian lists [S1, S3, unofficial]. Scaffold-GS uses a sparse voxel grid initialized from SfM points, while Octree-GS builds an octree over the scene [S1, unofficial]. These methods have been adopted in systems like CityGaussian for rendering huge scenes [S3, unofficial]. The anchor-based approach has also been extended to 2D and 3D Gaussian variants (Anchor-2D-GS, Anchor-3D-GS) to further reduce storage overhead [S5].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Compression in 3D Gaussian Splatting: A Survey of Methods, Trends, and Future Directions, https://doi.org/10.1109/TCSVT.2026.3676048, fetched 2026-10-26
+[S3] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-07 (unofficial)
+[S4] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-07 (unofficial)
+[S5] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-07

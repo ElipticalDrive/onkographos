@@ -1,0 +1,182 @@
+# Per-Frame Multi-Kernel Isosurface Ray-Tracing Pipeline
+
+Also called: MK pipeline, Multi-Kernel Isosurface Ray-casting Pipeline, multi-kernel rendering pipeline
+
+## Overview
+This method is a GPU-based image-order rendering pipeline for isosurface extraction that divides the ray-casting workload into four distinct, lightweight kernels: ray creation, BVH traversal, leaf intersection, and shading [S1, unofficial]. It solves the problem of thread divergence and inefficient memory access patterns in single-kernel ray tracers by using in-kernel stream compaction to filter out non-intersecting rays between stages [S1, unofficial]. Unlike sibling methods that may use static acceleration structures or single-pass execution, this pipeline dynamically rebuilds an explicit BVH for every frame based on the current isovalue, optimizing traversal for the specific geometry present [S1, unofficial]. It builds on [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) [G].
+
+## How it works
+The pipeline operates on a per-frame basis, assuming the isosurface may change every frame [S1, unofficial]. It relies on a balanced, median-split BVH where leaves are sized to 163 voxels, a value chosen to optimize texture caching on the target GPU hardware [S1, unofficial].
+
+### Data Structures
+*   **Min/Max Sub-volume:** A pre-processed volume containing the minimum and maximum scalar values for each leaf node (sub-volume), uploaded to GPU memory before rendering [S1, unofficial].
+*   **Implicit BVH:** A balanced binary tree structure created once, where node positions are determined implicitly by array indices (e.g., children of node $x$ are at $2x$ and $2x+1$ for an x-split) [S1, unofficial].
+*   **Explicit BVH:** A per-frame derived structure where nodes are flagged as valid or invalid based on the current isovalue; invalid nodes are compacted out [S1, unofficial].
+*   **Ray Stack:** A data structure passed between kernels to maintain traversal state (current node, $t_{near}$, $t_{far}$) for rays that have not yet hit a leaf [S1, unofficial].
+*   **Work-lists:** Lists of ray indices. Compaction is used to remove rays that have finished (hit surface or left volume) to maintain thread coherency for the next kernel [S1, unofficial].
+
+### Parameters
+*   **Leaf Size:** 163 voxels [S1, unofficial].
+*   **Tree Memory:** < 2.3 MB for a $512^3$ 8-bit volume [S1, unofficial].
+*   **Hardware:** NVIDIA GeForce GTX 480 (used for testing) [S1, unofficial].
+*   **Resolution:** $1024^2$ (used for testing) [S1, unofficial].
+
+### Steps
+1.  **Pre-processing (Offline/Initial):**
+    *   Compute the min/max scalar value for every leaf in the volume [S1, unofficial].
+    *   Create an implicit, balanced BVH structure large enough to hold all leaves [S1, unofficial].
+2.  **Per-Frame Initialization:**
+    *   **Ray Creation Kernel:** Generate one ray per pixel. Test against the global volume bounding box. Use stream compaction to discard rays that do not intersect the volume. Output a compacted list of valid ray indices [S1, unofficial].
+    *   **BVH Update Kernel:** Convert the implicit BVH into an explicit BVH specific to the current isovalue $\tau$:
+        *   For each leaf, compare $\tau$ against the pre-computed min/max values. Set a validity flag on the leaf node if $\min \le \tau \le \max$ [S1, unofficial].
+        *   Propagate validity flags up the tree. For each parent node:
+            *   If both children are invalid, mark parent invalid [S1, unofficial].
+            *   If one child is valid, copy the valid child's details to the parent (tree compaction) [S1, unofficial].
+            *   If both children are valid, mark parent valid and compute bounds encompassing both children [S1, unofficial].
+        *   Determine split dimensions based on the largest volume dimension (e.g., x-split offsets $2x + [0, 1]$) [S1, unofficial].
+3.  **Traversal (BVH Traversal Kernel):**
+    *   Input: Compacted list of ray indices and their initial states [S1, unofficial].
+    *   For each active ray:
+        *   Load the current node [S1, unofficial].
+        *   If internal node: Test ray against both child AABBs [S1, unofficial].
+        *   Traverse the child with the closest $t_{near}$ first [S1, unofficial].
+        *   Push the other child to the ray's stack [S1, unofficial].
+        *   If leaf node: Push leaf to stack, stop traversal for this ray, and call `InK-Compact` to filter out rays that did not reach a leaf (or finished). Output the list of rays reaching leaves [S1, unofficial].
+4.  **Intersection (Iso-Intersection Kernel):**
+    *   Input: List of ray indices reaching leaves [S1, unofficial].
+    *   For each ray:
+        *   Pop the ray stack to retrieve state [S1, unofficial].
+        *   Recompute $t_{near}$ and $t_{far}$ relative to the leaf's bounding box [S1, unofficial].
+        *   Step along the ray incrementally within the leaf [S1, unofficial].
+        *   Detect isovalue crossing [S1, unofficial].
+        *   Perform linear interpolation to find the precise intersection location [S1, unofficial].
+        *   Compute the surface normal $\nabla f$ at the hit point [S1, unofficial].
+        *   Set an output-to-shader predicate [S1, unofficial].
+        *   If no intersection is found, the ray is discarded via compaction [S1, unofficial].
+5.  **Shading (Shading Kernel):**
+    *   Input: Rays that hit the surface [S1, unofficial].
+    *   Compute color using local lighting models (ambient, diffuse, specular) based on the computed normal and position. Rays that did not hit the surface are excluded [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Standard graphics helpers (assumed available per [G])
+def pixel_to_world(pixel): ...
+def compute_direction(pixel): ...
+def ray_intersects_aabb(ray, bounds): ...
+def is_leaf(node): ...
+def ray_aabb_intersect(ray, node): ...
+def sample_scalar(volume, point): ...
+def compute_gradient(volume, point): ...
+def compute_phong(point, normal, direction): ...
+
+def pre_process_volume(volume_data, leaf_size=163):
+    num_leaves = ceil(len(volume_data) / leaf_size)
+    leaf_mins = [0.0] * num_leaves
+    leaf_maxs = [0.0] * num_leaves
+    for i in range(num_leaves):
+        start = i * leaf_size
+        end = min(start + leaf_size, len(volume_data))
+        leaf_mins[i] = min(volume_data[start:end])
+        leaf_maxs[i] = max(volume_data[start:end])
+    return leaf_mins, leaf_maxs
+
+def update_bvh_per_frame(leaf_mins, leaf_maxs, isovalue, num_leaves):
+    leaf_valid = [False] * num_leaves
+    for i in range(num_leaves):
+        if leaf_mins[i] <= isovalue <= leaf_maxs[i]:
+            leaf_valid[i] = True
+    for i in range(num_leaves - 1, -1, -1):
+        if i == 0: break
+        parent = (i - 1) // 2
+        left = 2 * parent + 0
+        right = 2 * parent + 1
+        l_valid = leaf_valid[left] if left < num_leaves else False
+        r_valid = leaf_valid[right] if right < num_leaves else False
+        if l_valid and r_valid:
+            leaf_valid[parent] = True
+        elif l_valid or r_valid:
+            leaf_valid[parent] = True
+        else:
+            leaf_valid[parent] = False
+    return leaf_valid
+
+def ray_creation_kernel(pixels, volume_bounds):
+    valid_rays = []
+    for pixel in pixels:
+        ray = {'origin': pixel_to_world(pixel), 'direction': compute_direction(pixel), 'stack': [0], 't_near': 0.0, 't_far': float('inf')}
+        if ray_intersects_aabb(ray, volume_bounds):
+            valid_rays.append(ray)
+    return valid_rays
+
+def bvh_traversal_kernel(rays, leaf_valid):
+    rays_at_leaves = []
+    for ray in rays:
+        while ray['stack']:
+            node = ray['stack'].pop()
+            if not leaf_valid[node]: continue
+            if is_leaf(node):
+                ray['current_node'] = node
+                rays_at_leaves.append(ray)
+                break
+            left = 2 * node + 0
+            right = 2 * node + 1
+            tn_l, tf_l = ray_aabb_intersect(ray, left)
+            tn_r, tf_r = ray_aabb_intersect(ray, right)
+            if tn_l < tn_r:
+                if tf_l > ray['t_far']: continue
+                ray['stack'].append(right)
+                ray['t_near'], ray['t_far'] = tn_l, tf_l
+            else:
+                if tf_r > ray['t_far']: continue
+                ray['stack'].append(left)
+                ray['t_near'], ray['t_far'] = tn_r, tf_r
+    return rays_at_leaves
+
+def iso_intersection_kernel(rays, volume_data, isovalue, leaf_size):
+    hit_rays = []
+    for ray in rays:
+        node = ray['current_node']
+        leaf_start = node * leaf_size
+        leaf_end = leaf_start + leaf_size
+        t = ray['t_near']
+        step = (leaf_end - leaf_start) / 100.0
+        prev_val = sample_scalar(volume_data, ray['origin'] + t * ray['direction']) - isovalue
+        while t < ray['t_far']:
+            p = ray['origin'] + t * ray['direction']
+            val = sample_scalar(volume_data, p) - isovalue
+            if val * prev_val < 0:
+                t_hit = t - val * step / (val - prev_val)
+                hit_point = ray['origin'] + t_hit * ray['direction']
+                normal = compute_gradient(volume_data, hit_point)
+                ray['hit_point'] = hit_point
+                ray['normal'] = normal
+                ray['t_hit'] = t_hit
+                hit_rays.append(ray)
+                break
+            prev_val = val
+            t += step
+    return hit_rays
+
+def shading_kernel(hit_rays):
+    return [compute_phong(ray['hit_point'], ray['normal'], ray['direction']) for ray in hit_rays]
+```
+
+## Subtopics
+
+### Single-Kernel Ray-Tracing Pipeline
+A variant that uses the same ray-tracing code but splits it into three kernels with additional work to initialize/from and output-to compacted work-lists [S1, unofficial]. It outperforms the multi-kernel pipeline only when isosurfaces are simple (little work) because the CPU-side overhead of the multi-kernel becomes a burden. Otherwise, the multi-kernel is faster [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** On an NVIDIA GTX 480 at $1024^2$ resolution, the multi-kernel pipeline outperforms the single-kernel pipeline by an average of 15% [S1, unofficial].
+*   **Complexity Dependence:** The multi-kernel approach is significantly faster for complex isosurfaces. For simple isosurfaces (little to be rendered), the single-kernel pipeline can be faster due to lower overhead, though the multi-kernel remains competitive (>100 fps) [S1, unofficial].
+*   **Memory:** The BVH tree memory usage is less than 2.3 MB for a $512^3$ 8-bit volume with 163-voxel leaves [S1, unofficial].
+*   **Strengths:** High thread coherency due to compaction; optimized for GPU texture caching via leaf size; dynamic BVH update handles changing isosurfaces efficiently [S1, unofficial].
+*   **Limitations:** CPU-side overhead for kernel launches and compaction can negate benefits for very simple scenes; assumes isosurface changes every frame (cost included in timing) [S1, unofficial].
+
+## Background
+The method was introduced by D. M. Hughes et al. in 2013 in the paper "In-Kernel Stream Compaction and Its Application to Isosurface Ray-Tracing" [S1, unofficial]. It was developed to address inefficiencies in single-kernel ray tracers on GPUs, specifically thread divergence and memory access patterns, by leveraging in-kernel stream compaction to maintain coherency between processing stages [S1, unofficial]. The work was presented at Computer Graphics Forum, published by The Eurographics Association and John Wiley & Sons Ltd. [S1, unofficial].
+
+## Sources
+[S1] InKernel Stream Compaction and Its Application to ..., https://www.sci.utah.edu/~knolla/hughes13.pdf, fetched 2026-10-29 (unofficial)

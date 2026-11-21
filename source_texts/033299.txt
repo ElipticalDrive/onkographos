@@ -1,0 +1,187 @@
+Tiered voxel object generator — an endless lattice of procedurally generated objects - Feature/center instancing by lardratboy · Pull Request #7 · lardratboy/block-showroom
+
+Feature/center instancing by lardratboy · Pull Request #7 · lardratboy/block-showroom · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lardratboy
+commented
+Sep 23, 2026
+Copy link
+Copy Markdown
+Owner
+Option B from discussion.md §3B. Written up in full as its new §7.
+buildBlock() now returns the occupancy walk's own output instead of a baked
+mesh — a flat grid index, a six-bit surviving-face mask and an orbit byte per
+occupied cell, plus the axis centre table. Six bytes a voxel where six baked
+quads were over a kilobyte. src/scene/instancing.js draws that from a shared
+24-vertex cube template, resolving position, the gamut ramp, the orbit hue ramp
+and face occlusion in a patched stock material's vertex shader.
+No behaviour change
+Core.meshArrays() still returns exactly what it always did — it is now
+expandInstances(instanceArrays(...)), so the occlusion rules have one
+implementation, the OBJ exporters still get real triangles, and every
+pos/idx hash in golden.json is unchanged.
+All four render modes became four indexings of the same instance attributes, so
+the derived wire/points/centres geometries and their byte accounting are gone,
+and switching modes now allocates nothing on the GPU. lattice/recipe.js no
+longer imports THREE at all.
+Hidden faces are sent outside the clip volume rather than simply drawn, so
+culling survives the translucent fade-in — otherwise every specimen would show
+its own interior on the way up.
+Measured (vs. the pre-branch core)
+before
+after
+geometry build
+—
+1.9–4.6× faster
+whole build
+—
+1.3–1.8× faster
+specimen at R=64
+42.0 MB
+649 KB
+worker message at R=64
+42.3 MB
+457 KB (92×)
+resident, 294 on-screen specimens
+27.8 MB
+0.66 MB
+This answers §3C: at R=64 baked geometry exhausted CACHE_BYTES after six
+specimens; it now does so after about 394. Nothing in config.js changed.
+The one regression
+Instancing submits whole cubes and discards hidden faces in the vertex shader.
+For every shipped preset that is exactly 1.00× (none of them culls a face). For
+a zero-gap layout it is 2.0× (3:0.5,5:0.0) to 3.3× (4·4·4 inner 0) the
+triangles — vertex work only, no fragments. Skipping them needs either six draw
+calls a specimen or a per-frame buffer rebuild, both of which cost more than
+they save.
+Verification
+npm test — 19 tests. New test/instancing.test.js pins the record itself
+and runs a CPU model of the vertex shader that reproduces the baked mesh
+vertex for vertex and colour for colour, plus a bound on how far the GPU's
+f32 arithmetic can drift (<1e-7 of the unit box — under half a step of an
+8-bit channel).
+npm run test:browser — 7 tests, now serial (~2 min; two headless Chromes on
+software WebGL contend badly). New test/browser/render-modes.test.js drives
+all twelve render × colour combinations and asserts on pixels, because a
+failed shader compile does not throw: three logs it and draws nothing.
+Additionally, main and this branch were screenshotted side by side across
+all twelve combinations, eight frames averaged: worst channel difference
+0.93 of 255, no shader errors.
+Also answers 5.4
+The 3³ LOD proxy now removes 22% of submitted triangles for 0.033 ms a frame
+and 20 KB, having previously also saved a 40 MB buffer and its upload. Most of
+its value is gone — your instinct was right — but the GPU side is not
+measurable under software rendering, so nothing was removed.
+🤖 Generated with Claude Code
+lardratboy
+and others
+added 3 commits
+September 22, 2026 20:55
+Instancing: a build ships an instance record, not a baked mesh
+…
+391dd78
+```
+The occupancy walk already computes everything a specimen is; the mesher
+then spent most of its time turning that into vertices nobody needed in
+that form. So the walk's own output is what buildBlock() returns and what
+the cache holds: a flat grid index, a six-bit surviving-face mask and an
+orbit byte per occupied cell, plus the axis centre table. Six bytes a
+voxel where six baked quads were over a kilobyte.
+
+meshArrays() still returns exactly what it always did -- it is now
+expandInstances(instanceArrays(...)), so the occlusion rules have one
+implementation and every pos/idx hash in golden.json is unchanged. The
+OBJ exporters expand a record on demand rather than reading baked buffers.
+
+scene/instancing.js draws it: a shared 24-vertex cube template plus one
+centre per voxel, with position, the gamut ramp, the orbit hue ramp and
+face occlusion all resolved in a patched stock material's vertex shader.
+A hidden face's corners go outside the clip volume, so culling survives
+even through the translucent fade-in. The four render modes become four
+indexings of the same instance attributes, which retires the derived
+wire/points/centres geometries and their byte accounting; lattice/recipe.js
+no longer imports THREE at all.
+
+The axis centre table stays Float64Array deliberately: f32 centres move
+every vertex by an ulp and would have invalidated the goldens for nothing
+visible. Only the GPU copy is f32.
+
+Measured against the pre-branch core: geometry 1.9-4.6x faster, whole
+build 1.3-1.8x, per-specimen memory 19-65x smaller. At R=64 a specimen
+goes from 42.0 MB to 649 KB and its worker message from 42.3 MB to 457 KB,
+which is what makes the MAX_R=64 ceiling and CACHE_BYTES compatible --
+six resident specimens became about 394. Full numbers in discussion.md.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Tests: pin the record, and what the page actually draws
+…
+6a0ec2b
+```
+test/instancing.test.js covers the record itself, which the golden hashes
+only reach through expandInstances(): one instance per filled voxel, mask
+popcount equal to the quad total, the zero-gap fixture culling 51% of its
+faces while the separated ones cull none, and analytic bounds matching a
+scan over the expanded vertices to the bit. The load-bearing one runs a
+CPU model of the vertex shader over the instances and asserts it
+reproduces the baked mesh vertex for vertex and colour for colour, with a
+second pass bounding how far the GPU's f32 arithmetic can drift from it
+(under 1e-7 of the unit box -- less than half a step of an 8-bit channel).
+
+test/browser/render-modes.test.js screenshots all twelve render x colour
+combinations and asserts on the pixels, because specimen colouring and
+occlusion now live in a shader and a failed shader compile does not throw:
+three logs it and carries on drawing nothing, so no assertion on the
+inspector would have noticed. png.js decodes the screenshots with zlib
+alone, keeping the suite install-free.
+
+The browser suite now runs one file at a time -- two headless Chromes on
+software WebGL contend badly enough to triple the wall clock.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Notes: what option B cost, what it bought, and the LOD measurement
+…
+c28d947
+```
+discussion.md section 7 records the instancing result against the 3B
+proposal: the numbers, the cache arithmetic that answers 3C, and the one
+thing that got worse -- instancing submits whole cubes and discards hidden
+faces in the vertex shader, so a zero-gap layout now costs 2-3.3x the
+triangles it used to. That is exactly zero for every shipped preset, since
+none of them culls a face, and it is vertex work only.
+
+Also answers 5.4 with a measurement rather than a guess: the 3^3 proxy now
+removes 22% of submitted triangles for 0.033 ms a frame and 20 KB, having
+previously also saved a 40 MB buffer and its upload. Most of its value is
+gone, but the GPU side is not measurable under software rendering, so
+nothing was removed and the switch is still there.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+lardratboy
+merged commit 5f6dad7
+into
+main
+Sep 23, 2026
+lardratboy
+deleted the
+feature/center-instancing
+branch
+September 23, 2026 04:34
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

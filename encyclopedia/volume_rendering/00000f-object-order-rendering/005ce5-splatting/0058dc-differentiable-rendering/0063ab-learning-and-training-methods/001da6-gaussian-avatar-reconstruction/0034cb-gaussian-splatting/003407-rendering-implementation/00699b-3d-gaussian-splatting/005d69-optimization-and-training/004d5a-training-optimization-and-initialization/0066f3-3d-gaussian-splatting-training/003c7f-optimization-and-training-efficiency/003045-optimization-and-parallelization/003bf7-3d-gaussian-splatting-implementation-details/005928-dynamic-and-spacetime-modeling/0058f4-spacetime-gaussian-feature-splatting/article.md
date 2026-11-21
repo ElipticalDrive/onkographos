@@ -1,0 +1,238 @@
+# Spacetime Gaussian Feature Splatting
+
+Also called: STG, Spacetime Gaussians
+
+## Overview
+Spacetime Gaussian Feature Splatting (STG) is a dynamic scene representation that extends 3D Gaussian Splatting to the 4D spacetime domain, enabling the modeling of static, dynamic, and transient content in real-time [S1]. It distinguishes itself from sibling methods by replacing spherical harmonics with a compact neural feature vector processed by a tiny MLP, and by employing a polynomial motion model for position and rotation rather than linear transformations or deformation fields [S1]. Unlike grid-based representations (e.g., K-Planes) which struggle with delicate dynamic details, STG adapts to scene structures while maintaining high rendering speeds [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Multi-view video sequences (sparse point clouds from Structure-from-Motion at all timestamps).
+*   **Output:** A set of Spacetime Gaussians (STGs) and a small Multi-Layer Perceptron (MLP) $\Phi$.
+*   **Rendering:** Given a camera pose, time $t$, and pixel coordinate, the method outputs the final color $I$.
+
+**Data Structures:**
+Each STG $i$ stores the following parameters:
+1.  **Spatial Opacity:** $\sigma_{is} \in \mathbb{R}$ (scalar).
+2.  **Temporal Opacity Parameters:** $s_{\tau i} \in \mathbb{R}$ (scaling), $\mu_{\tau i} \in \mathbb{R}$ (center time).
+3.  **Motion Coefficients:** $\{b_{i,k}\}_{k=0}^{n_p} \subset \mathbb{R}^3$ (polynomial coefficients for position).
+4.  **Rotation Coefficients:** $\{c_{i,k}\}_{k=0}^{n_q} \subset \mathbb{R}^4$ (polynomial coefficients for quaternion rotation).
+5.  **Scaling:** $s_i \in \mathbb{R}^3$ (3D vector, time-independent).
+6.  **Features:** $f_{base} \in \mathbb{R}^3$, $f_{dir} \in \mathbb{R}^3$, $f_{time} \in \mathbb{R}^3$. Total feature dimension is 9.
+
+**Parameters:**
+*   Polynomial degree for motion: $n_p = 3$ [S1].
+*   Polynomial degree for rotation: $n_q = 1$ [S1].
+*   Optimizer: Adam [S1].
+*   Loss: Combination of L1 loss and D-SSIM loss [S1].
+
+**Formulas:**
+1.  **Temporal Opacity:**
+    $$ \sigma_i(t) = \sigma_{is} \exp \left( -s_{\tau i} |t - \mu_{\tau i}|^2 \right) $$
+    where $\sigma_i(t)$ is the temporal opacity at time $t$ [S1].
+
+2.  **Time-Dependent Position:**
+    $$ \mu_i(t) = \sum_{k=0}^{n_p} b_{i,k} (t - \mu_{\tau i})^k $$
+    where $\mu_i(t)$ is the 3D position at time $t$ [S1].
+
+3.  **Time-Dependent Rotation:**
+    $$ q_i(t) = \sum_{k=0}^{n_q} c_{i,k} (t - \mu_{\tau i})^k $$
+    where $q_i(t)$ is the quaternion at time $t$. The rotation matrix $R_i(t)$ is derived from $q_i(t)$ [S1].
+
+4.  **Covariance Matrix:**
+    $$ \Sigma_i(t) = R_i(t) S_i S_i^T R_i^T(t) $$
+    where $S_i$ is a diagonal scaling matrix parameterized by $s_i$. $S_i$ is kept time-independent [S1].
+
+5.  **STG Opacity at Spacetime Point:**
+    $$ \alpha_i(t) = \sigma_i(t) \exp \left( -\frac{1}{2} (x - \mu_i(t))^T \Sigma_i(t)^{-1} (x - \mu_i(t)) \right) $$
+    where $x$ is the spatial point [S1].
+
+6.  **2D Projection:**
+    $$ \mu^{2D}_i = (K((W \mu_i(t))/(W \mu_i(t))_z))_{1:2} $$
+    $$ \Sigma^{2D}_i = (J W \Sigma_i(t) W^T J^T)_{1:2,1:2} $$
+    where $W$ is the viewing transformation, $K$ is the projection matrix, and $J$ is the Jacobian of the projective transformation [S1].
+
+7.  **Feature Splatting:**
+    The feature vector at time $t$ is:
+    $$ f_i(t) = [f_{base}, f_{dir}, (t - \mu_{\tau i}) f_{time}]^T $$
+    These features are splatted to image space. At each pixel, the splatted features are split into $F_{base}, F_{dir}, F_{time}$ [S1].
+
+8.  **Final Color:**
+    $$ I = F_{base} + \Phi(F_{dir}, F_{time}, r) $$
+    where $r$ is the view direction and $\Phi$ is the MLP [S1].
+
+9.  **Alpha Blending:**
+    $$ I = \sum_{i \in N} c_i \alpha^{2D}_i \prod_{j=1}^{i-1} (1 - \alpha^{2D}_j) $$
+    where $N$ is the set of Gaussians sorted in depth order, and $c_i$ is the color/feature output from the MLP for Gaussian $i$ [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Initialize STGs using Structure-from-Motion (SfM) sparse point clouds from all available timestamps [S1].
+2.  **Training Loop:**
+    a.  Render images using differentiable splatting for a given camera pose and time $t$.
+    b.  Compute loss (L1 + D-SSIM) against ground truth [S1].
+    c.  Backpropagate gradients to optimize STG parameters and MLP $\Phi$ using Adam [S1].
+    d.  Apply density control (densification, splitting, pruning). Pruning is more aggressive than in standard 3DGS to reduce model size [S1].
+3.  **Guided Sampling (Optional/Iterative):**
+    a.  Wait until training loss is stable.
+    b.  Aggregate training errors patch-wise to identify regions with substantial errors [S1].
+    c.  Select rays from the center pixels of high-error patches.
+    d.  Use a coarse depth map (generated during splatting) to determine a specific depth range [S1].
+    e.  Sample new Gaussians uniformly within this depth range along the rays.
+    f.  Add small noise to the centers of newly sampled Gaussians [S1].
+    g.  Repeat this sampling process no more than 3 times per scene [S1].
+4.  **Lite-Version (Optional):** Drop MLP $\Phi$ and use only $F_{base}$ for rendering to maximize speed [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_temporal_opacity(sigma_is, s_tau, mu_tau, t):
+    """Compute temporal opacity sigma_i(t)."""
+    return sigma_is * np.exp(-s_tau * (t - mu_tau)**2)
+
+def compute_position(b_coeffs, mu_tau, t, n_p=3):
+    """Compute time-dependent position mu_i(t) using polynomial coefficients."""
+    pos = np.zeros(3)
+    for k in range(n_p + 1):
+        pos += b_coeffs[k] * (t - mu_tau)**k
+    return pos
+
+def compute_rotation(c_coeffs, mu_tau, t, n_q=1):
+    """Compute time-dependent quaternion q_i(t) using polynomial coefficients."""
+    quat = np.zeros(4)
+    for k in range(n_q + 1):
+        quat += c_coeffs[k] * (t - mu_tau)**k
+    # Normalize quaternion to ensure valid rotation
+    quat = quat / np.linalg.norm(quat)
+    return quat
+
+def compute_covariance(quat, s_vec):
+    """Compute covariance matrix Sigma = R S S^T R^T."""
+    # Convert quaternion to rotation matrix R
+    R = quaternion_to_rotation_matrix(quat)
+    # S is diagonal matrix from scaling vector s
+    S = np.diag(s_vec)
+    Sigma = R @ S @ S.T @ R.T
+    return Sigma
+
+def project_gaussian(mu_3d, sigma_3d, W, K):
+    """Project 3D Gaussian to 2D image space."""
+    # W is viewing transformation, K is projection matrix
+    # mu_2d = (K * (W * mu_3d) / (W * mu_3d)_z)[:2]
+    mu_homogeneous = W @ np.append(mu_3d, 1.0)
+    mu_2d_homogeneous = K @ mu_homogeneous
+    mu_2d = mu_2d_homogeneous[:2] / mu_2d_homogeneous[2]
+    
+    # Sigma_2d = (J W Sigma W^T J^T)[:2, :2]
+    # J is Jacobian of projective transformation
+    J = compute_jacobian(mu_homogeneous, K)
+    Sigma_2d = (J @ W @ sigma_3d @ W.T @ J.T)[:2, :2]
+    
+    return mu_2d, Sigma_2d
+
+def render_stg(stgs, camera_pose, time_t, image_width, image_height):
+    """
+    Render an image using Spacetime Gaussians.
+    stgs: list of STG objects
+    camera_pose: contains W (view) and K (projection)
+    time_t: current time
+    """
+    # 1. Project all STGs to 2D
+    projected_stgs = []
+    for stg in stgs:
+        # Compute time-dependent parameters
+        sigma_t = compute_temporal_opacity(stg.sigma_is, stg.s_tau, stg.mu_tau, time_t)
+        mu_t = compute_position(stg.b_coeffs, stg.mu_tau, time_t)
+        quat_t = compute_rotation(stg.c_coeffs, stg.mu_tau, time_t)
+        sigma_3d_t = compute_covariance(quat_t, stg.s_vec)
+        
+        # Project to 2D
+        mu_2d, sigma_2d = project_gaussian(mu_t, sigma_3d_t, camera_pose.W, camera_pose.K)
+        
+        # Compute 2D opacity alpha_2d
+        # alpha_2d = sigma_t * exp(-0.5 * (x - mu_2d)^T Sigma_2d^-1 (x - mu_2d))
+        # This is evaluated per pixel during rasterization
+        
+        projected_stgs.append({
+            'mu_2d': mu_2d,
+            'sigma_2d': sigma_2d,
+            'sigma_t': sigma_t,
+            'stg': stg
+        })
+    
+    # 2. Sort by depth (z-coordinate of mu_3d projected)
+    # Note: Depth sorting is typically done in 3D space before projection or using z-buffer
+    # For simplicity, we assume depth order is available or approximated
+    projected_stgs.sort(key=lambda x: x['stg'].mu_3d_initial[2]) # Approximation
+    
+    # 3. Rasterize
+    image = np.zeros((image_height, image_width, 3))
+    
+    for p_stg in projected_stgs:
+        mu_2d = p_stg['mu_2d']
+        sigma_2d = p_stg['sigma_2d']
+        sigma_t = p_stg['sigma_t']
+        stg = p_stg['stg']
+        
+        # Determine bounding box for this Gaussian
+        # Bounding box calculation based on sigma_2d eigenvalues
+        # ... (standard Gaussian splatting bounding box logic)
+        
+        # For each pixel in bounding box:
+        #   Compute alpha_2d = sigma_t * exp(-0.5 * dist^T Sigma_2d^-1 dist)
+        #   If alpha_2d > threshold:
+        #     Compute feature f_t = [stg.f_base, stg.f_dir, (time_t - stg.mu_tau) * stg.f_time]
+        #     Split f_t into F_base, F_dir, F_time
+        #     Compute color c = F_base + MLP(F_dir, F_time, view_direction)
+        #     Alpha blend into image
+        pass
+        
+    return image
+
+def guided_sampling(stgs, error_map, coarse_depth_map, num_samples=3):
+    """
+    Sample new Gaussians in areas with large training errors.
+    """
+    for _ in range(num_samples):
+        # Aggregate errors patch-wise
+        patches = aggregate_errors_patchwise(error_map)
+        
+        # Select high-error patches
+        selected_patches = select_high_error_patches(patches)
+        
+        for patch in selected_patches:
+            # Get ray from center pixel of patch
+            ray = get_ray_from_pixel(patch.center_pixel)
+            
+            # Determine depth range from coarse depth map
+            depth_min, depth_max = get_depth_range(coarse_depth_map, patch.center_pixel)
+            
+            # Sample new Gaussian center along ray within depth range
+            new_center = sample_uniform_along_ray(ray, depth_min, depth_max)
+            new_center += add_small_noise(new_center)
+            
+            # Initialize new STG at new_center
+            new_stg = initialize_stg_from_point(new_center)
+            stgs.append(new_stg)
+            
+    return stgs
+```
+
+## Operating characteristics
+*   **Rendering Speed:** 140 FPS at 1352 × 1014 resolution on the Neural 3D Video Dataset [S1]. The lite-version achieves 66 FPS at 8K resolution on an Nvidia RTX 4090 GPU [S1].
+*   **Training Time:** 40-60 minutes for a 50-frame sequence on a single NVIDIA A6000 GPU [S1].
+*   **Model Size:** Compact. Uses 9 parameters per STG for features, compared to 48 for 3-degree Spherical Harmonics [S1].
+*   **Strengths:** Real-time high-resolution rendering, photorealistic quality, compact storage, adaptive to dynamic scene structures [S1].
+*   **Limitations:** Requires multi-view video input. Guided sampling adds complexity to the training pipeline [S1].
+*   **When to use:** When real-time dynamic view synthesis with high fidelity and compact storage is required.
+*   **When not to use:** For static scenes where standard 3DGS is sufficient, or when single-view input is the only option (though some variants exist, the core method assumes multi-view) [S1].
+
+## Background
+Spacetime Gaussian Feature Splatting was introduced by Zhan Li, Zhang Chen, Zhong Li, and Yi Xu from OPPO US Research Center and Portland State University in the paper "Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis" (arXiv:2312.16812v2, Apr 4 2024) [S1]. It builds on the principles of 3D Gaussian Splatting [41] and extends them to handle dynamic scenes by incorporating temporal components. It addresses the challenges of simultaneously achieving high-resolution photorealistic results, real-time rendering, and compact storage for dynamic scenes [S1].
+
+## Sources
+[S1] Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis, https://huggingface.co/papers/2312.16812, fetched 2026-10-30

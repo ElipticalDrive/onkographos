@@ -1,0 +1,121 @@
+# Hierarchical Point Cloud Rendering
+
+Also called: out-of-core hierarchical traversal, view-dependent LOD selection
+
+## Overview
+Hierarchical Point Cloud Rendering is a method for efficiently displaying massive point clouds by organizing data into a spatial hierarchy (typically a uniform grid or octree) and dynamically selecting the Level of Detail (LOD) for each cell based on the viewer's distance [S1][S2, unofficial]. It solves the performance bottleneck of rendering hundreds of millions of points by allowing aggressive pruning in distant or uniform regions while maintaining high fidelity in the foreground [S1]. It distinguishes itself from standard splatting by integrating spatial indexing and distance-driven LOD selection directly into the rendering loop, often combined with textured splats to preserve silhouette details at low sample counts [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A massive point cloud dataset (e.g., 150 million points) stored out-of-core, organized into a hierarchical structure (uniform grid cells or octree nodes) [S1][S2, unofficial].
+*   **Output:** A rendered image composed of textured splats, where each splat represents a subset of points from a selected LOD level of a spatial cell [S1].
+
+**Data Structures:**
+1.  **Hierarchical Index:** A tree structure (uniform grid or octree) held in memory. Each node represents a spatial region [S1][S2, unofficial].
+2.  **LOD Levels:** For each cell/node, multiple simplified versions of the point data are pre-computed. In the uniform grid approach, points are decimated by a factor of 10 for each decreasing LOD level [S1].
+3.  **Point Representation:** Points are rendered as textured splats. The texture includes an alpha channel to preserve the original silhouette, allowing larger splats to be trimmed effectively [S1].
+
+**Algorithm Steps:**
+1.  **Preprocessing:**
+    *   Generate a discretization of the scene using a uniform grid (or octree) [S1][S2, unofficial].
+    *   Store the bulk of the point data out-of-core (on disk or network) [S1][S2, unofficial].
+    *   For each cell, produce multiple simplified point sets by decimating the original points. A common strategy is reducing the point count by a factor of 10 for each subsequent LOD level [S1].
+    *   Keep the coarser LOD levels in main memory for fast access, while the finest level (original points) may remain out-of-core [S1].
+    *   Compute or store scaling factors for the textured splats at each LOD level to ensure visual consistency [S1].
+
+2.  **Rendering Loop (Per Frame):**
+    *   **Frustum Culling:** Identify cells overlapping the view frustum [S1].
+    *   **Front-to-Back Traversal:** Traverse the selected cells in front-to-back order relative to the viewpoint. This order enables early depth culling and correct alpha blending [S1].
+    *   **LOD Selection:** For each cell, calculate the distance $d$ from the cell center to the viewpoint [S1]. Dynamically select the most appropriate LOD level based on $d$. Closer cells use higher LODs (more points); distant cells use lower LODs (fewer points) [S1].
+    *   **Splat Rendering:** For each selected cell at its chosen LOD, render the points as textured splats. The scaling factor for the splat is adjusted according to the LOD level to maintain visual density [S1].
+    *   **Refinement (Optional):** If the viewpoint is static for a duration (e.g., a few seconds), asynchronously load the finest LOD (original points) for visible cells from disk and update the display [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_hierarchical_point_cloud(viewpoint, frustum, hierarchy, lod_cache, disk_loader):
+    """
+    viewpoint: Camera position (3D vector)
+    frustum: View frustum object with overlap test method
+    hierarchy: List of cells/nodes, each containing:
+        - center: 3D vector
+        - lod_levels: List of point sets [L0, L1, ...] where L0 is finest
+        - scaling_factors: List of float scalars for each LOD
+    lod_cache: Dictionary mapping cell_id -> current_lod_index
+    disk_loader: Function to load finest LOD points from disk for a cell_id
+    """
+    # 1. Identify visible cells
+    visible_cells = []
+    for cell in hierarchy:
+        if frustum.overlaps(cell.bounding_box):
+            visible_cells.append(cell)
+
+    # 2. Sort front-to-back based on distance to viewpoint
+    visible_cells.sort(key=lambda c: distance(c.center, viewpoint))
+
+    # 3. Traverse and render
+    for cell in visible_cells:
+        # Calculate distance for LOD selection
+        dist = distance(cell.center, viewpoint)
+        
+        # Select LOD index based on distance
+        # Note: Exact mapping function is implementation-specific; 
+        # sources indicate dynamic selection based on distance [S1].
+        lod_index = select_lod_by_distance(dist, cell.max_distance)
+        
+        # Retrieve points for this LOD
+        # LOD levels are pre-decimated by factor of 10 [S1]
+        points = cell.lod_levels[lod_index]
+        scale = cell.scaling_factors[lod_index]
+        
+        # Render textured splats
+        for point in points:
+            # Project point to screen
+            screen_pos = project(point.position, viewpoint, camera_matrix)
+            
+            # Render splat with texture and alpha mask
+            # Alpha channel preserves silhouette [S1]
+            render_textured_splat(screen_pos, scale, point.texture, point.alpha_mask)
+
+    # 4. Background refinement (if static)
+    if is_viewpoint_static(duration=5.0):
+        for cell in visible_cells:
+            # Load finest LOD from disk if not in cache
+            if cell.id not in lod_cache or lod_cache[cell.id] != 0:
+                finest_points = disk_loader.load(cell.id, lod_level=0)
+                cell.lod_levels[0] = finest_points
+                lod_cache[cell.id] = 0
+```
+
+**Parameters and Typical Values:**
+*   **Decimation Factor:** 10 points per LOD level reduction [S1].
+*   **Performance:** On an Intel Core i7-4790K and GeForce GTX 970, rendering ~150 million points achieved 600 fps for far-away views and 300-600 fps for closer views [S1].
+*   **Pruning Aggressiveness:** Quality remains good even with 1 point out of 100 retained in areas with uniform sampling density [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Static View Latency:** Loading the finest LOD from disk can take several seconds, causing a delay in high-fidelity display [S1].
+*   **Visual Consistency:** Scaling factors for splats must be manually tuned per LOD level to avoid visual artifacts or density mismatches [S1].
+*   **Uniform Density Assumption:** Aggressive pruning works best in areas with uniform sampling density; non-uniform areas may require finer LOD granularity [S1].
+
+## Subtopics
+
+### Out-of-Core Point Cloud Rendering
+A variant where the dataset exceeds RAM capacity. The octree index is kept in RAM, while point data is streamed from disk or network on demand using a paging system [S2, unofficial]. Nodes are loaded asynchronously to prevent render thread blocking, and evicted when they drift out of view [S2, unofficial]. It relies on a streamable layout (e.g., COPC, Potree) that allows fetching a single node with a single byte-range HTTP request [S2, unofficial]. Prefetching based on camera trajectory is critical to avoid pop-in latency [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is proportional to the number of visible splats, which is significantly reduced by LOD selection and culling. Traversal is $O(N)$ in the worst case but optimized by frustum culling and front-to-back ordering [S1].
+*   **Memory Complexity:** Main memory usage is dominated by the in-memory LOD levels (coarser levels) and the hierarchy index. The finest LOD remains out-of-core [S1]. Out-of-core variants require additional memory for the paging buffer [S2, unofficial].
+*   **Performance:** High frame rates (300-600 fps) are achievable for massive datasets (150M points) on mid-range hardware [S1].
+*   **Strengths:** Handles datasets far larger than RAM; maintains visual quality in foreground; efficient culling.
+*   **Limitations:** Requires pre-processing to generate LODs; static view refinement has latency; scaling factors may need manual tuning [S1].
+*   **When to Use:** Massive point clouds (hundreds of millions of points) where interactive frame rates are required.
+*   **When Not to Use:** Small datasets where overhead of hierarchy management is unjustified; scenes with highly non-uniform density requiring complex error metrics not covered by distance-based LOD [S1].
+
+## Background
+The method was presented in the paper "View-dependent Hierarchical Rendering of Massive Point Clouds through Textured Splats" (2019) [S1]. It builds on the concept of textured splatting to handle large silhouettes and extends it with a uniform grid hierarchy and distance-based LOD selection [S1]. The out-of-core streaming variant is discussed in later educational materials on point cloud level of detail, referencing formats like Potree and COPC [S2, unofficial].
+
+## Sources
+[S1] View-dependent Hierarchical Rendering of Massive Point Clouds through Textured Splats, https://doi.org/10.2312/ceig.20191203, fetched 2026-10-26
+[S2] Point Cloud Level of Detail: Octrees and Out-of-Core ..., https://learngeodata.eu/point-cloud-level-of-detail-octree/, fetched 2026-10-28 (unofficial)

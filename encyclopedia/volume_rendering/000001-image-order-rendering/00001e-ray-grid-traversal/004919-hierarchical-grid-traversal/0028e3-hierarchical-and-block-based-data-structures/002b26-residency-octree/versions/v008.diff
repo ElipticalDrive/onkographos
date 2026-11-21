@@ -1,0 +1,108 @@
+--- v007.md
++++ v008.md
+@@ -24,9 +24,10 @@
+ **Definitions of Mapping States:**
+ For a given octree node and resolution level:
+-1.  **Fully Mapped:** Cache-resident bricks of that level fully cover the node's spatial extent [S1, unofficial][S2].
+-2.  **Partially Mapped:** At least one brick of that level spatially overlaps with the node's extent and is resident in the cache [S1, unofficial][S2].
++1.  **Fully Mapped:** Cache-resident bricks of that level fully cover the node's spatial extent [S2].
++2.  **Partially Mapped:** At least one brick of that level spatially overlaps with the node's extent and is resident in the cache [S2].
+ 3.  **Not Mapped:** No resident bricks overlap the node [S1, unofficial][S2].
+-*   If a node is fully mapped, all its children are also fully mapped in that level [S1, unofficial][S2].
+-*   If a node is partially mapped, its parent is also partially mapped [S1, unofficial][S2].
++*   Fully mapped implies partially mapped, but not vice versa [S1, unofficial][S2].
++*   If a node is fully mapped in a resolution level, all child nodes are also fully mapped in that level [S1, unofficial][S2].
++*   If a node is partially mapped in a resolution level, its parent node is also partially mapped [S1, unofficial][S2].
+ *   Empty or homogeneous nodes are implicitly considered fully mapped in all resolution levels [S1, unofficial][S2].
+ 
+@@ -72,40 +73,40 @@
+ 
+ ```python
+-class OctreeNode:
+-    def __init__(self):
+-        self.min_val: int = 0
+-        self.max_val: int = 0
+-        self.partial_map_bitmap: int = 0  # 16 bits for resolution levels
+-        self.channel_data: list = []      # List of m channel states
+-
+-def traverse_ray(ray_origin, ray_direction, node_index, last_visited_parent):
+-    current_node = get_node(node_index)
++def traverse_ray(ray_origin, ray_direction, start_level=3, last_parent_idx=None):
++    # Resume traversal from last parent if available, else start at start_level
++    current_idx = last_parent_idx if last_parent_idx is not None else get_root_child_at_level(start_level)
+     
+-    # 1. Empty-space skipping
+-    if ray_is_outside_threshold(current_node.min_val, current_node.max_val):
+-        return  # Prune subtree
+-    
+-    # 2. Check residency
+-    if current_node.is_empty_or_homogeneous():
+-        return
+-    
+-    # 3. Check if we have data for the current resolution/channel
+-    if not has_resident_brick(current_node, current_resolution):
+-        lower_res_brick = find_available_lower_resolution_brick(current_node)
+-        if lower_res_brick:
+-            sample_with_brick(ray, lower_res_brick)
+-            return
++    while current_idx is not None:
++        node = get_node(current_idx)
++        
++        # 1. Empty-space skipping using min/max metadata
++        if ray_origin.x > node.max_val or ray_origin.x < node.min_val or \
++           ray_origin.y > node.max_val or ray_origin.y < node.min_val or \
++           ray_origin.z > node.max_val or ray_origin.z < node.min_val:
++            current_idx = get_next_sibling(current_idx)
++            continue
++            
++        # 2. Check residency bitmap for current resolution level
++        if not (node.partial_map_bitmap & (1 << current_resolution_level)):
++            # Fallback to lower resolution if available
++            fallback_res = find_lowest_set_bit(node.partial_map_bitmap)
++            if fallback_res is not None:
++                sample_with_brick(ray_origin, ray_direction, fallback_res)
++            else:
++                request_brick_from_server(node.spatial_extent, current_resolution_level) # Sources do not specify network protocol
++            current_idx = get_next_sibling(current_idx)
++            continue
++            
++        # 3. Traverse children or sample leaf
++        if is_leaf(node):
++            sample_with_brick(ray_origin, ray_direction, current_resolution_level)
+         else:
+-            request_brick_from_server(current_node.spatial_extent, current_resolution)
+-            return
+-
+-    # 4. If leaf or further subdivision needed
+-    if is_leaf(current_node):
+-        sample_with_brick(ray, get_resident_brick(current_node, current_resolution))
+-    else:
+-        for child_index in get_children_indices(current_node):
+-            traverse_ray(ray_origin, ray_direction, child_index, current_node)
++            current_idx = get_first_child(current_idx)
++            continue
++            
++        current_idx = get_next_sibling(current_idx)
+ 
+ def update_residency_on_brick_load(brick, resolution_level, channel):
++    # Sources do not specify spatial search algorithm for overlapping leaves
+     overlapping_leaves = find_overlapping_leaf_nodes(brick.spatial_extent)
+     for leaf in overlapping_leaves:
+@@ -131,8 +132,8 @@
+ 
+ ### [Mixed-Resolution Multi-Volume Renderer](5215-mixed-resolution-multi-volume-renderer.md)
+-A ray-guided renderer that accesses metadata and cached volume data through the Residency Octree to enable efficient mixing of resolutions across different channels in multi-volume datasets. It is implemented as a WebGPU compute shader that evaluates each visible channel at every sample along a ray, even when channels have different resolutions, to reduce shader divergence.
++A ray-guided renderer that accesses metadata and cached volume data through the Residency Octree to enable efficient mixing of resolutions across different channels in multi-volume datasets. It is implemented as a WebGPU compute shader that evaluates each visible channel at every sample along the ray, even when channels have different resolutions, to reduce shader divergence.
+ 
+ ### Residency Octree with Channel-Agnostic Brick Cache
+-Uses accumulation-level intermixing to combine different channels [S1, unofficial]. The residency octree is backed by a channel-agnostic brick cache where each cache entry only contains data belonging to a single channel. This allows the number of channels to not be limited by the texture format used by the brick cache implementation, unlike Brix et al.'s approach [S1, unofficial]. Residency octrees support changes to the selection of visible channels at run-time by replacing only the parts of their nodes related to the affected channels [S1, unofficial].
++Uses accumulation-level intermixing to combine different channels [S1, unofficial]. The residency octree is backed by a channel-agnostic brick cache where each cache entry only contains data belonging to a single channel [S1, unofficial]. This allows the number of channels to not be limited by the texture format used by the brick cache implementation, unlike Brix et al.'s approach [S1, unofficial]. Residency octrees support changes to the selection of visible channels at run-time by replacing only the parts of their nodes related to the affected channels [S1, unofficial].
+ 
+ ### Residency-Octree Node Classification
+@@ -140,5 +141,5 @@
+ 
+ ### Multi-Channel Residency Octree
+-An extension where all channels share the same octree structure, but each node stores culling and residency information for up to $m \le n$ channels. This allows using the same spatial subdivision for empty-space skipping while rendering each channel in a different resolution [S1, unofficial]. When a channel is replaced by another one, all nodes storing valid data for the old channel are marked as `INVALID` for the new channel. If invalid, the node stores a pointer to the node in the next lower subdivision level that has valid information for that channel, or a special `UNKNOWN` value if no such node exists. The pointer replaces the metadata for that channel to reduce memory [S1, unofficial].
++An extension where all channels share the same octree structure, but each node stores culling and residency information for up to $m \le n$ channels [S1, unofficial]. This allows using the same spatial subdivision for empty-space skipping while rendering each channel in a different resolution [S1, unofficial]. When a channel is replaced by another one, all nodes storing valid data for the old channel are marked as `INVALID` for the new channel [S1, unofficial]. If invalid, the node stores a pointer to the node in the next lower subdivision level that has valid information for that channel, or a special `UNKNOWN` value if no such node exists [S1, unofficial]. The pointer replaces the metadata for that channel to reduce memory [S1, unofficial].
+ 
+ ## Operating characteristics

@@ -1,0 +1,128 @@
+# Parallel Jumping Farthest Away (JFA)
+
+Also called: OpenMP JFA
+
+## Overview
+Parallel Jumping Farthest Away (JFA) is an OpenMP-based parallelization of the Sequential JFA algorithm for computing Signed Distance Fields (SDFs) on voxel grids. It accelerates the distance propagation phase by parallelizing the inner triple loop over voxel coordinates, while keeping the outer iteration over the jump distance scale $k$ sequential. It differs from the Compute Shader variant by running on CPU multi-core architectures rather than GPU, and from the Sequential JFA by utilizing thread-level parallelism for the spatial updates.
+
+## How it works
+The method computes the SDF and surface positions for a voxel grid by iteratively refining distance estimates. It relies on the initialization provided by the parent Sequential JFA or a separate bounding box calculation to seed the grid.
+
+**Inputs and Outputs:**
+- Input: A voxel grid of dimensions $W \times H \times D$.
+- Input: Initial SDF values and surface positions (typically from a sequential pass or bounding box intersection).
+- Output: Updated SDF values and surface positions for all voxels.
+
+**Data Structures:**
+The algorithm uses two sets of buffers to handle parallel writes safely:
+1. `sdf`: Current SDF values (read-only during the inner loop).
+2. `positions`: Current surface positions (read-only during the inner loop).
+3. `sdfApp`: Appended/updated SDF values (write-only during the inner loop).
+4. `positionsApp`: Appended/updated surface positions (write-only during the inner loop).
+
+Each buffer is a 3D array of size $W \times H \times D$. The type `T` represents the data type for distance (e.g., `float`) and position (e.g., `vec3`).
+
+**Numbered Steps:**
+1. **Initialization Parallelization**: The initial seeding of the grid (identifying boundary voxels) is parallelized. The outer loop over the Z-axis (`voxelZ`) is parallelized using OpenMP. The inner loops over Y and X remain sequential within each thread.
+   - Parallel directive: `#pragma omp parallel for collapse(1) schedule(static)` on the `voxelZ` loop.
+2. **Processing Parallelization**: The main JFA propagation loop iterates over the jump distance scale $k$.
+   - The outer loop over $k$ remains sequential to ensure correct propagation order across scales.
+   - The inner triple loop over `voxelZ`, `voxelY`, and `voxelX` is parallelized.
+   - Parallel directive: `#pragma omp parallel for collapse(3) schedule(static)` on the triple loop.
+3. **Distance Update**: For each voxel $(x, y, z)$ and each neighbor defined by the current jump distance $k$, compute the candidate distance. If the candidate distance is smaller than the current value in `sdfApp[x][y][z]`, update `sdfApp` and `positionsApp`.
+   - Formula: $d_{new} = \sqrt{(x-x')^2 + (y-y')^2 + (z-z')^2} + sdf[x'][y'][z']$
+   - Update condition: If $d_{new} < sdfApp[x][y][z]$, then $sdfApp[x][y][z] = d_{new}$ and $positionsApp[x][y][z] = positions[x'][y'][z']$.
+4. **Buffer Swap**: After the parallel inner loops complete for a given $k$, swap the contents of `sdf` with `sdfApp` and `positions` with `positionsApp`. This ensures that the next iteration reads from the most recently updated values without race conditions.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_jfa(sdf, positions, width, height, depth, max_k):
+    # Initialize buffers for parallel writing
+    sdf_app = create_buffer(width, height, depth)
+    positions_app = create_buffer(width, height, depth)
+    
+    # Step 1: Initialization Parallelization
+    # Parallelize outer loop over Z, sequential Y and X
+    for voxel_z in range(depth):
+        # #pragma omp parallel for collapse(1) schedule(static)
+        for voxel_y in range(height):
+            for voxel_x in range(width):
+                # Seed logic: identify boundary voxels
+                # This part is typically handled by a separate initialization pass
+                # or the first iteration of the main loop if not pre-seeded.
+                # For this method, we assume initial values are set or handled
+                # by the specific CSG operation (Union, Difference, etc.)
+                pass
+
+    # Step 2 & 3: Processing Parallelization
+    for k in range(1, max_k + 1):
+        # Reset app buffers or prepare for update
+        # Note: In JFA, we usually compare against current best.
+        # The source implies reading from 'sdf' and writing to 'sdfApp'.
+        
+        # Parallelize the triple loop
+        # #pragma omp parallel for collapse(3) schedule(static)
+        for voxel_z in range(depth):
+            for voxel_y in range(height):
+                for voxel_x in range(width):
+                    current_dist = sdf[voxel_x][voxel_y][voxel_z]
+                    current_pos = positions[voxel_x][voxel_y][voxel_z]
+                    
+                    best_dist = current_dist
+                    best_pos = current_pos
+                    
+                    # Check neighbors based on jump distance k
+                    # Iterate over neighbor offsets (dx, dy, dz) where max(|dx|,|dy|,|dz|) == k
+                    # This is a simplification; actual JFA checks specific offsets
+                    for offset in get_jump_offsets(k):
+                        nx = voxel_x + offset.x
+                        ny = voxel_y + offset.y
+                        nz = voxel_z + offset.z
+                        
+                        if is_valid(nx, ny, nz, width, height, depth):
+                            neighbor_dist = sdf[nx][ny][nz]
+                            neighbor_pos = positions[nx][ny][nz]
+                            
+                            # Calculate candidate distance
+                            # Euclidean distance between voxel centers
+                            dist_to_neighbor = sqrt((voxel_x - nx)**2 + (voxel_y - ny)**2 + (voxel_z - nz)**2)
+                            candidate = dist_to_neighbor + neighbor_dist
+                            
+                            if candidate < best_dist:
+                                best_dist = candidate
+                                best_pos = neighbor_pos
+                    
+                    # Write to app buffer
+                    sdf_app[voxel_x][voxel_y][voxel_z] = best_dist
+                    positions_app[voxel_x][voxel_y][voxel_z] = best_pos
+
+        # Step 4: Buffer Swap
+        swap(sdf, sdf_app)
+        swap(positions, positions_app)
+```
+
+**Parameters:**
+- `max_k`: The number of iterations for the jump flooding process. Typical value: $\lceil \log_2(\max(W, H, D)) \rceil$.
+- `schedule(static)`: Used for OpenMP loop scheduling to distribute chunks of iterations to threads.
+
+**Edge Cases and Pitfalls:**
+- **Race Conditions**: The algorithm avoids race conditions by using separate `sdfApp` and `positionsApp` buffers for writing, while reading from `sdf` and `positions`. Buffers are swapped after each $k$ iteration [S1, unofficial].
+- **Boundary Checks**: Neighbors outside the grid bounds must be handled to avoid out-of-bounds access.
+- **Precision**: Floating-point precision issues may arise in distance calculations for large grids.
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity**: $O(k \cdot W \cdot H \cdot D)$, where $k$ is the number of jump iterations. Parallelization reduces wall-clock time by a factor proportional to the number of CPU cores, subject to overhead.
+- **Memory Complexity**: $O(W \cdot H \cdot D)$ for the SDF and position buffers. The use of double buffering (`sdf`/`sdfApp`) doubles the memory requirement for the grid data.
+- **Strengths**: Leverages multi-core CPU performance for SDF generation. Simple to implement using OpenMP pragmas.
+- **Limitations**: Limited by CPU core count and memory bandwidth. Not suitable for real-time rendering on GPU without porting to compute shaders.
+- **When to use**: When SDF generation is performed on the CPU as part of a preprocessing pipeline, and GPU compute shaders are not available or desired.
+
+## Background
+Parallel Jumping Farthest Away is an adaptation of the JFA algorithm for multi-core CPU environments using OpenMP. It is part of the `cuda-mesh-voxelization` project, which also includes GPU-based implementations [S1, unofficial]. The method is used in computer graphics for generating Signed Distance Fields from mesh data, enabling efficient ray marching and collision detection in volume rendering.
+
+## Sources
+[S1] bigmat18/cuda-mesh-voxelization, https://github.com/bigmat18/cuda-mesh-voxelization, fetched 2026-10-26 (unofficial)

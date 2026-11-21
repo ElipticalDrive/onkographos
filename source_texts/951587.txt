@@ -1,0 +1,327 @@
+A fast, cross-platform physics engine for Swift. Contribute to alexanderuv/moonbounce development by creating an account on GitHub.
+
+feat(geometry): add closest points on simplices and barycentrics (#53) · alexanderuv/moonbounce@90eff8b · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+Benchmarks/Sources/PrimitivesSuite
+Fixtures.swift
+Primitives.swift
+JoltComparison
+Primitives.cpp
+README.md
+Sources/Moonbounce/Geometry
+ClosestPoint.swift
+Tests/MoonbounceTests
+AsyncArgumentTests.swift
+ClosestPointTests.swift
+StorageInvariantTests.swift
+Support
+ClosestPointReference.swift
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎Benchmarks/Sources/PrimitivesSuite/Fixtures.swift‎
+Copy file name to clipboardExpand all lines: Benchmarks/Sources/PrimitivesSuite/Fixtures.swift
++23Lines changed: 23 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -138,6 +138,18 @@ struct SplitMix64: RandomNumberGenerator {
+138138
+let (u, v) = bits & 2 == 0 ? (outside, other) : (other, outside)
+139139
+return SIMD2(ellipse.radiusX * u, ellipse.radiusY * v)
+140140
+}
+141+
+142+
+/// Vertices around a center in [-2, 2), each within 2 of it on each axis,
+143+
+/// so the origin falls in every kind of region of the simplex.
+144+
+mutating func simplexVertices(_ count: Int) -> [Vector3] {
+145+
+let center = vector3(-2, 2)
+146+
+return (0..<count).map { _ in center + vector3(-2, 2) }
+147+
+}
+148+
+}
+149+
+150+
+/// Four vertices, laid out like the C++ harness's `TetrahedronInput`.
+151+
+struct Tetrahedron: Sendable {
+152+
+var a, b, c, d: Vector3
+141153
+}
+142154
+143155
+/// Inputs shared by every benchmark: `count` elements per array, small enough
+@@ -192,6 +204,9 @@ struct Fixtures: Sendable {
+192204
+let ellipses: [Ellipse]
+193205
+/// One point outside each ellipse.
+194206
+let ellipsePoints: [SIMD2<Float>]
+207+
+/// Triangles and tetrahedra near the origin, for closest point queries.
+208+
+let simplexTriangles: [Triangle]
+209+
+let tetrahedra: [Tetrahedron]
+195210
+196211
+init() {
+197212
+var rng = SplitMix64(seed: 0x6D6F_6F6E_626F_756E) // "moonboun"
+@@ -235,5 +250,13 @@ struct Fixtures: Sendable {
+235250
+orientedBoxesB = rotationsB.map { rng.orientedBox(rotation: $0) }
+236251
+ellipses = (0..<Self.count).map { _ in rng.ellipse() }
+237252
+ellipsePoints = ellipses.map { rng.point(outside: $0) }
+253+
+simplexTriangles = (0..<Self.count).map { _ in
+254+
+let v = rng.simplexVertices(3)
+255+
+return Triangle(v[0], v[1], v[2])
+256+
+}
+257+
+tetrahedra = (0..<Self.count).map { _ in
+258+
+let v = rng.simplexVertices(4)
+259+
+return Tetrahedron(a: v[0], b: v[1], c: v[2], d: v[3])
+260+
+}
+238261
+}
+239262
+}
+Collapse file
+‎Benchmarks/Sources/PrimitivesSuite/Primitives.swift‎
+Copy file name to clipboardExpand all lines: Benchmarks/Sources/PrimitivesSuite/Primitives.swift
++10Lines changed: 10 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -192,6 +192,16 @@ extension SuiteBenchmark {
+192192
+}
+193193
+sweep(iteration, fixtures.ellipses, fixtures.ellipsePoints, operation)
+194194
+},
+195+
+196+
+SuiteBenchmark(name: "ClosestPoint.onTriangle") { iteration in
+197+
+@inline(always) func operation(_ t: Triangle) -> ClosestPoint { ClosestPoint.onTriangle(t.a, t.b, t.c) }
+198+
+sweep(iteration, fixtures.simplexTriangles, operation)
+199+
+},
+200+
+201+
+SuiteBenchmark(name: "ClosestPoint.onTetrahedron") { iteration in
+202+
+@inline(always) func operation(_ t: Tetrahedron) -> ClosestPoint { ClosestPoint.onTetrahedron(t.a, t.b, t.c, t.d) }
+203+
+sweep(iteration, fixtures.tetrahedra, operation)
+204+
+},
+195205
+]
+196206
+}
+197207
+}
+Collapse file
+‎JoltComparison/Primitives.cpp‎
+Copy file name to clipboardExpand all lines: JoltComparison/Primitives.cpp
++40Lines changed: 40 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -13,6 +13,7 @@
+1313
+#include <Jolt/Core/Memory.h>
+1414
+#include <Jolt/Geometry/AABox.h>
+1515
+#include <Jolt/Geometry/AABox4.h>
+16+
+#include <Jolt/Geometry/ClosestPoint.h>
+1617
+#include <Jolt/Geometry/Ellipse.h>
+1718
+#include <Jolt/Geometry/OrientedBox.h>
+1819
+#include <Jolt/Geometry/RayAABox.h>
+@@ -110,6 +111,20 @@ struct EllipseInput
+110111
+float mB;
+111112
+};
+112113
+114+
+// Four vertices, laid out like the benchmarks' Tetrahedron: 64 bytes.
+115+
+struct TetrahedronInput
+116+
+{
+117+
+Vec3 mA, mB, mC, mD;
+118+
+};
+119+
+120+
+// A closest point and the vertices of its feature, laid out like Moonbounce's
+121+
+// ClosestPoint: 32 bytes.
+122+
+struct ClosestPointOutput
+123+
+{
+124+
+Vec3 mPoint;
+125+
+uint32 mSet;
+126+
+};
+127+
+113128
+// Identical to SplitMix64 in Fixtures.swift.
+114129
+struct SplitMix64
+115130
+{
+@@ -256,6 +271,15 @@ struct SplitMix64
+256271
+float v = (bits & 2) == 0 ? other : outside;
+257272
+return Float2(inEllipse.mA * u, inEllipse.mB * v);
+258273
+}
+274+
+275+
+// Same as simplexVertices(_:) in Fixtures.swift: a center, then each
+276+
+// vertex as an offset from it.
+277+
+void SimplexVertices(Vec3 *outVertices, int inCount)
+278+
+{
+279+
+Vec3 center = Vector(-2, 2);
+280+
+for (int i = 0; i < inCount; ++i)
+281+
+outVertices[i] = center + Vector(-2, 2);
+282+
+}
+259283
+};
+260284
+261285
+static constexpr int cCount = 1000;
+@@ -281,6 +305,8 @@ struct Fixtures
+281305
+std::vector<OrientedBox> mOrientedBoxesA, mOrientedBoxesB;
+282306
+std::vector<EllipseInput> mEllipses;
+283307
+std::vector<Float2> mEllipsePoints;
+308+
+std::vector<TriangleInput> mSimplexTriangles;
+309+
+std::vector<TetrahedronInput> mTetrahedra;
+284310
+285311
+Fixtures()
+286312
+{
+@@ -345,6 +371,18 @@ struct Fixtures
+345371
+for (int i = 0; i < cCount; ++i) mOrientedBoxesB.push_back(rng.OrientedBoxInput(mRotationsB[i]));
+346372
+for (int i = 0; i < cCount; ++i) mEllipses.push_back(rng.EllipseRadii());
+347373
+for (const EllipseInput &e : mEllipses) mEllipsePoints.push_back(rng.PointOutside(e));
+374+
+for (int i = 0; i < cCount; ++i)
+375+
+{
+376+
+Vec3 v[3];
+377+
+rng.SimplexVertices(v, 3);
+378+
+mSimplexTriangles.push_back({ v[0], v[1], v[2] });
+379+
+}
+380+
+for (int i = 0; i < cCount; ++i)
+381+
+{
+382+
+Vec3 v[4];
+383+
+rng.SimplexVertices(v, 4);
+384+
+mTetrahedra.push_back({ v[0], v[1], v[2], v[3] });
+385+
+}
+348386
+}
+349387
+};
+350388
+@@ -541,6 +579,8 @@ int main()
+541579
+Sweep<AABox4Input, Vec4>("AABB4.rayDistance", f.mBoxGroups, [&](const AABox4Input &b) { return RayAABox4(origin, inverse_direction, b.mMinX, b.mMinY, b.mMinZ, b.mMaxX, b.mMaxY, b.mMaxZ); });
+542580
+Sweep<OrientedBox, OrientedBox, uint8_t>("OrientedBox.overlaps", f.mOrientedBoxesA, f.mOrientedBoxesB, [](const OrientedBox &a, const OrientedBox &b) { return a.Overlaps(b); });
+543581
+Sweep<EllipseInput, Float2, Float2>("Ellipse.closestPoint", f.mEllipses, f.mEllipsePoints, [](const EllipseInput &e, const Float2 &p) { return Ellipse(e.mA, e.mB).GetClosestPoint(p); });
+582+
+Sweep<TriangleInput, ClosestPointOutput>("ClosestPoint.onTriangle", f.mSimplexTriangles, [](const TriangleInput &t) { ClosestPointOutput r; r.mPoint = ClosestPoint::GetClosestPointOnTriangle(t.mV0, t.mV1, t.mV2, r.mSet); return r; });
+583+
+Sweep<TetrahedronInput, ClosestPointOutput>("ClosestPoint.onTetrahedron", f.mTetrahedra, [](const TetrahedronInput &t) { ClosestPointOutput r; r.mPoint = ClosestPoint::GetClosestPointOnTetrahedron(t.mA, t.mB, t.mC, t.mD, r.mSet); return r; });
+544584
+545585
+std::printf("\n }\n}\n");
+546586
+return 0;
+Collapse file
+‎README.md‎
+Copy file name to clipboardExpand all lines: README.md
++1-1Lines changed: 1 addition & 1 deletion
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -6,7 +6,7 @@ Moonbounce runs on macOS, Windows and Linux. It depends only on the Swift standa
+66
+77
+## Status
+88
+9-
+Early. The math core is in place: `Vector3`, `Vector4`, `UInt32Vector4`, `Quaternion`, `Matrix4x4`, deterministic trigonometry, `AABB`, `AABB4`, `Ray`, `Plane`, `Sphere`, `Capsule`, `Cylinder`, `Triangle`, `Triangle4`, `OrientedBox` and `Ellipse`. The [roadmap](docs/roadmap.md) lays out the path to a complete engine.
+9+
+Early. The math core is in place: `Vector3`, `Vector4`, `UInt32Vector4`, `Quaternion`, `Matrix4x4`, deterministic trigonometry, `AABB`, `AABB4`, `Ray`, `Plane`, `Sphere`, `Capsule`, `Cylinder`, `Triangle`, `Triangle4`, `OrientedBox`, `Ellipse` and `ClosestPoint`. The [roadmap](docs/roadmap.md) lays out the path to a complete engine.
+1010
+1111
+## Requirements
+1212
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

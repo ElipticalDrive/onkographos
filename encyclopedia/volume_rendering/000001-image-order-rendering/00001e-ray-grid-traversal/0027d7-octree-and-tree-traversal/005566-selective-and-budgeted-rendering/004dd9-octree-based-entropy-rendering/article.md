@@ -1,0 +1,62 @@
+# Octree-based Entropy Rendering
+
+Also called: Hierarchical decomposition rendering
+
+## Overview
+Octree-based entropy rendering accelerates volume visualization by traversing hierarchical octree structures where non-leaf nodes store entropy metrics or error bounds [S1, unofficial][S2, book]. It solves the problem of high computational cost in low-entropy regions by allowing rays to skip fine-grained details when the visual error remains within a user-defined tolerance or time budget [S1, unofficial][S2, book]. Unlike sibling methods that may focus on compositing trees, this approach explicitly uses spatial hierarchy and statistical variance to decide traversal depth [S1, unofficial][S2, book].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A volume dataset, a transfer function, a camera ray, and an error tolerance $\epsilon$ (or maximum render time) [S1, unofficial][S2, book].
+- Output: A pixel color and opacity value.
+
+**Data Structures:**
+The volume is stored in an octree [S1, unofficial][S2, book].
+- **Leaf Nodes:** Contain the actual voxel data (density/opacity values).
+- **Non-Leaf Nodes:** Store a summary metric derived from their children. Common metrics include:
+  - Standard deviation [S1, unofficial][S2, book].
+  - Minimum-maximum range [S1, unofficial][S2, book].
+  - Lipschitz range [S1, unofficial][S2, book].
+  - Root Mean Square (RMS) error [S1, unofficial][S2, book].
+  - Absolute error [S1, unofficial][S2, book].
+  - Average value (equivalent to box filtering) [S1, unofficial][S2, book].
+- The octree does not need to be balanced or fully expanded to single-voxel leaves; it may use a brick-of-bricks decomposition for cache coherence [S1, unofficial][S2, book].
+
+**Algorithm Steps:**
+1. **Initialization:** Construct the octree. For each non-leaf node, compute the chosen entropy or error metric from its children [S1, unofficial][S2, book].
+2. **Ray Casting:** For each pixel, cast a ray through the volume [S1, unofficial][S2, book].
+3. **Traversal:** Traverse the octree from the root [S1, unofficial][S2, book].
+   - At each node, evaluate the stored metric against the tolerance $\epsilon$ [S1, unofficial][S2, book].
+   - If the metric indicates low entropy/error (i.e., the variation among children is small enough), the ray may "leap" or skip to a coarser level or terminate the current segment early, using the node's aggregate value (e.g., average) for compositing [S1, unofficial][S2, book].
+   - If the metric exceeds the tolerance, descend into the children to process finer details [S1, unofficial][S2, book].
+4. **Compositing:** Accumulate color and opacity along the ray. If a node is skipped, its contribution is added based on its stored aggregate value (e.g., average density) and the ray's current transparency [S1, unofficial][S2, book].
+5. **Termination:** Stop when the ray exits the volume or accumulated opacity reaches a threshold [S1, unofficial][S2, book].
+
+**Parameters:**
+- **Error Tolerance ($\epsilon$):** The maximum tolerable error before rendering [S1, unofficial][S2, book].
+- **Max Render Time:** For time-critical rendering, the error bound is dynamically adjusted based on the remaining time [S1, unofficial][S2, book].
+
+**Edge Cases and Pitfalls:**
+- **Interpolation Normalization:** When using interpolated opacity from coarser nodes, it must be normalized to unit stepsize before being used in the compositing equation [S2, book].
+- **Unbalanced Trees:** Octrees do not have to be balanced, which can lead to irregular traversal patterns [S1, unofficial][S2, book].
+- **Transfer Function Changes:** If the transfer function changes, proximity clouds or entropy metrics may need rapid recomputation [S1, unofficial][S2, book].
+
+## Subtopics
+
+### [Beta-Acceleration](13648-beta-acceleration.md)
+A traversal optimization that weights the observable error of using a coarser approximation by the ray's remaining transparency. It differs from standard entropy-based traversal by incorporating the current state of the ray's compositing history, ensuring that coarse approximations are only accepted when their potential visual impact is negligible due to high prior opacity.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the entropy distribution. In low-entropy regions, traversal is accelerated by skipping nodes [S1, unofficial][S2, book]. In high-entropy regions, it degrades to standard ray casting [S1, unofficial][S2, book].
+- **Memory Complexity:** Higher than uniform grids due to octree overhead, but lower than storing full resolution data if significant pruning occurs [S1, unofficial][S2, book].
+- **Strengths:** Efficient traversal in smooth or homogeneous regions; supports time-critical rendering [S1, unofficial][S2, book].
+- **Limitations:** Requires pre-computation of entropy metrics; performance degrades in high-frequency data [S1, unofficial][S2, book].
+- **When to Use:** Large volumes with varying entropy; interactive applications requiring adaptive quality [S1, unofficial][S2, book].
+- **When Not to Use:** Uniform high-frequency data where pruning offers little benefit [S1, unofficial][S2, book].
+
+## Background
+Originating from the need to accelerate volume rendering in large datasets, this method utilizes hierarchical decomposition, often implemented via octrees [S1, unofficial][S2, book]. The concept of using entropy or error metrics to guide traversal was developed to address the inefficiency of uniform sampling in smooth regions [S1, unofficial][S2, book]. The approach is closely related to proximity clouds for empty space skipping but focuses on occupied space [S1, unofficial][S2, book].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

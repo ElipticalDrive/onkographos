@@ -1,0 +1,245 @@
+Contribute to forest-rs/layerstack development by creating an account on GitHub.
+
+Picking rays, narrowed frusta and ray/frustum intersection tests by waywardmonkeys · Pull Request #236 · forest-rs/layerstack · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+waywardmonkeys
+commented
+Oct 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Why
+A 3D engine that loads scenes from layerstack needs camera, frustum and picking math next to the existing culling. ComputedCamera and PreparedFrustum could project and cull boxes, but there was no pick ray, no narrowed frustum for a picking region, no ray intersection with geometry, no frustum test for edges or faces, and no way to build a frustum from an engine's own camera matrix or field of view. Each engine would have had to re-derive GfFrustum and GfRay, tolerances included.
+What
+All of it lives in layerstack_schemas::camera. The semantics follow C++ OpenUSD 26.08 GfRay, GfFrustum and GfCamera, with each step referenced to the code it mirrors.
+Ray (GfRay) with point, transformed, intersect_triangle (returns TriangleHit: distance, barycentrics, front-facing), intersect_plane (PlaneHit), intersect_range, intersect_bound, intersect_sphere, intersect_cylinder and intersect_cone (each returns RayInterval).
+PreparedFrustum (GfFrustum with cached planes) now keeps its conformed view, window, near/far and FrustumProjection next to its planes. New methods:
+picking: pick_ray and pick_ray_through (ComputePickRay); narrowed and narrowed_around (ComputeNarrowedFrustum). narrowed_around returns None for a point at or behind the eye, where C++ warns and returns the frustum unchanged.
+intersection: intersects_segment and intersects_triangle (Intersects(p0, p1) and Intersects(p0, p1, p2)), reusing the prepared planes.
+construction: new (the camToWorldXf constructor, conformed by SetPositionAndRotationFromMatrix), from_perspective and perspective (SetPerspective / GetPerspective, with FieldOfViewAxis and a Perspective struct), and from_view_and_projection (the double-precision form of GfCamera::SetFromViewAndProjectionMatrix).
+accessors: view_matrix, view_inverse, projection_matrix, window, clipping_range, corners and projection.
+Invalid input returns CameraError instead of a frustum with unusable planes. This covers a nonfinite or singular transform, an empty window, an empty near/far interval, a perspective near distance that is not positive, and a malformed projection [2][3] entry.
+The prepared culling query already existed (ComputedCamera::prepare_frustum), so no second one was added. The frustum math moves into camera/frustum.rs, and the camera and the new constructors share one conforming path.
+Two C++ behaviours are kept as they are, and documented:
+an orthographic window pick ray starts at eye depth 2 * near;
+a ray tested against a BoundingBox whose matrix is singular tests the untransformed range, because GfBBox3d falls back to an identity inverse.
+The camera_frustum example now picks the instance under the window center and narrows the frustum around it. The layerstack_schemas README describes the new API.
+Results
+The bench is wind_tunnel camera_frustum (criterion medians, arm64 macOS). The C++ column comes from a usd-core 26.08 Python timing loop over the same scene, best of 7 runs. The hit counts from both sides are equal: 3,754 and 90 visible boxes, 2,502 ray hits and 2,507 narrowed-frustum hits.
+Operation (perspective / orthographic)
+layerstack
+usd-core loop
+Prepared box culling, 10k boxes
+110 / 103 µs
+5.35 / 4.94 ms
+Pick ray + narrowed frustum
+90 / 87 ns
+1.20 / 1.23 µs
+Pick ray vs 10k triangles
+101 / 102 µs
+4.28 / 4.29 ms
+Pick ray vs 10k oriented bounds
+168 / 167 µs
+1.33 / 1.39 ms
+Narrowed frustum vs 10k triangles
+214 / 259 µs
+1.44 / 1.65 ms
+The C++ column includes Python call overhead. One trivial Gf call per element costs 1.06 ms per 10k, so read those numbers as upper bounds for C++. Box culling is the clearest gap: GfFrustum::Intersects(GfBBox3d) carries each plane into the box's local space with GfPlane::Transform, and that inverts a matrix for every plane of every box.
+Measured in the same session against main: prepare dropped from 172 ns to 74 ns and prepared_reuse from about 119 µs to 110 µs per 10k boxes. The plane math did not change; I have not looked further into the difference.
+Not done
+Cylinders and cones exist only on Ray. There is no frustum test against them, and none against spheres.
+GfFrustum::ComputeRay, the ray from the eye with no near-plane offset, is not exposed.
+No GfCamera round trip from a frustum back to USD lens parameters (aperture and focal length). from_view_and_projection gives a frustum, not a ComputedCamera.
+Exact-boundary classification for placed (rotated) frusta is not pinned. On those frusta, OpenUSD's own result depends on fused multiply-adds, so it differs by platform. Placed frusta are tested 1e-6 off each plane instead, and exact-boundary points are pinned only on unplaced frusta with power-of-two windows.
+Tests
+layerstack_conformance ray:: checks 308 GfRay cases from scripts/ray_oracle.py (fixtures/ray.json):
+28 triangles, including collinear and single-point degenerate ones;
+140 planes, including rays parallel to the plane and zero normals;
+28 each of ranges, oriented bounds (one singular), spheres, cylinders and cones.
+layerstack_conformance frustum:: checks six frusta from scripts/frustum_oracle.py (fixtures/frustum.json): perspective and orthographic, each unplaced, rotated, and scaled + sheared + reflected. Per frustum it covers view and projection matrices, corners, GetPerspective, and a rebuild from C++'s own view and projection matrices. Across the six it pins:
+60 window pick rays, including the window corners, and 36 world pick rays;
+30 narrowed windows, including clamped, zero-size and wholly-outside regions;
+30 narrowed_around windows, including points behind or at the eye;
+132 points, including boundary corners and edge midpoints;
+72 segments and 54 triangles, including frustum-spanning and collinear triangles;
+9 SetPerspective frusta, including a zero aspect ratio.
+Both oracle scripts support --check and run under LAYERSTACK_USD_PYTHON, as camera_oracle.py does.
+Unit tests next to the code in camera/ray.rs and camera/frustum.rs.
+gates.sh: GATE OK.
+waywardmonkeys
+added 7 commits
+October 25, 2026 16:43
+Add ray intersection tests as GfRay computes them
+…
+d5f9f4c
+```
+A 3D engine loading scenes needs to pick: cast a ray and find what it
+hits. Nothing here could intersect a ray with geometry, so each engine
+would re-derive `GfRay`'s tests and their tolerances.
+
+`camera::Ray` holds an origin and an unnormalized direction, reports
+hits as ray parameters, and follows `GfRay::Intersect` step for step for
+triangles (barycentrics, with the first weight in single precision as
+`GfRay` holds it, and front-facing), planes in the `[a, b, c, d]` form
+the frustum planes already use, `Range3d`, oriented `BoundingBox` (a
+singular matrix tests the untransformed range, as `GfBBox3d`'s identity
+inverse does), spheres, infinite cylinders and cones. Hits are named
+structs: `TriangleHit`, `PlaneHit` and `RayInterval`.
+
+`scripts/ray_oracle.py` pins 308 cases from usd-core 26.08 in
+`fixtures/ray.json`: seeded random rays plus degenerate (collinear and
+point) triangles, rays parallel to planes and slabs, zero-normal planes,
+rays starting inside solids and solids behind the ray.
+```
+Move frustum math into its own camera module
+…
+c8b2f8f
+```
+Pick rays, narrowed frusta and the frustum constructors that follow all
+need the transform conforming, corners, planes and projection matrix
+that `Camera::compute_camera` and `ComputedCamera` computed inline.
+
+They move to `camera/frustum.rs` as shared helpers with
+`PreparedFrustum`, and `GfFrustum::SetPositionAndRotationFromMatrix`'s
+conforming becomes `frustum::conform`, so a frustum built from a bare
+camera-to-world matrix is conformed exactly as a camera's is. Behavior
+and results are unchanged.
+```
+Pick and narrow with prepared frusta
+…
+8b73f79
+```
+An engine picking against a loaded scene needs the ray under the
+cursor, a narrowed frustum around a picking region (for CPU tests or a
+GPU picking pass), and frusta built from its own camera parameters
+rather than a USD camera. `PreparedFrustum` only held planes, so none of
+this could be derived from it.
+
+`PreparedFrustum` now keeps the conformed view, window, near/far and
+`FrustumProjection` beside its planes and gains, as `GfFrustum` has them:
+
+- `pick_ray` and `pick_ray_through` (`ComputePickRay` for a normalized
+  window point and a world point), including OpenUSD's orthographic
+  window ray that starts at eye depth `2 * near`;
+- `narrowed` and `narrowed_around` (`ComputeNarrowedFrustum`), the
+  latter returning `None` where OpenUSD warns about a point at or
+  behind the eye and returns the frustum unchanged;
+- `new` (the `camToWorldXf` constructor, conformed by
+  `SetPositionAndRotationFromMatrix`), `from_perspective` and
+  `perspective` (`SetPerspective` / `GetPerspective` with a
+  `FieldOfViewAxis` and a `Perspective` struct), and accessors for the
+  view, view inverse, projection matrix, window, near/far and corners.
+
+`new` rejects nonfinite or singular transforms and empty windows or
+near/far intervals with `CameraError`, where OpenUSD would compute
+unusable planes.
+
+`scripts/frustum_oracle.py` pins six frusta (perspective and
+orthographic, unplaced, rotated, and scaled, sheared and reflected)
+with 96 pick rays, 60 narrowed windows, 132 points and nine
+`SetPerspective` frusta. Boundary points sit on the unplaced frusta,
+whose power-of-two windows classify exactly with or without fused
+multiply-adds; placed frusta use points 1e-6 off each plane, since
+OpenUSD's own classification of exact boundary points there differs by
+platform.
+```
+Intersect prepared frusta with segments and triangles
+…
+b928bf7
+```
+Picking with a narrowed frustum means testing edges and faces, not just
+points and boxes: a triangle can cross the picking region with every
+vertex outside it, or cover the region entirely.
+
+`PreparedFrustum::intersects_segment` and `intersects_triangle` follow
+`GfFrustum::Intersects(p0, p1)` and `Intersects(p0, p1, p2)`: per-plane
+inside masks, parametric clipping of each straddling edge, and the
+corner pick rays (one when every vertex lies between near and far, four
+otherwise) to catch a triangle spanning the frustum. They reuse the
+prepared planes, so neither recomputes anything per call.
+
+The frustum oracle adds 72 segments and 54 triangles: edges crossing
+with both ends outside, segments passing just outside the window, triangles
+spanning the frustum between and through near and far, and degenerate
+(collinear) triangles inside and outside.
+```
+Benchmark picking against prepared frusta
+…
+b9e6972
+```
+Picking is a per-cursor-move cost in an engine, so it needs a number
+next to the culling cases this bench already measures.
+
+`camera_frustum` gains, per projection, the cost of a pick ray plus a
+narrowed frustum, and 10,000-element sweeps of the window-center pick
+ray against triangles (`Ray::intersect_triangle`) and oriented bounds
+(`Ray::intersect_bound`), and of a frustum narrowed to 2% of the window
+against the same triangles (`PreparedFrustum::intersects_triangle`).
+Setup asserts mixed hits; the counts (2,502 ray hits, 2,507 narrowed
+hits, 3,754 and 90 visible boxes) equal what usd-core computes for the
+same scene.
+```
+Show picking in the camera_frustum example and README
+…
+5e4b255
+```
+The example already culls moving instances against a sampled camera;
+picking is the next thing an engine does with the same frustum, so it
+now casts the window-center `pick_ray`, takes the nearest
+`intersect_bound` entry as the picked instance, and narrows the frustum
+to the picking region.
+
+The `layerstack_schemas` README describes the frustum constructors,
+segment and triangle tests, pick rays, narrowed frusta and `Ray`.
+```
+Rebuild frusta from view and projection matrices
+…
+122ef6b
+```
+An engine often holds its camera as a view and a projection matrix
+rather than USD lens parameters, and needs a frustum to pick and cull
+with. `GfCamera::SetFromViewAndProjectionMatrix` recovers the window and
+near/far from those matrices but rounds them through single-precision
+apertures and clipping range.
+
+`PreparedFrustum::from_view_and_projection` reads the same terms in
+double precision, telling perspective from orthographic by the `[2][3]`
+entry as `GfCamera` does, and places the frustum from the view's
+inverse as `PreparedFrustum::new` does. Where OpenUSD only warns about a
+`[2][3]` that is neither `-1` nor `0`, it returns
+`CameraError::InvalidAttribute("projection")`.
+
+Each oracle frustum's own `ComputeViewMatrix` and
+`ComputeProjectionMatrix` now rebuild its window, near/far and view.
+```
+Hide details
+View details
+waywardmonkeys
+merged commit fcbea52
+into
+main
+Oct 25, 2026
+17 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+waywardmonkeys
+deleted the
+camera-picking
+branch
+October 25, 2026 10:27
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

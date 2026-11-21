@@ -1,0 +1,118 @@
+# JointRF Training Procedure
+## Overview
+JointRF Training is a differentiable optimization method for dynamic neural radiance fields (NeRFs) that jointly optimizes scene representation and compression [S1]. It addresses high memory consumption in dynamic scenes by training a model to produce quantized feature grids with a minimal rate-distortion trade-off [S1]. It sets itself apart from methods that treat compression and representation as independent steps by integrating an entropy model into the forward pass, allowing end-to-end gradient propagation through quantization simulation [S1].
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Pre-trained dynamic NeRF parameters, a reconstructed keyframe buffer containing the long-reference basis feature grid $\hat{B}_k$, and a target bitrate constraint (implicit via the entropy model) [S1].
+- **Outputs:** Optimized residual feature grid $\hat{R}_t$, coefficient feature grid $\hat{C}_t$, and the parameters of the entropy model [S1].
+
+**Data Structures:**
+- **Basis Feature Grid ($\hat{B}_k$):** A long-reference feature grid loaded from the reconstructed keyframe buffer [S1].
+- **Coefficient Feature Grid ($\hat{C}_t$):** Quantized coefficients representing the static or slowly varying components of the dynamic features [S1].
+- **Residual Feature Grid ($\hat{R}_t$):** Quantized residuals representing the temporal changes or high-frequency details [S1].
+- **Entropy Model:** A probabilistic model estimating the probability distribution of the quantized grids to predict bitrates [S1].
+
+**Algorithm Steps:**
+1. **Simulated Quantization:** Apply uniform noise to the continuous feature values to simulate quantization [S1]. This allows gradients to flow through the quantization operation [S1]. The quantized value $Q(x)$ is computed as:
+   $$ Q(x) = x + u, \quad u \sim U\left(-\frac{1}{2}, \frac{1}{2}\right) $$
+   where $u$ is uniform noise [S1]. This generates the quantized coefficient grid $\hat{C}_t$ and residual grid $\hat{R}_t$ [S1].
+2. **Rate Estimation:** Estimate the bitrate (rate) of $\hat{C}_t$ and $\hat{R}_t$ using the entropy model [S1]. This estimated rate is used as a loss term during the forward pass to encourage a low-entropy distribution of features, effectively imposing a bitrate constraint [S1].
+3. **Load Basis Grid:** Load the long-reference basis feature grid $\hat{B}_k$ from the reconstructed keyframe buffer [S1].
+4. **Reconstruction and Distortion Loss:** Combine the basis grid $\hat{B}_k$ with the quantized coefficient grid $\hat{C}_t$ and residual grid $\hat{R}_t$ to reconstruct the feature representation [S1]. Compute the Mean Squared Error (MSE) loss between the reconstructed features and the ground truth features [S1].
+5. **Joint Optimization:** Sequentially train each frame [S1]. Update the parameters of the residual feature grid, coefficient feature grid, and the entropy model by minimizing the combined loss (MSE distortion + estimated rate) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+
+def joint_rf_training_step(nerf_params, keyframe_buffer, entropy_model, target_frames, lr=0.01):
+    """
+    Performs one step of JointRF training for a sequence of frames.
+    
+    Args:
+        nerf_params: Dictionary containing coefficient grid C_t and residual grid R_t.
+        keyframe_buffer: Buffer containing reconstructed keyframe basis grids.
+        entropy_model: Model estimating entropy of quantized features.
+        target_frames: List of frames to process sequentially.
+        lr: Learning rate for gradient descent.
+    """
+    for frame_id in target_frames:
+        # Step 1: Simulated Quantization
+        C_t = nerf_params['C_t'][frame_id]
+        R_t = nerf_params['R_t'][frame_id]
+        
+        # Apply uniform noise u ~ U(-0.5, 0.5) to simulate quantization
+        C_hat_t = C_t + random.uniform(-0.5, 0.5)
+        R_hat_t = R_t + random.uniform(-0.5, 0.5)
+        
+        # Step 2: Rate Estimation
+        rate_C = entropy_model.estimate_entropy(C_hat_t)
+        rate_R = entropy_model.estimate_entropy(R_hat_t)
+        total_rate = rate_C + rate_R
+        
+        # Step 3: Load Basis Grid
+        B_hat_k = keyframe_buffer.get_basis_grid(frame_id)
+        
+        # Step 4: Reconstruction and Distortion Loss
+        # Combine basis, coefficients, and residuals to reconstruct features
+        reconstructed_features = B_hat_k + C_hat_t + R_hat_t
+        
+        # Ground truth features are retrieved from the dataset [G]
+        ground_truth_features = get_ground_truth_features(frame_id)
+        
+        # Compute MSE loss
+        mse_loss = sum((reconstructed_features - ground_truth_features) ** 2) / len(reconstructed_features)
+        
+        # Step 5: Joint Optimization
+        # Combined loss: Distortion + Lambda * Rate
+        # Lambda is a trade-off factor for rate-distortion optimization
+        lambda_rate = 0.01 # Not given in the sources. Typically tuned to balance rate and distortion.
+        total_loss = mse_loss + lambda_rate * total_rate
+        
+        # Backpropagate and update parameters
+        # Standard gradient descent updates parameters [G]
+        gradients = compute_gradients(total_loss, nerf_params, entropy_model)
+        for param in nerf_params.values():
+            param -= lr * gradients[param]
+        for param in entropy_model.params.values():
+            param -= lr * gradients[param]
+
+def get_ground_truth_features(frame_id):
+    # Ground truth features are retrieved from the dataset [G]
+    pass
+
+def compute_gradients(loss, nerf_params, entropy_model):
+    # Standard backpropagation computes gradients [G]
+    pass
+```
+
+**Parameters:**
+- **Noise Range:** Uniform distribution $U(-0.5, 0.5)$ [S1].
+- **Trade-off Factor ($\lambda$):** Not given in the sources. Typically tuned to balance rate and distortion.
+
+**Edge Cases and Pitfalls:**
+- **Gradient Flow:** Standard quantization is non-differentiable [G]. The use of uniform noise simulation is critical for gradient propagation [S1].
+- **Entropy Model Accuracy:** The accuracy of the rate estimation depends on the entropy model's ability to predict the true distribution of quantized features [G]. Poor estimation can lead to suboptimal rate-distortion trade-offs.
+- **Keyframe Buffer Dependency:** The method relies on a pre-reconstructed keyframe buffer [S1]. Errors in the keyframe reconstruction can propagate to the dynamic frame training.
+## Subtopics
+
+### [Rate-Distortion Joint Finetuning](12624-rate-distortion-joint-finetuning.md)
+Rate-Distortion Joint Finetuning is a training approach that treats compression and 3D-scene representation as a single optimization problem, training the NeRF model for bitrate and distortion simultaneously. Unlike techniques that treat compression and 3D-scene representation as two independent optimization problems, which reduces compression performance and limits effectiveness across a wider bitrate range, this method jointly optimizes the model parameters to achieve an optimal Rate-Distortion (RD) curve by adjusting a single trade-off factor. It builds on [JointRF Training Procedure](11657-jointrf-training-procedure.md) by introducing a differentiable entropy model and noise-based gradient approximation to enable end-to-end learning of quantized features.
+
+### [Conjoint Pruning of the Ensemble](12978-conjoint-pruning-of-the-ensemble.md)
+Conjoint Pruning of the Ensemble (CPE) is the final optimization phase in the JointRF training procedure, designed to jointly prune multiple pre-trained neural field models to achieve superior reconstruction quality compared to ensembling pre-trained models with a comparable or lower memory footprint. It distinguishes itself from sibling methods like [Rate-Distortion Joint Finetuning](12624-rate-distortion-joint-finetuning.md) by explicitly modifying the ensemble's aggregation logic from averaging to summation to prevent signal degradation during the pruning process.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. Sequential training per frame implies linear scaling with the number of frames [G].
+- **Memory Complexity:** Not given in the sources. Depends on the size of the feature grids and the entropy model [G].
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** End-to-end differentiable optimization allows for joint learning of representation and compression [S1]. The noise-based gradient approximation enables training with quantization [S1].
+- **Limitations:** Relies on an accurate entropy model for rate estimation [G]. Performance is dependent on the quality of the keyframe buffer [S1].
+- **When to use:** When high compression ratios are required for dynamic NeRFs and end-to-end optimization is feasible [G].
+- **When not to use:** When computational resources for training are limited or when an accurate entropy model is difficult to construct [G].
+## Background
+JointRF Training was introduced in the paper "JOINTRF: End-To-End Joint Optimization for Dynamic Neural Radiance Field Representation and Compression" [S1]. It addresses the challenges of compressing dynamic neural radiance fields by integrating compression directly into the training process [S1].
+## Sources
+[S1] JOINTRF: End-To-End Joint Optimization for Dynamic Neural Radiance Field Representation and Compression, https://doi.org/10.1109/icip51287.2024.10647336, fetched 2026-10-26

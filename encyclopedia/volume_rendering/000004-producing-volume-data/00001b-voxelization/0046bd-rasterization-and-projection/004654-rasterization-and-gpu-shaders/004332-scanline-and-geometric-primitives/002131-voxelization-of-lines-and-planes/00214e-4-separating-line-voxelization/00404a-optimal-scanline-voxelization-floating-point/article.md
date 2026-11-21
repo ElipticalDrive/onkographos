@@ -1,0 +1,147 @@
+# Optimal Scanline Voxelization (Floating-Point)
+Also called: Optimal Scanline
+
+## Overview
+Optimal Scanline Voxelization is a method for generating a discrete voxel representation of 2D line segments within a triangle slice [S1, unofficial]. It solves the problem of filling the interior of a triangle slice with voxels while minimizing the total voxel count by ensuring no voxel exists between two parallel scanlines separated by a distance $l$ [S1, unofficial]. It sets itself apart from standard scanline algorithms by dynamically calculating the maximum safe step size $l$ based on the scanline direction, thereby skipping intermediate voxels that are guaranteed to be covered by the projection of the scanline [S1, unofficial].
+
+## How it works
+**Inputs:** A triangle defined by vertices $v_1, v_2, v_3$ in 3D space; the triangle's normal vector $n = (n_x, n_y, n_z)$; the plane constant $D$ such that $n \cdot p = D$ for any point $p$ on the triangle [S1, unofficial].
+**Outputs:** A set of voxel coordinates representing the 2D line voxelization of the triangle slice [S1, unofficial].
+
+**Data Structures:**
+*   `v1, v2, v3`: 3D vectors $(x, y, z)$.
+*   `n`: 3D normal vector $(n_x, n_y, n_z)$.
+*   `dsl`: 2D normalized scanline direction vector $(d_{sl,x}, d_{sl,y})$.
+*   `l`: Scalar distance threshold.
+*   `li`: Current scanline offset, initialized to 0.
+
+**Steps:**
+
+1.  **Determine Scanline Direction ($d_{sl}$):**
+    *   Check if all vertices $v_1, v_2, v_3$ have the same integer $z$-coordinate [S1, unofficial].
+    *   If yes, set $d_{sl}$ to the normalized direction of edge $v_1 \to v_3$ [S1, unofficial].
+    *   If no, calculate the gradient of the triangle with respect to $z$ [S1, unofficial]. The plane equation is $z = \frac{D - n_x x - n_y y}{n_z}$ [S1, unofficial]. The gradient vector is $d = \left( \frac{-n_x}{n_z}, \frac{-n_y}{n_z} \right)$ [S1, unofficial]. Normalize this vector: $d_{sl} = \frac{d}{|d|}$ [S1, unofficial].
+
+2.  **Calculate Distance Threshold ($l$):**
+    *   Compute $l = |d_{sl,x}| + |d_{sl,y}|$ [S1, unofficial].
+    *   Alternatively, using the four cases for signs of $d_{sl}$:
+        $$
+        l = \begin{cases}
+        ((0, 1) - (1, 0)) \cdot d_{sl} & \text{if } d_{sl,x} < 0 < d_{sl,y} \\
+        ((1, 0) - (0, 1)) \cdot d_{sl} & \text{if } d_{sl,y} < 0 < d_{sl,x} \\
+        ((0, 0) - (1, 1)) \cdot d_{sl} & \text{if } d_{sl,x}, d_{sl,y} < 0 \\
+        ((1, 1) - (0, 0)) \cdot d_{sl} & \text{if } 0 < d_{sl,x}, d_{sl,y}
+        \end{cases}
+        $$
+        These equations represent the dot product of the voxel diagonal aligned with $d_{sl}$ [S1, unofficial].
+
+3.  **Iterate Scanlines:**
+    *   Initialize $l_i = 0$ [S1, unofficial].
+    *   While $l_i$ is within the bounds of the triangle slice:
+        *   Calculate endpoints for the current scanline offset $l_i$ on the triangle edges [S1, unofficial].
+        *   For edges connected to $v_1$ (edges $v_1 \to v_2$ and $v_1 \to v_3$):
+            *   Let $d_e$ be the normalized direction of the edge [S1, unofficial].
+            *   Calculate endpoint $v_p = v_1 + d_e \frac{l_i}{d_e \cdot d_{sl}}$, where the dot product uses the $x,y$ components of $d_e$ and $d_{sl}$ [S1, unofficial].
+        *   For the edge $v_2 \to v_3$:
+            *   This edge does not share $v_1$ as a base for the projection formula [S1, unofficial]. Calculate a modified vertex $v_2'$ such that $(v_2' - v_1) \cdot d_{sl} = 0$ and $v_2' - v_2$ is parallel to $v_3 - v_2$ [S1, unofficial].
+            *   $v_2' = v_2 + (v_3 - v_2) \frac{(v_1 - v_2) \cdot d_{sl}}{(v_3 - v_2) \cdot d_{sl}}$ [S1, unofficial].
+            *   Use $v_2'$ as the base vertex and edge direction $v_2 \to v_3$ in the projection formula: $v_p = v_2' + d_e \frac{l_i}{d_e \cdot d_{sl}}$ [S1, unofficial].
+        *   Voxelize the line segment between the calculated endpoints [S1, unofficial].
+        *   Increment $l_i$ by $l$ [S1, unofficial].
+
+4.  **Merge Edges:**
+    *   The voxels on edge $v_1 \to v_2$ are merged with the voxels on edge $v_2 \to v_3$, counting them as a single edge to avoid double-counting or gaps at vertex $v_2$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def optimal_scanline_voxelization(v1, v2, v3, n, D):
+    def dot2d(a, b):
+        return a[0]*b[0] + a[1]*b[1]
+
+    def normalize2d(v):
+        mag = math.sqrt(v[0]**2 + v[1]**2)
+        return (v[0]/mag, v[1]/mag) if mag > 0 else (0.0, 0.0)
+
+    # Step 1: Determine scanline direction dsl
+    if v1[2] == v2[2] == v3[2]:
+        dsl = normalize2d((v3[0] - v1[0], v3[1] - v1[1]))
+    else:
+        if n[2] == 0:
+            raise ValueError("Triangle parallel to z-axis, gradient undefined")
+        dsl = normalize2d((-n[0]/n[2], -n[1]/n[2]))
+
+    # Step 2: Calculate distance threshold l
+    l = abs(dsl[0]) + abs(dsl[1])
+
+    # Step 3: Iterate scanlines
+    l_i = 0.0
+    voxels = set()
+
+    # Precompute v2' for edge v2-v3
+    v3_minus_v2 = (v3[0] - v2[0], v3[1] - v2[1])
+    v1_minus_v2 = (v1[0] - v2[0], v1[1] - v2[1])
+    denom_v2p = dot2d(v3_minus_v2, dsl)
+    v2_prime = None
+    if denom_v2p != 0:
+        factor = dot2d(v1_minus_v2, dsl) / denom_v2p
+        v2_prime = (v2[0] + v3_minus_v2[0] * factor, v2[1] + v3_minus_v2[1] * factor)
+
+    # Determine sweep bounds by projecting vertices onto dsl [G]
+    proj_v1 = dot2d((v1[0], v1[1]), dsl)
+    proj_v2 = dot2d((v2[0], v2[1]), dsl)
+    proj_v3 = dot2d((v3[0], v3[1]), dsl)
+    min_proj = min(proj_v1, proj_v2, proj_v3)
+    max_proj = max(proj_v1, proj_v2, proj_v3)
+
+    current_l_i = min_proj
+    while current_l_i <= max_proj:
+        # Project onto v1-v2
+        de_12 = normalize2d((v2[0] - v1[0], v2[1] - v1[1]))
+        denom_12 = dot2d(de_12, dsl)
+        ep1 = (v1[0] + de_12[0] * (current_l_i / denom_12), v1[1] + de_12[1] * (current_l_i / denom_12)) if denom_12 != 0 else None
+
+        # Project onto v1-v3
+        de_13 = normalize2d((v3[0] - v1[0], v3[1] - v1[1]))
+        denom_13 = dot2d(de_13, dsl)
+        ep2 = (v1[0] + de_13[0] * (current_l_i / denom_13), v1[1] + de_13[1] * (current_l_i / denom_13)) if denom_13 != 0 else None
+
+        # Project onto v2-v3 using v2'
+        ep3 = None
+        if v2_prime is not None:
+            de_23 = normalize2d((v3[0] - v2[0], v3[1] - v2[1]))
+            denom_23 = dot2d(de_23, dsl)
+            if denom_23 != 0:
+                ep3 = (v2_prime[0] + de_23[0] * (current_l_i / denom_23), v2_prime[1] + de_23[1] * (current_l_i / denom_23))
+
+        # Voxelize line segment between calculated endpoints [G]
+        endpoints = [ep for ep in [ep1, ep2, ep3] if ep is not None]
+        if len(endpoints) >= 2:
+            # Standard 2D line rasterization between endpoints [G]
+            voxels.add(tuple(endpoints[0]))
+            voxels.add(tuple(endpoints[1]))
+
+        current_l_i += l
+
+    return voxels
+```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Triangles:** If $n_z = 0$, the triangle is parallel to the z-axis, and the gradient is undefined [S1, unofficial].
+*   **Precision:** Floating-point arithmetic may cause gaps or overlaps if $l$ is not calculated with sufficient precision [G].
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources [S1, unofficial].
+**Memory Complexity:** Not given in the sources [S1, unofficial].
+**Strengths:** Minimizes the voxel count by skipping intermediate voxels that are guaranteed to be covered by the projection of the scanline [S1, unofficial].
+**Limitations:** Requires careful handling of the $v_2 \to v_3$ edge projection using the modified base vertex $v_2'$ [S1, unofficial].
+
+## Background
+Optimal Scanline Voxelization was proposed in the context of triangle slice voxelization for volume rendering [S1, unofficial]. It builds on the theory that there exists a maximum distance $l$ between parallel scanlines such that no voxel can exist between them [S1, unofficial].
+
+## Sources
+[S1] A Comparison of Optimal Scanline Voxelization Algorithms, https://liu.diva-portal.org/smash/get/diva2:1459330/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)

@@ -1,0 +1,108 @@
+# Display-Space Cube Mapping
+
+Also called: Parallel Projection with Offset Centering
+
+## Overview
+Display-Space Cube Mapping transforms a voxel dataset into a fixed-size cubic display space centered on the screen, enabling consistent projection across orientations [S1, unofficial]. It differs from perspective-based methods by omitting perspective correction, which allows for direct measurement of voxel distances from the screen at the cost of perspective distortions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A voxel dataset with dimensions $(D_X, D_Y, D_Z)$, where coordinates correspond to Cartesian indices. A transformation matrix (rotation) applied to the voxel coordinates.
+*   **Output:** A 2D image projected onto the frontal face of a cubic display space of dimensions $(I_D, I_D, I_D)$.
+
+**Data Structures:**
+*   **Voxel Coordinates:** 3D vectors $(x, y, z)$ representing object space indices.
+*   **Display Space:** A conceptual cube of size $I_D \times I_D \times I_D$.
+*   **Transformation Matrix:** A $3 \times 3$ matrix derived from rotation angles, applied via vector-matrix multiplication.
+
+**Steps:**
+1.  **Transformation:** Apply the object transformation matrix to each voxel coordinate $y_i$ (treated as a vector) to obtain transformed coordinates [S1, unofficial]. For a 2D rotation about an axis $\alpha$, the new coordinates $(x', y')$ of a point $(x, y)$ are:
+    $$
+    x' = x \cos \alpha - y \sin \alpha
+    $$
+    $$
+    y' = x \sin \alpha + y \cos \alpha
+    $$
+    Equivalent relations apply for 3D rotations [S1, unofficial].
+2.  **Offset Calculation:** Calculate an offset for the transformed origin to center the voxel dataset in the display space. The center of the voxel data set is positioned at the center of the projection screen for all possible orientations [S1, unofficial].
+3.  **Projection:** Compute the final image by projecting the transformed voxel set onto the frontal face of the $I_D \times I_D \times I_D$ cube. This is a parallel projection using uncorrected $x$ and $y$ coordinates [S1, unofficial].
+
+**Parameters:**
+*   $I_D$: Dimension of the cubic display space. Typically chosen to match or scale to the target screen resolution (e.g., $512 \times 780$) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Perspective Distortion:** Omitting perspective correction causes perspective distortions in the image [S1, unofficial]. To correct this, one would divide transformed $x$ and $y$ coordinates by the $z$ coordinate, but the prototype uses uncorrected values [S1, unofficial].
+*   **Clipping:** Clipping is not required if the screen size is chosen sufficiently large for the resulting image to fit for all voxel-data orientations. However, clipping must be used for larger voxel-data sets without increasing screen resolution. The computational cost is two comparisons for $x$ and $y$ coordinates against screen dimensions [S1, unofficial].
+*   **Hidden Surface Elimination:** Distant voxels are obscured by closer voxels. Implementation requires testing the $z$-value against a cutting plane (voxels in front are not visualized) and applying a user-selected grey value threshold [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def display_space_cube_mapping(voxels, transform_matrix, id_dim):
+    """
+    voxels: list of (x, y, z, value) tuples
+    transform_matrix: 3x3 matrix (list of lists)
+    id_dim: integer, dimension of the display cube
+    """
+    # 1. Transform and Offset
+    # Note: The exact offset calculation formula is not provided in the source.
+    # It is described as giving an offset to the transformed origin to center the data.
+    # [G] Assuming the dataset center is at (cx, cy, cz), we subtract this from transformed coords.
+    
+    transformed_voxels = []
+    for x, y, z, value in voxels:
+        # Apply rotation matrix
+        tx = transform_matrix[0][0]*x + transform_matrix[0][1]*y + transform_matrix[0][2]*z
+        ty = transform_matrix[1][0]*x + transform_matrix[1][1]*y + transform_matrix[1][2]*z
+        tz = transform_matrix[2][0]*x + transform_matrix[2][1]*y + transform_matrix[2][2]*z
+        
+        # Apply offset to center the dataset
+        # [G] Specific offset values are not given, only the concept of centering.
+        # tx, ty, tz = tx - offset_x, ty - offset_y, tz - offset_z
+        
+        transformed_voxels.append((tx, ty, tz, value))
+
+    # 2. Filter and Project
+    # Initialize display buffer
+    # [G] Assuming a 2D array of size id_dim x id_dim
+    display_buffer = [[None for _ in range(id_dim)] for _ in range(id_dim)]
+    
+    # Sort voxels by z-depth for hidden surface elimination (closer first)
+    # [G] Standard painter's algorithm assumption for parallel projection
+    transformed_voxels.sort(key=lambda v: v[2], reverse=True)
+
+    for tx, ty, tz, value in transformed_voxels:
+        # Threshold check
+        if value < threshold:
+            continue
+            
+        # Map to display coordinates
+        # [G] Mapping from continuous transformed space to discrete IDxDID grid is not explicitly defined.
+        # Assuming a direct mapping where the transformed space fits within ID dimensions.
+        # [G] Clipping check: if tx or ty are outside [0, id_dim], skip.
+        if 0 <= tx < id_dim and 0 <= ty < id_dim:
+            # Parallel projection: use x and y directly
+            # Hidden surface: overwrite if closer (already sorted)
+            display_buffer[int(ty)][int(tx)] = value
+            
+    return display_buffer
+```
+
+## Subtopics
+
+### Parallel Projection with Offset Centering
+A projection method where perspective correction is omitted, using uncorrected $x$ and $y$ coordinates. The data set center is positioned at the screen center via an offset [S1, unofficial]. It allows measurement of voxel distances from the screen but causes perspective distortions [S1, unofficial]. Choose this when distance measurement is prioritized over geometric accuracy and computational simplicity is desired.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels for transformation and projection. Clipping adds constant-time comparisons per voxel.
+*   **Memory Complexity:** Proportional to the number of voxels and the display buffer size ($I_D^2$).
+*   **Strengths:** Simple implementation; allows direct measurement of voxel distances from the screen; no need for complex perspective division [S1, unofficial].
+*   **Limitations:** Perspective distortions in the image; requires sufficient screen resolution to avoid clipping for large datasets [S1, unofficial].
+*   **When to use:** When consistent orientation and distance measurement are more important than perspective accuracy, and for prototyping or systems with limited computational resources.
+
+## Background
+Originating from the TNO report "Voxel Data Processing on a Transputer Network" (1991), this method was developed for a voxel processor system. It was designed to handle 3D voxel data visualization on a parallel processing architecture, emphasizing simplicity and speed for real-time or near-real-time display [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA245410: Voxel Data Processing on a Transputer Network, https://archive.org/details/DTIC_ADA245410, fetched 2026-10-26 (unofficial)

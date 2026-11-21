@@ -1,0 +1,97 @@
+# Shadow Density Scale
+
+
+## Overview
+Shadow Density Scale is a rendering optimization technique that decouples a volume's visual silhouette from its shadow-casting opacity, allowing light to penetrate deeper into participating media without altering the volume's physical density or absorption properties [S1][S2, unofficial][S3]. Unlike reducing absorption, which increases overall transparency and makes the volume appear "puffy," this method retains the volume's "tightness" and silhouette while faking the brightening effect of multiple scattering at a fraction of the computational cost [S1][S2, unofficial][S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The volume's optical depth $\tau$ along a shadow ray, calculated from the density field $\rho$ and absorption/scattering coefficients.
+*   **Parameter:** `shadow_density_scale` ($S$), a floating-point scalar.
+*   **Output:** The modified transmittance $T'$ used for shadow ray termination.
+
+**Data Structures:**
+The parameter is a single floating-point value stored in the shader's advanced configuration. No additional data structures are required; it modifies the evaluation of the existing density field during shadow ray traversal.
+
+**Steps:**
+1.  **Sample Density:** During shadow ray traversal, sample the volume density $\rho$ at the intersection point.
+2.  **Calculate Optical Depth:** Compute the optical depth $\tau$ accumulated along the ray segment from the light source to the current point, using the standard density and absorption coefficient $\sigma_a$ [S1].
+3.  **Apply Scale:** Multiply the accumulated optical depth by the `shadow_density_scale` parameter $S$:
+    $$ \tau' = \tau \times S $$
+4.  **Compute Transmittance:** Calculate the shadow ray transmittance using the scaled optical depth:
+    $$ T' = e^{-\tau'} $$
+5.  **Terminate:** Use $T'$ to determine the contribution of the light source. If $T'$ is below a threshold, terminate the shadow ray.
+
+**Parameters:**
+*   `shadow_density_scale` ($S$): A float value where $1.0$ is the default (no change) [S1]. Values below $1.0$ (e.g., $0.5$) increase transparency to shadow rays [S1].
+
+**Edge Cases and Pitfalls:**
+*   **$S > 1.0$:** Makes the volume more opaque to shadows than its physical density suggests, potentially creating unnatural dark cores [S1].
+*   **$S = 0.0$:** Renders the volume completely transparent to shadow rays, effectively removing all shadows cast by the volume [S1].
+*   **Visual Inconsistency:** Since the volume's silhouette remains unchanged while its internal lighting brightens, this can create a visual disconnect between the volume's edge and its interior if not balanced with other effects like the Powder Sugar Effect [S1][S2, unofficial][S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_shadow_transmittance(ray, volume_shader):
+    """
+    Computes shadow transmittance using Shadow Density Scale.
+    
+    Args:
+        ray: The shadow ray from the surface point to the light.
+        volume_shader: The volume shader containing density and coefficients.
+        
+    Returns:
+        float: The transmittance value T'.
+    """
+    # 1. Sample density and compute optical depth along the ray
+    # This involves integrating density * absorption_coefficient along the ray path
+    # from the light to the current point.
+    optical_depth = 0.0
+    step_size = ray.step_size
+    num_steps = ray.num_steps
+    
+    for i in range(num_steps):
+        point = ray.origin + ray.direction * (i * step_size)
+        density = volume_shader.sample_density(point)
+        absorption_coeff = volume_shader.get_absorption_coefficient(point)
+        optical_depth += density * absorption_coeff * step_size
+        
+    # 2. Apply Shadow Density Scale
+    # Get the scale parameter from the shader's advanced settings
+    shadow_density_scale = volume_shader.get_shadow_density_scale()
+    
+    # Default is 1.0 if not explicitly set
+    if shadow_density_scale is None:
+        shadow_density_scale = 1.0
+        
+    scaled_optical_depth = optical_depth * shadow_density_scale
+    
+    # 3. Compute transmittance
+    transmittance = math.exp(-scaled_optical_depth)
+    
+    return transmittance
+```
+
+## Subtopics
+
+### Powder Sugar Effect
+Reduces scattered light in low-density areas to approximate less scattered light at cloud fringes. Choose this for edge darkening; Shadow Density Scale is for internal brightening. [Link](1713-powder-sugar-effect.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ additional cost per shadow ray evaluation. It adds a single multiplication operation to the optical depth calculation [S2, unofficial][S3].
+*   **Memory Complexity:** $O(1)$ additional memory for the scalar parameter [S1].
+*   **Performance:** Significantly cheaper than simulating true multiple scattering, which requires additional bounces and anisotropic scattering evaluations [S2, unofficial][S3].
+*   **Strengths:** Allows light to penetrate deeper into volumes without increasing render time or changing the volume's silhouette [S2, unofficial][S3]. Retains the "tightness" of the volume [S1].
+*   **Limitations:** It is a heuristic cheat and does not physically simulate multiple scattering [S1][S2, unofficial][S3]. Can lead to visual inconsistencies if the volume's interior appears too bright relative to its edges [S1].
+*   **When to Use:** When rendering volumes that appear too dark internally due to high absorption or density, and true multiple scattering is too expensive [S2, unofficial][S3].
+*   **When Not to Use:** When physical accuracy is required, or when the volume's silhouette needs to change with lighting conditions [S1].
+
+## Background
+Shadow Density Scale was introduced as a practical optimization in volumetric rendering workflows, particularly within the Redshift Volume Shader and Cinema 4D's Pyro workflow [S1][S2, unofficial][S3]. It addresses the common problem of volumes appearing too dark or "muddy" when light cannot penetrate deeply, without resorting to expensive multiple scattering simulations [S2, unofficial][S3]. The technique is part of a broader set of "cheats" used to balance visual quality and render time, often combined with moderate trace depths and other helpers like anisotropic scattering relaxation [S2, unofficial][S3].
+
+## Sources
+[S1] Volume Rendering - Maxon, https://help.maxon.net/c4d/s26/en-us/Content/_REDSHIFT_/html/Volume%2BRendering.html, fetched 2026-10-26
+[S2] What Is Volumetric Rendering? Volume Shaders Explained, from ... - Maxon, https://www.maxon.net/en/article/volumetric-rendering, fetched 2026-10-26 (unofficial)
+[S3] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29

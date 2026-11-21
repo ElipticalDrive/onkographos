@@ -1,0 +1,180 @@
+--- v003.md
++++ v004.md
+@@ -1,101 +1,115 @@
+ # Trained Exposure Application
+-
+ Also called: Learned per-image color transform, Per-image color correction
+ 
+ ## Overview
+-Trained Exposure Application is a post-processing step in reference image guided colorization that applies a learned, per-image linear color transform and bias to a rendered RGB image. It ensures the final output matches the exposure conditions present in the training data [S1, unofficial]. It differs from sibling methods by using a fixed, pre-computed 3x3 matrix and 3D vector retrieved by image name, rather than learning a complex non-linear network or optimizing parameters per-pixel during rendering [S1, unofficial].
++Trained Exposure Application is a post-processing step applied to rendered RGB images to normalize their appearance to match the exposure conditions present in the training dataset. It solves the problem of domain shift where test-time rendering conditions (e.g., camera exposure, white balance) differ from the conditions the model was trained on. It differs from its sibling [Reference Based Color Transfer for Medical Volume Rendering](11552-reference-based-color-transfer-for-medical-volume-rendering.md) by using a fixed, data-driven affine transform rather than a learned style transfer, and from [Color Transfer](13520-color-transfer.md) by operating on a per-image basis using stored metadata rather than global histogram matching.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Rendered RGB image $I_{in}$ with shape $(H, W, 3)$ and an image identifier (name).
+-- Output: Color-corrected RGB image $I_{out}$ with shape $(H, W, 3)$.
++*   Input: A rendered RGB image tensor $I_{in}$ of shape $(H, W, 3)$ or $(3, H, W)$, and an image identifier (filename/name).
++*   Output: A color-adjusted RGB image tensor $I_{out}$ of the same spatial dimensions as $I_{in}$.
+ 
+ **Data Structures:**
+-- `exposure`: A tensor of shape $(4, 4)$ (or similar structure containing the first 4 rows/cols).
+-  - `exposure[:3, :3]`: The $3 \times 3$ color transformation matrix $E_{3\times3}$.
+-  - `exposure[:3, 3]`: The $3 \times 1$ bias vector $E_{3}$.
++The method retrieves a pre-computed exposure tensor $E$ associated with the input image. The tensor $E$ has shape $(4, 4)$ or a compatible structure where:
++*   $E_{3\times3}$ corresponds to $E[0:3, 0:3]$, a $3 \times 3$ matrix representing the linear color transform.
++*   $E_{3}$ corresponds to $E[0:3, 3]$, a 3D bias vector representing the additive offset.
++
++**Formulas:**
++The transformation is an affine color correction defined as:
++$$ I_{out} = (I_{in} \cdot E_{3\times3})^T + E_{3} $$
++Where $I_{in}$ is treated as a column vector for the multiplication step if using standard matrix notation, or handled via batched matrix multiplication in tensor libraries. In the implementation, this is computed as:
++$$ I_{out} = \text{permute}( \text{matmul}( \text{permute}(I_{in}), E_{3\times3} ) ) + E_{3} $$
++*Note: The source code [S1, unofficial] implements this by permuting to $(H, W, 3)$, multiplying by the $3 \times 3$ matrix, permuting back to $(3, H, W)$, and adding the bias.*
+ 
+ **Steps:**
+-1. Retrieve the `exposure` tensor associated with the current image name using a lookup function (e.g., `get_exposure_from_name`).
+-2. Permute the input image $I_{in}$ from shape $(H, W, 3)$ to $(H, W, 3)$ layout suitable for matrix multiplication (typically $(H, W, 3)$ if treating pixels as vectors, or $(H \cdot W, 3)$ for batched matmul). The source code permutes to $(H, W, 3)$ then multiplies, implying the last dimension is the color channel.
+-3. Apply the linear transform: Multiply the permuted image by the $3 \times 3$ matrix $E_{3\times3}$.
+-4. Add the bias vector $E_{3}$ to each pixel.
+-5. Permute the result back to the original spatial layout $(3, H, W)$ or $(H, W, 3)$ depending on the final tensor format required by the renderer.
+-
+-**Formula:**
+-$$ I_{out} = (I_{in} \cdot E_{3\times3})^T + E_{3} $$
+-Where:
+-- $I_{in}$ is the input image tensor of shape $(H, W, 3)$.
+-- $E_{3\times3}$ is the $3 \times 3$ color transform matrix.
+-- $E_{3}$ is the $3 \times 1$ bias vector.
+-- The operation is performed per-pixel.
++1.  Retrieve the exposure tensor $E$ for the current image using its unique name/identifier. If not found, the method cannot proceed without fallback logic (not specified in source) [S1, unofficial].
++2.  Extract the $3 \times 3$ color transform matrix $M = E[0:3, 0:3]$ and the bias vector $b = E[0:3, 3]$ [S1, unofficial].
++3.  Ensure the input image $I_{in}$ is in the format $(H, W, 3)$ [G].
++4.  Compute the intermediate product $P = I_{in} \times M$ using matrix multiplication, resulting in a tensor of shape $(H, W, 3)$ [S1, unofficial].
++5.  Add the bias vector $b$ to $P$. The bias is broadcasted across the height and width dimensions [S1, unofficial].
++6.  Permute the result back to the target layout $(3, H, W)$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def trained_exposure_application(rendered_image, get_exposure_from_name, image_name):
++import torch
++
++def trained_exposure_application(rendered_image: torch.Tensor, exposure_tensor: torch.Tensor) -> torch.Tensor:
+     """
+-    Applies a learned per-image 3x3 color transform and 3D bias vector.
++    Applies a learned per-image 3x3 color transform and 3D bias vector to the rendered RGB image.
+     
+     Args:
+-        rendered_image: Tensor of shape (3, H, W) or (H, W, 3).
+-        get_exposure_from_name: Function to retrieve exposure tensor by image name.
+-        image_name: String identifier for the current view.
++        rendered_image: Input tensor of shape (3, H, W) or (H, W, 3). 
++                        The source code assumes (3, H, W) input which is permuted.
++        exposure_tensor: Tensor of shape (4, 4) containing the color transform and bias.
+         
+     Returns:
+-        Tensor of shape (3, H, W) or (H, W, 3) matching input layout.
++        Output tensor of shape (3, H, W).
+     """
+-    # Retrieve the pre-computed exposure data
+-    exposure = get_exposure_from_name(image_name)
++    # Extract components from the exposure tensor
++    # E_3x3 is the 3x3 color transform matrix
++    E_3x3 = exposure_tensor[0:3, 0:3]
++    # E_3 is the 3D bias vector
++    E_3 = exposure_tensor[0:3, 3]
+     
+-    # Extract the 3x3 matrix and 3D bias
+-    # Note: Source assumes exposure is at least 4x4 or has these indices
+-    color_transform = exposure[:3, :3]  # Shape (3, 3)
+-    bias_vector = exposure[:3, 3]       # Shape (3,)
++    # Permute input from (3, H, W) to (H, W, 3) to allow matrix multiplication
++    # with the 3x3 transform on the last dimension
++    img_permuted = rendered_image.permute(1, 2, 0)
+     
+-    # Permute input to (H, W, 3) for matrix multiplication
+-    # Assuming input is (3, H, W) as is common in PyTorch image tensors
+-    if rendered_image.shape[0] == 3:
+-        img_permuted = rendered_image.permute(1, 2, 0)  # (H, W, 3)
+-    else:
+-        img_permuted = rendered_image  # Already (H, W, 3)
+-        
+-    # Apply color transform: (H, W, 3) @ (3, 3) -> (H, W, 3)
+-    # Using torch.matmul or equivalent
+-    transformed = torch.matmul(img_permuted, color_transform)
++    # Multiply by the 3x3 matrix
++    # matmul handles the batch dimensions if any, but here we apply to the spatial dims
++    # Result shape: (H, W, 3)
++    transformed = torch.matmul(img_permuted, E_3x3)
+     
+-    # Add bias: broadcast bias_vector (3,) to (H, W, 3)
+-    # Bias is added to the last dimension
+-    corrected = transformed + bias_vector
++    # Permute back to (3, H, W)
++    transformed_permuted = transformed.permute(2, 0, 1)
+     
+-    # Permute back to original layout (3, H, W)
+-    if rendered_image.shape[0] == 3:
+-        output = corrected.permute(2, 0, 1)
+-    else:
+-        output = corrected
+-        
++    # Add the bias vector. E_3 has shape (3,), need to add to each spatial location.
++    # None, None broadcasts the 3 values across H and W dimensions.
++    output = transformed_permuted + E_3[None, None, :]
++    
+     return output
+ ```
+ 
+ **Parameters:**
+-- `exposure`: Specific to each image. Not given in the sources. Typical values are learned during training.
++*   `exposure_tensor`: Must be retrieved from storage using the specific image name. Typical values are learned during the training phase [S1, unofficial].
++*   No other tunable parameters are mentioned [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- Requires exposure data to be stored and retrievable by image name [S1, unofficial].
+-- Permutation operations must match tensor dimensions exactly to avoid shape mismatches [S1, unofficial].
+-- If the exposure tensor is not found, the method fails. [G] Handle missing keys with a default identity transform.
++*   **Missing Data:** The method requires exposure data to be stored and retrievable by image name. If the lookup fails, the method is undefined [S1, unofficial].
++*   **Shape Mismatch:** Permutation operations must match tensor dimensions exactly. Failing to permute before or after multiplication results in shape errors or incorrect mathematical operations [S1, unofficial].
++*   **Precision:** The operation is linear. Numerical stability is generally high, but input values should be normalized appropriately for the learned matrix coefficients [G].
+ 
+ ## Subtopics
+ 
++### [ExpModel](14212-expmodel.md)
++ExpModel is a learned colorization module that applies a per-image 3x3 color transform and 3D bias vector to a rendered RGB image to match training-time exposure conditions. It operates as a conditional neural network that maps a scalar condition (temperature for white balance, exposure for log-scale adjustment) to a color correction factor. It builds on Trained Exposure Application by providing the specific parameterized functions for white balance and exposure adjustments within that framework.
++
++### [Reinhard Tonemapping for Training](14950-reinhard-tonemapping-for-training.md)
++This method converts unbounded high-dynamic-range (HDR) linear radiance from a differentiable renderer into display-referred sRGB images suitable for neural network training. It prevents numerical instabilities and out-of-distribution inputs by compressing the dynamic range into a bounded, perceptually plausible interval. It differs from ExpModel by using a fixed, non-learnable luminance normalization rather than a learned per-image transform.
++
++### Image-dependent affine color transformation
++A baseline variant where an MLP predicts an affine color transformation (shift + scale) to each Gaussian to inject appearance variance like exposure [S2]. On the Brandenburg Gate scene, this method achieves PSNR 18.34, SSIM 0.777, LPIPS 0.313. On the Trevi Fountain scene, this method achieves PSNR 19.01, SSIM 0.761, LPIPS 0.246 [S2].
++
+ ## Operating characteristics
+-- **Time Complexity**: $O(H \cdot W)$ for the matrix multiplication and bias addition. Very fast as it is a simple linear operation.
+-- **Memory Complexity**: $O(H \cdot W)$ for the output image. The exposure tensor is small ($4 \times 4$).
+-- **Strengths**: Computationally inexpensive; ensures consistency with training data exposure; simple to implement.
+-- **Limitations**: Only applies linear color adjustments; cannot correct for non-linear lighting changes or complex shadows.
+-- **When to use**: When the rendering pipeline produces images that need to match the exposure statistics of the training set for downstream tasks or visualization consistency.
+-- **When not to use**: When non-linear color correction or style transfer is required.
++**Time and Memory Complexity:**
++The operation is a single matrix multiplication and vector addition per pixel. Time complexity is $O(H \cdot W)$ where $H$ and $W$ are image dimensions. Memory complexity is $O(H \cdot W)$ for the output tensor. The lookup of the exposure tensor is $O(1)$ assuming hash-based storage [G].
++
++**Measured Performance:**
++Not given in the sources.
++
++**Scaling:**
++The method scales linearly with image resolution. It is independent of volume resolution as it operates on the final rendered image [S1, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Simple to implement, computationally inexpensive, effectively corrects global exposure and white balance shifts if the training data included such variations [S1, unofficial].
++*   **Limitations:** Limited to affine color corrections; cannot model complex non-linear color shifts or texture changes [S2]. Requires pre-computed exposure metadata for every image [S1, unofficial].
++
++**When to use it and when not:**
++Use when test-time camera parameters (exposure, white balance) are known or can be mapped to training conditions via stored metadata [S1, unofficial]. Do not use when complex appearance variations (e.g., lighting direction changes, material changes) are present, as affine transforms are insufficient [S2].
+ 
+ ## Background
+-The method is part of the "Improved-GS" project, an unofficial implementation or extension of Gaussian Splatting techniques [S1, unofficial]. It builds on the principles of Reference Image Guided Colorization, specifically the need to map rendered colors to a target domain. The specific mechanism of using a learned per-image 3x3 transform is attributed to this source [S1, unofficial].
++The method originates from the Improved-GS project, which applies deep image analogy principles to volume rendering [S1, unofficial]. It is part of a family of techniques that use learned per-image transforms to handle appearance variance in 3D Gaussian Splatting and similar rendering frameworks.
+ 
+ ## Sources
+-[S1] Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)+[S1] Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27, (unofficial)
++[S2] SWAG: Splatting in the Wild images with Appearance-conditioned Gaussians, https://doi.org/10.48550/arXiv.2403.10427, fetched 2026-10-29

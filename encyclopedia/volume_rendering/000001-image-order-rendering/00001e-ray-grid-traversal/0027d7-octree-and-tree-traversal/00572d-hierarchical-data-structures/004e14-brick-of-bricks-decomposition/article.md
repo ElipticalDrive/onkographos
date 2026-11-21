@@ -1,0 +1,87 @@
+# Brick-of-Bricks Decomposition
+Also called: Flat hierarchy of bricks
+
+## Overview
+Brick-of-Bricks Decomposition is a storage format for hierarchical volume data where the volume is stored as a flat hierarchy of bricks of size $n^3$ to improve cache-coherence in volume traversal [S1, unofficial][S2, book]. It arises from not fully expanding an octree into single-voxel leaf nodes [S2, book]. It sets itself apart from fully expanded octrees by reducing pointer overhead and improving spatial locality for raycasting very large volumes [S1, unofficial][S2, book].
+
+## How it works
+**Inputs:** An octree structure that is not fully expanded (i.e., non-leaf nodes may have children that are also non-leaf nodes, and leaf nodes may represent blocks of voxels rather than single voxels).
+**Outputs:** A flat array of bricks, where each brick is a contiguous block of $n^3$ voxels, along with an indexing scheme to map ray traversal steps to brick memory addresses.
+
+**Data Structures:**
+1.  **Brick Array:** A 1D array storing the voxel data. Each brick contains $n^3$ voxels. The layout is typically row-major or column-major within the brick, but the specific internal layout is not given in the sources.
+2.  **Hierarchy Index:** A structure mapping the octree topology to the flat brick array. This allows efficient calculation of the memory address for any voxel in the 8-neighborhood required for trilinear interpolation [S1, unofficial][S2, book].
+
+**Steps:**
+1.  **Construct Hierarchy:** Build an octree where nodes are not necessarily expanded to single voxels. Non-leaf nodes store aggregate information (e.g., average, entropy, error metrics) [S1, unofficial][S2, book].
+2.  **Flatten to Bricks:** Traverse the octree and group nodes into bricks of size $n^3$. The value of $n$ is not given in the sources.
+3.  **Indexing Scheme:** Implement an efficient indexing scheme to quickly find the memory address of voxels located in the 8-neighborhood required for trilinear interpolation [S1, unofficial][S2, book]. This scheme maps the hierarchical position (brick ID, offset within brick) to the flat array index.
+4.  **Raycasting:** During traversal, use the indexing scheme to access voxel data for shading and interpolation.
+
+**Parameters:**
+*   $n$: The side length of a brick in voxels. Typical values are not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Handling:** The indexing scheme must correctly handle bricks at the boundaries of the volume or irregular octree structures.
+*   **Interpolation:** Trilinear interpolation requires access to 8 neighboring voxels. If a neighbor crosses a brick boundary, the indexing scheme must correctly locate the adjacent brick and the relative offset within it.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for accessing a voxel using the indexing scheme
+# Note: The exact indexing algorithm is not provided in the sources.
+# This is a placeholder for the efficient indexing scheme mentioned.
+
+def get_voxel_value(brick_array, hierarchy_index, brick_id, x, y, z, n):
+    """
+    Get the value of a voxel at local coordinates (x, y, z) in brick_id.
+    n is the brick size.
+    """
+    # Calculate global offset within the brick
+    # Assuming row-major order: x + n*y + n*n*z
+    offset = x + n * y + n * n * z
+    
+    # Get the base address of the brick from the hierarchy index
+    # The exact method to compute base address from hierarchy is not given
+    base_address = hierarchy_index.get_brick_base_address(brick_id)
+    
+    return brick_array[base_address + offset]
+
+def get_neighbor_value(brick_array, hierarchy_index, current_brick_id, x, y, z, n, dx, dy, dz):
+    """
+    Get the value of a neighbor voxel at (x+dx, y+dy, z+dz).
+    Handles brick boundary crossing.
+    """
+    nx, ny, nz = x + dx, y + dy, z + dz
+    
+    # Check if neighbor is within the current brick
+    if 0 <= nx < n and 0 <= ny < n and 0 <= nz < n:
+        return get_voxel_value(brick_array, hierarchy_index, current_brick_id, nx, ny, nz, n)
+    else:
+        # Determine the adjacent brick ID
+        # The exact logic for determining adjacent brick ID is not given
+        adjacent_brick_id = hierarchy_index.get_adjacent_brick_id(current_brick_id, dx, dy, dz)
+        
+        # Calculate local coordinates in the adjacent brick
+        # This depends on the direction of the neighbor
+        local_x = (nx % n + n) % n
+        local_y = (ny % n + n) % n
+        local_z = (nz % n + n) % n
+        
+        return get_voxel_value(brick_array, hierarchy_index, adjacent_brick_id, local_x, local_y, local_z, n)
+```
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Not given in the sources.
+**Performance:** Improves cache-coherence in volume traversal compared to fully expanded octrees [S1, unofficial][S2, book].
+**Strengths:** Better cache performance for large volumes due to flat storage and reduced pointer overhead [S1, unofficial][S2, book].
+**Limitations:** Requires an efficient indexing scheme for neighbor access, which can be complex to implement [S1, unofficial][S2, book].
+
+## Background
+Brick-of-Bricks Decomposition was introduced by Parker et al. for raycasting very large volumes [S1, unofficial][S2, book]. It is derived from the observation that octrees do not have to be balanced nor fully expanded into single-voxel leaf nodes [S1, unofficial][S2, book].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

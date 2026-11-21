@@ -1,0 +1,102 @@
+# Hybrid Ray-Casting
+
+Also called: Intermediate Image Ray Casting, Warping Ray Casting
+
+## Overview
+Hybrid Ray-Casting is a volume rendering technique that combines object-order data access with image-order final projection by rendering an intermediate image aligned with a volume face and warping it to the view plane [S1, S2]. It solves the problem of irregular memory access patterns in standard image-order ray casting by ensuring voxels are read in contiguous slices, thereby enabling high-performance implementations on parallel architectures [S1, S2]. Unlike [Volume Ray Casting](3161-volume-ray-casting.md), which resamples the volume directly along view rays, this method decouples the volume traversal from the final viewpoint, using a shear-warp transformation to maintain a one-to-one mapping of ray samples onto the volume grid [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset $V$ defined on a regular grid; a camera view defined by the image plane and view direction.
+*   **Output:** A 2D image on the final image plane.
+
+**Data Structures:**
+*   **Volume Data:** Stored as a 3D array of voxels. The memory layout is optimized for sequential access along planes parallel to the base plane.
+*   **Intermediate Image:** A 2D buffer storing the composited color and opacity for the base plane.
+*   **Warping Parameters:** Affine transformation matrices (shear and scale) defining the mapping from the base plane to the view plane.
+
+**Method Steps:**
+1.  **Base Plane Selection:** Identify the face of the volume data that is most parallel and nearest to the image plane. Define a "base plane" co-planar to this face [S1].
+2.  **Volume Transformation (Shear/Scale):** Transform the volume into an intermediate coordinate system such that the resample locations for rays originating from the base plane coincide with integer grid points. This typically involves a shear transformation, and for perspective projections, a scale transformation of the original slices [S2].
+3.  **Base Plane Rendering:** Send rays from each pixel on the base plane into the volume. Because the base plane is parallel to a volume face, rays traverse the volume in planes (slices) parallel to the base plane.
+    *   Within each slice, voxels are read from memory a scanline at a time in top-to-bottom order [S1].
+    *   Perform volume integration (compositing) along each ray to produce the base-plane image [S1, S2].
+4.  **Warping:** Warp (2D transform) the resulting base-plane image onto the final image plane. This step accounts for the angle between the base plane and the view direction [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_ray_casting(volume, camera):
+    # 1. Determine base plane
+    # Select the volume face most parallel to the image plane
+    base_plane_normal = get_most_parallel_face_normal(volume)
+    
+    # 2. Compute shear and warp transforms
+    # Transform volume so that base-plane rays hit integer grid points
+    shear_transform = compute_shear_transform(base_plane_normal, camera.projection_type)
+    warp_transform = compute_warp_transform(base_plane_normal, camera.view_direction)
+    
+    # Apply shear to volume data structure or access pattern
+    sheared_volume = apply_shear(volume, shear_transform)
+    
+    # 3. Render intermediate image on base plane
+    base_image = create_empty_image(base_plane_resolution)
+    
+    for y in range(base_image.height):
+        for x in range(base_image.width):
+            # Ray origin and direction in base plane coordinates
+            ray_origin = base_plane.get_pixel_origin(x, y)
+            ray_direction = base_plane.get_ray_direction(x, y)
+            
+            # Traverse volume along ray
+            # Voxels are accessed in slice-parallel order
+            color, opacity = 0.0, 0.0
+            t = 0.0
+            while t < ray_length:
+                # Get voxel at current position in sheared volume
+                voxel = sheared_volume.sample(ray_origin + t * ray_direction)
+                
+                # Composite
+                alpha = voxel.alpha
+                c = voxel.color
+                color = color + c * alpha * (1.0 - opacity)
+                opacity = opacity + alpha * (1.0 - opacity)
+                
+                if opacity >= 1.0:
+                    break
+                t += step_size
+            
+            base_image.set_pixel(x, y, color, opacity)
+            
+    # 4. Warp to final image plane
+    final_image = warp_image(base_image, warp_transform)
+    return final_image
+```
+
+**Parameters and Edge Cases:**
+*   **Shear Factor:** Determined by the angle between the view direction and the volume axes. If the view is perfectly aligned with a volume axis, the shear is zero [S2].
+*   **Perspective Scale:** For perspective cameras, the scale factor depends on the distance from the camera center to the base plane [S2].
+*   **Precision:** The shear transformation may introduce floating-point errors in voxel indexing. Care must be taken to ensure the one-to-one mapping is maintained [S2].
+*   **Degenerate Input:** If the view direction is parallel to a volume face, the base plane selection is trivial, and the warp may be a simple rotation or translation [S1].
+
+## Subtopics
+
+### [Partial Ray Caching (Volumetric Lumigraph)](13573-partial-ray-caching-volumetric-lumigraph.md)
+Partial Ray Caching accelerates volume rendering by decomposing the volume integral into segments, storing composited color and opacity for partial rays, and re-combining them for novel viewpoints near the original one to save integration cost. Unlike static lumigraph or lightfield methods, this approach is dynamically computed, though it can also be used statically for volumetric-style lumigraph rendering. It serves as a volumetric extension of the lumigraph.
+
+## Operating characteristics
+*   **Time Complexity:** The rendering time is proportional to the number of pixels in the base plane and the number of voxels traversed per ray. The warping step is $O(N)$ where $N$ is the number of pixels in the final image [S1, S2].
+*   **Memory Complexity:** Requires storage for the volume data and the intermediate base-plane image. The shear transformation may require temporary storage or careful indexing logic [S2].
+*   **Performance:** Achieves high performance on massively parallel architectures due to regular, object-order data access [S1, S2]. The VolumePro system demonstrated subsecond rendering for 128^3 datasets using this approach [S1, S2].
+*   **Strengths:** Eliminates redundant data accesses and non-uniform mapping issues inherent in image-order ray casting [S2]. Enables efficient hardware implementations using ASICs and parallel processors [S1, S2].
+*   **Limitations:** Requires additional computation for shear and warp transformations. The intermediate image may suffer from aliasing if not filtered properly during warping [S2].
+*   **When to Use:** Ideal for real-time volume rendering on parallel hardware where memory access patterns are critical [S1, S2].
+*   **When Not to Use:** Less suitable for interactive applications with arbitrary, rapidly changing viewpoints where the shear/warp overhead becomes significant compared to the rendering cost [S2].
+
+## Background
+Hybrid Ray-Casting, also known as shear-warp rendering, was developed to address the inefficiencies of image-order ray casting on parallel architectures. The method was pioneered by researchers including Lacroute and Levoy, who reported on a fast implementation using shear-warp transformation [S2]. Yagel and Kaufman described a template-based ray-casting scheme to simplify path generation [S2], while Cameron and Underill efficiently reduced data communication in SIMD parallel processors [S2]. Schröder and Stoll used the idiom of line drawing to achieve subsecond rendering times [S2]. The approach is a key component of the VolumePro system, a highly parallel architecture based on template-based ray-casting [S1].
+
+## Sources
+[S1] Architectures for real-time volume rendering, https://doi.org/10.1016/s0167-739x(98)00051-x, fetched 2026-11-01
+[S2] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29

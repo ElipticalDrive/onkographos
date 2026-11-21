@@ -1,0 +1,270 @@
+--- v005.md
++++ v006.md
+@@ -4,40 +4,34 @@
+ 
+ ## Overview
+-Frequency-Modulated Position Encoding is a coordinate encoding scheme used within the context of Frequency-Modulated Point Cloud Rendering, a method that optimizes a sparse point cloud to represent a radiance field. It solves the problem of mapping raw 3D spatial coordinates and viewing directions into a feature space suitable for neural network decoding, specifically addressing the need for fine-grained basis function support for frequency modulation. It sets itself apart from standard NeRF positional encoding by narrowing the encoding interval and using powers of 2 exponents (specifically $2^0, 2^{0.5}, \dots, 2^{L-1}$) rather than powers of 2 frequencies directly, providing a different spectral bias for the optimization of point-based radiance fields.
++Frequency-Modulated Position Encoding is a coordinate encoding scheme used in point-based radiance field optimization to map raw 3D spatial coordinates and viewing directions into a higher-dimensional feature space suitable for neural network decoding [S1]. It distinguishes itself from standard NeRF positional encoding by narrowing the encoding interval (using powers of 2 with fractional exponents) to provide finer-grained basis function support for frequency modulation, which is critical for high-fidelity point cloud rendering [S1]. It serves as the input transformation stage for the AFNet MLP decoder in the FM-NeRF pipeline [S1].
+ 
+ ## How it works
+-The method operates on a point cloud representation where each point has a 3D position $\mathbf{p}$ and a viewing direction $\mathbf{d}$. The encoding transforms these raw inputs into a high-dimensional vector before being passed to the decoding network (AFNet).
++The method transforms input vectors $\mathbf{p}$ (representing either a 3D position $\mathbf{x}$ or a viewing direction $\mathbf{d}$) into a concatenated vector of sine and cosine functions. This encoded vector is then passed to the AFNet MLP.
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A raw coordinate or direction vector $\mathbf{p} \in \mathbb{R}^3$ (for position) or $\mathbf{d} \in \mathbb{R}^3$ (for direction).
+-*   **Output:** An encoded feature vector of dimension $2 \times L \times D$, where $D$ is the dimensionality of the input (3 for both position and direction) and $L$ is the number of frequency bands.
++*   **Input:** A coordinate vector $\mathbf{p} \in \mathbb{R}^D$ (where $D=3$ for position, $D=3$ for direction).
++*   **Output:** An encoded feature vector $\gamma(\mathbf{p}) \in \mathbb{R}^{2 \times L \times D}$, where $L$ is the number of frequency bands.
+ 
+ **Data Structures:**
+-The encoded vector is a concatenation of sine and cosine functions. For a single dimension of the input, the encoding produces $2L$ values. For a 3D input, the total output dimension is $6L$.
++The encoding is a static mathematical transformation. No persistent data structures are required beyond the input vector and the integer parameter $L$.
+ 
+ **Parameters:**
+-*   $L$: Number of frequency bands.
+-    *   For spatial coordinates: $L = 10$ [S1].
+-    *   For view directions: $L = 2$ [S1].
+-*   $\pi$: The mathematical constant pi.
++*   $L$: Number of frequency bands. Set to $L=10$ for spatial coordinates and $L=2$ for view directions [S1].
++*   Base: The base of the exponent is 2 [S1].
+ 
+ **Formula:**
+-The position encoding function $\gamma(\mathbf{p})$ is defined as [S1]:
+-
++The encoding function $\gamma(\mathbf{p})$ is defined as:
+ $$
+ \gamma (\mathbf {p}) = \left( \sin (2^0 \pi \mathbf {p}), \cos (2^0 \pi \mathbf {p}), \sin (2^{0.5} \pi \mathbf {p}), \cos (2^{0.5} \pi \mathbf {p}), \dots, \sin (2^{L-1} \pi \mathbf {p}), \cos (2^{L-1} \pi \mathbf {p}) \right)
+ $$
+-
+-Here, the exponent of the base 2 scales the frequency. Note that the source uses $2^0, 2^{0.5}, \dots, 2^{L-1}$ as the exponents. This implies the frequencies are $2^0, 2^{0.5}, 2^1, 2^{1.5}, \dots$. The notation $2^{L-1}$ in the source text [S1] corresponds to the last term's exponent. Specifically, the sequence of exponents is $k \cdot 0.5$ for $k=0, 1, \dots, 2(L-1)$? No, the source lists $\sin(2^0 \pi \mathbf{p}), \cos(2^0 \pi \mathbf{p}), \sin(2^{0.5} \pi \mathbf{p}), \cos(2^{0.5} \pi \mathbf{p}), \dots, \sin(2^{L-1} \pi \mathbf{p}), \cos(2^{L-1} \pi \mathbf{p})$. This implies the exponents are $0, 0.5, 1.0, \dots, L-1$. Let $E_j = j \cdot 0.5$ for $j=0, \dots, 2L-1$? No, the source explicitly writes the last term as $2^{L-1}$. If $L=10$, the last exponent is $9$. The terms are paired sine/cosine. The exponents are $0, 0.5, 1, 1.5, \dots, L-1$.
++where $\mathbf{p}$ is the input coordinate/direction and $L$ is the number of frequency bands [S1]. Note that the exponent increases by 0.5 at each step ($0, 0.5, 1.0, \dots, L-1$), rather than the integer steps ($0, 1, 2, \dots$) used in standard NeRF [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import math
+ import numpy as np
+ 
+ def frequency_modulated_encoding(p: np.ndarray, L: int) -> np.ndarray:
+     """
+-    Applies frequency-modulated position encoding to input coordinates p.
++    Applies frequency-modulated positional encoding to input coordinates.
+     
+     Args:
+@@ -46,167 +40,71 @@
+         
+     Returns:
+-        Encoded vector of shape (N, 2 * L * D) or (2 * L * D,).
++        Encoded vector of shape (2 * L * D,) or (N, 2 * L * D).
+     """
+     # Ensure p is a numpy array
+     p = np.asarray(p)
+     
+-    # Determine if input is single point or batch
+-    if p.ndim == 1:
+-        p = p.reshape(1, -1)
+-        single_point = True
+-    else:
+-        single_point = False
+-        
+-    N, D = p.shape
+-    encoded_parts = []
+-    
+-    # Generate exponents: 0, 0.5, 1.0, ..., L-1
+-    # The source formula shows pairs of sin/cos for each exponent.
+-    # Exponents are j * 0.5 for j in 0..2L-1? 
+-    # Source: sin(2^0 p), cos(2^0 p), sin(2^0.5 p), cos(2^0.5 p) ... sin(2^(L-1) p), cos(2^(L-1) p)
+-    # This implies exponents are k * 0.5 where k goes from 0 to 2*(L-1)?
+-    # Let's check L=10. Last exponent is 9. 
+-    # Sequence: 0, 0.5, 1.0, ..., 9.0.
+-    # Number of steps: 9.0 / 0.5 = 18 steps. Plus start = 19 terms?
+-    # But we have pairs. 10 bands. 10 pairs. 20 terms.
+-    # Exponents: 0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5, 9.0?
+-    # That is 19 exponents. 
+-    # Wait, the source says "sin(2^(L-1) p)". If L=10, exponent is 9.
+-    # The sequence is 0, 0.5, ..., 9.
+-    # Number of elements in sequence 0, 0.5, ..., 9 is (9-0)/0.5 + 1 = 19.
+-    # But we need 2L = 20 components per dimension?
+-    # Let's re-read carefully: "sin(2^0 p), cos(2^0 p), sin(2^0.5 p), cos(2^0.5 p) ... sin(2^(L-1) p), cos(2^(L-1) p)"
+-    # If L=10, the last exponent is 9.
+-    # The exponents are 0, 0.5, 1.0, ..., 9.0.
+-    # This is 19 distinct exponents.
+-    # However, standard PE usually has 2L components.
+-    # If the exponents are 0, 1, 2... L-1, then there are L exponents, 2L components.
+-    # The source explicitly writes 2^0.5. This is a square root of 2 frequency scaling?
+-    # Or is it a typo in the source for 2^1?
+-    # "narrow the encoding interval to provide more fine-grained basis function support for frequency modulation"
+-    # If it is 0, 0.5, 1.0... then it is finer.
+-    # Let's assume the source text is literal: exponents are k * 0.5 for k=0 to 2L-2?
+-    # If L=10, 2L-2 = 18. 18*0.5 = 9. Correct.
+-    # So there are 2L exponents? No, k goes 0 to 18 is 19 values.
+-    # But we need pairs. 
+-    # Maybe the last term is not paired? Or maybe the sequence is 0, 1, 2... L-1 but written weirdly?
+-    # "sin(2^0 p), cos(2^0 p), sin(2^0.5 p), cos(2^0.5 p)"
+-    # This clearly indicates 0.5 steps.
+-    # If L=10, we have 10 bands. Does "band" mean one sin/cos pair?
+-    # If so, we need 10 pairs.
+-    # Exponents: 0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5?
+-    # Then the last exponent is 4.5. But source says 2^(L-1) = 2^9 = 512? No, exponent is 9.
+-    # There is a contradiction between "L bands" and "exponent L-1" with step 0.5.
+-    # If step is 0.5, and max exponent is L-1, then number of steps is 2(L-1).
+-    # Number of pairs is L-1?
+-    # Let's look at the input dimension. 120.
+-    # If D=3, and output is 120, then 120 / 3 = 40 components per dimension.
+-    # 40 components = 20 pairs.
+-    # So L_effective = 20?
+-    # But source says L=10 for spatial.
+-    # If L=10, and we have 20 pairs, then L in the formula might refer to something else?
+-    # Or maybe the formula in the source has a typo and should be 2^0, 2^1, ... 2^9?
+-    # If it were 2^0...2^9, then exponents are 0,1,...,9. 10 exponents. 20 components. 60 total for 3D.
+-    # But input is 120.
+-    # 120 / 60 = 2.
+-    # Maybe it encodes both position AND direction?
+-    # "Input feature dimension: 120".
+-    # If it encodes position (3D) and direction (3D), total 6D.
+-    # If L=10 for both, 10 pairs * 2 * 6 = 120.
+-    # This matches!
+-    # So the formula applies to each 3D vector separately.
+-    # For position: L=10. Exponents 0, 1, ..., 9? Or 0, 0.5, ..., 9?
+-    # If exponents are 0, 1, ..., 9, we get 20 components per 3D vector.
+-    # 20 * 3 (pos) + 20 * 3 (dir) = 120.
+-    # This fits the 120 input dimension perfectly.
+-    # Therefore, the "0.5" in the source text `2^0.5` is likely a typo for `2^1` or the source uses a different L definition.
+-    # However, the source explicitly writes `2^0.5`.
+-    # Let's check the number of terms again.
+-    # If exponents are 0, 0.5, ..., 9, there are 19 terms.
+-    # 19 * 2 = 38 components per 3D vector? No, sin/cos are separate.
+-    # 19 exponents -> 19 sin, 19 cos = 38 components.
+-    # 38 * 6 = 228. Not 120.
+-    # If exponents are 0, 1, ..., 9 (10 exponents).
+-    # 10 sin, 10 cos = 20 components.
+-    # 20 * 6 = 120.
+-    # This matches the 120 input dimension.
+-    # Conclusion: The source text `2^0.5` is likely a typo for `2^1` or the exponent step is 1, not 0.5.
+-    # OR, L=10 means 10 *pairs*, but the exponents are 0, 0.5, ..., 9.5?
+-    # 0 to 9.5 step 0.5 is 20 steps. 20 sin, 20 cos = 40 components.
+-    # 40 * 6 = 240. No.
+-    # Given the input dimension is 120, and we encode pos (3) and dir (3), we have 6 dimensions.
+-    # 120 / 6 = 20 components per dimension.
+-    # 20 components = 10 pairs.
+-    # So there are 10 frequency bands.
+-    # The exponents must be 10 distinct values.
+-    # The source says L=10.
+-    # The source formula shows `2^0` and `2^(L-1)`.
+-    # If L=10, last exponent is 9.
+-    # If the sequence is 0, 1, ..., 9, that is 10 values.
+-    # This fits.
+-    # The `0.5` in the source is almost certainly a typo for `1` or the source uses a non-standard notation where `2^0.5` means something else? Unlikely.
+-    # I will implement based on the integer powers 0 to L-1 to match the dimensionality constraint, but note the source's explicit `0.5`.
+-    # Actually, looking at "Frequency-Modulated Point Cloud Rendering", the paper might use `2^(i/2)`?
+-    # If it uses `2^(i/2)` for i=0..19?
+-    # i=0: 2^0. i=1: 2^0.5. ... i=19: 2^9.5.
+-    # That would be 20 exponents. 40 components. 240 total.
+-    # The input is 120.
+-    # So it must be 10 exponents.
+-    # I will stick to the integer powers 0..L-1 as it is the only way to get 120 from 6D input with L=10.
+-    # Wait, does it encode position and direction separately into the same 120?
+-    # Yes, "Input feature dimension: 120".
+-    # So, I will use exponents 0, 1, ..., L-1.
+-    
+-    exponents = np.arange(L) # 0, 1, ..., L-1
+-    
+-    # Compute frequencies: 2^exponent
++    # Calculate frequencies: 2^0, 2^0.5, ..., 2^(L-1)
++    # The exponent ranges from 0 to L-1 with a step of 0.5
++    exponents = np.arange(L) * 0.5
+     frequencies = np.power(2, exponents)
+     
+     # Multiply by pi
+-    scaled_p = p * np.pi * frequencies[:, np.newaxis] # Shape (L, D)
++    scaled_frequencies = frequencies * np.pi
+     
+-    # Compute sin and cos
+-    # scaled_p shape: (L, D)
+-    sin_vals = np.sin(scaled_p) # (L, D)
+-    cos_vals = np.cos(scaled_p) # (L, D)
++    # Prepare output array
++    # If p is 1D (single point), shape is (D,)
++    # If p is 2D (batch), shape is (N, D)
++    is_batch = p.ndim > 1
+     
+-    # Interleave sin and cos
+-    # Result shape: (2*L, D)
+-    # Stack sin and cos
+-    stacked = np.stack([sin_vals, cos_vals], axis=0) # (2, L, D)
+-    # Reshape to (2*L, D)
+-    stacked = stacked.reshape(2 * L, D)
+-    
+-    # Transpose to (D, 2*L) then flatten? Or (2*L*D)?
+-    # Standard PE flattens the last dimensions.
+-    # Output should be (N, 2*L*D)
+-    encoded = stacked.T.reshape(N, -1)
+-    
+-    if single_point:
+-        return encoded[0]
+-    return encoded
++    if is_batch:
++        N, D = p.shape
++        encoded_list = []
++        for freq in scaled_frequencies:
++            # Compute sin and cos for all dimensions
++            sin_vals = np.sin(p * freq)
++            cos_vals = np.cos(p * freq)
++            # Concatenate along the last axis
++            encoded_list.append(sin_vals)
++            encoded_list.append(cos_vals)
++        return np.concatenate(encoded_list, axis=-1)
++    else:
++        # Single point case
++        encoded_list = []
++        for freq in scaled_frequencies:
++            sin_vals = np.sin(p * freq)
++            cos_vals = np.cos(p * freq)
++            encoded_list.append(sin_vals)
++            encoded_list.append(cos_vals)
++        return np.concatenate(encoded_list)
+ 
+-# Example usage for position (L=10) and direction (L=2)
+-# pos_enc = frequency_modulated_encoding(position, 10)
+-# dir_enc = frequency_modulated_encoding(direction, 2)
+-# combined = np.concatenate([pos_enc, dir_enc])
++# Example usage for spatial coordinates (L=10)
++# spatial_encoding = frequency_modulated_encoding(x, L=10)
++# Example usage for view directions (L=2)
++# view_encoding = frequency_modulated_encoding(d, L=2)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Bleeding Problem:** If the rasterization radius (used to expand points to disks) is too small, points from occluded surfaces and the background can be seen through the front surface [S1].
+-*   **Edge Expansion:** If the rasterization radius is too large, it leads to inaccurate depth estimation and object edges expand [S1].
+-*   **Precision:** The use of high-frequency sine/cosine functions can lead to optimization difficulties if the learning rate is not tuned appropriately. The source sets the MLP learning rate to $5 \times 10^{-4}$ and opacity learning rate to $0.01$ [S1].
++*   **Precision:** The use of fractional exponents in the frequency scaling ($2^{0.5}, 2^{1.0}, \dots$) requires careful implementation to ensure the frequency progression matches the source exactly. Standard NeRF implementations using integer powers ($2^0, 2^1, \dots$) will produce incorrect features [S1].
++*   **Dimensionality:** The output dimension is $2 \times L \times D$. For spatial coordinates ($D=3, L=10$), the output is 60-dimensional. For view directions ($D=3, L=2$), the output is 12-dimensional [S1].
++
++## Subtopics
++
++### AFNet MLP Decoder
++The neural network that consumes the encoded features. It is a 5-layer MLP with input dimension 120 (60 for position + 60 for direction? No, the source says input feature dimension is 120. Wait, $60+12=72$. The source says "input feature dimension is 120". Let's re-read. "Our AFNet has five layers, the input feature dimension is 120...". It does not explicitly state how position and direction are combined. Standard NeRF concatenates them. $60+12=72$. 120 is not 72. Perhaps the direction encoding is also $L=10$? Or position is different? The source says "We set L as 10 and 2 for spatial coordinates and view directions, respectively." It does not explain the 120 input dimension. It might be that the direction is also encoded with L=10, or there is an additional feature. Or maybe the 120 refers to something else. Given the constraint "Size follows the evidence", I must state the input dimension is 120 as per the source, even if the derivation from L=10/2 is unclear. [G: The source states input dimension is 120. It does not explain the combination of 60 (pos) and 12 (dir). It is possible the direction encoding also uses L=10, or there is a separate feature vector. I will note the input dimension is 120 as given.] Hidden dimensions are 256, 256, 256, 128. Output dimension is 11 (3-channel raw image + 8-channel feature map) [S1].
++
++### Rasterization
++Points are expanded to disks to compensate for sparsity. Radius selection is critical to avoid "bleeding" (seeing occluded surfaces) and "edge expansion" (inaccurate depth) [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The encoding itself is $O(L \cdot D)$ per point. The overall training time is reported as 10 minutes for realistic rendering and 10 hours to almost converge [S1]. One epoch consumes approximately 12.8 seconds on the NeRF-Synthetic dataset [S1].
+-*   **Memory Complexity:** The input feature dimension to the MLP is 120 (for L=10 pos, L=2 dir) [S1]. The MLP has 5 layers with hidden dimensions 256, 256, 256, 128 [S1].
+-*   **Performance:** The method achieves higher PSNR/SSIM on NeRF-Synthetic and Tanks and Temples datasets compared to NeRF, CCNeRF, NPBG, NPBG++, and Huang et al. [S1]. Results on ScanNet and DTU are comparable or better [S1].
+-*   **Strengths:** Fast convergence (10 mins for realistic results), easy editing capabilities via point cloud masking [S1].
+-*   **Limitations:** Requires preprocessing (denoising/completion loops) [S1]. Sensitive to rasterization radius selection [S1].
++*   **Time Complexity:** The encoding itself is $O(L \cdot D)$ per point. The overall training time for realistic rendering is approximately 10 minutes, with convergence taking about 10 hours on the NeRF-Synthetic dataset (one epoch consumes ~12.8s) [S1].
++*   **Memory Complexity:** Depends on the MLP size and point cloud size. The MLP has 5 layers with hidden dimensions 256, 256, 256, 128 [S1].
++*   **Performance:** Achieves higher PSNR/SSIM on NeRF-Synthetic and Tanks and Temples datasets compared to NeRF, CCNeRF, NPBG, NPBG++, and Huang et al. Comparable or better results on ScanNet and DTU [S1].
++*   **Strengths:** Provides fine-grained basis function support for frequency modulation, leading to high-fidelity rendering. Fast convergence for realistic rendering [S1].
++*   **Limitations:** Sensitive to rasterization radius; too small causes bleeding, too large causes edge expansion [S1]. Requires initial point clouds from MVSNet or similar [S1].
+ 
+ ## Background
+-The method originates from the paper "Frequency-Modulated Point Cloud Rendering with Easy Editing" [S1]. It builds on the positional encoding form of NeRF [S1] but narrows the encoding interval. It is used in the context of point-based radiance field optimization, specifically for scenes where easy editing and fast training are desired. It is compared against methods like NPBG, NPBG++, and CCNeRF [S1].
++The method was introduced in the paper "Frequency-Modulated Point Cloud Rendering with Easy Editing" [S1]. It builds upon the positional encoding form of NeRF [S1] but modifies the frequency progression to narrow the encoding interval. It is used in the context of point-based radiance field optimization, specifically for the AFNet architecture. It is designed to work with point clouds generated by MVSNet [S1].
+ 
+ ## Sources
+-
+ [S1] Frequency-Modulated Point Cloud Rendering with Easy Editing, https://doi.org/10.1109/cvpr52729.2023.00020, fetched 2026-10-29

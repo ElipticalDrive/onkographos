@@ -1,0 +1,346 @@
+Problem In src/adaptive_rl/environments/drone.py, the 16-ray 3D rangefinder readings are computed using exact analytical ray-sphere and ray-box intersections (compute_lidar_3d_readings, lines 284–304): The returned distance readings are ...
+
+[Robotics] Improve LiDAR sensor realism with configurable noise and dropout · Issue #254 · StellarResearch/ARL · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Robotics] Improve LiDAR sensor realism with configurable noise and dropout #254
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#268
+Closed
+[Robotics] Improve LiDAR sensor realism with configurable noise and dropout#254
+#268
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or requestgood first issueGood for newcomersGood for newcomerspriority:mediumMedium priority work itemMedium priority work itemroboticsRobotics modeling, sensing, and physical realismRobotics modeling, sensing, and physical realismsimulationPhysics, kinematics, and simulation dynamicsPhysics, kinematics, and simulation dynamics
+Description
+ashishsinghbora
+opened on Sep 28, 2026
+Issue body actions
+Problem
+In src/adaptive_rl/environments/drone.py, the 16-ray 3D rangefinder readings are computed using exact analytical ray-sphere and ray-box intersections (compute_lidar_3d_readings, lines 284–304):
+The returned distance readings are purely deterministic and mathematically noiseless ($d / \text{max_range}$).
+There is no model of sensor measurement noise (e.g. Gaussian ranging variance).
+There is no model of beam dropouts (missed returns caused by surface absorption, grazing incident angles, or sensor packet loss).
+There is no minimum blind-zone distance.
+Real-world LiDAR sensors (such as Livox, Velodyne, or lightweight ToF rangefinders) exhibit ranging noise, beam divergence, and spurious/dropped returns. Training an RL agent on noiseless LiDAR observations risks policy brittleness when transferring to noisy sensor data or stochastic simulation benchmarks.
+Goal
+Add configurable, physically motivated sensor noise and beam dropout models to DroneNavigation3DEnv, preserving full backward compatibility with default noiseless simulations.
+Technical requirements
+Configurable Noise Model:
+Add parameters to DroneNavigation3DEnv.__init__():
+lidar_noise_std: float = 0.0 (Standard deviation of zero-mean Gaussian measurement noise $\mathcal{N}(0, \sigma^2)$ in meters).
+lidar_dropout_prob: float = 0.0 (Probability $p \in [0, 1]$ that a ray fails to return an echo and defaults to max_range).
+lidar_min_range: float = 0.1 (Minimum detection threshold; distances below this are clipped or report blind-zone reading).
+Ensure default values (noise_std=0.0, dropout_prob=0.0) maintain 100% exact numerical backward compatibility with existing tests.
+Seeded Stochasticity:
+Sample all noise using the environment's internal RNG (self.np_random) to ensure that calling env.reset(seed=X) yields perfectly deterministic, reproducible noisy observations.
+Clip all resulting normalized LiDAR readings strictly to $[0.0, 1.0]$.
+Configuration & Inspection:
+Expose the parameters in YAML configuration under environment.parameters:
+```
+environment:
+  name: "drone"
+  parameters:
+    lidar_noise_std: 0.05       # 5cm standard deviation
+    lidar_dropout_prob: 0.02    # 2% beam dropout
+    lidar_min_range: 0.2
+```
+Show sensor noise parameters in adaptive-rl env inspect drone.
+Acceptance criteria
+Default environment initialization (noise_std=0.0, dropout_prob=0.0) produces identical readings to the current code.
+Non-zero lidar_noise_std injects Gaussian perturbations with empirical variance matching $\sigma^2$.
+Non-zero lidar_dropout_prob drops beams to max_range at the specified frequency.
+All output readings remain strictly clipped within $[0.0, 1.0]$ with no NaN or out-of-bound floats.
+Noisy observations are 100% deterministic when seeded with env.reset(seed=K).
+Configuration schema validates new environment parameters.
+Testing requirements
+Unit tests in tests/test_drone.py verifying:
+Backward compatibility: Output of compute_lidar_3d_readings with zero noise matches existing test vectors.
+Distribution properties: Across 10,000 ray samples with $\sigma = 0.1$, empirical standard deviation is within statistical bounds ($\approx 0.1 \pm 0.01$).
+Dropout frequency: With $p = 0.05$, empirical dropout rate is within $\pm 0.01$ of $0.05$.
+Seed reproducibility: Two separate environment resets with the same seed generate identical noisy observation vectors.
+Documentation requirements
+Add documentation in docs/ENVIRONMENT.md detailing the sensor noise formulation, typical noise values for commercial ToF/LiDAR sensors, and how to enable them in experiment configs.
+Non-goals
+Do not implement heavy physical ray-tracing or mesh shaders.
+Do not make the observation space shape dynamic or change the 16-ray geometric layout.
+Do not alter the noiseless defaults of committed baseline configs.
+Relevant code areas
+src/adaptive_rl/environments/drone.py
+src/adaptive_rl/config.py
+tests/test_drone.py
+Activity
+ashishsinghbora
+added
+enhancementNew feature or requestNew feature or request
+good first issueGood for newcomersGood for newcomers
+priority:mediumMedium priority work itemMedium priority work item
+simulationPhysics, kinematics, and simulation dynamicsPhysics, kinematics, and simulation dynamics
+roboticsRobotics modeling, sensing, and physical realismRobotics modeling, sensing, and physical realism
+on Sep 28, 2026
+AyushjhaDevops commented on Sep 28, 2026
+AyushjhaDevops
+on Sep 28, 2026
+Last edited by AyushjhaDevops
+More actions
+@ashishsinghbora Proposed Solution
+I suggest implementing this as a small, backward-compatible sensor-noise layer on top of the existing analytical LiDAR intersection logic. The existing ray-sphere/ray-box calculations should remain unchanged; noise and dropout should only be applied to the final distance readings.
+Update "DroneNavigation3DEnv"
+In "src/adaptive_rl/environments/drone.py", add the following constructor parameters:
+lidar_noise_std: float = 0.0,
+lidar_dropout_prob: float = 0.0,
+lidar_min_range: float = 0.1,
+Store and validate them during initialization:
+if lidar_noise_std < 0:
+raise ValueError("lidar_noise_std must be >= 0")
+if not 0.0 <= lidar_dropout_prob <= 1.0:
+raise ValueError("lidar_dropout_prob must be in [0, 1]")
+if lidar_min_range < 0:
+raise ValueError("lidar_min_range must be >= 0")
+self.lidar_noise_std = lidar_noise_std
+self.lidar_dropout_prob = lidar_dropout_prob
+self.lidar_min_range = lidar_min_range
+The existing default values must remain unchanged so that existing noiseless simulations and tests continue producing exactly the same readings.
+Apply the Sensor Model After Geometric Intersection
+Keep the current analytical ray-sphere/ray-box intersection implementation unchanged.
+After obtaining the physical distance for each ray, apply the sensor model in this order:
+Apply the minimum detection range.
+Add Gaussian measurement noise.
+Apply beam dropout.
+Normalize by "max_range".
+Clip the final result to "[0.0, 1.0]".
+Conceptually:
+distances = geometric_ray_intersections(...)
+if self.lidar_min_range > 0:
+distances = np.maximum(distances, self.lidar_min_range)
+if self.lidar_noise_std > 0:
+noise = self.np_random.normal(
+loc=0.0,
+scale=self.lidar_noise_std,
+size=distances.shape,
+)
+distances = distances + noise
+if self.lidar_dropout_prob > 0:
+dropout_mask = (
+self.np_random.random(size=distances.shape)
+< self.lidar_dropout_prob
+)
+distances[dropout_mask] = self.max_range
+readings = distances / self.max_range
+readings = np.clip(readings, 0.0, 1.0)
+The exact implementation should preserve the existing data types and return shape.
+Importantly, when:
+lidar_noise_std == 0.0
+lidar_dropout_prob == 0.0
+the existing distance calculation and normalization path should remain numerically identical.
+Use "self.np_random" for All Randomness
+Do not use:
+np.random
+random
+random.gauss(...)
+for LiDAR stochasticity.
+All stochastic operations should use the environment RNG:
+self.np_random.normal(...)
+self.np_random.random(...)
+This ensures:
+env.reset(seed=123)
+produces reproducible noisy observations.
+Two separately constructed environments using the same configuration and seed should produce identical LiDAR observations.
+Validate Configuration Parameters
+Update "src/adaptive_rl/config.py" so the environment configuration accepts:
+environment:
+name: "drone"
+parameters:
+lidar_noise_std: 0.05
+lidar_dropout_prob: 0.02
+lidar_min_range: 0.2
+The configuration validation should reject invalid values such as:
+lidar_noise_std: -0.1
+or:
+lidar_dropout_prob: 1.5
+while allowing the default values:
+lidar_noise_std: 0.0
+lidar_dropout_prob: 0.0
+lidar_min_range: 0.1
+Existing baseline configuration files should not be modified unless necessary for schema compatibility.
+Add Parameters to "env inspect drone"
+The output of:
+adaptive-rl env inspect drone
+should expose the configured sensor parameters, for example:
+Environment: drone
+LiDAR:
+rays: 16
+max_range: ...
+noise_std: 0.05 m
+dropout_prob: 0.02
+min_range: 0.20 m
+This makes the active sensor model visible without requiring users to inspect the YAML configuration manually.
+Add Unit Tests
+Extend "tests/test_drone.py" with the following tests.
+A. Backward compatibility
+Verify that the default configuration:
+lidar_noise_std=0.0
+lidar_dropout_prob=0.0
+produces exactly the same LiDAR vectors as the existing test vectors.
+Use exact equality where the existing implementation permits it, rather than introducing approximate comparisons unnecessarily.
+B. Gaussian noise distribution
+Configure:
+lidar_noise_std = 0.1
+lidar_dropout_prob = 0.0
+Generate approximately 10,000 valid ray samples and calculate:
+empirical_std = np.std(noise_samples)
+Verify that the measured standard deviation is approximately:
+0.1 ± 0.01
+The test should avoid boundary-clipped samples when estimating the raw noise distribution, because clipping at "0" or "max_range" changes the observed distribution.
+C. Dropout frequency
+Configure:
+lidar_noise_std = 0.0
+lidar_dropout_prob = 0.05
+Generate a sufficiently large number of ray samples and count readings that were replaced by:
+max_range
+Verify that the empirical dropout frequency is approximately:
+0.05 ± 0.01
+The test should use enough samples to avoid excessive statistical flakiness.
+D. Seed reproducibility
+Create two separate environments with identical configuration:
+env_a = DroneNavigation3DEnv(...)
+env_b = DroneNavigation3DEnv(...)
+obs_a, _ = env_a.reset(seed=123)
+obs_b, _ = env_b.reset(seed=123)
+Verify:
+np.testing.assert_array_equal(obs_a, obs_b)
+Repeat this for at least one subsequent step if LiDAR readings are generated during stepping.
+E. Output bounds
+Verify that noisy observations always satisfy:
+assert np.all(np.isfinite(readings))
+assert np.all(readings >= 0.0)
+assert np.all(readings <= 1.0)
+This should also cover extreme noise values.
+Documentation
+Update:
+docs/ENVIRONMENT.md
+with a new section such as:
+LiDAR Sensor Noise
+The 3D drone environment supports configurable LiDAR measurement noise,
+beam dropout, and minimum detection range.
+Configuration
+```
+environment:
+  name: "drone"
+  parameters:
+    lidar_noise_std: 0.05
+    lidar_dropout_prob: 0.02
+    lidar_min_range: 0.2
+
+"lidar_noise_std"
+: Standard deviation of zero-mean Gaussian ranging noise, in meters.
+
+"lidar_dropout_prob"
+: Probability that an individual LiDAR beam fails to return an echo.
+Dropped beams report "max_range".
+
+"lidar_min_range"
+: Minimum detectable distance in meters.
+
+The final normalized readings are always clipped to "[0, 1]".
+
+Recommended Usage
+
+For noiseless baseline experiments:
+
+lidar_noise_std: 0.0
+lidar_dropout_prob: 0.0
+
+For robustness-oriented training:
+
+lidar_noise_std: 0.05
+lidar_dropout_prob: 0.02
+lidar_min_range: 0.2
+
+The environment uses its seeded NumPy RNG for stochastic sensor behavior,
+so experiments remain reproducible when the environment is reset with a
+fixed seed.
+
+
+The documentation should also distinguish typical sensor specifications from the simulation model rather than implying that one Gaussian/dropout configuration represents every commercial LiDAR or ToF sensor.
+
+---
+
+## Suggested Implementation Order
+
+I recommend implementing the change in this order:
+
+1. Add constructor parameters and validation.
+2. Preserve the existing analytical ray intersection code.
+3. Add the stochastic LiDAR post-processing layer.
+4. Ensure all randomness uses `self.np_random`.
+5. Add configuration schema support.
+6. Expose the parameters through `env inspect drone`.
+7. Add backward-compatibility and stochastic behavior tests.
+8. Update `docs/ENVIRONMENT.md`.
+9. Run the complete test suite.
+
+Suggested verification commands:
+
+```bash
+pytest tests/test_drone.py -v
+
+then:
+
+pytest -q
+
+and finally:
+
+adaptive-rl env inspect drone
+
+Important Compatibility Consideration
+
+The most important requirement is that the default configuration remains completely noiseless:
+
+lidar_noise_std=0.0
+lidar_dropout_prob=0.0
+
+Therefore, the geometric ray intersection algorithm should not be rewritten or altered as part of this change. The new functionality should be implemented as an optional sensor-model layer after the existing analytical distance calculation.
+
+This keeps the change isolated, makes the feature easy to test, and ensures existing experiments and committed baseline configurations retain their current behavior.
+```
+👍React with 👍1Reacted by ASHISH SINGH BORA
+ashishsinghbora
+assigned
+AyushjhaDevops
+on Sep 28, 2026
+ashishsinghbora
+added a commit that references this issue on Sep 28, 2026
+feat(robotics): improve LiDAR realism with configurable noise and dro…
+...
+30bc3b4
+ashishsinghbora
+closed this as completedin #268on Sep 28, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+AyushjhaDevops
+Labels
+enhancementNew feature or requestNew feature or requestgood first issueGood for newcomersGood for newcomerspriority:mediumMedium priority work itemMedium priority work itemroboticsRobotics modeling, sensing, and physical realismRobotics modeling, sensing, and physical realismsimulationPhysics, kinematics, and simulation dynamicsPhysics, kinematics, and simulation dynamics
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

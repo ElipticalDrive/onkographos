@@ -1,0 +1,248 @@
+--- v005.md
++++ v006.md
+@@ -4,62 +4,63 @@
+ 
+ ## Overview
+-The Riley et al. Angular Distribution Renderer is a single-pass volume rendering method designed to approximate multiple scattering effects in participating media, specifically targeting the forward-scattering behavior of large atmospheric particles like water and ice [S2]. It solves the computational cost of integrating the in-scattering term over the sphere of directions by using pre-computed angular distribution functions to direct light into the eye ray, avoiding the premature darkening artifacts common in low-albedo models [S1]. Unlike [3D-Filter / Concrete Directions](12253-3d-filter-concrete-directions.md) which discretizes directions, this method uses a continuous angular distribution approximation within a half-angle slicing framework [S2].
++The Riley et al. Angular Distribution Renderer is a single-pass volume rendering method designed to approximate multiple scattering in participating media, specifically targeting large atmospheric particles like water and ice [S2]. It solves the computational complexity of the radiative transfer equation by precomputing angular distribution functions that describe how light spreads after a fixed number of scattering events, allowing the renderer to direct light into the eye ray in a single pass [S1, S2]. Unlike recursive ray casting or low-albedo approximations, this method captures essential single-scattering effects and chromatic phenomena (rainbows, halos) while avoiding the premature darkening artifacts common in simpler models [S1, S2].
+ 
+ ## How it works
++The method uses a half-angle slicing scheme to render simultaneously to an eye buffer and a light buffer, leveraging programmable graphics hardware for efficiency [S2].
++
+ **Inputs and Outputs:**
+-*   **Inputs:** Volume data (density/scattering coefficients), view direction $\Omega$, light direction $\Omega_{lt}$, number of expected scattering events $n(\vec{s})$, and a user-adjustable backscatter term $\xi$.
+-*   **Outputs:** Eye buffer (accumulated radiance) and Light buffer (attenuation).
++*   **Inputs:** Volume density field, phase function parameters, scattering albedo, number of expected scattering events $n(\vec{s})$, view direction, light direction, and user-adjustable backscatter term $\xi$.
++*   **Outputs:** Eye buffer (accumulated radiance directed into the eye) and Light buffer (attenuation of light traversing the volume) [S2].
+ 
+ **Data Structures:**
+-*   **Eye Buffer:** Accumulates in-scattered radiance directed into the eye ray.
+-*   **Light Buffer:** Stores the attenuation of light as it traverses the volume.
+-*   **Angular Distribution Function:** A pre-computed function approximating the distribution of light after a certain number of scattering events.
++*   **Eye Buffer:** Accumulates inscattered intensity. Stores total transparency in the alpha channel to attenuate direct sunlight [S1].
++*   **Light Buffer:** Stores the attenuation of light as it traverses the volume [S2].
++*   **Angular Distribution Function:** A precomputed lookup or function that maps the number of scattering events to the angular distribution of scattered light [S2].
+ 
+-**Steps:**
+-1.  **Slicing:** Slice the volume data at an angle halfway between the eye and light perspectives (half-angle slicing) [S2]. This orientation is suitable for both viewing and lighting calculations.
++**Numbered Steps:**
++1.  **Slicing:** Slice the volume data at an angle halfway between the eye and light perspectives (half-angle slicing) [S2].
+ 2.  **Light Buffer Pass:** Render to the light buffer to store the attenuation of light as it traverses the volume along the light direction [S2].
+-3.  **Eye Buffer Pass:** Perform a single slicing pass through the volume to collect in-scattered intensity into the eye ray [S1].
+-4.  **Accumulation:** For each sample along the eye ray, calculate the contribution from scattering events. The method applies the angular distribution function for $n(\vec{s}) + 1$ scattering events, where $n(\vec{s})$ is the expected number of scattering events reaching the sample [S1]. This extra event accounts for the scattering that directs light into the eye ray.
+-5.  **Backscatter Correction:** Add a user-adjustable term $\xi$ to the phase function to model light received from multiple scattering further along the path, preventing premature darkening where light first strikes the cloud [S1].
+-6.  **Final Compositing:** Add skylight and aerial perspective effects based on a simplified single-scattering analytic model [S2]. Store total transparency in the alpha channel of the eye buffer to attenuate direct sunlight [S1].
++3.  **Eye Buffer Pass:** Perform a single slicing pass through the volume. For each sample, collect inscattered intensity into the eye ray [S1].
++4.  **Angular Distribution Application:** Apply the angular distribution function for $n(\vec{s}) + 1$ scattering events, where $n(\vec{s})$ is the expected number of scattering events reaching the sample [S1]. This extra event models the scattering that directs light into the eye [S1].
++5.  **Backscatter Correction:** Add a user-adjustable term $\xi$ to the phase function to model light received from multiple scattering further along the path, preventing premature darkening at the cloud's illuminated edge [S1].
++6.  **Accumulation:** Accumulate the contributions using front-to-back compositing [S1].
++7.  **Direct Sunlight:** Add direct sunlight contribution in a distant light pass, attenuated by the total transparency stored in the eye buffer's alpha channel and the atmosphere [S1].
++8.  **Post-Processing:** Add skylight and aerial perspective effects based on a simplified single-scattering analytic model [S2].
+ 
+ **Formulas:**
+-The accumulation for a pixel, assuming front-to-back compositing starting from $\vec{s}_f$, is given by [S1]:
++The accumulation for a pixel, assuming front-to-back compositing from the beginning of the ray $\vec{s}_f$, is given by [S1]:
+ 
+-$$ L(\vec{s}, \Omega) = \sum_{i=front}^{back} T(\vec{s}, \vec{s}_f + i\vec{m}\Delta) I(\vec{s}_f + i\vec{m}\Delta) \times \left( A_{ms}^{\lfloor n(\vec{s}_f + i\vec{m}\Delta) + 1 \rfloor} (\Omega - \Omega_{lt}) + \xi \right) \beta_{sca} \Delta $$
++$$ L(\vec{s}, \Omega) = \sum_{i=\text{front}}^{\text{back}} T(\vec{s}, \vec{s}_f + i\vec{m}\Omega \Delta) I(\vec{s}_f + i\vec{m}\Omega \Delta) $$
+ 
+-Where:
+-*   $L(\vec{s}, \Omega)$ is the accumulated radiance.
+-*   $T(\vec{s}, \vec{s}')$ is the transmittance between points $\vec{s}$ and $\vec{s}'$.
+-*   $I(\vec{s}_f + i\vec{m}\Delta)$ is the incident light intensity at the sample point.
+-*   $n(\vec{s})$ is the expected number of scattering events.
+-*   $A_{ms}^{k} (\Omega - \Omega_{lt})$ is the multiple scattering angular distribution function for $k$ scattering events, evaluated at the angle between the eye direction $\Omega$ and light direction $\Omega_{lt}$.
+-*   $\xi$ is the user-adjustable backscatter term.
+-*   $\beta_{sca}$ is the scattering coefficient.
+-*   $\Delta$ is the step size.
++Where the intensity contribution $I$ at sample $i$ is [S1]:
+ 
+-**Note on Implementation:** The product form in Equation 24 of the source is noted as impractical for graphics hardware due to lack of floating-point texture interpolation support. Instead, intensity loss for the worst-case attenuation (highest number of scattering events) is implemented for efficiency [S1].
++$$ I(\vec{s} + \vec{m}\Omega_{lt} \Delta) = I(\vec{s}) T(\vec{s}, \vec{s} + \vec{m}\Omega_{lt} \Delta) + I(\vec{s})(1 - T(\vec{s}, \vec{s} + \vec{m}\Omega_{lt} \Delta)) \prod_{\alpha(\vec{s})}^{\lceil \beta_{\lambda ex} \Delta \rceil} F_{i\lambda} \left( A_{ms\lambda}^{\lfloor n(\vec{s}_f + i\vec{m}\Omega \Delta) + 1 \rfloor} (\Omega - \Omega_{lt}) + \xi \right) \beta_{sca} \Delta $$
++
++*Note: The product term in the source [S1] is described as "not practical for implementation on graphics hardware" due to floating-point texture interpolation limits. The implementation approximates intensity loss for the worst-case attenuation (highest number of scattering events) for efficiency [S1].*
+ 
+ **Parameters:**
+-*   $\xi$: User-adjustable term added to the phase function. Typical values are not specified, but it must be non-negative to prevent darkening [S1].
++*   $\xi$: User-adjustable term added to the phase function. Models backscattered light from multiple scattering further along the path. Prevents premature darkening [S1].
++*   $n(\vec{s})$: Expected number of scattering events reaching sample $\vec{s}$ [S1].
++*   $A_{ms\lambda}$: Multiple scattering angular distribution function [S2].
++*   $\beta_{sca}$: Scattering coefficient [S1].
++*   $\Delta$: Step size [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Premature Darkening:** Rendering without backscattered light ($\xi = 0$) causes the region where light first strikes the cloud to appear unnaturally dark [S1].
+-*   **Dense Regions:** The model is least accurate in dense inner regions of the cloud [S1].
+-*   **Hardware Limitations:** The method relies on efficient implementation on programmable graphics hardware, specifically avoiding complex products that require interpolation of floating-point textures [S1].
++*   **Premature Darkening:** Rendering without backscattered light ($\xi = 0$) causes the region where light first strikes the cloud to appear unnaturally dark [S1]. The term $\xi$ corrects this [S1].
++*   **Dense Inner Regions:** The model is least accurate in dense inner regions of the cloud [S1].
++*   **Hardware Limitations:** Linear interpolation is not available for floating-point textures in some hardware contexts, requiring the worst-case attenuation approximation [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_angular_distribution(volume, view_dir, light_dir, expected_scattering_count, xi, step_size):
++def render_angular_distribution(volume, view_dir, light_dir, num_scattering_events, xi):
+     """
+     Renders the volume using the Riley et al. Angular Distribution method.
+     
+     Args:
+-        volume: Volume data structure with density and scattering coefficients.
+-        view_dir: Eye direction vector.
++        volume: Volume density field.
++        view_dir: View direction vector.
+         light_dir: Light direction vector.
+-        expected_scattering_count: Function n(s) returning expected scattering events at position s.
++        num_scattering_events: Expected number of scattering events n(s).
+         xi: Backscatter correction term.
+-        step_size: Delta for integration steps.
+         
+     Returns:
+@@ -67,58 +68,68 @@
+         light_buffer: Attenuation buffer.
+     """
++    # Half-angle slicing direction
++    slice_dir = normalize(view_dir + light_dir)
++    
+     # Initialize buffers
+     eye_buffer = zeros_like(volume.resolution)
+     light_buffer = zeros_like(volume.resolution)
+     
+-    # Determine slicing plane halfway between eye and light perspectives
+-    slice_normal = normalize(view_dir + light_dir)
++    # Pass 1: Light Buffer (Attenuation)
++    # Render along light_dir to compute attenuation
++    for sample in volume.samples_along(light_dir):
++        attenuation = compute_attenuation(volume, sample, light_dir)
++        light_buffer[sample] = attenuation
++        
++    # Pass 2: Eye Buffer (Inscattering)
++    # Single slicing pass along slice_dir
++    for sample in volume.samples_along(slice_dir):
++        # Compute expected scattering events at this sample
++        n_s = compute_expected_scattering_events(volume, sample)
++        
++        # Apply angular distribution for n(s) + 1 events
++        # This models the scattering event that directs light into the eye
++        num_events = n_s + 1
++        
++        # Get angular distribution for the angle between view and light
++        angle = angle_between(view_dir, light_dir)
++        phase = get_angular_distribution(num_events, angle)
++        
++        # Add backscatter term xi
++        phase_corrected = phase + xi
++        
++        # Compute inscattered intensity
++        # Note: Source [S1] notes that the full product is impractical.
++        # Implementation uses worst-case attenuation approximation.
++        incident_light = light_buffer[sample] # Attenuated light from Pass 1
++        scattering_coeff = volume.scattering_coefficient(sample)
++        step_size = volume.step_size
++        
++        # Approximate intensity contribution
++        # I(s) * (1 - T) * (Phase + xi) * beta_sca * Delta
++        # Where T is approximated by worst-case attenuation
++        worst_case_attenuation = compute_worst_case_attenuation(volume, sample)
++        transmittance = 1.0 - worst_case_attenuation
++        
++        intensity_contribution = incident_light * transmittance * phase_corrected * scattering_coeff * step_size
++        
++        # Accumulate into eye buffer with front-to-back compositing
++        # T(s, s_f) is the transmittance from the start of the ray to the current sample
++        transmittance_from_start = compute_transmittance_from_start(volume, sample)
++        eye_buffer[sample] += transmittance_from_start * intensity_contribution
++        
++    # Pass 3: Direct Sunlight
++    # Attenuate direct sunlight by total transparency in eye buffer alpha
++    direct_sun = compute_direct_sunlight(light_dir)
++    total_transparency = eye_buffer.alpha # Stored in alpha channel
++    final_sunlight = direct_sun * total_transparency
+     
+-    # Pass 1: Light Buffer (Attenuation)
+-    # Render light buffer storing attenuation of light as it traverses the volume
+-    # This is a standard transmittance calculation along light rays
+-    for each ray in light_direction:
+-        transmittance = 1.0
+-        for sample in volume_along_ray:
+-            sigma_t = volume.get_extinction_coefficient(sample.position)
+-            transmittance *= exp(-sigma_t * step_size)
+-            light_buffer[ray_index] = transmittance
+-            
+-    # Pass 2: Eye Buffer (In-scattering)
+-    # Single slicing pass through the volume
+-    for each ray in view_direction:
+-        accumulated_radiance = 0.0
+-        current_transmittance = 1.0
+-        
+-        # Front-to-back compositing
+-        for i, sample in enumerate(volume_along_ray):
+-            position = sample.position
+-            sigma_s = volume.get_scattering_coefficient(position)
+-            
+-            # Expected number of scattering events at this position
+-            n_s = expected_scattering_count(position)
+-            
+-            # Angular distribution for n(s) + 1 scattering events
+-            # This accounts for the scattering event directing light into the eye
+-            angle = angle_between(view_dir, light_dir)
+-            angular_dist = get_multiple_scattering_angular_distribution(n_s + 1, angle)
+-            
+-            # Incident light intensity (from light buffer or direct sun)
+-            # Note: Source mentions storing total transparency in alpha channel to attenuate sunlight
+-            incident_intensity = get_incident_light(position, light_dir, light_buffer)
+-            
+-            # Contribution from this slab
+-            # Formula: T * I * (A_ms + xi) * beta_sca * Delta
+-            contribution = current_transmittance * incident_intensity * (angular_dist + xi) * sigma_s * step_size
+-            
+-            accumulated_radiance += contribution
+-            
+-            # Update transmittance for next step
+-            sigma_t = volume.get_extinction_coefficient(position)
+-            current_transmittance *= exp(-sigma_t * step_size)
+-            
+-        eye_buffer[ray_index] = accumulated_radiance
+-        
+-    # Add skylight and aerial perspective effects
+-    eye_buffer += apply_sky_and_aerial_perspective(eye_buffer, view_dir, light_dir)
++    # Add to eye buffer
++    eye_buffer.rgb += final_sunlight
++    
++    # Pass 4: Skylight and Aerial Perspective
++    # Add simplified single-scattering analytic model effects
++    skylight = compute_skylight(view_dir)
++    aerial_perspective = compute_aerial_perspective(volume, view_dir)
++    eye_buffer.rgb += skylight + aerial_perspective
+     
+     return eye_buffer, light_buffer
+@@ -128,19 +139,20 @@
+ 
+ ### Half-Angle Slicing
+-A technique where volume data is sliced at an angle halfway between the eye and light perspectives, suitable for both viewing and lighting calculations [S2].
++A technique to slice volume data at an angle halfway between eye and light perspectives, allowing efficient rendering to both eye and light buffers in a single pass [S2].
+ 
+-### Multiple Scattering Angular Distribution
+-Pre-computed functions approximating the distribution of light after a certain number of scattering events, used to handle forward multi-scattering behavior [S2].
++### Angular Distribution Functions
++Precomputed functions that approximate the distribution of light after a certain number of scattering events, enabling the handling of forward multi-scattering behavior [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Single pass through the volume for both light and eye buffers, making it efficient for real-time rendering on programmable graphics hardware [S2].
+-*   **Memory Complexity:** Requires storage for eye buffer, light buffer, and pre-computed angular distribution functions.
+-*   **Strengths:** Captures essential single-scattering effects and avoids premature darkening at cloud edges, unlike low-albedo models [S1]. Efficiently handles forward multi-scattering behavior of large water and ice particles [S2].
+-*   **Limitations:** Least accurate in dense inner regions of the cloud [S1]. Relies on pre-computed angular distributions, which may limit flexibility for arbitrary phase functions.
+-*   **When to use:** Real-time rendering of atmospheric phenomena (rainbows, halos, glories) where forward scattering is dominant and performance is critical [S2].
+-*   **When not to use:** Scenes requiring high accuracy in dense, highly scattering regions or where backward scattering is significant.
++*   **Time Complexity:** Single pass through the volume, making it efficient for real-time or near-real-time rendering [S2].
++*   **Memory Complexity:** Requires storage for eye buffer and light buffer [S2].
++*   **Performance:** Designed for efficient rendering on programmable graphics hardware [S2].
++*   **Strengths:** Captures essential single-scattering effects and avoids premature darkening; generates fine angularly dependent chromatic effects such as rainbows, halos, and glories [S1, S2].
++*   **Limitations:** Least accurate in dense inner regions of the cloud; relies on precomputed angular distribution functions which may limit flexibility [S1, S2].
++*   **When to use:** Suitable for rendering atmospheric phenomena with large water and ice particles where chromatic effects are important [S2].
++*   **When not to use:** Not suitable for dense inner regions of clouds where accuracy is critical [S1].
+ 
+ ## Background
+-The method was proposed by Riley et al. [76] as part of a multiple model system for fast rendering of atmospheric effects [S2]. It was designed to generate fine angularly dependent chromatic effects such as rainbows, halos, and glories by handling the forward multi-scattering behavior of large water and ice atmospheric particles [S2]. The core of the system is an angular distribution renderer developed to approximate the distribution of light after a certain number of scattering events [S2]. It builds on the half-angle slicing scheme of Kniss et al. [45] and is designed for efficient rendering on programmable graphics hardware [S2].
++The method was proposed by Riley et al. [76] as part of a multiple model system for fast rendering of atmospheric effects [S2]. It is based on the use of multiple scattering angular distribution functions to approximate the distribution of light after a certain number of scattering events [S2]. The method applies the half-angle slicing scheme of Kniss et al. [45] [S2]. It is designed to handle the forward multi-scattering behavior of large water and ice atmospheric particles [S2].
+ 
+ ## Sources

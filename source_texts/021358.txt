@@ -1,0 +1,191 @@
+Ignis: Eulerian Fluid Simulation and Rendering at VR Frame Rates
+Charlie Shenton
+charlieshenton@me.com
+RMIT University
+Melbourne, Victoria, Australia
+Figure 1: From left to right: (a) Two smoke rings collide. (b) A spinning dust devil. (c) A wall of fire, showing a comparison
+between dithering and naive undersampling. All views captured in headset on a Valve Index, simulated and rendered on an
+NVIDIA RTX 3080 at 90 FPS or more with Ignis.
+ABSTRACT
+We present Ignis, a GPU Eulerian fluid solver capable of simulating
+and rendering at VR resolutions and refresh rates. Core to our approach are an approximate shadowing technique and an adaptive
+dithering technique, which allow us to cheaply render fully lit volumes at high resolutions and under a range of visibility conditions.
+We discuss the design decisions which enable our solver to run at
+interactive rates.
+ACM Reference Format:
+Charlie Shenton. 2023. Ignis: Eulerian Fluid Simulation and Rendering at VR
+Frame Rates. In SIGGRAPH Asia 2023 Posters (SA Posters ’23), December 12-15,
+2023. ACM, New York, NY, USA, 2 pages. https://doi.org/10.1145/3610542.
+3626120
+1
+fire fighting, would benefit from an interactive VR simulation of
+smoke, fire, and other volumetrics.
+Our requirements for runtime fidelity are much higher than
+a flipbook. While a flipbook may run at a reduced framerate, an
+interactive simulation must run at the refresh rate of the headset to
+avoid input lag. Second, while flipbooks are typically rendered as
+effects in the distance, in VR our user is immersed in the simulation
+volume, with single voxels occupying an unbounded amount of
+screenspace. So, we must be able to perform expensive raymarch
+operations on every pixel in each of the HMD’s high resolution
+displays. These challenges, and others, motivate the design of Ignis’
+volumetric solver and renderer, which we discuss in the remainder
+of this paper.
+MOTIVATION
+Pre-rendered volumetric effects are common in games and VR simulators in the form of camera-facing flipbooks. However such flipbooks are not interactive, and their illusion breaks down as they
+get closer to the camera. Use cases which require proximity and
+interactivity, such as VR training simulators for fire extinguishers /
+Permission to make digital or hard copies of part or all of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for third-party components of this work must be honored.
+For all other uses, contact the owner/author(s).
+SA Posters ’23, December 12-15, 2023, Sydney, NSW, Australia
+© 2023 Copyright held by the owner/author(s).
+ACM ISBN 979-8-4007-0313-3/23/12.
+https://doi.org/10.1145/3610542.3626120
+2
+SIMULATION
+Ignis utilises a dense Eulerian fluid solver using operator splitting
+[Stam 1999] to approximately solve the Navier-Stokes equations.
+We track, at each grid cell centre, a velocity, density, and temperature which are each stored in 3D textures with 16-bit float formats.
+Using half-precision storage has negligible impact on the visual
+quality of our simulations, while effectively doubling their performance on bandwidth constrained portions of the solver.
+Each simulation presented is specified using a custom injection
+kernel which hooks into the rest of our solver. These kernels receive
+as input the voxel position, and timestep, and add density and
+temperature to the simulation, as well as applying arbitrary forces,
+such as buoyancy.
+SA Posters ’23, December 12-15, 2023, Sydney, NSW, Australia
+Charlie Shenton
+Table 1: Average frametimes in milliseconds for solver stages and total simulation & render
+Scene
+Smoke Rings
+Dust Devil
+Wall of Fire
+2.1
+Grid Size
+232 x 232 x 160
+160 x 256 x 160
+200 x 200 x 200
+Injection
+0.28ms
+0.21ms
+0.26ms
+Advection
+2.92ms
+2.29ms
+2.79ms
+Advection
+We use semi-lagrangian advection with a MacCormack backtrace
+[Selle et al. 2008]. Though we use linear sampling for velocity during
+the backtrace, cubic interpolation is used for our final resample of
+all advected properties, and we also optionally apply a vorticity
+confinement force as in [Fedkiw et al. 2001].
+2.2
+Projection
+Pressure projection is solved using geometric multigrid, using a
+single V-cycle with 1 pre and 2 post-smooths, and the fullweight
+and trilinear transfer operators described in [Trottenberg et al.
+2000]. Jacobi iteration is used for smoothing, and we approximately
+solve on our 3rd, coarsest, grid using red-black Gauss-Seidel with
+successive over-relaxation (SOR).
+3
+RENDERING
+Our volumetric renderer supports up to two shadowed directional
+lights, anisotropic scattering using the Henyey-Greenstein phase
+function, and light emission due to blackbody radiation. In VR, pixel
+counts can easily exceed voxel counts, so we opt to move as much
+of the rendering process onto the simulation grid as we can.
+3.1
+Approximate Shadowing
+Rather than performing a full shadow raycast per voxel (or worse,
+per primary raymarch step), we utilise an approximate shadowing
+algorithm. Baking axis-aligned light extinction into two RGB textures is commonly used to relight VFX flipbooks in real-time use
+cases, a technique typically referred to as 6-point, or 6-way lighting.
+Extinction in arbitrary light directions is then approximated by
+linear combination of the extinction along the appropriate axes.
+We extend this technique to work on an interactive simulation
+by observing that axis-aligned extinction can be computed via
+cumulative products of the extinction along each axis. In practice
+since each axis writes to a different texture, we can schedule these
+compute kernels to run concurrently.
+Since our primary raycast is mainly bottlenecked on GPU bandwidth, we also opt to collapse the axis aligned extinctions down
+to two interpolated directional extinction values. This allows us to
+compute approximate shadows along our raymarch without the
+full bandwidth cost of accessing all 6 directional shadow textures.
+Even with this additional packing step, precomputation of shadows costs <1ms on all of our experiments.
+3.2
+Adaptive Dithering
+Despite using a packed shadow texture, we cannot afford to exhaustively sample every voxel along our primary raymarch at VR resolutions. Naively undersampling the volume however will produce
+distracting slicing artifacts. Previous work on real-time volumetric
+Vorticity
+N/A
+0.32ms
+0.38ms
+Projection
+1.91ms
+1.49ms
+1.80ms
+Shadows
+0.82ms
+0.57ms
+0.67ms
+Raymarch
+3.69ms
+4.77ms
+3.82ms
+Total
+9.63ms
+9.65ms
+9.73ms
+lighting [Gjoel and Svendsen 2016] utilises ray dithering to break
+up banding, and this technique also works for primary visibility.
+However, these approaches rely on TAA to clean up the resulting
+noise, which in VR produces unsightly smearing artifacts due to
+the constant movement of the HMD.
+We instead opt to use dithering without any temporal accumulation. In practice, due to our high target resolutions, differing
+dithering patterns in each eye, and VR driver applied distortion,
+the resulting image is crisp, temporally stable, and renders quickly.
+We can even adapt our step size to varying performance conditions,
+which we refer to as adaptive dithering. Adaptive dithering is critical to meeting our frame targets, particularly as shading costs vary.
+For the scenarios in our supplementary video, adapted step counts
+vary by a factor of 4. Without dithering, as shown in the video, this
+results in juddering of the image. With dithering we have a stable
+image free of artifacts except for a small amount of noise.
+4
+RESULTS
+As shown in Table 1, we tested our solver on a range of scenarios
+designed to test quality and performance under varying densities,
+velocities, and light levels. All simulations were run with a 1.5cm
+voxel scale, and rendered at a resolution of 2016 x 2240 x 2. The
+solver is implemented in DirectX 12 and OpenVR, using a NVIDIA
+RTX 3080 and a Valve Index HMD. In all scenarios our frametimes
+are well within the 11.11ms frame budget for a 90 Hz HMD.
+5
+LIMITATIONS AND FUTURE WORK
+Currently, Ignis is primarily limited by the low simulation resolution
+necessary to run in VR on current hardware. However, many games
+and training use cases may only require full interactivity on a
+portion of a volumetric scene. Future work will investigate the
+composition of interactive and pre-simulated volumetrics in order
+to enable VR volumetrics with larger bounding volumes and voxel
+resolutions. In addition, Ignis will be extended to simulate thin
+flame combustion, and respond to collisions with obstacles in the
+environment.
+REFERENCES
+Ronald Fedkiw, Jos Stam, and Henrik Wann Jensen. 2001. Visual Simulation of Smoke.
+In Proceedings of the 28th Annual Conference on Computer Graphics and Interactive
+Techniques (SIGGRAPH ’01). Association for Computing Machinery, New York, NY,
+USA, 15–22. https://doi.org/10.1145/383259.383260
+Mikkel Gjoel and Mikkel Svendsen. 2016. Low Complexity, High Fidelity - INSIDE
+Rendering. In Proceedings of the GDC Europe 2016. Game Developers Conference,
+San Francisco, California, USA.
+Andrew Selle, Ronald Fedkiw, ByungMoon Kim, Yingjie Liu, and Jarek Rossignac.
+2008. An Unconditionally Stable MacCormack Method. J. Sci. Comput. 35 (06 2008),
+350–371. https://doi.org/10.1007/s10915-007-9166-4
+Jos Stam. 1999. Stable Fluids. In Proceedings of the 26th Annual Conference on Computer
+Graphics and Interactive Techniques (SIGGRAPH ’99). ACM Press/Addison-Wesley
+Publishing Co., USA, 121–128. https://doi.org/10.1145/311535.311548
+Ulrich Trottenberg, Cornelius Oosterlee, and Anton Schuller. 2000. Multigrid. Elsevier
+Science. https://books.google.dk/books?id=9ysyNPZoR24C(visited 2023-04-28).

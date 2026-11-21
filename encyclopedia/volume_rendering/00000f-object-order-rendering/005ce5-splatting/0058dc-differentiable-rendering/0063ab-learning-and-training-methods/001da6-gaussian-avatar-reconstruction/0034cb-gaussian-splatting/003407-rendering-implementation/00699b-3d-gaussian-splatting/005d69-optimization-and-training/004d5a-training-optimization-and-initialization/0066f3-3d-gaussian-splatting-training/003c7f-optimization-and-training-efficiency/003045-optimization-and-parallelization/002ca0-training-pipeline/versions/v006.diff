@@ -1,0 +1,100 @@
+--- v005.md
++++ v006.md
+@@ -11,5 +11,5 @@
+ **Inputs and Outputs:**
+ *   **Inputs:** A sparse point cloud (initial Gaussian positions), camera poses for training views, and ground truth images [S1, unofficial].
+-*   **Outputs:** An optimized set of 3D Gaussians representing the scene geometry and appearance.
++*   **Outputs:** An optimized set of 3D Gaussians representing the scene geometry and appearance [G].
+ 
+ **Data Structures:**
+@@ -24,5 +24,5 @@
+ **Numbered Steps:**
+ 1.  **View Sampling:** Select a random training view (camera pose and intrinsics) from the dataset [S1, unofficial][S2, unofficial].
+-2.  **Rasterization:** Pass the current `sparsePointCloud` and camera pose to the differentiable rasterizer. The rasterizer sorts Gaussians by depth and alpha-blends them to produce the rendered image $\mathbf{I}_r$ [G].
++2.  **Rasterization:** Pass the current `sparsePointCloud` and camera pose to the differentiable rasterizer [S1, unofficial]. The rasterizer sorts Gaussians by depth and alpha-blends them to produce the rendered image $\mathbf{I}_r$ [G].
+ 3.  **Loss Computation:** Compare $\mathbf{I}_r$ with the ground truth image $\mathbf{I}_{gt}$ using a composite loss function $\mathcal{L}$, typically combining L1 loss and SSIM loss [S1, unofficial][S3].
+ 4.  **Backpropagation:** Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all Gaussian parameters $\theta$ (position, covariance, opacity, color) via the differentiable rasterizer [S1, unofficial][S2, unofficial].
+@@ -42,5 +42,5 @@
+ 
+ **Parameters:**
+-*   $\alpha_{\text{SSIM}}$: SSIM loss weight. Typical value: 0.2 [S3].
++*   $\alpha_{\text{SSIM}}$: SSIM loss weight. Not given in the sources.
+ *   $\alpha_{\text{TV}}$: Total variation loss weight. Not given in the sources.
+ *   Voxelization sampling size: Increased from $8^3$ to $32^3$ in FaCT-GS [S3].
+@@ -53,40 +53,44 @@
+ ```python
+ def training_pipeline(sparse_point_cloud, camera_poses, ground_truth_images, num_iterations):
+-    # Initialize optimizer (e.g., Adam) with Gaussian parameters
++    # Initialize optimizer with Gaussian parameters (position, covariance, opacity, color) [G]
+     optimizer = Optimizer(params=sparse_point_cloud.parameters(), lr=initial_lr)
+     
+     for iteration in range(1, num_iterations + 1):
+-        # 1. View Sampling
++        # 1. View Sampling: select random training view [S1, unofficial]
+         camera_idx = random.randint(0, len(camera_poses) - 1)
+         camera_pose = camera_poses[camera_idx]
+         gt_image = ground_truth_images[camera_idx]
+         
+-        # 2. Rasterization: sort Gaussians by depth, project to 2D, alpha-blend
++        # 2. Rasterization: sort Gaussians by depth, project to 2D, alpha-blend [S1, unofficial]
++        # Standard differentiable rasterization kernel implementation [Comment]
+         rendered_image = rasterize_gaussians(sparse_point_cloud, camera_pose)
+         
+-        # 3. Loss Computation
++        # 3. Loss Computation: compare rendered image with ground truth [S1, unofficial][S3]
+         l1_loss = mean_absolute_error(rendered_image, gt_image)
+         ssim_loss = structural_similarity_index(rendered_image, gt_image)
+         total_loss = l1_loss + alpha_ssim * ssim_loss
+         
+-        # Optional: Add TV loss for variants like FaCT-GS
++        # Optional: Add TV loss for variants like FaCT-GS [S3]
+         if use_tv_loss:
++            # Voxelize a randomly sampled section of the volume [S3]
+             voxel_volume = voxelize_volume(sparse_point_cloud, size=32)
+             tv_loss = total_variation(voxel_volume)
+             total_loss += alpha_tv * tv_loss
+             
+-        # 4. Backpropagation
++        # 4. Backpropagation: compute gradients for all parameters [S1, unofficial][S2, unofficial]
+         optimizer.zero_gradients()
+         total_loss.backward()
+         
+-        # 5. Parameter Update
++        # 5. Parameter Update: apply gradients via optimizer [S1, unofficial]
+         optimizer.step()
+         
+-        # 6. Population Management (every N iterations)
++        # 6. Population Management: periodic densification and pruning [S3]
+         if iteration % densification_interval == 0:
++            # Standard densification/pruning logic based on gradient magnitudes and opacity [Comment]
+             densify_and_prune_gaussians(sparse_point_cloud, optimizer.gradients)
+             
+-        # 7. Logging and Validation
++        # 7. Logging and Validation: compute metrics at specified iterations [S1, unofficial]
+         if iteration in testing_iterations:
++            # Standard validation metric computation [Comment]
+             compute_validation_metrics(sparse_point_cloud, camera_poses, ground_truth_images)
+             
+@@ -100,5 +104,5 @@
+ 
+ ### FaCT-GS Optimization Loop
+-The FaCT-GS Optimization Loop extends the standard pipeline by adding a 3D total variation loss $\mathcal{L}_{\text{TV}}$ computed on a voxelized volume $\mathbf{V}_{32^3}$ of size $32^3$ [S3]. This acts as a homogeneity regularization prior [S3]. The total loss is $\mathcal{C}_{\text{total}} = \mathcal{L}_1 (\mathbf{I}_1, \mathbf{I}_{\text{tet}}) + \alpha_{\text{SSIM}} \mathcal{L}_{\text{SSIM}} (\mathbf{I}_1, \mathbf{I}_{\text{tet}}) + \alpha_{\text{TV}} \mathcal{L}_{\text{TV}} (\mathbf{V}_{32^3})$ [S3].
++The FaCT-GS Optimization Loop extends the standard pipeline by adding a 3D total variation loss $\mathcal{L}_{\text{TV}}$ computed on a voxelized volume $\mathbf{V}_{32^3}$ of size $32^3$ [S3]. This acts as a homogeneity regularization prior [S3]. The total loss is $\mathcal{C}_{\text{total}} = \mathcal{L}_1 (\mathbf{I}_r, \mathbf{I}_{gt}) + \alpha_{\text{SSIM}} \mathcal{L}_{\text{SSIM}} (\mathbf{I}_r, \mathbf{I}_{gt}) + \alpha_{\text{TV}} \mathcal{L}_{\text{TV}} (\mathbf{V}_{32^3})$ [S3].
+ 
+ ### Cut-Set Gradient Update
+@@ -109,6 +113,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by rasterization and backpropagation per view. Densification operations add overhead every $N$ iterations [G].
+-*   **Memory Complexity:** Proportional to the number of Gaussians. Hierarchical methods (e.g., Cut-Set) reduce memory by only loading active subsets [S2, unofficial].
++*   **Time Complexity:** Dominated by rasterization and backpropagation per view [G]. Densification operations add overhead every $N$ iterations [G].
++*   **Memory Complexity:** Proportional to the number of Gaussians [G]. Hierarchical methods (e.g., Cut-Set) reduce memory by only loading active subsets [S2, unofficial].
+ *   **Performance:** Standard 3DGS achieves real-time rendering speeds after training. Training time scales with scene complexity and number of views [G].
+ *   **Strengths:** High-quality novel view synthesis, fast training compared to neural radiance fields, explicit scene representation [G].
+@@ -118,5 +122,5 @@
+ 
+ ## Background
+-The training pipeline for 3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1, unofficial][S2, unofficial]. It builds on the concept of differentiable rasterization of 3D Gaussians. Subsequent works have extended the pipeline to handle larger scenes (e.g., FaCT-GS [S3], hierarchical methods [S2, unofficial]) and improve efficiency (e.g., Mini-Splatting [S1, unofficial]).
++The training pipeline for 3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1, unofficial][S2, unofficial]. It builds on the concept of differentiable rasterization of 3D Gaussians [G]. Subsequent works have extended the pipeline to handle larger scenes (e.g., FaCT-GS [S3], hierarchical methods [S2, unofficial]) and improve efficiency (e.g., Mini-Splatting [S1, unofficial]).
+ 
+ ## Sources

@@ -1,0 +1,104 @@
+# Depth-Guided Adaptive Neighbor Feature Fusion
+
+Also called: Adaptive neighbor fusion, Neighbor feature fusion
+
+## Overview
+A module that enhances point volume features by fusing features from nearby points on the same surface, selected adaptively using the predicted depth map [S1, unofficial]. It addresses the inaccuracy of geometric information in point volume features caused by occlusion or lighting variations [S1, unofficial]. It sets itself apart from standard feature aggregation by using the predicted depth map to guide the selection of neighbors on the *same* surface, rather than relying solely on spatial proximity or fixed sampling planes [S1, unofficial].
+
+## How it works
+**Inputs:**
+1. Point volume features $F$ for a set of 3D points.
+2. Predicted depth map $D$ for the target view [S1, unofficial].
+3. Source view image features (used for projection) [S1, unofficial].
+
+**Outputs:**
+1. Enhanced point volume features [S1, unofficial].
+2. Auxiliary features projected onto the source view [S1, unofficial].
+
+**Data Structures:**
+- **Point Volume:** A 3D grid or set of points where each location holds a feature vector. The layout is not explicitly defined beyond being "point volume features" [S1, unofficial].
+- **Predicted Depth Map:** A 2D map $D(u, v)$ corresponding to the target view resolution [S1, unofficial].
+
+**Steps:**
+1. **Adaptive Neighbor Selection:** Utilize the predicted depth map $D$ to identify adjacent points that lie on the same surface [S1, unofficial]. This implies filtering neighbors based on depth consistency rather than just Euclidean distance in 3D space [S1, unofficial].
+2. **Feature Fusion:** Fuse the features of the selected neighbor points using a shared multi-head cross-attention module [S1, unofficial]. The source does not specify the exact number of heads or dimensionality [S1, unofficial].
+3. **Projection:** Project the features of these adaptive neighbor points onto the source view [S1, unofficial].
+4. **Auxiliary Input:** Input the projected features into the NeRF model as auxiliary information [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def depth_guided_adaptive_neighbor_fusion(point_volume_features, predicted_depth_map, source_view_features):
+    """
+    Enhances point volume features by fusing features from nearby points on the same surface.
+    
+    Args:
+        point_volume_features: Tensor of features for 3D points.
+        predicted_depth_map: 2D tensor of predicted depths for the target view.
+        source_view_features: Tensor of features from source views.
+        
+    Returns:
+        enhanced_features: Enhanced point volume features.
+        auxiliary_features: Projected features for NeRF input.
+    """
+    # Step 1: Adaptive Neighbor Selection
+    # Select adjacent points from the same surface using predicted depth map.
+    # Note: Exact algorithm for "same surface" selection is not detailed in sources [S1, unofficial].
+    # [G] Implementation likely involves checking depth consistency within a local window.
+    neighbor_indices = select_neighbors_on_same_surface(point_volume_features, predicted_depth_map)
+    
+    # Step 2: Feature Fusion
+    # Fuse features of selected neighbors using shared multi-head cross-attention.
+    # Note: Specific attention mechanism details (head count, dimensions) are not provided [S1, unofficial].
+    # [G] Standard multi-head cross-attention is assumed.
+    fused_features = multi_head_cross_attention(
+        queries=point_volume_features,
+        keys=point_volume_features[neighbor_indices],
+        values=point_volume_features[neighbor_indices]
+    )
+    
+    # Step 3: Projection
+    # Project features of adaptive neighbor points onto the source view.
+    # Note: Projection matrix or camera parameters are not specified in sources [S1, unofficial].
+    # [G] Requires standard perspective projection using source view camera intrinsics/extrinsics.
+    auxiliary_features = project_to_source_view(fused_features, source_view_features)
+    
+    # Step 4: Return
+    return fused_features, auxiliary_features
+```
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Geometric information in point volume features may be inaccurate due to occlusion or lighting variations [S1, unofficial]. The method aims to mitigate this but relies on the quality of the predicted depth map [S1, unofficial].
+
+## Subtopics
+
+### Attention-Guided Multi-scale Residual Fusion
+A module designed to refine coarse disparity $D_{t0}$ with textural and semantic guides from the target view image $I_{t0}$ in a multi-scale, progressive manner to produce final disparity estimation $\hat{D}_{t0}$ [S2]. It sets itself apart by using RGB features to guide the refinement process through Feature Fusion Blocks and Residual Units [S2]. Choose this when high-precision disparity estimation is required from coarse inputs [S2]. It consists of Feature Fusion Blocks, Residual Units, Attention Units, and Interpolation ($\times 2$) [S2]. Inputs include RGB features and Disparity field [S2]. Operations include 2D Spatial Conv, 1D Spectral Conv, Spatial-to-Angular Reshape, Angular-to-Spatial Reshape, and ReLU [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+Experiments demonstrate superior performance in both novel view synthesis and dense geometry modeling without per-scene optimization [S1, unofficial].
+
+**Strengths and Limitations:**
+- Strengths: Improves geometric correctness by leveraging depth-guided neighbor fusion [S1, unofficial]. Fully differentiable and trainable end-to-end [S1, unofficial].
+- Limitations: Relies on the accuracy of the predicted depth map; geometric information may still be inaccurate due to occlusion or lighting [S1, unofficial].
+
+**When to Use:**
+Use when point volume features suffer from geometric inaccuracies due to occlusion or lighting [S1, unofficial].
+
+**When Not to Use:**
+Not given in the sources.
+
+## Background
+Originated in the paper "Improved Neural Radiance Fields Using Pseudo-depth and Fusion" by Jingliang Li et al. (2023) [S1, unofficial]. It is used in the context of Neural Radiance Fields (NeRF) for image-based rendering, specifically for novel view synthesis and dense geometry modeling [S1, unofficial]. It builds on multi-scale encoding volumes similar to CasMVSNet [S1, unofficial].
+
+## Sources
+[S1] Improved Neural Radiance Fields Using Pseudo-depth and Fusion, https://core.ac.uk/download/577699041.pdf, fetched 2026-10-30 (unofficial)
+[S2] Scale-Consistent Fusion: From Heterogeneous Local Sampling to Global Immersive Rendering, https://doi.org/10.1109/tip.2022.3205745, fetched 2026-10-26

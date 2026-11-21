@@ -1,0 +1,106 @@
+Procedural World: Through the Eye of the Needle
+Friday, December 23, 2011
+Through the Eye of the Needle
+I remember this short science fiction story: A group of very wealthy men were attempting to make a camel go through the eye of a needle so they could get into heaven. They tried all sort of things short of melting the camel. The biggest challenge was to have the camel back in one piece and alive.
+Sending complex meshes over a network will leave you the same feeling. For my world to be experienced over HTTP, I needed to compress terrain cells down to 10K average.
+If you remember from earlier posts, I had broken the terrain into chunks. A LOD system builds cells around the camera position. In the first LOD cells are 12x12x12 meters, the next is 24x24x24m, then 48x48x48m and so on. The highest LOD in my scenes is 7, where each cell covers 1.5 kilometers approximately. No matter which LOD, all cells should be around 10K.
+This is a challenge. 10K is not much. In vanilla form you need to store three coordinates for each vertex in a mesh, one for each axis (x, y, z). Then you have to store the actual triangles that make up the mesh. Each triangle requires three indices. If you used floats for the coordinates and 16 bit integers for the indices, it would require 12 bytes per vertex, 6 bytes per triangle. Odds are you also need texture coordinates, which are 2D points in texture space. Each triangle takes 3 of these pairs, one for each corner. If you store them as floats, it adds 24 bytes per triangle. A typical mesh has twice the number of triangles compared to faces. Each vertex is approximately costing 72 bytes. 10K would store only 142 vertices.
+It helps to cut on the number of bits used to represent each component. You could use 10 bits for each vertex coordinate, 12 bits for face indices and 8 bits for texture coordinates. Each vertex would be 30 bits, each triangle 78 bits. A mesh taking 10K this way would contain 440 vertices. It is an improvement but still very far from my target.
+The naive approach is not enough. Something different must be done.
+One very interesting approach to mesh compression is Geometry Images. This was developed by our granddaddy Hoppes. The idea is to store the mesh as two images: one for the vertex positions and one for the normal map. The main advantage is you can compress these images using traditional compression techniques, even use lossy compression like JPEG.
+The problem with it is you will need to flatten your mesh. Depending on mesh topology, you will need to cut it and create charts. This is not for the faint of hart. Also you need to make sure the image compression produces consistent results for the boundaries of these charts. If you use lossy compression you could get cracks in the reconstructed mesh. Like any 3D to 2D mapping, there can be stretch issues, and since you are storing geometry in a map, aliasing may be very noticeable in some places.
+For these reasons I decided to wait a little bit on the geometry images. I chose a more traditional approach to compression, here is what I did.
+The first step is to simplify the original mesh. This can be considered as some form of lossy compression. I described the method I used in an earlier post. At the end of this stage I have a simplified mesh for the cell which ranges from 200 to 2000 triangles.
+The next step is to recover most of the original detail in a normal map. Using a normal map allows you to crank up the mesh compression. Many of the smaller features of the mesh will be gone in the compressed mesh but will appear in the normal map.
+At this point I had a mesh with 2000 triangles and a normal map of 256x256 pixels. Both had to fit in 10K. To make things worse, there was some additional information I needed to store for each face corner. I needed to somehow describe which materials were present. The least I could pack was two materials and a blending factor between them.
+I decided I would worry first about the mesh, then deal with the normal map.
+As we saw before, just cutting the number of bits used to express components helped, but was far from enough. I needed some sort of compression scheme. Compression is about finding redundant data and taking it out. Redundancy is not always evident, for this reason you need to reshuffle your data, transform it in a way that redundancy will show. Here is a very simple way to illustrate this.
+Let's say you need to describe the sizes of these dolls:
+You could just list each doll and specify how big it is. What if you reorder the series?
+Then you could just say how big the first one is and the rate at which their sizes will decrease. That is a lot less data to convey the same amount of information.
+I did the same for the vertex positions in my meshes. I sorted vertices so the next vertex in the list would be the closet to the preceding one. The following image shows this list as a series of arrows:
+The advantage of sorting is that you could use less bits to express the difference between one position and the next.
+This approach does not guarantee you end up with minimal distances between vertices. The blue arrow shows one clear case. Often the best fitting configuration is not a list, but rather a tree. Using a list all the time has one advantage, you don't need to waste bits coding whether the next element is in the current branch of if it goes back to a previous point in the tree. Results may depend on the nature of your meshes, I advise you test with a lot of data to see what will do best.
+So using a list you will get you a few bad cases. These bad apples really hurt. To avoid this, I created two buckets. Most increments will be small and can be coded with just a few bits. Those go into the first bucket. Then the bad cases go into the second bucket. For each mesh you can find out at runtime how many bits you need for each bucket. Then you need only one bit to express which bucket it is.
+The bit map for a single channel of coordinates ends up looking like:
+For the first item:
+Store origin coordinate: 12 bits
+Store length of bucket A: 4 bits
+Store length of bucket B: 4 bits
+For each next value:
+Store bucket selector: 1 bit
+Store difference from previous: variable bits as determined by bucket
+If difference is different than zero, write sign: 1 bit
+In most of my meshes the first bucket can be represented with 4 to 5 bits. The second bucket is usually around 10 bits. 90% of the items fall in the first bucket. 1000 vertices stored at 10 bits each component would take 3,750 bytes. With sorting and buckets it would take around 2,436. This does not only save space, in most cases you get better precision.
+To compress triangle indices, it is probably best to use triangle strips. For each strip run you only need to add one additional index to get a new triangle. This does require you to re-sort your triangle data. I did not want to sort triangles just for this, cause I feared I needed to sort them to compress a different type of information in the future. For the triangles, I had to compress their vertex indices some other way.
+Each triangle has three different indices to vertices in the mesh. I found that in most cases these indices were very close. It does make sense since the closer two vertices were in space, the closer their position in the sorted vertex list. I could then store the first index of the three and save bits in the next two by only storing their difference with the first.
+Then I had the texture mapping coordinates. This is was entirely redundant. For my meshes, texture coordinates are created by an algorithm, they are not tweaked by hand. This meant the same algorithm could run on the receiving end and come up with the same data, without having to send anything. The tricky part was to make sure the results were consistent. If you think having running the same algorithms on two very different machines, at different moments in time and produce exactly the same results is easy, you may be surprised. There are many things that can go wrong. Comparisons you may do with floats or doubles could go any way. Numeric error may build up in different ways. But it is possible if you know what to look for. The savings in mesh size are great.
+The material information that augmented each triangle was easier to compress. There was a lot of regularity there. I saw the blending channel could do very well with just four bits. Also the materials present on each cell could go into a palette. For most cells it would be below 3 bits.
+While doing all this I made sure each channel of information was stored continuously. For instance, the material blending information for all triangles was written sequentially. This was to help the last phase, which was to feed the entire bit soup to traditional ZIP compression. For most meshes ZIP was not able to compress the resulting data anymore, but some times I could see a gain of up to 5%.
+At this point the meshes alone were taking around 4 to 5K. I still needed to fit the 256x256 normal map into a budget of 5K. I tried loss-less compression similar to PNG, but only storing two components for the normal. Since the normal vector is expected to have length equal to 1.0, you can skip one of the coordinates and reconstruct it later. Loss-less would not do it. It could not compress the map enough. So I decided to test how bad it would look if I used lossy compression. To my surprise it was not bad at all. The reason is that my meshes were very organic and noisy, so the errors in the compression were hard to spot.
+I looked at different codecs but ended up picking the new WebP by Google. It had the best compression I found. But I did not try JPEG2000.
+So I had done it. My rich, bloated original meshes were down to 10K average. A lot of detail was lost in the process, but there was no choice. I think that somehow relates to the ending of that sci-fi story. The wealthy mean got into heaven after all. Their failed camel compression and teleportation schemes were so expensive they became poor in the process.
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Labels:
+Mesh Baking,
+Mesh Compresion,
+Mesh Simplification,
+Sputnik
+9 comments:
+AroidzapDecember 23, 2011 at 3:26 PM
+Soooo interesting!!! :) I look forward to see some pictures :) I wish you Good Luck in new year! And happy christmas :)
+ReplyDelete
+Replies
+Reply
+AnonymousDecember 23, 2011 at 5:54 PM
+Great story. I enjoy reading your posts very much. Keep up the good work.
+ReplyDelete
+Replies
+Reply
+Fugu TabetaiDecember 24, 2011 at 11:13 PM
+I don't understand the content much (I'm a natural language processing guy, with some background in statistical nlp, but know nothing about 3d graphics.) I really enjoy reading this series anyway. Thanks!
+ReplyDelete
+Replies
+Reply
+Jose EsteveDecember 25, 2011 at 3:48 AM
+Excellent article, I'm really enjoying this series so full of ideas. Thanks for sharing them!
+I was wondering about the 10k threshold and whether this is picked empirically? When you combine this compression technique with the LOD scheme described in your previous post, would it be possible to achieve some degree of adaptivity by monitoring the streaming performance and tuning the heuristic accordingly? I understand the choice of LOD level controls the extents of a patch, and this in turn drives the update frequency required for the 10k data chunks (I'm guessing some form of prediction is needed to prefetch data in slow connections), so the system *is* adaptive. My question put in shot is whether the quality settings are configured once and remain static, or they can somehow be tweaked dynamically depending on the system's performance.
+Again, a fantastic read!
+ReplyDelete
+Replies
+Reply
+shdDecember 25, 2011 at 5:32 PM
+Have you tried 3Dc for normal maps?
+ReplyDelete
+Replies
+Reply
+Miguel CeperoDecember 26, 2011 at 12:04 AM
+@shd: 3DC won't go over a 4:1 ratio. A 256x256 normal map is around 30K.
+ReplyDelete
+Replies
+Reply
+Miguel CeperoDecember 26, 2011 at 12:34 AM
+@Jose: It takes time to compress each chunk. The creation of the normal map alone could be around 400 msec. If cells are compressed on the fly, it adds to the time the client needs to wait for new content. Having precomputed chunks allows you to send more information, the challenge is to make optimum use of the available bandwidth. I was considering keeping several resolution levels at the server. If your connection is slow, the system would request lower resolutions.
+At this point my design constraints are not really technical but financial. 10k average is a sweetspot between what looks good, allows for enjoyable walking speeds, and generates the amount of transfer I could afford. That is why I'm experimenting with a server side that is just static files available through HTTP. It is the cheapest server configuration.
+If I was going to have custom severs, I would not use any of these techniques. I would create an adaptive mesh streaming protocol over UDP. I would be a lot faster, allow for more detail and use less bandwidth. But then these servers would be a lot more expensive to host.
+ReplyDelete
+Replies
+Reply
+D. PelsmaekerMay 1, 2012 at 1:43 PM
+I don't know if you do this, but for the difference in vertex indices you always know for sure that the difference is at least 1. For positive offsets, you can subtract one and store the result. For negative offsets, add one. This might save single bits sometimes.
+But your approach is really interesting and I follow your work with great interest! Keep it up!
+ReplyDelete
+Replies
+Miguel CeperoMay 1, 2012 at 2:06 PM
+Thanks, it did not occur to me. You have any other tips you can share?
+Delete
+Replies
+Reply
+Reply
+Add comment
+Load more...
+Newer Post
+Older Post
+Home
+Subscribe to:
+Post Comments (Atom)

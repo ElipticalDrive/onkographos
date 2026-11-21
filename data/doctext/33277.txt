@@ -1,0 +1,536 @@
+Contribute to EreliaStudio/Sparkle development by creating an account on GitHub.
+
+V0.1.4 — Voxel engine design and implementation specification by Hyarius · Pull Request #37 · EreliaStudio/Sparkle · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Hyarius
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Sparkle V0.1.4 — Voxel Engine : architecture et contrats C++
+CONCEPTION EN COURS — NE PAS IMPLÉMENTER NI MERGER. Cette PR est le cahier des charges vivant et la future référence pour une seconde IA. Le but est de valider les noms de classes, leur interface, leurs dépendances, leurs algorithmes et leurs TU avant de coder. Les signatures ci-dessous sont des propositions d'interface, non encore validées ni garanties compilables. Les mécanismes approuvés sont explicitement distingués des détails encore ouverts.
+Branche V0.1.4 créée depuis main avec commit vide ; aucun fichier modifié. Pas de document de conception dans le dépôt : tout reste ici.
+1 — Scénario d'utilisation visé
+Un jeu construit un Volume, le mesher le transforme synchroniquement en Model immutable, puis le jeu compose des Models dans un Assembly copiable, anime l'Assembly, et attache un composant à une Entity3D. Le VoxelRenderingSystem collecte ces composants via le Registry de Sparkle, reconstruit chaque frame des batches compacts et un SSBO neuf par bucket non vide, puis émet les commandes de dessin instancié. Aucune commande de mise à jour par occurrence.
+```
+// PSEUDO-INTERFACE cible — méthodes et types à finaliser.
+// Les Shape et les Definition sont construites au préalable, via C++ ou JSON.
+spk::Voxel::Definition stone = /* definition immuable et partageable */;
+spk::Voxel::Cell cell{/* copie légère de stone */, /* orientation */};
+spk::Voxel::Volume::Builder builder({16, 16, 16});
+builder.set({2, 4, 1}, cell);
+spk::Voxel::Volume volume = std::move(builder).build();
+
+spk::Voxel::Model body = mesher.bake(volume); // interface proposée : les Cell donnent accès aux Definition
+spk::Voxel::Assembly character;
+auto torso = character.addPart("torso", body, torsoPalette);
+auto arm   = character.addPart("arm", armModel, armPalette, torso);
+
+spk::Voxel::Assembly npc = character; // copie autonome, version 1
+character.setLocalTransform(arm, animationMatrix);
+character.invalidate();
+
+spk::Voxel::AssemblyRenderingComponent component(&entity3D);
+component.bind(character); // non propriétaire : ne fait pas de rendu lui-même
+// Le VoxelRenderingSystem émet les commandes par RenderSnapshot.
+```
+Contrat fondamental : le moteur voxel est générique (objet, personnage, volumes/chunks). Aucun couplage à Erelia, à un terrain, à un catalogue ou à une Entity par partie.
+2 — Diagramme des classes attendues
+```
+classDiagram
+direction LR
+class Cell
+class Shape {
+  +outerShell(face) : polygons
+  +innerShell() : polygons
+  +boundaryCoverage(face) : derived
+}
+class Polygon {
+  +vertices : at least 3
+  +planar : true
+  +convex : true
+}
+Shape *-- Polygon : surfaces
+class Definition {
+  -shared_ptr~const Data~ data
+  +shape() const Shape&
+  +slotBindings()
+}
+class Volume {
+  +Builder
+}
+class VoxelMesher {
+  +bake(Volume) Model
+  #outsideCell(position)
+  -neighborClosesBoundary(side)
+  -shouldEmitInnerShell(cell)
+}
+class Mesh {
+  +MeshVertex
+}
+class Model {
+  +Volume volume
+  +Mesh opaque
+  +Mesh transparent
+  +materialSlots
+}
+class MaterialPalette
+class Assembly {
+  +parts
+  +transforms
+  +version
+  +invalidate()
+  +copy()
+}
+class ModelRenderingComponent {
+  +bind(model, palette)
+}
+class AssemblyRenderingComponent {
+  +bind(assembly)
+}
+class VoxelRenderingSystem {
+  +collect()
+  +buildCommands()
+  +frame scoped SSBO
+}
+class DrawVoxelBucketCommand {
+  +execute(context)
+}
+Volume o-- Cell : valeurs logiques
+Volume o-- Definition : table locale de definitions
+Cell --> Definition : valeur partageable
+Definition --> Shape : geometrie partagee
+VoxelMesher --> Volume
+VoxelMesher --> Definition
+VoxelMesher --> Shape
+VoxelMesher --> Model
+Model o-- Mesh
+Assembly o-- Model
+Assembly --> MaterialPalette
+ModelRenderingComponent --> Model
+ModelRenderingComponent --> MaterialPalette
+AssemblyRenderingComponent --> Assembly
+VoxelRenderingSystem --> ModelRenderingComponent : Registry
+VoxelRenderingSystem --> AssemblyRenderingComponent : Registry
+VoxelRenderingSystem --> DrawVoxelBucketCommand
+```
+Loading
+Noms proposés en namespace spk::Voxel, sauf MaterialPalette dans spk. Les signatures restent à valider.
+3 — Geometry : Cell, Shape, Volume, Mesh, Model, Mesher
+3.1 Cell, Definition et Shape — VXL-042, VXL-043, VXL-044 et VXL-045
+Les coordonnées des sommets locaux d'une cellule sont des spk::Vector3Int sur une grille entière 0 à 1000. VXL-044 validée : les contours et couvertures des faces de frontière sont évalués sur des grilles 2D entières à résolution 1000 × 1000 ; les coordonnées des nouvelles surfaces visibles restent quantifiées à cette précision. Les arêtes sont rasterisées avec une règle déterministe de type Bresenham. Les couvertures remplies sont décomposables en unions de rectangles 2D alignés sur les axes de la grille, pas en une unique boîte englobante pouvant produire de fausses occultations. Pas de grille mondiale discrète : les transforms de la scène restent libres et flottants. Les Shape décrivent la géométrie par polygones, UV/normales et slots locaux. VXL-043 validée : chaque polygone comporte au moins trois sommets, est plan et convexe. Les formes globalement concaves sont décrites comme l'union de plusieurs polygones convexes, et non sous forme d'un polygone concave individuel. Les Shape peuvent également contenir des surfaces ouvertes (végétation, plans croisés) : aucune obligation générale de maillage fermé n'est ajoutée. Orientation discrète des cellules : 4 rotations Y de 90 degrés et un flip vertical, soit 8 variantes. Les conventions exactes de sommets, winding, UV, normales, indexation et contrôle des entrées dégénérées restent à définir.
+Contrat VXL-042 validé : Cell → Definition → Shape. Une Definition associe une Shape réutilisable aux slots de matériaux sémantiques du Model, sans inclure les matériaux concrets d'une MaterialPalette. Une Definition est immuable une fois construite et sa copie est légère grâce à un std::shared_ptr<const Data> interne. Une Cell contient une Definition par valeur dans l'API publique, plus son orientation. Copier plusieurs cellules partage les données immuables des définitions ; aucun registre ou Catalog global n'est requis pour résoudre les Shape et les bindings.
+```
+// PSEUDO-INTERFACES — relations et propriété VALIDÉES ; signatures et détails ouverts.
+namespace spk::Voxel {
+  using Vertex = spk::Vector3Int; // Shape et fragments visibles quantifiés sur la grille 1/1000
+
+  class Shape {
+  public:
+    struct Polygon {
+      /* Au moins 3 sommets formant un polygone plan et convexe : VALIDÉ */
+      /* Type des sommets, UV, normale, slot, indexation : à définir */
+    };
+    /* PROPOSITIONS de lectures publiques à préciser :
+       polygons(face) / outerShell(face) -> polygones coplanaires au bord
+       innerShell() -> autres polygones 3D
+       boundaryCoverage(face) -> couverture 2D dérivée des outerShell */
+  };
+
+  class Definition {
+  private:
+    struct Data;
+    std::shared_ptr<const Data> _data;
+  public:
+    [[nodiscard]] const Shape& shape() const;
+    /* lecture seule des bindings : slot local de Shape -> slot de Model */
+    /* méthodes de construction/factory à définir */
+  };
+
+  struct Cell {
+    Definition definition;    // copie légère, propriétaire partagé du Data
+    /* orientation discrète : type exact à définir */
+    /* règles de cellule vide : à définir */
+  };
+}
+```
+Propriété : l'état Definition::Data reste valide tant qu'une copie de la Definition le référence, y compris quand le Volume d'origine est détruit. La Shape référencée par Data doit rester valide selon un mécanisme de propriété à préciser (ne pas laisser de référence pendante). Les Cell restent des valeurs C++ autonomes, sans dépendance à l'Engine ni à OpenGL.
+Contrat géométrique VXL-043 : le contenu d'une Shape est une collection de surfaces polygonales planes et convexes d'au moins trois sommets. Une forme concave reste autorisée à l'échelle de la Shape par assemblage de plusieurs polygones convexes. Le Mesher doit préserver les occultations partielles précises entre ces surfaces, quelle que soit leur triangulation pour le rendu ; la triangulation ne doit pas redéfinir le contrat de la forme. L'exigence de convexité concerne chaque polygone, pas le volume global. Les ouvertures et surfaces sans volume fermé restent possibles. Définir ultérieurement la validation exacte (dégénérescence, winding, tolérances) sans affaiblir ces invariants.
+VXL-045 — classification géométrique validée : au chargement / à la construction d'une Shape, classer chaque polygone plan et convexe dans l'un de six ensembles outerShell si tous ses sommets se trouvent sur le même plan frontière du cube unité (coordonnée X, Y ou Z constante et égale à 0 ou 1000), ou dans un ensemble innerShell sinon. Chaque polygone n'a qu'une classification ; aucune projection de polygone intérieur ou incliné n'est ajoutée artificiellement aux frontières. Les six couvertures 2D de la Shape sont calculées exclusivement à partir des outerShell correspondants. Les polygones des innerShell conservent leurs données 3D, UV et slots de matériaux indépendamment de ces couvertures. La classification est une organisation géométrique interne ; noms et signatures des accesseurs publics encore à finaliser.
+Une Shape qui ne possède aucun polygone de frontière peut avoir six couvertures vides tout en conservant un innerShell non vide (végétation, petite forme centrée dans la cellule). Les matériaux et normales peuvent influer sur la capacité effective à occulter, distincte de la simple présence géométrique sur un plan frontière. Le cas où une face intérieure doit être émise ou écartée par le Mesher n'est pas décidé par VXL-045.
+À préciser sans présumer de nouveaux choix : construction/validation d'une Shape et d'une Definition, identité/égalité des définitions lors de leur interning dans Volume, représentation des cellules vides, encodage d'orientation, format de sérialisation et attribution finale des indices de slots.
+3.2 Volume immutable, Builder mutable
+```
+namespace spk::Voxel {
+  class Volume {
+  public:
+    class Builder;
+    /* extents(), cell(), etc. */
+  private:
+    /* shared immutable cell storage */
+  };
+  class Volume::Builder {
+  public:
+    /* initialize size; set/erase; build() -> Volume */
+  };
+}
+```
+Copier un Volume est léger, le partage se fait sous le capot. Builder produit un nouveau snapshot ; ne jamais modifier un ancien Volume. Volume doit fonctionner headless, sans graphics/Entity.
+Stockage interne validé par VXL-042 : l'API de Volume::Builder::set reçoit une Cell portant sa Definition par valeur. Le Volume ne stocke pas un shared_ptr complet pour chaque cellule : il possède une table locale de définitions (valeurs Definition partageant leurs Data) et une grille de cellules compactes indexant cette table, avec les orientations nécessaires. Les lectures publiques reconstituent des Cell par valeur ; elles ne révèlent ni indices internes ni pointeurs susceptibles de devenir invalides. Le Volume garde la table et les données de cellule dans son snapshot immutable partagé.
+Conséquence : ne pas promettre std::span<const Cell> sur le stockage compact ; privilégier cell(position), une itération par valeurs/vues ou un accès adapté encore à définir. L'identité servant à dédupliquer les définitions, la taille et les limites des indices locaux, les cellules vides, et la manière de construire un Builder depuis un snapshot existant restent des détails ouverts.
+3.3 Mesh et Model
+Le Mesh reprend le template existant spk::Mesh, y compris sa logique de Builder et ses GPU LayoutBuffers. Aucun second framework de buffers.
+```
+namespace spk::Voxel {
+  struct MeshVertex {
+    spk::Vector3Int position;    // VXL-044 : entier jusqu'au shader GPU
+    spk::Vector3 normal;         // float : surfaces inclinées
+    spk::Vector2 uv;             // float
+    std::uint32_t materialIndex; // index local au Model
+  };
+
+  class Mesh : public spk::Mesh<MeshVertex> {
+  public:
+    class Builder;
+  };
+
+  class Model {
+  public:
+    const Volume& volume() const;
+    const Mesh& opaqueMesh() const;
+    const Mesh& transparentMesh() const;
+    /* named material slot accessors */
+  private:
+    /* immutable data, lightweight copies with shared internal resources */
+  };
+}
+```
+VXL-044 : les positions de MeshVertex restent entières, y compris pour les fragments créés après occultation sur la grille au 1/1000. Les shaders peuvent convertir ces entiers en flottants pour les transformations monde ; cela ne nécessite pas de positions float stockées dans le mesh. Une passe de bake donne deux meshes : opaque/cutout et semi-transparent. Les deux peuvent être vides. Le VertexBuffer existant supporte l'attribut entier ; vérifier layout et GLSL integer attribute. Les modèles sont immuables, non versionnés et les matrices d'Assembly ne provoquent jamais de rebake.
+3.4 Mesher : bake synchrone et occultation polygonale à précision discrète
+```
+namespace spk::Voxel {
+  struct OutsideCell {
+    enum class State { Empty, Occupied, Unknown };
+    State state;
+    /* optional Cell */
+  };
+
+  class VoxelMesher {
+  protected:
+    virtual OutsideCell _outsideCell(const spk::Vector3Int& pos) const {
+      return {/* Empty */};
+    }
+  public:
+    Model bake(const Volume& volume /* paramètres complémentaires éventuels à définir */) const;
+  };
+}
+```
+Les Shape et leurs correspondances de slots sont accessibles par les Definition contenues logiquement dans les Cell ; le Mesher ne requiert donc pas un Catalog ou une bibliothèque de Shape globale pour résoudre les cellules. Les règles de rendu et d'occlusion doivent rester disponibles au bake selon un contrat encore à préciser.
+Ce n'est pas un moteur de terrain. Une spécialisation de l'application peut répondre pour des cellules extérieures (exemple : chunks voisins). Empty expose, Occupied participe à l'occlusion, Unknown est traité comme temporairement exposé ; un nouveau bake intervient quand la donnée voisine devient accessible. Aucun voisin stocké dans Volume.
+L'occlusion doit retirer les couvertures réelles à l'échelle discrète retenue des polygones partiellement couverts (cube contre triangle, faces inversées, frontières, trous). VXL-044 remplace le clipping analytique exact à coordonnées rationnelles comme contrainte obligatoire : la couverture peut être calculée sur une grille 2D au 1/1000, puis soustraite à l'aide d'unions de rectangles alignés sur les axes. VXL-043 : les polygones source sont plans et convexes ; les formes complexes ou globalement concaves sont des assemblages de tels polygones. Les surfaces peuvent rester ouvertes. L'occlusion s'applique aux surfaces définies et à leurs éventuels fragments visibles, sans supposer que toute Shape forme un solide fermé. Principe VXL-044 : pour chacune des six directions de frontière de cellule, dériver de la Shape une couverture 2D à résolution 1000 × 1000. Rasteriser les arêtes selon une règle entière déterministe de type Bresenham, puis remplir la surface ; les seules arêtes ne permettent pas d'évaluer l'occlusion. Représenter les cellules couvertes comme une union exacte de rectangles 2D (AABB axis-aligned) sur cette grille, par exemple en fusionnant des intervalles de scanlines ; cette union doit être équivalente au masque discrétisé, y compris pour les triangles. Comparer les couvertures des deux faces opposées en vis-à-vis de cellules adjacentes, avec orientation/flip appliqués et coordonnées 2D alignées. Une AABB englobante d'un triangle ou d'une pente ne peut servir que de rejet précoce, jamais de masque exact de couverture.
+Les six couvertures sont des données géométriques dérivées et réutilisables d'une Shape immuable, plutôt que des grilles denses obligatoirement conservées pour chaque Cell. L'implémentation peut employer un masque temporaire dense, un ensemble de rectangles ou une autre structure interne pendant la construction ; la décomposition et sa taille/coût doivent être évalués. La granularité de stockage et le cache des 8 orientations sont à définir. La géométrie visible du mesh est reconstruite à partir de la couverture soustraite avec des positions entières ; préserver si possible les polygones initiaux lorsque la face est intégralement visible pour éviter une explosion du nombre de triangles.
+Limite assumée : l'occlusion devient exacte sur les pixels de la grille, non mathématiquement exacte dans le plan continu. Les diagonales et très petits fragments sont quantifiés ; dégénérescences, trous et éventuelles fissures de rasterisation exigent un contrat de bord partagé et déterministe. La géométrie des faces inclinées ou internes ne peut pas être intégralement décrite par ces seuls six masques de frontières ; ils accélèrent l'occlusion entre cellules, sans remplacer la liste des polygones 3D de Shape. Le masque représente une occupation géométrique, mais son emploi effectif pour occulter dépend du slot et du contrat de matériau (opaque, cutout, translucide), à préciser. Une projection 2D AABB de la Shape entière ne doit pas être prise pour une couverture de frontière.
+VXL-045 : une couverture sur un plan frontière résulte uniquement des polygones outerShell réellement coplanaires à ce plan, jamais de la projection de l'ensemble de la géométrie. Les surfaces innerShell ne contribuent pas aux masques de frontières et demeurent des polygones 3D.
+VXL-046 validée — émission conditionnelle des innerShell : pour la cellule courante, inspecter les six cellules voisines, et pour chaque direction consulter le outerShell du voisin situé sur le plan opposé en vis-à-vis. Une direction est considérée comme fermée seulement si la couverture opaque réellement occultante du voisin couvre tout le carré 1000 × 1000 de la frontière, à la résolution discrète VXL-044 et avec l'orientation/flip du voisin pris en compte. Ce test utilise uniquement la couverture du voisin, sans faire l'union avec le outerShell de la cellule courante.
+Règle : si les six directions sont fermées, le Mesher n'émet aucun polygone innerShell pour cette cellule. Si au moins une direction reste ouverte, partiellement couverte ou incertaine, il émet tous les polygones innerShell de la cellule (pas de culling individuel des polygones internes par cette règle). Cela s'applique aussi à une Shape qui n'a aucun outerShell, sans exception particulière : ce sont les voisins, non ses propres surfaces, qui contrôlent la condition.
+```
+// PSEUDO-ALGORITHME de VXL-046 — les helpers et types réels restent à définir.
+bool emitInnerShell(const Volume& volume, Position position) {
+    for (Side side : AllSixSides) {
+        const OutsideCell neighbor = neighborAt(volume, position + offset(side));
+        if (!neighbor.isKnownOccupied() ||
+            !neighbor.opaqueOuterShellFullyCovers(opposite(side))) {
+            return true; // voisin absent, vide, inconnu ou couverture incomplète
+        }
+    }
+    return false; // six voisins opaques à couverture intégrale
+}
+// À la construction du mesh :
+// traiter séparément les fragments visibles des outerShell ;
+// émettre tous les innerShell si emitInnerShell(...) est vrai.
+```
+Un voisin Empty ou Unknown, une donnée manquante, une couverture partielle, et un matériau non entièrement occultant ne prouvent pas qu'une frontière est fermée ; ils ne doivent donc pas conduire à supprimer les innerShell. En particulier, le calcul géométrique d'une couverture ne suffit pas : vérifier également la catégorie d'occlusion associée aux slots. Le résultat est déterminé au bake ; l'arrivée ou le changement d'un voisin peut imposer un nouveau bake.
+Limite à traiter explicitement avant implémentation : cette optimisation, indépendante du point de vue, peut supprimer une surface intérieure qui serait visible depuis une caméra placée dans un espace intégralement enfermé. Le comportement attendu des caméras intérieures et des cavités demeure ouvert ; ne pas déclarer cette situation résolue ou impossible sans décision du mainteneur.
+Encore à décider : représentation des slots sur les couvertures 2D, détail de la preuve de couverture entièrement opaque, gestion des normales et des matériaux d'occlusion, règles de fragments/UV et de reconstruction du mesh, et comportement du rendu depuis l'intérieur d'une région entièrement fermée. La condition globale d'émission des innerShell est fixée par VXL-046. Opaque occulte ; cutout non considéré complètement opaque ; translucide n'occulte généralement pas les faces arrière ; interfaces internes entre transparents identiques supprimables si visuellement correct. Un changement de contrat d'occlusion peut imposer un nouveau bake.
+V0.1.4 : bake complet, pas de remesh incrémental ; caches intermédiaires permis. L'appel est synchrone, thread/priorité/adoption du résultat gérés par le code appelant. Le bake produit un nouveau Model immutable.
+4 — MaterialPalette, slots nommés, transparence et ressources
+Chaque Model déclare les slots nommés utilisés par ses polygones : par exemple skin, cloth, eye. Les Shape possèdent des slots géométriques locaux et les Definition immuables les associent aux slots sémantiques du Model ; MaterialPalette associe ensuite ces derniers à des matériaux concrets par occurrence. Ce chaînage ne nécessite aucun Catalog global. Chaque slot fixe une catégorie de rendu (opaque, cutout, translucide) et un contrat d'occlusion. La Factory valide que le matériau concret respecte le contrat avant de fabriquer le mapping local d'indices.
+```
+namespace spk {
+  class MaterialPalette {
+  public:
+    class Factory;
+    /* palette materials and slot mappings */
+  };
+}
+
+namespace spk::Voxel {
+  struct MaterialSlot {
+    std::string name;
+    /* renderCategory + occlusionContract */
+  };
+}
+
+// Usage proposé :
+// auto palette = spk::MaterialPalette::Factory(model.materialSlots())
+//     .bind("skin", skinMaterial)
+//     .bind("eye", eyeMaterial)
+//     .build();
+```
+Correction majeure déjà validée : l'ancienne palette unique pour tout Assembly est révoquée. Chaque occurrence de Model dans Assembly possède sa propre association à une MaterialPalette, tout en pouvant partager volontairement une même palette avec d'autres occurrences. Model ne porte pas une palette mutable.
+La transparence s'applique à toute la 3D Sparkle : opaque, alpha-cutout et translucide avec Weighted Blended OIT (WBOIT) ; profondeur opaque, accumulation puis composition de la translucence. L'éclairage, les spots/points/directional lights et les ombres doivent être partagés avec le rendu 3D non voxel. Détails des passes d'ombres/cascades à confirmer avec le pipeline courant.
+Description des ressources en JSON, formats de volumes compacts binaires possibles ; construction via API C++ toujours possible. Pas de Catalogue obligatoire ni de Catalog implémenté pour cette version. Les Definition conservent leurs Shape et associations de slots indépendamment d'un catalogue ; les formats JSON devront pouvoir reconstruire ces relations et les tables locales de Volume sans dépendance à un registre global.
+5 — Assembly articulé, copiable, directement mutable
+Pas de Assembly::Instance. Assembly contient une hiérarchie légère de Part ; chaque Part porte une copie légère de Model (shared resources internes), un transform local 3D, une association de palette et éventuellement un parent. Un point d'attache nommé peut exister sans mesh ; on peut lui attacher/détacher Model ou Assembly sans créer d'Entity, en interdisant les cycles.
+```
+namespace spk::Voxel {
+  using PartID = /* stable part ID: to define */;
+
+  class Assembly : public spk::VersionedTrait {
+  public:
+    struct Part {
+      PartID id;
+      std::string name;
+      std::optional<PartID> parent;
+      spk::Matrix4x4 localMatrix;
+      std::optional<Model> model; // lightweight shared copy
+      /* per-part material palette association */
+    };
+
+    Assembly();
+    Assembly(const Assembly&); // new VersionedTrait state, version 1
+    /* copy assignment policy is still to be defined */
+
+    PartID addPart(/* name, model, palette, parent */);
+    void setLocalTransform(PartID, /* local transform */);
+    /* part(), attach(), detach(), reparent(), removePart() */
+    /* enumerate parts and named attachment points */
+  };
+}
+```
+L'Assembly ne dépend pas de Transform3D, car spk::Transform3D est déjà un Component3D ; choisir un type local autonome (Matrix4x4 ou struct transform). La logique d'AnimationClip reste externe aux voxels ; un système de gameplay/animation ajuste les transforms et appelle invalidate().
+Seul Assembly est versionné ; Model ne l'est pas. Si un Assembly source est en version 42, sa copie indépendante démarre en version 1, sans copier les abonnés. En attendant la correction générale de VersionedTrait, utiliser un constructeur de copie personnalisé reconstruisant la base ; voir issue #36 : #36.
+Un Assembly reste versionné pour le gameplay et les observateurs, et les animations appellent invalidate() après les modifications. Pour le rendu simplifié de V0.1.4, le VoxelRenderingSystem recalcule chaque frame toutes les matrices des parties affichées, même sans changement de version (une quinzaine typiquement), ainsi que les transforms globaux des Entity. Aucun cache d'instances fondé sur les versions.
+6 — Engine : composants de données et un VoxelRenderingSystem
+6.1 Composants
+Les composants n'ajoutent jamais eux-mêmes de RenderCommand au RenderSnapshot. Ils exposent seulement les bindings. Le bind Assembly est une référence non propriétaire ; le propriétaire externe assure sa durée de vie.
+```
+namespace spk::Voxel {
+  // PROPOSITION : typed Registry registration à vérifier dans Sparkle.
+  class ModelRenderingComponent : public spk::Component3D,
+      public spk::Registry<ModelRenderingComponent, spk::Engine*>::Object {
+  public:
+    using Component3D::Component3D;
+    void bind(const Model& model, const spk::MaterialPalette& palette);
+    void unbind();
+    const Model* model() const;
+    const spk::MaterialPalette* palette() const;
+  private:
+    const Model* _model = nullptr;
+    const spk::MaterialPalette* _palette = nullptr;
+  };
+
+  class AssemblyRenderingComponent : public spk::Component3D,
+      public spk::Registry<AssemblyRenderingComponent, spk::Engine*>::Object {
+  public:
+    using Component3D::Component3D;
+    void bind(Assembly& assembly);
+    void unbind();
+    Assembly* assembly() const;
+  private:
+    Assembly* _assembly = nullptr; // non-owning
+  };
+}
+```
+L'héritage de Registry typé est une proposition nécessitant vérification, et non une garantie de compilation : Component3D a déjà son propre Registry et l'enregistrement concret du sous-type doit suivre l'API effectivement disponible.
+6.2 System et lecture des composants depuis Registry
+```
+namespace spk::Voxel {
+  class VoxelRenderingSystem : public spk::RenderingSystem {
+  protected:
+    void _beforeBuildRenderSnapshot(spk::RenderSnapshot::Builder&) override;
+    void _buildRenderSnapshot(spk::RenderSnapshot::Builder&) override;
+    void _afterBuildRenderSnapshot(spk::RenderSnapshot::Builder&) override;
+  private:
+    /* transient BucketKey -> vector<GPUInstance> */
+    /* new SSBO for each nonempty bucket and each RenderSnapshot */
+  };
+}
+
+// PSEUDO-C++ proche de l'API Registry actuelle :
+// à condition que les composants soient typiquement inscrits.
+const auto& models =
+  spk::Registry<spk::Voxel::ModelRenderingComponent, spk::Engine*>
+    ::instance().elements(this->engine());
+const auto& assemblies =
+  spk::Registry<spk::Voxel::AssemblyRenderingComponent, spk::Engine*>
+    ::instance().elements(this->engine());
+for (auto* component : assemblies) {
+  if (!component->isEffectivelyActive() || !component->assembly()) continue;
+  // pour chaque part visible : worldEntityMatrix * parentPartMatrices * local
+  // stocker occurrence opaque et/ou translucide, palette propre à cette part
+}
+// ModelRenderingComponent : une occurrence logique par mesh non vide.
+```
+Ce sont les véritables APIs Sparkle : RenderingSystem hérite de System et RenderingObjectTrait ; Registry<T, Engine*>::instance().elements(engine) est disponible ; RenderSnapshotContributorTrait dispose des hooks before/build/after ; RenderSnapshot::Builder::renderPass(key), RenderPass::emplace() et RenderCommand::execute(RenderContext&) const existent. Les noms de nos nouvelles classes et signatures restent à valider.
+6.3 SSBO neuf par bucket et par frame (VXL-041 validée)
+Changement d'architecture : abandon de la gestion incrémentale des instances et des SSBO persistants. Le système récupère tous les composants actifs à chaque RenderSnapshot, calcule les transformations de leurs Models et Assemblies, groupe les occurrences compatibles en buckets et constitue pour chaque bucket un vecteur dense de GPUInstance.
+Pour chaque bucket non vide, VoxelRenderingSystem crée un nouvel objet spk::ShaderStorageBuffer, le dimensionne, écrit la totalité du tableau dynamique, puis appelle GPUResource::validate() pour signaler la modification. Il capture un ShaderStorageBuffer::Handle propre au snapshot et construit directement une DrawVoxelBucketCommand. Les meshes et ressources immuables sont partagés normalement ; seules les données d'instances et leurs SSBO sont reconstruits.
+Interfaces proposées (pseudo-C++, non encore figées) :
+```
+namespace spk::Voxel {
+  struct GPUInstance {
+    /* world transform, palette or material mapping, shader instance fields */
+  };
+
+  struct BucketKey {
+    /* mesh identity + render pass + compatible GPU bindings */
+  };
+
+  class DrawVoxelBucketCommand final : public spk::RenderCommand {
+    /* immutable mesh; ShaderStorageBuffer::Handle for THIS snapshot;
+       number of instances; immutable rendering resources */
+  public:
+    void execute(spk::RenderContext&) const override;
+  };
+}
+```
+```
+// Concept dans VoxelRenderingSystem::_buildRenderSnapshot(builder)
+auto buckets = collectAndGroupActiveComponents(); // reconstruits par frame
+for (auto& [key, instances] : buckets) {
+    if (instances.empty()) continue;
+
+    spk::ShaderStorageBuffer ssbo(
+        /* binding point */, 0, sizeof(spk::Voxel::GPUInstance));
+    ssbo.resize(instances.size());
+    ssbo.setDynamicData(
+        std::span<const spk::Voxel::GPUInstance>(instances));
+    ssbo.validate();
+
+    auto immutableHandle = ssbo.handle();
+    builder.renderPass(key.pass).emplace<DrawVoxelBucketCommand>(
+        /* mesh / material bindings */, immutableHandle, instances.size());
+    // Ne plus modifier l'état de ssbo après publication du handle.
+}
+```
+Au moment de l'exécution, DrawVoxelBucketCommand active le handle SSBO sur le RenderContext ; le mécanisme GPUResource / GPUResourceCollection existant synchronise la génération GPU du buffer au premier activate, en transférant tout son contenu ; ensuite la commande dessine les instances. La création des objets OpenGL peut être différée jusqu'à cet activate.
+Ne plus implémenter en v0.1.4 : UpdateVoxelInstanceCommand, CacheEntry, InstanceKey->offset, BucketInstanceStorage, swap-and-pop interframes, uploads GPU partiels, dirty ranges, double buffering explicite de SSBO ou cache de version Assembly pour optimiser le rendu. La suppression d'une instance consiste simplement à ne plus l'insérer dans le bucket de la frame suivante. Chaque bucket est automatiquement compact, sans trous.
+Durée de vie des snapshots : chaque RenderSnapshot doit conserver son propre handle SSBO et les ressources immuables nécessaires pendant son exécution. Un nouveau snapshot ne peut pas altérer le SSBO d'un ancien, puisque les états sont distincts. Vérifier le nettoyage réel dans GPUResourceCollection et l'absence de fuite. Le DoubleBuffer générique de Sparkle existe, mais n'est pas nécessaire au principe choisi. Deux SSBO alternés sont remplacés par des SSBO neufs par snapshot.
+Coût de simplicité accepté : création d'objets GPU et upload complet de toutes les instances à chaque frame, même en l'absence de modification. C'est un compromis volontaire, à mesurer par profiling avant toute optimisation future. Les Mesh/Volume/Model sont toujours partagés et immuables : aucun rebake par frame.
+```
+sequenceDiagram
+  participant Game as Simulation / animation
+  participant Sys as VoxelRenderingSystem
+  participant Registry as Registry
+  participant Snapshot as RenderSnapshot Builder
+  participant GPU as RenderContext
+  Game->>Game: modifie Assemblies
+  Sys->>Registry: collecter composants actifs
+  Registry-->>Sys: Models et Assemblies
+  Sys->>Sys: recalculer toutes les matrices et occurrences
+  Sys->>Sys: grouper en vecteurs compacts par bucket
+  loop chaque bucket non vide
+    Sys->>Sys: créer nouveau SSBO, remplir, validate
+    Sys->>Snapshot: ajouter DrawVoxelBucketCommand avec handle
+  end
+  Snapshot-->>GPU: activate handle, upload complet, instanced draw
+  Note over GPU: aucune lecture des Assemblies mutables
+```
+Loading
+6.4 Pipeline graphique
+```
+flowchart TD
+  A[Collecter Model et Assembly] --> B[Meshes opaque et cutout]
+  A --> C[Meshes translucides]
+  B --> D[Opaque + depth + lighting / shadow]
+  C --> E[Weighted Blended OIT accumulation]
+  D --> F[Composition OIT / frame finale]
+  E --> F
+```
+Loading
+WBOIT est retenu, avec éclairage/ombres partagés avec les rendus 3D non voxels, pas une seconde infrastructure complète.
+7 — Contrats de tests à faire valider AVANT le développement
+Cette liste est un point de départ pour une discussion dédiée sur les TU, pas une suite de tests déjà approuvée.
+Classes / système
+Comportements concrets proposés
+Cell/Shape/Definition
+8 orientations, sommets discrets, polygones plans/convexes à 3 sommets ou plus ; classification sur les 6 plans frontières à 0/1000 ou innerShell, demi-dalle à Y=500, formes inclinées et végétation sans outerShell ; slots ; Definition immuable, partage de Data, copie de Cell autonome et durées de vie
+Volume/Builder
+snapshot originel inchangé, copie légère, erreur hors limites ; interning local des Definition, cellules compactes, accès public par Cell-valeur, snapshots indépendants
+Mesher/occlusion
+deux cubes collés ; carré contre triangle ; triangle inversé ; demi-face ; rasterisation des 6 faces à 1000×1000, couverture par union exacte d'AABB 2D ; innerShell absent lorsque les 6 voisins ont chacun un outerShell opaque couvrant entièrement la face opposée ; innerShell intégral conservé dès qu'un seul voisin est absent, Unknown, Empty, cutout/translucide ou partiellement couvrant ; cas Shape sans outerShell, orientations/flips, arrivée de voisin et rebake ; cas de caméra intérieure à spécifier
+Model/Mesh
+opaque vs cutout vs translucide ; meshes vides ; mêmes ressources entre copies ; positions entières émises après quantification et shader acceptant attributs entiers
+Palette
+nom de slot, compatibilité de catégorie/occlusion, mapping local, palette par occurrence
+Assembly
+copie version 1 indépendante ; hiérarchie/parentage ; cycles refusés ; attaches, modification de bras, invalidate()
+Components/Registry
+bind/unbind ; composant inactif ; composants isolés par Engine ; durée de vie du non-owning binding
+VoxelRenderingSystem
+rebuild de toutes les matrices à chaque frame ; Entity transform ; grouping par Mesh/état GPU ; palettes indépendantes ; aucun cache de version GPU
+SSBO/Commands
+SSBO neuf par bucket non vide et par frame ; upload complet ; une commande de dessin groupé ; disparition d'une occurrence sans trou ; handles indépendants par snapshot ; durée de vie et libération GPU ; profiling du coût d'allocation
+Graphics
+transparence WBOIT ; lighting/ombres ; screenshots de référence et validations visuelles
+8 — Points ouverts et prochaines décisions
+VXL-040 — Buckets compacts : invariant conservé ; technique incrémentale supersédée
+Toutes les instances actives d'un bucket occupent une plage dense. L'ancien mécanisme swap-and-pop et les tables d'offsets persistantes ne sont plus à implémenter, puisque les buckets sont intégralement reconstruits à chaque frame. Une occurrence supprimée n'apparaît simplement plus dans la prochaine frame. Le shader ne reçoit ni matrice identité sentinelle ni slots inactifs.
+VXL-041 — Recréer les SSBO à chaque frame : VALIDÉ
+Le VoxelRenderingSystem crée un SSBO neuf par bucket de rendu non vide et par RenderSnapshot, copie tout son tableau d'instances, puis produit directement la commande de dessin instancié. Pas de commandes d'update par élément, cache d'occurrence, upload partiel ou double buffering explicite. Les Model/Mesh immuables restent partagés. Cette simplification accepte des allocations GPU et transferts complets réguliers, à mesurer ultérieurement.
+VXL-042 — Definition immuable, Cell par valeur et stockage interne compact : VALIDÉ
+L'architecture des ressources est Cell → Definition → Shape. Une Definition immuable encapsule un std::shared_ptr<const Data> et associe une Shape aux slots sémantiques du Model ; elle ne contient pas les matériaux concrets de la palette. Une Cell publique contient une Definition par valeur (copie légère), accompagnée de son orientation. Volume conserve une table locale de définitions et des cellules à indices compacts, reconstruisant des valeurs Cell sur les lectures publiques. Aucun Catalog global obligatoire. Les détails d'égalité des définitions, de cellule vide, d'identifiants locaux et de construction sont encore ouverts.
+VXL-043 — Polygones de Shape plans et convexes : VALIDÉ
+Une Shape est constituée de polygones plans et convexes d'au moins trois sommets. Il n'y a pas de polygone concave individuel dans le contrat d'entrée. Les objets et volumes globalement concaves sont représentés par plusieurs polygones convexes, y compris dans un seul Shape. Les surfaces ouvertes et non fermées (par exemple végétation) restent prises en charge. Cela ne réduit pas l'exigence de clipping et d'occlusion polygonale précis du Mesher : les intersections et fragments visibles restent à calculer robustement. Triangulation/résultats, winding, UV, erreurs de validation et représentation des coordonnées intermédiaires restent à spécifier.
+VXL-044 — Rasterisation entière et couvertures de frontière par rectangles 2D : VALIDÉ
+Les Shape conservent leurs sommets entiers sur [0,1000]³. Le modèle de calcul d'occlusion entre cellules utilise six domaines 2D de frontière à résolution 1000 × 1000, des arêtes rasterisées de manière déterministe (famille Bresenham), un remplissage des surfaces et une union de rectangles 2D AABB alignés sur les axes reproduisant exactement les pixels occupés, plutôt qu'une boîte englobante approximative. Les couvertures sont dérivées et réutilisables par Shape, et non des buffers denses obligatoires par Cell. Le Mesher soustrait les zones occultées et produit un MeshVertex::position entier ; le passage éventuel en float peut se limiter au GPU.
+Ce choix remplace la contrainte de clipping analytique continu exact : la précision garantie est celle de la grille, non une précision sous-pixel. Les 6 masques représentent uniquement l'information d'occlusion aux frontières, sans remplacer les polygones 3D, notamment les surfaces inclinées/internes. VXL-045 précise que leurs entrées sont les polygones coplanaires aux frontières, et non la projection des polygones intérieurs. Les règles exactes de remplissage, de bord, de séparation des slots, de cache, de décomposition des rectangles et de génération du mesh restent à préciser.
+VXL-045 — Six outerShell coplanaires et un innerShell géométrique : VALIDÉ
+Une Shape classe à la construction ses polygones en six groupes extérieurs par plan frontière (X=0, X=1000, Y=0, Y=1000, Z=0, Z=1000) et un groupe innerShell pour tous les polygones non situés intégralement sur l'un de ces plans. Les couvertures 2D 1000 × 1000 et leurs unions d'AABB découlent seulement des outerShell concernés ; aucune projection de la géométrie intérieure n'est utilisée comme masque d'occlusion de frontière. Les innerShell conservent leurs polygones 3D. Une Shape composée exclusivement de polygones intérieurs a six couvertures vides, mais n'est pas une Shape vide.
+La règle de visibilité/génération des polygones innerShell est définie séparément par VXL-046 : elle ne dépend ni de la présence ni de la visibilité des outerShell de la cellule courante, mais de la fermeture opaque complète des six frontières par les voisins. Une Shape isolée sans outerShell conserve donc ses innerShell ; une même Shape enfermée par six voisins pleinement opaques les omet au bake.
+VXL-046 — Emission conditionnelle des innerShell selon les six voisins : VALIDÉ
+L'optimisation des surfaces internes est activée : ne pas émettre les polygones innerShell d'une cellule lorsque ses six voisins possèdent chacun une couverture outerShell opaque intégrale sur le plan frontière opposé. Ce sont les seules couvertures des voisins qui comptent, sans union avec les surfaces extérieures de la cellule courante. L'occupation géométrique doit être occultante au sens du matériau ; les couvertures non totalement opaques ne ferment pas la frontière.
+Si une seule des six frontières n'est pas complètement fermée (voisin absent/Empty/Unknown, couverture partielle, matériau insuffisamment occultant), émettre l'ensemble des polygones innerShell de la cellule. Une Shape sans outerShell obéit à la même règle ; elle ne disparaît pas simplement parce que ses six propres couvertures sont vides. Les outerShell continuent, indépendamment, à subir leur occultation partielle par les voisins. Cette décision concerne le bake du Model, non un culling GPU par frame.
+Point explicitement ouvert : une caméra située à l'intérieur d'un espace entièrement fermé pourrait voir des polygones internes omis par cette règle ; déterminer la politique attendue pour les points de vue intérieurs avant de considérer l'algorithme comme universellement correct. Les détails du contrat d'opacité, du remplissage et des tests restent eux aussi à finaliser.
+Fonctionnalités explicitement conservées
+L'occlusion polygonale précise à la résolution discrète VXL-044 de 1/1000 et le Mesher ambitieux restent des exigences de V0.1.4, sans raccourci consistant à utiliser la bounding box globale d'un polygone comme couverture. La transparence (verre, fenêtres, etc.), alpha-cutout et WBOIT sont aussi conservés. Le WBOIT gère la transparence visuelle ; transmission physique de la lumière et ombres du verre constituent un contrat d'éclairage distinct à préciser.
+Autres sujets de conception ouverts : contrats exacts des Shapes/Volumes, binding palettes/textures, définition de compatibilité d'un bucket, durée de vie des ressources GPU et validation des APIs publiques. Ne pas inventer de décisions supplémentaires.
+9 — Traçabilité des décisions antérieures
+VXL-046 fixe le filtrage conditionnel des innerShell au bake : les émettre tous sauf si les six plans frontières sont entièrement couverts par les outerShell opaques de leurs voisins respectifs ; aucun outerShell propre à la cellule ne contribue à prouver sa fermeture. Voisin absent/inconnu/insuffisamment occultant ⇒ conserver les innerShell. Les caméras intérieures restent un risque de conception à trancher.
+VXL-045 établit six groupes de polygones outerShell strictement coplanaires aux frontières et un groupe innerShell pour les autres polygones. Les couvertures ne proviennent que des outerShell, sans projection de géométrie intérieure. La règle d'émission des innerShell demeure ouverte.
+VXL-044 fixe des couvertures discrétisées par six faces de frontière, rasterisation entière de type Bresenham, union exacte de rectangles AABB 2D pour les pixels couverts, et positions de mesh entières avec conversion flottante éventuellement réservée au GPU. La précision est limitée à la grille ; le détail sémantique des couvertures, des slots et du clipping reste ouvert.
+VXL-043 fixe des polygones individuels plans et convexes (au moins trois sommets), les formes globalement concaves étant des compositions de tels polygones ; les surfaces ouvertes restent admises. Les intersections précises du Mesher restent obligatoires.
+VXL-042 fixe Definition immuable avec shared_ptr<const Data>, Cell publique contenant Definition par valeur, et table locale de définitions indexée de manière compacte dans Volume, sans Catalog obligatoire.
+Les discussions VXL-001 à VXL-031 ont déterminé Volume immutable / Builder, positions locales discrètes, géométrie polygonale exacte, Materials et transparence, relecture des voisins, Mesh, Model immutable, Assembly hiérarchique et articulé, palettes par Model, JSON, bake synchrone, absence de Catalog. Les choix VXL-032 à VXL-040 ont fixé instancing, abandon de Assembly::Instance, composants uniquement données, orchestration par System, binding non propriétaire, RenderSnapshot autonome, Assembly seul versionné et instances compactes. VXL-041 remplace les stratégies GPU précédentes par une reconstruction intégrale des tableaux d'instances et des SSBO à chaque frame ; suppression des commandes d'update, caches d'offset et synchronisations partielles.
+Ne pas réintroduire les choix abandonnés : palette unique imposée pour Assembly, Assembly::Instance, Catalog obligatoire, grille entière mondiale, animation voxel dédiée, Entity3D par partie.
+10 — Processus d'implémentation à faire respecter par la seconde IA
+Phase 1 : lire la PR et le Sparkle réel, proposer les headers/relations/signatures de toutes les classes, résoudre les points ouverts avec le mainteneur et obtenir validation des interfaces.
+Phase 2 : discuter et obtenir validation des cas de TU (géométrie, scénarios de recouvrement, transformations, buffers, instancing), construire les tests et fixtures, sans anticiper silencieusement les comportements.
+Phase 3 : implémenter progressivement jusqu'à satisfaire ces TU ; ajouter tests graphiques, golden images, CI, profiling si pertinent et revue architecturale.
+La description de cette PR est la source de vérité jusqu'à validation finale. Aucun commit de code n'est autorisé par le seul fait que ce texte existe.
+Conception poursuivie jusqu'à VXL-046 validée ; outerShell des six frontières uniquement, innerShell 3D émis conditionnellement à l'absence d'enfermement opaque par les six voisins, couvertures discrètes par union d'AABB 2D, sommets entiers, Definition immuable, Cell par valeur, Volume à table locale compacte, SSBO neuf à chaque frame. Les points de vue intérieurs et les interfaces restantes sont encore à définir.
+chore: initialize V0.1.4 voxel design pull request (empty commit)
+6cff85c
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

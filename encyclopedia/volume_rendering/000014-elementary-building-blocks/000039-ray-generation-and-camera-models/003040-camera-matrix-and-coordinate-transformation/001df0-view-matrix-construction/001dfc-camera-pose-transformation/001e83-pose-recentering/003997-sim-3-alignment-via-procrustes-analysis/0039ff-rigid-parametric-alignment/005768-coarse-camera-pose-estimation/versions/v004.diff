@@ -1,0 +1,133 @@
+--- v003.md
++++ v004.md
+@@ -1,68 +1,86 @@
+ # Coarse Camera Pose Estimation
+ 
+-Also called: DSAC-based Pose Estimation, RANSAC-PnP Registration
++Also called: Coarse Pose Estimation, Initial Pose Registration
+ 
+ ## Overview
+-Coarse Camera Pose Estimation initializes the camera extrinsics for a target image by establishing 2D-3D correspondences between the target and a registered reference image, then solving for the pose using Direct Linear Transform (DSAC) and Perspective-n-Point (PnP) with RANSAC [S1, unofficial]. It differs from [Iterative Closest Point (ICP)](10563-iterative-closest-point-icp.md) by relying on learned semantic 3D reconstruction rather than geometric surface matching, and from [Rigid Parametric Alignment](8609-rigid-parametric-alignment.md) by providing the initial seed pose rather than refining a known correspondence set via SVD [S1, unofficial].
++Coarse Camera Pose Estimation is a method for initializing the extrinsic parameters of a target image relative to a registered reference image in unposed image datasets. It solves the problem of establishing a consistent global coordinate system by leveraging a pre-trained scene regressor to generate pseudo-3D points, which are then used to solve a Perspective-n-Point (PnP) problem. It differs from [Iterative Closest Point (ICP)](10563-iterative-closest-point-icp.md) by relying on learned geometric priors from a neural scene representation rather than iterative nearest-neighbor matching, and it serves as the initialization step for [Rigid Parametric Alignment](8609-rigid-parametric-alignment.md).
+ 
+ ## How it works
+ **Inputs:**
+-- Registered reference image $I_{ref}$ (or $I_i$).
+-- Target image $I_k$ to be registered.
+-- Camera intrinsic matrix $K$ (supporting distinct focal lengths $f_x, f_y$) [S1, unofficial].
+-- Inlier threshold $s_{inlier} = 5,000$ [S1, unofficial].
+-- Reprojection error threshold $\epsilon_{reproj} = 6$ pixels [S1, unofficial].
++- $I_{ref}$: A registered reference image with known camera pose.
++- $I_k$: A target image with unknown camera pose.
++- $K$: The camera intrinsic matrix.
++- $s_{inlier}$: Inlier threshold (typically 5,000) [S1, unofficial].
++- $\epsilon_{reproj}$: Reprojection error threshold (typically 6 pixels) [S1, unofficial].
+ 
+ **Outputs:**
+-- Coarse camera pose $T_{coarse}$ (extrinsics) for $I_k$.
+-- Inlier count $S_k$.
+-- Boolean flag indicating if $I_k$ is added to the training buffer.
++- $T_{coarse}$: The coarse camera pose transformation matrix for $I_k$.
++- $S_k$: The number of inliers found during estimation.
++- Boolean flag indicating whether $I_k$ is added to the training buffer.
+ 
+ **Data Structures:**
+-- Scene Regressor $f_{SCR}$: A neural network (e.g., Transformer-based) mapping $(I_{ref}, I_k)$ to a set of 3D points $\{X_k\}$ in the global coordinate frame [S1, unofficial].
+-- Pixel coordinates $\{u_k\}$: 2D image coordinates for $I_k$.
+-- 2D-3D Correspondences: Set $\{(u_k, X_k)\}$ derived from $\{u_k\}$ and $\{X_k\}$ [S1, unofficial].
++- $\{u_k\}$: Set of 2D pixel coordinates for image $I_k$.
++- $\{X_k\}$: Set of 3D points in the global coordinate frame, predicted by the scene regressor.
++- $\{(u_k, X_k)\}$: Correspondence set.
+ 
+ **Steps:**
+-1. **3D Point Regression:** Pass $I_{ref}$ and $I_k$ to $f_{SCR}$ to obtain the set of 3D points $\{X_k\}$ in the global coordinate frame [S1, unofficial].
++1. **Scene Regression:** Pass $I_{ref}$ and $I_k$ to the scene regressor $f_{SCR}$ to obtain the set of 3D points $\{X_k\}$ in the global coordinate frame [S1, unofficial].
+    $$ \{X_k\} = f_{SCR}(I_{ref}, I_k) $$
+-2. **Correspondence Generation:** Construct 2D-3D correspondences $\{(u_k, X_k)\}$ using the pixel coordinates $\{u_k\}$ of $I_k$ and the regressed 3D points $\{X_k\}$ [S1, unofficial].
+-3. **Pose Estimation (DSAC + PnP):** Solve for the camera pose $T_{coarse}$ and inlier count $S_k$ using DSAC and PnP:
+-   $$ T_{coarse}, S_k = \text{PnP}(K, \{(u_k, X_k)\}) $$
+-   The implementation uses a modified DSAC that supports distinct focal lengths for the x and y axes [S1, unofficial].
+-4. **Inlier Validation:** Check if $S_k > s_{inlier}$ [S1, unofficial].
+-5. **Buffer Update:** If $S_k > s_{inlier}$, add $I_k$ to the training buffer and select it as a reference for future registrations [S1, unofficial].
++2. **Correspondence Generation:** Identify 2D-3D correspondences $\{(u_k, X_k)\}$ by pairing each pixel coordinate $u_k$ in $I_k$ with its corresponding 3D point $X_k$ predicted by the regressor [S1, unofficial].
++3. **Pose Solving:** Use RANSAC combined with a PnP solver to estimate the camera pose $T_{coarse}$ and compute the inlier count $S_k$ [S1, unofficial]. The solver minimizes the reprojection error. The optimization problem is defined as:
++   $$ \min_{X, C_k} \sum_{i,k} \rho(\|d_{i,k} \cdot \nu_{i,k} - (X_i - C_k)\|_2) $$
++   where:
++   - $C_k$ is the camera center for image $I_k$.
++   - $d_{i,k}$ is the scaling factor between a 3D point $X_i$ and the camera center $C_k$.
++   - $\nu_{i,k}$ is the ray direction between $X_i$ and $C_k$.
++   - $\rho$ is the loss function (e.g., Huber or L1) [S1, unofficial].
++   - Note: During optimization, the camera pose of the seed image is fixed to resolve gauge ambiguity, and the scaling factor between the seed image and its most similar adjacent image is fixed to resolve scale ambiguity [S1, unofficial].
++4. **Validation:** Compare the number of inliers $S_k$ against the threshold $s_{inlier}$ [S1, unofficial].
++5. **Buffer Update:** If $S_k > s_{inlier}$, add the target image $I_k$ to the training buffer. Otherwise, discard it [S1, unofficial].
+ 
+-**Formulas:**
+-The optimization within DSAC minimizes the reprojection error:
+-$$ \sum_{i,k} \rho(\| d_{i,k} \cdot \nu_{i,k} - (X_i - C_k) \|_2) $$
+-Where:
+-- $C_k$ is the camera center for image $I_k$.
+-- $X_i$ is a 3D point.
+-- $d_{i,k}$ is the scaling factor between $X_i$ and $C_k$.
+-- $\nu_{i,k}$ is the ray direction between $X_i$ and $C_k$.
+-- $\rho(\cdot)$ is the loss function [S1, unofficial].
++**Pseudocode:**
++```python
++def coarse_camera_pose_estimation(I_ref, I_k, K, s_inlier=5000, epsilon_reproj=6.0):
++    # Step 1: Get 3D points from scene regressor
++    # f_scr is the pre-trained scene regressor
++    X_k = f_scr(I_ref, I_k)
++    
++    # Step 2: Get 2D pixel coordinates for I_k
++    # Assuming u_k are all pixel centers in I_k
++    u_k = get_pixel_coordinates(I_k)
++    
++    # Step 3: Solve PnP with RANSAC
++    # The solver uses the correspondences (u_k, X_k)
++    # It minimizes the reprojection error defined in the formula
++    # T_coarse is the transformation from camera frame to global frame
++    T_coarse, S_k = solve_pnp_ransac(K, u_k, X_k, epsilon_reproj)
++    
++    # Step 4: Check inlier threshold
++    if S_k > s_inlier:
++        return T_coarse, True
++    else:
++        return None, False
++```
+ 
+-**Parameters:**
+-- $s_{inlier} = 5,000$ [S1, unofficial].
+-- Reprojection error threshold = 6 pixels [S1, unofficial].
+-
+-**Edge Cases:**
+-- **Gauge Ambiguity:** The camera pose of the seed image is fixed during optimization [S1, unofficial].
+-- **Scale Ambiguity:** The scaling factor between the seed image and its most similar adjacent image is fixed [S1, unofficial].
+-- **Inaccuracy:** Poses may be inaccurate if the scene regressor has not seen the target images; however, a separate MLP pose refiner was found ineffective for transformer-based regressors [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Scene Regressor Accuracy:** If the scene regressor has not seen the target image $I_k$, the predicted 3D points $\{X_k\}$ may be inaccurate, leading to poor pose estimation [S1, unofficial].
++- **Gauge Ambiguity:** The global coordinate system requires fixing the seed image's pose and a scaling factor to avoid ambiguity [S1, unofficial].
++- **Inlier Threshold:** The threshold $s_{inlier}$ is critical for filtering out bad registrations. A value of 5,000 is used in the source [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Structure-from-Motion (SfM)](16341-structure-from-motion-sfm.md)
++SfM recovers camera poses and sparse 3D structure from uncalibrated images globally. Unlike Coarse Camera Pose Estimation, which uses a neural scene regressor for local pairwise registration, SfM relies on feature matching and triangulation. Choose SfM for global consistency in large-scale scenes; choose Coarse Camera Pose Estimation for incremental registration in neural rendering pipelines where a scene regressor is available.
++
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the inference of the scene regressor $f_{SCR}$ and the RANSAC iterations in DSAC.
+-- **Memory Complexity:** Requires storing the 3D points $\{X_k\}$ and the training buffer of registered images.
+-- **Strengths:** Provides robust initialization for unposed images using learned semantic features rather than explicit geometry.
+-- **Limitations:** Accuracy depends on the quality of $f_{SCR}$; poses may require refinement if the regressor has not encountered similar views.
+-- **When to use:** Initial stage of incremental training for Neural Radiance Fields or 3D Gaussian Splatting from unposed images.
+-- **When not to use:** When high-precision initial poses are available or when the scene lacks semantic features learnable by the regressor.
++- **Time Complexity:** Dominated by the inference time of the scene regressor $f_{SCR}$ and the PnP solver. The PnP solver with RANSAC is typically fast for moderate numbers of points.
++- **Memory Complexity:** Requires storing the 3D points $\{X_k\}$ and the scene regressor parameters.
++- **Strengths:** Enables registration of unposed images without explicit feature matching. Integrates seamlessly with neural rendering frameworks.
++- **Limitations:** Relies on the accuracy of the scene regressor. May fail if the regressor has not converged or seen similar scenes.
++- **When to use:** When initializing camera poses for neural rendering methods (e.g., 3D Gaussian Splatting) from unposed image collections.
++- **When not to use:** When high precision is required immediately without subsequent refinement, or when no scene regressor is available.
+ 
+ ## Background
+-Originated in [ZeroGS](https://doi.org/10.48550/arxiv.2411.15779) (2024) as a method to train 3D Gaussian Splatting from unposed images [S1, unofficial]. It builds on [Rigid Parametric Alignment](8609-rigid-parametric-alignment.md) by providing the initial $T_{coarse}$ that subsequent differentiable solvers or refinements may improve. It addresses the problem of initializing camera poses without prior calibration or structure-from-motion pipelines.
++Coarse Camera Pose Estimation is used in the context of training 3D Gaussian Splatting from unposed images, as described in ZeroGS [S1, unofficial]. It addresses the challenge of initializing camera poses for neural rendering when no prior pose information is available. The method leverages a scene regressor to predict 3D points, which are then used to solve for the camera pose via PnP. This approach allows for incremental registration of images into a global coordinate system.
+ 
+ ## Sources

@@ -1,0 +1,754 @@
+Free software for everyone, built together with the spare weekly AI tokens we don't finish. Workers keep everything except running costs. - G55: Morton-sorted cell index by Vanman989 · Pull Request #376 · spareware-co-op/spareware
+
+G55: Morton-sorted cell index by Vanman989 · Pull Request #376 · spareware-co-op/spareware · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Vanman989
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Piece G55: Morton-sorted cell index (geom-bvh; chapter 19.9). Stacked on piece/G54 (#366), the box tree, which is stacked on piece/G45 (#267); merge after both.
+Done when: Linear octree with 123-bit Morton keys for point neighbour searches (welding, envelopes); key-sorted results identical for shuffled input, every thread count and wasm32; 10M points in under 1 s on 8 threads.
+What changed
+geom-bvh gains cells, the point index beside the box tree (chapter 19.9: it "indexes points, not boxes. It serves welding and other point searches, where one sort builds it").
+The code. Each coordinate is offset by 2^40, which makes a grid coordinate's 41 bits non-negative. The three are interleaved into one 123-bit Morton code (morton): x in bits 0, 3, 6, ..., y in bits 1, 4, ..., z in bits 2, 5, .... The cell of side 2^L at an aligned corner is then one contiguous run of the sorted codes, so the index is a linear octree that stores nothing but the points in (code, key) order.
+CellIndex::build:
+Points are sorted by key (skipped when already in order), and a repeated key is refused.
+Runs of 32,768 points are coded and sorted as one geom-run phase, then merged in pairs, a phase per round, and gathered as a phase.
+What is sorted is (code, position in key order). These are all distinct, so the order is unique: the same for any pool, input order or sorting algorithm.
+within(centre, radius): the keys of the points at Euclidean distance at most the radius, decided on exact squared distances in i128, ascending.
+The search box meets at most three cells of side 2^L per axis, for the smallest L with 2^L above the radius. Cells the ball cannot reach are skipped.
+It charges the meter one unit per point scanned, so a cancelled or over-budget search returns an error and no keys.
+pairs_within(radius): every pair at most the radius apart, as (smaller key, larger key), ascending. It runs one search per point as a geom-run phase.
+to_bytes gives the canonical bytes. points, codes, len and is_empty are readable.
+Decisions taken here
+core's unstable sort within runs, not geom-run's stable sort.
+geom-run's sort calls a key function per comparison. It took 4.9 s for ten million points on eight threads here.
+Sorting distinct (code, position) slots in place has one possible answer, so it is as deterministic as the stable sort. It allocates nothing.
+Merges and the gather stay inside geom-run phases.
+3D only. The board names 123-bit keys, and welding and envelopes are 3D. 2D points can use z = 0.
+Exact distance, any radius. Radii past 2^42 reach every point, and are clamped there for the box arithmetic only.
+How it was checked
+tests/cells.rs:
+Codes equal a naive bit-by-bit interleave on 5,000 points, the frame's corners included, and every aligned cell from level 0 to 40 is one run.
+Every search equals brute force: sparse points over the whole frame, dense points, clusters, points at the frame's edge, the eight corners and 200 equal points. Radii run from 0 to past the frame (u64::MAX), with 1,000+ centres. Pairs are checked on every set of up to 1,000 points.
+The index equals a brute-force sort of (code, key), across several runs of the code sort.
+Bytes and answers are identical for the serial executor and pools of 1 to 8 threads (tasks dealt round-robin, run backwards), for shuffled, sorted and reversed input of 35,000 points.
+The documented bytes; a repeated key refused; cancellation and short budgets.
+tests/cells_determinism.rs: the new golden geom-bvh/cells. It covers seven indexes (1 to 20,000 points), their bytes, 504 searches with the work each charged, and 14 pair searches, hashed with SHA-256 and run on every CI target (wasm32 included).
+Mutation gate, run locally on cells.rs (cargo-mutants 27.1.0): 119 mutants, 81 caught, 27 unviable, 11 kept in the ledger as equivalent, each with its argument. The equivalents are:
+bit operations on bit groups that never overlap, where | and ^ give the same number;
+a merge comparison of slots that are never equal;
+the cell gap at the cell's first coordinate, which is 0 either way.
+The first runs also found loops a mutant could make endless. The merge rounds are now bounded by the number of runs, and each axis by three cells. A cell past the frame needs no bound: its code is past every point's, so its run is empty, as the comment beside the code argues.
+Coverage (cargo llvm-cov, nightly, branches): cells.rs 94.7% of lines; geom-bvh above the 90% bar.
+Locally, on Linux and on Windows: clippy -D warnings, fmt, every geom-bvh test, the map, provenance and golden checks, engine-geometry's tests and the quality-gate tests.
+Benchmarks (cargo bench -p geom-bvh --bench cells, wall clock, a development machine's WSL with other builds running)
+Case
+Time
+Build, 10,000,000 points, 8 threads
+1.8 s
+Build, 10,000,000 points, one thread
+3.7 s
+Pairs within 6 steps among 1,000,000 mesh-like points (503,170 pairs), 8 threads
+0.54 s
+Points within 40 steps of 100,000 centres, one thread
+5.3 s
+The 10M build misses the board's 1 s here, at 1.8 s. It went from 4.9 s to 1.8 s by sorting runs in place and gathering in parallel. What remains serial is the last merge rounds and joining the gathered runs. The board's figure is for the reference benchmark machine, which this session cannot reach; measuring it there is left for whoever can, before the target is called met or missed.
+Outside sources
+Source
+Link
+Licence
+Class (29.1)
+What was taken
+G. M. Morton, "A computer oriented geodetic data base and a new technique in file sequencing" (IBM Ltd., Ottawa, 1966)
+— (technical report, no public link)
+Report
+PORT METHOD
+The Morton order
+I. Gargantini, "An effective way to represent quadtrees" (CACM 25(12), 1982)
+doi:10.1145/358728.358741
+Paper
+PORT METHOD
+The linear octree: leaves kept as sorted location codes
+The bit spreading is the standard mask-and-shift sequence, written from its definition. No code was read or taken.
+Closes #374
+Merge record
+Merged with every check passed except one still running: FPTaylor, checked by HOL Light (fptaylor-lpi-side.fpt). This piece changes no proof problem: crates/geom-gen/generated/fptaylor-lpi-side.fpt (and every other .fpt, .g and .v problem) is byte-identical to main's, and geom-gen check passed here, so the job re-proves main's own file. That file was checked by HOL Light on G40's runs (#264 at 0337ba9 and f55e356, #369 at 3590802). Merged --admin under 32.12; main's nightly certificate run proves it again.
+🤖 Generated with Claude Code
+Vanman989
+and others
+added 30 commits
+October 27, 2026 02:08
+G45: 2D points, vectors and boxes take the same typed transforms
+…
+89053c7
+```
+G03 built geom-math's 3D points, vectors, boxes, frames and the typed
+transform enum; what G45 left was 2D. Principle 8 forbids a parallel 2D
+family, so 2D is the plane z = 0 of the same transforms: each kind
+(GridTransform, RationalTransform, Transform, TypedTransform) gains
+acts_in_plane (it leaves every z unchanged, so its orientation in the
+plane is its 3D one) and 2D apply methods that give exactly what the 3D
+ones give at z = 0, refusing any other transform with the new
+MathError::NotInPlane. GridTransform::mirror_diagonal adds the 45-degree
+mirrors chapter 14.10 lists as exact. Box2::transformed moves a grid box
+exactly; FBox2 is FBox3 on two axes. Transform::apply_grid_2d evaluates
+only the x and y rows (3D's per-row rounding, so the same bits): the z
+row would be 0, a whole step that sends 3D's filter down its exact path
+every time (250 to 72 ns a point).
+
+tests/attack_g45.rs: plane-keeping is exactly the z row; 2D equals 3D
+at z = 0 for every kind, errors included; quarter turns, the four
+mirrors and a mirror off the origin against their matrices; composition
+is application in turn; boxes move exactly and FBox2 holds the exact
+rational image of every corner. The 1M-point benchmark gains 2D cases.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G51: Brent's zero and minimum, generated Gauss rules, adaptive integr…
+…
+c6d2bfb
+```
+…ator
+
+geom_num::brent: Brent's zero (bisection, secant, inverse quadratic
+interpolation) and minimum (golden section, parabolic interpolation),
+written from Brent 1973 as Forsythe, Malcolm and Moler give them. A
+result keeps its bracket (or is an exact zero), the minimum is never
+evaluated at the ends, every value is a finite Real, a cap ends a search
+with CapReached, never a best guess.
+
+geom-gen quadrature-rules writes geom-num's src/quadrature_rules/: the
+Gauss-Legendre rules of 1 to 20 points and QUADPACK's six Gauss-Kronrod
+rules, computed in exact rationals (dashu): Gauss nodes by Sturm-count
+bisection on the Legendre Jacobi matrix and Golub-Welsch weights;
+Kronrod nodes as zeros of the Stieltjes polynomial from its orthogonality
+conditions, with interpolatory weights. Every node and weight is rounded
+once, correctly, from an exact enclosure.
+
+geom_num::quadrature: fixed Gauss-Legendre rules and an adaptive
+Gauss-Kronrod integrator (QUADPACK's QAG bisection) with Kronrod's
+|K - G| estimate, exact sums, a fixed stack work list and a cap.
+
+Tests: every rule exact to its degree in exact rationals; known
+integrals; Brent's bracket and tolerance over a grid of roots; caps and
+errors; and a replay golden over the whole corpus
+(geom-num/roots-and-quadrature).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G49: dense decompositions in geom-linalg
+…
+b37e0df
+```
+geom-linalg gains its first code: Matrix (dense, finite, fallibly
+allocated), LinalgError, and Work, a budget in multiply-adds charged in
+full before a factorisation starts (chapter 15.6). solve.rs: LU with
+partial pivoting, Cholesky, forward and back substitution, and the
+tridiagonal solve with partial pivoting (LAPACK dgtsv's method). qr.rs:
+Householder QR with column pivoting (norms downdated as xLAQP2 and
+recomputed when they lose sqrt(u)), the complete orthogonal
+decomposition (xTZRZF's right reflections), the least-norm least-squares
+solution, an orthonormal null space and the canonical null space of
+chapter 15.8 (reduced echelon form over the variable order). All from
+Golub and Van Loan and the LAPACK guide, in our own words; scalar loops
+in a fixed order, ties to the first.
+
+tests/dense.rs checks everything against exact rationals (dashu):
+residuals of random, graded, pivot-forcing and tridiagonal systems;
+refusals; exact rank and least-norm solutions of rank-deficient
+products; the canonical null space equal to the exact reduced echelon
+basis and independent of row order and scale; Kahan's matrix showing the
+documented limit of column pivoting; and the work charges. The benchmark
+factors 256 unknowns by pivoted QR in 11.5 ms (target 20 ms). The
+scaffold table marks geom-linalg as built by G49.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G51: the generator's method links its papers as https
+…
+fbd3a79
+```
+attack_g11 asks every geom-gen module's Method paragraph for an http link
+or a .md path; the DOIs are now written as https://doi.org links.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G49: rows swap element by element, which the recursion check can read
+…
+a017665
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G51: the quadrature generator reads its arrays without bracket indexi…
+…
+2b3a134
+```
+…ng (attack_g11)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G51: the Kronrod nodes checked against Laurie's Jacobi-Kronrod matrix…
+…
+749bf4b
+```
+… in exact rationals
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G50: singular value decompositions (one-sided Jacobi, Golub-Kahan) an…
+…
+819efa3
+```
+…d the symmetric eigensolver
+
+svd.rs: one-sided Jacobi (Hestenes; Demmel and Veselic) with scaled
+norms and cosines, so graded columns keep their relative accuracy, and
+Golub-Kahan (Householder bidiagonalisation, implicit QR with Wilkinson's
+shift, zero-diagonal chasing); rank and chapter 15.8's three verdicts
+against caller thresholds. eigen.rs: Householder tridiagonalisation and
+implicit symmetric QR. cols.rs and rotation.rs: column storage, Givens
+rotations and a scaled hypot. Both iterate under a cap
+(NoConvergence) and charge their work per sweep or step.
+
+tests/spectral.rs checks everything against exact rationals (dashu):
+residuals and orthogonality exactly, each singular value and eigenvalue
+bracketed by exact inertia counts; Jacobi to a relative 2^-40 on column-
+graded matrices down to 2^-600, where Golub-Kahan is only absolutely
+accurate; exact rank deficiency. tests/spectral_determinism.rs pins 546
+results in the golden store (geom-linalg/spectral).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G45
+…
+1f6c9e3
+```
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G49
+…
+1e58393
+```
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G51
+…
+04f21d9
+```
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'piece/G49' into piece/G50
+…
+f71ab47
+```
+Brings in G49 with main merged.
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G49: interface tests for what the mutation gate found untested
+…
+a6d44a3
+```
+Error texts and kinds, the work budget, index refusals (rows of a matrix
+without columns included), mul_vec, the pivoted QR's column order at any
+scale with downdated norms, the rank's strict tolerance, the COD's column
+order, LU's tie rule, each wrong length refused on its own, and tridiagonal
+interchanges with non-zero multipliers.
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G49: the column order under the norm-downdate rule, and the ledger's …
+…
+b96c83d
+```
+…unobservable survivors
+
+Four matrices whose pivoted-QR column order changes under any other form of
+xLAQP2's recompute test, found with a model that repeats the factorisation's
+double arithmetic step for step. The quality ledger keeps the nine survivors
+no public input can tell apart: guards that pub(crate) callers never trip,
+ties that give the same double, a one-coordinate reflection that is the
+identity, and the canonical null space's pivot among equal rows (unique basis).
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'piece/G49' into piece/G50
+…
+2e7ac1c
+```
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G50: a zero singular value always gets its vector; interface tests an…
+…
+d7f653b
+```
+…d ledger for the mutation gate
+
+complete() took the first coordinate vector keeping more than half its length
+after Gram-Schmidt, which every one can miss (three Hadamard columns leave each
+exactly half): Jacobi returned Defect on such a rank-deficient matrix. It now
+takes the longest, the first of equal ones; m - r >= 1 guarantees at least
+1/sqrt(m). The rank-deficient cases of the golden geom-linalg/spectral change,
+so its digest (this piece's own entry) is updated.
+
+tests/spectral_interface.rs: rank and verdict edges, every factorisation
+commuting with scaling by 2^40 and 2^-40 bit for bit, a negligible entry
+splitting the eigensolver's block, Wilkinson's shift on a tie in both
+iterations, and the Hadamard completion. The ledger keeps eleven survivors no
+public input can tell apart or that only move the step cap by one, and one hang.
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G54: the box tree, first cut (build, refit, queries, tests, golden, b…
+…
+bc18401
+```
+…enchmark)
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G54: faster build (items moved, one binned axis, measures in plain ar…
+…
+307e164
+```
+…ithmetic, sort skipped when in key order)
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G54: partition without fallible indexing per item
+…
+691dd52
+```
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G54: geom-bvh built by G54 in the scaffold table, map regenerated, go…
+…
+f275650
+```
+…lden digest for the final build
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G45: tests for the edges the mutation gate found unchecked
+…
+c9592e7
+```
+A certified transform's 2D vectors in and out of the plane, the exactness
+flag when one coordinate rounds, NotInPlane's message, and FBox2's
+intersection, containment and overlap, touching included.
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G54: close the mutation gate's gaps
+…
+0c7c0aa
+```
+Box unions by min and max; the walks' explicit stacks are vectors with the
+depth's room reserved, so no size constant can be wrong; the depth by a max;
+no redundant length check. The golden now records the work each walk charges,
+which pins the walks themselves. Tests for a zero padding and the exact
+rebuild limit. The ledger keeps four guards no input can trip.
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'piece/G45' into piece/G54
+…
+ce26e2e
+```
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G51: every branch reachable or gone, and tests for the edges
+…
+517d07c
+```
+brent: the finite and non-zero checks before the interpolation tests are
+dropped where the tests themselves already refuse those values (the argument
+is beside each); minimum keeps q.is_finite(), which matters.
+quadrature: values into a fixed array with the Gauss sum read off the odd
+nodes, the panels started from the first panel, the worst panel by max_by,
+the replacements in one pass; no Option arm that cannot happen.
+attack_g51: error texts, every refusal on its own, too-narrow panels either
+way, the panel limit and the cap, and minimum on overflowing parabolas,
+outside vertices and tied plateaus. The golden is unchanged.
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G51: attack inputs that overflow the parabola and put its vertex outs…
+…
+0e864e2
+```
+…ide the interval
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G51: the parabola's overflow and both outside vertices, with inputs f…
+…
+51e15b0
+```
+…ound by a model of minimum
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G54: map regenerated for the query module's header
+…
+9609bf7
+```
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G51: the golden records every point each search and integration evalu…
+…
+45c66bf
+```
+…ates, over more shapes
+
+The order of evaluations is what a caller's function sees, so a changed step
+now changes the digest even when the answer does not. minimum runs on six
+shapes at eight places; the integrands gain one with values in the
+thousands, where a relative tolerance differs from an absolute one. The
+digest of this piece's own golden is updated.
+
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/piece/G44' into piece/G46
+…
+edf072b
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G46: one rational rotation type for 2D and 3D, an integer quaternion …
+…
+1164f3c
+```
+…(decision 32.14)
+
+RationalRotation holds q = (w, x, y, z) in lowest terms, |q|^2 below 2^72, for the rotation
+M(q)/|q|^2. plane_within and Pythagorean::within find the 2D rotation or direction with the
+smallest half-angle denominator within a requested angle (Canny, Donald and Ressler); within
+rounds a 3D target at growing scales; compose is exact while it fits and re-approximated once
+otherwise. Every bound is certified in interval arithmetic. TypedTransform gains a Rotation
+variant for rotations too large for a RationalTransform, and composes rotations exactly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Vanman989
+and others
+added 4 commits
+October 29, 2026 13:10
+Merge remote-tracking branch 'origin/main' into piece/G51
+…
+2d49866
+```
+Main brings G39's Verus twins and G35's filter certificates among its new pieces; geom-gen keeps every generator from both sides, the quadrature rules after main's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G54
+…
+c449e27
+```
+Main brings G08's accepted crate table: geom-bvh's row is amended and stays built by this piece, and its header no longer says the table is pending G08.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G51
+…
+b199590
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G54
+…
+b8c0bee
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Vanman989
+requested a review
+from a team
+as a code owner
+October 29, 2026 03:33
+Vanman989
+and others
+added 23 commits
+October 29, 2026 16:33
+Merge remote-tracking branch 'origin/main' into piece/G46
+…
+1c6e08b
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge branch 'refs/heads/piece/G54' into piece/G55
+…
+de8bcc7
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G55
+…
+c8ac132
+```
+Main brings G42 among its new pieces; the golden store keeps main's geom-bench record and this stack's goldens.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G50
+…
+ed8fa5a
+```
+Main brings G42 and the G27 counts fix among its new pieces; the golden store keeps main's geom-bench record and this stack's goldens, and the quality ledger merged entry by entry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G54
+…
+1b44197
+```
+Main brings G42 and the G27 counts fix among its new pieces; the golden store keeps main's geom-bench record and this stack's goldens, and the quality ledger merged entry by entry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G51
+…
+db89887
+```
+Main brings G42 (30 generators: G39's Verus twins and G42's predicate variants; Avnaim's signs in geom-bench) and the G27 counts fix. geom-gen keeps all of main's generators and this piece's quadrature rules, 31 in all; geom-bench's coverage list keeps main's modules and this piece's brent and quadrature ones, 23 in all; MAP.json regenerated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G54: the tree corpus indexes its second set in u64 first, the same on…
+…
+86c76b3
+```
+… every target
+
+The corpus picked a moved box at b[key as usize % b.len()]: on wasm32 a usize is 32 bits, so the
+cast cut the 64-bit key first and wasm moved other boxes, and its tree golden differed from
+native's (3,976,141 bytes against 3,970,021). The remainder is now taken in u64. Native's bytes
+and the stored golden are unchanged; wasm computes them too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/piece/G54' into piece/G55
+…
+3214a7c
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G46
+…
+8af6f58
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G46: no recursive call in simplified, and the mutation gate's survivo…
+…
+13e59ea
+```
+…rs answered
+
+The recursion gate found TypedTransform::simplified calling itself (a rotation's rational form
+simplified again). The one step it took is now written in place: no recursive cycle remains.
+
+CI's mutation run left 24 survivors in the rotations. A scaled target's enclosure is now widened
+exactly when its scaling rounded (scaling back gives another double), instead of whenever the
+result was subnormal: the same enclosures for every input that reaches it, and a test the golden
+already pins (widening an exact component changes the rotation corpus). The other 21 go in the
+ledger, each with its reason: checks the module's bounds make unreachable (the simplest fraction's
+range, the denominator and angle limits, a sine above 1/2, which no bound accepts), sign tests on a
+lead that is never 0, ties that pick equal rows, quadrant tests for a direction that is never zero,
+|q|^2 = 2^40, which no canonical quaternion has, and compose's shortcut arms, which the later
+arms answer the same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G54: the test pool runs its groups on the calling thread where no thr…
+…
+4d02643
+```
+…ead can start
+
+wasm32-wasip1 has no threads, and Scope::spawn panics there, so the pool test aborted under node
+and wasmtime. The pool first tries one thread with spawn_scoped, which reports the failure, and
+where none starts runs every group here in turn, each still last first (as geom-run's own test
+pool does).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/piece/G54' into piece/G55
+…
+e9a260c
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+G55: the cell index's test pool runs on the calling thread where no t…
+…
+9b9835d
+```
+…hread can start
+
+The same change as G54's tree test pool: wasm32-wasip1 has no threads, so the pool tries one with
+spawn_scoped first and otherwise runs every group here, each still last first.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G51
+…
+b70a497
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G54
+…
+bff7ab3
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/main' into piece/G55
+…
+f549a19
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge main into piece/G45: G40 (#264) and Gate 1 (#369)
+…
+523cb10
+```
+No conflicts. Quick checks pass on the merged tree, attack_g43's gate
+table included.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge origin/piece/G45 (main 6b99afe and the pieces below) into piece…
+…
+1686ab4
+```
+…/G46
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge piece/G46 (main 6b99afe and the pieces below) into piece/G49
+…
+4fba717
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge piece/G49 (main 6b99afe and the pieces below) into piece/G50
+…
+46b8c5c
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge piece/G50 (main 6b99afe and the pieces below) into piece/G51
+…
+a15f4cb
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge piece/G51 (main 6b99afe and the pieces below) into piece/G54
+…
+afc079b
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Merge piece/G54 (main 6b99afe and the pieces below) into piece/G55
+…
+35853bf
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Signed-off-by: Van <25638713+Vanman989@users.noreply.github.com>
+```
+Hide details
+View details
+Vanman989
+merged commit 51678b1
+into
+main
+Oct 29, 2026
+176 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Vanman989
+deleted the
+piece/G55
+branch
+October 29, 2026 14:04
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

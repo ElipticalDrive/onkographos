@@ -1,0 +1,202 @@
+--- v005.md
++++ v006.md
+@@ -1,23 +1,36 @@
+ # Percentile-based Normalization
++
+ Also called: DRR Image Normalization, Grayscale Mapping
++
+ ## Overview
+-Percentile-based Normalization scales scalar field data to the range $[0, 1]$ by using robust statistical bounds (percentiles) instead of global extrema, effectively ignoring outliers that would otherwise compress the visible contrast. It differs from [Scaling](2287-scaling.md) and [Scalar Field Normalization](1842-scalar-field-normalization.md) by replacing the absolute minimum and maximum with the $p_{min}$-th and $p_{max}$-th percentiles, ensuring that extreme noise or sparse artifacts do not dominate the dynamic range. This method is particularly suited for generating Digital Radiograph (DRR) images and 8-bit visualizations where preserving local contrast is critical.
++Percentile-based Normalization scales scalar field data to a target range (typically $[0, 1]$ or $[0, 255]$) by using robust statistical bounds (percentiles) rather than global extrema. This solves the problem of outlier sensitivity in volume rendering, where a few extreme values can compress the dynamic range of the majority of the data, resulting in poor contrast. It differs from [Scaling](2287-scaling.md) by ignoring tail outliers, ensuring that the visualization focuses on the significant intensity distribution rather than being dominated by noise or sparse extreme values.
++
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A scalar field (e.g., a 2D projection image or 3D volume) $I$ with arbitrary real values.
+-- Output: A normalized scalar field $I_{norm}$ in $[0, 1]$ or an 8-bit integer image $I_{8bit}$ in $[0, 255]$.
++**Inputs:** A scalar field tensor or image $I$ of shape $(H, W)$ or $(D, H, W)$.
++**Outputs:** A normalized tensor $I_{norm}$ in $[0, 1]$ or an 8-bit integer image $I_{8bit}$ in $[0, 255]$.
+ 
+ **Data Structures:**
+-- The input is treated as a dense array of floating-point values.
+-- Two scalar bounds, $v_{min}$ and $v_{max}$, are computed.
++- Input: Floating-point array (float32/float64).
++- Output: Floating-point array or uint8 array.
+ 
+ **Steps:**
+-1. **Compute Percentile Bounds:** Calculate the lower bound $v_{min}$ as the $p_{min}$-th percentile and the upper bound $v_{max}$ as the $p_{max}$-th percentile of the input data $I$. Typical values are $p_{min}=5$ and $p_{max}=95$ to exclude the most extreme 10% of values [S1, unofficial].
+-2. **Clip Values:** Clip all values in $I$ to the range $[v_{min}, v_{max}]$. Values below $v_{min}$ become $v_{min}$, and values above $v_{max}$ become $v_{max}$.
+-3. **Normalize:** Apply linear scaling to map the clipped range to $[0, 1]$. A small epsilon $\epsilon$ is added to the denominator to prevent division by zero if $v_{min} = v_{max}$.
+-   $$ I_{norm}(x) = \frac{\max(0, \min(1, \frac{I_{clipped}(x) - v_{min}}{v_{max} - v_{min} + \epsilon}))} $$
+-   where $\epsilon = 10^{-8}$ [S1, unofficial].
+-4. **Quantize (Optional):** To produce an 8-bit grayscale image, scale by 255 and cast to unsigned 8-bit integer:
+-   $$ I_{8bit}(x) = \text{uint8}(I_{norm}(x) \times 255) $$
++1. **Calculate Percentile Bounds:** Compute the lower bound $p_{min}$ and upper bound $p_{max}$ as the $\alpha$-th and $(100-\alpha)$-th percentiles of the non-NaN values in $I$. Typical values are $\alpha=5$ (5th and 95th percentiles) [S1, unofficial].
++2. **Clip Values:** Clip the input image to the calculated bounds:
++   $$ I_{clipped} = \text{clip}(I, p_{min}, p_{max}) $$
++3. **Normalize:** Scale the clipped values to $[0, 1]$ using linear interpolation. A small epsilon $\epsilon$ is added to the denominator to prevent division by zero if $p_{min} \approx p_{max}$:
++   $$ I_{normalized} = \frac{I_{clipped} - p_{min}}{p_{max} - p_{min} + \epsilon} $$
++   Typical $\epsilon = 10^{-8}$ [S1, unofficial].
++4. **Scale to Target Range (Optional):** To convert to 8-bit grayscale:
++   $$ I_{8bit} = \text{astype}\left( \lfloor I_{normalized} \times 255 \rfloor, \text{uint8} \right) $$
++   [S1, unofficial].
++
++**Parameters:**
++- $\alpha$: Percentile cutoff (e.g., 5 for 5th/95th). Default: 5 [S1, unofficial].
++- $\epsilon$: Epsilon for numerical stability. Default: $10^{-8}$ [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Uniform Data:** If all values are identical, $p_{min} = p_{max}$, leading to division by zero. The epsilon term handles this, resulting in a constant output of 0 or 1 depending on implementation, but visually results in a uniform gray/black/white image.
++- **NaN Values:** Percentile calculations must ignore NaNs. If the entire tensor is NaN, the method fails. [S2, unofficial] suggests replacing NaNs with 0 before processing in some contexts.
++- **Negative Values:** The method works with negative values as long as the percentile calculation is robust.
+ 
+ **Pseudocode:**
+@@ -25,63 +38,109 @@
+ import numpy as np
+ 
+-def percentile_normalize(image: np.ndarray, p_min: float = 5.0, p_max: float = 95.0) -> np.ndarray:
++def percentile_normalize(image, alpha=5, epsilon=1e-8, to_8bit=False):
+     """
+-    Normalize image data using percentile-based clipping and scaling.
+-    Returns float array in [0, 1].
++    Normalize image using percentile-based clipping.
++    
++    Args:
++        image: np.ndarray, input scalar field.
++        alpha: float, percentile cutoff (default 5).
++        epsilon: float, numerical stability constant (default 1e-8).
++        to_8bit: bool, if True, return uint8 [0, 255].
++        
++    Returns:
++        np.ndarray, normalized image.
+     """
+-    # Step 1: Compute bounds
+-    v_min = np.percentile(image, p_min)
+-    v_max = np.percentile(image, p_max)
++    # Handle NaNs: replace with 0 for percentile calculation, 
++    # but preserve original structure if needed. 
++    # Note: np.percentile ignores NaNs by default in newer versions, 
++    # but explicit handling is safer.
++    valid_mask = ~np.isnan(image)
++    if not np.any(valid_mask):
++        return np.zeros_like(image)
++        
++    valid_values = image[valid_mask]
++    
++    # Step 1: Calculate bounds
++    p_min = np.percentile(valid_values, alpha)
++    p_max = np.percentile(valid_values, 100 - alpha)
+     
+     # Step 2: Clip
+-    image_clipped = np.clip(image, v_min, v_max)
++    image_clipped = np.clip(image, p_min, p_max)
+     
+     # Step 3: Normalize
+-    # Add epsilon to avoid division by zero
+-    epsilon = 1e-8
+-    range_val = v_max - v_min + epsilon
+-    image_normalized = (image_clipped - v_min) / range_val
++    denominator = p_max - p_min + epsilon
++    image_normalized = (image_clipped - p_min) / denominator
+     
+-    # Ensure strict [0, 1] bounds due to potential floating point errors
+-    image_normalized = np.clip(image_normalized, 0.0, 1.0)
+-    
++    # Step 4: Scale to 8-bit if requested
++    if to_8bit:
++        # Clip to [0, 1] again to handle any floating point errors
++        image_normalized = np.clip(image_normalized, 0.0, 1.0)
++        return (image_normalized * 255).astype(np.uint8)
++        
+     return image_normalized
+-
+-def percentile_normalize_to_8bit(image: np.ndarray, p_min: float = 5.0, p_max: float = 95.0) -> np.ndarray:
+-    """
+-    Normalize and convert to 8-bit grayscale.
+-    """
+-    norm = percentile_normalize(image, p_min, p_max)
+-    return (norm * 255).astype(np.uint8)
+ ```
+-
+-**Parameters:**
+-- $p_{min}$: Lower percentile. Default 5.0 [S1, unofficial].
+-- $p_{max}$: Upper percentile. Default 95.0 [S1, unofficial].
+-- $\epsilon$: Epsilon for numerical stability. Default $10^{-8}$ [S1, unofficial].
+-
+-**Edge Cases:**
+-- If $v_{min} = v_{max}$ (e.g., constant image), the denominator becomes $\epsilon$, resulting in a zero image (all black) after clipping, which is a safe fallback [S1, unofficial].
+-- Outliers: By definition, this method ignores values outside the percentile range, which is its primary advantage over min-max normalization.
+ 
+ ## Subtopics
+ 
+-### [Weighted Percentile Computation](7031-weighted-percentile-computation.md)
+-Computes percentiles using associated weights, allowing prioritization of voxels based on confidence or opacity during normalization.
++### Median Normalization
++Normalizes a tensor by dividing valid positive values by their median and multiplying by a configurable multiplier. It handles NaNs by replacing them with 0. It is used when the median is a more robust central tendency measure than the mean or percentile bounds, particularly for data with heavy skew. It differs from standard percentile normalization by using a single central statistic (median) rather than two bounds, effectively scaling the dynamic range relative to the center of the distribution. Choose this when the data has a clear central peak and you want to preserve relative ratios around the median. [S2, unofficial].
++
++**Pseudocode:**
++```python
++import torch
++
++def median_normalize(value_tensor, config_value=1.0):
++    """
++    Normalize tensor by median.
++    
++    Args:
++        value_tensor: torch.Tensor, input values.
++        config_value: float, multiplier after normalization.
++        
++    Returns:
++        torch.Tensor, normalized tensor.
++    """
++    # Replace NaN with 0
++    value_tensor = torch.nan_to_num(value_tensor, nan=0.0)
++    
++    # Identify valid indices (positive values)
++    valid_indices = value_tensor > 0
++    
++    if not torch.any(valid_indices):
++        return torch.zeros_like(value_tensor, dtype=torch.float32)
++        
++    # Extract valid values
++    valid_values = value_tensor[valid_indices].to(torch.float32)
++    
++    # Compute median
++    median_val = torch.median(valid_values)
++    
++    # Avoid division by zero
++    if median_val == 0:
++        return torch.zeros_like(value_tensor, dtype=torch.float32)
++        
++    # Initialize result
++    ret_value = torch.zeros_like(value_tensor, dtype=torch.float32)
++    
++    # Normalize and scale
++    ret_value[valid_indices] = config_value * (valid_values / median_val)
++    
++    return ret_value
++```
+ 
+ ### [Intensity-to-Grayscale Mapping](11937-intensity-to-grayscale-mapping.md)
+-Extends normalization by applying non-linear gamma compression to the normalized values to enhance contrast in low-intensity regions before 8-bit conversion.
++Converts absolute scalar field intensities to 8-bit grayscale luminance indices $[0, 255]$. It solves the visualization problem for high-precision floating-point data by compressing dynamic range and enhancing contrast in low-intensity regions via gamma compression. Unlike simple linear normalization, it uses percentile-based saturation thresholds to ignore outliers and applies a non-linear power law..
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ to compute percentiles and $O(N)$ to clip and scale, where $N$ is the number of voxels/pixels. Percentile computation can be $O(N)$ using selection algorithms or $O(N \log N)$ using sorting.
+-- **Memory Complexity:** $O(N)$ for the input and output arrays. No significant auxiliary memory is required.
+-- **Strengths:** Robust to outliers; preserves contrast in the "interesting" part of the data distribution; simple to implement.
+-- **Limitations:** Requires a full pass over the data to compute percentiles; not suitable for streaming data where global statistics are unknown.
+-- **When to use:** Visualization of medical images (CT, DRR), scientific data with heavy-tailed distributions, or when global min/max are dominated by noise.
+-- **When not to use:** When absolute intensity values are critical for quantitative analysis, or when the data distribution is uniform and min-max normalization is sufficient.
++- **Time Complexity:** $O(N)$ where $N$ is the number of voxels/pixels, due to the linear scan required for percentile calculation. Sorting-based percentile algorithms are $O(N \log N)$, but selection algorithms (like QuickSelect) can achieve $O(N)$ [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for storing the input and output arrays. No additional large data structures are required.
++- **Performance:** For a 512x512 DRR image, pure Python loops are slow, but vectorized NumPy operations are efficient. GPU implementation (CUDA) is recommended for real-time volume rendering [S1, unofficial].
++- **Strengths:** Robust to outliers; improves contrast for the majority of the data; simple to implement.
++- **Limitations:** Does not preserve absolute intensity relationships; requires a full pass over the data to compute percentiles (can be expensive for very large datasets if done repeatedly).
+ 
+ ## Background
+-This method is widely used in medical imaging, particularly in the generation of Digital Radiograph (DRR) images from CT data. It serves as a standard preprocessing step to map Hounsfield units or attenuation coefficients to a displayable range. The approach is documented in practical implementations for ray-casting and DRR generation [S1, unofficial].
++Originating from medical imaging techniques for Digital Radiography (DRR) and CT visualization, this method was popularized to handle the wide dynamic range of Hounsfield units. The specific implementation using 5th/95th percentiles for DRR generation is documented in practical medical imaging development guides [S1, unofficial]. The median-based variant is used in modern Gaussian Splatting frameworks like FastGS for normalizing feature tensors [S2, unofficial].
+ 
+ ## Sources
+-[S1] 医疗影像开发实战:如何用光线投射算法快速生成DRR图像(附Python代码), https://un.csdn.net/98nhkcg5t04h, fetched 2026-10-26 (unofficial)+[S1] 医疗影像开发实战:如何用光线投射算法快速生成DRR图像(附Python代码), https://un.csdn.net/98nhkcg5t04h, fetched 2026-10-26 (unofficial)
++[S2] fastgs/FastGS, https://github.com/fastgs/FastGS, fetched 2026-10-27 (unofficial)

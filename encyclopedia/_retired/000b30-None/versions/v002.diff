@@ -1,0 +1,265 @@
+--- v001.md
++++ v002.md
+@@ -4,33 +4,30 @@
+ 
+ ## Overview
+-Safe Raymarching Step Size is a method for determining the step length in distance-field ray marching that guarantees the ray never overshoots or penetrates the implicit surface, even when the Signed Distance Function (SDF) is distorted or approximated [S1, S2, S3, unofficial]. It solves the problem of artifacts caused by domain repetition or boolean operations, where the estimated distance may exceed the actual distance to the geometry [S1, unofficial]. It sets itself apart from standard sphere tracing by explicitly clamping SDF values and applying a conservative ratio to the step increment, and from [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by relying on fixed global bounds rather than local gradient estimation.
++Safe Raymarching Step Size is a method for determining the step length in distance-field ray marching that guarantees the ray never overshoots or penetrates the implicit surface, even when the Signed Distance Function (SDF) is distorted or approximated [S1, S2, unofficial]. It solves the problem of artifacts caused by domain repetition or boolean operations, where the estimated distance may exceed the actual distance to the geometry [S1, unofficial]. It sets itself apart from standard sphere tracing by explicitly clamping SDF values and applying a conservative ratio to the step increment [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Camera position $\mathbf{c}$ and ray directions $\mathbf{r}$ for all pixels.
+-- SDF decoder or evaluator $f(\mathbf{p})$.
++- Camera position $\mathbf{c}$ and ray directions $\mathbf{r}$ for all pixels [S2, unofficial].
++- SDF decoder or evaluator $f(\mathbf{p})$ [S2, unofficial].
+ - Axis-Aligned Bounding Box (AABB) of the scene, defined by $\mathbf{aabb}_{min}$ and $\mathbf{aabb}_{max}$ [S3, unofficial].
+-- Grid resolution $N_{grid}$ (if using grid-based step calculation) [S3, unofficial].
+ - Parameters:
+   - `clamp_dist`: Float threshold for clamping SDF values. Typical value: $0.1$ [S2, unofficial].
+   - `ray_marching_ratio`: Float multiplier applied to the clamped SDF to determine step size. Typical value: $1.5$ [S2, unofficial].
+   - `threshold`: Float SDF value threshold for surface intersection. Typical value: $5 \times 10^{-5}$ [S2, unofficial].
+-  - `step_ratio`: Float multiplier for grid-based step size calculation [S3, unofficial].
+   - `march_step`: Integer maximum number of iterations [S2, unofficial].
+ 
+ **Outputs:**
+-- `sdf_list`: Tensor of shape $(M, N)$ containing SDF values at each step for $N$ rays and $M$ steps [S2, unofficial].
+-- `marching_zdepth_list`: Tensor of shape $(M, N)$ containing accumulated depth [S2, unofficial].
+-- `points_list`: Tensor of shape $(M, N, 3)$ containing 3D points sampled along rays [S2, unofficial].
+-- `valid_mask_render`: Boolean mask indicating valid rays that have not exceeded bounds or hit the surface incorrectly [S2, unofficial].
++- `sdf_list`: List of lists containing SDF values at each step for $N$ rays and $M$ steps [S2, unofficial].
++- `marching_zdepth_list`: List of lists containing accumulated depth [S2, unofficial].
++- `points_list`: List of lists containing 3D points sampled along rays [S2, unofficial].
++- `valid_mask_render`: Boolean list indicating valid rays that have not exceeded bounds or hit the surface incorrectly [S2, unofficial].
+ 
+ **Data Structures:**
+-- Tensors are used for parallel processing of rays. `marching_zdepth` is initialized to zeros for all valid rays [S2, unofficial].
+-- Lists `sdf_list`, `marching_zdepth_list`, and `points_list` accumulate data per step [S2, unofficial].
++- Lists are used to accumulate data per step. `marching_zdepth` is initialized to zeros for all valid rays [S2, unofficial].
+ 
+ **Algorithm:**
+ 
+ 1.  **Initialization:**
+-    - Initialize `marching_zdepth` to a tensor of zeros with shape $(N)$, where $N$ is the number of valid rays [S2, unofficial].
++    - Initialize `marching_zdepth` to a list of zeros with length $N$, where $N$ is the number of valid rays [S2, unofficial].
+     - Initialize empty lists: `sdf_list`, `marching_zdepth_list`, `points_list` [S2, unofficial].
+     - Calculate `maxbound_zdepth` using a helper function `get_maxbound_zdepth(cam_pos, valid_cam_rays)` [S2, unofficial]. This represents the maximum distance a ray can travel before exiting the scene bounds [S2, unofficial].
+@@ -50,13 +47,7 @@
+     c.  **Clamping and Step Calculation:**
+         - Clamp SDF values: $d_{clamped} = \max(-\text{clamp\_dist}, \min(d_i, \text{clamp\_dist}))$ [S2, unofficial].
+-        - Calculate step size $\Delta s$:
+-          - If using grid-based calculation:
+-            - Calculate inverse AABB size: $\mathbf{inv\_aabb} = \frac{1}{\mathbf{aabb}_{max} - \mathbf{aabb}_{min}}$ [S3, unofficial].
+-            - Calculate unit size per grid cell: $\mathbf{unit\_size} = \mathbf{inv\_aabb} / N_{grid}$ [S3, unofficial].
+-            - Calculate mean unit size: $\bar{u} = \text{mean}(\mathbf{unit\_size})$ [S3, unofficial].
+-            - $\Delta s = \bar{u} \times \text{step\_ratio}$ [S3, unofficial].
+-          - If using SDF-based calculation (standard):
+-            - $\Delta s = d_{clamped} \times \text{ray\_marching\_ratio}$ [S2, unofficial].
+-            - Note: Sources indicate `ray_marching_ratio` is typically $> 1.0$ (e.g., 1.5) to ensure safety against distortion artifacts [S2, S1, unofficial].
++        - Calculate step size $\Delta s = d_{clamped} \times \text{ray\_marching\_ratio}$ [S2, unofficial].
++        - Note: Sources indicate `ray_marching_ratio` is typically $> 1.0$ (e.g., $1.5$) to ensure safety against distortion artifacts [S2, S1, unofficial].
++        - Not given in the sources. (Grid-based step calculation was mentioned in notes but not provided in the source text for [S3, unofficial].)
+             
+     d.  **Depth Update:**
+@@ -82,29 +73,27 @@
+ ```python
+ def safe_raymarching_step_size(cam_pos, cam_rays, sdf_decoder, aabb_min, aabb_max, 
+-                               grid_size, clamp_dist=0.1, ray_marching_ratio=1.5, 
+-                               threshold=5e-5, march_step=100, step_ratio=1.0):
++                               clamp_dist=0.1, ray_marching_ratio=1.5, 
++                               threshold=5e-5, march_step=100):
+     """
+     Implements Safe Raymarching Step Size.
+     
+     Args:
+-        cam_pos: Tensor (N, 3), camera positions.
+-        cam_rays: Tensor (N, 3), normalized ray directions.
+-        sdf_decoder: Function/Module evaluating SDF at point p.
+-        aabb_min: Tensor (3,), min corner of bounding box.
+-        aabb_max: Tensor (3,), max corner of bounding box.
+-        grid_size: int, resolution of the voxel grid.
++        cam_pos: List of tuples (x, y, z), camera positions.
++        cam_rays: List of tuples (dx, dy, dz), normalized ray directions.
++        sdf_decoder: Function evaluating SDF at point p.
++        aabb_min: Tuple (x, y, z), min corner of bounding box.
++        aabb_max: Tuple (x, y, z), max corner of bounding box.
+         clamp_dist: float, SDF clamping threshold.
+         ray_marching_ratio: float, multiplier for step size.
+         threshold: float, intersection threshold.
+         march_step: int, max iterations.
+-        step_ratio: float, multiplier for grid-based step size.
+         
+     Returns:
+         sdf_list, marching_zdepth_list, points_list, valid_mask_render
+     """
+-    N = cam_rays.shape[0]
++    N = len(cam_rays)
+     
+     # Initialize
+-    marching_zdepth = torch.zeros(N, device=cam_pos.device)
++    marching_zdepth = [0.0] * N
+     sdf_list = []
+     marching_zdepth_list = []
+@@ -112,97 +101,69 @@
+     
+     # Calculate max bound depth
+-    # Helper: get_maxbound_zdepth calculates the distance from cam_pos to the 
+-    # intersection of the ray with the AABB.
+     maxbound_zdepth = get_maxbound_zdepth(cam_pos, cam_rays, aabb_min, aabb_max)
+-    
+-    # Pre-calculate grid step size if needed (assuming grid-based fallback or hybrid)
+-    # Note: The sources describe both SDF-based and grid-based step calculations.
+-    # This implementation uses the SDF-based calculation as primary, 
+-    # but includes grid calculation as per [S3, unofficial] if specific context requires it.
+-    # For general safe marching, the SDF-based step with ratio is the core [S2, unofficial].
+     
+     for i in range(march_step):
+         # 1. Generate points
+-        # current_depth = init_zdepth (0) + marching_zdepth
+-        points = cam_pos + marching_zdepth.unsqueeze(1) * cam_rays
++        points = []
++        for j in range(N):
++            px = cam_pos[j][0] + marching_zdepth[j] * cam_rays[j][0]
++            py = cam_pos[j][1] + marching_zdepth[j] * cam_rays[j][1]
++            pz = cam_pos[j][2] + marching_zdepth[j] * cam_rays[j][2]
++            points.append((px, py, pz))
+         points_list.append(points)
+         
+         # 2. Evaluate SDF
+-        sdf_values = sdf_decoder(points)
+-        # Detach gradients if necessary
+-        sdf_values = sdf_values.detach()
++        sdf_values = [sdf_decoder(p) for p in points]
++        # Detach gradients if necessary (simulated by returning float)
++        sdf_values = [float(v) for v in sdf_values]
+         sdf_list.append(sdf_values)
+         
+         # 3. Clamp SDF
+-        sdf_clamped = torch.clamp(sdf_values, -clamp_dist, clamp_dist)
++        sdf_clamped = [max(-clamp_dist, min(v, clamp_dist)) for v in sdf_values]
+         
+         # 4. Calculate Step Size
+-        # Using SDF-based calculation with ratio [S2, unofficial]
+-        step_size = sdf_clamped * ray_marching_ratio
++        step_size = [v * ray_marching_ratio for v in sdf_clamped]
+         
+         # 5. Update Depth
+-        marching_zdepth = marching_zdepth + step_size
++        marching_zdepth = [z + s for z, s in zip(marching_zdepth, step_size)]
+         marching_zdepth_list.append(marching_zdepth)
+         
+-        # Optimization: If using recursive marching, mask out finished rays
+-        # For this generic implementation, we continue all rays but mask at the end
+-        
+     # 6. Post-processing
+-    sdf_tensor = torch.stack(sdf_list, dim=0) # Shape (march_step, N)
+-    zdepth_tensor = torch.stack(marching_zdepth_list, dim=0) # Shape (march_step, N)
+-    points_tensor = torch.stack(points_list, dim=0) # Shape (march_step, N, 3)
++    # Lists are already accumulated per step
+     
+     # Compute masks
+-    # valid_mask_max_marching_zdepth: final depth < maxbound
+-    final_zdepth = zdepth_tensor[-1]
+-    valid_mask_max = final_zdepth < maxbound_zdepth
+-    
+-    # valid_mask_ray_marching: min abs SDF <= threshold
+-    min_abs_sdf = torch.min(torch.abs(sdf_tensor), dim=0).values
+-    valid_mask_hit = min_abs_sdf <= threshold
+-    
+-    # valid_mask_first_query: first SDF > threshold (to handle immediate hit case)
+-    # If first query is <= threshold, it's a hit, but we want to ensure logic holds
+-    # The source says: "check if the first SDF query is greater than threshold"
+-    # This seems to be a filter to exclude rays that hit immediately if they are 
+-    # considered invalid for some reason, or to handle corner cases.
+-    # Re-reading [S2, unofficial]: "check if the first SDF query is greater than threshold (to handle corner cases where first query is already below threshold)"
+-    # This implies valid_mask_first_query is True if first SDF > threshold.
+-    # If first SDF <= threshold, valid_mask_first_query is False.
+-    # This effectively filters out rays that hit the surface at the very first step?
+-    # Or perhaps it's part of a larger logic. Let's follow the source literally.
+-    first_sdf = sdf_tensor[0]
+-    valid_mask_first = first_sdf > threshold
+-    
+-    # Combine
+-    valid_mask_render = valid_mask_max & valid_mask_hit & valid_mask_first
+-    
+-    return sdf_tensor, zdepth_tensor, points_tensor, valid_mask_render
++    final_zdepth = marching_zdepth
++    valid_mask_max = [z < maxbound_zdepth[j] for j, z in enumerate(final_zdepth)]
++    
++    # min abs SDF <= threshold
++    min_abs_sdf = [min(abs(sdf_list[k][j]) for k in range(march_step)) for j in range(N)]
++    valid_mask_hit = [m <= threshold for m in min_abs_sdf]
++    
++    # valid_mask_first_query: first SDF > threshold
++    first_sdf = sdf_list[0]
++    valid_mask_first = [s > threshold for s in first_sdf]
++    
++    valid_mask_render = [valid_mask_max[j] and valid_mask_hit[j] and valid_mask_first[j] for j in range(N)]
++    
++    return sdf_list, marching_zdepth_list, points_list, valid_mask_render
+ 
+ def get_maxbound_zdepth(cam_pos, cam_rays, aabb_min, aabb_max):
+     """
+     Calculates the distance from cam_pos to the intersection of the ray with the AABB.
+-    Returns a tensor of shape (N,).
+-    """
+-    # Tait-Bryan / Slab method for ray-AABB intersection
+-    # tmin = max((min - origin) / dir)
+-    # tmax = min((max - origin) / dir)
+-    # Handle division by zero for rays parallel to axes
+-    
+-    inv_dir = 1.0 / cam_rays
+-    t1 = (aabb_min - cam_pos) * inv_dir
+-    t2 = (aabb_max - cam_pos) * inv_dir
+-    
+-    tmin = torch.max(torch.min(t1, t2), dim=1).values
+-    tmax = torch.min(torch.max(t1, t2), dim=1).values
+-    
+-    # If tmax < 0, the ray is behind the box
+-    # If tmin > tmax, the ray misses the box
+-    # We want the positive intersection distance
+-    maxbound = torch.where(tmax < 0, torch.tensor(float('inf'), device=cam_pos.device), tmin)
+-    
+-    # Ensure we only return positive distances
+-    maxbound = torch.where(maxbound < 0, torch.tensor(float('inf'), device=cam_pos.device), maxbound)
+-    
++    Returns a list of floats.
++    """
++    maxbound = []
++    for j in range(len(cam_rays)):
++        inv_dir = [1.0 / cam_rays[j][k] if cam_rays[j][k] != 0 else float('inf') for k in range(3)]
++        t1 = [(aabb_min[k] - cam_pos[j][k]) * inv_dir[k] for k in range(3)]
++        t2 = [(aabb_max[k] - cam_pos[j][k]) * inv_dir[k] for k in range(3)]
++        
++        tmin = max(min(t1[k], t2[k]) for k in range(3))
++        tmax = min(max(t1[k], t2[k]) for k in range(3))
++        
++        if tmax < 0:
++            maxbound.append(float('inf'))
++        else:
++            maxbound.append(tmin if tmin >= 0 else float('inf'))
+     return maxbound
+ ```
+@@ -229,15 +190,15 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(M \times N)$, where $M$ is the number of steps and $N$ is the number of rays. The number of steps $M$ is determined by the scene size and step size. Conservative stepping may increase $M$ compared to adaptive methods if the step size is overly small.
+-- **Memory Complexity:** $O(M \times N)$ for storing the SDF, depth, and point lists if all steps are stored. Recursive variants can reduce this by only storing unfinished rays.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Not given in the sources.
+-- **Scaling:** Parallelizable across rays using tensor operations [S2, unofficial]. Grid-based step calculation scales with grid resolution [S3, unofficial].
+-- **Strengths:** Guarantees no overshoot even with distorted SDFs [S1, unofficial]. Simple to implement with fixed parameters [S2, unofficial]. Robust against artifacts from domain repetition [S1, unofficial].
+-- **Limitations:** May be less efficient than adaptive methods in scenes with large empty spaces, as the step size is constrained by the global ratio or grid size. The `ray_marching_ratio` must be tuned to balance safety and speed.
+-- **When to Use:** When rendering distorted SDFs (e.g., from boolean operations or domain repetition) [S1, unofficial]. When robustness is prioritized over maximum performance. When using neural SDF decoders where gradient information might be noisy or unavailable [S2, unofficial].
+-- **When Not to Use:** In scenes with very large empty spaces where adaptive step sizes would significantly reduce iteration count. When high precision is required and the conservative ratio introduces visible stepping artifacts.
++- **Scaling:** Parallelizable across rays using tensor operations [S2, unofficial].
++- **Strengths:** Guarantees no overshoot even with distorted SDFs [S1, unofficial]. Simple to implement with fixed parameters [S2, unofficial].
++- **Limitations:** The `ray_marching_ratio` must be tuned to balance safety and speed [S2, unofficial].
++- **When to Use:** When rendering distorted SDFs (e.g., from boolean operations or domain repetition) [S1, unofficial]. When using neural SDF decoders where gradient information might be noisy or unavailable [S2, unofficial].
++- **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-Safe Raymarching Step Size originates from techniques used in ray marching distance fields to mitigate artifacts caused by SDF distortion [S1, unofficial]. The concept of stepping shorter than the SDF returns was proposed to handle cases where domain repetition or boolean operations cause the distance field to be inaccurate [S1, unofficial]. The implementation details, including clamping, ratio multipliers, and tensor-based parallel processing, are derived from differentiable rendering frameworks like DIST-Renderer [S2, unofficial] and Collaborative Neural Radiance Fields [S3, unofficial]. The method is part of the broader family of step size optimization techniques in volume rendering and implicit surface rendering.
++Safe Raymarching Step Size originates from techniques used in ray marching distance fields to mitigate artifacts caused by SDF distortion [S1, unofficial]. The concept of stepping shorter than the SDF returns was proposed to handle cases where domain repetition or boolean operations cause the distance field to be inaccurate [S1, unofficial]. The implementation details, including clamping, ratio multipliers, and tensor-based parallel processing, are derived from differentiable rendering frameworks like DIST-Renderer [S2, unofficial] and Collaborative Neural Radiance Fields [S3, unofficial].
+ 
+ ## Sources

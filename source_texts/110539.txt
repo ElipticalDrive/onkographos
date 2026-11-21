@@ -1,0 +1,247 @@
+I'm trying to convert a voxel grid exactly to a mesh, i.e. the resulting mesh should contain the exact volume of the original voxel grid. I'm having a problem with the resulting watertightness though, as it looks like some of the edges a...
+
+Voxel to Mesh Watertightness Question · Issue #2165 · mikedh/trimesh · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Voxel to Mesh Watertightness Question #2165
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Voxel to Mesh Watertightness Question#2165
+Copy link
+Description
+Eric-Vin
+opened on Feb 27, 2024
+Issue body actions
+I'm trying to convert a voxel grid exactly to a mesh, i.e. the resulting mesh should contain the exact volume of the original voxel grid. I'm having a problem with the resulting watertightness though, as it looks like some of the edges are connected to 4 faces, which conflicts with Trimesh's definition of watertightness (exactly 2 faces to every edge). Is it possible to do such a conversion from voxels to meshes exactly in Trimesh?
+I've attached an image illustrating the problem, with fix_broken_faces having been used to color the problematic faces red.
+Reactions are currently unavailable
+Activity
+mikedh commented on Feb 29, 2024
+mikedh
+on Feb 29, 2024
+Owner
+More actions
+Hey, yeah does it work if you disable vertex merging? Is the "voxel" input a mesh? You probably need to pass Trimesh(..., process=False) wherever the mesh is being created?
+Eric-Vin commented on Mar 1, 2024
+Eric-Vin
+on Mar 1, 2024
+ContributorAuthor
+More actions
+Thanks for the response! I suspect it would work but I'm using the triangles to_kwargs constructor so I think I'll have to refactor to use faces and vertices to try it. I'm working from a Trimesh VoxelGrid and creating triangles for each of the faces on the surface, so I get a mesh that represents the exact same space. My main concern is if I turn off processing upon creation and that mesh gets used in a boolean operation down the line, it might not be a volume on the way out if processing is applied internally. Is there a way to represent this sort of thing as a proper watertight mesh in Trimesh with the vertices merged/processing applied?
+Here's my code for reference if you want to see what I'm doing. It's a rough prototype but the goal is to more rapidly construct what you would get from unioning all the boxes from the multibox VoxelGrid method together:
+```
+    def mesh(self):
+        # Extract values for original voxel grid and the surface of the voxel grid.
+        dense_encoding = self.voxelGrid.encoding.dense
+        hpitch = self.voxelGrid.pitch[0] / 2
+        hollow_vr = trimesh.voxel.VoxelGrid(
+            trimesh.voxel.morphology.surface(self.voxelGrid.encoding),
+            transform=self.voxelGrid.transform,
+        )
+
+        surface_indices = numpy.argwhere(hollow_vr.encoding.dense == True)
+        surface_centers = hollow_vr.indices_to_points(hollow_vr.sparse_indices)
+
+        # Determine which faces should be added for each voxel in our extracted surface.
+        point_face_mask_list = []
+
+        def index_in_bounds(index):
+            return all((0, 0, 0) <= index) and all(index < dense_encoding.shape)
+
+        def actual_face(index):
+            return (
+                not index_in_bounds(target_index)
+                or not dense_encoding[tuple(target_index)]
+            )
+
+        for i in range(len(surface_indices)):
+            base_index = surface_indices[i]
+            base_center = surface_centers[i]
+
+            face_mask = [0] * 6
+
+            # Right
+            target_index = numpy.asarray(
+                [base_index[0] + 1, base_index[1], base_index[2]]
+            )
+            if actual_face(target_index):
+                face_mask[0] = True
+
+            # Left
+            target_index = numpy.asarray(
+                [base_index[0] - 1, base_index[1], base_index[2]]
+            )
+            if actual_face(target_index):
+                face_mask[1] = True
+
+            # Front
+            target_index = numpy.asarray(
+                [base_index[0], base_index[1] + 1, base_index[2]]
+            )
+            if actual_face(target_index):
+                face_mask[2] = True
+
+            # Back
+            target_index = numpy.asarray(
+                [base_index[0], base_index[1] - 1, base_index[2]]
+            )
+            if actual_face(target_index):
+                face_mask[3] = True
+
+            # Top
+            target_index = numpy.asarray(
+                [base_index[0], base_index[1], base_index[2] + 1]
+            )
+            if actual_face(target_index):
+                face_mask[4] = True
+
+            # Bottom
+            target_index = numpy.asarray(
+                [base_index[0], base_index[1], base_index[2] - 1]
+            )
+            if actual_face(target_index):
+                face_mask[5] = True
+
+            point_face_mask_list.append((base_center, face_mask))
+
+        # Construct triangles for mesh
+        triangles = []
+
+        for base_center, face_mask in point_face_mask_list:
+            # Right
+            if face_mask[0]:
+                triangles.append(
+                    [
+                        base_center + [hpitch, hpitch, -hpitch],
+                        base_center + [hpitch, hpitch, hpitch],
+                        base_center + [hpitch, -hpitch, hpitch],
+                    ]
+                )
+                triangles.append(
+                    [
+                        base_center + [hpitch, hpitch, -hpitch],
+                        base_center + [hpitch, -hpitch, hpitch],
+                        base_center + [hpitch, -hpitch, -hpitch],
+                    ]
+                )
+
+            # Left
+            if face_mask[1]:
+                triangles.append(
+                    [
+                        base_center + [-hpitch, hpitch, -hpitch],
+                        base_center + [-hpitch, -hpitch, hpitch],
+                        base_center + [-hpitch, hpitch, hpitch],
+                    ]
+                )
+                triangles.append(
+                    [
+                        base_center + [-hpitch, hpitch, -hpitch],
+                        base_center + [-hpitch, -hpitch, -hpitch],
+                        base_center + [-hpitch, -hpitch, hpitch],
+                    ]
+                )
+
+            # Front
+            if face_mask[2]:
+                triangles.append(
+                    [
+                        base_center + [hpitch, hpitch, -hpitch],
+                        base_center + [-hpitch, hpitch, hpitch],
+                        base_center + [hpitch, hpitch, hpitch],
+                    ]
+                )
+                triangles.append(
+                    [
+                        base_center + [hpitch, hpitch, -hpitch],
+                        base_center + [-hpitch, hpitch, -hpitch],
+                        base_center + [-hpitch, hpitch, hpitch],
+                    ]
+                )
+            # Back
+            if face_mask[3]:
+                triangles.append(
+                    [
+                        base_center + [hpitch, -hpitch, -hpitch],
+                        base_center + [hpitch, -hpitch, hpitch],
+                        base_center + [-hpitch, -hpitch, hpitch],
+                    ]
+                )
+                triangles.append(
+                    [
+                        base_center + [hpitch, -hpitch, -hpitch],
+                        base_center + [-hpitch, -hpitch, hpitch],
+                        base_center + [-hpitch, -hpitch, -hpitch],
+                    ]
+                )
+
+            # Top
+            if face_mask[4]:
+                triangles.append(
+                    [
+                        base_center + [hpitch, -hpitch, hpitch],
+                        base_center + [hpitch, hpitch, hpitch],
+                        base_center + [-hpitch, hpitch, hpitch],
+                    ]
+                )
+                triangles.append(
+                    [
+                        base_center + [hpitch, -hpitch, hpitch],
+                        base_center + [-hpitch, hpitch, hpitch],
+                        base_center + [-hpitch, -hpitch, hpitch],
+                    ]
+                )
+
+            # Bottom
+            if face_mask[5]:
+                triangles.append(
+                    [
+                        base_center + [hpitch, -hpitch, -hpitch],
+                        base_center + [-hpitch, hpitch, -hpitch],
+                        base_center + [hpitch, hpitch, -hpitch],
+                    ]
+                )
+                triangles.append(
+                    [
+                        base_center + [hpitch, -hpitch, -hpitch],
+                        base_center + [-hpitch, -hpitch, -hpitch],
+                        base_center + [-hpitch, hpitch, -hpitch],
+                    ]
+                )
+
+        out_mesh = trimesh.Trimesh(**trimesh.triangles.to_kwargs(triangles))
+        assert out_mesh.is_volume
+        return out_mesh
+```
+Eric-Vin commented on Mar 11, 2024
+Eric-Vin
+on Mar 11, 2024
+ContributorAuthor
+More actions
+@mikedh Just wanted to ping you and see if you had any thoughts on this. I'd love to get this feature working and upstream it to the voxels module.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

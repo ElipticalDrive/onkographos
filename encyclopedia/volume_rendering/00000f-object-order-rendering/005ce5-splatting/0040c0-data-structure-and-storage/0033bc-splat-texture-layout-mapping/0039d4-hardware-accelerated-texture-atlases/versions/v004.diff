@@ -1,0 +1,244 @@
+--- v003.md
++++ v004.md
+@@ -4,127 +4,157 @@
+ 
+ ## Overview
+-This method organizes per-primitive texture data into large 2D atlas textures to leverage GPU hardware filtering and caching, thereby avoiding multiple texture bindings and software-based sampling overhead [S1]. It sets itself apart from software-based interpolation by utilizing dedicated texture units for bilinear filtering, which is significantly faster than manual interpolation from global memory arrays [S1].
++Hardware Accelerated Texture Atlases organize per-primitive texture data into large 2D atlas textures to leverage GPU hardware filtering and caching, thereby avoiding multiple texture bindings and software-based sampling overhead [S1]. This method builds on [Splat Texture Layout & Mapping](7089-splat-texture-layout-mapping.md) by consolidating individual primitive textures into a unified structure that enables efficient, filtered attribute fetching during rendering [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** $P$ splats (primitives), $C$ total attribute channels, fixed primitive texture resolution $T$ (typically a power of 2), and GPU maximum atlas dimensions [S1].
+-*   **Outputs:** One or more 2D atlas textures containing packed primitive textures, and an indirection buffer mapping primitive IDs to atlas chart coordinates [S1].
++*   **Inputs:** $P$ splats, each associated with a small fixed-resolution texture of size $T \times T$ texels; $C$ total attribute channels across all splats; GPU maximum texture dimensions.
++*   **Outputs:** One or more large 2D atlas textures; an indirection buffer mapping primitive IDs to atlas coordinates.
+ 
+ **Data Structures:**
+-1.  **Atlas Texture(s):** Large 2D textures. If $C > 4$, split attributes across multiple atlases (e.g., one for albedo/roughness, another for tangent normals/metallic) to respect CUDA texture object channel limits [S1].
+-2.  **Indirection Buffer:** A buffer storing the top-left corner coordinates $(chart\_idx\_x, chart\_idx\_y)$ for each primitive's texture within the atlas [S1].
++1.  **Atlas Texture(s):** Large 2D textures containing packed $T \times T$ charts. The layout is determined by GPU capabilities. If the total channels $C$ exceed the maximum supported by a single CUDA texture object (typically 4), multiple atlases are created [S1]. For example, one atlas may store Albedo (RGB) and Roughness (A), while another stores Tangent Normals (RGB) and Metallic (A) [S1].
++2.  **Indirection Buffer:** A buffer storing the top-left corner coordinates $(chart\_idx\_x, chart\_idx\_y)$ for each primitive's texture chart within the atlas [S1]. This maps primitive IDs to their specific location in the atlas grid.
+ 
+-**Steps:**
++**Parameters:**
++*   $T$: Fixed resolution of each primitive's small texture, typically a power of 2 [S1].
++*   $N_{chartsx}, N_{chartsy}$: Total number of charts along the width and height of the atlas, respectively [S1].
+ 
+-1.  **Determine Atlas Geometry:**
+-    Calculate the maximum number of $T \times T$ textures that fit along the width and height of the atlas based on GPU capabilities [S1]. Let $N_{chartsx}$ and $N_{chartsy}$ be the total number of charts along the width and height, respectively [S1].
++**Algorithm Steps:**
+ 
+-2.  **Pack Textures:**
+-    Organize the $P \times C \times T \times T$ texel data into one or more atlases [S1]. Each primitive's texture occupies a $T \times T$ block [S1]. The top-left corner of primitive $k$'s texture is stored in the indirection buffer at index $k$ [S1].
++1.  **Determine Atlas Dimensions:** Calculate the maximum atlas dimensions supported by the GPU. Determine how many $T \times T$ textures fit along each dimension ($N_{chartsx}, N_{chartsy}$) [S1].
++2.  **Calculate Atlas Count:** Compute the total number of textures per atlas based on channel constraints (e.g., max 4 channels per CUDA texture object). Determine the total number of atlases needed to store all $P \times C$ textures [S1].
++3.  **Construct Atlases:** Pack the $P \times C \times T \times T$ texel data into the atlas textures. Assign each primitive's texture to a specific chart position within the atlas [S1].
++4.  **Build Indirection Buffer:** For each primitive $k$, store the top-left chart coordinates $(chart\_idx\_x_k, chart\_idx\_y_k)$ in the indirection buffer [S1].
+ 
+-3.  **Sampling (Per Primitive $k$ at pixel $(x,y)$):**
+-    a. Map local coordinates $(u, v)$ to normalized texture coordinates $(s, t) \in [0, 1] \times [0, 1]$ [S1].
+-    b. Retrieve $(chart\_idx\_x, chart\_idx\_y)$ from the indirection buffer for primitive $k$ [S1].
+-    c. Compute atlas coordinates $(s_{atlas}, t_{atlas})$ using the formula:
+-       $$s_{atlas} = \frac{chart\_idx\_x \cdot T + s \cdot T}{N_{chartsx} \cdot T}$$
+-       $$t_{atlas} = \frac{chart\_idx\_y \cdot T + t \cdot T}{N_{chartsy} \cdot T}$$
+-       [S1]
+-    d. Sample the atlas using hardware-accelerated bilinear filtering:
+-       $$a_k(x, y) = \text{BilinearFilter}(atlas, s_{atlas}, t_{atlas})$$
+-       [S1]
++**Rendering (Hardware Accelerated Texture Sampling):**
++For a given primitive $k$ and local coordinates $(u, v)$:
++
++1.  **Normalize Coordinates:** Map local coordinates to normalized texture coordinates $(s, t) \in [0, 1] \times [0, 1]$ [S1].
++2.  **Retrieve Chart Coordinates:** Look up $(chart\_idx\_x, chart\_idx\_y)$ for primitive $k$ from the indirection buffer [S1].
++3.  **Compute Atlas Coordinates:** Calculate the normalized coordinates within the atlas texture using the following formulas [S1]:
++    $$
++    s_{atlas} = \frac{chart\_idx\_x \cdot T + s \cdot T}{N_{chartsx} \cdot T}
++    $$
++    $$
++    t_{atlas} = \frac{chart\_idx\_y \cdot T + t \cdot T}{N_{chartsy} \cdot T}
++    $$
++4.  **Sample:** Perform hardware-accelerated bilinear filtering using the CUDA `tex2D()` intrinsic:
++    $$
++    a_k(x, y) = \text{BilinearFilter}(atlas, s_{atlas}, t_{atlas})
++    $$
++    [S1]
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def build_atlas(primitives, T, max_atlas_width, max_atlas_height):
++def construct_atlas(primitives, T, max_atlas_width, max_atlas_height, max_channels_per_atlas):
+     """
+-    primitives: list of P objects, each having a T x T x 4 texture data array.
+-    T: resolution of each primitive's texture (power of 2).
+-    max_atlas_width, max_atlas_height: GPU limits in texels.
+-    Returns: list of atlas textures, global indirection buffer
++    Constructs texture atlases and indirection buffer.
++    primitives: List of primitive objects, each having a texture data array of size T x T x C_k
++    T: Texture resolution per primitive (power of 2)
++    max_atlas_width, max_atlas_height: Max dimensions supported by GPU
++    max_channels_per_atlas: Max channels per CUDA texture object (typically 4)
+     """
+-    charts_per_row = max_atlas_width // T
+-    charts_per_col = max_atlas_height // T
+-    total_charts_per_atlas = charts_per_row * charts_per_col
+-    num_atlases = (len(primitives) + total_charts_per_atlas - 1) // total_charts_per_atlas
++    # Calculate chart capacity per atlas
++    charts_per_atlas_x = max_atlas_width // T
++    charts_per_atlas_y = max_atlas_height // T
++    charts_per_atlas = charts_per_atlas_x * charts_per_atlas_y
++    
++    # Determine total atlases needed based on total channels
++    total_channels = sum(p.channels for p in primitives)
++    atlases_per_primitive = ceil(total_channels / primitives[0].channels) # Simplified assumption for uniform C
++    # More accurately: Group primitives by channel count or split attributes
++    # For this implementation, assume we split attributes across atlases if total C > max_channels_per_atlas
++    # The source implies splitting by attribute type (e.g., RGB+A vs RGB+A)
++    
++    # For simplicity, assume we pack as many charts as possible into one atlas
++    # If total channels exceed max_channels_per_atlas, we create multiple atlases
++    # Let's assume a single atlas holds up to max_channels_per_atlas channels worth of data
++    # Number of atlases = ceil(Total_Texture_Units / Charts_Per_Atlas)
++    # Where Total_Texture_Units = P * ceil(C / max_channels_per_atlas)
++    
++    num_textures_per_primitive = ceil(primitives[0].channels / max_channels_per_atlas)
++    total_textures = len(primitives) * num_textures_per_primitive
++    num_atlases = ceil(total_textures / charts_per_atlas)
+     
+     atlases = []
+     indirection_buffer = []
+     
+-    for a in range(num_atlases):
+-        atlas_w = charts_per_row * T
+-        atlas_h = charts_per_col * T
+-        # Initialize atlas as 4-channel 2D array: atlas[channel][y][x]
+-        atlas = [[[0.0] * atlas_w for _ in range(atlas_h)] for _ in range(4)]
++    current_atlas_idx = 0
++    current_chart_idx = 0
++    
++    for p_idx, primitive in enumerate(primitives):
++        # Determine which atlas and chart this primitive's texture belongs to
++        atlas_idx = current_atlas_idx
++        chart_idx = current_chart_idx
+         
+-        start = a * total_charts_per_atlas
+-        end = min(start + total_charts_per_atlas, len(primitives))
++        # Calculate chart coordinates (x, y) within the atlas
++        chart_x = chart_idx % charts_per_atlas_x
++        chart_y = chart_idx // charts_per_atlas_x
+         
+-        for k in range(start, end):
+-            chart_x = (k - start) % charts_per_row
+-            chart_y = (k - start) // charts_per_row
+-            indirection_buffer.append((chart_x, chart_y))
++        # Store indirection info
++        indirection_buffer.append({
++            'primitive_id': p_idx,
++            'atlas_idx': atlas_idx,
++            'chart_idx_x': chart_x,
++            'chart_idx_y': chart_y
++        })
++        
++        # Place texture data into atlas (implementation detail omitted, assumes atlas creation)
++        # ... pack primitive.texture_data into atlases[atlas_idx] at position (chart_x * T, chart_y * T) ...
++        
++        current_chart_idx += 1
++        if current_chart_idx >= charts_per_atlas:
++            current_chart_idx = 0
++            current_atlas_idx += 1
+             
+-            for u in range(T):
+-                for v in range(T):
+-                    ax = chart_x * T + u
+-                    ay = chart_y * T + v
+-                    for c in range(4):
+-                        atlas[c][ay][ax] = primitives[k].texture[v][u][c]
+-        
+-        atlases.append(atlas)
+-        
+     return atlases, indirection_buffer
+ 
+-def sample_atlas(atlas, indirection_buffer, k, s, t, T, Nchartsx, Nchartsy, atlas_w, atlas_h):
++def sample_texture(primitive_idx, u, v, atlases, indirection_buffer, T, N_charts_x, N_charts_y):
+     """
+-    Sample the texture for primitive k at normalized coordinates (s, t).
++    Samples texture for a primitive using hardware acceleration.
+     """
+-    chart_x, chart_y = indirection_buffer[k]
++    # 1. Normalize local coordinates
++    s = u
++    t = v
+     
+-    # Compute atlas coordinates
+-    s_atlas = (chart_x * T + s * T) / (Nchartsx * T)
+-    t_atlas = (chart_y * T + t * T) / (Nchartsy * T)
++    # 2. Retrieve chart coordinates from indirection buffer
++    info = indirection_buffer[primitive_idx]
++    chart_x = info['chart_idx_x']
++    chart_y = info['chart_idx_y']
++    atlas_idx = info['atlas_idx']
+     
+-    # Bilinear interpolation (standard graphics step)
+-    u0 = int(s_atlas * (atlas_w - 1))
+-    v0 = int(t_atlas * (atlas_h - 1))
+-    u1 = min(u0 + 1, atlas_w - 1)
+-    v1 = min(v0 + 1, atlas_h - 1)
+-    su = s_atlas * (atlas_w - 1) - u0
+-    sv = t_atlas * (atlas_h - 1) - v0
++    # 3. Compute atlas coordinates
++    # Formula: (chart_idx * T + s * T) / (N_charts * T)
++    # Simplifies to: (chart_idx + s) / N_charts
++    s_atlas = (chart_x + s) / N_charts_x
++    t_atlas = (chart_y + t) / N_charts_y
+     
+-    res = [0.0] * 4
+-    for c in range(4):
+-        c00 = atlas[c][v0][u0]
+-        c10 = atlas[c][v0][u1]
+-        c01 = atlas[c][v1][u0]
+-        c11 = atlas[c][v1][u1]
+-        res[c] = (c00 * (1 - su) + c10 * su) * (1 - sv) + (c01 * (1 - su) + c11 * su) * sv
+-    return res
++    # 4. Sample using hardware bilinear filtering
++    # In CUDA: tex2D(atlas_texture_object, s_atlas, t_atlas)
++    # Here we simulate the result
++    atlas = atlases[atlas_idx]
++    color = hardware_bilinear_filter(atlas, s_atlas, t_atlas)
++    
++    return color
+ ```
+-
+-**Parameters:**
+-*   $T$: Fixed resolution of each primitive's small texture, typically in powers of 2 [S1].
+-*   $N_{chartsx}, N_{chartsy}$: Total number of charts along the width and height of the atlas [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   CUDA texture objects support up to 4 channels [S1]. If total attribute channels $C$ exceed 4, attributes must be split across multiple atlases to avoid data loss or incorrect sampling (e.g., one atlas for albedo/roughness, another for normals/metallic) [S1].
+ 
+ ## Subtopics
+ 
+ ### Hardware Accelerated Texture Sampling
+-This variant refers specifically to the sampling phase where hardware bilinear filtering is used via CUDA’s `tex2D()` intrinsic, as opposed to software interpolation [S1]. It relies on the indirection buffer to map primitive IDs to atlas chart coordinates and computes normalized atlas coordinates $(s_{atlas}, t_{atlas})$ for sampling [S1]. It is chosen when performance is critical and the GPU supports efficient texture filtering [S1].
++A rendering technique where texture sampling is performed using GPU hardware filtering (e.g., CUDA `tex2D()`) rather than software interpolation. It maps primitive local coordinates to normalized atlas coordinates and retrieves values via bilinear filtering, leveraging dedicated texture caching for significant performance gains over manual global memory access [S1].
++
++### Multi-Texturing for Splat Atlases
++A process applied after shape/location refinement to generate a single texture atlas per splat by blending color information from multiple cameras. Unlike Yang et al. [2006] which uses view-dependent dynamic texture selection, or Sibbing et al. [2013] which uses a single texture per splat with three-pass rendering, this method blends multiple images into one atlas per splat to reduce inaccuracies from misalignments or irregular lighting [S2]. It works for splats even when they partially occlude each other, producing seamless transitions across surfaces [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sampling is $O(1)$ per primitive per pixel due to hardware filtering, significantly faster than software-based interpolation [S1].
+-*   **Memory Complexity:** Requires storing $P \times C \times T \times T$ texels in atlas textures plus the indirection buffer [S1].
+-*   **Performance:** Leverages dedicated texture caching and filtering hardware, speeding up attribute fetching compared to manual interpolation from global memory arrays [S1]. Avoids multiple texture bindings, reducing API overhead [S1].
+-*   **Strengths:** High performance on non-specular scenes; can reach performance levels of vanilla 3DGS on NeRF Synthetic dataset [S1].
+-*   **Limitations:** Limited by GPU maximum atlas dimensions and channel support (4 channels per texture object) [S1].
++*   **Performance:** Significantly faster than software-based sampling approaches due to the use of dedicated texture caching and filtering hardware [S1]. Improves performance by avoiding multiple texture bindings during rendering, reducing API overhead [S1].
++*   **Memory:** Requires large 2D atlas textures. The number of atlases depends on GPU texture object channel limits (typically 4) and total attribute channels [S1].
++*   **Limitations:** CUDA texture objects typically support up to 4 channels; exceeding this requires splitting attributes across multiple atlases, which increases complexity [S1].
++*   **Use Cases:** Suitable for non-specular scenes where high-quality material and normal texture splatting is required, capable of reaching performance levels comparable to vanilla 3DGS on NeRF Synthetic datasets [S1].
+ 
+ ## Background
+-This technique is detailed in the supplementary material of "TextureSplat: Per-Primitive Texture Mapping for Reflective Gaussian Splatting" [S1]. It builds on the concept of Ewa splatting [S1].
++The technique is detailed in "TextureSplat: Per-Primitive Texture Mapping for Reflective Gaussian Splatting" [S1]. It builds upon the concept of Ewa splatting [Gross 2002] [S1]. The multi-texturing aspect is derived from work on textured splat-based point clouds for handheld devices [S2], which itself references Pagés et al. [2015] for the blending approach [S2].
+ 
+ ## Sources
+-[S1] TextureSplat: Per-Primitive Texture Mapping for Reflective Gaussian Splatting, https://hal.science/hal-05484246v1, fetched 2026-10-26+[S1] TextureSplat: Per-Primitive Texture Mapping for Reflective Gaussian Splatting, https://hal.science/hal-05484246v1, fetched 2026-10-26
++[S2] Textured splat-based point clouds for rendering in handheld devices, https://doi.org/10.1145/2775292.2782779, fetched 2026-11-03

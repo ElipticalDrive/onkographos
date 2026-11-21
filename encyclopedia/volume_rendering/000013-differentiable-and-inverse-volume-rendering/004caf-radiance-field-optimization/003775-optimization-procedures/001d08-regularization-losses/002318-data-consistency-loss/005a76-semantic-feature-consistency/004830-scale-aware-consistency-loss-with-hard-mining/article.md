@@ -1,0 +1,234 @@
+# Scale-Aware Consistency Loss with Hard Mining
+
+Also called: Appendix A.1: Re-weighting, Appendix A.1: Resampling, Re-weighting
+
+## Overview
+Scale-Aware Consistency Loss with Hard Mining enforces semantic consistency between rendered and reference features by weighting pixel pairs based on shared mask coverage across scales and selectively sampling hard positive and negative examples [S1, unofficial]. It distinguishes itself from standard semantic consistency by explicitly filtering out ambiguous pairs (those with inconsistent mask overlap) and focusing optimization on difficult cases where semantic similarity contradicts geometric ground truth [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Rendered semantic features $F_{rendered}$ (shape $C \times H \times W$), reference/ground-truth semantic features $F_{ref}$ (shape $C \times H \times W$), binary masks $M$ indicating valid regions at multiple scales, and a set of sampled ray indices.
+*   **Outputs:** A scalar loss value representing the semantic inconsistency.
+
+**Data Structures**
+*   **Features:** Multi-channel feature maps. The implementation normalizes features to unit length.
+*   **Masks:** Binary tensors indicating valid pixels. Consistency is determined by the intersection of masks across scales.
+*   **Correlation Matrix:** A tensor storing cosine similarities between all pairs of sampled feature vectors.
+
+**Steps**
+
+1.  **Feature Normalization and Regularization:**
+    Compute the $L_2$ norm of the rendered features across the channel dimension and average it. Apply a regularization loss to encourage the feature magnitude to be close to 1:
+    $$ L_{norm} = (1 - \frac{1}{HW} \sum_{c,h,w} \|F_{rendered}[c, h, w]\|_2)^2 $$
+    [G] This step stabilizes training by preventing feature collapse or explosion [S1, unofficial].
+
+2.  **Scale Interpolation and Gating:**
+    Interpolate the rendered features to the resolution of the masks using bilinear interpolation. Apply scale-aware semantic feature gating to modulate features based on scale information [S1, unofficial].
+
+3.  **Sampling:**
+    Extract features corresponding to the selected rays. Let $N$ be the number of sampled rays. The sampled features are normalized to unit length:
+    $$ \hat{f}_i = \frac{f_i}{\|f_i\|_2} $$
+    where $f_i$ is the feature vector for the $i$-th sampled ray [S1, unofficial].
+
+4.  **Correlation Computation:**
+    Compute the cosine similarity between all pairs of sampled rays. For $N$ samples, this results in an $N \times N$ correlation matrix $C$:
+    $$ C_{ij} = \hat{f}_i \cdot \hat{f}_j $$
+    [S1, unofficial]
+
+5.  **Pair Classification:**
+    Determine the relationship between every pair of pixels $(i, j)$ based on their mask coverage across all scales. Let $S_{ij}$ be the sum of mask intersections for the pair across all scales, and $K$ be the total number of scales.
+    *   **Consistent Negative:** Pairs with no common mask coverage across any scale ($S_{ij} = 0$). These are assumed to be semantically unrelated.
+    *   **Consistent Positive:** Pairs with common mask coverage across all scales ($S_{ij} = K$). These are assumed to be semantically related.
+    *   **Inconsistent:** Pairs that are neither fully positive nor fully negative. These are excluded from the main mining process to avoid noise [S1, unofficial].
+
+6.  **Hard Mining:**
+    From the "Inconsistent" set, select a subset of samples to balance positive and negative contributions.
+    *   Calculate the number of samples to draw: $N_{sample} = \frac{N_{inconsistent}}{2}$.
+    *   Randomly select positive samples from the "Consistent Positive" set where the cosine similarity is low (hard positives).
+    *   Randomly select negative samples from the "Consistent Negative" set where the cosine similarity is high (hard negatives).
+    *   **Hard Positive Definition:** Pairs with common masks ($gt\_corr=1$) but low cosine similarity ($C_{ij} < 0.75$).
+    *   **Hard Negative Definition:** Pairs with no common masks ($gt\_corr=0$) but high cosine similarity ($C_{ij} > 0.5$).
+    [S1, unofficial]
+
+7.  **Loss Calculation:**
+    Compute the final loss using the mined hard positives and negatives. The loss encourages high similarity for hard positives and low similarity for hard negatives [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def scale_aware_consistency_loss(rendered_features, masks, sampled_ray_indices, num_scales):
+    """
+    Compute Scale-Aware Consistency Loss with Hard Mining.
+    
+    Args:
+        rendered_features: Tensor of shape (C, H, W)
+        masks: List of Tensors of shape (1, H_scale, W_scale) for each scale
+        sampled_ray_indices: Indices of rays to sample features from
+        num_scales: Number of scales used for mask consistency check
+        
+    Returns:
+        loss: Scalar tensor
+    """
+    # 1. Normalize rendered features and compute regularization
+    # Norm is computed over channel dim, then mean over spatial dims
+    feature_norm = torch.norm(rendered_features, dim=0, p=2).mean()
+    norm_reg_loss = (1 - feature_norm) ** 2
+    
+    # 2. Interpolate to mask resolution and apply gating
+    # Assuming masks[0] defines the target resolution
+    target_h, target_w = masks[0].shape[-2:]
+    rendered_features_interp = F.interpolate(
+        rendered_features.unsqueeze(0), 
+        size=target_h, 
+        mode='bilinear', 
+        align_corners=False
+    ).squeeze(0)
+    
+    # Apply scale gating (placeholder for specific gating mechanism)
+    # [G] Assuming a function `apply_scale_gating` exists or is implemented inline
+    # For this implementation, we assume the gating is part of the feature preparation
+    # If not provided, we proceed with interpolated features.
+    features_with_scale = rendered_features_interp 
+    
+    # 3. Sample features at selected rays
+    # Note: sampled_ray_indices usually maps to flattened spatial indices or ray IDs
+    # Assuming features_with_scale is (C, H, W) and we need to extract specific pixels
+    # This step depends on how rays are indexed. Assuming indices are (H, W) flattened.
+    if sampled_ray_indices.dim() == 1:
+        # Convert flat indices to (H, W) if necessary, or assume direct indexing
+        # For simplicity, assume sampled_ray_indices are flat indices into C*H*W
+        # Reshape to (C, H, W) -> (C, H*W)
+        features_flat = features_with_scale.view(features_with_scale.shape[0], -1)
+        sampled_features = features_flat[:, sampled_ray_indices] # Shape: (C, N)
+    else:
+        # Handle multi-dimensional indices if necessary
+        sampled_features = features_with_scale[:, sampled_ray_indices[0], sampled_ray_indices[1]]
+
+    # 4. Normalize sampled features
+    # Normalize along the channel dimension (dim=-1 if shape is (N, C))
+    # Transpose to (N, C) for normalization
+    sampled_features_T = sampled_features.T # Shape: (N, C)
+    scale_conditioned_features_sam = F.normalize(sampled_features_T, dim=-1, p=2)
+    
+    # 5. Compute cosine similarity between all pairs
+    # corr shape: (N, N)
+    corr = torch.einsum('nc,mc->nm', scale_conditioned_features_sam, scale_conditioned_features_sam)
+    
+    # 6. Identify pixel pairs based on mask coverage
+    # Compute mask intersection across scales for each pair
+    # This requires projecting masks to the same resolution and checking overlap
+    # For simplicity, assume `gt_corrs` is precomputed or computed as follows:
+    
+    # Project all masks to the resolution of sampled features
+    # This is a simplification; in practice, masks are aligned with rays
+    # Let's assume we have a binary matrix `mask_overlap` of shape (N, N)
+    # where mask_overlap[i, j] = 1 if ray i and j share valid mask at all scales
+    
+    # [G] Computing exact mask overlap for arbitrary rays requires ray-masking intersection logic.
+    # We assume `gt_corrs` is provided or computed via mask intersection.
+    # Here we simulate the logic described:
+    
+    # Calculate sum of mask intersections across scales
+    # This part is complex to implement without specific ray-mask intersection code.
+    # We will assume `gt_corrs` is a precomputed tensor of shape (N, N)
+    # representing the number of scales where both rays are valid.
+    
+    # If gt_corrs is not available, we cannot implement this step fully from the notes alone.
+    # However, the notes imply `gt_corrs` is derived from masks.
+    # Let's assume a helper `compute_mask_consistency` exists.
+    
+    # For the purpose of this article, we define the logic based on the notes:
+    # consistent_negative: sum_0 == 0
+    # consistent_positive: sum_0 == len(gt_corrs) -> likely means sum == num_scales
+    
+    # Let's assume `mask_sum` is the sum of mask overlaps across scales for each pair
+    # mask_sum shape: (N, N)
+    
+    # Identify sets
+    consistent_negative = (mask_sum == 0)
+    consistent_positive = (mask_sum == num_scales)
+    inconsistent = ~(consistent_negative | consistent_positive)
+    
+    # 7. Hard Mining
+    inconsistent_num = inconsistent.sum().item()
+    sampled_num = inconsistent_num // 2
+    
+    # Randomly select positive samples from consistent_positive
+    # [G] The notes mention `rand_num < sampled_num / consistent_positive.count_nonzero()`
+    # This implies a probability-based selection.
+    
+    pos_count = consistent_positive.sum().item()
+    if pos_count > 0:
+        prob_pos = sampled_num / pos_count
+        rand_pos = torch.rand_like(consistent_positive.float())
+        sampled_positive = consistent_positive & (rand_pos < prob_pos)
+    else:
+        sampled_positive = torch.zeros_like(consistent_positive, dtype=torch.bool)
+        
+    # Randomly select negative samples from consistent_negative
+    neg_count = consistent_negative.sum().item()
+    if neg_count > 0:
+        prob_neg = sampled_num / neg_count
+        rand_neg = torch.rand_like(consistent_negative.float())
+        sampled_negative = consistent_negative & (rand_neg < prob_neg)
+    else:
+        sampled_negative = torch.zeros_like(consistent_negative, dtype=torch.bool)
+        
+    # Add hard positives: common masks but low similarity
+    hard_pos_mask = (corr < 0.75) & consistent_positive
+    # Add hard negatives: no common masks but high similarity
+    hard_neg_mask = (corr > 0.5) & consistent_negative
+    
+    # Combine mined samples
+    final_pos_mask = sampled_positive | hard_pos_mask
+    final_neg_mask = sampled_negative | hard_neg_mask
+    
+    # 8. Compute Loss
+    # [G] The specific loss function (e.g., contrastive loss) is not detailed in the notes.
+    # Standard practice is to use a contrastive loss on the mined pairs.
+    # We assume a simple contrastive loss:
+    # L = -log(exp(sim_pos) / (exp(sim_pos) + exp(sim_neg)))
+    
+    pos_corrs = corr[final_pos_mask]
+    neg_corrs = corr[final_neg_mask]
+    
+    if pos_corrs.numel() == 0 or neg_corrs.numel() == 0:
+        return norm_reg_loss # Fallback to norm reg if no hard samples
+        
+    # Contrastive Loss
+    # [G] Implementation of contrastive loss depends on specific framework.
+    # Using a simple margin-based loss for demonstration.
+    loss_pos = -pos_corrs.mean()
+    loss_neg = torch.relu(neg_corrs - 0.5).mean() # Push negatives below 0.5
+    
+    total_loss = loss_pos + loss_neg + norm_reg_loss
+    
+    return total_loss
+```
+
+**Parameters**
+*   **Similarity Thresholds:** Hard positive threshold $< 0.75$, hard negative threshold $> 0.5$ [S1, unofficial].
+*   **Sampling Ratio:** Half of the inconsistent samples are drawn for positive and negative sets [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Degenerate Masks:** If no pairs satisfy the consistent positive or negative criteria, the mining step yields no samples. The loss falls back to the norm regularization [S1, unofficial].
+*   **Precision:** Cosine similarity calculations are sensitive to feature magnitude. Normalization is critical [S1, unofficial].
+*   **Mask Resolution:** Interpolation artifacts can affect mask consistency checks. Bilinear interpolation is used [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the correlation matrix computation $O(N^2)$, where $N$ is the number of sampled rays. Hard mining adds $O(N^2)$ for mask consistency checks.
+*   **Memory Complexity:** $O(N^2)$ for storing the correlation matrix and mask consistency matrix.
+*   **Strengths:** Focuses on difficult samples, improving convergence in complex scenes. Robust to geometric inaccuracies by relying on semantic consistency [S1, unofficial].
+*   **Limitations:** High memory usage for large $N$. Sensitive to mask quality and scale alignment [S1, unofficial].
+*   **When to Use:** When standard semantic consistency fails to capture fine-grained details or when the scene has significant geometric errors [S1, unofficial].
+
+## Background
+The method is described in the context of Gaussian Splatting optimization, specifically in the `gaussian-splatting-lightning` repository [S1, unofficial]. It builds upon the principles of Semantic Feature Consistency, extending them with scale-aware gating and hard mining techniques [S1, unofficial].
+
+## Sources
+[S1] yzslab/gaussian-splatting-lightning, https://github.com/yzslab/gaussian-splatting-lightning, fetched 2026-10-27 (unofficial)

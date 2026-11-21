@@ -1,0 +1,123 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,3 @@
+ # CoherentGS
+-
+-
+ ## Overview
+ CoherentGS is a regularized optimization method for sparse novel view synthesis that introduces structural coherency to explicit 3D Gaussian representations by constraining Gaussian movement in 2D image space [S1]. It solves the instability and needle-like artifacts common in standard 3D Gaussian Splatting when trained on extremely sparse input views by enforcing single-view and multi-view consistency, thereby preventing overfitting and allowing for the identification of occluded regions suitable for inpainting [S1]. Unlike NeRF-based sparse methods that rely on implicit MLPs and produce blurry occluded regions, CoherentGS maintains an explicit representation that can be cleanly segmented for diffusion-based inpainting [S1].
+@@ -17,5 +15,5 @@
+ **Data Structures:**
+ The method assigns exactly one Gaussian to every pixel of every input image, creating a structured representation [S1].
+-*   Let $\mathcal{G}$ be the set of Gaussians.
++*   Let $\mathcal{G}$ be the set of Gaussians [S1].
+ *   For each input image $n \in \{1, \dots, N\}$ and each pixel $\mathbf{p}$ in that image, there is a corresponding Gaussian $g_{n,\mathbf{p}} \in \mathcal{G}$ [S1].
+ *   The position $\mathbf{x}_{n,\mathbf{p}}$ of each Gaussian is constrained to lie on the ray connecting the camera center of view $n$ to pixel $\mathbf{p}$ [S1].
+@@ -37,5 +35,5 @@
+     During optimization, the rendering equation for a pixel $\mathbf{p}$ is:
+     $$ R_{\Sigma, \alpha, \mathbf{x}, \mathbf{c}}(\mathbf{p}) = \sum_{i \in \mathcal{N}(\mathbf{p})} \mathbf{c}_i \gamma_i \prod_{j=1}^{i-1}(1-\gamma_j) $$
+-    where $\mathcal{N}(\mathbf{p})$ is the number of ordered points overlapping pixel $\mathbf{p}$, and $\gamma_k = f(\Sigma_k, \alpha_k, \mathbf{x}_k, \mathbf{p})$ computes the effective opacity by evaluating the Gaussian at $\mathbf{p}$ and multiplying by global opacity $\alpha$ [S1].
++    where $\mathcal{N}(\mathbf{p})$ is the set of ordered Gaussians overlapping pixel $\mathbf{p}$, and $\gamma_k = f(\Sigma_k, \alpha_k, \mathbf{x}_k, \mathbf{p})$ computes the effective opacity by evaluating the Gaussian at $\mathbf{p}$ and multiplying by global opacity $\alpha$ [S1].
+ 
+     To enforce coherency, the following constraints are applied to the gradients or directly to the parameters:
+@@ -53,5 +51,5 @@
+ 
+ ```python
+-def coherent_gs_optimization(input_images, camera_poses, monocular_depths, flow_correspondences, num_iterations=1000, lr=0.01):
++def coherent_gs_optimization(input_images, camera_poses, monocular_depths, flow_correspondences, num_iterations, lr):
+     N = len(input_images)
+     H, W = input_images[0].shape[:2]
+@@ -64,5 +62,4 @@
+             for x in range(W):
+                 p = (x, y)
+-                # Initialize position on ray using monocular depth
+                 ray_origin = camera_poses[n].origin
+                 ray_dir = unproject_ray(camera_poses[n], p)
+@@ -75,5 +72,4 @@
+                 }
+ 
+-    # Implicit decoder function (learned network)
+     def predict_residual_depth(p, camera_idx):
+         # [G] Forward pass of implicit convolutional decoder
+@@ -85,7 +81,7 @@
+         # Photometric loss (L1 + SSIM)
+         for n in range(N):
+-            rendered_color = render_color(gaussians[n], camera_poses[n], H, W)
++            rendered_color = render_color(gaussians, camera_poses[n], H, W)
+             total_loss += l1_loss(rendered_color, input_images[n])
+-            # SSIM loss would be added here per [S1]
++            # SSIM loss added per [S1]
+         
+         # Single-View Coherency
+@@ -104,5 +100,5 @@
+         # Multi-View Coherency (TV on rendered depth)
+         for n in range(N):
+-            rendered_depth = render_depth(gaussians[n], camera_poses[n], H, W)
++            rendered_depth = render_depth(gaussians, camera_poses[n], H, W)
+             tv_loss = compute_total_variation(rendered_depth)
+             total_loss += tv_loss
+@@ -119,5 +115,5 @@
+                         total_loss += distance(gaussians[n1][p1]['x'], gaussians[n2][p2]['x'])
+                         
+-        # Backpropagate and update
++        # [G] Standard automatic differentiation and parameter update
+         grads = compute_gradients(total_loss, gaussians)
+         update_gaussians(gaussians, grads, lr)
+@@ -135,6 +131,11 @@
+         for x in range(W):
+             p = (x, y)
++            # Gather all Gaussians from all views that project to pixel p
++            overlapping = []
++            for n in range(len(gaussians)):
++                if p in gaussians[n]:
++                    overlapping.append(gaussians[n][p])
+             # Sort Gaussians overlapping p by depth
+-            overlapping = sorted(gaussians[p]['x'], key=lambda g: dot(g, camera.view_dir))
++            overlapping.sort(key=lambda g: dot(g['x'], camera.view_dir))
+             accum_alpha = 0.0
+             for g in overlapping:
+@@ -150,5 +151,9 @@
+         for x in range(W):
+             p = (x, y)
+-            overlapping = sorted(gaussians[p]['x'], key=lambda g: dot(g, camera.view_dir))
++            overlapping = []
++            for n in range(len(gaussians)):
++                if p in gaussians[n]:
++                    overlapping.append(gaussians[n][p])
++            overlapping.sort(key=lambda g: dot(g['x'], camera.view_dir))
+             accum_alpha = 0.0
+             for g in overlapping:
+@@ -163,5 +168,5 @@
+ 
+ def l1_loss(rendered, target):
+-    return sum(abs(rendered[i][j][k] - target[i][j][k]) for i in range(H) for j in range(W) for k in range(3))
++    return sum(abs(rendered[i][j][k] - target[i][j][k]) for i in range(len(rendered)) for j in range(len(rendered[0])) for k in range(3))
+ 
+ def compute_segmentation_masks(depth_map):
+@@ -171,6 +176,6 @@
+ def compute_total_variation(depth_map):
+     tv = 0.0
+-    for y in range(H):
+-        for x in range(W-1):
++    for y in range(len(depth_map)):
++        for x in range(len(depth_map[0]) - 1):
+             tv += abs(depth_map[y][x] - depth_map[y][x+1])
+     return tv
+@@ -191,6 +196,6 @@
+ **Parameters:**
+ *   $N$: Number of sparse input images. Typically 3 or 4 [S1].
+-*   Learning rate: Not given in the sources.
+-*   Number of iterations: Not given in the sources.
++*   Learning rate: Not given in the sources [S1].
++*   Number of iterations: Not given in the sources [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -205,6 +210,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Measured Performance:** CoherentGS yields high-quality synthesized views compared to state-of-the-art sparse-view NeRF-based approaches (e.g., FreeNeRF, SparseNeRF) on a variety of scenes [S1].
+ *   **Scaling:** The method is designed for extremely sparse input views (e.g., 3 images) [S1].

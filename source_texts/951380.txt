@@ -1,0 +1,1096 @@
+This PR adds GPU implementations of cucim.skimage.measure.marching_cubes and cucim.skimage.measure.mesh_surface_area for CuPy arrays. This resolves #332.
+marching_cubes extracts triangular isosurfaces from 3D volumes and follows the scikit-image API for the supported options, including level, spacing, gradient_direction, step_size, allow_degenerate, method, and mask. method="lewiner" (the scikit-image default) and method="lorensen" are implemented, and method="vega", which is not in scikit-image (see below). The Lewiner mesh has exactly the same number of vertices and faces as scikit-image's on every volume tested, including noise volumes that contain millions of ambiguous cells.
+mesh_surface_area computes the surface area of triangular meshes produced by marching_cubes using a CuPy reduction kernel.
+On an RTX A6000 the GPU implementation is 14-17x faster than scikit-image for 64^3 volumes, 69-88x for 128^3, 113-175x for 192^3 to 384^3 volumes with a simple isosurface, and 290-590x for volumes with large, noisy isosurfaces (see Benchmark results).
+Differences from scikit-image
+These are also listed in the docstring of marching_cubes.
+
+Supports additional, more modern method=vega in addition to the method=lewiner and method=lorensen approaches of scikit-image.
+The vertices and faces of method="lewiner" and method="lorensen" are the same sets as scikit-image's, in a different order.
+normals have the sign of scikit-image's, but a vertex on an edge gets the interpolated central-difference gradient of its two samples (scikit-image sums the gradients of the cells around it); values is the larger of the two sample values of the edge (scikit-image uses the range of the cells around the vertex). Neither is equal to scikit-image's. The reason is the vertex generation: one thread per crossed edge computes its vertex from the two samples at the ends of the edge, without visiting the cells around it. scikit-image accumulates the normal and the value of a vertex over every cell that emits it (up to four in 3D, and which cells do depends on the method's triangulation). Reproducing that would need an additional pass over the cells with atomic additions, which was not built or measured. The normal chosen is the usual one for a point on an edge: smooth and independent of how many cells share the vertex.
+verts is float32 and faces int32 (scikit-image returns float64 verts for a non-unit spacing and int64 faces with allow_degenerate=False).
+A volume that contains NaN raises a ValueError.
+The level is used as a float32 by the kernels.
+allow_degenerate=False can give different counts for volumes with samples equal to the level (scikit-image's vertices at samples have errors of about 1e-16, so it misses coincident vertices).
+method="vega" is not guaranteed to give a manifold mesh (some noisy volumes have edges shared by four triangles), although each cell has the topology of its trilinear interpolant.
+
+Implementation Approach
+The implementation uses CuPy RawKernels and scan-based allocation: no kernel appends to an output with atomics, so the mesh is deterministic and every output array is allocated once at its final size. For one call the steps are:
+
+Validate and prepare. Convert the volume to contiguous float32, check level against the data range and apply step_size by subsampling. The kernels index the nodes, cells and output arrays with 32-bit integers, and with 64-bit integers (compiled as a second variant of each kernel) when three times the number of nodes, cells, vertices or faces reaches 2**31, which is a volume of about 715 million voxels (894³). Volumes of over 2 billion voxels were checked (a 1300³ sphere, all three methods). The vertex ids are int32, so a mesh with 2**31 or more vertices or faces raises a ValueError.
+Classify edges, one thread per grid node. Each thread tests the three edges that leave its node (along the three axes) and writes a 3-bit crossing mask and the number of crossed edges (uint8 each). With a mask, an edge only counts when it belongs to a cell whose mask is set.
+Number the crossed edges. An inclusive scan over the per-node counts gives node_scan; the vertex id of a crossed edge is node_scan[node] - popcount(mask[node] >> side). Scanning per node rather than per edge makes the scan 3x smaller, and no separate array of vertex ids is stored. All scans of uint8 counts in the pipeline use a block scan (sums of blocks of 1024 counts, a scan of the block sums, and a scan inside each block with the block offset added), which gives the same values as cp.cumsum in half the time for 256^3 entries (0.17 ms against 0.34 ms); below about 2.6 million entries cp.cumsum is used because it is faster there. A small compaction kernel (one thread per node) writes the flat index of each crossed edge at its vertex id.
+Generate vertices, one thread per vertex. Position by linear interpolation along the edge, a normal from the interpolated central-difference gradient, and the values output (the larger of the two edge values).
+Count triangles, one thread per cell. uint8 triangle counts, and a scan gives each cell's output offset.
+Generate faces, one thread per cell. Triangle indices are looked up and written at the cell's offset, with the winding flipped for gradient_direction.
+allow_degenerate=False. Zero-area faces are found in parallel, coincident vertices are merged with a lock-free union-find, and the vertex and face arrays are compacted with scans (a no-op early return when no face is degenerate).
+
+The code shared by both methods (validation, step_size, the edge classification, numbering and compaction kernels, the vertex kernel, the volume and gradient helpers, and degenerate-face removal) is in _marching_cubes_common.py. Each method supplies its crossing test (mc_crosses, which is now the same for the three methods: a sample equal to the level is below it, as in scikit-image). _marching_cubes_lorensen.py holds the classic 256-entry triangle table and the Lorensen counting and face kernels (steps 5-6).
+The Lewiner path replaces steps 5-6 as follows. The counting kernel looks up the case and configuration of each cell and resolves the ambiguous cases (3, 4, 6, 7, 10, 12 and 13) with the face and interior tests of the Lewiner algorithm, evaluated in double precision, in the same operation order as scikit-image where the values allow it (the count kernel reads the sample values and the level as float32, so a sample or level that is not exactly a float32 can be classified differently from scikit-image, which keeps the level as a double). This is done once per cell: the kernel stores the triangle count, a "needs a center vertex" flag, and the offset of the cell's edges in a single concatenated triangle table (a uint16 per cell). A second kernel creates the center vertices (for the cells that need one) and writes them after the edge vertices in the same vertex, normal and value arrays. The face kernel is then a plain table lookup with no ambiguity tests and no double-precision work.
+method="vega" is the marching cubes 33 implementation of Vega, Abache and Coll (J. Computer Graphics Techniques 8(3), 2019), whose interior test is corrected: it is made on a diagonal of the cell on the plane through the saddle point of the trilinear interpolant, so that the topology of the mesh does not depend on the orientation of the field (the Lewiner method gives different topologies for some cells and their mirror images), and it has the two patterns of the case 13.5.2. The counting kernel resolves each cell once, as for Lewiner, with the case selection of the MC33 C library of Vega and Abache (MIT; ported with the help of the CUDA port in the isoext project, MIT) and its 2310-entry lookup
+table, and everything else is shared. The default stays lewiner, which matches scikit-image.
+All methods support masks (in classification and counting), step_size and spacing.
+Lorensen was implemented first because it is the simpler classic algorithm and provided the GPU data layout. The Lewiner path was added afterward to provide the topologically consistent behavior that scikit-image uses by default. Both methods are kept for API compatibility: method="lorensen" is part of the scikit-image API, and the Lorensen kernels are somewhat faster on noisy data (see below). The two meshes differ in topology (different Euler characteristic on noisy data, for example), not in watertightness: the classic table also gives meshes without open edges on the volumes tested.
+References and Licensing
+Licenses and attributions were added for some reference codebases:
+
+CuMCubes, as a design reference for a per-node, three-axis vertex-id grid with count, vertex and face passes.
+The MC33 C library of Vega and Abache (MIT) and the isoext project of Guangyan Cai (MIT): the case selection and the lookup table of method="vega" are a port of the library's, made with the help of isoext's CUDA port, and are credited in LICENSE-3rdparty.md and in the file headers.
+NVIDIA Warp, as a design reference for allocating the output from prefix scans rather than atomic appends. The reference is the legacy native CUDA marching cubes (warp/native/marching.cu) of Warp versions 1.6.2 to 1.7.2, the releases under Apache-2.0 (Warp was relicensed on 2025-03-06 and replaced this implementation in version 1.8.0).
+
+The kernel code does not come from any of th above projects. The Lewiner path (case tables, ambiguity tests, center vertex) is derived from the scikit-image implementation, which is also the behavioral reference for validation, output conventions and supported API semantics.
+Testing
+Tests (120 in test_marching_cubes.py, test_marching_cubes_kernels.py and test_marching_cubes_vega.py) compare behavior against scikit-image across representative volumes and options: Lorensen and Lewiner, allow_degenerate=True and False, step_size, masks, spacing, gradient direction, and surface-area calculation.
+The kernel-level tests check, for each of the 256 binary cases and the ambiguous branches (including center-vertex cases), that the face-generating kernels produce the triangles of a
+Python port of scikit-image's reference selector. Noisy volumes (white and smoothed, with level 0 and 0.1) check that the Lewiner mesh has the same number of vertices and faces and the same surface area as scikit-image's. The 64-bit kernels are run on small volumes (by lowering the limit) and give meshes that are bitwise equal to the 32-bit ones, for the three methods, with and without a mask and with and without removal of the degenerate faces; a 900³ sphere (above the old limit) is checked against the radius and the area of the sphere (skipped when less than 16 GB of device memory is free).
+The tests of vega check that the case selection equals that of the reference code (144 reference cells), that the topology of single cells and of closed random fields equals that of the trilinear interpolant on a finer grid, that it does not depend on the 48 symmetries of the cube, and the examples of the paper.
+For allow_degenerate=False the geometry is preserved, but which of several coincident vertices survives (and so the exact vertex count in rare cases) can differ from scikit-image's sequential post-processing; for example, one extra vertex in 12.6 million on a 384^3 noise volume. This is noted in the docstring.
+Benchmark comparison with isoext (a GPU reference for method="vega")
+method="vega" has no scikit-image counterpart, so it was compared with isoext (MIT; PyTorch and Thrust), whose vega method is a port of the same MC33 C library, and with its lewiner method as another GPU implementation. Same RTX A6000 and float32 volumes, one library at a time. isoext: median of 20 calls of isoext.marching_cubes on a prebuilt grid (CUDA events); cuCIM: mean GPU time of 20 calls with allow_degenerate=True. cuCIM also validates the input and returns normals and values, which isoext does not. isoext 1.0.0 was built from a local checkout with CUDA 13.2 and PyTorch 2.14.1.
+
+
+
+Volume
+Method
+isoext (ms)
+cuCIM (ms)
+isoext / cuCIM
+
+
+
+
+ellipsoid 128^3
+Lewiner
+1.86
+0.46
+4.0x
+
+
+ellipsoid 128^3
+Vega
+1.76
+0.47
+3.7x
+
+
+ellipsoid 256^3
+Lewiner
+6.85
+1.44
+4.8x
+
+
+ellipsoid 256^3
+Vega
+7.02
+1.42
+5.0x
+
+
+ellipsoid 384^3
+Lewiner
+15.50
+4.06
+3.8x
+
+
+ellipsoid 384^3
+Vega
+16.24
+4.06
+4.0x
+
+
+smooth noise 256^3
+Lewiner
+63.40
+3.29
+19.3x
+
+
+smooth noise 256^3
+Vega
+73.30
+3.20
+22.9x
+
+
+smooth noise 384^3
+Lewiner
+160.92
+10.54
+15.3x
+
+
+smooth noise 384^3
+Vega
+195.50
+10.36
+18.9x
+
+
+
+(White noise 128^3, a stress test with almost every cell ambiguous: Lewiner 96.4 vs 4.5 ms, Vega 66.5 vs 1.6 ms.) The cause of the difference was not isolated; isoext fills a fixed-size triangle soup per active cell and welds the vertices with a global sort, while cuCIM numbers the edges with a scan.
+Correctness: the vega meshes agree. On the ellipsoids all triangles are identical, and on the smooth-noise volume 7,414,288 of 7,414,355 triangles are identical (the 67 and 49 that differ are probably borderline single-precision tests, not investigated); areas and signed volumes agree to the printed digits. The lewiner meshes have the same vertices and areas, but only about 30% of the triangles are identical on the ellipsoid and smooth-noise volumes: for cells without ambiguity isoext splits the quadrilaterals along a different diagonal
+than scikit-image does (cuCIM's triangulation equals scikit-image's).
+Benchmark results vs. scikit-image
+RTX A6000 vs Intel i9-10980XE, scikit-image 0.26.0, CuPy 14.2.0, float32 volumes.
+GPU times are the mean of 10 runs from cupyx.profiler.benchmark (after 3 warm-up runs) and do not include host-device transfers.
+CPU times are the best of 2 runs (1 run when the first took over 2 s) over two benchmark sessions.
+The meshes had the same number of vertices and faces on CPU and GPU in every row except allow_degenerate=False (see Testing).
+Ellipsoid (the isosurface of benchmarks/skimage/cucim_measure_bench.py; about 0.1-0.6 M vertices):
+
+
+
+Volume
+Method
+CPU (True)
+GPU (True)
+Speedup
+CPU (False)
+GPU (False)
+Speedup
+
+
+
+
+64^3
+Lewiner
+5.6 ms
+0.40 ms
+13.9x
+6.8 ms
+0.44 ms
+15.4x
+
+
+64^3
+Lorensen
+5.8 ms
+0.35 ms
+16.6x
+6.7 ms
+0.39 ms
+17.1x
+
+
+128^3
+Lewiner
+31.8 ms
+0.46 ms
+68.6x
+37.6 ms
+0.49 ms
+77.4x
+
+
+128^3
+Lorensen
+33.5 ms
+0.41 ms
+81.2x
+37.5 ms
+0.43 ms
+87.8x
+
+
+192^3
+Lewiner
+93.8 ms
+0.79 ms
+118.0x
+105 ms
+0.80 ms
+130.2x
+
+
+192^3
+Lorensen
+96.8 ms
+0.70 ms
+138.0x
+108 ms
+0.73 ms
+148.8x
+
+
+256^3
+Lewiner
+208 ms
+1.43 ms
+145.4x
+229 ms
+1.50 ms
+152.3x
+
+
+256^3
+Lorensen
+220 ms
+1.40 ms
+157.1x
+241 ms
+1.39 ms
+172.8x
+
+
+384^3
+Lewiner
+699 ms
+4.37 ms
+159.9x
+722 ms
+4.37 ms
+165.0x
+
+
+384^3
+Lorensen
+700 ms
+4.20 ms
+166.6x
+766 ms
+4.37 ms
+175.4x
+
+
+
+(True / False is allow_degenerate.)
+Noisy volumes (Gaussian-smoothed noise, sigma 3, level 0; white noise has
+many ambiguous cells; the masked case has the top half of the volume enabled):
+
+
+
+Volume
+Vertices
+Faces
+Method
+CPU (True)
+GPU (True)
+Speedup
+CPU (False)
+GPU (False)
+Speedup
+
+
+
+
+smooth noise 256^3
+3.7 M
+7.4 M
+Lewiner
+1647 ms
+3.29 ms
+501x
+2.45 s
+4.83 ms
+506x
+
+
+smooth noise 256^3
+3.7 M
+7.4 M
+Lorensen
+1724 ms
+3.20 ms
+538x
+2.46 s
+4.82 ms
+510x
+
+
+smooth noise 384^3
+12.6 M
+25.1 M
+Lewiner
+6.33 s
+11.24 ms
+563x
+8.26 s
+15.78 ms
+523x
+
+
+smooth noise 384^3
+12.6 M
+25.1 M
+Lorensen
+6.24 s
+10.90 ms
+572x
+8.01 s
+15.56 ms
+515x
+
+
+white noise 128^3
+3.2 M
+7.2 M
+Lewiner
+1385 ms
+4.55 ms
+304x
+1890 ms
+5.88 ms
+322x
+
+
+white noise 128^3
+3.1 M
+6.6 M
+Lorensen
+1195 ms
+2.03 ms
+589x
+1810 ms
+3.28 ms
+551x
+
+
+smooth noise 256^3, half masked
+1.9 M
+3.7 M
+Lewiner
+779 ms
+2.64 ms
+295x
+1121 ms
+3.47 ms
+323x
+
+
+smooth noise 256^3, half masked
+1.9 M
+3.7 M
+Lorensen
+743 ms
+2.35 ms
+316x
+1043 ms
+3.18 ms
+328x
+
+
+
+On smooth data the methods take about the same time (Lewiner within about 5% of Lorensen). Lewiner is slower only when almost every cell is ambiguous
+(white noise), where it takes about twice as long as Lorensen because of the double-precision ambiguity tests. method="vega" takes 1.55 ms for the 256^3 ellipsoid, 3.34 ms for the smooth noise 256^3 and 10.50 ms for 384^3 (Lewiner 1.45, 3.27 and 10.82 ms), and 1.56 ms for white noise 128^3 (Lewiner 4.38 ms, Lorensen 2.07 ms), because its tests are in single precision (same GPU and settings, allow_degenerate=True; not isolated).
+mesh_surface_area (meshes from marching_cubes of the ellipsoid with allow_degenerate=False; the areas agree with scikit-image's):
+
+
+
+Volume
+Vertices
+Faces
+CPU
+GPU
+Speedup
+
+
+
+
+64^3
+8,536
+17,068
+1.24 ms
+0.051 ms
+24.3x
+
+
+128^3
+34,640
+69,276
+5.21 ms
+0.093 ms
+56.0x
+
+
+192^3
+78,536
+157,068
+11.44 ms
+0.170 ms
+67.3x
+
+
+256^3
+139,872
+279,740
+20.68 ms
+0.447 ms
+46.3x
+
+
+
+Effect of the optimizations in the commit history
+The branch ends with separate commits for each optimization of the first working implementation (same GPU and settings, allow_degenerate=True, GPU time before and after the whole series; every step left the output bitwise unchanged):
+
+
+
+Volume
+Lewiner before
+Lewiner now
+Lorensen before
+Lorensen now
+
+
+
+
+sphere 256^3
+3.56 ms
+1.48 ms
+3.37 ms
+1.39 ms
+
+
+smooth noise 256^3
+6.71 ms
+3.27 ms
+4.34 ms
+3.23 ms
+
+
+smooth noise 384^3
+22.6 ms
+11.1 ms
+14.7 ms
+10.9 ms
+
+
+smooth noise 256^3, half masked
+5.54 ms
+2.65 ms
+3.98 ms
+2.31 ms
+
+
+white noise 128^3
+34.7 ms
+4.46 ms
+1.79 ms
+2.10 ms
+
+
+
+The largest effects were resolving each Lewiner case once in the counting kernel (the white-noise face kernel went from 31 ms to under 1 ms), scanning per node instead of per edge (about 0.5-1 ms at 256^3), generating vertices with one thread per vertex, and scanning the counts in blocks (about 0.15-0.2 ms less for each scan of 256^3 entries).
+
+Add marching cubes and mesh surface area by grlee77 · Pull Request #1206 · rapidsai/cucim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add marching cubes and mesh surface area
+#1206
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Open
+grlee77
+wants to merge
+52
+commits into
+rapidsai:main
+base:
+main
+Branches
+Tags
+Loading
+Loading
+from
+grlee77:add-marching-cubes
+Uh oh!
+There was an error while loading. Please reload this page.
+Open
+Add marching cubes and mesh surface area
+#1206
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+52 commits
+Select commit
+Hold shift + click to select a range
+6e42490
+test case and license updates
+grlee77 May 7, 2026
+2751a7a
+add marching_cubes benchmark
+grlee77 May 7, 2026
+2e3038e
+start adding Lewiner marching cubes implementation
+grlee77 May 7, 2026
+7be2229
+complete initial Lewiner implementation
+grlee77 May 7, 2026
+61f71ba
+expand test coverage
+grlee77 May 7, 2026
+06d650b
+slow implementation of allow_degenerate=False
+grlee77 May 7, 2026
+96e9d61
+fix performance of allow_degenerate=False and allow step_size > 1
+grlee77 May 7, 2026
+fa7f6b4
+finish marching_cubes implementation
+grlee77 May 8, 2026
+598c820
+Optimize marching cubes degenerate post-processing
+grlee77 May 8, 2026
+34a9669
+improve masked marching_cubes performance
+grlee77 May 8, 2026
+0f93da2
+implement mask-aware edge classification to avoid separate compaction…
+grlee77 May 8, 2026
+cfafcde
+Lewiner: avoid extra work when there are no center vertices
+grlee77 May 8, 2026
+24633b2
+refactor Lewiner kernels
+grlee77 May 8, 2026
+8ed52ea
+store LUTs in __constant__ memory instead of passing in as many kerne…
+grlee77 May 8, 2026
+6076160
+have _lewiner_count_cells_gpu also return case_codes so they can be u…
+grlee77 May 8, 2026
+a41e9a9
+use __constant__ memory for Levensen LUT as well
+grlee77 May 8, 2026
+917a287
+Lewiner count kernels now emit a scalar center_count while computing …
+grlee77 May 8, 2026
+afb6bff
+use uint8 edge flags
+grlee77 May 8, 2026
+4030cff
+Update allow_degenerate=False case with early return in case of no de…
+grlee77 May 8, 2026
+ee672b2
+Split Lewener and Lorensen implementations into separate files
+grlee77 May 8, 2026
+da91e41
+split kernel-level test cases out from higher level marching_cubes tests
+grlee77 May 8, 2026
+2083655
+add 3rd-party license info
+grlee77 May 12, 2026
+61f596c
+update marching_cubes docstrings
+grlee77 May 12, 2026
+d3d0bff
+implement mesh_surface_area
+grlee77 May 12, 2026
+4f94462
+Add more efficient ReductionKernel for mesh_surface_area
+grlee77 May 12, 2026
+cf9fd46
+add mesh_surface_area benchmarks
+grlee77 May 12, 2026
+ff02dca
+marching_cubes: resolve Lewiner ambiguous cases once, in the counting…
+grlee77 Nov 1, 2026
+1c5cc15
+marching_cubes: use the edge scan as the vertex-id lookup
+grlee77 Nov 1, 2026
+a40cba7
+marching_cubes: generate vertices with one thread per vertex
+grlee77 Nov 1, 2026
+f4a2ea3
+marching_cubes: allocate the final Lewiner vertex arrays once
+grlee77 Nov 1, 2026
+cb3af94
+marching_cubes: store per-cell triangle counts and center flags as uint8
+grlee77 Nov 1, 2026
+452d090
+marching_cubes: raise instead of overflowing 32-bit indices
+grlee77 Nov 1, 2026
+c52f5c0
+marching_cubes: clarify provenance of CuMCubes and Warp references
+grlee77 Nov 1, 2026
+44798d6
+marching_cubes: scan the crossed edges per node instead of per edge
+grlee77 Nov 1, 2026
+74094db
+marching_cubes: match scikit-image's interior test for ambiguous cells
+grlee77 Nov 1, 2026
+b0dee2a
+marching_cubes: move the code shared by both methods to _marching_cub…
+grlee77 Nov 1, 2026
+e23b258
+share the edge classification and vertex kernels between methods
+grlee77 Nov 1, 2026
+2c3186c
+scan the per-node, per-cell and per-face counts in blocks
+grlee77 Nov 1, 2026
+60da8ff
+name the Apache-2.0 version of the Warp design reference
+grlee77 Nov 1, 2026
+df6adc7
+move the driver of the cell-table methods to the common module
+grlee77 Nov 1, 2026
+1097c59
+add method="vega": marching cubes 33 with the corrected interior test
+grlee77 Nov 1, 2026
+65461d7
+marching_cubes: wind the lorensen faces like scikit-image
+grlee77 Nov 2, 2026
+dcf0ada
+marching_cubes: add guidance on choosing the method
+grlee77 Nov 2, 2026
+1a8d91d
+marching_cubes: use 64-bit indices for volumes and meshes that need them
+grlee77 Nov 3, 2026
+376813f
+marching_cubes: fix review findings (NaN, union race, wide dispatch, …
+grlee77 Nov 4, 2026
+9a4b06a
+marching_cubes: triangulate the cells of method='lorensen' like sciki…
+grlee77 Nov 4, 2026
+aeddeda
+marching_cubes: test the vertex merge of allow_degenerate=False with …
+grlee77 Nov 4, 2026
+a9cceed
+marching_cubes: explain why normals and values differ from scikit-image
+grlee77 Nov 5, 2026
+7c3de2d
+Use the "NVIDIA CORPORATION & AFFILIATES" copyright holder in the tou…
+grlee77 Nov 5, 2026
+b19d486
+marching_cubes: scikit-image's values and normals in physical units
+grlee77 Nov 5, 2026
+f61e7f2
+marching_cubes: give the Vega center vertices the range as their value
+grlee77 Nov 5, 2026
+cf24483
+marching_cubes: use one normal definition for all vertices
+grlee77 Nov 5, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+finish marching_cubes implementation
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+grlee77
+committed
+Nov 5, 2026
+commit fa7f6b43138e851d2f740cfb90720a3183367673
+There are no files selected for viewing
+255 changes: 210 additions & 45 deletions
+255
+python/cucim/src/cucim/skimage/measure/_marching_cubes.py
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -437,6 +437,47 @@
+tri_counts[idx] = count;
+}
+extern "C" __global__ void mc_count_faces_masked(
+const float* volume, const bool* mask, const signed char* tri_table,
+int* tri_counts, int nx, int ny, int nz, float level) {
+int idx = blockDim.x * blockIdx.x + threadIdx.x;
+int cnx = nx - 1;
+int cny = ny - 1;
+int cnz = nz - 1;
+int total = cnx * cny * cnz;
+if (idx >= total) {
+return;
+}
+int k = idx % cnz;
+int j = (idx / cnz) % cny;
+int i = idx / (cny * cnz);
+if (!mask[node_index(i + 1, j + 1, k + 1, ny, nz)]) {
+tri_counts[idx] = 0;
+return;
+}
+int code = 0;
+code |= (vol_at(volume, i, j, k, ny, nz) >= level) ? 1 : 0;
+code |= (vol_at(volume, i + 1, j, k, ny, nz) >= level) ? 2 : 0;
+code |= (vol_at(volume, i + 1, j + 1, k, ny, nz) >= level) ? 4 : 0;
+code |= (vol_at(volume, i, j + 1, k, ny, nz) >= level) ? 8 : 0;
+code |= (vol_at(volume, i, j, k + 1, ny, nz) >= level) ? 16 : 0;
+code |= (vol_at(volume, i + 1, j, k + 1, ny, nz) >= level) ? 32 : 0;
+code |= (vol_at(volume, i + 1, j + 1, k + 1, ny, nz) >= level) ? 64 : 0;
+code |= (vol_at(volume, i, j + 1, k + 1, ny, nz) >= level) ? 128 : 0;
+int count = 0;
+const signed char* row = tri_table + code * 16;
+for (int n = 0; n < 15; n += 3) {
+if (row[n] < 0) {
+break;
+}
+count++;
+}
+tri_counts[idx] = count;
+}
+extern "C" __device__ inline int edge_vid(
+const int* edge_vertex_ids, int i, int j, int k, int side, int ny, int nz) {
+return edge_vertex_ids[(node_index(i, j, k, ny, nz) * 3) + side];
+Expand Down
+Expand Up
+@@ -779,6 +820,60 @@
+center_flags[idx] = center_flag;
+}
+extern "C" __global__ void mc_lewiner_count_cells_masked(
+const float* volume, const bool* mask, const signed char* cases,
+const signed char* test3, const signed char* test4,
+const signed char* test6, const signed char* test7,
+const signed char* test10, const signed char* test12,
+const signed char* test13, const signed char* subconfig13,
+const signed char* tiling13_5_1,
+int* tri_counts, int* center_flags,
+int nx, int ny, int nz, float level) {
+int idx = blockDim.x * blockIdx.x + threadIdx.x;
+int cnx = nx - 1;
+int cny = ny - 1;
+int cnz = nz - 1;
+int total = cnx * cny * cnz;
+if (idx >= total) {
+return;
+}
+int k = idx % cnz;
+int j = (idx / cnz) % cny;
+int i = idx / (cny * cnz);
+if (!mask[node_index(i + 1, j + 1, k + 1, ny, nz)]) {
+tri_counts[idx] = 0;
+center_flags[idx] = 0;
+return;
+}
+double v[8];
+load_lewiner_values(volume, i, j, k, ny, nz, level, v);
+int code = 0;
+if (v[0] > 0.0) code |= 1;
+if (v[1] > 0.0) code |= 2;
+if (v[2] > 0.0) code |= 4;
+if (v[3] > 0.0) code |= 8;
+if (v[4] > 0.0) code |= 16;
+if (v[5] > 0.0) code |= 32;
+if (v[6] > 0.0) code |= 64;
+if (v[7] > 0.0) code |= 128;
+int case_id = (int)cases[code * 2];
+int config = (int)cases[code * 2 + 1];
+int tri_count = 0;
+int center_flag = 0;
+if (case_id > 0) {
+lewiner_select_count_center(
+v, case_id, config, test3, test4, test6, test7, test10,
+test12, test13, subconfig13, tiling13_5_1,
+&tri_count, &center_flag);
+}
+tri_counts[idx] = tri_count;
+center_flags[idx] = center_flag;
+}
+extern "C" __global__ void mc_lewiner_generate_center_vertices(
+const float* volume, const int* center_flags, const int* center_scan,
+int* center_vertex_ids, float* vertices, float* normals, float* values_out,
+Expand Down
+Expand Up
+@@ -1334,8 +1429,7 @@ def marching_cubes(
+"""Marching cubes algorithm to find surfaces in 3D volumetric data.
+The ``method='lewiner'`` default and ``method='lorensen'`` are supported
+for CuPy inputs when ``mask=None``. Masked marching cubes is not
+implemented yet.
+for CuPy inputs.
+When ``allow_degenerate=False``, zero-area faces are removed and the mesh
+geometry is preserved, but the exact surviving duplicate vertex IDs can
+Expand Down
+Expand Up
+@@ -1375,7 +1469,7 @@ def _marching_cubes_lorensen(
+allow_degenerate,
+mask,
+):
+volume, level, spacing, step_size = _validate_marching_cubes_inputs(
+volume, level, spacing, step_size, mask = _validate_marching_cubes_inputs(
+volume,
+level,
+spacing,
+Expand All
+@@ -1384,9 +1478,9 @@ def _marching_cubes_lorensen(
+allow_degenerate,
+mask,
+)
+volume, spacing = _apply_step_size(volume, spacing, step_size)
+volume, spacing, mask = _apply_step_size(volume, spacing, step_size, mask)
+return _run_lorensen(
+volume, level, spacing, gradient_direction, allow_degenerate
+volume, level, spacing, gradient_direction, allow_degenerate, mask
+)
+Expand All
+@@ -1399,7 +1493,7 @@ def _marching_cubes_lewiner(
+allow_degenerate,
+mask,
+):
+volume, level, spacing, step_size = _validate_marching_cubes_inputs(
+volume, level, spacing, step_size, mask = _validate_marching_cubes_inputs(
+volume,
+level,
+spacing,
+Expand All
+@@ -1408,9 +1502,9 @@ def _marching_cubes_lewiner(
+allow_degenerate,
+mask,
+)
+volume, spacing = _apply_step_size(volume, spacing, step_size)
+volume, spacing, mask = _apply_step_size(volume, spacing, step_size, mask)
+return _run_lewiner(
+volume, level, spacing, gradient_direction, allow_degenerate
+volume, level, spacing, gradient_direction, allow_degenerate, mask
+)
+Expand Down
+Expand Up
+@@ -1455,23 +1549,27 @@ def _validate_marching_cubes_inputs(
+if mask is not None:
+if not isinstance(mask, cp.ndarray) or mask.shape != volume.shape:
+raise ValueError("volume and mask must have the same shape.")
+raise NotImplementedError("mask is not implemented yet.")
+mask = cp.ascontiguousarray(mask, dtype=cp.bool_)
+return volume, level, spacing, step_size
+return volume, level, spacing, step_size, mask
+def _apply_step_size(volume, spacing, step_size):
+def _apply_step_size(volume, spacing, step_size, mask):
+if step_size == 1:
+return volume, spacing
+return volume, spacing, mask
+volume = cp.ascontiguousarray(volume[::step_size, ::step_size, ::step_size])
+if mask is not None:
+mask = cp.ascontiguousarray(mask[::step_size, ::step_size, ::step_size])
+if volume.shape[0] < 2 or volume.shape[1] < 2 or volume.shape[2] < 2:
+raise RuntimeError("No surface found at the given iso value.")
+spacing = tuple(s * step_size for s in spacing)
+return volume, spacing
+return volume, spacing, mask
+def _run_lorensen(volume, level, spacing, gradient_direction, allow_degenerate):
+def _run_lorensen(
+volume, level, spacing, gradient_direction, allow_degenerate, mask
+):
+nx, ny, nz = volume.shape
+n_edges = nx * ny * nz * 3
+threads = 256
+Expand Down
+Expand Up
+@@ -1516,11 +1614,27 @@ def _run_lorensen(volume, level, spacing, gradient_direction, allow_degenerate):
+cell_blocks = ((n_cells + threads - 1) // threads,)
+tri_counts = cp.empty(n_cells, dtype=cp.int32)
+tri_table = _get_tri_table()
+_get_kernel("mc_count_faces")(
+cell_blocks,
+(threads,),
+(volume, tri_table, tri_counts, nx, ny, nz, np.float32(level)),
+)
+if mask is None:
+_get_kernel("mc_count_faces")(
+cell_blocks,
+(threads,),
+(volume, tri_table, tri_counts, nx, ny, nz, np.float32(level)),
+)
+else:
+_get_kernel("mc_count_faces_masked")(
+cell_blocks,
+(threads,),
+(
+volume,
+mask,
+tri_table,
+tri_counts,
+nx,
+ny,
+nz,
+np.float32(level),
+),
+)
+tri_scan = cp.cumsum(tri_counts, dtype=cp.int32)
+n_faces = int(tri_scan[-1])
+if n_faces == 0:
+Expand All
+@@ -1545,14 +1659,20 @@ def _run_lorensen(volume, level, spacing, gradient_direction, allow_degenerate):
+),
+)
+faces = faces.reshape(-1, 3)
+if mask is not None:
+vertices, faces, normals, values = _compact_referenced_vertices_gpu(
+vertices, faces, normals, values
+)
+if not allow_degenerate:
+vertices, faces, normals, values = _remove_degenerate_faces_gpu(
+vertices, faces, normals, values
+)
+return vertices, faces, normals, values
+def _run_lewiner(volume, level, spacing, gradient_direction, allow_degenerate):
+def _run_lewiner(
+volume, level, spacing, gradient_direction, allow_degenerate, mask
+):
+nx, ny, nz = volume.shape
+n_edges = nx * ny * nz * 3
+threads = 256
+Expand Down
+Expand Up
+@@ -1593,7 +1713,7 @@ def _run_lewiner(volume, level, spacing, gradient_direction, allow_degenerate):
+),
+)
+tri_counts, center_flags = _lewiner_count_cells_gpu(volume, level)
+tri_counts, center_flags = _lewiner_count_cells_gpu(volume, level, mask)
+edge_ids = _lewiner_generate_edge_ids_gpu(volume, level, tri_counts)
+if edge_ids.size == 0:
+raise RuntimeError("No surface found at the given iso value.")
+Expand All
+@@ -1619,6 +1739,10 @@ def _run_lewiner(volume, level, spacing, gradient_direction, allow_degenerate):
+volume.shape,
+gradient_direction,
+)
+if mask is not None:
+vertices, faces, normals, values = _compact_referenced_vertices_gpu(
+vertices, faces, normals, values
+)
+if not allow_degenerate:
+vertices, faces, normals, values = _remove_degenerate_faces_gpu(
+vertices, faces, normals, values
+Expand Down
+Expand Up
+@@ -1659,37 +1783,78 @@ def _remove_degenerate_faces_gpu(vertices, faces, normals, values):
+return vertices2, faces2, normals2, values2
+def _lewiner_count_cells_gpu(volume, level):
+def _compact_referenced_vertices_gpu(vertices, faces, normals, values):
+n_vertices = vertices.shape[0]
+if faces.size == 0:
+return vertices[:0], faces, normals[:0], values[:0]
+vertices_ok = cp.zeros(n_vertices, dtype=cp.bool_)
+vertices_ok[faces.ravel()] = True
+vertex_map = cp.cumsum(vertices_ok, dtype=cp.int32) - 1
+faces2 = vertex_map[faces]
+vertices2 = vertices[vertices_ok]
+normals2 = normals[vertices_ok]
+values2 = values[vertices_ok]
+return vertices2, faces2, normals2, values2
+def _lewiner_count_cells_gpu(volume, level, mask=None):
+nx, ny, nz = volume.shape
+n_cells = (nx - 1) * (ny - 1) * (nz - 1)
+threads = 256
+cell_blocks = ((n_cells + threads - 1) // threads,)
+tri_counts = cp.empty(n_cells, dtype=cp.int32)
+center_flags = cp.empty(n_cells, dtype=cp.int32)
+luts = _get_lewiner_luts_device()
+_get_kernel("mc_lewiner_count_cells")(
+cell_blocks,
+(threads,),
+(
+volume,
+luts["cases"],
+luts["test3"],
+luts["test4"],
+luts["test6"],
+luts["test7"],
+luts["test10"],
+luts["test12"],
+luts["test13"],
+luts["subconfig13"],
+luts["tiling13_5_1"],
+tri_counts,
+center_flags,
+nx,
+ny,
+nz,
+np.float32(level),
+),
+)
+if mask is None:
+_get_kernel("mc_lewiner_count_cells")(
+cell_blocks,
+(threads,),
+(
+volume,
+luts["cases"],
+luts["test3"],
+luts["test4"],
+luts["test6"],
+luts["test7"],
+luts["test10"],
+luts["test12"],
+luts["test13"],
+luts["subconfig13"],
+luts["tiling13_5_1"],
+tri_counts,
+center_flags,
+nx,
+ny,
+nz,
+np.float32(level),
+),
+)
+else:
+_get_kernel("mc_lewiner_count_cells_masked")(
+cell_blocks,
+(threads,),
+(
+volume,
+mask,
+luts["cases"],
+luts["test3"],
+luts["test4"],
+luts["test6"],
+luts["test7"],
+luts["test10"],
+luts["test12"],
+luts["test13"],
+luts["subconfig13"],
+luts["tiling13_5_1"],
+tri_counts,
+center_flags,
+nx,
+ny,
+nz,
+np.float32(level),
+),
+)
+return tri_counts, center_flags
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,95 @@
+# Random Cone Rotation
+## Overview
+Random Cone Rotation mitigates blocky artifacts in sparse diffuse cone sampling for Voxel Cone Tracing by randomly rotating a fixed set of cones around the surface normal [S1, unofficial]. It breaks up the rigid geometric structure of the sampling pattern without increasing the cone count [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: surface normal $\mathbf{n}$ and a random value $\rho \in [0, 1)$ [G].
+- Output: rotated cone directions $\{\mathbf{d}'_i\}$ in world space [G].
+
+**Data Structures:**
+The distribution uses 5 diffuse cones: one aligned with $\mathbf{n}$ and four perpendicular to it [S1, unofficial]. All diffuse cones share a fixed aperture of $30^\circ$ [S1, unofficial]. (Note: specular cones in the same pipeline use a roughness-dependent aperture, but this method applies exclusively to the diffuse set [S1, unofficial].)
+
+**Steps:**
+1. Define base cone directions in a local coordinate system where the normal aligns with the $z$-axis: $\mathbf{d}_0 = (0,0,1)$ and $\mathbf{d}_{1..4}$ in the $xy$-plane [S1, unofficial].
+2. Generate a random rotation angle $\theta = 2\pi\rho$ [G].
+3. Construct a rotation matrix $R$ for rotating vectors around the axis $\mathbf{n}$ by $\theta$ [G].
+4. Apply $R$ to each base direction to obtain $\mathbf{d}'_i = R\mathbf{d}_i$ [G].
+5. Use $\{\mathbf{d}'_i\}$ for cone tracing [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def random_cone_rotation(normal: list, random_value: float) -> list:
+    """
+    Rotates a fixed set of 5 diffuse cones around the surface normal.
+    Args:
+        normal: Surface normal vector [x, y, z], assumed normalized.
+        random_value: Random float in [0, 1) to determine rotation angle.
+    Returns:
+        List of 5 rotated cone direction vectors [x, y, z].
+    """
+    # 1. Define base cone directions in local space (aligned with Z)
+    base_cones = [
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0]
+    ]
+    
+    # 2. Generate rotation angle
+    theta = random_value * 2.0 * math.pi
+    
+    # 3. Construct rotation matrix around the normal axis using Rodrigues' formula
+    nx, ny, nz = normal
+    s = math.sin(theta)
+    c = math.cos(theta)
+    one_minus_c = 1.0 - c
+    
+    # Rotation matrix R = I + sin(theta)*K + (1-cos(theta))*K^2
+    # where K is the cross-product matrix of the axis
+    R = [
+        [one_minus_c * nx**2 + c, one_minus_c * nx * ny - s * nz, one_minus_c * nx * nz + s * ny],
+        [one_minus_c * nx * ny + s * nz, one_minus_c * ny**2 + c, one_minus_c * ny * nz - s * nx],
+        [one_minus_c * nx * nz - s * ny, one_minus_c * ny * nz + s * nx, one_minus_c * nz**2 + c]
+    ]
+    
+    # 4. Rotate each base cone direction
+    rotated_cones = []
+    for base_dir in base_cones:
+        x, y, z = base_dir
+        rx = R[0][0]*x + R[0][1]*y + R[0][2]*z
+        ry = R[1][0]*x + R[1][1]*y + R[1][2]*z
+        rz = R[2][0]*x + R[2][1]*y + R[2][2]*z
+        rotated_cones.append([rx, ry, rz])
+        
+    return rotated_cones
+```
+
+**Parameters:**
+- Aperture angle: $30^\circ$ for the diffuse cones [S1, unofficial].
+- Number of cones: 5 (1 normal, 4 perpendicular) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Noise:** The randomization introduces noise into the lighting result [S1, unofficial].
+- **Precision:** Ensure the normal vector is normalized before constructing the rotation matrix to avoid scaling artifacts [G].
+- **Degenerate Input:** If the normal is zero, the rotation is undefined [G].
+## Subtopics
+
+### [Noise Kernel Generation](6360-noise-kernel-generation.md)
+Constructs a rotation matrix aligned with the light direction to transform a fixed set of 6 offset vectors into a local coordinate system for cone tracing. It serves as the directional basis for Random Cone Rotation within the Voxel Cone Tracing pipeline. Unlike TraceDiffuse, which samples indirect lighting around the surface normal, this method aligns the cone distribution with the light vector.
+
+## Operating characteristics
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Strengths: Effectively reduces blocky artifacts caused by sparse sampling without increasing the number of cones [S1, unofficial].
+- Limitations: Introduces noise [S1, unofficial].
+- When to use: Not given in the sources.
+- When not to use: Not given in the sources.
+## Background
+Random Cone Rotation was introduced in the context of Voxel Cone Tracing for real-time global illumination [S1, unofficial]. It addresses the visual quality issues arising from the use of very few cones (5) to approximate the diffuse hemisphere integral [S1, unofficial].
+## Sources
+[S1] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)

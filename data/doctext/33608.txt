@@ -1,0 +1,2848 @@
+# torchmcubes: marching cubes for PyTorch
+
+[![Build (CPU)](https://github.com/tatsy/torchmcubes/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/tatsy/torchmcubes/actions/workflows/build.yml)
+
+> Marching cubes for PyTorch environment. Backend is implemented with C++ and CUDA.
+
+## Install
+
+### Requirements
+
+- Python (3.9 or later)
+- PyTorch
+- C++20 compiler (GCC 10+, Clang 12+, or Visual Studio 2019 16.11+), required by recent PyTorch headers
+- CUDA Toolkit 12 or later (optional, only for GPU support; nvcc needs CUDA 12 for C++20)
+  - Without a CUDA toolkit a CPU-only build is produced. CUDA tensors are then processed on the CPU with a warning. ROCm/HIP is not supported.
+- CMake (3.24 or later)
+
+Make sure that you have nvcc CUDA compiler with the following command.
+
+```shell
+nvcc --version
+```
+
+If you have CUDA installed but not able to run nvcc, you might need to add it to your path:
+
+```shell
+export CUDA_HOME=/usr/local/cuda/
+export PATH=$CUDA_HOME/bin:$PATH
+```
+
+### Pip installation
+
+torchmcubes is compiled against the PyTorch installed in your environment. Install PyTorch first, then install the build dependencies and torchmcubes **without build isolation**.
+
+```shell
+# 1. Install PyTorch (if you need GPU support, choose the correct CUDA version)
+pip install torch
+
+# 2. Install build dependencies
+pip install scikit-build-core pybind11
+
+# 3. Build and install torchmcubes against the PyTorch installed above
+pip install --no-build-isolation git+https://github.com/tatsy/torchmcubes.git
+```
+
+To build from a local checkout, run `pip install --no-build-isolation .` in the repository root instead of the last command.
+
+## Usage
+
+See [mcubes.py](./mcubes.py) for more details (the example additionally needs `numpy` and `matplotlib`).
+
+```python
+import time
+import numpy as np
+
+import torch
+from torchmcubes import marching_cubes, grid_interp
+
+# Grid data
+N = 128
+xs = np.linspace(-1.0, 1.0, N, endpoint=True, dtype="float32")
+ys = np.linspace(-1.0, 1.0, N, endpoint=True, dtype="float32")
+zs = np.linspace(-1.0, 1.0, N, endpoint=True, dtype="float32")
+zs, ys, xs = np.meshgrid(zs, ys, xs)
+
+# Implicit function (metaball)
+f0 = (xs - 0.35)**2 + (ys - 0.35)**2 + (zs - 0.35)**2
+f1 = (xs + 0.35)**2 + (ys + 0.35)**2 + (zs + 0.35)**2
+u = 4.0 / (f0 + 1.0e-6) + 4.0 / (f1 + 1.0e-6)
+
+rgb = np.stack((xs, ys, zs), axis=-1) * 0.5 + 0.5
+rgb = np.transpose(rgb, axes=(3, 2, 1, 0))
+rgb = np.ascontiguousarray(rgb)
+
+# Test
+u = torch.from_numpy(u)
+rgb = torch.from_numpy(rgb)
+u = u.cuda()
+rgb = rgb.cuda()
+
+t_start = time.time()
+verts, faces = marching_cubes(u, 15.0)
+colors = grid_interp(rgb, verts)
+t_end = time.time()
+print(f"verts: {verts.size(0)}, faces: {faces.size(0)}, time: {t_end - t_start:.2f}s")
+
+verts = verts.detach().cpu().numpy()
+faces = faces.detach().cpu().numpy()
+colors = colors.detach().cpu().numpy()
+verts = (verts / (N - 1)) * 2.0 - 1.0  # Get back to the original space
+visualize(verts, faces, colors)
+```
+
+## Screen shot
+
+![metaball.png](./metaball.png)
+
+## Copyright
+
+Mozilla Public License 2.0, 2019-2026 (c) Tatsuya Yatagawa
+
+### _torch_dep.py
+```
+"""
+scikit-build-core dynamic-metadata provider for the torch runtime requirement.
+
+torchmcubes links against the C++ ABI of the PyTorch it is compiled with, so the
+built wheel must not claim to work with any torch version. This provider pins
+the runtime requirement to the minor series of the torch found at build time
+(e.g. ``torch==2.14.*``). Patch releases keep the ABI, so they stay allowed;
+CUDA/CPU local versions such as ``2.14.0+cu126`` also satisfy the pin.
+If torch is not importable at build time the build is aborted with an
+explanatory error instead of producing unpinned metadata.
+"""
+
+from __future__ import annotations
+
+import importlib.metadata
+
+
+def torch_requirement() -> str:
+    try:
+        version = importlib.metadata.version('torch')
+    except importlib.metadata.PackageNotFoundError:
+        # Fail fast: without torch the build cannot succeed anyway (CMake needs
+        # its config files), and emitting an unpinned requirement would produce
+        # wrong metadata. Point the user at the documented install procedure.
+        raise RuntimeError(
+            'torchmcubes must be built against an installed PyTorch, but the '
+            "'torch' package was not found in the build environment. Install "
+            'torch first and build without isolation, e.g. '
+            '`pip install --no-build-isolation .` (see README).'
+        ) from None
+    major, minor = version.split('.')[:2]
+    return f'torch=={major}.{minor}.*'
+
+
+class Provider:
+    @staticmethod
+    def dynamic_metadata(settings, project):
+        return {'dependencies': [torch_requirement()]}
+```
+
+### mcubes.py
+```
+import time
+import argparse
+
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
+
+from torchmcubes import grid_interp, marching_cubes
+
+
+def frustum(left, right, bottom, top, znear, zfar):
+    M = np.zeros((4, 4), dtype=np.float32)
+    M[0, 0] = +2.0 * znear / (right - left)
+    M[1, 1] = +2.0 * znear / (top - bottom)
+    M[2, 2] = -(zfar + znear) / (zfar - znear)
+    M[0, 2] = (right + left) / (right - left)
+    M[2, 1] = (top + bottom) / (top - bottom)
+    M[2, 3] = -2.0 * znear * zfar / (zfar - znear)
+    M[3, 2] = -1.0
+    return M
+
+
+def perspective(fovy, aspect, znear, zfar):
+    h = np.tan(0.5 * np.radians(fovy)) * znear
+    w = h * aspect
+    return frustum(-w, w, -h, h, znear, zfar)
+
+
+def translate(x, y, z):
+    return np.array(
+        [
+            [1, 0, 0, x],
+            [0, 1, 0, y],
+            [0, 0, 1, z],
+            [0, 0, 0, 1],
+        ],
+        dtype=float,
+    )
+
+
+def xrotate(theta):
+    t = np.pi * theta / 180
+    c, s = np.cos(t), np.sin(t)
+    return np.array(
+        [
+            [1, 0, 0, 0],
+            [0, c, -s, 0],
+            [0, s, c, 0],
+            [0, 0, 0, 1],
+        ],
+        dtype=float,
+    )
+
+
+def yrotate(theta):
+    t = np.pi * theta / 180
+    c, s = np.cos(t), np.sin(t)
+    return np.array(
+        [
+            [c, 0, s, 0],
+            [0, 1, 0, 0],
+            [-s, 0, c, 0],
+            [0, 0, 0, 1],
+        ],
+        dtype=float,
+    )
+
+
+def visualize(V, F, C):
+    """
+    This function is inspired by the following URL:
+    https://blog.scientific-python.org/matplotlib/custom-3d-engine/
+    """
+
+    V = (V - (V.max(0) + V.min(0)) / 2) / max(V.max(0) - V.min(0))
+    MVP = perspective(40, 1, 1, 100) @ translate(0, 0, -2.5) @ xrotate(0.0) @ yrotate(0.0)
+
+    V = np.c_[V, np.ones(len(V))] @ MVP.T
+    V /= V[:, 3].reshape(-1, 1)
+    V = V[F]
+    C = C[F].mean(axis=1)
+
+    T = V[:, :, :2]
+    Z = -V[:, :, 2].mean(axis=1)
+    zmin, zmax = Z.min(), Z.max()
+    Z = (Z - zmin) / (zmax - zmin)
+    I = np.argsort(Z)
+    T, C = T[I, :], C[I, :]
+    fig = plt.figure(figsize=(6, 6))
+    ax = fig.add_axes(
+        (0, 0, 1, 1),
+        xlim=(-1, 1),
+        ylim=(-1, 1),
+        aspect=1,
+        frameon=False,
+    )
+
+    collection = PolyCollection(T, closed=True, linewidth=0.1, facecolor=C, edgecolor='#00000033')
+    ax.add_collection(collection)
+
+    plt.show()
+
+
+def main():
+    # Arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gpu', type=int, default=0)
+    args = parser.parse_args()
+
+    # Grid data
+    N = 128
+    xs = np.linspace(-1.0, 1.0, N, endpoint=True, dtype='float32')
+    ys = np.linspace(-1.0, 1.0, N, endpoint=True, dtype='float32')
+    zs = np.linspace(-1.0, 1.0, N, endpoint=True, dtype='float32')
+    zs, ys, xs = np.meshgrid(zs, ys, xs)
+
+    # Implicit function (metaball)
+    f0 = (xs - 0.35) ** 2 + (ys - 0.35) ** 2 + (zs - 0.35) ** 2
+    f1 = (xs + 0.35) ** 2 + (ys + 0.35) ** 2 + (zs + 0.35) ** 2
+    u = 4.0 / (f0 + 1.0e-6) + 4.0 / (f1 + 1.0e-6)
+
+    rgb = np.stack((xs, ys, zs), axis=-1) * 0.5 + 0.5
+    rgb = np.transpose(rgb, axes=(3, 2, 1, 0))
+    rgb = np.ascontiguousarray(rgb)
+
+    # Test (CPU)
+    u = torch.from_numpy(u)
+    rgb = torch.from_numpy(rgb)
+
+    t_start = time.time()
+    verts, faces = marching_cubes(u, 15.0)
+    colors = grid_interp(rgb, verts)
+    t_end = time.time()
+    print(f'verts: {verts.size(0)}, faces: {faces.size(0)}, time: {t_end - t_start:.2f}s')
+
+    verts = verts.numpy()
+    faces = faces.numpy()
+    colors = colors.numpy()
+    verts = (verts / (N - 1)) * 2.0 - 1.0  # Get back to the original space
+    visualize(verts, faces, colors)
+
+    # Test (GPU)
+    if torch.cuda.is_available():
+        device = torch.device('cuda', args.gpu)
+        u = u.to(device)
+        rgb = rgb.to(device)
+
+        t_start = time.time()
+        verts, faces = marching_cubes(u, 15.0)
+        colors = grid_interp(rgb, verts)
+        t_end = time.time()
+        print(f'verts: {verts.size(0)}, faces: {faces.size(0)}, time: {t_end - t_start:.2f}s')
+
+        verts = verts.detach().cpu().numpy()
+        faces = faces.detach().cpu().numpy()
+        colors = colors.detach().cpu().numpy()
+        verts = (verts / (N - 1)) * 2.0 - 1.0  # Get back to the original space
+        visualize(verts, faces, colors)
+
+    else:
+        print('CUDA is not available in this environment. Skip testing.')
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### cxx/cuda_utils.h
+```
+#ifdef _MSC_VER
+#pragma once
+#endif
+
+#ifndef _CUDA_UTILS_H_
+#define _CUDA_UTILS_H_
+
+#include <cuda_runtime.h>
+
+#define CUDA_CHECK_ERRORS()                                                                         \
+    do {                                                                                            \
+        cudaError_t err = cudaGetLastError();                                                       \
+        if (cudaSuccess != err) {                                                                   \
+            fprintf(stderr, "CUDA kernel failed : %s\n%s at L:%d in %s\n", cudaGetErrorString(err), \
+                    __PRETTY_FUNCTION__, __LINE__, __FILE__);                                       \
+            std::exit(1);                                                                           \
+        }                                                                                           \
+    } while (0)
+
+#endif  // _CUDA_UTILS_H_
+```
+
+### cxx/grid_interp_cpu.cpp
+```
+#include <torch/extension.h>
+
+#define NOMIMAX
+#include <cstdlib>
+#include <algorithm>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#include "macros.h"
+
+torch::Tensor grid_interp_cpu(torch::Tensor vol, torch::Tensor points) {
+    CHECK_CPU(vol);
+    CHECK_CONTIGUOUS(vol);
+    CHECK_N_DIM(vol, 4);
+
+    CHECK_CPU(points);
+    CHECK_CONTIGUOUS(points);
+    CHECK_N_DIM(points, 2);
+
+    const int Nx = vol.size(3);
+    const int Ny = vol.size(2);
+    const int Nz = vol.size(1);
+    const int C = vol.size(0);
+    const int Np = points.size(0);
+
+    torch::Tensor output = torch::zeros({ Np, C }, torch::TensorOptions().dtype(torch::kFloat32).device(vol.device()));
+
+    auto vol_ascr = vol.accessor<float, 4>();
+    auto pts_ascr = points.accessor<float, 2>();
+    auto out_ascr = output.accessor<float, 2>();
+
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int i = 0; i < Np; i++) {
+        const float x = pts_ascr[i][0];
+        const float y = pts_ascr[i][1];
+        const float z = pts_ascr[i][2];
+
+        const int ix = (int)x;
+        const int iy = (int)y;
+        const int iz = (int)z;
+        const float fx = x - ix;
+        const float fy = y - iy;
+        const float fz = z - iz;
+
+        for (int c = 0; c < C; c++) {
+            const int x0 = std::max(0, std::min(ix, Nx - 1));
+            const int x1 = std::max(0, std::min(ix + 1, Nx - 1));
+            const int y0 = std::max(0, std::min(iy, Ny - 1));
+            const int y1 = std::max(0, std::min(iy + 1, Ny - 1));
+            const int z0 = std::max(0, std::min(iz, Nx - 1));
+            const int z1 = std::max(0, std::min(iz + 1, Nz - 1));
+
+            const float v00 = (1.0 - fx) * vol_ascr[c][z0][y0][x0] + fx * vol_ascr[c][z0][y0][x1];
+            const float v01 = (1.0 - fx) * vol_ascr[c][z0][y1][x0] + fx * vol_ascr[c][z0][y1][x1];
+            const float v10 = (1.0 - fx) * vol_ascr[c][z1][y0][x0] + fx * vol_ascr[c][z1][y0][x1];
+            const float v11 = (1.0 - fx) * vol_ascr[c][z1][y1][x0] + fx * vol_ascr[c][z1][y1][x1];
+
+            const float v0 = (1.0 - fy) * v00 + fy * v01;
+            const float v1 = (1.0 - fy) * v10 + fy * v11;
+
+            out_ascr[i][c] = (1.0 - fz) * v0 + fz * v1;
+        }
+    }
+
+    return output;
+}
+```
+
+### cxx/grid_interp_cuda.cu
+```
+#include <torch/extension.h>
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
+
+#include <cuda_runtime.h>
+
+#include "macros.h"
+#include "cuda_utils.h"
+
+__global__ void grid_interp_cuda_kernel(const torch::PackedTensorAccessor32<float, 4, torch::RestrictPtrTraits> vol,
+                                        const torch::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> points,
+                                        torch::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> output,
+                                        int channels, int3 nGrids, size_t size) {
+    const int tx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int ty = blockIdx.y * blockDim.y + threadIdx.y;
+    const int tz = blockIdx.z * blockDim.z + threadIdx.z;
+    const int index = (tz * blockDim.y * gridDim.y + ty) * blockDim.x * gridDim.x + tx;
+    if (index >= size) {
+        return;
+    }
+
+    const float x = points[index][0];
+    const float y = points[index][1];
+    const float z = points[index][2];
+
+    const int ix = (int)x;
+    const int iy = (int)y;
+    const int iz = (int)z;
+    const float fx = x - ix;
+    const float fy = y - iy;
+    const float fz = z - iz;
+
+    for (int c = 0; c < channels; c++) {
+        const int x0 = max(0, min(ix, nGrids.x - 1));
+        const int x1 = max(0, min(ix + 1, nGrids.x - 1));
+        const int y0 = max(0, min(iy, nGrids.y - 1));
+        const int y1 = max(0, min(iy + 1, nGrids.y - 1));
+        const int z0 = max(0, min(iz, nGrids.z - 1));
+        const int z1 = max(0, min(iz + 1, nGrids.z - 1));
+
+        const float v00 = (1.0 - fx) * vol[c][z0][y0][x0] + fx * vol[c][z0][y0][x1];
+        const float v01 = (1.0 - fx) * vol[c][z0][y1][x0] + fx * vol[c][z0][y1][x1];
+        const float v10 = (1.0 - fx) * vol[c][z1][y0][x0] + fx * vol[c][z1][y0][x1];
+        const float v11 = (1.0 - fx) * vol[c][z1][y1][x0] + fx * vol[c][z1][y1][x1];
+
+        const float v0 = (1.0 - fy) * v00 + fy * v01;
+        const float v1 = (1.0 - fy) * v10 + fy * v11;
+
+        output[index][c] = (1.0 - fz) * v0 + fz * v1;
+    }
+}
+
+torch::Tensor grid_interp_cuda(torch::Tensor vol, torch::Tensor points) {
+    // Check input tensors
+    CHECK_CUDA(vol);
+    CHECK_CONTIGUOUS(vol);
+    CHECK_IS_FLOAT(vol);
+    CHECK_N_DIM(vol, 4);
+
+    CHECK_CUDA(points);
+    CHECK_CONTIGUOUS(points);
+    CHECK_IS_FLOAT(vol);
+    CHECK_N_DIM(points, 2);
+
+    // Size parameters
+    const int Nx = vol.size(3);
+    const int Ny = vol.size(2);
+    const int Nz = vol.size(1);
+    const int C = vol.size(0);
+    const int Np = points.size(0);
+    const int deviceId = vol.device().index();
+
+    torch::Tensor output =
+        torch::zeros({ Np, C }, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, deviceId));
+
+    auto volAscr = vol.packed_accessor32<float, 4, torch::RestrictPtrTraits>();
+    auto ptsAscr = points.packed_accessor32<float, 2, torch::RestrictPtrTraits>();
+    auto outAscr = output.packed_accessor32<float, 2, torch::RestrictPtrTraits>();
+
+    const uint32_t MAX_THREADS_AXIS = 128;
+    const uint32_t MAX_THREADS_AXIS2 = MAX_THREADS_AXIS * MAX_THREADS_AXIS;
+    const uint32_t blockx = MAX_THREADS_AXIS;
+    const uint32_t blocky = MAX_THREADS_AXIS;
+    const uint32_t blockz = (Np + MAX_THREADS_AXIS2 - 1) / MAX_THREADS_AXIS2;
+
+    const uint32_t BLOCK_SIZE = 8;
+    const uint32_t gridx = (blockx + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const uint32_t gridy = (blocky + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const uint32_t gridz = (blockz + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const int3 nGrids = make_int3(Nx, Ny, Nz);
+
+    const dim3 blocks = { gridx, gridy, gridz };
+    const dim3 threads = { BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE };
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    grid_interp_cuda_kernel<<<blocks, threads, 0, stream>>>(volAscr, ptsAscr, outAscr, C, nGrids, Np);
+
+    CUDA_CHECK_ERRORS();
+
+    return output;
+}
+```
+
+### cxx/helper_math.h
+```
+/**
+ * Copyright 1993-2012 NVIDIA Corporation.  All rights reserved.
+ *
+ * Please refer to the NVIDIA end user license agreement (EULA) associated
+ * with this source code for terms and conditions that govern your use of
+ * this software. Any use, reproduction, disclosure, or distribution of
+ * this software and related documentation outside the terms of the EULA
+ * is strictly prohibited.
+ *
+ */
+
+/*
+ *  This file implements common mathematical operations on vector types
+ *  (float3, float4 etc.) since these are not provided as standard by CUDA.
+ *
+ *  The syntax is modeled on the Cg standard library.
+ *
+ *  This is part of the Helper library includes
+ *
+ *    Thanks to Linh Hah for additions and fixes.
+ */
+
+#ifndef HELPER_MATH_H
+#define HELPER_MATH_H
+
+#include "cuda_runtime.h"
+
+typedef unsigned int uint;
+typedef unsigned short ushort;
+
+////////////////////////////////////////////////////////////////////////////////
+// constructors
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 make_float2(float s) {
+    return make_float2(s, s);
+}
+inline __host__ __device__ float2 make_float2(float3 a) {
+    return make_float2(a.x, a.y);
+}
+inline __host__ __device__ float2 make_float2(int2 a) {
+    return make_float2(float(a.x), float(a.y));
+}
+inline __host__ __device__ float2 make_float2(uint2 a) {
+    return make_float2(float(a.x), float(a.y));
+}
+
+inline __host__ __device__ int2 make_int2(int s) {
+    return make_int2(s, s);
+}
+inline __host__ __device__ int2 make_int2(int3 a) {
+    return make_int2(a.x, a.y);
+}
+inline __host__ __device__ int2 make_int2(uint2 a) {
+    return make_int2(int(a.x), int(a.y));
+}
+inline __host__ __device__ int2 make_int2(float2 a) {
+    return make_int2(int(a.x), int(a.y));
+}
+
+inline __host__ __device__ uint2 make_uint2(uint s) {
+    return make_uint2(s, s);
+}
+inline __host__ __device__ uint2 make_uint2(uint3 a) {
+    return make_uint2(a.x, a.y);
+}
+inline __host__ __device__ uint2 make_uint2(int2 a) {
+    return make_uint2(uint(a.x), uint(a.y));
+}
+
+inline __host__ __device__ float3 make_float3(float s) {
+    return make_float3(s, s, s);
+}
+inline __host__ __device__ float3 make_float3(float2 a) {
+    return make_float3(a.x, a.y, 0.0f);
+}
+inline __host__ __device__ float3 make_float3(float2 a, float s) {
+    return make_float3(a.x, a.y, s);
+}
+inline __host__ __device__ float3 make_float3(float4 a) {
+    return make_float3(a.x, a.y, a.z);
+}
+inline __host__ __device__ float3 make_float3(int3 a) {
+    return make_float3(float(a.x), float(a.y), float(a.z));
+}
+inline __host__ __device__ float3 make_float3(uint3 a) {
+    return make_float3(float(a.x), float(a.y), float(a.z));
+}
+
+inline __host__ __device__ int3 make_int3(int s) {
+    return make_int3(s, s, s);
+}
+inline __host__ __device__ int3 make_int3(int2 a) {
+    return make_int3(a.x, a.y, 0);
+}
+inline __host__ __device__ int3 make_int3(int2 a, int s) {
+    return make_int3(a.x, a.y, s);
+}
+inline __host__ __device__ int3 make_int3(uint3 a) {
+    return make_int3(int(a.x), int(a.y), int(a.z));
+}
+inline __host__ __device__ int3 make_int3(float3 a) {
+    return make_int3(int(a.x), int(a.y), int(a.z));
+}
+
+inline __host__ __device__ uint3 make_uint3(uint s) {
+    return make_uint3(s, s, s);
+}
+inline __host__ __device__ uint3 make_uint3(uint2 a) {
+    return make_uint3(a.x, a.y, 0);
+}
+inline __host__ __device__ uint3 make_uint3(uint2 a, uint s) {
+    return make_uint3(a.x, a.y, s);
+}
+inline __host__ __device__ uint3 make_uint3(uint4 a) {
+    return make_uint3(a.x, a.y, a.z);
+}
+inline __host__ __device__ uint3 make_uint3(int3 a) {
+    return make_uint3(uint(a.x), uint(a.y), uint(a.z));
+}
+
+inline __host__ __device__ float4 make_float4(float s) {
+    return make_float4(s, s, s, s);
+}
+inline __host__ __device__ float4 make_float4(float3 a) {
+    return make_float4(a.x, a.y, a.z, 0.0f);
+}
+inline __host__ __device__ float4 make_float4(float3 a, float w) {
+    return make_float4(a.x, a.y, a.z, w);
+}
+inline __host__ __device__ float4 make_float4(int4 a) {
+    return make_float4(float(a.x), float(a.y), float(a.z), float(a.w));
+}
+inline __host__ __device__ float4 make_float4(uint4 a) {
+    return make_float4(float(a.x), float(a.y), float(a.z), float(a.w));
+}
+
+inline __host__ __device__ int4 make_int4(int s) {
+    return make_int4(s, s, s, s);
+}
+inline __host__ __device__ int4 make_int4(int3 a) {
+    return make_int4(a.x, a.y, a.z, 0);
+}
+inline __host__ __device__ int4 make_int4(int3 a, int w) {
+    return make_int4(a.x, a.y, a.z, w);
+}
+inline __host__ __device__ int4 make_int4(uint4 a) {
+    return make_int4(int(a.x), int(a.y), int(a.z), int(a.w));
+}
+inline __host__ __device__ int4 make_int4(float4 a) {
+    return make_int4(int(a.x), int(a.y), int(a.z), int(a.w));
+}
+
+inline __host__ __device__ uint4 make_uint4(uint s) {
+    return make_uint4(s, s, s, s);
+}
+inline __host__ __device__ uint4 make_uint4(uint3 a) {
+    return make_uint4(a.x, a.y, a.z, 0);
+}
+inline __host__ __device__ uint4 make_uint4(uint3 a, uint w) {
+    return make_uint4(a.x, a.y, a.z, w);
+}
+inline __host__ __device__ uint4 make_uint4(int4 a) {
+    return make_uint4(uint(a.x), uint(a.y), uint(a.z), uint(a.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// negate
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator-(float2 &a) {
+    return make_float2(-a.x, -a.y);
+}
+inline __host__ __device__ int2 operator-(int2 &a) {
+    return make_int2(-a.x, -a.y);
+}
+inline __host__ __device__ float3 operator-(float3 &a) {
+    return make_float3(-a.x, -a.y, -a.z);
+}
+inline __host__ __device__ int3 operator-(int3 &a) {
+    return make_int3(-a.x, -a.y, -a.z);
+}
+inline __host__ __device__ float4 operator-(float4 &a) {
+    return make_float4(-a.x, -a.y, -a.z, -a.w);
+}
+inline __host__ __device__ int4 operator-(int4 &a) {
+    return make_int4(-a.x, -a.y, -a.z, -a.w);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// addition
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator+(float2 a, float2 b) {
+    return make_float2(a.x + b.x, a.y + b.y);
+}
+inline __host__ __device__ void operator+=(float2 &a, float2 b) {
+    a.x += b.x;
+    a.y += b.y;
+}
+inline __host__ __device__ float2 operator+(float2 a, float b) {
+    return make_float2(a.x + b, a.y + b);
+}
+inline __host__ __device__ float2 operator+(float b, float2 a) {
+    return make_float2(a.x + b, a.y + b);
+}
+inline __host__ __device__ void operator+=(float2 &a, float b) {
+    a.x += b;
+    a.y += b;
+}
+
+inline __host__ __device__ int2 operator+(int2 a, int2 b) {
+    return make_int2(a.x + b.x, a.y + b.y);
+}
+inline __host__ __device__ void operator+=(int2 &a, int2 b) {
+    a.x += b.x;
+    a.y += b.y;
+}
+inline __host__ __device__ int2 operator+(int2 a, int b) {
+    return make_int2(a.x + b, a.y + b);
+}
+inline __host__ __device__ int2 operator+(int b, int2 a) {
+    return make_int2(a.x + b, a.y + b);
+}
+inline __host__ __device__ void operator+=(int2 &a, int b) {
+    a.x += b;
+    a.y += b;
+}
+
+inline __host__ __device__ uint2 operator+(uint2 a, uint2 b) {
+    return make_uint2(a.x + b.x, a.y + b.y);
+}
+inline __host__ __device__ void operator+=(uint2 &a, uint2 b) {
+    a.x += b.x;
+    a.y += b.y;
+}
+inline __host__ __device__ uint2 operator+(uint2 a, uint b) {
+    return make_uint2(a.x + b, a.y + b);
+}
+inline __host__ __device__ uint2 operator+(uint b, uint2 a) {
+    return make_uint2(a.x + b, a.y + b);
+}
+inline __host__ __device__ void operator+=(uint2 &a, uint b) {
+    a.x += b;
+    a.y += b;
+}
+
+inline __host__ __device__ float3 operator+(float3 a, float3 b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__ void operator+=(float3 &a, float3 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+}
+inline __host__ __device__ float3 operator+(float3 a, float b) {
+    return make_float3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ void operator+=(float3 &a, float b) {
+    a.x += b;
+    a.y += b;
+    a.z += b;
+}
+
+inline __host__ __device__ int3 operator+(int3 a, int3 b) {
+    return make_int3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__ void operator+=(int3 &a, int3 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+}
+inline __host__ __device__ int3 operator+(int3 a, int b) {
+    return make_int3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ void operator+=(int3 &a, int b) {
+    a.x += b;
+    a.y += b;
+    a.z += b;
+}
+
+inline __host__ __device__ uint3 operator+(uint3 a, uint3 b) {
+    return make_uint3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+inline __host__ __device__ void operator+=(uint3 &a, uint3 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+}
+inline __host__ __device__ uint3 operator+(uint3 a, uint b) {
+    return make_uint3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ void operator+=(uint3 &a, uint b) {
+    a.x += b;
+    a.y += b;
+    a.z += b;
+}
+
+inline __host__ __device__ int3 operator+(int b, int3 a) {
+    return make_int3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ uint3 operator+(uint b, uint3 a) {
+    return make_uint3(a.x + b, a.y + b, a.z + b);
+}
+inline __host__ __device__ float3 operator+(float b, float3 a) {
+    return make_float3(a.x + b, a.y + b, a.z + b);
+}
+
+inline __host__ __device__ float4 operator+(float4 a, float4 b) {
+    return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+inline __host__ __device__ void operator+=(float4 &a, float4 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    a.w += b.w;
+}
+inline __host__ __device__ float4 operator+(float4 a, float b) {
+    return make_float4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ float4 operator+(float b, float4 a) {
+    return make_float4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ void operator+=(float4 &a, float b) {
+    a.x += b;
+    a.y += b;
+    a.z += b;
+    a.w += b;
+}
+
+inline __host__ __device__ int4 operator+(int4 a, int4 b) {
+    return make_int4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+inline __host__ __device__ void operator+=(int4 &a, int4 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    a.w += b.w;
+}
+inline __host__ __device__ int4 operator+(int4 a, int b) {
+    return make_int4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ int4 operator+(int b, int4 a) {
+    return make_int4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ void operator+=(int4 &a, int b) {
+    a.x += b;
+    a.y += b;
+    a.z += b;
+    a.w += b;
+}
+
+inline __host__ __device__ uint4 operator+(uint4 a, uint4 b) {
+    return make_uint4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+}
+inline __host__ __device__ void operator+=(uint4 &a, uint4 b) {
+    a.x += b.x;
+    a.y += b.y;
+    a.z += b.z;
+    a.w += b.w;
+}
+inline __host__ __device__ uint4 operator+(uint4 a, uint b) {
+    return make_uint4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ uint4 operator+(uint b, uint4 a) {
+    return make_uint4(a.x + b, a.y + b, a.z + b, a.w + b);
+}
+inline __host__ __device__ void operator+=(uint4 &a, uint b) {
+    a.x += b;
+    a.y += b;
+    a.z += b;
+    a.w += b;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// subtract
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator-(float2 a, float2 b) {
+    return make_float2(a.x - b.x, a.y - b.y);
+}
+inline __host__ __device__ void operator-=(float2 &a, float2 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+}
+inline __host__ __device__ float2 operator-(float2 a, float b) {
+    return make_float2(a.x - b, a.y - b);
+}
+inline __host__ __device__ float2 operator-(float b, float2 a) {
+    return make_float2(b - a.x, b - a.y);
+}
+inline __host__ __device__ void operator-=(float2 &a, float b) {
+    a.x -= b;
+    a.y -= b;
+}
+
+inline __host__ __device__ int2 operator-(int2 a, int2 b) {
+    return make_int2(a.x - b.x, a.y - b.y);
+}
+inline __host__ __device__ void operator-=(int2 &a, int2 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+}
+inline __host__ __device__ int2 operator-(int2 a, int b) {
+    return make_int2(a.x - b, a.y - b);
+}
+inline __host__ __device__ int2 operator-(int b, int2 a) {
+    return make_int2(b - a.x, b - a.y);
+}
+inline __host__ __device__ void operator-=(int2 &a, int b) {
+    a.x -= b;
+    a.y -= b;
+}
+
+inline __host__ __device__ uint2 operator-(uint2 a, uint2 b) {
+    return make_uint2(a.x - b.x, a.y - b.y);
+}
+inline __host__ __device__ void operator-=(uint2 &a, uint2 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+}
+inline __host__ __device__ uint2 operator-(uint2 a, uint b) {
+    return make_uint2(a.x - b, a.y - b);
+}
+inline __host__ __device__ uint2 operator-(uint b, uint2 a) {
+    return make_uint2(b - a.x, b - a.y);
+}
+inline __host__ __device__ void operator-=(uint2 &a, uint b) {
+    a.x -= b;
+    a.y -= b;
+}
+
+inline __host__ __device__ float3 operator-(float3 a, float3 b) {
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+inline __host__ __device__ void operator-=(float3 &a, float3 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+    a.z -= b.z;
+}
+inline __host__ __device__ float3 operator-(float3 a, float b) {
+    return make_float3(a.x - b, a.y - b, a.z - b);
+}
+inline __host__ __device__ float3 operator-(float b, float3 a) {
+    return make_float3(b - a.x, b - a.y, b - a.z);
+}
+inline __host__ __device__ void operator-=(float3 &a, float b) {
+    a.x -= b;
+    a.y -= b;
+    a.z -= b;
+}
+
+inline __host__ __device__ int3 operator-(int3 a, int3 b) {
+    return make_int3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+inline __host__ __device__ void operator-=(int3 &a, int3 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+    a.z -= b.z;
+}
+inline __host__ __device__ int3 operator-(int3 a, int b) {
+    return make_int3(a.x - b, a.y - b, a.z - b);
+}
+inline __host__ __device__ int3 operator-(int b, int3 a) {
+    return make_int3(b - a.x, b - a.y, b - a.z);
+}
+inline __host__ __device__ void operator-=(int3 &a, int b) {
+    a.x -= b;
+    a.y -= b;
+    a.z -= b;
+}
+
+inline __host__ __device__ uint3 operator-(uint3 a, uint3 b) {
+    return make_uint3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+inline __host__ __device__ void operator-=(uint3 &a, uint3 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+    a.z -= b.z;
+}
+inline __host__ __device__ uint3 operator-(uint3 a, uint b) {
+    return make_uint3(a.x - b, a.y - b, a.z - b);
+}
+inline __host__ __device__ uint3 operator-(uint b, uint3 a) {
+    return make_uint3(b - a.x, b - a.y, b - a.z);
+}
+inline __host__ __device__ void operator-=(uint3 &a, uint b) {
+    a.x -= b;
+    a.y -= b;
+    a.z -= b;
+}
+
+inline __host__ __device__ float4 operator-(float4 a, float4 b) {
+    return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+}
+inline __host__ __device__ void operator-=(float4 &a, float4 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+    a.z -= b.z;
+    a.w -= b.w;
+}
+inline __host__ __device__ float4 operator-(float4 a, float b) {
+    return make_float4(a.x - b, a.y - b, a.z - b, a.w - b);
+}
+inline __host__ __device__ void operator-=(float4 &a, float b) {
+    a.x -= b;
+    a.y -= b;
+    a.z -= b;
+    a.w -= b;
+}
+
+inline __host__ __device__ int4 operator-(int4 a, int4 b) {
+    return make_int4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+}
+inline __host__ __device__ void operator-=(int4 &a, int4 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+    a.z -= b.z;
+    a.w -= b.w;
+}
+inline __host__ __device__ int4 operator-(int4 a, int b) {
+    return make_int4(a.x - b, a.y - b, a.z - b, a.w - b);
+}
+inline __host__ __device__ int4 operator-(int b, int4 a) {
+    return make_int4(b - a.x, b - a.y, b - a.z, b - a.w);
+}
+inline __host__ __device__ void operator-=(int4 &a, int b) {
+    a.x -= b;
+    a.y -= b;
+    a.z -= b;
+    a.w -= b;
+}
+
+inline __host__ __device__ uint4 operator-(uint4 a, uint4 b) {
+    return make_uint4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+}
+inline __host__ __device__ void operator-=(uint4 &a, uint4 b) {
+    a.x -= b.x;
+    a.y -= b.y;
+    a.z -= b.z;
+    a.w -= b.w;
+}
+inline __host__ __device__ uint4 operator-(uint4 a, uint b) {
+    return make_uint4(a.x - b, a.y - b, a.z - b, a.w - b);
+}
+inline __host__ __device__ uint4 operator-(uint b, uint4 a) {
+    return make_uint4(b - a.x, b - a.y, b - a.z, b - a.w);
+}
+inline __host__ __device__ void operator-=(uint4 &a, uint b) {
+    a.x -= b;
+    a.y -= b;
+    a.z -= b;
+    a.w -= b;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// multiply
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator*(float2 a, float2 b) {
+    return make_float2(a.x * b.x, a.y * b.y);
+}
+inline __host__ __device__ void operator*=(float2 &a, float2 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+}
+inline __host__ __device__ float2 operator*(float2 a, float b) {
+    return make_float2(a.x * b, a.y * b);
+}
+inline __host__ __device__ float2 operator*(float b, float2 a) {
+    return make_float2(b * a.x, b * a.y);
+}
+inline __host__ __device__ void operator*=(float2 &a, float b) {
+    a.x *= b;
+    a.y *= b;
+}
+
+inline __host__ __device__ int2 operator*(int2 a, int2 b) {
+    return make_int2(a.x * b.x, a.y * b.y);
+}
+inline __host__ __device__ void operator*=(int2 &a, int2 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+}
+inline __host__ __device__ int2 operator*(int2 a, int b) {
+    return make_int2(a.x * b, a.y * b);
+}
+inline __host__ __device__ int2 operator*(int b, int2 a) {
+    return make_int2(b * a.x, b * a.y);
+}
+inline __host__ __device__ void operator*=(int2 &a, int b) {
+    a.x *= b;
+    a.y *= b;
+}
+
+inline __host__ __device__ uint2 operator*(uint2 a, uint2 b) {
+    return make_uint2(a.x * b.x, a.y * b.y);
+}
+inline __host__ __device__ void operator*=(uint2 &a, uint2 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+}
+inline __host__ __device__ uint2 operator*(uint2 a, uint b) {
+    return make_uint2(a.x * b, a.y * b);
+}
+inline __host__ __device__ uint2 operator*(uint b, uint2 a) {
+    return make_uint2(b * a.x, b * a.y);
+}
+inline __host__ __device__ void operator*=(uint2 &a, uint b) {
+    a.x *= b;
+    a.y *= b;
+}
+
+inline __host__ __device__ float3 operator*(float3 a, float3 b) {
+    return make_float3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+inline __host__ __device__ void operator*=(float3 &a, float3 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+    a.z *= b.z;
+}
+inline __host__ __device__ float3 operator*(float3 a, float b) {
+    return make_float3(a.x * b, a.y * b, a.z * b);
+}
+inline __host__ __device__ float3 operator*(float b, float3 a) {
+    return make_float3(b * a.x, b * a.y, b * a.z);
+}
+inline __host__ __device__ void operator*=(float3 &a, float b) {
+    a.x *= b;
+    a.y *= b;
+    a.z *= b;
+}
+
+inline __host__ __device__ int3 operator*(int3 a, int3 b) {
+    return make_int3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+inline __host__ __device__ void operator*=(int3 &a, int3 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+    a.z *= b.z;
+}
+inline __host__ __device__ int3 operator*(int3 a, int b) {
+    return make_int3(a.x * b, a.y * b, a.z * b);
+}
+inline __host__ __device__ int3 operator*(int b, int3 a) {
+    return make_int3(b * a.x, b * a.y, b * a.z);
+}
+inline __host__ __device__ void operator*=(int3 &a, int b) {
+    a.x *= b;
+    a.y *= b;
+    a.z *= b;
+}
+
+inline __host__ __device__ uint3 operator*(uint3 a, uint3 b) {
+    return make_uint3(a.x * b.x, a.y * b.y, a.z * b.z);
+}
+inline __host__ __device__ void operator*=(uint3 &a, uint3 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+    a.z *= b.z;
+}
+inline __host__ __device__ uint3 operator*(uint3 a, uint b) {
+    return make_uint3(a.x * b, a.y * b, a.z * b);
+}
+inline __host__ __device__ uint3 operator*(uint b, uint3 a) {
+    return make_uint3(b * a.x, b * a.y, b * a.z);
+}
+inline __host__ __device__ void operator*=(uint3 &a, uint b) {
+    a.x *= b;
+    a.y *= b;
+    a.z *= b;
+}
+
+inline __host__ __device__ float4 operator*(float4 a, float4 b) {
+    return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+}
+inline __host__ __device__ void operator*=(float4 &a, float4 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+    a.z *= b.z;
+    a.w *= b.w;
+}
+inline __host__ __device__ float4 operator*(float4 a, float b) {
+    return make_float4(a.x * b, a.y * b, a.z * b, a.w * b);
+}
+inline __host__ __device__ float4 operator*(float b, float4 a) {
+    return make_float4(b * a.x, b * a.y, b * a.z, b * a.w);
+}
+inline __host__ __device__ void operator*=(float4 &a, float b) {
+    a.x *= b;
+    a.y *= b;
+    a.z *= b;
+    a.w *= b;
+}
+
+inline __host__ __device__ int4 operator*(int4 a, int4 b) {
+    return make_int4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+}
+inline __host__ __device__ void operator*=(int4 &a, int4 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+    a.z *= b.z;
+    a.w *= b.w;
+}
+inline __host__ __device__ int4 operator*(int4 a, int b) {
+    return make_int4(a.x * b, a.y * b, a.z * b, a.w * b);
+}
+inline __host__ __device__ int4 operator*(int b, int4 a) {
+    return make_int4(b * a.x, b * a.y, b * a.z, b * a.w);
+}
+inline __host__ __device__ void operator*=(int4 &a, int b) {
+    a.x *= b;
+    a.y *= b;
+    a.z *= b;
+    a.w *= b;
+}
+
+inline __host__ __device__ uint4 operator*(uint4 a, uint4 b) {
+    return make_uint4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w);
+}
+inline __host__ __device__ void operator*=(uint4 &a, uint4 b) {
+    a.x *= b.x;
+    a.y *= b.y;
+    a.z *= b.z;
+    a.w *= b.w;
+}
+inline __host__ __device__ uint4 operator*(uint4 a, uint b) {
+    return make_uint4(a.x * b, a.y * b, a.z * b, a.w * b);
+}
+inline __host__ __device__ uint4 operator*(uint b, uint4 a) {
+    return make_uint4(b * a.x, b * a.y, b * a.z, b * a.w);
+}
+inline __host__ __device__ void operator*=(uint4 &a, uint b) {
+    a.x *= b;
+    a.y *= b;
+    a.z *= b;
+    a.w *= b;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// divide
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 operator/(float2 a, float2 b) {
+    return make_float2(a.x / b.x, a.y / b.y);
+}
+inline __host__ __device__ void operator/=(float2 &a, float2 b) {
+    a.x /= b.x;
+    a.y /= b.y;
+}
+inline __host__ __device__ float2 operator/(float2 a, float b) {
+    return make_float2(a.x / b, a.y / b);
+}
+inline __host__ __device__ void operator/=(float2 &a, float b) {
+    a.x /= b;
+    a.y /= b;
+}
+inline __host__ __device__ float2 operator/(float b, float2 a) {
+    return make_float2(b / a.x, b / a.y);
+}
+
+inline __host__ __device__ float3 operator/(float3 a, float3 b) {
+    return make_float3(a.x / b.x, a.y / b.y, a.z / b.z);
+}
+inline __host__ __device__ void operator/=(float3 &a, float3 b) {
+    a.x /= b.x;
+    a.y /= b.y;
+    a.z /= b.z;
+}
+inline __host__ __device__ float3 operator/(float3 a, float b) {
+    return make_float3(a.x / b, a.y / b, a.z / b);
+}
+inline __host__ __device__ void operator/=(float3 &a, float b) {
+    a.x /= b;
+    a.y /= b;
+    a.z /= b;
+}
+inline __host__ __device__ float3 operator/(float b, float3 a) {
+    return make_float3(b / a.x, b / a.y, b / a.z);
+}
+
+inline __host__ __device__ float4 operator/(float4 a, float4 b) {
+    return make_float4(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w);
+}
+inline __host__ __device__ void operator/=(float4 &a, float4 b) {
+    a.x /= b.x;
+    a.y /= b.y;
+    a.z /= b.z;
+    a.w /= b.w;
+}
+inline __host__ __device__ float4 operator/(float4 a, float b) {
+    return make_float4(a.x / b, a.y / b, a.z / b, a.w / b);
+}
+inline __host__ __device__ void operator/=(float4 &a, float b) {
+    a.x /= b;
+    a.y /= b;
+    a.z /= b;
+    a.w /= b;
+}
+inline __host__ __device__ float4 operator/(float b, float4 a) {
+    return make_float4(b / a.x, b / a.y, b / a.z, b / a.w);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// min
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 fminf(float2 a, float2 b) {
+    return make_float2(fminf(a.x, b.x), fminf(a.y, b.y));
+}
+inline __host__ __device__ float3 fminf(float3 a, float3 b) {
+    return make_float3(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z));
+}
+inline __host__ __device__ float4 fminf(float4 a, float4 b) {
+    return make_float4(fminf(a.x, b.x), fminf(a.y, b.y), fminf(a.z, b.z), fminf(a.w, b.w));
+}
+
+inline __host__ __device__ int2 min(int2 a, int2 b) {
+    return make_int2(min(a.x, b.x), min(a.y, b.y));
+}
+inline __host__ __device__ int3 min(int3 a, int3 b) {
+    return make_int3(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z));
+}
+inline __host__ __device__ int4 min(int4 a, int4 b) {
+    return make_int4(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z), min(a.w, b.w));
+}
+
+inline __host__ __device__ uint2 min(uint2 a, uint2 b) {
+    return make_uint2(min(a.x, b.x), min(a.y, b.y));
+}
+inline __host__ __device__ uint3 min(uint3 a, uint3 b) {
+    return make_uint3(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z));
+}
+inline __host__ __device__ uint4 min(uint4 a, uint4 b) {
+    return make_uint4(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z), min(a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// max
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 fmaxf(float2 a, float2 b) {
+    return make_float2(fmaxf(a.x, b.x), fmaxf(a.y, b.y));
+}
+inline __host__ __device__ float3 fmaxf(float3 a, float3 b) {
+    return make_float3(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z));
+}
+inline __host__ __device__ float4 fmaxf(float4 a, float4 b) {
+    return make_float4(fmaxf(a.x, b.x), fmaxf(a.y, b.y), fmaxf(a.z, b.z), fmaxf(a.w, b.w));
+}
+
+inline __host__ __device__ int2 max(int2 a, int2 b) {
+    return make_int2(max(a.x, b.x), max(a.y, b.y));
+}
+inline __host__ __device__ int3 max(int3 a, int3 b) {
+    return make_int3(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z));
+}
+inline __host__ __device__ int4 max(int4 a, int4 b) {
+    return make_int4(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+}
+
+inline __host__ __device__ uint2 max(uint2 a, uint2 b) {
+    return make_uint2(max(a.x, b.x), max(a.y, b.y));
+}
+inline __host__ __device__ uint3 max(uint3 a, uint3 b) {
+    return make_uint3(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z));
+}
+inline __host__ __device__ uint4 max(uint4 a, uint4 b) {
+    return make_uint4(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// lerp
+// - linear interpolation between a and b, based on value t in [0, 1] range
+////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ __host__ float lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+inline __device__ __host__ float2 lerp(float2 a, float2 b, float t) {
+    return a + t * (b - a);
+}
+inline __device__ __host__ float3 lerp(float3 a, float3 b, float t) {
+    return a + t * (b - a);
+}
+inline __device__ __host__ float4 lerp(float4 a, float4 b, float t) {
+    return a + t * (b - a);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// clamp
+// - clamp the value v to be in the range [a, b]
+////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ __host__ float clamp(float f, float a, float b) {
+    return fmaxf(a, fminf(f, b));
+}
+inline __device__ __host__ int clamp(int f, int a, int b) {
+    return max(a, min(f, b));
+}
+inline __device__ __host__ uint clamp(uint f, uint a, uint b) {
+    return max(a, min(f, b));
+}
+
+inline __device__ __host__ float2 clamp(float2 v, float a, float b) {
+    return make_float2(clamp(v.x, a, b), clamp(v.y, a, b));
+}
+inline __device__ __host__ float2 clamp(float2 v, float2 a, float2 b) {
+    return make_float2(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y));
+}
+inline __device__ __host__ float3 clamp(float3 v, float a, float b) {
+    return make_float3(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b));
+}
+inline __device__ __host__ float3 clamp(float3 v, float3 a, float3 b) {
+    return make_float3(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z));
+}
+inline __device__ __host__ float4 clamp(float4 v, float a, float b) {
+    return make_float4(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b), clamp(v.w, a, b));
+}
+inline __device__ __host__ float4 clamp(float4 v, float4 a, float4 b) {
+    return make_float4(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z), clamp(v.w, a.w, b.w));
+}
+
+inline __device__ __host__ int2 clamp(int2 v, int a, int b) {
+    return make_int2(clamp(v.x, a, b), clamp(v.y, a, b));
+}
+inline __device__ __host__ int2 clamp(int2 v, int2 a, int2 b) {
+    return make_int2(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y));
+}
+inline __device__ __host__ int3 clamp(int3 v, int a, int b) {
+    return make_int3(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b));
+}
+inline __device__ __host__ int3 clamp(int3 v, int3 a, int3 b) {
+    return make_int3(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z));
+}
+inline __device__ __host__ int4 clamp(int4 v, int a, int b) {
+    return make_int4(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b), clamp(v.w, a, b));
+}
+inline __device__ __host__ int4 clamp(int4 v, int4 a, int4 b) {
+    return make_int4(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z), clamp(v.w, a.w, b.w));
+}
+
+inline __device__ __host__ uint2 clamp(uint2 v, uint a, uint b) {
+    return make_uint2(clamp(v.x, a, b), clamp(v.y, a, b));
+}
+inline __device__ __host__ uint2 clamp(uint2 v, uint2 a, uint2 b) {
+    return make_uint2(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y));
+}
+inline __device__ __host__ uint3 clamp(uint3 v, uint a, uint b) {
+    return make_uint3(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b));
+}
+inline __device__ __host__ uint3 clamp(uint3 v, uint3 a, uint3 b) {
+    return make_uint3(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z));
+}
+inline __device__ __host__ uint4 clamp(uint4 v, uint a, uint b) {
+    return make_uint4(clamp(v.x, a, b), clamp(v.y, a, b), clamp(v.z, a, b), clamp(v.w, a, b));
+}
+inline __device__ __host__ uint4 clamp(uint4 v, uint4 a, uint4 b) {
+    return make_uint4(clamp(v.x, a.x, b.x), clamp(v.y, a.y, b.y), clamp(v.z, a.z, b.z), clamp(v.w, a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// dot product
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float dot(float2 a, float2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+inline __host__ __device__ float dot(float3 a, float3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline __host__ __device__ float dot(float4 a, float4 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+inline __host__ __device__ int dot(int2 a, int2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+inline __host__ __device__ int dot(int3 a, int3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline __host__ __device__ int dot(int4 a, int4 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+inline __host__ __device__ uint dot(uint2 a, uint2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+inline __host__ __device__ uint dot(uint3 a, uint3 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+inline __host__ __device__ uint dot(uint4 a, uint4 b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// length
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float length(float2 v) {
+    return sqrtf(dot(v, v));
+}
+inline __host__ __device__ float length(float3 v) {
+    return sqrtf(dot(v, v));
+}
+inline __host__ __device__ float length(float4 v) {
+    return sqrtf(dot(v, v));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// normalize
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 normalize(float2 v) {
+    float invLen = rsqrtf(dot(v, v));
+    return v * invLen;
+}
+inline __host__ __device__ float3 normalize(float3 v) {
+    float invLen = rsqrtf(dot(v, v));
+    return v * invLen;
+}
+inline __host__ __device__ float4 normalize(float4 v) {
+    float invLen = rsqrtf(dot(v, v));
+    return v * invLen;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// floor
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 floorf(float2 v) {
+    return make_float2(floorf(v.x), floorf(v.y));
+}
+inline __host__ __device__ float3 floorf(float3 v) {
+    return make_float3(floorf(v.x), floorf(v.y), floorf(v.z));
+}
+inline __host__ __device__ float4 floorf(float4 v) {
+    return make_float4(floorf(v.x), floorf(v.y), floorf(v.z), floorf(v.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// frac - returns the fractional portion of a scalar or each vector component
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float fracf(float v) {
+    return v - floorf(v);
+}
+inline __host__ __device__ float2 fracf(float2 v) {
+    return make_float2(fracf(v.x), fracf(v.y));
+}
+inline __host__ __device__ float3 fracf(float3 v) {
+    return make_float3(fracf(v.x), fracf(v.y), fracf(v.z));
+}
+inline __host__ __device__ float4 fracf(float4 v) {
+    return make_float4(fracf(v.x), fracf(v.y), fracf(v.z), fracf(v.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// fmod
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 fmodf(float2 a, float2 b) {
+    return make_float2(fmodf(a.x, b.x), fmodf(a.y, b.y));
+}
+inline __host__ __device__ float3 fmodf(float3 a, float3 b) {
+    return make_float3(fmodf(a.x, b.x), fmodf(a.y, b.y), fmodf(a.z, b.z));
+}
+inline __host__ __device__ float4 fmodf(float4 a, float4 b) {
+    return make_float4(fmodf(a.x, b.x), fmodf(a.y, b.y), fmodf(a.z, b.z), fmodf(a.w, b.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// absolute value
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float2 fabs(float2 v) {
+    return make_float2(fabs(v.x), fabs(v.y));
+}
+inline __host__ __device__ float3 fabs(float3 v) {
+    return make_float3(fabs(v.x), fabs(v.y), fabs(v.z));
+}
+inline __host__ __device__ float4 fabs(float4 v) {
+    return make_float4(fabs(v.x), fabs(v.y), fabs(v.z), fabs(v.w));
+}
+
+inline __host__ __device__ int2 abs(int2 v) {
+    return make_int2(abs(v.x), abs(v.y));
+}
+inline __host__ __device__ int3 abs(int3 v) {
+    return make_int3(abs(v.x), abs(v.y), abs(v.z));
+}
+inline __host__ __device__ int4 abs(int4 v) {
+    return make_int4(abs(v.x), abs(v.y), abs(v.z), abs(v.w));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// reflect
+// - returns reflection of incident ray I around surface normal N
+// - N should be normalized, reflected vector's length is equal to length of I
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float3 reflect(float3 i, float3 n) {
+    return i - 2.0f * n * dot(n, i);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// cross product
+////////////////////////////////////////////////////////////////////////////////
+
+inline __host__ __device__ float3 cross(float3 a, float3 b) {
+    return make_float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// smoothstep
+// - returns 0 if x < a
+// - returns 1 if x > b
+// - otherwise returns smooth interpolation between 0 and 1 based on x
+////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ __host__ float smoothstep(float a, float b, float x) {
+    float y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return (y * y * (3.0f - (2.0f * y)));
+}
+inline __device__ __host__ float2 smoothstep(float2 a, float2 b, float2 x) {
+    float2 y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return (y * y * (make_float2(3.0f) - (make_float2(2.0f) * y)));
+}
+inline __device__ __host__ float3 smoothstep(float3 a, float3 b, float3 x) {
+    float3 y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return (y * y * (make_float3(3.0f) - (make_float3(2.0f) * y)));
+}
+inline __device__ __host__ float4 smoothstep(float4 a, float4 b, float4 x) {
+    float4 y = clamp((x - a) / (b - a), 0.0f, 1.0f);
+    return (y * y * (make_float4(3.0f) - (make_float4(2.0f) * y)));
+}
+
+#endif
+```
+
+### cxx/macros.h
+```
+#ifdef _MSC_VER
+#pragma once
+#endif
+
+#ifndef _MACROS_H_
+#define _MACROS_H_
+
+#include <torch/extension.h>
+
+#include <cstdio>
+
+#define CHECK_CUDA(x)                                                   \
+    do {                                                                \
+        TORCH_CHECK(vol.type().is_cuda(), #x " must be a CUDA tensor"); \
+    } while (0)
+
+#define CHECK_CPU(x)                                                        \
+    do {                                                                    \
+        TORCH_CHECK(x.device() == torch::kCPU, #x " must be a CPU tensor"); \
+    } while (0)
+
+#define CHECK_CONTIGUOUS(x)                                       \
+    do {                                                          \
+        TORCH_CHECK(x.is_contiguous(), #x " must be contiguous"); \
+    } while (0)
+
+#define CHECK_IS_INT(x)                                                                   \
+    do {                                                                                  \
+        TORCH_CHECK(x.scalar_type() == at::ScalarType::Int, #x " must be an int tensor"); \
+    } while (0)
+
+#define CHECK_IS_FLOAT(x)                                                                    \
+    do {                                                                                     \
+        TORCH_CHECK(x.scalar_type() == at::ScalarType::Float, #x " must be a float tensor"); \
+    } while (0)
+
+#define CHECK_N_DIM(x, n)                               \
+    do {                                                \
+        char msg[256];                                  \
+        sprintf(msg, "%s must be %d-dimension", #x, n); \
+        TORCH_CHECK(x.sizes().size() == n, msg);        \
+    } while (0)
+
+#endif  // _MACROS_H_
+```
+
+### cxx/mcubes.cpp
+```
+#include <torch/extension.h>
+
+#include <iostream>
+#include <vector>
+
+// Forward declarations
+
+std::vector<torch::Tensor> mcubes_cpu(torch::Tensor func, float threshold);
+
+#if defined(WITH_CUDA)
+std::vector<torch::Tensor> mcubes_cuda(torch::Tensor func, float threshold);
+#endif
+
+torch::Tensor grid_interp_cpu(torch::Tensor vol, torch::Tensor points);
+
+#if defined(WITH_CUDA)
+torch::Tensor grid_interp_cuda(torch::Tensor vol, torch::Tensor points);
+#endif
+
+// Pybind11 exports
+PYBIND11_MODULE(torchmcubes_module, m) {
+    m.def("mcubes_cpu", &mcubes_cpu, "Marching cubes (CPU)", py::arg("vol"), py::arg("threshold"));
+    m.def("grid_interp_cpu", &grid_interp_cpu, "Grid interpolation (CPU)", py::arg("vol"), py::arg("points"));
+#if defined(WITH_CUDA)
+    m.def("mcubes_cuda", &mcubes_cuda, "Marching cubes (CUDA)", py::arg("vol"), py::arg("threshold"));
+    m.def("grid_interp_cuda", &grid_interp_cuda, "Grid interpolation (CUDA)", py::arg("vol"), py::arg("points"));
+#endif
+}
+```
+
+### cxx/mcubes_cpu.cpp
+```
+#include <torch/extension.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <algorithm>
+#include <vector>
+#include <unordered_map>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#include "macros.h"
+
+struct XYZ {
+    explicit XYZ(float x = 0.0f, float y = 0.0f, float z = 0.0f)
+        : x(x)
+        , y(y)
+        , z(z) {
+    }
+    bool operator==(const XYZ &xyz) const {
+        return x == xyz.x && y == xyz.y && z == xyz.z;
+    }
+    XYZ operator+(const XYZ &xyz) const {
+        return XYZ(x + xyz.x, y + xyz.y, z + xyz.z);
+    }
+    XYZ operator*(float s) const {
+        return XYZ(x * s, y * s, z * s);
+    }
+    float x, y, z;
+};
+
+namespace std {
+
+inline void hash_combine(size_t &seed, size_t hash) {
+    hash += 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    seed ^= hash;
+}
+
+template <>
+struct hash<XYZ> {
+    size_t operator()(const XYZ &xyz) const {
+        size_t seed = 0;
+        hash<float> hasher;
+        hash_combine(seed, hasher(xyz.x));
+        hash_combine(seed, hasher(xyz.y));
+        hash_combine(seed, hasher(xyz.z));
+        return seed;
+    }
+};
+
+}  // namespace std
+
+struct TRIANGLE {
+    XYZ p[3];
+};
+
+struct GRIDCELL {
+    XYZ p[8];
+    float val[8];
+};
+
+/*
+ * Linearly interpolate the position where an isosurface cuts
+ * an edge between two vertices, each with their own scalar value
+ */
+XYZ VertexInterp(float isolevel, XYZ p1, XYZ p2, float valp1, float valp2) {
+    float mu;
+    XYZ p;
+
+    if (std::abs(isolevel - valp1) < 1.0e-4f) return p1;
+    if (std::abs(isolevel - valp2) < 1.0e-4f) return p2;
+    if (std::abs(valp1 - valp2) < 1.0e-4f) return p1;
+
+    mu = (isolevel - valp1) / (valp2 - valp1);
+    p.x = p1.x + mu * (p2.x - p1.x);
+    p.y = p1.y + mu * (p2.y - p1.y);
+    p.z = p1.z + mu * (p2.z - p1.z);
+
+    return p;
+}
+
+/*
+   Given a grid cell and an isolevel, calculate the triangular
+   facets required to represent the isosurface through the cell.
+   Return the number of triangular facets, the array "triangles"
+   will be loaded up with the vertices at most 5 triangular facets.
+   0 will be returned if the grid cell is either totally above
+   of totally below the isolevel.
+*/
+int Polygonise(GRIDCELL grid, float isolevel, TRIANGLE *triangles) {
+    int i, ntriang;
+    int cubeindex;
+    XYZ vertlist[12];
+
+    static int edgeTable[256] = {
+        0x0,   0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+        0x190, 0x99,  0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+        0x230, 0x339, 0x33,  0x13a, 0x636, 0x73f, 0x435, 0x53c, 0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+        0x3a0, 0x2a9, 0x1a3, 0xaa,  0x7a6, 0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+        0x460, 0x569, 0x663, 0x76a, 0x66,  0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+        0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff,  0x3f5, 0x2fc, 0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+        0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55,  0x15c, 0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+        0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc,  0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+        0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc, 0xcc,  0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+        0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c, 0x15c, 0x55,  0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+        0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc, 0x2fc, 0x3f5, 0xff,  0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+        0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c, 0x36c, 0x265, 0x16f, 0x66,  0x76a, 0x663, 0x569, 0x460,
+        0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa,  0x1a3, 0x2a9, 0x3a0,
+        0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33,  0x339, 0x230,
+        0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99,  0x190,
+        0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c, 0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0
+    };
+
+    static int triTable[256][16] = { { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+                                     { 8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1 },
+                                     { 3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1 },
+                                     { 4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+                                     { 4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1 },
+                                     { 9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1 },
+                                     { 10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1 },
+                                     { 5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+                                     { 5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1 },
+                                     { 8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1 },
+                                     { 2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+                                     { 2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1 },
+                                     { 11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1 },
+                                     { 5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1 },
+                                     { 11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1 },
+                                     { 11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1 },
+                                     { 2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1 },
+                                     { 6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+                                     { 3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1 },
+                                     { 6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+                                     { 6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1 },
+                                     { 8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1 },
+                                     { 7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1 },
+                                     { 3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+                                     { 0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1 },
+                                     { 9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1 },
+                                     { 8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+                                     { 5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1 },
+                                     { 0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1 },
+                                     { 6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1 },
+                                     { 10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+                                     { 1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1 },
+                                     { 0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1 },
+                                     { 3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+                                     { 6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1 },
+                                     { 9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1 },
+                                     { 8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1 },
+                                     { 3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1 },
+                                     { 10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1 },
+                                     { 10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+                                     { 2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1 },
+                                     { 7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+                                     { 2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1 },
+                                     { 1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1 },
+                                     { 11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1 },
+                                     { 8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1 },
+                                     { 0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1 },
+                                     { 7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1 },
+                                     { 7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1 },
+                                     { 10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1 },
+                                     { 0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1 },
+                                     { 7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1 },
+                                     { 6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1 },
+                                     { 4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1 },
+                                     { 10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1 },
+                                     { 8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1 },
+                                     { 1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1 },
+                                     { 10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1 },
+                                     { 10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1 },
+                                     { 9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1 },
+                                     { 7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1 },
+                                     { 3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1 },
+                                     { 7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1 },
+                                     { 3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1 },
+                                     { 6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1 },
+                                     { 9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1 },
+                                     { 1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1 },
+                                     { 4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1 },
+                                     { 7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1 },
+                                     { 6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1 },
+                                     { 0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1 },
+                                     { 6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1 },
+                                     { 0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1 },
+                                     { 11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1 },
+                                     { 6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1 },
+                                     { 5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1 },
+                                     { 9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1 },
+                                     { 1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1 },
+                                     { 10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1 },
+                                     { 0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1 },
+                                     { 11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1 },
+                                     { 9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1 },
+                                     { 7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1 },
+                                     { 2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1 },
+                                     { 9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1 },
+                                     { 9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1 },
+                                     { 1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1 },
+                                     { 0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1 },
+                                     { 10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1 },
+                                     { 2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1 },
+                                     { 0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1 },
+                                     { 0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1 },
+                                     { 9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1 },
+                                     { 5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1 },
+                                     { 5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1 },
+                                     { 8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1 },
+                                     { 9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1 },
+                                     { 1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1 },
+                                     { 3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1 },
+                                     { 4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1 },
+                                     { 9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1 },
+                                     { 11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1 },
+                                     { 2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1 },
+                                     { 9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1 },
+                                     { 3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1 },
+                                     { 1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1 },
+                                     { 4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1 },
+                                     { 0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1 },
+                                     { 1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { 0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                     { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 } };
+
+    /*
+      Determine the index into the edge table which
+      tells us which vertices are inside of the surface
+   */
+    cubeindex = 0;
+    if (grid.val[0] < isolevel) cubeindex |= 1;
+    if (grid.val[1] < isolevel) cubeindex |= 2;
+    if (grid.val[2] < isolevel) cubeindex |= 4;
+    if (grid.val[3] < isolevel) cubeindex |= 8;
+    if (grid.val[4] < isolevel) cubeindex |= 16;
+    if (grid.val[5] < isolevel) cubeindex |= 32;
+    if (grid.val[6] < isolevel) cubeindex |= 64;
+    if (grid.val[7] < isolevel) cubeindex |= 128;
+
+    /* Cube is entirely in/out of the surface */
+    if (edgeTable[cubeindex] == 0) return (0);
+
+    /* Find the vertices where the surface intersects the cube */
+    if (edgeTable[cubeindex] & 1) vertlist[0] = VertexInterp(isolevel, grid.p[0], grid.p[1], grid.val[0], grid.val[1]);
+    if (edgeTable[cubeindex] & 2) vertlist[1] = VertexInterp(isolevel, grid.p[1], grid.p[2], grid.val[1], grid.val[2]);
+    if (edgeTable[cubeindex] & 4) vertlist[2] = VertexInterp(isolevel, grid.p[2], grid.p[3], grid.val[2], grid.val[3]);
+    if (edgeTable[cubeindex] & 8) vertlist[3] = VertexInterp(isolevel, grid.p[3], grid.p[0], grid.val[3], grid.val[0]);
+    if (edgeTable[cubeindex] & 16) vertlist[4] = VertexInterp(isolevel, grid.p[4], grid.p[5], grid.val[4], grid.val[5]);
+    if (edgeTable[cubeindex] & 32) vertlist[5] = VertexInterp(isolevel, grid.p[5], grid.p[6], grid.val[5], grid.val[6]);
+    if (edgeTable[cubeindex] & 64) vertlist[6] = VertexInterp(isolevel, grid.p[6], grid.p[7], grid.val[6], grid.val[7]);
+    if (edgeTable[cubeindex] & 128)
+        vertlist[7] = VertexInterp(isolevel, grid.p[7], grid.p[4], grid.val[7], grid.val[4]);
+    if (edgeTable[cubeindex] & 256)
+        vertlist[8] = VertexInterp(isolevel, grid.p[0], grid.p[4], grid.val[0], grid.val[4]);
+    if (edgeTable[cubeindex] & 512)
+        vertlist[9] = VertexInterp(isolevel, grid.p[1], grid.p[5], grid.val[1], grid.val[5]);
+    if (edgeTable[cubeindex] & 1024)
+        vertlist[10] = VertexInterp(isolevel, grid.p[2], grid.p[6], grid.val[2], grid.val[6]);
+    if (edgeTable[cubeindex] & 2048)
+        vertlist[11] = VertexInterp(isolevel, grid.p[3], grid.p[7], grid.val[3], grid.val[7]);
+
+    /* Create the triangle */
+    ntriang = 0;
+    for (i = 0; triTable[cubeindex][i] != -1; i += 3) {
+        triangles[ntriang].p[0] = vertlist[triTable[cubeindex][i]];
+        triangles[ntriang].p[1] = vertlist[triTable[cubeindex][i + 1]];
+        triangles[ntriang].p[2] = vertlist[triTable[cubeindex][i + 2]];
+        ntriang++;
+    }
+
+    return ntriang;
+}
+
+void mcubes_method(torch::TensorAccessor<float, 3> vol, std::vector<XYZ> &vertices, std::vector<uint32_t> &faces,
+                   float threshold) {
+    // Marching cubes
+    static int indexTable[8] = { 0, 1, 4, 5, 3, 2, 7, 6 };
+
+    // Process all cells in parallel
+    std::vector<XYZ> all_vertices;
+
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+    for (int z = 0; z < vol.size(0) - 1; z++) {
+        std::vector<XYZ> sub_vertices;
+        for (int y = 0; y < vol.size(1) - 1; y++) {
+            for (int x = 0; x < vol.size(2) - 1; x++) {
+                // Process a single cell
+                GRIDCELL cell;
+                TRIANGLE tris[16];
+                for (int i = 0; i < 8; i++) {
+                    const int dx = i % 2;
+                    const int dy = (i / 2) % 2;
+                    const int dz = i / 4;
+
+                    cell.p[indexTable[i]] = XYZ(x + dx, y + dy, z + dz);
+                    cell.val[indexTable[i]] = vol[z + dz][y + dy][x + dx];
+                }
+
+                std::memset(tris, 0, sizeof(tris));
+                const int ntris = Polygonise(cell, threshold, tris);
+
+                for (int i = 0; i < ntris; i++) {
+                    for (int j = 0; j < 3; j++) {
+                        sub_vertices.push_back(tris[i].p[j]);
+                    }
+                }
+            }
+        }
+
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+        {
+            all_vertices.insert(all_vertices.end(), sub_vertices.begin(), sub_vertices.end());
+        }
+    }
+
+    // Unique vertices
+    std::unordered_map<XYZ, uint32_t> uniqueVertices;
+    for (const auto &v : all_vertices) {
+        if (uniqueVertices.count(v) == 0) {
+            uniqueVertices[v] = vertices.size();
+            vertices.push_back(v);
+        }
+        faces.push_back(uniqueVertices[v]);
+    }
+}
+
+std::vector<torch::Tensor> mcubes_cpu(torch::Tensor vol, float threshold) {
+    // Check input tensor
+    CHECK_CPU(vol);
+    CHECK_CONTIGUOUS(vol);
+    CHECK_N_DIM(vol, 3);
+
+    std::vector<XYZ> vertices;
+    std::vector<uint32_t> faces;
+    mcubes_method(vol.accessor<float, 3>(), vertices, faces, threshold);
+
+    const int Nv = (int)vertices.size();
+    const int Nf = (int)faces.size() / 3;
+    auto vert_tensor = torch::zeros({ Nv, 3 }, at::kFloat);
+    auto face_tensor = torch::zeros({ Nf, 3 }, at::kInt);
+
+    auto vert_accs = vert_tensor.accessor<float, 2>();
+    for (int i = 0; i < Nv; i++) {
+        vert_accs[i][0] = vertices[i].x;
+        vert_accs[i][1] = vertices[i].y;
+        vert_accs[i][2] = vertices[i].z;
+    }
+
+    auto face_accs = face_tensor.accessor<int, 2>();
+    for (int i = 0; i < Nf; i++) {
+        face_accs[i][0] = faces[i * 3 + 0];
+        face_accs[i][1] = faces[i * 3 + 1];
+        face_accs[i][2] = faces[i * 3 + 2];
+    }
+
+    return { vert_tensor, face_tensor };
+}
+```
+
+### cxx/mcubes_cuda.cu
+```
+#include <torch/extension.h>
+#include <ATen/ATen.h>
+#include <ATen/cuda/CUDAContext.h>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <thrust/device_ptr.h>
+#include <thrust/scan.h>
+
+#include <vector>
+
+#include "macros.h"
+#include "cuda_utils.h"
+
+static int edgeTable[256] = {
+    0x0,   0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x99,  0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x33,  0x13a, 0x636, 0x73f, 0x435, 0x53c, 0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0xaa,  0x7a6, 0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x66,  0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff,  0x3f5, 0x2fc, 0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55,  0x15c, 0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc,  0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc, 0xcc,  0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c, 0x15c, 0x55,  0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc, 0x2fc, 0x3f5, 0xff,  0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c, 0x36c, 0x265, 0x16f, 0x66,  0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa,  0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33,  0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99,  0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c, 0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0
+};
+
+static int triTable[256][16] = { { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+                                 { 8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1 },
+                                 { 3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1 },
+                                 { 4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+                                 { 4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1 },
+                                 { 9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1 },
+                                 { 10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1 },
+                                 { 5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+                                 { 5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1 },
+                                 { 8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1 },
+                                 { 2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+                                 { 2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1 },
+                                 { 11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1 },
+                                 { 5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1 },
+                                 { 11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1 },
+                                 { 11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1 },
+                                 { 2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1 },
+                                 { 6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+                                 { 3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1 },
+                                 { 6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+                                 { 6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1 },
+                                 { 8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1 },
+                                 { 7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1 },
+                                 { 3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+                                 { 0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1 },
+                                 { 9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1 },
+                                 { 8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+                                 { 5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1 },
+                                 { 0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1 },
+                                 { 6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1 },
+                                 { 10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+                                 { 1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1 },
+                                 { 0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1 },
+                                 { 3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+                                 { 6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1 },
+                                 { 9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1 },
+                                 { 8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1 },
+                                 { 3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1 },
+                                 { 10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1 },
+                                 { 10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+                                 { 2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1 },
+                                 { 7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+                                 { 2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1 },
+                                 { 1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1 },
+                                 { 11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1 },
+                                 { 8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1 },
+                                 { 0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1 },
+                                 { 7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1 },
+                                 { 7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1 },
+                                 { 10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1 },
+                                 { 0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1 },
+                                 { 7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1 },
+                                 { 6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1 },
+                                 { 4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1 },
+                                 { 10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1 },
+                                 { 8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1 },
+                                 { 1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1 },
+                                 { 10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1 },
+                                 { 10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1 },
+                                 { 9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1 },
+                                 { 7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1 },
+                                 { 3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1 },
+                                 { 7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1 },
+                                 { 3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1 },
+                                 { 6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1 },
+                                 { 9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1 },
+                                 { 1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1 },
+                                 { 4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1 },
+                                 { 7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1 },
+                                 { 6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1 },
+                                 { 0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1 },
+                                 { 6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1 },
+                                 { 0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1 },
+                                 { 11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1 },
+                                 { 6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1 },
+                                 { 5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1 },
+                                 { 9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1 },
+                                 { 1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1 },
+                                 { 10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1 },
+                                 { 0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1 },
+                                 { 11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1 },
+                                 { 9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1 },
+                                 { 7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1 },
+                                 { 2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1 },
+                                 { 9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1 },
+                                 { 9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1 },
+                                 { 1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1 },
+                                 { 0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1 },
+                                 { 10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1 },
+                                 { 2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1 },
+                                 { 0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1 },
+                                 { 0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1 },
+                                 { 9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1 },
+                                 { 5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1 },
+                                 { 5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1 },
+                                 { 8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1 },
+                                 { 9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1 },
+                                 { 1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1 },
+                                 { 3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1 },
+                                 { 4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1 },
+                                 { 9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1 },
+                                 { 11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1 },
+                                 { 2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1 },
+                                 { 9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1 },
+                                 { 3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1 },
+                                 { 1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1 },
+                                 { 4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1 },
+                                 { 0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1 },
+                                 { 1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { 0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+                                 { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 } };
+
+__device__ float3 vertexInterp(float isolevel, float3 p1, float3 p2, float valp1, float valp2) {
+    float mu;
+    float3 p;
+
+    if (fabsf(isolevel - valp1) < 1.0e-4f) {
+        return p1;
+    }
+
+    if (fabsf(isolevel - valp2) < 1.0e-4f) {
+        return p2;
+    }
+
+    if (fabsf(valp1 - valp2) < 1.0e-4f) {
+        return p1;
+    }
+
+    mu = (isolevel - valp1) / (valp2 - valp1);
+    p.x = p1.x + mu * (p2.x - p1.x);
+    p.y = p1.y + mu * (p2.y - p1.y);
+    p.z = p1.z + mu * (p2.z - p1.z);
+
+    return p;
+}
+
+__global__ void mcubes_cuda_kernel(const torch::PackedTensorAccessor64<float, 3, torch::RestrictPtrTraits> vol,
+                                   torch::PackedTensorAccessor64<float, 5, torch::RestrictPtrTraits> vertices,
+                                   torch::PackedTensorAccessor64<int, 3, torch::RestrictPtrTraits> ntris_in_cells,
+                                   int3 nGrids, float threshold,
+                                   const torch::PackedTensorAccessor64<int, 1, torch::RestrictPtrTraits> edgeTable,
+                                   const torch::PackedTensorAccessor64<int, 2, torch::RestrictPtrTraits> triTable) {
+    const int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    const int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    const int iz = blockIdx.z * blockDim.z + threadIdx.z;
+    if (ix >= nGrids.x - 1 || iy >= nGrids.y - 1 || iz >= nGrids.z - 1) {
+        return;
+    }
+
+    int cubeindex = 0;
+    int bits = 0;
+    float val[8];
+    float3 p[8];
+
+    int indexTable[8]{ 0, 1, 4, 5, 3, 2, 7, 6 };
+
+    for (int k = 0; k <= 1; k++) {
+        for (int j = 0; j <= 1; j++) {
+            for (int i = 0; i <= 1; i++) {
+                const int jx = ix + i;
+                const int jy = iy + j;
+                const int jz = iz + k;
+                if (vol[jz][jy][jx] < threshold) {
+                    cubeindex |= 0x01 << indexTable[bits];
+                }
+
+                val[indexTable[bits]] = vol[jz][jy][jx];
+                p[indexTable[bits]] = make_float3(jx, jy, jz);
+                bits += 1;
+            }
+        }
+    }
+
+    /* Find the vertices where the surface intersects the cube */
+    float3 vertlist[12];
+    if ((edgeTable[cubeindex] & 1) != 0) {
+        vertlist[0] = vertexInterp(threshold, p[0], p[1], val[0], val[1]);
+    }
+
+    if ((edgeTable[cubeindex] & 2) != 0) {
+        vertlist[1] = vertexInterp(threshold, p[1], p[2], val[1], val[2]);
+    }
+
+    if ((edgeTable[cubeindex] & 4) != 0) {
+        vertlist[2] = vertexInterp(threshold, p[2], p[3], val[2], val[3]);
+    }
+
+    if ((edgeTable[cubeindex] & 8) != 0) {
+        vertlist[3] = vertexInterp(threshold, p[3], p[0], val[3], val[0]);
+    }
+
+    if ((edgeTable[cubeindex] & 16) != 0) {
+        vertlist[4] = vertexInterp(threshold, p[4], p[5], val[4], val[5]);
+    }
+
+    if ((edgeTable[cubeindex] & 32) != 0) {
+        vertlist[5] = vertexInterp(threshold, p[5], p[6], val[5], val[6]);
+    }
+
+    if ((edgeTable[cubeindex] & 64) != 0) {
+        vertlist[6] = vertexInterp(threshold, p[6], p[7], val[6], val[7]);
+    }
+
+    if ((edgeTable[cubeindex] & 128) != 0) {
+        vertlist[7] = vertexInterp(threshold, p[7], p[4], val[7], val[4]);
+    }
+
+    if ((edgeTable[cubeindex] & 256) != 0) {
+        vertlist[8] = vertexInterp(threshold, p[0], p[4], val[0], val[4]);
+    }
+
+    if ((edgeTable[cubeindex] & 512) != 0) {
+        vertlist[9] = vertexInterp(threshold, p[1], p[5], val[1], val[5]);
+    }
+
+    if ((edgeTable[cubeindex] & 1024) != 0) {
+        vertlist[10] = vertexInterp(threshold, p[2], p[6], val[2], val[6]);
+    }
+
+    if ((edgeTable[cubeindex] & 2048) != 0) {
+        vertlist[11] = vertexInterp(threshold, p[3], p[7], val[3], val[7]);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        if (triTable[cubeindex][i * 3 + 0] >= 0) {
+            for (int k = 0; k < 3; k++) {
+                const float3 &v = vertlist[triTable[cubeindex][i * 3 + k]];
+                vertices[iz][iy][ix][i * 3 + k][0] = v.x;
+                vertices[iz][iy][ix][i * 3 + k][1] = v.y;
+                vertices[iz][iy][ix][i * 3 + k][2] = v.z;
+            }
+            ntris_in_cells[iz][iy][ix] += 1;
+        }
+    }
+}
+
+__global__ void compaction(const torch::PackedTensorAccessor64<float, 5, torch::RestrictPtrTraits> vertBuf,
+                           const torch::PackedTensorAccessor64<int, 3, torch::RestrictPtrTraits> ntris,
+                           const torch::PackedTensorAccessor64<int, 3, torch::RestrictPtrTraits> offsets, int3 nGrids,
+                           torch::PackedTensorAccessor64<float, 2, torch::RestrictPtrTraits> verts,
+                           torch::PackedTensorAccessor64<int, 2, torch::RestrictPtrTraits> faces) {
+    const int ix = blockIdx.x * blockDim.x + threadIdx.x;
+    const int iy = blockIdx.y * blockDim.y + threadIdx.y;
+    const int iz = blockIdx.z * blockDim.z + threadIdx.z;
+    const int index = (iz * nGrids.y + iy) * nGrids.x + ix;
+    const int size = nGrids.x * nGrids.y * nGrids.z;
+
+    if (index < size) {
+        const int start = offsets[iz][iy][ix];
+        const int n = ntris[iz][iy][ix];
+        for (int i = 0; i < n; i++) {
+            for (int k = 0; k < 3; k++) {
+                verts[(start + i) * 3 + k][0] = vertBuf[iz][iy][ix][i * 3 + k][0];
+                verts[(start + i) * 3 + k][1] = vertBuf[iz][iy][ix][i * 3 + k][1];
+                verts[(start + i) * 3 + k][2] = vertBuf[iz][iy][ix][i * 3 + k][2];
+                faces[start + i][k] = (start + i) * 3 + k;
+            }
+        }
+    }
+}
+
+std::vector<torch::Tensor> mcubes_cuda(torch::Tensor vol, float threshold) {
+    // Check input tensor
+    CHECK_CUDA(vol);
+    CHECK_CONTIGUOUS(vol);
+    CHECK_IS_FLOAT(vol);
+    CHECK_N_DIM(vol, 3);
+
+    // Transfer table data to device
+    torch::Tensor edgeTableTensor = torch::zeros({ 256 }, torch::TensorOptions().dtype(at::kInt).device(at::kCPU));
+    {
+        auto acsr = edgeTableTensor.accessor<int, 1>();
+        for (int i = 0; i < 256; i++) {
+            acsr[i] = edgeTable[i];
+        }
+    }
+    torch::Tensor edgeTableTensorCuda = edgeTableTensor.to(vol.device());
+
+    torch::Tensor triTableTensor = torch::zeros({ 256, 16 }, torch::TensorOptions().dtype(at::kInt).device(at::kCPU));
+    {
+        auto acsr = triTableTensor.accessor<int, 2>();
+        for (int i = 0; i < 256; i++) {
+            for (int j = 0; j < 16; j++) {
+                acsr[i][j] = triTable[i][j];
+            }
+        }
+    }
+    torch::Tensor triTableTensorCuda = triTableTensor.to(vol.device());
+
+    // Size parameters
+    const uint32_t Nx = vol.size(2);
+    const uint32_t Ny = vol.size(1);
+    const uint32_t Nz = vol.size(0);
+
+    const uint32_t BLOCK_SIZE = 8;
+    const uint32_t gridx = (Nx + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const uint32_t gridy = (Ny + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    const uint32_t gridz = (Nz + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    const dim3 blocks = { gridx, gridy, gridz };
+    const dim3 threads = { BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE };
+    const int3 nGrids = make_int3(Nx, Ny, Nz);
+
+    const int deviceId = vol.device().index();
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream(deviceId);
+
+    // Allocate vertex buffer
+    torch::Tensor vert_buffer = torch::zeros(
+        { Nz, Ny, Nx, 12, 3 }, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, deviceId));
+    torch::Tensor ntris_in_cells =
+        torch::zeros({ Nz, Ny, Nx }, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA, deviceId));
+    torch::Tensor offsets =
+        torch::zeros({ Nz, Ny, Nx }, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA, deviceId));
+
+    // Kernel call
+    cudaSetDevice(deviceId);
+    mcubes_cuda_kernel<<<blocks, threads, 0, stream>>>(
+        vol.packed_accessor64<float, 3, torch::RestrictPtrTraits>(),
+        vert_buffer.packed_accessor64<float, 5, torch::RestrictPtrTraits>(),
+        ntris_in_cells.packed_accessor64<int, 3, torch::RestrictPtrTraits>(), nGrids, threshold,
+        edgeTableTensorCuda.packed_accessor64<int, 1, torch::RestrictPtrTraits>(),
+        triTableTensorCuda.packed_accessor64<int, 2, torch::RestrictPtrTraits>());
+    CUDA_CHECK_ERRORS();
+    cudaDeviceSynchronize();
+
+    // Compute number of triangles
+    thrust::device_ptr<int> ntris_in_cells_ptr((int *)ntris_in_cells.data_ptr<int>());
+    thrust::device_ptr<int> offsets_ptr((int *)offsets.data_ptr<int>());
+    thrust::exclusive_scan(thrust::cuda::par.on(stream), ntris_in_cells_ptr,
+                           ntris_in_cells_ptr + ntris_in_cells.numel(), offsets_ptr);
+    CUDA_CHECK_ERRORS();
+    cudaDeviceSynchronize();
+
+    const int ntri_last = ntris_in_cells[Nz - 1][Ny - 1][Nx - 1].cpu().item<int>();
+    const int offset_last = offsets[Nz - 1][Ny - 1][Nx - 1].cpu().item<int>();
+    const int ntris = std::max(1, ntri_last + offset_last);
+
+    // Triangle list compaction
+    torch::Tensor verts =
+        torch::zeros({ ntris * 3, 3 }, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA, deviceId));
+    torch::Tensor faces =
+        torch::zeros({ ntris, 3 }, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA, deviceId));
+
+    cudaSetDevice(deviceId);
+    compaction<<<blocks, threads, 0, stream>>>(vert_buffer.packed_accessor64<float, 5, torch::RestrictPtrTraits>(),
+                                               ntris_in_cells.packed_accessor64<int, 3, torch::RestrictPtrTraits>(),
+                                               offsets.packed_accessor64<int, 3, torch::RestrictPtrTraits>(), nGrids,
+                                               verts.packed_accessor64<float, 2, torch::RestrictPtrTraits>(),
+                                               faces.packed_accessor64<int, 2, torch::RestrictPtrTraits>());
+    CUDA_CHECK_ERRORS();
+    cudaDeviceSynchronize();
+
+    return { verts, faces };
+}
+```
+
+### torchmcubes/__init__.py
+```
+import os
+import warnings
+
+
+__version__ = '0.1.0'
+
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+
+import torch
+import torchmcubes_module as mc
+
+
+# True when the extension module was compiled with CUDA kernels.
+HAS_CUDA = hasattr(mc, 'mcubes_cuda')
+
+
+def _warn_cpu_fallback() -> None:
+    warnings.warn(
+        'torchmcubes was built without CUDA support, so CUDA tensors are processed on the CPU '
+        'and the results are copied back to the original device. Rebuild torchmcubes in an '
+        'environment where the CUDA toolkit is available to run on the GPU.',
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+def marching_cubes(vol: torch.Tensor, thresh: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    vol: 3D torch tensor
+    thresh: threshold
+    """
+
+    if vol.is_cuda:
+        if HAS_CUDA:
+            return mc.mcubes_cuda(vol, thresh)
+        _warn_cpu_fallback()
+        verts, faces = mc.mcubes_cpu(vol.cpu(), thresh)
+        return verts.to(vol.device), faces.to(vol.device)
+    return mc.mcubes_cpu(vol, thresh)
+
+
+def grid_interp(vol: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+    """
+    Interpolate volume data at given points
+
+    Inputs:
+        vol: 4D torch tensor (C, Nz, Ny, Nx)
+        points: point locations (Np, 3)
+    Outputs:
+        output: interpolated data (Np, C)
+    """
+
+    if vol.is_cuda:
+        if HAS_CUDA:
+            return mc.grid_interp_cuda(vol, points)
+        _warn_cpu_fallback()
+        return mc.grid_interp_cpu(vol.cpu(), points.cpu()).to(vol.device)
+    return mc.grid_interp_cpu(vol, points)
+```

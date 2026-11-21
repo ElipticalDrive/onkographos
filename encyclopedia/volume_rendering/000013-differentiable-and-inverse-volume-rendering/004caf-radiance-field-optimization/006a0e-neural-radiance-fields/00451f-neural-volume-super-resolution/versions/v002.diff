@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -12,5 +12,5 @@
+ **Data Structures:**
+ The 3D scene representation uses four 2D feature planes [S1, unofficial]:
+-1. Three planes encode spatial scene features.
++1. Three planes encode spatial scene features [S1, unofficial].
+ 2. A fourth plane is added to enable view-direction dependency for the RGB values [S1, unofficial].
+ The representation model $G$ comprises a decoder model $D$ and learned feature planes $P_s$ corresponding to each scene $s$ [S1, unofficial].
+@@ -22,5 +22,5 @@
+ 
+ **Steps:**
+-1. **Learn Coarse Representation:** Train the scene representation model $G$ using the low-resolution images $I_{lr}$ and their poses. This yields parameters $\theta^G_s$ [S1, unofficial].
++1. **Learn Coarse Representation:** Train the scene representation model $G$ using the low-resolution images $I_{lr}$ and their poses [S1, unofficial].
+ 2. **Render Low-Resolution Views:** Render novel low-resolution views for new camera poses using the learned model [S1, unofficial]:
+    $$ \hat{i}_{lr}(\mathbf{r}) = G(\theta^G_s, \mathbf{r}) $$
+@@ -34,69 +34,59 @@
+ **Pseudocode:**
+ ```python
+-# NVSR Rendering and Training Pipeline
++import math
+ 
+-def render_lr(ray, scene_params):
+-    """
+-    Renders a low-resolution pixel value for a given ray and scene parameters.
+-    scene_params contains the 4 feature planes and decoder weights.
+-    """
+-    # 1. Sample points along the ray
+-    points = sample_points_along_ray(ray)
+-    
+-    # 2. Project points onto 2D feature planes to get features
+-    # Projects 3D point location onto three spatial planes and one view-dependent plane
+-    features = project_onto_feature_planes(points, scene_params.feature_planes, ray.direction)
+-    
+-    # 3. Decode features to density and color
+-    density, color = decode_features(features, scene_params.decoder)
+-    
+-    # 4. Volume rendering (accumulation)
+-    # Uses the standard emission-absorption model
++def sample_points_along_ray(origin, direction, near, far, num_samples):
++    """Returns N 3D points along the ray from near to far."""
++    t = [near + i * (far - near) / (num_samples - 1) for i in range(num_samples)]
++    return [[origin[d] + t[i]*direction[d] for d in range(3)] for i in range(num_samples)]
++
++def project_onto_feature_planes(points, feature_planes, view_direction):
++    """Projects 3D points onto 3 spatial planes and concatenates view direction."""
++    features = []
++    for point in points:
++        p_feat = [feature_planes[0][point[0]][point[1]],
++                  feature_planes[1][point[0]][point[2]],
++                  feature_planes[2][point[1]][point[2]]]
++        p_feat.extend(view_direction)
++        features.append(p_feat)
++    return features
++
++def decode_features(features, decoder_weights):
++    """Maps features to density (sigma) and RGB color via a small MLP."""
++    sigma = []
++    color = []
++    for f in features:
++        h = [max(0.0, sum(f[j]*decoder_weights['W1'][j][k] for j in range(len(f))) + decoder_weights['b1'][k]) for k in range(decoder_weights['W1'][0].__len__())]
++        s = math.log(1.0 + math.exp(sum(h[j]*decoder_weights['W2'][j] for j in range(len(h))) + decoder_weights['b2']))
++        c = [1.0 / (1.0 + math.exp(-(sum(h[j]*decoder_weights['W3'][j][k] for j in range(len(h))) + decoder_weights['b3'][k]))) for k in range(3)]
++        sigma.append(s)
++        color.append(c)
++    return sigma, color
++
++def render_ray(origin, direction, near, far, num_samples, feature_planes, decoder_weights):
++    """Standard volume rendering equation: C(r) = sum T_i (1 - exp(-sigma_i * delta)) c_i"""
++    points = sample_points_along_ray(origin, direction, near, far, num_samples)
++    features = project_onto_feature_planes(points, feature_planes, direction)
++    sigma, color = decode_features(features, decoder_weights)
++    delta = (far - near) / (num_samples - 1)
+     transmittance = 1.0
+-    accumulated_color = 0.0
+-    for i in range(len(points)):
+-        alpha = 1.0 - exp(-density[i] * step_size)
++    accumulated_color = [0.0, 0.0, 0.0]
++    for i in range(num_samples):
++        alpha = 1.0 - math.exp(-sigma[i] * delta)
+         transmittance *= (1.0 - alpha)
+-        accumulated_color += transmittance * alpha * color[i]
+-        
++        accumulated_color = [accumulated_color[k] + transmittance * alpha * color[i][k] for k in range(3)]
+     return accumulated_color
+ 
+-def super_resolve_features(feature_planes, sr_module):
+-    """
+-    Applies 2D convolutional super-resolution to the feature planes.
+-    """
+-    # Apply learned 2D SR module F to each of the 4 planes
+-    sr_planes = []
+-    for plane in feature_planes:
+-        sr_plane = sr_module(plane)
+-        sr_planes.append(sr_plane)
+-    return sr_planes
+-
+-def nvsr_train(lr_images, hr_images, camera_poses, sr_module):
+-    """
+-    End-to-end training of NVSR.
+-    """
+-    # Initialize scene representation G with random feature planes and decoder
+-    scene_params = initialize_scene_params()
+-    
+-    for epoch in epochs:
+-        for lr_img, hr_img, pose in zip(lr_images, hr_images, camera_poses):
+-            # 1. Render LR view
+-            lr_rendered = render_lr(pose, scene_params)
+-            
+-            # 2. Super-resolve the volumetric features
+-            sr_features = super_resolve_features(scene_params.feature_planes, sr_module)
+-            
+-            # 3. Create new scene params with SR features
+-            sr_scene_params = update_scene_params(scene_params, sr_features)
+-            
+-            # 4. Render SR view
+-            sr_rendered = render_lr(pose, sr_scene_params)
+-            
+-            # 5. Compute loss against HR ground truth
+-            loss = compute_loss(sr_rendered, hr_img)
+-            
+-            # 6. Backpropagate to update both scene params and SR module
+-            update_gradients(loss, [scene_params, sr_module])
++def train_nvsr(lr_images, hr_images, poses, sr_module, lr_feature_planes, lr_decoder):
++    """End-to-end training loop."""
++    theta_F = init_sr_module()
++    for epoch in range(100):
++        for lr_img, hr_img, pose in zip(lr_images, hr_images, poses):
++            sr_feature_planes = sr_module(lr_feature_planes, theta_F)
++            sr_rendered = render_ray(pose.origin, pose.direction, pose.near, pose.far, 128, sr_feature_planes, lr_decoder)
++            loss = sum((sr_rendered[k] - hr_img[k])**2 for k in range(3)) / 3.0
++            theta_F = [p - 0.001 * grad for p, grad in zip(theta_F, compute_gradient(loss, theta_F))]
++            lr_feature_planes = [p - 0.001 * grad for p, grad in zip(lr_feature_planes, compute_gradient(loss, lr_feature_planes))]
++    return sr_feature_planes, lr_decoder
+ ```
+ 

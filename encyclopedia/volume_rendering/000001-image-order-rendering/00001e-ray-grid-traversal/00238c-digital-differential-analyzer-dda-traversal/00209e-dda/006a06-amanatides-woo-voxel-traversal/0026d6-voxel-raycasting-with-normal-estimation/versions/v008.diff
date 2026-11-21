@@ -1,0 +1,580 @@
+--- v007.md
++++ v008.md
+@@ -1,350 +1,277 @@
+ # Voxel Raycasting with Normal Estimation
+ 
+-Also called: Amanatides and Woo algorithm, DDA Voxel Traversal, DDA-like voxel traversal, Digital Differential Analyzer voxel traversal, Parallel Ray Casting, Step-wise ray-sphere intersection for voxels, Voxel Raycasting via DDA, VoxelTrace
++Also called: Amanatides and Woo algorithm, Digital Differential Analyzer voxel traversal, Voxel Raycasting via DDA, DDA Voxel Traversal
+ 
+ ## Overview
+-Voxel Raycasting with Normal Estimation is a rendering approach where each ray is shot independently to pierce a data grid, allowing for parallel execution across CPU threads [S1, unofficial]. It solves the problem of efficiently tracing a ray through a voxel grid to find the first solid voxel hit by walking the grid directly, visiting only intersected cells, with $O(\text{max\_distance})$ complexity [S2, unofficial]. This method is more efficient than PhysX raycasts for voxel grids [S2, unofficial]. It differs from its parent method, [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md), by explicitly estimating the surface normal based on the direction of travel relative to the voxel grid axes at the point of intersection [S3, unofficial]. Unlike [Voxel Raycasting with DDA and Vertical Stripe Rendering](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md) which may optimize for specific rendering patterns, this method focuses on general-purpose first-hit detection with normal calculation suitable for lighting and collision [S3, unofficial].
++Voxel Raycasting with Normal Estimation is a method for tracing a ray through a voxel grid to find the first solid voxel hit, simultaneously estimating the surface normal based on the traversal direction relative to the grid axes [S2, S3, unofficial]. It solves the problem of efficiently querying sparse or dense voxel structures for collision, occlusion, or surface detection by walking the grid directly, visiting only intersected cells [S2, unofficial]. It differs from fixed-step raymarching by using precomputed distance-to-boundary parameters (`tMax`) to jump directly to the next voxel boundary, ensuring exactly one voxel is processed per step and eliminating redundant checks . It builds on [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md) by providing the core traversal mechanism that identifies the hit voxel and entry face, which are then used for normal estimation [S3, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Ray origin $O = (O_x, O_y, O_z)$ in world coordinates.
+-- Ray direction $D = (D_x, D_y, D_z)$, assumed normalized or scaled.
+-- Maximum ray distance $T_{max}$ (e.g., $6.0$ units) [S3, unofficial].
+-- Voxel grid data structure providing a function `solidAt(x, y, z)` returning true if the voxel at integer coordinates $(x, y, z)$ is occupied [S3, unofficial].
+-- Epsilon $\epsilon$ for degenerate ray detection (e.g., $0.0001$) [S2, unofficial].
+-
+-**Outputs:**
+-- Boolean indicating if a hit was found.
+-- Hit position $P_{hit}$ (integer voxel coordinates or interpolated position).
+-- Surface normal $N$ estimated at the hit point.
++**Inputs:** Ray origin $O$, ray direction $D$ (normalized), maximum ray distance $maxDist$, voxel grid occupancy data, and an epsilon constant $\epsilon$ for degenerate ray detection [S2, S3, S4, unofficial].
++**Outputs:** Boolean hit status, hit position $P$, and surface normal $N$ [S3, S4, unofficial].
+ 
+ **Data Structures:**
+-- The voxel grid is typically stored as a sparse or dense array. For the traversal logic, direct access to `solidAt(x,y,z)` is required.
+-- Variables:
+-  - `voxel`: `Vector3Int` representing the current voxel coordinates $(v_x, v_y, v_z)$.
+-  - `delta`: `Vector3` representing the distance along the ray to the next voxel boundary on each axis.
+-  - `stepSize`: `Vector3` representing the reciprocal of the absolute ray direction components, used to advance `delta`.
+-  - `step`: `Vector3Int` representing the direction of travel on each axis ($+1$ or $-1$).
++*   `Ray`: Contains `origin` (Vec3), `direction` (Vec3), `maxDistance` (float).
++*   `VoxelGrid`: Provides a function `isSolid(x, y, z)` returning boolean [S3, unofficial].
++*   `HitResult`: Contains `hit` (bool), `point` (Vec3), `normal` (Vec3) [S3, S4, unofficial].
++
++**Parameters:**
++*   $\epsilon = 0.0001$ [S2, unofficial].
++*   $maxDist = 6.0$ (typical, scene-dependent) [S3, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Degeneracy Check:**
+-    Calculate the squared magnitude of the ray direction vector $L = D \cdot T_{max}$ (or just $D$ if normalized). If $|L|^2 < \epsilon^2$, the ray is degenerate. Return `false` [S2, unofficial].
+-
++1.  **Degenerate Ray Check:** Calculate squared magnitude $|D|^2$. If $|D|^2 < \epsilon$, return no hit [S2, unofficial].
+ 2.  **Initialization:**
+-    - Convert ray origin to local chunk/grid coordinates if necessary: $Start = \text{WorldToLocal}(O)$ [S2, unofficial].
+-    - Determine the starting voxel index:
+-      $$v_x = \lfloor Start_x \rfloor, \quad v_y = \lfloor Start_y \rfloor, \quad v_z = \lfloor Start_z \rfloor$$
+-      Using `Mathf.FloorToInt` or equivalent floor function [S2, unofficial].
+-    - Determine step direction for each axis:
+-      $$step_x = \text{sign}(D_x), \quad step_y = \text{sign}(D_y), \quad step_z = \text{sign}(D_z)$$
+-      Where $\text{sign}(d) = 1$ if $d > 0$, $-1$ if $d < 0$, and $0$ if $d = 0$ [S2, unofficial].
+-    - Compute step size (reciprocal of ray direction magnitude per axis):
+-      For each axis $i \in \{x, y, z\}$:
+-      If $|L_i| > \epsilon$:
+-      $$stepSize_i = \frac{1}{|L_i|}$$
+-      Else:
+-      $$stepSize_i = \infty \quad (\text{or float.MaxValue})$$
+-      This excludes axes where the ray is parallel to the grid planes [S2, unofficial].
+-    - Initialize delta (distance to first boundary):
+-      Initialize $delta_x, delta_y, delta_z = \infty$.
+-      For each axis $i$ where $step_i \neq 0$:
+-      If $step_i > 0$:
+-      $$delta_i = ((v_i + 1) - Start_i) \cdot stepSize_i$$
+-      Else ($step_i < 0$):
+-      $$delta_i = (Start_i - v_i) \cdot stepSize_i$$
+-      This calculates the distance along the ray to the next integer grid boundary in the direction of travel [S2, unofficial].
+-
+-3.  **Check Starting Voxel:**
+-    If the starting voxel $(v_x, v_y, v_z)$ is within the grid bounds and `solidAt(v_x, v_y, v_z)` is true:
+-    - Calculate the entry normal. The normal is determined by finding the closest face based on the ray direction and local position within the voxel. Typically, this corresponds to the axis with the largest component of the ray direction, inverted.
+-    - Return `true` with the hit position and this normal [S2, unofficial].
+-
+-4.  **Main DDA Loop:**
+-    Loop while $t < T_{max}$ (where $t$ is the accumulated distance along the ray, tracked implicitly or explicitly):
+-    - Compare $delta_x, delta_y, delta_z$.
+-    - Identify the smallest delta. Tie-breaking priority is typically $X > Y > Z$ (i.e., if $delta_x == delta_y$, choose X) [S2, unofficial].
+-    - **Case X:** If $delta_x \le delta_y$ and $delta_x \le delta_z$:
+-      - Increment voxel: $v_x \leftarrow v_x + step_x$.
+-      - Advance delta: $delta_x \leftarrow delta_x + stepSize_x$.
+-      - Set tentative normal: $N = (-step_x, 0, 0)$ [S2, unofficial].
+-    - **Case Y:** Else if $delta_y \le delta_z$:
+-      - Increment voxel: $v_y \leftarrow v_y + step_y$.
+-      - Advance delta: $delta_y \leftarrow delta_y + stepSize_y$.
+-      - Set tentative normal: $N = (0, -step_y, 0)$ [S2, unofficial].
+-    - **Case Z:** Else:
+-      - Increment voxel: $v_z \leftarrow v_z + step_z$.
+-      - Advance delta: $delta_z \leftarrow delta_z + stepSize_z$.
+-      - Set tentative normal: $N = (0, 0, -step_z)$ [S2, unofficial].
+-    - Check bounds. If $(v_x, v_y, v_z)$ is out of grid bounds, return `false`.
+-    - Check for solid voxel: If `solidAt(v_x, v_y, v_z)` is true:
+-      - A hit is found. Proceed to Normal Estimation.
+-
+-5.  **Normal Estimation:**
+-    The normal is estimated based on the displacement vector $diff$ between the previous step position and the current step position [S3, unofficial].
+-    - Let $P_{prev}$ be the position in the previous voxel (or entry point).
+-    - Let $P_{curr}$ be the position in the current voxel (or hit point).
+-    - Calculate displacement: $diff = P_{curr} - P_{prev}$ [S3, unofficial].
+-    - Estimate normal by comparing absolute components of $diff$:
+-      - If $|diff_x| > |diff_y|$ and $|diff_x| > |diff_z|$:
+-        $$N = (\text{sign}(diff_x) \cdot -1, 0, 0)$$
+-        Specifically: $N_x = -1$ if $diff_x > 0$, else $1$ [S3, unofficial].
+-      - Else if $|diff_y| > |diff_z|$:
+-        $$N = (0, \text{sign}(diff_y) \cdot -1, 0)$$
+-        Specifically: $N_y = -1$ if $diff_y > 0$, else $1$ [S3, unofficial].
+-      - Else:
+-        $$N = (0, 0, \text{sign}(diff_z) \cdot -1)$$
+-        Specifically: $N_z = -1$ if $diff_z > 0$, else $1$ [S3, unofficial].
+-    - Return `true` with hit position and estimated normal [S3, unofficial].
+-
+-6.  **Termination:**
+-    If the loop completes without hitting a solid voxel (i.e., $t \ge T_{max}$), return `false` [S3, unofficial].
++    *   Compute step direction vector $S$:
++        $$ S_x = \text{sign}(D_x), \quad S_y = \text{sign}(D_y), \quad S_z = \text{sign}(D_z) $$
++        Where $\text{sign}(v) = 1$ if $v > 0$, $-1$ if $v < 0$, and $0$ if $v = 0$ [S2, unofficial].
++    *   Compute step size (reciprocal of direction magnitude):
++        $$ \Delta T_x = \begin{cases} 1/|D_x| & \text{if } |D_x| > \epsilon \\ \infty & \text{otherwise} \end{cases} $$
++        $$ \Delta T_y = \begin{cases} 1/|D_y| & \text{if } |D_y| > \epsilon \\ \infty & \text{otherwise} \end{cases} $$
++        $$ \Delta T_z = \begin{cases} 1/|D_z| & \text{if } |D_z| > \epsilon \\ \infty & \text{otherwise} \end{cases} $$
++        [S2, unofficial].
++    *   Determine starting voxel coordinates:
++        $$ V_x = \lfloor O_x \rfloor, \quad V_y = \lfloor O_y \rfloor, \quad V_z = \lfloor O_z \rfloor $$
++        [S2, S3, unofficial].
++    *   Initialize distance to next boundary ($T_{max}$) for each axis:
++        $$ T_{max_x} = \begin{cases} (V_x + 1 - O_x) \Delta T_x & \text{if } S_x = 1 \\ (O_x - V_x) \Delta T_x & \text{if } S_x = -1 \\ \infty & \text{if } S_x = 0 \end{cases} $$
++        $$ T_{max_y} = \begin{cases} (V_y + 1 - O_y) \Delta T_y & \text{if } S_y = 1 \\ (O_y - V_y) \Delta T_y & \text{if } S_y = -1 \\ \infty & \text{if } S_y = 0 \end{cases} $$
++        $$ T_{max_z} = \begin{cases} (V_z + 1 - O_z) \Delta T_z & \text{if } S_z = 1 \\ (O_z - V_z) \Delta T_z & \text{if } S_z = -1 \\ \infty & \text{if } S_z = 0 \end{cases} $$
++        [S2, unofficial].
++    *   Initialize previous position $P_{prev} = O$ [S3, unofficial].
++
++3.  **Immediate Hit Check:** Check if the starting voxel $(V_x, V_y, V_z)$ is solid. If yes, calculate the entry normal based on the closest face (determined by ray direction and local position within the voxel) and return the hit [S2, unofficial]. *Note: Standard Amanatides-Woo traversal assumes the ray starts outside or handles the start voxel separately; if the start voxel is solid, the normal is typically the face opposite to the dominant direction component of the ray if entering from inside, or the face corresponding to the first boundary crossed if considering the ray origin as the entry point. For simplicity in this "first hit" context, if the start voxel is solid, we treat it as the hit.* [S2, S3, unofficial].
++
++4.  **DDA Loop:** While $T_{max_x} < maxDist$, $T_{max_y} < maxDist$, and $T_{max_z} < maxDist$:
++    *   Find the minimum $T_{max}$ among $T_{max_x}, T_{max_y}, T_{max_z}$. Tie-breaking priority: X > Y > Z [S2, unofficial].
++    *   Update previous position: $P_{prev} = P_{curr}$ (where $P_{curr}$ is the current ray position, implicitly tracked by the loop progress).
++    *   Advance the voxel index along the axis with the minimum $T_{max}$:
++        *   If $T_{max_x}$ is smallest: $V_x \leftarrow V_x + S_x$, $T_{max_x} \leftarrow T_{max_x} + \Delta T_x$. Normal candidate $N_{cand} = (-S_x, 0, 0)$.
++        *   Else if $T_{max_y}$ is smallest: $V_y \leftarrow V_y + S_y$, $T_{max_y} \leftarrow T_{max_y} + \Delta T_y$. Normal candidate $N_{cand} = (0, -S_y, 0)$.
++        *   Else: $V_z \leftarrow V_z + S_z$, $T_{max_z} \leftarrow T_{max_z} + \Delta T_z$. Normal candidate $N_{cand} = (0, 0, -S_z)$.
++    *   Check if the new voxel $(V_x, V_y, V_z)$ is solid [S2, S3, unofficial].
++    *   If solid:
++        *   Calculate displacement vector $Diff = P_{curr} - P_{prev}$ [S3, unofficial].
++        *   Estimate normal $N$ by comparing absolute components of $Diff$:
++            *   If $|Diff_x| > |Diff_y|$ and $|Diff_x| > |Diff_z|$: $N = (\text{sign}(Diff_x) \cdot -1, 0, 0)$? No, the source says: if $Diff_x > 0$, normal is $(-1, 0, 0)$, else $(1, 0, 0)$. This matches $-S_x$ if $S_x$ is the step direction. Let's stick to the source formula:
++                $$ N = \begin{cases} (-1, 0, 0) & \text{if } Diff_x > 0 \\ (1, 0, 0) & \text{if } Diff_x < 0 \end{cases} $$
++            *   Else if $|Diff_y| > |Diff_z|$:
++                $$ N = \begin{cases} (0, -1, 0) & \text{if } Diff_y > 0 \\ (0, 1, 0) & \text{if } Diff_y < 0 \end{cases} $$
++            *   Else:
++                $$ N = \begin{cases} (0, 0, -1) & \text{if } Diff_z > 0 \\ (0, 0, 1) & \text{if } Diff_z < 0 \end{cases} $$
++        *   Return hit with position $P_{curr}$ and normal $N$ [S3, unofficial].
++    *   If not solid, continue loop.
++
++5.  **Termination:** If the loop completes without hitting a solid voxel, return no hit [S3, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def voxel_raycast_with_normal_estimation(origin, direction, max_dist, solid_at, epsilon=0.0001):
++import math
++
++def voxel_raycast_with_normal_estimation(origin, direction, max_dist, is_solid, epsilon=0.0001):
+     """
+-    Performs a voxel raycast using DDA traversal and estimates the normal.
++    Traces a ray through a voxel grid to find the first solid voxel and estimate its normal.
+     
+     Args:
+-        origin: Vec3, ray origin.
+-        direction: Vec3, ray direction.
+-        max_dist: float, maximum ray length.
+-        solid_at: function, solid_at(x, y, z) returns True if voxel is solid.
+-        epsilon: float, threshold for degenerate rays.
++        origin (Vec3): Ray origin.
++        direction (Vec3): Ray direction (assumed normalized).
++        max_dist (float): Maximum ray length.
++        is_solid (function): Function taking (x, y, z) integers, returning True if voxel is solid.
++        epsilon (float): Threshold for degenerate rays.
+         
+     Returns:
+-        tuple: (hit: bool, position: Vec3, normal: Vec3)
++        dict: {'hit': bool, 'point': Vec3, 'normal': Vec3}
+     """
+-    # Scale direction by max_dist to get ray vector L
+-    # Note: Some implementations use normalized direction and track t. 
+-    # Based on [S2, unofficial], L = ray.direction * distance is used for stepSize calculation.
+-    L = direction * max_dist
+-    
+-    # Degeneracy check
+-    if L.x**2 + L.y**2 + L.z**2 < epsilon**2:
+-        return (False, None, None)
+-    
+-    # Convert origin to local chunk coordinates if needed
+-    # Assuming origin is already in grid coordinates for simplicity
+-    start_x, start_y, start_z = origin.x, origin.y, origin.z
+-    
+-    # Determine starting voxel
+-    voxel_x = floor(start_x)
+-    voxel_y = floor(start_y)
+-    voxel_z = floor(start_z)
+-    
+-    # Determine step direction
+-    step_x = 1 if L.x > 0 else (-1 if L.x < 0 else 0)
+-    step_y = 1 if L.y > 0 else (-1 if L.y < 0 else 0)
+-    step_z = 1 if L.z > 0 else (-1 if L.z < 0 else 0)
+-    
+-    # Compute step size (reciprocal of absolute L components)
+-    step_size_x = 1.0 / abs(L.x) if abs(L.x) > epsilon else float('inf')
+-    step_size_y = 1.0 / abs(L.y) if abs(L.y) > epsilon else float('inf')
+-    step_size_z = 1.0 / abs(L.z) if abs(L.z) > epsilon else float('inf')
+-    
+-    # Initialize delta (distance to next boundary)
+-    delta_x = float('inf')
+-    delta_y = float('inf')
+-    delta_z = float('inf')
+-    
+-    if step_x != 0:
+-        if step_x > 0:
+-            delta_x = ((voxel_x + 1) - start_x) * step_size_x
+-        else:
+-            delta_x = (start_x - voxel_x) * step_size_x
+-            
+-    if step_y != 0:
+-        if step_y > 0:
+-            delta_y = ((voxel_y + 1) - start_y) * step_size_y
+-        else:
+-            delta_y = (start_y - voxel_y) * step_size_y
+-            
+-    if step_z != 0:
+-        if step_z > 0:
+-            delta_z = ((voxel_z + 1) - start_z) * step_size_z
+-        else:
+-            delta_z = (start_z - voxel_z) * step_size_z
+-            
+-    # Check starting voxel
+-    if is_in_bounds(voxel_x, voxel_y, voxel_z) and solid_at(voxel_x, voxel_y, voxel_z):
+-        # Calculate entry normal based on ray direction and local position
+-        # Simplified: normal is opposite to the dominant direction of entry
+-        # [S2, unofficial] mentions finding closest face based on ray direction
+-        # For implementation, we can use the step direction of the dominant axis
+-        # However, [S3, unofficial] uses diff for normal estimation later. 
+-        # For initial hit, we might use the same logic or a simplified version.
+-        # Let's assume the same logic applies or use the step of the axis we entered from.
+-        # Since we are already inside, we need the face normal of the entry.
+-        # This is complex without explicit entry point. 
+-        # Fallback: Use the step direction of the axis with largest |L| component?
+-        # Or simply return the step direction inverted? 
+-        # [S2, unofficial] says "calculate the entry normal by finding the closest face".
+-        # We will use the logic from [S3, unofficial] adapted for the initial step if possible,
+-        # or assume the ray enters from the direction of the dominant axis.
+-        # For now, let's use the dominant axis of L.
+-        abs_l = [abs(L.x), abs(L.y), abs(L.z)]
+-        max_idx = argmax(abs_l)
+-        if max_idx == 0:
++    # 1. Degenerate Ray Check
++    dir_sq = direction.x**2 + direction.y**2 + direction.z**2
++    if dir_sq < epsilon:
++        return {'hit': False, 'point': None, 'normal': None}
++
++    # 2. Initialization
++    # Step direction
++    step_x = 1 if direction.x > 0 else (-1 if direction.x < 0 else 0)
++    step_y = 1 if direction.y > 0 else (-1 if direction.y < 0 else 0)
++    step_z = 1 if direction.z > 0 else (-1 if direction.z < 0 else 0)
++
++    # Step size (reciprocal of direction magnitude)
++    abs_dx = abs(direction.x)
++    abs_dy = abs(direction.y)
++    abs_dz = abs(direction.z)
++
++    delta_t_x = (1.0 / abs_dx) if abs_dx > epsilon else float('inf')
++    delta_t_y = (1.0 / abs_dy) if abs_dy > epsilon else float('inf')
++    delta_t_z = (1.0 / abs_dz) if abs_dz > epsilon else float('inf')
++
++    # Starting voxel
++    voxel_x = math.floor(origin.x)
++    voxel_y = math.floor(origin.y)
++    voxel_z = math.floor(origin.z)
++
++    # Distance to next boundary
++    if step_x == 1:
++        t_max_x = (voxel_x + 1.0 - origin.x) * delta_t_x
++    elif step_x == -1:
++        t_max_x = (origin.x - voxel_x) * delta_t_x
++    else:
++        t_max_x = float('inf')
++
++    if step_y == 1:
++        t_max_y = (voxel_y + 1.0 - origin.y) * delta_t_y
++    elif step_y == -1:
++        t_max_y = (origin.y - voxel_y) * delta_t_y
++    else:
++        t_max_y = float('inf')
++
++    if step_z == 1:
++        t_max_z = (voxel_z + 1.0 - origin.z) * delta_t_z
++    elif step_z == -1:
++        t_max_z = (origin.z - voxel_z) * delta_t_z
++    else:
++        t_max_z = float('inf')
++
++    # 3. Immediate Hit Check
++    if is_solid(voxel_x, voxel_y, voxel_z):
++        # Estimate normal for start voxel based on ray direction
++        # If entering from outside, normal is opposite to dominant direction component
++        # If inside, this logic might need refinement, but standard DDA assumes start is outside or handled.
++        # For "first hit" from origin, if origin is inside solid, we return immediately.
++        # Normal estimation for immediate hit: closest face.
++        abs_step_x = abs(step_x)
++        abs_step_y = abs(step_y)
++        abs_step_z = abs(step_z)
++        
++        # Determine closest face based on ray direction relative to voxel center?
++        # Source [S2, unofficial] says "closest face based on ray direction and local position".
++        # Simplified: if ray is moving +X, normal is -X.
++        normal = Vec3(-step_x, -step_y, -step_z)
++        # Normalize to axis-aligned
++        if abs(direction.x) > abs(direction.y) and abs(direction.x) > abs(direction.z):
+             normal = Vec3(-step_x, 0, 0)
+-        elif max_idx == 1:
++        elif abs(direction.y) > abs(direction.z):
+             normal = Vec3(0, -step_y, 0)
+         else:
+             normal = Vec3(0, 0, -step_z)
+-        return (True, Vec3(voxel_x, voxel_y, voxel_z), normal)
+-
+-    # Previous position for normal estimation
++            
++        return {'hit': True, 'point': origin, 'normal': normal}
++
+     prev_pos = origin
+-    
+-    # Main DDA loop
+-    # We track accumulated distance t implicitly via delta comparisons
+-    # But we need to know when t > max_dist. 
+-    # Since delta is scaled by max_dist in L, delta values are in [0, 1] relative to max_dist?
+-    # No, delta is distance along ray. If L is scaled by max_dist, then delta is scaled by max_dist.
+-    # So we compare delta to max_dist? No, delta is the distance to the NEXT boundary.
+-    # The current distance along ray is not directly stored.
+-    # However, we can track t.
+-    t = 0.0
+-    
+-    while t < max_dist:
+-        # Find smallest delta
+-        if delta_x <= delta_y and delta_x <= delta_z:
+-            # Step X
++    curr_pos = origin
++
++    # 4. DDA Loop
++    while t_max_x < max_dist and t_max_y < max_dist and t_max_z < max_dist:
++        # Find minimum t_max
++        if t_max_x <= t_max_y and t_max_x <= t_max_z:
++            # Advance X
+             voxel_x += step_x
+-            delta_x += step_size_x
+-            # Normal for this step (face normal)
+-            # [S2, unofficial] sets normal to (-step.x, 0, 0)
+-            # But [S3, unofficial] uses diff. We will store the step info for diff calculation.
+-            step_axis = 0
+-        elif delta_y <= delta_z:
+-            # Step Y
++            t_max_x += delta_t_x
++            axis = 'x'
++        elif t_max_y <= t_max_z:
++            # Advance Y
+             voxel_y += step_y
+-            delta_y += step_size_y
+-            step_axis = 1
++            t_max_y += delta_t_y
++            axis = 'y'
+         else:
+-            # Step Z
++            # Advance Z
+             voxel_z += step_z
+-            delta_z += step_size_z
+-            step_axis = 2
++            t_max_z += delta_t_z
++            axis = 'z'
++        
++        # Update current position (approximate, using t_max of the axis just crossed)
++        # In a strict DDA, we track t. Here we can compute point from t_max.
++        # However, for normal estimation, we need the displacement from prev_pos.
++        # Let's compute the intersection point for the axis that was crossed.
++        if axis == 'x':
++            t = t_max_x - delta_t_x # The t value at the start of this step
++            # Actually, t_max_x is the t value AT the boundary.
++            # The point at the boundary is:
++            curr_pos = Vec3(
++                origin.x + direction.x * t_max_x,
++                origin.y + direction.y * t_max_x,
++                origin.z + direction.z * t_max_x
++            )
++        elif axis == 'y':
++            t = t_max_y - delta_t_y
++            curr_pos = Vec3(
++                origin.x + direction.x * t_max_y,
++                origin.y + direction.y * t_max_y,
++                origin.z + direction.z * t_max_y
++            )
++        else:
++            t = t_max_z - delta_t_z
++            curr_pos = Vec3(
++                origin.x + direction.x * t_max_z,
++                origin.y + direction.y * t_max_z,
++                origin.z + direction.z * t_max_z
++            )
++
++        # Check occupancy
++        if is_solid(voxel_x, voxel_y, voxel_z):
++            # 5. Normal Estimation
++            diff = curr_pos - prev_pos
++            abs_diff_x = abs(diff.x)
++            abs_diff_y = abs(diff.y)
++            abs_diff_z = abs(diff.z)
++
++            if abs_diff_x > abs_diff_y and abs_diff_x > abs_diff_z:
++                if diff.x > 0:
++                    normal = Vec3(-1, 0, 0)
++                else:
++                    normal = Vec3(1, 0, 0)
++            elif abs_diff_y > abs_diff_z:
++                if diff.y > 0:
++                    normal = Vec3(0, -1, 0)
++                else:
++                    normal = Vec3(0, 1, 0)
++            else:
++                if diff.z > 0:
++                    normal = Vec3(0, 0, -1)
++                else:
++                    normal = Vec3(0, 0, 1)
+             
+-        # Update t? 
+-        # The actual distance traveled to this boundary is not simply delta.
+-        # However, for the loop condition, we can check if the current delta exceeds max_dist?
+-        # No, delta is distance to NEXT boundary. The distance to CURRENT boundary was delta_prev.
+-        # We need to track t explicitly.
+-        # Let's assume t is updated by the smallest delta from the previous iteration.
+-        # This is tricky. Let's use a simpler approach: 
+-        # If we are using L = D * max_dist, then the ray parameter t is in [0, 1] if D is normalized?
+-        # No, L is the vector. The distance along the ray is |L| * t_param.
+-        # Let's stick to the [S2, unofficial] logic which doesn't explicitly track t in the loop but relies on delta.
+-        # Actually, [S2, unofficial] doesn't show a t loop variable. It just loops "While true".
+-        # We need a termination condition. 
+-        # If delta_x, delta_y, delta_z all exceed max_dist (scaled?), we are done.
+-        # But delta is distance along ray. If L is scaled by max_dist, then delta is in units of max_dist?
+-        # No, stepSize = 1/|L|. If L is scaled by max_dist, stepSize is 1/(|D|*max_dist).
+-        # So delta is distance / max_dist? No.
+-        # Let's assume standard DDA where t is tracked.
+-        
+-        # Check bounds
+-        if not is_in_bounds(voxel_x, voxel_y, voxel_z):
+-            return (False, None, None)
+-            
+-        # Check solid
+-        if solid_at(voxel_x, voxel_y, voxel_z):
+-            # Hit found
+-            # Estimate normal using diff
+-            curr_pos = Vec3(voxel_x, voxel_y, voxel_z) # Or interpolated position?
+-            # [S3, unofficial] uses pos = origin + dir * t. 
+-            # We don't have t here easily. 
+-            # Let's approximate curr_pos as the voxel center or corner?
+-            # [S3, unofficial] sets hitPos = {x, y, z}.
+-            hit_pos = Vec3(voxel_x, voxel_y, voxel_z)
+-            
+-            diff = hit_pos - prev_pos
+-            
+-            # Normal estimation
+-            if abs(diff.x) > abs(diff.y) and abs(diff.x) > abs(diff.z):
+-                normal = Vec3(-1.0 if diff.x > 0 else 1.0, 0.0, 0.0)
+-            elif abs(diff.y) > abs(diff.z):
+-                normal = Vec3(0.0, -1.0 if diff.y > 0 else 1.0, 0.0)
+-            else:
+-                normal = Vec3(0.0, 0.0, -1.0 if diff.z > 0 else 1.0)
+-                
+-            return (True, hit_pos, normal)
+-            
+-        prev_pos = hit_pos # Update prev_pos for next iteration? 
+-        # Wait, prev_pos should be the position of the previous voxel.
+-        # In the loop, we just moved to a new voxel.
+-        # So prev_pos should be the voxel we just left?
+-        # [S3, unofficial] says diff = pos - prev. pos is current, prev is previous.
+-        # So we need to store the previous voxel position.
+-        
+-        # Update t?
+-        # If we don't track t, we might loop forever if there are no solid voxels.
+-        # We need to check if we have exceeded max_dist.
+-        # Since delta is distance to next boundary, if the smallest delta > remaining distance, we stop.
+-        # But we don't track remaining distance.
+-        # Let's assume the loop runs for a fixed number of steps or until delta > max_dist.
+-        # If L is scaled by max_dist, then delta values are scaled by max_dist?
+-        # No, stepSize = 1/|L|. If L is large, stepSize is small.
+-        # delta = distance_to_boundary * stepSize? No.
+-        # delta = (boundary - start) * stepSize.
+-        # If L = D * max_dist, then stepSize = 1/(|D|*max_dist).
+-        # delta = (boundary - start) / (|D|*max_dist).
+-        # This is not distance. It is a normalized parameter?
+-        # This is confusing. Let's assume standard DDA with t.
+-        
+-        # Revised Loop Condition:
+-        # We need to track t.
+-        # t += min(delta_x, delta_y, delta_z) ? No, delta is distance to NEXT boundary.
+-        # The distance to the CURRENT boundary (which we just crossed) was the min delta from the PREVIOUS step.
+-        # So we should add the min delta of the previous step to t.
+-        
+-        # Let's restructure the loop to track t.
+-        pass # Placeholder for t tracking logic which is not fully explicit in sources.
+-        
+-    return (False, None, None)
+-
+-def is_in_bounds(x, y, z):
+-    # Check if voxel is within grid bounds
+-    # Not given in the sources. [G]
+-    return True # Placeholder
++            return {'hit': True, 'point': curr_pos, 'normal': normal}
++        
++        prev_pos = curr_pos
++
++    return {'hit': False, 'point': None, 'normal': None}
++
++class Vec3:
++    def __init__(self, x, y, z):
++        self.x = x
++        self.y = y
++        self.z = z
++    def __sub__(self, other):
++        return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Degenerate Rays:** If the ray direction magnitude is near zero, the algorithm returns immediately to avoid division by zero or NaN issues [S2, unofficial].
+-- **Large Step Size:** If the step size (increment in the loop) is large relative to voxel size, the normal estimation based on displacement `diff` may be inaccurate. The ray might pass through a corner, and the assumption that the normal corresponds to the largest component of `diff` may fail [S3, unofficial].
+-- **Tie-Breaking:** When delta values are equal, the priority X > Y > Z must be consistent to avoid infinite loops or missed voxels [S2, unofficial].
+-- **OpenMP Variables:** Incorrect management of inner loop variables (distinguishing between loop variables and invariants) in parallel implementations can cause errors [S1, unofficial].
++*   **Degenerate Rays:** Rays with zero or near-zero direction components must be handled to avoid division by zero or infinite loops [S2, S4, unofficial].
++*   **Axis-Aligned Rays:** If a direction component is exactly 0, the corresponding `step` and `delta_t` are handled as 0 and infinity respectively, skipping traversal on that axis [S4, unofficial].
++*   **Normal Accuracy:** Normal estimation relies on the displacement vector between steps. If the step size is large relative to voxel size, or if the ray passes through a corner, the normal may be inaccurate or incorrectly axis-aligned [S3, unofficial]. The method assumes the ray enters the voxel face corresponding to the largest component of the displacement vector [S3, unofficial].
++*   **Precision:** Floating-point precision errors in `t_max` accumulation can cause jitter or missed voxels in long rays. Using double precision or periodic re-normalization of `t_max` may be required [G].
+ 
+ ## Subtopics
+ 
+ ### [DN_step_map](8596-dn-step-map.md)
+-A voxel grid traversal algorithm that determines the sequence of voxels intersected by a ray without performing explicit intersection tests with voxel faces. It differs from fixed-step raymarching by using precomputed distance-to-boundary parameters (`tMax`) to jump directly to the next voxel boundary, ensuring exactly one voxel is processed per step and eliminating redundant checks.
++A traversal algorithm that determines the sequence of voxels intersected by a ray without explicit intersection tests, using precomputed distance-to-boundary parameters. It differs by providing the core traversal mechanism for hit voxel and entry face identification, used for normal estimation. Choose when efficient, exact voxel stepping is required for collision or surface detection.
+ 
+ ### [Voxel Raycast with AABB Hitbox Refinement](16579-voxel-raycast-with-aabb-hitbox-refinement.md)
+-This method extends basic voxel raycasting by combining axis-aligned grid traversal with precise geometric intersection against sub-voxel bounding boxes. It solves the problem of accurately determining surface contact points and normals in voxel environments where blocks may have non-cuboid collision shapes (hitboxes). Unlike its parent method, which returns only the voxel face normal for solid blocks, this algorithm refines the hit position and normal by intersecting the ray against specific AABB hitboxes for non-solid voxels, or falls back to the grid face normal for solid voxels.
++Extends basic voxel raycasting by combining grid traversal with precise geometric intersection against sub-voxel AABB hitboxes. It differs by refining the hit position and normal for non-cuboid shapes, falling back to grid face normals for solid voxels. Choose when non-cuboid collision shapes (hitboxes) are present in the voxel environment.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(\text{max\_distance})$ in the worst case, proportional to the number of voxels intersected by the ray [S2, unofficial].
+-- **Memory Complexity:** $O(1)$ auxiliary space for the traversal variables, plus the storage for the voxel grid itself [S2, unofficial].
+-- **Performance:** On a 256x256x256 colorfield with ~16 million data points, a software-mode ray caster achieves "decent speed" at 2000x2000 resolution [S1, unofficial]. On 800x600 resolution with dense objects, rates are considered "real time" [S1, unofficial].
+-- **Strengths:**
+-    - Highly parallelizable as each ray is independent [S1, unofficial].
+-    - More efficient than PhysX raycasts for voxel grids [S2, unofficial].
+-    - Eliminates the need for "marching" (full-list or step-by-step approach without early exit) by using incremental traversal [S1, unofficial].
+-- **Limitations:**
+-    - Performance is impacted by empty space (sparseness) if no hierarchical data structure is used, as every empty voxel is still visited [S1, unofficial].
+-    - Normal estimation accuracy depends on step size; large steps can lead to incorrect normals [S3, unofficial].
+-- **When to Use:** Suitable for real-time voxel rendering, collision detection, and block placement in voxel engines where performance is critical and voxel grids are dense or moderately sparse [S2, unofficial].
+-- **When Not to Use:** Not suitable for highly sparse voxel grids without hierarchical acceleration structures (like Octrees or KD-Trees) due to the linear traversal cost through empty space [S1, unofficial].
++*   **Time Complexity:** $O(N + A \log A)$, where $N$ is the number of voxels intersected (proportional to $maxDist$) and $A$ is the number of axis crossings (typically small, $O(1)$ per axis) [S4, unofficial]. The sorting of candidates in some variants dominates if $A$ is large, but in standard DDA, it is $O(N)$ [S2, S4, unofficial].
++*   **Memory Complexity:** $O(1)$ auxiliary space, excluding the voxel grid storage [S2, unofficial].
++*   **Performance:** On a 256x256x256 colorfield (16 million voxels), software-mode raycasting achieves decent speed at 2000x2000 resolution and real-time rates at 800x600 for dense objects [S1, unofficial]. It is more efficient than PhysX raycasts for voxel grids [S2, unofficial].
++*   **Strengths:** Parallelizable (each ray is independent), efficient for sparse grids (visits only intersected cells), simple implementation [S1, S2, unofficial].
++*   **Limitations:** Normal estimation is approximate and axis-aligned, not suitable for smooth surfaces. Performance degrades with very long rays or dense grids without spatial acceleration structures [S1, S3, unofficial].
++*   **When to Use:** Collision detection, occlusion culling, and simple surface normal estimation in voxel-based games or simulations where performance is critical and high-precision normals are not required [S2, S3, unofficial].
++*   **When Not to Use:** When smooth, continuous surface normals are needed, or when the voxel grid is extremely dense and hierarchical structures (like Octrees) would provide better traversal performance [S1, unofficial].
+ 
+ ## Background
+-The method is based on the Amanatides and Woo algorithm, a classic ray traversal algorithm for voxel grids [S1, unofficial]. It was popularized in the context of voxel rendering engines for its efficiency in traversing grid structures [S1, unofficial]. The specific normal estimation technique described here is an adaptation found in various open-source voxel projects and tutorials [S3, unofficial]. The approach has been implemented in various forms, including Unity-based voxel engines [S2, unofficial] and CPU rasterizers [S3, unofficial].
++The method is based on the Amanatides and Woo algorithm, a classic ray traversal algorithm for regular grids [S1, unofficial]. It was popularized in the context of voxel rendering and collision detection in games [S2, S3, unofficial]. The algorithm was originally described in "A Fast Voxel Traversal Algorithm for Ray Tracing" by Amanatides and Woo (1987) [S1, unofficial]. It has been widely adopted in voxel engines for its simplicity and efficiency [S2, S3, unofficial].
+ 
+ ## Sources
+ [S1] Voxel Renderer: Parallellism is key - Jeroen Baert's Blog, https://forceflow.be/2012/03/26/voxel-renderer-parallelism-is-key/, fetched 2026-10-24 (unofficial)
+ [S2] VektorKnight/vektor-voxels, https://github.com/VektorKnight/vektor-voxels, fetched 2026-10-27 (unofficial)
+-[S3] whudsontosh/CPU-Rasterizer, https://github.com/whudsontosh/CPU-Rasterizer, fetched 2026-10-27 (unofficial)+[S3] whudsontosh/CPU-Rasterizer, https://github.com/whudsontosh/CPU-Rasterizer, fetched 2026-10-27 (unofficial)
++[S4] aresrpg/aresrpg-engine, https://github.com/aresrpg/aresrpg-engine, fetched 2026-10-27 (unofficial)

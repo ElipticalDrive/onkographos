@@ -1,0 +1,150 @@
+# 1. はじめに
+[前回](https://qiita.com/devgamesan/items/b5be3dc9727f0a2c1a13)に引き続き、3D gaussian Splattingモデルを作ってみる。前回はnerfstudioで3DGSモデルを作成したが、今回は、COLMAPとƒVDB-Reality-Captureを使って作成してみた。
+
+# 2. 環境
+筆者環境以下の通り。
+
+| 項目 | 内容 |
+| :--- | :--- |
+| OS | Kubuntu 24.04.04 |
+| CPU | Ryzen 5 7600 |
+| メモリ | DDR5-5600 64GB |
+| マザーボード | MSI MAG B650 TOMAHAWK WIFI |
+| GPU1 | ZOTAC GAMING GeForce RTX 5060 Ti 16GB Twin Edge |
+| GPU2 | MSI GeForce RTX 3060 VENTUS 2X 12G OC |
+| GPUドライババージョン | 580.126.09 |
+
+# 2. COLMAPとは
+[COLMAP](https://colmap.github.io/)とは、複数の写真から物体の3D形状やカメラの位置情報を復元するオープンソースソフトウェア。バラバラに撮られた2D写真の束を解析して、カメラがどこから撮ったのか（位置・角度）を特定し、特徴点を抽出してスカスカの3D点群（Sparse Cloud）を作ることができるツール。COLMAPで作成するSparse CloudがGaussian Spalattingを作る際の入力となる。
+
+# 3. ƒVDB-Reality-Captureとは
+[ƒVDB-Reality-Capture](https://openvdb.github.io/fvdb-core/reality-capture/index.html)とはNVIDIAが開発・保守を行う、現実世界の物体や空間をデジタル化する「リアリティキャプチャ」のためのソフトウェア。3D Gaussian Splatting（3DGS）の作成を、従来手法(gssplat)よりも圧倒的に高精度かつ高効率に行える(らしい)。
+
+# 4. 手順
+## 4.1 動画の準備
+今回は愛車(自転車)を3DGS化する。スマホのカメラの動画モードで自転車をグルリと撮影。
+2週くらい回って全ての部位が動画に収まるように撮影した。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/e7efff0e-9364-4dd3-bc4d-055671b4e8d3.png)
+
+## 4.2 動画から画像の切り出し
+COLMAPへ直接動画は入力できないため、ffmpegで動画から画像を切り出す。
+
+```bash
+mkdir images
+# 動画から画像を3枚/秒で高品質で抽出
+ffmpeg -i "input.mp4" -vf fps=3 -q:v 2 "./images/frame_%06d.jpg" 
+```
+
+## 4.2 COLMAPのインストール
+次のコマンドでCOLMAPをインストール。
+
+```bash
+sudo apt update
+sudo apt install colmap
+```
+
+## 4.3 COLMAP起動
+COLMAPのGUIを次のコマンドで起動する
+
+```bash
+colmap gui
+```
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/75f55f80-485b-4860-ad92-dbb416ff47c6.png)
+
+## 4.4 COLMAPのプロジェクト新規作成
+`File` -> `New Project`を選択。
+
+データベースのパス(新規作成のため任意のパスでOK)と画像の保存ディレクトリを指定して`Save`ボタンを押す。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/a957b8bc-a1da-4e9a-9abf-66bfe26f4532.png)
+
+## 4.5 Feature extraction
+`Processing` -> `Feature extraction`を選択。
+`Shared for all images`にチェックを入れて`Extract`ボタンを押す。`Shared for all images`は、同じカメラで撮影した場合はチェックを入れるものらしい。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/cc28d5c7-e729-4e86-b94a-b2bdcd656099.png)
+
+Feature extractionが完了すると、Log画面に完了を示す`Elapsed time: 0.064 [minutes]`が出力される。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/485024c4-aa46-407c-8185-9fe7ea8288ec.png)
+
+## 4.6 Feature matching
+`Processing` -> `Feature matching`を選択し、`Sequential`タブに移動する。
+
+1. `Sequential`を選択: 動画から切り出した画像を入力とする場合に選択
+2. `loop_detection`にチェックを入れる: 撮影対象の物体の周りを複数回集会して撮影しているため
+3. `vocab_tree`を選択:  `loop_detection`にチェックを入れると、`vocab_tree`の指定が必須となる。[COLMAPの公式サイト](https://demuc.de/colmap/)からvocab_treeをダウンロードできるので、ダウンロードして選択する。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/0cc313d8-ab7c-4a68-af82-af5ddb606e23.png)
+
+準備ができたら`Run`ボタンを押すとMatchingが開始される。処理完了まで待つ。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/e0c6f955-fbae-458b-ae64-9f384e7f005b.png)
+
+## 4.7 Reconstruction
+`Reconstruction` -> `Start Reconstruction`を選択すると、撮影時のカメラの位置・向きと3次元点の座標の推定が始まる。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/e919d882-6335-4c1d-8299-84d0a632d8c6.png)
+
+今回は、自転車の周りを周回したので、最終的に以下のような出力となった。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/0742b3a8-b035-4842-a24e-106d7bbbebca.png)
+
+## 4.8 Reconstruction結果の保存
+`Extras` -> `Undistortion`から、`output_path`(結果の保存先)を指定して、`Undistort`ボタンを押す。これでCOLMAPの処理結果が保存できる。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/ebbc6247-eac1-4e3c-8588-16a8958f5328.png)
+
+## 4.9 ƒVDB-Reality-Captureのインストール
+ƒVDB-Reality-Captureはpythonのライブラリのため、pythonの仮想環境を構築し、インストール。
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install fvdb-reality-capture fvdb-core==0.3.0+pt28.cu128 --extra-index-url="https://d36m13axqqhiit.cloudfront.net/simple" torch==2.8.0 --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
+## 4.10 3DGSの構築
+ƒVDB-Reality-Captureをインストールすると、frgsコマンドが使用できるようになる。
+以下のようにCOLMAPの出力結果保存ディレクトリを指定して実行するだけでよい。
+筆者の環境では、3DGSの構築にコマンド実行完了まで15分ほどかかった。
+
+```bash
+frgs reconstruct ./colmap_output -o bike.ply
+```
+
+## 4.11 結果の確認
+生成されたPLYファイルをSuperSplatにドラッグ&ドロップする。
+
+https://superspl.at/editor
+
+無事、自転車の3DGSが表示された。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/6d579774-04ec-411d-b9fe-ef322ffa724f.png)
+
+# 5. まとめ
+今回は、COLMAPとƒVDB-Reality-Captureを組み合わせて、3D Gaussian Splatting（3DGS）モデルを作成した。環境構築やコマンド操作も比較的シンプルであり、実世界の物体をデジタル化する強力な手法として非常に有用であると感じた。
+
+
+
+# 参考
+## 3DGSからのメッシュの作成
+ƒVDB-Reality-Captureのfrgsコマンドは作成した3DGSのPLYファイルから、メッシュを生成することもできる。
+
+
+```bash
+CUDA_VISIBLE_DEVICES=1 frgs mesh-dlnr bike.ply -o bike_mesh.ply 0.10
+# このコマンドは筆者環境のRTX5060tiではエラーで動作しなかったため、RTX3060で動作させるためCUDA_VISIBLE_DEVICESを指定して実行した。
+```
+
+MeshLabで生成したメッシュを表示した様子。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/d1415197-cf3f-4bed-9bb6-21f435a0112d.png)
+
+# おまけ
+こちらは、一眼レフで撮影した44枚の画像から作成したガンダムの3DSGS。
+
+![image.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4072158/54be3653-a29e-4715-87f4-e3aaa266eb83.png)

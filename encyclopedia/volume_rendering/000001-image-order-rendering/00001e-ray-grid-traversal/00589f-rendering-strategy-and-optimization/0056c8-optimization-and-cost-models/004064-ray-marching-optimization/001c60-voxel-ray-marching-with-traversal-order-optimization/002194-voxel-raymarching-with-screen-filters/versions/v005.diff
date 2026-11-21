@@ -1,0 +1,407 @@
+--- v004.md
++++ v005.md
+@@ -4,32 +4,34 @@
+ 
+ ## Overview
+-Voxel Raymarching with Screen Filters is a fragment shader technique for rendering transparent voxels that combines ray traversal through a 3D texture with post-traversal screen-space visual effects [S2, unofficial]. It solves the problem of rendering voxelized data with lighting and transparency by sampling a screen texture for background blending and applying specific visual filters based on hit status [S2, unofficial]. It differs from its parent [Voxel Ray Marching with Traversal Order Optimization](1251-voxel-ray-marching-with-traversal-order-optimization.md) by explicitly applying screen-space filters (such as normal, position, depth, and toon filters) to the final color output rather than relying solely on the traversal optimization [S1, unofficial]. It is distinct from the [Voxel Visualization Ray Marcher](3432-voxel-visualization-ray-marcher.md) by using these screen filters and a more complex lighting model involving specular and diffuse directions, rather than a fixed-step traversal with explicit alpha compositing [S1, unofficial].
++Voxel Raymarching with Screen Filters is a fragment shader technique for rendering voxelized data that combines ray traversal through a 3D texture with screen-space visual effects [S1, unofficial]. It differs from its parent [Voxel Ray Marching with Traversal Order Optimization](1251-voxel-ray-marching-with-traversal-order-optimization.md) by applying screen-space filters (normal, position, depth, iterations, flat color, and toon) to the final color output rather than relying solely on traversal optimization [S1, unofficial]. It is distinct from the [Voxel Visualization Ray Marcher](3432-voxel-visualization-ray-marcher.md) by using these screen filters and a complex lighting model with specular and diffuse directions, rather than a fixed-step traversal with explicit alpha compositing [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origin, ray direction, scene data (including `worldWidth`, `time`, `screenFilter` flag, `tonemap` flag), camera data (prevPosition, prevRotation), previous depth texture, color texture, position texture.
+-*   **Outputs:** Final color written to `colorTexture`, velocity written to `velocityTexture`, depth written to `currentDepthTexture`.
++*   **Inputs:** Ray origin, ray direction, scene data (including `worldWidth`, `time`, `screenFilter` flag, `tonemap` flag), camera data (`prevPosition`, `prevRotation`), previous depth texture, color texture, position texture [S1, unofficial].
++*   **Outputs:** Final color written to `colorTexture`, velocity written to `velocityTexture`, depth written to `currentDepthTexture` [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `RayHit`: Contains `status` (int), `position` (vec3<f32>), `normal` (vec3<f32>), `voxelData` (u32), `uv` (vec2<f32>), `worldUV` (vec2<f32>), `iterations` (u32).
+-*   `VoxelData` (u32): Packed 32-bit integer. Bits 7–4 store `albedoIndex` (4 bits). Bits 3–0 store `materialIndex` (4 bits).
+-*   `Material`: Contains `emissive` (bool), `specular` (float).
+-*   `SceneData`: Contains `worldWidth` (int), `time` (float), `screenFilter` (int), `tonemap` (int).
+-*   `CameraData`: Contains `position` (vec3<f32>), `prevPosition` (vec3<f32>), `prevRotation` (mat4x4<f32>).
++*   `RayHit`: Contains `status` (int), `position` (vec3<f32>), `normal` (vec3<f32>), `voxelData` (u32), `uv` (vec2<f32>), `worldUV` (vec2<f32>), `iterations` (u32) [S1, unofficial].
++*   `VoxelData` (u32): Packed 32-bit integer. Bits 7–4 store `albedoIndex` (4 bits). Bits 3–0 store `materialIndex` (4 bits) [S1, unofficial].
++*   `Material`: Contains `emissive` (bool), `specular` (float) [S1, unofficial].
++*   `SceneData`: Contains `worldWidth` (int), `time` (float), `screenFilter` (int), `tonemap` (int) [S1, unofficial].
++*   `CameraData`: Contains `position` (vec3<f32>), `prevPosition` (vec3<f32>), `prevRotation` (mat4x4<f32>) [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def voxel_raymarching_with_screen_filters(pixel_pos: vec2<u32>, ray_origin: vec3<f32>, ray_dir: vec3<f32>, scene_data: SceneData, camera_data: CameraData, previous_depth_texture: Texture2D) -> vec3<f32>:
++def voxel_raymarching_with_screen_filters(pixel_pos: tuple[int, int], ray_origin: tuple[float, float, float], ray_dir: tuple[float, float, float], scene_data: dict, camera_data: dict, previous_depth_texture: object) -> tuple[float, float, float]:
+     """
+     Renders a voxel raymarched pixel with screen filters.
+     """
+-    max_steps = 50  # Typical value inferred from Filter 3 normalization
+-    ray_pos = floor(ray_origin)
+-    ray_step = sign(ray_dir)
+-    
+-    # Precompute traversal deltas
+-    max_translation = (((0.5 + ray_pos) + 0.5 * ray_step) - ray_origin) / ray_dir
+-    delta_translation = ray_step / ray_dir
++    max_steps = 50  # Typical value inferred from Filter 3 normalization [S1, unofficial]
++    ray_pos = (int(ray_origin[0]), int(ray_origin[1]), int(ray_origin[2]))
++    ray_step = (1.0 if ray_dir[0] >= 0 else -1.0, 1.0 if ray_dir[1] >= 0 else -1.0, 1.0 if ray_dir[2] >= 0 else -1.0)
++    
++    # Precompute traversal deltas [S1, unofficial]
++    max_translation = (((0.5 + ray_pos[0]) + 0.5 * ray_step[0] - ray_origin[0]) / ray_dir[0],
++                       ((0.5 + ray_pos[1]) + 0.5 * ray_step[1] - ray_origin[1]) / ray_dir[1],
++                       ((0.5 + ray_pos[2]) + 0.5 * ray_step[2] - ray_origin[2]) / ray_dir[2])
++    delta_translation = (ray_step[0] / ray_dir[0], ray_step[1] / ray_dir[1], ray_step[2] / ray_dir[2])
+     
+     steps = 0
+@@ -37,183 +39,207 @@
+     result_hit = None
+     
+-    # Marching Loop
++    # Marching Loop [S1, unofficial]
+     while steps < max_steps:
+         # Check bounds
+-        if (ray_pos.x >= scene_data.worldWidth or ray_pos.x < 0.0 or
+-            ray_pos.y >= scene_data.worldWidth or ray_pos.y < 0.0 or
+-            ray_pos.z >= scene_data.worldWidth or ray_pos.z < 0.0):
++        if (ray_pos[0] >= scene_data['worldWidth'] or ray_pos[0] < 0 or
++            ray_pos[1] >= scene_data['worldWidth'] or ray_pos[1] < 0 or
++            ray_pos[2] >= scene_data['worldWidth'] or ray_pos[2] < 0):
+             break
+             
+-        # Get voxel data
+-        voxel_data = get_voxel(vec3<u32>(ray_pos))
++        # Get voxel data [G]
++        voxel_data = get_voxel(ray_pos)
+         
+         if voxel_data != 0:
+             # Compute intersection details
+-            intersection_depth = 0.0
+-            ray_box_intersect(ray_origin, ray_dir, ray_pos, ray_pos + vec3<f32>(1.0, 1.0, 1.0), intersection_depth)
+-            intersection_position = ray_origin + ray_dir * intersection_depth
+-            
+-            # Compute normal
+-            direction = intersection_position - (ray_pos + vec3<f32>(0.5, 0.5, 0.5))
+-            absolute_direction = abs(direction)
+-            
+-            if absolute_direction.y > absolute_direction.x and absolute_direction.y > absolute_direction.z:
+-                intersection_normal = vec3<f32>(0.0, sign(direction.y), 0.0)
++            intersection_depth = ray_box_intersect(ray_origin, ray_dir, ray_pos, (ray_pos[0]+1, ray_pos[1]+1, ray_pos[2]+1))
++            if intersection_depth is None:
++                intersection_depth = 0.0
++            intersection_position = (ray_origin[0] + ray_dir[0]*intersection_depth, 
++                                     ray_origin[1] + ray_dir[1]*intersection_depth, 
++                                     ray_origin[2] + ray_dir[2]*intersection_depth)
++            
++            # Compute normal [S1, unofficial]
++            direction = (intersection_position[0] - (ray_pos[0] + 0.5), 
++                         intersection_position[1] - (ray_pos[1] + 0.5), 
++                         intersection_position[2] - (ray_pos[2] + 0.5))
++            absolute_direction = (abs(direction[0]), abs(direction[1]), abs(direction[2]))
++            
++            if absolute_direction[1] > absolute_direction[0] and absolute_direction[1] > absolute_direction[2]:
++                intersection_normal = (0.0, 1.0 if direction[1] > 0 else -1.0, 0.0)
+             else:
+-                intersection_normal = vec3<f32>(0.0, 0.0, sign(direction.z))
++                intersection_normal = (0.0, 0.0, 1.0 if direction[2] > 0 else -1.0)
+                 
+-            result_hit = RayHit()
+-            result_hit.status = 2
+-            result_hit.position = intersection_position
+-            result_hit.normal = intersection_normal
+-            result_hit.voxelData = voxel_data
+-            result_hit.iterations = steps
++            result_hit = {'status': 2, 'position': intersection_position, 'normal': intersection_normal, 
++                          'voxelData': voxel_data, 'iterations': steps}
+             hit_world = True
+             break
+             
+-        # Advance ray
+-        ray_advance_mask = max(ray_dir.x, max(ray_dir.y, ray_dir.z)) <= min(ray_dir.y, min(ray_dir.z, ray_dir.x)) # Note: Source logic uses maxTranslation comparison
+-        # Corrected logic from source:
+-        ray_advance_mask = max_translation.xyz <= min(max_translation.yzx, max_translation.zxy)
+-        max_translation = max_translation + vec3<f32>(ray_advance_mask) * delta_translation
+-        ray_pos = ray_pos + vec3<f32>(vec3<i32>(ray_advance_mask)) * ray_step
++        # Advance ray [S1, unofficial]
++        ray_advance_mask = (max_translation[0] <= min(max_translation[1], max_translation[2]),
++                            max_translation[1] <= min(max_translation[2], max_translation[0]),
++                            max_translation[2] <= min(max_translation[0], max_translation[1]))
++        max_translation = (max_translation[0] + ray_advance_mask[0]*delta_translation[0],
++                           max_translation[1] + ray_advance_mask[1]*delta_translation[1],
++                           max_translation[2] + ray_advance_mask[2]*delta_translation[2])
++        ray_pos = (ray_pos[0] + int(ray_advance_mask[0])*ray_step[0],
++                   ray_pos[1] + int(ray_advance_mask[1])*ray_step[1],
++                   ray_pos[2] + int(ray_advance_mask[2])*ray_step[2])
+         steps += 1
+         
+     if not hit_world:
+-        # Skybox hit or out of bounds
+-        result_hit = RayHit()
+-        result_hit.status = 3 # Or 0 if max steps reached
+-        result_hit.position = ray_origin + ray_dir * 1000.0 # Placeholder for sky direction
+-        result_hit.normal = vec3<f32>(0.0, 0.0, 0.0)
+-        result_hit.voxelData = 0
+-        result_hit.iterations = steps
+-
+-    # Lighting and Color Calculation
+-    color = vec3<f32>(0.0, 0.0, 0.0)
+-    throughput = vec3<f32>(1.0, 1.0, 1.0)
++        # Skybox hit or out of bounds [S1, unofficial]
++        result_hit = {'status': 3, 'position': (ray_origin[0] + ray_dir[0]*1000.0, ray_origin[1] + ray_dir[1]*1000.0, ray_origin[2] + ray_dir[2]*1000.0), 
++                      'normal': (0.0, 0.0, 0.0), 'voxelData': 0, 'iterations': steps}
++
++    # Lighting and Color Calculation [S1, unofficial]
++    color = (0.0, 0.0, 0.0)
++    throughput = (1.0, 1.0, 1.0)
+     bounce_count = 0
+     
+     if hit_world:
+         # Extract indices
+-        albedo_index = (result_hit.voxelData >> 4) & 0xF
+-        material_index = result_hit.voxelData & 0xF
+-        
+-        albedo = COLORS[albedo_index]
+-        material = MATERIALS[material_index]
+-        
+-        # Random seed for diffuse direction
+-        seed = (result_hit.position + vec3<f32>(scene_data.time * 17.0, scene_data.time * 29.0, scene_data.time * 41.0)) * f32(pixel_pos.x) / f32(pixel_pos.y)
+-        
+-        specular_dir = reflect(ray_dir, result_hit.normal)
+-        diffuse_dir = normalize(result_hit.normal + random_direction(seed))
++        albedo_index = (result_hit['voxelData'] >> 4) & 0xF
++        material_index = result_hit['voxelData'] & 0xF
++        albedo = COLORS[albedo_index] # [G]
++        material = MATERIALS[material_index] # [G]
++        
++        # Random seed for diffuse direction [S1, unofficial]
++        # Guard against division by zero [G]
++        y_denom = pixel_pos[1] if pixel_pos[1] != 0 else 1.0
++        seed = (result_hit['position'][0] + scene_data['time'] * 17.0,
++                result_hit['position'][1] + scene_data['time'] * 29.0,
++                result_hit['position'][2] + scene_data['time'] * 41.0)
++        seed = (seed[0] * pixel_pos[0] / y_denom, seed[1] * pixel_pos[0] / y_denom, seed[2] * pixel_pos[0] / y_denom)
++        
++        specular_dir = reflect(ray_dir, result_hit['normal']) # [G]
++        rand_dir = random_direction(seed) # [G]
++        diffuse_dir = normalize((result_hit['normal'][0] + rand_dir[0], result_hit['normal'][1] + rand_dir[1], result_hit['normal'][2] + rand_dir[2]))
+         
+         # Emissive
+-        if material.emissive:
+-            color += throughput * albedo
+-            # Break loop logic implied for single bounce or accumulation? Source says "break loop". 
+-            # Assuming this is the final color contribution for this ray step.
++        if material['emissive']:
++            color = (color[0] + throughput[0]*albedo[0], color[1] + throughput[1]*albedo[1], color[2] + throughput[2]*albedo[2])
++            # Source implies breaking loop here for single-bounce contribution.
+             
+         # Specular
+-        if material.specular > 0.0:
++        if material['specular'] > 0.0:
+             bounce_count += 1
+-            throughput *= (1.0 - material.specular * 0.1)
++            throughput = (throughput[0] - material['specular']*0.1, throughput[1] - material['specular']*0.1, throughput[2] - material['specular']*0.1)
+             
+         # Sun Contribution
+-        sun_contribution = sunlight(result_hit.position, result_hit.normal)
+-        color += throughput * (albedo * sun_contribution) * (1.0 - material.specular)
+-        throughput *= albedo
+-        
+-        # Update ray for next march (if multi-bounce were implemented, but source breaks on emissive)
+-        # ray_pos = result_hit.position - (0.001 * ray_dir)
+-        # ray_dir = mix(diffuse_dir, specular_dir, material.specular)
+-        
+-        # Skybox fallback if not emissive break
+-        # color += throughput * skybox(ray_dir)
+-        
+-    else:
+-        # Skybox hit
+-        color += throughput * skybox(ray_dir)
+-
+-    # Screen Filters
+-    if hit_world and scene_data.screen_filter != 0:
+-        filter_id = scene_data.screen_filter
++        sun_contribution = sunlight(result_hit['position'], result_hit['normal']) # [G]
++        color = (color[0] + throughput[0]*(albedo[0]*sun_contribution)*(1.0 - material['specular']),
++                 color[1] + throughput[1]*(albedo[1]*sun_contribution)*(1.0 - material['specular']),
++                 color[2] + throughput[2]*(albedo[2]*sun_contribution)*(1.0 - material['specular']))
++        throughput = (throughput[0]*albedo[0], throughput[1]*albedo[1], throughput[2]*albedo[2])
++        
++        # Update ray for next march [G]
++        # ray_pos = (result_hit['position'][0] - 0.001*ray_dir[0], ...)
++        # ray_dir = mix(diffuse_dir, specular_dir, material['specular'])
++        
++    else:
++        # Skybox hit [S1, unofficial]
++        color = (color[0] + throughput[0]*skybox(ray_dir)[0], color[1] + throughput[1]*skybox(ray_dir)[1], color[2] + throughput[2]*skybox(ray_dir)[2])
++
++    # Screen Filters [S1, unofficial]
++    if hit_world and scene_data['screenFilter'] != 0:
++        filter_id = scene_data['screenFilter']
+         if filter_id == 1: # Normal
+-            color = (result_hit.normal / 2.0) + 0.5
++            color = (result_hit['normal'][0]/2.0 + 0.5, result_hit['normal'][1]/2.0 + 0.5, result_hit['normal'][2]/2.0 + 0.5)
+         elif filter_id == 2: # Position
+-            color = result_hit.position / f32(scene_data.worldWidth)
++            color = (result_hit['position'][0]/scene_data['worldWidth'], result_hit['position'][1]/scene_data['worldWidth'], result_hit['position'][2]/scene_data['worldWidth'])
+         elif filter_id == 3: # Iterations
+-            color = vec3<f32>(1.0 - (f32(result_hit.iterations) / 50.0))
++            color = (1.0 - steps/50.0, 1.0 - steps/50.0, 1.0 - steps/50.0)
+         elif filter_id == 4: # Flat color
+-            norm = (result_hit.normal / 2.0) + 0.5
+-            brightness = norm.x * 0.2 + norm.y * 0.4 + norm.z * 0.6
+-            color = albedo * brightness
++            norm = (result_hit['normal'][0]/2.0 + 0.5, result_hit['normal'][1]/2.0 + 0.5, result_hit['normal'][2]/2.0 + 0.5)
++            brightness = norm[0]*0.2 + norm[1]*0.4 + norm[2]*0.6
++            color = (albedo[0]*brightness, albedo[1]*brightness, albedo[2]*brightness)
+         elif filter_id == 5: # Depth
+-            depth_val = distance(camera_data.position, result_hit.position)
+-            color = vec3<f32>(1.0 - depth_val / f32(scene_data.worldWidth) * 2.0)
++            depth_val = distance(camera_data['position'], result_hit['position'])
++            color = (1.0 - depth_val/scene_data['worldWidth']*2.0, 1.0 - depth_val/scene_data['worldWidth']*2.0, 1.0 - depth_val/scene_data['worldWidth']*2.0)
+         elif filter_id == 6: # Toon
+-            # Sample 4 neighboring depth values from previous depth texture
++            # Sample 4 neighboring depth values from previous depth texture [S1, unofficial]
+             d0 = sample_depth(previous_depth_texture, pixel_pos)
+-            d1 = sample_depth(previous_depth_texture, pixel_pos + vec2<u32>(1, 0))
+-            d2 = sample_depth(previous_depth_texture, pixel_pos + vec2<u32>(0, 1))
+-            d3 = sample_depth(previous_depth_texture, pixel_pos + vec2<u32>(1, 1))
++            d1 = sample_depth(previous_depth_texture, (pixel_pos[0]+1, pixel_pos[1]))
++            d2 = sample_depth(previous_depth_texture, (pixel_pos[0], pixel_pos[1]+1))
++            d3 = sample_depth(previous_depth_texture, (pixel_pos[0]+1, pixel_pos[1]+1))
+             
+             mean = (d0 + d1 + d2 + d3) / 4.0
+             variance = (pow(d0 - mean, 2.0) + pow(d1 - mean, 2.0) + pow(d2 - mean, 2.0) + pow(d3 - mean, 2.0)) / 4.0
+             
+-            # Albedo must be retrieved again if not stored in scope
+-            albedo = COLORS[albedo_index]
+-            color = (vec3<f32>(1.0) - vec3<f32>(variance)) * albedo
+-            
+-    else:
+-        # No screen filter: Write position to positionTexture (side effect)
++            color = (1.0 - variance)*albedo[0], (1.0 - variance)*albedo[1], (1.0 - variance)*albedo[2]
++            
++    else:
++        # No screen filter: Write position to positionTexture [S1, unofficial]
+         # Write pixelWorldPosition to positionTexture
+         
+-        # Tonemapping
+-        if scene_data.tonemap == 0:
++        # Tonemapping [S1, unofficial]
++        if scene_data['tonemap'] == 0:
+             color = tonemap_aces(color)
+-        elif scene_data.tonemap == 1:
++        elif scene_data['tonemap'] == 1:
+             color = tonemap_reinhard(color)
+             
+-    # Gamma Correction
++    # Gamma Correction [S1, unofficial]
+     color = gamma_correct(color)
+     
+-    # Write Velocity
++    # Write Velocity [S1, unofficial]
+     if not hit_world:
+-        write_velocity(velocity_texture, pixel_pos, vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0))
+-    else:
+-        prev_pixel_pos = world_to_clip_space(result_hit.position, camera_data.prev_position, camera_data.prev_rotation)
+-        pixel_velocity = vec2<f32>(pixel_pos) - prev_pixel_pos
+-        write_velocity(velocity_texture, pixel_pos, vec4<f32>(pixel_velocity.x, pixel_velocity.y, 0.0, 0.0))
+-        
+-    # Write Depth
++        write_velocity(velocity_texture, pixel_pos, (1000000000.0, 1000000000.0, 0.0, 0.0))
++    else:
++        prev_pixel_pos = world_to_clip_space(result_hit['position'], camera_data['prevPosition'], camera_data['prevRotation'])
++        pixel_velocity = (pixel_pos[0] - prev_pixel_pos[0], pixel_pos[1] - prev_pixel_pos[1])
++        write_velocity(velocity_texture, pixel_pos, (pixel_velocity[0], pixel_velocity[1], 0.0, 0.0))
++        
++    # Write Depth [S1, unofficial]
+     if not hit_world:
+-        write_depth(current_depth_texture, pixel_pos, vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0))
+-    else:
+-        depth_val = distance(camera_data.position, result_hit.position)
+-        write_depth(current_depth_texture, pixel_pos, vec4<f32>(depth_val, 0.0, 0.0, 0.0))
++        write_depth(current_depth_texture, pixel_pos, (1000000000.0, 1000000000.0, 0.0, 0.0))
++    else:
++        depth_val = distance(camera_data['position'], result_hit['position'])
++        write_depth(current_depth_texture, pixel_pos, (depth_val, 0.0, 0.0, 0.0))
+         
+     return color
+ 
+-def ray_box_intersect(ray_origin: vec3<f32>, ray_dir: vec3<f32>, box_min: vec3<f32>, box_max: vec3<f32>, intersection_depth: float):
+-    origin_to_box_max = (box_max - ray_origin) / ray_dir
+-    origin_to_box_min = (box_min - ray_origin) / ray_dir
+-    
+-    max_vector = max(origin_to_box_max, origin_to_box_min)
+-    min_vector = min(origin_to_box_max, origin_to_box_min)
+-    
+-    back_intersection = min(max_vector.x, min(max_vector.y, max_vector.z))
+-    front_intersection = max(max(min_vector.x, 0.0), min(min_vector.y, min_vector.z))
+-    
+-    if back_intersection > front_intersection:
+-        intersection_depth = front_intersection
+-    else:
+-        intersection_depth = 0.0 # No hit
++def ray_box_intersect(ray_origin: tuple[float, float, float], ray_dir: tuple[float, float, float], box_min: tuple[float, float, float], box_max: tuple[float, float, float]) -> float | None:
++    """Standard slab method for ray-AABB intersection, handling zero direction components correctly [G]."""
++    t_min = 0.0
++    t_max = float('inf')
++    for i in range(3):
++        if ray_dir[i] == 0.0:
++            if ray_origin[i] < box_min[i] or ray_origin[i] > box_max[i]:
++                return None
++        else:
++            t1 = (box_min[i] - ray_origin[i]) / ray_dir[i]
++            t2 = (box_max[i] - ray_origin[i]) / ray_dir[i]
++            if t1 > t2: t1, t2 = t2, t1
++            t_min = max(t_min, t1)
++            t_max = min(t_max, t2)
++        if t_min > t_max:
++            return None
++    return t_min if t_max > 0.0 else None
++
++def get_voxel(pos): pass # [G]
++def reflect(v, n): pass # [G]
++def normalize(v): pass # [G]
++def random_direction(seed): pass # [G]
++def sunlight(pos, n): pass # [G]
++def skybox(d): pass # [G]
++def tonemap_aces(c): pass # [G]
++def tonemap_reinhard(c): pass # [G]
++def gamma_correct(c): pass # [G]
++def world_to_clip_space(pos, prev_pos, prev_rot): pass # [G]
++def sample_depth(tex, uv): pass # [G]
++def write_velocity(tex, uv, val): pass # [G]
++def write_depth(tex, uv, val): pass # [G]
++def distance(a, b): pass # [G]
++COLORS = {} # [G]
++MATERIALS = {} # [G]
++velocity_texture = None # [G]
++current_depth_texture = None # [G]
+ ```
+ 
+ **Parameters:**
+-*   `max_steps`: 50 (inferred from Filter 3 normalization divisor).
+-*   `worldWidth`: Size of the voxel world in units.
+-*   `screenFilter`: Integer 0-6. 0 disables filters.
+-*   `tonemap`: Integer 0 (ACES) or 1 (Reinhard).
++*   `max_steps`: 50 (inferred from Filter 3 normalization divisor) [S1, unofficial].
++*   `worldWidth`: Size of the voxel world in units [S1, unofficial].
++*   `screenFilter`: Integer 0-6. 0 disables filters [S1, unofficial].
++*   `tonemap`: Integer 0 (ACES) or 1 (Reinhard) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -232,12 +258,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of steps taken until a hit or exit. The screen filters add constant time overhead per pixel.
+-*   **Memory Complexity:** Low, primarily storing the voxel texture and screen buffers (depth, velocity, color).
+-*   **Performance:** Performance depends heavily on the density of the voxel world and the `max_steps` limit. The use of screen filters requires additional texture samples (e.g., for the Toon filter), increasing memory bandwidth usage.
+-*   **Strengths:** Provides flexible visual debugging and stylized rendering via screen filters. Integrates lighting calculations directly into the raymarching loop.
+-*   **Limitations:** Transparency support is incomplete/untested [S2, unofficial]. The Toon filter requires sampling neighboring depth values, which can be costly. The random seed calculation is sensitive to pixel coordinates.
++*   **Time Complexity:** Linear with respect to the number of steps taken until a hit or exit. The screen filters add constant time overhead per pixel [G].
++*   **Memory Complexity:** Low, primarily storing the voxel texture and screen buffers (depth, velocity, color) [G].
++*   **Performance:** Performance depends heavily on the density of the voxel world and the `max_steps` limit. The use of screen filters requires additional texture samples (e.g., for the Toon filter), increasing memory bandwidth usage [S1, unofficial].
++*   **Strengths:** Provides flexible visual debugging and stylized rendering via screen filters. Integrates lighting calculations directly into the raymarching loop [S1, unofficial].
++*   **Limitations:** Transparency support is incomplete/untested [S2, unofficial]. The Toon filter requires sampling neighboring depth values, which can be costly [S1, unofficial]. The random seed calculation is sensitive to pixel coordinates [S1, unofficial].
+ 
+ ## Background
+-This method originates from a WebGPU voxel raymarching implementation [S1, unofficial]. It is also associated with a Godot voxel plugin [S2, unofficial]. The technique combines standard raymarching traversal with screen-space post-processing effects.
++This method originates from a WebGPU voxel raymarching implementation [S1, unofficial]. It is also associated with a Godot voxel project [S2, unofficial]. The technique combines standard raymarching traversal with screen-space post-processing effects [S1, unofficial].
+ 
+ ## Sources

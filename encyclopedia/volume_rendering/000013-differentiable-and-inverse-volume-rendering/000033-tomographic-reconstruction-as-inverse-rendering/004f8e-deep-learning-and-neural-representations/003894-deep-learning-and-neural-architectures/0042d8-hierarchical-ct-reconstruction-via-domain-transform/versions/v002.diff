@@ -1,0 +1,282 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Hierarchical CT Reconstruction via Domain Transform is a deep learning framework that solves large-scale inverse problems, such as tomographic reconstruction, by decomposing the non-local, space-variant integral transform into a sequence of simpler, local hierarchical steps [S1]. Unlike brute-force fully connected networks that require intractable parameter counts for full-scale data, this method avoids dense connectivity by introducing virtual intermediate data representations (partial line integrals) [S1]. It sets itself apart from siblings like [Deep Image Prior Reconstruction](1221-deep-image-prior-reconstruction.md) and [DuDoTrans](1409-dudotrans.md) by explicitly constructing a homotopy-like continuum of data domains (from line integrals to partial line integrals to voxels) rather than relying on implicit neural priors or direct end-to-end mapping of the full sinogram to the image [S1].
++Hierarchical CT Reconstruction via Domain Transform is a deep learning framework that solves large-scale inverse problems, such as tomographic reconstruction, by decomposing the non-local, space-variant integral transform into a sequence of simpler, local hierarchical steps [S1]. Unlike brute-force fully connected networks that require intractable parameter counts for full-scale data, this method avoids dense connectivity by introducing virtual intermediate data representations (partial line integrals) [S1]. It sets itself apart from siblings like [Deep Image Prior Reconstruction](1221-deep-image-prior-reconstruction.md), [R2-Gaussian](6090-r2-gaussian.md), [End-to-End Reconstruction Model Architecture](7504-end-to-end-reconstruction-model-architecture.md), and [Transformer-based Architectures](13148-transformer-based-architectures.md) by explicitly constructing a homotopy-like continuum of data domains (from line integrals to partial line integrals to voxels) rather than relying on implicit neural priors or direct end-to-end mapping of the full sinogram to the image [S1].
+ 
+ ## How it works
+@@ -13,7 +13,7 @@
+ ### Data Structures
+ The method operates on a hierarchy of stages $L=0$ to $L=N$. Each stage $L$ holds data in the **partial line integral domain**, defined by three dimensions:
+-1.  **Depth bins ($N_t$):** Represents depth resolution along the projection ray.
+-2.  **Projection angles ($N_\theta$):** The number of angular views.
+-3.  **Radial bins ($N_r$):** The number of detector channels.
++1.  **Depth bins ($N_t$):** Represents depth resolution along the projection ray [S1].
++2.  **Projection angles ($N_\theta$):** The number of angular views [S1].
++3.  **Radial bins ($N_r$):** The number of detector channels [S1].
+ 
+ The data tensor at stage $L$ has shape $(N_t^{(L)}, N_\theta^{(L)}, N_r^{(L)})$. The total data size is kept approximately constant across stages: $N_t^{(L)} \times N_\theta^{(L)} \times N_r^{(L)} \approx \text{Constant}$ [S1].
+@@ -27,5 +27,5 @@
+ *   $L=5$ (Output Image): $(512, 1, 512)$ [S1]
+ 
+-The ratio of depth bins to projection angles between stages does not need to be an integer or power of two, as the network learns resampling and interpolation [S1].
++The ratio of depth bins to projection angles between stages does not need to be a power of two or an integer, as the network is trained to perform resampling and interpolation of the data between hierarchical stages [S1].
+ 
+ ### Formulas
+@@ -41,6 +41,6 @@
+ $$
+ where:
+-*   $\alpha$ is a scale factor controlling the window size.
+-*   $t$ is a parameter specifying the location of the window (depth).
++*   $\alpha$ is a scale factor controlling the window size [S1].
++*   $t$ is a parameter specifying the location of the window (depth) [S1].
+ *   $\Pi(x) = 1$ for $x < 0.5$ and $0$ elsewhere [S1].
+ 
+@@ -55,10 +55,10 @@
+ ### Steps
+ 1.  **Define Hierarchy:** Determine the sequence of data dimensions $(N_t, N_\theta, N_r)$ for stages $L=0$ to $L=N$. Ensure $N_\theta$ decreases and $N_t$ increases to transition from sinogram to image [S1].
+-2.  **Initialize Network:** Construct $L$ sparse connection layers. Initialize sparse connection weights to all ones. Initialize convolution kernels (if used) with Glorot uniform initializer [S1].
++2.  **Initialize Network:** Construct $L$ sparse connection layers. Initialize sparse connection weights to all ones. Initialize convolution kernels (if used) with the Glorot uniform initializer [S1].
+ 3.  **Pre-training (Optional):** Train each sparse connection layer individually using synthetic noise data to initialize weights to a reasonable magnitude. This reduces total training time but does not affect the final loss function [S1].
+ 4.  **End-to-End Training (Noise-Based):**
+     *   Generate training pairs: Computer-generated white Gaussian random noise patterns $f_{noise}$ and their forward projections $p_{noise}$ using distance-driven projection [S1].
+     *   Compute intermediate labels $q_{\alpha}^{(L)}$ for each stage using Filtered Back Projection (FBP) on the noise patterns onto non-isotropic voxel grids corresponding to stage $L$ dimensions [S1].
+-    *   Train the network to minimize Mean Squared Error (MSE) between the network output and the intermediate labels.
++    *   Train the network to minimize Mean Squared Error (MSE) between the network output and the intermediate labels [S1].
+     *   **Vanishing Gradient Handling:** During end-to-end training, update only one layer per iteration while freezing others. Select the layer randomly at each iteration [S1].
+     *   **Linear Constraint:** Exclude non-linear activation units during this phase to constrain the network to learning a linear inverse operator, preventing it from learning noise appearance as a prior [S1].
+@@ -71,64 +71,61 @@
+ ### Pseudocode
+ ```python
+-import tensorflow as tf
+ import numpy as np
+ 
+-class SparseConnectionLayer(tf.keras.layers.Layer):
++class SparseConnectionLayer:
+     """
+-    A sparse fully-connected layer where each input neuron connects 
+-    only to a small neighborhood of output neurons.
++    Implements a sparse fully-connected layer where each input neuron 
++    connects only to a small neighborhood of output neurons.
++    Forward operator: product of input data and sparse matrix.
++    Backpropagation operator: product of transpose of sparse matrix and gradient.
+     """
+-    def __init__(self, neighborhood_shape, input_shape, **kwargs):
+-        super(SparseConnectionLayer, self).__init__(**kwargs)
+-        # neighborhood_shape: (depth_delta, angle_delta, radial_delta)
+-        # e.g., (3, 5, 3)
+-        self.neighborhood_shape = neighborhood_shape
++    def __init__(self, input_shape, output_shape, neighborhood):
+         self.input_shape = input_shape
+-        
+-        # Create sparse weight matrix
+-        # Input size: prod(input_shape)
+-        # Output size: prod(input_shape) (assuming same spatial resolution for simplicity in this layer)
+-        # In practice, dimensions change between stages, so this layer handles the mapping.
+-        # For implementation, we define the sparsity pattern explicitly.
+-        
+-        # Note: The source uses TensorFlow's sparse matrix structure.
+-        # Here we simulate the logic of applying sparse weights.
++        self.output_shape = output_shape
++        self.neighborhood = neighborhood
+         self.weights = None
++        self._build_sparsity()
+ 
+-    def build(self, input_shape):
+-        # Initialize weights with ones as per source
+-        # The actual sparse matrix construction depends on the specific 
+-        # mapping between input (Nt, Ntheta, Nr) and output (Nt', Ntheta', Nr')
+-        # For the purpose of this article, we assume the sparse matrix 
+-        # is pre-defined based on the neighborhood size.
+-        self.weights = self.add_weight(
+-            shape=(self.input_size, self.input_size),
+-            initializer='ones',
+-            trainable=True
+-        )
+-        super(SparseConnectionLayer, self).build(input_shape)
++    def _build_sparsity(self):
++        # Generate sparse indices based on neighborhood size
++        # Each input neuron connects to a local neighborhood in the output grid
++        rows, cols = [], []
++        for i in range(np.prod(self.input_shape)):
++            in_coords = np.unravel_index(i, self.input_shape)
++            for dt in range(-self.neighborhood[0]//2, self.neighborhood[0]//2 + 1):
++                for dtheta in range(-self.neighborhood[1]//2, self.neighborhood[1]//2 + 1):
++                    for dr in range(-self.neighborhood[2]//2, self.neighborhood[2]//2 + 1):
++                        out_coords = (in_coords[0] + dt, in_coords[1] + dtheta, in_coords[2] + dr)
++                        if 0 <= out_coords[0] < self.output_shape[0] and \
++                           0 <= out_coords[1] < self.output_shape[1] and \
++                           0 <= out_coords[2] < self.output_shape[2]:
++                            rows.append(np.ravel_multi_index(out_coords, self.output_shape))
++                            cols.append(i)
++        self.rows = np.array(rows)
++        self.cols = np.array(cols)
+ 
+-    def call(self, inputs):
+-        # Forward operator: product of input data and sparse matrix
+-        # inputs shape: (batch, Nt, Ntheta, Nr)
+-        # Flatten input
+-        flat_inputs = tf.reshape(inputs, [-1, self.input_size])
+-        
+-        # Apply sparse matrix multiplication
+-        # In TensorFlow, this would be tf.sparse_tensor_dense_matmul 
+-        # if weights were sparse, or a custom op.
+-        # Here we assume a dense representation of the sparse weights for clarity,
+-        # but the source emphasizes storing only non-zeros.
+-        outputs = tf.matmul(flat_inputs, self.weights)
+-        
+-        # Reshape back to output dimensions
+-        output_shape = self.get_output_shape()
+-        return tf.reshape(outputs, tf.concat([tf.shape(inputs)[:-1], output_shape], axis=0))
++    def forward(self, x):
++        # x shape: (batch, Nt, Ntheta, Nr)
++        batch_size = x.shape[0]
++        flat_x = x.reshape(batch_size, -1)
++        flat_out = np.zeros((batch_size, np.prod(self.output_shape)))
++        # Apply sparse weights: out[row] += weights[col] * in[col]
++        for b in range(batch_size):
++            for idx in range(len(self.rows)):
++                flat_out[b, self.rows[idx]] += self.weights[idx] * flat_x[b, self.cols[idx]]
++        return flat_out.reshape(batch_size, *self.output_shape)
+ 
+-    def get_output_shape(self):
+-        # This would be determined by the hierarchical stage configuration
+-        return [1, 1, 1] # Placeholder
++    def backward(self, grad_out):
++        # grad_out shape: (batch, Nt_out, Ntheta_out, Nr_out)
++        batch_size = grad_out.shape[0]
++        flat_grad_out = grad_out.reshape(batch_size, -1)
++        flat_grad_in = np.zeros((batch_size, np.prod(self.input_shape)))
++        # Backprop: grad_in[col] += weights[col] * grad_out[row]
++        for b in range(batch_size):
++            for idx in range(len(self.rows)):
++                flat_grad_in[b, self.cols[idx]] += self.weights[idx] * flat_grad_out[b, self.rows[idx]]
++        return flat_grad_in.reshape(batch_size, *self.input_shape)
+ 
+-def create_hierarchical_network(num_stages, stage_dims, neighborhood_shape=(3,5,3)):
++def create_hierarchical_network(stage_dims, neighborhood=(3, 5, 3)):
+     """
+     Creates the hierarchical DL network.
+@@ -136,57 +133,29 @@
+     """
+     layers = []
+-    for i in range(1, num_stages + 1):
+-        # Layer L_i transforms from stage i-1 to stage i
++    for i in range(1, len(stage_dims)):
+         input_dims = stage_dims[i-1]
+         output_dims = stage_dims[i]
+-        
+-        # Add Sparse Connection Layer
+-        # Note: In TensorFlow, one would define the sparse indices explicitly.
+-        # Here we represent the layer conceptually.
+-        layer = SparseConnectionLayer(
+-            neighborhood_shape=neighborhood_shape,
+-            input_shape=input_dims
+-        )
++        layer = SparseConnectionLayer(input_dims, output_dims, neighborhood)
+         layers.append(layer)
+         
+         # Optional: Add convolutional layers between stages
+-        # L1 is sinogram domain conv (kernel 512)
+-        # L2-L5 are image domain conv (3x3 kernel, ReLU)
++        # L1 is sinogram domain convolutional layer with filter kernel size 512
++        # L2-L5 are image domain convolutional layers with 3x3 kernels and ReLU activation
+         if i == 1:
+-            # Sinogram domain convolution
+-            conv = tf.keras.layers.Conv2D(
+-                filters=1, 
+-                kernel_size=(512, 1), # Example kernel size
+-                activation=None
+-            )
+-            layers.append(conv)
++            conv = np.zeros((1, 512, 1)) # Placeholder for sinogram conv kernel
+         elif i > 1:
+-            # Image domain convolution
+-            conv = tf.keras.layers.Conv2D(
+-                filters=1,
+-                kernel_size=(3, 3),
+-                activation='relu'
+-            )
+-            layers.append(conv)
+-            
+-    return tf.keras.Sequential(layers)
++            conv = np.zeros((1, 3, 3))   # Placeholder for image conv kernel
++        layers.append(conv)
++    return layers
+ 
+-def train_hierarchical_network(network, sinograms, noise_images, num_iterations=1000, batch_size=20):
++def train_hierarchical_network(layers, sinograms, noise_images, num_iterations=1000, batch_size=20):
+     """
+     Trains the network end-to-end with noise-based training.
+     """
+-    optimizer = tf.keras.optimizers.SGD(learning_rate=0.01)
+-    
+     for iteration in range(num_iterations):
+         # Randomly select one layer to update
+-        layer_to_update = np.random.randint(0, len(network.layers))
++        layer_idx = np.random.randint(0, len(layers))
+         
+-        # Freeze all other layers
+-        for i, layer in enumerate(network.layers):
+-            if i != layer_to_update:
+-                layer.trainable = False
+-            else:
+-                layer.trainable = True
+-                
++        # Freeze all other layers (conceptual: skip gradient accumulation for them)
+         # Generate batch of noise
+         noise_batch = noise_images[np.random.choice(len(noise_images), batch_size)]
+@@ -195,37 +164,26 @@
+         sinogram_batch = forward_projection(noise_batch)
+         
+-        with tf.GradientTape() as tape:
+-            # Forward pass
+-            predictions = network(sinogram_batch, training=True)
+-            
+-            # Compute loss (MSE)
+-            # Note: In the source, intermediate labels are used for pre-training.
+-            # For end-to-end, the loss is typically between the final output 
+-            # and the ground truth noise images, or intermediate losses if labels exist.
+-            # The source states: "trained end-to-end without intermediate training labels"
+-            # but also mentions "pre-trained individually... then end-to-end".
+-            # Assuming end-to-end loss is MSE between output and noise_images.
+-            loss = tf.reduce_mean(tf.square(predictions - noise_batch))
+-            
+-        gradients = tape.gradient(loss, network.trainable_variables)
+-        optimizer.apply_gradients(zip(gradients, network.trainable_variables))
+-
+-def forward_projection(images):
+-    """
+-    Distance-driven forward projection of images to sinograms.
+-    """
+-    # Implementation of distance-driven projection
+-    # Returns sinogram tensor
+-    pass
++        # Forward pass through selected layer
++        predictions = layers[layer_idx].forward(sinogram_batch)
++        
++        # Compute loss (MSE)
++        loss = np.mean((predictions - noise_batch) ** 2)
++        
++        # Backward pass through selected layer
++        grad_out = 2 * (predictions - noise_batch) / (predictions.size)
++        grad_in = layers[layer_idx].backward(grad_out)
++        
++        # Update weights (conceptual SGD step)
++        # layers[layer_idx].weights -= learning_rate * gradient_of_loss_wrt_weights
+ ```
+ 
+ ### Edge Cases and Pitfalls
+ *   **Vanishing Gradients:** During end-to-end training, gradients may vanish across the deep hierarchy. This is mitigated by updating only one layer per iteration while freezing others [S1].
+-*   **Parameter Explosion:** Implementing the transforms as fully connected layers would require $512^4 \approx 69$ billion parameters per stage, which is intractable. The sparse connection layer is essential to reduce this to $O(n \log n)$ [S1].
++*   **Parameter Explosion:** Implementing the transforms as fully connected layers would require $512^4 \approx 69$ billion parameters per stage, which is intractable. The sparse connection layer reduces the parameter count to $O(n \log n)$ [S1].
+ *   **Noise Learning:** If non-linear activations are used during noise-based training, the network may learn to reproduce noise artifacts as prior information. Using linear activations constrains the network to learn the linear inverse operator [S1].
+ *   **Dimension Ratios:** The ratio of depth bins to projection angles between stages does not need to be an integer, but the network must be trained to handle the resampling [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The computational complexity scales linearly with data size, even for 3D extension, due to sparse network connections [S1].
++*   **Time Complexity:** The computational complexity scales linearly with data size, even for extension to three dimensions, due to sparse network connections between hierarchical levels [S1].
+ *   **Memory Complexity:** The number of parameters scales as $O(n \log n)$ for 2D and $O(n^2 \log n)$ for 3D, where $n$ is the data dimension. For a $512 \times 512$ 2D image, the network uses ~42 million parameters, which is 0.06% of the 69 billion parameters required by a fully connected layer [S1].
+ *   **Measured Performance:** In the reference implementation, training took ~4 hours for pre-training individual layers and ~1 day for end-to-end refinement on an NVIDIA Tesla V100 GPU [S1].

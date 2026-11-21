@@ -1,0 +1,508 @@
+#### I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs
+
+Jingsen Zhu1 Yuchi Huo2,1 Qi Ye3,6 Fujun Luan4
+
+Jifan Li1 Dianbing Xi1
+
+Lisha Wang1 Rui Tang5 Wei Hua2 Hujun Bao1 Rui Wang1
+
+1State Key Lab of CAD&CG, Zhejiang University 2Zhejiang Lab 3Zhejiang University 4Adobe Research 5KooLab, Manycore 6Key Lab of CS&AUS of Zhejiang Province
+
+
+
+# Abstract
+
+In this work, we present I*2 *-SDF, a new method for intrinsic indoor scene reconstruction and editing using differentiable Monte Carlo raytracing on neural signed distance fields (SDFs). Our holistic neural SDF-based framework jointly recovers the underlying shapes, incident radiance and materials from multi-view images. We introduce a novel bubble loss for fine-grained small objects and error-guided adaptive sampling scheme to largely improve the reconstruction quality on large-scale indoor scenes. Further, we propose to decompose the neural radiance field into spatially-varying material of the scene as a neural field through surface-based, differentiable Monte Carlo raytracing and emitter semantic segmentations, which enables physically based and photorealistic scene relighting and editing applications. Through a number of qualitative and quantitative experiments, we demonstrate the superior quality of our method on indoor scene reconstruction, novel view synthesis, and scene editing compared to state-of-the-art baselines. Our project page is at [https:](https://jingsenzhu.github.io/i2-sdf) [//jingsenzhu.github.io/i2-sdf](https://jingsenzhu.github.io/i2-sdf).
+
+# 1. Introduction
+
+Reconstructing 3D scenes from multi-view images is a fundamental task in computer graphics and vision. Neural Radiance Field (NeRF) [18] and its follow-up research leverage multi-layer perceptions (MLPs) as implicit functions, taking as input the positional and directional coordinates, to approximate the underlying geometry and appearance of a 3D scene. Such methods have shown compelling and high-fidelity results in novel view synthesis. However, we argue that novel view synthesis itself is insufficient for
+
+
+
+Figure 1. I 2 -SDF. Left: State-of-the-art neural implicit surface representation method [45] fails in reconstructing small objects inside an indoor scene (e.g. lamps and chandeliers), which is resolved by our bubbling method. Middle and Right: Our intrinsic decomposition and raytracing method enable photo-realistic scene editing and relighting applications.
+
+scene editing such as inserting virtual objects, relighting and editing surface materials with global illumination.
+
+On the other hand, inverse rendering or intrinsic decomposition, which reconstructs and decomposes the scene into shape, shading and surface reflectance from single or multiple images, enables photorealistic scene editing possibilities. It is a long-term challenge especially for largescale indoor scenes because they typically exhibit complex geometry and spatially-varying global illumination appearance. As intrinsic decomposition is an extremely ill-posed task, a physically-based shading model will crucially affect the decomposition quality. Existing neural rendering methods [2, 20, 46, 49] rely on simple rendering algorithms (such as pre-filtered shading) for the decomposition and use a global lighting representation (e.g., spherical Gaussians). Although these methods have demonstrated the effectiveness on object-level inverse rendering, they are inapplicable to complex indoor scenes. Moreover, indoor scene images are usually captured from the inside out and most lighting information has already presented inside the room. As a result, the reconstructed radiance field already provides sufficient lighting information without the need of active, external capture lighting setup.
+
+To tackle the above challenges, we propose I 2 -SDF, a new method to decompose a 3D scene into its underlying shape, material, and incident radiance components using implicit neural representations. We design a robust twostage training scheme that first reconstructs a neural SDF with radiance field, and then conducts raytracing in the SDF to decompose the radiance field into material and emission fields. As complex indoor scenes typically contain many fine-grained, thin or small structures with high-frequency details that are difficult for an implicit SDF function to fit, we propose a novel bubble loss and an error-guided adaptive sampling scheme that greatly improve the reconstruction quality on small objects in the scene. As a result, our approach achieves higher reconstruction quality in both geometry and novel view synthesis, outperforming previous state-of-the-art neural rendering methods in complex indoor scenes. Further, we present an efficient intrinsic decomposition method that decomposes the radiance field into spatially-varying material and emission fields using surfacebased, differentiable Monte Carlo raytracing, enabling various scene editing applications.
+
+In summary, our contributions include:
+
+- We introduce I2 -SDF1 , a holistic neural SDF-based framework for complex indoor scenes that jointly recovers the underlying shape, radiance, and material fields from multi-view images.
+- We propose a novel bubble loss and error-guided adaptive sampling strategy to effectively reconstruct finegrained small objects inside the scene.
+- We are the first that introduce Monte Carlo raytracing technique in scene-level neural SDF to enable photorealistic indoor scene relighting and editing.
+- We provide a high-quality synthetic indoor scene multi-view dataset, with ground truth camera pose and geometry annotations.
+
+# 2. Related Work
+
+Neural implicit scene representations (or neural fields) have recently received extensive attention from the research community for representing 3D geometry and radiance information. Neural radiance field (NeRF) [18] uses a single MLP to encode a scene as a continuous volumetric field of RGB radiance and density, giving promising results in novel view synthesis. Follow-up works accelerate reconstruction speed using voxels [29, 33], hashgrids [19] or deep image features [4, 44]. Neural fields can also be applied to represent 3D geometric functions [25, 26, 38, 43]. Despite their success in reconstructing small-scaled and textured objects, they have difficulties in handling shape-radiance ambiguity on texture-less surfaces. In this paper, we adopt one of the state-of-the-art implicit SDF methods, VolSDF [43], as our neural implicit representation backbone and overcome the difficulties in indoor scene reconstruction task.
+
+Neural 3D reconstruction for indoor scenes. Traditional multi-view stereo methods [30, 31] can produce plausible geometry of textured surfaces, but struggle with texture-less regions such as white walls commonly seen in indoor scenes. Recently, learning-based MVS methods have been widely studied, which can be divided into two categories: depth-based methods and TSDF (truncated signed distance function) based methods. NeuralRecon [34] proposes a coarse-to-fine framework to regress input images to TSDF incrementally. NerfingMVS [41] leverages depth priors to guide the point sampling in NeRF to reduce shape-radiance ambiguity. NeRFusion [48] combines the advantages of NeRF and TSDF-based fusion techniques to achieve reconstruction and rendering. Neural implicit SDF methods [38, 43], which succeed in object-level 3D reconstruction, have also been applied to indoor scene reconstruction. To tackle with texture-less regions, additional priors are exploited to guide the network optimization, including semantic priors [8], normal priors [37, 45] and depth priors [45]. The usage of priors results in improved reconstruction quality.
+
+Inverse rendering (also known as intrinsic decomposition) is a long-term challenging and ill-posed problem in computer graphics and vision, which attempts to reconstruct and factorize the scene with geometry, material and lighting from single or multiple images. Monocular methods [6, 9, 15–17, 40, 50] rely on strong priors from largescale datasets. Recent methods exploit physically-based techniques such as differentiable rendering [15, 24] or raytracing [50] to achieve high-fidelity predictions, but cannot recover full 3D reconstructions that can be viewed from arbitrary viewpoints. Multi-view methods holistically recover factorized 3D models for relighting and novel view synthesis from additional observations instead of strong priors. Neural implicit representations have been widely researched to estimate BRDF and lighting from image collections. NeRV [32] models light transport to support lighting effects such as shadows with high computational costs. Recent methods jointly estimate 3D geometry, BRDF and lighting from images. Illumination is represented as spherical Gaussians (NeRD [2], PhySG [46]), low-resolution environment maps (NeRFactor [49]), split-sum lighting model (Neural-PIL [3], NVDIFFREC [20]), or Monte-Carlo estimator (NVDIFFREC-MC [11]). However, these recent methods mainly focus on single object reconstruction and
+
+1 I 2 meaning "Intrinsics and Indoor"
+
+do not handle spatially-varying lighting conditions, which is not applicable to indoor scenes with complex geometry and lighting variations. In contrast, our method handles spatially-varying lighting and achieves indoor relighting with high fidelity.
+
+#### 3. Overview
+
+Our goal is to jointly decompose the underlying shape, incident radiance and material of the indoor scene according to multi-view input images with geometry priors such as depths and normals. We use implicit representations [18,43] to model the scene geometry, radiance and material, parameterizing each factor as a single MLP. Fig. 2 shows an overview of our pipeline, which consists of the neural SDF field (Fd), the neural radiance field (Fc), the neural material fields (Fa and Fρ) and emission field (Fe with L[·]), and finally the Monte Carlo rendering layer which uses the decomposed factors to re-render the scene image.
+
+To avoid the training ambiguities, we adopt a two-stage training scheme: We first train the geometry (Fd), radiance (Fc) and emitter semantic (Fe) fields, and then train the material (Fa, Fρ) and emission (L[·]) fields. During the optimization of material and emission fields, Fd, Fc, Fe are fixed and detached from the gradient descents.
+
+In the following sections, we first review the concepts of neural SDF field and volume rendering in Sec. 3.1. Next, we will respectively introduce the design details of decomposed components in Sec. 4, Monte Carlo rendering with raytracing in Sec. 5 and the training strategy in Sec. 6.
+
+#### 3.1. Implicit Neural Surface Representation and Volume Rendering
+
+We represent the scene geometry as an implicit signed distance function (SDF). A signed distance function is a continuous function d that maps a 3D point x to the closest distance of x to the surface:
+
+$$d : \mathbb{R}^3 \rightarrow \mathbb{R} \quad d(\mathbf{x}) = (-1)^{1_{\Omega}(\mathbf{x})} \min_{\mathbf{y} \in \mathcal{M}} \|\mathbf{x} - \mathbf{y}\|, \quad (1)$$
+
+where Ω is the scene space and M = ∂Ω is the scene surface. The sign of d(x) indicates whether the point x is inside or outside the scene. In this work, we parameterize the SDF function as a single MLP Fd. Inspired by NeRF [18], we also parameterize the scene appearance as a view-dependent radiance field Fc:
+
+$$(d(\mathbf{x}), \mathbf{z}(\mathbf{x})) = F_d(\mathbf{x}), \quad (2)$$
+
+$$\mathbf{c}(\mathbf{x}) = F_c(\mathbf{z}(\mathbf{x}), \mathbf{v}), \quad (3)$$
+
+where z(x) is a neural feature output by Fd providing deep geometric cues to the radiance field Fc, and v is the view direction to model view-dependent visual effects such as specular reflections.
+
+Following NeRF [18], we adopt differentiable volume rendering to learn scene implicit representation network from images. Specifically, to render a pixel, we cast a ray r from camera position o through the pixel along view direction v. M points x i r = o + t i rv are sampled along the ray and fed into Fd and Fc to predict their SDF value and radiance. In order to apply color accumulation, we transform SDF value d i r = d(x i r ) to volume density σ i r = σ(x i r ) [43]:
+
+
+
+| $\sigma(\mathbf{x}) = \begin{cases} \frac{1}{\beta} \left( 1 - \frac{1}{2} \exp \left( \frac{d(\mathbf{x})}{\beta} \right) \right) & \text{if } d(\mathbf{x}) < 0, \\ \frac{1}{2\beta} \exp \left( -\frac{d(\mathbf{x})}{\beta} \right) & \text{if } d(\mathbf{x}) \geq 0, \end{cases} \quad (4)$ |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+where β is a learnable parameter to control the sparsity near the surface. The pixel color Cˆ (r) for ray r is rendered via numerical integration [18]:
+
+
+$$\hat{\mathbf{C}}(\mathbf{r}) = \sum_{i=1}^M T_{\mathbf{r}}^i \alpha_{\mathbf{r}}^i \mathbf{c}_{\mathbf{r}}^i, \quad (5)$$
+
+where δ i r is the distance between adjacent sampled points x i r and x i+1 r , α i r = 1 − exp −σ i r δ i r is the alpha value of each point, and T i r = Qi−1 j=1 1 − α j r is the accumulated transmittance. Similarly, depth Dˆ(r), normal Nˆ(r) of the surface can be accumulated as:
+
+
+
+| $\hat{D}(\mathbf{r}) = \sum_{i=1}^M T_i^i \alpha_i^i t_i^i, \hat{N}(\mathbf{r}) = \sum_{i=1}^M T_i^i \alpha_i^i \hat{\mathbf{n}}_i^i$ | (6) |
+|---------------------------------------------------------------------------------------------------------------------------------------|-----|
+|                                                                                                                                       |     |
+
+where normal values n(x) can be estimated by computing the gradient of SDF function at point x.
+
+# 4. Intrinsics Decomposition
+
+#### 4.1. Geometry Field
+
+#### 4.1.1 Bubbling for Small Objects
+
+Unlike single-object scenarios, indoor scenes contain objects of different scales and different visibility levels, some of which appear rarely in the input views or are restricted in view poses due to their location (e.g. in the corner). We observe that existing indoor reconstruction methods [37, 45] frequently fail in recognizing and reconstructing thin (e.g. chair legs) or suspended (e.g. chandeliers) objects in the room, even with dense geometry priors. Fig. 1 shows a reconstruction error on the chandelier.
+
+The reason for the failure of recovering small objects in the scenes can be attributed to the inherent nature of the neural network as elaborated in [35]: the low-frequency information in a neural network tends to converge faster than the higher-frequency information. In an indoor scene, the SDF for large objects like walls and tables (corresponding to low frequency information) converges in earlier iterations. In some tasks the high-frequency details can be recovered in
+
+
+
+Figure 2. An overview of our pipeline. Multi-view images are used to learn the underlying neural SDF field (Fd), radiance field (Fc), material fields (Fa and Fρ), and emission field (Fe with L[·]), producing an intrinsic neural scene re-renderable for various applications.
+
+later iterations of training, while methods based on SDF as geometry representations can hardly recover the fine details due to vanishing gradients for small objects.
+
+Figure 3. Concept image of bubble, where dotted lines represent thin geometry (lamp in this example) not yet learned by the SDF network. Left: ∂σ ∂d rapidly vanishes as d increases, and thus the SDF cannot learn the thin object. Middle: inserting bubbles (creating zero-value surfaces) recovers the gradient flow around the missing object. Right: the bubbles grow with the introduced gradients to recover the thin object.
+
+An example of the vanishing gradients is illustrated in Fig. 3. Suppose the loss for the radiance L is a function c(σ(d(x; θ))). The derivative of L w.r.t the network parameters θ for SDF can be written as ∂L ∂c ∂c ∂σ ∂σ ∂d ∂d ∂θ . For d(x) ≥ 0, ∂σ ∂d = 2β3 exp − d(x) β (from Eq. \(4\)). Usually the learned β is large to make σ fall off the target surface rapidly, indicating ∂σ ∂d vanishes fast with increasing d(x). When the SDF for a surface with a thin object converges to the status as shown in the left of Fig. 3, the gradients ∂σ ∂d for points near the object off the surface are almost zero and therefore ∂L ∂θ remains near zero (see the gradient fields ∂σ ∂d Fig. 3\); in other words, no gradients can be acquired to recover the thin object. To address the problem, we propose to insert "bubbles" for the missing surface points to create gradients for SDF near small or thin objects. The middle figure of Fig. 3 exemplifies inserted bubbles. The inserted bubble creates many local surface islands and gradient fields near them, which then allows the growing up of new objects that are previously ignored.
+
+Specifically, we obtain the bubbles from depth images. Given a depth image D(u, v) with corresponding camera pose [R|t] and intrinsics K, the 3D point x(p) associated with a pixel p = (u, v) is
+
+
+
+
+$$\mathbf{x}(\mathbf{p}, D) = \mathbf{t} + D(u, v) \begin{pmatrix} \text{RK}^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix} \end{pmatrix}. \quad (7)$$
+
+The 3D points from depth images, i.e. the bubbles, can be regarded as an approximation of surface points during ray casting and its SDF value should be zero. In order to enforce precise surface reconstructions, we define bubble loss Lbubble to minimize the absolute SDF value of these surface points:
+
+$$\mathcal{L}_{\text{bubble}} = \sum_{\mathbf{p} \in \mathcal{P}} |d(\mathbf{x}(\mathbf{p}, D))|, \quad (8)$$
+
+where d(x) is the predicted SDF value of a point x (Eq. \(2\)), D is the depth image and P denotes the minibatch of sampled pixels in each iteration.
+
+#### 4.1.2 Error-Guided Adaptive Sampling Strategy
+
+Applying the bubble loss on the implicit SDF field can improve the 3D reconstruction quality. However, the geometry of large planar areas can already be reconstructed very well with the image-space depth loss. Applying Lbubble on 3D points within these areas is a waste of computation. Furthermore, as analyzed in Sec. 1, small objects (which is our target) make up only a small percentage of all pixels, so it will be favorable if the bubble loss is applied more frequently in these areas.
+
+Determining the areas of "small objects" is a perceptual task, which cannot be easily accomplished without semantic segmentation or manual marking. However, due to the feature of neural networks that low-frequency signals are always easier to fit than high-frequency signal [35], we can naturally filter out the uninterested large planar areas (low frequency) and preserve small-object areas (high frequency) according to the reconstruction error of the neural network. Specifically, given an error metric E (depth loss is adopted in our case), we leverage importance sampling algorithm according to a probability distribution determined by E. The PDF (Probability Density Function) of a point x(p; D) (Eq. \(7\)) is proportional to the reconstruction error E(p) at the pixel p. We also prune the pixels with errors lower than a threshold Pmin, indicating that those pixels are not of our interest. In this way, the network can pay more attention to the erroneous areas and converge faster. Please refer to our supplementary material for visualizations of PDF map.
+
+The PDF values are updated dynamically: We maintain a PDF map for each training image. After each training iteration, the PDF values for pixels in the current batch are updated with their error metrics E.
+
+Geometry loss. Together with the bubble loss, our geometry loss is as follows to approximate the geometry field:
+
+$$\begin{aligned} \mathcal{L}_{\text{geo}} &= \lambda_1 \mathcal{L}_{\text{eikonal}} + \lambda_2 \mathcal{L}_{\text{depth}} + \lambda_3 \mathcal{L}_{\text{normal}} \\ &\quad + \lambda_4 \mathcal{L}_{\text{smooth}} + \lambda_5 \mathcal{L}_{\text{bubble}}. \end{aligned} \quad (9)$$
+
+As suggested by previous work [43], we apply Eikonal term [7] to regularize SDF values
+
+$$\mathcal{L}_{\text{eikonal}} = \sum_{\mathbf{x} \in \mathcal{X}} (\|\nabla d(\mathbf{x})\|_2 - 1)^2, \quad (10)$$
+
+where X is the minibatch of 3D points uniformly sampled in 3D space and nearby surface.
+
+We use depth and normal priors to supervise our network to handle shape-radiance ambiguity. We compute the surface depth and normal by Eq. \(6\) and use L1 loss for depth and angular L1 loss for normal:
+
+$$\mathcal{L}_{\text{depth}} = \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{D}(\mathbf{r}) - D(\mathbf{r})\|_1, \quad (11)$$
+
+$$\mathcal{L}_{\text{normal}} = \sum_{\mathbf{r} \in \mathcal{R}} \|1 - \hat{N}(\mathbf{r}) \cdot N(\mathbf{r})\|_1. \quad (12)$$
+
+We also use smoothness loss [23] on the gradient of the SDF field to encourage smooth surface reconstruction:
+
+
+$$\mathcal{L}_{\text{smooth}} = \sum_{\mathbf{x} \in \mathcal{S}} \|\nabla d(\mathbf{x}) - \nabla d(\mathbf{x} + \epsilon)\|_2, \quad (13)$$
+
+where S is the minibatch of points sampled near the surface and is a small random uniform 3D perturbation.
+
+#### 4.2. Emitter Semantic Field
+
+Considering that our radiance field Fc is trained from LDR images, the light intensity from emitters (e.g. lamps/windows) is usually under-estimated. This will cause an over-dark estimation in the re-render stage (Sec. 5\). We resolve this by introducing semantic labels of emitters to optimize the radiance value emitted from light sources. We add a neural emitter semantic field Fe into our module, which determines whether the input 3D point x is on an emitter or not. The estimated emitter mask Mˆ e(r) for a ray can also be evaluated by volume accumulation
+
+$$\hat{m}(\mathbf{x}) = F_e(\mathbf{z}(\mathbf{x})), \quad (14)$$
+
+$$\hat{M}_e(\mathbf{r}) = \sum_{i=1}^M T_{\mathbf{r}}^i \alpha_{\mathbf{r}}^i \hat{m}_{\mathbf{r}}^i, \quad (15)$$
+
+where z(x) is the latent code output by SDF field Fd (Eq. \(2\)). We choose z(x) as the MLP input because it can provide latent information about the scene.
+
+Emitter segmentation loss. Given ground truth emitter masks Me, we optimize Fe by a binary cross-entropy loss:
+
+$$\mathcal{L}_{\text{emi}} = \sum_{\mathbf{r} \in \mathcal{R}} M_e(\mathbf{r}) \log \hat{M}_e(\mathbf{r}) + (1 - M_e(\mathbf{r})) \log (1 - \hat{M}_e(\mathbf{r})). \quad (16)$$
+
+After Fe is trained, it can be used by our raytracing stage to indicate if a ray hits an emitter. We use K-Means algorithm [10] to cluster emitter points as K emitters. To model HDR emissions, we define an array L[·] with size K as a learnable parameter that corresponds to the emission values of each emitter. L[·] will be queried in the raytracing and re-rendering stage (see Sec. 5\).
+
+#### 4.3. Material Field
+
+Similar to the geometry and radiance field, we parameterize the spatially-varying material of the scene as a neural field. We use physically-based GGX microfacet BRDF model [36] to present scene material and introduce two MLPs to model the albedo and roughness of the scene, respectively:
+
+| $K_d(\mathbf{x}), K_s(\mathbf{x}) = F_a(\mathbf{z}(\mathbf{x})),$ | (17) |
+|-------------------------------------------------------------------|------|
+|-------------------------------------------------------------------|------|
+
+$$\rho(\mathbf{x}) = F_\rho(\mathbf{z}(\mathbf{x})), \quad (18)$$
+
+where Kd(x) and Ks(x) are the diffuse and specular albedo at 3D point x, ρ(x) is the surface roughness at x. Note that the SDF field Fd and radiance field Fc have been pretrained and fixed. The estimated material parameter associated with a ray r can be calculated by volumetric accumulation similar to Eq. \(5\) and Eq. \(6\).
+
+Material regularizations. To enforce physical correctness for predicted material parameters, we define regularizations as
+
+$$\mathcal{L}_{\text{mreg}} = \sum_{\mathbf{x} \in \mathcal{S}} \|\hat{M}(\mathbf{x}) - \hat{M}(\mathbf{x} + \epsilon)\|_2 \quad (19)$$
+
+$$+ \sum_{\mathbf{x} \in \mathcal{S}} \left( \hat{K}_d(\mathbf{x}) + \hat{K}_s(\mathbf{x}) - 1 \right)_+, \quad (20)$$
+
+where Mˆ ∈ {Kˆ d, Kˆ s, ρˆ} denotes 3 material parameters. Similar to Eq. \(13\), we encourage smooth estimation of materials in the first loss term. According to energy conservation law, the sum of diffuse and specular albedo should not exceed 1 (the second loss term), where (·)+ is the ReLU function [21].
+
+# 5. Differentiable Monte Carlo Raytracing
+
+Given material, geometry, and lighting components, the scene appearance can be re-rendered using surface rendering algorithms. Inspired by [50], we use differentiable Monte Carlo rendering algorithm with raytracing to recover scene appearance from shape, material and illumination. The difference between our work and [50] is that their raytracing is performed on screen space while ours is in a 3D volumetric space. For a ray r : x = o + tvs, we can trace and intersect it with the neural SDF field. The intersection point s can be estimated by
+
+
+$$\mathbf{s} = \text{trace}(\mathbf{r}) = \mathbf{o} + \left( \sum_{i=1}^M T_{\mathbf{r}}^i \alpha_{\mathbf{r}}^i t_{\mathbf{r}}^i \right) \mathbf{v}_{\mathbf{s}}. \quad (21)$$
+
+We leverage Monte Carlo rendering technique to perform the scene re-rendering. We first cast the rays from camera view to obtain the surface points associated with each pixel by Eq. \(21\), as well as their corresponding surface normal by Eq. \(6\). Then, given a sample rate N, we use GGX importance sampling to generate N outgoing rays {r k s : x = s + td k s } N k=1 starting from a surface point s according to the surface normal and material parameters Nˆ(s), Kˆ d(s), Kˆ s(s), ρˆ(s). The surface color can be rendered by Monte Carlo integration:
+
+
+$$\mathbf{R}(\mathbf{s}) = \frac{1}{N} \sum_{k=1}^N \frac{f_r(\mathbf{v}_s, \mathbf{d}_s^k; \hat{N}, \hat{K}_d, \hat{K}_s, \hat{\rho}) L_s^k \cos \theta_k}{p(\mathbf{v}_s, \mathbf{d}_s^k)}, \quad (22)$$
+
+where fr and p is the evaluation and PDF value of GGX microfacet BRDF model determined by the material parameters. L k s is the predicted radiance of ray r k s :
+
+$$L_s^k = \begin{cases} \hat{\mathbf{C}}(\mathbf{r}_s^k) & \text{if not } \hat{M}_e(\mathbf{r}_s^k), \\ \mathbf{L}[\text{index}(\text{trace}(\mathbf{r}_s^k))] & \text{if } \hat{M}_e(\mathbf{r}_s^k), \end{cases} \quad (23)$$
+
+which can be divided into two cases: we use Fe to determine if r k s hits an emitter. If so, we obtain the emitter index by K-means and retrieve its emission from emission field L[·] (defined in Sec. 4.2\). Otherwise, we use Fc and volume rendering (Eq. \(5\)) to predict the radiance of the ray.
+
+#### 6. Training
+
+The training of intrinsic decomposition and the reconstruction of the indoor scenes are conducted in two stages: 1) the training of geometry and radiance fields, 2) the training of the material and emission fields.
+
+Training of geometry and radiance fields. The training scheme of the SDF network Fd and radiance network Fc is end-to-end. We firstly use geometric initialization [1] to initialize Fd, and then optimize the networks with following loss:
+
+$$\mathcal{L}_1 = \mathcal{L}_{\text{rgb}} + \lambda_{\text{geo}} \mathcal{L}_{\text{geo}} + \lambda_{\text{emi}} \mathcal{L}_{\text{emi}}, \quad (24)$$
+
+where Lrgb = P r∈R kCˆ(r) − C(r)k1. Eq. \(5\) provides volume rendering results from 3D neural representation to 2D images. R denotes the set of pixels/rays sampled in the minibatch and C(r) is the ground truth pixel color.
+
+The weight hyperparameters of some losses vary during our 3-step training:
+
+- 1. (Warm-up step) In the early stage of training, bubble loss is not applied (i.e. λ5 = 0) until the network can reconstruct a coarse scene geometry. At the end of this step, the error (PDF) maps are initialized per image.
+- 2. (Bubble step) The adaptive sampling and bubble loss are enabled in this step to reconstruct missing small structures. Note that the bubble loss breaks the stable status of the converged SDF field so far, which makes the Eikonal and smoothness regularization increase. Therefore, we disable them (i.e. λ1, λ4 = 0) to prevent potential contradictions.
+- 3. (Smooth step) Since the bubble loss will affect the smoothness and stability of the SDF field, which will have negative effects such as imprecision in normal estimation. Therefore, the bubble loss is disabled (i.e. λ5 = 0) in this step. To restore the SDF field smoothness, the training continues with the Eikonal and smoothness loss enabled again.
+
+Training of material and emission fields. We jointly train the material network Fa, Fρ and the emission array L[·] after the geometry and radiance networks (Fd, Fc, Fe) have been pretrained. During the optimization of intrinsic decomposition, the parameters of the geometry and radiance networks are fixed. Since the ground truths of material
+
+Table 1. Quantitative comparisons of novel view synthesis results. Data in brackets denote metrics in training views.
+
+
+
+| Method      |      |       |         | Synthetic | Data   |        |             |         |         | Real   | Data   |         |          |
+|-------------|------|-------|---------|-----------|--------|--------|-------------|---------|---------|--------|--------|---------|----------|
+|             |      | PSNR  | ↑       | SSIM      | ↑      | LPIPS  | ↓           | PSNR    | ↑       | SSIM   | ↑      | LPIPS   | ↓        |
+| NeuRIS      | [37] | 25.02 | (26.01) | 0.77      | (0.77) | 0.46   | (0.42)      | 22.33   | (24.45) | 0.68   | (0.71) | 0.53    | (0.50)   |
+| MonoSDF     | [45] | 25.74 | (26.73) | 0.79      | (0.78) | 0.38   | (0.43)      | 22.38   | (24.71) | 0.69   | (0.73) | 0.49    | (0.45)   |
+| NeRF        | [18] | 26.81 | (27.74) | 0.85      | (0.85) | 0.18   | (0.22)      | 24.06   | (25.58) | 0.77   | (0.78) | 0.27    | (0.27)   |
+| Instant-NGP | [19] | 23.89 | ( 31.59 | ) 0.78    | ( 0.90 | ) 0.25 | ( 0.12      | ) 22.95 | ( 28.51 | ) 0.76 | ( 0.88 | ) 0.20  | ( 0.09 ) |
+| Ours        |      | 28.42 | (29.70) | 0.87      | (0.87) | 0.15   | (0.19)      | 24.66   | (26.33) | 0.78   | (0.79) | 0.25    | (0.26)   |
+| GT          |      | Ours  |         |           | NeRF   |        | Instant-NGP |         |         | NeuRIS |        | MonoSDF |          |
+
+Figure 4. Qualitative comparisons of novel view synthesis. More results are presented in supplementary material.
+
+are impossible to capture from images, we weakly supervise the network by re-render results instead of direct supervision from strong material priors. The overall loss for this stage is
+
+$$\mathcal{L}_2 = \mathcal{L}_{\text{render}} + \lambda_{\text{mat}} \mathcal{L}_{\text{mat}}, \quad (25)$$
+
+where Lrender = P r∈R kRˆ (s(r)) − C(r)k1, minimizing the L1 error between the re-rendered result (Eq. \(22\)) and input image.
+
+### 7. Experiments
+
+We first analyze and compare our method with the stateof-the-art methods in terms of geometry reconstruction and novel view synthesis. We then demonstrate qualitative scene editing and relighting results based on our intrinsics decomposition method. Finally, we also perform ablation studies to prove the effectiveness of our design.
+
+Datasets. We propose a new synthetic multi-view indoor scene dataset, which includes well-designed scenes by artists and provides high quality rendered images with ground truth camera poses and geometry annotations (depth and normal maps). Existing datasets (such as ScanNet [5]) suffers from inaccurate camera calibration, erroneous depth capture and low image quality (such as motion blur), which will crucially affect the reconstruction quality. Our dataset provides well-designed indoor scenes with ground truth camera poses, normal and depth maps, with superior image quality to existing datasets. We also test our method on realworld scenes, specifically, a living room scene from [28] and 3 scenes from Scalable-NISR [42]. All the real data contains calibrated camera poses and depth maps. To train the emitter field, we annotate emitter masks for the real data.
+
+Metrics. For the 3D geometry reconstruction, following previous works [45], we compare on mesh-based metrics including accuracy, precision, recall and F-score. We also present image-space geometry errors including depth error and normal angular error in the supplementary. For the novel view synthesis, we use widely-used image metrics including PSNR, SSIM [39] and LPIPS [47].
+
+Baselines. We compare against state-of-the-art neural reconstruction, multi-view stereo and novel view synthesis methods. In particular, for the geometry reconstruction, VolSDF [43], NeuRIS [37] and MonoSDF [45] are compared. Since the original VolSDF method suffers from shape-radiance ambiguity and usually fails in reconstructing plausible scene structure, we add an additional depth loss when optimizing it. We mark it as "VolSDF-D" in the following figures and tables. For novel view synthesis, we also compare with NeRF [18] and Instant-NGP [19].
+
+## 7.1. Comparisons with state-of-the-art methods
+
+Novel view synthesis. We evaluate the quality of novel view synthesis on both synthetic and real data. Tab. 1 and Fig. 4 give quantitative results and qualitative results. NeRF and SDF-baselines struggle in recognizing small objects, leading to poor results. Instant-NGP performs best in training views. However, this is achieved by color over-fitting
+
+
+
+instead of accurate geometry understanding, leading to poor quality in test views. Benefiting from our high-quality geometry, our method provides good results in novel views. We also provide view interpolation results, which are displayed in the supplementary video.
+
+Table 2. Quantitative comparisons of geometric reconstruction results on synthetic data.
+
+|         | Method Ours | VolSDF-D | NeuRIS | MonoSDF |
+|---------|-------------|----------|--------|---------|
+| Acc.    | ↓ 0.035     | 0.041    | 0.036  | 0.052   |
+| Prec.   | ↑ 0.87      | 0.76     | 0.74   | 0.82    |
+| Recall  | ↑ 0.79      | 0.64     | 0.65   | 0.72    |
+| F-Score | ↑ 0.83      | 0.68     | 0.66   | 0.77    |
+
+Geometry reconstruction. We evaluate 3D geometry metrics on our synthetic dataset with ground truth meshes. Tab. 2 shows quantitative results on mesh evaluation. Our method outperforms all baselines due to the precise reconstructions on small objects. Fig. 5 shows qualitative results on the reconstructed depth and normal maps. Our method can faithfully reconstruct thin structures where baseline fails. Please refer to our supplementary material for more qualitative and quantitative results.
+
+
+
+Figure 5. Qualitative comparisons of reconstructed depth map and normal map (real data). Zoom in for details.
+
+## 7.2. Scene Editing
+
+With the decomposition results of shape, material and lighting, we can enable photo-realistic scene editing tasks such as material editing and relighting, as shown in Figs. 1 and 6. In Fig. 6, we change the hue of the light in the room (1 st column), increase the emission intensity of the lamp (2 nd column), and change the material of the closet door into a mirror (3 rd column), respectively. Note that the reflections in the specular mirror is consistent to the surroundings. With our physically-based rendering algorithm, our method can produce photo-realistic lighting effects such as specular reflections. More results and videos are presented in the supplementary.
+
+# 7.3. Ablation Studies
+
+Robustness on inaccurate depth information. In realworld scenarios, the captured depth always contains noises and errors. To simulate this, we use noisy depths, which are added with noise scaling approximately quadratically with
+
+Figure 6. Qualitative results in material editing and relighting.
+
+
+
+Figure 7. Noisy depth. Figure 8. Sampling strategy.
+
+Table 3. Ablation studies on noisy depth and sampling strategy. "σ noise" and "3σ noise" means using the standard noise model and 3 times noise model. "σ noise" induces negligible negative effects, while "3σ noise" still outperforms "Uniform".
+
+| Method       | Ours   | $\sigma$ noise | $5\sigma$ noise | Uniform |
+|--------------|--------|----------------|-----------------|---------|
+| PSNR         | 29.42  | 29.30          | 28.94           | 28.92   |
+| Depth- $L_1$ | 0.0326 | 0.0312         | 0.0328          | 0.0337  |
+
+depth z, to supervise our bubble and depth loss. As suggested by [14, 22], the noise model is = N(µ(z), σ(z)), where µ(z) = 0.0001125z 2 + 0.0048875, σ(z) = 0.002925z 2 + 0.003325. Fig. 7 and Tab. 3 shows that noisy depths produce negligible impacts on the result, demonstrating the robustness of our method.
+
+Effectiveness of adaptive sampling strategy. We ablate between the sampling strategies on bubble points sampling. We compare our error-guided adaptive sampling with uniform sampling. In Fig. 8, uniform sampling is unable to reconstruct the complete lamp pole, due to insufficient bubble points sampled from the missing pole. In Tab. 3, uniform sampling with ground truth depths is inferior to adaptive sampling with noisy depths.
+
+# 8. Conclusion and Limitations
+
+This work proposes I2 -SDF that reconstructs an intrinsic neural scene from multi-view images, enabling physicallyrealistic novel view synthesis of editable indoor scenes. With the novel bubbling strategy, we are able to recover the small objects in large-scale scenes and obtain SOTA geometry and novel view synthesis results. This work's limitations are: Firstly, the MLP-based network backbone is not powerful enough to capture high-frequency textures. Secondly, the time-consuming MC raytracing increases the total reconstruction time. We consider them as problems to be solved in the future.
+
+Acknowledgement. This work was supported in part by Key R&D Program of Zhejiang Province (No. 2023C01039), and NSFC (No. 61872319, No. 62233013), PI funding of Zhejiang Lab (121005-PI2101), Key Re-
+
+- search Project of Zhejiang Lab (No. 2022PG1BB01). References [1] Matan Atzmon and Yaron Lipman. Sal: Sign agnostic learning of shapes from raw data. In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2020. 6 [2] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P.A. Lensch. Nerd: Neural reflectance decomposition from image collections. In IEEE International Conference on Computer Vision (ICCV), 2021. 1, 2 [3] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu, Jonathan T. Barron, and Hendrik P.A. Lensch. Neuralpil: Neural pre-integrated lighting for reflectance decomposition. In Advances in Neural Information Processing Systems (NeurIPS), 2021. 2 [4] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang, Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 14124–14133, 2021. 2 [5] Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias Nießner. Scannet: Richly-annotated 3d reconstructions of indoor scenes. In Proc. Computer Vision and Pattern Recognition (CVPR), IEEE, 2017. 7 [6] Mathieu Garon, Kalyan Sunkavalli, Sunil Hadap, Nathan Carr, and Jean-Franc¸ois Lalonde. Fast spatially-varying indoor lighting estimation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 6908–6917, 2019. 2 [7] Amos Gropp, Lior Yariv, Niv Haim, Matan Atzmon, and Yaron Lipman. Implicit geometric regularization for learning shapes. In International Conference on Machine Learning, pages 3789–3799. PMLR, 2020. 5 [8] Haoyu Guo, Sida Peng, Haotong Lin, Qianqian Wang, Guofeng Zhang, Hujun Bao, and Xiaowei Zhou. Neural 3d scene reconstruction with the manhattan-world assumption. In CVPR, 2022. 2 [9] Jie Guo, Shuichang Lai, Chengzhi Tao, Yuelong Cai, Lei Wang, Yanwen Guo, and Ling-Qi Yan. Highlight-aware twostream network for single-image svbrdf acquisition. ACM Transactions on Graphics (TOG), 40(4):1–14, 2021. 2 [10] John A Hartigan and Manchek A Wong. Algorithm as 136: A k-means clustering algorithm. Journal of the royal statistical society. series c (applied statistics), 28(1):100–108, 1979. 5 [11] Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg. Shape, Light, and Material Decomposition from Images using Monte Carlo Rendering and Denoising. arXiv:2206.03380, 2022. 2 [12] James T Kajiya. The rendering equation. In Proceedings of the 13th annual conference on Computer graphics and interactive techniques, pages 143–150, 1986. 11 [13] Brian Karis and Epic Games. Real shading in unreal engine
+  - 4. Proc. Physically Based Shading Theory Practice, 4(3):1, 2013. 11 [14] Leonid Keselman, John Iselin Woodfill, Anders Grunnet-Jepsen, and Achintya Bhowmik. Intel realsense stereoscopic depth cameras. In Proceedings of the IEEE conference on computer vision and pattern recognition workshops, pages 1–10, 2017. 8 [15] Zhengqin Li, Mohammad Shafiei, Ravi Ramamoorthi, Kalyan Sunkavalli, and Manmohan Chandraker. Inverse rendering for complex indoor scenes: Shape, spatially-varying lighting and svbrdf from a single image. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 2475–2484, 2020. 2 [16] Zhengqin Li, Jia Shi, Sai Bi, Rui Zhu, Kalyan Sunkavalli, Milos Ha ˇ san, Zexiang Xu, Ravi Ramamoorthi, and Man- ˇ mohan Chandraker. Physically-based editing of indoor scene lighting from a single image. arXiv preprint arXiv:2205.09343, 2022. 2 [17] Zhengqin Li, Zexiang Xu, Ravi Ramamoorthi, Kalyan Sunkavalli, and Manmohan Chandraker. Learning to reconstruct shape and spatially-varying reflectance from a single image. In SIGGRAPH Asia 2018 Technical Papers, page
+  - 269. ACM, 2018. 2 [18] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 3, 7, 11 [19] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1– 102:15, July 2022. 2, 7 [20] Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao, Wenzheng Chen, Alex Evans, Thomas Muller, and Sanja Fi- ¨ dler. Extracting triangular 3d models, materials, and lighting from images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8280– 8290, 2022. 1, 2 [21] Vinod Nair and Geoffrey E Hinton. Rectified linear units improve restricted boltzmann machines. In Icml, 2010. 6 [22] Chuong V Nguyen, Shahram Izadi, and David Lovell. Modeling kinect sensor noise for improved 3d reconstruction and tracking. In 2012 second international conference on 3D imaging, modeling, processing, visualization & transmission, pages 524–530. IEEE, 2012. 8 [23] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In Proceedings IEEE Conf. on Computer Vision and Pattern Recognition (CVPR), 2020. 5 [24] Merlin Nimier-David, Zhao Dong, Wenzel Jakob, and Anton Kaplanyan. Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering. In Adrien Bousseau and Morgan McGuire, editors,
+
+Eurographics Symposium on Rendering - DL-only Track. The Eurographics Association, 2021. 2 [25] Michael Oechsle, Songyou Peng, and Andreas Geiger. Unisurf: Unifying neural implicit surfaces and radiance fields for multi-view reconstruction. In International Conference on Computer Vision (ICCV), 2021. 2 [26] Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR), June 2019. 2 [27] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems, 32, 2019. 11 [28] Julien Philip, Sebastien Morgenthaler, Micha ´ el Gharbi, and ¨ George Drettakis. Free-viewpoint indoor neural relighting from multi-view stereo. ACM Transactions on Graphics, 2021. 7 [29] Sara Fridovich-Keil and Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In CVPR, 2022. 2 [30] Johannes Lutz Schonberger and Jan-Michael Frahm. ¨ Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016. 2 [31] Johannes Lutz Schonberger, Enliang Zheng, Marc Pollefeys, ¨ and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In European Conference on Computer Vision (ECCV), 2016. 2 [32] Pratul P. Srinivasan, Boyang Deng, Xiuming Zhang, Matthew Tancik, Ben Mildenhall, and Jonathan T. Barron. Nerv: Neural reflectance and visibility fields for relighting and view synthesis. In CVPR, 2021. 2 [33] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In CVPR, 2022. 2 [34] Jiaming Sun, Yiming Xie, Linghao Chen, Xiaowei Zhou, and Hujun Bao. NeuralRecon: Real-time coherent 3D reconstruction from monocular video. In CVPR, 2021. 2 [35] Matthew Tancik, Pratul P. Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan T. Barron, and Ren Ng. Fourier features let networks learn high frequency functions in low dimensional domains. NeurIPS, 2020. 3, 5 [36] Bruce Walter, Stephen R Marschner, Hongsong Li, and Kenneth E Torrance. Microfacet models for refraction through rough surfaces. Rendering techniques, 2007:18th, 2007. 5, 11 [37] Jiepeng Wang, Peng Wang, Xiaoxiao Long, Christian Theobalt, Taku Komura, Lingjie Liu, and Wenping Wang. Neuris: Neural reconstruction of indoor scenes using normal priors. arXiv preprint, 2022. 2, 3, 7, 14 [38] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. NeurIPS, 2021. 2 [39] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to structural similarity. IEEE transactions on image processing, 13(4):600–612, 2004. 7 [40] Zian Wang, Jonah Philion, Sanja Fidler, and Jan Kautz. Learning indoor inverse rendering with 3d spatially-varying lighting. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 12538–12547, 2021. 2 [41] Yi Wei, Shaohui Liu, Yongming Rao, Wang Zhao, Jiwen Lu, and Jie Zhou. Nerfingmvs: Guided optimization of neural radiance fields for indoor multi-view stereo. In ICCV, 2021. 2 [42] Xiuchao Wu, Jiamin Xu, Zihan Zhu, Hujun Bao, Qixing Huang, James Tompkin, and Weiwei Xu. Scalable neural indoor scene rendering. ACM Transactions on Graphics (TOG), 2022. 7 [43] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in Neural Information Processing Systems, 34:4805–4815, 2021. 2, 3, 5, 7, 11 [44] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelNeRF: Neural radiance fields from one or few images. In CVPR, 2021. 2 [45] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction. arXiv:2022.00665, 2022. 1, 2, 3, 7, 8, 14 [46] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. PhySG: Inverse rendering with spherical gaussians for physics-based material editing and relighting. In The IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2021. 1, 2 [47] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In CVPR, 2018. 7 [48] Xiaoshuai Zhang, Sai Bi, Kalyan Sunkavalli, Hao Su, and Zexiang Xu. Nerfusion: Fusing radiance fields for largescale scene reconstruction. In CVPR, 2022. 2 [49] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ACM Transactions on Graphics (TOG), 40(6):1–18, 2021. 1, 2 [50] Jingsen Zhu, Fujun Luan, Yuchi Huo, Zihao Lin, Zhihua Zhong, Dianbing Xi, Jiaxiang Zheng, Rui Tang, Hujun Bao, and Rui Wang. Learning-based inverse rendering of complex indoor scenes with differentiable monte carlo raytracing. arXiv preprint arXiv:2211.03017, 2022. 2, 6
+
+#### A. Network Details
+
+#### A.1. Architecture
+
+All neural fields in our network are implemented by multi-layer perceptrons (MLPs). For neural SDF field Fd and radiance field Fc, we follow VolSDF [43]'s default setting, where Fd is a 8-layer MLP with hidden dimension 256 and Fc is a 4-layer MLP with hidden dimension 256. The dimension of the latent code output by Fd (i.e. z(x)) is 256, and a skip connection is used in the 4th layer in Fd. The input position x and view direction v are encoded by sinusoidal positional encoding [18], with a maximum frequency band of 6 for x and 4 for v, the same as in VolSDF [43]. The emitter semantic field Fe is a 2-layer MLP with hidden dimension 128, while material fields Fρ, Fa are 3-layer MLPs with hidden dimension 64.
+
+#### A.2. Implementation Details
+
+The network model, as well as the training and evaluation scripts, are implemented with Pytorch [27]. The network is trained per-scene on a single NVIDIA Tesla V100 GPU. We adopt two stage training scheme, the training details of the 2 stages are as follows:
+
+Training of geometry and radiance fields. We jointly optimize SDF network Fd, radiance network Fc and emitter semantic network Fe in this stage. We optimize our model for 200k iterations in this stage, which takes about 15 hours for a scene. The training loss
+
+| $\mathcal{L}_{\text{geo}} = \lambda_1 \mathcal{L}_{\text{cikonal}} + \lambda_2 \mathcal{L}_{\text{depth}} + \lambda_3 \mathcal{L}_{\text{normal}}$ |      |
+|----------------------------------------------------------------------------------------------------------------------------------------------------|------|
+| $+ \lambda_4 \mathcal{L}_{\text{smooth}} + \lambda_5 \mathcal{L}_{\text{bubble}}$                                                                  | (26) |
+| $\mathcal{L}_1 = \mathcal{L}_{\text{rgb}} + \lambda_{\text{geo}} \mathcal{L}_{\text{geo}} + \lambda_{\text{emi}} \mathcal{L}_{\text{emi}}$         | (27) |
+
+$$\mathcal{L}_1 = \mathcal{L}_{\text{rgb}} + \lambda_{\text{geo}} \mathcal{L}_{\text{geo}} + \lambda_{\text{emi}} \mathcal{L}_{\text{emi}} \quad (27)$$
+
+where the weight hyperparameters are λgeo = 1, λemi = 0.5, and λ2 = 0.1, λ3 = 0.05, respectively. For λ1, λ4, λ5, since the training process is further divided into 3 steps (i.e. warm-up, bubble and smooth), their values are adjusted during the training accordingly:
+
+- 1. In warm-up step, λ5 = 0, λ1 = 0.1, λ4 = 0.
+- 2. In bubble step, λ1 = λ4 = 0, λ5 = 0.5.
+- 3. In smooth step, λ5 = 0, λ1 = 0.1, λ4 = 0.01.
+
+The number of iterations assigned to the three steps are 50k, 100k and 50k in sequence.
+
+We use error-guided adaptive sampling in bubble step, where the pruning threshold Pmin = 0.05.
+
+Training of material and emission fields. In this stage, we use importance sampling and Monte Carlo estimation to compute the rendering result. We generate N outgoing rays to perform Monte Carlo integration. In practice, the sample rate N is set to 16, which is a trade-off between quality and performance.
+
+We jointly optimize Fa, Fρ,L[·] for 100k iterations. The bottleneck of computational cost lies in the prediction of incident radiance L k s , which grows proportional to the sample rate N. With N = 16, the training lasts for about 2-3 days.
+
+
+
+Figure 9. Display of indoor scenes in our dataset.
+
+#### B. Dataset Details
+
+Our synthetic dataset contains 12 scenes in total: 6 bedrooms, 2 living rooms, 2 dining rooms and 2 kitchens. All the scenes are well-designed by artists with detailed geometry and fine textures. We use GPU-accelerated path tracing algorithm [12] to render the images, which can create photo-realistic rendering results with global illumination. All data are rendered on a NVIDIA RTX 3090 GPU, with 4096 samples per pixel (spp). The rendering time is roughly 15 seconds per image. Fig. 9 displays some of the indoor scenes in our dataset.
+
+All images in our dataset are annotated by ground truth camera intrinsics and poses, normal maps, depth maps and emitter semantic masks.
+
+# C. BRDF Model
+
+We use GGX microfacet BRDF model [36] to approximate the surface reflection properties by a set of material parameters, including diffuse albedo Kd, specular albedo Ks and roughness ρ. In our implementation, we refer to Unreal Engine [13]'s implementation of microfacet BRDF model. The BRDF (bidirectional reflectance distribution function) fr(v, d; N, Kd, Ks, ρ) (where v and d are view and lighting directions, and N is the surface normal) can be decomposed into diffuse and specular components and computed
+
+
+
+Figure 10. Intermediate results in bubble step.
+
+by
+
+| $f_r(\mathbf{v}, \mathbf{d}) = f_d(K_d) + f_s(\mathbf{v}, \mathbf{d}; N, K_s, \rho)$ | (28) |
+|--------------------------------------------------------------------------------------|------|
+|--------------------------------------------------------------------------------------|------|
+
+$$f_d(K_d) = \frac{K_d}{\pi} \quad \alpha = \rho^2 \quad (29)$$
+
+$$f_s(\mathbf{v}, \mathbf{d}; N, K_s, \rho) = D(\alpha, N, h)G_2(\alpha, N, \mathbf{v}, \mathbf{d})F(K_s, \mathbf{d}, h) \quad (30)$$
+
+where fd and fs are the diffuse and specular components respectively, while D, G2, F are the distribution, Fresnel and geometric terms, defined as
+
+$$D(\alpha, \mathbf{N}, \mathbf{h}) = \frac{\alpha^2}{\pi((\alpha^2 - 1)(\mathbf{N} \cdot \mathbf{h})^2 + 1)^2} \quad (31)$$
+
+$$S(\alpha, \mathbf{N}, \mathbf{v}, \mathbf{d}) = (\mathbf{N} \cdot \mathbf{d}) \sqrt{\alpha^2 + (\mathbf{N} \cdot \mathbf{v})^2(1 - \alpha^2)} \quad (32)$$
+
+$$G_2(\alpha, \mathbf{N}, \mathbf{v}, \mathbf{d}) = \frac{1}{2(S(\alpha, \mathbf{N}, \mathbf{v}, \mathbf{d}) + S(\alpha, \mathbf{N}, \mathbf{d}, \mathbf{v}))} \quad (33)$$
+
+$$\text{lum}(C) = 0.213C \cdot \text{r} + 0.715C \cdot \text{g} + 0.072C \cdot \text{b}$$
+  
+(34)
+
+$$F_{90}(K_s) = \min\left(\frac{\text{lum}(K_s)}{0.04}, 1\right) \quad (35)$$
+
+$$F(K_s, \mathbf{N}, \mathbf{d}) = K_s + (F_{90}(K_s) - K_s)(1 - (\mathbf{N} \cdot \mathbf{d}))^5 \quad (36)$$
+
+In importance sampling and Monte Carlo integration, we also need to calculate the PDF value p(v, d) corresponding to the view and lighting direction:
+
+$$w_d = \frac{\text{lum}(K_d)}{\text{lum}(K_d) + \text{lum}(K_s)} \quad (37)$$
+
+$$p(\mathbf{v}, \mathbf{d}) = w_d p_d(\mathbf{v}, \mathbf{d}) + (1 - w_d) p_s(\mathbf{v}, \mathbf{d})$$
+ (38)
+
+$$p_d(\mathbf{v}, \mathbf{d}) = \frac{N \cdot \mathbf{d}}{\pi} \quad (39)$$
+
+$$G_1(\alpha, N, \mathbf{v}) = \frac{2}{\sqrt{1 + \frac{\alpha^2(1-(\mathbf{N}\cdot\mathbf{v})^2)}{(\mathbf{N}\cdot\mathbf{v})^2} + 1}} \quad (40)$$
+
+$$p_s(\mathbf{v}, \mathbf{d}) = \frac{D(\alpha, N, h)G_1(\alpha, N, \mathbf{v})}{4(\mathbf{N} \cdot \mathbf{v})} \quad (41)$$
+
+where pd and ps are the diffuse and specular components, which are mixed according to the luminance of Kd and Ks.
+
+### D. Details of Bubbling and Adaptive Sampling
+
+Intermediate results in bubble step. Fig. 10 presents the process of how the missing objects are reconstructed by our bubbling method. The chandelier is missing initially at 50k iterations. In the early stage of bubble step, the light balls are reconstructed rapidly (55k), since they are relatively large inside the chandelier. On the other hand, thin components (e.g. poles) grow slowly (70k). Eventually (150k) the entire chandelier is successfully reconstructed.
+
+
+
+
+
+Figure 11. Visualization of error-guided sampling map during training. The first row displays intermediate normal reconstruction results, while the second row displays the corresponding error PDF map.
+
+Visualization of error-guided sampling map during training. As shown in Fig. 11, at the training iteration of 50k (i.e. the start of bubble step), the chandelier is completely ignored and thus the corresponding pixels in the PDF map have high values. As the training proceeds to 80k iterations, the light balls have already been wellreconstructed, with chandelier poles still missing. Therefore, the value of pixels corresponding to light balls are reduced to 0, whereas chandelier pole pixels still need to be further sampled.
+
+# E. Additional Experimental Results
+
+Novel view synthesis. Tab. 4 displays quantitative results of per-scene novel view PSNR. It turns out that our method
+
+Table 4. Comparisons of per-scene novel view PSNR.
+
+
+
+|      |   | Ours  | NeRF  | Instant-NGP | NeuRIS | MonoSDF |
+|------|---|-------|-------|-------------|--------|---------|
+| syn  | 1 | 28.03 | 26.24 | 25.8        | 25.53  | 27.37   |
+| syn  | 2 | 30.09 | 29.27 | 27.34       | 24.30  | 24.83   |
+| syn  | 3 | 27.46 | 25.73 | 26.58       | 24.30  | 24.48   |
+| syn  | 4 | 29.64 | 27.99 | 25.95       | 26.93  | 26.67   |
+| syn  | 5 | 27.71 | 26.93 | 16.82       | 24.38  | 26.03   |
+| syn  | 6 | 28.55 | 27.27 | 16.27       | 25.21  | 26.49   |
+| syn  | 7 | 28.04 | 27.65 | 24.67       | 25.18  | 24.67   |
+| syn  | 8 | 27.83 | 25.31 | 27.72       | 24.36  | 25.39   |
+| mean |   | 29.70 | 27.09 | 23.89       | 25.02  | 25.74   |
+| real | 1 | 26.63 | 26.48 | 19.10       | 25.91  | 26.21   |
+| real | 2 | 28.01 | 27.21 | 26.32       | 23.87  | 24.38   |
+| real | 3 | 24.58 | 24.11 | 23.29       | 23.31  | 22.72   |
+| real | 4 | 21.39 | 20.86 | 19.23       | 19.82  | 20.05   |
+| mean |   | 25.15 | 24.66 | 21.99       | 23.22  | 23.34   |
+
+Table 5. Comparisons of per-scene normal angular error and depth L1 loss.
+
+
+
+|      |   | Ours  | Normal-Angular- NeuRIS | L 1 ↓ MonoSDF | Ours  | Depth- NeuRIS | L 1 ↓ MonoSDF |
+|------|---|-------|------------------------|---------------|-------|---------------|---------------|
+| syn  | 1 | 0.040 | 0.051                  | 0.036         | 0.014 | 0.240         | 0.010         |
+| syn  | 2 | 0.030 | 0.041                  | 0.035         | 0.019 | 0.331         | 0.048         |
+| syn  | 3 | 0.054 | 0.080                  | 0.073         | 0.021 | 0.319         | 0.061         |
+| syn  | 4 | 0.053 | 0.071                  | 0.065         | 0.068 | 0.312         | 0.103         |
+| syn  | 5 | 0.064 | 0.096                  | 0.058         | 0.025 | 0.227         | 0.034         |
+| syn  | 6 | 0.057 | 0.082                  | 0.054         | 0.051 | 0.355         | 0.043         |
+| syn  | 7 | 0.057 | 0.071                  | 0.076         | 0.065 | 0.335         | 0.099         |
+| syn  | 8 | 0.072 | 0.071                  | 0.064         | 0.016 | 0.274         | 0.033         |
+| mean |   | 0.053 | 0.070                  | 0.058         | 0.035 | 0.299         | 0.054         |
+
+
+
+
+
+Figure 12. Comparisons between GT material and predictions. Note that our optimization does not require supervision from GT material dataset but we still produce plausible results.
+
+outperforms all of the baselines, benefiting from our precise reconstruction of small objects and proper handling of shape-radiance ambiguity. Qualitative results are presented in Fig. 14. NeRF, NeuRIS and MonoSDF fails to reconstruct small objects such as chandeliers and lamp poles, while NeRF and Instant-NGP also sufffers from fractured reconstruction results. While Instant-NGP usually capture most high-frequency details, it likely overfits to single-view radiance and fails to ensure multi-view geometry consistency in indoor scenes, leading to poor novel view synthesis results with floating artifacts.
+
+Geometry Reconstruction. Tab. 5 displays quantitative comparisons of per-scene normal angular L1 error and depth L1 error between our method and baselines. The definition of normal angular L1 error is
+
+$$\mathcal{L}_{\text{normal}} = \|1 - \hat{N} \cdot N\|_1 \quad (42)$$
+
+Our method also outperforms NeuRIS and MonoSDF, indicating superior 3D reconstruction quality. Fig. 15 presents qualitative comparisons of the reconstructed normal maps. Our method can even recover high-frequency details on geometry, such as the spikes on the ball.
+
+Material Decomposition. Figs. 12 and 16 presents qualitative results of the decomposed diffuse albedo Kd, spec-
+
+
+
+Figure 13. Qualitative comparisons of reconstructed depth map and normal map.
+
+
+
+Figure 14. Qualitative comparisons of novel view synthesis on synthetic data and real data. Zoom in for details.
+
+
+
+Figure 15. Qualitative comparisons of normal estimation on synthetic data and real data.
+
+ular albedo Ks and roughness ρ. The material parameters are not directly supervised by GT labels, but we produce plausible results.
+
+Scene editing. With the intrinsic decomposition results, we can enable photo-realistic scene editing tasks such as material editing and relighting. Fig. 17 shows qualitative results of scene editing results in both real and synthetic data. We explore mirror insertion (top-left and bottomright), texture editing (top-right and mid-left), object inser-
+
+
+
+Figure 16. Qualitative results of decomposed materials.
+
+
+
+Figure 17. Qualitative results of scene editing and relighting.
+
+tion (mid-right) and relighting (bottom-left). Note that the edited specular reflections (on mirrors and inserted metal ball) are consistent with the surroundings. On account of our raytracing algorithm, our method is capable of casting shadows of the inserted object (see the shadows of the inserted ball on the sofa).

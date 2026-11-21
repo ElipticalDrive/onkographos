@@ -1,0 +1,145 @@
+--- v012.md
++++ v013.md
+@@ -12,5 +12,4 @@
+     *   $C_{0:k}$: The set of multi-view images captured up to the current time step $t_k$ [S1].
+     *   $F_{k-1}$: The radiance field function estimated at the previous time step $t_{k-1}$ [S1].
+-    *   Camera parameters for the current time step [S1].
+ *   **Outputs:**
+     *   $F_k$: The updated radiance field function at time $t_k$, parameterized by spatial coordinates $\mathbf{x}$ and viewing direction $\mathbf{d}$ [S1].
+@@ -19,11 +18,11 @@
+ The method relies on standard NeRF representations:
+ 1.  **Radiance Field $F_k$:** A neural network mapping $(\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\sigma \in \mathbb{R}$ is volume density and $\mathbf{c} \in \mathbb{R}^3$ is RGB color [S1]. For dynamic scenes, this may implicitly or explicitly encode time via deformation fields or 4D expansion, but the core optimization target is the field state $F_k$ [S1].
+-2.  **Occupancy Grid $G_k$:** A sparse data structure used for efficient ray sampling, which is also updated via a transition function from $G_{k-1}$ [S1].
++2.  **Occupancy Grid $G_k$:** A sparse data structure used for efficient ray sampling, which is updated via a transition function from $G_{k-1}$ [S1].
+ 
+ ### Numbered Steps
+ 
+-1.  **Initialize:** Start with an initial radiance field $F_0$ and occupancy grid $G_0$ [S1].
+-2.  **Receive Data:** At time step $k$, acquire the new set of images $C_k$ and corresponding camera poses [S1].
+-3.  **Markov Simplification:** Apply the first-order Markov assumption to simplify the probability model. Assume conditional independence such that the current radiance field $F_k$ is independent of all previous images $\{C_{0:k-1}\}$ and fields $\{F_{0:k-2}\}$ given the current images $C_k$ and previous field $F_{k-1}$ [S1]:
++1.  **Initialize:** Start with an initial radiance field $F_0$ [S1]. The occupancy grid $G_0$ is initialized to cover the scene volume [G].
++2.  **Receive Data:** At time step $k$, acquire the new set of images $C_k$ [S1].
++3.  **Markov Simplification:** Apply the first-order Markov assumption to simplify the probability model [S1]. Assume conditional independence such that the current radiance field $F_k$ is independent of all previous images $\{C_{0:k-1}\}$ and fields $\{F_{0:k-2}\}$ given the current images $C_k$ and previous field $F_{k-1}$ [S1]:
+     $$ F_k \perp\!\!\!\perp \{C_{0:k-1}, F_{0:k-2}\} \mid \{C_k, F_{k-1}\} $$
+     This reduces the estimation objective to:
+@@ -38,6 +37,6 @@
+     $$ T_i = \exp\left(-\sum_{j=0}^{i-1} \sigma_j \delta_j\right) $$
+     Here, $\sigma_i$ and $c_i$ are the density and color queried from $F_k$ at the $i$-th point on the ray [S1].
+-6.  **Optimization:** Update the parameters of $F_k$ (and potentially $G_k$) using gradient descent to minimize the loss defined in Step 4. The optimization starts from the state $F_{k-1}$ to ensure continuity and minimize the number of iterations required [S1].
+-7.  **Transition (Optional):** Update the occupancy grid $G_k$ from $G_{k-1}$ using a simple transition function to maintain efficient sampling [S1].
++6.  **Optimization:** Update the parameters of $F_k$ (and potentially $G_k$) using gradient descent to minimize the loss defined in Step 4 [S1]. The optimization starts from the state $F_{k-1}$ to ensure continuity and minimize the number of iterations required [S1].
++7.  **Transition:** Update the occupancy grid $G_k$ from $G_{k-1}$ using a simple transition function to maintain efficient sampling [S1].
+ 8.  **Stream:** Render novel views using $F_k$ at time $t_k$ [S1].
+ 
+@@ -45,51 +44,39 @@
+ 
+ ```python
+-def on_the_fly_training_step(F_prev, G_prev, images_Ck, cameras_k):
+-    """
+-    Perform one step of on-the-fly dynamic NeRF training.
++def on_the_fly_training_step(F_prev, images_Ck, cameras_k, num_iterations_per_frame, delta):
++    # Initialize current field parameters from previous step
++    F_curr = copy.deepcopy(F_prev)
+     
+-    Args:
+-        F_prev: Radiance field network from time step k-1.
+-        G_prev: Occupancy grid from time step k-1.
+-        images_Ck: List of multi-view images captured at time step k.
+-        cameras_k: Camera parameters for time step k.
+-        
+-    Returns:
+-        F_curr: Updated radiance field network for time step k.
+-    """
+-    # Initialize current field parameters from previous step
+-    F_curr = copy_parameters(F_prev)
+-    G_curr = copy_structure(G_prev)
+-    
+-    # Define the loss function based on current images and field
+-    def compute_loss(F, G, images, cameras):
++    # Volume rendering function matching the formula exactly using forward accumulation
++    def volume_render(points, directions):
++        # points: (N, 3), directions: (N, 3)
++        sigma, color = F_curr(points, directions)
++        # sigma: (N,), color: (N, 3)
++        rendered = np.zeros(3)
++        T = 1.0
++        for i in range(len(sigma)):
++            alpha = 1.0 - np.exp(-sigma[i] * delta)
++            rendered += T * alpha * color[i]
++            T *= (1.0 - alpha)
++        return rendered
++
++    # Loss computation over all cameras and pixels
++    def compute_loss():
+         total_loss = 0.0
+-        for ray in sample_rays(cameras, G):
+-            # Query density and color from the field
+-            # Note: F takes (x, d) as input. For dynamic scenes, 
+-            # F may internally handle time or deformation.
+-            sigma, color = F(ray.points, ray.directions)
+-            
+-            # Volume rendering aggregation
+-            # T_i = exp(-sum_{j=0}^{i-1} sigma_j * delta_j)
+-            # C_hat = sum_{i=0}^{N-1} T_i * (1 - exp(-sigma_i * delta_i)) * c_i
+-            rendered_color = volume_render(ray, sigma, color)
+-            
+-            # Get ground truth color for this ray
+-            gt_color = get_gt_color(ray, images)
+-            
+-            # L2 Loss
+-            total_loss += sum((rendered_color - gt_color) ** 2)
++        for cam in cameras_k:
++            for u, v in cam.pixel_coordinates:
++                ray_origin = cam.position
++                ray_direction = normalize(cam.focal_matrix @ np.array([u, v, 1.0]) - ray_origin)
++                points = ray_origin + np.array([ray_direction * (i * delta) for i in range(N)])
++                rendered = volume_render(points, ray_direction)
++                gt = cam.image[u, v]
++                total_loss += np.sum((rendered - gt) ** 2)
+         return total_loss
+ 
+     # Optimization loop
+-    # The method requires minimum optimization iterations per frame [S1]
+-    for iteration in range(num_iterations_per_frame):
+-        loss = compute_loss(F_curr, G_curr, images_Ck, cameras_k)
+-        gradients = compute_gradients(loss, F_curr)
+-        update_parameters(F_curr, gradients)
+-        
+-        # Optional: Update occupancy grid transition
+-        # G_curr = transition_function(G_prev, G_curr)
++    for _ in range(num_iterations_per_frame):
++        loss = compute_loss()
++        gradients = compute_gradient(loss, F_curr.weights)
++        F_curr.weights -= learning_rate * gradients
+         
+     return F_curr
+@@ -97,7 +84,9 @@
+ 
+ ### Parameters
+-*   **Number of optimization iterations per frame:** The method is designed to work with a minimal number of iterations to achieve interactive speed [S1]. The exact number is not specified in the sources but is implied to be significantly lower than offline training [S1].
++*   **Number of optimization iterations per frame:** The exact number is not given in the sources [S1].
+ *   **Number of samples $N$:** Not given in the sources.
+ *   **Interval $\delta$:** Not given in the sources.
++*   **Camera Setup:** The method is limited to dynamic scenes captured by multi-view forward-facing cameras [S1].
++*   **Memory Complexity:** Memory usage is dominated by the radiance field $F_k$ and the occupancy grid $G_k$ [S1].
+ 
+ ### Edge Cases and Pitfalls
+@@ -105,4 +94,5 @@
+ *   **Camera Setup:** The method is limited to dynamic scenes captured by multi-view forward-facing cameras. Monocular setups are excluded due to the need for camera movement, which is cumbersome for prolonged streaming [S1]. 360-degree inward-facing setups are also excluded due to hardware complexity [S1].
+ *   **Continuity:** The optimization must start from $F_{k-1}$ to ensure smooth transitions and minimize optimization steps [S1].
++*   **Precision:** The volume rendering loop must use forward transmittance accumulation to avoid numerical underflow or off-by-one errors when rays start inside volumes or use fine step sizes [G].
+ 
+ ## Operating characteristics
+@@ -110,5 +100,5 @@
+ ### Time and Memory Complexity
+ *   **Time Complexity:** The method aims for interactive speed by minimizing optimization iterations per frame [S1]. It avoids the $O(K)$ complexity of processing all $K$ frames jointly, instead operating in $O(1)$ per frame with respect to the history length, thanks to the Markov assumption [S1].
+-*   **Memory Complexity:** Memory usage is dominated by the radiance field $F_k$ and the occupancy grid $G_k$. It does not need to store the full history of radiance fields or images, only the current state and the immediate previous state [S1].
++*   **Memory Complexity:** Memory usage is dominated by the radiance field $F_k$ and the occupancy grid $G_k$ [S1]. It does not need to store the full history of radiance fields or images, only the current state and the immediate previous state [S1].
+ 
+ ### Measured Performance
+@@ -128,5 +118,4 @@
+ 
+ ### When Not to Use
+-*   Do not use when offline 4D reconstruction of a completed event is sufficient, as other methods may offer higher quality with full data access [S1].
+ *   Do not use with monocular or complex multi-view inward-facing setups [S1].
+ 

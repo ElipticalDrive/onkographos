@@ -1,0 +1,225 @@
+--- v001.md
++++ v002.md
+@@ -4,127 +4,130 @@
+ 
+ ## Overview
+-A strategy to improve SIMD utilization by distributing work for a single ray to many threads when rays have high workload or when standard packetization is inefficient [S1, S2, unofficial]. It addresses the loss of parallel efficiency in sparse grids with many primitives per leaf, where standard warp-level packetization fails due to divergent traversal paths [S1, S2, unofficial]. It sets itself apart by dynamically switching between standard warp-level intersection and a shared-memory-based parallel processing mode based on workload thresholds [S1, S2, unofficial].
++A strategy to improve SIMD utilization by distributing work for a single ray to many threads when rays have high workload or when standard packetization is inefficient [S1, unofficial]. It solves the problem of low occupancy in warp-level ray-triangle intersection on sparse grids with many primitives per leaf [S1, unofficial]. It sets itself apart from standard packetization by dynamically switching between warp-level parallelism and intra-ray parallelism based on workload thresholds [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- Input: A warp of 32 rays, an acceleration structure (two-level grid) with leaf nodes containing lists of triangle primitives.
+-- Output: The closest intersection distance for each ray in the warp.
++**Inputs and Outputs:**
++*   Input: A warp of 32 rays, a list of intersection candidates (primitive indices) for each ray.
++*   Output: The closest intersection distance for each ray in the warp.
+ 
+-**Data Structures**
+-- **Shared Memory Buffer**: Stores indices for rays with high workload.
+-  - Fields: `ray_index` (uint32), `first_candidate_index` (uint32).
+-  - Size: Dynamic, up to 32 entries (one per thread in the warp).
+-- **Shared Distance Arrays**: Arrays to store intersection distances for intermediate reduction.
+-- **Thread Local Memory**: Stores the final closest intersection distance for the thread's assigned ray.
++**Data Structures:**
++*   **Shared Memory Buffer:** Stores ray indices and the starting index of their intersection candidate lists.
++    *   Layout: Array of structs or interleaved integers.
++    *   Fields: `ray_id` (uint32), `candidate_start_index` (uint32).
++    *   Size: Dynamic, up to 32 entries.
++*   **Shared Memory Counter:** Atomic integer tracking the number of high-workload rays inserted into the buffer.
++*   **Thread Local Memory:** Stores the current closest intersection distance for the active thread's ray.
+ 
+-**Parameters**
+-- **High Workload Threshold**: 16 intersection candidates [S1, S2, unofficial].
+-- **Fallback Threshold**: 20 active rays with high workload [S1, S2, unofficial].
+-- **Warp Size**: 32 threads [S1, S2, unofficial].
++**Parameters:**
++*   Warp size: 32 threads [S1, unofficial].
++*   High workload threshold: 16 intersection candidates per ray [S1, unofficial].
++*   Fallback threshold: 20 active rays with high workload [S1, unofficial].
+ 
+-**Steps**
+-1. **Check Uniformity**: Determine if all 32 rays in the warp have intersection candidates.
+-   - If yes, proceed with standard ray-triangle intersection [S1, S2, unofficial].
+-2. **Check High Workload Count**: If not all rays have candidates, count the number of rays with $\ge 16$ intersection candidates.
+-   - If count $> 20$, proceed with standard intersection routine (optimized for architectures like Fermi that support more Boolean operations) [S1, S2, unofficial].
+-   - If count $\le 20$ and $> 0$, proceed with hybrid packetization [S1, S2, unofficial].
+-3. **Buffer Insertion**: For each ray with high workload:
+-   - Use an atomic increment on a shared counter to get a buffer slot index [S1, S2, unofficial].
+-   - Store the ray's global index and the index of its first intersection candidate in the shared buffer [S1, S2, unofficial].
+-   - Note: Remaining primitive indices are assumed consecutive, so only the first is stored [S1, S2, unofficial].
+-4. **Parallel Processing**: Iterate through the buffer entries, taking two at a time.
+-   - Perform 32 intersection tests for a pair of rays in parallel using the warp's threads [S1, S2, unofficial].
+-   - Store intersection distances in shared memory arrays [S1, S2, unofficial].
+-5. **Reduction**: Perform a reduction on the shared distance arrays to find the minimum distance for each ray [S1, S2, unofficial].
+-6. **Record Result**: The thread responsible for tracing the ray records the closest intersection distance in thread local memory [S1, S2, unofficial].
+-7. **Remaining Tests**: Process remaining intersection tests one by one for all rays as usual after high workload rays are processed [S1, S2, unofficial].
++**Steps:**
++1.  **Check Uniformity:** Determine if all 32 rays in the warp have intersection candidates.
++    *   If yes, proceed with standard ray-triangle intersection [S1, unofficial].
++2.  **Check High Workload Count:** If not all rays have candidates, count the number of rays with $\ge 16$ intersection candidates.
++    *   If count $> 20$, proceed with standard intersection routine (optimized for hardware Boolean operations, e.g., Fermi) [S1, unofficial].
++    *   If count $\le 20$ and $> 0$, proceed with hybrid strategy [S1, unofficial].
++3.  **Buffer Insertion:** For each ray with high workload:
++    *   Atomically increment a shared counter to get a buffer slot index.
++    *   Store the ray's index and the index of its first intersection candidate in the shared memory buffer [S1, unofficial].
++    *   Note: Remaining primitive indices are assumed consecutive, so only the start index is stored [S1, unofficial].
++4.  **Parallel Processing Loop:** Iterate through the buffer entries in pairs (two rays at a time).
++    *   For each pair, perform 32 intersection tests in parallel across the warp [S1, unofficial].
++    *   This involves each thread computing intersections for the two rays' candidate lists.
++5.  **Reduction:** Perform a reduction on the arrays of intersection distances stored in shared memory to find the minimum distance for each of the two rays [S1, unofficial].
++6.  **Result Recording:** The thread responsible for tracing each ray records the closest intersection (if any) in thread local memory [S1, unofficial].
++7.  **Remaining Rays:** After processing all high-workload rays, perform remaining intersection tests one by one for all other rays in the warp as usual [S1, unofficial].
+ 
+-**Pseudocode**
++**Pseudocode:**
+ 
+ ```python
+-def hybrid_packetization_intersect(warp_rays, grid, leaf_primitives):
++def hybrid_packetization_intersect(warp_rays, candidates_per_ray):
+     """
+-    warp_rays: List of 32 Ray objects
+-    grid: Two-level grid structure
+-    leaf_primitives: List of triangles in the current leaf node
++    warp_rays: list of 32 ray objects
++    candidates_per_ray: list of 32 lists of primitive indices
+     """
+     # Step 1: Check if all rays have candidates
+-    all_have_candidates = all(ray.has_candidates() for ray in warp_rays)
++    all_have_candidates = all(len(c) > 0 for c in candidates_per_ray)
+     if all_have_candidates:
+-        return standard_ray_triangle_intersection(warp_rays, leaf_primitives)
++        return standard_ray_triangle_intersect(warp_rays, candidates_per_ray)
+ 
+     # Step 2: Count high workload rays
+     high_workload_threshold = 16
++    high_workload_rays = []
++    for i, c in enumerate(candidates_per_ray):
++        if len(c) >= high_workload_threshold:
++            high_workload_rays.append(i)
++
+     fallback_threshold = 20
+-    high_workload_rays = [ray for ray in warp_rays if ray.candidate_count() >= high_workload_threshold]
+-    num_high_workload = len(high_workload_rays)
++    if len(high_workload_rays) > fallback_threshold:
++        return standard_ray_triangle_intersect(warp_rays, candidates_per_ray)
+ 
+-    if num_high_workload > fallback_threshold:
+-        return standard_ray_triangle_intersection(warp_rays, leaf_primitives)
+-
+-    if num_high_workload == 0:
+-        # No high workload rays, process remaining as usual
+-        return process_remaining_intersection_tests(warp_rays, leaf_primitives)
+-
+-    # Step 3: Buffer Insertion
+-    # Shared memory buffer: array of (ray_index, first_candidate_index)
+-    # Shared counter for buffer insertion
+-    shared_buffer = [None] * 32
++    # Step 3: Buffer insertion
++    # Shared memory structures assumed to be initialized
++    shared_buffer = []
+     shared_counter = 0
+     
+-    for ray in high_workload_rays:
+-        # Atomic increment to get slot
+-        slot_index = atomic_add(shared_counter, 1)
+-        shared_buffer[slot_index] = (ray.global_index, ray.first_candidate_index)
+-
+-    # Step 4 & 5: Parallel Processing and Reduction
+-    # Iterate buffer entries two at a time
+-    processed_rays = set()
++    # Atomic increment simulation for shared memory
++    for ray_idx in high_workload_rays:
++        slot = atomic_add(shared_counter, 1)
++        shared_buffer[slot] = {
++            'ray_id': ray_idx,
++            'start_index': 0 # Assuming consecutive, store start index
++        }
++    
++    num_high_workload = len(high_workload_rays)
++    
++    # Step 4 & 5: Process in pairs
++    results = {i: infinity for i in range(32)}
++    
+     for i in range(0, num_high_workload, 2):
+         if i + 1 < num_high_workload:
+-            ray1_idx, ray1_first = shared_buffer[i]
+-            ray2_idx, ray2_first = shared_buffer[i + 1]
++            ray1_idx = high_workload_rays[i]
++            ray2_idx = high_workload_rays[i+1]
+             # Perform 32 intersection tests for the pair
+-            distances = perform_parallel_intersections(ray1_idx, ray1_first, ray2_idx, ray2_first, leaf_primitives)
+-            # Reduction on distances
+-            min_dist1 = reduce_min(distances[0])
+-            min_dist2 = reduce_min(distances[1])
+-            # Record results
+-            warp_rays[ray1_idx].closest_distance = min_dist1
+-            warp_rays[ray2_idx].closest_distance = min_dist2
+-            processed_rays.add(ray1_idx)
+-            processed_rays.add(ray2_idx)
++            dist1, dist2 = parallel_intersect_pair(ray1_idx, ray2_idx, candidates_per_ray)
++            # Reduction to find closest
++            results[ray1_idx] = dist1
++            results[ray2_idx] = dist2
+         else:
+-            # Odd ray out
+-            ray_idx, ray_first = shared_buffer[i]
+-            distances = perform_parallel_intersections(ray_idx, ray_first, None, None, leaf_primitives)
+-            min_dist = reduce_min(distances[0])
+-            warp_rays[ray_idx].closest_distance = min_dist
+-            processed_rays.add(ray_idx)
++            # Handle odd ray out if necessary, though logic implies pairs
++            ray_idx = high_workload_rays[i]
++            dist = parallel_intersect_single(ray_idx, candidates_per_ray)
++            results[ray_idx] = dist
+ 
+-    # Step 7: Remaining tests
+-    for ray in warp_rays:
+-        if ray.global_index not in processed_rays:
+-            ray.closest_distance = process_remaining_intersection_tests([ray], leaf_primitives)[0]
++    # Step 7: Process remaining rays
++    for i in range(32):
++        if i not in high_workload_rays:
++            results[i] = standard_single_ray_intersect(warp_rays[i], candidates_per_ray[i])
+ 
+-    return [ray.closest_distance for ray in warp_rays]
++    return results
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-- **Precision**: Intersection distance calculations must handle floating-point precision issues, especially when comparing distances from different rays [G].
+-- **Boundaries**: Ensure buffer indices do not exceed shared memory limits [G].
+-- **Degenerate Input**: Handle cases where rays have no intersection candidates gracefully [G].
++**Edge Cases and Pitfalls:**
++*   Precision: Standard ray-triangle intersection precision issues apply.
++*   Boundaries: The assumption that primitive indices are consecutive is critical for the buffer size optimization [S1, unofficial]. If not consecutive, the buffer must store full lists, increasing memory pressure.
++*   Degenerate Input: If no rays have candidates, standard logic handles it. If exactly 20 rays have high workload, the fallback is used, which may be suboptimal but safe [S1, unofficial].
++
++## Subtopics
++
++### Standard Packetization
++The baseline method where each thread handles one ray. Less efficient for sparse grids with high primitive density per leaf. [Standard Packetization](5617-ray-tracing-and-ray-intersection-methods.md)
++
++### Warp-Level Intersection
++The fallback method used when high workload rays exceed the threshold, leveraging hardware Boolean operations. [Warp-Level Intersection](5617-ray-tracing-and-ray-intersection-methods.md)
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on the number of primitives per leaf and the number of high-workload rays. Standard packetization is $O(N)$ where $N$ is the number of primitives. Hybrid strategy adds overhead for buffer management and reduction but improves SIMD utilization for sparse grids [S1, S2, unofficial].
+-- **Memory Complexity**: Additional shared memory for the buffer and distance arrays. Buffer size is proportional to the number of high-workload rays (up to 32) [S1, S2, unofficial].
+-- **Measured Performance**: Benchmarked on GTX 280 (Fermi architecture). Performance improves for scenes with sparse grids and many primitives per leaf [S1, S2, unofficial].
+-- **Strengths**: Improves SIMD utilization in scenarios where standard packetization is inefficient due to divergent ray paths [S1, S2, unofficial].
+-- **Limitations**: Overhead from buffer management and reduction can negate benefits if too many rays have high workload [S1, S2, unofficial].
+-- **When to Use**: Sparse grids with many primitives per leaf, where standard packetization leads to poor SIMD utilization [S1, S2, unofficial].
+-- **When Not to Use**: Dense grids or scenes with low primitive counts per leaf, where standard packetization is more efficient [S1, S2, unofficial].
++*   **Time Complexity:** Depends on the number of intersection candidates. The hybrid strategy aims to balance the overhead of buffer management with the gain from parallelizing high-workload rays.
++*   **Memory Complexity:** Requires shared memory for the buffer and counter. The buffer size is limited to the number of high-workload rays (max 20 in the hybrid path).
++*   **Measured Performance:** Tested on GTX 280 (Fermi architecture). Performance improves on sparse grids with many primitives per leaf [S1, unofficial].
++*   **Strengths:** Improves SIMD utilization when rays have uneven workloads.
++*   **Limitations:** Overhead from atomic operations and buffer management can negate benefits if not tuned correctly. The thresholds (16, 20) are specific to the tested architecture and scene characteristics [S1, unofficial].
++*   **When to use:** When rendering sparse grids with high primitive density per leaf and ray coherence is low [S1, unofficial].
++*   **When not to use:** When all rays have uniform low workload or when the number of high-workload rays exceeds the fallback threshold [S1, unofficial].
+ 
+ ## Background
+-Originated in the paper "Two-Level Grids for Ray Tracing on GPUs" by J. Kalojanov, M. Billeter, and P. Slusallek [S1, S2, unofficial]. Developed to address inefficiencies in ray-triangle intersection on GPUs, particularly Fermi architecture, by leveraging shared memory and atomic operations to handle divergent ray workloads [S1, S2, unofficial].
++Originated in the paper "Two-Level Grids for Ray Tracing on GPUs" by J. Kalojanov, M. Billeter, and P. Slusallek [S1, unofficial]. The method was developed to address the inefficiencies of standard packetization on GPU architectures like Fermi, which have specific hardware capabilities for warp-level Boolean operations [S1, unofficial].
+ 
+ ## Sources

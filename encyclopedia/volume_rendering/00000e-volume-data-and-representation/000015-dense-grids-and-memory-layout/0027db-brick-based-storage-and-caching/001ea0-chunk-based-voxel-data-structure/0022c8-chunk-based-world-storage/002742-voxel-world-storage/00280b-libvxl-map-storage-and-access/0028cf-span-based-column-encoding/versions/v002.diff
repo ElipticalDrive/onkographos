@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -2,64 +2,42 @@
+ 
+ Also called: VXL span serialization
+-
+ ## Overview
+-Span-based Column Encoding compresses a single $(x,y)$ column of a sparse voxel map into a linear sequence of runs, separating air, top-surface color, and bottom-surface color. It solves the problem of efficiently serializing sparse voxel data by reducing the storage of empty space and surface boundaries to compact run-length encoded structures. It differs from [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) by focusing on vertical column integrity and explicit air/run separation rather than face-based mesh generation or horizontal chunking.
+-
++Span-based Column Encoding encodes a single $(x,y)$ column of a sparse voxel map into a sequence of `libvxl_span` structures containing air runs, top color runs, and bottom color runs [S1, unofficial]. It solves the problem of efficiently serializing sparse voxel data by reducing the storage of empty space and surface boundaries to compact run-length encoded structures [S1, unofficial].
+ ## How it works
+-**Inputs:** A `libvxl_map` structure containing width, height, depth, and a sparse block storage; coordinates $(x,y)$ defining the column to encode.
+-**Outputs:** A sequence of `libvxl_span` structures written to a buffer.
+-
++**Inputs:** A `libvxl_map` structure containing `width`, `height`, `depth`, and sparse block storage; coordinates $(x,y)$ defining the column to encode [S1, unofficial].
++**Outputs:** A sequence of `libvxl_span` structures written to a buffer [S1, unofficial].
+ **Data Structures:**
+-*   `libvxl_span`: Contains fields `color_start`, `color_end`, `air_start`, `length`, and `offset`. The exact bit layout is not specified in the sources, but it represents a run of voxels.
+-*   `libvxl_block`: Contains `position` (packed key) and `color` (uint32_t).
+-*   `position` key: Packed integer where $z$ is extracted via `key_getz()` and the rest via `key_discardz()`.
+-
++* `libvxl_span`: Contains fields `color_start`, `color_end`, `air_start`, `length`, and `offset` [S1, unofficial].
++* `libvxl_block`: Contains `position` (packed key) and `color` (uint32_t) [S1, unofficial].
++* `position` key: Packed integer where $z$ is extracted via `key_getz()` and the rest via `key_discardz()` [S1, unofficial].
+ **Steps:**
+-1.  **Initialization:** Set `first_run = true`. Determine the starting $z$ coordinate from the first block in the chunk at $(x,y)$. If no blocks exist, the column is empty.
+-2.  **Determine Top Start:** Query the map geometry at $(x,y,z)$. If a block exists (`libvxl_geometry_get` returns true), set `top_start = z`. Otherwise, set `top_start` to the $z$-coordinate of the first block in the chunk (the lowest occupied voxel). [S1, unofficial]
+-3.  **Find Top End:** Call `find_successive_surface` to identify `top_end` (the $z$ coordinate immediately above the top surface) and `last_surface_block`. [S1, unofficial]
+-4.  **Determine Bottom Start:**
+-    *   If `top_end` equals `map->depth` (column height) OR the voxel at `top_end` is not solid (`!libvxl_geometry_get`), then `bottom_start = top_end`.
+-    *   Else, if `last_surface_block` points to a block at $z=0$, set `bottom_start` to the $z$-coordinate of that block. [S1, unofficial]
+-5.  **Write Top Run:**
+-    *   Set `desc->color_start = top_start`.
+-    *   Set `desc->color_end = top_end - 1`.
+-    *   Set `desc->air_start = 0` if `first_run` is true; otherwise `desc->air_start = z` (current $z$).
+-    *   Advance the buffer offset.
+-    *   Write top colors: Loop $k$ from `top_start` to `top_end`. For each block, write `(block->color & 0xFFFFFF) | 0x7F000000`. The alpha channel is set to `0x7F` (127), indicating semi-transparency or surface status. Advance offset. [S1, unofficial]
+-6.  **Write Bottom Run:**
+-    *   Determine `bottom_end` (implied by context as the end of the bottom color run).
+-    *   If `bottom_end < map->depth`:
+-        *   Set `desc->length = 1 + (top_end - top_start) + (bottom_end - bottom_start)`.
+-        *   Write bottom colors.
+-        *   Set $z = bottom_end$.
+-    *   Else (column ends at surface or depth):
+-        *   Set `desc->length = 1 + (top_end - top_start)`.
+-        *   Set $z = bottom_start$. [S1, unofficial]
+-
++1. Initialize `first_run = true`, get starting $z$ from the first block in the chunk [S1, unofficial].
++2. Determine `top_start`: if `libvxl_geometry_get(map, x, y, z)` is true, `top_start = z`, else `top_start = key_getz(first_block->position)` [S1, unofficial].
++3. Call `find_successive_surface` to find `top_end` and `last_surface_block` [S1, unofficial].
++4. Determine `bottom_start`: if `top_end == map->depth` or `!libvxl_geometry_get(map, x, y, top_end)`, `bottom_start = top_end`. Else if `last_surface_block` points to a block at $z=0$, `bottom_start = key_getz(last_surface_block->position)` [S1, unofficial].
++5. Write `desc->color_start = top_start`, `desc->color_end = top_end - 1`, `desc->air_start = first_run ? 0 : z`. Advance offset [S1, unofficial].
++6. Write top colors: loop $k$ from `top_start` to `top_end`, write `(block->color & 0xFFFFFF) | 0x7F000000`. Advance offset [S1, unofficial].
++7. If `bottom_end < map->depth`, set `desc->length = 1 + top_end - top_start + bottom_end - bottom_start`, write bottom colors, and set `z = bottom_end`. Else set `desc->length = 1 + top_end - top_start` and `z = bottom_start` [S1, unofficial].
+ **Pseudocode:**
+ ```python
+ def encode_column(map, x, y):
+-    # 1. Initialization
+     first_run = True
+-    # Get starting z from first block in chunk
+-    chunk = chunk_fposition(map, x, y)
++    chunk = map.chunks[y * map.width + x]
+     if chunk.index == 0:
+-        return [] # Empty column
+-    
+-    # Find first block
+-    first_block = libvxl_chunk_gequal_block(chunk, pos_key(x, y, 0))
++        return []
++    first_block = next((b for b in chunk.blocks if b.position >= pos_key(x, y, 0)), None)
+     z = key_getz(first_block.position)
+-    
+-    # 2. Determine Top Start
++
+     if libvxl_geometry_get(map, x, y, z):
+         top_start = z
+     else:
+         top_start = key_getz(first_block.position)
+-        
+-    # 3. Find Top End
+-    top_end, last_surface_block = find_successive_surface(map, x, y, top_start)
+-    
+-    # 4. Determine Bottom Start
++
++    top_end = top_start
++    last_surface_block = None
++    while top_end < map.depth and libvxl_geometry_get(map, x, y, top_end):
++        last_surface_block = get_block_at(map, x, y, top_end)
++        top_end += 1
++
+     if top_end == map.depth or not libvxl_geometry_get(map, x, y, top_end):
+         bottom_start = top_end
+@@ -67,31 +45,24 @@
+         bottom_start = key_getz(last_surface_block.position)
+     else:
+-        bottom_start = top_end # Fallback if condition not met
+-        
+-    # 5. Write Top Run
+-    spans = []
++        bottom_start = top_end
++
+     desc = libvxl_span()
+     desc.color_start = top_start
+     desc.color_end = top_end - 1
+     desc.air_start = 0 if first_run else z
+-    desc.offset = 0 # Placeholder for buffer offset logic
+-    spans.append(desc)
+-    
+-    # Write top colors
++    desc.offset = 0
++    spans = [desc]
++
+     for k in range(top_start, top_end):
+         block = get_block_at(map, x, y, k)
+         if block:
+-            color = (block.color & 0xFFFFFF) | 0x7F000000
+-            write_color(color) # To buffer
+-            
+-    # 6. Write Bottom Run
+-    # Note: bottom_end is not explicitly defined in the snippet, 
+-    # assumed to be derived from geometry or block data below top_end.
+-    # Assuming bottom_end is found similarly to top_end or via geometry check.
+-    bottom_end = find_bottom_end(map, x, y, bottom_start)
+-    
++            write_color((block.color & 0xFFFFFF) | 0x7F000000)
++
++    bottom_end = bottom_start
++    while bottom_end < map.depth and libvxl_geometry_get(map, x, y, bottom_end):
++        bottom_end += 1
++
+     if bottom_end < map.depth:
+         desc.length = 1 + (top_end - top_start) + (bottom_end - bottom_start)
+-        # Write bottom colors
+         for k in range(bottom_start, bottom_end):
+             block = get_block_at(map, x, y, k)
+@@ -102,17 +73,27 @@
+         desc.length = 1 + (top_end - top_start)
+         z = bottom_start
+-        
++
+     return spans
++
++# Helper definitions [G]
++class libvxl_span:
++    color_start = 0; color_end = 0; air_start = 0; length = 0; offset = 0
++class libvxl_block:
++    position = 0; color = 0
++def pos_key(x, y, z): return (x << 24) | (y << 16) | z
++def key_getz(pos): return pos & 0xFFFF
++def libvxl_geometry_get(map, x, y, z): return map.geometry.get((x, y, z), False)
++def get_block_at(map, x, y, z):
++    chunk = map.chunks[y * map.width + x]
++    return next((b for b in chunk.blocks if b.position == pos_key(x, y, z)), None)
++def write_color(c): pass
+ ```
+-
+ **Parameters:**
+-*   `map->depth`: Total height of the voxel map.
+-*   `0x7F000000`: Alpha mask for surface blocks.
+-
++* `map->depth`: Total height of the voxel map [S1, unofficial].
++* `0x7F000000`: Alpha mask for surface blocks [S1, unofficial].
+ **Edge Cases:**
+-*   **Empty Column:** If no blocks exist in the chunk, the function should return early or handle the absence of `first_block`.
+-*   **Boundary Conditions:** `top_end` can equal `map->depth`. `bottom_start` logic depends on whether the surface touches the bottom ($z=0$) or ends at the top.
+-*   **Precision:** Color packing uses bitwise AND with `0xFFFFFF` to mask RGB, preserving only the lower 24 bits.
+-
++* **Empty Column:** If no blocks exist in the chunk, the function returns an empty list [S1, unofficial].
++* **Boundary Conditions:** `top_end` can equal `map->depth` [S1, unofficial]. `bottom_start` logic depends on whether the surface touches the bottom ($z=0$) or ends at the top [S1, unofficial].
++* **Precision:** Color packing uses bitwise AND with `0xFFFFFF` to mask RGB, preserving only the lower 24 bits [S1, unofficial].
+ ## Subtopics
+ 
+@@ -121,14 +102,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of blocks in the column, as it iterates through surface blocks to determine runs.
+-*   **Memory Complexity:** Proportional to the number of runs in the column.
+-*   **Strengths:** Efficiently compresses sparse columns by ignoring large air gaps. Explicitly handles surface colors with alpha masking.
+-*   **Limitations:** Requires random access to blocks within a column to determine geometry and colors. Not suitable for horizontal traversal without re-encoding.
+-*   **When to Use:** When serializing voxel maps for storage or network transmission where column-wise access is natural.
+-*   **When Not to Use:** When horizontal slicing or face-based mesh generation is required (use [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) instead).
+-
++* **Time Complexity:** Linear with respect to the number of blocks in the column, as it iterates through surface blocks to determine runs [G].
++* **Memory Complexity:** Proportional to the number of runs in the column [G].
++* **Strengths:** Efficiently compresses sparse columns by ignoring large air gaps [G]. Explicitly handles surface colors with alpha masking [G].
++* **Limitations:** Requires random access to blocks within a column to determine geometry and colors [G]. Not suitable for horizontal traversal without re-encoding [G].
++* **When to Use:** When serializing voxel maps for storage or network transmission where column-wise access is natural [G].
++* **When Not to Use:** When horizontal slicing or face-based mesh generation is required [G].
+ ## Background
+-Span-based Column Encoding is part of the `libvxl` library, an implementation of the Voxel Space map format used in the game *Ace of Spades*. It was developed by xtreme8000 to provide an efficient internal representation for sparse voxel data. The method derives from the `.vxl` file format specifications, focusing on compact serialization of columnar data.
+-
++Span-based Column Encoding is part of the `libvxl` library, an implementation of the Voxel Space map format used in the game *Ace of Spades* [S1, unofficial]. It was developed by xtreme8000 to provide an efficient internal representation for sparse voxel data [S1, unofficial]. The method derives from the `.vxl` file format specifications, focusing on compact serialization of columnar data [S1, unofficial].
+ ## Sources
+ [S1] xtreme8000/libvxl, https://github.com/xtreme8000/libvxl, fetched 2026-10-28 (unofficial)

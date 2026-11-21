@@ -1,0 +1,369 @@
+--- v003.md
++++ v004.md
+@@ -1,121 +1,92 @@
+ # Sampling and Jittering
+-
+ Also called: Jittered Ray Casting, Jittered Sampling Volume Rendering, RayCaster, Volume Ray Casting with Jittered Sampling and Front-to-Back Blending
+ 
+ ## Overview
+-Sampling and Jittering is a direct volume rendering technique that casts rays from the camera through a 3D voxel grid, perturbing sample positions with pre-computed offsets to reduce banding and aliasing artifacts caused by regular grid structures [S1, unofficial]. It distinguishes itself from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by breaking the periodicity of sample placement, and from [Stochastic Jittering](924-stochastic-jittering.md) by using a deterministic, fixed 2D texture for offsets rather than runtime random number generation [S1, unofficial][S6, unofficial]. It builds on [Interpolation and Sampling Techniques](2787-interpolation-and-sampling-techniques.md) by applying these perturbations before interpolation to mitigate high-frequency sampling errors.
++Sampling and Jittering is a direct volume ray casting technique that casts rays from the camera through the volume, samples voxel data with jittered step offsets to reduce banding, and composites the result using front-to-back alpha blending [S1, unofficial]. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by perturbing sample locations with random offsets, transforming structured aliasing into less visually noticeable noise [S1, unofficial]. It is particularly effective when using low sample counts or nearest-neighbor interpolation, where regular grid patterns are most visible [S1, unofficial][S2].
+ 
+ ## How it works
+-**Inputs:**
+-*   `VoxelSampler`: A 3D texture containing the volume data (scalar density and color).
+-*   `JitterTexSampler`: A 2D texture containing pre-computed jitter offsets.
+-*   `CameraPosition`: The camera's world-space position.
+-*   `LightPosition`: The light source's world-space position.
+-*   `VolExtentMin`, `VolExtentMax`: The bounding box of the volume in world space.
+-*   `RayStepSize`: The distance between consecutive sample points.
+-*   `NumSamples`: Maximum iterations per ray.
+-*   `ComputeLighting`: Boolean flag to enable shading.
+-*   `k_Ambient`, `k_Diffuse`, `k_Specular`, `k_Shininess`: Phong shading parameters.
+-
+-**Outputs:**
+-*   `FragColor`: The final composited color and alpha for the pixel.
++**Inputs and Outputs:**
++*   **Inputs:** Camera position ($\mathbf{o}$), ray direction ($\mathbf{d}$), volume texture ($V$), jitter texture ($J$), volume bounding box ($[\mathbf{VolExtentMin}, \mathbf{VolExtentMax}]$), lighting parameters ($\mathbf{k}_{Ambient}, \mathbf{k}_{Diffuse}, \mathbf{k}_{Specular}, k_{Shininess}$), and control flags ($ComputeLighting$).
++*   **Outputs:** Final fragment color ($\mathbf{dst}$).
+ 
+ **Data Structures:**
+-*   `dst`: A 4-component vector `(R, G, B, A)` initialized to `(0.0, 0.0, 0.0, 0.0)`.
+-*   `rayPosition`: A 3D vector representing the current sample location in world space.
+-*   `rayDir`: A normalized 3D vector representing the ray direction.
+-*   `rayStep`: A 3D vector representing the displacement per sample (`rayDir * RayStepSize`).
++*   **Voxel Sampler:** A 3D texture storing scalar or RGBA volume data.
++*   **Jitter Texture:** A 2D texture storing pre-computed random offsets. The width and height are defined by $JitterTexSize$. The red channel is used for the jitter value.
++*   **Ray State:** Current position $\mathbf{p}$, direction $\mathbf{d}$, step size $s$.
++
++**Parameters:**
++*   $NumSamples$: Maximum iterations per ray.
++*   $RayStepSize$: Distance between consecutive samples ($s$).
++*   $JitterTexSize$: Dimension of the jitter texture.
++*   $ComputeLighting$: Boolean flag for shading.
++*   $\mathbf{k}_{Ambient} = (0.05, 0.05, 0.05)$
++*   $\mathbf{k}_{Diffuse} = (1.0, 1.0, 1.0)$
++*   $\mathbf{k}_{Specular} = (1.0, 1.0, 1.0)$
++*   $k_{Shininess} = 100.0$
+ 
+ **Algorithm Steps:**
+-
+-1.  **Initialization**:
+-    Set `dst = (0.0, 0.0, 0.0, 0.0)`.
+-    Calculate `rayDir = normalize(rayPosition - CameraPosition)`.
+-    Calculate `rayStep = rayDir * RayStepSize`.
+-
+-2.  **Jitter Application**:
+-    Determine the 2D texture coordinate from the fragment's screen coordinates modulo `JitterTexSize`.
+-    Fetch the red channel value `jitter_value` from `JitterTexSampler` at this coordinate.
+-    Update `rayPosition = rayPosition + rayStep * jitter_value`.
+-    [G] The jitter value is typically in the range $[0, 1]$ or $[-0.5, 0.5]$ depending on the texture generation; the source implies a direct additive scaling.
+-
+-3.  **Boundary Check**:
+-    Determine if `rayPosition` is inside the volume bounds defined by `VolExtentMin` and `VolExtentMax`.
+-    The source uses a specific dot-product check:
+-    Let `test1` and `test2` be vectors derived from the position relative to the extent bounds.
+-    If `dot(test1, test2) >= 3.0`, the point is considered inside. [S1, unofficial]
+-    [G] This specific check likely corresponds to a normalized coordinate check where each component must be within $[0, 1]$, and the dot product of three valid components equals 3.0.
+-
+-4.  **Voxel Sampling**:
+-    Sample the volume data at `rayPosition` using `VoxelSampler`.
+-    Let the result be `src` (color and alpha).
+-
+-5.  **Lighting (Optional)**:
+-    If `ComputeLighting` is true:
+-    a.  **Gradient Estimation**: Estimate the normal using central differences on the alpha channel ($a$) of the voxel texture.
+-        Use offsets `ivec4(1, 0, 0, -1)` and permutations `(yxz, yzx, wyz, ywz, yzw)` to sample neighbors.
+-        Calculate `normal = normalize(sample2 - sample1)`.
+-        If `normal` is NaN (e.g., if `sample1 == sample2`), skip shading for this sample. [S1, unofficial]
+-    b.  **Phong Shading**: Apply shading to `src.rgb` using the `shading` function with `normal`, `toCamera`, and `toLight`.
+-        The shading function computes:
+-        $$ \text{halfway} = \text{normalize}(\text{toLight} + \text{toCamera}) $$
+-        $$ \text{diffuseLight} = \max(\text{dot}(\text{toLight}, \text{normal}), 0) $$
+-        $$ \text{diffuse} = \begin{cases} k_{\text{Diffuse}} \cdot \text{rgb} \cdot \text{diffuseLight} & \text{if } \text{diffuseLight} > 0 \\ 0 & \text{otherwise} \end{cases} $$
+-        $$ \text{specularLight} = \max(\text{dot}(\text{halfway}, \text{normal}), 0)^{k_{\text{Shininess}}} $$
+-        $$ \text{specular} = k_{\text{Specular}} \cdot \text{rgb} \cdot \text{specularLight} $$
+-        $$ \text{ambient} = k_{\text{Ambient}} \cdot \text{rgb} $$
+-        $$ \text{result} = \text{ambient} + \text{diffuse} + \text{specular} $$
+-        Update `src.rgb` with the result.
+-
+-6.  **Compositing**:
+-    Composite `src` into `dst` using front-to-back blending:
+-    $$ \text{dst} = (1.0 - \text{dst}.a) \cdot \text{src} + \text{dst} $$
+-
+-7.  **Early Ray Termination**:
+-    If `dst.a > 0.95`, break the loop. [S1, unofficial]
+-
+-8.  **Advancement**:
+-    Update `rayPosition = rayPosition + rayStep`.
+-    Re-evaluate the inside condition.
+-    Repeat steps 2-7 until `rayPosition` is outside bounds or `NumSamples` is reached.
+-
+-9.  **Output**:
+-    Set `FragColor = dst`.
++1.  **Initialization:** Set destination color $\mathbf{dst} = (0.0, 0.0, 0.0, 0.0)$. Calculate ray direction $\mathbf{d} = \text{normalize}(\mathbf{p}_{frag} - \mathbf{o})$. Calculate step vector $\mathbf{s} = \mathbf{d} \times RayStepSize$.
++2.  **Jitter Application:** Determine texture coordinate from fragment coordinates modulo $JitterTexSize$. Fetch jitter value $j$ from the red channel of $J$. Update ray position: $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{s} \times j$.
++3.  **Boundary Check:** Check if $\mathbf{p}$ is inside the volume bounds. Using the bounding box defined by $\mathbf{VolExtentMin}$ and $\mathbf{VolExtentMax}$, compute test vectors. If $\text{dot}(\mathbf{test1}, \mathbf{test2}) \ge 3.0$, the point is inside [S1, unofficial].
++4.  **Sampling:** Sample the volume at $\mathbf{p}$ to get source color/alpha $\mathbf{src}$.
++5.  **Lighting (Optional):** If $ComputeLighting$ is true:
++    *   Estimate gradient normal using central differences on the alpha channel ($a$) of $\mathbf{src}$. Use offsets `ivec4(1, 0, 0, -1)` and permutations (yxz, yzx, wyz, ywz, yzw) to sample neighbors [S1, unofficial].
++    *   Calculate $\mathbf{n} = \text{normalize}(\mathbf{sample2} - \mathbf{sample1})$. If $\mathbf{n}$ is NaN, skip shading [S1, unofficial].
++    *   Apply Phong shading to $\mathbf{src}.rgb$ using ambient, diffuse, and specular components [S1, unofficial].
++6.  **Compositing:** Update destination using front-to-back blending:
++    $$ \mathbf{dst} = (1.0 - \mathbf{dst}.a) \times \mathbf{src} + \mathbf{dst} $$
++7.  **Termination:** If $\mathbf{dst}.a > 0.95$, break the loop (early ray termination) [S1, unofficial].
++8.  **Advance:** Update $\mathbf{p} \leftarrow \mathbf{p} + \mathbf{s}$. Re-evaluate boundary check. Repeat until $NumSamples$ is reached or ray exits.
++9.  **Output:** Return $\mathbf{dst}$.
+ 
+ **Pseudocode:**
+-
+ ```python
+-def render_jittered_volume(fragment_coords, camera_pos, light_pos, 
+-                           vol_extent_min, vol_extent_max, 
+-                           voxel_sampler, jitter_tex_sampler, 
+-                           ray_step_size, num_samples, compute_lighting,
+-                           k_ambient, k_diffuse, k_specular, k_shininess):
+-    
+-    # 1. Initialization
++def render_jittered_volume(ray_position, camera_position, ray_step_size, num_samples, 
++                           jitter_tex, jitter_tex_size, voxel_tex, vol_extent_min, vol_extent_max,
++                           compute_lighting, light_position):
++    # 1. Initialize
+     dst = vec4(0.0, 0.0, 0.0, 0.0)
+-    ray_dir = normalize(fragment_coords - camera_pos) # Assuming fragment_coords is origin for ray
++    ray_dir = normalize(ray_position - camera_position)
+     ray_step = ray_dir * ray_step_size
+     
+-    # Initial jitter application
+-    jitter_uv = fragment_coords % jitter_tex_sampler.size
+-    jitter_val = jitter_tex_sampler.sample(jitter_uv).r
+-    ray_pos = fragment_coords + ray_step * jitter_val
++    # 2. Jitter offset application
++    # Get 2D texture coordinate from fragment coordinates modulo JitterTexSize
++    frag_coords = get_fragment_coords() # Implementation detail: derived from screen position
++    jitter_uv = vec2(frag_coords.x % jitter_tex_size, frag_coords.y % jitter_tex_size) / jitter_tex_size
++    jitter_value = texture(jitter_tex, jitter_uv).r
++    current_pos = ray_position + ray_step * jitter_value
+     
+     for i in range(num_samples):
+         # 3. Boundary Check
+-        if not is_inside_volume(ray_pos, vol_extent_min, vol_extent_max):
+-            break
++        # Check if current_pos is inside volume bounds
++        # Using sign functions and dot product logic from source
++        test1 = vec3(sign(current_pos - vol_extent_min))
++        test2 = vec3(sign(vol_extent_max - current_pos))
++        if dot(test1, test2) < 3.0:
++            # Point is outside, advance and continue or break depending on implementation
++            # Source implies re-evaluating inside condition for the loop
++            current_pos += ray_step
++            continue
+             
+-        # 4. Voxel Sampling
+-        src = voxel_sampler.sample(ray_pos)
++        # 4. Sample Voxel Data
++        src = texture(voxel_tex, current_pos)
+         
+         # 5. Lighting
+         if compute_lighting:
+-            normal = estimate_gradient_normal(voxel_sampler, ray_pos)
+-            if not is_nan(normal):
+-                src.rgb = apply_phong_shading(src.rgb, normal, camera_pos, light_pos, 
+-                                              k_ambient, k_diffuse, k_specular, k_shininess)
++            # Estimate gradient normal using central differences on alpha channel
++            # Offsets: ivec4(1, 0, 0, -1) and permutations (yxz, yzx, wyz, ywz, yzw)
++            # Note: Source implies specific neighbor sampling logic for gradient
++            sample1 = texture(voxel_tex, current_pos + vec3(0.0, 0.0, 0.0)) # Placeholder for specific neighbor logic
++            sample2 = texture(voxel_tex, current_pos + vec3(0.0, 0.0, 0.0)) # Placeholder for specific neighbor logic
++            # Actual implementation requires fetching specific neighbors based on permutations
++            # For the sake of self-contained pseudocode, we assume a gradient function exists
++            normal = estimate_gradient_normal(voxel_tex, current_pos)
++            
++            if not isnan(normal):
++                to_camera = normalize(camera_position - current_pos)
++                to_light = normalize(light_position - current_pos)
++                src.rgb = shading(src.rgb, normal, to_camera, to_light)
+         
+-        # 6. Compositing
++        # 6. Front-to-Back Blending
+         dst = (1.0 - dst.a) * src + dst
+         
+@@ -124,134 +95,78 @@
+             break
+             
+-        # 8. Advancement
+-        ray_pos += ray_step
+-        # Re-apply jitter for next step? The source implies jitter is applied once per step or per ray start.
+-        # Source says: "Apply jitter offset... add rayStep * jitter_value to rayPosition" inside the loop context 
+-        # or as a setup. The code snippet shows it before the loop or as part of the step.
+-        # Re-reading S1: "Apply jitter offset... add rayStep * jitter_value to rayPosition" is listed as a step.
+-        # Then "Advance rayPosition by rayStep".
+-        # To be precise to the source's "step" list:
+-        # Step 4: Apply jitter. Step 5: Check bounds. Step 6: Sample. ... Step 11: Advance.
+-        # This implies jitter is applied to the *current* position before sampling.
+-        # However, standard jittered sampling usually perturbs the step. 
+-        # The source code snippet is not provided, only the step list. 
+-        # The step list order: 1. Init, 2. Calc Dir/Step, 3. Apply Jitter, 4. Check Inside, 5. Sample, 6. Lighting, 7. Composite, 8. ERT, 9. Advance.
+-        # This implies jitter is applied to the position *before* the check.
+-        # Let's adjust the loop to match the source's explicit step order.
++        # 8. Advance Ray
++        current_pos += ray_step
+         
+-        # Re-evaluating source step order:
+-        # 1. Init dst
+-        # 2. Calc rayDir
+-        # 3. Calc rayStep
+-        # 4. Apply jitter offset (to rayPosition)
+-        # 5. Check inside
+-        # 6. Sample
+-        # 7. Lighting
+-        # 8. Composite
+-        # 9. ERT
+-        # 10. Advance rayPosition
+-        # 11. Re-evaluate inside
+-        
+-        # This suggests the jitter is applied to the *starting* position of the ray or each step?
+-        # "Get 2D texture coordinate from fragment coordinates... add rayStep * jitter_value to rayPosition"
+-        # If this is inside the loop, it perturbs each sample.
+-        
+-        # Let's refine the loop based on the explicit steps provided in S1.
+-        pass
++    return dst
+ 
+-def is_inside_volume(pos, min_ext, max_ext):
+-    # Source: dot(test1, test2) >= 3.0
+-    # Assuming normalized coordinates [0,1]
+-    norm_pos = (pos - min_ext) / (max_ext - min_ext)
+-    # If all components are in [0,1], dot([1,1,1], norm_pos) == sum(norm_pos)
+-    # But the source says dot(test1, test2). 
+-    # Likely test1 = [1,1,1] and test2 = norm_pos? Or test1/test2 are masks?
+-    # Given the ambiguity, we implement the check as:
+-    if all(0.0 <= c <= 1.0 for c in norm_pos):
+-        return True
+-    return False
+-
+-def estimate_gradient_normal(sampler, pos):
+-    # Central differences on alpha channel
+-    # Offsets: ivec4(1,0,0,-1) and permutations
+-    # This implies sampling neighbors in voxel space
+-    # Simplified:
+-    dx = sampler.sample(pos + vec3(1,0,0)).a - sampler.sample(pos - vec3(1,0,0)).a
+-    dy = sampler.sample(pos + vec3(0,1,0)).a - sampler.sample(pos - vec3(0,1,0)).a
+-    dz = sampler.sample(pos + vec3(0,0,1)).a - sampler.sample(pos - vec3(0,0,1)).a
+-    normal = normalize(vec3(dx, dy, dz))
+-    return normal
+-
+-def apply_phong_shading(rgb, normal, cam_pos, light_pos, k_amb, k_diff, k_spec, k_shin):
+-    to_light = normalize(light_pos - cam_pos) # Or from surface? Source uses toLight/toCamera vectors.
+-    to_camera = normalize(cam_pos - ???) # Source uses toCamera. Usually view vector.
+-    # Source shading function:
+-    halfway = normalize(to_light + to_camera) # Assuming these are normalized vectors pointing to light/camera
++def shading(rgb, normal, to_camera, to_light):
++    halfway = normalize(to_light + to_camera)
+     diffuse_light = max(dot(to_light, normal), 0.0)
+-    
+-    diffuse = vec3(0.0)
+-    specular = vec3(0.0)
++    diffuse = vec3(0.0, 0.0, 0.0)
++    specular = vec3(0.0, 0.0, 0.0)
+     
+     if diffuse_light > 0.0:
+-        diffuse = k_diff * rgb * diffuse_light
+-        specular_light = pow(max(dot(halfway, normal), 0.0), k_shin)
+-        specular = k_spec * rgb * specular_light
++        diffuse = vec3(1.0, 1.0, 1.0) * rgb * diffuse_light # k_Diffuse
++        specular_light = pow(max(dot(halfway, normal), 0.0), 100.0) # k_Shininess
++        specular = vec3(1.0, 1.0, 1.0) * rgb * specular_light # k_Specular
+         
+-    ambient = k_amb * rgb
++    ambient = vec3(0.05, 0.05, 0.05) * rgb # k_Ambient
+     return ambient + diffuse + specular
+ ```
+ 
+-*Note on Pseudocode Correction*: The source steps are sequential. The jitter is applied to `rayPosition`. The loop structure in the source is implicit. The jitter texture coordinate is derived from `fragment coordinates`. This suggests the jitter is constant for the pixel (or thread) but applied to the ray position.
++**Edge Cases and Pitfalls:**
++*   **NaN Normals:** Gradient calculation may result in NaN if `sample1` equals `sample2` or if values are identical. This is handled by checking `isnan(normal)` and skipping shading [S1, unofficial].
++*   **Early Termination:** Early ray termination occurs when accumulated alpha exceeds 0.95, potentially missing faint structures behind dense ones [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Stochastic Jittering](924-stochastic-jittering.md)
+-Stochastic jittering perturbs sample positions using random noise to mitigate banding. It sets itself apart from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by breaking periodicity, and from [Multi-Sample Anti-Aliasing via Ray Distribution](1219-multi-sample-anti-aliasing-via-ray-distribution.md) by using a fixed, pre-computed noise texture rather than distributing rays, trading visible banding for less objectionable dither patterns.
++Stochastic jittering is a sampling technique used in direct volume ray casting to mitigate banding and quantization artifacts caused by regular, uniformly spaced sample positions. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by perturbing sample locations with random offsets, transforming structured aliasing into less visually noticeable noise. It is particularly effective when using low sample counts or nearest-neighbor interpolation, where regular grid patterns are most visible.
+ 
+ ### [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md)
+-Hierarchical sampling generates importance samples by inverting the CDF of the rendering contribution. It solves the problem of efficiently placing samples in high-density regions. Unlike standard hierarchical sampling, this method uses inverse transform sampling on a piecewise approximated density field, allowing gradients to back-propagate. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by providing a deterministic/stratified mechanism to concentrate fine samples.
+-
+-### [Multi-Sample Anti-Aliasing via Ray Distribution](1219-multi-sample-anti-aliasing-via-ray-distribution.md)
+-MSAA via Ray Distribution reduces aliasing by casting multiple rays per pixel, distributed within the pixel area, and averaging results. It differs from [Stochastic Jittering](924-stochastic-jittering.md) by using deterministic, fixed offsets for low sample counts (1x–4x) rather than random patterns, and from [Monte Carlo Volume Rendering](2060-monte-carlo-volume-rendering.md) by relying on simple arithmetic averaging.
++Hierarchical sampling (Inverse CDF Sampling) is a method for generating importance samples along a ray in volume rendering by inverting the cumulative distribution function (CDF) of the rendering contribution, which is mathematically equivalent to the transmittance function. It solves the problem of efficiently placing sample points in regions of high density without redundant radiance queries, enabling differentiable end-to-end optimization of neural radiance fields. Unlike standard hierarchical sampling which samples from a piecewise constant probability density defined by coarse weights, this method uses inverse transform sampling on a piecewise approximated density field (constant or linear), allowing gradients to back-propagate through the sampling process to the density parameters. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by providing a deterministic or stratified mechanism to concentrate fine samples where the coarse pass indicated high opacity.
+ 
+ ### [Uniform Ray Sampling](1261-uniform-ray-sampling.md)
+-Uniform Ray Sampling distributes depths uniformly between near ($t_n$) and far ($t_f$) clipping planes. It assumes constant probability density and linearly decaying transmittance. It is the baseline for NeRF-style raymarching but offers the lowest efficiency compared to spatial skipping or importance sampling.
++Uniform Ray Sampling generates sample points along camera rays at equal distances between a near and far clipping plane to discretize the volume for integration. It assumes every point along the ray contributes equally to the final rendering, implying a constant probability density function (PDF) and linearly decaying transmittance. This method sets itself apart from its siblings by using fixed, deterministic spacing without adaptive logic or stratification, making it the simplest to implement but often the least efficient for scenes with large empty regions. It serves as the baseline for NeRF-style rendering.
+ 
+-### [Random Jitter with Reprojection](2782-random-jitter-with-reprojection.md)
+-Random Jitter with Reprojection reduces banding by introducing stochastic jitter and reducing noise via temporal accumulation. It distinguishes itself from pure spatial jittering by leveraging temporal coherence, projecting a pseudo-hit position from the current frame into the previous frame's screen space to blend with a history buffer.
++### [Slab-based Ray Sampling](2853-slab-based-ray-sampling.md)
++Slab-based ray sampling is an image-order caching mechanism for direct volume ray casting that groups rays into rectangular screen regions to form stacked slabs, storing voxel samples in shared memory to optimize neighborhood access for lighting and compositing. Unlike object-order bricking, which struggles with GPU hardware mapping due to per-brick lists, this method leverages the regular structure of rays within a slab to reduce memory bandwidth and latency when calculating gradients or performing ambient occlusion. It is distinct from sibling methods like [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by explicitly managing spatial locality in shared memory across multiple rays, and from [Stochastic Jittering](924-stochastic-jittering.md) by prioritizing deterministic cache coherence over variance reduction.
+ 
+ ### [Supersampling](3493-supersampling.md)
+-Supersampling minimizes aliasing by casting multiple rays per pixel and averaging results. Unlike [Stochastic Jittering](924-stochastic-jittering.md) which relies on random distribution, standard supersampling often uses structured patterns (e.g., grid-based) or hardware-accelerated interpolation. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by increasing sample density.
++Supersampling is a technique to minimize aliasing artifacts by casting multiple rays per pixel and averaging the results. It handles high-frequency components in transfer functions by performing dense quadrature of the volume render integral, assuming linearity of the scalar field between sample points but not linearity of the integral itself. Unlike pre-integration, which requires equidistant sample points and fails for nonlinear integrals, supersampling accounts for the nonlinearity of the volume render integral while avoiding oversampling of the scalar field. It differs from [Stochastic Jittering](924-stochastic-jittering.md) by using deterministic, fixed offsets for low sample counts (1x–4x) rather than random or stratified patterns, and from [Monte Carlo Volume Rendering](2060-monte-carlo-volume-rendering.md) by relying on simple arithmetic averaging rather than importance-weighted integration.
+ 
+ ### [Importance Sampling for SPH Rendering](3624-importance-sampling-for-sph-rendering.md)
+-Importance Sampling for SPH Rendering increases performance by reducing particle counts using a non-uniform strategy based on data importance and view-dependent criteria. It solves the high computational cost of large SPH datasets by sampling complex regions (e.g., phase interfaces) more densely. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by avoiding equal-time high-error trade-offs.
++Importance Sampling for SPH Rendering is a technique to increase rendering performance by reducing the number of particles used during rendering, using a non-uniform sampling strategy based on data importance and view-dependent criteria. It solves the problem of high computational cost when rendering large, unstructured Smoothed Particle Hydrodynamics (SPH) datasets by ensuring that particles in complex regions (e.g., phase interfaces, vortices) are sampled more densely than those in homogeneous areas. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by avoiding equal-time high-error trade-offs.
+ 
+-### [Ray Casting with Jittered Sampling](4151-ray-casting-with-jittered-sampling.md)
+-Ray Casting with Jittered Sampling casts rays through a 3D voxel grid, perturbing sample positions with a pre-computed jitter texture to break up regular grid patterns and reduce aliasing. Unlike stochastic methods, it uses deterministic offsets stored in a 2D texture rather than runtime random number generation [G].
++### [Epipolar Sampling](3899-epipolar-sampling.md)
++Epipolar sampling is a technique for aggregating features from multiple views by sampling along epipolar lines rather than along the camera ray in 3D space. It solves the problem of scale ambiguity in 3D reconstruction from sparse views, where camera poses are scaled by an arbitrary factor, preventing the inference of metric depth from a single view. Unlike standard volume rendering which samples along a ray, this method samples features from a reference pixel and correlates them with features sampled along the corresponding epipolar line in a second view, augmented with positionally encoded depths.
+ 
+ ### [Warp-based Sampling](4298-warp-based-sampling.md)
+-Warp-based Sampling is a GPU optimization that improves texture cache performance by reorganizing thread warps to align sampling directions with memory strides. Unlike standard sampling, it assigns a single warp to a single ray, marching through the volume in chunks equal to the warp size. This minimizes memory stride within the atomic scheduling unit, effective for large dynamic volumes at low resolutions.
++Warp-based Sampling is a GPU optimization strategy for direct volume ray casting that improves texture cache performance by reorganizing thread warps to align sampling directions with the volume's memory strides. Unlike standard sampling where a warp processes a block of pixels, Warp Marching assigns a single warp to a single ray, marching through the volume in chunks equal to the warp size. This approach minimizes memory stride within the atomic scheduling unit (the warp), making it particularly effective for rendering large dynamic volumes at low resolutions where view-independent performance is critical.
++
++### [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md)
++Hierarchical sampling is a two-stage strategy for volume rendering that improves image quality by concentrating samples in regions of high geometric or color complexity, thereby addressing the sensitivity of neural radiance fields to sparse initial sampling. It sets itself apart from uniform sampling by using a coarse network to estimate density and guide importance sampling for a fine network, and from [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by explicitly defining the coarse-to-fine pipeline as the primary mechanism for efficiency, often implemented via the inverse-CDF of coarse weights.
+ 
+ ### Resampling Techniques
+-Resampling techniques align geometry and color between scenes along corresponding rays [S2]. Uniform sampling can lead to misalignment. Density-based resampling identifies density peaks along each ray and adjusts sampling to align key points in both scenes, ensuring improved color-geometry consistency [S2].
++Resampling techniques align geometry and color between scenes along corresponding rays [S2]. Uniform sampling points evenly along the ray but can lead to misalignment. A strategy exists where points are valid only if density exceeds a threshold in both scenes, without resampling. Density-based resampling identifies density peaks along each ray and adjusts sampling to align key points in both scenes, ensuring improved color-geometry consistency [S2].
+ 
+ ### Consistent Ray Sampling
+-Consistent Ray Sampling ensures ray sample intervals are consistent across all subvolumes to allow correct reconstruction of the original volume and prevent feature loss [S3]. It calculates the starting sample location for each subvolume such that the distance between the first sample of the new subvolume and the last sample of the previous subvolume equals the predetermined interval. Incorrect calculation causes small features to be lost or enhanced erroneously [S3].
++Consistent Ray Sampling ensures that ray sample intervals are consistent across all subvolumes to allow correct reconstruction of the original volume and prevent feature loss or enhancement [S3]. The starting sample location for each subvolume is calculated such that the distance between the first sample of the new subvolume and the last sample of the previous subvolume equals the predetermined interval. Incorrect calculation of sample locations causes small features in the data to be lost or enhanced erroneously [S3].
+ 
+-### Interleaved Sampling
+-Interleaved sampling samples every $2^n$ voxels as long as voxels are fully transparent, sampling only $1/4$ of the points in the image and interpolating. It is faster for interactive mode but results in less quality compared to full sampling [S4, unofficial].
++### Ray Direction Jitter
++Ray Direction Jitter improves generalizability by applying sub-pixel jitter to ray directions [S4]. Instead of shooting in the pixel centers, a jitter $\psi$ is applied such that:
++$$ \mathbf{x}_i = \mathbf{o} + t_i (\mathbf{d} + \psi) $$
++where $\psi$ is sampled uniformly such that the resulting ray still confines to the boundaries of its designated pixel [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of samples per ray (or `NumSamples`).
+-*   **Memory Complexity**: $O(V)$ for the volume texture and $O(J)$ for the jitter texture, where $V$ is the volume size and $J$ is the jitter texture size.
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Performance scales linearly with resolution and sample count. Early ray termination can reduce average sample count.
+-*   **Strengths**: Reduces banding artifacts effectively; deterministic jitter avoids runtime RNG overhead; simple to implement.
+-*   **Limitations**: Can miss faint structures behind dense ones due to early ray termination (alpha > 0.95); gradient calculation may result in NaN if values are identical.
+-*   **When to use**: When banding artifacts from uniform sampling are visible and deterministic jitter is preferred over stochastic methods.
+-*   **When not**: When high-frequency detail preservation is critical and early ray termination might obscure it; when gradient-based lighting is not required or desired.
++*   **Time Complexity:** Linear with respect to the number of samples per ray ($NumSamples$) and the number of pixels.
++*   **Memory Complexity:** Depends on the volume texture size and the jitter texture size ($JitterTexSize^2$).
++*   **Strengths:** Reduces banding artifacts significantly compared to uniform sampling, especially at low sample counts. Simple to implement in shaders.
++*   **Limitations:** Early ray termination may miss faint structures. Gradient estimation can be noisy or produce NaNs.
++*   **When to use:** When visual quality (reduction of banding) is prioritized over strict physical accuracy or when using low sample counts.
++*   **When not to use:** When high precision is required for faint structures behind dense ones, or when deterministic sampling is strictly required for reproducibility without random seeds.
+ 
+ ## Background
+-The method originates from direct volume rendering techniques that utilize jittered sampling to improve image quality. The specific implementation details, including the jitter texture application, Phong shading, and early ray termination threshold, are derived from the VoxViz/GigaVoxels debug renderer and associated thesis work [S1, unofficial]. The concept of jittered sampling to mitigate aliasing in volume rendering is a well-established technique in computer graphics, often cited in general volume rendering introductions [S4, unofficial].
++The method originates from direct volume ray casting techniques that utilize jittered sampling to mitigate aliasing. The specific implementation details, including the jitter texture lookup and Phong shading integration, are documented in the VoxViz thesis [S1, unofficial]. Consistent sampling across subvolumes for parallel rendering was discussed in early parallel ray tracing algorithms [S3]. Ray direction jitter for generalizability in neural rendering contexts was introduced in NeRF for Outdoor Scene Relighting [S4].
+ 
+ ## Sources
+@@ -259,3 +174,3 @@
+ [S2] Generalized TensoRF: Efficient Multi-Scene Radiance Fields and View-Consistent 3D Editing, https://doi.org/10.1145/3722564.3728385, fetched 2026-10-29
+ [S3] A data distributed, parallel algorithm for ray-traced volume ..., https://www.cs.ucdavis.edu/~ma/papers/PRS93.pdf, fetched 2026-10-27
+-[S4] Introduction to volume rendering, https://slidetodoc.com/introduction-to-volume-rendering-presented-by-zvi-devir/, fetched 2026-10-29 (unofficial)+[S4] NeRF for Outdoor Scene Relighting, https://doi.org/10.1007/978-3-031-19787-1_35, fetched 2026-10-26

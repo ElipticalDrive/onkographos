@@ -1,0 +1,217 @@
+--- v003.md
++++ v004.md
+@@ -5,5 +5,5 @@
+ ## Overview
+ 
+-Zero Order Integration approximates the continuous volume rendering integral by a Riemann sum over $n$ equidistant segments, assuming the scalar signal (density/extinction) is constant within each segment [S1, S2, unofficial][S4, book][S6]. It sets itself apart from higher-order methods like [Runge-Kutta 4 (RK4) Integration](3158-runge-kutta-4-rk4-integration.md) or [Partial Pre-Integration](1148-partial-pre-integration.md) by requiring only one texture lookup per step and no pre-computed tables, but at the cost of significant approximation errors and visible discontinuities [S4, book][S6]. Unlike [Back-to-Front Accumulation](831-volume-raycasting-discretization.md) which cannot perform early ray termination, the forward iteration form of this method supports early ray termination [S4, book].
++Zero Order Integration approximates the continuous volume rendering integral by a Riemann sum over $n$ equidistant segments, assuming the scalar signal (density/extinction) is constant within each segment [S1, S2, unofficial][S4, unofficial][S6]. It sets itself apart from higher-order methods like [Runge-Kutta 4 (RK4) Integration](3158-runge-kutta-4-rk4-integration.md) or [Partial Pre-Integration](1148-partial-pre-integration.md) by requiring only one sample lookup per step and no pre-computed tables, but at the cost of significant approximation errors and visible discontinuities [S4, unofficial][S6]. Unlike back-to-front accumulation which cannot perform early ray termination, the forward iteration form of this method supports early ray termination [S5, book].
+ 
+ ## How it works
+@@ -14,37 +14,36 @@
+ 
+ **Data Structures:**
+-*   Sample points $x_i = i \Delta x$ for $i = 1 \dots n$ (or $s_i = i \Delta s$) [S2, unofficial][S5].
+-*   Pre-computed or on-the-fly values for $\tau(x_i)$ and $c(x_i)$ [S4, book].
++*   Sample points $x_i = i \Delta x$ for $i = 0 \dots n-1$ [S5, book].
++*   Pre-computed or on-the-fly values for $\tau(x_i)$ and $c(x_i)$ [S4, unofficial].
+ 
+ **Formulas:**
+-The transparency of the $i$-th segment is defined as [S1, S2, unofficial][S5]:
+-$$ T_i \approx e^{-\tau(x_i)\Delta x} $$
++The transparency of the $i$-th segment is defined as [S5, book]:
++$$ T_i = \exp(-\tau(x_i)\Delta x) $$
+ The color contribution of the $i$-th segment is [S1, unofficial]:
+-$$ c_i \approx q(x_i)\Delta x $$
++$$ c_i = q(x_i)\Delta x $$
+ Alternatively, using opacity $A_i = 1 - T_i$ [S2, unofficial]:
+ $$ A_i \approx \tau(x_i)\Delta x \quad \text{when } \tau(x_i)\Delta x \ll 1.0 $$
+-The accumulated transmittance up to sample $i$ is [S2, unofficial][S4, book]:
+-$$ T(s_i) \cong \prod_{j=1}^{i} \exp(-\tau(s_j)\Delta s) $$
+-The final color approximation (assuming background $I_0 = 0$) is [S2, unofficial][S4, book]:
+-$$ C \approx \sum_{i=1}^{n} C_i \prod_{j=i+1}^{n} T_j $$
+-where $C_i$ is the emission of the $i$-th segment [S2, unofficial].
++The accumulated transmittance up to sample $i$ is [S5, book]:
++$$ T(s_i) = \prod_{j=0}^{i-1} \exp(-\tau(x_j)\Delta x) $$
++The final color approximation (assuming background $B$) is [S5, book]:
++$$ C \approx \sum_{i=0}^{n-1} T(s_i) \tau(x_i) c(x_i) \Delta x + T(D) B $$
+ 
+ **Parameters:**
+ *   $n$: Number of segments. Not given in the sources.
+-*   $\Delta x = D/n$: Segment length [S2, unofficial][S5].
++*   $\Delta x = D/n$: Segment length [S2, unofficial][S5, book].
+ 
+ **Steps:**
+-1.  Divide the interval $[0, D]$ into $n$ equal segments of length $\Delta x = D/n$ [S2, unofficial][S5].
+-2.  Choose sample points $x_i = i\Delta x$ for $i=1 \dots n$ [S5].
+-3.  Evaluate extinction $\tau(x_i)$ and color/emission $c(x_i)$ at each sample point [S4, book].
+-4.  Compute segment transparency $T_i = \exp(-\tau(x_i)\Delta x)$ [S5].
++1.  Divide the interval $[0, D]$ into $n$ equal segments of length $\Delta x = D/n$ [S2, unofficial][S5, book].
++2.  Choose sample points $x_i = i\Delta x$ for $i=0 \dots n-1$ [S5, book].
++3.  Evaluate extinction $\tau(x_i)$ and color/emission $c(x_i)$ at each sample point [S4, unofficial].
++4.  Compute segment transparency $T_i = \exp(-\tau(x_i)\Delta x)$ [S5, book].
+ 5.  Compute segment color contribution $c_i = q(x_i)\Delta x$ [S1, unofficial] or $C_i = g(x_i)$ [S2, unofficial].
+ 6.  Composite the results using either Front-to-Back or Back-to-Front iteration.
+ 
+ **Pseudocode (Front-to-Back with Early Ray Termination):**
+-This corresponds to "Iteration A" [S4, book].
++This corresponds to "Iteration A" [S5, book].
+ 
+ ```python
+-def zero_order_integration_front_to_back(n, D, tau_func, c_func, background_color=0.0):
++def zero_order_integration_front_to_back(n, step, tau_func, c_func, background_color=0.0, t_threshold=1e-4):
+     """
+     Zero Order Integration using Front-to-Back iteration with early ray termination.
+@@ -52,89 +51,48 @@
+     Args:
+         n: Number of segments.
+-        D: Total ray length.
++        step: Distance between consecutive samples (DeltaS).
+         tau_func: Function returning extinction coefficient tau(s).
+         c_func: Function returning color/emission c(s).
+-        background_color: Background intensity I0.
++        background_color: Background intensity B.
++        t_threshold: Threshold for early ray termination. [G] Standard small epsilon.
+         
+     Returns:
+         Final color C.
+     """
+-    delta_s = D / n
+     accumulated_color = 0.0
+     accumulated_transmittance = 1.0
+     
+-    # Threshold for early termination. Not given in sources, typically a small epsilon.
+-    # [G] Use a standard small value like 1e-4 for T threshold.
+-    T_threshold = 1e-4 
+-    
+-    for i in range(1, n + 1):
+-        # Early ray termination check
+-        if accumulated_transmittance < T_threshold:
++    for i in range(n):
++        if accumulated_transmittance < t_threshold:
+             break
+             
+-        s_i = i * delta_s
+-        tau_i = tau_func(s_i)
+-        c_i = c_func(s_i)
++        tau_i = tau_func(i * step)
++        c_i = c_func(i * step)
+         
+-        # Segment transparency T_i
+-        # [S2, unofficial] Simplified approximation: A_i = tau_i * delta_s
+-        # [S1, unofficial][S5] Exact approximation: T_i = exp(-tau_i * delta_s)
+-        # We use the exact exponential form as it is more robust.
+-        T_i = math.exp(-tau_i * delta_s)
++        accumulated_color += accumulated_transmittance * tau_i * c_i * step
++        accumulated_transmittance *= math.exp(-tau_i * step)
+         
+-        # Segment color contribution C_i
+-        # [S1, unofficial] c_i approx q(s_i) * delta_x
+-        # [S2, unofficial] C_i = g(i*delta_x) (assuming pre-multiplied or handled by transfer function)
+-        # The formula C = sum(C_i * prod(T_j)) implies C_i is the emitted color of the slab.
+-        # In standard DVR, C_i = (1 - T_i) * color_i.
+-        # However, S4's Iteration A uses: E = E + T * tau[i] * c[i].
+-        # This implies the term added is T * (tau * c * delta_s).
+-        # Let's follow S4's Iteration A structure directly for consistency with "Iteration A".
+-        
+-        # Contribution of current slab: Transmittance * (Extinction * Color * DeltaS)
+-        # Note: S4 defines E = E + T * tau[i] * c[i] where c[i] likely includes delta_s or tau[i]c[i] is the emission density.
+-        # S1 says c_i approx q(s_i) * delta_x.
+-        # So term is T * c_i.
+-        
+-        slab_color = tau_i * c_i * delta_s # Emission density * volume
+-        
+-        accumulated_color += accumulated_transmittance * slab_color
+-        accumulated_transmittance *= T_i
+-        
+-    # Add background contribution
+     accumulated_color += accumulated_transmittance * background_color
+-    
+     return accumulated_color
+ ```
+ 
+ **Pseudocode (Back-to-Front):**
+-Corresponds to the recursive form derived in [S2, unofficial][S5].
++Corresponds to the recursive form derived in [S2, unofficial][S6].
+ 
+ ```python
+-def zero_order_integration_back_to_front(n, D, tau_func, c_func):
++def zero_order_integration_back_to_front(n, step, tau_func, c_func, background_color=0.0):
+     """
+     Zero Order Integration using Back-to-Front iteration.
+     Does not support early ray termination.
+     """
+-    delta_s = D / n
+-    accumulated_color = 0.0
++    accumulated_color = background_color
+     
+-    for i in range(n, 0, -1):
+-        s_i = i * delta_s
+-        tau_i = tau_func(s_i)
+-        c_i = c_func(s_i)
++    for i in range(n - 1, -1, -1):
++        tau_i = tau_func(i * step)
++        c_i = c_func(i * step)
+         
+-        T_i = math.exp(-tau_i * delta_s)
++        T_i = math.exp(-tau_i * step)
+         
+-        # C'_i = C_i + (1 - A_i) * C'_{i+1}
+-        # A_i = 1 - T_i
+-        # C_i is pre-multiplied color. S2 says C_i = g(i*delta_x).
+-        # If c_func returns non-premultiplied color, we must multiply by A_i.
+-        # S2: "colors C_i used are pre-multiplied by their opacity".
+-        # So we assume c_func returns A_i * color_i.
+-        
+-        C_i = c_i # Pre-multiplied color of slab i
+-        
+-        accumulated_color = C_i + T_i * accumulated_color
++        accumulated_color = T_i * accumulated_color + tau_i * c_i * step
+         
+     return accumulated_color
+@@ -144,28 +102,26 @@
+ *   **Discontinuities:** The reconstructed signal is not $C^0$ continuous, leading to visible discontinuities and significant approximation errors [S6].
+ *   **Uniform Sampling Artifacts:** Uniform sampling assumes homogeneous material within each segment, which may result in artifacts [S1, unofficial].
+-*   **Taylor Approximation:** Using $\exp(-\tau(s)\Delta s) \approx 1 - \tau(s)\Delta s$ is valid only when $\tau(s)\Delta s$ is small; otherwise, it causes visible artifacts [S4, book].
+-*   **Early Termination:** Early ray termination stops computation when $T$ becomes zero or small enough that further terms have negligible effect [S4, book].
++*   **Taylor Approximation:** Using $\exp(-\tau(s)\Delta s) \approx 1 - \tau(s)\Delta s$ is valid only when $\tau(s)\Delta s$ is small; otherwise, it causes visible artifacts [S4, unofficial].
++*   **Early Termination:** Early ray termination stops computation when $T$ becomes zero or small enough that further terms have negligible effect [S5, book].
+ 
+ ## Subtopics
+ 
+ ### [Runge-Kutta 4 (RK4) Integration](3158-runge-kutta-4-rk4-integration.md)
+-Runge-Kutta 4 (RK4) is a higher-order numerical integration method for volume rendering that queries the vector field at four distinct positions to compute a single ray step, significantly reducing truncation error compared to the zero-order [Rectangle Rule](2082-zero-order-integration-rectangle-rule.md) and first-order [Euler Integration](3839-runge-kutta-2-3-ode-solver.md) methods. It sets itself apart by achieving an error order of $O(dt^5)$ per step, allowing for larger step sizes while maintaining accuracy, though it requires four texture lookups per step rather than one [3158-runge-kutta-4-rk4-integration.md].
++Runge-Kutta 4 (RK4) is a higher-order numerical integration method for volume rendering that queries the vector field at four distinct positions to compute a single ray step, significantly reducing truncation error compared to the zero-order [Rectangle Rule](2082-zero-order-integration-rectangle-rule.md) and first-order [Euler Integration](3839-runge-kutta-2-3-ode-solver.md) methods. It sets itself apart by achieving an error order of $O(dt^5)$ per step, allowing for larger step sizes while maintaining accuracy, though it requires four texture lookups per step rather than one.
+ 
+ ### Gaussian Integration for Volume Rendering
+-Gaussian integration approximates the volume rendering integral as an unequally weighted sum of the integrand at $n$ unequally spaced sample points to achieve greater accuracy for smoothly varying transfer functions compared to equally spaced sampling [S4, book]. The sample locations and weights are chosen such that the integral is exact for polynomials of maximum degree $2n-1$, utilizing the $2n$ degrees of freedom in the positions and weights [S4, book]. It performs poorly for non-smooth transfer functions selected to emphasize specific contour surfaces, as the integrand is not well-approximated by high-degree polynomials in these cases [S4, book]. Unlike equally spaced sampling, Gaussian integration uses unequally spaced points and weights, providing higher accuracy for smooth integrands but failing for non-smooth ones [S4, book].
++Gaussian integration approximates the volume rendering integral as an unequally weighted sum of the integrand at $n$ unequally spaced sample points to achieve greater accuracy for smoothly varying transfer functions compared to equally spaced sampling [S5, book]. The sample locations and weights are chosen such that the integral is exact for polynomials of maximum degree $2n-1$, utilizing the $2n$ degrees of freedom in the positions and weights [S5, book]. It performs poorly for non-smooth transfer functions selected to emphasize specific contour surfaces, as the integrand is not well-approximated by high-degree polynomials in these cases [S5, book]. Unlike equally spaced sampling, Gaussian integration uses unequally spaced points and weights, providing higher accuracy for smooth integrands but failing for non-smooth ones [S5, book].
+ 
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** $O(n)$ per ray, where $n$ is the number of samples [S2, unofficial][S4, book].
+-*   **Memory Complexity:** $O(1)$ auxiliary memory per ray (excluding the volume data itself) [S4, book].
+-*   **Performance:** Fastest among integration methods due to minimal computation per step (one texture lookup, one exponential) [S4, book][S6].
+-*   **Strengths:** Simple implementation, supports early ray termination (in forward iteration), no pre-computation required [S4, book][S6].
++*   **Time Complexity:** $O(n)$ per ray, where $n$ is the number of samples [S2, unofficial][S4, unofficial].
++*   **Memory Complexity:** $O(1)$ auxiliary memory per ray (excluding the volume data itself) [S4, unofficial].
++*   **Performance:** Computationally inexpensive, requiring one sample lookup and one exponential per segment [S4, unofficial][S6].
++*   **Strengths:** Simple implementation, supports early ray termination (in forward iteration), no pre-computation required [S4, unofficial][S6].
+ *   **Limitations:** Low accuracy, visible artifacts due to piecewise-constant assumption, $C^0$ discontinuities [S1, unofficial][S6].
+-*   **When to use:** When performance is critical and visual quality is secondary, or as a baseline for comparison [S4, book][S6].
+-*   **When not to use:** When high accuracy is required, or when the volume contains high-frequency details that require higher-order integration [S6].
+ 
+ ## Background
+ 
+-Zero Order Integration, also known as the Rectangle Rule or Riemann Sum approximation, is one of the simplest numerical integration techniques applied to volume rendering. It originates from the fundamental definition of the Riemann integral, where the area under a curve is approximated by the sum of rectangles [S1, S2, unofficial][S4, book][S5]. In the context of volume rendering, it was widely used in early direct volume ray casting implementations due to its computational efficiency [S4, book]. The method assumes that the scalar field (density) is constant within each ray segment, leading to a "zero-order hold" reconstruction [S6]. While historically significant, it is often superseded by higher-order methods or pre-integration techniques for high-quality rendering [S1, unofficial][S6].
++Zero Order Integration, also known as the Rectangle Rule or Riemann Sum approximation, is one of the simplest numerical integration techniques applied to volume rendering. It originates from the fundamental definition of the Riemann integral, where the area under a curve is approximated by the sum of rectangles [S1, S2, unofficial][S4, unofficial][S5, book]. In the context of volume rendering, it was widely used in early direct volume ray casting implementations due to its computational efficiency [S4, unofficial]. The method assumes that the scalar field (density) is constant within each ray segment, leading to a "zero-order hold" reconstruction [S6]. While historically significant, it is often superseded by higher-order methods or pre-integration techniques for high-quality rendering [S1, unofficial][S6].
+ 
+ ## Sources
+@@ -174,5 +130,6 @@
+ [S2] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+ [S3] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+-[S4] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+-[S5] Optical models for direct volume rendering (PDF) - Academia.edu, https://www.academia.edu/49467168/Optical_models_for_direct_volume_rendering, fetched 2026-10-27
+-[S6] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29+[S4] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (unofficial)
++[S5] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
++[S6] Optical models for direct volume rendering (PDF) - Academia.edu, https://www.academia.edu/49467168/Optical_models_for_direct_volume_rendering, fetched 2026-10-27
++[S7] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29

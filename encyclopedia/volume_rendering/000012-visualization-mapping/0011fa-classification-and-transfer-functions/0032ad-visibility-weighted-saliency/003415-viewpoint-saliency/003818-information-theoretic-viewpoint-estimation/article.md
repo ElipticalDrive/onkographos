@@ -1,0 +1,103 @@
+# Information-Theoretic Viewpoint Estimation
+
+Also called: Information-Theoretic Framework for Viewpoint Selection
+
+## Overview
+An algorithm that estimates optimal viewpoints for a set of features using an information-theoretic framework to maximize visual discrimination between focus features and context [S1, unofficial]. It selects viewpoints that make specific objects "pop out" by ensuring dense rendering for focus features and sparse rendering for context, distinguishing it from geometric-only approaches by incorporating visibility probabilities into the selection metric.
+
+## How it works
+**Inputs:**
+- A set of candidate viewpoints $V = \{v_1, v_2, \dots, v_n\}$.
+- A set of features (objects) $O = \{o_1, o_2, \dots, o_m\}$.
+- Prior probabilities $p(v_i)$ for each viewpoint (often uniform or based on importance distribution).
+- Prior probabilities $p(o_j)$ for each feature (importance distribution).
+
+**Outputs:**
+- The optimal viewpoint $v^*$ that maximizes the information metric.
+
+**Data Structures:**
+- Visibility matrix $P_{vis}$ of size $n \times m$, where $P_{vis}[i][j] = p(o_j|v_i)$ is the probability that feature $o_j$ is visible from viewpoint $v_i$.
+- Probability vectors $P_{view}$ of size $n$ and $P_{feat}$ of size $m$.
+
+**Steps:**
+1. **Define Candidates:** Establish the set of candidate viewpoints $V$ and features $O$.
+2. **Compute Visibility Probabilities:** Calculate $p(o_j|v_i)$ for each pair $(v_i, o_j)$. This represents the likelihood that feature $o_j$ is visible from viewpoint $v_i$ [S1, unofficial].
+3. **Calculate Information Metric:** For each viewpoint $v_i$, compute the information metric $I(v_i, O)$ using the formula:
+   $$ I(v_i, O) = \sum_{j=1}^{m} p(o_j|v_i) \log \frac{p(o_j|v_i)}{p(o_j)} $$
+   This metric quantifies the information gain or discrimination provided by viewpoint $v_i$ regarding the features [S1, unofficial].
+4. **Select Optimal Viewpoint:** Choose the viewpoint $v_i$ that maximizes $I(v_i, O)$. This viewpoint is selected to visually pop out the focus feature while suppressing context [S1, unofficial].
+
+**Parameters:**
+- The logarithm base is not explicitly specified in the sources, but typically base 2 (bits) or base $e$ (nats) is used. Not given in the sources.
+- The method assumes the visibility probabilities $p(o_j|v_i)$ and priors $p(o_j)$ are known or estimated. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- If $p(o_j|v_i) = 0$, the term $0 \log 0$ is treated as 0. Not given in the sources.
+- Degenerate input: If all visibility probabilities are equal, the metric may not distinguish well between viewpoints. Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_information_metric(p_vis, p_feat):
+    """
+    Calculate the information metric I(v_i, O) for each viewpoint.
+    
+    Args:
+    p_vis: 2D list of size n x m, where p_vis[i][j] = p(o_j|v_i)
+    p_feat: 1D list of size m, where p_feat[j] = p(o_j)
+    
+    Returns:
+    1D list of size n, containing I(v_i, O) for each viewpoint
+    """
+    n = len(p_vis)
+    m = len(p_feat)
+    metrics = [0.0] * n
+    
+    for i in range(n):
+        for j in range(m):
+            p_oj_vi = p_vis[i][j]
+            p_oj = p_feat[j]
+            
+            # Avoid log(0)
+            if p_oj_vi > 0 and p_oj > 0:
+                metrics[i] += p_oj_vi * math.log(p_oj_vi / p_oj)
+            # If p_oj_vi is 0, the term is 0. If p_oj is 0, it's undefined but typically handled as 0 contribution if p_oj_vi is also 0.
+            # Note: The source formula does not explicitly handle p_oj=0, but standard information theory treats 0*log(0) as 0.
+            
+    return metrics
+
+def select_optimal_viewpoint(p_vis, p_feat):
+    """
+    Select the viewpoint that maximizes the information metric.
+    
+    Args:
+    p_vis: 2D list of size n x m
+    p_feat: 1D list of size m
+    
+    Returns:
+    Index of the optimal viewpoint
+    """
+    metrics = calculate_information_metric(p_vis, p_feat)
+    return metrics.index(max(metrics))
+```
+
+## Subtopics
+
+### [TLOO-based View Point Selection](16857-tloo-based-view-point-selection.md)
+A method for selecting optimal viewpoints in Direct Volume Rendering (DVR) by optimizing viewpoint entropy and structural features (opacity and luminance) using a hybrid algorithm combining Teaching-Learning Based Optimization (TLOO) and an Extended Kalman Filter (EKF) for cost function evaluation. It extends the information-theoretic approach by incorporating structural features and using a specific optimization algorithm.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Maximizes visual discrimination between focus and context; provides a principled information-theoretic basis for viewpoint selection.
+- **Limitations:** Requires accurate estimation of visibility probabilities and feature importance distributions. Not given in the sources.
+- **When to Use:** When the goal is to visually emphasize specific features in a volume dataset by maximizing their visibility relative to context.
+- **When Not to Use:** When visibility probabilities are difficult to estimate or when computational resources are limited for calculating the information metric. Not given in the sources.
+
+## Background
+Originated from the work of Ivan Viola and M. Eduard Gröller, presented in "Illustrative Visualization for Medicine and Science" [S1, unofficial]. The method is part of a broader framework for visual focus discrimination and guided navigation in volume visualization. It addresses the problem of selecting characteristic viewpoints that best highlight specific features of interest.
+
+## Sources
+[S1] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,70 @@
+# 3D Gaussian Splatting with Feature Vectors
+
+Also called: Feature-3DGS, Semantic 3DGS, Open-Vocabulary 3DGS
+
+## Overview
+This method extends standard 3D Gaussian Splatting by attaching a high-dimensional feature vector $\mathbf{f}_i$ to each Gaussian primitive, enabling the rendering of semantic, linguistic, or latent feature maps rather than just color. It solves the problem of integrating 2D vision-language models (e.g., CLIP, LSeg) into a 3D representation, allowing for real-time open-vocabulary semantic segmentation and phrase grounding. It differs from sibling methods by serving as the foundational rasterization mechanism for feature accumulation; while siblings like LangSplat or LSeg Feature Encoding apply specific encoders or decoding heads, this article defines the core differentiable alpha-blending accumulation of arbitrary feature vectors $\mathbf{f}_i \in \mathbb{R}^d$ that underpins the entire family.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $\mathcal{G} = \{g_i\}$, where each $g_i$ is defined by position $\mathbf{x}_i$, covariance $\mathbf{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and a feature vector $\mathbf{f}_i \in \mathbb{R}^d$. The feature dimension $d$ is typically 512 (CLIP) or 768 (LSeg/CLIP text), but can vary.
+*   **Output:** A 2D feature map $\mathbf{F} \in \mathbb{R}^{H \times W \times d}$, where each pixel $p$ contains the accumulated feature vector $\mathbf{F}(p)$.
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+*   $\mathbf{x}_i \in \mathbb{R}^3$: Center position.
+*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix (or quaternion).
+*   $\mathbf{s}_i \in \mathbb{R}^3$: Scale vector.
+*   $\alpha_i \in \mathbb{R}$: Opacity (clamped to $[0, 1]$).
+*   $\mathbf{f}_i \in \mathbb{R}^d$: Feature vector.
+
+**Rendering Steps:**
+1.  **Projection:** For each Gaussian $i$, compute the 2D mean $\mathbf{\mu}_i$ and covariance $\mathbf{\Sigma}'_i$ in screen space using the camera projection matrix $\mathbf{P}$ and Jacobian $\mathbf{J}$:
+    $$ \mathbf{\mu}_i = \mathbf{P} \mathbf{x}_i $$
+    $$ \mathbf{\Sigma}'_i = \mathbf{J} \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T \mathbf{J}^T $$
+    where $\mathbf{S}_i$ is the diagonal scale matrix.
+2.  **Sorting:** For each pixel $p$, identify the set of overlapping Gaussians $\mathcal{O}_p$. Sort $\mathcal{O}_p$ front-to-back based on depth $z_i$ relative to the camera.
+3.  **Accumulation:** Compute the feature vector $\mathbf{F}(p)$ for pixel $p$ using the shared principle of differentiable alpha-blending:
+    $$ \mathbf{F}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{f}_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    where:
+    *   $\mathbf{f}_i$ is the feature vector of the $i$-th Gaussian in the sorted order.
+    *   $\alpha_i$ is the opacity of the $i$-th Gaussian.
+    *   $\prod_{j=1}^{i-1} (1 - \alpha_j)$ is the transmittance from all preceding Gaussians $j < i$.
+    *   If $\mathcal{O}_p$ is empty, $\mathbf{F}(p) = \mathbf{0}$.
+4.  **Post-processing:** The resulting feature map $\mathbf{F}$ is passed to a downstream task, such as a segmentation head or a similarity comparison with text embeddings from a vision-language model (e.g., CLIP).
+
+**Parameters:**
+*   Feature dimension $d$: Not given in the sources (varies by encoder, e.g., 512, 768).
+*   Opacity $\alpha_i$: Optimized during training via photometric loss.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** High-dimensional feature vectors may require float32 or float16 precision to avoid quantization artifacts during accumulation.
+*   **Boundaries:** Gaussians partially outside the image bounds must be clipped or handled to avoid out-of-bounds memory access during rasterization.
+*   **Degenerate Input:** If all $\alpha_i = 0$, $\mathbf{F}(p) = \mathbf{0}$. If $\alpha_i = 1$ for any $i$, subsequent Gaussians in the stack contribute nothing to $\mathbf{F}(p)$.
+
+## Subtopics
+
+### Scale-Aware Semantic Feature Gating
+A mechanism to modulate rendered semantic features based on the scale of the Gaussians, using learned or fixed gate vectors derived from sampled scales [S2, unofficial]. It is chosen when scale-dependent semantic consistency is required, such as in multi-scale segmentation tasks. It differs from standard feature accumulation by introducing a gating factor $g$ that multiplies the accumulated feature. The steps are:
+1.  Map the distribution of sampled scales to a Gaussian distribution using a transformation function `self.q_trans(sampled_scales)` [S2, unofficial].
+2.  Compute gates:
+    *   If `scale_aware_dim <= 0` or `scale_aware_dim >= 32`, compute gates by passing sampled scales through a learned gate network: `gates = self.scale_gate(sampled_scales.unsqueeze(-1))` [S2, unofficial].
+    *   Otherwise, discretize scales to integers: `int_sampled_scales = ((1 - sampled_scales.squeeze()) * scale_aware_dim).long()`, then lookup pre-computed gates: `gates = self.fixed_scale_gate[int_sampled_scales].detach()` [S2, unofficial].
+3.  Repeat rendered features for each sampled scale: `feature_with_scale = rendered_features.unsqueeze(0).repeat([sampled_scales.shape[0], 1, 1, 1])` [S2, unofficial].
+4.  Multiply features by gate vectors: `feature_with_scale = feature_with_scale * gates.unsqueeze(-1).unsqueeze(-1)` [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot H \cdot W)$ for rasterization, where $N$ is the number of Gaussians and $H \times W$ is the image resolution. The feature accumulation adds a constant factor proportional to the feature dimension $d$.
+*   **Memory Complexity:** $O(N \cdot d)$ to store feature vectors for all Gaussians, plus $O(H \cdot W \cdot d)$ for the output feature map.
+*   **Measured Performance:** Real-time frame rates are achievable on modern GPUs due to the efficiency of the Gaussian rasterizer, similar to standard 3DGS [S1, unofficial].
+*   **Strengths:** Enables open-vocabulary understanding without retraining the 3D representation; leverages the speed of 3DGS rasterization.
+*   **Limitations:** Feature quality depends on the 2D encoder used during training; high-dimensional features increase memory usage.
+*   **When to use:** When semantic or linguistic understanding is required from a 3D scene, especially for dynamic or real-time applications.
+*   **When not to use:** When only geometric or photometric rendering is needed; when memory is constrained and $d$ is large.
+
+## Background
+Originated from the observation that the speed of the 3DGS rasterizer makes it an ideal platform for distilling 2D vision-model features into a 3D representation [S1, unofficial]. Feature-3DGS and LangSplat pioneered this direction by adding high-dimensional feature vectors to Gaussians [S1, unofficial]. Language Embedded 3D Gaussians expanded this to full scene understanding, encoding object-level embeddings for phrase grounding [S1, unofficial]. Subsequent works like SplatTalk and 3D Vision-Language GS further extended these capabilities [S1, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] yzslab/gaussian-splatting-lightning, https://github.com/yzslab/gaussian-splatting-lightning, fetched 2026-10-27 (unofficial)

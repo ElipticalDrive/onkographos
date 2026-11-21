@@ -1,0 +1,192 @@
+# Multi-Level Array Grid
+
+Also called: Classic multi-level array grid
+
+## Overview
+The Multi-Level Array Grid is a hierarchical spatial acceleration structure for ray tracing that recursively subdivides the scene bounding box into uniform grids based on item density [S1, unofficial][S2, unofficial]. It solves the problem of efficient ray-primitive intersection by skipping empty regions of space, using a fixed-depth recursion (typically 2 levels) to balance traversal overhead against intersection cost [S1, unofficial][S2, unofficial]. It is distinguished from sibling methods like the Multi-Level Hashed Grid by its use of dense array indexing for child nodes rather than hash tables, making it memory-conservative but potentially sparse in empty areas [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:** A set of scene primitives (items) and their bounding boxes.
+**Outputs:** A root `GridNode` representing the hierarchical grid structure.
+
+**Data Structures:**
+The structure consists of two main types of nodes, defined in C-like pseudocode below.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```c
+// Inner node: represents a subdivided grid cell
+struct InnerNode {
+    float min[3];       // Bounding box minimum
+    float max[3];       // Bounding box maximum
+    int dim[3];         // Grid dimensions (Mi for each axis)
+    float delta[3];     // Cell size (width/height/depth)
+    GridNode** cells;   // Array of pointers to child nodes (size = dim[0]*dim[1]*dim[2])
+};
+
+// Union node: either a leaf containing items or a pointer to an inner node
+struct GridNode {
+    int index;          // High bits: item count (if leaf); Low bit: type flag
+                        // Low bit 1 = Inner Node, Low bit 0 = Leaf Node
+    union {
+        struct {
+            int* items; // Array of primitive indices
+        } leaf;
+        struct {
+            InnerNode* interior; // Pointer to child grid
+        } inner;
+    };
+};
+```
+
+**Construction Algorithm:**
+1.  **Compute Scene Bounding Box:** Determine the global minimum and maximum extents of all scene primitives. Let $S_i$ be the size of the bounding box in dimension $i \in \{x, y, z\}$.
+2.  **Initialize Root:** Create a root `GridNode` as a leaf node containing all scene primitives.
+3.  **Recursive Construction:** Process each node recursively.
+    *   **Termination Conditions:** If the number of items in the current node is less than 8, or if the current grid depth is greater than 2, the node remains a leaf. Recursion stops for this branch [S1, unofficial][S2, unofficial].
+    *   **Expansion:** If termination conditions are not met, expand the node to an `InnerNode`.
+    *   **Dimension Calculation:** Calculate the grid dimensions $M_i$ for each axis using the heuristic attributed to Woo (1992) [S1, unofficial][S2, unofficial]:
+        $$M_i = \frac{S_i}{\max\{S_i\}} \sqrt[3]{\rho N} \quad (i \in \{x, y, z\})$$
+        Where:
+        *   $S_i$ is the bounding box size in dimension $i$.
+        *   $\max\{S_i\}$ is the maximum dimension size among $x, y, z$.
+        *   $\rho$ is a density factor, typically 4 [S1, unofficial][S2, unofficial].
+        *   $N$ is the number of primitives in the current node.
+    *   **Cell Allocation:** Compute `delta` (cell size) as $S_i / M_i$. Allocate the `cells` array of size $\prod M_i$.
+    *   **Item Assignment:** Distribute primitives into the grid cells.
+        *   If a cell contains no primitives, set its pointer to `null`.
+        *   If a cell contains primitives, initialize a new `GridNode` as a leaf, storing the primitive indices in `items` and the count in the high bits of `index`.
+    *   **Recurse:** For each non-null child leaf node, repeat the construction process (incrementing depth).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_grid(primitives, depth=0, max_depth=2, leaf_threshold=8, rho=4):
+    """
+    Recursively build the multi-level array grid.
+    primitives: list of primitive indices
+    depth: current recursion depth
+    max_depth: maximum allowed depth (typically 2)
+    leaf_threshold: minimum items to trigger subdivision (typically 8)
+    rho: density factor (typically 4)
+    """
+    if not primitives:
+        return None
+
+    # 1. Compute bounding box of current primitives
+    bbox_min, bbox_max = compute_bounding_box(primitives)
+    S = [bbox_max[i] - bbox_min[i] for i in range(3)]
+    max_S = max(S)
+    N = len(primitives)
+
+    # 2. Check termination conditions
+    if depth > max_depth or N < leaf_threshold:
+        # Return leaf node
+        node = GridNode()
+        node.index = N << 1  # Store count in high bits, 0 for leaf
+        node.leaf.items = primitives
+        return node
+
+    # 3. Calculate grid dimensions
+    # M_i = (S_i / max_S) * cbrt(rho * N)
+    dim = []
+    for i in range(3):
+        m_i = (S[i] / max_S) * (rho * N) ** (1/3)
+        dim.append(int(round(m_i)))
+
+    # 4. Allocate inner node and cells array
+    inner = InnerNode()
+    inner.min = bbox_min
+    inner.max = bbox_max
+    inner.dim = dim
+    inner.delta = [S[i] / dim[i] for i in range(3)]
+    
+    total_cells = dim[0] * dim[1] * dim[2]
+    inner.cells = [None] * total_cells
+
+    # 5. Distribute primitives into cells
+    # Helper to map point to cell index
+    def get_cell_index(point):
+        # point is relative to bbox_min
+        cx = int((point[0] - bbox_min[0]) / inner.delta[0])
+        cy = int((point[1] - bbox_min[1]) / inner.delta[1])
+        cz = int((point[2] - bbox_min[2]) / inner.delta[2])
+        # Clamp to bounds
+        cx = min(max(cx, 0), dim[0]-1)
+        cy = min(max(cy, 0), dim[1]-1)
+        cz = min(max(cz, 0), dim[2]-1)
+        return cx + cy * dim[0] + cz * dim[0] * dim[1]
+
+    # Group primitives by cell
+    cell_items = [[] for _ in range(total_cells)]
+    for p_idx in primitives:
+        center = get_primitive_center(p_idx)
+        c_idx = get_cell_index(center)
+        cell_items[c_idx].append(p_idx)
+
+    # 6. Initialize child nodes and recurse
+    for c_idx in range(total_cells):
+        items = cell_items[c_idx]
+        if not items:
+            inner.cells[c_idx] = None
+        else:
+            # Create leaf node for this cell
+            leaf_node = GridNode()
+            leaf_node.index = len(items) << 1 # 0 for leaf
+            leaf_node.leaf.items = items
+            inner.cells[c_idx] = leaf_node
+
+    # 7. Recurse on non-empty leaves
+    for c_idx in range(total_cells):
+        child = inner.cells[c_idx]
+        if child is not None:
+            # Recurse to potentially turn leaf into inner node
+            inner.cells[c_idx] = build_grid(
+                child.leaf.items, 
+                depth + 1, 
+                max_depth, 
+                leaf_threshold, 
+                rho
+            )
+
+    # Set inner node flag in index (bit 0 = 1)
+    # Note: The index field in GridNode is shared. 
+    # For inner nodes, the 'index' field might just store the type flag 
+    # or be unused if 'interior' pointer is sufficient. 
+    # Based on struct definition: index low bit 1=inner.
+    # We assume the 'index' field for inner nodes is set to 1.
+    # However, the struct definition shows 'index' is part of GridNode.
+    # We need to return a GridNode that points to this InnerNode.
+    
+    result_node = GridNode()
+    result_node.index = 1 # 1 indicates Inner Node
+    result_node.inner.interior = inner
+    
+    return result_node
+```
+
+**Parameters:**
+*   **Leaf Threshold:** 8 items. Nodes with fewer items remain leaves [S1, unofficial][S2, unofficial].
+*   **Max Depth:** 2. Recursion stops if depth exceeds 2 [S1, unofficial][S2, unofficial].
+*   **Density Factor ($\rho$):** 4. Used in the dimension calculation heuristic [S1, unofficial][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Empty Cells:** Represented as `null` pointers to save memory. Traversal must check for `null` before dereferencing [S1, unofficial][S2, unofficial].
+*   **Precision:** Cell indices are computed using floating-point division. Clamping is required to prevent out-of-bounds access due to floating-point errors at boundaries [G].
+*   **Redundant Data:** `delta` is stored in `InnerNode` but can be computed from `max`, `min`, and `dim`. It is cached for performance [S1, unofficial][S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Construction is $O(N \log N)$ or $O(N)$ depending on spatial hashing vs. sorting, but the sources describe a direct assignment which is $O(N)$ per level. Traversal is generally faster than one-level grids because it reduces the number of ray-primitive intersections by skipping empty space [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** Memory usage is proportional to the number of non-empty cells. Empty cells are `null`, reducing overhead compared to dense grids. However, the array-based structure can waste space if the scene is sparse but the grid dimensions are large [S1, unofficial][S2, unofficial].
+*   **Strengths:** Simple to implement; memory conservative compared to hashed grids; effective for scenes with moderate density [S1, unofficial][S2, unofficial].
+*   **Limitations:** Grid traversal dominates render time; one-level grids spend twice as much time on ray-triangle intersections as multi-level grids, but multi-level grids add traversal overhead [S1, unofficial][S2, unofficial]. The fixed depth limit (2) may not be optimal for all scenes.
+*   **When to Use:** When memory is a constraint and the scene has a moderate number of primitives with non-uniform distribution. It serves as a baseline for comparison with more advanced structures like hashed grids [S1, unofficial][S2, unofficial].
+
+## Background
+The Multi-Level Array Grid was described in a 2010 paper by SCITEPRESS, used as a baseline for comparison against a Multi-Level Hashed Grid implementation [S1, unofficial][S2, unofficial]. The dimension calculation heuristic is attributed to Woo (1992) [S1, unofficial][S2, unofficial]. It is part of a family of hierarchical grid structures designed to optimize ray tracing performance by reducing the number of intersection tests [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2010/28153/, fetched 2026-10-24 (unofficial)
+[S2] PDF Multi-level Grid Strategies for Ray Tracing, https://pdfs.semanticscholar.org/f922/40132d0d7340ff97ac4074b0a6906fb44c44.pdf, fetched 2026-10-25 (unofficial)

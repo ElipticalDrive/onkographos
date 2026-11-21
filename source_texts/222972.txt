@@ -1,0 +1,160 @@
+meep.adjoint returns a gradient that disagrees with finite differences when Simulation(geometry_center=c) is set and c is not a multiple of 1/resolution. On-grid offsets are fine. Placing the same device at the same offset relative to th...
+
+adjoint gradient wrong when `geometry_center` is not a multiple of the grid spacing · Issue #3345 · NanoComp/meep · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+adjoint gradient wrong when geometry_center is not a multiple of the grid spacing #3345
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+adjoint gradient wrong when geometry_center is not a multiple of the grid spacing#3345
+Copy link
+Description
+laghai
+opened on Oct 20, 2026
+Issue body actions
+meep.adjoint returns a gradient that disagrees with finite differences when Simulation(geometry_center=c)
+is set and c is not a multiple of 1/resolution. On-grid offsets are fine. Placing the same device at the
+same offset relative to the grid with explicit coordinates (and geometry_center=0) is also fine.
+Repro (2D, ~1 min, script below): a straight Si guide through a 1 x 1 µm
+MaterialGrid design region (10 x 10), objective |a+|² of the fundamental mode, resolution 20. The same
+device is built with the cell centred at the origin, then with the cell and every object shifted by dx,
+either through geometry_center or through explicit coordinates. Directional derivative along one random
+unit direction, adjoint vs central FD with h = 1e-3. decay_by=1e-11.
+```
+shift +0.000 via geometry_center  f0=1.933280e+01  adjoint=+1.089676e-01  fd=+1.089685e-01  rel_err=0.001%
+shift +0.750 via geometry_center  f0=1.933280e+01  adjoint=+1.089676e-01  fd=+1.089685e-01  rel_err=0.001%
+shift +0.750 via explicit coords  f0=1.933261e+01  adjoint=+1.086230e-01  fd=+1.086252e-01  rel_err=0.002%
+shift +0.370 via geometry_center  f0=1.531736e+01  adjoint=-4.584684e-01  fd=-2.324986e-01  rel_err=97.192%
+shift +0.370 via explicit coords  f0=1.874672e+01  adjoint=-3.922098e-01  fd=-3.922111e-01  rel_err=0.000%
+shift +0.025 via geometry_center  f0=1.544844e+01  adjoint=-2.108536e-01  fd=+8.501872e-02  rel_err=348.008%
+shift +0.025 via explicit coords  f0=1.812283e+01  adjoint=-1.806163e-01  fd=-1.806170e-01  rel_err=0.000%
+```
+0.75 µm is 15 pixels at resolution 20; 0.37 and 0.025 are not whole pixels. At 0.025 the adjoint has the
+wrong sign. The forward objective also differs from the explicit-coordinates build at the same offset
+(15.3 vs 18.7 at 0.37). We have not established which forward value is correct.
+We first saw this in 3D (a grating coupler cell not centred on its design window): adjoint vs FD 124-437 %
+with geometry_center, 0.06-1.7 % with explicit coordinates.
+Where it may come from (not verified): Simulation._create_grid_volume shifts the grid origin by
+geometry_center, but nothing in python/adjoint/ reads geometry_center, so the design-region volume
+passed to _get_gradient and the material-grid lookup may disagree by the sub-pixel part of the offset.
+Environment: meep 1.35.0 (conda-forge, MPI 4.1, 1 process), Python 3.12, autograd 1.8.0, macOS x86_64.
+Workaround: leave geometry_center at 0 and shift coordinates explicitly.
+upstream_geometry_center_repro.py
+```
+"""Minimal repro for a proposed NanoComp/meep issue: meep.adjoint gradients with geometry_center.
+
+One 2D device (straight guide through a 1 x 1 um design region, objective |a+|^2 of the
+fundamental mode) is built twice: cell centred at the origin, and cell centred at (dx, 0) with
+every source, monitor and block shifted by dx. The physics is identical, so the objective must be
+identical and the adjoint directional derivative must match central finite differences in both.
+Control: the same shift with geometry_center=0 and explicit coordinates (cell walls move, the
+device-to-grid offset is the same).
+
+Run: python upstream_geometry_center_repro.py  (meep 1.35.0, autograd).
+Arguments: shifts in um (default 0.37). Prints one line per case.
+"""
+
+import sys
+
+import autograd.numpy as npa
+import meep as mp
+import meep.adjoint as mpa
+import numpy as np
+
+RES = 20
+NX = NY = 10
+SX, SY, DPML = 8.0, 4.0, 1.0  # monitors stay outside the PML for shifts up to 1 um
+FCEN = 1 / 1.55
+SI, SIO2 = mp.Medium(index=3.45), mp.Medium(index=1.44)
+
+
+def build(dx, use_gc=True):
+    c = mp.Vector3(dx if use_gc else 0.0, 0)
+    at = lambda x, y=0.0: mp.Vector3(x + dx, y)  # noqa: E731
+    grid = mp.MaterialGrid(mp.Vector3(NX, NY), SIO2, SI, grid_type="U_MEAN")
+    region = mpa.DesignRegion(grid, volume=mp.Volume(center=at(0), size=mp.Vector3(1, 1)))
+    geometry = [
+        mp.Block(center=at(0), size=mp.Vector3(mp.inf, 0.5), material=SI),
+        mp.Block(center=region.center, size=region.size, material=grid),
+    ]
+    src = mp.EigenModeSource(
+        mp.GaussianSource(FCEN, fwidth=0.2 * FCEN),
+        center=at(-1.8),
+        size=mp.Vector3(0, 2),
+        eig_band=1,
+        eig_parity=mp.EVEN_Y + mp.ODD_Z,
+    )
+    sim = mp.Simulation(
+        cell_size=mp.Vector3(SX, SY),
+        geometry_center=c,
+        boundary_layers=[mp.PML(DPML)],
+        geometry=geometry,
+        sources=[src],
+        default_material=SIO2,
+        resolution=RES,
+    )
+    mon = mpa.EigenmodeCoefficient(sim, mp.Volume(center=at(1.8), size=mp.Vector3(0, 2)), 1)
+    return mpa.OptimizationProblem(
+        simulation=sim,
+        objective_functions=lambda a: npa.abs(a) ** 2,
+        objective_arguments=[mon],
+        design_regions=[region],
+        frequencies=[FCEN],
+        decay_by=1e-11,
+    )
+
+
+def check(dx, x0, v, use_gc=True, h=1e-3):
+    opt = build(dx, use_gc)
+    f0, g = opt([x0])
+    adj = float(np.dot(np.ravel(g), v))
+    fp, _ = opt([x0 + h * v], need_gradient=False)
+    fm, _ = opt([x0 - h * v], need_gradient=False)
+    fd = float((fp[0] - fm[0]) / (2 * h))
+    return float(f0[0]), adj, fd
+
+
+if __name__ == "__main__":
+    rng = np.random.default_rng(0)
+    x0 = 0.5 + 0.2 * rng.standard_normal(NX * NY).clip(-2, 2)
+    v = rng.standard_normal(NX * NY)
+    v /= np.linalg.norm(v)
+    for dx in [0.0] + [float(a) for a in sys.argv[1:] or ["0.37"]]:
+        for use_gc in [True, False] if dx else [True]:
+            f0, adj, fd = check(dx, x0, v, use_gc)
+            how = "geometry_center" if use_gc else "explicit coords"
+            print(
+                f"shift {dx:+.3f} via {how:15s}  f0={f0:.6e}  adjoint={adj:+.6e}  "
+                f"fd={fd:+.6e}  rel_err={abs(adj - fd) / abs(fd):.3%}",
+                flush=True,
+            )
+```
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

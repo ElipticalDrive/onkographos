@@ -1,0 +1,157 @@
+Part of #114. Context perspectiveCamera (packages/render/src/domain/perspective-camera.ts) requires near/far at construction time. Eve cannot use it: to avoid Z-fighting at close orbit angles and clipping at steep pitch, Eve computes tig...
+
+`orbitCamera()` + `fitClipPlanes()` — orbit framing with mesh-fitted near/far · Issue #137 · vercel-labs/vgpu · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+orbitCamera() + fitClipPlanes() — orbit framing with mesh-fitted near/far #137
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+orbitCamera() + fitClipPlanes() — orbit framing with mesh-fitted near/far#137
+Copy link
+Description
+matiasngf
+opened on Jul 8, 2026
+Issue body actions
+Part of #114.
+Context
+perspectiveCamera (packages/render/src/domain/perspective-camera.ts) requires near/far at construction time. Eve cannot use it: to avoid Z-fighting at close orbit angles and clipping at steep pitch, Eve computes tight clip planes per frame by projecting the 8 AABB corners of the mesh onto the camera forward vector (cameraClipPlanes, eve render/camera.ts:28-52). Since vgpu offers no way to feed dynamically computed planes into an orbit setup, Eve hand-rolled the entire chain — orbitEye, cameraBasis, perspective, lookAt, multiply (~60 lines across eve render/math.ts + render/params.ts:22-27) — even though the math is identical to what perspectiveCamera already does internally via wgpu-matrix (column-major, compatible).
+Two gaps, two exports:
+fitClipPlanes() — the missing primitive: tight near/far from an AABB + eye + forward. A free function, so it composes with perspectiveCamera, orthographicCamera, and orbitCamera alike.
+orbitCamera() — the ergonomic composition: yaw/pitch/radius orbit around a target, returning matrix + position + basis + clip in one pure call. It exists because of a data dependency: fitClipPlanes needs eye and forward, which are derived from the orbit parameters — callers of a bare fitClipPlanes would have to re-implement orbitEye/cameraBasis to produce its inputs.
+Priority: lower than §1–§10. Eve's hand-rolled code is correct; the win is ~60 LOC deleted per consumer and eliminating the fixed-near/far footgun for every future orbiting scene, not fixing an active bug.
+Proposed API
+New files in @vgpu/render/src/domain/: bounds.ts, fit-clip-planes.ts, orbit-camera.ts (+ .docs.md per repo convention).
+```
+import type { Camera, Vec3 } from "./camera.ts";
+
+/** Axis-aligned bounding box, in the same space the camera operates in. */
+export interface Bounds {
+  readonly min: Vec3;
+  readonly max: Vec3;
+}
+
+export interface ClipPlanes {
+  readonly near: number;
+  readonly far: number;
+}
+
+/**
+ * Tight near/far for any camera: projects the 8 corners of `bounds` onto
+ * `forward` (unit vector) from `eye`, then applies additive `padding`.
+ * Clamps: near >= minNear, far > near. Pure.
+ */
+export function fitClipPlanes(spec: {
+  readonly bounds: Bounds;
+  readonly eye: Vec3;
+  readonly forward: Vec3;
+  readonly padding?: number;   // additive, world units; default 0.01
+  readonly minNear?: number;   // default 1e-3
+}): ClipPlanes;
+
+export interface OrbitCameraSpec {
+  readonly yaw: number;          // radians, around world +Y
+  readonly pitch: number;        // radians; pole-safe at ±π/2
+  readonly radius: number;
+  readonly fovYRadians: number;  // matches PerspectiveCameraSpec.fovYRadians
+  readonly aspect: number;
+  readonly target?: Vec3;        // orbit center; default [0, 0, 0]
+  /** Explicit clip planes — required unless fitBounds is provided. */
+  readonly near?: number;
+  readonly far?: number;
+  /** Tight per-frame near/far via fitClipPlanes(bounds, eye, forward). Wins over near/far. */
+  readonly fitBounds?: Bounds;
+  readonly clipPadding?: number; // forwarded as fitClipPlanes padding; default 0.01
+}
+
+export interface OrbitCamera extends Camera {
+  // inherited: viewProjectionMatrix (column-major Mat4), position (Vec3)
+  readonly basis: { readonly forward: Vec3; readonly right: Vec3; readonly up: Vec3 };
+  readonly clip: ClipPlanes;
+}
+
+/** Pure, frozen result — same construction style as perspectiveCamera. Throws if
+ *  neither (near, far) nor fitBounds is given. */
+export function orbitCamera(spec: OrbitCameraSpec): OrbitCamera;
+```
+Implementation notes: internally mat4.perspective + mat4.lookAt + mat4.multiply (wgpu-matrix, exactly as perspective-camera.ts:17-19). Eye = spherical offset from target (eve math.ts:8-15). Basis must be pole-safe: when |forward · (0,1,0)| > 0.98, switch the reference up to +Z (eve math.ts:17-23) so pitch ±π/2 never degenerates. OrbitCamera extends Camera, so it drops into any API accepting Camera.
+Example
+Eve render/params.ts, per frame:
+```
+const cam = orbitCamera({
+  yaw: controls.yaw, pitch: controls.pitch, radius: controls.radius,
+  fovYRadians: fovEff, aspect,
+  target: orbitTarget,
+  fitBounds: gpuMeshBounds,          // normalized-space AABB
+  clipPadding: CAMERA_CLIP_PADDING,  // 0.02, additive
+});
+data.set(cam.viewProjectionMatrix, 0);
+// cam.position, cam.basis.right / .up / .forward → written into scene uniforms
+```
+fitClipPlanes alone composes with the existing generic camera (arbitrary up, no orbit):
+```
+const forward = vec3.normalize(vec3.subtract(target, position));
+const { near, far } = fitClipPlanes({ bounds, eye: position, forward });
+const cam = perspectiveCamera({ fovYRadians, aspect, near, far, position, target });
+```
+Same example without the util
+Eve today (~60 lines of hand-rolled orbitEye, cameraBasis, cameraClipPlanes, perspective, lookAt, multiply in render/math.ts + render/camera.ts):
+```
+const eye      = orbitEye(orbitTarget, controls.radius, controls.yaw, controls.pitch);
+const basis    = cameraBasis(eye, orbitTarget);
+const clip     = cameraClipPlanes(meshBounds, eye, basis.forward);
+const proj     = perspective(fovEff, aspect, clip.near, clip.far);
+const view     = lookAt(eye, orbitTarget, [0, 1, 0]);
+const viewProj = multiply(proj, view);
+```
+Alternatives
+fitBounds option on PerspectiveCameraSpec — forward is derivable from position/target, so no orbit math would leak in. Rejected: mutates a stable API, and Camera has no clip field, so the computed planes would be invisible to the caller (Eve needs them observable). The free function gives the same capability without touching perspectiveCamera.
+Full decomposition only (orbitBasis() + fitClipPlanes() + perspectiveCamera(), no orbitCamera) — maximally composable, but Camera lacks basis, so every orbit consumer re-assembles 3 calls and stitches results; the shader-uniform use case (matrix + position + basis + clip in one write) is the common case, not the exception.
+FrustumCamera class — stateful wrapper over a stateless per-frame computation; a pure function matching perspectiveCamera's construction style is the right shape. Rejected in prior design review; still rejected.
+Deliberately omitted: up override and roll. Orbit yaw/pitch are defined against world +Y; arbitrary-up or rolled cameras use perspectiveCamera + fitClipPlanes (the escape hatch above). roll?: number can be added later without breaking — a two-way door.
+Activity
+matiasngf
+added a parent issue on Jul 8, 2026
+dogfood API #114
+matiasngf commented on Jul 30, 2026
+matiasngf
+on Jul 30, 2026
+CollaboratorAuthor
+More actions
+Closing this and folding it into the Scene API north star #219.
+The framing no longer matches the codebase: @vgpu/render/domain does not exist any more, and neither does the perspectiveCamera() free function this issue was written against. Since PR #185 the camera is a SceneNode (packages/vgpu-api/src/scene/camera.ts) with optional near/far and a target/up pair, so the "near/far are mandatory at construction time" complaint is gone. A basic orbit() also exists (packages/vgpu-api/src/scene/orbit.ts), though it only produces a Y-axis orbit model matrix from a time value — it is not camera framing.
+What remains genuinely valuable and unbuilt:
+fitClipPlanes() — AABB-fitted near/far: project the 8 corners of a bounds box onto the camera forward vector from the eye, pad, clamp. This is still the missing primitive, and it is still the fix for both Z-fighting at close orbit and clipping at steep pitch. As a free function it composes with the perspective and orthographic scene cameras alike.
+Orbit framing — yaw/pitch/radius around a target, exposing eye, basis and clip in one call, with a pole-safe up reference. The data dependency argued in the body still holds: fitClipPlanes() needs the eye and forward that orbit parameters derive.
+Both belong to the scene camera surface, so they should be tracked as a camera sub-task of #219 rather than as a standalone @vgpu/render utility. The original design (API shape, semantics, and the rejected alternatives) is preserved in the body above and is still the reference for whoever picks it up.
+matiasngf
+closed this as not plannedon Jul 30, 2026
+matiasngf
+changed the title [-]`orbitCamera()` + `fitClipPlanes()` — orbit framing with mesh-fitted near/far in `@vgpu/render/domain`[/-] [+]`orbitCamera()` + `fitClipPlanes()` — orbit framing with mesh-fitted near/far[/+] on Jul 30, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

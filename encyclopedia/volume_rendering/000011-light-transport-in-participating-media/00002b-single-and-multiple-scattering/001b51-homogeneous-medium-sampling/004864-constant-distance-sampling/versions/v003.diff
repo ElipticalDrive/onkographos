@@ -1,0 +1,235 @@
+--- v002.md
++++ v003.md
+@@ -10,33 +10,33 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Scene geometry (surfaces classified as diffuse or specular).
+-*   Homogeneous medium properties: absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, and extinction coefficient $\sigma_t = \sigma_a + \sigma_s$.
+-*   Step size $\delta$.
+-*   Phase function approximation (Schlick phase function).
+-*   Light sources (for light tracing).
++*   Scene geometry with surfaces classified as diffuse or specular based on a threshold [S2, book].
++*   Homogeneous medium properties: absorption coefficient $\sigma_a$, scattering coefficient $\sigma_s$, and extinction coefficient $\sigma_t = \sigma_a + \sigma_s$ [S1][S2, book].
++*   Step size $\delta$ [S1][S2, book].
++*   Phase function approximation using the Schlick phase function [S1][S2, book].
++*   Light sources for generating initial bundles [S1][S2, book].
+ 
+ **Outputs:**
+-*   Radiance contribution stored in voxels (isotropic component) and surfaces (diffuse/specular).
+-*   Final image or progressive refinement sequence.
++*   Radiance contribution stored in voxels (isotropic component) and surfaces (diffuse/specular) [S1][S2, book].
++*   Final image or progressive refinement sequence [S2, book].
+ 
+ ### Data Structures
+-*   **Voxel Grid:** Stores the isotropic part of the scattered energy. The directional component is not stored in the voxel for subsequent illumination [S1][S2, book].
++*   **Voxel Grid:** Stores the isotropic part of the scattered energy [S1][S2, book].
+ *   **Surface Energy Buffer:** Stores unshot energy for diffuse surfaces in mixed scenes [S2, book].
+ 
+ ### Parameters
+ *   $\delta$: Constant step size. Smaller values reduce bias but increase computation time [S2, book].
+-*   Schlick phase function parameters: Approximates Mie scattering as a combination of isotropic and forward scattering components [S1][S2, book].
++*   Schlick phase function parameters: Approximates Mie scattering as a combination of isotropic plus forward scattering components [S1][S2, book].
+ 
+ ### Algorithm Steps
+-1.  **Initialization:** Create light bundles from light sources with initial flux $E$.
+-2.  **Propagation:** Advance the bundle along its direction by distance $\delta$.
++1.  **Initialization:** Create light bundles from light sources with initial flux $E$ [S1][S2, book].
++2.  **Propagation:** Advance the bundle along its direction by distance $\delta$ [S1][S2, book].
+ 3.  **Absorption:** Update the bundle's flux $E$ by multiplying it with the transmittance over the step $\delta$:
+     $$ E_{new} = E_{old} \cdot e^{-\sigma_a \delta} $$
+     This accounts for absorption along the entire path of the bundle [S1][S2, book].
+-4.  **Scattering Decision:** At the new position, perform a sampling process to decide if scattering occurs. The sources describe a "sampling process" but do not provide the explicit probability formula for the decision at each step. However, they note that bundles can only be scattered at distances which are multiples of $\delta$ [S2, book]. [G] In standard implementations of this bias, the probability of scattering at a step is often derived from the transmittance over $\delta$, i.e., $P_{scatter} = 1 - e^{-\sigma_t \delta}$, but the sources do not explicitly define this probability, only the consequence of the fixed step.
++4.  **Scattering Decision:** At the new position, perform a sampling process to decide if scattering occurs [S1][S2, book]. The sources describe a "sampling process" but do not provide the explicit probability formula for the decision at each step [S2, book]. [G] In standard implementations of this bias, the probability of scattering at a step is derived from the transmittance over $\delta$, i.e., $P_{scatter} = 1 - e^{-\sigma_t \delta}$, but the sources do not explicitly define this probability, only the consequence of the fixed step.
+ 5.  **Scattering Event:** If scattering occurs:
+     *   Determine the scatter direction using optimal importance sampling of the scattering component based on the Schlick phase function [S1][S2, book].
+     *   Store the isotropic part of the scattered energy in the current voxel [S1][S2, book].
+-    *   Continue the bundle with the new direction and reduced flux.
++    *   Continue the bundle with the new direction and reduced flux [S1][S2, book].
+ 6.  **Surface Interaction (Mixed Scenes):**
+     *   If the bundle hits a surface:
+@@ -44,9 +44,12 @@
+         *   **Specular Surface:** Reflect the bundle using importance sampling and continue [S2, book].
+ 7.  **Exit:** If the bundle exits the medium, record its energy at the border voxel [S2, book].
+-8.  **Progressive Refinement (Optional):** In mixed scenes, if a bundle hits a diffuse surface, its path ends. At each iteration, bundles representing the unshot energy of the element with the highest value are spread to the environment [S2, book].
++8.  **Progressive Refinement (Optional):** In mixed scenes, if a bundle hits a diffuse surface, its path ends [S2, book]. At each iteration, bundles representing the unshot energy of the element with the highest value are spread to the environment [S2, book].
+ 
+ ### Pseudocode
+ 
+ ```python
++import math
++import random
++
+ def constant_distance_sampling(light_bundles, medium, step_size, surfaces):
+     """
+@@ -54,69 +57,105 @@
+     
+     Args:
+-        light_bundles: List of initial light bundles (position, direction, flux).
+-        medium: Object containing sigma_a, sigma_s, sigma_t.
++        light_bundles: List of tuples (position, direction, flux).
++        medium: Dict with keys 'sigma_a', 'sigma_s', 'sigma_t'.
+         step_size: Constant step length delta.
+-        surfaces: List of surface objects with hit testing and reflection properties.
++        surfaces: List of surface dicts with 'type', 'intersect', 'reflect'.
+         
+     Returns:
+-        voxel_energy: Accumulated isotropic energy in voxels.
+-        surface_energy: Accumulated energy on diffuse surfaces.
+-    """
+-    voxel_energy = initialize_voxel_grid()
+-    surface_energy = initialize_surface_buffer()
+-    
+-    active_bundles = light_bundles
++        voxel_energy: Dict mapping voxel_coords to accumulated isotropic flux.
++        surface_energy: Dict mapping surface_id to accumulated flux.
++    """
++    voxel_energy = {}
++    surface_energy = {}
++    active_bundles = list(light_bundles)
+     
+     while active_bundles:
+         next_active_bundles = []
+         
+-        for bundle in active_bundles:
++        for pos, dir, flux in active_bundles:
+             # Step 1: Propagate and Absorb
+-            new_position = bundle.position + bundle.direction * step_size
+-            transmittance = exp(-medium.sigma_a * step_size)
+-            bundle.flux *= transmittance
++            new_pos = (pos[0] + dir[0] * step_size, pos[1] + dir[1] * step_size, pos[2] + dir[2] * step_size)
++            transmittance = math.exp(-medium['sigma_a'] * step_size)
++            new_flux = flux * transmittance
+             
+             # Step 2: Check for Surface Intersection
+-            hit_surface, hit_point, surface_normal, surface_type = ray_intersect(new_position, bundle.direction, surfaces)
++            hit = False
++            for surf in surfaces:
++                hit_point, surf_type = surf['intersect'](new_pos, dir)
++                if hit_point is not None:
++                    hit = True
++                    if surf_type == "diffuse":
++                        # Store energy and terminate
++                        surface_energy[surf['id']] = surface_energy.get(surf['id'], 0) + new_flux
++                        break
++                    elif surf_type == "specular":
++                        # Reflect and continue
++                        new_dir = reflect(dir, surf['normal'])
++                        new_pos = hit_point
++                        next_active_bundles.append((new_pos, new_dir, new_flux))
++                        break
+             
+-            if hit_surface:
+-                if surface_type == "diffuse":
+-                    # Store energy and terminate
+-                    surface_energy.add(hit_point, bundle.flux)
+-                    continue
+-                elif surface_type == "specular":
+-                    # Reflect and continue
+-                    bundle.direction = reflect(bundle.direction, surface_normal)
+-                    bundle.position = hit_point
+-                    next_active_bundles.append(bundle)
+-                    continue
+-            
++            if hit:
++                continue
++                
+             # Step 3: Scattering Decision
+             # Note: Sources do not specify the exact probability formula for scattering
+             # at each step, only that scattering is restricted to multiples of delta.
+             # [G] Standard implementation uses P_scatter = 1 - exp(-sigma_t * delta)
+-            scatter_prob = 1.0 - exp(-medium.sigma_t * step_size)
++            scatter_prob = 1.0 - math.exp(-medium['sigma_t'] * step_size)
+             
+-            if random_uniform() < scatter_prob:
++            if random.random() < scatter_prob:
+                 # Scattering Event
+                 # Determine scatter direction using Schlick phase function importance sampling
+-                scatter_direction = sample_schlick_phase(bundle.direction, medium)
++                scatter_dir = sample_schlick_phase(dir, medium)
+                 
+                 # Store isotropic part in voxel
+                 # Note: Sources state only isotropic part is stored
+-                voxel_energy.add(bundle.position, bundle.flux * isotropic_component)
++                voxel_coords = get_voxel_coords(new_pos)
++                voxel_energy[voxel_coords] = voxel_energy.get(voxel_coords, 0) + new_flux
+                 
+                 # Continue bundle with new direction
+-                bundle.position = new_position
+-                bundle.direction = scatter_direction
+-                next_active_bundles.append(bundle)
++                next_active_bundles.append((new_pos, scatter_dir, new_flux))
+             else:
+                 # No scattering, continue propagation
+-                bundle.position = new_position
+-                next_active_bundles.append(bundle)
++                next_active_bundles.append((new_pos, dir, new_flux))
+                 
+         active_bundles = next_active_bundles
+         
+     return voxel_energy, surface_energy
++
++def reflect(d, n):
++    """Standard vector reflection: d - 2(d·n)n"""
++    dot = d[0]*n[0] + d[1]*n[1] + d[2]*n[2]
++    return (d[0] - 2*dot*n[0], d[1] - 2*dot*n[1], d[2] - 2*dot*n[2])
++
++def sample_schlick_phase(incoming_dir, medium):
++    """
++    Importance sampling of the Schlick phase function.
++    Approximates Mie scattering as isotropic + forward scattering.
++    Returns a normalized direction vector.
++    """
++    # [G] Standard Schlick importance sampling: mix isotropic and forward directions
++    # Isotropic component weight is typically derived from the phase function parameters.
++    # Here we use a simplified uniform random direction for isotropic, 
++    # and a forward-biased direction for the anisotropic part.
++    u1, u2 = random.random(), random.random()
++    if u1 < 0.5:
++        # Isotropic direction
++        theta = math.acos(1 - 2*u2)
++        phi = 2 * math.pi * random.random()
++        return (math.sin(theta)*math.cos(phi), math.sin(theta)*math.sin(phi), math.cos(theta))
++    else:
++        # Forward scattering direction (simplified)
++        g = 0.7  # Anisotropy factor
++        cos_theta = ((1 - g**2) / (1 - g + 2*g*u2)) if u2 > 0 else 1.0
++        sin_theta = math.sqrt(max(0, 1 - cos_theta**2))
++        phi = 2 * math.pi * random.random()
++        # Rotate to align with incoming direction (simplified for axis-aligned case)
++        return (sin_theta*math.cos(phi), sin_theta*math.sin(phi), cos_theta)
++
++def get_voxel_coords(pos):
++    """Map 3D position to integer voxel grid coordinates."""
++    return (int(pos[0]), int(pos[1]), int(pos[2]))
+ ```
+ 
+@@ -124,5 +163,5 @@
+ *   **Bias:** The method produces biased results because the sampling strategy restricts scattering to discrete distances (multiples of step size), causing the expected length before scattering to differ from the mean free path without absorption [S2, book].
+ *   **Variance vs. Bias Trade-off:** To assure results with a variance below a threshold, the time required is approximately of the order of the inverse of the step size $\delta$ [S2, book]. Smaller $\delta$ reduces bias but increases computation time [S2, book].
+-*   **Isotropic Energy Loss:** The isotropic part of the voxel is not considered for the illumination of other voxels. Since the directional component is much more important, the resulting error is expected not to be significant, but a progressive refinement strategy could be used when isotropic energy becomes too important [S1][S2, book].
++*   **Isotropic Energy Loss:** The isotropic part of the voxel is not considered for the illumination of other voxels [S1][S2, book]. Since the directional component is much more important, the resulting error is expected not to be significant, but a progressive refinement strategy could be used when isotropic energy becomes too important [S1][S2, book].
+ *   **Mixed Scenes:** In mixed scenes, the storage scheme requires a higher number of rays traveling through the volumes to get an accurate sampling of the energy leaving the volume compared to per-voxel storage [S2, book].
+ 
+@@ -131,5 +170,5 @@
+ ### Time and Memory Complexity
+ *   **Time Complexity:** The time required to assure results with a variance below a threshold is approximately of the order of the inverse of the step size $\delta$ [S2, book].
+-*   **Memory Complexity:** Depends on the voxel grid size for storing isotropic energy and surface buffers for diffuse surfaces [S1][S2, book].
++*   **Memory Complexity:** Memory usage scales with the voxel grid size for storing isotropic energy and with the number of diffuse surfaces for storing unshot energy in mixed scenes [S1][S2, book].
+ 
+ ### Measured Performance
+@@ -142,6 +181,6 @@
+ 
+ ### When to Use
+-*   Use when computational efficiency of phase function sampling is prioritized over unbiased accuracy.
+-*   Use for homogeneous media where the bias introduced by $\delta$ is acceptable.
++*   Use when computational efficiency of phase function sampling is prioritized over unbiased accuracy [S1][S2, book].
++*   Use for homogeneous media where the bias introduced by $\delta$ is acceptable [S2, book].
+ *   Use for mixed scenes requiring progressive refinement [S2, book].
+ 
+@@ -153,5 +192,5 @@
+ 
+ ### Origin
+-Constant Distance Sampling was described by Blasi et al. in [4, 5] (also cited as [9, 10] in [S1]). The first method [4] deals with a single participating medium, while the second [5] can render mixed scenes [S1][S2, book].
++Constant Distance Sampling was described by Blasi et al. in [4, 5] (also cited as [9, 10] in [S1]) [S1][S2, book]. The first method [4] deals with a single participating medium, while the second [5] can render mixed scenes [S1][S2, book].
+ 
+ ### History and Development

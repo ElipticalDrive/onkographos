@@ -1,0 +1,2815 @@
+## Overview
+
+
+----------
+
+
+This project voxelizes the meshes in STL file ***without*** the condition of *watertight*. It supports many formats only now, since we are using `assimp` library to load the file. Basically, the project can be summarized into two steps:
+
+- Surface voxelization  
+    For each piece of mesh (triangle) , we check the collided voxels in either way: 
+    1. Get the minimal bounding box of each triangle, check each voxel in this box with the triangle;
+    2. Start at any voxel collided with the triangle, and do bfs search to check neighboring voxels.   
+    
+    The first way is lightweight, but may become worse when the ratio of (triangle's volume/bounding box's volume) is small. While the second way has quite large constant overhead. For each thread in thread pool, it will pick a triangle to voxelize. The time complexity is O(m*c), where m is the triangle number and c is some factor such as the voxel number in the bounding box or constant overhead of bfs.
+- Solid voxelization  
+    When equipped with surface voxelization, the solid voxelization can be simple: flood fill. We try to flood fill the outer space of the meshes like carving the wood, since it is more simple and doesn't requires *watertight* property. However, the basic flood fill with bfs is too heavy and time-consuming, optimizations are proposed here (see below). The time complexity is O(n), where n is the voxel number in the bounding box of whole mesh.
+
+## Optimizations
+----------
+
+- Use thread pool. 
+- Use bit compression to record and order the voxel. First, I store voxel (x, y, z) to index=x\*size_y\*size_z + y\*size_z + z, where size_{x,y,z} are the voxel grid size, and I call the compressed format as *index*. For instance, with size=4, index=1 indicates voxel (0,0,1), index=4 indicates voxel (0,1,0). With indexes, all voxels can be represented with a binary string. For instance, '010010' means the voxels with indexes of 1 and 4 are collided with the mesh, while others are not. The binary string is further compressed with 64-bit unsigned int array.
+- Use atomic<unsigned int> on the int array (the conceptional binary string) to guarantee the correctness when multi threads write the results, i.e., set the '0' or '1' to the int array. This design gives better parallel performance.
+- Estimate the bounding box size of a triangle to guide which method is more suitable for surface voxelization.
+- Randomly permutate the triangles' order to reduce the possibility of lock, thus get better parallel performance.
+- Use filter-and-refine strategy to optimize the plain flood fill algorithm as follows: 
+  - Filter  
+  We fill the voxels along each axis, and stop when meet the mesh. For instance, fix (x,y), enumerate z in [0, maxz], if a voxel (x,y,z) is occupied, stop. The intuition is to mark all voxels which are visible along that axis. This idea is similar to flood fill but is much more efficient benefit from the lightweight operations. 
+  - Refine  
+  And it's worthy noting, after filtering, there are some *holes*, because they are not visible along any axis. But these are very few holes, so we can use flood fill again on them efficiently. 
+  
+  Although the time complexity is still O(n), it runs much faster than basic flood fill search.
+- Compress the output file, for your convenience, I choose the simple version of output for default. But optimized version is prepared. Recall that the voxels are stored in binary string, such as '1110000'. To reduce the output file, please be noted only voxels in the minimal bounding box for mesh are output. It is further compressed as $value$ and $count$. For '1110000', it is compressed to (1)(2)(0)(3), (1)(2) means 3 consecutive 1, and (0)(3) means 4 consecutive 0. I use two bytes to record $value$ and $count$. Specifically, $value$ can be 0 or 1, and $count$ can be [0,255] which corresponds to [1,256]. To retrieve the coordination of a voxel in original space, let $(x,y,z)$ denote the voxel coordinate extracted from the output binary string, and the coordinate in voxelized space is $(x+x_{vox\_lb},y+y_{vox\_lb},z+z_{vox\_lb})$.
+- [TODO] Combine the coarse and fine strategy, i.e., do coarse grid size first to filter more unnecessary voxels.
+- [TODO] Use gpu
+- [TODO] Try to fill the inside voxels, such that the time complexity is proportional to size of the result voxels.
+
+## Installation
+
+
+----------
+
+
+This project requires libraries (dependencies) as follows:
+- *absl* (https://github.com/abseil/abseil-cpp), which is installed as git submodule
+- *boost*
+- *libccd*
+- *libfcl*    
+  for collision checking (https://github.com/flexible-collision-library/fcl, version: tags/0.3.3)
+- *assimp*  
+    for loading STL file (https://github.com/assimp/assimp)
+- *cmake & make*
+    make sure `pkg-config` is installed.
+
+
+CMakeLists.txt is used to generate makefiles. To build this project, in command line, run
+
+``` cmake
+mkdir build
+cd build
+cmake ..
+```
+
+Next, in linux, use `make` in 'build' directory to compile the code. 
+
+## How to Use
+
+
+----------
+
+`voxelizer --help` will give all the parameters.
+
+```Allowed options:
+    --clipping_size (clipping size (x,y,z) to clip the voxelized result. The
+      clipping size is grid size based. If only one integter is specified,
+      clipping size is initialized as (x,x,x). If not set, the result is not
+      clipped.); default: ;
+    --format (output format, can be binvox or rawvox); default: "binvox";
+    --grid_size (grid size, the granularity of voxelizer. if only one integer is
+      set, assuming the X,Y,Z are the same.); default: ;
+    --input (input file to be voxelized, file type will be inferred from file
+      suffix); default: "";
+    --mesh_index (mesh index to be voxelized); default: 0;
+    --mode (voxelizer mode, surface or solid); default: "solid";
+    --num_thread (number of thread to run voxelizer); default: 4;
+    --output (output file to store voxelized result); default: "";
+    --tight (If true, check whether the center point of each voxel is inside the
+      mesh or outside it, and if it is outside, remove it. Caveat: this option
+      could be time consuming.); default: false;
+    --verbose (print debug info); default: false;
+    --voxel_size (voxel size, which determines the size of each voxel);
+      default: ;
+    --with_meta (write voxel meta info to .meta file if set to true);
+      default: false;
+```
+
+<!--- Output (voxel file format, it is wrote in `binvox` or `rawvox` mode, the 'read_rawvox.cpp' in test folder provides a sample code to load the .rawvox file.) `rawvox` is the following format:-->
+<!--  - header-->
+<!--    - size_x, size_y, size_z   -->
+<!--    three integer denotes the size of grid system, e.g., 256, 256, 256-->
+<!--    - lowerbound_x lowerbound_y lowerbound_z  -->
+<!--    three doubles denote the lower bound of the original system, e.g., -0.304904 -0.304904 -0.304904-->
+<!--    - voxel_size   -->
+<!--    one double denotes the unit size of a voxel in original system, e.g., 0.00391916-->
+<!--  - data-->
+<!--    - x y z  -->
+<!--    three integers denote the voxel coordinate in grid system, e.g, 30 66 194-->
+<!--        - ...   -->
+<!--When we have the voxel (x,y,z), we can get the box in original space as follows: (lowerbound_x + x\*voxel_size, lowerbound_y + y\*voxel_size, lowerbound_z + z\*voxel_size), (lowerbound_x + (x+1)\*voxel_size, lowerbound_y + (y+1)\*voxel_size, lowerbound_z + (z+1)\*voxel_size).-->
+
+When you are in 'build' directory, one running example is: 
+
+``` ./bin/voxelizer --input=../data/sphere.obj --output=../playground/sphere.binvox --grid_size=256 --verbose=true```
+It outputs a `binvox` file with grid size `256 x 256 x 256`.
+
+If you specify `--voxel_size=0.1`, instead, it will output a file with each voxel size is `0.1 x 0.1 x 0.1`. Note that the dimensions can be different.
+
+To view the `sphere.binbox` file, you may use the viewvox here: https://www.patrickmin.com/viewvox/ or https://raahii.github.io/simple_voxel_viewer/index.html.
+
+
+<!--For your reference, the pseudo output code for output is:-->
+
+<!--```C++-->
+<!--ofstream* output = new ofstream(p_file.c_str(), ios::out | ios::binary);-->
+<!--*output << size_x << " " << size_y << " " << size_z << endl;-->
+<!--*output << lowerbound_x << " " << lowerbound_y << " " << lowerbound_z << endl;-->
+<!--*output << voxel_size << endl;-->
+<!--for (x,y,z) in voxels:-->
+<!--  *output << x << " " << y << " " << z << endl;-->
+<!--```-->
+    
+
+
+<!--  - header
+    - $x_{grid\size_}y_{grid\size_}z_{grid\size_}$
+    three integer denote the grid sizes, e.g., 256 256 256
+    - $x_{lb}y_{lb}z_{lb}$  
+    three doubles denote the lower bounds of the original space, e.g., -0.304904 -0.304904 -0.304904
+    - $x_{vox\unit_}y_{vox\unit_}z_{vox\unit_}$  
+    three doubles denote the a voxel's size in original space, e.g., 0.00783833 0.00783833 0.00783833
+    - $x_{vox\_lb}$$y_{vox\_lb}$$z_{vox\_lb}$
+    three integers denote the lower bound of minimal bounding box in voxelized space, e.g., 30 0 8
+        - $x_{vox\size_}$$y_{vox\size_}$$z_{vox\size_}$
+    three integers denote the minimal bounding box's size in voxelized space, e.g., 
+  - data  
+    - $value_{01}count_{[0,255]}$...  
+    Recall that the voxels are stored in binary string, such as '1110000'. To reduce the output file, please be noted only voxels in the minimal bounding box for mesh are output. It is further compressed as $value$ and $count$. For '1110000', it is compressed to (1)(2)(0)(3), (1)(2) means 3 consecutive 1, and (0)(3) means 4 consecutive 0. I use two bytes to record $value$ and $count$. Specifically, $value$ can be 0 or 1, and $count$ can be [0,255] which corresponds to [1,256]. To retrieve the coordination of a voxel in original space, let $(x,y,z)$ denote the voxel coordinate extracted from the output binary string, and the coordinate in voxelized space is $(x+x_{vox\_lb},y+y_{vox\_lb},z+z_{vox\_lb})$.
+-->
+
+
+
+## Directories
+
+
+----------
+
+
+This project has folders and files as follows:
+
+ - *src*    
+    the source files
+ - *test*    
+    the test files
+ - *data*    
+    testing data (.stl files)
+ - *CMakeLists.txt*    
+    for cmake
+    
+## Testing
+
+
+----------
+
+For simple testing, in `build` directory, run  ```./test/collision_checker```.
+It is a benchmark of voxel collision checking and mesh collision checking (using the libfcl), with three testing files (kawada-hironx.stl, racecar.stl, and bike.stl). The grid size varies from 128 to 512, and the random cube (with random translate and random rotation) has size of 0.005^3 to 0.08^3 of the total scene size. The accuracy is defined based on the ground truth of mesh collision checking. As you can see, when the grid size becomes larger, the accuracy will increase. The collision checking performance is not specially optimized yet.
+
+#### Testing Plaform
+MacOS 10.9.3    
+ubuntu 14.04
+
+### examples/check_side.cpp
+```
+#include "fcl/shape/geometric_shapes.h"
+#include "commons.h"
+#include "ray_caster.h"
+#include "voxelizer.h"
+#include "time.h"
+
+using voxelizer::Voxelizer;
+using voxelizer::RayCaster;
+using voxelizer::RandFloat;
+
+bool InitVoxleizer(std::unique_ptr<Voxelizer>& vox_ptr) {
+  const std::string in_file = "../data/sphere.obj";
+  voxelizer::Option option;
+  option.SetInFilePath(in_file);
+  vox_ptr.reset(new Voxelizer(128, option));
+  auto status = vox_ptr->Init();
+  if (!status.ok()) {
+    std::cout << "init failure: " << status.message() << std::endl;
+    return false;
+  }
+  vox_ptr->VoxelizeSurface(4);
+  return true;
+}
+
+Vec3f RandomPoint(const Vec3f& lb, const Vec3f& ub) {
+  return lb + (ub - lb) * Vec3f(RandFloat(), RandFloat(), RandFloat());
+}
+
+int main(int argc, char* argv[]) { 
+  srand((unsigned)time(NULL));
+  std::unique_ptr<Voxelizer> vox_ptr;
+  if (!InitVoxleizer(vox_ptr)) return 1;
+  std::vector<Vec3f> vertices = vox_ptr->VerticesVec();
+  std::vector<Triangle> triangles = vox_ptr->TrianglesVec();
+  std::cout << vertices.size() << ", " << triangles.size() << std::endl;
+  RayCaster ray_caster(vertices, triangles);
+  if (!ray_caster.Init()) {
+    std::cout << "Fail to init ray_caster" << std::endl;
+    return 1;
+  }
+  std::cout << "Space: " << vox_ptr->MeshLowerBound() << ", " << vox_ptr->MeshUpperBound() << std::endl;
+  Vec3f source = RandomPoint(vox_ptr->MeshLowerBound(), vox_ptr->MeshUpperBound());
+  std::cout << "Source: " << source << std::endl;
+  std::cout << "Inside: " << ray_caster.Inside(source) << std::endl;
+  std::cout << RandFloat() << ", " << RandFloat() << ", " << RandFloat() << std::endl;
+  return 0;
+}
+```
+
+### examples/collision_checker.cpp
+```
+/*
+ * collisionChecker.cpp
+ *
+ *  Created on: 30 Jun, 2014
+ *      Author: chenqian
+ */
+
+#include "collision_checker.h"
+
+using voxelizer::ArrayDeleter;
+using voxelizer::BoxSP;
+using voxelizer::kBatchSize;
+using voxelizer::Timer;
+using voxelizer::V3SP;
+using voxelizer::Voxelizer;
+using voxelizer::VoxelIndex;
+
+namespace collision_checker {
+
+float CollisionChecker::RandInterval(float rmin, float rmax) {
+  srand (time(NULL));
+  float t = static_cast<float>(rand() % 1000) / 1000;
+  return (t * (rmax - rmin) + rmin);
+}
+
+void CollisionChecker::EulerToMatrix(FCL_REAL a, FCL_REAL b, FCL_REAL c,
+                                     Matrix3f& R) {
+  FCL_REAL c1 = cos(a);
+  FCL_REAL c2 = cos(b);
+  FCL_REAL c3 = cos(c);
+  FCL_REAL s1 = sin(a);
+  FCL_REAL s2 = sin(b);
+  FCL_REAL s3 = sin(c);
+
+  R.setValue(c1 * c2, -c2 * s1, s2, c3 * s1 + c1 * s2 * s3,
+             c1 * c3 - s1 * s2 * s3, -c2 * s3, s1 * s3 - c1 * c3 * s2,
+             c3 * s1 * s2 + c1 * s3, c2 * c3);
+}
+
+bool CollisionChecker::Init() {
+	std::cout << "collision checker init..." << std::endl;
+
+  auto status = voxelizer_->Init();
+	if (!status.ok()) {
+    std::cout << "init failure: " << status.message() << std::endl;
+    return false;
+  }
+
+  voxelizer_->VoxelizeSurface(num_thread_);
+  Vec3f lb = voxelizer_->MeshLowerBound();
+  Vec3f ub = voxelizer_->MeshUpperBound();
+  extents_[0] = lb[0];
+  extents_[1] = lb[1];
+  extents_[2] = lb[2];
+  extents_[3] = ub[0];
+  extents_[4] = ub[1];
+  extents_[5] = ub[2];
+  size2_ = size_ * size_;
+  voxels_.reset(new VoxelIndex[voxelizer_->TotalVoxelCompressedSize()],
+                ArrayDeleter<VoxelIndex>());
+  for (int i = 0; i < voxelizer_->TotalVoxelCompressedSize(); ++i)
+    voxels_.get()[i] = voxelizer_->Voxels().get()[i];
+  unit_.reset(new Box(voxelizer_->Unit()));
+  PreMeshCO();
+
+  std::cout << "done." << std::endl;
+
+  return true;
+}
+
+COSP CollisionChecker::GenRandomCO(double ratio) {
+  BoxSP box(new Box((voxelizer_->MeshUpperBound() -
+                     voxelizer_->MeshLowerBound()) *
+                    ratio));
+  Transform3f tf;
+  GenRandomTransform(extents_, tf);
+  COSP boxCO(new CollisionObject(box, tf));
+  return boxCO;
+}
+
+inline bool CollisionChecker::TestVoxel(const COSP& cube_co) {
+  const Vec3f lb = voxelizer_->GetVoxel(cube_co->getAABB().min_);
+  const Vec3f ub = voxelizer_->GetVoxel(cube_co->getAABB().max_);
+  int lx = std::max(0, (int)lb[0]), ux = std::min(size_ - 1, (int)ub[0]),
+      ly = std::max(0, (int)lb[1]), uy = std::min(size_ - 1, (int)ub[1]),
+      lz = std::max(0, (int)lb[2]), uz = std::min(size_ - 1, (int)ub[2]);
+  VoxelIndex voxel_index, tmp;
+  Vec3f vxl_box;
+  //	std::cout << "e" << std::endl;
+  // std::cout << *lb << ", " << *ub << std::endl;
+  for (int x = lx, y, z; x <= ux; ++x) {
+    for (y = ly; y <= uy; ++y) {
+      for (z = lz; z <= uz; ++z) {
+        voxel_index = x * size2_ + y * size_ + z;
+        tmp = (voxels_.get())[voxel_index / kBatchSize];
+        if (!GETBIT(tmp, voxel_index)) continue;
+        vxl_box.setValue(x, y, z);
+        // Transform3f tf(*voxelizer_->GetLoc(vxl_box));
+        Transform3f tf(voxelizer_->GetLoc(vxl_box) +
+                       voxelizer_->HalfUnit());
+        // std::cout << *voxelizer_->GetLoc(vxl_box) << std::endl;
+        CollisionRequest request;
+        CollisionResult result;
+        COUP box_co(new CollisionObject(unit_, tf));
+        if (fcl::collide(box_co.get(), cube_co.get(), request, result)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+inline bool CollisionChecker::TestMesh(const COSP& cube_co) {
+  CollisionRequest request;
+  CollisionResult result;
+  if (fcl::collide(mesh_co_.get(), cube_co.get(), request, result)) {
+    return true;
+  }
+  return false;
+}
+
+void CollisionChecker::Test(int num_cases, double ratio) {
+  Timer timer;
+  double t1 = 0, t2 = 0;
+  int tp = 0, fp = 0, fn = 0, tn = 0;
+  for (int i = 0; i < num_cases; ++i) {
+    COSP cube_co = GenRandomCO(ratio);
+    cube_co->computeAABB();
+    //		std::cout << cube_co->getAABB().min_ << std::endl;
+    timer.Restart();
+    bool res1 = TestVoxel(cube_co);
+    timer.Stop();
+    t1 += timer.TimeInNs();
+    timer.Restart();
+    bool res2 = TestMesh(cube_co);
+    timer.Stop();
+    t2 += timer.TimeInNs();
+    if (res1 && !res2) {
+      fp++;
+    }
+    if (!res1 && res2) {
+      fn++;
+    }
+    if (res1 && res2) {
+      tp++;
+    }
+    if (!res1 && !res2) {
+      tn++;
+    }
+  }
+  std::cout << "---------- ratio = " << ratio << " ----------" << std::endl;
+  std::cout << "accuracy = \t" << 100.0 * (tp + tn) / (num_cases) << "\%" << std::endl;
+  // std::cout << "# = \t" << tp << ", " << tn << "\%" << std::endl;
+  std::cout << "voxel consumes \t" << t1 / num_cases << " ns" << std::endl;
+  std::cout << "mesh consumes \t" << t2 / num_cases << " ns" << std::endl;
+}
+
+void CollisionChecker::PreMeshCO() {
+  vertices_ = voxelizer_->VerticesVec();
+  triangles_ = voxelizer_->TrianglesVec();
+  ModelSP model(new Model());
+  model->beginModel(triangles_.size(), vertices_.size());
+  model->addSubModel(vertices_, triangles_);
+  model->endModel();
+  mesh_co_.reset(new CollisionObject(model));
+  mesh_co_->computeAABB();
+}
+
+void CollisionChecker::GenRandomTransform(FCL_REAL extents[6],
+                                          Transform3f& transform) {
+  FCL_REAL x = RandInterval(extents[0], extents[3]);
+  FCL_REAL y = RandInterval(extents[1], extents[4]);
+  FCL_REAL z = RandInterval(extents[2], extents[5]);
+
+  const FCL_REAL pi = 3.1415926;
+  FCL_REAL a = RandInterval(0, 2 * pi);
+  FCL_REAL b = RandInterval(0, 2 * pi);
+  FCL_REAL c = RandInterval(0, 2 * pi);
+
+  Matrix3f R;
+  EulerToMatrix(a, b, c, R);
+  Vec3f T(x, y, z);
+  transform.setTransform(R, T);
+}
+
+CollisionChecker::~CollisionChecker() {
+  // TODO Auto-generated destructor stub
+}
+
+}  // namespace collision_checker
+
+int run_benchmark () {
+  const std::string inputFile[] = {"../data/kawada-hironx.stl", "../data/racecar.stl",
+                        "../data/bike.stl"};
+  const double ratios[] = {0.005, 0.01, 0.02, 0.04, 0.08};
+  const int gridSize[] = {128, 256, 512};
+  int testCases = 1000;
+  for (int k = 0; k < 3; ++k) {
+    for (int i = 0; i < 3; ++i) {
+      std::cout << "==================================" << std::endl;
+      std::cout << "Intput file : " << inputFile[i] << std::endl;
+      std::cout << "Grid size : " << gridSize[k] << std::endl;
+      std::cout << "==================================" << std::endl;
+      collision_checker::CollisionChecker checker(gridSize[k], 4, inputFile[i]);
+      if (!checker.Init()) {
+        std::cout << "Checker init error." << std::endl;
+        return 1;
+      }
+      for (int j = 0; j < 5; ++j) {
+        checker.Test(testCases, ratios[j]);
+      }
+    }
+  }
+  return 0;
+}
+
+int run_single() {
+  const std::string in_file = "../data/kawada-hironx.stl";
+   collision_checker::CollisionChecker checker(256, 4, in_file);
+  if (!checker.Init()) {
+    std::cout << "Checker init error." << std::endl;
+    return 1;
+  }
+  checker.Test(10, 0.08);
+  return 0;
+}
+
+int main(int argc, char* argv[]) {
+  if (argc >= 2 && std::string(argv[1]) == "benchmark") {
+    return run_benchmark();
+  }
+  return run_single();
+}
+```
+
+### examples/collision_checker.h
+```
+/*
+ * collisionChecker.h
+ *
+ *  Created on: 30 Jun, 2014
+ *      Author: chenqian
+ */
+
+#ifndef COLLISIONCHECKER_H_
+#define COLLISIONCHECKER_H_
+
+#include <cmath>
+#include <cstddef>
+#include <cstdio>
+
+#include "commons.h"
+#include "fcl/BV/BV.h"
+#include "fcl/BVH/BVH_model.h"
+#include "fcl/collision.h"
+#include "fcl/math/transform.h"
+#include "fcl/shape/geometric_shapes.h"
+#include "time.h"
+#include "voxelizer.h"
+
+namespace collision_checker {
+
+typedef std::unique_ptr<voxelizer::Voxelizer> VoxUP;
+typedef boost::shared_ptr<CollisionObject> COSP;
+typedef std::unique_ptr<CollisionObject> COUP;
+typedef fcl::BVHModel<OBBRSS> Model;
+typedef boost::shared_ptr<Model> ModelSP;
+
+class CollisionChecker {
+  void EulerToMatrix(FCL_REAL a, FCL_REAL b, FCL_REAL c, Matrix3f& R);
+  COSP GenRandomCO(double ratio);
+  void PreMeshCO();
+  float RandInterval(float rmin, float rmax);
+  FCL_REAL extents_[6];
+  void GenRandomTransform(FCL_REAL extents[6], Transform3f& transform);
+  VoxUP voxelizer_;
+  COUP mesh_co_;
+  std::vector<Vec3f> vertices_;
+  std::vector<Triangle> triangles_;
+  int size_, size2_, num_thread_;
+  std::string p_file_;
+  voxelizer::VISP voxels_;
+  voxelizer::BoxSP unit_;
+
+ public:
+  inline bool TestVoxel(const COSP& cube_co);
+  inline bool TestMesh(const COSP& cube_co);
+  void Test(int num_cases, double ratio);
+  bool Init();
+  CollisionChecker(int size, int num_thread, const std::string& p_file)
+      : size_(size),
+        num_thread_(num_thread) {
+          voxelizer::Option option;
+          option.SetInFilePath(p_file);
+          voxelizer_ = absl::make_unique<voxelizer::Voxelizer>(size, option);
+        }
+  virtual ~CollisionChecker();
+};
+
+}  // namespace collision_checker
+
+#endif /* COLLISIONCHECKER_H_ */
+```
+
+### examples/read_meta.cpp
+```
+#include <fstream>
+#include <iostream>
+#include <string>
+#include "commons.h"
+#include "voxelizer.h"
+
+using voxelizer::VoxelIndex;
+using voxelizer::VoxelFlags;
+using voxelizer::VoxelMeta;
+
+int main(int argc, char* argv[]) {
+  std::ifstream* input = new std::ifstream(argv[1], std::ios::in | std::ios::binary);
+  std::string format;
+  VoxelIndex size_x, size_y, size_z;
+  getline(*input, format);
+  std::cout << format << std::endl;
+  *input >> size_x >> size_y >> size_z;
+  std::cout << size_x << ", " << size_y << ", " << size_z << std::endl;
+  VoxelIndex total_size = size_x * size_y * size_z;
+  int filled = 0;
+  for (VoxelIndex voxel_index = 0; voxel_index < total_size; ++voxel_index) {
+    VoxelIndex read_index;
+    VoxelFlags read_flag;
+    *input >> read_index >> read_flag;
+    VoxelMeta voxel_meta(read_index, read_flag);
+    if (voxel_meta.Filled()) ++filled;
+  }
+  std::cout << "Filled: " << filled << std::endl;
+  input->close();
+}
+```
+
+### examples/read_rawvox.cpp
+```
+#include <fstream>
+#include <iostream>
+#include <string>
+using namespace std;
+
+int main(int argc, char* argv[]) {
+  ifstream* input = new ifstream(argv[1], ios::in | ios::binary);
+  int grid_size;
+  double lx, ly, lz, voxel_size;
+  *input >> grid_size;
+  *input >> lx >> ly >> lz;
+  *input >> voxel_size;
+  int x, y, z, count = 0;
+  while (*input >> x >> y >> z) {
+    // do something
+    if (count == 0)
+      cout << "first line : " << x << ", " << y << ", " << z
+           << endl;  // first line
+    ++count;
+  }
+  cout << "last line : " << x << ", " << y << ", " << z << endl;  // last line
+  input->close();
+  cout << "grid size : " << grid_size << endl;
+  cout << "lower bound : " << lx << " " << ly << " " << lz << endl;
+  cout << "voxel size : " << voxel_size << endl;
+  cout << "voxel count : " << count << endl;
+}
+```
+
+### src/commons.cpp
+```
+/*
+ * Commons.cpp
+ *
+ *  Created on: 23 Jun, 2014
+ *      Author: chenqian
+ */
+
+#include "commons.h"
+
+#include "absl/strings/numbers.h"
+
+namespace voxelizer {
+
+const int kRandMax = 1e6;
+
+float RandFloat(const float rmin, const float rmax) {
+  float t = static_cast<float>(rand() % kRandMax) / kRandMax;
+  return (t * (rmax - rmin) + rmin);
+}
+
+int Random(const int l, const int r) {
+  return (int)((1.0 * random()) / RAND_MAX * (r - l)) + l;
+}
+
+inline void Fill(const Vec3f& vc, float ft[3]) {
+  ft[0] = vc[0];
+  ft[1] = vc[1];
+  ft[2] = vc[2];
+}
+
+bool Collide(const Vec3f& half_unit, const Vec3f& box_aa, const TriangleP& tri) {
+  Vec3f v_box_center = box_aa + half_unit;
+  float half_size[3];
+  Fill(half_unit, half_size);
+  float box_center[3];
+  Fill(v_box_center, box_center);
+  float tricerts[3][3];
+  Fill(tri.a, tricerts[0]);
+  Fill(tri.b, tricerts[1]);
+  Fill(tri.c, tricerts[2]);
+  return TriBoxOverlap(box_center, half_size, tricerts);
+}
+
+bool ToVector3Int(const std::vector<std::string>& vs, std::vector<int>& vi) {
+  vi.clear();
+  for (const auto& v : vs) {
+    int i;
+    if (!absl::SimpleAtoi(v, &i)) {
+      return false;
+    }
+    vi.push_back(i);
+  }
+  return true;
+}
+
+bool ToVector3Float(const std::vector<std::string>& vs, std::vector<float>& vf) {
+  vf.clear();
+  for (const auto& v : vs) {
+    float f;
+    if (!absl::SimpleAtof(v, &f)) {
+      return false;
+    }
+    vf.push_back(f);
+  }
+  return true;
+}
+
+}  // namespace voxelizer
+```
+
+### src/commons.h
+```
+/*
+ * Commons.h
+ *
+ *  Created on: 23 Jun, 2014
+ *      Author: chenqian
+ */
+
+#ifndef COMMONS_H_
+#define COMMONS_H_
+
+#include <assimp/postprocess.h>  // Post processing flags
+#include <assimp/scene.h>        // Output data structure
+#include <fcl/collision.h>
+#include <fcl/narrowphase/narrowphase.h>
+#include <fcl/shape/geometric_shapes.h>
+#include <fcl/shape/geometric_shapes_utility.h>
+
+#include <assimp/Importer.hpp>  // C++ importer interface
+#include <boost/atomic.hpp>
+#include <boost/shared_ptr.hpp>
+#include <boost/unordered_set.hpp>
+#include <cstdlib>
+#include <ctime>
+
+#include "tri_box.h"
+using namespace fcl;
+
+namespace voxelizer {
+
+// we use unsigned int64 as the index
+typedef uint64_t VoxelIndex;
+typedef uint32_t VoxelFlags;
+// we batch with 64 bit.
+const int kBatchSize = 64;
+
+typedef boost::shared_ptr<TriangleP> TriSP;
+typedef boost::shared_ptr<Box> BoxSP;
+typedef boost::shared_ptr<Vec3f> V3SP;
+typedef std::unique_ptr<Vec3f> V3UP;
+
+typedef std::atomic<VoxelIndex> AVI;
+typedef boost::shared_ptr<std::atomic<VoxelIndex>> AVISP;
+
+typedef boost::unordered_set<VoxelIndex> HashSet;
+typedef boost::shared_ptr<VoxelIndex> VISP;
+
+typedef unsigned char Byte;
+
+template <typename T>
+struct ArrayDeleter {
+  void operator()(T const* p) { delete[] p; }
+};
+
+bool Collide(const Vec3f& size, const Vec3f& boxAA, const TriangleP& tri);
+inline void Fill(const Vec3f& vc, float ft[3]);
+
+float RandFloat(const float rmin=0.0, const float rmax=1.0);
+int Random(const int l, const int r);
+
+const Vec3f D_8[] = {Vec3f(1, 1, 1),   Vec3f(1, 1, -1),  Vec3f(1, -1, 1),
+                     Vec3f(1, -1, -1), Vec3f(-1, 1, 1),  Vec3f(-1, 1, -1),
+                     Vec3f(-1, -1, 1), Vec3f(-1, -1, -1)};
+
+const int DI_4[4][2] = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+
+const Vec3f D_6[] = {
+    Vec3f(0, 0, -1), Vec3f(0, 0, 1),  Vec3f(-1, 0, 0),
+    Vec3f(1, 0, 0),  Vec3f(0, -1, 0), Vec3f(0, 1, 0),
+};
+
+const Vec3f D_26[] = {
+    Vec3f(-1, -1, -1), Vec3f(-1, -1, 0), Vec3f(-1, -1, 1), Vec3f(-1, 0, -1),
+    Vec3f(-1, 0, 0),   Vec3f(-1, 0, 1),  Vec3f(-1, 1, -1), Vec3f(-1, 1, 0),
+    Vec3f(-1, 1, 1),   Vec3f(0, -1, -1), Vec3f(0, -1, 0),  Vec3f(0, -1, 1),
+    Vec3f(0, 0, -1),   Vec3f(0, 0, 1),   Vec3f(0, 1, -1),  Vec3f(0, 1, 0),
+    Vec3f(0, 1, 1),    Vec3f(1, -1, -1), Vec3f(1, -1, 0),  Vec3f(1, -1, 1),
+    Vec3f(1, 0, -1),   Vec3f(1, 0, 0),   Vec3f(1, 0, 1),   Vec3f(1, 1, -1),
+    Vec3f(1, 1, 0),    Vec3f(1, 1, 1)};
+
+bool ToVector3Int(const std::vector<std::string>& vs, std::vector<int>& vi);
+bool ToVector3Float(const std::vector<std::string>& vs, std::vector<float>& vf);
+
+}  // namespace voxelizer
+
+#endif /* COMMONS_H_ */
+```
+
+### src/ray_caster.cpp
+```
+#include "ray_caster.h"
+
+#include "fcl/collision.h"
+#include "fcl/BV/BV.h"
+#include "fcl/BVH/BVH_model.h"
+
+namespace voxelizer {
+
+const Vec3f kFarPoint = Vec3f(-1e5, 1e7, -1e6);
+const Triangle kSingleTraingle = Triangle(0, 1, 2);
+const int kMaxNumContact = 10;
+typedef fcl::BVHModel<OBBRSS> Model;
+
+using fcl::collide;
+
+bool RayCaster::Init() {
+  boost::shared_ptr<Model> model(new Model());
+  model->beginModel(triangles_.size(), vertices_.size());
+  model->addSubModel(vertices_, triangles_);
+  model->endModel();
+  mesh_co_.reset(new CollisionObject(model));
+  mesh_co_->computeAABB();
+  return true;
+}
+
+int RayCaster::RayCast(const Vec3f& source) {
+  boost::shared_ptr<Model> model(new Model());
+  model->beginModel(1, 3);
+  std::vector<Vec3f> vertices = {source, kFarPoint, kFarPoint};
+  std::vector<Triangle> triangles = {kSingleTraingle};
+  model->addSubModel(vertices, triangles);
+  model->endModel();
+  CollisionObject* ray_co = new CollisionObject(model);
+  CollisionRequest request(kMaxNumContact, true);
+  CollisionResult result;
+  if (collide(mesh_co_.get(), ray_co, request, result)) 
+    return result.numContacts();
+  return 0;
+}
+
+bool RayCaster::Inside(const Vec3f& source) {
+  const int num_contacts = RayCast(source);
+  return num_contacts % 2;
+}
+
+}
+```
+
+### src/ray_caster.h
+```
+#ifndef RAY_CASTER_H_
+#define RAY_CASTER_H_
+
+#include "commons.h"
+#include "fcl/collision.h"
+#include "fcl/shape/geometric_shapes.h"
+#include "voxelizer.h"
+
+namespace voxelizer {
+
+class RayCaster {
+  std::vector<Vec3f> vertices_;
+  std::vector<Triangle> triangles_;
+  std::unique_ptr<CollisionObject> mesh_co_;
+
+public:
+  RayCaster(const std::vector<Vec3f>& vertices, const std::vector<Triangle>& triangles)
+    : vertices_(vertices), triangles_(triangles) {}
+  bool Init();
+  // Cacluates the number of hit points for this casting ray.
+  int RayCast(const Vec3f& source);
+  // Whether the source inside the mesh object.
+  bool Inside(const Vec3f& source);
+};
+
+}
+
+#endif
+```
+
+### src/thread_pool.cpp
+```
+/*
+ * ThreadPool.cpp
+ *
+ *  Created on: 22 Jun, 2014
+ *      Author: chenqian
+ */
+
+#include "thread_pool.h"
+
+namespace voxelizer {
+
+ThreadPool::ThreadPool(size_t n_threads) { Restart(n_threads); }
+
+void ThreadPool::Stop(bool wait) {
+  if (wait) {
+    work_.reset();  // if not delete this, io_service::run will never exit
+    thread_pool_.join_all();
+    service_.stop();
+  } else {
+    service_.stop();
+    thread_pool_.join_all();
+    work_.reset();
+  }
+}
+
+void ThreadPool::Restart(size_t nThreads) {
+  work_.reset(new boost::asio::io_service::work(service_));
+  for (std::size_t i = 0; i < nThreads; ++i)
+    thread_pool_.create_thread(
+        boost::bind(&boost::asio::io_service::run, &service_));
+}
+
+ThreadPool::~ThreadPool() { thread_pool_.join_all(); }
+
+}  // namespace voxelizer
+```
+
+### src/thread_pool.h
+```
+/*
+ * ThreadPool.h
+ *
+ *  Created on: 22 Jun, 2014
+ *      Author: chenqian
+ */
+
+#ifndef THREADPOOL_H_
+#define THREADPOOL_H_
+
+#include <boost/asio/io_service.hpp>
+#include <boost/bind.hpp>
+#include <boost/function.hpp>
+#include <boost/thread/thread.hpp>
+
+namespace voxelizer {
+
+class ThreadPool {
+  boost::shared_ptr<boost::asio::io_service::work> work_;
+  boost::asio::io_service service_;
+  boost::thread_group thread_pool_;
+
+ public:
+  void Stop(bool wait = true);
+  ThreadPool(size_t n_threads = 1);
+  void Restart(size_t n_threads = 1);
+  template <typename T>
+  void Run(T func) {
+    service_.post(func);
+  }
+  virtual ~ThreadPool();
+};
+
+}  // namespace voxelizer
+
+#endif /* THREADPOOL_H_ */
+```
+
+### src/timer.cpp
+```
+/*
+ * Timer.cpp
+ *
+ *  Created on: 22 Jun, 2014
+ *      Author: chenqian
+ */
+
+#include <iostream>
+
+#include "timer.h"
+#include "absl/time/clock.h"
+
+namespace voxelizer {
+
+Timer::Timer() {}
+
+void Timer::Restart() {
+  start_ = absl::Now();
+}
+
+void Timer::Stop() {
+  end_ = absl::Now();
+}
+
+int64_t Timer::TimeInS() {
+  absl::Duration dur = end_ - start_;
+  return dur / absl::Seconds(1);
+}
+
+int64_t Timer::TimeInMs() {
+  absl::Duration dur = end_ - start_;
+  return dur / absl::Milliseconds(1);
+}
+
+int64_t Timer::TimeInNs() {
+  absl::Duration dur = end_ - start_;
+  return dur / absl::Nanoseconds(1);
+}
+
+Timer::~Timer() {}
+
+void Timer::PrintTimeInS() {
+  std::cout << "consumes " << TimeInS() << " s." << std::endl;
+}
+
+void Timer::PrintTimeInMs() {
+  std::cout << "consumes " << TimeInMs() << " ms." << std::endl;
+}
+
+void Timer::PrintTimeInNs() {
+  std::cout << "consumes " << TimeInNs() << " ns." << std::endl;
+}
+
+}  // namespace voxelizer
+```
+
+### src/timer.h
+```
+/*
+ * Timer.h
+ *
+ *  Created on: 22 Jun, 2014
+ *      Author: chenqian
+ */
+
+#ifndef TIMER_H_
+#define TIMER_H_
+
+#include "absl/time/time.h"
+
+namespace voxelizer {
+
+class Timer {
+  absl::Time start_, end_;
+
+ public:
+  Timer();
+  virtual ~Timer();
+  void Restart();
+  void Stop();
+  int64_t TimeInS();
+  int64_t TimeInMs();
+  int64_t TimeInNs();
+  void PrintTimeInS();
+  void PrintTimeInMs();
+  void PrintTimeInNs();
+};
+
+}  // namespace voxelizer
+
+#endif /* TIMER_H_ */
+```
+
+### src/tri_box.cpp
+```
+/*
+ * TriBox.cpp
+ *
+ *  Created on: 23 Jun, 2014
+ *      Author: chenqian
+ */
+
+#include "tri_box.h"
+
+/********************************************************/
+
+/* AABB-triangle overlap test code                      */
+
+/* by Tomas Akenine-Möller                              */
+
+/* Function: int triBoxOverlap(float boxcenter[3],      */
+
+/*          float boxhalfsize[3],float triverts[3][3]); */
+
+/* History:                                             */
+
+/*   2001-03-05: released the code in its first version */
+
+/*   2001-06-18: changed the order of the tests, faster */
+
+/*                                                      */
+
+/* Acknowledgement: Many thanks to Pierre Terdiman for  */
+
+/* suggestions and discussions on how to optimize code. */
+
+/* Thanks to David Hunt for finding a ">="-bug!         */
+
+/********************************************************/
+
+#include <math.h>
+#include <stdio.h>
+
+namespace voxelizer {
+
+#define X 0
+
+#define Y 1
+
+#define Z 2
+
+#define CROSS(dest, v1, v2)                \
+  dest[0] = v1[1] * v2[2] - v1[2] * v2[1]; \
+  dest[1] = v1[2] * v2[0] - v1[0] * v2[2]; \
+  dest[2] = v1[0] * v2[1] - v1[1] * v2[0];
+
+#define DOT(v1, v2) (v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2])
+
+#define SUB(dest, v1, v2)  \
+  dest[0] = v1[0] - v2[0]; \
+  dest[1] = v1[1] - v2[1]; \
+  dest[2] = v1[2] - v2[2];
+
+#define FINDMINMAX(x0, x1, x2, min, max) \
+  min = max = x0;                        \
+  if (x1 < min) min = x1;                \
+  if (x1 > max) max = x1;                \
+  if (x2 < min) min = x2;                \
+  if (x2 > max) max = x2;
+
+int planeBoxOverlap(float normal[3], float vert[3], float maxbox[3])  // -NJMP-
+
+{
+  int q;
+
+  float vmin[3], vmax[3], v;
+
+  for (q = X; q <= Z; q++)
+
+  {
+    v = vert[q];  // -NJMP-
+
+    if (normal[q] > 0.0f)
+
+    {
+      vmin[q] = -maxbox[q] - v;  // -NJMP-
+
+      vmax[q] = maxbox[q] - v;  // -NJMP-
+
+    }
+
+    else
+
+    {
+      vmin[q] = maxbox[q] - v;  // -NJMP-
+
+      vmax[q] = -maxbox[q] - v;  // -NJMP-
+    }
+  }
+
+  if (DOT(normal, vmin) > 0.0f) return 0;  // -NJMP-
+
+  if (DOT(normal, vmax) >= 0.0f) return 1;  // -NJMP-
+
+  return 0;
+}
+
+/*======================== X-tests ========================*/
+
+#define AXISTEST_X01(a, b, fa, fb)                 \
+  p0 = a * v0[Y] - b * v0[Z];                      \
+  p2 = a * v2[Y] - b * v2[Z];                      \
+  if (p0 < p2) {                                   \
+    min = p0;                                      \
+    max = p2;                                      \
+  } else {                                         \
+    min = p2;                                      \
+    max = p0;                                      \
+  }                                                \
+  rad = fa * boxhalfsize[Y] + fb * boxhalfsize[Z]; \
+  if (min > rad || max < -rad) return 0;
+
+#define AXISTEST_X2(a, b, fa, fb)                  \
+  p0 = a * v0[Y] - b * v0[Z];                      \
+  p1 = a * v1[Y] - b * v1[Z];                      \
+  if (p0 < p1) {                                   \
+    min = p0;                                      \
+    max = p1;                                      \
+  } else {                                         \
+    min = p1;                                      \
+    max = p0;                                      \
+  }                                                \
+  rad = fa * boxhalfsize[Y] + fb * boxhalfsize[Z]; \
+  if (min > rad || max < -rad) return 0;
+
+/*======================== Y-tests ========================*/
+
+#define AXISTEST_Y02(a, b, fa, fb)                 \
+  p0 = -a * v0[X] + b * v0[Z];                     \
+  p2 = -a * v2[X] + b * v2[Z];                     \
+  if (p0 < p2) {                                   \
+    min = p0;                                      \
+    max = p2;                                      \
+  } else {                                         \
+    min = p2;                                      \
+    max = p0;                                      \
+  }                                                \
+  rad = fa * boxhalfsize[X] + fb * boxhalfsize[Z]; \
+  if (min > rad || max < -rad) return 0;
+
+#define AXISTEST_Y1(a, b, fa, fb)                  \
+  p0 = -a * v0[X] + b * v0[Z];                     \
+  p1 = -a * v1[X] + b * v1[Z];                     \
+  if (p0 < p1) {                                   \
+    min = p0;                                      \
+    max = p1;                                      \
+  } else {                                         \
+    min = p1;                                      \
+    max = p0;                                      \
+  }                                                \
+  rad = fa * boxhalfsize[X] + fb * boxhalfsize[Z]; \
+  if (min > rad || max < -rad) return 0;
+
+/*======================== Z-tests ========================*/
+
+#define AXISTEST_Z12(a, b, fa, fb)                 \
+  p1 = a * v1[X] - b * v1[Y];                      \
+  p2 = a * v2[X] - b * v2[Y];                      \
+  if (p2 < p1) {                                   \
+    min = p2;                                      \
+    max = p1;                                      \
+  } else {                                         \
+    min = p1;                                      \
+    max = p2;                                      \
+  }                                                \
+  rad = fa * boxhalfsize[X] + fb * boxhalfsize[Y]; \
+  if (min > rad || max < -rad) return 0;
+
+#define AXISTEST_Z0(a, b, fa, fb)                  \
+  p0 = a * v0[X] - b * v0[Y];                      \
+  p1 = a * v1[X] - b * v1[Y];                      \
+  if (p0 < p1) {                                   \
+    min = p0;                                      \
+    max = p1;                                      \
+  } else {                                         \
+    min = p1;                                      \
+    max = p0;                                      \
+  }                                                \
+  rad = fa * boxhalfsize[X] + fb * boxhalfsize[Y]; \
+  if (min > rad || max < -rad) return 0;
+
+int TriBoxOverlap(float boxcenter[3], float boxhalfsize[3],
+                  float triverts[3][3])
+
+{
+  /*    use separating axis theorem to test overlap between triangle and box */
+
+  /*    need to test for overlap in these directions: */
+
+  /*    1) the {x,y,z}-directions (actually, since we use the AABB of the
+   * triangle */
+
+  /*       we do not even need to test these) */
+
+  /*    2) normal of the triangle */
+
+  /*    3) crossproduct(edge from tri, {x,y,z}-directin) */
+
+  /*       this gives 3x3=9 more tests */
+
+  float v0[3], v1[3], v2[3];
+
+  //   float axis[3];
+
+  float min, max, p0, p1, p2, rad, fex, fey,
+      fez;  // -NJMP- "d" local variable removed
+
+  float normal[3], e0[3], e1[3], e2[3];
+
+  /* This is the fastest branch on Sun */
+
+  /* move everything so that the boxcenter is in (0,0,0) */
+
+  SUB(v0, triverts[0], boxcenter);
+
+  SUB(v1, triverts[1], boxcenter);
+
+  SUB(v2, triverts[2], boxcenter);
+
+  /* compute triangle edges */
+
+  SUB(e0, v1, v0); /* tri edge 0 */
+
+  SUB(e1, v2, v1); /* tri edge 1 */
+
+  SUB(e2, v0, v2); /* tri edge 2 */
+
+  /* Bullet 3:  */
+
+  /*  test the 9 tests first (this was faster) */
+
+  fex = fabsf(e0[X]);
+
+  fey = fabsf(e0[Y]);
+
+  fez = fabsf(e0[Z]);
+
+  AXISTEST_X01(e0[Z], e0[Y], fez, fey);
+
+  AXISTEST_Y02(e0[Z], e0[X], fez, fex);
+
+  AXISTEST_Z12(e0[Y], e0[X], fey, fex);
+
+  fex = fabsf(e1[X]);
+
+  fey = fabsf(e1[Y]);
+
+  fez = fabsf(e1[Z]);
+
+  AXISTEST_X01(e1[Z], e1[Y], fez, fey);
+
+  AXISTEST_Y02(e1[Z], e1[X], fez, fex);
+
+  AXISTEST_Z0(e1[Y], e1[X], fey, fex);
+
+  fex = fabsf(e2[X]);
+
+  fey = fabsf(e2[Y]);
+
+  fez = fabsf(e2[Z]);
+
+  AXISTEST_X2(e2[Z], e2[Y], fez, fey);
+
+  AXISTEST_Y1(e2[Z], e2[X], fez, fex);
+
+  AXISTEST_Z12(e2[Y], e2[X], fey, fex);
+
+  /* Bullet 1: */
+
+  /*  first test overlap in the {x,y,z}-directions */
+
+  /*  find min, max of the triangle each direction, and test for overlap in */
+
+  /*  that direction -- this is equivalent to testing a minimal AABB around */
+
+  /*  the triangle against the AABB */
+
+  /* test in X-direction */
+
+  FINDMINMAX(v0[X], v1[X], v2[X], min, max);
+
+  if (min > boxhalfsize[X] || max < -boxhalfsize[X]) return 0;
+
+  /* test in Y-direction */
+
+  FINDMINMAX(v0[Y], v1[Y], v2[Y], min, max);
+
+  if (min > boxhalfsize[Y] || max < -boxhalfsize[Y]) return 0;
+
+  /* test in Z-direction */
+
+  FINDMINMAX(v0[Z], v1[Z], v2[Z], min, max);
+
+  if (min > boxhalfsize[Z] || max < -boxhalfsize[Z]) return 0;
+
+  /* Bullet 2: */
+
+  /*  test if the box intersects the plane of the triangle */
+
+  /*  compute plane equation of triangle: normal*x+d=0 */
+
+  CROSS(normal, e0, e1);
+
+  // -NJMP- (line removed here)
+
+  if (!planeBoxOverlap(normal, v0, boxhalfsize)) return 0;  // -NJMP-
+
+  return 1; /* box and triangle overlaps */
+}
+
+}  // namespace voxelizer
+```
+
+### src/tri_box.h
+```
+/*
+ * TriBox.h
+ *
+ *  Created on: 23 Jun, 2014
+ *      Author: chenqian
+ */
+
+#ifndef TRIBOX_H_
+#define TRIBOX_H_
+
+namespace voxelizer {
+
+int TriBoxOverlap(float boxcenter[3], float boxhalfsize[3],
+                  float triverts[3][3]);
+
+}
+
+#endif /* TRIBOX_H_ */
+```
+
+### src/voxelizer.cpp
+```
+/*
+ * Voxelizer.cpp
+ *
+ *  Created on: 22 Jun, 2014
+ *      Author: chenqian
+ */
+
+#include "absl/strings/str_format.h"
+#include "absl/strings/str_split.h"
+#include "absl/strings/string_view.h"
+#include "voxelizer.h"
+#include "ray_caster.h"
+
+namespace voxelizer {
+
+void Voxelizer::InitVoxelMeta() {
+  voxel_metas_.reset(new VoxelMeta[size_x_*size_y_*size_z_], ArrayDeleter<VoxelMeta>());
+  VoxelIndex tmp;
+  for (VoxelIndex voxel_index = 0; voxel_index < TotalVoxelSize(); ++voxel_index) {
+    (voxel_metas_.get())[voxel_index].Reset();
+    (voxel_metas_.get())[voxel_index].SetIndex(voxel_index);
+
+    Vec3f voxel = ConvIndexToVoxel(voxel_index);
+    if (!InRange(voxel, *output_lb_, *output_ub_)) {
+      (voxel_metas_.get())[voxel_index].SetClipped();
+    }
+  }
+}
+
+absl::Status Voxelizer::Init() {
+  if (option_.Verbose()) std::cout << "voxelizer init... " << std::endl;
+
+  if (!(grid_size_.empty() ^ voxel_size_.empty())) {
+    return absl::InvalidArgumentError("only one of grid_size and voxel_size can be specifed.");
+  }
+
+  is_init_ = false;
+  const aiScene* scene;
+  try {
+    /*
+     * Load scene
+     * */
+    Assimp::Importer importer;
+    scene = importer.ReadFile(option_.InFilePath(), aiProcessPreset_TargetRealtime_Quality |
+                                           aiProcess_OptimizeGraph |
+                                           aiProcess_OptimizeMeshes);
+    if (!scene) {
+      return absl::AbortedError("Scene fails to be loaded!");
+    }
+    if (option_.Verbose()) std::cout << "mesh number: " << scene->mNumMeshes << std::endl;
+    if (scene->mNumMeshes == 0) {
+      return absl::AbortedError("0 mesh in the scene!");
+    }
+    if (scene->mNumMeshes <= option_.MeshIndex()) {
+      return absl::AbortedError(absl::StrFormat("Required mesh index %d out of range: %d", option_.MeshIndex(), scene->mNumMeshes));
+    }
+
+    // TODO(topskychen@gmail.com): consider all the meshes when mesh_index_ is
+    // -1.
+    aiMesh* mesh = scene->mMeshes[option_.MeshIndex()];
+
+    /**
+     * Store info.
+     */
+    num_vertices_ = mesh->mNumVertices;
+    num_faces_ = mesh->mNumFaces;
+    if (option_.Verbose()) std::cout << "faces : " << num_faces_ << std::endl;
+    if (option_.Verbose()) std::cout << "vertices : " << num_vertices_ << std::endl;
+    
+    /**
+    * Load meshes.
+    * TODO(topskychen@gmail.com): refactor this function.
+    */
+    auto status = LoadFromMesh(mesh);
+    if (!status.ok()) return status;
+
+    if (option_.WithMeta()) {
+      InitVoxelMeta();
+    }
+
+    is_init_ = true;
+  } catch (std::exception& e) {
+    return absl::AbortedError(e.what());
+  }
+  if (option_.Verbose()) std::cout << "Init done." << std::endl;
+
+  return absl::OkStatus();
+}
+
+/**
+ * Given voxel (int x, int y, int z), return loc (float x, float y, float z)
+ */
+Vec3f Voxelizer::GetLoc(const Vec3f& voxel) {
+  return *lb_ + (*scale_) * (voxel);
+}
+
+/**
+ * Given voxel (int x, int y, int z), return loc (float x, float y, float z) + half_unit
+ */
+Vec3f Voxelizer::GetCenterLoc(const Vec3f& voxel) {
+  return GetLoc(voxel) + *half_unit_;
+}
+
+/**
+ * Given loc (float x, float y, float z), return voxel (int x, int y, int z)
+ */
+Vec3f Voxelizer::GetVoxel(const Vec3f& loc) {
+  Vec3f tmp = (loc - (*lb_)) * (*size_) / (*bound_);
+  return Vec3f(static_cast<int>(tmp[0]), static_cast<int>(tmp[1]), static_cast<int>(tmp[2]));
+}
+
+/**
+ *Get the collision object form triangle(face) id;
+ */
+TriangleP Voxelizer::GetTri(const int tri_id) {
+  const Vec3f& v_ids = faces_.get()[tri_id];
+  return TriangleP(vertices_.get()[(int)v_ids[0]],
+                          vertices_.get()[(int)v_ids[1]],
+                          vertices_.get()[(int)v_ids[2]]);
+}
+
+/**
+ * Load info from mesh.
+ */
+absl::Status Voxelizer::LoadFromMesh(const aiMesh* mesh) {
+  // load vertices and update mesh bounds
+  vertices_.reset(new Vec3f[num_vertices_], ArrayDeleter<Vec3f>());
+  Vec3f tmp;
+  for (size_t i = 0; i < num_vertices_; ++i) {
+    vertices_.get()[i] =
+        Vec3f(mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z);
+    if (i == 0) {
+      mesh_lb_.reset(new Vec3f(mesh->mVertices[i].x, mesh->mVertices[i].y,
+                               mesh->mVertices[i].z));
+      mesh_ub_.reset(new Vec3f(mesh->mVertices[i].x, mesh->mVertices[i].y,
+                               mesh->mVertices[i].z));
+    } else {
+      mesh_lb_->ubound(vertices_.get()[i]);
+      mesh_ub_->lbound(vertices_.get()[i]);
+    }
+  }
+
+  // Add an epsilon box to bound box the whole mesh spce.
+  mesh_lb_.reset(new Vec3f((*mesh_lb_) - kEpsBox));
+  mesh_ub_.reset(new Vec3f((*mesh_ub_) + kEpsBox));
+
+  /**
+   * Calculate a bounding box according to the mesh bounds.
+   */
+  min_lb_ = (*mesh_lb_)[0];
+  min_lb_ = std::min(min_lb_, (float)(*mesh_lb_)[1]);
+  min_lb_ = std::min(min_lb_, (float)(*mesh_lb_)[2]);
+  max_ub_ = (*mesh_ub_)[0];
+  max_ub_ = std::max(max_ub_, (float)(*mesh_ub_)[1]);
+  max_ub_ = std::max(max_ub_, (float)(*mesh_ub_)[2]);
+  lb_ = absl::make_unique<Vec3f>(min_lb_, min_lb_, min_lb_);
+  ub_ = absl::make_unique<Vec3f>(max_ub_, max_ub_, max_ub_);
+  bound_ = absl::make_unique<Vec3f>(*ub_ - *lb_);
+
+  /**
+  * Store face info.
+  */
+  faces_.reset(new Vec3f[num_faces_], ArrayDeleter<Vec3f>());
+  if (mesh->mPrimitiveTypes != kPrimitiveTriangleType) {
+    return absl::InvalidArgumentError(absl::StrFormat("mesh face primitive type expects: %d indices but received: %d", kPrimitiveTriangleType, mesh->mPrimitiveTypes));
+  }
+  for (size_t i = 0; i < num_faces_; ++i) {
+    if (mesh->mFaces[i].mNumIndices != kTriangleNumIndices) {
+      return absl::InvalidArgumentError(absl::StrFormat("triangle face expects: %d indices but received %d", kTriangleNumIndices, mesh->mFaces[i].mNumIndices));
+    }
+    faces_.get()[i] =
+        Vec3f(mesh->mFaces[i].mIndices[0], mesh->mFaces[i].mIndices[1],
+              mesh->mFaces[i].mIndices[2]);
+  }
+  RandomPermutation(faces_, num_faces_);
+
+  /**
+  * Calculate the grid size and voxel size. 
+  */
+  if (grid_size_.size() > 0) {
+    if (grid_size_.size() != 3) {
+      return absl::InvalidArgumentError(absl::StrFormat("grid_size dim error: %d", grid_size_.size()));
+    }
+
+    size_x_ = grid_size_[0];
+    size_y_ = grid_size_[1];
+    size_z_ = grid_size_[2];
+
+    size_ = absl::make_unique<Vec3f>(size_x_, size_y_, size_z_);
+
+    unit_ = absl::make_unique<Vec3f>((*bound_)/(*size_));
+    half_unit_ = absl::make_unique<Vec3f>((*unit_)/2);
+  } else {
+    if (voxel_size_.size() != 3) {
+      return absl::InvalidArgumentError(absl::StrFormat("voxel_size dim error: %d", voxel_size_.size()));
+    }
+
+    float voxel_x = voxel_size_[0];
+    float voxel_y = voxel_size_[1];
+    float voxel_z = voxel_size_[2];
+
+    unit_ = absl::make_unique<Vec3f>(voxel_x, voxel_y, voxel_z);
+    half_unit_ = absl::make_unique<Vec3f>((*unit_)/2);
+
+    Vec3f size = (*bound_)/(*unit_);
+    
+    size_x_ = static_cast<VoxelIndex>(size[0]);
+    size_y_ = static_cast<VoxelIndex>(size[1]);
+    size_z_ = static_cast<VoxelIndex>(size[2]);
+
+    size_ = absl::make_unique<Vec3f>(size_x_, size_y_, size_z_);
+  }
+
+  if (option_.Verbose()) {
+    std::cout << absl::StrFormat("voxel size: %f, %f, %f", (*unit_)[0], (*unit_)[1], (*unit_)[2]) << std::endl;
+    std::cout << absl::StrFormat("grid size: %d, %d, %d", size_x_, size_y_, size_z_) << std::endl; 
+  }
+
+  // The real voxel bounding box should extract the epsilon box.
+  mesh_vox_lb_ = absl::make_unique<Vec3f>(GetVoxel(*mesh_lb_ + kEpsBox));
+  mesh_vox_ub_ = absl::make_unique<Vec3f>(GetVoxel(*mesh_ub_ - kEpsBox));
+
+  if (option_.Verbose()) {
+    std::cout << "space: " << *lb_ << ", " << *ub_ << std::endl;
+    std::cout << "mesh bound: " << *mesh_lb_ << ", " << *mesh_ub_ << std::endl;
+    std::cout << "voxel bound: " << *mesh_vox_lb_ << ", " << *mesh_vox_ub_ << std::endl;
+  }
+
+  size_xy_ = size_x_*size_y_;
+  size_xz_ = size_x_*size_z_;
+  size_yz_ = size_y_*size_z_;
+  scale_ = absl::make_unique<Vec3f>((*bound_) / (*size_));
+  compressed_total_size_ = size_x_*size_y_*size_z_/kBatchSize;
+
+  InitOutputBound();
+
+  /**
+  * Reset voxels.
+  */
+  voxels_.reset(new AVI[compressed_total_size_], ArrayDeleter<AVI>());
+  voxels_buffer_.reset(new AVI[compressed_total_size_], ArrayDeleter<AVI>());
+  memset(voxels_.get(), 0, compressed_total_size_ * sizeof(VoxelIndex));
+  memset(voxels_buffer_.get(), 0, compressed_total_size_ * sizeof(VoxelIndex));
+
+  return absl::OkStatus();
+}
+
+void Voxelizer::UpdateSurfaceMeta() {
+  VoxelIndex tmp;
+  int surface_cnt = 0;
+  for (VoxelIndex voxel_index = 0; voxel_index < TotalVoxelSize(); ++voxel_index) {
+    tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+    if (GETBIT(tmp, voxel_index)) {
+      surface_cnt ++;
+      (voxel_metas_.get())[voxel_index].SetSurface();
+    }
+  }
+  if (option_.Verbose()) {
+    std::cout << "update surface meta done, surface count: " << surface_cnt << std::endl;
+  }
+}
+
+// Note this function is called after surface voxelization.
+void Voxelizer::UpdateTight() {
+  RayCaster ray_caster(VerticesVec(), TrianglesVec());
+  if (!ray_caster.Init()) {
+    std::cerr << "ray_caster failed to init." << std::endl;
+  } else {
+    if (option_.Verbose()) {
+      std::cout << "ray_caster succeeded to init." << std::endl;
+    }
+  }
+  int inside_cnt = 0;
+  VoxelIndex tmp;
+  for (VoxelIndex voxel_index = 0; voxel_index < TotalVoxelSize(); ++voxel_index) {
+    tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+    if (GETBIT(tmp, voxel_index)) {
+      const Vec3f voxel = ConvIndexToVoxel(voxel_index);
+      if (ray_caster.Inside(GetCenterLoc(voxel))) {
+        inside_cnt ++;
+        (voxel_metas_.get())[voxel_index].SetInside();  
+      } else {
+        (voxel_metas_.get())[voxel_index].UnsetInside();
+      }
+    }
+  }
+  if (option_.Verbose()) {
+    std::cout << "update tight done, inside count: " << inside_cnt << std::endl;
+  }
+}
+
+/**
+ * voxelize the surface.
+ */
+void Voxelizer::VoxelizeSurface(const int num_thread) {
+  if (!is_init_) {
+    return;
+  }
+  if (option_.Verbose()) std::cout << "surface voxelizing... " << std::endl;
+  ThreadPool tp(num_thread);
+  for (int i = 0; i < num_faces_; ++i) {
+    tp.Run(boost::bind(&Voxelizer::RunSurfaceTask, this, i));
+  }
+  tp.Stop();
+  if (option_.WithMeta()) {
+    UpdateSurfaceMeta();
+    if (option_.Tight()) {
+      UpdateTight();
+    }
+  }
+  if (option_.Verbose()) std::cout << "done." << std::endl;
+}
+
+/**
+ * Details of surface task.
+ */
+inline void Voxelizer::RunSurfaceTask(const int tri_id) {
+  TriangleP tri = GetTri(tri_id);
+  tri.computeLocalAABB();
+  const Vec3f lb = GetVoxel(tri.aabb_local.min_);
+  const Vec3f ub = GetVoxel(tri.aabb_local.max_);
+  
+  const int lx = lb[0], ux = ub[0], ly = lb[1], uy = ub[1], lz = lb[2],
+      uz = ub[2];
+  /**
+   * when the estimated voxels are too large, optimize with bfs.
+   */
+  VoxelIndex count = 0;
+  int esti = std::min(ux - lx, std::min(uy - ly, uz - lz));
+  if (esti < kThresholdBfsSurface) {
+    VoxelIndex voxel_index, tmp;
+    Vec3f vxlBox(0, 0, 0);
+    for (int x = lx, y, z; x <= ux; ++x) {
+      for (y = ly; y <= uy; ++y) {
+        for (z = lz; z <= uz; ++z) {
+          voxel_index = INDEX(x, y, z);
+          tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+          if (GETBIT(tmp, voxel_index)) continue;
+          vxlBox.setValue(x, y, z);
+          if (Collide(*half_unit_, GetLoc(vxlBox), tri)) {
+            SETBIT(voxels_, voxel_index);
+            count++;
+          }
+        }
+      }
+    }
+  } else {
+    count = BfsSurface(tri, lb, ub);
+  }
+}
+
+inline VoxelIndex Voxelizer::BfsSurface(const TriangleP& tri, const Vec3f& lb,
+                                 const Vec3f& ub) {
+  std::queue<VoxelIndex> q;
+  HashSet set;
+  VoxelIndex start = ConvVoxelToIndex(GetVoxel(tri.a)), top_voxel_index, tmp,
+               new_voxel_index;
+  q.push(start);
+  set.insert(start);
+  Vec3f top_voxel;
+  VoxelIndex count = 0;
+  while (!q.empty()) {
+    count++;
+    top_voxel_index = q.front();
+    q.pop();
+    tmp = (voxels_.get())[top_voxel_index / kBatchSize].load();
+    ConvIndexToVoxel(top_voxel_index, top_voxel);
+    if (GETBIT(tmp, top_voxel_index) ||
+        Collide(*half_unit_, GetLoc(top_voxel), tri)) {
+      if (!GETBIT(tmp, top_voxel_index)) {
+        SETBIT(voxels_, top_voxel_index);
+      }
+      for (int i = 0; i < 6; ++i) {
+        Vec3f newVoxel = top_voxel + D_6[i];
+        if (!InRange(newVoxel, lb, ub)) continue;
+        new_voxel_index = ConvVoxelToIndex(newVoxel);
+        if (set.find(new_voxel_index) == set.end()) {
+          set.insert(new_voxel_index);
+          q.push(new_voxel_index);
+        }
+      }
+    }
+  }
+  return count;
+}
+
+void Voxelizer::VoxelizeSolid(int num_thread) {
+  if (!is_init_) {
+    return;
+  }
+  if (option_.Verbose()) std::cout << "solid voxelizing... " << std::endl;
+  if (option_.Verbose()) std::cout << "round 1..." << std::endl;
+  RunSolidTask(num_thread);
+  if (option_.Verbose()) std::cout << "round 2..." << std::endl;
+  RunSolidTask2(num_thread);
+  for (VoxelIndex i = 0; i < compressed_total_size_; ++i)
+    voxels_.get()[i] = voxels_buffer_.get()[i] ^ (~static_cast<VoxelIndex>(0));
+  if (option_.WithMeta()) {
+    UpdateSolidMeta();
+  }
+  if (option_.Verbose()) std::cout << "done." << std::endl;
+}
+
+void Voxelizer::UpdateSolidMeta() {
+  int solid_cnt = 0;
+  VoxelIndex tmp;
+  for (VoxelIndex voxel_index = 0; voxel_index < TotalVoxelSize(); ++voxel_index) {
+    tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+    if (GETBIT(tmp, voxel_index) && !(voxel_metas_.get())[voxel_index].Surface()) {
+      solid_cnt ++;
+      (voxel_metas_.get())[voxel_index].SetSolid();
+    }
+  }
+  if (option_.Verbose()) {
+    std::cout << "update solid meta done, solid count: " << solid_cnt << std::endl;
+  }
+}
+
+inline void Voxelizer::BfsSolid(const VoxelIndex start_index) {
+  VoxelIndex voxel_index = start_index,
+               tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+                     (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+  if (GETBIT(tmp, voxel_index)) return;
+  std::queue<VoxelIndex> q;
+  q.push(voxel_index);
+  Vec3f top_voxel;
+  while (!q.empty()) {
+    voxel_index = q.front();
+    tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+          (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+    q.pop();
+    ConvIndexToVoxel(voxel_index, top_voxel);
+    if (!GETBIT(tmp, voxel_index)) {
+      SETBIT(voxels_buffer_, voxel_index);
+      for (int i = 0; i < 6; i++) {
+        Vec3f newVoxel = top_voxel + D_6[i];
+        if (!InRange(newVoxel, *mesh_vox_lb_, *mesh_vox_ub_)) continue;
+        voxel_index = ConvVoxelToIndex(newVoxel);
+        tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+              (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+        if (!GETBIT(tmp, voxel_index)) q.push(voxel_index);
+      }
+    }
+  }
+}
+
+inline bool Voxelizer::InRange(const Vec3f& vc, const Vec3f& lb,
+                               const Vec3f& ub) {
+  return vc[0] >= lb[0] && vc[0] <= ub[0] && vc[1] >= lb[1] &&
+         vc[1] <= ub[1] && vc[2] >= lb[2] && vc[2] <= ub[2];
+}
+
+inline bool Voxelizer::InRange(const int x, const int y, const int z,
+                               const int lx, const int ly, const int lz,
+                               const int ux, const int uy, const int uz) {
+  return x >= lx && x <= ux && y >= ly && y <= uy && z >= lz && z <= uz;
+}
+
+inline bool Voxelizer::InRange(const int x, const int y, const int z,
+                               const Vec3f& lb, const Vec3f& ub) {
+  const int lx = lb[0], ly = lb[1], lz = lb[2], ux = ub[0], uy = ub[1], uz = ub[2];
+  return InRange(x, y, z, lx, ly, lz, ux, uy, uz);
+}
+
+void Voxelizer::ConvIndexToVoxel(const VoxelIndex coord, int& x, int& y, int& z) {
+  x = coord / size_yz_;
+  y = (coord / size_z_) % size_y_;
+  z = coord % size_z_;
+}
+
+inline Vec3f Voxelizer::ConvIndexToVoxel(const VoxelIndex coord) {
+  return Vec3f(coord / size_yz_, (coord / size_z_) % size_y_, coord % size_z_);
+}
+
+void Voxelizer::ConvIndexToVoxel(const VoxelIndex coord, Vec3f& voxel) {
+  voxel.setValue(coord / size_yz_, (coord / size_z_) % size_y_, coord % size_z_);
+}
+
+inline VoxelIndex Voxelizer::ConvVoxelToIndex(const Vec3f& voxel) {
+  return INDEX(voxel[0], voxel[1], voxel[2]);
+}
+
+inline void Voxelizer::RandomPermutation(const V3SP& data, int num) {
+  for (int i = 0, id; i < num; ++i) {
+    id = Random(i, num - 1);
+    if (i != id) std::swap((data.get())[i], (data.get())[id]);
+  }
+}
+
+inline void Voxelizer::FillYZ(const int x) {
+  const int ly = (*mesh_vox_lb_)[1], uy = (*mesh_vox_ub_)[1],
+            lz = (*mesh_vox_lb_)[2], uz = (*mesh_vox_ub_)[2];
+  VoxelIndex voxel_index, tmp;
+  for (int y = ly, z; y <= uy; ++y) {
+    for (z = lz; z <= uz; ++z) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        SETBIT(voxels_buffer_, voxel_index);
+      }
+    }
+    if (z == uz + 1) continue;
+    for (z = uz; z >= lz; --z) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        SETBIT(voxels_buffer_, voxel_index);
+      }
+    }
+  }
+}
+
+inline void Voxelizer::FillYZ2(const int x) {
+  const int lx = (*mesh_vox_lb_)[0], ux = (*mesh_vox_ub_)[0],
+            ly = (*mesh_vox_lb_)[1], uy = (*mesh_vox_ub_)[1],
+            lz = (*mesh_vox_lb_)[2], uz = (*mesh_vox_ub_)[2];
+  int nx, ny;
+  VoxelIndex voxel_index, tmp;
+  for (int y = ly, z; y <= uy; ++y) {
+    for (z = lz; z <= uz; ++z) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        for (int i = 0; i < 4; ++i) {
+          nx = x + DI_4[i][0];
+          ny = y + DI_4[i][1];
+          if (nx >= lx && nx <= ux && ny >= ly && ny <= uy) {
+            voxel_index = INDEX(nx, ny, z);
+            tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+                  (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+            if (!GETBIT(tmp, voxel_index)) BfsSolid(voxel_index);
+          }
+        }
+      }
+    }
+    if (z == uz + 1) continue;
+    for (z = uz; z >= lz; --z) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        for (int i = 0; i < 4; ++i) {
+          nx = x + DI_4[i][0];
+          ny = y + DI_4[i][1];
+          if (nx >= lx && nx <= ux && ny >= ly && ny <= uy) {
+            voxel_index = INDEX(nx, ny, z);
+            tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+                  (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+            if (!GETBIT(tmp, voxel_index)) BfsSolid(voxel_index);
+          }
+        }
+      }
+    }
+  }
+}
+
+inline void Voxelizer::FillXZ(const int y) {
+  const int lx = (*mesh_vox_lb_)[0], ux = (*mesh_vox_ub_)[0],
+            lz = (*mesh_vox_lb_)[2], uz = (*mesh_vox_ub_)[2];
+  VoxelIndex voxel_index, tmp;
+  for (int z = lz, x; z <= uz; ++z) {
+    for (x = lx; x <= ux; ++x) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        SETBIT(voxels_buffer_, voxel_index);
+      }
+    }
+    if (x == ux + 1) continue;
+    for (x = ux; x >= lx; --x) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        SETBIT(voxels_buffer_, voxel_index);
+      }
+    }
+  }
+}
+
+inline void Voxelizer::FillXZ2(const int y) {
+  const int lx = (*mesh_vox_lb_)[0], ux = (*mesh_vox_ub_)[0],
+            ly = (*mesh_vox_lb_)[1], uy = (*mesh_vox_ub_)[1],
+            lz = (*mesh_vox_lb_)[2], uz = (*mesh_vox_ub_)[2];
+  int ny, nz;
+  VoxelIndex voxel_index, tmp;
+  for (int z = lz, x; z <= uz; ++z) {
+    for (x = lx; x <= ux; ++x) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        for (int i = 0; i < 4; ++i) {
+          ny = y + DI_4[i][0];
+          nz = z + DI_4[i][1];
+          if (nz >= lz && nz <= uz && ny >= ly && ny <= uy) {
+            voxel_index = INDEX(x, ny, nz);
+            tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+                  (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+            if (!GETBIT(tmp, voxel_index)) BfsSolid(voxel_index);
+          }
+        }
+      }
+    }
+    if (x == ux + 1) continue;
+    for (x = ux; x >= lx; --x) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        for (int i = 0; i < 4; ++i) {
+          ny = y + DI_4[i][0];
+          nz = z + DI_4[i][1];
+          if (nz >= lz && nz <= uz && ny >= ly && ny <= uy) {
+            voxel_index = INDEX(x, ny, nz);
+            tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+                  (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+            if (!GETBIT(tmp, voxel_index)) BfsSolid(voxel_index);
+          }
+        }
+      }
+    }
+  }
+}
+
+inline void Voxelizer::FillXY(const int z) {
+  const int ly = (*mesh_vox_lb_)[1], uy = (*mesh_vox_ub_)[1],
+            lx = (*mesh_vox_lb_)[0], ux = (*mesh_vox_ub_)[0];
+  VoxelIndex voxel_index, tmp;
+  for (int x = lx, y; x <= ux; ++x) {
+    for (y = ly; y <= uy; ++y) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        SETBIT(voxels_buffer_, voxel_index);
+      }
+    }
+    if (y == uy + 1) continue;
+    for (y = uy; y >= ly; --y) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        SETBIT(voxels_buffer_, voxel_index);
+      }
+    }
+  }
+}
+
+inline void Voxelizer::FillXY2(const int z) {
+  const int lx = (*mesh_vox_lb_)[0], ux = (*mesh_vox_ub_)[0],
+            ly = (*mesh_vox_lb_)[1], uy = (*mesh_vox_ub_)[1],
+            lz = (*mesh_vox_lb_)[2], uz = (*mesh_vox_ub_)[2];
+  int nx, nz;
+  VoxelIndex voxel_index, tmp;
+  for (int x = lx, y; x <= ux; ++x) {
+    for (y = ly; y <= uy; ++y) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        for (int i = 0; i < 4; ++i) {
+          nx = x + DI_4[i][0];
+          nz = z + DI_4[i][1];
+          if (nz >= lz && nz <= uz && nx >= lx && nx <= ux) {
+            voxel_index = INDEX(nx, y, nz);
+            tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+                  (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+            if (!GETBIT(tmp, voxel_index)) BfsSolid(voxel_index);
+          }
+        }
+      }
+    }
+    if (y == uy + 1) continue;
+    for (y = uy; y >= ly; --y) {
+      voxel_index = INDEX(x, y, z);
+      tmp = (voxels_.get())[voxel_index / kBatchSize].load();
+      if (GETBIT(tmp, voxel_index)) {
+        break;
+      } else {
+        for (int i = 0; i < 4; ++i) {
+          nx = x + DI_4[i][0];
+          nz = z + DI_4[i][1];
+          if (nz >= lz && nz <= uz && nx >= lx && nx <= ux) {
+            voxel_index = INDEX(nx, y, nz);
+            tmp = (voxels_.get())[voxel_index / kBatchSize].load() |
+                  (voxels_buffer_.get())[voxel_index / kBatchSize].load();
+            if (!GETBIT(tmp, voxel_index)) BfsSolid(voxel_index);
+          }
+        }
+      }
+    }
+  }
+}
+
+inline void Voxelizer::RunSolidTask(size_t num_thread) {
+  ThreadPool tp(num_thread);
+  const int lx = (*mesh_vox_lb_)[0], ux = (*mesh_vox_ub_)[0],
+            ly = (*mesh_vox_lb_)[1], uy = (*mesh_vox_ub_)[1],
+            lz = (*mesh_vox_lb_)[2], uz = (*mesh_vox_ub_)[2];
+  for (int x = lx; x <= ux; ++x) {
+    tp.Run(boost::bind(&Voxelizer::FillYZ, this, x));
+  }
+  for (int y = ly; y <= uy; ++y) {
+    tp.Run(boost::bind(&Voxelizer::FillXZ, this, y));
+  }
+  for (int z = lz; z <= uz; ++z) {
+    tp.Run(boost::bind(&Voxelizer::FillXY, this, z));
+  }
+  tp.Stop();
+}
+
+inline void Voxelizer::RunSolidTask2(size_t num_thread) {
+  ThreadPool tp(num_thread);
+  const int lx = (*mesh_vox_lb_)[0], ux = (*mesh_vox_ub_)[0],
+            ly = (*mesh_vox_lb_)[1], uy = (*mesh_vox_ub_)[1],
+            lz = (*mesh_vox_lb_)[2], uz = (*mesh_vox_ub_)[2];
+  for (int x = lx; x <= ux; ++x) {
+    tp.Run(boost::bind(&Voxelizer::FillYZ2, this, x));
+  }
+  for (int z = lz; z <= uz; ++z) {
+    tp.Run(boost::bind(&Voxelizer::FillXY2, this, z));
+  }
+  for (int y = ly; y <= uy; ++y) {
+    tp.Run(boost::bind(&Voxelizer::FillXZ2, this, y));
+  }
+  tp.Stop();
+}
+
+void Voxelizer::InitOutputBound() {
+  output_lb_ = absl::make_unique<Vec3f>(*mesh_vox_lb_);
+  output_ub_ = absl::make_unique<Vec3f>(*mesh_vox_ub_);
+
+  const std::vector<int> vector_clipping_size = option_.ClippingSize();
+  if (vector_clipping_size.size() == 3) {
+    Vec3f clipping_size(vector_clipping_size[0], vector_clipping_size[1], vector_clipping_size[2]);
+    const Vec3f half = (clipping_size-Vec3f(1,1,1)) / 2.0;
+    const Vec3f center = (*mesh_vox_lb_ + *mesh_vox_ub_) / 2.0;
+    const Vec3f clip_vox_lb = center - half, clip_vox_ub = center + clipping_size - half - Vec3f(1,1,1);
+    if (option_.Verbose()) {
+      std::cout << "mesh_vox_lb: " << *mesh_vox_lb_ << std::endl;
+      std::cout << "mesh_vox_ub: " << *mesh_vox_ub_ << std::endl;  
+      std::cout << "center: " << center << std::endl;
+      std::cout << "half: " << half << std::endl;
+    }
+    output_lb_->lbound(clip_vox_lb);
+    output_ub_->ubound(clip_vox_ub);
+  }
+  if (option_.Verbose()) {
+    std::cout << "init output bound done." << std::endl;
+  }
+}
+
+/**
+ * Write to file with a output format
+ */
+void Voxelizer::Write() {
+  const std::string format = option_.Format();
+  if (format == "binvox") {
+    WriteBinvox();
+  } else if (format == "rawvox") {
+    WriteRawvox();
+  } else {
+    std::cout << "no such format: " << format << std::endl;
+  }
+  if (option_.WithMeta()) {
+    WriteMeta();
+  }
+}
+
+bool Voxelizer::Filled(const VoxelIndex index) {
+  if (option_.WithMeta()) {
+    return (voxel_metas_.get())[index].Filled();  
+  }
+  int x, y, z;
+  ConvIndexToVoxel(index, x, y, z);
+  return InRange(x, y, z, *output_lb_, *output_ub_)? GETBIT((voxels_.get())[index / kBatchSize].load(), index): 0;  
+}
+
+bool Voxelizer::Filled(const int x, const int y, const int z) {
+  return Filled(INDEX(x, y, z));
+}
+
+/**
+ * Write to file, with binvox format, check https://www.patrickmin.com/viewvox/
+ */
+void Voxelizer::WriteBinvox() {
+  if (option_.Verbose()) std::cout << "writing voxels to file..." << std::endl;
+
+  const int lx = 0, ux = size_x_ - 1, ly = 0, uy = size_y_ - 1, lz = 0, uz = size_z_ - 1;
+  const int bx = ux - lx + 1, by = uy - ly + 1, bz = uz - lz + 1;
+  
+  std::ofstream* output = new std::ofstream(option_.OutFilePath().c_str(), std::ios::out | std::ios::binary);
+
+  Vec3f& norm_translate = (*lb_);
+  float norm_scale = (*bound_).norm();
+
+  //
+  // write header
+  //
+  *output << "#binvox 1" << std::endl;
+  *output << "dim " << bx << " " << by << " " << bz << std::endl;
+  if (option_.Verbose()) std::cout << "dim : " << bx << " x " << by << " x " << bz << std::endl;
+  *output << "translate " << -norm_translate[0] << " " << -norm_translate[2]
+          << " " << -norm_translate[1] << std::endl;
+  *output << "scale " << norm_scale << std::endl;
+  *output << "data" << std::endl;
+
+  Byte value;
+  Byte count;
+  VoxelIndex total_ones = 0;
+  int bytes_written = 0;
+
+  /**
+   * Compression
+   */
+  int x = lx, y = ly, z = lz;
+  while (x <= ux) {
+    value = Filled(x, y, z);
+    count = 0;
+    while ((x <= ux) && (count < 255) && value == Filled(x, y, z)) {
+      z++;
+      if (z > uz) {
+        z = lz;
+        y++;
+        if (y > uy) {
+          y = ly;
+          x++;
+        }
+      }
+      count++;
+    }
+    if (value) total_ones += count;
+    *output << value << count;
+    bytes_written += 2;
+  }
+
+  output->close();
+  if (option_.Verbose())
+    std::cout << "wrote " << total_ones << " set voxels out of " << static_cast<VoxelIndex>(bx) * by * bz
+         << ", in " << bytes_written << " bytes" << std::endl;
+    std::cout << "bounds are: " << *output_lb_ << ", " << *output_ub_ << std::endl;
+}
+
+/**
+ * Write to file with raw format.
+ */
+void Voxelizer::WriteRawvox() {
+  if (option_.Verbose()) std::cout << "writing voxels to file..." << std::endl;
+  int lx = 0, ux = size_x_ - 1, ly = 0, uy = size_y_ - 1, lz = 0, uz = size_z_ - 1;
+
+  std::ofstream* output = new std::ofstream(option_.OutFilePath().c_str(), std::ios::out | std::ios::binary);
+
+  //
+  // write header
+  //
+  *output << size_x_ << " " << size_y_ << " " << size_z_ << std::endl;
+  *output << (double)(*lb_)[0] << " " << (double)(*lb_)[1] << " "
+          << (double)(*lb_)[2] << std::endl;
+  *output << (double)(*unit_)[0] << (double)(*unit_)[1] << (double)(*unit_)[2] << std::endl;
+
+  if (option_.Verbose())
+    std::cout << "dim : " << size_x_ << " x " << size_y_ << " x " << size_z_ << std::endl;
+  if (option_.Verbose()) std::cout << "lower bound : " << (*lb_) << std::endl;
+  if (option_.Verbose()) std::cout << "voxel size : " << (*unit_)[0] << " " << (*unit_)[1] << " " << (*unit_)[2] << std::endl;
+
+  //
+  // write data
+  //
+  VoxelIndex count = 0;
+  for (int x = lx; x <= ux; ++x) {
+    for (int y = ly; y <= uy; ++y) {
+      for (int z = lz; z <= uz; ++z) {
+        if (Filled(x, y, z)) {
+          *output << x << ' ' << y << ' ' << z << '\n';
+          ++count;
+        }
+      }
+    }
+  }
+  output->close();
+  if (option_.Verbose()) std::cout << "wrote " << count << " voxels" << std::endl;
+}
+
+void Voxelizer::WriteMeta() {
+  std::string base_out_file_path = option_.OutFilePath();
+  // remove file extension
+  if (absl::EndsWith(base_out_file_path, ".rawvox") || absl::EndsWith(base_out_file_path, ".binvox")) {
+    base_out_file_path = base_out_file_path.substr(0, base_out_file_path.size() - 7);
+  }
+  std::string meta_out_file_path = base_out_file_path + ".meta";
+
+  if (option_.Verbose()) {
+    std::cout << absl::StrFormat("write meta file to %s.", meta_out_file_path) << std::endl;
+  }
+  std::ofstream* output = new std::ofstream(meta_out_file_path.c_str(), std::ios::out | std::ios::binary);
+
+  // write header
+  *output << "#voxmeta 1" << std::endl;
+  *output << size_x_ << " " << size_y_ << " " << size_z_ << std::endl;
+
+  // write data
+  VoxelIndex tmp;
+  for (VoxelIndex voxel_index = 0; voxel_index < TotalVoxelSize(); ++voxel_index) {
+    *output << (voxel_metas_.get())[voxel_index].Index() << " " << (voxel_metas_.get())[voxel_index].Flags() << std::endl;
+  }
+
+  output->close();
+  if (option_.Verbose()) {
+    std::cout << "meta file is written." << std::endl;
+  }
+}
+
+Voxelizer::~Voxelizer() {
+  // TODO Auto-generated destructor stub
+}
+
+V3SP Voxelizer::Vertices() { return vertices_; }
+
+std::vector<Vec3f> Voxelizer::VerticesVec() { 
+  std::vector<Vec3f> vertices(VerticesSize());
+  for (int i = 0; i < VerticesSize(); ++i) {
+    vertices[i] = (vertices_.get())[i];
+  }
+  return std::move(vertices);
+}
+
+V3SP Voxelizer::Faces() { return faces_; }
+
+std::vector<Triangle> Voxelizer::TrianglesVec() { 
+  std::vector<Triangle> triangles(FacesSize());
+  for (int i = 0; i < FacesSize(); ++i) {
+    const Vec3f& tmp = (faces_.get())[i];
+    triangles[i] = std::move(Triangle(tmp[0], tmp[1], tmp[2]));
+  }
+  return std::move(triangles);
+}
+
+int Voxelizer::VerticesSize() { return num_vertices_; }
+
+int Voxelizer::FacesSize() { return num_faces_; }
+
+Vec3f Voxelizer::LowerBound() { return *lb_; }
+
+Vec3f Voxelizer::UpperBound() { return *ub_; }
+
+Vec3f Voxelizer::MeshLowerBound() { return *mesh_lb_; }
+
+Vec3f Voxelizer::MeshUpperBound() { return *mesh_ub_; }
+
+AVISP Voxelizer::Voxels() { return voxels_; }
+
+Vec3f Voxelizer::HalfUnit() { return *half_unit_; }
+
+Vec3f Voxelizer::Unit() { return *unit_; }
+
+VoxelIndex Voxelizer::TotalVoxelCompressedSize() { return compressed_total_size_; }
+
+VoxelIndex Voxelizer::TotalVoxelSize() { return size_x_*size_y_*size_z_; }
+
+}  // namespace voxelizer
+```
+
+### src/voxelizer.h
+```
+/*
+ * Voxelizer.h
+ *
+ *  Created on: 22 Jun, 2014
+ *      Author: chenqian
+ */
+
+#ifndef VOXELIZER_H_
+#define VOXELIZER_H_
+
+#include <assimp/postprocess.h>  // Post processing flags
+#include <assimp/scene.h>        // Output data structure
+
+#include <assimp/Importer.hpp>  // C++ importer interface
+#include <boost/atomic.hpp>
+#include <boost/shared_ptr.hpp>
+#include <fstream>
+#include <queue>
+
+#include "absl/status/status.h"
+#include "commons.h"
+#include "thread_pool.h"
+#include "timer.h"
+
+namespace voxelizer {
+
+const int kPrimitiveTriangleType = 0x4;
+const int kTriangleNumIndices = 3;
+const Vec3f kEpsBox(0.0001, 0.0001, 0.0001); // epsilon box
+const int kThresholdBfsSurface = 10;
+
+#define GETBIT(x, i) ((x >> (i % kBatchSize)) & 1)
+#define SETBIT(voxels, voxel_index) (voxels.get())[voxel_index / kBatchSize] |= (static_cast<VoxelIndex>(1) << (voxel_index % kBatchSize))
+#define INDEX(x, y, z) x * size_yz_ + y * size_z_ + z
+
+class Option {
+public:
+  Option() {
+    mesh_index_ = 0;
+    verbose_ = false;
+    with_meta_= false;
+    tight_ = false;
+  }
+  std::vector<int> ClippingSize() const {
+    return clipping_size_;
+  }
+  void SetClippingSize(const std::vector<int>& clipping_size) {
+     clipping_size_ = clipping_size;
+  }
+  std::string Format() const {
+    return format_;
+  }
+  void SetFormat(const std::string& format) {
+    format_ = format;
+  }
+  std::string InFilePath() const {
+    return in_file_path_;
+  }
+  void SetInFilePath(const std::string& in_file_path) {
+    in_file_path_ = in_file_path;
+  }
+  std::string OutFilePath() const {
+    return out_file_path_;
+  }
+  void SetOutFilePath(const std::string& out_file_path) {
+    out_file_path_ = out_file_path;
+  }
+  int MeshIndex() const {
+    return mesh_index_;
+  }
+  void SetMeshIndex(const int mesh_index) {
+    mesh_index_ = mesh_index;
+  }
+  bool Verbose() {
+    return verbose_;
+  }
+  void SetVerbose(const bool verbose) {
+    verbose_ = verbose;
+  }
+  bool WithMeta() const {
+    return with_meta_;
+  }
+  void SetWithMeta(const bool with_meta) {
+    with_meta_ = with_meta;
+  }
+  bool Tight() const {
+    return tight_;
+  }
+  void SetTight(const bool tight) {
+    tight_ = tight;
+  }
+
+private:
+  std::string in_file_path_;
+  std::string out_file_path_;
+  std::string format_;
+  std::vector<int> clipping_size_;
+  int mesh_index_;
+  bool verbose_;
+  bool with_meta_;
+  bool tight_;
+};
+
+enum VoxelFlagsEnum {
+    FILLED            = 0x01 <<  0,        // Set this bit when a voxel cell is not empty. Unset this bit when this voxel is empty.
+    INSIDE            = 0x01 <<  1,        // Voxel center is inside the mesh surface , TIGHT
+    SURFACE           = 0x01 <<  2,        // Voxel is generated from surface in the surface voxelizing pass
+    SOLID             = 0x01 <<  3,        // Voxel is generated in solid flood filling in the solid voxelizing pass
+    CLIPPED           = 0x01 <<  4,        // Voxel is clipped
+};
+
+class VoxelMeta {
+public:
+  VoxelMeta(VoxelIndex index, VoxelFlags flags): index_(index), flags_(flags) {}
+  VoxelMeta() {
+    Reset();
+  }
+  void Reset() {
+    index_ = 0;
+    ClearFlags();
+  }
+  VoxelIndex Index() const {
+    return index_;
+  }
+  void SetIndex(const VoxelIndex& index) {
+    index_ = index;
+  }
+  VoxelFlags Flags() const {
+    return flags_;
+  }
+  void SetFlags(const VoxelFlags& flags) {
+    flags_ = flags;
+  }
+  void ClearFlags() {
+    flags_ = 0;
+    SetInside();
+  }
+  bool Filled() const {
+    return (flags_ & VoxelFlagsEnum::FILLED) > 0;
+  }
+  void SetFilled() {
+    flags_ |= VoxelFlagsEnum::FILLED;
+  }
+  void UnsetFilled() {
+    flags_ &= ~VoxelFlagsEnum::FILLED;
+  }
+  void UpdateFilled() {
+    if (!Clipped() && (Solid() || (Surface() && Inside()))) {
+      SetFilled();
+    } else {
+      UnsetFilled();
+    }
+  }
+  bool Inside() const {
+    return (flags_ & VoxelFlagsEnum::INSIDE) > 0;
+  }
+  void SetInside() {
+    flags_ |= VoxelFlagsEnum::INSIDE;
+    UpdateFilled();
+  }
+  void UnsetInside() {
+   flags_ &= ~VoxelFlagsEnum::INSIDE; 
+   UpdateFilled();
+  }
+  bool Surface() const {
+    return (flags_ & VoxelFlagsEnum::SURFACE) > 0;
+  }
+  void SetSurface() {
+    flags_ |= VoxelFlagsEnum::SURFACE;
+    UpdateFilled();
+  }
+  void UnsetSurface() {
+    flags_ &= ~VoxelFlagsEnum::SURFACE;
+    UpdateFilled();
+  }
+  bool Solid() const {
+    return (flags_ & VoxelFlagsEnum::SOLID) > 0;
+  }
+  void SetSolid() {
+    flags_ |= VoxelFlagsEnum::SOLID; 
+    UpdateFilled();
+  }
+  void UnsetSolid() {
+    flags_ &= ~VoxelFlagsEnum::SOLID; 
+    UpdateFilled();
+  }
+  bool Clipped() const {
+    return (flags_ & VoxelFlagsEnum::CLIPPED) > 0;
+  }
+  void SetClipped() {
+    flags_ |= VoxelFlagsEnum::CLIPPED;
+    UpdateFilled();
+  }
+  void UnsetClipped() {
+    flags_ &= ~VoxelFlagsEnum::CLIPPED;
+    UpdateFilled();
+  }
+
+private:
+  VoxelIndex index_;
+  VoxelFlags flags_;
+};
+
+class Voxelizer {
+  Option option_;
+  boost::shared_ptr<VoxelMeta> voxel_metas_;
+  bool is_init_;
+
+  V3UP mesh_lb_, mesh_ub_;          // location
+  V3UP mesh_vox_lb_, mesh_vox_ub_;  // voxels of location
+  V3UP output_lb_, output_ub_;      // output lower/upper bound locations
+
+  float min_lb_, max_ub_;
+  V3UP lb_, ub_, bound_;  // lowerBound and upperBound of the whole space
+  V3UP unit_, half_unit_;        // full or half size of the unit
+
+  int num_meshes_;
+
+  V3SP faces_;
+  int num_faces_;
+
+  V3SP vertices_;
+  int num_vertices_;
+
+  AVISP voxels_buffer_;
+  AVISP voxels_;
+
+  VoxelIndex size2_, size_x_, size_y_, size_z_, size_xy_, size_xz_, size_yz_, compressed_total_size_;  // size_2 = size*size
+  V3UP size_, scale_;
+
+  std::vector<int> grid_size_;
+  std::vector<float> voxel_size_;
+
+  absl::Status LoadFromMesh(const aiMesh* mesh);
+  inline void RunSolidTask(size_t num_thread = 1);
+  inline void RunSolidTask2(size_t num_thread = 1);
+  inline void RunSurfaceTask(const int tri_id);
+  inline void FillYZ(const int x);
+  inline void FillXZ(const int y);
+  inline void FillXY(const int z);
+  inline void FillYZ2(const int x);
+  inline void FillXZ2(const int y);
+  inline void FillXY2(const int z);
+  inline bool InRange(const Vec3f& vc, const Vec3f& lb, const Vec3f& ub);
+  inline bool InRange(const int x, const int y, const int z, const int lx,
+                      const int ly, const int lz, const int ux,
+                      const int uy, const int uz);
+  inline bool InRange(const int x, const int y, const int z,
+                               const Vec3f& lb, const Vec3f& ub);
+  inline TriangleP GetTri(const int tri_id);
+  void ConvIndexToVoxel(const VoxelIndex coord, int& x, int& y, int& z);
+  inline Vec3f ConvIndexToVoxel(const VoxelIndex coord);
+  void ConvIndexToVoxel(const VoxelIndex coord, Vec3f& voxel);
+  inline VoxelIndex ConvVoxelToIndex(const Vec3f& voxel);
+  inline VoxelIndex BfsSurface(const TriangleP& tri, const Vec3f& lb, const Vec3f& ub);
+  void RandomPermutation(const V3SP& data, int num);
+  void BfsSolid(const VoxelIndex voxel_id);
+  void InitOutputBound();
+  void UpdateSurfaceMeta();
+  void UpdateTight();
+  void UpdateSolidMeta();
+  void InitVoxelMeta();
+
+ public:
+  VoxelIndex TotalVoxelSize();
+  VoxelIndex TotalVoxelCompressedSize();
+  Vec3f HalfUnit();
+  Vec3f Unit();
+  AVISP Voxels();
+  Vec3f GetVoxel(const Vec3f& loc);
+  Vec3f GetLoc(const Vec3f& voxel);
+  Vec3f GetCenterLoc(const Vec3f& voxel);
+  Vec3f MeshLowerBound();
+  Vec3f MeshUpperBound();
+  Vec3f LowerBound();
+  Vec3f UpperBound();
+  int VerticesSize();
+  int FacesSize();
+  V3SP Vertices();
+  std::vector<Vec3f> VerticesVec();
+  V3SP Faces();
+  std::vector<Triangle> TrianglesVec();
+  void VoxelizeSurface(int num_thread = 1);
+  void VoxelizeSolid(int num_thread = 1);
+  // Returns whether a voxel is filled. If meta data is avaiable, use meta.Filled(); otherwise check voxels_.
+  bool Filled(const VoxelIndex voxel_id);
+  bool Filled(const int x, const int y, const int z);
+  void Write();
+  void WriteBinvox();
+  void WriteRawvox();
+  void WriteMeta();
+  absl::Status Init();
+  void SetOption(const Option& option) {
+    option_ = option;
+  }
+  Voxelizer(int grid_size, const Option& option)
+      : option_(option) {
+        grid_size_.push_back(grid_size);
+        grid_size_.push_back(grid_size);
+        grid_size_.push_back(grid_size);
+      }
+  Voxelizer(float voxel_size, const Option& option)
+      : option_(option) {
+        voxel_size_.push_back(voxel_size);
+        voxel_size_.push_back(voxel_size);
+        voxel_size_.push_back(voxel_size);
+      }
+  Voxelizer(const std::vector<int>& grid_size, const Option& option)
+      : grid_size_(grid_size), option_(option) {}
+  Voxelizer(const std::vector<float>& voxel_size, const Option& option)
+      : voxel_size_(voxel_size), option_(option) {}
+  virtual ~Voxelizer();
+};
+
+}  // namespace voxelizer
+
+#endif /* VOXELIZER_H_ */
+```
+
+### src/voxelizer_main.cpp
+```
+/*
+ * voxelizerMain.cpp
+ *
+ *  Created on: 1 Jul, 2014
+ *      Author: chenqian
+ */
+#include <vector>
+#include <string>
+
+#include "absl/flags/flag.h"
+#include "absl/flags/parse.h"
+#include "absl/base/internal/raw_logging.h"
+
+#include "voxelizer.h"
+
+using voxelizer::Timer;
+using voxelizer::Voxelizer;
+using voxelizer::ToVector3Int;
+using voxelizer::ToVector3Float;
+using voxelizer::Option;
+
+ABSL_FLAG(std::vector<std::string>, grid_size, {}, "grid size, the granularity of voxelizer. if only one integer is set, assuming the X,Y,Z are the same.");
+ABSL_FLAG(std::vector<std::string>, voxel_size, {}, "voxel size, which determines the size of each voxel");
+ABSL_FLAG(int, num_thread, 4, "number of thread to run voxelizer");
+ABSL_FLAG(bool, verbose, false, "print debug info");
+ABSL_FLAG(std::string, input, "", "input file to be voxelized, file type will be inferred from file suffix");
+ABSL_FLAG(std::string, output, "", "output file to store voxelized result");
+ABSL_FLAG(std::string, format, "binvox", "output format, can be binvox or rawvox");
+ABSL_FLAG(std::string, mode, "solid", "voxelizer mode, surface or solid");
+ABSL_FLAG(int, mesh_index, 0, "mesh index to be voxelized");
+ABSL_FLAG(std::vector<std::string>, clipping_size, {}, "clipping size (x,y,z) to clip the voxelized result. The clipping size is grid size based. If only one integter is specified, clipping size is initialized as (x,x,x). If not set, the result is not clipped.");
+ABSL_FLAG(bool, with_meta, false, "write voxel meta info to .meta file if set to true");
+ABSL_FLAG(bool, tight, false, "If true, check whether the center point of each voxel is inside the mesh or outside it, and if it is outside, remove it. Caveat: this option could be time consuming.");
+
+absl::Status PraseOption(Option& option) {
+  std::string format = absl::GetFlag(FLAGS_format);
+  option.SetFormat(format);
+
+  std::vector<int> clipping_size;
+  if (!ToVector3Int(absl::GetFlag(FLAGS_clipping_size), clipping_size)) {
+    return absl::InvalidArgumentError("Failed to convert the clipping size to int vector.");
+  }
+  if (clipping_size.size() == 1) {
+    clipping_size.push_back(clipping_size[0]);
+    clipping_size.push_back(clipping_size[0]);
+  }
+  option.SetClippingSize(clipping_size);
+
+  std::string input_file = absl::GetFlag(FLAGS_input);
+  if (input_file.empty()) {
+    return absl::InvalidArgumentError("Input should be non-empty");
+  }
+  option.SetInFilePath(input_file);
+
+  std::string output_file = absl::GetFlag(FLAGS_output);
+  if (output_file.empty()) {
+    return absl::InvalidArgumentError("Output should be non-empty");
+  }
+  option.SetOutFilePath(output_file);
+
+  int mesh_index = absl::GetFlag(FLAGS_mesh_index);
+  option.SetMeshIndex(mesh_index);
+
+  bool verbose = absl::GetFlag(FLAGS_verbose);
+  option.SetVerbose(verbose);
+
+  bool tight = absl::GetFlag(FLAGS_tight);
+  option.SetTight(tight);
+
+  // tight fit needs with meta.
+  bool with_meta = absl::GetFlag(FLAGS_with_meta) || tight;
+  option.SetWithMeta(with_meta);
+
+  
+
+  return absl::OkStatus(); 
+}
+
+int main(int argc, char* argv[]) {
+  absl::ParseCommandLine(argc, argv);
+
+  std::vector<int> grid_size; 
+  ABSL_INTERNAL_CHECK(ToVector3Int(absl::GetFlag(FLAGS_grid_size), grid_size), "failed to parse grid_size");
+  ABSL_INTERNAL_CHECK(grid_size.size() == 0 || grid_size.size() == 1 || grid_size.size() == 3, "grid_size should be 1 or 3 dimensions if specifed");
+  if (grid_size.size() == 1) {
+    grid_size.push_back(grid_size[0]);
+    grid_size.push_back(grid_size[0]);
+  }
+  std::vector<float> voxel_size;
+  ABSL_INTERNAL_CHECK(ToVector3Float(absl::GetFlag(FLAGS_voxel_size), voxel_size), "failed to parse voxel_size");
+  ABSL_INTERNAL_CHECK(voxel_size.size() == 0 || voxel_size.size() == 1 || voxel_size.size() == 3, "voxel_size should be 3 dimensions if specifed");
+  if (voxel_size.size() == 1) {
+    voxel_size.push_back(voxel_size[0]);
+    voxel_size.push_back(voxel_size[0]);
+  }
+  int num_thread = absl::GetFlag(FLAGS_num_thread);
+  
+  std::string mode = absl::GetFlag(FLAGS_mode);
+  
+  ABSL_INTERNAL_CHECK(grid_size.empty() ^ voxel_size.empty(), "if and only if grid_size or voxel_size should be set.");
+
+  Option option;
+  auto status = PraseOption(option);
+  if (!status.ok()) {
+    std::cout << "Failed to parse Option." << std::endl;
+    return 1;
+  }
+
+  Timer timer;
+
+  timer.Restart();
+  Voxelizer* voxelizer;
+  if (grid_size.empty()) {
+    voxelizer = new Voxelizer(voxel_size, option);
+  } else {
+    voxelizer = new Voxelizer(grid_size, option);
+  }
+  status = voxelizer->Init();
+  if (!status.ok()) {
+    std::cout << "voxelizer fails initialization: " << status.message();
+    return 1;
+  }
+  timer.Stop();
+  std::cout << "voxelizer initialization ";
+  timer.PrintTimeInMs();
+  std::cout << "-------------------------------------------" << std::endl;
+  timer.Restart();
+  voxelizer->VoxelizeSurface(num_thread);
+  timer.Stop();
+  std::cout << "surface voxelization ";
+  timer.PrintTimeInMs();
+  if (mode == "solid") {
+    std::cout << "-------------------------------------------" << std::endl;
+    timer.Restart();
+    voxelizer->VoxelizeSolid(num_thread);
+    timer.Stop();
+    std::cout << "solid voxelization ";
+    timer.PrintTimeInMs();
+  }
+  std::cout << "-------------------------------------------" << std::endl;
+  timer.Restart();
+  voxelizer->Write();
+  timer.Stop();
+  std::cout << "writing file ";
+  timer.PrintTimeInMs();
+
+  return 0;
+}
+```

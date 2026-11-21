@@ -1,0 +1,311 @@
+Reality Engine V11 — physics/world simulation engine - Dense geometry -> Poisson mesh -> WorldIR MESH artifact + glTF TRIANGLES export (P0.11-P0.13) by Shresthbhati · Pull Request #16 · Shresthbhati/reality-engine
+
+Dense geometry -> Poisson mesh -> WorldIR MESH artifact + glTF TRIANGLES export (P0.11-P0.13) by Shresthbhati · Pull Request #16 · Shresthbhati/reality-engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Shresthbhati
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+Owner
+What this closes
+reconstruction/meshing/ was an empty scaffold and Geometry(type=MESH, data_uri, data_hash) -- designed for real mesh artifacts since day one -- was never produced by anything. The glTF exporter explicitly excluded MESH payloads. This PR wires the last unmapped leg of the capture spine:
+```
+fused metric cloud -> filtered/oriented -> COLMAP CPU poisson_mesher
+  -> MeshData artifact (content-addressed, sha256)
+  -> Geometry(type=MESH, data_uri, data_hash) + STRUCTURE entity in WorldIR
+  -> glTF TRIANGLES primitive + Studio web viewer mesh layer
+```
+Implementation
+reconstruction/meshing/mesh.py — MeshData (vertices/faces/per-vertex normals), deterministic binary encoding (artifact-hashable), binary-PLY writer/reader that follows header-declared property types (COLMAP writes property list int int vertex_indices; uchar assumptions misparse it).
+reconstruction/meshing/preprocess.py — deterministic voxel downsample, statistical outlier filter, camera-oriented PCA normals (scipy cKDTree, oriented toward observing camera centers), and a camera-envelope filter: the triangulated sparse cloud defines the plausible scene extent (95th-percentile distance-to-nearest-camera); depth-unprojection artifacts beyond it are cut with reported facts.
+reconstruction/meshing/surface.py — mature backend: the configured COLMAP binary's CPU poisson_mesher. Capability-probed (colmap help must list the command); adapts to two observed COLMAP 4.2 behaviors: the density-bounded solver depth (auto-retries at the reported maximum) and trim-vs-sparsity (COLMAP's dense-pipeline trim=10 empties sparse clouds; default 0 here). Honest MeshingUnavailableError/MeshingError; no fabricated fallback mesh.
+Pipeline stage 3.6 (engine/pipeline/vertical_slice.py) — meshes the fused metric cloud, persists the artifact, attaches the geometry + entity, and rolls back if the world fails its validation gate. The METRIC gate uses the scale-anchoring stage's fact directly (a metadata read would race stage 4 -- regression-tested). artifact_store now also flows to the compiler, so promoted planes persist real point payloads.
+glTF exporter — resolvable MESH payloads export as real TRIANGLES primitives; index width follows vertex count (uint32 >65,535). Cube fallback only when no real artifact exists. Plane/object entities export as POINTS primitives from their real artifacts.
+Studio viewer — --mesh embed (or served fetch) renders the reconstructed surface as a translucent layer; header-driven PLY triangle parser.
+reconstruction/mvs/README.md — documents that classic dense MVS (patch_match_stereo) is dependency-blocked: the environment's COLMAP 4.2.0 is CPU-only. Not silently emulated.
+Real-data verification (observed, this environment)
+Real 28-image room fixture, full pipeline (run_vertical_slice.py, MiDaS_small, mesh depth 9):
+25/28 cameras registered (honest PARTIAL), scale=metric (0.2458 m/unit from the measured 0.44 m baseline)
+Envelope filter cut 43,445 depth-noise points (envelope 4.63 m from 1,051 real sparse points) -- without it the mesh came out at 400 m / kilometer scale
+Room mesh: 240,735 vertices, 482,260 faces at honest room scale (extent 15.8 x 5.7 x 15.8 m), persisted as artifact://23a91a39..., mesh.ply written
+WorldIR: 71 entities, 4 measurements, 0 validation errors after the mesh lands
+glTF export: room mesh as mode-4 TRIANGLES (1,446,780 uint32 indices) + 48 entities as real POINTS primitives from their artifacts; exports/scene.gltf written
+Synthetic-plane backend checks: 3k pts -> 9k-vert mesh (extent 2.2 m for a 2 m plane); 40k pts -> 75k verts / 150k faces in 1.6 s
+Tests
+tests/test_meshing_pipeline.py: 27 deterministic tests (MeshData roundtrips incl. COLMAP-style headers, preprocessing determinism + normal orientation, stage skip paths, artifact roundtrip, exporter TRIANGLES) + a dependency-gated real-COLMAP test (REALITY_COLMAP)
+Full suite: 1294 passed, 1 pre-existing SAM torch-hub env failure (unrelated), 1 gated skip
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff noreply@codebuff.com
+Shresthbhati
+and others
+added 6 commits
+September 14, 2026 15:24
+Wire dense geometry -> Poisson mesh -> WorldIR MESH artifact (P0.11-P…
+…
+244f2b5
+```
+…0.13)
+
+reconstruction/meshing/ was an empty scaffold and Geometry(type=MESH)
+was never produced by anything; the glTF exporter explicitly excluded
+MESH payloads. This closes the last unmapped leg of the capture spine:
+
+- mesh.py: MeshData model (vertices/faces/normals) with deterministic
+  binary encoding and a binary-PLY reader that follows the header's
+  list-property types (COLMAP writes `list int int` face counts).
+- preprocess.py: deterministic voxel downsample, statistical outlier
+  filter, and camera-oriented PCA normals via scipy cKDTree.
+- surface.py: mature backend -- the configured COLMAP binary's CPU
+  poisson_mesher, capability-probed, with an auto-retry at the
+  density-bounded solver depth and trim=0 (COLMAP's dense-pipeline
+  trim default empties sparse clouds). Honest unavailability errors;
+  no fabricated fallback mesh.
+- vertical_slice stage 3.6: meshes the fused metric cloud, persists a
+  content-addressed artifact, attaches Geometry(type=MESH,
+  data_uri, data_hash) + a STRUCTURE entity, and rolls back if the
+  world fails its validation gate. artifact_store now also flows to
+  the compiler, so promoted planes persist real point payloads too.
+- glTF exporter: resolvable MESH payloads export as real TRIANGLES
+  primitives (uint16 indices, 4-byte aligned); cube fallback only
+  when no real artifact exists.
+
+Verified: real COLMAP 4.2.0 CPU poisson_mesher produces 9k-vert meshes
+from 3k-point clouds (extent 2.2 m for a 2 m plane) and 75k verts /
+150k faces from 40k points in 1.6 s; 26 new deterministic tests;
+full suite 1293 passed (1 pre-existing SAM env failure, 1 gated skip).
+
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff <noreply@codebuff.com>
+```
+Fix mesh-stage scale gate: use the anchoring stage's fact, not world …
+…
+a2a9519
+```
+…metadata
+
+_mesh_stage runs before stage 4 writes world.metadata["scale"], so a
+metadata-based METRIC gate would always skip (silently disabling the
+whole stage in the real pipeline while unit tests that pre-set the
+metadata masked it). The gate now takes scale_state from the scale-
+anchoring stage directly -- the single owner of that fact -- with a
+regression test that reproduces the pre-stage-4 world state.
+
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff <noreply@codebuff.com>
+```
+Add camera-envelope filter: sparse cloud defines the plausible scene …
+…
+7613a4b
+```
+…extent
+
+Observed on the real room fixture: monocular-depth unprojection flings
+points to kilometer distances when alignment fails, and the global
+mean-distance outlier statistic cannot see them once the outlier
+population is large (only 53 of 121k removed; the mesh came out at
+400 m scale for a 5 m room). The triangulated sparse SfM points are
+reliable geometry: their distance-to-nearest-camera distribution IS
+the scene envelope (95th percentile). Depth-derived points beyond it
+are cut with the facts reported, never silently.
+
+In the pipeline the sparse/depth split comes from track_id prefixes
+(depth-derived points are 'depth-<evidence>-<row>-<col>').
+
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff <noreply@codebuff.com>
+```
+Fix test fakes to carry the real track_id contract
+…
+315a24a
+```
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff <noreply@codebuff.com>
+```
+Viewer: render the real reconstructed surface mesh when present
+…
+c7ed4f1
+```
+--mesh embeds mesh.ply (or fetches it when served); a binary-PLY
+triangle parser follows header-declared strides and count/index types.
+Rendered as a translucent double-sided layer so the point evidence
+stays visible through it; hidden/shown with the points toggle.
+
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff <noreply@codebuff.com>
+```
+Fix glTF index width: uint32 when the mesh exceeds 65535 vertices
+…
+d9c3b91
+```
+The real room mesh (240,735 verts) overflowed uint16 indices in the
+exporter -- caught by exporting the actual E2E artifact, not by unit
+tests. Index componentType now follows the vertex count.
+
+🤖 Generated with Codebuff
+Co-Authored-By: Codebuff <noreply@codebuff.com>
+```
+Copilot
+AI
+lite review requested due to automatic review settings
+September 14, 2026 10:41
+ecc-tools
+Bot
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+ECC Tools / Security Evidence
+Commit: d9c3b915bb1947fa96492acdcbb4eaa2f7f14f8a
+Security evidence gate passed (success)
+No security-sensitive scanner-evidence gap detected.
+Mode: enforce
+Scanned 13 changed file(s). No missing scanner-evidence signal was detected.
+Check publication was denied or unavailable. An app owner must enable Checks: read and write, and the installation owner must approve the updated permission.
+strix-security
+Bot
+commented
+Sep 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Strix Security Review
+No security issues found.
+Updated for d9c3b91.
+Reviewed by Strix
+Re-run review · Configure security review settings
+ecc-tools
+Bot
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+ECC Tools / PR Risk Taxonomy
+Commit: d9c3b915bb1947fa96492acdcbb4eaa2f7f14f8a
+PR taxonomy clear (success)
+Scanned 13 changed file(s). No taxonomy bucket signals were detected.
+Scanned 13 changed file(s).
+No PR taxonomy bucket signals were detected.
+Check publication was denied or unavailable. An app owner must enable Checks: read and write, and the installation owner must approve the updated permission.
+ecc-tools
+Bot
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+ECC Tools / Reference Set Readiness
+Commit: d9c3b915bb1947fa96492acdcbb4eaa2f7f14f8a
+Reference set readiness gaps detected (neutral)
+Reference evidence present for 0/7 areas (0%) across 13 changed file(s).
+This check is based on files changed in this PR. Repository-level readiness is still reported by /ecc-tools analyze comments and generated manifests.
+Area
+Status
+Evidence / Next Step
+Deep analyzer corpus
+Missing
+Add analyzer fixture, golden, benchmark, or reference-set files that can catch analyzer regressions.
+RAG/evaluator comparison
+Missing
+Add retrieval or evaluator reference-set comparison fixtures with expected ranking behavior.
+PR salvage/review corpus
+Missing
+Add stale-PR, review-thread, reopen-flow, or salvage reference cases for queue cleanup automation.
+Discussion triage corpus
+Missing
+Add public discussion triage fixtures, golden cases, or reference sets for informational, answered, and no-response classifications.
+Harness compatibility
+Missing
+Add cross-harness, adapter-compliance, or harness-audit evidence for Claude, Codex, OpenCode, Zed, dmux, and agent surfaces.
+Security evidence
+Missing
+Attach security evidence such as SBOMs, SARIF, audit reports, or AgentShield evidence packs.
+CI failure-mode evidence
+Missing
+Add captured CI failure logs, dry-run fixtures, or troubleshooting docs for common workflow failure modes.
+Check publication was denied or unavailable. An app owner must enable Checks: read and write, and the installation owner must approve the updated permission.
+Copilot
+AI
+reviewed
+Sep 14, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+ecc-tools
+Bot
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+ECC Tools / Hosted Promotion Readiness
+Commit: d9c3b915bb1947fa96492acdcbb4eaa2f7f14f8a
+Hosted promotion readiness passed (success)
+No hosted promotion evidence gaps detected across 13 changed file(s); 0 corpus scenarios had matching evidence.
+This check compares PR file changes against the evaluator/RAG promotion corpus in src/analyzers/fixtures/evaluator-rag-corpus.ts.
+Hosted output scoring inspected 0 completed cached hosted job results.
+No evaluator corpus scenarios matched this PR.
+Check publication was denied or unavailable. An app owner must enable Checks: read and write, and the installation owner must approve the updated permission.
+strix-security
+Bot
+approved these changes
+Sep 14, 2026
+View reviewed changes
+strix-security
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed all 13 changed files, focusing on the new meshing backend (reconstruction/meshing/mesh.py, preprocess.py, surface.py), the pipeline wiring in engine/pipeline/vertical_slice.py, the glTF exporter, and the Studio viewer/builder changes. The PR adds a surface-reconstruction stage that invokes COLMAP's poisson_mesher and persists content-addressed mesh artifacts.
+Key areas assessed and cleared:
+Command execution: surface.py invokes the resolved COLMAP binary via subprocess with a list argument vector (no shell=True), and the binary path is operator-configured through shutil.which resolution — no command-injection surface.
+Artifact/path safety: FileArtifactStore validates data_uri digests against a strict sha256 pattern before joining onto the store root, and the exporter/runner resolve only internally produced URIs.
+Binary parsing: MeshData.from_ply_bytes/from_bytes bound allocations against actual body length (struct.unpack_from raises on truncation), and face indices are validated; exporter wraps parse errors defensively.
+Viewer: the new parseMeshPly path renders through THREE.BufferGeometry with no untrusted-data HTML injection; embedding uses base64 + JSON escaping.
+Static analysis: semgrep reported 0 findings; bandit's subprocess flags were reviewed and determined to be false positives.
+No security vulnerabilities were identified in the changed code.
+Reviewed by Strix
+Configure security review settings
+Hide details
+View details
+Shresthbhati
+merged commit a075e86
+into
+main
+Sep 14, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Shresthbhati
+mentioned this pull request
+Sep 14, 2026
+docs: canonical documentation architecture + future-work registry
+#21
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

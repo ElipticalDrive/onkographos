@@ -1,0 +1,325 @@
+--- v006.md
++++ v007.md
+@@ -4,75 +4,67 @@
+ 
+ ## Overview
+-Configures the rendering pipeline parameters—specifically transfer functions, shading, and sampling rates—to map scalar volume data to visible color and opacity during direct volume ray casting. It differs from sibling methods by focusing on the *setup* of the rendering state (properties, mappers, and actors) rather than the mathematical definition of the transfer function itself or the compositing algorithm. It builds on [Direct volume ray casting](19-direct-volume-ray-casting.md) and [Transfer Function and Opacity Mapping](2789-transfer-function-and-opacity-mapping.md).
++Configures the rendering pipeline parameters that map scalar volume data to visual properties (color, opacity, shading) and control the ray-casting execution behavior. It solves the problem of translating raw scalar field values into a perceptually meaningful image by defining transfer functions, lighting models, and sampling strategies. It differs from [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md) by focusing on the static configuration of the rendering actor's state rather than dynamic opacity normalization, and from [Direct Volume Rendering with Interactive Piecewise Transfer Function](2068-direct-volume-rendering-with-interactive-piecewise-transfer-.md) by encompassing the broader pipeline setup (lighting, clipping, sampling) beyond just the interactive transfer function definition.
+ 
+ ## How it works
+-The configuration process involves loading the dataset, defining the mapping from scalar values to visual properties, and setting the geometric and optical parameters for the ray caster.
++The configuration process involves loading the scalar dataset, defining the mapping from scalar values to color and opacity, setting shading and sampling parameters, and applying geometric constraints such as clipping planes.
+ 
+ ### Inputs and Outputs
+-*   **Input**: A 3D scalar field dataset (e.g., TIFF, structured points) with defined extent, spacing, and origin.
+-*   **Output**: A configured rendering pipeline (Actor, Mapper, Property) ready for display.
++*   **Input:** A 3D scalar field $V(\mathbf{p})$ defined on a structured grid with extent $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$, spacing $\Delta x, \Delta y, \Delta z$, and origin $\mathbf{o}$.
++*   **Output:** A configured volume rendering actor/mapper ready for compositing, producing a final pixel color $\mathbf{C}_{final}$.
+ 
+ ### Data Structures
+-The core data structures are the **Transfer Functions** and the **Volume Property**.
++The configuration relies on two primary transfer function objects and a set of scalar properties:
+ 
+-1.  **Color Transfer Function (CTF)**: Maps scalar value $V$ to RGB color $\mathbf{c}$.
+-    *   Implemented as a piecewise function defined by control points $(V_k, R_k, G_k, B_k)$.
+-    *   Interpolation is typically linear or fast linear between points.
+-2.  **Opacity Transfer Function (OTF)**: Maps scalar value $V$ to opacity $\alpha$.
+-    *   Implemented as a piecewise function defined by control points $(V_k, \alpha_k)$.
+-    *   Can be augmented by gradient-based opacity modulation.
+-3.  **Volume Property**: Holds shading and sampling parameters.
+-    *   Fields: `sampleDistance`, `opacityUnitDistance`, `shading` (boolean), `ambient`, `diffuse`, `specular`, `specularPower`, `gradientOpacity` settings.
++1.  **Color Transfer Function ($T_c$):** Maps scalar value $V$ to RGB color $\mathbf{c} \in [0,1]^3$.
++    *   *VTK Style:* `vtkColorTransferFunction`. Stores control points $(V_k, R_k, G_k, B_k)$. Interpolation is typically linear between points.
++2.  **Scalar Opacity Transfer Function ($T_\alpha$):** Maps scalar value $V$ to opacity $\alpha \in [0,1]$.
++    *   *VTK Style:* `vtkPiecewiseFunction`. Stores control points $(V_k, \alpha_k)$. Interpolation is typically linear or piecewise.
++3.  **Volume Property:** A container for shading and sampling parameters.
++    *   Fields: `sampleDistance`, `scalarOpacityUnitDistance`, `interpolationType`, `shading` (bool), `ambient`, `diffuse`, `specular`, `specularPower`, `useGradientOpacity` (bool), `gradientOpacityMinimumValue`, `gradientOpacityMinimumOpacity`, `gradientOpacityMaximumValue`, `gradientOpacityMaximumOpacity`.
+ 
+-### Steps
++### Numbered Steps
+ 
+-1.  **Load Dataset**:
+-    *   Initialize a reader (e.g., `vtkTIFFReader`, `vtkStructuredPointsReader`).
+-    *   Set 3D dimensionality.
+-    *   Set data extent (min/max indices for X, Y, Z).
+-    *   Set data spacing (physical distance between voxels). **Crucial**: Enable `SpacingSpecifiedFlag` to ensure spacing is respected [S2, unofficial].
+-    *   Set data origin (world coordinates of the first voxel).
+-    *   Set scalar type (e.g., unsigned short) and byte order.
+-    *   Call `UpdateWholeExtent()` to load data.
++1.  **Load and Validate Dataset:**
++    *   Read the scalar data using a reader (e.g., `vtkTIFFReader`, `vtkStructuredPointsReader`).
++    *   Set the 3D dimensionality, data extent, spacing, origin, scalar type, and byte order.
++    *   **Critical:** If custom spacing is set, the `SpacingSpecifiedFlag` must be enabled (e.g., `SpacingSpecifiedFlagOn()` in VTK) to ensure the spacing parameters take effect [S2, unofficial].
++    *   Execute the update pipeline (e.g., `UpdateWholeExtent()`) to populate the data structure.
+ 
+-2.  **Configure Transfer Functions**:
+-    *   Create `vtkColorTransferFunction` and `vtkPiecewiseFunction` (for opacity).
+-    *   Add RGB points: `AddRGBPoint(V, R, G, B)`.
+-    *   Add opacity points: `AddPoint(V, alpha)`.
+-    *   *Example Values*:
+-        *   CTF: $(0, 0,0,0)$, $(500, 0.9,0.5,0.3)$, $(1100, 0.8,0.8,0.6)$, $(1200, 0.6,0.6,0.6)$ [S2, unofficial].
+-        *   OTF: $(0, 0.0)$, $(1200, 0.05)$, $(1300, 1.0)$ [S2, unofficial].
++2.  **Configure Transfer Functions:**
++    *   Create instances of $T_c$ and $T_\alpha$.
++    *   Add control points to map scalar ranges to visual properties.
++        *   For $T_c$: `AddRGBPoint(V, R, G, B)`.
++        *   For $T_\alpha$: `AddPoint(V, alpha)`.
++    *   *Example Configuration:*
++        *   $T_c$: $(0, 0,0,0)$, $(500, 0.9,0.5,0.3)$, $(1100, 0.8,0.8,0.6)$, $(1200, 0.6,0.6,0.6)$ [S2, unofficial].
++        *   $T_\alpha$: $(0, 0.0)$, $(1200, 0.05)$, $(1300, 1.0)$ [S2, unofficial].
+ 
+-3.  **Configure Volume Property**:
+-    *   **Sampling**:
+-        *   Set `sampleDistance` (ray step size). Typical value: $1.0$ or $1.1$ [S1, S2, unofficial].
+-        *   Set `imageSampleDistance` (rays per pixel). $1.0$ = 1 ray/pixel; $0.5$ = 4 rays/pixel; $2.0$ = 1 ray/4 pixels [S2, unofficial].
+-    *   **Interpolation**:
+-        *   Set interpolation type (e.g., `Linear`, `FastLinear`) for texture sampling [S1, S3, unofficial].
+-    *   **Shading**:
+-        *   Enable `ShadeOn()` (or `setShade(true)`). Requires normal calculation [S2, S3, unofficial].
+-        *   Set lighting coefficients:
+-            *   Ambient: $0.2$ [S1, S3, unofficial].
+-            *   Diffuse: $0.7$ [S1, S3, unofficial].
+-            *   Specular: $0.3$ [S1, S3, unofficial].
+-            *   Specular Power: $8.0$ [S1, S3, unofficial].
+-    *   **Gradient Opacity** (Optional):
+-        *   Enable `UseGradientOpacity` (or `setUseGradientOpacity(true)`) [S1, S3, unofficial].
+-        *   Map gradient magnitude $|\nabla V|$ to opacity modulation.
+-        *   Set Gradient Opacity Value Range: Min $2$, Max $20$ [S1, S3, unofficial].
+-        *   Set Gradient Opacity Opacity Range: Min $0.0$, Max $1.0$ [S1, S3, unofficial].
+-    *   **Opacity Unit Distance**:
+-        *   Set `scalarOpacityUnitDistance` to $3.0$ to control density scaling for opacity accumulation [S1, S3, unofficial].
++3.  **Set Sampling and Resolution Parameters:**
++    *   **Sample Distance:** Set the step size along the ray. A value of $1.0$ is standard for unit spacing; $1.1$ is used in some web-based implementations [S1, unofficial].
++    *   **Image Sample Distance:** Controls rays per pixel. $1.0$ yields 1 ray/pixel; $0.5$ yields 4 rays/pixel (supersampling); $2.0$ yields 1 ray per 4 pixels (undersampling) [S2, unofficial].
++    *   **Interpolation Type:** Set to linear for texture sampling to ensure smooth gradients [S1, unofficial].
+ 
+-4.  **Configure Clipping Planes** (Optional):
+-    *   Extract rotation from the image's index-to-world transform.
+-    *   Create 6 planes (X min/max, Y min/max, Z min/max) using `vtkPlane`.
+-    *   Normals are rotated standard basis vectors; origins/corners are derived from ijk bounds [S1, unofficial].
+-    *   Apply planes to the mapper.
++4.  **Configure Shading and Gradient Opacity:**
++    *   **Shading:** Enable 3D shading (`ShadeOn()`). Note: This requires the ray cast function to implement illumination calculations; otherwise, rendering may fail or appear incorrect [S2, unofficial].
++    *   **Lighting Coefficients:**
++        *   Ambient: $0.2$
++        *   Diffuse: $0.7$
++        *   Specular: $0.3$
++        *   Specular Power: $8.0$ [S1, unofficial].
++    *   **Gradient Opacity:** Modulate opacity based on the magnitude of the gradient $\|\nabla V\|$.
++        *   Enable gradient opacity mode.
++        *   Map gradient magnitude range $[V_{grad,min}, V_{grad,max}]$ to opacity range $[\alpha_{min}, \alpha_{max}]$.
++        *   Typical values: Gradient Value Range $[2, 20]$, Opacity Range $[0.0, 1.0]$ [S1, unofficial].
+ 
+-5.  **Link and Render**:
+-    *   Assign CTF and OTF to the volume actor's property.
+-    *   Assign the mapper to the actor.
+-    *   Link transfer function modification events to trigger viewport updates (e.g., `ctfun.onModified(() => render())`) [S1, unofficial].
++5.  **Apply Clipping Planes (Optional):**
++    *   Extract the rotation from the image's index-to-world transform.
++    *   Define six clipping planes (X min/max, Y min/max, Z min/max) using `vtkPlane`.
++    *   Set plane normals by rotating the standard basis vectors and set origins/corners based on the ijk bounds.
++    *   Remove existing clipping planes from the mapper and add the new set.
++    *   Mark the mapper as modified to trigger a pipeline update [S1, unofficial].
++
++6.  **Link to Rendering Pipeline:**
++    *   Assign the transfer functions and properties to the volume actor/mapper.
++    *   Register callbacks so that modifications to the transfer functions (e.g., via UI widgets) trigger immediate viewport updates (`renderWindow.render()`) [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -80,109 +72,118 @@
+ ```python
+ # 1. Load Data
+-reader = vtkTIFFReader()
+-reader.SetFileName("volume.tif")
+-reader.SetFileDimensionality(3)
+-reader.SetDataExtent(0, 255, 0, 255, 0, 255)
+-reader.SetDataSpacing(1.0, 1.0, 1.0)
+-reader.SpacingSpecifiedFlagOn()  # Critical for spacing to take effect [S2, unofficial]
+-reader.SetDataOrigin(0.0, 0.0, 0.0)
+-reader.SetDataScalarTypeToUnsignedShort()
+-reader.SetDataByteOrderToLittleEndian()
+-reader.UpdateWholeExtent()
++reader = create_reader("data.tiff")
++reader.set_file_dimensionality(3)
++reader.set_data_extent(0, 255, 0, 255, 0, 255)
++reader.set_data_spacing(1.0, 1.0, 1.0)
++reader.spacing_specified_flag_on() # Critical for VTK
++reader.set_data_origin(0.0, 0.0, 0.0)
++reader.set_data_scalar_type_to_unsigned_short()
++reader.set_data_byte_order_to_little_endian()
++reader.update_whole_extent()
+ 
+ # 2. Create Transfer Functions
+-colorTF = vtkColorTransferFunction()
+-colorTF.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+-colorTF.AddRGBPoint(500.0, 0.9, 0.5, 0.3)
+-colorTF.AddRGBPoint(1100.0, 0.8, 0.8, 0.6)
+-colorTF.AddRGBPoint(1200.0, 0.6, 0.6, 0.6)
++color_tf = vtk_color_transfer_function()
++opacity_tf = vtk_piecewise_function()
+ 
+-opacityTF = vtkPiecewiseFunction()
+-opacityTF.AddPoint(0, 0.0)
+-opacityTF.AddPoint(1200, 0.05)
+-opacityTF.AddPoint(1300, 1.0)
++# Color mapping
++color_tf.add_rgb_point(0.0, 0.0, 0.0, 0.0)
++color_tf.add_rgb_point(500.0, 0.9, 0.5, 0.3)
++color_tf.add_rgb_point(1100.0, 0.8, 0.8, 0.6)
++color_tf.add_rgb_point(1200.0, 0.6, 0.6, 0.6)
++
++# Opacity mapping
++opacity_tf.add_point(0, 0.0)
++opacity_tf.add_point(1200, 0.05)
++opacity_tf.add_point(1300, 1.0)
+ 
+ # 3. Configure Volume Property
+-prop = vtkVolumeProperty()
+-prop.SetColor(colorTF)
+-prop.SetScalarOpacity(opacityTF)
+-prop.SetInterpolationTypeToLinear() # or FastLinear [S3, unofficial]
+-
+-# Sampling
+-prop.SetSampleDistance(1.1) # [S1, unofficial]
+-# Note: ImageSampleDistance is often set on the Mapper, not Property, in some VTK versions
+-# mapper.SetImageSampleDistance(1.0) 
+-
+-# Shading
+-prop.ShadeOn() # [S2, unofficial]
+-prop.SetAmbient(0.2)
+-prop.SetDiffuse(0.7)
+-prop.SetSpecular(0.3)
+-prop.SetSpecularPower(8.0)
++prop = vtk_volume_property()
++prop.set_sample_distance(1.1)
++prop.set_scalar_opacity_unit_distance(3.0)
++prop.set_interpolation_type_to_linear()
++prop.set_shade(True)
++prop.set_ambient(0.2)
++prop.set_diffuse(0.7)
++prop.set_specular(0.3)
++prop.set_specular_power(8.0)
+ 
+ # Gradient Opacity
+-prop.SetUseGradientOpacity(True) # [S1, unofficial]
+-prop.SetGradientOpacityMinimumValue(2)
+-prop.SetGradientOpacityMinimumOpacity(0.0)
+-prop.SetGradientOpacityMaximumValue(20)
+-prop.SetGradientOpacityMaximumOpacity(1.0)
++prop.set_use_gradient_opacity(True)
++prop.set_gradient_opacity_minimum_value(2)
++prop.set_gradient_opacity_minimum_opacity(0.0)
++prop.set_gradient_opacity_maximum_value(20)
++prop.set_gradient_opacity_maximum_opacity(1.0)
+ 
+-# Opacity Unit Distance
+-prop.SetScalarOpacityUnitDistance(3.0) # [S1, unofficial]
++# 4. Configure Mapper
++mapper = vtk_volume_mapper()
++mapper.set_input_connection(reader.get_output_port())
++mapper.set_sample_distance(1.1) # Or set via property depending on API
+ 
+-# 4. Create Mapper and Actor
+-mapper = vtkVolumeRayCastMapper()
+-mapper.SetInputConnection(reader.GetOutputPort())
+-# mapper.SetImageSampleDistance(1.0) # If supported by specific mapper type [S2, unofficial]
++# 5. Configure Actor
++actor = vtk_volume()
++actor.set_mapper(mapper)
++actor.set_property(prop)
++actor.set_rgb_transfer_function(0, color_tf)
++actor.set_scalar_opacity(0, opacity_tf)
+ 
+-actor = vtkVolume()
+-actor.SetMapper(mapper)
+-actor.SetProperty(prop)
++# 6. Clipping Planes (Optional)
++# Extract rotation from index-to-world transform
++# Define 6 planes: Xmin, Xmax, Ymin, Ymax, Zmin, Zmax
++# Rotate normals and set origins
++# mapper.remove_all_clipping_planes()
++# mapper.add_clipping_plane(plane_xmin)
++# ... add other planes ...
++# mapper.modified()
+ 
+-# 5. Clipping Planes (Optional)
+-# Extract rotation from index-to-world transform
+-# Create 6 planes with rotated normals
+-# mapper.AddClippingPlane(plane)
+-# mapper.RemoveClippingPlanes() # If replacing
+-# mapper.Modified()
++# 7. Link Updates
++color_tf.on_modified(lambda: render_window.render())
++opacity_tf.on_modified(lambda: render_window.render())
+ ```
+ 
+-### Parameters and Typical Values
+-*   **Sample Distance**: $1.0$ to $1.1$ [S1, S2, unofficial].
+-*   **Scalar Opacity Unit Distance**: $3.0$ [S1, S3, unofficial].
+-*   **Gradient Opacity Value Range**: $[2, 20]$ [S1, S3, unofficial].
+-*   **Gradient Opacity Opacity Range**: $[0.0, 1.0]$ [S1, S3, unofficial].
+-*   **Lighting**: Ambient $0.2$, Diffuse $0.7$, Specular $0.3$, Power $8.0$ [S1, S3, unofficial].
++### Parameters with Typical Values
++*   `SampleDistance`: $1.0$ to $1.1$ [S1, S2, unofficial].
++*   `ScalarOpacityUnitDistance`: $3.0$ [S1, unofficial].
++*   `Ambient`: $0.2$ [S1, unofficial].
++*   `Diffuse`: $0.7$ [S1, unofficial].
++*   `Specular`: $0.3$ [S1, unofficial].
++*   `SpecularPower`: $8.0$ [S1, unofficial].
++*   `GradientOpacityMinValue`: $2$ [S1, unofficial].
++*   `GradientOpacityMaxValue`: $20$ [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Spacing Ignored**: If `SpacingSpecifiedFlag` is not enabled, `SetDataSpacing` may be ignored, leading to incorrect aspect ratios or shading [S2, unofficial].
+-*   **Shading Failure**: Enabling 3D shading (`ShadeOn`) requires the ray cast function to implement illumination calculations. If the underlying renderer does not support it, the volume may not render correctly or appear flat [S2, unofficial].
+-*   **Scattering Artifacts**: In filters supporting scattering (e.g., DF3 Viewer), scattering non-zero values enable self-shadowing but significantly increase render time. Red/yellow scattering can cause objects behind the volume to appear blue/green due to color complementarity [S4].
+-*   **Filter Order**: In pipeline filters, data handling filters must be placed *above* the volume filter to affect the rendered data correctly [S4].
++*   **Spacing Ignored:** If `SpacingSpecifiedFlag` is not enabled after calling `SetDataSpacing`, the default spacing is used, leading to incorrect aspect ratios and sampling [S2, unofficial].
++*   **Shading Failure:** Enabling 3D shading (`ShadeOn()`) without a ray cast function that implements illumination calculations can result in incorrect or missing rendering [S2, unofficial].
++*   **Color Complementarity in Scattering:** In filters that support scattering (e.g., DF3 Viewer), if red or yellow colors are scattered, objects beyond the volume may appear blue or green due to color complementarity effects [S3].
++*   **Scattering Performance:** Enabling scattering (non-zero value) significantly increases rendering time, especially in ray-traced modes like PovRay, and has no effect on preview renders [S3].
+ 
+ ## Subtopics
+ 
+-### Volume Rendering Property Configuration
+-Configures the `vtkVolumeProperty` object specifically, focusing on the assignment of transfer functions and lighting parameters. It sets the RGB color transfer function, scalar opacity transfer function, interpolation type (fast linear), gradient opacity, and shading coefficients. It is chosen when fine-tuning the visual appearance (lighting, gradient-based opacity) of an existing volume actor. Link: [VTK Volume Property](https://kitware.github.io/vtk-js/api/Rendering/Core/VolumeProperty.html) [S3, unofficial].
++### [Volume Rendering Property Configuration](13233-volume-rendering-property-configuration.md)
++Configures the visual and shading properties of a volume rendering actor within a graphics pipeline. It establishes the mapping from scalar data to color and opacity, defines interpolation behavior, and sets lighting coefficients for gradient-based shading. It differs from [MAP](13234-map-volume-rendering.md) by focusing on the configuration of the rendering actor's internal state rather than the data interpolation strategy for irregular grids.
+ 
+ ### Volume Rendering Filter
+-A filter-based approach (e.g., in DF3 Viewer) that displays volume data based on emission, absorption, and scattering parameters. It processes data top-to-bottom. It is chosen when using a filter pipeline rather than a direct actor/mapper setup. It supports scattering for self-shadowing and emboss shading. Link: [DF3 Viewer Filter](https://qcganime.web.fc2.com/OOSAWA/MANUAL/FilterE.html) [S4].
++A filter that displays volume data based on emission, absorption, and scattering parameters. It processes data from top to bottom in filter order.
++*   **Distinctive Feature:** Supports self-shadowing via scattering parameters (e.g., in PovRay mode) and emboss shading.
++*   **When to Choose:** Use when a filter-based pipeline approach is required, particularly for tools like DF3 Viewer that integrate volume rendering with other filters (isosurface, cross-section).
++*   **Parameters:**
++    *   `Scattering`: Non-zero values enable self-shadowing but increase rendering time significantly. No effect on preview.
++    *   `Emboss Shading`: Enhances shading in both preview and PovRay rendering.
++    *   `Density`: Always uses the self data slot; other slots can be chosen for coloring.
++*   **Pitfall:** If red or yellow color is scattered, objects beyond the volume appear as blue or green due to color complementarity [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Configuration is $O(1)$ relative to volume size, but setting up clipping planes or computing gradients for gradient opacity can be $O(N)$ where $N$ is the number of voxels.
+-*   **Memory Complexity**: $O(1)$ for property storage; $O(N)$ if gradient volumes are precomputed.
+-*   **Performance**:
+-    *   `FastLinear` interpolation is faster than `Linear` [S3, unofficial].
+-    *   Enabling gradient opacity and shading increases per-sample computation cost.
+-    *   Scattering (in filter contexts) significantly increases rendering time [S4].
+-*   **Strengths**: Provides fine-grained control over visual appearance and sampling. Integrates well with interactive widgets for dynamic transfer function adjustment [S1, unofficial].
+-*   **Limitations**: Dependent on the underlying renderer's support for shading and gradient computation. Incorrect spacing configuration leads to geometric artifacts [S2, unofficial].
++*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of rays (pixels). Early ray termination (when accumulated opacity $\ge 1.0$) can reduce the average number of steps per ray [S2, unofficial].
++*   **Memory Complexity:** Linear with respect to the volume data size. Transfer functions and property objects have negligible memory overhead.
++*   **Measured Performance:** Varies by hardware and resolution. Image sample distance $0.5$ (4 rays/pixel) doubles the rendering time compared to $1.0$ (1 ray/pixel) but improves anti-aliasing [S2, unofficial].
++*   **Strengths:** Flexible mapping of scalar data to visual properties; supports complex shading and gradient-based opacity; supports clipping for interactive exploration.
++*   **Limitations:** Performance is sensitive to sample distance and opacity accumulation; scattering calculations are computationally expensive; requires careful tuning of transfer functions for optimal visualization.
++*   **When to Use:** Standard direct volume rendering where scalar-to-color/opacity mapping is the primary concern.
++*   **When Not to Use:** When slice-count invariance is critical (use [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md)); when interactive piecewise transfer function editing is the primary need (use [Direct Volume Rendering with Interactive Piecewise Transfer Function](2068-direct-volume-rendering-with-interactive-piecewise-transfer-.md)).
+ 
+ ## Background
+-Originated in the Visualization Toolkit (VTK) ecosystem for configuring volume rendering pipelines. The specific parameters and methods described are drawn from VTK examples and web-based VTK implementations (vtk.js) [S1, S2, S3, unofficial]. The DF3 viewer variant represents a filter-based approach used in specialized scientific visualization tools [S4].
++Originating from the Visualization Toolkit (VTK) and its web-based counterpart vtk.js, this configuration method is a standard approach in scientific visualization for setting up volume rendering pipelines. It builds on the principles of direct volume ray casting [19-direct-volume-ray-casting.md] and transfer function mapping [2789-transfer-function-and-opacity-mapping.md]. The specific parameters and API calls (e.g., `vtkVolumeProperty`, `vtkColorTransferFunction`) are documented in VTK examples and community implementations [S1, S2, unofficial]. The DF3 Viewer filter represents a specialized implementation within a specific visualization toolchain [S3].
+ 
+ ## Sources
+ [S1] Muhammed-Magdy-Abdelhady/volume-rendering-web-application, https://github.com/Muhammed-Magdy-Abdelhady/volume-rendering-web-application, fetched 2026-10-27 (unofficial)
+ [S2] TotteKarlsson/vtkExamples, https://github.com/TotteKarlsson/vtkExamples, fetched 2026-10-27 (unofficial)
+-[S3] AbdelrahmanKK/Volume-Rendering-Web-Application-VTK, https://github.com/AbdelrahmanKK/Volume-Rendering-Web-Application-VTK, fetched 2026-10-27 (unofficial)
+-[S4] DF3 Viewer Oosawa, https://qcganime.web.fc2.com/OOSAWA/MANUAL/FilterE.html, fetched 2026-10-29+[S3] DF3 Viewer Oosawa, https://qcganime.web.fc2.com/OOSAWA/MANUAL/FilterE.html, fetched 2026-10-29

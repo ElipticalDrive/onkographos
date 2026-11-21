@@ -1,0 +1,115 @@
+--- v003.md
++++ v004.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A dataset of rays $\mathcal{D}$, a neural field model with parameters $\Theta$, hyperparameters $M$ (number of stochastic patches), $K$ (kernel size), $s$ (stride), and $\lambda$ (loss weight).
+-*   **Outputs:** Updated model parameters $\Theta$.
++*   **Inputs:** A dataset of rays $\mathcal{D}$, a neural field model with parameters $\Theta$, hyperparameters $M$ (number of stochastic patches), $K$ (kernel size), $s$ (stride), and $\lambda$ (loss weight) [S1].
++*   **Outputs:** Updated model parameters $\Theta$ [S1].
+ 
+ **Data Structures:**
+-*   $\mathcal{R}$: A minibatch of rays sampled from $\mathcal{D}$.
+-*   $\mathcal{C}$: Ground-truth pixel colors corresponding to rays in $\mathcal{R}$.
+-*   $\hat{\mathcal{C}}$: Rendered pixel colors corresponding to rays in $\mathcal{R}$.
+-*   $\Patch^{(m)}$: A stochastic patch generation function for the $m$-th iteration.
++*   $\mathcal{R}$: A minibatch of rays sampled from $\mathcal{D}$ [S1].
++*   $\mathcal{C}$: Ground-truth pixel colors corresponding to rays in $\mathcal{R}$ [S1].
++*   $\hat{\mathcal{C}}$: Rendered pixel colors corresponding to rays in $\mathcal{R}$ [S1].
++*   $\Patch^{(m)}$: A stochastic patch generation function for the $m$-th iteration [S1].
+ 
+ **Numbered Steps:**
+@@ -43,5 +43,5 @@
+     $$ L_{\SSSIM}(\Theta, \mathcal{R}) = 1 - \frac{1}{M} \sum_{m=1}^{M} \SSIM (\Patch^{(m)}(\hat{\mathcal{C}}), \Patch^{(m)}(\mathcal{C})) $$
+     [S1]
+-    Where $\SSSIM$ is the average SSIM over $M$ stochastic patches, $\hat{\mathcal{C}}$ are rendered pixels, $\mathcal{C}$ are ground-truth pixels, and $\Patch^{(m)}$ generates the $m$-th stochastic patch.
++    Where $\SSSIM$ is the average SSIM over $M$ stochastic patches, $\hat{\mathcal{C}}$ are rendered pixels, $\mathcal{C}$ are ground-truth pixels, and $\Patch^{(m)}$ generates the $m$-th stochastic patch [S1].
+ *   **Base Color Loss (L1 form):**
+     $$ L_{\mathrm{color}} = \frac{1}{\|\mathcal{R}\|} \sum_{\mathbf{r} \in \mathcal{R}} \| \hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r}) \|_{1} $$
+@@ -64,4 +64,32 @@
+ 
+ ```python
++import torch
++import torch.nn.functional as F
++
++def compute_ssim(img1, img2, kernel_size=4, stride=4):
++    """Compute SSIM between two image tensors using a uniform kernel."""
++    pad = kernel_size // 2
++    img1_p = F.pad(img1, (pad, pad, pad, pad), mode='replicate')
++    img2_p = F.pad(img2, (pad, pad, pad, pad), mode='replicate')
++    kernel = torch.ones(1, 1, kernel_size, kernel_size) / (kernel_size * kernel_size)
++    mu1 = F.conv2d(img1_p, kernel, stride=stride)
++    mu2 = F.conv2d(img2_p, kernel, stride=stride)
++    mu1_sq = mu1.pow(2)
++    mu2_sq = mu2.pow(2)
++    mu12 = mu1 * mu2
++    sigma1_sq = F.conv2d(img1_p**2, kernel, stride=stride) - mu1_sq
++    sigma2_sq = F.conv2d(img2_p**2, kernel, stride=stride) - mu2_sq
++    sigma12 = F.conv2d(img1_p * img2_p, kernel, stride=stride) - mu12
++    C1, C2 = 1e-4, 1e-4
++    ssim_map = ((2 * mu12 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
++    return ssim_map.mean()
++
++def generate_stochastic_patches(rendered, gt, m):
++    """Generate stochastic patches by applying a random binary mask to simulate random pixel sampling."""
++    # [G] The source defines P^(m) as a stochastic patch generation function without specifying the exact sampling mechanism.
++    # A standard implementation applies a random mask or samples a random subset of pixels.
++    mask = torch.rand_like(rendered) > 0.5
++    return rendered * mask, gt * mask
++
+ def multiplex_training_s3im(model, dataset, optimizer, M=10, K=4, s=4, lambda_s3im=1.0):
+     """
+@@ -77,5 +105,6 @@
+         lambda_s3im: Weight for S3IM loss.
+     """
+-    while not stopping_criterion_met():
++    # [G] Standard training loop condition; replaced placeholder stopping_criterion_met()
++    while True:
+         # 1. Sample minibatch
+         rays, gt_colors = dataset.sample_minibatch()
+@@ -85,7 +114,5 @@
+         
+         # 3. Compute conventional loss (L1 as per source for NeuS/general case)
+-        # Note: Source specifies L1 for NeuS, MSE is common for NeRF. 
+-        # We implement L1 as the base L(Theta) as per Eq 13/14 context.
+-        conventional_loss = mean_l1_loss(rendered_colors, gt_colors)
++        conventional_loss = torch.mean(torch.abs(rendered_colors - gt_colors))
+         
+         # 4. Compute S3IM Loss
+@@ -93,18 +120,7 @@
+         for m in range(M):
+             # Initialize stochastic patch generation
+-            # The source defines P^(m) as a function that transforms pixels into a stochastic patch.
+-            # In implementation, this typically involves random cropping or sampling 
+-            # of pixel coordinates to form a patch, or a randomized weighting/filtering.
+-            # Since the exact mathematical definition of P^(m) is not fully detailed 
+-            # beyond "stochastic patch generation function", we assume a standard 
+-            # stochastic sampling of pixel indices or patches.
+-            
+-            # Transform rendered pixels into rendered stochastic patch
+-            # Note: SSIM is computed on the patches. 
+-            # We assume P^(m) returns the subset of pixels/patches for the m-th sample.
+             rendered_patch, gt_patch = generate_stochastic_patches(rendered_colors, gt_colors, m)
+             
+             # Compute SSIM between patches
+-            # SSIM function takes two image/patch tensors, kernel size K, stride s
+             ssim_value = compute_ssim(rendered_patch, gt_patch, kernel_size=K, stride=s)
+             ssim_sum += ssim_value
+@@ -128,8 +144,8 @@
+ 
+ ### S3IM (Stochastic Structural SIMilarity)
+-The core loss metric used in this method. It differs from standard SSIM by averaging SSIM over $M$ stochastic patches rather than local fixed patches, allowing it to capture non-local structural information. [Link](10895-s3im-stochastic-structural-similarity.md)
++A loss metric that averages SSIM over $M$ stochastic patches rather than fixed local patches, enabling the capture of non-local structural information across distant pixels and different images [S1]. Choose it when standard SSIM optimization fails to capture global structure or when local patch sampling proves computationally expensive [S1]. [Link](10895-s3im-stochastic-structural-similarity.md)
+ 
+ ### NeuS
+-A neural surface representation method where the multiplex training via S3IM is specifically adapted by replacing the color loss with the multiplex color loss $L_{\mathrm{M},\mathrm{color}}$. [Link](10895-s3im-stochastic-structural-similarity.md) (Contextual link to application)
++A neural surface representation method that relates volume occupancy to density for improved geometry reconstruction [S1]. It is adapted for multiplex training by replacing the standard color loss with the multiplex color loss $L_{\mathrm{M},\mathrm{color}} = L_{\mathrm{color}} + \lambda L_{\SSSIM}$, where $L_{\mathrm{color}}$ uses an L1 form [S1]. Choose it when high-fidelity surface geometry and RGB reconstruction are required simultaneously [S1]. [Link](10895-s3im-stochastic-structural-similarity.md)
+ 
+ ## Operating characteristics
+@@ -148,5 +164,5 @@
+ ## Background
+ *   **Origin**: Introduced in the paper "S3IM: Stochastic Structural SIMilarity and Its Unreasonable Effectiveness for Neural Fields" [S1].
+-*   **History**: The method is model-agnostic and orthogonal to existing point-wise training paradigms and NeRF variants like DVGO, TensoRF, D-NeRF, and NeuS [S1]. It was developed to address the limitations of standard SSIM optimization in neural field reconstruction.
++*   **History**: The method is model-agnostic and orthogonal to existing point-wise training paradigms and NeRF variants like DVGO, TensoRF, D-NeRF, and NeuS [S1]. It was developed to address the limitations of standard SSIM optimization in neural field reconstruction [S1].
+ *   **Usage**: Applied to NeRF, DVGO, TensoRF, D-NeRF, and NeuS [S1].
+ 

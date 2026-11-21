@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -4,15 +4,13 @@
+ 
+ ## Overview
+-Alpha Computation with Alpha Mask is a technique for correcting over-estimation of occlusion when rendering planar surfaces with complex contours, such as foliage or fences, using alpha-masked polygons [S2, unofficial]. It prevents the ambient occlusion volume from incorrectly treating the solid bounding geometry as fully opaque by weighing the occlusion contribution by the average alpha value ($\bar{\alpha}$) of the surface texture [S2, unofficial]. This method is distinct from standard alpha blending because it applies a scalar weight to the entire surface's occlusion contribution rather than performing per-pixel alpha testing during the volume integration [S2, unofficial].
++Alpha Computation with Alpha Mask corrects over-estimation of occlusion when rendering planar surfaces with complex contours, such as foliage or fences, by weighing the occlusion contribution with the average alpha value $\bar{\alpha}$ of the surface texture [S2, unofficial]. It differs from standard per-pixel alpha blending by applying a scalar occlusion weight to the entire surface's ambient occlusion volume contribution rather than performing per-sample alpha testing during integration [S2, unofficial].
+ 
+ ## How it works
+-The method operates in two contexts: a general density-to-alpha conversion pipeline (often used in neural rendering) and a specific geometric occlusion correction.
+-
+ ### Inputs and Outputs
+ **Inputs:**
+ - Surface geometry tagged with an alpha mask [S2, unofficial].
+-- Alpha texture map associated with the surface [S2, unofficial].
+-- Integration length $L$ (or step size) [S1, unofficial].
+-- Density features $\sigma_{feature}$ [S1, unofficial].
++- Integration length $L$ [S1, unofficial].
++- Density features or sigma features [S1, unofficial].
++- Alpha texture for sampling [S2, unofficial].
+ 
+ **Outputs:**
+@@ -21,20 +19,17 @@
+ 
+ ### Data Structures
+-- **Alpha Mask:** A boolean tensor or array indicating valid sample locations where $\alpha > 0$ [S1, unofficial].
+-- **Sigma Tensor:** A tensor storing extinction coefficients $\sigma$, initialized to zeros [S1, unofficial].
+-- **Alpha Texture:** A 2D texture map storing alpha values for the surface [S2, unofficial].
++- **Alpha Mask:** Boolean array indicating valid sample locations where sampled alpha $> 0$ [S1, unofficial].
++- **Sigma Tensor:** Tensor storing extinction coefficients $\sigma$, initialized to zeros [S1, unofficial].
+ 
+ ### Steps
+-1. **Mask Generation:** If the surface has an alpha mask, sample alpha values at the relevant 3D locations ($xyz\_locs$) to create a boolean mask `alpha_mask` where `alpha > 0` [S1, unofficial].
++1. **Mask Generation:** If `self.alphaMask` exists, sample alpha values at 3D locations (`xyz_locs`) and create a boolean mask `alpha_mask` where sampled alpha $> 0$ [S1, unofficial].
+ 2. **Initialization:** Initialize the sigma tensor with zeros [S1, unofficial].
+-3. **Feature Computation:** If there are valid points (`alpha_mask.any()`), normalize coordinates and compute density features [S1, unofficial].
+-4. **Density Conversion:** Convert density features to sigma ($\sigma$):
+-   - If `component_wise_feature2density` is true, use $\sigma_{feature}$ directly [S1, unofficial].
+-   - Otherwise, apply the `feature2density` function [S1, unofficial].
+-5. **Assignment:** Assign valid sigma values to the sigma tensor at locations specified by `alpha_mask` [S1, unofficial].
++3. **Feature Computation:** If `alpha_mask.any()` is true, normalize coordinates and compute density features [S1, unofficial].
++4. **Density Conversion:** Convert density features to sigma ($\sigma$): if `component_wise_feature2density` is true, use the feature values directly as $\sigma$; otherwise, apply a density conversion function [S1, unofficial].
++5. **Assignment:** Assign the computed valid sigma values to the sigma tensor at indices specified by `alpha_mask` [S1, unofficial].
+ 6. **Alpha Calculation:** Compute alpha from sigma and length using the Beer-Lambert law:
+    $$ \alpha = 1 - \exp(-\sigma \cdot L) $$
+    [S1, unofficial]
+-7. **Occlusion Weighting (Geometric Context):** For surfaces tagged as having a mask, determine the average alpha $\bar{\alpha}$ efficiently in the geometry shader by fetching from a low MIP level of the alpha texture [S2, unofficial]. Weigh the occlusion contribution of the surface by $\bar{\alpha}$ [S2, unofficial].
++7. **Occlusion Weighting (Geometric Context):** For surfaces tagged with a mask, determine $\bar{\alpha}$ efficiently by fetching from a low MIP level of the alpha texture in the geometry shader [S2, unofficial]. Weigh the surface's occlusion contribution by $\bar{\alpha}$ [S2, unofficial].
+ 
+ ### Formulas
+@@ -50,40 +45,42 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **Positional Variation:** It is not efficient to use the full alpha channel for positional variation in occlusion from a single polygon without tessellation [S2, unofficial]. The analytic solution assumes constant opacity over the integration domain; making it piecewise constant requires multiple integrals, which is equivalent to tessellating the polygon [S2, unofficial].
+-- **Over-estimation:** Without masking, the underlying geometry of alpha-masked surfaces (like foliage) causes ambient occlusion volumes to over-estimate occlusion [S2, unofficial].
++- **Positional Variation:** Using the full alpha-channel for positional variation in occlusion from a single polygon is not efficient without tessellation [S2, unofficial]. The analytic solution assumes constant opacity over the integration domain; making it piecewise constant requires multiple integrals, which is equivalent to tessellating the polygon [S2, unofficial].
++- **Over-estimation:** Without masking, the underlying geometry of alpha-masked surfaces causes ambient occlusion volumes to over-estimate occlusion [S2, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def compute_alpha_with_mask(sigma_features, length, alpha_texture, is_component_wise=True):
++def compute_alpha_with_mask(density_features, length, alpha_mask, is_component_wise=True):
+     """
+-    Compute alpha from sigma features and apply alpha mask logic.
++    Compute alpha from density features using an alpha mask.
+     Note: The geometric averaging of alpha for occlusion weighting is handled
+     separately in the geometry shader as per [S2, unofficial].
+     """
++    import math
++
+     # Step 1: Initialize sigma tensor
+-    sigma_tensor = np.zeros_like(sigma_features)
+-    
+-    # Step 2: Determine valid locations (simplified boolean mask logic)
+-    # In practice, alpha_mask is derived from sampling alpha_texture at xyz_locs
+-    # Here we assume alpha_mask is provided or derived from a threshold
+-    alpha_mask = sigma_features > 0  # Placeholder for actual alpha > 0 check
+-    
+-    if not np.any(alpha_mask):
++    sigma_tensor = [0.0] * len(density_features)
++
++    # Step 2: Determine valid locations
++    if not any(alpha_mask):
+         return sigma_tensor
+-    
+-    # Step 3: Convert features to sigma
+-    if is_component_wise:
+-        valid_sigma = sigma_features[alpha_mask]
+-    else:
+-        # Apply feature2density function
+-        valid_sigma = feature2density(sigma_features[alpha_mask])
+-        
+-    # Step 4: Assign valid sigma values
+-    sigma_tensor[alpha_mask] = valid_sigma
+-    
++
++    # Step 3 & 4: Convert features to sigma and assign
++    valid_sigma = []
++    for i in range(len(density_features)):
++        if alpha_mask[i]:
++            if is_component_wise:
++                valid_sigma.append(density_features[i])
++            else:
++                # Apply feature2density function
++                # Not given in the sources.
++                valid_sigma.append(density_features[i])
++
++    for i in range(len(density_features)):
++        if alpha_mask[i]:
++            sigma_tensor[i] = valid_sigma.pop(0)
++
+     # Step 5: Compute alpha
+-    # alpha = 1 - exp(-sigma * length)
+-    alpha = 1.0 - np.exp(-sigma_tensor * length)
+-    
++    alpha = [1.0 - math.exp(-sigma_tensor[i] * length) for i in range(len(sigma_tensor))]
++
+     return alpha
+ 
+@@ -95,6 +92,7 @@
+     # Fetch from low MIP level
+     # This is a conceptual representation; actual implementation uses GPU texture sampling
+-    mip_texture = downsample_texture(alpha_texture, mip_level)
+-    avg_alpha = np.mean(mip_texture)
++    # Not given in the sources.
++    mip_texture = alpha_texture
++    avg_alpha = sum(mip_texture) / len(mip_texture)
+     return avg_alpha
+ ```
+@@ -109,6 +107,4 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The alpha computation is $O(N)$ where $N$ is the number of valid points [S1, unofficial]. The average alpha computation is $O(1)$ if using a pre-computed low MIP level [S2, unofficial].
+-- **Memory Complexity:** Requires storage for the sigma tensor and alpha texture [S1, unofficial].
+ - **Strengths:** Efficiently corrects over-estimation of occlusion for complex planar surfaces without requiring tessellation [S2, unofficial].
+ - **Limitations:** Cannot efficiently handle positional variation in occlusion within a single polygon without tessellation [S2, unofficial].

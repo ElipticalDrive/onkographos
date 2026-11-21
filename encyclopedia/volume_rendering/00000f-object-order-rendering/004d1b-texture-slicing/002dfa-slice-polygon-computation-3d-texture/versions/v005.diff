@@ -1,0 +1,231 @@
+--- v004.md
++++ v005.md
+@@ -1,7 +1,5 @@
+ # Slice Polygon Computation (3D Texture)
+-
+-
+ ## Overview
+-Slice Polygon Computation (3D Texture) is a texture-based volume rendering method that generates proxy geometry by intersecting slicing planes with the volume's bounding box, then mapping the resulting polygons using 3D texture coordinates [S1]. It differs from sibling methods like [View-Aligned Slicing with 3D Textures](870-view-aligned-slicing-with-3d-textures.md) by computing slice geometry dynamically based on the viewing direction rather than using pre-aligned planes, and from [Object Aligned Planes Volume Rendering](11411-object-aligned-planes-volume-rendering.md) by relying on 3D texture lookups instead of pre-extracted 2D textures [S1, S2].
++Slice Polygon Computation (3D Texture) is a texture-based volume rendering method that generates proxy geometry by intersecting slicing planes with the volume's bounding box, then mapping the resulting polygons using 3D texture coordinates [S1]. It differs from the alternative approach of storing data as 2D texture slices, which uses pre-aligned rectangular proxy polygons, by dynamically computing arbitrary slice polygons and relying on 3D texture lookups [S1].
+ 
+ ## How it works
+@@ -19,135 +17,97 @@
+ 
+ **Steps:**
+-1.  **Intersect Slicing Planes with Bounding Box:** Calculate the intersection points between the slicing planes and the edges of the volume's bounding box [S1].
+-2.  **Sort Vertices:** Sort the resulting intersection vertices in a clockwise or counterclockwise direction around their center to form a valid polygon [S1].
+-3.  **Calculate Texture Coordinates:** For each vertex of the generated polygon, calculate the corresponding 3D texture coordinate [S1]. This can be done on the CPU, in a vertex program, or via automatic texture-coordinate generation [S1].
+-4.  **Render:** Pass the vertex arrays to the graphics library to render the textured polygons [S1].
++1. **Intersect Slicing Planes with Bounding Box:** Calculate the intersection points between the slicing planes and the edges of the volume's bounding box [S1].
++2. **Sort Vertices:** Sort the resulting intersection vertices in a clockwise or counterclockwise direction around their center to form a valid polygon [S1].
++3. **Calculate Texture Coordinates:** For each vertex of the generated polygon, calculate the corresponding 3D texture coordinate [S1]. This can be done on the CPU, in a vertex program, or via automatic texture-coordinate generation [S1].
++4. **Render:** Pass the vertex arrays to the graphics library to render the textured polygons [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_slice_polygons(volume_bounding_box, slicing_planes, volume_texture):
+-    """
+-    Generates proxy geometry for volume rendering using 3D textures.
+-    
+-    Args:
+-        volume_bounding_box: The 3D bounding box of the volume.
+-        slicing_planes: A list of parallel planes defined by normal and distance.
+-        volume_texture: The 3D texture object containing the volume data.
+-        
+-    Returns:
+-        A list of polygons, where each polygon is a list of vertices.
+-        Each vertex is a tuple (position_3d, texture_coord_3d).
+-    """
+-    polygons = []
+-    
+-    for plane in slicing_planes:
+-        # Step 1: Intersect slicing plane with the edges of the volume bounding box
+-        intersection_points = []
+-        for edge in volume_bounding_box.edges:
+-            # Calculate intersection of line segment (edge) with plane
+-            point = intersect_line_plane(edge.start, edge.end, plane)
+-            if point is not None:
+-                intersection_points.append(point)
+-        
+-        # Step 2: Sort the resulting vertices in a clockwise or counterclockwise direction around their center
+-        center = compute_center(intersection_points)
+-        sorted_points = sort_clockwise_around_center(intersection_points, center, plane.normal)
+-        
+-        # Step 3: Calculate the corresponding 3D texture coordinate for each vertex
+-        vertices = []
+-        for point in sorted_points:
+-            # Map the 3D position to 3D texture coordinates
+-            # This depends on the volume's spatial extent and texture dimensions
+-            tex_coord = map_position_to_texture_coord(point, volume_bounding_box, volume_texture.dimensions)
+-            vertices.append((point, tex_coord))
+-        
+-        polygons.append(vertices)
+-        
+-    return polygons
++import math
+ 
+-def intersect_line_plane(p1, p2, plane):
+-    """
+-    Computes the intersection of a line segment (p1, p2) with a plane.
+-    Returns the intersection point if it lies within the segment, else None.
+-    """
+-    # Vector from p1 to p2
++class Vector3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __sub__(self, o): return Vector3(self.x-o.x, self.y-o.y, self.z-o.z)
++    def __add__(self, o): return Vector3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __mul__(self, s): return Vector3(self.x*s, self.y*s, self.z*s)
++    def dot(self, o): return self.x*o.x + self.y*o.y + self.z*o.z
++    def cross(self, o): return Vector3(self.y*o.z-self.z*o.y, self.z*o.x-self.x*o.z, self.x*o.y-self.y*o.x)
++    def length(self): return (self.x**2 + self.y**2 + self.z**2)**0.5
++    def normalize(self): l = self.length(); return Vector3(self.x/l, self.y/l, self.z/l) if l > 1e-9 else Vector3(0,0,0)
++
++def intersect_line_plane(p1, p2, plane_p0, plane_normal):
+     line_vec = p2 - p1
+-    # Vector from p1 to a point on the plane (e.g., plane origin)
+-    # Plane is defined by normal n and distance d from origin, or point P0 and normal n
+-    # Let's assume plane has a point P0 and normal n
+-    # Vector from P0 to p1
+-    p1_to_p0 = p1 - plane.p0
+-    # Dot product of line_vec and plane normal
+-    denom = dot(line_vec, plane.normal)
+-    
+-    if abs(denom) < 1e-9:
+-        # Line is parallel to plane
+-        return None
+-    
+-    # Distance t along the line to the intersection
+-    t = -dot(p1_to_p0, plane.normal) / denom
+-    
+-    if 0 <= t <= 1:
+-        return p1 + t * line_vec
+-    else:
+-        return None
++    denom = line_vec.dot(plane_normal)
++    if abs(denom) < 1e-9: return None
++    t = (plane_p0 - p1).dot(plane_normal) / denom
++    if 0 <= t <= 1: return p1 + line_vec * t
++    return None
+ 
+ def compute_center(points):
+-    """Computes the centroid of a list of 3D points."""
+-    sum_pos = sum(points, start=Vector3(0, 0, 0))
+-    return sum_pos / len(points)
++    if not points: return Vector3(0, 0, 0)
++    s = Vector3(0, 0, 0)
++    for p in points: s = s + p
++    return s * (1.0 / len(points))
+ 
+ def sort_clockwise_around_center(points, center, normal):
+-    """
+-    Sorts points in a clockwise direction around the center, projected onto the plane.
+-    """
+-    # Project points onto the plane to get 2D coordinates
+-    # Choose a basis for the plane (u, v) orthogonal to normal
+-    u, v = create_orthonormal_basis(normal)
+-    
+-    projected_points = []
++    if len(points) <= 2: return points
++    # Create orthonormal basis for the plane
++    ref = Vector3(0, 1, 0) if abs(normal.y) < 0.9 else Vector3(1, 0, 0)
++    u = normal.cross(ref).normalize()
++    v = u.cross(normal)
++    projected = []
+     for p in points:
+         vec = p - center
+-        u_coord = dot(vec, u)
+-        v_coord = dot(vec, v)
+-        projected_points.append((u_coord, v_coord, p))
+-    
+-    # Sort by angle
+-    projected_points.sort(key=lambda pt: math.atan2(pt[1], pt[0]))
+-    
+-    # Return original 3D points in sorted order
+-    return [pt[2] for pt in projected_points]
++        projected.append((vec.dot(u), vec.dot(v), p))
++    # Sort by angle using atan2 (pseudo-angle can be used to avoid trig [G])
++    projected.sort(key=lambda pt: math.atan2(pt[1], pt[0]))
++    return [pt[2] for pt in projected]
+ 
+-def create_orthonormal_basis(normal):
+-    """Creates two orthonormal vectors u and v orthogonal to the given normal."""
+-    # Simple heuristic: if normal is not parallel to Y, use Y as reference
+-    if abs(normal.y) < 0.9:
+-        ref = Vector3(0, 1, 0)
+-    else:
+-        ref = Vector3(1, 0, 0)
+-    
+-    u = normalize(cross(normal, ref))
+-    v = cross(u, normal)
+-    return u, v
++def map_position_to_texture_coord(position, bbox_min, bbox_max):
++    dx = bbox_max.x - bbox_min.x
++    dy = bbox_max.y - bbox_min.y
++    dz = bbox_max.z - bbox_min.z
++    if dx == 0 or dy == 0 or dz == 0: return (0.0, 0.0, 0.0) # Guard against degenerate bounding box [G]
++    return ((position.x - bbox_min.x) / dx, (position.y - bbox_min.y) / dy, (position.z - bbox_min.z) / dz)
+ 
+-def map_position_to_texture_coord(position, bounding_box, tex_dims):
+-    """
+-    Maps a 3D position in world space to 3D texture coordinates [0, 1].
+-    """
+-    # Normalize position relative to bounding box
+-    x = (position.x - bounding_box.min.x) / (bounding_box.max.x - bounding_box.min.x)
+-    y = (position.y - bounding_box.min.y) / (bounding_box.max.y - bounding_box.min.y)
+-    z = (position.z - bounding_box.min.z) / (bounding_box.max.z - bounding_box.min.z)
+-    
+-    return (x, y, z)
++def compute_slice_polygons(volume_bbox_min, volume_bbox_max, slicing_planes):
++    polygons = []
++    # Source does not specify exact edge enumeration; standard 12 bounding box edges used [G]
++    edges = [
++        (volume_bbox_min, Vector3(volume_bbox_max.x, volume_bbox_min.y, volume_bbox_min.z)),
++        (Vector3(volume_bbox_max.x, volume_bbox_min.y, volume_bbox_min.z), volume_bbox_max),
++        (volume_bbox_min, Vector3(volume_bbox_min.x, volume_bbox_max.y, volume_bbox_min.z)),
++        (Vector3(volume_bbox_min.x, volume_bbox_max.y, volume_bbox_min.z), volume_bbox_max),
++        (volume_bbox_min, Vector3(volume_bbox_min.x, volume_bbox_min.y, volume_bbox_max.z)),
++        (Vector3(volume_bbox_min.x, volume_bbox_min.y, volume_bbox_max.z), volume_bbox_max),
++        (Vector3(volume_bbox_max.x, volume_bbox_min.y, volume_bbox_min.z), Vector3(volume_bbox_max.x, volume_bbox_max.y, volume_bbox_min.z)),
++        (Vector3(volume_bbox_min.x, volume_bbox_max.y, volume_bbox_min.z), Vector3(volume_bbox_min.x, volume_bbox_max.y, volume_bbox_max.z)),
++        (Vector3(volume_bbox_min.x, volume_bbox_min.y, volume_bbox_max.z), Vector3(volume_bbox_max.x, volume_bbox_min.y, volume_bbox_max.z)),
++        (Vector3(volume_bbox_max.x, volume_bbox_min.y, volume_bbox_max.z), Vector3(volume_bbox_max.x, volume_bbox_max.y, volume_bbox_max.z)),
++        (Vector3(volume_bbox_min.x, volume_bbox_max.y, volume_bbox_max.z), Vector3(volume_bbox_max.x, volume_bbox_max.y, volume_bbox_max.z)),
++        (Vector3(volume_bbox_max.x, volume_bbox_max.y, volume_bbox_min.z), Vector3(volume_bbox_max.x, volume_bbox_max.y, volume_bbox_max.z))
++    ]
++    for plane in slicing_planes:
++        intersection_points = []
++        for p1, p2 in edges:
++            pt = intersect_line_plane(p1, p2, plane.p0, plane.normal)
++            if pt is not None: intersection_points.append(pt)
++        center = compute_center(intersection_points)
++        sorted_pts = sort_clockwise_around_center(intersection_points, center, plane.normal)
++        vertices = []
++        for pt in sorted_pts:
++            tex = map_position_to_texture_coord(pt, volume_bbox_min, volume_bbox_max)
++            vertices.append((pt, tex))
++        polygons.append(vertices)
++    return polygons
+ ```
+ 
+ **Parameters:**
+-- Slicing plane spacing: Determines the number of slices. Not given in the sources.
+-- Bounding box: Defines the spatial extent of the volume.
++- Slicing plane spacing: Determines the number of slices [G].
++- Bounding box: Defines the spatial extent of the volume [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ - Precision issues in clipping: The brute-force approach of generating a large triangle and clipping it to the data set can suffer from precision issues when generating texture coordinates for clipped triangles [S2]. The slice polygon computation method avoids this by intersecting directly with the bounding box edges [S1].
+-- Degenerate input: If a slicing plane does not intersect the bounding box, no vertices are generated, and the slice is skipped [S1].
++- Degenerate input: If a slicing plane does not intersect the bounding box, no vertices are generated, and the slice is skipped [G].
+ 
+ ## Subtopics
+@@ -162,7 +122,7 @@
+ - **Scaling:** Not given in the sources.
+ - **Strengths:** Avoids precision issues associated with polygon clipping [S2].
+-- **Limitations:** Requires 3D texture support [S1].
++- **Limitations:** Not given in the sources.
+ - **When to use:** When using 3D textures and dynamic slicing planes are required [S1].
+-- **When not to use:** When 3D texture support is unavailable or when pre-extracted 2D textures are preferred [S1].
++- **When not to use:** Not given in the sources.
+ 
+ ## Background

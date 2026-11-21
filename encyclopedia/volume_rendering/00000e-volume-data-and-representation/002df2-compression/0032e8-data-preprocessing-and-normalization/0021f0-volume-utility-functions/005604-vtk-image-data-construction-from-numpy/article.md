@@ -1,0 +1,197 @@
+# VTK Image Data Construction from NumPy
+
+Also called: NIfTI Loading, NumPy to VTK Image Data Conversion, Volume Data Import and Spacing Configuration, vtkImageImportFromArray
+
+## Overview
+This method imports volume data from NumPy arrays or NIfTI files into VTK, ensuring correct memory layout, data spacing, and origin configuration for normalized volume rendering, particularly for Diffusion Weighted Imaging (DWI) images [S2, unofficial]. It differs from generic array conversion by explicitly handling the geometric metadata (spacing/origin) required to prevent visual artifacts such as volumes appearing too thin [S2, unofficial].
+
+## How it works
+**Inputs:**
+1.  Source data: A NumPy array (from memory or loaded from NIfTI/HDR files).
+2.  Metadata: Spacing tuple $(s_x, s_y, s_z)$ and Origin tuple $(o_x, o_y, o_z)$. For NIfTI, these are derived from the header [S2, unofficial].
+
+**Outputs:**
+1.  A `vtkImageData` object containing the volume data as scalars, ready for rendering.
+
+**Data Structures:**
+*   **NumPy Array:** The source volume data. Must be contiguous.
+*   **VTK Array:** A `vtkUnsignedCharArray` or `vtkUnsignedShortArray` holding the flattened data.
+*   **vtkImageData:** The VTK object representing the structured volume.
+
+**Steps:**
+
+1.  **Load and Preprocess Data:**
+    *   If loading from NIfTI:
+        *   Load the NIfTI image using a library like `NiftiImage` [S2, unofficial].
+        *   Check the data shape:
+            *   If 4D (multiple volumes): Sum the volumes along the 4th dimension. Let $D$ be the data array. Initialize $A = 0$. For $i$ from $0$ to $N-1$ (where $N$ is the number of volumes): $A = A + D[i]$ [S2, unofficial].
+            *   If 5D (tensor field): Sum the first component of each volume. Initialize $A = 0$. For $i$ from $0$ to $N-1$: $A = A + D[i][0]$ [S2, unofficial].
+        *   Extract spacing from header: $s_x = \text{header}['\text{pixdim}'][1]$, $s_y = \text{header}['\text{pixdim}'][2]$, $s_z = \text{header}['\text{pixdim}'][3]$ [S2, unofficial].
+        *   Extract origin from header: $o_x = \text{header}['\text{dim}'][0] \times \text{header}['\text{pixdim}'][0]$, $o_y = \text{header}['\text{dim}'][1] \times \text{header}['\text{pixdim}'][1]$, $o_z = \text{header}['\text{dim}'][2] \times \text{header}['\text{pixdim}'][2]$ [S2, unofficial].
+    *   If loading from HDR:
+        *   Read shape from the first line of the `.hdr` file.
+        *   Read raw bytes from the corresponding `.dat` file.
+        *   Reshape into a NumPy array with dimensions $(z, y, x)$ using `uint8` [S2, unofficial].
+    *   If loading from a NumPy array directly: Use the provided spacing and origin.
+
+2.  **Flatten Data:**
+    *   Flatten the NumPy array using Fortran order ('F') to ensure correct memory layout for VTK [S1, S2, unofficial].
+    *   Let $F$ be the flattened array.
+
+3.  **Convert Data Type (Optional but Recommended for NIfTI):**
+    *   If the source data is integer and needs to be unsigned short for VTK compatibility, convert it. This step ensures the data fits within the expected VTK array type [S2, unofficial].
+
+4.  **Create VTK Array:**
+    *   Convert the flattened NumPy array $F$ to a VTK array object.
+    *   Let $V$ be the VTK array.
+    *   Set the data: $V.\text{SetArray}(F)$ [S2, unofficial].
+    *   If converting integers to unsigned shorts, enable the conversion flag: $V.\text{ConvertIntToUnsignedShortOn}()$ [S2, unofficial].
+
+5.  **Create vtkImageData:**
+    *   Create a new `vtkImageData` object $I$.
+    *   Set dimensions based on the original array shape $(D_x, D_y, D_z)$: $I.\text{SetDimensions}(D_x, D_y, D_z)$ [S1, S2, unofficial].
+    *   Set spacing: $I.\text{SetSpacing}(s_x, s_y, s_z)$ [S1, S2, unofficial].
+    *   Set origin: $I.\text{SetOrigin}(o_x, o_y, o_z)$ [S1, S2, unofficial].
+
+6.  **Attach Data:**
+    *   Attach the VTK array $V$ as scalars to the point data of the image: $I.\text{GetPointData}().\text{SetScalars}(V)$ [S1, S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import vtk
+
+def numpy_to_vtk_image_data(array, spacing, origin, data_type=np.uint8):
+    """
+    Convert a NumPy array to a VTK Image Data object.
+    
+    Args:
+        array: NumPy array of shape (x, y, z) or (x, y, z, c) for RGB.
+        spacing: Tuple (sx, sy, sz) for voxel dimensions.
+        origin: Tuple (ox, oy, oz) for volume origin.
+        data_type: VTK data type constant (e.g., vtk.VTK_UNSIGNED_SHORT).
+        
+    Returns:
+        vtkImageData object.
+    """
+    # Step 1: Flatten in Fortran order for correct memory layout
+    flat_array = array.flatten(order='F')
+    
+    # Step 2: Convert to VTK array
+    # Using numpy_support to convert numpy array to VTK array
+    from vtk.util import numpy_support
+    
+    # Determine VTK type based on input data type
+    if data_type == np.uint8:
+        vtk_type = vtk.VTK_UNSIGNED_CHAR
+    elif data_type == np.uint16:
+        vtk_type = vtk.VTK_UNSIGNED_SHORT
+    else:
+        # Default to unsigned short for safety with integer data
+        vtk_type = vtk.VTK_UNSIGNED_SHORT
+        # Note: If source is int, conversion might be needed. 
+        # For this implementation, we assume the array is already compatible 
+        # or we cast it. [G] Casting to uint16 if source is int16 to prevent overflow.
+        if array.dtype == np.int16:
+            flat_array = flat_array.astype(np.uint16)
+            
+    vtk_array = numpy_support.numpy_to_vtk(flat_array, deep=True, array_type=vtk_type)
+    
+    # If the original data was integer and we need to ensure unsigned short conversion
+    # as per specific NIfTI handling notes, we might need to set flags if using vtkImageImport
+    # However, numpy_to_vtk handles the conversion directly.
+    # For cases using vtkImageImportFromArray directly:
+    # img = vtk.vtkImageImportFromArray()
+    # img.SetArray(vtk_array)
+    # img.ConvertIntToUnsignedShortOn() # If applicable
+    
+    # Step 3: Create vtkImageData
+    img = vtk.vtkImageData()
+    
+    # Set dimensions
+    # Note: array.shape is (x, y, z) for standard numpy arrays
+    img.SetDimensions(array.shape[0], array.shape[1], array.shape[2])
+    
+    # Set spacing and origin
+    img.SetSpacing(spacing[0], spacing[1], spacing[2])
+    img.SetOrigin(origin[0], origin[1], origin[2])
+    
+    # Step 4: Attach scalars
+    img.GetPointData().SetScalars(vtk_array)
+    
+    return img
+
+def load_nifti_to_vtk(nifti_path):
+    """
+    Load a NIfTI file and convert to VTK Image Data.
+    Handles 4D (sum volumes) and 5D (sum first component) cases.
+    """
+    # [G] Assuming nibabel is available for NIfTI loading
+    import nibabel as nib
+    
+    nii = nib.load(nifti_path)
+    data = nii.get_fdata()
+    header = nii.header
+    
+    # Extract spacing and origin from header
+    # pixdim[0] is unused, pixdim[1:4] are x, y, z spacing
+    spacing = (header['pixdim'][1], header['pixdim'][2], header['pixdim'][3])
+    
+    # Origin calculation as per notes
+    # dim[0] is number of dimensions, dim[1:4] are x, y, z sizes
+    # Note: The note says header['dim'][0]*header['pixdim'][0]
+    # This seems to imply a specific header interpretation. 
+    # Standard NIfTI origin is often (0,0,0) or derived from qform/sform.
+    # We follow the note's formula strictly.
+    origin = (
+        header['dim'][0] * header['pixdim'][0],
+        header['dim'][1] * header['pixdim'][1],
+        header['dim'][2] * header['pixdim'][2]
+    )
+    
+    # Handle 4D and 5D data
+    if data.ndim == 4:
+        # Sum volumes
+        alldata = np.zeros(data.shape[:3], dtype=data.dtype)
+        for i in range(data.shape[3]):
+            alldata = np.add(alldata, data[..., i])
+        data = alldata
+    elif data.ndim == 5:
+        # Sum first component of each volume
+        alldata = np.zeros(data.shape[:3], dtype=data.dtype)
+        for i in range(data.shape[4]):
+            alldata = np.add(alldata, data[..., i, 0])
+        data = alldata
+            
+    # Convert to VTK
+    # Note: nibabel returns float64. We need to convert to integer for VTK scalar storage
+    # typically. [G] Scaling and casting to uint16 is common for medical images.
+    # Assuming the data is already in a suitable range or we normalize.
+    # For this method, we assume the data is ready for direct conversion or 
+    # the caller handles normalization.
+    
+    return numpy_to_vtk_image_data(data, spacing, origin, data_type=np.uint16)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Incorrect Spacing/Origin:** If spacing and origin are not set correctly, the volume may appear distorted (e.g., too thin). Pre-resampling was previously used to fix this, but setting spacing/origin correctly is the preferred solution [S2, unofficial].
+*   **Memory Layout:** Using C-order ('C') for flattening will result in incorrect voxel mapping in VTK. Fortran order ('F') is required [S1, S2, unofficial].
+*   **Data Type Mismatch:** Ensure the VTK array type matches the data range. Converting integers to unsigned shorts requires care to avoid overflow or sign errors [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, for flattening and conversion.
+*   **Memory Complexity:** $O(N)$ for the flattened array and VTK array.
+*   **Strengths:** Correctly handles geometric metadata, preventing rendering artifacts. Supports various input formats (NumPy, NIfTI, HDR).
+*   **Limitations:** Requires manual handling of 4D/5D data summation. Dependent on external libraries for NIfTI/HDR loading.
+*   **When to Use:** When importing volume data into VTK for rendering, especially when geometric accuracy is critical.
+*   **When Not to Use:** When working with data that does not require geometric metadata or when using a different rendering framework.
+
+## Background
+This method is derived from implementations in medical imaging viewers and volume rendering tools, such as `medviewer` and `PyVolRender` [S1, S2, unofficial]. It addresses the specific needs of DWI and NIfTI data, which often require summing multiple volumes or components to create a single scalar volume for rendering.
+
+## Sources
+[S1] caitlin-leonard/medviewer, https://github.com/caitlin-leonard/medviewer, fetched 2026-10-27 (unofficial)
+[S2] chapering/PyVolRender, https://github.com/chapering/PyVolRender, fetched 2026-10-27 (unofficial)

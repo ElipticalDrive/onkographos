@@ -1,0 +1,356 @@
+c++ - Fast SSE ray - 4 triangle intersection - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+Get early access and see previews of new features.
+Learn more about Labs
+Fast SSE ray - 4 triangle intersection
+Ask Question
+Asked
+6 years, 8 months ago
+Modified
+6 years, 8 months ago
+Viewed
+2k times
+4
+I am currently working on a Path Tracer, and i am looking for ways to optimize my ray-triangle intersections. I currently use the following sse4 implementation of Moller-Trumbore algorithm:
+```
+bool Ray::intersectTriangle(const Triangle tri, float& result) const
+{
+    __m128 q = _mm_cross_ps(m_directionM128, tri.e2);
+
+    float a = _mm_dp_ps(tri.e1, q, dotProductMask).m128_f32[0];
+
+    if (a > negativeEpsilon && a < positiveEpsilon)
+        return false;
+
+    float f = 1.0f / a;
+
+    __m128 s = _mm_sub_ps(m_originM128, tri.v0);
+    float u = f * _mm_dp_ps(s, q, dotProductMask).m128_f32[0];
+
+    if (u < 0.0f)
+        return false;
+
+    __m128 r = _mm_cross_ps(s, tri.e1);
+    float v = f * _mm_dp_ps(m_directionM128, r, dotProductMask).m128_f32[0];
+
+    if (v < 0.0f || (u + v > 1.0f))
+        return false;
+
+    float t = f * _mm_dp_ps(tri.e2, r, dotProductMask).m128_f32[0];
+    if (t < 0.0f || t > m_length)
+        return false;
+
+    result = t;
+
+    return true;
+}
+```
+(If someone see a way to optimize it let me know).
+Then i've read that it is possible to perform intersection tests on 4 triangles simultaneously using SIMD intructions. But how to do that ? I don't see how could it be possible to implement it in a way that will be more efficient than my sequential fashion.
+Here the small code concerned of my renderer.
+c++
+raytracing
+Share
+Improve this question
+Follow
+edited Aug 9, 2017 at 23:48
+StudenteChamp
+asked Aug 9, 2017 at 20:07
+StudenteChampStudenteChamp
+18722 silver badges1212 bronze badges
+2
+have you looked at embree? embree.github.io
+– Roman Kolesnikov
+Aug 9, 2017 at 20:13
+Thanks ! I will look at it.
+– StudenteChamp
+Aug 10, 2017 at 0:07
+Add a comment
+|
+2 Answers
+2
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+6
+It is possible to do up to 16 triangles with AVX512, 8 with AVX2, and 4 with SSE. The trick though, is to ensure the data is in SOA format. The other trick is to not 'return false' at any point (just filter the results at the end). So you triangle input would look something like:
+```
+  struct Tri {
+    __m256 e1[3];
+    __m256 e2[3];
+    __m256 v0[3];
+  };
+```
+And your ray would look like:
+```
+  struct Ray {
+    __m256 dir[3];
+    __m256 pos[3];
+  };
+```
+The maths code then starts to look far nicer (be aware the _mm_dp_ps is not the fastest function ever written - and also be aware that accessing the internal implementation of the __m128/__m256/__m512 types is not portable).
+```
+  #define or8f _mm256_or_ps
+  #define mul _mm256_mul_ps
+  #define fmsub _mm256_fmsub_ps
+  #define fmadd _mm256_fmadd_ps
+
+  void cross(__m256 result[3], const __m256 a[3], const __m256 b[3])
+  {
+    result[0] = fmsub(a[1], b[2], mul(b[1], a[2]));
+    result[1] = fmsub(a[2], b[0], mul(b[2], a[0]));
+    result[2] = fmsub(a[0], b[1], mul(b[0], a[1]));
+  }
+  __m256 dot(const __m256 a[3], const __m256 b[3])
+  {
+    return fmadd(a[2], b[2], fmadd(a[1], b[1], mul(a[0], b[0])));
+  }
+```
+You basically have 4 conditions in the method:
+```
+if (a > negativeEpsilon && a < positiveEpsilon)
+
+if (u < 0.0f)
+
+if (v < 0.0f || (u + v > 1.0f))
+
+if (t < 0.0f || t > m_length)
+```
+If any of those conditions are true, then there is no intersection. That basically requires a little refactoring (in pseudo code)
+```
+__m256 condition0 = (a > negativeEpsilon && a < positiveEpsilon);
+
+__m256 condition1 = (u < 0.0f)
+
+__m256 condition2 = (v < 0.0f || (u + v > 1.0f))
+
+__m256 condition3 = (t < 0.0f || t > m_length)
+
+// combine all conditions that can cause failure.
+__m256 failed = or8f(or8f(condition0, condition1), or8f(condition2, condition3));
+```
+So finally, if an intersection occurred, the result will be t. If an intersection DID NOT occur, then we need to set the result to something wrong (a negative number is possibly a good choice in this case!)
+```
+// if(failed) return -1;
+// else return t;
+return _mm256_blendv_ps(t, _mm256_set1_ps(-1.0f), failed);
+```
+Whilst the final code may look a bit nasty, it will end up being significantly faster than your approach. The devil is in the details though....
+One major problem with this approach is that you have a choice between testing 1 ray against 8 triangles, or testing 8 rays against 1 triangle. For primarily rays this probably isn't a big deal. For secondary rays that have a habit of scattering in different directions), things can start to get a bit annoying. There's a good chance most of the ray tracing code will end up following a pattern of: test -> sort -> batch -> test -> sort -> batch
+If you don't follow that pattern, you're pretty much never going to get the most out of the vector units. (Thankfully the compress/expand instructions in AVX512 help out with this quite a lot!)
+Share
+Improve this answer
+Follow
+edited Aug 11, 2017 at 1:41
+answered Aug 10, 2017 at 1:04
+robtheblokerobthebloke
+9,43199 silver badges1212 bronze badges
+2
+Thank you very much !. I agree shooting 8 rays against 1 triangle will be an improvement since i can also benefit of mini frustums culling for primary rays. Batch and after reorganize ray results from different paths seems quite challenging :)
+– StudenteChamp
+Aug 10, 2017 at 2:20
+For the last line i think the two first operand should be swapped. So : _mm256_blendv_ps(t, _mm256_set1_ps(-1.0f), failed);
+– StudenteChamp
+Aug 10, 2017 at 23:17
+Add a comment
+|
+4
+I ended with the following working code
+```
+struct PackedTriangles
+{
+    __m256 e1[3];
+    __m256 e2[3];
+    __m256 v0[3];
+    __m256 inactiveMask; // Required. We cant always have 8 triangles per packet.
+};
+
+struct PackedIntersectionResult
+{
+    float t = Math::infinity<float>();
+    int idx;
+};
+
+struct PackedRay
+{
+    __m256 m_origin[3];
+    __m256 m_direction[3];
+    __m256 m_length;
+
+    bool intersect(const PackedTriangles& packedTris, PackedIntersectionResult& result) const;
+};
+
+#define or8f _mm256_or_ps
+#define mul _mm256_mul_ps
+#define fmsub _mm256_fmsub_ps
+#define fmadd _mm256_fmadd_ps
+#define cmp _mm256_cmp_ps
+#define div _mm256_div_ps
+
+void avx_multi_cross(__m256 result[3], const __m256 a[3], const __m256 b[3])
+{
+    result[0] = fmsub(a[1], b[2], mul(b[1], a[2]));
+    result[1] = fmsub(a[2], b[0], mul(b[2], a[0]));
+    result[2] = fmsub(a[0], b[1], mul(b[0], a[1]));
+}
+
+__m256 avx_multi_dot(const __m256 a[3], const __m256 b[3])
+{
+    return fmadd(a[2], b[2], fmadd(a[1], b[1], mul(a[0], b[0])));
+}
+
+void avx_multi_sub(__m256 result[3], const __m256 a[3], const __m256 b[3])
+{
+    result[0] = _mm256_sub_ps(a[0], b[0]);
+    result[1] = _mm256_sub_ps(a[1], b[1]);
+    result[2] = _mm256_sub_ps(a[2], b[2]);
+}
+
+const __m256 oneM256 = _mm256_set1_ps(1.0f);
+const __m256 minusOneM256 = _mm256_set1_ps(-1.0f);
+const __m256 positiveEpsilonM256 = _mm256_set1_ps(1e-6f);
+const __m256 negativeEpsilonM256 = _mm256_set1_ps(-1e-6f);
+const __m256 zeroM256 = _mm256_set1_ps(0.0f);
+
+bool PackedRay::intersect(const PackedTriangles& packedTris, PackedIntersectionResult& result) const
+{
+    __m256 q[3];
+    avx_multi_cross(q, m_direction, packedTris.e2);
+
+    __m256 a = avx_multi_dot(packedTris.e1, q);
+
+    __m256 f = div(oneM256, a);
+
+    __m256 s[3];
+    avx_multi_sub(s, m_origin, packedTris.v0);
+
+    __m256 u = mul(f, avx_multi_dot(s, q));
+
+    __m256 r[3];
+    avx_multi_cross(r, s, packedTris.e1);
+
+    __m256 v = mul(f, avx_multi_dot(m_direction, r));
+
+    __m256 t = mul(f, avx_multi_dot(packedTris.e2, r));
+
+    // Failure conditions
+    __m256 failed = _mm256_and_ps(
+        cmp(a, negativeEpsilonM256, _CMP_GT_OQ),
+        cmp(a, positiveEpsilonM256, _CMP_LT_OQ)
+    );
+
+    failed = or8f(failed, cmp(u, zeroM256, _CMP_LT_OQ));
+    failed = or8f(failed, cmp(v, zeroM256, _CMP_LT_OQ));
+    failed = or8f(failed, cmp(_mm256_add_ps(u, v), oneM256, _CMP_GT_OQ));
+    failed = or8f(failed, cmp(t, zeroM256, _CMP_LT_OQ));
+    failed = or8f(failed, cmp(t, m_length, _CMP_GT_OQ));
+    failed = or8f(failed, packedTris.inactiveMask);
+
+    __m256 tResults = _mm256_blendv_ps(t, minusOneM256, failed);
+
+    int mask = _mm256_movemask_ps(tResults);
+    if (mask != 0xFF)
+    {
+        // There is at least one intersection
+        result.idx = -1;
+
+        float* ptr = (float*)&tResults;
+        for (int i = 0; i < 8; ++i)
+        {
+            if (ptr[i] >= 0.0f && ptr[i] < result.t)
+            {
+                result.t = ptr[i];
+                result.idx = i;
+            }
+        }
+
+        return result.idx != -1;
+    }
+
+    return false;
+}
+```
+RESULTS
+The results are awesome. For a 100k triangle scene i have a 84% speedup !!. For a very small scene(20 triangles) i have a performance loss of 13%. But it's ok because these one are not usual.
+Share
+Improve this answer
+Follow
+edited Aug 12, 2017 at 2:53
+answered Aug 11, 2017 at 2:59
+StudenteChampStudenteChamp
+18722 silver badges1212 bronze badges
+Add a comment
+|
+Not the answer you're looking for? Browse other questions tagged
+c++
+raytracing
+or ask your own question.
+The Overflow Blog
+Climbing the GenAI decision tree
+sponsored post
+Diverting more backdoor disasters
+Featured on Meta
+New Focus Styles & Updated Styling for Button Groups
+Upcoming initiatives on Stack Overflow and across the Stack Exchange network
+Staging Ground is coming back and moving out of beta
+Temporary policy: Generative AI (e.g., ChatGPT) is banned
+Pausing the 1-rep voting experiment on Stack Overflow: reflecting on the...
+Visit chat
+Related
+22
+Ray-box Intersection Theory
+0
+Ray-Plane Intersection
+26
+How to do ray plane intersection?
+0
+Calculate if a rectangle is intersected by a ray in c++ 3D
+7
+Ray-Triangle Intersection C++
+4
+Ray intersection with a bundle of SIMD-packed triangles (ray tracing)
+0
+Compiling triangle intersection code?
+3
+Ray/Rectangle intersection in 3D space
+3
+Fast Ray and Polygon Intersection
+2
+Efficient line segment-triangle intersection
+Hot Network Questions
+Why do self cleaning windows use titanium dioxide (specifically in nanoparticle form)?
+What is the name of the tense referred to in a conditional clause relative to a subjunctive sentence?
+Security implications of increasing sudo timeout in terminal
+Is 'jeden Tag' at the end of a sentence wrong?
+Did Benny Morris ever say all Palestinians are animals and should be locked up in a cage?
+Where to stop in Da Capo al fine
+Dyslexic friendly packages in latex
+Can falsehood be measured? If so, would it be continuous or discrete?
+Is there something between Debug and Release build?
+Are my skin and hair colors believable?
+The last iterations of the floppy drives?
+How to say politely not to doze off during progress meeting?
+False information on Florida Criminal History Report, can I sue the state?
+Can I cascade two different shift register?
+Can I completely omit "of" when speaking quickly?
+How does a wireless charger work if there is no transfer of electrons?
+Maximum number of trailing zeros
+Real-world examples of unweighted directed graphs
+Did Goethe say this quote praising the Prophet Muhammed?
+Choose and snooze
+What can you do at the Thomson station on the Walhalla goldfields railway?
+Why is there increased fear of Russia's attack against Latvia, Lithuania, Estonia after the invasion of Ukraine started?
+Has anyone ever made a quiet floppy drive?
+How can we infallibly know that the Catholic Church is infallible?
+more hot questions
+Question feed
+lang-cpp

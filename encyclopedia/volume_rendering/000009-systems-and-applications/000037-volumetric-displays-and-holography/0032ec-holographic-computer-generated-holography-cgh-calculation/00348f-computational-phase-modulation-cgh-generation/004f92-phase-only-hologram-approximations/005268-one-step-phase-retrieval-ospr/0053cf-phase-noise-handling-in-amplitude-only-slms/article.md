@@ -1,0 +1,150 @@
+# Phase Noise Handling in Amplitude-Only SLMs
+
+Also called: Phase Noise Mitigation in Amplitude-Only SLMs
+
+## Overview
+This method models and mitigates phase noise inherent to liquid crystal amplitude-only Spatial Light Modulators (SLMs) by analyzing the coupling between amplitude modulation and unwanted phase modulation. It establishes a mathematical framework using Jacobi-Anger expansions to separate signal terms from noise terms in the Fourier domain, allowing for the design of grating frequencies that prevent noise overlap with the reconstructed signal. It sets it apart from sibling methods by providing a rigorous analytical derivation of noise spectra based on the specific physical properties of the liquid crystal, rather than relying solely on empirical averaging or iterative phase retrieval.
+
+## How it works
+**Inputs and Outputs**
+- **Input**: The amplitude modulation function $f(x)$ applied to the SLM pixels.
+- **Output**: A derived expression for the wave field at the SLM plane, identifying signal and noise components, and a constraint on the grating phase frequency to avoid aliasing.
+
+**Data Structures**
+- **Amplitude Function**: Represented as a Fourier series $f(x) = \sum_k F_k \cos(kx + \phi_k)$, where $F_k$ are amplitude coefficients and $\phi_k$ are phase coefficients for spatial frequency $k$.
+- **Phase Noise Model**: Unwanted phase modulation is modeled as a second-order polynomial of the amplitude: $\exp(i p_1 f(x) + i p_2 f(x)^2)$, where $p_1$ and $p_2$ are coefficients characterizing the liquid crystal's phase-amplitude coupling.
+
+**Steps**
+1.  **Model the Wave Field**: Define the complex wave field $U(x)$ at the SLM plane as the product of the amplitude modulation and the unwanted phase modulation:
+    $$ U(x) = f(x) e^{i p_1 f(x) + i p_2 f(x)^2} $$
+    [S1]
+
+2.  **Expand Phase Terms**: Apply the Jacobi-Anger expansion, $e^{iz \cos \theta} = \sum_{n=-\infty}^{\infty} i^n J_n(z) e^{in\theta}$, to the exponential terms. Here, $J_n(z)$ is the $n$-th Bessel function of the first kind. [S1]
+
+3.  **Substitute Fourier Series**: Substitute the Fourier series expansion of $f(x)$ into the phase terms. The term $f(x)$ becomes $\sum_k F_k \cos(kx + \phi_k)$. This transforms the wave field into a product of sums involving Bessel functions and complex exponentials. [S1]
+
+4.  **Derive Expanded Expression**: The full expanded wave field is given by:
+    $$ U(x) = f(x) \prod_k \sum_n i^n J_n(p_1 F_k) e^{in(kx + \phi_k)} \prod_{k,l} \sum_n i^n J_n\left(\frac{p_2 F_k F_l}{2}\right) e^{in((k+l)x + \phi_k + \phi_l)} \prod_{k,l} \sum_n i^n J_n\left(\frac{p_2 F_k F_l}{2}\right) e^{in((k-l)x + \phi_k - \phi_l)} $$
+    [S1]
+
+5.  **Approximate for Small Parameters**: In typical experimental conditions, $p_1, p_2, F_k < 1$ and $|n| \ll 1$. Under these conditions, higher-order Bessel functions $J_n(z)$ for $|n| \gg 1$ are negligible. The expression approximates to:
+    $$ U(x) \approx f(x) \prod_k J_0(p_1 F_k) \prod_{k,l} J_0\left(\frac{p_2 F_k F_l}{2}\right) \left[ \sum_m J_1(p_1 F_m) e^{i(mx + \phi_m)} J_1(p_m F_m) + \sum_{m,n} 2i J_1\left(\frac{p_1 F_1 F_2}{2}\right) e^{i((m+n)x + \phi_m + \phi_n)} J_0\left(\frac{p_0 F_0 F_2}{2}\right) + O(p_1 F_k^2) + O(p_2 F_k^2) \right] $$
+    [S1]
+    *Note: The source text contains specific indices in the approximation (Eq. 6) which appear to contain typos (e.g., $J(p_1 F_k)$ instead of $J_1$, mixed indices $F_1, F_2, F_0$). The implementer should use the general structure derived in Step 4 and truncate based on the magnitude of $p_1 F_k$ and $p_2 F_k F_l$.*
+
+6.  **Identify Noise Terms**: Analyze the frequency components of the expanded expression. The signal term is typically the first-order diffraction $e^{ik_{prism}x}$. Noise terms arise from higher-order interactions, such as $e^{ik_{pitch}x - 2ik_{prism}x}$, where $k_{pitch}$ is the wavenumber of the SLM pixel pitch and $k_{prism}$ is the grating frequency. [S1]
+
+7.  **Set Grating Frequency Constraint**: To ensure noise terms do not overlap with the signal term in the Fourier domain, set the grating phase frequency $k_{prism}$ to one-quarter or less of the spatial frequency of the pixel pitch $k_{pitch}$:
+    $$ k_{prism} \le \frac{1}{4} k_{pitch} $$
+    [S1]
+
+**Parameters**
+- **$p_1, p_2$**: Phase noise coefficients. Values are typically $< 1$ in experimental setups. [S1]
+- **$F_k$**: Fourier coefficients of the amplitude pattern. Values are typically $< 1$. [S1]
+- **Grating Frequency**: Must be $\le 1/4$ of the pixel pitch spatial frequency. [S1]
+
+**Edge Cases and Pitfalls**
+- **Noise Overlap**: If the grating phase frequency is set to one-third of the spatial frequency of the pixel pitch, the signal term $e^{ik_{prism}x}$ overlaps with the noise term $e^{ik_{pitch}x - 2ik_{prism}x}$. This makes the noise unfilterable. [S1]
+- **High-Order Terms**: If $p_1 F_k$ or $p_2 F_k F_l$ are not small, the approximation in Step 5 fails, and higher-order Bessel terms must be retained, increasing computational complexity. [S1]
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.special import jv
+
+def calculate_wave_field_spectrum(fourier_coeffs, p1, p2, k_max):
+    """
+    Calculate the spectral components of the wave field at an amplitude-only SLM
+    with phase noise, using the Jacobi-Anger expansion.
+    
+    Parameters:
+    fourier_coeffs: dict mapping spatial frequency k to (amplitude F_k, phase phi_k)
+    p1: Phase noise linear coefficient
+    p2: Phase noise quadratic coefficient
+    k_max: Maximum spatial frequency to consider for truncation
+    
+    Returns:
+    spectrum: dict mapping spatial frequency k to complex amplitude
+    """
+    spectrum = {}
+    
+    # Iterate through all combinations of k and l within k_max
+    ks = list(fourier_coeffs.keys())
+    for k in ks:
+        if abs(k) > k_max:
+            continue
+        F_k, phi_k = fourier_coeffs[k]
+        
+        # Term 1: Linear phase noise contribution (from p1)
+        # Sum over n, but truncate for small p1*F_k
+        # Dominant term is n=1 for first-order diffraction
+        if abs(p1 * F_k) < 1.0: # Small argument approximation
+            # J_1(p1*F_k) is the dominant non-zero term for n=1
+            coeff = jv(1, p1 * F_k)
+            freq = k
+            phase = phi_k
+            spectrum[freq] = spectrum.get(freq, 0) + coeff * np.exp(1j * phase)
+            
+        # Term 2: Quadratic phase noise contribution (from p2)
+        # Involves products of F_k and F_l
+        for l in ks:
+            if abs(l) > k_max:
+                continue
+            F_l, phi_l = fourier_coeffs[l]
+            
+            # Sum over n for (k+l) and (k-l) terms
+            # Dominant term is n=1
+            arg = p2 * F_k * F_l / 2
+            if abs(arg) < 1.0:
+                coeff = jv(1, arg)
+                
+                # Frequency component for (k+l)
+                freq_sum = k + l
+                phase_sum = phi_k + phi_l
+                spectrum[freq_sum] = spectrum.get(freq_sum, 0) + 2j * coeff * np.exp(1j * phase_sum)
+                
+                # Frequency component for (k-l)
+                freq_diff = k - l
+                phase_diff = phi_k - phi_l
+                spectrum[freq_diff] = spectrum.get(freq_diff, 0) + 2j * coeff * np.exp(1j * phase_diff)
+                
+    return spectrum
+
+def check_grating_constraint(k_prism, k_pitch):
+    """
+    Check if the grating frequency avoids noise overlap.
+    
+    Parameters:
+    k_prism: Grating phase frequency
+    k_pitch: Spatial frequency of the pixel pitch
+    
+    Returns:
+    bool: True if constraint is satisfied
+    """
+    return k_prism <= 0.25 * k_pitch
+```
+
+## Subtopics
+
+### One Step Phase Retrieval (OSPR)
+A method to obtain amplitude in a phase-only device by playing back several holograms with randomized object phases in random succession, allowing noise to average out. [Link](14717-one-step-phase-retrieval-ospr.md)
+
+### Diffraction-Engineered Holography
+A broader approach that uses the physical properties of the SLM and optical system to engineer the diffraction pattern, often incorporating phase noise models. [Link](14717-one-step-phase-retrieval-ospr.md)
+
+## Operating characteristics
+- **Time Complexity**: The analytical derivation is $O(1)$, but the numerical evaluation of the spectrum depends on the number of Fourier components $N$. The pseudocode is $O(N^2)$ due to the double loop over $k$ and $l$.
+- **Memory Complexity**: $O(N)$ to store the Fourier coefficients and the resulting spectrum.
+- **Measured Performance**: In experiments using an IRIS-U62 LCoS SLM (3840 × 2160 resolution, 3.6 μm pixel pitch, binned to 7.2 μm effective pitch), the method successfully mitigated phase noise by setting the grating frequency to $\le 1/4$ of the pixel pitch spatial frequency. [S1]
+- **Strengths**: Provides a rigorous physical model for phase noise; allows for precise design of grating frequencies to avoid aliasing; analytical solution avoids iterative computation.
+- **Limitations**: Relies on the assumption that $p_1, p_2, F_k < 1$; higher-order terms may become significant for large amplitude modulations or strong phase coupling; requires accurate characterization of $p_1$ and $p_2$ for the specific SLM.
+- **When to Use**: When using amplitude-only SLMs for holography and phase noise is a significant artifact; when analytical design of the grating frequency is preferred over empirical tuning.
+- **When Not to Use**: When the SLM has negligible phase noise; when the amplitude modulation is large enough to violate the small argument approximation for Bessel functions.
+
+## Background
+This method originates from research into diffraction-engineered holography, specifically addressing the limitations of amplitude-only SLMs in volumetric displays and holographic computer-generated holography. The work was published in *Nature Communications* in 2022 by researchers investigating the depth representation limit of holographic displays. [S1]
+
+## Sources
+[S1] Diffraction-engineered holography: Beyond the depth representation limit of holographic displays, https://www.nature.com/articles/s41467-022-33728-5, fetched 2026-10-29

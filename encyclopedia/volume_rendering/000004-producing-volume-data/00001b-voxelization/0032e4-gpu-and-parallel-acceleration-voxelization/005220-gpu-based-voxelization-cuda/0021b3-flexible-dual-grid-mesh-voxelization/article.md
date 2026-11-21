@@ -1,0 +1,228 @@
+# Flexible Dual Grid Mesh Voxelization
+
+Also called: CUDA Mesh-to-Flexible-Dual-Grid
+
+## Overview
+Flexible Dual Grid Mesh Voxelization determines the set of active sparse voxels intersected by a triangle mesh and solves an enhanced Quadratic Error Function (QEF) to compute dual vertex positions within those voxels [S1, unofficial]. It serves as the foundational occupancy and geometry reconstruction stage for [O-Voxel](3835-o-voxel.md), differing from its sibling [O-Voxel](3835-o-voxel.md) by strictly providing the raw voxel indices, dual vertices, and intersection flags without the higher-level QEF weighting or serialization logic [S1, unofficial]. It builds on [GPU-based Voxelization (CUDA)](14644-gpu-based-voxelization-cuda.md) by implementing the specific dual-grid topology logic on the GPU.
+
+## How it works
+**Inputs:**
+*   `vertices`: Tensor of shape $(N_v, 3)$, dtype `float32`, containing mesh vertex coordinates.
+*   `faces`: Tensor of shape $(N_f, 3)$, dtype `int32` or `long`, containing face indices.
+*   `grid_size`: Tensor of shape $(3)$, dtype `int32`, specifying resolution $(N_x, N_y, N_z)$.
+*   `aabb`: Tensor of shape $(2, 3)$, dtype `float32`, specifying the axis-aligned bounding box $[min, max]$. If not provided, computed from vertices.
+*   `face_weight`: Scalar, weight for the face term in QEF. Default: $1.0$.
+*   `boundary_weight`: Scalar, weight for the boundary term in QEF. Default: $0.2$.
+*   `regularization_weight`: Scalar, weight for the regularization term in QEF. Default: $1e-2$.
+
+**Outputs:**
+*   `voxel_indices`: Tensor of occupied voxel coordinates.
+*   `dual_vertices`: Tensor of shape $(N_{occ}, 3)$, dtype `float32`, containing the solved dual vertex positions.
+*   `intersected`: Tensor of shape $(N_{occ}, 3)$, dtype `bool` (or packed uint8), indicating which edges of the voxel are intersected by the mesh.
+
+**Data Structures:**
+*   **Hashmap**: Used for sparse voxel lookup during occupancy computation.
+    *   `hashmap_keys`: Tensor of size `capacity`. Dtype is `uint32` if total volume $< 2^{32}$, else `uint64`. Initialized to maximum value.
+    *   `hashmap_vals`: Tensor of size `capacity`, dtype `uint32`.
+
+**Algorithm Steps:**
+
+1.  **Input Validation and Normalization**:
+    *   Ensure `vertices` and `faces` are 2D tensors with 3 columns.
+    *   Ensure both are on the same device.
+    *   Convert `vertices` to `float32` contiguous tensor.
+    *   Convert `faces` to `int32` contiguous tensor.
+    *   Handle `voxel_size` and `grid_size` inputs: Convert lists/tuples/ndarrays to `torch` tensors. Ensure metadata is on CPU to avoid implicit CUDA synchronization. Move tensors to the target device.
+
+2.  **AABB and Grid Parameter Derivation**:
+    *   If `aabb` is not provided, compute `min_xyz` and `max_xyz` from `vertices`.
+    *   If `voxel_size` is provided:
+        *   Compute padding: $padding = \lceil \frac{max\_xyz - min\_xyz}{voxel\_size} \rceil \cdot voxel\_size - (max\_xyz - min\_xyz)$.
+        *   Adjust bounds: $min\_xyz \leftarrow min\_xyz - 0.5 \cdot padding$, $max\_xyz \leftarrow max\_xyz + 0.5 \cdot padding$.
+    *   If `grid_size` is provided:
+        *   Compute padding: $padding = \frac{max\_xyz - min\_xyz}{grid\_size - 1}$.
+        *   Adjust bounds: $min\_xyz \leftarrow min\_xyz - 0.5 \cdot padding$, $max\_xyz \leftarrow max\_xyz + 0.5 \cdot padding$.
+    *   Stack into `aabb` tensor.
+    *   If `voxel_size_cpu` is None, compute: $voxel\_size\_cpu = \frac{aabb[1] - aabb[0]}{grid\_size}$.
+    *   If `grid_size_cpu` is None, compute: $grid\_size\_cpu = \text{round}(\frac{aabb[1] - aabb[0]}{voxel\_size})$.
+
+3.  **Coordinate Transformation**:
+    *   Translate vertices relative to AABB: $v' = v - aabb[0]$.
+    *   Extract triangle coordinates: $triangles = vertices[faces]$.
+
+4.  **Occupancy Computation**:
+    *   Invoke CUDA kernel `intersect_occ_cuda` (or CPU equivalent) with `triangles`, `voxel_size_arg`, and `grid_range_arg`.
+    *   `voxel_size_arg`: List of floats from `voxel_size_cpu`.
+    *   `grid_range_arg`: List `[0, 0, 0]` concatenated with `grid_size_cpu` integers.
+    *   This step returns the set of occupied voxel indices.
+
+5.  **QEF Accumulation and Dual Vertex Solve**:
+    *   For each occupied voxel, accumulate contributions from intersecting faces and boundaries to form the QEF matrix and vector.
+    *   The QEF minimizes the distance to the mesh surface. The enhanced QEF includes:
+        *   Face term (weighted by `face_weight`).
+        *   Boundary term (weighted by `boundary_weight`).
+        *   Regularization term (weighted by `regularization_weight`).
+    *   Solve the linear system $A^T A x = A^T b$ for the dual vertex position $x$ within each voxel.
+    *   *Pitfall Handling*: To address CUDA FMA contraction in cross-product based normal computation (which can produce tiny non-zero normals for nearly degenerate triangles, amplified by normalization), use an aligned cross-normalize path [S1, unofficial].
+
+6.  **Sorting and Serialization**:
+    *   Compute sequence ID: $vid = \text{encode\_seq}(voxel\_indices)$.
+    *   Compute mapping: $mapping = \text{argsort}(vid)$.
+    *   Apply mapping to `voxel_indices`, `dual_vertices`, and `intersected` to ensure alignment for subsequent material voxelization or serialization.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def mesh_to_flexible_dual_grid(vertices, faces, grid_size=None, voxel_size=None, aabb=None,
+                               face_weight=1.0, boundary_weight=0.2, regularization_weight=1e-2):
+    """
+    Converts a triangle mesh to a Flexible Dual Grid representation.
+    
+    Args:
+        vertices: (N, 3) float32 tensor
+        faces: (M, 3) int32/long tensor
+        grid_size: (3,) int32 tensor or None
+        voxel_size: (3,) float32 tensor or None
+        aabb: (2, 3) float32 tensor or None
+        face_weight: float
+        boundary_weight: float
+        regularization_weight: float
+        
+    Returns:
+        voxel_indices: Occupied voxel coordinates
+        dual_vertices: (K, 3) float32 tensor of solved dual vertices
+        intersected: (K, 3) bool tensor of edge intersections
+    """
+    # 1. Input Validation
+    assert vertices.dim() == 2 and vertices.size(1) == 3
+    assert faces.dim() == 2 and faces.size(1) == 3
+    assert vertices.device == faces.device
+    
+    device = vertices.device
+    vertices = vertices.float().contiguous()
+    faces = faces.to(torch.int32).contiguous()
+    
+    # 2. AABB and Grid Parameter Handling
+    if aabb is None:
+        min_xyz = vertices.min(dim=0).values
+        max_xyz = vertices.max(dim=0).values
+    else:
+        min_xyz = aabb[0]
+        max_xyz = aabb[1]
+        
+    voxel_size_cpu = None
+    grid_size_cpu = None
+    
+    if voxel_size is not None:
+        if isinstance(voxel_size, (list, tuple)):
+            voxel_size = torch.tensor(voxel_size, dtype=torch.float32)
+        elif isinstance(voxel_size, np.ndarray):
+            voxel_size = torch.from_numpy(voxel_size).float()
+        voxel_size_cpu = voxel_size.to(dtype=torch.float32).contiguous()
+        voxel_size = voxel_size_cpu.to(device=device).contiguous()
+        
+        # Padding calculation for voxel_size
+        padding = torch.ceil((max_xyz - min_xyz) / voxel_size) * voxel_size - (max_xyz - min_xyz)
+        min_xyz = min_xyz - 0.5 * padding
+        max_xyz = max_xyz + 0.5 * padding
+        
+    if grid_size is not None:
+        if isinstance(grid_size, (list, tuple)):
+            grid_size = torch.tensor(grid_size, dtype=torch.int32)
+        grid_size_cpu = grid_size.to(dtype=torch.int32).contiguous()
+        grid_size = grid_size_cpu.to(device=device).contiguous()
+        
+        # Padding calculation for grid_size
+        padding = (max_xyz - min_xyz) / (grid_size - 1)
+        min_xyz = min_xyz - 0.5 * padding
+        max_xyz = max_xyz + 0.5 * padding
+        
+    # Derive missing parameters
+    if voxel_size_cpu is None:
+        assert grid_size_cpu is not None
+        voxel_size_cpu = ((max_xyz - min_xyz) / grid_size_cpu).to(dtype=torch.float32).contiguous()
+        
+    if grid_size_cpu is None:
+        assert voxel_size_cpu is not None
+        grid_size_cpu = ((max_xyz - min_xyz) / voxel_size_cpu).round().to(dtype=torch.int32).contiguous()
+        
+    aabb_final = torch.stack([min_xyz, max_xyz])
+    
+    # 3. Coordinate Transformation
+    vertices_rel = vertices - aabb_final[0].reshape(1, 3)
+    triangles = vertices_rel[faces]
+    
+    # 4. Prepare CUDA Arguments
+    voxel_size_arg = [float(x) for x in voxel_size_cpu.tolist()]
+    grid_range_arg = [0, 0, 0] + [int(x) for x in grid_size_cpu.tolist()]
+    
+    # 5. Occupancy Computation (CUDA Kernel Call)
+    # This step calls the underlying C++/CUDA extension
+    # _C.intersect_occ_cuda(triangles, voxel_size_arg, grid_range_arg)
+    # Returns raw occupied indices. Implementation detail: [G]
+    voxel_indices = _compute_occupancy_cuda(triangles, voxel_size_arg, grid_range_arg)
+    
+    # 6. QEF Solve and Dual Vertex Computation
+    # This step accumulates QEF terms and solves for dual vertices.
+    # Implementation detail: [G]
+    dual_vertices, intersected = _solve_qef_cuda(
+        triangles, voxel_indices, voxel_size_arg, grid_range_arg,
+        face_weight, boundary_weight, regularization_weight
+    )
+    
+    # 7. Sorting for Serialization Alignment
+    vid = _encode_seq(voxel_indices)
+    mapping = torch.argsort(vid)
+    
+    voxel_indices = voxel_indices[mapping]
+    dual_vertices = dual_vertices[mapping]
+    intersected = intersected[mapping]
+    
+    return voxel_indices, dual_vertices, intersected
+
+def _compute_occupancy_cuda(triangles, voxel_size_arg, grid_range_arg):
+    """Placeholder for CUDA occupancy kernel call."""
+    # Calls _C.intersect_occ_cuda
+    pass
+
+def _solve_qef_cuda(triangles, voxel_indices, voxel_size_arg, grid_range_arg,
+                    face_weight, boundary_weight, regularization_weight):
+    """Placeholder for QEF accumulation and solve."""
+    # Calls relevant QEF kernels (intersect_qef, face_qef, boundary_qef)
+    pass
+
+def _encode_seq(voxel_indices):
+    """Placeholder for sequence encoding."""
+    pass
+```
+
+## Subtopics
+
+### [Flexible Dual Grid Occupancy](3522-flexible-dual-grid-occupancy.md)
+Computes only the set of sparse voxel coordinates intersected by a triangle mesh. It differs from [O-Voxel](3835-o-voxel.md) by strictly returning occupied indices without solving the QEF or computing edge intersection data. Choose this when only occupancy is needed.
+
+### [O-Voxel](3835-o-voxel.md)
+A sparse, voxel-based native 3D representation that utilizes Flexible Dual Grid formulation to robustly represent surfaces with arbitrary topology. It differs by solving an enhanced QEF for dual vertex positions and supporting volumetric surface properties like PBR attributes. Choose this for high-quality 3D generation and reconstruction requiring sharp features and open boundaries.
+
+## Operating characteristics
+*   **Time Complexity**: Dominated by the occupancy computation and QEF solve. The CUDA implementation provides significant speedup over CPU counterparts.
+*   **Memory Complexity**: Sparse storage using a hashmap. Memory usage scales with the number of occupied voxels, not the total grid volume.
+*   **Performance**:
+    *   On a subdivided mesh (3.6M verts / 10.3M faces) at resolution 512:
+        *   Reference CUDA: 113.9 ms, Dual RMS error 2.08e-4.
+        *   Optimized CUDA: 85.9 ms, Dual RMS error 1.16e-4.
+    *   Memory usage for the optimized CUDA implementation is ~1.8 GB, compared to ~12.9 GB for the reference, due to efficient sparse storage [S1, unofficial].
+*   **Strengths**: Exact occupancy match with CPU implementation; zero intersected-flag mismatch; handles non-manifold and open surfaces; robust to nearly degenerate triangles via aligned cross-normalize path.
+*   **Limitations**: Requires CUDA-capable hardware for optimal performance; precision issues with FMA contraction in cross-product normals if not handled (mitigated by aligned path).
+*   **When to use**: When converting triangle meshes to sparse voxel representations for rendering or reconstruction, especially when sharp features and open boundaries must be preserved.
+*   **When not to use**: When a dense voxel grid is required; when CPU-only execution is mandatory.
+
+## Background
+The Flexible Dual Grid method was originally implemented on the CPU and later ported to GPU for performance. The CUDA implementation `mesh_to_flexible_dual_grid` aims to reproduce the original CPU computation closely, including occupancy, QEF accumulation, boundary handling, and dual-vertex solve semantics [S1, unofficial]. It serves as the core geometry voxelization component for the O-Voxel library, which provides instant bidirectional conversion between Meshes and O-Voxels [S1, unofficial]. The implementation benefited from a reference CUDA implementation provided by `yuyujunjun/o-voxel-gpu` [S1, unofficial].
+
+## Sources
+[S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)

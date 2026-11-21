@@ -1,0 +1,1438 @@
+R E P RIOR : M EASUREMENT-R ECONCILED P RIOR C ORRECTION
+FOR S PARSE -V IEW CBCT R ECONSTRUCTION
+arXiv:2610.14102v2 [eess.IV] 17 Oct 2026
+Mengrui Yin1,2 , Tianxingjian Ding1 , Wufan Zhao2 ,
+Ziyang Yan3,4,* , Yu Tian1
+2
+1
+University of Central Florida
+The Hong Kong University of Science and Technology (Guangzhou)
+3
+Tampere University
+4
+Ellis Institute Finland
+*
+Corresponding author: Ziyang Yan
+A BSTRACT
+Sparse-view cone-beam computed tomography (CBCT) is severely under-constrained by limited
+X-ray projections. Learned reconstruction can provide complementary anatomical information, but
+using it as a prior in patient-specific Gaussian reconstruction introduces two challenges. First, the
+discrepancy between the learned prior and current reconstruction is spatially non-uniform: some
+local differences contain useful missing 3D information, whereas others reflect prior bias. Second,
+even a volumetrically beneficial correction can conflict with the observed X-ray measurements.
+Since X-ray measurements are line integrals, spatially separated corrections may affect overlapping
+rays, with their signed projection responses reinforcing or partially canceling in the measurement
+residual, so their feasibility cannot always be assessed independently. In this paper, we introduce
+RePrior, a multi-stage progressive prior-correction framework that addresses correction actionability,
+measurement feasibility, and representation expressivity. Selective Correction Proposal (SCP) first
+identifies actionable signed local corrections from prior–reconstruction discrepancies. MeasurementConstrained Reconciliation (MCR) then jointly enforces their consistency with patient-specific X-ray
+measurements, while Hybrid Residual Enhancement (HRE) recovers additional correction capacity
+through complementary voxel- and Gaussian-domain degrees of freedom around the reconciled
+anchor. RePrior requires neither test-time ground truth nor case-specific network fine-tuning. RePrior
+gains approximately 2.6 dB in 3D PSNR over R2 -Gaussian across LUNA16, PANORAMA, and
+PENGWIN. Beyond prior-assisted reconstruction, it delivers additional gains in volumetric quality
+and observed-view projection fidelity, with consistent gains in held-out-view fidelity in the backbonematched evaluation.
+1
+Introduction
+Cone-beam computed tomography (CBCT) reconstructs a three-dimensional attenuation field from multi-view X-ray
+projections. Reducing the number of acquired views is a direct way to lower radiation exposure and acquisition
+burden (Sidky et al., 2006; Bian et al., 2010). This is particularly attractive in settings where CBCT is acquired
+repeatedly or under tight acquisition constraints. However, reduced angular sampling can produce prominent streak
+artifacts and degrade the recovery of structural details in reconstructed CT images (Bian et al., 2010). Preserving
+these local anatomical details is important for anatomically faithful 3D reconstruction and interpretation (Lin et al.,
+2025). Early learning-based approaches mitigated these sparse-view artifacts through image-domain or dual-domain
+reconstruction networks (Jin et al., 2017; Chen et al., 2018; Zhang et al., 2018; Wu et al., 2021). More recently, neural
+fields and explicit Gaussian representations have enabled patient-specific 3D reconstruction directly from measured
+X-rays through differentiable projection (Zha et al., 2022; Cai et al., 2024b; Zha et al., 2024; Yang et al., 2026).
+Complementary directions include reconstruction-friendly projection interpolation (Wang et al., 2022), meta-learned
+neural attenuation fields (Shin et al., 2025), learned 3D Gaussian feature representations (Lin et al., 2024), and diffusion
+RePrior
+P REPRINT
+priors coupled with explicit measurement models (Liu et al., 2023). Despite improved representations and optimization
+strategies, highly sparse measurements remain challenging for 3D reconstruction.
+Figure 1: We introduce RePrior, a multi-stage progressive prior-correction framework which transfers learned priors
+into patient-specific sparse-view CBCT reconstruction through selective correction proposal, measurement-constrained
+reconciliation, and hybrid residual enhancement.
+For sparse-view CBCT, the central challenge is not merely to recover plausible anatomy, but to recover anatomy that
+is supported by the measurements of the current patient. To complement the weakly constrained 3D information,
+recent feed-forward approaches such as X-GRM (Liu et al., 2025), X-LRM (Zhang et al., 2026), and DeepSparse (Lin
+et al., 2026) learn mappings from sparse X-rays to volumetric or explicit 3D representations, providing strong
+anatomical information learned from training data. Here, we focus on a complementary post-reconstruction question:
+whether individual local prior-induced changes are supported by the current patient’s measured X-ray projections.
+Complementarily, patient-specific neural-field and Gaussian reconstruction methods directly optimize against the
+current measurements and therefore provide strong data fidelity, yet sparse acquisition still leaves substantial 3D degrees
+of freedom weakly constrained. This raises a key question: how can complementary 3D information from a learned
+reconstruction be converted into patient-specific corrections that are supported by the measured X-rays, rather than
+simply choosing between a learned prior and projection fitting?
+Figure 2 further reveals two recurring
+difficulties across the three anatomies
+studied here. First, local prior reliability is spatially non-uniform: every analyzed case contains regions where VP
+is closer to the reference volume than
+VR , as well as regions where it is farther away, indicating that the remaining
+discrepancy mixes useful 3D information with local prior bias. Second, volu- Figure 2: Challenges in prior-guided correction. Left: local prior differences
+metric benefit does not guarantee mea- contain both useful 3D corrections and prior bias. Right: some volumetrically
+surement compatibility: our post-hoc beneficial corrections still conflict with X-ray measurements.
+diagnostic shows that 43.3% of the 3Dbeneficial recovery candidates increase the projection error over the observed X-ray views, with such conflicts occurring
+in all 230 analyzed cases. These observations lead to two sequential questions: which local prior differences should be
+adopted, and how should the selected corrections be jointly reconciled under patient-specific X-ray measurements?
+Based on these observations, we propose RePrior, a multi-stage progressive prior-correction framework for sparse-view
+CBCT. Fig. 1 summarizes the overall process of prior-to-reconstruction correction-transfer. Rather than relying on direct
+global prior supervision alone, RePrior further decomposes prior correction into three progressive stages: correction
+actionability, measurement feasibility, and representation expressivity. First, Selective Correction Proposal (SCP) learns
+which local prior differences are actionable and how strongly their signed discrepancy directions should be retained.
+Next, Measurement-Constrained Reconciliation (MCR) coordinates multiple candidate corrections according to their
+patient-specific X-ray responses, thereby establishing a measurement-feasible reconstruction. Finally, Hybrid Residual
+Enhancement (HRE) uses this feasible solution as an anchor and jointly exploits voxel- and Gaussian-domain residual
+freedom to recover useful 3D corrections that remain unexpressed after reconciliation.
+2
+RePrior
+P REPRINT
+In this paper, our contributions are summarized as follows:
+• We propose RePrior, a progressive prior-correction framework for sparse-view CBCT that transfers learned
+volumetric priors into patient-specific Gaussian reconstruction through a three-stage progression from correction actionability to measurement feasibility and representation expressivity, rather than direct global prior
+fusion.
+• We conduct a systematic analysis of prior correction in sparse-view CBCT and identify two key failure modes:
+local prior discrepancies have spatially non-uniform utility, and volumetrically beneficial corrections do not
+necessarily improve patient-specific X-ray fitting. These findings motivate separating selective correction
+proposal from measurement-constrained reconciliation.
+• Across three anatomies and 230 evaluation cases, RePrior improves 3D PSNR by approximately 2.6 dB
+over R2 -Gaussian. Beyond the matched prior-assisted reconstruction, its correction stages further improve
+volumetric quality and observed- and held-out-view projection fidelity.
+2
+Related Work
+2.1
+Sparse-View Tomographic Reconstruction
+Sparse-view reconstruction has attracted considerable attention in medical CT imaging. Early deep-learning methods (Zhang et al., 2018; Wu et al., 2021) refined analytical reconstructions to suppress undersampling artifacts, while
+neural fields enabled direct optimization against measured projections. NAF (Zha et al., 2022) models attenuation
+with a coordinate-based network through differentiable X-ray rendering, and X-Gaussian (Cai et al., 2024a) adapts 3D
+Gaussian Splatting (Kerbl et al., 2023) for efficient X-ray optimization and rendering.
+More recently, feed-forward models such as X-GRM (Liu et al., 2025), X-LRM (Zhang et al., 2026), and
+DeepSparse (Lin et al., 2026) learn transferable 3D reconstruction priors from large-scale data. Generative approaches such as CvG-Diff (Chen et al., 2025b) and CT-SDM (Yang et al., 2025) further exploit diffusion-based priors
+to recover anatomical structures under severe angular undersampling. These learned reconstruction models provide
+strong structural information. RePrior focuses on a complementary question: which remaining local prior-induced
+changes should be retained under the measured projections of the current patient.
+2.2
+Tomographic Reconstruction with 3DGS Representation
+Although early NeRF-based approaches (Zha et al., 2022; Cai et al., 2024b) enable high-fidelity tomographic reconstruction, their implicit representations require per-scene optimization. R2 -Gaussian (Zha et al., 2024) introduced
+3DGS-based sparse-view CT reconstruction with X-ray-specific rasterization for efficient reconstruction.
+Subsequent works advance Gaussian tomography from complementary perspectives. 3DGR-CT (Li et al., 2025)
+combines FBP-guided Gaussian initialization with a differentiable CT projector, while Exact-GS (Yang et al., 2026)
+derives an exact splatting formulation for X-ray reconstruction. PGE (Wu et al., 2026) further explores uncertaintyguided active view selection.
+These advances establish 3D Gaussians as an efficient explicit representation for projection-driven tomographic
+reconstruction. RePrior studies a complementary problem: selectively transferring learned volumetric prior corrections
+into a patient-specific Gaussian reconstruction.
+2.3
+Learned Priors with Measurement Constraints
+Another line of work combines learned generative priors with explicit physical measurements during reconstruction (Chung et al., 2023). DOLCE (Liu et al., 2023) couples a conditional diffusion prior with an explicit CT
+measurement model for limited-angle reconstruction. Recent work has also studied discrepancies introduced by
+data-consistency operations in diffusion-based sparse-view CT reconstruction (Chen et al., 2025a), while diffusion
+generative priors have been incorporated into iterative reconstruction through physics-informed initialization and latent
+optimization (Evangelista et al., 2026). DiffNR (Su et al., 2026) instead uses diffusion-generated pseudo-reference
+volumes to provide auxiliary 3D supervision during neural representation optimization for sparse-view tomography.
+These studies demonstrate the value of combining learned structural priors with physical measurements for tomographic
+reconstruction. RePrior builds on this general direction and focuses on selectively utilizing the residual prior discrepancies that remain after prior-assisted Gaussian reconstruction, with subsequent correction constrained by patient-specific
+X-ray measurements.
+3
+RePrior
+3
+P REPRINT
+Problem Analysis: Prior Utility and Measurement Compatibility
+Learned-prior utilization in sparse-view CBCT faces two related but distinct challenges. Let VP denote the learned
+prior and VR the corresponding prior-assisted Gaussian reconstruction, as illustrated in Fig. 2; their formal construction
+is introduced in Sec. 4.1.
+First, the remaining prior discrepancy does not have uniformly reliable local utility. Sparse-view measurements may
+admit multiple attenuation volumes consistent with the same data (Sidky et al., 2006; Bian et al., 2010). This motivates
+our use of a learned prior as a source of complementary structural information. However, this does not imply that the
+remaining discrepancy VP − VR should be transferred unconditionally. As shown in Fig. 2(a), within the same patient,
+some regions of the learned prior are closer to the reference volume, whereas others exhibit larger prior bias. The
+remaining discrepancy should therefore be regarded as candidate correction information with unknown local reliability.
+Reliable prior correction must first determine which local differences correspond to useful structures still missing from
+the current reconstruction and how strongly they should be retained.
+Second, volumetric utility does not imply measurement compatibility. As shown in Fig. 2(b), even a local change that
+improves the volumetric reconstruction can worsen the fit to the patient’s observed X-ray measurements. Our post-hoc
+diagnostic shows that this conflict is systematic: 43.3% of the 3D-beneficial recovery candidates increase the projection
+error over the observed X-ray views, and such conflicting corrections occur in all 230 analyzed cases. Thus, potential
+volumetric benefit alone is insufficient for deciding whether a correction should be retained.
+Moreover, under the calibrated log-domain line-integral model, the responses of multiple local corrections add in
+projection space. Let r = P(VR ) − Y denote the current measurement residual and hi = P(δVi ) the projection
+response of correction δVi . For two corrections, the change in squared projection error is
+∥r + hi + hj ∥22 − ∥r∥22
+= 2⟨r, hi + hj ⟩ + ∥hi ∥22 + ∥hj ∥22 + 2⟨hi , hj ⟩.
+(1)
+The cross term 2⟨hi , hj ⟩ shows that the measurement effect of one correction depends on the other corrections
+applied simultaneously: their signed ray responses may reinforce or partially cancel one another. Thus, measurement
+compatibility cannot in general be determined by accepting or rejecting local corrections independently.
+Reliable prior correction therefore requires answering two distinct questions in sequence: which local prior differences
+should be adopted, and how should the resulting candidate changes remain compatible with the current patient’s X-ray
+measurements when acting jointly? The former concerns the local reliability and utility of prior information, whereas
+the latter requires reasoning about the joint ray effects of multiple corrections in patient-specific measurement space.
+4
+Method
+4.1
+Overview
+RePrior addresses the requirements identified in Sec. 3 by selecting useful prior differences and reconciling their
+joint X-ray effects. Given sparse-view X-ray measurements Y, a pretrained reconstructor FP first produces a learned
+volumetric prior VP . We additionally construct a patient-specific prior-assisted Gaussian reconstruction by optimizing
+R2 -GS against the measured projections and subsequently introducing fixed spatial supervision from VP . This yields
+the Gaussian representation GR and its voxelized attenuation volume VR :
+VP = FP (Y),
+GR = RR2 GS (Y; VP ),
+VR = V(GR ),
+(2)
+where V(·) denotes Gaussian voxelization. The detailed optimization schedule used to construct VR is provided in the
+Appendix.
+As illustrated in Fig. 3, SCP converts the remaining prior discrepancy into an actionable signed correction DA . MCR
+jointly reconciles its patient-specific X-ray responses, yielding DB and the measurement-feasible anchor VB . Because
+MCR uses a restricted structured correction space, HRE introduces complementary voxel- and Gaussian-domain
+residual freedom around VB to recover unexpressed SCP corrections while preserving measurement consistency.
+4.2
+Selective Correction Proposal
+The discrepancy VP − VR should be regarded as candidate prior information rather than a direct correction target. As
+analyzed in Sec. 3, such local disagreement may correspond either to anatomical structure genuinely missed under
+sparse acquisition or to prediction bias introduced by the learned reconstructor. Its magnitude alone does not indicate
+local prior reliability.
+4
+RePrior
+P REPRINT
+Figure 3: Overview of RePrior. (a) Learned prior VP and prior-assisted reconstruction VR . (b) SCP predicts a signed
+correction DA . (c) MCR jointly reconciles structured correction modes using their X-ray responses H, producing DB
+and the feasible anchor VB . (d) HRE combines voxel- and Gaussian-domain residual freedom under measurement
+guards to obtain V ∗ .
+To distinguish these cases, SCP uses training-time ground-truth supervision to learn which observable prior–
+reconstruction discrepancies are actionable and how strongly their signed directions should be retained. We collectively
+denote local frequency characteristics, boundary and differential morphology, and structural disagreement cues by
+Φ(VP , VR ). A FusionCNN estimates the local actionability and retained magnitude of the prior discrepancy, yielding
+
+DA = FSCP VP , VR , Φ(VP , VR ) ,
+(3)
+where the spatial support and magnitude determine where and how strongly the prior discrepancy is retained, while
+the attenuation-change direction follows the sign of VP − VR . SCP thus converts the spatially non-uniform prior
+discrepancy into an actionable local correction proposal for subsequent measurement-constrained reconciliation.
+4.3
+Measurement-Constrained Reconciliation
+SCP identifies locally beneficial corrections in the volumetric domain, but volumetric utility does not guarantee
+consistency with the measured X-rays. As shown in Fig. 2(b), some corrections that improve the volume can still
+degrade the X-ray fitting of the current patient. Since each X-ray measurement integrates attenuation along a source–
+detector path, spatially separated corrections may affect the same measurements. As illustrated in Fig. 4, a correction
+that is beneficial in 3D can worsen projection fitting when considered alone, while another signed mode can partially
+compensate for its ray response. This motivates reconciling multiple corrections jointly in measurement space.
+MCR organizes DA into a low-dimensional structured correction space. We first establish a coarse measurement-aware
+correction and then parameterize the remaining correction using regional recovery modes, which control how much
+of the desirable correction is retained across spatial regions. However, resolving measurement conflicts through
+suppression alone may discard useful 3D changes. We therefore introduce signed compensation modes that provide
+additional attenuation-redistribution freedom across regions, allowing their measurement responses to reinforce or
+partially cancel rather than simply suppressing the original correction.1
+We then map the variable correction modes into the X-ray measurement space of the current patient. Rather than
+reasoning about candidate corrections independently in voxel space, their patient-specific ray responses directly
+characterize how each 3D change perturbs the measured projections. The corresponding coefficients are jointly
+optimized to preserve as much of the SCP proposal as possible while satisfying patient-specific measurement and
+physical constraints:
+2
+c∗ = arg min ∥DB (c) − DA ∥2
+c∈Cphys
+1
+s.t.
+
+Cmeas r0 − Hc ≤ 0.
+(4)
+Detailed construction of the coarse correction, regional recovery modes, and signed compensation modes is provided in the
+Appendix.
+5
+RePrior
+P REPRINT
+Here, DB (c) denotes the correction synthesized from the coarse measurement-aware correction and the variable recovery
+and compensation modes, H collects the patient-specific X-ray responses of the variable modes, and r0 denotes the
+measurement residual after the coarse correction. The optimized correction yields the reconciled reconstruction
+VB = VR + DB (c∗ ), which serves as the measurement-feasible anchor for HRE.
+4.4
+Hybrid Residual Enhancement
+Since MCR operates in a restricted structured correction space to obtain a controllable measurementfeasible solution, it may not realize the entire SCP
+proposal. The unrealized component does not necessarily correspond to incorrect prior information, but may
+instead arise from the limited expressivity of the MCR
+correction modes. We denote this residual correction
+by RB = DA − DB and make no assumption that RB
+is measurement-feasible on its own.
+We then introduce HRE. After MCR establishes a
+measurement-feasible anchor VB , HRE recovers additional representation freedom around this anchor to
+capture useful corrections that cannot be represented
+within the restricted MCR space, while preserving the
+measurement feasibility established by MCR.
+Specifically, HRE parameterizes this residual search
+Figure 4: Ray-coupled correction responses on a representative
+using two complementary degrees of freedom. The
+case, illustrating measurement conflict and signed compensavoxel branch moves along the unresolved SCP direction
+tion.
+RB through a scalar coefficient α, preserving its signed
+attenuation structure. In parallel, the Gaussian branch
+starts from the fixed-topology prior-assisted Gaussian
+state Gref = GR and performs bounded residual updates to attenuation, position, scale, and orientation, enabling
+geometric and spatial-support redistribution that cannot be expressed by voxel-domain backfilling alone. Together, the
+two branches define the candidate reconstruction
+VC (α, θ) = VB + αRB + [V(Gθ ) − V(Gref )] .
+(5)
+Here, αRB represents voxel-domain residual backfilling, while the Gaussian term captures the volumetric correction
+induced by the bounded Gaussian updates. HRE jointly optimizes these two residual components and retains only
+candidates that satisfy the measurement guards2 . The selected candidate is denoted as the final reconstruction V ∗ .
+5
+Experiments
+5.1
+Experimental Setting
+Datasets and evaluation. We evaluate on LUNA16 (Setio et al., 2017), PANORAMA (Alves et al., 2026), and
+PENGWIN (Sang et al., 2026). Unless otherwise specified, matched experiments use 25 observed projections and
+40 held-out views reserved for evaluation. We report volumetric PSNR/SSIM and reproject each reconstruction with
+the same physics-based projector to compute observed- and held-out-view PSNR/SSIM under a common per-view
+normalization protocol. Reconstruction outputs are fixed before ground-truth and held-out evaluation.
+Baselines and implementation. We compare with SAX-NeRF, X-Gaussian, R2 -GS, Exact-GS, and DeepSparse.
+DeepSparse-10 is the official 10-view checkpoint, reported as an additional reference; DeepSparse-25 is our continuation
+trained under the matched 25-view setting. RePrior uses R2 -GS as its primary backbone and a frozen SCP predictor at
+test time. Further training and implementation details are provided in the Appendix.
+5.2
+Main Comparison
+Quantitative evaluation. As shown in Table 1, RePrior consistently achieves the highest 3D PSNR and SSIM across all
+three evaluated anatomies. Compared with R2 -GS, RePrior improves 3D PSNR by +3.46 dB on LUNA16, +2.38 dB
+2
+More details are provided in the Appendix.
+6
+RePrior
+P REPRINT
+on PANORAMA, and +2.04 dB on PENGWIN, corresponding to a dataset-level macro-average gain of approximately
+2.63 dB. Relative to the strongest competing method in each dataset, RePrior further improves 3D PSNR by +1.73 dB
+on LUNA16, +1.93 dB on PANORAMA, and +1.47 dB on PENGWIN. The corresponding SSIM results show the
+same consistent trend.
+These results demonstrate the complementary benefit of learned structural information and patient-specific measurement
+constraints. Learned reconstruction provides anatomical information that is difficult to recover from sparse projections
+alone, while RePrior selectively transfers and reconciles useful local corrections within a patient-specific reconstruction
+rather than directly imposing the learned volume.
+Table 1: Main comparison on sparse-view CBCT reconstruction. Best and second-best results are shown in bold and
+underlined, respectively.
+LUNA16 (90)
+PANORAMA (90) PENGWIN (50)
+Method
+PSNR↑ SSIM↑ PSNR↑
+SSIM↑
+PSNR↑
+SSIM↑
+SAX-NeRF (CVPR’24)
+X-Gaussian (ECCV’24)
+R2 -GS (NeurIPS’24)
+Exact-GS (CVPR’26)
+DeepSparse-10 (TMI’26)
+DeepSparse-25
+29.41
+19.55
+29.12
+26.71
+30.74
+30.85
+0.8311
+0.3030
+0.8357
+0.7598
+0.8660
+0.8750
+27.57
+19.24
+28.42
+26.51
+26.35
+28.87
+0.8358
+0.3546
+0.8534
+0.7711
+0.8386
+0.8780
+30.86
+20.41
+30.29
+28.46
+27.12
+29.33
+0.8726
+0.3468
+0.8817
+0.8134
+0.8461
+0.8740
+RePrior (Ours)
+32.58
+0.8881
+30.80
+0.8990
+32.33
+0.9146
+Qualitative evaluation. Figure 5 shows representative reconstructions across the three anatomies. Compared with the
+projection-driven Gaussian baselines, RePrior better preserves the highlighted local boundaries and fine structures
+while reducing local blur and structural distortion. The DeepSparse variants recover plausible global anatomy but show
+local smoothing or attenuation mismatch in several highlighted regions; RePrior more closely follows the ground-truth
+local shape and attenuation pattern. These patterns are visible in the representative thoracic structures on LUNA16,
+abdominal and pelvic interfaces on PANORAMA, and fine osseous structures on PENGWIN, complementing the
+quantitative improvements in Table 1.
+5.3
+Generalization Across Gaussian Backbones
+To examine whether RePrior generalizes across Gaussian reconstruction backbones, we instantiate the same correction
+framework with both R2 -GS and Exact-GS on LUNA16. For each backbone, we report the vanilla reconstruction, its
+matched prior-assisted reconstruction, and the final RePrior result. The 3D metrics are volumetric PSNR/SSIM, while
+the 2D metrics are evaluated on the 40 held-out projections. The R2 -GS comparison uses 90 cases, whereas Exact-GS
+uses the available 30-case matched cohort; we therefore interpret the progression within each backbone rather than
+comparing absolute values across backbones.
+Table 2: Generalization across Gaussian reconstruction backbones on LUNA16.
+Backbone Cases Method
+2
+2
+3D PSNR↑ 3D SSIM↑ 2D PSNR↑ 2D SSIM↑
+R -GS
+90
+90
+90
+R -GS
+Prior-R2 -GS
+RePrior
+29.12
+32.09
+32.58
+0.8357
+0.8826
+0.8881
+43.17
+44.09
+44.24
+0.9864
+0.9906
+0.9910
+Exact-GS
+30
+30
+30
+Exact-GS
+Prior-Exact-GS
+RePrior
+27.25
+31.27
+31.87
+0.7749
+0.8688
+0.8754
+40.60
+44.22
+44.35
+0.9754
+0.9893
+0.9898
+As shown in Table 2, RePrior provides additional gains beyond the matched prior-assisted reconstruction for both
+Gaussian backbones. With R2 -GS, RePrior improves 3D PSNR by +0.49 dB over Prior-R2 -GS (32.09→32.58 dB),
+while held-out projection PSNR also increases from 44.09 to 44.24 dB. With Exact-GS, the corresponding additional
+3D gain is +0.60 dB (31.27→31.87 dB), with held-out projection PSNR increasing from 44.22 to 44.35 dB. This
+consistent Vanilla→Prior-assisted→RePrior progression indicates that the proposed correction framework is not tied to
+a single Gaussian backbone.
+7
+RePrior
+P REPRINT
+Figure 5: Qualitative comparison on representative LUNA16, PANORAMA, and PENGWIN cases. Red and cyan
+boxes mark the highlighted local regions.
+5.4
+Stage-wise Ablation and Analysis
+The three stages of RePrior serve complementary rather than redundant roles. SCP first proposes local corrections
+with potential volumetric utility, MCR reconciles these corrections under patient-specific X-ray measurements, and
+HRE restores residual expressivity around the resulting measurement-feasible anchor. Accordingly, these stages should
+not be interpreted as repeatedly optimizing the same 3D objective, and their addition need not produce a monotonic
+increase in 3D PSNR.
+Table 3 summarizes the stage-wise contribution of each component in RePrior. For this ablation, we use 20 randomly
+selected cases from each dataset and evaluate all configurations on the same cases. Results are reported as datasetbalanced averages across the three datasets, and the 2D metrics are computed on the 25 observed projections.
+SCP recovers useful volumetric information from the prior–reconstruction discrepancy, without explicitly enforcing
+measurement compatibility. Compared with Prior-R2 -GS, adding SCP increases 3D PSNR from 32.03 to 32.58 dB
+(+0.55 dB) and 3D SSIM from 0.8966 to 0.9033. This gain comes with a slight decrease in observed-view projection
+PSNR from 46.46 to 46.30 dB and SSIM from 0.9956 to 0.9952, confirming that volumetric improvement does not
+necessarily imply measurement compatibility.
+MCR then reconciles the candidate corrections under the patient-specific measurements. From SCP to MCR, 3D
+PSNR decreases from 32.58 to 32.24 dB and 3D SSIM from 0.9033 to 0.8989, while observed-view projection PSNR
+increases from 46.30 to 46.63 dB (+0.33 dB) and SSIM from 0.9952 to 0.9957. Importantly, MCR still improves
+over Prior-R2 -GS in both 3D PSNR (32.24 vs. 32.03 dB) and projection PSNR (46.63 vs. 46.46 dB), indicating that
+measurement reconciliation preserves useful prior corrections rather than simply removing them.
+8
+RePrior
+P REPRINT
+Table 3: Stage-wise ablation of RePrior.
+HRE further expands the correction space around the
+3D
+3D
+2D
+2D
+measurement-feasible MCR anchor. It increases 3D
+Configuration PSNR↑ SSIM↑ PSNR↑ SSIM↑
+PSNR from 32.24 to 32.43 dB (+0.19 dB) and 3D
+Prior-R2 -GS 32.03 0.8966 46.46 0.9956
+SSIM from 0.8989 to 0.9012, while observed-view
++ SCP
+32.58 0.9033 46.30 0.9952
+projection PSNR increases from 46.63 to 47.10 dB
++ MCR
+32.24 0.8989 46.63 0.9957
+(+0.47 dB). Projection SSIM remains nearly un+ HRE (Full) 32.43 0.9012 47.10 0.9956
+changed at 0.9956. These results show that the complementary voxel- and Gaussian-domain residual freedoms recover additional useful corrections without sacrificing the measurement feasibility established by MCR.
+6
+Conclusion
+We propose RePrior, a multi-stage select–reconcile–enhance framework for transferring learned priors into patientspecific Gaussian reconstruction for sparse-view CBCT. RePrior identifies useful local prior corrections, reconciles
+them under patient-specific X-ray measurements, and recovers residual information beyond the restricted reconciliation
+space. This design separates correction selection from measurement enforcement while preserving additional freedom
+for reconstruction refinement. Across LUNA16, PANORAMA, and PENGWIN, RePrior improves 3D PSNR by
+approximately 2.6 dB over R2 -Gaussian and provides further volumetric and projection-fidelity gains beyond matched
+prior-assisted reconstruction, with consistent improvements in held-out-view fidelity. These results support using
+learned priors as sources of selective, measurement-compatible corrections rather than transferring them unconditionally
+as reconstruction targets.
+References
+Natalia Alves, Megan Schuurmans, Dawid Rutkowski, et al. Artificial intelligence and radiologists in pancreatic cancer detection
+using standard of care ct scans (panorama): An international, paired, non-inferiority, confirmatory, observational study. The
+Lancet Oncology, 27(1):116–124, 2026. doi: 10.1016/S1470-2045(25)00567-4.
+Junguo Bian, Jeffrey H. Siewerdsen, Xiao Han, Emil Y. Sidky, Jerry L. Prince, Charles A. Pelizzari, and Xiaochuan Pan. Evaluation
+of sparse-view reconstruction from flat-panel-detector cone-beam ct. Physics in Medicine and Biology, 55(22):6575–6599, 2010.
+doi: 10.1088/0031-9155/55/22/001.
+Yuanhao Cai, Yixun Liang, Jiahao Wang, Angtian Wang, Yulun Zhang, Xiaokang Yang, Zongwei Zhou, and Alan Yuille. Radiative
+gaussian splatting for efficient x-ray novel view synthesis. In European Conference on Computer Vision, volume 15059, pp.
+283–299. Springer, 2024a. doi: 10.1007/978-3-031-73232-4_16.
+Yuanhao Cai, Jiahao Wang, Alan Yuille, Zongwei Zhou, and Angtian Wang. Structure-aware sparse-view x-ray 3d reconstruction. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 11174–11183. IEEE, 2024b.
+Hanyu Chen, Zhixiu Hao, Lin Guo, and Liying Xiao. Mitigating data consistency induced discrepancy in cascaded diffusion models
+for sparse-view ct reconstruction. IEEE Transactions on Medical Imaging, 44(7):3012–3024, 2025a. doi: 10.1109/TMI.2025.
+3557243.
+Hu Chen, Yi Zhang, Yunjin Chen, Junfeng Zhang, Weihua Zhang, Huaiqiang Sun, Yang Lv, Peixi Liao, Jiliu Zhou, and Ge Wang.
+Learn: Learned experts’ assessment-based reconstruction network for sparse-data ct. IEEE Transactions on Medical Imaging, 37
+(6):1333–1347, 2018. doi: 10.1109/TMI.2018.2805692.
+Jixiang Chen, Yiqun Lin, Yi Qin, Hualiang Wang, and Xiaomeng Li. Cross-view generalized diffusion model for sparse-view ct
+reconstruction. In Medical Image Computing and Computer Assisted Intervention – MICCAI 2025, volume 15975, pp. 140–150.
+Springer Nature Switzerland, 2025b. doi: 10.1007/978-3-032-05325-1_14.
+Hyungjin Chung, Dohoon Ryu, Michael T. McCann, Marc L. Klasky, and Jong Chul Ye. Solving 3d inverse problems using
+pre-trained 2d diffusion models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp.
+22542–22551, 2023.
+Davide Evangelista, Pasquale Cascarano, and Elena Loli Piccolomini. A diffusion-based generative prior approach to sparse-view
+computed tomography. Computerized Medical Imaging and Graphics, 134:102802, 2026. doi: 10.1016/j.compmedimag.2026.
+102802.
+Kyong Hwan Jin, Michael T. McCann, Emmanuel Froustey, and Michael Unser. Deep convolutional neural network for inverse
+problems in imaging. IEEE Transactions on Image Processing, 26(9):4509–4522, 2017. doi: 10.1109/TIP.2017.2713099.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D Gaussian Splatting for real-time radiance field
+rendering. ACM Transactions on Graphics, 42(4):1–14, 2023. doi: 10.1145/3592433.
+Yingtai Li, Xueming Fu, Han Li, Shang Zhao, Ruiyang Jin, and S. Kevin Zhou. 3DGR-CT: Sparse-view ct reconstruction with a 3d
+gaussian representation. Medical Image Analysis, 103:103585, 2025. doi: 10.1016/j.media.2025.103585.
+Tianyu Lin, Xinran Li, Chuntung Zhuang, Qi Chen, Yuanhao Cai, Kai Ding, Alan L. Yuille, and Zongwei Zhou. Are pixel-wise
+metrics reliable for computerized tomography reconstruction? In Advances in Neural Information Processing Systems, volume 38,
+2025. doi: 10.52202/085713-1132.
+9
+RePrior
+P REPRINT
+Yiqun Lin, Hualiang Wang, Jixiang Chen, and Xiaomeng Li. Learning 3d gaussians for extremely sparse-view cone-beam ct
+reconstruction. In Medical Image Computing and Computer Assisted Intervention – MICCAI 2024, pp. 425–435, 2024. doi:
+10.1007/978-3-031-72104-5_41.
+Yiqun Lin, Jixiang Chen, Hualiang Wang, Jiewen Yang, Jiarong Guo, Yi Zhang, and Xiaomeng Li. Deepsparse: A foundation model
+for sparse-view cbct reconstruction. IEEE Transactions on Medical Imaging, 45(6):3339–3351, 2026. doi: 10.1109/TMI.2026.
+3674948.
+Jiaming Liu, Rushil Anirudh, Jayaraman J. Thiagarajan, Stewart He, K. Aditya Mohan, Ulugbek S. Kamilov, and Hyojin Kim.
+Dolce: A model-based probabilistic diffusion framework for limited-angle ct reconstruction. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pp. 10498–10508, 2023.
+Yifan Liu, Wuyang Li, Weihao Yu, Chenxin Li, Alexandre Alahi, Max Meng, and Yixuan Yuan. X-GRM: Large gaussian
+reconstruction model for sparse-view x-rays to computed tomography. arXiv preprint arXiv:2505.15235, 2025.
+Yudi Sang, Yanzhen Liu, Sutuke Yibulayimu, et al. Benchmark of segmentation techniques for pelvic fracture in ct and x-ray:
+Summary of the pengwin 2024 challenge. IEEE Transactions on Medical Imaging, 45(5):2212–2228, 2026. doi: 10.1109/TMI.
+2025.3650126.
+Arnaud Arindra Adiyoso Setio, Alberto Traverso, Thomas de Bel, et al. Validation, comparison, and combination of algorithms for
+automatic detection of pulmonary nodules in computed tomography images: The luna16 challenge. Medical Image Analysis, 42:
+1–13, 2017. doi: 10.1016/j.media.2017.06.015.
+Heejun Shin, Taehee Kim, Jongho Lee, Se Young Chun, Seungryong Cho, and Dongmyung Shin. Sparse-view cbct reconstruction
+using meta-learned neural attenuation field and hash-encoding regularization. Computers in Biology and Medicine, 189:109900,
+2025. doi: 10.1016/j.compbiomed.2025.109900.
+Emil Y. Sidky, Chien-Min Kao, and Xiaochuan Pan. Accurate image reconstruction from few-views and limited-angle data in
+divergent-beam ct. Journal of X-Ray Science and Technology, 14(2):119–139, 2006. doi: 10.3233/XST-2006-00155.
+Shiyan Su, Ruyi Zha, Danli Shi, Hongdong Li, and Xuelian Cheng. DiffNR: Diffusion-enhanced neural representation optimization
+for sparse-view 3d tomographic reconstruction. In Proceedings of the AAAI Conference on Artificial Intelligence, volume 40, pp.
+9144–9152, 2026. doi: 10.1609/aaai.v40i11.37871.
+Yanli Wang, Lianying Chao, Wenqi Shan, Haobo Zhang, Zhiwei Wang, and Qiang Li. Improving the quality of sparse-view
+cone-beam computed tomography via reconstruction-friendly interpolation network. In Proceedings of the Asian Conference on
+Computer Vision, pp. 2255–2269, 2022.
+Weiwen Wu, Dianlin Hu, Chuang Niu, Hengyong Yu, Varut Vardhanabhuti, and Ge Wang. DRONE: Dual-domain residual-based
+optimization network for sparse-view ct reconstruction. IEEE Transactions on Medical Imaging, 40(11):3002–3014, 2021. doi:
+10.1109/TMI.2021.3078067.
+Yulun Wu, Ruyi Zha, Wei Cao, Yingying Li, Yuanhao Cai, and Yaoyao Liu. Active view selection with perturbed gaussian ensemble
+for tomographic reconstruction. arXiv preprint arXiv:2603.06852, 2026.
+Guangpu Yang, Steffen Kieß, Hanxiang Luo, Xingyu Liu, and Sven Simon. Exact-GS: Mathematically rigorous and accurate 3d
+gaussian splatting for 3d x-ray reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pp. 4902–4911, 2026.
+Liutao Yang, Jiahao Huang, Guang Yang, and Daoqiang Zhang. Ct-sdm: A sampling diffusion model for sparse-view ct reconstruction
+across various sampling rates. IEEE Transactions on Medical Imaging, 44(6):2581–2593, 2025. doi: 10.1109/TMI.2025.3541491.
+Ruyi Zha, Yanhao Zhang, and Hongdong Li. NAF: Neural attenuation fields for sparse-view cbct reconstruction. In Medical
+Image Computing and Computer Assisted Intervention – MICCAI, volume 13436, pp. 442–452. Springer, 2022. doi: 10.1007/
+978-3-031-16446-0_42.
+Ruyi Zha, Tao Jun Lin, Yuanhao Cai, Jiwen Cao, Yanhao Zhang, and Hongdong Li. R2 -Gaussian: Rectifying radiative gaussian
+splatting for tomographic reconstruction. In Advances in Neural Information Processing Systems, volume 37, pp. 44907–44934,
+2024. doi: 10.52202/079017-1427.
+Guofeng Zhang, Ruyi Zha, Hao He, Yixun Liang, Alan Yuille, Hongdong Li, and Yuanhao Cai. X-LRM: X-ray large reconstruction
+model for extremely sparse-view computed tomography recovery in one second. In International Conference on 3D Vision, pp.
+176–185. IEEE, 2026. doi: 10.1109/3DV69130.2026.00024.
+Zhicheng Zhang, Xiaokun Liang, Xu Dong, Yaoqin Xie, and Guohua Cao. A sparse-view ct reconstruction method based on
+combination of densenet and deconvolution. IEEE Transactions on Medical Imaging, 37(6):1407–1417, 2018. doi: 10.1109/TMI.
+2018.2823338.
+10
+RePrior
+P REPRINT
+APPENDIX
+A
+Detailed Prior-Assisted R2 -GS Reconstruction
+This section provides the implementation details of the prior-assisted R2 -GS reconstruction used to construct the
+reference volume VR in Sec. 4.1. We first obtain a frozen learned volumetric prior, establish a measurement-driven
+Gaussian reconstruction prefix, and only then introduce full-volume spatial prior supervision. All per-case reconstruction
+experiments are conducted on NVIDIA V100 GPUs.
+A.1
+Learned Volumetric Prior
+Given the 25 observed sparse-view X-ray projections Y25 , we use an anatomy-specific DeepSparse-25 reconstructor FP
+to obtain the learned volumetric prior
+VP = FP (Y25 ).
+(6)
+DeepSparse-25 prior models. For the matched 25-view setting, we finetune anatomy-specific DeepSparse models
+from the official pretrained weights (pretrain/ep_700.pth) following the official two-stage finetuning protocol. For
+the three anatomies evaluated in this paper, the finetuning sets contain 250 LUNA16 cases, 250 PANORAMA cases,
+and all 60 available PENGWIN training cases, respectively. Both stages are trained for 400 epochs. Stage 2 is initialized
+from the corresponding Stage 1 epoch-400 checkpoint and uses random sparse-view sampling with min_views=25.
+The final Stage 2 epoch-400 checkpoint is used throughout our experiments.
+The same frozen DeepSparse-25 checkpoint serves two roles. Its direct volumetric prediction is reported as the
+DeepSparse-25 baseline in Table 1, while the identical prediction is used as the learned prior VP for RePrior. Thus,
+the DeepSparse-25 baseline and the prior used by RePrior share the same checkpoint and acquisition setting. No
+DeepSparse parameters are updated during patient-specific RePrior reconstruction.
+For RePrior inference, the 25 observed projections follow the fixed 25-view acquisition protocol used throughout our
+experiments. The frozen network produces a 2563 normalized attenuation volume, which is clipped to [0, 1]. Thus,
+VP ∈ [0, 1]256×256×256 .
+(7)
+The prior network remains frozen for all test patients and is never adapted using patient-specific ground truth. All
+subjects used for DeepSparse-25 fine-tuning are disjoint from the subjects used in the reported evaluation.
+A.2
+Measurement-Driven Gaussian Prefix
+We first optimize R2 -GS using only the measured X-ray projections. Let G denote the current Gaussian representation
+and V(G) its voxelized attenuation volume. Before prior supervision is activated, the objective is
+Lbase = LL1,proj + 0.25 (1 − SSIM) + 0.05 LTV ,
+(8)
+where LTV is evaluated on a randomly sampled 323 voxelized subvolume.
+The measurement-driven prefix is optimized until iteration 10,000:
+t ≤ 10,000
+=⇒
+L(t) = Lbase .
+(9)
+No learned-prior loss is applied during this prefix. The current production configuration uses an FDK-based initialization
+with approximately 50K Gaussian primitives. Densification follows the standard R2 -GS schedule during the initial
+measurement-driven optimization and is disabled for the subsequent prior-assisted continuation.
+We use this staged schedule as the fixed reconstruction protocol throughout our experiments. We do not claim that the
+10K transition point is theoretically optimal, as a matched prior-from-initialization ablation is not part of the frozen
+experimental protocol.
+A.3
+Full-Volume Spatial Prior Supervision
+Starting from the measurement-driven prefix, we introduce full-volume spatial supervision from VP . Define
+e = V(G) − VP .
+11
+(10)
+RePrior
+P REPRINT
+For a three-dimensional volume x, we define the mean first-order spatial difference as
+3
+X
+FD(x) =
+X
+|xi+ea − xi |
+a=1 i: i+ea ∈Ω
+3
+X
+,
+(11)
+Na
+a=1
+where Na is the number of valid neighboring voxel pairs along axis a.
+The spatial prior loss is
+√
+e2 + 10−8 − 10−4
+max (⟨|VP |⟩, 10−3 )
+(12)
+FD(e)
++ 0.25
+.
+max (FD(VP ), 10−3 )
+The first term is a normalized Charbonnier volumetric discrepancy, whereas the second term constrains first-order
+spatial variations.
+Lprior =
+The complete prior-assisted objective is
+(t)
+LR2GS = LL1,proj + 0.25(1 − SSIM) + 0.05LTV
++ λP 1P (t)Lprior ,
+(13)
+with
+λP = 0.19356790574571794.
+The prior term is evaluated on the complete 2563 volume.
+A.4
+(14)
+Prior Schedule and Reference Reconstruction
+Full-volume voxelization is not performed at every optimization iteration. The prior indicator in Eq. (13) is
+1P (t) = 1 [t > 10,000 ∧ t mod qt = 0] ,
+(15)
+where
+
+qt =
+10,
+50,
+10,000 < t < 15,000,
+t ≥ 15,000.
+(16)
+The first active prior evaluation therefore occurs at iteration 10,010. The prior weight is not decayed during continuation,
+and VP remains fixed.
+The matched prior-assisted reference is taken at iteration 20,000:
+GR = G (20K) ,
+VR = V(GR ).
+(17)
+This P20 state is the reference reconstruction used by the subsequent SCP, MCR, and HRE stages. The same fixed
+Gaussian state GR also serves as the pre-correction measurement reference in the subsequent reconciliation and
+residual-enhancement stages.
+B
+Details of Selective Correction Proposal
+SCP converts the remaining discrepancy between the learned prior and the prior-assisted Gaussian reconstruction into
+an actionable signed correction. This section specifies the training target, discrepancy representation, FusionCNN
+architecture, and inference-time aggregation used in Sec. 4.2.
+B.1
+Local Correction Actionability
+Let
+d = V P − VR
+(18)
+rGT = VGT − VR
+(19)
+denote the remaining prior discrepancy, and let
+12
+RePrior
+P REPRINT
+denote the ground-truth-indicated reconstruction residual available only during training.
+For a local patch Pk and body support S, we define their local alignment as
+X
+sk =
+di rGT,i .
+(20)
+i∈Pk ∩S
+A local prior direction is labeled actionable whenever it has positive alignment with the ground-truth residual:
+a∗k = 1[sk > 0].
+(21)
+We additionally define the least-squares coefficient of the ground-truth residual along the local prior-discrepancy
+direction:
+X
+di rGT,i
+i∈P ∩S
+βk∗ =
+Xk
+d2i + 10−30
+.
+(22)
+i∈Pk ∩S
+Hence SCP learns two complementary quantities: whether a local prior direction should be acted upon, and how
+strongly that direction should be retained.
+Importantly, the regression target βk∗ is neither clipped nor masked by a∗k during training. The sign of the final correction
+is inherited from VP − VR , whereas the predicted scalar controls its magnitude.
+B.2
+Local Discrepancy Representation
+The 2563 lattice is tiled with overlapping 163 target patches using a stride of 8 voxels. For each target patch, SCP
+extracts a 243 spatial context using a four-voxel halo. A patch is retained if at least 25% of its voxels belong to the
+source-derived body support.
+The spatial input contains three raw channels,
+Xkspa = [VP , VR , VP − VR ]243 ,
+(23)
+together with a 75-dimensional scalar descriptor
+Φk ∈ R75 .
+(24)
+The descriptor summarizes multi-scale frequency structure, differential morphology, local structural statistics, direct
+prior–reconstruction disagreement, discrepancy-frequency structure, and frozen structural-anchor relations. For either
+source volume v ∈ {VP , VR }, we construct the Gaussian pyramid
+L0 = v,
+Lj = Gσj ∗ v,
+σj ∈ {1, 2, 4, 8},
+(25)
+and define five frequency bands
+B1 = L0 − L1 ,
+B2 = L1 − L2 ,
+B3 = L2 − L3 ,
+B4 = L3 − L4 ,
+B5 = L4 .
+(26)
+Their local energies are
+Ej = G1 ∗ (Bj2 ),
+T =
+5
+X
+Ej .
+(27)
+j=1
+These quantities are used to construct band-energy ratios, spectral centroids, high-to-low and mid-to-total ratios, and
+total spectral energy.
+The complete feature groups are summarized below.
+For example, the relative attenuation discrepancy is
+drel =
+|VP − VR |
+.
+max (0.5(|VP | + |VR |), 10−4 )
+13
+(28)
+RePrior
+P REPRINT
+Table 4: Composition of the 75-dimensional SCP discrepancy descriptor. All features are available at test time; ground
+truth is used only to build the training targets in Eqs. (21) and (22).
+Feature family
+Multi-scale frequency
+Dim.
+18
+Differential morphology
+38
+Local attenuation
+Direct disagreement
+2
+5
+Discrepancy spectrum
+7
+Structural-anchor relation
+5
+Total
+75
+Main quantities
+Five band-energy ratios, spectral centroid, high/low ratio, mid/total ratio,
+and total energy for VP and VR
+Gradient magnitude, surface normal, Hessian eigenstructure, structuretensor descriptors, local variance, contrast, Laplacian, and boundary
+distance
+Local attenuation values of VP and VR
+Absolute and relative attenuation discrepancy, gradient difference, normal
+disagreement, and local NCC
+Five discrepancy-band ratios, spectral centroid, and total discrepancy
+energy
+Structural-feature distance and frozen AGREE/DISAGREE/P1ONLY/P2-ONLY indicators
+Most non-negative magnitude descriptors are normalized using a casewise 95th-percentile scale within the body support
+and clipped to [0, 1]. Signed normals, bounded structural ratios, and NCC retain their natural ranges. Voxelwise feature
+fields are averaged over Pk ∩ S, after which the resulting 75-dimensional vector is imputed and standardized using
+frozen training-set statistics.
+The structural-anchor descriptors are computed from frozen source-side correspondence information. No patient-specific
+observed-ray response is used by SCP; such measurement reasoning is deferred to MCR.
+B.3
+FusionCNN and Training Objective
+SCP uses a lightweight dual-stream FusionCNN. The spatial branch processes Xkspa ∈ R3×24×24×24 using three
+3 × 3 × 3 convolutional stages,
+3 → 16 → 32 → 64,
+(29)
+with GroupNorm and ReLU activations. Two 2 × 2 × 2 max-pooling operations reduce the spatial resolution, and global
+average pooling produces a 64-dimensional representation.
+The scalar-feature branch maps the 75-dimensional descriptor through
+75 → 64 → 32.
+(30)
+The resulting 64- and 32-dimensional representations are concatenated and passed through a 96 → 64 fusion layer.
+Two scalar heads then predict a gate logit and a correction coefficient:
+(âk , β̂k ) = FSCP (Xkspa , Φk ) .
+(31)
+The complete network contains approximately 84,034 trainable parameters.
+The training objective is
+LSCP = BCEWithLogits (âk , a∗k ; w+ )
+
+
++ MSE β̂k , βk∗ ,
+(32)
+where w+ compensates for the positive/negative patch imbalance.
+We train the SCP predictor with AdamW, learning rate 10−3 , weight decay 10−4 , batch size 64, and at most 30 epochs
+with early stopping. The frozen checkpoint is trained on a multi-anatomy cohort of 155 cases, with an additional 20
+cases used for validation. Training and validation subjects are separated from the reported evaluation subjects. The
+same frozen SCP checkpoint is used for every test patient without case-specific fine-tuning. Ground truth is used
+only to construct the offline supervision targets a∗k and βk∗ during SCP training and is never accessed during test-time
+reconstruction.
+B.4
+Inference and Overlap Aggregation
+At inference time, the predicted patch coefficient is
+
+
+bk = 1 [σ(âk ) ≥ 0.5] clip β̂k , 0, 1 .
+14
+(33)
+RePrior
+P REPRINT
+For each voxel i, coefficients from all overlapping patches are uniformly averaged:
+X
+bk
+b̄i = Si
+k: i∈Pk
+|{k : i ∈ Pk }|
+.
+(34)
+No additional taper or center weighting is used.
+The final SCP correction is
+DA = b̄ ⊙ (VP − VR ),
+VA = VR + DA .
+(35)
+The support of DA specifies where a correction is proposed, its sign is inherited from the learned-prior discrepancy, and
+its magnitude is controlled by the predicted actionable coefficient.
+C
+Details of Measurement-Constrained Reconciliation
+The main paper describes MCR through the abstract optimization
+min ∥DB (c) − DA ∥22
+Cmeas (r0 − Hc) ≤ 0,
+s.t.
+c
+c ∈ Cphys .
+(36)
+This section specifies how the structured correction DB (c), the patient-specific response matrix H, and the measurement
+constraints are instantiated in the production system.
+MCR first establishes a coarse patient-specific, measurement-aware correction, then parameterizes the remaining SCP
+correction using regional recovery and signed compensation modes. The latter are the variable modes represented by c
+in Eq. (36).
+C.1
+Patient-Specific Measurement Representation
+Let N denote the native 25-view prediction of the fixed Prior-R2 -GS reference state GR , and let Y denote the
+corresponding observed measurements. The native Gaussian prediction is used as the measurement baseline.
+Incremental volumetric corrections are evaluated using a calibrated linear TIGRE projector Pcal . The initial native
+residual is
+r = Y − N.
+(37)
+We deliberately distinguish the native Gaussian prediction N from a voxelized-volume replay: in general,
+N ̸= Pcal (VR ).
+(38)
+Instead, Pcal is used to model the incremental response induced by the volumetric correction modes.
+C.2
+Coarse Measurement-Aware Correction
+We first partition the 2563 lattice into 64 non-overlapping 643 blocks Qj . Within block Qj , define the local SCP
+correction
+dj = 1Qj DA .
+(39)
+When ∥dj ∥2 > 0, the normalized desired direction is
+dj
+.
+∥dj ∥2
+(40)
+mj = 1Qj S
+(41)
+qj =
+Let
+denote the corresponding body-support direction. To introduce a coarse compensation degree of freedom that is distinct
+from qj , we orthogonalize mj with respect to qj :
+ũj = mj − ⟨qj , mj ⟩qj ,
+(42)
+and, whenever ∥ũj ∥2 > 0,
+uj =
+ũj
+.
+∥ũj ∥2
+15
+(43)
+RePrior
+P REPRINT
+The target coefficient for a desired direction is ∥dj ∥2 , whereas the target coefficient for its orthogonal body direction is
+zero. Let x⋆ denote this target coefficient vector, and let H0 collect the calibrated X-ray responses of the corresponding
+coarse modes. For a fixed regularization value λ, the coarse coefficients are obtained from
+1
+λ
+x0 (λ) = arg min ∥x − x⋆ ∥22 + 2 ∥r − H0 x∥22 ,
+x 2
+2s
+(44)
+s2 = λmax (H0⊤ H0 ).
+(45)
+where
+Equivalently, x0 (λ) satisfies
+
+I+
+
+λ ⊤
+λ ⊤
+⋆
+H
+H
+0 x = x + 2 H0 r.
+s2 0
+s
+(46)
+A frozen ridge ladder followed by direct projection checks selects a measurement-compatible coefficient configuration.
+The resulting direction is additionally restricted along an exact feasible scalar interval before it is used by the subsequent
+regional stage. We denote the resulting coarse correction by
+X
+X body
+D0 =
+xdes
+xj uj .
+(47)
+j qj +
+j
+j
+Thus D0 is a patient-specific, measurement-aware coarse realization of the SCP proposal rather than a learned
+reconstruction module.
+C.3
+Regional Recovery Modes
+After establishing D0 , we define the remaining SCP correction as
+EA = DA − D0 .
+(48)
+The volume is partitioned into 512 non-overlapping 323 regions Rk . A region is active when its residual correction has
+non-negligible norm.
+For an active region,
+nk = ∥EA,k ∥2 .
+EA,k = 1Rk EA ,
+(49)
+We construct the unit-ℓ2 recovery basis
+ψk =
+1Rk EA
+,
+nk
+(50)
+with coefficient constraint
+0 ≤ xk ≤ nk .
+The full recovery of region Rk is therefore obtained at
+xfull
+k = nk ,
+nk ψk = 1Rk EA .
+(51)
+(52)
+This normalization separates the response-space basis direction from the actual magnitude of the proposed regional
+correction.
+C.4
+Signed Compensation Modes
+Regional recovery modes only preserve or suppress the residual SCP direction. To provide limited attenuationredistribution freedom under the X-ray constraints, we additionally construct signed compensation modes.
+Within an active region, define the positive and negative residual masses
+p(x) = max(EA (x), 0) S(x),
+n(x) = max(−EA (x), 0) S(x).
+When both contain sufficient mass, their centroids are
+P
+P
+x p(x)
+x n(x)
+x
+µ+ = P
+,
+µ− = Px
+.
+x p(x)
+x n(x)
+(53)
+(54)
+(55)
+We retain the pair only when
+∥µ+ − µ− ∥2 ≥ 4
+16
+(56)
+RePrior
+P REPRINT
+voxels.
+We then construct two support-masked isotropic spatial Gaussian lobes
+
+
+∥x − µ± ∥22
+S(x),
+g± (x) = exp −
+2σ 2
+σ = 6.
+(57)
+The approximately mass-balanced signed mode is
+g+
+g−
+−P
+.
+x g+ (x)
+x g− (x)
+ψjpair = P
+(58)
+These Gaussian lobes are purely spatial basis functions and are unrelated to the R2 -GS Gaussian primitives optimized
+in HRE.
+To bound the compensation amplitude, let
+f = min(VR + DA , VR + D0 )
+(59)
+elementwise, and define the global attenuation floor
+zmin = min(VR + D0 )i .
+i
+(60)
+The maximal admissible local amplitude implied by this floor is
+h=
+Let
+m=
+fi − zmin
+min
+i:ψipair ̸=0
+X
+|ψipair |
+.
+max(VR (i), 0)Si .
+(61)
+(62)
+i∈Rk
+The pair amplitude is
+a = min (0.20m, 0.5 max(h, 0)) .
+(63)
+ϕj
+,
+∥ϕj ∥2
+(64)
+We define
+ϕj = aψjpair ,
+bj =
+with signed coefficient bound
+−∥ϕj ∥2 ≤ zj ≤ ∥ϕj ∥2 .
+(65)
+At most 256 candidate pairs are constructed. A frozen source-only response-space screening procedure retains at most
+64 compensation modes. The purpose of these modes is to introduce controlled signed redistribution freedom; we do
+not assume that an arbitrary pair of individually conflicting corrections becomes feasible when combined.
+C.5
+Joint Structured Reconciliation
+Combining the coarse correction, regional recovery modes, and signed compensation modes yields the raw structured
+correction family
+X
+X
+Draw (x, z) = D0 +
+xk ψk +
+zj bj .
+(66)
+k∈K
+j∈J
+Let Bm denote any variable recovery or compensation basis. Its patient-specific X-ray response is
+hm = Pcal (Bm ),
+(67)
+H = [h1 , . . . , hM ].
+(68)
+and
+After the coarse correction, the measurement residual becomes
+r0 = Y − N − Pcal (D0 ).
+(69)
+c = [x; z],
+(70)
+For coefficient vector
+17
+RePrior
+P REPRINT
+the predicted residual is
+r(c) = r0 − Hc.
+(71)
+The exact production objective is
+2
+min
+c
+subject to group-wise measurement constraints
+X
+∥D0 + Bc − DA ∥2
+,
+2∥EA ∥22
+(72)
+2
+∥r0,v − Hv c∥2 ≤ TG ,
+(73)
+v∈G
+and the recovery and compensation coefficient bounds defined above.
+The denominator in Eq. (72) is constant for a given patient and therefore does not alter the minimizer. This exact
+formulation corresponds to the simpler unnormalized objective used in the main paper.
+The observed views are partitioned into the complete 25-view set, a 20-view fitting subset, and a fixed 5-view calibration
+subset. Their SSE limits relative to the native reference are
+Tfull25 = SSEfull25 (N ),
+Tfit20 = SSEfit20 (N )100.05/10 ,
+Tcal5 = SSEcal5 (N )10
+0.05/10
+(74)
+,
+while each individual observed view satisfies
+SSEv ≤ SSEv (N )100.15/10 .
+(75)
+The regional and recovery-plus-compensation problems are solved with SLSQP, using a Phase-I feasibility step followed
+by target minimization, at most 1500 iterations per start, and ftol = 10−12 . All candidate solutions are subsequently
+replayed with the production projector before being accepted.
+C.6
+Physical Repair and Final Certification
+The structured solve does not constrain every voxel of the raw candidate to be non-negative. Since DB is a signed
+correction, the physical requirement is instead
+VB = VR + DB ≥ 0.
+(76)
+raw
+VBraw = VR + DB
+.
+(77)
+Vclip = max(VBraw , 0).
+(78)
+Let
+We first construct the zero-clipped target
+Because clipping changes the measurement response, this volume is not accepted directly. Starting from an already
+certified repaired coarse anchor VB0 , we search along
+V (t) = VB0 + t (Vclip − VB0 ) ,
+0 ≤ t ≤ 1,
+(79)
+for the feasible point that best preserves the target correction.
+Equivalently, in correction space,
+DB = DB0 + t (Dclip − DB0 ) .
+(80)
+The repaired candidate is reprojected and must pass all inherited measurement constraints, body-support checks,
+numerical-validity checks, and non-negativity. The resulting volume
+VB = VR + DB ≥ 0
+is the measurement-feasible anchor used by HRE.
+18
+(81)
+RePrior
+Algorithmic summary.
+P REPRINT
+MCR can be summarized as follows:
+1. Construct a coarse 643 measurement-aware correction D0 .
+2. Compute the unresolved SCP correction EA = DA − D0 .
+3. Construct normalized 323 regional recovery modes.
+4. Construct and screen signed spatial compensation modes.
+5. Compute patient-specific X-ray responses for all variable modes.
+6. Jointly optimize their coefficients under group-wise and per-view measurement constraints.
+7. Replay candidate corrections with the production projector.
+8. Enforce non-negative attenuation through a measurement-feasible line repair and certify the final VB .
+D
+Details of Hybrid Residual Enhancement
+MCR deliberately establishes measurement feasibility in a restricted structured correction space. HRE subsequently
+introduces bounded voxel- and Gaussian-domain residual freedom around this feasible anchor. This section specifies
+the residual representation, local-response optimization, measurement guards, and endpoint selection referenced in
+Sec. 4.4.
+D.1
+Residual Correction and Gaussian Reference
+The correction realized by MCR is
+DB = VB − VR .
+(82)
+RB = DA − DB = VA − VB .
+(83)
+The remaining SCP correction is therefore
+We make no assumption that RB is measurement-feasible on its own.
+The Gaussian reference used throughout HRE is the matched P20 Prior-R2 -GS checkpoint,
+(20K)
+Gref = GR
+.
+(84)
+It is not a Gaussian representation refitted to VB . Its topology remains fixed throughout HRE, with no densification or
+pruning.
+D.2
+Hybrid Voxel–Gaussian Residual Representation
+The voxel branch directly moves along the unresolved SCP direction:
+∆Vvox (α) = αRB ,
+0 ≤ α ≤ 1.
+(85)
+In parallel, let Gθ denote the bounded Gaussian state obtained from Gref . Because Gaussian parameter changes are
+nonlinear after voxelization, we measure their actual volumetric contribution using the production voxelizer:
+∆VG (θ) = Vprod (Gθ ) − Vprod (Gref ).
+(86)
+VC (α, θ) = VB + αRB + ∆VG (θ).
+(87)
+The hybrid candidate is therefore
+The source target is the SCP endpoint VA . We define the normalized source objective
+LA (V ) =
+∥V − VA ∥22
+.
+∥VA − VB ∥22
+(88)
+Thus LA (VB ) = 1. HRE seeks additional source recovery while preserving the measurement feasibility inherited from
+MCR.
+19
+RePrior
+P REPRINT
+Table 5: Gaussian trust bounds used by HRE.
+Quantity
+Position
+Attenuation / density
+Per-axis scale
+Physical scale
+Rotation
+Topology
+D.3
+Constraint
+∥∆xi ∥2 ≤ 0.2 normalized scene units
+log(ρi /ρref
+i ) ≤ 0.1
+log(si,a /sref
+i,a ) ≤ 0.1
+0.001 ≤ si,a ≤ 1
+geodesic change ≤ 10◦
+fixed; no densification or pruning
+Certified Scalar Recovery
+Before introducing Gaussian residual freedom, we first consider the pure voxel path
+0 ≤ α ≤ 1.
+V (α) = VB + αRB ,
+(89)
+We find the largest actually certified scalar coefficient α⋆ and define
+V⋆ = VB + α⋆ RB .
+(90)
+The scalar search uses the quadratic measurement response only to obtain an upper bound; final feasibility is determined
+by real forward projection and bisection. Consequently, V⋆ is selected without access to ground truth or held-out views
+and becomes the starting anchor of the coupled voxel–Gaussian refinement.
+D.4
+Bounded Gaussian Residual Space
+HRE allows bounded updates to Gaussian position, attenuation, scale, and rotation while preserving the P20 topology.
+The trust region relative to Gref is summarized in Table 5.
+These bounds allow the Gaussian branch to redistribute residual attenuation through primitive geometry and support
+without reopening an unrestricted patient-specific Gaussian reconstruction.
+D.5
+Local-Response Optimization
+Rather than jointly optimizing all Gaussian parameters with a conventional fixed-learning-rate optimizer, HRE constructs
+a low-dimensional local response space at every outer iteration.
+Up to four high-shortfall 323 regions contribute local density directions, together with one global density direction and
+up to three regional geometry directions. Each direction is derived from the negative gradient of the source objective
+with respect to the raw Gaussian parameters, with parameter-group scaling inherited from the frozen P20 optimizer
+state. After normalization, at most eight Gaussian directions are retained.
+Let these directions be {dk }K
+k=1 , K ≤ 8. A local Gaussian update is represented as
+∆p =
+K
+X
+γk dk ,
+(91)
+k=1
+with
+∥γ∥1 ≤ 1.
+(92)
+The voxel coefficient is simultaneously updated within
+|∆α| ≤ 0.125 η,
+0 ≤ α ≤ 1,
+(93)
+where η is the current trust scale.
+HRE builds a local quadratic approximation of the source objective and of the measurement responses over the voxel
+direction and the selected Gaussian directions. A bounded local QCQP proposes the joint coefficient update.
+Importantly, this local solution is only a proposal. Every candidate is subsequently reconstructed with the production
+voxelizer and evaluated using the actual X-ray forward model. The response approximation therefore improves search
+efficiency without replacing the physical certification step.
+20
+RePrior
+D.6
+P REPRINT
+Measurement Guards
+HRE evaluates every real candidate under two calibrated projection scales,
+s ∈ {cert, common}.
+(94)
+The cert scale uses the frozen per-view calibration employed for certification, whereas the common scale uses a
+case-specific global scale fixed during preflight from the reference Gaussian prediction.
+For scale s and view group G, define
+Ss,G (V ) =
+X
+2
+∥Ps (V )v − Yv ∥2 .
+(95)
+v∈G
+ref
+Let Ss,G
+denote the corresponding SSE of the fixed pre-correction reference prediction produced by GR under scale s.
+For
+G ∈ {full25, fit20, cal5},
+(96)
+h
+i
+−7
+B
+ref
+Ts,G
+= min Ss,G
+ρG , Ss,G (VB )102×10 /10 ,
+(97)
+HRE first inherits the MCR-stage cap
+where
+ρfit20 = ρcal5 = 100.05/10 .
+ρfull25 = 1,
+After the certified scalar anchor V⋆ has been established, the coupled HRE cap is tightened to
+h
+i
+−7
+C
+B
+Ts,G
+= min Ts,G
+, Ss,G (V⋆ )102×10 /10 .
+(98)
+(99)
+For every individual observed view,
+ref
+Ss,v (VC ) ≤ Ss,v
+100.15/10 .
+(100)
+All pooled and per-view constraints must hold under both calibration scales.
+These constraints instantiate the measurement guards referred to in Sec. 4.4: HRE is allowed to expand representation
+freedom only within the measurement envelope already established by MCR and the certified scalar recovery.
+D.7
+Spatial and Physical Validity Constraints
+Let O = ¬S denote the region outside the source-derived support, and define the fixed normalization
+ZO = ∥VR [O]∥2 .
+(101)
+We constrain both the total outside-support deviation and the additional deviation introduced after MCR:
+∥(VC − VR )[O]∥2
+≤ Ltotal ,
+ZO
+(102)
+∥(VC − VB )[O]∥2
+≤ 0.005.
+ZO
+(103)
+and
+When VB already satisfies the 0.005 total bound, Ltotal = 0.005; otherwise the measured deviation of VB is retained as
+the compatibility anchor.
+Every candidate must additionally be finite and satisfy
+min VC ≥ −10−7 .
+No post-hoc volume clipping is applied in HRE.
+21
+(104)
+RePrior
+D.8
+P REPRINT
+Candidate Acceptance and Endpoint Selection
+For every local QCQP proposal, HRE evaluates the backtracking fractions
+1 1 1 1 1 1
+, , ,
+,
+,
+.
+(105)
+2 4 8 16 32 64
+Each candidate is re-voxelized and reprojected. It is accepted only if all Gaussian trust bounds, pooled measurement
+guards, per-view constraints, spatial-support constraints, and numerical checks are satisfied.
+1,
+A candidate is accepted directly when the source objective improves by more than 2 × 10−7 . If the source objectives
+agree within this tolerance, the candidate is accepted only when its common-scale full-25-view SSE improves beyond
+the repeatability margin.
+If a round is rejected, the previous certified Gaussian state is restored and the trust scale is reduced. The production
+configuration uses at most 30 outer rounds, at most 100 iterations for each local QCQP, ftol = 10−12 , and a 1200-second
+wall-time budget. Optimization also terminates after six consecutive failed rounds or when the trust scale becomes
+smaller than 1/64.
+All accepted states, including the scalar-only state V⋆ , are certified before endpoint selection. Eligibility requires
+LA (V ) ≤ LA (V⋆ ) + 2 × 10−7 .
+(106)
+Among eligible candidates, the final state is selected lexicographically by
+(LA , Scommon,full25 , outer index) .
+(107)
+Thus source fidelity is prioritized first, followed by common-scale measurement consistency and a deterministic iteration
+tie-break. If no coupled Gaussian update improves upon the certified scalar anchor, V⋆ is retained.
+The final reconstruction is the hybrid attenuation volume
+V ∗ = VC (α∗ , θ∗ ).
+(108)
+Both ground truth and held-out views remain excluded from HRE optimization and endpoint selection.
+Algorithmic summary.
+HRE can be summarized as follows:
+1. Compute RB = VA − VB .
+2. Determine the largest measurement-certified scalar voxel recovery and obtain V⋆ .
+3. Generate a small set of gradient-derived Gaussian residual directions.
+4. Build a local voxel–Gaussian response model and solve the bounded QCQP.
+5. Apply the proposed update using backtracking.
+6. Re-voxelize and reproject every real candidate.
+7. Accept only candidates that satisfy all measurement, support, numerical, and Gaussian trust constraints.
+8. Repeat until the stopping criterion is reached.
+9. Select the final source-first certified endpoint and output V ∗ .
+22
+RePrior
+E
+P REPRINT
+Additional qualitative results
+To complement the quantitative results in the main paper, we provide additional qualitative comparisons on LUNA16,
+PANORAMA, and PENGWIN in Figs S1- S6. The supplementary figures below show additional slices and viewing
+planes. Columns correspond to SAX-NeRF, X-Gaussian, R2 -GS, Exact-GS, DeepSparse-10, DeepSparse-25, RePrior,
+and the ground truth (GT).
+Figure S1: Additional qualitative results on LUNA16 (Part I). Each row shows an additional representative slice,
+while columns compare SAX-NeRF, X-Gaussian, R2 -GS, Exact-GS, DeepSparse-10, DeepSparse-25, RePrior, and GT.
+23
+RePrior
+P REPRINT
+Figure S2: Additional qualitative results on LUNA16 (Part II). Additional slices and viewing planes using the same
+method ordering as in Fig. S1.
+24
+RePrior
+P REPRINT
+Figure S3: Additional qualitative results on PANORAMA (Part I). Each row shows an additional representative
+slice, while columns compare SAX-NeRF, X-Gaussian, R2 -GS, Exact-GS, DeepSparse-10, DeepSparse-25, RePrior,
+and GT.
+25
+RePrior
+P REPRINT
+Figure S4: Additional qualitative results on PANORAMA (Part II). Additional slices and viewing planes using the
+same method ordering as in Fig. S3.
+26
+RePrior
+P REPRINT
+Figure S5: Additional qualitative results on PENGWIN (Part I). Each row shows an additional representative slice,
+while columns compare SAX-NeRF, X-Gaussian, R2 -GS, Exact-GS, DeepSparse-10, DeepSparse-25, RePrior, and GT.
+27
+RePrior
+P REPRINT
+Figure S6: Additional qualitative results on PENGWIN (Part II). Additional slices and viewing planes using the
+same method ordering as in Fig. S5.
+28

@@ -1,0 +1,180 @@
+# Panoptic Neural Fields (PNF)
+
+
+## Overview
+Panoptic Neural Fields (PNF) is an object-aware neural scene representation that decomposes a dynamic 3D scene into a set of discrete objects ("things") and an amorphous background ("stuff"), predicting a panoptic-radiance field for color, density, instance, and category labels at any point in time [S1]. Unlike [Panoptic Radiance Field](15849-panoptic-radiance-field.md) and [Category-Level Semantic NeRF](20302-category-level-semantic-nerf.md), which are not object-aware and cannot handle dynamic scenes, PNF explicitly models moving objects using separate MLPs per instance within dynamic bounding boxes, enabling joint optimization of 3D shape, appearance, semantics, and object poses from RGB images alone [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A sequence of RGB images. No 3D supervision or ground-truth semantic labels are required during training [S1]. Off-the-shelf algorithms provide camera parameters, 2D semantic segmentations, and 3D object detections (oriented bounding boxes with category labels) [S1].
+*   **Outputs:** For a query $(x, d, t)$ where $x \in \mathbb{R}^3$ is position, $d \in \mathbb{R}^3$ is view direction, and $t \in \mathbb{R}$ is time, the model outputs color $c$, density $\sigma$, semantic label $s$, and instance label $i$ [S1].
+
+**Data Structures**
+The scene is composed of two types of neural functions:
+1.  **Things (Foreground Objects):**
+    *   Represented by a separate, time-invariant MLP for each object instance $k$.
+    *   Each MLP operates within a local domain defined by a dynamic 3D oriented bounding box.
+    *   The bounding box track $T_k$ is parameterized by a sequence of transformation matrices at discrete timestamps. For each timestamp, parameters include a rotation matrix $R \in \mathbb{R}^{3 \times 3}$, a translation vector $t \in \mathbb{R}^3$, and a time-invariant box extent $s \in \mathbb{R}^3$ [S1].
+2.  **Stuff (Background):**
+    *   Represented by a single static MLP (or separate foreground/background MLPs for large scenes) [S1].
+    *   Architecture is similar to NeRF but includes an additional direction-invariant head for semantic logits [S1].
+
+**Numbered Steps**
+1.  **Input Preparation:** Employ off-the-shelf algorithms to predict camera parameters, 2D semantic segmentations for all images, and a set of 3D object detections with 3D oriented bounding boxes and category labels [S1].
+2.  **Initialization:** Initialize the weights of the MLPs for the panoptic neural field model. This can be done using object category-specific meta-learned initialization or a simple biased initialization of density activation layers [S1].
+3.  **Track Interpolation:** To determine the coordinate frame of an object at an arbitrary real-valued timestamp $t$, interpolate the discrete track steps (rotation $R$, translation $t$, extent $s$) [S1].
+4.  **Coordinate Transformation:** For a query point $x$ and time $t$, transform the position from the world frame to the bounding box frame of the relevant object instance $k$ using the interpolated track $T_k^{-1}$ [S1].
+5.  **Field Evaluation:** Query the respective MLPs (thing or stuff) to obtain density, color, semantic, and instance outputs.
+6.  **Aggregation:** Combine outputs from all active bounding boxes and the background field to form the final panoptic-radiance field [S1].
+7.  **Optimization:** Jointly optimize the bounding box parameters (poses) and MLP weights to minimize analysis-by-synthesis style losses measuring differences in synthesized color and semantic images [S1].
+
+**Formulas**
+The final panoptic-radiance field for any output channel (e.g., color $c$) is computed by aggregating contributions from bounding box hits, defaulting to the stuff output if there is no intersection [S1]:
+
+$$
+c(x | \theta) = \mathbb{1}_S(x) c_s(x | \theta) + \sum_k c_k(T_k^{-1} x | \theta)
+$$
+
+Where:
+*   $\mathbb{1}_S(x)$ is 1 if and only if the point $x$ intersects no bounding boxes, and 0 otherwise.
+*   $c_s$ is the stuff color field.
+*   $c_k$ is the thing color field for object instance $k$.
+*   $T_k^{-1}$ is the inverse transformation of the bounding box track for object $k$ at the query time.
+*   $\theta$ denotes the MLP weights for both stuff and thing MLPs.
+*   For other fields (density, semantic, instance), substitute radiance $c$ with the respective function [S1].
+
+**Parameters**
+*   **Optimization Targets:** MLP weights and bounding box parameters (object poses) [S1].
+*   **Typical Values:** Not given in the sources.
+
+**Pitfalls**
+*   **Rotation Orthogonality:** Optimizing rotation matrices requires maintaining orthogonality. After each gradient descent step, orthogonalize $R$ using Singular Value Decomposition (SVD) to project it back onto the special orthogonal group SO(3) [S1].
+*   **Shared MLPs:** Previous methods that share MLPs for multiple objects limit the ability to reproduce specific discrete instances. PNF avoids this by using separate MLPs per instance, which allows each MLP to be smaller and faster, leveraging category-specific priors via meta-learned initialization [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def orthogonalize_R(R):
+    """
+    Orthogonalize a rotation matrix R using SVD to project back onto SO(3).
+    """
+    U, S, Vt = np.linalg.svd(R)
+    return U @ Vt
+
+def interpolate_track(track, t):
+    """
+    Interpolate the discrete track steps to find the transformation at time t.
+    track is a list of dicts, each containing 'R', 't', 's' at specific timestamps.
+    Returns the interpolated R, t, s for time t.
+    Note: Specific interpolation method (e.g., linear, spline) is not detailed in sources.
+    """
+    # Placeholder for interpolation logic
+    # Find surrounding timestamps and interpolate R, t, s
+    pass
+
+def query_pnf(x, d, t, things, stuff_mlp):
+    """
+    Query the Panoptic Neural Field for color, density, semantic, and instance.
+    things: List of dicts, each containing 'mlp', 'track', 'instance_id', 'category'.
+    stuff_mlp: The MLP for the background stuff.
+    """
+    # Check intersection with bounding boxes
+    intersecting_things = []
+    for thing in things:
+        # Get interpolated transform for this thing at time t
+        R, trans, s = interpolate_track(thing['track'], t)
+        
+        # Transform point to local box frame
+        # x_local = R^T * (x - trans)
+        # Note: Source uses T_k^-1 x. Assuming T_k is the transform from local to world.
+        # T_k^-1 involves rotation transpose and translation negation.
+        x_local = R.T @ (x - trans)
+        
+        # Check if x_local is within box extent s
+        if np.all(np.abs(x_local) <= s):
+            intersecting_things.append((thing, x_local))
+    
+    # Aggregate results
+    # Default to stuff if no intersection
+    if not intersecting_things:
+        return stuff_mlp.query(x, d)
+    
+    # Sum contributions from intersecting things
+    # Note: Source formula sums c_k(T_k^-1 x). 
+    # In volumetric rendering, this usually implies alpha compositing, 
+    # but the formula provided is a direct sum for the field value itself.
+    # We follow the formula strictly.
+    
+    final_color = np.zeros(3)
+    final_density = 0.0
+    final_semantic = np.zeros(num_classes)
+    final_instance = -1
+    
+    for thing, x_local in intersecting_things:
+        # Query thing MLP
+        c_k, sigma_k, s_k, i_k = thing['mlp'].query(x_local, d)
+        
+        # Accumulate
+        final_color += c_k
+        final_density += sigma_k
+        # Semantic and instance aggregation logic depends on specific rendering setup
+        # Source formula implies direct sum for the field definition
+        final_semantic += s_k 
+        final_instance = i_k # Overwrite or handle conflict; source doesn't specify conflict resolution
+        
+    # Add stuff contribution if no intersection (handled by if/else above)
+    # If there are intersections, the formula implies the stuff term is 0 (1_S(x) = 0)
+    
+    return final_color, final_density, final_semantic, final_instance
+
+def optimize_pnf(images, semantic_preds, things, stuff_mlp, optimizer):
+    """
+    Jointly optimize bounding box and MLP parameters.
+    """
+    for image, semantic_pred in zip(images, semantic_preds):
+        # Render image from current camera pose
+        rendered_color, rendered_semantic = render_image(image.camera_pose, things, stuff_mlp)
+        
+        # Compute losses
+        color_loss = loss_function(rendered_color, image.rgb)
+        semantic_loss = loss_function(rendered_semantic, semantic_pred)
+        total_loss = color_loss + semantic_loss
+        
+        # Backpropagate
+        total_loss.backward()
+        
+        # Update parameters
+        optimizer.step()
+        
+        # Orthogonalize rotation matrices for all things
+        for thing in things:
+            thing['track'].R = orthogonalize_R(thing['track'].R)
+        
+        optimizer.zero_grad()
+```
+
+## Subtopics
+
+### Panoptic Radiance Field
+A method for panoptic segmentation in radiance fields. PNF differs by being object-aware and handling dynamic scenes, whereas Panoptic Radiance Field is not object-aware and cannot handle dynamic scenes [S1].
+
+### Category-Level Semantic NeRF
+A method for semantic NeRF. PNF differs by explicitly decomposing scenes into dynamic objects and background with separate MLPs, whereas Category-Level Semantic NeRF is not object-aware and cannot handle dynamic scenes [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources. However, using separate MLPs per instance allows each MLP to be smaller and faster than shared MLPs, speeding inference in scenes with many objects [S1].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Object-aware representation handles multiple moving objects; separate MLPs per instance allow overfitting to specific novel objects; smaller MLPs per instance speed up inference; uses meta-learned initialization for category-specific priors [S1].
+*   **Limitations:** Requires off-the-shelf algorithms for initial camera poses, semantic segmentations, and 3D object detections; optimization of rotation matrices requires SVD orthogonalization after each step [S1].
+*   **When to use:** Novel view synthesis, 2D panoptic segmentation, 3D scene editing, and multiview depth prediction on dynamic scenes [S1].
+*   **When not:** Static scenes without semantic requirements may not benefit from the complexity; scenes where off-the-shelf detection/segmentation fails may lead to poor initialization [S1].
+
+## Background
+Panoptic Neural Fields were introduced by Google Research, Georgia Tech, Simon Fraser University, and Stanford University in a paper presented at CVPR 2022 [S1]. The work addresses limitations of previous object-aware frameworks that do not produce panoptic segmentations, learn from scratch for every scene, and share MLPs for multiple objects, limiting their ability to reproduce specific instances [S1]. It builds on NeRF [37] and extends it to semantic and panoptic understanding in dynamic scenes [S1].
+
+## Sources
+[S1] Panoptic Neural Fields: A Semantic Object-Aware Neural Scene Representation, https://doi.org/10.1109/cvpr52688.2022.01253, fetched 2026-10-26

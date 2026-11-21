@@ -1,0 +1,390 @@
+# Neural Radiative Transfer via Physics-Informed Optimization
+
+Also called: Joint Light Field and Material Optimization, Neural Inverse Rendering for Participating Media, Neural RTE Inverse Rendering, Volumetric Inverse Rendering, Volumetric Inverse Rendering with Neural Radiative Transfer
+
+## Overview
+This method reconstructs the spatially varying optical properties (absorption, scattering, phase function) and the light field of heterogeneous participating media from multi-view RGB images [S1, S2]. It solves the inverse rendering problem for participating media by jointly optimizing a neural light field and a neural material field, enforcing the Radiative Transfer Equation (RTE) as a physics-informed constraint [S1]. Unlike differentiable stochastic light transport methods that require independent simulation per iteration, this approach amortizes global illumination costs by learning a continuous light field representation [S1]. It differs from surface-based PINN inverse rendering by enforcing light transport locally throughout the volume via pointwise RTE constraints rather than stochastic ray sampling [S2].
+
+## How it works
+**Inputs:** A set of posed RGB images $\{I_k\}$ providing multi-view observations. Known and fixed environment illumination is assumed [S1, S2].
+
+**Outputs:** Neural field parameters $\theta$ for the light field $L_\theta$ and $\phi$ for the medium field $M_\phi$ [S1].
+
+**Data Structures:**
+1.  **Neural Light Field ($L_\theta$):** A function $L_\theta: (\mathbf{x}, \boldsymbol{\omega}) \rightarrow \mathbb{R}^3$ encoding spatio-angular radiance. Implemented as a SIREN network [S1, S2].
+2.  **Neural Medium Field ($M_\phi$):** A function $M_\phi: \mathbf{x} \rightarrow (\sigma_a, \sigma_s, g)$ encoding absorption $\sigma_a(\mathbf{x})$, scattering $\sigma_s(\mathbf{x})$, and the Henyey-Greenstein anisotropy parameter $g(\mathbf{x})$. Implemented as a SIREN network [S1, S2].
+3.  **Phase Function ($f_p$):** Spatially varying Henyey-Greenstein function parameterized by $g$ from $M_\phi$ [S1].
+4.  **Initialization Model ($F_\xi$):** A neural hash grid architecture used in Stage 1 to provide high-frequency initialization for density [S1].
+
+**Parameters:**
+*   $\lambda_{BC} = 1$ [S1]
+*   $\lambda_{obs} = 1$ [S1]
+*   $\lambda_{VRE} = 70$ [S1]
+*   Optimizer: Adam with default settings [S1].
+*   Collocation points for RTE: 10,000 [S1].
+*   Directional samples for in-scattering: 32 [S1].
+*   Boundary samples: 10,000 [S1].
+*   Samples per viewing ray for VRE: 100 [S1].
+
+**Steps:**
+
+1.  **Initialization (Stage 1):** Train an emission-absorption reconstruction model $F_\xi$ using a neural hash grid architecture on the input images [S1]. Discard the color output of $F_\xi$ as it represents a non-physical emission term [S1].
+
+2.  **Representation Setup:** Initialize $L_\theta$ and $M_\phi$ as SIREN networks [S1]. The medium field $M_\phi$ multiplicatively modulates the density output of $F_\xi$ to provide high-frequency initialization for the volumetric structure [S1].
+    *   Enforce positivity of $\sigma_a$ and $\sigma_s$ via exponential mapping: $\sigma_a = \exp(\hat{\sigma}_a)$, $\sigma_s = \exp(\hat{\sigma}_s)$ [S1].
+    *   Bound the anisotropy parameter $g$ using a hyperbolic tangent: $g = \tanh(\hat{g})$ [S1].
+    *   Compute extinction coefficient: $\sigma_t(\mathbf{x}) = \sigma_a(\mathbf{x}) + \sigma_s(\mathbf{x})$ [S1, S2].
+
+3.  **Physics-Informed Optimization:** Minimize the total loss $L(\theta, \phi)$ using Adam [S1]. The loss consists of four terms:
+
+    *   **RTE Residual Loss ($L_{RTE}$):** Enforces the steady-state RTE at collocation points $(\mathbf{x}, \boldsymbol{\omega})$ [S1, S2].
+        $$L_{RTE}(\theta, \phi) = \mathbb{E}_{\mathbf{x},\boldsymbol{\omega}} \left[ \left( \boldsymbol{\omega} \cdot \nabla \right) L_\theta(\mathbf{x}, \boldsymbol{\omega}) + \sigma_t(\mathbf{x}) L_\theta(\mathbf{x}, \boldsymbol{\omega}) - \sigma_s(\mathbf{x}) \int_{S^2} f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}') L_\theta(\mathbf{x}, \boldsymbol{\omega}') d\boldsymbol{\omega}' \right]^2$$
+        *   The directional derivative $(\boldsymbol{\omega} \cdot \nabla) L_\theta$ is evaluated using automatic differentiation [S1, S2].
+        *   The in-scattering integral is approximated using Monte Carlo sampling over the angular domain $S^2$ at each spatial location $\mathbf{x}$, without ray tracing [S1, S2].
+        *   Independent samples are drawn for forward and backward passes to avoid optimization gradient bias [S1].
+
+    *   **Boundary Condition Loss ($L_{BC}$):** Enforces inflow boundary conditions on the light field [S1].
+        *   Define the inflow boundary domain $\Gamma = \{ (\mathbf{x}, \boldsymbol{\omega}) \mid \mathbf{x} \in \partial B, \boldsymbol{\omega} \in S^2, \boldsymbol{\omega} \cdot \mathbf{n}_B(\mathbf{x}) < 0 \}$, where $\partial B$ is the scene boundary and $\mathbf{n}_B$ is the outward unit normal [S1, S2].
+        $$L_{BC}(\theta) = \mathbb{E}_{(\mathbf{x},\boldsymbol{\omega})\in\Gamma} \left[ \| L_{in}(\mathbf{x}, \boldsymbol{\omega}) - L_\theta(\mathbf{x}, \boldsymbol{\omega}) \|^2 \right]$$
+        where $L_{in}$ is the incoming radiance from environment illumination [S1].
+
+    *   **Observation Loss ($L_{obs}$):** Constrains the light field at camera locations [S1].
+        $$L_{obs}(\theta) = \mathbb{E}_{k,q} \left[ I_k(q) - L_\theta(\mathbf{o}_k, -\boldsymbol{\omega}_k(q)) \right]^2$$
+        where $\mathbf{o}_k$ is the camera center and $\boldsymbol{\omega}_k(q)$ is the viewing direction for pixel $q$ in image $I_k$ [S1].
+
+    *   **Volume Rendering Equation Loss ($L_{VRE}$):** Introduces non-local constraints to counteract the low-frequency bias of neural networks [S1].
+        $$L_{VRE}(\theta, \phi) = \mathbb{E}_{k,q} \left[ I_k(q) - \int_0^{t_b} \left( \int_{S^2} \sigma_s(\mathbf{x}_t) \exp\left(-\int_0^t \sigma_t(\mathbf{x}_s) ds\right) L_\theta(\mathbf{x}_t, \boldsymbol{\omega}') d\boldsymbol{\omega}' \right) dt \right]^2$$
+        *   Locations $\mathbf{x}_\tau$ lie on the primary viewing ray $\mathbf{o}_k + \tau \boldsymbol{\omega}_k(q)$ [S1].
+        *   The line integral is evaluated using jittered stratified sampling [S1].
+        *   The directional in-scattering integral is handled identically to $L_{RTE}$ using Monte Carlo sampling [S1].
+
+    **Total Loss:**
+    $$L(\theta, \phi) = L_{RTE}(\theta, \phi) + \lambda_{BC} L_{BC}(\theta) + \lambda_{obs} L_{obs}(\theta) + \lambda_{VRE} L_{VRE}(\theta, \phi)$$
+    [S1]
+
+**Pitfalls and Edge Cases:**
+*   **Low-Frequency Bias:** Neural networks exhibit a bias toward low-frequency solutions, causing overly smooth results [S1, S2]. This is mitigated by the VRE term and the high-frequency initialization from $F_\xi$ [S1].
+*   **Gradient Bias:** Stochastic sampling of in-scattering directions can cause optimization gradient bias. This is handled by drawing independent samples for forward and backward passes [S1].
+*   **Boundary Definition:** The boundary $\partial B$ must be well-defined to compute $\mathbf{n}_B(\mathbf{x})$ for $L_{BC}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+# Standard math operations assumed available
+def henney_greenstein(g, cos_theta):
+    """
+    Henyey-Greenstein phase function.
+    g: anisotropy parameter (bounded by tanh in main loop)
+    cos_theta: cosine of the angle between incident and outgoing direction
+    """
+    g_sq = g * g
+    denom = 1.0 + g_sq - 2.0 * g * cos_theta
+    return (1.0 - g_sq) / (4.0 * np.pi * np.sqrt(denom) * denom)
+
+class NeuralRadiativeTransfer:
+    def __init__(self, images, cameras, boundary_mesh):
+        """
+        images: List of RGB images [H, W, 3]
+        cameras: List of camera parameters (o_k, omega_k)
+        boundary_mesh: Mesh object providing boundary points and normals
+        """
+        self.images = images
+        self.cameras = cameras
+        self.boundary_mesh = boundary_mesh
+        
+        # Stage 1: Initialization
+        # F_xi is a neural hash grid. We train it to reconstruct images 
+        # using emission-absorption model, then discard color output.
+        self.F_xi = train_emission_absorption_model(images, cameras)
+        
+        # Stage 2: Joint Optimization
+        # L_theta: SIREN network for light field (x, w) -> R3
+        self.L_theta = SIRENNetwork(input_dim=6) # 3 for x, 3 for w
+        # M_phi: SIREN network for medium (x) -> (sigma_a, sigma_s, g)
+        self.M_phi = SIRENNetwork(input_dim=3)
+        
+        # Parameters
+        self.lambda_bc = 1.0
+        self.lambda_obs = 1.0
+        self.lambda_vre = 70.0
+        self.num_collocation = 10000
+        self.num_dir_samples = 32
+        self.num_boundary_samples = 10000
+        self.num_vre_samples = 100
+        
+        # Optimizer
+        self.optimizer = torch.optim.Adam(list(self.L_theta.parameters()) + 
+                                          list(self.M_phi.parameters()), lr=1e-4)
+
+    def get_medium_properties(self, x):
+        """
+        x: [N, 3] spatial coordinates
+        Returns: sigma_a, sigma_s, g
+        """
+        out = self.M_phi(x)
+        # Enforce positivity for sigma_a and sigma_s
+        sigma_a = torch.exp(out[:, :3])
+        sigma_s = torch.exp(out[:, 3:6])
+        # Bound g using tanh
+        g = torch.tanh(out[:, 6])
+        sigma_t = sigma_a + sigma_s
+        return sigma_a, sigma_s, sigma_t, g
+
+    def compute_in_scattering(self, x, w_out, sigma_s, g):
+        """
+        Approximate integral of f_p * L_theta over S^2 using Monte Carlo.
+        x: [N, 3]
+        w_out: [N, 3] outgoing directions
+        sigma_s: [N, 3] scattering coefficients
+        g: [N] anisotropy parameters
+        """
+        # Sample directions
+        w_in = sample_sphere(self.num_dir_samples) # [N, M, 3]
+        
+        # Compute cos theta
+        # w_out is [N, 3], w_in is [N, M, 3]
+        # Need to broadcast w_out to [N, 1, 3]
+        cos_theta = torch.sum(w_out.unsqueeze(1) * w_in, dim=2)
+        
+        # Phase function
+        f_p = henney_greenstein(g.unsqueeze(1).unsqueeze(2), cos_theta) # [N, M]
+        
+        # Query Light Field for incoming directions
+        # L_theta(x, w_in) -> [N, M, 3]
+        L_in = self.L_theta(torch.cat([x.unsqueeze(1).expand(-1, self.num_dir_samples, -1), w_in], dim=2))
+        
+        # Integral approximation: (1/M) * sum(f_p * L_in)
+        # Note: Monte Carlo over sphere usually involves 4*pi factor if uniform sampling
+        # However, standard MC estimator for integral I = int f(x) dx is (Vol/Samples) * sum(f)
+        # Here we integrate over S^2 (area 4pi).
+        # The RTE term is sigma_s * int f_p L domega.
+        # Estimator: sigma_s * (4*pi / M) * sum(f_p * L)
+        
+        integral = torch.sum(f_p.unsqueeze(2) * L_in, dim=1) * (4.0 * np.pi / self.num_dir_samples)
+        return sigma_s.unsqueeze(1) * integral # [N, 3]
+
+    def compute_rte_residual(self, x, w):
+        """
+        x: [N, 3]
+        w: [N, 3]
+        Returns: RTE residual [N, 3]
+        """
+        # 1. Directional derivative (w . grad) L_theta
+        # Use automatic differentiation
+        x.requires_grad_(True)
+        w.requires_grad_(True)
+        
+        L_val = self.L_theta(torch.cat([x, w], dim=1))
+        
+        # Compute gradient of L_val w.r.t x
+        grad_L = torch.autograd.grad(L_val.sum(), x, create_graph=True)[0]
+        
+        # Dot product w . grad L
+        directional_deriv = torch.sum(w * grad_L, dim=1)
+        
+        # 2. Medium properties
+        sigma_a, sigma_s, sigma_t, g = self.get_medium_properties(x)
+        
+        # 3. In-scattering
+        in_scattering = self.compute_in_scattering(x, w, sigma_s, g)
+        
+        # RTE: (w . grad) L + sigma_t * L - sigma_s * int f_p L domega = 0
+        # Note: Emission term is omitted as per environment illumination assumption
+        residual = directional_deriv + sigma_t * L_val - in_scattering
+        
+        return residual
+
+    def compute_boundary_loss(self):
+        """
+        Enforce inflow boundary conditions.
+        """
+        # Sample points on boundary
+        x_b, n_b = self.boundary_mesh.sample_boundary(self.num_boundary_samples)
+        
+        # Sample directions
+        w_b = sample_sphere(self.num_boundary_samples)
+        
+        # Filter for inflow: w . n < 0
+        dot_prod = torch.sum(w_b * n_b, dim=1)
+        mask = dot_prod < 0
+        
+        x_b = x_b[mask]
+        w_b = w_b[mask]
+        n_b = n_b[mask]
+        
+        if len(x_b) == 0:
+            return torch.tensor(0.0)
+            
+        # Query light field
+        L_b = self.L_theta(torch.cat([x_b, w_b], dim=1))
+        
+        # Incoming radiance from environment (assumed known)
+        L_in = get_environment_radiance(x_b, w_b)
+        
+        loss = torch.mean((L_in - L_b) ** 2)
+        return loss
+
+    def compute_observation_loss(self):
+        """
+        Constrain light field at camera locations.
+        """
+        total_loss = 0.0
+        count = 0
+        for k, (image, camera) in enumerate(zip(self.images, self.cameras)):
+            o_k = camera['o']
+            # Sample pixels
+            # Assuming uniform sampling over pixels for simplicity
+            # In practice, jittered stratified sampling is used for VRE, 
+            # but for L_obs, pointwise constraint is sufficient.
+            # Let's sample a subset or all pixels.
+            H, W, _ = image.shape
+            # Flatten pixels
+            pixels = image.reshape(-1, 3)
+            N_pixels = pixels.shape[0]
+            
+            # Generate viewing directions for each pixel
+            # omega_k(q) is direction FROM camera TO scene
+            # But L_theta is queried at -omega_k(q) because L_theta(x, w) is radiance 
+            # traveling in direction w. The camera observes radiance traveling 
+            # towards the camera, i.e., in direction -omega_k(q).
+            
+            # Construct directions
+            # This depends on camera model. Assuming pinhole.
+            # For brevity, assume we have a function to get directions for all pixels
+            directions = get_pixel_directions(o_k, H, W) # [N_pixels, 3]
+            
+            # Query L_theta at camera center o_k and direction -directions
+            neg_directions = -directions
+            L_cam = self.L_theta(torch.cat([o_k.unsqueeze(0).expand(N_pixels, -1), neg_directions], dim=1))
+            
+            loss = torch.mean((pixels - L_cam) ** 2)
+            total_loss += loss
+            count += 1
+            
+        return total_loss / count
+
+    def compute_vre_loss(self):
+        """
+        Volume Rendering Equation loss.
+        """
+        total_loss = 0.0
+        count = 0
+        for k, (image, camera) in enumerate(zip(self.images, self.cameras)):
+            o_k = camera['o']
+            H, W, _ = image.shape
+            pixels = image.reshape(-1, 3)
+            N_pixels = pixels.shape[0]
+            
+            directions = get_pixel_directions(o_k, H, W) # [N_pixels, 3]
+            
+            # For each pixel, integrate along ray
+            # Ray: x(t) = o_k + t * direction
+            # We use jittered stratified sampling for t
+            # Assume t_b is far enough or bounded by scene
+            
+            pixel_loss = 0.0
+            for i in range(N_pixels):
+                d = directions[i]
+                # Sample t values
+                t_samples = jittered_stratified_sample(self.num_vre_samples, t_min=0, t_max=t_b)
+                t_samples.sort()
+                
+                # Compute x_t
+                x_t = o_k + t_samples.unsqueeze(1) * d.unsqueeze(0) # [M, 3]
+                
+                # Get medium properties at x_t
+                sigma_a, sigma_s, sigma_t, g = self.get_medium_properties(x_t)
+                
+                # Compute transmittance T(t) = exp(-int_0^t sigma_t(s) ds)
+                # Approximate integral using trapezoidal rule or simple sum
+                # dt = t[i] - t[i-1]
+                dt = torch.diff(t_samples, prepend=torch.tensor(0.0))
+                # Cumulative optical depth
+                tau = torch.cumsum(sigma_t * dt, dim=0)
+                T = torch.exp(-tau)
+                
+                # In-scattering integral at each t
+                # int_{S^2} f_p L_theta domega
+                # Reuse compute_in_scattering logic but for specific t
+                # Note: compute_in_scattering expects x and w_out
+                # Here w_out is -d (incoming to camera)
+                w_out = -d.unsqueeze(0).expand(self.num_vre_samples, -1)
+                
+                in_scattering_term = self.compute_in_scattering(x_t, w_out, sigma_s, g) # [M, 3]
+                
+                # Contribution: sigma_s(t) * T(t) * in_scattering_term * dt
+                # Note: sigma_s is already included in in_scattering_term calculation?
+                # In compute_in_scattering, we return sigma_s * integral.
+                # So we just need T * contribution * dt
+                
+                contribution = T.unsqueeze(1) * in_scattering_term * dt.unsqueeze(1)
+                
+                # Integrate along ray
+                ray_radiance = torch.sum(contribution, dim=0)
+                
+                pixel_loss += torch.mean((pixels[i] - ray_radiance) ** 2)
+            
+            total_loss += pixel_loss / N_pixels
+            count += 1
+            
+        return total_loss / count
+
+    def step(self):
+        self.optimizer.zero_grad()
+        
+        # Sample collocation points
+        x_col = sample_volume(self.num_collocation)
+        w_col = sample_sphere(self.num_collocation)
+        
+        # RTE Loss
+        residual = self.compute_rte_residual(x_col, w_col)
+        loss_rte = torch.mean(residual ** 2)
+        
+        # Boundary Loss
+        loss_bc = self.compute_boundary_loss()
+        
+        # Observation Loss
+        loss_obs = self.compute_observation_loss()
+        
+        # VRE Loss
+        loss_vre = self.compute_vre_loss()
+        
+        # Total Loss
+        loss = loss_rte + self.lambda_bc * loss_bc + self.lambda_obs * loss_obs + self.lambda_vre * loss_vre
+        
+        loss.backward()
+        self.optimizer.step()
+        
+        return loss.item()
+```
+
+## Operating characteristics
+*   **Time Complexity:** The runtime is dominated by the evaluation of the four loss terms. On an A100 GPU, $L_{VRE}$ accounts for 53% of the time, $L_{RTE}$ for 38%, $L_{BC}$ for 7%, and $L_{obs}$ for 2% [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Evaluated on 50 synthetic scenes from the Disney Clouds dataset with 500 viewpoints each [S1]. For anisotropic scenes, the method achieves MSE($\sigma_a$) 1.99, MSE($\sigma_s$) 2.37, MSE($\sigma_t$) 1.33, and MSE($g$) 1.21 (values $\times 10^2$) [S1].
+*   **Strengths:** Handles heterogeneous media without strong assumptions like homogeneity [S1]. Enforces light transport locally throughout the volume, supporting soft geometry optimization naturally [S2]. Amortizes global illumination costs in generative settings [S1].
+*   **Limitations:** Solutions may be overly smooth due to neural network low-frequency bias, requiring the VRE term to mitigate [S1]. Requires known and fixed environment illumination [S1]. Does not yet support hard geometry (sharp discontinuities) [S2].
+
+## Background
+The method was introduced by Nsampi et al. in "Volumetric Inverse Rendering via Neural Radiative Transfer" (Eurographics 2026) [S1, S2]. It builds on the concept of Physics-Informed Neural Networks (PINNs) [RPK19] and applies it to the Radiative Transfer Equation (RTE) for volumetric scenes [S1]. Previous work often relied on homogeneous media assumptions or simplified light transport [S1]. This method addresses the lack of real multi-view datasets for volumetric scenes by using synthetic data from the Disney Clouds dataset [S1].
+
+## Subtopics
+
+### [Refractive Index Tomography using Neural Fields](4146-refractive-index-tomography-using-neural-fields.md)
+Reconstructs refractive index fields. Chooses this when the medium is transparent and refraction is the dominant effect, rather than scattering.
+
+### [Inverse Rendering and Optical Properties](7914-inverse-rendering-and-optical-properties.md)
+General inverse rendering for optical properties. Chooses this when the scene is surface-based or when a simpler model than full RTE is sufficient.
+
+### [Multi-Sensor and Physical Priors](11031-multi-sensor-and-physical-priors.md)
+Uses multiple sensor types. Chooses this when multi-modal data (e.g., LiDAR + RGB) is available to constrain the solution further.
+
+## Sources
+[S1] Volumetric Inverse Rendering via Neural Radiative Transfer, https://doi.org/10.1111/cgf.70541, fetched 2026-10-27
+[S2] Volumetric Inverse Rendering via Neural Radiative Transfer, https://arxiv.org/abs/2607.13695, fetched 2026-10-29

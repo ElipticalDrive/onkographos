@@ -1,0 +1,349 @@
+Ray tracing from first principles: ray-sphere and ray-triangle intersection, Phong shading, reflection and refraction, BVH acceleration structure — full…
+
+Ray Tracing from Scratch — Rays, Intersections, BVH | 3D…
+1. Ray tracing pipeline overview
+The Whitted ray tracing model (1980) defines a recursive pipeline.
+Each pixel generates one primary ray; every hit spawns at most two
+secondary rays (shadow + mirror/refracted). Real path tracers fire
+many rays per pixel and average the results — this article covers the
+Whitted model as it is the conceptual foundation.
+Camera rays
+→
+Scene intersect
+→
+Hit point
+→
+Shadow ray → light
+→
+Phong shading
+→
++ Mirror/refract ray (recursive)
+The output is a 2D array of colour values — rendered to a
+<canvas> via ImageData. Performance is
+O(W × H × N × log N) per frame where N is the geometry count; the BVH
+in section 7 reduces this to O(W × H × log N).
+2. Generating primary rays
+A ray is a parametric half-line:
+P(t) = origin + t × direction, t > 0. Camera setup
+converts each pixel (px, py) into a world-space ray using the view
+frustum:
+NDC (Normalised Device Coordinates):
+ndc_x = (px + 0.5) / width
+ndc_y = (py + 0.5) / height
+Screen space (±1, ±aspectRatio):
+screen_x = (2 × ndc_x − 1) × tan(fov/2) × aspect
+screen_y = (1 − 2 × ndc_y) × tan(fov/2)
+Ray direction (world space):
+d = normalize(camera_right × screen_x + camera_up × screen_y +
+camera_forward)
+```
+function generateRay(px, py, cam) {
+  const s_x = (2 * (px + 0.5) / cam.width  - 1) * cam.tanFov * cam.aspect;
+  const s_y = (1 - 2 * (py + 0.5) / cam.height) * cam.tanFov;
+  const dir = normalise(
+    add(
+      add(scale(cam.right,   s_x),
+          scale(cam.up,      s_y)),
+      cam.forward
+    )
+  );
+  return { origin: cam.position, dir };
+}
+```
+Anti-aliasing: for each pixel, fire N rays with
+sub-pixel jitter (random offsets within the pixel) and average the
+colour. 4–16 samples per pixel removes aliasing with minimal overhead.
+3. Ray–sphere intersection
+The intersection of ray P(t) = o + t·d and sphere (centre
+c, radius r) is found by substituting into the sphere
+equation |P − c|² = r²:
+Let oc = o − c
+a = d · d (= 1 if d is normalised)
+b = 2 (oc · d)
+c = oc · oc − r²
+discriminant Δ = b² − 4ac
+Δ < 0 → no intersection
+Δ = 0 → tangent (one root)
+Δ > 0 → two roots: t = (−b ± √Δ) / (2a)
+take smallest positive t
+```
+function intersectSphere(ray, sphere) {
+  const oc = sub(ray.origin, sphere.center);
+  const a  = dot(ray.dir, ray.dir);
+  const b  = 2 * dot(oc, ray.dir);
+  const c  = dot(oc, oc) - sphere.radius * sphere.radius;
+  const D  = b * b - 4 * a * c;
+  if (D < 0) return null;
+  const sqrtD = Math.sqrt(D);
+  const t1 = (-b - sqrtD) / (2 * a);
+  const t2 = (-b + sqrtD) / (2 * a);
+  const t  = t1 > 0.001 ? t1 : t2 > 0.001 ? t2 : null;
+  if (t === null) return null;
+  const point  = add(ray.origin, scale(ray.dir, t));
+  const normal = normalise(sub(point, sphere.center));
+  return { t, point, normal, mat: sphere.mat };
+}
+```
+4. Ray–triangle intersection (Möller-Trumbore)
+The Möller-Trumbore algorithm (1997) directly computes barycentric
+coordinates without first finding the plane of the triangle. It is the
+standard algorithm used in every production ray tracer.
+Given triangle vertices v0, v1, v2:
+e1 = v1 − v0
+e2 = v2 − v0
+h = d × e2 (cross product)
+a = e1 · h (determinant)
+if |a| < ε → ray is parallel to triangle
+f = 1 / a
+s = o − v0
+u = f (s · h)
+if u < 0 or u > 1 → miss
+q = s × e1
+v = f (d · q)
+if v < 0 or u+v > 1 → miss
+t = f (e2 · q)
+if t > ε → HIT at barycentric (u, v, 1-u-v)
+```
+function intersectTriangle(ray, v0, v1, v2) {
+  const e1  = sub(v1, v0), e2 = sub(v2, v0);
+  const h   = cross(ray.dir, e2);
+  const a   = dot(e1, h);
+  if (Math.abs(a) < 1e-7) return null;  // parallel
+  const f   = 1 / a;
+  const s   = sub(ray.origin, v0);
+  const u   = f * dot(s, h);
+  if (u < 0 || u > 1) return null;
+  const q   = cross(s, e1);
+  const v   = f * dot(ray.dir, q);
+  if (v < 0 || u + v > 1) return null;
+  const t   = f * dot(e2, q);
+  if (t < 0.001) return null;
+  const point  = add(ray.origin, scale(ray.dir, t));
+  const normal = normalise(cross(e1, e2));  // flat shading
+  return { t, point, normal, u, v };
+}
+```
+For smooth shading, interpolate vertex normals using barycentric
+coordinates: N = u·n1 + v·n2 + (1−u−v)·n0.
+5. Phong shading and shadows
+At each hit point, the Phong model combines ambient, diffuse and
+specular contributions from each light source. A shadow ray tests
+occlusion before adding any direct lighting:
+L = k_a · I_a
++ Σ_lights (not in shadow) × [
+k_d · max(N·L, 0) · I_d
++ k_s · max(R·V, 0)^n · I_s
+]
+N = surface normal (normalised)
+L = direction to light
+R = reflect(−L, N) = 2(N·L)N − L
+V = direction to camera
+```
+function shade(hit, ray, scene, depth) {
+  const { point, normal, mat } = hit;
+  let colour = scale(mat.albedo, mat.ka);  // ambient
+
+  for (const light of scene.lights) {
+    const toLight  = sub(light.pos, point);
+    const lightDist = length(toLight);
+    const L        = scale(toLight, 1 / lightDist);
+
+    // Shadow ray
+    const shadowRay = { origin: add(point, scale(normal, 0.001)), dir: L };
+    const shadowHit = closestHit(shadowRay, scene, lightDist);
+    if (shadowHit) continue;
+
+    const diff = Math.max(dot(normal, L), 0);
+    const R    = sub(scale(normal, 2 * dot(normal, L)), L);
+    const V    = scale(ray.dir, -1);
+    const spec = Math.pow(Math.max(dot(R, V), 0), mat.shininess);
+
+    colour = add(colour,
+      add(scale(mulV(mat.albedo, light.colour), mat.kd * diff),
+          scale(light.colour, mat.ks * spec)));
+  }
+  return colour;
+}
+```
+Shadow acne: offset the shadow ray origin slightly
+along the normal (point + normal × 0.001) to avoid
+self-intersection with the surface from which the ray is cast. The
+exact offset depends on scene scale.
+6. Reflections and refractions
+Perfect mirror reflection
+```
+function reflect(d, n) {
+  return sub(d, scale(n, 2 * dot(d, n)));
+}
+// In shade(), if mat.reflectivity > 0 and depth < MAX_DEPTH:
+const rDir = reflect(ray.dir, normal);
+const rCol = traceRay({ origin: add(point, scale(normal, 0.001)), dir: rDir }, scene, depth + 1);
+colour = add(colour, scale(rCol, mat.reflectivity));
+```
+Snell's law refraction
+n₁ sin θ₁ = n₂ sin θ₂ (Snell's law)
+cos θ₁ = −d · n
+n_ratio = n₁ / n₂
+discriminant = 1 − n_ratio² (1 − cos²θ₁)
+if discriminant < 0 → total internal reflection
+refracted = n_ratio·d + (n_ratio·cos θ₁ − √D)·n
+```
+function refract(d, n, ni, nt) {
+  const nr   = ni / nt;
+  const cosI = -dot(d, n);
+  const sinT2 = nr * nr * (1 - cosI * cosI);
+  if (sinT2 > 1) return null;  // total internal reflection
+  return add(scale(d, nr), scale(n, nr * cosI - Math.sqrt(1 - sinT2)));
+}
+// Fresnel (Schlick approximation):
+function schlick(cosI, n1, n2) {
+  let r0 = (n1 - n2) / (n1 + n2); r0 = r0 * r0;
+  return r0 + (1 - r0) * Math.pow(1 - cosI, 5);
+}
+```
+For glass (n₂ ≈ 1.5), the Fresnel coefficient determines the mix
+between the reflected and refracted rays. Schlick's approximation is
+fast and accurate within 1% for most angles.
+7. Bounding Volume Hierarchy (BVH)
+Naively testing every ray against every primitive is O(N) per ray. A
+BVH organises primitives into a binary tree of
+Axis-Aligned Bounding Boxes (AABB). Each node stores
+an AABB enclosing all its children; at traversal, a ray that misses a
+node's AABB can skip the entire subtree.
+The Surface Area Heuristic (SAH) is the standard cost
+function for choosing how to split a node's primitives:
+cost(split) = traversalCost + (SA_left / SA_parent) × N_left ×
+leafCost
++ (SA_right / SA_parent) × N_right × leafCost
+SA = surface area of the AABB
+Split along the axis that minimises cost; try O(N) candidate split
+planes.
+```
+class BVHNode {
+  constructor(prims) {
+    this.aabb = computeAABB(prims);
+    if (prims.length <= 4) { this.prims = prims; return; }
+
+    // Split along the widest axis at the centroid median
+    const axis = widestAxis(this.aabb);
+    prims.sort((a, b) => centroid(a)[axis] - centroid(b)[axis]);
+    const mid  = prims.length >> 1;
+    this.left  = new BVHNode(prims.slice(0, mid));
+    this.right = new BVHNode(prims.slice(mid));
+  }
+
+  intersect(ray) {
+    if (!intersectAABB(ray, this.aabb)) return null;
+    if (this.prims) return closestPrim(ray, this.prims);
+    const hL = this.left.intersect(ray);
+    const hR = this.right.intersect(ray);
+    if (!hL) return hR;
+    if (!hR) return hL;
+    return hL.t < hR.t ? hL : hR;
+  }
+}
+```
+For a scene with 10 000 triangles, a well-built BVH reduces average
+ray-intersection cost from 10 000 tests to roughly 25–40 tests (about
+8–9 levels of tree traversal).
+8. Full JavaScript ray tracer
+The complete render loop ties everything together. All heavy work (the
+per-pixel loop) can be offloaded to a Web Worker to avoid blocking the
+main thread.
+```
+// ── Minimal 3D vector helpers ──────────────────────────────────
+const add  = (a, b) => ({ x: a.x+b.x, y: a.y+b.y, z: a.z+b.z });
+const sub  = (a, b) => ({ x: a.x-b.x, y: a.y-b.y, z: a.z-b.z });
+const scale = (v, s) => ({ x: v.x*s,   y: v.y*s,   z: v.z*s });
+const dot  = (a, b) => a.x*b.x + a.y*b.y + a.z*b.z;
+const cross = (a,b) => ({ x:a.y*b.z-a.z*b.y, y:a.z*b.x-a.x*b.z, z:a.x*b.y-a.y*b.x });
+const length = v => Math.sqrt(dot(v, v));
+const normalise = v => scale(v, 1 / (length(v) || 1e-9));
+const mulV = (a,b) => ({ x:a.x*b.x, y:a.y*b.y, z:a.z*b.z });
+
+// ── Scene ──────────────────────────────────────────────────────
+const scene = {
+  spheres: [
+    { center:{x:0,y:0,z:-5},   radius:1,   mat:{albedo:{x:0.9,y:0.2,z:0.2}, ka:0.05, kd:0.7, ks:0.4, shininess:40, reflectivity:0.3} },
+    { center:{x:-2.5,y:0,z:-6}, radius:1,   mat:{albedo:{x:0.2,y:0.6,z:0.9}, ka:0.05, kd:0.7, ks:0.6, shininess:80, reflectivity:0.0} },
+    { center:{x: 2.5,y:0,z:-6}, radius:1,   mat:{albedo:{x:0.9,y:0.9,z:0.9}, ka:0.05, kd:0.1, ks:0.9, shininess:120, reflectivity:0.9} },
+    { center:{x:0,y:-101,z:-5}, radius:100, mat:{albedo:{x:0.6,y:0.6,z:0.6}, ka:0.05, kd:0.8, ks:0.1, shininess:10,  reflectivity:0.0} },
+  ],
+  lights: [
+    { pos:{x:5,y:8,z:-2},  colour:{x:1,y:0.95,z:0.85} },
+    { pos:{x:-4,y:3,z:-4}, colour:{x:0.3,y:0.4,z:0.8} },
+  ],
+};
+
+// ── Scene test (BVH would replace this) ───────────────────────
+function closestHit(ray, maxDist = Infinity) {
+  let best = null;
+  for (const s of scene.spheres) {
+    const h = intersectSphere(ray, s);
+    if (h && h.t < (best?.t ?? maxDist)) best = h;
+  }
+  return best;
+}
+
+// ── Recursive trace ────────────────────────────────────────────
+const MAX_DEPTH = 4;
+const SKY = {x:0.05,y:0.08,z:0.13};
+
+function traceRay(ray, depth = 0) {
+  if (depth >= MAX_DEPTH) return SKY;
+  const hit = closestHit(ray);
+  if (!hit) return SKY;
+
+  const col = shade(hit, ray, scene, depth);
+
+  if (hit.mat.reflectivity > 0) {
+    const rDir = reflect(ray.dir, hit.normal);
+    const rCol = traceRay({ origin: add(hit.point, scale(hit.normal, 0.001)), dir: rDir }, depth + 1);
+    return add(scale(col, 1 - hit.mat.reflectivity), scale(rCol, hit.mat.reflectivity));
+  }
+  return col;
+}
+
+// ── Render to canvas ───────────────────────────────────────────
+function render(canvas) {
+  const ctx  = canvas.getContext('2d');
+  const img  = ctx.createImageData(canvas.width, canvas.height);
+  const d    = img.data;
+  const cam  = {
+    position: {x:0,y:1,z:1},
+    forward:  normalise({x:0,y:-0.1,z:-1}),
+    right:    {x:1,y:0,z:0},
+    up:       {x:0,y:1,z:0},
+    width: canvas.width, height: canvas.height,
+    tanFov: Math.tan(Math.PI / 4),
+    aspect: canvas.width / canvas.height,
+  };
+
+  for (let py = 0; py < canvas.height; py++) {
+    for (let px = 0; px < canvas.width; px++) {
+      const ray = generateRay(px, py, cam);
+      const col = traceRay(ray);
+      const i   = (py * canvas.width + px) * 4;
+      d[i]   = Math.min(col.x * 255, 255);
+      d[i+1] = Math.min(col.y * 255, 255);
+      d[i+2] = Math.min(col.z * 255, 255);
+      d[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+```
+Performance: a 400×300 scene with 4 spheres, 2 lights
+and MAX_DEPTH = 4 traces ~900 k rays. In JavaScript this takes
+~0.1–0.3 s — fine for a static render. For interactive use, reduce
+resolution, limit depth, and render tiles from a Worker.
+✨ Ray Marching and SDF
+The SDF-based alternative to ray tracing — no geometry required,
+just a distance function.
+Read article →
+Related Articles
+Rayleigh Scattering: Why the Sky Is Blue \u0026 Sunsets Are Red
+Ray Marching and Signed Distance Functions — Sphere Tracing in GLSL
+Turing Reaction-Diffusion — Gray-Scott Patterns
+Real-Time Denoising: SVGF, A-SVGF, DLSS \u0026 ReLAX
+Lotka–Volterra Equations — Predator–Prey Population Cycles

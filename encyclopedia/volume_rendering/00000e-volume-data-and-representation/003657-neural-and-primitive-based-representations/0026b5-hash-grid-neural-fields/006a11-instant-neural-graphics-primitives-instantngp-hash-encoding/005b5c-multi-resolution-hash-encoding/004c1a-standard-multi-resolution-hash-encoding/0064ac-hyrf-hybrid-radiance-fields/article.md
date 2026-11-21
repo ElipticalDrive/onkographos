@@ -1,0 +1,270 @@
+# HyRF (Hybrid Radiance Fields)
+
+Also called: Hybrid Radiance Fields
+
+## Overview
+HyRF is a novel view synthesis method that combines explicit 3D Gaussian Splatting (3DGS) for foreground geometry with a multi-resolution hash-encoded neural radiance field for background modeling [S1]. It solves the problem of blurry backgrounds and excessive memory usage in large-scale scenes by decoupling geometry and appearance into separate neural fields and using the radiance field to render distant objects via a background sphere [S1]. Unlike sibling methods that predict all properties from a single field or rely solely on explicit primitives, HyRF uses a hybrid compositing strategy where the neural field only predicts background color when foreground transmittance is low, achieving significant model size reductions compared to 3DGS while maintaining real-time performance [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera parameters (rotation $R$, translation $t$), a set of explicit 3D Gaussians $\{G_e\}$ with initial properties, and two neural field encoders $\Theta_{geo}$ and $\Theta_{rad}$ initialized with multi-resolution hash grids.
+*   **Outputs:** Pixel color $C$.
+
+**Data Structures:**
+*   **Hash Grids:** Two sets of hash tables, one for geometry ($\Theta_{geo}$) and one for radiance ($\Theta_{rad}$).
+    *   Number of levels $L=16$ [S1].
+    *   Feature dimension per entry $F=2$ [S1].
+    *   Radiance field max hash size $T_{rad}$: $2^{17}$ (synthetic), $2^{18}$ (standard), $2^{21}$ (large) [S1].
+    *   Geometry field max hash size $T_{geo}$: Half of $T_{rad}$ [S1].
+*   **Decoder:** Fully-fused MLP with 2 hidden layers, 64 neurons each [S1].
+*   **Background Sphere:** Radius $r=100$ [S1].
+
+**Preprocessing: Scene Contraction:**
+Before encoding, 3D points $\mathbf{p}_i$ are normalized using the scene's axis-aligned bounding box (AABB) $B_0$ (defined by min/max camera positions) and contracted to the range $(0, 1)$ to satisfy multi-resolution hash input requirements [S1]. The contraction function is:
+$$
+\text{contract}(\mathbf{p}_i) = 
+\begin{cases} 
+0.25 \cdot \mathbf{p}_i + 1 & \text{if } \|\mathbf{p}_i\| \le 1 \\
+\frac{\mathbf{p}_i}{0.25 \cdot (2 - \|\mathbf{p}_i\|) + 1} & \text{otherwise}
+\end{cases}
+$$
+Note: This differs from MipNeRF360 which contracts to $(-2, 2)$ [S1].
+
+**Decoupled Neural Field Encoding:**
+HyRF decouples geometry and appearance because predicting all Gaussian properties through a single neural field fails due to weak correlation between geometry and appearance attributes [S1]. The contracted point $\mathbf{p}_i$ is encoded into two high-dimensional feature vectors:
+$$
+\mathbf{f}_{rad} = \text{enc}(\mathbf{p}_i; \Theta_{rad})
+$$
+$$
+\mathbf{f}_{geo} = \text{enc}(\mathbf{p}_i; \Theta_{geo})
+$$
+where $\text{enc}$ denotes the multi-resolution hash encoding process defined in [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md).
+
+**Geometry Decoding:**
+The geometry features $\mathbf{f}_{geo}$ are decoded into raw view-independent properties: opacity $\alpha_n$, scale $s_n$, and rotation $r_n$ (quaternion) [S1]:
+$$
+(\alpha_n, s_n, r_n) = \text{dec}(\mathbf{f}_{geo}, \Phi_{geo})
+$$
+where $\Phi_{geo}$ is the geometry decoder MLP [S1].
+
+**View Direction Encoding:**
+To account for view-dependent effects, the view direction is encoded using positional encoding (PE) [S1]:
+$$
+\mathbf{f}_{dir} = \text{PE}\left( \frac{\mathbf{p}_i - \mathbf{p}_{cam}}{\|\mathbf{p}_i - \mathbf{p}_{cam}\|_2} \right)
+$$
+where $\mathbf{p}_{cam}$ is the camera position [S1].
+
+**Color Decoding:**
+The view-dependent color $\mathbf{c}_n$ is decoded by concatenating the radiance features and direction encoding:
+$$
+\mathbf{c}_n = \text{dec}(\mathbf{f}_{rad} \oplus \mathbf{f}_{dir}, \Phi_{c})
+$$
+where $\oplus$ denotes tensor concatenation and $\Phi_{c}$ is the color decoder MLP [S1]. The outputs $\alpha_n, s_n, r_n, \mathbf{c}_n$ are raw MLP outputs without activations [S1].
+
+**Aggregation with Explicit Gaussians:**
+Neural predictions are aggregated with explicit Gaussian properties (subscript $e$) stored in the 3DGS structure [S1]:
+$$
+\alpha = \sigma(\alpha_n + \alpha_e)
+$$
+$$
+\mathbf{c} = \sigma(\mathbf{c}_n + \mathbf{c}_e)
+$$
+$$
+\mathbf{r} = \text{Normalize}(\mathbf{r}_n)
+$$
+$$
+\mathbf{s} = \sigma(s_n + s_e)
+$$
+where $\sigma$ is the sigmoid function and $\text{Normalize}(\cdot)$ is L2 normalization of the quaternion [S1]. These aggregated properties are fed to the 3DGS rasterizer to compute foreground color $C_{fg}$ and transmittance [S1].
+
+**Visibility Pre-culling:**
+To reduce computational overhead, points are projected to camera space $\mathbf{p}_i' = R\mathbf{p}_i + \mathbf{t}$ [S1]. A point is retained only if projected within the image frame with tolerance $tol$:
+$$
+(|x_i'| \le 1 + tol) \land (|y_i'| \le 1 + tol)
+$$
+where $x_i', y_i'$ are the first two elements of $\mathbf{p}_i'$ [S1]. Gaussians too close to the image plane are discarded to avoid optimization instability [S1].
+
+**Hybrid Rendering (Background):**
+3DGS struggles with distant objects, resulting in blurry backgrounds [S1]. HyRF constructs a background sphere of radius $r=100$ [S1]. For each ray, the intersection point $\mathbf{p}_s$ with the sphere is computed [S1]. The radiance field predicts the color $\mathbf{c}_s$ at $\mathbf{p}_s$ [S1]. The background color $C_{bg}$ combines this with the remaining visibility after foreground accumulation:
+$$
+C_{bg} = \left( \prod_{i=1}^{N} (1 - \alpha_i) \right) \mathbf{c}_s
+$$
+The final pixel color is:
+$$
+C = C_{fg} + C_{bg}
+$$
+Background rendering is skipped if the accumulated transmittance $T = \prod_{i=1}^{N} (1 - \alpha_i)$ is greater than or equal to the threshold $\tau_T = 0.2$ [S1].
+
+**Optimization:**
+The method minimizes the loss:
+$$
+\mathcal{L} = (1 - \lambda)\mathcal{L}_{1} + \lambda\mathcal{L}_{ssim}
+$$
+where $\lambda$ is the SSIM weight (consistent with original 3DGS) [S1]. Explicit opacity is periodically reset to a small value during densification, and Gaussians with low opacity are pruned [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hyrf_render(camera, gaussians, theta_geo, theta_rad, background_radius=100, tau_t=0.2, tol=0.0):
+    """
+    Renders a frame using HyRF.
+    
+    Args:
+        camera: Object with rotation matrix R, translation vector t, and camera position p_cam.
+        gaussians: List of explicit 3D Gaussians, each with position p_i, color c_e, opacity alpha_e, 
+                   scale s_e, rotation r_e.
+        theta_geo: Geometry hash encoder (Multi-resolution hash encoding).
+        theta_rad: Radiance hash encoder (Multi-resolution hash encoding).
+        background_radius: Radius of the background sphere.
+        tau_t: Transmittance threshold for background rendering.
+        tol: Tolerance for visibility pre-culling.
+        
+    Returns:
+        pixel_color: Rendered pixel color.
+    """
+    
+    # 1. Visibility Pre-culling
+    valid_gaussians = []
+    for g in gaussians:
+        # Project to camera space
+        p_i = g.position
+        p_cam = camera.position
+        R = camera.rotation
+        t = camera.translation
+        
+        # Camera space coordinates
+        p_i_cam = R @ p_i + t
+        x_i, y_i = p_i_cam[0], p_i_cam[1]
+        
+        # Check if within frame with tolerance
+        if abs(x_i) <= 1 + tol and abs(y_i) <= 1 + tol:
+            # Discard if too close to image plane (implementation detail: check z component or distance)
+            # Note: The source mentions discarding Gaussians too close to the image plane.
+            # Assuming a simple check on z_i or distance to camera center in camera space.
+            # For this pseudocode, we assume a helper function is_available(g, p_i_cam) handles this.
+            if is_available(g, p_i_cam):
+                valid_gaussians.append(g)
+
+    # 2. Foreground Rendering (3DGS Rasterization)
+    # This part relies on the standard 3DGS rasterizer logic, which is external.
+    # We assume a function rasterize_foreground returns C_fg and accumulated transmittance T.
+    # However, to be self-contained as per instructions, we outline the aggregation step.
+    
+    foreground_color = [0.0, 0.0, 0.0]
+    accumulated_transmittance = 1.0
+    
+    # Sort gaussians by depth for correct alpha blending (standard 3DGS step)
+    sorted_gaussians = sort_by_depth(valid_gaussians, camera)
+    
+    for g in sorted_gaussians:
+        p_i = g.position
+        p_cam = camera.position
+        
+        # Scene Contraction
+        p_contracted = contract(p_i)
+        
+        # Decoupled Encoding
+        f_geo = theta_geo.encode(p_contracted)
+        f_rad = theta_rad.encode(p_contracted)
+        
+        # Geometry Decoding
+        alpha_n, s_n, r_n = theta_geo.decode_geometry(f_geo)
+        
+        # View Direction Encoding
+        view_dir = (p_i - p_cam) / np.linalg.norm(p_i - p_cam)
+        f_dir = positional_encoding(view_dir)
+        
+        # Color Decoding
+        c_n = theta_rad.decode_color(concatenate(f_rad, f_dir))
+        
+        # Aggregation
+        alpha = sigmoid(alpha_n + g.alpha_e)
+        color = sigmoid(c_n + g.color_e)
+        rotation = normalize_quaternion(r_n)
+        scale = sigmoid(s_n + g.scale_e)
+        
+        # Rasterization contribution (simplified 2D Gaussian projection)
+        # In a real implementation, this involves projecting the 3D Gaussian to 2D, 
+        # computing the covariance matrix, and splatting.
+        # Here we assume a helper `project_and_splat` exists that updates the framebuffer.
+        # Since we cannot implement the full 3DGS rasterizer from scratch in this context 
+        # without violating the "no library internals" rule for complex graphics ops, 
+        # we denote the result of the foreground pass.
+        
+        # Note: The actual HyRF paper uses the 3DGS rasterizer. 
+        # The pseudocode here represents the *HyRF-specific* logic.
+        pass 
+
+    # Assume C_fg and T are computed by the 3DGS rasterizer using the aggregated properties above.
+    # C_fg = foreground_color
+    # T = accumulated_transmittance
+    
+    # 3. Hybrid Background Rendering
+    if T < tau_t:
+        # Compute intersection with background sphere
+        # Ray origin: p_cam, Ray direction: d (from camera to pixel)
+        # Sphere center: p_cam (assumed, or scene center? Source says "background sphere", 
+        # usually centered at origin or camera. Source Fig 3b implies ray intersection).
+        # Standard sphere intersection: |o + td - c|^2 = r^2.
+        # Assuming sphere centered at origin for simplicity if not specified, 
+        # but source says "construct a background sphere". 
+        # Let's assume the sphere is centered at the scene origin or camera. 
+        # Source doesn't specify center, but "points at infinity" alternative suggests large radius.
+        # We assume a helper `intersect_sphere` exists.
+        
+        p_s = intersect_sphere(p_cam, ray_direction, background_radius)
+        
+        # Contract and Encode for Background
+        p_s_contracted = contract(p_s)
+        f_rad_bg = theta_rad.encode(p_s_contracted)
+        
+        # Decode background color
+        # Note: Background color prediction uses the radiance field. 
+        # Does it use view direction? Source Eq 6 uses view direction for color.
+        # Source Eq 10 uses c_s. Eq 6 defines c_n. 
+        # It is implied c_s is derived similarly or just from position.
+        # Source says "predict the color at point ps". 
+        # Given Eq 6, we likely need view direction for the background too.
+        view_dir_bg = ray_direction
+        f_dir_bg = positional_encoding(view_dir_bg)
+        c_s = theta_rad.decode_color(concatenate(f_rad_bg, f_dir_bg))
+        
+        C_bg = T * c_s
+    else:
+        C_bg = [0.0, 0.0, 0.0]
+        
+    return C_fg + C_bg
+
+def contract(p):
+    norm = np.linalg.norm(p)
+    if norm <= 1:
+        return 0.25 * p + 1
+    else:
+        return p / (0.25 * (2 - norm) + 1)
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+def normalize_quaternion(q):
+    return q / np.linalg.norm(q)
+
+def positional_encoding(v, num_frequencies=10):
+    # Standard NeRF positional encoding
+    # Not fully implemented here as it's a standard utility, 
+    # but required for the method.
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Real-time rendering speeds are achieved. On an NVIDIA RTX 3090, HyRF achieves 102 FPS on MipNeRF360, 130 FPS on Tanks & Temples, and 112 FPS on Deep Blending [S1]. On large urban datasets (Mill19, Urbanscene3D), it achieves 75-77 FPS, which is over 7000 times faster than NeRF-based methods [S1].
+*   **Memory Complexity:** HyRF significantly reduces model size. It is over 12 times smaller than 3DGS on standard real-world scenes, 1.5 to 5 times smaller than Scaffold-GS, and 4 to 7 times smaller than 3DGS-based methods on urban-scale datasets [S1]. On NeRF Synthetic, it is 13 MB, over 4 times smaller than 3DGS (53 MB) [S1].
+*   **Strengths:** Compact model size, real-time performance, superior background modeling compared to pure 3DGS, and ability to handle large-scale urban scenes [S1].
+*   **Limitations:** Struggles with extremely distant objects if the background sphere is not used (addressed by the hybrid approach). Optimization instability can occur if Gaussians are too close to the image plane (addressed by pre-culling) [S1].
+*   **When to use:** Large-scale novel view synthesis where memory efficiency and background quality are critical.
+*   **When not to use:** Scenes where the background is complex and cannot be approximated by a simple sphere intersection, or when extremely high-frequency foreground details are required without the overhead of explicit Gaussians (though HyRF uses both).
+
+## Background
+HyRF was introduced in the paper "HyRF: Hybrid Radiance Fields for Memory-efficient and High-quality Novel View Synthesis" [S1]. It builds upon the original 3DGS implementation and utilizes multi-resolution hash encoding [27] (Instant-NGP) for the neural fields [S1]. The method addresses limitations in 3DGS regarding background blurriness and memory consumption in large scenes [S1]. Experiments were conducted on NVIDIA 3090 GPUs [S1].
+
+## Sources
+[S1] HyRF: Hybrid Radiance Fields for Memory-efficient and High-quality Novel View Synthesis, https://doi.org/10.52202/085713-0617, fetched 2026-10-30

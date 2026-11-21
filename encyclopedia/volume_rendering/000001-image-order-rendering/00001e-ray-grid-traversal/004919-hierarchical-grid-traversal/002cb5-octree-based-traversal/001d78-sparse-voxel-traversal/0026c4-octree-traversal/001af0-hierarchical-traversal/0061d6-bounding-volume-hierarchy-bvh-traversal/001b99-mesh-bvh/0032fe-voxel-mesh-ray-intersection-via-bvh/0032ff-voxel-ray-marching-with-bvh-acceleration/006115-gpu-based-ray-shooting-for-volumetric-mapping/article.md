@@ -1,0 +1,129 @@
+# GPU-based Ray Shooting for Volumetric Mapping
+
+Also called: GPU-Accelerated Ray Shooting for Probabilistic Volumetric Mapping, GPU-based ray shooting, RTX-based ray shooting
+
+## Overview
+This method accelerates the ray-shooting bottleneck in Probabilistic Volumetric Mapping (PVM) by mapping leaf-level octree voxels to Axis-Aligned Bounding Boxes (AABBs) and performing massively parallel ray shooting on an RTX GPU using the DirectX Raytracing (DXR) API [S1]. It replaces the CPU-based DDA ray-shooting procedure used in standard Octomap, which typically consumes ~90% of processing time [S1]. Unlike [Voxel Ray Marching with BVH Acceleration](6903-voxel-ray-marching-with-bvh-acceleration.md), which uses BVH for lighting and AO calculations in a compute shader, this method uses the dedicated DXR ray-tracing pipeline to determine voxel occupancy (free/occupied) by intersecting rays with a BVH of AABBs [S1].
+
+## How it works
+**Inputs:**
+*   `sensorOrigin`: 3D vector representing the camera/sensor position.
+*   `rayDirections`: Array of 3D vectors or point cloud positions defining ray endpoints.
+*   `octree`: The current probabilistic volumetric map on the CPU, containing leaf-level voxels labeled as occupied, free, or unknown [S1].
+
+**Outputs:**
+*   `intersectedVoxels`: A set of finest-resolution voxels labeled as occupied or free, which are read back to the CPU to update the octree [S1].
+
+**Data Structures:**
+1.  **AABB Set:** Each leaf-level voxel in the octree is converted to an individual AABB. The AABB geometry (position and size) matches the voxel exactly [S1].
+    *   **Unknown Voxels:** Voxels labeled "unknown" are also converted to AABBs. This ensures the AABBs fill the entire 3D workspace, preventing rays from passing through unrepresented space without intersection [S1].
+2.  **BVH (Bounding Volume Hierarchy):** Built on the GPU from the AABB set.
+    *   **Bottom Level Acceleration Structure (BLAS):** Contains the geometric primitives (the AABBs) [S1].
+    *   **Top Level Acceleration Structure (TLAS):** Contains transformation matrices and rendering materials (standard DXR requirement, though materials are unused in this specific logic) [S1].
+
+**Parameters:**
+*   **Finest Resolution Subdivision:** When an AABB larger than the finest resolution is intersected, it is subdivided into typically 16 finest-resolution voxels using DDA [S1].
+*   **Ray Count:** Proportional to the point cloud size. In benchmarks, 320×240 rays (76,800 rays) were used per view [S1].
+*   **Octree Depth:** Maximum depth of 16 in benchmarks, corresponding to 25K–34K leaf-level voxels [S1].
+
+**Algorithm Steps:**
+
+1.  **Preprocessing (CPU):** Scan the environment to generate a point cloud. Convert all leaf-level voxels (occupied, free, unknown) from the octree into individual AABBs [S1].
+2.  **Upload and Build (GPU):** Upload the set of AABBs to the GPU. The RTX GPU builds the BVH of these AABBs [S1].
+3.  **Ray Generation (GPU):** In the Ray Generation Shader, set up rays. Each ray starts at `sensorOrigin` and ends at a point in the point cloud. The ray length is set to the distance from the sensor origin to the point cloud point [S1].
+4.  **Ray Shooting (GPU):** Execute massively parallel ray shooting. Rays traverse the BVH.
+    *   If a ray hits an AABB within its extent, the Intersection Shader is executed [S1].
+    *   If the intersected AABB size is greater than the finest resolution voxel size, subdivide the subspace traversed by the ray into finest resolution voxels (typically 16) using DDA [S1].
+    *   For all newly generated finest resolution voxels:
+        *   If the voxel includes the ray's end point, set it as **occupied** [S1].
+        *   Else if the ray passed through the voxel, set it as **free** [S1].
+    *   If ray-AABB intersection no longer occurs, the Miss Shader is executed to terminate the ray shooting (the Closest Hit Shader is not used) [S1].
+5.  **Readback (GPU to CPU):** Read back the intersected voxel data from the GPU to the CPU [S1].
+6.  **Update (CPU):** Update the octree with the new occupancy information. Merge leaf-level nodes with the same occupancy and promote them to higher-level nodes using Octomap [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# GPU-side execution (DXR Pipeline)
+
+# 1. Build BVH on GPU from AABBs derived from CPU Octree leaf nodes
+# Note: Unknown voxels are included to fill the workspace
+blas = BuildBLAS(aabb_list)
+tlas = BuildTLAS(blas, identity_matrices)
+
+# 2. Ray Generation Shader
+for each point in point_cloud:
+    ray_origin = sensorOrigin
+    ray_direction = normalize(point - sensorOrigin)
+    ray_length = length(point - sensorOrigin)
+    
+    # 3. BVH Traversal
+    hit = False
+    current_aabb = None
+    
+    # Traverse BVH to find first intersecting AABB
+    # (Implementation details of DXR traversal abstracted)
+    if RayIntersectsBVH(ray_origin, ray_direction, ray_length, tlas):
+        hit = True
+        # Identify the specific AABB hit
+        current_aabb = GetHitAABB()
+        
+        # 4. Intersection Shader Logic
+        if current_aabb.size > finest_resolution_size:
+            # Subdivide AABB into finest resolution voxels using DDA
+            finest_voxels = SubdivideAABB(current_aabb, ray_origin, ray_direction, ray_length)
+            
+            for voxel in finest_voxels:
+                if voxel.contains(ray_end_point):
+                    voxel.label = OCCUPIED
+                else:
+                    voxel.label = FREE
+        else:
+            # AABB is already at finest resolution
+            if current_aabb.contains(ray_end_point):
+                current_aabb.label = OCCUPIED
+            else:
+                current_aabb.label = FREE
+
+# 5. Miss Shader
+# If no intersection, ray terminates. No action needed.
+
+# 6. Readback
+intersected_data = ReadBackGPUBuffer()
+
+# CPU-side execution
+octree = LoadOctomap()
+for voxel in intersected_data:
+    octree.update_voxel(voxel.position, voxel.label)
+octree.restructure() # Merge and promote nodes
+```
+
+**Edge Cases and Pitfalls:**
+*   **Unknown Space Handling:** Rays can pass anywhere in the space. If unknown voxels are not converted to AABBs, rays may pass through unrepresented subspace without being labeled. Including unknown voxels as AABBs ensures all traversed subspace is labeled [S1].
+*   **Readback Bottleneck:** Reading back voxel data from GPU to CPU takes significantly longer than the ray shooting itself (e.g., 14.19 ms readback vs 1.42 ms shooting in View a). This creates a bottleneck. The method suggests updating the octree on the GPU to mitigate this, but the described implementation performs this on the CPU [S1].
+*   **Precision:** The method relies on the DXR API's ray-tracing precision. No specific numerical precision constraints are given in the sources [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The ray shooting performance is more than three orders of magnitude faster than the state-of-the-art Octomap CPU implementation [S1].
+*   **Memory Complexity:** Requires storing the BVH (BLAS and TLAS) on the GPU. The size depends on the number of leaf-level voxels (25K–34K in benchmarks) [S1].
+*   **Measured Performance:**
+    *   **Hardware:** AMD Ryzen 7 3700X CPU, NVIDIA RTX 2080 GPU, 16GB RAM, Windows 10, DirectX DXR [S1].
+    *   **Benchmark:** 77K points, 25K–34K adaptive voxel grids [S1].
+    *   **View (a) Stats:** 25,515 voxels.
+        *   CPU Ray Shooting: 886.83 ms [S1].
+        *   GPU Ray Shooting: 1.42 ms [S1].
+        *   BVH Build: 0.59 ms [S1].
+        *   Readback: 14.19 ms [S1].
+    *   With readback included, the GPU method is still two orders of magnitude faster than the CPU version [S1].
+*   **Strengths:** Drastic improvement in ray shooting speed, enabling real-time or near-real-time PVM for autonomous robotics [S1].
+*   **Limitations:** The octree is not maintained on the GPU; readback from GPU to CPU is a significant bottleneck (10x the shooting time) [S1].
+*   **When to use:** Autonomous robotic navigational tasks requiring Probabilistic Volumetric Mapping where ray shooting is the bottleneck [S1].
+*   **When not to use:** When GPU memory is insufficient for the BVH, or when the overhead of readback dominates the workflow and GPU-based octree maintenance is not implemented [S1].
+
+## Background
+Probabilistic Volumetric Mapping (PVM) represents a 3D environmental map for autonomous robotic navigational tasks. Octomap is a popular implementation using an octree structure. The main bottleneck in Octomap is the massive ray-shooting required to determine voxel occupancy, which takes up about 90% of processing time [S1]. This method was proposed by Heajung Min, Kyung Min Han, and Young J. Kim to leverage RTX GPUs and the DXR API to accelerate this process [S1]. The work was presented at ICRA 2021 [S1].
+
+## Sources
+[S1] Accelerating Probabilistic Volumetric Mapping using Ray-Tracing Graphics Hardware, https://doi.org/10.1109/icra48506.2021.9561068, fetched 2026-10-24

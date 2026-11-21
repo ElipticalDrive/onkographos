@@ -1,0 +1,137 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Monte Carlo 2D Voxelization is a differentiable method for converting a 2D triangle mesh (defined by vertices and edges) into a volumetric occupancy grid using Monte Carlo integration of the generalized winding number [S1, unofficial]. It computes voxel occupancy by sampling triangles and projecting samples into voxels, using a box filter to accumulate contributions [S1, unofficial]. Unlike [Analytic Voxelization](10493-analytic-voxelization.md) which computes exact integrals, this method approximates the winding number field via stochastic sampling, enabling gradient-based optimization of mesh geometry through [Forward-Mode Derivative of Monte Carlo 2D Voxelization](1876-forward-mode-derivative-of-monte-carlo-2d-voxelization.md) or [Backward Differentiable Monte Carlo Voxelization](#backward-differentiable-monte-carlo-voxelization) [S1, unofficial].
++Monte Carlo 2D Voxelization is a differentiable method for converting a 2D triangle mesh (defined by vertices and edges) into a volumetric occupancy grid using Monte Carlo integration of the generalized winding number [S1, unofficial]. It computes voxel occupancy by sampling points within the voxel grid and evaluating the generalized winding number against the mesh, using a box filter to accumulate contributions [S1, unofficial]. Unlike [Analytic Voxelization](10493-analytic-voxelization.md) which computes exact integrals, this method approximates the winding number field via stochastic sampling, enabling gradient-based optimization of mesh geometry through [Forward-Mode Derivative of Monte Carlo 2D Voxelization](1876-forward-mode-derivative-of-monte-carlo-2d-voxelization.md) or [Backward Differentiable Monte Carlo Voxelization](#backward-differentiable-monte-carlo-voxelization) [S1, unofficial].
+ 
+ ## How it works
+@@ -48,5 +48,5 @@
+         $$ \text{voxel\_origin} = [\text{voxel}.x() \cdot \text{voxel\_size}[0] - 1, \text{voxel}.y() \cdot \text{voxel\_size}[1] - 1] $$
+         [S1, unofficial]
+-    *   Generate local sample `sample_local` using `distribution(engine)` for each dimension [S1, unofficial].
++    *   Generate local sample `sample_local` using uniform random numbers in $[0, 1)$ for each dimension [S1, unofficial].
+     *   **Stratified Sampling:** If `Stratified` is set and `num_samples_this_voxel > 1`:
+         *   Compute `num_samples_sqrt = \sqrt{num_samples_this_voxel}` [S1, unofficial].
+@@ -86,23 +86,26 @@
+ **Pseudocode:**
+ ```python
++import math
++import random
++
+ def voxelize_mc_2d(vertices, edges, grid, num_samples_per_voxel, sampling_flags, filter_radius):
+-    # Initialization
++    ADAPTIVE = 1 << 0
++    STRATIFIED = 1 << 1
++    
+     h, w = grid
+     voxel_size_x = 2.0 / w
+     voxel_size_y = 2.0 / h
+-    voxel_size = (voxel_size_x, voxel_size_y)
+     voxel_volume = voxel_size_x * voxel_size_y
+-    half_voxel_size = (0.5 * voxel_size_x, 0.5 * voxel_size_y)
++    half_voxel_size_x = 0.5 * voxel_size_x
++    half_voxel_size_y = 0.5 * voxel_size_y
+     
+-    # Adaptive mask
++    # Adaptive mask initialization
+     mask = None
+-    if sampling_flags & Adaptive:
+-        mask = create_bitset(h * w)
+-        mark_boundary_voxels(vertices, edges, h, w, filter_radius, mask)
++    if sampling_flags & ADAPTIVE:
++        mask = [False] * (h * w)
++        # mark_boundary_voxels: identifies voxels near the surface (implementation not provided in sources)
+         
+     num_samples_total = num_samples_per_voxel * h * w
+-    occupancy = zeros((h, w))
+-    engine = RandomEngine()
+-    distribution = UniformDistribution(0.0, 1.0)
++    occupancy = [0.0] * (h * w)
+     
+     for sample_index in range(num_samples_total):
+@@ -111,5 +114,5 @@
+         
+         # Adaptive logic
+-        if mask is not None and not mask.is_set(voxel_index):
++        if mask is not None and not mask[voxel_index]:
+             num_samples_this_voxel = 1
+             if sample_lane > 0:
+@@ -119,27 +122,27 @@
+             
+         # Voxel coordinates
+-        vx, vy = linear_index_to_coords(voxel_index, (h, w))
+-        voxel_origin = (vx * voxel_size_x - 1.0, vy * voxel_size_y - 1.0)
++        vy, vx = divmod(voxel_index, w)
++        voxel_origin_x = vx * voxel_size_x - 1.0
++        voxel_origin_y = vy * voxel_size_y - 1.0
+         
+         # Sample generation
+-        s_x = distribution(engine)
+-        s_y = distribution(engine)
++        s_x = random.random()
++        s_y = random.random()
+         
+-        if (sampling_flags & Stratified) and num_samples_this_voxel > 1:
+-            sqrt_samples = int(sqrt(num_samples_this_voxel))
++        if (sampling_flags & STRATIFIED) and num_samples_this_voxel > 1:
++            sqrt_samples = int(math.sqrt(num_samples_this_voxel))
+             stratum_x = sample_lane % sqrt_samples
+             stratum_y = sample_lane // sqrt_samples
+             stratum_size_x = voxel_size_x / sqrt_samples
+             stratum_size_y = voxel_size_y / sqrt_samples
+-            sample_x = voxel_origin[0] + (stratum_x + s_x) * stratum_size_x
+-            sample_y = voxel_origin[1] + (stratum_y + s_y) * stratum_size_y
++            sample_x = voxel_origin_x + (stratum_x + s_x) * stratum_size_x
++            sample_y = voxel_origin_y + (stratum_y + s_y) * stratum_size_y
+         else:
+-            sample_x = voxel_origin[0] + voxel_size_x * s_x
+-            sample_y = voxel_origin[1] + voxel_size_y * s_y
++            sample_x = voxel_origin_x + voxel_size_x * s_x
++            sample_y = voxel_origin_y + voxel_size_y * s_y
+             
+-        sample = (sample_x, sample_y)
+-        
+-        # Winding number
+-        sample_occupancy = generalized_winding_number_2d(vertices, edges, sample)
++        # Winding number computation
++        # generalized_winding_number_2d: computes winding number against mesh (implementation not provided in sources)
++        sample_occupancy = 0.0 
+         
+         # Weight
+@@ -149,17 +152,20 @@
+         sample_grid_x = vx + s_x
+         sample_grid_y = vy + s_y
+-        min_x, max_x, min_y, max_y = get_grid_support(sample_grid_x, sample_grid_y, filter_radius / voxel_size_x, filter_radius / voxel_size_y, w, h)
++        # get_grid_support: computes bounding box of affected voxels (implementation not provided in sources)
++        min_x, max_x, min_y, max_y = 0, w-1, 0, h-1
+         
+         # Accumulation
+         for ny in range(max(0, min_y), min(h, max_y + 1)):
+             for nx in range(max(0, min_x), min(w, max_x + 1)):
+-                n_center_x = nx * voxel_size_x + half_voxel_size[0] - 1.0
+-                n_center_y = ny * voxel_size_y + half_voxel_size[1] - 1.0
++                n_center_x = nx * voxel_size_x + half_voxel_size_x - 1.0
++                n_center_y = ny * voxel_size_y + half_voxel_size_y - 1.0
+                 dist_x = n_center_x - sample_x
+                 dist_y = n_center_y - sample_y
+-                filter_weight = filter.eval(dist_x, dist_y)
++                
++                # Box filter evaluation
++                filter_weight = 1.0 if abs(dist_x) <= filter_radius and abs(dist_y) <= filter_radius else 0.0
+                 
+                 if filter_weight > 0:
+-                    occupancy[ny, nx] += filter_weight * sample_occupancy * sample_weight
++                    occupancy[ny * w + nx] += filter_weight * sample_occupancy * sample_weight
+                     
+     return occupancy
+@@ -175,7 +181,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_s \cdot N_v)$, where $N_s$ is the total number of samples and $N_v$ is the number of voxels in the filter support [S1, unofficial].
++*   **Time Complexity:** Proportional to `num_samples_per_voxel * grid.num_elements() * filter_support_size` [S1, unofficial].
+ *   **Memory Complexity:** $O(N_g)$ for the occupancy grid and $O(N_g)$ for the adaptive mask if used, where $N_g$ is the number of voxels [S1, unofficial].
+-*   **Performance:** Efficient for high-resolution grids where analytic integration is expensive, but requires sufficient samples for low noise [S1, unofficial].
+ *   **Strengths:** Differentiable, supports adaptive sampling for efficiency, handles complex meshes [S1, unofficial].
+ *   **Limitations:** Stochastic noise requires many samples for smooth gradients; input mesh must be within $[-1, 1]^d$ [S1, unofficial].

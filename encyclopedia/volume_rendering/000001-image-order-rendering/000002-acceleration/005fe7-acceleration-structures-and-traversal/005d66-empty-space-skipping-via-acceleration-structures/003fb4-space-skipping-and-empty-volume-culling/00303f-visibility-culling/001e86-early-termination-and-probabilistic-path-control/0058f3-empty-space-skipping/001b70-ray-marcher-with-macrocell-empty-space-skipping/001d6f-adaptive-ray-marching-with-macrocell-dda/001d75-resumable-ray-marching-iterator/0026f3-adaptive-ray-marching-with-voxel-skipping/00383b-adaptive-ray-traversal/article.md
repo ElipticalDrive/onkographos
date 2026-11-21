@@ -1,0 +1,102 @@
+# Adaptive Ray Traversal
+## Overview
+Adaptive ray traversal is a space-skipping technique for volume rendering that accelerates ray marching by distinguishing between empty space and regions near data [S1, unofficial]. It solves the problem of inefficient traversal through large empty volumes by using a low-precision algorithm for rapid empty-space skipping and switching to a high-precision algorithm when the ray approaches occupied voxels [S1, unofficial]. It differs from fixed-step ray marching by dynamically adapting traversal precision based on local data density, and from proximity clouds by not requiring pre-computed distance fields for all empty voxels [S1, unofficial].
+
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, voxel grid with occupancy flags, and a "vicinity flag" for empty voxels.
+**Outputs:** Sampled color and opacity along the ray.
+
+**Data Structures:**
+*   **Voxel Grid:** 3D array of voxels. Each voxel has an `occupied` boolean and a `vicinity` boolean.
+*   **Vicinity Flag:** An empty voxel has `vicinity = true` if it is a neighbor of at least one `occupied = true` voxel [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Preprocessing:** Iterate through all voxels. For every empty voxel, check its neighbors. If any neighbor is a data voxel, set the empty voxel's `vicinity` flag to true [S1, unofficial].
+2.  **Ray Initialization:** Set current position $t = 0$.
+3.  **Traversal Loop:**
+    a.  **Empty Space Check:** Determine if the current voxel (or the voxel the ray is entering) is empty and has `vicinity = false`.
+    b.  **Low-Precision Skip:** If the condition in (a) is met, advance the ray using a low-precision algorithm. This typically involves stepping by the full voxel size or using a coarse grid traversal that ignores fine boundaries. The goal is to jump over large empty regions [S1, unofficial].
+    c.  **High-Precision Switch:** If the ray enters a voxel where `vicinity = true` or `occupied = true`, switch to a high-precision algorithm. This algorithm uses smaller steps to accurately sample the data and handle boundaries [S1, unofficial].
+    d.  **Integration:** Sample the volume at the current position and accumulate color/opacity.
+    e.  **Termination:** If opacity is 1.0 or the ray exits the volume, stop. Otherwise, continue to step 3.
+
+**Parameters:**
+*   **Vicinity Radius:** The number of neighbor layers checked for the vicinity flag. Not given in the sources.
+*   **Skip Step Size:** The step size used in low-precision mode. Often equal to the voxel size or a multiple thereof [S1, unofficial].
+
+**Edge Cases:**
+*   **Precision Loss:** The low-precision algorithm must not overshoot the vicinity region. Not given in the sources.
+*   **Boundary Handling:** The transition between low- and high-precision modes must be smooth to avoid sampling gaps or overlaps. Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_ray_traversal(ray_origin, ray_direction, voxel_grid, voxel_size, max_distance):
+    # Preprocessing: set vicinity flags
+    for voxel in voxel_grid:
+        if not voxel.occupied:
+            for neighbor in voxel.neighbors:
+                if neighbor.occupied:
+                    voxel.vicinity = True
+                    break
+    
+    t = 0.0
+    color = (0.0, 0.0, 0.0)
+    opacity = 0.0
+    
+    while opacity < 1.0 and t < max_distance:
+        current_pos = ray_origin + ray_direction * t
+        voxel = voxel_grid.get_voxel_at(current_pos)
+        
+        if not voxel.occupied and not voxel.vicinity:
+            # Low-precision skip: step by full voxel size
+            step = voxel_size
+        else:
+            # High-precision traversal: step by half voxel size for accuracy
+            step = voxel_size * 0.5
+            
+        t += step
+        current_pos = ray_origin + ray_direction * t
+        sample = voxel_grid.sample(current_pos)
+        
+        # Front-to-back accumulation
+        alpha = sample.opacity
+        color = color + (1.0 - opacity) * sample.color * alpha
+        opacity = opacity + alpha * (1.0 - opacity)
+            
+    return color
+```
+
+## Subtopics
+
+### [Proximity Clouds](8227-proximity-clouds.md)
+Proximity clouds are an acceleration technique for 3D grid traversal that replaces density values in empty space with pre-computed distance-to-nearest-occupied-voxel metrics, enabling long, safe skips along a ray. Unlike standard empty-space culling which often relies on binary occupancy or fixed block sizes, this method allows arbitrary step leaps based on the geometric distance to the object boundary, significantly reducing traversal overhead in large empty regions.
+
+### Adaptive Direct Volume Ray Traversal
+A ray traversal technique for TB-AMR (Tree-Based Adaptive Mesh Refinement) data that skips empty space and adapts the integration step size to the width of the leaf cell being sampled, avoiding the over/under-sampling artifacts of fixed-step rendering [S2]. It differs from standard adaptive ray traversal by operating on octrees rather than uniform grids and by adapting the step size to the local resolution [S2].
+
+**Definition:** A method for rendering TB-AMR volumes that combines empty-space skipping with adaptive sampling [S2].
+
+**Steps:**
+1.  Traverse the octree top-down using a software-maintained stack [S2].
+2.  For each node, query the maximum opacity over its value range using OSPRay's preintegrated transfer function [S2].
+3.  If the maximum opacity is 0, skip the node and its children [S2].
+4.  Compute samples for the ray interval using a user-selected reconstruction kernel (e.g., finest, octant, or GTI method) [S2].
+5.  Advance the ray to the next sample point, where the step size is equal to the width of the leaf cell currently being sampled [S2].
+6.  When interpolating within a non-boundary region, find the values of the eight corners of the dual cell by traversing all eight points at once using a bitmask to track which query points require traversal of each child node [S2].
+
+**Comparison:** Unlike OSPRay 1.8 which uses a fixed step size leading to over-sampling or under-sampling, this method adapts the step size to the data resolution [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+
+## Background
+Adaptive ray traversal was introduced as a method to accelerate direct volume rendering by distinguishing between empty space and data regions [S1, unofficial]. The concept of assigning a "vicinity flag" to empty voxels was proposed to allow for a hybrid traversal strategy [S1, unofficial]. Proximity clouds were later introduced as an extension, using pre-computed distance fields for more efficient skipping [S1, unofficial]. Adaptive Direct Volume Ray Traversal was developed for TB-AMR data to address the limitations of fixed-step rendering in OSPRay 1.8, leading to improvements in OSPRay 2.0 [S2].
+
+## Sources
+[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S2] PDF CPU Ray Tracing of Tree‐Based Adaptive Mesh Refinement Data, https://publications.sci.utah.edu/publications/Wan2020a/cgf.13958.pdf, fetched 2026-10-27

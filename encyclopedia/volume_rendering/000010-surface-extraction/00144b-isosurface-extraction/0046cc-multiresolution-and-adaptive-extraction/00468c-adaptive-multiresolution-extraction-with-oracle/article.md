@@ -1,0 +1,155 @@
+# Adaptive Multiresolution Extraction with Oracle
+
+Also called: Adaptive Surface Reconstruction with Oracle-based LOD, Crack-free adaptive marching cubes, Westermann et al. adaptive extraction
+
+## Overview
+Adaptive Multiresolution Extraction with Oracle is a technique that adaptively extracts meshes from coarser-resolution nodes to gain speed, using an 'oracle' structure to manage level of detail and patch cracks at resolution junctions [S1, unofficial]. It solves the problem of cracks appearing at junctions where finer-resolution octree cells are adjacent to coarser cells by patching resulting meshes to guarantee continuity [S1, unofficial]. Unlike methods that process only the deepest leaves, this approach exploits the multiresolution nature of the octree to process higher-resolution volumes at real-time rates by adaptively deciding to extract the mesh from fewer, coarser-resolution nodes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An octree data structure representing a 3D scalar field [S1, unofficial].
+*   **Output:** A watertight, crack-free triangular mesh representing the isosurface [S1, unofficial].
+
+**Data Structures:**
+*   **Octree:** Hierarchical structure where each node represents a voxel or group of voxels [G]. Leaf nodes contain the scalar data or occupancy information [G].
+*   **Oracle Structure:** A data structure built during a single pass of the octree [S1, unofficial]. It stores the determined level of detail (LOD) or traversal depth for each region [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Oracle Construction:** Perform a single pass of the octree to build the 'oracle' structure [S1, unofficial]. This structure determines the level of detail (depth of the octree to be traversed) for each region based on view-dependent and geometric criteria [S1, unofficial].
+    *   **Curvature Oracle:** Implement an oracle for predicting maximum surface curvature within each leaf node [S1, unofficial]. Regions of low curvature use fewer polygons (shallower traversal), while high curvature regions traverse to the finest level [S1, unofficial].
+    *   **Focus Point Oracle:** Determine octree traversal depth based on distance to the camera view position [S1, unofficial]. Regions closer to the view point may be traversed to finer levels [S1, unofficial].
+2.  **Adaptive Traversal:** Traverse the octree using the depths determined by the oracle [S1, unofficial]. Extract the mesh from the nodes at the specified depth [S1, unofficial]. This allows coarser nodes to be used in low-detail areas and finer nodes in high-detail areas [S1, unofficial].
+3.  **Crack Patching:** Patch the resulting meshes to guarantee continuity at junctions between different resolution levels [S1, unofficial]. This step is critical because cell corner values may vary at junctions in the octree, leading to cracks when surfaces are extracted from adjacent cells of different resolution [S1, unofficial]. The method involves modifying the mesh geometry at these junctions to ensure vertices align and edges connect properly [G].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+*   **Curvature Threshold:** Not given in the sources.
+*   **Distance Threshold:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Cracks:** Cracks appear when surfaces are extracted from adjacent cells of different resolution because cell corner values vary at junctions [S1, unofficial]. This is the primary challenge addressed by the patching step [S1, unofficial].
+*   **Precision:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_extraction_with_oracle(octree_root, camera_position, isovalue):
+    """
+    Performs adaptive multiresolution surface extraction using an oracle.
+    
+    Args:
+        octree_root: The root node of the octree data structure.
+        camera_position: The 3D position of the camera.
+        isovalue: The scalar threshold for surface extraction.
+        
+    Returns:
+        A list of triangles forming the crack-free mesh.
+    """
+    # Step 1: Build Oracle Structure
+    # The oracle maps each node to its target traversal depth.
+    oracle = {}
+    
+    def build_oracle(node, depth):
+        if node is None:
+            return
+        
+        # Curvature oracle: predict max surface curvature in leaf node
+        max_curvature = estimate_max_curvature(node)  # [G]
+        curvature_depth = map_curvature_to_depth(max_curvature)  # [G]
+        
+        # Focus point oracle: determine depth based on distance to camera
+        node_center = get_node_center(node)  # [G]
+        distance = euclidean_distance(node_center, camera_position)  # [G]
+        distance_depth = map_distance_to_depth(distance)  # [G]
+        
+        # Combine criteria: use the finer (deeper) depth
+        final_depth = max(curvature_depth, distance_depth)
+        oracle[node] = final_depth
+        
+        # Recurse to children if deeper traversal is needed
+        if depth < final_depth and node.has_children():
+            for child in node.children:
+                build_oracle(child, depth + 1)
+    
+    build_oracle(octree_root, 0)
+    
+    # Step 2: Adaptive Traversal and Mesh Extraction
+    mesh_triangles = []
+    
+    def extract(node, current_depth):
+        target_depth = oracle.get(node, current_depth)
+        
+        if current_depth == target_depth:
+            # Extract mesh from this node at the specified resolution
+            mesh_triangles.extend(marching_cubes(node, isovalue))  # [G]
+        elif current_depth < target_depth and node.has_children():
+            # Recurse to children until target depth is reached
+            for child in node.children:
+                extract(child, current_depth + 1)
+        # If current_depth > target_depth, stop recursion to prevent over-traversal
+        
+    extract(octree_root, 0)
+    
+    # Step 3: Crack Patching
+    # Patch the resulting meshes to guarantee continuity at junctions
+    mesh_triangles = patch_cracks(mesh_triangles, octree_root, oracle)  # [G]
+    return mesh_triangles
+
+def estimate_max_curvature(node):
+    # [G] Standard curvature estimation from scalar gradients at node vertices
+    return 0.0
+
+def map_curvature_to_depth(curvature):
+    # [G] Maps curvature magnitude to octree depth level
+    return 0
+
+def get_node_center(node):
+    # [G] Computes geometric center of the node's bounding box
+    return (0, 0, 0)
+
+def euclidean_distance(p1, p2):
+    # Standard Euclidean distance calculation
+    return ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)**0.5
+
+def map_distance_to_depth(distance):
+    # [G] Maps camera distance to octree depth level
+    return 0
+
+def marching_cubes(node, isovalue):
+    # [G] Standard Marching Cubes algorithm for isosurface extraction
+    return []
+
+def patch_cracks(triangles, octree, oracle):
+    # [G] Aligns boundary vertices at resolution junctions to eliminate cracks
+    return triangles
+```
+
+## Subtopics
+
+### Adaptive Minimum Projected Size Adjustment
+Adjusts mesh resolution based on projected size on screen. Choose when screen-space error is the primary concern. [Adaptive Minimum Projected Size Adjustment](7457-adaptive-minimum-projected-size-adjustment.md)
+
+### Non-reconnected Multiresolution Isosurfacing
+Extracts meshes at different resolutions without reconnecting them, potentially leading to cracks. Choose when performance is critical and cracks are acceptable or handled differently. [Non-reconnected Multiresolution Isosurfacing](7512-non-reconnected-multiresolution-isosurfacing.md)
+
+### Extended Particle System with Gradient-Weighted Projection
+Uses a particle system with gradient-weighted projection for adaptive extraction. Choose when particle-based methods better suit the data distribution. [Extended Particle System with Gradient-Weighted Projection](15135-extended-particle-system-with-gradient-Weighted-projection.md)
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the octree depth and the distribution of curvature/distance [S1, unofficial]. Generally faster than full-resolution extraction due to adaptive coarsening [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the octree and the oracle structure [G].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the complexity of the scalar field and the camera position [G].
+*   **Strengths:** Real-time rates for high-resolution volumes; handles view-dependent and geometric criteria [S1, unofficial].
+*   **Limitations:** Requires complex patching logic to avoid cracks; oracle construction adds overhead [S1, unofficial].
+*   **When to use:** When real-time rendering of high-resolution volumetric data is required, and cracks must be avoided [S1, unofficial].
+*   **When not to use:** When simplicity of implementation is prioritized over performance, or when cracks are acceptable [G].
+
+## Background
+The technique was proposed by Westermann et al. [WKE99] as an improvement over methods like Wilhlems and Van Gelder, which processed only the deepest leaves of the octree [S1, unofficial]. It builds upon previous view-dependent extraction methods, such as Livnat et al. [LH98] [S1, unofficial]. The main insight was recognizing that speedups could be gained by adaptively deciding to extract the mesh from fewer, coarser-resolution nodes [S1, unofficial]. The primary challenge addressed is the appearance of cracks at junctions where finer-resolution octree cells are adjacent to coarser cells [S1, unofficial].
+
+## Sources
+[S1] PDF A Survey of Octree Volume Rendering Methods, https://www.sci.utah.edu/~knolla/octsurvey.pdf, fetched 2026-10-29 (unofficial)

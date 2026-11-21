@@ -1,0 +1,60 @@
+# Extra free space
+
+Also called: Extra free space encoding, Address space padding for data hiding
+
+## Overview
+Extra free space is a data hiding technique that encodes information by inserting variable-sized, 32-bit aligned gaps between nodes in the addressing space of a Sparse Voxel Directed Acyclic Graph (SVDAG) [S1]. Unlike methods that modify node contents, this approach leaves the geometric representation unchanged by filling the gaps with zero bits, relying on the discrepancy between the expected compact layout and the actual file size to conceal the payload [S1]. It sets itself apart from sibling methods like "Data Hiding in Unused Mask Space" by operating at the structural layout level rather than within the bit-fields of individual nodes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A valid SVDAG data structure representing a 3D voxelized scene, where nodes are typically concatenated to fill addressing space economically [S1].
+*   **Output:** An SVDAG file with identical geometric content but a larger file size, containing encoded information within the padding gaps [S1].
+
+**Data Structures:**
+The SVDAG structure decomposes space into 8 suboctants. Each node comprises:
+1.  An 8-bit child node mask (1 bit per child).
+2.  A variable number of 32-bit child pointers (1 to 8 pointers, corresponding to set bits in the mask) [S1].
+Nodes are normally stored contiguously. The method introduces "free space" (padding) between these nodes [S1].
+
+**Steps:**
+1.  **Analyze Structure:** Determine the standard, compact layout of the SVDAG by counting the total number of nodes and their individual sizes based on their masks and pointer counts [S1].
+2.  **Calculate Payload:** Determine the number of bits to be hidden.
+3.  **Insert Gaps:** Insert variable-sized blocks of 32-bit aligned zero bits between existing nodes in the addressing space. The size and location of these gaps encode the secret information [S1].
+4.  **Verify Alignment:** Ensure all inserted gaps are multiples of 32 bits to maintain alignment constraints [S1].
+
+**Formulas:**
+*   Let $N$ be the number of nodes in the compact SVDAG.
+*   Let $S_i$ be the size of node $i$ in bits.
+*   The expected compact size $C = \sum_{i=1}^{N} S_i$.
+*   The actual file size $F$ includes the compact size plus the total size of inserted free space $P$:
+    $$ F = C + P $$
+*   The information is encoded in the values of $P$ and the positions of the gaps [S1].
+
+**Parameters:**
+*   **Alignment:** 32-bit [S1].
+*   **Padding Content:** Strings of 0 bits [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Detection:** The method is detectable by analyzing the assumed number and size of nodes compared to the real size of the data structure. A discrepancy between the calculated compact size and the actual file size reveals the presence of hidden data [S1].
+*   **Geometry Preservation:** The method must not alter the represented geometry of the 3D scene [S1].
+
+## Subtopics
+
+### Data Hiding in Unused Mask Space
+This variant hides information by filling the 24-bit unused space within the 32-bit child node mask of SVDAG nodes [S1].
+*   **Definition:** Identifies the 32-bit child node mask, locates the 24 bits of unused space immediately following the 8-bit mask, and writes secret data bits into this space [S1].
+*   **Capacity:** 24 bits (3 Bytes) per non-leaf node [S1]. This represents 8.33% of node size with 8 pointers, 37.5% with 1 pointer, and 75% for leaf nodes [S1].
+*   **Pitfall:** Extremely easy to detect if the unused space is filled, especially with extensive use [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Increases the file size by the amount of padding inserted. The geometric data size remains constant [S1].
+*   **Strengths:** Does not change the represented geometry of the 3D scene; utilizes address space gaps which are not traversed during standard data structure use [S1].
+*   **Limitations:** Extremely easy to detect via file size analysis; requires the ability to modify the file layout without breaking the parser's ability to skip or ignore the padding [S1].
+*   **When to use:** When the goal is to hide data in the structural layout of the SVDAG without modifying node contents, and detection risk is acceptable or mitigated by other means [S1].
+
+## Background
+The method originates from research on data hiding using domain-specific hierarchical data structures, specifically Sparse Voxel Directed Acyclic Graphs (SVDAG) for geometry representation of voxelized three-dimensional scenes [S1]. It was proposed as an alternative to modifying node masks or adding extra child pointers, leveraging the natural alignment requirements of the data structure [S1].
+
+## Sources
+[S1] ON DATA HIDING USING DOMAIN SPECIFIC HIERARCHICAL DATA STRUCTURE SVDAG FOR GEOMETRY REPRESENTATION OF VOXELIZED THREEDIMENSIONAL SCENES, https://doi.org/10.15546/aeei-2019-0027, fetched 2026-10-26

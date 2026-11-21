@@ -1,0 +1,183 @@
+From the owner's design note Loft engine gaps: particles, 3D audio, camera (2026-09-24), filed as plans by the loft stream. The full note is the owner's; each plan carries its own section and the shared conventions. Depends on @PLN168 (h...
+
+[libs] camera — extract moros's orbit / follow / overview camera, picker and view-cone occlusion into camera, camera_occlude, camera_block, picker (2D layer included) · Issue #169 · loft-lang/plans · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[libs] camera — extract moros's orbit / follow / overview camera, picker and view-cone occlusion into camera, camera_occlude, camera_block, picker (2D layer included) #169
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[libs] camera — extract moros's orbit / follow / overview camera, picker and view-cone occlusion into camera, camera_occlude, camera_block, picker (2D layer included)#169
+Copy link
+Labels
+status:futurePlanned, not startedPlanned, not startedsubject:libsSubject — the loft library ecosystemSubject — the loft library ecosystem
+Description
+jjstwerff
+opened on Sep 24, 2026
+Issue body actions
+From the owner's design note Loft engine gaps: particles, 3D audio, camera (2026-09-24), filed as plans by the loft stream. The full note is the owner's; each plan carries its own section and the shared conventions.
+Depends on @PLN168 (hex_block) for blocked and raycast. Extract moros's working camera into camera, camera_occlude, camera_block and picker.
+Camera
+Moros already has a working orbit camera, follow and overview modes, a picker and a CPU see-through occlusion test, all in loft and all under headless tests. It is close to a library already: the camera functions take primitives (Vec3, facing in radians) and depend only on graphics, not on moros_sim or any hex package.
+What moros has today (jjstwerff/moros, inspected 2026-09-24; moros_render is 1,372 lines, moros_sim about 780):
+Piece
+Where
+What it does
+Tests
+RenderCamera
+moros_render
+Orbit camera: target, azimuth and elevation in degrees, distance, fov_y, near/far, up. Eye, view and projection matrices. Orbit (elevation clamped to ±89°), zoom (0.1–10 000), pan, unbounded zoom (cap 50 000).
+camera_modes
+Follow / Overview modes
+moros_render
+camera_follow puts the eye behind the avatar's facing; camera_overview pins elevation at 89° and backs out to at least 80 units.
+camera_modes
+Picker
+moros_render
+NDC to world ray, ray against a horizontal plane, pick_hex (hex-specific).
+picking
+See-through occlusion
+moros_render
+30° view cone from eye to target, first 20% and last 30% of the axis skipped. AABB-vs-cone flags scene nodes to draw as wireframe. CPU only, identical on interpreter, OpenGL and WebGL. Toggled with o.
+occlusion
+CameraControl
+moros_sim
+The user's orbit offset, accumulated by right-drag at 0.3°/px and re-applied every frame after the mode's base pose; reset on mode toggle. Wheel zoom. Mouse-look drives player yaw and pitch.
+camera_input, mouse_look
+Collision
+moros_sim (collide.loft)
+Map-based, no mesh readback: blocked_by_wall, floor_y_at, axis-separated resolve_move with wall sliding and 0.5-unit step-up.
+collide, player_physics
+What it does not have: smoothing (the camera snaps every frame), camera collision with terrain (the camera never pulls in; blocking is handled by drawing occluders as wireframe instead), a 2D camera, and free-fly or first-person controllers. The camera-type note in LOFT_LIBRARIES.md (radians, single) is stale; the code uses degrees and float.
+What to pull out of moros: RenderCamera and its functions, the two modes, CameraControl and its per-frame re-apply rule, the picker minus the hex snap, and the ViewCone / Aabb occlusion test. Their tests move with them.
+What to leave in moros: pick_hex and world_to_hex (they belong beside hex_grid), the o and Tab key bindings, and EditorState, which owns the camera today.
+Proposed shape:
+Package
+Contents
+Source
+Depends on
+camera
+RenderCamera, orbit/zoom/pan, Follow and Overview, CameraControl offsets; smoothing added on extraction
+moros_render + moros_sim
+graphics (Vec3, Mat4), fixstep, tween
+camera_occlude
+ViewCone, Aabb, aabb_vs_cone, flag_occluders over a caller-supplied AABB list; cone angle and margins as parameters instead of constants
+moros_render
+camera
+camera_block
+New: resolves a desired pose against a blocking query; returns the adjusted pose and a fade factor
+none yet
+camera; a caller-supplied blocked(from, to) -> float
+picker
+Ray from NDC, ray against a plane; hex snap stays with hex_grid
+moros_render
+camera
+Keeping camera_occlude and camera_block separate from camera means a game with neither never pulls them in. Moros needs camera_occlude today (its see-through is a render effect, not a camera move) and camera_block only if it ever wants pull-in; the same blocking query serves audio occlusion.
+Environment blocking, defined once: a single function blocked(from: vec3, to: vec3) -> float returning 0 (clear) to 1 (fully blocked). Moros can implement it two ways it already has the data for: count the AABBs that aabb_vs_cone flags between eye and target, or walk collide.loft's wall and floor data along the segment. Camera pulls in on partial blocking, audio low-passes on it.
+Extraction risks: low. The camera has no frame-timing dependency (it is recomputed from scratch every frame from the avatar pose plus the stored offset), and the occlusion test reads mesh AABBs from the graphics Scene, not from hex data. The two things that will move are the hex-specific pick functions and the OCCLUSION_* constants, which should become parameters. The existing tests (camera_modes, occlusion, camera_input, mouse_look, picking) are the recording the extracted packages must keep passing.
+camera
+The 3D camera is moros's RenderCamera with the names kept, smoothing added, and the follow logic told about the hex world so it can pull in when a wall or roof sits between eye and target. The 2D camera has the same verbs on a Vec2.
+```
+// ── 2D ──────────────────────────────────────────────────────────
+pub struct Camera2D {
+  pos: Vec2, zoom: float, rotation: float,        // rotation in degrees
+  viewport: Vec2, bounds: Rect,                    // bounds null = unbounded
+  dead_zone: Rect, smoothing: float,               // 0 = snap, else seconds to close 90% of the gap
+  shake: float, shake_decay: float,
+}
+pub fn camera_2d(viewport: Vec2) -> Camera2D
+pub fn follow(self: &Camera2D, target: Vec2, dt: float)         // dead zone, then exponential smoothing, then bounds
+pub fn look_at(self: &Camera2D, target: Vec2)                   // snap
+pub fn zoom_to(self: &Camera2D, zoom: float, dt: float)
+pub fn shake_by(self: &Camera2D, strength: float)
+pub fn world_to_screen(self: Camera2D, p: Vec2) -> Vec2
+pub fn screen_to_world(self: Camera2D, p: Vec2) -> Vec2
+pub fn visible(self: Camera2D) -> Rect                          // for culling
+pub fn view_matrix(self: Camera2D) -> Mat4                      // feeds Painter2D / draw_sprite_at
+
+// ── 3D, hex world ───────────────────────────────────────────────
+pub struct Camera3D {
+  target: Vec3, azimuth: float, elevation: float, distance: float,   // RenderCamera fields, degrees
+  fov_y: float, near: float, far: float, up: Vec3,
+  mode: CameraMode,                                 // Follow | Overview | Orbit | Free
+  orbit_offset: Vec2,                               // moros CameraControl: user drag on top of the mode pose
+  smoothing: float, min_distance: float, max_distance: float,
+  pull_in: float,                                   // 0..1, how far the camera may shorten distance when blocked
+  shake: float,
+}
+pub fn camera_3d() -> Camera3D                                   // camera_default values
+pub fn eye(self: Camera3D) -> Vec3                               // camera_eye
+pub fn view_matrix(self: Camera3D) -> Mat4
+pub fn projection_matrix(self: Camera3D, aspect: float) -> Mat4
+pub fn orbit(self: &Camera3D, d_azimuth: float, d_elevation: float)   // clamps ±89°
+pub fn zoom(self: &Camera3D, delta: float)                       // clamps to [min_distance, max_distance]
+pub fn pan(self: &Camera3D, delta: Vec3)
+pub fn shake_by(self: &Camera3D, strength: float)
+
+// Per-frame pose. Order is fixed and matches moros: mode pose, then user offset, then blocking, then smoothing.
+pub fn follow<W: HexWorld>(self: &Camera3D, world: W, boxes: BoxSet,
+                           head: Vec3, facing: float, dt: float)
+pub fn overview(self: &Camera3D, ground: Vec3, dt: float)
+pub fn set_mode(self: &Camera3D, mode: CameraMode)               // resets orbit_offset, as moros does on Tab
+
+// Rays and picking (hex snap lives in the caller, via hex_grid).
+pub fn ray_dir(self: Camera3D, ndc: Vec2, aspect: float) -> Vec3
+pub fn pick_ground(self: Camera3D, ndc: Vec2, aspect: float, plane_y: float) -> Vec3
+pub fn pick<W: HexWorld>(self: Camera3D, world: W, boxes: BoxSet, ndc: Vec2, aspect: float) -> HexHit
+
+// See-through: moros's cone, with its constants as fields.
+pub struct ViewCone { apex: Vec3, axis: Vec3, length: float, half_angle: float, t_near: float, t_far: float }
+pub fn view_cone(self: Camera3D, half_angle: float, near_skip: float, far_skip: float) -> ViewCone
+pub fn contains(self: ViewCone, p: Vec3) -> boolean
+pub fn intersects(self: ViewCone, b: Aabb) -> boolean           // aabb_vs_cone
+pub fn occluders(self: ViewCone, boxes: BoxSet) -> vector<boolean>   // flag_occluders
+pub fn occluding_cells<W: HexWorld>(self: ViewCone, world: W) -> vector<HexHit>   // walls and roofs in the cone, for wireframe or fade
+```
+How follow uses hex_block: it computes the desired eye from the mode pose and offset, calls blocked(world, boxes, target, eye), and if the result is above 0 it shortens distance toward min_distance by pull_in × blocked, never past the first hit from raycast(target → eye). With pull_in = 0 the camera never moves and the game uses occluding_cells to draw through instead, which is exactly moros's behaviour today.
+Moros mapping: camera_follow → follow, camera_overview → overview, camera_zoom_unbounded → zoom with a large max_distance, CameraControl → orbit_offset, flag_occluders → occluders. pick_hex stays in moros as px_to_hex(cam.pick_ground(…)).
+Suggested order and open questions
+Camera first, because the code exists and its extraction risk is low; then audio bus, because every game needs it; then particles and spatial audio, which both wait on a runtime answer.
+Record the moros camera behaviour with a headless test, then extract camera and camera_block against that recording.
+Define blocked(from, to) -> float once and have moros implement it.
+Ship audio_bus with plain 2D mixing and wav loading.
+Add spatialization on top of the bus; wire occlusion to the blocking query.
+Ship the particle simulation headless; wire the quad batch once the graphics answer is known.
+Open questions:
+Instanced quads: yes. graphics exposes gl_upload_instance_buffer, gl_instance_attrib and gl_draw_instanced on native and in the WebGL bridge (PLN144), and stage already packs its flat node array into one instance buffer with st_time as a uniform for ambient sway. Particles' GPU path can reuse that buffer layout, or be a stage layer outright.
+audio_play_raw every tick: no. Native opens a new rodio Sink per call and the browser starts a new buffer source immediately, so consecutive blocks overlap or gap. Gapless procedural audio needs an audio_queue_raw(sink, samples) that appends to one sink (rodio's append is gapless; the browser schedules start(prevEnd)). Only chiptune needs it under the rodio/WebAudio design.
+Moros camera: no frame-timing dependency; only the hex pick functions stay behind.
+blocked(from, to): derive it from the world data (HexWorld.wall, floor_y, roof_y) plus the BoxSet for props. The view cone stays a render effect. Exact for hex worlds, and free meshes are only ever their boxes, which is the rule this doc set for 3D.
+Curves: tween already takes Curve and Shape enums from an easing package and evaluates ease(curve, shape, t); the Tween struct itself counts integer time units. Particles should depend on easing, not tween: an over-lifetime curve is (from, to, Curve, Shape) sampled at age / life, which is lerp(from, to, ease(c, s, t)) and lands exactly on both ends. Rename the particles Curve struct to LifeCurve to avoid clashing with easing::Curve.
+Does graphics have a native audio_set_pan / audio_set_speed equivalent on rodio 0.20 sinks, or does the rodio 0.22 upgrade come first?
+Activity
+jjstwerff
+added
+subject:libsSubject — the loft library ecosystemSubject — the loft library ecosystem
+status:futurePlanned, not startedPlanned, not started
+on Sep 24, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+status:futurePlanned, not startedPlanned, not startedsubject:libsSubject — the loft library ecosystemSubject — the loft library ecosystem
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

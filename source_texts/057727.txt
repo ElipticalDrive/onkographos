@@ -1,0 +1,1296 @@
+Differentiable Shadow Mapping for Efficient Inverse Graphics
+Markus Worchel
+Marc Alexa
+arXiv:2308.10896v1 [cs.GR] 21 Aug 2023
+TU Berlin
+Abstract
+We show how shadows can be efficiently generated in
+differentiable rendering of triangle meshes. Our central observation is that pre-filtered shadow mapping, a technique
+for approximating shadows based on rendering from the
+perspective of a light, can be combined with existing differentiable rasterizers to yield differentiable visibility information. We demonstrate at several inverse graphics problems that differentiable shadow maps are orders of magnitude faster than differentiable light transport simulation
+with similar accuracy – while differentiable rasterization
+without shadows often fails to converge.
+1. Introduction
+Differentiable renderers have become an essential tool
+for solving inverse problems in computer vision. They currently come in two flavors: (1) forward rasterization using local shading models [10, 11, 43] and (2) path tracing
+and/or Monte Carlo methods for global light transport simulation [24, 40, 58, 81]. While local methods are orders of
+magnitude faster, they lack effects of global light interaction
+such as shadows, caustics, or indirect illumination.
+Modern methods in real-time graphics can generate surprisingly realistic images by using efficient approximations
+of global effects. The single most important aspect for increasing the realism of local shading is the consideration of
+shadows (see Figure 1): for each pixel to be shaded, check
+if the path to a light source is unobstructed before evaluating
+a local shading model. Doing this accurately is costly and
+many approximate techniques have been developed. Our
+central observation is that one of the oldest and most widely
+used, shadow maps [76] (see Section 3), can be adapted to
+work in differentiable rendering frameworks.
+In Section 4 we explain how (certain approximations
+of) shadow mapping can be differentiated, exploiting existing differentiable rasterizers. Our main idea is similar to shadow maps: exploit efficient rasterization from
+the light’s point of view. For differentiable shadows
+this means: Existing differentiable rasterizers handle dis-
+Local Shading
+Local Shading + Shadows
+Global Shading
+Figure 1. Adding shadows (middle) to local shading (left) is a
+significant step towards global light transport simulation (right).
+Rendering
+Numerical Deriva�ves
+Our Deriva�ves
+Figure 2. Complex scene (330k triangles) rendered in real time
+with our differentiable shadow mapping. It shows self-shadowing
+of objects, shadowing between objects, and colored surfaces. Finite differences and our automatic derivatives w.r.t. movement of
+the light (note the non-zero derivatives at shadow boundaries).
+continuities of primary visibility along primitive borders;
+we use this machinery to handle discontinuities of secondary visibility along
+shadow borders. The resulting images
+contain shadows and are differentiable
+(see Figure 2). For many inverse graphics problems the level of realism they Primary
+Discon�nui�es
+provide will suffice, while being generated significantly faster than with global
+methods. This is important for machine
+learning tasks, where the renderings (and
+their derivatives w.r.t. scene parameters) Secondary
+are computed repeatedly. We provide de- Discon�nui�es
+tails of the implementation and how parameters affect optimization based on target images in Section 5.
+Given the importance of shadows for realistic image synthesis, it is unsurprising that many inverse problems heavily
+depend on them. We demonstrate the trade-off and possibillities of differentiable shadow mappings in several appli-
+cations, ranging from pose estimation, over different types
+of geometry reconstruction, to interactive editing by manipulating shadows (Section 6).
+The main idea of this work, using existing differentiable
+rendering frameworks that readily resolve the problem of
+visibility discontinuities for dealing with discontinuities of
+secondary rays, may be useful for various other scenarios
+beyond shadows. We elaborate on this and other immediate
+consequences of our approach in Section 7.
+2. Related Work: Differentiable Rendering
+Differentiable rendering enables computing derivatives
+of the rendering process, which generates a virtual image
+from a set of scene parameters. While there are differentiable renderers for a variety of scene representations, including volumes [56] or implicit surfaces [4, 26, 73], we focus on triangle meshes here and refer to Kato et al. [29] for
+a broader overview.
+Many differentiable mesh renderers are based on rasterization, effectively point-sampling the scene on a regular grid in the image plane. Point sampling means that a
+primitive either covers a pixel or not; this binary outcome
+makes computing derivatives w.r.t. scene parameters difficult. Some differentiable rasterizers approximate the gradient computation [30, 43] whereas others approximate the
+rasterization [10–12,34,42,63,71], using a form of smoothing or anti-aliasing to ensure differentiability. Approaches
+also differ in terms of local shading of a pixel, from considering only given colors to evaluating reflection models
+based on the BRDF.
+At the other end of the spectrum are complex physicallybased differentiable renderers [24, 40, 58, 81], often based
+on Monte Carlo integration to numerically approximate the
+rendering equation [27]. For handling visibility discontinuities in the gradients, several techniques have been developed [5, 40, 44, 86]. Significant effort has been made to
+improve the immense time and memory requirements [25,
+57, 72]. While modern GPUs possess specialized hardware
+for ray-triangle intersection, they still cannot match the performance of rasterization-based renderers.
+Multi-view 3D reconstruction and related inverse problems such as view synthesis and material estimation are
+prime examples for the potential of differentiable rendering. Recent combinations of inverse graphics with machine
+learning techniques, like NeRF [6, 7, 48, 54, 84] or neural implicit surfaces [55, 59, 75, 79, 80, 83] are particularly
+successful. It is still common to use local shading models, especially in combination with efficient differentiable
+rasterizers for triangle meshes. Missing shadows or indirect illumination in the differentiable rendering process are
+often compensated for by assuming a setting where these
+effects are either neglegible (e.g. co-located camera and
+light [45,82] or soft environment lighting [19,51]), by mod-
+eling the interaction of light and material as a black box neural network [77], or simply ignored [20, 66]. In addition to
+analysis-by-synthesis settings, differentiable renderers have
+been used in a variety of contexts to train machine learning
+models [10, 17, 23, 36, 41, 47, 61, 67, 74, 78, 85].
+Despite the popularity in computer graphics, surprisingly
+little effort has been spent on combining local shading models and approximate global solutions in the context of differentiable rendering. Lyu et al. [46] take a first step in this direction by approximating soft shadows produced by imagebased lighting, however, their gradients are so far limited
+by the proxy geometry [65] used for shadow computation.
+In contrast, we use the full mesh geometry for the shadows
+and are not restricted to a specific class of deformations.
+3. Background: Shadow Mapping
+Shadow mapping [76] is based on the observation that
+points in a scene are lit by a (point) light source if they are
+closest to the light source. The shadow map is a depth image from the perspective of the light source. If a point in the
+scene is further from the light than the value stored in the
+shadow map, it is in the shadow. Otherwise it has the value
+stored in the shadow map, is closest to the light source, and
+lit. In local shading models, light is added over all light
+sources and the shadow computation is performed for each
+individual light, using a shadow map per light. In the following we consider a single light source and shadow map.
+Formally, let the scene be given as the set X ⊂ R3 . A
+point light source is defined by its position p. We assume
+a projective model and represent positions in homogeneous
+coordinates, so p can be at infinity, creating a directional
+light source, in which case p is the direction vector. Denote
+the distance of x ∈ R3 to the light source as d : R3 7→ [0 :
+dmax ], where the distance to a directional light source is
+measured from a plane outside of X so that distance values
+are finite and non-negative.
+The shadow map is parameterized over
+the space of rays emanating from p. For simplicity we assume that the rays from p to any
+point in the scene can be parameterized over
+a single plane and we assume a rectangle U
+on this plane to be the parameter space for
+the rays; if the light source is placed so that
+this condition is violated, several planes (i.e.,
+arranged in the form of a box) may be used.
+The mapping from scene points x ∈ R3 to
+U is the linear projective camera transformation L : R3 7→ R2 . In this setup, the shadow map can be
+expressed as
+f: \mathcal {U} \mapsto \R , \quad f(\mv {u}) = \min \left \{ {d(\mv {x}): L(\mv {x}) = \mv {u}}, \mv {x} \in \mathcal {X} \right \}
+(1)
+Given the shadow map, we get the visibility of any point in
+Light
+no bias
+with bias
+Shadow Maps
+Variance Shadow Maps
+Figure 3. Shadow mapping suffers from self-shadowing artifacts
+(“shadow acne”) that are alleviated by biasing the depths towards
+the light source in the visibility test. Variance shadow mapping
+handles these artifacts implicitly.
+the scene w.r.t. the light source as
+V(\mv {x}) = \begin {cases} 0 & d(\mv {x}) > f(L(\mv {x}))\\ 1 & \mathrm {else}.\end {cases}
+(2)
+It is important to note that the ‘else’ case really reduces to
+d(x) = f (L(x)) because f had been constructed to store
+the smallest possible value of f in direction L(x).
+The usefulness of shadow maps arises from the fact that
+they can be efficiently approximated using graphics hardware: simply render the scene from the perspective of the
+light source, disabling all lighting computations and storing
+only the depth values. However, a naive implementation
+will suffer from severe artifacts. First, the condition for a
+point to be lit is d(x) ≤ f (L(x)) in finite precision arithmetic, which may or may not happen for visible points on a
+smooth surface because of the different discretization of the
+rendered image and the shadow map. The resulting problem
+is referred to as “shadow acne” and commonly tackled by
+introducing a bias β for the depth comparison, considering
+points with d(x) ≤ f (L(x)) + β to be lit (Figure 3). While
+suitably chosen bias attenuates artifacts along smooth surfaces, it cannot remedy aliasing across shadow boundaries.
+Various techniques have been suggested for dealing
+with aliasing artifacts resulting from the discrete nature of
+shadow maps [2, 3, 14, 62]. Many such approaches can be
+traced back to or interpreted as approximations of percentage closer filtering [64]. Rather than comparing d(x) to
+only f (L(x)) we consider a small neighborhood around
+L(x) in the shadow map and take the percentage of the rays
+around L(x) that would lit x. In a slight generalization of
+the original formulation, we assume the neighborhood to be
+implicitly defined by aR smooth (compactly supported) kernel kx (u) satisfying kx (u) du = 1. Then the desired
+visibility function is
+\label {eq:pcf} v(\mv {x}) = \int _{d(\mv {x}) \le f(\mv {u})} k_{\mv {x}}(\mv {u})\, \mathrm {d}\mv {u}.
+(3)
+Note that in this case we can indeed have d(x) < f (u) because u is not restricted to L(x) but varies over a region.
+The visibility function is taking on values in [0, 1], and in
+particular the boundaries of shadows are smoothly transitioning between the two extreme values. This also means
+that on completely lit smooth surfaces, even if the visibility
+is not 1 in concave areas, it is always smoothly varying and
+close to 1, eliminating the necessity to estimate a suitable
+bias, which can be difficult for some scenes [15].
+Percentage closer filtering successfully alleviates many
+sampling artifacts but is costly: for every point x in the
+scene the integral needs to be evaluated. One would much
+rather pre-filter the shadow map [2]. Yet, simply convolving f with k and then evaluating the smoothed shadow map
+is different. This can be readily seen as the result would
+take only the discrete values 0 and 1. Better approximations (see [18] for an overview) generally pre-warp f and/or
+pre-filter not only f but also simple functions g(f ), such as
+g(f ) = f k or g = exp. Then an approximation to Eq. (3)
+is built from the set of pre-computed functions.
+While our approach works with all such approximations, we demonstrate it at the example of variance shadow
+maps [14]. The approximation is built by taking the view
+that the local shadow map may be considered a probability
+distribution. This makes sense because it is irrelevant what
+points are in the integration domain in Eq. (3) as long as
+the measure of the integration domain is correct. The local
+weighted mean and variance of the shadow map are
+\label {eq:meanvar} \mu _{\mv {x}} = \int k_{\mv {x}}(\mv {u})f(\mv {u})\, \mathrm {d}\mv {u}, \quad \sigma ^2_{\mv {x}} = \int k_{\mv {x}}(\mv {u})f(\mv {u})^2\, \mathrm {d}\mv {u} - \mu _{\mv {x}}^2.
+(4)
+We note that v(x) is a measure and since the shadow map
+f is positive the best bound for this measure is given by the
+one-sided Chebyshev or Cantelli inequality, yielding
+v(\mv {x}) \le \frac {\sigma _{\mv {x}}^2} {\sigma _{\mv {x}}^2 + (d(\mv {x})-\mu _{\mv {x}})^2}.
+(5)
+Notice that, similar to percentage closer filtering, it may
+happen that d(x) < µx because µx is a filtered version
+of f . Since in this case the approximation of the visibility
+function would decrease as d(x) comes closer to the light
+source, Donnelly and Lauritzen [14] suggest the following
+slightly modified visibility function:
+\hat {v}(\mv {x}) = \begin {cases} \frac {\sigma ^2_{\mv {x}}} {\sigma ^2_{\mv {x}} + (d(\mv {x})-\mu _{\mv {x}})^2}, & d(\mv {x}) > \mu _{\mv {x}}\\ 1 & \mathrm {else}. \end {cases}
+(6)
+The resulting shadow maps (see Figure 3) have been observed to be very similar to percentage closer filtering.
+4. Differentiable Filtered Shadow Mapping
+Our goal is to differentiate the visibility function with respect to the scene parameters Θ. The binary visibility V (x)
+has zero derivative almost everywhere. The exact form v(x)
+of percentage closer filtering (Eq. (3)) is smooth, yet the integration domain not only varies with the scene parameters
+but also depends on x. We suggest to rather consider v̂.
+∂ v̂
+is that the shadow
+The main difficulty in computing ∂Θ
+map f is only piecewise smooth, and the boundaries of the
+smooth regions may change with Θ. This makes the derivatives of the integrals in Eq. (4) challenging to compute.
+Similar in spirit to the original shadow map idea [76], we
+can use existing rasterizers. While the original motivation
+was efficiency, and this is also true in our case, an additional
+point is that significant effort has been spent to estimate
+such derivatives when rendering from the perspective of the
+viewer [10–12,30,34,42,43]. We can readily exploit any existing solution and simply render from the perspective of the
+light. Most differentiable rasterizers effectively replace the
+piecewise smooth functions f and f 2 with smoothed functions f˜ and f˜2 . Attenuating aliasing artifacts in pre-filtered
+shadow mapping requires smoothing, so the smoothing by
+differentiable rasterizers is complementary in our setting.
+In the following, the vectors f̃ and f˜2 represent the discrete versions of f˜ and f˜2 , with ∇f̃ and ∇f˜2 their Jacobians
+w.r.t. Θ. The elements in v̂ dependent on the shadow map
+are µ and σ 2 . The weighted mean µ is a convolution that, in
+the discrete case, can be expressed as the scalar product
+\mv {m}_1 = \mv {G} \tilde {\mv {f}}, \label {eq:moment1}
+(7)
+where G is a Toeplitz matrix and m1 is the first discrete
+moment of the shadow map. The derivative is then simply
+\frac {\partial \mv {m}_1}{\partial \Theta } = \frac {\partial \mv {m}_1}{\partial \tilde {\mv {f}}} \frac {\partial \tilde {\mv {f}}}{\partial \Theta } = \mv {G} \nabla \tilde {\mv {f}}.
+(8)
+For σ 2 we introduce the second discrete moment
+\mv {m}_2 = \mv {G} \tilde {\mv {f}^2}, \label {eq:moment2}
+(9)
+which similarly has the derivative
+\frac {\partial \mv {m}_2}{\partial \Theta } = \frac {\partial \mv {m}_2}{\partial \tilde {\mv {f}^2}} \frac {\partial \tilde {\mv {f}^2}}{\partial \Theta } = \mv {G} \nabla \tilde {\mv {f}^2}.
+(10)
+The discrete image of σ 2 can be computed from the moments as m2 − m1 ⊗ m1 and its derivative directly follows
+from expressions above and the product rule for m1 ⊗ m1 .
+The distance d(x) is independent of the shadow map. Its
+variation with Θ stems from possible modification of the
+position of the light source or geometry and can be easily expressed. Lastly, v̂ is a piecewise rational function of
+these variables, with the boundary between the two pieces
+at d = µ depending on both d and µ. This requires no
+special treatment, however, because v̂ is a continuously differentiable function across d = µ, as we see from
+\frac {\partial \hat {v}}{\partial {\mu }} = -\frac {\partial \hat {v}}{\partial {d}} = \begin {cases} 2 \frac {\sigma ^2 ( d-\mu )} {\left (\sigma ^2 + ( d-\mu )^2\right )^2} & d > \mu \\ 0 & \mathrm {else} \end {cases}.
+Direc�onal Lights
+Spot Lights
+Point Lights
+IBL
+Figure 4. We implement directional lights and spot lights in our
+framework. An extension to omnidirectional point lights is straight
+forward. Image-based lighting (IBL) is not supported, but the illumination from some environment maps can be sufficiently well
+approximated by a collection of point lights.
+5. Implementation and Parameter Exploration
+Our reference implementation is based on N VD IFFRAST [34] for creating and smoothing the shadow map.
+The Jacobians ∇f̃ and ∇f˜2 (w.r.t. the scene parameters)
+are not explicitly computed. Rather, we use reverse-mode
+differentiation to compute the gradients of an objective
+function. The relevant derivatives are computed automatically [60] and are implicitly evaluated.
+We currently use a single shadow map per light source,
+which supports directional lights and spot lights. Omnidirectional point lights can be implemented by creating and
+querying several shadow maps. Area lights or environment lighting would have to be approximated by point light
+sources – we leave a more accurate treatment for future
+work. Figure 4 illustrates the supported light sources in our
+current implementation.
+By building on an existing differentiable rasterizer and
+automatic differentiation, our code becomes rather straightforward. The pseudo-code below is provided for a single
+light source – keep in mind that the methods have to be executed for each light source. The pre-computation of the prefiltered depth images m1 and m2 is described in Alg. 1 below. Here, we assume that the R ENDER S CENE function returns the smoothed discrete depth image f̃ as well as f˜2 . The
+modular design of N VDIFFRAST implements this in two
+steps, first providing the discrete values f and f 2 = f ⊗ f ,
+which are then smoothed using the antialias function.
+We implement the filtering as a convolution with a kernel
+of size k (e.g. a Gaussian). Once the discrete smoothed
+shadow maps have been computed, the visibility for a point
+x ∈ X can be computed with Alg. 2.
+Algorithm 1 Render the shadow map for a light source l
+function R ENDER S HADOW M AP(X , pl , k)
+f̃ , f˜2 ← R ENDER S CENE(X , pl )
+m1 ← F ILTER(f̃ , k)
+m2 ← F ILTER(f˜2 , k)
+return m1 , m2
+(11)
+∂ v̂
+Thus, ∂Θ
+can be directly computed using the chain rule.
+Optimization without Smoothed Shadow Map. We test
+our hypothesis that the discrete shadow map f and f 2 must
+Algorithm 2 Compute the visibility between a point x and
+a light at p given the pre-filtered shadow map
+function C OMPUTE V ISIBILITY(x, p, m1 , m2 )
+u ← L(x)
+m1 , m2 ← S AMPLE S HADOW M AP(u, m1 , m2 )
+d ← d(x, p), µ ← m1 , σ 2 ← m2 − m21
+if d ≤ µ then return 1
+else return σ 2 /(σ 2 + (d − µ)2 )
+5122
+1282
+322
+k=3
+k=7
+k = 13
+Rendering
+Figure 6. Effect of shadow map resolution (top row) and filter size
+k (bottom row) on the shadows cast by differently slanted planes.
+Ini�al
+No An�-Aliasing With An�-Aliasing
+Figure 5. Convergence behavior for a simple scene with and without using a smoothed shadow map in the differentiable rasterizer.
+Without smoothing, shadow discontinuities are not properly differentiated and optimization fails.
+be turned into smooth versions f̃ and f˜2 for properly tracking shadow discontinuities. This is facilitated by the modularity of N VDIFFRAST that allows disabling the smoothing.
+Our setup is as simple as possible: a single square occluder casts a single shadow on a single square receiver. We
+optimize the position of one displaced vertex of the occluder
+to reproduce the shadow in a reference configuration (see
+Figure 5). The optimization minimizes the mean squared
+error to the reference shadow image.
+We find that the target configuration is not attained
+when using the discontinuous discrete shadow map for generating the visibility (i.e., without using N VDIFFRAST’s
+antialias function). Importantly, this result is independent of the kernel k used for pre-filtering to generate the
+moments m1 and m2 . In other words, filtering f and f 2
+cannot recover the connection between the scene parameters and the shadow boundaries. Using the smooth functions
+(i.e., applying antialias to f and f 2 ) shows the expected
+convergence across variations of all other parameters.
+Shadow Map Resolution and Filter Kernel. The
+shadow map resolution and the filter kernel size are key parameters as they directly affect the quality of the shadow
+approximation (see Figure 6). Instead of investigating the
+forward pass of shadow map rendering, we focus on the
+backward pass, because it influences the gradient computation and any optimization based on it.
+Consider a scene similar to the one above, now with a
+highly tessellated and slightly rotated occluder. High tessellation (relative to shadow map pixels) results in sparse
+shadow map Jacobians for occluder geometry because the
+k=0
+Finite Diﬀerence
+7
+15
+Automa�c Deriva�ves with Filter Size k
+Figure 7. Jacobian of the visibility ∇x v, where x is the horizontal
+translation of a highly tessellated occluder over a planar receiver.
+Error
+Reference
+k=0
+k=7
+k=15
+0
+0
+SGD, = 0.02
+50
+100 0
+SGD, = 0.25
+50
+100 0
+Adam, = 0.02
+50
+100 0
+Adam, = 0.25
+50
+100
+Figure 8. Convergence plots for the single rectangular occluder
+experiment with different filter kernel sizes k. Stochastic gradient
+descent (left) and A DAM [31] (right) with small and large steps
+sizes α. The y-axis shows the signed error of the x translation.
+anti-aliasing misses primitive boundaries. This might occur for arbitrary differentiable renderers relying on explicit
+boundary detection. The filter applied to recover the moments (Eqs. (7), (9)) is also applied to the Jacobians of the
+shadow map and thus affects the Jacobian of the visibility
+function (see Figure 7). While the filter kernel size is merely
+a visual effect in the forward pass, it can indeed affect the
+optimization: Figure 8 shows that larger filter kernels increase the robustness of gradient descent, both for stochastic
+gradient descent and momentum-based variants. However,
+larger kernels also increase the runtime.
+Low shadow map resolution may lead to occluders being missed completely by the visibility test (see Figure 6,
+top row). These issues can be alleviated by increasing the
+shadow map resolution; again at the cost of runtime.
+In the following we consider a more complex setting to
+test different shadow map resolutions and filter kernel sizes
+in a more involved optimization: an object is placed on
+a rectangular floor plane and illuminated by n directional
+lights (Figure 9). Given a single reference image Iref , we
+wish to recover the n light directions {li }, minimizing the
+Mitsuba 3
+3
+Reference
+642
+15
+Filter Kernel Size
+5122
+Shadow Map Resolu�on
+Runtime [s] Alignment
+Figure 9. Light direction estimation with four lights, varying filter
+kernel sizes and shadow map resolutions.
+1.0
+1.0
+0.9
+0.9
+4
+10
+2
+64 128
+Ours
+1 Light
+2 Lights
+3 Lights
+Figure 11. Visual difference between path-traced images by Mitsuba 3 [24] in direct illumination mode and our approximation
+based on local shading models and pre-filtered shadow maps.
+1 Light
+4 Lights
+5
+256
+512
+Shadow Map Resolution
+0 3
+7
+15
+Filter Kernel Size k
+25
+Figure 10. Quantitative results for the parameter exploration, using a light direction estimation experiment. The y-axis in the top
+row is the average alignment of predicted light directions to the
+reference light directions, measured by the dot product.
+mean squared image error.
+We run the optimization for different objects and varying number of lights n. We report qualitative results in
+Figure 9 and quantitative results in Figure 10. As expected, increasing the shadow map resolution or the filter
+kernel size increases the runtime. The optimization behaves
+robustly with high accuracy and consistent error bounds
+across resolutions and filter sizes. Again, the accuracy improves slightly with larger filter size, albeit this improvement seems marginal considering the error bounds. Lowering the shadow map resolution has a similar effect because
+the effective filter footprint increases if k stays constant. We
+observe that the optimization for one light can get stuck in
+local minima where the shadows do not align but the shade
+of the floor plane matches that in the reference image. For
+multiple lights, shadows dominate the image, so this scenario is less likely; this could explain the different error
+bounds. Conversely, recovering multiple lights is more difficult, hence the lower average accuracy. These challenges
+are specific to the task and, in general, we observe that our
+method works robustly with different sets of parameters.
+6. Applications
+We run all experiments on a workstation with an
+NVIDIA 1070 Ti GPU with 8 GB VRAM.
+6.1. Monocular Pose Estimation
+Estimating the orientation and position of an object from
+images is a classic computer vision task. The problem be-
+Reference
+Ini�al
+Rast.
+Rast. + Shadow Mitsuba 3
+Figure 12. Pose estimation results with path-traced references. In
+most cases, shadows provide viable cues for convergence (top row)
+but occasionally pure local shading is sufficient (bottom row).
+comes easier for sequences of images [38] or if priors apply, such as in pose estimation of human body parts [12,69].
+Given only a single (monocular) image makes retrieving the
+rigid transformation of an known object ill-posed. Shafer
+and Kanade [70] noticed that the shadow of an object in the
+image provides viable cues for reducing the ambiguity. We
+consider a simplified version of the 6D problem, allowing
+only 2 translational and one rotational degree of freedom.
+We place an object in front of a receiver plane and a directional light orthogonal to the plane. In this setting, we recover the parameters t = (x, y) (translation parallel to the
+plane) and φ (rotation around the object-centric “up” axis),
+given a reference image Iref .
+We perform tests across a variety of common 3D mesh
+models. The reference images are generated using the differentiable path tracer Mitsuba 3 [24] in direct illumination
+mode. We verify that our local shading model can generate
+images similar to the reference images (Figure 11). The results are generated by averaging over several random starting conditions for each object. This experiment is repeated
+for different camera image resolutions (1282 , 5122 , 10242 ).
+We report quantitative results for the 5122 resolution in
+Table 2 (more data is in the supplementary material) and
+qualitative results in Figure 12. Mitsuba 3 recovers the rotation and translation most accurately, which could be attributed to its accurate gradient computation, using multiple
+sub-pixel samples. It should be expected, however, that the
+results are biased towards the method used for generating
+Table 1. Quantitative results for the pose estimation experiments
+for different scenes and image resolution 512 × 512 (full table in
+the supplementary material). We measure the rotation error ∆φ,
+the translation error ∆t, and the total runtime t, averaged over ten
+runs. We include results for a GPU with ray-tracing cores (“RT”)
+and for a setting where we use our renderer as reference (“Our
+Ref.”). Best scores in bold, second best scores underlined.
+Mitsuba 3 [24]
+◦
+↓ ∆φ[ ] ↓ ∆t
+Rast. + Shadows (Ours)
+◦
+Rasterizer
+◦
+↓ t [s] ↓ ∆φ[ ] ↓ ∆t
+↓ t [s] ↓ ∆φ[ ] ↓ ∆t ↓ t [s]
+Bunny
+Dragon
+Hand
+Spot
+0.23
+2.86
+1.41
+0.03
+0.10
+3.91
+5.18
+0.02
+325.29
+306.46
+317.40
+381.80
+0.33
+3.32
+1.68
+0.05
+0.22
+4.53
+5.36
+0.05
+3.76
+3.64
+3.66
+3.76
+0.31 0.26
+8.02 11.63
+1.85 5.66
+5.80 23.15
+1.58
+1.54
+1.51
+1.77
+Spot (RT)
+Spot (Our Ref.)
+0.03
+0.05
+0.02 53.26
+0.12 384.24
+0.05
+0.02
+0.05
+0.06
+1.93
+3.60
+6.92 21.52
+5.83 23.12
+1.05
+1.71
+Ground Truth
+Op�mized (1 Shadow)
+Op�mized (3 Shadows)
+Figure 13. Face reconstruction from synthetic shadows.
+the reference images. We show that this is the case by using
+our renderer as reference for one experiment (see Table 2)
+and finding our method to yield the most accurate results in
+this instance. Across all experiments, not using shadows at
+all and relying purely on the shading of the object surface
+performs worst, yet still manages to converge to reasonable
+solutions in some instances.
+Unsurprisingly, rasterization is magnitudes faster than
+path tracing, both with and without shadows. Shadow mapping roughly doubles the runtime in rasterization, however,
+the pose estimation accuracy is significantly increased: our
+method consistently yields accuracy similar or close to the
+path tracing approach. Modern GPUs posses hardware units
+for ray-triangle intersections that significantly increase ray
+tracing performance. We include scores for a system with
+such a GPU (NVIDIA RTX 3080 Ti). It improves the path
+tracing runtime but, at least in this example, rasterization is
+still 27× faster.
+6.2. Face Reconstruction from Profile Shadows
+While the variation within certain classes of objects is
+governed by pose, such as in articulated objects, deformations are best described by morphable models. A prominent example for morphable models is face geometry [16].
+Reference
+Ours
+Ini�al
+Prince Philip
+Gary Lineker
+Derren Brown
+Figure 14. Face reconstruction from real silhouettes of public figures. We masked out hair, facial hair, and the base.
+Our idea is to reconstruct face geometry from one (or more)
+shadows of the face. We base the experiment on the publicly available morphable model assembled by Li et al. [39]
+(other models would work as well).
+In the first experiment we generated synthetic shadows
+from the morphable model. This allows comparing the optimization result not just based on images but also geometry (see Figure 13). We find that using more shadows only
+slightly increases the runtime (the time is not linear in the
+number of light sources, because we have one base pass and
+multiple shadow passes) but significantly improves the accuracy (see supplementary material for quantitative results).
+We have also performed reconstructions of face geometry from ‘real’ silhouettes, created manually by artist
+Charles Burns using scissors and black paper [9] (the process is shown here [1]). We ignore regions appearing to be
+(facial) hair or torso as those are not captured by the morphable model we use. While the lack of ground truth makes
+it difficult to quantify the resulting geometry, visually they
+appear to be reasonable approximations (Figure 14).
+6.3. Shadow Art
+Shadow Art [22, 50] is the design of a 3D object based
+only on the shadows it casts. When solving this design
+problem computationally, it is commonly simplified by assuming that the shadows are cast to planar surfaces orthogonal to directional lights, reducing the shadow images to
+silhouettes. In the traditional approach [50], the object is
+represented on a volumetric grid and voxel lines outside
+the shadow regions are removed – similar in spirit to visual
+hulls [37] or space carving [32]. Sadekar et al. [68] perform
+Shadow Art with differentiable rendering of meshes, but the
+limitation of co-located cameras and lights remains.
+In our framework, lights and cameras can be placed arbitrarily. Also, curved shadow receivers work out-of-the-box
+(Figure 15). The only (minor) constraints we impose are
+gradient pre-conditioning [53] and a smoothness term between the normals of neighboring faces [45, 77] to avoid
+arbitrary vertex movements during optimization.
+A single triangle mesh is only one possible representation of the generated geometry. The combination of automatic differentiation and gradient descent allows optimizing
+arbitrary scene parameters. For example, we can also repre-
+Camera View
+Top View
+Reference Shadows
+Light
+Figure 15. Shadow Art with one view. Our method can be used for simple scenes with co-located light and camera (left), for more complex
+settings with perspective cameras that observe the shadow receiver from any direction (middle), and for complex receiver geometry (right).
+Ini�al
+Reference
+Op�mized Mesh
+(Vertex Posi�ons)
+Op�mized Objects
+Op�mized Objects
+(Posi�on + Scale) (Posi�on + Scale + Rota�on)
+Figure 16. Shadow art with two views. Our method can be used
+in any setting that permits differentiable rendering, for example
+optimizing vertex positions of a mesh (left) or optimizing the parameters of multiple geometric objects (middle and right).
+sent the object as a collection of shapes (see Figure 16).
+Beyond our reference implementation based on triangle
+meshes, the same approach readily works with any geometry representation as long as it can be differentiably rendered (e.g. signed distance functions [4,73] or spheres [35]).
+6.4. Interactive Modeling from Shadows
+Our rasterization-based implementation generates shadows and – most importantly – the gradients of the objective function in real time. We demonstrate this by turning the shadow art setting, which is usually concerned with
+static reference shadows, into a “shadow modeling” setting,
+where a user can interactively paint the target shadows and
+an appropriate deformation is applied to the initial geometry in real time (see Figure 17). Note that using co-located
+camera and light is a design decision since painting silhouettes feels intuitive – the method is not limited to this setup.
+7. Conclusion
+Our approach to inverse graphics using differentiable
+rasterization with local shading models and shadow maps
+helps in closing the gap between efficient differentiable
+renderers based on rasterization and renderers based on
+path tracing and Monte Carlo methods that more accurately
+model light transport.
+Ini�al
+User Input Op�mized
+Figure 17. Shadow art from one view, with co-located camera and
+light is used as an interactive modeling tool. Users can modify the
+shadow of the reference object (gray) and an appropriate deformation is applied to the mesh in real-time (green).
+Limitations Focusing on direct shadows neglects other
+effects of global illumination. But even within the framework of local shading models with shadow maps we have
+made simplifiying assumptions: so far we consider only
+point light sources (instead of area lights) and for those we
+consider only one planar shadow map. Also, the particular
+choice of variance shadow maps suffers from artifacts, such
+as light bleeding, i.e. shadows becoming lighter in regions
+of high depth variance. Independent of the illumination effects, we have so far only considered triangle meshes for the
+representation of geometry.
+Possible Generalizations Apart from shadows, various
+effects of global illumination have been recreated by efficient real-time approximations. Approaches very similar to
+ours may readily work with ambient occlusion [49], reflections and refractions [21], or generally indirect illumination.
+Other geometry representations that are popular in the
+vision community, such as signed distance fields [26] or
+NeRFs [48], should work with shadow maps as well – although it is not clear if the same efficiency can be achieved,
+as the fast computation is mainly achieved by rasterizing
+triangle primitives.
+References
+[1] Alive Network. Charles burns silhouette artist. https:
+//www.youtube.com/watch?v=sZEZs3yVkpQ, Oct
+2016. 7
+[2] Thomas Annen, Tom Mertens, Philippe Bekaert, Hans-Peter
+Seidel, and Jan Kautz. Convolution shadow maps. In Proceedings of the 18th Eurographics Conference on Rendering
+Techniques, EGSR’07, page 51–60, Goslar, DEU, 2007. Eurographics Association. 3, 15
+[3] Thomas Annen, Tom Mertens, Hans-Peter Seidel, Eddy Flerackers, and Jan Kautz. Exponential shadow maps. In Proceedings of Graphics Interface 2008, GI ’08, page 155–161,
+CAN, 2008. Canadian Information Processing Society. 3, 15
+[4] Sai Bangaru, Michael Gharbi, Tzu-Mao Li, Fujun Luan,
+Kalyan Sunkavalli, Milos Hasan, Sai Bi, Zexiang Xu, Gilbert
+Bernstein, and Fredo Durand. Differentiable rendering of
+neural sdfs through reparameterization. In ACM SIGGRAPH
+Asia 2022 Conference Proceedings, SIGGRAPH Asia ’22,
+New York, NY, USA, 2022. Association for Computing Machinery. 2, 8
+[5] Sai Praveen Bangaru, Tzu-Mao Li, and Frédo Durand. Unbiased warped-area sampling for differentiable rendering.
+ACM Trans. Graph., 39(6), nov 2020. 2
+[6] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pages 5855–
+5864, October 2021. 2
+[7] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 5470–5479, June 2022. 2
+[8] Brent Burley. Physically Based Shading at Disney. In SIGGRAPH Courses: Practical Physically Based Shading in
+Film and Game Production, 2012. 13
+[9] Charles Burns. Mastering Silhouettes: Expert Instruction in
+the Art of Silhouette Portraiture. Stackpole Books, 2011. 7
+[10] Wenzheng Chen, Jun Gao, Huan Ling, Edward J. Smith,
+Jaakko Lehtinen, Alec Jacobson, and Sanja Fidler. Learning to predict 3d objects with an interpolation-based differentiable renderer. In Proceedings of the 33rd International
+Conference on Neural Information Processing Systems, Red
+Hook, NY, USA, 2019. Curran Associates Inc. 1, 2, 4
+[11] Wenzheng Chen, Joey Litalien, Jun Gao, Zian Wang,
+Clement Fuji Tsang, Sameh Khalis, Or Litany, and Sanja Fidler. DIB-R++: Learning to predict lighting and material
+with a hybrid differentiable renderer. In Advances in Neural
+Information Processing Systems (NeurIPS), 2021. 1, 2, 4
+[12] Martin de La Gorce, Nikos Paragios, and David J. Fleet.
+Model-based hand tracking with texture, shading and selfocclusions. In 2008 IEEE Conference on Computer Vision
+and Pattern Recognition, pages 1–8, 2008. 2, 4, 6
+[13] Michael Deering, Stephanie Winner, Bic Schediwy, Chris
+Duffy, and Neil Hunt. The triangle processor and normal
+vector shader: A vlsi system for high performance graphics.
+In Proceedings of the 15th Annual Conference on Computer
+Graphics and Interactive Techniques, SIGGRAPH ’88, page
+21–30, New York, NY, USA, 1988. Association for Computing Machinery. 13
+[14] William Donnelly and Andrew Lauritzen. Variance shadow
+maps. In Proceedings of the 2006 Symposium on Interactive
+3D Graphics and Games, I3D ’06, page 161–165, New York,
+NY, USA, 2006. Association for Computing Machinery. 3,
+15
+[15] Hang Dou, Yajie Yan, Ethan Kerzner, Zeng Dai, and Chris
+Wyman. Adaptive depth bias for shadow maps. In Proceedings of the 18th Meeting of the ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games, I3D ’14, page
+97–102, New York, NY, USA, 2014. Association for Computing Machinery. 3
+[16] Bernhard Egger, William A. P. Smith, Ayush Tewari, Stefanie Wuhrer, Michael Zollhoefer, Thabo Beeler, Florian
+Bernard, Timo Bolkart, Adam Kortylewski, Sami Romdhani,
+Christian Theobalt, Volker Blanz, and Thomas Vetter. 3d
+morphable face models—past, present, and future. ACM
+Trans. Graph., 39(5), jun 2020. 7
+[17] Marc Habermann, Lingjie Liu, Weipeng Xu, Michael Zollhoefer, Gerard Pons-Moll, and Christian Theobalt. Real-time
+deep dynamic characters. ACM Trans. Graph., 40(4), jul
+2021. 2
+[18] Jean-Marc Hasenfratz, Marc Lapierre, Nicolas Holzschuch,
+and François X. Sillion. A survey of Real-Time Soft Shadows Algorithms. Computer Graphics Forum, 22(4):753–
+774, Dec. 2003. 3
+[19] Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg.
+Shape, Light, and Material Decomposition from Images using Monte Carlo Rendering and Denoising.
+arXiv:2206.03380, 2022. 2
+[20] Jon Hasselgren, Jacob Munkberg, Jaakko Lehtinen, Miika
+Aittala, and Samuli Laine. Appearance-driven automatic 3d
+model simplification. In Eurographics Symposium on Rendering, 2021. 2
+[21] Wolfgang Heidrich and Hans-Peter Seidel.
+Realistic,
+hardware-accelerated shading and lighting. In Proceedings of the 26th Annual Conference on Computer Graphics
+and Interactive Techniques, SIGGRAPH ’99, page 171–178,
+USA, 1999. ACM Press/Addison-Wesley Publishing Co. 8
+[22] Kai-Wen Hsiao, Jia-Bin Huang, and Hung-Kuo Chu. Multiview wire art. ACM Trans. Graph., 37(6), dec 2018. 7
+[23] Zeng Huang, Yuanlu Xu, Christoph Lassner, Hao Li, and
+Tony Tung. Arch: Animatable reconstruction of clothed humans. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2020. 2
+[24] Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin
+Nimier-David, Delio Vicini, Tizian Zeltner, Baptiste Nicolet,
+Miguel Crespo, Vincent Leroy, and Ziyi Zhang. Mitsuba 3
+renderer, 2022. https://mitsuba-renderer.org. 1, 2, 6, 7, 13,
+16
+[25] Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, and Delio Vicini. Dr.jit: A just-in-time compiler for differentiable
+rendering. ACM Trans. Graph., 41(4), jul 2022. 2
+[26] Yue Jiang, Dantong Ji, Zhizhong Han, and Matthias Zwicker.
+Sdfdiff: Differentiable rendering of signed distance fields for
+3d shape optimization. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), June 2020. 2, 8
+[27] James T. Kajiya. The rendering equation. SIGGRAPH Comput. Graph., 20(4):143–150, aug 1986. 2
+[28] Brian Karis. Real shading in unreal engine 4. SIGGRAPH
+2013 Course: Physically Based Shading in Theory and Practice, 2013. 13
+[29] Hiroharu Kato, Deniz Beker, Mihai Morariu, Takahiro Ando,
+Toru Matsuoka, Wadim Kehl, and Adrien Gaidon. Differentiable rendering: A survey, 2020. 2
+[30] Hiroharu Kato, Yoshitaka Ushiku, and Tatsuya Harada. Neural 3d mesh renderer. In The IEEE Conference on Computer
+Vision and Pattern Recognition (CVPR), 2018. 2, 4
+[31] Diederik P. Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. In Yoshua Bengio and Yann LeCun,
+editors, 3rd International Conference on Learning Representations, ICLR 2015, San Diego, CA, USA, May 7-9, 2015,
+Conference Track Proceedings, 2015. 5, 14
+[32] Kiriakos N. Kutulakos and Steven M. Seitz. A theory of
+shape by space carving. International Journal of Computer
+Vision, 38(3):199–218, 2000. 7
+[33] Sebastien Lagarde and Charles de Rousiers. Moving frostbite to physically based rendering 3.0. SIGGRAPH 2014
+Course: Physically Based Shading in Theory and Practice,
+2014. 13
+[34] Samuli Laine, Janne Hellsten, Tero Karras, Yeongho Seol,
+Jaakko Lehtinen, and Timo Aila. Modular primitives for
+high-performance differentiable rendering. ACM Trans.
+Graph., 39(6), nov 2020. 2, 4, 13
+[35] Christoph Lassner and Michael Zollhöfer. Pulsar: Efficient
+sphere-based neural rendering. In 2021 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 1440–1449, June 2021. 8
+[36] Alexandros Lattas, Stylianos Moschoglou, Stylianos
+Ploumpis, Baris Gecer, Abhijeet Ghosh, and Stefanos
+Zafeiriou. Avatarme++: Facial shape and brdf inference
+with photorealistic rendering-aware gans. IEEE Transactions on Pattern Analysis and Machine Intelligence,
+44(12):9269–9284, 2022. 2
+[37] A. Laurentini. The visual hull concept for silhouette-based
+image understanding. IEEE Transactions on Pattern Analysis and Machine Intelligence, 16(2):150–162, 1994. 7
+[38] Vincent Lepetit and Pascal Fua. Monocular model-based 3d
+tracking of rigid objects. Found. Trends. Comput. Graph.
+Vis., 1(1):1–89, jan 2005. 6
+[39] Ruilong Li, Karl Bladin, Yajie Zhao, Chinmay Chinara,
+Owen Ingraham, Pengda Xiang, Xinglei Ren, Pratusha
+Prasad, Bipin Kishore, Jun Xing, and Hao Li. Learning formation of physically-based face attributes. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2020. 7
+[40] Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. Differentiable monte carlo ray tracing through edge
+sampling. ACM Trans. Graph., 37(6), dec 2018. 1, 2
+[41] Lingjie Liu, Marc Habermann, Viktor Rudnev, Kripasindhu
+Sarkar, Jiatao Gu, and Christian Theobalt. Neural actor:
+Neural free-view synthesis of human actors with pose control. ACM Trans. Graph., 40(6), dec 2021. 2
+[42] Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. Soft rasterizer: A differentiable renderer for image-based 3d reasoning. The IEEE International Conference on Computer Vision
+(ICCV), Oct 2019. 2, 4
+[43] Matthew M. Loper and Michael J. Black. Opendr: An approximate differentiable renderer. In David Fleet, Tomas Pajdla, Bernt Schiele, and Tinne Tuytelaars, editors, Computer
+Vision – ECCV 2014, pages 154–169, Cham, 2014. Springer
+International Publishing. 1, 2, 4
+[44] Guillaume Loubet, Nicolas Holzschuch, and Wenzel Jakob.
+Reparameterizing discontinuous integrands for differentiable
+rendering. ACM Trans. Graph., 38(6), nov 2019. 2
+[45] Fujun Luan, Shuang Zhao, Kavita Bala, and Zhao Dong.
+Unified Shape and SVBRDF Recovery using Differentiable
+Monte Carlo Rendering. Computer Graphics Forum, 2021.
+2, 7
+[46] Linjie Lyu, Marc Habermann, Lingjie Liu, Ayush Tewari,
+Christian Theobalt, et al. Efficient and differentiable shadow
+computation for inverse problems. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 13107–13116, 2021. 2
+[47] Oscar Michel, Roi Bar-On, Richard Liu, Sagie Benaim, and
+Rana Hanocka. Text2mesh: Text-driven neural stylization
+for meshes. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+13492–13502, June 2022. 2
+[48] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 2, 8
+[49] Gavin Miller. Efficient algorithms for local and global accessibility shading. In Proceedings of the 21st Annual Conference on Computer Graphics and Interactive Techniques,
+SIGGRAPH ’94, page 319–326, New York, NY, USA, 1994.
+Association for Computing Machinery. 8
+[50] Niloy J. Mitra and Mark Pauly. Shadow art. ACM Trans.
+Graph., 28(5):1–7, dec 2009. 7
+[51] Jacob Munkberg, Wenzheng Chen, Jon Hasselgren, Alex
+Evans, Tianchang Shen, Thomas Müller, Jun Gao, and Sanja
+Fidler. Extracting triangular 3d models, materials, and lighting from images. In 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 8270–
+8280, 2022. 2
+[52] Hubert Nguyen. Gpu Gems 3. Addison-Wesley Professional,
+first edition, 2007. 15
+[53] Baptiste Nicolet, Alec Jacobson, and Wenzel Jakob. Large
+steps in inverse rendering of geometry. ACM Trans. Graph.,
+40(6), dec 2021. 7, 14
+[54] Michael Niemeyer, Jonathan T. Barron, Ben Mildenhall,
+Mehdi S. M. Sajjadi, Andreas Geiger, and Noha Radwan.
+Regnerf: Regularizing neural radiance fields for view synthesis from sparse inputs. In Proc. IEEE Conf. on Computer
+Vision and Pattern Recognition (CVPR), 2022. 2
+[55] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
+Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In
+Proc. IEEE Conf. on Computer Vision and Pattern Recognition (CVPR), 2020. 2
+[56] Merlin Nimier-David, Thomas Müller, Alexander Keller,
+and Wenzel Jakob. Unbiased inverse volume rendering with
+differential trackers. ACM Trans. Graph., 41(4), jul 2022. 2
+[57] Merlin Nimier-David, Sébastien Speierer, Benoı̂t Ruiz, and
+Wenzel Jakob. Radiative backpropagation: An adjoint
+method for lightning-fast differentiable rendering. ACM
+Trans. Graph., 39(4), aug 2020. 2
+[58] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. Mitsuba 2: A retargetable forward and inverse
+renderer. ACM Trans. Graph., 38(6), nov 2019. 1, 2
+[59] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+fields for multi-view reconstruction. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision
+(ICCV), pages 5589–5599, October 2021. 2
+[60] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
+James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
+Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison,
+Andreas Köpf, Edward Yang, Zach DeVito, Martin Raison,
+Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu
+Fang, Junjie Bai, and Soumith Chintala. Pytorch: An imperative style, high-performance deep learning library. In
+Proceedings of the 33rd International Conference on Neural Information Processing Systems, Red Hook, NY, USA,
+2019. Curran Associates Inc. 4, 13
+[61] Dario Pavllo, Graham Spinks, Thomas Hofmann, MarieFrancine Moens, and Aurelien Lucchi. Convolutional generation of textured 3d meshes. In H. Larochelle, M. Ranzato,
+R. Hadsell, M.F. Balcan, and H. Lin, editors, Advances in
+Neural Information Processing Systems, volume 33, pages
+870–882. Curran Associates, Inc., 2020. 2
+[62] Christoph Peters and Reinhard Klein. Moment shadow mapping. In Proceedings of the 19th Symposium on Interactive
+3D Graphics and Games, i3D ’15, page 7–14, New York,
+NY, USA, 2015. Association for Computing Machinery. 3,
+15
+[63] Felix Petersen, Bastian Goldluecke, Christian Borgelt, and
+Oliver Deussen. GenDR: A Generalized Differentiable Renderer. In IEEE/CVF International Conference on Computer
+Vision and Pattern Recognition (CVPR), 2022. 2
+[64] William T. Reeves, David H. Salesin, and Robert L. Cook.
+Rendering antialiased shadows with depth maps. SIGGRAPH Comput. Graph., 21(4):283–291, aug 1987. 3
+[65] Zhong Ren, Rui Wang, John Snyder, Kun Zhou, Xinguo Liu,
+Bo Sun, Peter-Pike Sloan, Hujun Bao, Qunsheng Peng, and
+Baining Guo. Real-time soft shadows in dynamic scenes using spherical harmonic exponentiation. In ACM SIGGRAPH
+2006 Papers, SIGGRAPH ’06, page 977–986, New York,
+NY, USA, 2006. Association for Computing Machinery. 2
+[66] Denys Rozumnyi, Martin R. Oswald, Vittorio Ferrari, and
+Marc Pollefeys. Shape from blur: Recovering textured 3d
+shape and motion of fast moving objects. In M. Ranzato,
+A. Beygelzimer, Y. Dauphin, P.S. Liang, and J. Wortman
+Vaughan, editors, Advances in Neural Information Processing Systems, volume 34, pages 29972–29983. Curran Associates, Inc., 2021. 2
+[67] Darius Rückert, Linus Franke, and Marc Stamminger. Adop:
+Approximate differentiable one-pixel point rendering. ACM
+Trans. Graph., 41(4), jul 2022. 2
+[68] Kaustubh Sadekar, Ashish Tiwari, and Shanmuganathan Raman. Shadow art revisited: A differentiable rendering based
+approach. In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), pages 29–
+37, January 2022. 7
+[69] Nikolaos Sarafianos, Bogdan Boteanu, Bogdan Ionescu, and
+Ioannis A. Kakadiaris. 3d human pose estimation: A review
+of the literature and analysis of covariates. Computer Vision
+and Image Understanding, 152:1–20, 2016. 6
+[70] Steven A Shafer and Takeo Kanade. Using shadows in finding surface orientations. Computer Vision, Graphics, and
+Image Processing, 22(1):145–176, 1983. 6
+[71] Yusuke Takimoto, Hiroyuki Sato, Hikari Takehara, Keishiro
+Uragaki, Takehiro Tawara, Xiao Liang, Kentaro Oku, Wataru
+Kishimoto, and Bo Zheng. Dressi: A hardware-agnostic
+differentiable renderer with reactive shader packing and
+soft rasterization. Computer Graphics Forum, 41(2):13–27,
+2022. 2
+[72] Delio Vicini, Sébastien Speierer, and Wenzel Jakob. Path replay backpropagation: Differentiating light paths using constant memory and linear time. ACM Trans. Graph., 40(4),
+jul 2021. 2
+[73] Delio Vicini, Sébastien Speierer, and Wenzel Jakob. Differentiable signed distance function rendering. ACM Trans.
+Graph., 41(4), jul 2022. 2, 8
+[74] Gu Wang, Fabian Manhardt, Jianzhun Shao, Xiangyang
+Ji, Nassir Navab, and Federico Tombari. Self6d: Selfsupervised monocular 6d object pose estimation. In The
+European Conference on Computer Vision (ECCV), August
+2020. 2
+[75] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+NeurIPS, 2021. 2
+[76] Lance Williams. Casting curved shadows on curved surfaces.
+In Proceedings of the 5th Annual Conference on Computer
+Graphics and Interactive Techniques, SIGGRAPH ’78, page
+270–274, New York, NY, USA, 1978. Association for Computing Machinery. 1, 2, 4
+[77] Markus Worchel, Rodrigo Diaz, Weiwen Hu, Oliver Schreer,
+Ingo Feldmann, and Peter Eisert. Multi-view mesh reconstruction with neural deferred shading. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 6187–6197, June 2022. 2, 7
+[78] Shangzhe Wu, Christian Rupprecht, and Andrea Vedaldi.
+Unsupervised learning of probably symmetric deformable
+3d objects from images in the wild. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2020. 2
+[79] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman.
+Volume rendering of neural implicit surfaces. In ThirtyFifth Conference on Neural Information Processing Systems,
+2021. 2
+[80] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems, 33, 2020. 2
+[81] Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas,
+and Shuang Zhao. Path-space differentiable rendering. ACM
+Trans. Graph., 39(4), aug 2020. 1, 2
+[82] Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely. Iron:
+Inverse rendering by optimizing neural sdfs and materials
+from photometric images. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 5565–5574, June 2022. 2
+[83] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and
+Noah Snavely. PhySG: Inverse rendering with spherical
+gaussians for physics-based material editing and relighting.
+In The IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2021. 2
+[84] Xiuming Zhang, Pratul P. Srinivasan, Boyang Deng, Paul
+Debevec, William T. Freeman, and Jonathan T. Barron. Nerfactor: Neural factorization of shape and reflectance under
+an unknown illumination. ACM Trans. Graph., 40(6), dec
+2021. 2
+[85] Yuxuan Zhang, Wenzheng Chen, Huan Ling, Jun Gao, Yinan Zhang, Antonio Torralba, and Sanja Fidler. Image gans
+meet differentiable rendering for inverse graphics and interpretable 3d neural rendering. In International Conference on
+Learning Representations, 2021. 2
+[86] Yang Zhou, Lifan Wu, Ravi Ramamoorthi, and Ling-Qi Yan.
+Vectorization for fast, analytic, and differentiable visibility.
+ACM Trans. Graph., 40(3), jul 2021. 2
+Supplementary Material
+A. Implementation and Renderer Details
+We implemented our method in Python1 , on top of the
+automatic differentiation framework PyTorch [60] and use
+the differentiable rasterization primitives by Laine et al. [34]
+as foundation for our renderer. Our rendering pipeline follows a deferred shading architecture [13], so we first rasterize the scene geometry and then perform a shading pass that
+computes the light-material interaction. This architecture
+allows us to consider an arbitrary number of lights. Currently, all surfaces use a BRDF (bidirectional reflectance
+distribution function) with only the Lambert diffuse term
+but an extension to more physically-based material models, like the Disney “principled” BRDF [8] or variants of
+it [28, 33], is trivial.
+For rendering the shadow maps, we use the same rasterization primitives as for the primary camera. The camera
+built for each light depends on the light type: (1) a directional light uses a camera with orthographic project that is
+placed far outside of the scene, facing the origin from the
+specified direction; (2) a spot light uses a camera that is
+placed at its position, facing the desired direction, and using
+a perspective projection with a configurable field of view.
+B. Experiment Details
+Our scenes are roughly centered at the origin and after
+loading 3D models, we scale them to the [−1, 1]3 cube. This
+allows us to use consistent near and far planes across experiments, both for the frusta of the actual cameras and the
+frusta of the light cameras.
+For all experiments – except those explicitly stating otherwise – we use a shadow map resolution of 256 × 256. We
+implement two filters for pre-filtering the shadow map: a
+box filter and a Gaussian filter. We use both filters in the
+experiments, usually with kernel size k = 3 or k = 5.
+The Gaussian filter produces more pleasing visual results
+whereas using the box filter is a little faster. Generally, we
+observed robustness to the exact choice of filter.
+Convergence and Jacobian Experiments. We use a
+“minimal plane” setup for the convergence and Jacobian
+experiments, consisting of a single planar shadow receiver
+and a single planar occluder (both parallel), illuminated by
+a directional light orthogonal to them. The camera that produces the shadow images used for optimization is located
+between the receiver and the occluder, focusing the receiver.
+The highly tessellated and slightly rotated occluder that we
+use for computing the Jacobian has 130,000 faces. For the
+1 An open-source implementation is available at https://github.
+com/mworchel/differentiable-shadow-mapping
+simple experiment that investigates the effect of shadow
+map filtering on the convergence, we displace the occluder
+horizontally and the goal of the optimization is to recover
+the original position, only by using the shadow images.
+Light Direction Estimation. The experiment of light direction estimation has the following general setup: an object is placed on a rectangular floor plane and illuminated
+by n directional lights. We render a reference image with a
+fixed camera that observes the object. The goal of the optimization is to recover the target light directions from some
+initial state, only by comparing the rendered image to the
+target image.
+We run the experiment for 6 objects in total. For each parameter setting (e.g. filter size) we perform 150 runs of the
+experiment, with randomized target and initial conditions.
+We ensure that these configurations are deterministic, so –
+as an example – the optimizations for filter size k = 3 and
+k = 15 use the same set of 150 configurations. The average accuracy is computed as an average over the 6 objects
+and 150 runs; our error bounds are based on the standard
+deviation, respectively.
+The accuracy (alignment) is computed as follows: Given
+the n target light directions {li } and the estimated light directions {lopt
+j }, we first perform a greedy matching between
+both sets, trying to maximize the dot product li ·lopt
+ki between
+a direction i and its match ki . Note that this mapping is
+bijective, so there is a one-to-one correspondence between
+directions. We then compute the alignment as the average
+dot product over all directions:
+\frac {1}{n} \sum _i \mathbf {l}_{i} \cdot \mathbf {l}^\text {opt}_{k_i}
+(12)
+Monocular Pose Estimation. The general setup for the
+pose estimation application is as follows: the scene consists
+of a single planar receiver that is illuminated by a directional
+light orthogonal to it. The object whose pose we wish to recover is placed in front of the receiver, such that it casts a
+shadow. For each optimization run, we first randomly offset
+the object in the plane parallel to the receiver and randomly
+rotate it around its up-axis (the random offsets and rotations
+are deterministic). Then, we recover the original pose in an
+optimization, which compares rendered images to a reference image that shows the object without offset or rotation.
+The camera is located at a position where it sees both the
+object and the shadow receiver plane.
+We use Mitsuba 3 [24] for creating the reference images
+and as a baseline in the optimization. Since Mitsuba 3 does
+not support differentiation for directional lighting, we use a
+far-away, rectangular area light as a proxy in the optimization. We calibrate this proxy to match the directional light.
+Figure 18. General setup of the face reconstruction experiment.
+The face model is placed in front of a planar shadow receiver and
+the camera (blue) is placed between them, focusing the receiver
+(left). For the experiments with three shadows, we add two additional lights with small horizontal offsets (middle, right).
+In our experiments, timings for Mitsuba 3 showed no noticeable dependence on the choice of emitter.
+We use A DAM [31] for the optimization, with a step size
+of 0.01 and β1 = 0.9, β2 = 0.999 and run 150 iterations.
+Face Reconstruction from Profile Shadows. The basic
+setup for face reconstruction is similar to that of pose estimation: a single planar shadow receiver is illuminated by a
+directional light orthogonal to it. The head model is placed
+in front of the plane so that is casts a shadow. However, here
+the camera is located between the head and the receiver, focusing the receiver (see Figure 18). For the setup with three
+shadows, we add two additional directional lights.
+We use artificial geometry to evaluate the quality of our
+fit quantitatively. When computing the geometric distance
+between the reference geometry and our prediction, we only
+compare the meshes from the neck upwards, because the
+shadow of the upper torso is not included in the optimization.
+In the experiment that uses silhouette images of real public figures, we first scale the images and align them roughly
+with the shadow observed by the camera in our scene. We
+also optimize the translation of the head model to reduce the
+effect of small inaccuracies in this alignment.
+We use A DAM [31] with a step size of 0.01 for the translation and a step size of 0.2 for the identity weights used by
+the morphable face model, both with β1 = 0.9, β2 = 0.999.
+We run the optimization for 400 iterations.
+Shadow Art. The basic shadow art setup is again similar to the setup for face reconstruction and pose estimation:
+a single shadow receiver illuminated by an orthogonal directional light with the geometry that is optimized in front
+of the plane. The experiments with two views use a second shadow receiver that is placed orthogonal to the first
+one, illuminated by a second directional light orthogonal to
+Figure 19. Shadow art setup for one view (left) and two views
+(right), with a reference object.
+it (see Figure 19). For each receiver plane, we place an orthographic camera between the object and the plane: these
+are the cameras producing the shadow images used in the
+optimization.
+In selected experiments, we use a perspective camera
+that observes the receiver plane from the side, demonstrating that light rays and view rays do not need to coincide
+with our framework. We also replace the planar shadow receiver with a curved receiver to show that the receiver does
+not necessarily need to be flat. In our demo code, we include a shadow art sample, which reproduces these settings
+for a single view.
+The shadow art experiments that deform a mesh start
+with a sphere of 12,800 triangles and finish in roughly
+15 seconds for each object. We run 400 iterations with
+A DAM [31], using a step size of 0.2, β1 = 0.9, β2 = 0.999,
+λ = 20 for gradient preconditioning [53], and a weight of
+0.2 for the normal consistency regularization.
+The shadow art experiments that optimize the translations, scales, and rotations of an object collection initially
+start with one instance of the object and duplicate the number of objects every 150 iterations (each object spawns two
+objects with small offsets to avoid interpenetration). We run
+1100 iterations with A DAM [31], using a step size of 0.005,
+β1 = 0.9, β2 = 0.999.
+Interactive Modeling from Shadows. The interactive
+modeling setup is equivalent to the one-view shadow art
+setup. In contrast to shadow art, the intend here is to modify
+an existing model based on user interaction with the shadow
+image. We first load an input mesh, generate a shadow image from the unmodified mesh, and write the image to the
+disk. The optimization loop then reads back this shadow
+image in each iteration and uses it as a target image to drive
+the model deformation.
+C. Additional Results
+Monocular Pose Estimation. Table 2 contains the quantitative results for all resolutions (1282 , 5122 , 10242 ) as
+well as time measurements per iteration. We can perform
+Iden�ty + Expr.
+Expression
+by using heuristics [52] or implementing other pre-filtered
+shadow maps [2, 3, 62] in our framework.
+Ini�al
+Ground Truth
+Ini�al
+Op�mized
+(1 Shadow)
+Op�mized
+(3 Shadows)
+Figure 20. We use a morphable face model that allows controlling
+the face identity and the expression. We optimize both (top row)
+and only the expression (bottom row) based on the shadows cast
+by the model.
+Figure 21. Shaded image (left) and visibility (right) with visible
+light bleeding artifact.
+approximately 70 (1282 ), 40 (5122 ), and 20 (10242 ) optimization steps per second, which allows following the optimization in real-time.
+Face Reconstruction from Profile Shadows. Table 3
+contains the quantitative results for four artificial faces models. In the main paper, we only optimize the identity weights
+of the morphable face model, which effectively determine
+the fundamental shape of the face. We also experimented
+with optimizing the identity and expression as well as only
+the expression, while keeping the identity fixed (see Figure 20). The latter might be useful if the shape of the head
+is known (e.g. because it was scanned previously) and the
+task is to recover facial expressions using shadows, for example in the context of face motion capture.
+D. Limitation: Light Bleeding
+It is well known that Variance Shadow Maps [14] – our
+particular choice of pre-filtered shadow maps – suffer from
+light bleeding in regions with high depth variance (see Figure 21). While we noticed no immediate impact in our
+experiments, it might be desirable to reduce light bleeding
+Table 2. Quantitative results for the pose estimation experiments for different scenes and resolutions. We measure the rotation error ∆φ,
+the translation error ∆t, the total runtime, and runtime per iteration, averaged over ten runs. We include results for a GPU with ray-tracing
+cores (“RT”) and for a setting where we use our renderer as reference (“Our Ref.”). Best scores in bold, second best scores underlined.
+Mitsuba 3 [24]
+↓ ∆φ[◦ ] ↓ ∆t
+Rasterizer + Shadows (Ours)
+Rasterizer
+↓ time [s] (/it) ↓ ∆φ[◦ ] ↓ ∆t ↓ time [s] (/it) ↓ ∆φ[◦ ] ↓ ∆t ↓ time [s] (/it)
+128 × 128
+0.31
+2.78
+1.44
+0.02
+0.05
+4.01
+5.24
+0.11
+54.13 (0.361)
+52.46 (0.349)
+53.17 (0.354)
+58.19 (0.388)
+0.69 0.27
+3.32 3.94
+3.66 4.02
+7.40 12.83
+2.27 (0.015)
+2.09 (0.014)
+2.08 (0.014)
+2.11 (0.014)
+3.04 5.56
+8.01 14.31
+6.80 12.42
+12.47 44.70
+1.06 (0.007)
+1.03 (0.007)
+1.03 (0.007)
+1.05 (0.007)
+Bunny
+Dragon
+Hand
+Spot
+0.23
+2.86
+1.41
+0.03
+0.10
+3.91
+5.18
+0.02
+325.29 (2.168)
+306.46 (2.043)
+317.40 (2.116)
+381.80 (2.545)
+0.33
+3.32
+1.68
+0.05
+0.22
+4.53
+5.36
+0.05
+3.76 (0.024)
+3.64 (0.023)
+3.66 (0.023)
+3.76 (0.023)
+0.31 0.26
+8.02 11.63
+1.85 5.66
+5.80 23.15
+1.58 (0.009)
+1.54 (0.009)
+1.51 (0.009)
+1.77 (0.010)
+Spot (RT)
+Spot (Our Ref.)
+0.03
+0.05
+0.02
+0.12
+53.26 (0.354)
+384.24 (2.561)
+0.05
+0.02
+0.05
+0.06
+1.93 (0.012)
+3.60 (0.022)
+6.92 21.52
+5.83 23.12
+1.05 (0.006)
+1.71 (0.010)
+0.22
+2.86
+1.42
+0.03
+0.12
+3.87
+5.38
+0.03
+1245.60 (8.304)
+1151.74 (7.678)
+1200.74 (8.005)
+1441.56 (9.610)
+0.31
+3.22
+1.61
+0.03
+0.21
+4.48
+5.43
+0.04
+7.72 (0.047)
+7.53 (0.046)
+7.72 (0.048)
+7.64 (0.046)
+0.33 0.25
+7.85 11.48
+1.76 5.66
+2.58 3.93
+3.71 (0.021)
+3.18 (0.018)
+3.13 (0.018)
+3.19 (0.017)
+Bunny
+Dragon
+Hand
+Spot
+512 × 512
+1024 × 1024
+Bunny
+Dragon
+Hand
+Spot
+Table 3. Quantitative results for face reconstruction from shadows,
+using artificial head geometry generated with a morphable face
+model. Best scores in bold.
+1 Shadow
+3 Shadows
+Face ID ↓ Dmean ↓ DHausdorff ↓ time [s] (/it) ↓ Dmean ↓ DHausdorff ↓ time [s] (/it)
+1
+6
+8
+131
+0.011
+0.012
+0.014
+0.014
+0.114
+0.108
+0.129
+0.069
+18.86 (0.047)
+19.00 (0.048)
+19.36 (0.048)
+18.09 (0.045)
+0.006
+0.010
+0.007
+0.008
+0.066
+0.106
+0.054
+0.046
+mean
+0.013
+0.105 18.83 (0.047)
+0.008
+0.068 27.32 (0.068)
+27.11 (0.068)
+27.32 (0.068)
+27.37 (0.068)
+27.46 (0.069)

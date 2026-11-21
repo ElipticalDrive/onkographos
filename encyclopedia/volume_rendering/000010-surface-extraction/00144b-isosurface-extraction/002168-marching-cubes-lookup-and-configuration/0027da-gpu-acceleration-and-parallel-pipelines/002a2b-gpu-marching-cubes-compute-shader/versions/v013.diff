@@ -1,0 +1,153 @@
+--- v012.md
++++ v013.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-This method extracts an isosurface from a 3D scalar field (density texture) by executing the Marching Cubes algorithm on the GPU using a compute shader [S1, unofficial]. It solves the performance bottleneck of CPU-based surface extraction by parallelizing voxel processing across thread groups [S1, unofficial]. Unlike CPU immediate mode implementations, it utilizes an append buffer for dynamic triangle generation and indirect draw calls to handle variable output sizes per frame [S1, unofficial].
++This method extracts an isosurface from a 3D scalar field (density texture) by executing the Marching Cubes algorithm on the GPU using a compute shader [S1, unofficial]. It solves the performance bottleneck of CPU-based surface extraction by parallelizing voxel processing across thread groups [S1, unofficial]. Unlike CPU immediate mode implementations, it utilizes an append buffer for dynamic triangle generation and indirect draw calls to handle variable output sizes per frame [S1, unofficial]. It builds on [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md).
+ 
+ ## How it works
+@@ -44,9 +44,9 @@
+         *   Retrieve edge intersection mask from `edgeTable[C]` [S1, unofficial].
+         *   Retrieve triangle indices from `triangleTable[C]` [S1, unofficial].
+-    *   **Edge Interpolation**: For each intersected edge, calculate the intersection point $P$ and normal $N$.
+-        *   Linear interpolation for position: $P = V_a + \frac{I - V_a}{V_b - V_a}(V_b - V_a)$, where $V_a, V_b$ are vertex values [S1, unofficial].
+-        *   Normal calculation: Use gradient-based normals (e.g., central differences) or vertex normals interpolated to $P$ [S1, unofficial].
++    *   **Edge Interpolation**: For each intersected edge, calculate the intersection point $P$ and normal $N$ [G].
++        *   Linear interpolation for position: $P = V_a + \frac{I - V_a}{V_b - V_a}(V_b - V_a)$, where $V_a, V_b$ are vertex values [G].
++        *   Normal calculation: Use gradient-based normals (e.g., central differences) or vertex normals interpolated to $P$ [G].
+     *   **Append Triangles**: For each triangle triplet $(e_a, e_b, e_c)$ in the case configuration:
+-        *   Create 3 vertices from the interpolated edge points [S1, unofficial].
++        *   Create 3 vertices from the interpolated edge points [G].
+         *   Append the `Triangle` struct to `triangleRW` (the append buffer) [S1, unofficial].
+ 
+@@ -69,46 +69,20 @@
+ 
+ ```python
+-def cross_product(a, b):
+-    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
++# Pseudocode for the compute shader kernel "MarchingCubes"
++# Assumes standard Marching Cubes lookup tables are available as static constants
++# Uses Python-like syntax for clarity; vector operations are standard math functions
+ 
+-def normalize(v):
+-    length = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-    if length == 0: return [0.0, 0.0, 1.0]
+-    return [v[0]/length, v[1]/length, v[2]/length]
+-
+-def intersect_edge(edge_idx, v, x, y, z, iso_level):
+-    edges = [
+-        [(x, y, z), (x+1, y, z), v[0], v[1]],
+-        [(x+1, y, z), (x+1, y+1, z), v[1], v[2]],
+-        [(x+1, y+1, z), (x, y+1, z), v[2], v[3]],
+-        [(x, y+1, z), (x, y, z), v[3], v[0]],
+-        [(x, y, z+1), (x+1, y, z+1), v[4], v[5]],
+-        [(x+1, y, z+1), (x+1, y+1, z+1), v[5], v[6]],
+-        [(x+1, y+1, z+1), (x, y+1, z+1), v[6], v[7]],
+-        [(x, y+1, z+1), (x, y, z+1), v[7], v[4]],
+-        [(x, y, z), (x, y, z+1), v[0], v[4]],
+-        [(x+1, y, z), (x+1, y, z+1), v[1], v[5]],
+-        [(x+1, y+1, z), (x+1, y+1, z+1), v[2], v[6]],
+-        [(x, y+1, z), (x, y+1, z+1), v[3], v[7]]
+-    ]
+-    p1, p2, val1, val2 = edges[edge_idx]
+-    denom = val2 - val1
+-    if abs(denom) < 1e-6:
+-        t = 0.5
+-    else:
+-        t = (iso_level - val1) / denom
+-    return [p1[j] + t * (p2[j] - p1[j]) for j in range(3)]
+-
+-def process_voxel(x, y, z, grid_size, iso_level, density_texture, edge_table, triangle_table, triangle_rw):
++def marching_cubes_kernel(grid_size, iso_level, density_texture, edge_table, triangle_table, triangle_rw):
++    # Each thread processes one voxel in the (grid_size-1)^3 grid
++    x, y, z = get_thread_id()  # [G] Standard thread ID extraction
+     if x >= grid_size - 1 or y >= grid_size - 1 or z >= grid_size - 1:
+         return
+ 
+-    v = [
+-        density_texture[x, y, z], density_texture[x+1, y, z],
+-        density_texture[x+1, y+1, z], density_texture[x, y+1, z],
+-        density_texture[x, y, z+1], density_texture[x+1, y, z+1],
+-        density_texture[x+1, y+1, z+1], density_texture[x, y+1, z+1]
+-    ]
++    # Sample 8 vertices
++    v = [density_texture[x, y, z], density_texture[x+1, y, z], density_texture[x+1, y+1, z],
++         density_texture[x, y+1, z], density_texture[x, y, z+1], density_texture[x+1, y, z+1],
++         density_texture[x+1, y+1, z+1], density_texture[x, y+1, z+1]]
+ 
++    # Case index
+     cube_index = 0
+     for i in range(8):
+@@ -120,4 +94,5 @@
+         return
+ 
++    # Intersect edges
+     points = [None] * 12
+     for i in range(12):
+@@ -125,14 +100,37 @@
+             points[i] = intersect_edge(i, v, x, y, z, iso_level)
+ 
+-    tri_row = triangle_table[cube_index]
++    # Generate triangles
++    tri_indices = triangle_table[cube_index]
+     idx = 0
+-    while tri_row[idx] != -1:
+-        e1, e2, e3 = tri_row[idx], tri_row[idx+1], tri_row[idx+2]
++    while tri_indices[idx] != -1:
++        e1, e2, e3 = tri_indices[idx], tri_indices[idx+1], tri_indices[idx+2]
+         p1, p2, p3 = points[e1], points[e2], points[e3]
+-        edge_a = [p2[j] - p1[j] for j in range(3)]
+-        edge_b = [p3[j] - p1[j] for j in range(3)]
+-        normal = normalize(cross_product(edge_a, edge_b))
+-        triangle_rw.append({'v0': p1, 'v1': p2, 'v2': p3, 'n': normal})
++        # Normal calculation [G]
++        normal = normalize(cross(sub(p2, p1), sub(p3, p1)))
++        triangle_rw.append(Triangle(positions=[p1, p2, p3], normal=normal))
+         idx += 3
++
++def intersect_edge(edge_index, v, x, y, z, iso_level):
++    # Edge to vertex mapping [G]
++    edges = [
++        ((x, y, z), (x+1, y, z), v[0], v[1]),
++        ((x+1, y, z), (x+1, y+1, z), v[1], v[2]),
++        ((x+1, y+1, z), (x, y+1, z), v[2], v[3]),
++        ((x, y+1, z), (x, y, z), v[3], v[0]),
++        ((x, y, z+1), (x+1, y, z+1), v[4], v[5]),
++        ((x+1, y, z+1), (x+1, y+1, z+1), v[5], v[6]),
++        ((x+1, y+1, z+1), (x, y+1, z+1), v[6], v[7]),
++        ((x, y+1, z+1), (x, y, z+1), v[7], v[4]),
++        ((x, y, z), (x, y, z+1), v[0], v[4]),
++        ((x+1, y, z), (x+1, y, z+1), v[1], v[5]),
++        ((x+1, y+1, z), (x+1, y+1, z+1), v[2], v[6]),
++        ((x, y+1, z), (x, y+1, z+1), v[3], v[7])
++    ]
++    p1, p2, val1, val2 = edges[edge_index]
++    # Avoid division by zero [G]
++    if val2 == val1:
++        return p1
++    t = (iso_level - val1) / (val2 - val1)
++    return add(p1, scale(sub(p2, p1), t))
+ ```
+ 
+@@ -142,15 +140,14 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hardware Dependency**: Requires DX11 hardware [S1, unofficial].
+-*   **Density Field Generation**: The example generates the density field on the CPU, which is a bottleneck [S1, unofficial].
+-*   **Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous [10327-lookup-table-and-ambiguity-handling].
+-*   **Lighting**: The default shader uses a barebone diffuse lighting model [S1, unofficial].
++*   **Hardware Dependency**: Requires DX11 hardware. Mobile support is uncertain [S1, unofficial].
++*   **Density Field Generation**: The example generates the density field on the CPU, which is a bottleneck. For real applications, use a `RenderTexture` instead of `Texture3D` [S1, unofficial].
++*   **Lighting**: The default shader uses a barebone diffuse lighting model. Custom shaders are recommended for better visuals [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels $(R-1)^3$ [S1, unofficial].
++*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels $(R-1)^3$ [G]. Each voxel is processed in parallel by a thread group [S1, unofficial].
+ *   **Memory Complexity**: $O(N)$ for the append buffer, with capacity $(R-1)^3 \times 5$ triangles [S1, unofficial].
+ *   **Performance**: Parallelizes the extraction process, significantly faster than CPU-based methods for high resolutions [S1, unofficial].
+ *   **Strengths**: Dynamic output size handled via append buffers and indirect draw calls; leverages GPU parallelism [S1, unofficial].
+-*   **Limitations**: Requires DX11; CPU density generation is a bottleneck in the reference implementation; potential topological artifacts in ambiguous cases [S1, unofficial].
++*   **Limitations**: Requires DX11; CPU density generation is a bottleneck in the reference implementation; potential topological artifacts in ambiguous cases [S1, unofficial][G].
+ 
+ ## Background

@@ -1,0 +1,158 @@
+# Proximal Operator
+
+Also called: Prox, Proximal Mapping
+
+## Overview
+The proximal operator is a mathematical tool used in proximal algorithms to solve non-smooth, constrained, or large-scale optimization problems by decomposing complex objective functions into simpler sub-problems [S1, unofficial][S2]. It generalizes projections onto convex sets, allowing an algorithm to move closer to the optimal solution while remaining close to the current estimate [S1, unofficial]. In the context of tomographic reconstruction, it enables the handling of composite objectives, such as combining smooth data fidelity terms with non-smooth regularization (e.g., sparsity or total variation), which are otherwise difficult to minimize jointly [S1, unofficial].
+
+## How it works
+The proximal operator for a function $h(\cdot)$ and a regularization parameter $\lambda$ is defined as the minimizer of the sum of the function and a quadratic penalty term that measures the distance to a reference point [S1, unofficial].
+
+**Inputs:**
+- $u \in \mathbb{R}^n$: The current estimate (reference point).
+- $h(\cdot)$: The function to be regularized or minimized.
+- $\lambda > 0$: The regularization parameter controlling the trade-off between minimizing $h(x)$ and staying close to $u$ [S1, unofficial].
+
+**Outputs:**
+- $x \in \mathbb{R}^n$: The result of the proximal operator, representing the new estimate.
+
+**Data Structures:**
+- Vectors $u$ and $x$ are typically dense arrays of floating-point numbers. For large-scale tomography, $u$ and $x$ represent 3D volumes, stored as 1D arrays or 3D grids depending on implementation [S2].
+
+**Formula:**
+The general definition is:
+$$ \text{prox}_{\lambda h}(u) = \operatorname{argmin}_x \left( h(x) + \frac{1}{2\lambda} \|x - u\|_2^2 \right) $$
+where $\| \cdot \|_2$ denotes the Euclidean norm [S1, unofficial].
+
+**Parameters:**
+- $\lambda$: Regularization parameter. A larger $\lambda$ places more weight on staying close to $u$ (less regularization influence), while a smaller $\lambda$ emphasizes minimizing $h(x)$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $h(x)$ is not convex, the minimizer may not be unique, and the operator is not well-defined in the standard proximal sense [S1, unofficial].
+- For the data fidelity term, if the system matrix $W$ is not full rank, the analytical solution requires solving a linear system. The addition of the identity matrix $I$ in the term $(\mu W^T W + I)$ ensures the system is well-conditioned [S2].
+
+**Pseudocode:**
+The following pseudocode implements the general proximal operator logic and specific instances found in tomographic reconstruction.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def proximal_operator_general(u, h, lambda_val):
+    """
+    General proximal operator definition.
+    Note: This is a conceptual placeholder. In practice, closed-form solutions
+    or specialized solvers are used for specific h(x).
+    """
+    # This function represents the argmin definition.
+    # Implementers should use specific closed-form solutions where available.
+    raise NotImplementedError("Use specific proximal operators for h(x).")
+
+def proximal_l1(u, lambda_val):
+    """
+    Proximal operator for the L1 norm (Soft Thresholding).
+    Used for sparsity regularization.
+    
+    Args:
+        u: Input vector (current estimate).
+        lambda_val: Regularization parameter lambda.
+        
+    Returns:
+        x: Output vector after soft thresholding.
+    """
+    # Formula: prox_{lambda g}(u) = (u - lambda)_+ - (-u - lambda)_+
+    # Element-wise:
+    # u_i - lambda if u_i >= lambda
+    # 0 if |u_i| <= lambda
+    # u_i + lambda if u_i <= -lambda
+    
+    x = np.zeros_like(u)
+    mask_pos = u >= lambda_val
+    mask_neg = u <= -lambda_val
+    mask_zero = ~mask_pos & ~mask_neg
+    
+    x[mask_pos] = u[mask_pos] - lambda_val
+    x[mask_neg] = u[mask_neg] + lambda_val
+    x[mask_zero] = 0.0
+    
+    return x
+
+def proximal_data_term(u, W, p, mu, solver='sart'):
+    """
+    Proximal operator for the data fidelity term F(v) = 1/2 ||Wv - p||^2.
+    
+    Args:
+        u: Current volume estimate.
+        W: Forward projection operator (matrix or callable).
+        p: Projection data (sinogram).
+        mu: Regularization parameter for the data term.
+        solver: Method to solve the linear system. 'sart' uses SART internally.
+        
+    Returns:
+        v: New volume estimate minimizing data fidelity + proximity to u.
+        
+    Formula:
+        (mu * W^T W + I)^-1 * (mu * W^T p + u)
+    """
+    # The analytical solution is (mu * W^T W + I)^-1 * (mu * W^T p + u).
+    # For large-scale tomography, explicit matrix inversion is infeasible.
+    # Instead, a linear solver (like SART) is used to solve the system:
+    # (mu * W^T W + I) v = (mu * W^T p + u)
+    
+    # Compute the right-hand side: rhs = mu * W^T p + u
+    # Note: W^T is the backprojection operator.
+    rhs = mu * backproject(W, p) + u
+    
+    # Solve (mu * W^T W + I) v = rhs
+    # Using SART as the linear solver, which is proven for tomographic reconstruction
+    # and avoids explicit generation of the system matrix [S2].
+    v = solve_linear_system_sart(W, rhs, mu=mu)
+    
+    return v
+
+def backproject(W, p):
+    """
+    Computes W^T p (backprojection).
+    Implementation depends on the specific geometry of W.
+    """
+    # Placeholder for actual backprojection logic
+    pass
+
+def solve_linear_system_sart(W, rhs, mu=1.0):
+    """
+    Solves (mu * W^T W + I) v = rhs using SART.
+    This corresponds to Algorithm 2 in [S2].
+    """
+    # SART iterations to solve the system
+    # T2 is the number of SART iterations
+    # This is a simplified representation; actual SART implementation required
+    v = np.zeros_like(rhs)
+    # ... SART loop ...
+    return v
+```
+
+## Subtopics
+
+### L1 Norm Proximal Operator
+The proximal operator for the L1 norm, used for sparsity regularization. It applies soft thresholding to the input vector [S1, unofficial]. It is chosen when the solution is expected to be sparse (e.g., in compressed sensing tomography) [S1, unofficial]. Formula: $\text{prox}_{\lambda g}(u) = (u - \lambda)_+ - (-u - \lambda)_+$, where $(u)_+ = \max(u, 0)$ [S1, unofficial]. Element-wise: $(\text{prox}_{\lambda g}(u))_i = u_i - \lambda$ if $u_i \geq \lambda$; $0$ if $|u_i| \leq \lambda$; $u_i + \lambda$ if $u_i \leq -\lambda$ [S1, unofficial].
+
+### Data Term Proximal Operator
+The proximal operator for the data fidelity term $F(v) = \frac{1}{2} \|W v - p\|^2$. It finds a new volume $v$ close to the current estimate $u$ that minimizes the data fidelity [S2]. It is chosen when enforcing consistency with measured projection data is required [S2]. Formula: $\text{prox}_{\mu F}(u) = (\mu W^T W + I)^{-1} (\mu W^T p + u)$ [S2]. The inverse is well-conditioned due to the addition of $I$, even if $W$ is not full rank [S2]. In practice, this is solved using a linear solver like SART to avoid explicit matrix generation [S2].
+
+### Anisotropic Total Variation Prior (ATV)
+The proximal operator for the Anisotropic Total Variation prior $h(x) = \sum_{i,j,k} |x_{i+1,j,k} - x_{i,j,k}| + |x_{i,j+1,k} - x_{i,j,k}| + |x_{i,j,k+1,k} - x_{i,j,k}|$ [S1, unofficial]. It can be represented as $g(Dx)$ where $D$ is the forward difference matrix [S1, unofficial]. It is chosen when piecewise constant solutions with sharp edges are desired [S1, unofficial]. The specific proximal operator implementation is not detailed in the sources beyond this representation [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the specific proximal operator. The L1 operator is $O(n)$ where $n$ is the number of voxels [S1, unofficial]. The data term operator requires solving a linear system, which is typically $O(k \cdot n)$ per iteration where $k$ is the number of SART iterations [S2].
+- **Memory Complexity:** $O(n)$ for storing the volume and projection data [S2]. Explicit storage of the system matrix $W$ is avoided in favor of procedural forward/backprojection, which is critical for large-scale tomography [S2].
+- **Strengths:** Modular design allows handling non-smooth functions (like L1) that are difficult to optimize with gradient-based methods [S1, unofficial]. Closed-form solutions exist for common regularizers [S1, unofficial].
+- **Limitations:** Requires careful tuning of parameters $\lambda$ and $\mu$ [S1, unofficial]. The data term operator requires a linear solver, which adds computational overhead [S2].
+- **When to use:** When the objective function is composite (smooth data term + non-smooth regularization) [S1, unofficial]. Specifically in tomographic reconstruction where sparsity or total variation regularization is needed [S1, unofficial][S2].
+
+## Background
+The proximal operator was introduced as a generalization of projections on convex sets [S1, unofficial]. It is a core component of proximal algorithms, which are designed to solve non-smooth, constrained, or large-scale optimization problems [S1, unofficial]. In tomography, it has been applied to industrial CT reconstruction and electron microscopy tilt-series reconstruction to handle noisy data and enforce priors like sparsity and total variation [S1, unofficial][S2]. The use of SART within the data term proximal operator leverages its proven effectiveness in tomographic reconstruction [S2].
+
+## Sources
+[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)
+[S2] GPU Accelerated 3D Tomographic Reconstruction and Visualization From Noisy Electron Microscopy Tilt-Series., https://doi.org/10.1109/tvcg.2022.3230445, fetched 2026-10-28

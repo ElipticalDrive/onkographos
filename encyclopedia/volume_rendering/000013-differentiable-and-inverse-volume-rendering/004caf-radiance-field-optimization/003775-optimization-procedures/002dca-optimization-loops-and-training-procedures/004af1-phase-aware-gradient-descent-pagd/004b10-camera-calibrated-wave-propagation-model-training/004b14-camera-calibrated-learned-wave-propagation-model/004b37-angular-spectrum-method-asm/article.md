@@ -1,0 +1,124 @@
+# Angular Spectrum Method (ASM)
+
+Also called: Free-space propagation operator
+
+## Overview
+The Angular Spectrum Method (ASM) is a free-space propagation operator used to model the parallel propagation of a wave field from one plane to another without approximations [S1, S2]. It solves the problem of accurately reconstructing or propagating a complex optical field $U_0(x_0, y_0)$ to a target plane at distance $z$ by treating the field as a superposition of plane waves [S1]. Unlike the Fresnel Method, which relies on paraxial approximations, ASM calculates the wavefield by propagating plane waves in different directions, making it exact for any propagation distance and angle, provided the sampling conditions are met [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The complex optical field $U_0(x_0, y_0)$ at the source plane ($z=0$), the propagation distance $z$, and the wavelength $\lambda$.
+*   **Output:** The reconstructed complex wavefield $U_r(x, y)$ at the target plane ($z$).
+
+**Data Structures:**
+*   The input field is represented as a 2D grid of complex numbers.
+*   The angular spectrum is represented as a 2D grid of complex numbers in the frequency domain $(k_x, k_y)$.
+*   The transfer function is a 2D grid of complex numbers with the same dimensions as the angular spectrum.
+
+**Parameters:**
+*   $\lambda$: Wavelength of the light.
+*   $k = \frac{2\pi}{\lambda}$: Wavenumber.
+*   $z$: Propagation distance.
+*   $\Delta x, \Delta y$: Spatial sampling intervals in the source plane.
+*   $\Delta k_x, \Delta k_y$: Frequency sampling intervals, where $\Delta k_x = \frac{2\pi}{N_x \Delta x}$ and $\Delta k_y = \frac{2\pi}{N_y \Delta y}$ for an $N_x \times N_y$ grid.
+
+**Steps:**
+1.  **Fourier Transform:** Compute the 2D Fourier Transform of the input field $U_0(x_0, y_0)$ to obtain the Angular Spectrum $A_0(k_x, k_y)$.
+    $$ A_0(k_x, k_y) = \mathcal{F} \{ U_0(x_0, y_0) \} $$
+    Note: The exact definition involves a normalization factor depending on the Fourier Transform convention. The source defines the inverse transform with a factor of $\frac{1}{2\pi}$, implying the forward transform does not include it, or uses a symmetric convention. We follow the standard DFT implementation where the forward transform sums without normalization and the inverse divides by $N$ or uses $\frac{1}{2\pi}$ factors as per the specific mathematical definition. The source equation (8) shows the continuous integral with $\frac{1}{2\pi}$, but equation (11) uses operator notation $\mathcal{F}$ and $\mathcal{F}^{-1}$. In discrete implementation, standard FFT libraries are used.
+
+2.  **Apply Transfer Function:** Multiply the Angular Spectrum $A_0(k_x, k_y)$ by the propagation phase factor (transfer function) $H(k_x, k_y; z)$.
+    $$ H(k_x, k_y; z) = \exp \left( j k_z z \right) $$
+    where
+    $$ k_z = \sqrt{k^2 - k_x^2 - k_y^2} $$
+    This step assumes $k^2 \ge k_x^2 + k_y^2$. If $k_x^2 + k_y^2 > k^2$, the term under the square root is negative, resulting in an evanescent wave which decays exponentially. In many practical implementations for propagating fields, these components are zeroed out or handled via complex $k_z$. The source states the assumption $k^2 \ge k_x^2 + k_y^2$ [S1].
+
+3.  **Inverse Fourier Transform:** Compute the 2D Inverse Fourier Transform of the product to obtain the reconstructed wavefield $U_r(x, y)$.
+    $$ U_r(x, y) = \mathcal{F}^{-1} \left\{ A_0(k_x, k_y) \exp \left( j \sqrt{k^2 - k_x^2 - k_y^2} z \right) \right\} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def angular_spectrum_method(U0, z, wavelength, dx, dy):
+    """
+    Propagates a complex optical field U0 using the Angular Spectrum Method.
+    
+    Args:
+        U0: 2D numpy array (complex128) representing the input field.
+        z: float, propagation distance.
+        wavelength: float, wavelength of light.
+        dx: float, spatial sampling interval in x.
+        dy: float, spatial sampling interval in y.
+        
+    Returns:
+        Ur: 2D numpy array (complex128) representing the propagated field.
+    """
+    Ny, Nx = U0.shape
+    k = 2 * np.pi / wavelength
+    
+    # Create frequency grid
+    # FFT shift centers zero frequency at the center of the array
+    kx = np.fft.fftfreq(Nx, d=dx) * 2 * np.pi
+    ky = np.fft.fftfreq(Ny, d=dy) * 2 * np.pi
+    
+    # Create 2D meshgrid
+    KX, KY = np.meshgrid(kx, ky)
+    
+    # Calculate kz
+    # k_z = sqrt(k^2 - kx^2 - ky^2)
+    # If kx^2 + ky^2 > k^2, kz becomes imaginary (evanescent waves)
+    # For standard propagation, we often set these to 0 or handle them.
+    # The source assumes k^2 >= kx^2 + ky^2.
+    kz_sq = k**2 - KX**2 - KY**2
+    
+    # Handle evanescent waves: if kz_sq < 0, kz is imaginary.
+    # exp(j * kz * z) will decay.
+    # We use complex sqrt to handle negative arguments correctly.
+    kz = np.sqrt(kz_sq)
+    
+    # Transfer function
+    H = np.exp(1j * kz * z)
+    
+    # Step 1: Fourier Transform
+    A0 = np.fft.fft2(U0)
+    
+    # Step 2: Multiply by transfer function
+    A_propagated = A0 * H
+    
+    # Step 3: Inverse Fourier Transform
+    Ur = np.fft.ifft2(A_propagated)
+    
+    return Ur
+```
+
+**Edge Cases and Pitfalls:**
+*   **Evanescent Waves:** If $k_x^2 + k_y^2 > k^2$, $k_z$ is imaginary. The source assumes $k^2 \ge k_x^2 + k_y^2$ [S1]. In practice, high-frequency components beyond the cutoff must be handled, typically by zeroing them or allowing exponential decay.
+*   **Sampling:** The spatial sampling $\Delta x, \Delta y$ must satisfy the Nyquist criterion for the highest spatial frequency present in the field to avoid aliasing. The frequency grid must cover the relevant bandwidth.
+*   **Computational Cost:** ASM requires two 2D Fourier Transforms, making it more computationally intensive than the Fresnel Method [S1].
+
+## Subtopics
+
+### [Camera-Calibrated Differentiable Holographic Model](17687-camera-calibrated-differentiable-holographic-model.md)
+A differentiable computational model that simulates the physical propagation of light from a Spatial Light Modulator (SLM) to a camera sensor, incorporating learnable parameters to account for system-specific imperfections such as polarization, SLM curvature, beam profiles, higher diffraction orders, crosstalk, and Lookup Table (LUT) non-linearity. It sets itself apart from standard Angular Spectrum Method (ASM) implementations by explicitly modeling the superposition of zero and first-order diffraction patterns through a neural network (U-Net) and calibrating these parameters against experimental data, thereby compensating for unmodeled physical effects in compact optical setups.
+
+### [Modified High Order Angular Spectrum Method (HOASM)](17758-modified-high-order-angular-spectrum-method-hoasm.md)
+HOASM is a differentiable wave propagation model that separates the propagation of zero-order and first-order diffraction terms to handle them differently before feeding them into a neural network. It builds on [Angular Spectrum Method (ASM)](12941-angular-spectrum-method-asm.md) by introducing a specific preprocessing step for the first-order term involving grid patterning and sinc weighting, distinguishing it from standard ASM which propagates all orders together.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \log N)$ due to the use of Fast Fourier Transforms (FFT), where $N$ is the number of pixels in the 2D grid.
+*   **Memory Complexity:** $O(N)$ for storing the input field, angular spectrum, and transfer function.
+*   **Measured Performance:** The source notes that ASM is more computationally intensive than the Fresnel Method because it requires two Fourier Transforms and does not use approximations that might allow for faster, single-transform methods [S1].
+*   **Strengths:** Exact solution for free-space propagation; no paraxial approximation; works for large angles and short distances.
+*   **Limitations:** Computationally more expensive than Fresnel or Fresnel-Kirchhoff approximations; sensitive to sampling rates; requires handling of evanescent waves.
+*   **When to use:** When high accuracy is required, especially for near-field propagation or large angles where Fresnel approximations fail.
+*   **When not to use:** When computational speed is critical and the paraxial approximation is valid (use Fresnel Method instead).
+
+## Background
+The Angular Spectrum Method is a fundamental technique in wave optics and digital holography. It is based on the principle that any optical field can be decomposed into a sum of plane waves (its angular spectrum) [S1]. The method was developed as an exact solution to the Helmholtz equation for free-space propagation. It is widely used in computer-generated holography (CGH) and digital holographic reconstruction [S1, S2]. The method is cited in recent advances in processing and rendering algorithms for CGH [S1] and in mesh-represented hologram synthesis [S2].
+
+## Sources
+[S1] Recent Advances in the Processing and Rendering Algorithms for Computer-Generated Holography, https://doi.org/10.3390/electronics8050556, fetched 2026-10-26
+[S2] Mesh-represented and learning-empowered hologram synthesis for full 3D holographic displays, https://www.nature.com/articles/s41467-026-74557-0, fetched 2026-10-30

@@ -1,0 +1,173 @@
+# Voxel Trilinear Interpolation (SIMD)
+
+Also called: SIMD Trilinear Sampling, Trilinear Interpolation with AVX, Trilinear Volume Interpolation, Trilinear Voxel Interpolation
+
+## Overview
+Voxel Trilinear Interpolation (SIMD) retrieves scalar or vector values from a dense 3D volume grid at arbitrary floating-point coordinates by performing trilinear interpolation across the 8 surrounding voxel corners, optimized for Single Instruction, Multiple Data (SIMD) execution units [S1, S3, S5, unofficial]. It solves the problem of extracting continuous fields from discrete voxel representations for volume rendering and isosurface extraction [S1, S2, S5, unofficial]. It sets itself apart from its sibling [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by explicitly structuring the computation to exploit SIMD registers (e.g., AVX/AVX2) for parallel evaluation of multiple components or channels, and from [VoxelGrid](2159-voxelgrid.md) by providing the specific low-level sampling kernel rather than the grid structure itself [S3, S5, unofficial].
+
+## How it works
+**Inputs:**
+- A 3D volume data array. Sources describe two common layouts: a 1D array of `uchar` or `float` values representing a brick of size $(B_x+1) \times (B_y+1) \times (B_z+1)$ in row-major order [S3, unofficial], or a 4D tensor `vol` with shape $(C, N_z, N_y, N_x)$ accessed as `vol[c][z][y][x]` [S2, unofficial].
+- Query coordinates $(x, y, z)$, which may be normalized $[0, 1]$ or absolute grid indices [S1, S2, unofficial].
+- Volume or brick dimensions $(D_x, D_y, D_z)$ or $(B_x, B_y, B_z)$ [S3, unofficial].
+
+**Outputs:**
+- Interpolated scalar or vector value(s) at the query point [S1, S3, unofficial].
+
+**Data Structures:**
+- **Voxel Data:** Stored contiguously. For SIMD optimization, data is loaded into 128-bit or 256-bit registers [S3, unofficial].
+- **Corner References:** The 8 corners of the cell enclosing the query point are identified by integer indices $(i, j, k)$ where $i,j,k \in \{0, 1\}$ [S1, S5, unofficial].
+
+**Steps:**
+
+1. **Coordinate Conversion and Bounds Checking:**
+   - Compute the relative position from the volume minimum bound: $\text{relative} = (x, y, z) - \text{bmin}$ [S3, unofficial].
+   - Normalize the relative position to voxel indices: $\text{tmp1} = \text{dims\_v} / \text{bsize}$, then $\text{relative} = \text{tmp1} \times \text{relative}$ [S3, unofficial].
+   - Check if the query point is outside the volume bounds. If any coordinate component is $< 0$ or $\ge$ the dimension size, return a default value (e.g., $0.0$) [S3, unofficial].
+
+2. **Index and Fraction Extraction:**
+   - Compute integer grid indices for the lower corner: $i = \lfloor x \rfloor$, $j = \lfloor y \rfloor$, $k = \lfloor z \rfloor$ [S2, S3, unofficial].
+   - Compute fractional offsets: $fx = x - i$, $fy = y - j$, $fz = z - k$ [S2, S4, unofficial].
+   - Clamp indices to valid ranges $[0, D-1]$ to handle boundary conditions safely [S2, unofficial]. Specifically, clamp all 8 corner indices individually to $[0, D-1]$ using $\max(0, \min(\text{idx}, D-1))$ [S2, unofficial].
+
+3. **Corner Value Retrieval:**
+   - Calculate the linear base index for the lower corner $(i, j, k)$ using row-major strides. For brick data, strides are $xNext = B_x+1$, $yNext = B_x+1$, $zNext = (B_x+1)(B_y+1)$, and $\text{idx} = (k \cdot yNext + j) \cdot xNext + i$ [S3, unofficial].
+   - Retrieve the 8 corner values $f_{ijk}$ from the data array:
+     $$
+     \begin{aligned}
+     f_{000} &= \text{data}[\text{idx}] \\
+     f_{100} &= \text{data}[\text{idx} + xNext] \\
+     f_{010} &= \text{data}[\text{idx} + yNext] \\
+     f_{110} &= \text{data}[\text{idx} + yNext + xNext] \\
+     f_{001} &= \text{data}[\text{idx} + zNext] \\
+     f_{101} &= \text{data}[\text{idx} + zNext + xNext] \\
+     f_{011} &= \text{data}[\text{idx} + zNext + yNext] \\
+     f_{111} &= \text{data}[\text{idx} + zNext + yNext + xNext]
+     \end{aligned}
+     $$
+     [S3, unofficial].
+
+4. **Trilinear Interpolation (Scalar):**
+   - Perform interpolation along the X-axis for the two Z-levels ($z=0$ and $z=1$):
+     $$
+     \begin{aligned}
+     v_{00} &= (1-fx)f_{000} + fx \cdot f_{100} \\
+     v_{01} &= (1-fx)f_{001} + fx \cdot f_{101} \\
+     v_{10} &= (1-fx)f_{010} + fx \cdot f_{110} \\
+     v_{11} &= (1-fx)f_{011} + fx \cdot f_{111}
+     \end{aligned}
+     $$
+   - Interpolate along the Y-axis for the two Z-levels:
+     $$
+     \begin{aligned}
+     v_0 &= (1-fy)v_{00} + fy \cdot v_{10} \\
+     v_1 &= (1-fy)v_{01} + fy \cdot v_{11}
+     \end{aligned}
+     $$
+   - Interpolate along the Z-axis to get the final value:
+     $$ V = (1-fz)v_0 + fz \cdot v_1 $$
+     [S2, S4, unofficial].
+   - **Expanded Formula:**
+     $$
+     \begin{aligned}
+     V = \;& f_{000}(1-fx)(1-fy)(1-fz) + f_{100}fx(1-fy)(1-fz) + \\
+          & f_{010}(1-fx)fy(1-fz) + f_{110}fx \cdot fy(1-fz) + \\
+          & f_{001}(1-fx)(1-fy)fz + f_{101}fx(1-fy)fz + \\
+          & f_{011}(1-fx)fy \cdot fz + f_{111}fx \cdot fy \cdot fz
+     \end{aligned}
+     $$
+     [S3, unofficial].
+
+5. **SIMD Optimization (AVX/AVX2):**
+   - Load voxel data into SIMD registers. For example, load 8 bytes into two 128-bit registers `v128_l` and `v128_h` [S3, unofficial].
+   - Broadcast the fractional coordinate to all vector lanes: $f_a = \text{fraction}.x$ [S3, unofficial].
+   - Compute interpolation weights in parallel: $f_b = (1-fy, 1-fy, fy, fy)$ and $f_c = (1-fz, fz, 1-fz, fz)$ [S3, unofficial].
+   - Compute high part contribution: $\text{tmp1} = \text{v128\_h} \times f_a$, $\text{tmp2} = f_b \times f_c$, $\text{res} = \text{tmp1} \times \text{tmp2}$ [S3, unofficial].
+   - Compute low part contribution: $f_a = 1 - f_a$, $\text{tmp1} = \text{v128\_l} \times f_a$, $\text{tmp2} = \text{tmp1} \times \text{tmp2}$, $\text{res} = \text{res} + \text{tmp2}$ [S3, unofficial].
+   - Sum components within the register to produce the final scalar result [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trilinear_interpolate(data, dims, x, y, z):
+    # 1. Bounds check
+    if x < 0 or x >= dims[0] or y < 0 or y >= dims[1] or z < 0 or z >= dims[2]:
+        return 0.0
+    
+    # 2. Index and fraction extraction
+    ix = int(x)
+    iy = int(y)
+    iz = int(z)
+    fx = x - ix
+    fy = y - iy
+    fz = z - iz
+    
+    # 3. Clamp indices to valid range [0, D-1]
+    ix = max(0, min(ix, dims[0] - 1))
+    iy = max(0, min(iy, dims[1] - 1))
+    iz = max(0, min(iz, dims[2] - 1))
+    
+    # 4. Compute strides and fetch 8 corners
+    sx, sy, sz = 1, dims[0], dims[0] * dims[1]
+    idx = iz * sz + iy * sy + ix * sx
+    
+    f000 = data[idx]
+    f100 = data[idx + sx]
+    f010 = data[idx + sy]
+    f110 = data[idx + sy + sx]
+    f001 = data[idx + sz]
+    f101 = data[idx + sz + sx]
+    f011 = data[idx + sz + sy]
+    f111 = data[idx + sz + sy + sx]
+    
+    # 5. Trilinear interpolation
+    v00 = (1 - fx) * f000 + fx * f100
+    v01 = (1 - fx) * f001 + fx * f101
+    v10 = (1 - fx) * f010 + fx * f110
+    v11 = (1 - fx) * f011 + fx * f111
+    
+    v0 = (1 - fy) * v00 + fy * v10
+    v1 = (1 - fy) * v01 + fy * v11
+    
+    return (1 - fz) * v0 + fz * v1
+```
+
+**Parameters:**
+- **Block Dimensions:** In CUDA implementations, fixed block sizes like $8 \times 8 \times 8$ (512 threads) are used [S2, unofficial].
+- **Brick Size:** For tiled volumes, brick dimensions $(B_x, B_y, B_z)$ determine the local grid size [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** Indices must be clamped to $[0, D-1]$ to prevent out-of-bounds memory access [S2, unofficial].
+- **Precision:** `float` is standard for interpolation weights and values [S2, unofficial].
+- **Degenerate Input:** Query points exactly on grid boundaries or outside the volume must be handled explicitly via clamping or default returns [S3, unofficial].
+
+## Subtopics
+
+### [Voxel Grid Density Estimation with Trilinear Interpolation](3593-voxel-grid-density-estimation-with-trilinear-interpolation.md)
+Estimates accumulated density and color along a ray by sampling a 3D voxel grid using trilinear interpolation. Distinguished by providing higher-level ray marching logic and boundary handling.
+
+### [Trilinear Interpolation on Sparse Voxel Octree](5118-trilinear-interpolation-on-sparse-voxel-octree.md)
+Samples fields stored in SVO leaf nodes. Distinguished by navigating the octree structure to find neighbors rather than using a dense grid index.
+
+### [Voxel Interpolation (Nearest, Trilinear, Triquadratic, Tricubic)](6486-voxel-interpolation-nearest-trilinear-triquadratic-tricubic.md)
+Supports multiple interpolation orders (0–3). Distinguished by offering a choice of polynomial orders and integration with high-level frameworks like PyTorch.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query point, as it involves a fixed number of arithmetic operations and memory accesses (8 samples) [S1, S3, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space per query, assuming the volume data is already in memory [S3, unofficial].
+- **Performance:** SIMD optimization significantly increases throughput by processing multiple data elements in parallel per CPU cycle [S3, unofficial]. Measured performance depends on CPU architecture (AVX2 vs AVX-512) and memory bandwidth [S3, unofficial].
+- **Strengths:** Efficient for dense memory layouts; produces smooth interpolation results; simple implementation [S3, S5, unofficial].
+- **Limitations:** Requires contiguous memory layout for optimal SIMD efficiency; boundary handling adds branching or clamping logic; not suitable for sparse data without additional indexing structures [S3, S5, unofficial].
+- **When to use:** When sampling dense voxel grids on CPUs with high throughput requirements [S3, unofficial].
+- **When not to use:** For sparse volumes or when GPU acceleration is preferred [S2, S3, unofficial].
+
+## Background
+Voxel trilinear interpolation is a fundamental technique in volume rendering and computer graphics for sampling continuous fields from discrete voxel data [S1, S5, unofficial]. The SIMD-optimized variant leverages CPU vector instructions (such as Intel AVX/AVX2) to accelerate the interpolation process, which is critical for real-time or high-performance volume rendering applications [S3, unofficial]. It is used in scientific visualization (e.g., CT heads, MR brains, smoke rendering) [S5, unofficial] and procedural noise generation [S1, unofficial]. The method builds on the general concept of trilinear interpolation, extending it to exploit parallel processing capabilities of modern processors [S3, unofficial].
+
+## Sources
+[S1] Scrawk/Marching-Cubes, https://github.com/Scrawk/Marching-Cubes, fetched 2026-10-26 (unofficial)
+[S2] tatsy/torchmcubes, https://github.com/tatsy/torchmcubes, fetched 2026-10-26 (unofficial)
+[S3] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
+[S4] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+[S5] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,139 @@
+--- v004.md
++++ v005.md
+@@ -2,88 +2,70 @@
+ 
+ Also called: StyleNeRF
++
+ ## Overview
+-StylizedNeRF (also known as StyleNeRF) is a method for high-resolution, 3D-consistent non-photorealistic rendering that integrates a 2D style transfer network with a differentiable volume renderer [S2, unofficial]. It solves the problem of generating stylized 3D scenes that maintain geometric consistency across viewpoints, a common failure mode in prior methods that discard view-dependent information [S2, unofficial]. It differs from its siblings by using a mutual learning strategy between a stylized NeRF and a 2D stylization network, handling 2D ambiguities via learnable latent codes to ensure geometry consistency [S1]. Unlike [Non-Photorealistic Style Editing](16597-non-photorealistic-style-editing.md) which allows region-specific styles, StylizedNeRF applies a global style to the entire scene [S1].
++StylizedNeRF (also known as StyleNeRF) is a method for high-resolution 3D-aware image synthesis that integrates a style-based generator into the Neural Radiance Field (NeRF) framework [S2, unofficial]. It solves the problem of generating consistent, high-fidelity 3D objects with specific artistic styles by combining a NeRF++ backbone with StyleGAN2-style synthesis networks [S2, unofficial]. It differs from its siblings, such as [Spherical Harmonics NeRF](14480-spherical-harmonics-nerf.md) which focuses on lighting decomposition, and [Non-Photorealistic Style Editing](16597-non-photorealistic-style-editing.md) which focuses on post-hoc style transfer, by natively synthesizing the stylized appearance during the 3D reconstruction process using mutual learning between the 3D field and a 2D stylization network [S1].
++
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A dataset of unbounded images (e.g., faces), camera poses, and a target style image.
+-*   **Outputs:** A synthesized 3D-aware generator that produces stylized images from arbitrary viewpoints.
++*   **Inputs:** Latent codes sampled from a standard Gaussian distribution; camera parameters (position, orientation, intrinsics).
++*   **Outputs:** RGB images of the synthesized 3D object from arbitrary viewpoints.
+ 
+ **Data Structures:**
+-The model consists of two main components: a **Mapping Network** and a **Synthesis Network** (backed by NeRF++).
++The architecture consists of three main components:
++1.  **Mapping Network:** Processes input latent codes.
++2.  **Synthesis Network:** A NeRF++ variant that renders the scene.
++    *   **Foreground NeRF:** Encoded within a unit sphere.
++    *   **Background NeRF:** Uses inverted sphere parameterization for unbounded backgrounds.
++    *   **Style-Conditioned Blocks:** Interleaved within the density and color prediction MLPs.
++3.  **Discriminator:** Standard StyleGAN2 discriminator for adversarial training.
+ 
+-1.  **Mapping Network:**
+-    *   Input: Latent code $\mathbf{z}$ sampled from a standard Gaussian distribution $\mathcal{N}(0, I)$.
+-    *   Structure: 8 fully connected layers [S2, unofficial].
+-    *   Output: Style vectors $\mathbf{w}$ of dimension 512 [S2, unofficial].
+-
+-2.  **Synthesis Network (NeRF++ Backbone):**
+-    *   **Foreground Field:** A Multi-Layer Perceptron (MLP) with 256 hidden units [S2, unofficial]. Predicts volume density $\sigma$ for points within a unit sphere.
+-    *   **Background Field:** An MLP with 128 hidden units [S2, unofficial]. Predicts volume density $\sigma$ for points outside the unit sphere using inverted sphere parameterization.
+-    *   **Color Prediction:** A shared MLP predicts color $\mathbf{c}$.
+-    *   **Positional Encoding:** Fourier features are used for position $\mathbf{x}$ and view direction $\mathbf{d}$. The dimension $L$ is set to 10 [S2, unofficial].
+-    *   **Style-Conditioned Blocks:** Inserted into the density prediction MLPs. Each block consists of:
+-        *   An affine transformation layer that modulates the style vectors.
+-        *   A $1 \times 1$ Convolution layer.
+-        *   **Modulation:** Convolution weights are modulated by the affine-transformed styles.
+-        *   **Demodulation:** Weights are demodulated for computation to stabilize training [S2, unofficial].
+-        *   **Activation:** Leaky ReLU is used [S2, unofficial].
+-    *   **2D Aggregation:** After the style-conditioned blocks, feature maps undergo 2D aggregation. Feature sizes decrease progressively from 512 (for $32 \times 32$ resolution) down to 32 (for $1024 \times 1024$ resolution) [S2, unofficial].
+-
+-**Training Procedure:**
+-The method employs a mutual learning strategy to optimize both the stylized NeRF and the 2D stylization network [S1].
+-
+-1.  **Latent Sampling:** Sample $\mathbf{z} \sim \mathcal{N}(0, I)$.
+-2.  **Style Generation:** Pass $\mathbf{z}$ through the Mapping Network to get $\mathbf{w}$.
+-3.  **Volume Rendering:**
+-    *   For each pixel, cast a ray.
+-    *   Sample points along the ray.
+-    *   Encode positions with Fourier features ($L=10$) [S2, unofficial].
+-    *   Pass encoded positions and $\mathbf{w}$ through the Style-Conditioned Blocks in the Foreground/Background MLPs to get $\sigma$.
+-    *   Pass encoded positions and view directions through the shared Color MLP to get $\mathbf{c}$.
+-    *   Render the image using standard volumetric rendering (compositing $\alpha$ and $\mathbf{c}$ with transmittance $T$).
+-4.  **Stylization:** Pass the rendered image through a 2D stylization network.
+-5.  **Loss Calculation:**
+-    *   Compute a NeRF path regularization loss to enforce 3D consistency [S2, unofficial].
+-    *   Compute a non-saturating GAN objective with R1 regularization [S2, unofficial].
+-    *   Compute style and content losses against the target style image.
+-6.  **Optimization:** Update both the NeRF parameters and the 2D stylization network parameters jointly [S1].
++**Numbered Steps:**
++1.  **Latent Code Generation:** Sample a latent vector $z$ from a standard Gaussian distribution $\mathcal{N}(0, I)$.
++2.  **Mapping:** Pass $z$ through the Mapping Network to produce a style vector $w$. This vector is broadcast to all style-conditioned blocks in the synthesis network [S2, unofficial].
++3.  **Ray Sampling:** For a given camera ray, sample points $\mathbf{x}_i$ along the ray.
++4.  **Density Prediction:**
++    *   The foreground MLP predicts density $\sigma_f$ for points inside the unit sphere.
++    *   The background MLP predicts density $\sigma_b$ for points outside. The background MLP has fewer parameters than the foreground MLP [S2, unofficial].
++    *   Total density $\sigma(\mathbf{x})$ is determined by the spatial location relative to the sphere boundary.
++5.  **Color Prediction with Style Modulation:**
++    *   A shared MLP predicts base color features.
++    *   Each **Style-Conditioned Block** applies the style vector $w$ to the features.
++    *   The block consists of an affine transformation layer and a $1 \times 1$ Convolution layer (Conv) [S2, unofficial].
++    *   The Conv weights $W$ are modulated by the affine-transformed style $s$ and demodulated for computation:
++        $$ W' = \frac{s \cdot W}{\sqrt{\sum W^2 + \epsilon}} $$
++    *   Leaky ReLU is used as the activation function [S2, unofficial].
++6.  **Volume Rendering:** Render the final color $\hat{C}(r)$ using standard volumetric rendering with transmittance $T_i$ and opacity $\alpha_i$:
++    $$ \hat{C}(r) = \sum_{i=1}^{N} T_i \alpha_i C_i $$
++7.  **Mutual Learning Optimization:**
++    *   Optimize the Stylized NeRF and a 2D stylization network simultaneously [S1].
++    *   Use learnable latent codes to handle ambiguities in 2D stylized results, ensuring 3D geometry consistency [S1].
++    *   Apply a NeRF path regularization loss to enforce 3D consistency [S2, unofficial].
++    *   Use a non-saturating GAN objective with R1 regularization [S2, unofficial].
+ 
+ **Parameters:**
+-*   **Mapping Network:** 8 fully connected layers, learning rate $100\times$ lower than default [S2, unofficial].
+-*   **Latent/Style Dimensions:** 512 [S2, unofficial].
+-*   **Foreground MLP Hidden Units:** 256 [S2, unofficial].
+-*   **Background MLP Hidden Units:** 128 [S2, unofficial].
+-*   **Fourier Feature Dimension ($L$):** 10 [S2, unofficial].
+ *   **Input Resolution:** Fixed at $32^2$ for all experiments [S2, unofficial].
+-*   **Batch Size:** 64 [S2, unofficial].
+-*   **Progressive Training:** Uses progressive growing of the generator and discriminator, similar to StyleGAN2 [S2, unofficial].
++*   **Batch Size:** 64 images per batch [S2, unofficial].
++*   **Training Steps:** $T_1 = 500k$, $T_2 = 5000k$, $T_3 = 25000k$ images (used for progressive training/stages) [S2, unofficial].
++*   **Target Resolution:** Evaluated at $256^2$ [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **GPU Memory:** High-resolution training requires significant memory. The method uses a minibatch size of 64 and trains on 8 GPUs [S2, unofficial].
+-*   **Small Datasets:** If the dataset is too small (e.g., fewer than 70k images), stability issues may arise, requiring fine-tuning from a pretrained model (e.g., on FFHQ) [S2, unofficial].
+-*   **3D Consistency:** Without the NeRF path regularization, the generator may produce 3D inconsistent artifacts where shape and appearance change constantly as the camera moves [S2, unofficial].
++*   **Small Datasets:** Training on small datasets (e.g., CelebFaces) is unstable; fine-tuning from a pretrained model (e.g., FFHQ) is required [S2, unofficial].
++*   **3D Consistency:** Without proper regularization, the model may produce 3D inconsistent artifacts where shape and appearance change constantly as the camera moves [S2, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Physical Imaging Model with Spherical Harmonics](16376-physical-imaging-model-with-spherical-harmonics.md)
+-This method integrates a physically constrained imaging model into the NeRF optimization loop to decompose illumination into direct sunlight and ambient skylight, using spherical harmonics to model the latter. It differs from standard NeRF by explicitly separating albedo, surface normals, and lighting to provide auxiliary supervision, thereby reducing lighting ambiguity and improving reconstruction fidelity in shadowed or radiometrically inconsistent regions.
+-
+-### [StyleRF-VolVis](16573-stylerf-volvis.md)
+-StyleRF-VolVis is a framework for editing the style (appearance) of a DVR scene represented by a NeRF model without losing original content (geometry) information. It supports both photorealistic (PSE) and non-photorealistic (NPSE) editing in a single pipeline by separating content and appearance, allowing explicit assignment of different styles to different DVR regions via a Palette Color Network (PCN) and an Unrestricted Color Network (UCN), while preserving view-dependent lighting. It differs from prior works by supporting both photorealistic and non-photorealistic editing in a single framework, whereas others focus on one or the other.
+-
+-### [Non-Photorealistic Style Editing](16597-non-photorealistic-style-editing.md)
+-Non-Photorealistic Style Editing (NPSE) is a style transfer process for volume rendering that assigns specific styles to distinct regions of a scene using an unrestricted color network and Nearest Neighbor Feature Matching (NNFM) loss. Unlike StylizedNeRF which assigns one style to the whole scene, NPSE allows explicit assignment of different styles to different DVR regions. Unlike ARF and StylizedNeRF which discard view directions to ensure consistency, NPSE removes view direction input only in the Unrestricted Color Network (UCN) optimization to preserve lighting while ensuring consistency.
++### StyleNeRF Architecture
++This variant refers to the specific architectural configuration described in [S2, unofficial]. It uses a NeRF++ backbone (foreground unit sphere + background inverted sphere) combined with StyleGAN2-style style-conditioned blocks. It differs from standard NeRF by introducing low-dimensional appearance codes and style-based MLPs, setting it apart from siblings like StylizedNeRF which may use different stylization mechanisms [14882-stylizednerf.md].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is computationally intensive. Default training involves 25,000k images (iterations) with a minibatch size of 64, taking approximately three days on 8 Tesla V100 GPUs [S2, unofficial].
+-*   **Memory Complexity:** High. The use of NeRF++ with foreground and background fields, combined with high-resolution feature maps (up to $1024 \times 1024$), requires significant VRAM. The method relies on 8 GPUs to manage this load [S2, unofficial].
+-*   **Performance:** Achieves high-quality, 3D-consistent stylized images at resolutions up to $1024 \times 1024$ (via progressive growing) [S2, unofficial]. It outperforms baselines like HoloGAN, GARF, and $\pi$-GAN in geometric correctness and avoids the 3D inconsistency artifacts seen in GIRAFFE [S2, unofficial].
+-*   **Strengths:** High resolution, 3D consistency, ability to handle unbounded backgrounds via NeRF++ [S2, unofficial].
+-*   **Limitations:** Requires large datasets for stable training; small datasets require fine-tuning from pretrained models [S2, unofficial]. Computationally expensive due to GAN training and high-resolution rendering.
+-*   **When to use:** When high-fidelity, globally stylized 3D content is required with strict geometric consistency.
+-*   **When not to use:** When computational resources are limited, or when region-specific style editing is needed (use [Non-Photorealistic Style Editing](16597-non-photorealistic-style-editing.md) instead).
++*   **Time and Memory Complexity:** The method uses a NeRF++ backbone which is more complex than standard NeRF due to the separate background and foreground networks. The integration of StyleGAN2-style synthesis networks increases memory usage compared to baseline NeRF.
++*   **Measured Performance:** On datasets like FFHQ, AFHQ, and CompCars, StyleNeRF achieves high quality and 3D consistency at $256^2$ resolution, outperforming baselines like HoloGAN, GARF, and $\pi$-GAN which fail to learn geometry correctly [S2, unofficial].
++*   **Strengths:** High-resolution synthesis, 3D consistency, ability to handle unbounded backgrounds.
++*   **Limitations:** Requires large datasets or fine-tuning from pretrained models for stability; computationally expensive due to GAN training and NeRF++ structure.
++*   **When to use:** When high-resolution, 3D-consistent, stylized image synthesis is required.
++*   **When not to use:** When working with very small datasets without pretrained weights, or when computational resources are limited.
+ 
+ ## Background
+-StylizedNeRF (StyleNeRF) was introduced in the paper "StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis" [S2, unofficial]. It builds upon the StyleGAN2 architecture [S2, unofficial] and the NeRF++ framework [S2, unofficial]. The method was developed to address the limitations of previous 3D-aware generators that failed to maintain geometric consistency during style transfer [S2, unofficial]. It is cited in surveys on 3D editing based on NeRF and 3DGS [S1].
++StylizedNeRF (StyleNeRF) was introduced in the paper "StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis" [S2, unofficial]. It builds on the NeRF++ architecture [S2, unofficial] and StyleGAN2 [S2, unofficial] to address the limitations of previous 3D-aware generative models that suffered from 3D inconsistency or low resolution. The method was developed to enable high-fidelity 3D object synthesis with style control.
+ 
+ ## Sources

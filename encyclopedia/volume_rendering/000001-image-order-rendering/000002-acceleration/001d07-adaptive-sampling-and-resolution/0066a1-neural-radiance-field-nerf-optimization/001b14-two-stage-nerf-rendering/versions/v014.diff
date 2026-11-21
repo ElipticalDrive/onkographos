@@ -1,0 +1,287 @@
+--- v013.md
++++ v014.md
+@@ -4,95 +4,175 @@
+ 
+ ## Overview
+-Two-stage NeRF Rendering is a hierarchical sampling technique for Neural Radiance Fields that decouples density estimation from detailed color rendering to improve computational efficiency and image quality [S1][S2, unofficial][S3]. It solves the problem of uniform sampling wasting queries on empty space or low-detail regions by first using a coarse pass to estimate the scene's density distribution, then using that distribution to importance-sample a fine pass [S2, unofficial][S3]. It sets itself apart from single-stage methods by explicitly separating the rough density estimation from the detailed color/density evaluation, and from simple uniform sampling by concentrating computational effort on high-density regions identified in the first pass [S2, unofficial][S3].
++Two-stage NeRF Rendering is a hierarchical volume rendering technique that decouples density estimation from detailed color and density evaluation to improve sampling efficiency and image quality [S1][S2, S3, unofficial]. It solves the problem of uniform sampling wasting queries on empty space or low-detail regions by first performing a coarse pass to estimate the scene's density distribution, then using that distribution to importance-sample a fine pass [S2, S3, unofficial]. It sets itself apart from single-stage methods by explicitly separating the rough density estimation from the detailed evaluation, and from simple stratified sampling by concentrating computational effort on high-density regions identified in the first pass [S2, S3, unofficial].
+ 
+ ## How it works
+-The method operates in two distinct phases: a coarse sampling phase to build a probability distribution over the ray, and a fine sampling phase to render the final pixel color using samples drawn from that distribution.
+-
+-### Inputs and Outputs
+-*   **Inputs:** Ray bundle $r$ (origin $o$, direction $d$), near/far bounds $[t_n, t_f]$, coarse network $N_c$, fine network $N_f$.
+-*   **Outputs:** Rendered color $C(r)$, depth $D(r)$, accumulated transmittance $T(t)$.
++The method executes two distinct rendering passes per ray bundle. The inputs are the camera parameters (position, orientation, intrinsics) defining a ray bundle, and the trained neural network parameters (coarse and fine networks). The outputs are the rendered RGB images, depth maps, and auxiliary losses for training.
+ 
+ ### Data Structures
+-*   **Ray Samples:** A list of 3D points $t_i$ along the ray and their corresponding density $\sigma_i$ and color $c_i$ returned by the networks.
+-*   **Weights:** A list of importance weights $w_i$ derived from the coarse density estimates, used to guide the placement of fine samples.
+-
+-### Steps
++*   **Ray Bundle:** A list or tensor of rays, each defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   **Coarse Network:** A neural network (MLP or Hash Grid-based) predicting density $\sigma_c$ and color $\mathbf{c}_c$.
++*   **Fine Network:** A neural network predicting density $\sigma_f$ and color $\mathbf{c}_f$.
++*   **Samples:** A list of 3D points $\mathbf{x}_i$ along each ray, parameterized by distance $t_i$ from the camera origin.
++
++### Numbered Steps
+ 
+ 1.  **Coarse Sampling:**
+-    *   Sample $N_c$ points uniformly or with single jitter along the ray interval $[t_n, t_f]$ [S2, unofficial].
+-    *   Query the coarse network $N_c$ at these points to obtain densities $\sigma_c$ and colors $c_c$ [S1].
+-    *   Compute the accumulated transmittance $T(t_i)$ and weights $w_i$ for the coarse samples:
+-        $$ T(t_i) = \exp\left(-\sum_{j=1}^{i-1} \sigma_c(t_j) \Delta t_j\right) $$
+-        $$ w_i = T(t_i) (1 - \exp(-\sigma_c(t_i) \Delta t_i)) $$
+-    *   Normalize the weights to form a probability distribution $p_i = w_i / \sum w_j$ [S3].
+-
+-2.  **Fine Sampling:**
+-    *   Sample $N_f$ points from the distribution defined by $p_i$ [S3]. This is typically done via stratified sampling or inverse transform sampling based on the cumulative distribution function (CDF) of the coarse weights [S2, unofficial].
+-    *   Query the fine network $N_f$ at these new points to obtain densities $\sigma_f$ and colors $c_f$ [S1].
+-
+-3.  **Rendering:**
+-    *   Combine the coarse and fine samples (or use only fine samples, depending on the specific variant) to compute the final volume integral:
+-        $$ C(r) = \sum_{i=1}^{N} w_i c_i $$
+-        where $w_i$ are the final importance weights derived from the combined density estimates [S1, S3].
++    For each ray, generate $N_c$ sample points. The original NeRF implementation uses stratified sampling [S1]. The number of coarse samples $N_c$ is typically 64 [S1, S6].
++    *   *Note:* Some variants use a "Proposal Network" to generate these samples based on learned density priors rather than uniform stratification [S3, unofficial].
++
++2.  **Coarse Rendering:**
++    Query the Coarse Network at each sample point $\mathbf{x}_i$ to obtain density $\sigma_c(\mathbf{x}_i)$ and color $\mathbf{c}_c(\mathbf{x}_i)$.
++    Compute the transmittance $T_i$ and weight $w_i$ for each sample:
++    $$
++    \sigma_i = \max(\sigma_c(\mathbf{x}_i), \epsilon)
++    $$
++    $$
++    \alpha_i = 1 - \exp(-\sigma_i \Delta t_i)
++    $$
++    $$
++    T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \Delta t_j\right)
++    $$
++    $$
++    w_i = T_i \alpha_i
++    $$
++    where $\Delta t_i$ is the distance between adjacent samples.
++    Compute the coarse color $\mathbf{C}_c$ and coarse depth $D_c$:
++    $$
++    \mathbf{C}_c = \sum_{i=1}^{N_c} w_i \mathbf{c}_c(\mathbf{x}_i)
++    $$
++    $$
++    D_c = \sum_{i=1}^{N_c} w_i t_i
++    $$
++
++3.  **Fine Sampling (Importance Sampling):**
++    Use the weights $w_i$ from the coarse pass to sample $N_f$ points for the fine pass. The original method uses stratified sampling within the bins defined by the coarse samples [S1].
++    *   *Note:* In Proposal Network variants, the fine samples are drawn directly from the proposal distribution learned by the network [S3, unofficial].
++    The number of fine samples $N_f$ is typically 128 additional samples, resulting in a total of 192 fine samples per ray (64 initial + 128 additional) [S1].
++
++4.  **Fine Rendering:**
++    Query the Fine Network at each fine sample point $\mathbf{x}_j$ to obtain density $\sigma_f(\mathbf{x}_j)$ and color $\mathbf{c}_f(\mathbf{x}_j)$.
++    Compute the final transmittance $T_j$ and weight $w_j$:
++    $$
++    \sigma_j = \max(\sigma_f(\mathbf{x}_j), \epsilon)
++    $$
++    $$
++    \alpha_j = 1 - \exp(-\sigma_j \Delta t_j)
++    $$
++    $$
++    T_j = \exp\left(-\sum_{k=1}^{j-1} \sigma_k \Delta t_k\right)
++    $$
++    $$
++    w_j = T_j \alpha_j
++    $$
++    Compute the final color $\mathbf{C}$ and depth $D$:
++    $$
++    \mathbf{C} = \sum_{j=1}^{N_f} w_j \mathbf{c}_f(\mathbf{x}_j)
++    $$
++    $$
++    D = \sum_{j=1}^{N_f} w_j t_j
++    $$
++
++5.  **Background Handling (Optional):**
++    If the scene has a background, an outer volume is rendered. Rays that do not intersect the foreground volume are sampled using a stratified sampler over the background volume [S2, unofficial].
+ 
+ ### Parameters
+-*   **Coarse samples per ray ($N_c$):** Typically 64 [S1].
+-*   **Fine samples per ray ($N_f$):** Typically 128 additional samples, resulting in 192 total fine samples (64 initial + 128 additional) [S1].
+-*   **Total samples per ray:** 256 (64 coarse + 192 fine) [S1].
+-*   **Initial Sampler:** Can be 'uniform' with single jitter or 'piecewise' [S2, unofficial].
+-*   **Update Schedule:** Determines how often proposal networks are updated during training [S2, unofficial].
++*   $N_c$: Number of coarse samples per ray. Typical value: 64 [S1, S6].
++*   $N_f$: Number of fine samples per ray. Typical value: 192 (64 + 128) [S1].
++*   $\epsilon$: Minimum density value to prevent division by zero or numerical instability. Not given in the sources.
++*   $channel\_scale$: Multiplier for output channels (e.g., 255.0 for 8-bit images) [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Floating-point precision in transmittance calculation can lead to underflow in long rays with high density, causing artifacts [G].
+-*   **Boundaries:** Incorrect handling of near/far plane clipping can result in samples outside the valid range [G].
+-*   **Degenerate Input:** If the coarse network predicts zero density everywhere, the importance sampling distribution becomes uniform, negating the efficiency gain [G].
++*   **Empty Space:** If a ray passes through empty space, the coarse pass may assign low weights to all samples. The fine pass, relying on these weights, may also undersample, leading to noise. Proposal networks mitigate this by learning to allocate samples to empty space if necessary [S3, unofficial].
++*   **Precision:** The exponential decay in transmittance can lead to underflow for deep scenes. Using log-space computations or clamping $\sigma$ is recommended [G].
++*   **Degenerate Input:** If the ray direction is zero or the origin is undefined, the sampling process fails. Guard against this by validating ray inputs [G].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def two_stage_render(ray_origin, ray_direction, t_near, t_far, coarse_net, fine_net):
+-    # Step 1: Coarse Sampling
+-    # Sample N_c points uniformly with single jitter
+-    N_c = 64
+-    coarse_t = uniform_sample_with_jitter(N_c, t_near, t_far)
++import numpy as np
++
++def render_two_stage(rays, coarse_model, fine_model, n_coarse=64, n_fine=192, epsilon=1e-4):
++    """
++    Render a batch of rays using two-stage NeRF rendering.
+     
+-    # Query coarse network
+-    coarse_sigma, coarse_color = coarse_net(ray_origin, ray_direction, coarse_t)
++    Args:
++        rays: List of Ray objects, each with origin (3,) and direction (3,).
++        coarse_model: Function or object that returns (sigma, color) given points.
++        fine_model: Function or object that returns (sigma, color) given points.
++        n_coarse: Number of samples for the coarse pass.
++        n_fine: Number of samples for the fine pass.
++        epsilon: Minimum density value.
++        
++    Returns:
++        colors: Rendered RGB images.
++        depths: Rendered depth maps.
++    """
++    colors = []
++    depths = []
+     
+-    # Compute coarse weights for importance sampling
+-    # Delta t is the distance between samples
+-    delta_t = np.diff(coarse_t, prepend=t_near, append=t_far)
+-    # Transmittance T(t_i) = exp(-sum_{j<i} sigma_j * delta_t_j)
+-    alpha = 1 - np.exp(-coarse_sigma * delta_t)
+-    T = np.exp(-np.cumsum(coarse_sigma * delta_t))
+-    # Weights w_i = T(t_i) * (1 - exp(-sigma_i * delta_t_i))
+-    coarse_weights = T * alpha
+-    
+-    # Normalize weights to get probability distribution
+-    p = coarse_weights / np.sum(coarse_weights)
+-    
+-    # Step 2: Fine Sampling
+-    # Sample N_f points from the coarse distribution
+-    N_f = 128
+-    fine_t = sample_from_distribution(p, N_f, t_near, t_far)
+-    
+-    # Query fine network
+-    fine_sigma, fine_color = fine_net(ray_origin, ray_direction, fine_t)
+-    
+-    # Step 3: Rendering
+-    # Compute final weights for fine samples
+-    # Note: In some implementations, coarse and fine samples are combined.
+-    # Here we assume standard hierarchical rendering using fine samples only for final color,
+-    # or combining them as per the specific variant.
+-    # For simplicity, we use the fine samples' own density for final integration.
+-    fine_delta_t = np.diff(fine_t, prepend=t_near, append=t_far)
+-    fine_alpha = 1 - np.exp(-fine_sigma * fine_delta_t)
+-    fine_T = np.exp(-np.cumsum(fine_sigma * fine_delta_t))
+-    fine_weights = fine_T * fine_alpha
+-    
+-    # Final color
+-    color = np.sum(fine_weights * fine_color)
+-    
+-    return color
++    for ray in rays:
++        # Step 1: Coarse Sampling
++        # Generate n_coarse points along the ray
++        t_coarse = np.linspace(ray.t_min, ray.t_max, n_coarse + 1)
++        t_coarse_mid = (t_coarse[:-1] + t_coarse[1:]) / 2
++        points_coarse = ray.origin + ray.direction * t_coarse_mid[:, np.newaxis]
++        
++        # Step 2: Coarse Rendering
++        sigma_coarse, color_coarse = coarse_model(points_coarse)
++        sigma_coarse = np.maximum(sigma_coarse, epsilon)
++        
++        # Compute weights
++        delta_t = t_coarse[1] - t_coarse[0]
++        alpha_coarse = 1.0 - np.exp(-sigma_coarse * delta_t)
++        T_coarse = np.exp(-np.cumsum(sigma_coarse * delta_t) + sigma_coarse * delta_t)
++        T_coarse = np.concatenate(([1.0], T_coarse[:-1]))
++        weights_coarse = T_coarse * alpha_coarse
++        
++        # Compute coarse color and depth
++        color_c = np.sum(weights_coarse[:, np.newaxis] * color_coarse, axis=0)
++        depth_c = np.sum(weights_coarse * t_coarse_mid, axis=0)
++        
++        # Step 3: Fine Sampling (Importance Sampling)
++        # Sample n_fine points based on coarse weights
++        # Using stratified sampling within the bins defined by coarse samples
++        indices = np.random.choice(n_coarse, size=n_fine, p=weights_coarse / np.sum(weights_coarse))
++        # Add jitter within each bin
++        t_fine = np.zeros(n_fine)
++        for i in range(n_fine):
++            idx = indices[i]
++            t_min_bin = t_coarse[idx]
++            t_max_bin = t_coarse[idx + 1]
++            t_fine[i] = np.random.uniform(t_min_bin, t_max_bin)
++        
++        points_fine = ray.origin + ray.direction * t_fine[:, np.newaxis]
++        
++        # Step 4: Fine Rendering
++        sigma_fine, color_fine = fine_model(points_fine)
++        sigma_fine = np.maximum(sigma_fine, epsilon)
++        
++        # Compute weights
++        # Sort points by distance to ensure correct transmittance calculation
++        sort_idx = np.argsort(t_fine)
++        t_fine_sorted = t_fine[sort_idx]
++        sigma_fine_sorted = sigma_fine[sort_idx]
++        color_fine_sorted = color_fine[sort_idx]
++        
++        delta_t_fine = np.diff(np.concatenate(([ray.t_min], t_fine_sorted, [ray.t_max])))
++        # Approximate delta_t as constant for simplicity, or use actual differences
++        delta_t_fine = np.mean(delta_t_fine)
++        
++        alpha_fine = 1.0 - np.exp(-sigma_fine_sorted * delta_t_fine)
++        T_fine = np.exp(-np.cumsum(sigma_fine_sorted * delta_t_fine) + sigma_fine_sorted * delta_t_fine)
++        T_fine = np.concatenate(([1.0], T_fine[:-1]))
++        weights_fine = T_fine * alpha_fine
++        
++        # Compute final color and depth
++        color = np.sum(weights_fine[:, np.newaxis] * color_fine_sorted, axis=0)
++        depth = np.sum(weights_fine * t_fine_sorted, axis=0)
++        
++        colors.append(color)
++        depths.append(depth)
++        
++    return np.array(colors), np.array(depths)
+ ```
+ 
+@@ -112,20 +192,22 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_c + N_f)$ network queries per ray, where $N_c$ and $N_f$ are the number of coarse and fine samples.
+-*   **Memory Complexity:** $O(N_c + N_f)$ to store intermediate densities and colors.
++*   **Time Complexity:** $O(N \cdot (N_c + N_f))$ where $N$ is the number of rays, $N_c$ is coarse samples, and $N_f$ is fine samples. The original NeRF implementation requires 256 network queries per ray (64 coarse + 192 fine) [S1].
++*   **Memory Complexity:** $O(N \cdot (N_c + N_f))$ to store intermediate densities and colors for backpropagation.
+ *   **Measured Performance:** On an NVIDIA V100, rendering a realistic synthetic dataset (640k rays/image) or real scenes (762k rays/image) takes approximately 30 seconds per frame, resulting in 150-200 million network queries per image [S1].
+-*   **Strengths:** Significantly reduces the number of network queries required for high-quality images by focusing computation on relevant regions [S1, S3].
+-*   **Limitations:** Requires training two networks (coarse and fine) or a multi-stage proposal system, increasing training complexity [S2, unofficial][S3].
+-*   **When to Use:** When rendering high-quality novel views from a trained NeRF is required, and computational resources are limited [S1].
+-*   **When Not to Use:** For real-time applications where the overhead of two-stage sampling is prohibitive, or for scenes with uniform density where uniform sampling is sufficient [S5, S6].
++*   **Scaling:** Performance scales linearly with the number of rays and samples. Proposals networks can reduce the effective number of samples needed by focusing on high-density regions [S3, unofficial].
++*   **Strengths:** Improved image quality compared to uniform sampling; reduced computational cost by avoiding unnecessary queries in empty space.
++*   **Limitations:** Requires training two networks (coarse and fine); increased memory usage due to storing intermediate values for both passes.
++*   **When to Use:** When high-quality novel view synthesis is required and computational resources allow for two passes per ray.
++*   **When Not to Use:** When real-time performance is critical and the scene is simple enough that uniform sampling suffices.
+ 
+ ## Background
+-Two-stage NeRF Rendering was introduced in the original NeRF paper by Mildenhall et al. in 2020 [S1]. It was developed to address the inefficiency of uniform sampling in neural radiance fields, which often wastes queries on empty space. The method has since become a standard component in many NeRF variants, including those using proposal networks [S2, unofficial][S3] and semantic guidance [S1].
++Two-stage NeRF Rendering was introduced in the original NeRF paper by Mildenhall et al. in 2020 [S1]. It was designed to address the inefficiency of uniform sampling in neural radiance fields. The method has since been extended with proposal networks [S3, unofficial] and combined with occupancy grids [S1] to further improve efficiency. It is widely used in modern NeRF implementations and variants [S2, unofficial][S4, S6, S7].
+ 
+ ## Sources
+ [S1] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27
+-[S2] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+-[S3] PlaNeRF: SVD Unsupervised 3D Plane Regularization for NeRF Large-Scale Urban Scene Reconstruction, https://doi.org/10.1109/3dv62453.2024.00114, fetched 2026-11-04
+-[S4] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)
+-[S5] HeadNeRF: A Realtime NeRF-based Parametric Head Model, https://doi.org/10.1109/cvpr52688.2022.01973, fetched 2026-10-26
+-[S6] NeRF Synthesis with Shading Guidance, https://link.springer.com/chapter/10.1007/978-981-99-9666-7_16, fetched 2026-10-26+[S2] gsgen3d/gsgen, https://github.com/gsgen3d/gsgen, fetched 2026-10-27 (unofficial)
++[S3] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
++[S4] PlaNeRF: SVD Unsupervised 3D Plane Regularization for NeRF Large-Scale Urban Scene Reconstruction, https://doi.org/10.1109/3dv62453.2024.00114, fetched 2026-11-04
++[S5] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)
++[S6] HeadNeRF: A Realtime NeRF-based Parametric Head Model, https://doi.org/10.1109/cvpr52688.2022.01973, fetched 2026-10-26
++[S7] NeRF Synthesis with Shading Guidance, https://link.springer.com/chapter/10.1007/978-981-99-9666-7_16, fetched 2026-10-26

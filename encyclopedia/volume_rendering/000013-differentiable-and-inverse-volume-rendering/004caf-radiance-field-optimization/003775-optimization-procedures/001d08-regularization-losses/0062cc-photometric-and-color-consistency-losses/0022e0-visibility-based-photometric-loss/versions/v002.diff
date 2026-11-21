@@ -1,0 +1,205 @@
+--- v001.md
++++ v002.md
+@@ -4,28 +4,23 @@
+ 
+ ## Overview
+-Visibility-Based Photometric Loss restricts the photometric error computation to pixels that are geometrically consistent across views, thereby excluding occluded regions and transient objects from the optimization signal. It differs from standard photometric losses by explicitly filtering out pixels where reprojection depth disagrees with rendered depth, preventing the model from fitting to non-static geometry or occlusion boundaries.
++Visibility-Based Photometric Loss computes photometric error only on pixels identified as visible across source and target views [S1]. It differs from standard photometric losses by filtering out pixels where the squared difference between reprojected source depth and directly rendered target depth exceeds a threshold, preventing the model from fitting to occluded or transient geometry [S1, S2].
+ 
+ ## How it works
+-The method computes a photometric error (typically L1) only on pixels identified as "visible" in both the source and target views. Visibility is determined by comparing the depth of a pixel reprojected from a source view into the target view against the directly rendered depth of that target view.
++The method restricts the photometric error computation to pixels that are geometrically consistent across views [S1]. Visibility is determined by comparing the depth of a pixel reprojected from a source view into the target view against the directly rendered depth of that target view [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   Source view color image $I_s$ and depth map $D_s$.
+-    *   Target view color image $I_t$ and rendered depth map $D_t$.
+-    *   Camera poses for source and target views.
+-    *   Intrinsic camera parameters.
+-*   **Outputs:**
+-    *   Scalar loss value $L_{photo}$.
++*   **Inputs:** Source view color image $I_s$ and depth map $D_s$ [S1]. Target view color image $I_t$ and rendered depth map $D_t$ [S1]. Camera poses for source and target views [S1]. Intrinsic camera parameters [G].
++*   **Outputs:** Scalar loss value $L_{photo}$ [S1].
+ 
+ ### Data Structures
+-*   **Visibility Mask ($M_v$):** A 2D tensor of shape $(H, W)$ with values in $\{0, 1\}$ (or continuous weights in variants). $1$ indicates a visible pixel, $0$ indicates occluded or transient.
+-*   **Reprojected Depth ($D_{reproj}$):** A 2D tensor of shape $(H, W)$ containing the depth of the source view pixel projected into the target view coordinate system.
++*   **Visibility Mask ($M_v$):** A 2D tensor of shape $(H, W)$ with values in $\{0, 1\}$ [S1]. $1$ indicates a visible pixel, $0$ indicates occluded or transient [S1].
++*   **Reprojected Depth ($D_{reproj}$):** A 2D tensor of shape $(H, W)$ containing the depth of the source view pixel projected into the target view coordinate system [S1].
+ 
+ ### Steps
+-1.  **Reproject Depth:** For each pixel $(u, v)$ in the target view, project the corresponding 3D point from the source view using the source camera intrinsics, the source-to-target transformation, and the target camera intrinsics. Retrieve the depth value $D_{reproj}(u, v)$ from the source depth map $D_s$ at the projected coordinates.
+-2.  **Retrieve Rendered Depth:** Obtain the directly rendered depth $D_t(u, v)$ for the target view at pixel $(u, v)$.
+-3.  **Compute Depth Difference:** Calculate the squared difference $\Delta d^2 = (D_{reproj}(u, v) - D_t(u, v))^2$.
+-4.  **Determine Visibility:** Mark pixel $(u, v)$ as visible if $\Delta d^2 < \tau$, where $\tau$ is a threshold. The sources specify $\tau = 0.001$ [S1].
+-5.  **Compute Photometric Loss:** Calculate the L1 loss between the source color $I_s$ (warped to target view) and target color $I_t$ only for pixels where the visibility mask is true.
++1.  Compute reprojected depth from source view to target view [S1].
++2.  Compute directly rendered depth of target view [S1].
++3.  Calculate difference $\Delta d$ between reprojected and rendered depth [S1].
++4.  Mark pixel as visible if $\Delta d^2 < 0.001$ [S1].
++5.  Compute photometric error only on visible pixels using L1 loss [S1].
+ 
+ ### Formula
+@@ -46,14 +41,53 @@
+ 
+ ### Parameters
+-*   **Threshold ($\tau$):** $0.001$ [S1]. This value determines the tolerance for depth inconsistency.
++*   **Threshold ($\tau$):** $0.001$ [S1]. This value determines the tolerance for depth inconsistency [G].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Depth values must be in consistent units. Small numerical errors in reprojection can lead to false occlusions if $\tau$ is too small.
+-*   **Boundaries:** Pixels near object boundaries may have ambiguous depth due to anti-aliasing or discretization, potentially causing flickering visibility masks.
+-*   **Degenerate Input:** If depth maps are missing or invalid, reprojection fails. The method assumes valid depth inputs.
++*   **Precision:** Depth values must be in consistent units; small numerical errors in reprojection can lead to false occlusions if $\tau$ is too small [G].
++*   **Boundaries:** Pixels near object boundaries may have ambiguous depth due to anti-aliasing or discretization, potentially causing flickering visibility masks [G].
++*   **Degenerate Input:** If depth maps are missing or invalid, reprojection fails [G].
+ 
+ ### Pseudocode
+ ```python
+-def visibility_based_photometric_loss(I_s, D_s, I_t, D_t, pose_s, pose_t, intrinsics, tau=0.001):
++import numpy as np
++
++def transform_points(pts, pose):
++    """Transform 3D points (H, W, 3) by 4x4 pose matrix."""
++    return pts @ pose[:3, :3].T + pose[:3, 3]
++
++def sample_depth(D, u, v):
++    """Bilinearly sample depth map D at coordinates u, v (H, W)."""
++    # Clamp coordinates to valid range
++    u = np.clip(u, 0, D.shape[1] - 1)
++    v = np.clip(v, 0, D.shape[0] - 1)
++    # Floor and ceil for bilinear interpolation
++    u0, v0 = np.floor(u).astype(int), np.floor(v).astype(int)
++    u1, v1 = u0 + 1, v0 + 1
++    # Handle boundary cases
++    u1 = np.clip(u1, 0, D.shape[1] - 1)
++    v1 = np.clip(v1, 0, D.shape[0] - 1)
++    # Interpolate
++    wa = (u1 - u)[:, :, np.newaxis]
++    wb = (v1 - v)[:, :, np.newaxis]
++    wc = (u - u0)[:, :, np.newaxis]
++    wd = (v - v0)[:, :, np.newaxis]
++    return (wa * wb * D[v0, u0] + wa * wd * D[v0, u1] + 
++            wc * wb * D[v1, u0] + wc * wd * D[v1, u1])
++
++def warp_image(I, u, v):
++    """Bilinearly warp image I (H, W, 3) to coordinates u, v."""
++    # Clamp coordinates
++    u = np.clip(u, 0, I.shape[1] - 1)
++    v = np.clip(v, 0, I.shape[0] - 1)
++    u0, v0 = np.floor(u).astype(int), np.floor(v).astype(int)
++    u1, v1 = np.clip(u0 + 1, 0, I.shape[1] - 1), np.clip(v0 + 1, 0, I.shape[0] - 1)
++    wa = (u1 - u)[:, :, np.newaxis]
++    wb = (v1 - v)[:, :, np.newaxis]
++    wc = (u - u0)[:, :, np.newaxis]
++    wd = (v - v0)[:, :, np.newaxis]
++    return (wa * wb * I[v0, u0] + wa * wd * I[v0, u1] + 
++            wc * wb * I[v1, u0] + wc * wd * I[v1, u1])
++
++def visibility_based_photometric_loss(I_s, D_s, I_t, D_t, pose_s, pose_t, K, tau=0.001):
+     """
+     Compute photometric loss only on visible pixels.
+@@ -66,5 +100,5 @@
+         pose_s: Source camera pose (4, 4)
+         pose_t: Target camera pose (4, 4)
+-        intrinsics: Camera intrinsics matrix (3, 3)
++        K: Camera intrinsics matrix (3, 3)
+         tau: Depth difference threshold (float)
+         
+@@ -75,51 +109,46 @@
+     
+     # Create grid of pixel coordinates
+-    u, v = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
++    u, v = np.meshgrid(np.arange(W), np.arange(H), indexing='ij')
+     
+-    # Convert pixel coordinates to homogeneous coordinates in target view
+-    # Assuming intrinsics are known, we can back-project to 3D in target view
+-    # However, the standard method reprojects FROM source TO target.
+-    # Step 1: Get 3D points from Source View
+-    # Back-project source pixels to 3D using D_s
+-    x_s = (u - intrinsics[0,2]) / intrinsics[0,0]
+-    y_s = (v - intrinsics[1,2]) / intrinsics[1,1]
++    # Back-project source pixels to 3D using D_s and K
++    x_s = (u - K[0, 2]) / K[0, 0]
++    y_s = (v - K[1, 2]) / K[1, 1]
+     z_s = D_s
+     
+     # 3D points in source camera frame
+-    pts_s_cam = torch.stack([x_s * z_s, y_s * z_s, z_s], dim=-1) # (H, W, 3)
++    pts_s_cam = np.stack([x_s * z_s, y_s * z_s, z_s], axis=-1)
+     
+     # Transform to world frame
+-    pts_s_world = transform_points(pts_s_cam, pose_s) # (H, W, 3)
++    pts_s_world = transform_points(pts_s_cam, pose_s)
+     
+     # Transform to target camera frame
+-    pts_t_cam = transform_points(pts_s_world, inverse(pose_t)) # (H, W, 3)
++    pts_t_cam = transform_points(pts_s_world, pose_t)
+     
+     # Project to target image plane
+-    u_reproj = (pts_t_cam[..., 0] / pts_t_cam[..., 2]) * intrinsics[0,0] + intrinsics[0,2]
+-    v_reproj = (pts_t_cam[..., 1] / pts_t_cam[..., 2]) * intrinsics[1,1] + intrinsics[1,2]
++    u_reproj = (pts_t_cam[..., 0] / pts_t_cam[..., 2]) * K[0, 0] + K[0, 2]
++    v_reproj = (pts_t_cam[..., 1] / pts_t_cam[..., 2]) * K[1, 1] + K[1, 2]
+     
+     # Sample depth from source depth map at reprojected coordinates
+-    # Note: In practice, bilinear interpolation is used for sampling
+-    D_reproj = sample_depth(D_s, u_reproj, v_reproj) # (H, W)
++    D_reproj = sample_depth(D_s, u_reproj, v_reproj)
+     
+-    # Step 3: Compute depth difference
++    # Compute depth difference
+     delta_d_sq = (D_reproj - D_t) ** 2
+     
+-    # Step 4: Determine visibility
+-    M_v = (delta_d_sq < tau).float() # (H, W)
++    # Determine visibility
++    M_v = (delta_d_sq < tau).astype(np.float32)
+     
+     # Warp source image to target view
+-    I_s_warped = warp_image(I_s, u_reproj, v_reproj) # (H, W, 3)
++    I_s_warped = warp_image(I_s, u_reproj, v_reproj)
+     
+-    # Step 5: Compute L1 loss on visible pixels
+-    diff = torch.abs(I_s_warped - I_t) # (H, W, 3)
+-    loss_per_pixel = torch.mean(diff, dim=-1) # (H, W)
++    # Compute L1 loss on visible pixels
++    diff = np.abs(I_s_warped - I_t)
++    loss_per_pixel = np.mean(diff, axis=-1)
+     
+     # Masked mean
+-    visible_sum = torch.sum(M_v)
++    visible_sum = np.sum(M_v)
+     if visible_sum > 0:
+-        L_photo = torch.sum(M_v * loss_per_pixel) / visible_sum
++        L_photo = np.sum(M_v * loss_per_pixel) / visible_sum
+     else:
+-        L_photo = torch.tensor(0.0)
++        L_photo = np.float32(0.0)
+         
+     return L_photo
+@@ -129,16 +158,16 @@
+ 
+ ### Transient Object Handling via Visibility Map
+-This variant uses a learned 2D visibility map $V_M \in \mathbb{R}^{1 \times H \times W}$ generated by a U-Net model to segment transient objects (e.g., moving people) from static geometry [S2]. Unlike the geometric reprojection method, this approach relies on appearance-based segmentation. The loss between the rendered image $I_r$ and reference image $I_{gt}$ is weighted by $V_M$ via Hadamard product ($\odot$) [S2]. To prevent the network from suppressing all pixels to minimize loss, a regularization loss $L_{vm} = L_2(V_M, 1)$ is applied, encouraging the visibility map to remain close to ones [S2]. This method is chosen when transient objects are prevalent and geometric consistency alone is insufficient to exclude them.
++This variant uses a learned 2D visibility map $V_M \in \mathbb{R}^{1 \times H \times W}$ generated by a U-Net model to segment transient objects (e.g., moving people) from static geometry [S2]. The loss between the rendered image $I_r$ and reference image $I_{gt}$ is weighted by $V_M$ via Hadamard product ($\odot$) [S2]. To prevent the network from suppressing all pixels to minimize loss, a regularization loss $L_{vm} = L_2(V_M, 1)$ is applied, encouraging the visibility map to remain close to ones [S2]. This method is chosen when transient objects are prevalent and geometric consistency alone is insufficient to exclude them [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(HW)$ per view pair for reprojection and masking. The U-Net variant adds inference time for the segmentation network.
+-*   **Memory Complexity:** $O(HW)$ for storing depth maps and visibility masks.
+-*   **Strengths:** Effectively removes artifacts from occlusions and transient objects. Improves reconstruction quality in dynamic scenes.
+-*   **Limitations:** Requires accurate depth maps for the geometric variant. The threshold $\tau$ is sensitive to noise. The U-Net variant requires additional training and memory.
+-*   **When to use:** Multi-view reconstruction with occlusions or dynamic scenes.
+-*   **When not to use:** Static scenes with no occlusions where simple photometric loss suffices.
++*   **Time Complexity:** $O(HW)$ per view pair for reprojection and masking [G]. The U-Net variant adds inference time for the segmentation network [S2].
++*   **Memory Complexity:** $O(HW)$ for storing depth maps and visibility masks [G].
++*   **Strengths:** Effectively removes artifacts from occlusions and transient objects [S1, S2]. Improves reconstruction quality in dynamic scenes [S2].
++*   **Limitations:** Requires accurate depth maps for the geometric variant [S1]. The threshold $\tau$ is sensitive to noise [G]. The U-Net variant requires additional training and memory [S2].
++*   **When to use:** Multi-view reconstruction with occlusions or dynamic scenes [S1, S2].
++*   **When not to use:** Static scenes with no occlusions where simple photometric loss suffices [G].
+ 
+ ## Background
+-The geometric visibility-based photometric loss was introduced in the context of differentiable volume rendering and signed distance function (SDF) optimization [S1]. It addresses the issue of photometric errors being computed on occluded pixels, which leads to incorrect gradient updates. The transient object handling variant was proposed for 3D Gaussian Splatting in unconstrained image collections, where moving objects cause artifacts in the reconstructed scene [S2].
++The geometric visibility-based photometric loss was introduced in the context of differentiable volume rendering and signed distance function (SDF) optimization [S1]. It addresses the issue of photometric errors being computed on occluded pixels, which leads to incorrect gradient updates [S1]. The transient object handling variant was proposed for 3D Gaussian Splatting in unconstrained image collections, where moving objects cause artifacts in the reconstructed scene [S2].
+ 
+ ## Sources

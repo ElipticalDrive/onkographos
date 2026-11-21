@@ -1,0 +1,300 @@
+--- v002.md
++++ v003.md
+@@ -4,102 +4,210 @@
+ 
+ ## Overview
+-Deformation MLP Configuration defines the architecture, initialization, and conditioning mechanisms for a Multi-Layer Perceptron (MLP) used to predict spatial or temporal deformations (delta positions) in neural volume rendering. It solves the problem of mapping canonical coordinates to deformed coordinates by configuring the MLP's weights, biases, and input processing to ensure stable optimization and effective conditioning on latent codes or external features [S1][S2, unofficial]. It is distinguished from standard MLP Neural Fields by its specific focus on deformation outputs and the integration of conditioning strategies like FiLM or concatenation to handle dynamic or multi-instance scenes [S1][S2, unofficial].
++Deformation MLP Configuration refers to the architectural setup and conditioning mechanisms used to map spatial-temporal coordinates to deformation fields (displacements) within neural volume representations. It solves the problem of representing dynamic or variable-volume data by allowing a single neural field to adapt its output based on external context (such as time, identity, or elastic ratios) rather than learning a static mapping. It is distinguished from standard MLP Neural Fields by its explicit handling of conditional inputs—either via concatenation, feature-wise modulation, or hypernetworks—to generate instance-specific deformations [S1][S2, unofficial].
+ 
+ ## How it works
++The method configures a Multi-Layer Perceptron (MLP) to predict displacement vectors ($\delta\mathbf{x}$) or transformation parameters based on input coordinates and optional conditioning codes.
++
+ ### Inputs and Outputs
+-*   **Inputs:** Spatial coordinates $\mathbf{x}$, time $t$, and optionally a latent code $\mathbf{z}$ or LiDAR features [S1, S3].
+-*   **Outputs:** Delta position $\delta\mathbf{x}$ (deformation vector) or high-dimensional feature vectors [S1, S3].
++*   **Inputs:**
++    *   Spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ (often positional encoded).
++    *   Temporal coordinate $t \in \mathbb{R}$ (often positional encoded) [S1].
++    *   Optional latent code $\mathbf{z}$ for conditioning (identity, elastic ratio, etc.) [S2, unofficial][S5].
++*   **Outputs:**
++    *   Delta position $\delta\mathbf{x} \in \mathbb{R}^3$ [S1].
++    *   Transformation parameters (e.g., scale, rotation) for Gaussian splats [S5].
+ 
+ ### Data Structures and Layout
+-The core deformation MLP typically follows a fixed architecture:
+-*   **Structure:** 8 hidden layers with 256 neurons per layer [S1].
+-*   **Input Encoding:** Positional encoding is applied to spatial coordinates $\mathbf{x}$ and time $t$ with frequencies $L_x = 10$ and $L_t = 10$ respectively [S1].
+-*   **Final Layer:** Maps the final 256 features to the delta position $\delta\mathbf{x}$ [S1].
+-
+-### Initialization Steps
+-1.  **Hidden Layers:** Initialize all weights using Xavier normal initialization [S1].
+-2.  **Biases:** Initialize all biases to zero [S1].
+-3.  **Final Layer:** Initialize weights of the final linear layer (mapping 256 features to $\delta\mathbf{x}$) from a normal distribution with standard deviation $\sigma = 10^{-5}$ [S1]. This ensures small initial deformations for stable optimization [S1].
++The standard deformation MLP configuration consists of the following structure [S1]:
++*   **Layers:** 8 fully connected linear layers.
++*   **Neurons:** 256 neurons per hidden layer.
++*   **Input Encoding:**
++    *   Spatial frequencies $L_x = 10$.
++    *   Temporal frequencies $L_t = 10$.
++    *   Input vector combines encoded $\mathbf{x}$ and $t$.
++*   **Output Layer:** Final linear layer maps 256 features to 3 dimensions (delta position).
++
++### Initialization and Parameters
++1.  **Weights:** Initialized using Xavier normal initialization [S1].
++2.  **Biases:** Initialized to zero [S1].
++3.  **Final Layer Weights:** The weights of the final linear layer (mapping 256 features to $\delta\mathbf{x}$) are initialized from a normal distribution with standard deviation $\sigma = 10^{-5}$ [S1]. This ensures small initial deformations for stable optimization.
++4.  **Learning Rate:** Typically starts at $\gamma_{MLP} = 0.0008$ and decays exponentially [S1].
+ 
+ ### Conditioning Mechanisms
+-The MLP can be conditioned via several methods to incorporate context (e.g., identity, time, or scene variations):
++Conditioning allows the MLP to represent multiple instances or dynamic states.
+ 
+ #### 1. Concatenation Conditioning
+-*   **Step:** Concatenate the latent code $\mathbf{z}$ with the input coordinates/features [S2, unofficial].
+-*   **Step:** Feed the concatenated tensor into the Neural Field decoder [S2, unofficial].
++*   **Method:** The latent code $\mathbf{z}$ is concatenated with the input coordinates/features before entering the MLP [S2, unofficial].
++*   **Pitfall:** Only the first layer directly incorporates the condition; subsequent layers operate on internal feature representations, requiring the network to propagate the condition through non-linearities [S2, unofficial].
++
++#### 2. Feature-wise Linear Modulation (FiLM) / Conditional Batch Normalization
++*   **Method:** Small neural networks $\boldsymbol{\beta_i}$ and $\boldsymbol{\gamma_i}$ predict scale and bias vectors based on the latent code $\mathbf{z}$. These are applied to the layer outputs $\mathbf{x}_i$ as [S2, unofficial]:
++    $$ \hat{\mathbf{x}}_i = L_i(\mathbf{x}) \odot \boldsymbol{\gamma_i}(\mathbf{z}) + \boldsymbol{\beta_i}(\mathbf{z}) $$
++*   **Parameter:** The size of $\boldsymbol{\gamma_i}$ and $\boldsymbol{\beta_i}$ matches the output size of layer $i$ [S2, unofficial].
++
++#### 3. HyperNetwork Conditioning
++*   **Method:** A secondary network (HyperNetwork) predicts the weights of the deformation MLP decoder from the latent code [S2, unofficial]. This creates a distinct MLP for each instance [S2, unofficial].
++
++#### 4. Spatial-Ratio Conditioning (Multi-Plane)
++*   **Method:** Uses six 2D planes to model a 4D voxel space $(x, y, z, e)$, where $e$ is an elastic ratio [S5].
++*   **Layout:** Planes correspond to pairs $\{(x, y), (x, z), (y, z), (x, e), (y, e), (z, e)\}$ [S5].
++*   **Parameters:**
++    *   Resolutions: $\{64, 64, 64, 100\}$ for dimensions $\{x, y, z, e\}$ respectively [S5].
++    *   Hidden feature dimension $D = 64$ for the GsNet and Multi-Head Predictor [S5].
++
++### Pseudocode: Standard Deformation MLP
++```python
++import torch
++import torch.nn as nn
++import math
++
++class DeformationMLP(nn.Module):
++    def __init__(self, input_dim=3, hidden_dim=256, num_layers=8, 
++                 L_x=10, L_t=10, use_conditioning=False, cond_dim=0):
++        super().__init__()
++        self.num_layers = num_layers
++        self.hidden_dim = hidden_dim
++        self.use_conditioning = use_conditioning
++        
++        # Positional Encoding parameters
++        self.L_x = L_x
++        self.L_t = L_t
++        
++        # Linear layers
++        self.layers = nn.ModuleList()
++        for i in range(num_layers):
++            if i == 0:
++                # Input dimension depends on PE and conditioning
++                pe_dim = 2 * input_dim * (L_x + L_t) # Simplified PE dim calculation
++                if use_conditioning:
++                    in_features = pe_dim + cond_dim
++                else:
++                    in_features = pe_dim
++            else:
++                in_features = hidden_dim
++            
++            out_features = hidden_dim
++            self.layers.append(nn.Linear(in_features, out_features))
++            
++        # Final layer: maps to delta position (3D)
++        self.final_layer = nn.Linear(hidden_dim, 3)
++        
++        self._init_weights()
++
++    def positional_encode(self, x, t):
++        """
++        Basic positional encoding for spatial x and temporal t.
++        Assumes x is (B, 3) and t is (B, 1).
++        """
++        # Concatenate x and t
++        coords = torch.cat([x, t], dim=-1) # (B, 4)
++        
++        # Simple sinusoidal PE for demonstration
++        # In practice, this might be more complex or use specific frequencies
++        freq_bands = torch.linspace(1, self.L_x, self.L_x).to(x.device)
++        # Expand for spatial and temporal
++        # Note: Exact PE formula depends on specific implementation (e.g., SIREN vs standard)
++        # Here we assume a standard sin/cos embedding
++        pe_x = self._pe(coords[:, :3], freq_bands)
++        pe_t = self._pe(coords[:, 3:], freq_bands)
++        return torch.cat([pe_x, pe_t], dim=-1)
++
++    def _pe(self, x, freq_bands):
++        # Placeholder for actual PE implementation
++        # x: (B, D), freq_bands: (K,)
++        # Returns: (B, 2*D*K)
++        pass 
++
++    def _init_weights(self):
++        for layer in self.layers:
++            nn.init.xavier_normal_(layer.weight)
++            nn.init.zeros_(layer.bias)
++        
++        # Special initialization for final layer
++        nn.init.normal_(self.final_layer.weight, std=1e-5)
++        nn.init.zeros_(self.final_layer.bias)
++
++    def forward(self, x, t, z=None):
++        # 1. Encode inputs
++        x_pe = self.positional_encode(x, t)
++        
++        # 2. Condition if provided
++        if self.use_conditioning and z is not None:
++            x_pe = torch.cat([x_pe, z], dim=-1)
++            
++        # 3. Pass through MLP
++        h = x_pe
++        for i, layer in enumerate(self.layers):
++            h = layer(h)
++            # Activation (e.g., ReLU or Sine) - Not specified in notes, assuming ReLU as generic
++            # [G] Standard MLPs use ReLU; SIRENs use Sine. 
++            # The source [S1] mentions "MLP" and "Xavier normal", which often implies ReLU, 
++            # but Deformation MLPs in dynamic NeRFs often use Sine. 
++            # Without explicit activation in notes, we leave it as a placeholder or generic.
++            # However, [S1] contrasts with SIREN, implying this might be a standard ReLU MLP.
++            h = torch.relu(h) 
++            
++        # 4. Final output
++        delta_x = self.final_layer(h)
++        return delta_x
++```
++
++## Subtopics
++
++### [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md)
++HyperNetwork Conditioning uses a secondary neural network to predict the weights of the deformation MLP decoder from a latent code. Unlike concatenation, which shares decoder parameters across all instances, this approach creates a distinct Neural Field (with unique weights) for each input instance. This separation allows the primary decoder to maintain lower complexity, resulting in a more compact representation.
++
++### [Multi-MLP Linear Layer](15116-multi-mlp-linear-layer.md)
++The Multi-MLP Linear Layer is a specialized linear transformation module designed to enable the parallel training of multiple independent MLPs within a single computational graph. It solves the problem of efficiently managing distinct weight and bias parameters for different MLP instances by using 3D tensors indexed by an MLP identifier. Unlike conventional linear layers that use 2D matrices for a single MLP, this method allows batch processing of multiple MLPs simultaneously, leveraging hardware parallelism without complex control flow. It is a core component of the Efficient Compressive Neural Representation (ECNR) framework.
++
++### Concatenation Conditioning
++Concatenation Conditioning involves concatenating the latent code with the input coordinates or features before feeding them into the Neural Field decoder [S2, unofficial].
+ *   **Pitfall:** Only the first layer directly incorporates the condition; remaining layers operate only on internal feature representations, requiring the network to distinguish samples based on input alone [S2, unofficial].
+ 
+-#### 2. Feature-wise Linear Modulation (FiLM) / Conditional Batch Normalization
+-*   **Definition:** Uses small neural networks $\boldsymbol{\beta_i}$ and $\boldsymbol{\gamma_i}$ to predict scale and bias vectors for each layer $i$, conditioned on the latent code $\mathbf{z}$ [S2, unofficial].
+-*   **Formula:**
+-    $$ \hat{\boldsymbol{x}}_i = L_i(\boldsymbol{x}) \odot \boldsymbol{\gamma_i}(\boldsymbol{z}) + \boldsymbol{\beta_i}(\boldsymbol{z}) $$
+-    where $L_i(\boldsymbol{x})$ is the output of the $i$-th linear layer, $\odot$ is element-wise multiplication, and $\boldsymbol{\gamma_i}, \boldsymbol{\beta_i}$ are vectors matching the layer's output size [S2, unofficial].
+-
+-#### 3. HyperNetwork Conditioning
+-*   **Step:** Use a secondary network (HyperNetwork) to predict the decoder's weights from the latent code [S1].
+-*   **Effect:** Creates a distinct Neural Field (unique weights) for each input instance, allowing the primary decoder to maintain lower complexity [S1].
+-
+-#### 4. Autoencoder/Autodecoder Conditioning
+-*   **Step:** Train the model in an autoencoder manner (using an encoder to produce latent codes) or an autodecoder manner (optimizing a learnable latent vector per sample jointly with decoder weights) [S2, unofficial].
+-*   **Definition:** The mapping becomes $f: (\Omega, \mathcal{Z}) \mapsto \mathcal{X}$, where $\mathcal{Z}$ is the latent space [S2, unofficial].
+-
+-#### 5. Global vs. Local Conditioning
+-*   **Global Conditioning:** Encodes the whole information about a data sample in one single latent vector [S2, unofficial].
+-*   **Local Conditioning:** Spreads information about a data sample over multiple latent codes assigned to specific subsets of spatio-temporal coordinates (regions or time steps) [S2, unofficial].
+-
+-### Specialized Architectures
+-
+-#### Fused Hash Encoding MLP
+-*   **Step:** Compose the sampler from two consecutive neural density fields [S3].
+-*   **Step:** Represent each density field using 'fused' MLPs that employ hash encoding to process 3D positions [S3].
+-*   **Step:** Predict density using an MLP following the hash encoding [S3].
+-*   **Parameters:** Minimum hash grid resolution: 16; Number of hash encoding levels: 5; Hash feature dimension: 2-dim features per level [S3].
+-
+-#### MLP LiDAR Encoding
++### Autoencoder/Autodecoder Conditioning
++*   **Autoencoder:** The model is trained using an encoder to produce latent codes from the input data [S2, unofficial].
++*   **Autodecoder:** The latent vector is optimized jointly with the decoder weights for each sample, without an explicit encoder [S2, unofficial].
++
++### Global Conditioning
++Global Conditioning encodes the whole information about a data sample in one single latent vector [S2, unofficial].
++
++### Local Conditioning
++Local Conditioning spreads information about a data sample over multiple latent codes assigned to specific subsets of spatio-temporal coordinates (regions or time steps) [S2, unofficial].
++
++### Fused Hash Encoding MLP Architecture
++*   **Step:** Compose the sampler from two consecutive neural density fields [S3]. Represent each density field using 'fused' MLPs that employ hash encoding to process 3D positions [S3]. Predict density using an MLP following the hash encoding [S3].
++*   **Parameters:** Minimum hash grid resolution: 16 [S3]. Number of hash encoding levels: 5 [S3]. Hash feature dimension: 2-dim features per level [S3].
++
++### MLP Lidar Encoding
+ *   **Step:** Process LiDAR features using an MLP with three hidden layers [S3].
+-*   **Parameters:** Hidden layer feature sizes: 64, 96, 128; Output layer feature size: 64-dim feature vector [S3].
+-
+-#### CoDeF (Canonical Deformation Field)
+-*   **Step:** Allow direct application of image processing algorithms to the canonical image [S4].
+-*   **Step:** Propagate results across time via the temporal deformation field [S4].
++*   **Parameters:** Hidden layer feature sizes: 64, 96, 128 [S3]. Output layer feature size: 64-dim feature vector [S3].
++
++### CoDeF
++*   **Step:** Allow the direct application of image processing algorithms to the canonical image [S4]. Propagate results across time via the temporal deformation field [S4]. Enable efficient video processing [S4].
+ *   **Pitfall:** Limited by optical flow accuracy and has difficulty in modeling complex motion [S4].
+ 
+-## Subtopics
+-
+-### [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md)
+-HyperNetwork Conditioning is a method for conditioning a Neural Field decoder by using a secondary neural network (the HyperNetwork) to predict the decoder's weights from a latent code. Unlike concatenation-based conditioning, which shares decoder parameters across all instances and relies on the latent code to distinguish them, this approach creates a distinct Neural Field (with unique weights) for each input instance. This separation allows the primary decoder network to maintain lower complexity, resulting in a more compact representation. See [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md).
+-
+-### [Multi-MLP Linear Layer](15116-multi-mlp-linear-layer.md)
+-The Multi-MLP Linear Layer is a specialized linear transformation module designed to enable the parallel training of multiple independent Multi-Layer Perceptrons (MLPs) within a single computational graph. It solves the problem of efficiently managing distinct weight and bias parameters for different MLP instances by using 3D tensors indexed by an MLP identifier. Unlike conventional linear layers that use 2D matrices for a single MLP, this method allows batch processing of multiple MLPs simultaneously, leveraging hardware parallelism without complex control flow. It is a core component of the Efficient Compressive Neural Representation (ECNR) framework. See [Multi-MLP Linear Layer](15116-multi-mlp-linear-layer.md).
+-
+-### Concatenation Conditioning
+-A conditioning method where the latent code is concatenated with the input coordinates/features before being fed into the Neural Field decoder [S2, unofficial]. The primary limitation is that only the first layer directly incorporates the condition, forcing subsequent layers to rely on internal feature representations to distinguish samples [S2, unofficial].
+-
+-### Autoencoder/Autodecoder Conditioning
+-A training paradigm where the Neural Field is conditioned via latent codes. In the autoencoder manner, an encoder produces the latent codes from input data. In the autodecoder manner, a learnable latent vector is optimized jointly with the decoder weights for each sample [S2, unofficial].
+-
+-### Global Conditioning
+-Encoding the whole information about a data sample in one single latent vector [S2, unofficial].
+-
+-### Local Conditioning
+-Spreading information about a data sample over multiple latent codes assigned to specific subsets of spatio-temporal coordinates (regions or time steps) [S2, unofficial].
+-
+-### Fused Hash Encoding MLP Architecture
+-An architecture using 'fused' MLPs with hash encoding to process 3D positions for density prediction. It typically uses a minimum hash grid resolution of 16, 5 levels of hash encoding, and 2-dim features per level [S3].
+-
+-### MLP Lidar Encoding
+-An MLP configuration for processing LiDAR features, consisting of three hidden layers with feature sizes 64, 96, and 128, outputting a 64-dim feature vector [S3].
+-
+-### CoDeF
+-A method that allows direct application of image processing algorithms to a canonical image, propagating results across time via a temporal deformation field. It is limited by optical flow accuracy and struggles with complex motion [S4].
++### Spatial-Ratio Neural Field Configuration
++*   **Definition:** A multi-plane implicit representation modeling a 4D voxel space $(x, y, z, e)$ using six 2D planes to predict Gaussian transformations conditioned on an elastic ratio $e$ [S5].
++*   **Parameters:** $D$: hidden feature dimension for GsNet and Multi-Head Predictor; set to 64 [S5]. $D$: hidden feature dimension of the Multi-Head Predictor for predicting transformations under a given ratio; set to 64 [S5].
++*   **Layout:** Planes: $\{(x, y), (x, z), (y, z), (x, e), (y, e), (z, e)\}$ [S5]. Resolutions: $\{64, 64, 64, 100\}$ for dimensions $\{x, y, z, e\}$ respectively [S5].
++
++### Deformation Network (Static)
++*   **Step:** Query the grid field for features at the 3D point coordinates: `grid_feature = self.grid(rays_pts_emb[:,:3])` [S6, unofficial]. Compute displacement using the static MLP: `dx = self.static_mlp(grid_feature)` [S6, unofficial]. Return deformed points by adding displacement to original coordinates: `return rays_pts_emb[:, :3] + dx` [S6, unofficial].
++
++### Multi-Head MLP Decoder
++*   **Definition:** An orthogonal approach to uncertainty that attaches multiple lightweight MLP decoders (heads) to a shared feature grid encoder to amortize parameter cost of ensemble diversity [S7, unofficial].
++*   **Step:** 1. Attach multiple lightweight MLP decoders (five heads, two layers each) to a shared feature grid encoder [S7, unofficial]. 2. Apply variance regularization to encourage the model’s uncertainty to concentrate where reconstruction errors are largest [S7, unofficial].
++*   **Performance:** On volumes up to $1024^3$ (4 GB), RMDSRN achieved the highest reconstruction PSNR among all uncertainty-aware methods and produced variance maps identifying high-error regions without ground truth [S7, unofficial].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The standard deformation MLP (8 layers, 256 neurons) has moderate memory requirements but can be computationally expensive if evaluated at high frequencies [S1].
+-*   **Stability:** Initializing the final layer weights with a small standard deviation ($10^{-5}$) is critical for stable optimization of deformation fields [S1].
+-*   **Conditioning Trade-offs:** Concatenation is simple but may limit the network's ability to distinguish complex variations in deeper layers [S2, unofficial]. FiLM/HyperNetwork approaches offer more expressive conditioning but increase parameter count or computational overhead [S1][S2, unofficial].
+-*   **Performance:** LiDAR encoding with MLPs may underperform compared to 3D convolutional networks in global context learning scenarios [S3].
++*   **Time Complexity:** Depends on the number of layers (typically 8) and hidden dimensions (256). Conditioning via concatenation adds negligible overhead. Hypernetworks add the cost of the secondary network.
++*   **Memory Complexity:** Proportional to the number of parameters in the MLP ($8 \times 256 \times 256$ weights + biases) plus any conditioning parameters. Hash encoding variants add memory for the hash grid.
++*   **Strengths:** Flexible conditioning allows representation of dynamic scenes or multiple objects. Small initial deformation weights ($10^{-5}$) aid convergence [S1].
++*   **Limitations:** Concatenation conditioning may struggle to propagate conditions through deep networks [S2, unofficial]. Hypernetworks increase training complexity.
++*   **When to use:** When representing dynamic volumes or multiple instances with a single model.
++*   **When not to use:** For static, single-instance volumes where a standard MLP suffices.
+ 
+ ## Background
+-The Deformation MLP Configuration originates from research into dynamic neural radiance fields and time-of-flight (ToF) signal optimization. Key implementations include the "Time of the Flight of the Gaussians" method, which uses an 8-layer, 256-neuron MLP with specific positional encoding frequencies ($L_x=10, L_t=10$) and specialized initialization for deformation prediction [S1]. Conditioning techniques like FiLM and HyperNetworks were adapted from generative modeling literature (e.g., [Ha et al., 2016], [de Vries et al., 2018]) to allow neural fields to represent multiple instances or dynamic scenes [S2, unofficial]. Hash encoding and LiDAR-specific MLPs were introduced to improve efficiency and handle sparse sensor data in large-scale scenes [S3].
++The Deformation MLP Configuration originates from methods for dynamic neural radiance fields and 3D Gaussian Splatting, where static representations are extended to handle motion. Key implementations include the deformation MLP in "Time of the Flight of the Gaussians" [S1] and various conditioning techniques described in "Introduction to Neural Fields" [S2, unofficial]. The use of hash encoding in MLPs for density prediction appears in "LidaRF" [S3]. The spatial-ratio configuration is detailed in "FlexGS" [S5]. Static deformation networks are used in "4DGS" [S6, unofficial]. Uncertainty-aware multi-head decoders are described in "PDF Deep Learning Methods..." [S7, unofficial].
+ 
+ ## Sources
+@@ -107,3 +215,6 @@
+ [S2] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)
+ [S3] LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes, https://doi.org/10.1109/cvpr52733.2024.01850, fetched 2026-10-26
+-[S4] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28+[S4] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
++[S5] FlexGS: Train Once, Deploy Everywhere with Many-in-One Flexible 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52734.2025.01523, fetched 2026-10-29
++[S6] ElenaViewSynthesis/4dgs, https://github.com/ElenaViewSynthesis/4dgs, fetched 2026-10-28 (unofficial)
++[S7] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -4,32 +4,35 @@
+ 
+ ## Overview
+-Gradient-based Densification Control is a mechanism for allocating 3D Gaussian primitives to regions with high reconstruction error by using gradient magnitude as a proxy for representational need [S1, unofficial]. It differs from sibling methods by explicitly decoupling the *decision* to densify (based on gradient magnitude) from the *strategy* of densification (splitting vs. cloning, based on spatial extent), allowing for dataset-specific tuning of densification aggressiveness [S1, unofficial].
++Gradient-based Densification Control is a mechanism for allocating 3D Gaussian primitives to regions with high reconstruction error by using gradient magnitude as a proxy for representational need [S1, unofficial]. It differs from sibling methods by explicitly decoupling the decision to densify (based on gradient magnitude) from the strategy of densification (splitting vs. cloning, based on spatial extent), allowing for dataset-specific tuning of densification aggressiveness [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Per-primitive gradient magnitude $g_i$ for each active Gaussian primitive $i$.
+-*   Per-primitive spatial extent (e.g., scale or covariance eigenvalues) $s_i$.
+-*   Gradient threshold parameter $thres\_grad$.
+-*   Percent-dense parameter $per\_dense$.
++*   Per-primitive gradient magnitude $g_i$ for each active primitive $i$ [S1, unofficial].
++*   Per-primitive spatial extent $s_i$ [S1, unofficial].
++*   Gradient threshold parameter $thres\_grad$ [S1, unofficial].
++*   Percent-dense parameter $per\_dense$ [S1, unofficial].
+ 
+ **Outputs:**
+-*   A set of primitives to be densified (cloned or split).
+-*   Updated primitive set with new positions, scales, and opacities.
++*   Updated primitive set with new positions, scales, and opacities [S1, unofficial].
+ 
+ **Data Structures:**
+-*   Primitive list: Each primitive $i$ stores position $\mathbf{p}_i$, covariance matrix $\Sigma_i$ (or scale/rotation/quaternion), opacity $\alpha_i$, and accumulated gradient magnitude $g_i$.
++*   Primitive list: Each primitive $i$ stores position $\mathbf{p}_i$, covariance matrix $\Sigma_i$ (or scale/rotation/quaternion), opacity $\alpha_i$, and accumulated gradient magnitude $g_i$ [G].
+ *   Parameters: $thres\_grad \in [1 \times 10^{-10}, 6.5 \times 10^{-9}]$, $per\_dense \in [0.001, 0.01]$ [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Compute Gradient Magnitude:** For each primitive $i$, compute the magnitude of the gradient of the loss with respect to the primitive's parameters (typically position and opacity) during the backward pass. Let this be $g_i = \|\nabla_{\theta_i} \mathcal{L}\|$ [S1, unofficial].
+-2.  **Threshold Check:** Compare $g_i$ against $thres\_grad$. If $g_i < thres\_grad$, the primitive is not selected for densification [S1, unofficial].
+-3.  **Extent Evaluation:** If $g_i \ge thres\_grad$, evaluate the spatial extent of the primitive. Calculate the average scale or a representative dimension $s_i$ (e.g., mean of scale factors or largest eigenvalue of covariance) [S1, unofficial].
+-4.  **Split or Clone Decision:** Compare $s_i$ against $per\_dense$.
+-    *   If $s_i > per\_dense$, the primitive is considered "too large" and is **split** into multiple smaller primitives (typically 2 or 4) around the original position, inheriting properties but with reduced scale [S1, unofficial].
+-    *   If $s_i \le per\_dense$, the primitive is considered "small enough" but has high error, so it is **cloned** (copied) to increase density without changing individual size [S1, unofficial].
+-5.  **Parameter Adjustment:** The parameters $thres\_grad$ and $per\_dense$ are jointly tuned based on the dataset and volume resolution to control the aggressiveness of densification [S1, unofficial].
++1. Compute gradient magnitude $g_i$ for each primitive $i$ during the backward pass [S1, unofficial].
++2. Compare $g_i$ against $thres\_grad$ to decide if densification is triggered [S1, unofficial].
++3. If triggered, evaluate spatial extent $s_i$ against $per\_dense$ to choose between splitting or cloning [S1, unofficial].
++4. Jointly adjust $thres\_grad$ and $per\_dense$ to control densification aggressiveness per dataset and volume resolution [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++class Primitive:
++    def __init__(self, pos, cov, opacity, grad_mag):
++        self.pos = pos
++        self.cov = cov
++        self.opacity = opacity
++        self.grad_mag = grad_mag
++
+ def densify_primitives(primitives, thres_grad, per_dense):
+     """
+@@ -37,87 +40,65 @@
+     
+     Args:
+-        primitives: List of primitive objects with attributes:
+-            - grad_mag: float, gradient magnitude
+-            - scale: float, representative spatial extent (e.g., mean scale)
+-            - pos: vector, position
+-            - cov: matrix, covariance
+-            - opacity: float
++        primitives: List of Primitive objects
+         thres_grad: float, gradient threshold (1e-10 to 6.5e-9)
+         per_dense: float, percent-dense threshold (0.001 to 0.01)
+         
+     Returns:
+-        new_primitives: List of new primitives (clones or splits)
++        new_primitives: List of new Primitive objects (clones or splits)
+     """
+     new_primitives = []
+     
+     for prim in primitives:
+-        # Step 1 & 2: Check gradient threshold
+-        if prim.grad_mag < thres_grad:
+-            continue  # No densification needed
++        g_i = prim.grad_mag
++        s_i = prim.cov.trace() / 3  # Representative spatial extent (mean scale)
++        
++        # Step 2: Threshold Check
++        if g_i < thres_grad:
++            continue  # No densification triggered
+             
+-        # Step 3 & 4: Evaluate spatial extent
+-        if prim.scale > per_dense:
+-            # Split: Create multiple smaller primitives
+-            # [G] Implementation detail: Splitting typically involves creating 
+-            # 2-4 new primitives at the same position with scaled-down covariance 
+-            # and adjusted opacity to preserve total density.
+-            splits = split_primitive(prim)
++        # Step 3 & 4: Extent Evaluation and Split/Clone Decision
++        if s_i > per_dense:
++            # Split: Create multiple smaller primitives around the original position
++            splits = []
++            for _ in range(2):
++                new_p = Primitive(
++                    pos=prim.pos[:],
++                    cov=prim.cov * 0.5,
++                    opacity=prim.opacity / 2,
++                    grad_mag=0.0
++                )
++                splits.append(new_p)
+             new_primitives.extend(splits)
+         else:
+-            # Clone: Create a copy with same properties
+-            clone = clone_primitive(prim)
++            # Clone: Create a copy to increase density without changing individual size
++            clone = Primitive(
++                pos=prim.pos[:],
++                cov=prim.cov.copy(),
++                opacity=prim.opacity,
++                grad_mag=0.0
++            )
+             new_primitives.append(clone)
+             
+     return new_primitives
+-
+-def split_primitive(prim):
+-    """
+-    [G] Standard 3DGS split: Create 2-4 new primitives.
+-    """
+-    # Example: Create 2 clones with half the scale
+-    new_prims = []
+-    for _ in range(2):
+-        new_prim = Primitive()
+-        new_prim.pos = prim.pos.copy()
+-        new_prim.cov = prim.cov * 0.5  # Scale down covariance
+-        new_prim.opacity = prim.opacity / 2  # Adjust opacity
+-        new_prim.grad_mag = 0  # Reset gradient for new primitive
+-        new_prims.append(new_prim)
+-    return new_prims
+-
+-def clone_primitive(prim):
+-    """
+-    [G] Standard 3DGS clone: Create an exact copy.
+-    """
+-    new_prim = Primitive()
+-    new_prim.pos = prim.pos.copy()
+-    new_prim.cov = prim.cov.copy()
+-    new_prim.opacity = prim.opacity
+-    new_prim.grad_mag = 0  # Reset gradient for new primitive
+-    return new_prim
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Gradient magnitudes can be very small ($10^{-10}$ range). Ensure floating-point precision is sufficient to distinguish between zero and non-zero gradients [S1, unofficial].
+-*   **Boundary Conditions:** If $thres\_grad$ is set too low, almost all primitives may be densified, leading to excessive memory usage. If too high, no densification occurs, leading to under-reconstruction [S1, unofficial].
+-*   **Degenerate Input:** If a primitive has zero gradient but large scale, it will not be densified, potentially leaving large empty regions with high error if the gradient signal is sparse [S1, unofficial].
++*   The sources do not specify additional edge cases beyond parameter tuning per dataset and volume resolution [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### OTS+SAtn Densification
+-The parent method that incorporates gradient-based control into a broader structure-aware and attention-based densification framework. It adds structural priors and attention mechanisms to guide densification beyond simple gradient magnitude. [OTS+SAtn Densification](1488-ots-satn-densification.md)
++### [Screen-Space Gradient Densification Criterion](5303-screen-space-gradient-densification-criterion.md)
++This method provides a criterion for 3D primitive densification based on the mean magnitude of the gradient of the photometric loss with respect to the projected 2D screen-space center of the primitive, accumulated over all training views. It differs from alternatives like 2DGS [Huang et al. 2024] by using an analytical T-matrix backward pass to avoid conflating depth and lateral motion, which prevents gradient cancellation and ensures the signal faithfully captures the rendering residual. [Screen-Space Gradient Densification Criterion](5303-screen-space-gradient-densification-criterion.md)
++
++### Density-Aware Splitting
++A splitting/cloning strategy that compares surfel scale against local sampling density (mean neighbor distance) rather than a fixed global scene extent fraction [S2, unofficial]. It maintains a spatial index structure over surfel centers and queries the mean distance $\bar{d}$ to same-orientation nearest neighbors for each surfel to estimate local sampling density [S2, unofficial]. A global scale threshold is unsuitable because it does not adapt to local density or enforce the spatially varying overlap condition required by the partition-of-unity assumption [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per densification step, where $N$ is the number of primitives. Splitting and cloning are constant-time operations per primitive.
+-*   **Memory Complexity:** Increases linearly with the number of densified primitives. Each split or clone adds new primitive data structures.
+-*   **Measured Performance:** Tuned parameters ($thres\_grad \in [1 \times 10^{-10}, 6.5 \times 10^{-9}]$, $per\_dense \in [0.001, 0.01]$) were evaluated on the hemibrain and BigBrain datasets, showing efficient allocation of primitives to high-error regions [S1, unofficial].
+-*   **Strengths:** Efficiently allocates representational capacity to regions with high reconstruction error. Simple to implement and tune.
+-*   **Limitations:** Relies solely on gradient magnitude, which may not capture all aspects of reconstruction error (e.g., structural details). May over-densify in noisy regions if gradients are high due to noise rather than error.
+-*   **When to Use:** When computational resources are limited and efficient allocation of primitives is critical. Suitable for large-scale volume rendering where adaptive resolution is needed.
+-*   **When Not to Use:** When structural or semantic information is available and should guide densification (use parent method [OTS+SAtn Densification](1488-ots-satn-densification.md)). When noise is high and gradient-based selection is unreliable.
++The method ensures efficient spatial allocation of primitives to regions with high reconstruction error [S1, unofficial]. Parameters are tuned depending on the dataset and volume resolution, with $thres\_grad$ ranging from $1 \times 10^{-10}$ to $6.5 \times 10^{-9}$ and $per\_dense$ from $0.001$ to $0.01$ [S1, unofficial]. These parameters jointly control the aggressiveness of densification [S1, unofficial].
+ 
+ ## Background
+-Gradient-based densification is a core principle from the original 3D Gaussian Splatting (3DGS) method, adapted for volume rendering in the ESVR framework [S1, unofficial]. It was introduced to address the challenge of efficiently allocating 3D primitives to complex volumetric data, such as the hemibrain and BigBrain datasets, which contain millions of neurons and synaptic connections [S1, unofficial]. The method leverages the intuition that regions with high gradient magnitudes in the loss function require more representational capacity to reconstruct accurately.
++Gradient-based densification follows the original 3D Gaussian Splatting (3DGS) principle, where primitives with large gradients indicate regions requiring more representational capacity and are selected for cloning or splitting [S1, unofficial]. It is used in the ESVR framework for large-scale volumetric datasets such as the hemibrain and BigBrain datasets [S1, unofficial].
+ 
+ ## Sources
+-[S1] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)+[S1] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)
++[S2] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)

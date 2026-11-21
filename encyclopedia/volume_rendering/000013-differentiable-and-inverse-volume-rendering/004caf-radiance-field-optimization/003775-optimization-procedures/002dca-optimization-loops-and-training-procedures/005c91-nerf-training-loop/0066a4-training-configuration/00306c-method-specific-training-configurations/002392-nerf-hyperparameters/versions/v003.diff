@@ -1,0 +1,92 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-NeRF Hyperparameters define the specific configuration of the neural network architecture, sampling strategy, and optimizer settings required to train a Neural Radiance Field (NeRF) model [S1][S3, S4, unofficial]. This configuration solves the problem of reconstructing a continuous 3D scene representation from a set of calibrated 2D images by optimizing the radiance field parameters [S3, S4, unofficial]. What sets this configuration apart from its siblings is that it establishes the baseline "vanilla" NeRF settings (specifically the MLP depth, width, positional encoding frequencies, and hierarchical sampling counts) against which variants like Mip-NeRF [3409-mip-nerf-optimization-and-activation-details.md] or HashNeRF [3068-hashnerf-parameters.md] adjust their specific architectural or optimization details [S1][S3, S4, unofficial].
++NeRF Hyperparameters define the specific configuration of the neural network architecture, sampling strategy, and optimizer settings required to train a Neural Radiance Field (NeRF) model [S1][S3, unofficial][S4, unofficial]. This configuration solves the problem of reconstructing a continuous 3D scene representation from a set of calibrated 2D images by optimizing the radiance field parameters [S3, unofficial][S4, unofficial]. What sets this configuration apart from its siblings is that it establishes the baseline "vanilla" NeRF settings (specifically the MLP depth, width, positional encoding frequencies, and hierarchical sampling counts) against which variants like Mip-NeRF [3409-mip-nerf-optimization-and-activation-details.md] or HashNeRF [3068-hashnerf-parameters.md] adjust their specific architectural or optimization details [S1][S3, unofficial][S4, unofficial].
+ 
+ ## How it works
+@@ -11,6 +11,6 @@
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   Dataset: A collection of images with known camera poses (extrinsics) and intrinsics (focal length) [S3, S4, unofficial].
+-    *   Hyperparameters: Defined below (MLP layers, samples, learning rate, etc.) [S1][S3, S4, unofficial].
++    *   Dataset: A collection of images with known camera poses (extrinsics) and intrinsics (focal length) [S3, unofficial][S4, unofficial].
++    *   Hyperparameters: Defined below (MLP layers, samples, learning rate, etc.) [S1][S3, unofficial][S4, unofficial].
+ *   **Outputs**:
+     *   Trained NeRF model weights (MLP parameters) [S4, unofficial].
+@@ -44,7 +44,7 @@
+ 2.  **Ray Generation**:
+     *   For each pixel in the training image batch, generate a ray origin $\mathbf{o}$ and direction $\mathbf{d}$ using camera intrinsics and extrinsics [S4, unofficial].
+-    *   Define near ($t_n$) and far ($t_f$) clipping planes along the ray. Typical values: $t_n = 2.0$, $t_f = 6.0$ for Blender scenes [S4, unofficial].
++    *   Define near ($t_n$) and far ($t_f$) clipping planes along the ray [S4, unofficial]. Typical values: $t_n = 2.0$, $t_f = 6.0$ for Blender scenes [S4, unofficial].
+ 3.  **Coarse Sampling**:
+-    *   Sample $N_c$ points uniformly along the ray segment $[t_n, t_f]$. Default $N_c = 64$ [S3, unofficial].
++    *   Sample $N_c$ points uniformly along the ray segment $[t_n, t_f]$ [S3, unofficial]. Default $N_c = 64$ [S3, unofficial].
+     *   Query the **Coarse MLP** at these points to get densities $\sigma_c$ and colors $c_c$ [S1].
+     *   Compute transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and alpha $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S3, unofficial].
+@@ -52,5 +52,5 @@
+ 4.  **Hierarchical Resampling**:
+     *   Use the coarse weights $w_i = T_i \alpha_i$ to construct a cumulative distribution function (CDF) [S3, unofficial].
+-    *   Sample $N_f$ points from this distribution (inverse CDF sampling) to concentrate samples in high-density regions. Default $N_f = 128$ [S3, unofficial].
++    *   Sample $N_f$ points from this distribution (inverse CDF sampling) to concentrate samples in high-density regions [S3, unofficial]. Default $N_f = 128$ [S3, unofficial].
+     *   Query the **Fine MLP** at these new points to get densities $\sigma_f$ and colors $c_f$ [S1].
+ 5.  **Fine Rendering**:
+@@ -98,6 +98,6 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Out of Memory (OOM)**: Processing all points for a batch simultaneously can exceed GPU memory. Solution: Split query points into chunks (e.g., 4096 points) and process sequentially [S4, unofficial].
+-*   **Precision**: Use float32 for standard training. Mixed precision can be used but requires careful handling of loss scaling [G].
++*   **Out of Memory (OOM)**: Processing all points for a batch simultaneously can exceed GPU memory [S4, unofficial]. Solution: Split query points into chunks (e.g., 4096 points) and process sequentially [S4, unofficial].
++*   **Precision**: Use float32 for standard training [G]. Mixed precision can be used but requires careful handling of loss scaling [G].
+ *   **Degenerate Input**: If near/far planes are not set correctly relative to the scene scale, sampling may miss the object or include excessive empty space, leading to poor convergence [G].
+ *   **Distortion Regularization**: Standard NeRF does not apply distortion regularization [S1], unlike mip-NeRF which uses it to improve anti-aliasing [3409-mip-nerf-optimization-and-activation-details.md].
+@@ -159,5 +159,6 @@
+     for i in range(0, pts.shape[0], chunk_size):
+         chunk_pts = pts[i:i+chunk_size]
+-        colors, sigmas = model(chunk_pts, ray_d)
++        chunk_dirs = ray_d[i:i+chunk_size]
++        colors, sigmas = model(chunk_pts, chunk_dirs)
+         all_colors.append(colors)
+         all_sigmas.append(sigmas)
+@@ -191,6 +192,11 @@
+     coarse_color, coarse_weights = render_ray(rays_o, rays_d, args.near, args.far, args.n_samples_coarse, model.coarse_model)
+     
+-    # Hierarchical resampling: sample fine points based on coarse weights
+-    # (Standard implementation uses inverse CDF sampling on coarse_weights)
++    # Hierarchical resampling: sample fine points based on coarse weights [G]
++    cdfs = torch.cumsum(coarse_weights, dim=-1)
++    cdfs = torch.cat([torch.zeros_like(cdfs[..., :1]), cdfs], dim=-1)
++    u = torch.rand_like(cdfs)
++    inds = torch.searchsorted(cdfs, u, right=True)
++    inds = torch.clamp(inds, 1, args.n_samples_coarse - 1)
++    z_fine = torch.gather(coarse_weights.new_tensor(torch.linspace(args.near, args.far, args.n_samples_coarse)), 1, inds)
+     fine_color, _ = render_ray(rays_o, rays_d, args.near, args.far, args.n_samples_fine, model.fine_model)
+     
+@@ -212,10 +218,7 @@
+ Specifies hyperparameters for DONeRF, which adapts NeRF for dynamic scenes, often involving temporal encoding and different sampling strategies.
+ 
+-### [Reflectance and Shading Decomposition Priors](4624-reflectance-and-shading-decomposition-priors.md)
+-Defines hyperparameters for methods that decompose radiance into albedo and shading, requiring additional priors and loss weights.
+-
+ ## Operating characteristics
+-*   **Time Complexity**: Training time scales linearly with the number of iterations and the number of samples per ray ($N_c + N_f$). Quadrupling the sampling resolution (e.g., from 32x32 to 64x64 in NeTF context) quadruples training time [S2].
+-*   **Memory Complexity**: Memory usage is dominated by the MLP weights and the intermediate activations during the forward pass. Chunking (e.g., 4096 points) limits peak memory usage [S4, unofficial].
++*   **Time Complexity**: Training time scales linearly with the number of iterations and the number of samples per ray ($N_c + N_f$) [G]. Quadrupling the sampling resolution (e.g., from 32x32 to 64x64 in NeTF context) quadruples training time [S2].
++*   **Memory Complexity**: Memory usage is dominated by the MLP weights and the intermediate activations during the forward pass [G]. Chunking (e.g., 4096 points) limits peak memory usage [S4, unofficial].
+ *   **Measured Performance**:
+     *   On Blender dataset (Lego scene, 200k iterations): PSNR ~31-32 dB, SSIM ~0.96, Time ~12-15 hours on a single GPU [S3, unofficial].
+@@ -223,9 +226,9 @@
+     *   With 512 hidden units: 3.23M params, 3.42 hours training time, PSNR 33.25 [S1].
+     *   Comparison: The proposed model (with proposal networks) is significantly faster to train than mip-NeRF, with speedup increasing as model capacity rises [S1].
+-*   **Strengths**: Simple to implement, robust baseline, good quality on synthetic data.
+-*   **Limitations**: Slow training for large scenes, requires many samples for high quality, sensitive to near/far plane selection.
++*   **Strengths**: Simple to implement, robust baseline, good quality on synthetic data [G].
++*   **Limitations**: Slow training for large scenes, requires many samples for high quality, sensitive to near/far plane selection [G].
+ 
+ ## Background
+-The hyperparameters described here are based on the original NeRF implementation and its common variants (like the "TinyNeRF" implementation [S4, unofficial] and the "NeRF from Scratch" [S3, unofficial]). The configuration has become a standard reference for differentiable volume rendering optimization [S1][S3, S4, unofficial].
++The hyperparameters described here are based on the original NeRF implementation and its common variants (like the "TinyNeRF" implementation [S4, unofficial] and the "NeRF from Scratch" [S3, unofficial]). The configuration has become a standard reference for differentiable volume rendering optimization [S1][S3, unofficial][S4, unofficial].
+ 
+ ## Sources

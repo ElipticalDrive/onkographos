@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -4,38 +4,33 @@
+ 
+ ## Overview
+-Ray Subtraction is a boolean operation that removes material from a target ray (Ray A) using a source ray (Ray B) [S1]. It solves the problem of sculpting or editing volumetric data by defining the region to be removed via a second set of samples. It differs from [Ray Union](13991-region-nesting-merge.md) by inverting the normals of the source samples before merging, which effectively flips the inside/outside logic for the subtracted volume, allowing inner regions to be identified and excised by the subsequent [MergeRegion](13991-region-nesting-merge.md) step.
++Ray subtraction is a boolean operation that removes material from a target ray (Ray A) using a source ray (Ray B) [S1]. It solves the problem of sculpting or editing volumetric data by allowing users to delete specific regions, such as removing a sphere from a cube [S1]. It differs from [Ray Union](13991-ray-union.md) by inverting the normals of the source samples before merging, which causes the [MergeRegion](13991-region-nesting-merge.md) procedure to treat the source region as an "inside" void rather than an added volume [S1].
+ 
+ ## How it works
+-**Inputs:**
+-*   `Ray A`: The target ray containing the list of samples to be modified.
+-*   `Ray B`: The source ray defining the material to be removed.
+-
+-**Outputs:**
+-*   `Ray A`: Modified such that the volume defined by `Ray B` is subtracted from `Ray A`.
++**Inputs and Outputs:**
++*   Input: Ray A (target), Ray B (source). Both contain a list of samples sorted by depth.
++*   Output: Ray A modified in place to represent the material of A minus B.
+ 
+ **Data Structures:**
+-*   `Ray.list`: A list of samples. Each sample `s` contains at least:
+-    *   `z`: The depth coordinate along the ray (used for sorting).
+-    *   `normal`: A vector indicating the surface orientation at the sample point.
+-    *   `direction`: The ray's propagation direction vector (used in `MergeRegion`).
++*   `Ray.list`: A list of samples. Each sample `s` contains at least a position (implied by sorting) and a `normal` vector.
++*   `Ray.direction`: The viewing direction vector.
+ 
+-**Algorithm:**
+-1.  Iterate through each sample `s` in `Ray B.list`.
++**Algorithm Steps:**
++1.  Iterate through every sample `s` in `Ray B.list`.
+ 2.  Negate the normal of sample `s`: $s.normal \leftarrow -s.normal$.
+ 3.  Append the modified sample `s` to `Ray A.list`.
+-4.  Sort `Ray A.list` in ascending order by the sample's `z` value.
+-5.  Call `MergeRegion(Ray A)` to remove inner regions based on the nesting level logic [S1].
++4.  Sort `Ray A.list` by depth (typically z-value or distance along the ray) [S1].
++5.  Call `MergeRegion` on `Ray A` to remove inner regions based on the inverted normals [S1].
+ 
+ **Pseudocode:**
+ ```python
+ def RaySubstraction(Ray A, Ray B):
+-    # Step 1-3: Invert normals and merge samples
++    # Step 1-3: Invert normals and merge
+     for s in B.list:
+         s.normal = -s.normal
+         A.list.append(s)
+     
+-    # Step 4: Sort by depth
+-    # Assuming standard sort on the 'z' attribute of samples
+-    A.list.sort(key=lambda sample: sample.z)
++    # Step 4: Sort by depth (z-value)
++    # Implementation note: Sorts samples based on their position along the ray direction
++    A.list.sort(key=lambda sample: dot(sample.position, A.direction))
+     
+     # Step 5: Remove inner regions
+@@ -44,8 +39,11 @@
+ 
+ **MergeRegion Logic (Required Context):**
+-The `MergeRegion` procedure, called in Step 5, tracks a nesting `level` initialized to 0. It iterates through `R.list` (the sorted list of `Ray A`):
+-*   If $Dot(s.normal, R.direction) < 0$, the sample is an "exit" or "inner" boundary relative to the current nesting. Decrement `level`. If `level` becomes 0, keep the sample.
+-*   Otherwise, the sample is an "entry" or "outer" boundary. If `level` is 0, keep the sample. Increment `level`.
+-*   The final list `T` contains only the samples that define the outermost boundaries of the remaining volume [S1].
++The `MergeRegion` procedure tracks a nesting `level`. It iterates through the sorted list. If the dot product of the sample's normal and the ray direction is negative, it decrements the level; otherwise, it increments it. Samples are kept only when the level transitions from 0 to 1 (entering a region) or when the level is 0 and the normal points with the ray (entering a region from outside) [S1]. Specifically:
++*   If $Dot(s.normal, R.direction) < 0$:
++    *   $level \leftarrow level - 1$
++    *   If $level == 0$, keep sample $s$.
++*   Else:
++    *   If $level == 0$, keep sample $s$.
++    *   $level \leftarrow level + 1$
+ 
+ **Parameters:**
+@@ -53,45 +51,50 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Sorting stability and floating-point precision in `z` values can affect the order of coincident samples, potentially leading to incorrect nesting levels if normals are ambiguous.
+-*   **Empty Lists:** If `Ray B.list` is empty, `Ray A` remains unchanged. If `Ray A.list` is empty, the result is empty.
+-*   **Degenerate Input:** If `Ray B` defines a closed volume completely inside `Ray A`, the subtraction correctly removes the inner shell. If `Ray B` is outside `Ray A`, no samples are removed (assuming `MergeRegion` handles the resulting disjoint intervals correctly, which it does by treating the first entry as the start of a region).
++*   Precision errors in sorting or dot products may lead to incorrect nesting levels if samples are coplanar or nearly parallel to the ray [G].
++*   The method assumes the input rays are valid representations of volumetric boundaries.
+ 
+ ## Subtopics
+ 
+ ### Shape Removal with Occlusion Handling
+-This variant addresses the limitation of standard boolean subtraction when the object being removed (foreground) occludes other geometry behind it. Standard subtraction might leave artifacts or fail to remove the occluded parts if the geometry is not explicitly defined in `Ray B`. This method handles occlusion by zeroing out the first mode of density along the ray for rays in the foreground mask [S2]. The first mode of density is defined as starting at the first point with non-zero density up to the first subsequent point with zero density [S2]. While effective for simple occlusion scenarios, this procedure can be slow and may leave artifacts of incomplete removal [S2].
++A procedure for handling occlusion when removing an object part that is in front of another one [S2]. Instead of simple boolean subtraction, it zeros out the first mode of density along the ray [S2]. The first mode of density is defined as starting at the first point with non-zero density up to the first subsequent point with zero density [S2]. This procedure is effective but can be slow and may leave artifacts of incomplete removal [S2].
++
++### Volume Carving
++A technique to remove occluding structures by skipping ray integration steps that intersect with a specified geometric shape (e.g., sphere, cone, cylinder) [S3]. It uses an Init shader to compute start and stopping coordinates of the carving shape [S3]. If the ray intersects the shape, the integration start position (`currentDistance`) is adjusted to the intersection point [S3].
++
++**Parameters:**
++*   `interactionPoint1`: A user-defined 3D coordinate used to determine the center of the carving shape (e.g., sphere) [S3].
++*   `currentDistance`: A built-in variable specifying the next integration position along the ray [S3].
++*   `sphereRadius`: The radius of the carving sphere [S3].
++
++**Pseudocode (Volume Carving Init Shader):**
++```python
++# Determine if ray is intersecting the sphere
++centerDir = interactionPoint1 - rayStart
++centerProjDist = dot(centerDir, rayDir)
++centerProj = rayStart + rayDir * centerProjDist
++distCenterProjCenter = length(centerProj - interactionPoint1)
++
++# if we have an intersection, adjust ray integration start
++if distCenterProjCenter < sphereRadius:
++    dcpc2 = distCenterProjCenter * distCenterProjCenter
++    sr2 = sphereRadius * sphereRadius
++    intersectDistance = centerProjDist + sqrt(sr2 - dcpc2)
++    if intersectDistance > 0.0:
++        currentDistance = intersectDistance
++```
+ 
+ ## Operating characteristics
+-**Time Complexity:**
+-*   Dominated by the sorting step: $O(N \log N)$, where $N$ is the total number of samples in `Ray A` plus `Ray B` [S1].
+-*   `MergeRegion` is linear: $O(N)$ [S1].
+-
+-**Memory Complexity:**
+-*   $O(N)$ to store the merged list of samples [S1].
+-
+-**Measured Performance:**
+-*   Not given in the sources.
+-
+-**Scaling:**
+-*   Scales linearly with the number of samples after the initial sort.
+-
+-**Strengths:**
+-*   Simple implementation based on existing Union and MergeRegion primitives [S1].
+-*   Robust for non-occluded boolean operations.
+-
+-**Limitations:**
+-*   Does not handle occlusion natively; requires the separate "Shape Removal with Occlusion Handling" procedure for complex scenes [S2].
+-*   The occlusion handling variant can be slow and may produce artifacts [S2].
+-
+-**When to use:**
+-*   Use for standard boolean subtraction of volumetric shapes where occlusion is not a primary concern or is handled by explicit geometry in the subtractor.
+-
+-**When not to use:**
+-*   Do not use for editing tasks involving significant occlusion without the supplementary density-zeroing procedure, as it may leave visual artifacts [S2].
++*   **Time Complexity:** Dominated by the sorting step, $O(N \log N)$ where $N$ is the total number of samples in both rays, plus the linear scan of `MergeRegion`, $O(N)$ [S1].
++*   **Memory Complexity:** $O(N)$ to store the merged list [S1].
++*   **Strengths:** Simple to implement; leverages existing union and merge logic [S1].
++*   **Limitations:** The basic boolean subtraction does not handle occlusion well (e.g., removing a front object while keeping a back object) without additional density zeroing techniques [S2]. The volume carving variant can be slow and may leave artifacts [S2].
++*   **When to use:** When performing boolean sculpting on volumetric meshes or ray lists where topological correctness is required [S1].
++*   **When not to use:** When occlusion handling is critical and performance is constrained, or when the geometry is complex enough that simple ray list manipulation fails to capture the visual intent [S2].
+ 
+ ## Background
+-Ray Subtraction was introduced in the context of detail sculpting using cubical marching squares [S1]. It is part of a suite of boolean operations (Union, Intersection, Subtraction) used for editing volumetric representations. The method relies on the topological inside/outside test provided by `MergeRegion` to identify and remove inner regions after the normal inversion [S1]. Later work in editing Conditional Radiance Fields highlighted the limitations of this approach regarding occlusion, proposing density-based zeroing as a supplementary technique [S2].
++The method originates from work on detail sculpting using cubical marching squares [S1]. It was introduced as Algorithm 3 in the paper "Detail sculpting using cubical marching squares" [S1]. The technique is similar to Ray Union but relies on normal inversion to achieve subtraction semantics [S1]. Variants like Volume Carving were later explored in the context of interactive GPU volume rendering shaders using frameworks like PRISM [S3], and occlusion-aware removal was discussed in the context of editing Conditional Radiance Fields [S2].
+ 
+ ## Sources
+ [S1] Detail sculpting using cubical marching squares, https://doi.org/10.1145/1152399.1152402, fetched 2026-11-06
+-[S2] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26+[S2] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26
++[S3] PRISM: An open source framework for the interactive design of GPU volume rendering shaders., https://doi.org/10.1371/journal.pone.0193636, fetched 2026-10-26

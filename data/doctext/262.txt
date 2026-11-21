@@ -1,0 +1,1452 @@
+## A voxel ray tracing demo using techniques similar to teardown
+
+This demo uses only a single storage buffer to store all voxel data.
+This demo only has very limited denoising, so the rendering may seem extremely noisy.
+
+## How to run the demo
+1. Download Rust toolchain.
+2. run `cargo run -r`.
+
+### shaders/ray.wgsl
+```
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+    @location(0) vp: vec2f,
+}
+
+struct FragmentOutput {
+    @location(0) color: vec4f,
+    @location(1) normal_depth: vec4f,
+}
+
+struct CameraGpuData {
+    position: vec3f,
+    rot: mat3x3f,
+    sin_half_vfov: f32,
+    frame_count: u32,
+    surface_size: vec2f,
+    prev_position: vec3f,
+}
+@group(0) @binding(0)
+var<uniform> camera_data: CameraGpuData;
+@group(0) @binding(1)
+var<storage> voxels: array<u32>;
+@group(0) @binding(2)
+var<uniform> chunk_size: vec3<i32>;
+@group(0) @binding(3)
+var blue_noise_texture: texture_2d<f32>;
+
+const chunk_pos: vec3f = vec3f(0.0, 0.0, 0.0);
+const voxel_size: f32 = 0.1;
+const epsilon: f32 = voxel_size * 0.01;
+const inv_voxel_size: f32 = 1.0 / voxel_size;
+const max_dist: f32 = 16.0;
+
+const PI: f32 = 3.1415926538;
+const GOLDEN_RATIO: f32 = 0.6180339887;
+
+var<private> SAMPLE_POINTS: array<vec2f, 4> = array(
+    vec2f(0.375, 0.125),
+    vec2f(0.875, 0.375),
+    vec2f(0.125, 0.625),
+    vec2f(0.625, 0.875),
+);
+
+
+// random
+fn random_dir(rand_2d: vec2f) -> vec3f {
+    let phi = 2.0 * PI * rand_2d.x;
+    let cos_theta = rand_2d.y * 2.0 - 1.0;
+    let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+    return vec3f(
+        sin_theta * cos(phi),
+        sin_theta * sin(phi),
+        cos_theta
+    );
+}
+
+fn incremental_rand(rand: f32) -> f32 {
+    return fract(rand + GOLDEN_RATIO * 4);
+}
+
+fn incremental_rand_2d(rand: vec2f) -> vec2f {
+    return fract(rand + vec2f(GOLDEN_RATIO, PI));
+}
+
+fn sky_color() -> vec4f {
+    return vec4f(1.0, 1.0, 1.0, 1.0);
+}
+
+fn axis_dir_normal(axis: u32, dir: vec3f) -> vec3f {
+    var result = vec3f(0.0, 0.0, 0.0);
+    result[axis] = f32(!(dir[axis] > 0.0)) * 2.0 - 1.0;
+    return result;
+}
+
+struct IntersectResult {
+    normal: vec3f,
+    dist: f32,
+}
+
+// return < 0.0: no intersection
+// return == 0.0: start inside
+// return > 0.0: intersection distance
+fn intersect_aabb(min_coords: vec3f, max_coords: vec3f, start: vec3f, dir: vec3f) -> IntersectResult {
+    var min_ts = (min_coords - start) / dir;
+    var max_ts = (max_coords - start) / dir;
+
+    if dir.x < 0.0 {
+        let temp = min_ts.x;
+        min_ts.x = max_ts.x;
+        max_ts.x = temp;
+    }
+    if dir.y < 0.0 {
+        let temp = min_ts.y;
+        min_ts.y = max_ts.y;
+        max_ts.y = temp;
+    }
+    if dir.z < 0.0 {
+        let temp = min_ts.z;
+        min_ts.z = max_ts.z;
+        max_ts.z = temp;
+    }
+
+    var min_t: f32;
+    var axis: u32;
+    if min_ts.x < min_ts.y {
+        if min_ts.z < min_ts.y {
+            min_t = min_ts.y;
+            axis = 1;
+        } else {
+            min_t = min_ts.z;
+            axis = 2;
+        }
+    } else {
+        if min_ts.z < min_ts.x {
+            min_t = min_ts.x;
+            axis = 0;
+        } else {
+            min_t = min_ts.z;
+            axis = 2;
+        }
+    }
+
+    let max_t = min(min(max_ts.x, max_ts.y), max_ts.z);
+
+    var result: IntersectResult;
+    result.normal = axis_dir_normal(axis, dir);
+
+    if min_t > max_t - epsilon || max_t < 0.0 {
+        result.dist = -1.0;
+    } else if min_t < 0.0 {
+        result.dist = 0.0;
+    } else {
+        result.dist = min_t + epsilon;
+    }
+    return result;
+}
+
+fn step_i(dir_i: f32) -> i32 {
+    if dir_i < 0.0 {
+        return -1;
+    } else {
+        return 1;
+    }
+}
+
+
+fn t_max_i(pos_i: f32, min_i: f32, voxel_size: f32, dir_i: f32) -> f32 {
+    let left = (pos_i - min_i) % voxel_size;
+    var axis_t: f32;
+    if dir_i < 0.0 {
+        axis_t = -left;
+    } else {
+        axis_t = voxel_size - left;
+    }
+    return axis_t / dir_i;
+}
+
+struct TraverseData {
+    start_pos: vec3f,
+    ray_dir: vec3f,
+    ray_dir_i: vec3i,
+    dt: vec3f,
+    grid_pos: vec3i,
+    last_axis: u32,
+    t_max: vec3f,
+    dist: f32,
+}
+
+fn new_traverse(start_pos: vec3f, min_pos: vec3f, ray_dir: vec3f) -> TraverseData {
+    let grid_pos_f = (start_pos - min_pos) * inv_voxel_size;
+    let grid_pos = vec3i(grid_pos_f);
+    let ray_dir_b = ray_dir > vec3f(0.0);
+    let ray_dir_i = vec3i(ray_dir_b) * 2 - 1;
+    let inv_ray_dir = 1.0 / ray_dir;
+    let dt = abs(voxel_size * inv_ray_dir);
+    let left = (vec3f(ray_dir_b) - fract(grid_pos_f)) * voxel_size;
+    let t_max = left * inv_ray_dir;
+    return TraverseData(
+        start_pos,
+        ray_dir,
+        ray_dir_i,
+        dt,
+        grid_pos,
+        3,
+        t_max,
+        0.0,
+    );
+}
+
+fn argmin(v: vec3f) -> u32 {
+    var maxVal = v.x;
+    var maxIndex = 0u;
+    
+    if (v.y < maxVal) {
+        maxVal = v.y;
+        maxIndex = 1u;
+    }
+    if (v.z < maxVal) {
+        maxIndex = 2u;
+    }
+    
+    return maxIndex;
+}
+
+fn step(data: ptr<function, TraverseData>) {
+    let last_axis = argmin((*data).t_max);
+    (*data).grid_pos[last_axis] += (*data).ray_dir_i[last_axis];
+    (*data).dist = (*data).t_max[last_axis];
+    (*data).t_max[last_axis] += (*data).dt[last_axis];
+    (*data).last_axis = last_axis;
+
+    // var data_ref = *data;
+    // let last_axis = argmin(data_ref.t_max);
+    // data_ref.grid_pos[last_axis] += data_ref.ray_dir_i[last_axis];
+    // data_ref.dist = data_ref.t_max[last_axis];
+    // data_ref.t_max[last_axis] += data_ref.dt[last_axis];
+    // data_ref.last_axis = last_axis;
+
+    // *data = data_ref;
+}
+
+fn load_voxel_data(data: ptr<function, TraverseData>, chunk_size: vec3i, chunk_area: i32) -> u32 {
+    let grid_pos = (*data).grid_pos;
+    let index = grid_pos.x + grid_pos.y * chunk_size.x + grid_pos.z * chunk_area;
+    return voxels[index];
+}
+
+fn out_of_range(data: ptr<function, TraverseData>, chunk_size: vec3i) -> bool {
+    let grid_pos = (*data).grid_pos;
+    return any(grid_pos < vec3i(0)) || any(grid_pos >= chunk_size);
+}
+
+@fragment
+fn main(in: VertexOutput) -> FragmentOutput {
+    var out: FragmentOutput;
+
+    let sample_offset = SAMPLE_POINTS[camera_data.frame_count % 4] * 2.0 / camera_data.surface_size;
+    // let sample_offset = vec2f(0.0, 0.0);
+
+    var local_ray_dir = vec3f(in.vp + sample_offset, -1.0);
+    local_ray_dir.y *= camera_data.sin_half_vfov;
+    local_ray_dir.x *= camera_data.sin_half_vfov * camera_data.surface_size.x / camera_data.surface_size.y;
+
+    var ray_dir = normalize(camera_data.rot * local_ray_dir);
+
+    let half_chunk_size = vec3f(chunk_size) * voxel_size * 0.5;
+    let max_coords = chunk_pos + half_chunk_size;
+    let min_coords = chunk_pos - half_chunk_size;
+
+    let intersect_result = intersect_aabb(min_coords, max_coords, camera_data.position, ray_dir);
+    if intersect_result.dist < 0.0 {
+        out.color = sky_color();
+        out.normal_depth = vec4f(-1.0, -1.0, -1.0, -1.0);
+        return out;
+    }
+
+    let start_pos = camera_data.position + ray_dir * intersect_result.dist;
+    var traverse_data = new_traverse(start_pos, min_coords, ray_dir);
+
+    var normal = intersect_result.normal;
+    out.normal_depth = vec4f(normal, intersect_result.dist);
+
+    let area = chunk_size.x * chunk_size.y;
+
+    let frag_pos = vec2u(in.position.xy);
+    // let sample_coord = frag_pos % vec2u(33, 33);
+    let sample_coord = frag_pos % textureDimensions(blue_noise_texture);
+
+    let rand_4d = textureLoad(blue_noise_texture, sample_coord, 0);
+    let clamped_frame = f32(camera_data.frame_count % 1111111);
+    var rand = fract(rand_4d.a + GOLDEN_RATIO * clamped_frame);
+    var rand_2d = fract(rand_4d.rg + vec2f(PI, GOLDEN_RATIO) * clamped_frame);
+    // var rand_2d = rand_4d.rg;
+
+    var color = vec4(1.0, 1.0, 1.0, 1.0);
+    // var ambient = vec4f(1.0, 1.0, 1.0, 1.0);
+    var ambient = vec4f(0.0, 0.0, 0.0, 1.0);
+
+    var reflect_time = 0;
+    for(var i = 0; i < 512; i += 1) {
+        let voxel_data = load_voxel_data(&traverse_data, chunk_size, area);
+        if voxel_data != 0u {
+            if traverse_data.last_axis != 3 {
+                normal = axis_dir_normal(traverse_data.last_axis, traverse_data.ray_dir);
+            }
+            if reflect_time == 0 {
+                out.normal_depth = vec4f(normal, traverse_data.dist + intersect_result.dist);
+            }
+
+            var reflect_ray: vec3f;
+            if rand > 0.9 {
+                reflect_ray = reflect(traverse_data.ray_dir, normal);
+                color *= 0.9;
+            } else {
+                var rand_dir = random_dir(rand_2d);
+                rand_2d = incremental_rand_2d(rand_2d);
+
+                let dot_rand_normal = dot(rand_dir, normal);
+                if dot_rand_normal < 0.0 {
+                    rand_dir -= dot_rand_normal * 2.0 * normal;
+                }
+                reflect_ray = rand_dir;
+                color *= unpack4x8unorm(voxel_data);
+                // color *= vec4(vec3(1.0 / (dist + 1.0)), 1.0);
+            }
+            rand = incremental_rand(rand);
+
+            reflect_time += 1;
+            if reflect_time > 3 {
+                break;
+            }
+
+            let start_pos = traverse_data.start_pos + traverse_data.dist * traverse_data.ray_dir + epsilon * normal;
+            traverse_data = new_traverse(start_pos, min_coords, reflect_ray);
+            if out_of_range(&traverse_data, chunk_size) {
+                ambient = sky_color();
+                break;
+            }
+        }
+
+        step(&traverse_data);
+        if out_of_range(&traverse_data, chunk_size) {
+            ambient = sky_color();
+            break;
+        }
+    }
+
+    out.color = ambient * color;
+    return out;
+}
+```
+
+### shaders/smooth.wgsl
+```
+@group(0) @binding(0)
+var color_texture: texture_2d<f32>;
+@group(0) @binding(1)
+var normal_depth_texture: texture_2d<f32>;
+
+const R: i32 = 7;
+const WINDOW: i32 = R * 2 + 1;
+
+@fragment
+fn smooth_h(@builtin(position) position: vec4f) -> @location(0) vec4f {
+    return neighbor_smooth(position, 0);
+}
+
+@fragment
+fn smooth_v(@builtin(position) position: vec4f) -> @location(0) vec4f {
+    return neighbor_smooth(position, 1);
+}
+
+fn neighbor_smooth(position: vec4f, axis: i32) -> vec4f {
+    let frag_pos = vec2i(position.xy);
+    
+    let normal_depth = textureLoad(normal_depth_texture, frag_pos, 0);
+    let normal = normal_depth.xyz;
+    let depth = normal_depth.a;
+    let depth_fwidth = fwidthFine(depth);
+    let color = textureLoad(color_texture, frag_pos, 0);
+
+    var result = vec4f(0.0, 0.0, 0.0, 0.0);
+    var sum_w = 0.0;
+
+    for(var i = -R; i <= R; i += 1) {
+        var pos = frag_pos;
+        pos[axis] += i;
+
+        let normal_depth2 = textureLoad(normal_depth_texture, pos, 0);
+        let normal2 = normal_depth2.xyz;
+        let depth2 = normal_depth2.a;
+        let color2 = textureLoad(color_texture, pos, 0);
+
+        let wz = exp(-abs(depth - depth2) * 0.1 / (depth_fwidth + 0.01));
+        let wn = abs(dot(normal, normal2));
+        let wd = exp(-f32(i * i) * 0.005);
+        let dc = color2 - color;
+        let wc = exp(-dot(dc, dc) * 2.0);
+
+        let w = wn * wz * wd * wc;
+        sum_w += w;
+        result += color2 * w;
+    }
+
+    result *= 1.0 / sum_w;
+    return result;
+}
+
+
+// fn blockify(position: vec4f, axis: i32) -> vec4f {
+//     let frag_pos = vec2i(position.xy);
+    
+//     let normal_depth = textureLoad(normal_depth_texture, frag_pos, 0);
+//     let normal = normal_depth.xyz;
+//     let depth = normal_depth.a;
+//     let depth_fwidth = fwidth(depth);
+
+//     var result = vec4f(0.0, 0.0, 0.0, 0.0);
+//     var sum_w = 0.0;
+    
+//     let base = frag_pos[axis] / WINDOW * WINDOW;
+//     for(var i = 0; i < WINDOW; i += 1) {
+//         var pos = frag_pos;
+//         pos[axis] = base + i;
+
+//         let normal_depth2 = textureLoad(normal_depth_texture, pos, 0);
+//         let normal2 = normal_depth2.xyz;
+//         let depth2 = normal_depth2.a;
+//         let color2 = textureLoad(color_texture, pos, 0);
+
+//         let wz = exp(-abs(depth - depth2) * 0.1 / (depth_fwidth + 0.01));
+//         let wn = abs(dot(normal, normal2));
+
+//         let w = wn * wz;
+//         sum_w += w;
+//         result += color2 * w;
+//     }
+
+//     result *= 1.0 / sum_w;
+//     return result;
+// }
+```
+
+### shaders/temporal.wgsl
+```
+@group(0) @binding(0)
+var history_frames: texture_2d_array<f32>;
+
+@fragment
+fn main(@builtin(position) frac_pos: vec4f) -> @location(0) vec4f {
+    var result = vec4f(0.0, 0.0, 0.0, 0.0);
+    let n_layers = textureNumLayers(history_frames);
+    for(var i = 0u; i < n_layers; i += 1u) {
+        result += textureLoad(history_frames, vec2<u32>(frac_pos.xy), i, 0);
+    }
+    result *= 1.0 / f32(n_layers);
+    return result;
+}
+```
+
+### shaders/vertex.wgsl
+```
+const POSITIONS: array<vec2f, 4> = array(
+    vec2f(-1.0, -1.0),
+    vec2f(1.0, -1.0),
+    vec2f(-1.0, 1.0),
+    vec2f(1.0, 1.0),
+);
+
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+    @location(0) vp: vec2f,
+}
+
+@vertex
+fn main(@builtin(vertex_index) vid: u32) -> VertexOutput {
+    var out: VertexOutput;
+
+    let pos = POSITIONS[vid];
+    out.position = vec4f(pos, 0.0, 1.0);
+    out.vp = pos;
+
+    return out;
+}
+```
+
+### src/camera.rs
+```
+use std::f32::consts::PI;
+
+use bytemuck::NoUninit;
+use nalgebra::{Point3, Vector3};
+use winit::{event::{ElementState, KeyEvent}, keyboard::{KeyCode, PhysicalKey}};
+
+/// neg-z towards target
+/// y up
+/// right hand
+/// 
+/// rotation sequence:
+/// 1. yaw (around y axis)
+/// 2. pitch (around rotated x axis)
+pub struct Camera {
+    pub position: Point3<f32>,
+    pub prev_position: Point3<f32>,
+    pub width: f32,
+    pub height: f32,
+    pub vfov: f32,
+    yaw: f32,
+    pitch: f32,
+
+    moving_speed: f32,
+    mouse_speed: f32,
+
+    forward: i8,
+    backward: i8,
+    left: i8,
+    right: i8,
+    up: i8,
+    down: i8,
+}
+
+#[derive(NoUninit, Clone, Copy)]
+#[repr(C)]
+pub struct CameraGpuData {
+    position: [f32; 4],
+    rot: [[f32; 4]; 3],
+    sin_half_vfov: f32,
+    frame_count: u32,
+    width: f32,
+    height: f32,
+    prev_position: [f32; 4],
+}
+
+impl Camera {
+    pub fn looking_at(position: Point3<f32>, target: Point3<f32>, width: f32, height: f32) -> Self {
+        let dir = (target - position).normalize();
+        let pitch = dir.y.asin();
+        let yaw = if dir.z < 0.0 {
+            (dir.x / dir.z).atan()
+        } else {
+            PI + (dir.x / dir.z).atan()
+        };
+        Self {
+            position,
+            prev_position: position,
+            width,
+            height,
+            vfov: PI * 0.5,
+            yaw,
+            pitch,
+            moving_speed: 1.0,
+            mouse_speed: 0.01,
+            forward: 0,
+            backward: 0,
+            left: 0,
+            right: 0,
+            up: 0,
+            down: 0,
+        }
+    }
+    pub fn on_keyboard(&mut self, event: &KeyEvent) {
+        let key_code = match event.physical_key {
+            PhysicalKey::Code(code) => code,
+            _ => return
+        };
+        let value = match event.state {
+            ElementState::Pressed => 1,
+            ElementState::Released => 0,
+        };
+        match key_code {
+            KeyCode::KeyA => self.left = value,
+            KeyCode::KeyD => self.right = value,
+            KeyCode::KeyW => self.forward = value,
+            KeyCode::KeyS => self.backward = value,
+            KeyCode::ShiftLeft => self.down = value,
+            KeyCode::Space => self.up = value,
+            _ => {}
+        };
+    }
+    pub fn on_mouse_motion(&mut self, dx: f32, dy: f32) {
+        self.pitch -= dy * self.mouse_speed;
+        self.yaw -= dx * self.mouse_speed;
+    }
+    pub fn update_self(&mut self, dt: f32) {
+        let vy = (self.up - self.down) as f32 * self.moving_speed;
+
+        let local_vz = (self.backward - self.forward) as f32 * self.moving_speed;
+        let local_vx = (self.right - self.left) as f32 * self.moving_speed;
+
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+
+        let vz = local_vz * cos_yaw - local_vx * sin_yaw;
+        let vx = local_vz * sin_yaw + local_vx * cos_yaw;
+
+        self.position.x += vx * dt;
+        self.position.y += vy * dt;
+        self.position.z += vz * dt;
+    }
+    pub fn local_to_world_rot(&self) -> [[f32; 4]; 3] {
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let vec_z = Vector3::new(cos_pitch * sin_yaw, -sin_pitch, cos_pitch * cos_yaw);
+        let vec_x = Vector3::y().cross(&vec_z).normalize();
+        let vec_y = vec_z.cross(&vec_x);
+        [
+            [vec_x.x, vec_x.y, vec_x.z, 0.0],
+            [vec_y.x, vec_y.y, vec_y.z, 0.0],
+            [vec_z.x, vec_z.y, vec_z.z, 0.0],
+        ]
+    }
+    pub fn gpu_data(&mut self, frame_count: u32) -> CameraGpuData {
+        self.prev_position = self.position;
+        CameraGpuData {
+            position: [self.position.x, self.position.y, self.position.z, 0.0],
+            rot: self.local_to_world_rot(),
+            sin_half_vfov: (0.5 * self.vfov).sin(),
+            frame_count,
+            width: self.width,
+            height: self.height,
+            prev_position: [self.prev_position.x, self.prev_position.y, self.prev_position.z, 0.0]
+        }
+    }
+}
+```
+
+### src/init.rs
+```
+use std::{fs, sync::Arc, time::Instant};
+
+use bytemuck::cast_slice;
+use image::ImageReader;
+use nalgebra::{Point3, Vector3};
+use wgpu::util::DeviceExt;
+use wgpu_text::glyph_brush::ab_glyph::FontArc;
+use winit::window::Window;
+
+use crate::camera::Camera;
+
+pub const N_HISTORY_ACC: u32 = 4;
+
+pub struct InnerApp {
+    pub window: Arc<Window>,
+    pub surface: wgpu::Surface<'static>,
+    pub surface_config: wgpu::SurfaceConfiguration,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+
+    pub controlling: bool,
+
+    pub text_brush: wgpu_text::TextBrush,
+
+    pub camera: Camera,
+    pub camera_buffer: wgpu::Buffer,
+
+    pub smooth_bind_group_layout: wgpu::BindGroupLayout,
+    pub temporal_bind_group_layout: wgpu::BindGroupLayout,
+
+    pub ray_bind_group: wgpu::BindGroup,
+    pub temporal_bind_group: wgpu::BindGroup,
+
+    pub ray_pipeline: wgpu::RenderPipeline,
+    pub smooth_h_pipeline: wgpu::RenderPipeline,
+    pub smooth_v_pipeline: wgpu::RenderPipeline,
+    pub temporal_pipeline: wgpu::RenderPipeline,
+
+    pub last_time: Instant,
+    pub frame_count: u32,
+
+    pub history_frames: wgpu::Texture,
+    pub normal_depth_texture: wgpu::Texture,
+    pub smooth_temp_texture: wgpu::Texture,
+}
+
+impl InnerApp {
+    pub async fn new(window: Window) -> Self {
+        // wgpu
+        let window = Arc::new(window);
+        let width = window.inner_size().width;
+        let height = window.inner_size().height;
+        
+        let instance = wgpu::Instance::new(&Default::default());
+        let surface = instance.create_surface(window.clone()).unwrap();
+        
+        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptionsBase {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }).await.unwrap();
+        let surface_config = surface.get_default_config(&adapter, width, height).unwrap();
+
+        let (device, queue) = adapter.request_device(&Default::default(), None).await.unwrap();
+        surface.configure(&device, &surface_config);
+
+        // text
+        let font = FontArc::try_from_vec(fs::read("SourceCodePro-Regular.otf").unwrap()).unwrap();
+        let text_brush = wgpu_text::BrushBuilder::using_fonts(vec![font])
+            .build(&device, width, height, surface_config.format);
+
+        // shaders
+        let vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vertex_shader"),
+            source: wgpu::ShaderSource::Wgsl(fs::read_to_string("shaders/vertex.wgsl").unwrap().into())
+        });
+        let ray_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ray_shader"),
+            source: wgpu::ShaderSource::Wgsl(fs::read_to_string("shaders/ray.wgsl").unwrap().into())
+        });
+        let smooth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("smooth_shader"),
+            source: wgpu::ShaderSource::Wgsl(fs::read_to_string("shaders/smooth.wgsl").unwrap().into())
+        });
+        let temporal_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("temporal_shader"),
+            source: wgpu::ShaderSource::Wgsl(fs::read_to_string("shaders/temporal.wgsl").unwrap().into())
+        });
+
+        // g buffers
+        let normal_depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("normal_depth_texture"),
+            size: wgpu::Extent3d {
+                width, height, depth_or_array_layers: 1
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[]
+        });
+
+        // smooth temp buffer
+        let smooth_temp_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("smooth_temp_texture"),
+            size: wgpu::Extent3d {
+                width, height, depth_or_array_layers: 1
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[]
+        });
+
+        // history frames
+        let history_frame = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("history_frame"),
+            size: wgpu::Extent3d {
+                width, height, depth_or_array_layers: 1
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[]
+        });
+
+        // blue noise texture
+        let blue_noise_image = ImageReader::open("LDR_RGBA_0.png").unwrap().decode().unwrap().into_rgba8();
+        let blue_noise_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("blue_noise_image"),
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                view_formats: &[],
+                size: wgpu::Extent3d {
+                    width: blue_noise_image.width(),
+                    height: blue_noise_image.height(),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            cast_slice(blue_noise_image.as_raw())
+        );
+
+        // camera
+        let mut camera = Camera::looking_at(
+            Point3::new(1.0, 1.0, 1.0),
+            Point3::new(0.0, 0.0, 0.0),
+            width as f32,
+            height as f32,
+        );
+        
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera_buffer"),
+            contents: cast_slice(&[camera.gpu_data(0)]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST
+        });
+
+        // voxels
+        let voxel_size = Vector3::new(64i32, 32, 64);
+        let mut voxels = Vec::new();
+        for k in 0..voxel_size.z {
+            for j in 0..voxel_size.y {
+                for i in 0..voxel_size.x {
+                    if k == 0 {
+                        voxels.push([255, 0, 0, 255u8]);
+                    } else if k == voxel_size.z - 1 {
+                        voxels.push([0, 255, 0, 255]);
+                    } else if j == 0 || j == voxel_size.y - 1 || i == 0 {
+                        voxels.push([200, 200, 200, 255]);
+                    } else if (Vector3::new(i, j, k) - voxel_size / 2).abs().sum() < voxel_size.x / 8 {
+                        voxels.push([200, 200, 200, 255]);
+                    } else {
+                        voxels.push([0, 0, 0, 0]);
+                    }
+                }
+            }
+        }
+
+        println!("voxel_buffer_size: {}", voxels.len() * size_of_val(&voxel_size[0]));
+
+        let voxels_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("voxels_buffer"),
+            contents: cast_slice(&voxels),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST
+        });
+        let voxel_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("voxel_size_buffer"),
+            contents: cast_slice(&voxel_size.data.0[0]),
+            usage: wgpu::BufferUsages::UNIFORM
+        });
+
+        // bind groups
+        let ray_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ray_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                }
+            ]
+        });
+        let ray_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ray_bind_group"),
+            layout: &ray_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: voxels_buffer.as_entire_binding()
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: voxel_size_buffer.as_entire_binding()
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&blue_noise_texture.create_view(&Default::default()))
+                }
+            ]
+        });
+        let smooth_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("smooth_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ]
+        });
+        let temporal_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("temporal_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                }
+            ]
+        });
+        let temporal_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("temporal_bind_group"),
+            layout: &temporal_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&history_frame.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2Array),
+                        ..Default::default()
+                    }))
+                }
+            ]
+        });
+
+        // pipeline
+        let ray_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ray_pipeline_layout"),
+            bind_group_layouts: &[&ray_bind_group_layout],
+            push_constant_ranges: &[]
+        });
+        let ray_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ray_pipeline"),
+            layout: Some(&ray_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vertex_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                buffers: &[]
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &ray_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: surface_config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })
+                ]
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let smooth_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("smooth_pipeline_layout"),
+            bind_group_layouts: &[
+                &smooth_bind_group_layout,
+            ],
+            push_constant_ranges: &[]
+        });
+        let smooth_h_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("smooth_h_pipeline"),
+            layout: Some(&smooth_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vertex_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                buffers: &[]
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &smooth_shader,
+                entry_point: Some("smooth_h"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })]
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let smooth_v_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("smooth_v_pipeline"),
+            layout: Some(&smooth_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vertex_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                buffers: &[]
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &smooth_shader,
+                entry_point: Some("smooth_v"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })]
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let temporal_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("temporal_pipeline_layout"),
+            bind_group_layouts: &[&temporal_bind_group_layout],
+            push_constant_ranges: &[]
+        });
+        let temporal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("temporal_pipeline"),
+            layout: Some(&temporal_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vertex_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                buffers: &[]
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &temporal_shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })]
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        Self {
+            window,
+            surface,
+            surface_config,
+            device,
+            queue,
+            history_frames: history_frame,
+            controlling: false,
+            text_brush,
+            camera,
+            camera_buffer,
+            ray_bind_group,
+            smooth_bind_group_layout,
+            temporal_bind_group_layout,
+            temporal_bind_group,
+            ray_pipeline,
+            smooth_h_pipeline,
+            smooth_v_pipeline,
+            temporal_pipeline,
+            last_time: Instant::now(),
+            frame_count: 0,
+            normal_depth_texture,
+            smooth_temp_texture,
+        }
+    }
+}
+```
+
+### src/main.rs
+```
+mod init;
+mod main_loop;
+mod camera;
+
+use init::InnerApp;
+use winit::application::ApplicationHandler;
+use winit::event::{DeviceEvent, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::window::{Window, WindowId};
+
+struct App {
+    inner: Option<InnerApp>,
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let window = event_loop.create_window(Window::default_attributes()).unwrap();
+        self.inner = Some(pollster::block_on(InnerApp::new(window)));
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let inner = self.inner.as_mut().unwrap();
+        match event {
+            WindowEvent::CloseRequested => {
+                println!("The close button was pressed; stopping");
+                event_loop.exit();
+            },
+            WindowEvent::Resized(size) => inner.on_resize(size.width, size.height),
+            WindowEvent::RedrawRequested => inner.request_redraw(),
+            WindowEvent::KeyboardInput {event, .. } => inner.on_keyboard(event),
+            WindowEvent::MouseInput { state, button, .. } => inner.on_mouse_button(state, button),
+            _ => (),
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        let inner = self.inner.as_mut().unwrap();
+        match event {
+            DeviceEvent::MouseMotion { delta } => inner.on_mouse_motion(delta.0 as f32, delta.1 as f32),
+            _ => {}
+        }
+    }
+}
+
+fn main() {
+    let event_loop = EventLoop::new().unwrap();
+
+    let mut app = App {
+        inner: None,
+    };
+    event_loop.run_app(&mut app).unwrap();
+}
+```
+
+### src/main_loop.rs
+```
+use std::time::Instant;
+
+use bytemuck::cast_slice;
+use wgpu_text::glyph_brush;
+use winit::{event::{ElementState, KeyEvent, MouseButton}, keyboard::{KeyCode, PhysicalKey}, window::CursorGrabMode};
+
+use crate::init::{InnerApp, N_HISTORY_ACC};
+
+impl InnerApp {
+    pub fn request_redraw(&mut self) {
+        // time
+        self.frame_count += 1;
+        let now = Instant::now();
+        let dt = (now - self.last_time).as_secs_f32();
+        self.last_time = now;
+
+        // window & surface
+        self.window.request_redraw();
+
+        let surface_texture = self.surface.get_current_texture().unwrap();
+        let surface_view = surface_texture.texture.create_view(&Default::default());
+
+        // text
+        let text = format!("fps: {:.2}", 1.0 / dt);
+        let section = glyph_brush::Section::default()
+            .add_text(
+                glyph_brush::Text::new(&text)
+                    .with_color([1.0, 0.0, 0.0, 1.0]),
+            );
+
+        self.text_brush.queue(&self.device, &self.queue, [section]).unwrap();
+
+        // camera
+        self.camera.update_self(dt);
+        self.queue.write_buffer(&self.camera_buffer, 0, cast_slice(&[self.camera.gpu_data(self.frame_count)]));
+
+        // render
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let mut ray_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ray_pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.history_frames.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("history_frame_attachment"),
+                            base_array_layer: self.frame_count % N_HISTORY_ACC,
+                            array_layer_count: Some(1),
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            ..Default::default()
+                        }),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        }
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.normal_depth_texture.create_view(&Default::default()),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        }
+                    }),
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            ray_pass.set_bind_group(0, &self.ray_bind_group, &[]);
+            ray_pass.set_pipeline(&self.ray_pipeline);
+            ray_pass.draw(0..4, 0..1);
+        }
+        {
+            let mut smooth_h_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("smooth_h_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.smooth_temp_texture.create_view(&Default::default()),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let smooth_h_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("smooth_h_bind_group"),
+                layout: &self.smooth_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.history_frames.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("history_frame_attachment"),
+                            base_array_layer: self.frame_count % N_HISTORY_ACC,
+                            array_layer_count: Some(1),
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            ..Default::default()
+                        }))
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.normal_depth_texture.create_view(&Default::default()))
+                    }
+                ]
+            });
+            smooth_h_pass.set_pipeline(&self.smooth_h_pipeline);
+            smooth_h_pass.set_bind_group(0, &smooth_h_bind_group, &[]);
+            smooth_h_pass.draw(0..4, 0..1);
+        }
+        {
+            let mut smooth_v_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("smooth_v_pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.history_frames.create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("history_frame_attachment"),
+                            base_array_layer: self.frame_count % N_HISTORY_ACC,
+                            array_layer_count: Some(1),
+                            dimension: Some(wgpu::TextureViewDimension::D2),
+                            ..Default::default()
+                        }),
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        }
+                    }),
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let smooth_v_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("smooth_v_bind_group"),
+                layout: &self.smooth_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.smooth_temp_texture.create_view(&Default::default()))
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.normal_depth_texture.create_view(&Default::default()))
+                    }
+                ]
+            });
+            smooth_v_pass.set_pipeline(&self.smooth_v_pipeline);
+            smooth_v_pass.set_bind_group(0, &smooth_v_bind_group, &[]);
+            smooth_v_pass.draw(0..4, 0..1);
+        }
+        {
+            let mut temporal_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("temporal_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            temporal_pass.set_bind_group(0, &self.temporal_bind_group, &[]);
+            temporal_pass.set_pipeline(&self.temporal_pipeline);
+            temporal_pass.draw(0..4, 0..1);
+            self.text_brush.draw(&mut temporal_pass);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        surface_texture.present();
+    }
+    pub fn on_resize(&mut self, width: u32, height: u32) {
+        let wf = width as f32;
+        let hf = height as f32;
+
+        self.history_frames = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("history_frames"),
+            size: wgpu::Extent3d {
+                width, height, depth_or_array_layers: N_HISTORY_ACC
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[]
+        });
+        self.temporal_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("temporal_bind_group"),
+            layout: &self.temporal_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.history_frames.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2Array),
+                        ..Default::default()
+                    }))
+                }
+            ]
+        });
+
+        self.normal_depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("normal_depth_texture"),
+            size: wgpu::Extent3d {
+                width, height, depth_or_array_layers: 1
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[]
+        });
+        self.smooth_temp_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("smooth_temp_texture"),
+            size: wgpu::Extent3d {
+                width, height, depth_or_array_layers: 1
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface_config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[]
+        });
+
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.surface.configure(&self.device, &self.surface_config);
+
+        self.camera.width = wf;
+        self.camera.height = hf;
+
+        self.text_brush.resize_view(wf, hf, &self.queue);
+    }
+    pub fn on_keyboard(&mut self, event: KeyEvent) {
+        if self.controlling {
+            self.camera.on_keyboard(&event);
+
+            let key_code = match event.physical_key {
+                PhysicalKey::Code(code) => code,
+                _ => return
+            };
+            match key_code {
+                KeyCode::Escape => {
+                    if let ElementState::Pressed = event.state {
+                        self.controlling = false;
+                        self.window.set_cursor_grab(CursorGrabMode::None).unwrap();
+                        self.window.set_cursor_visible(true);
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+    pub fn on_mouse_button(&mut self, state: ElementState, button: MouseButton) {
+        if !self.controlling {
+            if let ElementState::Pressed = state {
+                if let MouseButton::Left = button {
+                    self.controlling = true;
+                    self.window
+                        .set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_e| self.window.set_cursor_grab(CursorGrabMode::Locked))
+                        .unwrap();
+                    self.window.set_cursor_visible(false);
+                }
+            }
+        }
+    }
+    pub fn on_mouse_motion(&mut self, dx: f32, dy: f32) {
+        if self.controlling {
+            self.camera.on_mouse_motion(dx, dy);
+        }
+    }
+}
+```

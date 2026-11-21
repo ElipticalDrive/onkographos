@@ -1,0 +1,403 @@
+--- v001.md
++++ v002.md
+@@ -1,62 +1,90 @@
+ # Mesh to SDF via Point Cloud
+ 
+-Also called: Mesh to Signed Distance Field (SDF) via Point Cloud, SurfacePointCloud SDF computation
++Also called: Mesh to Signed Distance Field (SDF) via Point Cloud, SDF Voxelization, SurfacePointCloud SDF computation, Voxelization of SDF
+ 
+ ## Overview
+-This method generates a Signed Distance Field (SDF) for a query set of points by first converting a triangular mesh into a discrete point cloud and then computing distances to that cloud. It solves the problem of creating volumetric distance data from polygonal surfaces without requiring complex analytic integration or GPU-based ray marching. It differs from analytic voxelization by relying on nearest-neighbor search in a point cloud, and from GPU-based generation by performing the heavy lifting on the CPU using KD-trees and batched processing.
++This method generates a Signed Distance Field (SDF) for a triangular mesh by first constructing a surface point cloud and then querying that cloud to determine distances and signs for arbitrary query points or a voxel grid. It solves the problem of converting explicit mesh geometry into a continuous volumetric representation suitable for neural rendering or implicit surface reconstruction. It differs from direct rasterization-based SDF generation by relying on nearest-neighbor searches in a point cloud, which allows for flexible sign determination via surface normals or depth buffers. It builds on [Naive SDF Generation (CPU)](10688-naive-sdf-generation-cpu.md) by introducing structured point cloud sampling and batched KD-tree queries.
+ 
+ ## How it works
+-The method proceeds in three phases: surface point cloud generation, SDF computation via nearest-neighbor search, and sign determination.
++The method consists of three phases: mesh normalization and point cloud generation, sign determination, and SDF computation (either for arbitrary points or a voxel grid).
+ 
+ ### Inputs and Outputs
+-- **Input**: A triangular mesh (typically `trimesh` object), a set of query points (numpy array of shape $(N, 3)$), and configuration parameters.
+-- **Output**: An array of signed distances of shape $(N)$, and optionally gradients.
++**Inputs:**
++- `mesh`: A triangular mesh object (e.g., `trimesh.Trimesh`).
++- `query_points`: An $(N, 3)$ numpy array of points at which to evaluate the SDF. For voxelization, these are derived from the voxel grid.
++- `surface_point_method`: String, either `'scan'` or `'sample'`. Determines how the surface point cloud is generated.
++- `sign_method`: String, either `'normal'` or `'depth'`. Determines how the inside/outside status is calculated.
++- `bounding_radius`: Float. Radius of the sphere around the mesh center for sampling. Default: $\sqrt{3}$ (for unit cube).
++- `scan_count`: Integer. Number of camera viewpoints for `'scan'` method. Default: 100.
++- `scan_resolution`: Integer. Resolution of each scan image. Default: 400.
++- `sample_point_count`: Integer. Number of points to sample uniformly from the mesh surface for `'sample'` method. Default: 10,000,000.
++- `normal_sample_count`: Integer. Number of nearest neighbors ($k$) for KD-tree query when `sign_method='normal'`. Default: 11.
++- `voxel_resolution`: Integer. Resolution $V$ of the output voxel grid ($V \times V \times V$). Default: 64.
++- `batch_size`: Integer. Maximum number of query points processed in one batch to manage memory. Default: 1,000,000.
++- `pad`: Boolean. If true, pad the resulting voxel grid by 1 voxel with constant value 1 (SDF) or edge mode (gradients).
++- `check_result`: Boolean. If true, validate voxel smoothness.
++
++**Outputs:**
++- For `mesh_to_sdf`: A numpy array of SDF values (and optionally gradients) corresponding to `query_points`.
++- For `mesh_to_voxels`: A 3D numpy array of shape $(V, V, V)$ containing SDF values.
+ 
+ ### Data Structures
+-The core data structure is `SurfacePointCloud` [S1, unofficial]:
+-- `mesh`: The original triangular mesh.
+-- `points`: A float array of shape $(M, 3)$ containing the sampled surface points.
+-- `normals`: A float array of shape $(M, 3)$ containing surface normals (optional, required if `sign_method='normal'`).
++**SurfacePointCloud:**
++- `mesh`: The original mesh.
++- `points`: $(M, 3)$ float array of surface points.
++- `normals`: $(M, 3)$ float array of surface normals (optional, computed if `sign_method='normal'`).
++- `scans`: List of `Scan` objects (used for depth-based sign).
+ - `kd_tree`: A `sklearn.neighbors.KDTree` built on `points`.
+-- `scans`: A list of `Scan` objects (used for depth-based sign determination).
+-
+-### Parameters
+-- `surface_point_method`: `'scan'` or `'sample'`. Default: `'scan'` [S1, unofficial].
+-- `sign_method`: `'normal'` or `'depth'`. Default: `'normal'` [S1, unofficial].
+-- `scan_count`: Number of camera scans for `'scan'` method. Default: 100 [S1, unofficial].
+-- `scan_resolution`: Resolution of each scan. Default: 400 [S1, unofficial].
+-- `sample_point_count`: Number of points to sample for `'sample'` method. Default: 10,000,000 [S1, unofficial].
+-- `normal_sample_count` ($k$): Number of nearest neighbors for KD-tree query in normal sign method. Default: 11 [S1, unofficial].
+-- `batch_size`: Max query points per batch. Default: 1,000,000 [S1, unofficial].
+-
+-### Algorithm Steps
+-
+-1. **Input Validation**: Ensure `query_points` is a numpy array of shape $(N, 3)$. If `surface_point_method` is `'sample'` and `sign_method` is `'depth'`, override `sign_method` to `'normal'` due to incompatibility [S1, unofficial].
+-
+-2. **Generate Surface Point Cloud**:
+-   - If `surface_point_method` is `'scan'`: Render the mesh from multiple viewpoints using `pyrender` to generate depth and normal buffers. Extract surface points from these scans. This requires disabling antialiasing to avoid blurred edges in normal buffers [S1, unofficial].
+-   - If `surface_point_method` is `'sample'`: Uniformly sample `sample_point_count` points from the mesh surface. Calculate normals if `sign_method` is `'normal'` [S1, unofficial].
+-   - Build a KD-tree on the resulting points [S1, unofficial].
+-
+-3. **Compute SDF in Batches**:
+-   - Split `query_points` into batches of size `batch_size`.
+-   - For each batch, compute distances and signs based on `sign_method`.
+-
+-4. **Sign Determination (Normal Method)**:
+-   - Query the KD-tree for $k = \text{normal\_sample\_count}$ nearest neighbors. Let the closest point be $p_{closest}$ and its normal be $n_{closest}$.
+-   - Compute direction vector: $d = q - p_{closest}$, where $q$ is the query point [S1, unofficial].
+-   - Determine if inside: Calculate the sum of dot products between $d$ and the normals of the $k$ neighbors. If $\sum_{i=1}^{k} (d \cdot n_i) < k \times 0.5$, the point is considered inside [S1, unofficial].
+-   - If inside, negate the distance.
+-
+-5. **Sign Determination (Depth Method)**:
+-   - Query the KD-tree for 1 nearest neighbor.
+-   - Use ray casting via the stored scans (`is_outside()` method) to determine if the point is outside the mesh. Points not outside are considered inside [S1, unofficial].
+-   - Negate distance for inside points.
+-
+-6. **Gradient Calculation (Normal Method)**:
+-   - Compute raw gradient as the direction vector $d$ normalized.
+-   - If inside, negate the gradient.
+-   - **Near-Surface Correction**: For points where $|dist| < \sqrt{0.0025^2 \times 3} \times 3$, replace the gradient with the pre-computed surface normal $n_{closest}$ to avoid noise [S1, unofficial].
+-   - Normalize the final gradient.
++
++**Scan:**
++- `depth_buffer`: 2D array of depth values from rendering.
++- `normal_buffer`: 2D array of normal vectors from rendering (optional).
++- `camera_transform`: $4 \times 4$ transformation matrix.
++- `resolution`: Integer, width/height of the buffer.
++
++### Steps
++
++1.  **Input Validation:**
++    - Ensure `query_points` is a numpy array of shape $(N, 3)$.
++    - If `surface_point_method == 'sample'` and `sign_method == 'depth'`, override `sign_method` to `'normal'` because depth-based sign requires scan data which is not generated by uniform sampling [S1, unofficial].
++
++2.  **Mesh Normalization:**
++    - Scale the mesh to fit within a unit cube centered at the origin. This is done by `scale_to_unit_cube(mesh)` [S1, unofficial].
++
++3.  **Generate Surface Point Cloud:**
++    - If `surface_point_method == 'scan'`:
++        - Generate `scan_count` camera poses distributed around the mesh.
++        - For each pose, render the mesh to obtain depth and normal buffers using a custom OpenGL/pyrender wrapper that disables antialiasing [S1, unofficial].
++        - Extract 3D points from the depth buffer and their corresponding normals.
++    - If `surface_point_method == 'sample'`:
++        - Sample `sample_point_count` points uniformly from the mesh surface.
++        - If `sign_method == 'normal'`, compute vertex/face normals for these points.
++    - Construct a KD-tree from the resulting points.
++
++4.  **Compute SDF for Query Points:**
++    - Split `query_points` into batches of size `batch_size`.
++    - For each batch:
++        - **If `sign_method == 'normal'`:**
++            - Query the KD-tree for `normal_sample_count` ($k=11$) nearest neighbors.
++            - Compute direction vectors: $\vec{d}_i = \mathbf{q}_i - \mathbf{p}_{\text{nearest}, i}$, where $\mathbf{q}_i$ is the query point and $\mathbf{p}_{\text{nearest}, i}$ is the nearest surface point.
++            - Determine "inside" status: Calculate the dot product of $\vec{d}_i$ with the normal $\mathbf{n}_{\text{nearest}, i}$ of the nearest point. If the sum of dot products for the $k$ neighbors is less than $k \times 0.5$, the point is considered inside [S1, unofficial].
++            - Compute distance: Euclidean distance to the nearest neighbor.
++            - If inside, negate the distance.
++            - **Gradient Calculation:**
++                - Raw gradient is $\vec{d}_i$. If inside, negate gradient.
++                - For points very close to the surface ($|\text{distance}| < \sqrt{0.0025^2 \times 3} \times 3$), replace the gradient with the pre-computed surface normal $\mathbf{n}_{\text{nearest}, i}$ to avoid noise [S1, unofficial].
++                - Normalize the gradient.
++        - **If `sign_method == 'depth'`:**
++            - Query the KD-tree for 1 nearest neighbor.
++            - Determine "inside" status using ray casting via the stored scans (`is_outside()` method). A point is outside if it is visible in any scan and the ray from the camera to the point intersects the surface before the point itself.
++            - Compute distance to nearest neighbor.
++            - If not outside (i.e., inside), negate the distance.
++
++5.  **Voxelization (Optional):**
++    - Generate grid points for a $V \times V \times V$ grid spanning $[-1, 1]$ in each dimension.
++    - Compute SDF values for these grid points using the steps above.
++    - Reshape results to $(V, V, V)$.
++    - If `pad=True`, pad the array by 1 voxel.
++    - If `check_result=True`, verify smoothness: max difference between adjacent voxels must be $< \frac{2.0}{V} \sqrt{3} \times 1.1$ [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -66,129 +94,142 @@
+ from sklearn.neighbors import KDTree
+ 
+-def mesh_to_sdf_via_point_cloud(mesh, query_points, 
+-                                surface_point_method='scan', 
+-                                sign_method='normal',
+-                                scan_count=100, 
+-                                scan_resolution=400, 
+-                                sample_point_count=10000000, 
+-                                normal_sample_count=11, 
+-                                batch_size=1000000):
+-    # 1. Input Validation
+-    if not isinstance(query_points, np.ndarray):
+-        raise TypeError('query_points must be a numpy array.')
+-    if len(query_points.shape) != 2 or query_points.shape[1] != 3:
+-        raise ValueError('query_points must be of shape N x 3.')
+-    
+-    # Incompatible method override
++def scale_to_unit_cube(mesh):
++    """Scale mesh vertices to fit in [-1, 1]^3."""
++    # Implementation details omitted: compute bounding box, center, and scale
++    pass
++
++def get_surface_point_cloud(mesh, method, bounding_radius, scan_count, scan_resolution, sample_count, calculate_normals):
++    """Generate point cloud from mesh."""
++    if method == 'scan':
++        # Render mesh from scan_count viewpoints
++        # Extract points and normals from depth/normal buffers
++        pass
++    elif method == 'sample':
++        # Sample sample_count points from mesh surface
++        # If calculate_normals, compute normals for these points
++        pass
++    # Build KDTree
++    kd_tree = KDTree(points)
++    return SurfacePointCloud(points, normals, kd_tree, scans)
++
++def compute_sdf_normal_sign(query_points, point_cloud, k=11):
++    """Compute SDF using normal-based sign determination."""
++    indices, distances = point_cloud.kd_tree.query(query_points, k=k)
++    closest_points = point_cloud.points[indices]
++    normals = point_cloud.normals[indices]
++    
++    # Direction from surface to query point
++    directions = query_points[:, np.newaxis, :] - closest_points
++    
++    # Dot products
++    dot_products = np.sum(directions * normals, axis=2)
++    
++    # Inside check: sum of dot products < k * 0.5
++    inside = np.sum(dot_products, axis=1) < (k * 0.5)
++    
++    # Distance to nearest neighbor (first neighbor)
++    sdf = distances[:, 0]
++    sdf[inside] = -sdf[inside]
++    
++    # Gradient calculation
++    gradients = directions[:, 0, :] # Direction to nearest neighbor
++    gradients[inside] = -gradients[inside]
++    
++    # Replace gradient with normal for points very close to surface
++    threshold = np.sqrt(0.0025**2 * 3) * 3
++    near_surface = np.abs(sdf) < threshold
++    gradients[near_surface] = normals[near_surface, 0]
++    
++    # Normalize gradients
++    norms = np.linalg.norm(gradients, axis=1, keepdims=True)
++    gradients = gradients / norms
++    
++    return sdf, gradients
++
++def compute_sdf_depth_sign(query_points, point_cloud):
++    """Compute SDF using depth-based sign determination."""
++    indices, distances = point_cloud.kd_tree.query(query_points, k=1)
++    closest_points = point_cloud.points[indices]
++    
++    sdf = distances[:, 0]
++    
++    # Determine inside using ray casting via scans
++    inside = ~point_cloud.is_outside(query_points)
++    sdf[inside] = -sdf[inside]
++    
++    return sdf
++
++def mesh_to_sdf(mesh, query_points, surface_point_method='scan', sign_method='normal', 
++                bounding_radius=np.sqrt(3), scan_count=100, scan_resolution=400, 
++                sample_point_count=10000000, normal_sample_count=11, batch_size=1000000):
++    if not isinstance(query_points, np.ndarray) or query_points.shape[1] != 3:
++        raise ValueError("query_points must be shape (N, 3)")
++    
+     if surface_point_method == 'sample' and sign_method == 'depth':
+-        sign_method = 'normal'
+-
+-    # 2. Generate Point Cloud
+-    # This step involves rendering (for 'scan') or sampling (for 'sample')
+-    # and building a KDTree. Implementation details depend on the specific library.
+-    point_cloud = get_surface_point_cloud(
+-        mesh, surface_point_method, scan_count, scan_resolution, 
+-        sample_point_count, calculate_normals=(sign_method == 'normal')
+-    )
+-    
+-    kd_tree = point_cloud.kd_tree
+-    points = point_cloud.points
+-    normals = point_cloud.normals
+-    
+-    # 3. Process in Batches
+-    all_distances = []
+-    all_gradients = []
+-    
+-    num_batches = (len(query_points) + batch_size - 1) // batch_size
+-    
+-    for i in range(num_batches):
+-        start_idx = i * batch_size
+-        end_idx = min((i + 1) * batch_size, len(query_points))
+-        batch_queries = query_points[start_idx:end_idx]
++        sign_method = 'normal' # Override incompatible combination
++    
++    mesh = scale_to_unit_cube(mesh)
++    point_cloud = get_surface_point_cloud(mesh, surface_point_method, bounding_radius, 
++                                          scan_count, scan_resolution, sample_point_count, 
++                                          sign_method == 'normal')
++    
++    results = []
++    for i in range(0, len(query_points), batch_size):
++        batch = query_points[i:i+batch_size]
++        if sign_method == 'normal':
++            sdf, _ = compute_sdf_normal_sign(batch, point_cloud, k=normal_sample_count)
++        else:
++            sdf = compute_sdf_depth_sign(batch, point_cloud)
++        results.append(sdf)
++    
++    return np.concatenate(results)
++
++def mesh_to_voxels(mesh, voxel_resolution=64, **kwargs):
++    mesh = scale_to_unit_cube(mesh)
++    # Generate grid points
++    x = np.linspace(-1, 1, voxel_resolution)
++    y = np.linspace(-1, 1, voxel_resolution)
++    z = np.linspace(-1, 1, voxel_resolution)
++    xx, yy, zz = np.meshgrid(x, y, z)
++    query_points = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1)
++    
++    sdf_values = mesh_to_sdf(mesh, query_points, **kwargs)
++    voxels = sdf_values.reshape((voxel_resolution, voxel_resolution, voxel_resolution))
++    
++    if kwargs.get('pad', False):
++        voxels = np.pad(voxels, 1, mode='constant', constant_values=1)
+         
+-        distances, gradients = compute_sdf_batch(
+-            batch_queries, kd_tree, points, normals, 
+-            sign_method, normal_sample_count
+-        )
+-        
+-        all_distances.append(distances)
+-        all_gradients.append(gradients)
+-        
+-    return np.concatenate(all_distances), np.concatenate(all_gradients)
+-
+-def compute_sdf_batch(queries, kd_tree, points, normals, sign_method, k):
+-    distances = np.zeros(len(queries))
+-    gradients = np.zeros((len(queries), 3))
+-    
+-    # Query KDTree for k nearest neighbors
+-    # distances_k: shape (N, k)
+-    # indices_k: shape (N, k)
+-    distances_k, indices_k = kd_tree.query(queries, k=k)
+-    
+-    # Get normals for the k neighbors
+-    # normals_k: shape (N, k, 3)
+-    normals_k = normals[indices_k]
+-    
+-    # Closest point and normal
+-    closest_points = points[indices_k[:, 0]]
+-    closest_normals = normals[indices_k[:, 0]]
+-    
+-    if sign_method == 'normal':
+-        # Direction from closest surface point to query point
+-        direction = queries[:, np.newaxis, :] - closest_points[:, np.newaxis, :]
+-        
+-        # Sum of dot products for inside check
+-        # direction * normals_k: shape (N, k, 3)
+-        dot_products = np.sum(direction * normals_k, axis=2)
+-        inside = np.sum(dot_products, axis=1) < (k * 0.5)
+-        
+-        # Distances are the distance to the closest point
+-        distances = distances_k[:, 0]
+-        
+-        # Negate distance for inside points
+-        distances[inside] = -distances[inside]
+-        
+-        # Gradient calculation
+-        raw_gradients = direction[:, 0] # Direction to closest point
+-        raw_gradients[inside] = -raw_gradients[inside]
+-        
+-        # Normalize
+-        norms = np.linalg.norm(raw_gradients, axis=1, keepdims=True)
+-        # Avoid division by zero
+-        norms[norms == 0] = 1.0
+-        gradients = raw_gradients / norms
+-        
+-        # Near-surface gradient correction
+-        # Threshold: sqrt(0.0025^2 * 3) * 3
+-        threshold = np.sqrt(0.0025**2 * 3) * 3
+-        near_surface = np.abs(distances) < threshold
+-        gradients[near_surface] = closest_normals[near_surface]
+-        
+-    elif sign_method == 'depth':
+-        # Depth method uses ray casting via scans
+-        # This requires access to the 'scans' object in point_cloud
+-        # For simplicity, we assume a helper function exists
+-        is_outside = check_outside_via_scans(queries, point_cloud.scans)
+-        
+-        distances = distances_k[:, 0]
+-        inside = ~is_outside
+-        distances[inside] = -distances[inside]
+-        
+-        # Gradients for depth method are not detailed in the primary notes
+-        # [G] Typically computed via finite differences or normal approximation
+-        gradients = np.zeros_like(queries)
+-        
+-    return distances, gradients
++    return voxels
+ ```
+ 
++### Parameters and Typical Values
++- `voxel_resolution`: 64 (default), 128, 256.
++- `scan_count`: 100 (default).
++- `scan_resolution`: 400 (default).
++- `sample_point_count`: 10,000,000 (default).
++- `normal_sample_count`: 11 (default).
++- `batch_size`: 1,000,000 (default).
++
++### Edge Cases and Pitfalls
++- **Incompatible Methods:** Using `surface_point_method='sample'` with `sign_method='depth'` is invalid because the depth buffer is not generated for sampled points. The code automatically falls back to `sign_method='normal'` [S1, unofficial].
++- **Near-Surface Gradient Noise:** Distances very close to zero may have noisy gradients from the KD-tree direction. These are replaced by the pre-computed surface normals [S1, unofficial].
++- **Precision:** The mesh is scaled to a unit cube. Ensure the mesh is watertight for accurate sign determination, especially with the depth method.
++
++## Subtopics
++
++### [Sampling SDF Near Surface](16321-sampling-sdf-near-surface.md)
++Generates query points concentrated near the mesh surface for training SDFs, differing from uniform sampling by prioritizing surface proximity.
++
+ ## Operating characteristics
+-- **Time Complexity**: Dominated by KD-tree construction $O(M \log M)$ and $N$ queries $O(N \log M)$, where $M$ is the number of surface points and $N$ is the number of query points.
+-- **Memory Complexity**: $O(M + N)$ to store the point cloud and query results.
+-- **Performance**: CPU-bound. Batching allows processing large query sets without excessive memory allocation. The `scan` method is slower to generate the point cloud but provides robust normals. The `sample` method is faster for cloud generation but may have less uniform distribution.
+-- **Strengths**: Simple implementation, no GPU required, robust sign determination via normals.
+-- **Limitations**: Resolution is limited by the density of the point cloud. Very thin features may be missed if not sampled. The `depth` method requires storing scan data, increasing memory usage.
++- **Time Complexity:** $O(N \log M)$ for $N$ query points and $M$ surface points, due to KD-tree queries.
++- **Memory Complexity:** $O(M + N)$ for storing the point cloud and query results.
++- **Performance:** Depends heavily on `scan_count` and `sample_point_count`. Rendering scans is GPU-accelerated but can be slow for high resolutions. KD-tree queries are CPU-bound.
++- **Strengths:** Flexible sign determination; handles non-watertight meshes better than pure rasterization if normals are used; easy to implement on CPU.
++- **Limitations:** Slower than GPU-based rasterization for high-resolution voxel grids; memory intensive for large point clouds; noisy gradients near surface without correction.
++- **When to use:** When CPU-only implementation is required; when normal-based sign is preferred; for generating training data for neural SDFs.
++- **When not to use:** For real-time rendering; for very high-resolution voxel grids where GPU rasterization is significantly faster.
+ 
+ ## Background
+-This method is part of the `mesh_to_sdf` library, an unofficial Python package for converting meshes to SDFs [S1, unofficial]. It leverages `pyrender` for rendering and `scikit-learn` for KD-tree operations. It is designed as a CPU-based alternative to GPU-based SDF generation methods, suitable for preprocessing or environments without GPU support.
++The method is based on the `mesh_to_sdf` library by marian42 [S1, unofficial]. It draws inspiration from the DeepSDF paper [S1, unofficial] for sampling strategies. The approach of using point clouds and KD-trees for SDF computation is a common technique in implicit surface reconstruction and neural rendering pipelines.
+ 
+ ## Sources

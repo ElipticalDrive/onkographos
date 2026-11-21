@@ -1,0 +1,356 @@
+# Multi-scale PointNeRF++ Feature Aggregation
+
+Also called: Hierarchical point cloud feature extraction, PointNeRF++ multi-scale approach
+
+## Overview
+Multi-scale PointNeRF++ is a method for obtaining radiance ($\rho_q$) and density ($\sigma_q$) for a query point $q$ by operating on a sparse, hierarchical point cloud representation at multiple granularity levels [S1]. It solves the problem of rendering in empty regions without relying on failure-prone region-growing heuristics [S1]. Unlike its sibling [PointNeRF](link-to-pointnerf), this method naturally fills empty regions by averaging feature embeddings over valid scale levels where neighbors exist [S1]. It builds on [NeRF Network Query with Hashed Embeddings](3107-nerf-network-query-with-hashed-embeddings.md) by replacing hash grids with a multi-scale point cloud hierarchy [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Query point $q \in \mathbb{R}^3$.
+*   Hierarchical point cloud $\{P_s\}_{s=1}^{S}$, where $S=5$ is the total number of scale levels [S1].
+*   Feature maps $\{F_s\}_{s=1}^{S}$ associated with each scale level [S1].
+
+**Outputs:**
+*   Radiance $\rho_q \in \mathbb{R}^3$ (color).
+*   Density $\sigma_q \in \mathbb{R}$ (opacity).
+
+### Data Structures
+
+**Point Cloud Hierarchy:**
+The input is a set of 5 scale levels $\{P_s\}$.
+*   **Global Scale ($s=1$):** Represents the entire scene. Points are derived from a global voxel grid.
+*   **Coarse Scales ($s=2, 3$):** Intermediate granularity.
+*   **Fine Scales ($s=4, 5$):** Finest granularity, closest to the original point cloud density.
+
+**Feature Storage:**
+Features are stored differently depending on the scale level $s$:
+1.  **Tri-plane Representation (Coarsest levels):**
+    *   Used for the global scale and the two largest (coarsest) remaining levels [S1].
+    *   Each point $p$ at these levels is associated with three orthogonal feature planes: $f_p^{XY}, f_p^{YZ}, f_p^{XZ}$ [S1].
+    *   **Resolution:**
+        *   Global scale: $512 \times 512$ per plane [S1].
+        *   Coarsest two remaining levels: Each plane is a two-layer pyramid with $4 \times 4$ and $2 \times 2$ grids [S1].
+    *   **Dimension:** 32-dimensional feature vectors per plane [S1].
+    *   **Query:** Values are retrieved via bilinear interpolation at local coordinates [S1].
+2.  **Point Features (Finest levels):**
+    *   Used for the two finest scales [S1].
+    *   Each point $p$ has a direct 32-dimensional feature vector $f_p$ [S1].
+
+**Decoder MLP ($M$):**
+*   **Density:** One linear layer [S1].
+*   **Color:** Four-layer MLP with 64 neurons per hidden layer [S1].
+
+**Feature Extraction MLP:**
+*   Applied after tri-plane query or point feature retrieval [S1].
+*   Architecture: Four-layer MLP with 64 neurons per hidden layer [S1].
+
+### Parameters
+
+*   $\tau$: Threshold ratio for neighborhood radius. The search radius at scale $s$ is $\tau V_s$, where $V_s$ is the voxel size at scale $s$ [S1].
+*   $\epsilon$: Small constant added to distance to avoid division by zero. Value not explicitly given in sources [G: typical value $10^{-6}$ or $10^{-8}$].
+*   Max Neighbors:
+    *   8 for ScanNet and NeRF Synthetic datasets [S1].
+    *   6 for KITTI-360 dataset [S1].
+*   Ray Sampling Points:
+    *   400 points per ray for ScanNet and NeRF Synthetic [S1].
+    *   1,000 points per ray for KITTI-360 [S1].
+*   Positional Encodings: 5 frequencies augmented to global scale features [S1].
+
+### Steps
+
+1.  **Determine Valid Scale Levels:**
+    For a query point $q$ and hierarchy $\{P_s\}$, identify the set of valid scale levels $\mathcal{S}(q, \{P_s\})$ [S1]:
+    $$ \mathcal{S}(q, \{P_s\}) = \{ s \mid \mathcal{N}(q, P_s) \neq \emptyset \} $$
+    where $\mathcal{N}(q, P_s)$ is the set of neighbors at scale $s$ [S1].
+
+2.  **Find Neighbors:**
+    For each scale $s$, find neighbors $\mathcal{N}(q, P_s)$ [S1]:
+    $$ \mathcal{N}(q, P_s) = \{ p \mid p \in P_s \land \|p - q\|_2 \le \tau V_s \} $$
+    *   Implementation note: Use voxel-grid-based approximate nearest neighbors to speed up search [S1].
+    *   Limit the number of neighbors to `max_neighbors` (8 or 6) to limit GPU memory [S1].
+
+3.  **Compute Feature Embedding per Scale:**
+    For each valid scale $s \in \mathcal{S}(q, \{P_s\})$, compute the feature embedding $E_s = \text{PointNeRF}_{feature}(q | P_s, F_s)$ [S1]:
+    $$ E_s = \frac{\sum_{p \in \mathcal{N}(q, P_s)} w(p, q) \cdot \text{MLP}_{feature}(f_p, u_p)}{\sum_{p \in \mathcal{N}(q, P_s)} w(p, q)} $$
+    where:
+    *   $w(p, q) = (\|p - q\|_2 + \epsilon)^{-1}$ [S1].
+    *   $u_p = (q - p) / (\tau V_s)$ is the local 3D coordinate relative to point $p$ [S1].
+    *   $\text{MLP}_{feature}(f_p, u_p)$ depends on the scale:
+        *   **If scale $s$ uses Tri-planes:**
+            $$ \text{MLP}_{feature}(f_p, u_p) = \text{MLP}_{extract} \left( f_p^{XY}[u_p] + f_p^{YZ}[u_p] + f_p^{XZ}[u_p] \right) $$
+            where $f_p^{**}[u_p]$ denotes querying the tri-plane at position $u_p$ with bilinear interpolation, and $\text{MLP}_{extract}$ is the 4-layer, 64-neuron MLP [S1].
+        *   **If scale $s$ uses Point Features:**
+            $$ \text{MLP}_{feature}(f_p, u_p) = \text{MLP}_{extract} (f_p) $$
+            where $f_p$ is the 32-dim feature vector of point $p$ [S1].
+
+4.  **Aggregate Features:**
+    Average the feature embeddings from all valid scales [S1]:
+    $$ E_{avg} = \mathbb{E}_{s \in \mathcal{S}(q, \{P_s\})} [ E_s ] = \frac{1}{|\mathcal{S}(q, \{P_s\})|} \sum_{s \in \mathcal{S}(q, \{P_s\})} E_s $$
+
+5.  **Decode Radiance and Density:**
+    Pass the aggregated feature $E_{avg}$ through the decoder MLP $M$ [S1]:
+    $$ \rho_q, \sigma_q = M(E_{avg}) $$
+    *   $\sigma_q$ is the output of the single linear layer [S1].
+    *   $\rho_q$ is the output of the 4-layer, 64-neuron MLP [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def query_pointnerf_plus_plus(q, hierarchy, params):
+    """
+    Query radiance and density for point q using Multi-scale PointNeRF++.
+    
+    Args:
+        q: Query point (3,)
+        hierarchy: List of 5 scale levels. Each level s is a dict:
+                   {'points': list of (3,) points, 
+                    'features': list of features (either 32-dim vectors or tri-plane data),
+                    'voxel_size': V_s}
+        params: Dict containing tau, epsilon, max_neighbors, etc.
+    
+    Returns:
+        rho: Radiance (3,)
+        sigma: Density (scalar)
+    """
+    tau = params['tau']
+    epsilon = params['epsilon']
+    max_neighbors = params['max_neighbors']
+    
+    valid_scales = []
+    scale_embeddings = []
+    
+    for s in range(len(hierarchy)):
+        level = hierarchy[s]
+        points = level['points']
+        features = level['features']
+        voxel_size = level['voxel_size']
+        is_triplane = level['is_triplane'] # True for coarsest 3 levels, False for finest 2
+        
+        # Step 1 & 2: Find neighbors
+        # Use voxel-grid-based approximate nearest neighbors in practice.
+        # Here we simulate a ball query for clarity.
+        neighbors = []
+        neighbor_features = []
+        
+        # Optimization: In implementation, use spatial hashing or voxel grid for O(1) lookup
+        # rather than brute force O(N).
+        for i, p in enumerate(points):
+            dist_sq = sum((q[j] - p[j])**2 for j in range(3))
+            dist = math.sqrt(dist_sq)
+            radius = tau * voxel_size
+            
+            if dist <= radius:
+                neighbors.append(p)
+                neighbor_features.append(features[i])
+                
+                if len(neighbors) >= max_neighbors:
+                    break
+        
+        if not neighbors:
+            continue
+            
+        valid_scales.append(s)
+        
+        # Step 3: Compute feature embedding for this scale
+        weighted_sum = [0.0, 0.0, 0.0] # For 3D feature vector
+        weight_total = 0.0
+        
+        for p, f in zip(neighbors, neighbor_features):
+            dist = math.sqrt(sum((q[j] - p[j])**2 for j in range(3)))
+            w = 1.0 / (dist + epsilon)
+            
+            # Compute local coordinate
+            u = [(q[j] - p[j]) / (tau * voxel_size) for j in range(3)]
+            
+            # Get feature value based on scale type
+            if is_triplane:
+                # Tri-plane query: f_p^XY[u] + f_p^YZ[u] + f_p^XZ[u]
+                # Assuming f is structured as [XY_data, YZ_data, XZ_data]
+                # Each data is a 2D grid or pyramid.
+                # Bilinear interpolation is performed at u.
+                # Note: u might be outside [0,1] depending on normalization.
+                # Standard practice: clamp or handle boundaries.
+                val_xy = bilinear_interpolate(f['XY'], u[0], u[1])
+                val_yz = bilinear_interpolate(f['YZ'], u[1], u[2])
+                val_xz = bilinear_interpolate(f['XZ'], u[0], u[2])
+                
+                triplane_feat = [val_xy[j] + val_yz[j] + val_xz[j] for j in range(32)]
+                
+                # Apply 4-layer MLP with 64 neurons
+                feat_mlp_out = apply_mlp_4x64(triplane_feat)
+            else:
+                # Point feature: direct 32-dim vector
+                feat_mlp_out = apply_mlp_4x64(f)
+            
+            # Accumulate weighted sum
+            for j in range(32):
+                weighted_sum[j] += w * feat_mlp_out[j]
+            weight_total += w
+            
+        if weight_total > 0:
+            avg_feat = [weighted_sum[j] / weight_total for j in range(32)]
+            scale_embeddings.append(avg_feat)
+            
+    # Step 4: Aggregate features across valid scales
+    if not scale_embeddings:
+        # Fallback or error handling if no neighbors found at any scale
+        # [G]: Return zero or background color depending on context
+        return [0.0, 0.0, 0.0], 0.0
+        
+    avg_scale_feat = [0.0] * 32
+    num_scales = len(scale_embeddings)
+    for s_feat in scale_embeddings:
+        for j in range(32):
+            avg_scale_feat[j] += s_feat[j]
+    avg_scale_feat = [x / num_scales for x in avg_scale_feat]
+    
+    # Augment with positional encodings if global scale is involved?
+    # The source says "augment the features extracted from the global tri-plane 
+    # with positional encodings". This implies the augmentation happens 
+    # *before* the final averaging or *during* the global scale embedding calculation.
+    # Re-reading: "augment the features extracted from the global tri-plane...".
+    # This suggests the input to the MLP for the global scale includes PE.
+    # However, the formula shows MLP_feature taking f_p and u.
+    # Let's assume the MLP_feature for the global scale internally handles PE 
+    # or the feature vector is concatenated with PE before the MLP.
+    # Given the formula structure, we assume the MLP_feature output is the result.
+    # If PE is separate, it would be concatenated to avg_scale_feat before Decoder.
+    # Source: "augment the features extracted from the global tri-plane with positional encodings...".
+    # This likely means the input to the decoder or the feature embedding includes PE.
+    # Let's stick to the formula: MLP_decoder takes the averaged feature.
+    # If PE is needed, it's part of the feature representation.
+    # For simplicity, we assume the 32-dim feature is sufficient as per the main formula,
+    # and PE is an implementation detail of the global scale's MLP_feature or pre-processing.
+    # [G]: If PE is required, concatenate 5 frequencies of positional encoding to avg_scale_feat.
+    
+    # Step 5: Decode
+    # Density: Linear layer
+    sigma = linear_layer_density(avg_scale_feat)
+    
+    # Color: 4-layer MLP with 64 neurons
+    rho = mlp_color(avg_scale_feat)
+    
+    return rho, sigma
+
+def bilinear_interpolate(grid, u, v):
+    """
+    Simple bilinear interpolation for a 2D grid.
+    Assumes grid is normalized to [0,1]x[0,1].
+    """
+    # Clamp u, v to [0,1]
+    u = max(0.0, min(1.0, u))
+    v = max(0.0, min(1.0, v))
+    
+    # Get grid dimensions
+    H, W, C = grid.shape
+    
+    # Map u, v to indices
+    u_idx = u * (W - 1)
+    v_idx = v * (H - 1)
+    
+    x0 = int(math.floor(u_idx))
+    y0 = int(math.floor(v_idx))
+    x1 = min(x0 + 1, W - 1)
+    y1 = min(y0 + 1, H - 1)
+    
+    dx = u_idx - x0
+    dy = v_idx - y0
+    
+    # Interpolate
+    val00 = grid[y0, x0]
+    val01 = grid[y0, x1]
+    val10 = grid[y1, x0]
+    val11 = grid[y1, x1]
+    
+    res = (1 - dx) * (1 - dy) * val00 + \
+          (1 - dx) * dy * val01 + \
+          dx * (1 - dy) * val10 + \
+          dx * dy * val11
+          
+    return res
+
+def apply_mlp_4x64(input_feat):
+    """
+    4-layer MLP with 64 neurons.
+    Input: 32-dim
+    Hidden 1: 64
+    Hidden 2: 64
+    Hidden 3: 64
+    Output: 64
+    """
+    # [G]: Standard ReLU activations assumed for hidden layers
+    h1 = relu(linear(input_feat, 32, 64))
+    h2 = relu(linear(h1, 64, 64))
+    h3 = relu(linear(h2, 64, 64))
+    return linear(h3, 64, 64)
+
+def linear_layer_density(input_feat):
+    """
+    Single linear layer for density.
+    """
+    return linear(input_feat, 64, 1)
+
+def mlp_color(input_feat):
+    """
+    4-layer MLP with 64 neurons for color.
+    Input: 64-dim (from feature extraction MLP)
+    Hidden 1: 64
+    Hidden 2: 64
+    Hidden 3: 64
+    Output: 3 (RGB)
+    """
+    h1 = relu(linear(input_feat, 64, 64))
+    h2 = relu(linear(h1, 64, 64))
+    h3 = relu(linear(h2, 64, 64))
+    return linear(h3, 64, 3)
+
+def relu(x):
+    return max(0.0, x)
+
+def linear(x, in_dim, out_dim):
+    # [G]: Placeholder for actual weight matrix multiplication
+    # In a real implementation, this would be a matrix multiply.
+    # Here we assume a simplified linear transformation.
+    # Since we cannot define weights, we return a dummy value for structure.
+    # This function must be implemented with actual weights in the model.
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Empty Regions:** If no neighbors are found at any scale, the query returns no valid embedding. The method avoids region-growing heuristics by relying on the multi-scale hierarchy to naturally fill gaps [S1]. If a query point is completely isolated, the result is undefined by this method alone [G: typically handled by background or fallback].
+*   **Numerical Stability:** The weight calculation $w(p, q) = (\|p - q\|_2 + \epsilon)^{-1}$ requires $\epsilon > 0$ to prevent division by zero when $p=q$ [S1].
+*   **Per-Point Weights:** The original PointNeRF used per-point weights, but these were experimentally found to not improve rendering quality and are omitted in PointNeRF++ [S1].
+*   **Bounding Box:** For points outside the bounding box of the point cloud, the contraction function from [2] is used [S1].
+*   **Sky Modeling:** For outdoor scenes like KITTI-360, a separate four-layer MLP mapping ray direction to color is used to model the sky, separate from the point cloud query [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** Depends on the number of neighbors and scales. Neighborhood search is accelerated using voxel-grid-based approximate nearest neighbors [S1]. The number of neighbors is capped (6 or 8) to limit computation [S1].
+*   **Memory Complexity:** Determined by the storage of tri-planes and point features. Tri-planes are $512 \times 512$ for the global scale and pyramids for coarser levels, with 32-dim features [S1].
+*   **Performance:** Trained on a single NVIDIA V100 GPU for 200k iterations [S1].
+*   **Strengths:**
+    *   Naturally fills empty regions without region-growing heuristics [S1].
+    *   Tri-plane representation at coarse levels increases representation power without excessive computational cost [S1].
+    *   Effective for large scenes (e.g., KITTI-360) [S1].
+*   **Limitations:**
+    *   Requires a hierarchical point cloud input [S1].
+    *   Performance depends on the quality of the initial point cloud [S1].
+*   **When to Use:** Suitable for novel view synthesis from sparse point clouds, especially in large outdoor scenes where empty regions are common [S1].
+*   **When Not to Use:** If high-density point clouds are available and empty regions are not a concern, simpler methods like standard PointNeRF might suffice [S1].
+
+## Background
+
+*   **Origin:** PointNeRF++ was introduced in the paper "PointNeRF++: A Multi-scale, Point-Based Neural Radiance Field" [S1].
+*   **Development:** It extends PointNeRF [53] by introducing a multi-scale hierarchy and tri-plane features at coarse levels [S1].
+*   **Usage:** Evaluated on ScanNet, NeRF Synthetic, and KITTI-360 datasets [S1]. It is used for novel view synthesis in both indoor and outdoor settings [S1].
+
+## Sources
+
+[S1] PointNeRF++: A Multi-scale, Point-Based Neural Radiance Field, https://doi.org/10.1007/978-3-031-72920-1_13, fetched 2026-10-27

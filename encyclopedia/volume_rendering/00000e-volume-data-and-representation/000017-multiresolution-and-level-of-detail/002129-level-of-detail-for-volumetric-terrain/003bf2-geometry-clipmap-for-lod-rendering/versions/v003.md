@@ -1,0 +1,53 @@
+# Geometry Clipmap for LOD Rendering
+Also called: Volumetric terrain clipmap
+
+## Overview
+Geometry Clipmap for LOD Rendering is a level-of-detail technique for real-time volumetric terrain that replaces conventional 2D concentric rings with 3D cubical shells to reduce vertex counts for distant geometry [S1]. It differs from sibling methods like [Nested Clip-Boxes](13078-nested-clip-boxes.md) by using world octants of LOD grids to form cubical shells, whereas Nested Clip-Boxes caches polygonal mesh geometry in nested cubic volumes to handle complex 3D mesh topologies [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Viewer position, terrain function, clipmap shell parameters (thickness, LOD levels).
+*   **Output:** Triangle meshes for each LOD shell, rendered with decreasing vertex density as distance from the viewer increases [S1].
+
+**Data Structures:**
+*   **Clipmap Shell List:** A list of world octant keys for every LOD shell [S1].
+*   **Task Queues:** Two separate queues manage volume modification tasks and contouring tasks, with modifications taking precedence [S1].
+*   **Local CSG Queues:** Used to create data for an octant; the process is identical across all LOD grids [S1].
+
+**Steps:**
+1.  **Initialize Clipmap:** Create concentric cubical shells around the viewer, supported by the world octree [S1].
+2.  **Maintain Octant Keys:** For each shell, maintain a list of world octant keys representing the current active geometry patches [S1].
+3.  **Update on Viewer Movement:** Create a new list of keys for each shell based on the viewer's current position [S1]. Compare the new keys with those from the current list to identify octants that have left or entered the shell [S1].
+4.  **Task Management:** Add volume modification tasks to the modification queue and contouring tasks to the contouring queue [S1]. Process queues with modification priority [S1].
+5.  **Mesh Generation:** For each active octant in a shell, use local CSG queues to generate mesh data [S1]. For LOD levels above zero, use world octants of the corresponding LOD grid to create meshes with lower effective resolution [S1].
+
+**Formulas and Parameters:**
+*   **LOD Resolution:** The resolution of a shell at LOD $L$ is lower than LOD $L-1$ [S1]. Shell thickness is adjustable by the user [S1].
+*   **Exponential Data Requirement:** Accumulating existing data from lower LOD grids into a higher grid octant is not feasible because all required data from the lower grids must be fully available [S1]. For example, creating a resampled data set in LOD 8 requires data from up to eight child octants from LOD 7, each requiring their own eight children, leading to $8^7 - 1 = 2097152$ octants needing processing [S1].
+
+**Pitfalls:**
+*   **Data Accumulation:** Do not attempt to accumulate existing data from lower LOD grids into an octant of a higher grid, as it triggers exponential processing requirements (e.g., 2097152 octants for LOD 8) [S1].
+
+## Subtopics
+
+### [Nested Clip-Boxes](13078-nested-clip-boxes.md)
+A level-of-detail rendering technique for massive procedural volumetric terrains that caches polygonal mesh geometry in a set of nested cubic volumes (Clip-Boxes) centered on the viewpoint. It solves the problem of real-time visualization of arbitrary-sized 3D terrain functions by converting sampled volume data into triangle meshes via iso-surface extraction, while maintaining high frame rates through incremental updates and seamless LOD transitions. Unlike Geometry Clipmap, which operates on world octants of LOD grids, Nested Clip-Boxes handles complex, rapidly changing 3D mesh topologies derived from volumetric data.
+
+### Analytic Heightfield Clipmap Rendering
+Renders distant terrain using nested clipmap rings derived from an analytic heightfield, extending beyond the meshed voxel range [S2, unofficial]. It constructs four nested clipmap rings in worker threads, flat-shades and colours them to match the voxel surface, and applies a per-column mask to hide rings where voxel chunks are actively meshed [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given. The method avoids exponential complexity by processing each octant independently via local CSG queues rather than accumulating data across LODs [S1].
+*   **Memory Complexity:** Not explicitly given. Depends on the number of active octants in the clipmap shells [S1].
+*   **Performance:** Improves GPU performance by reducing the number of vertices for distant meshes [S1].
+*   **Strengths:** GPU-friendly, reduces vertex count for distant objects, straightforward update mechanism based on viewer movement [S1].
+*   **Limitations:** Accumulating data across LODs is computationally prohibitive [S1].
+*   **When to use:** Real-time rendering of large volumetric terrain where geometry can be decomposed into world octants [S1].
+*   **When not to use:** Not given in the sources.
+
+## Background
+Introduced in a WebGL-based volumetric terrain rendering system [S1]. The technique adapts conventional 2D geometry clipmaps (concentric rings) to 3D by using cubical shells composed of world octants [S1].
+
+## Sources
+[S1] Volumetric Terrain Rendering with WebGL, https://doi.org/10.2352/issn.2470-1173.2018.06.mobmu-136, fetched 2026-10-26
+[S2] 12.8B destructible voxels rendered in the browser with Rust WASM custom engine, https://github.com/cktang88/2.5d-experiment, fetched 2026-10-26 (unofficial)

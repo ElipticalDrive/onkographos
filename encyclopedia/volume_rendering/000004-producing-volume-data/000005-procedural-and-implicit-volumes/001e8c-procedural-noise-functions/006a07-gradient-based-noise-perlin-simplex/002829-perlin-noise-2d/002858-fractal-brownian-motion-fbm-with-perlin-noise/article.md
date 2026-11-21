@@ -1,0 +1,124 @@
+# Fractal Brownian Motion (fBm) with Perlin Noise
+
+Also called: FBM noise, Fractal Brownian Motion, Fractal Noise, Multi-octave Perlin Noise, Octave Noise, Weighted sum of band-pass noises, octaves
+
+## Overview
+Fractal Brownian Motion (fBm) with Perlin Noise is a procedural technique that generates complex, self-similar noise patterns by summing multiple octaves of a base gradient noise function (typically Perlin Noise) with increasing frequency and decreasing amplitude [S1, S2, unofficial][S3, unofficial][S4, unofficial][S5]. It solves the problem of creating natural-looking, detailed volumetric structures (such as terrain, smoke, or clouds) that simple Perlin noise cannot provide due to its lack of multi-scale detail [S2, unofficial][S9]. Unlike standard Perlin noise, which produces a single scale of variation, fBm mimics natural fractal phenomena by layering fine details over coarse structures [S2, unofficial][S9].
+
+## How it works
+**Inputs:**
+- `p`: Input coordinate (vector of dimension $d$, typically 2D or 3D).
+- `octaves`: Integer number of noise layers to sum ($N$).
+- `persistence`: Float amplitude decay factor per octave ($A$).
+- `lacunarity`: Float frequency increase factor per octave ($L$).
+- `base_noise`: A gradient noise function (e.g., Perlin Noise 2D/3D) returning values in $[-1, 1]$ or $[0, 1]$.
+
+**Outputs:**
+- `value`: The summed fBm noise value.
+
+**Data Structures:**
+No complex data structures are required beyond the state variables for the loop. The base noise function requires a permutation table (for Perlin) or hash function, as defined in [Perlin Noise 2D](4211-perlin-noise-2d.md).
+
+**Parameters:**
+- `octaves`: Typical range 1–8 [S2, unofficial], or up to 12 for high detail [S4, unofficial].
+- `persistence`: Typically 0.5 (halving amplitude) [S2, unofficial][S7, unofficial][S9].
+- `lacunarity`: Typically 2.0 (doubling frequency) [S2, unofficial][S7, unofficial][S9]. Note: For tiling textures, lacunarity must be a power of 2 [S6, unofficial].
+
+**Steps:**
+1. Initialize `value = 0.0`, `amplitude = 1.0`, `frequency = 1.0`.
+2. Loop `i` from 0 to `octaves - 1`:
+   a. Evaluate the base noise function at the scaled coordinate: `n = base_noise(p * frequency)`.
+   b. Add the weighted noise to the sum: `value += amplitude * n`.
+   c. Update amplitude: `amplitude *= persistence`.
+   d. Update frequency: `frequency *= lacunarity`.
+3. (Optional) Normalize the result. If the base noise is in $[-1, 1]$, the theoretical max is $\sum amplitude_i$. Normalization ensures consistent output range [S2, unofficial][S6, unofficial].
+4. Return `value`.
+
+**Formulas:**
+The general form is a weighted sum of band-pass noise functions [S5]:
+$$ \text{FBM}(\mathbf{x}) = \sum_{i=0}^{N-1} w_i N(2^i \mathbf{x}) $$
+Where $N$ is the base noise function, $w_i$ is the weight of octave $i$, and $2^i$ represents the frequency scaling [S5]. With constant persistence $A$ and lacunarity $L=2$, this expands to [S9]:
+$$ \text{FBM} = A \cdot N(\mathbf{p}) + A^2 \cdot N(2\mathbf{p}) + A^3 \cdot N(4\mathbf{p}) + \dots $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fbm_perlin(p, octaves, persistence, lacunarity, base_noise_func):
+    """
+    Computes Fractal Brownian Motion using a base gradient noise function.
+    
+    Args:
+        p: Input coordinate (vec2 or vec3).
+        octaves: Number of octaves to sum.
+        persistence: Amplitude decay factor (e.g., 0.5).
+        lacunarity: Frequency increase factor (e.g., 2.0).
+        base_noise_func: Function taking (coord) -> float in [-1, 1].
+        
+    Returns:
+        float: The fBm value.
+    """
+    value = 0.0
+    amplitude = 1.0
+    frequency = 1.0
+    max_value = 0.0  # For normalization
+    
+    # Calculate max possible value for normalization
+    for i in range(octaves):
+        max_value += amplitude
+        amplitude *= persistence
+        
+    amplitude = 1.0
+    frequency = 1.0
+    
+    for i in range(octaves):
+        # Evaluate base noise at scaled coordinate
+        # Note: base_noise_func must be implemented per [Perlin Noise 2D](4211-perlin-noise-2d.md)
+        noise_val = base_noise_func(p * frequency)
+        
+        # Add weighted contribution
+        value += amplitude * noise_val
+        
+        # Update parameters for next octave
+        amplitude *= persistence
+        frequency *= lacunarity
+        
+    # Normalize to [-1, 1] if base noise was in [-1, 1]
+    if max_value > 0:
+        value /= max_value
+        
+    return value
+```
+
+**Edge Cases and Pitfalls:**
+- **High Octave Counts:** Significantly reduce performance due to nested loop complexity in raymarchers [S4, unofficial].
+- **Frequency Cutoff:** The summation must stop when the frequency becomes too high for the noise to be properly represented between neighboring pixels (aliasing) [S9].
+- **Tiling:** If the resulting volume or texture must tile, lacunarity must be a power of 2 [S6, unofficial].
+- **Negative Weights:** Negative weights cannot cancel energy from a frequency band because noise has random phase; the primitive noise function must be band-pass rather than merely band-limited [S5].
+- **Turbulence Variant:** Using `abs(noise)` instead of signed noise creates a "turbulence" effect (white-noise-like) rather than cloudy patterns [S1, unofficial].
+
+## Subtopics
+
+### [Turbulence Function](16932-turbulence-function.md)
+A variant that sums multiple octaves of base gradient noise with increasing frequency and decreasing amplitude, specifically applied to simulating natural fractal phenomena like fire and smoke, often using M-Noise for GPU efficiency.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of octaves and $C$ is the cost of the base noise function (typically $O(1)$ for fixed-grid Perlin, but involves hashing and interpolation).
+- **Memory Complexity:** $O(1)$ auxiliary space, excluding the permutation table of the base noise function.
+- **Performance:** High octave counts significantly reduce frame rates in real-time raymarching due to the nested evaluation of the noise function [S4, unofficial].
+- **Strengths:** Produces self-similar, organic detail at multiple scales, mimicking natural terrain and volumetric effects [S2, unofficial][S9].
+- **Limitations:** Can appear repetitive if not combined with other techniques (e.g., domain warping) [S4, unofficial]. Aliasing occurs if frequencies exceed the Nyquist limit of the sampling grid [S9].
+
+## Background
+Fractal Brownian Motion was introduced by Ken Perlin in 1985 [S5][S8, unofficial]. It was designed to generate rougher, more natural-looking noise by composing multiple layers of band-pass noise [S1, unofficial][S5]. The technique exploits the spectral properties of noise, where weights $w_i = 1/2^i$ produce $1/f$ spectral content [S5]. It is widely used in procedural generation for terrain, textures, and volumetric effects in computer graphics [S2, unofficial][S4, unofficial][S9]. Goldberg et al. later utilized dynamic weights to cancel mapping distortions [S5].
+
+## Sources
+[S1] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
+[S2] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
+[S3] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)
+[S4] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)
+[S5] A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27
+[S6] sixthsurge/volume-noise-generator, https://github.com/sixthsurge/volume-noise-generator, fetched 2026-10-27 (unofficial)
+[S7] migaelstrydom/VoxelPhase, https://github.com/migaelstrydom/VoxelPhase, fetched 2026-10-28 (unofficial)
+[S8] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)
+[S9] Noise Textures, https://github.com/TylerDodds/VolumetricCloudsTutorial/blob/master/Assets/VolumetricCloudsTutorial/CloudDensity/NoiseTextures/NoiseTextures.md, fetched 2026-10-29

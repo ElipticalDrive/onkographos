@@ -1,0 +1,125 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Stochastic Gradient Estimation for Differentiable Rasterization
+ 
+-Also called: Per-Pixel Formulation, Per-Pixel Stochastic Gradient Estimation, SGE, Stochastic finite difference, transformed rasterizer
++Also called: Per-Pixel Formulation, Per-Pixel Stochastic Gradient Estimation, Per-Pixel Stochastic Gradient Estimation for Differentiable Rasterization, SGE, Stochastic Gradient Estimation, Stochastic finite difference, transformed rasterizer
+ 
+ ## Overview
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** Scene parameters $\boldsymbol{\theta}$ (e.g., vertex positions, texture values, Gaussian splat parameters), random sign vector $\boldsymbol{s}$, perturbation magnitude vector $\boldsymbol{\epsilon}$, number of averaging samples $N$.
+-**Outputs:** Gradient estimates $\frac{\partial f}{\partial \theta_i}$ for each parameter $\theta_i$.
++**Inputs:** Scene parameters $\boldsymbol{\theta}$ (e.g., vertex positions, texture values, Gaussian splat parameters), random sign vector $\boldsymbol{s}$, perturbation magnitude vector $\boldsymbol{\epsilon}$, number of averaging samples $N$ [S1].
++**Outputs:** Gradient estimates $\frac{\partial f}{\partial \theta_i}$ for each parameter $\theta_i$ [S1].
+ 
+ **Data Structures:**
+@@ -18,5 +18,5 @@
+ 
+ **Steps:**
+-1.  **Initialize:** Set the current scene parameters to $\boldsymbol{\theta}$. Initialize gradient accumulators for all parameters to zero.
++1.  **Initialize:** Set the current scene parameters to $\boldsymbol{\theta}$ and initialize gradient accumulators for all parameters to zero [S1].
+ 2.  **Loop for Averaging:** Repeat $N$ times with different random sign vectors $\mathbf{s}^{(n)}$:
+     1.  **Perturb Parameters:** Generate a random sign vector $\boldsymbol{s}$ where each component $s_i \in \{-1, +1\}$ with probability $1/2$ [S1].
+@@ -32,64 +32,38 @@
+ **Pseudocode:**
+ ```python
+-def stochastic_gradient_estimation(scene_params, epsilon, N, rasterizer, error_function):
+-    """
+-    scene_params: dict or array of parameters theta
+-    epsilon: float or array of perturbation magnitudes
+-    N: int, number of averaging samples
+-    rasterizer: function that takes params and returns (image, id_buffer, uv_buffer)
+-    error_function: function that takes two images and returns l2 error per pixel
+-    """
++import random
++
++def stochastic_gradient_estimation(scene_params, epsilon, N, target_image, rasterizer, id_buffer, uv_buffer):
+     d = len(scene_params)
+-    gradients = [0.0] * d
+-    
++    H, W = len(target_image), len(target_image[0])
++    grad_accum = [0.0] * d
++
+     for n in range(N):
+-        # Step 1: Generate random sign vector
+-        s = [1 if random() > 0.5 else -1 for _ in range(d)]
++        # Generate random sign vector s
++        s = [1.0 if random.random() > 0.5 else -1.0 for _ in range(d)]
+         
+-        # Step 2: Perturb parameters
++        # Perturb parameters
+         theta_plus = [scene_params[i] + s[i] * epsilon[i] for i in range(d)]
+         theta_minus = [scene_params[i] - s[i] * epsilon[i] for i in range(d)]
+         
+-        # Step 3: Rasterize
+-        img_plus, id_buf_plus, uv_buf_plus = rasterizer(theta_plus)
+-        img_minus, id_buf_minus, uv_buf_minus = rasterizer(theta_minus)
++        # Rasterize and compute per-pixel l2 errors
++        img_plus = rasterizer(theta_plus)
++        img_minus = rasterizer(theta_minus)
++        err_plus = [(img_plus[h][w] - target_image[h][w]) ** 2 for h in range(H) for w in range(W)]
++        err_minus = [(img_minus[h][w] - target_image[h][w]) ** 2 for h in range(H) for w in range(W)]
+         
+-        # Step 4: Compute per-pixel errors
+-        # error_function returns a 2D array of l2 errors per pixel
+-        errors = error_function(img_plus, img_minus)
+-        
+-        # Step 5: Accumulate gradients per parameter
++        # Accumulate gradients per parameter
+         for i in range(d):
+-            # Identify pixels impacted by parameter i
+-            # This depends on the geometry type:
+-            # - Opaque: pixels where id_buf[i] == triangle_index_of_param_i
+-            # - Transparent: pixels where id_buf[i] is in the list of triangles for param_i
+-            # - Texture: pixels where uv_buf[i] maps to texel of param_i
+-            impacted_pixels = get_impacted_pixels(i, id_buf_plus, uv_buf_plus, scene_params)
+-            
+             sum_diff = 0.0
+-            for (w, h) in impacted_pixels:
+-                sum_diff += errors[w][h]
+-            
+-            # Formula: sum( (f(theta+) - f(theta-)) / (2 * s_i * epsilon_i) )
+-            # Note: The source uses f(theta+) - f(theta-) directly in the numerator
+-            # but the standard finite difference is (f_plus - f_minus).
+-            # The source formula (8) is: sum( (f_w,h(theta + s*e) - f_w,h(theta - s*e)) / (2 * s_i * epsilon_i) )
+-            # Here f_w,h is the l2 error. Wait, the source says f_w,h is the l2 pixel error.
+-            # Usually l2 error is (pred - target)^2.
+-            # The source equation 8: sum( (f_w,h(theta + s*e) - f_w,h(theta - s*e)) / (2 * s_i * epsilon_i) )
+-            # This implies f_w,h is the rendered value or the error value?
+-            # "f_w,h is the l2 pixel error" -> This is ambiguous.
+-            # In standard SGE, we estimate gradient of the loss.
+-            # Loss L = sum(f_w,h). Gradient dL/dtheta_i = sum( df_w,h/dtheta_i ).
+-            # df_w,h/dtheta_i approx (f_w,h(theta+) - f_w,h(theta-)) / (2 * s_i * epsilon_i).
+-            # So we sum the differences in the error values.
+-            
++            for h in range(H):
++                for w in range(W):
++                    # Check if parameter i impacts pixel (w,h) via ID or UV buffers
++                    if id_buffer[h][w] == i or uv_buffer[h][w] == i:
++                        sum_diff += err_plus[h * W + w] - err_minus[h * W + w]
+             if 2 * s[i] * epsilon[i] != 0:
+-                gradients[i] += sum_diff / (2 * s[i] * epsilon[i])
+-    
+-    # Step 6: Average
+-    final_gradients = [g / N for g in gradients]
+-    return final_gradients
++                grad_accum[i] += sum_diff / (2 * s[i] * epsilon[i])
++                
++    # Average over N samples
++    return [g / N for g in grad_accum]
+ ```
+ 
+@@ -99,8 +73,8 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   The estimator is stochastic and exhibits variance. The variance increases with the number of dimensions $d$. This is traded for performance compared to finite differences [S1].
++*   The estimator is stochastic and exhibits variance [S1]. The variance increases with the number of dimensions $d$ [S1]. This is traded for performance compared to finite differences [S1].
+ *   Full-image error formulation causes high noise in high-dimensional spaces, making optimization impractical for large scenes (e.g., 100K triangles) [S1].
+ *   Texture gradient estimation approximates the elliptical footprint by only updating the closest texel to the center, which is sufficient if resolution is high enough to avoid sub-pixel scale texels [S1].
+-*   For subdivision surfaces, the compute shader must associate each tessellated triangle to its original triangle and loop over its neighbors in the control mesh using a subdivision data structure [S1].
++*   For subdivision surfaces, the compute shader associates each tessellated triangle to its original triangle and loops over its neighbors in the control mesh using a subdivision data structure [S1].
+ *   For 3D Gaussian Splats, an additional resampling and splat subdivision compute shader is executed after each gradient descent step [S1].
+ 

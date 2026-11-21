@@ -1,0 +1,1214 @@
+KPage: Cross-Block Page Compaction for Hardware-Efficient
+Sparse Attention
+Kling Infra Team
+arXiv:2610.28096v1 [cs.DC] 20 Oct 2026
+KlingAI Research
+Beijing, China
+Junwei Feng∗†
+Qiaorui Chen∗
+Chenyu Liang
+fengjunwei@kuaishou.com
+KlingAI Research
+Beijing, China
+cjerry@nvidia.com
+NVIDIA
+Shanghai, China
+liangchenyu03@kuaishou.com
+KlingAI Research
+Beijing, China
+Zhen Guo
+Jingyi Yang
+Xiaoling Zhou
+jemiryg@nvidia.com
+NVIDIA
+Shanghai, China
+sopyang@nvidia.com
+NVIDIA
+Beijing, China
+zhouxiaoling03@kuaishou.com
+KlingAI Research
+Beijing, China
+Jiahao Zhang
+Dongliang Huang
+Yiqiao Liao‡
+zhangjiahao09@kuaishou.com
+KlingAI Research
+Beijing, China
+huangdongliang@kuaishou.com
+KlingAI Research
+Beijing, China
+liaoyiqiao@kling.ai
+KlingAI Research
+Beijing, China
+Chengru Song‡
+songchengru@kuaishou.com
+KlingAI Research
+Beijing, China
+Abstract
+speedup increases to 2.29×. Execution-capacity analysis shows
+that Page16 K/V compaction and query-adaptive execution reduce
+physical query–key pair capacity from 334.1G to 177.5G positions
+while preserving 160.6G useful interactions. Across eight layouts
+reconstructed from the open-source Selective and Sliding Tile Attention (SSTA), Sliding Tile Attention (STA), and Video Sparse
+Attention (VSA) systems, the same KPage kernel has the lowest
+forward time in every case: 1.13–4.25× faster than the strongest
+exact baseline. The corresponding forward-plus-backward ratios
+are 1.02–2.71×. We further extend the metadata interface to independent Q/K partitions and evaluate the paper-matched Sparse
+VideoGen2 (SVG2) Wan 14B/720p configuration. KPage is 1.49×
+faster than the strongest exact sparse baseline and 1.57× faster than
+NVIDIA BSA. After compliance review, we will open-source KPage
+and submit a PR to NVIDIA cuDNN Frontend.
+Sparse attention reduces the algorithmic cost of long-sequence
+video Transformers, but three-dimensional token layouts can leave
+selected block-sparse regions only partially occupied. As a result,
+eliminating unselected blocks does not necessarily eliminate unused
+capacity inside the physical tiles that remain.
+We present KPage, a page-compacted execution scheme for blocksparse attention. KPage decomposes selected K/V blocks into 16row pages and packs valid pages across logical-block boundaries
+into large physical attention tiles. The packed tiles are assembled
+directly during K/V loading, without materializing an intermediate compacted tensor in high-bandwidth memory. KPage further
+routes partially occupied query blocks between 𝑀64 × 𝑁 256 and
+𝑀128 × 𝑁 128 forward kernels, and uses exact score masking to preserve the original sparse-attention semantics. For backward, KPage
+constructs a K/V-owned paged layout and restores the original
+sparse adjacency after packing both Q and K/V.
+Across five representative sparse-attention workload cases, KPage
+achieves 1.35×–2.06× bare forward-kernel speedup over NVIDIA
+Block-Sparse Attention (BSA), with a geometric mean of 1.77×. On
+controlled workloads with fully occupied logical blocks, KPage is effectively on par with BSA (1.03× geometric mean). Under matchedscale 3D layouts containing partial blocks, the geometric-mean
+Keywords
+Video Diffusion, Block-Sparse Attention, GPU Kernel Optimization,
+Long-Sequence Attention
+1
+Introduction
+Self-attention is the core computation in Transformer architectures [19], and its quadratic complexity becomes particularly expensive in modern video diffusion Transformers (DiTs) [14]. Stateof-the-art video generators typically operate on compressed spatiotemporal representations and use Transformer backbones over
+∗ These authors contributed equally to this work.
+† This work was conducted during the author’s internship at KlingAI.
+‡ Corresponding authors.
+1
+long token sequences [2, 8, 20, 23]. In particular, modern video variational autoencoders (VAEs) compress video along both temporal
+and spatial dimensions, producing an underlying three-dimensional
+token organization that can be written as 𝑇 ×𝐻 ×𝑊 . Once flattened
+for Transformer execution, these representations can contain tens
+or hundreds of thousands of tokens, making attention one of the
+dominant costs of both training and inference.
+Sparse attention is a natural way to reduce this cost. Earlier work
+established structured sparse attention for long sequences using
+strided, local, global, or mixed connectivity [1, 3, 26]. For video
+generation, the spatial and temporal structure provides substantially stronger sparsity opportunities. Recent systems exploit either
+structured spatiotemporal locality or content-dependent sparse selection. Sparse VideoGen identifies spatial- and temporal-dominant
+attention heads [21]; STA converts 3D local attention into hardwarefriendly tiles [29]; VSA learns dynamic 3D block selection [28];
+SVG2 uses semantic clustering and permutation to densify selected
+regions [22]; and Radial Attention constructs a distance-dependent
+sparse pattern for long videos [9]. SSTA further combines selective
+and sliding-tile attention in HunyuanVideo 1.5 [18]. Other recent
+systems, including SpargeAttention, VORTA, FPSAttention, and
+SPADE, likewise exploit structured or dynamic sparsity to reduce
+video attention cost [10, 11, 17, 27].
+Despite their different sparse-selection mechanisms, efficient
+implementations of these methods share an important property:
+sparse attention is eventually quantized into block- or tile-level
+GPU execution. This is necessary because reducing arithmetic work
+alone does not guarantee wall-clock speedup. Efficient attention
+kernels depend on sufficiently large matrix operations, regular
+memory movement, and fused online softmax. Consequently, sparse
+selection can identify useful interactions at a finer granularity than
+the tiles a GPU executes efficiently.
+This mismatch is particularly important for three-dimensional
+video layouts. A logical sparse block is defined over a flattened
+token sequence, while token validity is inherited from the original
+𝑇 × 𝐻 × 𝑊 geometry. If a temporal or spatial dimension is not
+aligned with the blocking geometry, boundary blocks contain fewer
+valid tokens than their nominal block size. Unlike one-dimensional
+sequence padding, which is commonly concentrated at the end of a
+sequence, multidimensional boundaries recur along temporal and
+spatial surfaces and their intersections. After flattening, partially
+occupied blocks can therefore appear repeatedly throughout the
+sequence.
+This is not a hypothetical corner case. Existing video sparseattention systems have independently encountered closely related
+forms of intra-block under-utilization. STA identifies mixed blocks,
+in which only part of a hardware tile belongs to the desired 2D
+or 3D attention window, and redesigns the sliding pattern so that
+executed tiles are predominantly fully dense or fully empty [29].
+SVG2 observes the same granularity problem for dynamically sized
+semantic clusters: a useful 128 × 32 attention region executed with
+a fixed 128 × 128 sparse kernel requires 75% of the physical computation to be spent outside the useful region [22]. VSA exposes
+the complementary hardware trade-off: smaller sparse blocks provide finer selection granularity, but reducing the block size lowers
+kernel throughput; its implementation therefore uses a 64 × 64
+block-sparse kernel and carefully balances sparsity against hardware efficiency [28].
+The difficulty is that simply shrinking the compute tile is not
+free. The evolution from FlashAttention to FlashAttention-2 (FA2),
+FlashAttention-3 (FA3), and FA4 has progressively increased the importance of hardware-aware tiling, asynchronous data movement,
+and deeply pipelined matrix operations [4, 5, 15, 25]. ThunderKittens similarly builds high-performance attention around regular
+tile abstractions and asynchronous pipelines [16], while FlashInfer
+and FlexAttention retain block-structured execution to combine
+flexibility with high GPU efficiency [6, 24]. Thus, smaller execution
+granularity can remove padding but can also give up the efficiency
+of large attention tiles.
+Current systems address this tension in several ways. STA changes
+the sparse pattern so that mixed blocks disappear. SVG2 changes the
+compute geometry itself by supporting dynamically sized blocks.
+General block-sparse executors such as NVIDIA BSA retain a fixed
+block representation while accepting valid-length metadata so that
+padded K/V rows are excluded from the mathematical attention
+result [13]. For fixed-tile block-sparse execution, valid rows from different selected logical blocks remain uncombined, leaving physical
+tile capacity underutilized. Fine-grained sparse execution such as
+FG-Attn gathers selected K/V vectors into packed shared-memory
+tiles [7], but its fine-grained units represent the attention sparsity
+pattern itself rather than invalid rows inside an already selected 3D
+sparse block.
+We present KPage, which removes partial-block waste by packing data rather than shrinking the large compute tile. KPage keeps
+the original blk128 sparse graph but divides selected K/V blocks into
+16-row pages. Valid Page16 regions from different logical blocks are
+compacted across block boundaries and gathered directly into the
+shared-memory stages of the attention kernel. No compacted K/V
+tensor is materialized in HBM. The resulting physical tile remains
+large enough for efficient Tensor Core execution while containing
+substantially less padding.
+KPage also addresses partial occupancy on the query dimension.
+Query blocks with at most 64 valid rows use an 𝑀64 × 𝑁 256 path,
+while larger blocks use 𝑀128 × 𝑁 128; both geometries contain the
+same 16,384 query–key positions per physical tile. Invalid rows
+in partial pages are masked before the online-softmax row maximum, preserving exact attention semantics. For backward, KPage
+constructs a K/V-owned paged layout, derives reverse-Q neighborhoods for packed K/V tiles, and uses page-pair adjacency metadata
+to restore the original Q–K sparse graph after both sides have been
+physically packed.
+The page abstraction does not require Q and K/V to share one
+logical partition. We expose separate per-head Q block sizes and K/V
+block sizes and offsets, allowing independently clustered layouts
+such as SVG2 to reuse the same page execution. Q clusters retain
+the Q64/Q128 routes, while independently sized K/V clusters are
+placed on Page16 boundaries.
+Our evaluation shows that the gain is specifically associated with
+partial-block fragmentation rather than a generic advantage over
+the block-sparse baseline. When every logical block is fully occupied, KPage and NVIDIA BSA are effectively on par, with a 1.03×
+geometric-mean forward speedup. Under matched-scale workloads
+2
+Table 1: Forward bare-kernel performance on padding-free and 3D-padded VAE layouts. Length is the physical sequence
+length after layout construction, and sparsity is measured over valid token pairs. Within each row, BSA and KPage execute
+the same sparse graph and valid-row metadata. Speedup is BSA/KPage; displayed latencies and reported ratios are rounded
+independently.
+Padding-free (0% padding)
+Video
+Length
+Sparsity
+5s
+10s
+15s
+30s
+65,536
+122,880
+184,320
+368,640
+87.33%
+93.24%
+95.49%
+97.74%
+–
+–
+Geometric Mean
+3D padded
+BSA
+KPage
+Time (ms)
+Speedup
+Length
+Sparsity
+Padding
+1.65
+3.38
+5.32
+12.17
+1.50
+3.28
+5.03
+12.97
+1.11×
+1.03×
+1.06×
+0.94×
+81,920
+158,720
+235,520
+465,920
+92.68%
+97.00%
+98.29%
+99.34%
+22.8%
+21.6%
+21.2%
+20.8%
+–
+–
+1.03×
+–
+–
+–
+containing 3D partial blocks, KPage achieves a 2.29× geometricmean forward speedup. Across five representative sparse-attention
+workload cases, KPage achieves a 1.77× geometric-mean bare forwardkernel speedup over BSA. Page16 K/V compaction and query-adaptive
+execution reduce physical query–key pair capacity from 334.1G to
+177.5G positions while preserving 160.6G useful interactions, increasing pair-capacity efficiency from 48.1% to 90.5%. On the papermatched SVG2 Wan 14B/720p configuration, the independent-partition
+extension is 1.49× faster than the strongest exact sparse baseline.
+1.1
+Speedup
+1.86
+3.82
+5.66
+11.70
+1.08
+1.74
+2.32
+3.97
+1.73×
+2.20×
+2.44×
+2.95×
+–
+–
+2.29×
+by 1.6–10× over FA3 depending on the workload [15, 16, 29]. VSA
+performs dynamic selection over 3D video blocks and implements
+dedicated block-sparse forward and backward kernels, reaching
+more than 85% of the MFU of FA3 while substantially reducing
+attention time at high sparsity [28]. These results demonstrate that
+modern video sparse attention is already heavily co-designed with
+high-performance GPU kernels.
+Other systems follow similar hardware-aware designs. Radial
+Attention constructs structured spatiotemporal sparse masks and
+executes them with FlashInfer for inference and an FA2-derived
+block-sparse kernel for training [4, 9, 12, 24]. HunyuanVideo 1.5 deploys SSTA through a dedicated flex-block-attention library built on
+ThunderKittens; the implementation supports STA, selective sparse
+attention, and their hybrid for both training and inference [16, 18].
+SVG2 goes further by supporting dynamically sized sparse regions.
+It observes that semantic clustering can produce, for example, a
+128 × 32 useful region that would waste 75% of the computation if
+executed as a fixed 128 × 128 block, and develops dynamic-blocksize attention kernels following FlashAttention-style execution [22].
+SVG2 reports up to 2.30× and 1.89× end-to-end speedup for HunyuanVideo and Wan on H100, respectively. Our SVG2 study in
+Section 4.6 instead isolates attention-kernel execution and is not
+a reproduction of those end-to-end results. Collectively, these systems show that the state of the art already includes sophisticated
+sparse layouts, specialized block-sparse kernels, asynchronous data
+movement, and variable execution geometries.
+NVIDIA BSA represents the corresponding state of the art in
+general block-sparse execution [13]. Its CUTLASS DSL kernels
+consume per-query lists of selected K/V blocks and support explicit
+valid lengths for partially occupied K/V blocks in forward. Thus,
+partial blocks can already be represented with exact mathematical
+semantics rather than treating padding as valid attention input.
+BSA nevertheless preserves the selected logical block as the unit
+of the sparse execution interface: valid rows from different logical
+blocks are not physically combined into the same K/V tile. The
+current blk128 backward path additionally requires full physical
+K/V blocks.
+The above systems optimize different sources of sparse-attention
+inefficiency, but they do not target the particular padding studied in
+Summary of Contributions
+Our contributions are as follows:
+• We propose KPage, which packs valid Page16 regions across
+logical K/V block boundaries directly into large attention
+tiles, without materializing an intermediate compacted tensor in HBM. Query-adaptive tiling reduces Q-side padding,
+while K/V-owned page packing preserves the sparse graph
+in backward execution.
+• We extend the same execution scheme to independent Q/K
+partitions, supporting sparse layouts with different query
+and key/value block boundaries, including semantic clustering.
+• Across five representative workloads, KPage achieves a
+1.77× geometric-mean forward speedup over NVIDIA BSA,
+and 2.29× on controlled 3D partial-block layouts. Across
+eight open-source SSTA, STA, and VSA layouts, KPage
+is 1.13–4.25× faster than the strongest exact sparse forward baseline. It further achieves 1.49× on the SVG2 Wan
+14B/720p configuration.
+2
+BSA
+KPage
+Time (ms)
+State of the Art
+Recent video sparse-attention systems have made substantial progress
+in both sparse-pattern design and GPU execution. Sparse VideoGen
+exploits spatial–temporal sparsity in pretrained video diffusion
+models and combines the sparse pattern with layout transformation and customized sparse kernels [21]. STA targets local 3D attention and redesigns token-wise sliding windows into hardwarealigned tiles; its ThunderKittens-based implementation reaches
+58.79% model FLOPs utilization (MFU) and accelerates attention
+3
+Figure 1: Three-dimensional video layouts can produce partially occupied logical blocks after flattening. A block-sparse selector
+may retain such blocks even though only a subset of their rows are valid. KPage decomposes selected blocks into Page16 regions
+and compacts valid pages across logical-block boundaries while retaining large Tensor Core execution tiles.
+3.2
+this work. STA removes mixed attention tiles created by the slidingwindow mask by changing the sparse pattern itself. SVG2 removes
+padding caused by variable semantic-cluster sizes by varying the
+compute-block geometry. VSA studies the trade-off between sparse
+block size and kernel throughput. In contrast, our problem appears
+after a logical sparse block has already been selected: because valid
+tokens originate from a three-dimensional video layout, a selected
+blk128 block can contain substantially fewer than 128 valid rows.
+This layout-induced partial occupancy is independent of which
+sparse-selection algorithm produced the block.
+Existing block-sparse kernels therefore leave a specific execution opportunity. A partially occupied selected block need not be
+executed as an independent under-filled physical tile if its valid subregions can be combined with valid subregions from other selected
+blocks. To the best of our knowledge, prior video sparse-attention
+kernels do not perform such cross-logical-block packing of valid
+sub-blocks while retaining a large physical attention tile.
+KPage targets exactly this remaining inefficiency. It decomposes
+the valid K/V region of each selected blk128 block into Page16
+units and packs pages from different logical blocks into the same
+physical K/V tile. The packed tile is assembled directly during K/V
+loading, without materializing a compacted K/V tensor in HBM. As
+a result, KPage retains the large Tensor Core execution geometry
+used by high-performance attention kernels while substantially
+increasing the occupancy of each physical tile. The sparse graph
+and its selection policy remain unchanged.
+Page-Granular Forward Execution
+3.2.1 K/V page compaction. For logical K/V block 𝑏, let 𝑐𝑏 ∈ [0, 𝐵]
+be its valid-row count and 𝑝𝑏 its number of Page16 regions:
+𝑝𝑏 =
+l𝑐 m
+𝑏
+,
+0 ≤ 𝑃𝑝𝑏 − 𝑐𝑏 < 𝑃,
+(1)
+𝑃
+where 𝑃 = 16. Thus, the physical extent of a selected block
+decreases from 128 rows to 16𝑝𝑏 rows before final tile alignment.
+The remaining padding within each logical block is bounded by 15
+rows.
+For a query block 𝑞, let K𝑞 be the ordered list of logical K/V
+blocks selected by the sparse-attention algorithm. KPage expands
+these blocks into Page16 regions. Fully valid pages from all selected
+blocks are emitted first, followed by at most one partial tail page
+from each partially occupied block. Dummy pages are appended
+only when required by the physical iteration granularity.
+This ordering serves two purposes. First, pages from different
+logical blocks can share a physical K/V tile, eliminating the requirement that each selected blk128 begin at a separate tile boundary.
+Second, the partial pages are confined to a suffix of the page walk.
+The kernel can therefore identify a prefix consisting entirely of
+valid rows and execute it without loading validity metadata.
+The sparse graph is not changed by this transformation. A page
+is included only if its parent logical K/V block belongs to K𝑞 ; KPage
+changes the physical packing of selected blocks, not the set of
+selected blocks.
+3 Methodology and Implementation
+3.1 Overview
+KPage retains the logical blk128 sparse graph while changing its
+mapping to physical attention tiles. In forward, selected K/V blocks
+are divided into 16-row pages and valid pages from different blocks
+are packed into the same large tile. Two query tile shapes reduce
+Q-side padding without merging Q blocks with different sparse
+neighborhoods.
+Backward requires a different organization: multiple Q blocks
+may contribute to the gradients of the same K/V block. KPage
+therefore packs pages into K/V-owned tiles, traverses their reverseQ neighborhoods, and records page-pair adjacency to preserve the
+original sparse graph. Algorithm 1 summarizes the execution flow.
+Figure 2: K/V page compaction. Selected blk128 blocks are
+decomposed into Page16 regions. Fully valid pages are packed
+across logical-block boundaries, followed by partial tail pages.
+Eight Page16 regions form one physical 𝑁 128 K/V tile.
+4
+3.2.2 Query-adaptive tile shapes. Page compaction reduces padding
+on K/V but does not reduce padding inside the Q block. Packing
+several Q blocks together would require merging their K/V neighborhoods, because different Q blocks generally have different sparse
+selections. KPage instead keeps every logical Q block independent
+and selects the physical tile shape from its valid-row count 𝑐𝑞 , where
+𝑀𝑞 and 𝑁𝑞 are the Q and K/V tile dimensions:
+(
+(64, 256), 0 < 𝑐𝑞 ≤ 64,
+(𝑀𝑞 , 𝑁𝑞 ) =
+(2)
+(128, 128), 64 < 𝑐𝑞 ≤ 128.
+Fully occupied logical blocks also retain a regular access pattern.
+Likewise, backward detects aligned eight-page blocks and uses the
+original full-tile transfer path for them. Page-wise transfers are
+required only when physical tiles contain pages from different or
+partial logical blocks.
+3.2.4 Exact handling of partial pages. A Page16 tail may contain
+fewer than 16 valid rows, and dummy pages introduced by alignment contain no valid rows. Zero-filling these rows is not sufficient
+for attention, because a zero key would still contribute a finite value
+to the softmax normalization.
+KPage therefore masks invalid scores before the row maximum.
+Let 𝑆𝑖 𝑗 and 𝑆e𝑖 𝑗 be the attention scores before and after masking, and
+let 𝑣 𝑗 indicate whether physical K/V row 𝑗 is valid:
+(
+𝑆𝑖 𝑗 , 𝑣 𝑗 = 1,
+𝑆e𝑖 𝑗 =
+(3)
+−∞, 𝑣 𝑗 = 0,
+Empty Q blocks are skipped.
+Both paths expose the same number of Q–K positions per physical tile: 64 × 256 = 128 × 128 = 16,384. The Q64 path therefore
+reduces unused Q rows without reducing the tile area presented to
+Tensor Core. It consumes sixteen Page16 K/V regions per iteration;
+the Q128 path consumes eight.
+The two optimizations operate independently. Page compaction
+reduces waste in the K/V dimension, while Q64/Q128 routing reduces waste in the Q dimension. Neither operation changes the
+sparse neighborhood of the query block.
+Query blocks from the two paths are placed in separate persistent
+work queues. Within each route, longer page walks are scheduled
+earlier to reduce the tail caused by uneven sparse workloads. The
+underlying pipeline requires aligned iteration counts, so a small
+number of dummy pages can remain at the end of a walk. These
+pages are handled by the same validity mechanism as partial pages.
+This ordering is required for exact attention semantics. Since
+invalid scores are removed before the maximum and exponential,
+they contribute neither to the online-softmax maximum nor to its
+denominator.
+KPage stores validity at Page16 granularity using compact bit
+masks. Two Page16 masks are packed into one 32-bit word. The
+page-table builder also records where the fully valid region ends,
+so validity metadata is only accessed for physical tiles that overlap
+the partial suffix.
+The distinction is reflected in the kernel implementation. For
+fully valid tiles, KPage retains the fused score-loading and rowmaximum path used by the underlying kernel. For a masked tile,
+the scores are loaded, the packed validity predicate is applied, and
+the row maximum is then computed from the masked values. The
+additional masking work is therefore restricted to tiles that actually
+contain partial or dummy rows.
+For partial K/V pages, the unused suffix is also zeroed before the
+attention launch so that the Page16 TMA transfer remains a regular
+contiguous load. This zeroing is an implementation convenience;
+exact softmax semantics are provided by Eq. (3).
+3.2.3 Direct page-guided K/V loading. Materializing the compacted
+K/V layout in HBM would require an additional gather kernel followed by another HBM read by the attention kernel. Instead, KPage
+uses the page table to assemble packed K/V tiles directly in shared
+memory during data loading, avoiding intermediate HBM materialization.
+3.3
+K/V-Owned Paged Backward
+Forward page packing cannot be applied to backward without
+changing the work organization. In forward, a Q block owns one
+sparse walk and only reads K/V. In backward, several Q blocks can
+contribute to the same dK and dV rows. KPage therefore constructs
+a separate physical layout centered on K/V tiles.
+Figure 3: Page-guided K/V loading. Page16 regions are gathered from the original K/V tensors directly into the sharedmemory tile consumed by the attention kernel. No compacted K/V tensor is materialized in HBM.
+3.3.1 K/V owner packing. A physical K/V owner contains eight
+Page16 slots. KPage allows pages from multiple partial logical blocks
+to share an owner, but does not allow one logical block to cross an
+owner boundary. If 𝑠𝑏 is the starting page-slot index of block 𝑏, the
+layout requires
+Each entry in the page table identifies a contiguous 16-row region
+in the original K/V tensors. An 𝑁 128 stage is assembled from eight
+such regions directly in shared memory. The Q64 path uses two
+adjacent 𝑁 128 page groups to construct its 𝑁 256 stage.
+The shared-memory representation seen by the consumer is
+unchanged. After the producer has assembled a stage, the existing
+QK matrix multiply–accumulate (MMA), online-softmax, and PV
+MMA pipeline operates on a regular large tile. Page indirection is
+therefore confined to the producer side.
+(𝑠𝑏 mod 8) + 𝑝𝑏 ≤ 8.
+(4)
+The constraint keeps all pages of one logical K/V block associated
+with the same physical owner. Its reverse-Q neighborhood therefore
+needs to be constructed only once for that owner.
+Fully occupied blocks already contain eight pages and are kept
+aligned to a complete owner tile. Partial blocks are packed into the
+5
+When all 64 page pairs are valid, the mask is represented by an
+all-valid value and the additional masking path is skipped. Packing
+therefore does not impose page-pair tests on regular full-tile cases.
+The resulting dQ, dK, and dV fragments are written back through
+the existing FP32 accumulation and postprocessing layout. For
+mixed owner tiles, KPage scatters results by Page16 identifier; for
+aligned full tiles, it retains the regular bulk path.
+Figure 4: K/V-owned paged backward. K/V Page16 regions
+are packed into 128-row owner tiles. Each owner traverses
+the Q pages connected to its constituent logical K/V blocks.
+Page-pair metadata restores the original sparse adjacency
+after packing.
+3.4
+The forward layout depends on the sparse graph and valid-row
+counts, not on the values of 𝑄, 𝐾, or 𝑉 . The page table, Q64/Q128
+route assignment, full-tile boundary, and suffix validity masks can
+therefore be reused while the sparse layout is unchanged.
+Forward metadata construction scans the selected sparse edges
+to count the required Page16 regions, partitions active Q blocks into
+the two execution routes, and emits the page and validity tables.
+The generated metadata is consumed directly by the persistent
+forward kernels; no runtime K/V compaction buffer is allocated.
+Backward metadata is constructed lazily because it is unnecessary for inference. The backward builder packs K/V owners, derives
+their reverse-Q neighborhoods, packs the corresponding Q pages,
+and emits the page-pair adjacency masks. The resulting layout can
+likewise be reused while the sparse graph and block occupancies
+remain unchanged.
+KPage retains the large-tile arithmetic of the reference NVIDIA
+BSA implementation. Forward changes the K/V producer, introduces Q64/Q128 routing, and adds validity handling for the partial
+page suffix. Backward changes the physical ownership and traversal
+while retaining the 128 × 128 attention-gradient computation. The
+sparse-selection algorithm and attention equations are unchanged.
+remaining owner tiles. This also provides a full-tile fast path: when
+the eight page identifiers correspond to one aligned logical block,
+the backward kernel uses the regular K/V tile load and store path
+rather than eight independent page transfers.
+3.3.2 Reverse-Q construction and Q packing. A packed owner can
+contain pages from several logical K/V blocks. Backward must visit
+every Q block connected to any of these blocks.
+Let B𝑡 be the logical K/V blocks packed into owner 𝑡, Q (𝑏) the
+Q blocks connected to block 𝑏, and G𝑔 a group of Q blocks. KPage
+visits their reverse neighborhood
+Ø
+U𝑡,𝑔 = G𝑔 ∩
+Q (𝑏).
+(5)
+𝑏 ∈ B𝑡
+The grouping bounds the amount of serial Q work assigned to
+one backward work item for long sequences.
+The reverse relation is constructed from the original Q-to-K
+sparse edges. KPage scatters these edges into an owner-indexed
+bitmap and then compacts the nonempty Q entries. This avoids
+constructing a separate K-to-Q edge array followed by a global sort.
+Q data are subsequently represented at Page16 granularity as
+well. Full Q blocks remain aligned so they can use the regular 128row load path. Pages from partial Q blocks are packed into the
+remaining physical Q steps. Thus, backward removes padding on
+both sides while retaining the 128 × 128 MMA shape.
+3.4.1 Independent Q/K partitions. The shared blk128 layout used
+by the representative workloads is a special case of the page repre𝑄
+sentation. More generally, for each head let 𝑐𝑞 ∈ [0, 128] denote the
+𝐾
+𝐾
+valid rows of logical Q block 𝑞, and let (𝑐𝑘 , 𝑜𝑘 ) denote the valid-row
+count and physical row offset of logical K/V block 𝑘. We require 𝑜𝑘𝐾
+to be Page16 aligned and the page footprints of distinct K/V blocks
+to be disjoint. The sparse graph K𝑞 indexes this K/V partition; the
+numbers and boundaries of Q and K/V blocks need not match. Clusters larger than 128 rows are represented by multiple logical blocks
+with the same sparse neighborhood.
+𝑄
+Forward routing depends only on 𝑐𝑞 , while the K/V walk emits
+𝐾
+page identifiers starting at 𝑜𝑘 /16 and masks the final page according
+to 𝑐𝑘𝐾 . Backward independently packs the K/V partition and builds
+reverse-Q neighborhoods over the 𝑛𝑄 × 𝑛𝐾𝑉 sparse graph, where
+𝑛𝑄 and 𝑛𝐾𝑉 count the logical blocks in each partition. Padding-state
+cleanup likewise uses Q sizes for dQ and K/V sizes for dK and dV.
+The attention kernels consume the same page identifiers, validity
+masks, and page-pair adjacency words as in the shared case. The
+𝑄
+shared layout is recovered with 𝑛𝑄 = 𝑛𝐾𝑉 , 𝑐𝑏 = 𝑐𝑏𝐾 , and 𝑜𝑏𝐾 = 128𝑏.
+3.3.3 Restoring the sparse graph after packing. The reverse union
+introduces physical Q–K pairs that need not exist in the original
+sparse graph. For example, an owner may contain pages from two
+logical K/V blocks while a Q block is connected to only one of them.
+Executing the full Cartesian product of the packed pages would
+therefore introduce incorrect attention edges.
+For a physical backward step, let 𝑞 𝑗 and 𝑘𝑖 denote the logical
+blocks owning Q-page 𝑗 and K/V-page 𝑖, and let E be the original
+sparse block graph. The page-pair adjacency is
+
+
+𝐴 𝑗𝑖 = 1 (𝑞 𝑗 , 𝑘𝑖 ) ∈ E ,
+Metadata Construction and Kernel
+Integration
+(6)
+where 1[·] is the indicator function.
+A physical step contains eight Q pages and eight K/V pages, so
+the complete 8 × 8 adjacency matrix requires 64 bits and is stored in
+one machine word. The kernel reads this word and masks page pairs
+with 𝐴 𝑗𝑖 = 0 before reconstructing the attention probability. These
+pairs therefore produce zero probability and zero score gradient.
+6
+Algorithm 1 KPage Execution
+Require: Sparse graph { K𝑞 }, Q sizes
+{𝑐𝑘𝐾 , 𝑜𝑘𝐾 }, and 𝑄, 𝐾, 𝑉
+𝑄
+{𝑐𝑞 },
+cases evaluate page compaction across different sparse-attention
+settings.
+The controlled and representative workloads use eight attention
+heads; the SVG2 traces use the model’s heads (12 for Wan 1.3B,
+40 for Wan 14B). All workloads use head dimension 128 and BF16
+inputs.
+K/V sizes and offsets
+Forward
+1: for each query block 𝑞 do
+2:
+form a K/V page walk from { (𝑐𝑘𝐾 , 𝑜𝑘𝐾 ) : 𝑘 ∈ K𝑞 }
+3:
+place full Page16 regions before partial tail pages
+Baselines and software. FA4 serves as the dense-attention reference in Figures 5 and 7, while NVIDIA BSA serves as the principal block-sparse baseline. The FA4-BSA column in Table 2 is a
+sparse kernel and must not be confused with dense FA4. For every reported forward comparison, KPage and BSA receive identical
+sparse metadata and valid-row information. Section 4.6 additionally
+evaluates layouts reconstructed from open-source SSTA, STA, and
+VSA systems. It compares KPage against NVIDIA BSA, FastVideo’s
+native and Triton VSA kernels, upstream FA4 block sparsity, and
+FlexAttention under the same GPU execution environment. It also
+evaluates the independent-partition extension on a trace from the
+official SVG2 Wan 14B/720p pipeline, including SVG2’s released
+variable-block kernel and the FA4-BSA path. The configuration
+matches SVG2’s published experiment, allowing its reported FA3based results to be contrasted with the FA4-based measurements
+in our setup. These comparisons refer to different execution environments.
+Experiments are conducted on a single GPU using CUDA 13.2.
+KPage is implemented with CUTLASS DSL, and NVIDIA BSA is provided by cuDNN Frontend 1.28.0. Since the generated BSA kernel
+can depend on the CUTLASS DSL version, we benchmark compatible BSA configurations using CUTLASS DSL 4.5.0 and 4.7.1 and
+report the faster result for each workload. The open-source layouts
+in Section 4.6 run KPage with CUTLASS DSL 4.4.2 and BSA and
+upstream FA4 (4.0.0b33) with CUTLASS DSL 4.7.1.
+𝑄
+choose the Q64 or Q128 execution path from 𝑐𝑞
+4:
+5: end for
+6: for each active query block 𝑞 do
+7:
+gather its K/V pages directly into shared memory
+8:
+mask invalid rows in partial or alignment pages
+9:
+execute large-tile attention
+10: end for
+Backward
+11: pack K/V pages into non-straddling physical owner tiles
+12: for each K/V owner do
+13:
+construct the union of its reverse-Q neighborhoods
+14:
+pack the corresponding Q blocks at Page16 granularity
+15:
+record the original Q–K adjacency for each physical step
+16: end for
+17: for each K/V owner and Q-group do
+18:
+gather the packed Q and K/V pages
+19:
+remove page pairs absent from the original sparse graph
+20:
+execute the 128 × 128 attention-gradient computation
+21: end for
+4 Experimental Results
+4.1 Experimental Setup
+We evaluate KPage using a controlled padding comparison and
+five representative sparse-attention workload cases covering varied
+sequence lengths, sparsity levels, and block-occupancy patterns.
+Timing methodology. Unless otherwise stated, we report bare
+attention-kernel execution time. Sparse-graph construction, KPage
+page-table construction, Q64/Q128 route assignment, and backward layout construction are performed outside the timed region
+because these structures depend only on the sparse graph and block
+occupancies and can be reused while the layout remains unchanged.
+The timed region contains the complete attention kernel, including page-table traversal, page-guided K/V loading, partial-page
+masking, online softmax, and output computation. No compacted
+K/V tensor is materialized in HBM.
+For the controlled workloads in Table 1, we report the median of
+20 timed iterations after 5 warmup iterations. For the five representative workload cases, we report the median of 10 timed iterations
+after 3 warmup iterations. For the SVG2 study, we report the median
+of 20 timed iterations after 3 warmup iterations. All measurements
+use synchronized wall-clock timing on a single GPU and a single
+execution stream.
+Controlled workloads. We construct two groups of matched-scale
+workloads corresponding to 5, 10, 15, and 30 s video sequences.
+The first group contains no padding: all selected logical blocks are
+fully occupied. The second group uses three-dimensional layouts
+that produce partially occupied boundary blocks. Across these workloads, padding accounts for 20.8–22.8% of the physical sequence,
+and approximately one third of the logical blocks are partial.
+Both groups use the same sparse-selection procedure and comparable sequence scales. Within each workload, KPage and NVIDIA
+BSA consume the same sparse block graph and the same valid-row
+metadata.
+The two groups are not identical sparse graphs because the underlying layouts produce different numbers of logical blocks under
+the same selection procedure. We therefore use this experiment to
+compare two execution regimes: fully occupied blocks and layouts
+with substantial partial-block fragmentation.
+4.2
+Representative workload cases. We additionally evaluate five sparseattention workload cases spanning different sequence scales and
+sparsity regimes. Their physical sequence lengths range from 470K
+to 629K tokens, and their retained valid sparsity patterns vary across
+the cases, as do the proportions of partially occupied blocks. These
+Numerical Correctness
+We validate KPage against an exact FP32 masked-attention reference. For each workload, we sample query rows from multiple
+heads and logical blocks and compare both forward outputs and
+backward gradients using the same sparse graph and valid-row
+metadata.
+7
+Across the evaluated workloads, KPage forward output errors
+remain in the same range as the BF16 BSA baseline, with maximum
+absolute errors on the order of 10−4 . The log-sum-exp (LSE) error
+remains below 2 × 10−6 . For backward, the cosine similarity of 𝑑𝑄,
+𝑑𝐾, and 𝑑𝑉 is at least 0.99999 across the sampled cases.
+These results confirm that page compaction changes only physical data placement and execution order; invalid rows and page
+pairs are excluded before softmax or probability reconstruction,
+preserving the original sparse-attention semantics.
+For the independent SVG2 partitions, sampled forward outputs
+over all heads have relative ℓ2 error 2.34 × 10−3 (Wan 1.3B traces)
+and 2.35 × 10−3 (Wan 14B trace) against the FP32 masked reference,
+comparable to the released variable-block kernel’s 2.27 × 10−3 and
+2.30 × 10−3 . A full-row backward check on one head of a Wan 1.3B
+trace gives relative ℓ2 errors of (2.37, 2.35, 2.32) × 10−3 for dQ, dK,
+and dV, respectively, against 1.66×10−3 for BF16 scaled dot-product
+attention (SDPA) on the same inputs.
+Figure 5: Forward bare-kernel speedup relative to dense FA4
+across five representative workload cases. Dashed lines denote the ideal bound from the valid-pair sparsity shown
+for each case. KPage reaches approximately 76–79% of this
+bound.
+4.4
+4.3
+Reduction of Padding-Induced Physical
+Work
+We reconstruct the forward execution geometry directly from the
+complete q2k metadata and valid-row counts of the five representative workload cases. The useful sparse computation contains
+160.611G valid query–key token pairs.
+If every selected logical blk128 pair is represented by a full
+128 × 128 physical tile, the five workloads expose 334.109G physical
+query–key positions, corresponding to 48.1% useful-work utilization.
+Page16 K/V compaction provides the largest reduction. Keeping
+the query side at 𝑀128 while compacting selected K/V blocks at
+Page16 granularity reduces the physical pair capacity from 334.109G
+to 199.689G.
+KPage additionally applies Q64/Q128 routing. Query blocks with
+at most 64 valid rows use the 𝑀64 × 𝑁 256 path instead of a full
+𝑀128 query tile. This further reduces the physical pair capacity
+from 199.689G to 177.548G, an additional 11.1% reduction relative
+to the M128-only paged layout.
+Overall, this nominal packed-tile accounting reduces physical
+pair capacity by 46.9% relative to the whole-block layout and raises
+pair-capacity efficiency from 48.1% to 90.5%, while preserving the
+same 160.611G useful sparse interactions. The companion breakdown in Figure 6 also depicts residual union-mask and walk-tail
+overhead, yielding a slightly higher 180.3G total (89.1% useful) under that overhead-inclusive accounting.
+These quantities characterize the physical capacity implied by
+the corresponding execution layouts. In particular, the 334.109G
+whole-block value should not be interpreted as a direct measurement of NVIDIA BSA forward FLOPs: BSA forward supports valid
+block-size metadata and preserves exact partial-block semantics.
+The direct BSA comparison is therefore given by the measured
+wall-clock results in Section 4.3.
+The nominal accounting separates the contributions of the two
+forward mechanisms. Most of the reduction comes from Page16 K/V
+compaction, while Q64/Q128 routing removes a further 11.1% of
+nominal physical pair capacity by reducing Q-side padding. Figure 6
+separately visualizes the additional overhead categories; its 180.3G
+total is therefore not the same accounting quantity as 177.5G.
+Forward Performance
+Table 1 compares KPage and NVIDIA BSA under fully occupied
+and 3D-partial layouts.
+On the padding-free layouts, all logical blocks are full. The perworkload BSA/KPage speedups are 1.11×, 1.03×, 1.06×, and 0.94×,
+giving a geometric mean of 1.03×. KPage and BSA are therefore
+effectively on par when page compaction is unnecessary.
+This comparison also rules out a general kernel-speed advantage
+as the source of the padded-layout result. On these padding-free
+workloads, KPage’s pipeline alignment schedules approximately
+1.4–1.5% more 128-row tile equivalents than BSA, while the measured performance remains close to parity.
+Under the 2 × 8 × 8 3D layout, boundary cubes introduce 20.8–
+22.8% padding. KPage achieves 1.73×, 2.20×, 2.44×, and 2.95× speedup
+over BSA on the four workloads, respectively, with a geometric
+mean of 2.29×.
+The two layout families do not contain identical sparse graphs
+because their different block constructions produce different numbers of logical blocks under the fixed top-64 selector. The controlled
+result should therefore be interpreted as a comparison between
+two execution regimes: KPage is near parity with BSA when logical
+blocks are fully occupied, but provides a substantially larger advantage when the same selection procedure produces partial blocks
+under 3D boundary fragmentation.
+We observe the same behavior across the five representative
+workload cases. KPage achieves per-case bare forward-kernel speedups
+of 1.90×, 1.35×, 1.94×, 2.06×, and 1.68× over NVIDIA BSA, with a
+geometric mean of 1.77×.
+Figure 5 compares KPage with the ideal speedup derived from
+each case’s valid-pair sparsity. Based on the plotted values, KPage
+reaches approximately 76–79% of this ideal sparse-work bound,
+leaving approximately 1.26×–1.32× headroom.
+8
+Figure 6: Physical attention-work breakdown across five representative workload cases, preserving 160.6G useful pairs.
+The illustrated whole-block and packed totals are 334.1G
+and 180.3G (48.1% and 89.1% useful), respectively; the latter
+includes the displayed union-mask and walk-tail terms. The
+separate nominal tile-capacity accounting in the text gives
+177.5G (90.5% useful).
+4.5
+Figure 7: Forward-plus-backward kernel speedup relative
+to dense FA4 on the five representative workload cases
+(case000–case004), with the corresponding valid-pair-density
+ideal bound. This plot is distinct from the controlled 5–30 s
+padding comparison. NVIDIA BSA’s backward result is a hardware timing reference where partial-block semantics differ;
+it is not an exact numerical comparison.
+Backward Performance
+For training-oriented execution, we additionally measure the combined forward-and-backward bare-kernel time.
+The padding-free workloads provide an exact comparison because every logical block is fully occupied and NVIDIA BSA backward does not require partial-block semantics. The per-workload
+forward–backward BSA/KPage ratios are 0.98×, 0.98×, 1.00×, and
+0.98×, giving a geometric mean of 0.99×. KPage and BSA are therefore effectively identical when no partial blocks are present.
+Under the 3D-padded layouts, the corresponding timing ratios
+are 1.36×, 1.33×, 1.36×, and 1.44×, with a geometric mean of 1.37×.
+These 3D-padded backward numbers are reported only as a hardware timing reference. The current NVIDIA blk128 BSA backward
+path does not support variable block_sizes and therefore executes whole-block semantics on partial layouts. They should not be
+interpreted as an exact numerical comparison of the two backward
+operators.
+Our primary quantitative comparison against NVIDIA BSA is
+therefore the forward result, where both implementations support
+the same valid-row semantics and execute the same sparse graph.
+Figure 7 separately reports the five representative cases, normalizing forward-plus-backward kernel timings to dense FA4. These
+are distinct from the four controlled padding-length comparisons
+above; the BSA bars are timing references where partial-block backward semantics are not identical.
+4.6
+from official end-to-end inference runs. Every case is converted to
+the exact block-index and valid-row metadata consumed by KPage;
+no kernel or schedule is specialized for a selector.
+We compare with NVIDIA BSA [13], FastVideo’s native CUDA
+and Triton VSA kernels [28], upstream FA4 block sparsity [25],
+FlexAttention [6], and SVG2’s released FlashInfer variable-block
+kernel (VBS) [24]. On the 128-row-aligned SSTA, STA, and VSA
+layouts, BSA, VSA-CUDA, FA4, and FlexAttention run with 128token blocks and VSA-Triton with 64-token blocks. On the SVG2
+layouts, whose clusters are far smaller than 128 rows, each baseline
+uses its fastest exact configuration: 64-token blocks for VSA-CUDA,
+FlexAttention, and Triton, and 128-token blocks for BSA and FA4,
+which offer no smaller exact block. All runs use BF16, head dimension 128, and the same GPU. Metadata construction is excluded;
+each latency is the median of ten iterations after three warmups
+(twenty iterations for the SVG2 rows).
+In Table 2, a VSA tuple (𝑡, ℎ, 𝑤) is the temporal, latent-height,
+and latent-width cube. Pad is the invalid-row fraction after blk128
+placement, and Partial is the fraction of nonempty blk128 blocks
+that are not full. For SVG2, which has independent partitions, Pad
+reports Q/K padding and Partial is marked indep.
+On the eight shared-partition layouts in Table 2, padding ranges
+from 0.7% to 59.0% and the partial-block ratio from 5.9% to 100%.
+KPage has the lowest forward latency in all ten configurations.
+Relative to the fastest exact sparse baseline, the forward speedups
+are 1.22–1.46× for SSTA, 1.13× for STA, 1.24–4.25× for VSA, and
+1.49–1.93× for SVG2. For the eight training-capable SSTA, STA, and
+VSA cases, KPage also has the lowest combined forward–backward
+time among exact baselines, with 1.02–2.71× speedup. The nearly
+full-block STA case remains close to parity, while the largest gains
+occur when every selected block is partial.
+SVG2 is the only special interface case. Its independent Q/K clusters require separate per-head Q sizes and K/V sizes and offsets;
+KPage places the K/V clusters on Page16 boundaries without changing the page kernels. The 1.3B/480p row aggregates 15 middle-layer
+traces with 𝐶𝑞 = 300 and 𝐶𝑘 = 1000. The 14B/720p row matches the
+paper configuration (𝐶𝑞 = 100, 𝐶𝑘 = 500, 30% dense warmup) on a
+released prompt; its 31.9% density is close to the reported 29.5–30.1%.
+Generality Across Open-Source Sparse
+Layouts and Kernels
+The preceding experiments cover several workload configurations.
+To test whether KPage generalizes to other video models and sparse
+selectors, we evaluate ten configurations from four open-source
+systems. The HunyuanVideo cases comprise SSTA at 480p and 720p
+with 121 or 241 frames, and STA at 720p with 117 frames [18, 29].
+The Wan cases comprise VSA at 480p and 720p with (4, 4, 4) or
+(4, 8, 8) spatiotemporal cubes [28], plus SVG2 at 480p on Wan 1.3B
+and at 720p on Wan 14B [22]. SSTA combines a 3D window with top𝑘 selection, STA uses head-specific windows, VSA routes learned
+3D cubes, and SVG2 independently clusters and permutes Q and K.
+For SSTA, STA, and VSA, block occupancy follows the released
+geometry, padding rule, resolution, and frame count; we synthesize
+Q, K, and V because these quantities do not depend on sample
+content. For SVG2, we capture cluster sizes and selected cluster pairs
+9
+Table 2: Fragmentation statistics and attention latency on layouts from open-source systems. Pad rows and Partial blocks
+are defined in the text. Best/KPage is the minimum latency among exact sparse baselines divided by KPage latency; values
+above one indicate a KPage speedup. Displayed latencies and speedups are rounded independently. † BSA backward executes
+whole blocks and is reported as a hardware timing reference but excluded from Best/KPage. ‡ SVG2 uses independent Q/K
+partitions; its Pad rows entry reports the Q-side and K-side blk128 padding (Q/K), averaged over the traces of the row. The
+released workload is inference-only, so no forward–backward result is reported. SVG2’s released kernel is not a column: it runs
+4.43 ms (1.3B) and 98.67 ms (14B), see text.
+(a) Forward time (ms)
+Layout
+Pad rows Partial blocks NV BSA VSA-CUDA FA4-BSA
+Flex VSA-Triton KPage Best/KPage
+SSTA-Hunyuan 480p/121f
+SSTA-Hunyuan 480p/241f
+SSTA-Hunyuan 720p/121f
+SSTA-Hunyuan 720p/241f
+STA-Hunyuan 720p/117f
+10.0%
+8.5%
+4.2%
+2.5%
+0.7%
+18.3%
+15.5%
+12.2%
+9.1%
+5.9%
+6.77
+21.45
+16.02
+51.90
+56.03
+6.71
+22.36
+16.20
+51.92
+56.02
+13.66 16.66
+40.34 50.02
+26.41 35.21
+73.58 103.72
+75.52 114.78
+14.77
+45.74
+34.63
+108.24
+126.39
+4.58
+17.26
+13.15
+42.70
+49.72
+1.46×
+1.24×
+1.22×
+1.22×
+1.13×
+VSA-Wan 480p (4, 4, 4)
+VSA-Wan 720p (4, 8, 8)
+VSA-Wan 720p (4, 4, 4)
+59.0%
+10.5%
+59.0%
+100.0%
+16.7%
+100.0%
+4.17
+14.77
+74.96
+3.68
+15.00
+76.71
+24.98 16.86
+30.60 34.91
+432.63 301.51
+4.60
+30.13
+77.28
+1.13
+11.90
+17.63
+3.27×
+1.24×
+4.25×
+SVG2-Wan 1.3B/480p‡
+SVG2-Wan 14B/720p‡
+31.9/74.4%
+7.8/30.7%
+indep.
+indep.
+5.63
+48.59
+2.76
+46.18
+35.88 14.48
+197.22 180.44
+5.21
+81.80
+1.43
+30.92
+1.93×
+1.49×
+(b) Forward + backward time (ms)
+Layout
+Pad rows Partial blocks NV BSA† VSA-CUDA FA4-BSA
+SSTA-Hunyuan 480p/121f
+SSTA-Hunyuan 480p/241f
+SSTA-Hunyuan 720p/121f
+SSTA-Hunyuan 720p/241f
+STA-Hunyuan 720p/117f
+10.0%
+8.5%
+4.2%
+2.5%
+0.7%
+18.3%
+15.5%
+12.2%
+9.1%
+5.9%
+24.99
+79.44
+58.30
+181.52
+200.78
+25.71
+84.50
+61.83
+190.97
+210.77
+30.55
+99.96
+69.54
+220.97
+223.90
+VSA-Wan 480p (4, 4, 4)
+VSA-Wan 720p (4, 8, 8)
+VSA-Wan 720p (4, 4, 4)
+59.0%
+10.5%
+59.0%
+100.0%
+16.7%
+100.0%
+13.80
+55.53
+239.90
+13.62
+57.12
+269.03
+34.57 51.41
+72.36 119.28
+633.66 908.29
+The released SVG2 VBS interface exposes FA2/FA3 paths but does
+not provide a matching device-specific backend for our execution
+environment. It therefore uses FA2 and is slower than dense FA4 in
+our comparison. We report VBS alongside the compatible sparse
+kernels available in the same environment. SVG2 reports 2.98×
+H100 attention speedup over FA3 and 1.60× end-to-end speedup
+(1.89× for SVG2-Turbo); our table reports attention-kernel latency
+and makes no end-to-end KPage claim.
+All exact forward kernels match an FP32 masked-attention oracle
+to BF16 accuracy; training-capable kernels have gradient cosine
+similarity of at least 0.9999. The consistent ranking across these
+models, resolutions, selectors, and block geometries shows that the
+gain is not confined to the preceding workload configurations.
+4.7
+Flex VSA-Triton KPage Best/KPage
+55.68
+168.38
+118.31
+352.78
+391.13
+62.90 22.30
+194.23 73.51
+148.21 56.46
+462.62 176.49
+532.88 206.48
+1.15×
+1.15×
+1.10×
+1.08×
+1.02×
+5.99
+51.51
+99.10
+2.27×
+1.11×
+2.71×
+19.16
+126.52
+331.75
+compaction reduces physical pair capacity from 334.1G to 199.7G
+pairs, while Q64/Q128 routing further reduces it to 177.5G. The
+resulting pair-capacity efficiency increases from 48.1% to 90.5%
+while preserving 160.6G useful sparse interactions.
+These results show that KPage remains competitive when logical
+blocks are already fully occupied and substantially reduces the cost
+of partial-block fragmentation in three-dimensional video layouts.
+The same behavior holds on layouts reproduced from open-source
+systems (Section 4.6): against the fastest exact block-sparse kernel
+available for each layout, KPage has the lowest forward time in
+all eight SSTA, STA, and VSA cases. The geometric-mean forward
+ratios are 1.28× for SSTA and 2.58× for VSA; a nearly full-block STA
+case remains close to parity at 1.13×. On the SVG2 Wan 1.3B middlelayer traces, KPage is 1.93× faster than the strongest exact sparse
+baseline. On the paper-matched SVG2 Wan 14B/720p trace, KPage
+is 1.49× faster than the strongest exact sparse baseline and 1.57×
+faster than NVIDIA BSA. We do not infer a dense-FA4 speedup
+from the FA4-BSA column in Table 2.
+Summary
+The controlled padding comparison shows that KPage remains
+near parity with NVIDIA BSA when every logical block is full,
+with a 1.03× geometric-mean forward speedup. Under 3D-blocked
+workloads, where boundary cubes introduce 20.8–22.8% padding,
+the geometric-mean forward speedup is 2.29×.
+Across five representative workload cases, KPage achieves a
+1.77× geometric-mean bare forward-kernel speedup over NVIDIA
+BSA. Metadata-based execution accounting shows that Page16 K/V
+5
+Conclusion
+KPage improves the execution of partially occupied block-sparse
+attention without changing the sparse graph or shrinking the large
+10
+compute tile. It decomposes selected K/V blocks into Page16 regions, packs valid pages across logical-block boundaries, and assembles the resulting physical tiles directly during K/V loading.
+Query-adaptive 𝑀64 × 𝑁 256/𝑀128 × 𝑁 128 execution reduces Qside padding, while a K/V-owned paged layout extends the same
+compaction principle to exact backward execution.
+KPage is effectively on par with NVIDIA BSA when all logical blocks are fully occupied (1.03× geometric mean), but reaches
+2.29× geometric-mean forward speedup under 3D partial-block
+fragmentation and 1.77× across five representative workload cases.
+Page16 K/V compaction and query routing reduce physical pair
+capacity from 334.1G to 177.5G positions for 160.6G useful interactions, increasing pair-capacity efficiency from 48.1% to 90.5%.
+The open-source cross-system evaluation confirms that this behavior is not pipeline-specific: across reconstructed SSTA, STA, and
+VSA layouts, KPage achieves 1.13–4.25× forward speedup over the
+strongest exact baseline while remaining close to parity as blocks
+become full. Separate Q/K partition metadata further extends the
+same page kernels to SVG2’s independent semantic clusters. On
+the paper-matched Wan 14B/720p trace, KPage is 1.49× faster than
+the strongest exact sparse baseline and 1.57× faster than NVIDIA
+BSA.
+The central result is that block-sparse attention need not choose
+between fine-grained padding removal and large-tile execution:
+fine-grained page packing can fill large physical tiles while preserving the original sparse-attention semantics.
+initially modified from FlashAttention 2.4.2.
+[13] NVIDIA. 2026. Block Sparse Attention (BSA). NVIDIA cuDNN Frontend OSS
+API Documentation, v1.28.0. Accessed September 2026.
+[14] William Peebles and Saining Xie. 2023. Scalable Diffusion Models with Transformers. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision. 4195–4205.
+[15] Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and
+Tri Dao. 2024. FlashAttention-3: Fast and Accurate Attention with Asynchrony
+and Low-Precision. In Advances in Neural Information Processing Systems. doi:10.
+52202/079017-2193
+[16] Benjamin F. Spector, Simran Arora, Aaryan Singhal, Daniel Y. Fu, and Christopher
+Ré. 2024. ThunderKittens: Simple, Fast, and Adorable AI Kernels. arXiv preprint
+arXiv:2410.20399 (2024).
+[17] Wenhao Sun, Rong-Cheng Tu, Yifu Ding, Zhao Jin, Jingyi Liao, Shunyu Liu,
+and Dacheng Tao. 2025. VORTA: Efficient Video Diffusion via Routing Sparse
+Attention. In Advances in Neural Information Processing Systems, Vol. 38. doi:10.
+52202/085713-0268
+[18] Tencent Hunyuan Foundation Model Team. 2025. HunyuanVideo 1.5 Technical
+Report. arXiv:2511.18870 [cs.CV]
+[19] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
+Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention Is All
+You Need. In Advances in Neural Information Processing Systems, Vol. 30.
+[20] Wan Team. 2025. Wan: Open and Advanced Large-Scale Video Generative
+Models. arXiv preprint arXiv:2503.20314 (2025).
+[21] Haocheng Xi, Shuo Yang, Yilong Zhao, Chenfeng Xu, Muyang Li, Xiuyu Li, Yujun
+Lin, Han Cai, Jintao Zhang, Dacheng Li, Jianfei Chen, Ion Stoica, Kurt Keutzer, and
+Song Han. 2025. Sparse Video-Gen: Accelerating Video Diffusion Transformers
+with Spatial-Temporal Sparsity. In Proceedings of the 42nd International Conference
+on Machine Learning (Proceedings of Machine Learning Research, Vol. 267). 68208–
+68224.
+[22] Shuo Yang, Haocheng Xi, Yilong Zhao, Muyang Li, Jintao Zhang, Han Cai, Yujun
+Lin, Xiuyu Li, Chenfeng Xu, Kelly Peng, Jianfei Chen, Song Han, Kurt Keutzer,
+and Ion Stoica. 2025. Sparse VideoGen2: Accelerate Video Generation with Sparse
+Attention via Semantic-Aware Permutation. In Advances in Neural Information
+Processing Systems, Vol. 38.
+[23] Zhuoyi Yang, Jiayan Teng, Wendi Zheng, Ming Ding, Shiyu Huang, Jiazheng Xu,
+Yuanming Yang, Wenyi Hong, Xiaohan Zhang, Guanyu Feng, Da Yin, Yuxuan
+Zhang, Weihan Wang, Yean Cheng, Ting Liu, Bin Xu, Xiaotao Gu, Yuxiao Dong,
+and Jie Tang. 2025. CogVideoX: Text-to-Video Diffusion Models with an Expert
+Transformer. In International Conference on Learning Representations.
+[24] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang,
+Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze.
+2025. FlashInfer: Efficient and Customizable Attention Engine for LLM Inference
+Serving. In Proceedings of Machine Learning and Systems, Vol. 7.
+[25] Ted Zadouri, Markus Hoehnerbach, Jay Shah, Vijay Thakkar, and Tri Dao. 2026.
+FlashAttention-4: Algorithm and Kernel Pipelining Co-Design for Asymmetric
+Hardware Scaling. In Proceedings of Machine Learning and Systems, Vol. 8.
+[26] Manzil Zaheer, Guru Guruganesh, Avinava Dubey, Joshua Ainslie, Chris Alberti,
+Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr
+Ahmed. 2020. Big Bird: Transformers for Longer Sequences. In Advances in
+Neural Information Processing Systems, Vol. 33.
+[27] Jintao Zhang, Chendong Xiang, Haofeng Huang, Jia Wei, Haocheng Xi, Jun Zhu,
+and Jianfei Chen. 2025. SpargeAttention: Accurate and Training-free Sparse
+Attention Accelerating Any Model Inference. In Proceedings of the 42nd International Conference on Machine Learning (Proceedings of Machine Learning Research,
+Vol. 267). 76397–76413.
+[28] Peiyuan Zhang, Yongqi Chen, Haofeng Huang, Will Lin, Zhengzhong Liu, Ion
+Stoica, Eric P. Xing, and Hao Zhang. 2025. Faster Video Diffusion with Trainable
+Sparse Attention. In Advances in Neural Information Processing Systems, Vol. 38.
+doi:10.52202/085713-5099
+[29] Peiyuan Zhang, Yongqi Chen, Runlong Su, Hangliang Ding, Ion Stoica,
+Zhengzhong Liu, and Hao Zhang. 2025. Fast Video Generation with Sliding
+Tile Attention. In Proceedings of the 42nd International Conference on Machine
+Learning (Proceedings of Machine Learning Research, Vol. 267). 74714–74731.
+References
+[1] Iz Beltagy, Matthew E. Peters, and Arman Cohan. 2020. Longformer: The LongDocument Transformer. arXiv preprint arXiv:2004.05150 (2020).
+[2] Andreas Blattmann, Tim Dockhorn, Sumith Kulal, Daniel Mendelevitch, Maciej
+Kilian, Dominik Lorenz, Yam Levi, Zion English, Vikram Voleti, Adam Letts,
+Varun Jampani, and Robin Rombach. 2023. Stable Video Diffusion: Scaling Latent
+Video Diffusion Models to Large Datasets. arXiv preprint arXiv:2311.15127 (2023).
+[3] Rewon Child, Scott Gray, Alec Radford, and Ilya Sutskever. 2019. Generating
+Long Sequences with Sparse Transformers. arXiv preprint arXiv:1904.10509
+(2019).
+[4] Tri Dao. 2024. FlashAttention-2: Faster Attention with Better Parallelism and
+Work Partitioning. In International Conference on Learning Representations.
+[5] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022.
+FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.
+In Advances in Neural Information Processing Systems, Vol. 35.
+[6] Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. 2025.
+FlexAttention: A Programming Model for Generating Fused Attention Variants.
+In Proceedings of Machine Learning and Systems, Vol. 7.
+[7] Sankeerth Durvasula, Kavya Sreedhar, Zain Moustafa, Suraj Kothawade, Ashish
+Gondimalla, Suvinay Subramanian, Narges Shahidi, and Nandita Vijaykumar.
+2025. FG-Attn: Leveraging Fine-Grained Sparsity in Diffusion Transformers.
+arXiv preprint arXiv:2509.16518 (2025).
+[8] Weijie Kong et al. 2024. HunyuanVideo: A Systematic Framework for Large
+Video Generative Models. arXiv preprint arXiv:2412.03603 (2024).
+[9] Xingyang Li, Muyang Li, Tianle Cai, Haocheng Xi, Shuo Yang, Yujun Lin, Lvmin
+Zhang, Songlin Yang, Jinbo Hu, Kelly Peng, Maneesh Agrawala, Ion Stoica, Kurt
+Keutzer, and Song Han. 2025. Radial Attention: 𝑂 (𝑛 log 𝑛) Sparse Attention
+with Energy Decay for Long Video Generation. In Advances in Neural Information
+Processing Systems, Vol. 38.
+[10] Akide Liu, Zeyu Zhang, Zhexin Li, Xuehai Bai, Yuanjie Xing, Yizeng Han, Jiasheng
+Tang, Jichao Wu, Mingyang Yang, Weihua Chen, Jiahao He, Yuanyu He, Fan
+Wang, Gholamreza Haffari, and Bohan Zhuang. 2025. FPSAttention: TrainingAware FP8 and Sparsity Co-Design for Fast Video Diffusion. In Advances in
+Neural Information Processing Systems, Vol. 38. doi:10.52202/085713-4633
+[11] Shanghao Liu, Renze Chen, Size Zheng, Yuanqiang Liu, Yun Liang, and Hailong Yang. 2026. SPADE: An Input-Adaptive Sparse Attention Engine for Fast
+Video Diffusion Models Inference. In Proceedings of the 63rd ACM/IEEE Design
+Automation Conference. doi:10.1145/3770743.3804015
+[12] MIT HAN Lab. 2024. Block-Sparse-Attention: A Sparse Attention Kernel Supporting Mixed Sparse Patterns. Open-source software repository. Implementation
+11

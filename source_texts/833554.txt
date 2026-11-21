@@ -1,0 +1,793 @@
+Unified framework for robot learning with multi-physics/renderer support - Update runtime camera intrinsics through device buffers by ooctipus · Pull Request #7916 · isaac-sim/IsaacLab
+
+Update runtime camera intrinsics through device buffers by ooctipus · Pull Request #7916 · isaac-sim/IsaacLab · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ooctipus
+commented
+Sep 20, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Description
+Runtime camera calibration previously copied matrices to the CPU, authored USD attributes for every camera, and reread USD to reconstruct the reported projection. OVRTX did not propagate runtime calibration into its renderer-owned scene, and Newton built its ray field only at initialization.
+Use NumPy for initial camera calibration and Warp for runtime updates. The camera owns persistent calibration buffers; each renderer owns its camera-specific bindings and queries.
+Initialization: read authored USD values once, build the pinhole matrices with NumPy array operations, preserve authored OpenCV calibration, and upload the completed arrays. Do not preload runtime calibration kernels. The two setter kernels share a separate Warp compilation unit within the existing camera file, so pose initialization cannot compile them incidentally.
+Runtime: set_intrinsic_matrices accepts NumPy, Torch, and Warp matrices. Upload host inputs, then validate indices, resolve duplicates, and convert projection parameters on the camera device. Keep matrix/index batches on device. Submit pending buffers to BaseRenderer.update_camera_intrinsics before committing public storage in place. Register float32/float64 specializations together; compilation happens on first use and subsequent updates reuse it.
+Kit: write five projection columns directly into Fabric with one Warp kernel, compiled on first use. Render data owns the selection and releases its tags on cleanup. Reinitialization restores authored calibration in both Fabric and the reported matrices.
+OVRTX: write GPU columns through native bindings or an ovstage query owned by each camera's render data. Cameras sharing a renderer retain independent handles; cleanup releases only that camera's resources.
+Newton Warp: regenerate the persistent shared ray field in Warp without changing its address. Reject nonuniform calibration before committing camera buffers. Avoid the native convenience helper's scalar GPU-to-host readbacks.
+Errors are atomic, duplicate indices retain the last row, OpenCV distortion calibration stays fixed, and ordinary pinhole cameras retain the centered, square-pixel projection. This also addresses the cardinality issue in #7898. Runtime preparation has one device path, with no batch-size threshold or first-call switching. All production changes stay in existing Python files. Camera-specific AGENTS.md additions are removed.
+Migration and limitations
+Breaking: Camera.set_intrinsic_matrices changes runtime calibration without authoring USD. USD edit-target/layer composition no longer controls the result, and exporting USD does not persist runtime overrides. Use PinholeCameraCfg.from_intrinsic_matrix when spawning cameras to persist calibration. Custom renderers must implement update_camera_intrinsics for runtime updates.
+Initial authored calibration uses NumPy. The public setter always uses Warp, including when called during setup. Its first invocation can incur JIT compilation; repeated invocations reuse compiled kernels. Renderer initialization still performs its existing native setup, including Newton's initial ray construction.
+Synchronous index errors and projection warnings require one status integer readback. Newton also reads a scalar for its shared-calibration constraint. The setter is not CUDA graph capturable. Host inputs are uploaded; CPU-configured cameras retain CPU support.
+All three backends support uniform runtime updates. On the tested Kit/OVRTX tiled runtimes, views share the first camera's projection: per-view attributes and reported matrices change, but independent rendered projections do not. Direct USD writes reproduce the same restriction. Newton explicitly rejects differing per-environment calibration and leaves active calibration unchanged. These limitations are documented in the API.
+Performance
+Compared the actual implementation against the prior eager-compilation version (fbf82be7d) on a Threadripper PRO 7965WX and RTX 5090. Three fresh-process, empty-Warp-cache trials per camera count gave these medians:
+Calibration phase
+1 camera: before → after
+4,096 cameras: before → after
+Initialization: USD import, matrices, device buffers
+312.37 → 3.15 ms
+358.17 → 45.27 ms
+First GPU setter, including any JIT
+0.36 → 71.31 ms
+0.38 → 72.53 ms
+These measurements exclude USD scene creation, process/CUDA initialization, renderer setup/writes, and rendering. NumPy initialization avoids setter compilation entirely; the first runtime setter pays its one-time compilation cost.
+For repeated updates, both implementations use the same native Fabric writer. GPU float32 matrices alternate focal lengths; five warm-up calls precede 50 paired measurements with alternating implementation order. Timings include validation, Fabric writes, and completed GPU work, excluding initialization and rendering:
+Cameras
+Previous GPU setter + Fabric
+NumPy initialization / GPU setter + Fabric
+1
+0.413 ms
+0.411 ms
+64
+0.409 ms
+0.403 ms
+1,024
+0.411 ms
+0.412 ms
+4,096
+0.409 ms
+0.408 ms
+With explicitly reversed GPU indices at 4,096 cameras, the runtime setter took 0.408 ms versus 0.411 ms previously. Repeated GPU throughput is preserved.
+Validation
+109 checks passed: 91 calibration cases, two architecture gates, four shared Kit rendered cases, two OVRTX rendered cases (bindings/ovstage), three Newton rendered/ray-field cases, and seven existing Kit camera cases.
+Existing calibration tests prohibit kernel launches, preloading, and compilation during initial calibration. The regression selection failed at the eager preload before the fix and passed afterward. Structural assertions ensure runtime calibration kernels cannot share the pose initialization compilation unit.
+Runtime tests prohibit matrix/index batch readbacks and compilation after the first update. Covered float32/64, NumPy/Torch/Warp and strided matrices, negative/repeated/empty selections, both focal-length modes, distortion skipping, atomic backend rejection, unchanged USD, native rendered projection changes, per-view Fabric values, and initialization/reset behavior.
+Full uv run --no-sync isaaclab -f, git diff --check, and a file-by-file architecture audit passed. All Python changes remain in existing files; no new scene or subprocess test harness was added.
+Local runtime: PyTorch 2.11.0+cu128, Warp 1.17.0, Isaac Sim 6.0.1 / Kit 110.1.2, OVRTX 0.4.1.364340, ovstage 0.1.1.355824. The branch pins PyTorch 2.12/CUDA 13 and CI's newer Isaac Sim image; CI covers that exact environment.
+Type of change
+Performance improvement
+Bug fix
+Breaking runtime-authoring behavior change
+Release backport
+Backport this pull request to the active release branch after it merges into develop
+Checklist
+Ran pre-commit checks.
+Updated API documentation and package changelog fragments, including migration guidance.
+Verified rendered behavior and regression failure before the change.
+Measured cold and warmed setters, including GPU input transfers and native Fabric writes.
+Batch camera intrinsic conversion in Warp
+ca080a9
+github-actions
+Bot
+added
+the
+isaac-lab
+Related to Isaac Lab team
+label
+Sep 20, 2026
+ooctipus
+added
+the
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+label
+Sep 20, 2026
+ooctipus
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+don't merge
+Write runtime camera intrinsics through renderer device buffers
+d80231e
+ooctipus
+changed the title
+Batch camera intrinsic conversion in Warp
+Update runtime camera intrinsics through device buffers
+Sep 20, 2026
+Document per-environment camera intrinsic limitations
+da8bbc2
+ooctipus
+marked this pull request as ready for review
+September 20, 2026 07:33
+ooctipus
+requested a review
+from a team
+September 20, 2026 07:33
+ooctipus
+requested review from
+AntoineRichard,
+StafaH,
+fatimaanes,
+huidongc,
+hujc7,
+kellyguo11,
+marcodiiga,
+pbarejko and
+rilei-nvidia
+as code owners
+September 20, 2026 07:33
+ooctipus
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+run-ci
+isaaclab-bot
+Bot
+added
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+and removed
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+labels
+Sep 20, 2026
+greptile-apps
+Bot
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Contributor
+Confidence Score: 5/5
+The PR appears safe to merge; no actionable correctness, security, or repository-rule violations remain.
+Summary
+This PR moves runtime camera calibration from per-camera USD authoring into persistent device buffers and renderer-native update paths.
+Adds a renderer contract for intrinsic-only updates and commits camera buffers only after backend validation.
+Writes Kit calibration columns through Fabric and OVRTX columns through cached bindings or ovstage.
+Regenerates Newton’s shared pinhole ray field in place and rejects nonuniform per-environment calibration.
+Adds migration notes and CPU/CUDA, selection, atomicity, unchanged-USD, and rendered-backend coverage.
+Diagram
+```
+%%{init: {'theme': 'neutral'}}%%
+flowchart LR
+  A[Camera.set_intrinsic_matrices] --> B[Warp selection and validation]
+  B --> C[Build pending matrices and projection parameters]
+  C --> D{Renderer backend}
+  D --> E[Kit: Fabric column kernel]
+  D --> F[OVRTX: binding or ovstage writes]
+  D --> G[Newton: validate shared calibration and update rays]
+  E --> H[Commit camera-owned buffers]
+  F --> H
+  G --> H
+  G -->|nonuniform calibration| I[Raise ValueError without commit]
+```
+Loading
+Reviews (1) · Last reviewed commit: "Document per-environment camera intrinsi..."
+isaaclab-review-bot
+Bot
+reviewed
+Sep 20, 2026
+View reviewed changes
+isaaclab-review-bot
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Isaac Lab Review Bot
+Reviewed the move from USD-authored runtime calibration to camera-owned device buffers and traced the new renderer update path across Kit/Fabric, OVRTX, and Newton. The proposed constructor-placement finding does not establish a concrete defect; moving the same Fabric setup into create_render_data would not remove the stage dependencies cited by the finding.
+Design and architecture: The pose-independent BaseRenderer.update_camera_intrinsics hook provides a coherent ownership boundary: the camera prepares and commits calibration buffers while each renderer applies backend-specific state. IsaacRtxRenderData.__post_init__ does introduce active Fabric setup into render-data construction, but the candidate review demonstrates no lifecycle or compatibility failure requiring relocation before merge.
+API: The breaking change to Camera.set_intrinsic_matrices is explicitly documented with persistence migration guidance, expanded index forms, validation behavior, backend limitations, and CUDA graph restrictions. The new renderer hook intentionally requires custom renderers to implement runtime calibration support.
+Implementation: The reviewed paths keep matrix and index batches on device, use a scalar status readback, resolve duplicate indices deterministically, and commit public calibration only after backend validation. Kit writes Fabric columns, OVRTX updates both native binding and ovstage paths, and Newton validates shared calibration before regenerating its persistent ray field in place.
+No blocking issues. No inline issue met the actionable-evidence threshold; the assessment above records the review feedback.
+Automated review; human maintainers own approval decisions.
+ooctipus
+added 2 commits
+September 20, 2026 01:01
+Fix camera calibration ownership and restart handling
+401e912
+Consolidate camera calibration tests into existing suites
+c69a819
+ooctipus
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+run-ci
+isaaclab-bot
+Bot
+added
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+and removed
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+labels
+Sep 20, 2026
+ooctipus
+mentioned this pull request
+Sep 20, 2026
+fix(camera): reject intrinsic matrix batch mismatches
+#7898
+Closed
+StafaH
+approved these changes
+Sep 21, 2026
+View reviewed changes
+ooctipus
+commented
+Sep 21, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+run-ci
+isaaclab-bot
+Bot
+added
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+and removed
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+labels
+Sep 21, 2026
+ooctipus
+added 2 commits
+September 21, 2026 11:46
+Merge develop into camera intrinsics branch
+18ace5d
+Use shared OVRTX backend for camera intrinsics
+…
+0f61b0a
+```
+Route camera calibration binding, updates, and cleanup through the native backend introduced by isaac-sim#7899. Update the existing camera isolation test to enforce that ownership.
+```
+ooctipus
+added
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+and removed
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+labels
+Sep 21, 2026
+Bound standalone demo output draining before teardown
+…
+6c929f9
+```
+Snapshot bytes queued at the soak deadline instead of waiting for a continuously logging demo to empty the pipe. Preserve buffered fatal-error detection and extend its existing regression test.
+```
+ooctipus
+added
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+and removed
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+labels
+Sep 21, 2026
+Merge develop into camera intrinsics branch
+…
+80cf093
+```
+Resolve the OVRTX conflicts with per-sensor render products from isaac-sim#7860.
+Keep calibration bindings in each camera's resource stack and reuse its
+ovstage pose query for intrinsic updates. Preserve direct and renderer-led
+cleanup and independent camera selection in the contract tests.
+
+Validation: 46 OVRTX contract, rendered behavior, and architecture checks
+passed; full formatting and merge-content audits passed.
+```
+ooctipus
+commented
+Sep 21, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+run-ci
+isaaclab-bot
+Bot
+added
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+and removed
+ci:run-docker
+Trigger the on-demand Docker and GPU CI workflow
+labels
+Sep 21, 2026
+Hide details
+View details
+StafaH
+merged commit 27d66c0
+into
+isaac-sim:develop
+Sep 22, 2026
+52 of 53 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+isaaclab-bot Bot
+pushed a commit
+that referenced
+this pull request
+Sep 22, 2026
+Update runtime camera intrinsics through device buffers (#7916)
+…
+33fbd71
+```
+## Description
+
+Runtime camera calibration previously copied matrices to the CPU,
+authored USD attributes for every camera, and reread USD to reconstruct
+the reported projection. OVRTX did not propagate runtime calibration
+into its renderer-owned scene, and Newton built its ray field only at
+initialization.
+
+Use NumPy for initial camera calibration and Warp for runtime updates.
+The camera owns persistent calibration buffers; each renderer owns its
+camera-specific bindings and queries.
+
+- **Initialization:** read authored USD values once, build the pinhole
+matrices with NumPy array operations, preserve authored OpenCV
+calibration, and upload the completed arrays. Do not preload runtime
+calibration kernels. The two setter kernels share a separate Warp
+compilation unit within the existing camera file, so pose initialization
+cannot compile them incidentally.
+- **Runtime:** `set_intrinsic_matrices` accepts NumPy, Torch, and Warp
+matrices. Upload host inputs, then validate indices, resolve duplicates,
+and convert projection parameters on the camera device. Keep
+matrix/index batches on device. Submit pending buffers to
+`BaseRenderer.update_camera_intrinsics` before committing public storage
+in place. Register float32/float64 specializations together; compilation
+happens on first use and subsequent updates reuse it.
+- **Kit:** write five projection columns directly into Fabric with one
+Warp kernel, compiled on first use. Render data owns the selection and
+releases its tags on cleanup. Reinitialization restores authored
+calibration in both Fabric and the reported matrices.
+- **OVRTX:** write GPU columns through native bindings or an ovstage
+query owned by each camera's render data. Cameras sharing a renderer
+retain independent handles; cleanup releases only that camera's
+resources.
+- **Newton Warp:** regenerate the persistent shared ray field in Warp
+without changing its address. Reject nonuniform calibration before
+committing camera buffers. Avoid the native convenience helper's scalar
+GPU-to-host readbacks.
+
+Errors are atomic, duplicate indices retain the last row, OpenCV
+distortion calibration stays fixed, and ordinary pinhole cameras retain
+the centered, square-pixel projection. This also addresses the
+cardinality issue in #7898. Runtime preparation has one device path,
+with no batch-size threshold or first-call switching. All production
+changes stay in existing Python files. Camera-specific `AGENTS.md`
+additions are removed.
+
+## Migration and limitations
+
+**Breaking:** `Camera.set_intrinsic_matrices` changes runtime
+calibration without authoring USD. USD edit-target/layer composition no
+longer controls the result, and exporting USD does not persist runtime
+overrides. Use `PinholeCameraCfg.from_intrinsic_matrix` when spawning
+cameras to persist calibration. Custom renderers must implement
+`update_camera_intrinsics` for runtime updates.
+
+Initial authored calibration uses NumPy. The public setter always uses
+Warp, including when called during setup. Its first invocation can incur
+JIT compilation; repeated invocations reuse compiled kernels. Renderer
+initialization still performs its existing native setup, including
+Newton's initial ray construction.
+
+Synchronous index errors and projection warnings require one status
+integer readback. Newton also reads a scalar for its shared-calibration
+constraint. The setter is **not CUDA graph capturable**. Host inputs are
+uploaded; CPU-configured cameras retain CPU support.
+
+All three backends support uniform runtime updates. On the tested
+Kit/OVRTX tiled runtimes, views share the first camera's projection:
+per-view attributes and reported matrices change, but independent
+rendered projections do not. Direct USD writes reproduce the same
+restriction. Newton explicitly rejects differing per-environment
+calibration and leaves active calibration unchanged. These limitations
+are documented in the API.
+
+## Performance
+
+Compared the actual implementation against the prior eager-compilation
+version (`fbf82be7d`) on a Threadripper PRO 7965WX and RTX 5090. Three
+fresh-process, empty-Warp-cache trials per camera count gave these
+medians:
+
+| Calibration phase | 1 camera: before → after | 4,096 cameras: before →
+after |
+| --- | ---: | ---: |
+| Initialization: USD import, matrices, device buffers | 312.37 → 3.15
+ms | 358.17 → 45.27 ms |
+| First GPU setter, including any JIT | 0.36 → 71.31 ms | 0.38 → 72.53
+ms |
+
+These measurements exclude USD scene creation, process/CUDA
+initialization, renderer setup/writes, and rendering. NumPy
+initialization avoids setter compilation entirely; the first runtime
+setter pays its one-time compilation cost.
+
+For repeated updates, both implementations use the same native Fabric
+writer. GPU float32 matrices alternate focal lengths; five warm-up calls
+precede 50 paired measurements with alternating implementation order.
+Timings include validation, Fabric writes, and completed GPU work,
+excluding initialization and rendering:
+
+| Cameras | Previous GPU setter + Fabric | NumPy initialization / GPU
+setter + Fabric |
+| ---: | ---: | ---: |
+| 1 | 0.413 ms | 0.411 ms |
+| 64 | 0.409 ms | 0.403 ms |
+| 1,024 | 0.411 ms | 0.412 ms |
+| 4,096 | 0.409 ms | 0.408 ms |
+
+With explicitly reversed GPU indices at 4,096 cameras, the runtime
+setter took 0.408 ms versus 0.411 ms previously. Repeated GPU throughput
+is preserved.
+
+## Validation
+
+- **109 checks passed:** 91 calibration cases, two architecture gates,
+four shared Kit rendered cases, two OVRTX rendered cases
+(bindings/ovstage), three Newton rendered/ray-field cases, and seven
+existing Kit camera cases.
+- Existing calibration tests prohibit kernel launches, preloading, and
+compilation during initial calibration. The regression selection failed
+at the eager preload before the fix and passed afterward. Structural
+assertions ensure runtime calibration kernels cannot share the pose
+initialization compilation unit.
+- Runtime tests prohibit matrix/index batch readbacks and compilation
+after the first update. Covered float32/64, NumPy/Torch/Warp and strided
+matrices, negative/repeated/empty selections, both focal-length modes,
+distortion skipping, atomic backend rejection, unchanged USD, native
+rendered projection changes, per-view Fabric values, and
+initialization/reset behavior.
+- Full `uv run --no-sync isaaclab -f`, `git diff --check`, and a
+file-by-file architecture audit passed. All Python changes remain in
+existing files; no new scene or subprocess test harness was added.
+
+Local runtime: PyTorch 2.11.0+cu128, Warp 1.17.0, Isaac Sim 6.0.1 / Kit
+110.1.2, OVRTX 0.4.1.364340, ovstage 0.1.1.355824. The branch pins
+PyTorch 2.12/CUDA 13 and CI's newer Isaac Sim image; CI covers that
+exact environment.
+
+## Type of change
+
+- Performance improvement
+- Bug fix
+- Breaking runtime-authoring behavior change
+
+## Release backport
+
+- [x] <!-- backport-active-release --> Backport this pull request to the
+active release branch after it merges into `develop`
+
+## Checklist
+
+- [x] Ran pre-commit checks.
+- [x] Updated API documentation and package changelog fragments,
+including migration guidance.
+- [x] Verified rendered behavior and regression failure before the
+change.
+- [x] Measured cold and warmed setters, including GPU input transfers
+and native Fabric writes.
+
+(cherry picked from commit 27d66c0)
+```
+isaaclab-bot
+Bot
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Backported to release/3.0.0 as 33fbd71.
+This was referenced Sep 23, 2026
+[Bug Report] Camera intrinsic batch mismatch silently updates only a prefix
+#7798
+Closed
+[Bug Report] EventManager.apply(reset, env_ids=None) passes slice(None) to event terms
+#7791
+Closed
+ooctipus
+mentioned this pull request
+Sep 23, 2026
+[Backport release/3.0.0] Complete September 20–23 backports and cloning docs
+#7957
+Merged
+ooctipus
+added a commit
+that referenced
+this pull request
+Sep 24, 2026
+[Backport release/3.0.0] Complete September 20–23 backports and cloni…
+…
+94b9091
+```
+…ng docs (#7957)
+
+Backports the three changes from the September 20–23 `develop` audit
+that are missing from `release/3.0.0`, alongside the existing
+cloning-guide backport:
+
+- #7722 (`4cf439dfeb`): reject a second `SimulationContext` construction
+instead of silently discarding its configuration. Includes the original
+fixture cleanup and regression coverage.
+- #7893 (`22fcd71bc4`): validate DelayBuffer lag values before mutating
+its live configuration.
+- #7947 (`6e9ef17f59`): make `v3.0.0-EA` the default documentation
+version in deployment and local multi-version builds.
+- #7129 (`354168560f`): clarify that `replicate_physics=False` skips the
+active physics context while other declared replication contexts still
+run.
+
+**Compatibility:** repeated `SimulationContext(...)` calls now raise.
+Retrieve the live context with `SimulationContext.instance()`, or call
+`clear_instance()` before constructing a replacement. The original major
+changelog fragment includes this migration.
+
+The runtime and test files match current `develop`. The docs-default
+backport adapts the release branch's existing redirect template,
+validates the target page, and preserves explicit overrides. The
+cloning-guide backport preserves the current release APIs; its obsolete
+sections were already removed.
+
+## Release audit
+
+Checked all **35 PRs** merged into `develop` from **2026-09-20 16:43:18
+UTC** through `cff81e8473` (September 23), against release head
+`5d3e0b695e`. **32 are already covered; the remaining three are included
+here.** Git history, patch equivalence, GitHub's merged PR list, and
+remaining file differences were checked. Branch-specific
+version/changelog compilation and existing release-only changes are
+preserved.
+
+<details>
+<summary>Already covered PRs</summary>
+
+26 have an equivalent patch in release: #7919, #7922, #7923, #7924,
+#7925, #6758, #7928, #7902, #7927, #7891, #7931, #7691, #7861, #7929,
+#7916, #7939, #4609, #7942, #7940, #7948, #7937, #7955, #7960, #7961,
+#7970, #7958.
+
+Six were squash-merged or adapted: #7530 and #7899 in #7926; #7637 in
+#7933; #7860 in #7936; #7954 and #7950 in #7964. Their implementation
+differences were checked against the current release tree.
+
+</details>
+
+## Validation
+
+- **276 tests passed**: SimulationContext (51, including CPU/CUDA),
+headless context construction (15), nine schema/fragment suites (165),
+four manager suites (38), and DelayBuffer (7).
+- Both backported regressions reproduce with the original release
+implementations.
+- Docs redirect recipe: local/deployment EA defaults, explicit override,
+and missing-target rejection passed with a stubbed Sphinx builder.
+- All 22 changed files match the intended backport scope; `uv run
+isaaclab -f` and `git diff --check` passed.
+- Fresh Sphinx validation (`-b dummy -W --keep-going`): passed without
+warnings, excluding static assets as the HTML builder does. Full HTML
+documentation CI is running.
+
+Local runtime validation used PyTorch 2.12.0, CUDA 13.0, Isaac Sim
+6.0.1.0, and an RTX 5090. Existing runtime/deprecation warnings
+occurred; the CI jobs validate the pinned environments.
+
+The previous [docs CI
+failure](https://github.com/isaac-sim/IsaacLab/actions/runs/35795116307/job/106972539281)
+was an external connection reset fetching the Omniverse intersphinx
+inventory, producing one warning under `-W`. That URL returned HTTP 200
+when rechecked. This update starts a fresh docs build.
+
+---------
+
+Co-authored-by: hujc <jichuanh@nvidia.com>
+Co-authored-by: Zihan Xu <2024010904024@std.uestc.edu.cn>
+```
+ooctipus
+self-assigned this
+Sep 25, 2026
+ooctipus
+added this to the
+Isaac Lab 3.0 GA milestone
+Sep 25, 2026
+ooctipus
+added this to Isaac Lab
+Sep 25, 2026
+github-project-automation
+Bot
+moved this to Done
+in Isaac Lab
+Sep 25, 2026
+ooctipus
+deleted the
+perf/camera-intrinsics-warp
+branch
+October 14, 2026 14:28
+qianl-nv
+mentioned this pull request
+Oct 21, 2026
+Update Arena to Isaac Lab 3.0 release
+isaac-sim/IsaacLab-Arena#1481
+Merged
+eric-heiden
+mentioned this pull request
+Oct 22, 2026
+[REQ] Declare cameras in ModelBuilder and import them from USD/MJCF
+newton-physics/newton#4899
+Open
+qianl-nv
+added a commit
+to isaac-sim/IsaacLab-Arena
+that referenced
+this pull request
+Oct 23, 2026
+Update Arena to Isaac Lab 3.0 release (#1481)
+…
+6eaa525
+```
+Update Arena to the Isaac Lab 3.0.0 GA pin and Isaac Sim 6.2. Keep the
+Isaac Sim base image while installing the pinned Lab and Arena source
+trees from their frozen uv locks.
+
+## Why this change?
+
+Arena was on Lab 3.0 EA and Isaac Sim 6.1. Update to the [Isaac Lab
+v3.0.0
+release](https://github.com/isaac-sim/IsaacLab/releases/tag/v3.0.0),
+pinned at
+[`e3f7d9ff1f5d7f8280de3ece9000b7117f66bcf4`](isaac-sim/IsaacLab@e3f7d9f),
+and adapt Arena to its released APIs and dependencies.
+
+## What changes?
+
+### Docker and uv workflow
+
+- Follow the uv-based Docker installation introduced by Isaac Lab [PR
+#7405](isaac-sim/IsaacLab#7405) and [commit
+`eed50f77c53`](isaac-sim/IsaacLab@eed50f77c53),
+while retaining Arena's Isaac Sim base-image stages and editable Lab
+source.
+- Interactive container shells alias `python` and `python3` to
+`isaaclab.sh -p`, and `pytest` to `isaaclab.sh -p -m pytest`, so
+commands initialize Isaac Sim and execute from `/opt/isaaclab-venv`.
+- Non-interactive runtime and CI commands invoke `isaaclab.sh -p`
+explicitly; build-time package operations use `uv pip` or
+`/opt/isaaclab-venv/bin/python`. `/isaac-sim/python.sh` is no longer a
+supported Arena entry point because it bypasses the Lab launcher and the
+locked Lab virtual environment.
+- Continue building from the Isaac Sim 6.2 image. Copy in uv 0.12.9 and
+create `/opt/isaaclab-venv` with Isaac Sim's Kit Python.
+- Sync third-party dependencies from the pinned Isaac Lab submodule's
+frozen `uv.lock`. The metadata-only stage skips all local path packages;
+after the complete submodule is copied, a second sync installs its
+editable packages.
+- Overlay Arena's non-Lab dependencies from Arena's frozen lock with `uv
+sync --inexact`, then install Arena editable into the same environment.
+- Pin uv 0.12.9 in Docker and native CI. Regenerating the lockfile with
+the newer serializer puts Arena's Linux x86_64 constraint in top-level
+`resolution-markers` and `supported-markers` and remove it from uv lock
+edges.
+
+### Torch 2.11 and CUDA 13 handling
+
+- Isaac Lab [PR #8372](isaac-sim/IsaacLab#8372)
+deliberately selects Torch 2.11.0 on CUDA 13.0. Torch 2.12's CUDA 13
+NCCL 2.29 can fail beside Kit RTX or OVRTX on Blackwell because of a
+driver shared-memory accounting issue. Torch 2.11 uses NCCL 2.28.9 and
+avoids that failure while retaining Isaac Lab's
+deferred-CUDA-initialization workaround.
+- Native uv routes `torch==2.11.0` and `torchvision==0.26.0` to the
+`cu130` PyTorch index. Docker takes those versions from Lab's frozen
+lock instead of duplicating them in a hand-written constraint list.
+Arena drops its direct `torchaudio` dependency, matching Lab.
+- Build cuRobo with the CUDA 13.0 toolkit and
+`CUDA_HOME=/usr/local/cuda-13.0`, matching PyTorch's CUDA major version.
+
+### Other API and released-stack changes
+
+- **Environment reset selectors — Lab [PR
+#8030](isaac-sim/IsaacLab#8030) and [PR
+#8015](isaac-sim/IsaacLab#8015 accept Lab's
+tensor, slice, and `None` environment selections in Arena's environment
+and recorder reset paths. This is API compatibility, no behavior change.
+- **Camera observations — Lab [PR
+#8051](isaac-sim/IsaacLab#8051 replace the
+removed generic `mdp.image` term with the RGB, depth, normals, or
+segmentation observation function selected for each modality.
+Unsupported data types now fail explicitly.
+- **Newton camera pose propagation — Lab [issue
+#7676](isaac-sim/IsaacLab#7676), [PR
+#7691](isaac-sim/IsaacLab#7691), and release
+backport [PR #7935](isaac-sim/IsaacLab#7935
+Lab 3.0 now mirrors Newton `FrameView` pose writes into Fabric so RTX
+sees camera movement. Remove Arena [PR
+#1196](#1196) and its
+`CameraPoseWriter` USD workaround. Camera-extrinsics variations now use
+Lab `set_local_poses()` directly; retained tests cover rendered images
+and reported poses under PhysX and Newton with Fabric enabled and
+disabled.
+- **Runtime camera intrinsics — Lab [PR
+#7916](isaac-sim/IsaacLab#7916 replace
+private USD sensor access and `_update_intrinsic_matrices()` with
+`Camera.set_intrinsic_matrices()`. Lab's ordinary pinhole runtime API
+enforces square pixels, so Arena now samples one focal-length delta and
+applies it to both `fx` and `fy`. **Note:** intrinsics variation has an
+pre-existing bug before this Lab upgrade which results in env_0 camera
+params being used for all parallel envs. Fix will go in a separate PR.
+- **Clone-plan topology — Lab [PR
+#8045](isaac-sim/IsaacLab#8045), backported in
+[PR #8073](isaac-sim/IsaacLab#8073 resolve
+representative scene geometry through asset-prototype IDs, prototype
+paths, and clone-plan topology instead of the removed
+`cloner.query.iter_sources()` helper. arena_world_scene_access.py was
+updated to essentially re-implement the removed helper.
+- **Franka presets — Lab [PR
+#8169](isaac-sim/IsaacLab#8169) and [PR
+#8170](isaac-sim/IsaacLab#8170 select
+`FRANKA_PANDA_LEGACY_CFG` and `FRANKA_PANDA_LEGACY_HIGH_PD_CFG`
+explicitly after Lab made the flat Franka asset the default and
+introduced shared minimal presets. This keeps Arena's nested `/panda`
+hierarchy, legacy joint names, and existing actuator grouping.
+- **Replicator kitchen USD — Isaac Sim 6.2 asset update:** update tests
+for `kitchen_peninsula.usda`, which now exposes 50 physics roots instead
+of 56. Its `_OnlineVisual` physics roots decrease from 24 to 18, and the
+previously discovered `_OnlineVisual` articulation is no longer present.
+- Unit test pick and place success speed thresholds were relax due to
+large observed residual speed. Root cause unknown yet.
+
+## Validation
+
+Passing local checks:
+
+- `uv lock --check --no-python-downloads` with uv 0.12.9
+- Docker build and Isaac Sim startup/import smoke checks with Torch
+2.11.0+cu130 and NCCL 2.28.9
+- All RL and IL sample workflow replay and inference commands are
+validated and producing expected success rate.
+
+---------
+
+Signed-off-by: Qian Lin <qianl@nvidia.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+isaac-lab
+Related to Isaac Lab team
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

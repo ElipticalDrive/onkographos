@@ -1,0 +1,99 @@
+Background, the only reason we're not using Compute Shaders with Inline Ray-Queries is because of Raytracing Invocation Reorder / SER and lack of function pointers which make RT Pipeline Callables really attractive (esp that callable pay...
+
+Extension to tell us if a Raytracing Pipeline implementation actually uses Wavefront Tracing and builtins to uniquely identify rays · Issue #2717 · KhronosGroup/Vulkan-Docs · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Extension to tell us if a Raytracing Pipeline implementation actually uses Wavefront Tracing and builtins to uniquely identify rays #2717
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Extension to tell us if a Raytracing Pipeline implementation actually uses Wavefront Tracing and builtins to uniquely identify rays#2717
+Copy link
+Assignees
+Labels
+Ray Tracing
+Description
+devshgraphicsprogramming
+opened on Apr 21, 2026
+Issue body actions
+Background, the only reason we're not using Compute Shaders with Inline Ray-Queries is because of Raytracing Invocation Reorder / SER and lack of function pointers which make RT Pipeline Callables really attractive (esp that callable payloads get much better treatment than emulated function calls, as some arguments can be passed in registers like a proper calling convention, instead of getting dynamically indexed from local memory arrays).
+However when developing our Layered Material Virtual Machine we've come across the need to manage the spilling ourselves, in and out of an additional VRAM buffer with an offset allocated for each ray.
+And yes we know ray payloads and live-state across OpTraceRay and other calls which can change your SubgroupInvocationIndex can make trips through VRAM and implementation is expected to manage spilling.
+So why not keep everything in the callable payload?
+Because not all Materials need the same amount of virtual registers, so we don't want to over pessimize for spilling.
+Even if we had a switch statement which called Callables with Payloads of increasing log2(size), this would not reduce the register usage and increase occupancy in the calling shader. Not to mention the nasty combinatorial explosion.
+As per the spec, with vkCmdTraceRays(W,H,D) you can have all W*H*D rays live and in-flight at once.
+And we really don't want to statically preallocate 8M meta-ray-payloads for spilling in a 4k render, esp that to allocate up-front we need to assume all rays will hit the most-spilling material in the scene - this really prevents layering as complex as in Weta's Avatar shaders.
+But here's the thing, on most driver implementations, Raytracing Pipelines don't actually run all your vkCmdTraceRays(W,H,D) rays at once, instead a group of ray invocations are ran to completion before the next set is begun. I can observe this by writing out the shader clock to the image as I render.
+Sure rays can be put to sleep and buffered up so there's enough work for a specialized kernel like running the SBT Closest hit or Intersection routines, so the numer of "rays in flight" (with implementation allocated payload and live-state living on device) can be much more than the "live rays" (actually hot and out of VRAM), this would be especially true for implementations which are more Wavefront-like.
+In theory because of the single-ray programming model, the implementation is free to run all rays until traceRay then run all the intersection and traversal, then run closest hit shaders one by one and bucketed.
+But efficient Wavefront Path Tracers can't do that in practice because
+the amount of VRAM used would be unbounded, should the ray payloads and live state across OpTraceRay, need to perform spilling and you had a large trace ray dispatch size
+having a large live-ray working set is really bad for the cache hits on the spilled data and payloads when juggling live rays between different kernels or when performing Shader Execution Reorder
+Armed with the knowledge that we only have an order of magnitude less "rays in flight" than "rays in a dispatch" we can reduce the amount of scratch we allocate.
+Know the bound on the size of the ray working set size or configure it
+For static allocation with bounded memory usage we would need to make assumptions in the Host code, split one vkCmdTraceRays into multiple virtually via the use of persistent threads (1080p dispatch becomes 270p and our raygen runs the original entrypoint for 16 rays on a loop, interleaved or tiled throughout the screen).
+Though we'd still need to assume worst case spilling.
+The worst part is that there's no way for us to reliably determine how the pipeline will run:
+Is it wavefront-like
+Whats the maximum number of live rays (executing all at once) at a given point
+Whats the scratch memory per ray
+Whats the maximum number of rays in flight
+How many distinct kernels we have and which shader handles they cover (similar to pipeline creation feedback where it lets you know how many "opaque" binaries there are and which stages they cover)
+Note that current pipelien feedback extension doesn't do anything for RT pipelines on Nvidia and doesn't even let us know how many registers we're using.
+it would be good to know how much VRAM the implementation is already setting aside for the stack and live state spilling and configure it internally.
+Qualcomm has a tile memory heap extension which you can bind explicitly to buffers, it would be nice to bind memory explicitly to back a RT pipeline.
+New SPIR-V Builtins to use on the device
+Due to the above we would like to allocate our meta-payloads dynamically within the shader not statically.
+This immediately runs into a certain problem, as even the simplest GPU scratch memory allocator requires the use of at least one atomic, and we don't want to use one per ray/invocation. Thanks to subgroup intrinsics we can elect one invocation and distribute the result to all rays. This is not ideal, given that a RT Pipeline implementation is usually just a bunch of compute shader kernels with the smallest possible workgroup size which doesn't tank occupancy so we're talking 2-4 subgroups per workgroup, but these workgroups are not visible to us.
+With SER we can actually sort the rays at the end of raygen to attempt to have the rays with similar spilling offsets grouped together in a subgroup and therefore reduce the use of atomics (if any) when "freeing" allocations.
+The lack of #2233 really really really makes our lives difficult here, as the only allocator we can reliably use without UB is a circular buffer, as the only other alternative which is the bump allocator puts us back at square one (its like static preallocation but worse).
+We would like to use a special circular buffer where when you allocate a new slot, you check a bitfield if the allocation is not currently in use, and if it is, increment the current pointer and try again. However without these insights we have no way to size it properly ahead of time.
+Ideally what I'd love to see is a SPIR-V ray compact-UUID builtin but which gets recycled, when the ray finishes its raygen. It doesn't matter if its stays constant for the same ray or if its volatile like subgroup invocation id, I can backup the original value between any ray-potentially-reordering instructions
+Another ask is for something like a gl_WorkgroupInvocationIndex but to enumerate the current kernel/pipeline binary and the workgroups within it and current number of workgroups running live.
+P.S. We could use a new a new circular buffer allocation between SER and OpTraceRay points, but callables can reorder by themselves AFAIK and we plan on replacing the giant VM switch with callable invocation.
+Activity
+devshgraphicsprogramming
+changed the title [-]Extension to tell us if a Raytracing Pipeline implementation actually uses Wavefront Tracing and builtins[/-] [+]Extension to tell us if a Raytracing Pipeline implementation actually uses Wavefront Tracing and builtins to uniquely identify rays[/+] on Apr 21, 2026
+oddhack
+assigned
+dgkoch
+on Apr 29, 2026
+oddhack
+added
+Ray Tracing
+on Apr 29, 2026
+dgkoch commented on Jun 12, 2026
+dgkoch
+on Jun 12, 2026
+Contributor
+More actions
+Thanks for the writeup.
+The Ray Tracing TSG has reviewed this on a recent call and we've raised an internal issue to track it. There are some interesting threads here worth thinking about, but at this point the group hasn't yet formed a position on whether any of it is something we'd want to expose through the API, or whether it's better left as an implementation detail.
+If you have additional concrete use cases — particularly ones where you've prototyped the persistent-threads workaround and can quantify the cost — those would be useful to fold into the discussion.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+dgkoch
+Labels
+Ray Tracing
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

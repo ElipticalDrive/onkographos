@@ -1,0 +1,114 @@
+# Adaptive Atomic ReduCtion (ARC)
+
+## Overview
+Adaptive Atomic ReduCtion (ARC) is a GPU primitive that accelerates atomic operations in differentiable rendering by leveraging intra-warp locality and varying atomic traffic [S1]. It reduces atomic requests sent to the L2 cache by performing warp-level reduction in registers or Streaming Multiprocessor (SM) cores and dynamically distributing the remaining atomic computation between SM cores and L2 ROP units [S1]. Unlike prior approaches that buffer and aggregate atomics in L1/scratchpad memory, which fail to fully leverage intra-warp locality and overwhelm load-store units, ARC performs reduction at the core level using registers, significantly reducing L2 traffic [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A warp of threads, each potentially generating an atomic update (e.g., gradient accumulation) to a shared memory location.
+*   **Output:** The reduced atomic value written to the target memory location, with minimal L2 traffic.
+
+**Data Structures:**
+*   **Registers:** Used to store intermediate atomic values within a warp before reduction [S1].
+*   **Balancing Threshold ($T$):** A tunable hyperparameter defining the minimum number of threads in a warp that must perform atomic updates to a location for the reduction to be performed at the SM [S1].
+
+**Steps:**
+1.  **Identify Active Threads:** Determine which threads in the warp have valid atomic updates to perform. In differentiable rendering, for most warps, all threads atomically update the same memory locations, but the number of active threads varies due to control divergence (e.g., failing condition checks) [S1].
+2.  **Count Active Threads:** Count the number of threads ($N_{active}$) in the warp that are performing atomic updates to the specific memory location [S1].
+3.  **Compare with Threshold:** Compare $N_{active}$ with the balancing threshold $T$ [S1].
+4.  **Conditional Reduction:**
+    *   If $N_{active} > T$: Perform warp-level reduction at the SM level. This involves using warp-level primitives (e.g., `shfl` in software implementations) to combine the atomic values from all active threads within the warp into a single value [S1].
+    *   If $N_{active} \le T$: Do not perform SM-level reduction. Instead, send the atomic updates directly to the ROP (Raster Operations Pipeline) units in L2 [S1].
+5.  **Execute Atomic Operation:**
+    *   If SM-level reduction was performed (Step 4a): The single reduced value is then atomically updated to the target memory location [S1].
+    *   If direct update was chosen (Step 4b): Each active thread performs its atomic update directly to the target memory location via the ROP units [S1].
+
+**Pseudocode (ARC-SW Implementation):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def arc_atomic_add(target_addr, value, threshold):
+    """
+    Performs adaptive atomic addition within a warp.
+    
+    Args:
+        target_addr: Memory address to update.
+        value: The value to add (e.g., gradient).
+        threshold: The balancing threshold T.
+        
+    Returns:
+        The result of the atomic operation.
+    """
+    # Get warp ID and lane ID
+    warp_id = get_warp_id()
+    lane_id = get_lane_id()
+    warp_size = get_warp_size() # Typically 32
+    
+    # Determine if this thread has a valid update
+    # [G] This condition is application-specific (e.g., checking if a pixel is covered)
+    has_update = check_update_condition()
+    
+    if not has_update:
+        return 0 # No update needed
+
+    # Step 1: Count active threads in the warp for this target address
+    # [G] Assuming all active threads in the warp target the same address for this example.
+    # In practice, this might require a warp-wide sum or shuffle-based counting.
+    active_count = 0
+    for i in range(warp_size):
+        # [G] Using a hypothetical warp shuffle to check if lane i has an update
+        if warp_shfl(has_update, i):
+            active_count += 1
+            
+    # Step 2: Compare with threshold
+    if active_count > threshold:
+        # Step 3a: Perform SM-level reduction
+        # [G] Using a butterfly reduction pattern with shfl for atomic add
+        local_val = value
+        for offset in [1, 2, 4, 8, 16]:
+            other_val = warp_shfl(local_val, lane_id ^ offset)
+            # [G] Only add if the other lane is active
+            if (lane_id ^ offset) < warp_size and warp_shfl(has_update, lane_id ^ offset):
+                local_val = local_val + other_val
+        
+        # Step 4a: Perform single atomic add to global memory
+        result = atomic_add(target_addr, local_val)
+    else:
+        # Step 3b: Direct atomic add to ROP units (L2)
+        # [G] This bypasses SM-level reduction logic
+        result = atomic_add(target_addr, value)
+        
+    return result
+```
+
+**Parameters:**
+*   **Balancing Threshold ($T$):** A tunable hyperparameter. The optimal value depends on the workload and hardware characteristics [S1]. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Control Divergence:** The number of active threads varies across warps due to condition checks, which is the primary driver for the adaptive nature of ARC [S1].
+*   **Intra-warp Locality:** ARC assumes that threads within a warp target the same memory location. If this assumption is violated, the reduction logic may need to be adapted [S1].
+*   **Precision:** Atomic operations must be commutative and associative for reduction to be valid (e.g., addition) [S1].
+
+## Subtopics
+
+### [Adaptive Atomic ReduCtion Hardware (ARC-HW)](12371-adaptive-atomic-reduction-hardware-arc-hw.md)
+ARC-HW is a hardware-software cooperative primitive that accelerates commutative atomic additions in differentiable rendering by performing warp-level reduction within the Streaming Multiprocessor (SM) and dynamically distributing the remaining atomic computation between the SM and L2 ROP units. It addresses the bottleneck of irregular atomic updates where only a subset of threads in a warp generate atomic updates, and the high throughput requirements that overwhelm standard hardware queues. Unlike its software counterpart [Adaptive Atomic ReduCtion Software (ARC-SW)](12373-adaptive-atomic-reduction-software-arc-sw.md), ARC-HW eliminates instruction overheads, redundant computation, and control flow divergence by implementing the reduction logic directly in hardware, requiring no programmer intervention or tuning of balancing thresholds.
+
+### [Adaptive Atomic ReduCtion Software (ARC-SW)](12373-adaptive-atomic-reduction-software-arc-sw.md)
+ARC-SW is a software-only implementation of the Adaptive Atomic Reduction (ARC) framework designed to accelerate gradient computation in raster-based differentiable rendering by reducing atomic operation bottlenecks on GPUs. It replaces standard atomic instructions with a function that dynamically chooses between baseline atomic addition, serialized warp-level reduction, or butterfly reduction based on a balancing threshold. Unlike its hardware counterpart [Adaptive Atomic ReduCtion Hardware (ARC-HW)](12371-adaptive-atomic-reduction-hardware-arc-hw.md), ARC-SW leverages existing warp-level primitives (such as `shfl`) to perform reduction at the Streaming Multiprocessor (SM) level, making it flexible for GPUs that do not support specific hardware primitives and requiring less programmer effort to integrate.
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of atomic operations sent to L2, thereby reducing memory latency and contention [S1].
+*   **Memory Complexity:** Uses registers for intermediate storage within the warp, minimizing additional memory overhead compared to L1/scratchpad buffering approaches [S1].
+*   **Measured Performance:** With ARC-HW, an average speedup of 2.1× (up to 8.6×) for gradient computation was demonstrated using GPGPU-Sim [S1]. With ARC-SW, a speedup of 1.8× on average (up to 7.2×) was demonstrated [S1].
+*   **Scaling:** Performance gains are most significant in workloads with high atomic traffic and varying active thread counts per warp, such as 3D Gaussian Splatting, NVDiffRec, and Pulsar [S1].
+*   **Strengths:** Significantly reduces L2 traffic, eliminates instruction overheads (in ARC-HW), and leverages intra-warp locality effectively [S1].
+*   **Limitations:** Requires tuning of the balancing threshold in ARC-SW [S1]. ARC-HW requires hardware support [S1].
+*   **When to Use:** When gradient computation in differentiable rendering is bottlenecked by atomic operations, especially with irregular atomic traffic patterns [S1].
+*   **When Not to Use:** When atomic traffic is uniform across all threads in a warp, or when the overhead of determining active thread count outweighs the benefits of reduction [S1].
+
+## Background
+ARC was introduced by Sankeerth Durvasula, Adrian Zhao, Fan Chen, Ruofan Liang, Pawan Kumar Sanjaya, Yushi Guan, Christina Giannoula, and Nandita Vijaykumar in 2025 [S1]. It addresses bottlenecks in differentiable rendering applications like 3D Gaussian Splatting, NVDiffRec, and Pulsar, where atomic operations for gradient computation can overwhelm GPU resources [S1]. Prior approaches buffered atomics in L1/scratchpad memory, but failed to fully leverage intra-warp locality, leading to overwhelmed load-store units [S1]. ARC improves upon these by performing reduction at the core level using registers [S1].
+
+## Sources
+[S1] ARC: Warp-level Adaptive Atomic Reduction in GPUs to Accelerate Differentiable Rendering, https://doi.org/10.1145/3669940.3707238, fetched 2026-11-03

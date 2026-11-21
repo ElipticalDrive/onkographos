@@ -1,0 +1,427 @@
+# Towards Fully Dynamic Omnitrees: Moment-Conserving Anisotropic Compression With Wavelets
+
+Theresa Pollinger, Masado Ishii, Jens Domke
+
+RIKEN Center for Computational Science, Kobe, Japan
+
+#### Abstract
+
+Recently, omnitrees were introduced as a flexible space partitioning tree that improves upon the benefits of both octrees and k-d trees: Omnitrees' efficient encoding of anisotropic refinements holds particular interest for applications with anisotropic features and high dimensionality. These include, but are not limited to, computer graphics, databases, machine learning, and physics simulations. The present paper defines new operations on the omnitree encoding that extend its capabilities from the existing refinement to also include coarsening and therefore fully adaptive compression. It demonstrates natural integration of omnitrees with wavelets, which conserves moments of the stored function by design. For omnitrees, the wavelet coefficients can be interpreted as local refinement priorities, which can be used to guide the adaptation process. We derive algorithms for coarsening and downsplit that are guided by wavelet coefficients, and show their application to a large dataset of 3D shapes, as well as the continuous-valued density field of a cloud. The comparison to OpenVDB, a widely-used data structure for sparse volumetric data in computer graphics, enables a demonstration of the practical benefits of omnitrees even for moderately anisotropic three-dimensional data. Compared to OpenVDB, objects can be stored using up to 28× less space, and asymptotically show savings that exceed theoretical expectations. Using lossy compression, the cloud dataset can be compressed by ≈ 5 × compared to OpenVDB, with negligible loss of visual quality. This demonstrates the potential of omnitrees for efficient storage and processing, and motivates further research into their applications in various domains.
+
+### 1 Introduction
+
+Omnitrees are introduced by [29] as a type of flexible space partitioning tree that improves upon the benefits of both octrees and bintrees (k-d trees). This is achieved by efficiently encoding anisotropic refinements. Whereas octrees bisect all dimensions of a volume at once, and bintrees bisect one dimension at a time, omnitrees bisect a locally optimal subset of dimensions on any level. It is shown in [29] that, for the same error threshold, omnitree discretizations of anisotropic problems are smaller than their octree counterparts by a power law, Nomni ∼ (Noct) γ , γ < 1, where N is the number of cells in the discretization. That is, N is improved by faster than a constant factor. Omnitrees also generalize bintrees to allow any dimension to be split on any level without a regular period. The ability for multiple dimensions to be split at once further distills the tree into a shallower encoding with shorter traversal depth.
+
+The present paper defines new operations on this omnitree encoding that enable not only top-down refinement but also fully adaptive compression. The compression scheme integrates naturally with wavelet bases: Wavelet coefficients below a threshold indicate that coarsening is possible, and this paper describes how the updated tree and wavelet coefficients can be computed. For the purposes of this work, we select Haar wavelets as one of the simplest possible multiscale bases. Haar wavelet compression conserves the mass of the function, and higher orders of conservation (momentum, energy, ...) are possible with a choice of higher-order wavelets. By comparing with OpenVDB—a state-ofthe-art adaptive hierarchical storage format—this paper provides a validation of increased compression and even approximation rate for three-dimensional objects.
+
+These coarsening operations represent a major step towards a fully dynamic omnitree data structure that can be used for adaptive storage and processing of anisotropic data in various domains, including computer graphics, databases, machine learning, and physics simulations.
+
+### 2 Related Work
+
+In addition to the related work of the 2000s, e.g. [12, 26], discussed in the previous omnitree paper [29], there is a range of related concepts that the authors since became aware of. On the topic of omnitree-like data structures, there is a tradition of including anisotropically split hexagonal elements in mixed element trees [15, 17]. Also using mixed-element trees, the hp3D library [14] was used successfully to explore the numerics of Discontinuous Petrov-Galerkin schemes on omnitree-equivalent dyadic discretization spaces [8]. Their hp adaptation approach, in particular the anisotropic p adaptation, provides a very interesting possibility to further increase the convergence order of omnitree discretizations for physics simulations. Similarly, the interfaces for MFEM1 support anisotropic refinement of hexahedral elements [7]. The same holds true for the interface of peano in the refinement2 of its triadic spacetree data structure [36].
+
+OpenVDB [25] is a hierarchical voxel structure specialized for 3-d animation tasks such as volume rendering and finite difference calculations. Although the
+
+1
+
+2[https://web.archive.org/web/20250918090327/https://hpcsoftware.pages.](https://web.archive.org/web/20250918090327/https://hpcsoftware.pages.gitlab.lrz.de/Peano/dd/dc6/structpeano4_1_1datamanagement_1_1VertexMarker.html#a5bd3c7eec8d87ec4d2d403639063c21c) [gitlab.lrz.de/Peano/dd/dc6/structpeano4\\_1\\_1datamanagement\\_1\\_1VertexMarker.html#](https://web.archive.org/web/20250918090327/https://hpcsoftware.pages.gitlab.lrz.de/Peano/dd/dc6/structpeano4_1_1datamanagement_1_1VertexMarker.html#a5bd3c7eec8d87ec4d2d403639063c21c) [a5bd3c7eec8d87ec4d2d403639063c21c](https://web.archive.org/web/20250918090327/https://hpcsoftware.pages.gitlab.lrz.de/Peano/dd/dc6/structpeano4_1_1datamanagement_1_1VertexMarker.html#a5bd3c7eec8d87ec4d2d403639063c21c)
+
+authors acknowledge a "superficial" resemblance to octree grids, they emphasize properties of the data structure, such as compile-time-fixed tree height and traversal caching, that enable fast lookups despite its dynamic nature.
+
+Since the present work draws some comparisons to OpenVDB, we would also like to mention recent approaches to increase its parallelism and information efficiency. For example, NanoVDB [24] was created to offload a static snapshot of an OpenVDB tree (similar to the linearized omnitree data structure) to various GPU architectures. This is particularly useful for real-time applications [34] and allows for further lossy compression to achieve fast scientific visualization [38]. The hierarchical lossy compression [38] has some similarity to the lossy compression that this paper presents in Section 4.4.1.
+
+NeuralVDB [19] uses learned details to achieve a 10× to 100× compression compared to OpenVDB on various surfaces. (In fact, one of their showcases is the same cloud that will be the experimental basis for Section 5.2.) One can argue that these findings are not in conflict with omnitrees, to the contrary: Omnitree compression may well benefit from neural approaches, potentially compounding the compression effects of both approraches. Recently, NeuralVDB approaches were integrated into fVDB, which—among other optimizations allows storing the function data separately from the tree topology data [37].
+
+### 3 Omnitree Transformations Beyond Refinement
+
+Before introducing the novel transformations coarsening \(Section 4.4.1\) and downsplit \(Section 4.4.2\), we briefly recapitulate the core concepts of omnitrees [29]:
+
+Omnitrees partition a d-dimensional Cartesian domain Ω ⊂ R d into N nonoverlapping subdomains,
+
+$$\overline{\Omega} = \bigcup_{1 \leq i \leq N} \overline{Q}_i, \quad Q_i \cap Q_j = \emptyset \quad \text{for } i \neq j, \quad (1)$$
+
+where Q = (x − 1 , x+ 1 ) × · · · × (x − d , x+ d ) are d-dimensional hyper-rectangles (hereafter "rectangles", or "cuboids" in 3-d). Indexing dimensions by the set D with |D| = d, we take Ω = (0, 1)D without loss of generality. An omnitree encodes a hierarchical dyadic partition of this unit hypercube: all partition boundaries occur at dyadic rationals, i.e., at multiples of 2−k for appropriate k ∈ N.
+
+An omnitree node v is characterized by its binary splitting label ⃗b(v) ∈ {0, 1} d , where bj = 1 indicates bisection in dimension j, yielding 2|σ(v)| children. The all-zero label ⃗b = ⃗0 is reserved for leaf nodes. Normalization [29, Definition 2.2] enforces that splits are gathered as high in the tree as possible, guaranteeing a unique, shallowest representation.
+
+Each node maps to a rectangle Q⃗i,⃗ℓ with per-dimension refinement levels ⃗ℓ ∈ N d , extents 2−⃗ℓ , and index ⃗i with ij ∈ {0, . . . , 2 ℓj − 1}, occupying
+
+$$Q_{\vec{i},\vec{\ell}} = \prod_{j=1}^d (i_j 2^{-\ell_j}, (i_j + 1) 2^{-\ell_j}). \quad (2)$$
+
+The tree is linearized into a binary descriptor via Z-curve order, allowing to access a node v i 's splitting label b(v i ) by accessing the descriptor's ith tuple of d bits. If spatial data is stored on leaves, it can be stored in a flat data array the same length as the number of leaves.
+
+Refinement proceeds in four steps:
+
+- 1. Marker attachment: Each node v in the initial tree receives a marker ⃗m(v) ∈ N d , where mj specifies additional refinement levels in dimension j; the default is ⃗m(v) = ⃗0
+- 2. Bottom-up sweep: Markers migrate upward when all siblings share a common marker or already carry a split (bj = 1) in the relevant dimension; the latter are compensated with negative markers.
+- 3. Top-down sweep: Markers lifted too high are pushed back down to children where the refinement can be resolved.
+- 4. Tree construction: The target tree is built with preorder depth-first traversal, greedily constructing the target descriptor. At each rectangle q, the initial node s whose rectangle covers q is located. Child rectangles we are identified by substituting trailing λ entries in ˆ\$(v) with 0 or 1, and the procedure recurses. At leaf nodes, the subtree is expanded directly from ⃗m. Structural changes can be substantial: positive markers increase branching (requiring grandchild adoption) and negative markers decrease it (requiring node culling).
+
+The algorithm guarantees a valid omnitree, though not necessarily in its unique normalized representation; The latter can be obtained in a separate step by detecting nodes that violate the uniqueness condition and attaching the corresponding markers to the node (positive marker) and its children (negative markers) and applying the tree construction step. This is repeated until no nodes in the newly constructed tree violate the uniqueness condition.
+
+#### 3.1 Information Mapping
+
+An index mapping M from an initial tree T (length N) to a target tree T ′ (length N′ )
+
+$$M : \{0, \dots, N-1\} \rightarrow \mathcal{P}(\{0, \dots, N'-1\}), \quad (3)$$
+
+always maps in the initial → target direction (and P denotes the power set). The mapping M[i] for initial node i contains at least a node in the target tree that corresponds to the smallest rectangle in the target discretization that covers i's rectangle in the initial discretization. Also, there is a union of corresponding target rectangles in M[i] that exactly matches i's initial rectangle. The mapping is important to the algorithms presented here, as it is an expression of how information is propagated around the tree.
+
+For example, considering refinement as presented in [29]: Refining a leaf node v i with target refinement ⃗b(v i ) expands it into a parent with 2|⃗b(v ′ leaf children. Assuming no further tree modifications happen (for example, all of v i s siblings are leaves too), the mapping is
+
+$$M[i] = \{i', i'+1, \dots, i'+2^{|\bar{b}(v^i)|}\}, \quad (4)$$
+
+where i ′ is the target index of v i . All other nodes shift by δ = 2|⃗b(v i : M[j] = {j + δ} for j > i. New information is added at the refined leaf i, by finer resolving the part of the discretized space it maps to.
+
+For refinement, the mapping can always be directly created, for example as an array of sets, during construction of the target tree as part of the refinement algorithm in [29].
+
+#### 3.2 Coarsening
+
+Coarsening an internal node reverses the action of refinement, decrementing selected positions from the splitting label and fusing children along one or more dimensions. A request to coarsen the tree consists of a set of fusion markers attached to internal nodes.
+
+Definition 3.1 (Coarsening). Let v be an internal node of a d-dimensional omnitree with splitting label ⃗b(v) and σ(v) = {j ∈ D : bj (v) = 1}. A coarsening of v in dimensions C ⊆ σ(v), C ̸= ∅, replaces v with a node v ′ whose splitting label satisfies bj (v ′ ) = 0 for j ∈ C and bj (v ′ ) = bj (v) for j /∈ C. The 2 |σ(v)| children of v are fused along each dimension in C, yielding 2 |σ(v)\C| children of v ′ ; in the case that C = σ(v), v ′ is a leaf and as such has no children left.
+
+In case C = σ(v), all split dimensions at the node are coarsened, and all children are absorbed. When C ⊊ σ(v), the complement is nonempty (C¯ ̸= ∅) and new fused children persist: Specifically, a group of children with common C¯-dimension indices are fused into a single child of v ′ .
+
+Theoretically, fusion markers placed at arbitrary internal nodes would be conditional on the structure of the tree at lower levels. For simplicity, we restrict our presentation to last-level coarsening requests, that is, requests to reverse last-level refinements, which are guaranteed to result in the expected fusion.
+
+Beneath a marked node, fusion is well-defined if only if all branches contain identical subtrees over the non-coarsened dimensions. Equivalently, it must be possible to rotate the coarsened dimensions to the bottom, i.e., to parents of leafs, where coarsening would be a series of local modifications to the tree. If branches contain identical subtrees, the information mapping is determined by a constant stride of the subtree size. To compute this stride takes linear time in the size of one of the (identical) subtrees. This cost is amortized over mapping the entire family of subtrees.
+
+Both conditions—last-level markers and identical subtrees—are met by nodes whose children already consist entirely of leaves.
+
+In practice, coarsening can be implemented as a special case of the refinement algorithm of [29]. A coarsening request for node v in dimensions C is expressed as a negative marker ⃗m(v), with mj = −1 for j ∈ C and mj = 0 otherwise. The marker-sweep machinery can operate on these negative markers analogously to positive ones. In contrast to refinement, where the splitting markers can always be attached to leaves, our code [27] attaches coarsening markers directly to internal (parent) nodes where the dimension is currently refined. Negative markers do not move in the upward and downward sweep phases. 3
+
+In the construction step, the new splitting label is computed as ⃗b(v ′ ) = ⃗b(v) + ⃗m(v), where the addition is component-wise and bj ∈ {0, 1}. If bj (v) = 1 and mj (v) = −1, then bj (v ′ ) = 0: that dimension is removed from the split.
+
+From the final splitting labels, a linearized descriptor of the target tree can be constructed. Consider an initial node v with 2|σ(v)| children, indexed by tuples e ∈ {0, 1} σ(v) corresponding to local Morton codes. Let C ⊆ σ(v) be the coarsening request at v and C¯ = σ(v) \ C be the unaffected split dimensions. To coarsen v in dimensions C, each group of children in the initial tree with common C¯ coordinates should be fused into one child of v ′ in the target tree, the goal being for v ′ to end with 2|C¯| total children. The tree construction algorithm of [29] must be modified here. As stated, it builds the target descriptor topdown by locating, for each child, the corresponding child in the initial tree via its location code stack \$. When it encounters the first member va of a yet unfused group in the initial tree, it emits a node v ′ a for the target tree. One can track their connection by adding a ′ to M[a] in the mapping M. However, further members v i of the group to be fused would not have their mapping M[i] found—because the algorithm is not looking for them. In addition to producing an invalid mapping, the naive algorithm cannot know where the subtree region of the initial tree ends. Even though refinement of the subtree is already finalized and the subtree is greedily added to T ′ , there may be tree nodes that are erroneously copied from the initial tree. The solution is to find all members of the fused group when their target node v ′ a is emitted, by appending their local binary location to \$ in line 17 of algorithm 1 in [29]. A special case has to be considered when all split dimensions are removed, i.e. ⃗b(v ′ ) = ⃗0: No children of v ′ are emitted to the target tree in this case. As a result, all the coarsened children nodes v i , initially leaves, will map to the index of v ′ . The v i are easily identified in the construction algorithm, as they are the 2|σ(v)| direct successors of v in the initial tree's linearized descriptor.
+
+Constructing the mapping this way allows to exactly identify the location of input and output data for the wavelet compression in the initial and target data vectors as will be described in Section 4.2.
+
+#### 3.3 Downsplit
+
+Downsplit restructures an omnitree without modifying the set of leaf boxes. It factors a multi-dimensional split into a cascade of lower-dimensional splits.
+
+3Technically, they can be swept down the tree if they cannot be realized at their original node, in the case that v is not initially refined in all of C (though this only applicable when the omnitree is not canonical [29, Definition 2.2], and the refinement in C eventually does occur for all the children nodes).
+
+Again, the outputs of the procedure are a target tree and a mapping M from initial to target tree nodes.
+
+Definition 3.2 (Downsplit). Let v be an internal node of omnitree T with splitting label ⃗b(v) and |σ(v)| ≥ 2. v has children uk, k ∈ {0, 1} σ(v) . A downsplit of dimensions S1 ⊂ σ(v), ∅ ̸= S1 ̸= σ(v), with S2 = σ(v) \ S1, replaces v by a two-level structure:
+
+- 1. A node v ′ in the target tree T ′ at the same location, with σ(v ′ ) = S2. Thus v ′ has 2 |S2| children.
+- 2. Each (newly added) child ur of v ′ (r ∈ {0, 1} S2 ) has σ(ur) = S1. Accordingly, ur has 2 |S1| children, which are exactly the original children uk whose S2-coordinates equal r.
+
+Downsplit can be considered the inverse to normalization (see [29, Definition 2.2]): Normalization absorbs a common child refinement into the parent; downsplit moves a parent refinement down to the children. The number of leaves in the tree as well as their spatial positions stay the same, but their order in the linearized omnitree may change.
+
+A downsplit rotation can be implemented by reusing the refinement algorithm from [29] as well as the group resolution described in Section 3.2 for coarsening. Conceptually, v is coarsened but in the same step its children are refined in such a way that their descendants remain unaffected (apart from potential reordering). The only difference to coarsening is that for downsplit, the children are not necessarily leaves and the special case of removing all splits cannot occur. In the mapping, c.f. Section 3.1, the only tree node that changes structure is the v that is being split down. If we denote v's index i, v ′ 's index i ′ , and u ′ r 's index ir (for each r ∈ {0, . . . , 2 |S2|}), then M[i] will consist of the union of {i} and ir.
+
+To illustrate the potential benefits of downsplit, Fig. 1 shows different omnitree representations of the same two-dimensional binary data. Figure 1a is a regular octree representation with 16 data coefficients. If we were using only octree compression here, we could fuse into a single leaf all quadrants except the lower left one, and store seven coefficients in total. Omnitree coarsening as outlined in Section 3.2 allows to coarsen the lower left quadrant in one dimension, resulting in five coefficients as can be seen in Fig. 1c. The last possible optimization for this example is only enabled in combination with downsplit: Figure 1d shows how the tree is transformed, while the spatial discretization stays the same. After the downsplit transformation, the right half can become a single leaf by applying the plain coarsening again.
+
+To make use of both coarsening and downsplit, one can apply them in alternation as more and more leaves fuse together. But how do we know where coarsening is desirable, and what heuristics can we use to know where and which dimensions to split down? As the next section will show, wavelet representations can supply answers to both questions.
+
+
+
+
+
+Figure 1: Two-dimensional example for coarsening and downsplit + coarsening on binary data: The fully-refined octree \(Figs. 1a and 1b\) contains some redundant information. By omnitree coarsening, the tree can be significantly simplified to only five leaf nodes, cf. Fig. 1c, Fig. 1d (left). Note that octree coarsening alone would not have allowed for any coarsening in the lower left quadrant. To further compress the omnittree by fusing the two rightmost quadrants, it is necessary to downsplit the vertical split from the root node Fig. 1d (right). If the downsplit happens this way, the same-valued leaves become siblings and can be fused with the plain coarsening algorithm, resulting in Figs. 1e and 1f.
+
+#### 4 Haar Wavelets on Omnitrees
+
+Wavelet function spaces [23] have been shown to be ideally suited for quad- and octree structured data [9], and are also amenable to anisotropic functions [2]. These "wavelets on trees" are not to be confused with "wavelet trees", which are concerned with string storage. They also should not be confused with hyperbolic / sparse grid wavelet spaces [5, 13, 35, 32], where the hierarchical structure is characterized by intentional spatial overlap of basis functions at different mixed resolutions.
+
+This section defines Haar wavelets on the anisotropic refinement structure of omnitrees and derives the coefficient transformations under coarsening and downsplit. For simplicity, we consider only piecewise constant functions f ∈ L 2 ([0, 1]d ) discretized on an omnitree,
+
+| $f = \sum_{v: \vec{b}(v)=\vec{0}} s^v \cdot \phi^v, \quad \phi^v(\vec{x}) = \begin{cases} 1 & \text{if } \vec{x} \in \text{rect}(v), \\ 0 & \text{else.} \end{cases}$ | (5) |
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----|
+
+Here, v is a leaf node corresponding to rectangle rect(v); s v is the data coefficient at this node; and ϕ v is a nodal basis function for the rectangle. We call storing f as a combination of the omnitree and the coefficients s v the nodal representation.
+
+#### 4.1 Tensor-product Haar basis
+
+Equivalently to the nodal representation, f can be stored hierachically using a multiresolution wavelet approach. We consider the simplest wavelets, Haar wavelets, which naturally represent piecewise constant functions. In one dimension, the scaling and detail functions associated to an interval, I = (x −, x+), are of the form
+
+$$\hat{\phi}^I(x) = \begin{cases} 1 & \text{if } x \in I \\ 0 & \text{else} \end{cases} \quad \hat{\psi}^I = \begin{cases} 1 & \text{if } x \in \left( \frac{x^- - x^+}{2} \right) \\ -1 & \text{if } x \in \left( \frac{x^- + x^+}{2}, x^+ \right) \\ 0 & \text{else} \end{cases} \quad (6)$$
+
+The extension to multiple dimensions involves a tensor product of the onedimensional basis. Within a hierarchy of rectangles generated by an omnitree, several wavelet functions ψ v τ are defined at a node v:
+
+$$\psi_\tau^\tau(\vec{x}) = \prod_{j \notin \tau} \hat{\phi}_j^{\tau}(x_j) \prod_{j \in \tau} \hat{\psi}^{I_j}(x_j), \quad \tau \in 2^{\sigma(v)}, \quad (7)$$
+
+where rect(v) is a product of the intervals Ij , j ∈ σ(v). Here, the index is over all subsets, τ ∈ 2 σ(v) (i.e., τ ⊂ σ(v)), because a wavelet is only needed in the split dimensions σ(v). The functions {ψ v ∅ } are scaling functions, equal to the nodal basis functions {ϕ v}. The functions {ψ v τ , τ ̸= ∅}, are the detail functions. The scaling and wavelet functions form a hierarchical basis containing the same information as the nodal basis formulation, as outlined in the following.
+
+Haar wavelets associated to omnitree nodes v are orthogonal
+
+
+$$\langle \psi_{\tau'}, \psi_{\tau'}' \rangle = \delta_{\nu, \nu'} \delta_{\tau, \tau'}. \quad (8)$$
+
+Intuitively, this holds because, within a node, the product is odd unless τ = τ ′ , and, between nodes, the supported intervals are either disjoint or dyadically nested. If nested, each smaller (descendant) wavelet's support "sees" a constant contribution from any ancestor wavelet and multiplies a smaller-scale 0-mean variation.
+
+Due to orthogonality of the wavelet basis, f's wavelet coefficients w v τ are equivalent to the scalar product of f with the wavelet itself
+
+$$w_t^i = \langle f, \psi_t^{(v^i)} \rangle, \quad (9)$$
+
+which is computed implicitly by the forward wavelet transform. (For the multidimensional setting, we use (w∅, w{j}, . . .) in place of (s, d) common in the wavelet literature.) See Daubechies [11] and Mallat [23] for detailed mathematical properties of wavelet transforms.
+
+Relevant to our purpose is the fact that the forward wavelet transform can be computed in a bottom-up fashion in linear time. Let v be an internal node with splitting label ⃗b(v), refined dimensions σ(v), and 2|σ(v)| child nodes {c}. In the base case, the children are leaves. Associated to their rectangles are nodal coefficients, which may be interpreted as scaling values w c ∅ . We assume that the Z order is used both for ordering the children and their scaling coefficients, which we gather into a small vector, ⃗sv ← {w c ∅ }. The wavelet coefficients ⃗w v are arranged in a compatible order. Then, the wavelet coefficients are given by multiplication with a local transformation matrix H at the parent rectangle rect(v):
+
+$$\vec{w}^v = H_{|\sigma(v)|} \cdot \vec{s}^v . \quad (10)$$
+
+For Haar wavelets, the transformations correspond to left-multiplication by the Hadamard matrices
+
+
+$$H_{|\sigma(v)|} = \frac{1}{2^{|\sigma(v)|}} \bigotimes_{j \in \sigma(v)} \begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix}, \quad H_{|\sigma(v)|} = \bigotimes_{j \in \sigma(v)} \begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix}, \quad (11)$$
+
+where H|σ(v)| is the hierarchization (decomposition) matrix and R|σ(v)| is the nodalization (reconstruction) matrix, satisfying R|σ(v)|H|σ(v)| = I. The result includes the scaling coefficient w v ∅ , which is consumed at the next higher level to compute the wavelet coefficients for the parent of v.
+
+Once the local transformations have been applied at all scales, the root scaling coefficient holds the mean value over (0, 1)d , and all other information is encoded into wavelet coefficients at non-leaf nodes. This yields a unique representation of f in the wavelet basis:
+
+$$f = w_\theta^{\text{root}} + \sum_{v: \text{nonleaf}} \sum_{\emptyset \neq \tau \subset \sigma(v)} w_\tau^v \cdot \psi_\tau^v \quad (12)$$
+
+Since ψ v τ ∈ {0, 1, −1}, the triangle inequality on |f| yields the following bound:
+
+$$\|f\|_1 \leq |w_\theta^{\text{root}}||\Omega| + \sum_{\substack{v: \text{nonleaf} \\ \theta \neq \tau \subset \sigma(v)}} |w_\tau^v| \text{rect}(v) \quad (13)$$
+
+For any τ ̸= ∅, wτ is the detail coefficient measuring variation along exactly the dimensions in τ . Conversely, if a wavelet coefficient w v τ with |τ | = 1 is zero, it means that change along the respective dimension is not visible within rect(v) at this particular scale. From this representation, the original nodal coefficients can be reconstructed by applying the inverse transformation successively from larger to finer scales, i.e. from the root down to the leaf nodes of the tree.
+
+The small multiplications by H and R can be applied to an omnitree discretization (with N leaf nodes) by using data stacks, leading to a maximum transform complexity of O((2d ) 2 · N 2 d ) = O(2dN) – linear in the number of coefficients N.
+
+#### 4.2 Wavelet coefficients under coarsening
+
+Wavelet coefficients indicate how much the function changes along any dimension at a given scale. Some of this information must be preserved when a node is coarsened in a subset of the available dimensions. When a parent-of-leaves node v, i.e. a node with the smallest scales at that spatial position, is coarsened in dimensions C ⊆ σ(v), the detail coefficients w v τ with nonempty τ ∩ C are pruned (set to zero), and the remaining coefficients become the coefficient vector of the coarsened node v ′ with σ(v ′ ) = σ(v) \ C. Thus we know that if the wavelet coefficients w v τ for dimensions j ∈ τ are (close to) zero, then this node can be well coarsened in dimension j. Upon coarsening, we know that the integral of the function f will be exactly preserved, since the discarded wavelet functions have an integral of exactly zero, due to orthogonality against constant functions \(Eq. \(8\)\). Accumulating the weighted magnitudes of discarded detail coefficients, P|w v τ ||rect(v)|, provides an upper bound for the overall L1 error incurred in the compression.
+
+#### 4.3 Wavelet coefficients under downsplit
+
+Consider the wavelet coefficients at a node v, from which dimensions S1 ⊂ σ(v) are to be downsplit and dimensions S2 = σ(v) \ S1 retained. The node v is replaced by a residual node v ′ (σ(v ′ ) = S2) and its intermediate children {ur} (σ(ur) = S1). The source wavelet coefficients w v τ , τ ⊂ σ(v) must be redistributed accordingly.
+
+The coefficients associated purely to S2 are transferred directly to v ′ :
+
+
+$$w_{\tau_2}^v = w_{\tau_2}^v, \quad \emptyset \neq \tau_2 \subset S_2 . \quad (14)$$
+
+Meanwhile, the coefficients that involve S1 participate in reconstruction at the intermediate nodes {ur}:
+
+
+$$w_{\tau_1}^{\{u_r\}} = \sum_{\tau_2 \subset S_2} (R_{|S_2|})_{\tau_2}^{\{r\}} \cdot w_{\tau_2 \sqcup \tau_1}^v, \quad \emptyset \neq \tau_1 \subset S_1 \quad (15)$$
+
+
+
+
+
+(a) Association of function values to leaf rectangles (green) and wavelet coefficients to nonleaf super-rectangles (red/black). Multiple split dimensions lead to a local wavelet space of tensor product form.
+
+
+
+(b) Binary function taking on the nodal values 0 (blue) or 1 (yellow), composed of wavelets with coefficients (3/8); (3/8, −1/8, −1/8); (1/2).
+
+(c) Storing either nodal or hierarchical values alongside the tree descriptor.
+
+Figure 2: Illustrations of the equivalence of nodal and wavelet representations of a function on an omnitree. Note how the parent nodes in (c) map to the blue rectangles in (a) and leaves map to the green rectangles.
+
+Here, (R|S2|) is a nodalization matrix as in Eq. \(11\), where the Kronecker product is taken over the dimensions in S2. The rows are indexed by the children of v ′ in Z order and the columns are indexed by the power set 2S2 in a compatible way. The source coefficients can be interpreted as a tensor with disjoint indices τ1 and τ2 referring to distinct modes S1 and S2.
+
+As a matter of accounting, let k1 = |S1|, k2 = |S2|, and k = k1 +k2 = |σ(v)|. The downsplit decouples 2k − 1 source coefficients into one parent set of size (2k2 − 1) and 2k2 child sets of size (2k1 − 1), then applies identical inverse Haar butterflies to all child sets. We entirely omit the scaling coefficients w∅ for these computations, but in principle they could also be stored for a redundant encoding.
+
+#### 4.4 Wavelet Compression on Omnitrees
+
+The coefficient transformations of Sections 4.2 and 4.3 enable a compression strategy that operates entirely in the wavelet domain: Coarsening prunes small detail coefficients, and downsplit restructures the tree to expose new coarsening opportunities that multi-dimensional splits would otherwise hide. Thus, we can transform the nodal input data to wavelet coefficients, and reconstruct the nodal function values only at the end, for output file writing and error evaluation.
+
+Coarsening acts on functions as a linear projection to a reduced set of leaf rectangles. Downsplit and normalization preserve functions and leaf rectangles, while changing the basis used for the coefficients. Thus the final set of wavelet coefficients resulting from any sequence of downsplit, coarsening, or normalization passes depends only on the final omnitree.
+
+Selecting the absolute optimal omnitree discretization (in terms of storage) is not computationally feasible at fine resolutions in 3d. For now, we consider a heuristic \(Section 4.4.2\) that focuses on the parents and grandparents of leaves, as leaves carry the data coefficients and we already see significant savings through this heuristic.
+
+#### 4.4.1 Coarsening compression
+
+Given a hierarchized omnitree and an error density threshold ε ≥ 0, the coarsening pass identifies nodes whose children are leaves and whose detail coefficients are small enough to discard. The compression scheme schedules such a node v to be coarsened in dimension(s) C ⊆ σ(v) if the detail coefficients associated with C satisfy
+
+
+$$|w_\tau^v| \leq \varepsilon \quad \forall \tau \cap C \neq \emptyset. \quad (16)$$
+
+When all detail coefficients simultaneously satisfy this criterion, C is set to σ(v) and the node is fully coarsened into a leaf. Otherwise, individual dimensions j ∈ σ(v) whose associated detail coefficients are within the bound can be coarsened, resulting in a partial coarsening that reduces |σ(v)| without removing the node entirely. Coarsening is applied bottom-up from last-level parents \(Section 3.2\) and repeated until no further coarsening passes are possible.
+
+The total error incurred by all coarsening passes is bounded by a function of the threshold ε, domain volume, dimension d, and source tree height ℓ:
+
+$$\|\tilde{f} - f\|_1 \leq \sum_{v \text{ nonleaf}} (2^{|\sigma(v)|} - 1) \cdot \varepsilon |\text{rect}(v)| \leq (2^d - 1) \cdot \varepsilon |\Omega| \cdot \ell \quad (17)$$
+
+These relations are derived by assuming all parent nodes could be fully coarsened, committing error ε for each detail coefficient. Summing parent rectangle volumes level by level, the domain is covered ℓ times.
+
+In practice, this a priori bound will greatly overestimate the actual L1 error when ε > 0. A tighter a posteriori estimate may be obtained during the compression, by aggregating coefficient magnitudes from the nodes actually selected for coarsening. This holds also for the downsplit compression discussed in the next section. When ε = 0, only nodes with exactly zero detail coefficients are coarsened, yielding lossless compression.
+
+#### 4.4.2 Downsplit-coarsening compression
+
+Omnitree coarsening alone cannot always exploit all redundancy, but some redundancy can be exposed by downsplitting, cf. Fig. 1.
+
+This motivates an alternating strategy. After plain coarsening has converged, the algorithm enters the downsplit-coarsening loop:
+
+- 1. Downsplit. For each multi-dimensional node v (with |σ(v)| ≥ 2) and at least two leaf children, select the dimension j ∗ ∈ σ(v) whose pure onedimensional detail coefficient has the smallest magnitude:
+
+
+$$j^* = \arg \min_{j \in \sigma(v)} |w_{T_j}^v|, \quad (18)$$
+
+where τj = {j} ⊂ σ(v). Downsplit the single dimension {j ∗} and update all coefficients using Eqs. \(14\) and \(15\).
+
+- 2. Coarsen. Apply the coarsening criterion Eq. \(16\) to all nodes whose children are all leaves.
+- 3. Normalize. Resolve any uniqueness violations introduced by the combination of downsplit and coarsening, restoring a canonical omnitree.
+
+These three steps are repeated until no coarsenings occur in a round.
+
+The dimension selection heuristic Eq. \(18\) assumes the dominance of firstorder effects, so that when w v τj is near zero, all intermediates along j will have negligible detail. In other words, the dimension with the smallest onedimensional detail is the one along which the function varies the least, making it the most promising candidate for coarsening after downsplit.
+
+#### 4.5 Worked Example
+
+Since this section introduces many (partly new) concepts, we illustrate them with a simple example in 2d. Figure 1c shows a omnitree discretization of a function with 5 leaf nodes, where the function values are binary when stored in the nodal representation: 0 in the darker and 1 in the lighter rectangles. In Fig. 2a, there is an expanded view of the corresponding tree structure (also shown in Fig. 1d left). Nodal coefficients are associated to the leaf rectangles (green). Equivalently, wavelet coefficients are associated to the non-leaf rectangles (red/black); note that there are five values to store in either case.
+
+The wavelet coefficients are computed by applying the local transformation matrices H in a bottom-up fashion. Starting at the leftmost parent node v 1 , its scaling coefficient w 1 ∅ and its detail coefficients w{x} can be computed by applying the local transformation matrix H1 to the vector of its two children's nodal values
+
+$$\begin{pmatrix} w_\emptyset \\ w_{\{x\}}^1 \end{pmatrix} = \frac{1}{2} \begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix} \cdot \begin{pmatrix} 1 \\ 0 \end{pmatrix} = \begin{pmatrix} 1/2 \\ 1/2 \end{pmatrix}. \quad (19)$$
+
+In line with our definition of the transform matrices, the scaling coefficient is the average of the two nodal values, and the detail coefficient is half of their signed difference. Using the same procedure, we can compute the coefficients for the root node v 0 , with its four children v 1 , v4 , v5 , v6
+
+$$\begin{pmatrix} w_0^1 \\ w_0^{\{x\}} \\ w_0^{\{y\}} \\ w_0^{\{x,y\}} \end{pmatrix} = \frac{1}{4} \begin{pmatrix} 1 & 1 & 1 & 1 \\ 1 & -1 & 1 & -1 \\ 1 & 1 & -1 & 1 \\ 1 & -1 & 1 & 1 \end{pmatrix} \cdot \begin{pmatrix} 3/8 \\ 3/8 \\ -1/8 \\ -1/8 \end{pmatrix} . \quad (20)$$
+
+Figure 2b illustrates how the function can be reconstructed from the wavelet coefficients. For the data coefficients, we can choose to store either the nodal values at the leaves or the wavelet coefficients at the non-leaves, as shown in Fig. 2c. The coarsening criterion Eq. \(16\) with ε = 0 does not suggest an opporunity for lossless compression, since all detail coefficients are nonzero. However, if we apply the downsplit-coarsening loop, the root node v 0 splits down the y-dimension, since the one-dimensional detail coefficient w 0 {y} has the smallest magnitude. The resulting tree structure is shown in Fig. 1d right. The root node keeps the coefficient w{x}, while the details w{y} and w{x,y} are used to compute the coefficients of its new, intermediate children
+
+$$\begin{pmatrix} w_{\{y\}}^{u1} \\ w_{\{y\}}^{u2} \end{pmatrix} = \begin{pmatrix} w'_{\{y\}}^1 \\ w'_{\{y\}}^6 \end{pmatrix} = \begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix} \cdot \begin{pmatrix} w_{\{y\}}^0 \\ w_{\{y\}}^0 \end{pmatrix} = \begin{pmatrix} -1/4 \\ 0 \end{pmatrix}. \quad (21)$$
+
+Now, the intermediate node u2 has zero detail coefficient and can be coarsened. This removes the leaf nodes v ′7 , v′8 by making v ′6 a leaf and reduces the total number of coefficients to store from 5 to 4 by dropping the w ′6 {y} = 0 coefficient, with discretization and tree structure as in Figs. 1e and 1f. From the remaining wavelet coefficients (3/8),(3/8),(−1/4),(1/2), one can perfectly reconstruct the corresponding binary nodal coefficients 1, 0, 1, 0 by multiplying with R1 starting at the top of the tree.
+
+### 5 Experimental Evaluation and Comparison to OpenVDB
+
+In this section we observe the empirical relationship between data resolution and storage size when representing 3-d data in wavelet form on omnitrees. The task is to minimize the storage size for a given resolution. Our experimental methodology varies the resolution in the following ways: For our evaluation of lossless compression, Boolean density distributions, fℓ(⃗x) ∈ {0, 1}, are given, pre-voxelized into cubes of a target width 2−ℓ , and we observe the sizes of omnitrees required to represent these functions exactly. For our evaluation of lossy compression, a real density distribution f(⃗x) ∈ [0, 1] ⊂ R is given, and coarsened omnitrees are constructed to approximate f to various tolerances ε > 0. The storage size is measured both as the number of numeric function values stored and as the total number of bytes, including data structure overheads.
+
+For a baseline comparison, we also observe the storage requirement of Open-VDB [25], a state-of-the-art hierarchical volumetric data structure, as introduced in Section 2. To ensure a direct comparison, the discretized functions are first obtained in the format of OpenVDB. The storage requirement of OpenVDB is counted as the number of leaf voxels plus the number of active tiles. The VDB structure is then unfurled to an equivalent octree, stored in the omnitree format. After applying a plain coarsening pass as described in Section 4.4.1, we count the number of wavelet coefficients. Continuing from this result, we further apply the downsplit-coarsening loop (cf. Section 4.4.2\), and count again. Thus for each resolution three measurements are made—one for OpenVDB, one for omnitrees without downsplit, and one with.
+
+In addition, we compare the file sizes with OpenVDB data stored in a blosc2-compressed [4] binary file (this is default for OpenVDB). For omnitrees, we reconstruct the nodal values and write them to a binary file using numpy. We consider the raw storage size of the tree descriptor and the data coefficients stored separately, as well as different combinations of raw and blosc2 compressed files.
+
+Figure 3: Cat object [\(Thingi 34965\)](https://web.archive.org/web/20250509051543/https://ten-thousand-models.appspot.com/detail.html?file_id=100349) at various resolution levels (ℓ = 2 to ℓ = 7). Animation available with [various pdf readers.](https://tex.stackexchange.com/questions/235139/using-the-animate-package-without-adobe) Rendered in Blender [3] from VDB file.
+
+
+
+#### 5.1 Binary function and lossless compression: Comparison on 4,166 thingies
+
+Like in previous work [29], we consider the Thingi10K data set of surface models curated from a database of printable three-dimensional objects [39]. We filter this data set to the 4,166 models which contain up to 10,000 vertices, and which are watertight, not self-intersecting, and solid. The model coordinates are shifted and scaled to fit in the unit cube. To obtain a voxel representation at a given level of detail ℓ, the unit cube is subdivided into 2ℓ voxels in each dimension, and a function f(⃗x) is defined as 1 over every voxel whose midpoint is inside the object and 0 elsewhere. This setup is more representative of practical numerical approaches such as level sets, in contrast to our previous investigation that allowed almost arbitrarily small refinements [29]. Figure 3 shows an example of a representative object, which was also the object of our previous study, at various resolution levels ℓ.
+
+The samples are used to initialize a VDB BoolGrid structure, using the same voxel size 2−ℓ . OpenVDB's prune() function is called to condense the hierarchy. The coefficients are compounded in VDB's hierarchical storage where there is no small-scale change. After storing this baseline OpenVDB file, we apply the omnitree plain and downsplit coarsening algorithms as described above, setting the threshold as ε = 0 so that only lossless compression takes place. This allows us to compare storage between OpenVDB and omnitrees for the exact same functions. Importantly, lossless coarsening ensures that the same binary function is maintained. This is true, not only in the wavelet basis, but also in the nodal basis, whose binary coefficients are the ones counted in the following.
+
+Figure 4 shows the number of binary coefficients stored by the three methods. Plotted are the mean (line) and median, q25 and q75 quartile, and extremal statistics (boxplot) over the 4,166 objects. Displayed for reference are slopes of (4ℓ ) and (8ℓ ) corresponding to 2-d surface- and 3-d volume-complexities in the quadtree/octree complexity theorem [31].
+
+We briefly comment on the variances appearing at the coarsest resolutions, ℓ = 2, 3. Because voxels are initialized by sampling at midpoints, on very coarse grids the interiors of some objects are not sampled at all and appear to be empty. At ℓ = 3, a large fraction and, at ℓ = 2, a majority of the objects create this effect. In this situation, our measurements count OpenVDB as storing no values, leading to zero coefficients in Fig. 4, outside the range of the logarithmic scale. Omnitrees are counted as storing one value in the same case. Due to this sampling artifact, the median, lower quartile, and lower whisker may coincide at ℓ = 2, 3.
+
+Whether inspecting the mean values or the median values, the overall trends are the same. The discussion will focus on the median values unless noted otherwise. (This is for easier comparability with previous work.) As such, for ℓ > 3, it is seen that the plain omnitree method uses on average 8.75× fewer coefficients as OpenVDB. With downsplit omnitrees, this number is further reduced by at least 2.28× (ℓ = 4) and by up to 3.96× (ℓ = 7).
+
+We calculate the empirical approximation rates ra of the three methods to
+
+
+
+Figure 4: Boxplots and lineplots showing the number of stored binary coefficients to represent the 4,166 thingies with varying levels of resolution. The black dotted line denotes the number of coefficients that would be stored on a uniformly resolved full grid. For the boxplots, the box boundaries denote the q25 and q75 quartiles and the line across the box denotes the median. The line plots show the mean values, which are consistently slightly higher than the median values. At very coarse resolutions, OpenVDB even stores the same number or more coefficients as the full grid, but starting from ℓ = 5, one can clearly see savings. Omnitrees (both with only coarsening and downsplit) reach this asymptotic region much earlier, since they store no intermediate hierarchical data and can take advantage of the anisotropy inherent in the three-dimensional objects. Median values at ℓ = 7 are annotated in the figure. The mean and median difference from OpenVDB to downsplit omnitree at ℓ = 7 amount to 96.30 % and 97.21 %, respectively. Median numbers for ℓ = 7 are printed to the right.
+
+analyze their asymptotics:
+
+$$r_a(\ell) = \log_{10}(N_\ell) - \log_{10}(N_{\ell-1}), \quad (22)$$
+
+where Nℓ is the number of coefficients at resolution level ℓ. Visually, in Fig. 4, ra is the slope between (ℓ−1) and ℓ. Flatter slope means that more coefficients can be pruned at every scale while representing the same data. The quadtree approximation theorem predicts a theoretical rate of r ∗ a = log10(22 ) ≈ 0.60. We calculate r VDB a (7) = 0.63 for OpenVDB and r plain a (7) = 0.61 for plain omnitrees, both hovering near the predicted value. Downsplit omnitrees, however, undercut the prediction at r downsplit a (7) = 0.51. This shows that, on the task of lossless compression, omnitrees asymptotically outperform isotropic data structures like octrees and OpenVDB, and that downsplitting anisotropy is essential to do so.
+
+In absolute terms, there is no single object for which omnitrees require more coefficients than OpenVDB. The ratio of omnitree coefficients to OpenVDB coefficients for any given object ranges from at most 1 (e.g. for a perfect cube) down to 1 5472 at ℓ = 7 (e.g. for [Thingi 95807,](https://web.archive.org/web/20250616141737/https://ten-thousand-models.appspot.com/detail.html?file_id=95807) a flat cuboid object).
+
+Next we compare file sizes. Note that OpenVDB uses blosc2 [4] compression
+
+
+
+Figure 5: Boxplots and lineplots showing the the file size required to store the 4,166 thingies with varying levels of resolution. Colors and styles are used analogously to Fig. 4, with the addition of dotted properties for blosc2-compressed omnitree storage (with compressed descriptor and raw binary data coefficients). While blosc2 compression reduces the file size for all omnitree variants, the effect is more pronounced for the plain coarsening than for downsplit, which already reduces the number of coefficients to store.
+
+by default, and we have kept this behavior enabled in our experiments. In this particular scenario, we are storing only binary numbers as function data (i.e., one bit per leaf as data coefficients), such that the descriptor (i.e. three bits for all tree nodes) dominates the overall storage for omnitrees. We noticed that for the Thingi10K omnitree compression there is rarely a benefit of using blosc2 compression on the coefficients data for fine resolutions, which is consistent with the high (and increasing) information density observed in [29, Fig. 7(b)]. By contrast, the descriptor data is usually well compressible with blosc2. Accordingly, we consider five cases in Fig. 5: Each of the omnitree schemes has a variant with raw storage of both binary arrays, and one variant where the coefficients are stored in raw format and the descriptor is compressed with blosc2. Again, downsplit achieves the smallest overheads, but benefits less from compression compared to the plain coarsening. Using storage instead of coefficients in computing the approximation rate, the OpenVDB solution performs favorable with a rate of 0.49, clearly outperforming the plain and downsplit omnitrees stored raw at 0.61 and 0.51, respectively, while starting at a much larger footprint to begin with. Using blosc2 for the omnitree as well, the rates are virtually the same as for OpenVDB, at 0.50 and 0.47, with a lower value to start with. At ℓ = 7, the median storage size of OpenVDB and omnitree differs by factors between 6.69× (for plain coarsening and raw storage) and 27.61× (for downsplit coarsening and blosc2 storage).
+
+#### 5.2 Continuous function and lossy compression: Comparison on Disney cloud
+
+(a) Original sixteenth cloud from WDAS cloud data set containing 415,642 values.
+
+(b) Lossy cloud produced by plain omni-
+
+tree compression.
+
+(c) Lossy cloud produced by downsplit omnitree compression.
+
+Figure 6: Disney cloud (one sixteenth) in its original and lossily compressed versions. Animations available for ε = 10−2 to 1 with [various pdf readers.](https://tex.stackexchange.com/questions/235139/using-the-animate-package-without-adobe) Up to ε = 10−1 , the visual quality is almost unaffected, while the number of coefficients is already significantly reduced. For higher thresholds, the mass is conserved but distributed to larger and larger cuboids, ultimately leading to a single-cuboid low-density "block". Rendered in Blender [3] from VDB file.
+
+Walt Disney Animation Studios provides a large volumetric cloud model [18] under a Creative Commons license, downloadable in OpenVDB format. We select the one-sixteenth downsampled version, also provided. The contained floating-point density distribution f ∗ directly serves as the baseline data in our omnitree workflow, after zero-padding. The active extent of the input data
+
+ε = 1 · 10−1
+
+137,364 value(s)
+
+ε = 1 · 10−1
+
+91,981 value(s)
+
+is originally (126, 86, 154), facilitated by VDB's top-level sparse map allowing domains of arbitrary bounds. A corresponding omnitree is constructed with initial resolution ⃗ℓ0 = (7, 7, 8) from a zero-pad extended voxel grid of extent (128, 128, 256).
+
+Our experiments in this section show the relation between storage size and approximation error under lossy wavelet compression. These are bounded by the results for lossless compression, which are also shown for reference. The prescribed lossy wavelet thresholds range from ε = 10−6 to 1.
+
+Figure 6 (animated in the electronic version) provides a visual understanding of the approximation quality for different thresholds. In the judgment of the authors, only slight variations in the fine, near-zero density cloud structures are detectable, with almost no other noticeable change up to ε = 10−1 . The cloud begins shifting into blocky cuboids for ε = 3.3 · 10−1 . In this range, though mass is conserved, it is being distributed across larger and larger extents that begin to register visually as the threshold increases. There is virtually no visual difference between plain and downsplit coarsening.
+
+Figure 7a plots the relative errors incurred by lossy compression with plain and downsplit coarsening. The approximation error increases smoothly with the threshold ε. As is to be expected, the downsplit-coarsening loop introduces slightly higher errors over plain coarsening for the same threshold, as more nodes can be merged under the same criterion. The maximum threshold ε = 1, fully coarsens the field to only the root node with the mean density of 0.04 everywhere, leading to a uniform cube in Fig. 6. For all thresholds, the mass in the density field is conserved within 10−8 . Lossless compression produces accurate results, with floating-point round-off staying below 10−15 (not shown).
+
+In Fig. 7b, the reduction in storage size is slow at first and becomes significant for ε > 10−3 . Downsplit compression prunes away nearly a constant number of coefficients after plain coarsening, a difference that grows in relative importance as the storage size is further reduced. At small ε, the difference in storage size between plain and downsplit coarsening is around 12 %. At ε = 3.3 · 10−1 , it is higher, around 46 %. Notably, the ε = 10−1 approximations, while retaining decent visual quality, need fewer than half the coefficients of their lossless counterparts and, in the case of downsplit, fewer than one quarter of the coefficients used by OpenVDB.
+
+Figure 7c plots the overall storage requirements in mebibytes, including both the data coefficients and the omnitree descriptor. The overhead due to the tree descriptor is a small fraction of the total storage requirement, which is dominated by the real-valued data coefficients. Thus, the total storage largely follows the number of coefficients as in Fig. 7b. One can also observe that lossless plain coarsening achieves a compression of 1.34× compared to OpenVDB, and downsplit raises this to 1.51×. For the cloud data, we apply blosc2 compression to both the data values and the descriptor. The total added blosc2 compression rates range from 1.29 (for high ε and downsplit) to 1.55 (for low ε and plain coarsening). As a result, adding blosc2 compression allows to achieve a storage footprint smaller than OpenVDB by 2.1× for lossless downsplit, and further reduce it to 4.9× with ε = 10−1 .
+
+
+
+(a) Relative compression errors for L1, L2, and L∞ norms (double-log scale). Lossless compression introduces rounding errors less than 10−15, outside the plotted range.
+
+
+
+(b) Number of remaining coefficients (semi-log scale)
+
+
+
+(c) File sizes (semi-log scale); total = values + descriptor.
+
+Figure 7: Lossy compression errors, coefficients, and storage for different wavelet thresholds, in comparison to the original OpenVDB data. The interesting range is ε ∈ [1 · 10−2 , 3.3 · 10−1 ], where the lossy compression reduces the number of coefficients and file size significantly, while the visual quality is still good.
+
+### 6 Discussion
+
+The experiments detailed in Section 5 show that anisotropic structured compression can outperform the isotropic compression offered by OpenVDB in terms of both in-memory and on-disk storage. How much exactly is saved depends both on the inherent (axis-aligned) anisotropy of the data, and the heuristic criteria employed for the coarsening and downsplit operations, which were the topic of Section 3: As long as only plain coarsening with Haar wavelets is employed, one needs to store significantly less data coefficients compared to OpenVDB, see Fig. 4, but the approximation rate still largely follows the quadtree complexity theorem. However, if we combine the wavelet coarsening with tree transformations like downsplit, one observes an asymptotic increase of the approximation rate, meaning that the relative savings even increase with resolution.
+
+In fact, the single-level-downsplit employed here is a simple heuristic that still misses many cross-level coarsening opportunities, so there is potential for further improvement through more refined tree transformation strategies. Analogously, coarseninng and downsplit by wavelet coefficients is just one among many possible heuristics, there are several ways in which this method could be refined, e.g., dynamic programming [33]. (Conversely, the space-frequency tiling algorithm of Villemoes et al. [33, 22] may benefit from omnitree data structures, particularly in higher dimensionalities.)
+
+Furthermore, adding blosc2 compression was evaluated for on-disk storage of omnitree descriptors, showing some compression benefits for larger omnitrees. Additional compression with blosc2 appears more effective for plain coarsening at 2.5×, but still sees some savings for downsplit coarsening at 1.4×. For continuous-valued data, the potential for omnitree compression is tightly linked to the errors one wants to admit in the scheme, and blosc2 adds consistent savings of 1.29× to 1.55× on top. It might be interesting to evaluate other approaches to scientific data compression, such as SZ [21], in particular for the downsplit data. Similarly, the omnitree multiscale framework could be interesting for further research into mixed-precision computation and storage schemes: For fine-scale details, lower precision is usually sufficient, while the coarser features operate in higher precision, analogously to RAPTOR's mixed-precision experiments [16].
+
+Compared to OpenVDB objects, however, it is fair to say that lossless compression by large factors (up to 35.8× for coefficients and 27.6× for file sizes) was possible in our experiments. A runtime comparison is contingent on a highperformance omnitree implementation, and out of the scope of this work. In fact, the authors believe that the hierarchy implemented in OpenVDB could be a good fit to make omnitrees a high-performance data structure, for example by a forest-of-omnitrees-of-omnitrees-of-omnitrees... approach. The tree hierarchy could have a fixed depth, and segment the tree by different wavelet thresholds, allowing for adaptive reconstruction despite irregular access patterns. This could also map cleanly to distributed-memory approaches as implemented in p4est [6] and t8code [17].
+
+Our method conserves the first moment (mass) during compression by us-
+
+ing Haar wavelets. Higher conservation orders are possible with higher orders of wavelets, for example CDF lifting wavelets [10] and Alpert mutliwavelets [1]. The discontinuous Alpert multiwavelets in particular could be a great fit for omnitrees, as their supports are nonoverlapping per level (and Haar wavelets are in fact their lowest-order instantiation). Combining them with the ultraweak DG approaches in hp3D [8, 14] could yield very effective multiscale schemes. But even for the smoother CDF wavelets with larger supports, AMM [2] illustrates how "stamping" can be used to transform the hierarchical wavelet representation exactly to a nodal representation for continuous biorthogonal wavelets. After stamping, the result can then be used for visualization and other workflow steps that operate on non-hierarchical (nodal) values. This could be valuable for applications that require the numerical stability usually hard to obtain with interpolating adaptive schemes: Many interpolating schemes are similar or equivalent to interpolet / lazy wavelet basis compression, which is inherently numerically unstable [20, 30].
+
+Equipped with the algorithms to refine and coarsen omnitrees, it is now possible to develop fully dynamic AMR schemes that could be particularly beneficial to higher-dimensional simulations, i.e., 4-6 spatial dimensions. These dimensionalities are common for high-fidelity simulations of plasma microturbulence with the Vlasov-Boltzmann equation, where current approaches often rely on structured and block-structured grids. Omnitrees or block-omnitree data structures have the potential to allow for fully adaptive spatial refinement in this area of scientific computing for the first time.
+
+### 7 Conclusion
+
+This work shows that omnitrees can be effectively coarsened and compressed, and significant advantages are enabled by the omnitree downsplit operation. Wavelet representations fit well into the omnitree framework, as they allow to coarsen by thresholding the detail coefficients, and also give a heuristic for guiding the downsplit operation. This was validated on binary-valued data from the Thingi10K data set, and continuous-valued data from the Disney cloud data set, showing significant savings in terms of number of coefficients and storage size compared to OpenVDB. In summary, omnitrees can outperform the expectations of the quadtree/octree complexity theorem in storage, and further improvements are possible through more refined heuristics for coarsening and downsplit, as well as through efficient iteration and parallelization of the data structure.
+
+### Acknowledgments
+
+We thank Stefan Henneking, Nancy Hitschfeld Kahler, Tobias Weinzierl, and Stefan Zellmann for discussing their previous work on similar data structures with us. We thank Prof. Gerald Pao for pointing us to the work of Villemoes et al. [33, 22] regarding omnitree-like tiling in the space/frequency domain. We thank Stefan Zimmer for suggesting the scale-independent coarsening criterion \(Eq. \(16\)\).
+
+## Declaration of Generative AI and AI-assisted technologies in the writing process
+
+Statement: During the preparation of this work the authors used Claude and Microsoft Copilot in order to edit the manuscript text, and Claude Code to assist with code generation. After using this tool/service, the authors reviewed and edited the content as needed and take full responsibility for the content of the publication.
+
+### Reproducibility References
+
+Code used for this work includes omnitree data structures [27] and function approximation as well as tree transformations using wavelets [28]; both are available through github under GPL-3.0. Intermediate data produced are available through a research data repository4 .
+
+### References
+
+[1] Bradley K. Alpert. "A Class of Bases in L 2 for the Sparse Representation of Integral Operators". In: SIAM Journal on Mathematical Analysis 24.1 (Jan. 1, 1993), pp. 246–262. issn: 0036-1410. doi: [10.1137/0524016](https://doi.org/10.1137/0524016). url: . [2] Harsh Bhatia et al. "AMM: Adaptive Multilinear Meshes". In: IEEE Transactions on Visualization and Computer Graphics 28.6 (June 2022), pp. 2350–2363. issn: 1941-0506. doi: [10.1109/TVCG.2022.3165392](https://doi.org/10.1109/TVCG.2022.3165392). [3] Blender Online Community. Blender - The Free and Open Source 3D Creation Software. Version 5.1.2. Blender Institute, Amsterdam: Blender Foundation, 2026. url: . [4] Blosc Development Team. A fast, compressed and persistent data store library. https://blosc.org. 2009-2026.
+
+4will be published after review; preview link: [https://](https://zenodo.org/records/19659695?preview=1&token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6Ijc1NzAwNGQ0LWQwOWQtNDMzOS05NDlkLTE3YWFhYzA0NDQ4NiIsImRhdGEiOnt9LCJyYW5kb20iOiI2ZmY2ZjcwOTYwY2RmNDdiZWQ5MjMwZGMxODAyZjlhMyJ9.xp3B0567kIMBkgU41xmE_hx-5Hfv3dw9xAhwnFQJqCcjPYGCjY9J50xT79qIqRm5n31q0loO3CRmvJEMUHKLtA) [zenodo.org/records/19659695?preview=1&token=eyJhbGciOiJIUzUxMiJ9.](https://zenodo.org/records/19659695?preview=1&token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6Ijc1NzAwNGQ0LWQwOWQtNDMzOS05NDlkLTE3YWFhYzA0NDQ4NiIsImRhdGEiOnt9LCJyYW5kb20iOiI2ZmY2ZjcwOTYwY2RmNDdiZWQ5MjMwZGMxODAyZjlhMyJ9.xp3B0567kIMBkgU41xmE_hx-5Hfv3dw9xAhwnFQJqCcjPYGCjY9J50xT79qIqRm5n31q0loO3CRmvJEMUHKLtA) [eyJpZCI6Ijc1NzAwNGQ0LWQwOWQtNDMzOS05NDlkLTE3YWFhYzA0NDQ4NiIsImRhdGEiOnt9LCJyYW5kb2](https://zenodo.org/records/19659695?preview=1&token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6Ijc1NzAwNGQ0LWQwOWQtNDMzOS05NDlkLTE3YWFhYzA0NDQ4NiIsImRhdGEiOnt9LCJyYW5kb20iOiI2ZmY2ZjcwOTYwY2RmNDdiZWQ5MjMwZGMxODAyZjlhMyJ9.xp3B0567kIMBkgU41xmE_hx-5Hfv3dw9xAhwnFQJqCcjPYGCjY9J50xT79qIqRm5n31q0loO3CRmvJEMUHKLtA)0iOiI2ZmY2ZjcwOTYwY2RmNDdiZWQ5MjMwZGMxODAyZjlhMyJ9. [xp3B0567kIMBkgU41xmE\\_hx-5Hfv3dw9xAhwnFQJqCcjPYGCjY9J50xT79qIqRm5n31q0loO3CRmvJEMUHKLtA](https://zenodo.org/records/19659695?preview=1&token=eyJhbGciOiJIUzUxMiJ9.eyJpZCI6Ijc1NzAwNGQ0LWQwOWQtNDMzOS05NDlkLTE3YWFhYzA0NDQ4NiIsImRhdGEiOnt9LCJyYW5kb20iOiI2ZmY2ZjcwOTYwY2RmNDdiZWQ5MjMwZGMxODAyZjlhMyJ9.xp3B0567kIMBkgU41xmE_hx-5Hfv3dw9xAhwnFQJqCcjPYGCjY9J50xT79qIqRm5n31q0loO3CRmvJEMUHKLtA)
+
+- [5] Hans-Joachim Bungartz and Michael Griebel. "Sparse Grids". In: Acta Numerica 13 (May 2004), pp. 147–269. issn: 1474-0508, 0962-4929. doi: [10 . 1017 / S0962492904000182](https://doi.org/10.1017/S0962492904000182). url: [https : / / www . cambridge . org /](https://www.cambridge.org/core/journals/acta-numerica/article/sparse-grids/47EA2993DB84C9D231BB96ECB26F615C) [core/journals/acta-numerica/article/sparse-grids/47EA2993DB84C9D231BB96ECB26F615C](https://www.cambridge.org/core/journals/acta-numerica/article/sparse-grids/47EA2993DB84C9D231BB96ECB26F615C). [6] Carsten Burstedde, Lucas C. Wilcox, and Omar Ghattas. "P4est: Scalable Algorithms for Parallel Adaptive Mesh Refinement on Forests of Octrees". In: SIAM Journal on Scientific Computing 33.3 (Jan. 2011), pp. 1103– 1133. issn: 1064-8275. doi: [10.1137/100791634](https://doi.org/10.1137/100791634). [7] Jakub Cerven´y, Veselin Dobrev, and Tzanio Kolev. "Nonconforming Mesh ˇ Refinement for High-Order Finite Elements". In: SIAM Journal on Scientific Computing (2019). url: [https://epubs.siam.org/doi/10.1137/](https://epubs.siam.org/doi/10.1137/18M1193992) [18M1193992](https://epubs.siam.org/doi/10.1137/18M1193992). [8] Ankit Chakraborty, Stefan Henneking, and Leszek Demkowicz. "An Anisotropic hp-Adaptation Framework for Ultraweak Discontinuous Petrov–Galerkin Formulations". In: Computers & Mathematics with Applications 167 (2024), pp. 315–327. issn: 0898-1221. doi: [10 . 1016 / j . camwa . 2024 . 05 . 025](https://doi.org/10.1016/j.camwa.2024.05.025). url: [https : / / www . sciencedirect . com / science / article / pii /](https://www.sciencedirect.com/science/article/pii/S089812212400244X) [S089812212400244X](https://www.sciencedirect.com/science/article/pii/S089812212400244X). [9] Albert Cohen, Wolfgang Dahmen, Ingrid Daubechies, and Ronald DeVore. "Tree Approximation and Optimal Encoding". In: Applied and Computational Harmonic Analysis 11.2 (Sept. 1, 2001), pp. 192–226. issn: 1063- 5203. doi: [10.1006/acha.2001.0336](https://doi.org/10.1006/acha.2001.0336). url: [https://www.sciencedirect.](https://www.sciencedirect.com/science/article/pii/S1063520301903367) [com/science/article/pii/S1063520301903367](https://www.sciencedirect.com/science/article/pii/S1063520301903367). [10] Albert Cohen, Ingrid Daubechies, and Jean-Christophe Feauveau. "Biorthogonal Bases of Compactly Supported Wavelets". In: Communications on Pure and Applied Mathematics 45.5 (1992), pp. 485–560. issn: 1097-0312. doi: [10.1002/cpa.3160450502](https://doi.org/10.1002/cpa.3160450502). url: [https://onlinelibrary.wiley.](https://onlinelibrary.wiley.com/doi/abs/10.1002/cpa.3160450502) [com/doi/abs/10.1002/cpa.3160450502](https://onlinelibrary.wiley.com/doi/abs/10.1002/cpa.3160450502). [11] Ingrid Daubechies. Ten Lectures on Wavelets. SIAM, 1992. [12] Neal Domel and Steve Karman. "Splitflow - Progress in 3D CFD with Cartesian Omni-Tree Grids for Complex Geometries". In: 38th Aerospace Sciences Meeting and Exhibit. American Institute of Aeronautics and Astronautics, 2000. doi: [10.2514/6.2000-1006](https://doi.org/10.2514/6.2000-1006). [13] Pieter W. Hemker. "Sparse-Grid Finite-Volume Multigrid for 3D-problems". In: Advances in Computational Mathematics 4.1 (Dec. 1, 1995), pp. 83–
+- 110. issn: 1572-9044. doi: [10 .1007 /BF02123474](https://doi.org/10.1007/BF02123474). url: [https :/ /doi .](https://doi.org/10.1007/BF02123474) [org/10.1007/BF02123474](https://doi.org/10.1007/BF02123474). [14] Stefan Henneking et al. "hp3D: A Scalable MPI/OpenMP hp-Adaptive Finite Element Software Library for Complex Multiphysics Applications". In: Journal of Open Source Software 9.95 (2024), p. 5946. issn: 2475-9066. doi: [10.21105/joss.05946](https://doi.org/10.21105/joss.05946). url: [https://joss.theoj.org/papers/](https://joss.theoj.org/papers/10.21105/joss.05946) [10.21105/joss.05946](https://joss.theoj.org/papers/10.21105/joss.05946).
+
+[15] Nancy Hitschfeld, Paolo Conti, and Wolfgang Fichtner. "Mixed Element Trees: A Generalization of Modified Octrees for the Generation of Meshes for the Simulation of Complex 3-D Semiconductor Device Structures". In: IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems 12.11 (1993), pp. 1714–1725. issn: 1937-4151. doi: [10.1109/43.](https://doi.org/10.1109/43.248082) [248082](https://doi.org/10.1109/43.248082). url: [https : / / ieeexplore . ieee . org / abstract / document /](https://ieeexplore.ieee.org/abstract/document/248082) [248082](https://ieeexplore.ieee.org/abstract/document/248082). [16] Faveo Hoerold et al. "RAPTOR: Practical Numerical Profiling of Scientific Applications". In: Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis. SC '25. New York, NY, USA: Association for Computing Machinery, Nov. 15, 2025, pp. 661–680. doi: [10.1145/3712285.3759810](https://doi.org/10.1145/3712285.3759810). url: [https://dl.acm.](https://dl.acm.org/doi/10.1145/3712285.3759810) [org/doi/10.1145/3712285.3759810](https://dl.acm.org/doi/10.1145/3712285.3759810). [17] Johannes Holke et al. "T8code - Modular Adaptive Mesh Refinement in the Exascale Era". In: Journal of Open Source Software 10.106 (Feb. 6, 2025), p. 6887. issn: 2475-9066. doi: [10.21105/joss.06887](https://doi.org/10.21105/joss.06887). [18] Disney Enterprises Inc. Walt Disney Animation Studios Cloud Data Set. 2017. url: . [19] Doyub Kim, Minjae Lee, and Ken Museth. "NeuralVDB: High-resolution Sparse Volume Representation Using Hierarchical Neural Networks". In: ACM Trans. Graph. 43.2 (Feb. 28, 2024), 20:1–20:21. issn: 0730-0301. doi: [10.1145/3641817](https://doi.org/10.1145/3641817). url: . [20] Frank Koster. "Multiskalen-basierte Finite-Differenzen-Verfahren auf adaptiven d¨unnen Gittern". Thesis. Universit¨ats- und Landesbibliothek Bonn, 2002. url: [https://bonndoc.ulb.uni- bonn.de/xmlui/handle/20.](https://bonndoc.ulb.uni-bonn.de/xmlui/handle/20.500.11811/1696) [500.11811/1696](https://bonndoc.ulb.uni-bonn.de/xmlui/handle/20.500.11811/1696). [21] Xin Liang et al. "SZ3: A Modular Framework for Composing Prediction-Based Error-Bounded Lossy Compressors". In: IEEE Transactions on Big Data 9.2 (Apr. 2023), pp. 485–498. issn: 2332-7790. doi: [10.1109/](https://doi.org/10.1109/TBDATA.2022.3201176) [TBDATA.2022.3201176](https://doi.org/10.1109/TBDATA.2022.3201176). url: [https://ieeexplore.ieee.org/document/](https://ieeexplore.ieee.org/document/9866018) [9866018](https://ieeexplore.ieee.org/document/9866018). [22] Maj Lindberg and Lars F. Villemoes. "Image Compression with Adaptive Haar-Walsh Tilings". In: Wavelet Applications in Signal and Image Processing VIII. Vol. 4119. SPIE, 2000, pp. 911–921. url: [https://www.](https://www.spiedigitallibrary.org/conference-proceedings-of-spie/4119/0000/Image-compression-with-adaptive-Haar-Walsh-tilings/10.1117/12.408575.short) [spiedigitallibrary.org/conference- proceedings- of- spie/4119/](https://www.spiedigitallibrary.org/conference-proceedings-of-spie/4119/0000/Image-compression-with-adaptive-Haar-Walsh-tilings/10.1117/12.408575.short) [0000/Image-compression-with-adaptive-Haar-Walsh-tilings/10.](https://www.spiedigitallibrary.org/conference-proceedings-of-spie/4119/0000/Image-compression-with-adaptive-Haar-Walsh-tilings/10.1117/12.408575.short) [1117/12.408575.short](https://www.spiedigitallibrary.org/conference-proceedings-of-spie/4119/0000/Image-compression-with-adaptive-Haar-Walsh-tilings/10.1117/12.408575.short). [23] St´ephane Georges Mallat. "A Theory for Multiresolution Signal Decomposition: The Wavelet Representation". In: IEEE Transactions on Pattern Analysis and Machine Intelligence 11.7 (July 1989), pp. 674–693. issn: 1939-3539. doi: [10.1109/34.192463](https://doi.org/10.1109/34.192463). url: [https://ieeexplore.ieee.](https://ieeexplore.ieee.org/abstract/document/192463) [org/abstract/document/192463](https://ieeexplore.ieee.org/abstract/document/192463).
+
+- [24] Ken Museth. "NanoVDB: A GPU-Friendly and Portable VDB Data Structure For Real-Time Rendering And Simulation". In: ACM SIGGRAPH 2021 Talks. SIGGRAPH '21. New York, NY, USA: Association for Computing Machinery, Aug. 6, 2021, pp. 1–2. isbn: 978-1-4503-8373-8. doi: [10.1145/3450623.3464653](https://doi.org/10.1145/3450623.3464653). url: [https://dl.acm.org/doi/10.1145/](https://dl.acm.org/doi/10.1145/3450623.3464653) [3450623.3464653](https://dl.acm.org/doi/10.1145/3450623.3464653). [25] Ken Museth. "VDB: High-resolution Sparse Volumes with Dynamic Topology". In: ACM Trans. Graph. 32.3 (July 4, 2013), 27:1–27:22. issn: 0730- 0301. doi: [10.1145/2487228.2487235](https://doi.org/10.1145/2487228.2487235). url: [https://dl.acm.org/doi/](https://dl.acm.org/doi/10.1145/2487228.2487235) [10.1145/2487228.2487235](https://dl.acm.org/doi/10.1145/2487228.2487235). [26] Takanobu Ogawa. "An Adaptive Cartesian Mesh Flow Solver Based on the Tree-data with Anisotropic Mesh Refinement". In: Computational Fluid Dynamics 2002. Ed. by Steve W. Armfield, Patrick Morgan, and Karkenahalli Srinivas. Berlin, Heidelberg: Springer, 2003, pp. 453–458. isbn: 978-3-642-59334-5. doi: [10.1007/978-3-642-59334-5\\_67](https://doi.org/10.1007/978-3-642-59334-5_67). [27] Theresa Pollinger. freifrauvonbleifrei/DyAda. version 0.0.12. 2026. url: . [28] Theresa Pollinger. freifrauvonbleifrei/wavelets with omnitrees. Will be published alongside paper. 2026. url: [https://github.com/freifrauvonblei](https://github.com/freifrauvonbleifrei/wavelets_with_omnitrees)frei/ [wavelets\\_with\\_omnitrees](https://github.com/freifrauvonbleifrei/wavelets_with_omnitrees). [29] Theresa Pollinger, Masado Ishii, and Jens Domke. The Beauty of Anisotropic Mesh Refinement: Omnitrees for Efficient Dyadic Discretizations. Aug. 8, 2025. doi: [10.48550/arXiv.2508.06316](https://doi.org/10.48550/arXiv.2508.06316). arXiv: [2508.06316 [cs]](https://arxiv.org/abs/2508.06316). url: . Pre-published. [30] Theresa Pollinger, Johannes Rentrop, Dirk Pfl¨uger, and Katharina Kormann. "A Stable and Mass-Conserving Sparse Grid Combination Technique with Biorthogonal Hierarchical Basis Functions for Kinetic Simulations". In: Journal of Computational Physics 491 (Oct. 15, 2023),
+- p. 112338. issn: 0021-9991. doi: [10 . 1016 / j . jcp . 2023 . 112338](https://doi.org/10.1016/j.jcp.2023.112338). url: . [31] Hanan Samet and Robert E. Webber. "Hierarchical Data Structures and Algorithms for Computer Graphics. I. Fundamentals". In: IEEE Computer Graphics and Applications 8.3 (May 1988), pp. 48–68. issn: 1558-1756. doi: [10.1109/38.513](https://doi.org/10.1109/38.513). url: [https://ieeexplore.ieee.org/abstract/](https://ieeexplore.ieee.org/abstract/document/513) [document/513](https://ieeexplore.ieee.org/abstract/document/513). [32] Martin Sch¨afer, Tino Ullrich, and B´eatrice Vedel. "Hyperbolic Wavelet Analysis of Classical Isotropic and Anisotropic Besov–Sobolev Spaces". In: Journal of Fourier Analysis and Applications 27.3 (May 18, 2021),
+  - p. 51. issn: 1531-5851. doi: [10.1007/s00041-021-09844-z](https://doi.org/10.1007/s00041-021-09844-z). url: [https:](https://doi.org/10.1007/s00041-021-09844-z) [//doi.org/10.1007/s00041-021-09844-z](https://doi.org/10.1007/s00041-021-09844-z).
+
+[33] Christoph M. Thiele and Lars F. Villemoes. "A Fast Algorithm for Adapted Time–Frequency Tilings". In: Applied and Computational Harmonic Analysis 3.2 (Apr. 1, 1996), pp. 91–99. issn: 1063-5203. doi: [10.1006/acha.](https://doi.org/10.1006/acha.1996.0009) [1996.0009](https://doi.org/10.1006/acha.1996.0009). url: [https://www.sciencedirect.com/science/article/](https://www.sciencedirect.com/science/article/pii/S1063520396900093) [pii/S1063520396900093](https://www.sciencedirect.com/science/article/pii/S1063520396900093). [34] Violet Walker, Fernando Vanegas, and Felipe Gonzalez. "NanoMap: A GPU-Accelerated OpenVDB-Based Mapping and Simulation Package for Robotic Agents". In: Remote Sensing 14.21 (Jan. 2022), p. 5463. issn: 2072-4292. doi: [10.3390/rs14215463](https://doi.org/10.3390/rs14215463). url: [https://www.mdpi.com/](https://www.mdpi.com/2072-4292/14/21/5463) [2072-4292/14/21/5463](https://www.mdpi.com/2072-4292/14/21/5463). [35] Zixuan Wang, Qi Tang, Wei Guo, and Yingda Cheng. "Sparse Grid Discontinuous Galerkin Methods for High-Dimensional Elliptic Equations". In: Journal of Computational Physics 314 (June 1, 2016), pp. 244–263. issn: 0021-9991. doi: [10.1016/j.jcp.2016.03.005](https://doi.org/10.1016/j.jcp.2016.03.005). url: [http://www.](http://www.sciencedirect.com/science/article/pii/S002199911600156X) [sciencedirect.com/science/article/pii/S002199911600156X](http://www.sciencedirect.com/science/article/pii/S002199911600156X). [36] Tobias Weinzierl and Miriam Mehl. "Peano—A Traversal and Storage Scheme for Octree-Like Adaptive Cartesian Multiscale Grids". In: SIAM Journal on Scientific Computing (Oct. 27, 2011). doi: [10.1137/100799071](https://doi.org/10.1137/100799071). url: . [37] Francis Williams et al. "fVDB: A Deep-Learning Framework for Sparse, Large-Scale, and High-Performance Spatial Intelligence". In: ACM Transactions on Graphics 43.4 (July 19, 2024). doi: [10.1145/3658226](https://doi.org/10.1145/3658226). arXiv: [2407.01781 [cs.CV]](https://arxiv.org/abs/2407.01781). url: . [38] Stefan Zellmann, Milan Jaros, Jefferson Amstutz, and Ingo Wald. GPU Volume Rendering with Hierarchical Compression Using VDB. Version 2. Apr. 10, 2025. doi: [10.48550/arXiv.2504.04564](https://doi.org/10.48550/arXiv.2504.04564). arXiv: [2504.04564](https://arxiv.org/abs/2504.04564) [[cs]](https://arxiv.org/abs/2504.04564). url: . Pre-published. [39] Qingnan Zhou and Alec Jacobson. Thingi10K: A Dataset of 10,000 3D-Printing Models. July 2, 2016. doi: [10.48550/arXiv.1605.04797](https://doi.org/10.48550/arXiv.1605.04797). arXiv: [1605.04797 [cs]](https://arxiv.org/abs/1605.04797). Pre-published.

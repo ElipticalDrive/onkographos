@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -1,6 +1,5 @@
+ # Grid Background Change
+-
+ ## Overview
+-Grid Background Change updates the background value of inactive voxels in a volume grid while preserving the values of active voxels. It solves the problem of isolating background noise or changing the default background representation in a volume dataset. Unlike [Voxel Grid Construction](3085-voxel-grid-construction.md), which builds a grid from scratch, this method modifies an existing grid's background state. It differs from [Grid Deactivation](3214-grid-deactivation.md), which removes active voxels based on scalar criteria, by explicitly updating the values of previously inactive (background) voxels.
++Grid Background Change updates the background value of inactive voxels in a volume grid while preserving the values of active voxels [S1, unofficial]. It returns a new grid where inactive voxels holding the old background value are updated to a new background value, while active voxels remain unchanged [S1, unofficial].
+ ## How it works
+ **Inputs:**
+@@ -9,16 +8,16 @@
+ 
+ **Outputs:**
+-- A new grid instance with the same structure (tree, voxel size, name) but with inactive voxels set to `new_bg`.
++- A new grid instance with the same structure (tree, voxel size, name) but with inactive voxels set to `new_bg` [S1, unofficial].
+ 
+ **Data Structures:**
+-- The grid uses a tree structure (e.g., VDB tree) where each leaf node contains a `value_mask` indicating active voxels and a `values` array storing scalar data.
+-- `on_indices(mask)`: Returns a list of offsets corresponding to set bits in `value_mask`.
++- The grid uses a tree structure where each leaf node contains a `value_mask` indicating active voxels and a `values` array storing scalar data.
+ - `Dict{Coord, T}`: A dictionary mapping 3D coordinates to scalar values for active voxels.
+ 
+ **Steps:**
+-1. **Extract Active Voxels:** Iterate through all leaf nodes in the grid's tree. For each leaf, iterate through the offsets returned by `on_indices(leaf.value_mask)`.
+-2. **Decode Coordinates:** For each offset, decode the 3D coordinate `c` using the leaf's `origin` and the offset bits.
+-3. **Store Active Data:** Store the value `leaf.values[offset + 1]` in a dictionary `active_data` at key `c`. The `+1` accounts for potential header or padding bytes in the leaf's value storage layout [S1, unofficial].
+-4. **Build New Grid:** Construct a new grid using the extracted `active_data` and the `new_bg` value. The new grid retains the original grid's `name`, `grid_class`, and `voxel_size` (`vs`). The construction function `build_grid` handles assigning `new_bg` to all coordinates not present in `active_data` [S1, unofficial].
++1. Iterate all leaves in the tree.
++2. For each leaf, iterate offsets in `on_indices(leaf.value_mask)`.
++3. Decode coordinate `c` from `origin` and offset bits.
++4. Store `leaf.values[offset + 1]` in a `Dict{Coord, T}` at key `c`.
++5. Build the new grid using `build_grid(data, new_bg; name=grid.name, grid_class=grid.grid_class, voxel_size=vs)` where `vs` is the voxel size.
+ 
+ **Pseudocode:**
+@@ -27,45 +26,62 @@
+     active_data = {}
+     for leaf in grid.tree.leaves():
+-        # Get offsets of active voxels in this leaf
+-        offsets = on_indices(leaf.value_mask)
+-        for offset in offsets:
+-            # Decode coordinate from leaf origin and offset
++        for offset in on_indices(leaf.value_mask):
+             c = decode_coordinate(leaf.origin, offset)
+-            # Store value; offset + 1 accounts for leaf data layout
+             active_data[c] = leaf.values[offset + 1]
+-    
+-    # Build new grid with active data and new background value
+-    new_grid = build_grid(
+-        data=active_data,
+-        new_bg=new_bg,
+-        name=grid.name,
+-        grid_class=grid.grid_class,
+-        voxel_size=grid.voxel_size
+-    )
+-    return new_grid
++    return build_grid(active_data, new_bg, grid.name, grid.grid_class, grid.voxel_size)
++
++def on_indices(mask):
++    """Yields bit offsets where mask has a 1."""
++    i = 0
++    while mask > 0:
++        if mask & 1:
++            yield i
++        mask >>= 1
++        i += 1
++
++def decode_coordinate(origin, offset):
++    """Maps leaf-local offset to global coordinate. Not given in the sources."""
++    return origin + offset
++
++def build_grid(data, new_bg, name, grid_class, voxel_size):
++    """Constructs a new grid, initializing inactive voxels to new_bg and inserting active data. Not given in the sources."""
++    grid = Grid(name=name, grid_class=grid_class, voxel_size=voxel_size)
++    for c, v in data.items():
++        grid.set(c, v)
++    return grid
++
++class Grid:
++    def __init__(self, name, grid_class, voxel_size):
++        self.name = name
++        self.grid_class = grid_class
++        self.voxel_size = voxel_size
++        self.data = {}
++    def set(self, c, v):
++        self.data[c] = v
+ ```
+ 
+ **Parameters:**
+-- `new_bg`: The new background scalar value. Typical values depend on the data type (e.g., 0.0 for density, 1.0 for opacity). Not given in the sources.
++- `new_bg`: The new background scalar value. Typical values depend on the data type. Not given in the sources.
+ 
+ **Edge Cases:**
+-- **Empty Active Set:** If no voxels are active, the new grid will consist entirely of `new_bg`.
+-- **Precision:** Coordinate decoding must handle floating-point precision if the grid uses continuous coordinates. Not given in the sources.
+-- **Boundary Conditions:** The `decode_coordinate` function must correctly map leaf-local offsets to global coordinates. Not given in the sources.
++- **Empty Active Set:** If no voxels are active, the new grid will consist entirely of `new_bg`. Not given in the sources.
++- **Precision & Boundaries:** Coordinate decoding and boundary handling must correctly map leaf-local offsets to global coordinates. Not given in the sources.
+ 
+ ## Subtopics
+ 
+ ### [Grid Deactivation](3214-grid-deactivation.md)
+-Removes active voxels based on scalar value. Choose when isolating foreground objects by removing background noise is required.
++Returns a new grid where any active voxel whose value equals a specific `value` is deactivated (removed from the active set). Choose it when isolating foreground objects by removing background noise is required.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear in the number of active voxels, as it iterates only through active leaves and offsets. Not given in the sources.
+-- **Memory Complexity:** Proportional to the number of active voxels for the temporary dictionary, plus the size of the new grid. Not given in the sources.
+-- **Strengths:** Efficiently updates background without modifying active data. Preserves grid structure.
+-- **Limitations:** Requires iterating all leaves. Not suitable for sparse grids with very large inactive regions if memory is constrained.
+-- **When to Use:** When the background value needs to be changed for rendering or analysis purposes without altering active data.
+-- **When Not to Use:** When active voxels also need modification; use [Grid Deactivation](3214-grid-deactivation.md) or other methods.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to Use:** Not given in the sources.
++- **When Not to Use:** Not given in the sources.
++
+ ## Background
+-Originated in the Lyr.jl library by Tobias Osborne [S1, unofficial]. It is used in volume rendering pipelines to manage background values in VDB-based volume grids.
++The method is defined in the Lyr.jl library [S1, unofficial]. It is used in volume rendering pipelines to manage background values in VDB-based volume grids.
++
+ ## Sources
+ [S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)

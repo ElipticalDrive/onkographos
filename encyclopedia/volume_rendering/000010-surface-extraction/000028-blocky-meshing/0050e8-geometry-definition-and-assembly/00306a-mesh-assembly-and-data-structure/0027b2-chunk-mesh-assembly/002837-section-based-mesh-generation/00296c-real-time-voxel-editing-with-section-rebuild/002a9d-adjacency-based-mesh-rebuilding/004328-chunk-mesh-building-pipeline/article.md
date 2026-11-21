@@ -1,0 +1,100 @@
+# Chunk Mesh Building Pipeline
+
+Also called: buildMesh, buildMeshData, updateMesh
+
+## Overview
+The Chunk Mesh Building Pipeline orchestrates the incremental reconstruction of a chunk's geometry and lighting after voxel modifications, handling palette decoding, mesh generation, GPU upload, vegetation building, and neighbor synchronization [S1, unofficial]. It differs from static meshing by embedding lighting recomputation and vegetation updates into the rebuild cycle, and from simple adjacency rebuilding by managing full chunk state transitions and explicit neighbor dependency checks [S1, unofficial].
+
+## How it works
+**Inputs:** A `ChunkRenderer` instance, a voxel modification trigger, and access to neighbor chunk references [S1, unofficial].
+**Outputs:** Updated GPU vertex/index buffers, recomputed sky and block lighting, and updated vegetation geometry [S1, unofficial].
+
+**Data Structures:**
+*   `needsUpdate`: Boolean flag indicating if the chunk requires rebuilding [S1, unofficial].
+*   `neighborNeedUpdate`: Array of directional flags (`WEST`, `EAST`, `SOUTH`, `NORTH`) indicating if a specific neighbor requires an update due to adjacency [S1, unofficial].
+*   `FACE_NORMALS`: Constant array of 6 unit vectors defining normals for the 6 cube faces [S1, unofficial].
+    *   Index 0: `(0, 0, 1)`
+    *   Index 1: `(0, 0, -1)`
+    *   Index 2: `(0, 1, 0)`
+    *   Index 3: `(0, -1, 0)`
+    *   Index 4: `(1, 0, 0)`
+    *   Index 5: `(-1, 0, 0)`
+
+**Steps:**
+1.  **Trigger Check:** When `updateMesh()` is called, clear the `needsUpdate` flag to prevent redundant processing during the same frame [S1, unofficial].
+2.  **Neighbor Synchronization:** Iterate through the directional neighbors (`WEST`, `EAST`, `SOUTH`, `NORTH`) [S1, unofficial]. For each flagged neighbor, lock the weak pointer, cast to `ChunkRenderer`, check `hasAllAdjacentChunkLoaded()`, and call `buildMesh()` if true [S1, unofficial].
+3.  **Lighting Recomputation:** Inside `buildMesh()`, skip the full sky and block-light BFS only if `blockLightOnlyRebuild` is true AND the chunk already has sky and block light [S1, unofficial]. Otherwise, call `computeSkyLight()` and `computeBlockLight()` [S1, unofficial].
+4.  **Mesh Generation:** Generate vertex and index data for the chunk's visible faces [S1, unofficial]. The vertex shader determines face normals using `face = (gl_VertexID / 6) % 6` to index `FACE_NORMALS` [S1, unofficial].
+5.  **GPU Upload:** Call `uploadMesh()` to transfer the generated vertex data to GPU buffers (VAO/VBO) [S1, unofficial].
+6.  **Vegetation Update:** Call `buildVegetationMesh()` to generate vegetation geometry [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_mesh(self):
+    self.needs_update = False
+    for direction in ['WEST', 'EAST', 'SOUTH', 'NORTH']:
+        if self.neighbor_need_update[direction]:
+            neighbor_ptr = self.lock_weak_pointer(direction)
+            if neighbor_ptr is not None:
+                neighbor_renderer = neighbor_ptr.cast_to_chunk_renderer()
+                if neighbor_renderer.has_all_adjacent_chunk_loaded():
+                    neighbor_renderer.build_mesh()
+    self.build_mesh()
+
+def build_mesh(self):
+    if self.block_light_only_rebuild and self.has_sky_light and self.has_block_light:
+        pass
+    else:
+        self.compute_sky_light()
+        self.compute_block_light()
+    vertex_data = self.generate_mesh_vertices()
+    self.upload_mesh(vertex_data)
+    self.build_vegetation_mesh()
+
+def generate_mesh_vertices(self):
+    vertices = []
+    indices = []
+    for x in range(0, CHUNK_SIZE):
+        for y in range(0, CHUNK_SIZE):
+            for z in range(0, CHUNK_SIZE):
+                if self.voxels[x, y, z] is empty:
+                    continue
+                for face_idx in range(6):
+                    neighbor_pos = (x, y, z) + FACE_OFFSETS[face_idx]
+                    if self.is_voxel_empty(neighbor_pos):
+                        quad = build_face_quad(x, y, z, face_idx)
+                        vertices.extend(quad.vertices)
+                        indices.extend(quad.indices)
+    return vertices, indices
+```
+
+**Edge Cases:**
+*   **Weak Pointer Failure:** If a neighbor chunk is unloaded or destroyed, `lock_weak_pointer` returns `None`, gracefully skipping the neighbor update [S1, unofficial].
+*   **Incomplete Adjacency:** If a neighbor does not have all adjacent chunks loaded (`has_all_adjacent_chunk_loaded()` returns false), its boundary faces may be incorrect, so the pipeline defers synchronization until the neighbor is fully loaded [S1, unofficial].
+*   **Lighting State:** If `block_light_only_rebuild` is true but the chunk lacks existing light data, a full BFS is still required to avoid rendering artifacts [S1, unofficial].
+
+## Subtopics
+
+### Volume Meshing with Halo Bricks
+A method to mesh a whole volume by including a one-cell halo across brick seams to handle culling and ambient occlusion (AO) for boundary faces [S2, unofficial]. It returns a `spall_jobs::JobToken` covering every brick revision and a missing-neighbour sentinel [S2, unofficial]. If a halo brick arrives, the mesh is marked as stale; when stale, the volume is re-meshed, which drops the now-occluded seam [S2, unofficial].
+
+### Chunk Mesh Orchestration
+A high-level function that orchestrates octree loading, mesh generation, GPU-to-CPU export, and seam node gathering for a single clipmap chunk [S3, unofficial]. It clears the `seamNodeBuffer`, loads or caches the octree, and if `octree.numNodes > 0`, allocates a `MeshBufferGPU`, calls `GenerateMeshFromOctree`, and exports to CPU via `ExportMeshBuffer` [S3, unofficial]. It then calls `GatherSeamNodesFromOctree` and returns `CL_SUCCESS` [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Integrates lighting propagation, vegetation updates, and neighbor synchronization into a single rebuild cycle [S1, unofficial].
+*   **Limitations:** Requires explicit neighbor chunk loading state checks; weak pointer management is necessary to handle unloaded chunks [S1, unofficial].
+*   **When to Use:** Real-time voxel editing with frequent small changes [S1, unofficial].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] ldominiq/ft_minecraft, https://github.com/ldominiq/ft_minecraft, fetched 2026-10-27 (unofficial)
+[S2] T05 — Visible voxel baseline (spall_mesh, spall_render), https://github.com/deranjer/spall/pull/10, fetched 2026-10-27 (unofficial)
+[S3] nickgildea/leven, https://github.com/nickgildea/leven, fetched 2026-10-26 (unofficial)

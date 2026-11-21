@@ -1,0 +1,54 @@
+# Signed Distance Field Voxelization
+
+Also called: SDF Voxelization, Signed Euclidean Distance Field Generation
+
+## Overview
+Signed Distance Field (SDF) Voxelization maps a continuous parametric object $Q_c$ into a digital representation $D_p$ where each voxel stores the signed Euclidean distance to the nearest point on the object's surface [G]. It solves the problem of creating a topologically robust, continuous scalar field from discrete geometry, enabling applications like marching cubes extraction, fluid simulation, and collision detection. It differs from [Analytic Voxelization](10493-analytic-voxelization.md) by storing exact distance magnitudes rather than fractional volume occupancy, and from [Surface-Aware Discretization](6820-surface-aware-discretization.md) by providing a global signed field rather than just surface-adjacent data.
+
+## Shared principles
+All methods in this family map a continuous parametric object $Q_c$ into a digital representation $D_p$ defined on a 3D grid [G]. The core mechanism involves:
+1. **Parametric Definition**: The input is defined by analytical equations (e.g., implicit functions, parametric surfaces) rather than discrete samples [G].
+2. **Geometric Evaluation**: For each voxel, the method computes a scalar value based on the geometric relationship between the voxel volume and the object $Q_c$ [G].
+3. **Value Mapping**: The output is a scalar field where values represent either the signed Euclidean distance to the surface or the fractional volume of the voxel occupied by the object [G].
+
+## Subtopics
+
+### [Signed Distance Field (SDF) Generation from Scanned Surfaces](854-signed-distance-field-sdf-generation-from-scanned-surfaces.md)
+Generates an SDF from a scanned triangulated mesh by computing minimum Euclidean distance to mesh geometry. It differs from [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md) by evaluating distance directly against geometric primitives rather than projecting slices, making it suitable for inputs from upstream reconstruction pipelines where calibrated camera poses are unavailable. Unlike [Dense Volume SDF Generation](4499-dense-volume-sdf-generation.md) which may use hierarchical structures, this approach typically samples a uniform grid directly against the raw mesh triangles.
+
+### [SDF-based Binary Voxelization](2402-sdf-based-binary-voxelization.md)
+Converts a continuous parametric object or a pre-computed SDF into a discrete 3D grid where each voxel is classified strictly as inside or outside the object. It solves the problem of creating a topological binary representation from a continuous scalar field, serving as the foundational step for many binary volume rendering and mesh extraction techniques. Unlike [Dense Volume SDF Generation](4499-dense-volume-sdf-generation.md) which preserves distance magnitudes, this method discards geometric precision in favor of binary membership, and unlike [Signed Distance Field (SDF) Generation from Scanned Surfaces](854-signed-distance-field-sdf-generation-from-scanned-surfaces.md) which generates the SDF from raw data, this method assumes the SDF or implicit definition is already available.
+
+### [MeshIntegrator Integration](3630-meshintegrator-integration.md)
+Writes a triangle mesh's truncated signed distance field (TSDF) into a `VoxelBlockGrid`'s `tsdf` and `weight` attributes. It solves the problem of efficiently rasterizing arbitrary triangle meshes into a volumetric distance representation suitable for downstream fusion or rendering. It differs from its siblings by performing a GPU-accelerated, block-based binning and integration pass that overwrites voxel values within the truncation band, rather than computing a global SDF from scratch or fusing multi-view observations directly. It builds on [Signed Distance Field Voxelization](3849-signed-distance-field-voxelization.md) by providing the specific integration mechanism for mesh inputs.
+
+### [Dense Volume SDF Generation](4499-dense-volume-sdf-generation.md)
+Converts a continuous triangle mesh into a dense 3D grid where every voxel stores the exact signed Euclidean distance to the mesh surface. Unlike sparse narrow-band methods that only store distances near the surface, this method populates the entire bounding volume, making it suitable for full-data access, simulation, and direct marching cubes extraction. It differs from [Signed Distance Field (SDF) Generation from Scanned Surfaces](854-signed-distance-field-sdf-generation-from-scanned-surfaces.md) by operating on clean B-rep meshes rather than point clouds, and from [SDF-based Binary Voxelization](2402-sdf-based-binary-voxelization.md) by retaining continuous distance values rather than quantizing to binary occupancy.
+
+### [Level Set Water Representation](4635-level-set-water-representation.md)
+Tracks the interface between liquid and air in fluid simulations by encoding the surface as an SDF. It solves the problem of maintaining a sharp, topologically flexible boundary between two phases during advection, distinguishing itself from Eulerian grid methods that track volume fractions by storing only the scalar distance value at each grid cell. Unlike sibling methods that may rely on scanned surfaces or binary voxelization, this approach explicitly defines the fluid domain via the zero set of the level set function, allowing for efficient culling of air cells during pressure solves.
+
+### Function Volume SDF
+#### definition
+- [S1] A method that stores no data in memory, returning a function object that computes distance on each query, trading computational power for memory savings.
+#### step
+- [S1] Load mesh and calculate oneDimVoxelSize using `mm.suggestVoxelSize(mesh, 1e7)`.
+- [S1] Calculate origin and dimensions using `mm.calcOriginAndDimensions(mesh.computeBoundingBox(), oneDimVoxelSize)`.
+- [S1] Set `dist.signMode` to `mm.SignDetectionMode.HoleWindingRule`.
+- [S1] If CUDA is available, create `FastWindingNumber` mesh and assign to `params.fwn`.
+- [S1] Call `mm.meshToDistanceFunctionVolume(mesh, params)` to generate `functionVolume`.
+- [S1] Call `mm.marchingCubes(functionVolume, mcParams)` to extract `offMesh`.
+#### parameter
+- [S1] `voxelSize`: Vector3f diagonal size. Calculated via `mm.suggestVoxelSize(mesh, 1e7)`.
+- [S1] `origin`: Vector3f defining the grid origin, calculated via `mm.calcOriginAndDimensions`.
+- [S1] `dimensions`: Vector3i defining the grid dimensions, calculated via `mm.calcOriginAndDimensions`.
+- [S1] `maxDistSq`: float squared maximum distance to calculate. Set to `(3 * oneDimVoxelSize)^2`.
+- [S1] `nullOutsideMinMax`: boolean. If True, do not calculate values too far.
+- [S1] `signMode`: enum for sign detection. `mm.SignDetectionMode.HoleWindingRule` is robust.
+- [S1] `fwn`: Optional FastWindingNumber object (GPU/CUDA) for accelerated sign calculation.
+
+## Background
+The concept of Signed Distance Fields for voxelization originates from the need to represent complex 3D geometry in a format suitable for rendering and simulation. Early work focused on generating SDFs from polygonal meshes for real-time rendering and collision detection. The specific implementation details described in the child articles, such as the use of `MeshIntegrator` for TSDF integration and `meshlib` for dense volume generation, reflect modern developments in GPU-accelerated voxelization and volumetric processing. The method is widely used in computer graphics for mesh extraction (marching cubes), fluid dynamics (level sets), and robotics (collision avoidance).
+
+## Sources
+[S1] Mesh to SDF (Signed Distance Field) Library for Python & C++, https://meshlib.io/feature/mesh-to-sdf/, fetched 2026-10-30

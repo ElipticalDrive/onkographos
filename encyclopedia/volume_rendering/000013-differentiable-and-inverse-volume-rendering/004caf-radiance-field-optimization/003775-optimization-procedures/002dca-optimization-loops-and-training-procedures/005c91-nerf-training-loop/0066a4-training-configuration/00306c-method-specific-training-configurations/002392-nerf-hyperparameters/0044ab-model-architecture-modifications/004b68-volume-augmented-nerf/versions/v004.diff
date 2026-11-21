@@ -1,0 +1,122 @@
+--- v003.md
++++ v004.md
+@@ -4,63 +4,77 @@
+ 
+ ## Overview
+-Volume-Augmented NeRF is a neural rendering method that extends the standard NeRF architecture to handle dynamic fluid scenes by binding explicit fluid volume values to sample points [S1, unofficial]. Unlike original NeRF, which assumes static scenes, this variant allows the renderer to learn density and color based on an explicit fluid distribution provided by a differentiable fluid simulator [S1, unofficial]. It serves as the rendering component in a joint inverse rendering framework for inferring fluid dynamics [S1, unofficial].
++Volume-Augmented NeRF is a neural radiance field architecture designed for dynamic fluid scenes by binding explicit fluid volume values to sample points, allowing the renderer to learn density and color based on an explicit fluid distribution provided by a simulator [S1, unofficial]. Unlike standard NeRF which assumes static scenes, this method augments the input with a fluid volume field $V$ to handle temporal changes in density and color caused by fluid flow [S1, unofficial]. It serves as the rendering component in a joint differentiable framework that infers fluid dynamics by matching observed images, avoiding the spatial and temporal ambiguities inherent in particle-based representations like NeuroFluid [S1, unofficial].
+ 
+ ## How it works
++The method combines a neural Euler fluid simulator with a neural renderer. The simulator provides a 3D volume field $V$ representing the fluid distribution, which is interpolated at sample points to guide the NeRF network [S1, unofficial].
++
+ **Inputs and Outputs:**
+-*   **Inputs:** Sample point position $x_i$, viewing direction $d$, and fluid volume value $v_i$ [S1, unofficial].
+-*   **Outputs:** Density $\sigma_i$ and RGB color $c_i$ [S1, unofficial].
++*   **Inputs:** Sample point position $\mathbf{x}_i$, viewing direction $\mathbf{d}$, and fluid volume value $v_i$ at $\mathbf{x}_i$.
++*   **Outputs:** Volume density $\sigma_i$ and view-dependent RGB color $\mathbf{c}_i$.
+ 
+ **Data Structures:**
+-The method uses a neural network $F_\Psi$ with the following structure:
+-1.  **Input Layer:** Concatenation of positional encoding $\gamma(x_i)$ and fluid volume $v_i$ [S1, unofficial].
+-2.  **Density/Feature Branch:** 8 fully-connected ReLU layers, each with 256 channels [S1, unofficial]. A skip connection concatenates the initial input ($\gamma(x_i)$ and $v_i$) to the activation of the 5th layer [S1, unofficial].
+-3.  **Density/Feature Output:** An additional fully-connected layer outputs a scalar density $\sigma_i$ (rectified by ReLU) and a 256-dimensional feature vector [S1, unofficial].
+-4.  **Color Branch:** Concatenation of the 256-dimensional feature vector and positional encoding of the viewing direction $\gamma(d)$ [S1, unofficial].
+-5.  **View-Dependent Layer:** One fully-connected ReLU layer with 128 channels [S1, unofficial].
+-6.  **Color Output:** A final fully-connected layer with sigmoid activation outputs the RGB radiance $c_i$ [S1, unofficial].
++*   **Fluid Volume Field $V$:** A 3D grid defined by the Euler simulator.
++    *   For generated datasets: Grid size $40 \times 40 \times 40$ [S1, unofficial].
++    *   For DPI Dam Break dataset: Grid size $54 \times 60 \times 32$ [S1, unofficial].
++    *   Initialization: Volume value is $1.0$ if the grid center is inside the initial fluid mesh, otherwise $0.0$ [S1, unofficial].
++*   **Neural Network $F_\Psi$:** A Multi-Layer Perceptron (MLP) with specific layer widths and activation functions.
++
++**Network Architecture Layout:**
++1.  **Positional Encoding:** Input position $\mathbf{x}$ is encoded using positional encoding $\gamma(\mathbf{x})$.
++2.  **Concatenation:** $\gamma(\mathbf{x})$ is concatenated with the interpolated fluid volume $v_i$.
++3.  **Position MLP:** The concatenated vector passes through 8 fully-connected ReLU layers, each with 256 channels.
++    *   **Skip Connection:** The initial input ($\gamma(\mathbf{x})$ and $v_i$) is concatenated to the activation of the 5th layer.
++4.  **Density/Feature Layer:** The output of the 8th layer passes through an additional fully-connected layer.
++    *   **Density $\sigma_i$:** Output is rectified using ReLU to ensure non-negativity.
++    *   **Feature Vector $\mathbf{h}_i$:** A 256-dimensional vector is output.
++5.  **Directional Encoding:** Viewing direction $\mathbf{d}$ is encoded using positional encoding $\gamma(\mathbf{d})$.
++6.  **Shading MLP:** The feature vector $\mathbf{h}_i$ is concatenated with $\gamma(\mathbf{d})$.
++    *   This concatenated vector passes through a fully-connected ReLU layer with 128 channels.
++7.  **Color Output:** A final fully-connected layer with sigmoid activation outputs the RGB radiance $\mathbf{c}_i$.
++
++**Rendering Formula:**
++The final pixel color $\hat{C}(r)$ for a ray $r$ is computed using standard volume rendering integration over $N$ samples:
++
++$$
++\hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
++$$
++
++where:
++*   $T_i = \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right)$ is the accumulated transmittance from the near bound to sample $i$.
++*   $\sigma_i$ is the density predicted by the network.
++*   $\mathbf{c}_i$ is the color predicted by the network.
++*   $\delta_i$ is the distance between adjacent samples along the ray.
+ 
+ **Algorithm Steps:**
+-1.  **Simulator Integration:** Assign the fluid volume field $V$ inferred by the neural Euler simulator into the scene space [S1, unofficial].
+-2.  **Ray Sampling:** Emit rays $r(k) = o + kd$ from camera position $o$ and direction $d$, sampling $N$ points $x_i$ along the ray between near and far bounds [S1, unofficial].
+-3.  **Volume Interpolation:** For each sampled point $x_i$, perform trilinear interpolation on the fluid volume field $V$ to capture the corresponding fluid volume value $v_i$ [S1, unofficial].
+-4.  **Network Forward Pass:** Input $\gamma(x_i)$, $v_i$, and $d$ into $F_\Psi$ to regress $\sigma_i$ and $c_i$ [S1, unofficial].
+-    *   Compute $h_0 = \text{ReLU}(\text{Linear}_1([\gamma(x_i), v_i]))$ [S1, unofficial].
+-    *   For $l = 2$ to $8$: $h_l = \text{ReLU}(\text{Linear}_l(h_{l-1}))$ [S1, unofficial].
+-    *   Apply skip connection: $h_{skip} = \text{ReLU}(\text{Linear}_{skip}(h_0))$ [S1, unofficial].
+-    *   $h_5' = h_5 + h_{skip}$ [S1, unofficial].
+-    *   Compute density and feature: $[\sigma_i, f_i] = \text{Linear}_{out}(h_5')$ [S1, unofficial].
+-    *   Ensure non-negative density: $\sigma_i = \text{ReLU}(\sigma_i)$ [S1, unofficial].
+-    *   Concatenate feature and direction: $z = [f_i, \gamma(d)]$ [S1, unofficial].
+-    *   Compute view-dependent features: $h_{view} = \text{ReLU}(\text{Linear}_{view}(z))$ [S1, unofficial].
+-    *   Compute color: $c_i = \text{Sigmoid}(\text{Linear}_{color}(h_{view}))$ [S1, unofficial].
+-5.  **Volume Rendering:** Integrate the samples along the ray to compute the pixel color $\hat{C}(r)$ [S1, unofficial]:
+-    $$ \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+-    where $T_i = \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right)$ is the accumulated transmittance, and $\delta_i$ is the distance between adjacent samples [S1, unofficial].
++1.  **Simulator Rollout:** The neural Euler simulator computes the fluid volume field $V$ for the current time step.
++2.  **Ray Sampling:** For each camera ray, sample $N$ 3D points $\mathbf{x}_i$ between near and far bounds.
++3.  **Volume Interpolation:** For each sample point $\mathbf{x}_i$, perform trilinear interpolation on the fluid volume field $V$ to obtain the scalar volume value $v_i$.
++4.  **Network Forward Pass:**
++    *   Compute $\gamma(\mathbf{x}_i)$ and $\gamma(\mathbf{d})$.
++    *   Concatenate $\gamma(\mathbf{x}_i)$ and $v_i$.
++    *   Pass through the 8-layer Position MLP (with skip connection at layer 5) to get $\sigma_i$ and $\mathbf{h}_i$.
++    *   Concatenate $\mathbf{h}_i$ and $\gamma(\mathbf{d})$.
++    *   Pass through the 128-channel Shading MLP to get $\mathbf{c}_i$.
++5.  **Volume Rendering:** Integrate $\sigma_i$ and $\mathbf{c}_i$ along the ray using the formula above to produce the image.
+ 
+ **Parameters:**
+-*   Hidden layer size for the first 8 layers: 256 channels [S1, unofficial].
+-*   Hidden layer size for the view-dependent layer: 128 channels [S1, unofficial].
+-*   Positional encoding dimensions: Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Density Non-negativity:** The density output must be rectified using ReLU to ensure non-negative values, as required by the volumetric rendering equation [S1, unofficial].
+-*   **Volume Field Accuracy:** The quality of the rendered fluid depends on the accuracy of the interpolated volume field $V$ from the simulator. Errors in the simulator's volume field propagate directly to the density prediction [S1, unofficial].
++*   Position MLP hidden size: 256 channels [S1, unofficial].
++*   Shading MLP hidden size: 128 channels [S1, unofficial].
++*   Image resolution: $256 \times 256$ [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Inverse Rendering for Fluid Dynamics
+-A method that jointly trains a differentiable fluid simulator and the volume-augmented NeRF renderer to match observed images, avoiding ambiguities present in particle-based representations [S1, unofficial]. Unlike NeuroFluid, which uses a Lagrangian particle-based representation and overfits to single sequences, this method uses an Eulerian volume field, allowing generalizable learning across multiple sequences [S1, unofficial]. Training involves pre-training the NeRF on the first frames of all sequences for 20k iterations (learning rate $5 \times 10^{-4}$, decay 0.5 every 5k iterations), followed by joint training of the simulator and renderer for 60k iterations [S1, unofficial]. Initial conditions for the simulator include setting grid velocities to the initial velocity and setting the volume value to 1.0 if the grid center is inside the initial fluid mesh, otherwise 0 [S1, unofficial].
++A training procedure where the volume-augmented NeRF is jointly trained with a differentiable fluid simulator to infer fluid dynamics from images [S1, unofficial]. Unlike particle-based methods (e.g., NeuroFluid) that overfit to single sequences, this approach uses the Eulerian volume field to allow generalizable learning across multiple sequences by avoiding spatial and temporal ambiguities [S1, unofficial]. Training involves pre-training the NeRF on the first frames of all sequences for 20k iterations (learning rate $5 \times 10^{-4}$, decay 0.5 every 5k iterations), followed by joint training of the simulator and renderer for 60k iterations (simulator LR $5 \times 10^{-5}$, renderer LR $1 \times 10^{-6}$, both decay 0.5 every 10k iterations) [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** The method is trained on 4 NVIDIA RTX 3090 GPUs with a batch size of 4 [S1, unofficial]. Image resolution is 256x256 [S1, unofficial].
+-*   **Scaling:** The method supports training on multiple sequences (e.g., 90 sequences for training, 10 for test in generated datasets; 180 sequences for training, 20 for test in DPI Dam Break dataset) [S1, unofficial].
+-*   **Strengths:** Handles dynamic fluid scenes where density and color change with fluid flow; avoids spatial and temporal ambiguities of particle-based methods; enables generalizable learning across multiple sequences [S1, unofficial].
+-*   **Limitations:** Requires a differentiable fluid simulator to provide the volume field; performance depends on the accuracy of the simulator [S1, unofficial].
+-*   **When to use:** When rendering dynamic fluid scenes and/or inferring fluid dynamics from images.
+-*   **When not to use:** For static scenes (standard NeRF is sufficient) or when a differentiable simulator is not available.
++*   **Complexity:** The method adds a trilinear interpolation step per sample point to retrieve the fluid volume value $v_i$ from the Euler grid. The computational cost of the NeRF itself remains comparable to standard NeRF, with the addition of the volume input dimension.
++*   **Performance:** The method achieves significantly better rendering and simulation results compared to particle-based counterparts (NeuroFluid) in transfer settings (training on multiple sequences, testing on unseen ones) [S1, unofficial].
++*   **Strengths:** Handles dynamic fluid scenes; avoids ambiguities of particle-based representations; enables generalizable learning across multiple sequences; differentiable bridge between simulator and renderer.
++*   **Limitations:** Requires a differentiable fluid simulator to provide the volume field; performance on single-sequence overfitting may be lower than complex particle-based methods (though this is a feature for generalization, not a limitation of the method's intent) [S1, unofficial].
++*   **Hardware:** Demonstrated on 4 NVIDIA RTX 3090 GPUs [S1, unofficial].
+ 
+ ## Background
+-The method was proposed in "Inferring Fluid Dynamics via Inverse Rendering" (2023) [S1, unofficial]. It builds on the original NeRF architecture (Mildenhall et al., 2020) [S1, unofficial]. The work addresses the limitation of original NeRF, which works only on static scenes, by introducing a fluid volume representation that bridges a neural Euler simulator and the renderer in a joint differentiable way [S1, unofficial]. It is compared against NeuroFluid, a concurrent work that uses particle-based representations [S1, unofficial].
++The method was introduced in the paper "Inferring Fluid Dynamics via Inverse Rendering" [S1, unofficial]. It addresses the limitation of original NeRF (Mildenhall et al., 2020) which works only on static scenes [S1, unofficial]. By binding fluid volume values to sample points, it extends NeRF to dynamic scenes where density and color change with fluid flow [S1, unofficial]. It is part of a broader effort to infer fluid dynamics using inverse rendering, contrasting with Lagrangian (particle-based) approaches like NeuroFluid (Guan et al., 2022) [S1, unofficial].
+ 
+ ## Sources

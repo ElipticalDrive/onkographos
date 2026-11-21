@@ -1,0 +1,220 @@
+--- v004.md
++++ v005.md
+@@ -4,128 +4,117 @@
+ 
+ ## Overview
+-Depth Supervision Loss (Laug) is a data consistency regularization term used in differentiable volume rendering to constrain the rendered depth to match ground-truth depth estimates. It addresses the ambiguity of monocular depth estimation by applying a dynamic reliability mask that stabilizes training, particularly in the early stages. It differs from its siblings, [Depth Consistency Check](9363-depth-consistency-check-depth-outlier-removal.md) and [Multi-view Consistency Depth Filtering](12319-multi-view-consistency-depth-filtering.md), by operating as a direct pixel-wise regression loss with adaptive masking rather than a post-hoc filtering or consistency check mechanism.
++Depth Supervision Loss (Laug) enforces geometric consistency by minimizing the discrepancy between rendered depth maps and ground-truth depth estimates during radiance field optimization. It distinguishes itself from sibling methods by combining a dynamic adaptive masking strategy to handle unreliable depth regions with a robust, gradient-stopped reliability weighting mechanism that prevents error propagation from noisy depth priors [S1, unofficial][S2].
+ 
+ ## How it works
+-The method computes a weighted L1 reconstruction loss between the warped rendered depth and the ground-truth depth. It employs a two-phase strategy: an initial phase with a static scene-specific mask, followed by a dynamic phase that replaces masked ground-truth values and updates the mask based on depth comparisons.
++The method computes a weighted L1 reconstruction loss between the warped rendered depth and the ground-truth depth. It employs two distinct mechanisms for handling reliability: a time-dependent adaptive mask for standard depth consistency [S1, unofficial] and a reliability-based indicator mask for robust supervision [S2].
+ 
+-### Inputs and Outputs
+-*   **Inputs:**
+-    *   $d_{render}$: Warped rendered depth map.
+-    *   $d_{gt}$: Ground-truth depth map.
+-    *   $m_{init}$: Initial scene-specific binary mask (1 for valid pixels, 0 for invalid).
+-    *   $I$: Current training iteration index.
+-    *   $I_{total}$: Total number of training iterations ($opt.iterations$).
+-*   **Outputs:**
+-    *   $L_{depth}$: Scalar loss value.
++**Inputs:**
++- $d_{render}$: Warped rendered depth map.
++- $d_{gt}$: Ground-truth depth map.
++- $m_{gt}$: Initial ground-truth mask (binary, 1 for valid, 0 for invalid).
++- $z_m$: Multi-view consistent depth estimate.
++- $z_a$: Single-view depth estimate.
++- $m_a, m_m$: Reliability masks for single-view and multi-view depths, respectively.
++- $N$: Number of pixels.
++- $I$: Current training iteration.
++- $I_{total}$: Total number of training iterations.
+ 
+-### Data Structures
+-*   **Depth Maps:** 2D arrays of floating-point values, shape $(H, W)$.
+-*   **Masks:** 2D boolean or binary float arrays, shape $(H, W)$.
++**Data Structures:**
++- Depth maps are 2D arrays of floating-point values.
++- Masks are 2D binary arrays (0 or 1).
+ 
+-### Algorithm Steps
+-1.  **Initialize Mask:** Set the adaptive mask $m_{gt}$ to the initial scene-specific mask $m_{init}$.
+-2.  **Check Iteration Threshold:** Determine if the current iteration $I$ exceeds one-third of the total iterations ($I > I_{total} / 3$).
+-3.  **Adaptive Masking (Post-Threshold):**
+-    *   If $I > I_{total} / 3$:
+-        *   Replace masked ground-truth depth values with a constant value $C = 0.75$. Specifically, for pixels where $m_{gt} == 0$, set $d_{gt}[i] = 0.75$.
+-        *   Update the mask: $m_{gt} = (d_{render} < d_{gt}) \land m_{init}$. This selects pixels where the rendered depth is closer than the ground truth, restricted to the initial valid region.
+-    *   Else:
+-        *   Keep $m_{gt} = m_{init}$.
+-        *   Keep $d_{gt}$ unchanged.
+-4.  **Compute Loss:** Calculate the masked L1 loss and scale by 2.0.
++**Parameters:**
++- `opt.iterations`: Total training iterations. The adaptive masking logic triggers at $I_{total} / 3$ [S1, unofficial].
++- Scaling factor: 2.0 [S1, unofficial].
+ 
+-### Formula
+-The loss is defined as:
+-$$ L_{depth} = 2 \cdot \frac{1}{N} \sum_{i=1}^{N} |d_{render, i} \cdot m_{gt, i} - d_{gt, i} \cdot m_{gt, i}| $$
+-Where:
+-*   $N$ is the total number of pixels.
+-*   $d_{render, i}$ is the rendered depth at pixel $i$.
+-*   $d_{gt, i}$ is the ground-truth depth at pixel $i$ (potentially modified in step 3).
+-*   $m_{gt, i}$ is the adaptive mask value at pixel $i$.
++**Steps:**
+ 
+-### Pseudocode
++1. **Adaptive Masking (Standard L_depth):**
++   - Load $d_{gt}$ and $m_{gt}$.
++   - If $I > I_{total} / 3$:
++     - Replace masked-out values in $d_{gt}$ with 0.75.
++     - Update $m_{gt}$ to: $m_{gt} = (d_{render} < d_{gt}) \cdot m_{gt}$. This selects pixels where the rendered depth is closer than the ground truth, effectively masking out occluded or unreliable rear surfaces [S1, unofficial].
++   - Compute the loss:
++     $$ L_{depth} = 2 \cdot \frac{1}{N} \sum_{i=1}^{N} |d_{render, i} \cdot m_{gt, i} - d_{gt, i} \cdot m_{gt, i}| $$
++     where $d_{render}$ is the warped rendered depth and $d_{gt}$ is the ground-truth depth [S1, unofficial].
++
++2. **Robust Supervision (Laug):**
++   - Use reliability masks $m_a$ and $m_m$ to weight the depth consistency between single-view ($z_a$) and multi-view ($z_m$) estimates.
++   - Apply stop-gradient ($\hat{\nabla}$) to the reference terms to prevent gradient flow through unreliable depth estimates [S2].
++   - Compute the loss:
++     $$ L_{aug} = \mathbb{1}_{\{m_a=1\}} \odot ||z_m - \hat{\nabla}(z_a)||^2 + \mathbb{1}_{\{m_m=1\}} \odot ||\hat{\nabla}(z_m) - z_a||^2 $$
++     where $\odot$ is element-wise multiplication, $\mathbb{1}$ is the indicator function, and $\hat{\nabla}$ denotes the stop-gradient operator [S2].
++
++**Pseudocode:**
++
+ ```python
+-def compute_depth_supervision_loss(d_render, d_gt, m_init, iteration, total_iterations):
++def compute_depth_loss(d_render, d_gt, m_gt, z_m, z_a, m_a, m_m, current_iter, total_iters):
+     """
+-    Computes the Depth Supervision Loss (Laug) with adaptive masking.
++    Computes Depth Supervision Loss (Laug) combining adaptive masking and robust reliability weighting.
++    """
++    # --- Part 1: Adaptive Masking for L_depth [S1, unofficial] ---
++    # Apply scene-specific mask logic if past 1/3 of training
++    if current_iter > total_iters / 3:
++        # Replace masked GT depth values with 0.75
++        d_gt_masked = d_gt.clone()
++        d_gt_masked[m_gt == 0] = 0.75
++        
++        # Update mask: keep pixels where rendered depth is closer than GT depth
++        # Note: Source [S1, unofficial] implies this is applied to the valid region
++        m_gt_new = (d_render < d_gt_masked).float() * m_gt
++        m_gt = m_gt_new
++        
++        # Compute L1 loss with scaling factor 2.0
++        # Only sum over valid pixels defined by m_gt
++        valid_pixels = m_gt.sum()
++        if valid_pixels > 0:
++            l_depth = 2.0 * (torch.abs(d_render * m_gt - d_gt_masked * m_gt).sum() / valid_pixels)
++        else:
++            l_depth = torch.tensor(0.0)
++    else:
++        # Standard L1 loss without adaptive replacement/mask update
++        valid_pixels = m_gt.sum()
++        if valid_pixels > 0:
++            l_depth = 2.0 * (torch.abs(d_render * m_gt - d_gt * m_gt).sum() / valid_pixels)
++        else:
++            l_depth = torch.tensor(0.0)
++
++    # --- Part 2: Robust Supervision for Laug [S2] ---
++    # Apply stop-gradient to reference terms
++    z_a_stopped = z_a.detach()
++    z_m_stopped = z_m.detach()
+     
+-    Args:
+-        d_render: numpy array (H, W), rendered depth.
+-        d_gt: numpy array (H, W), ground truth depth.
+-        m_init: numpy array (H, W), initial binary mask (0 or 1).
+-        iteration: int, current training iteration.
+-        total_iterations: int, total number of training iterations.
+-        
+-    Returns:
+-        float: The computed loss value.
+-    """
+-    # Step 1: Initialize adaptive mask
+-    m_gt = m_init.copy()
++    # Term 1: Multi-view vs Single-view (weighted by single-view reliability)
++    term1 = (m_a == 1).float() * (z_m - z_a_stopped).pow(2)
+     
+-    # Step 2: Check iteration threshold
+-    threshold = total_iterations / 3.0
++    # Term 2: Single-view vs Multi-view (weighted by multi-view reliability)
++    term2 = (m_m == 1).float() * (z_m_stopped - z_a).pow(2)
+     
+-    if iteration > threshold:
+-        # Step 3a: Replace masked GT depth values with 0.75
+-        # Note: The source implies replacing values where the mask is 0,
+-        # or potentially all masked-out regions. Based on "replace masked GT depth values",
+-        # we assume pixels where m_gt is 0 are set to 0.75.
+-        d_gt[m_gt == 0] = 0.75
+-        
+-        # Step 3b: Update mask to (depth < gt_depth) * mask[0:1]
+-        # m_init is used as the base constraint.
+-        # Condition: d_render < d_gt
+-        condition = d_render < d_gt
+-        m_gt = (condition.astype(float) * m_init)
+-    else:
+-        # Step 3c: Early training phase, no modification
+-        pass
+-        
+-    # Step 4: Compute L1 loss
+-    # Masked rendered depth
+-    masked_render = d_render * m_gt
+-    # Masked GT depth
+-    masked_gt = d_gt * m_gt
++    # Combine losses
++    l_aug = term1.sum() + term2.sum()
+     
+-    # Absolute difference
+-    abs_diff = np.abs(masked_render - masked_gt)
+-    
+-    # Mean over N pixels (N is total pixels, not just valid ones, as per formula 1/N sum)
+-    loss = np.mean(abs_diff)
+-    
+-    # Scale by 2.0
+-    loss = 2.0 * loss
+-    
+-    return loss
++    return l_depth, l_aug
+ ```
+ 
+-### Parameters
+-*   `opt.iterations`: Total training iterations. The adaptive masking logic triggers at $I > opt.iterations / 3$.
+-*   Constant replacement value: $0.75$.
+-*   Loss scaling factor: $2.0$.
+-
+-### Edge Cases and Pitfalls
+-*   **Precision:** Ensure $d_{render}$ and $d_{gt}$ are in the same coordinate system and scale (e.g., meters). The constant $0.75$ is unit-dependent; if depths are in millimeters, this value is invalid. The source does not specify the unit, but $0.75$ suggests meters.
+-*   **Boundary Conditions:** The mask update $(d_{render} < d_{gt})$ may result in empty masks if the network is poorly initialized. This is mitigated by the initial mask $m_{init}$.
+-*   **Degenerate Input:** If $m_{init}$ is all zeros, the loss is zero. If $d_{gt}$ contains NaNs, they should be masked out in $m_{init}$.
++**Edge Cases and Pitfalls:**
++- **Precision:** The comparison $d_{render} < d_{gt}$ in the adaptive mask can be sensitive to depth quantization errors. [S1, unofficial]
++- **Boundaries:** The adaptive mask update at $I_{total}/3$ may cause sudden changes in the loss landscape if the rendered depth is significantly inaccurate at that stage. [S1, unofficial]
++- **Degenerate Input:** If $m_{gt}$ is all zeros, the L1 loss division by $N$ (or valid pixels) must handle division by zero. [G]
+ 
+ ## Subtopics
+ 
+-### Robust Depth Supervision
+-A variant that identifies a reliable subset of depth points $D_{reliable}^m$ using scheduled parameters $\epsilon_t^m$ (threshold) and $\epsilon_o^m$ (offset) to filter out occluded or distant points. It computes a Lidar Depth Loss $L_{ds} = L_{depth} + L_{sight}$. $L_{depth}$ is an L2 loss between rendered and ground truth depth. $L_{sight}$ enforces the weight distribution $w(t)$ along the ray to resemble a Gaussian $N(\hat{D}_i, \epsilon_n)$ centered at the ground truth depth $\hat{D}_i$. The probability mass $N_i$ is computed exactly using the Gaussian CDF rather than mid-point approximation. The reliable subset is defined as $D_{reliable}^m = \{D_i | D_i \le \epsilon_t^m, D_i \le \hat{D}_i + \epsilon_o^m, D_i \in D\}$. The parameters $\epsilon_t^m$ and $\epsilon_o^m$ are scheduled exponentially: $\epsilon_t^m = \min\{\alpha_t \epsilon_t^{m-1}, \epsilon_t^0\}$ with $\alpha_t > 1$, and $\epsilon_o^m = \max\{\alpha_o \epsilon_o^{m-1}, \epsilon_o^0\}$ with $\alpha_o < 1$.
++### [Robust Depth Supervision](12870-robust-depth-supervision.md)
++Handles defocus blur ambiguity by sampling front-most depth values and using exact Gaussian CDFs, avoiding the blending of front/rear depths.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of pixels, due to element-wise operations.
+-*   **Memory Complexity:** $O(N)$ for storing the depth maps and masks.
+-*   **Strengths:** Stabilizes training by ignoring unreliable depth estimates early on. The adaptive mask prevents the network from overfitting to noisy or occluded ground-truth depth.
+-*   **Limitations:** Relies on the quality of the initial mask $m_{init}$ and the ground-truth depth. The constant $0.75$ is heuristic and may not generalize across different scenes or units.
+-*   **When to use:** When training with sparse views or noisy monocular depth estimates where early training instability is a concern.
+-*   **When not to use:** When high-precision, metric depth is available and reliable for all pixels, or when computational resources are extremely limited (though the cost is low).
++- **Time Complexity:** Linear with respect to the number of pixels $N$ for both L1 and L2 loss computations [S1, unofficial][S2].
++- **Memory Complexity:** Requires storage for depth maps and masks, proportional to image resolution [S1, unofficial][S2].
++- **Strengths:** The adaptive masking stabilizes training by ignoring unreliable rear-surface depths early on, while the reliability masks in Laug prevent noisy depth estimates from corrupting the optimization [S1, unofficial][S2].
++- **Limitations:** The method relies on the quality of the initial depth estimates and masks. If the reliability masks are inaccurate, the loss may guide the model incorrectly [S2]. The adaptive mask logic is specific to the iteration schedule and may not generalize to all training regimes [S1, unofficial].
+ 
+ ## Background
+-The Depth Supervision Loss (Laug) with adaptive masking was introduced in the context of Autonomous Vehicle Multi-View Stereo (AVM-GS) [S1, unofficial]. It is designed to handle the challenges of training neural radiance fields with limited view coverage and noisy depth data. The method builds on the idea of dynamic masking to improve convergence stability.
++The method originates from implementations in AVM-GS [S1, unofficial] and Simple-RF [S2]. It is used in differentiable volume rendering and radiance field optimization to regularize depth consistency, particularly in sparse-view settings where depth estimation is ambiguous [S2].
+ 
+ ## Sources
+ [S1] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
+-[S2] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
+-[S3] LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes, https://doi.org/10.1109/cvpr52733.2024.01850, fetched 2026-10-26+[S2] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27

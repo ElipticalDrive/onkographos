@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -2,77 +2,79 @@
+ Also called: Texture Storage for Real-Time Rendering, iNGP Texture Storage for Real-Time Rendering
+ ## Overview
+-This method replaces hash-table-based feature storage with explicit 3D grid and triplane textures to leverage hardware-accelerated memory locality and bilinear interpolation [S1]. It reduces the number of texture fetches per neural network evaluation by storing presummed multi-resolution features, enabling a 3× reduction in fetch overhead compared to the original InstantNGP approach [S1].
++This method replaces hash-table-based feature storage with explicit 3D grid and triplane textures to leverage hardware-accelerated memory locality and texture interpolation [S1]. It reduces the number of texture fetches per neural network evaluation by storing presummed multi-resolution features, enabling a 3× reduction in fetch overhead compared to the original InstantNGP approach [S1].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A set of multi-resolution feature grids (3D) and triplanes (2D) optimized during training.
++- Input: Multi-resolution feature grids (3D) and triplanes (2D) optimized during training.
+ - Output: Anti-aliased feature vectors for a given 3D sample point $x$ at render time.
+ 
+ **Data Structures:**
+-- **Feature Grids/Triplanes:** Explicit 3D or 2D arrays of floating-point values. Unlike hash tables, these are stored as textures in GPU memory.
+-- **Presummed Features:** For each resolution level $L$, the stored value $g'(v)$ is the sum of features from level $0$ to $L$:
++- **Feature Grids/Triplanes:** Explicit 3D or 2D arrays of floating-point values stored as textures in GPU memory instead of hash tables [S1].
++- **Presummed Features:** For each resolution level $L$, the stored value $g'(v)$ is the cumulative sum of features from level $0$ to $L$:
+   $$g'(v) = \sum_{l=0}^{L} g(v, l)$$
+   where $g(v, l)$ is the feature at location $v$ and resolution level $l$ [S1].
+ 
+ **Algorithm:**
+-1. **Training Phase:** Optimize the multi-resolution feature grids and triplanes. During this phase, features at different resolution levels are summed to form the presummed features $g'$ stored in the texture memory [S1].
+-2. **Render-Time Fetch:** For a sample point $x$, determine the required resolution based on the pixel area $p(x)$ [S1].
+-3. **Interpolation:** Perform bilinear (or trilinear) interpolation on the presummed feature textures at the two resolution levels implied by $p(x)$ [S1]. This interpolation effectively averages the features across resolutions, providing anti-aliasing [S1].
+-4. **MLP Input:** Pass the interpolated feature vector to the MLP for color/density prediction [S1].
++1. **Training Phase:** Optimize the multi-resolution feature grids and triplanes, summing features across levels to form the presummed features $g'$ stored in texture memory [S1].
++2. **Render-Time Level Selection:** For a sample point $x$, determine two adjacent resolution levels implied by the pixel area $p(x)$ [S1].
++3. **Texture Fetch:** Retrieve the presummed feature vectors from both selected levels using hardware-accelerated interpolation (trilinear for 3D grids, bilinear for triplanes) [S1].
++4. **Anti-Aliasing Interpolation:** Interpolate between the two fetched feature vectors based on $p(x)$ to produce the final anti-aliased feature input for the MLP [S1].
+ 
+ **Parameters:**
+-- **Resolution Levels:** The number of levels depends on the scene complexity and desired quality. In the cited example, seven triplane levels and three 3D grids were used [S1].
++- **Resolution Levels:** The number of levels depends on the scene complexity and desired quality. In the cited implementation, seven triplane levels and three 3D grids were used [S1].
+ - **Pixel Area Threshold:** Determines which two resolution levels to interpolate between based on $p(x)$ [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Memory Locality:** While this method improves locality over hash tables, it still requires careful management of texture memory size for high-resolution grids [S1].
+-- **Interpolation Artifacts:** Bilinear interpolation may introduce slight blurring compared to nearest-neighbor hash lookups, but this is mitigated by the multi-resolution presummed storage [S1].
++- **Memory Locality:** Explicit textures improve locality over hash tables but require careful management of texture memory size for high-resolution grids [S1].
++- **Interpolation Artifacts:** Hardware interpolation may introduce slight blurring compared to nearest-neighbor hash lookups, mitigated by the multi-resolution presummed storage design [S1].
+ 
+ **Pseudocode:**
+ ```python
+ def get_feature_anti_aliased(x, pixel_area_p, feature_grids, feature_triplanes):
+-    """
+-    Retrieve anti-aliased features for point x using presummed textures.
++    # Determine two adjacent resolution levels implied by pixel area p(x)
++    # Exact mapping from p(x) to levels is implementation-specific [G]
++    level_low, level_high = find_adjacent_levels(pixel_area_p, len(feature_grids))
+     
+-    Args:
+-        x: 3D point coordinates.
+-        pixel_area_p: Area of the pixel in 3D space, determines resolution.
+-        feature_grids: List of 3D feature grids, stored as presummed textures.
+-        feature_triplanes: List of 2D triplane features, stored as presummed textures.
+-        
+-    Returns:
+-        Interpolated feature vector.
+-    """
+-    # Determine the two resolution levels to interpolate between based on pixel_area_p
+-    # This logic is specific to the implementation but generally involves mapping p(x) to levels
+-    level_low, level_high = determine_levels_from_pixel_area(pixel_area_p)
++    # Fetch presummed features from both levels
++    feats_low = fetch_presummed_features(x, level_low, feature_grids, feature_triplanes)
++    feats_high = fetch_presummed_features(x, level_high, feature_grids, feature_triplanes)
+     
+-    # Fetch presummed features from the lower resolution level
+-    # For 3D grids, use trilinear interpolation; for triplanes, use bilinear
+-    features_low = interpolate_texture(feature_grids, feature_triplanes, x, level_low)
+-    
+-    # Fetch presummed features from the higher resolution level
+-    features_high = interpolate_texture(feature_grids, feature_triplanes, x, level_high)
+-    
+-    # Interpolate between the two levels to get the final anti-aliased feature
+-    # The interpolation weight is determined by how close p(x) is to the boundaries of the levels
+-    weight = calculate_interpolation_weight(pixel_area_p, level_low, level_high)
+-    final_features = lerp(features_low, features_high, weight)
+-    
+-    return final_features
++    # Interpolate between levels based on pixel area
++    weight = interpolate_level_weight(pixel_area_p, level_low, level_high)
++    return lerp(feats_low, feats_high, weight)
+ 
+-def interpolate_texture(grids, triplanes, x, level):
+-    """
+-    Interpolate features from the specified resolution level.
+-    """
+-    # Implementation depends on whether x falls within a 3D grid or a triplane
+-    # For 3D grids:
+-    if in_3d_grid(x, level):
++def find_adjacent_levels(p, num_levels):
++    idx = p * (num_levels - 1)
++    return int(idx), min(int(idx) + 1, num_levels - 1)
++
++def interpolate_level_weight(p, l_low, l_high):
++    if l_high == l_low:
++        return 0.0
++    return (p * (l_high - l_low) - l_low) / (l_high - l_low)
++
++def fetch_presummed_features(x, level, grids, triplanes):
++    # Determine if x is sampled from a 3D grid or a triplane
++    # Implementation depends on scene layout [G]
++    if is_in_3d_grid(x, level):
+         return trilinear_interpolate(grids[level], x)
+-    # For triplanes:
+     else:
+         return bilinear_interpolate(triplanes[level], x)
++
++def trilinear_interpolate(grid, x):
++    # Standard 3D trilinear interpolation over 8 surrounding voxels
++    # Returns weighted average based on fractional coordinates of x [G]
++    pass # Standard graphics operation [G]
++
++def bilinear_interpolate(grid, x):
++    # Standard 2D bilinear interpolation over 4 surrounding texels
++    # Returns weighted average based on fractional coordinates of x [G]
++    pass # Standard graphics operation [G]
++
++def lerp(a, b, t):
++    return a + t * (b - a)
++
++def is_in_3d_grid(x, level):
++    # Determines sampling domain based on scene layout [G]
++    return True # Placeholder for scene-specific logic [G]
+ ```
+-[G] The `determine_levels_from_pixel_area` and `calculate_interpolation_weight` functions are implementation-specific details not provided in the source. The core idea is interpolating between two presummed levels based on the sample's footprint [S1].
+-
+ ## Subtopics
+ 
+@@ -87,5 +89,5 @@
+ - **Limitations:** Fixed memory usage, potential for interpolation artifacts if not carefully tuned [S1].
+ ## Background
+-This method is part of the HybridNeRF architecture, which combines neural rendering with adaptive volumetric surfaces [S1]. It was introduced to optimize real-time rendering performance by leveraging explicit grid structures instead of hash tables [S1].
++This method is described in the HybridNeRF paper, which introduces efficient neural rendering via adaptive volumetric surfaces [S1]. It was introduced to optimize real-time rendering performance by leveraging explicit grid structures instead of hash tables [S1].
+ ## Sources
+ [S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26

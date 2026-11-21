@@ -1,0 +1,293 @@
+--- v001.md
++++ v002.md
+@@ -4,57 +4,63 @@
+ 
+ ## Overview
+-A recursive Level of Detail (LOD) system that partitions a volume domain into octree-like chunks, splitting them into eight children when close to the viewer and merging them when far away to maintain a consistent surface approximation across varying distances [S1, unofficial]. It differs from frequency-domain methods by using spatial subdivision and from flat blocking by dynamically adjusting the hierarchy depth based on viewer proximity rather than a fixed grid structure [S1, unofficial].
++A recursive Level of Detail (LOD) system using octree-like chunk subdivision to maintain a consistent surface approximation across different distances [S1, unofficial]. It splits chunks into 8 children when close to the viewer and merges them when far away, yielding interactive rates by handling levels of detail and culling [S1, unofficial]. It differs from [Flat blocking multi-resolution volume rendering](6428-flat-blocking-multi-resolution-volume-rendering.md) by using a dynamic, recursive tree structure rather than static pre-computed blocks.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Viewer position ($P_{viewer}$), maximum LOD depth ($L_{max}$), base chunk size ($S_{base}$), view distance radius ($R_{view}$), and volume density data.
+-*   **Outputs:** A set of active chunks, each containing a generated mesh and associated metadata (position, size, LOD level).
++*   **Input:** Viewer position ($P_{view}$), maximum LOD depth ($L_{max}$), view distance radius ($R_{view}$), base chunk size ($S_{base}$), and density data.
++*   **Output:** A set of active `Chunk` objects, each containing a generated mesh and collider, forming the visible terrain.
+ 
+ **Data Structures:**
+ The core structure is the `Chunk` object.
+-*   `position`: `Vector3Int` representing the chunk's origin in world space.
+-*   `size`: `int` representing the side length of the chunk.
+-*   `lod`: `int` representing the current level of detail (0 is finest, $L_{max}$ is coarsest).
+-*   `children`: Array of 8 `Chunk` references (or null if leaf).
+-*   `dirty`: `bool` flag indicating if the mesh needs regeneration.
+-*   `densities`: `float[]` array storing the volume data for this chunk.
+-*   `mesh`: `Mesh` object for rendering.
++*   `position`: `Vector3Int` representing the chunk's grid coordinates.
++*   `mesh`: Reference to the generated `Mesh` object.
++*   `dirty`: `bool`. Flag indicating if the mesh needs regeneration.
++*   `densities`: `float[]`. Array of density values for the chunk's voxel grid.
++*   `lod`: `int`. Current Level of Detail index (0 is finest, $L_{max}$ is coarsest).
++*   `size`: `int`. The side length of the chunk in voxels.
++*   `children`: `Chunk[8]`. Array of 8 child chunks (null if leaf).
++*   `transform`: Unity `Transform` component for spatial hierarchy.
+ 
+-**Numbered Steps:**
++**Parameters:**
++*   `levelsOfDetail` ($L_{max}$): Maximum depth of the LOD hierarchy. Range: $[0, 9]$. Typical value: 4 [S1, unofficial].
++*   `viewDistance` ($R_{view}$): Radius within which chunks are considered for splitting. Typical value: 500 [S1, unofficial].
++*   `chunkSize` ($S_{base}$): Size of the finest detail chunk. Range: $[2, 64]$. Typical value: 2 [S1, unofficial].
++
++**Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    Create root chunks at positions determined by $(x, y, z) \times (S_{base} \ll L_{max})$. Set each root chunk's `lod` to $L_{max}$ and `size` to $S_{base} \ll L_{max}$. Set `dirty` to `true` [S1, unofficial].
++    Create root chunks at positions $(x, y, z) \times (S_{base} \ll L_{max})$.
++    Set each root chunk's `lod` = $L_{max}$ and `size` = $S_{base} \ll L_{max}$.
++    Set `dirty` = true for all new chunks [S1, unofficial].
+ 
+-2.  **Update Loop (Recursive):**
+-    For each active chunk, determine if it requires splitting or merging based on the viewer's distance.
+-    *   **Split Condition:** If the chunk is within the view distance $R_{view}$ and `lod` > 0, and `dirty` is true:
+-        1.  Create 8 children.
+-        2.  For each child $i$ (0 to 7):
+-            *   Set `child.size` = `parent.size` / 2.
+-            *   Set `child.lod` = `parent.lod` - 1.
+-            *   Set `child.position` = `parent.position` + offset. The offset is calculated by adding `child.size / 2` to the parent's position components based on the octant index $i$ (e.g., bit 0 for X, bit 1 for Y, bit 2 for Z) [S1, unofficial].
+-            *   Initialize child mesh settings (material, collider) from parent.
+-            *   Set `child.dirty` = `true`.
+-        3.  Set `parent.children` to the array of new children.
+-        4.  Set `parent.dirty` = `false`.
+-        5.  Recursively call `RequestUpdateChunk` on all 8 children [S1, unofficial].
+-    *   **Merge Condition:** If the chunk is outside the view distance $R_{view}$ and has children:
+-        1.  Recursively merge all children (destroy them).
+-        2.  Set `parent.children` = `null`.
+-        3.  Set `parent.dirty` = `true`.
+-        4.  Regenerate the parent's mesh at the current `lod` level [S1, unofficial].
++2.  **Update Loop (per frame or per viewer movement):**
++    For each active chunk $C$:
++    a.  **Culling Check:** If $C$ is outside the view distance $R_{view}$ from $P_{view}$, mark it for potential removal or ignore.
++    b.  **Split Condition:** If $C$ is inside $R_{view}$ AND $C.lod > 0$:
++        i.  Call `Split(C)`.
++    c.  **Merge Condition:** If $C$ is outside $R_{view}$ AND $C.lod < L_{max}$ AND $C$ has children:
++        i.  Call `Merge(C)`.
++    d.  **Dirty Check:** If $C.dirty$ is true:
++        i.  Generate mesh from `densities` using Marching Cubes or similar algorithm.
++        ii. Set $C.dirty$ = false.
+ 
+-3.  **Mesh Generation:**
+-    If `dirty` is true and the chunk is a leaf (no children), generate the mesh using the density data and current resolution. The resolution is derived from the `lod` level [S1, unofficial].
++3.  **Split Operation:**
++    a.  If $C.children$ is null, allocate `Chunk[8]`.
++    b.  Calculate `childSize` = $C.size / 2$.
++    c.  For each of the 8 octants $i \in [0, 7]$:
++        i.  Create new `Chunk` child $C_i$.
++        ii. Set $C_i.size$ = `childSize`.
++        iii. Set $C_i.lod$ = $C.lod - 1$.
++        iv. Set $C_i.position$ = $C.position + \text{offset}_i$, where $\text{offset}_i$ is $(\pm \text{childSize}/2, \pm \text{childSize}/2, \pm \text{childSize}/2)$ based on octant index.
++        v.  Initialize $C_i$ with same material and collider settings as $C$.
++        vi. Set $C_i.dirty$ = true.
++    d.  Set $C.dirty$ = false (since children will handle their own generation).
++    e.  Recursively call `RequestUpdateChunk` on all children to ensure they are processed [S1, unofficial].
+ 
+-**Parameters:**
+-*   `levelsOfDetail` ($L_{max}$): Maximum depth of the hierarchy. Range: $[0, 9]$. Typical value: 4 [S1, unofficial].
+-*   `viewDistance` ($R_{view}$): Radius within which chunks are considered for splitting. Typical value: 500 units [S1, unofficial].
+-*   `chunkSize` ($S_{base}$): Base resolution at highest detail. Range: $[2, 64]$. Typical value: 2 [S1, unofficial].
+-
+-**Pitfalls:**
+-*   **Dirty Flag:** A chunk is only processed for mesh generation if `chunk.dirty` is true. Splitting or merging sets this flag. Failure to reset it causes redundant computation [S1, unofficial].
+-*   **Recursion Depth:** The system is highly recursive. Deep hierarchies or frequent splits/merges can lead to stack overflow or performance bottlenecks on the CPU [S1, unofficial].
+-*   **Boundary Checks:** Ensure viewer position checks account for the full extent of the chunk (radius + half-length) to avoid premature culling or splitting [S1, unofficial].
++4.  **Merge Operation:**
++    a.  Recursively merge all children of $C$.
++    b.  Destroy child objects.
++    c.  Set $C.children$ = null.
++    d.  Set $C.dirty$ = true (to regenerate mesh at current LOD).
+ 
+ **Pseudocode:**
+@@ -62,97 +68,119 @@
+ ```python
+ class Chunk:
+-    def __init__(self, position, size, lod, parent_material):
++    def __init__(self, position, lod, size):
+         self.position = position
++        self.lod = lod
+         self.size = size
+-        self.lod = lod
+         self.children = None
+         self.dirty = True
+-        self.material = parent_material
+         self.mesh = None
++        self.densities = None # Populated by external density function
+ 
+-    def update(self, viewer_pos, view_distance, max_lod):
+-        # Check if chunk is within view distance
+-        half_size = self.size / 2.0
+-        dist_x = abs(viewer_pos.x - self.position.x)
+-        dist_y = abs(viewer_pos.y - self.position.y)
+-        dist_z = abs(viewer_pos.z - self.position.z)
++    def split(self):
++        if self.children is not None:
++            return # Already split
++
++        child_size = self.size // 2
++        self.children = [None] * 8
+         
+-        # Simple AABB check against view radius
+-        if (dist_x > view_distance + half_size or dist_x < -view_distance - half_size or
+-            dist_y > view_distance + half_size or dist_y < -view_distance - half_size or
+-            dist_z > view_distance + half_size or dist_z < -view_distance - half_size):
+-            # Outside view distance: Merge if possible
+-            if self.children is not None:
+-                self.merge()
++        # Offsets for 8 octants: (-1,-1,-1) to (1,1,1)
++        offsets = [
++            (-1, -1, -1), (-1, -1, 1), (-1, 1, -1), (-1, 1, 1),
++            (1, -1, -1), (1, -1, 1), (1, 1, -1), (1, 1, 1)
++        ]
++
++        for i in range(8):
++            ox, oy, oz = offsets[i]
++            child_pos = (
++                self.position.x + ox * child_size,
++                self.position.y + oy * child_size,
++                self.position.z + oz * child_size
++            )
++            child = Chunk(child_pos, self.lod - 1, child_size)
++            # Initialize mesh/collider settings from parent
++            child.initialize_mesh_settings(self)
++            self.children[i] = child
++
++        self.dirty = False
++
++    def merge(self):
++        if self.children is None:
++            return # Already merged
++
++        for child in self.children:
++            if child is not None:
++                child.merge() # Recursively merge children
++                child.destroy() # Destroy child object
++
++        self.children = None
++        self.dirty = True
++
++    def update(self, viewer_pos, view_distance):
++        # Culling check
++        if not self.is_within_view(viewer_pos, view_distance):
++            # Optional: mark for removal if far enough
+             return
+ 
+-        # Inside view distance: Split if possible and needed
+-        if self.lod > 0 and self.dirty:
++        # Split logic
++        if self.lod > 0 and self.is_within_view(viewer_pos, view_distance):
+             self.split()
+             # Recursively update children
+             for child in self.children:
+-                child.update(viewer_pos, view_distance, max_lod)
+-        elif self.children is None and self.dirty:
+-            # Leaf node, generate mesh
++                if child is not None:
++                    child.update(viewer_pos, view_distance)
++            return
++
++        # Merge logic (if far away and has children)
++        if self.lod < max_lod and self.children is not None:
++            # Check if all children are far away? 
++            # Simplified: if parent is far, merge. 
++            # Note: Source implies merge happens when far away.
++            # To prevent flickering, usually check if viewer moved out of range.
++            # For this implementation, we assume a global update pass.
++            pass 
++
++        # Mesh generation
++        if self.dirty:
+             self.generate_mesh()
+             self.dirty = False
+ 
+-    def split(self):
+-        if self.children is None:
+-            self.children = [None] * 8
+-            child_size = self.size // 2
+-            for i in range(8):
+-                # Calculate offset based on octant index
+-                offset_x = (i & 1) * child_size
+-                offset_y = (i & 2) * child_size
+-                offset_z = (i & 4) * child_size
+-                
+-                new_pos = Vector3Int(
+-                    self.position.x + offset_x,
+-                    self.position.y + offset_y,
+-                    self.position.z + offset_z
+-                )
+-                self.children[i] = Chunk(new_pos, child_size, self.lod - 1, self.material)
+-        self.dirty = False
+-
+-    def merge(self):
+-        if self.children is not None:
+-            for child in self.children:
+-                if child is not None:
+-                    child.destroy()
+-            self.children = None
+-            self.dirty = True
++    def is_within_view(self, viewer_pos, radius):
++        half_length = self.size / 2.0
++        # AABB vs Sphere intersection check
++        # Simplified: check if chunk center is within radius + half_length
++        dist_sq = (self.position.x - viewer_pos.x)**2 + \
++                  (self.position.y - viewer_pos.y)**2 + \
++                  (self.position.z - viewer_pos.z)**2
++        return dist_sq <= (radius + half_length)**2
+ 
+     def generate_mesh(self):
+-        # Placeholder for mesh generation logic using self.densities and self.lod
++        # Use Marching Cubes on self.densities
++        # Assign result to self.mesh
++        pass
++
++    def initialize_mesh_settings(self, parent):
++        # Copy material, collider settings
+         pass
+ 
+     def destroy(self):
+-        # Placeholder for object destruction
++        # Destroy Unity GameObject
+         pass
+ ```
+ 
+-## Subtopics
+-
+-### Hierarchical Culling & Multi-resolution Approximation
+-Uses spatial hierarchies for culling but may employ different approximation techniques for the volume data itself. Choose when memory bandwidth is the primary constraint. [Link](2010-hierarchical-culling-multi-resolution-approximation.md)
+-
+-### Streaming and Level-of-Detail (LOD) selection
+-Focuses on data streaming from disk/memory rather than in-memory hierarchy management. Choose for extremely large datasets that do not fit in RAM. [Link](3087-streaming-and-level-of-detail-lod-selection.md)
+-
+-### Focus Point Based Brick LOD Selection
+-Uses a specific focus point (e.g., camera or object) to determine LOD, potentially allowing for non-spherical view distances. Choose when the viewer's attention is concentrated in a specific area. [Link](5282-focus-point-based-brick-lod-selection.md)
++**Edge Cases and Pitfalls:**
++*   **Dirty Flag:** A chunk is only processed for mesh generation if `chunk.dirty` is true. Splitting or merging sets `dirty` to true. Initial creation sets `dirty` to true [S1, unofficial].
++*   **Recursion Depth:** The system is described as "very recursive-based," which may lead to inefficiency or complexity compared to iterative approaches [S1, unofficial].
++*   **Precision:** Floating-point precision issues may arise with large world coordinates. Using integer grid positions (`Vector3Int`) helps mitigate this.
++*   **Boundary Conditions:** Ensure density data is available for all chunks, including those at the edge of the world.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of active chunks. Splitting and merging are recursive operations, potentially leading to $O(2^L)$ overhead in the worst case if the entire volume is within view distance and needs updating.
+-*   **Memory Complexity:** $O(2^L)$ for the hierarchy structure, where $L$ is the max LOD depth. The actual volume data storage depends on whether data is duplicated at each level or shared.
+-*   **Measured Performance:** The implementation described is CPU-based and noted to take "too much CPU" for rendering, indicating poor performance for real-time applications without optimization [S1, unofficial].
+-*   **Strengths:** Simple to implement recursively; provides smooth transitions between detail levels based on distance.
+-*   **Limitations:** High CPU overhead due to recursion and object creation/destruction; lacks texture support in the described implementation; potential for "popping" artifacts if LOD transitions are not smoothed [S1, unofficial].
+-*   **When to use:** Small to medium-sized volumes where CPU budget allows for recursive updates and dynamic mesh generation.
+-*   **When not to use:** Large-scale scenes requiring GPU-based acceleration or streaming; real-time applications with strict CPU constraints.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of active chunks. Splitting and merging are $O(1)$ per chunk, but recursive updates can propagate.
++*   **Memory Complexity:** $O(N)$ for active chunks. Hidden chunks consume minimal memory.
++*   **Performance:** Interactive rates are achieved by only rendering visible chunks at appropriate LODs [S1, unofficial]. However, CPU-based job approach is not implemented correctly in the source, leading to high CPU usage [S1, unofficial].
++*   **Strengths:** Dynamic LOD, consistent surface approximation, efficient culling.
++*   **Limitations:** High CPU usage due to recursion and lack of optimized job system. Lack of textures (requires triplanar shader or similar) [S1, unofficial].
+ 
+ ## Background
+-The method originates from a terrain generator project written in Unity 2019.2.15f1, utilizing concepts from marching cubes and noise shaders [S1, unofficial]. It builds upon the work of Seb Lague (Marching Cubes), Keijiro (Noise Shader), Paul Bourke (Polygonize), and NVIDIA (GPUGems3) [S1, unofficial]. The author notes the system is "very recursive-based" and suggests there may be more elegant solutions, highlighting its experimental nature [S1, unofficial].
++Originated in the `tcgj/terrain-generator` project, written in Unity 2019.2.15f1 [S1, unofficial]. It builds on Marching Cubes algorithms [S1, unofficial]. The author notes potential inefficiencies in the recursive logic [S1, unofficial].
+ 
+ ## Sources

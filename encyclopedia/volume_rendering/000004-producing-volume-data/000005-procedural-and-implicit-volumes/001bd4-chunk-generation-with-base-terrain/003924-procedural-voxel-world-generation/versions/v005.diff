@@ -1,0 +1,620 @@
+--- v004.md
++++ v005.md
+@@ -4,338 +4,306 @@
+ 
+ ## Overview
+-Procedural Voxel World Generation is a method that deterministically assigns a block type (material ID) to every voxel in a 3D coordinate space based on its position, height, and noise-derived parameters [S1, S3, unofficial]. It solves the problem of creating complex, varied terrain features—including surface layers, underground caves, trees, and clouds—without hard-coding specific coordinates [S1, S4, unofficial]. Unlike sibling methods that may rely on heightmaps or separate chunk-based meshing, this approach evaluates a single function per voxel to return a material index, often implemented as a GPU shader for real-time generation [S1, S3, unofficial]. It builds on [Chunk Generation with Base Terrain](1110-chunk-generation-with-terrain.md) by providing the specific logic for what fills those chunks.
++Procedural Voxel World Generation determines the material type of every voxel in a 3D coordinate space by evaluating a deterministic function per cell, synthesizing terrain height, caves, trees, and special blocks (clouds, emissives) from noise and hash functions [S1, S3, unofficial]. It differs from heightmap-based methods by generating volumetric data directly in 3D space rather than projecting a 2D surface, and from octree methods by using a fixed-resolution chunk structure where every cell is evaluated [S1, S3, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+-- **Inputs**:
+-  - `cell`: A 3D integer coordinate `(x, y, z)` representing the voxel position in game units [S1, S3, unofficial].
+-  - `QUALITY`: An integer parameter controlling generation complexity and detail (typically 0, 1, or 2) [S1, unofficial].
+-  - Configuration flags: `ENABLE_TREES`, `ENABLE_CAVES`, `ENABLE_CLOUDS`, `BLOCK_LIGHT`, `ENDLESS_LOWER_HEIGHT` [S1, unofficial].
+-  - Constants: `CLOUD_HEIGHT`, `world_height` (implicit or explicit boundary) [S1, S2, unofficial].
+-- **Outputs**:
+-  - An integer `block_id` representing the material type. `0` indicates air/empty space [S1, S3, unofficial].
+-
+-### Data Structures
+-The method relies on pseudo-random hash functions and noise functions.
+-- **Hash Functions**:
+-  - `hash12(vec2 p)`: Returns a float in `[0, 1)`. Implementation: `fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123)` [S1, unofficial].
+-  - `hash13(vec3 p)`: Returns a float in `[0, 1)`. Implementation: `fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123)` [S1, unofficial].
+-- **Noise Functions**:
+-  - `fbm3(vec3 p)`: Fractional Brownian Motion in 3D, typically summing octaves of value noise with Hermite smoothing and trilinear interpolation [S1, unofficial].
+-  - `noise3`, `noise2`: Single-octave wrappers or specific dimensional variants used for cave and biome noise [S1, S2, unofficial].
+-
+-### Block ID Mapping
+-The following integer IDs are used for material assignment [S1, unofficial]:
+-- `0`: Air
+-- `1`: Grass
+-- `2`: Dirt
+-- `3`: Stone
+-- `4`: Wood (Trunk)
+-- `5`: Leaves
+-- `6`: Emissive Block
+-- `7`: Cloud
+-
+-### Algorithm Steps
+-The generation logic branches based on the `QUALITY` setting.
+-
+-#### 1. Low Quality Mode (`QUALITY == 0`)
+-This mode uses stochastic placement without complex terrain height calculation [S1, unofficial].
+-1.  **Density Calculation**: Compute `r = hash13(vec3(x*0.12, y*0.08, z*0.15))` [S1, unofficial].
+-2.  **Threshold Check**: Calculate `density = 0.30 + 0.360 * r + 0.15` [S1, unofficial].
+-    - If `y >= 15`, the threshold is `0.8069`.
+-    - If `y < 15`, the threshold is `0.6`.
+-    - If `density <= threshold`, return `0` (Air) [S1, unofficial].
+-3.  **Emissive Check**: If `r > 0.999`, return `6` (Emissive) [S1, unofficial].
+-4.  **Block Selection**: Compute `pick = hash12(vec2(x*0.19, z*0.23))` [S1, unofficial].
+-    - If `pick < 0.33`, return `1` (Grass).
+-    - Else if `pick < 0.4`, return `4` (Wood).
+-    - Else if `pick < 0.66`, return `2` (Dirt).
+-    - Else, return `3` (Stone) [S1, unofficial].
+-5.  **Boundary**: If `y >= 15` and density was insufficient, return `0` [S1, unofficial].
+-
+-#### 2. High Quality Mode (`QUALITY > 0`)
+-This mode generates structured terrain with height, caves, and features [S1, unofficial].
+-
+-**Step 1: Clouds**
+-- If `ENABLE_CLOUDS` is true and `cell.y == CLOUD_HEIGHT`:
+-  - Compute `ch = hash12(floor(vec2(x*0.21, z*0.13) * 2.0))` [S1, unofficial].
+-  - If `ch > 0.74`, return `7` (Cloud) [S1, unofficial].
+-  - Otherwise, return `0` (Air) [S1, unofficial].
+-- If `ENABLE_CLOUDS` is false and `cell.y == CLOUD_HEIGHT`, return `0` [S1, unofficial].
+-
+-**Step 2: Sky and Lower Bounds**
+-- If `cell.y >= 19`, return `0` (Air) [S1, unofficial].
+-- If `ENDLESS_LOWER_HEIGHT` is false and `cell.y <= -50`, return `3` (Stone) [S1, unofficial].
+-
+-**Step 3: Terrain Height**
+-- Calculate floating-point height: `terrainH_f = proceduralTerrainHeight(x, z, QUALITY)` [S1, unofficial].
+-  - `proceduralTerrainHeight` uses `fbm3` with scale `s` and vertical scaling:
+-    - If `QUALITY == 1`: `s = 0.045`, `verticalScale = 10.0`, `base = 3.5`.
+-    - If `QUALITY == 2`: `s = 0.055`, `verticalScale = 11.0`, `base = 4.0`.
+-    - Default (e.g., 3): `s = 0.06`, `verticalScale = 12.0`, `base = 4.0` [S1, unofficial].
+-- Convert to integer: `terrainH = floor(terrainH_f)` [S1, unofficial].
+-
+-**Step 4: Cave Generation**
+-- If `ENABLE_CAVES` is true:
+-  - Compute `caveNoise = 2.0 * fbm3(vec3(x*0.10, y*0.10, z*0.10))` [S1, unofficial].
+-  - If `caveNoise > 0.68` (for `QUALITY==2`) or `0.66` (for `QUALITY==1`), mark `isCave = true` [S1, unofficial].
+-- Else, `isCave = false` [S1, unofficial].
+-
+-**Step 5: Emissive Blocks (Lighting)**
+-- If `BLOCK_LIGHT` is enabled:
+-  - Compute `rr = hash13(vec3(x*0.23, y*0.17, z*0.19))` [S1, unofficial].
+-  - If `isCave`:
+-    - Threshold `caveThresh`: `0.9975` (q=1), `0.9965` (q=2), `0.995` (q=0).
+-    - If `rr > caveThresh`, return `6` (Emissive) [S1, unofficial].
+-  - If `cell.y == terrainH`:
+-    - Threshold `surfThresh`: `0.9995` (q=1), `0.999` (q=2), `0.998` (q=0).
+-    - If `rr > surfThresh`, return `6` (Emissive) [S1, unofficial].
+-
+-**Step 6: Terrain Body**
+-- If `cell.y <= terrainH` AND `!isCave`:
+-  - If `cell.y == terrainH`, return `1` (Grass) [S1, unofficial].
+-  - Else if `cell.y >= terrainH - 3`, return `2` (Dirt) [S1, unofficial].
+-  - Else, return `3` (Stone) [S1, unofficial].
+-- If `isCave` or `cell.y > terrainH`, proceed to feature generation (trees) or return `0` [S1, unofficial].
+-
+-**Step 7: Tree Generation**
+-- If `ENABLE_TREES` is true:
+-  - Check `hasTreeAtColumn(x, z, QUALITY)` [S1, unofficial].
+-    - Compute `r = hash12(vec2(x*0.374, z*0.912))` [S1, unofficial].
+-    - Return `true` if `r > 0.995` (q=1), `0.985` (q=2), or `0.97` (q=0) [S1, unofficial].
+-  - If a tree exists:
+-    - Calculate trunk height: `trunkH = 3 + floor(hash12(vec2(x*0.11, z*0.08)) * 3.0)` [S1, unofficial].
+-    - `baseY = terrainH + 1` [S1, unofficial].
+-    - `topY = baseY + trunkH` [S1, unofficial].
+-    - If `baseY <= cell.y < topY`, return `4` (Wood) [S1, unofficial].
+-
+-**Step 8: Leaf Placement**
+-- Determine search parameters:
+-  - `SEARCH_MAX`: `1` (q=1), `3` (q=2) [S1, unofficial].
+-  - `maxOffset`: `1` (q=1), `2` (q=2) [S1, unofficial].
+-- Iterate `ox` from `-SEARCH_MAX` to `SEARCH_MAX` and `oz` from `-SEARCH_MAX` to `SEARCH_MAX` [S1, unofficial].
+-- For each neighbor `(nx, nz) = (x + ox, z + oz)`:
+-  - If `abs(ox) > maxOffset` or `abs(oz) > maxOffset`, continue [S1, unofficial].
+-  - Check if `hasTreeAtColumn(nx, nz, QUALITY)` is true [S1, unofficial].
+-  - If true, calculate local coordinates relative to the neighbor tree's top:
+-    - `dx = x - nx`, `dz = z - nz`, `dy = y - topY_neighbor` [S1, unofficial].
+-    - Return `5` (Leaves) if:
+-      - `dy == 0` or `dy == 1` AND `dx` in `[-1, 2]` AND `dz` in `[-1, 2]` OR (`dx == -2` AND `dz` in `[-1, 2]`) [S1, unofficial].
+-      - OR `dy == 2` AND (`dx == 0` AND `dz == 0`) OR (`abs(dx) <= 1` AND `dz == 0`) OR (`abs(dz) <= 1` AND `dx == 0`) [S1, unofficial].
+-
+-**Step 9: Default**
+-- If no block type was returned, return `0` (Air) [S1, unofficial].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Input:** 3D integer coordinates $(x, y, z)$ representing the voxel cell in world space. Configuration parameters: `QUALITY` (integer, typically 0–3), `CLOUD_HEIGHT` (integer), `ENABLE_TREES`, `ENABLE_CAVES`, `ENABLE_CLOUDS`, `BLOCK_LIGHT` (boolean), `ENDLESS_LOWER_HEIGHT` (boolean).
++*   **Output:** An integer block ID. Standard IDs: 1=Grass, 2=Dirt, 3=Stone, 4=Wood, 5=Leaves, 6=Emissive, 7=Cloud. 0 represents Air [S1, unofficial].
++
++**Data Structures:**
++*   **Block ID:** Single integer per voxel.
++*   **Noise/Hash Functions:**
++    *   `hash12(vec2 p)`: Returns `fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123)` [S1, unofficial].
++    *   `hash13(vec3 p)`: Returns `fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123)` [S1, unofficial].
++    *   `fbm3(vec3 p)`: Fractional Brownian Motion 3D noise. Implementation details vary, but typically sums octave noise values [S1, unofficial].
++    *   `noise3`: Value noise on a unit lattice with Hermite smoothing and trilinear interpolation [S1, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Global Bounds Check:**
++    If `ENDLESS_LOWER_HEIGHT` is false and $y \le -50$, return 3 (Stone) [S1, unofficial].
++
++2.  **Quality 0 (Stochastic/Low Quality):**
++    *   Compute random value $r = \text{hash13}(x \cdot 0.12, y \cdot 0.08, z \cdot 0.15)$ [S1, unofficial].
++    *   Compute density: $d = 0.30 + 0.360 \cdot r + 0.15$ [S1, unofficial].
++    *   Determine threshold $T$:
++        *   If $y \ge 15$, $T = 0.8069$.
++        *   If $y < 15$, $T = 0.6$ [S1, unofficial].
++    *   If $d > T$:
++        *   If $r > 0.999$, return 6 (Emissive) [S1, unofficial].
++        *   Compute pick value $p = \text{hash12}(x \cdot 0.19, z \cdot 0.23)$ [S1, unofficial].
++        *   If $p < 0.33$, return 1 (Grass).
++        *   Else if $p < 0.4$, return 4 (Wood).
++        *   Else if $p < 0.66$, return 2 (Dirt).
++        *   Else return 3 (Stone) [S1, unofficial].
++    *   If $y \ge 15$, return 0 (Air) [S1, unofficial].
++    *   Return 0 (Air) [S1, unofficial].
++
++3.  **Quality > 0 (High Quality):**
++    *   **Clouds:** If `ENABLE_CLOUDS` is true and $y == \text{CLOUD_HEIGHT}$:
++        *   Compute $ch = \text{hash12}(\lfloor(x \cdot 0.21, z \cdot 0.13) \cdot 2.0\rfloor)$ [S1, unofficial].
++        *   If $ch > 0.74$, return 7 (Cloud).
++        *   Else return 0 (Air) [S1, unofficial].
++    *   **Sky Cutoff:** If $y \ge 19$, return 0 (Air) [S1, unofficial].
++    *   **Terrain Height:**
++        *   Compute float height $h_f = \text{proceduralTerrainHeight}(x, z, \text{QUALITY})$ [S1, unofficial].
++        *   Formula for `proceduralTerrainHeight`:
++            *   Scale $s$: $0.045$ if $q=1$, $0.055$ if $q=2$, $0.06$ otherwise [S1, unofficial].
++            *   Vertical Scale $V$: $10.0$ if $q=1$, $11.0$ if $q=2$, $12.0$ otherwise [S1, unofficial].
++            *   Base $B$: $3.5$ if $q=1$, $4.0$ otherwise [S1, unofficial].
++            *   $h_f = \text{fbm3}(x \cdot s, 0.0, z \cdot s) \cdot V + B$ [S1, unofficial].
++        *   $h = \lfloor h_f \rfloor$ [S1, unofficial].
++    *   **Caves:**
++        *   If `ENABLE_CAVES` is true:
++            *   Compute cave noise $c_n = 2.0 \cdot \text{fbm3}(x \cdot 0.10, y \cdot 0.10, z \cdot 0.10)$ [S1, unofficial].
++            *   Threshold $C_{th}$: $0.68$ if $q=2$, $0.66$ otherwise [S1, unofficial].
++            *   If $c_n > C_{th}$, mark `isCave = true` [S1, unofficial].
++            *   Else `isCave = false` [S1, unofficial].
++        *   Else `isCave = false` [S1, unofficial].
++    *   **Emissive Blocks (Lighting):**
++        *   If `BLOCK_LIGHT` is true:
++            *   Compute $rr = \text{hash13}(x \cdot 0.23, y \cdot 0.17, z \cdot 0.19)$ [S1, unofficial].
++            *   If `isCave`:
++                *   Threshold $E_{cave}$: $0.9975$ if $q=1$, $0.9965$ if $q=2$, $0.995$ otherwise [S1, unofficial].
++                *   If $rr > E_{cave}$, return 6 (Emissive) [S1, unofficial].
++            *   If $y == h$:
++                *   Threshold $E_{surf}$: $0.9995$ if $q=1$, $0.999$ if $q=2$, $0.998$ otherwise [S1, unofficial].
++                *   If $rr > E_{surf}$, return 6 (Emissive) [S1, unofficial].
++    *   **Terrain Body:**
++        *   If $y \le h$ AND `isCave` is false:
++            *   If $y == h$, return 1 (Grass) [S1, unofficial].
++            *   Else if $y \ge h - 3$, return 2 (Dirt) [S1, unofficial].
++            *   Else return 3 (Stone) [S1, unofficial].
++    *   **Trees:**
++        *   If `ENABLE_TREES` is true:
++            *   Check `hasTreeAtColumn(x, z, QUALITY)` [S1, unofficial].
++            *   Formula for `hasTreeAtColumn`:
++                *   $r_t = \text{hash12}(x \cdot 0.374, z \cdot 0.912)$ [S1, unofficial].
++                *   Return true if $r_t > 0.995$ ($q=1$), $0.985$ ($q=2$), or $0.97$ (other) [S1, unofficial].
++            *   If tree present:
++                *   Trunk height $t_h = 3 + \lfloor \text{hash12}(x \cdot 0.11, z \cdot 0.08) \cdot 3.0 \rfloor$ [S1, unofficial].
++                *   Base $y_b = h + 1$ [S1, unofficial].
++                *   Top $y_t = y_b + t_h$ [S1, unofficial].
++                *   If $y_b \le y < y_t$, return 4 (Wood) [S1, unofficial].
++    *   **Leaves:**
++        *   Define search bounds:
++            *   `SEARCH_MAX`: $1$ if $q=1$, $3$ if $q=2$ [S1, unofficial].
++            *   `maxOffset`: $1$ if $q=1$, $2$ if $q=2$ [S1, unofficial].
++        *   Iterate $ox$ from $-\text{SEARCH\_MAX}$ to $\text{SEARCH\_MAX}$, $oz$ from $-\text{SEARCH\_MAX}$ to $\text{SEARCH\_MAX}$ [S1, unofficial].
++        *   Skip if $|ox| > \text{maxOffset}$ or $|oz| > \text{maxOffset}$ [S1, unofficial].
++        *   Check if neighbor column $(x+ox, z+oz)$ has a tree using `hasTreeAtColumn` [S1, unofficial].
++        *   If neighbor has tree:
++            *   Calculate local coordinates relative to neighbor tree top: $dx = x - (x+ox)$, $dz = z - (z+oz)$, $dy = y - y_t$ [G] (Note: $y_t$ is calculated per neighbor).
++            *   Return 5 (Leaves) if:
++                *   $dy = 0$ or $1$ AND $dx \in [-1, 2]$ AND $dz \in [-1, 2]$ OR ($dx = -2$ AND $dz \in [-1, 2]$) [S1, unofficial].
++                *   OR $dy = 2$ AND ($dx=0, dz=0$) OR ($|dx| \le 1, dz=0$) OR ($|dz| \le 1, dx=0$) [S1, unofficial].
++    *   Return 0 (Air) [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-def get_block_type(cell_x, cell_y, cell_z, quality, config):
+-    """
+-    Determines the block type at a given 3D coordinate.
++def hash12(p):
++    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123)
++
++def hash13(p):
++    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453123)
++
++def proceduralTerrainHeight(x, z, q):
++    if q == 1:
++        s = 0.045
++        v = 10.0
++        b = 3.5
++    elif q == 2:
++        s = 0.055
++        v = 11.0
++        b = 4.0
++    else:
++        s = 0.06
++        v = 12.0
++        b = 4.0
+     
+-    Args:
+-        cell_x, cell_y, cell_z: Integer world coordinates.
+-        quality: Integer (0, 1, 2).
+-        config: Dict with keys ENABLE_TREES, ENABLE_CAVES, ENABLE_CLOUDS, BLOCK_LIGHT, ENDLESS_LOWER_HEIGHT, CLOUD_HEIGHT.
+-        
+-    Returns:
+-        Integer block ID. 0 is air.
+-    """
+-    # Constants
+-    BLOCK_AIR = 0
+-    BLOCK_GRASS = 1
+-    BLOCK_DIRT = 2
+-    BLOCK_STONE = 3
+-    BLOCK_WOOD = 4
+-    BLOCK_LEAVES = 5
+-    BLOCK_EMISSIVE = 6
+-    BLOCK_CLOUD = 7
++    # fbm3 is assumed to be defined in the environment
++    h = fbm3(vec3(x * s, 0.0, z * s))
++    return h * v + b
++
++def hasTreeAtColumn(x, z, q):
++    r = hash12(vec2(float(x) * 0.374, float(z) * 0.912))
++    if q == 1:
++        return r > 0.995
++    elif q == 2:
++        return r > 0.985
++    else:
++        return r > 0.97
++
++def getBlockType(x, y, z, quality, cloudY, enableTrees, enableCaves, enableClouds, blockLight, endlessLowerHeight):
++    # Global Bounds
++    if not endlessLowerHeight and y <= -50:
++        return 3 # Stone
++
++    # Quality 0: Stochastic
++    if quality == 0:
++        r = hash13(vec3(float(x) * 0.12, float(y) * 0.08, float(z) * 0.15))
++        density = 0.30 + 0.360 * r + 0.15
++        
++        threshold = 0.8069 if y >= 15 else 0.6
++        
++        if density > threshold:
++            if r > 0.999:
++                return 6 # Emissive
++            pick = hash12(vec2(float(x) * 0.19, float(z) * 0.23))
++            if pick < 0.33:
++                return 1 # Grass
++            elif pick < 0.4:
++                return 4 # Wood
++            elif pick < 0.66:
++                return 2 # Dirt
++            else:
++                return 3 # Stone
++        
++        if y >= 15:
++            return 0 # Air
++        return 0 # Air
++
++    # Quality > 0
++    # Clouds
++    if enableClouds:
++        if y == cloudY:
++            ch = hash12(floor(vec2(float(x) * 0.21, float(z) * 0.13) * 2.0))
++            if ch > 0.74:
++                return 7 # Cloud
++            return 0 # Air
++    else:
++        if y == cloudY:
++            return 0 # Air
++
++    if y >= 19:
++        return 0 # Air
++
++    fx = float(x)
++    fz = float(z)
++    terrainH_f = proceduralTerrainHeight(fx, fz, quality)
++    terrainH = floor(terrainH_f)
++
++    # Caves
++    isCave = False
++    if enableCaves:
++        caveNoise = 2.0 * fbm3(vec3(float(x) * 0.10, float(y) * 0.10, float(z) * 0.10))
++        caveThresh = 0.68 if quality == 2 else 0.66
++        if caveNoise > caveThresh:
++            isCave = True
++
++    # Emissive
++    if blockLight:
++        rr = hash13(vec3(float(x) * 0.23, float(y) * 0.17, float(z) * 0.19))
++        
++        if isCave:
++            caveET = 0.9975 if quality == 1 else (0.9965 if quality == 2 else 0.995)
++            if rr > caveET:
++                return 6 # Emissive
++        
++        if y == terrainH:
++            surfET = 0.9995 if quality == 1 else (0.999 if quality == 2 else 0.998)
++            if rr > surfET:
++                return 6 # Emissive
++
++    # Terrain Body
++    if y <= terrainH and not isCave:
++        if y == terrainH:
++            return 1 # Grass
++        if y >= terrainH - 3:
++            return 2 # Dirt
++        return 3 # Stone
++
++    # Trees
++    if enableTrees:
++        if hasTreeAtColumn(x, z, quality):
++            trunkH = 3 + floor(hash12(vec2(float(x) * 0.11, float(z) * 0.08)) * 3.0)
++            baseY = terrainH + 1
++            topY = baseY + trunkH
++            if baseY <= y < topY:
++                return 4 # Wood
++
++    # Leaves
++    searchMax = 1 if quality == 1 else 3
++    maxOffset = 1 if quality == 1 else 2
+     
+-    # Helper Hash Functions
+-    def hash12(v):
+-        return fract(sin(dot(v, vec2(127.1, 311.7))) * 43758.5453123)
+-    
+-    def hash13(v):
+-        return fract(sin(dot(v, vec3(127.1, 311.7, 74.7))) * 43758.5453123)
+-        
+-    # Helper Noise Functions (Simplified for pseudocode)
+-    def fbm3(v):
+-        # Placeholder for actual FBM implementation
+-        return noise3(v) 
+-        
+-    def procedural_terrain_height(fx, fz, q):
+-        if q == 1:
+-            s, vs, base = 0.045, 10.0, 3.5
+-        elif q == 2:
+-            s, vs, base = 0.055, 11.0, 4.0
+-        else:
+-            s, vs, base = 0.06, 12.0, 4.0
++    for ox in range(-searchMax, searchMax + 1):
++        for oz in range(-searchMax, searchMax + 1):
++            if abs(ox) > maxOffset or abs(oz) > maxOffset:
++                continue
+             
+-        h = fbm3(vec3(fx * s, 0.0, fz * s))
+-        return h * vs + base
+-
+-    def has_tree_at_column(cx, cz, q):
+-        if not config['ENABLE_TREES']:
+-            return False
+-        r = hash12(vec2(float(cx) * 0.374, float(cz) * 0.912))
+-        if q == 1: return r > 0.995
+-        if q == 2: return r > 0.985
+-        return r > 0.97
+-
+-    # 1. Low Quality Mode
+-    if quality == 0:
+-        r = hash13(vec3(float(cell_x) * 0.12, float(cell_y) * 0.08, float(cell_z) * 0.15))
+-        density = 0.30 + 0.360 * r + 0.15
+-        
+-        threshold = 0.8069 if cell_y >= 15 else 0.6
+-        
+-        if density <= threshold:
+-            if cell_y >= 15:
+-                return BLOCK_AIR
+-            return BLOCK_AIR
+-            
+-        if r > 0.999:
+-            return BLOCK_EMISSIVE
+-            
+-        pick = hash12(vec2(float(cell_x) * 0.19, float(cell_z) * 0.23))
+-        if pick < 0.33: return BLOCK_GRASS
+-        if pick < 0.4: return BLOCK_WOOD
+-        if pick < 0.66: return BLOCK_DIRT
+-        return BLOCK_STONE
+-
+-    # 2. High Quality Mode
+-    cloud_y = config['CLOUD_HEIGHT']
+-    
+-    # Clouds
+-    if config['ENABLE_CLOUDS']:
+-        if cell_y == cloud_y:
+-            ch = hash12(floor(vec2(float(cell_x) * 0.21, float(cell_z) * 0.13) * 2.0))
+-            if ch > 0.74:
+-                return BLOCK_CLOUD
+-            return BLOCK_AIR
+-    else:
+-        if cell_y == cloud_y:
+-            return BLOCK_AIR
+-            
+-    # Sky
+-    if cell_y >= 19:
+-        return BLOCK_AIR
+-        
+-    # Lower Bounds
+-    if not config['ENDLESS_LOWER_HEIGHT'] and cell_y <= -50:
+-        return BLOCK_STONE
+-        
+-    fx = float(cell_x)
+-    fz = float(cell_z)
+-    terrain_h_f = procedural_terrain_height(fx, fz, quality)
+-    terrain_h = floor(terrain_h_f)
+-    
+-    # Caves
+-    is_cave = False
+-    if config['ENABLE_CAVES']:
+-        cave_noise = 2.0 * fbm3(vec3(float(cell_x) * 0.10, float(cell_y) * 0.10, float(cell_z) * 0.10))
+-        cave_thresh = 0.68 if quality == 2 else 0.66
+-        if cave_noise > cave_thresh:
+-            is_cave = True
+-            
+-    # Emissive
+-    rr = hash13(vec3(float(cell_x) * 0.23, float(cell_y) * 0.17, float(cell_z) * 0.19))
+-    if config['BLOCK_LIGHT']:
+-        if is_cave:
+-            cave_light_thresh = 0.9975 if quality == 1 else (0.9965 if quality == 2 else 0.995)
+-            if rr > cave_light_thresh:
+-                return BLOCK_EMISSIVE
++            # Check neighbor column for tree
++            if hasTreeAtColumn(x + ox, z + oz, quality):
++                # Calculate neighbor tree top
++                n_trunkH = 3 + floor(hash12(vec2(float(x + ox) * 0.11, float(z + oz) * 0.08)) * 3.0)
++                n_baseY = terrainH + 1 # Note: terrainH is local to x,z, not neighbor. 
++                                       # In shader, terrainH is computed per cell. 
++                                       # For neighbor, we need neighbor's terrain height.
++                # Correction: The shader code iterates neighbors to find IF they have a tree,
++                # but uses the CURRENT cell's y. The leaf logic in the source code 
++                # calculates dx, dz, dy relative to the neighbor's tree top.
++                # We must compute neighbor's terrain height to get its topY.
+                 
+-        if cell_y == terrain_h:
+-            surf_light_thresh = 0.9995 if quality == 1 else (0.999 if quality == 2 else 0.998)
+-            if rr > surf_light_thresh:
+-                return BLOCK_EMISSIVE
++                n_terrainH_f = proceduralTerrainHeight(float(x + ox), float(z + oz), quality)
++                n_terrainH = floor(n_terrainH_f)
++                n_topY = n_terrainH + 1 + n_trunkH
+                 
+-    # Terrain Body
+-    if cell_y <= terrain_h and not is_cave:
+-        if cell_y == terrain_h:
+-            return BLOCK_GRASS
+-        if cell_y >= terrain_h - 3:
+-            return BLOCK_DIRT
+-        return BLOCK_STONE
+-        
+-    # Trees
+-    if config['ENABLE_TREES'] and has_tree_at_column(cell_x, cell_z, quality):
+-        trunk_h = 3 + floor(hash12(vec2(float(cell_x) * 0.11, float(cell_z) * 0.08)) * 3.0)
+-        base_y = terrain_h + 1
+-        top_y = base_y + trunk_h
+-        
+-        if base_y <= cell_y < top_y:
+-            return BLOCK_WOOD
+-            
+-        # Leaves
+-        search_max = 1 if quality == 1 else 3
+-        max_offset = 1 if quality == 1 else 2
+-        
+-        for ox in range(-search_max, search_max + 1):
+-            for oz in range(-search_max, search_max + 1):
+-                if abs(ox) > max_offset or abs(oz) > max_offset:
+-                    continue
+-                    
+-                nx = cell_x + ox
+-                nz = cell_z + oz
++                dx = x - (x + ox)
++                dz = z - (z + oz)
++                dy = y - n_topY
+                 
+-                if has_tree_at_column(nx, nz, quality):
+-                    # Calculate neighbor tree top
+-                    n_trunk_h = 3 + floor(hash12(vec2(float(nx) * 0.11, float(nz) * 0.08)) * 3.0)
+-                    n_base_y = terrain_h + 1 # Note: terrain height might vary per column, but simplified here to global or neighbor's local height
+-                    # In strict implementation, neighbor's terrain height must be calculated
+-                    n_terrain_h_f = procedural_terrain_height(float(nx), float(nz), quality)
+-                    n_terrain_h = floor(n_terrain_h_f)
+-                    n_top_y = n_terrain_h + 1 + n_trunk_h
+-                    
+-                    dx = cell_x - nx
+-                    dz = cell_z - nz
+-                    dy = cell_y - n_top_y
+-                    
+-                    # Leaf logic
+-                    if (dy == 0 or dy == 1) and (-1 <= dx <= 2) and (-1 <= dz <= 2):
+-                        if not (dx == -2 and not (-1 <= dz <= 2)):
+-                             return BLOCK_LEAVES
+-                    if dy == 2:
+-                        if (dx == 0 and dz == 0):
+-                            return BLOCK_LEAVES
+-                        if (abs(dx) <= 1 and dz == 0):
+-                            return BLOCK_LEAVES
+-                        if (abs(dz) <= 1 and dx == 0):
+-                            return BLOCK_LEAVES
+-                            
+-    return BLOCK_AIR
++                # Leaf placement rules
++                if (dy == 0 or dy == 1) and (-1 <= dx <= 2) and (-1 <= dz <= 2):
++                    return 5 # Leaves
++                if (dx == -2) and (-1 <= dz <= 2):
++                    return 5 # Leaves
++                
++                if dy == 2:
++                    if (dx == 0 and dz == 0):
++                        return 5 # Leaves
++                    if (abs(dx) <= 1 and dz == 0):
++                        return 5 # Leaves
++                    if (abs(dz) <= 1 and dx == 0):
++                        return 5 # Leaves
++
++    return 0 # Air
+ ```
+ 
+-### Parameters
+-- `QUALITY`: Integer. `0` = stochastic sparse blocks, no caves/trees/clouds. `1` = medium detail, simple trees, basic caves. `2` = high detail, complex caves, larger leaf search radius [S1, unofficial].
+-- `CLOUD_HEIGHT`: Integer Y-coordinate for cloud layer [S1, unofficial].
+-- `ENABLE_*`: Boolean flags for features [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-- **Division by Zero**: In touch input handling for UV calculation, resolution must be clamped to `max(1.0)` to prevent division by zero [S1, unofficial].
+-- **Boundary Conditions**: The algorithm assumes a specific vertical range (e.g., `y < 19` for sky, `y > -50` for endless stone). Outside these, behavior is defined by `ENDLESS_LOWER_HEIGHT` [S1, unofficial].
+-- **Tree Height Consistency**: Leaf placement requires checking the terrain height of *neighboring* columns, not just the current column, to correctly position leaves relative to the neighbor's tree top [S1, unofficial].
++**Parameters:**
++*   `QUALITY`: Integer. 0: Stochastic sparse blocks, no trees/caves/clouds. 1: Simple terrain, basic leaves (3x3), caves active. 2: Detailed terrain, detailed leaves (4x4), caves active. 3: Dense trees (implied by source comments, though logic matches q=2 thresholds) [S1, unofficial].
++*   `CLOUD_HEIGHT`: Integer Y-coordinate for cloud layer [S1, unofficial].
++*   `ENABLE_TREES`, `ENABLE_CAVES`, `ENABLE_CLOUDS`, `BLOCK_LIGHT`: Boolean flags [S1, unofficial].
++*   `ENDLESS_LOWER_HEIGHT`: Boolean. If false, returns Stone below Y=-50 [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Division by Zero:** In touch input handling for UV calculation, resolution is clamped to `max(1.0)` to prevent division by zero [S1, unofficial].
++*   **Precision:** Hash functions rely on floating-point precision. `fract(sin(dot(...)))` is fast but may have statistical shortcomings compared to integer bitwise hashes [S1, unofficial].
++*   **Boundary Conditions:** The leaf search loop assumes neighbor trees exist within the search radius. If a tree is at the chunk boundary, the neighbor check might fail if the neighbor's chunk hasn't been generated or if the hash logic doesn't account for chunk offsets correctly (though the shader uses global coordinates, so this is less of an issue for pure generation) [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Deterministic Fixture Worlds](3941-deterministic-fixture-worlds.md)
+-Generates small-scale, static geometric structures (slabs, towers) using pure functions of `VolumeId` for regression testing, avoiding RNG.
++Generates specific, small-scale geometric structures (slabs, towers) using pure functions of `VolumeId` without RNG, serving as regression tests.
+ 
+ ### [Biome and Voxel Layer Determination](4167-biome-and-voxel-layer-determination.md)
+-Assigns voxel types based on vertical position relative to `genHeight` and biome noise (moisture, temperature), creating varied surface compositions like deserts or jungles.
++Assigns voxel types based on vertical position relative to terrain surface and biome parameters (moisture, temperature) derived from noise.
+ 
+ ### [Procedural Tree Generation](4826-procedural-tree-generation.md)
+-Focuses specifically on placing organic tree structures (trunks and leaves) on valid ground positions, handling boundary checks and intersection avoidance.
++Places voxel-based trees on terrain surfaces by identifying valid ground positions and filling volumes with trunk and leaf blocks.
++
++### [Procedural Chunk Generation with Density Falloff](15703-procedural-chunk-generation-with-density-falloff.md)
++Generates chunks with radial center falloff and plateau mechanisms to create isolated floating structures.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per voxel evaluation. The cost is dominated by hash and noise function evaluations, which are constant time relative to world size but depend on `QUALITY` (FBM octaves).
+-- **Memory Complexity**: $O(1)$ auxiliary memory per voxel if evaluated on-the-fly (shader). If pre-computed, $O(N)$ where $N$ is the number of voxels in the chunk/world [S3, unofficial].
+-- **Performance**: Low quality (`QUALITY=0`) is extremely fast, suitable for mobile or low-end hardware. High quality (`QUALITY=2`) with caves and trees requires more noise evaluations and leaf neighbor checks, increasing CPU/GPU load [S1, unofficial].
+-- **Strengths**: Deterministic, parameter-driven, supports real-time generation on GPU via shaders [S1, S3, unofficial].
+-- **Limitations**: Stochastic low-quality mode lacks coherent terrain structure. High-quality mode can be computationally expensive due to neighbor lookups for leaves and FBM noise [S1, unofficial].
++*   **Time Complexity:** $O(1)$ per voxel evaluation. The cost is dominated by noise function evaluations (FBM) and hash computations. Tree leaf placement adds a constant factor loop ($O(1)$ since search radius is fixed per quality) [S1, unofficial].
++*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel evaluation. No large data structures are required during generation if the function is stateless [S1, S3, unofficial].
++*   **Performance:** Quality 0 is extremely fast due to simple hash checks. Quality 2 is more expensive due to FBM noise and leaf search loops [S1, unofficial].
++*   **Strengths:** Deterministic, reproducible, low memory footprint, supports complex features (caves, trees) without pre-computed meshes [S1, S3, unofficial].
++*   **Limitations:** Fixed resolution per chunk. High-quality generation can be CPU/GPU intensive if evaluated per-voxel without culling [S1, unofficial].
++*   **When to use:** When deterministic, infinite-world generation is required with minimal storage overhead.
++*   **When not to use:** When highly optimized meshing is required without per-voxel evaluation overhead, or when non-deterministic, organic variation beyond noise is needed.
+ 
+ ## Background
+-Procedural voxel world generation is a staple in voxel-based games (e.g., Minecraft). The specific implementation detailed here originates from a GLSL shader project (`Voxel-World-Shader`) designed for efficient in-shader world generation [S1, unofficial]. Other implementations, such as `voxel-engine-stackgl`, use JavaScript to pass a `generate` function to the engine, which is called per voxel [S3, unofficial]. Academic and engine projects like DigBuild structure generation into phases: constraints, biome picking, and terrain population [S4, unofficial].
++Procedural voxel world generation is a core technique in voxel-based games and simulations. It evolved from early heightmap-based terrain generation to full volumetric evaluation. The specific implementation described here, often referred to as "Voxel World Shader," originates from GLSL-based voxel engines where generation is performed on the GPU or via a JavaScript bridge to WebGL [S1, S3, unofficial]. The three-phase approach (constraints, biomes, terrain) was formalized in the DigBuild engine documentation [S4, unofficial]. The method relies heavily on hash-based pseudo-random number generation for efficiency in shader environments [S1, unofficial].
+ 
+ ## Sources

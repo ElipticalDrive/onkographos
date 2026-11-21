@@ -1,0 +1,121 @@
+# Depth Rendering
+
+Also called: Depth Visualization, Z-Buffer Visualization
+
+## Overview
+Depth Rendering is a visualization technique that maps the z-coordinate (depth) of the first surface hit by a ray to grayscale intensity, providing a direct representation of distance from the camera [S1, unofficial]. Unlike [Iteration-Based Coloring](1244-iteration-based-coloring.md), which visualizes computational intensity via step counts, Depth Rendering visualizes geometric proximity, where closer features appear brighter or darker depending on the specific mapping function [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `tree`: The voxel data structure (e.g., Octree) containing spatial bounds `tree->min[2]` and `tree->max[2]` along the depth axis [S1, unofficial].
+- `rc`: Render context providing pixel dimensions `rc.n_y` (assumed square) and ray generation `rc.getRayForPixel(x, y)` [S1, unofficial].
+- `texture_array`: Output buffer of size `n_y * n_y * 4` (RGBA), where each pixel is 4 unsigned chars [S1, unofficial].
+
+**Data Structures:**
+- `TreeTraverser`: Manages ray traversal through the tree. Methods include `isTerminated()`, `getCurrentNode()`, `hasData()`, `step()`, and `getCurrentPosition()` [S1, unofficial].
+- `vec3`: 3D vector type with components `[0]` (x), `[1]` (y), `[2]` (z) [S1, unofficial].
+
+**Parameters:**
+- `factor`: Normalized depth value in range [0, 1] [S1, unofficial].
+- `size`: `tree->gridlength` used in alternative implementations [S1, unofficial].
+
+**Algorithm:**
+1. Initialize OpenMP threads equal to the number of CPU processors [S1, unofficial].
+2. Parallelize the pixel loop over `y` and `x` [S1, unofficial].
+3. For each pixel `(x, y)`:
+   a. Initialize `TreeTraverser` with the tree and the ray for `(x, y)` [S1, unofficial].
+   b. Traverse the tree:
+      i. While `!t.isTerminated()`:
+         - If `t.getCurrentNode()->isLeaf()` and `t.getCurrentNode()->hasData()`, break loop [S1, unofficial].
+         - Else, call `t.step()` [S1, unofficial].
+   c. Get hit position `pos = t.getCurrentPosition()` [S1, unofficial].
+   d. Compute depth factor:
+      $$ factor = \frac{|pos[2]|}{|tree->max[2]| - |tree->min[2]|} $$
+      [S1, unofficial]
+   e. Compute grayscale color:
+      $$ r = 255 - (255 \times factor) $$
+      $$ g = 255 - (255 \times factor) $$
+      $$ b = 255 - (255 \times factor) $$
+      [S1, unofficial]
+   f. Write to `texture_array` at index `index = y * (rc.n_y * 4) + x * 4`:
+      - `texture_array[index] = (unsigned char) r`
+      - `texture_array[index+1] = (unsigned char) g`
+      - `texture_array[index+2] = (unsigned char) b`
+      - `texture_array[index+3] = (unsigned char) 1` (Alpha) [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_depth(tree, rc, texture_array):
+    # Initialize OpenMP threads [S1, unofficial]
+    num_threads = get_num_procs()
+    set_num_threads(num_threads)
+    
+    n_y = rc.n_y
+    size = tree.gridlength
+    
+    # Parallel pixel loop [S1, unofficial]
+    for y in range(n_y):
+        partindex = y * (n_y * 4)
+        for x in range(n_y):
+            index = partindex + x * 4
+            
+            # Initialize ray traverser [S1, unofficial]
+            t = TreeTraverser(tree, rc.getRayForPixel(x, y))
+            
+            # Traverse tree [S1, unofficial]
+            while not t.isTerminated():
+                current_node = t.getCurrentNode()
+                if current_node.isLeaf():
+                    if current_node.hasData():
+                        break
+                t.step()
+            
+            # Get hit position [S1, unofficial]
+            pos = t.getCurrentPosition()
+            
+            # Compute depth factor [S1, unofficial]
+            # Note: Source uses abs() on bounds and position [2]
+            depth_range = abs(tree.max[2]) - abs(tree.min[2])
+            if depth_range == 0:
+                factor = 0.0
+            else:
+                factor = abs(pos[2]) / depth_range
+            
+            # Compute grayscale color [S1, unofficial]
+            r = 255 - (255 * factor)
+            g = 255 - (255 * factor)
+            b = 255 - (255 * factor)
+            
+            # Write color [S1, unofficial]
+            texture_array[index] = int(r)
+            texture_array[index+1] = int(g)
+            texture_array[index+2] = int(b)
+            texture_array[index+3] = 1
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If `tree->max[2] == tree->min[2]`, the depth range is zero. The implementation must handle this to avoid NaN/Inf [G].
+- **Termination:** If the ray never hits a leaf with data, `t.isTerminated()` must eventually return true. If the ray escapes the tree without hitting a surface, the behavior is undefined in the source [S1, unofficial].
+- **Coordinate System:** The formula uses `abs(pos[2])`, implying a specific coordinate system where depth is the Z-axis. This may not match standard OpenGL/DirectX conventions where Y or -Z is depth [G].
+
+## Subtopics
+
+### Logarithmic Depth Rendering
+A variant that normalizes the logarithmic distance traveled by the ray to the range [0, 1], where brighter pixels indicate further travel distance [S2, unofficial]. It calculates distance $d = |p_i - p_0|$, computes $\log(d)$, and normalizes it. This helps visualize depth over large ranges where linear mapping would compress distant details [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of steps per ray [S1, unofficial]. Parallelized with OpenMP [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for the output texture array [S1, unofficial].
+- **Strengths:** Simple to implement; provides immediate visual feedback on object proximity [S1, unofficial].
+- **Limitations:** Does not account for surface orientation or lighting; linear mapping may not be perceptually uniform [S1, unofficial].
+
+## Background
+Originated in early voxel rendering implementations for CPU-based raycasting, specifically in the `cpu_voxel_raycaster` project by Forceflow [S1, unofficial]. It serves as a debugging and visualization tool for voxel data structures.
+
+## Sources
+[S1] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)
+[S2] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)

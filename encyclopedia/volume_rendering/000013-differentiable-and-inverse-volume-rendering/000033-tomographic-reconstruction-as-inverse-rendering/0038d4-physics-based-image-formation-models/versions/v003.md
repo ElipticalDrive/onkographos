@@ -1,0 +1,37 @@
+# Physics-Based Image Formation Models
+## Overview
+Physics-Based Image Formation Models define the differentiable forward operator $\mathcal{P}$ that maps a 3D (or 4D) volume representation to 2D projection images, serving as the core component in inverse rendering pipelines [G]. Unlike generic differentiable renderers, these models are tailored to specific physical acquisition modalities (e.g., X-ray absorption, ultrasound wave propagation) to ensure physical consistency and computational efficiency [G]. They distinguish themselves from siblings like [Neural Adaptive Tomography](1862-neural-adaptive-tomography-neat.md) by explicitly modeling the underlying physics (such as linear absorption or coupled wave equations) rather than relying solely on learned neural priors or adaptive sampling strategies [G].
+## Shared principles
+All methods in this family rely on the differentiability of the forward projection operator $\mathcal{P}$ and its adjoint (back-projection) $\mathcal{P}^T$ [G]. The core optimization problem is generally formulated as minimizing a loss function $\mathcal{L}$ between the measured sinogram $p$ and the rendered projection $\hat{p} = \mathcal{P}(x)$ of the current volume estimate $x$:
+$$
+\min_x \mathcal{L}(\mathcal{P}(x), p) + \lambda R(x)
+$$
+where $R(x)$ is a regularizer and $\lambda$ is a weighting factor [G].
+The gradient of the loss with respect to the volume $x$ is computed via the chain rule:
+$$
+\frac{\partial \mathcal{L}}{\partial x} = \mathcal{P}^T \left( \frac{\partial \mathcal{L}}{\partial \hat{p}} \right)
+$$
+The term $\frac{\partial \mathcal{L}}{\partial \hat{p}}$ is the residual gradient in projection space (e.g., $p - \hat{p}$ for MSE), and $\mathcal{P}^T$ is the back-projection operator [G].
+Key shared components include:
+1.  **Forward Projection:** Ray marching through the volume representation (voxels, octrees, or neural fields) to compute line integrals of density/absorption coefficients [G].
+2.  **Backward Projection (Adjoint):** Distributing the error from the 2D detector plane back into the 3D volume [G].
+3.  **Optimization Loop:** An iterative process (e.g., SGD, Adam) that updates the volume parameters (voxel values, neural network weights, or Gaussian parameters) to reduce the projection error [G].
+## Subtopics
+
+### [Space-Time Image Formation Model](3268-space-time-image-formation-model.md)
+Represents a continuously deforming 3D object as a 4D density function $h(x, y, z, t)$, discretized into $N_k$ static frames [3268-space-time-image-formation-model.md]. It differs from warp-based methods by treating time as a direct dimension of the density field, allowing for topology changes but potentially suffering from temporal inconsistency [3268-space-time-image-formation-model.md]. Choose this when reconstructing dynamic objects where deformation is complex and topology changes are expected [3268-space-time-image-formation-model.md].
+
+### [B-mode Image Reconstruction](5511-b-mode-image-reconstruction.md)
+A differentiable forward model for synthesizing ultrasound B-mode images by solving coupled forward and backward wave amplitude equations across voxel interfaces using a sparse linear system [5511-b-mode-image-reconstruction.md]. It distinguishes itself from standard ray-marching volume rendering by modeling wave physics rather than simple line integrals of density [5511-b-mode-image-reconstruction.md]. Choose this for differentiable ultrasound rendering where acoustic wave propagation physics are critical [5511-b-mode-image-reconstruction.md].
+
+### Density Reconstruction (Absorption-Only)
+Reconstruction of a 3D density field from images using an optical absorption-only model, reducing the problem to a linear optimization problem solvable via DiffDVR [S1].
+*   **Step:** Multi-resolution optimization: Start with volume resolution $32^3$. Double the resolution in each dimension after 10 iterations. Perform optimization for 50 iterations at the highest resolution [S1].
+*   **Formula:** Loss function: Same $L_{\text{total}}$ as TF reconstruction, but the smoothing prior is computed on reconstructed volume densities in 3D with $\lambda = 0.5$ [S1].
+*   **Parameter:** Views: 64 uniformly sampled views on a surrounding sphere. Image Resolution: $512^2$. Reconstructed Volume Resolution: $256^3$. Step size: 0.2 voxels during reconstruction. Optimizer: Adam with batch size 8 and learning rate 0.3 [S1].
+*   **Number:** Performance comparison for human skull dataset: ASTRA takes 53 seconds, DiffDVR takes ~12 minutes, Mitsuba takes multiple hours [S1].
+
+## Background
+The family originates from the application of differentiable rendering techniques to tomographic reconstruction [G]. Early work focused on adapting standard volume rendering pipelines (like DiffDVR) to inverse problems, demonstrating that absorption-only models could be solved using differentiable optimizers, though at higher computational cost than algebraic methods [S1]. The field has since expanded to include specialized physics-based models for modalities like ultrasound, where simple ray-tracing is insufficient to capture wave phenomena [B-mode Image Reconstruction](5511-b-mode-image-reconstruction.md).
+## Sources
+[S1] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26

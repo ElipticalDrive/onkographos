@@ -1,0 +1,114 @@
+# Random Point Sampling in Bounds
+
+Also called: Uniform Random Point Sampling, UniformSampler, sampleCell
+
+## Overview
+Generates uniformly distributed random points within a specified 3D axis-aligned bounding box (AABB) defined by minimum and maximum bounds [S1, S2, S3, unofficial]. It solves the problem of initializing ray origins or query points for volume rendering and neural field training by ensuring spatial coverage without bias [S1, unofficial][S4]. Unlike [Background Point Sampling](6423-background-point-sampling.md) which targets empty space, or [Uncertainty-guided Point Sampling](13488-uncertainty-guided-point-sampling.md) which targets high-error regions, this method provides a baseline uniform distribution [S4].
+
+## How it works
+**Inputs:**
+- `num_points`: Integer, the number of random points to generate [S1, unofficial].
+- `bounds`: A tuple or list containing two arrays/tensors: `min_bounds` (shape `[3]` or `[batch, 3]`) and `max_bounds` (shape `[3]` or `[batch, 3]`) [S1, unofficial].
+- `device`: The computational device (e.g., 'cpu', 'cuda') [S1, unofficial].
+
+**Data Structures:**
+- `_min_bounds`: `torch.Tensor`, stores the minimum coordinates of the bounding box [S2, unofficial].
+- `_max_bounds`: `torch.Tensor`, stores the maximum coordinates of the bounding box [S2, unofficial].
+- `_number_of_samples`: `int`, stores the count of points to generate [S2, unofficial].
+
+**Steps:**
+1.  **Initialization**: Store `num_points` in `_number_of_samples`. Convert `min_bounds` and `max_bounds` to tensors on the specified `device`. If the inputs are not batched, add a batch dimension (unsqueeze) to ensure consistent tensor shapes for vectorized operations [S1, unofficial].
+2.  **Uniform Generation**: Generate `num_points` random points in the unit cube $[0, 1]^3$. This is done by sampling three independent uniform random values for each point [S1, S2, unofficial].
+    $$ u \sim \mathcal{U}([0, 1])^3 $$
+3.  **Scaling and Shifting**: Transform the unit cube samples to the target bounding box. Let $w = \text{max\_bounds} - \text{min\_bounds}$ be the width vector. The final point $p$ is calculated as:
+    $$ p = u \cdot w + \text{min\_bounds} $$
+    This linear mapping preserves uniformity [S1, S2, unofficial].
+
+**Alternative Voxel-Centric Formulation:**
+Some implementations define the bounds relative to a voxel center $c$ and size vector $s$ [S3, unofficial]. In this case, random values $r$ are sampled from $\mathcal{U}(-1, 1)^3$, scaled by $s$, and added to $c$:
+$$ p = c + r \cdot s $$
+This is mathematically equivalent to the min/max formulation where $c = (\text{min} + \text{max})/2$ and $s = (\text{max} - \text{min})/2$ [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def sample_random_points_in_bounds(num_points, min_bounds, max_bounds, device='cpu'):
+    """
+    Generates uniformly distributed random points within a 3D bounding box.
+    
+    Args:
+        num_points (int): Number of points to generate.
+        min_bounds (tensor-like): Minimum bounds of the box, shape (3,) or (batch, 3).
+        max_bounds (tensor-like): Maximum bounds of the box, shape (3,) or (batch, 3).
+        device (str): Target device for tensors.
+        
+    Returns:
+        torch.Tensor: Sampled points of shape (num_points, 3).
+    """
+    # Convert inputs to tensors and ensure they are on the correct device
+    min_b = torch.as_tensor(min_bounds, device=device).float()
+    max_b = torch.as_tensor(max_bounds, device=device).float()
+    
+    # Add batch dimension if not present to handle vectorized operations uniformly
+    if min_b.dim() == 1:
+        min_b = min_b.unsqueeze(0)
+        max_b = max_b.unsqueeze(0)
+        
+    # Generate uniform random numbers in [0, 1)
+    # Shape: (num_points, 3)
+    # Note: Standard torch.rand generates in [0, 1)
+    u = torch.rand((num_points, 3), device=device)
+    
+    # Calculate box dimensions
+    # Shape: (1, 3) or (batch, 3) depending on input, broadcasted correctly
+    width = max_b - min_b
+    
+    # Scale and shift to the bounding box
+    # If min_b was unsqueezed, it is (1, 3). width is (1, 3).
+    # u is (num_points, 3).
+    # Result p is (num_points, 3)
+    p = u * width + min_b
+    
+    return p
+```
+
+**Parameters:**
+- `num_points`: Typical values range from thousands to millions depending on training batch sizes [S1, unofficial][S4].
+- `bounds`: Defined by the scene or voxel grid geometry [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-Cubic Voxels**: If the sampling domain is conceptualized as a voxel, scaling a uniform distribution over $(-1,1)^3$ correctly covers the volume, but the density per unit world-space volume remains uniform. However, if spherical sampling is expected within a non-cubic voxel, this method produces non-uniform density relative to the sphere [S3, unofficial].
+- **Precision**: Using floating-point arithmetic for large bounding boxes may introduce precision errors in the least significant bits of the coordinates [G].
+- **Empty Bounds**: If `min_bounds` equals `max_bounds`, the width is zero, resulting in all points collapsing to the single boundary point [G].
+
+## Subtopics
+
+### Single-Entity DDF Data Extraction
+A set of specialized sampling strategies for generating position-direction $(p, v)$ tuples for Directed Distance Fields (DDFs) within a bounding box $B$ [S4].
+- **Uniform (U)**: Samples $p \sim \mathcal{U}[B]$ and $v \sim \mathcal{U}[S^2]$ [S4].
+- **At-surface (A)**: Samples a surface point $q_0 \sim \mathcal{U}[S]$ (areaweighted) and direction $v_0 \sim \mathcal{U}[S^2]$. Samples $p$ on the line segment between $q_0$ and its intersection with $B$ along $v_0$. Sets $v = -v_0$ [S4].
+- **Bounding (B)**: Samples $p \sim \mathcal{U}[\partial B]$ (boundary) and $v \sim \mathcal{U}[S^2]$, restricted to point into the interior of $B$ [S4].
+- **Surface (S)**: Samples $p \sim \mathcal{U}[S]$ and $v \sim \mathcal{U}[S^2]$ [S4].
+- **Tangent (T)**: Same as A-type, but enforces $v_0$ to lie in the tangent plane $T_{q_0}(S)$ [S4].
+- **Offset (O)**: Takes a T-type $(p, v)$ and updates $p \leftarrow p + \varsigma_O \epsilon_O n_0$, where $n_0$ is the normal at $q_0$, $\epsilon_O = 0.05$, and $\varsigma_O \sim \mathcal{U}[\{-1, 1\}]$ [S4].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of points, as it involves generating $3N$ random numbers and performing $3N$ multiplications and additions [S1, S2, unofficial].
+- **Memory Complexity**: $O(N)$ to store the resulting points [S1, unofficial].
+- **Performance**: Highly efficient on GPUs due to vectorized tensor operations (`torch.rand`, broadcasting) [S1, S2, unofficial].
+- **Strengths**: Simple to implement; guarantees uniform spatial coverage; no bias towards any region of the box [S1, S3, unofficial].
+- **Limitations**: Does not account for scene geometry or uncertainty; may waste samples in empty space compared to [Background Point Sampling](6423-background-point-sampling.md) [S4].
+- **When to use**: Initial training phases, baseline comparisons, or when uniform spatial coverage is required regardless of content [S1, unofficial][S4].
+- **When not to use**: When focusing on surface details or high-uncertainty regions [S4].
+
+## Background
+Originating from basic Monte Carlo integration techniques, uniform sampling within bounding volumes is a fundamental primitive in computer graphics [S1, S2, unofficial]. It is widely used in Neural Radiance Fields (NeRF) and 3D Gaussian Splatting variants for initializing ray origins and training data [S1, S2, S3, unofficial]. The specific implementation details using PyTorch tensors are documented in unofficial repositories for Neural Surfaces and VF-NeRF [S1, S2, S3, unofficial]. The extension to Directed Distance Fields (DDFs) with various sampling types (U, A, B, S, T, O) was formalized in recent research on probabilistic DDFs [S4].
+
+## Sources
+[S1] Neural Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
+[S2] VF-NeRF, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
+[S3] 3DGS-FLoD, https://github.com/3DGS-FLoD/flod, fetched 2026-10-27 (unofficial)
+[S4] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29

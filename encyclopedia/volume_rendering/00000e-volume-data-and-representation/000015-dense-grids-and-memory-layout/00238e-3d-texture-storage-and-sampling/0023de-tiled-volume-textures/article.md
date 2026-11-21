@@ -1,0 +1,183 @@
+# Tiled Volume Textures
+
+Also called: 3D Tiled Resources, Volume (3D) textures as tiled resources, Volume Tiled Resources
+
+## Overview
+Tiled Volume Textures are a Direct3D 11.3/12 hardware feature that decouples a 3D texture resource object from its backing memory, enabling virtual addressing for high-resolution volume data [S1, unofficial][S2]. This allows the GPU to stream texture data and maintain performance by loading only a subset of the volume onto the GPU at any given time, addressing memory capacity limits while preserving the filtering and sampling capabilities of 3D textures [S1, unofficial][S2]. Unlike software-managed virtual texturing (e.g., id Tech 5), which requires the CPU to manage all page mappings and incur significant overhead, tiled resources offload the virtual-to-physical mapping to the hardware, reducing CPU workload [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A logical 3D texture resource (defined by dimensions, format, and mip levels) and a backing memory heap (typically a `D3D12_HEAP_TYPE_DEFAULT` or similar).
+*   **Output:** A mapped resource where specific 3D tiles within the logical texture are bound to physical memory locations in the heap, or marked as NULL (unmapped).
+
+**Data Structures:**
+The method relies on specific Direct3D 12 structures to define the mapping. The exact layouts are:
+
+1.  **`D3D12_TILED_RESOURCE_COORDINATE`**: Defines the location of a tile within the logical resource.
+    *   `UINT X`: X-coordinate of the tile in the resource (0-based).
+    *   `UINT Y`: Y-coordinate of the tile in the resource (0-based).
+    *   `UINT Z`: Z-coordinate of the tile in the resource (0-based).
+    *   `UINT Subresource`: Index of the mip level/array slice.
+2.  **`D3D12_TILE_REGION_SIZE`**: Defines the size of the region to be mapped or copied.
+    *   `UINT NumTiles`: Total number of tiles in the region.
+    *   `UINT Width`: Width of the region in tiles (used if `bUseBox` is true).
+    *   `UINT Height`: Height of the region in tiles (used if `bUseBox` is true).
+    *   `UINT Depth`: Depth of the region in tiles (used if `bUseBox` is true).
+    *   `BOOL bUseBox`: If true, `Width`, `Height`, and `Depth` define a rectangular box of tiles; if false, `NumTiles` defines a linear sequence of tiles starting from the coordinate.
+3.  **`D3D12_TILE_SHAPE`**: Defines the dimensions of a single tile in texels.
+    *   `UINT WidthInTexels`: Width of the tile.
+    *   `UINT HeightInTexels`: Height of the tile.
+    *   `UINT DepthInTexels`: Depth of the tile.
+
+**Tile Dimensions:**
+The physical size of a tile (in texels) depends on the texture's bits-per-pixel (bpp) for 1 sample/pixel formats [S2]. The standard tile dimensions are:
+
+| Bits/pixel | Tile Dimensions (w x h x d) |
+| :--- | :--- |
+| 8 | 64 x 32 x 32 |
+| 16 | 32 x 32 x 32 |
+| 32 | 32 x 32 x 16 |
+| 64 | 32 x 16 x 16 |
+| 128 | 16 x 16 x 16 |
+| BC1, BC4 | 128 x 64 x 16 |
+| BC2, BC3, BC5, BC6, BC7 | 64 x 64 x 16 |
+
+**Numbered Steps:**
+
+1.  **Check Feature Support:** Query the device to determine if volume tiled resources are supported.
+    *   Call `ID3D12Device::CheckFeatureSupport` with `D3D12_FEATURE_DATA_D3D12_OPTIONS`.
+    *   Verify that `D3D12_TILED_RESOURCES_TIER` is at least `D3D12_TILED_RESOURCES_TIER_1` (or higher) and that `VolumeTiledResourcesSupported` is `true` [S2].
+2.  **Create Resource and Heap:**
+    *   Create a 3D texture resource using `ID3D12Device::CreatePlacedResource` or `CreateReservedResource`, specifying the `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` or appropriate flags, and ensuring the resource is compatible with tiling (check `D3D12_FORMAT_SUPPORT2` for `D3D12_FORMAT_SUPPORT1_TILED`) [S2].
+    *   Create a backing memory heap large enough to hold the *active* tiles. The heap size is calculated as: `NumActiveTiles * TileSizeInBytes`. `TileSizeInBytes` is derived from the tile dimensions and format [S2].
+3.  **Map Tiles to Memory:**
+    *   Construct a `D3D12_TILE_MAPPING` array (or use `UpdateTileMappings` with a single entry) specifying:
+        *   `pTiledResource`: The 3D texture.
+        *   `TiledResourceCoordinate`: The logical tile position (X, Y, Z, Subresource).
+        *   `Heap`: The backing memory heap.
+        *   `HeapOffset`: The offset within the heap where this tile's data resides.
+        *   `NumTiles`: The number of tiles to map.
+        *   `Flags`: `D3D12_TILE_MAPPING_NO_HOLE` if the region is contiguous, or `D3D12_TILE_MAPPING_RESERVE` if mapping NULL tiles.
+    *   Call `ID3D12CommandQueue::UpdateTileMappings` to bind the logical tiles to the physical heap memory [S2].
+4.  **Copy Data to Tiles:**
+    *   Prepare a source buffer (CPU or GPU) containing the volume data.
+    *   Construct a `D3D12_TILE_COPY` structure specifying the source buffer, source offset, destination tiled resource, destination coordinate, tile region size, and copy flags (e.g., `D3D12_TILE_COPY_FORMAT` if format conversion is needed) [S2].
+    *   Call `ID3D12GraphicsCommandList::CopyTiles` to transfer data from the buffer to the tiled resource [S2].
+5.  **Handle NULL Tiles:**
+    *   To mark a tile as unused (NULL), call `UpdateTileMappings` with `HeapOffset` set to `D3D12_TILE_MAPPING_NO_RESERVE` (or equivalent flag indicating no backing memory) and `NumTiles` set appropriately. This allows the hardware to treat the tile as empty during sampling, maintaining sparseness similar to Sparse Voxel Octrees (SVOs) [S1, unofficial][S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_volume_tiled_resource(device, command_queue, command_list, texture_desc, heap, active_tile_indices):
+    """
+    Sets up a 3D tiled resource and maps active tiles to the backing heap.
+    """
+    # 1. Check feature support
+    feature_data = device.check_feature_support(D3D12_FEATURE_D3D12_OPTIONS)
+    if not feature_data.VolumeTiledResourcesSupported:
+        raise RuntimeError("Volume Tiled Resources not supported")
+    
+    # 2. Create the 3D texture resource
+    # Note: Resource creation details depend on D3D12 API specifics (CreatePlacedResource)
+    # Assume 'texture' is the created ID3D12Resource
+    texture = device.create_placed_resource(heap, 0, texture_desc, D3D12_RESOURCE_STATE_COMMON)
+    
+    # 3. Get tile shape and size
+    tiling_info = device.get_resource_tiling(texture)
+    tile_shape = tiling_info.TileShape
+    tile_size_bytes = calculate_tile_size_bytes(tile_shape, texture_desc.Format)
+    
+    # 4. Prepare tile mappings
+    # Map all active tiles to the heap
+    # In a real implementation, you would iterate through active_tile_indices
+    # and create a list of D3D12_TILE_MAPPING structures.
+    # For simplicity, we assume a single contiguous block of active tiles for demonstration.
+    
+    num_active_tiles = len(active_tile_indices)
+    if num_active_tiles == 0:
+        return
+
+    # Calculate total heap size needed for active tiles
+    heap_size = num_active_tiles * tile_size_bytes
+    
+    # 5. Update tile mappings
+    # Construct the mapping structure
+    # D3D12_TILE_MAPPING mapping = {
+    #     .TiledResource = texture,
+    #     .TiledResourceCoordinate = {X: 0, Y: 0, Z: 0, Subresource: 0},
+    #     .Heap = heap,
+    #     .HeapOffset = 0,
+    #     .NumTiles = num_active_tiles,
+    #     .Flags = D3D12_TILE_MAPPING_NO_HOLE
+    # }
+    
+    # Call UpdateTileMappings
+    command_queue.update_tile_mappings(
+        tiled_resources=[texture],
+        num_tile_mappings=1,
+        tile_mappings=[mapping],
+        tiled_resource_ranges=None # Or specify ranges if needed
+    )
+    
+    # 6. Copy data to the tiled resource
+    # Assume 'data_buffer' is a GPU buffer containing the volume data
+    copy_desc = D3D12_TILE_COPY(
+        SourceBuffer = data_buffer,
+        SourceOffset = 0,
+        TiledResource = texture,
+        TiledResourceCoordinate = {X: 0, Y: 0, Z: 0, Subresource: 0},
+        TileRegionSize = D3D12_TILE_REGION_SIZE(NumTiles=num_active_tiles, bUseBox=False),
+        Flags = D3D12_TILE_COPY_NONE
+    )
+    
+    command_list.copy_tiles(copy_desc)
+    command_list.close()
+    command_queue.execute_command_lists([command_list])
+
+def calculate_tile_size_bytes(tile_shape, format):
+    """
+    Calculates the size of a tile in bytes based on tile dimensions and format.
+    """
+    texels = tile_shape.WidthInTexels * tile_shape.HeightInTexels * tile_shape.DepthInTexels
+    bytes_per_texel = get_bytes_per_texel(format)
+    return texels * bytes_per_texel
+
+def get_bytes_per_texel(format):
+    """
+    Returns bytes per texel for common formats.
+    """
+    if format == DXGI_FORMAT_R8_UNORM:
+        return 1
+    elif format == DXGI_FORMAT_R16_FLOAT:
+        return 2
+    elif format == DXGI_FORMAT_R32_FLOAT:
+        return 4
+    elif format == DXGI_FORMAT_BC1_UNORM:
+        return 8 # 64 bits per 4x4 block, but tile size is larger
+    # ... other formats
+    return 0
+```
+
+**Edge Cases and Pitfalls:**
+*   **Dynamic Object Latency:** Dynamic objects require the CPU to flag which bricks/tiles need to be updated. This involves writing the list of active bricks back to the CPU, which takes a few frames to process. Consequently, dynamic objects may not be fully voxelized across brick bounds immediately [S1, unofficial].
+*   **Unsupported Formats:** Tiled resources do not support 96bpp formats, video formats, `R1_UNORM`, `R8G8_B8G8_UNORM`, or `R8R8_G8B8_UNORM` [S2].
+*   **CPU Overhead:** While hardware-managed, the CPU must still manage the mapping of tiles in the volume texture, including marking blocks as unused to maintain sparseness [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Mapping tiles is an API call ($O(1)$ per call, but $O(N)$ for $N$ tiles). Copying data is $O(N)$ where $N$ is the number of texels. Sampling is $O(1)$ per sample, with hardware handling the virtual-to-physical translation.
+*   **Memory Complexity:** Memory usage is proportional to the number of *active* tiles, not the total volume size. This allows for high-resolution volumes to be stored with low GPU memory footprint [S1, unofficial][S2].
+*   **Performance:** Maintains high performance by leveraging hardware virtual addressing, avoiding the CPU overhead of software-managed virtual texturing [S1, unofficial].
+*   **Strengths:** Efficient memory usage for sparse or large volumes; hardware-accelerated sampling and filtering; reduced CPU overhead compared to software solutions.
+*   **Limitations:** Requires Direct3D 11.3/12 hardware support; CPU still manages tile mappings; dynamic updates have latency due to CPU-GPU synchronization [S1, unofficial][S2].
+*   **When to use:** When rendering large, sparse 3D volumes on Direct3D 11.3/12 hardware where memory is a constraint, and some latency in dynamic updates is acceptable.
+*   **When not to use:** On hardware without tiled resource support; when real-time, frame-accurate dynamic updates are critical without latency; when using unsupported formats.
+
+## Background
+Tiled resources were first introduced in DirectX 11.2 (Windows 8.1) for 2D textures. Volume (3D) tiled resources were added in Direct3D 11.3 and Direct3D 12 [S1, unofficial][S2]. The feature targets memory issues in high-resolution 3D texture rendering by allowing only part of the texture to be loaded onto the GPU at any given time [S1, unofficial]. It is similar to the virtual texturing used in id Tech 5 (Rage), but leverages hardware virtual addressing to reduce the CPU overhead associated with manual page management [S1, unofficial]. It is used in voxel-based rendering techniques, such as Voxel Cone Traced Global Illumination, to manage large voxel grids efficiently [S1, unofficial].
+
+## Sources
+[S1] Voxel Cone Traced Global Illumination - Leif Node, https://leifnode.com/2015/05/voxel-cone-traced-global-illumination/, fetched 2026-10-27 (unofficial)
+[S2] Volume tiled resources (Direct3D 12) - Win32 apps | Microsoft Learn, https://learn.microsoft.com/en-us/windows/win32/direct3d12/volume-tiled-resources, fetched 2026-10-30

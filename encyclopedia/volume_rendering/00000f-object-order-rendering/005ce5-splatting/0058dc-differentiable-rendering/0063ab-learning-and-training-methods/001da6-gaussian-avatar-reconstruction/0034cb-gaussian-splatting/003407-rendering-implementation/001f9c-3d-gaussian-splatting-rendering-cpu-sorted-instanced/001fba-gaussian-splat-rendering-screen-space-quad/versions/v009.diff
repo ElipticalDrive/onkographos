@@ -1,0 +1,277 @@
+--- v008.md
++++ v009.md
+@@ -4,143 +4,124 @@
+ 
+ ## Overview
+-Gaussian Splat Rendering (Screen-Space Quad) is a display-only rendering technique that projects 3D Gaussian distributions into 2D screen-space quads, sorts them by camera-space depth, and renders them using instanced drawing with standard alpha blending [S2, S3, unofficial]. It solves the problem of visualizing large-scale, photorealistic 3D scenes reconstructed via Gaussian Splatting on client-side hardware without requiring neural network inference or server-side ray tracing [S1, S3, unofficial]. It sets itself apart from its siblings by utilizing a CPU-side depth sorting algorithm (often offloaded to a background worker) to resolve the non-commutative nature of alpha blending, whereas the parent [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md) describes the general projection and quad-drawing mechanism without specifying the sorting implementation [S2, S3, unofficial]. Unlike [Animated 3D Gaussian Splatting (Splatv rendering)](7758-animated-3d-gaussian-splatting-splatv-rendering.md), this method typically omits spherical harmonics to reduce file size and memory footprint for web delivery [S1, unofficial].
++Gaussian Splat Rendering (Screen-Space Quad) is a display-only rendering technique that projects 3D Gaussian distributions into 2D screen-space quads, sorts them by camera-space depth, and renders them using instanced drawing with standard alpha blending [S2, S3, unofficial]. It solves the problem of visualizing large-scale, photorealistic 3D scenes reconstructed via Gaussian Splatting on client-side hardware without requiring neural network inference or server-side ray tracing [S1, S3, unofficial]. It sets itself apart from its siblings by utilizing a CPU-side depth sorting algorithm (often offloaded to a background worker) to resolve the non-commutative nature of alpha blending, whereas the parent [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md) describes the general projection and quad-drawing mechanism without specifying the sorting implementation [S2, S3, unofficial]. Unlike [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md), this method relies on explicit per-splat sorting rather than tile-based accumulation [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A depth-sorted index buffer (Uint32Array) containing splat indices, view-space projection data (position, axes, color), camera matrices (Model-View `MV`, Projection `P`), and screen resolution (`_ScreenParams.xy` or `u_viewport`) [S2, S3, unofficial].
+-*   **Outputs:** A framebuffer with the composited image using pre-multiplied alpha blending [S1, S3, unofficial].
++*   **Inputs:** A depth-sorted index buffer (Uint32Array) mapping instance IDs to splat indices; view-space projection data (position, axes, color, opacity) stored in textures or buffers; camera matrices (Model-View, Projection); screen resolution parameters.
++*   **Outputs:** A composited color buffer with pre-multiplied alpha blending.
+ 
+ **Data Structures:**
+ *   **Vertex Buffer:** Contains 8 floats representing a unit quad: `[-2, -2, 2, -2, 2, 2, -2, 2]` [S3, unofficial].
+-*   **Index Buffer (Depth Index):** A `Uint32Array` containing the sorted splat indices, updated via worker message or CPU sort [S3, unofficial].
+-*   **Splat Texture:** Created with `gl.RGBA32UI` internal format, `gl.RGBA_INTEGER` format, and `gl.UNSIGNED_INT` type, sized to `width x height` of the render data [S3, unofficial].
+-*   **View Data:** Per-splat data including view-space position, axis vectors, and color (often half-floats) [S2, unofficial].
++*   **Index Buffer (Depth Index):** A `Uint32Array` containing the depth-sorted splat indices, updated via worker messages [S3, unofficial].
++*   **Splat Texture:** Created with `gl.RGBA32UI` internal format, `gl.RGBA_INTEGER` format, and `gl.UNSIGNED_INT` type, sized to the render data width and height [S3, unofficial]. For animated or complex variants, additional textures (e.g., `splatRotation` as RGBA16F) may be used [S5, unofficial].
++*   **View Data:** Contains per-splat attributes including position, rotation (quaternion), scale, and color (SH degree 0) [S4, S5, unofficial].
+ 
+ **Numbered Steps:**
+-
+-1.  **Initialization:** Create vertex buffer with quad coordinates `[-2, -2, 2, -2, 2, 2, 2, 2]` and index buffer for depth-sorted splat indices [S3, unofficial]. Bind splat texture with `gl.RGBA32UI` format [S3, unofficial]. Initialize worker for sorting if using WebGL [S3, unofficial].
+-2.  **Update Camera:** On each render frame, update camera matrices and send the view-projection matrix (`viewProj`) to the sorting worker [S3, unofficial].
+-3.  **Vertex Shader Execution (Per Instance):**
+-    a.  Map instance ID to splat index via `instID = _OrderBuffer[instID]` [S2, unofficial].
+-    b.  Load view data: `SplatViewData view = _SplatViewData[instID]` [S2, unofficial].
+-    c.  Check if behind camera: `bool behindCam = centerClipPos.w <= 0`. If true, output NaN vertex `asfloat(0x7fc00000)` to discard primitive [S2, unofficial].
+-    d.  Calculate quad position in clip space: `quadPos = float2(idx&1, (idx>>1)&1) * 2.0 - 1.0; quadPos *= 2.0` [S2, unofficial].
+-    e.  Calculate screen delta: `deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2.0 / _ScreenParams.xy` [S2, unofficial].
+-    f.  Final vertex: `o.vertex.xy += deltaScreenPos * centerClipPos.w` [S2, unofficial].
+-    g.  (Optional) Check selection bit: If `_SplatBitsValid` is true, check selection bit `wordIdx = instID / 32`, `bitIdx = instID & 31`. Load word `selVal = _SplatSelectedBits.Load(wordIdx * 4)`. If `(selVal & (1 << bitIdx))` is true, set `o.col.a = -1` to mark as selected [S2, unofficial].
+-4.  **Fragment Shader Execution (Per Fragment):**
+-    a.  Calculate Gaussian falloff: `power = -dot(i.pos, i.pos); alpha = exp(power)` [S2, unofficial].
+-    b.  If not selected (`i.col.a >= 0`), saturate alpha: `alpha = saturate(alpha * i.col.a)` [S2, unofficial].
+-    c.  If selected (`i.col.a < 0`), apply magenta outline logic: if `alpha > 7.0/255.0`, set `alpha = 1` and `i.col.rgb = selectedColor` (magenta) if `alpha < 10.0/255.0`; otherwise `alpha = saturate(alpha + 0.3)` and tint `i.col.rgb = lerp(i.col.rgb, selectedColor, 0.5)` [S2, unofficial].
+-    d.  Discard fragment if `alpha < 1.0/255.0` [S2, unofficial].
+-    e.  Output final color: `res = half4(i.col.rgb * alpha, alpha)` [S2, unofficial].
+-5.  **Blending:** Set up blending: `gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.ONE, gl.ONE_MINUS_DST_ALPHA, gl.ONE)` [S3, unofficial].
+-6.  **Draw Call:** Bind index buffer with `gl.vertexAttribIPointer` and divisor 1. Call `gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount)` [S3, unofficial].
++1.  **Initialization:** Create the vertex buffer with quad coordinates and the index buffer for sorted splat indices [S3, unofficial]. Initialize the scene, camera, and render data [S3, unofficial].
++2.  **Sorting (CPU/Worker):** Send initial sort data (positions, dummy transforms, transform indices) to a background worker [S3, unofficial]. On each render frame, update the camera and send the view-projection matrix to the worker [S3, unofficial]. The worker computes the depth-sorted order and returns the `depthIndex` buffer [S3, unofficial].
++3.  **Setup Blending:** Configure the graphics pipeline for alpha blending: `gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.ONE, gl.ONE_MINUS_DST_ALPHA, gl.ONE)` [S3, unofficial].
++4.  **Bind Attributes:** Bind the index buffer using `gl.vertexAttribIPointer` with a divisor of 1 to enable instanced drawing [S3, unofficial].
++5.  **Vertex Shader Execution:**
++    *   Map the instance ID to the splat index using the order buffer: `instID = _OrderBuffer[instID]` [S2, unofficial].
++    *   Load view data for the splat: `SplatViewData view = _SplatViewData[instID]` [S2, unofficial].
++    *   Check if the splat is behind the camera (`centerClipPos.w <= 0`). If so, output a NaN vertex (`asfloat(0x7fc00000)`) to discard the primitive [S2, unofficial].
++    *   Transform the voxel position to view space: `vec4 voxelPosViewSpace = MV * gl_in[0].gl_Position` [S1, unofficial].
++    *   Transform to clip space and normalize: `vec4 voxelPosClipSpace = P * voxelPosViewSpace; voxelPosClipSpace /= voxelPosClipSpace.w` [S1, unofficial].
++    *   Perform clip-space frustum culling. Calculate the voxel offset: $voxelOffset = splatSize \times (scale/gridLength) \times \sqrt{2}$ [S1, unofficial]. Calculate the half-edge length in clip space: $voxelHalfEdgeLengthClipSpace = distance(voxelPosClipSpace, voxelRightEdgeMidPointClipSpace)$ [S1, unofficial]. Define the frustum culling border: $voxelFrustumCullingBorder = 1 + voxelHalfEdgeLengthClipSpace$ [S1, unofficial]. Discard if `voxelPosClipSpace.x` or `y` is outside `[-voxelFrustumCullingBorder, voxelFrustumCullingBorder]` [S1, unofficial].
++    *   Calculate the quad position in clip space. For WebGL implementations, map instance ID to quad corners: `quadPos = float2(idx&1, (idx>>1)&1) * 2.0 - 1.0; quadPos *= 2.0` [S2, unofficial]. Calculate screen delta: `deltaScreenPos = (quadPos.x * view.axis1 + quadPos.y * view.axis2) * 2 / _ScreenParams.xy` [S2, unofficial]. Final vertex: `o.vertex.xy += deltaScreenPos * centerClipPos.w` [S2, unofficial].
++    *   (Optional) Handle selection bits if `_SplatBitsValid` is true, marking selected splats with specific color values [S2, unofficial].
++6.  **Fragment Shader Execution:**
++    *   Calculate the Gaussian falloff: `power = -dot(i.pos, i.pos); alpha = exp(power)` [S2, unofficial].
++    *   If not selected, saturate alpha: `alpha = saturate(alpha * i.col.a)` [S2, unofficial].
++    *   If selected, apply magenta outline logic: if `alpha > 7.0/255.0`, set `alpha = 1` and `i.col.rgb = selectedColor` if `alpha < 10.0/255.0`; otherwise `alpha = saturate(alpha + 0.3)` and tint `i.col.rgb = lerp(i.col.rgb, selectedColor, 0.5)` [S2, unofficial].
++    *   Discard fragment if `alpha < 1.0/255.0` [S2, unofficial].
++    *   Output final color: `res = half4(i.col.rgb * alpha, alpha)` [S2, unofficial].
++7.  **Draw Call:** Call `gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, vertexCount)` [S3, unofficial].
+ 
+ **Formulas:**
+-*   **Screen Delta:** $\Delta_{screen} = \frac{(quadPos_x \cdot axis_1 + quadPos_y \cdot axis_2) \cdot 2}{ScreenResolution}$ [S2, unofficial]
+-*   **Gaussian Falloff:** $\alpha = e^{-\mathbf{d}^T \mathbf{d}}$ where $\mathbf{d}$ is the fragment position relative to the quad center [S2, unofficial]
++*   Voxel Offset: $voxelOffset = splatSize \times \frac{scale}{gridLength} \times \sqrt{2}$ [S1, unofficial].
++*   Frustum Culling Border: $voxelFrustumCullingBorder = 1 + distance(voxelPosClipSpace, voxelRightEdgeMidPointClipSpace)$ [S1, unofficial].
++*   Gaussian Falloff: $\alpha = e^{-d^T \Sigma_2^{-1} d}$ (evaluated as `exp(-dot(i.pos, i.pos))` in simplified implementations) [S2, S5, unofficial].
+ 
+ **Parameters:**
+ *   `_ScreenParams.xy`: Screen resolution in pixels, used to normalize the screen-space delta of the quad [S2, unofficial].
+-*   `u_focal`: WebGLUniformLocation for camera focal lengths fx, fy. Set via `gl.uniform2fv` [S3, unofficial].
+-*   `u_time`: WebGLUniformLocation for animation time. Set to `Math.sin(Date.now() / 1000) / 2 + 1 / 2` [S3, unofficial].
++*   `u_focal`: WebGLUniformLocation for camera focal lengths $f_x, f_y$ [S3, unofficial].
++*   `splatCount`: The number of splats to render, coerced to the range `0..splatCloud.count`. Defaults to the full cloud count. Used for LOD or reveal effects [S4, unofficial].
++*   `u_time`: WebGLUniformLocation for animation time, typically set to `Math.sin(Date.now() / 1000) / 2 + 1 / 2` [S3, unofficial].
+ *   `u_viewport`: WebGLUniformLocation for canvas dimensions `[canvas.width, canvas.height]` [S3, unofficial].
+-*   `splatCount`: The number of splats to render, coerced to the range `0..splatCloud.count`. Defaults to the full cloud count. Used for LOD or reveal effects [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Behind Camera:** Splats behind the camera (clip-space $w \le 0$) must be discarded to prevent rendering artifacts. This is handled by outputting a NaN vertex in the vertex shader [S2, unofficial].
+-*   **Multiple Objects:** Multiple Splatv objects are not supported; triggers `console.warn('Multiple Splatv objects are not currently supported')` [S3, unofficial].
+-*   **Worker Initialization:** Worker must be initialized before rendering; checks `renderer.renderProgram.worker === null` and returns error if null [S3, unofficial].
+-*   **Color Tone Mapping:** The material cancels the View's tone mapping, so colors are displayed as stored in the splat data [S4, unofficial].
+-*   **SH Degree:** Splat color is limited to SH (Spherical Harmonics) degree 0 only [S4, unofficial].
++*   **Behind Camera:** Splats with clip-space $w \le 0$ must be discarded to prevent rendering artifacts. This is handled by outputting a NaN vertex in the vertex shader [S2, unofficial].
++*   **Multiple Objects:** Multiple Splatv objects are not supported in some implementations (e.g., gsplat.js), triggering a console warning [S3, unofficial].
++*   **Worker Initialization:** The background worker must be initialized before rendering; checks for `renderer.renderProgram.worker === null` and returns an error if null [S3, unofficial].
++*   **Tone Mapping:** The material cancels the View's tone mapping so colors are displayed as stored in the splat data (SH degree 0 only) [S4, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-# Vertex Shader Logic (Simplified)
+-def vertex_shader(instance_id, quad_index):
+-    # Map instance ID to sorted splat index
+-    splat_idx = order_buffer[instance_id]
++# Vertex Shader Logic (Simplified WebGL/Unity Hybrid)
++def vertex_shader(instance_id, quad_corner_index):
++    # 1. Map instance to splat index
++    splat_index = order_buffer[instance_id]
+     
+-    # Load view data
+-    view_data = splat_view_data[splat_idx]
+-    center_clip_pos = view_data.center_clip_pos
++    # 2. Load view data
++    view_data = splat_view_data[splat_index]
+     
+-    # Check if behind camera
+-    if center_clip_pos.w <= 0:
+-        return float('nan') # Discard primitive
++    # 3. Check behind camera
++    center_clip_w = view_data.center_clip_pos.w
++    if center_clip_w <= 0:
++        return NaN_VERTEX # Discard primitive
+     
+-    # Calculate quad position in clip space
+-    idx_x = instance_id & 1
+-    idx_y = (instance_id >> 1) & 1
+-    quad_pos = float2(idx_x, idx_y) * 2.0 - 1.0
+-    quad_pos *= 2.0
++    # 4. Transform to view/clip space
++    voxel_pos_view = mv_matrix * view_data.position
++    voxel_pos_clip = projection_matrix * voxel_pos_view
++    voxel_pos_clip /= voxel_pos_clip.w
+     
+-    # Calculate screen delta
+-    delta_screen_pos = (quad_pos.x * view_data.axis1 + quad_pos.y * view_data.axis2) * 2.0 / screen_params.xy
++    # 5. Frustum Culling
++    voxel_offset = splat_size * (view_data.scale / grid_length) * sqrt(2)
++    right_edge_mid = projection_matrix * (voxel_pos_view.xy + vec2(0.5, 0) * voxel_offset)
++    right_edge_mid /= right_edge_mid.w
++    half_edge_len = distance(voxel_pos_clip, right_edge_mid)
++    culling_border = 1.0 + half_edge_len
+     
+-    # Final vertex position
+-    final_vertex = center_clip_pos
+-    final_vertex.xy += delta_screen_pos * center_clip_pos.w
++    if abs(voxel_pos_clip.x) > culling_border or abs(voxel_pos_clip.y) > culling_border:
++        return NaN_VERTEX # Discard primitive
+     
+-    # Handle selection (optional)
+-    if splat_bits_valid:
+-        word_idx = instance_id // 32
+-        bit_idx = instance_id & 31
+-        sel_val = splat_selected_bits.Load(word_idx * 4)
+-        if (sel_val & (1 << bit_idx)):
+-            color.a = -1.0 # Mark as selected
+-        else:
+-            color.a = saturate(color.a * view_data.alpha)
+-    else:
+-        color.a = saturate(color.a * view_data.alpha)
+-        
++    # 6. Calculate Quad Position
++    # Map quad_corner_index (0-3) to [-2, -2], [2, -2], [2, 2], [-2, 2]
++    quad_x = (quad_corner_index & 1) * 2.0 - 1.0
++    quad_y = ((quad_corner_index >> 1) & 1) * 2.0 - 1.0
++    quad_pos = vec2(quad_x, quad_y) * 2.0
++    
++    # Screen delta calculation
++    screen_delta = (quad_pos.x * view_data.axis1 + quad_pos.y * view_data.axis2) * 2.0 / screen_params.xy
++    final_vertex = voxel_pos_clip.xy + screen_delta * center_clip_w
++    
+     return final_vertex
+ 
+ # Fragment Shader Logic
+-def fragment_shader(fragment_pos, color):
++def fragment_shader(interpolated_pos, interpolated_color):
+     # Calculate Gaussian falloff
+-    power = -dot(fragment_pos, fragment_pos)
++    power = -dot(interpolated_pos, interpolated_pos)
+     alpha = exp(power)
+     
+-    # Handle selection outline
+-    if color.a < 0: # Selected
++    # Handle selection
++    if interpolated_color.a < 0: # Selected
+         if alpha > 7.0/255.0:
+             if alpha < 10.0/255.0:
+                 alpha = 1.0
+-                color.rgb = selected_color # Magenta
++                rgb = selected_color # Magenta
+             else:
+                 alpha = saturate(alpha + 0.3)
+-                color.rgb = lerp(color.rgb, selected_color, 0.5)
++                rgb = lerp(interpolated_color.rgb, selected_color, 0.5)
++        else:
++            discard_fragment()
+     else: # Not selected
+-        alpha = saturate(alpha * color.a)
++        alpha = saturate(alpha * interpolated_color.a)
++        rgb = interpolated_color.rgb
+         
+-    # Discard if negligible alpha
+     if alpha < 1.0/255.0:
+-        discard()
++        discard_fragment()
+         
+-    return half4(color.rgb * alpha, alpha)
+-
+-# Render Loop
+-def render_frame():
+-    # Update camera and send to worker
+-    worker.post_message({
+-        'sortData': {
+-            'positions': positions,
+-            'transforms': dummy_transforms,
+-            'transform_indices': dummy_transform_indices,
+-            'vertex_count': render_data.vertex_count
+-        }
+-    }, [positions.buffer, dummy_transforms.buffer, dummy_transform_indices.buffer])
+-    
+-    # Set blending
+-    gl.blend_func_separate(gl.ONE_MINUS_DST_ALPHA, gl.ONE, gl.ONE_MINUS_DST_ALPHA, gl.ONE)
+-    
+-    # Bind index buffer with divisor 1
+-    gl.vertex_attrib_i_pointer(index_buffer, divisor=1)
+-    
+-    # Draw instanced quads
+-    gl.draw_arrays_instanced(gl.TRIANGLE_FAN, 0, 4, render_data.vertex_count)
++    return half4(rgb * alpha, alpha)
+ ```
+ 
+@@ -151,5 +132,5 @@
+ 
+ ### [Debug Splat Point Rendering](2101-debug-splat-point-rendering.md)
+-Renders small quads at the center of each splat for debugging, optionally displaying the splat index as color.
++Debug Splat Point Rendering is a diagnostic visualization technique that renders individual 3D Gaussian splats as small screen-space quads centered at their projected positions. Unlike the production rendering path which draws full elliptical splats for opacity blending, this method isolates the center location and basic attributes of each splat, allowing developers to inspect splat distribution, density, and attribute correctness. It serves as a lightweight alternative to full splat rendering for verifying the correctness of the splat data pipeline and camera projection logic.
+ 
+ ### [Gaussian Splat Fragment Shader](3258-gaussian-splat-fragment-shader.md)
+@@ -162,28 +143,30 @@
+ Animated 3D Gaussian Splatting (Splatv rendering) is a GPU-accelerated rendering method for time-varying 3D Gaussian splats that computes time-dependent position, rotation, and scale deltas from packed texture data to enable smooth animation without per-frame CPU updates. It differs from static 3D Gaussian Splatting by evaluating polynomial motion deltas and applying temporal opacity decay in the vertex and fragment shaders, building on the screen-space quad rendering of [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md).
+ 
++### [Gaussian Splat URP Render Pass](17074-gaussian-splat-urp-render-pass.md)
++A Unity Universal Render Pipeline (URP) `ScriptableRendererFeature` that renders pre-sorted 3D Gaussian splats into a temporary render target and composites the result onto the camera color buffer. It differs from raw shader implementations by integrating into the URP render graph, handling XR multipass separation, and managing the intermediate render target lifecycle automatically.
++
+ ### Anisotropic 3D Gaussian Splatting Rendering
+-A rendering method for Gaussian splats that computes anisotropic covariance matrices to handle perspective distortion and view-dependent scaling, improving edge crispness and reducing haze compared to isotropic approximations [S5, unofficial]. In the vertex shader, compute the 3D covariance matrix $\Sigma_3$ using the rotation $R$ and scale $S$: $\Sigma_3 = R \cdot S^2 \cdot R^T$. Transform $\Sigma_3$ to view space. Compute the perspective Jacobian $J$ using focal terms from `getClipFromViewMatrix()`. Apply a low-pass filter to $\Sigma_2$ by adding $0.3 \text{ px}^2$ to prevent aliasing. Compute eigenvalues $\lambda_1, \lambda_2$ and eigenvectors from $\Sigma_2$. Compute the quad corners as centre $\pm 3 \cdot \sqrt{\lambda} \cdot v$, clamped to screen bounds. In the fragment shader, evaluate the Gaussian kernel $\exp(-\frac{1}{2} \mathbf{d}^T \Sigma_2^{-1} \mathbf{d})$ using interpolated quad coordinates $\mathbf{d}$ [S5, unofficial]. SplatBuffers: Add a third RGBA16F texture named `splatRotation` storing quaternion xyzw. The 3-axis scale can go into a fourth texture, or scale xyz plus position are repacked across three textures. `splatPositionScale.a` stays for compatibility [S5, unofficial].
++A rendering method for Gaussian splats that computes anisotropic covariance matrices to handle perspective distortion and view-dependent scaling, improving edge crispness and reducing haze compared to isotropic approximations [S5, unofficial]. In the vertex shader, it computes the 3D covariance matrix $\Sigma_3 = R \cdot S^2 \cdot R^T$, transforms it to view space, computes the perspective Jacobian $J$, applies a low-pass filter ($+0.3 \text{ px}^2$) to $\Sigma_2$, and eigen-decomposes it to place quad corners at $\text{centre} \pm 3\sqrt{\lambda}v$ [S5, unofficial]. It requires a third RGBA16F texture (`splatRotation`) for quaternions [S5, unofficial].
+ 
+ ### Isotropic Gaussian Splatting Rendering
+-A rendering technique for 3D Gaussian Splatting where each splat is rendered as an isotropic billboard (circle) using the maximum of the three axis scales, ignoring the rotation for the shape geometry. This results in a hazy, over-bright appearance and is considered a visible defect [S5, unofficial]. 1. Fetch per-splat data from two RGBA16F textures using the instance ID in the vertex shader. 2. Determine the billboard size using the maximum axis scale from the scale data. 3. Render as hardware-instanced camera-facing quads with premultiplied-alpha blend, depthWrite:false, and depthCulling:true. 4. Batch instances in groups of at most 65535 per draw call [S5, unofficial]. Per-splat data is stored in two RGBA16F textures. The vertex shader fetches this data by instance ID. The data includes positions, scales, rotations, colors, and opacities (with activations already applied in the SplatCloud model) [S5, unofficial]. Rendering defect: The isotropic approach causes splats to appear hazy and over-bright, specifically identified as the 'P1 isotropic artefact' [S5, unofficial]. Sorting complexity: $O(n \log n)$ performed on the CPU using a LongArray sort (SplatBuffers.sortBackToFront) [S5, unofficial].
++A rendering technique for 3D Gaussian Splatting where each splat is rendered as an isotropic billboard (circle) using the maximum of the three axis scales, ignoring the rotation for the shape geometry [S5, unofficial]. This results in a hazy, over-bright appearance (the 'P1 isotropic artefact') [S5, unofficial]. It fetches per-splat data from two RGBA16F textures, determines billboard size using max axis scale, and renders as hardware-instanced camera-facing quads with batches of at most 65535 instances per draw call [S5, unofficial]. Sorting complexity is $O(n \log n)$ on the CPU [S5, unofficial].
+ 
+ ### Anisotropic Gaussian Splatting Projection
+-A rendering technique that projects 3D Gaussian ellipses onto the screen space by computing a 2x2 covariance matrix, allowing for accurate anisotropic rendering of splats as ellipses rather than circles [S5, unofficial]. 1. Add a rotation texture or pack a quaternion and scales into a third RGBA16F texture. 2. Compute the 3D covariance matrix: $\Sigma = R \cdot S \cdot S^T \cdot R^T$, where $R$ is rotation and $S$ is scale. 3. Project the 3D covariance to screen space using the view Jacobian to obtain a 2x2 covariance matrix. 4. Eigen-decompose the 2x2 covariance to find major and minor axes. 5. Place the quad corners on these axes to render the anisotropic ellipse [S5, unofficial]. Differs from isotropic rendering by using the full covariance matrix to render ellipses, which reduces overdraw compared to max-axis discs and provides a sharper image [S5, unofficial]. Requires a third RGBA16F texture to store rotation (quaternion) and/or scale data if not packed into the existing two textures [S5, unofficial]. `getViewFromWorldMatrix()` and `getClipFromViewMatrix()` are available in Filament material vertex code [S5, unofficial].
++A rendering technique that projects 3D Gaussian ellipses onto the screen space by computing a 2x2 covariance matrix, allowing for accurate anisotropic rendering of splats as ellipses rather than circles [S5, unofficial]. It computes $\Sigma = R \cdot S \cdot S^T \cdot R^T$, projects it using the view Jacobian, eigen-decomposes to find major/minor axes, and places quad corners on these axes [S5, unofficial]. It differs from isotropic rendering by using the full covariance matrix, reducing overdraw and providing a sharper image [S5, unofficial]. It requires a third RGBA16F texture for rotation/scale data [S5, unofficial].
+ 
+ ### Gaussian Splat Vertex Shader
+-A vertex shader for rendering Gaussian splats as quads [S6, unofficial]. Input buffers: ViewDataBuffer (StructuredBuffer<FGaussianSplatViewData>), SortKeysBuffer (StructuredBuffer<uint>) [S6, unofficial]. SplatCount (uint32): Number of splats. DebugMode (uint32): 0=off, 1=cluster colors (Nanite-style debug). EnableNanite (uint32): 1=Nanite enabled, 0=disabled (hidden in debug mode) [S6, unofficial].
++A vertex shader for rendering Gaussian splats as quads [S6, unofficial]. It takes `SplatCount` (uint32), `DebugMode` (uint32: 0=off, 1=cluster colors), and `EnableNanite` (uint32: 1=Nanite enabled) as parameters [S6, unofficial]. It inputs `ViewDataBuffer` (StructuredBuffer<FGaussianSplatViewData>) and `SortKeysBuffer` (StructuredBuffer<uint>) [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sorting is $O(n \log n)$ performed on the CPU [S5, unofficial].
+-*   **Memory Complexity:** Requires texture re-upload of about 16 B/splat (24 B with a third texture) per re-sort [S5, unofficial].
+-*   **Measured Performance:** At 233k splats, re-sorting involves about 5.6 MB of data transfer [S5, unofficial]. Fill rate and overdraw dominate performance on mid-range phones [S5, unofficial].
+-*   **Scaling:** The CPU sort is fine up to about 300–500k splats; beyond that, LOD/pruning is needed [S5, unofficial].
+-*   **Strengths:** Real-time rendering on client-side hardware; reduces overdraw compared to isotropic billboards (anisotropic variant); handles transparency via alpha blending [S1, S3, S5, unofficial].
+-*   **Limitations:** CPU sorting can become a bottleneck for very large scenes; isotropic rendering causes haze and over-brightness; multiple Splatv objects are not supported [S3, S5, unofficial].
+-*   **When to use:** Real-time visualization of 3D Gaussian Splatting scenes in web browsers or mobile apps where neural network inference is not feasible [S1, S3, unofficial].
+-*   **When not to use:** Scenes with more than 500k splats without LOD; when isotropic rendering quality is insufficient (use anisotropic variant) [S5, unofficial].
++*   **Time Complexity:** Sorting is $O(n \log n)$ on the CPU [S5, unofficial]. Rendering is $O(n)$ for the draw call, but fragment processing is proportional to the number of overlapping pixels.
++*   **Memory Complexity:** Requires storage for splat data (positions, rotations, scales, colors) and the sorted index buffer. For 233k splats, sorting involves ~5.6 MB of texture re-upload per frame [S5, unofficial].
++*   **Measured Performance:** On mid-range phones, fill rate and overdraw dominate performance [S5, unofficial]. Anisotropic ellipses reduce overdraw compared to max-axis discs, offering a performance win [S5, unofficial]. The CPU sort is feasible up to ~300–500k splats; beyond that, LOD/pruning is needed [S5, unofficial].
++*   **Strengths:** Simple implementation using standard graphics APIs (WebGL, Unity URP); leverages existing instanced drawing capabilities; effective for real-time web and mobile visualization [S1, S3, S4, unofficial].
++*   **Limitations:** CPU sorting becomes a bottleneck at very high splat counts (>500k) [S5, unofficial]; isotropic variants suffer from visual artifacts (haze) [S5, unofficial]; multiple Splatv objects are not supported in some WebGL implementations [S3, unofficial].
++*   **When to Use:** Real-time visualization of Gaussian Splatting scenes in web browsers (WebGL) or Unity URP environments where CPU sorting is acceptable [S1, S3, S4, unofficial].
++*   **When Not to Use:** Scenes with millions of splats requiring real-time performance without LOD; platforms where CPU sorting is too slow or unavailable (e.g., pure GPU sorting required).
+ 
+ ## Background
+-Gaussian Splat Rendering (Screen-Space Quad) is a rendering technique identical in geometry generation to Circle Splat, used for Gaussian Splat visualization, projecting voxels as 2D quads [S1, unofficial]. It is used in `gsplat.js` for real-time WebGL rendering of Gaussian splats [S3, unofficial]. The method builds on the general projection and quad-drawing mechanism described in [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md) [S2, S3, unofficial].
++Gaussian Splat Rendering (Screen-Space Quad) is a rendering technique identical in geometry generation to Circle Splat, used for Gaussian Splat visualization, projecting voxels as 2D quads [S1, unofficial]. It is used in `gsplat.js` for real-time WebGL rendering of Gaussian splats [S3, unofficial]. The method builds on the general 3D Gaussian Splatting rendering pipeline, adapting it for screen-space quad rendering with CPU-side sorting [S2, S3, unofficial]. It is commonly used in web-based viewers (e.g., gsplat.js) and Unity URP implementations [S3, S4, unofficial].
+ 
+ ## Sources

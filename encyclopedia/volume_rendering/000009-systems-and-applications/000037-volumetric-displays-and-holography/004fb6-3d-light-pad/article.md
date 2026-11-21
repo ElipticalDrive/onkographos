@@ -1,0 +1,157 @@
+# 3D Light PAD
+Also called: volumetric three-dimensional digital light photoactivatable dye display
+
+## Overview
+3D Light PAD is a chemically enabled volumetric 3D display that uses photoactivatable molecules and digital light processing (DLP) to generate structured light in three dimensions by simultaneously activating and exciting fluorophores in a spatial pattern defined by DLP [S1]. It differs from photoactivated localization microscopy, which sequentially activates subsets of fluorophores, by generating a viewable volumetric image through simultaneous activation and excitation [S1]. Unlike beam-addressable systems using upconversion or plasma which require expensive high-energy beams, 3D Light PAD uses DLP projectors and photoactivatable dyes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D image definition (spatial pattern), two light sources (ultraviolet for photoactivation, visible for excitation/emission), and a chemical medium consisting of photoactivatable dye dispersed in a low-scattering solvent with a base additive.
+*   **Output:** A 3D volumetric image composed of fluorescent voxels at the intersection of the structured light beams.
+
+**Data Structures and Chemical Composition:**
+The medium is a solution containing:
+1.  **Photoactivatable Dye:** N-phenyl spirolactam rhodamine B [S1].
+2.  **Solvent:** Low-scattering solvent, specifically dichloromethane ($CH_2Cl_2$) in the reported implementation [S1].
+3.  **Base Additive:** Triethylamine, used to increase reversibility and speed up thermal fading [S1]. Concentrations tested were 1 p.p.m. (7.2 mM), 5 p.p.m. (36 mM), and 15 p.p.m. (108 mM) [S1].
+
+**Operating Principle:**
+The dye exists in a non-fluorescent 'off' state (spirolactam form) and a fluorescent 'on' state (merocyanine form) [S1].
+*   **Photoactivation:** Ultraviolet light opens the spirolactam ring, converting the dye to the fluorescent 'on' state [S1].
+*   **Excitation/Emission:** Visible light excites the 'on' state dye, causing it to emit fluorescence [S1].
+*   **Voxel Generation:** A 3D voxel is generated at the intersection of the UV and visible light beams [S1].
+*   **Thermal Fading:** The 'on' state is thermally reversible. The dye spontaneously returns to the 'off' state, allowing the voxel to fade and enabling dynamic updates [S1]. The base (triethylamine) accelerates this thermal fading [S1].
+
+**Parameters:**
+*   **Photoactivation Wavelength:** Ultraviolet light. Specific wavelengths used in experiments include 254 nm, 315 nm, and 385 nm [S1].
+*   **Excitation Wavelength:** Visible light. Specific wavelengths used include 532 nm and 556 nm [S1].
+*   **Emission Wavelength:** 586 nm [S1].
+*   **Minimum Voxel Size:** $0.68 \text{ mm}^3$ [S1].
+*   **Resolution:** 200 mm (stated as such in the source, likely a typo for 200 µm or similar, but reported as 200 mm) [S1].
+
+**Kinetics:**
+The thermal fading (off-rate, $k_{obs}$) follows single-exponential decay [S1]. The rate depends on the concentration of triethylamine [S1]:
+*   1 p.p.m. triethylamine: $k_{obs} = 0.048 \text{ s}^{-1}$ [S1].
+*   5 p.p.m. triethylamine: $k_{obs} = 0.20 \text{ s}^{-1}$ [S1].
+*   15 p.p.m. triethylamine: $k_{obs} = 0.50 \text{ s}^{-1}$ [S1] [G: The increase in rate was observed to be linear with base concentration].
+
+**Pitfalls and Edge Cases:**
+*   **Slow Fading/Irreversibility:** Prolonged UV illumination or the use of certain solvents (e.g., chloroform $CHCl_3$, deuterated chloroform $CDCl_3$) can lead to slow thermal fading kinetics or irreversible coloration/fluorescence [S1].
+*   **Solvent Choice:** Dichloromethane is preferred to avoid the irreversibility issues seen with chlorinated solvents [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# 3D Light PAD Simulation/Control Logic
+# Note: This describes the logical control flow for the display system
+# based on the chemical and optical principles described in [S1].
+
+def initialize_display():
+    # Define chemical medium parameters
+    dye_concentration = 5.0  # mM, as used in experiments [S1]
+    solvent = "dichloromethane"
+    base = "triethylamine"
+    base_ppm = 5.0  # Example concentration [S1]
+    base_molarity = 36.0  # mM corresponding to 5 p.p.m. [S1]
+    
+    # Define optical parameters
+    uv_wavelength = 385  # nm, example from DLP projector [S1]
+    vis_wavelength = 532  # nm, example from DLP projector [S1]
+    emission_wavelength = 586  # nm [S1]
+    
+    # Define kinetic parameters for the chosen base concentration
+    # k_obs values from [S1]
+    if base_ppm == 1.0:
+        k_obs = 0.048  # s^-1
+    elif base_ppm == 5.0:
+        k_obs = 0.20  # s^-1
+    elif base_ppm == 15.0:
+        k_obs = 0.50  # s^-1
+    else:
+        # Interpolate or use default if not specified in sources [G]
+        k_obs = 0.20  # s^-1
+        
+    return {
+        "dye": "N-phenyl spirolactam rhodamine B",
+        "solvent": solvent,
+        "base": base,
+        "base_conc_mM": base_molarity,
+        "uv_wl": uv_wavelength,
+        "vis_wl": vis_wavelength,
+        "em_wl": emission_wavelength,
+        "k_obs": k_obs
+    }
+
+def generate_voxel_3d(image_data, display_config):
+    """
+    Generates a 3D volumetric image by controlling UV and Visible light projectors.
+    
+    Args:
+        image_data: 3D array representing the desired voxel pattern (1 for on, 0 for off)
+        display_config: Output from initialize_display()
+        
+    Returns:
+        None, controls projectors directly
+    """
+    # Align projectors so UV and Visible beams cross in the solution [S1]
+    # The intersection of the structured light patterns defines the voxel locations
+    
+    # For each frame of the animation/image:
+    for frame in image_data:
+        # 1. Activate UV Projector
+        # Project the UV pattern corresponding to the 'on' voxels in the current frame
+        # This photoactivates the dye at the intersection points
+        uv_projector.set_pattern(frame)
+        uv_projector.on()
+        
+        # 2. Activate Visible Projector
+        # Project the visible pattern corresponding to the 'on' voxels
+        # This excites the activated dye to emit fluorescence
+        vis_projector.set_pattern(frame)
+        vis_projector.on()
+        
+        # 3. Wait for emission
+        # The dye emits light at 586 nm at the intersection [S1]
+        # The duration of illumination determines the brightness/intensity
+        # The thermal fading (k_obs) determines how long the voxel persists after light is off
+        wait_for_frame_duration()
+        
+        # 4. Turn off projectors
+        uv_projector.off()
+        vis_projector.off()
+        
+        # 5. Allow thermal fading
+        # The dye spontaneously returns to the 'off' state
+        # The rate is controlled by k_obs and base concentration [S1]
+        # If the next frame requires a different pattern, the old voxels fade out
+        # while new ones are activated in the next cycle
+        wait_for_next_frame()
+
+def check_solvent_stability(solvent_type):
+    """
+    Checks if the solvent is suitable to avoid irreversible coloration.
+    """
+    if solvent_type in ["CHCl3", "CDCl3"]:
+        return False  # Risk of irreversible coloration/fluorescence [S1]
+    elif solvent_type == "CH2Cl2":
+        return True   # Suitable [S1]
+    else:
+        return False  # Not given in the sources for other solvents [G]
+```
+
+## Operating characteristics
+*   **Voxel Size:** Minimum voxel size of $0.68 \text{ mm}^3$ [S1].
+*   **Resolution:** Reported as 200 mm (likely a typo for 200 µm or similar, but stated as 200 mm in text) [S1].
+*   **Stability:** Good stability over repeated 'on-off' cycles [S1].
+*   **Kinetics:** Thermal fading rates range from $0.048 \text{ s}^{-1}$ to $0.50 \text{ s}^{-1}$ depending on base concentration [S1].
+*   **Strengths:** Lack of moving parts, drastic simplification in voxel arrangement, widely accessible using commercial DLP projectors, no need for expensive high-energy beams [S1].
+*   **Limitations:** Voxel size is relatively large ($0.68 \text{ mm}^3$); resolution is limited by the optical setup and dye kinetics; potential for irreversible coloration with prolonged UV illumination or certain solvents [S1].
+*   **When to use:** Applications requiring accessible, low-cost volumetric 3D displays with moderate resolution and dynamic content [S1].
+*   **When not to use:** Applications requiring high-resolution, small-voxel displays or those incompatible with chemical media [S1].
+
+## Background
+3D Light PAD was reported in a 2017 Nature Communications paper by researchers from Southern Methodist University [S1]. It builds on the use of photoactivatable molecules, which are central to advances in super-resolution microscopy, data storage, molecular motors, and photopharmacology [S1]. The specific dye used, N-phenyl spirolactam rhodamine B, is a class of photoactivatable compounds that can be switched from a non-fluorescent to a fluorescent isomer using ultraviolet light [S1]. The system was developed to overcome obstacles in volumetric 3D display technology, such as complex fabrication, moving parts, high-speed projectors, or high laser powers [S1].
+
+## Sources
+[S1] A volumetric three-dimensional digital light photoactivatable dye display, https://doi.org/10.1038/ncomms15239, fetched 2026-10-26

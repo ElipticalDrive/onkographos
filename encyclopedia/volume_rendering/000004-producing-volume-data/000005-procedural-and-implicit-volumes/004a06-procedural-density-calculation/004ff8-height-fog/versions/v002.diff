@@ -1,0 +1,201 @@
+--- v001.md
++++ v002.md
+@@ -2,111 +2,136 @@
+ 
+ Also called: Exponential Height Fog
+-
+ ## Overview
+-Height fog is a procedural volumetric effect where density falls exponentially with height, filling space to fade the horizon and fill valleys [S1, unofficial]. It simulates a dense, flat atmospheric volume by blending voxel colors with a height fog color based on a submersion factor and a visibility curve [S2, unofficial]. Unlike distance-based fog which fades objects uniformly, height fog creates a stratified atmosphere that interacts with terrain geometry [S1, unofficial].
++Height fog is a procedural volumetric effect where density falls exponentially with height, filling space to fade the horizon and fill valleys [S1, unofficial]. It simulates a dense, flat atmospheric volume by blending voxel colors with a height fog color based on a submersion factor and a visibility curve [S2, unofficial]. In voxel-based systems, it often serves as the analytical component for sun light without dynamic shadows, applied to everything outside the ray-marching range [S3]. It is distinguished from general procedural density calculation by its specific exponential falloff and closed-form sampling, and from particle fog by its continuous, noise-free (in the base form) density field [S2, S4, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `z_centers`: Array of Z-coordinates for the sampled points (or voxels).
+-- `colors`: Array of base colors at the sampled points.
+-- `fog_density`: Scalar controlling fog strength.
+-- `fog_max_z`: Scalar, the maximum Z height for the fog effect.
+-- `fog_fade`: Scalar, minimum denominator for submersion calculation.
+-- `HEIGHT_FOG_RGB`: Scalar or vector, the color of the fog.
++- `z_centers`: Array of Z-coordinates for the sampled points or voxels.
++- `colors`: Array of RGB colors at the sampled points.
++- `fog_max_z`: Maximum Z height for the fog effect [S2, unofficial][S3].
++- `fog_fade`: Minimum denominator for submersion calculation [S2, unofficial].
++- `fog_density`: Scalar controlling the strength of the fog effect [S2, unofficial].
++- `HEIGHT_FOG_RGB`: The base color of the fog [S2, unofficial].
+ 
+ **Outputs:**
+-- `final_colors`: The fog-blended colors.
++- `final_colors`: The fog-blended RGB colors.
+ 
+ **Data Structures:**
+-- Arrays are assumed to be NumPy-style multidimensional arrays. `z_centers` and `colors` share spatial dimensions. `colors` shape is `(H, W, C)` or `(N, C)`.
++- Standard floating-point arrays for coordinates and colors. No complex bit-packing is required for the basic analytical calculation.
+ 
+ **Steps:**
+-1.  **Early Exit:** If `fog_density <= 0`, return `colors` immediately [S2, unofficial].
++
++1.  **Check Density:** If `fog_density <= 0`, return the input `colors` immediately [S2, unofficial].
+ 2.  **Calculate Submersion:**
+-    - Compute raw submersion: `sub = fog_max_z - z_centers` [S2, unofficial].
+-    - Clip to `[0.0, inf)`: `sub = max(0.0, sub)` [S2, unofficial].
+-    - Normalize by fade: `sub = sub / max(0.1, fog_fade)` [S2, unofficial].
+-    - Clip to `[0.0, 1.0]`: `submersion = min(1.0, sub)` [S2, unofficial].
++    - Compute raw submersion: `submersion_raw = fog_max_z - z_centers` [S2, unofficial].
++    - Clip to `[0.0, inf)`: `submersion_raw = max(0.0, submersion_raw)` [S2, unofficial].
++    - Compute denominator: `denom = max(0.1, fog_fade)` [S2, unofficial].
++    - Normalize: `submersion = submersion_raw / denom` [S2, unofficial].
++    - Clip to `[0.0, 1.0]`: `submersion = min(1.0, max(0.0, submersion))` [S2, unofficial].
+ 3.  **Calculate Visibility:**
+-    - `vis = 1.0 - submersion` [S2, unofficial].
+-    - Apply density exponent: `vis = vis ** (fog_density * 4.0)` [S2, unofficial].
+-4.  **Desaturate (Washout):**
++    - Compute base visibility: `vis = 1.0 - submersion` [S2, unofficial].
++    - Apply density falloff: `vis = vis ** (fog_density * 4.0)` [S2, unofficial].
++4.  **Desaturate Colors (Washout):**
+     - Compute washout factor: `washout = vis ** 2` [S2, unofficial].
+-    - Compute average luminance per pixel: `avg_lum = mean(colors, axis=-1)` [S2, unofficial].
+-    - Blend: `colors = colors * washout + avg_lum[..., None] * (1.0 - washout)` [S2, unofficial].
++    - Compute average luminance of input colors: `avg_lum = mean(colors, axis=1)` [S2, unofficial].
++    - Blend: `colors = colors * washout + avg_lum * (1.0 - washout)` [S2, unofficial].
+ 5.  **Blend with Fog Color:**
+-    - `vis_mask = vis` [S2, unofficial].
+-    - `final_colors = colors * vis_mask + HEIGHT_FOG_RGB * (1.0 - vis_mask)` [S2, unofficial].
++    - Compute visibility mask (same as `vis`): `vis_mask = vis` [S2, unofficial].
++    - Final blend: `final_colors = colors * vis_mask + HEIGHT_FOG_RGB * (1.0 - vis_mask)` [S2, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+ import numpy as np
+ 
+-def height_fog(z_centers: np.ndarray, colors: np.ndarray, 
+-               fog_density: float, fog_max_z: float, 
+-               fog_fade: float, height_fog_rgb: np.ndarray) -> np.ndarray:
++def apply_height_fog(z_centers: np.ndarray, colors: np.ndarray, 
++                     fog_max_z: float, fog_fade: float, 
++                     fog_density: float, height_fog_rgb: np.ndarray) -> np.ndarray:
+     """
+-    Applies exponential height fog to colors based on Z-height.
++    Applies exponential height fog to a set of colors based on their Z-height.
+     
+     Args:
+-        z_centers: Z-coordinates of the samples.
+-        colors: Base colors (N, C) or (H, W, C).
+-        fog_density: Strength of the fog.
+-        fog_max_z: Max Z height for fog.
+-        fog_fade: Minimum denominator for submersion.
+-        height_fog_rgb: Color of the fog.
++        z_centers: Array of Z-coordinates for each point/voxel.
++        colors: Array of RGB colors (N, 3) for each point/voxel.
++        fog_max_z: Maximum Z height for the fog effect.
++        fog_fade: Minimum denominator for submersion calculation.
++        fog_density: Controls the strength of the fog effect.
++        height_fog_rgb: The base color of the fog (3,).
+         
+     Returns:
+-        Fog-blended colors.
++        Final colors with height fog applied.
+     """
+-    if fog_density <= 0:
++    # Step 1: Check density
++    if fog_density <= 0.0:
+         return colors
+ 
+-    # 1. Calculate Submersion
+-    sub = fog_max_z - z_centers
+-    sub = np.maximum(0.0, sub)
+-    sub = sub / np.maximum(0.1, fog_fade)
+-    submersion = np.minimum(1.0, sub)
+-
+-    # 2. Calculate Visibility
++    # Step 2: Calculate Submersion
++    # submersion_raw = fog_max_z - z_centers
++    # Clip to [0.0, inf)
++    submersion_raw = np.maximum(0.0, fog_max_z - z_centers)
++    
++    # Denominator
++    denom = max(0.1, fog_fade)
++    
++    # Normalize and clip to [0.0, 1.0]
++    submersion = np.clip(submersion_raw / denom, 0.0, 1.0)
++    
++    # Step 3: Calculate Visibility
+     vis = 1.0 - submersion
+     vis = np.power(vis, fog_density * 4.0)
+-
+-    # 3. Desaturate
+-    washout = np.power(vis, 2)
+-    # Calculate mean luminance along the color axis (last axis)
+-    avg_lum = np.mean(colors, axis=-1, keepdims=True)
+-    colors = colors * washout[..., None] + avg_lum * (1.0 - washout[..., None])
+-
+-    # 4. Blend with Height Fog Color
+-    vis_mask = vis[..., None] if vis.ndim < colors.ndim else vis
+-    final_colors = colors * vis_mask + height_fog_rgb * (1.0 - vis_mask)
+-
++    
++    # Step 4: Desaturate Colors (Washout)
++    washout = np.power(vis, 2.0)
++    
++    # Compute average luminance per point
++    # Assuming colors are in RGB, simple mean is used as per source
++    avg_lum = np.mean(colors, axis=1, keepdims=True)
++    
++    # Blend colors with their average luminance
++    colors = colors * washout[:, np.newaxis] + avg_lum * (1.0 - washout[:, np.newaxis])
++    
++    # Step 5: Blend with Fog Color
++    vis_mask = vis
++    final_colors = colors * vis_mask[:, np.newaxis] + height_fog_rgb * (1.0 - vis_mask[:, np.newaxis])
++    
+     return final_colors
+ ```
+ 
+-**Parameters:**
+-- `fog_density`: Controls the strength of the fog effect [S2, unofficial].
+-- `fog_max_z`: Maximum Z height for the fog effect [S2, unofficial].
+-- `fog_fade`: Minimum denominator for submersion calculation (`max(0.1, fog_fade)`) [S2, unofficial].
++**Parameters with Typical Values:**
++- `fog_density`: Controls strength. Not given in the sources.
++- `fog_max_z`: Maximum Z height. Not given in the sources.
++- `fog_fade`: Minimum denominator. Not given in the sources.
++- `HEIGHT_FOG_RGB`: Fog color. Not given in the sources.
+ 
+-**Edge Cases:**
+-- If `fog_density <= 0`, the function returns immediately [S2, unofficial].
++**Edge Cases and Pitfalls:**
++- If `fog_density` is negative or zero, the fog is disabled [S2, unofficial].
+ - Division by zero is prevented by `max(0.1, fog_fade)` [S2, unofficial].
+-- Submersion is clipped to `[0.0, 1.0]` to ensure valid visibility values [S2, unofficial].
++- Submersion is clipped to `[0.0, 1.0]` to prevent invalid visibility values [S2, unofficial].
++- Precision issues may arise if `vis` becomes extremely small due to high `fog_density`, potentially causing underflow in floating-point representations [G].
+ 
+ ## Subtopics
+ 
+ ### Ground Fog
+-A technique building on exponential height fog that adds noise to simulate random particle movement, causing some areas to appear denser than others [S3, unofficial]. Fog density is defined by sampling fBm (fractional Brownian motion) noise [S3, unofficial].
++A technique building on exponential height fog that adds noise to simulate random particle movement, causing some areas to appear denser than others [S4, unofficial]. Fog density is defined by sampling fBm (fractional Brownian motion) noise [S4, unofficial]. It is chosen when a more natural, varied, and less uniform fog appearance is desired compared to the smooth exponential falloff of standard height fog [S4, unofficial].
++
++### Analytical Volumetric Fog
++A component of voxel-based systems that handles sun light without dynamic shadows and exponential height fog density, applied to everything outside the ray-marching range [S3]. It is distinguished from ray-marching fog by its analytical, closed-form calculation which is faster but lacks dynamic shadowing [S3]. It is used for distant fog effects where performance is critical and dynamic shadows are not required [S3].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++- **Time Complexity:** O(N) where N is the number of sampled points or voxels, as it involves simple arithmetic operations per point [S2, unofficial].
++- **Memory Complexity:** O(N) to store the input and output color arrays [S2, unofficial].
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Scales linearly with the number of samples. Suitable for real-time applications due to its closed-form nature [S1, unofficial][S3].
++- **Strengths:** Fast, simple to implement, provides a smooth and realistic horizon fade [S1, unofficial].
++- **Limitations:** Does not account for dynamic shadows or complex light interactions within the fog volume [S3]. The base form lacks the natural variation of noise-based fog [S4, unofficial].
++- **When to use:** For atmospheric fog effects in voxel-based or real-time rendering where performance is key and dynamic shadows are handled separately or not required [S3].
++- **When not to use:** When realistic, varied fog density is needed (use Ground Fog) [S4, unofficial], or when dynamic shadows within the fog are required (use Ray-marching Volumetric Fog) [S3].
+ 
+ ## Background
+-Height fog is implemented in MagicaVoxel as part of its "style voxel" preset, which includes ACES, bloom, vignette, a sun, atmospheric sky, ground, bounce caps, and transparent shadows [S1, unofficial]. It is also used in the Pyvorengi SDK demo for voxel rendering [S2, unofficial]. The concept of using noise to enhance procedural fog is discussed in the context of PlayCanvas and Magnopus Web Renderer [S3, unofficial].
++Height fog, also known as exponential height fog, originated as a technique in voxel-based rendering systems, such as MagicaVoxel, to provide atmospheric depth [S1, unofficial]. It is a standard component in game engines like CRYENGINE for handling distant atmospheric effects analytically [S3]. The concept of adding noise to create ground fog has been explored in web-based rendering contexts to enhance realism [S4, unofficial].
+ 
+ ## Sources
+ [S1] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
+ [S2] herbal1st/pyvorengi-sdk-demo, https://github.com/herbal1st/pyvorengi-sdk-demo, fetched 2026-10-27 (unofficial)
+-[S3] Building beautiful worlds across platforms with PlayCanvas and the Magnopus Web Renderer; featuring volumetric lighting — Mag..., https://www.magnopus.com/blog/building-beautiful-worlds-across-platforms-with-playcanvas-and-the-magnopus-web-renderer-featuring-volumetric-lighting, fetched 2026-10-29 (unofficial)+[S3] CRYENGINE | Documentation - Volumetric Fog, https://www.cryengine.com/docs/static/engines/cryengine-3/categories/1114113/pages/21268322, fetched 2026-10-29
++[S4] Building beautiful worlds across platforms with PlayCanvas and the Magnopus Web Renderer; featuring volumetric lighting — Mag..., https://www.magnopus.com/blog/building-beautiful-worlds-across-platforms-with-playcanvas-and-the-magnopus-web-renderer-featuring-volumetric-lighting, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,105 @@
+# Hybrid Updates for Editing
+
+Also called: Hybrid Network Update Strategy, Selective Layer Finetuning
+
+## Overview
+Hybrid Updates for Editing is a strategy that targets specific network components for updates to balance efficiency and accuracy during user interaction in conditional radiance fields [S1]. It updates only specific layers of the network and latent codes to achieve both accuracy and efficiency, avoiding the slowness of updating all weights and the low quality of updating only latent codes [S1]. Unlike updating the entire network or only codes, this method updates only a subset of components (later layers) to achieve significant computational speed-up [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A pre-trained conditional radiance field model $F$ consisting of shared shape network $F_{share}$, instance-specific shape network $F_{inst}$, fusion shape network $F_{fuse}$, output density network $F_{dens}$, and output radiance network $F_{rad}$ [S1]. User constraints (e.g., target colors or shape modifications) [S1].
+*   **Outputs:** Updated network weights for the selected layers and updated latent codes ($z^{(s)}$ for shape, $z^{(c)}$ for color) [S1].
+
+**Data Structures:**
+*   **Shape Code ($z^{(s)}$):** 32-dimensional vector [S1].
+*   **Color Code ($z^{(c)}$):** 32-dimensional vector [S1].
+*   **Network Components:**
+    *   $F_{share}$: Operates on positional encoding $\gamma(x)$ [S1].
+    *   $F_{inst}$: Conditioned on $z^{(s)}$ and $\gamma(x)$ [S1].
+    *   $F_{fuse}$: Fuses representations from $F_{share}$ and $F_{inst}$ [S1].
+    *   $F_{dens}$: Linear layer taking output of $F_{fuse}$ to predict density $\sigma$ [S1].
+    *   $F_{rad}$: Takes concatenated output of $F_{fuse}$, $z^{(c)}$, and viewing direction encoding $\gamma(d)$ to predict radiance $c$ [S1].
+
+**Parameters:**
+*   **Learning Rate:** $10^{-2}$ for editing optimization steps [S1]. (Note: Initial training uses $10^{-4}$ [S1]).
+*   **Optimizer:** Adam [S1].
+*   **Ray Sampling:**
+    *   Color editing: Randomly sample 64 rays [S1].
+    *   Shape editing: Randomly sample 8,192 rays [S1].
+
+**Algorithm Steps:**
+The method distinguishes between shape editing and color editing, updating different subsets of the network.
+
+1.  **Initialize Optimization:**
+    *   Load pre-trained conditional radiance field $F$ [S1].
+    *   Initialize latent codes $z^{(s)}$ and $z^{(c)}$ if not already present or if joint optimization is required [S1].
+    *   Set learning rate $\eta = 10^{-2}$ [S1].
+
+2.  **Determine Edit Type and Target Components:**
+    *   If **Color Editing**:
+        *   Target components: Output radiance network $F_{rad}$ and color code $z^{(c)}$ [S1].
+        *   Note: The source states "potentially network weights" generally, but specifies for color editing: "Update only $F_{rad}$ and $z^{(c)}$" [S1].
+    *   If **Shape Editing**:
+        *   Target components: Fusion shape network $F_{fuse}$ and output density network $F_{dens}$ [S1].
+        *   Also update shape code $z^{(s)}$ [S1].
+
+3.  **Apply Feature Caching (Optional but Recommended):**
+    *   Identify network components that remain unchanged during the specific edit [S1].
+    *   For **Color Editing**: Since only $F_{rad}$ is optimized, its input features are unchanged. Cache the outputs of $F_{share}$, $F_{inst}$, and $F_{fuse}$ (specifically the input to $F_{rad}$) for the views being rendered/optimized [S1].
+    *   For **Shape Editing**: Cache outputs of components not in $\{F_{fuse}, F_{dens}\}$ if applicable, though the primary speedup comes from gradient computation reduction [S1].
+    *   *Implementation Note:* During optimization, skip forward passes for cached components and use stored values [S1].
+
+4.  **Optimization Loop:**
+    *   Sample rays based on edit type (64 for color, 8,192 for shape) [S1].
+    *   Perform forward pass through the network:
+        *   Compute features using cached values where applicable.
+        *   Compute gradients only for the target components ($F_{rad}, z^{(c)}$ for color; $F_{fuse}, F_{dens}, z^{(s)}$ for shape) [S1].
+    *   Compute loss (e.g., reconstruction loss $L_{rec}$ based on user constraints) [S1].
+    *   Update target parameters using Adam optimizer with $\eta = 10^{-2}$ [S1].
+    *   Repeat until convergence or user satisfaction [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Occlusions:** The basic method assumes desired object parts do not occlude other parts. Additional slower methods are required for occluded edits (see appendix of source) [S1].
+*   **Precision:** Standard floating-point precision is assumed; no specific bit-packing is mentioned for the codes or weights in the context of the update strategy itself [S1].
+*   **Boundary Conditions:** The method relies on the conditional radiance field architecture being properly trained first. Updating only later layers assumes the earlier layers (shared shape) provide a sufficient base representation [S1].
+
+## Subtopics
+
+### Feature Caching
+Feature caching is an optimization technique that caches network outputs that remain unchanged during editing to avoid unnecessary computation [S1]. During color editing optimization, since only $F_{rad}$ is optimized, its input features (outputs of $F_{share}$, $F_{inst}$, $F_{fuse}$) are cached [S1]. This reduces rendering time for a 256x256 image from 6.2 to under 0.8 seconds (7.8x speedup) [S1]. It also accelerates color edit optimization by 3.2x and shape edit optimization by 1.9x [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Optimization Time:**
+    *   Overall training optimization time is reduced by 3.2x (from 1,081 to 342 seconds) using hybrid updates compared to updating the entire network [S1].
+    *   Color editing optimization time is reduced from 972 to 260 seconds (3.7x speedup) compared to optimizing the whole network [S1].
+    *   Shape editing optimization time is reduced by 1.9x [S1].
+*   **Rendering Time:**
+    *   Rendering time for a 256x256 image is reduced from 6.2 to under 0.8 seconds (7.8x speedup) with feature caching during color edits [S1].
+*   **Subsampling Impact:**
+    *   Subsampling user constraints provides additional speedups: 24x for color edits and 2.9x for shape edits [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant computational speed-up while maintaining edit accuracy [S1]. Avoids unwanted changes in unedited regions that can occur when updating the entire network [S1]. Efficiently propagates edits to unseen views [S1].
+*   **Limitations:** Requires identifying the correct network components for specific edits (shape vs. color) [S1]. May not handle complex occlusions as effectively as full network updates without additional methods [S1].
+
+**When to Use:**
+*   Use when user interaction requires real-time or near-real-time feedback for color or shape edits in a conditional radiance field [S1].
+*   Use when computational resources are limited but high-quality editing is required [S1].
+
+**When Not to Use:**
+*   Use full network updates if the edit requires changes to the shared shape representation or if the specific layer mapping is unknown [S1].
+*   Use if the scene has complex occlusions that require global re-optimization (unless the slower occlusion-handling method is employed) [S1].
+
+## Background
+**Origin:**
+The method was introduced in the paper "Editing Conditional Radiance Fields" [S1].
+
+**History and Development:**
+The approach builds upon neural radiance fields (NeRF) [S1] and adapts them to a 3D neural editing setting for object classes (e.g., "chairs") [S1]. It addresses the limitations of prior neural editing approaches by proposing a hybrid update strategy that targets specific network components [S1]. The authors observed that shape and color edits can effectively take place in the later layers of the network, motivating the selective update strategy [S1].
+
+**Usage:**
+Demonstrated on various editing tasks over three shape datasets, showing effectiveness for object view synthesis, color editing, and shape editing [S1]. Also applied to editing the appearance and shape of real photographs, with edits propagating to extrapolated novel views [S1].
+
+## Sources
+[S1] Editing Conditional Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00572, fetched 2026-10-26

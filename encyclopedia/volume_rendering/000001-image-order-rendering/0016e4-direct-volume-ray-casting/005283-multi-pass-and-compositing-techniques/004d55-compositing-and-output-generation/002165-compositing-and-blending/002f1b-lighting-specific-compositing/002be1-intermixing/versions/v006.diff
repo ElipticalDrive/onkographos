@@ -1,0 +1,104 @@
+--- v005.md
++++ v006.md
+@@ -8,32 +8,58 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ co-registered volume datasets (channels), each with its own scalar field $V_n(x,y,z)$ and associated lighting model parameters. A ray $r(t) = o + t \cdot d$ traversing the volume.
+-*   **Outputs:** A final pixel color $C_{final}$ and opacity $\alpha_{acc}$.
++*   **Inputs:** A set of $N$ co-registered volume datasets (channels), each with a scalar field and associated illumination model parameters [S1, unofficial]. A viewing ray $r(t) = o + t \cdot d$ [G].
++*   **Outputs:** Final pixel color $C_{final}$ and accumulated opacity $\alpha_{acc}$ [G].
+ 
+ **Data Structures:**
+-The method operates on the standard ray-casting accumulator state $(C_{acc}, \alpha_{acc})$, initialized to $(0, 0)$ [S1, unofficial]. For each sample $i$ along the ray, the method requires access to the values from all $N$ channels at the sample position $p_i$.
++The method operates on the standard ray-casting accumulator state $(C_{acc}, \alpha_{acc})$, initialized to $(0, 0)$ [G]. For each sample $i$ along the ray, values from all $N$ channels are accessed at the sample position $p_i$ [S1, unofficial].
+ 
+ **Numbered Steps:**
+-1.  Initialize accumulator: $C_{acc} \leftarrow 0$, $\alpha_{acc} \leftarrow 0$, and transmittance $T \leftarrow 1.0$ [G].
++1.  Initialize accumulator: $C_{acc} \leftarrow \mathbf{0}$, $\alpha_{acc} \leftarrow 0$, and transmittance $T \leftarrow 1.0$ [G].
+ 2.  For each sample $i$ along the ray (from near to far):
+-    a.  Evaluate the scalar value $v_{n,i}$ for each channel $n \in \{1, \dots, N\}$ at the sample position $p_i$.
+-    b.  For each channel $n$, compute the effective color contribution $\Delta C_{n,i}$ and effective opacity contribution $\Delta \alpha_{n,i}$ using the specific lighting model for that channel. The lighting model takes $v_{n,i}$ and potentially other local properties (e.g., gradient) as input [S1, unofficial].
+-    c.  Aggregate the contributions from all channels. The total effective color contribution $\Delta C_i$ and opacity contribution $\Delta \alpha_i$ are derived from the individual channel results. In the standard accumulation-level intermixing formulation, these are summed or combined according to the specific implementation's blending rules for multiple channels [S1, unofficial].
+-    d.  Update the accumulator using the combined contributions:
+-        $$
+-        C_{acc} \leftarrow C_{acc} + \Delta C_i \cdot T
+-        $$
+-        $$
+-        T \leftarrow T \cdot (1 - \Delta \alpha_i)
+-        $$
+-        $$
+-        \alpha_{acc} \leftarrow 1 - T
+-        $$
+-    e.  Check for early ray termination: if $\alpha_{acc}$ exceeds a threshold (e.g., 0.99), break the loop [S10, S12, unofficial].
+-3.  Composite the final color over the background $C_{bg}$:
+-    $$
+-    C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}
+-    $$
+-    [S1, S14, unofficial].
++    a.  Evaluate the scalar value $v_{n,i}$ for each channel $n \in \{1, \dots, N\}$ at the sample position $p_i$ [S1, unofficial].
++    b.  For each channel $n$, compute the effective color contribution $\Delta C_{n,i}$ and effective opacity contribution $\Delta \alpha_{n,i}$ using the specific illumination model for that channel [S1, unofficial].
++    c.  Aggregate the contributions from all channels to obtain total effective color $\Delta C_i = \sum_{n=1}^N \Delta C_{n,i}$ and opacity $\Delta \alpha_i = \sum_{n=1}^N \Delta \alpha_{n,i}$ [G].
++    d.  Update the accumulator: $C_{acc} \leftarrow C_{acc} + \Delta C_i \cdot T$, $T \leftarrow T \cdot (1 - \Delta \alpha_i)$, $\alpha_{acc} \leftarrow 1 - T$ [G].
++    e.  Check for early ray termination: if $\alpha_{acc}$ exceeds a threshold (e.g., $0.99$), break the loop [G].
++3.  Composite the final color over the background $C_{bg}$: $C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}$ [G].
++
++**Pseudocode:**
++```python
++def intermixing_ray_cast(ray_origin, ray_direction, volumes, lighting_models, dt, C_bg):
++    # Initialize accumulator [G]
++    C_acc = (0.0, 0.0, 0.0)
++    alpha_acc = 0.0
++    T = 1.0
++
++    # Sample along ray [G]
++    # Ray length and step size dt are Not given in the sources.
++    t = 0.0
++    while t < ray_length:
++        p = ray_origin + t * ray_direction
++        # Evaluate illumination for each channel at sample position [S1, unofficial]
++        delta_C_total = (0.0, 0.0, 0.0)
++        delta_alpha_total = 0.0
++        for n in range(len(volumes)):
++            v_n = volumes[n].sample(p)
++            # Compute channel-specific contributions using its illumination model [S1, unofficial]
++            delta_C_n, delta_alpha_n = lighting_models[n](v_n)
++            delta_C_total = (delta_C_total[0] + delta_C_n[0], delta_C_total[1] + delta_C_n[1], delta_C_total[2] + delta_C_n[2])
++            delta_alpha_total += delta_alpha_n
++
++        # Update accumulator with combined contributions [G]
++        C_acc = (C_acc[0] + delta_C_total[0] * T, C_acc[1] + delta_C_total[1] * T, C_acc[2] + delta_C_total[2] * T)
++        T = T * (1.0 - delta_alpha_total)
++        alpha_acc = 1.0 - T
++
++        # Early ray termination [G]
++        if alpha_acc > 0.99:
++            break
++
++        t += dt
++
++    # Composite over background [G]
++    C_final = (C_acc[0] + (1.0 - alpha_acc) * C_bg[0], C_acc[1] + (1.0 - alpha_acc) * C_bg[1], C_acc[2] + (1.0 - alpha_acc) * C_bg[2])
++    return C_final, alpha_acc
++```
+ 
+ **Pitfalls:**
+@@ -41,4 +67,5 @@
+ *   **Channel Limitations:** In hardware implementations (e.g., GPU texture formats), the number of channels $N$ may be limited (e.g., to 4) due to available texture components [S1, unofficial].
+ *   **Homogeneity Optimization:** If using spatial acceleration structures (like octrees), a node can only be marked homogeneous if its corresponding bricks in *all* channels are homogeneous [S1, unofficial].
++*   **Parameters:** Typical ray step size, accumulation threshold, and background color are Not given in the sources.
+ 
+ ## Subtopics
+@@ -48,5 +75,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of channels and $S$ is the number of samples per ray. Each sample requires evaluating the lighting model for all $N$ channels [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of channels and $S$ is the number of samples per ray. Each sample requires evaluating the illumination model for all $N$ channels [S1, unofficial].
+ *   **Memory Complexity:** Depends on the storage of $N$ volume datasets. In hardware implementations, limited to the number of texture components (typically 4) [S1, unofficial].
+ *   **Strengths:** Correctly handles occlusions between different channels; flexible lighting models per channel [S1, unofficial].
+@@ -56,5 +83,5 @@
+ 
+ ## Background
+-Intermixing, specifically accumulation-level intermixing, was presented by Brix et al. in 2014 [BPH14] as part of an out-of-core rendering approach for multi-channel volume data sets. It builds on Crassin et al.’s [CNLE09] octree-based memory virtualization scheme. The method is used in systems such as Voreen [DLJL22], Viv [MGP+22], and Neuroglancer [Goo22].
++Accumulation-level intermixing is used by Brix et al. [BPH14], Viv [MGP+22], Neuroglancer [Goo22], and the author's method [S1, unofficial]. Brix et al.'s out-of-core rendering approach for multi-channel volume data sets is based on Crassin et al.’s [CNLE09] octree-based memory virtualization scheme [S1, unofficial]. The method is implemented in systems such as Voreen [DLJL22], Viv [MGP+22], and Neuroglancer [Goo22] [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,273 @@
+# Volume Cloud Generation Pipeline
+
+Also called: Procedural Cloud Volume Generation, Noise-Based Cloud Density Field
+
+## Overview
+The Volume Cloud Generation Pipeline generates a patchy, volumetric density field for cloud simulation by applying procedural noise functions with domain warping and edge constraints. It solves the problem of creating large-scale atmospheric phenomena without requiring pre-computed voxel data or external texture maps [S1, unofficial]. It distinguishes itself from its sibling [Volumetric Density Generation](4894-volumetric-density-generation.md) by incorporating multi-scale domain warping, specific boundary envelope functions, and dual-style (realistic/cartoon) noise lattices to produce organic, non-repeating cloud structures [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `params`: Configuration object containing `resolution` (int), `seed` (int), `cloud_type_id` (int), `style` (enum: 'realistic' or 'cartoon'), `disturbance_strength` (float), `detail_strength` (float), `resolved_allow_boundary_overlap` (bool).
+- `cloud`: Cloud definition object containing `default_allow_boundary_overlap` (bool).
+
+**Outputs:**
+- `density`: 3D `uint8` array of shape `(size, size, size)` representing density (0-255).
+- `disturbance`: 3D `uint8` array of shape `(size, size, size)` representing flow/velocity magnitude (0-255).
+- `metadata`: Dictionary containing encoding version, dimensions, tile layout, axis order, cloud type info, parameters, style, noise profile, channel meanings, and edge profiles.
+
+**Data Structures:**
+- `density`: `np.ndarray` of shape `(size, size, size)`, dtype `uint8`.
+- `disturbance`: `np.ndarray` of shape `(size, size, size)`, dtype `uint8`.
+- `axis`: 1D `float32` array of length `size`, values in `[-1.0, 1.0]`.
+- `x, y`: 2D `float32` arrays of shape `(size, size)`, generated via `np.meshgrid`.
+- `lattices`: Tuple of 3D `float32` arrays. Each lattice has shape `(frequency, frequency, frequency)` where `frequency` is a prime number from a predefined set.
+
+**Constants:**
+- `SAFE_EMPTY_BORDER_Z`: Not given in the sources.
+- `SAFE_FADE_WIDTH_Z`: Not given in the sources.
+- `LAYER_CLOUD_TYPE_IDS`: Set of cloud type IDs considered "layer" clouds. Not given in the sources.
+- `lobe_z`, `lobe_z_radius`, `weight`, `vertical_presence`, `lobe`: Parameters for lobe-based shaping. Not given in the sources.
+- `center_z`, `half_height`, `horizontal_taper`, `side_variation`: Parameters for layer shape profiles. Not given in the sources.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def volume_cloud_generation_pipeline(params, cloud):
+    size = params.resolution
+    seed = params.seed
+    style = params.style
+    detail_strength = params.detail_strength
+    disturbance_strength = params.disturbance_strength
+    cloud_type_id = params.cloud_type_id
+    
+    # 1. Allocate output arrays
+    try:
+        density = np.zeros((size, size, size), dtype=np.uint8)
+        disturbance = np.zeros((size, size, size), dtype=np.uint8)
+    except MemoryError:
+        raise VolumeMemoryPressureError("Insufficient memory for volume cloud generation")
+
+    # 2. Generate coordinate grids
+    axis = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+    x, y = np.meshgrid(axis, axis, indexing="xy")
+
+    # 3. Initialize noise lattices
+    density_lattices = _make_noise_lattices(seed + 101, (2, 3, 5, 8, 13))
+    flow_lattices = _make_noise_lattices(seed + 7919, (2, 4, 7, 11))
+    boundary_lattices = _make_noise_lattices(seed + 12113, (1, 2, 3, 5))
+
+    cartoon_noise_set = None
+    shape_variation = None
+    if style == 'cartoon':
+        cartoon_noise_set = _make_cartoon_noise_set(seed)
+        shape_variation = _get_cloud_shape_variation(seed, cloud_type_id) # [G] Helper to get variation params
+
+    # 4. Determine boundary behavior
+    uses_natural_finite_edge = (
+        not params.resolved_allow_boundary_overlap and
+        cloud.default_allow_boundary_overlap and
+        cloud_type_id in LAYER_CLOUD_TYPE_IDS
+    )
+
+    # 5. Generate boundary noise fields for finite edges
+    top_surface_noise = _value_noise_slice(boundary_lattices[0], x, y, -0.61) * (detail_strength * 0.22 / 0.26)
+    bottom_surface_noise = _value_noise_slice(boundary_lattices[1], x, y, 0.27) * (detail_strength * 0.22 / 0.26)
+    thickness_noise = _value_noise_slice(boundary_lattices[2], x, y, 0.83) * (detail_strength * 0.22 / 0.26)
+
+    # 6. Calculate XY distance to edges
+    xy_distance = np.minimum.reduce((x + 1.0, 1.0 - x, y + 1.0, 1.0 - y))
+    discrete_cloud_edge_guard = _safe_edge_fade(xy_distance, 0.0, 0.045)
+
+    # 7. Loop over Z slices
+    for z_index in range(size):
+        z_coord = axis[z_index]
+        
+        if style == 'cartoon':
+            macro, body, edge, cartoon_flow = _cartoon_noise_fields(
+                cartoon_noise_set, x, y, z_coord, detail_strength, disturbance_strength
+            )
+            raw_density = _cartoon_density_slice(macro, body, edge, shape_variation) # [G] Helper for cartoon density
+            flow = _cartoon_flow_noise(cartoon_flow) # [G] Helper for cartoon flow
+        else: # realistic
+            density_noise = _fractal_value_noise(density_lattices, x, y, z_coord, detail_strength)
+            flow_noise = _fractal_value_noise(flow_lattices, x, y, z_coord, disturbance_strength)
+            raw_density = _density_slice(density_noise) # [G] Helper for realistic density
+            flow = 0.5 + (flow_noise - 0.5) * disturbance_strength
+
+        # 8. Calculate Z fade
+        z_distance = np.minimum(float(z_index + 1.0), float(size - 1 - z_index))
+        # Note: z_distance calculation in source uses float(z + 1.0) where z is likely index or normalized coord.
+        # Assuming z_index is used for distance to border in voxels.
+        z_fade = _safe_edge_fade(z_distance, SAFE_EMPTY_BORDER_Z, SAFE_FADE_WIDTH_Z)
+
+        # 9. Apply boundary constraints
+        if uses_natural_finite_edge:
+            # Calculate side edge noise with offset
+            side_edge_noise = _value_noise_slice(
+                boundary_lattices[0], 
+                x + z_coord * 0.16, 
+                y - z_coord * 0.11, 
+                z_coord * 1.75 + 0.19
+            )
+            natural_xy_edge = _natural_xy_edge_envelope(side_edge_noise, shape_variation) # [G] Helper
+            vertical_envelope = _finite_layer_vertical_envelope(cloud_type_id, z_coord) # [G] Helper
+            fixed_vertical = _fixed_layer_vertical_profile(cloud_type_id) # [G] Helper
+            fixed_vertical = max(fixed_vertical, 0.075)
+            raw_density = raw_density * natural_xy_edge * (vertical_envelope / fixed_vertical)
+        elif not params.resolved_allow_boundary_overlap:
+            raw_density = raw_density * discrete_cloud_edge_guard
+
+        # 10. Apply Z fade and store
+        raw_density = raw_density * z_fade
+        clipped_density = np.clip(raw_density, 0.0, 1.0)
+        density[z_index] = np.rint(clipped_density * 255.0).astype(np.uint8)
+        
+        clipped_flow = np.clip(flow, 0.0, 1.0)
+        disturbance[z_index] = np.rint(clipped_flow * 255.0).astype(np.uint8)
+
+    # 11. Construct metadata
+    metadata = {
+        "encoding_version": 1,
+        "dimensions": (size, size, size),
+        "tile_layout": {"cols": size, "rows": 1},
+        "axis_order": "Z,Y,X",
+        "cloud_type_id": cloud_type_id,
+        "parameters": params,
+        "style": style,
+        "noise_profile": {
+            "density_lattices": density_lattices,
+            "flow_lattices": flow_lattices,
+            "boundary_lattices": boundary_lattices
+        },
+        "channel_meanings": {
+            "R": "density",
+            "G": "flow",
+            "B": "0",
+            "A": "255"
+        },
+        "edge_profiles": {
+            "uses_natural_finite_edge": uses_natural_finite_edge,
+            "discrete_cloud_edge_guard": discrete_cloud_edge_guard
+        }
+    }
+
+    return VolumeResult(density, disturbance, metadata)
+
+def _smoothstep(value):
+    clipped = np.clip(value, 0.0, 1.0)
+    return clipped * clipped * (3.0 - 2.0 * clipped)
+
+def _safe_edge_fade(distance_to_edge, empty_border, fade_width):
+    return _smoothstep(np.maximum(distance_to_edge - empty_border, 0.0) / fade_width)
+
+def _fade(value):
+    return value * value * value * (value * (value * 6.0 - 15.0) + 10.0)
+
+def _value_noise_slice(lattice, x, y, z):
+    frequency = lattice.shape[0]
+    px = (x + 1.0) * 0.5 * frequency
+    py = (y + 1.0) * 0.5 * frequency
+    pz = (z + 1.0) * 0.5 * frequency
+    
+    ix = np.floor(px).astype(np.intp) % frequency
+    iy = np.floor(py).astype(np.intp) % frequency
+    iz = np.floor(pz).astype(np.intp) % frequency
+    
+    fx, fy, fz = _fade(px - np.floor(px)), _fade(py - np.floor(py)), _fade(pz - np.floor(pz))
+    
+    ix1, iy1, iz1 = (ix + 1) % frequency, (iy + 1) % frequency, (iz + 1) % frequency
+    
+    c00 = lattice[iz, iy, ix] * (1.0 - fx) + lattice[iz, iy, ix1] * fx
+    c10 = lattice[iz, iy1, ix] * (1.0 - fx) + lattice[iz, iy1, ix1] * fx
+    c01 = lattice[iz1, iy, ix] * (1.0 - fx) + lattice[iz1, iy, ix1] * fx
+    c11 = lattice[iz1, iy1, ix] * (1.0 - fx) + lattice[iz1, iy1, ix1] * fx
+    
+    lower = c00 * (1.0 - fy) + c10 * fy
+    upper = c01 * (1.0 - fy) + c11 * fy
+    
+    return lower * (1.0 - fz) + upper * fz
+
+def _fractal_value_noise(lattices, x, y, z, detail):
+    warp_strength = 0.12 + 0.08 * np.clip(detail, 0.0, 1.0)
+    lattice_x = lattices[0]
+    lattice_y = lattices[min(1, len(lattices) - 1)]
+    lattice_z = lattices[min(2, len(lattices) - 1)]
+    
+    warp_x = _value_noise_slice(lattice_x, x + y, y - z, z + x) - 0.5
+    warp_y = _value_noise_slice(lattice_y, 2.0 * x - y, x + z, y + z) - 0.5
+    warp_z = _value_noise_slice(lattice_z, x - z, 2.0 * y + z, x + y - z) - 0.5
+    
+    warped_x = x + warp_strength * warp_x
+    warped_y = y + warp_strength * warp_y
+    warped_z = z + warp_strength * warp_z
+    
+    transforms = (
+        (warped_x, warped_y, warped_z),
+        (warped_x + warped_y, warped_y + warped_z, warped_z + warped_x),
+        (2.0 * warped_x - warped_y, warped_x + 2.0 * warped_y, warped_z + warped_y),
+        (warped_x - warped_z, 2.0 * warped_y + warped_z, warped_x + warped_y - warped_z),
+        (2.0 * warped_x + warped_z, warped_y - warped_x, 2.0 * warped_z + warped_y),
+    )
+    
+    samples = [
+        _value_noise_slice(lattice, *transforms[index % len(transforms)])
+        for index, lattice in enumerate(lattices)
+    ]
+    
+    weights = [1.0]
+    for index in range(1, len(samples)):
+        weights.append((0.52 + detail * 0.16) ** index)
+        
+    total = sum(weight * sample for weight, sample in zip(weights, samples, strict=True))
+    return np.clip(total / sum(weights), 0.0, 1.0)
+
+def _make_noise_lattices(seed, frequencies):
+    generator = np.random.default_rng(seed)
+    return tuple(generator.random((frequency, frequency, frequency), dtype=np.float32) for frequency in frequencies)
+
+def _make_cartoon_noise_set(seed):
+    return {
+        "macro_lattices": _make_noise_lattices(seed + 20101, (1, 2, 3)),
+        "body_lattices": _make_noise_lattices(seed + 20503, (2, 3, 5)),
+        "edge_lattices": _make_noise_lattices(seed + 20907, (3, 5, 7)),
+        "flow_lattices": _make_noise_lattices(seed + 21301, (2, 3, 5, 8))
+    }
+
+def _cartoon_noise_fields(noise_set, x, y, z, detail, disturbance):
+    macro = _fractal_value_noise(noise_set["macro_lattices"], x, y, z, detail * 0.10)
+    body = _fractal_value_noise(noise_set["body_lattices"], x, y, z, detail * 0.30)
+    edge = _fractal_value_noise(noise_set["edge_lattices"], x, y, z, detail * 0.55)
+    flow = _fractal_value_noise(noise_set["flow_lattices"], x, y, z, disturbance * 0.25)
+    return macro, body, edge, flow
+```
+
+**Edge Cases and Pitfalls:**
+- **Memory Pressure:** The method allocates two large 3D arrays. If `resolution` is too high, a `MemoryError` should be caught and re-raised as `VolumeMemoryPressureError` [S1, unofficial].
+- **Boundary Overlap:** The `uses_natural_finite_edge` logic depends on specific cloud type IDs and parameter flags. If these are not correctly aligned, the cloud may exhibit unnatural hard edges or overlap artifacts [S1, unofficial].
+- **Precision:** The use of `np.float32` for lattices and coordinates is specified. Higher precision may not be necessary but could increase memory usage [S1, unofficial].
+- **Degenerate Input:** If `lobe_z_radius` or `half_height` is zero, division by zero must be avoided by using `max(..., 0.001)` as shown in the source snippets [S1, unofficial].
+
+## Subtopics
+
+### [Redshift Clouds Object](10707-redshift-clouds-object.md)
+The Redshift Clouds Object is a procedural volume primitive that generates entire procedural skies. It distinguishes itself from other volume generation methods by offering a dual-mode rendering approach: a "fast mode" that renders the cloud deck as a clever background, and a "fully volumetric mode" that allows geometry such as skyscrapers or aircraft to pierce the cloud layer and be lit by it. This method solves the problem of simulating large-scale atmospheric phenomena without requiring pre-computed voxel data.
+
+## Operating characteristics
+- **Time Complexity:** $O(N^3)$ where $N$ is the resolution, as every voxel in the 3D grid is computed once per slice. The noise evaluation involves multiple lattice lookups and interpolations, making the constant factor significant.
+- **Memory Complexity:** $O(N^3)$ for the `density` and `disturbance` arrays. Lattices are small and constant size relative to resolution.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance scales linearly with the number of voxels. Resolution increases have a cubic impact on both time and memory.
+- **Strengths:** Generates organic, non-repeating cloud structures without external textures. Supports both realistic and cartoon styles. Efficient memory usage compared to storing full-resolution noise fields.
+- **Limitations:** Requires significant memory for high resolutions. The procedural nature may not match specific artistic references without tuning.
+- **When to Use:** When procedural, large-scale cloud volumes are needed without pre-computed data.
+- **When Not to Use:** When exact replication of specific cloud formations is required, or when memory is extremely constrained.
+
+## Background
+The Volume Cloud Generation Pipeline is based on the implementation found in the `Noise-Cloud` repository by mingtu149411 [S1, unofficial]. It utilizes procedural noise functions, specifically value noise with domain warping, to generate cloud density fields. The method was developed to provide a flexible, code-based approach to cloud generation in real-time rendering contexts.
+
+## Sources
+[S1] mingtu149411/Noise-Cloud, https://github.com/mingtu149411/Noise-Cloud, fetched 2026-10-27 (unofficial)

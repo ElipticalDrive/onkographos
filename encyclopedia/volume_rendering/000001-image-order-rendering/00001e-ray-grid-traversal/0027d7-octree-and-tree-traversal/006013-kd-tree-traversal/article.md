@@ -1,0 +1,198 @@
+# kD-Tree Traversal
+Also called: kdt traversal
+
+## Overview
+kD-Tree Traversal is a ray traversal algorithm for binary spatial partitioning structures where nodes split space using arbitrary axis-aligned planes, offering more flexible geometry adaptation than fixed-center octrees [S1, unofficial]. It solves the problem of efficiently intersecting rays with complex, non-uniform geometry distributions by recursively descending a binary tree, determining which child node (near or far) the ray intersects relative to the splitting plane, and performing early termination upon finding the first hit [S1, unofficial]. Unlike octrees, which subdivide at the center of cells, kD-trees allow subdivision in all directions via single splitting planes, adapting better to the distribution of geometry [S1, unofficial].
+
+## How it works
+**Inputs:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized), and a root node of the kD-tree.
+**Outputs:** The distance $t_{hit}$ to the closest intersection with a primitive in the scene, or $\infty$ if no intersection is found.
+
+**Data Structures:**
+The kD-tree is a binary tree. Each node contains:
+1.  **Splitting Plane:** Defined by an axis index $axis \in \{0, 1, 2\}$ (representing x, y, or z) and a split position $s$ along that axis.
+2.  **Children:** Pointers to two child nodes (left and right).
+3.  **Primitives:** A list of geometry primitives (e.g., triangles) stored only in leaf nodes.
+4.  **Bounding Box:** Implicitly defined by the path from the root. The root encloses the entire scene. Each child's bounding box is the parent's box clipped by the splitting plane. Explicit storage of bounding boxes is not required for traversal if the split position and axis are known [S1, unofficial].
+
+**Construction (Brief):**
+1.  Given a cell (axis-aligned BBox) and a list of primitives, choose an axis-aligned splitting plane perpendicular to one coordinate axis [S1, unofficial].
+2.  Distribute geometry among the two children. Polygons straddling the plane must be assigned to both children [S1, unofficial].
+3.  Recurse until a stopping criterion is met (e.g., max depth, number of objects, or cost function threshold) [S1, unofficial].
+4.  **Splitting Plane Selection:** To minimize traversal cost, use the Surface-Area-Heuristic (SAH). Try all 3 axes. For each axis, evaluate the cost function at finite points (borders of bounding boxes of primitives) using a plane sweep. Choose the axis and split position with the minimum cost [S1, unofficial].
+    *   **SAH Cost Function:**
+        $$ C(B) = Area(B_1) \cdot N(B_1) + Area(B_2) \cdot N(B_2) $$
+        where $Area(B_i)$ is the surface area of child box $i$ and $N(B_i)$ is the number of triangles in child box $i$. This assumes rays have a far-away origin and hit the root bounding volume [S1, unofficial].
+    *   **Cost Ratio:** The ratio of time for one ray-primitive test ($t_i$) to one ray-splitting-plane intersection test ($t_t$) is typically $80:1$ [S1, unofficial].
+    *   **Approximation:** For large scenes (>500,000 polygons), sort polygons into buckets and evaluate SAH only at bucket borders [S1, unofficial].
+
+**Traversal Algorithm (Recursive):**
+The traversal determines the intersection of the ray with the splitting plane to identify the "near" child (containing the ray origin) and the "far" child.
+
+1.  **Leaf Check:** If the current node is a leaf, intersect the ray with each primitive in the node's object list. Discard intersections with $t > t_{max}$. Return the closest intersection $t_{hit}$ if found, otherwise return $\infty$.
+2.  **Splitting Plane Intersection:** Calculate $t_{split}$, the signed distance along the ray to the splitting plane of the current node.
+    $$ t_{split} = \frac{s - o_{axis}}{d_{axis}} $$
+    where $s$ is the split position, $o_{axis}$ is the ray origin component along the split axis, and $d_{axis}$ is the ray direction component along the split axis. If $d_{axis} = 0$, the ray is parallel to the plane; handle as a special case (e.g., treat as intersecting both or neither based on origin position) [G].
+3.  **Child Determination:**
+    *   If $d_{axis} > 0$, the ray moves in the positive direction of the axis. The "near" child is the left child (if split position $s$ is the boundary) or determined by comparing $o_{axis}$ to $s$. Specifically, the child containing the origin is determined by $\mathbb{I}(o_{axis} < s)$ [G]. Let $near$ be the child containing the origin, and $far$ be the other child.
+4.  **Traversal Logic:**
+    *   If $t_{split} > t_{max}$: The splitting plane is beyond the current search range. Traverse only the $near$ child with $t_{min}, t_{max}$.
+    *   If $t_{split} < t_{min}$: The splitting plane is before the current search range. Traverse only the $far$ child with $t_{min}, t_{max}$.
+    *   Otherwise ($t_{min} \le t_{split} \le t_{max}$): The ray intersects the splitting plane within the range.
+        1.  Recursively traverse the $near$ child with $t_{min}, t_{split}$. Let the result be $t_{hit}$.
+        2.  If $t_{hit} < t_{split}$: A hit was found in the near subtree before the splitting plane. Return $t_{hit}$ (early termination).
+        3.  Else: Traverse the $far$ child with $t_{split}, t_{max}$. Return the result.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_kd_tree(ray_origin, ray_direction, node, t_min, t_max):
+    """
+    Recursively traverse a kD-tree.
+    
+    Args:
+        ray_origin: (x, y, z) tuple
+        ray_direction: (x, y, z) tuple
+        node: Current node object
+        t_min: Minimum t value for intersection test
+        t_max: Maximum t value for intersection test
+        
+    Returns:
+        t_hit: Distance to closest intersection, or infinity if none
+    """
+    # 1. Leaf Handling
+    if node.is_leaf:
+        t_hit = infinity
+        for primitive in node.primitives:
+            t = intersect_ray_primitive(ray_origin, ray_direction, primitive)
+            if t_min <= t < t_hit:
+                t_hit = t
+        return t_hit
+
+    # 2. Splitting Plane Intersection
+    axis = node.axis
+    split_pos = node.split_position
+    
+    o_axis = ray_origin[axis]
+    d_axis = ray_direction[axis]
+    
+    # Handle parallel ray case
+    if d_axis == 0:
+        # Ray is parallel to splitting plane
+        # Determine which side the origin is on
+        if o_axis < split_pos:
+            near_child = node.left
+            far_child = node.right
+        else:
+            near_child = node.right
+            far_child = node.left
+        # Traverse both? Or just the one containing origin?
+        # Standard kD-tree traversal for parallel rays usually requires checking both
+        # if the ray is inside the node's volume, but typically we treat t_split as infinity
+        # or handle via the logic below. 
+        # If d_axis is 0, t_split is undefined. 
+        # We can treat t_split as infinity if the ray is moving away, or -infinity if towards.
+        # However, a robust implementation checks if the ray origin is on one side.
+        # If the ray is parallel, it will never cross the plane. 
+        # So we only traverse the child containing the origin? 
+        # No, if the ray is inside the node, it might exit the node's volume through a face 
+        # not defined by this split. But for binary tree traversal, we assume the split 
+        # divides the space. If parallel, it stays on one side.
+        # Let's use the standard logic: if d_axis == 0, t_split is effectively infinity 
+        # if moving away from the split, or -infinity if moving towards.
+        # But simpler: determine near/far based on origin position.
+        # And since t_split is not crossed, we only traverse the near child?
+        # Actually, if the ray is parallel, it never crosses the plane, so it stays in one subtree.
+        # So we only traverse the child containing the origin.
+        t_hit = traverse_kd_tree(ray_origin, ray_direction, near_child, t_min, t_max)
+        return t_hit
+
+    t_split = (split_pos - o_axis) / d_axis
+
+    # 3. Child Determination
+    # Determine which child contains the ray origin
+    if d_axis > 0:
+        if o_axis < split_pos:
+            near_child = node.left
+            far_child = node.right
+        else:
+            near_child = node.right
+            far_child = node.left
+    else: # d_axis < 0
+        if o_axis < split_pos:
+            near_child = node.right
+            far_child = node.left
+        else:
+            near_child = node.left
+            far_child = node.right
+
+    # 4. Traversal Logic
+    if t_split > t_max:
+        # Splitting plane is beyond the current search range
+        return traverse_kd_tree(ray_origin, ray_direction, near_child, t_min, t_max)
+    elif t_split < t_min:
+        # Splitting plane is before the current search range
+        return traverse_kd_tree(ray_origin, ray_direction, far_child, t_min, t_max)
+    else:
+        # Ray intersects the splitting plane within the range
+        # Traverse near child first
+        t_hit_near = traverse_kd_tree(ray_origin, ray_direction, near_child, t_min, t_split)
+        
+        if t_hit_near < t_split:
+            # Hit found in near subtree before the splitting plane
+            return t_hit_near
+        
+        # Traverse far child
+        return traverse_kd_tree(ray_origin, ray_direction, far_child, t_split, t_max)
+```
+
+**Optimized Iterative Traversal (for Shadow Rays):**
+For shadow rays where any hit is sufficient, the tree can be transformed to allow pure Depth-First Search (DFS) using a linear array and skip pointers.
+1.  Transform the tree into a linear array where nodes are ordered for DFS.
+2.  Each node has a `skipNode` pointer to the next node to visit if the current node has no primitives or no hit.
+3.  Algorithm:
+    ```python
+    def traverse_shadow_ray(ray, root):
+        node = root
+        stop_node = root.skip_node
+        while node < stop_node:
+            if intersects_ray_node(ray, node):
+                if node.has_primitives:
+                    if intersects_ray_primitive(ray, node.primitives):
+                        return intersection
+            node = node.skip_node
+        return "no intersection"
+    ```
+    [S1, unofficial]
+
+**Oversized Object Handling:**
+If objects are very large (e.g., in architectural models), they can hinder the finding of good splitting planes.
+1.  Before each splitting, filter out "oversized objects".
+2.  If many oversized objects exist, build a separate kD-tree for them.
+3.  Otherwise, store them in a simple list attached to the node or scene [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Straddling Polygons:** In regular kD-trees, polygons straddling the splitting plane must be stored in both subtrees, leading to 2-3 times more pointers to triangles than triangles exist [S1, unofficial]. This increases memory usage and traversal time.
+*   **Precision:** Floating-point precision issues can arise when calculating $t_{split}$, especially when the ray is nearly parallel to the splitting plane ($d_{axis} \approx 0$).
+*   **Boundary Conditions:** Ensure correct handling of ray origins exactly on the splitting plane.
+
+## Subtopics
+
+### Spatial KD-Tree (SKD-Tree)
+A variant of the kD-tree using 2 parallel splitting planes per node (also known as BoxTree or Bounding Interval Hierarchy, BIH) [S1, unofficial]. It solves the straddling polygon problem by ensuring that polygons are not stored in both subtrees; instead, the space between the two planes is shared [S1, unofficial]. However, because the child boxes overlap, traversal cannot stop as soon as a hit is found in the 'near' subtree; the 'far' subtree must also be checked if the hit is within the overlap region [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Average case $O(\log N)$ for balanced trees, but can degrade to $O(N)$ for poorly constructed trees or specific ray directions. Traversal cost is dominated by the number of nodes visited.
+*   **Memory Complexity:** $O(N)$ for $N$ primitives, but with a constant factor overhead due to storing straddling polygons in multiple nodes (2-3x pointers) [S1, unofficial]. SKD-Trees reduce this overhead but increase node size (2 planes vs 1).
+*   **Performance:** Very fast ray traversal due to simple node structure (8 bytes per node: axis + split position) [S1, unofficial]. SAH construction is $O(N \log N)$ or $O(N^2)$ depending on implementation, but plane sweep optimization reduces it [S1, unofficial].
+*   **Strengths:** Adaptive subdivision, compact nodes, simple and fast traversal, good for static scenes [S1, unofficial].
+*   **Limitations:** Memory intensive due to straddling polygons, construction can be slow for large scenes, not ideal for dynamic scenes due to frequent rebuilds [S1, unofficial].
+*   **When to use:** Static scenes with complex geometry distribution where adaptive subdivision is beneficial.
+*   **When not to use:** Dynamic scenes requiring frequent updates, or when memory is extremely constrained.
+
+## Background
+kD-trees were introduced as an acceleration structure for ray tracing to address the inflexibility of octrees, which always subdivide at the center of cells [S1, unofficial]. The concept of kD-trees for spatial partitioning dates back to the 1970s, but their application to ray tracing and the use of SAH for construction were popularized in the 1990s and 2000s [S1, unofficial]. The "best known method" for static scenes was highlighted in a Siggraph Course in 2006 [S1, unofficial]. The Spatial KD-Tree (SKD-Tree) or BIH variant was proposed in 1987, 2002, and 2006 to mitigate the straddling polygon issue [S1, unofficial].
+
+## Sources
+[S1] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)

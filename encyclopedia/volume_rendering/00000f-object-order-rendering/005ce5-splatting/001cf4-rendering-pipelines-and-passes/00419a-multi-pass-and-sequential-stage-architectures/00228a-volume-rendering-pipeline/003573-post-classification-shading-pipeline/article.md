@@ -1,0 +1,140 @@
+# Post-classification Shading Pipeline
+
+Also called: Post-DVRI, Post-classified DVR, Post-classified Volume Rendering, Post-shaded DVRI
+
+## Overview
+The Post-classification Shading Pipeline (also known as Post-DVRI) is a volume rendering model where raw volume density values are interpolated by the ray first, and the resulting interpolated values are then mapped to color and opacity via transfer functions, followed by shading [S1, unofficial][S2, unofficial][S3, book]. This approach solves the blurring artifacts inherent in pre-classification methods by ensuring that high-frequency details in transfer functions are resolved after interpolation [S1, unofficial][S3, book]. It is distinct from the Pre-classification Shading Pipeline, which classifies discrete voxel values before interpolation, resulting in blurry edges and loss of fine detail under magnification [S2, unofficial][S3, book].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar volume grid $f_d(x,y,z)$ representing density; a ray defined by origin $\mathbf{x}$ and direction $\mathbf{r}$; transfer functions for color $C_\lambda$ and opacity $\alpha$; shading function $C_\lambda$ (which may depend on gradient); ray step size $\Delta s$; and ray length $L$.
+*   **Output:** The accumulated color $I_\lambda(\mathbf{x}, \mathbf{r})$ for each pixel.
+
+**Data Structures:**
+*   **Volume Grid:** A 3D array of scalar density values.
+*   **Transfer Functions:** Lookup tables (LUTs) mapping density values to color and opacity.
+*   **Gradient Field:** Pre-computed or on-the-fly computed gradient vectors $\nabla f$ for shading normals.
+
+**Steps:**
+1.  **Ray Marching:** For each pixel, cast a ray through the volume. Sample the volume at intervals $\Delta s$ along the ray.
+2.  **Interpolation:** For each sample position $s_i = \mathbf{x} + i\Delta s \mathbf{r}$, interpolate the raw density value $f(s_i)$ and the gradient vector $g(s_i)$ from the volume grid $f_d$ using a 3D interpolation kernel (e.g., trilinear or tri-linear) [S1, unofficial][S3, book].
+3.  **Classification:** Map the interpolated density $f(s_i)$ to opacity $\alpha(f(s_i))$ and base color using the transfer function $\alpha$ [S2, unofficial][S4].
+4.  **Shading:** Compute the shading color $C_\lambda$ based on the interpolated density $f(s_i)$ and the interpolated gradient $g(s_i)$ [S1, unofficial][S3, book]. The gradient $g(i\Delta s)$ serves as the surface normal for lighting calculations [S3, book].
+5.  **Compositing:** Accumulate the color contributions using front-to-back alpha blending.
+
+**Formula:**
+The final image intensity $I_\lambda(\mathbf{x}, \mathbf{r})$ is computed as [S1, unofficial][S3, book]:
+
+$$
+I_\lambda(\mathbf{x}, \mathbf{r}) = \sum_{i=0}^{L/\Delta s - 1} C_\lambda(f(i\Delta s), g(i\Delta s)) \alpha(f(i\Delta s)) \prod_{j=0}^{i-1} (1 - \alpha(f(j\Delta s)))
+$$
+
+Where:
+*   $L$ is the total length of the ray within the volume.
+*   $\Delta s$ is the step size.
+*   $f(i\Delta s)$ is the interpolated volume function value at sample $i$.
+*   $g(i\Delta s)$ is the interpolated gradient vector at sample $i$.
+*   $\alpha(f(i\Delta s))$ is the opacity derived from the transfer function applied to the interpolated density.
+*   $C_\lambda(f(i\Delta s), g(i\Delta s))$ is the color contribution, determined by transfer and shading functions using the interpolated density and gradient.
+*   The product term $\prod_{j=0}^{i-1} (1 - \alpha(f(j\Delta s)))$ represents the transmittance from previous samples.
+
+*Note: Some sources define the summation limit as $L/\Delta s$ without the $-1$, implying inclusive upper bound indexing [S2, unofficial][S4]. The standard front-to-back accumulation typically iterates up to the last sample within the volume bounds.*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def post_classification_shading_pipeline(volume_grid, ray_origin, ray_direction, 
+                                        transfer_function_alpha, transfer_function_color, 
+                                        shading_function, step_size, volume_bounds):
+    """
+    Implements the Post-classification Shading Pipeline.
+    
+    Args:
+        volume_grid: 3D array of density values.
+        ray_origin: 3D vector (x, y, z).
+        ray_direction: 3D vector (x, y, z), normalized.
+        transfer_function_alpha: Function or LUT mapping density -> opacity.
+        transfer_function_color: Function or LUT mapping density -> base color.
+        shading_function: Function mapping (density, gradient) -> shaded color.
+        step_size: Float, distance between samples.
+        volume_bounds: Object defining the AABB of the volume.
+        
+    Returns:
+        Color vector (R, G, B).
+    """
+    # 1. Intersect ray with volume bounds to get t_min and t_max
+    t_min, t_max = intersect_ray_aabb(ray_origin, ray_direction, volume_bounds)
+    if t_max < 0:
+        return (0.0, 0.0, 0.0) # Ray misses volume
+    
+    # Initialize accumulators
+    accumulated_color = (0.0, 0.0, 0.0)
+    accumulated_opacity = 0.0
+    transmittance = 1.0
+    
+    # 2. Ray march
+    t = t_min
+    while t <= t_max:
+        # Current sample position
+        pos = ray_origin + ray_direction * t
+        
+        # 3. Interpolate raw density and gradient from volume grid
+        # f_val is the interpolated scalar density
+        # g_vec is the interpolated gradient vector (normal)
+        f_val = interpolate_density(volume_grid, pos)
+        g_vec = interpolate_gradient(volume_grid, pos)
+        
+        # 4. Classification: Map density to opacity
+        alpha = transfer_function_alpha(f_val)
+        
+        # 5. Shading: Compute color based on density and gradient
+        # Note: Some implementations might use base color from transfer function
+        # and modulate it with shading. Here we assume shading function outputs final color.
+        color = shading_function(f_val, g_vec)
+        
+        # 6. Compositing: Front-to-back blending
+        # Contribution of current sample
+        contribution = color * alpha * transmittance
+        accumulated_color += contribution
+        accumulated_opacity += alpha * transmittance
+        
+        # Update transmittance for next sample
+        transmittance *= (1.0 - alpha)
+        
+        # Early ray termination optimization
+        if accumulated_opacity >= 1.0:
+            break
+            
+        t += step_size
+        
+    return accumulated_color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Partial Volume Effect:** Interpolated density values may fall into a range classified as a material not actually present at the sample location, leading to false colors [S2, unofficial][S4].
+*   **Narrow Transfer Function Peaks:** If the transfer function has very narrow peaks (e.g., specific density thresholds), standard ray sampling might miss these peaks entirely, failing to render thin structures [S1, unofficial]. Pre-integrated transfer functions can mitigate this but are not part of the basic pipeline definition.
+*   **Staircasing Artifacts:** Avoiding false colors via prior segmentation can introduce high-frequency artifacts and staircasing [S2, unofficial][S4].
+
+## Subtopics
+
+### [Pre-classification Shading Pipeline](7803-pre-classification-shading-pipeline.md)
+Classifies and shades discrete voxel values before interpolation. Chosen for performance or when partial volume effects are less critical; results in blurrier images at high resolutions compared to post-classification.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray ($O(L/\Delta s)$) and the number of pixels.
+*   **Memory Complexity:** Depends on the storage of the volume grid and transfer function LUTs. Gradient computation can be done on-the-fly (increasing compute) or pre-computed (increasing memory).
+*   **Performance:** Generally faster than methods requiring complex geometric primitives but slower than pre-classification if gradient computation is expensive.
+*   **Strengths:** Produces considerably sharper images than pre-classified rendering because classification is performed after interpolation, eliminating blurry edges introduced by the interpolation filter [S3, book]. Fine detail in transfer functions is readily expressed in the final image [S2, unofficial].
+*   **Limitations:** Susceptible to partial volume artifacts (false colors) [S2, unofficial][S4]. Can miss narrow peaks in transfer functions if ray sampling is too coarse [S1, unofficial].
+*   **When to Use:** When image sharpness and accurate representation of high-frequency transfer function details are prioritized over the avoidance of partial volume artifacts.
+*   **When Not to Use:** When partial volume artifacts are unacceptable and segmentation is not feasible, or when extreme performance is required and blur is tolerable (use Pre-classification).
+
+## Background
+The Post-classification Shading Pipeline, also referred to as Post-DVRI (Post-shaded Direct Volume Rendering Integration), was developed as an alternative to the pre-classified model to address blurring issues in volume visualization [S1, unofficial][S2, unofficial]. It is based on the principle that interpolating raw data before applying transfer functions allows for better resolution of high-frequency details [S3, book]. The mathematical formulation is derived from the generalized volume rendering integral, adapted for discrete sampling and interpolation [S4]. It is widely used in modern volume rendering systems where image quality is paramount.
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)
+[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
+[S4] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29

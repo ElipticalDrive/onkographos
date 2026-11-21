@@ -1,0 +1,188 @@
+# Procedural Chunk Generation with Density Falloff
+
+Also called: Floating Rock Generation, Voxel World Generation
+
+## Overview
+This method generates a voxel chunk by computing a density field using normalized coordinates, plateau falloff, cave noise, and center falloff, then assigns block types based on density thresholds and random distributions [S1, unofficial]. It differs from its parent [Procedural Voxel World Generation](3891-procedural-voxel-world-generation.md) by explicitly incorporating a radial center falloff and a specific plateau falloff mechanism to create isolated floating structures or "floating rocks" rather than continuous terrain, while using a distinct cave generation threshold [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `world_x`, `world_y`, `world_z`: Integer coordinates of the chunk's origin in the global world space.
+- `chunk_width`, `chunk_height`, `chunk_depth`: Integer dimensions of the chunk.
+- `e`: A random number generator state or seed instance.
+
+**Outputs:**
+- A 3D array of block types (`block_type`) with dimensions `chunk_width` x `chunk_height` x `chunk_depth`.
+
+**Data Structures:**
+- `block_type`: An enumeration or integer type representing block states (e.g., `air`, `stone`, `dirt`, `grass`).
+- `density`: A floating-point value representing the solidity of a voxel.
+
+**Parameters:**
+- `caves_threshold`: 0.5. If the computed cave noise is below this value, the density is forced to 0 [S1, unofficial].
+- `density_threshold`: 3.1. Blocks with final density below this value are set to `air` [S1, unofficial].
+- `grass_dist`: A uniform real distribution over $[0.8, 0.9]$. Determines the height threshold for grass [S1, unofficial].
+- `dirt_dist`: A uniform real distribution over $[0.4, 0.7]$. Determines the height threshold for dirt [S1, unofficial].
+- `simplex_noise(seed, x, y, z)`: A simplex noise function returning a value in $[-1, 1]$ or $[0, 1]$ depending on implementation. The source uses `simplex_noise(1, ...)` for caves and `simplex_noise(5, ...)` for base terrain [S1, unofficial].
+- `noise(x, y, z)`: A secondary noise function (likely Perlin or similar) used for high-frequency detail. The source does not specify the seed for this call, implying it may be stateless or derived from coordinates [S1, unofficial].
+
+**Steps:**
+1. **Normalize Coordinates:** Compute normalized world coordinates $x_f, y_f, z_f$ for the current voxel at local coordinates $(x, y, z)$:
+   $$
+   x_f = \frac{\text{world\_x} + x}{\text{world\_width} \times \text{chunk\_width}}
+   $$
+   $$
+   y_f = \frac{\text{world\_y} + y}{\text{world\_height} \times \text{chunk\_height}}
+   $$
+   $$
+   z_f = \frac{\text{world\_z} + z}{\text{world\_depth} \times \text{chunk\_depth}}
+   $$
+   [S1, unofficial]
+
+2. **Compute Plateau Falloff:** Determine `plateau_falloff` based on $y_f$:
+   - If $y_f \le 0.8$, `plateau_falloff` = 1.0.
+   - If $0.8 < y_f < 0.9$, `plateau_falloff` = $1.0 - (y_f - 0.8) \times 10.0$.
+   - If $y_f \ge 0.9$, `plateau_falloff` = 0.0.
+   [S1, unofficial]
+
+3. **Compute Cave Density:** Calculate cave noise:
+   $$
+   \text{caves} = \text{simplex\_noise}(1, x_f \times 5, y_f \times 5, z_f \times 5)^3
+   $$
+   If `caves` < 0.5, set `density` = 0 and skip to Step 7. Otherwise, proceed.
+   [S1, unofficial]
+
+4. **Compute Center Falloff:** Calculate radial distance from the chunk center $(0.5, 1.0, 0.5)$:
+   $$
+   \text{center\_falloff} = \frac{0.1}{(x_f - 0.5)^2 \times 1.5^2 + (y_f - 1.0)^2 \times 0.8^2 + (z_f - 0.5)^2 \times 1.5^2}
+   $$
+   Note: The source code shows `pow((xf-0.5)*1.5, 2)`, which is equivalent to $((x_f - 0.5) \times 1.5)^2$.
+   [S1, unofficial]
+
+5. **Compute Base Density:**
+   $$
+   \text{density} = \text{simplex\_noise}(5, x_f, y_f \times 0.5, z_f) \times \text{center\_falloff} \times \text{plateau\_falloff}
+   $$
+   [S1, unofficial]
+
+6. **Apply High-Frequency Detail:**
+   $$
+   \text{density} = \text{density} \times (\text{noise}((x_f + 1) \times 3.0, (y_f + 1) \times 3.0, (z_f + 1) \times 3.0) + 0.4)^{1.8}
+   $$
+   [S1, unofficial]
+
+7. **Assign Block Type:**
+   - If `density` < 3.1, `type` = `air`.
+   - Else if $y_f > \text{grass\_dist}(e)$, `type` = `grass`.
+   - Else if $y_f > \text{dirt\_dist}(e)$, `type` = `dirt`.
+   - Else, `type` = `stone`.
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_chunk(world_x, world_y, world_z, chunk_width, chunk_height, chunk_depth, rng):
+    """
+    Generates a voxel chunk using procedural density falloff.
+    
+    Args:
+        world_x, world_y, world_z: Global chunk origin coordinates.
+        chunk_width, chunk_height, chunk_depth: Chunk dimensions.
+        rng: Random number generator instance for grass_dist and dirt_dist.
+        
+    Returns:
+        3D list of block_type values.
+    """
+    # Initialize chunk with air
+    chunk = [[[block_type.air for _ in range(chunk_depth)] 
+              for _ in range(chunk_height)] 
+              for _ in range(chunk_width)]
+    
+    for z in range(chunk_depth):
+        for y in range(chunk_height):
+            for x in range(chunk_width):
+                # Step 1: Normalize coordinates
+                xf = (world_x + x) / (world_width * chunk_width)
+                yf = (world_y + y) / (world_height * chunk_height)
+                zf = (world_z + z) / (world_depth * chunk_depth)
+                
+                # Step 2: Plateau falloff
+                if yf <= 0.8:
+                    plateau_falloff = 1.0
+                elif yf < 0.9:
+                    plateau_falloff = 1.0 - (yf - 0.8) * 10.0
+                else:
+                    plateau_falloff = 0.0
+                
+                # Step 3: Cave density
+                caves = simplex_noise(1, xf * 5, yf * 5, zf * 5) ** 3
+                if caves < 0.5:
+                    density = 0.0
+                else:
+                    # Step 4: Center falloff
+                    # Note: Source uses pow((val * scale), 2)
+                    dx = (xf - 0.5) * 1.5
+                    dy = (yf - 1.0) * 0.8
+                    dz = (zf - 0.5) * 1.5
+                    center_falloff = 0.1 / (dx**2 + dy**2 + dz**2)
+                    
+                    # Step 5: Base density
+                    base_noise = simplex_noise(5, xf, yf * 0.5, zf)
+                    density = base_noise * center_falloff * plateau_falloff
+                    
+                    # Step 6: High-frequency detail
+                    detail_noise = noise((xf + 1) * 3.0, (yf + 1) * 3.0, (zf + 1) * 3.0)
+                    density *= (detail_noise + 0.4) ** 1.8
+                
+                # Step 7: Assign block type
+                if density < 3.1:
+                    block = block_type.air
+                else:
+                    # Get random thresholds
+                    grass_threshold = rng.uniform(0.8, 0.9)
+                    dirt_threshold = rng.uniform(0.4, 0.7)
+                    
+                    if yf > grass_threshold:
+                        block = block_type.grass
+                    elif yf > dirt_threshold:
+                        block = block_type.dirt
+                    else:
+                        block = block_type.stone
+                
+                chunk[x][y][z] = block
+                
+    return chunk
+```
+[G] The pseudocode assumes `simplex_noise` and `noise` are available. `world_width`, `world_height`, `world_depth` are assumed to be global constants or passed parameters; the source code snippet implies they are accessible in scope. The random distribution calls `grass_dist(e)` and `dirt_dist(e)` are implemented as `rng.uniform(0.8, 0.9)` and `rng.uniform(0.4, 0.7)` respectively.
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** In Step 4, if $x_f=0.5, y_f=1.0, z_f=0.5$, the denominator for `center_falloff` becomes 0. This results in infinity or NaN. In practice, this occurs only at the exact center of the chunk. A guard clause or epsilon addition is required to prevent NaN propagation [G].
+- **Negative Density:** `simplex_noise` can return negative values. If `base_noise` is negative, `density` becomes negative, which will likely result in `air` blocks. This is intentional for creating voids but should be noted [S1, unofficial].
+- **Precision:** The use of `pow` and multiple noise evaluations can accumulate floating-point errors. Using `float` (32-bit) is sufficient as per the source code, but `double` may be needed for higher precision in large worlds [S1, unofficial].
+
+## Subtopics
+
+### [Deterministic Fixture Worlds](3941-deterministic-fixture-worlds.md)
+Generates fixed, non-procedural structures. Choose when static, hand-crafted layouts are needed.
+
+### [Biome and Voxel Layer Determination](4167-biome-and-voxel-layer-determination.md)
+Assigns block types based on biome data. Choose when environmental variation is required.
+
+### [Procedural Tree Generation](4826-procedural-tree-generation.md)
+Creates tree structures. Choose when vegetation is needed.
+
+## Operating characteristics
+- **Time Complexity:** $O(W \times H \times D)$ per chunk, where $W, H, D$ are chunk dimensions. Each voxel requires multiple noise evaluations and arithmetic operations.
+- **Memory Complexity:** $O(W \times H \times D)$ to store the chunk data.
+- **Performance:** The method is computationally intensive due to multiple noise calls per voxel. On modern CPUs, generating a 16x16x16 chunk takes milliseconds. On GPUs, this can be parallelized effectively.
+- **Strengths:** Creates visually distinct floating structures; simple to implement; deterministic given the same seed.
+- **Limitations:** The center falloff can cause artifacts at the chunk center if not handled; the plateau falloff limits vertical extent; noise parameters are hardcoded.
+- **When to Use:** Ideal for generating isolated floating islands or "floating rocks" in a voxel world.
+- **When Not to Use:** Not suitable for continuous terrain or large-scale world generation without modification.
+
+## Background
+This method originates from the `lexov` project by jshrake, an unofficial voxel engine implementation [S1, unofficial]. It is designed to generate procedural chunks with a focus on creating floating rock structures, distinguishing it from standard terrain generation methods. The technique uses a combination of simplex noise for base terrain and cave generation, along with radial and plateau falloffs to shape the final geometry.
+
+## Sources
+[S1] jshrake/lexov, https://github.com/jshrake/lexov, fetched 2026-10-27 (unofficial)

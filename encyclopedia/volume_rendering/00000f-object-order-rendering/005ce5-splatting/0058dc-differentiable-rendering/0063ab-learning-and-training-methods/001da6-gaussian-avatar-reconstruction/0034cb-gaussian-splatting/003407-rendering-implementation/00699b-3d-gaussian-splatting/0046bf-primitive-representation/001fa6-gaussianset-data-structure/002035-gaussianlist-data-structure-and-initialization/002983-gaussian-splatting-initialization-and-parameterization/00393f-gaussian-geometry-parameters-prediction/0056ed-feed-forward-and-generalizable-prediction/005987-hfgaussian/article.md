@@ -1,0 +1,201 @@
+# HFGaussian
+
+Also called: Human Feature Gaussian
+
+## Overview
+HFGaussian is a generalizable, feed-forward framework for real-time 3D human avatar reconstruction that simultaneously estimates novel views, 3D pose, and biomechanical features (such as dense pose and 3D keypoints) from sparse input images [S1]. Unlike sibling methods that rely on parametric body models (e.g., SMPL) or fail to integrate structural biomechanics, HFGaussian uses Gaussian splatting to represent the human subject and its associated features directly [S1]. It builds on [Feed-forward and Generalizable Prediction](15832-feed-forward-and-generalizable-prediction.md) by introducing a "feature splatting" mechanism that decouples human feature learning from the geometric Gaussian parameters, allowing different frequencies of features to be rendered efficiently without per-subject optimization [S1].
+
+## How it works
+HFGaussian operates in two stages: depth estimation and joint Gaussian/pose/feature prediction. It uses two nearest source views to estimate depth, which informs the 3D position of Gaussians and provides point cloud data for pose regression.
+
+### Inputs and Outputs
+*   **Inputs:** Two RGB images $I_l, I_r \in \mathbb{R}^{H \times W \times 3}$ corresponding to the left and right nearest source views, and their known camera parameters [S1].
+*   **Outputs:**
+    *   A set of 3D Gaussians $\mathcal{G} = \{X, c, r, s, \alpha, f\}$, where $X$ is position, $c$ is color, $r$ is rotation, $s$ is scaling, $\alpha$ is opacity, and $f$ is the human feature vector [S1].
+    *   Rendered novel view images.
+    *   Estimated 3D pose (19 keypoints) [S1].
+    *   Human features (continuous surface embeddings/dense pose) [S1].
+
+### Data Structures
+The scene is represented as a set of 3D Gaussians. Each Gaussian $i$ is defined by:
+*   $X_i \in \mathbb{R}^3$: 3D position.
+*   $c_i \in \mathbb{R}^3$: Color (RGB).
+*   $r_i \in \mathbb{R}^4$: Rotation (quaternion).
+*   $s_i \in \mathbb{R}^3$: Scaling.
+*   $\alpha_i \in [0, 1]$: Opacity.
+*   $f_i \in \mathbb{R}^d$: Human feature vector (dimension $d$ depends on the specific feature, e.g., dense pose embedding) [S1].
+
+### Steps
+
+1.  **View Selection:** Select the two nearest source views, $I_l$ and $I_r$, relative to the target view [S1].
+2.  **Image Encoding:** Feed $I_l$ and $I_r$ into a shared image encoder $\epsilon_{img}$ to generate multiscale image features $f^l_s$ and $f^r_s$, where $s$ is the feature scale [S1].
+3.  **Cost Volume & Depth Estimation:**
+    *   Generate a cost volume $C$ by correlating the feature maps $f^l_s$ and $f^r_s$ [S1].
+    *   Use an iterative update mechanism on $C$ to estimate depth maps $D_l$ and $D_r$ for the left and right views [S1].
+4.  **Gaussian Feature Generation:**
+    *   Encode the depth maps $D_l, D_r$ using a depth encoder $\epsilon_{depth}$ [S1].
+    *   Combine the encoded depth features with the image features $f_{img}$ (concatenation $\oplus$) and pass them through a U-Net-like decoder $\epsilon_{params}$ to generate a Gaussian feature map $\Gamma$ [S1]:
+        $$ \Gamma = \epsilon_{params}(\epsilon_{img}(I) \oplus \epsilon_{depth}(I)) $$
+    *   Apply four separate convolutional prediction heads to $\Gamma$ to estimate parameter maps for rotation ($M_r$), scaling ($M_s$), opacity ($M_\alpha$), and human features ($M_f$) [S1].
+    *   The human feature map is defined as:
+        $$ M_f = \text{Sigmoid}(h_f(\Gamma(x))) $$
+        where $h_f$ is the feature head and $x$ is the foreground pixel coordinate [S1].
+5.  **Gaussian Parameter Mapping:**
+    *   Map 2D pixel coordinates $x$ to 3D positions $X$ using the predicted depth and camera parameters via map $M_p$ [S1].
+    *   Extract color $c$ directly from the source images via map $M_c$ [S1].
+    *   The full Gaussian set is $\mathcal{G} = \{M_p(x), M_c(x), M_r(x), M_s(x), M_\alpha(x), M_f(x)\}$ [S1].
+6.  **Pose Regression:**
+    *   Generate point clouds $P_l, P_r$ from depth maps $D_l, D_r$ and camera parameters [S1].
+    *   Extract human point clouds using 2D masks [S1].
+    *   Combine point clouds from both views into a single point cloud [S1].
+    *   Randomly sample 2048 points to form $P_c$ [S1].
+    *   Input $P_c$ into a pose regression network (based on DGCNN and PointNet) to estimate 3D pose (19 keypoints) [S1].
+7.  **Feature Splatting (Rendering Features):**
+    *   Project Gaussians into 2D space using view transformation matrix $W$ and Jacobian $J$ of the affine approximation of the projective transform [S1].
+    *   Calculate the 2D covariance matrix $\Sigma'$:
+        $$ \Sigma' = J W \Sigma W^T J^T $$
+        where $\Sigma$ is the 3D covariance matrix derived from $r$ and $s$ [S1].
+    *   Render human feature vectors $f_p$ by splatting Gaussian features $f_i$ in the image plane using alpha composition:
+        $$ f_p = \sum_{i \in N} f_i \alpha'_i \prod_{j=1}^{i-1} (1 - \alpha'_j) $$
+        where $\alpha'_i$ is the opacity $\alpha_i$ multiplied by the 2D Gaussian value, and $N$ is the set of splatted Gaussians [S1].
+    *   Decode the blended feature vectors $f_p$ using an MLP with two linear layers (ReLU activation) followed by a final sigmoid layer to render continuous surface embeddings [S1].
+8.  **Color Rendering:**
+    *   Render final pixel colors $C$ using alpha blending:
+        $$ C = \sum_{i \in N} c_i \alpha'_i \prod_{j=1}^{i-1} (1 - \alpha'_j) $$
+        where $c_i$ is the learned color [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def HFGaussian_forward(I_l, I_r, camera_params):
+    """
+    I_l, I_r: RGB images (H, W, 3)
+    camera_params: Intrinsics and extrinsics for I_l and I_r
+    Returns: Rendered image, 3D pose, Feature map, Gaussians
+    """
+    
+    # 1. Image Encoding
+    # Shared encoder generates multiscale features
+    f_l = epsilon_img(I_l)
+    f_r = epsilon_img(I_r)
+    
+    # 2. Depth Estimation
+    # Cost volume correlation and iterative update
+    C = correlate_cost_volume(f_l, f_r)
+    D_l, D_r = iterative_depth_update(C)
+    
+    # 3. Gaussian Parameter Estimation
+    # Encode depth and combine with image features
+    depth_feat = epsilon_depth(D_l) # or combined depth encoding
+    img_feat = epsilon_img(I_l) # or combined image encoding
+    Gamma = epsilon_params(depth_feat + img_feat) # U-Net decoder
+    
+    # Prediction heads
+    M_r = conv_head_rotation(Gamma)
+    M_s = conv_head_scaling(Gamma)
+    M_alpha = conv_head_opacity(Gamma)
+    M_f = sigmoid(conv_head_feature(Gamma)) # Human feature map
+    
+    # Map 2D pixels to 3D Gaussians
+    # M_p uses predicted depth and camera params
+    Gaussians = []
+    for pixel in foreground_pixels:
+        X = M_p(pixel, D_l, camera_params)
+        c = get_color(I_l, pixel) # From source image
+        r = M_r(pixel)
+        s = M_s(pixel)
+        alpha = M_alpha(pixel)
+        f = M_f(pixel)
+        Gaussians.append(Gaussian(X, c, r, s, alpha, f))
+        
+    # 4. Pose Regression
+    # Generate point clouds from depth
+    P_l = depth_to_pointcloud(D_l, camera_params)
+    P_r = depth_to_pointcloud(D_r, camera_params)
+    
+    # Filter by 2D masks (assumed available or pre-computed)
+    P_l_human = filter_by_mask(P_l, mask_l)
+    P_r_human = filter_by_mask(P_r, mask_r)
+    
+    # Combine and sample
+    P_combined = combine_pointclouds(P_l_human, P_r_human)
+    P_sampled = random_sample(P_combined, 2048)
+    
+    # Estimate 3D pose
+    pose = pose_regression_network(P_sampled) # DGCNN + PointNet
+    
+    # 5. Rendering
+    # Project Gaussians
+    projected_gaussians = project_gaussians(Gaussians, camera_params)
+    
+    # Sort by depth for alpha blending
+    projected_gaussians.sort_by_depth()
+    
+    # Render Color
+    rendered_color = alpha_blend_color(projected_gaussians)
+    
+    # Render Features (Feature Splatting)
+    rendered_features = alpha_blend_features(projected_gaussians)
+    
+    # Decode features
+    decoded_features = feature_mlp(rendered_features) # 2 Linear + ReLU + Sigmoid
+    
+    return rendered_color, pose, decoded_features, Gaussians
+
+def alpha_blend_color(gaussians):
+    """
+    Standard 3DGS alpha blending for color
+    """
+    C = zeros(H, W, 3)
+    for i, g in enumerate(gaussians):
+        # alpha' is opacity * 2D Gaussian value
+        alpha_prime = g.alpha * gaussian_2d_value(g)
+        # Accumulate
+        # C = C + c_i * alpha_prime * product(1 - alpha'_j) for j < i
+        # Simplified for implementation:
+        pass 
+    return C
+
+def alpha_blend_features(gaussians):
+    """
+    Feature splatting blending
+    """
+    F = zeros(H, W, d) # d is feature dimension
+    for i, g in enumerate(gaussians):
+        alpha_prime = g.alpha * gaussian_2d_value(g)
+        # F = F + f_i * alpha_prime * product(1 - alpha'_j)
+        pass
+    return F
+```
+
+### Parameters
+*   **Learning Rate:** $2 \times 10^{-4}$ [S1].
+*   **Weight Decay:** $1 \times 10^{-5}$ [S1].
+*   **Batch Size:** 4 [S1].
+*   **Dataset Resolution:** $512 \times 512$ [S1].
+*   **Source Views:** 8 images rendered in a circle at 45-degree intervals [S1].
+*   **Target Views:** 3 random viewpoints [S1].
+*   **Keypoints:** 19 (nose, neck, shoulders, elbows, wrists, pelvis, hips, knees, ankles, eyes, ears) [S1].
+*   **Depth Estimator Training Iterations:** 40,000 [S1].
+*   **Joint Training Iterations:** 100,000 [S1].
+*   **Loss Weights:** $\beta=1.6$ (MAE), $\gamma=0.4$ (SSIM) for photometric loss; $\mu=0.9$ for depth loss weighting [S1].
+
+### Edge Cases and Pitfalls
+*   **Feature Parameterization:** Directly parameterizing 3D Gaussians with human features (opacity, scaling, rotation) yields suboptimal performance because these geometric parameters are not suitable for the different frequencies of human features [S1]. HFGaussian avoids this by optimizing separate feature parameters decoded after rendering [S1].
+*   **Point Cloud Sampling:** The pose regression relies on a subset of Gaussians. Randomly sampling 2048 points is critical for the DGCNN/PointNet backbone to function effectively [S1].
+*   **Generalization:** The method is designed to generalize to unseen data without fine-tuning, leveraging GPS-Gaussian as a backbone [S1].
+
+## Operating characteristics
+*   **Speed:** Real-time rendering at 25 FPS [S1].
+*   **Performance:** Achieves a PSNR of 32.43 on novel view synthesis, closely matching GPS-Gaussian's 32.55 [S1].
+*   **Strengths:** Simultaneously estimates RGB, 3D pose, and biomechanical features (dense pose) without per-subject optimization or parametric body models [S1].
+*   **Limitations:** Relies on the quality of the initial depth estimation and the generalizability of the backbone encoder [S1].
+*   **Hardware:** Implemented using PyTorch and AdamW optimizer [S1].
+
+## Background
+HFGaussian was introduced by Arnab Dey, Cheng-You Lu, Andrew I. Comport, Jean Martinet, Srinath Sridhar, and Chin-Teng Lin in arXiv:2411.03086v1 on 5 Nov 2024 [S1]. It addresses the limitations of previous methods that either rely on substantial computational resources for parametric models (SMPL/STAR) or fail to incorporate biomechanical features essential for virtual interactions [S1]. It is used for 3D human avatar reconstruction, AR/VR, entertainment, and medical applications [S1].
+
+## Sources
+[S1] HFGaussian: Learning Generalizable Gaussian Human with Integrated Human Features, https://doi.org/10.48550/arXiv.2411.03086, fetched 2026-10-26

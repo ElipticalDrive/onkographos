@@ -1,0 +1,108 @@
+# Cox-de Boor recursion for B-spline basis functions
+
+Also called: B-spline Evaluation via de Boor's Algorithm, Cox-de Boor algorithm, Cox-de Boor recursion, de Boor's algorithm
+
+## Overview
+The Cox-de Boor recursion is a numerically stable algorithm for evaluating B-spline basis functions, serving as the computational core for B-spline curve and surface evaluation [S2, S1, unofficial]. It solves the problem of efficiently computing the shape functions that define the local influence of control points in a B-spline field [S2, unofficial]. It sets itself apart from direct polynomial evaluation by using a recursive linear combination of lower-degree basis functions, which avoids numerical instability and leverages the local support property of B-splines [S2, S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A parameter value $x$ (or $k$), the degree $n$ (or $d$), and a knot vector $U = \{u_0, u_1, \dots, u_m\}$ where $u_i$ are the knot values [S2, S1, unofficial].
+- **Output:** The value of the B-spline basis function $N_{i,n}(x)$ (or $Q_{u,d}(k)$) for a specific index $i$ (or $u$) [S2, S1, unofficial].
+
+**Data Structures:**
+- **Knot Vector:** An array of floating-point numbers $U$ of size $m+1$, sorted in non-decreasing order [S2, S1, unofficial].
+- **Basis Function Values:** A temporary storage for intermediate basis function values during recursion. Typically, a 2D array or two 1D arrays are used to store values for degree $r-1$ and degree $r$ [S2, S1, unofficial].
+
+**Numbered Steps:**
+1. **Initialize Degree-0 Basis Functions:** For a given index $i$, compute the zero-degree basis functions $N_{i,0}(x)$ [S2, S1, unofficial].
+2. **Recursive Computation:** For degree $r$ from 1 to $n$, compute the basis functions $N_{i,r}(x)$ using the values from degree $r-1$ [S2, S1, unofficial].
+3. **Handle Zero Denominators:** If a denominator in the recursive formula is zero, the corresponding term is set to zero [S1, S2, unofficial].
+
+**Formulas:**
+The degree-0 basis function $N_{i,0}(x)$ is defined as [S2, S1, unofficial]:
+$$
+N_{i,0}(x) = \begin{cases} 
+1 & \text{if } u_i \le x < u_{i+1} \\
+0 & \text{otherwise}
+\end{cases}
+$$
+Note: Some sources use closed intervals $[u_i, u_{i+1}]$ for the non-zero case [S1, unofficial]. The standard convention often uses half-open intervals to handle knot multiplicity correctly, but the provided sources show slight variation. We follow the half-open interval definition from [S2, unofficial] as it is more standard for B-splines, but acknowledge [S1, unofficial] uses closed intervals.
+
+The recursive step for degree $r$ is [S2, S1, unofficial]:
+$$
+N_{i,r}(x) = \frac{x - u_i}{u_{i+r} - u_i} N_{i,r-1}(x) + \frac{u_{i+r+1} - x}{u_{i+r+1} - u_{i+1}} N_{i+1,r-1}(x)
+$$
+If $u_{i+r} - u_i = 0$, the first term is defined to be 0 [S1, S2, unofficial].
+If $u_{i+r+1} - u_{i+1} = 0$, the second term is defined to be 0 [S1, S2, unofficial].
+
+**Parameters:**
+- $n$: The degree of the B-spline [S2, unofficial].
+- $u_i$: The knot values, typically uniformly distributed between 0 and 1 for uniform B-splines [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** Occurs when $u_{i+r} = u_i$ or $u_{i+r+1} = u_{i+1}$. The implementation must explicitly check these denominators and set the corresponding term to zero [S1, S2, unofficial].
+- **Locality:** Only $n+1$ control points influence the curve segment for a given interval $[u_l, u_{l+1}]$. Specifically, the value is determined by control points $d_{l-n}, \dots, d_l$ [S2, unofficial]. This means only a subset of basis functions need to be evaluated for a given $x$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cox_de_boor(x, i, n, knots):
+    """
+    Evaluate the B-spline basis function N_{i,n}(x) using Cox-de Boor recursion.
+    
+    Args:
+        x (float): The parameter value at which to evaluate.
+        i (int): The index of the basis function.
+        n (int): The degree of the B-spline.
+        knots (list): The knot vector U.
+        
+    Returns:
+        float: The value of the basis function N_{i,n}(x).
+    """
+    # Base case: degree 0
+    if n == 0:
+        # Using half-open interval [u_i, u_{i+1}) as per [S2, unofficial]
+        # Note: [S1, unofficial] uses closed interval [u_i, u_{i+1}]
+        if knots[i] <= x < knots[i+1]:
+            return 1.0
+        else:
+            return 0.0
+            
+    # Recursive step
+    term1 = 0.0
+    denom1 = knots[i+n] - knots[i]
+    if denom1 != 0:
+        term1 = ((x - knots[i]) / denom1) * cox_de_boor(x, i, n-1, knots)
+    # If denom1 is 0, term1 remains 0.0 [S1, S2, unofficial]
+        
+    term2 = 0.0
+    denom2 = knots[i+n+1] - knots[i+1]
+    if denom2 != 0:
+        term2 = ((knots[i+n+1] - x) / denom2) * cox_de_boor(x, i+1, n-1, knots)
+    # If denom2 is 0, term2 remains 0.0 [S1, S2, unofficial]
+        
+    return term1 + term2
+```
+
+## Subtopics
+
+### [Magnification-driven B-spline Interpolation](18904-magnification-driven-b-spline-interpolation.md)
+Magnification-driven B-spline interpolation is a spatial resampling technique for homography, projection, and backprojection operations that adapts to local magnification factors to reduce edge artifacts and aliasing compared to linear interpolation. It solves the problem of nonstationarity in linear interpolation, which causes missing features during homography and artificial high-frequency patterns in adjoint operations. It sets itself apart from standard B-spline interpolation by explicitly incorporating the local Jacobian of the transformation into the sampling step and the correlation functions, ensuring that the interpolation kernel adapts to the local density of the source or detector grid.
+
+## Operating characteristics
+- **Time Complexity:** The naive recursive implementation has exponential time complexity $O(2^n)$ if not memoized. However, since only $n+1$ basis functions are non-zero for a given $x$, and the recursion depth is $n$, an iterative implementation can compute the value in $O(n^2)$ time [S2, S1, unofficial].
+- **Memory Complexity:** $O(n)$ if implemented iteratively with two arrays for current and previous degree levels [S2, S1, unofficial].
+- **Measured Performance:** Chosen for its speed and numerical stability compared to other methods [S2, unofficial].
+- **Strengths:** Numerically stable, efficient for local evaluation, leverages locality of B-splines [S2, S1, unofficial].
+- **Limitations:** Requires careful handling of knot vectors and zero denominators [S1, S2, unofficial].
+- **When to use:** When evaluating B-spline basis functions for interpolation or curve/surface evaluation [S2, S1, unofficial].
+- **When not to use:** When global polynomial evaluation is required or when the knot vector is not available [G].
+
+## Background
+The Cox-de Boor recursion was devised by Carl R. de Boor and is also known as de Boor's algorithm [S2, unofficial]. It is a generalization of de Casteljau's algorithm for Bezier curves [S2, unofficial]. The algorithm is widely used in computer graphics and geometric modeling for B-spline evaluation [S2, S1, unofficial].
+
+## Sources
+[S1] Differentiable Uncalibrated Imaging, https://doi.org/10.48550/arXiv.2211.10525, fetched 2026-10-26 (unofficial)
+[S2] PDF Real-Time Volumetric Rendering of Fire in a Production System ..., https://clas.iusb.edu/math-compsci/_prior-thesis/YVanzine_thesis.pdf, fetched 2026-10-27 (unofficial)

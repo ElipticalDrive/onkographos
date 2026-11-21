@@ -1,0 +1,152 @@
+# Post-finetune Refinement
+
+Also called: Post-finetune process, finetuning procedure, post-finetune
+
+## Overview
+Post-finetune Refinement is a method that uses a small number of bits to enhance the reconstruction quality of important voxels, compensating for losses introduced by coarse quantization [S1]. It addresses the trade-off between bitrate and rendering fidelity by allowing the model to recover detail that would otherwise be lost during the discretization step of the compression pipeline. Unlike standard quantization which maps values to a fixed grid, this method actively adjusts the latent representation after an initial training or coding phase to optimize the rate-distortion performance [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The quantized or coarse latent representation of the volume data (e.g., voxel grid features), depth maps $D$, and camera parameters ($K, T$) for multiple views.
+*   **Output:** A refined feature representation $F_{dec}$ (or $F_c$) that yields higher PSNR/SSIM with minimal additional bitrate overhead.
+
+**Data Structures:**
+*   **Feature Tensor ($F$):** A 3D or 4D tensor representing voxel intensities or neural network features.
+*   **Depth Map ($D$):** A 2D map storing depth values for each pixel in a view.
+*   **Camera Parameters:** Intrinsic matrix $K$ and extrinsic matrix $T$ for source and reference views.
+
+**Steps:**
+1.  **Geometry-Aligned Multi-View Feature Aggregation:**
+    For each reference view $r$, obtain geometry-aligned multi-view features $A_r$ by warping neighboring source-view features to the reference view. This involves:
+    *   Back-projecting reference-view pixels using reference depth $D_r$ to 3D.
+    *   Projecting these 3D points to source view $s$.
+    *   Bilinearly sampling the source feature tensor $F_s$ at the projected coordinates.
+    *   Encoding the inverse depth $d^{-1}_{r \to s}$ of the back-projected point in the source camera.
+    *   Fusing the reference feature $F_r$ and the warped source feature using a learned operator $\Phi$.
+    *   Aggregating valid pairwise features using an averaging operator $\text{Avg}$.
+    
+    The formula for the aggregated feature is [S2, unofficial]:
+    $$ A_r(F, D) = \text{Avg}_{s \neq r} \Phi \left( F_r, \text{Warps}_{\to r}(F_s; D_r, K_r, T_r, K_s, T_s), E(d^{-1}_{r \to s}) \right) $$
+    Where:
+    *   $\text{Warps}_{\to r}$ back-projects reference-view pixels using $D_r$, projects to source view $s$, and bilinearly samples $F_s$.
+    *   $d_{r \to s}$ is the depth of the back-projected reference point in the source camera.
+    *   $E$ encodes the inverse depth.
+    *   $\Phi$ is a learned pairwise feature fusion operator.
+    *   $\text{Avg}$ averages valid pairwise features.
+
+2.  **Residual Update (Pre-Codec or Post-Codec):**
+    *   **Pre-Codec Refinement (if applied before compression):** The feature to be compressed $F_c$ is produced by a residual update [S2, unofficial]:
+        $$ F_c = F_g + R_{pre}(F_g, A(F_g, D_{enc})) $$
+        Where $F_g$ is the initial feature and $D_{enc}$ is the encoded depth.
+    *   **Post-Codec Refinement (if applied after decoding):** Once the reconstructed feature $\hat{F}_c$ and codec-side depth $\hat{D}$ are available, the post-codec refiner produces the final decoded feature $F_{dec}$ [S2, unofficial]:
+        $$ F_{dec} = \hat{F}_c + R_{post}(\hat{F}_c, A(\hat{F}_c, \hat{D})) $$
+        Where $R_{pre}$ and $R_{post}$ are learned refinement networks.
+
+**Parameters:**
+*   **Rate Parameter ($\lambda$):** Selects the rate point of the model. A larger $\lambda$ emphasizes bitrate reduction during training [S1].
+*   **Typical Values:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Disabling Refinement:** Disabling post-finetune saves bits but inevitably deteriorates rendering quality. On the Synthetic-NeRF dataset, disabling it causes a $\Delta$PSNR of $-1.72$ dB, $\Delta$SSIM of $-0.07$, and $\Delta$Size of $-0.079$ MB [S1].
+*   **Precision:** The method relies on accurate depth estimation and warping; errors in depth $D$ can lead to misaligned features and artifacts.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def post_finetune_refinement(F_hat, D_hat, K_ref, T_ref, K_src, T_src, D_src, Phi, R_post):
+    """
+    Performs post-codec refinement for a single reference view.
+    
+    Args:
+        F_hat: Reconstructed feature tensor for the reference view.
+        D_hat: Codec-side depth map for the reference view.
+        K_ref, T_ref: Intrinsic and extrinsic parameters for the reference view.
+        K_src, T_src: Intrinsic and extrinsic parameters for source views.
+        D_src: Depth maps for source views.
+        Phi: Learned pairwise feature fusion operator.
+        R_post: Learned post-codec refinement network.
+        
+    Returns:
+        F_dec: Refined decoded feature tensor.
+    """
+    # Step 1: Geometry-aligned multi-view feature aggregation
+    # Initialize aggregated feature
+    A_r = None
+    
+    # Iterate over neighboring source views
+    for s in source_views:
+        # Back-project reference-view pixels using reference depth
+        # This creates 3D points from reference view pixels
+        points_3d = back_project(D_hat, K_ref, T_ref)
+        
+        # Project 3D points to source view s
+        # This gives 2D coordinates in the source view
+        coords_2d = project(points_3d, K_src, T_src)
+        
+        # Bilinearly sample source feature tensor F_s at coords_2d
+        # F_s is the feature tensor for source view s
+        warped_feature = bilinear_sample(F_hat[s], coords_2d)
+        
+        # Calculate depth of back-projected point in source camera
+        # d_r_to_s is the depth of the point in the source camera frame
+        d_r_to_s = get_depth_in_source(points_3d, T_src)
+        
+        # Encode inverse depth
+        inv_depth_encoded = encode_inverse_depth(1.0 / d_r_to_s)
+        
+        # Learned pairwise feature fusion
+        # Phi takes reference feature, warped source feature, and encoded depth
+        fused = Phi(F_hat, warped_feature, inv_depth_encoded)
+        
+        # Aggregate valid pairwise features
+        if A_r is None:
+            A_r = fused
+        else:
+            A_r = average_valid_features(A_r, fused)
+            
+    # Step 2: Residual update
+    # R_post takes the reconstructed feature and the aggregated multi-view feature
+    residual = R_post(F_hat, A_r)
+    
+    # Final refined feature
+    F_dec = F_hat + residual
+    
+    return F_dec
+```
+
+## Subtopics
+
+### Depth-guided Multi-view Feature Refinement
+A pre- and post-codec refinement step that uses depth-guided multi-view interaction to align features geometrically and reduce cross-view redundancy before latent coding, and to compensate for compression artifacts after decoding [S2, unofficial]. It is chosen when multi-view consistency is critical and depth information is available. It differs from single-view refinement by explicitly leveraging geometric alignment across views. See [CodecSplat](link-to-codecsplat-if-exists) for implementation details.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** The refinement step adds computational overhead due to warping, sampling, and neural network inference ($\Phi$ and $R_{post}$). The exact complexity depends on the number of views and resolution.
+*   **Memory:** Requires storing depth maps and intermediate warped features. The refinement networks add model size.
+
+**Measured Performance:**
+*   On the Synthetic-NeRF dataset, disabling post-finetune results in a $-1.72$ dB drop in PSNR and a $-0.07$ drop in SSIM, while saving $0.079$ MB [S1].
+*   The method allows for a small number of bits to enhance reconstruction quality, compensating for coarse quantization losses [S1].
+
+**Scaling:**
+*   Performance scales with the number of views and the accuracy of depth estimation.
+
+**Strengths and Limitations:**
+*   **Strengths:** Significantly improves rendering quality (PSNR/SSIM) with minimal bitrate increase. Effective at recovering details lost during quantization.
+*   **Limitations:** Requires accurate depth information. Adds computational complexity. If depth is inaccurate, artifacts may be introduced.
+
+**When to Use:**
+*   Use when high-fidelity reconstruction is required and a small bitrate overhead is acceptable.
+*   Use when depth information is available and reliable.
+
+**When Not to Use:**
+*   Use when bitrate is extremely constrained and quality degradation is acceptable.
+*   Use when depth information is unavailable or unreliable.
+
+## Background
+Post-finetune Refinement originates from research into spatial predictive compression for voxel-based radiance fields, specifically in the context of SPC-NeRF [S1]. It was developed to address the limitations of coarse quantization in neural radiance field compression. The method was further adapted in CodecSplat for 3D Gaussian Splatting compression, where it was extended to multi-view settings [S2, unofficial].
+
+## Sources
+[S1] SPC-NeRF: Spatial Predictive Compression for Voxel-Based Radiance Field, https://doi.org/10.1145/3795528, fetched 2026-10-26
+[S2] CodecSplat: Ultra-Compact Latent Coding for Feed-Forward 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2605.25563, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,67 @@
+# Coordinate-Time Encoding
+
+Also called: One-Blob Encoding
+
+## Overview
+Coordinate-Time Encoding (also known as One-Blob Encoding) is a continuous, single-scale positional encoding method designed for bounded domains [S1, unofficial]. It serves as a continuous variant of one-hot encoding, rasterizing a kernel to map input coordinates into a higher-dimensional space [S1, unofficial]. Unlike the multi-frequency approach of its parent [Fourier Positional Encoding](1267-fourier-positional-encoding.md), it provides a localized representation that can achieve higher accuracy in bounded regions at the cost of lacking multi-scale frequency support [S1, unofficial]. It is particularly noted for its application in concatenating with spatiotemporal features to handle dynamic conditions in in vivo sequences [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar coordinate value $s \in \mathbb{R}$ (typically a spatial coordinate $x, y, z$ or a temporal coordinate $\tau$).
+*   **Output:** A vector $\mathbf{b}(s) \in \mathbb{R}^k$, where $k$ is the dimensionality of the encoded space.
+
+**Data Structures:**
+*   The encoding is applied independently to each coordinate component. For a 4D input $(x, y, z, \tau)$, the final encoded vector is the concatenation of the one-blob encodings for each component: $\mathbf{b}(x, y, z, \tau) = [\mathbf{b}(x); \mathbf{b}(y); \mathbf{b}(z); \mathbf{b}(\tau)]$.
+
+**Parameters:**
+*   $k$: The dimensionality of the output space. [S2]
+*   $\xi^2$: The variance of the Gaussian kernel. [S2]
+*   Typical values: Not given in the sources.
+
+**Formula:**
+The encoding is defined by evaluating a Gaussian kernel at discrete points [S2]:
+
+$$
+\mathbf{b}(s) = g_{s, \xi^2}\left(\frac{i - 0.5}{k}\right), \quad i = 1, 2, \dots, k
+$$
+
+Where:
+*   $g_{s, \xi^2}(u)$ is a Gaussian kernel with mean $s$ and variance $\xi^2$, evaluated at $u$.
+*   The standard Gaussian PDF is $g_{s, \xi^2}(u) = \frac{1}{\sqrt{2\pi\xi^2}} \exp\left(-\frac{(u - s)^2}{2\xi^2}\right)$.
+*   The evaluation points are uniformly spaced in the interval $(0, 1)$, specifically at $\frac{i - 0.5}{k}$.
+
+**Steps:**
+1.  For each coordinate value $s$ to be encoded:
+2.  Initialize an empty vector $\mathbf{b}$ of size $k$.
+3.  For $i$ from 1 to $k$:
+    a. Calculate the evaluation point $u_i = \frac{i - 0.5}{k}$.
+    b. Compute the Gaussian value $v_i = \frac{1}{\sqrt{2\pi\xi^2}} \exp\left(-\frac{(u_i - s)^2}{2\xi^2}\right)$.
+    c. Set $\mathbf{b}[i-1] = v_i$.
+4.  Return $\mathbf{b}$.
+
+**Edge Cases and Pitfalls:**
+*   **Bounded Domains:** The method is designed for bounded domains. If $s$ falls far outside the range of evaluation points $(0, 1)$, the Gaussian values will be near zero, potentially leading to vanishing gradients or uninformative representations [S1, unofficial].
+*   **Single-Scale Limitation:** Because it uses a fixed variance $\xi^2$ and fixed grid points, it cannot represent high-frequency details as effectively as multi-scale encodings like Fourier Positional Encoding if the scene contains features smaller than the effective support of the kernel [S1, unofficial].
+
+## Subtopics
+
+### Off-Axis Positional Encoding
+An alternative encoding that shifts the frequency bands to avoid aliasing artifacts. Choose when high-frequency details are critical and standard Fourier encoding suffers from banding. [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md)
+
+### Integrated Positional Encoding
+An extension that integrates the positional encoding over the volume segment to account for density variations. Choose when accurate volume rendering integration is required. [Integrated Positional Encoding](5255-integrated-positional-encoding.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(k)$ per coordinate, where $k$ is the encoding dimension.
+*   **Memory Complexity:** $O(k)$ to store the encoded vector.
+*   **Strengths:** Can achieve more accurate results than frequency encodings in bounded domains [S1, unofficial]. It provides a smooth, localized representation suitable for concatenating with other features (e.g., in dynamic in vivo sequences) [S2].
+*   **Limitations:** It is single-scale, meaning it lacks the ability to represent a wide range of frequencies simultaneously, which can limit its effectiveness for scenes with complex high-frequency details compared to multi-scale methods [S1, unofficial].
+*   **When to use:** When working with bounded domains and requiring a smooth, continuous representation that integrates well with other feature planes, particularly in dynamic scenarios [S2].
+*   **When not to use:** When multi-scale frequency representation is required for high-frequency details [S1, unofficial].
+
+## Background
+The method was suggested by Müller et al. in 2019 and 2020 as a continuous variant of one-hot encoding based on rasterizing a kernel [S1, unofficial]. It is categorized under parametric encodings, which blur the line between classical data structures and neural approaches by arranging trainable parameters in auxiliary data structures [S1, unofficial]. It has been applied in contexts such as efficient deformable tissue reconstruction via orthogonal neural planes, where it is used to encode spatiotemporal information for dynamic in vivo sequences [S2].
+
+## Sources
+[S1] Nvidia – learning representations of positions in a 3D scene [pdf], https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf, fetched 2026-10-26 (unofficial)
+[S2] Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane, https://doi.org/10.1109/tmi.2024.3388559, fetched 2026-10-26

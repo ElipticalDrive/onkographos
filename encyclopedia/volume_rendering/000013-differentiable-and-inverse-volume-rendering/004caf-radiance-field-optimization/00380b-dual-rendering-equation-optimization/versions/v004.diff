@@ -1,0 +1,172 @@
+--- v003.md
++++ v004.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Dual Rendering Equation Optimization (DREO) is a differentiable volume rendering method that jointly optimizes scene geometry and appearance by minimizing a combined loss derived from two distinct rendering equations: one for volumetric density accumulation and one for surface reflectance [S1, unofficial]. It solves the problem of reconstructing scenes with complex lighting and geometry from limited views by leveraging both volume and surface cues simultaneously [S1, unofficial]. Unlike standard NeRF which relies solely on volumetric integration, DREO explicitly models surface normals and BRDF properties, allowing for more accurate relighting and geometry recovery [S1, unofficial]. It differs from [Deformable and Dynamic Fields](11311-deformable-and-dynamic-fields.md) by focusing on the dual-equation loss formulation rather than temporal deformation fields, and from [Surface-SDF Representation](10778-surface-sdf-representation.md) by using a neural radiance field tensor optimized via volume rendering integrals rather than explicit signed distance functions.
++Dual Rendering Equation Optimization (DREO) is a differentiable volume rendering method that jointly optimizes scene geometry and appearance by minimizing a combined loss derived from two distinct rendering equations: one for volumetric density accumulation and one for surface reflectance [S1, unofficial]. Unlike standard NeRF which relies solely on volumetric integration, DREO explicitly models surface normals and BRDF properties to enable relighting [S1, unofficial]. It differs from [Deformable and Dynamic Fields](11311-deformable-and-dynamic-fields.md) by focusing on the dual-equation loss formulation rather than temporal deformation fields, and from [Surface-SDF Representation](10778-surface-sdf-representation.md) by using a neural radiance field tensor optimized via volume rendering integrals rather than explicit signed distance functions.
+ 
+ ## How it works
+-The method optimizes a scene tensor (representing density, color, and BRDF parameters) by alternating or jointly minimizing losses from two rendering passes.
++The method optimizes a scene tensor (representing density, color, and BRDF parameters) by jointly minimizing losses from two rendering passes.
+ 
+ ### Inputs and Outputs
+@@ -14,91 +14,60 @@
+ 
+ ### Data Structures
+-The scene is represented as a tensor field. Specific internal layouts (e.g., voxel grid vs. MLP) are not detailed in the primary source [S1, unofficial], but the optimization targets a "scene tensor" that encodes density $\sigma$, color $c$, and BRDF values [S1, unofficial].
++The scene is represented as a tensor field encoding density $\sigma$, color $c$, and BRDF parameters [S1, unofficial]. Specific internal layouts (e.g., voxel grid vs. MLP) are not detailed in the primary source [S1, unofficial].
+ 
+ ### Numbered Steps
+-1. **Volume Rendering Pass**:
+-   - Emit a ray $r(t) = o + td$ from origin $o$ in direction $d$ [S1, unofficial].
+-   - Sample $N$ points along the ray [S1, unofficial].
+-   - Compute density-weighted color accumulation using the volume rendering equation [S1, unofficial]:
+-     $$ C_{vl}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i, \quad T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j) $$
+-     where $\delta_i$ is the distance between samples [S1, unofficial].
+-2. **Surface Rendering Pass**:
+-   - For surface points $x$, compute the reflected radiance $L(x, d)$ [S1, unofficial].
+-   - Approximate the surface integral of the reflectance equation using the incident light field $L_i(x, d)$ and normal $n$ [S1, unofficial]:
+-     $$ L(x, d) = bval \cdot L_i(x, d) (n \cdot d) $$
+-     where $bval$ is the BRDF value decoded by a decoder $B_{dec}$ [S1, unofficial].
+-3. **Loss Evaluation**:
+-   - Compute the total loss combining surface rendering, volume rendering, and normal consistency [S1, unofficial]:
+-     $$ loss = \lambda_1 || L(x, d) - C_{gt} ||_2^2 + \lambda_2 || C_{vl}(r) - C_{gt} ||_2^2 + \lambda_3 || n - n_{gt} ||_2^2 $$
+-     where $\lambda_1, \lambda_2, \lambda_3$ are loss weights [S1, unofficial].
+-4. **Optimization**:
+-   - Update the scene tensor parameters to minimize the loss [S1, unofficial].
+-   - **Schedule**: Set $\lambda_1 = 0$ during early iterations (before the scene surface is obtained) [S1, unofficial]. Once a threshold is reached, gradually decrease $\lambda_2$ in subsequent iterations [S1, unofficial].
++1. **Volume Rendering Pass**: Emit a ray $r(t) = o + td$ from origin $o$ in direction $d$ [S1, unofficial]. Sample $N$ points along the ray [S1, unofficial]. Compute density-weighted color accumulation using the volume rendering equation [S1, unofficial]:
++   $$ C_{vl}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i, \quad T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j) $$
++   where $\delta_i$ is the distance between consecutive samples [S1, unofficial].
++2. **Surface Rendering Pass**: For surface points $x$, compute the reflected radiance $L(x, d)$ [S1, unofficial]. Approximate the surface integral of the reflectance equation using the incident light field $L_i(x, d)$ and normal $n$ [S1, unofficial]:
++   $$ L(x, d) = bval \cdot L_i(x, d) (n \cdot d) $$
++   where $bval$ is the BRDF value decoded by a decoder $B_{dec}$ [S1, unofficial].
++3. **Loss Evaluation**: Compute the total loss combining surface rendering, volume rendering, and normal consistency [S1, unofficial]:
++   $$ loss = \lambda_1 || L(x, d) - C_{gt} ||_2^2 + \lambda_2 || C_{vl}(r) - C_{gt} ||_2^2 + \lambda_3 || n - n_{gt} ||_2^2 $$
++   where $\lambda_1, \lambda_2, \lambda_3$ are loss weights [S1, unofficial].
++4. **Optimization**: Update the scene tensor parameters to minimize the loss [S1, unofficial]. **Schedule**: Set $\lambda_1 = 0$ during early iterations before the scene surface is obtained [S1, unofficial]. Once a threshold is reached, gradually decrease $\lambda_2$ in subsequent iterations [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-# Initialize scene tensor parameters
+-scene_tensor = initialize_tensor()
+-
+-# Hyperparameters
+-lambda_1 = 0.0
+-lambda_2 = 1.0
+-lambda_3 = 1.0
+-surface_threshold = 1000 # Example iteration count
+-current_iter = 0
+-
+-for iteration in range(max_iterations):
+-    # 1. Sample rays and points
+-    rays = sample_rays(cameras)
+-    points = sample_points_along_rays(rays, N=128)
++def dual_rendering_optimization(cameras, gt_colors, gt_normals, num_iterations, surface_threshold, decay_rate, lambda_1_init, lambda_2_init, lambda_3_init):
++    scene_tensor = SceneTensor()  # [G]
++    lambda_1 = lambda_1_init
++    lambda_2 = lambda_2_init
++    lambda_3 = lambda_3_init
+     
+-    # 2. Forward pass: Volume Rendering
+-    # Compute density, color, and transmittance for each point
+-    sigma, c, n = scene_tensor.query(points)
+-    
+-    # Volume Rendering Integral
+-    T_prev = 1.0
+-    C_vl = 0.0
+-    for i in range(len(points)):
+-        delta = distance(points[i], points[i+1]) if i < len(points)-1 else 0.0
+-        # T_i calculation
+-        T_i = T_prev * exp(-sigma[i] * delta)
+-        # Color contribution
+-        alpha = 1.0 - exp(-sigma[i] * delta)
+-        C_vl += T_i * alpha * c[i]
+-        T_prev = T_i
++    for iteration in range(num_iterations):
++        rays = sample_rays(cameras)  # [G]
++        points = sample_points_along_rays(rays, N=128)  # [G]
+         
+-    # 3. Forward pass: Surface Rendering
+-    # Approximate surface integral using incident light field
+-    # Note: L_i(x, d) is precomputed or approximated ambient light
+-    L_i = get_incident_light_field(points)
+-    bval = scene_tensor.decode_brdf(points) # Decoded by B_dec
+-    L_surf = bval * L_i * dot(n, rays.direction)
+-    
+-    # 4. Compute Losses
+-    # Volume Loss
+-    loss_vol = mean_squared_error(C_vl, ground_truth_colors)
+-    
+-    # Surface Loss
+-    loss_surf = mean_squared_error(L_surf, ground_truth_colors)
+-    
+-    # Normal Loss (if ground truth normals available)
+-    loss_norm = mean_squared_error(n, ground_truth_normals)
+-    
+-    # Combined Loss
+-    total_loss = lambda_1 * loss_surf + lambda_2 * loss_vol + lambda_3 * loss_norm
+-    
+-    # 5. Backpropagation and Update
+-    gradients = compute_gradients(total_loss, scene_tensor)
+-    update_scene_tensor(scene_tensor, gradients)
+-    
+-    # 6. Schedule Adjustment
+-    current_iter += 1
+-    if current_iter > surface_threshold:
+-        lambda_1 = 1.0 # Enable surface loss
+-        lambda_2 = lambda_2 * decay_factor # Gradually decrease volume loss weight
++        sigma, c, n = scene_tensor.query(points)  # [G]
++        deltas = compute_deltas(points)  # [G]
+         
+-    if current_iter % checkpoint_interval == 0:
+-        save_checkpoint(scene_tensor)
++        # Volume Rendering
++        T = 1.0
++        C_vl = 0.0
++        for i in range(len(points)):
++            alpha = 1.0 - exp(-sigma[i] * deltas[i])
++            C_vl += T * alpha * c[i]
++            T *= exp(-sigma[i] * deltas[i])
++            
++        # Surface Rendering
++        L_i = compute_incident_light(points)  # [G]
++        bval = scene_tensor.decode_brdf(points)  # [G]
++        L_surf = bval * L_i * dot(n, rays.direction)
++        
++        # Loss
++        loss_vol = mean_squared_error(C_vl, gt_colors)
++        loss_surf = mean_squared_error(L_surf, gt_colors)
++        loss_norm = mean_squared_error(n, gt_normals) if gt_normals is not None else 0.0
++        total_loss = lambda_1 * loss_surf + lambda_2 * loss_vol + lambda_3 * loss_norm
++        
++        # Update
++        gradients = compute_gradients(total_loss, scene_tensor)  # [G]
++        scene_tensor.step(gradients)  # [G]
++        
++        # Schedule
++        if iteration > surface_threshold:
++            lambda_1 = 1.0
++            lambda_2 *= decay_rate
+ ```
+ 
+@@ -125,11 +94,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not explicitly given, but DREO involves two rendering passes (volume and surface) per iteration, potentially doubling the computational cost compared to single-equation methods [S1, unofficial].
+-- **Memory Complexity**: Depends on the scene tensor representation; not explicitly given [S1, unofficial].
+-- **Performance**: The dual-equation approach allows for more accurate geometry and appearance reconstruction, especially in scenes with complex lighting and surfaces [S1, unofficial].
+-- **Strengths**: Joint optimization of volume and surface cues leads to better reconstruction quality; explicit BRDF modeling enables relighting [S1, unofficial].
+-- **Limitations**: Requires careful scheduling of loss weights; approximation of surface integral may introduce errors; computationally more expensive due to dual passes [S1, unofficial].
+-- **When to Use**: Scenes with complex geometry and lighting where both volume and surface information are important [S1, unofficial].
+-- **When Not to Use**: Simple scenes where volumetric rendering alone suffices; real-time applications where computational cost is critical [S1, unofficial].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Performance**: The dual-equation approach requires two rendering passes per iteration, increasing computational cost compared to single-equation methods [S1, unofficial].
++- **Strengths**: Joint optimization of volume and surface cues improves reconstruction quality [S1, unofficial]. Explicit BRDF modeling enables relighting [S1, unofficial].
++- **Limitations**: The method requires careful scheduling of loss weights and depends on the incident light field approximation [S1, unofficial]. BRDF modeling requires dataset-specific decoder tuning [S1, unofficial].
++- **When to Use**: Not given in the sources.
++- **When Not to Use**: Not given in the sources.
+ 
+ ## Background

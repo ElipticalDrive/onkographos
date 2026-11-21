@@ -1,0 +1,196 @@
+# GSGEN
+
+Also called: 3D Point Cloud Guidance, G SGEN, GSGEN: A method introducing 3D SDS loss based on Point-E
+
+## Overview
+GSGEN is a text-to-3D generation method that represents 3D content as a set of 3D Gaussians and optimizes them progressively in two stages: geometry optimization and appearance refinement, using 2D and 3D diffusion priors [S1, S2]. It differs from NeRF-based methods (e.g., DreamFusion, Magic3D) by using explicit 3D Gaussians, which allows for the incorporation of direct 3D geometry priors and alleviates the Janus problem [S1]. It differs from DreamGaussian by focusing on incorporating 3D prior with more advanced representation, whereas DreamGaussian focuses on fast image-to-3D generation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A text prompt $y$.
+*   **Output:** A set of 3D Gaussians $\{\theta\}$ representing the 3D asset, where $\theta$ includes positions $\mu_i$, covariances $\Sigma_i$, opacities $o_i$, and colors $c_i$ for each Gaussian $i$.
+
+**Data Structures:**
+The method uses the standard 3D Gaussian Splatting representation [S1]. Each Gaussian $i$ is defined by:
+*   Position $\mu_i \in \mathbb{R}^3$
+*   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite)
+*   Opacity $o_i \in [0, 1]$
+*   Color $c_i$ (typically represented by spherical harmonics coefficients)
+
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Use a text-to-point-cloud diffusion model (specifically Point-E [S1, S2]) to generate a coarse 3D point cloud from the text prompt $y$.
+    *   Initialize the positions $\mu_i$ of the Gaussians with this coarse point cloud [S1, S2].
+    *   *Note:* The original adaptive control in Gaussian Splatting performs sub-optimally under SDS loss, necessitating the introduction of compactness-based densification [S1].
+
+2.  **Stage 1: Geometry Optimization:**
+    *   Optimize the Gaussians under the joint guidance of:
+        1.  A 3D point cloud diffusion prior (from Point-E) via 3D SDS loss.
+        2.  An ordinary 2D image prior (from StableDiffusion) via 2D SDS loss [S1, S2].
+    *   This stage establishes a rough, 3D-consistent shape and corrects major shape deviations (e.g., asymmetric geometries like dogs or pandas) [S1].
+    *   The gradient for Score Distillation Sampling (SDS) is calculated as [S1]:
+        $$ \nabla_\theta L^{SDS} = \mathbb{E}_{\epsilon, t} w(t)(\epsilon_\phi (x_t ; y, t) - \epsilon) \frac{\partial x}{\partial \theta} $$
+        where:
+        *   $\epsilon$ is Gaussian noise.
+        *   $w(t)$ is a weighting function.
+        *   $\epsilon_\phi$ is the score estimation function from the diffusion model.
+        *   $x_t$ is the noisy image.
+        *   $y$ is the text embedding.
+        *   $t$ is the timestep.
+        *   $x = g(\theta)$ is the rendered image.
+    *   For the 3D SDS loss, the rendering function $g(\theta)$ projects the 3D Gaussians to a point cloud representation compatible with the Point-E prior [S1].
+
+3.  **Stage 2: Appearance Refinement:**
+    *   Optimize the Gaussians to enrich delicate details using only the 2D image prior (StableDiffusion) [S1, S2].
+    *   Increase the number of Gaussians using **compactness-based densification** to enhance continuity and improve fidelity [S1].
+    *   *Densification Parameters:*
+        *   The original densification strategy splits Gaussians with an average view-space gradient larger than a threshold $T_{pos}$ [S1].
+        *   Typical value for $T_{pos}$ in the original strategy: $0.0002$ [S1].
+        *   A variant with larger $T_{pos} = 0.02$ avoids generating too many new Gaussians but may result in over-smoothed appearance [S1].
+        *   GSGEN uses compactness-based densification as a supplement to the original strategy to avoid the dilemma of unstable gradients under SDS guidance [S1].
+
+**Rendering Formula:**
+The color $C(p)$ of a point $p$ on the image plane is rendered using point-based volume rendering [S1]:
+$$ C(p) = \sum_{i \in N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+where:
+*   $N$ is the set of Gaussians sorted by depth in the tile.
+*   $c_i$ is the color of the $i$-th Gaussian.
+*   $\alpha_i$ is the opacity of the $i$-th Gaussian at point $p$.
+
+The opacity $\alpha_i$ is defined as [S1]:
+$$ \alpha_i = o_i e^{-\frac{1}{2} (p-\mu_i)^T \Sigma_i^{-1} (p-\mu_i)} $$
+where:
+*   $o_i$ is the base opacity.
+*   $\mu_i$ is the position.
+*   $\Sigma_i$ is the covariance matrix.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gsgen(text_prompt):
+    # 1. Initialization
+    # Generate coarse point cloud using Point-E
+    point_cloud = point_e_generate(text_prompt)
+    
+    # Initialize Gaussians with point cloud positions
+    # Other parameters (covariance, opacity, color) initialized to defaults
+    gaussians = initialize_gaussians_from_point_cloud(point_cloud)
+    
+    # 2. Geometry Optimization Stage
+    # Joint guidance from 2D (StableDiffusion) and 3D (Point-E) priors
+    for step in range(geometry_optimization_steps):
+        # Sample random camera views
+        cameras = sample_random_cameras()
+        
+        # Render images from current Gaussians
+        rendered_images = render_gaussians(gaussians, cameras)
+        
+        # Calculate 2D SDS Loss using StableDiffusion
+        loss_2d = calculate_2d_sds_loss(rendered_images, text_prompt, stable_diffusion_model)
+        
+        # Calculate 3D SDS Loss using Point-E
+        # Project Gaussians to point cloud for 3D prior comparison
+        projected_point_clouds = project_to_point_cloud(gaussians, cameras)
+        loss_3d = calculate_3d_sds_loss(projected_point_clouds, text_prompt, point_e_model)
+        
+        # Combine losses
+        total_loss = loss_2d + loss_3d
+        
+        # Update Gaussians
+        gaussians = update_gaussians(gaussians, total_loss)
+        
+    # 3. Appearance Refinement Stage
+    # Only 2D image prior (StableDiffusion)
+    for step in range(appearance_refinement_steps):
+        # Sample random camera views
+        cameras = sample_random_cameras()
+        
+        # Render images
+        rendered_images = render_gaussians(gaussians, cameras)
+        
+        # Calculate 2D SDS Loss
+        loss_2d = calculate_2d_sds_loss(rendered_images, text_prompt, stable_diffusion_model)
+        
+        # Update Gaussians
+        gaussians = update_gaussians(gaussians, loss_2d)
+        
+        # Compactness-based densification
+        gaussians = densify_gaussians_compactness(gaussians)
+        
+    return gaussians
+
+def calculate_2d_sds_loss(rendered_images, text_prompt, diffusion_model):
+    # Standard SDS gradient calculation
+    # E_{epsilon, t} [ w(t) * (epsilon_phi(x_t; y, t) - epsilon) * dx/dtheta ]
+    loss = 0
+    for image in rendered_images:
+        # Add noise
+        t = sample_timestep()
+        epsilon = sample_gaussian_noise()
+        x_t = add_noise(image, epsilon, t)
+        
+        # Predict noise from diffusion model
+        predicted_epsilon = diffusion_model.predict(x_t, text_prompt, t)
+        
+        # Compute gradient contribution
+        # Note: dx/dtheta is obtained via backprop through the renderer
+        gradient = w(t) * (predicted_epsilon - epsilon)
+        loss += gradient * render_gradient(image)
+    return loss
+
+def calculate_3d_sds_loss(projected_point_clouds, text_prompt, point_e_model):
+    # Similar to 2D SDS but applied to point cloud representation
+    # and guided by Point-E model
+    loss = 0
+    for pc in projected_point_clouds:
+        # Point-E might operate on latent space or direct point cloud
+        # Assuming similar SDS formulation adapted for 3D prior
+        t = sample_timestep()
+        epsilon = sample_gaussian_noise()
+        # Noise addition to point cloud coordinates
+        pc_t = add_noise(pc, epsilon, t)
+        
+        predicted_epsilon = point_e_model.predict(pc_t, text_prompt, t)
+        
+        gradient = w(t) * (predicted_epsilon - epsilon)
+        loss += gradient * point_cloud_gradient(pc)
+    return loss
+
+def densify_gaussians_compactness(gaussians):
+    # Compactness-based densification strategy
+    # Supplements original gradient-based densification
+    # to avoid over-smoothing or instability under SDS
+    for gaussian in gaussians:
+        # Check compactness metric
+        if is_too_spread(gaussian):
+            split_or_copy_gaussian(gaussian)
+    return gaussians
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. However, it is noted that Gaussian Splatting enables significantly faster rendering speed and reduction of memory usage during training compared to NeRF-based methods [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** GSGEN generates 3D assets with delicate details and accurate geometry, demonstrating superior performance in capturing high-frequency components [S1]. It effectively addresses asymmetric geometries (e.g., dog, panda) and collapsed structures better than methods without 3D priors [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:**
+    *   Alleviates the Janus problem (inaccurate geometry/multi-face issue) common in NeRF-based methods [S1, S2].
+    *   Generates highly detailed and 3D consistent assets [S1].
+    *   Explicit 3D representation allows direct incorporation of 3D geometry priors [S1].
+*   **Limitations:**
+    *   Tends to generate unsatisfying results when the text prompt contains complex descriptions or complicated logic due to the limited language understanding ability of Point-E and the CLIP text encoder used in StableDiffusion [S1].
+    *   The Janus problem is mitigated but not entirely eliminated; potential degenerations can still occur, especially when the textual prompt is extremely biased in the guidance diffusion models [S1].
+    *   The original adaptive control in Gaussian Splatting performs sub-optimally under SDS loss, requiring the custom compactness-based densification [S1].
+*   **When to use:** Text-to-3D generation requiring high fidelity and 3D consistency, especially for asymmetric objects.
+*   **When not to use:** Prompts with complex logic or detailed scene descriptions that exceed the language understanding capabilities of Point-E and StableDiffusion [S1].
+
+## Background
+*   **Origin:** GSGEN was proposed in the paper "Text-to-3D using Gaussian Splatting" [S1].
+*   **History:** It builds upon the success of Score Distillation Sampling (SDS) introduced by DreamFusion [S1] and the efficiency of 3D Gaussian Splatting [S1]. It specifically addresses the limitations of implicit representations (NeRF) in integrating 3D priors [S1].
+*   **Usage:** Used in GSGEN for text-to-3D generation [S1]. It utilizes StableDiffusion as the 2D image prior and Point-E as the 3D point cloud diffusion prior [S1, S2].
+
+## Sources
+[S1] Text-to-3D using Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.02022, fetched 2026-10-26
+[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

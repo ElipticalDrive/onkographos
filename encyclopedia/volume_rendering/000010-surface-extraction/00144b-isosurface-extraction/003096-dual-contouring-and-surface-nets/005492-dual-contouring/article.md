@@ -1,0 +1,285 @@
+# Dual Contouring
+
+Also called: Dual Contouring on a Uniform Grid, DualContourMesher, Hermite Dual Contouring, Ju's method, algo.dualContouring
+
+## Overview
+Dual Contouring is a feature-preserving isosurface extraction method that generates a mesh by placing a single vertex inside each grid cell intersecting the isosurface, rather than on the cell edges as in Marching Cubes [S1][S2, unofficial][S3]. It solves the problem of sharp feature preservation and topological ambiguity inherent in standard marching cubes by utilizing Hermite data (intersection points and surface normals) to position vertices via Quadratic Error Function (QEF) minimization [S3][S35, unofficial]. Unlike its siblings, it constructs a dual graph where grid cells become mesh vertices and edge intersections become faces, allowing for the exact reconstruction of creases and apexes [S2, S35, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar field $f: \mathbb{R}^3 \rightarrow \mathbb{R}$ (typically a Signed Distance Field, SDF) discretized on a uniform grid or octree. The isovalue is typically $0$ [S10][S20, unofficial].
+*   **Output:** A polygonal mesh (typically quadrilaterals or triangles) representing the isosurface $f(x)=0$.
+
+**Data Structures:**
+1.  **Grid/Volume:** A 3D array or octree storing scalar values $f(v)$ at vertices $v$ [S10].
+2.  **Hermite Data:** For every grid edge $e$ connecting vertices $v_a, v_b$ where $f(v_a)$ and $f(v_b)$ have opposite signs, store the intersection point $p_e$ on the edge and the normal $n_e$ (gradient of $f$ at $p_e$, normalized) [S28, unofficial].
+3.  **QEF Accumulators:** Per active cell (cell with at least one sign-changing edge), store the symmetric $3 \times 3$ matrix $A$ and vector $b$ for the QEF, plus a scalar $c$ for regularization [S14, unofficial][S30].
+
+**Steps:**
+
+1.  **Evaluate Grid:** Sample $f$ at all grid vertices. Compute signs $S(v) = \text{sign}(f(v))$ [S10].
+2.  **Identify Active Edges:** Iterate over all grid edges. An edge is active if the signs of its endpoints differ: $S(v_a) \neq S(v_b)$ [S7, unofficial][S44].
+3.  **Compute Hermite Data:** For each active edge $e$ between $v_a$ and $v_b$:
+    *   Calculate intersection parameter $t$:
+        $$ t = \frac{0 - f(v_a)}{f(v_b) - f(v_a)} $$
+        If $|f(v_b) - f(v_a)| < \epsilon$ (where $\epsilon$ is machine epsilon or a small threshold like $10^{-12}$), set $t = 0.5$ [S30].
+    *   Compute intersection point $p_e$:
+        $$ p_e = (1-t)v_a + t v_b $$
+    *   Compute normal $n_e$: Evaluate the gradient $\nabla f$ at $p_e$ and normalize:
+        $$ n_e = \frac{\nabla f(p_e)}{\|\nabla f(p_e)\|} $$
+4.  **Identify Active Cells:** A cell is active if it contains at least one active edge [S13, unofficial].
+5.  **Construct QEF for Each Active Cell:**
+    For each active cell $c$, initialize $A = 0_{3 \times 3}$, $b = 0_3$, and $c_{reg} = 0$ [S14, unofficial].
+    For each active edge $e$ incident to cell $c$ (up to 12 edges in 3D):
+    *   Let $n_e$ be the normal and $p_e$ be the intersection point.
+    *   Update $A$:
+        $$ A \leftarrow A + n_e n_e^T $$
+        In component form (symmetric):
+        $$ A_{00} += n_{e,x}^2, \quad A_{01} += n_{e,x}n_{e,y}, \quad A_{02} += n_{e,x}n_{e,z} $$
+        $$ A_{11} += n_{e,y}^2, \quad A_{12} += n_{e,y}n_{e,z} $$
+        $$ A_{22} += n_{e,z}^2 $$
+    *   Update $b$:
+        $$ b \leftarrow b + (n_e \cdot p_e) n_e $$
+        In component form:
+        $$ b_x += n_{e,x} (n_e \cdot p_e), \quad b_y += n_{e,y} (n_e \cdot p_e), \quad b_z += n_{e,z} (n_e \cdot p_e) $$
+    *   (Optional) Regularization: Add $\lambda I$ to $A$ and $\lambda c_{center}$ to $b$ to prevent singularity and pull vertices toward the cell center if normals are collinear [S2, S35, unofficial]. Here $c_{center}$ is the cell centroid.
+6.  **Solve QEF:** Solve the linear system $Ax = b$ for vertex position $v_c$. Use a standard linear solver or an iterative approach starting $v_c$ at the cell center with step $\alpha \approx 0.7$ [S7, unofficial][S44]. Clamp the resulting $v_c$ to the cell bounds $[cx, cx+1] \times [cy, cy+1] \times [cz, cz+1]$ to prevent vertices from falling outside [S2, unofficial].
+7.  **Generate Faces:**
+    *   Iterate over all active edges $e$ again.
+    *   Identify the four cells sharing edge $e$: $c_1, c_2, c_3, c_4$.
+    *   Create a quadrilateral face connecting vertices $v_{c_1}, v_{c_2}, v_{c_3}, v_{c_4}$ in order around the edge [S4][S41, unofficial].
+    *   If using an octree or adaptive grid, handle transition cells carefully to ensure manifold topology (e.g., using Transvoxel logic or specific face configurations) [S6][S27, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_contouring(grid, isovalue=0.0):
+    """
+    grid: 3D list of scalar values, indexed as grid[x][y][z].
+    Returns: vertices (list of [x,y,z]), faces (list of 4-tuples of vertex indices).
+    """
+    nx, ny, nz = len(grid), len(grid[0]), len(grid[0][0])
+    vertices = {}
+    vertex_positions = []
+    faces = []
+    active_edges = []
+    
+    # Step 1 & 2: Identify active edges
+    for x in range(nx - 1):
+        for y in range(ny - 1):
+            for z in range(nz - 1):
+                # X-axis edge
+                if sign(grid[x][y][z]) != sign(grid[x+1][y][z]):
+                    t = (isovalue - grid[x][y][z]) / (grid[x+1][y][z] - grid[x][y][z])
+                    if abs(grid[x+1][y][z] - grid[x][y][z]) < 1e-12: t = 0.5
+                    p = [x + t, y, z]
+                    n = normalize(gradient(grid, p))
+                    active_edges.append((x, y, z, 0, p, n))
+                
+                # Y-axis edge
+                if sign(grid[x][y][z]) != sign(grid[x][y+1][z]):
+                    t = (isovalue - grid[x][y][z]) / (grid[x][y+1][z] - grid[x][y][z])
+                    if abs(grid[x][y+1][z] - grid[x][y][z]) < 1e-12: t = 0.5
+                    p = [x, y + t, z]
+                    n = normalize(gradient(grid, p))
+                    active_edges.append((x, y, z, 1, p, n))
+
+                # Z-axis edge
+                if sign(grid[x][y][z]) != sign(grid[x][y][z+1]):
+                    t = (isovalue - grid[x][y][z]) / (grid[x][y][z+1] - grid[x][y][z])
+                    if abs(grid[x][y][z+1] - grid[x][y][z]) < 1e-12: t = 0.5
+                    p = [x, y, z + t]
+                    n = normalize(gradient(grid, p))
+                    active_edges.append((x, y, z, 2, p, n))
+
+    # Step 5: Construct QEF for each active cell
+    qef_data = {}
+    
+    for (ex, ey, ez, axis, p, n) in active_edges:
+        cells = []
+        if axis == 0:
+            cells.append((ex, ey, ez))
+            cells.append((ex-1, ey, ez))
+        elif axis == 1:
+            cells.append((ex, ey, ez))
+            cells.append((ex, ey-1, ez))
+        else:
+            cells.append((ex, ey, ez))
+            cells.append((ex, ey, ez-1))
+            
+        for (cx, cy, cz) in cells:
+            if (cx, cy, cz) not in qef_data:
+                qef_data[(cx, cy, cz)] = [[0.0]*3 for _ in range(3)], [0.0, 0.0, 0.0], 0
+            
+            A, b, count = qef_data[(cx, cy, cz)]
+            
+            # Update A = A + n * n^T
+            A[0][0] += n[0]*n[0]; A[0][1] += n[0]*n[1]; A[0][2] += n[0]*n[2]
+            A[1][1] += n[1]*n[1]; A[1][2] += n[1]*n[2]
+            A[2][2] += n[2]*n[2]
+            
+            # Update b = b + (n . p) * n
+            dot_np = n[0]*p[0] + n[1]*p[1] + n[2]*p[2]
+            b[0] += dot_np * n[0]; b[1] += dot_np * n[1]; b[2] += dot_np * n[2]
+            
+            qef_data[(cx, cy, cz)] = (A, b, count + 1)
+
+    # Step 6: Solve QEF and store vertices
+    for (cx, cy, cz), (A, b, count) in qef_data.items():
+        v = solve_linear_system(A, b)
+        v[0] = clamp(v[0], cx, cx + 1)
+        v[1] = clamp(v[1], cy, cy + 1)
+        v[2] = clamp(v[2], cz, cz + 1)
+        
+        vertex_positions.append(v)
+        vertices[(cx, cy, cz)] = len(vertex_positions) - 1
+
+    # Step 7: Generate Faces
+    for (ex, ey, ez, axis, p, n) in active_edges:
+        cell_offsets = []
+        if axis == 0:
+            cell_offsets = [(-1,-1,0), (-1,0,0), (0,-1,0), (0,0,0)]
+        elif axis == 1:
+            cell_offsets = [(-1,-1,0), (0,-1,0), (-1,0,0), (0,0,0)]
+        else:
+            cell_offsets = [(-1,-1,-1), (0,-1,-1), (-1,0,-1), (0,0,-1)]
+            
+        face_verts = []
+        for dx, dy, dz in cell_offsets:
+            key = (ex + dx, ey + dy, ez + dz)
+            if key in vertices:
+                face_verts.append(vertices[key])
+        
+        if len(face_verts) == 4:
+            faces.append((face_verts[0], face_verts[1], face_verts[3], face_verts[2]))
+            
+    return vertex_positions, faces
+
+def gradient(grid, p):
+    x, y, z = p
+    gx = grid[clamp(x+1, 0, len(grid)-1)][y][z] - grid[clamp(x-1, 0, len(grid)-1)][y][z]
+    gy = grid[x][clamp(y+1, 0, len(grid[0])-1)][z] - grid[x][clamp(y-1, 0, len(grid[0])-1)][z]
+    gz = grid[x][y][clamp(z+1, 0, len(grid[0][0])-1)] - grid[x][y][clamp(z-1, 0, len(grid[0][0])-1)]
+    return [gx, gy, gz]
+
+def sign(val):
+    return 1 if val >= 0 else -1
+
+def clamp(v, mn, mx):
+    return max(mn, min(mx, v))
+
+def normalize(v):
+    l = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return [v[0]/l, v[1]/l, v[2]/l] if l > 1e-12 else [1.0, 0.0, 0.0]
+
+def solve_linear_system(A, b):
+    M = [row[:] + [b[i]] for i, row in enumerate(A)]
+    for i in range(3):
+        pivot = M[i][i]
+        if abs(pivot) < 1e-12:
+            return [0.5, 0.5, 0.5]
+        for j in range(i, 4):
+            M[i][j] /= pivot
+        for k in range(3):
+            if k != i:
+                factor = M[k][i]
+                for j in range(i, 4):
+                    M[k][j] -= factor * M[i][j]
+    return [M[i][3] for i in range(3)]
+```
+
+## Subtopics
+
+### [Topologically Accurate Dual Isosurfacing Using Ray Intersection](800-topologically-accurate-dual-isosurfacing-using-ray-intersect.md)
+Extracts a topologically correct isosurface by computing exact intersection points within each voxel using ray intersection with a trilinear interpolation model. It solves topological ambiguities inherent in Marching Cubes and avoids the gradient/Hermite data requirement of standard Dual Contouring. It uses a pre-computed look-up table of cell diagonals to determine the minimum number of rays required.
+
+### [Linear Edge Intersection for Dual Contouring](926-linear-edge-intersection-for-dual-contouring.md)
+Computes a single vertex per grid cell by averaging the intersection points on the cell edges, then connects these points into quads based on edge sign changes. It replaces the QEF minimization with a simple arithmetic mean, differing from standard Dual Contouring [778-dual-contouring.md] and Topologically Accurate Dual Isosurfacing [800-topologically-accurate-dual-isosurfacing-using-ray-intersect.md] by relying on linear interpolation rather than ray casting or QEF.
+
+### [Dual Contouring QEF Solver](1424-dual-contouring-qef-solver.md)
+The core vertex placement mechanism solving the QEF to determine optimal vertex positions by minimizing error based on surface normals and intersection points. It preserves sharp features via QEF SVD and uses a Jacobi $3 \times 3$ symmetric eigensolver with regularized truncation to ensure watertight manifold topology and numerical stability.
+
+### [Simplified Dual Contouring](1580-simplified-dual-contouring.md)
+Generates a quad mesh by placing a single vertex at the center of every voxel cell where the scalar field values at the eight corners exhibit a sign change along any axis-aligned edge. It bypasses QEF minimization and normal-based optimization, trading topological accuracy and geometric fidelity for implementation simplicity and speed.
+
+### [Neural Dual Contouring](2183-neural-dual-contouring.md)
+Replaces the hand-crafted QEF minimization with a neural network that directly predicts vertex positions and edge crossings. It solves the problem of reconstructing high-fidelity meshes from implicit inputs without requiring explicit surface gradients or suffering from ill-defined QEF scenarios. It produces meshes with better tessellation quality and can generate open surfaces with boundaries.
+
+### [Occupancy Dual Contouring](3665-occupancy-dual-contouring.md)
+Constructs a mesh from a binary occupancy grid by locating vertices at grid edges and solving a QEF to determine vertex positions, using dual contouring principles to handle complex topology. It avoids using distance information, using auxiliary 2D points to compute local surface normals, and is designed for GPU parallelization.
+
+### [Dual Contouring 2D](3668-dual-contouring-2d.md)
+Generates a 2D polygonal mesh from a scalar field defined on a uniform grid. It solves the problem of extracting manifold 2D contours with sharp feature preservation by placing a single vertex inside each grid cell intersecting the isosurface, determined by minimizing a QEF. It differs from its sibling [Dual Contouring (2D Grid Implementation)](3764-dual-contouring-2d-grid-implementation.md) by utilizing a specific dispatch mechanism for predefined function types.
+
+### [Dual Contouring Leaf Processing](3817-dual-contouring-leaf-processing.md)
+The atomic step in adaptive dual contouring that generates a single mesh vertex and its associated normal for a leaf voxel containing an isosurface intersection. It operates strictly on voxels of size 1, using a specific edge-intersection and QEF-minimization pipeline.
+
+### [Dual Contouring on Octree](4469-dual-contouring-on-octree.md)
+Generates a triangle mesh from a scalar field by traversing an adaptive octree hierarchy, solving QEFs at nodes to determine vertex positions, and connecting these vertices via edge and face processing. It differs from uniform grid dual contouring by allowing adaptive resolution, reducing polygon count in flat regions while preserving detail in complex areas. It manages mesh generation through recursive traversal of cell faces and edges to handle topological transitions between nodes of varying depths.
+
+### [Classical Dual Contouring with Estimated Normals](5802-classical-dual-contouring-with-estimated-normals.md)
+Generates a mesh from an SDF by placing a single vertex inside each grid cell intersected by the isosurface, determined by minimizing a QEF derived from estimated surface normals. It relies on local numerical differentiation of the SDF for normal estimation, producing results similar to or slightly better than Marching Cubes 33 in Chamfer Distance and F1 scores, though with lower normal accuracy near sharp features.
+
+#### Multiresolution Dual Contouring
+Refines a low-resolution dual contouring mesh by subdividing each triangle into 4, projecting new vertices to the MLS surface, and re-indexing [S18, unofficial]. It clears the mesh, generates a low-res mesh via DC, loops through triangles to compute midpoints, projects all vertices (original and midpoints) to the MLS surface using HPSS, and creates 4 new triangles per original triangle using the projected vertices [S18, unofficial]. Data structures include `MR_mesh_triangles` (vector of ints), `MR_mesh_positions` (vector of Vec3), and `MR_centers` (hashmap mapping vertex position to ID) [S18, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Generally faster than Marching Cubes for high-resolution grids because it processes cells independently for vertex placement, though face generation requires coordination across adjacent cells. GPU implementations are highly parallelizable [S17, S24, unofficial].
+*   **Strengths:** Excellent sharp feature preservation (creases, corners) [S35, unofficial]. Produces regular quadrilateral meshes [S4]. Supports adaptive octrees for LOD [S1][S27, unofficial].
+*   **Limitations:** Can produce non-manifold geometry if multiple objects are close together in one cell [S1]. QEF solution can be unstable if normals are collinear [S1][S2, unofficial]. Requires gradient/Hermite data, which may be expensive to compute for noisy fields [S2, unofficial].
+*   **When to use:** When sharp features must be preserved and the input is a smooth implicit function (SDF) with available gradients [G].
+*   **When not to use:** When the input is noisy without reliable gradients, or when topological correctness is critical without additional manifold-preserving post-processing (e.g., Manifold Dual Contouring) [S6][S27, unofficial].
+
+## Background
+Dual Contouring was introduced by Tao Ju, Frank Losasso, Scott Schaefer, and Joe Warren in the 2002 SIGGRAPH proceedings paper "Dual Contouring of Hermite Data" [S2, unofficial][S3]. It was developed as an extension to both Surface Nets and Marching Cubes, aiming to preserve sharp features that previous methods smoothed out [S5][S33, unofficial]. The method leverages the dual graph concept, where grid cells become vertices and edge intersections become faces [S2, unofficial]. It has since been extended to octrees (Octree-based Dual Contouring) for adaptive resolution [S1][S27, unofficial], and to neural networks (Neural Dual Contouring) for faster inference [S4, S10].
+
+## Sources
+[S1] Adaptation of Dual Contouring and Marching Cubes Algorithms for 3D Reconstruction of the Human Lumbar Spine, https://doi.org/10.35596/1729-7648-2023-21-6-99-105, fetched 2026-10-27
+[S2] Dual Contouring Tutorial (2018), https://www.boristhebrave.com/2018/04/15/dual-contouring-tutorial/, fetched 2026-10-26 (unofficial)
+[S3] Verifiable Visualization for Isosurface Extraction, https://doi.org/10.1109/tvcg.2009.194, fetched 2026-10-26
+[S4] Self-Supervised Dual Contouring, https://inria.hal.science/hal-04590906v1, fetched 2026-10-26
+[S5] Isosurface, https://en.wikipedia.org/wiki/Isosurface, fetched 2026-10-26
+[S6] Volumetric Terrain Rendering with WebGL, https://doi.org/10.2352/issn.2470-1173.2018.06.mobmu-136, fetched 2026-10-26
+[S7] Can someone explain dual contouring?, https://gamedev.stackexchange.com/questions/83457/can-someone-explain-dual-contouring, fetched 2026-10-26 (unofficial)
+[S8] Basic Dual Contouring Theory, https://stackoverflow.com/questions/6485908/basic-dual-contouring-theory, fetched 2026-10-26 (unofficial)
+[S9] BorisTheBrave/mc-dc, https://github.com/BorisTheBrave/mc-dc, fetched 2026-10-26 (unofficial)
+[S10] Neural Dual Contouring, https://arxiv.org/abs/2202.01999v3, fetched 2026-10-26
+[S11] nickgildea/DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
+[S12] nickgildea/fast_dual_contouring, https://github.com/nickgildea/fast_dual_contouring, fetched 2026-10-26 (unofficial)
+[S13] emilk/Dual-Contouring, https://github.com/emilk/Dual-Contouring, fetched 2026-10-26 (unofficial)
+[S14] ChessQian/DualContouring, https://github.com/ChessQian/DualContouring, fetched 2026-10-26 (unofficial)
+[S15] thebusytypist/cudc, https://github.com/thebusytypist/cudc, fetched 2026-10-26 (unofficial)
+[S16] nivshalomlom/Dual-contouring, https://github.com/nivshalomlom/Dual-contouring, fetched 2026-10-26 (unofficial)
+[S17] HeartofTheForce/Isosurface, https://github.com/HeartofTheForce/Isosurface, fetched 2026-10-26 (unofficial)
+[S18] bouguerra-khalil/DualContouring-3DRendring, https://github.com/bouguerra-khalil/DualContouring-3DRendring, fetched 2026-10-26 (unofficial)
+[S19] heckj/IsosurfaceExtraction, https://github.com/heckj/IsosurfaceExtraction, fetched 2026-10-26 (unofficial)
+[S20] Add `dual_contour` (DC+QEF) mesh extraction op, https://github.com/openvdb/fvdb-core/pull/670, fetched 2026-10-26 (unofficial)
+[S21] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)
+[S22] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)
+[S23] bfops/rust-isosurface-extraction, https://github.com/bfops/rust-isosurface-extraction, fetched 2026-10-27 (unofficial)
+[S24] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)
+[S25] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
+[S26] Generating mesh from SDFs with Dual Contouring, https://henriquegois.dev/posts/generating-mesh-from-sdfs-with-dual-contouring/, fetched 2026-10-27 (unofficial)
+[S27] PDF Manifold Dual Contouring, https://people.engr.tamu.edu/schaefer/research/dualsimp_tvcg.pdf, fetched 2026-10-27 (unofficial)
+[S28] Dual Contouring - pixyz-software.com, https://www.pixyz-software.com/documentations/sdk/2024.3/manual/functions/dualcontouring.html, fetched 2026-10-27 (unofficial)
+[S29] Dual Contouring • 2025.7 • Asset Transformer SDK, https://docs.unity.com/en-us/asset-transformer-sdk/2025.7/manual/functions/dualcontouring, fetched 2026-10-27
+[S30] Entendore/MarchingCubesDualContouring, https://github.com/Entendore/MarchingCubesDualContouring, fetched 2026-10-27
+[S31] Level-of-Detail Independent Voxel-Based Surface ..., https://studenttheses.uu.nl/items/a8b8233a-d142-43f1-8f6d-c0b0fe43a767, fetched 2026-10-27 (unofficial)
+[S32] Improve surface rendering, https://github.com/CauldronDevelopmentLLC/CAMotics/issues/1, fetched 2026-10-27 (unofficial)
+[S33] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)
+[S34] New in CGAL: Isosurfacing, https://www.cgal.org/2025/10/10/Isosurfacing/, fetched 2026-10-28 (unofficial)
+[S35] feat(export): dual contouring for sharp-feature mesh export (roadmap S9, #391), https://github.com/AloneButUnsober/FracturingFog/pull/446, fetched 2026-10-28 (unofficial)
+[S36] Dual Contouring, http://users.csc.calpoly.edu/~zwood/teaching/csc572/final15/kpidding/index.html, fetched 2026-10-28 (unofficial)
+[S37] Dual Contouring | Developerblog – Johannes Jendersie, https://jojendersie.de/dual-contouring/, fetched 2026-10-28 (unofficial)
+[S38] Gallery of Volume Graphics, https://people.compute.dtu.dk/janba/gallery/polygonization.html, fetched 2026-10-28 (unofficial)
+[S39] Smooth Voxel Terrain (Part 2) – 0 FPS, https://0fps.net/2012/07/12/smooth-voxel-terrain-part-2/, fetched 2026-10-28 (unofficial)
+[S40] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29
+[S41] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29 (unofficial)
+[S42] http://ngildea.blogspot.com.br/2014/11/implementing-dual-contouring.html, http://ngildea.blogspot.com.br/2014/11/implementing-dual-contouring.html, fetched 2026-10-30 (unofficial)
+[S43] http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, fetched 2026-10-30 (unofficial)
+[S44] gamedev.stackexchange.com/questions/83457/… can someone explain dual contouring, http://gamedev.stackexchange.com/questions/83457/can-someone-explain-dual-contouring?lq=1, fetched 2026-10-30
+[S45] Extraction of isosurfaces from multi-material CT volumetric data of mechanical parts, https://doi.org/10.1145/1364901.1364931, fetched 2026-11-01 (unofficial)

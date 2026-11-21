@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -8,7 +8,7 @@
+ ## How it works
+ **Inputs:**
+-*   A 3D point cloud $P_i$ containing points with 3D coordinates, features, and depths.
+-*   Camera pose $P$ defining the target view.
+-*   Parameters: Point radius $r$, number of nearest points $K$, output resolution, and feature dimension.
++*   A 3D point cloud $P_i$ containing points with 3D coordinates, features, and depths [S1].
++*   Camera pose $P$ defining the target view [S1].
++*   Parameters: Point radius $r$, number of nearest points $K$, output resolution, and feature dimension [S1].
+ 
+ **Outputs:**
+@@ -17,6 +17,6 @@
+ 
+ **Data Structures:**
+-*   **Point Cloud:** A list or tensor of points. Each point $x$ has a 3D position, a feature vector $F$, and a depth $d$.
+-*   **Pixel:** Identified by index $l$. Invisible pixels are filled with zeros [S1].
++*   **Point Cloud:** A list or tensor of points. Each point $x$ has a 3D position, a feature vector $F$, and a depth $d$ [S1].
++*   **Pixel:** Identified by index $l$. Invisible pixels are filled with 64-dimensional zeros [S1].
+ 
+ **Parameters:**
+@@ -58,5 +58,4 @@
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def neural_point_cloud_renderer(points, camera_pose, K=16, r_ndc=1.5, 
+@@ -78,84 +77,53 @@
+         rendered_depth: Tensor of shape (out_h, out_w)
+     """
+-    # 1. Transform points to target view coordinates
+-    # [G] Implementation detail: Apply camera pose transformation (rotation/translation)
+-    # and projection to NDC coordinates.
+-    view_points = transform_to_view(points, camera_pose)
++    # 1. Transform and project points to target view coordinates [S1]
++    # [G] Apply camera extrinsics (rotation R, translation t) to get view coordinates,
++    # then apply perspective division and intrinsics to map to pixel coordinates.
++    view_coords = points[:, :3] @ camera_pose[:3, :3].T + camera_pose[:3, 3]
++    # Perspective projection to pixel space
++    x = view_coords[:, 0] / (view_coords[:, 2] + 1e-8) * camera_pose[0, 0] + camera_pose[0, 2]
++    y = view_coords[:, 1] / (view_coords[:, 2] + 1e-8) * camera_pose[1, 1] + camera_pose[1, 2]
++    z = view_coords[:, 2]
++    coords = torch.stack([x, y, z], dim=1)
+     
+-    # Extract coordinates and features
+-    # view_points shape: (N, 3 + feat_dim + 1)
+-    # x, y, z are in NDC or screen space depending on implementation details of [S1]
+-    # Note: [S1] specifies r is in NDC, so s must be in NDC.
+-    coords = view_points[:, :3]  # (N, 3)
+-    features = view_points[:, 3:3+feat_dim]  # (N, feat_dim)
+-    depths = view_points[:, -1]  # (N,)
++    features = points[:, 3:3+feat_dim]
++    depths = points[:, -1]
+     
+-    # 2. Project to 2D image plane
+-    # [G] Assuming coords are already in a format where x, y map to pixel centers.
+-    # If NDC, map [-1, 1] to [0, W/H].
+-    pixel_centers = coords[:, :2]  # (N, 2)
+-    
+-    # Initialize output tensors
++    # 2. Initialize output tensors
+     rendered_features = torch.zeros(out_h, out_w, feat_dim, device=points.device)
+     rendered_depth = torch.zeros(out_h, out_w, device=points.device)
+     
+-    # 3. Compute distances and weights for all points
+-    # Create grid of pixel centers
++    # 3. Compute distances and weights for all points [S1]
+     y_grid, x_grid = torch.meshgrid(torch.arange(out_h), torch.arange(out_w), indexing='ij')
+-    pixel_grid = torch.stack([x_grid, y_grid], dim=-1).float()  # (H, W, 2)
++    pixel_grid = torch.stack([x_grid, y_grid], dim=-1).float()
+     
+-    # Reshape for broadcasting: pixel_grid (H, W, 1, 2), pixel_centers (1, 1, N, 2)
+-    # Distance s: Euclidean distance between pixel center and point center
+-    # s^2 = (x_p - x_i)^2 + (y_p - y_i)^2
+-    dist_sq = torch.sum((pixel_grid.unsqueeze(-2) - pixel_centers.unsqueeze(0).unsqueeze(0))**2, dim=-1)  # (H, W, N)
++    # Euclidean distance squared between pixel centers and point splat centers
++    dist_sq = torch.sum((pixel_grid.unsqueeze(-2) - coords[:, :2].unsqueeze(0).unsqueeze(0))**2, dim=-1)
+     
+-    # 4. Compute blending weights
+-    # alpha = 1 - clamp(r^2 / s^2, 1e-3, 1.0)
+-    # Handle s=0 to avoid division by zero
++    # 4. Compute blending weights [S1]
+     r_sq = r_ndc ** 2
+-    alpha = 1.0 - torch.clamp(r_sq / (dist_sq + 1e-8), min=1e-3, max=1.0)  # (H, W, N)
++    alpha = 1.0 - torch.clamp(r_sq / (dist_sq + 1e-8), min=1e-3, max=1.0)
+     
+-    # 5. Sort points by depth for each pixel
+-    # We need to sort the N points for each (h, w) by their depth values
+-    # depths shape: (N,) -> (1, 1, N)
+-    sorted_depths, sorted_indices = torch.sort(depths.unsqueeze(0).unsqueeze(0), dim=-1)  # (1, 1, N)
++    # 5. Sort points by depth for each pixel [S1]
++    sorted_depths, sorted_indices = torch.sort(depths.unsqueeze(0).unsqueeze(0), dim=-1)
++    top_k_indices = sorted_indices[..., :K]
+     
+     # Gather features and alphas based on sorted indices
+-    # [G] We only need the top K points.
+-    top_k_indices = sorted_indices[..., :K]  # (1, 1, K)
++    idx_expanded = top_k_indices.unsqueeze(-1).expand(-1, -1, -1, feat_dim)
++    gathered_features = torch.gather(features.unsqueeze(0).unsqueeze(0), 2, idx_expanded)
++    gathered_alphas = torch.gather(alpha, 2, top_k_indices)
++    gathered_depths = torch.gather(sorted_depths, 2, top_k_indices)
+     
+-    # Gather features: (H, W, K, feat_dim)
+-    # Expand indices to match feature dimensions
+-    idx_expanded = top_k_indices.unsqueeze(-1).expand(-1, -1, -1, feat_dim)
+-    gathered_features = torch.gather(features.unsqueeze(0).unsqueeze(0), 2, idx_expanded)  # (H, W, K, feat_dim)
++    # 6. Alpha-compositing [S1]
++    one_minus_alpha = 1.0 - gathered_alphas
++    # Cumulative product of (1 - alpha) for j < i
++    cum_prod = torch.cat([torch.ones_like(one_minus_alpha[..., :1]), 
++                          torch.cumprod(one_minus_alpha[..., :-1], dim=-1)], dim=-1)
+     
+-    # Gather alphas: (H, W, K)
+-    gathered_alphas = torch.gather(alpha, 2, top_k_indices)  # (H, W, K)
++    weighted_features = gathered_alphas.unsqueeze(-1) * gathered_features * cum_prod.unsqueeze(-1)
++    rendered_features = torch.sum(weighted_features, dim=-2)
+     
+-    # Gather depths: (H, W, K)
+-    gathered_depths = torch.gather(sorted_depths, 2, top_k_indices)  # (H, W, K)
+-    
+-    # 6. Alpha-compositing
+-    # F_l = sum(alpha_i * F_i * prod(1 - alpha_j) for j < i)
+-    # D_l = sum(alpha_i * d_i)
+-    
+-    # Compute cumulative product of (1 - alpha)
+-    # (1 - alpha) shape: (H, W, K)
+-    one_minus_alpha = 1.0 - gathered_alphas  # (H, W, K)
+-    
+-    # Cumulative product along the K dimension
+-    # prod_j=1^{i-1} (1 - alpha_j)
+-    # For i=0, product is 1.
+-    cum_prod = torch.cat([torch.ones_like(one_minus_alpha[..., :1]), 
+-                          torch.cumprod(one_minus_alpha[..., :-1], dim=-1)], dim=-1)  # (H, W, K)
+-    
+-    # Rendered features
+-    # alpha_i * F_i * cum_prod_i
+-    weighted_features = gathered_alphas.unsqueeze(-1) * gathered_features * cum_prod.unsqueeze(-1)  # (H, W, K, feat_dim)
+-    rendered_features = torch.sum(weighted_features, dim=-2)  # (H, W, feat_dim)
+-    
+-    # Rendered depth
+-    weighted_depths = gathered_alphas * gathered_depths  # (H, W, K)
+-    rendered_depth = torch.sum(weighted_depths, dim=-1)  # (H, W)
++    weighted_depths = gathered_alphas * gathered_depths
++    rendered_depth = torch.sum(weighted_depths, dim=-1)
+     
+     return rendered_features, rendered_depth
+@@ -167,10 +135,22 @@
+ *   **Precision:** The blending weight is clamped to a minimum of $10^{-3}$ to prevent numerical instability when $s$ is very large or $r$ is small relative to $s$ [S1].
+ 
++## Subtopics
++
++### Direct rendering
++Renders Plenoptic Point Clouds (PPCs) by directly projecting occupied voxels visible in the viewing direction over each training viewpoint, using the same projection scheme as colorization [S2]. Unlike NeRF-like solutions that use ray-marching via the Volume Rendering equation, this method projects explicit occupied voxels [S2].
++
++### Neural Point Cloud Rendering
++Performs novel-view synthesis for canonical space using a neural point cloud representation [S3, unofficial]. The point cloud is structured as $P = \{(x_i, f_i, \gamma_i) \mid i = 1, \dots, N\}$, where each point $i$ has a location $x_i$, a neural feature $f_i$, and a scale confidence value $\gamma_i \in [0, 1]$ [S3, unofficial].
++
++### Point Cloud Inpainting via Gate/Sparse Convolution
++Treats rendering as an image inpainting problem using a U-Net backbone, replacing ordinary convolution with gate convolution (GateConv) and sparse convolution (SparseConv) to fill irregular holes [S4]. Directly inpainting sparse point cloud images generates blurry results compared to this method because the color of directly projected points differs from ground truth images due to view-dependent effects (e.g., specular highlights) and different exposure times [S4].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the distance calculation and sorting for each pixel. With $N$ points and $H \times W$ pixels, the naive distance calculation is $O(N \cdot H \cdot W)$. Sorting is $O(H \cdot W \cdot N \log N)$, but limited to top $K$ points, it can be optimized. The implementation uses Pytorch3D [S1], which provides efficient CUDA kernels for splatting.
+-*   **Memory Complexity:** Requires storing the point cloud features and intermediate tensors for distance and alpha calculations. The output feature map is $150 \times 200 \times 64$ [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Fully differentiable, allowing end-to-end training with photometric and perceptual losses [S1]. Geometrically consistent across views due to explicit geometry transformation [S1].
+ *   **Limitations:** Vulnerable to depth inaccuracies if not handled properly (mitigated by individual rendering and fusion) [S1]. Requires multi-view inputs [S1].
+ *   **When to use:** When generating novel views from a constructed point cloud with multi-view inputs and requiring differentiable rendering for optimization [S1].
++*   **Implementation:** Pytorch3D [S1].
+ 
+ ## Background
+@@ -178,3 +158,6 @@
+ 
+ ## Sources
+-[S1] FWD: Real-time Novel View Synthesis with Forward Warping and Depth, https://doi.org/10.1109/cvpr52688.2022.01526, fetched 2026-10-29+[S1] FWD: Real-time Novel View Synthesis with Forward Warping and Depth, https://doi.org/10.1109/cvpr52688.2022.01526, fetched 2026-10-29
++[S2] A Comparative Assessment Of Implicit and Explicit Plenoptic Scene Representations, https://inria.hal.science/hal-04709909v1, fetched 2026-10-26
++[S3] Point-Based Radiance Fields for Controllable Human Motion Synthesis, https://doi.org/10.48550/arXiv.2310.03375, fetched 2026-10-29 (unofficial)
++[S4] Neural Point Cloud Rendering via Multi-Plane Projection, https://doi.org/10.1109/cvpr42600.2020.00785, fetched 2026-10-30

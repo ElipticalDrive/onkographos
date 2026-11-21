@@ -1,0 +1,169 @@
+--- v008.md
++++ v009.md
+@@ -1,124 +1,78 @@
+ # Error Estimate
+-
+-Also called: Relative Error Metric
++Also called: Relative Error Metric, Adaptive Stepping Error Metric
+ 
+ ## Overview
+-Error Estimate calculates a relative error metric for adaptive stepping in volume rendering, determining the step size based on the local field values and a minimum threshold [S1, unofficial]. It sets itself apart from sibling methods like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by focusing on a normalized relative deviation rather than a strict geometric Lipschitz constraint, allowing for dynamic adjustment in regions where the field magnitude varies significantly.
++Error Estimate calculates a relative error metric to drive adaptive stepping in volume rendering or ray marching [S1, unofficial]. It sets itself apart from static step size rules by dynamically scaling the step size based on the magnitude of the field value relative to a threshold, ensuring precision where the field changes rapidly or is small [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A scalar field value $y$ (typically a vector representing density or distance at the current ray position), a constant $k$ (representing a target error bound or scaling factor), and a `threshold` (a small positive value to prevent division by zero).
+-- Output: A scalar step size adjustment factor $\Delta t_{rel}$, which is the maximum component-wise relative error plus a machine epsilon.
++- Input: A scalar field value $y$ (typically a vector, e.g., RGB or 3D coordinate difference), a scaling factor $k$, and a threshold value.
++- Output: A scalar relative error metric $E$.
+ 
+ **Data Structures:**
+-- $y$: A 3-component vector $\mathbf{y} = (y_x, y_y, y_z)$ or a scalar field sample. In the source implementation, it is treated as a vector where the maximum absolute component is used [S1, unofficial].
+-- $k$: A scalar constant. The source code implies a fixed or precomputed value, but does not specify its typical magnitude or derivation [S1, unofficial].
+-- `threshold`: A small float, typically near machine epsilon or a user-defined minimum to ensure numerical stability.
++- $y$: A vector of values (e.g., `vec3` in GLSL/OpenGL Shading Language context) representing the current field evaluation or residual.
++- $k$: A scalar constant used for normalization or scaling.
++- threshold: A small positive scalar to prevent division by zero or excessive step sizes when $y$ is near zero.
+ 
+ **Steps:**
+-1.  Compute the absolute value of each component of $y$: $|y_i|$ for $i \in \{x, y, z\}$.
+-2.  Determine the maximum absolute component: $y_{max} = \max(|y_x|, |y_y|, |y_z|)$.
+-3.  Apply the threshold to prevent division by zero: $y_{safe} = \max(y_{max}, \text{threshold})$.
+-4.  Calculate the relative error vector $r_v$:
+-    $$ r_v = \frac{k}{y_{safe}} $$
+-    Note: The source code `abs(k / max(abs(y), threshold))` suggests $k$ is treated as a scalar divisor for the entire vector, or $k$ is applied component-wise if $k$ were a vector. Given the return statement `max(r_v.x, max(r_v.y, r_v.z))`, $k$ is likely a scalar, and the division is scalar division of the vector components, or $k$ is a vector. However, `abs(k / ...)` usually implies scalar division if $k$ is scalar. Let's assume $k$ is a scalar constant representing the desired error bound. If $k$ is a vector, the operation is component-wise. The source code `abs(k / max(...))` is ambiguous if $k$ is scalar vs vector. Standard relative error is $|val - approx|/|val|$. Here, it seems to be a heuristic: $k$ acts as a numerator. Let's assume $k$ is a scalar.
+-    $$ r_v = \left( \frac{k}{y_{safe}}, \frac{k}{y_{safe}}, \frac{k}{y_{safe}} \right) $$
+-    Wait, if $k$ is scalar, $r_v$ has identical components. The max is just that value. If $k$ is a vector, it's component-wise. The source code `abs(k / max(abs(y), threshold))` in GLSL/C++ usually performs scalar division if `k` is scalar. If `k` is a `vec3`, it's component-wise. The variable name `k` often implies a constant. Let's look at the return: `max(r_v.x, max(r_v.y, r_v.z))`. This implies $r_v$ is a vector. If $k$ is scalar, $r_v$ is uniform. The max is redundant but safe.
+-5.  Return the maximum component of $r_v$ plus `FLOAT_MIN` (machine epsilon for float):
+-    $$ \Delta t_{rel} = \max(r_v) + \text{FLOAT\_MIN} $$
++1. Compute the absolute value of each component of $y$: $|y_i|$.
++2. Determine the maximum absolute component: $M = \max(|y_x|, |y_y|, |y_z|)$.
++3. Calculate the denominator: $D = \max(M, \text{threshold})$.
++4. Compute the relative error for each component: $r_{v,i} = \frac{|k|}{D}$.
++5. The final error metric is the maximum component of $r_v$ plus a small constant `FLOAT_MIN` to ensure non-zero results:
++   $$ E = \max(r_{v,x}, \max(r_{v,y}, r_{v,z})) + \text{FLOAT\_MIN} $$
+ 
+ **Pseudocode:**
+ ```python
+-def error_estimate(y: Vector3f, k: float, threshold: float) -> float:
++def error_estimate(y, k, threshold, float_min=1e-8):
+     """
+     Calculate relative error metric for adaptive stepping.
+     
+     Args:
+-        y: Field value vector at current position.
+-        k: Scaling constant for error bound.
+-        threshold: Minimum value to prevent division by zero.
++        y (list/tuple of 3 floats): Scalar field values or residuals.
++        k (float): Scaling factor.
++        threshold (float): Minimum denominator to avoid division by zero.
++        float_min (float): Small constant to ensure non-zero output.
+         
+     Returns:
+-        Step size adjustment factor.
++        float: Relative error metric.
+     """
+-    # Compute absolute values of components
+-    abs_y_x = abs(y.x)
+-    abs_y_y = abs(y.y)
+-    abs_y_z = abs(y.z)
++    # Step 1 & 2: Compute max absolute component
++    abs_y = [abs(val) for val in y]
++    max_abs_y = max(abs_y)
+     
+-    # Find maximum absolute component
+-    max_abs_y = max(abs_y_x, max(abs_y_y, abs_y_z))
++    # Step 3: Calculate denominator with threshold
++    denominator = max(max_abs_y, threshold)
+     
+-    # Apply threshold for numerical stability
+-    safe_max = max(max_abs_y, threshold)
++    # Step 4: Compute relative error components
++    # Note: k is typically constant, so |k| is constant
++    abs_k = abs(k)
++    r_v = [abs_k / denominator for _ in range(3)]
+     
+-    # Calculate relative error vector (assuming k is scalar)
+-    # If k were a vector, this would be component-wise division
+-    r_v_x = abs(k / safe_max)
+-    r_v_y = abs(k / safe_max)
+-    r_v_z = abs(k / safe_max)
+-    
+-    # Find maximum component of the error vector
+-    max_r_v = max(r_v_x, max(r_v_y, r_v_z))
+-    
+-    # Add machine epsilon to ensure non-zero step
+-    return max_r_v + FLOAT_MIN
++    # Step 5: Return max component + FLOAT_MIN
++    max_r_v = max(r_v)
++    return max_r_v + float_min
+ ```
+ 
+ **Parameters:**
+-- $k$: Not given in the sources. [S1, unofficial]
+-- `threshold`: Not given in the sources. [S1, unofficial]
+-- `FLOAT_MIN`: Machine epsilon for the floating-point format used (e.g., $1.19 \times 10^{-7}$ for 32-bit float). [S1, unofficial]
++- $k$: Scaling factor. Not given in the sources.
++- threshold: Small positive value. Not given in the sources.
++- FLOAT_MIN: Smallest positive normalized floating-point number. Typically $1.17549435 \times 10^{-38}$ for IEEE 754 single-precision.
+ 
+-**Edge Cases and Pitfalls:**
+-- **Zero Field Value:** If $y$ is zero, the threshold prevents division by zero. If the threshold is too large, the step size may become unnecessarily large, causing overshoot. If too small, numerical noise may dominate.
+-- **Negative Field Values:** The use of `abs()` ensures the step size is positive regardless of the sign of the field value, which is critical for SDFs where negative values indicate inside the object.
+-- **Precision:** Using `FLOAT_MIN` ensures the step size is never exactly zero, preventing infinite loops in stagnation scenarios.
++**Edge Cases:**
++- If $y$ is zero, the threshold prevents division by zero.
++- If $k$ is zero, the error estimate is `FLOAT_MIN`.
+ 
+ ## Subtopics
+ 
+-### [Data-Dependent Error Metric for Scalar Fields](6981-data-dependent-error-metric-for-scalar-fields.md)
+-This method refines the mesh only in regions with values close to a chosen isovalue $v_{iso}$, reducing computation time by ignoring regions far from the isovalue. It sets itself apart from its sibling, the Mean-Square Error Metric, which evaluates error globally within an element regardless of isovalue proximity, potentially leading to unnecessary refinement in regions far from the target isosurface.
+-
+-### Stepsize Annealing
+-**Definition:**
+-A training strategy that varies the sampling rate $s$ in a range $[s_l, s_h]$ across epochs to benefit from fast convergence at low sampling rates and refinement at high sampling rates [S2, unofficial]. It is a training acceleration method for raymarching models that starts with a high rendering step size in early epochs and decreases it over time to achieve similar performance as training with a constant small step size [S2, unofficial].
+-
+-**Formula:**
+-The sampling rate $s(e)$ at epoch $e$ is calculated as:
+-$$ s(e) = s_l \left(1 - \left(\frac{e}{E}\right)^2\right) + \left(\frac{e}{E}\right)^2 s_h $$
+-where $s(e)$ is the sampling rate at epoch $e$, $s_l$ is the lower bound, $s_h$ is the upper bound, $e$ is the current epoch, and $E$ is the total number of epochs [S2, unofficial].
+-
+-**Parameters:**
+-- $s_l$: Lower bound of sampling rate range. Typical value: 0.1 [S2, unofficial].
+-- $s_h$: Upper bound of sampling rate range. Typical value: 2.0 [S2, unofficial].
+-
+-**Comparison:**
+-Stepsize annealing produces visual results comparable to training with a fixed sampling rate of $s=2.0$ but reduces training time by 33.4% on average compared to constant $s=2.0$ [S2, unofficial]. Compared to training with a constant small step size, stepsize annealing achieves similar performance but with accelerated training time [S2, unofficial].
+-
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-The calculation is $O(1)$ in time and memory, involving a few arithmetic operations and comparisons [S1, unofficial].
+-
+-**Measured Performance:**
+-Not given in the sources. [S1, unofficial]
+-
+-**Scaling:**
+-The method scales linearly with the number of components in the vector $y$, but since $y$ is typically 3D, it is effectively constant time.
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Simple to implement, numerically stable with thresholding, provides a relative error metric that adapts to field magnitude.
+-- **Limitations:** The constant $k$ and threshold are not specified, requiring empirical tuning. It does not account for higher-order derivatives or curvature, which might be necessary for complex geometries.
+-
+-**When to Use:**
+-Use when adaptive stepping is required based on local field values and a relative error metric is preferred over absolute or geometric constraints.
+-
+-**When Not to Use:**
+-Avoid when strict geometric safety is required (use [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md)) or when training differentiable volume rendering models where annealing is more appropriate [S2, unofficial].
++- **Time Complexity:** $O(1)$ per evaluation.
++- **Memory Complexity:** $O(1)$.
++- **Strengths:** Simple, efficient, adapts to local field magnitude.
++- **Limitations:** Depends on appropriate choice of $k$ and threshold. Not given in the sources for specific performance metrics.
+ 
+ ## Background
+-The Error Estimate method is described in the context of adaptive ray marching for scalar fields [S1, unofficial]. It is part of a broader effort to optimize rendering performance by dynamically adjusting step sizes based on local data characteristics.
++Origin: From the NTSL Graphics project [S1, unofficial]. History: Used in adaptive ray marching implementations.
+ 
+ ## Sources
+-[S1] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26 (unofficial)
+-[S2] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)+[S1] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26 (unofficial)

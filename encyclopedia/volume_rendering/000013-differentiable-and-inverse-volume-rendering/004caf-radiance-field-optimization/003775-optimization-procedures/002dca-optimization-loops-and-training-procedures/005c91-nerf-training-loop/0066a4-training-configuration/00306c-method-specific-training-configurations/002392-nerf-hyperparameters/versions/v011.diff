@@ -1,0 +1,379 @@
+--- v010.md
++++ v011.md
+@@ -4,57 +4,48 @@
+ 
+ ## Overview
+-NeRF hyperparameters define the configuration of the training loop, including network architecture, sampling strategies, optimization schedules, and loss functions, to minimize the difference between rendered pixel colors and ground truth images. Unlike sibling methods that modify the underlying representation (e.g., [Mip-NeRF Optimization and Activation Details](3409-mip-nerf-optimization-and-activation-details.md) or [DONeRF](4461-donerf.md)), this configuration focuses on the procedural settings required to converge the standard MLP-based radiance field. It addresses the trade-off between rendering fidelity and computational cost by tuning sample density, noise injection, and multi-resolution strategies.
++NeRF hyperparameters define the configuration of the training loop, including network architecture dimensions, sampling strategies, optimization schedules, and loss weighting, which collectively determine the convergence speed, rendering quality, and computational cost of Neural Radiance Fields. Unlike generic volume rendering methods, NeRF optimization is highly sensitive to the balance between coarse and fine sampling densities and the specific learning rate decay profiles required to stabilize the implicit surface representation [S1][S7, unofficial].
+ 
+ ## How it works
+-The training process minimizes the photometric difference between the rendered color $\hat{C}(\mathbf{r})$ and the ground truth $C_{gt}$ by optimizing neural network parameters. The core loop involves ray sampling, point sampling, feature encoding, network forward pass, volume rendering, loss computation, and optimization.
++The training process minimizes the photometric difference between rendered pixel colors and ground truth images by optimizing neural network parameters [S1, S9]. The core loop involves ray sampling, point sampling, feature encoding, network forward pass, volume rendering, loss computation, and optimization [Parent].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Training images, camera intrinsics (focal length), camera extrinsics (poses), and dataset metadata (near/far clipping planes).
+-*   **Outputs:** Optimized MLP weights (density $\sigma$ and color $\mathbf{c}$), and optionally a cached density field or mesh for acceleration.
++*   **Inputs:** Training images, camera intrinsics (focal length), camera extrinsics (poses), and dataset metadata (near/far clipping planes) [Parent].
++*   **Outputs:** Optimized MLP weights (density $\sigma$ and color $\mathbf{c}$), and optionally a cached density field or mesh for acceleration [Parent].
+ 
+ ### Data Structures
+-*   **Ray Bundle:** A tensor of shape $[B, 3]$ for origins and $[B, 3]$ for directions, where $B$ is the batch size in rays.
+-*   **Query Points:** A tensor of shape $[B, N, 3]$ containing 3D coordinates along rays, where $N$ is the number of samples per ray.
+-*   **Depth Values:** A tensor of shape $[B, N]$ containing the distance from the camera origin to each query point.
++*   **Ray Bundle:** A tensor of shape $[B, 3]$ for origins and $[B, 3]$ for directions, where $B$ is the batch size in rays [Parent].
++*   **Query Points:** A tensor of shape $[B, N, 3]$ containing 3D coordinates along rays, where $N$ is the number of samples per ray [Parent].
++*   **Depth Values:** A tensor of shape $[B, N]$ containing the distance from the camera origin to each query point [Parent].
+ 
+ ### Volume Rendering
+ Compute accumulated color $\hat{C}(\mathbf{r})$ using the differentiable volume rendering integral:
+ $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i $$
+-where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, and $\delta_i$ is the distance between samples [S1][S6, unofficial].
++where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, and $\delta_i$ is the distance between samples [Parent].
+ 
+ ### Loss Computation
+-Typically involves photometric loss (MSE or L1) between $\hat{C}$ and ground truth $C_{gt}$ [S1][S9].
+-
+-### Parameters and Steps
+-The following parameters and steps constitute the standard training configuration, with variations noted for specific datasets or variants.
+-
+-1.  **Data Pre-processing:**
+-    *   Normalize image pixel values by dividing by 255.0 [S8, unofficial].
+-    *   Normalize camera center coordinates to the range $[-1, 1]$ to ensure reliable training of the NeRF MLP based on positional encoding [S10].
+-    *   Reserve one image for testing/validation by indexing (e.g., index 99 or 101) and slice the images array to exclude it [S8, unofficial].
+-
+-2.  **Network Architecture Configuration:**
+-    *   **Position MLP:** Typically 8 layers with 256 (or 512) hidden units [S1].
+-    *   **Direction MLP:** Typically 4 layers with 128 hidden units [S7, unofficial].
+-    *   **Positional Encoding:** Use axis-aligned IPE. Number of frequencies for position is typically 10, and for direction is 4 [S6, unofficial].
+-    *   **Proposal Network (Optional):** For hierarchical sampling, a proposal MLP with 4 layers and 256 hidden units is used [S1].
+-
+-3.  **Sampling Configuration:**
+-    *   **Coarse Samples:** 64 samples per ray for NeRF 360 Synthetic and LLFF datasets [S7, unofficial]. Default `--n_samples_coarse` is 64 [S6, unofficial].
+-    *   **Fine Samples:** 128 samples per ray for NeRF 360 Synthetic; 64 samples for LLFF [S7, unofficial]. Default `--n_samples_fine` is 128 [S6, unofficial].
+-    *   **Clipping Planes:** Near clipping plane (`near_thresh`) is typically 2.0; far clipping plane (`far_thresh`) is typically 6.0 [S8, unofficial].
+-
+-4.  **Optimization Loop:**
+-    *   **Optimizer:** Adam with $\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=10^{-7}$ [S4, unofficial][S5][S7, unofficial].
+-    *   **Learning Rate:** Initial learning rate is typically $5 \times 10^{-4}$ [S6, unofficial][S7, unofficial]. It decays exponentially to $5 \times 10^{-5}$ [S4, unofficial] or $8 \times 10^{-5}$ [S3].
+-    *   **Batch Size:** Typically 1024 rays per batch [S3][S6, unofficial]. Some implementations use 3072 rays to fully utilize GPU memory [S4, unofficial].
+-    *   **Iterations:** Training typically runs for 200k–300k iterations [S3][S4, unofficial]. For specific variants like FastNeRF, the best model is selected at 300k iterations [S7, unofficial].
+-    *   **Chunking:** To avoid out-of-memory issues, query points are processed in chunks. `chunksize` is typically 4096 points [S8, unofficial].
+-
+-5.  **Loss Weighting and Regularization:**
+-    *   **Coarse-to-Fine Weights:** In hierarchical sampling, weights $\lambda_s = 0.9$ and $\lambda_e = 0.1$ are used for coarse and fine optimization respectively [S3].
+-    *   **Occlusion Regularization:** For sparse-view training, an occlusion regularization term $L_{occ}$ is added to prevent floaters. The total loss is $L(\theta, t) = L_{color}(\theta) + L_{geo}(\theta, t) + \lambda_{occ} L_{occ}(\theta)$, with $\lambda_{occ} = 0.01$ [S12].
++Typically involves photometric loss (MSE or L1) between $\hat{C}$ and ground truth $C_{gt}$ [Parent]. Variants may include perceptual losses (LPIPS) [S2] or regularization terms for occlusion [S12] and geometry [S12].
++
++### Parameters and Typical Values
++Standard configurations vary by dataset and variant. Key parameters include:
++
++*   **Network Architecture:**
++    *   **NeRF MLP:** Typically 8 layers with 256 or 512 hidden units [S1].
++    *   **Proposal MLP:** 4 layers with 256 hidden units [S1].
++    *   **Positional Encoding:** 10 frequencies for position, 4 for direction [S6, unofficial].
++*   **Sampling:**
++    *   **Coarse Samples ($N_c$):** 64 samples per ray is standard for synthetic datasets (Blender/NeRF 360) [S3][S7, unofficial]. Some variants use 128 for proposal networks [S1].
++    *   **Fine Samples ($N_f$):** 128 samples per ray for synthetic datasets [S7, unofficial], or 64 for LLFF datasets [S3][S7, unofficial].
++    *   **Batch Size:** 1024 rays is common [S3][S6, unofficial], though larger batches (3072 rays) are used to maximize GPU utilization [S4, unofficial].
++*   **Optimization:**
++    *   **Optimizer:** Adam with $\beta_1=0.9, \beta_2=0.999, \epsilon=10^{-7}$ [S4, unofficial][S5][S7, unofficial].
++    *   **Learning Rate:** Initial rate of $5 \times 10^{-4}$ [S4, S7, unofficial], decaying exponentially to $5 \times 10^{-5}$ [S4, unofficial] or $8 \times 10^{-5}$ [S3].
++    *   **Iterations:** 200k to 300k iterations for convergence [S3][S4, S7, unofficial].
++*   **Clipping Planes:**
++    *   **Near:** 2.0 [S8, unofficial].
++    *   **Far:** 6.0 [S8, unofficial].
+ 
+ ### Pseudocode
++The following pseudocode outlines a standard NeRF training step, incorporating hierarchical sampling and Adam optimization.
++
+ ```python
+ import torch
+@@ -62,123 +53,111 @@
+ import torch.optim as optim
+ 
+-def train_nerf(dataset, config):
+-    """
+-    Train a NeRF model.
++def train_step(model, coarse_model, optimizer, images, poses, intrinsics, args):
++    """
++    Performs one training step for a NeRF model.
+     
+     Args:
+-        dataset: Iterable yielding batches of (images, poses, intrinsics).
+-        config: Dictionary containing hyperparameters.
+-    """
+-    # 1. Initialize Model
+-    # Position MLP: 8 layers, 256 hidden units
+-    # Direction MLP: 4 layers, 128 hidden units
+-    model = NeRFModel(
+-        pos_enc_freqs=config.get('pos_enc_freqs', 10),
+-        dir_enc_freqs=config.get('dir_enc_freqs', 4),
+-        net_width=config.get('net_width', 256),
+-        net_depth=config.get('net_depth', 8)
+-    ).to(config['device'])
+-    
+-    # 2. Initialize Optimizer
+-    optimizer = optim.Adam(model.parameters(), lr=config.get('lr', 5e-4), 
+-                           betas=(0.9, 0.999), eps=1e-7)
+-    
+-    # 3. Training Loop
+-    num_iters = config.get('num_iters', 300000)
+-    batch_size = config.get('batch_size', 1024)
+-    n_samples_coarse = config.get('n_samples_coarse', 64)
+-    n_samples_fine = config.get('n_samples_fine', 128)
+-    near_thresh = config.get('near_thresh', 2.0)
+-    far_thresh = config.get('far_thresh', 6.0)
+-    chunksize = config.get('chunksize', 4096)
+-    
+-    for i in range(num_iters):
+-        # Get batch
+-        images, poses, intrinsics = next(dataset)
+-        images = images / 255.0  # Normalize pixel values [S8, unofficial]
++        model: Fine NeRF MLP.
++        coarse_model: Coarse NeRF MLP (used for importance sampling).
++        optimizer: Adam optimizer.
++        images: Ground truth images tensor [B, H, W, 3].
++        poses: Camera pose matrices [B, 4, 4].
++        intrinsics: Camera intrinsic parameters.
++        args: Configuration object containing hyperparameters.
++    """
++    # 1. Ray Generation
++    # Generate ray origins and directions from camera poses and intrinsics
++    ray_origins, ray_directions = generate_rays(poses, intrinsics, args.image_shape)
++    
++    # 2. Stratified Sampling (Coarse)
++    # Sample N_c points along each ray between near and far planes
++    # Perturbation is added to avoid aliasing
++    coarse_depths = stratified_sample(
++        ray_origins, ray_directions, 
++        args.near, args.far, 
++        args.n_samples_coarse, 
++        perturb=True
++    )
++    
++    # 3. Coarse Network Forward Pass
++    # Query coarse model to get density and color
++    coarse_points = ray_origins.unsqueeze(1) + coarse_depths.unsqueeze(2) * ray_directions.unsqueeze(1)
++    coarse_sigma, coarse_color = coarse_model(coarse_points, ray_directions)
++    
++    # 4. Importance Sampling (Fine)
++    # Use coarse weights to sample more points in high-density regions
++    coarse_weights = coarse_sigma * torch.exp(-torch.cat([torch.zeros_like(coarse_sigma[:, :1]), 
++                                                           torch.cumsum(coarse_sigma[:, :-1], dim=1)]) * 
++                                             torch.diff(torch.cat([args.near.unsqueeze(1), coarse_depths], dim=1), dim=1))
++    fine_depths = importance_sample(coarse_depths, coarse_weights, args.n_samples_fine)
++    
++    # 5. Fine Network Forward Pass
++    fine_points = ray_origins.unsqueeze(1) + fine_depths.unsqueeze(2) * ray_directions.unsqueeze(1)
++    fine_sigma, fine_color = model(fine_points, ray_directions)
++    
++    # 6. Volume Rendering
++    # Compute transmittance and accumulated color
++    deltas = torch.cat([fine_depths[:, 1:] - fine_depths[:, :-1], 
++                        torch.tensor([args.far - fine_depths[:, -1]])], dim=1)
++    alpha = 1.0 - torch.exp(-fine_sigma * deltas)
++    T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)[:, :-1]
++    weights = alpha * T
++    rendered_color = torch.sum(weights.unsqueeze(-1) * fine_color, dim=1)
++    
++    # 7. Loss Computation
++    # L1 loss between rendered and ground truth colors
++    loss = torch.mean(torch.abs(rendered_color - images))
++    
++    # Optional: Add regularization terms (e.g., occlusion, geometry)
++    # loss += args.lambda_occ * compute_occlusion_regularization(fine_sigma, ray_origins)
++    
++    # 8. Optimization Step
++    optimizer.zero_grad()
++    loss.backward()
++    optimizer.step()
++    
++    return loss.item()
++
++def stratified_sample(origins, directions, near, far, n_samples, perturb=True):
++    """
++    Divides the ray segment [near, far] into N bins and samples uniformly.
++    """
++    t_vals = torch.linspace(0., 1., steps=n_samples)
++    t_vals = torch.stack([near * (1. - t_vals) + far * t_vals], dim=-1)
++    
++    if perturb:
++        # Add uniform noise to each sample
++        mids = 0.5 * (t_vals[..., 1:] + t_vals[..., :-1])
++        upper = torch.cat([mids, t_vals[..., -1:]], dim=-1)
++        lower = torch.cat([t_vals[..., :1], mids], dim=-1)
++        t_rand = torch.rand_like(t_vals)
++        t_vals = lower * (1. - t_rand) + upper * t_rand
+         
+-        # Generate Ray Bundle
+-        # ray_origins: [B, 3], ray_directions: [B, 3]
+-        ray_origins, ray_directions = generate_rays(poses, intrinsics, batch_size)
+-        
+-        # Sample Query Points
+-        # query_points: [B, N, 3], depth_values: [B, N]
+-        query_points, depth_values = sample_stratified(
+-            ray_origins, ray_directions, near_thresh, far_thresh, 
+-            n_samples_coarse + n_samples_fine
+-        )
+-        
+-        # Flatten for processing
+-        flattened_query_points = query_points.reshape(-1, 3).to(config['device'])
+-        flattened_ray_directions = ray_directions.unsqueeze(1).expand(-1, n_samples_coarse + n_samples_fine, -1).reshape(-1, 3).to(config['device'])
+-        
+-        # Forward Pass in Chunks
+-        rgb_field = []
+-        density_field = []
+-        
+-        for batch_pos, batch_dir in get_minibatches(flattened_query_points, flattened_ray_directions, chunksize):
+-            color, sigma = model(batch_pos, batch_dir)
+-            rgb_field.append(color)
+-            density_field.append(sigma)
+-            
+-        rgb_field = torch.cat(rgb_field, dim=0)
+-        density_field = torch.cat(density_field, dim=0)
+-        
+-        # Reshape to [B, N, 3] and [B, N]
+-        rgb_field = rgb_field.reshape(query_points.shape)
+-        density_field = density_field.reshape(depth_values.shape)
+-        
+-        # Volume Rendering
+-        # Compute alpha and transmittance
+-        deltas = depth_values[:, 1:] - depth_values[:, :-1]
+-        deltas = torch.cat([deltas, torch.tensor([1e10]).to(config['device'])], dim=1)
+-        
+-        alpha = 1.0 - torch.exp(-density_field * deltas)
+-        T = torch.cumprod(torch.exp(-density_field * deltas), dim=1)
+-        T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+-        
+-        # Rendered Color
+-        weights = T * alpha
+-        rendered_color = torch.sum(weights.unsqueeze(-1) * rgb_field, dim=1)
+-        
+-        # Loss Computation
+-        # MSE Loss between rendered and ground truth
+-        loss = torch.mean((rendered_color - images) ** 2)
+-        
+-        # Optional: Occlusion Regularization [S12]
+-        # loss += 0.01 * compute_occlusion_loss(density_field, depth_values)
+-        
+-        # Optimization Step
+-        optimizer.zero_grad()
+-        loss.backward()
+-        optimizer.step()
+-        
+-        # Decay Learning Rate
+-        # Exponential decay from 5e-4 to 5e-5 [S4, unofficial]
+-        current_lr = config['lr'] * (config['lr_final'] / config['lr']) ** (i / num_iters)
+-        for param_group in optimizer.param_groups:
+-            param_group['lr'] = current_lr
+-            
+-        if i % config.get('display_every', 100) == 0:
+-            print(f"Iter {i}, Loss: {loss.item()}")
+-
+-def generate_rays(poses, intrinsics, batch_size):
+-    """Generate random rays from poses."""
+-    # Implementation depends on specific dataset loader
+-    # Returns ray_origins [B, 3] and ray_directions [B, 3]
+-    pass
+-
+-def sample_stratified(ray_origins, ray_directions, near, far, n_samples):
+-    """Stratified sampling along rays."""
+-    # Implementation of stratified sampling
+-    # Returns query_points [B, N, 3] and depth_values [B, N]
+-    pass
+-
+-def get_minibatches(points, directions, chunksize):
+-    """Split points and directions into chunks."""
+-    n = points.shape[0]
+-    for i in range(0, n, chunksize):
+-        yield points[i:i+chunksize], directions[i:i+chunksize]
++    return t_vals
++
++def importance_sample(depths, weights, n_samples):
++    """
++    Resamples points based on the density weights from the coarse pass.
++    """
++    # Compute CDF from weights
++    cdf = torch.cumsum(weights, dim=-1)
++    cdf = cdf / cdf[..., -1:]
++    
++    # Sample uniformly in [0, 1] and invert CDF
++    u = torch.rand_like(cdf)
++    # Find indices where u falls in the CDF bins
++    indices = torch.searchsorted(cdf, u, side='left')
++    
++    # Interpolate depths at these indices
++    # Note: Simplified interpolation; full implementation requires bin edge handling
++    sampled_depths = interpolate_depths(depths, indices)
++    return sampled_depths
+ ```
++
++### Edge Cases and Pitfalls
++*   **View-Dependent Artifacts:** Overfitting of the view-dependent MLP can cause direction-dependent flickering in motion [S7, unofficial]. Mitigation includes reducing the Fourier encoding dimensionality for directions ($L=1$ instead of $L=4$) or using a smaller direction-dependent cache resolution ($16^3$ to $64^3$) [S7, unofficial].
++*   **Scene Scale:** The magnitude of optimized density $\sigma(\mathbf{x})$ is tied to the domain of integration. Scaling the scene requires inversely scaling the density to preserve appearance (Alpha Invariance) [10127-alpha-invariance-inverse-scaling.md].
++*   **Nadir Perspective:** For aerial imagery, nadir camera perspectives allow the omission of background NeRFs as sky pixels are not visible [S10].
++*   **Exposure:** RawNeRF variants may require learned exposure scaling offsets to handle varying illumination [S11, unofficial].
+ 
+ ## Subtopics
+@@ -191,5 +170,5 @@
+ 
+ ### [Alpha Invariance / Inverse Scaling](10127-alpha-invariance-inverse-scaling.md)
+-Maintains opacity consistency across different scene scales by inversely scaling density.
++Ensures robust view synthesis across arbitrary scene scales by adjusting density.
+ 
+ ### [Batch size scaling for computational parity](10942-batch-size-scaling-for-computational-parity.md)
+@@ -199,11 +178,11 @@
+ 
+ ### [Regularization Techniques](11314-regularization-techniques.md)
+-Strategies to mitigate artifacts like floaters and blur, particularly in sparse-view settings.
++Strategies to mitigate floaters and blur, such as occlusion regularization.
+ 
+ ### [Exponential Learning Rate Decay with Delay](12969-exponential-learning-rate-decay-with-delay.md)
+-A schedule interpolating between initial and final learning rates with a warm-up phase.
++A schedule providing a controlled initial delay for stable initialization.
+ 
+ ### [Adaptive Time-step Training Framework](13342-adaptive-time-step-training-framework.md)
+-Reduces inference time steps for spike-based NeRFs.
++Reduces inference time steps in spike-based NeRFs.
+ 
+ ### [Model Architecture and Encoding](13550-model-architecture-and-encoding.md)
+@@ -216,30 +195,19 @@
+ 
+ ### NeRF Training Configuration for View-Dependent Artifacts
+-Mitigates direction-dependent flickering artifacts on synthetic datasets caused by overfitting of the view-dependent MLP [S7, unofficial]. It sets itself apart by adjusting the Fourier feature encoding of view directions or the resolution of the direction-dependent cache. To implement: choose a direction-dependent cache resolution between $16^3$ and $64^3$ (using interpolation at lookup) [S7, unofficial]. Alternatively, set the Fourier encoding dimensionality for directions $L=1$ (instead of the baseline $L=4$) [S7, unofficial]. With $L=1$, an 8-layer 256 hidden MLP for position and 4-layer 128 MLP for direction yields an average PSNR of 29.748dB on synthetic data, compared to 29.646dB for $L=2$ and 29.449dB for $L=3$ [S7, unofficial]. Using a smaller cache (e.g., $32^3$) has a negligible impact on metrics, occasionally improving them (e.g., Drums $23.745\text{dB} \to 23.836\text{dB}$) [S7, unofficial].
++Mitigates direction-dependent flickering artifacts on synthetic datasets caused by overfitting of the view-dependent MLP [S7, unofficial]. It distinguishes itself by adjusting the Fourier feature encoding of view directions ($L=1$) or using a smaller direction-dependent cache resolution ($16^3$ to $64^3$) [S7, unofficial]. This is chosen when motion artifacts are observed in the rendered video [S7, unofficial].
+ 
+ ### RoGUENeRF Training and Loss
+-A training configuration for a robust geometry-consistent universal enhancer [S9]. It differs by pre-training on LLFF dataset renders and fine-tuning on new scenes. Steps: Pre-train on LLFF dataset using NeRF renders for 3000 epochs (~5 days) [S9]. Fine-tune on new scenes/models for 1 hour per scene [S9]. Loss function: $L = |\hat{H}_i - H_i|_1 + 10^{-3}|\omega(\hat{H}_i) - \omega(H_i)|_1$, where $\hat{H}_i$ is the predicted enhanced image, $H_i$ is the ground truth, and $\omega()$ is a pre-trained VGG-19 [S9]. Parameters: Crop size 512x512, batch size 4, learning rate $1 \times 10^{-4}$, optimizer Adam, hardware 4x Nvidia V100 GPUs [S9].
+-
+-### NeRF Pre-processing
+-Pre-processing steps for NeRF-based training, particularly for large-scale aerial imagery [S10]. Steps: Normalize all camera center coordinates to the range $[-1, 1]$ for reliable training of the NeRF MLP based on positional encoding [S10]. Use K-Means clustering of camera centers to partition into sub-modules for Mega-NeRF and Block-NeRF [S10]. Pitfall: Nadir camera perspective allows omission of background NeRF because sky pixels are not visible [S10].
+-
+-### Learned Exposure Scaling
+-A mechanism to learn exposure scaling offsets for RawNeRF, parameterized as an offset from 1, constrained to be zero for exposure index 0 [S11, unofficial]. Steps: If `learned_exposure_scaling` is True, create embedding `exposure_scaling_offsets = nn.Embed(max_num_exposures, features=3, embedding_init=jax.nn.initializers.zeros, name='exposure_scaling_offsets')` [S11, unofficial]. During rendering, if `rays.exposure_idx is not None`, compute `mask = exposure_idx > 0`. Compute `scaling = 1 + mask[..., None] * exposure_scaling_offsets(exposure_idx)`. Multiply RGB by scaling [S11, unofficial]. Parameter: `learned_exposure_scaling: bool = False` [S11, unofficial].
+-
+-### Occlusion Regularization
+-A regularization term to prevent 'floater' or 'walls' artifacts in sparse-view training by constraining near-camera density to zero [S12]. It operates effectively where geometry regularization cannot due to missing correspondences. Formula: Total loss $L(\theta, t) = L_{color}(\theta) + L_{geo}(\theta, t) + \lambda_{occ} L_{occ}(\theta)$, where $\lambda_{occ}$ is a pre-defined weighting factor [S12]. Parameter: Occlusion regularization weight ($\lambda_{occ}$) is 0.01 across all experiments [S12].
++A training configuration for a robust geometry-consistent universal enhancer for NeRF [S9]. It differs by pre-training on LLFF dataset renders for 3000 epochs and fine-tuning on new scenes for 1 hour per scene [S9]. The loss function combines L1 and perceptual losses: $L = |\hat {H}_{i} - H_i|_{1} + 10^{-3}|\omega (\hat {H}_{i}) - \omega (H_i)|_{1}$, where $\omega$ is a pre-trained VGG-19 [S9]. It is chosen for enhancing NeRF outputs with geometric consistency [S9].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time scales with the number of iterations, batch size, and sampling density. Convergence typically takes 200–300k iterations [S4, unofficial]. On a single NVIDIA RTX3090 GPU, this takes approximately 17–25 hours [S4, unofficial].
+-*   **Memory Complexity:** Memory usage is dominated by the storage of query points and gradients. Chunking (e.g., 4096 points) is used to manage out-of-memory issues [S8, unofficial].
+-*   **Measured Performance:** On the Blender dataset with 256 hidden units, mip-NeRF achieves PSNR 33.09, SSIM 0.961, LPIPS 0.043, Time 2.89 hrs, Params 0.61M [S1]. Our Model (with proposal networks) achieves PSNR 32.96, SSIM 0.960, LPIPS 0.043, Time 1.86 hrs, Params 0.84M [S1]. With 512 hidden units, mip-NeRF achieves PSNR 33.03, SSIM 0.964, LPIPS 0.037, Time 7.03 hrs, Params 2.27M [S1]. Our Model achieves PSNR 33.25, SSIM 0.962, LPIPS 0.039, Time 3.42 hrs, Params 3.23M [S1]. The relative speedup increases as model capacity rises [S1].
+-*   **Scaling:** Training time quadruples when increasing sampling resolution from 32x32 to 64x64 samples with the same number of layers [S5].
+-*   **Strengths:** Hierarchical sampling with proposal networks significantly reduces training time compared to mip-NeRF [S1].
+-*   **Limitations:** Standard NeRF can exhibit direction-dependent flickering artifacts on synthetic datasets, requiring specific hyperparameter adjustments (e.g., $L=1$ for direction encoding) [S7, unofficial].
+-*   **When to use:** Use when training standard MLP-based NeRFs on synthetic or real-world datasets where convergence speed and rendering quality are balanced.
+-*   **When not to use:** Avoid for large-scale unbounded scenes without modifications (e.g., [Mega-NeRF](8766-mega-nerf-training-configuration.md)) or when specific artifacts like floaters are prevalent without regularization [S12].
++*   **Time Complexity:** Training typically requires 200–300k iterations [S3][S4, S7, unofficial]. On a single NVIDIA RTX 3090 GPU, this takes approximately 17–25 hours for standard scenes [S4, unofficial].
++*   **Memory Complexity:** Depends on batch size and chunk size. A batch size of 1024 rays with 128 samples requires significant VRAM, often necessitating chunking (e.g., 4096 points per chunk) to avoid out-of-memory errors [S8, unofficial].
++*   **Measured Performance:** On the Blender dataset with 256 hidden units, a model with proposal networks achieves PSNR 32.96, SSIM 0.960, and LPIPS 0.043 in 1.86 hours, compared to mip-NeRF's 2.89 hours [S1].
++*   **Scaling:** Training time quadruples when increasing sampling resolution from 32x32 to 64x64 samples [S5]. The relative speedup of proposal-based methods increases as model capacity rises [S1].
++*   **Strengths:** Hierarchical sampling improves rendering quality with minimal overhead [S1].
++*   **Limitations:** High computational cost for large scenes; sensitive to hyperparameter tuning for learning rate and sampling densities [S1][S7, unofficial].
+ 
+ ## Background
+-NeRF (Neural Radiance Fields) was introduced by Mildenhall et al. in 2020 [S1]. The hyperparameters and training procedures described here are based on the original NeRF implementation and subsequent refinements such as mip-NeRF [S1], FastNeRF [S7, unofficial], and various extensions like RoGUENeRF [S9] and SGCNeRF [S12]. The standard configuration uses an 8-layer MLP for position and a 4-layer MLP for direction, with positional encoding and Adam optimization.
++NeRF (Neural Radiance Fields) was introduced by Mildenhall et al. in 2020 [S1][S7, S8, unofficial]. The method uses a continuous volumetric scene function parameterized by a non-linear MLP to render novel views from unstructured input images. The training hyperparameters described here are derived from the original NeRF implementation and subsequent optimizations such as mip-NeRF [S1], FastNeRF [S7, unofficial], and various extensions for large-scale scenes (Mega-NeRF [S10]) and editing (ViCA-NeRF [S2]).
+ 
+ ## Sources

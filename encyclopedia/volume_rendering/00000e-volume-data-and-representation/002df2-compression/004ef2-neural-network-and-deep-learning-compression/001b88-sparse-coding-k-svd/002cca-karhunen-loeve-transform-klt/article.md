@@ -1,0 +1,104 @@
+# Karhunen-Loeve Transform (KLT)
+Also called: Eigen-vector Transform, PCA-like decorrelation
+
+## Overview
+The Karhunen-Loeve Transform (KLT) is a linear data decorrelation technique used in volume rendering compression to remove redundancy by estimating the covariance matrix and computing its eigenvectors [S1, S2]. It is closely related to Principal Component Analysis (PCA) and provides superior decorrelation quality compared to the Discrete Cosine Transform (DCT) [S1, S2]. Unlike DCT, which uses fixed bases, KLT derives data-specific bases, but this comes at the cost of dependent bases and the absence of fast forward/inverse transforms [S1, S2].
+
+## How it works
+**Inputs:** A volume dataset (or blocks thereof) represented as a collection of data vectors.
+**Outputs:** Decorrelated coefficients (typically quantized via Vector Quantization) and the transformation basis (eigenvectors).
+
+**Data Structures:**
+1.  **Data Block:** A sub-volume or vector of samples. Let $N$ be the number of samples in a block.
+2.  **Covariance Matrix:** An $N \times N$ matrix $\mathbf{C}$ computed from the data block.
+3.  **Eigenvectors:** The columns of the transformation matrix $\mathbf{U}$, where $\mathbf{U}^T \mathbf{U} = \mathbf{I}$.
+
+**Steps:**
+1.  **Block Decomposition:** Subdivide the volume into small, non-overlapping blocks to handle the dependency of bases across the entire volume [S1, S2].
+2.  **Covariance Estimation:** For each block, compute the covariance matrix $\mathbf{C}$ of the data samples [S1, S2].
+    $$ \mathbf{C} = \frac{1}{M} \sum_{i=1}^{M} (\mathbf{x}_i - \boldsymbol{\mu})(\mathbf{x}_i - \boldsymbol{\mu})^T $$
+    Where $\mathbf{x}_i$ are the data vectors in the block, $\boldsymbol{\mu}$ is the mean, and $M$ is the number of samples used for estimation [G].
+3.  **Eigen-decomposition:** Compute the eigenvectors of $\mathbf{C}$ to form the transformation matrix $\mathbf{U}$ [S1, S2].
+4.  **Forward Transform:** Project the data block $\mathbf{x}$ onto the eigenvectors:
+    $$ \mathbf{y} = \mathbf{U}^T \mathbf{x} $$
+    Where $\mathbf{y}$ are the decorrelated coefficients [G].
+5.  **Vector Quantization (VQ):** Encode the coefficients $\mathbf{y}$ using a VQ dictionary [S1, S2].
+6.  **Residual Encoding (Multi-Band Variant):** If the reconstruction error (residual) exceeds a threshold, encode the residual with a second dictionary. Repeat to identify low-, band-, and high-pass components encoded with separate dictionaries [S1].
+7.  **Precomputation (Optimization):** To avoid the computational intensity of the inverse KLT during rendering, precompute partial reprojections and store them in the codebooks instead of the coefficients [S1].
+
+**Parameters:**
+*   **Block Size:** Small blocks are used to overcome dependent bases [S1, S2]. Size not given in the sources.
+*   **Threshold:** Determines when to encode residuals with additional dictionaries [S1]. Value not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Computational Intensity:** The inverse KLT is computationally intensive [S1].
+*   **Dependent Bases:** The bases are not independent, requiring block-wise decomposition [S1, S2].
+*   **No Fast Transform:** There are no fast forward or inverse transforms available, unlike DCT or FFT [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def klt_compress_block(block_data):
+    """
+    Compress a single volume block using KLT and VQ.
+    block_data: array of shape (N,) representing voxel values in the block.
+    """
+    # Step 1: Estimate covariance matrix
+    # Note: For a single block, covariance is often estimated from a training set
+    # or assumed stationary. Here we assume a pre-computed basis U is available
+    # or computed from the block itself if N is small.
+    # C = cov(block_data) # Not given in sources how C is computed for single block
+    # U = eigenvectors(C) # Not given in sources
+    
+    # Step 2: Forward Transform
+    # y = U.T @ block_data
+    # Since U is not given, we assume U is pre-computed or derived from training data.
+    # [G] In practice, U is derived from a training set of similar blocks.
+    
+    # Step 3: Vector Quantization
+    # index = find_nearest_codebook_entry(y, codebook)
+    # [G] Standard VQ lookup.
+    
+    return index, U # Return index and basis for reconstruction context
+
+def klt_decompress_block(index, codebook, U):
+    """
+    Decompress using precomputed reprojections if available, else inverse KLT.
+    """
+    # Optimization: If partial reprojections are stored in codebook (Multi-Band VQ)
+    # return codebook[index] # Direct lookup
+    
+    # Standard Inverse KLT (Computationally Intensive)
+    # y = codebook[index]
+    # block_data = U @ y
+    # [G] Matrix-vector multiplication.
+    pass
+```
+
+## Subtopics
+
+### [KLT Decompression with VQ](5374-klt-decompression-with-vq.md)
+KLT Decompression with VQ is a rendering method that accelerates Karhunen-Loève Transform (KLT) decoding by precomputing partial reprojections during compression and storing them in an auxiliary codebook. It solves the problem of slow KLT reconstruction during visualization by allowing direct lookup of precomputed values, thereby reducing memory pressure and avoiding full decompression of the data. Unlike methods requiring full decompression, this technique reduces memory pressure during rendering because it does not need to fully decompress the data.
+
+### [Principal Component Analysis (PCA)](6565-principal-component-analysis-pca.md)
+Principal Component Analysis (PCA) is a linear dimensionality reduction technique that finds a subspace maximizing the variance of projected data, assuming sample points lie on or near a linear subspace.
+
+### Karhunen-Loeve Transform (KLT) with Multi-Band VQ
+A method by Fout and Ma [FM07] that subdivides volume into blocks, applies KLT, and encodes low, band, and high-pass components with separate dictionaries [S1]. Steps: 1. Subdivide volume into small blocks. 2. Process blocks with Karhunen-Loeve transform. 3. Encode each block with VQ and decode. 4. If residual is above a threshold, encode it with a second dictionary. 5. Repeat the residual encoding process to identify three bands (low-, band-, high-pass) encoded with three separate dictionaries. 6. Precompute partial reprojections and store them in codebooks instead of coefficients to avoid inverse KLT [S1]. Pitfall: Inverse KLT is computationally intensive [S1].
+
+## Operating characteristics
+*   **Time Complexity:** High. The lack of fast forward/inverse transforms makes KLT computationally expensive compared to DCT [S1, S2]. The inverse transform is particularly intensive [S1].
+*   **Memory Complexity:** Depends on the storage of the basis matrix $\mathbf{U}$ ($N \times N$) and the VQ codebooks.
+*   **Performance:** Provides better decorrelation quality than DCT [S1, S2].
+*   **Strengths:** Superior decorrelation; data-specific bases adapt to the volume content [S1, S2].
+*   **Limitations:** No fast transforms; bases are not independent; computationally intensive inverse transform [S1, S2].
+*   **When to Use:** When high-quality decorrelation is prioritized over speed, or when combined with offline VQ and precomputed reprojections to mitigate decoding costs [S1, S2].
+*   **When Not to Use:** When real-time decoding speed is critical and precomputation is not feasible, or when fixed bases (DCT) are sufficient.
+
+## Background
+The Karhunen-Loeve Transform is a linear transform closely related to PCA, also referred to as the eigen-vector transform [S1, S2]. It was selected by Fout et al. [FM07] for volume rendering compression due to its better quality de-correlation compared to DCT [S1]. The method was further developed by Fout and Ma [FM07] to combine KLT with vector quantization and multi-band encoding [S1].
+
+## Sources
+[S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

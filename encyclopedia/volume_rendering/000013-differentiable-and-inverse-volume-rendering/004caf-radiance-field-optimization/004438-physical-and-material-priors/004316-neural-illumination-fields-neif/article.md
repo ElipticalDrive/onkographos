@@ -1,0 +1,158 @@
+# Neural Illumination Fields (NeIF)
+
+## Overview
+Neural Illumination Fields (NeIF) is a fully differentiable framework that represents 3D ambient illumination as a continuous volumetric radiance field, treating each sample in the surrounding 3D environment as a light emitter [S1]. Unlike methods that assume illumination is infinitely far away (e.g., environment maps or Spherical Gaussians) or methods that ignore spatial distance constraints (e.g., NeILF), NeIF naturally handles environment occlusion and directional lighting by modeling the 3D position of illumination [S1]. It serves as a plug-and-play module for NeRF-style renderers, enabling the decomposition of object materials from environmental lighting and the re-rendering of objects in new virtual environments [S1].
+
+## How it works
+NeIF operates in two stages: first, it acquires the object’s geometry from input images using an existing method (Yariv et al. 2020) [S1]; second, it jointly optimizes the NeIF representation and the object’s materials [S1]. The core mechanism models the incoming radiance at a surface point by integrating volumetric radiance along a specular lobe defined by the material's roughness [S1].
+
+### Inputs and Outputs
+*   **Inputs:** A set of posed images of an object under static illumination; the object’s geometry (surface points $\mathbf{x}_s$) reconstructed from the input images [S1].
+*   **Outputs:**
+    *   **NeIF:** A 5D volumetric radiance field function $\mathcal{R}(\mathbf{x}, \mathbf{l})$ mapping 3D position $\mathbf{x}$ and incoming direction $\mathbf{l}$ to color $\mathbf{c}$ and volume density $\sigma$ [S1].
+    *   **Material Parameters:** For each surface point $\mathbf{x}_s$, a diffuse color $\mathbf{C}_d \in [0, 1]^3$, a specular tint $\alpha \in [0, 1]$, and a roughness $\rho \in [0, 1]$ [S1].
+    *   **Rendered Image:** The final color $\hat{C}(\mathbf{r})$ for a camera ray $\mathbf{r}$ [S1].
+
+### Data Structures
+1.  **Ambient MLP ($\mathcal{R}$):** A neural network approximating the 5D volumetric radiance field [S1].
+    *   **Input:** Sample position $\mathbf{x} \in \mathbb{R}^3$ and incoming ray direction $\mathbf{l} \in \mathbb{R}^3$.
+    *   **Output:** Tuple $(\mathbf{c}, \sigma)$, where $\mathbf{c}$ is the emitted color and $\sigma$ is the volume density [S1].
+2.  **Material MLP ($\mathcal{M}$):** A neural network predicting material properties [S1].
+    *   **Input:** Surface point position $\mathbf{x}_s \in \mathbb{R}^3$.
+    *   **Output:** Tuple $(\rho, \mathbf{C}_d, \alpha)$ [S1].
+    *   **Activation:** Softplus is used for roughness and alpha to ensure parameters remain within valid ranges [S1].
+3.  **Integrated Lobe Encoding (ILE):** A feature representation constructed from the coordinates within a conical frustum (specular lobe) to efficiently handle high-frequency variations related to roughness [S1].
+4.  **Multiscale Pre-convolved Representation:** A representation of the background used to assist in the decomposition of object materials and environmental illumination [S1].
+
+### Numbered Steps
+
+1.  **Geometry Reconstruction:** Acquire the object’s geometry (surface points $\mathbf{x}_s$) from input images using a standard SDF-based method (e.g., Yariv et al. 2020) [S1].
+2.  **Specular Lobe Definition:** For a specific surface point $\mathbf{x}_s$, define a 3D specular lobe. The center axis of the lobe is the reflection direction $\mathbf{l}_r$, and the width is defined by the material roughness $\rho$ [S1].
+3.  **Sample Generation:** Generate sample points $\mathbf{r}(t)$ along rays within this specular lobe. The ray is defined as $\mathbf{r}(t) = \mathbf{x}_s + t\mathbf{l}$, where $\mathbf{l}$ is the direction of the incoming ray passing through $\mathbf{x}_s$ [S1].
+4.  **Encoding:** Apply Integrated Lobe Encoding (ILE) to the coordinates of the samples within the lobe. ILE constructs positional encodings for all coordinates $(\mu, \Sigma)$ lying within the conical frustum defined by the lobe [S1].
+5.  **Radiance Field Evaluation:** Feed the encoded samples into the Ambient MLP $\mathcal{R}$ to predict the color $\mathbf{c}(\mathbf{r}(t), \mathbf{l})$ and volume density $\sigma(\mathbf{r}(t))$ for each sample [S1].
+6.  **Volume Rendering Integration:** Integrate the predicted values direction-wise to compute the incident radiance $L_{in}(\mathbf{x}_s, \mathbf{l})$. This treats each sample in the 3D environment as a light emitter [S1]. The integration is performed over the ray segment from near bound $t_n$ to far bound $t_f$:
+    $$
+    L_{in}(\mathbf{x}_s, \mathbf{l}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{l}) \, dt
+    $$
+    where the accumulated transmittance $T(t)$ is:
+    $$
+    T(t) = \exp\left( -\int_{t_n}^{t} \sigma(\mathbf{r}(s)) \, ds \right)
+    $$
+    Ideally, $t_n \to 0$ and $t_f \to \infty$ [S1].
+7.  **Specular Color Computation:** Combine the integrated incident radiance $L_{in}$ with the material’s specular function (dependent on $\alpha$ and $\rho$) to compute the specular color $\mathbf{C}_s$ [S1].
+8.  **Diffuse Color Retrieval:** Query the Material MLP $\mathcal{M}$ at $\mathbf{x}_s$ to obtain the diffuse color $\mathbf{C}_d$ [S1].
+9.  **Final Rendering:** Combine the specular color $\mathbf{C}_s$ and diffuse color $\mathbf{C}_d$ to render the final photo-realistic color for the pixel [S1].
+10. **Optimization:** Jointly optimize the NeIF representation ($\mathcal{R}$) and object materials ($\mathcal{M}$) using gradient descent. The optimization is typically performed in two stages: first optimizing geometry, then jointly optimizing NeIF and materials [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class AmbientMLP(nn.Module):
+    """Approximates the 5D volumetric radiance field R: (x, l) -> (c, sigma) [S1]."""
+    def __init__(self, input_dim=6, hidden_dim=256, num_layers=4):
+        super().__init__()
+        layers = []
+        for i in range(num_layers):
+            layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, 4))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x, l):
+        inputs = torch.cat([x, l], dim=-1)
+        out = self.network(inputs)
+        return out[..., :3], out[..., 3:]
+
+class MaterialMLP(nn.Module):
+    """Predicts material parameters M: xs -> (rho, Cd, alpha) [S1]."""
+    def __init__(self, input_dim=3, hidden_dim=128, num_layers=2):
+        super().__init__()
+        layers = []
+        for i in range(num_layers):
+            layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, 5))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, xs):
+        out = self.network(xs)
+        rho = F.softplus(out[..., 0:1])
+        Cd = torch.sigmoid(out[..., 1:4])
+        alpha = torch.sigmoid(out[..., 4:5])
+        return rho, Cd, alpha
+
+def volume_rendering(samples, c, sigma, tn=1e-5, tf=1e5):
+    """Computes integrated radiance L_in using iterative volume rendering [S1]."""
+    # samples: (N, 3), c: (N, 3), sigma: (N, 1)
+    # Assume samples are sorted along the ray from near to far
+    deltas = torch.diff(samples, dim=-2)
+    delta_t = torch.norm(deltas, dim=-1, keepdim=True)
+    delta_t = torch.clamp(delta_t, min=1e-6)
+
+    alpha = 1.0 - torch.exp(-sigma * delta_t)
+    # Iterative transmittance accumulation
+    T_cum = torch.ones_like(alpha[:, :1])
+    T_cum = torch.cat([T_cum, torch.cumprod(1.0 - alpha[:, :-1], dim=0)], dim=0)
+
+    contribution = T_cum * alpha * c
+    L_in = torch.sum(contribution, dim=0)
+    return L_in
+
+def render_neif(xs, view_dirs, normals, ambient_mlp, material_mlp, roughness_scale=1.0):
+    """Renders the color for a surface point xs [S1]."""
+    rho, Cd, alpha_spec = material_mlp(xs)
+    
+    # Reflection direction lr
+    lr = 2.0 * torch.sum(normals * -view_dirs, dim=-1, keepdim=True) * normals + view_dirs
+    
+    # Sample directions within specular lobe (width defined by roughness rho)
+    phi = torch.rand(32, 1) * 2 * torch.pi
+    cos_theta = 1.0 - rho * torch.rand(32, 1)
+    sin_theta = torch.sqrt(1.0 - cos_theta**2)
+    local_dirs = torch.cat([sin_theta * torch.cos(phi), cos_theta, sin_theta * torch.sin(phi)], dim=-1)
+    samples_r = lr + local_dirs * rho * roughness_scale
+    
+    # Evaluate NeIF
+    c, sigma = ambient_mlp(samples_r, samples_r - xs)
+    
+    # Volume render to get L_in
+    L_in = volume_rendering(samples_r, c, sigma)
+    
+    # Compute specular color Cs (material function)
+    Cs = L_in * alpha_spec * (1.0 - rho)
+    
+    # Final color
+    C = Cd + Cs
+    return C
+```
+
+### Parameters
+*   **Roughness ($\rho$):** Controls the width of the specular lobe. Range $[0, 1]$ [S1].
+*   **Near/Far Bounds ($t_n, t_f$):** Ideally $t_n \to 0$ and $t_f \to \infty$ [S1].
+*   **Material MLP Activation:** Softplus for roughness and alpha to ensure positivity [S1].
+
+### Edge Cases and Pitfalls
+*   **Material-Light Ambiguity:** Without background guidance ("w/o BG"), the method reconstructs geometrically correct results but fails to disentangle material and light, resulting in incorrect white balance (e.g., ambiguity between a red object and red incident light) [S1].
+*   **Roughness Limits:** As roughness increases, novel views gradually become blurred, even when the roughness becomes extremely large that exceeds the maximum scale of the pre-convolved representation [S1].
+*   **Near-field Lighting:** Methods like Ne-Env assume all radiance comes from infinite distance, leading to poor decomposition for nearby illumination that varies dramatically with position. NeIF handles this by modeling 3D position [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method involves evaluating a neural network for every sample in the specular lobe and performing volume rendering integration. The use of Integrated Lobe Encoding (ILE) and multiscale pre-convolved representations is designed to reduce computational cost compared to naive sampling [S1].
+*   **Memory Complexity:** Requires storing the parameters for the Ambient MLP and Material MLP. The volume rendering integration requires storing intermediate transmittance and density values for the samples in the lobe [G].
+*   **Strengths:** Handles environment occlusion and directional lighting naturally; provides photo-realistic views; allows for material editing (roughness, diffuse color); works as a plug-and-play module for existing NeRF pipelines (e.g., Mip-NeRF) [S1].
+*   **Limitations:** Struggles with material-light decomposition without background guidance; difficult to model ambient illumination in complex scenarios without sufficient constraints; computationally more expensive than environment map-based methods due to volumetric integration [S1].
+*   **When to Use:** When realistic specular reflections and accurate environmental lighting decomposition are required, especially for placing objects into new NeRF-style environments [S1].
+*   **When Not to Use:** When computational resources are extremely limited and approximate lighting (environment maps) is sufficient; when background information is unavailable and high-fidelity material-light separation is critical [S1].
+
+## Background
+Neural Illumination Fields (NeIF) was proposed to address the limitations of previous illumination representations. Traditional methods like environment maps and Spherical Gaussians assume illumination is infinitely far away, failing to handle environment occlusion and directional lighting practically [S1]. Follow-up methods like NeILF modeled incident illumination maps for each surface point but ignored spatial distance constraints, leading to material-lighting ambiguity in complex 3D environments [S1]. NeIF builds on the success of Neural Radiance Fields (NeRF) and their ability to recover detailed geometry and material, extending this to a fully differentiable framework for 3D ambient illumination [S1]. It was demonstrated as a plug-and-play module for Mip-NeRF, allowing objects to have a better sense of belonging in new 3D environments [S1].
+
+## Sources
+[S1] A Pre-convolved Representation for Plug-and-Play Neural Illumination Fields, https://doi.org/10.1609/aaai.v38i7.28618, fetched 2026-10-29

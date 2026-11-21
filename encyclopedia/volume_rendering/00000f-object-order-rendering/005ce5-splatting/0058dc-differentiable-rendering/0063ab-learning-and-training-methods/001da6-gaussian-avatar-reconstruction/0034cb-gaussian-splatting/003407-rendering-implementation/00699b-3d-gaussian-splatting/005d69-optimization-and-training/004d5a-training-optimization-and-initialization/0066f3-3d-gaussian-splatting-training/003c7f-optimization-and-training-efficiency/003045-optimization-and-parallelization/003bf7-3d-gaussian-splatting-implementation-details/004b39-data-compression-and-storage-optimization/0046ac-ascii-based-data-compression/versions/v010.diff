@@ -1,0 +1,244 @@
+--- v009.md
++++ v010.md
+@@ -3,202 +3,64 @@
+ 
+ ## Overview
+-This method reduces the storage size and transmission time of 3D Gaussian Splatting parameters by encoding numerical values as ASCII strings using base-95 (integers) and base-94 (floating-point) schemes [S1, unofficial]. It distinguishes itself from sibling methods like [Sensitivity-Aware Vector Clustering](12167-sensitivity-aware-vector-clustering.md) and [Compact 3D Gaussian Representation (C3DGS)](12927-compact-3d-gaussian-representation-c3dgs.md) by focusing on data transmission efficiency during training rather than geometric quantization or structural pruning [S1, unofficial].
++This method reduces the bit-width of scene parameters during 3D Gaussian Splatting training by encoding numerical values as ASCII characters, thereby improving data transmission speed over network or inter-process boundaries [S1, unofficial]. It distinguishes itself from sibling methods like [Sensitivity-Aware Vector Clustering](12167-sensitivity-aware-vector-clustering.md) and [Compact 3D Gaussian Representation (C3DGS)](12927-compact-3d-gaussian-representation-c3dgs.md) by focusing on transmission efficiency via character-based encoding rather than geometric simplification or vector quantization.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Continuous numerical parameters of Gaussian primitives (position, scale, rotation, SH coefficients, color) and integer indices.
+-*   **Output:** ASCII string representations of these parameters for storage or transmission.
++- Input: Numerical scene parameters (integers, floating-point numbers, and color matrix values) to be transmitted.
++- Output: ASCII strings representing the compressed parameters.
+ 
+ **Data Structures:**
+-*   **Integer Encoding:** Maps integers in the range $[0, 95]$ to a single ASCII character.
+-*   **Floating-Point Encoding:** Maps the integer component of a float to a single ASCII character in the range $[0, 94]$. Uses a specific separator character for the fractional part.
++- **Integer Encoding Map:** A mapping of integers $[0, 95]$ to ASCII characters in the range `chr(32)` to `chr(126)`.
++- **Floating-Point Encoding Map:** A mapping of integer components $[0, 94]$ to ASCII characters in the range `chr(32)` to `chr(125)`. The character `chr(126)` serves as a delimiter between the integer and fractional parts.
++- **Color Matrix Optimization:** Each color value is restricted to one decimal place within the range $[0.0, 2.0]$, resulting in 21 discrete alternative values.
+ 
+ **Steps:**
+ 
+ 1.  **Integer Compression:**
+-    *   Select ASCII characters with codes 32 to 126 (inclusive). There are 95 such characters.
+-    *   Map each integer $n \in [0, 95]$ to the character at index $n$ within this set.
+-    *   *Encoding:* $Char(n) = \text{ASCII}(32 + n)$
+-    *   *Decoding:* Convert the ASCII string directly back to the decimal integer.
++    For an integer $n$ where $0 \le n \le 95$:
++    - Map $n$ to the corresponding ASCII character $c$ using the range `chr(32)` to `chr(126)`.
++    - Output the string containing $c$.
+ 
+ 2.  **Floating-Point Compression:**
+-    *   Select ASCII characters with codes 32 to 125 (inclusive) for the integer part. There are 94 such characters.
+-    *   Use ASCII character 126 (`~`) as a separator between the integer and fractional parts.
+-    *   *Encoding:*
+-        1.  Extract the integer part $I$ of the floating-point number.
+-        2.  Map $I$ to a character using the base-94 scheme: $Char(I) = \text{ASCII}(32 + I)$.
+-        3.  Append the separator character: $\text{ASCII}(126)$.
+-        4.  Encode the fractional part (decimal places) as a string of digits $d$.
+-        5.  Result: $String = Char(I) + \text{ASCII}(126) + d$
+-    *   *Decoding:*
+-        1.  Split the string at the separator $\text{ASCII}(126)$.
+-        2.  Decode the first part to get integer $I$.
+-        3.  Parse the second part as the number of decimal places $d$.
+-        4.  Calculate the final value: $f = I \times 10^{-d}$ [S1, unofficial].
++    For a floating-point number $f$:
++    - Extract the integer part $I$ and the fractional part.
++    - Map $I$ (where $0 \le I \le 94$) to an ASCII character $c_I$ using the range `chr(32)` to `chr(125)`.
++    - Determine the number of decimal places $d$ required for the fractional part.
++    - Concatenate $c_I$, the delimiter `chr(126)`, and the string representation of $d$.
++    - Output the resulting ASCII string.
+ 
+ 3.  **Color Matrix Optimization:**
+-    *   Restrict color values to the range $[0.0, 2.0]$ with only one decimal place.
+-    *   This results in 21 possible values ($0.0, 0.1, \dots, 2.0$).
+-    *   Apply ASCII compression to these quantized values to significantly reduce data size [S1, unofficial].
++    - Round each color matrix item to one decimal place, restricting values to the range $[0.0, 2.0]$.
++    - This reduces the possible values to 21 distinct options per item.
++    - Apply ASCII compression to these rounded values to reduce data size significantly.
++
++4.  **Decoding Integer:**
++    - Convert the ASCII string directly back to the decimal integer number using the inverse mapping of Step 1.
++
++5.  **Decoding Floating-Point:**
++    - Split the ASCII string into two parts: the integer part $I$ (decoded from the first character) and the decimal places $d$ (decoded from the part after the delimiter).
++    - Calculate the final floating-point value $f$ using the formula:
++      $$ f = I \times 10^{-d} $$
+ 
+ **Parameters:**
+-*   **Integer Base:** 95 (ASCII 32–126).
+-*   **Floating-Point Integer Base:** 94 (ASCII 32–125).
+-*   **Separator:** ASCII 126 (`~`).
+-*   **Color Precision:** 1 decimal place.
++- Integer base: 95.
++- Floating-point integer component base: 94.
++- Color precision: 1 decimal place.
++- Color range: $[0.0, 2.0]$.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Matrix Traversal:** Compressing large color matrices via ASCII string traversal is computationally expensive. Using internal functions like `torch.where` and `torch.index_select` improves speed but may not be sufficient for full replacement of loops [S1, unofficial].
+-*   **Line Breaks:** Using line break characters in ASCII strings adds overhead for writing and decoding operations [S1, unofficial].
+-*   **Performance Gain:** The method yields approximately 6% or less improvement in training speed [S1, unofficial].
+-
+-**Pseudocode:**
+-
+-```python
+-def encode_integer(n: int) -> str:
+-    """Encode an integer in [0, 95] to a single ASCII character."""
+-    if not (0 <= n <= 95):
+-        raise ValueError("Integer out of range [0, 95]")
+-    # ASCII 32 to 126 corresponds to indices 0 to 94
+-    # Note: Source says range [0, 95] uses 95 chars (32-126). 
+-    # 126 - 32 + 1 = 95. So index 94 is ASCII 126.
+-    # Wait, source says "No.32 to No.126 ... range [0, 95]".
+-    # 126 - 32 = 94. Indices 0..94. 
+-    # If range is [0, 95], that's 96 values. 
+-    # Source text: "selected No.32 to No.126 ASCII characters ... number range of [0, 95]"
+-    # This implies a mapping error in the source or inclusive/exclusive ambiguity.
+-    # Assuming standard base-95: 95 values. 0->32, 94->126.
+-    # If 95 is included, we need 96 chars. 
+-    # Let's stick to the explicit character ranges given.
+-    # 32 to 126 is 95 characters. 
+-    # If the source insists on [0, 95], it might mean 0..94. 
+-    # We will implement based on the character count (95 chars).
+-    return chr(32 + n)
+-
+-def decode_integer(s: str) -> int:
+-    """Decode a single ASCII character to an integer in [0, 94]."""
+-    code = ord(s)
+-    if not (32 <= code <= 126):
+-        raise ValueError("Invalid ASCII character for integer encoding")
+-    return code - 32
+-
+-def encode_float(f_val: float) -> str:
+-    """
+-    Encode a floating-point number.
+-    Integer part I in [0, 94] mapped to ASCII 32-125.
+-    Separator is ASCII 126.
+-    Fractional part is encoded as decimal digits.
+-    Formula: f = I * 10^-d
+-    """
+-    # Extract integer part
+-    I = int(f_val)
+-    if not (0 <= I <= 94):
+-        raise ValueError("Integer part out of range [0, 94]")
+-    
+-    # Determine decimal places d
+-    # The source says "split into ... decimal places d". 
+-    # And f = I * 10^-d. This implies d is the *number* of decimal places, 
+-    # not the value of the fractional part.
+-    # However, standard floating point representation usually stores the digits.
+-    # Let's re-read: "split into two part ... integer part I ... decimal places d. 
+-    # Final value f = I * 10^-d".
+-    # This formula is unusual. If f=1.23, I=1. If d=2, f=1*10^-2 = 0.01. Incorrect.
+-    # If the source means the fractional part is stored as a string of digits, 
+-    # and d is the length, the reconstruction is different.
+-    # But the source explicitly states: "f = I * 10^-d".
+-    # This suggests d might be the *value* of the fractional part scaled? 
+-    # Or perhaps the source has a typo and means f = I + fractional_part.
+-    # Given the constraint "implement from plain text", we must follow the source formula strictly.
+-    # However, "decimal places d" usually means count. 
+-    # Let's look at the color matrix optimization: "one decimal places".
+-    # If f=1.5, I=1. d=1? f = 1 * 10^-1 = 0.1. Still wrong.
+-    # Maybe d is the fractional part itself? "decimal places d" -> d is the digits.
+-    # If d is the digits (e.g., "5"), and we interpret it as 0.5?
+-    # Let's assume the source formula is literal: f = I * 10^-d.
+-    # This would only work if I is the significant digits and d is the exponent?
+-    # No, it says "integer part I".
+-    # There is a high likelihood of a source error or non-standard definition.
+-    # We will implement the decoding as described: split string, parse I, parse d, apply formula.
+-    
+-    # To encode, we need to determine d.
+-    # If the input is f_val, and we assume the standard representation:
+-    # f_val = I + frac.
+-    # The source formula f = I * 10^-d is likely a typo for f = I + frac/10^d or similar.
+-    # But we cannot guess. We will encode the fractional part as a string of digits.
+-    # And store d as the length? Or the value?
+-    # Source: "decimal places d". 
+-    # Let's assume d is the number of decimal digits.
+-    # And the reconstruction in the source is flawed or uses a different interpretation.
+-    # For implementation, we will store the fractional digits.
+-    
+-    frac_str = ""
+-    if f_val != I:
+-        # Get fractional part
+-        frac = f_val - I
+-        # Round to reasonable precision for transmission
+-        frac_str = f"{frac:.6f}".split('.')[1]
+-        # Remove trailing zeros? Source doesn't specify.
+-        frac_str = frac_str.rstrip('0')
+-    
+-    sep = chr(126)
+-    int_char = chr(32 + I)
+-    return int_char + sep + frac_str
+-
+-def decode_float(s: str) -> float:
+-    """
+-    Decode ASCII string to float.
+-    Split at ASCII 126.
+-    I = decode_integer(part1)
+-    d = part2 (interpreted as decimal places count or value?)
+-    f = I * 10^-d
+-    """
+-    sep = chr(126)
+-    if sep not in s:
+-        raise ValueError("Missing separator")
+-    
+-    parts = s.split(sep)
+-    I = decode_integer(parts[0])
+-    
+-    # Interpretation of d:
+-    # Source says "decimal places d". 
+-    # If d is a string of digits, e.g., "5", is d=5 or d=0.5?
+-    # Formula: f = I * 10^-d.
+-    # If d is the count of decimal places, it doesn't help reconstruct the value.
+-    # If d is the fractional value, it works if I is the integer part? No.
+-    # Example: 1.5. I=1. frac=0.5. 
+-    # If d=0.5, f = 1 * 10^-0.5 = 0.316. Wrong.
+-    # If d=5 (digit), f = 1 * 10^-5 = 0.00001. Wrong.
+-    # The source formula is mathematically inconsistent with standard float representation.
+-    # We will implement the literal formula as requested, noting the pitfall.
+-    
+-    d_str = parts[1]
+-    try:
+-        d = int(d_str)
+-    except ValueError:
+-        # If d_str is not an integer, it might be the fractional value?
+-        # Or the source implies d is the number of digits?
+-        # We'll assume d is the integer value of the fractional part string for the formula.
+-        d = int(d_str)
+-        
+-    return I * (10 ** -d)
+-```
+-
+-## Subtopics
+-
+-### Sensitivity-Aware Vector Clustering
+-Clusters Gaussians based on rendering sensitivity to reduce primitive count. Choose when memory reduction is prioritized over transmission speed. [Link](12167-sensitivity-aware-vector-clustering.md)
+-
+-### Compact 3D Gaussian Representation (C3DGS)
+-Uses codebook quantization for scales and rotations. Choose when high-fidelity reconstruction is needed with lower storage than raw floats. [Link](12927-compact-3d-gaussian-representation-c3dgs.md)
++- **Color Matrix Traversal:** Compressing the entire color matrix into ASCII strings is computationally expensive due to the time required for matrix traversal. Using internal functions like `torch.where` and `torch.index_select` can replace explicit loops but may still not be fast enough for full replacement [S1, unofficial].
++- **Line Break Characters:** Using line break characters in ASCII strings adds an extra operator during writing and decoding, which should be avoided [S1, unofficial].
++- **Performance Gain:** The method provides approximately 6% or less improvement in training speed [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding/decoding is $O(1)$ per number, but matrix traversal for color optimization is $O(N)$ where $N$ is the number of color entries. Using vectorized operations (`torch.where`) mitigates this but remains a bottleneck.
+-*   **Memory Complexity:** Reduces storage size by encoding multiple values into single ASCII characters. Color matrix compression reduces size significantly by limiting precision to 1 decimal place (21 values).
+-*   **Performance:** Gains approximately 6% or less in training speed [S1, unofficial].
+-*   **Strengths:** Simple implementation; improves data transmission speed; reduces storage for color matrices.
+-*   **Limitations:** Limited speedup; difficult to compress large color matrices efficiently; potential precision loss from quantization; source formula for float decoding is ambiguous/non-standard.
++- **Time Complexity:** Encoding and decoding are linear with respect to the number of parameters. However, matrix traversal for color compression is a bottleneck, potentially negating transmission gains if not optimized [S1, unofficial].
++- **Memory Complexity:** Reduces the number of bits required to represent parameters, leading to smaller data payloads during transmission.
++- **Performance:** Gains about 6% or less in training speed [S1, unofficial].
++- **Strengths:** Simple implementation; effective for reducing transmission overhead for integers and small-range floats.
++- **Limitations:** Limited applicability to color matrices due to traversal costs; minimal overall speedup; not suitable for high-precision requirements beyond one decimal place for colors.
+ 
+ ## Background
+-Originated in the "I3DGS" paper, which explores improvements to 3D Gaussian Splatting from multiple dimensions, including compression [S1, unofficial]. The method is part of a broader effort to optimize training efficiency by reducing data transmission overhead.
++This method was introduced in the context of improving the training speed of 3D Gaussian Splatting models. It is part of a broader effort to optimize various dimensions of the model, including compression, to enhance scientific and practical references for related research [S1, unofficial].
+ 
+ ## Sources

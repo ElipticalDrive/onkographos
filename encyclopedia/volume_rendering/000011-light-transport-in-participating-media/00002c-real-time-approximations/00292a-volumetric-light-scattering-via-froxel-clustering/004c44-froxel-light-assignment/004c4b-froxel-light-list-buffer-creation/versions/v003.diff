@@ -1,0 +1,224 @@
+--- v002.md
++++ v003.md
+@@ -4,52 +4,50 @@
+ 
+ ## Overview
+-This method prepares the GPU buffers required to store the variable-length light lists for each froxel after they have been assigned. It allocates the necessary memory structures and executes compute shaders to populate the light indices, ensuring that subsequent rendering passes can efficiently access the lights relevant to each volume voxel. It differs from its parent [Froxel Light Assignment](13184-froxel-light-assignment.md) by focusing on the buffer allocation, offset calculation, and index population rather than the spatial assignment logic itself.
++This method allocates and populates the GPU buffers that store variable-length light lists for each froxel after spatial assignment. It prepares the `Counts`, `Offsets`, `TotalIndices`, and `LightIndices` buffers required for subsequent volumetric rendering passes [S1, unofficial].
+ 
+ ## How it works
+-The method consists of buffer allocation, a reduction pass to determine total light count, an atomic assignment pass to populate indices, and a prefix-sum scan to compute offsets.
++The method consists of buffer allocation, a reduction pass to determine the total light count, an atomic assignment pass to populate indices, and a three-pass prefix-sum scan to compute offsets [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-- `Grid`: 3D grid dimensions $(G_X, G_Y, G_Z)$ defining the froxel structure.
+-- `NumLights_RT`: Number of real-time lights in the scene.
+-- `MaxLightsPerFroxel`: Maximum number of lights assigned to any single froxel.
++- `Grid`: 3D grid dimensions $(G_X, G_Y, G_Z)$ defining the froxel structure [S1, unofficial].
++- `NumLights_RT`: Number of real-time lights in the scene [S1, unofficial].
++- `MaxLightsPerFroxel`: Maximum number of lights assigned to any single froxel [S1, unofficial].
+ 
+ **Outputs:**
+-- `FroxelLists`: A structure containing four buffers (see Layout).
++- `FroxelLists`: A structure containing four buffers (see Layout) [S1, unofficial].
+ 
+ ### Data Structures and Layout
+-The `FFroxelLists` structure contains the following buffers, all created as `RWStructuredBuffer` with `BUF_ShaderResource | BUF_UnorderedAccess` flags:
++The `FFroxelLists` structure contains the following buffers, all created as `RWStructuredBuffer<uint32>` with `BUF_ShaderResource | BUF_UnorderedAccess` flags [S1, unofficial]:
+ 
+-1.  **Counts**: `RWStructuredBuffer<uint32>`, size $G_X \times G_Y \times G_Z$. Stores the number of lights assigned to each froxel.
+-2.  **Offsets**: `RWStructuredBuffer<uint32>`, size $G_X \times G_Y \times G_Z$. Stores the starting index in `LightIndices` for each froxel.
+-3.  **TotalIndices**: `RWStructuredBuffer<uint32>`, size 1. Stores the total number of light indices across all froxels.
+-4.  **LightIndices**: `RWStructuredBuffer<uint32>`, size $(G_X \times G_Y \times G_Z) \times MaxLightsPerFroxel$. Stores the actual light indices for all froxels, packed sequentially.
++1.  **Counts**: `RWStructuredBuffer<uint32>`, size $G_X \times G_Y \times G_Z$. Stores the number of lights assigned to each froxel [S1, unofficial].
++2.  **Offsets**: `RWStructuredBuffer<uint32>`, size $G_X \times G_Y \times G_Z$. Stores the starting index in `LightIndices` for each froxel [S1, unofficial].
++3.  **TotalIndices**: `RWStructuredBuffer<uint32>`, size 1. Stores the total number of light indices across all froxels [S1, unofficial].
++4.  **LightIndices**: `RWStructuredBuffer<uint32>`, size $(G_X \times G_Y \times G_Z) \times \text{MaxLightsPerFroxel}$. Stores the actual light indices for all froxels, packed sequentially [S1, unofficial].
+ 
+ ### Steps
+ 
+ 1.  **Calculate Froxel Count**:
+-    $$N_{froxel} = G_X \times G_Y \times G_Z$$
++    $$N_{\text{froxel}} = G_X \times G_Y \times G_Z$$ [S1, unofficial].
+ 
+ 2.  **Allocate Buffers**:
+-    Allocate the four buffers defined in the Layout section with sizes derived from $N_{froxel}$ and `MaxLightsPerFroxel`.
++    Allocate the four buffers defined in the Layout section with sizes derived from $N_{\text{froxel}}$ and `MaxLightsPerFroxel` [S1, unofficial].
+ 
+ 3.  **Compute Total Indices (Reduction)**:
+-    -   Clear `TotalIndices` UAV to 0.
+-    -   Execute the `FFroxelTotalIndicesCS` compute shader.
+-    -   Group count: $(1, 1, 1)$.
+-    -   This pass sums the `Counts` buffer to determine the total number of light entries.
++    -   Clear `TotalIndices` UAV to 0 [S1, unofficial].
++    -   Execute the `FFroxelTotalIndicesCS` compute shader with group count $(1, 1, 1)$ [S1, unofficial].
++    -   This pass sums the `Counts` buffer to determine the total number of light entries [S1, unofficial].
+ 
+ 4.  **Assign Light Indices**:
+-    -   Clear `LightIndices` UAV to 0.
+-    -   Reuse the `Counts` buffer as `FroxelHeads` (atomic head pointer) and clear it to 0.
+-    -   Execute the `FFroxelAssignLightsCS` compute shader.
+-    -   Group count: $\lceil NumLights_{RT} / 64 \rceil$.
+-    -   Each light thread atomically increments the head for its assigned froxel and writes the light index to `LightIndices` at the returned position.
++    -   Clear `LightIndices` UAV to 0 [S1, unofficial].
++    -   Reuse the `Counts` buffer as `FroxelHeads` (atomic head pointer) and clear it to 0 [S1, unofficial].
++    -   Execute the `FFroxelAssignLightsCS` compute shader with group count $\lceil \text{NumLights\_RT} / 64 \rceil$ [S1, unofficial].
++    -   Each light thread atomically increments the head for its assigned froxel and writes the light index to `LightIndices` at the returned position [S1, unofficial].
+ 
+ 5.  **Compute Offsets (Prefix Sum)**:
+-    The offsets are computed using a 3-pass Blelloch scan to handle the 3D grid efficiently:
+-    -   **Pass A (Intra-Slice Scan)**: Perform a prefix sum on `Counts` within each Z-slice (size $G_X \times G_Y$). Store intermediate results in `ZSliceTotals` and final offsets in `Offsets`.
+-    -   **Pass B (Inter-Slice Scan)**: Perform a prefix sum on the `ZSliceTotals` buffer (size $G_Z$) to get cumulative sums for each Z-slice. Store in `ZSliceOffsets`.
+-    -   **Pass C (Add Z-Slice Offsets)**: Add the corresponding `ZSliceOffsets` value to each froxel's offset in the `Offsets` buffer.
++    The offsets are computed using a three-pass Blelloch scan to handle the 3D grid efficiently [S1, unofficial]:
++    -   **Pass A (Intra-Slice Scan)**: Perform a prefix sum on `Counts` within each Z-slice (size $G_X \times G_Y$) [S1, unofficial]. Store intermediate results in `ZSliceTotals` and final offsets in `Offsets` [S1, unofficial].
++    -   **Pass B (Inter-Slice Scan)**: Perform a prefix sum on the `ZSliceTotals` buffer (size $G_Z$) to get cumulative sums for each Z-slice [S1, unofficial]. Store in `ZSliceOffsets` [S1, unofficial].
++    -   **Pass C (Add Z-Slice Offsets)**: Add the corresponding `ZSliceOffsets` value to each froxel's offset in the `Offsets` buffer [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -66,80 +64,45 @@
+ 
+     # 1. Allocate Buffers
+-    # All buffers are RWStructuredBuffer with ShaderResource | UnorderedAccess
+-    counts = allocate_buffer(N_froxel, dtype=uint32)
+-    offsets = allocate_buffer(N_froxel, dtype=uint32)
+-    total_indices = allocate_buffer(1, dtype=uint32)
+-    light_indices = allocate_buffer(N_froxel * max_lights_per_froxel, dtype=uint32)
+-    
+-    # Temporary buffers for prefix sum
+-    z_slice_totals = allocate_buffer(Gz, dtype=uint32)
+-    z_slice_offsets = allocate_buffer(Gz, dtype=uint32)
++    counts = [0] * N_froxel
++    offsets = [0] * N_froxel
++    total_indices = [0] * 1
++    light_indices = [0] * (N_froxel * max_lights_per_froxel)
++    z_slice_totals = [0] * Gz
++    z_slice_offsets = [0] * Gz
+ 
+-    # 2. Compute Total Indices
+-    clear(total_indices, 0)
+-    execute_compute_shader(
+-        shader=FFroxelTotalIndicesCS,
+-        params={
+-            'FroxelSharedUB': shared_ub,
+-            'View': view_uniform_buffer,
+-            'Lights': lights_srv,
+-            'FroxelLightCounts': counts
+-        },
+-        group_count=(1, 1, 1)
+-    )
++    # 2. Compute Total Indices (Reduction)
++    # Execute FFroxelTotalIndicesCS with group count (1, 1, 1)
++    total_indices[0] = sum(counts)
+ 
+     # 3. Assign Light Indices
+-    clear(light_indices, 0)
+-    clear(counts, 0) # Reuse counts as atomic heads
+-    
+-    execute_compute_shader(
+-        shader=FFroxelAssignLightsCS,
+-        params={
+-            'FroxelSharedUB': shared_ub,
+-            'View': view_uniform_buffer,
+-            'Lights': lights_srv,
+-            'FroxelLightCounts': counts, # Acts as heads
+-            'FroxelLightIndices': light_indices
+-        },
+-        group_count=ceil(num_lights / 64)
+-    )
++    # Clear LightIndices and reuse Counts as FroxelHeads (atomic heads)
++    light_indices = [0] * len(light_indices)
++    counts = [0] * len(counts)
++    # Execute FFroxelAssignLightsCS with group count ceil(num_lights / 64)
++    froxel_heads = [0] * N_froxel
++    for light_idx in range(num_lights):
++        froxel_idx = light_idx % N_froxel
++        pos = froxel_heads[froxel_idx]
++        froxel_heads[froxel_idx] += 1
++        if pos < max_lights_per_froxel:
++            light_indices[froxel_idx * max_lights_per_froxel + pos] = light_idx
+ 
+     # 4. Compute Offsets (3-Pass Blelloch Scan)
+-    
+     # Pass A: Prefix sum within each Z-slice
+-    clear(z_slice_totals, 0)
+-    clear(offsets, 0)
+-    execute_compute_shader(
+-        shader=FFroxelOffsetPassACS,
+-        params={
+-            'FroxelSharedUB': shared_ub,
+-            'FroxelLightCounts': counts,
+-            'FroxelLightOffsets': offsets,
+-            'ZSliceTotals': z_slice_totals
+-        },
+-        group_count=get_group_count(N_froxel, 64) # Or appropriate tile size
+-    )
++    for z in range(Gz):
++        base = z * Z_slice_size
++        for i in range(Z_slice_size):
++            offsets[base + i] = sum(counts[base:base + i])
++        z_slice_totals[z] = sum(counts[base:base + Z_slice_size])
+ 
+     # Pass B: Prefix sum of Z-slice totals
+-    clear(z_slice_offsets, 0)
+-    execute_compute_shader(
+-        shader=FFroxelOffsetPassBCS,
+-        params={
+-            'ZSliceTotals': z_slice_totals,
+-            'ZSliceOffsets': z_slice_offsets
+-        },
+-        group_count=get_group_count(Gz, 64)
+-    )
++    for z in range(1, Gz):
++        z_slice_offsets[z] = z_slice_offsets[z-1] + z_slice_totals[z-1]
+ 
+     # Pass C: Add Z-slice offsets to individual froxel offsets
+-    execute_compute_shader(
+-        shader=FFroxelOffsetPassCCS,
+-        params={
+-            'FroxelLightOffsets': offsets,
+-            'ZSliceOffsets': z_slice_offsets,
+-            'GridSize': grid
+-        },
+-        group_count=get_group_count(N_froxel, 64)
+-    )
++    for z in range(Gz):
++        base = z * Z_slice_size
++        for i in range(Z_slice_size):
++            offsets[base + i] += z_slice_offsets[z]
+ 
+     return {
+@@ -152,22 +115,21 @@
+ 
+ ### Parameters and Edge Cases
+--   **MaxLightsPerFroxel**: Must be large enough to avoid overflow. If exceeded, light indices are dropped. [S1, unofficial]
+--   **Atomic Contention**: The `FFroxelAssignLightsCS` uses atomic operations on `Counts` (as heads). High light density per froxel may cause contention. [S1, unofficial]
+--   **Grid Dimensions**: The prefix sum assumes a Z-slice major order. $G_X \times G_Y$ defines the slice size. [S1, unofficial]
++-   **MaxLightsPerFroxel**: Determines the size of `LightIndices` as $(G_X \times G_Y \times G_Z) \times \text{MaxLightsPerFroxel}$ [S1, unofficial].
++-   **NumLights_RT**: Determines the group count for the assignment shader as $\lceil \text{NumLights\_RT} / 64 \rceil$ [S1, unofficial].
++-   **Grid Layout**: The prefix sum assumes a Z-slice major order where each slice contains $G_X \times G_Y$ froxels [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Froxel Light Index Assignment
+-Computes the list of light indices for each froxel, storing results in `FroxelLists.LightIndices`. It first computes the total number of indices using a reduction pass, then assigns indices using an atomic counter. It differs from the parent by focusing on the actual index population rather than buffer allocation. [S1, unofficial]
++### [Froxel Assign Lights Compute Shader Parameters](13208-froxel-assign-lights-compute-shader-parameters.md)
++Defines the shader parameter structure for the compute shader that assigns lights to froxels during the volumetric light scattering pass. It provides the GPU kernel with references to the froxel grid state, view parameters, light data, offsets, and atomic counters required for populating the light index buffer. Choose this when configuring the GPU kernel dispatch for the assignment phase. See [Froxel Assign Lights Compute Shader Parameters](13208-froxel-assign-lights-compute-shader-parameters.md).
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N_{froxel} + N_{lights})$ for assignment and $O(N_{froxel})$ for prefix sum. The prefix sum is implemented in 3 passes, so constant factors are higher.
+--   **Memory Complexity**: $O(N_{froxel} \times MaxLightsPerFroxel)$ for `LightIndices`, plus $O(N_{froxel})$ for `Counts` and `Offsets`.
+--   **Performance**: The atomic assignment pass can be a bottleneck if many lights map to the same froxel. The 3-pass prefix sum is efficient for large grids but requires temporary buffers. [S1, unofficial]
+--   **Strengths**: Efficiently handles variable-length light lists. GPU-native.
+--   **Limitations**: Requires significant temporary memory for prefix sum. Atomic contention may reduce throughput. [S1, unofficial]
++-   **Time Complexity**: $O(N_{\text{froxel}})$ for allocation and offset computation, and $O(\text{NumLights\_RT})$ for index assignment [S1, unofficial].
++-   **Memory Complexity**: $O(N_{\text{froxel}} \times \text{MaxLightsPerFroxel})$ for `LightIndices`, plus $O(N_{\text{froxel}})$ for `Counts` and `Offsets`, and $O(G_Z)$ for temporary prefix sum buffers [S1, unofficial].
++-   **Strengths**: Handles variable-length light lists efficiently on the GPU [G].
++-   **Limitations**: Requires temporary buffers for the three-pass prefix sum [G].
+ 
+ ## Background
+-This method is part of the Unreal Engine 5 Froxel Lighting system, an unofficial implementation of volumetric light scattering using froxel clustering. It was developed by Armin Tajik. [S1, unofficial]
++This method is part of the Unreal Engine 5 Froxel Lighting system for volumetric light scattering via froxel clustering [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,63 @@
+# Volumetric displays and holography
+
+
+## Overview
+This family covers hardware systems and computational methods that render volumetric data directly into physical space, creating images visible from multiple viewpoints without headgear [S1, unofficial][S3, unofficial]. It differs from standard rasterization by projecting light into a physical medium or light field rather than onto a 2D sensor [S1, unofficial][S3, unofficial]. It is distinct from [Voxel engines and games](47-voxel-engines-and-games.md) which simulate volume appearance on 2D displays, and from [Scientific and medical visualization](49-scientific-and-medical-visualization.md) which typically uses 2D slice views or volume rendering on monitors [S1, unofficial][S3, unofficial].
+
+## Shared principles
+
+## Subtopics
+
+### [Galvanometer Scanner Volume Rendering](5277-galvanometer-scanner-volume-rendering.md)
+Renders volumetric images with arbitrary per-voxel colors by temporally synchronizing spatial voxel generation with a Liquid Crystal (LC) color filter. It solves multicolor volumetric display by mapping 3D voxel data to control signals for a galvanometer scanner, varifocal lens, and LC filter. Unlike monochromatic scanning methods, it explicitly calculates optimal scanning routes for color layers to minimize mechanical travel time while ensuring color fidelity through temporal multiplexing. It is chosen when full-color volumetric displays with precise spatial control are required.
+
+### [Drawing Space Separation (DSS)](5290-drawing-space-separation-dss.md)
+Physically separates the volume where voxels are generated (drawing space) from the observation volume (viewing space) using an optical re-projection system. This allows the drawing space to be filled with materials like xenon gas that lower the energy threshold for voxel generation and provide broadband emission, without creating a physical barrier. It enables the insertion of color filters in the re-projection path. It is chosen when the display medium requires specific environmental conditions (like gas discharge) incompatible with direct user viewing.
+
+### [Dual-Path Holographic Laser Rendering](5627-dual-path-holographic-laser-rendering.md)
+Renders palm-sized 3D contents in real space by splitting a femtosecond laser into two paths: one using an LC-SLM for holographic voxel generation, and the other using a 3D laser scanner. It solves the limitation of single-path systems by cooperatively combining holographic multiplexing with galvanometric scanning to achieve higher voxel density and larger volumes. It is chosen for high-resolution, real-time volumetric displays in free space.
+
+### [Multi-view Lenticular Volume Rendering](6636-multi-view-lenticular-volume-rendering.md)
+Generates multi-view stereoscopic images of volumetric medical datasets for display on a multi-view lenticular screen, using the GPU for both rendering and compositing. It is chosen when hardware-accelerated, glasses-free stereoscopic visualization of medical volumes is required.
+
+### [Photophoretic-Trap Volumetric Display](6753-photophoretic-trap-volumetric-display.md)
+Creates luminous image points in free space using a trapped particle illuminated by RGB lasers, forming images via persistence of vision. It solves the 'clipping' limitation of holographic displays by keeping image points physically separate from the scattering surface, allowing unconstrained viewing angles. It is chosen for free-space displays requiring large viewing geometries.
+
+### [Holographic Computer-Generated Holography (CGH) Calculation](6884-holographic-computer-generated-holography-cgh-calculation.md)
+Maps 3D voxel data to a physical 3D light field by computing the interference pattern (hologram) required to reconstruct the volume. It differs from sibling methods by using optical superposition (diffraction) rather than temporal persistence or scanning beams. It is chosen when wave optics modeling is needed to resolve viewing space vs. drawing space conflicts through phase modulation.
+
+### [Quantum-Dot-Based Volumetric Display](6943-quantum-dot-based-volumetric-display.md)
+Uses quantum dots (QDs) embedded in a polymer substrate to eliminate occlusion from electrical wiring. External light excites the QDs to emit light spontaneously, forming visible voxels without internal power connections. It is chosen for displays requiring high transparency and absence of internal wiring occlusion.
+
+### [Chromatic Dispersion Volumetric Display](7367-chromatic-dispersion-volumetric-display.md)
+Realizes a solid-state volumetric display by using the chromatic dispersion of a diffractive lens to image planar patterns from a projector. Each image plane's position is defined by a distinct wavelength from a narrowband polychromatic source. It is chosen for solid-state displays without moving parts in the viewing volume.
+
+### [Material-Based Volumetric Emission](7614-material-based-volumetric-emission.md)
+Not given in the sources.
+
+### [Dynamic Projection Mapping for Rotating Volumetric Display](7619-dynamic-projection-mapping-for-rotating-volumetric-display.md)
+Displays layered volumetric images by projecting optical patterns onto a rotating object composed of fan-shaped disks, using external high-speed cameras for tracking and a high-speed projector for rendering. It is chosen for interactive displays where users can freely move and rotate the physical object.
+
+### [Rotational Swept-Screen Projection](8589-rotational-swept-screen-projection.md)
+Not given in the sources.
+
+#### Varifocal Mirror Display
+A display system that eliminates the need for mental reconstruction by displaying the entire stack of tomographic images as a 3D image using a vibrating mirror with variable focal length optics [S2, unofficial]. The speaker is made to vibrate at 30 Hz, and tomographic images are displayed one at a time on the CRT in synchrony with the mirror's motion [S2, unofficial]. Due to the variable focal length, timing sequence, and retinal integration, the stack of 2D images appears as a virtual 3D image in the mirror [S2, unofficial]. The mirror consists of an aluminized membrane stretched over a loud-speaker coupled to a CRT [S2, unofficial].
+
+#### Drone Volumetric Display
+A volumetric display using a drone equipped with 8 one-dimensional LEDs [S3, unofficial]. The voxel generation capability is limited to the surface of a sphere, but the display space itself can move [S3, unofficial].
+
+#### Kumagai Volumetric Bubble Display
+A method using bubbles excited by lasers in liquid as voxels [S3, unofficial]. By increasing liquid viscosity, slow-floating bubbles are generated and arranged to stack 2D cross-sections, realizing volumetric image display [S3, unofficial]. This system has a very long voxel residence time, requiring time for image refresh, but can express complex shapes [S3, unofficial].
+
+#### SliceView
+A volumetric display that extends the Pepper's Ghost optical illusion to multiple stacked translucent planes, cumulatively giving volume to an initially two-dimensional projection [S4]. A plane of translucent material is placed at a certain angle on a light source so that it reflects towards the user the projection of an image superimposed on the perceived reality [S4]. This is repeated for multiple planes to create volume [S4]. It differs from persistence-of-vision displays that use moving parts or levitated particles by using static stacked planes [S4]. It is implemented as a layer-based painting tool, retro-gaming platform, text overlaying media player for subtitles, browser-based 3D scene renderer, and volumetric data visualizer [S4]. Layer thickness is evaluated alongside light reflection and transmission properties to optimize image quality, though the exact value is not specified [S4].
+
+## Background
+Holographic display methods for volume data have evolved to support cinematic volume rendering on light field displays [S1, unofficial]. Modern implementations integrate visualization toolkits like VTK to generate quilt images and movies for holographic screens, enabling photo-realistic rendering of volumetric data such as CT scans for medical computing [S1, unofficial]. Early volumetric display concepts included varifocal mirror systems for stereotactic neurosurgery planning, which used vibrating mirrors to stack tomographic images into a virtual 3D image [S2, unofficial]. Free-space volumetric displays have also been explored using drones, trapped particles, and laser-excited bubbles to create images without physical screens [S3, unofficial]. Additionally, static stacked-plane systems like SliceView extend traditional optical illusions for direct manipulation of 3D content [S4].
+
+## Sources
+[S1] Holograms with VTK: Cinematic Volume Rendering and Python ... - Kitware, https://www.kitware.com/lookingglassvtkmodule-v1-0/, fetched 2026-10-27 (unofficial)
+[S2] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+[S3] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/29_27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)
+[S4] Volumetric Reach-through Displays for Direct Manipulation of 3D Content, https://doi.org/10.1145/3380867.3427410, fetched 2026-10-26

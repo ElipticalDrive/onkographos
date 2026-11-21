@@ -1,0 +1,150 @@
+--- v002.md
++++ v003.md
+@@ -61,5 +61,5 @@
+ 
+ **SPH Kernel Functions:**
+-*   The exact mathematical expressions for the kernel functions are Not given in the sources.
++*   The exact mathematical expressions for the kernel functions are Not given in the sources [S1].
+ *   The cubic spline kernel is smoother but has twice the support width of the Epanechnikov kernel, requiring more particle accesses [S1].
+ 
+@@ -87,69 +87,82 @@
+ 
+ ```python
+-def render_sph_volume(ray_origin, ray_dir, grid, particles, random_table, 
+-                      num_steps, kernel_type, max_samples_per_cell, 
+-                      workgroup_id, local_id, transfer_func):
+-    # Initialize accumulation variables [G]
++import math
++
++def evaluate_kernel(r, h, kernel_type):
++    # Exact kernel formulas not given in sources [G]
++    if r >= h:
++        return 0.0
++    if kernel_type == "cubic_spline":
++        # Standard cubic spline kernel approximation [G]
++        q = r / h
++        return (1.0 - 6.0 * q**2 + 6.0 * q**3) if q < 1.0 else 0.0
++    else: # Epanechnikov
++        q = r / h
++        return 0.75 * (1.0 - q**2)
++
++def render_sph_volume(ray_origin, ray_dir, grid, particles, random_table,
++                      num_steps, kernel_type, max_samples_per_cell,
++                      workgroup_id, local_id, transfer_func, light_sources,
++                      enable_single_scattering):
+     color = [0.0, 0.0, 0.0]
+     alpha = 0.0
+     t = 0.0
+-    
+-    # Ray marching loop [G]
++    step_length = 1.0 / num_steps  # Assumes ray length normalized to 1 [G]
++    previous_phase = -1
++
+     for step in range(num_steps):
+-        # 1. Determine sampling position [S1]
+-        x = ray_origin + t * ray_dir
+-        
+-        # 2. Identify relevant grid cell [S1]
++        x = ray_origin[0] + t * ray_dir[0], ray_origin[1] + t * ray_dir[1], ray_origin[2] + t * ray_dir[2]
+         cell_idx = grid.query_cell(x)
+         cell_particles = grid.cells[cell_idx].particle_block
+-        
+-        # 3. Stochastic particle sampling [S1]
++
+         if len(cell_particles) == 0:
++            t += step_length
+             continue
+-            
+-        # Use precomputed random table with work-group offset for coalesced access [S1]
++
+         base_offset = random_table[workgroup_id]
+         offset = base_offset + local_id
+         sample_idx = offset % len(cell_particles)
+-        
+-        # Select contiguous block of particles [S1]
+         k = min(max_samples_per_cell, len(cell_particles))
+-        subset = cell_particles[sample_idx : sample_idx + k]
+-        
+-        # 4. SPH evaluation [S1]
++        end_idx = min(sample_idx + k, len(cell_particles))
++        subset = cell_particles[sample_idx:end_idx]
++
+         density = 0.0
+         phase_id = -1
+         gradient = [0.0, 0.0, 0.0]
+-        
++
+         for p in subset:
+-            r = distance(x, p.position)
++            dx = x[0] - p.position[0]
++            dy = x[1] - p.position[1]
++            dz = x[2] - p.position[2]
++            r = math.sqrt(dx*dx + dy*dy + dz*dz)
+             w = evaluate_kernel(r, p.h, kernel_type)
+-            density += p.mass * w / p.density
++            density += p.mass * w
+             if phase_id == -1 or p.phase_id == phase_id:
+                 phase_id = p.phase_id
+-            gradient += p.mass * w * (x - p.position) / p.density
+-            
+-        # 5. Shading [S1]
+-        # Check for phase transition or homogeneous segment [S1]
+-        if is_phase_transition(phase_id, previous_phase):
++            gradient[0] += p.mass * w * dx
++            gradient[1] += p.mass * w * dy
++            gradient[2] += p.mass * w * dz
++
++        if phase_id != previous_phase:
+             # Surface shading with Blinn-Phong BRDF [S1]
+-            shading = compute_surface_shading(x, gradient, light_sources)
++            shading = compute_surface_shading(x, gradient, light_sources) [G]
+         else:
+             # Volumetric shading with pre-integrated transfer functions [S1]
+-            optical_depth = compute_optical_depth(density, step_length)
+-            shading = lookup_preintegrated_transfer(optical_depth, transfer_func)
+-            
+-        # Optional stochastic single scattering [S1]
++            optical_depth = compute_optical_depth(density, step_length) [G]
++            shading = lookup_preintegrated_transfer(optical_depth, transfer_func) [G]
++
+         if enable_single_scattering:
+-            shading += compute_single_scattering(x, ray_dir, subset)
+-            
+-        # 6. Accumulation [G]
+-        color += shading * alpha * (1.0 - alpha)
++            shading += compute_single_scattering(x, ray_dir, subset) [G]
++
++        color[0] += shading.color[0] * shading.alpha * (1.0 - alpha)
++        color[1] += shading.color[1] * shading.alpha * (1.0 - alpha)
++        color[2] += shading.color[2] * shading.alpha * (1.0 - alpha)
+         alpha += (1.0 - alpha) * shading.alpha
+         t += step_length
+-        
++        previous_phase = phase_id
++
+         if alpha >= 1.0:
+             break
+-            
++
+     return color
+ ```
+@@ -157,15 +170,15 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity**: Depends on the number of particles sampled per step. By sampling a subset, it reduces the complexity from $O(N)$ per step to $O(k)$ where $k \ll N$. The overall complexity is $O(R \cdot S \cdot k)$ where $R$ is the number of rays, $S$ is the number of steps per ray, and $k$ is the number of sampled particles per step [S1].
+-*   **Memory Complexity**: $O(N)$ for storing particles and the grid. The grid adds minimal overhead as it only stores references [S1].
++*   **Time Complexity**: Depends on the number of particles sampled per step [S1]. By sampling a subset, it reduces the complexity from $O(N)$ per step to $O(k)$ where $k \ll N$ [S1]. The overall complexity is $O(R \cdot S \cdot k)$ where $R$ is the number of rays, $S$ is the number of steps per ray, and $k$ is the number of sampled particles per step [S1].
++*   **Memory Complexity**: $O(N)$ for storing particles and the grid [S1]. The grid adds minimal overhead as it only stores references [S1].
+ *   **Performance**: Scales continuously from fast, interactive previews to high-quality rendering by adjusting the number of sampled particles [S1].
+ *   **Strengths**: Minimal preprocessing, no intermediate grid representation, handles large datasets, supports multi-phase flows, efficient GPU implementation with coalesced memory access [S1].
+ *   **Limitations**: Stochastic sampling introduces noise; requires careful tuning of the importance measure and number of samples for quality [S1]. Pre-integration is limited to homogeneous segments [S1].
+-*   **When to Use**: Large SPH datasets where preprocessing time and memory are constraints, and interactive or semi-interactive visualization is desired. Particularly suitable for multi-phase flows [S1].
++*   **When to Use**: Large SPH datasets where preprocessing time and memory are constraints, and interactive or semi-interactive visualization is desired [S1]. Particularly suitable for multi-phase flows [S1].
+ 
+ ## Background
+ 
+ *   **Origin**: The method was introduced in the paper "Stochastic Volume Rendering of Multi-Phase SPH Data" [S1].
+-*   **History**: It builds on previous work in SPH visualization and stochastic rendering. It addresses the computational complexity of rendering large, unstructured particle data by avoiding intermediate representations and using importance sampling [S1].
++*   **History**: It builds on previous work in SPH visualization and stochastic rendering [S1]. It addresses the computational complexity of rendering large, unstructured particle data by avoiding intermediate representations and using importance sampling [S1].
+ *   **Usage**: Used in scientific visualization for fluid dynamics, particularly for multi-phase flows like gas-liquid interactions [S1].
+ 

@@ -1,0 +1,135 @@
+Pixal3D: a fork of trellis.cpp (GGML C++ TRELLIS.2) adding the multiview, camera-aware Pixal3D backbone and a WebGPU/WASM browser target - perf(postprocess): parallel CPU QEM decimation with CSR edge extraction (Metal: 128.7 s -> 7.1 s) by raven38 · Pull Request #46 · raven38/pixal3d.cpp
+
+perf(postprocess): parallel CPU QEM decimation with CSR edge extraction (Metal: 128.7 s -> 7.1 s) by raven38 · Pull Request #46 · raven38/pixal3d.cpp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+raven38
+commented
+Sep 20, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #29 (sub-issue of #28).
+Summary
+The CPU decimate_qem path — the only one on Metal builds, and the run-time fallback for CUDA/HIP/Vulkan — was single-threaded and rebuilt a 27M-entry unordered_map of edges every round. On the cyclops MV 1024 mesh (18.37M → 1M faces) that was 128.7 s (E2E [post] lap: ~118 s), of which cost 62 s / edge hash map 29 s (+11 s freeing it) / propagate 18 s.
+This PR keeps the algorithm (quadrics, cost, independent-set collapse, threshold ladder, λ) and every float accumulation order unchanged, and:
+extracts unique edges per vertex from the v→f CSR (local insertion sort + RLE) so edge ids come out in (a,b) order — the same order the CUDA port gets from cub sort + RLE; boundary flags fall out of the run counts;
+runs qem / cost / propagate / collapse with parallel_for (std::thread; serial under Emscripten). propagate min-reduces the packed (cost,id) key with an atomic CAS (plain array on Emscripten); collapse writes are disjoint per winner by the independent-set ownership rule;
+splits decimate_qem into the GPU dispatch and decimate_qem_cpu (exposed for tests), with a shared entry check that drops out-of-range / degenerate faces;
+moves remesh_dc.cpp's parallel_for into include/parallel_for.h and shares it;
+adds trellis-test-decimate-cpu (regression), trellis-test-decimate-bench (--legacy / compare / dist) and post-replay --decimated for A/B GLBs.
+Results (M4 Max, Metal build, idle machine — docs/results/2026-09-20-qem-decimate-cpu-perf.md)
+before (main)
+this PR
+decimate_qem, 18.37M → 1M faces (bench)
+128.7 s
+7.07 s (median of 3)
+peak RSS (bench process)
+3.90 GB
+3.26 GB
+E2E load + postprocess (done in − stage sum)
+191.1 s
+73.3 s
+output V / F
+478,776 / 961,394
+478,472 / 960,784
+Correctness:
+Output is bit-identical to the previous implementation with its edge ids sorted (src/test_decimate_qem_legacy.inc), over all 45 rounds of the real fixture and in trellis-test-decimate-cpu (closed/open torus, degenerate / non-manifold / high-degree / duplicate-face inputs, pass-through, thread counts 1/2/3/8/16 × 3 runs; TSAN clean; em++ -c compiles).
+Versus the old hash-order ids only tie-breaks on flat regions differ: two-sided sampled surface distance mean 3e-6 (p99 6e-5), an order of magnitude below the decimation error itself (mean 2.6e-5, identical to 3 digits for both); silhouette IoU ≥ 0.9999 in five fixed views (docs/results/2026-09-20-qem-decimate-ab-grid.jpg).
+Design / reviews: docs/design/2026-09-20-qem-decimate-cpu-perf.md (with both codex review-response tables), docs/reviews/2026-09-20_qem-decimate-cpu-perf_review.md, docs/reviews/2026-09-20_qem-decimate-cpu-perf_impl_review.md.
+Not in this PR
+decimate_qem_vk.cpp still builds its edge list with the same host-side unordered_map (Vulkan-only builds); candidate follow-up issue.
+CUDA/HIP builds were not exercised here (no GPU on this machine); the CPU fallback path is what trellis-test-decimate-cpu pins on any build.
+WASM: compile check only (em++ -c), no full web/ss link.
+Generated with Claude Code
+perf(postprocess): parallel CPU QEM decimation with CSR edge extracti…
+…
+858c4f3
+```
+…on (#29)
+```
+raven38
+force-pushed
+the
+perf/qem-decimate
+branch
+from
+05190d6 to
+858c4f3
+Compare
+September 20, 2026 04:42
+Hide details
+View details
+raven38
+merged commit f147aa2
+into
+main
+Sep 20, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+raven38
+deleted the
+perf/qem-decimate
+branch
+September 20, 2026 04:54
+raven38
+mentioned this pull request
+Sep 20, 2026
+perf: multi-thread the mesh postprocess and drop its per-edge hash tables
+#27
+Merged
+raven38
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+fix(postprocess): use shared parallel_for after #46
+db72971
+raven38
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+perf: multi-thread the mesh postprocess and drop its per-edge hash ta…
+…
+c89126d
+```
+…bles (#27)
+
+* perf(postprocess): rebase parallel mesh tail onto current main
+
+* fix(postprocess): use shared parallel_for after #46
+
+* fix(postprocess): keep two WebP encodes actually parallel
+
+* fix(postprocess): parallelize small BVH task fanout
+```
+raven38
+mentioned this pull request
+Sep 20, 2026
+docs: v0.10.1-desktop-alpha — Windows + WSL2 verification of the published assets
+#57
+Merged
+raven38
+added a commit
+that referenced
+this pull request
+Sep 23, 2026
+fix(postprocess): use shared parallel_for after #46
+25bbeb4
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

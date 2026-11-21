@@ -1,0 +1,244 @@
+--- v001.md
++++ v002.md
+@@ -4,144 +4,129 @@
+ 
+ ## Overview
+-Parallel Cell Projection is a distributed-memory and shared-memory strategy for object-order volume rendering that decomposes the cell projection pipeline into parallelizable stages: object-space polygon generation and image-space ray merging/composition [S1, S3, S4, unofficial]. It solves the scalability problem of rendering large unstructured grids by allowing multiple processors or threads to compute projected polygons and merge ray segments concurrently [S3, S4, unofficial]. It sets itself apart from synchronous communication strategies by decoupling sending and receiving tasks to hide data transfer overheads, and from concurrent scan-conversion/composition approaches by separating the projection and global composition phases to reduce asynchronous communication frequency [S1, S3, S4, unofficial].
++Parallel Cell Projection is a distributed-memory strategy for volume rendering that parallelizes the object-order cell projection method [S1, S3, S4, unofficial]. It solves the scalability problem of rendering large unstructured grids by decomposing the workload across multiple processors, allowing rendering time to remain constant as dataset size increases with additional nodes [S2][S4, unofficial]. It sets itself apart from synchronous cell projection by decoupling sending and receiving tasks to hide communication overheads, and from concurrent scan-conversion/composition methods by separating the projection and composition phases to avoid frequent asynchronous interprocessor communication [S1, S4, unofficial].
+ 
+ ## How it works
+-The method operates in two primary phases: object-space projection and image-space composition. It can be implemented on shared-memory multiprocessors (using threads) or distributed-memory clusters (using MPI).
++The method operates in two distinct phases: object-space projection and image-space composition [S4, unofficial]. It assumes the scalar field varies linearly across cells and uses pre-integration for opacity to avoid derivative discontinuities, as described in the parent article [Cell projection](26-cell-projection.md).
+ 
+-### Inputs and Outputs
+-*   **Input:** A 3D unstructured grid (e.g., tetrahedral or general cell topology) and a camera viewpoint.
+-*   **Output:** A 2D rendered image (color and opacity per pixel).
++**Inputs:**
++- Unstructured grid dataset (cells, vertices, scalar values).
++- Camera parameters (viewpoint, projection type).
++- Transfer function (scalar to color/opacity).
++- Number of processors $P$ (or working nodes $N$).
+ 
+-### Data Structures
+-*   **Vertex Array:** Stores projected polygonal information. Each vertex contains transformed coordinates, normal, and lighting values [S2, S5].
+-*   **Ray-Segment List:** For each pixel (or region), a list of depth-sorted segments. Each segment contains interpolated vertex color, opacity, and depth value [S1, S4, unofficial].
+-*   **Communication Buffers:** Output buffers storing ray segments to be sent to other nodes. The buffer depth is configurable (e.g., 25 or 200 segments) [S3, unofficial].
++**Outputs:**
++- Final composite image.
+ 
+-### Steps
++**Data Structures:**
++- **Ray-Segment List:** A list of depth-sorted ray segments for a pixel or region. Each segment contains start/end depth, average differential opacity $\kappa_{avg}$, and color $C$.
++- **Vertex Array:** Stores projected polygon vertices, normals, colors, and opacities for OpenGL rendering [S2, S5].
++- **Partition Map:** Defines the spatial region assigned to each processor [S3, S4, unofficial].
+ 
+-1.  **Object-Space Partitioning and Projection (Pass 1):**
+-    *   Partition the object space (volume) among processors or threads [S1, S3, unofficial].
+-    *   Each processor/thread computes per-vertex calculations: point/normal transformation and lighting [S1, unofficial].
+-    *   Shared vertices are processed only once to avoid redundancy [S1, unofficial].
+-    *   Each cell is projected into 2D polygons. For tetrahedral cells, this often uses the Shirley-Tuchman projection [S2, S5].
+-    *   Polygons are loaded into vertex arrays [S2, S5].
+-    *   *Note:* In some implementations, faces are sorted back-to-front within the local node, using face centroids as a sorting criterion, though this may lead to incorrect sorting if not handled carefully [S1, unofficial].
++**Steps:**
+ 
+-2.  **Parallel Composition (Pass 2):**
+-    *   The screen is partitioned among processors. Each processor is assigned a region of the screen [S4, unofficial].
+-    *   **Gather:** Each node gathers ray-segment lists from other nodes corresponding to the pixels in its assigned region [S4, unofficial].
+-    *   **Merge:** Ray segments are merged into a single depth-sorted list for each pixel [S4, unofficial].
+-    *   **Composite:** Pixel values are calculated by compositing the depth-sorted ray segments from front to back using Porter-Duff's "over" operation (alpha blending) [S4, unofficial].
+-    *   **Final Output:** Each node sends its rendered image region to a control node for final assembly and display [S4, unofficial].
++1.  **Partitioning:** The volume or image space is partitioned into regions assigned to processors. Static load balancing is typically used, though dynamic work-stealing can handle view-dependent imbalances [S3, S4, unofficial].
++2.  **Phase 1: Parallel Projection (Object Space):**
++    - Each processor computes the projection of its assigned cells [S4, unofficial].
++    - Per-vertex calculations (transformation, lighting) are performed [S1, unofficial].
++    - Polygons are scan-converted into ray segments [S3, unofficial].
++    - **Partial Composition:** To reduce data transfer, processors perform local front-to-back alpha blending of ray segments within their assigned region before sending data [S4, unofficial]. This reduces the size of ray-segment lists exchanged in Phase 2.
++    - Processors send their partially composed ray-segment lists to other processors as needed for global composition [S3, S4, unofficial].
++    - **Asynchronous Communication:** If sending is blocked due to full buffers, the processor switches to receiving or merging tasks to hide latency [S3, unofficial].
++3.  **Phase 2: Parallel Composition (Image Space):**
++    - The screen is divided into regions, each assigned to a processor [S4, unofficial].
++    - Each processor gathers ray-segment lists from all other nodes corresponding to its assigned screen region [S4, unofficial].
++    - **Merging:** Ray segments from different nodes are merged into a single depth-sorted list [S4, unofficial].
++    - **Compositing:** The final pixel color is calculated by compositing the sorted segments from front to back using Porter-Duff’s over operation [S4, unofficial].
++    - **Global Output:** Each processor sends its rendered image region to a control node for final output [S4, unofficial].
+ 
+-### Communication and Synchronization
+-*   **Asynchronous Communication:** To mitigate communication overhead, the system uses asynchronous task management. Processors proceed independently, multiplexing object-space cell computations with image-space ray merging [S1, unofficial].
+-*   **Feedback Mechanism:** If sending is blocked due to full buffers, the processor switches to the ray merging task and begins receiving, regardless of the polling interval [S3, unofficial].
+-*   **Polling:** Processors check for incoming messages at a configurable frequency (e.g., after each cell scan conversion or every 4 cells) [S3, unofficial].
+-*   **Buffer Tuning:** Larger buffers and longer polling intervals reduce sending/receiving/polling overhead but increase idle time (`send_wait`, `recv_wait`, `sync_wait`) because idle processors wait longer for new work [S3, unofficial].
++**Pseudocode:**
+ 
+-### Pseudocode
+ ```python
+-# Shared Memory / Thread-based Implementation (SGI Onyx2 style)
+-# Note: This is a simplified representation of the multi-threaded approach.
++# Phase 1: Projection and Partial Composition
++def parallel_projection_phase(grid, camera, partition_map):
++    # Each processor P_i handles cells in its partition
++    assigned_cells = get_cells_in_partition(grid, partition_map[my_id])
++    
++    # Compute projected polygons and ray segments
++    local_ray_segments = []
++    for cell in assigned_cells:
++        # Project cell vertices and compute ray segments intersecting the cell
++        segments = project_cell(cell, camera)
++        
++        # Partial composition: sort and blend locally if possible
++        # This reduces the number of segments to send later
++        blended_segments = partial_composite(segments)
++        local_ray_segments.extend(blended_segments)
++        
++        # Asynchronous send: send segments to nodes responsible for the screen regions
++        # covered by these segments
++        for segment in local_ray_segments:
++            target_node = get_target_node_for_segment(segment, partition_map)
++            if buffer_full(target_node):
++                # Switch to receiving/merging to hide latency [S3, unofficial]
++                receive_and_merge(target_node)
++            else:
++                send_segments(target_node, segment)
+ 
+-def parallel_cell_projection_shmem(cells, camera):
+-    # 1. Object Space Projection (Parallel)
+-    vertex_arrays = []
+-    num_threads = get_num_threads()
++# Phase 2: Global Composition
++def parallel_composition_phase(screen_partition_map):
++    # Each processor handles a region of the screen
++    assigned_screen_region = get_screen_region(screen_partition_map[my_id])
+     
+-    # Partition cells among threads
+-    cell_partitions = partition_cells(cells, num_threads)
++    # Gather ray segments from all nodes for the assigned screen region
++    global_ray_segments = []
++    for node_id in all_nodes:
++        if node_id == my_id:
++            global_ray_segments.extend(local_ray_segments)
++        else:
++            received_segments = receive_segments(node_id, assigned_screen_region)
++            global_ray_segments.extend(received_segments)
++            
++    # Merge and sort all segments by depth
++    sorted_segments = depth_sort(global_ray_segments)
+     
+-    # Parallel region for projection
+-    for thread_id in range(num_threads):
+-        local_vertices = []
+-        for cell in cell_partitions[thread_id]:
+-            # Project cell to 2D polygons
+-            polygons = project_cell(cell, camera)
+-            # Compute per-vertex lighting and transformation
+-            for poly in polygons:
+-                for vertex in poly.vertices:
+-                    transformed_v = transform(vertex, camera)
+-                    lit_v = light(transformed_v, cell.material)
+-                    local_vertices.append(lit_v)
+-        vertex_arrays.append(local_vertices)
++    # Final compositing
++    pixel_color = clear_color()
++    for segment in sorted_segments:
++        # Alpha blending using Porter-Duff over operation
++        pixel_color = alpha_blend(pixel_color, segment.color, segment.opacity)
+         
+-    # 2. Sorting (Single Thread)
+-    # Sort all faces back-to-front based on depth
+-    sorted_faces = sort_faces_back_to_front(vertex_arrays)
+-    
+-    # 3. OpenGL Rendering (Single Thread)
+-    # Make OpenGL calls on full vertex arrays
+-    render_opengl(sorted_faces)
++    return pixel_color
+ 
+-# Distributed Memory / Cluster Implementation (SDVR style)
+-def parallel_cell_projection_distributed(cells, camera, rank, num_nodes):
+-    # 1. Object Space Projection (Local)
+-    # Each node projects its assigned cells
+-    local_ray_segments = []
+-    for cell in cells:
+-        polygons = project_cell(cell, camera)
+-        # Scan-convert polygons to ray segments
+-        segments = scan_convert(polygons)
+-        local_ray_segments.extend(segments)
+-        
+-    # 2. Communication (Asynchronous)
+-    # Send ray segments to nodes responsible for the corresponding screen regions
+-    # Use feedback mechanism: if send blocked, switch to merge/receive
+-    for segment in local_ray_segments:
+-        dest_node = get_dest_node(segment.screen_coords)
+-        send_async(segment, dest_node)
+-        
+-    # 3. Image Space Composition (Parallel)
+-    # Each node handles a region of the screen
+-    screen_region = partition_screen(rank, num_nodes)
+-    
+-    for pixel in screen_region:
+-        # Gather ray segments from other nodes
+-        incoming_segments = gather_segments(pixel)
+-        
+-        # Merge and sort
+-        merged_segments = merge_and_sort(incoming_segments)
+-        
+-        # Composite using Porter-Duff over
+-        color = composite_front_to_back(merged_segments)
+-        set_pixel_color(pixel, color)
+-        
+-    # 4. Final Output
+-    send_image_region_to_control_node()
++# Final Output
++def output_image():
++    # Send rendered region to control node
++    send_image_to_control_node(rendered_region)
+ ```
+ 
+-### Parameters
+-*   **Buffer Depth:** Number of ray segments stored in output buffers before sending. Typical values: 25 and 200 segments [S3, unofficial].
+-*   **Polling Frequency:** Interval at which processors check for incoming messages. Typical values: after each cell scan conversion or after every 4 cells [S3, unofficial].
+-*   **Partitioner Aspect Ratio:** Configuring the partitioner to produce regions with high aspect ratios to reduce congestion [S3, unofficial].
+-*   **Minimum Region Size:** Parameters to prevent regions from falling below a certain size to avoid message traffic congestion [S3, unofficial].
++**Parameters:**
++- **Buffer Depth:** Number of ray segments stored in output buffers before sending. Typical values: 25 and 200 segments [S3, unofficial].
++- **Polling Frequency:** Interval for checking incoming messages. Typical values: after each cell scan conversion or after every 4 cells [S3, unofficial].
++- **System Architecture:** $N$ working nodes (WNs) for computation, one control node (CN) for management and final output [S4, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Incorrect Sorting:** Using only centroids of each face as a sorting criterion may lead to incorrect sorting [S1, unofficial].
+-*   **Message Congestion:** Spatial partitioners may generate regions with very small projected areas, causing all message traffic to bombard a few nodes, backing up output buffers and leaving most nodes idle [S3, unofficial].
+-*   **Idle Time:** Larger buffers and longer polling intervals increase idle time (`send_wait`, `recv_wait`, `sync_wait`) [S3, unofficial].
+-*   **Hot Spots:** High cell density regions map to few scanlines, causing load imbalance in image-space operations [S3, unofficial].
++**Pitfalls:**
++- **Incorrect Sorting:** Using only face centroids for sorting can lead to incorrect back-to-front ordering [S1, unofficial].
++- **Message Congestion:** Spatial partitioners may create regions with small projected areas, causing message traffic to bombard a few nodes, backing up buffers and leaving other nodes idle [S3, unofficial].
++- **Idle Time:** Larger buffers and longer polling intervals reduce communication overhead but increase idle time ($send\_wait$, $recv\_wait$) because processors wait longer for new work [S3, unofficial].
++- **Communication Overhead:** Speed-up levels out due to communication costs, not computation [S2, S5][S6, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Asynchronous Communication Task Management](3656-asynchronous-communication-task-management.md)
+-Asynchronous Communication Task Management is a strategy for managing inter-processor communication costs in parallel volume rendering by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering. It sets itself apart from synchronous strategies by decoupling sending and receiving tasks, thereby hiding data transfer overheads and spreading the communication load over time.
++A strategy to manage communication costs by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering. It sets itself apart from synchronous cell projection by decoupling sending and receiving tasks, thereby hiding data transfer overheads and spreading the communication load over time.
+ 
+ ### Dynamic Load Balancing
+-Dynamic Load Balancing is a distributed work-stealing scheme used to handle load imbalance caused by initial data distribution, view dependency of scan conversion time, and run-time dynamic behavior of Early Ray Termination (ERT) [S4, unofficial]. It differs from preprocessing-based static load balancing (which cannot handle dynamic ERT behavior) and self-scheduling based schemes (which do not work well for non-shared memory systems like PC clusters) [S4, unofficial].
++A distributed work-stealing scheme used to handle load imbalance caused by initial data distribution, view dependency of scan conversion time, and run-time dynamic behavior of Early Ray Termination (ERT) [S4, unofficial]. It differs from preprocessing-based static load balancing (which cannot handle dynamic ERT behavior) and self-scheduling based schemes (which do not work well for non-shared memory systems like PC clusters) [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The object-space projection phase scales with the number of cells and processors. The image-space composition phase scales with the number of pixels and processors. Communication overhead increases with the number of processors and data size [S3, S4, unofficial].
+-*   **Memory Complexity:** Memory usage is proportional to the number of ray segments stored on each processor. With 64 regions, the maximum number of unmerged ray segments stored on any processor is at most 15-20% of the total number received [S3, unofficial].
+-*   **Measured Performance:** On a 128-processor Intel Paragon (66.7 MHz POWER2 chipset, 34 MB/s node-to-node bandwidth), the method achieved a speedup of 90 and a parallel efficiency of 70%, with a rendering time of 2 frames per second (excluding display) [S3, unofficial]. On a 64-processor SGI Onyx2, speed-up for tetrahedral cells with Shirley-Tuchman projection leveled out after about 5 projection threads, while for general grids, it leveled out after 18 projection threads, attributed to communications overhead [S2, S5][S6, unofficial].
+-*   **Strengths:** Scalability to large node counts (16-1000+ nodes) [S2][S4, unofficial]. Ability to run with or without graphics hardware [S2]. Effective reduction of communication overhead through asynchronous task management and buffer tuning [S3, unofficial].
+-*   **Limitations:** Performance levels out due to communication overhead [S2, S5][S6, unofficial]. Load imbalance can occur due to hot spots in the volume data [S3, unofficial]. Static load balancing may not handle dynamic ERT behavior [S4, unofficial].
+-*   **When to Use:** Large unstructured grid datasets on distributed-memory clusters or shared-memory multiprocessors where scalability is critical.
+-*   **When Not to Use:** Small datasets where communication overhead dominates computation. Systems with high-latency or low-bandwidth interconnects.
++- **Time Complexity:** The projection phase is parallelized across cells, and the composition phase is parallelized across screen regions. The complexity depends on the number of cells, screen resolution, and communication overhead [S3, S4, unofficial].
++- **Memory Complexity:** Memory usage is proportional to the number of unmerged ray segments stored on each processor. With 64 regions, the maximum number of unmerged ray segments on any processor is at most 15-20% of the total number received [S3, unofficial].
++- **Measured Performance:** On a 128-processor Intel Paragon (66.7 MHz POWER2 chipset, 34 MB/s node-to-node bandwidth), the method achieved a speedup of 90 and parallel efficiency of 70%, with a rendering time of 2 frames per second (excluding display) [S3, unofficial]. On a 64-processor SGI Onyx2, speed-up leveled out after 5 threads for tetrahedral cells and 18 threads for general grids, attributed to communication overhead [S2, S5][S6, unofficial].
++- **Scaling:** The method is designed for scalability, where rendering time remains constant as dataset size increases with additional nodes [S2][S4, unofficial]. However, efficiency degrades with load imbalance and communication overhead [S3, unofficial][S5].
++- **Strengths:** High performance on distributed-memory architectures, scalability for large datasets, and reduced communication overhead through partial composition and asynchronous task management [S3, S4, unofficial].
++- **Limitations:** Performance is limited by communication overhead and load imbalance. Static load balancing may not handle dynamic view-dependent workloads effectively without dynamic load balancing [S3, S4, unofficial]. Message congestion can occur with poor partitioning [S3, unofficial].
+ 
+ ## Background
+-Parallel Cell Projection was developed in the mid-1990s as an extension of cell projection methods to parallel architectures. Early implementations by Lucas [S1, unofficial] and Wilhelms et al. [S1, unofficial] explored software-based parallel projection. The Scalable Distributed Volume Rendering (SDVR) System [S2][S4, unofficial] targeted large PC clusters, using MPI and OpenGL. The method has been used in research for rendering complex unstructured grids, such as flowfields around aircraft wings [S3, unofficial].
++Parallel Cell Projection was developed as an extension of the cell projection method to distributed-memory systems. Early implementations by Lucas [Lucas92] and Wilhelms et al. [Wilhelms96] explored parallelization strategies [S1, unofficial]. The Scalable Distributed Volume Rendering (SDVR) System [15] targeted large PC clusters, using MPI and OpenGL [S2][S4, unofficial]. The method has been implemented on various architectures, including SGI Onyx2 and Intel Paragon [S2][S3, unofficial][S5][S6, unofficial].
+ 
+ ## Sources

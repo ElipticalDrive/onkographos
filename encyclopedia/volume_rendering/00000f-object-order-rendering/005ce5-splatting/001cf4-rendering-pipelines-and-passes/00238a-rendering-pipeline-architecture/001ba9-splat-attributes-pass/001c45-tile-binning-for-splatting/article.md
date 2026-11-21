@@ -1,0 +1,141 @@
+# Tile Binning for Splatting
+
+Also called: Tile Binning, Tsplat tile binning
+
+## Overview
+Tile Binning for Splatting groups depth-sorted splats into per-tile buckets to improve cache locality during the compositing phase of Gaussian Splatting rendering [S1, unofficial]. It solves the problem of scattered memory access patterns by organizing splats into coarse depth bins (typically 16x16 pixel blocks) within each tile, serving as the foundational data structure for subsequent rasterization passes [S1, unofficial][S2]. It is distinguished from its siblings by its reliance on a count-then-scatter two-pass approach to organize splats by tile [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A list of projected splats, each with a bounding box in screen space and a depth value. The splats are sorted by depth prior to binning [S1, unofficial].
+- **Output:** A flattened array of splat indices (`bins.splat_indices`) ordered by tile, and an offset array (`bins.offsets`) indicating the start index of each tile's splats in the flattened array [S1, unofficial].
+
+**Data Structures:**
+- `bins.offsets`: An array of size $num\_tiles + 1$. `bins.offsets[i]` stores the starting index in `bins.splat_indices` for tile $i$. `bins.offsets[num_tiles]` stores the total number of splats [S1, unofficial].
+- `bins.cursor`: A temporary array of size $num\_tiles$, initialized as a copy of `bins.offsets[..num_tiles]`, used during the scatter pass to track the current write position for each tile [S1, unofficial].
+- `bins.splat_indices`: A pre-allocated buffer of size equal to the total number of splats, storing the indices of the splats, ordered by tile [S1, unofficial].
+
+**Parameters:**
+- `TILE_W`, `TILE_H`: Tile dimensions in pixels. Standard value is 16x16 [S1, unofficial][S2].
+- `width`, `height`: Render resolution in pixels [S1, unofficial].
+
+**Steps:**
+
+1. **Calculate Tile Grid:**
+   Compute the number of tiles in x and y directions:
+   $$num\_tiles\_x = \lceil width / TILE\_W \rceil$$
+   $$num\_tiles\_y = \lceil height / TILE\_H \rceil$$
+   $$num\_tiles = num\_tiles\_x \cdot num\_tiles\_y$$ [S1, unofficial].
+
+2. **Pass 1: Count Splat-Tile Intersections:**
+   Initialize `bins.offsets` of size $num\_tiles + 1$ to zero [S1, unofficial].
+   For each splat $p$ in the input list:
+   - Determine the tile range $[tx0, tx1] \times [ty0, ty1]$ covered by the splat's bounding box [S1, unofficial].
+   - For each tile $(tx, ty)$ in this range, calculate the linear tile index $t = ty \cdot num\_tiles\_x + tx$ [S1, unofficial].
+   - Increment a counter for tile $t$ (e.g., `counts[t] += 1`) [S1, unofficial].
+
+3. **Prefix Sum:**
+   Perform an exclusive prefix sum on the counts to determine start offsets [S1, unofficial].
+   For $i$ from 1 to $num\_tiles$:
+   $$bins.offsets[i] += bins.offsets[i-1]$$
+   After this step, `bins.offsets[i]` holds the start index for tile $i$ in the output array [S1, unofficial]. The total number of splats is `bins.offsets[num_tiles]` [S1, unofficial].
+
+4. **Initialize Cursors:**
+   Copy the start offsets to the cursor array:
+   $$bins.cursor[i] = bins.offsets[i] \quad \text{for } i \in [0, num\_tiles-1]$$ [S1, unofficial].
+
+5. **Pass 2: Scatter Splat Indices:**
+   For each splat index $idx$ and splat $p$:
+   - Determine the tile range $[tx0, tx1] \times [ty0, ty1]$ covered by the splat's bounding box [S1, unofficial].
+   - For each tile $(tx, ty)$ in this range, calculate the linear tile index $t = ty \cdot num\_tiles\_x + tx$ [S1, unofficial].
+   - Place the splat index $idx$ into the output array at the current cursor position for tile $t$:
+     $$bins.splat\_indices[bins.cursor[t]] = idx$$
+   - Increment the cursor for tile $t$:
+     $$bins.cursor[t] += 1$$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tile_bin_splats(splats, width, height, TILE_W=16, TILE_H=16):
+    num_tiles_x = (width + TILE_W - 1) // TILE_W
+    num_tiles_y = (height + TILE_H - 1) // TILE_H
+    num_tiles = num_tiles_x * num_tiles_y
+    
+    # Initialize offsets to zero
+    offsets = [0] * (num_tiles + 1)
+    cursors = [0] * num_tiles
+    
+    # Pass 1: Count
+    for splat in splats:
+        x_min, y_min, x_max, y_max = splat.bounding_box
+        tx0 = x_min // TILE_W
+        ty0 = y_min // TILE_H
+        tx1 = (x_max + TILE_W - 1) // TILE_W
+        ty1 = (y_max + TILE_H - 1) // TILE_H
+        
+        tx0 = max(0, min(tx0, num_tiles_x - 1))
+        ty0 = max(0, min(ty0, num_tiles_y - 1))
+        tx1 = max(0, min(tx1, num_tiles_x - 1))
+        ty1 = max(0, min(ty1, num_tiles_y - 1))
+        
+        for ty in range(ty0, ty1 + 1):
+            for tx in range(tx0, tx1 + 1):
+                t = ty * num_tiles_x + tx
+                offsets[t + 1] += 1  # Evidence uses t+1 or row+tx+1
+                
+    # Prefix Sum
+    for i in range(1, num_tiles + 1):
+        offsets[i] += offsets[i-1]
+        
+    # Initialize cursors
+    for i in range(num_tiles):
+        cursors[i] = offsets[i]
+        
+    # Pass 2: Scatter
+    splat_indices = [0] * offsets[num_tiles]
+    
+    for idx, splat in enumerate(splats):
+        x_min, y_min, x_max, y_max = splat.bounding_box
+        tx0 = max(0, min((x_min // TILE_W), num_tiles_x - 1))
+        ty0 = max(0, min((y_min // TILE_H), num_tiles_y - 1))
+        tx1 = max(0, min(((x_max + TILE_W - 1) // TILE_W), num_tiles_x - 1))
+        ty1 = max(0, min(((y_max + TILE_H - 1) // TILE_H), num_tiles_y - 1))
+        
+        for ty in range(ty0, ty1 + 1):
+            for tx in range(tx0, tx1 + 1):
+                t = ty * num_tiles_x + tx
+                pos = cursors[t]
+                splat_indices[pos] = idx
+                cursors[t] += 1
+                
+    return splat_indices, offsets
+```
+
+**Edge Cases and Pitfalls:**
+
+## Subtopics
+
+### [Tile-Local Bin Construction](10280-tile-local-bin-construction.md)
+Tile-Local Bin Construction assigns Gaussian-tile intersection entries to coarse depth bins within each tile and constructs a flattened tile-bin-major pair stream using direct atomic operations for count and scatter. It solves the problem of organizing splats for cache-efficient compositing by grouping them into depth-ordered buckets, serving as the foundational data structure for subsequent rasterization passes. It is distinguished from its siblings by its reliance on direct atomics for the count/scatter phase, which provides the default performance baseline on modern hardware.
+
+### Stable Tile ID Sorting
+Stable Tile ID Sorting groups depth-sorted fragments into per-tile lists using a stable radix sort on tile IDs, preserving the depth order within each tile [S2]. It computes a 16-bit tile ID for each fragment and uses it as the key for a 16-bit radix sort [S2]. After sorting, it computes the first and last indices for each tile by launching a kernel with one thread per fragment, updating the previous tile's `lastIndex` and the current tile's `firstIndex` when tile IDs differ [S2].
+
+### Splat Compaction
+Splat Compaction is a GPU compute shader that builds a compact list of visible splat indices to enable subsequent passes to only process visible splats [S3, unofficial]. It uses input buffers `SplatClusterIndexBuffer`, `ClusterVisibilityBitmap`, `LODClusterSelectedBitmap`, and `SelectedClusterBuffer` (all `StructuredBuffer<uint>`) and outputs `CompactedSplatIndices` (`RWStructuredBuffer<uint>`) and `VisibleSplatCount` (`RWStructuredBuffer<uint>`) [S3, unofficial]. Parameters include `TotalSplatCount`, `OriginalSplatCount`, `UseLODRendering`, and `THREADGROUP_SIZE` (256) [S3, unofficial].
+
+### Splat Reordering
+Splat Reordering is a technique to reduce reconstruction buffer bandwidth by storing splats in a pre-rasterization cache and rasterizing all splats for a specific tile consecutively as a batch [S4]. It maintains a list of splats for each reconstruction buffer tile, selects one tile at a time, and rasterizes all splats inside that tile as a batch, processing tiles in scan-line order [S4]. It uses a modified priority queue ordering criterion for cyclic processing: $i \prec j$ is defined as: false if $i < I_c \leq j$; true if $j < I_c \leq i$; $i < j$ otherwise, where $I_c$ is the currently processed tile index [S4]. The tile size is typically 8x8 pixels [S4]. A pitfall is that using N linked lists on-chip fails for large output resolutions because it cannot support more than N concurrent lists [S4]. Conventional heap insertion/removal requires O(log n) operations, but pipelined heap insertion and removal achieve constant throughput (two cycles in FPGA implementation), independent of heap size [S4].
+
+## Operating characteristics
+
+## Background
+Tile Binning for Splatting originated from the need to optimize Gaussian Splatting rendering on GPUs [S1, unofficial]. The specific application to Gaussian Splatting involves adapting these techniques to handle the unique properties of Gaussian primitives, such as their bounding boxes and depth sorting [S1, unofficial].
+
+## Sources
+[S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
+[S2] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31
+[S3] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)
+[S4] A hardware architecture for surface splatting, https://doi.org/10.1145/1275808.1276490, fetched 2026-10-28

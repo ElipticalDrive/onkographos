@@ -1,0 +1,281 @@
+--- v001.md
++++ v002.md
+@@ -3,215 +3,90 @@
+ 
+ ## Overview
+-Volumetric Primitives Radiance Field (VPRF) is a rendering integrator variant designed for rendering 3D Gaussian Splatting-like assets using volumetric primitives [S1, unofficial]. It shares the core structure of the Volumetric Primitives Path Tracer (VPPT) but is specifically optimized for radiance field optimization and rendering tasks [S1, unofficial]. Unlike VPPT, which targets general volumetric scattering media, VPRF simplifies the problem by considering only primary rays from the camera and accumulating emission based on spherical harmonics within segments [S2, unofficial].
++Volumetric Primitives Radiance Field (VPRF) is a differentiable volume rendering integrator designed to optimize and render 3D Gaussian Splatting-like assets using volumetric primitives [S1, unofficial]. It simplifies the radiance field rendering pipeline by considering only primary rays from the camera and accumulating emission based on spherical harmonics within segments [S2, unofficial]. VPRF is tailored for radiance field optimization tasks, whereas its sibling VPPT is designed for general volumetric scattering media [S1, unofficial].
+ 
+ ## How it works
+-VPRF renders scenes composed of 3D Gaussian kernels by treating them as volumetric primitives. It relies on the closed-form analytical integration of emission along ray segments intersecting these primitives, eliminating stochastic noise [S2, unofficial].
++VPRF builds on the shared principles of radiative and tomographic Gaussians [Radiative and Tomographic Gaussians](4971-radiative-and-tomographic-gaussians.md). It utilizes the same underlying primitive representation as VPPT but restricts the rendering scope to primary rays for efficient radiance field optimization [S1, unofficial][S2, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussian kernels $\mathcal{G}_3 = \{G_{3i}\}_{i=1}^M$ (position $\mathbf{p}_i$, rotation $\mathbf{R}_i$, scale $\mathbf{S}_i$, and view-independent scalar parameters such as density or radiative intensity) [S1, unofficial][S2, unofficial]. Camera parameters (position, orientation, intrinsics).
+-*   **Output:** Pixel intensities for the rendered image.
++*   **Inputs:** Camera parameters (intrinsics $K$, extrinsics $c2w$), a set of 3D Gaussian primitives (position, covariance, spherical harmonic coefficients), and training image colors.
++*   **Outputs:** Rendered pixel colors $\hat{C}(\mathbf{r})$ for the photometric loss calculation.
+ 
+ **Data Structures:**
+-The method uses the standard 3D Gaussian Splatting representation for the primitives [S1, unofficial]. Each kernel $G_{3i}$ is defined by:
+-*   Position $\mathbf{p}_i \in \mathbb{R}^3$
+-*   Rotation matrix $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$
+-*   Scale matrix $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$
+-*   Covariance $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [S1, unofficial]
+-*   View-independent scalar parameter (e.g., central density $\rho_i$ or radiative intensity $\alpha_i$) [S1, unofficial][S2, unofficial]
+-*   Spherical Harmonics (SH) coefficients for view-dependent color/emission [S2, unofficial]
++The method relies on the 3D Gaussian primitive representation. Each primitive is defined by:
++*   Mean position $\mathbf{\mu} \in \mathbb{R}^3$.
++*   Covariance matrix $\mathbf{\Sigma} \in \mathbb{R}^{3 \times 3}$ (often parameterized by a rotation matrix $\mathbf{R}$ and scaling vector $\mathbf{s}$).
++*   Spherical Harmonic (SH) coefficients representing view-dependent color.
+ 
+ **Steps:**
+-1.  **Ray Generation:** Generate primary rays from the camera for each pixel [S2, unofficial].
+-2.  **Intersection:** For each ray, determine intersections with the 3D Gaussian primitives. Since the primitives are defined by quadratic forms (Gaussians), intersections are found by solving for the roots of the quadratic equation defined by the ray and the Gaussian's covariance matrix [S2, unofficial].
+-3.  **Segmentation:** For each intersected primitive, calculate the entry and exit points along the ray to define the integration segment [S2, unofficial].
+-4.  **Analytical Integration:** Compute the accumulated emission and transmittance for each segment using closed-form solutions. This step leverages the mathematical definition of the Gaussian volume to integrate emission exactly, avoiding Monte Carlo noise [S2, unofficial].
+-    *   The emission is modulated by the Spherical Harmonics coefficients evaluated at the viewing direction [S2, unofficial].
+-5.  **Compositing:** Composite the results from all segments along the ray using alpha compositing to produce the final pixel color [S2, unofficial].
++1.  **Ray Generation:** For each pixel in the training images, generate a primary ray $\mathbf{r}$ originating from the camera center with direction $\mathbf{d}$ [S2, unofficial].
++2.  **Primitive Intersection:** Determine which Gaussian primitives intersect the ray $\mathbf{r}$. This involves solving for the intersection of the ray with the implicit surface defined by the Gaussian's covariance [S2, unofficial].
++3.  **Segmentation:** For each intersecting primitive, calculate the entry and exit points along the ray to define a segment [S2, unofficial]. The mathematical definition of the Gaussian allows for closed-form calculation of these segments, avoiding stochastic noise [S2, unofficial].
++4.  **Emission Accumulation:** Within each segment, accumulate the emission based on the spherical harmonics coefficients and the Gaussian density profile [S2, unofficial]. The transparency and density are computed analytically [S2, unofficial].
++5.  **Compositing:** Composite the contributions from all segments along the ray using standard volume rendering integration to produce the final pixel color $\hat{C}(\mathbf{r})$ [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_vprf(cameras, gaussians):
++def render_vprf(rays, primitives, camera_intrinsics, camera_extrinsics):
+     """
+-    Render a scene using Volumetric Primitives Radiance Field.
++    Render a batch of rays using Volumetric Primitives Radiance Field.
+     
+     Args:
+-        cameras: List of camera objects with position, orientation, and intrinsics.
+-        gaussians: List of Gaussian kernels, each with position, covariance, 
+-                   scalar intensity/density, and SH coefficients.
++        rays: Array of ray origins and directions.
++        primitives: List of 3D Gaussian primitives (mean, covariance, SH coefficients).
++        camera_intrinsics: Camera intrinsic matrix K.
++        camera_extrinsics: Camera extrinsic matrix c2w.
++        
++    Returns:
++        rendered_colors: Array of rendered pixel colors.
++    """
++    rendered_colors = []
+     
+-    Returns:
+-        Rendered image tensor.
+-    """
+-    image = zeros_like(camera.resolution)
+-    
+-    for camera in cameras:
+-        for y, x in pixel_coordinates(camera):
+-            ray = camera.generate_primary_ray(x, y)
++    for ray in rays:
++        # 1. Generate primary ray from camera parameters [S2, unofficial]
++        # ray_origin, ray_direction = compute_ray(ray.pixel_coords, camera_intrinsics, camera_extrinsics)
++        
++        # 2. Find intersecting primitives [S2, unofficial]
++        intersecting_primitives = []
++        for prim in primitives:
++            # Solve for intersection of ray with Gaussian implicit surface
++            # Returns segment [t_start, t_end] if intersection exists
++            segment = compute_gaussian_segment(ray, prim)
++            if segment is not None:
++                intersecting_primitives.append((prim, segment))
++        
++        # 3. Sort primitives by distance along the ray [S2, unofficial]
++        intersecting_primitives.sort(key=lambda x: x[1][0])
++        
++        # 4. Accumulate emission and transparency [S2, unofficial]
++        accumulated_color = [0.0, 0.0, 0.0]
++        accumulated_alpha = 0.0
++        transmittance = 1.0
++        
++        for prim, (t_start, t_end) in intersecting_primitives:
++            # Compute density and color for the segment using SH and Gaussian profile [S2, unofficial]
++            # density = compute_gaussian_density(ray, prim, t_start, t_end)
++            # color = compute_sh_color(prim.sh_coeffs, ray_direction)
+             
+-            # Find all intersecting Gaussians
+-            intersections = []
+-            for g in gaussians:
+-                # Solve quadratic equation for ray-Gaussian intersection
+-                # Returns entry and exit distances along the ray, or None if no intersection
+-                t_start, t_end = intersect_gaussian_ray(g, ray)
+-                if t_start is not None:
+-                    intersections.append((t_start, t_end, g))
++            # Accumulate contribution
++            # alpha = 1.0 - exp(-density * (t_end - t_start))
++            # accumulated_color += transmittance * alpha * color
++            # accumulated_alpha += transmittance * alpha
++            # transmittance *= (1.0 - alpha)
+             
+-            # Sort intersections by distance
+-            intersections.sort(key=lambda item: item[0])
+-            
+-            # Accumulate emission
+-            accumulated_color = vec3(0.0)
+-            accumulated_transmittance = 1.0
+-            
+-            for t_start, t_end, g in intersections:
+-                # Calculate segment length
+-                segment_length = t_end - t_start
+-                
+-                # Compute attenuation over the segment using closed-form Gaussian integral
+-                # This depends on the Gaussian's scalar parameter (density/intensity)
+-                # and the segment length.
+-                # Let A be the accumulated attenuation factor for this segment.
+-                # A = 1 - exp(-integral_of_density_along_segment)
+-                # The integral of a Gaussian along a line segment has a closed form
+-                # involving the error function (erf) or similar analytic expressions.
+-                attenuation = compute_gaussian_attenuation(g, ray, t_start, t_end)
+-                
+-                # Evaluate emission color using Spherical Harmonics
+-                # Direction is the ray direction
+-                emission_color = evaluate_sh(g.sh_coeffs, ray.direction)
+-                
+-                # Add contribution: emission * transmittance * (1 - transmittance_of_segment)
+-                # Note: The exact compositing formula depends on whether the scalar
+-                # represents opacity or density. Assuming density-based integration:
+-                segment_transmittance = 1.0 - attenuation
+-                
+-                accumulated_color += emission_color * accumulated_transmittance * attenuation
+-                accumulated_transmittance *= segment_transmittance
+-                
+-                # Early exit if fully opaque
+-                if accumulated_transmittance < 1e-6:
+-                    break
+-            
+-            image[y, x] = accumulated_color
+-            
+-    return image
+-
+-def intersect_gaussian_ray(gaussian, ray):
+-    """
+-    Intersect a ray with a 3D Gaussian defined by covariance Sigma.
+-    Returns (t_start, t_end) or (None, None).
+-    """
+-    # Transform ray into Gaussian's local coordinate system
+-    # Or solve the quadratic form directly: (ray_origin + t * ray_direction - p)^T * Sigma^-1 * (...) <= 1
+-    # This results in a quadratic equation: a*t^2 + b*t + c = 0
+-    # where a = ray_direction^T * Sigma^-1 * ray_direction
+-    #       b = 2 * (ray_origin - p)^T * Sigma^-1 * ray_direction
+-    #       c = (ray_origin - p)^T * Sigma^-1 * (ray_origin - p) - 1
+-    
+-    # Compute coefficients
+-    inv_sigma = inverse(gaussian.covariance)
+-    diff = ray.origin - gaussian.position
+-    
+-    a = dot(ray.direction, multiply(inv_sigma, ray.direction))
+-    b = 2 * dot(diff, multiply(inv_sigma, ray.direction))
+-    c = dot(diff, multiply(inv_sigma, diff)) - 1.0
+-    
+-    discriminant = b*b - 4*a*c
+-    
+-    if discriminant < 0:
+-        return None, None
+-    
+-    sqrt_disc = sqrt(discriminant)
+-    t1 = (-b - sqrt_disc) / (2*a)
+-    t2 = (-b + sqrt_disc) / (2*a)
+-    
+-    # Ensure t1 <= t2
+-    if t1 > t2:
+-        t1, t2 = t2, t1
++            pass # Placeholder for specific SH and density integration logic [G]
+         
+-    return t1, t2
+-
+-def compute_gaussian_attenuation(gaussian, ray, t_start, t_end):
+-    """
+-    Compute the attenuation (1 - transmittance) over a segment [t_start, t_end]
+-    for a Gaussian primitive. Uses closed-form integration of the Gaussian density.
+-    """
+-    # The integral of a 3D Gaussian along a line segment can be expressed
+-    # using the error function (erf).
+-    # Let the Gaussian be centered at p with covariance Sigma.
+-    # The density along the ray at distance t is proportional to exp(-0.5 * (ray(t)-p)^T * Sigma^-1 * (ray(t)-p)).
+-    # The integral of this density from t_start to t_end is:
+-    # Integral = C * [erf((t_end - t_center)/sigma_eff) - erf((t_start - t_center)/sigma_eff)]
+-    # where C and sigma_eff depend on the Gaussian's orientation and the ray direction.
+-    
+-    # Simplified representation:
+-    # 1. Project the Gaussian's covariance onto the ray direction to get an effective 1D variance.
+-    effective_variance = dot(ray.direction, multiply(gaussian.covariance, ray.direction))
+-    effective_sigma = sqrt(effective_variance)
+-    
+-    # 2. Find the closest point on the ray to the Gaussian center
+-    # t_center = dot(gaussian.position - ray.origin, ray.direction) / dot(ray.direction, ray.direction)
+-    # Assuming ray.direction is normalized:
+-    t_center = dot(gaussian.position - ray.origin, ray.direction)
+-    
+-    # 3. Compute the integral using erf
+-    # Note: The exact constant C depends on the peak density and normalization.
+-    # For rendering, we often care about the optical depth.
+-    # Optical Depth = Integral of density dt.
+-    
+-    # Using a simplified erf approximation for the sake of the algorithm description
+-    # In practice, use a robust erf implementation.
+-    arg1 = (t_end - t_center) / (sqrt(2) * effective_sigma)
+-    arg2 = (t_start - t_center) / (sqrt(2) * effective_sigma)
+-    
+-    integral_value = erf(arg1) - erf(arg2)
+-    
+-    # Scale by the Gaussian's peak density/intensity parameter
+-    # The peak density of a 3D Gaussian is (2*pi)^(-3/2) * det(Sigma)^(-1/2)
+-    # However, the scalar parameter stored in the Gaussian (rho or alpha)
+-    # typically encapsulates the normalization and intensity.
+-    peak_density = gaussian.scalar_parameter # e.g., rho_i or alpha_i
+-    
+-    # The attenuation is 1 - exp(-optical_depth)
+-    # Optical depth is proportional to peak_density * integral_value
+-    # The proportionality constant depends on the specific definition of the scalar parameter.
+-    # Assuming the scalar parameter is defined such that the integral yields the correct optical depth:
+-    optical_depth = peak_density * integral_value
+-    
+-    attenuation = 1.0 - exp(-optical_depth)
+-    
+-    return attenuation
+-
+-def evaluate_sh(sh_coeffs, direction):
+-    """
+-    Evaluate Spherical Harmonics coefficients at a given direction.
+-    """
+-    # Convert direction to spherical coordinates (theta, phi)
+-    theta = acos(direction.z / length(direction))
+-    phi = atan2(direction.y, direction.x)
+-    
+-    # Evaluate SH basis functions at (theta, phi)
+-    basis_values = evaluate_sh_basis(theta, phi, degree=sh_coeffs.degree)
+-    
+-    # Dot product of coefficients and basis values
+-    color = vec3(0.0)
+-    for i in range(3): # Assuming RGB
+-        for j in range(len(sh_coeffs[i])):
+-            color[i] += sh_coeffs[i][j] * basis_values[j]
+-            
+-    return color
++        rendered_colors.append(accumulated_color)
++        
++    return rendered_colors
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by ray-primitive intersection tests and the evaluation of closed-form integrals. Intersection is $O(1)$ per primitive, but requires checking all primitives or using a spatial acceleration structure (not specified in sources, but implied for performance). The closed-form integration is $O(1)$ per segment.
+-*   **Memory Complexity:** $O(M)$ for storing $M$ Gaussian kernels.
+-*   **Strengths:** Noise-free rendering due to analytical integration [S2, unofficial]. Efficient for radiance field optimization as gradients can be computed analytically [S1, unofficial].
+-*   **Limitations:** Limited to primary rays (no global illumination, multiple scattering, or path tracing) [S2, unofficial]. Not suitable for general volumetric scattering media where multiple bounces are required [S1, unofficial].
+-*   **When to use:** Radiance field optimization and rendering of emissive or absorbing media where view-dependent color is modeled via SH and global illumination is not required [S1, unofficial][S2, unofficial].
+-*   **When not to use:** When global illumination, multiple scattering, or complex light transport is needed (use VPPT instead) [S1, unofficial].
++*   **Complexity:** Not given in the sources.
++*   **Performance:** The closed-form calculation of segments and transparency eliminates stochastic noise, improving calculation speed compared to traditional stochastic methods [S2, unofficial].
++*   **Strengths:** Zero noise in rendering; efficient ray tracing for primary rays; suitable for radiance field optimization [S2, unofficial].
++*   **Limitations:** Restricted to primary rays; not designed for general volumetric scattering media (unlike VPPT) [S1, unofficial].
+ 
+ ## Background
+-VPRF is part of the Volumetric Primitives family introduced by Facebook Research [S1, unofficial]. It was developed to provide a specialized integrator for 3D Gaussian Splatting assets, leveraging the analytical properties of Gaussian volumes for efficient radiance field rendering [S1, unofficial]. The method builds on the principles of Differentiable Radiative Rasterization and closed-form integration of volumetric primitives [S2, unofficial].
++VPRF is introduced as part of the `volprim` library by Facebook Research [S1, unofficial]. It is described in the context of rendering 3D Gaussian Splatting-like assets, leveraging the volumetric primitives framework to enable differentiable rendering for radiance field optimization [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

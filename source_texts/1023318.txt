@@ -1,0 +1,149 @@
+Vibe coding toy. Contribute to ShapeShading/vr-dive development by creating an account on GitHub.
+
+Optimize cellular foam and fix Mandelbulb visibility by tiye · Pull Request #9 · ShapeShading/vr-dive · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tiye
+commented
+Aug 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+reduce Voronoi cellular foam cost with an 8-candidate bounded-jitter neighborhood, arithmetic hashing, fewer march steps, tetrahedral normals, and reuse of the hit sample
+move Infinite Mandelbulb raymarching from the full 1888x1792 stereo compositor target into a 384x304 per-eye offscreen compute texture, then composite it with a lightweight fullscreen pass
+keep the Mandelbulb centered in canonical view space instead of a fixed AR-world position
+prevent black NaN surfaces with finite DE handling and a safe normal fallback
+lower the three Mandelbulb quality tiers to practical ray-step and fractal-iteration budgets
+log the active offscreen configuration once so device runs can confirm the compute prepass executes
+Root cause
+The previous fragment shader evaluated the hierarchical Mandelbulb DE directly for every full-resolution stereo fragment. Renderer frame counters only tracked submitted command buffers, so they could continue advancing while the GPU missed presentation deadlines and the compositor kept showing the black clear frame.
+Validation
+standalone Infinite Mandelbulb Metal compile: passed
+complete DynamicBox Metal type-check: 49/49 passed
+visionOS Simulator Debug build: succeeded
+canonical center-ray simulation reaches the Mandelbulb surface
+device runtime should log: [InfiniteMandelbulbZoom] Offscreen raymarch active: 384x304x2
+Optimize cellular foam and fix Mandelbulb visibility
+c6abb3f
+Copilot
+AI
+lite review requested due to automatic review settings
+August 24, 2026 17:05
+Copilot started reviewing on behalf of
+tiye
+August 24, 2026 17:06
+View session
+Copilot
+AI
+reviewed
+Aug 24, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR updates two demo shaders to reduce ray-marching cost and improve visual stability: the Voronoi cellular foam gets cheaper candidate evaluation and fewer march steps, while the Infinite Mandelbulb Zoom is marched in canonical view space to keep it centered and adds DE/normal safety handling.
+Changes:
+Renamed the Mandelbulb uniform from a world-anchored objectCenterAndScale to view-relative cameraAndScale, and updated the renderer/shader to march in canonical view space.
+Optimized Mandelbulb DE and hierarchy work (cheaper r^7, finite DE fallback, fewer hierarchy levels) and adjusted bounds/background.
+Optimized cellular foam (arithmetic hash, 8-candidate neighborhood, tetrahedral normal, fewer ray-march steps, reuse of hit sample data).
+Reviewed changes
+Copilot reviewed 4 out of 4 changed files in this pull request and generated 1 comment.
+File
+Description
+vr-dive/Demos/InfiniteMandelbulbZoom/InfiniteMandelbulbZoomTypes.swift
+Renames/clarifies the CPU/GPU uniform field to cameraAndScale.
+vr-dive/Demos/InfiniteMandelbulbZoom/InfiniteMandelbulbZoomShaders.metal
+Switches marching to view space, improves DE stability, tweaks hierarchy/normal/bounds.
+vr-dive/Demos/InfiniteMandelbulbZoom/InfiniteMandelbulbZoomRenderer.swift
+Updates uniform initialization to match the new cameraAndScale contract.
+vr-dive/Demos/DynamicBox/shaders/voronoi-cellular-foam.metal
+Reduces cellular foam cost via cheaper hashing/neighborhood and fewer march steps.
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+vr-dive/Demos/InfiniteMandelbulbZoom/InfiniteMandelbulbZoomShaders.metal
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tiye
+added 3 commits
+August 25, 2026 01:16
+Render Mandelbulb zoom offscreen
+5bf5b7d
+Make Mandelbulb normal fallback zero-safe
+3e3d5b6
+Stabilize Mandelbulb rendering on device
+9a5c77f
+tiye
+commented
+Aug 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+再次修复 Infinite Mandelbulb 真机全黑（9a5c77f）：移除对 compositor reverse-Z / infinite-far 投影矩阵的反投影依赖，改用稳定的屏幕空间射线；离屏分辨率降为 256×200，并每 3 帧更新一次，平衡画质平均 GPU 工作量约降至原来的 1/11；同时新增首帧 GPU completion 日志。visionOS 26.5 Simulator 已实际进入沉浸模式确认图案可见，完整 Xcode/Metal 编译通过。真机正常时应看到 [InfiniteMandelbulbZoom] First offscreen frame completed on GPU。
+Add Mandelbulb GPU diagnostics
+f503d78
+tiye
+commented
+Aug 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+新增真机诊断提交 f503d78。Infinite Mandelbulb 现在会在第 1/2/3 次 compute，以及此后每 120 次输出：queueDelayMs、wallMs、gpuMs、command-buffer status/error；左右眼 C/L/R/B/T 五个 rgba16Float texel 的回读值；最终 composite 的 view count、vertex amplification、render-target layers 与 viewport。模拟器运行验证回读值为有限非零 RGBA，诊断不会每帧刷日志。真机复测时请保留从 Offscreen raymarch active 到至少 Diagnostic #3 texels 的完整段落。
+Trace Mandelbulb drawable output
+aea559c
+tiye
+commented
+Aug 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+继续诊断提交 aea559c：新增最终 fragment 稀疏原子覆盖计数，并在 render encoder 结束、present 之前直接回读 compositor color target 的 C/L/R/B/T texel（双眼 slice）。模拟器运行验证 fragmentCoverage 持续增长，Drawable #1/#2/#3 texels 均为非零 RGBA。真机复测请保留 Drawable #1 completed 到 Drawable #3 texels：coverage>0 且 drawable texels 非零表示 Metal 最终输出完全正确，问题只剩 compositor presentation；coverage=0 或 texels=0 则定位在真机 foveation/vertex-amplification 合成。
+tiye
+added 3 commits
+August 25, 2026 22:11
+Write valid Mandelbulb compositor depth
+e2b2832
+Render infinite Mandelbulb inside world-space box
+4f9d68c
+Increase Mandelbulb rendering detail
+a2b124a
+tiye
+merged commit 32ba69b
+into
+main
+Aug 25, 2026
+tiye
+deleted the
+codex/dynamic-box-foam-mandelbulb-fixes
+branch
+August 25, 2026 14:45
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

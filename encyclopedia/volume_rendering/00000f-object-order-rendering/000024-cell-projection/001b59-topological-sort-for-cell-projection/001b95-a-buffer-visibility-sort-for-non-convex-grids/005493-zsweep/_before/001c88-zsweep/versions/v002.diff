@@ -1,0 +1,158 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-ZSWEEP is an exact, object-order cell projection algorithm for volume rendering on unstructured grids that optimizes for sorting efficiency and memory usage [S1][S3, S2, unofficial]. It solves the problem of correctly ordering cell segments for front-to-back compositing without the high memory overhead of ray-casting or the complexity of true global visibility sorts [S2, unofficial]. It sets itself apart from its parent [A-buffer visibility sort for non-convex grids](1057-a-buffer-visibility-sort-for-non-convex-grids.md) by using a sweep-plane approach that exploits the implicit global ordering induced by vertex z-coordinates, rather than maintaining full A-buffer lists for all pixels simultaneously [S2, unofficial].
++ZSWEEP is an exact, object-order cell projection algorithm for volume rendering on unstructured grids that optimizes for sorting efficiency and memory usage [S1][S3, unofficial][S2, unofficial]. It solves the problem of correctly ordering cell segments for front-to-back compositing without the high memory overhead of ray-casting or the complexity of true global visibility sorts [S2, unofficial]. It sets itself apart from its parent [A-buffer visibility sort for non-convex grids](1057-a-buffer-visibility-sort-for-non-convex-grids.md) by using a sweep-plane approach that exploits the implicit global ordering induced by vertex z-coordinates, rather than maintaining full A-buffer lists for all pixels simultaneously [S2, unofficial].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Sweep Plane State:** A set of active cells and faces currently intersected by the sweep plane.
++*   **Sweep Plane State:** Tracks active cells and faces currently intersected by the sweep plane.
+ *   **Pixel Lists:** For each pixel, a short list of ordered face intersections. This list is maintained to be correct and complete at the instant each stage of computation is completed [S2, unofficial].
+ *   **Auxiliary Structures:** Stores partial information taken from a small number of "slices" of the dataset, rather than the entire dataset in memory [S2, unofficial].
+@@ -28,62 +28,86 @@
+     *   For each pixel, use the current short list of ordered face intersections to compute the color and opacity contribution [S2, unofficial].
+     *   Ensure the list is correct and complete before computing the contribution for that stage [S2, unofficial].
+-    *   Composite the contribution into the frame buffer using standard front-to-back alpha compositing equations [S2, unofficial].
+ 5.  **Sparsification (Optional):** Apply a data sparsification technique to reduce the number of cells processed, if applicable [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def zsweep(mesh, view_direction):
+-    # 1. Sort vertices by z-coordinate
++def zsweep(mesh, view_direction, image_width, image_height):
++    # 1. Sort vertices by z-coordinate along view_direction
+     vertices = mesh.get_vertices()
+-    sorted_vertices = sort_by_z(vertices, view_direction)
+-    
++    sorted_vertices = sorted(vertices, key=lambda v: dot(v.position, view_direction))
++
+     # 2. Initialize data structures
+-    # pixel_lists: dict mapping pixel_id -> list of (face, z_depth)
+-    pixel_lists = {}
+-    # active_cells: set of cells currently intersected by sweep plane
++    pixel_lists = {}  # Maps (x, y) -> list of projected faces
+     active_cells = set()
+-    
+-    # 3. Sweep through vertices
++
++    # 3. Sweep through vertices in increasing z-order
+     for vertex in sorted_vertices:
+-        # Get cells incident to this vertex
++        # Identify cells incident to the current vertex
+         incident_cells = mesh.get_incident_cells(vertex)
+-        
+-        # Update active cells
++
++        # Update active cells and project their faces
+         for cell in incident_cells:
+             if cell not in active_cells:
+                 active_cells.add(cell)
+-                # Project faces of the cell
+                 faces = cell.get_faces()
+                 for face in faces:
+-                    # Check if face is internal to avoid double projection
++                    # Avoid double projection of internal faces
+                     if not is_internal_face(face, active_cells):
+-                        projected_face = project_face(face, view_direction)
+-                        # Update pixel lists for the pixels covered by this face
+-                        update_pixel_lists(pixel_lists, projected_face, vertex.z)
+-        
+-        # 4. Compute contributions for affected pixels
+-        affected_pixels = get_affected_pixels(active_cells)
+-        for pixel_id in affected_pixels:
+-            if pixel_id in pixel_lists:
+-                # Ensure list is sorted and complete
+-                sort_pixel_list(pixel_lists[pixel_id])
+-                # Compute and composite contribution
+-                composite_pixel(pixel_id, pixel_lists[pixel_id])
+-                
+-    return frame_buffer
++                        projected = project_face_to_screen(face, view_direction, image_width, image_height)
++                        update_pixel_lists(pixel_lists, projected)
++
++        # 4. Compute contributions for affected pixels in stages
++        affected_pixels = get_affected_pixels(active_cells, image_width, image_height)
++        for pixel in affected_pixels:
++            if pixel in pixel_lists:
++                # Ensure list is sorted and complete for this stage
++                pixel_lists[pixel].sort(key=lambda f: f.z_depth)
++                # Compute contribution using ordered face intersections
++                render_pixel(pixel, pixel_lists[pixel])
++
++    return pixel_lists
+ 
+ def is_internal_face(face, active_cells):
+-    # A face is internal if it is shared by two cells in the active set
+-    # This is a simplified check; actual implementation requires adjacency info
+-    neighbors = face.get_neighbors()
+-    in_active = [n for n in neighbors if n in active_cells]
+-    return len(in_active) > 1
++    # A face is internal if shared by two cells in the active set
++    neighbors = face.get_adjacent_cells()
++    return sum(1 for n in neighbors if n in active_cells) > 1
+ 
+-def update_pixel_lists(pixel_lists, projected_face, z_depth):
+-    for pixel_id in projected_face.get_covered_pixels():
+-        if pixel_id not in pixel_lists:
+-            pixel_lists[pixel_id] = []
+-        # Insert face into list maintaining z-order
+-        insert_in_order(pixel_lists[pixel_id], (projected_face, z_depth))
++def project_face_to_screen(face, view_direction, width, height):
++    # Project face vertices to screen space and compute bounding box
++    screen_vertices = [project_point(v, view_direction, width, height) for v in face.vertices]
++    min_x, max_x = min(v.x for v in screen_vertices), max(v.x for v in screen_vertices)
++    min_y, max_y = min(v.y for v in screen_vertices), max(v.y for v in screen_vertices)
++    z_depth = dot(face.centroid, view_direction)
++    return {'vertices': screen_vertices, 'min_x': min_x, 'max_x': max_x, 'min_y': min_y, 'max_y': max_y, 'z_depth': z_depth}
++
++def update_pixel_lists(pixel_lists, projected_face):
++    for x in range(int(projected_face['min_x']), int(projected_face['max_x']) + 1):
++        for y in range(int(projected_face['min_y']), int(projected_face['max_y']) + 1):
++            if (x, y) not in pixel_lists:
++                pixel_lists[(x, y)] = []
++            pixel_lists[(x, y)].append(projected_face)
++
++def get_affected_pixels(active_cells, width, height):
++    # Return unique pixel coordinates covered by active cells
++    pixels = set()
++    for cell in active_cells:
++        for face in cell.get_faces():
++            proj = project_face_to_screen(face, view_direction, width, height)
++            for x in range(int(proj['min_x']), int(proj['max_x']) + 1):
++                for y in range(int(proj['min_y']), int(proj['max_y']) + 1):
++                    pixels.add((x, y))
++    return pixels
++
++def render_pixel(pixel, face_list):
++    # Compute contribution using ordered face intersections [S2, unofficial]
++    # Exact compositing equations are not specified in the sources [G]
++    pass
++
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
++
++def project_point(vertex, view_direction, width, height):
++    # Standard perspective/orthographic projection [G]
++    return {'x': vertex.x * width, 'y': vertex.y * height}
+ ```
+ 
+@@ -102,4 +126,7 @@
+ Out-of-Core ZSWEEP is a direct volume rendering technique for large unstructured grids that extends the in-core ZSWEEP algorithm to handle datasets exceeding available RAM by processing data in tiles and loading meta-cells from disk only when needed. It differs from its sibling [MIR](1281-mir.md) by being substantially faster and leveraging the ZSWEEP optimization of front-to-back sorting, at the cost of more complex preprocessing and higher main-memory requirements.
+ 
++### X-Bucket and X-Actives Processing
++This variant processes scanlines from bottom to top [S4]. For each scanline, a critical section of code is entered, allowing only one processor to run it at a time [S4]. The surviving polygons of the previous pixel's x-actives list are updated with newly interpolated field data and screen-z values, requiring rearrangement among survivors to maintain screen-z order [S4]. Taking into account the line-of-sight distance between adjacent polygons, the color-opacity contribution for the inter-polygon region is calculated and composited into a software floating-point frame buffer using standard equations [S4].
++
+ ## Operating characteristics
+ *   **Time Complexity:** Up to 5 times faster than the best previously-known exact algorithms that use comparable amounts of memory [S2, unofficial].
+@@ -108,5 +135,5 @@
+ *   **Limitations:** No simple way to map into currently available graphics hardware [S1][S3, unofficial]. Requires careful handling of internal faces and ordering correctness [S2, unofficial].
+ *   **When to Use:** When exact rendering of unstructured grids is required, and memory is a constraint, and hardware acceleration is not a primary requirement [S2, unofficial].
+-*   **When Not to Use:** When hardware acceleration is needed or when approximate rendering is acceptable [S1][S3, unofficial].
++*   **When Not to Use:** When hardware acceleration is required, as the algorithm lacks a simple mapping to current graphics hardware [S1][S3, unofficial].
+ 
+ ## Background

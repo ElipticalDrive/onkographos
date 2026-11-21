@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -1,109 +1,85 @@
+ # Two-Stage Training Pipeline
+ 
+-Also called: Coarse-to-Fine Voxel Training
++Also called: ActiveRMAP Fine Stage Optimization, ActiveRMAP Two-Stage Training, Coarse-to-Fine Voxel Training
+ 
+ ## Overview
+-A training strategy that first recovers global shape at low resolution, then refines fine details at high resolution [S1, unofficial]. It sets itself apart from single-resolution approaches by decoupling structural coherence from high-frequency detail reconstruction, ensuring the model converges to a valid global geometry before committing computational resources to fine-grained features [S1, unofficial].
++A coarse-to-fine training strategy that first recovers global shape at low resolution, then refines fine details at high resolution [S2, unofficial]. It sets itself apart from single-resolution training by decoupling structural coherence from high-frequency detail recovery, allowing the model to converge to a stable global geometry before committing computational resources to fine-grained optimization [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Training dataset (images/points), initial low-resolution voxel grid parameters, target high-resolution voxel grid parameters.
+-*   **Output:** Optimized high-resolution neural field (e.g., SDF or radiance field) representing the target geometry/appearance.
++- **Inputs:** A coarse radiance field model $M_T$ (initialized from Stage 1), an image database $\{I_i\}_{i=0}^T$ containing training views, total fine-stage iterations $N$, and sampling interval $m$.
++- **Outputs:** A refined fine radiance field model $M_f$.
+ 
+ **Data Structures:**
+-*   **Voxel Grid ($V$):** A 3D tensor storing field values (e.g., SDF, density, color).
+-    *   **Layout:** Dense 3D array.
+-    *   **Size:** Defined by resolution $N \times N \times N$.
+-    *   **Fields:** For SDF-based methods (like Voxurf), stores signed distance values. For radiance fields, stores density and color coefficients.
++- $M_T$: Coarse model parameters (e.g., voxel grid or neural network weights) representing the global shape.
++- $M_f$: Fine model parameters, initialized from or sharing structure with $M_T$, optimized to capture high-frequency details.
++- $\{I_i\}_{i=0}^T$: Set of $T+1$ training images.
+ 
+ **Numbered Steps:**
+-
+-1.  **Stage-1: Coarse Training**
+-    *   Initialize a low-resolution voxel grid $V_{coarse}$ with resolution $N_{coarse}$.
+-    *   Train the model using the low-resolution grid to recover the global shape.
+-    *   **Gaussian Kernel Application:** During coarse training, apply a 3D convolution with a Gaussian kernel to the field. This stabilizes the optimization and prevents noise. Removing this kernel increases Chamfer Distance (CD) error from 0.72 to 0.74 [S1, unofficial].
+-    *   **Post-Processing:** After Stage-1, apply a Gaussian kernel post-process to the coarse field. This improves visualization quality, with a minor sacrifice in quantitative performance (CD reduces from 0.720 to 0.715 if applied) [S1, unofficial].
+-    *   Result: A coherent global shape $V_{coarse}$ is obtained, though fine details are limited by resolution [S1, unofficial].
+-
+-2.  **Stage-2: Fine Training**
+-    *   Initialize a high-resolution voxel grid $V_{fine}$ with resolution $N_{fine}$ ($N_{fine} > N_{coarse}$).
+-    *   **Initialization:** Transfer the learned global structure from $V_{coarse}$ to $V_{fine}$. This can be done via trilinear interpolation or direct copying of the coarse field into the center of the fine grid, ensuring structural consistency [S1, unofficial].
+-    *   Train the model using the high-resolution grid to recover fine details.
+-    *   The optimization refines the geometry while maintaining the structural consistency established in Stage-1 [S1, unofficial].
++1. **Initialization:** Initialize the fine model $M_f$ using the coarse model $M_T$ obtained from the previous stage. Initialize the image database $\{I_i\}_{i=0}^T$ with available training views [S1, unofficial].
++2. **Iteration Loop:** Iterate $k$ from $0$ to $N$ [S1, unofficial].
++3. **Ray Sampling:** If $k \mod m == 0$, sample new training pixels (rays) from the image database $\{I_i\}_{i=0}^T$ [S1, unofficial]. This step ensures diverse view coverage is maintained or expanded periodically during optimization [S1, unofficial].
++4. **Optimization:** Optimize the Differentiable Voxel Grid Optimization (DVGO) to refine the fine model $M_f$ using the sampled rays [S1, unofficial]. This step minimizes the rendering loss between predicted and ground-truth images, adjusting high-resolution voxel features [S1, unofficial].
++5. **Termination:** After $N$ iterations, the final $M_f$ represents the high-resolution reconstruction [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Default Resolution:** $256^3$ for the fine stage [S1, unofficial].
+-*   **Coarse Resolution:** Typically significantly lower (e.g., $128^3$ or $192^3$) to accelerate global shape recovery [S1, unofficial].
++- $N$: Total number of fine-stage optimization iterations [S1, unofficial].
++- $m$: Interval frequency for sampling new training pixels; new pixels are added every $m$ iterations [S1, unofficial].
++- $M_T$: Coarse radiance field model initialized at the start of the fine stage [S1, unofficial].
++- $M_f$: Fine radiance field model refined during each iteration of the loop [S1, unofficial].
++
++**Pseudocode:**
++```python
++def two_stage_fine_training(M_T, image_database, N, m):
++    """
++    Refines a coarse radiance field model M_T into a fine model M_f.
++    
++    Args:
++        M_T: Coarse radiance field model (e.g., from DVGO coarse stage).
++        image_database: List of training images {I_i}_{i=0}^T.
++        N: Total number of fine-stage optimization iterations.
++        m: Interval frequency for sampling new training pixels.
++        
++    Returns:
++        M_f: Refined fine radiance field model.
++    """
++    # Initialize fine model from coarse model
++    M_f = initialize_fine_model(M_T)
++    
++    # Iterate through fine-stage optimization steps
++    for k in range(N):
++        # Periodically sample new training rays to ensure view diversity
++        if k % m == 0:
++            rays = sample_training_pixels(image_database)
++        
++        # Optimize the fine model using DVGO
++        # This step updates M_f to minimize rendering error on sampled rays
++        M_f = optimize_dvgo(M_f, rays)
++        
++    return M_f
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Resolution Scaling:** Increasing resolution from $128^3$ to $192^3$ and $192^3$ to $256^3$ consistently lowers Chamfer Distance but increases training time. However, $320^3$ yields similar CD to $256^3$ at higher cost, making $256^3$ the optimal default [S1, unofficial].
+-*   **Gaussian Kernel Removal:** Omitting the Gaussian kernel during coarse training leads to less coherent shapes and higher CD errors [S1, unofficial].
+-
+-**Pseudocode:**
+-
+-```python
+-def two_stage_training(dataset, N_coarse=128, N_fine=256):
+-    # Stage 1: Coarse Training
+-    # Initialize low-res voxel grid
+-    sdf_coarse = initialize_voxel_grid(N_coarse)
+-    
+-    # Train to recover global shape
+-    for epoch in range(coarse_epochs):
+-        # Sample rays/points from dataset
+-        rays = sample_rays(dataset)
+-        
+-        # Render and compute loss
+-        # Apply Gaussian kernel convolution during training for stability
+-        sdf_coarse_smoothed = gaussian_convolve(sdf_coarse, kernel_size=3, sigma=1.0)
+-        predictions = render_sdf(sdf_coarse_smoothed, rays)
+-        loss = compute_loss(predictions, dataset.targets)
+-        
+-        # Update parameters
+-        sdf_coarse = optimize_step(sdf_coarse, loss)
+-        
+-    # Post-process coarse result
+-    # Improves visualization, minor CD reduction
+-    sdf_coarse = gaussian_convolve(sdf_coarse, kernel_size=3, sigma=1.0)
+-    
+-    # Stage 2: Fine Training
+-    # Initialize high-res voxel grid
+-    sdf_fine = initialize_voxel_grid(N_fine)
+-    
+-    # Transfer coarse geometry to fine grid
+-    # Interpolate coarse field into fine grid to maintain structural consistency
+-    sdf_fine = interpolate_and_copy(sdf_coarse, N_coarse, N_fine)
+-    
+-    # Train to recover fine details
+-    for epoch in range(fine_epochs):
+-        # Sample rays/points from dataset
+-        rays = sample_rays(dataset)
+-        
+-        # Render and compute loss
+-        predictions = render_sdf(sdf_fine, rays)
+-        loss = compute_loss(predictions, dataset.targets)
+-        
+-        # Update parameters
+-        sdf_fine = optimize_step(sdf_fine, loss)
+-        
+-    return sdf_fine
+-```
++- **Resolution Scaling:** Increasing voxel grid resolution significantly increases training time. For example, moving from $128^3$ to $256^3$ increases training time from 11 minutes to 15 minutes (on specific hardware/configs) [S2, unofficial].
++- **Detail vs. Structure:** If the coarse stage fails to produce a coherent global shape, the fine stage may struggle to recover fine details correctly [S2, unofficial].
++- **Post-processing:** Removing Gaussian kernel smoothing during coarse training or post-processing can increase Chamfer Distance (CD) error from 0.715 to 0.720 or 0.72 to 0.74, respectively, indicating that smoothing aids in structural consistency [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Magic3D
+-A variant targeting issues caused by low-resolution diffusion images using a two-stage coarse-fine approach [S2]. In the coarse stage, it uses Instant-NGP as the NeRF model trained from images generated from text prompts using the image diffusion model eDiff-I [S2]. In the fine stage, the coarse geometry extracted from Instant-NGP is placed on a mesh, which is optimized over in the fine stage using images generated with a latent diffusion model [S2]. Experiments over 397 prompts showed a user preference toward Magic3D over DreamFusion [S2].
++A method targeting issues caused by low-resolution diffusion images using a two-stage coarse-fine approach [S3]. In the coarse stage, Magic3D uses Instant-NGP as the NeRF model trained from images generated from text prompts using the image diffusion model eDiff-I [S3]. In the fine stage, the coarse geometry extracted from Instant-NGP is placed on a mesh, which is optimized over in the fine stage using images generated with a latent diffusion model [S3]. Experiments over 397 prompts generated objects, each rated by three users, showed a preference toward Magic3D over DreamFusion [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time scales with voxel grid resolution. For a default $256^3$ grid, training takes approximately 15 minutes. Lower resolutions ($128^3$, $192^3$) take 11-12 minutes, while higher resolutions ($320^3$) take 17 minutes [S1, unofficial].
+-*   **Memory Complexity:** Memory usage is proportional to $N^3$ where $N$ is the voxel grid resolution. The coarse stage uses less memory, allowing for faster initial convergence.
+-*   **Strengths:** Ensures coherent global shape recovery before refining details, reducing the risk of converging to local minima with incorrect global structure. The Gaussian kernel post-processing improves visualization quality [S1, unofficial].
+-*   **Limitations:** Requires two distinct training phases, increasing implementation complexity. Higher resolutions ($320^3$) offer diminishing returns in Chamfer Distance compared to $256^3$ while incurring higher computational costs [S1, unofficial].
+-*   **When to Use:** When global shape coherence is critical and the scene has complex structures that might be missed by single-resolution training. Ideal for voxel-based neural surface reconstruction [S1, unofficial].
+-*   **When Not to Use:** When computational resources are extremely limited and only coarse shape is needed, or when the scene is simple enough that single-resolution training suffices.
++- **Time Complexity:** Training time scales with voxel grid resolution. For a default resolution of $256^3$, training takes approximately 15 minutes, compared to 11 minutes for $128^3$, 12 minutes for $192^3$, and 17 minutes for $320^3$ [S2, unofficial].
++- **Memory Complexity:** Memory usage is proportional to the voxel grid resolution. Higher resolutions ($320^3$) require more memory but offer diminishing returns in Chamfer Distance (CD) error compared to $256^3$ [S2, unofficial].
++- **Performance:** The two-stage approach yields a coherent global shape in Stage 1, which is then refined for high-frequency details in Stage 2, resulting in lower CD errors than single-resolution methods [S2, unofficial].
++- **Strengths:** Effective at recovering both global structure and fine details; robust to low-resolution input images when combined with diffusion models (as in Magic3D) [S2, unofficial][S3].
++- **Limitations:** Requires careful tuning of resolution and sampling interval $m$; post-processing steps (e.g., Gaussian smoothing) may slightly sacrifice quantitative performance for visual quality [S2, unofficial].
+ 
+ ## Background
+-The two-stage coarse-to-fine training pipeline is a method for efficient and accurate neural surface reconstruction, specifically within voxel-based frameworks [S1, unofficial]. It was introduced in the context of Voxurf (Voxel-based Efficient and Accurate Neural Surface Reconstruction) to address the trade-off between training speed and geometric detail [S1, unofficial]. The method leverages the observation that global shape can be recovered quickly at low resolution, while fine details require higher resolution but benefit from a good initial global structure [S1, unofficial].
++The two-stage training pipeline was introduced in ActiveRMAP (2022) as part of a radiance field-based active mapping and planning framework [S1, unofficial]. It was further explored in Voxurf (2022) for voxel-based efficient and accurate neural surface reconstruction, where it was shown to improve Chamfer Distance metrics by separating coarse shape recovery from fine detail refinement [S2, unofficial]. The approach has also been adapted in Magic3D (2022) for text-to-3D generation, leveraging coarse-fine optimization to mitigate artifacts from low-resolution diffusion images [S3].
+ 
+ ## Sources
+-[S1] Voxurf: Voxel-based Efficient and Accurate Neural Surface Reconstruction, https://doi.org/10.48550/arxiv.2208.12697, fetched 2026-10-26 (unofficial)
+-[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28+[S1] ActiveRMAP: Radiance Field for Active Mapping And Planning, https://doi.org/10.48550/arxiv.2211.12656, fetched 2026-10-26 (unofficial)
++[S2] Voxurf: Voxel-based Efficient and Accurate Neural Surface Reconstruction, https://doi.org/10.48550/arxiv.2208.12697, fetched 2026-10-26 (unofficial)
++[S3] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

@@ -1,0 +1,217 @@
+# Gaussian Deformation Field (GauFRe)
+Also called: Dynamic Gaussian Splatting with static component, Forward-warping deformation field
+
+## Overview
+GauFRe is a dynamic scene representation that augments 3D Gaussian Splatting with a time-conditioned forward-warping deformation field to enable real-time novel view synthesis of dynamic scenes [S1]. Unlike NeRF-based methods that use backward warps to query canonical space, GauFRe stores Gaussians in a canonical space and uses a neural network to output deformed attributes (position, rotation, scale) for each time step $t$ [S1]. It distinguishes itself from sibling methods by explicitly separating the scene into static and deformable Gaussian sets, preventing capacity waste and noise in static regions, and by modeling non-rigid deformations (scaling) in addition to rigid motion [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ canonical 3D Gaussians $\{G_i\}$, each defined by position $x_i$, rotation $q_i$, scale $s_i$, opacity $\sigma_i$, and color $c_i$. A query time $t$. Camera parameters (view and projection matrices).
+*   **Output:** A rendered 2D image at time $t$.
+
+**Data Structures:**
+1.  **Deformable Gaussians $\{G_i\}$:** Stored in canonical space. Parameters: $x_i \in \mathbb{R}^3$, $q_i \in \mathbb{R}^4$ (unit quaternion), $s_i \in \mathbb{R}^3$ (log-scale), $\sigma_i \in \mathbb{R}$, $c_i \in \mathbb{R}^3$.
+2.  **Static Gaussians $\{G_j\}$:** Stored in world space. Parameters: $x_j \in \mathbb{R}^3$, $q_j \in \mathbb{R}^4$, $s_j \in \mathbb{R}^3$, $\sigma_j \in \mathbb{R}$, $c_j \in \mathbb{R}^3$. These are not deformed.
+3.  **Deformation Field Network $\Phi$:** An MLP with 6 hidden layers and 256 width. Inputs are positional encodings of $x_i$ and $t$. Outputs $\delta x_{ti}, \delta q_{ti}, \delta s_{ti}$.
+
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Initialize static Gaussians $\{G_j\}$ using a Structure-from-Motion (SfM) point cloud [S1].
+    *   Initialize deformable Gaussians $\{G_i\}$ with uniform random samples within the scene bounding box [S1].
+    *   Initialize $\Phi$ with random weights [S1].
+
+2.  **Positional Encoding:**
+    *   Compute positional encoding $\gamma(x)$ for position $x$ and $\gamma(t)$ for time $t$ using base $L=10$ [S1]:
+        $$ \gamma(v) = (\sin(2^0 v), \cos(2^0 v), \dots, \sin(2^{L-1} v), \cos(2^{L-1} v)) $$
+    *   Concatenate $\gamma(x_i)$ and $\gamma(t)$ to form the input vector for $\Phi$ [S1].
+
+3.  **Deformation Field Evaluation:**
+    *   Pass the encoded input through $\Phi$ to obtain deltas:
+        $$ (\delta x_{ti}, \delta q_{ti}, \delta s_{ti}) = \Phi(\gamma(x_i), \gamma(t)) $$
+    *   Note: $\Phi$ maps $\mathbb{R}^{2L_x + 2L_t} \to \mathbb{R}^{10}$ (3 for pos, 4 for rot, 3 for scale) [S1].
+
+4.  **Attribute Update (Forward Warp):**
+    *   Update position:
+        $$ x_{ti} = x_i + \delta x_{ti} \quad (4) $$
+    *   Update scale (pre-exponentiation):
+        $$ \text{Exp}(s_{ti}) = \text{Exp}(s_i + \delta s_{ti}) \quad (5) $$
+        *   Pre-exponentiation is used because it is a log-linear estimation problem, simpler than exponential, and allows handling negative changes [S1].
+    *   Update rotation (quaternion multiplication):
+        $$ q_{ti} = q_i \cdot \delta q_{ti} \quad (6) $$
+        *   Quaternion multiplication is used instead of addition to maintain geometric bounds. The resulting quaternion must be normalized [S1].
+    *   Opacity $\sigma_i$ and color $c_i$ are **not** deformed; they remain constant in canonical space [S1].
+
+5.  **Concatenation:**
+    *   Combine deformed Gaussians $\{G_{ti}\}$ and static Gaussians $\{G_j\}$ into a single set for rendering [S1].
+
+6.  **Rendering:**
+    *   Project the 3D covariance $\Sigma_{ti}$ (derived from $q_{ti}, s_{ti}$) to 2D using the standard Jacobian $J$ [Parent].
+    *   Rasterize using standard back-to-front alpha blending [Parent].
+
+7.  **Optimization:**
+    *   Compute loss $\mathcal{L}(I, I_{gt})$ between rendered image $I$ and ground truth $I_{gt}$ [S1].
+    *   For iterations $itr \le 20,000$, use L2 loss. For $itr > 20,000$, switch to L1 loss [S1].
+    *   Loss function:
+        $$ \mathcal{L}(I, I_{gt}) = \begin{cases} (1 - \lambda_{ssim})\mathcal{L}_2(I, I_{gt}) + \lambda_{ssim}(1 - \text{SSIM}(I, I_{gt})) & \text{if } itr \le 20,000 \\ (1 - \lambda_{ssim})\mathcal{L}_1(I, I_{gt}) + \lambda_{ssim}(1 - \text{SSIM}(I, I_{gt})) & \text{if } itr > 20,000 \end{cases} $$
+    *   Optimize Gaussians and $\Phi$ using Adam ($\beta=(0.9, 0.999)$, $\epsilon=10^{-15}$) [S1].
+    *   Densify and prune both static and deformable sets separately until 20,000 iterations. Continue optimizing until 40,000 iterations [S1].
+    *   Deformation Field Learning Rate: 0.001, with exponential scheduling shrinking to $0.001 \times$ original rate until 30,000 iterations [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, base=10):
+        super().__init__()
+        self.base = base
+
+    def forward(self, x):
+        # x shape: (..., 1)
+        # Output shape: (..., 2 * base)
+        freq_bands = 2.0 ** torch.arange(self.base, device=x.device).float()
+        # sin(2^0 x), cos(2^0 x), ...
+        out = torch.cat([
+            torch.sin(x * freq_bands),
+            torch.cos(x * freq_bands)
+        ], dim=-1)
+        return out
+
+class DeformationField(nn.Module):
+    def __init__(self, pos_base=10, time_base=10, hidden_dim=256, num_layers=6):
+        super().__init__()
+        self.pos_enc = PositionalEncoding(pos_base)
+        self.time_enc = PositionalEncoding(time_base)
+        
+        input_dim = 2 * pos_base + 2 * time_base # 20 + 20 = 40
+        self.mlp = nn.Sequential()
+        
+        layers = []
+        for i in range(num_layers):
+            in_dim = input_dim if i == 0 else hidden_dim
+            out_dim = hidden_dim
+            layers.append(nn.Linear(in_dim, out_dim))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, 10)) # 3 pos, 4 rot, 3 scale
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x, t):
+        # x: (N, 3), t: (N,) or (N, 1)
+        # Encode position and time
+        x_enc = self.pos_enc(x) # (N, 20)
+        t_enc = self.time_enc(t.unsqueeze(-1)) # (N, 20)
+        
+        input_vec = torch.cat([x_enc, t_enc], dim=-1) # (N, 40)
+        deltas = self.mlp(input_vec) # (N, 10)
+        
+        delta_x = deltas[:, :3]
+        delta_q = deltas[:, 3:7]
+        delta_s = deltas[:, 7:10]
+        
+        return delta_x, delta_q, delta_s
+
+def normalize_quaternion(q):
+    return F.normalize(q, p=2, dim=-1)
+
+def update_gaussians(x_i, q_i, s_i, delta_x, delta_q, delta_s):
+    # Position update
+    x_t = x_i + delta_x
+    
+    # Scale update (pre-exponentiation)
+    # s_i is log-scale. delta_s is added in log-space.
+    s_t = s_i + delta_s
+    
+    # Rotation update (quaternion multiplication)
+    # q_i and delta_q are unit quaternions
+    q_t = quaternion_multiply(q_i, delta_q)
+    q_t = normalize_quaternion(q_t)
+    
+    return x_t, q_t, s_t
+
+def quaternion_multiply(q1, q2):
+    # q = [w, x, y, z]
+    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+    
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    
+    return torch.stack([w, x, y, z], dim=-1)
+
+def render_gaussians(gaussians, camera_params):
+    # Standard 3DGS rasterization
+    # 1. Project 3D covariance to 2D
+    # 2. Rasterize and alpha composite
+    pass
+
+def train_step(gaussians, static_gaussians, camera_params, gt_image, time, itr, optimizer, phi):
+    # 1. Get deformable Gaussians
+    delta_x, delta_q, delta_s = phi(gaussians.x, time)
+    x_t, q_t, s_t = update_gaussians(gaussians.x, gaussians.q, gaussians.s, delta_x, delta_q, delta_s)
+    
+    # 2. Create deformed set
+    deformed_gaussians = Gaussians(x=x_t, q=q_t, s=s_t, sigma=gaussians.sigma, color=gaussians.color)
+    
+    # 3. Concatenate with static
+    all_gaussians = concatenate(deformed_gaussians, static_gaussians)
+    
+    # 4. Render
+    rendered_image = render_gaussians(all_gaussians, camera_params)
+    
+    # 5. Compute Loss
+    if itr <= 20000:
+        l1_loss = F.mse_loss(rendered_image, gt_image)
+        ssim_loss = 1 - ssim(rendered_image, gt_image)
+        loss = (1 - lambda_ssim) * l1_loss + lambda_ssim * ssim_loss
+    else:
+        l1_loss = F.l1_loss(rendered_image, gt_image)
+        ssim_loss = 1 - ssim(rendered_image, gt_image)
+        loss = (1 - lambda_ssim) * l1_loss + lambda_ssim * ssim_loss
+        
+    # 6. Backprop
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+    return loss
+```
+
+**Parameters:**
+*   Positional Encoding Base for Position ($L_x$): 10 [S1].
+*   Positional Encoding Base for Time ($L_t$): 10 [S1].
+*   Network Architecture: MLP, 6 hidden layers, 256 width [S1].
+*   Optimizer: Adam, $\beta=(0.9, 0.999)$, $\epsilon=10^{-15}$ [S1].
+*   Deformation Field Learning Rate: 0.001, exponential decay to $0.001 \times$ original until 30,000 iterations [S1].
+*   Densification/Pruning: Until 20,000 iterations [S1].
+*   Total Optimization: Until 40,000 iterations [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Quaternion Addition:** Using addition for rotation deformation causes artifacts at novel viewpoints and timesteps because the result is not geometrically bound. Normalization after deformation is required [S1].
+*   **Deforming Opacity/Color:** Deforming $\sigma_i$ and $c_i$ causes severe overfitting on training sets and artifacts in novel views. These are optimized in canonical space only [S1].
+*   **Initialization Conflict:** Initializing both static and deformable sets with SfM or both with random samples causes them to "fight" over scene occupancy, leading to worse reconstruction. Static must be SfM, deformable must be random [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training takes 10–20 minutes on D-NeRF and NeRF-DS datasets [S1]. This is significantly faster than MLP-based NeRF representations [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:**
+    *   **D-NeRF:** 34.5 PSNR, 0.01s rendering time (100 FPS) on NVIDIA 3090 [S1].
+    *   **NeRF-DS:** 23.9 PSNR, 0.01s rendering time [S1].
+    *   **HyperNeRF:** 24.1 PSNR, 0.06s rendering time [S1].
+*   **Strengths:** Real-time rendering speeds, fast training, handles non-rigid deformations (scaling), separates static/dynamic regions for efficiency [S1].
+*   **Limitations:** Requires careful initialization to avoid conflicts between static and deformable sets. Deforming opacity/color is detrimental [S1].
+*   **When to use:** Dynamic scenes with significant static regions, requiring real-time rendering and fast training.
+*   **When not to use:** Scenes where opacity/color change significantly over time (GauFRe does not model this) [S1].
+
+## Background
+GauFRe was introduced in the paper "GauFRe: Gaussian Deformation Fields for Real-Time Dynamic Novel View Synthesis" [S1]. It builds on 3D Gaussian Splatting [Parent] and addresses the limitations of backward-warping NeRF methods and other dynamic Gaussian methods that either only model rigid motion or struggle with static regions [S1].
+
+## Sources
+[S1] GauFRe: Gaussian Deformation Fields for Real-Time Dynamic Novel View Synthesis, https://doi.org/10.1109/wacv61041.2025.00262, fetched 2026-10-26

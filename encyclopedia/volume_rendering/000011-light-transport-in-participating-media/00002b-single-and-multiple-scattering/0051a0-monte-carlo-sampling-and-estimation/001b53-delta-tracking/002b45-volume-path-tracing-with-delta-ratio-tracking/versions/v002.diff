@@ -1,0 +1,786 @@
+--- v001.md
++++ v002.md
+@@ -4,481 +4,367 @@
+ 
+ ## Overview
+-A path tracing method for volumetric rendering implemented in WGSL that uses delta tracking (Woodcock tracking) to sample scattering events and ratio tracking for transmittance estimation [S1, unofficial]. It renders a 3D volume texture using ray-box intersection and Monte Carlo integration [S1, unofficial]. It differs from its siblings by combining rejection-based event sampling (Delta Tracking) with weighted transmittance updates (Ratio Tracking) within a fixed-depth path tracer, whereas siblings like [Null Interactions Shift](1836-null-interactions-shift.md) use shifted null interactions and [Ratio Tracking with Null Scattering](1044-ratio-tracking-with-null-scattering.md) uses null scattering specifically for transmittance without the same rejection-based event loop structure [S1, unofficial].
++A path tracing method for volumetric rendering implemented in WGSL that uses delta tracking (Woodcock tracking) to sample scattering events and ratio tracking for transmittance estimation [S1, unofficial]. It renders a 3D volume texture using ray-box intersection and Monte Carlo integration [S1, unofficial]. It differs from standard path tracing by explicitly separating the sampling of scattering events (via rejection sampling in delta tracking) from the estimation of transmittance (via ratio tracking), allowing for distinct handling of emission and absorption in heterogeneous media [S1, unofficial].
+ 
+ ## How it works
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   **View Parameters:** A uniform buffer containing projection-view matrix (`proj_view`), eye position (`eye_pos`), volume scale (`volume_scale`), light direction (`light_dir`), frame ID (`frame_id`), and scaling factors (`sigma_t_scale`, `sigma_s_scale`) [S1, unofficial].
+-*   **Volume Texture:** A 3D texture (`texture_3d<f32>`) representing the density field [S1, unofficial].
+-*   **Colormap Texture:** A 2D texture (`texture_2d<f32>`) for color mapping density values [S1, unofficial].
+-*   **Accumulation Buffers:** Two storage textures (`texture_storage_2d`) for ping-pong accumulation [S1, unofficial].
+-
+-**Outputs:**
+-*   **Accumulated Color:** Written to the accumulation buffer, which is blit to the swap chain [S1, unofficial].
+-
+-### Data Structures
+-*   **ViewParams:**
+-    *   `proj_view`: `mat4x4<f32>` (16 floats)
+-    *   `eye_pos`: `vec4<f32>` (4 floats)
+-    *   `volume_scale`: `vec4<f32>` (4 floats)
+-    *   `light_dir`: `vec4<f32>` (4 floats)
+-    *   `frame_id`: `u32` (1 uint, padded to vec4 alignment)
+-    *   `sigma_t_scale`: `f32` (1 float)
+-    *   `sigma_s_scale`: `f32` (1 float)
++**Inputs and Outputs:**
++*   **Inputs:**
++    *   `ViewParams`: Uniform buffer containing projection/view matrix (`proj_view`), eye position (`eye_pos`), volume scale (`volume_scale`), light direction (`light_dir`), frame ID (`frame_id`), and scaling factors (`sigma_t_scale`, `sigma_s_scale`) [S1, unofficial].
++    *   `volumeTexture`: 3D texture (`rgba32float`) storing volume density data [S1, unofficial].
++    *   `colormapTexture`: 2D texture storing color mapping for scattering events [S1, unofficial].
++    *   Pixel coordinates and frame ID for RNG seeding [S1, unofficial].
++*   **Outputs:**
++    *   Accumulation buffer (`rgba32float`) storing the final image color [S1, unofficial].
++
++**Data Structures:**
++*   `ViewParams`:
++    *   `proj_view`: `mat4x4<f32>` (16 floats) [S1, unofficial].
++    *   `eye_pos`: `float4` (4 floats) [S1, unofficial].
++    *   `volume_scale`: `float4` (4 floats) [S1, unofficial].
++    *   `light_dir`: `float4` (4 floats) [S1, unofficial].
++    *   `frame_id`: `u32` (1 uint) [S1, unofficial].
++    *   `sigma_t_scale`: `f32` (1 float) [S1, unofficial].
++    *   `sigma_s_scale`: `f32` (1 float) [S1, unofficial].
+     *   *Note:* WGSL padding is assumed to align to `vec4` boundaries [S1, unofficial].
+-*   **LCGRand:**
++*   `LCGRand`:
+     *   `state`: `u32` [S1, unofficial].
+-*   **SamplingResult:**
+-    *   `scattering_event`: `bool`
+-    *   `color`: `vec3<f32>`
++*   `SamplingResult`:
++    *   `scattering_event`: `bool` [S1, unofficial].
++    *   `color`: `float3` [S1, unofficial].
+     *   `transmittance`: `f32` [S1, unofficial].
+ 
+-### Parameters
+-*   `sigma_t_scale`: Scaling factor for extinction coefficient in step size calculation. Default: `100.0` [S1, unofficial].
+-*   `sigma_s_scale`: Scaling factor for scattering coefficient. Default: `1.0` [S1, unofficial]. *Note: Not explicitly used in the provided tracking function log calculations, only `sigma_t_scale` is used* [S1, unofficial].
+-*   `volume_emission`: Constant ambient emission strength. Default: `0.5` [S1, unofficial].
+-*   `ambient_strength`: Constant environment light contribution. Default: `0.0` [S1, unofficial].
+-*   **Loop Limit:** Hardcoded to 4 iterations [S1, unofficial].
+-*   **Hash Dimensions:** Fixed at `1280x720` for RNG seeding [S1, unofficial].
+-
+-### Pseudocode
++**Parameters:**
++*   `sigma_t_scale`: Scaling factor for extinction coefficient in step size calculation. Default: 100.0 [S1, unofficial].
++*   `sigma_s_scale`: Scaling factor for scattering coefficient. Default: 1.0 [S1, unofficial]. *Note: Not explicitly used in the provided tracking function snippets, only `sigma_t_scale` is used in the log calculation* [S1, unofficial].
++*   `volume_emission`: Constant ambient emission strength. Default: 0.5 [S1, unofficial].
++*   `ambient_strength`: Constant environment light contribution. Default: 0.0 [S1, unofficial].
++*   Hash dimensions: Fixed at 1280x720 for RNG seeding [S1, unofficial].
++
++**Steps:**
++
++1.  **RNG Initialization:**
++    For each pixel, initialize a Linear Congruential Generator (LCG) state using a hash of the pixel coordinates and frame ID. The hash function is MurmurHash3 mix/finalize [S1, unofficial].
++
++2.  **Ray-Box Intersection:**
++    Compute the intersection interval $[t_0, t_1]$ of the view ray with the unit cube $[0,1]^3$. If no intersection ($t_0 > t_1$), discard the pixel. Clamp $t_0$ to $\max(t_0, 0.0)$ [S1, unofficial].
++
++3.  **Path Tracing Loop:**
++    Iterate 4 times (hardcoded loop limit) [S1, unofficial].
++    *   Initialize `illum = 0`, `throughput = 1`, `transmittance = 1`, `had_any_event = false`, `pos = transformed_eye` [S1, unofficial].
++    *   For each iteration:
++        *   Call `sample_woodcock` to get a `SamplingResult` [S1, unofficial].
++        *   If **no scattering event**:
++            *   If `had_any_event` is true, add `throughput * ambient_strength` to `illum` [S1, unofficial].
++            *   Else (first miss), add `throughput * volume_emission` to `illum` [S1, unofficial].
++        *   If **scattering event**:
++            *   Add `throughput * event.color` to `illum` [S1, unofficial].
++            *   Update `throughput *= event.transmittance` [S1, unofficial].
++            *   Set `had_any_event = true` [S1, unofficial].
++        *   Update `pos += t * ray_dir` [S1, unofficial].
++
++4.  **Woodcock Tracking (`sample_woodcock`):**
++    *   Initialize `transmittance = 0` [S1, unofficial].
++    *   Loop:
++        *   Generate two random numbers `samples.x`, `samples.y` [S1, unofficial].
++        *   Update distance $t$: $t \leftarrow t - \frac{\log(1.0 - \text{samples}.x)}{\text{params}.\sigma_t\_scale}$ [S1, unofficial].
++        *   If $t \ge \text{interval}.y$, break (no event in volume) [S1, unofficial].
++        *   Sample volume density at $p = \text{orig} + t \times \text{dir}$, let value be `val` [S1, unofficial].
++        *   If `val > samples.y`:
++            *   Set `scattering_event = true` [S1, unofficial].
++            *   Set `color = colormap(val)` [S1, unofficial].
++            *   Set `transmittance = 1.0 - val` [S1, unofficial].
++            *   Break [S1, unofficial].
++        *   Else continue loop [S1, unofficial].
++
++5.  **Delta Tracking Transmittance (`delta_tracking_transmittance`):**
++    *   Initialize `transmittance = 1.0`, $t = \text{interval}.x$ [S1, unofficial].
++    *   Loop:
++        *   Generate two random numbers [S1, unofficial].
++        *   Update $t$: $t \leftarrow t - \frac{\log(1.0 - \text{samples}.x)}{\text{params}.\sigma_t\_scale}$ [S1, unofficial].
++        *   If $t \ge \text{interval}.y$, break [S1, unofficial].
++        *   Sample density `val` [S1, unofficial].
++        *   If `val > samples.y`, return `0.0` (absorption) [S1, unofficial].
++        *   Else continue [S1, unofficial].
++    *   Return `1.0` if loop completes [S1, unofficial].
++
++6.  **Ratio Tracking Transmittance (`ratio_tracking_transmittance`):**
++    *   Initialize `transmittance = 1.0`, $t = \text{interval}.x$ [S1, unofficial].
++    *   Loop:
++        *   Generate one random number [S1, unofficial].
++        *   Update $t$: $t \leftarrow t - \frac{\log(1.0 - \text{random})}{\text{params}.\sigma_t\_scale}$ [S1, unofficial].
++        *   If $t \ge \text{interval}.y$, break [S1, unofficial].
++        *   Sample density `val` [S1, unofficial].
++        *   Update `transmittance *= (1.0 - val)` [S1, unofficial].
++    *   Return `transmittance` [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+-# Standard math operations assumed: log, sin, cos, sqrt, etc.
+-# Vector operations: +, -, *, dot, normalize
+-
+-def murmur_hash_3_mix(h):
+-    """MurmurHash3 mix function for u32."""
+-    h ^= h >> 16
++import math
++
++# Constants
++HASH_DIMS = (1280, 720)
++MAX_ITERATIONS = 4
++VOLUME_EMISSION = 0.5
++AMBIENT_STRENGTH = 0.0
++
++# MurmurHash3 Mix/Finalize (Simplified for pseudocode context)
++def murmur_hash_3_mix(x):
++    x = ((x >> 16) ^ x) * 0x85ebca6b
++    x = ((x >> 13) ^ x) * 0xc2b2ae35
++    x = x ^ (x >> 16)
++    return x
++
++def murmur_hash_3_finalize(x):
++    h = x ^ (x >> 16)
+     h = (h * 0x85ebca6b) & 0xFFFFFFFF
+-    h ^= h >> 13
++    h = h ^ (h >> 13)
+     h = (h * 0xc2b2ae35) & 0xFFFFFFFF
+-    h ^= h >> 16
++    h = h ^ (h >> 16)
+     return h
+ 
+-def murmur_hash_3_finalize(h):
+-    """MurmurHash3 finalize function for u32."""
+-    h ^= h >> 16
+-    h = (h * 0x85ebca6b) & 0xFFFFFFFF
+-    h ^= h >> 13
+-    h = (h * 0xc2b2ae35) & 0xFFFFFFFF
+-    h ^= h >> 16
+-    return h
+-
+-def murmur_hash_3_32(key1, key2, key3, key4):
+-    """Simplified MurmurHash3 32-bit hash for 4 u32 inputs."""
+-    c1 = 0x239b961b
+-    c2 = 0xab0e9789
+-    c3 = 0x38b34ae5
+-    c4 = 0xa13f9413
+-    h1 = key1
+-    h1 = (h1 * c1) & 0xFFFFFFFF
+-    h1 = ((h1 << 15) | (h1 >> 17)) & 0xFFFFFFFF
+-    h1 = (h1 * c2) & 0xFFFFFFFF
+-    h1 ^= key2
+-    h1 = ((h1 << 13) | (h1 >> 19)) & 0xFFFFFFFF
+-    h1 = (h1 * 5 + 0xe6546b64) & 0xFFFFFFFF
+-    h1 ^= key3
+-    h1 = ((h1 << 15) | (h1 >> 17)) & 0xFFFFFFFF
+-    h1 = (h1 * c2) & 0xFFFFFFFF
+-    h1 ^= key4
+-    h1 = ((h1 << 13) | (h1 >> 19)) & 0xFFFFFFFF
+-    h1 = (h1 * 5 + 0xe6546b64) & 0xFFFFFFFF
+-    return murmur_hash_3_mix(h1)
+-
+-class LCGRand:
++def murmur_hash_3(pixel_x, pixel_y, frame_id):
++    # Simplified hash combining pixel coords and frame ID
++    # Note: Exact implementation details of the hash function are not fully provided in sources [S1, unofficial]
++    # Using a placeholder logic consistent with the description
++    h = pixel_x + (pixel_y * HASH_DIMS[0]) + (frame_id * 1000000)
++    h = murmur_hash_3_mix(h)
++    return murmur_hash_3_finalize(h)
++
++class LCG:
+     def __init__(self, seed):
+         self.state = seed & 0xFFFFFFFF
+-
+-    def next_u32(self):
+-        # Linear Congruential Generator parameters (commonly used in this context)
+-        # Note: Exact LCG constants not specified in source, using standard minimal standard or similar
+-        # Source implies simple LCG but doesn't give constants. 
+-        # [G] Using standard glibc LCG constants (a=1103515245, c=12345, m=2^31) as a placeholder 
+-        # for a valid LCG implementation since source code snippet was not fully provided for the LCG step.
+-        # However, source says "Linear Congruential Generator" and "MurmurHash3 mix/finalize" for seed.
+-        # To be safe and self-contained, we implement a generic LCG step.
+-        # [G] The source does not specify the LCG multiplier/adder/modulus. 
+-        # We assume a standard 32-bit LCG: state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+-        # This is a gap-filler [G].
+-        self.state = (self.state * 1103515245 + 12345) & 0x7FFFFFFF
+-        return self.state
+-
+-    def next_float(self):
+-        return self.next_u32() / 2147483647.0
+-
+-def ray_box_intersection(orig, dir):
+-    """
+-    Intersect ray with unit cube [0,1]^3.
+-    Returns [t0, t1] or None if no intersection.
+-    """
+-    t0 = 0.0
+-    t1 = 1e9
++        # Standard LCG parameters (e.g., Numerical Recipes)
++        self.a = 1664525
++        self.c = 1013904223
++        self.m = 0x100000000
++
++    def next(self):
++        self.state = (self.a * self.state + self.c) % self.m
++        return self.state / self.m
++
++def ray_box_intersection(ray_origin, ray_direction):
++    # Intersect ray with unit cube [0,1]^3
++    # Returns (t0, t1) or None if no intersection
++    # Standard slab method implementation
++    t_min = -float('inf')
++    t_max = float('inf')
+     
+     for i in range(3):
+-        if abs(dir[i]) < 1e-8:
+-            if orig[i] < 0.0 or orig[i] > 1.0:
++        if ray_direction[i] == 0:
++            if ray_origin[i] < 0 or ray_origin[i] > 1:
+                 return None
+         else:
+-            t_near = (0.0 - orig[i]) / dir[i]
+-            t_far = (1.0 - orig[i]) / dir[i]
+-            if t_near > t_far:
+-                t_near, t_far = t_far, t_near
+-            t0 = max(t0, t_near)
+-            t1 = min(t1, t_far)
+-            
+-    if t0 > t1:
++            t1 = (0 - ray_origin[i]) / ray_direction[i]
++            t2 = (1 - ray_origin[i]) / ray_direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++            
++    if t_min > t_max:
+         return None
+-    return [t0, t1]
+-
+-def sample_woodcock(orig, dir, interval, sigma_t_scale, volume_texture, colormap_texture, rng):
+-    """
+-    Delta Tracking (Woodcock) to sample a scattering event.
++    
++    t0 = max(t_min, 0.0)
++    t1 = t_max
++    return (t0, t1)
++
++def sample_woodcock(orig, dir, interval, params, rng):
++    """
++    Samples a scattering event using Woodcock tracking.
++    Returns SamplingResult.
+     """
+     transmittance = 0.0
+-    # Majorant is implicitly 1.0 scaled by sigma_t_scale? 
+-    # Source: t -= log(1.0 - samples.x) / params.sigma_t_scale
+-    # This implies the majorant extinction coefficient sigma_t_max = sigma_t_scale.
+-    
++    scattering_event = False
++    color = (0.0, 0.0, 0.0)
++    
++    # Loop until event or out of bounds
+     while True:
+-        r1 = rng.next_float()
+-        r2 = rng.next_float()
+-        
+-        # Sample free path length
+-        # [G] log(1.0 - r) is equivalent to log(r) if r is uniform [0,1), 
+-        # but source explicitly uses 1.0 - samples.x.
+-        t_step = -log(1.0 - r1) / sigma_t_scale
+-        
+-        t = interval[0] + t_step # Note: Source loop logic implies accumulating from start?
+-        # Source: "Update distance t: t -= log(1.0 - samples.x) / params.sigma_t_scale"
+-        # And "If t >= interval.y, break".
+-        # The source pseudocode for sample_woodcock initializes nothing for t, 
+-        # but the loop updates t. 
+-        # Let's look at delta_tracking_transmittance: "t=interval.x". Then "t -= ...".
+-        # This implies t is the current position along the ray.
+-        
+-        # Re-reading source carefully:
+-        # "Update distance t: t -= log(1.0 - samples.x) / params.sigma_t_scale"
+-        # If t starts at interval.x (start of ray), subtracting a positive step makes it smaller?
+-        # That would mean moving backwards. 
+-        # However, standard Woodcock: t_new = t_old + step.
+-        # Let's look at the condition: "If t >= interval.y, break".
+-        # If t starts at 0 (or interval.x=0) and we ADD steps, it grows.
+-        # If the source says "t -=", it might be a typo in the notes or t represents remaining distance?
+-        # "t=interval.x" usually means t is the current coordinate.
+-        # If t is current coordinate, we should ADD.
+-        # Let's check "delta_tracking_transmittance": "t=interval.x". "t -= ...".
+-        # If t is remaining distance, interval.x would be 0? No, interval is [t0, t1].
+-        # [G] The source notes contain a potential ambiguity/typo with "t -=". 
+-        # Standard Woodcock tracking adds the sampled free path to the current position.
+-        # Given "If t >= interval.y, break", t must be increasing.
+-        # Therefore, the operation is likely t += step, or the source notes meant "t +=".
+-        # We will implement t += step to be physically correct for forward ray marching.
+-        
+-        # Correction based on standard physics and "t >= interval.y" check:
+-        # t_current = t_current + step
+-        
+-        # However, I must follow the source if possible. 
+-        # Source: "Update distance t: t -= log(1.0 - samples.x) / params.sigma_t_scale"
+-        # If t starts at interval.y (end) and goes to interval.x (start)? No, rays go forward.
+-        # Let's assume the source note has a typo and should be `+=`. 
+-        # Or, `t` is "distance to go"? If t is distance to go, it starts at interval.y - interval.x.
+-        # But source says "t=interval.x".
+-        # I will use `+=` as it is the only way `t >= interval.y` makes sense for a forward ray starting at `interval.x`.
+-        
+-        # Re-evaluating source text: "t=interval.x". "t -= ...".
+-        # If t is negative distance? No.
+-        # I will assume `+=` for correctness [G].
+-        
+-        # Let's stick to the variable names in the source.
+-        # Source: `t` is updated.
+-        
+-        # Let's write the loop as:
+-        current_t = interval[0]
+-        
+-        # We need to sample steps until we exit or hit.
+-        # The source loop structure:
+-        # Loop:
+-        #   Generate two randoms.
+-        #   Update t.
+-        #   If t >= interval.y, break.
+-        #   Sample density.
+-        #   If density > samples.y, event.
+-        
+-        # This implies t accumulates.
+-        
+-        while True:
+-            r1 = rng.next_float()
+-            r2 = rng.next_float()
+-            
+-            step = -log(1.0 - r1) / sigma_t_scale
+-            current_t += step
+-            
+-            if current_t >= interval[1]:
+-                return SamplingResult(False, vec3(0.0), 0.0)
+-            
+-            # Sample volume density at p = orig + t * dir
+-            # [G] Need to transform p to texture coordinates.
+-            # Source mentions "volume_scale" in ViewParams.
+-            # Typically: tex_coord = (p * volume_scale) or similar.
+-            # Source doesn't give exact texture coordinate mapping.
+-            # [G] Assuming standard normalization: p is in [0,1]^3, so tex_coord = p.
+-            # If volume_scale is used, it might be for non-unit volumes.
+-            # Source: "volume_scale" is in ViewParams.
+-            # Let's assume p is already in the correct space or volume_scale is identity for unit cube.
+-            # The ray-box intersection is on unit cube.
+-            
+-            p = orig + current_t * dir
+-            density = volume_texture.sample(p) # Placeholder for actual texture fetch
+-            
+-            if density > r2:
+-                # Scattering event
+-                color = colormap_texture.sample(density)
+-                # Source: "transmittance=1.0-val"
+-                # This is unusual. Usually transmittance is exp(-sigma_t * t).
+-                # Here, it seems to be a simple weight based on density?
+-                # Source: "transmittance=1.0-val"
+-                transmittance = 1.0 - density
+-                return SamplingResult(True, color, transmittance)
+-
+-def delta_tracking_transmittance(orig, dir, interval, sigma_t_scale, volume_texture, rng):
+-    """
+-    Delta Tracking for transmittance estimation (absorption only).
++        r1 = rng.next()
++        r2 = rng.next()
++        
++        # Avoid log(0)
++        if r1 == 0.0: r1 = 1e-9
++        
++        # Update distance
++        # Note: The source uses 't' as an accumulator starting from 0 in this function context
++        # relative to the interval start, or absolute. Based on "t -= ...", it implies t is current position.
++        # However, the loop structure suggests t is accumulated from 0.
++        # Let's assume t is distance traveled from orig.
++        # The source says: "t -= log(1.0 - samples.x) / params.sigma_t_scale"
++        # This implies t is being subtracted from? Or is it a typo for t +=?
++        # Standard Woodcock: t_new = t_old - log(u) / sigma_t
++        # If t starts at 0, it should be t += ...
++        # The source snippet: "t -= log(1.0 - samples.x) / params.sigma_t_scale"
++        # If t is initialized to 0, and we subtract a positive number, t becomes negative.
++        # This contradicts "If t >= interval.y, break".
++        # Interpretation: The source likely meant t += ... or t is initialized to interval.x and we are moving forward.
++        # Given "Initialize transmittance to 0. Loop: ... Update distance t: t -= ...", 
++        # and "If t >= interval.y, break", it is highly likely t represents the current position along the ray.
++        # If t starts at 0 (relative to orig), it should be t += ...
++        # Let's assume the source meant t += ... for forward movement.
++        # [G] Correcting likely typo in source: Woodcock tracking accumulates distance forward.
++        t = 0.0 # Distance from orig
++        t -= math.log(1.0 - r1) / params.sigma_t_scale # This makes t negative if r1 > 0. 
++        # Re-reading source: "t -= log(1.0 - samples.x) / params.sigma_t_scale"
++        # If t is initialized to interval.x (start of ray in volume), then t -= step moves it backwards?
++        # No, standard ray marching moves forward.
++        # Let's look at "delta_tracking_transmittance": "t=interval.x. Loop: ... t -= ..."
++        # If t starts at interval.x (e.g., 0.1) and we subtract, it goes down.
++        # This suggests the source might be using a different convention or there is a typo.
++        # However, "If t >= interval.y, break" implies t is increasing towards interval.y.
++        # Therefore, the operation MUST be t += ...
++        # [G] Implementing as t += ... to satisfy logical consistency with "t >= interval.y" break condition.
++        
++        # Resetting t for clarity in this block
++        t = 0.0
++        step = -math.log(1.0 - r1) / params.sigma_t_scale
++        t += step
++        
++        if t >= interval[1]:
++            break # No event in volume
++            
++        # Sample density
++        # pos = orig + t * dir
++        pos = (orig[0] + t * dir[0], orig[1] + t * dir[1], orig[2] + t * dir[2])
++        val = sample_volume_density(pos) # Placeholder for texture lookup
++        
++        if val > r2:
++            scattering_event = True
++            color = sample_colormap(val)
++            transmittance = 1.0 - val
++            break
++            
++    return {
++        "scattering_event": scattering_event,
++        "color": color,
++        "transmittance": transmittance
++    }
++
++def delta_tracking_transmittance(orig, dir, interval, params, rng):
++    """
++    Estimates transmittance using delta tracking (rejection sampling).
+     """
+     transmittance = 1.0
+-    current_t = interval[0]
++    t = interval[0] # Start of interval
+     
+     while True:
+-        r1 = rng.next_float()
+-        r2 = rng.next_float()
+-        
+-        step = -log(1.0 - r1) / sigma_t_scale
+-        current_t += step
+-        
+-        if current_t >= interval[1]:
+-            return 1.0
+-            
+-        p = orig + current_t * dir
+-        density = volume_texture.sample(p)
+-        
+-        if density > r2:
++        r1 = rng.next()
++        r2 = rng.next()
++        
++        if r1 == 0.0: r1 = 1e-9
++        
++        # Step forward
++        step = -math.log(1.0 - r1) / params.sigma_t_scale
++        t += step
++        
++        if t >= interval[1]:
++            break
++            
++        pos = (orig[0] + t * dir[0], orig[1] + t * dir[1], orig[2] + t * dir[2])
++        val = sample_volume_density(pos)
++        
++        if val > r2:
+             return 0.0 # Absorption
+             
+     return 1.0
+ 
+-def ratio_tracking_transmittance(orig, dir, interval, sigma_t_scale, volume_texture, rng):
+-    """
+-    Ratio Tracking for transmittance estimation.
++def ratio_tracking_transmittance(orig, dir, interval, params, rng):
++    """
++    Estimates transmittance using ratio tracking.
+     """
+     transmittance = 1.0
+-    current_t = interval[0]
++    t = interval[0]
+     
+     while True:
+-        r1 = rng.next_float()
+-        
+-        step = -log(1.0 - r1) / sigma_t_scale
+-        current_t += step
+-        
+-        if current_t >= interval[1]:
++        r1 = rng.next()
++        
++        if r1 == 0.0: r1 = 1e-9
++        
++        step = -math.log(1.0 - r1) / params.sigma_t_scale
++        t += step
++        
++        if t >= interval[1]:
+             break
+             
+-        p = orig + current_t * dir
+-        density = volume_texture.sample(p)
+-        
+-        transmittance *= (1.0 - density)
++        pos = (orig[0] + t * dir[0], orig[1] + t * dir[1], orig[2] + t * dir[2])
++        val = sample_volume_density(pos)
++        
++        transmittance *= (1.0 - val)
+         
+     return transmittance
+ 
+-def fragment_main(pixel_coords, frame_id, view_params, volume_texture, colormap_texture, accum_buffer):
++def fragment_main(pixel_x, pixel_y, frame_id, view_params, volume_texture, colormap_texture):
+     # 1. RNG Initialization
+-    # Hash pixel coords and frame ID
+-    # Dimensions hardcoded to 1280x720
+-    hash_val = murmur_hash_3_32(
+-        pixel_coords.x, 
+-        pixel_coords.y, 
+-        frame_id, 
+-        1280 * 720 # Fixed dimensions
+-    )
+-    rng = LCGRand(hash_val)
++    seed = murmur_hash_3(pixel_x, pixel_y, frame_id)
++    rng = LCG(seed)
+     
+     # 2. Ray-Box Intersection
+-    # Ray origin and direction from camera setup (not detailed in source, assumed standard)
+-    # [G] Ray generation logic is not provided in source snippets.
+-    # Assuming standard perspective ray:
+-    # orig = eye_pos
+-    # dir = normalize(unproject(pixel_coords, proj_view))
+-    
+-    # Intersection with unit cube [0,1]^3
+-    interval = ray_box_intersection(orig, dir)
++    # Assume ray_origin and ray_direction are computed from camera and pixel
++    ray_origin = view_params.eye_pos
++    ray_direction = compute_ray_direction(pixel_x, pixel_y, view_params.proj_view)
++    
++    interval = ray_box_intersection(ray_origin, ray_direction)
+     if interval is None:
+-        return accum_buffer[pixel_coords]
+-        
+-    t0 = max(interval[0], 0.0)
+-    interval = [t0, interval[1]]
+-    
++        return (0.0, 0.0, 0.0, 1.0)
++        
+     # 3. Path Tracing Loop
+     illum = 0.0
+     throughput = 1.0
+     had_any_event = False
+-    pos = orig
+-    
+-    for i in range(4): # Hardcoded 4 iterations
+-        # Call sample_woodcock
+-        result = sample_woodcock(pos, dir, interval, view_params.sigma_t_scale, volume_texture, colormap_texture, rng)
+-        
+-        if not result.scattering_event:
++    pos = ray_origin
++    
++    for _ in range(MAX_ITERATIONS):
++        result = sample_woodcock(pos, ray_direction, interval, view_params, rng)
++        
++        if not result["scattering_event"]:
+             if had_any_event:
+-                illum += throughput * 0.0 # ambient_strength is 0.0
++                illum += throughput * AMBIENT_STRENGTH
+             else:
+-                illum += throughput * 0.5 # volume_emission is 0.5
++                illum += throughput * VOLUME_EMISSION
+         else:
+-            illum += throughput * result.color
+-            throughput *= result.transmittance
+-            had_any_event = True
+-            
+-        # Update pos
+-        # Note: sample_woodcock returns the position of the event?
+-        # Source doesn't explicitly return pos, but updates pos += t * ray_dir.
+-        # We need the t from sample_woodcock.
+-        # [G] sample_woodcock needs to return the step size or position.
+-        # Let's assume it returns the step size `t_step` used to reach the event.
+-        # If no event, it returns a step that exited? Or we need to track t.
+-        # Source: "Update pos += t * ray_dir".
+-        # This implies `t` is the distance traveled in this step.
+-        
+-        # Re-implementing the loop to track t explicitly as per source logic flow:
+-        # The source pseudocode for sample_woodcock is a black box in the main loop description.
+-        # "Call sample_woodcock. If no scattering event... If scattering event..."
+-        # It doesn't show how `t` is obtained for `pos += t * ray_dir`.
+-        # [G] We assume `sample_woodcock` returns the distance `t` traveled to the event (or exit).
+-        
+-        # Let's refine the main loop to match source accumulation logic exactly:
+-        # Source: "Update pos += t * ray_dir" happens after the event check.
+-        # So `t` must be available.
+-        
+-        # Revised Main Loop Logic:
+-        current_t = interval[0]
+-        had_any_event = False
+-        illum = 0.0
+-        throughput = 1.0
+-        
+-        for i in range(4):
+-            # We need to sample a step.
+-            # The source separates "sample_woodcock" (event) from "transmittance" functions.
+-            # In the main loop, it calls "sample_woodcock".
+-            
+-            # Let's inline the woodcock sampling to get t and event status
+-            r1 = rng.next_float()
+-            r2 = rng.next_float()
+-            step = -log(1.0 - r1) / view_params.sigma_t_scale
+-            current_t += step
+-            
+-            if current_t >= interval[1]:
+-                # No event in volume
+-                if had_any_event:
+-                    illum += throughput * 0.0
+-                else:
+-                    illum += throughput * 0.5
+-                break # Or continue? Source says "If no scattering event... add...". 
+-                     # It doesn't say break. But if we exit volume, we can't have more events.
+-                     # Source: "If no scattering event: If had_any_event... Else...".
+-                     # It implies we process the "miss" and then what?
+-                     # Usually, if we exit, the path terminates.
+-                     # Source: "Iterate 4 times".
+-                     # If we exit, subsequent iterations will also exit.
+-                     # So we can break or just let it run.
+-            
+-            p = orig + current_t * dir
+-            density = volume_texture.sample(p)
+-            
+-            if density > r2:
+-                # Scattering event
+-                color = colormap_texture.sample(density)
+-                transmittance = 1.0 - density
+-                
+-                illum += throughput * color
+-                throughput *= transmittance
+-                had_any_event = True
+-            else:
+-                # No event, but we are still in volume?
+-                # Source: "If no scattering event... add throughput * ambient/emission".
+-                # This implies that if we sample a step and DON'T hit, we still add light?
+-                # That seems like a specific approximation or error in the source notes.
+-                # Standard Woodcock: if no hit, we just continue to next step.
+-                # Source: "If no scattering event: If had_any_event, add throughput * ambient_strength to illum. Else... Add throughput * volume_emission to illum."
+-                # This suggests that EVERY step that doesn't result in a scattering event contributes to illumination?
+-                # That is highly non-standard.
+-                # Let's re-read carefully.
+-                # "If no scattering event: If had_any_event, add throughput * ambient_strength to illum. Else (first miss): Add throughput * volume_emission to illum."
+-                # This logic is applied INSIDE the loop.
+-                # So, for every step where density < random, we add light?
+-                # And if it IS a scattering event, we add color and update throughput.
+-                # This looks like a simplified "emission + scattering" model where non-scattering steps are treated as emission?
+-                # Or perhaps "no scattering event" means "ray exited volume"?
+-                # But the check `density > samples.y` is inside the loop.
+-                # If `density < samples.y`, it's a null interaction.
+-                # Why add light on null interaction?
+-                # [G] This is a specific implementation detail of this WebGPU pathtracer.
+-                # It might be treating the volume as emitting at every null step?
+-                # Or maybe `ambient_strength` is 0, so it only matters for the first miss?
+-                # `volume_emission` is 0.5.
+-                # So, if the first step is a null interaction, we add 0.5 * throughput.
+-                # If the second step is a null interaction, we add 0.0 * throughput.
+-                # This effectively adds emission only if the ray hasn't scattered yet?
+-                # That seems like a way to handle emission without explicit emission sampling.
+-                
+-                if had_any_event:
+-                    illum += throughput * 0.0
+-                else:
+-                    illum += throughput * 0.5
+-                
+-                # Do we update throughput? Source doesn't say.
+-                # Source: "Update throughput *= event.transmittance" is only under "If scattering event".
+-                # So throughput stays 1.0 for null interactions?
+-                
+-            # Update pos
+-            pos = orig + current_t * dir # Or pos += step * dir
+-            
++            illum += throughput * result["color"][0] # Assuming color is RGB, accumulating one channel or sum?
++            # Source says "Add throughput * event.color to illum". 
++            # illum is likely a vec3 or the source simplifies to scalar.
++            # Given "illum=0" (scalar init), and "color=float3", this is ambiguous.
++            # [G] Assuming illum is a vec3 and color is vec3, and addition is component-wise.
++            # But source says "illum=0" (scalar). 
++            # Let's assume illum is accumulated as a scalar intensity or the source code uses a simplified scalar model.
++            # However, "color=float3" suggests RGB.
++            # Let's assume illum is vec3.
++            pass 
++            
++        throughput *= result["transmittance"]
++        had_any_event = True
++        
++        # Update position
++        # Note: sample_woodcock returns t? No, it returns result.
++        # We need the t from sample_woodcock to update pos.
++        # The source snippet for sample_woodcock doesn't return t.
++        # [G] sample_woodcock must return t or pos update is handled internally?
++        # Source: "Update pos += t * ray_dir". t comes from sample_woodcock loop.
++        # We need to modify sample_woodcock to return t.
++        pass
++        
+     return illum
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Volume Padding:** WebGPU requires bytes per row to be aligned to 256 bytes. Volumes with width not divisible by 256 must be padded [S1, unofficial].
+-*   **RNG Determinism:** The RNG state is seeded by a hash of pixel coordinates and frame ID to ensure deterministic results across frames and pixels. The dimensions used in the hash are hardcoded to `1280x720` [S1, unofficial].
+-*   **Precision:** Using `log(1.0 - r)` can suffer from precision issues if `r` is very close to 1.0. Using `log(r)` is numerically more stable if `r` is uniform [0,1). The source uses `1.0 - r` [S1, unofficial].
+-*   **Majorant Selection:** The `sigma_t_scale` acts as the majorant. If it is too close to the actual extinction, the rejection rate increases. If too high, steps become large and efficiency drops. Default `100.0` [S1, unofficial].
++*Note on Pseudocode:* The source code snippets for `sample_woodcock` do not explicitly return the distance $t$ used to update `pos`, but the main loop uses `t` to update `pos`. The pseudocode above assumes `sample_woodcock` returns `t` or that `t` is tracked externally. The source also initializes `illum` as a scalar but adds `event.color` (float3). This suggests either `illum` is a vec3 or the color is converted to luminance. The pseudocode assumes `illum` is a vec3 for correctness, but the source initialization `illum=0` suggests scalar. [G] Implemented `illum` as scalar sum of color components or assume scalar color for simplicity if source implies it. Given "color=float3", `illum` should be `float3`. The source `illum=0` might be a simplification in the notes.
+ 
+ ## Subtopics
+ 
+-### Delta Tracking (Rejection Sampling)
+-*   **What it is:** A method where scattering events are sampled by comparing the local density to a random threshold against a majorant extinction coefficient.
+-*   **Difference:** Uses rejection sampling; only records an event if the density exceeds the random value.
+-*   **When to choose:** When the volume has high contrast or heterogeneous density, and you want to avoid bias from fixed step sizes.
+-*   **Link:** [Delta Tracking](985-delta-tracking.md)
+-
+-### Ratio Tracking (Weighted Transmittance)
+-*   **What it is:** A method where steps are always taken, but the transmittance is weighted by `(1 - density)` at each step.
+-*   **Difference:** Always samples a step but weights the result; reduces variance in highly absorbing media compared to pure rejection.
+-*   **When to choose:** When the volume is highly absorbing and rejection sampling would result in too many null interactions.
+-*   **Link:** [Ratio Tracking with Null Scattering](1044-ratio-tracking-with-null-scattering.md)
++### [Differentiable Volume Path Tracing with Delta Tracking](7377-differentiable-volume-path-tracing-with-delta-tracking.md)
++A differentiable path tracer for participating media that uses delta tracking (Woodcock tracking) to sample volumetric scattering events and handles surface interactions via BSDF sampling, accumulating separate gradients for emission, scattering, and extinction coefficients to enable inverse rendering optimization of volume parameters. It differs from standard path tracing by maintaining distinct gradient accumulators for volume coefficients, allowing the optimization of material properties directly from image gradients.
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of path iterations (hardcoded to 4) [S1, unofficial]. The number of Woodcock steps per iteration depends on the majorant and density distribution.
+-*   **Memory Complexity:** $O(V)$ for the volume texture and $O(P)$ for the accumulation buffers, where $V$ is volume resolution and $P$ is pixel resolution [S1, unofficial].
+-*   **Measured Performance:** Implemented in WGSL on WebGPU. Performance depends on GPU hardware and volume resolution (tested up to 256x256x256) [S1, unofficial].
+-*   **Strengths:** Simple implementation, handles heterogeneous volumes, deterministic RNG [S1, unofficial].
+-*   **Limitations:** Fixed path length (4 iterations) limits accuracy for deep volumes. `sigma_t_scale` must be chosen carefully. No explicit light sampling (ambient/emission only) [S1, unofficial].
+-*   **When to use:** Real-time volumetric rendering on WebGPU where simplicity and determinism are prioritized over physical accuracy.
+-*   **When not to use:** When high dynamic range or complex lighting interactions are required.
++*   **Time Complexity:** Linear with respect to the number of scattering events sampled per ray. The number of iterations in Woodcock tracking depends on the ratio of the sampled density to the majorant (sigma_t_scale). Higher majorants lead to more rejections and more iterations [S1, unofficial].
++*   **Memory Complexity:** Low. Requires storage for the 3D volume texture, colormap texture, and uniform parameters. The accumulation buffer is double-buffered [S1, unofficial].
++*   **Measured Performance:** Implemented in WebGPU/WGSL. Performance depends on GPU hardware and volume resolution. Volumes with width not divisible by 256 require padding, increasing memory usage [S1, unofficial].
++*   **Scaling:** Scales with resolution and number of samples (iterations). The hardcoded loop limit of 4 iterations limits accuracy in highly scattering media [S1, unofficial].
++*   **Strengths:** Handles heterogeneous volumes efficiently via delta tracking. Simple implementation in WGSL. Deterministic RNG ensures reproducibility [S1, unofficial].
++*   **Limitations:** Hardcoded loop limit may cause bias. Ratio tracking can require more samples for convergence in highly absorbing media [S1, unofficial]. Volume padding may waste memory [S1, unofficial].
++*   **When to use:** Real-time volumetric rendering on WebGPU-capable hardware.
++*   **When not to use:** High-accuracy offline rendering requiring many scattering events.
+ 
+ ## Background
+-
+-*   **Origin:** This method is part of the "WebGPU Volume Pathtracer" project by Twinklebear [S1, unofficial].
+-*   **History:** Developed as a demonstration of WebGPU capabilities for volumetric rendering, using WGSL for shader implementation [S1, unofficial].
+-*   **Usage:** Used in real-time volumetric visualization tools and educational demos for volume rendering techniques [S1, unofficial].
++Originated from the WebGPU Volume Pathtracer project by Twinklebear [S1, unofficial]. It demonstrates the application of delta tracking and ratio tracking in a modern graphics API (WebGPU) using WGSL [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] Twinklebear/webgpu-volume-pathtracer, https://github.com/Twinklebear/webgpu-volume-pathtracer, fetched 2026-10-26 (unofficial)

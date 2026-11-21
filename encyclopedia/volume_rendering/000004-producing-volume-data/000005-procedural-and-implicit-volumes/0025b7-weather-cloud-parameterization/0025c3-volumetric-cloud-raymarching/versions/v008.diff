@@ -1,0 +1,215 @@
+--- v007.md
++++ v008.md
+@@ -1,8 +1,8 @@
+ # Volumetric Cloud Raymarching
+ 
+-Also called: Cloud Raymarching, Real-Time Volumetric Clouds, Sky Cloud Raymarching, Volumetric Cloud Rendering, VolumometricCloudPass, VolumetricCloudProgram
++Also called: Cloud Raymarching, Real-Time Volumetric Clouds, Sky Cloud Raymarching, Volumetric Cloud Rendering, VolumetricCloudPass, VolumetricCloudProgram
+ 
+ ## Overview
+-Volumetric Cloud Raymarching is a real-time rendering technique that simulates cumulus and stratiform clouds by tracing rays through a 3D procedural density field and integrating light attenuation using Beer's Law [S1, S2, S3, S4, unofficial]. It replaces static sprites or low-poly meshes with continuous participating media, enabling realistic self-shadowing, silver linings, and god rays [S6, S10, unofficial]. It differs from its parent [Weather & Cloud Parameterization](3617-weather-cloud-parameterization.md) by implementing the actual radiative transfer integration and noise sampling, and from its sibling [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by focusing on the ray-marching traversal and shading loop rather than just the density generation [S1, S2, unofficial].
++Volumetric Cloud Raymarching is a real-time rendering technique that simulates cumulus clouds by tracing rays through a 3D procedural density field and integrating light attenuation using Beer's Law [S1, S2, S3, S4, unofficial]. It replaces static sprites or low-poly meshes with continuous participating media, enabling realistic self-shadowing, silver linings, and god rays [S6, S10, unofficial]. It differs from its parent [Weather & Cloud Parameterization](3617-weather-cloud-parameterization.md) by implementing the actual radiative transfer integration and noise sampling, and from its sibling [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by focusing on the ray-marching traversal and shading loop rather than just the density generation [S1, S2, unofficial].
+ 
+ ## How it works
+@@ -12,10 +12,10 @@
+ 
+ **Data Structures:**
+-*   **Cloud Config:** Uniforms or struct containing `cloudBottom`, `cloudTop`, `coverage`, `densityMultiplier`, `maxSteps`, `lightSteps`, `sunDirection`, `sunColor`, `ambientColor`, `stepSize` [S4, unofficial].
++*   **Cloud Config:** Uniforms or struct containing `cloud_bottom`, `cloud_top`, `coverage`, `density_multiplier`, `max_steps`, `light_steps`, `sun_direction`, `sun_color`, `ambient_color`, `extinction` [S4, unofficial].
+ *   **Noise Textures:**
+     *   `ShapeNoise`: 3D texture (e.g., $128^3$ or $64^3$), format `RGBA8` or `Float`, wrapping `REPEAT` [S5, S6, unofficial].
+     *   `DetailNoise`: 3D texture (e.g., $32^3$), format `RGBA8`, wrapping `REPEAT` [S5, unofficial].
+     *   `WeatherSignal`: 2D texture (e.g., $512 \times 512$), format `RGBA8`, wrapping `REPEAT`. Channel R: coverage, Channel G: cloud type [S5, S9, unofficial].
+-*   **Bounding Box:** Defined by `boundsMin` and `boundsMax` (float3) or spherical shell radii [S3, S13, unofficial].
++*   **Bounding Box:** Defined by `bounds_min` and `bounds_max` (float3) or spherical shell radii [S3, S13, unofficial].
+ 
+ **Numbered Steps:**
+@@ -24,63 +24,81 @@
+     *   Compute ray origin (`ro`) from camera position and ray direction (`rd`) from NDC coordinates using the inverse view-projection matrix [S5, S11, unofficial].
+     *   If using a spherical shell, intersect `rd` with inner/outer spheres to find entry `t0` and exit `t1` [S13, unofficial].
+-    *   If using a slab, calculate entry `t_near` and exit `t_far` based on `cloudBottom` and `cloudTop` altitudes relative to `ro` and `rd` [S4, unofficial].
+-        $$t_{\text{near}} = \max(0.0, \frac{h_{\text{bottom}} - r_o.y}{r_d.y})$$
+-        $$t_{\text{far}} = \frac{h_{\text{top}} - r_o.y}{r_d.y}$$
+-    *   If `t_far <= t_near` or `rd.y <= 0.001` (pointing below horizon), return sky color/black with full transmittance [S4, S13, unofficial].
+-
++    *   If using a slab, calculate entry `t_near` and exit `t_far` based on `cloud_bottom` and `cloud_top` altitudes relative to `ro` and `rd` [S4, unofficial].
++        $$t_0 = \frac{h_{\text{bottom}} - r_o.y}{r_d.y}, \quad t_1 = \frac{h_{\text{top}} - r_o.y}{r_d.y}$$
++        Swap $t_0$ and $t_1$ if $t_0 > t_1$ to handle negative $r_d.y$ [S4, unofficial].
++        Clamp $t_0$ to $\max(0.0, t_0)$ and reject if $t_1 \le 0$ or $t_0 \ge t_1$ [S4, S13, unofficial].
+ 2.  **Step Size Calculation:**
+-    *   Calculate step size: `stepSize = (t_far - t_near) / maxSteps` [S4, unofficial].
+-    *   Clamp `stepSize` to a minimum (e.g., 24.0 meters) to prevent aliasing at distance [S5, unofficial].
+-    *   Add jitter: `t = t_near + rand() * stepSize` [S5, unofficial].
+-
++    *   Calculate step size: `step_size = (t_far - t_near) / max_steps` [S4, unofficial].
++    *   Clamp `step_size` to a minimum (e.g., 24.0 meters) to prevent aliasing at distance [S5, unofficial].
++    *   Add jitter: `t = t_near + rand() * step_size` [S5, unofficial].
+ 3.  **Main Raymarching Loop:**
+     *   Initialize `transmittance = 1.0`, `accumulated_color = 0.0` [S8, S4, unofficial].
+-    *   Loop `i` from 0 to `maxSteps`:
++    *   Loop `i` from 0 to `max_steps`:
+         *   If `t > t_far` or `transmittance < 0.01`, break [S4, S9, unofficial].
+         *   Compute sample position: `p = ro + rd * t` [S2, unofficial].
+         *   **Density Sampling:**
+-            *   Calculate UVW coordinates: `uvw = (p - boundsMin) / (boundsMax - boundsMin)` or scaled world position [S3, S9, unofficial].
++            *   Calculate UVW coordinates: `uvw = (p - bounds_min) / (bounds_max - bounds_min)` or scaled world position [S3, S9, unofficial].
+             *   Sample `ShapeNoise` at `uvw` to get base density `d_base` [S9, unofficial].
+             *   Sample `DetailNoise` at `uvw * detail_scale` for erosion/detail [S3, S9, unofficial].
+-            *   Compute final density: `density = max(0.0, (d_base - threshold) * densityMultiplier - erosion)` [S9, S10, unofficial].
++            *   Compute final density: `density = max(0.0, (d_base - threshold) * density_multiplier - erosion)` [S9, S10, unofficial].
+             *   Apply height gradient and weather coverage mask if available [S7, S9, unofficial].
+         *   **Lighting & Accumulation (if `density > 0.001`):**
+-            *   **Phase Function:** Calculate scattering angle cosine `cosTheta = dot(rd, sunDir)` [S4, unofficial]. Compute phase value `P` using Dual-Lobe Henyey-Greenstein [S4, unofficial]:
++            *   **Phase Function:** Calculate scattering angle cosine `cos_theta = dot(rd, sun_dir)` [S4, unofficial]. Compute phase value `P` using Dual-Lobe Henyey-Greenstein [S4, unofficial]:
+                 $$P(\cos\theta, g) = \frac{1}{4\pi} \frac{1 - g^2}{(1 + g^2 - 2g\cos\theta)^{1.5}}$$
+                 Where $g_{\text{forward}} \approx 0.82$ and $g_{\text{backward}} \approx -0.22$ [S4, unofficial].
+             *   **Secondary Light March (Self-Shadowing):**
+-                *   Initialize `lightOpticalDepth = 0.0` [S4, unofficial].
+-                *   Loop `l` from 1 to `lightSteps`:
+-                    *   `lp = p + sunDir * (l * lightStep)` [S4, unofficial].
+-                    *   `lightOpticalDepth += SampleDensity(lp) * lightStep` [S4, unofficial].
+-                *   Calculate light transmittance: `lightTrans = exp(-lightOpticalDepth * 0.035)` [S4, unofficial].
++                *   Initialize `light_optical_depth = 0.0` [S4, unofficial].
++                *   Loop `l` from 1 to `light_steps`:
++                    *   `lp = p + sun_dir * (l * light_step)` [S4, unofficial].
++                    *   `light_optical_depth += SampleDensity(lp) * light_step` [S4, unofficial].
++                *   Calculate light transmittance: `light_trans = exp(-light_optical_depth * 0.035)` [S4, unofficial].
+             *   **Accumulate Scattered Light:**
+-                *   `stepOpticalDepth = density * stepSize * extinctionCoefficient` (e.g., 0.035) [S4, unofficial].
+-                *   `stepTrans = exp(-stepOpticalDepth)` [S4, unofficial].
+-                *   `scatteredLight = (sunColor * lightTrans * P + ambientColor) * density * stepSize * transmittance` [S4, S10, unofficial].
+-                *   `accumulated_color += scatteredLight` [S4, unofficial].
+-                *   `transmittance *= stepTrans` [S4, unofficial].
+-        *   Advance: `t += stepSize` [S3, unofficial].
++                *   `step_optical_depth = density * step_size * extinction_coefficient` (e.g., 0.035) [S4, unofficial].
++                *   `step_trans = exp(-step_optical_depth)` [S4, unofficial].
++                *   `scattered_light = (sun_color * light_trans * P + ambient_color) * density * step_size * transmittance` [S4, S10, unofficial].
++                *   `accumulated_color += scattered_light` [S4, unofficial].
++                *   `transmittance *= step_trans` [S4, unofficial].
++        *   Advance: `t += step_size` [S3, unofficial].
+ 
+ 4.  **Final Compositing:**
+-    *   `finalColor = accumulated_color + skyColor * transmittance` [S9, S11, unofficial].
+-    *   `finalAlpha = 1.0 - transmittance` [S2, unofficial].
++    *   `final_color = accumulated_color + sky_color * transmittance` [S9, S11, unofficial].
++    *   `final_alpha = 1.0 - transmittance` [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
++
++def hash_float(x, y, z):
++    """Deterministic hash returning a float in [0, 1)."""
++    return (math.sin(x * 12.9898 + y * 78.233 + z * 44.567) * 43758.5453) % 1.0
++
++def sample_3d_texture(tex, uvw):
++    """Placeholder for 3D texture/procedural noise lookup. Returns density."""
++    return max(0.0, tex.sample(uvw).r)
++
++def dual_lobe_hg(cos_theta, g_fwd, g_bwd):
++    """Dual-lobe Henyey-Greenstein phase function."""
++    def hg(g, ct):
++        g2 = g * g
++        denom = math.pow(1.0 + g2 - 2.0 * g * ct, 1.5)
++        return (1.0 - g2) / (4.0 * math.pi * denom) if denom > 1e-6 else 0.0
++    return 0.75 * hg(g_fwd, cos_theta) + 0.25 * hg(g_bwd, cos_theta)
++
+ def raymarch_clouds(ray_origin, ray_dir, config, time):
+-    # 1. Intersection
+-    if ray_dir.y <= 0.001:
+-        return (vec3(0), 1.0) # Sky
+-
+-    t_near = max(0.0, (config.cloud_bottom - ray_origin.y) / ray_dir.y)
+-    t_far = (config.cloud_top - ray_origin.y) / ray_dir.y
+-
+-    if t_far <= t_near:
++    # 1. Slab Intersection
++    t0 = (config.cloud_bottom - ray_origin.y) / ray_dir.y
++    t1 = (config.cloud_top - ray_origin.y) / ray_dir.y
++    if t0 > t1:
++        t0, t1 = t1, t0
++    if t1 < 0.0:
++        return (vec3(0), 1.0) # Ray points away from slab
++    if t0 < 0.0:
++        t0 = 0.0
++    if t0 >= t1:
+         return (vec3(0), 1.0)
+ 
+-    step_size = (t_far - t_near) / config.max_steps
+-    t = t_near + random_float() * step_size # Jitter
++    step_size = (t1 - t0) / config.max_steps
++    t = t0 + hash_float(ray_origin.x, ray_origin.y, ray_origin.z) * step_size
+ 
+     transmittance = 1.0
+@@ -89,5 +107,5 @@
+     # 2. Main Loop
+     for i in range(config.max_steps):
+-        if t > t_far or transmittance < 0.01:
++        if t > t1 or transmittance < 0.01:
+             break
+ 
+@@ -98,5 +116,5 @@
+             # Phase Function
+             cos_theta = dot(normalize(ray_dir), config.sun_direction)
+-            phase = dual_lobe_henyey_greenstein(cos_theta, config.g_forward, config.g_backward)
++            phase = dual_lobe_hg(cos_theta, config.g_forward, config.g_backward)
+ 
+             # Secondary Light March
+@@ -106,9 +124,9 @@
+                 light_optical_depth += sample_cloud_density(light_pos, config, time) * config.light_step
+             
+-            light_trans = exp(-light_optical_depth * 0.035)
++            light_trans = math.exp(-light_optical_depth * 0.035)
+ 
+             # Accumulation
+             step_optical_depth = density * step_size * config.extinction
+-            step_trans = exp(-step_optical_depth)
++            step_trans = math.exp(-step_optical_depth)
+             
+             sun_contrib = config.sun_color * light_trans * phase
+@@ -125,14 +143,15 @@
+ 
+ def sample_cloud_density(pos, config, time):
+-    # Simplified density sampling
++    """Procedural density sampling based on noise textures."""
++    # Normalize position to [0, 1] range relative to bounds
+     uvw = (pos - config.bounds_min) / (config.bounds_max - config.bounds_min)
+     # Add wind/time offset
+     uvw += vec3(time * 0.0004, 0, 0) 
+     
+-    base = texture3D(config.shape_noise, uvw).r
+-    detail = texture3D(config.detail_noise, uvw * 4.0).r
++    base = sample_3d_texture(config.shape_noise, uvw)
++    detail = sample_3d_texture(config.detail_noise, uvw * 4.0)
+     
+     # Erosion logic
+-    erosion = (1.0 - detail) * (1.0 - base)**3
++    erosion = (1.0 - detail) * math.pow(1.0 - base, 3)
+     density = base - erosion
+     
+@@ -141,12 +160,12 @@
+ 
+ **Parameters with Typical Values:**
+-*   `maxSteps`: 64–128 [S4, S10, unofficial].
+-*   `lightSteps`: 4–6 [S4, S10, unofficial].
+-*   `lightStep`: 60.0 meters [S4, unofficial].
++*   `max_steps`: 64–128 [S4, S10, unofficial].
++*   `light_steps`: 4–6 [S4, S10, unofficial].
++*   `light_step`: 60.0 meters [S4, unofficial].
+ *   `extinction`: 0.035 [S4, unofficial].
+ *   `g_forward`: 0.82 [S4, unofficial].
+ *   `g_backward`: -0.22 [S4, unofficial].
+-*   `cloudBottom`: 1500.0 meters [S4, unofficial].
+-*   `cloudTop`: 4000.0 meters [S4, unofficial].
++*   `cloud_bottom`: 1500.0 meters [S4, unofficial].
++*   `cloud_top`: 4000.0 meters [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -165,5 +184,5 @@
+ 
+ ### Secondary Light-Cone Self-Shadowing
+-A technique where secondary ray samples march along the direct sun vector to integrate optical shadow depth, generating self-shadowing effects [S4, unofficial]. It accumulates optical depth by adding `sampled_density * lightStep` to `lightOpticalDepth` [S4, unofficial]. The light transmittance is calculated as $T_{\text{light}} = e^{-\tau_{\text{sun}} \times 0.035}$ [S4, unofficial]. Choose this when realistic soft shadows within the cloud volume are required.
++A technique where secondary ray samples march along the direct sun vector to integrate optical shadow depth, generating self-shadowing effects [S4, unofficial]. It accumulates optical depth by adding `sampled_density * light_step` to `light_optical_depth` [S4, unofficial]. The light transmittance is calculated as $T_{\text{light}} = e^{-\tau_{\text{sun}} \times 0.035}$ [S4, unofficial]. Choose this when realistic soft shadows within the cloud volume are required.
+ 
+ ### Smoke Rendering

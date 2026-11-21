@@ -1,0 +1,171 @@
+--- v006.md
++++ v007.md
+@@ -1,131 +1,64 @@
+ # SDF Primitive Definitions
+ 
+-Also called: Analytical SDF Primitives, Canonical SDF Shapes
++Also called: Analytical SDFs, Base Primitives, Canonical Shapes
+ 
+ ## Overview
+-SDF Primitive Definitions provide analytical scalar functions $f(\mathbf{p})$ that return the exact Euclidean distance from a query point $\mathbf{p}$ to the nearest surface of a canonical geometric shape [S2, S3, unofficial]. This method replaces explicit mesh tessellation with continuous algebraic solutions, enabling efficient distance-field ray marching (sphere tracing) by providing a safe lower bound on the distance to the surface [S1, unofficial]. Unlike [Constructive SDF Modeling](871-constructive-sdf-modeling-min-combination.md), which focuses on composition, this method defines the base primitives themselves [G].
++SDF Primitive Definitions provide closed-form analytical functions for canonical 3D shapes (spheres, boxes, tori, planes) that serve as the foundational building blocks for procedural geometry in distance-field ray marching. They solve the problem of defining scene geometry without explicit mesh tessellation by providing conservative distance estimates that guarantee ray step sizes will not overshoot surfaces [S1]. Unlike [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) which combines primitives, this method focuses on the base analytical definitions of canonical shapes and their immediate geometric properties [G].
+ 
+-## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D query point $\mathbf{p} \in \mathbb{R}^3$ and primitive-specific parameters (e.g., radius, height, position).
+-*   **Output:** A scalar value $d \in \mathbb{R}$ representing the signed distance. Positive values denote points outside the object, negative values denote points inside, and zero defines the surface boundary [S2, unofficial].
++## Shared principles
++The family operates on the principle that a scene is defined by a scalar field $f(\mathbf{p})$ where the zero-level set $f(\mathbf{p}) = 0$ represents the surface. For sphere tracing to be valid, the function must satisfy the Lipschitz condition with constant 1, ensuring $|f(\mathbf{p}_1) - f(\mathbf{p}_2)| \le \|\mathbf{p}_1 - \mathbf{p}_2\|$. This guarantees that the value $f(\mathbf{p})$ is a safe lower bound on the distance to the surface, allowing the ray marcher to step forward by exactly $f(\mathbf{p})$ without tunneling [S2, 9643, unofficial].
+ 
+-**Data Structures:**
+-No persistent data structures are required for the evaluation of a single primitive. The function is stateless and pure.
++Composition is achieved through Boolean operations on the distance values:
++*   **Union**: $f_{union}(\mathbf{p}) = \min(f_1(\mathbf{p}), f_2(\mathbf{p}))$ .
++*   **Intersection**: $f_{intersect}(\mathbf{p}) = \max(f_1(\mathbf{p}), f_2(\mathbf{p}))$ .
++*   **Subtraction**: $f_{sub}(\mathbf{p}) = \max(-f_1(\mathbf{p}), f_2(\mathbf{p}))$ .
+ 
+-**Steps:**
+-1.  **Transform Point:** If the primitive is not at the origin or has a non-unit scale, map the query point $\mathbf{p}$ into the primitive's local coordinate space using the inverse transformation matrix $M^{-1}$ . Let the transformed point be $\mathbf{p}_{local}$.
+-2.  **Evaluate Canonical Distance:** Compute the distance $d_{local}$ from $\mathbf{p}_{local}$ to the canonical shape centered at the origin. The specific formula depends on the primitive type (see Subtopics).
+-3.  **Return Result:** Return $d_{local}$.
+-
+-**Formulas:**
+-The general form for a transformed primitive is:
+-$$ f(\mathbf{p}) = f_{canonical}(M^{-1} \mathbf{p}) $$
+-where $f_{canonical}$ is the analytical distance function for the untransformed primitive .
+-
+-**Parameters:**
+-*   **Radius ($r$):** For spheres and cylinders. Typical values depend on scene scale.
+-*   **Height ($h$):** For cylinders and cones.
+-*   **Bounding Box Min/Max:** For box intersections [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Clamping Artifacts:** Clamping coordinates (e.g., `clamp(p.xyz, min, max)`) before computing the SDF results in the SDF returning a constant distance very close to the surface, causing raymarching to run out of iterations and produce stretched artifacts [S1, unofficial]. Instead, intersect the object's SDF with a box SDF to restrict the field [S1, unofficial].
+-*   **Precision:** Standard floating-point precision is sufficient for most primitives, but finite difference normal calculation requires a small step size $h$ (e.g., 0.001) [S3, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def evaluate_sdf_primitive(p: vec3, primitive_type: str, params: dict) -> float:
+-    """
+-    Evaluates the signed distance for a canonical primitive.
+-    params: dict containing 'radius', 'height', 'position', etc.
+-    """
+-    # 1. Transform point to local space (simplified for origin-aligned primitives)
+-    # In a general implementation, p_local = inverse_transform * p
+-    p_local = p - params.get('position', vec3(0, 0, 0))
+-    
+-    if primitive_type == "sphere":
+-        r = params.get('radius', 1.0)
+-        return length(p_local) - r
+-        
+-    elif primitive_type == "box":
+-        # Box defined by extents from center
+-        extents = params.get('extents', vec3(1, 1, 1))
+-        # Distance to box surface
+-        d = max(abs(p_local) - extents, 0.0)
+-        return length(d) - min(max(d.x, max(d.y, d.z)), 0.0) # Simplified box SDF
+-        
+-    elif primitive_type == "cylinder":
+-        # Cap cylinder: axis along Y, height h, radius r
+-        r = params.get('radius', 1.0)
+-        h = params.get('height', 1.0)
+-        # Distance to outer cylinder surface
+-        # Using the formula from [S3, unofficial] adapted for generic cap cylinder
+-        # d = abs(vec2(length(p.yz), p.x)) - vec2(r, h) is for specific orientation
+-        # General cap cylinder along Y:
+-        dist_to_axis = length(p_local.xz)
+-        dy = abs(p_local.y) - h
+-        dx = dist_to_axis - r
+-        if dy > 0 and dx > 0:
+-            return length(vec2(dx, dy))
+-        elif dy > 0:
+-            return dy
+-        elif dx > 0:
+-            return dx
+-        else:
+-            return min(dy, dx)
+-            
+-    else:
+-        return 0.0 # Placeholder for other primitives
+-```
++Transformations are applied by mapping the query point $\mathbf{p}$ into the local coordinate space of the primitive using the inverse transformation matrix $M^{-1}$ before evaluation . Procedural noise (e.g., FBM) is often used to perturb these analytical surfaces, creating hypertextures where the isosurface is defined by $SDF(\mathbf{p}) + B_n(\mathbf{p}) = 0$ [S1].
+ 
+ ## Subtopics
+ 
+ ### [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md)
+-Constructive SDF Modeling (Min Combination) is a method for defining complex geometric scenes by combining primitive Signed Distance Functions (SDFs) using the minimum operator to represent the geometric union of volumes. It solves the problem of rendering multiple distinct objects as a single continuous scalar field, allowing a ray marcher to step forward by the distance to the nearest surface without tunneling. Unlike [Smooth SDF Composition](2685-smooth-sdf-composition.md), which blends primitives to create organic transitions, Min Combination produces sharp, non-differentiable boundaries at the intersection of objects, preserving the exact geometric union defined by Boolean logic.
+-
+-### [Signed Distance Field (SDF) Primitive Definition](890-signed-distance-field-sdf-primitive-definition.md)
+-A Signed Distance Field (SDF) Primitive Definition is a method for representing 3D geometry using analytical scalar functions $f(\mathbf{p})$ that return the shortest Euclidean distance from a query point $\mathbf{p}$ to the nearest surface of a canonical shape. The sign of the result indicates spatial containment: positive values denote points outside the object, negative values denote points inside, and zero defines the surface boundary. This method replaces explicit mesh tessellation with continuous algebraic solutions, enabling efficient ray marching (sphere tracing) by providing a safe lower bound on the distance to the surface, which guarantees no tunneling occurs during step advancement. Unlike [Constructive SDF Modeling](871-constructive-sdf-modeling-min-combination.md) which focuses on composition, this method defines the base primitives themselves [G].
+-
+-### [Distance to Natural Quadrics](1559-distance-to-natural-quadrics.md)
+-Distance to Natural Quadrics provides closed-form Signed Distance Functions (SDFs) for standard solid modeling primitives, including spheres, cylinders, cones, planes, and tori. These functions compute the exact Euclidean distance from a query point to the surface of the primitive, enabling efficient distance-field ray marching (sphere tracing). Unlike generic or approximate methods, these analytical solutions are computationally cheap and serve as the foundational building blocks for Constructive Solid Geometry (CSG) operations. They are distinct from [Superquadrics](1561-distance-to-superquadics.md) because they rely on the standard Euclidean $L_2$ norm rather than generalized $L_p$ norms, and from [Cylinder SDF](2739-cylinder-signed-distance-function.md) in that the natural quadric definitions often assume infinite extent or specific canonical orientations unless explicitly capped.
++Constructive SDF Modeling (Min Combination) computes the signed distance from a query point to the geometric union of multiple primitives by returning the minimum of their individual signed distance functions (SDFs). It solves the problem of representing complex scenes composed of many objects as a single continuous distance field, enabling efficient ray marching by ensuring the returned distance is a conservative lower bound to the nearest surface. What sets it apart from its siblings, such as [Smooth SDF Composition](2685-smooth-sdf-composition.md), is that it produces sharp, non-differentiable boundaries at intersections rather than smooth transitions, and it differs from [Boolean Operations on Distance Fields](1961-boolean-operations-on-distance-fields.md) by specifically implementing the union operation via the `min` operator, whereas intersection and difference require `max` or negation. See [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md).
+ 
+ ### [Pyroclastic Sphere Primitive](1579-pyroclastic-sphere-primitive.md)
+-The Pyroclastic Sphere Primitive is a procedural signed distance field (SDF) primitive that generates organic, cloud-like or volcanic shapes by perturbing a base sphere's distance function with procedural noise. It solves the problem of creating complex, non-convex volumetric structures with overhangs and disconnected density regions that cannot be achieved with simple analytical spheres. It distinguishes itself from standard SDF primitives by adding a noise displacement term to the distance value, and from pure noise volumes by maintaining a coherent spherical base shape.
+-
+-### [Infinite Tiling with Modulo](1632-infinite-tiling-with-modulo.md)
+-Infinite Tiling with Modulo is a technique for rendering infinite, repeating patterns of a single Signed Distance Field (SDF) primitive by folding space using the modulo operator. It allows a single primitive SDF to be tiled infinitely at essentially zero extra computational cost, enabling the creation of ray-marched fractals like Mandelbulbs and Menger sponges. Unlike explicit mesh instances, it generates infinite geometry procedurally by mapping query points into a periodic local coordinate system.
++The Pyroclastic Sphere Primitive is a procedural signed distance field (SDF) primitive that displaces a base sphere's surface using procedural noise to create organic, turbulent shapes with overhangs. It distinguishes itself from static SDF primitives by combining a low-frequency sinusoidal "breathing" modulation with high-frequency fractal Brownian motion (fBM) and sinusoidal products to generate complex surface topology. Unlike standard sphere primitives, it supports 2D displacement to prevent density disconnection, making it suitable for volumetric effects like smoke or lava. See [Pyroclastic Sphere Primitive](1579-pyroclastic-sphere-primitive.md).
+ 
+ ### [Offset Surface Evaluation](1782-offset-surface-evaluation.md)
+-Offset Surface Evaluation computes the signed distance from a query point $\mathbf{p}$ to a surface generated by offsetting a base "skeleton" geometry $S$ by a fixed distance $c$. It solves the problem of defining smooth, thickened versions of curves, surfaces, or meshes for use in implicit modeling and ray tracing. It is distinguished from its siblings by its reliance on a global point-to-set distance search rather than simple parametric displacement or local Boolean combinations.
++Offset Surface Evaluation computes the signed distance from a query point to a surface generated by offsetting a base "skeleton" geometry by a fixed distance. It solves the problem of defining smooth, thickened representations of curves, surfaces, or meshes for use in implicit modeling and ray marching. It is distinguished from its siblings by its reliance on a global point-to-set distance search (global offset) rather than a local parametric displacement, which avoids the interior self-intersections and high-degree algebraic artifacts common in local offset methods. See [Offset Surface Evaluation](1782-offset-surface-evaluation.md).
+ 
+ ### [Boolean Operations on Distance Fields](1961-boolean-operations-on-distance-fields.md)
+-Boolean operations on Signed Distance Fields (SDFs) allow the construction of complex 3D geometry from simple primitives by combining their scalar distance values. This method solves the problem of representing Constructive Solid Geometry (CSG) in ray marching without explicit mesh topology, enabling the creation of arbitrary shapes through algebraic combination of distance functions. It is distinguished from explicit mesh CSG by operating directly on the continuous scalar field, ensuring the resulting function remains a valid distance field (satisfying the Lipschitz condition) for sphere tracing.
++Boolean operations on Signed Distance Fields (SDFs) are Constructive Solid Geometry (CSG) primitives that combine two or more base SDFs to create complex shapes by performing set-theoretic unions, intersections, and differences. Unlike standard geometric primitives, these operations allow the construction of arbitrary topology from simple building blocks without requiring mesh generation. The method is distinguished by its reliance on component-wise minimum and maximum functions to preserve the distance field property, ensuring that the resulting function remains a valid distance field for ray marching. See [Boolean Operations on Distance Fields](1961-boolean-operations-on-distance-fields.md).
+ 
+-### Recursive Signed Distance Fields
+-A technique to compose recursive and fractal scenes by adding a loop to the signed distance function and applying a tiling operator on each iteration [S2, unofficial]. Recursive SDFs are costly and impact performance significantly, even with low recursion levels [S2, unofficial]. To mitigate this, recursive construction is often wrapped in bounding boxes, formed by adding a slightly larger version of the primitive distance field base [S2, unofficial].
++### [Standard Solid Primitives](16223-standard-solid-primitives.md)
++Standard Solid Primitives are closed-form analytical Signed Distance Functions (SDFs) for canonical 3D shapes, serving as the foundational building blocks for procedural geometry in distance-field ray marching. They solve the problem of defining scene geometry without explicit mesh tessellation by providing conservative distance estimates that guarantee ray step sizes will not overshoot surfaces. Unlike [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) which combines primitives, this method focuses on the base analytical definitions of canonical shapes (spheres, boxes, tori, etc.) and their immediate geometric properties [G]. See [Standard Solid Primitives](16223-standard-solid-primitives.md).
+ 
+-### Cylindrical SDF Primitives
+-A technique for rendering implicit geometry defined by Signed Distance Functions (SDFs) using ray marching, specifically for a cap cylinder shape [S3, unofficial]. The distance is calculated using `d = abs(vec2f(length(p.yz), p.x)) - vec2(r, h); return min(max(d.x, d.y), 0.) + length(max(d, vec2f(0.)))` [S3, unofficial]. Normals are calculated using finite differences with $h=0.001$ and kernel $k=\text{vec2f}(1, -1)$ [S3, unofficial]. Typical parameters include `OUTER_RADIUS: 0.4255`, `INNER_RADIUS: 0.385`, and `LIGHT_POS: 0.035` [S3, unofficial].
+-
+-### SDF Room with Planks
+-Computes the signed distance to a room shape composed of two bounding boxes (b1, b2) and a plank surface (b3). The plank surface is repeated periodically along the x-axis with a period of 8 units [S4, unofficial]. The modulo operation for periodic repetition uses integer division and subtraction instead of the `fmod` function for performance, taking 6.1s compared to 6.3s for the while-loop version [S4, unofficial]. The `Room` struct inherits from `Shape` and contains pointers to three `Shape` objects (b1, b2, b3) and a `Material` pointer `m` [S4, unofficial].
++### [Tiling and Repetition via Modulo](16224-tiling-and-repetition-via-modulo.md)
++Not given in the sources.
+ 
+ ### Implicit Surface Representation
+-Representation of an implicit surface as a grid-based Signed Distance Function (SDF) using tricubic interpolation to ensure continuous surface normals [S5]. Used in the implementation based on the `cuda_ad_rgb` backend of Mitsuba 3 [S5].
++#### definition
++Representation of an implicit surface as a grid-based Signed Distance Function (SDF) using tricubic interpolation to ensure continuous surface normals [S1].
++#### usage
++Used in the implementation based on the cuda_ad_rgb backend of Mitsuba 3 [S1].
+ 
+-## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per primitive evaluation. Recursive or tiled variants increase complexity based on the number of iterations or depth [S2, S3, unofficial].
+-*   **Memory Complexity:** $O(1)$ for analytical primitives. Grid-based implicit representations require $O(N^3)$ memory for the grid [S5].
+-*   **Performance:** Analytical primitives are computationally cheap [S2, unofficial]. Recursive SDFs are costly and significantly impact performance [S2, unofficial].
+-*   **Strengths:** No mesh storage required; infinite resolution; easy composition via Boolean operations [S1, unofficial].
+-*   **Limitations:** Limited to shapes with known analytical distance functions; sharp edges in Min Combination are non-differentiable [S1, unofficial].
++### SDF Bounding Box Clipping
++#### definition
++A technique to restrict a signed distance field (SDF) to a specific bounding box by intersecting the object's SDF with a box SDF, avoiding artifacts caused by clamping coordinates [S2, unofficial].
++#### step
++Compute the object's local SDF value (`d_pt`) using the modulo-repeated coordinate pattern. Calculate the bounding box extents and center: `bb_extents = (bounding_box_max - bounding_box_min) * 0.5` and `bb_center = bounding_box_min + bb_extents`. Compute the distance from the point to the box surface: `bb_p = max(abs(p - bb_center) - bb_extents, 0.)`. Compute the box SDF as the maximum component of `bb_p`: `d_bb = max(max(bb_p.x, bb_p.y), bb_p.z)`. Return the maximum of the object SDF and the box SDF to intersect them: `return max(d_pt, d_bb)` [S2, unofficial].
++#### pitfall
++Clamping coordinates (e.g., `clamp(p.xyz, min, max)`) before computing the SDF results in the SDF returning a constant distance very close to the surface, causing raymarching to run out of iterations and produce stretched artifacts [S2, unofficial].
++
++### SDF Scene Graph API
++#### definition
++A fluent API for defining 3D scenes using Signed Distance Field (SDF) primitives, boolean/smooth operators, and transformations, tagged with hatch directions [S3, unofficial].
++#### step
++Create primitives: `SdfNode.sphere(center, radius)`, `SdfNode.box_(size)`, `SdfNode.torus(major_radius, minor_radius)`, `SdfNode.plane_y(y_value)`. Apply transformations: `.displace(freq, amp)`, `.round(radius)`, `.rotate_x/y/z(angle)`, `.translate((x, y, z))`, `.repeat_xz()`. Combine nodes: `.smooth_union(other_node, k)`, `.smooth_subtract(other_node, k)`, `.union(other_node)`, `.intersect(other_node)`, `.subtract(other_node)`, where `k` is the blending radius for smooth variants. Set hatch direction: `.hatch_dir(x, y, z)` sets the 3D tangent vector that strokes follow on that subtree's surface [S3, unofficial].
+ 
+ ## Background
+-The use of analytical SDF primitives for ray marching was popularized by Inigo Quilez in his online tutorials [S1, S2, S3, unofficial][S5]. The concept of using distance fields for rendering dates back to earlier work on implicit surfaces, but the specific application to sphere tracing with analytical primitives is a cornerstone of modern real-time ray marching [S1, unofficial].
++The concept of using analytical distance functions for ray marching was popularized by Inigo Quilez in his online tutorials, establishing the standard definitions for primitives like spheres, boxes, and tori . The use of these primitives as building blocks for Constructive Solid Geometry (CSG) via min/max operators is a standard technique in procedural modeling . More recent developments include the integration of SDFs into differentiable rendering pipelines, such as in Mitsuba 3, where grid-based SDFs with interpolation are used for inverse rendering [S1]. Fluent APIs for scene definition, such as HatchForge, have also emerged to simplify the composition of these primitives [S3, unofficial].
+ 
+ ## Sources
+-[S1] Raymarching Clamping coordinate makes weird streched artifacts, https://stackoverflow.com/questions/76244905/raymarching-clamping-coordinate-makes-weird-streched-artifacts, fetched 2026-10-27 (unofficial)
+-[S2] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)
+-[S3] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)
+-[S4] AlerianEmperor/SDF-Sphere-Tracing, https://github.com/AlerianEmperor/SDF-Sphere-Tracing, fetched 2026-10-26 (unofficial)
+-[S5] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30+[S1] Path-Space Differentiable Rendering of Implicit Surfaces, https://doi.org/10.1145/3641519.3657473, fetched 2026-10-30
++[S2] Raymarching Clamping coordinate makes weird streched artifacts, https://stackoverflow.com/questions/76244905/raymarching-clamping-coordinate-makes-weird-streched-artifacts, fetched 2026-10-27 (unofficial)
++[S3] HatchForge - Hugo Cisneros, https://hugocisneros.com/projects/svg_sdf_renderer/, fetched 2026-10-30 (unofficial)

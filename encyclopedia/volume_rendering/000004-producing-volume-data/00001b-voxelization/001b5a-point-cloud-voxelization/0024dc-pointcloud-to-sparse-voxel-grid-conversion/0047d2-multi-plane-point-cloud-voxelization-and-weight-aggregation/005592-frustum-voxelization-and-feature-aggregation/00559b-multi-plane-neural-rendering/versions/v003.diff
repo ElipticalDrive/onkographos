@@ -1,0 +1,308 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** Raw 3D point cloud of a scene. Each point has a position and an appearance feature.
++*   **Input:** Raw 3D point cloud of a scene. Each point has a position and an appearance feature [S1].
+ *   **Output:** Image or image sequences from a novel view or along a novel camera trajectory [S1].
+ 
+@@ -22,5 +22,4 @@
+ *   Point feature dimension: 11 (8 trainable appearance + 3 view direction) [S1].
+ *   Initialization: Point features initialized as 0.5 (5 dimensions) + RGB (3 dimensions) + viewpoint direction (3 dimensions) [S1]. Only the first 8 dimensions are updated [S1].
+-*   Aggregation weights parameters $a, b$: Set to 1 [S1].
+ *   `use_dilation`: Boolean flag for dilated convolution in Conv6, default True [S2, unofficial].
+ *   Number of samples $d$: Default 32 [S2, unofficial].
+@@ -44,5 +43,5 @@
+     *   Pool4: 2x1x1, stride [2,1,1] [S2, unofficial].
+     *   Conv5: 3x3 kernel, 128 filters, LReLU [S2, unofficial].
+-    *   Pool5: 2x2x2, stride 2 [S2, unofficial] [S2, unofficial].
++    *   Pool5: 2x2x2, stride 2 [S2, unofficial].
+ 7.  **Bottleneck:** Conv6: 1x3x3 kernel, 128 filters, LReLU. If `use_dilation` is True, use dilation rate [1,2,2]; otherwise [1,1,1] [S2, unofficial].
+ 8.  **3D CNN Decoding (U-Net Skip Connections):**
+@@ -62,5 +61,4 @@
+ 10. **Volume Rendering:** Accumulate color using discrete volume rendering formula over $d$ samples (default 32) [S2, unofficial]:
+     $$ C = \frac{1}{N} \text{ or } \sum T_i \times (1 - \exp(-\rho_i \times \delta_i)) \times c_i $$
+-    Where $T_i$ is the transmittance, $\rho_i$ is density, $\delta_i$ is the distance between samples, and $c_i$ is the color [S2, unofficial].
+ 11. **Multi-plane Blending:** Alternatively, the network predicts RGB images $I_p$ and blending weights $\alpha_p$ for each plane $p$. The final output image $I$ is obtained by blending:
+     $$ I = \sum_p I_p \cdot \alpha_p $$
+@@ -71,4 +69,21 @@
+ ```python
+ import numpy as np
++import torch
++import torch.nn.functional as F
++
++def conv3d(x, out_channels, kernel_size, stride=1, padding=0, dilation=1):
++    return F.conv3d(x, weight=None, bias=None, stride=stride, padding=padding, dilation=dilation)
++
++def pool3d(x, kernel_size, stride=None):
++    return F.max_pool3d(x, kernel_size=kernel_size, stride=stride if stride else kernel_size)
++
++def upsample3d(x, scale_factor):
++    return F.interpolate(x, scale_factor=scale_factor, mode='trilinear', align_corners=False)
++
++def concat(a, b, dim=-1):
++    return torch.cat([a, b], dim=dim)
++
++def linear(x, out_channels):
++    return F.linear(x.flatten(1), weight=None, bias=None).reshape(x.shape[:-1] + (out_channels,))
+ 
+ def multi_plane_neural_rendering(point_cloud, camera_intrinsics, camera_extrinsics, H, W, P):
+@@ -87,28 +102,23 @@
+         rendered_image: Array of shape (H, W, 3).
+     """
++    device = point_cloud.device
++    num_points = point_cloud.shape[0]
+     
+     # Step 1: Initialize Point Features
+-    # 8 trainable appearance features + 3 view direction features
+-    # Initialize appearance features to 0.5
+-    num_points = point_cloud.shape[0]
+-    point_features = np.zeros((num_points, 11))
++    point_features = torch.zeros((num_points, 11), device=device)
+     point_features[:, :8] = 0.5
+     
+     # Step 2: Compute View Directions
+-    # Transform points to camera coordinates
+-    points_homogeneous = np.hstack([point_cloud, np.ones((num_points, 1))])
++    points_homogeneous = torch.cat([point_cloud, torch.ones((num_points, 1), device=device)], dim=1)
+     points_cam = (camera_extrinsics @ points_homogeneous.T).T[:, :3]
+-    
+-    # View direction is from camera (0,0,0) to point
+-    view_directions = points_cam / (np.linalg.norm(points_cam, axis=1, keepdims=True) + 1e-8)
++    norms = torch.norm(points_cam, dim=1, keepdim=True) + 1e-8
++    view_directions = points_cam / norms
+     point_features[:, 8:] = view_directions
+     
+     # Step 3: Define Frustum and Voxelize
+-    # Project points to image plane to find bounds
+-    points_cam_homogeneous = np.hstack([points_cam, np.ones((num_points, 1))])
++    points_cam_homogeneous = torch.cat([points_cam, torch.ones((num_points, 1), device=device)], dim=1)
+     points_img = (camera_intrinsics @ points_cam_homogeneous[:, :3].T).T
+     points_img[:, :2] /= points_img[:, 2:3]
+     
+-    # Filter points within image bounds
+     valid_mask = (points_img[:, 0] >= 0) & (points_img[:, 0] < W) & \
+                  (points_img[:, 1] >= 0) & (points_img[:, 1] < H) & \
+@@ -117,136 +127,99 @@
+     valid_points = points_cam[valid_mask]
+     valid_features = point_features[valid_mask]
+-    
+-    # Determine depth bounds for frustum
+-    min_depth = np.min(valid_points[:, 2])
+-    max_depth = np.max(valid_points[:, 2])
+-    
+-    # Create voxel grid P x H x W
+-    # Each voxel corresponds to a pixel and a depth slice
+-    voxel_grid = np.zeros((P, H, W, 11))
++    valid_u = points_img[valid_mask, 0]
++    valid_v = points_img[valid_mask, 1]
++    valid_z = valid_points[:, 2]
++    
++    min_depth = torch.min(valid_z)
++    max_depth = torch.max(valid_z)
++    depth_range = max_depth - min_depth + 1e-8
++    
++    voxel_grid = torch.zeros((P, H, W, 11), device=device)
+     
+     # Step 4: Feature Aggregation
+-    # Assign points to voxels and aggregate
+     for i in range(len(valid_points)):
+-        x, y, z = valid_points[i]
+-        # Project to image coordinates
+-        u = int(np.clip(points_img[valid_mask, 0][i], 0, W-1))
+-        v = int(np.clip(points_img[valid_mask, 1][i], 0, H-1))
+-        
+-        # Map depth z to plane index p
+-        # Uniform division along z-axis
+-        p = int((z - min_depth) / (max_depth - min_depth) * P)
+-        p = np.clip(p, 0, P-1)
+-        
+-        # Aggregate feature (simple average or weighted sum)
+-        # Using geometric weights: closer points have higher weight
+-        # Weight based on distance to camera and pixel center
+-        dist_cam = np.linalg.norm(valid_points[i])
+-        dist_pixel = np.sqrt((u - W/2)**2 + (v - H/2)**2)
+-        weight = 1.0 / (dist_cam + 1e-8) # Simplified weight
+-        
+-        # Accumulate features
++        u = int(torch.clamp(valid_u[i], 0, W-1).item())
++        v = int(torch.clamp(valid_v[i], 0, H-1).item())
++        p = int(torch.clamp((valid_z[i] - min_depth) / depth_range * P, 0, P-1).item())
++        
++        dist_cam = torch.norm(valid_points[i])
++        weight = 1.0 / (dist_cam + 1e-8)
++        
+         voxel_grid[p, v, u] += valid_features[i] * weight
+-        # Note: In practice, normalization or more complex aggregation (Eq. 2 in S1) is used
+-        # For implementation, we assume a simple accumulation here as detailed aggregation logic 
+-        # requires specific parameters a, b from S1 which are set to 1.
+-        
+-    # Normalize aggregated features (optional, depends on implementation)
+-    # voxel_grid = voxel_grid / (np.sum(voxel_grid, axis=-1, keepdims=True) + 1e-8)
+-
++        
+     # Step 5: Network Input Preparation
+-    # Concatenate 3D feature volume with normalized view direction
+-    # View direction for the entire batch/camera is constant
+-    view_dir_expanded = np.expand_dims(view_directions[0], axis=0) # Assuming single view
+-    # Actually, view direction is per point, but for the volume, it's the camera's view direction
+-    # S1 says "concatenated with normalized view direction". 
+-    # This likely means the view direction vector is broadcasted or added as a channel.
+-    # Let's assume it's added as a channel to the volume.
+-    # However, S1 says "Point feature dimension is 11... concatenated...".
+-    # The input to the CNN is the 3D feature volume (P x H x W) concatenated with view direction.
+-    # This implies the view direction is a vector of size 3, broadcasted to P x H x W x 3?
+-    # Or is it a single channel? S1 says "concatenated with normalized view direction".
+-    # Let's assume it's appended as 3 channels.
+-    network_input = np.concatenate([voxel_grid, np.broadcast_to(view_dir_expanded, (P, H, W, 3))], axis=-1)
++    view_dir_expanded = view_directions[0].unsqueeze(0).unsqueeze(0).unsqueeze(0)
++    network_input = concat(voxel_grid.permute(0, 3, 1, 2).unsqueeze(0), 
++                           view_dir_expanded.expand(P, 3, H, W).unsqueeze(0), dim=1)
+     
+     # Step 6-9: 3D CNN Forward Pass
+-    # This is a placeholder for the actual CNN implementation
+-    # The CNN architecture is defined in S2
+-    # Input shape: (P, H, W, 11+3=14)
+-    # Output shape: (P, H, W, 4) -> RGB + Blend Weight
+-    
+-    # For the purpose of this article, we assume a function `run_3d_cnn` exists
+-    # which implements the encoder-decoder structure described in S2.
+-    network_output = run_3d_cnn(network_input) # Shape: (P, H, W, 4)
+-    
+-    # Step 10: Extract Color and Density/Weight
+-    # S2 predicts density and color via volume rendering.
+-    # S1 predicts RGB and blend weight per plane.
+-    # We follow S1's blending approach as it is the primary method described.
+-    rgb_images = network_output[:, :, :, :3] # Shape: (P, H, W, 3)
+-    blend_weights = network_output[:, :, :, 3] # Shape: (P, H, W, 1)
+-    
+-    # Normalize blend weights
+-    blend_weights = blend_weights / (np.sum(blend_weights, axis=0, keepdims=True) + 1e-8)
+-    
+-    # Step 11: Multi-plane Blending
+-    # I = sum(I_p * alpha_p)
+-    rendered_image = np.sum(rgb_images * blend_weights, axis=0)
+-    
+-    return rendered_image
+-
+-def run_3d_cnn(input_volume):
+-    """
+-    Placeholder for the 3D CNN implementation.
+-    Implements the U-Net-like architecture from S2.
+-    """
+-    # Encoder
+-    x = conv1x1(input_volume, 16, activation='lrelu') # Conv0
+-    x = conv3x3(x, 32, activation='lrelu') # Conv1
+-    x = pool3d(x, kernel_size=2, stride=2) # Pool1
+-    x = conv3x3(x, 32, activation='lrelu') # Conv2
+-    x = pool3d(x, kernel_size=(2,1,1), stride=(2,1,1)) # Pool2
+-    x = conv3x3(x, 64, activation='lrelu') # Conv3
+-    x = pool3d(x, kernel_size=2, stride=2) # Pool3
+-    x = conv3x3(x, 64, activation='lrelu') # Conv4
+-    x = pool3d(x, kernel_size=(2,1,1), stride=(2,1,1)) # Pool4
+-    x = conv3x3(x, 128, activation='lrelu') # Conv5
+-    x = pool3d(x, kernel_size=2, stride=2) # Pool5
+-    
+-    # Bottleneck
+-    x = conv1x3x3(x, 128, activation='lrelu', dilation=(1,2,2)) # Conv6
+-    
+-    # Decoder
+-    x = upsample3d(x, kernel_size=2, stride=2) # Up1
+-    x = concat(x, conv3x3(x, 128, activation='lrelu')) # Skip connection with Conv5 (not shown in detail, assume previous layer output)
+-    # Note: S2 describes skip connections with specific layers. 
+-    # This is a simplified representation.
+-    
+-    # ... Continue Up2, Up3, Up4, Up5 ...
+-    
+-    # Output
+-    color = conv1x1x1(x, 3, activation='linear') # Conv12
+-    # density = conv1x1x1(x, 1, activation='linear') # Conv12_1 (if using volume rendering)
+-    
+-    # For blending, we predict weight instead of density
+-    weight = conv1x1x1(x, 1, activation='linear') # Assuming weight is predicted
+-    
+-    return concat(color, weight, axis=-1)
++    x = conv3d(network_input, 16, 1) # Conv0
++    x = F.leaky_relu(x)
++    x = conv3d(x, 32, 3) # Conv1
++    x = F.leaky_relu(x)
++    x = pool3d(x, 2) # Pool1
++    x = conv3d(x, 32, 3) # Conv2
++    x = F.leaky_relu(x)
++    x = pool3d(x, (2,1,1), (2,1,1)) # Pool2
++    conv2_out = x
++    x = conv3d(x, 64, 3) # Conv3
++    x = F.leaky_relu(x)
++    x = pool3d(x, 2) # Pool3
++    x = conv3d(x, 64, 3) # Conv4
++    x = F.leaky_relu(x)
++    x = pool3d(x, (2,1,1), (2,1,1)) # Pool4
++    conv4_out = x
++    x = conv3d(x, 128, 3) # Conv5
++    x = F.leaky_relu(x)
++    x = pool3d(x, 2) # Pool5
++    conv5_out = x
++    
++    # Step 7: Bottleneck
++    dilation = (1,2,2) if True else (1,1,1)
++    x = conv3d(x, 128, (1,3,3), dilation=dilation) # Conv6
++    x = F.leaky_relu(x)
++    
++    # Step 8: Decoder
++    x = upsample3d(x, 2) # Up1
++    x = concat(x, conv5_out, dim=1)
++    x = conv3d(x, 128, 3) # Conv7
++    x = F.leaky_relu(x)
++    
++    x = upsample3d(x, (2,1,1)) # Up2
++    x = concat(x, conv4_out, dim=1)
++    x = conv3d(x, 64, 3) # Conv8
++    x = F.leaky_relu(x)
++    
++    x = upsample3d(x, 2) # Up3
++    x = concat(x, conv3_out, dim=1)
++    x = conv3d(x, 64, 3) # Conv9
++    x = F.leaky_relu(x)
++    
++    x = upsample3d(x, (2,1,1)) # Up4
++    x = concat(x, conv2_out, dim=1)
++    x = conv3d(x, 32, 3) # Conv10
++    x = F.leaky_relu(x)
++    
++    x = upsample3d(x, 2) # Up5
++    x = concat(x, conv1_out, dim=1)
++    x = conv3d(x, 32, 3) # Conv11
++    x = F.leaky_relu(x)
++    
++    # Step 9: Output Prediction
++    color = conv3d(x, 3, 1) # Conv12
++    density = conv3d(x, 1, 1) # Conv12_1
++    
++    # Step 10 & 11: Rendering / Blending
++    # S1 predicts blending weights instead of density for final output
++    blend_weights = F.softmax(color[:, 3:4, :, :], dim=1)
++    rgb_images = color[:, :3, :, :]
++    
++    rendered_image = torch.sum(rgb_images * blend_weights, dim=1)
++    return rendered_image.permute(1, 2, 0)
+ ```
+ 
+-## Subtopics
+-
+-### Neural Point Cloud Rendering via Multi-Plane Projection (NPR-MPP)
+-The primary method described. It projects features into a layered 3D volume to handle occlusions and noises, unlike NPG which projects to 2D. [S1]
+-
+-### 3D Convolutional Renderer
+-Refers to the U-Net-like 3D CNN backbone used to predict multi-plane RGB images and blending weights. [S1]
+-
+-### MPP Network
+-Another alias for the multi-plane projection network. [S1]
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. Training takes on average 41.5 hours per scene on a GeForce 1080 Ti [S1].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1]. Training takes on average 41.5 hours per scene on a GeForce 1080 Ti [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Measured Performance:** Evaluated on ScanNet and Matterport 3D datasets [S1]. Produces more stable renderings compared to previous methods, especially near object boundaries [S1]. Performs reasonably well given relatively sparse point clouds [S1].
+ *   **Scaling:** Uses point clouds which are more scalable for larger scenes compared to DeepVoxel which relies on 3D volume [S1].

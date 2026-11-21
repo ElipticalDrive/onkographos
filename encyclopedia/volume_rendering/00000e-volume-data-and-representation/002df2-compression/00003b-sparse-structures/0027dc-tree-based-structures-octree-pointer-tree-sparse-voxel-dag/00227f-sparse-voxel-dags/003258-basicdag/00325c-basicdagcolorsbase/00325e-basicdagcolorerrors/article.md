@@ -1,0 +1,17 @@
+# BasicDAGColorErrors
+
+
+## Overview
+BasicDAGColorErrors provides a binary quality control mechanism for sparse voxel DAG color data by computing an error flag between compressed and uncompressed color representations. It differs from sibling methods that may store continuous error metrics or skip validation by returning a strict binary indicator (1.0 or 0.0) based on a fixed threshold, ensuring adaptive quality control without storing additional floating-point error values per leaf.
+
+## Shared principles
+This family builds on [BasicDAGColorsBase](6742-basicdagcolorsbase.md), which decouples leaf count storage from the primary geometry data using an enclosed array structure. The core mechanism relies on the `enclosedLeaves` array to determine the number of leaves, which dictates the scope of the color error computation. The error calculation is performed per leaf, comparing the stored compressed color against a reference uncompressed color.
+
+## Subtopics
+This family does not define distinct subtopics; it serves as a specific implementation of the error checking protocol within the BasicDAGColorsBase hierarchy.
+
+## Background
+The method originates from the HashDAG project by Phyronnaz [S1, unofficial]. It is used in the context of real-time volume rendering optimization, specifically to validate the integrity of compressed color data during the rendering pipeline. The approach allows for efficient detection of compression artifacts or data corruption by triggering a binary flag when the error exceeds a predefined tolerance.
+
+## Sources
+[S1] Phyronnaz/HashDAG, https://github.com/Phyronnaz/HashDAG, fetched 2026-10-26 (unofficial)

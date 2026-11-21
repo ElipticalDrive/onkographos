@@ -1,0 +1,198 @@
+--- v002.md
++++ v003.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs:**
+-- Input mesh (OBJ format) or ground truth SDF data.
++- Input mesh (OBJ format) or ground truth SDF data [S1, unofficial][S2, unofficial].
+ - Voxel grid resolution $R$ (integer, $4 \le R \le 512$) [S1, unofficial].
+-- Optimization parameters: learning rate, max iterations, convergence threshold, clamping values [S1, unofficial].
++- Optimization parameters: learning rate, maximum iterations, convergence threshold, clamping values [S1, unofficial].
+ 
+ **Outputs:**
+-- Extracted triangle mesh (vertices and faces).
+-- Optional optimized weights and deformed grid.
++- Extracted triangle mesh (vertices and faces) [S1, unofficial][S2, unofficial].
++- Optional optimized weights and deformed grid [S2, unofficial].
+ 
+ **Data Structures:**
+@@ -45,5 +45,5 @@
+ 
+ 3.  **Extraction and Loss Computation:**
+-    -   Call the differentiable extraction function `fc.extract_surface_with_grads(grid_verts, sdf, cube_fx8, R, beta, alpha, gamma, training=True)`.
++    -   Call the differentiable extraction function `fc.extract_surface_with_grads(grid_verts, sdf, cube_fx8, R, beta, alpha, gamma, training=True)` [S2, unofficial].
+     -   This function returns the extracted mesh vertices, faces, and the deviation loss $L_{dev}$ [S2, unofficial].
+     -   Compute SDF regularization loss:
+@@ -59,6 +59,6 @@
+ 
+ 4.  **Optimization Loop:**
+-    -   Compute gradients of $L_{total}$ with respect to `sdf`, `deform`, and `weight` via backpropagation through the extraction function.
+-    -   Update parameters using an optimizer (e.g., Adam with lr 0.01) or gradient descent [S1, unofficial][S2, unofficial].
++    -   Compute gradients of $L_{total}$ with respect to `sdf`, `deform`, and `weight` via backpropagation through the extraction function [S2, unofficial].
++    -   Update parameters using gradient descent [S1, unofficial] or Adam optimizer with default learning rate 0.01 [S2, unofficial].
+     -   If `opt_clamp` > 0, clamp `beta`, `alpha`, and `gamma` to $[-\text{opt\_clamp}, \text{opt\_clamp}]$ [S1, unofficial].
+     -   Check for convergence: if $|\text{loss}_{prev} - \text{loss}_{curr}| < \text{opt\_convergence}$ and iteration > 5, terminate [S1, unofficial].
+@@ -68,84 +68,90 @@
+ ```python
+ def flexicubes_optimize(input_mesh_path, resolution, opt_iterations, opt_lr, opt_clamp, opt_convergence, sdf_weight=0.2, opt_l_dev_weight=0.0):
+-    # 1. Load and Normalize
+-    mesh = load_obj(input_mesh_path)
+-    scale = mesh.normalize_to_unit_cube()
+-    
+-    # 2. Construct Voxel Grid
+-    grid = construct_voxel_grid(resolution)
+-    x_nx3 = grid.vertices # (N_v, 3)
+-    cube_fx8 = grid.cubes # (N_c, 8)
+-    
+-    # 3. Build TMD and Compute Initial SDF
+-    tmd = TriangleMeshDistance(mesh.vertices, mesh.faces)
+-    sdf = torch.zeros(x_nx3.shape[0])
+-    for i in range(x_nx3.shape[0]):
+-        sdf[i] = tmd.signed_distance(x_nx3[i]).distance
+-        
+-    # 4. Initialize Learnable Parameters
+-    deform = torch.zeros_like(x_nx3, requires_grad=True)
+-    weight = torch.zeros((cube_fx8.shape[0], 21), requires_grad=True)
+-    
+-    # 5. Optimization Loop
++    # 1. Load and normalize mesh to unit cube
++    mesh = parse_obj_file(input_mesh_path)
++    scale = normalize_to_unit_cube(mesh)
++
++    # 2. Construct voxel grid
++    grid = create_regular_grid(resolution)
++    x = grid.vertices  # (N_v, 3)
++    cube_fx8 = grid.cubes  # (N_c, 8)
++
++    # 3. Build nearest-point query structure and compute initial SDF
++    tmd = build_nearest_point_query(mesh.vertices, mesh.faces)
++    sdf = compute_signed_distances(tmd, x)  # (N_v,)
++
++    # 4. Initialize learnable parameters
++    deform = zeros_like(x)  # (N_v, 3)
++    weight = zeros((cube_fx8.shape[0], 21))  # (N_c, 21)
++    beta = weight[:, :12]
++    alpha = weight[:, 12:20]
++    gamma = weight[:, 20]
++
+     prev_loss = float('inf')
+-    for iter in range(opt_iterations):
+-        # Compute deformed grid vertices
+-        # Factor (2 - 1e-8) / (2 * resolution) scales deformation to cube edge length
+-        grid_verts = x_nx3 + (2 - 1e-8) / (2 * resolution) * torch.tanh(deform)
+-        
+-        # Extract surface and get gradients
+-        # training=True ensures 4 triangles per quad for better gradient flow
+-        vertices, faces, L_dev = fc.extract_surface_with_grads(
++
++    for iteration in range(opt_iterations):
++        # 5. Compute deformed grid vertices
++        # Factor (2 - 1e-8) prevents numerical boundary issues
++        grid_verts = x + (2.0 - 1e-8) / (2.0 * resolution) * tanh(deform)
++
++        # 6. Extract surface with gradients
++        # training=True produces 4 triangles per quad for better mesh quality
++        vertices, faces, L_dev = flexicubes_extract_surface(
+             grid_verts, sdf, cube_fx8, resolution,
+-            beta=weight[:, :12],
+-            alpha=weight[:, 12:20],
+-            gamma=weight[:, 20],
+-            training=True
++            beta, alpha, gamma, training=True
+         )
+-        
+-        # Compute Losses
+-        # SDF Regularization (e.g., smoothness)
+-        reg_loss = sdf_reg_loss(sdf, grid_edges).mean() * sdf_weight
+-        
+-        # Deviation Loss from extraction
+-        dev_loss = L_dev.mean() * opt_l_dev_weight
+-        
+-        # Weight L1 Regularization
+-        weight_reg = weight[:, :20].abs().mean() * 0.1
+-        
+-        total_loss = reg_loss + dev_loss + weight_reg
+-        
+-        # Backpropagation
+-        total_loss.backward()
+-        
+-        # Update weights (using SGD example; Adam is also used in practice)
+-        with torch.no_grad():
+-            weight -= opt_lr * weight.grad
+-            deform -= opt_lr * deform.grad
+-            sdf -= opt_lr * sdf.grad
+-            
+-            # Zero gradients
+-            weight.grad.zero_()
+-            deform.grad.zero_()
+-            sdf.grad.zero_()
+-            
+-            # Clamp weights if specified
+-            if opt_clamp > 0.0:
+-                weight[:, :12] = torch.clamp(weight[:, :12], -opt_clamp, opt_clamp)
+-                weight[:, 12:20] = torch.clamp(weight[:, 12:20], -opt_clamp, opt_clamp)
+-                weight[:, 20] = torch.clamp(weight[:, 20], -opt_clamp, opt_clamp)
+-                
+-        # Convergence Check
+-        loss_change = abs(prev_loss - total_loss.item())
+-        if loss_change < opt_convergence and iter > 5:
++
++        # 7. Compute losses
++        # SDF regularization (e.g., smoothness on grid edges)
++        grid_edges = compute_grid_adjacency_edges(x, resolution)
++        reg_loss = mean(sdf_smoothness_loss(sdf, grid_edges)) * sdf_weight
++
++        # Deviation loss from extraction
++        reg_loss += mean(L_dev) * 0.5
++
++        # Weight L1 regularization
++        reg_loss += mean(abs(weight[:, :20])) * 0.1
++
++        # 8. Backpropagation and parameter update
++        gradients = compute_gradients(reg_loss, [sdf, deform, weight])
++        sdf -= opt_lr * gradients.sdf
++        deform -= opt_lr * gradients.deform
++        beta -= opt_lr * gradients.beta
++        alpha -= opt_lr * gradients.alpha
++        gamma -= opt_lr * gradients.gamma
++
++        # 9. Clamp weights if opt_clamp > 0
++        if opt_clamp > 0.0:
++            beta = clip(beta, -opt_clamp, opt_clamp)
++            alpha = clip(alpha, -opt_clamp, opt_clamp)
++            gamma = clip(gamma, -opt_clamp, opt_clamp)
++
++        # 10. Convergence check
++        loss_change = abs(prev_loss - reg_loss)
++        if loss_change < opt_convergence and iteration > 5:
+             break
+-        prev_loss = total_loss.item()
+-        
+-    return vertices, faces
++        prev_loss = reg_loss
++
++    return vertices, faces, weight, deform
+ ```
+ 
++**Parameters:**
++- `resolution`: Voxel grid resolution, must be between 4 and 512 [S1, unofficial]. Default is 64 [S2, unofficial].
++- `opt_iterations`: Maximum number of optimization iterations [S1, unofficial].
++- `opt_lr`: Learning rate for gradient descent optimization [S1, unofficial]. Default is 0.01 [S2, unofficial].
++- `opt_convergence`: Threshold for loss change to declare convergence [S1, unofficial].
++- `opt_clamp`: Maximum absolute value for weight clamping; if > 0.0, weights are clamped to $[-\text{opt\_clamp}, \text{opt\_clamp}]$ [S1, unofficial].
++- `opt_l_dev_weight`: Weight for the Laplacian deviation term in the loss function [S1, unofficial].
++- `training`: Boolean flag set to true to use training mode, which produces 4 triangles per quad instead of 2 for better mesh quality [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Precision at boundaries is handled by the $(2 - 10^{-8})$ scaling factor to avoid numerical issues [S2, unofficial].
++- Resolution must be strictly between 4 and 512; out-of-bounds values cause validation errors [S1, unofficial].
++- Strong regularization weights can hinder convergence; low weights are recommended initially [S2, unofficial].
++- Switching from tetrahedral grids (e.g., DMTet) to voxel grids requires a 4:5 resolution ratio to align output triangle counts, as voxel grids contain $(R+1)^3$ vertices versus $(R/2+1)^3$ for tetrahedra [S2, unofficial].
++
+ ## Operating characteristics
+--   **Time Complexity:** Extraction is $O(N_c)$ per iteration, where $N_c$ is the number of cubes. Optimization adds gradient computation overhead proportional to the mesh size and network depth if the SDF is learned [S2, unofficial].
+--   **Memory Complexity:** Dominated by the voxel grid and learnable parameters. Memory scales with $O(R^3)$ for the grid and $O(R^3)$ for weights/deformations [S2, unofficial].
++-   **Time Complexity:** Extraction is $O(N_c)$ per iteration, where $N_c$ is the number of cubes [S2, unofficial]. Optimization adds gradient computation overhead proportional to the mesh size and network depth if the SDF is learned [S2, unofficial].
++-   **Memory Complexity:** Dominated by the voxel grid and learnable parameters [S2, unofficial]. Memory scales with $O(R^3)$ for the grid and $O(R^3)$ for weights/deformations [S2, unofficial].
+ -   **Performance:** A $64^3$ FlexiCubes grid generates approximately the same number of triangles as an $80^3$ DMTet grid, but with higher computational cost due to the denser vertex count $(R+1)^3$ vs $(R/2+1)^3$ [S2, unofficial].
+ -   **Strengths:** High-quality mesh topology, differentiable, supports complex regularizers (e.g., developability), robust to ambiguous SDF values via learnable weights [S2, unofficial].

@@ -1,0 +1,109 @@
+# Per-fragment Deformation Evaluation
+
+Also called: Fragment shader deformation, Shader Shift, Shader Sine
+
+## Overview
+Per-fragment deformation evaluation is a volume rendering technique that applies deformation functions directly within the fragment shader for every sample point along a ray, rather than deforming proxy geometry on a per-vertex basis [S1]. It solves the problem of rendering dynamically deforming volumes, such as those driven by interactive volume widgets, without the retessellation overhead required by per-vertex approaches [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Volume data (3D texture), deformation parameters (uniforms for analytical functions or 3D textures for HBSpline), ray origin, ray direction, and view/projection matrices [S1, G].
+- Output: Color and opacity for the fragment [G].
+
+**Data Structures:**
+- **Deformation Parameters:** Uniform variables for analytical deformations (e.g., amplitude, frequency for sine waves) or 3D texture handles for complex deformations (e.g., Hierarchical B-Splines) [S1].
+- **Volume Texture:** Standard 3D texture storing density/opacity values [S1].
+
+**Steps:**
+1. **Ray Marching Loop:** For each fragment, iterate along the ray [G].
+2. **Sample Position:** Calculate the world-space position $\mathbf{p}$ of the current sample point [G].
+3. **Deformation Evaluation:** Apply the deformation function to $\mathbf{p}$ using uniform parameters or texture lookups [S1].
+   - For analytical deformations (Shader Shift, Shader Sine), compute the offset directly in the shader [S1].
+   - For complex deformations (HBSpline), sample a deformation texture to retrieve the offset or transformed coordinate [S1].
+4. **Volume Sampling:** Evaluate the volume density at the deformed position [S1].
+5. **Shading:** Compute color and opacity using transfer functions and potentially gradients (Case 2) [S1].
+6. **Compositing:** Accumulate color and opacity along the ray [G].
+
+**Formulas:**
+- **Shader Shift (Trivial Translation):** $\mathbf{p}' = \mathbf{p} + \mathbf{t}$, where $\mathbf{t}$ is a translation vector uniform [S1].
+- **Shader Sine:** $\mathbf{p}' = \mathbf{p} + A \sin(\omega \mathbf{p} + \phi)$, where $A$ is amplitude, $\omega$ is frequency, and $\phi$ is phase, all uniforms [S1].
+- **Hierarchical B-Spline (HBSpline):** The deformation is precomputed and stored in a 3D texture $T_{def}$ [S1]. The offset is retrieved via $\mathbf{d} = T_{def}(\mathbf{p})$, and the deformed position is $\mathbf{p}' = \mathbf{p} + \mathbf{d}$ [S1].
+
+**Parameters:**
+- **Texture Size for HBSpline:** 16^3 is used in the primary performance tests [S1].
+- **Sample Planes per Voxel:** Tested at 0.5 and 1.0 [S1].
+
+**Edge Cases and Pitfalls:**
+- **Discontinuities:** Volume widgets (e.g., leafer widget) introduce discontinuities in deformation functions, requiring conditional branches in the shader that are inefficient on some hardware [S1].
+- **Performance Optimization:** Direct texture coordinate feeding (no deformation) is faster than trivial computation (Shader Shift) due to hardware optimizations for direct lookups; the shift operation reduces performance from 39 fps to 29.2 fps in Case 1 [S1].
+- **Memory Coherence:** Texture-based deformations suffer from poor memory coherence and high bandwidth costs for updating deformation textures [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def per_fragment_deformation(ray_origin, ray_direction, volume_tex, deform_type, uniforms, deform_tex=None):
+    color = [0.0, 0.0, 0.0, 0.0]
+    alpha = 0.0
+    step_size = 0.01
+    max_dist = 10.0
+    t = 0.0
+    while t < max_dist and alpha < 1.0:
+        p = ray_origin + ray_direction * t
+        if deform_type == "shift":
+            p_deformed = p + uniforms.translation
+        elif deform_type == "sine":
+            p_deformed = p + uniforms.amplitude * sin(uniforms.frequency * p + uniforms.phase)
+        elif deform_type == "hbspline":
+            d = deform_tex.sample(p)
+            p_deformed = p + d
+        else:
+            p_deformed = p
+        density = volume_tex.sample(p_deformed).r
+        # Standard transfer function mapping density to color and alpha [G]
+        c = [density, density, density]
+        a = density
+        color[0] = color[0] + c[0] * a * (1.0 - alpha)
+        color[1] = color[1] + c[1] * a * (1.0 - alpha)
+        color[2] = color[2] + c[2] * a * (1.0 - alpha)
+        color[3] = color[3] + a * (1.0 - alpha)
+        alpha = alpha + a * (1.0 - alpha)
+        t += step_size
+    return color
+```
+
+## Subtopics
+
+### [Deformation Texture](9847-deformation-texture.md)
+Deformation Texture is a technique for evaluating complex, computationally expensive deformation functions during volume rendering by encoding the inverse deformation mapping into a 3D texture. It solves the problem of "inverse parameterization," where a shader needs to map a fragment's screen-space or ray-space coordinate back to the deformed object space, a task that is often analytically intractable or too costly for real-time fragment programs. Unlike direct shader evaluation, which is suitable for simple bends and twists, this method is chosen for complex functions like Hierarchical B-Splines and Thin-Plate Splines, trading memory bandwidth for computational simplicity.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Performance is bound by texture access and memory bandwidth when using texture-based deformations (HBSpline) due to poor memory coherence and the cost of writing/updating deformation textures [S1].
+- Analytical deformations (Shift, Sine) have lower computational overhead but still incur a performance penalty compared to no deformation due to the loss of hardware optimizations for direct texture lookups [S1].
+
+**Measured Performance:**
+- **Hardware/Scene:** 512x512x106 CT Head [S1].
+- **Shader Shift:** 29.2 fps (Case 1), 8.5 fps (Case 2) [S1].
+- **Shader Sine:** 29 fps (Case 1), 7.1 fps (Case 2) [S1].
+- **Texture (HBSpline):** 21.7 fps (Case 1), 5.7 fps (Case 2) [S1].
+- **Baseline (Direct Texture):** 39 fps (Case 1) [S1].
+- **Mouse Torso (256x256x192):**
+  - HBSpline 16^3 Texture, 1 sample/voxel: 3.96 fps [S1].
+  - HBSpline 16^3 Texture, 0.5 samples/voxel: 6.19 fps [S1].
+  - Control (no deformation), 1 sample/voxel: 5.15 fps [S1].
+  - Control (no deformation), 0.5 samples/voxel: 9.56 fps [S1].
+
+**Strengths and Limitations:**
+- **Strengths:** Flexible proxy geometry, avoids retessellation, supports interactive volume widgets [S1].
+- **Limitations:** Conditional branches for discontinuities are inefficient; texture-based methods suffer from memory bandwidth and coherence issues; analytical methods still lose hardware optimization benefits [S1].
+
+**When to Use:**
+- Use for real-time interactive visualization of deforming volumes, especially when deformations are driven by user interaction (widgets) or simple analytical functions [S1].
+- Avoid for very complex deformations requiring high-frequency detail if memory bandwidth is a bottleneck, unless texture-based methods are optimized [S1].
+
+## Background
+Originating from the work on integrating dynamic deformations into interactive volume visualization, this method addresses the third hurdle of deformation rendering: performance [S1]. It contrasts with per-vertex methods that rely on proxy geometry tessellation, which must be retessilated for view-dependent deformations [S1]. The approach was implemented to support volume widgets, such as the leafer widget, directly in the shader [S1].
+
+## Sources
+[S1] Integrating Dynamic Deformations into Interactive Volume Visualization, https://doi.org/10.2312/vissym.eurovis06.219-226, fetched 2026-10-31

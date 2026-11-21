@@ -1,0 +1,179 @@
+# GPU Marching Cubes with Histogram Pyramid
+
+Also called: GPU Marching Cubes with HistoPyramid, GPU Marching Cubes with HistoPyramid-style Compaction, GPU-MC, Histogram Pyramid Marching Cubes, OpenCL Marching Cubes
+
+## Overview
+GPU Marching Cubes with Histogram Pyramid is a parallel isosurface extraction method that uses a Histogram Pyramid (HP) to count and locate surface triangles without atomic operations or sorting [S1, S2, unofficial]. It builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) and [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md). Unlike sibling methods that rely on global atomics or append buffers, this method precomputes exact output offsets via a hierarchical histogram, enabling lock-free writes to the final vertex buffer [S1, S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- Scalar volume data (8-bit unsigned integer, e.g., `CL_R, CL_UNSIGNED_INT8`).
+- Isosurface threshold (`isolevel` or `isoValue`).
+- Grid dimensions (`sizeX`, `sizeY`, `sizeZ`).
+
+**Outputs:**
+- A Vertex Buffer Object (VBO) containing triangle vertices and normals.
+- Total triangle count (`totalSum`).
+
+### Data Structures
+1. **Volume Data**: 3D texture or buffer of size `SIZE x SIZE x SIZE` (padded to power of two).
+2. **Histogram Pyramid (HP)**:
+   - **Texture Path**: Series of 3D images.
+     - Level 0: `CL_RGBA, CL_UNSIGNED_INT8`, size `SIZE/2`.
+     - Level 1: `CL_R, CL_UNSIGNED_INT8`, size `SIZE/4`.
+     - Levels 2-4: `CL_R, CL_UNSIGNED_INT16`, size halving each level (`SIZE/8`, `SIZE/16`, `SIZE/32`).
+     - Level 5+: `CL_R, CL_UNSIGNED_INT32`, size halving by 2 each level until 1.
+   - **Buffer Path**: Series of buffers (used if 3D texture writes are unsupported).
+     - Level 0: `char`, size `SIZE^3/8`.
+     - Level 1: `char`, size `SIZE^3/64`.
+     - Level 2: `short`, size `SIZE^3/512`.
+     - Level 3: `short`, size `SIZE^3/4096`.
+     - Level 4: `short`, size `SIZE^3/32768`.
+     - Level 5+: `int`, size halving by 8 each level.
+3. **Cube Indexes**: `char` buffer `cubeIndexesBuffer` of size `SIZE^3` storing 8-bit cube indices, copied to `cubeIndexesImage` for traversal.
+4. **VBO**: Stores triangle data. Each triangle has 3 vertices. Each vertex has 3 floats for position and 3 floats for normal (24 bytes total). Size: `totalSum * 18 * sizeof(cl_float)`.
+5. **Lookup Tables**:
+   - `numVertsTable`: `uint[256]`, number of vertices per cube case.
+   - `triTable`: `uint[256*16]`, edge indices for triangle vertices.
+
+### Steps
+1. **Input Preparation**:
+   - Read raw volume data.
+   - If step sizes (`stepSizeX`, `stepSizeY`, `stepSizeZ`) > 1, subsample the volume.
+   - Pad the volume to the next power of two dimension (`SIZE`) with zeros. Calculate `largestSize = max(sizeX, sizeY, sizeZ)`. Find `i` such that $2^i \ge largestSize$. Set `SIZE = 2^i`. Allocate `newVoxels` of size `SIZE^3` initialized to 0. Copy data from original `voxels` to `newVoxels` using index $x + y \cdot SIZE + z \cdot SIZE^2$.
+
+2. **Classify Voxels**:
+   - Launch kernel `classifyCubesKernel` with work group `NDRange(SIZE, SIZE, SIZE)`.
+   - For each voxel at `gridPos`, compute field values at 8 corners (`field0` to `field7`) using `computeValue`.
+   - Calculate `cubeindex`:
+     $$ cubeindex = \sum_{k=0}^{7} \mathbb{I}(field_k < isoValue) \cdot 2^k $$
+   - Look up `numVerts = numVertsTable[cubeindex]`.
+   - Store `numVerts` in `voxelVerts[i]`.
+   - If `numVerts > 0`, set `voxelOccupied[i] = 1`, else `0`.
+   - If using buffers, store `cubeindex` in `cubeIndexesBuffer`.
+
+3. **Histogram Pyramid Construction**:
+   - **Base Level**:
+     - If textures: Kernel `constructHPLevelKernel` reads `images[0]` (voxel counts) and writes to `images[1]`. Work group `NDRange(SIZE/2, SIZE/2, SIZE/2)`.
+     - If buffers: Kernel `constructHPLevelCharCharKernel` reads `buffers[0]` and writes to `buffers[1]`. Work group `NDRange(SIZE/2, SIZE/2, SIZE/2)`.
+   - **Intermediate Levels**:
+     - Iterate from level 1 to $\log_2(SIZE)-2$.
+     - If textures: Kernel `constructHPLevelKernel` reads `images[i]` and writes to `images[i+1]`. Work group size halves each iteration.
+     - If buffers: Use specific kernels for type transitions:
+       - `constructHPLevelCharShortKernel` (char->short).
+       - `constructHPLevelShortShortKernel` (short->short).
+       - `constructHPLevelShortIntKernel` (short->int).
+       - Each step halves the grid dimensions.
+   - **Top Level**: The top level contains 8 integers (sum[0] to sum[7]) representing the total triangle count.
+
+4. **Triangle Count Retrieval**:
+   - Read the top of the HistoPyramid (8 integers).
+   - Sum them to get `totalSum`.
+   - If `totalSum == 0`, no triangles were extracted.
+
+5. **VBO Allocation**:
+   - Create a new VBO with size `totalSum * 18 * sizeof(cl_float)`.
+
+6. **Triangle Compaction (HistoPyramid Traversal)**:
+   - Call `histoPyramidTraversal(totalSum)`.
+   - Launch kernel `traverseHPKernel`.
+   - Global work size: `sum + 64 - (sum - 64*(sum / 64))` (next multiple of 64).
+   - Local work size: 64.
+   - Traverse the pyramid from top to bottom to find triangle indices and fill the VBO with vertex data.
+   - Arguments: `rawData` (or skipped in texture mode), `cubeIndexesImage`, HP levels, VBO buffer, `isolevel`, `sum`.
+
+7. **Rendering**:
+   - Set up OpenGL matrices (projection, modelview).
+   - Apply translation, rotation, and scaling.
+   - Bind VBO.
+   - Set vertex pointer (3 floats, stride 24, offset 0) and normal pointer (3 floats, stride 24, offset 12).
+   - Draw triangles using `glDrawArrays(GL_TRIANGLES, 0, totalSum*3)`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gpu_marching_cubes_histogram_pyramid(volume, isolevel):
+    # 1. Input Preparation
+    size_x, size_y, size_z = volume.shape
+    largest_size = max(size_x, size_y, size_z)
+    size = 1
+    while size < largest_size:
+        size *= 2
+    
+    # Pad volume to power of two
+    padded_volume = np.zeros((size, size, size), dtype=np.uint8)
+    padded_volume[:size_x, :size_y, :size_z] = volume
+    
+    # 2. Classify Voxels
+    # Launch classifyCubesKernel with NDRange(size, size, size)
+    # For each voxel (x, y, z):
+    #   field_values = compute_field_values(padded_volume, x, y, z)
+    #   cubeindex = 0
+    #   for k in range(8):
+    #       if field_values[k] < isolevel:
+    #           cubeindex += (1 << k)
+    #   num_verts = numVertsTable[cubeindex]
+    #   voxel_occupied[x, y, z] = (num_verts > 0)
+    #   cube_indexes[x, y, z] = cubeindex
+    
+    # 3. Histogram Pyramid Construction
+    # Base Level
+    # Launch constructHPLevelKernel (or char/char variant) with NDRange(size/2, size/2, size/2)
+    # Intermediate Levels
+    current_size = size / 2
+    for level in range(1, int(np.log2(size)) - 1):
+        # Launch appropriate kernel based on data type and level
+        # Work group size is current_size / 2
+        current_size /= 2
+    
+    # 4. Triangle Count Retrieval
+    # Read top 8 integers from HP
+    top_values = read_hp_top()
+    total_sum = sum(top_values)
+    
+    if total_sum == 0:
+        return empty_mesh
+    
+    # 5. VBO Allocation
+    vbo_size = total_sum * 18 * 4 # 4 bytes per float
+    vbo = allocate_vbo(vbo_size)
+    
+    # 6. Triangle Compaction
+    # Launch traverseHPKernel
+    global_work_size = total_sum + 64 - (total_sum - 64 * (total_sum // 64))
+    # Launch with NDRange(global_work_size, 1, 1) and local size 64
+    # Kernel traverses HP and writes to VBO
+    
+    # 7. Rendering
+    # Bind VBO, set pointers, draw arrays
+    return vbo
+```
+
+### Parameters
+- `isolevel`: Threshold value for surface extraction. Default 51. Normalized to [0, 1] by dividing by 255.0f for display [S1, unofficial].
+- `stepSizeX`, `stepSizeY`, `stepSizeZ`: Subsampling factors. Default 1 [S1, unofficial].
+- `SIZE`: Dimension of the cubic voxel grid, always a power of two. Passed to OpenCL kernel via `-DSIZE=<value>` [S1, unofficial].
+- `scalingFactor`: 3D vector used to scale the volume during rendering. Calculated as `spacing * 1.5f / size` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Power of Two Requirement**: Volume dimensions must be powers of two. If not, pad with zeros [S1, unofficial].
+- **NVIDIA GPU Limitation**: Lack of 3D texture write support on NVIDIA GPUs requires a slower version using regular buffers and morton codes [S1, unofficial].
+- **Image Size Constraint**: OpenGL/OpenCL images cannot be 1x1x1. If buffer size becomes 1 during HP construction, force it to 2 [S1, unofficial].
+- **Empty Volume**: If no voxels are active, return early with `successful = false` and `num_resultVertices = 0` [S2, unofficial].
+- **Grid Dimension Limit**: CUDA grid dimensions are limited to 65535. If `numVoxels` exceeds this, adjust launch configuration: `grid.x = 32768`, `grid.y = grid.x / 32768` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ for classification and HP construction, where $N$ is the number of voxels. Traversal is $O(T)$, where $T$ is the number of triangles.
+- **Memory Complexity**: $O(N)$ for volume and HP storage. VBO size is $O(T)$.
+- **Performance**: Faster than atomic-based methods due to lock-free writes. Slower on NVIDIA GPUs due to buffer fallback [S1, unofficial].
+- **Strengths**: No atomic operations, no sorting, efficient memory usage.
+- **Limitations**: Requires power-of-two dimensions, NVIDIA GPU performance penalty.
+
+## Background
+Originated from Dyken et al. (2008) "High-speed marching cubes using histopyramids" [S2, unofficial]. Implemented in OpenCL and OpenGL by Erik Smistad [S1, unofficial]. Further developed in the FAST framework [S1, unofficial].
+
+## Sources
+[S1] smistad/GPU-Marching-Cubes, https://github.com/smistad/GPU-Marching-Cubes, fetched 2026-10-26 (unofficial)
+[S2] AlbertLiDesign/ALG_MarchingCubes_GPU, https://github.com/AlbertLiDesign/ALG_MarchingCubes_GPU, fetched 2026-10-27 (unofficial)

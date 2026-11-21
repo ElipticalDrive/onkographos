@@ -1,0 +1,195 @@
+--- v002.md
++++ v003.md
+@@ -1,7 +1,6 @@
+ # Inverse CDF Ray Sampling
+ 
+-
+ ## Overview
+-Inverse CDF Ray Sampling is a CUDA kernel that samples points along rays using inverse CDF sampling based on probability distributions (probs) associated with depth intervals (hits), supporting optional fixed step size [S1, unofficial]. It maps uniform random noise to depth intervals using the cumulative distribution function derived from per-hit probabilities [S1, unofficial]. It builds on [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md) by replacing uniform spacing with probability-weighted stratification.
++Inverse CDF Ray Sampling is a CUDA kernel that samples points along rays using inverse CDF sampling based on probability distributions (probs) associated with depth intervals (hits), supporting optional fixed step size [S1, unofficial]. It maps uniform random noise to depth intervals using the cumulative distribution function derived from per-hit probabilities [S1, unofficial]. It builds on [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md) by replacing uniform spacing with probability-weighted stratification [G].
+ 
+ ## How it works
+@@ -48,10 +47,4 @@
+ import random
+ 
+-def pad_1d(arr, pad_right):
+-    return arr + [0] * pad_right
+-
+-def pad_2d(arr, pad_right):
+-    return [row + [0] * pad_right for row in arr]
+-
+ def inverse_cdf_sampling(probs, steps, min_depth, max_depth, pts_idx, fixed_step_size=-1, deterministic=False):
+     batch_size, num_rays, max_hits = len(probs), len(probs[0]), len(probs[0][0])
+@@ -60,16 +53,19 @@
+     P = 3
+ 
+-    probs_pad = pad_2d(probs, H - num_rays)
+-    steps_pad = pad_1d(steps, H - num_rays)
+-    min_depth_pad = pad_2d(min_depth, H - num_rays)
+-    max_depth_pad = pad_2d(max_depth, H - num_rays)
+-    pts_idx_pad = pad_2d(pts_idx, H - num_rays)
++    # Pad inputs to multiple of G
++    probs_pad = [row + [0.0] * (H - num_rays) for row in probs]
++    steps_pad = steps + [0] * (H - num_rays)
++    min_depth_pad = [row + [0.0] * (H - num_rays) for row in min_depth]
++    max_depth_pad = [row + [0.0] * (H - num_rays) for row in max_depth]
++    pts_idx_pad = [row + [-1] * (H - num_rays) for row in pts_idx]
+ 
+     max_steps_val = math.ceil(max(steps_pad)) + P
+-    noise = [[0.5 if deterministic else max(0.001, min(0.999, u)) for u in [0.0] * max_steps_val] for _ in range(H)]
+-    if not deterministic:
+-        for i in range(H):
+-            for j in range(max_steps_val):
+-                noise[i][j] = max(0.001, min(0.999, random.random()))
++    noise = []
++    for _ in range(H):
++        row = []
++        for _ in range(max_steps_val):
++            u = 0.5 if deterministic else random.random()
++            row.append(max(0.001, min(0.999, u)))
++        noise.append(row)
+ 
+     results = []
+@@ -79,81 +75,61 @@
+         end = min(start + chunk_size, H)
+         chunk_len = end - start
+-        chunk_samples = cuda_inverse_cdf_kernel(
+-            probs_pad[start:end], steps_pad[start:end],
+-            min_depth_pad[start:end], max_depth_pad[start:end],
+-            pts_idx_pad[start:end], noise[start:end],
+-            fixed_step_size, max_steps_val, start
+-        )
+-        results.append(chunk_samples)
++        # The actual implementation calls a CUDA extension _ext.inverse_cdf_sampling [S1, unofficial]
++        # Below is the Python-equivalent logic for the kernel:
++        chunk_samples = []
++        for k in range(start, end):
++            ray_samples = []
++            s = 0
++            z_low = min_depth_pad[k][0]
++            curr_bin = 0
++            curr_min_cdf = 0.0
++            curr_max_cdf = probs_pad[k][0]
++            curr_min_depth = min_depth_pad[k][0]
++            curr_max_depth = max_depth_pad[k][0]
++            done = False
++            step_size = fixed_step_size if fixed_step_size > 0 else 1.0 / steps_pad[k]
+ 
+-    all_samples = [item for sublist in results for item in sublist]
+-    all_samples = all_samples[:num_rays]
++            for curr_step in range(int(steps_pad[k])):
++                if done:
++                    break
++                curr_cdf = (float(curr_step) + noise[k][curr_step]) * step_size
++
++                while curr_cdf > curr_max_cdf:
++                    ray_samples.append((pts_idx_pad[k][curr_bin], curr_max_depth - z_low, (curr_max_depth + z_low) * 0.5))
++                    curr_bin += 1
++                    s += 1
++                    if curr_bin >= max_hits or pts_idx_pad[k][curr_bin] == -1:
++                        done = True
++                        break
++                    curr_min_depth = min_depth_pad[k][curr_bin]
++                    curr_max_depth = max_depth_pad[k][curr_bin]
++                    curr_min_cdf = curr_max_cdf
++                    curr_max_cdf += probs_pad[k][curr_bin]
++                    z_low = curr_min_depth
++                if done:
++                    break
++
++                u = (curr_cdf - curr_min_cdf) / (curr_max_cdf - curr_min_cdf)
++                z = curr_min_depth + u * (curr_max_depth - curr_min_depth)
++                ray_samples.append((pts_idx_pad[k][curr_bin], z - z_low, (z + z_low) * 0.5))
++                z_low = z
++                s += 1
++
++                while z_low < curr_max_depth and not done:
++                    ray_samples.append((pts_idx_pad[k][curr_bin], curr_max_depth - z_low, (curr_max_depth + z_low) * 0.5))
++                    curr_bin += 1
++                    s += 1
++                    if curr_bin >= max_hits or pts_idx_pad[k][curr_bin] == -1:
++                        break
++                    curr_min_depth = min_depth_pad[k][curr_bin]
++                    curr_max_depth = max_depth_pad[k][curr_bin]
++                    z_low = curr_min_depth
++
++            chunk_samples.append(ray_samples)
++        results.extend(chunk_samples)
++
++    all_samples = results[:num_rays]
+     final_samples = [ray[:max(steps[i])] for i, ray in enumerate(all_samples)]
+     return final_samples
+-
+-def cuda_inverse_cdf_kernel(probs, steps, min_depth, max_depth, pts_idx, noise, fixed_step_size, max_steps, K_offset):
+-    batch_size, num_rays, max_hits = len(probs), len(probs[0]), len(probs[0][0])
+-    output_idx = []
+-    output_dist = []
+-    output_depth = []
+-
+-    for k in range(num_rays):
+-        s = 0
+-        z_low = min_depth[k][0]
+-        curr_bin = 0
+-        curr_min_cdf = 0.0
+-        curr_max_cdf = probs[k][0]
+-        curr_min_depth = min_depth[k][0]
+-        curr_max_depth = max_depth[k][0]
+-        done = False
+-        step_size = fixed_step_size if fixed_step_size > 0 else 1.0 / steps[k]
+-
+-        for curr_step in range(int(steps[k])):
+-            if done:
+-                break
+-            curr_cdf = (float(curr_step) + noise[k][curr_step]) * step_size
+-
+-            while curr_cdf > curr_max_cdf:
+-                output_idx.append(pts_idx[k][curr_bin])
+-                output_dist.append(curr_max_depth - z_low)
+-                output_depth.append((curr_max_depth + z_low) * 0.5)
+-                curr_bin += 1
+-                s += 1
+-                if curr_bin >= max_hits or pts_idx[k][curr_bin] == -1:
+-                    done = True
+-                    break
+-                curr_min_depth = min_depth[k][curr_bin]
+-                curr_max_depth = max_depth[k][curr_bin]
+-                curr_min_cdf = curr_max_cdf
+-                curr_max_cdf += probs[k][curr_bin]
+-                z_low = curr_min_depth
+-            if done:
+-                break
+-
+-            u = (curr_cdf - curr_min_cdf) / (curr_max_cdf - curr_min_cdf)
+-            z = curr_min_depth + u * (curr_max_depth - curr_min_depth)
+-            output_idx.append(pts_idx[k][curr_bin])
+-            output_dist.append(z - z_low)
+-            output_depth.append((z + z_low) * 0.5)
+-            z_low = z
+-            s += 1
+-
+-            while z_low < curr_max_depth and not done:
+-                output_idx.append(pts_idx[k][curr_bin])
+-                output_dist.append(curr_max_depth - z_low)
+-                output_depth.append((curr_max_depth + z_low) * 0.5)
+-                curr_bin += 1
+-                s += 1
+-                if curr_bin >= max_hits or pts_idx[k][curr_bin] == -1:
+-                    break
+-                curr_min_depth = min_depth[k][curr_bin]
+-                curr_max_depth = max_depth[k][curr_bin]
+-                z_low = curr_min_depth
+-
+-        output_idx.append([idx + K_offset for idx in output_idx[-s:]])
+-        output_dist.append(output_dist[-s:])
+-        output_depth.append(output_depth[-s:])
+-
+-    return output_idx, output_dist, output_depth
+ ```
+ 
+@@ -176,5 +152,5 @@
+ 
+ ## Background
+-Inverse CDF sampling is a standard technique in Monte Carlo integration, applied to volume rendering to sample along rays according to the estimated density or opacity distribution. In the context of Neural Volume Rendering (NSVF), it is used to efficiently sample points within the reconstructed volume based on the learned probability distribution of surface intersections [S1, unofficial].
++Inverse CDF sampling is a standard technique in Monte Carlo integration, applied to volume rendering to sample along rays according to the estimated density or opacity distribution [G]. In the context of Neural Volume Rendering (NSVF), it is used to efficiently sample points within the reconstructed volume based on the learned probability distribution of surface intersections [S1, unofficial].
+ 
+ ## Sources

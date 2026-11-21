@@ -1,0 +1,113 @@
+# Grouped vs Interleaved Macro Distribution
+Also called: Grouped Distribution, Interleaved Distribution, Random Distribution
+
+## Overview
+Grouped vs Interleaved Macro Distribution classifies how a node's allocated macros are spatially arranged within the global voxel dataset [S1, unofficial]. It solves the problem of determining the spatial locality of data chunks to optimize cache coherence and minimize inter-node communication during ray casting [S1, unofficial]. It sets itself apart from its siblings by defining the geometric arrangement of the redistribution unit (macro), whereas [Macro Distribution Granularity](16651-macro-distribution-granularity.md) defines the size of that unit [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Global voxel dataset of size $V$ samples; number of processing nodes $N$; macro size $M$ (number of voxels per macro).
+*   **Output:** Assignment of macros to nodes, categorized as either "Grouped" or "Interleaved/Random".
+
+**Data Structures:**
+The dataset is partitioned into macros of fixed size $M$. Each macro is assigned to a specific node. The classification depends on the spatial relationship between macros assigned to the same node.
+
+**Steps:**
+1.  **Partition:** Divide the global voxel array into non-overlapping macros of size $M$.
+2.  **Assign:** Distribute these macros among $N$ nodes.
+3.  **Classify:**
+    *   **Grouped:** If the macros assigned to a single node form a spatially adjacent subset of the global dataset [S1, unofficial].
+    *   **Interleaved/Random:** If the macros assigned to a single node form a non-adjacent, interleaved, or random subset of the global dataset [S1, unofficial].
+
+**Formulas and Parameters:**
+*   Let $S_i$ be the set of spatial indices of voxels contained in macros assigned to node $i$.
+*   **Grouped Condition:** The union of spatial indices in $S_i$ forms a contiguous sub-volume.
+*   **Interleaved Condition:** The spatial indices in $S_i$ are scattered or non-contiguous.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Fetches:** Resampling requires data at neighboring points. In grouped distributions, nodes may avoid fetching remote macros by replicating boundary voxels locally [S1, unofficial]. In interleaved distributions, every boundary access likely requires fetching macros from other nodes, increasing communication cost [S1, unofficial].
+*   **Cache Coherence:** Grouped distributions offer better cache coherence during ray casting because neighboring voxels are likely stored in the same local memory or cache lines [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def classify_macro_distribution(node_macros, global_volume_shape):
+    """
+    Classify a node's macro assignment as Grouped or Interleaved.
+    
+    Args:
+        node_macros: List of macro IDs assigned to the node.
+        global_volume_shape: Tuple (D, H, W) of the global volume dimensions.
+        
+    Returns:
+        str: 'Grouped' or 'Interleaved'
+    """
+    # Helper to get spatial bounds of a macro
+    def get_macro_bounds(macro_id, macro_size, volume_shape):
+        # Calculate linear index
+        total_voxels = volume_shape[0] * volume_shape[1] * volume_shape[2]
+        num_macros = (total_voxels + macro_size - 1) // macro_size
+        
+        # Determine macro coordinates
+        # Note: Exact mapping depends on memory layout (row-major, etc.)
+        # Assuming standard row-major flattening
+        macro_idx = macro_id
+        voxel_start = macro_idx * macro_size
+        voxel_end = min(voxel_start + macro_size, total_voxels)
+        
+        # Convert linear indices to 3D coordinates
+        coords_start = linear_to_3d(voxel_start, volume_shape)
+        coords_end = linear_to_3d(voxel_end - 1, volume_shape)
+        
+        return (coords_start, coords_end)
+
+    # Collect all voxel coordinates covered by the node's macros
+    all_voxel_coords = []
+    for macro_id in node_macros:
+        start, end = get_macro_bounds(macro_id, macro_size, global_volume_shape)
+        # Generate all voxels in this macro (simplified for logic)
+        # In practice, check if the union of these bounding boxes is contiguous
+        # For strict adjacency, the set of voxels must form a rectangular block
+        # without holes.
+        pass
+
+    # Simplified check: If macros are assigned in a way that their spatial
+    # union is a single contiguous block, it is Grouped.
+    # Otherwise, it is Interleaved.
+    # This requires checking the spatial connectivity of the union of all
+    # voxels in the node's macros.
+    
+    # Placeholder for complex spatial connectivity check [G]
+    # If the bounding box of all voxels equals the sum of voxel counts
+    # and there are no gaps, it is Grouped.
+    
+    return "Interleaved" # Default assumption for non-adjacent assignment
+
+def linear_to_3d(idx, shape):
+    z = idx // (shape[0] * shape[1])
+    y = (idx % (shape[0] * shape[1])) // shape[0]
+    x = idx % shape[0]
+    return (x, y, z)
+```
+
+## Subtopics
+
+### [Data Replication for Adjacent Macros](14149-data-replication-for-adjacent-macros.md)
+A strategy for grouped distributions that replicates boundary voxels to avoid inter-node communication. Choose when minimizing network traffic is critical and memory allows for redundancy.
+
+### [Macro Distribution Granularity](16651-macro-distribution-granularity.md)
+Defines the size of the macro unit. Choose finer granularity for load balancing, coarser for reduced addressing overhead.
+
+## Operating characteristics
+*   **Time Complexity:** Communication cost depends on the distribution. Grouped distributions may reduce communication to $O(1)$ per boundary access via replication, while interleaved distributions may require $O(1)$ fetch per boundary access from remote nodes [S1, unofficial].
+*   **Memory Complexity:** Grouped distributions with replication require additional memory for boundary voxels [S1, unofficial]. Interleaved distributions do not require replication but may have higher communication latency.
+*   **Strengths:** Grouped distributions offer better cache coherence and simplified addressing [S1, unofficial]. Interleaved distributions may offer better load balancing if the workload is uneven.
+*   **Limitations:** Grouped distributions can suffer from load imbalance if the data is not uniform. Interleaved distributions incur higher communication costs for boundary accesses [S1, unofficial].
+*   **When to Use:** Use Grouped for cache-sensitive applications with uniform data. Use Interleaved for load-balanced scenarios where communication latency is less critical than compute balance.
+
+## Background
+This classification originates from early taxonomy of volume rendering algorithms on multicomputers [S1, unofficial]. It addresses the fundamental trade-off between spatial locality (cache performance) and load balancing in parallel volume rendering.
+
+## Sources
+[S1] DTIC ADA236632: Taxonomy and Algorithms for Volume Rendering on Multicomputers, https://archive.org/details/DTIC_ADA236632, fetched 2026-10-26 (unofficial)

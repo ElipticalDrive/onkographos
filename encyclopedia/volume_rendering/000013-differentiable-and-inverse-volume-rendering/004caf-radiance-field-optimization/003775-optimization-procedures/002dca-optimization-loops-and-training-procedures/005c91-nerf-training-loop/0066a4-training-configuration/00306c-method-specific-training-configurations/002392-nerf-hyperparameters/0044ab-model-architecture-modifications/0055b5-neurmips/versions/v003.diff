@@ -1,0 +1,498 @@
+--- v002.md
++++ v003.md
+@@ -1,93 +1,78 @@
+ # NeurMiPs
+-
+ Also called: NeurMiPs, Neural Mixture of Planar Experts, Neural Mixture of Planar Experts for View Synthesis
+ 
+ ## Overview
+-NeurMiPs is a view synthesis method that represents a 3D scene as a mixture of $K$ learnable rectangular planar surfaces, where each surface acts as an independent "expert" with an associated neural radiance field predicting view-dependent color and transparency [S1]. It alleviates the frontal-parallel limitation of traditional Multi-Plane Imagery (MPI) while maintaining high efficiency through closed-form ray-casting, offering better memory and computational efficiency than standard NeRF and superior extrapolation capabilities compared to voxel-based methods like PlenOctrees or KiloNeRF [S1].
++NeurMiPs represents a 3D scene as a mixture of $K$ learnable rectangular planar surfaces, where each surface acts as an independent "expert" containing a small neural radiance field that predicts view-dependent color and transparency [S1]. It solves the frontal-parallel limitation of traditional Multi-Plane Imagery (MPI) and the high memory/compute costs of dense volume rendering by leveraging closed-form ray-plane intersections and local MLPs, achieving real-time rendering speeds while maintaining superior extrapolation capabilities compared to voxel-based methods [S1].
+ 
+ ## How it works
+ ### Inputs and Outputs
+-**Inputs:**
+-*   Sparse 3D point cloud $\{x_i\}$ estimated by Structure-from-Motion (SfM) [S1].
+-*   Camera poses and intrinsics for training and rendering views [S1].
+-*   Number of planar experts $K$ (500 for Replica, 1000 for Tanks & Temples) [S1].
+-
+-**Outputs:**
+-*   Rendered pixel color $c(r)$ for a given ray $r$ [S1].
+-*   Estimated depth $d(r)$ along the ray [S1].
+-*   Optimized planar geometry parameters $\{s_k\}$ and neural network weights for each expert [S1].
++*   **Inputs:**
++    *   Sparse 3D point cloud $\{x_i\}$ from Structure-from-Motion (SfM) [S1].
++    *   Training images with known camera poses [S1].
++    *   Number of planar experts $K$ (500 for Replica, 1000 for Tanks & Temples) [S1].
++*   **Outputs:**
++    *   Rendered image color $c(\mathbf{r})$ for a ray $\mathbf{r}$ [S1].
++    *   Estimated depth $d(\mathbf{r})$ [S1].
++    *   Baked alpha textures $A_k$ for each plane $k$ (optional, for acceleration) [S1].
+ 
+ ### Data Structures
+-**Planar Expert Geometry Parameter $s_k$:**
+-A tuple defining the $k$-th planar expert:
+-*   $p_k$: 3D center coordinate of the rectangle [S1].
+-*   $n_k$: Normalized 3D normal vector of the plane [S1].
+-*   $u_k$: Normalized up vector defining the y-axis direction of the plane coordinate in the world [S1].
+-*   $w_k$: Width of the rectangle [S1].
+-*   $h_k$: Height of the rectangle [S1].
+-
+-**Neural Radiance Function $f_k$:**
+-An MLP for each planar expert $k$ [S1]:
+-*   **Architecture:** Three fully-connected hidden layers with ReLU activation; final output layer with sigmoid activation [S1].
+-*   **Input:** 3D space coordinate $\mathbf{x}_k$ on the plane and normalized 3D ray direction $\mathbf{d} \in S^2$ [S1]. The ray direction $\mathbf{d}$ is transformed into a higher-dimensional space using high-frequency functions before entering the network [S1].
+-*   **Output:** Color $\mathbf{c}_k$ and transparency $\alpha_k$ [S1].
+-*   **Formula:** $(\mathbf{c}_k, \alpha_k) = f_k(\mathbf{x}_k, \mathbf{d})$ [S1].
+-
+-**Alpha Texture $A_i$:**
+-*   Pre-rendered view-independent alpha values baked into a texture map of size $w \times h$ for each rectangular plane $i$ [S1]. Used for fast retrieval via bilinear interpolation during inference [S1].
++**Planar Expert Geometry Parameter $s_k$**
++Each planar expert $k$ is defined by a tuple $s_k = (p_k, n_k, u_k, w_k, h_k)$ [S1]:
++*   $p_k \in \mathbb{R}^3$: The 3D center coordinate of the rectangle.
++*   $n_k \in \mathbb{R}^3$: The normalized 3D normal vector of the plane.
++*   $u_k \in \mathbb{R}^3$: The normalized up vector defining the y-axis direction of the plane's local coordinate system.
++*   $w_k \in \mathbb{R}$: The width of the rectangle.
++*   $h_k \in \mathbb{R}$: The height of the rectangle.
++
++**Neural Radiance Field $f_k$**
++Each expert $k$ has an associated MLP $f_k$ [S1]:
++*   **Architecture:** 3 fully-connected hidden layers with ReLU activation; final output layer with sigmoid activation.
++*   **Input:** 3D coordinate $\mathbf{x}_k$ on the plane and normalized ray direction $\mathbf{d} \in S^2$. The direction $\mathbf{d}$ is transformed into a higher-dimensional space using high-frequency positional encoding before input [S1].
++*   **Output:** Color $\mathbf{c}_k \in \mathbb{R}^3$ and transparency $\alpha_k \in \mathbb{R}$ [S1].
++
++**Alpha Texture $A_k$**
++*   A 2D texture map of size $w \times h$ storing pre-computed, view-independent alpha values for plane $k$ [S1].
+ 
+ ### Numbered Steps
+ 
+-#### 1. Plane Initialization
+-1.  Select plane centers $\{p_k\}$ using farthest point sampling on the coarse 3D point cloud $\{x_i\}$ from SfM [S1].
+-2.  Initialize plane orientations $\{n_k, u_k\}$ as normals estimated from local point sets around $p_k$ [S1].
+-3.  Optimize the geometric parameters $\{s_k\}$ by minimizing the geometry loss $\mathcal{L}_g$:
+-    $$ \mathcal{L}_g = \sum_i \min_k d(\mathbf{x}_i, \mathbf{s}_k) + \lambda \sum_k (w_k h_k)^2 $$
+-    where $d(\mathbf{x}_i, \mathbf{s}_k)$ is the distance from point $\mathbf{x}_i$ to the closest rectangular surface $\mathbf{s}_k$, and $(w_k h_k)^2$ is an area regularization term to prevent rectangles from becoming arbitrarily large [S1]. The weighting factor $\lambda$ is not specified in the sources [S1].
+-
+-#### 2. Teacher Model Training
+-1.  Train a large-capacity ordinary NeRF as a teacher model [S1].
+-2.  Conduct point sampling through NeurMiPs's ray-plane intersection (see Step 3) [S1].
++**Phase 1: Plane Initialization**
++1.  Initialize plane centers $p_k$ using farthest point sampling on the SfM point cloud $\{x_i\}$ [S1].
++2.  Initialize normals $n_k$ and up vectors $u_k$ based on local point sets around $p_k$ [S1].
++3.  Optimize geometric parameters $\{s_k\}$ by minimizing the geometry loss $\mathcal{L}_g$:
++    $$ \mathcal{L}_g = \sum_i \min_k d(x_i, s_k) + \lambda \sum_k (w_k h_k)^2 $$
++    where $d(x_i, s_k)$ is the distance from point $x_i$ to the closest rectangular surface $s_k$, and $(w_k h_k)^2$ is an area regularization term to prevent arbitrarily large rectangles. $\lambda$ is a weighting factor [S1].
++
++**Phase 2: Teacher Model Training**
++1.  Train a large-capacity standard NeRF (Teacher) as a reference model [S1].
++2.  Sample points along rays using the current NeurMiPs ray-plane intersection logic [S1].
+ 3.  Jointly optimize the planar experts' geometric parameters and the teacher model using the total loss:
+     $$ \mathcal{L}_{total} = \mathcal{L}_g + \mathcal{L}_c $$
+-    where $\mathcal{L}_c$ is the photometric loss [S1].
+-
+-#### 3. Ray-Plane Intersection
+-For a ray $r = \{o, d\}$ (origin $o$, direction $d$) and plane $k$ (normal $n_k$, center $p_k$):
+-1.  Compute the intersection point $x_k$ with the infinite plane:
+-    $$ \mathbf{x}_k = \mathbf{o} + \frac{(\mathbf{p}_k - \mathbf{o}) \cdot \mathbf{n}_k}{\mathbf{d} \cdot \mathbf{n}_k} \mathbf{d} $$
+-2.  Check if $x_k$ lies within the rectangular bounds defined by $w_k, h_k, u_k$ and the orthogonal vector [S1].
+-3.  Keep only intersected rectangles for the next phase [S1].
+-
+-#### 4. Radiance Evaluation
+-1.  For each intersecting planar expert $k$, evaluate the neural radiance function $f_k$ using the intersection point coordinate $\mathbf{x}_{p,k}$ (projected onto the plane's local coordinate system) and ray direction $\mathbf{d}$ [S1].
+-2.  Output transparency $\alpha_k$ and color $\mathbf{c}_k$ [S1].
+-
+-#### 5. Alpha Composition
+-1.  Collect the set of point samples $\{x_j, c_j, \alpha_j\}$ from all intersecting planes [S1].
+-2.  Sort points from closest to furthest relative to the eye $o$ [S1].
+-3.  Compute the final ray color:
+-    $$ c(\mathbf{r}) = \sum_j \prod_i^{j-1} (1 - \alpha_i) \alpha_j \mathbf{c}_j $$
+-4.  **Early Ray Termination:** If the transmittance $\prod (1 - \alpha_i)$ is close to zero, stop evaluating further planes [S1]. Re-normalize if the sum of alpha values is smaller than 1 [S1].
+-
+-#### 6. Distillation
+-1.  Draw random points uniformly from each planar rectangle and random view directions from the half unit sphere [S1].
+-2.  Evaluate the teacher NeRF at these points [S1].
+-3.  Update the student network parameters (the $f_k$ MLPs) by minimizing the L2 loss of both alpha values and colors between the teacher and student outputs [S1].
+-
+-#### 7. Fine-Tuning
+-1.  Fix the plane parameters $\{s_k\}$ [S1].
+-2.  Fine-tune the student radiance field models to improve rendering quality by minimizing the L2-photometric loss $\mathcal{L}_c$:
++    where $\mathcal{L}_c$ is the photometric loss:
+     $$ \mathcal{L}_c = \sum_{\mathbf{r}} \|c(\mathbf{r}) - c_{\text{gt}}(\mathbf{r})\|_2^2 $$
+-    where $c(\mathbf{r})$ is the rendered pixel color and $c_{\text{gt}}(\mathbf{r})$ is the ground-truth color [S1].
+-
+-#### 8. Alpha Baking (Inference Acceleration)
+-1.  Pre-render view-independent alpha values for each planar expert [S1].
+-2.  Bake these values into alpha textures $A_i$ of size $w \times h$ for each plane [S1].
+-3.  During inference, retrieve the alpha value by bilinear interpolation from the baked texture $A_i$ instead of evaluating the MLP [S1].
+-
+-#### 9. Custom CUDA Kernel Implementation
+-1.  Implement a custom CUDA kernel for ray-plane intersection, model inference, and alpha composition [S1].
+-2.  Fuse the network evaluation of each expert into a single CUDA kernel to render all experts in parallel [S1].
++    [S1].
++
++**Phase 3: Distillation**
++1.  For each planar expert $k$, draw random points uniformly from its rectangle and random view directions from the half unit sphere [S1].
++2.  Evaluate the Teacher model at these points to get target color $\mathbf{c}_{teacher}$ and alpha $\alpha_{teacher}$ [S1].
++3.  Update the student network $f_k$ parameters by minimizing the L2 loss between the student's output $(\mathbf{c}_k, \alpha_k)$ and the teacher's output [S1].
++
++**Phase 4: Fine-Tuning**
++1.  Fix the plane geometry parameters $\{s_k\}$ [S1].
++2.  Fine-tune the student radiance field models $f_k$ to improve rendering quality by minimizing the photometric loss $\mathcal{L}_c$ between rendered pixel color and ground-truth color [S1].
++
++**Rendering Pipeline (Inference)**
++1.  **Ray-Plane Intersection:** For a ray $r = \{o, d\}$ and plane $k$ with normal $n_k$ and center $p_k$, compute the intersection point $x_k$:
++    $$ x_k = o + \frac{(p_k - o) \cdot n_k}{d \cdot n_k} d $$
++    Keep only rectangles where the intersection lies within the bounds defined by $w_k, h_k$ and the local coordinate system defined by $n_k, u_k$ [S1].
++2.  **Radiance Evaluation:** For each intersecting planar expert $k$, evaluate $f_k(x_{p,k}, d)$ to obtain transparency $\alpha_k$ and color $c_k$. If alpha baking is used, retrieve $\alpha_k$ via bilinear interpolation from texture $A_k$ [S1].
++3.  **Alpha Composition:**
++    *   Collect all intersecting points $\{x_j, c_j, \alpha_j\}$.
++    *   Sort points from closest to furthest relative to the eye $o$ [S1].
++    *   Compute final ray color:
++        $$ c(r) = \sum_j \left( \prod_i^{j-1} (1 - \alpha_i) \right) \alpha_j c_j $$
++    *   Compute expected depth:
++        $$ d(r) = \sum_j \left( \prod_i^{j-1} (1 - \alpha_i) \right) \alpha_j t_j $$
++        where $t_j$ is the depth of sampled point $j$ [S1].
++4.  **Early Ray Termination:** If the accumulated transmittance $\prod (1 - \alpha_i)$ is close to zero, stop evaluating further planes. Re-normalize if the sum of alpha values is smaller than 1 [S1].
+ 
+ ### Pseudocode
+@@ -95,184 +80,195 @@
+ ```python
+ import math
++import numpy as np
+ 
+ def ray_plane_intersection(ray_o, ray_d, plane_center, plane_normal):
+     """
+-    Computes the intersection of a ray with an infinite plane.
+-    ray_o: (3,) origin
+-    ray_d: (3,) direction
+-    plane_center: (3,) p_k
+-    plane_normal: (3,) n_k
+-    Returns intersection point x_k or None if parallel/no intersection.
+-    """
+-    denom = math.dot(ray_d, plane_normal)
++    Computes intersection of ray and infinite plane.
++    Returns distance t along ray, or None if parallel or behind ray.
++    """
++    denom = np.dot(ray_d, plane_normal)
+     if abs(denom) < 1e-8:
+         return None
+-    t = math.dot(plane_center - ray_o, plane_normal) / denom
+-    return ray_o + t * ray_d
+-
+-def is_point_in_rectangle(point, plane_center, plane_normal, plane_up, width, height):
+-    """
+-    Checks if a 3D point lies within the rectangular bounds of a plane.
+-    """
+-    # Project point onto plane to get local coordinates
++    t = np.dot(plane_center - ray_o, plane_normal) / denom
++    if t < 0:
++        return None
++    return t
++
++def point_in_rectangle(point, plane_center, plane_normal, plane_up, width, height):
++    """
++    Checks if point lies within the rectangle defined by center, normal, up, width, height.
++    """
++    # Construct local basis
++    # u is plane_up
++    # v is cross(normal, u)
++    v = np.cross(plane_normal, plane_up)
++    v = v / np.linalg.norm(v)
++    u = plane_up # Already normalized
++    
+     # Vector from center to point
+     vec = point - plane_center
+-    # Local x axis is orthogonal to normal and up
+-    local_x = math.cross(plane_normal, plane_up)
+-    local_x = local_x / math.norm(local_x)
+-    local_y = plane_up
+-    
+-    # Coordinates in local frame
+-    u = math.dot(vec, local_x)
+-    v = math.dot(vec, local_y)
++    
++    # Project onto u and v
++    proj_u = np.dot(vec, u)
++    proj_v = np.dot(vec, v)
+     
+     # Check bounds
+-    half_w = width / 2.0
+-    half_h = height / 2.0
+-    return -half_w <= u <= half_w and -half_h <= v <= half_h
+-
+-def evaluate_planar_expert(mlp, local_u, local_v, ray_d):
+-    """
+-    Evaluates the neural radiance field for a planar expert.
+-    mlp: The MLP function f_k
+-    local_u, local_v: Coordinates on the plane
+-    ray_d: Ray direction
+-    Returns (color, alpha)
+-    """
+-    # Construct 3D coordinate on plane
+-    # Note: In implementation, mlp expects specific input format.
+-    # Here we assume mlp takes (x, y, z, dx, dy, dz)
+-    # We need to reconstruct 3D pos from local_u, v and plane params
+-    # This is a placeholder for the specific coordinate transformation logic
+-    # defined in the paper's high-frequency encoding.
+-    pos_3d = ... # Reconstruct from local_u, v, plane_center, plane_up, local_x
+-    return mlp(pos_3d, ray_d)
+-
+-def render_ray(ray_o, ray_d, planes, mlp_models, alpha_textures=None, use_baking=False):
++    if abs(proj_u) <= height / 2.0 and abs(proj_v) <= width / 2.0:
++        return True
++    return False
++
++def evaluate_neural_field(mlp, x, d):
++    """
++    Evaluates the MLP for a specific expert.
++    Returns color and alpha.
++    """
++    # Apply positional encoding to d
++    d_encoded = positional_encoding(d)
++    # Concatenate x and d_encoded
++    input_vec = np.concatenate([x, d_encoded])
++    # Pass through MLP
++    output = mlp.forward(input_vec)
++    color = output[:3]
++    alpha = output[3]
++    return color, alpha
++
++def render_ray_neurmiips(ray_o, ray_d, planes, experts, use_alpha_baking, alpha_textures):
+     """
+     Renders a single ray using NeurMiPs.
+-    planes: List of dicts with keys: center, normal, up, width, height
+-    mlp_models: List of MLPs corresponding to planes
+-    alpha_textures: Optional list of baked alpha textures
+-    """
+-    intersecting = []
+-    
+-    # Step 3: Ray-Plane Intersection
+-    for k, plane in enumerate(planes):
+-        x_k = ray_plane_intersection(ray_o, ray_d, plane['center'], plane['normal'])
+-        if x_k is not None:
+-            if is_point_in_rectangle(x_k, plane['center'], plane['normal'], plane['up'], plane['width'], plane['height']):
+-                intersecting.append((k, x_k))
+-    
+-    # Sort by distance to origin
+-    intersecting.sort(key=lambda item: math.norm(item[1] - ray_o))
+-    
+-    color = [0.0, 0.0, 0.0]
+-    transmittance = 1.0
++    planes: list of dicts with keys: center, normal, up, width, height
++    experts: list of MLP models corresponding to planes
++    use_alpha_baking: boolean
++    alpha_textures: list of 2D arrays (textures) corresponding to planes
++    """
++    intersections = []
++    
++    # 1. Ray-Plane Intersection
++    for i, plane in enumerate(planes):
++        t = ray_plane_intersection(ray_o, ray_d, plane['center'], plane['normal'])
++        if t is not None:
++            hit_point = ray_o + t * ray_d
++            if point_in_rectangle(hit_point, plane['center'], plane['normal'], 
++                                  plane['up'], plane['width'], plane['height']):
++                intersections.append((t, hit_point, i))
++    
++    # 2. Sort by distance
++    intersections.sort(key=lambda x: x[0])
++    
++    # 3. Alpha Composition
++    accumulated_transmittance = 1.0
++    final_color = np.zeros(3)
+     depth_sum = 0.0
+-    alpha_sum = 0.0
+-    
+-    # Step 5: Alpha Composition
+-    for k, x_k in intersecting:
++    depth_weight_sum = 0.0
++    
++    for t, hit_point, idx in intersections:
+         # Early Ray Termination
+-        if transmittance < 1e-4:
++        if accumulated_transmittance < 1e-4:
+             break
+             
+-        # Step 4: Radiance Evaluation
+-        if use_baking and alpha_textures is not None:
+-            # Retrieve alpha from baked texture
+-            # Note: Requires mapping 3D point to 2D texture coordinates
+-            alpha = get_alpha_from_texture(alpha_textures[k], x_k, plane['up'], plane['normal'])
+-            # Color still needs MLP evaluation or baked color texture
+-            # Paper says alpha baking is for view-independent alpha.
+-            # Color is still evaluated or baked? Paper says "fine-tune RGB branch".
+-            # Assuming color is evaluated via MLP for accuracy, or baked if fully cached.
+-            # For this pseudocode, we assume color is evaluated.
+-            color_k, _ = evaluate_planar_expert(mlp_models[k], ..., ray_d)
++        # 4. Radiance Evaluation
++        if use_alpha_baking:
++            # Retrieve alpha from texture
++            # Note: Implementation of bilinear interpolation from texture at hit_point
++            # relative to plane's local coordinates is required here.
++            # For pseudocode, we assume a function get_alpha_from_texture exists.
++            alpha = get_alpha_from_texture(alpha_textures[idx], hit_point, planes[idx])
++            # Color still needs network evaluation or baked RGB texture (not specified in notes, 
++            # notes say "fine-tune RGB branch", implying color is not baked, only alpha)
++            color, _ = evaluate_neural_field(experts[idx], hit_point, ray_d)
+         else:
+-            color_k, alpha_k = evaluate_planar_expert(mlp_models[k], ..., ray_d)
+-            alpha = alpha_k
++            color, alpha = evaluate_neural_field(experts[idx], hit_point, ray_d)
+             
+-        # Alpha Composition Formula
+-        # c(r) = sum_j (prod_i^{j-1} (1 - alpha_i)) * alpha_j * c_j
+-        weight = transmittance * alpha
+-        color = color + weight * color_k
+-        transmittance = transmittance * (1 - alpha)
+-        alpha_sum += alpha
+-        
+-        # Depth Estimation
+-        # d(r) = sum_j (prod_i^{j-1} (1 - alpha_i)) * alpha_j * t_j
+-        depth_j = math.dot(x_k - ray_o, ray_d) # Depth along ray
+-        depth_sum += weight * depth_j
+-        
+-        # Re-normalization if sum of alpha < 1 (empirical observation)
+-        # This is handled implicitly by the loop, but explicit check might be needed
+-        # if alpha_sum < 1.0: ...
+-
+-    # Re-normalize color if transmittance is not zero (background)
+-    if transmittance > 1e-4:
+-        # Background color assumption (e.g., black or white)
+-        # Paper doesn't specify background color handling explicitly in formula,
+-        # but standard NeRF adds background.
+-        pass 
+-        
+-    return color, depth_sum
+-
+-def train_neurmiips(point_cloud, training_views, K):
+-    """
+-    Training pipeline for NeurMiPs.
+-    """
+-    # Step 1: Plane Initialization
+-    planes = initialize_planes(point_cloud, K)
+-    
+-    # Step 2: Teacher Model Training
+-    teacher_nerf = train_teacher_nerf(training_views, planes)
+-    
+-    # Step 6: Distillation
+-    student_mlps = [create_small_mlp() for _ in range(K)]
+-    distill_teacher_to_students(teacher_nerf, student_mlps, planes, epochs=1500)
+-    
+-    # Step 7: Fine-Tuning
+-    fix_plane_parameters(planes)
+-    fine_tune_students(student_mlps, training_views, epochs=2500)
+-    
+-    return planes, student_mlps
++        # 5. Compose
++        weight = accumulated_transmittance * alpha
++        final_color += weight * color
++        depth_sum += weight * t
++        depth_weight_sum += weight
++        
++        accumulated_transmittance *= (1.0 - alpha)
++        
++    # Re-normalization if sum of alpha < 1 (handled implicitly by transmittance, 
++    # but notes mention re-normalization if sum < 1, likely for visual consistency)
++    # Standard volume rendering handles this via transmittance.
++    
++    # Depth estimation
++    estimated_depth = depth_sum / depth_weight_sum if depth_weight_sum > 0 else 0.0
++    
++    return final_color, estimated_depth
++
++def train_neurmiips(planes, experts, teacher_nerf, points_cloud, images, epochs_teacher, epochs_distill, epochs_finetune):
++    """
++    Training loop for NeurMiPs.
++    """
++    optimizer = Adam(learning_rate=5e-4)
++    
++    # Phase 1: Initialization (Optimize plane geometry only)
++    for epoch in range(1000): # Placeholder for initialization steps
++        # Minimize L_g
++        loss_g = compute_geometry_loss(planes, points_cloud)
++        loss_g.backward()
++        optimizer.step()
++        
++    # Phase 2: Teacher Training & Joint Optimization
++    # Train Teacher NeRF
++    for epoch in range(epochs_teacher):
++        # Standard NeRF training loop
++        pass
++        
++    # Distillation: Jointly optimize geometry and distill
++    for epoch in range(epochs_distill):
++        # Sample rays
++        # Intersect with planes
++        # Evaluate Teacher
++        # Compute L_g and L_c
++        # Update planes and experts
++        pass
++        
++    # Phase 3: Fine-Tuning
++    # Fix planes
++    for epoch in range(epochs_finetune):
++        # Sample rays
++        # Intersect with planes
++        # Evaluate Experts
++        # Compute L_c
++        # Update experts only
++        pass
+ ```
+ 
+ ### Parameters
+-*   **K (Number of planar experts):** 500 for Replica dataset, 1000 for Tanks & Temples dataset [S1].
++*   **$K$ (Number of Planar Experts):** 500 for Replica dataset, 1000 for Tanks & Temples dataset [S1].
+ *   **Optimizer:** Adam [S1].
+ *   **Learning Rate:** $5 \times 10^{-4}$ [S1].
+ *   **Training Epochs:**
+-    *   Teacher model: 6,000 epochs [S1].
++    *   Teacher Model: 6,000 epochs [S1].
+     *   Distillation: 1,500 epochs [S1].
+-    *   Fine-tuning: 2,500 epochs [S1].
++    *   Fine-Tuning: 2,500 epochs [S1].
++*   **$\lambda$ (Geometry Loss Weight):** Not given in the sources [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Finite Plane Size:** Planes may not cover all regions in extreme viewpoints, inducing higher depth error for scenes modeled by the background [S1]. This can be resolved by adopting multiple-layer boxes [S1].
+-*   **Dependency on SfM:** The method relies heavily on SfM point clouds for plane initialization. If sparse point clouds are noisy or unavailable, performance degrades [S1].
+-*   **Unbounded Scenes:** The current model cannot handle unbounded scenes. A possible solution is incorporating techniques from NeRF++ to model background texture with non-Euclidean coordinates [S1].
+-*   **Alpha Baking Quality:** Applying alpha baking directly during inference might bring a minor rendering performance drop due to the discretization of the continuous radiance field [S1].
++*   **Finite Plane Size:** Planes may not cover all regions in extreme viewpoints, leading to higher depth errors for background scenes [S1]. Solution: Adopt multiple-layer boxes [S1].
++*   **SfM Dependency:** Performance degrades if sparse point clouds are noisy or unavailable [S1].
++*   **Unbounded Scenes:** The method currently cannot handle unbounded scenes. Solution: Incorporate techniques from NeRF++ to model background texture with non-Euclidean coordinates [S1].
++*   **Alpha Baking Artifacts:** Applying alpha baking directly during inference may bring a minor rendering performance drop or quality drop due to discretization of the continuous radiance field [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is accelerated by closed-form ray-plane intersection and early ray termination. A custom CUDA kernel fuses network evaluation of all experts into a single kernel for parallel rendering [S1].
+-*   **Memory Complexity:** Significantly lower memory footprint compared to voxel-based approaches due to the compact representation of planes and tiny MLPs [S1]. Alpha baking increases memory consumption for texture storage [S1].
++*   **Time Complexity:** Rendering is accelerated by closed-form ray-plane intersection and early ray termination. Only a small fraction of planes intersect a given ray [S1].
++*   **Memory Complexity:** Significantly lower than voxel-based approaches due to the compact representation of planes and tiny MLPs [S1]. Alpha baking increases memory usage for textures [S1].
+ *   **Measured Performance:**
+-    *   **Replica Dataset:** Achieves 19.16 frames per second (FPS) on a single TITAN RTX using the custom CUDA kernel [S1].
+-    *   **Tanks & Temples (Truck Scene):** Achieves 976 FPS for the 1000-plane scene at 1920x1080 resolution on a single RTX 3090 desktop using texture baking [S1].
++    *   **Replica:** 19.16 FPS on a single TITAN RTX using a custom CUDA kernel [S1].
++    *   **Tanks & Temples (Truck scene, 1000 planes, 1920x1080):** 976 FPS on a single RTX 3090 using texture baking [S1].
+ *   **Strengths:**
+-    *   More efficient in memory and computation than standard NeRF [S1].
+-    *   More sample-efficient with better extrapolation capabilities [S1].
+-    *   Captures detailed textures on planar surfaces with sharp boundaries, avoiding the blurry textures of NeRF in large-scale scenes [S1].
+-    *   Better reflects geometry than Multi-Plane Imagery (MPI) [S1].
++    *   More efficient in memory and computation than NeRF [S1].
++    *   More sample-efficient with better extrapolation than NeRF [S1].
++    *   Captures detailed textures on planar surfaces with sharp boundaries, avoiding the blurriness of NeRF in large-scale scenes [S1].
++    *   Better geometry reflection than Multi-Plane Imagery (MPI) [S1].
+     *   Generalizes better in view extrapolation than voxel-based methods (PlenOctrees, KiloNeRF) which prune redundant voxels and cannot estimate appearances of unseen regions [S1].
+-    *   Avoids "fog-like" artifacts in free space (NeRF) and "stack-of-cards" effects (NeX) [S1].
++    *   Avoids "fog-like" artifacts of NeRF and "stack-of-cards" effects of NeX [S1].
+ *   **Limitations:**
+-    *   Cannot handle unbounded scenes without modification [S1].
+-    *   Performance degrades if SfM point clouds are noisy or unavailable [S1].
++    *   Cannot handle unbounded scenes natively [S1].
++    *   Relies heavily on SfM point clouds [S1].
+     *   Depth error increases in extreme viewpoints due to finite plane size [S1].
+ 
+ ## Background
+-NeurMiPs (Neural Mixture of Planar Experts) was proposed in the paper "NeurMiPs: Neural Mixture of Planar Experts for View Synthesis" [S1]. It builds upon the success of neural rendering [44, 73] and addresses the limitations of existing 3D representations. It is positioned as a hybrid approach that combines the geometric flexibility of neural radiance fields with the efficiency of planar representations. The method was evaluated on the Tanks & Temples and Replica datasets, demonstrating state-of-the-art quality-efficiency trade-offs at the time of publication [S1].
++NeurMiPs was introduced in the paper "NeurMiPs: Neural Mixture of Planar Experts for View Synthesis" [S1]. It builds upon the success of neural rendering [44, 73] and MPI [S1]. The method addresses the limitations of dense volume rendering and standard MPI by using a mixture of learnable planar experts. It is used for view synthesis on datasets like Tanks & Temples and Replica [S1].
+ 
+ ## Sources

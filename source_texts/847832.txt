@@ -1,0 +1,160 @@
+Cecelia Feijoa. Contribute to schienstockd/cecelia development by creating an account on GitHub.
+
+fix(viewer): brick atlas OOM on 2D↔3D, playback refetch thrash, unused cache budget by schienstockd · Pull Request #1583 · schienstockd/cecelia · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+schienstockd
+commented
+Oct 10, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Three brick-renderer problems reported on Dml3RG:
+OOM on 2D→3D with a 12/16 GB cache on a 20 GB GPU. setImage destroyed the old atlases and created new ones in the same tick; Dawn frees VRAM only after the queue retires, so old + new had to fit at once. Now: wait for onSubmittedWorkDone after a drop, allocate under an awaited OOM scope, and step down one atlas per OOM (only a single-atlas failure reaches the flat fallback).
+Flicker returning after a few playback loops. The play loop's working set (~5 GB) exceeded the 4.3 GB atlas, and LRU on a cyclic sweep evicts exactly the next-needed frame — every loop refetched everything (15 GB fetched in the bench). While playing, eviction now ranks by next use (Belady's MIN): 181 → 25 refetches per loop on that view.
+Cache budget rounded down. Atlases were sized at maxBufferSize and counted with floor, so 12 GB used 8.6 GB and anything under 8.6 GB used 4.3 GB. The budget is now split evenly (atlasCountForBudget, shared with the chip label). Plan Decision 4 updated.
+Also: prefetch direction at the loop wrap, multi-atlas prefetch capacity, label atlases following the step-down, and setZPlane / maxSafePrefetchDepth during the async allocation window.
+Test plan
+pixi run test-frontend — 4083 passed; new tests: budget split, 2³²−4 edge, nextUseDistance, a cyclic-playback simulation through PageTable (LRU 181/loop vs next-use 25/loop — fails on LRU)
+vue-tsc -b
+Laptop playback check by the user
+20 GB box: 12 GB cache, 2D→3D; optionally atlas_free_probe.html to confirm the deferred-free cause
+Not touched: tileRenderer.ts has the same destroy-then-create shape (plausible, ~800 MB atlas).
+🤖 Generated with Claude Code
+fix(viewer): brick atlas OOM on 2D↔3D, playback refetch thrash, unuse…
+…
+e8c45a5
+```
+…d cache budget
+
+- setImage now waits for the dropped atlas's VRAM to be reclaimed before allocating (Dawn
+  frees destroyed textures only after the queue retires them — old + new were resident at
+  once), allocates under an awaited out-of-memory scope, and steps down one atlas per OOM
+  instead of failing the brick renderer.
+- While playing, atlas eviction ranks by next use (Belady's MIN) instead of LRU. LRU on a
+  loop longer than the atlas evicted the frame needed next, so every loop refetched every
+  frame; now only the overflow refetches (181 → 25 per loop on the reported view).
+- pickAtlasLayout splits the budget evenly over ceil(budget / maxBufferSize) atlases; it used
+  to round the count down (12 GB → 8.6 GB, 6 GB → 4.3 GB). Shared atlasCountForBudget keeps
+  the cache-chip label in step.
+- Prefetch direction at the loop wrap (travelDir), multi-atlas prefetch capacity, and
+  setZPlane / maxSafePrefetchDepth during the now-async allocation window.
+
+Reservations:
+1. Not reproduced on the 20 GB box — the deferred-free cause is Dawn's documented behaviour,
+   probe page handed to the user to confirm. Laptop check by the user: "better".
+2. The tile renderer (tileRenderer.ts:352) has the same destroy-then-create shape and an
+   unawaited OOM scope — plausible, not touched here.
+3. Allocation is async now; the canvas is blank for one GPU round-trip after setImage.
+
+[fanout-20b8ecce: fixed_pre_commit]
+[fanout-23895061: fixed_pre_commit]
+[conv-262645c2: fixed_pre_commit]
+[fanout-a52f24e2: fixed_pre_commit]
+
+_Fanout audit (evidence):_
+
+- **frontend/src/lib/webgpu/tileRenderer.ts:352** — out-of-memory scope around the tile-atlas `createTexture`. This is the shape the hunk replaced in `brickAtlasTexture.ts`: `void device.popErrorScope().then(...)` at :365 is never awaited, and `atlas = tex` is installed unconditionally at :368. There is also no `onSubmittedWorkDone` wait after the previous atlas is destroyed, so an OOM there would still go unseen and an old+new VRAM spike is still possible. To confirm: check whether the tile atlas gets re-created right after a destroy (cache resize or image switch) at sizes near VRAM. [**plausible**]
+- **frontend/src/modules/ViewerWindow.vue:1427** — the disabled-chip tooltip counts atlases with `Math.ceil(o.mb / perAtlasMB)`. That is a second copy of the count, separate from the new shared `atlasCountForBudget` (no 1 % tolerance). It only shows on chips already over the hard cap, so the label may be off by one at most. To confirm: check whether any `BASE_CACHE_OPTIONS` value sits within 1 % above a multiple of `perAtlasMB`. [**plausible**]
+
+Evidence:
+- `createBrickAtlasTexture` (`brickAtlasTexture.ts:71`, the `callerScope` change): its only caller is `createBrickAtlasTextures` at :219, which passes `callerScope: true`. No other callers.
+- `maxSafePrefetchDepth` capacity fix (`brickVolumeRenderer.ts` ~:1842): the other `atlasSlotCapacity(` uses are `brickVolumeRenderer.ts:674` (intended per-atlas, multiplied right after) and `brickAtlasTexture.ts:106` (per-texture). Both are correctly per-atlas. Clear.
+- Loop-wrap direction fix (`Math.sign(tp - lastT)`): the only remaining `Math.sign` in `ViewerWindow.vue` is inside `travelDir` at :2300. All four `prefetchWindow(` call sites (:2252, :2291, :2339, :2847) now use `travelDir` or `dir = 1`. Clear.
+- `setZPlane` storing its value before the null check, now that `setImage` is async (`brickVolumeRenderer.ts:1871`): I went through every `atlas === null` early return (:593, 823, 842, 858, 887, 1032, 1037, 1102, 1179, 1194, 1346, 1487, 1662, 1759, 1895). None of them returns before storing a caller-supplied argument. `setBrickSource`, `setTestPattern` and `setChannels` store first or fall back with `?.`. Clear.
+- `pickAtlasLayout` sizing: its one caller is `brickVolumeRenderer.ts:658`. The chip estimate at :1407 now uses the shared helper. Clear.
+- Other un-awaited out-of-memory scopes: `volumeRenderer.ts:804` awaits its pop (:823). Clear.
+
+Coverage gaps: the shell hook failed once the working directory moved to `frontend/src`, so this sweep used file reads instead of a repo-wide grep. `ViewerWindow.vue` lines 200–1300 and 4900+ were not read.
+
+_Fanout audit: run_
+
+_Convention check (evidence):_
+
+No findings.
+
+**Evidence**
+
+Docs I read for this frontend diff:
+- `docs/ai-assist/CONVENTION_CHECK.md`, the *Reviewer prompt* section.
+- `frontend/CLAUDE.md`: the two mandatory lookups, and the *Conventions* rules on continuous controls and extracting logic out of SFCs.
+- `docs/inventory/FRONTEND.md`, the *Brick atlas primitives* bullet (the diff edits it).
+- `frontend/src/utils/volumeCache.ts` lines 25–244: `prefetchWindow`, `prefetchDepth`, `walkPrefetch`, `lruEvictions`, `playbackAdvance`.
+- `frontend/src/lib/webgpu/volumeRenderer.ts` lines 795–880: the flat renderer's OOM scope and `onSubmittedWorkDone`.
+- `docs/ui/PRIMITIVES.md` and `docs/ui/COPY.md` don't apply: the diff renders no UI and adds no user-facing copy. The only new string is a `console.warn`.
+
+What I grepped across `frontend/src`, and what I checked for each addition:
+- **Grep terms:**
+  - The exported symbols in `pageTable.ts`, `volumeCache.ts`, `brickAtlas.ts` and `brickScheduler.ts`.
+  - `evictBy`, `evictFarthest`, `Belady`, `nextUse`, `cyclicDist`, `wrapDist`, `% nT`, `+ nT) %`.
+  - Brick-key patterns without `t`: `posKey`, `gridKey`, `footprintKey`.
+  - `onSubmittedWorkDone`, `pushErrorScope`.
+- **`atlasCountForBudget`** (`utils/brickAtlas.ts:149`): no near-equivalent found. It replaces the inline `Math.floor(budgetMB / perAtlasMB)` in `ViewerWindow.vue`'s `estimateAtlasesForBudget`, so the picker and the chip label now share one helper. Clean.
+- **`nextUseDistance` and `PlaybackHint`** (`utils/pageTable.ts:124,140`):
+  - The closest candidates are `prefetchWindow`, which builds a fetch window rather than an eviction distance, and `playbackAdvance`, which steps playback forward.
+  - `PlaybackHint`'s `{nT, loop}` matches `playbackAdvance`'s parameters, but there is no shared type to reuse. Rejected.
+  - Belady 1966 is cited with a DOI, as root `CLAUDE.md` requires for published algorithms.
+- **`evictHighestRank` and the `rank?` argument on `insertOrEvictLru`** (`pageTable.ts`): the closest candidate is `lruEvictions` (`volumeCache.ts:151`). It works on the flat per-t cache's order array and has no ranking, so it isn't the page-table structure. Rejected.
+- **`viewportPosKey`** (`pageTable.ts:119`): this is `brickKey` without the timepoint. `brickKey` can't be used for it because it encodes `t`. No other position key exists. Clean.
+- **`destroyAtlasState`, `buildAtlas`, `allocateAtlas`** (`brickVolumeRenderer.ts`):
+  - These are private closures that pull the old inline body apart.
+  - The OOM step-down mirrors `volumeRenderer.ts:804–842`, but that one is inline too, so there's no shared helper to reuse.
+  - `allocGen` is an async-allocation stale token, not a timer plus sequence-token pair on a continuous control, so the `debouncedLatest` rule doesn't apply.
+- **`callerScope`** (`brickAtlasTexture.ts`): an option on an existing function. Clean.
+- **`travelDir` and `playbackHint`** (`ViewerWindow.vue`): one-line pieces of view state. `playbackAdvance` doesn't expose a direction. Clean.
+
+Comments I checked for wrong home:
+- The `callerScope` scope-nesting comment and the `allocateAtlas` Dawn deferred-free comment are protected, correctness-critical comments.
+- The `nextUseDistance` comment is a sanctioned citation.
+- The `travelDir` loop-wrap comment explains a design choice and stays in source.
+- The plan's "Revised 2026-10-10" paragraph sits in its own `_PLAN.md` home. It names no new file location, so the placement pass has nothing to check.
+- The `brickAtlas.test.ts` Dml3RG narrative is in a test, and its dataset uid is the maintainability lint's job, not this check's.
+
+_Convention check: run_
+
+_Inventory check: skipped — no new shared files or routes_
+
+_Maintainability lint: run — nothing flagged_
+
+_Recital stamp: fix/brick-atlas-oom@427b9190b0cd_
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+schienstockd
+merged commit 58b5ac4
+into
+main
+Oct 10, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+schienstockd
+deleted the
+fix/brick-atlas-oom
+branch
+October 10, 2026 07:48
+schienstockd
+mentioned this pull request
+Oct 10, 2026
+fix(viewer): tile atlas no longer reallocates on zoom; awaited, step-down allocation
+#1585
+Merged
+2 of 3 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

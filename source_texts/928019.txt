@@ -1,0 +1,137 @@
+Compressing voxel worlds with octrees and ray-casting through them directly on the GPU.
+
+Sparse Voxel Octrees · ./jerome{m}Skip to content
+~/Notes/Sparse Voxel Octrees.md · note · budding · 7 min · updated 2026-08-30
+Sparse Voxel Octrees
+// status: budding
+A dense 3D grid at 1024³ is a gibibyte of u8. When much of it is air, Sparse Voxel Octrees (SVOs) exploit that sparsity: recursively subdivide space and store children only where detail is needed. You lose direct O(1) indexing but can reduce memory substantially and ray-cast through the hierarchy.
+Id Software shipped Sparse Voxel Octree ideas in the MegaTexture-era Tech 6 research. NVIDIA's Laine & Karras turned it into a GPU-friendly data structure with the ESVO paper (2010) — still the modern reference.
+The data structure
+Each node covers a cube of space. Children split it into 8 octants. A node is either:
+Internal — has up to 8 children, encoded as a child-mask (which octants exist) and a pointer to a contiguous block of children.
+Leaf — holds the voxel data (colour, normal, material…) or a "this whole cell is full" marker.
+A naive encoding burns memory on pointers. Classic packing tricks:
+Child-mask + offset — 8-bit mask says which of the 8 children exist, single 24-bit offset points to the first child. Children are stored contiguously so you can index with mask popcount.
+Contour data (ESVO-specific) — store a small plane per leaf so smooth surfaces don't need subdivision all the way to pixel-level.
+ESVO encoding in more detail
+Laine & Karras pack each non-leaf node into 8 bytes:
+childmask (8 bits) — which of the 8 children exist.
+leafmask (8 bits) — of those, which are leaves (no further subdivision).
+childptr — a compact relative offset from the current node to its first child. Siblings are stored contiguously so a child can be selected with a mask popcount.
+A far-pointer mechanism — an extra indirection or word handles offsets that do not fit the compact inline representation.
+Contour data is a small per-leaf plane (normal + offset) inside the cell, letting one leaf represent a smooth surface patch without further subdivision. That's the "efficient" in ESVO — it buys you most of the visual quality at a fraction of the memory of a pure-topology SVO.
+Ray traversal
+Two families:
+Stackless / parametric — Revelles et al.'s algorithm uses parametric t entry/exit values per axis and decides which children to visit in the right order without a stack. Works on GPU where deep stacks are painful. ESVO uses a variant.
+Stack-based — walk down to the first-hit leaf, push siblings, unwind on miss. Simpler, needs shared-memory or thread-local stack.
+Both boil down to: at each node, find which child the ray enters first; if it's empty, advance the ray to the next child plane; if it's internal, descend; if it's a leaf, hit.
+glslcopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22// Rough sketch — the real ESVO code is longer and tighter.
+Hit castRay(vec3 ro, vec3 rd) {
+    // Precompute ray coefficients; mirror ray so rd components are positive.
+    Stack stack;
+    Node node = root;
+    float tMin = boxEntry(root, ro, rd);
+    float tMax = boxExit(root, ro, rd);
+
+    while (tMin < tMax) {
+        int childIdx = firstChild(node, ro, rd, tMin);
+        if (node.mask & (1 << childIdx)) {
+            Node child = fetch(node.childPtr + popcountBelow(node.mask, childIdx));
+            if (child.isLeaf) return Hit{ tMin, child };
+            stack.push(node, tMin, tMax);
+            node = child;
+            tMax = childExit(child, ro, rd);
+        } else {
+            tMin = advanceToNextChild(node, ro, rd, tMin);
+        }
+    }
+    return miss();
+}
+```
+Corner cases are the bulk of the real implementation: ray/child-plane intersection with correct signs, advancing to the next child without tunnelling, popping back up the tree when you exit a node.
+Revelles parametric traversal
+The trick that makes stackless (or small-stack) traversal tractable on a GPU: transform the ray so all three direction components are positive, remember the sign XOR per axis to map back to original child indices. Every node intersection then produces three parametric values (tx_mid, ty_mid, tz_mid) where the ray crosses each splitting plane.
+Invariants:
+The ray always enters a node through exactly one face — which face tells you the first child.
+From that child, advancing to the next-first-hit sibling is whichever of the three t_mid is smallest; the exited axis flips the corresponding bit of the child index.
+Going down needs no stack — you always know the first child to descend into.
+Going up does — pop to the parent, carry on from where you left off.
+ESVO keeps a bounded traversal stack. Its required depth grows logarithmically with grid resolution, but register pressure and spills still matter on a GPU.
+Updates and streaming
+SVOs are read-optimised. Inserting a single voxel means potentially allocating a new leaf, subdividing up to max depth, and shifting sibling blocks. Options:
+Rebuild whole subtrees on edit (fine for tools, not for games).
+Free-list the child blocks — accept fragmentation, compact periodically.
+Dual structure — keep a small writeable brick-grid for dirty regions, merge into the SVO on flush.
+DAG — Directed Acyclic Graph variant (Kämpe et al.) that deduplicates identical subtrees. It can compress repetitive worlds very well, but edits require copy-on-write updates and rebuilding affected ancestors.
+Memory layout tips
+Morton-order children so spatially close voxels are close in memory — better cache behaviour, faster traversal.
+Pack nodes to 8 bytes if you can; 16 if you need a full 32-bit child pointer. ESVO's "parent block" layout keeps all children of a parent contiguous.
+Separate topology from attributes. The traversal loop only needs the mask and child pointer; colours/normals live in a parallel array accessed only on hits.
+Attribute storage
+The topology tree stays tiny; colour, normal, and material live in parallel arrays accessed only on hit:
+Per-leaf indirection — each leaf has an index into an attribute buffer. The index is derived from popcount-on-the-path, so it's computable from the topology without extra pointers.
+Compressed attributes — compact colour encodings, octahedron-encoded normals, and small material IDs can keep per-leaf storage low; the actual memory budget still depends on topology, occupancy, and indirection overhead.
+Deferred shading — the ray pass writes a minimal "G-buffer" of (leafIndex, t, face); a full-screen pass fetches attributes and shades. See Deferred vs forward rendering.
+Separating topology from attributes keeps the hot traversal loop cache-friendly. Attributes are random-access anyway — no benefit to interleaving.
+Streaming & paging
+Billion-voxel worlds don't fit in GPU memory. Standard architecture (Crassin's GigaVoxels thesis):
+Split the octree into bricks — subtrees with a fixed memory footprint.
+Maintain a GPU-side page table mapping virtual brick ID → physical slot (or "absent").
+On a ray hitting an absent brick, either shade with a placeholder or mark the miss and let the CPU page it in next frame.
+Feedback: the GPU writes a list of needed bricks per frame; the CPU loads them async and updates the page table.
+This is essentially virtual texturing extended to 3D, and it is a common architecture for datasets larger than resident GPU memory.
+DAG — the next compression step
+If two subtrees are bit-for-bit identical, store the data once. The octree becomes a Directed Acyclic Graph. Kämpe et al. (2013) showed strong compression on high-resolution scenes where identical subtrees recur; the gain is content-dependent.
+Downsides:
+Editing needs copy-on-write changes along the affected path and may reduce deduplication.
+Building takes longer — you hash every subtree and merge duplicates.
+Random access is still a traversal, not O(1).
+Perfect for static heroes — scanned heritage sites, archival work, ray-traced cinematics, or fixed level geometry. Not great for games with physics. Some engines solve this with a small writeable brick grid overlaid on the DAG for dynamic objects.
+Data structure comparison
+StructureMemoryEdit costRay speedBest for
+Dense 3D gridHugeO(1)Good (DDA)Small worlds, sims
+BrickmapMediumMediumVery goodVolumetric data, moderate worlds
+SVO / ESVOSmallHighVery goodLarge mostly-empty worlds
+DAG-compressed SVOVery compact on repetitive dataVery highGoodStatic high-resolution scenes
+OpenVDB / NanoVDBMediumLowGoodVFX pipelines, offline
+Use cases
+Static world ray-casting — hero use case. Worlds much bigger than main memory, rendered at interactive rates.
+Voxel cone tracing — the hierarchical structure doubles as the GI mip pyramid (see Voxel rendering techniques).
+Collision / physics queries — nearest-surface and occupancy checks are cheap.
+DAG-compressed scanned environments — Euclideon-style, also modern scientific viz.
+Things that tripped me up
+Float precision at the leaves — at deep levels the numbers involved in child-plane intersections get tiny. Rescale the ray to unit-cube octree space at the start.
+Thin features vanish — a surface thinner than the finest cell is gone forever. Choose your max depth based on feature size, not view distance.
+Editing breaks the compression — if users can carve, your world inflates over time. Plan for a periodic repack, or use a brick grid for the mutable layer.
+Branch divergence on GPU — different rays take different paths, and warps stall waiting for the slowest. Sort/bin rays by direction before dispatch if you can.
+References
+Laine, S., & Karras, T. — Efficient Sparse Voxel Octrees (NVIDIA, 2010)
+Revelles, J., Ureña, C., & Lastra, M. — An Efficient Parametric Algorithm for Octree Traversal
+Kämpe, V., Sintorn, E., & Assarsson, U. — High Resolution Sparse Voxel DAGs
+Crassin, C. — GigaVoxels (thesis, 2011) — brickmaps + streaming
+Back to Notes · see also Voxel rendering techniques · Spatial acceleration structures
+›Jump to a page
+enter openup/down moveesc close

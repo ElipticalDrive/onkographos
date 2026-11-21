@@ -1,0 +1,531 @@
+The Elder Scrolls Adventures: Redguard (1998), rebuilt in Rust and Bevy. - feat(render): ray-traced lighting through Bevy Solari with its own denoiser by vibepodml[bot] · Pull Request #247 · michidk/cyrus
+
+feat(render): ray-traced lighting through Bevy Solari with its own denoiser by vibepodml[bot] · Pull Request #247 · michidk/cyrus · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+vibepodml
+Bot
+commented
+Nov 7, 2026
+•
+edited by michidk
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Stacked on #246 (modern lighting): its branch is this PR's base. Adds hardware ray tracing through Bevy Solari behind the ray_tracing fidelity area (--ray-tracing modern, an F1 debug-menu checkbox greyed out without ray-query hardware; not part of --mode), with a denoiser of our own so it needs no NVIDIA SDK or DLSS Ray Reconstruction.
+What it adds
+fog/ray_tracing (native-only raytracing feature on cyrus-render, off for cyrus-web). Solari traces only plain StandardMaterial meshes and shades a deferred G-buffer, so while it runs each opaque world mesh gets stand-ins and the original draw is hidden through render layers. Flats, water, sky and chroma-keyed meshes keep their original shading.
+Per source: one traced part (RaytracingMesh3d, never drawn, not emissive) and one drawn part per face brightness (fills the G-buffer). The original adds each face's brightness byte to its ambient light (preservation engine/model-lighting.md), so drawn parts give off albedo × brightness / 255, visible where seen but lighting nothing else. Solari picks lights uniformly among all emissive meshes, so making the stand-ins themselves emissive would starve the sun of samples.
+Stand-ins are reconciled only for sources whose transform, mesh, visibility, layers or material changed. They follow a posed actor's swapped mesh asset.
+Lights use feat(render): modern PBR lighting, effects, unfiltered textures and day/night #246's calibration (sun π/exposure, environment 1/exposure, tonemapping off). Object lights are emissive spheres of the raster point lights' power. The environment is scaled by 4 while traced, because traced sky light is occluded. feat(render): modern PBR lighting, effects, unfiltered textures and day/night #246's day/night cycle moves and tints the traced sun and ambient too.
+Path-traced reference: an F1 checkbox under Ray tracing, or control ray_tracing_reference {enabled}, swaps the real-time lighting for Solari's path tracer, which converges while the camera is still.
+Vendored bevy_solari (dev/vendor/bevy_solari via [patch.crates-io]) with a BLAS compaction fix (a replaced mesh was prepared twice) and the denoiser (SolariLighting::denoise, realtime/denoise.wesl). It divides the albedo out, accumulates against a reprojected history validated by the previous depth and normals (up to 48 frames), runs three edge-stopping à-trous passes (1, 2, 4 px) and multiplies the albedo back in. History is dropped on camera jumps (more than 5 units or 0.8 rad) and world changes.
+Changes in #246's files (kept small)
+modern_lighting/plugin.rs: lit stands down while Solari traces.
+modern_lighting/lights.rs, day_night.rs: helpers and components made pub(in crate::fog), so the traced lights reuse them.
+clipping.rs, water.rs: world-space geometry follows lighting Modern or active ray tracing (ray_tracing::world_space_geometry).
+fog.rs, effects.rs, preparation.rs: the materials' modern-shader flag (lighting.x) uses the same world_space_geometry test, so keyed meshes (not traced, still drawn by their material) get the branch that fits the world-space geometry while Lighting is Faithful.
+fog.rs: scene preparation skips the stand-ins.
+modern_lighting/lights.rs (placed): object lights with a negative colour channel are kept, with that channel clamped to zero. The faithful lighting adds negative channels (subtracting them), so dropping the light was a bug; it left ISLAND's lanterns unlit in both modern tiers.
+day_night.rs: the default speed is 1 in-game minute per real second (a 24-minute day) instead of 30 (a 48-second day).
+modern_lighting.rs, modern_lighting/plugin.rs: a CameraHandover set pair (Teardown before Setup), so the raster camera's teardown and the traced camera's setup cannot drop Hdr in the same frame (crash when switching raster → traced).
+water.rs, terrain.rs: modern waves stay in the original 16-cell wave window (fading over its outer 4 cells), and ticks inside an unchanged window rewrite only those vertices; terrain meshes no camera sees stay main-world only. feat(render): modern PBR lighting, effects, unfiltered textures and day/night #246's GPU waves (ray_tracing::shader_waves) stand down while traced, since Solari's stand-ins are built from the CPU terrain mesh.
+animation.rs: posed meshes no camera layer sees are main-world only (PrivateMesh), so Bevy stops re-uploading them every frame.
+Verification
+GPU (RTX 4070, Vulkan, release build, --scene ISLAND --volume 0, 1600×900, fixed flycam view at the harbour; screenshots kept locally):
+Solari and denoise.wesl compile and run with wgpu validation on and no errors.
+Denoiser off vs on: mean frame-to-frame luminance change 2.4 → 0.3, high-frequency energy 9.2 → 3.5. The user's own screenshot shows a clean image whose shadows were too dark, which led to the ambient gain.
+After the merge with feat(render): modern PBR lighting, effects, unfiltered textures and day/night #246's rework, shaded walls and street measure 20–47 with gain 4, against 24–43 for the raster tier.
+Book menu and back, with a 12 s menu: brightness and flicker identical before and after. The earlier "noise after the menu" repro came from another session driving the same control port.
+cargo clippy -D warnings for render (with and without raytracing), script, debug, control, mcp and cyrus.
+Unit and behaviour tests: tier selection, world-space condition, stand-in layout, brightness grouping, emission, the stand-in sync, light power matching, view-jump reset, query disjointness.
+publish-check and genmap.
+Not verified yet
+The last three changes have not run on a GPU: the self-lit drawn parts, change-detected reconciliation, and day/night following. The ambient gain may need lowering once the self-lit term is visible.
+The path-traced reference has not been run.
+Frame rates: the only measurement after the merge ran while other workloads shared the GPU (1–3 fps for every mode), so it says nothing. Before the merge, ray tracing cost about 25% over the faithful renderer at 1600×900.
+Interior, torch-lit worlds have not been checked.
+Fallback without ray-query hardware is covered by tests only. The area then selects the raster tier or faithful.
+Not covered
+The denoiser treats all light as diffuse, so there are no ray-traced reflections. Water keeps its original shader.
+Animated meshes have no motion vectors, so they fall back to little history.
+🤖 Generated with Claude Code
+vibepodml
+Bot
+and others
+added 2 commits
+November 7, 2026 17:07
+feat(render): restore ray-traced lighting through Bevy Solari
+…
+1a9aecc
+```
+Reverts the removal in the base change: the `ray_tracing` fidelity area, the Solari
+plugin and its tuning, emissive object lights, the debug-menu checkbox, the `--ray-tracing`
+flag and the vendored `bevy_solari`.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+fix(render): allow the lint exceptions the restored lighting systems …
+…
+d738db6
+```
+…need
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+codacy-production
+Bot
+commented
+Nov 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Not up to standards ⛔
+🔴 Issues 2 medium
+Alerts:
+⚠ 2 issues (≤ 0 issues of at least minor severity)
+Results:
+2 new issues
+Category
+Results
+Complexity
+2 medium
+View in Codacy
+🟢 Metrics 277 complexity · 18 duplication
+Metric
+Results
+Complexity
+277
+Duplication
+18
+View in Codacy
+NEW Get contextual insights on your PRs based on Codacy's metrics, along with PR and Jira context, without leaving GitHub. Enable AI reviewer
+TIP This summary will be updated as you push new changes.
+vibepodml
+Bot
+and others
+added 4 commits
+November 7, 2026 17:23
+feat(render): denoise ray-traced lighting with a spatio-temporal filter
+…
+42cacb0
+```
+Adds `SolariLighting::denoise` to the vendored bevy_solari: the albedo is divided out of the
+lit image, the light is accumulated over time against the previous frame's depth and normals,
+filtered with three edge-stopping a-trous passes and remodulated. It needs no NVIDIA SDK. The
+ray tracing plugin turns it on and drops the history on camera jumps and world changes.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into t3/modern-ray-tracing
+53a6046
+Merge remote-tracking branch 'origin/t3/debug-menu-raytracing-toggle'…
+…
+3ea30c8
+```
+… into t3/modern-ray-tracing
+```
+fix(render): raise the ambient light while Solari traces the world
+…
+b4fe282
+```
+Traced sky light is occluded by the surrounding buildings, unlike the
+raster tier's uniform ambient, so shaded ISLAND streets came out at
+luminance 15-25 against 85-115 in the faithful view. The environment
+light is scaled by 8 in the traced tier only; at the fixed harbour view
+the shaded walls and street now measure 37-61, keeping the contrast of
+the sunlit areas. A Modern tuning choice, measured on an RTX 4070.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+michidk
+mentioned this pull request
+Nov 7, 2026
+feat(render): modern PBR lighting, effects, unfiltered textures and day/night
+#246
+Open
+michidk
+and others
+added 22 commits
+November 7, 2026 20:40
+feat(render): add a path-traced reference for the ray-traced lighting
+…
+5f7ff94
+```
+The debug menu's Path-traced reference switch, and the control command
+ray_tracing_reference, swap Solari's real-time lighting on the view
+camera for Solari's path tracer, which accumulates while the camera is
+still. It gives a converged image to judge the real-time lighting and
+the denoiser against. The resource exists only with RayTracingPlugin,
+and the switch is greyed out unless ray tracing runs.
+
+Not yet run on the GPU: the other sessions sharing this machine asked
+for a pause in game launches while frame rates are measured.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/t3/debug-menu-raytracing-toggle'…
+…
+24b66ab
+```
+… into t3/modern-ray-tracing
+
+#246 replaced the raster stand-ins with a MODERN_LIGHTING branch in the
+original materials and deleted the proxy code. The traced tier keeps
+needing deferred StandardMaterial geometry, so it moves into its own
+module, fog/ray_tracing (support detection, the reference switch, the
+stand-ins, Solari's lights and camera), and #246's raster files are
+taken as they are, except for:
+
+- modern_lighting/plugin.rs: `lit` stands down while Solari traces.
+- modern_lighting/lights.rs: helpers made pub(in crate::fog) so the
+  traced lights reuse the calibration instead of copying it.
+- clipping.rs, water.rs: world-space geometry follows lighting Modern
+  or active ray tracing (ray_tracing::world_space_geometry), so Solari
+  traces world-space meshes and not per-frame camera-space ones.
+- fog.rs: scene preparation skips the stand-ins again.
+
+The traced lights use #246's calibration (sun pi/exposure, environment
+1/exposure, tonemapping off); object lights are emissive spheres of the
+raster point lights' power. The traced ambient gain is 4: at the fixed
+ISLAND harbour view the shaded walls and street measure 20-47 against
+the raster tier's 24-43 (gain 2 gave 12-32). Frame rates from that run
+are not meaningful; the GPU was shared with other workloads.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(render): give traced stand-ins the faces' own brightness
+…
+68c015c
+```
+The original adds each face's brightness byte to its ambient light
+(preservation docs/engine/model-lighting.md), and scene preparation
+keeps it in UV 1. Each traced source now gets a traced part, which only
+Solari sees, and one drawn part per face brightness, which fills the
+G-buffer and gives off albedo * brightness / 255 at the modern
+lighting's calibration. The traced part stays non-emissive: Solari
+picks lights uniformly among all emissive meshes, so thousands of faint
+stand-ins would starve the sun of samples, and the original's face
+brightness lights only the face itself.
+
+Stand-in meshes are now looked up by the source's current mesh asset,
+so posing, which swaps the asset, gets a matching stand-in instead of
+keeping the stale one.
+
+Verified with unit tests (grouping, emission, layout). Not yet run on
+the GPU; the ambient gain may need lowering once the self-lit term is
+seen in game.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): reconcile traced stand-ins only for changed sources
+…
+57e3bef
+```
+The stand-in sync walked and rebuilt every source each frame. It now
+keeps an index from source to its parts and reconciles a source only
+when its transform, mesh, visibility, render layers or material
+changed, its material asset was edited, or its stand-in meshes gained a
+brightness group; unchanged sources cost a few change-flag checks.
+Sources that disappear take their parts with them.
+
+A test drives the sync through a terrain-material source: parts are
+spawned per brightness and kept while unchanged, follow a posed mesh
+asset, and go away with the source's draw restored when it is hidden.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/t3/debug-menu-raytracing-toggle'…
+…
+bfcf354
+```
+… into t3/modern-ray-tracing
+
+Brings in #246's day/night cycle. The traced sun and ambient carry the
+cycle's Sun and Ambient components, and the ray-tracing plugin runs the
+cycle's advance and apply while Solari traces, so the traced lighting
+follows the clock as the raster tier does. The cycle's systems and the
+light components become pub(in crate::fog); no behaviour changes in
+#246's files.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(script): split the shell-list test world's program into a helper
+…
+35b7727
+```
+Codacy flagged shell_list_world at 86 lines against its limit of 70.
+The query program now comes from query_steps; the test is unchanged and
+passes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+refactor(render): split the stand-in sync into named source queries
+…
+b193eaf
+```
+Codacy flagged sync_proxies at 9 parameters and 101 lines and the module
+at 651 lines. Group the asset-event readers into one system parameter,
+name the source query so its change check and material are methods,
+build a source's wanted parts in their own function, and move the tests
+into their own file. Behaviour is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(render): shade world-space geometry with the modern branch when t…
+…
+ff0afbe
+```
+…raced
+
+Under ray tracing, clipped models draw their world-space source meshes
+even while Area::Lighting is Faithful, but the materials still compiled
+the faithful branch, which expects camera-space prepared geometry. Keyed
+meshes, which are not traced and keep drawing through the material,
+went missing until Lighting was set to Modern. Select the branch with
+the same world_space_geometry test that selects the geometry.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(render): describe the stand-in tests module for the map
+…
+0fd43be
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(render): drop solari's double-buffer markers when leaving tracing
+…
+3852f81
+```
+Switching ray tracing off crashed with a validation error. The camera
+kept Solari's DepthPrepassDoubleBuffer and DeferredPrepassDoubleBuffer,
+which require their prepass; extraction re-inserted them in the render
+world and brought the prepass back without its textures, so the
+pipelines expected prepass bindings the view bind group lacked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(render): keep object lights that have a negative colour channel
+…
+80baa91
+```
+The modern tiers dropped every object light with a negative channel,
+calling it skipped by the original. The faithful lighting adds each
+channel and clamps afterwards, so a negative channel subtracts that
+colour and the light still shines. ISLAND's only light by the town
+lanterns is [255, 121, -255], so the lanterns lit nothing in the raster
+or traced modern tiers. Keep the light; Bevy lights cannot subtract, so
+light_color clamps the negative channel to zero.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(render): run the day/night cycle at one in-game minute per second
+…
+0e680ec
+```
+At 30 minutes per second a whole day passed in 48 seconds, too fast to
+play through. One minute per second makes a day last 24 real minutes;
+the debug panel's speed drags in tenths so slow speeds stay reachable.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/t3/debug-menu-raytracing-toggle'…
+…
+796c1e9
+```
+… into t3/9baa83a3
+
+# Conflicts:
+#	crates/cyrus-render/src/fog/clipping.rs
+```
+fix(render): hand the camera over between lighting tiers in order
+…
+d5ce815
+```
+Switching ray tracing back on after raster modern lighting crashed with
+a storage usage on a non-HDR main texture: modern lighting removed Hdr
+in the same frame the ray tracing setup saw it present and skipped
+adding it. The reverse switch removed the prepasses modern lighting had
+just added. Both tiers now tear down in CameraHandover::Teardown, which
+runs and is applied before any CameraHandover::Setup looks at the
+camera. Leaving tracing runs after flat preparation, whose queued
+markers on the stand-ins must land before they are despawned.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): stop re-uploading hidden and unchanged animated meshes
+…
+b48e069
+```
+Posed model parts and the water-animated terrain are rewritten every
+animation frame, and every rewrite of a render-world mesh is cloned
+and uploaded again. Their entities are hidden while a clipping draw or
+a ray-tracing stand-in draws them, so a PrivateMesh marker keeps those
+meshes in the main world, which the copies read from, and uploads them
+again once drawn. World-space water no longer rewrites terrain chunks
+whose positions, normals and colours did not change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): tile large stand-ins and write only changed parts
+…
+8ee7061
+```
+Modern water moved a few vertices of the 296k-vertex terrain every
+frame, and its stand-in was copied, uploaded and its acceleration
+structure rebuilt whole. Stand-ins of meshes over 32k vertices are now
+split into tiles of about 16k, and a rebuild writes only the parts whose
+faces changed. A tile of one face brightness draws its traced mesh
+instead of a copy, and sources that want no parts are indexed, so they
+are not re-checked every frame.
+
+Measured on ISLAND at 1280x720 with every area Modern: 6-8 fps traced
+before this series, 16-19 fps after.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(render): update traced object lights in place
+…
+e7160da
+```
+Fire effects retime their light radius several times a second, and
+every change despawned and rebuilt all traced lights, the sun and the
+ambient image. Each new light material missed a frame of Solari
+preparation, so fires lit nothing, and the lighting history kept
+resetting. Each object light now keeps its sphere and material and is
+moved or re-tinted in place; the sun and ambient light are rebuilt only
+when the environment changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+feat(render): let lamp-bright faces light the traced scene
+…
+80b8e07
+```
+Faces with a face brightness of 192 or more, lantern glass and lit
+windows, are traced apart with an emissive material, so they give off
+light into the scene; ISLAND has faces of 200 and 252. Dimmer faces stay
+dark for Solari's uniform light sampling. A Modern choice: the original
+brightens only the face itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/t3/debug-menu-raytracing-toggle'…
+…
+a3f4e9f
+```
+… into t3/9baa83a3
+
+# Conflicts:
+#	crates/cyrus-render/src/fog/modern_lighting.rs
+#	crates/cyrus-render/src/fog/modern_lighting/plugin.rs
+```
+perf(render): work stand-in layouts out once per source mesh
+…
+c9f07ba
+```
+Every edit in place, the water on the terrain every frame, rebuilt the
+tiling, grouping and every tile of the source from scratch, about 30 ms
+per frame for the 296k-vertex terrain. Edits in place change vertex
+values but never which vertices and faces a part holds, so each part
+keeps its layout and an edit only compares the vertices it selects and
+rewrites the parts that differ. The layouts are worked out again only
+when the vertex or face count changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): keep modern waves in the original wave window
+…
+72aee84
+```
+Modern Fog widens the terrain window to the far frustum, and Modern
+Water moved every water vertex in it every frame, so nearly the whole
+terrain was rewritten and uploaded each frame: 27 MB of the 29 MB
+uploaded per frame with ray tracing. The original animates water only
+within its sixteen-cell window; modern waves now stay there and fade out
+over its outer four cells, leaving the far sea still. Uploads fell to
+about 4 MB per frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): budget solari blas rebuilds for meshes edited in place
+…
+0d08510
+```
+Solari built a new BLAS for every modified mesh every frame, about 90
+animated character parts at roughly 190 us each, and compacted each one
+into yet another BLAS. A mesh edited in place with the same vertex and
+index count now keeps tracing its previous BLAS, marked changed so its
+instances read the new buffer ranges, and at most 32 such meshes are
+rebuilt per frame, oldest first. Instances move through their
+transforms every frame regardless; only a change of shape is delayed.
+Only new meshes are compacted. No validation errors in a run with
+validation on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+michidk
+and others
+added 3 commits
+November 8, 2026 11:17
+perf(render): update modern water inside its window only
+…
+da765e9
+```
+Modern water rebuilt the whole 65k-vertex grid, its normals and colours,
+and compared every terrain chunk on every frame, although modern waves
+now move only inside the original window. A modern update inside an
+unchanged window now moves just the window vertices, recomputes the
+normals and colours one cell around them bit-identically, keeps the
+original wave heights for ground queries, and skips chunks the window
+does not touch; faithful wave ticks skip those chunks too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): write only the wave window into world-space terrain
+…
+86513b4
+```
+The island terrain is one mesh of about 300k vertices, and every wave
+tick recoloured, compared and rewrote all of them although only the
+wave window moved. Incremental ticks now write just the vertices inside
+the window.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 't3/debug-menu-raytracing-toggle' into t3/modern-ray-tra…
+…
+7362c06
+```
+…cing
+
+Takes the batched modern-lighting draws and GPU waves. A ray-traced scene
+keeps the waves in the CPU terrain mesh, since Solari's stand-ins are built
+from it; `ray_tracing::shader_waves` gates both the shader and the CPU path.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

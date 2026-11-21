@@ -1,0 +1,59 @@
+# Topological/Inside Tests
+
+Also called: Inside/Outside Tests, Point-in-Mesh Tests, Winding Number Tests
+
+## Overview
+Topological/Inside Tests determine whether a query point lies inside or outside a closed volume or triangle mesh, resolving the ambiguity of depth-based occlusion tests which fail on self-intersecting or complex geometries [S1]. Unlike [Ray-primitive intersection](769-ray-primitive-intersection.md), which computes geometric hit points, these tests evaluate the topological relationship between a point and a boundary, often serving as a preprocessing step for sculpting or boolean operations [S1]. They differ from [Ray Occlusion Test](5670-ray-occlusion-test.md) by returning a boolean state for a static point rather than a binary hit/miss for a ray segment, and from [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) by relying on explicit mesh topology rather than scalar field gradients.
+
+## Shared principles
+The family shares the geometric definition of rays and the parallel execution model [G].
+**Ray Definition**
+Rays are defined by an origin $\mathbf{o}$ and a direction $\mathbf{d}$ [G]. The direction is typically normalized. The origin is often the camera eye position, but can vary based on the camera model [G].
+**Parallel Execution**
+Computations are mapped to parallel threads [G]. Each thread typically processes one or more pixels or samples [G]. Memory access patterns are optimized for coalescing [G]. Synchronization is used to manage data dependencies between threads [G].
+
+## Subtopics
+
+### [Ray Crossing Count (Winding Number)](915-ray-crossing-count-winding-number.md)
+Determines if a point is inside a closed triangle mesh by counting ray-surface intersections. It solves the topological "inside/outside" ambiguity that plagues simpler depth-based tests. Unlike [Region Nesting Merge](13991-region-nesting-merge.md), which relies on hierarchical containment logic, this method uses a direct parity or signed accumulation of ray-triangle hits. Choose this for general point-in-mesh queries on closed meshes.
+
+### [Region Nesting Merge](13991-region-nesting-merge.md)
+A post-processing step that removes nested inner regions from a sorted list of ray samples. It solves the problem of redundant geometry resulting from boolean unions or subtractions where one volume is entirely contained within another. It differs from [Ray Crossing Count (Winding Number)](915-ray-crossing-count-winding-number.md) by using a simple nesting depth counter based on normal direction rather than a cumulative winding number, making it suitable for specific sculpting and boolean contexts where only the outermost boundary of nested structures is required. Choose this when processing pre-computed ray samples for sculpting or boolean operations.
+
+### Ray-Vertex Inside Test
+A procedure that checks if a vertex is inside or outside the volume by finding the closest sample along the ray and checking its normal direction [S1].
+**Step**
+1. Calculate the signed distance between the vertex $v$ and the ray origin [S1].
+2. Find the sample $s$ in $R.list$ where the distance from $s.position$ to $R.origin$ is less than or equal to the vertex distance and is the maximum such distance [S1].
+3. If the dot product of $s.normal$ and $R.direction$ is less than 0, return False (outside) [S1].
+**Code**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def IsInside(Ray R, Vertex v):
+    dist = Dist(v, R.origin)  # signed dist. between 2 points
+    # find sample s in R.list where Dist(s.position, R.origin) <= dist
+    # and Dist(s.position, R.origin) is maximum
+    s = None
+    max_dist = -infinity
+    for sample in R.list:
+        d = Dist(sample.position, R.origin)
+        if d <= dist and d > max_dist:
+            max_dist = d
+            s = sample
+    
+    if s is None:
+        return False # No sample found within distance
+        
+    if Dot(s.normal, R.direction) < 0:
+        return False
+    else:
+        return True
+```
+[S1]
+
+## Background
+Originating from sculpting applications requiring precise topological queries, this family was detailed in "Detail sculpting using cubical marching squares" [S1]. The methods allow for efficient visual quality improvements in sculpting by providing robust inside/outside tests for vertices and samples. The use of cubical marching squares and associated data structures (like BVHs and 2D grids) optimizes the intersection search for these topological queries [S1].
+
+## Sources
+[S1] Detail sculpting using cubical marching squares, https://doi.org/10.1145/1152399.1152402, fetched 2026-11-06

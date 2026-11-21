@@ -1,0 +1,493 @@
+--- v001.md
++++ v002.md
+@@ -4,51 +4,63 @@
+ 
+ ## Overview
+-A-NeRF is a method for learning a user-specific neural 3D body model and underlying skeleton pose from unlabelled monocular videos by extending Neural Radiance Fields (NeRFs) with a skeleton to apply to time-varying and articulated motion [S1, unofficial]. The core technical novelty is defining spatial latent variables relative to the pose of body parts to overcome ill-posed inverse operations with an overparameterization, embedding domain knowledge of how humans move [S1, unofficial]. Unlike explicit models like SMPL that deform a surface via forwards kinematics, A-NeRF uses implicit networks requiring inverse transformation from 3D world coordinates to reference skeleton [S1, unofficial].
++A-NeRF is a method for learning a user-specific neural 3D body model and underlying skeleton pose from unlabelled monocular videos by extending Neural Radiance Fields (NeRFs) with a skeleton to apply to time-varying and articulated motion [S1, unofficial]. It solves the ill-posed inverse problem of mapping dynamic 3D points to a static radiance field by defining spatial latent variables relative to the pose of body parts, effectively overparameterizing the representation with one embedding per bone [S1, unofficial]. Unlike explicit surface models that use forward kinematics, A-NeRF learns an implicit volumetric model that jointly refines pose and appearance without requiring ground truth labels for shape or pose [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A sequence of $N$ images $[I_k]_{k=1}^N$ from one or several videos of the same person. Initial estimates of camera intrinsics, bone lengths, and skeleton pose $\hat{\theta}_k$ are obtained from an off-the-shelf estimator (e.g., SPIN) [S1, unofficial].
+-*   **Outputs:** Refined skeleton poses $\theta_k$ for each frame, neural network parameters $\phi$ defining volumetric shape and color, and rendered images $C_\phi(\theta_k)$ [S1, unofficial].
++*   **Inputs:** A sequence of $N$ images $I_k \in \mathbb{R}^{H \times W \times 3}$ from one or several videos of the same person.
++*   **Outputs:** A neural body model $C_\phi$ parameterized by $\phi$ (volumetric shape and color) and time-varying skeleton poses $\theta_k$. The model renders images $C_\phi(\theta_k)$ via ray-marching.
+ 
+ **Data Structures:**
+ *   **Skeleton Representation:**
+-    *   Rest pose: 3D joint locations $\tilde{a}_m$ for $m=1..24$, root at 0, connected via $B$ bones [S1, unofficial].
+-    *   Per-frame pose $\theta_k$: Includes relative rotation of 24 joints $\tilde{\theta}_{k,m}$ to parents and global position $\tilde{\theta}_{k,0}$ [S1, unofficial].
++    *   Rest pose: 3D joint locations $\tilde{a}_m$ for $m=1..24$, with root at 0, connected via $B$ bones.
++    *   Pose $\theta_k$: Per-frame skeleton pose defined as $[\tilde{\theta}_{k,0}, \dots, \tilde{\theta}_{k,24}]$.
++    *   $\tilde{\theta}_{k,m}$: Relative rotation of joint $m$ to its parent.
++    *   $\tilde{\theta}_{k,0}$: Global position of the root.
+ *   **Network Architecture:**
+-    *   Follows original NeRF [42].
+-    *   Inputs: Position, direction, appearance code, and Relative Ray (Rel. Ray.) [S1, unofficial].
+-    *   Intermediate features: 10 layers of size 256, followed by 1 layer of size 128 [S1, unofficial].
+-    *   Outputs: Density $\sigma \in \mathbb{R}$ and color $c \in \mathbb{R}^3$ [S1, unofficial].
+-    *   Activations: ReLU for intermediate layers, sigmoid for output, no activation for specific connections [S1, unofficial].
+-    *   Appearance code and Rel. Ray. are fed into the network in the second last fully-connected layer [S1, unofficial].
++    *   Follows the original NeRF MLP structure [S1, unofficial].
++    *   **Inputs:** Position, direction, appearance code, and "Rel. Ray" encoding.
++    *   **Intermediate Layers:** 10 fully connected layers with size 256, followed by one layer of size 128.
++    *   **Outputs:** Density $\sigma \in \mathbb{R}$ and color $c \in \mathbb{R}^3$.
++    *   **Activations:** ReLU for intermediate layers, sigmoid for density, no activation for color.
++    *   **Integration:** Appearance code and Rel. Ray encoding are fed into the network in the second-to-last fully connected layer to avoid affecting body geometry [S1, unofficial].
+ 
+ **Positional Encoding (PE):**
+-*   $\Gamma$ maps input scene point $q$ and view direction $d$ to a higher dimensional space [S1, unofficial].
+-*   Frequencies: $L_{input} = 7$ for position, $L_{view} = 4$ for view direction [S1, unofficial].
+-
+-**Skeleton-Relative Encoding:**
+-*   To resolve the ill-posed inverse problem, a single 3D query location maps to an overcomplete reparametrization represented relative to each skeleton bone [S1, unofficial].
+-*   **Bone-relative Position (Rel. Pos.):** Distance from query point to joint $m$.
+-*   **Bone-relative Direction (Rel. Dir.):** Angle between ray direction and vector from query point to joint $m$.
+-*   **Rel. Ray:** Combination of Bone-relative Position and Bone-relative Direction [S1, unofficial].
+-*   **Cutoff:** A cutoff distance $t$ and temperature $\tau$ are applied to limit the influence of distant bones. $t$ starts at 500mm and decays exponentially over 250k iterations. $\tau$ starts at -20 and decays exponentially to -200 over 500k iterations [S1, unofficial].
++The input scene point $q$ and view direction $d$ are mapped to a higher dimensional space using PE $\Gamma$ [S1, unofficial].
++*   Frequencies for input ($L_{input}$): 7.
++*   Frequencies for view ($L_{view}$): 4.
++
++**Skeleton-Relative Encoding (Core Novelty):**
++To overcome the ill-posed inverse operation where a single 3D query location cannot uniquely be associated with a body part, A-NeRF uses an overparameterized reparametrization relative to each skeleton bone [S1, unofficial].
++*   **Bone-relative Position (Rel. Pos.):** Distance from query point $q$ to joint $m$.
++*   **Bone-relative Direction (Rel. Dir.):** Direction from query point $q$ to joint $m$.
++*   **Rel. Ray (Full Model):** Combines Bone-relative Distance and Bone-relative Direction, plus the angle between the ray direction and the vector from query point to joint [S1, unofficial].
++    *   $d'_{k,m} = \arccos(\tilde{d}_{k,m} \cdot \tilde{q}_{k,m}) \in \mathbb{R}$, where $\tilde{d}_{k,m}$ is the normalized ray direction and $\tilde{q}_{k,m}$ is the normalized vector from query to joint.
++    *   This encoding is preferred over World Ray or simple World Position + Joint Position + $\theta$ conditioning, which leads to overfitting or poor SSIM (~0.7) by rendering background colors [S1, unofficial].
+ 
+ **Training Objective:**
+-The objective function $L_{SV}(\theta, \phi)$ consists of three terms [S1, unofficial]:
+-$$ L_{SV}(\theta, \phi) = \sum_k \|C_\phi(\theta_k) - I_k\|_1 + \lambda_\theta \sum_k d(\theta_k - \hat{\theta}_k) + \lambda_t \sum_k \|\frac{\partial^2 \theta_k}{\partial t^2}\|^2 $$
++The model optimizes neural parameters $\phi$ and poses $\theta_k$ by minimizing:
++$$ L_{SV}(\theta, \phi) = \sum_k \| C_\phi(\theta_k) - I_k \|_1 + \lambda_\theta \sum_k d(\theta_k - \hat{\theta}_k) + \lambda_t \sum_k \left\| \frac{\partial^2 \theta_k}{\partial t^2} \right\|^2 $$
+ Where:
+-*   Data term: L1 distance between generated images and input images [S1, unofficial].
+-*   Pose regularizer: Encourages solution to stay close to initial pose estimate $\hat{\theta}_k$. $d(x) = \min(\|x\|_2 - \epsilon, 0)$ where $\epsilon = 0.01$ [S1, unofficial].
+-*   Smoothness prior: Penalizes acceleration $\frac{\partial^2 \theta_k}{\partial t^2}$ between poses of consecutive frames [S1, unofficial].
+-*   Hyperparameters: $\lambda_\theta$ balances pose regularizer, $\lambda_t$ balances smoothness prior [S1, unofficial].
+-
+-**Algorithm:**
+-1.  **Initialization:** Initialize camera intrinsics, bone lengths $a_m$, and pose $\theta_k$ using SPIN [26] for every frame $k$ [S1, unofficial].
+-2.  **Joint Optimization:** Optimize poses $\theta_k$ and neural parameters $\phi$ (shape/appearance) for 500k iterations on objective Eq. 2 [S1, unofficial].
+-3.  **Fine-tuning:** Stop optimizing pose and continue training $\phi$ with only the data term for additional 200k iterations [S1, unofficial].
+-4.  **Batch Sampling:** Form a training batch by randomly sampling $N_{batch} = 3072$ rays from all available images [S1, unofficial].
+-5.  **Gradient Accumulation:** Accumulate gradient update $\nabla \theta$ for $G \times (30 \times N_{batch}) / N$ iterations so that each $\theta_k$ is expected to be sampled 30 times before update [S1, unofficial].
+-6.  **Importance Sampling:** Use coarse-to-fine importance sampling strategy. Restrict samples to be within a coarse human silhouette estimated with [10] unless the background is monochrome [S1, unofficial].
+-7.  **Rendering:** Render images via classical ray-marching from computer graphics using the MLP $F_\phi$ [S1, unofficial].
++*   **Data Term:** L1 distance between generated image $C_\phi(\theta_k)$ and input image $I_k$.
++*   **Pose Regularizer:** Encourages solution to stay close to initial pose estimate $\hat{\theta}_k$ from an off-the-shelf predictor (e.g., SPIN [26]).
++    *   $d(x) = \min(\|x\|_2 - \epsilon, 0)$ with tolerance $\epsilon = 0.01$.
++*   **Smoothness Prior:** Penalizes acceleration $\frac{\partial^2 \theta_k}{\partial t^2}$ between consecutive frames.
++*   **Hyperparameters:** $\lambda_\theta$ balances pose regularizer; $\lambda_t$ balances smoothness prior.
++
++**Algorithm Steps:**
++1.  **Initialization:**
++    *   Initialize camera intrinsics, bone lengths $a_m$, and pose $\theta_k$ using an off-the-shelf estimator (e.g., SPIN) for every frame $k$ [S1, unofficial].
++    *   Initialize neural parameters $\phi$.
++2.  **Joint Optimization (500k iterations):**
++    *   Form a training batch by randomly sampling $N_{batch} = 3072$ rays from all available images.
++    *   Use coarse-to-fine importance sampling. Restrict samples to be within a coarse human silhouette estimated from the input unless the background is monochrome [S1, unofficial].
++    *   Accumulate gradient update $\Delta \theta$ for $G \times (30 \times N_{batch}) / N$ iterations so that each $\theta_k$ is expected to be sampled at least 30 times before update.
++        *   $G$ (gradient accumulation steps): 20 for Mixamo, 50 for Human 3.6M, 10 for MonoPerfCap.
++    *   Update $\phi$ and $\theta_k$ using the objective $L_{SV}$.
++    *   Apply cutoff distance $t$ (500mm) and cutoff temperature $\tau$ (starts at -20, decays exponentially to -200 over 500k iterations) to the bone-relative encodings to limit the influence of distant bones [S1, unofficial].
++3.  **Finetuning (200k iterations):**
++    *   Stop optimizing pose $\theta_k$.
++    *   Continue training $\phi$ with only the data term (L1 loss) to improve visual fidelity.
++    *   Learning rate for $\phi$ decays from $5 \times 10^{-4}$ to $5 \times 10^{-5}$ over 200k iterations. Finetune LR starts at $2 \times 10^{-4}$ decaying to $5 \times 10^{-5}$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -57,193 +69,216 @@
+ import numpy as np
+ 
+-def initialize_skeleton(image_sequence):
+-    """
+-    Initialize skeleton pose, camera intrinsics, and bone lengths using SPIN.
+-    Returns: theta_k (initial poses), camera_params, bone_lengths
+-    """
+-    # Implementation of SPIN initialization
+-    # Returns initial pose estimates for each frame
+-    pass
+-
+-def positional_encoding(x, L):
+-    """
+-    Apply positional encoding to input x with L frequencies.
+-    """
+-    # Standard NeRF PE implementation
+-    pass
+-
+-def skeleton_relative_encoding(query_point, ray_direction, skeleton_pose, bone_indices, cutoff_t, cutoff_tau):
+-    """
+-    Compute bone-relative position and direction for each bone.
+-    Apply cutoff based on distance and temperature.
+-    """
+-    rel_pos = []
+-    rel_dir = []
+-    for m in bone_indices:
+-        joint_pos = get_joint_position(skeleton_pose, m)
+-        vector_to_joint = joint_pos - query_point
+-        dist = np.linalg.norm(vector_to_joint)
+-        
+-        # Apply cutoff
+-        if dist > cutoff_t:
+-            continue
+-            
+-        rel_pos.append(dist)
+-        
+-        ray_dir_normalized = ray_direction / np.linalg.norm(ray_direction)
+-        vector_normalized = vector_to_joint / np.linalg.norm(vector_to_joint)
+-        angle = np.arccos(np.clip(np.dot(ray_dir_normalized, vector_normalized), -1.0, 1.0))
+-        rel_dir.append(angle)
+-        
+-    return rel_pos, rel_dir
+-
+-def nerf_forward(position_enc, direction_enc, appearance_code, network_params):
+-    """
+-    Forward pass through the NeRF MLP.
+-    Returns: sigma (density), c (color)
+-    """
+-    # Concatenate inputs
+-    input_vector = np.concatenate([position_enc, direction_enc, appearance_code])
+-    
+-    # Pass through layers
+-    x = input_vector
+-    for i, layer_size in enumerate(network_params['layer_sizes']):
+-        x = np.dot(x, network_params['weights'][i]) + network_params['biases'][i]
+-        if i < len(network_params['layer_sizes']) - 2:
+-            x = relu(x)
+-        elif i == len(network_params['layer_sizes']) - 2:
+-            # Second last layer: no activation for appearance code injection?
+-            # According to notes, appearance code and Rel. Ray are fed in second last layer.
+-            # This implies the network structure might be modified or inputs are concatenated here.
+-            # For simplicity, assuming standard NeRF structure with appended inputs.
+-            pass
+-        else:
+-            x = sigmoid(x) # Output layer
+-            
+-    sigma = x[0]
+-    c = x[1:]
+-    return sigma, c
+-
+-def ray_marching(query_points, ray_directions, network_params, appearance_code):
+-    """
+-    Render image along rays using volume rendering.
+-    """
+-    # Standard NeRF volume rendering
+-    pass
+-
+-def compute_loss(rendered_image, input_image, current_pose, initial_pose, prev_pose, curr_pose, next_pose, lambda_theta, lambda_t):
+-    """
+-    Compute the A-NeRF loss function.
+-    """
+-    data_term = np.mean(np.abs(rendered_image - input_image))
+-    
+-    pose_reg = 0
+-    for k in range(len(current_pose)):
+-        diff = current_pose[k] - initial_pose[k]
+-        dist = np.linalg.norm(diff)
+-        epsilon = 0.01
+-        pose_reg += min(dist - epsilon, 0)
+-    pose_reg *= lambda_theta
+-    
+-    smoothness = 0
+-    for k in range(1, len(curr_pose) - 1):
+-        acceleration = curr_pose[k+1] - 2*curr_pose[k] + curr_pose[k-1]
+-        smoothness += np.linalg.norm(acceleration)**2
+-    smoothness *= lambda_t
+-    
+-    return data_term + pose_reg + smoothness
+-
+-def train_anerf(image_sequence, num_iterations=700000):
+-    """
+-    Main training loop for A-NeRF.
+-    """
+-    # Initialization
+-    theta_k, camera_params, bone_lengths = initialize_skeleton(image_sequence)
+-    network_params = initialize_neural_network()
+-    appearance_codes = initialize_appearance_codes(len(image_sequence))
+-    
+-    # Hyperparameters
++def initialize_model(images, num_frames):
++    """
++    Initialize A-NeRF model and pose.
++    images: List of N images I_k.
++    num_frames: N.
++    Returns: phi (neural params), theta_k (poses), camera_intrinsics, bone_lengths.
++    """
++    # Initialize camera intrinsics, bone lengths a_m, and pose theta_k
++    # using off-the-shelf estimator (e.g., SPIN) [S1, unofficial]
++    theta_k = init_pose_estimator(images)
++    camera_intrinsics = init_camera_estimator(images)
++    bone_lengths = init_bone_lengths(theta_k)
++    
++    # Initialize neural network parameters phi
++    phi = init_neural_network()
++    return phi, theta_k, camera_intrinsics, bone_lengths
++
++def encode_query(q, d, theta_k, joint_indices, cutoff_t, cutoff_tau):
++    """
++    Encode query point q and direction d relative to skeleton pose theta_k.
++    q: (3,) query point in world coordinates.
++    d: (3,) ray direction.
++    theta_k: Pose for frame k.
++    joint_indices: List of joint indices (1..24).
++    cutoff_t: Cutoff distance.
++    cutoff_tau: Cutoff temperature.
++    Returns: Encoded position and direction vectors.
++    """
++    # Calculate bone-relative distance and direction for each joint
++    rel_dists = []
++    rel_dirs = []
++    ray_angles = []
++    
++    for m in joint_indices:
++        # Get joint position from theta_k
++        joint_pos = get_joint_position(theta_k, m)
++        
++        # Vector from query to joint
++        vec = joint_pos - q
++        dist = np.linalg.norm(vec)
++        rel_dists.append(dist)
++        
++        # Relative direction
++        rel_dir = vec / (dist + 1e-8)
++        rel_dirs.append(rel_dir)
++        
++        # Angle between ray direction and vector to joint
++        angle = np.arccos(np.clip(np.dot(d, rel_dir), -1.0, 1.0))
++        ray_angles.append(angle)
++        
++    # Apply cutoff
++    # Exponential decay based on distance and temperature
++    weights = np.exp(-np.array(rel_dists) / (cutoff_t * np.exp(cutoff_tau)))
++    
++    # Combine into final encoding (Rel. Ray)
++    # This is a simplified representation of the high-dimensional encoding
++    encoded_pos = np.concatenate([np.array(rel_dists) * weights])
++    encoded_dir = np.concatenate([np.array(rel_dirs) * weights[:, None], np.array(ray_angles) * weights[:, None]])
++    
++    return encoded_pos, encoded_dir
++
++def render(phi, theta_k, rays, camera_intrinsics):
++    """
++    Render image using ray-marching.
++    phi: Neural network parameters.
++    theta_k: Pose for frame k.
++    rays: List of rays (origin, direction).
++    camera_intrinsics: Camera parameters.
++    Returns: Rendered image.
++    """
++    # Coarse-to-fine importance sampling
++    # Restrict samples to coarse human silhouette [S1, unofficial]
++    coarse_samples = sample_rays(rays, num_samples=64)
++    fine_samples = sample_rays(rays, num_samples=16, weights=coarse_samples)
++    
++    # Ray marching
++    sigma_list = []
++    c_list = []
++    
++    for sample in fine_samples:
++        q, d = sample.origin, sample.direction
++        
++        # Encode query
++        encoded_pos, encoded_dir = encode_query(q, d, theta_k, cutoff_t=0.5, cutoff_tau=-20)
++        
++        # Feed to MLP
++        # Inputs: Position, Direction, Appearance Code, Rel. Ray
++        # Appearance code is per-image, fed into second last layer [S1, unofficial]
++        sigma, c = neural_network_forward(phi, encoded_pos, encoded_dir)
++        
++        sigma_list.append(sigma)
++        c_list.append(c)
++        
++    # Composite color and opacity
++    image = composite(sigma_list, c_list)
++    return image
++
++def train_anerf(images, num_iterations=700000):
++    """
++    Train A-NeRF model.
++    images: List of N images.
++    num_iterations: Total training iterations.
++    """
++    phi, theta_k, camera_intrinsics, bone_lengths = initialize_model(images, len(images))
++    
++    N = len(images)
+     N_batch = 3072
+     G = 50 # For Human 3.6M
++    
++    # Hyperparameters
+     lambda_theta = 2.0
+     lambda_t = 0.05
+-    cutoff_t = 500.0
+-    cutoff_tau = -20.0
+-    
+-    # Training
+-    for iteration in range(num_iterations):
+-        # Decay parameters
+-        if iteration < 250000:
+-            cutoff_t = 500.0 * np.exp(-iteration / 250000)
+-        if iteration < 500000:
+-            cutoff_tau = -20.0 * np.exp(-iteration / 500000)
+-            
+-        # Sample rays
+-        rays = sample_rays(image_sequence, N_batch)
+-        
+-        # Forward pass
+-        rendered_images = []
+-        for i, ray in enumerate(rays):
+-            # Compute skeleton-relative encoding
+-            rel_pos, rel_dir = skeleton_relative_encoding(
+-                ray.query_point, ray.direction, theta_k[ray.frame_idx], 
+-                bone_indices, cutoff_t, cutoff_tau
+-            )
+-            
+-            # Encode inputs
+-            pos_enc = positional_encoding(rel_pos, L_input=7)
+-            dir_enc = positional_encoding(rel_dir, L_view=4)
+-            app_code = appearance_codes[ray.frame_idx]
+-            
+-            # Get density and color
+-            sigma, c = nerf_forward(pos_enc, dir_enc, app_code, network_params)
+-            rendered_images.append(c)
+-            
+-        # Compute loss
+-        loss = compute_loss(
+-            rendered_images, 
+-            [image_sequence[i] for i in [ray.frame_idx for ray in rays]],
+-            theta_k, 
+-            initial_theta_k, 
+-            prev_theta_k, 
+-            theta_k, 
+-            next_theta_k,
+-            lambda_theta, 
+-            lambda_t
+-        )
+-        
+-        # Backward pass and update
+-        if iteration < 500000:
+-            # Joint optimization
+-            gradients = compute_gradients(loss, network_params, theta_k)
+-            update_parameters(network_params, theta_k, gradients, learning_rate=5e-4)
++    epsilon = 0.01
++    lr_phi_init = 5e-4
++    lr_phi_finetune = 2e-4
++    lr_theta = 1e-4
++    
++    for step in range(num_iterations):
++        # Determine phase
++        if step < 500000:
++            phase = 'joint'
+         else:
+-            # Fine-tuning
+-            gradients = compute_gradients(loss, network_params, theta_k)
+-            update_parameters(network_params, theta_k, gradients, learning_rate=2e-4)
+-            
+-        # Gradient accumulation
+-        if iteration % G == 0:
+-            apply_accumulated_gradients()
+-            
+-    return network_params, theta_k
++            phase = 'finetune'
++            
++        # Sample batch
++        batch_rays = sample_rays_from_images(images, N_batch)
++        
++        # Compute gradients
++        grads_phi = []
++        grads_theta = []
++        
++        for k, ray_batch in enumerate(batch_rays):
++            # Render
++            rendered_img = render(phi, theta_k[k], ray_batch, camera_intrinsics)
++            target_img = images[k]
++            
++            # Data term
++            data_loss = np.mean(np.abs(rendered_img - target_img))
++            
++            if phase == 'joint':
++                # Pose regularizer
++                theta_hat = get_initial_pose(k)
++                pose_reg = np.sum(np.maximum(np.linalg.norm(theta_k[k] - theta_hat) - epsilon, 0))
++                
++                # Smoothness prior
++                if k > 0 and k < N - 1:
++                    smooth_loss = np.linalg.norm(theta_k[k+1] - 2*theta_k[k] + theta_k[k-1])**2
++                else:
++                    smooth_loss = 0
++                    
++                total_loss = data_loss + lambda_theta * pose_reg + lambda_t * smooth_loss
++                
++                grads_phi.append(grad(data_loss, phi))
++                grads_theta.append(grad(pose_reg, theta_k[k]) + grad(smooth_loss, theta_k[k]))
++            else:
++                total_loss = data_loss
++                grads_phi.append(grad(data_loss, phi))
++                
++        # Accumulate gradients
++        # Accumulate for G iterations before update [S1, unofficial]
++        if step % G == 0:
++            # Update phi
++            update_phi(phi, grads_phi, lr=lr_phi_init if phase=='joint' else lr_phi_finetune)
++            
++            if phase == 'joint':
++                # Update theta
++                update_theta(theta_k, grads_theta, lr=lr_theta)
++                
++        # Decay learning rates and cutoff parameters
++        decay_params(step)
++
++def update_phi(phi, grads, lr):
++    """Update neural network parameters."""
++    phi -= lr * np.mean(grads, axis=0)
++
++def update_theta(theta_k, grads, lr):
++    """Update pose parameters."""
++    for k, grad in enumerate(grads):
++        theta_k[k] -= lr * grad
++
++def decay_params(step):
++    """Decay cutoff temperature and learning rates."""
++    # Cutoff temperature tau decays exponentially to -200 over 500k iterations
++    if step < 500000:
++        tau = -20 * np.exp(-step / 500000) # Simplified decay
++    else:
++        tau = -200
++        
++    # Learning rate decay
++    if step < 200000:
++        lr_phi = 5e-4 * np.exp(-step / 200000)
++    else:
++        lr_phi = 5e-5
+ ```
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Training takes approximately 60 hours on 2 Nvidia Tesla V100 32GB GPUs [S1, unofficial]. Rendering time is 1-4 seconds per 512x512x3 image on a single Nvidia Tesla V100 GPU [S1, unofficial].
+-*   **Memory Complexity:** Encoding positions relative to the skeleton has high dimensionality compared to world coordinates [S1, unofficial].
++*   **Memory Complexity:** Encoding positions relative to the skeleton has high dimensionality compared to world coordinates, but the full model (Rel. Ray) balances this with performance [S1, unofficial].
++*   **Performance:**
++    *   On Human 3.6M S9 Protocol II: PSNR 26.64, SSIM 0.9192, PA-MPJPE 41.00 [S1, unofficial].
++    *   On SURREAL: PSNR 29.10, SSIM 0.9655 (compared to NeuralBody PSNR 23.86, SSIM 0.9304) [S1, unofficial].
+ *   **Strengths:**
+-    *   Learns volumetric body shape and appearance from scratch while jointly refining the articulated pose without ground truth labels [S1, unofficial].
+-    *   Works better than NeuralBody for longer sequences and retargeting to diverse poses [S1, unofficial].
+-    *   Can be trained with only a single view; adding more views does not help if poses are not diverse enough [S1, unofficial].
++    *   Works with single-view monocular videos without ground truth labels for appearance, pose, or 3D shape [S1, unofficial].
++    *   Better than NeuralBody for longer sequences and retargeting to diverse poses [S1, unofficial].
++    *   One long video with diverse poses is comparable to multiple shorter multi-view recordings [S1, unofficial].
+ *   **Limitations:**
++    *   Adding more views does not help if poses are not diverse enough [S1, unofficial].
+     *   Using World Ray direction causes overfitting in static/estimated camera settings, leading to flickering results for novel view rendering [S1, unofficial].
+-    *   Encoding world coordinates directly fails on motions and has large memory consumption [S1, unofficial].
+-    *   Straightforward baselines conditioning directly on pose perform worst [S1, unofficial].
+-*   **When to use:** When learning a neural body model from monocular video is required, especially for novel-view-synthesis and motion capture [S1, unofficial].
+-*   **When not to use:** When surface supervision or initialization is available, or when the scene is static [S1, unofficial].
++    *   Straightforward baselines conditioning directly on pose perform worst (SSIM ~0.7) [S1, unofficial].
+ 
+ ## Background
+-A-NeRF builds on NeRF [42] and uses appearance code design from [36, 49] [S1, unofficial]. It was proposed to learn a generative neural body model from unlabelled monocular videos by extending Neural Radiance Fields (NeRFs) with a skeleton to apply to time-varying and articulated motion [S1, unofficial]. The method addresses the challenge of implicit models requiring the inverse of the forward kinematics used in explicit surface models [S1, unofficial].
++A-NeRF builds on NeRF [42] and uses appearance code design from [36, 49] [S1, unofficial]. It was proposed to learn a generative neural body model from unlabelled monocular videos, extending NeRFs with a skeleton to handle time-varying and articulated motion. The key insight is that implicit models require the inverse of the forward kinematics used in explicit surface models, and A-NeRF overcomes this by defining spatial latent variables relative to the pose of body parts [S1, unofficial].
+ 
+ ## Sources

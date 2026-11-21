@@ -1,0 +1,213 @@
+--- v001.md
++++ v002.md
+@@ -4,119 +4,120 @@
+ 
+ ## Overview
+-This method organizes terrain or volumetric data into a block-based quadtree index where node metadata (bounding boxes, centers, hierarchy levels, and data offsets) is packed into a compact structure array residing entirely in GPU video memory. It solves the CPU traversal and assembly overhead by executing frustum culling and occlusion determination in parallel on the GPU via compute shaders, with each thread processing one node to output a list of visible nodes and their Level of Detail (LOD) levels. It differs from CPU-side hierarchical traversal by moving the culling logic to the GPU, leveraging parallelism for large-scale datasets.
++This method organizes large-scale terrain data into a block-based quadtree index where node metadata (bounding boxes, hierarchy levels, offsets) is packed into a compact structure array residing entirely in GPU video memory [S1]. It solves the CPU traversal and assembly overhead bottleneck by executing frustum culling and occlusion determination in parallel on the GPU via compute shaders, with each thread processing one node to output a list of visible nodes and their Level of Detail (LOD) levels [S1]. It differs from CPU-side hierarchical traversal by offloading the culling logic to the GPU, leveraging parallel processing for cache-friendly Z-order storage [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   Global terrain size in samples: $2^L \times 2^L$.
+-*   Leaf node size in samples: $2^K \times 2^K$.
+-*   Camera frustum parameters.
+-*   GPU-accessible buffers: Index Structure (metadata), Tile Data Buffer (elevation), Texture Atlas (color).
++*   Global terrain size: $2^L \times 2^L$ samples [S1].
++*   Leaf node size: $2^K \times 2^K$ samples [S1].
++*   Camera frustum parameters [S1].
+ 
+ **Outputs:**
+-*   List of visible nodes and their computed LOD levels.
++*   List of visible nodes and their corresponding LOD levels [S1].
+ 
+ **Data Structures:**
+-1.  **Quadtree Node Index Structure:** A packed structure array in GPU memory. Each node entry contains:
+-    *   Bounding box (AABB).
+-    *   Center coordinates.
+-    *   Hierarchy level (depth).
+-    *   Offset within the data buffer.
+-    *   Storage order: Z-order curve (Morton code) for cache friendliness.
+-2.  **Tile Data Buffer:** Elevation data written in Z-order curve order. Within each tile, values are stored contiguously in row-major order.
+-3.  **Texture Atlas:** Aligned one-to-one with elevation data blocks. Elevation and texture for the same tile have a deterministic mapping relationship in buffer offsets, avoiding secondary lookup tables.
++1.  **Quadtree Node Index Structure:** A compact structure array in GPU memory. Fields include:
++    *   Bounding boxes [S1].
++    *   Center coordinates [S1].
++    *   Hierarchy levels [S1].
++    *   Offsets within the data buffer [S1].
++    *   Stored in Z-order curve (space-filling curve) order for cache friendliness [S1].
++2.  **Tile Data Buffer:** Elevation data written in Z-order curve order. Within each tile, elevation values are stored contiguously in row-major order [S1].
++3.  **Texture Atlas:** Aligned one-to-one with elevation data blocks. Elevation and texture for the same tile have a deterministic mapping relationship in buffer offsets, avoiding secondary lookup tables [S1].
++
++**Formulas:**
++*   Quadtree depth: $D = L - K$ [S1].
++*   Total number of nodes: $\sum_{i=0}^{D} 4^i = \frac{4^{D+1}-1}{3}$ [S1].
+ 
+ **Parameters:**
+-*   $L$: Logarithm of total terrain dimension.
+-*   $K$: Logarithm of leaf node dimension. Typical value $K=9$ (512×512 samples per tile) [S1].
+-*   $D$: Quadtree depth, calculated as $D = L - K$ [S1].
++*   $K$ (Leaf node size exponent): Determines tile resolution. Typical value $K=9$ (512×512 samples per tile) [S1].
++    *   Example: For global SRTM30m data ($2^L \times 2^L$ large), $K=9$ yields $\approx 6.3 \times 10^5$ leaf nodes and $\approx 8.4 \times 10^5$ total nodes, fitting in GPU memory [S1].
++    *   Example: For a $2^\circ \times 2^\circ$ Rocky Mountains region at 1-arc-second resolution ($\approx 7200 \times 7200$ samples), $K=9$ yields $\approx 225$ leaf nodes and $\approx 341$ total nodes [S1].
+ 
+-**Algorithm Steps:**
+-1.  **Index Construction:**
+-    *   Divide the terrain region into fixed-size tile blocks of $2^K \times 2^K$ samples.
+-    *   Compute the quadtree depth $D = L - K$.
+-    *   Calculate total number of nodes: $N_{total} = \sum_{i=0}^{D} 4^i = \frac{4^{D+1}-1}{3}$ [S1].
+-    *   Pack bounding boxes, center coordinates, hierarchy levels, and data buffer offsets into the Index Structure array.
+-    *   Store the array in Z-order curve order.
+-2.  **Parallel Culling (Compute Shader):**
+-    *   Launch a compute shader with one thread per node in the Index Structure.
+-    *   For each thread $i$:
+-        *   Retrieve node $i$'s bounding box from the Index Structure.
+-        *   Perform frustum culling test against the camera frustum.
+-        *   If the node is visible, compute its LOD level based on distance or screen-space error (implementation detail not specified in source, but implied by "dynamic LOD" [S1]).
+-        *   Output the visible node index and LOD level to an output buffer.
+-3.  **Rendering:**
+-    *   Use the output buffer to drive the rendering pipeline.
+-    *   Fetch elevation data from the Tile Data Buffer using the node's offset.
+-    *   Fetch texture data from the Texture Atlas using the deterministic mapping offset.
++**Steps:**
++1.  **Data Organization:** Divide the terrain region into fixed-size tile blocks of $N \times N$ elevation samples ($N=2^K$) [S1].
++2.  **Index Construction:** Pack bounding boxes, center coordinates, hierarchy levels, and buffer offsets for all quadtree nodes into a compact structure array [S1].
++3.  **Storage Layout:** Write tile data into the buffer in Z-order curve order to ensure spatially adjacent tiles remain adjacent in storage addresses [S1]. Store elevation values within tiles in row-major order [S1].
++4.  **Texture Mapping:** Align texture atlases one-to-one with elevation data blocks, ensuring deterministic buffer offset mapping between elevation and texture for each tile [S1].
++5.  **Parallel Culling:** Execute frustum culling and occlusion determination in parallel on the GPU via compute shaders [S1].
++6.  **Thread Processing:** Each compute shader thread processes one node from the index structure [S1].
++7.  **Output Generation:** Threads output a list of visible nodes and their calculated LOD levels [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Compute Shader Kernel: ProcessOneNode
+-# Input: node_index, frustum_planes, index_buffer, output_buffer
+-# Output: visible_nodes_list
++# Compute Shader Entry Point
++# Each thread handles one node index 'node_idx' from the packed index array
+ 
+-def process_one_node(node_index, frustum_planes, index_buffer, output_buffer):
+-    # 1. Fetch Node Metadata
+-    node = index_buffer[node_index]
+-    bbox = node.bounding_box
+-    center = node.center
+-    level = node.hierarchy_level
+-    data_offset = node.data_offset
++struct NodeIndex {
++    float3 bbox_min;
++    float3 bbox_max;
++    float3 center;
++    int level;
++    int data_offset;
++};
++
++// Global buffers
++NodeIndex* node_indices; // Packed in Z-order
++float* elevation_data;   // Z-order, row-major within tiles
++float* texture_data;     // Aligned with elevation_data
++
++void main() {
++    int node_idx = gl_GlobalInvocationID.x;
+     
+-    # 2. Frustum Culling
+-    # Check if bbox intersects with any of the 6 frustum planes
+-    is_visible = True
+-    for plane in frustum_planes:
+-        if is_bbox_behind_plane(bbox, plane):
+-            is_visible = False
+-            break
+-            
+-    # 3. LOD Computation (Generic placeholder as specific formula not in source)
+-    # [G] Typically involves distance from camera center to node center
+-    # or screen-space error estimation.
+-    lod_level = compute_lod(center, level) 
++    // 1. Load node metadata
++    NodeIndex node = node_indices[node_idx];
+     
+-    # 4. Output
+-    if is_visible:
+-        output_buffer.append({
+-            'node_index': node_index,
+-            'lod_level': lod_level,
+-            'data_offset': data_offset
+-        })
++    // 2. Frustum Culling
++    // Check if node's bounding box intersects the camera frustum
++    if (!is_visible_in_frustum(node.bbox_min, node.bbox_max)) {
++        return; // Node is culled
++    }
++    
++    // 3. LOD Calculation
++    // Determine appropriate LOD level based on distance or screen-space error
++    // Note: Specific LOD formula not provided in sources [S1]
++    int lod_level = compute_lod(node.center, node.level); 
++    
++    // 4. Output Visible Node
++    // Append to output list of visible nodes
++    append_visible_node(node_idx, lod_level);
++}
+ 
+-# Helper: Check if AABB is behind a plane
+-def is_bbox_behind_plane(bbox, plane):
+-    # Determine the corner of the bbox most likely to be behind the plane
+-    # based on the plane normal direction.
+-    # If that corner is behind the plane, the entire bbox is behind.
+-    corner = get_corner(bbox, plane.normal)
+-    return dot(plane.normal, corner) + plane.d < 0
++// Helper: Check intersection with frustum planes
++bool is_visible_in_frustum(float3 min, float3 max) {
++    // Standard AABB vs Frustum plane test
++    // Returns true if any part of the box is inside the frustum
++    // Implementation details assumed standard graphics primitive
++    return true; // Placeholder for actual frustum test logic [G]
++}
+ 
+-# Helper: Get corner of bbox based on normal
+-def get_corner(bbox, normal):
+-    # bbox.min and bbox.max are vectors
+-    corner = vec3(0.0)
+-    for i in range(3):
+-        if normal[i] > 0:
+-            corner[i] = bbox.max[i]
+-        else:
+-            corner[i] = bbox.min[i]
+-    return corner
++// Helper: Compute LOD
++int compute_lod(float3 center, int max_level) {
++    // Distance-based or error-based LOD selection
++    // Specific algorithm not detailed in sources [S1]
++    return max_level; // Placeholder [G]
++}
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Capacity:** For global SRTM30m data ($1.66 \times 10^{11}$ samples), with $K=9$, the number of leaf nodes is $\approx 6.3 \times 10^5$ and total nodes $\approx 8.4 \times 10^5$. This fits in GPU memory [S1]. Smaller regions (e.g., $2^\circ \times 2^\circ$ Rocky Mountains) have far fewer nodes ($\approx 341$) [S1].
+-*   **Cache Friendliness:** Storing nodes and data in Z-order curve order improves cache locality for spatially adjacent tiles [S1].
+-*   **Deterministic Mapping:** Ensuring elevation and texture offsets are deterministically mapped avoids secondary lookups [S1].
++*   **Memory Capacity:** For global data scales, the total number of nodes must fit in GPU memory. With $K=9$, global SRTM30m data fits ($\approx 8.4 \times 10^5$ nodes) [S1].
++*   **Data Scale Distinction:** Global data scale differs from experimental region scale. A $2^\circ \times 2^\circ$ region has far fewer nodes ($\approx 341$) than global data [S1].
++*   **Storage Order:** Deviation from Z-order storage may reduce cache efficiency [S1].
++
++## Subtopics
++
++### Dynamic LOD Generation
++Uses compute shaders to calculate subdivision levels based on viewpoint distance and screen-space error, replacing CPU-based calculations [S1].
++
++### WebGPU Integration
++Tailored for WebGPU environments, addressing raw terrain parsing, GPU-friendly storage, and copy-free rendering pipelines [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Culling is $O(N)$ where $N$ is the number of nodes, but executed in parallel on the GPU. The constant factor is low due to simple bounding box tests.
+-*   **Memory Complexity:** $O(N)$ for the index structure. The source notes that for global data, the index fits in GPU memory [S1].
+-*   **Performance:** Parallel processing on the GPU avoids CPU traversal and assembly overhead, which becomes significant as data scales [S1].
+-*   **Strengths:** Efficient for large-scale terrain data; leverages GPU parallelism; cache-friendly storage.
+-*   **Limitations:** Requires GPU memory for the entire index; LOD computation logic is not detailed in the source.
++*   **Performance:** Parallel processing on the GPU reduces traversal and assembly overhead at the CPU when data scales grow large [S1].
++*   **Memory:** Index data for global SRTM30m data ($\approx 8.4 \times 10^5$ nodes) fully resides in GPU memory with $K=9$ [S1].
++*   **Cache Efficiency:** Z-order curve storage provides good cache friendliness for large-area terrain data [S1].
++*   **Limitations:** Relies on preprocessed formats or efficient parsing; raw terrain parsing and organization can consume significant loading time, especially over networks [S1].
+ 
+ ## Background
+-This method was proposed in the context of WebGPU terrain visualization, addressing issues with raw terrain parsing and organization [S1]. It builds on previous works exploring WebGPU for terrain, such as occlusion culling [1], large-area geosimulation [2], and underwater terrain rendering [3]. The specific block-based quadtree index with GPU-side culling is attributed to the authors of the cited paper [S1].
++This method was proposed in the context of WebGPU terrain visualization, addressing issues with raw terrain parsing, GPU-friendly storage organization, and compute-shader-based dynamic LOD [S1]. It builds on previous works exploring WebGPU for terrain, such as occlusion culling and multi-threaded scheduling [S1]. The approach is tailored for large-scale data, such as global SRTM30m or high-resolution regional data like the Rocky Mountains [S1].
+ 
+ ## Sources

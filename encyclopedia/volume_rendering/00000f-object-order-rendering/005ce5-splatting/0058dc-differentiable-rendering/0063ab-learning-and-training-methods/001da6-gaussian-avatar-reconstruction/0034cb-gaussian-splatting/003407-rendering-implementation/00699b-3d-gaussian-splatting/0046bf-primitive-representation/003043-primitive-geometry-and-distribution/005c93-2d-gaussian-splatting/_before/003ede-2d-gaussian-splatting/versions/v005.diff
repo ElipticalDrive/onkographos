@@ -1,0 +1,97 @@
+--- v004.md
++++ v005.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-2DGS modifies the primitive representation and projection pipeline of 3D Gaussian Splatting to enforce a zero-thickness, surface-aligned geometry.
++2DGS modifies the primitive representation and projection pipeline of 3D Gaussian Splatting to enforce a zero-thickness, surface-aligned geometry [S4, unofficial].
+ 
+ **Inputs and Outputs**
+@@ -17,10 +17,10 @@
+ 1.  **Mean Position** ($\boldsymbol{\mu}_i$): A 3D vector $(x, y, z)$ in world space [G].
+ 2.  **Orientation** ($\mathbf{q}_i$): A quaternion representing the normal direction of the disk [G].
+-3.  **Scale** ($\mathbf{s}_i$): A 2D vector $(s_{i,x}, s_{i,y})$ defining the extent of the disk in its local tangent plane [G]. The third dimension (thickness) is effectively zero.
++3.  **Scale** ($\mathbf{s}_i$): A 2D vector $(s_{i,x}, s_{i,y})$ defining the extent of the disk in its local tangent plane [G]. The third dimension (thickness) is effectively zero [S4, unofficial][G].
+ 4.  **Opacity** ($\alpha_i$): A scalar value in $[0, 1]$ [G].
+ 5.  **Appearance**: Spherical Harmonics (SH) coefficients for view-dependent color [G].
+ 
+ **Projection**
+-The 3D covariance $\boldsymbol{\Sigma}_i$ is replaced by a 2D covariance structure. The 2D Gaussian is defined in its local coordinate system where the $z$-axis aligns with the surface normal [G]. The 2D covariance matrix $\boldsymbol{\Sigma}'_i$ in screen space is computed by projecting the local 2D disk [G]. Let $\mathbf{W}$ be the view rotation matrix and $\mathbf{J}$ be the Jacobian of the projective transformation. The 2D covariance is computed as:
++The 3D covariance $\boldsymbol{\Sigma}_i$ is replaced by a 2D covariance structure [S3][G]. The 2D Gaussian is defined in its local coordinate system where the $z$-axis aligns with the surface normal [G]. The 2D covariance matrix $\boldsymbol{\Sigma}'_i$ in screen space is computed by projecting the local 2D disk [G]. Let $\mathbf{W}$ be the view rotation matrix and $\mathbf{J}$ be the Jacobian of the projective transformation [G]. The 2D covariance is computed as:
+ $$ \boldsymbol{\Sigma}'_i = \mathbf{J} \mathbf{W} \boldsymbol{\Sigma}_i \mathbf{W}^T \mathbf{J}^T $$
+ The 2D mean $\boldsymbol{\mu}'_i$ is obtained by projecting the 3D mean $\boldsymbol{\mu}_i$ through the camera projection matrix [G].
+@@ -38,8 +38,9 @@
+ **Pseudocode**
+ ```python
+-def render_2d_gaussians(primitives, K, W, img_w, img_h):
++def render_2d_gaussians(primitives, K, W_view, extrinsics, img_w, img_h):
+     """
+     K: 3x3 camera intrinsics matrix
+-    W: 4x4 camera extrinsics matrix
++    W_view: 3x3 view rotation matrix
++    extrinsics: 4x4 camera extrinsics matrix
+     primitives: list of primitive objects with attributes mu, q, s, alpha, sh
+     """
+@@ -51,14 +52,18 @@
+         mu_3d = p.mu
+         mu_4d = [mu_3d[0], mu_3d[1], mu_3d[2], 1.0]
+-        mu_cam = mat_mul(W, mu_4d)
++        mu_cam = mat_mul(extrinsics, mu_4d)
+         depth = mu_cam[2]
+         mu_proj = mat_mul(K, [mu_cam[0], mu_cam[1], mu_cam[2]])
+         mu_2d = [mu_proj[0] / mu_proj[2], mu_proj[1] / mu_proj[2]]
+ 
+-        R = quat_to_rot(p.q)
++        R = quat_to_rot(p.q) # Standard quaternion-to-rotation-matrix conversion [G]
+         S = diag(p.s[0], p.s[1], 0.0)
+         Sigma_3d = mat_mul(R, mat_mul(S, mat_mul(transpose(S), transpose(R))))
+         J = compute_jacobian(mu_cam, K)
+-        Sigma_2d = mat_mul(J, mat_mul(W, mat_mul(Sigma_3d, mat_mul(transpose(W), transpose(J)))))
++        Sigma_3d_cam = mat_mul(W_view, mat_mul(Sigma_3d, transpose(W_view)))
++        Sigma_2d_full = mat_mul(J, mat_mul(Sigma_3d_cam, transpose(J)))
++        # Extract top-left 2x2 block for 2D density evaluation
++        Sigma_2d = [[Sigma_2d_full[0][0], Sigma_2d_full[0][1]],
++                    [Sigma_2d_full[1][0], Sigma_2d_full[1][1]]]
+ 
+         screen_primitives.append({'mu': mu_2d, 'Sigma': Sigma_2d, 'alpha': p.alpha, 'sh': p.sh, 'depth': depth})
+@@ -79,6 +84,5 @@
+                 alpha_eff = prim['alpha'] * t
+ 
+-                # Low-pass filter applied during optimization to avoid degenerate line projection [S2]
+-                color = eval_sh(prim['sh'], W, prim['mu'])
++                color = eval_sh(prim['sh'], W_view, prim['mu']) # Standard SH evaluation [G]
+ 
+                 idx = y * img_w + x
+@@ -97,13 +101,26 @@
+ def transpose(M): return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
+ def diag(x, y, z): return [[x,0,0],[0,y,0],[0,0,z]]
+-def quat_to_rot(q): return [[1,0,0],[0,1,0],[0,0,1]] # Standard quaternion-to-matrix conversion [G]
+-def compute_jacobian(cam_pos, K): return [[K[0][0]/cam_pos[2], 0, -K[0][0]*cam_pos[0]/cam_pos[2]**2], [0, K[1][1]/cam_pos[2], -K[1][1]*cam_pos[1]/cam_pos[2]**2], [0, 0, 0]] # Standard projective Jacobian [G]
+-def invert_2x2(M): d = M[0][0]*M[1][1] - M[0][1]*M[1][0]; return [[M[1][1]/d, -M[0][1]/d], [-M[1][0]/d, M[0][0]/d]]
++def quat_to_rot(q): # Standard quaternion-to-rotation-matrix conversion [G]
++    return [[1,0,0],[0,1,0],[0,0,1]]
++def compute_jacobian(cam_pos, K): # Standard projective Jacobian [G]
++    return [[K[0][0]/cam_pos[2], 0, -K[0][0]*cam_pos[0]/cam_pos[2]**2],
++            [0, K[1][1]/cam_pos[2], -K[1][1]*cam_pos[1]/cam_pos[2]**2],
++            [0, 0, 0]]
++def invert_2x2(M):
++    d = M[0][0]*M[1][1] - M[0][1]*M[1][0]
++    return [[M[1][1]/d, -M[0][1]/d], [-M[1][0]/d, M[0][0]/d]]
+ def dot(a, b): return a[0]*b[0] + a[1]*b[1]
+ def compute_bbox(mu, Sigma, w, h):
+-    eigvals = [Sigma[0][0]+Sigma[1][1], Sigma[0][0]-Sigma[1][1]]
+-    radius = math.sqrt(max(eigvals))
++    # Compute eigenvalues for 2x2 covariance to get bounding radius
++    tr = Sigma[0][0] + Sigma[1][1]
++    det = Sigma[0][0]*Sigma[1][1] - Sigma[0][1]*Sigma[1][0]
++    disc = tr*tr - 4*det
++    if disc < 0: disc = 0
++    eig1 = (tr + math.sqrt(disc)) / 2
++    eig2 = (tr - math.sqrt(disc)) / 2
++    radius = math.sqrt(max(eig1, eig2))
+     return [max(0, mu[0]-radius), min(w, mu[0]+radius), max(0, mu[1]-radius), min(h, mu[1]+radius)]
+-def eval_sh(sh, W, mu): return [0.5, 0.5, 0.5] # Standard SH evaluation [G]
++def eval_sh(sh, W, mu): # Standard SH evaluation [G]
++    return [0.5, 0.5, 0.5]
+ ```
+ 

@@ -1,0 +1,470 @@
+Cross-Platform Benchmark of Neural 3D Reconstruction for Autonomous
+Laboratory Robots
+Yongho Kim,* Mengjiao Han†
+Victor Mateevitsi‡, Silvio Rizzi§, Michael E. Papka¶
+Nicola Ferrier||
+Argonne National Laboratory
+Argonne National Laboratory
+University of Illinois Chicago
+Argonne National Laboratory
+NAISE, Northwestern University
+arXiv:2608.26383v1 [cs.RO] 26 Aug 2026
+Real-time 3D Reconstruction and Tracking
+Key Enabler for Autonomous Laboratory
+Chemical synthesis and progress tracking
+Laboratory monitoring and scene reconstruction
+Protein production with labeling and tracking
+Real-time visualization and rendering
+Figure 1: Our vision is an autonomous laboratory powered by 3D reconstruction and tracking. The four dashed boxes illustrate
+use cases necessitating visual analytics for science-aware autonomous manipulation. Note that the illustration is AI-generated.
+A BSTRACT
+Autonomous robots performing laboratory tasks depend on 3D reconstruction pipelines that can turn raw camera streams into actionable object representations within the latency budget of a physical
+control loop. Neural 3D reconstruction methods have demonstrated
+high-quality view synthesis, but their real-time viability across the
+compute platforms on which laboratory robots actually run remains poorly characterized. In this work, we present a systematic
+compute-platform benchmark of neural 3D reconstruction methods,
+evaluating NeRF and 3D Gaussian Splatting training and rendering on GPU-enabled computing devices ranging from single-board
+computers to server-class nodes, and place Meta’s SAM3D singleimage reconstruction on the same axes to quantify its latency and fidelity gap relative to per-scene optimization. Our results show that
+Gaussian Splatting yields higher rendering quality than NeRF at
+greater GPU cost, and that onboard compute is insufficient for full
+per-scene optimization at interactive rates. Our preliminary assessment on SAM3D indicates that it delivers plausible object geometry within seconds, but with detail mismatches that can compromise downstream manipulation. Together, these findings motivate
+* e-mail: yongho.kim@anl.gov
+† e-mail: hanm@anl.gov
+‡ e-mail: vmateevitsi@anl.gov
+§ e-mail: srizzi@anl.gov
+¶ e-mail: papka@anl.gov, papka@uic.edu
+|| e-mail: nferrier@anl.gov
+tiered pipelines in which lightweight feed-forward reconstruction
+sustains the real-time perception-and-tracking loop for laboratory
+robots, while heavier neural reconstruction is scheduled selectively
+on suitable compute.
+Index Terms: Neural 3D reconstruction, Real-time rendering and
+tracking, Latency-fidelity tradeoffs, Autonomous laboratory
+ACKNOWLEDGEMENT
+This work was supported in part by the Office of Science of the
+U.S. Department of Energy under Contract No. DE- DE-AC0106CH11357 through two projects: 1) ”DAIMSL: Digital twins and
+AI-enabled & IMmmersive Environments for Automated Scientific
+Laboratories”. funded by the Office of Advanced Scientific Computing Research (ASCR), and 2)“Tele-robotics to Tele-autonomous
+robotics for isotope production”, a project jointly funded by the
+Office of Isotope R&D and Production (IP) and the Office of Advanced Scientific Computing Research (ASCR). This research used
+resources of the Argonne Leadership Computing Facility, which is
+a DOE Office of Science User Facility supported under Contract
+DE-AC02-06CH11357. The manuscript is written and edited with
+AI assistance.
+The submitted manuscript has been created by UChicago Argonne, LLC, Operator of Argonne National Laboratory (“Argonne”). Argonne, a U.S. Department of Energy Office of Science
+laboratory, is operated under Contract No. DE-AC02-06CH11357.
+The U.S. Government retains for itself, and others acting on
+its behalf, a paid-up nonexclusive, irrevocable worldwide license
+in said article to reproduce, prepare derivative works, distribute
+copies to the public, and perform publicly and display publicly,
+by or on behalf of the Government. The Department of Energy will provide public access to these results of federally spon-
+Figure 2: Computing devices used in the benchmark. (left)
+NVIDIA Jetson AGX Orin, (middle) Dell Alienware with NVIDIA
+RTX 2080, and (right) Argonne Leadership Computing Facility’s
+Sophia with NVIDIA A100.
+sored research in accordance with the DOE Public Access Plan
+(http://energy.gov/downloads/doe-public-accessplan).
+1
+I NTRODUCTION
+Autonomous laboratories are increasingly relying on mobile manipulators and instrument-mounted robots to carry out experimental
+tasks that once required a human scientist at the bench — loading
+samples, operating centrifuges, transferring liquids, and inspecting
+apparatus [11]. Each of these tasks depends on a 3D representation
+of the target object that is accurate enough for reliable manipulation and fast enough to keep the robot’s perception–action loop. 3D
+reconstruction and object tracking are therefore not peripheral capabilities in a scientific robot’s software stack; they sit directly on
+the critical path between sensing and action.
+Neural 3D reconstruction has emerged as a natural candidate for
+this role. Neural Radiance Fields (NeRFs) and 3D Gaussian Splatting (GS) produce dense, photorealistic, view-consistent reconstructions from multi-view images, while transformer-based large
+reconstruction models (LRMs) such as SAM3D generate a 3D object from a single image in seconds. These two families sit at opposite ends of a latency–fidelity spectrum: per-scene optimization
+delivers high-quality geometry at the cost of minutes to hours of
+training, while feed-forward inference delivers near-instantaneous
+outputs whose fidelity, especially in occluded regions, is not guaranteed to match the physical object a robot must manipulate. Which
+family—and which compute platform—is appropriate for a given
+laboratory task is not obvious, and empirical guidance grounded in
+the hardware that scientific robots actually run on is limited.
+In this work, we systematically benchmark existing neural 3D reconstruction methods on the compute tiers relevant to autonomous
+laboratory deployment. We evaluate NeRF and GS training and rendering, using the nerfacto and splatfacto implementations in NerfStudio, on an embedded NVIDIA Jetson AGX Orin, an RTX-class
+desktop workstation, and an A100-equipped HPC node, using a 40image capture of a robotic arm as the target scene. In parallel, we
+present a preliminary assessment of SAM3D single-image reconstruction on laboratory objects, including a centrifuge bucket, and
+discuss the methodological challenges of comparing single-image
+LRM outputs against multi-view ground truth. Together, these
+results characterize the trade-offs between reconstruction quality,
+training and rendering latency, and compute cost that are critical
+to shape the design of 3D reconstruction pipelines for autonomous
+laboratory robots; visual analytics capabilities for science-aware
+decision-making are identified as future work.
+Figure 3: A synthetic view representing the scene we use for benchmarking. A total of 40 images with a resolution of 2124 x 2832 are
+used to train NeRF and GS models.
+novel-view synthesis at the cost of per-scene optimization. In parallel, transformer-based large reconstruction models (LRMs) have
+emerged, employing feed-forward neural networks to produce 3D
+object representations directly from one or a few images, trading
+fidelity for near-instantaneous inference. These two families occupy opposite ends of the latency–fidelity spectrum, and each imposes markedly different demands on the compute platform that
+hosts it—an axis that becomes decisive once the target deployment
+is a scientific robot rather than an offline workstation. The remainder of this section reviews each family in turn: we first survey their
+rendering and tracking capabilities, and then examine the computational requirements that govern whether, and where, they can be
+deployed in a robot-driven discovery loop.
+2.1
+While NeRF reconstructs the scene using ray-tracing that passes
+through the network weights, GS maintains explicit “splats” to
+project onto the 2D image plane. Because this projection can be
+highly accelerated by a GPU, the GS method has been mainly used
+for rendering scenes. Instant-NGP [12] is one of the early GS
+methods that utilizes multi-resolution hash encoding and pushes the
+training and rendering into seconds to minutes from hours. Followed by that, dynamic 3DGS [9] and 4DGS [18] extend the reconstruction to dynamic scenes for movement tracking while benefiting from real-time rendering and high-quality view synthesis. To
+support live camera streams from mobile robots like drones flying
+over the scene, NerfBridge [19] provides a messaging layer that
+flows image data into the training and constantly updates the image
+pool used in the reconstruction with unseen images for diversifying
+the views. 3DGauCIM [5] proposes memory-efficient algorithms
+for 3DGS to achieve real-time rendering in power-constrained edge
+devices.
+However, we practically experience that the training of these
+GS models can take at least a few minutes to over an hour to obtain a high-quality reconstruction. For instance, 4DGS [18] uses
+NVIDIA RTX 3090 and takes 8 minutes of training, still beating many existing GS methods. Additionally, the training requires
+mutli-perspective 2D images. These can become a constraint when
+needing a within-a-minute reconstruction and tracking for robots to
+manipulate science objects in real time.
+2.2
+2
+R ELATED W ORK
+Real-time novel-view synthesis and object tracking together constitute the core problem discussed in this paper, and both have
+advanced rapidly along two largely independent research fronts.
+On the reconstruction side, Neural Radiance Field (NeRF) [10]
+and 3D Gaussian Splatting (GS) have become the dominant tools
+for high-fidelity static scene reconstruction, offering photorealistic
+Neural Radiance Field and Gaussian Splatting
+Large Reconstruction Models
+Large reconstruction models are transformer-based models for reconstructing objects using a single image within seconds [4]. Once
+trained with millions of 3D objects, the model predicts NeRF triplane representations with volumetric rendering to construct a 3D
+model. LRMs are widely used to construct object meshes and 3D
+Gaussian primitives for reconstruction [16, 20]. SAM3D [2], possibly fused with SAM3 object tracking [1], and BundleSDF [17]
+Figure 4: Visualization of the evaluation. (left) ground truth, (middle) NeRF, and (right) GS.
+Table 1: Performance Metrics of NeRF and GS across devices.
+Case
+ALCF Sophia-NeRF
+ALCF Sophia-GS
+Alienware-NeRF
+Alienware-GS
+NVIDIA Jetson Orin-NeRF
+NVIDIA Jetson Orin-GS
+PSNR ↑
+18.96
+24.32
+20.37
+23.21
+19.14
+24.06
+SSIM ↑
+0.65
+0.84
+0.69
+0.82
+0.64
+0.83
+LPIPS ↓
+0.36
+0.21
+0.30
+0.21
+0.33
+0.21
+maintain their memory pool to save posed models to track objects
+in a video. The large 4D Gaussian reconstruction model [13] generates an animated 3D object from a video. Note that they are not
+necessarily all transformer models but have self-attention layers in
+common.
+As one can guess, one obvious downside of LRMs is the fact
+that the generated 3D models contain parts that are not from the
+input image but are predicted based on the trained model. These
+unseen, synthetically generated parts may fail to represent the actual object shape, possibly leading to failure in object manipulation
+due to the mismatch between the generated object model and the
+physical object. To overcome this limitation, robots can take additional perspective images to reinforce the generated model before
+manipulating the object (i.e., BundleSDF).
+3
+N EURAL RECONSTRUCTION ON HETEROGENEOUS COM PUTE PLATFORMS
+While the aforementioned neural 3D reconstruction models push
+on digitizing physical objects and scenes, we focus in this work on
+evaluating these models in different computing devices that vary
+in computing architecture and energy budget. As shown in Figure 2, the considered devices include NVIDIA Jetson AGX Orin,
+a desktop-grade computer with NVIDIA RTX, and a single HPC
+node equipped with NVIDIA A100 GPU. Based on their specification, they consume roughly 50 W, 500 W, and 1500 W, respectively.
+3.1
+NeRF and Gaussian Splatting
+We use NerfStuido [15], a framework for training and rendering
+NeRF models, and select nerfacto and splafacto that are the basic
+models supported in NerfStudio. The nerfacto model, referred to
+as “NeRF” in the remainder of this section, is a deep neural network model balanced between speed and quality. Originating from
+3D-GS [6], the splafacto model, referred to as “GS”, is an implementation of the 3D-GS with GPU-backed rasterization for rapid
+rendering. Both are within 6 GB of memory, suitable for edge devices like NVIDIA Jetson.
+Figure 3 shows the manually collected dataset used in the benchmarking. The scene is captured with 40 6-megapixel RGB images,
+FPS ↑
+0.25
+0.78
+0.42
+24.16
+0.09
+4.87
+Time (minute)
+15.6
+16.5
+17.4
+21.8
+84.1
+90.0
+Averaged GPU Utilization
+51.9
+83.9
+62.7
+72.2
+62.2
+72.6
+GPU-minute
+8.1
+13.8
+10.9
+15.7
+52.3
+65.3
+with the focus around the robot arm as the target object. We use
+COLMAP [14] to calculate their perspective coordination in the
+space by feeding the images that share regions in the image.
+3.2
+Computing Benchmarking
+The training runs for 30,000 iterations while measuring GPU utilization and elapsed training time. In the end, we evaluate the
+performance of the trained models using the ‘ns-eval’ command
+in NerfStudio. As shown in Figure 4, the evaluation focuses on the
+quality of view synthesis against the ground-truth image used in the
+training.
+3.2.1
+Evaluation Metrics
+Table 1 reports six key metrics across all platform-method combinations. We briefly define each:
+• PSNR ↑ (Peak Signal-to-Noise Ratio, in dB): Measures reconstruction fidelity by comparing pixel-level similarity between rendered and ground-truth images. Higher values indicate better visual quality. PSNR is standard in 3D reconstruction but saturates at high quality thresholds.
+• SSIM ↑ (Structural Similarity Index): Captures perceived
+structural similarity between rendered and ground-truth images, addressing PSNR’s perceptual gaps. Values range from
+0 to 1; higher is better.
+• LPIPS ↓ (Learned Perceptual Image Patch Similarity): A
+deep-learning-based metric that aligns better with human perceptual judgment than PSNR or SSIM. Lower values indicate
+better perceived visual quality.
+• FPS ↑ (Frames Per Second): Rendering throughput during inference; critical for real-time perception loops. Values below
+10 FPS represent unacceptable latency for interactive robotic
+tasks.
+• Time (minute): Elapsed wall-clock training time in minutes;
+reflects absolute time to obtain a trained model.
+• GPU-minute: Effective GPU compute cost, calculated as
+elapsed time × averaged GPU utilization, normalizing for
+hardware idling. Allows fair comparison across devices with
+different utilization profiles.
+3.2.2
+Key Findings
+Table 1 shows the results of NeRF and GS benchmarking on the
+computing devices. In all devices, the GS method yields higher
+PSNR and faster rendering than NeRF. However, it tends to train
+longer and consume more GPU resources. For instance, the GPUminute — the wall-clock minutes for GPU computation calculated
+from elapsed time × averaged GPU utilization — of GS on Alienware takes roughly 1.4x more than NeRF on the same device.
+Quality-vs.-Cost Trade-off: GS achieves 5.95 PSNR points
+higher than NeRF on the Sophia HPC node (24.32 vs 18.96 dB),
+at the cost of 70% more GPU-minutes (13.8 vs 8.1). This suggests that the higher fidelity comes at a substantial compute premium. On the Jetson Orin—the platform most likely to be mounted
+onboard a laboratory robot—GS still outperforms NeRF in quality but requires 25% more GPU-time (65.3 vs 52.3 GPU-minutes),
+a trade-off that becomes critical when onboard power budgets are
+constrained to ˜50 W.
+Rendering Latency: GS achieves higher FPS over NeRF because
+GS uses hardware-accelerated and optimized rasterization for reconstruction. We suspect that Alienware and Orin devices benefit
+more from this optimization due to their GPU architectures than
+Sophia’s A100. For interactive robotic manipulation, this result indicates that real-time perception loops must rely on Gaussian splats
+for reconstruction and rendering, with periodic refinement through
+heavier neural methods.
+Platform Scaling: Across the devices, the Sophia node shows
+the fastest training as expected, followed by the Alienware desktop computer and the Jetson Orin. The elapsed training time on
+the Orin has a huge gap from the other two, indicating that Orin’s
+insufficient computing power prevents it from supporting the task
+effectively. Specifically, training a single GS model takes 16.5 minutes on Sophia, 21.8 minutes on Alienware, and 90.0 minutes on the
+Jetson Orin—a 5.5x slowdown relative to the server-class platform.
+This scaling behavior is critical for pipeline design: onboard optimization is prohibitively slow, necessitating edge or cloud-based
+reconstruction with periodic synchronization.
+Note that we utilized only 1 out of 8 available A100 GPUs in
+Sophia. Using PyTorch’s Distribution Data Parallel (DDP) and/or
+model-split methods [8] can further accelerate the training on multiGPU devices. Such multi-GPU strategies could significantly reduce
+Sophia’s training time, reinforcing the gap between cloud and onboard reconstruction capabilities.
+4
+P RELIMINARY RESULT OF SAM3D RECONSTRUCTION
+To understand the performance of LRMs for single-image inference, we test SAM3D with single images taken from a camera.
+We downsize the input image into 512 x 512 and feed it once into
+the SAM3D inference running on a desktop-grade computer with
+an NVIDIA RTX 5000 GPU. The inference takes roughly 9-12
+seconds to generate a 3D model; generating Gaussian splats from
+SAM3D takes 8-10 seconds, while mesh decoding finishes within
+a second.
+4.1
+openings for accepting plastic tubes, but the associated 3D model
+has more openings, which can cause misalignment of the tube into
+the opening when robots refer to the 3D model for the manipulation. The same problem occurs in the well plate, with the wrong
+number of openings. Lastly, the 3D bee model does not seem to
+capture the shape and volume that are unique to the bee.
+Object Reconstruction Examples
+Figure 5 shows example 3D models generated from SAM3D. These
+models follow the shape of the object in the input image, and 3D
+shapes in the occluded area also resemble the example objects,
+which appear symmetric. However, we see challenging examples
+where the object geometry is not precisely reconstructed in the 3D
+model (see the bottom row in Fig. 5). The centrifuge bucket has 7
+4.2
+Assessing Quality of SAM3D Reconstruction
+Although the reconstructed 3D models appear reasonably shaped,
+we find two problems in comparing the visual quality of the reconstructed object against the ground-truth image. First, different from
+NeRF and GS, the ground-truth image misses its pose information
+to match the perspective of the reconstructed model to the physical
+object. Heuristically estimating the exact pose of the ground truth
+image is not feasible. As a consequence, simply comparing PSNR
+to gauge the visual quality of reconstructed 3D model faces this
+matching problem (see Fig. 6). Secondly, SAM3D constructs a 3D
+object model without rendering the scene, and hence the groundtruth image needs to be background removed. Background removal
+is currently done either by masking the object of interest in SAM3
+or by using automated background removal tools such as RemBG.
+However, if the target object is in a complex scene, background
+removal may leave some background in the image and may cause
+false positives in the region, negatively impacting PSNR calculation.
+To evaluate the geometric and volumetric quality of reconstructed objects, many studies use the Chamfer distance and the
+F-1 score. SAM3D respectively reports their F-1 score and Chamfer distance as 0.2344 and 0.04, on the SA-3DAO dataset (see the
+detailed comparison in [2]). Despite of these scores, our preliminary assessment in this zero-shot reconstruction raises concerns in
+the details of reconstructed object models in the context of automated robot manipulation of these models due to the detail mismatch. This necessitates continuous model finetuning with laboratory objects as well as any unseen, unmodeled object that would be
+discovered during laboratory experiement.
+5
+R EMARK AND FUTURE WORK
+3D reconstruction and rendering are essential components for autonomous robots to understand the surrounding environment and
+plan actions. The NeRF and GS methods provide high-quality
+view synthesis but require multi-perspective images and a sufficient amount of training time. On the other hand, transformer-based
+models quickly produce Gaussian splats to generate a 3D model,
+but the visual and detailed geometric quality for autonomous robot
+tasks is questionable at the early stage of our assessment. We see
+that the latency-fidelity balance exists, and that can be managed
+when we scale computation at every level in the infrastructure,
+spanning from mobile robots, scientific instruments, edge computers, to HPC systems.
+5.1
+Benchmark Scope and Limitations
+This work focuses narrowly on the computational and
+reconstruction-quality aspects of neural 3D reconstruction
+methods across compute platforms. We do not propose new
+reconstruction techniques, nor do we develop visual analytics
+capabilities for system-level decision support. Instead, we provide
+empirical benchmarking data to inform engineering choices in
+pipeline design. Robotic manipulation tasks, particularly those in
+laboratory settings, impose strict latency requirements on perception loops. Open datasets [3, 7] for visual-language-action models
+record visual data at 15 to 20 Hz, implying that the perception loop
+should operate ideally at a similar frame rate to sustain real-time
+interaction.
+Figure 5: Reconstructed 3D models from SAM3D. Each pair consists of an input image on the left and a generated 3D model on the right.
+From top-left to bottom-right: toy measuring cup, toy spoon, plastic tube with cap, centrifuge bucket, pipette well plate, and taxidermy bee.
+els with their scientific context (e.g., knowing what chemicals are
+synthesized in the flask); (3) provide interactive decision support
+for autonomous platform to select between latency-optimized and
+fidelity-optimized reconstruction strategies based on task requirements; and (4) integrate these systems into the full autonomous laboratory workflow. These capabilities require domain-specific design, user study validation, and integration with laboratory automation platforms—efforts beyond the scope of this compute-platform
+benchmark.
+R EFERENCES
+Figure 6: (left) A ground-truth image, (middle) SAM3D reconstruction from the image, and (right) masked image showing the
+area for PSNR calculation. The red area is excluded for the calculation. The scale and pose mismatch between the image and the
+reconstructed model make PSNR calculation challenging.
+5.2
+Direct Future Work: Reconstruction Methods
+Future work includes performance benchmarking of LRM models
+for lab-related objects. Obtaining precisely 3D-scanned objects can
+help with benchmarking, in addition to using open datasets. On the
+GS model training, we will explore ways to speed up the training
+by importing Gaussian splats generated from LRM models. This
+approach can not only loosen the need for multi-perspective images
+to train the GS model but also enable adaptive strategies to generate
+high-fidelity splats on focused parts of the object.
+5.3
+Future Work: Visual Analytics and Science-Aware
+Autonomy
+The benchmarking results presented here establish a foundation
+for designing reconstruction pipelines; however, integrating these
+pipelines into a visual analytics system for science-aware autonomous manipulation is left as future work. Such a system
+would need to: (1) visualize reconstruction outputs to enable scientist monitoring and intervention; (2) track reconstructed mod-
+[1] N. Carion, L. Gustafson, Y.-T. Hu, S. Debnath, R. Hu, D. Suris,
+C. Ryali, K. V. Alwala, H. Khedr, A. Huang, et al. Sam 3: Segment
+anything with concepts. arXiv preprint arXiv:2511.16719, 2025. 2
+[2] X. Chen, F.-J. Chu, P. Gleize, K. J. Liang, A. Sax, H. Tang, W. Wang,
+M. Guo, T. Hardin, X. Li, et al. Sam 3d: 3dfy anything in images.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 7220–7232, 2026. 2, 4
+[3] K. Grauman, A. Westbury, E. Byrne, Z. Chavis, A. Furnari, R. Girdhar, J. Hamburger, H. Jiang, M. Liu, X. Liu, M. Martin, T. Nagarajan,
+I. Radosavovic, S. K. Ramakrishnan, F. Ryan, J. Sharma, M. Wray,
+M. Xu, E. Z. Xu, C. Zhao, S. Bansal, D. Batra, V. Cartillier, S. Crane,
+T. Do, M. Doulaty, A. Erapalli, C. Feichtenhofer, A. Fragomeni,
+Q. Fu, C. Fuegen, A. Gebreselasie, C. Gonzalez, J. Hillis, X. Huang,
+Y. Huang, W. Jia, W. Khoo, J. Kolar, S. Kottur, A. Kumar, F. Landini,
+C. Li, Y. Li, Z. Li, K. Mangalam, R. Modhugu, J. Munro, T. Murrell,
+T. Nishiyasu, W. Price, P. R. Puentes, M. Ramazanova, L. Sari, K. Somasundaram, A. Southerland, Y. Sugano, R. Tao, M. Vo, Y. Wang,
+X. Wu, T. Yagi, Y. Zhu, P. Arbelaez, D. Crandall, D. Damen, G. M.
+Farinella, B. Ghanem, V. K. Ithapu, C. V. Jawahar, H. Joo, K. Kitani,
+H. Li, R. Newcombe, A. Oliva, H. S. Park, J. M. Rehg, Y. Sato, J. Shi,
+M. Z. Shou, A. Torralba, L. Torresani, M. Yan, and J. Malik. Ego4d:
+Around the World in 3,000 Hours of Egocentric Video. In IEEE/CVF
+Computer Vision and Pattern Recognition (CVPR), 2022. 4
+[4] Y. Hong, K. Zhang, J. Gu, S. Bi, Y. Zhou, D. Liu, F. Liu, K. Sunkavalli,
+T. Bui, and H. Tan. Lrm: Large reconstruction model for single image
+to 3d. In International Conference on Learning Representations, vol.
+2024, pp. 50678–50702, 2024. 2
+[5] W.-H. Huang, C.-J. Shih, J.-W. Su, S. Wang, V. Garg, Y. Kong, J.-C.
+Tien, N. Li, A. Raychowdhury, M.-F. Chang, et al. 3dgaucim: Accelerating static/dynamic 3d gaussian splatting via digital cim for high
+frame rate real-time edge rendering. ACM Transactions on Design
+Automation of Electronic Systems, 31(4):1–18, 2026. 2
+[6] B. Kerbl, G. Kopanas, T. Leimkühler, G. Drettakis, et al. 3d gaussian
+splatting for real-time radiance field rendering. ACM Trans. Graph.,
+42(4):139–1, 2023. 3
+[7] A. Khazatsky, K. Pertsch, S. Nair, A. Balakrishna, S. Dasari,
+S. Karamcheti, S. Nasiriany, M. K. Srirama, L. Y. Chen, K. Ellis, P. D.
+Fagan, J. Hejna, M. Itkina, M. Lepert, Y. J. Ma, P. T. Miller, J. Wu,
+S. Belkhale, S. Dass, H. Ha, A. Jain, A. Lee, Y. Lee, M. Memmel,
+S. Park, I. Radosavovic, K. Wang, A. Zhan, K. Black, C. Chi, K. B.
+Hatch, S. Lin, J. Lu, J. Mercat, A. Rehman, P. R. Sanketi, A. Sharma,
+C. Simpson, Q. Vuong, H. R. Walke, B. Wulfe, T. Xiao, J. H. Yang,
+A. Yavary, T. Z. Zhao, C. Agia, R. Baijal, M. G. Castro, D. Chen,
+Q. Chen, T. Chung, J. Drake, E. P. Foster, J. Gao, V. Guizilini, D. A.
+Herrera, M. Heo, K. Hsu, J. Hu, M. Z. Irshad, D. Jackson, C. Le, Y. Li,
+K. Lin, R. Lin, Z. Ma, A. Maddukuri, S. Mirchandani, D. Morton,
+T. Nguyen, A. O’Neill, R. Scalise, D. Seale, V. Son, S. Tian, E. Tran,
+A. E. Wang, Y. Wu, A. Xie, J. Yang, P. Yin, Y. Zhang, O. Bastani,
+G. Berseth, J. Bohg, K. Goldberg, A. Gupta, A. Gupta, D. Jayaraman,
+J. J. Lim, J. Malik, R. Martı́n-Martı́n, S. Ramamoorthy, D. Sadigh,
+S. Song, J. Wu, M. C. Yip, Y. Zhu, T. Kollar, S. Levine, and C. Finn.
+Droid: A large-scale in-the-wild robot manipulation dataset. 2024. 4
+[8] R. Li, S. Fidler, A. Kanazawa, and F. Williams. Nerf-xl: Scaling nerfs
+with multiple gpus. In European Conference on Computer Vision, pp.
+92–107. Springer, 2024. 4
+[9] J. Luiten, G. Kopanas, B. Leibe, and D. Ramanan. Dynamic 3d gaussians: Tracking by persistent dynamic view synthesis. In 2024 International Conference on 3D Vision (3DV), pp. 800–809. IEEE, 2024.
+2
+[10] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng. Nerf: Representing scenes as neural radiance fields for
+view synthesis. Communications of the ACM, 65(1):99–106, 2021. 2
+[11] Y. Ming, X. Yang, W. Wang, Z. Chen, J. Feng, Y. Xing, and
+G. Zhang. Benchmarking neural radiance fields for autonomous
+robots: An overview. Engineering Applications of Artificial Intelligence, 140:109685, 2025. 2
+[12] T. Müller, A. Evans, C. Schied, and A. Keller. Instant neural graphics
+primitives with a multiresolution hash encoding. ACM transactions
+on graphics (TOG), 41(4):1–15, 2022. 2
+[13] J. Ren, K. Xie, A. Mirzaei, H. Liang, X. Zeng, K. Kreis, Z. Liu,
+A. Torralba, S. Fidler, S. W. Kim, et al. L4gm: Large 4d gaussian
+reconstruction model. Advances in Neural Information Processing
+Systems, 37:56828–56858, 2024. 3
+[14] J. L. Schönberger and J.-M. Frahm. Structure-from-motion revisited.
+In Conference on Computer Vision and Pattern Recognition (CVPR),
+2016. 3
+[15] M. Tancik, E. Weber, E. Ng, R. Li, B. Yi, T. Wang, A. Kristoffersen,
+J. Austin, K. Salahi, A. Ahuja, et al. Nerfstudio: A modular framework for neural radiance field development. In ACM SIGGRAPH 2023
+conference proceedings, pp. 1–12, 2023. 3
+[16] X. Wei, K. Zhang, S. Bi, H. Tan, F. Luan, V. Deschaintre,
+K. Sunkavalli, H. Su, and Z. Xu. Meshlrm: Large reconstruction
+model for high-quality meshes. arXiv preprint arXiv:2404.12385,
+2024. 2
+[17] B. Wen, J. Tremblay, V. Blukis, S. Tyree, T. Müller, A. Evans, D. Fox,
+J. Kautz, and S. Birchfield. Bundlesdf: Neural 6-dof tracking and 3d
+reconstruction of unknown objects. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pp. 606–
+617, 2023. 2
+[18] G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian, and
+X. Wang. 4d gaussian splatting for real-time dynamic scene rendering.
+In Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, pp. 20310–20320, 2024. 2
+[19] J. Yu, J. E. Low, K. Nagami, and M. Schwager. Nerfbridge: Bringing real-time, online neural radiance field training to robotics. arXiv
+preprint arXiv:2305.09761, 2023. 2
+[20] K. Zhang, S. Bi, H. Tan, Y. Xiangli, N. Zhao, K. Sunkavalli, and Z. Xu.
+Gs-lrm: Large reconstruction model for 3d gaussian splatting. In European Conference on Computer Vision, pp. 1–19. Springer, 2024. 2

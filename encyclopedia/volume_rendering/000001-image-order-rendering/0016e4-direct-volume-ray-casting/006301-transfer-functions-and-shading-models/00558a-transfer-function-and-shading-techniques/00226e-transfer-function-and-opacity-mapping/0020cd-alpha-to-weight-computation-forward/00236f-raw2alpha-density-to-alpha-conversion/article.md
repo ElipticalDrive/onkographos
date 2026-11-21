@@ -1,0 +1,182 @@
+# Raw2Alpha Density to Alpha Conversion
+
+Also called: Density to Alpha Conversion, Opacity Transfer Function, Raw Density to Alpha, Raw Density to Alpha Conversion, Raw to Alpha Conversion, Raw2Alpha, Raw2Alpha Activation, density to alpha
+
+## Overview
+Raw2Alpha converts raw network outputs (density $\sigma$) into opacity ($\alpha$) and rendering weights for volume rendering [S1, S2, S7, S9, unofficial][S10]. It solves the problem of adapting raw density fields, which are often unbounded or physically inconsistent, into bounded opacity values suitable for front-to-back compositing [S2, S7, unofficial][S10]. Unlike [Alpha-to-Extinction Conversion](13044-alpha-to-extinction-conversion.md), which handles the inverse mapping for physical scattering models, Raw2Alpha is the forward step that prepares density for integration [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Raw density field $\sigma$ (scalar or tensor), inter-sample distance $dist$ (scalar or tensor), and optional parameters: `shift` (scalar), `interval` (scalar or tensor), `distance_scale` (scalar) [S1, S2, S7, S9, unofficial].
+*   **Outputs:** Opacity $\alpha$, transmittance $T$, and ray weights $w$ [S1, S7, S9, unofficial].
+
+**Data Structures:**
+*   $\sigma$: Tensor of shape $(N, S)$ or $(N,)$, where $N$ is the number of rays and $S$ is the number of samples per ray [S7, unofficial].
+*   $dist$: Tensor of shape $(N, S)$ or $(N,)$, representing the distance between consecutive samples along the ray [S7, unofficial].
+*   $\alpha$: Tensor of shape $(N, S)$, values in $[0, 1]$ [S7, unofficial].
+*   $T$: Tensor of shape $(N, S+1)$, where $T[:, 0] = 1.0$ and $T[:, i]$ stores the transmittance before sample $i-1$ [S1, S7, unofficial].
+*   $w$: Tensor of shape $(N, S)$, representing the contribution weight of each sample [S1, S7, unofficial].
+
+**Formulas:**
+The standard exponential mapping converts density to opacity:
+$$ \alpha = 1 - \exp(-\sigma \cdot dist) $$
+[S1, S5, S7, S9, unofficial][S10]
+
+An alternative activation, commonly used in voxel-based optimizations to handle saturation, uses a shift and interval parameter:
+$$ e = \exp(\sigma + \text{shift}) $$
+$$ \alpha = 1 - (1 + e)^{-\text{interval}} $$
+[S2, S3, S8, unofficial]
+
+The gradient for the alternative activation (backward pass) is:
+$$ \frac{\partial \alpha}{\partial \sigma} = \text{interval} \cdot (1 + e)^{-(\text{interval} + 1)} \cdot e $$
+[S2, S3, S8, unofficial]
+
+**Parameters:**
+*   `shift`: A float added to density before exponentiation [S2, unofficial]. Typical value: Not given in the sources.
+*   `interval`: A float representing the uniform distance between samples or a scaling factor for the activation [S2, unofficial]. Typical value: Not given in the sources.
+*   `distance_scale`: A float scaling inter-sample distances before exponentiation [S7, unofficial]. Typical value: Not given in the sources.
+*   `epsilon`: A small constant added to prevent numerical instability in cumulative products. Value: $10^{-10}$ [S5, S7, S9, unofficial].
+
+**Steps:**
+1.  **Compute Intermediate Density:** If using the alternative activation, compute $e = \exp(\sigma + \text{shift})$ [S2, S3, unofficial].
+2.  **Compute Opacity:** Calculate $\alpha$ using the standard exponential mapping or the alternative activation formula [S1, S2, S5, S7, S9, unofficial].
+3.  **Compute Transmittance:** Initialize $T$ with shape $(N, S+1)$. Prepend a tensor of ones to $(1 - \alpha + \epsilon)$ and compute the cumulative product along the sample dimension [S1, S5, S7, unofficial].
+4.  **Compute Weights:** Calculate $w = \alpha \cdot T[:, :-1]$ [S1, S7, S9, unofficial].
+5.  **Return:** Return $\alpha$, $w$, and the final transmittance $T[:, -1:]$ [S7, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def raw2alpha_forward(sigma, dist, shift=0.0, interval=1.0, distance_scale=1.0, epsilon=1e-10):
+    """
+    Computes alpha, weights, and transmittance from raw density.
+    
+    Args:
+        sigma: Tensor of raw density values. Shape (N, S) or (N,).
+        dist: Tensor of inter-sample distances. Shape (N, S) or (N,).
+        shift: Float added to density before exponentiation (alternative activation).
+        interval: Float representing interval/scaling factor (alternative activation).
+        distance_scale: Float scaling distances.
+        epsilon: Float for numerical stability.
+        
+    Returns:
+        alpha: Tensor of opacity values.
+        weights: Tensor of ray weights.
+        T_final: Tensor of final transmittance values.
+    """
+    # Scale distance if parameter is provided
+    scaled_dist = dist * distance_scale
+    
+    # Compute exponential term for alternative activation
+    exp_d = torch.exp(sigma + shift)
+    
+    # Compute alpha using alternative activation formula
+    alpha = 1.0 - torch.pow(1.0 + exp_d, -interval)
+    
+    # Compute transmittance T
+    # T has shape (N, S+1). T[:, 0] = 1.0
+    # T[:, i] = T[:, i-1] * (1 - alpha[:, i-1] + epsilon)
+    
+    # Create ones tensor matching batch dimension
+    ones = torch.ones_like(sigma[..., :1])
+    
+    # Concatenate ones to the start of (1 - alpha)
+    one_minus_alpha = 1.0 - alpha + epsilon
+    T = torch.cat([ones, one_minus_alpha], dim=-1)
+    
+    # Cumulative product along the sample dimension
+    T = torch.cumprod(T, dim=-1)
+    
+    # Compute weights: w = alpha * T[:, :-1]
+    weights = alpha * T[:, :-1]
+    
+    # Final transmittance is the last element of T
+    T_final = T[:, -1:]
+    
+    return alpha, weights, T_final
+
+def raw2alpha_backward(grad_back, sigma, dist, shift=0.0, interval=1.0, distance_scale=1.0, epsilon=1e-10):
+    """
+    Computes the gradient of the loss with respect to sigma.
+    
+    Args:
+        grad_back: Gradient flowing back from the loss w.r.t alpha. Shape (N, S).
+        sigma: Original raw density.
+        dist: Original distances.
+        shift, interval, distance_scale, epsilon: Same as forward.
+        
+    Returns:
+        grad_sigma: Gradient w.r.t sigma.
+    """
+    # Recompute exp_d for gradient calculation
+    exp_d = torch.exp(sigma + shift)
+    
+    # Clamp exp_d to prevent overflow in gradient
+    exp_d_clamped = torch.clamp(exp_d, max=1e10)
+    
+    # Gradient formula for alternative activation:
+    # grad = interval * (1 + exp_d)^(-interval-1) * exp_d * grad_back
+    term1 = interval
+    term2 = torch.pow(1.0 + exp_d_clamped, -(interval + 1))
+    term3 = exp_d_clamped
+    
+    grad_sigma = term1 * term2 * term3 * grad_back
+    
+    return grad_sigma
+```
+
+**Edge Cases and Pitfalls:**
+*   **Overflow:** The exponential $e = \exp(\sigma + \text{shift})$ can overflow if $\sigma + \text{shift}$ is large. This is handled by clamping $e$ to $10^{10}$ in the backward pass to prevent NaNs [S2, S6, unofficial].
+*   **Numerical Stability:** Adding $\epsilon = 10^{-10}$ to $(1 - \alpha)$ before cumulative product prevents $T$ from becoming exactly zero, which could cause gradient issues or NaNs [S5, S7, S9, unofficial].
+*   **Boundary Checks:** In shader implementations, boundary checks assume the volume is normalized to $[0, 1]$; rays exiting this range should be discarded or clamped [S5, unofficial].
+
+## Subtopics
+
+### Post-activation Trilinear Interpolation
+A variant where trilinear interpolation of raw values $V$ at position $x$ is performed *after* the activation function, rather than before [S11]. The formula is $\alpha_{\text{post}} = 1 - \exp(-\delta \log(1 + \exp(\text{interp}(x, V)))) = 1 - (1 + \exp(\text{interp}(x, V)))^{-\delta}$, where $\delta$ is the segment length [S11]. Choose this when faster convergence is needed in voxel-based optimizations [S11].
+
+### Raw Density to Alpha Backward Pass (Uniform)
+Computes the gradient of the alpha conversion with respect to input density given the gradient of the loss w.r.t. alpha [S2, unofficial]. The gradient is calculated as $\text{grad}[i] = \min(e_d[i], 10^{10}) \cdot (1 + e_d[i])^{-(\text{interval}+1)} \cdot \text{interval} \cdot \text{grad\_back}[i]$, where $e_d$ is the pre-computed exponential density [S2, unofficial]. Choose this when differentiating through the alternative activation is required [S2, unofficial].
+
+### Grayscale to RGBA Threshold Conversion
+Converts a 1D grayscale volume buffer to a 4D RGBA buffer by replicating the scalar value to RGB channels and applying a hard alpha threshold [S12, unofficial]. Input is a 1D array of `char`; output is a 1D array of `char` with stride 4 per sample (R, G, B, A) [S12, unofficial]. Alpha is set to 0 if input < 30, else 255 [S12, unofficial]. Choose this for simple binary masking of grayscale volumes [S12, unofficial].
+
+### Transfer Function CDF Construction
+Ensures the alpha channel of a transfer function LUT is monotonically nondecreasing, a hard requirement for DDA ray marching optimization [S13, unofficial]. It computes a cumulative distribution function (CDF) of the alpha values by iterating through the LUT, summing alpha values, and normalizing by the total integral [S13, unofficial]. Choose this when optimizing ray marching with DDA [S13, unofficial].
+
+### Grayscale Luminance Alpha Mapping
+Computes a grayscale channel from RGB channels using the NTSC luminance weighting equation $\alpha = 0.3 R + 0.59 G + 0.11 B$ and replaces the default alpha channel with this value [S14]. A pitfall is that if the background is black in RGB, the resulting alpha will be 0, causing near-total transparency for background voxels [S14]. Choose this when deriving transparency from color data [S14].
+
+### Raw2Alpha Density to Alpha Conversion (Non-uniform)
+A variant of Raw2Alpha for non-uniform sampling intervals, implemented via CUDA kernels [S3, unofficial]. The forward pass computes alpha using `render_utils_cuda.raw2alpha_nonuni(density, shift, interval)` and the backward pass retrieves saved `exp` and `interval` tensors to compute gradients [S3, unofficial]. Choose this when ray samples are spaced irregularly [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot S)$ for the forward pass, where $N$ is the number of rays and $S$ is the number of samples [G]. The cumulative product is linear in $S$ [S7, unofficial].
+*   **Memory Complexity:** $O(N \cdot S)$ to store $\alpha$, $T$, and $w$ [G].
+*   **Performance:** Efficient on GPU due to vectorizable operations (exp, cumprod) [G].
+*   **Strengths:** Simple, differentiable, and standard for NeRF-like rendering [G].
+*   **Limitations:** Assumes constant density within each sample interval [G]. The exponential mapping can saturate for high densities, leading to "black holes" where transmittance drops to zero quickly [S2, unofficial].
+*   **When to Use:** Standard volume rendering where density is the primary output of a neural network or voxel grid [G].
+*   **When Not to Use:** When physical accuracy of extinction is required (use [Alpha-to-Extinction Conversion](13044-alpha-to-extinction-conversion.md)) or when masking is needed to prevent background contributions (use [Alpha Computation with Alpha Mask](10549-alpha-computation-with-alpha-mask.md)) [G].
+
+## Background
+Raw2Alpha is a fundamental component in differentiable volume rendering, particularly in Neural Radiance Fields (NeRF) and voxel-based optimizations like DirectVoxGO [S2, S5, S6, unofficial]. It bridges the gap between raw density outputs from neural networks and the opacity values required for front-to-back compositing [S1, S2, unofficial]. The method has been adapted in various forms, including post-activation interpolation for faster convergence [S11] and thresholding for mesh extraction (DiffMC) [S10].
+
+## Sources
+[S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)
+[S2] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
+[S3] Jumpat/SegmentAnythingin3D, https://github.com/Jumpat/SegmentAnythingin3D, fetched 2026-10-26 (unofficial)
+[S4] steubengineer/imaginaryVolumes, https://github.com/steubengineer/imaginaryVolumes, fetched 2026-10-26 (unofficial)
+[S5] GPU Raycast Volume Rendering with Transfer ... - Visualization Library, https://visualizationlibrary.org/documentation/pag_guide_raycast_volume.html, fetched 2026-10-26 (unofficial)
+[S6] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S7] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
+[S8] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
+[S9] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+[S10] NeuManifold: Neural Watertight Manifold Reconstruction with Efficient and High-Quality Rendering Support, https://doi.org/10.1109/wacv61041.2025.00081, fetched 2026-10-29
+[S11] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
+[S12] abhishektrip/SliceBasedVolumeRendering, https://github.com/abhishektrip/SliceBasedVolumeRendering, fetched 2026-10-27 (unofficial)
+[S13] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)
+[S14] Showing their true colors: a practical approach to volume rendering ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC2876090/, fetched 2026-10-27

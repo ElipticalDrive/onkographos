@@ -1,0 +1,213 @@
+# Voxel Space Setup
+
+Also called: AABB to Voxel Grid Mapping, SetupVoxelization
+
+## Overview
+Voxel Space Setup computes the bounding box and transformation matrices required to map continuous world coordinates to discrete voxel grid indices, handling padding and cube voxel normalization [S1, unofficial]. It differs from sibling methods like [Coordinate Conversion Utilities](1785-coordinate-space-conversion.md) by defining the static bounding volume and transformation matrices, whereas utilities perform the actual arithmetic conversions [S1, S2, S3, unofficial]. It differs from [Voxel Grid Construction from AABB](12627-voxel-grid-construction-from-aabb.md) by explicitly computing the projection matrix for NDC mapping and managing the specific stride calculations for GPU memory layouts [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Axis-Aligned Bounding Box (AABB) of the model in world space: `g_aabbModel[0]` (min) and `g_aabbModel[1]` (max), stored as 3D vectors.
+*   Grid dimensions: `g_gridSizeX`, `g_gridSizeY`, `g_gridSizeZ` (integers).
+*   Boolean flag: `g_useCubeVoxels` (if true, enforces uniform voxel dimensions).
+
+**Outputs:**
+*   `g_voxelSpace[0]` and `g_voxelSpace[1]`: The minimum and maximum coordinates of the voxel space in world units.
+*   `g_matWorldToVoxel`: A $4 \times 4$ matrix transforming world coordinates to voxel indices.
+*   `g_matWorldToVoxelProj`: A $4 \times 4$ matrix transforming world coordinates to Normalized Device Coordinates (NDC) for rasterization-based voxelization.
+*   `g_strideX`, `g_strideY`, `g_dataSize`: Stride values for memory layout.
+
+**Data Structures:**
+*   `g_voxelSpace`: Array of two 3D vectors.
+*   `g_matWorldToVoxel`, `g_matWorldToVoxelProj`: $4 \times 4$ column-major matrices (transposed storage as per DirectX conventions in source).
+
+**Steps:**
+
+1.  **Calculate Memory Strides:**
+    Compute the X stride padded to 32-bit words (dividing by 32 and rounding up). Compute the Y stride based on the X stride and X grid size. Compute total data size.
+    $$ \text{strideX} = \lceil \frac{\text{gridSizeZ}}{32} \rceil $$
+    $$ \text{strideY} = \text{strideX} \times \text{gridSizeX} $$
+    $$ \text{dataSize} = \text{strideY} \times \text{gridSizeY} $$
+
+2.  **Compute Model Extent:**
+    Calculate the raw extent of the AABB.
+    $$ \text{extent} = \text{max} - \text{min} $$
+    Scale the extent by a factor that adds padding. The source uses a factor of $(\text{gridSize} + 2) / \text{gridSize}$, which effectively adds 2 units of padding distributed across the grid resolution [S1, unofficial].
+    $$ \text{extent}_{\text{padded}} = \text{extent} \times \frac{\text{gridSize} + 2}{\text{gridSize}} $$
+    *Note: This operation is performed component-wise.*
+
+3.  **Normalize to Cube Voxels (Optional):**
+    If `g_useCubeVoxels` is true, replace the extent components with the maximum of the X, Y, and Z components to ensure cubic voxels.
+    $$ \text{extent} = [\max(x, y, z), \max(x, y, z), \max(x, y, z)] $$
+
+4.  **Compute Voxel Space Bounds:**
+    Calculate the center of the original AABB.
+    $$ \text{center} = \frac{\text{min} + \text{max}}{2} $$
+    Calculate the minimum coordinate of the voxel space.
+    $$ \text{voxelSpaceMin} = \text{center} - 0.5 \times \text{extent} $$
+    Store `voxelSpaceMin` and `voxelSpaceMax = voxelSpaceMin + extent`.
+
+5.  **Compute World-to-Voxel Matrix:**
+    Construct a matrix that translates the voxel space minimum to the origin and scales the padded extent to the grid size.
+    $$ \text{Scale} = \frac{\text{gridSize}}{\text{extent}} $$
+    $$ \text{Translate} = -\text{voxelSpaceMin} $$
+    $$ \text{g\_matWorldToVoxel} = \text{Translate}(-\text{voxelSpaceMin}) \times \text{Scale}(\frac{\text{gridSize}}{\text{extent}}) $$
+    *Note: The source stores the transpose of this matrix.*
+
+6.  **Compute World-to-Projection Matrix:**
+    Construct a matrix for rasterization. It translates the center of the AABB in X and Y, and the voxel space minimum in Z, then scales to NDC range $[-1, 1]$ (or $[0, 1]$ depending on API, but source uses $2.0/\text{extent}$ for X/Y and $1.0/\text{extent}$ for Z, implying a specific NDC convention).
+    $$ \text{Translate}_{\text{proj}} = (-\text{center}.x, -\text{center}.y, -\text{voxelSpaceMin}.z) $$
+    $$ \text{Scale}_{\text{proj}} = (\frac{2.0}{\text{extent}.x}, \frac{2.0}{\text{extent}.y}, \frac{1.0}{\text{extent}.z}, 0.0) $$
+    $$ \text{g\_matWorldToVoxelProj} = \text{Translate}_{\text{proj}} \times \text{Scale}_{\text{proj}} $$
+    *Note: The source stores the transpose of this matrix.*
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def setup_voxelization(aabb_min, aabb_max, grid_size_x, grid_size_y, grid_size_z, use_cube_voxels):
+    """
+    Computes voxel space bounding box and transformation matrices.
+    
+    Args:
+        aabb_min: np.array([x, y, z])
+        aabb_max: np.array([x, y, z])
+        grid_size_x, grid_size_y, grid_size_z: int
+        use_cube_voxels: bool
+        
+    Returns:
+        voxel_space_min: np.array([x, y, z])
+        voxel_space_max: np.array([x, y, z])
+        mat_world_to_voxel: np.array(4x4)
+        mat_world_to_voxel_proj: np.array(4x4)
+        stride_x: int
+        stride_y: int
+        data_size: int
+    """
+    # 1. Calculate Memory Strides
+    # Padded to 32-bit words (div 32, ceil)
+    stride_x = math.ceil(grid_size_z / 32)
+    stride_y = stride_x * grid_size_x
+    data_size = stride_y * grid_size_y
+    
+    # 2. Compute Model Extent
+    extent = aabb_max - aabb_min
+    
+    # Scale extent by (gridSize + 2) / gridSize to add padding
+    # Note: Source applies this component-wise using vector replication
+    grid_size_vec = np.array([grid_size_x, grid_size_y, grid_size_z], dtype=float)
+    extent = extent * (grid_size_vec + 2.0) / grid_size_vec
+    
+    # 3. Normalize to Cube Voxels
+    if use_cube_voxels:
+        max_extent = max(extent[0], max(extent[1], extent[2]))
+        extent = np.array([max_extent, max_extent, max_extent])
+        
+    # 4. Compute Voxel Space Bounds
+    center = 0.5 * (aabb_min + aabb_max)
+    voxel_space_min = center - 0.5 * extent
+    voxel_space_max = voxel_space_min + extent
+    
+    # 5. Compute World-to-Voxel Matrix
+    # Translate to min, then Scale to grid size
+    # Matrix = Scale(gridSize / extent) * Translate(-voxelSpaceMin)
+    # Note: Source computes Translate * Scale, then transposes. 
+    # Standard column-major multiplication order for M * v is Scale(Translate(v)).
+    # Let's follow the source's explicit formula: Translate(-min) * Scale(grid/extent)
+    # This implies row-major logic or specific storage convention. 
+    # We will construct the matrix that performs: v' = Scale(v - min)
+    
+    scale_factors = grid_size_vec / extent
+    translation = -voxel_space_min
+    
+    # Construct 4x4 matrix for v' = S * (v + T)
+    # [ Sx 0  0  Tx ]
+    # [ 0  Sy 0  Ty ]
+    # [ 0  0  Sz  Tz ]
+    # [ 0  0  0  1  ]
+    mat_world_to_voxel = np.eye(4)
+    mat_world_to_voxel[0, 0] = scale_factors[0]
+    mat_world_to_voxel[1, 1] = scale_factors[1]
+    mat_world_to_voxel[2, 2] = scale_factors[2]
+    mat_world_to_voxel[0, 3] = translation[0]
+    mat_world_to_voxel[1, 3] = translation[1]
+    mat_world_to_voxel[2, 3] = translation[2]
+    
+    # 6. Compute World-to-Projection Matrix
+    # Translate(-center.x, -center.y, -voxelSpaceMin.z)
+    # Scale(2.0/extent.x, 2.0/extent.y, 1.0/extent.z, 0.0)
+    # Note: The source uses 1.0/extent.z for Z scaling in projection, 
+    # mapping to [0,1] or similar, while X/Y map to [-1,1] via 2.0.
+    
+    proj_scale = np.array([2.0 / extent[0], 2.0 / extent[1], 1.0 / extent[2], 0.0])
+    proj_translate = np.array([-center[0], -center[1], -voxel_space_min[2]])
+    
+    mat_world_to_voxel_proj = np.eye(4)
+    mat_world_to_voxel_proj[0, 0] = proj_scale[0]
+    mat_world_to_voxel_proj[1, 1] = proj_scale[1]
+    mat_world_to_voxel_proj[2, 2] = proj_scale[2]
+    mat_world_to_voxel_proj[0, 3] = proj_translate[0]
+    mat_world_to_voxel_proj[1, 3] = proj_translate[1]
+    mat_world_to_voxel_proj[2, 3] = proj_translate[2]
+    
+    return voxel_space_min, voxel_space_max, mat_world_to_voxel, mat_world_to_voxel_proj, stride_x, stride_y, data_size
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Misses:** A grid padding of 2 units is added to the extent to prevent edge cases where triangles exactly on the boundary are missed [S1, unofficial].
+*   **Zero Extent:** If an axis has zero extent, the scaling factor becomes infinite. The source notes that [Voxel Grid Construction from AABB](12627-voxel-grid-construction-from-aabb.md) clamps zero-extent axes, but Voxel Space Setup assumes a valid AABB. Implementers should ensure the AABB is valid before calling this setup.
+*   **Precision:** Floating-point precision in the transformation matrices should be sufficient to avoid jitter in voxel indices for large scenes.
+
+## Subtopics
+
+### [Spherical Voxel Grid Setup](3883-spherical-voxel-grid-setup.md)
+Initializes data structures for spherical coordinate systems, aligning grid topology with radial rays to reduce wasted memory.
+
+### [Incremental Back-Rotation for Voxel Mapping](6759-incremental-back-rotation-for-voxel-mapping.md)
+Maps destination voxel coordinates to source positions during room rotation to eradicate holes.
+
+### [Coordinate Conversion Utilities](6766-coordinate-conversion-utilities.md)
+Provides bidirectional mapping between discrete voxel indices and continuous world coordinates.
+
+### [PixelGrid2D Construction](9430-pixelgrid2d-construction.md)
+Constructs a 2D grid structure mapping voxel coordinates to boolean occupancy flags from a bit array.
+
+### [Voxel Center Precomputation](10731-voxel-center-precomputation.md)
+Precomputes 3D world coordinates of voxel centers for efficient ray-voxel intersection.
+
+### [Voxel Grid Construction from AABB](12627-voxel-grid-construction-from-aabb.md)
+Constructs a uniform voxel grid from an AABB, ensuring uniform voxel size by scaling based on the longest axis.
+
+### OpenVDB Density Grid Loading
+Loads a heterogeneous density field from an OpenVDB file to provide spatial density queries for participating media [S2, unofficial]. It computes the AABB from the active voxel bounding box using `gridPtr->evalActiveVoxelBoundingBox()` and converts indices to world coordinates. Density at a position is sampled using `openvdb::tools::GridSampler` with `openvdb::tools::BoxSampler`. Maximum density is retrieved via `gridPtr->evalMinMax` [S2, unofficial].
+
+### Ray Tracing Volume Data Setup
+Typical simplifications include an integral mapping of voxel address space to pixel address space (1-1 is easiest; usually projection of a voxel map to $k \times k$ pixels), where arbitrary mapping requires interpolation [S3, unofficial]. The sampling lattice is rectilinear and uniformly spaced. Pixel spacing must be less than voxel spacing. The setup assumes one ray per pixel (no supersampling) and parallel projection [S3, unofficial].
+
+### Volume Normalization to Unit Cube
+Computes the bounding box of the volume grid by transforming corner points using the grid's transform matrix. It calculates the extent and maximum dimension size. If the size is not 1.0, it constructs a transformation matrix that scales the volume by $1/\text{size}$ and translates it so its center is at the origin. The `density_scale` parameter is multiplied by the original size to compensate for spatial scaling [S4, unofficial].
+
+### Voxel Space Setup — AABB to Voxel Grid Mapping
+A function in `lacunr` that converts voxel data (such as a `lasmetrics3d` object) into an array representation [S5]. It requires the input to contain a column named `N` (number of points per voxel), generated by `voxel_metrics()`. The `bounding_box()` function converts this object into an array [S5].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ relative to the number of voxels, as it performs a fixed number of arithmetic operations based on the AABB and grid dimensions.
+*   **Memory Complexity:** $O(1)$ for the setup data structures (matrices, bounds). The memory for the voxel grid itself is determined by `dataSize` calculated in Step 1.
+*   **Strengths:** Handles non-cubic bounding boxes by padding and normalizing to cube voxels if required. Provides both index-space and NDC-space transformations, facilitating both ray-casting and rasterization-based voxelization.
+*   **Limitations:** Assumes a static AABB. Does not handle dynamic scene updates; the setup must be recomputed if the bounding box changes. The padding strategy (adding 2 units) is specific to the source implementation and may need adjustment for different boundary conditions.
+*   **When to use:** When preparing a voxel grid for GPU-based rendering or ray tracing where efficient memory layout and coordinate transformation are critical.
+*   **When not to use:** For sparse voxel grids (use [OpenVDB Density Grid Loading](3883-spherical-voxel-grid-setup.md) or similar) or when dynamic rotation of the volume is required (use [Incremental Back-Rotation for Voxel Mapping](6759-incremental-back-rotation-for-voxel-mapping.md)).
+
+## Background
+The method originates from GPU Pro 3, specifically the chapter on voxelization via rendering [S1, unofficial]. It is designed to bridge the gap between continuous world coordinates and discrete voxel indices, enabling efficient rasterization of geometry into a voxel buffer. The approach is widely used in real-time volume rendering and voxel-based collision detection systems.
+
+## Sources
+[S1] michschw/GpuPro3Vox, https://github.com/michschw/GpuPro3Vox, fetched 2026-10-26 (unofficial)
+[S2] GitHub - yumcyaWiz/volpt: Volumetric path tracer written in C++, https://github.com/yumcyaWiz/volpt, fetched 2026-10-27 (unofficial)
+[S3] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
+[S4] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)
+[S5] Interfacing with lidR, https://cran.rstudio.org/web/packages/lacunr/vignettes/working-with-lidR.html, fetched 2026-10-27

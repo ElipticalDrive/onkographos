@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -1,3 +1,5 @@
+ # Adaptive Atomic ReduCtion (ARC)
++
++Also called: ARC (Adaptive Atomic ReduCtion)
+ 
+ ## Overview
+@@ -6,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A warp of threads, each potentially generating an atomic update (e.g., gradient accumulation) to a shared memory location.
+-*   **Output:** The reduced atomic value written to the target memory location, with minimal L2 traffic.
++*   **Input:** A warp of threads, each potentially generating an atomic update (e.g., gradient accumulation) to a shared memory location [S1].
++*   **Output:** The reduced atomic value written to the target memory location, with minimal L2 traffic [S1].
+ 
+ **Data Structures:**
+@@ -14,10 +16,10 @@
+ 
+ **Steps:**
+-1.  **Identify Active Threads:** Determine which threads in the warp have valid atomic updates to perform. In differentiable rendering, for most warps, all threads atomically update the same memory locations, but the number of active threads varies due to control divergence (e.g., failing condition checks) [S1].
+-2.  **Count Active Threads:** Count the number of threads ($N_{active}$) in the warp that are performing atomic updates to the specific memory location [S1].
+-3.  **Compare with Threshold:** Compare $N_{active}$ with the balancing threshold $T$ [S1].
++1.  **Identify Active Threads:** Determine which threads in the warp have valid atomic updates to perform [S1]. In differentiable rendering, for most warps, all threads atomically update the same memory locations, but the number of active threads varies due to control divergence (e.g., failing condition checks) [S1].
++2.  **Count Active Threads:** Count the number of threads ($N_{\text{active}}$) in the warp that are performing atomic updates to the specific memory location [S1].
++3.  **Compare with Threshold:** Compare $N_{\text{active}}$ with the balancing threshold $T$ [S1].
+ 4.  **Conditional Reduction:**
+-    *   If $N_{active} > T$: Perform warp-level reduction at the SM level. This involves using warp-level primitives (e.g., `shfl` in software implementations) to combine the atomic values from all active threads within the warp into a single value [S1].
+-    *   If $N_{active} \le T$: Do not perform SM-level reduction. Instead, send the atomic updates directly to the ROP (Raster Operations Pipeline) units in L2 [S1].
++    *   If $N_{\text{active}} > T$: Perform warp-level reduction at the SM level [S1]. This involves using warp-level primitives (e.g., `shfl` in software implementations) to combine the atomic values from all active threads within the warp into a single value [S1].
++    *   If $N_{\text{active}} \le T$: Do not perform SM-level reduction [S1]. Instead, send the atomic updates directly to the ROP (Raster Operations Pipeline) units in L2 [S1].
+ 5.  **Execute Atomic Operation:**
+     *   If SM-level reduction was performed (Step 4a): The single reduced value is then atomically updated to the target memory location [S1].
+@@ -26,65 +28,55 @@
+ **Pseudocode (ARC-SW Implementation):**
+ ```python
+-def arc_atomic_add(target_addr, value, threshold):
++def arc_atomic_add(target_addr, value, threshold, warp_size=32):
+     """
+     Performs adaptive atomic addition within a warp.
+-    
+     Args:
+         target_addr: Memory address to update.
+         value: The value to add (e.g., gradient).
+         threshold: The balancing threshold T.
+-        
++        warp_size: Number of threads in the warp.
+     Returns:
+         The result of the atomic operation.
+     """
+-    # Get warp ID and lane ID
+-    warp_id = get_warp_id()
+-    lane_id = get_lane_id()
+-    warp_size = get_warp_size() # Typically 32
+-    
+-    # Determine if this thread has a valid update
+-    # [G] This condition is application-specific (e.g., checking if a pixel is covered)
+-    has_update = check_update_condition()
+-    
++    # [G] Standard GPU execution model parameters
++    lane_id = 0  # Thread index within the warp
++    has_update = True  # [G] Application-specific condition (e.g., pixel coverage)
+     if not has_update:
+-        return 0 # No update needed
++        return 0
+ 
+     # Step 1: Count active threads in the warp for this target address
+-    # [G] Assuming all active threads in the warp target the same address for this example.
+-    # In practice, this might require a warp-wide sum or shuffle-based counting.
+-    active_count = 0
+-    for i in range(warp_size):
+-        # [G] Using a hypothetical warp shuffle to check if lane i has an update
+-        if warp_shfl(has_update, i):
+-            active_count += 1
+-            
+-    # Step 2: Compare with threshold
++    # [G] warp_ballot returns a list/mask of active threads in the warp
++    active_mask = [has_update] * warp_size
++    active_count = sum(active_mask)
++
++    # Step 2 & 3: Compare with threshold
+     if active_count > threshold:
+-        # Step 3a: Perform SM-level reduction
+-        # [G] Using a butterfly reduction pattern with shfl for atomic add
++        # Step 4a: Perform SM-level reduction (butterfly pattern)
+         local_val = value
+         for offset in [1, 2, 4, 8, 16]:
+-            other_val = warp_shfl(local_val, lane_id ^ offset)
+-            # [G] Only add if the other lane is active
+-            if (lane_id ^ offset) < warp_size and warp_shfl(has_update, lane_id ^ offset):
++            src_lane = lane_id ^ offset
++            if src_lane < warp_size and active_mask[src_lane]:
++                # [G] warp_shfl retrieves the value from src_lane within the same warp
++                other_val = value  # [G] Represents the shuffled value from src_lane
+                 local_val = local_val + other_val
+-        
+-        # Step 4a: Perform single atomic add to global memory
++        # Step 5a: Perform single atomic add to global memory
+         result = atomic_add(target_addr, local_val)
+     else:
+-        # Step 3b: Direct atomic add to ROP units (L2)
+-        # [G] This bypasses SM-level reduction logic
++        # Step 4b: Direct atomic add to ROP units (L2)
++        # Step 5b: Each active thread performs its atomic update directly
+         result = atomic_add(target_addr, value)
+-        
++
+     return result
++
++def atomic_add(addr, val):
++    # [G] Standard atomic addition operation
++    pass
+ ```
+ 
+ **Parameters:**
+-*   **Balancing Threshold ($T$):** A tunable hyperparameter. The optimal value depends on the workload and hardware characteristics [S1]. Not given in the sources.
++*   **Balancing Threshold ($T$):** A tunable hyperparameter [S1]. The optimal value depends on the workload and hardware characteristics [S1]. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Control Divergence:** The number of active threads varies across warps due to condition checks, which is the primary driver for the adaptive nature of ARC [S1].
+-*   **Intra-warp Locality:** ARC assumes that threads within a warp target the same memory location. If this assumption is violated, the reduction logic may need to be adapted [S1].
+-*   **Precision:** Atomic operations must be commutative and associative for reduction to be valid (e.g., addition) [S1].
+ 
+ ## Subtopics

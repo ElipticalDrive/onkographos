@@ -1,0 +1,258 @@
+Contribute to ucsc-redwood/better-together development by creating an account on GitHub.
+
+Vulkan campaign B: device-derived subgroup size, one radix-sort shader, workgroup-size spec constants by xuyanwen2012 · Pull Request #20 · ucsc-redwood/better-together · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xuyanwen2012
+commented
+Oct 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Phase B of the Vulkan engine campaign. Stacked on Phase A (#19); review only the diff against vk-campaign/phase-a.
+Changes
+Subgroup size from the device (6a004ff):
+The engine queries subgroupSize and the subgroup-size-control properties, then pins subgroup-dependent pipelines with requiredSubgroupSize where the device supports it.
+multi_radixsort_warp{16,32,64}.comp are merged into one multi_radixsort.comp, with the subgroup size as a specialization constant.
+devices/*.json gpu.subgroup_size is now only a cross-check: a mismatch logs a warning.
+BT_VK_SUBGROUP_SIZE=<n> (5e7d320) pins another supported size. That's how subgroup 32 stays covered: no fleet GPU defaults to it.
+Workgroup size (5491c54, bd59780): work_group_size() now feeds local_size_*_id spec constants, and sizes beyond the device limits are rejected. maintenance4 joins the required features, because SPIR-V 1.6 LocalSizeId needs it (VUID-RuntimeSpirv-LocalSizeId-06434). Vulkan 1.3 mandates support for it.
+Docs (a9e57d2): the subgroup size is a runtime query, and the phones are on the build box's adb, not rocky.
+Finding
+The Samsung's Xclipse 940 reports a default subgroup of 64 (range 32..64), not the 32 in devices/R5CY21Y3VEV.json. The JSON and the specs are corrected.
+Verification
+The tree suites match the OMP oracle exactly at subgroup 16 (Pixel), 32 (rocky and Samsung, pinned) and 64 (rocky and Samsung default), with one shader source.
+ctest -L vulkan passes 7/7 on rocky, and validation reports 0 errors.
+Radix-sort time on rocky: 0.78308 → 0.78311 ms, within noise. Pinning to 32 would cost +24%, so it isn't used.
+Codex review: DONE.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+xuyanwen2012
+and others
+added 6 commits
+October 14, 2026 12:25
+feat(vulkan): device-derived subgroup size, pinned where supported (t…
+…
+6a004ff
+```
+…asks 5.1-5.4, 5.6)
+
+- BaseEngine queries subgroupSize and the 1.3 subgroup-size-control properties, enables
+  subgroupSizeControl when COMPUTE is in requiredSubgroupSizeStages, and exposes the
+  result as ComputeLimits / subgroup_size(); a debug line logs size, min/max and pinning.
+- Algorithm scans its SPIR-V (SpecId, LocalSize, LocalSizeId) and gains
+  subgroup_size_dependent(): spec constant 0 = the device's size, pinned with
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo (checked against
+  requiredSubgroupSize x maxComputeWorkgroupSubgroups). work_group_size() feeds
+  local_size_*_id spec constants, else must equal the literal LocalSize, and is
+  checked against the device's compute limits.
+- multi_radixsort_warp{16,32,64}.comp collapse to one multi_radixsort.comp with
+  constant_id = 0; the tree dispatcher uses it. Re-baked; old .comp/.spv/_spv.h removed.
+- get_vulkan_warp_size() is replaced by check_vulkan_subgroup_size(), a cross-check the
+  Engine runs that warns when devices/*.json disagrees with the device.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+feat(vulkan): BT_VK_SUBGROUP_SIZE pins another supported subgroup siz…
+…
+5e7d320
+```
+…e (task 5.4)
+
+The queried fleet has no GPU that defaults to subgroup 32: rocky-ryzen's 780M and the
+Samsung's Xclipse 940 both report 64 (range 32..64), the Pixel 7a's Mali-G710 16. So the
+device-default policy alone would never run the radix sort at 32. BT_VK_SUBGROUP_SIZE=<n>
+pins n instead, when pinning is available and n is a power of two in [min, max];
+otherwise Engine() throws (applied in Engine, so the has_integrated_gpu() probe cannot
+turn a bad value into a silent skip). It is also design D5's "pin to minSubgroupSize"
+mitigation knob.
+
+Artifacts corrected in the same commit: the pipeline-config "Every fleet subgroup width"
+scenario and proposal.md listed the Samsung as sg32 (the devices/R5CY21Y3VEV.json value);
+design D5 now records the measured fleet values and the hook, and the spec gains the
+"Another supported size is pinned for testing" scenario.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+test(vulkan): workgroup size via spec constants + device-limit checks…
+…
+5491c54
+```
+… (tasks 6.1, 6.2)
+
+- engine_test_workgroup_size.comp (engine self-test, not an app kernel) declares
+  local_size_{x,y,z}_id; test-kiss-vk dispatches it at a declared (64, 2, 1) and reads
+  back 128 invocations and gl_WorkGroupSize = (64, 2, 1).
+- Tests: a declared size that disagrees with a literal LocalSize throws; sizes over
+  maxComputeWorkGroupSize / maxComputeWorkGroupInvocations throw naming size and limit;
+  constant_id 0 and subgroup_size_dependent() must agree; the SPIR-V scan reads
+  LocalSizeId.
+- Algorithm::create_pipeline() validates before creating any Vulkan object.
+- The registry cross-check warning says "the Vulkan engine uses N" (with
+  BT_VK_SUBGROUP_SIZE the size is not what the device reports).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+docs(vk-campaign): subgroup size is queried at runtime; phones are on…
+…
+a9e57d2
+```
+… the build box (task 5.8)
+
+- 01-hardware.md: the subgroup source of truth is the runtime query (with the queried
+  fleet table and the BT_VK_SUBGROUP_SIZE hook); devices/*.json is an informational
+  cross-check. The phones' adb is on the build box, not rocky-ryzen (also fixed in
+  02-building.md, 03-unit-testing.md and run-on-android.sh comments/error text; the
+  script's behaviour is unchanged).
+- devices/README.md documents gpu / subgroup_size as informational; the schema and
+  validate_devices.py make subgroup_size optional, so a board without it validates
+  (pipeline-config scenario "Board without a registry subgroup entry").
+- devices/R5CY21Y3VEV.json: subgroup_size 32 -> 64, what its Xclipse 940 reports.
+- testing-status.md §F: the subgroup gap is closed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+fix(vulkan): require maintenance4 for LocalSizeId shaders (tasks 6.1,…
+…
+bd59780
+```
+… 6.3)
+
+The Phase B gate's validation run on rocky-ryzen reported
+VUID-RuntimeSpirv-LocalSizeId-06434 three times in test-kiss-vk: glslc's SPIR-V 1.6
+output turns `local_size_*_id` into OpExecutionModeId LocalSizeId, which needs the
+Vulkan 1.3 maintenance4 feature enabled. Only engine_test_workgroup_size.comp uses it
+today, but it is the path work_group_size() specializes. maintenance4 joins the
+required-feature table (a 1.3 table next to the 1.2 one; 1.3 mandates support, and
+the SPIR-V 1.6 shaders already need 1.3), and the 3.2 feature test also checks that
+a missing maintenance4 is named. design D3 and proposal.md updated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+docs(vk-campaign): evidence for Phase B tasks 5.1-6.3; Phase B gate g…
+…
+7cc0916
+```
+…reen
+
+Ticks groups 5-6 of tasks.md with the commands and results: the per-target subgroup
+query (the Samsung reports 64, not 32), the tree suites at 16 / 32 / 64, the
+registry-free run and its 471001d control, the stage-2 before/after measurement on
+rocky-ryzen (no regression; pinning to 32 would cost +23.9 %), and the VK fleet gate
+at bd59780 on rocky-ryzen, the Pixel 7a and the Samsung plus local OMP.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+This was referenced Oct 15, 2026
+Vulkan campaign A: host-visibility barrier, Algorithm lifetime, exact device features, opt-in validation
+#19
+Merged
+Vulkan campaign C: push descriptors, persisted pipeline cache; archive OpenSpec change
+#21
+Merged
+xuyanwen2012
+and others
+added 2 commits
+October 14, 2026 17:32
+Merge vk-campaign/phase-a into vk-campaign/phase-b (clang-tidy fix)
+…
+d51b554
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+
+# Conflicts:
+#	platform/engine/vulkan/base_engine.cpp
+```
+fix(clang-tidy): default-initialize SpirvReflection/Algorithm contain…
+…
+32c29df
+```
+…er members
+
+clang-tidy (changed lines, CI pc build without Vulkan headers) flags
+cppcoreguidelines-pro-type-member-init on Phase B's changed lines:
+SpirvReflection::spec_ids and Algorithm::{descriptor_sets_, buffer_infos_}.
+The TU's parse degrades at the missing vk.hpp; an explicit `{}` default
+member initializer is harmless and satisfies the check without a NOLINT.
+
+Verified: CI-equivalent clang-tidy-diff vs origin/vk-campaign/phase-a
+reports no findings; test-kiss-vk 10/10 (local vulkan build).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+xuyanwen2012
+changed the base branch from
+vk-campaign/phase-a
+to
+dev
+October 15, 2026 00:48
+xuyanwen2012
+closed this
+Oct 15, 2026
+xuyanwen2012
+reopened this
+Oct 15, 2026
+fix(clang-tidy): suppress CI-only header-less false positives in algo…
+…
+c3b1f2d
+```
+…rithm.cpp
+
+CI's clang-tidy (Ubuntu's, older than local LLVM 22) on PR #20 flagged three
+findings that are artifacts of tidying Vulkan code against the pc build,
+which has no Vulkan headers:
+- bugprone-branch-clone x2 (SPIR-V scan branches assign different
+  variables; the two pipeline debug lines differ),
+- cppcoreguidelines-pro-type-member-init on the Algorithm ctor (fields are
+  in the init list).
+Suppressed with a reason + NOLINTNEXTLINE directly above each, per 1de2e29.
+Real part: push_constants_buffer_ gets a `{}` initializer.
+
+Verified: test-kiss-vk 10/10, test-tree-vk 15/15 (local vulkan build).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C1zsh1e43ckiEjKAqXydD2
+```
+Hide details
+View details
+xuyanwen2012
+merged commit 79a09db
+into
+dev
+Oct 15, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+xuyanwen2012
+deleted the
+vk-campaign/phase-b
+branch
+October 15, 2026 03:52
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

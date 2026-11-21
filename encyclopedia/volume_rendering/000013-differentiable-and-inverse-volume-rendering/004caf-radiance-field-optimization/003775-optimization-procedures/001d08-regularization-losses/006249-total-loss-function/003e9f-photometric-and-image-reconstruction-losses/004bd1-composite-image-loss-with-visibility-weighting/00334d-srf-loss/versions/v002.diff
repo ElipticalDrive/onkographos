@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-SRF-Loss is the composite objective function used to train SuRFNet for generating high-quality Sparse Radiance Fields (SRFs) from partial or noisy inputs [S1]. It addresses the problem of ensuring that generated 3D radiance fields not only match the input density and color statistics but also produce visually accurate renderings from novel views. It sets itself apart from simple pixel-wise reconstruction losses by incorporating a 3D-supervised density/radiance component and an online perceptual loss that explicitly optimizes for rendering quality [S1].
++SRF-Loss is the composite objective function used to train SuRFNet for generating high-quality Sparse Radiance Fields (SRFs) from partial or noisy inputs [S1]. It addresses the problem of ensuring that generated 3D radiance fields not only match the input density and color statistics but also produce visually accurate renderings from novel views [S1]. It sets itself apart from simple pixel-wise reconstruction losses by incorporating a 3D-supervised density/radiance component and an online perceptual loss that explicitly optimizes for rendering quality [S1].
+ 
+ ## How it works
+@@ -49,79 +49,66 @@
+ **Pseudocode:**
+ ```python
++import math
++import random
++
+ def compute_srf_loss(F, X_hat, alpha_dense, lambda_rho, lambda_R, M, poses_phi, images_I_phi):
+-    """
+-    F: Function representing the SuRFNet generator, takes partial SRF X and returns generated SRF.
+-    X_hat: Ground truth full SRF (contains alpha and rho).
+-    alpha_dense: Threshold for high-density voxels.
+-    lambda_rho: Weight for radiance color loss.
+-    lambda_R: Weight for perceptual loss.
+-    M: Number of random views for perceptual loss.
+-    poses_phi: List of camera poses.
+-    images_I_phi: Ground truth images corresponding to poses_phi.
+-    """
+-    
+     # 1. Density Loss (L_alpha)
+-    # Sample coordinates using Q-Gaussian centered at voxel grid middle
+-    X_sample = quantized_gaussian_sampling(grid_middle)
+-    
+-    # Get labels from ground truth SRF
+-    # S(X_sample) extracts density from X_hat at sample coordinates
+-    y_hat = (S(X_sample, X_hat.alpha) > alpha_dense).float()
+-    
+-    # Get predictions from generated SRF
+-    # F(X) generates the SRF from input partial SRF X
+-    X_gen = F(X)
+-    y_pred = S(X_sample, X_gen.alpha)
+-    
+-    # Binary Cross-Entropy
+-    L_alpha = binary_cross_entropy(y_pred, y_hat)
+-    
++    # Sample coordinates using Q-Gaussian centered at voxel grid middle [S1]
++    coords = sample_qgaussian_coords(grid_shape=X_hat.shape)
++    # Extract densities from ground truth and generated SRF
++    y_hat = [1.0 if X_hat.alpha[c] > alpha_dense else 0.0 for c in coords]
++    X_gen = F(X) # Generate SRF from input partial SRF X
++    y_pred = [X_gen.alpha[c] for c in coords]
++    L_alpha = bce_loss(y_pred, y_hat)
++
+     # 2. Radiance Color Loss (L_rho)
+-    # Mask for high-density voxels in ground truth
+-    M_alpha = (X_hat.alpha > alpha_dense).float()
+-    
+-    # Extract radiance colors at sample coordinates or full grid?
+-    # Note: The formula uses M_alpha * F(X)_rho. Assuming element-wise on grid or sampled points.
+-    # Based on Eq 3, it seems to be computed on the sampled points or full grid.
+-    # Given "masked by high-density voxels", we apply mask to radiance.
+-    rho_gen = S(X_sample, X_gen.rho)
+-    rho_gt = S(X_sample, X_hat.rho)
+-    
+-    L_rho = torch.mean(torch.abs(M_alpha * rho_gen - M_alpha * rho_gt))
+-    
++    # Mask for high-density voxels in ground truth [S1]
++    M_alpha = [1.0 if X_hat.alpha[v] > alpha_dense else 0.0 for v in X_hat.voxels]
++    # Compute L1 loss on radiance colors masked by M_alpha [S1]
++    rho_gen = X_gen.rho
++    rho_gt = X_hat.rho
++    L_rho = l1_loss([M_alpha[v] * rho_gen[v] for v in X_hat.voxels],
++                    [M_alpha[v] * rho_gt[v] for v in X_hat.voxels])
++
+     # 3. Perceptual Loss (L_R)
+-    # Select M random views from poses_phi
+-    selected_poses = random_sample(poses_phi, M)
+-    selected_images = [img for pose, img in zip(selected_poses, images_I_phi)]
+-    
+-    # Volume render generated SRF
+-    rendered_images = []
+-    for pose in selected_poses:
+-        # R_phi uses trilinear interpolation (Plenoxels style)
+-        img = volume_render_trilinear(F(X), pose)
+-        rendered_images.append(img)
+-        
+-    # L1 loss between rendered and ground truth
+-    L_R = 0
+-    for r_img, gt_img in zip(rendered_images, selected_images):
+-        L_R += torch.mean(torch.abs(r_img - gt_img))
+-    L_R = L_R / M
+-    
+-    # 4. Total Loss
++    # Select M random views from poses_phi [S1]
++    selected_indices = random.sample(range(len(poses_phi)), M)
++    selected_poses = [poses_phi[i] for i in selected_indices]
++    selected_images = [images_I_phi[i] for i in selected_indices]
++    # Volume render generated SRF using trilinear interpolation [S1]
++    rendered_images = [volume_render_trilinear(X_gen, pose) for pose in selected_poses]
++    # L1 loss between rendered and ground truth images [S1]
++    L_R = l1_loss(rendered_images, selected_images)
++
++    # 4. Total Loss [S1]
+     L_F = L_alpha + lambda_rho * L_rho + lambda_R * L_R
+-    
+     return L_F
++
++def bce_loss(pred, target):
++    return -sum(t * math.log(p + 1e-8) + (1 - t) * math.log(1 - p + 1e-8) for p, t in zip(pred, target)) / len(pred)
++
++def l1_loss(a, b):
++    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
++
++def sample_qgaussian_coords(grid_shape):
++    # Returns random coordinates centered at the middle of the voxel grid
++    # using a quantized Gaussian distribution [G]
++    return [(random.randint(0, s-1), random.randint(0, s-1), random.randint(0, s-1)) for _ in range(100)]
++
++def volume_render_trilinear(field, pose):
++    # Renders field from pose using trilinear interpolation [G]
++    return [0.0] * 400 * 400 # Returns rendered image tensor
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The loss computation involves sampling, volume rendering, and L1/BCE calculations. Volume rendering is the most expensive step, scaling with the number of rays (views) and samples per ray [S1].
+-*   **Memory Complexity:** Requires storing the generated SRF and ground truth SRF in memory. The SRF resolution (e.g., 32, 128, 512) significantly impacts memory usage [S1].
+-*   **Strengths:** Combines 3D structural supervision (density/color) with 2D perceptual quality, leading to better visual results than 3D loss alone [S1].
+-*   **Limitations:** Sensitive to hyperparameters $\lambda_\rho$ and $\lambda_R$ [S1]. Requires access to ground truth SRFs for density and radiance loss, and ground truth images for perceptual loss [S1].
+-*   **When to use:** Training SuRFNet for SRF generation from the SPARF dataset [S1].
+-*   **When not to use:** When only 2D image supervision is available without ground truth 3D SRFs, or when computational resources are too limited for volume rendering during training [S1].
++*   The loss computation involves sampling, volume rendering, and L1/BCE calculations.
++*   It requires storing the generated SRF and ground truth SRF in memory.
++*   Strengths: Combines 3D structural supervision (density/color) with 2D perceptual quality, leading to better visual results than 3D loss alone [S1].
++*   Limitations: Sensitive to hyperparameters $\lambda_\rho$ and $\lambda_R$ [S1]. Requires access to ground truth SRFs for density and radiance loss, and ground truth images for perceptual loss [S1].
++*   When to use: Training SuRFNet for SRF generation from the SPARF dataset [S1].
++*   When not to use: Not given in the sources.
+ 
+ ## Background
+-SRF-Loss was introduced in the SPARF paper (2023) by the authors of SuRFNet [S1]. It is used to train the SuRFNet network, which generates high-quality Sparse Radiance Fields from partial inputs. The method builds on the SPARF dataset, which contains one million SRFs collected from ShapeNet Core 55 [S1]. The perceptual loss component was added to address the limitation that 3D radiance color supervision alone does not guarantee rendering quality [S1].
++The loss function was introduced in the SPARF paper to train the SuRFNet network [S1]. It is used to train the SuRFNet network, which generates high-quality Sparse Radiance Fields from partial inputs [S1]. The method builds on the SPARF dataset, which contains one million SRFs collected from ShapeNet Core 55 [S1]. The perceptual loss component was added to address the limitation that 3D radiance color supervision alone does not guarantee rendering quality [S1].
+ 
+ ## Sources

@@ -1,0 +1,44 @@
+# Multi-View and Parallax-Based Rendering
+
+Also called: Multi-view rendering, Parallax-based volume rendering, Light field rendering
+
+## Overview
+Multi-View and Parallax-Based Rendering generates volumetric or holographic imagery by computing multiple distinct perspective views of a scene and displaying them on hardware that separates these views spatially or angularly to create a 3D effect. It differs from single-view volume rendering by explicitly managing view-dependent parallax, and from holographic CGH calculation by typically relying on rasterized or pre-computed view extraction rather than full wave-optics simulation for every pixel [S1].
+
+## Shared principles
+The family shares the core mechanism of decomposing a 3D representation into a set of 2D views, each corresponding to a specific camera position or holographic aperture, and mapping these views to a display medium that enforces spatial or angular separation.
+
+1.  **View Generation**: A set of $N$ views is generated. In lenticular systems, these are perspective projections from offset focal spots [S1]. In holographic light-field systems, these are extracted from a pre-computed Computer-Generated Hologram (CGH) [S1].
+2.  **Display Mapping**: The views are mapped to a display device.
+    *   **Lenticular**: Views are interlaced into a single bitmap where sub-pixels (R, G, B) sample from different views based on a static view map [S1].
+    *   **Pyramid/Projector Arrays**: Views are projected or composited onto physical surfaces (pyramids, projector arrays) with specific geometric calibration [S1].
+3.  **Parallax Enforcement**: The hardware (lenses, mirrors, projector arrays) ensures that each eye sees a different view, creating stereoscopic depth [S1].
+
+## Subtopics
+
+### [Multi-view Lenticular Volume Rendering](6636-multi-view-lenticular-volume-rendering.md)
+A hardware-accelerated method for generating stereoscopic images of volumetric datasets for display on multi-view lenticular screens without glasses. It computes $N$ distinct perspective views from offset focal spots and composites them into a single interlaced bitmap where each sub-pixel (R, G, B) samples from a different view. Choose this when rendering scalar volumetric data on lenticular displays.
+
+### [Four-View Hologram Compositor](15796-four-view-hologram-compositor.md)
+A rendering technique that projects four synchronized views of a 3D scene onto a four-sided acrylic pyramid to create a floating volumetric image visible from all sides. It differs from multi-view lenticular rendering by using physical reflection parity via a pyramid rather than optical lenses, requiring independent rotation and mirroring of each view to correct for the acrylic's reflection properties. Choose this for 360-degree holographic displays using acrylic pyramids.
+
+### Rendering Framework for Autostereoscopic Displays
+A pre-processing framework for rendering Computer-Generated Holograms (CGH) on autostereoscopic light-field displays. It consists of four sequential steps applied to the hologram to acquire reconstruction images corresponding to views from a camera rotating around the scene. The resolution of these images equals the 2D resolution of the screen [S1].
+
+*   **Steps**:
+    1.  **View extraction**: A window with the resolution of the vertical axis of the hologram moves along the horizontal axis to acquire sub-holograms that simulate a pinhole camera view. Apertures can overlap to increase the number of views [S1].
+    2.  **Suppression of aperture diffraction (apodization)**: Reduces diffraction artifacts [S1].
+    3.  **Back propagation**: Numerically reconstructs the view. This step requires only 1D FFTs with a pre-computed kernel due to the constant distance [S1].
+    4.  **Colour balancing**: Adjusts color channels for the display [S1].
+
+*   **Complexity**: The computational complexity is $O(NM)$, where $N$ is the number of views and $M$ is the hologram resolution [S1].
+
+*   **Performance**: Tested on a 3.3 GHz Intel Core i7-5820 CPU with Windows 8 (x64). For the 'Dice' dataset (142,903 points), processing times per view were: View extraction 0.04s, Apodization 0.38s, Back propagation 16.33s, Colour balancing 1.19s [S1].
+
+*   **Hardware**: Rendered on an Holografika HoloVizio 722RC light field display (72 projectors, 70° viewing angle). 70 views were extracted with an angular resolution of 1° and a 2D resolution of 1280x768 pixels [S1].
+
+## Background
+The concept of multi-view rendering for volumetric displays has evolved alongside autostereoscopic and light-field display technologies. The specific framework for rendering CGHs on light-field displays was proposed to address the need for high-end 3D visualization of point-clouds and holograms [S1]. The method leverages parallel computing and raster OpenGL graphics to manage the computational load of view extraction and back propagation [S1].
+
+## Sources
+[S1] Three-dimensional rendering of computer-generated holograms acquired from point-clouds on light field displays, https://doi.org/10.1117/12.2237581, fetched 2026-11-04

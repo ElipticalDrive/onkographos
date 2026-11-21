@@ -1,0 +1,126 @@
+# Data Consistency Loss
+
+Also called: Forward Projection Loss, Projection Fidelity Loss
+
+## Overview
+Data Consistency Loss enforces fidelity between a predicted volumetric representation and measured projection data (such as sinograms in tomography or multi-view images in NeRF) by minimizing the difference between the forward-projected prediction and the observed measurements [S1, S2, unofficial]. It differs from its siblings, such as [Total Variation Regularization](860-total-variation-regularization.md) which penalizes spatial gradients, and [Perceptual Loss Training](2000-perceptual-loss-training.md) which operates in feature space, by directly constraining the physical forward model of the rendering or imaging process [S1, S2, unofficial]. This ensures that the reconstructed volume is physically consistent with the input data, resolving ambiguities inherent in inverse problems [S1, S2, unofficial].
+
+## How it works
+The method minimizes the discrepancy between the forward-projected volume and the ground-truth projection data. While the specific implementation depends on the imaging modality (e.g., X-ray CT vs. optical multi-view), the core principle remains the minimization of the squared L2 norm difference between the forward-projected data and the original projection data [S1, S2, unofficial].
+
+### Inputs and Outputs
+- **Input Volume ($x$):** The predicted volumetric representation (e.g., density field, SDF, or radiance field) parameterized by a neural network or grid.
+- **Input Projections ($y$):** The measured projection data (e.g., sinogram pixels, image pixels).
+- **Forward Projection Operator ($A$):** A differentiable operator that simulates the acquisition process (e.g., ray marching for optical views, line integrals for X-rays).
+- **Output:** A scalar loss value $\mathcal{L}_{dc}$ used for gradient-based optimization.
+
+### Data Structures
+- **Volume ($x$):** Typically a 3D tensor of shape $(H, W, D)$ or a neural network outputting values at query points.
+- **Projections ($y$):** A 2D tensor of shape $(N_{rays}, N_{views})$ or $(H_{img}, W_{img})$ depending on the setup.
+- **Forward Projector ($A$):** Implemented as a differentiable layer (e.g., `torch.nn.Module`) that performs the integration along rays [S1, S2, unofficial].
+
+### Steps
+1. **Forward Pass:** Compute the predicted volume $x$ using the model.
+2. **Forward Projection:** Apply the differentiable forward projection operator $A$ to $x$ to generate the predicted projections $\hat{y} = A(x)$ [S1, S2, unofficial].
+   - For optical views, this involves sampling the volume along camera rays and compositing colors/opacities using the standard emission-absorption model [44-radiance-field-optimization.md].
+   - For X-ray CT, this involves computing line integrals through the density field [S1, S2, unofficial].
+3. **Loss Computation:** Calculate the squared L2 difference between the predicted projections $\hat{y}$ and the ground truth $y$ [S1, S2, unofficial]:
+   $$
+   \mathcal{L}_{dc} = \| A(x) - y \|_2^2
+   $$
+4. **Backpropagation:** Compute gradients $\frac{\partial \mathcal{L}_{dc}}{\partial x}$ and propagate them back through the forward projector $A$ and the volume model to update parameters [S1, S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def data_consistency_loss(model, projector, volume, projections):
+    """
+    Computes the Data Consistency Loss.
+    
+    Args:
+        model: Neural network or structure generating the volume.
+        projector: Differentiable forward projection operator (e.g., ray marcher or CT projector).
+        volume: The predicted volumetric representation (e.g., density field).
+        projections: Ground truth projection data (e.g., sinogram or images).
+        
+    Returns:
+        loss: Scalar tensor representing the L2 error.
+    """
+    # Step 1: Forward projection
+    # A(x) computes the predicted projections from the volume
+    predicted_projections = projector(volume)
+    
+    # Step 2: Compute L2 loss
+    # Minimizes the squared difference between predicted and ground truth
+    loss = torch.sum((predicted_projections - projections) ** 2)
+    
+    return loss
+```
+
+### Parameters
+- **Weight ($\lambda_{dc}$):** The weight applied to the data consistency loss in the total loss function. Typical values are not specified in the general sources, but are often tuned relative to other regularization terms [S1, S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Differentiability:** The forward projection operator must be fully differentiable to enable gradient flow [S1, S2, unofficial]. Non-differentiable approximations (e.g., hard thresholding) will break the optimization.
+- **Precision:** In X-ray CT, numerical integration accuracy affects the gradient quality [S1, S2, unofficial].
+- **Scale Ambiguity:** In single-view scenarios, depth scale ambiguity may require additional constraints (e.g., Monocular Depth Consistency Loss) [4668-monocular-depth-consistency-loss.md].
+
+## Subtopics
+
+### [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md)
+Monocular Depth Consistency Loss enforces geometric consistency between a rendered depth map and dense depth priors estimated by off-the-shelf monocular depth estimation networks, resolving the scale ambiguity inherent in single-view depth prediction. It differs from its siblings, [Optimal Transport Loss](7472-optimal-transport-loss.md) and [Cross-View Consistent Loss](12062-cross-view-consistent-loss.md), by explicitly modeling the affine relationship (scale and shift) between the rendered geometry and the monocular prior via a closed-form least-squares solution, rather than relying on distributional matching or cross-view geometric constraints.
+
+### [Optimal Transport Loss](7472-optimal-transport-loss.md)
+Optimal Transport (OT) Loss captures global and long-range correspondences between a rendered image $I$ and a target image $I_{ref}$ by solving a transportation problem, replacing local pixel-wise losses like L1 or L2.
+
+### [Cross-View Consistent Loss](12062-cross-view-consistent-loss.md)
+Cross-View Consistent Loss (CVCL) is a regularization term used in differentiable volume rendering, specifically within Gaussian Splatting frameworks, to enforce global geometric coherence and mitigate Gaussian overfitting. It operates by penalizing discrepancies between the residuals of paired views, weighted by their structural similarity. Unlike sibling methods such as [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) which focuses on single-view depth priors, or [Optimal Transport Loss](7472-optimal-transport-loss.md) which aligns distributions, CVCL explicitly leverages the correlation between adjacent views to ensure that regions with high structural similarity in ground truth exhibit consistent error patterns in reconstruction.
+
+### [Depth Consistency Loss](16534-depth-consistency-loss.md)
+Depth Consistency Loss (LDC) is a regularization term used in differentiable volume rendering and implicit surface reconstruction to enforce geometric accuracy by aligning the zero level set of the signed distance field (SDF) with ground truth depth observations. Unlike volume rendering depth losses that constrain all samples along a ray, LDC specifically targets surface points, ensuring that the projected depth of points lying on the reconstructed surface matches the observed depth map. It is distinct from sibling methods like Monocular Depth Consistency Loss and Optimal Transport Loss by its exclusive focus on the zero-level set constraint via binary masking of invalid projections.
+
+### [Semantic Feature Consistency](16658-semantic-feature-consistency.md)
+Semantic Feature Consistency is a regularization strategy for differentiable volume rendering that constrains the similarity between rendered images and reference views by comparing high-level feature representations rather than raw pixel intensities. It addresses the failure of naive pixel-wise reconstruction losses on non-Lambertian surfaces, self-occlusions, and geometric artifacts by enforcing structural and semantic alignment . It differs from Monocular Depth Consistency Loss [4668-monocular-depth-consistency-loss.md] by operating in feature space rather than depth space, and from Optimal Transport Loss [7472-optimal-transport-loss.md] by using direct feature distance metrics rather than transport plans.
+
+### [Implicit Field Consistency](17875-implicit-field-consistency.md)
+Implicit Field Consistency is a regularization strategy that ensures the implicit field (e.g., SDF or density) remains consistent with the underlying geometry across different resolutions or representations.
+
+#### Neural Projection with Photometric Consistency
+Neural Projection with Photometric Consistency projects points to the implicit surface using SDF and gradient information, then regularizes the SDF field using photometric consistency between image patches [S3, unofficial]. For a point $x_P$, the gradient $g(x_P) = \nabla f(x_P)$ is computed, and the point is projected to the nearest neighbor $t_P$ on the implicit surface $S$ by moving along the gradient direction: $t_P = x_P - f(x_P) \cdot g(x_P) / \|g(x_P)\|_2$ [S3, unofficial]. Patches around $t_P$ are extracted from reference and source images, and the Normalized Cross-Correlation (NCC) score is calculated: $\text{Score}(I_r(s), I_s(s)) = \text{Cov}(I_r(s), I_s(s)) / \sqrt{\text{Var}(I_r(s)) \text{Var}(I_s(s))}$ [S3, unofficial]. The photometric consistency loss is $\mathcal{L}_{pc} = \frac{1}{m D_P} \sum_{x_P \in P} \sum_{i=1}^m (1 - \text{Score}(I_r(s), I_{s_i}(s)))$, where $m=4$ source images are used [S3, unofficial]. This loss is applied to the base SDF network signals, not the final SDF, to allow gradient computation and avoid interfering with the Bias network [S3, unofficial].
+
+#### Integration-aware Streamline Loss
+Integration-aware Streamline Loss extends the SSR-VFD architecture with an integration-aware streamline loss that backpropagates through differentiable Euler integration [S4, unofficial]. This approach improved the fidelity of downstream streamline visualizations at the cost of slightly reduced PSNR [S4, unofficial].
+
+#### LBFC (Bottleneck Feature Consistency Loss)
+LBFC (Bottleneck Feature Consistency Loss) enhances feature-level consistency between original input rays and flipped reflection rays [S5]. It computes the Jensen-Shannon Divergence (JSD) between the probability distributions of the bottleneck features of the original and flipped reflection rays [S5]. Extracting bottleneck feature $b$ from the network encoder, LBFC with JSD on $b$ achieves PSNR 19.55, SSIM 0.767, LPIPS 0.180, and Average Error 0.101, outperforming MSE (PSNR 18.83) and cosine similarity (PSNR 18.77) [S5]. Regularizing $b$ with MSE or cosine similarity yields no significant performance impact. Applying LBFC with JSD to $b_{\hat{d}}$ (bottleneck feature conditioned on viewing direction $\hat{d}$) degrades performance, likely due to reduced feature dimensionality limiting representation capacity [S5].
+
+#### Subset Consistency Loss
+Subset Consistency Loss encourages compatible reconstructions from different subsets of the same scene by matching rendered accumulation and depth maps using a symmetric stop-gradient formulation [S6]. It samples a temporally ordered sequence of 24 views uniformly from $[\text{minframe}, \text{maxframe}]$ where $\text{maxframe}-\text{minframe} \in [40, 220]$, selects 12 target views, and constructs two input subsets $I_a$ and $I_b$ from the remaining context views by splitting intermediate context views by parity of their order, while sharing the first and last context views as anchors [S6]. The consistency loss is $\mathcal{L}_{con} = \lambda_{\alpha}^{con} \mathcal{L}_{con}^{\alpha} + \lambda_{d}^{con} \mathcal{L}_{con}^{d}$, where $\mathcal{L}_{con}^{\alpha} = 0.5 \|\hat{O}^a - \text{sg}(\hat{O}^b)\|_1 + 0.5 \|\hat{O}^b - \text{sg}(\hat{O}^a)\|_1$ and $\mathcal{L}_{con}^{d} = 0.5 \|\hat{D}^a - \text{sg}(\hat{D}^b)\|_{1,\Omega} + 0.5 \|\hat{D}^b - \text{sg}(\hat{D}^a)\|_{1,\Omega}$ [S6]. Here, $\text{sg}(\cdot)$ is the stop-gradient operator, and $\Omega$ is an optional mask restricting depth comparison to pixels where both branches have sufficient rendered support [S6].
+
+#### Radiance Consistency Loss
+Radiance Consistency Loss is a supervision loss that ensures consistency between the indirect incoming radiance obtained via ray tracing and the outgoing radiance of secondary Gaussians, providing guidance from extra viewpoints without full one-bounce tracing for all Gaussians [S7]. For each Gaussian $j$, it samples only one direction near the specular reflection (instead of all $K$ directions) to compute the loss, reducing cost [S7]. The loss is $\mathcal{L}_{rc} = |L_i^{\text{ind}}(x_j, \omega_{ik}) - L_s^{\text{ind}}(x_j, \omega_{ik})|$, where $L_i^{\text{ind}}$ is the indirect incoming radiance at Gaussian $j$, and $L_s^{\text{ind}}$ is the outgoing radiance of the secondary Gaussian on direction $\omega_{ik}$ [S7].
+
+#### Warm-Start Loss
+Warm-Start Loss is a loss component that transforms observation XYZ coordinates to canonical UV coordinates defined by consistent semantic and UV-metric loss, improving information reuse across frames [S8]. Without warm-start loss, the model suffers from ambiguity, such as meaningless textures or belt artifacts on pants [S8].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the forward projection operator. For ray marching, it is $O(N_{rays} \cdot N_{samples})$. For CT, it is $O(N_{projections} \cdot N_{voxels})$ [S1, S2, unofficial].
+- **Memory Complexity:** Requires storing intermediate states for backpropagation through the forward projector. Adjoint methods or analytic inversion can reduce this to $O(N_{rays})$ [44-radiance-field-optimization.md].
+- **Strengths:** Ensures physical consistency with input data; effective for inverse problems with limited or noisy data [S1, S2, unofficial].
+- **Limitations:** Requires a differentiable forward model; may be computationally expensive for large volumes or high-resolution projections [S1, S2, unofficial].
+- **When to use:** When ground truth projection data is available and physical consistency is critical (e.g., CT reconstruction, NeRF with known camera poses) [S1, S2, unofficial].
+- **When not to use:** When projection data is unavailable or the forward model is not differentiable [S1, S2, unofficial].
+
+## Background
+Data Consistency Loss originates from the field of computed tomography (CT) and inverse problems, where it is used to incorporate measured sinogram data into deep learning pipelines [S1, S2, unofficial]. It has been adapted for differentiable volume rendering in NeRF and Gaussian Splatting frameworks to enforce multi-view consistency and geometric accuracy [S1, S2, S3, unofficial][S5, S6, S7, S8]. The method leverages the differentiability of the forward rendering operator to propagate gradients from the projection space to the volume space [44-radiance-field-optimization.md].
+
+## Sources
+[S1] PDF Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)
+[S2] Differentiable Forward Projector for X-ray Computed ..., https://openreview.net/forum?id=dX8khDFGHv, fetched 2026-11-06 (unofficial)
+[S3] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
+[S4] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S5] FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis, https://doi.org/10.1109/iccv51070.2023.02092, fetched 2026-10-29
+[S6] GlobalSplat: Efficient Feed-Forward 3D Gaussian Splatting via Global Scene Tokens, https://doi.org/10.1007/978-3-032-37595-7_10, fetched 2026-10-29
+[S7] SVG-IR: Spatially-Varying Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52734.2025.01505, fetched 2026-10-29
+[S8] UV Volumes for Real-time Rendering of Editable Free-view Human Performance, https://doi.org/10.1109/cvpr52729.2023.01595, fetched 2026-10-26

@@ -1,0 +1,1527 @@
+Sparfels: Fast Reconstruction from Sparse Unposed Imagery
+arXiv:2505.02178v4 [cs.CV] 31 Jul 2025
+Shubhendu Jena* , Amine Ouasfi* , Mae Younes, Adnane Boukhayma
+Inria, Univ. Rennes, CNRS, IRISA
+Figure 1. Examples of reconstruction meshes obtained within 3 minutes from sparse pose-free images via our method. We used here 6
+(left) and 3 (right) input images respectively from scenes of datasets MVImgNet [102] and BlendedMVS [97].
+Abstract
+multi-view stereo [74, 75], shape from visual cues such as
+shading or silhouette [31, 46], photometric stereo [88] etc.,
+have been popular for decades in this regard. More recently,
+deep learning has been progressively disrupting 3D vision
+and top-down approaches to vision more broadly. Among
+the latest additions, large vision and foundation models (e.g.
+DUSt3R [84], MASt3R [47]) can offer robustness and fast
+feed-forward inference compared to classical photogrammetry [74, 75]. Given a few raw uncalibrated images of
+a scene, they are capable of inferring reasonable relative
+poses and a competitive coarse 3D structure. These predictions can lack precision and details, though, and cannot
+enable stand-alone novel view synthesis.
+Furthermore, state-of-the-art data-prior free scene specific learning methods for reconstruction can deliver highly
+detailed geometry and impressive novel view synthesis capabilities from dense calibrated image grids. While implicit
+and some grid shape representations (e.g. NeuS, VolSDF,
+HF-NeuS, Voxurf [83, 85, 90, 99]) trained via differentiable
+volumetric rendering (NeRF [59]) have been powerful tools
+for this task for a while, Gaussian Splatting [43] based alternatives emerged with comparable novel view and reconstruction [32, 105] quality, within a fraction of the training
+time, and with orders of magnitude higher interactive rendering frame rates. These methods typically fail however
+under uncalibrated and sparse training images. Contemporary literature attempts to hedge against the underconstrained nature of the sparse view problem through regularization with a multitude of deep geometric priors (monocular depth [19, 80, 110], normal [103], point cloud [71] etc.),
+or training new priors from scratch [53, 71, 92]. Such strategies can prove to be cumbersome, impractical or costly in
+terms of data, memory or compute.
+In this paper, we propose to marry the best of both worlds
+efficiently — namely pre-exisiting large 3D vision feedforward models (MASt3R) and fast test-time optimization
+We present a method for Sparse view reconstruction with
+surface element splatting that runs within 3 minutes on a
+consumer grade GPU. While few methods address sparse
+radiance field learning from noisy or unposed sparse cameras, shape recovery remains relatively underexplored in
+this setting. Several radiance and shape learning testtime optimization methods address the sparse posed setting by learning data priors or using combinations of external monocular geometry priors. Differently, we propose an efficient and simple pipeline harnessing a single
+recent 3D foundation model. We leverage its various task
+heads, notably point maps and camera initializations to instantiate a bundle adjusting 2D Gaussian Splatting (2DGS)
+model, and image correspondences to guide camera optimization midst 2DGS training. Key to our contribution
+is a novel formulation of splatted color variance along
+rays, which can be computed efficiently. Reducing this
+moment in training leads to more accurate shape reconstructions. We demonstrate state-of-the-art performances
+in the sparse uncalibrated setting in reconstruction and
+novel view benchmarks based on established multi-view
+datasets. Code will be made available at https://shubhendujena.github.io/Sparfels-web/
+1. Introduction
+3D reconstruction is a long standing problem at the intersection of computer vision, graphics and machine learning.
+It is core to a myriad of downstream applications in virtual
+and augmented reality, autonomous driving, medical imaging, film and animation, to name a few. Classical optimization based techniques such as structure from motion and
+* Equal contribution.
+1
+(2DGS) — with the aim of addressing the underexplored
+problem of 3D geometric reconstruction from sparse unposed images within minutes (less than 3 on average in our
+experiments) at minimal cost.
+We propose to exploit a single pre-existing foundation
+model (MASt3R [47]) to the fullest to bootstrap our reconstruction, without needing to load or deploy any additional deep neural networks. Given a few sparse color
+images, MASt3R delivers a coarse point cloud and initial
+camera poses. We use these to initialize a bundle adjusting 2D Gaussian Splatting (2DGS) optimization via differentiable render-and-compare, where surface elements are
+instantiated at the point samples, oriented initially according to their normals. Differently from the closest competition [22, 23], we harness the MASt3R [47] produced image
+pair correspondences to guide camera optimization during
+2DGS training. This is achieved via a splatted depth reprojection error loss. The resulting camera alignment improvement proves crucial for obtaining accurate shape representations.
+By analyzing the surface element splatting from a statistical moment perspective, rendered pixels can be seen as
+color expectation over fragments following the ray termination probability. Based on this, we derive an expression of
+splatted color variance along the ray, and propose a novel
+loss tasked with reducing it. This results in improved reconstruction metrics and qualitative sharper mesh details as
+witnessed by our ablation studies.
+The integration of these elements yields state-of-art performance in sparse pose-free 3D reconstruction, obtained
+in very short times on mid-range GPUs. We evaluate our
+method using established reconstruction and novel view
+datasets [1, 5, 45, 97, 102], showcasing both superior geometric reconstruction, camera pose estimation and novel
+view synthesis w.r.t. comparable state-of-the-art baselines.
+Evaluation of 3D shape reconstruction in the posed
+setting relies traditionally on mesh Chamfer distance to
+ground-truth, as used in multi-view reconstruction benchmarks like DTU [1]. This is a mesh pose and scale sensitive
+metric. In the unposed setting, reconstructions are obtained
+naturally up-to a rigid transformation. RANSAC powered alignments between predicted and ground-truth cameras have been shown to be acceptable for pre-evaluation
+reconstruction mesh alignment in the dense view setting
+[7], and good enough for camera pose evaluation for sparse
+sets [79]. However, we found these camera based alignments to be too inaccurate in the sparse setting to enable
+reliable mesh pre-alignments for Chamfer distance evaluation. Hence, inspired by the rigid-transform invariant evaluation in [84], we compare the reconstructed mesh depth and
+normal rasterizations to the groundtruth in screen space in
+our evaluation, and show considerable improvements compared to the competition in the standard DTU benchmark
+Figure 2. 3D Foundation models meet differentiable perspective
+accurate Splatting for fast reconstruction from pose-free sparse
+images. We bootstrap a bundle adjusting 2DGS with MASt3R
+[47] 3D point clouds and initial camera predictions. Besides standard 2DGS photometric reconstruction and geometric regularization losses, we leverage a camera reprojection error loss using
+MASt3R’s correspondences and a novel splatted color variance
+reduction loss.
+(Tab.1,2,3). Further qualitative comparison in BlendedMVS [97], MVImgNet [102], Mip-NeRF 360 [4] illustrate
+the quality of our reconstructions.
+2. Related work
+NVS and 3D Reconstruction Novel view synthesis
+(NVS) aims to generate unseen views from input images [3,
+58]. Neural Radiance Fields (NeRF) [59] revolutionized
+this field by representing 3D scenes as continuous implicit
+functions, though challenges remain in efficiency and quality [4–6, 70, 76, 77]. Inspired by the success of other explicit representations (e.g. meshes [36, 41, 82] and point
+clouds [2, 21]), recent advancements introduced primitivebased scene representations [14, 43, 95], notably 3D Gaussian Splatting (3DGS) [43], which uses anisotropic 3D
+Gaussians with differentiable splatting for efficient highquality reconstruction. This has sparked extensions for
+surface reconstruction [32, 105, 106], neural representations [54], multi-resolution modeling [25, 104], and feedforward methods [10, 13, 24, 30, 94]. In parallel, implicit representations model 3D geometry as continuous
+functions [17, 40, 42, 61, 63]. Methods like IDR [98],
+NeuS [83], and VolSDF [99] enhance geometric accuracy
+but often suffer from slow rendering. In contrast, 2D
+Gaussian Splatting (2DGS) [32] offers real-time rendering
+while improving view consistency for surface reconstruction through planar Gaussian primitives.
+Sparse-View NVS and 3D Reconstruction Traditional
+NeRFs and GS methods require carefully captured images and SfM preprocessing with COLMAP [73], which
+could limit practical applications. The few-shot setup has
+been addressed for both reconstruction from Point Cloud
+[12, 66, 68, 69] and images. Various approaches address
+the challenge of limited views through regularization techniques, including depth supervision [18, 49, 62, 80], foundation model supervision [35, 89, 93], specialized architectures [96, 101], while SparseCraft [100] uses learning2
+free MVS cues for SDF regularization. For Gaussian Splatting, methods like FSGS [110] and SparseGS [91] incorporate external priors. Generalizable methods address sparseview challenges by pretraining on large datasets, enabling
+feed-forward inference. Inputs include images (e.g. [10, 13,
+38, 48, 52]) and 3D Points (e.g. [9, 33, 55, 64, 65, 67]).
+For surface reconstruction from color images, approaches
+like SparseNeuS [53], VolRecon [72], ReTR [50], UfoRecon [60], GeoTransfer [37], and Spurfies [71] leverage various mechanisms such as using image priors to form multiview cost volumes, using transformer architectures to enhance reconstruction from limited views, as well as using
+reconstruction priors trained on sparse point clouds.
+gent planes. Unlike volumetric 3D Gaussians [43], 2DGS
+is a surface-based representation that improves multi-view
+consistency. Each 2D Gaussian is defined as:
+
+
+u(p)2 + v(p)2
+G(p) = exp −
+2
+(1)
+where u(p) and v(p) are local UV space coordinates of
+a pixel p in the primitive’s tangent plane. This ray-splat intersection can be expressed as a function of the camera parameters and splat attributes differentiably. Each primitive
+is parameterized by the center of the Gaussian in world coordinates x ∈ R3 , a quaternion representing the orientation
+of the primitive q ∈ R4 , scale factors for the two dimensions in the local UV tangent plane s ∈ R2 , opacity α ∈ R
+controlling the transparency of the primitive, and Spherical harmonic coefficients csh k ∈ R3 |k = 1, . . . , n encoding
+view-dependent appearance. Rotation q defines a local coordinate frame [u, v, n], n being the normal vector orthogonal to the primitive’s plane, and u and v spanning the tangent plane.
+For rendering, 2DGS uses alpha-compositing for volumetric rendering similarly to 3DGS. Given a set of primitives along a ray sorted from front to back G1 , G2 , ..., GK ,
+the final color C is computed as:
+Pose-Free NVS and 3D Reconstruction Pose-free methods eliminate the need for accurate camera calibration.
+NeRFmm [87], BARF [51], SCNeRF [39], and GARF [16]
+jointly optimize camera parameters and scene representations. SPARF [79] and PoRF [7] address optimization with
+noisy poses, though often requiring lengthy training. Recent
+work like Nope-NeRF [8], Lu-NeRF [15], LocalRF [57],
+and CF-3DGS [27] leverage depth information but typically
+assume dense video sequences. InstantSplat [22, 23] addresses these limitations by using MASt3R [47] for initialization and jointly optimizing camera poses and 3D models.
+Our work builds on these foundations but focuses specifically on using 2D Gaussian Splatting for efficient 3D surface reconstruction from sparse, uncalibrated views. We initialize with MASt3R [47] and refine through joint optimization of Gaussian parameters and camera poses, incorporating a novel variance-based color loss for improved detail
+preservation. Unlike previous approaches requiring dense
+sequences, known intrinsics, or long optimization times,
+our method efficiently handles sparse, uncalibrated images
+while achieving high-quality reconstructions.
+C(p) =
+K
+X
+i=1
+αi′ ci
+i−1
+Y
+(1 − αj′ ),
+(2)
+j=1
+where αi′ = αi G(p) is the modified opacity of the i-th
+primitive and ci is its color, computed from the spherical
+harmonic coefficients based on the viewing direction.
+MASt3R MASt3R [47] is a foundation model for 3D vision that extends DUSt3R [84] with more powerful feature
+extraction and matching capabilities. It tackles the multiview stereo reconstruction task without requiring prior camera calibration or poses.
+Given a pair of images I 1 , I 2 ∈ RW ×H×3 , MASt3R outputs two corresponding pointmaps P1,1 , P2,1 ∈ RW ×H×3
+with associated confidence maps O1,1 , O2,1 ∈ RW ×H .
+Each pointmap assigns a 3D point to every pixel in the image. Importantly, both pointmaps are expressed in the same
+coordinate frame of the first image I 1 .
+The architecture of MASt3R consists of a Siamese
+ViT encoder that processes both images independently,
+Transformer decoders that exchange information via crossattention, and regression heads that output pointmaps and
+confidence maps. MASt3R is trained using a confidenceweighted regression loss:
+3. Method
+Given a few unposed color images {I i }N
+i=1 , our goal is to
+recover a 3D triangle mesh S and render novel views of the
+observed scene efficiently. We achieve this by fitting a bundle adjusting 2DGS [32] model to the images of the scene,
+bootstrapped by point map and correspondence feedforward
+predictions from a 3D foundation model (MASt3R [47])
+and carefully designed regularizations. At test time, mesh
+S can be extracted using the TSDF algorithm in Open3D
+[109] using the converged 2DGS model rendered depth,
+as recommended in [32]. We detail the workings of our
+method below.
+3.1. Preliminaries
+2D Gaussian Splatting Our method builds upon 2D
+Gaussian Splatting (2DGS) [32], which represents 3D
+scenes using planar disk primitives defined within local tan-
+Lconf =
+X X
+v∈1,2
+3
+i
+Oiv,1 Lreg (v, i) − α log Oiv,1 ,
+(3)
+where Lreg (v, i) measures the Euclidean distance between
+predicted and ground-truth 3D points for pixel i, and α is a
+regularization parameter.
+Besides pointmaps, MASt3R also provides dense pixelwise correspondences between the input views. These correspondences establish reliable geometric constraints across
+different viewpoints, which we leverage in our optimization
+framework.
+2D Gaussian primitive with position xi directly from the
+pointmap, rotation qi , scale si set proportionally to the local pointmap density, and opacity αi set to a default value
+(e.g. 0.8). Color for the lowest spherical harmonic band
+(DC component) is initialized from the original image colors projected onto the point, with higher-order coefficients
+set to zero. This initialization preserves the surface structure from the MASt3R reconstruction while enabling efficient optimization with 2D Gaussian primitives.
+3.2. Scene Initialization
+3.3. Joint Optimization
+Global Geometry Alignment Given a set of input images I 1 , I 2 , ..., I N , we first construct a connectivity graph
+G(V, E) where each vertex v ∈ V represents an image,
+and each edge e = (n, m) ∈ E indicates a pair of images
+with shared visual content. For each edge in the graph, we
+run MASt3R to obtain pairwise pointmaps and correspondences. To align these pairwise predictions into a globally
+consistent reconstruction, we follow the optimization approach from MASt3R:
+min
+χ,P,σ
+X X HW
+X
+Oiv,e |χvi − σe Pe Piv,e |,
+Correspondence Loss Using the dense correspondences
+provided by MASt3R, and inspired by SPARF [79], we formulate a multi-view correspondence loss that enforces geometric consistency across different viewpoints:
+
+−1
+Lcorr = wpn ,pm ρ pm − π Pm
+Pn π −1 (pn , dn ) , (5)
+where (pn , pm ) is a correspondence pair with pn ∈
+[0, 1]2 a pixel in view n and pm its corresponding pixel
+in view m. wpn ,pm ∈ [0, 1] is the confidence of the correspondence. ρ represents the Huber loss [34] function.
+π : R3 → R2 is the projection operator mapping 3D points
+to pixel coordinates. π −1 : R2 × R → R3 is the backprojection operator mapping pixel coordinates and depth
+to 3D points. dn is the 2DGS model splatted depth at
+pixel pn . Pn and Pm represent the camera parameters for
+views n and m. This loss enforces that corresponding pixels across views should project to the same 3D point when
+back-projected using their respective depths and camera parameters, and thus helps guide our bundle adjustment to a
+good minima.
+(4)
+e∈E v∈e i=1
+where χvi is the globally aligned pointmap for view v at
+pixel i, Pe ∈ R3×4 the rigid transformation for edge e,
+σe > 0 is a scaling factor for edge e, Oiv,e the confidence
+value for pixel i in view v for edge e, and finally Piv,e the
+original pointmap from MASt3R. This optimization proH×W ×3
+duces globally aligned pointmaps {χv ∗ }N
+v=1 ∈ R
+and camera parameters (intrinsics and extrinsics for each
+view v). We stabilize the estimated focal lengths
+PNby averaging them across all training views: f¯ = N1 v=1 fi∗ ,
+assuming a single-camera setup.
+Photometric Loss Following 3DGS and 2DGS, we use a
+combination of L1 image reconstruction loss and structural
+similarity (SSIM) to optimize the rendering of our system:
+Primitive Initialization We leverage the merged globally
+aligned pointmap to initialize 2D Gaussian primitives with
+suitable orientation, which is crucial for accurately representing surface geometry. For each point pi in the globally
+aligned pointmap, we compute a local surface normal using
+Principal Component Analysis (PCA). First, we determine
+the k-nearest neighbors {pj }kj=1 and compute the covariPk
+ance matrix C = k1 j=1 (pj − p̄)(pj − p̄)T , where p̄ is
+the centroid of the neighborhood. We then perform eigendecomposition on C to obtain the eigenvectors {v1 , v2 , v3 }
+and corresponding eigenvalues {λ1 , λ2 , λ3 }, sorted such
+that λ1 ≥ λ2 ≥ λ3 . The eigenvector v3 , associated with
+the smallest eigenvalue, is chosen as the normal direction,
+i.e., n = v3 . To construct an orthonormal basis, we initialize an arbitrary vector a orthogonal to n = (nx , ny , nz ),
+defined as a = (−ny , nx , 0)T . The tangent vector is then
+n×a
+and the bitangent as v = n × u.
+computed as u = ∥n×a∥
+Finally, the local reference frame [u, v, n] is used to define a rotation matrix, which can be converted to a quaternion qi for efficient representation. Next, we initialize each
+Lphoto = (1 − λ) · L1 + λ · LSSIM + Lreg .
+(6)
+Notice that 2DGS comes also with geometric regularization
+term Lreg binding pixel depth normals to splatted normals,
+and reducing depth distortion, as detailed in [32].
+Variance Regularization Loss A key contribution of our
+method is the introduction of a splatted color variance regularization loss. The fundamental insight is that volume rendering can be interpreted as computing the expected value
+of colors sampled along a ray [78]:
+C = Et∼p(t) [c(t)] =
+K
+X
+i=1
+αi ci
+i−1
+Y
+(1 − αj ),
+(7)
+j=1
+where c(t) represents the color of a point t along the ray,
+and the expectation is taken with respect to p(t) = σ(t)T (t)
+with σ(t) being the density at t and T (t) representing the
+transmittance function.
+4
+4.1. Datasets and Experimental Configuration
+We hypothesize that stabilizing and robustifying our
+training would lead to more robust and improved reconstructions. In order to robustify the training, we would like
+to control how the rendered color deviates from the ground
+truth color when the geometry is perturbed, i.e. given divergence measure D, we want to minimize the following
+worst-case loss along the ray:
+Lr =
+sup
+|Et∼q(t) [c(t)] − Cgt |,
+Our method is tested on benchmark datasets [1, 5, 45, 97,
+102]. Further implementation details and additional qualitative results are provided in the supplementary material.
+Few-Shot 3D Reconstruction: We evaluate sparse
+3D reconstruction on DTU [1], BlendedMVS [97],
+MVImgNet [102], and MipNeRF360 [5]. For 3-view reconstruction on DTU, we follow SparseNeuS [53], evaluating 15 scenes with two sets of 3-view inputs, reporting the mean per scene. We also provide qualitative comparisons for 3, 6, and 12-view settings on selected scenes
+from BlendedMVS [97], MVImgNet [102], and MipNeRF360 [5].
+Few-Shot Novel View Synthesis: We conduct novel view
+synthesis (NVS) on Tanks and Temples [45] (8 scenes),
+MVImgNet [102] (7 scenes), and MipNeRF360 [5] (9
+scenes), following InstantSplat [22, 23]. Results are reported under sparse input settings (3, 6, and 12 views).
+Camera Pose Estimation: Camera poses are evaluated on
+Tanks and Temples [45], MVImgNet [102], and MipNeRF360 [5], following InstantSplat [22, 23]. Additionally, for few-shot reconstruction, we assess camera poses
+on DTU [1] using the same 3-view evaluation protocol as
+in the reconstruction task.
+(8)
+q:D(q,p)<ρ
+where ρ controls the strength of the perturbation. By leveraging theorem 2 in [20], this loss can be upper bounded by:
+q
+(9)
+L1 + η Vart∼p(t) [c(t)].
+Consequently, we consider minimizing the variance of the
+color along the ray under the distribution p(t) that can be
+expressed as follows:
+Lvar = Vart∼p(t) [c(t)]
+(10)
+2
+2
+2
+= Et∼p(t) [(c(t) − C) ] = Et∼p(t) [c(t) ] − C .
+(11)
+For efficient implementation, we compute the first term using a modified CUDA kernel of the 2DGS splatting algorithm, where we render the square of colors in addition to
+the rendering of the colors. This allows for efficient forward and backward passes during optimization. Intuitively,
+reducing rendered color variance reduces uncertainty in the
+rendering, which leads to sharper and more multi-view coherent reconstructions. This reflects positively on the qualitative (Fig 5) and quantitative (Tab 4 and Fig 6) performance
+of our reconstructions. We note that in practice, loss Lvar is
+averaged across pixels for a given view.
+4. Experiments
+Evaluation Metrics. For 3D reconstruction quality, we
+employ the Absolute Relative Error (Rel) and Normal Consistency (NC). Rel measures the accuracy of depth estimation following DUSt3R [84], while NC evaluates the geometric fidelity by measuring the alignment between predicted and ground truth surface normals. We apply these
+metrics to our final meshes. We compute ground truth normals from the gradients of the ground truth DTU depth
+maps.
+For novel view synthesis, we use standard metrics: Peak
+Signal-to-Noise Ratio (PSNR), Structural Similarity Index
+Measure (SSIM) [86], and Learned Perceptual Image Patch
+Similarity (LPIPS) [108]. We note that for this evaluation
+we follow InstantSplat[22, 23]: for novel test views without pre-computed camera poses, we perform an additional
+camera optimization step, which optimizes the test cameras
+while keeping the 2D Gaussian primitives fixed using the
+L1 photometric reconstruction loss.
+For camera pose estimation, we report the Absolute Trajectory Error (ATE) as defined in [8, 22], using COLMAPcomputed poses from dense views as ground-truth references.
+We evaluate our approach across 3D reconstruction, novel
+view synthesis, and camera pose estimation. We outline the
+experimental setup, including datasets, baseline methods,
+and implementation details, followed by quantitative and
+qualitative comparisons. Ablation studies further analyze
+the impact of key components.
+Baselines. We compare our method against several stateof-the-art approaches:
+• NVS specific methods: Pose-free methods NoPeNeRF [8], CF-3DGS [27], NeRFmm [87], SPARF [79]
+and InstantSplat [22, 23] (in both S and XL configurations). We also include comparisons with 3DGS [43] and
+Training Objective Our total optimization objective
+combines the three loss terms:
+L = λphoto Lphoto + λcorr Lcorr + λvar Lvar ,
+(12)
+where λphoto , λcorr , and λvar are weighting factors that balance the contribution of each term. We optimize all parameters simultaneously using the Adam [44] optimizer with a
+learning rate scheduling following [32]. Unlike multi-stage
+approaches [79], our single-stage optimization allows for
+faster convergence while maintaining high reconstruction
+quality. The optimization updates both camera extrinsics
+{P } per input view and 2D Gaussian primitive parameters
+{α, c, q, s} according to the gradient of the total loss.
+5
+Figure 3. Qualitative comparison on DTU dataset from 3 input
+images.
+FSGS [110], which use pre-computed camera parameters
+from Colmap [73].
+• Reconstruction-specific methods:
+MASt3R [47],
+Colmap [73], UfoRecon [60], CasMVSNet [28],
+Spurfies [71], SpaRP [92], SparseCraft [100], InstantSplatGOF (our implementation based on [23]) and
+InstantSplat2dgs [23]. Of these, similar to our approach,
+InstantSplatGOF (our implementation based on [23]) and
+InstantSplat2dgs [23] further refine cameras.
+Figure 4. Qualitative comparison on BlendedMVS dataset
+from 3 input images.
+dataset for Rel and NC metrics, respectively. Fig 3, 4 and
+7 show qualitative reconstruction comparisons, with additional qualitative comparisons with SpaRP [92] included in
+the supplementary material. Additionally, the supplementary material contains extended qualitative results, in the
+form of video comparisons demonstrating our reconstructions for several datasets. Our method achieves state-of-theart performance, outperforming all competing approaches
+across the majority of scenes.
+Several key observations can be made from these results.
+Pretrained generalizable methods (UfoRecon [60] and CasMVSNet [28]) generalize poorly when faced with noisy initial camera parameters from MASt3R [47], resulting in significantly worse performance. Despite being designed for
+sparse reconstruction, SparseCraft [100] struggles with the
+noisy camera poses and point clouds from MASt3R [47].
+Spurfies [71], which employs an SDF prior trained on
+ShapeNet, performs particularly poorly with noisy camera
+poses, resulting in worse mesh extractions. InstantSplat
+[22, 23] variants (InstSplatGOF and InstSplat2DGS) perform better than other competing approaches, but still produce overly smooth meshes lacking fine details.
+Our method significantly outperforms these approaches
+due to several key advantages, including the variance regularization loss (Sec. 3.3) promoting sharper and more
+detailed reconstructions Fig 5, The correspondence loss
+(Sec. 3.3) and joint optimization framework effectively refine the initial noisy camera poses from MASt3R [47]. Our
+method’s ability to preserve fine geometric details is also
+evidenced by the superior Normal Consistency scores.
+Table 3 presents camera pose estimation results measured by ATE. Our approach achieves significant improve-
+Implementation Details. Our framework is implemented
+in PyTorch. We set the optimization iterations to 1k for
+DTU dataset reconstruction experiments and between 2k4k for other reconstruction and novel view synthesis experiments. For test-time optimization, camera parameters are jointly optimized for 1k iterations (while keeping
+the learned Gaussian parameters fixed). We initialize our
+pipeline with MASt3R [47] configured at a resolution of
+512 pixels and use Open3D [109] to compute normals for
+the point cloud, which are used to initialize rotation parameters of the 2D Gaussians. All experiments are conducted
+on a single NVIDIA A6000 GPU. We set λphoto = 1.0 and
+λcorr = 5 × 10−5 . The variance loss weight λvar follows
+
+a cosine annealing schedule: λvar = 0.5 1 + cos π·t
+,
+T
+where t denotes the current training step and T the total number of steps. This schedule gradually decreases
+λvar from 1.0 to 0.0, ensuring an adaptive regularization
+throughout training.
+4.2. 3D Reconstruction Evaluation
+For few-shot reconstruction, we follow the evaluation protocol from prior work [53, 60, 100], cleaning the generated meshes with masks from training views. We evaluate
+the Absolute Relative Error (Rel) and Normal Consistency
+(NC) between predicted depths/normals from the extracted
+meshes and the ground truth depths/normals from the DTU
+dataset [1].
+Tab. 1 and 2 present the quantitative results on the DTU
+6
+Methods
+scan24
+scan37
+scan40
+scan55
+scan63
+scan65
+scan69
+scan83
+scan97
+scan105
+scan106
+scan110
+scan114
+scan118
+scan122
+↓ Mean
+MASt3R [47]
+UFORecon [60]
+CasMVSNet [28]
+Spurfies [71]
+InstSplatGOF [22]
+Sparsecraft [100]
+InstantSplat2DGS [23]
+Ours
+2.49
+35.55
+9.76
+2.96
+9.54
+2.96
+2.42
+2.42
+20.48
+57.15
+38.00
+52.15
+23.14
+10.51
+21.74
+12.313
+12.02
+38.81
+37.03
+58.42
+13.74
+7.16
+9.08
+7.9
+5.39
+35.47
+17.30
+20.25
+15.62
+2.92
+3.08
+3.15
+8.86
+50.02
+19.39
+14.66
+13.30
+8.17
+6.77
+6.05
+6.3
+44.94
+24.10
+19.24
+12.33
+9.44
+3.60
+3.526
+4.71
+34.70
+6.57
+4.97
+11.19
+3.83
+3.63
+3.48
+9.01
+53.56
+29.57
+12.44
+12.21
+6.19
+5.24
+4.98
+7.70
+41.67
+11.84
+7.50
+14.69
+7.61
+5.82
+5.29
+10.33
+47.93
+14.92
+10.64
+15.61
+6.44
+7.12
+6.22
+5.86
+40.22
+12.38
+7.36
+13.61
+4.75
+4.48
+4.39
+2.50
+39.34
+8.38
+6.26
+12.30
+6.43
+2.78
+2.41
+5.0
+39.75
+3.93
+38.61
+15.31
+5.36
+3.62
+3.46
+4.56
+33.34
+9.87
+25.84
+12.90
+7.65
+3.11
+3.32
+4.95
+49.04
+13.44
+44.19
+12.05
+8.14
+3.43
+3.38
+7.34
+42.77
+17.10
+21.70
+13.84
+6.50
+5.73
+4.82
+Table 1. 3-view reconstruction results on DTU dataset The relative error (rel↓) is reported for 15 scans. Best results are bold.
+Methods
+scan24
+scan37
+scan40
+scan55
+scan63
+scan65
+scan69
+scan83
+scan97
+scan105
+scan106
+scan110
+scan114
+scan118
+scan122
+↑ Mean
+MASt3R [47]
+UFORecon [60]
+CasMVSNet [28]
+Spurfies [71]
+InstSplatGOF [22]
+Sparsecraft [100]
+InstSplat2DGS [23]
+Ours
+0.888
+0.362
+0.718
+0.863
+0.774
+0.841
+0.882
+0.904
+0.695
+0.278
+0.502
+0.35
+0.581
+0.679
+0.616
+0.75
+0.844
+0.506
+0.619
+0.297
+0.689
+0.827
+0.86
+0.877
+0.874
+0.469
+0.756
+0.711
+0.696
+0.864
+0.899
+0.896
+0.837
+0.277
+0.693
+0.742
+0.746
+0.728
+0.834
+0.866
+0.839
+0.372
+0.683
+0.668
+0.750
+0.714
+0.865
+0.887
+0.851
+0.383
+0.740
+0.771
+0.710
+0.834
+0.845
+0.867
+0.754
+0.361
+0.564
+0.671
+0.658
+0.756
+0.783
+0.799
+0.824
+0.362
+0.704
+0.777
+0.682
+0.746
+0.810
+0.845
+0.745
+0.338
+0.681
+0.683
+0.653
+0.765
+0.773
+0.789
+0.871
+0.424
+0.785
+0.78
+0.695
+0.837
+0.882
+0.888
+0.875
+0.366
+0.795
+0.771
+0.724
+0.629
+0.849
+0.874
+0.884
+0.332
+0.859
+0.509
+0.710
+0.801
+0.895
+0.902
+0.831
+0.402
+0.778
+0.572
+0.663
+0.761
+0.827
+0.85
+0.846
+0.339
+0.755
+0.433
+0.650
+0.735
+0.855
+0.865
+0.830
+0.371
+0.709
+0.640
+0.692
+0.768
+0.832
+0.857
+Table 2. 3-view reconstruction results on DTU dataset Normal consistency (NC↑) is reported for 15 scans. Best results are bold.
+ments in camera pose estimation, with a 13.1% reduction in
+error compared to the best-performing baseline (InstSplatGOF [22]). This demonstrates the effectiveness of our correspondence loss in refining the initial noisy camera poses
+from MASt3R [47].
+4.3. Novel View Synthesis Evaluation
+We evaluate our method’s capability for novel view synthesis on Tanks and Temples [45], MVImgNet [102], and MipNeRF360 [5] datasets. Quantitative and qualitative result
+comparisons on all datasets are included in the supplementary material.
+4.4. Ablation Studies
+We conduct ablation studies to analyze the contribution of
+each component in our method, including an experiment to
+study the impact of varying the number of input views.
+Component Ablation These experiments were performed using 3 input unposed views on 5 testing scenes
+from the DTU dataset using two sets of views, following the
+protocols established in [53, 60]. Tab 4 shows the impact of
+incorporating different components into our pipeline. Fig
+5 shows a qualitative ablation comparison. Camera optimization using bundle adjustment improves all metrics. Incorporating the correspondence loss further enhances this
+alignment, resulting in improved reconstructions. Splat orientation initialization with pointmap normals improves results further. Notice that our variance loss contributes to
+both the final metrics and the qualitative aspect of our results. The reconstructions with variance loss exhibit significantly sharper details and better preservation of fine structures, validating the quantitative improvements observed in
+our metrics.
+Figure 5. Qualitative ablation of the component of our method,
+showing also the effect of variance loss. Left blue box: w/o Lvar .
+Right red box: w Lvar . (3 input images).
+shown in Figure 6, our method benefits favorably from
+increased views. The benefits of all components of our
+method are also maintained, if not increased. This includes
+our variance loss.
+5. Running time
+In our reconstruction experiments, we observed that the
+mean training time on DTU [1] for 1000 iterations (similar to InstantSplat-XL [22, 23]) was roughly 146s on a single Nvidia A6000 GPU. For a fair comparison, we also
+trained InstantSplat-XL [22, 23] on the same GPU and
+observed that the mean training time was around 128s.
+Hence, our training time is in the same range as InstantSplat
+[22, 23] while offering significantly higher reconstruction
+and novel-view quality.
+Number of Views Ablation We progressively increase
+the number of views and perform pose-free reconstruction
+with our method using scan37 from DTU. We evaluate by
+computing the mean metrics across both test view sets. As
+7
+Methods
+scan24
+scan37
+scan40
+scan55
+scan63
+scan65
+scan69
+scan83
+scan97
+scan105
+scan106
+scan110
+scan114
+scan118
+scan122
+↓ Mean
+MASt3R [47]
+InstSplatGOF [22]
+InstSplat2DGS [23]
+Ours
+0.0202
+0.0180
+0.0192
+0.0063
+0.0689
+0.0536
+0.0895
+0.0450
+0.0094
+0.0089
+0.0090
+0.0069
+0.0203
+0.0136
+0.0154
+0.0124
+0.0171
+0.0049
+0.0123
+0.0175
+0.0392
+0.0273
+0.0338
+0.0294
+0.0291
+0.0263
+0.0294
+0.0198
+0.0294
+0.0239
+0.0272
+0.0283
+0.0271
+0.0180
+0.0242
+0.0146
+0.0326
+0.0323
+0.0322
+0.0273
+0.0167
+0.0128
+0.0166
+0.0082
+0.0210
+0.0238
+0.0210
+0.0179
+0.0289
+0.0249
+0.0274
+0.0242
+0.0192
+0.0175
+0.0163
+0.0112
+0.0242
+0.0149
+0.0175
+0.0101
+0.0269
+0.0214
+0.0261
+0.0186
+Table 3. Results on DTU dataset Results include ATE↓ metrics for 15 scans. Best results are bold.
+Methods
+2DGS
+BA-2DGS
+BA-2DGS+Lcorr
+BA-2DGS+Lcorr +Norm. init.
+BA-2DGS+Lcorr +Norm. init.+Lvar
+rel ↓
+7.93
+7.79
+7.41
+7.03
+6.79
+NC ↑
+0.785
+0.788
+0.804
+0.829
+0.834
+ATE ↓
+0.0327
+0.0284
+0.0256
+0.0237
+0.0238
+Table 4. Ablation on DTU dataset, adding one component at a
+time. Results include rel and NC metrics. Best results are bold.
+Figure 6. Effect of increasing the number of input views on
+different metrics.
+6. Limitations and Future Work
+Despite the promising results, several limitations remain,
+which present opportunities for future research. As foundation models keep on improving, better initializations could
+be available in the future. Furthermore, while our approach
+handles a variety of scenes across different datasets, performance may be limited for highly complex geometry, very
+thin structures, or semi-transparent objects (observed for
+the glass bottle in Fig 7 room scene in MipNeRF360 [5]),
+which are common challenges for surface based methods
+especially in the sparse setting. Additionally, our method
+assumes a static scene under consistent lighting. Extending
+it to more dynamic scenarios is one of the challenges we are
+looking forward to exploring.
+Figure 7. Qualitative comparison on MVImgNet and MipNeRF360 datasets from 6 and 12 input images, respectively.
+camera pose accuracy. Extensive evaluations on multiple
+datasets demonstrate that our approach consistently outperforms state-of-the-art methods in reconstruction quality,
+novel view synthesis, and camera pose estimation.
+7. Conclusion
+We addressed the underexplored problem of shape reconstruction from sparse uncalibrated multi-view images. Our
+method leverages foundation models for initial camera and
+geometry estimation, followed by joint optimization of 2D
+Gaussian primitives and camera parameters. The introduction of a variance regularization loss significantly improves the detail and sharpness of reconstructions, while
+our correspondence matching based framework enhances
+8
+References
+sparse point clouds without learning priors. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), 2023. 2
+[13] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan
+Zhuang, Marc Pollefeys, Andreas Geiger, Tat-Jen Cham,
+and Jianfei Cai. Mvsplat: Efficient 3d gaussian splatting
+from sparse multi-view images. In European Conference
+on Computer Vision, pages 370–386. Springer, 2025. 2, 3
+[14] Zhang Chen, Zhong Li, Liangchen Song, Lele Chen, Jingyi
+Yu, Junsong Yuan, and Yi Xu. Neurbf: A neural fields representation with adaptive radial basis functions. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 4182–4194, 2023. 2
+[15] Zezhou Cheng, Carlos Esteves, Varun Jampani, Abhishek
+Kar, Subhransu Maji, and Ameesh Makadia. Lu-nerf:
+Scene and pose estimation by synchronizing local unposed
+nerfs. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 18312–18321, 2023. 3
+[16] Shin-Fang Chng, Sameera Ramasinghe, Jamie Sherrah, and
+Simon Lucey. Gaussian activated neural radiance fields for
+high fidelity reconstruction and pose estimation. In European Conference on Computer Vision, pages 264–280.
+Springer, 2022. 3
+[17] François Darmon, Bénédicte Bascle, Jean-Clément Devaux, Pascal Monasse, and Mathieu Aubry. Improving neural implicit surfaces geometry with patch warping. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 6260–6269, 2022. 2
+[18] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and faster
+training for free. arXiv preprint arXiv:2107.02791, 2021.
+2
+[19] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and faster
+training for free. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+12882–12891, 2022. 1
+[20] John Duchi, Peter Glynn, and Hongseok Namkoong. Statistics of robust optimization: A generalized empirical likelihood approach, 2018. 5
+[21] Haoqiang Fan, Hao Su, and Leonidas J Guibas. A point
+set generation network for 3d object reconstruction from a
+single image. In CVPR, 2017. 2
+[22] Zhiwen Fan, Wenyan Cong, Kairun Wen, Kevin Wang,
+Jian Zhang, Xinghao Ding, Danfei Xu, Boris Ivanovic,
+Marco Pavone, Georgios Pavlakos, et al. Instantsplat: Unbounded sparse-view pose-free gaussian splatting in 40 seconds. arXiv preprint arXiv:2403.20309, 2(3):4, 2024. 2, 3,
+5, 6, 7, 8, 14
+[23] Zhiwen Fan, Kairun Wen, Wenyan Cong, Kevin Wang, Jian
+Zhang, Xinghao Ding, Danfei Xu, Boris Ivanovic, Marco
+Pavone, Georgios Pavlakos, et al. Instantsplat: Sparseview sfm-free gaussian splatting in seconds. arXiv preprint
+arXiv:2403.20309, 2024. 2, 3, 5, 6, 7, 8, 14
+[24] Zhiwen Fan, Jian Zhang, Wenyan Cong, Peihao Wang,
+Renjie Li, Kairun Wen, Shijie Zhou, Achuta Kadambi,
+Zhangyang Wang, Danfei Xu, et al. Large spatial model:
+[1] Henrik Aanæs, Rasmus Ramsbøl Jensen, George Vogiatzis,
+Engin Tola, and Anders Bjorholm Dahl. Large-scale data
+for multiple-view stereopsis. International Journal of Computer Vision, 120(2):153–168, 2016. 2, 5, 6, 7, 14
+[2] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry
+Ulyanov, and Victor Lempitsky. Neural point-based graphics. In Computer Vision–ECCV 2020: 16th European Conference, Glasgow, UK, August 23–28, 2020, Proceedings,
+Part XXII 16, pages 696–712. Springer, 2020. 2
+[3] Shai Avidan and Amnon Shashua. Novel view synthesis
+in tensor space. In Proceedings of IEEE Computer Society
+Conference on Computer Vision and Pattern Recognition,
+pages 1034–1040. IEEE, 1997. 2
+[4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields. 2022
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 5460–5469, 2022. 2
+[5] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5470–5479, 2022. 2, 5, 7, 8, 14
+[6] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Zip-nerf: Anti-aliased
+grid-based neural radiance fields. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 19697–19705, 2023. 2
+[7] Jia-Wang Bian, Wenjing Bian, Victor Adrian Prisacariu,
+and Philip Torr. Porf: Pose residual field for accurate neural
+surface reconstruction. arXiv preprint arXiv:2310.07449,
+2023. 2, 3
+[8] Wenjing Bian, Zirui Wang, Kejie Li, Jia-Wang Bian, and
+Victor Adrian Prisacariu. Nope-nerf: Optimising neural
+radiance field with no pose prior. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 4160–4169, 2023. 3, 5, 14
+[9] Alexandre Boulch and Renaud Marlet. Poco: Point convolution for surface reconstruction. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 6302–6314, 2022. 3
+[10] David Charatan, Sizhe Lester Li, Andrea Tagliasacchi, and
+Vincent Sitzmann. pixelsplat: 3d gaussian splats from image pairs for scalable generalizable 3d reconstruction. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 19457–19467, 2024.
+2, 3
+[11] Pratik Chaudhari, Anna Choromanska, Stefano Soatto,
+Yann LeCun, Carlo Baldassi, Christian Borgs, Jennifer
+Chayes, Levent Sagun, and Riccardo Zecchina. Entropysgd: Biasing gradient descent into wide valleys. Journal of
+Statistical Mechanics: Theory and Experiment, 2019(12):
+124018, 2019. 16
+[12] Chao Chen, Zhizhong Han, and Yu-Shen Liu. Unsupervised inference of signed distance functions from single
+9
+International Conference on Computer Vision, pages 5846–
+5854, 2021. 3
+[40] Yue Jiang, Dantong Ji, Zhizhong Han, and Matthias
+Zwicker. Sdfdiff: Differentiable rendering of signed distance fields for 3d shape optimization. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 1251–1261, 2020. 2
+[41] Hiroharu Kato, Yoshitaka Ushiku, and Tatsuya Harada.
+Neural 3d mesh renderer. In CVPR, 2018. 2
+[42] Petr Kellnhofer, Lars C Jebe, Andrew Jones, Ryan Spicer,
+Kari Pulli, and Gordon Wetzstein. Neural lumigraph rendering. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 4287–
+4297, 2021. 2
+[43] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139–1,
+2023. 1, 2, 3, 5, 14
+[44] Diederik P Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. arXiv preprint arXiv:1412.6980,
+2014. 5
+[45] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale
+scene reconstruction. ACM Transactions on Graphics
+(ToG), 36(4):1–13, 2017. 2, 5, 7, 14
+[46] Aldo Laurentini. The visual hull concept for silhouettebased image understanding. IEEE Transactions on pattern
+analysis and machine intelligence, 16(2):150–162, 1994. 1
+[47] Vincent Leroy, Yohann Cabon, and Jérôme Revaud.
+Grounding image matching in 3d with mast3r. arXiv
+preprint arXiv:2406.09756, 2024. 1, 2, 3, 6, 7, 8, 15, 16
+[48] Qian Li, Franck Multon, and Adnane Boukhayma. Learning generalizable light field networks from few images.
+In ICASSP 2023-2023 IEEE International Conference on
+Acoustics, Speech and Signal Processing (ICASSP), pages
+1–5. IEEE, 2023. 3
+[49] Qian Li, Franck Multon, and Adnane Boukhayma. Regularizing neural radiance fields from sparse rgb-d inputs. In
+2023 IEEE International Conference on Image Processing
+(ICIP), pages 2320–2324. IEEE, 2023. 2
+[50] Yixun Liang, Hao He, and Yingcong Chen. Retr: Modeling
+rendering via transformer for generalizable neural surface
+reconstruction. Advances in Neural Information Processing
+Systems, 36, 2024. 3
+[51] Chen-Hsuan Lin, Wei-Chiu Ma, Antonio Torralba, and Simon Lucey. Barf: Bundle-adjusting neural radiance fields.
+In Proceedings of the IEEE/CVF international conference
+on computer vision, pages 5741–5751, 2021. 3
+[52] Tianqi Liu, Guangcong Wang, Shoukang Hu, Liao Shen,
+Xinyi Ye, Yuhang Zang, Zhiguo Cao, Wei Li, and Ziwei
+Liu. Fast generalizable gaussian splatting reconstruction
+from multi-view stereo. arXiv preprint arXiv:2405.12218,
+2024. 3
+[53] Xiaoxiao Long, Cheng Lin, Peng Wang, Taku Komura, and
+Wenping Wang. Sparseneus: Fast generalizable neural surface reconstruction from sparse views. In European Conference on Computer Vision, pages 210–227. Springer, 2022.
+1, 3, 5, 6, 7
+End-to-end unposed images to semantic 3d. arXiv preprint
+arXiv:2410.18956, 2024. 2
+[25] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi
+Wang, Tao Liu, Zhilin Pei, Hengjie Li, Xingcheng Zhang,
+and Bo Dai. Flashgs: Efficient 3d gaussian splatting for
+large-scale and high-resolution rendering. arXiv preprint
+arXiv:2408.07967, 2024. 2
+[26] Pierre Foret, Ariel Kleiner, Hossein Mobahi, and
+Behnam Neyshabur. Sharpness-aware minimization for
+efficiently improving generalization.
+arXiv preprint
+arXiv:2010.01412, 2020. 16
+[27] Yang Fu, Sifei Liu, Amey Kulkarni, Jan Kautz, Alexei A
+Efros, and Xiaolong Wang. Colmap-free 3d gaussian splatting. arXiv preprint arXiv:2312.07504, 2023. 3, 5, 14
+[28] Xiaodong Gu, Zhiwen Fan, Siyu Zhu, Zuozhuo Dai,
+Feitong Tan, and Ping Tan. Cascade cost volume for highresolution multi-view stereo and stereo matching. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 2495–2504, 2020. 6, 7
+[29] Sepp Hochreiter and Jürgen Schmidhuber. Flat minima.
+Neural computation, 9(1):1–42, 1997. 15, 16
+[30] Sunghwan Hong, Jaewoo Jung, Heeseong Shin, Jisang
+Han, Jiaolong Yang, Chong Luo, and Seungryong Kim.
+Pf3plat: Pose-free feed-forward 3d gaussian splatting.
+arXiv preprint arXiv:2410.22128, 2024. 2
+[31] Berthold KP Horn. Shape from shading: A method for obtaining the shape of a smooth opaque object from one view.
+1970. 1
+[32] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH 2024 Conference Papers, pages 1–11, 2024. 1, 2, 3, 4, 5
+[33] Jiahui Huang, Zan Gojcic, Matan Atzmon, Or Litany, Sanja
+Fidler, and Francis Williams. Neural kernel surface reconstruction. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 4369–
+4379, 2023. 3
+[34] Peter J Huber. Robust estimation of a location parameter. In
+Breakthroughs in statistics: Methodology and distribution,
+pages 492–518. Springer, 1992. 4
+[35] Ajay Jain, Matthew Tancik, and Pieter Abbeel. Putting nerf
+on a diet: Semantically consistent few-shot view synthesis.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 5885–5894, 2021. 2
+[36] Shubhendu Jena, Franck Multon, and Adnane Boukhayma.
+Neural mesh-based graphics. In European Conference on
+Computer Vision, pages 739–757. Springer, 2022. 2
+[37] Shubhendu Jena, Franck Multon, and Adnane Boukhayma.
+Geotransfer:
+Generalizable few-shot multi-view reconstruction via transfer learning.
+arXiv preprint
+arXiv:2408.14724, 2024. 3
+[38] Shubhendu Jena, Shishir Reddy Vutukur, and Adnane
+Boukhayma. Sparsplat: Fast multi-view reconstruction
+with generalizable 2d gaussian splatting. arXiv, 2025. 3
+[39] Yoonwoo Jeong, Seokjun Ahn, Christopher Choy, Anima
+Anandkumar, Minsu Cho, and Jaesik Park. Self-calibrating
+neural radiance fields. In Proceedings of the IEEE/CVF
+10
+spatial adversaries. arXiv preprint arXiv:2408.15114, 2024.
+2
+[67] Amine Ouasfi and Adnane Boukhayma. Robustifying generalizable implicit shape networks with a tunable nonparametric model. Advances in Neural Information Processing Systems, 36, 2024. 3
+[68] Amine Ouasfi and Adnane Boukhayma. Unsupervised occupancy learning from sparse point cloud. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 21729–21739, 2024. 2
+[69] Amine Ouasfi, Shubhendu Jena, Eric Marchand, and Adnane Boukhayma. Toward robust neural reconstruction
+from sparse point sets. arXiv preprint arXiv:2412.16361,
+2024. 2
+[70] Eric Penner and Li Zhang. Soft 3D Reconstruction for View
+Synthesis. ACM Transactions on Graphics (TOG), 36(6):
+1–11, 2017. 2
+[71] Kevin Raj, Christopher Wewer, Raza Yunus, Eddy Ilg,
+and Jan Eric Lenssen. Spurfies: Sparse surface reconstruction using local geometry priors. arXiv preprint
+arXiv:2408.16544, 2024. 1, 3, 6, 7
+[72] Yufan Ren, Tong Zhang, Marc Pollefeys, Sabine Süsstrunk,
+and Fangjinhua Wang. Volrecon: Volume rendering of
+signed ray distance functions for generalizable multi-view
+reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+16685–16695, 2023. 3
+[73] Johannes L Schonberger and Jan-Michael Frahm.
+Structure-from-motion revisited.
+In Proceedings of
+the IEEE conference on computer vision and pattern
+recognition, pages 4104–4113, 2016. 2, 6
+[74] Johannes L Schonberger and Jan-Michael Frahm.
+Structure-from-motion revisited.
+In Proceedings of
+the IEEE conference on computer vision and pattern
+recognition, pages 4104–4113, 2016. 1
+[75] Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys, and Jan-Michael Frahm. Pixelwise view selection for
+unstructured multi-view stereo. In European Conference on
+Computer Vision (ECCV), 2016. 1
+[76] Steven M Seitz and Charles R Dyer. Photorealistic Scene
+Reconstruction by Voxel Coloring, 2002. US Patent
+6,363,170. 2
+[77] Pratul P Srinivasan, Ben Mildenhall, Matthew Tancik,
+Jonathan T Barron, Richard Tucker, and Noah Snavely.
+Lighthouse: Predicting Lighting Volumes for SpatiallyCoherent Illumination. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 8080–8089, 2020. 2
+[78] Andrea Tagliasacchi and Ben Mildenhall. Volume rendering digest (for nerf), 2022. 4
+[79] Prune Truong, Marie-Julie Rakotosaona, Fabian Manhardt,
+and Federico Tombari. Sparf: Neural radiance fields from
+sparse and noisy poses. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 4190–4200, 2023. 2, 3, 4, 5, 14
+[80] Guangcong Wang, Zhaoxi Chen, Chen Change Loy, and Ziwei Liu. Sparsenerf: Distilling depth ranking for few-shot
+[54] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin
+Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d
+gaussians for view-adaptive rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 20654–20664, 2024. 2
+[55] Baorui Ma, Yu-Shen Liu, Matthias Zwicker, and Zhizhong
+Han. Surface reconstruction from point clouds by learning
+predictive context priors. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition,
+pages 6326–6337, 2022. 3
+[56] David JC MacKay. A practical bayesian framework for
+backpropagation networks. Neural computation, 4(3):448–
+472, 1992. 16
+[57] Andreas Meuleman, Yu-Lun Liu, Chen Gao, Jia-Bin
+Huang, Changil Kim, Min H Kim, and Johannes Kopf. Progressively optimized local radiance fields for robust view
+synthesis. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 16539–
+16548, 2023. 3
+[58] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG), 38(4):1–14, 2019. 2
+[59] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+1, 2
+[60] Youngju Na, Woo Jae Kim, Kyu Beom Han, Suhyeon Ha,
+and Sung-Eui Yoon. Uforecon: Generalizable sparse-view
+surface reconstruction from arbitrary and unfavorable sets.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 5094–5104, 2024. 3,
+6, 7
+[61] Michael Niemeyer, Lars Mescheder, Michael Oechsle,
+and Andreas Geiger. Differentiable volumetric rendering:
+Learning implicit 3d representations without 3d supervision. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3504–3515,
+2020. 2
+[62] Michael Niemeyer, Jonathan T Barron, Ben Mildenhall,
+Mehdi SM Sajjadi, Andreas Geiger, and Noha Radwan.
+Regnerf: Regularizing neural radiance fields for view synthesis from sparse inputs. arXiv preprint arXiv:2112.00724,
+2021. 2
+[63] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+fields for multi-view reconstruction. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 5589–5599, 2021. 2
+[64] Amine Ouasfi and Adnane Boukhayma. Few’zero level
+set’-shot learning of shape signed distance functions in feature space. In ECCV, 2022. 3
+[65] Amine Ouasfi and Adnane Boukhayma. Mixing-denoising
+generalizable occupancy networks. 3DV, 2024. 3
+[66] Amine Ouasfi and Adnane Boukhayma. Few-shot unsupervised implicit neural shape representation learning with
+11
+[94] Haofei Xu, Songyou Peng, Fangjinhua Wang, Hermann
+Blum, Daniel Barath, Andreas Geiger, and Marc Pollefeys.
+Depthsplat: Connecting gaussian splatting and depth. arXiv
+preprint arXiv:2410.13862, 2024. 2
+[95] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin
+Shu, Kalyan Sunkavalli, and Ulrich Neumann. Pointnerf: Point-based neural radiance fields. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5438–5448, 2022. 2
+[96] Jiawei Yang, Marco Pavone, and Yue Wang. Freenerf: Improving few-shot neural rendering with free frequency regularization. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 8254–
+8263, 2023. 2
+[97] Yao Yao, Zixin Luo, Shiwei Li, Jingyang Zhang, Yufan
+Ren, Lei Zhou, Tian Fang, and Long Quan. Blendedmvs:
+A large-scale dataset for generalized multi-view stereo networks. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 1790–1799,
+2020. 1, 2, 5, 14
+[98] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and
+appearance. Advances in Neural Information Processing
+Systems, 33:2492–2502, 2020. 2
+[99] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman.
+Volume rendering of neural implicit surfaces. Advances
+in Neural Information Processing Systems, 34:4805–4815,
+2021. 1, 2
+[100] Mae Younes, Amine Ouasfi, and Adnane Boukhayma.
+Sparsecraft: Few-shot neural reconstruction through stereopsis guided geometric linearization. In European Conference on Computer Vision, pages 37–56. Springer, 2024. 2,
+6, 7
+[101] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo
+Kanazawa. pixelnerf: Neural radiance fields from one or
+few images. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 4578–
+4587, 2021. 2
+[102] Xianggang Yu, Mutian Xu, Yidan Zhang, Haolin Liu,
+Chongjie Ye, Yushuang Wu, Zizheng Yan, Chenming Zhu,
+Zhangyang Xiong, Tianyou Liang, et al. Mvimgnet: A
+large-scale dataset of multi-view images. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern recognition, pages 9150–9161, 2023. 1, 2, 5, 7, 14
+[103] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction. Advances in neural information processing systems,
+35:25018–25032, 2022. 1
+[104] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and
+Andreas Geiger. Mip-splatting: Alias-free 3d gaussian
+splatting. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 19447–
+19456, 2024. 2
+[105] Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian
+opacity fields: Efficient and compact surface reconstruction
+novel view synthesis. arXiv preprint arXiv:2303.16196,
+2023. 1, 2
+[81] Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea
+Vedaldi, Christian Rupprecht, and David Novotny. Vggt:
+Visual geometry grounded transformer. In Proceedings of
+the Computer Vision and Pattern Recognition Conference,
+pages 5294–5306, 2025. 15
+[82] Nanyang Wang, Yinda Zhang, Zhuwen Li, Yanwei Fu, Wei
+Liu, and Yu-Gang Jiang. Pixel2mesh: Generating 3d mesh
+models from single rgb images. In ECCV, 2018. 2
+[83] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt,
+Taku Komura, and Wenping Wang. Neus: Learning neural
+implicit surfaces by volume rendering for multi-view reconstruction. arXiv preprint arXiv:2106.10689, 2021. 1,
+2
+[84] Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris
+Chidlovskii, and Jerome Revaud. Dust3r: Geometric 3d
+vision made easy. In Proceedings of the IEEE/CVF Confesrence on Computer Vision and Pattern Recognition, pages
+20697–20709, 2024. 1, 2, 3, 5
+[85] Yiqun Wang, Ivan Skorokhodov, and Peter Wonka.
+Hf-neus: Improved surface reconstruction using highfrequency details. Advances in Neural Information Processing Systems, 35:1966–1978, 2022. 1
+[86] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P
+Simoncelli. Image quality assessment: from error visibility
+to structural similarity. IEEE transactions on image processing, 13(4):600–612, 2004. 5
+[87] Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen, and Victor Adrian Prisacariu. Nerf–: Neural radiance fields without
+known camera parameters. 2021. 3, 5, 14
+[88] Robert J Woodham. Photometric method for determining
+surface orientation from multiple images. Optical engineering, 19(1):139–144, 1980. 1
+[89] Rundi Wu, Ben Mildenhall, Philipp Henzler, Keunhong
+Park, Ruiqi Gao, Daniel Watson, Pratul P Srinivasan, Dor
+Verbin, Jonathan T Barron, Ben Poole, et al. Reconfusion: 3d reconstruction with diffusion priors. arXiv preprint
+arXiv:2312.02981, 2023. 2
+[90] Tong Wu, Jiaqi Wang, Xingang Pan, Xudong Xu, Christian Theobalt, Ziwei Liu, and Dahua Lin. Voxurf: Voxelbased efficient and accurate neural surface reconstruction.
+In ICLR, 2023. 1
+[91] Haolin Xiong, Sairisheek Muttukuru, Rishi Upadhyay,
+Pradyumna Chari, and Achuta Kadambi. Sparsegs: Realtime 360 sparse view synthesis using gaussian splatting.
+arXiv preprint arXiv:2312.00206, 2023. 3
+[92] Chao Xu, Ang Li, Linghao Chen, Yulin Liu, Ruoxi Shi, Hao
+Su, and Minghua Liu. Sparp: Fast 3d object reconstruction and pose estimation from sparse views. In European
+Conference on Computer Vision, pages 143–163. Springer,
+2024. 1, 6, 14, 15
+[93] Dejia Xu, Yifan Jiang, Peihao Wang, Zhiwen Fan,
+Humphrey Shi, and Zhangyang Wang. Sinnerf: Training
+neural radiance fields on complex scenes from a single image. In European Conference on Computer Vision, pages
+736–753. Springer, 2022. 2
+12
+in unbounded scenes. arXiv preprint arXiv:2404.10772,
+2024. 1, 2
+[106] Baowen Zhang, Chuan Fang, Rakesh Shrestha, Yixun
+Liang, Xiaoxiao Long, and Ping Tan. Rade-gs: Rasterizing depth in gaussian splatting.
+arXiv preprint
+arXiv:2406.01467, 2024. 2
+[107] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
+Koltun. Nerf++: Analyzing and improving neural radiance
+fields. arXiv preprint arXiv:2010.07492, 2020. 15
+[108] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 586–595, 2018. 5
+[109] Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3d:
+A modern library for 3d data processing. arXiv preprint
+arXiv:1801.09847, 2018. 3, 6
+[110] Zehao Zhu, Zhiwen Fan, Yifan Jiang, and Zhangyang
+Wang. Fsgs: Real-time few-shot view synthesis using gaussian splatting. arXiv preprint arXiv:2312.00451, 2023. 1,
+3, 6, 14
+13
+Sparfels: Fast Reconstruction from Sparse Unposed Imagery
+– Supplementary Material –
+Shubhendu Jena* , Amine Ouasfi* , Mae Younes, Adnane Boukhayma
+Inria, Univ. Rennes, CNRS, IRISA
+Method
+A. Evaluation of Novel View Synthesis and
+Camera pose estimation
+COLMAP + 3DGS [43]
+COLMAP + FSGS [110]
+NoPe-NeRF [8]
+CF-3DGS [27]
+NeRF-mm [87]
+SPARF [79]
+Instantsplat-S [23]
+Instantsplat-XL [23]
+Ours
+In this section, we provide qualitative and quantitative comparisons on the Tanks and Temples [45], MipNeRF360 [5]
+datasets and MVImgNet [102] datasets for both novel view
+synthesis and camera pose estimation metrics. Tab 5
+presents quantitative results for these experiments on MipNeRF360 [5] and MVImgNet [102] with qualitative results
+presented in Fig 8 and Fig 9. For Tanks and Temples [45],
+quantitative and qualitative results are reported in Tab 6 and
+Fig 10 respectively. We observe that NoPe-NeRF [8] and
+NeRF-mm [87] suffer markedly in their novel view performance and camera pose estimation metrics. Being implicit, volumetric rendering methods, they also suffer from
+slow training and inference times. CF-3DGS [27] also encounters artifacts when rendering from novel viewpoints,
+stemming from its complex optimization pipeline and erroneous pose estimations. InstantSplat [22, 23] variants provide good performance, but still lag behind our method in
+most metrics, particularly in the challenging 3-view setting.
+For the Tanks and Temples comparison in Tab 6, Fig 10,
+we also outperform SPARF [79] by a sizeable margin on all
+metrics, while requiring order of magnitudes less training
+and inference time, since it takes around 10 hours to train
+on a single scene and needs more than a minute to render a
+single image during inference, owing to its volumetric rendering framework. Our method significantly outperforms
+all baselines on various datasets in terms of SSIM, LPIPS
+(novel view synthesis metrics) and ATE (camera pose estimation metric), demonstrating its robustness to complex
+scenes with challenging lighting conditions.
+Method
+NoPe-NeRF [8]
+CF-3DGS [27]
+NeRF-mm [87]
+Instantsplat-S [22, 23]
+Instantsplat-XL [22, 23]
+Ours
+SSIM (MVImgNet)
+3-view 6-view 12-view
+0.4326 0.4329 0.4686
+0.3414 0.3544 0.3655
+0.3752 0.3685 0.3718
+0.5489 0.6835 0.7050
+0.5628 0.6933 0.7321
+0.8313 0.8801 0.9008
+LPIPS (MVImgNet)
+3-view 6-view 12-view
+0.6168 0.6614 0.6257
+0.4520 0.4326 0.4492
+0.6421 0.6252 0.6020
+0.3941 0.2980 0.3033
+0.3688 0.2611 0.2421
+0.2215 0.1658 0.1410
+ATE (MVImgNet) ↓
+3-view 6-view 12-view
+0.2780 0.1740 0.1493
+0.1593 0.1981 0.1243
+0.2721 0.2376 0.1529
+0.0184 0.0259 0.0165
+0.0184 0.0259 0.0164
+0.0273 0.0244 0.0172
+3-view
+0.3755
+0.5701
+0.4570
+0.4066
+0.4019
+0.5751
+0.7624
+0.7615
+0.8752
+SSIM↑
+6-view 12-view
+0.5917 0.7163
+0.7752 0.8479
+0.5067 0.6096
+0.4690 0.5077
+0.4308 0.4677
+0.6731 0.5708
+0.8300 0.8413
+0.8453 0.8785
+0.9020 0.9180
+3-view
+0.5130
+0.3465
+0.6168
+0.4520
+0.6421
+0.4021
+0.1844
+0.1634
+0.1623
+LPIPS↓
+6-view 12-view
+0.3433 0.2505
+0.1927 0.1477
+0.5780 0.5067
+0.4219 0.4189
+0.6252 0.6020
+0.3275 0.4310
+0.1579 0.1654
+0.1173 0.1068
+0.1283 0.1050
+3-view
+0.2828
+0.1937
+0.2721
+0.0568
+0.0191
+0.0189
+0.0150
+ATE↓
+6-view
+0.1431
+0.1572
+0.2329
+0.0554
+0.0172
+0.0164
+0.0174
+12-view
+0.1029
+0.1031
+0.1529
+0.0385
+0.0110
+0.0101
+0.0078
+Table 6. Performance comparison of different methods across
+SSIM, LPIPS, and ATE metrics for 3-view, 6-view, and 12-view
+settings on the Tanks and Temples dataset.
+Figure 8. Qualitative comparison of novel view synthesis on
+MipNeRF360 dataset from 12 input images.
+leverages 2D diffusion models for efficient 3D reconstruction and pose estimation from unposed sparse-view images.
+For comparison using 3 input images, our method achieves
+mesh reconstructions with greater fidelity to the input images, as seen in the comparisons. We also provide video
+results depicting our reconstructions and novel view results
+on the DTU [1] and BlendedMVS [97] datasets and their
+comparison to other methods.
+MipNeRF360 (12 Training Views)
+SSIM PSNR LPIPS ATE ↓
+0.3580 16.16 0.6867 0.2374
+0.2443 13.17 0.6098 0.2263
+0.2003 11.53 0.7238 0.2401
+0.4647 17.68 0.5027 0.2161
+0.4398 17.23 0.4486 0.2162
+0.8168 26.21 0.2199 0.2067
+Table 5. NVS Performance Comparison of Different Methods on
+MVImgNet and MipNeRF360
+B. Additional qualitative comparison on 3D reconstruction
+C. Color variance plot
+We also provide a qualitative comparison in Fig. 11 to
+SpaRP [92] on the DTU [1] dataset, a recent method that
+We plot the average color variance over optimization iterations (Fig. 12) for models w/ and w/o variance loss. Models with the loss activated effectively maintain lower color
+* Equal contribution.
+14
+Figure 9. Qualitative comparison of novel view synthesis on
+MVImgNet dataset from 3 input images.
+Figure 11. Qualitative comparison with SpaRP [92] on DTU
+from 3 input images.
+0.2
+w/o var loss
+w/ var loss
+0.15
+0.1
+0.05
+0
+Figure 10. Qualitative comparison of novel view synthesis on
+Tanks and Temples dataset from 3 input images.
+0
+100
+200
+300
+400
+500
+600
+700
+800
+900
+1000
+steps
+Figure 12. Color variance. The variance loss keeps color variance
+lower, encouraging stable, robust convergence.
+variance consistently, which aligns with our goal of encouraging stable, low-uncertainty renderings. This supports the
+effectiveness of the proposed loss in guiding convergence
+toward robust geometry.
+images but generalizes poorly (see Sec.3 in [107]). This
+issue is exacerbated when camera poses are optimized during training, introducing additional noise into the supervision. In Gaussian Splatting, scene geometry is encoded
+through splat parameters defining the 3D density. Among
+the many plausible geometries, we seek to bias the model
+toward those that remain predictive even under small perturbations, i.e. robust solutions less sensitive to noisy supervision signals. To formalize this, we minimize the worst-case
+deviation in rendered color under perturbations to the geometric density field (Eq. 8), yielding a variance regularization loss (Eq. 10) that penalizes color variance along rays.
+From a learning-theoretic perspective, this can be interpreted as seeking flat minima [29] in the space of densities,
+an idea supported by arguments from both statistical and
+deep learning viewpoints, and shown to be effective across
+D. Alternative priors
+This example (Fig. 13) demonstrates that initializing our
+framework with VGGT [81], a recent state-of-the-art feedforward method that avoids the global optimization step of
+MASt3R [47] also produces successful results. This highlights the modularity of our approach and its compatibility
+with different geometric priors.
+E. Variance loss motivation
+Our goal is to hedge against epistemic uncertainty in geometry estimation inherent to the unposed surface reconstruction problem. Under sparse-view supervision, the rendering objective admits many geometries that fit the training
+15
+Figure 13. Alternative prior. VGGT initialization shows successful results (3 input images), demonstrating our framework’s
+modularity.
+a range of machine learning applications [11, 26, 29, 56].
+Empirically, this leads to more stable and consistent reconstructions from sparse views (Fig. 5, Tab. 4).
+F. Prior failures
+The example below illustrates a typical scenario where
+MASt3R’s [47] feed-forward geometry prediction struggles: reconstruction from only 6 images without known
+camera poses. Challenging regions such as texture-less
+surfaces, highly reflective materials (e.g., glass doors and
+shiny faucets), and thin structures often lead to noisy or incomplete results. In contrast, our method recovers plausible geometry in these cases thanks to robust test-time optimization, which refines both the pose and the reconstructed
+shape despite imperfect initializations.
+Figure 14. Robustness to MASt3R failure (3 input images). Our
+method recovers geometry where MASt3R struggles.
+16

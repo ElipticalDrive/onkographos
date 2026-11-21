@@ -1,0 +1,148 @@
+# GaussianPro
+
+Also called: 3D Gaussian Splatting with Progressive Propagation
+
+## Overview
+GaussianPro is a training optimization method for 3D Gaussian Splatting that mitigates reconstruction artifacts (such as "popping" Gaussians) and improves geometric fidelity by introducing a progressive propagation strategy [S1, S2]. Unlike standard densification which relies solely on position gradients, GaussianPro utilizes propagated depth and normal maps from neighboring views to guide the growth and adjustment of Gaussians [S2]. It sets itself apart by explicitly enforcing normal consistency between neighboring views and introducing planar constraints, ensuring that the discrete Gaussian representation aligns more closely with continuous surface geometry [S1, S2].
+
+## How it works
+GaussianPro operates by integrating geometric priors into the densification and optimization pipeline. It generates initial depth and normal maps, propagates these values across neighboring pixels using patch matching, and uses the propagated information to identify regions requiring new Gaussians [S2].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Set of 3D Gaussians $\mathcal{G} = \{g_i\}$, where each $g_i$ is defined by center $\mathbf{c}_i$, covariance $\Sigma_i$ (or rotation $R_i$ and scale $S_i$), opacity $\alpha_i$, and spherical harmonics coefficients $C_i$.
+    *   Input images from multiple views.
+    *   Initial depth and normal estimates (e.g., from a monocular estimator or SfM).
+*   **Outputs:**
+    *   Optimized set of 3D Gaussians $\mathcal{G}'$ with improved geometric alignment and reduced artifacts.
+
+### Data Structures
+The method relies on standard 3D Gaussian Splatting data structures but augments the densification logic with geometric filters.
+*   **Gaussian Attributes:** Standard fields: $\mathbf{c} \in \mathbb{R}^3$, $\mathbf{q} \in \mathbb{R}^4$ (quaternion), $\mathbf{s} \in \mathbb{R}^3$ (scale), $\alpha \in \mathbb{R}$, $\mathbf{c}_{sh} \in \mathbb{R}^{K \times 3}$ (SH coefficients).
+*   **Geometric Maps:** Depth map $D \in \mathbb{R}^{H \times W}$ and Normal map $N \in \mathbb{R}^{H \times W \times 3}$ for each view.
+*   **Propagated Maps:** $D_{prop}$ and $N_{prop}$, generated via patch matching.
+
+### Numbered Steps
+
+1.  **Generate Initial Geometric Priors:**
+    Compute initial depth $D$ and normal $N$ maps for each input view. These serve as the source for propagation [S2].
+
+2.  **Patch Matching Propagation:**
+    For each pixel $p$ in a target view, propagate depth and normal information from neighboring pixels in adjacent views. This generates propagated depth $D_{prop}(p)$ and normal $N_{prop}(p)$ [S2].
+    *   *Note:* Patch matching involves searching for corresponding patches in neighboring views to fill in missing or unreliable depth/normal values [S2].
+
+3.  **Geometric Filtering and Selection:**
+    Identify pixels $p$ that require additional Gaussians. This is done by comparing the rendered depth/normal with the propagated depth/normal or by detecting regions where the current Gaussian density is insufficient relative to the geometric detail [S2].
+    *   Pixels with high discrepancy or low coverage are marked for densification [S2].
+
+4.  **Gaussian Initialization:**
+    Initialize new Gaussians at the locations corresponding to the selected pixels. The initial position $\mathbf{c}_{new}$ is derived from the propagated depth $D_{prop}(p)$ and the camera projection. The initial orientation is aligned with the propagated normal $N_{prop}(p)$ [S2].
+
+5.  **Optimization with Geometric Losses:**
+    During training, minimize the total loss $\mathcal{L}_{total}$, which includes photometric loss and specific geometric terms [S1, S2]:
+    $$ \mathcal{L}_{total} = \mathcal{L}_{rgb} + \lambda_{planar} \mathcal{L}_{planar} + \lambda_{norm} \mathcal{L}_{norm} $$
+    *   $\mathcal{L}_{rgb}$: Standard photometric reconstruction loss (e.g., L1 or LPIPS).
+    *   $\mathcal{L}_{planar}$: Planar loss that encourages Gaussians to lie on planar surfaces, ensuring they match real surfaces more closely [S2].
+    *   $\mathcal{L}_{norm}$: Normal consistency loss enforcing alignment between the Gaussian's rendered normal and the propagated normal $N_{prop}$ [S2].
+
+### Formulas and Definitions
+
+*   **Normal Consistency Loss ($\mathcal{L}_{norm}$):**
+    Enforces consistency between the Gaussian's rendered normal $\mathbf{n}_{rendered}$ and the propagated normal $\mathbf{n}_{prop}$ [S2].
+    $$ \mathcal{L}_{norm} = \mathcal{L}_{1}(\mathbf{n}_{rendered}, \mathbf{n}_{prop}) + \mathcal{L}_{angular}(\mathbf{n}_{rendered}, \mathbf{n}_{prop}) $$
+    Where $\mathcal{L}_{1}$ is the L1 distance and $\mathcal{L}_{angular}$ is the angular difference (e.g., $1 - \mathbf{n}_{rendered} \cdot \mathbf{n}_{prop}$) [S2].
+
+*   **Planar Loss ($\mathcal{L}_{planar}$):**
+    Encourages Gaussians to conform to planar structures. While the exact formula is not explicitly detailed in the provided snippets, it is described as a constraint ensuring Gaussians match real surfaces more closely [S2]. Typically, this involves minimizing the distance of Gaussian centers to a fitted plane or penalizing deviations from planarity within local neighborhoods [S2].
+
+*   **Progressive Propagation:**
+    The strategy updates Gaussians progressively by considering normal consistency between neighboring views [S1]. This implies that the propagation and densification steps are not one-off but integrated into the iterative training loop, allowing Gaussians to grow and adjust based on evolving geometric estimates [S1, S2].
+
+### Parameters
+*   $\lambda_{planar}$: Weight for the planar loss. Not given in the sources.
+*   $\lambda_{norm}$: Weight for the normal consistency loss. Not given in the sources.
+*   Patch matching window size: Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Popping Artifacts:** Standard 3DGS can suffer from "popping" Gaussians due to discrete depth sorting. GaussianPro mitigates this by ensuring consistent sorting and geometric alignment, though it does not replace tile-based sorting (like StopThePop) if used in conjunction [S1].
+*   **Propagation Errors:** If the initial depth/normal estimates are noisy, patch matching may propagate errors. Geometric filtering is used to identify reliable pixels, but poor initial priors can still lead to misaligned Gaussians [S2].
+*   **Degenerate Input:** In textureless or reflective regions, depth and normal estimation may fail. The method relies on the robustness of the patch matching and geometric filtering to handle these cases [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_pro_training_step(gaussians, images, cameras, initial_depth, initial_normal):
+    """
+    One step of GaussianPro training.
+    """
+    # 1. Render current Gaussians
+    rendered_image, rendered_depth, rendered_normal = render(gaussians, cameras)
+    
+    # 2. Propagate geometric information from neighboring views
+    # Assuming 'images' contains multiple views
+    propagated_depth, propagated_normal = patch_match_propagation(
+        initial_depth, initial_normal, cameras, images
+    )
+    
+    # 3. Compute Photometric Loss
+    loss_rgb = compute_photometric_loss(rendered_image, target_image)
+    
+    # 4. Compute Normal Consistency Loss
+    # Align rendered normal with propagated normal
+    loss_norm = l1_loss(rendered_normal, propagated_normal) + \
+                angular_loss(rendered_normal, propagated_normal)
+    
+    # 5. Compute Planar Loss
+    # Encourage Gaussians to lie on planes
+    loss_planar = compute_planar_loss(gaussians)
+    
+    # 6. Total Loss
+    total_loss = loss_rgb + lambda_norm * loss_norm + lambda_planar * loss_planar
+    
+    # 7. Backpropagate and Update Gaussians
+    gaussians.backward(total_loss)
+    gaussians.update()
+    
+    # 8. Densification based on Geometric Filtering
+    # Identify pixels needing new Gaussians
+    pixels_to_densify = geometric_filter(
+        rendered_depth, propagated_depth, 
+        rendered_normal, propagated_normal
+    )
+    
+    for p in pixels_to_densify:
+        # Initialize new Gaussian using propagated info
+        new_gaussian = initialize_gaussian_from_propagation(
+            p, propagated_depth[p], propagated_normal[p], cameras
+        )
+        gaussians.add(new_gaussian)
+        
+    return total_loss
+```
+
+## Subtopics
+
+### Surface and Geometry Alignment
+The broader family of methods that align Gaussians with geometric priors. GaussianPro is a specific implementation within this family that uses progressive propagation [9267-surface-and-geometry-alignment].
+
+### NeuSG
+Uses neural implicit surfaces to guide Gaussian placement, differing from GaussianPro's explicit propagation of depth/normal maps [9172-neusg.md].
+
+### GSDF
+Uses a signed distance function (SDF) to guide densification, whereas GaussianPro uses propagated depth and normal maps [9205-gsdf.md].
+
+## Operating characteristics
+*   **Time Complexity:** Increased per-step time due to patch matching propagation and additional loss computations (normal and planar) [S2].
+*   **Memory Complexity:** Standard 3DGS memory overhead, plus storage for depth/normal maps and propagated values [S2].
+*   **Strengths:** Reduces popping artifacts, improves geometric accuracy, and handles complex surfaces better than standard 3DGS [S1, S2].
+*   **Limitations:** Relies on the quality of initial depth/normal estimates; patch matching can be computationally expensive [S2].
+*   **When to Use:** When high geometric fidelity is required, or when standard 3DGS produces artifacts like popping or poor surface reconstruction [S1, S2].
+
+## Background
+GaussianPro was introduced as a method to improve the reconstruction quality of 3D Gaussian Splatting by addressing the lack of continuity in the frame-by-frame discrete definition [S1]. It builds on the observation that physical-based constraints and geometric priors can mitigate artifacts [S1]. The method was cited in surveys of recent advances in 3D Gaussian Splatting [S1] and compression methods [S2].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26

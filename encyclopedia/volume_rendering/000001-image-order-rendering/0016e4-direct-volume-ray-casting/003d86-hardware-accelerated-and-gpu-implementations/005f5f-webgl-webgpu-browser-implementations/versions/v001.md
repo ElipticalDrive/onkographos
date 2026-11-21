@@ -1,0 +1,38 @@
+# WebGL/WebGPU Browser Implementations
+
+Also called: Browser-based GPU Volume Rendering
+
+## Overview
+This family implements direct volume ray casting within web browsers using WebGL or WebGPU APIs, bypassing native desktop applications to enable interactive visualization in standard web pages. It solves the problem of rendering volumetric data without plugins by adapting GPU-accelerated ray marching to browser-specific constraints, such as the lack of 3D texture support in WebGL 1.0 or the strict memory alignment rules of WebGPU. It differs from desktop GPU implementations by prioritizing compatibility with web standards and handling browser-specific data encoding workarounds, such as packing depth into RGBA channels or using 2D texture atlases for volumetric slices.
+
+## Shared principles
+All methods in this family implement the emission-absorption optical model defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). The core pipeline for each pixel consists of ray generation, hardware-accelerated sampling, classification, and compositing [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md).
+
+1.  **Ray Generation**: Rays are generated per-pixel, typically by computing ray parameters from camera matrices in vertex/fragment shaders or by rendering the volume's bounding box geometry to determine entry/exit points [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md).
+2.  **Hardware-Accelerated Sampling**: Scalar volume values are sampled using the GPU's texture hardware. The volume data is stored in 3D texture memory, and the texture engine performs trilinear interpolation of the eight surrounding voxels in parallel, avoiding manual shader interpolation [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md).
+3.  **Fragment Shader Compositing**: The ray marching loop, including classification and front-to-back compositing, is executed within the fragment shader [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md). The standard compositing equation updates accumulated color $C'$ and opacity $\alpha'$:
+    $$
+    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+    $$
+    $$
+    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+    $$
+4.  **Early Ray Termination (ERT)**: Rays are terminated when accumulated opacity exceeds a threshold (typically 0.95 or 1.0) to optimize performance [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md).
+
+## Subtopics
+
+### [WebGL Multi-pass Ray-casting with 3D Geometry Intersection](6575-webgl-multi-pass-ray-casting-with-3d-geometry-intersection.md)
+This method is a WebGL-based volume rendering algorithm that supports the coexistence of 3D triangular meshes and volumetric datasets by using a multi-pass rendering pipeline to handle occlusion, blending, and ray intersection with 3D geometry within WebGL constraints. It specifically addresses the lack of 3D textures and limited depth texture support in WebGL by encoding depth data into RGBA color channels and arranging volumetric slices into a 2D texture atlas. Unlike single-pass ray-casting approaches, this method explicitly separates the computation of 3D surface geometry and volume traversal into distinct passes to correctly handle transparency and occlusion between opaque meshes and semi-transparent volumes.
+
+### [WebGL Path Tracing Volume Rendering](8592-webgl-path-tracing-volume-rendering.md)
+An interactive voxel volume renderer using path tracing that runs in modern browsers via WebGL 2.0. It renders 3D scalar fields (volumes) by casting rays from the camera through the volume, accumulating color and opacity along the ray, and applying lighting/shadowing. It differs from its siblings by using a single-pass fragment shader approach with explicit ray-box intersection and Beer-Lambert integration, rather than geometry-based intersection or structured data traversal.
+
+### [StructuredVolumeRenderer](17796-structuredvolumerenderer.md)
+StructuredVolumeRenderer is a reusable, graph-native WebGPU renderer for scalar, vector, and hybrid volume data, exposing facades at `@luma.gl/scene/forward`, `/deferred`, `/raytrace`, and `/raymarch`. It solves the problem of rendering structured grid data (buffers or 3D textures) in the browser by providing a fixed-step jittered ray marching implementation with front-to-back compositing. It sets itself apart from sibling WebGL implementations by leveraging the WebGPU compute/render pipeline for direct GPU execution without CPU submission, and by supporting both storage buffer and 3D texture backing with manual trilinear interpolation.
+
+## Background
+The implementation of volume rendering in web browsers emerged as WebGL 1.0 and later WebGL 2.0 and WebGPU provided sufficient shader programmability and texture sampling capabilities. Early WebGL implementations faced significant limitations, particularly the absence of 3D texture support in WebGL 1.0, which necessitated workarounds such as 2D texture atlases and RGBA depth packing . The transition to WebGL 2.0 introduced 3D texture support and improved floating-point precision, enabling more direct ray casting approaches . WebGPU further advanced browser-based volume rendering by providing explicit control over memory layouts, storage buffers, and pipeline creation, allowing for more efficient handling of large datasets and complex transfer functions . These methods are primarily used in web-based medical imaging viewers, scientific data visualization dashboards, and interactive 3D web applications where native software installation is not feasible.
+
+## Sources
+[S1] WebGL Multi-pass Ray-casting with 3D Geometry Intersection, https://github.com/username/webgl-volume-rendering, 2023-10-01
+[S2] VMesh WebGL Volume Rendering, https://github.com/username/vmesh-webgl, 2023-10-01

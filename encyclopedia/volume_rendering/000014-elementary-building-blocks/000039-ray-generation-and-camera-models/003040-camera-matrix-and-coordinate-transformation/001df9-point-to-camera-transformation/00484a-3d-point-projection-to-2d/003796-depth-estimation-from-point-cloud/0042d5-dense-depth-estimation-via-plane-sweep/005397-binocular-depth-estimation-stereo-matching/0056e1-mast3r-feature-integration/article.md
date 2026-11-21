@@ -1,0 +1,108 @@
+# MASt3R Feature Integration
+
+Also called: MASt3R
+
+## Overview
+MASt3R Feature Integration is a method for enriching stereo matching cost volumes with deep multi-view features to improve depth estimation and subsequent mesh reconstruction accuracy [S1, unofficial]. It addresses the limitation of traditional cost volumes by injecting semantically rich correspondences learned by the MASt3R foundation model, which establishes dense pointmap and stereo feature correspondences between image pairs [S1, unofficial]. Unlike monocular feature integration (e.g., DINOv2), which extracts features from single images, this method leverages pairwise multi-view consistency, making it particularly effective for scenes with weak texture or repetitive patterns where local photometric costs are ambiguous [S1, unofficial].
+
+## How it works
+The method integrates features predicted by the MASt3R model into a downstream reconstruction pipeline (such as a Gaussian Splatting regression network or a cost volume aggregator).
+
+**Inputs and Outputs:**
+- **Inputs:** A set of $N$ input images $\{I_1, I_2, \dots, I_N\}$ of the same scene.
+- **Outputs:** Enriched feature representations for each image, typically concatenated with the original image data, ready for injection into a feature pyramid network (FPN) or cost volume construction module.
+
+**Data Structures:**
+- **Stereo Feature Map ($F$):** A 4D tensor with layout $R^{H \times W \times 24}$.
+  - $H, W$: Height and width of the input images.
+  - $24$: The dimensionality of the MASt3R feature vector per pixel.
+- **Enriched Image Representation:** For image $I_i$, the enriched input is the concatenation of the original image $I_i$ and all its pairwise stereo feature maps with other views $I_k$ ($k \neq i$).
+
+**Numbered Steps:**
+1. **Pairwise Feature Extraction:** For every unique pair of input images $(I_i, I_j)$ where $i \neq j$, compute the stereo feature maps using the MASt3R model:
+   $$ F_{ij}, F_{ji} = F_{\text{MASt3R}}(I_i, I_j) $$
+   where $F_{ij} \in R^{H \times W \times 24}$ contains features for $I_i$ conditioned on $I_j$, and $F_{ji}$ contains features for $I_j$ conditioned on $I_i$ [S1, unofficial].
+2. **Feature Aggregation per Image:** For each image $I_i$, concatenate its original image data with the stereo feature maps obtained from all other $N-1$ views. The resulting feature representation for $I_i$ is:
+   $$ [I_i, F_{ik}]_{k=1, k \neq i}^{N} $$
+   For example, if $N=3$, the representation for $I_1$ is $[I_1, F_{12}, F_{13}]$ [S1, unofficial].
+3. **Injection into Downstream Pipeline:** Feed the concatenated enriched representation into the target network. In Gaussian Splatting pipelines, this is typically done by feeding the enriched features as input to a Feature Pyramid Network (FPN) to regress Gaussian attributes (position, scale, rotation, color, opacity) [S1, unofficial].
+
+**Parameters:**
+- **Feature Dimension:** 24 (fixed for MASt3R) [S1, unofficial].
+- **Number of Views ($N$):** Variable, depending on the input set. Typical evaluations use $N=3$ or more [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Memory Constraints:** Computing pairwise features for all $N$ images requires $O(N^2)$ forward passes through MASt3R. For large $N$, this becomes computationally expensive [S1, unofficial].
+- **Pose Dependency:** While MASt3R can estimate poses, the feature integration itself assumes geometric consistency between the paired views. Significant misalignment or large baseline changes may reduce feature correspondence quality [S2, unofficial].
+- **Not Given in the sources:** Specific normalization or scaling applied to the 24-dimensional features before concatenation is not specified.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def integrate_mast3r_features(images: List[Image], mast3r_model: Model) -> List[EnrichedInput]:
+    """
+    Integrates MASt3R multi-view features into input images for downstream reconstruction.
+    
+    Args:
+        images: List of N input images [I_1, ..., I_N].
+        mast3r_model: The pre-trained MASt3R model.
+        
+    Returns:
+        List of enriched inputs for each image, ready for FPN/network injection.
+    """
+    n = len(images)
+    enriched_inputs = []
+    
+    # Step 1: Compute pairwise stereo features for all unique pairs
+    # F_ij is the feature map for image i given image j
+    pairwise_features = {} 
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                # F_ij, F_ji = F_MASt3R(I_i, I_j)
+                # Note: The model returns features for both views in one forward pass
+                f_ij, f_ji = mast3r_model(images[i], images[j])
+                pairwise_features[(i, j)] = f_ij
+                pairwise_features[(j, i)] = f_ji
+
+    # Step 2: Aggregate features for each image
+    for i in range(n):
+        # Start with the original image
+        current_features = [images[i]]
+        
+        # Concatenate stereo features from all other views
+        for k in range(n):
+            if k != i:
+                # Get F_ik
+                f_ik = pairwise_features[(i, k)]
+                current_features.append(f_ik)
+        
+        # Concatenate along the channel/dimension axis
+        # Result shape: [H, W, C_img + (N-1)*24]
+        enriched_input = concatenate_along_channels(current_features)
+        enriched_inputs.append(enriched_input)
+        
+    return enriched_inputs
+```
+
+## Subtopics
+
+### MASt3R Point Cloud Baseline Rendering
+A baseline evaluation method that directly rasterizes MASt3R's predicted 3D points as a colored point cloud without confidence filtering [S2, unofficial]. It assigns each predicted 3D point the color of its corresponding source pixel from the input images and renders the entire unfiltered point cloud to reconstruct and visualize the full 3D scene [S2, unofficial]. This approach exhibits visible artifacts compared to learned Gaussian representations, such as those produced by Splatt3R, due to the lack of smoothness and density estimation inherent in point-based rendering [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N^2)$ forward passes through the MASt3R model for $N$ images, as pairwise features are computed for all combinations [S1, unofficial].
+- **Memory Complexity:** High, due to storing $O(N^2)$ feature maps of size $H \times W \times 24$ and the concatenated enriched inputs [S1, unofficial].
+- **Performance:** Improves depth estimation accuracy and mesh reconstruction quality compared to methods using only monocular features (like DINOv2) or standard photometric cost volumes [S1, unofficial].
+- **Strengths:** Leverages strong semantic correspondences learned from large-scale data, robust to textureless regions [S1, unofficial].
+- **Limitations:** Computationally expensive for large numbers of views; requires significant memory for feature storage [S1, unofficial].
+- **When to use:** When high-fidelity 3D reconstruction is required from a moderate number of unposed or calibrated images, and computational resources allow for pairwise feature computation [S1, unofficial].
+- **When not to use:** When real-time performance is critical or the number of input views is very large, due to the quadratic scaling [S1, unofficial].
+
+## Background
+MASt3R is a state-of-the-art 3D foundation model trained on a large dataset to establish correspondences in feature space between pairs of images of the same scene [S1, unofficial]. It was introduced as a tool for dense pointmap and stereo feature prediction, enabling downstream tasks like depth estimation and 3D reconstruction [S1, unofficial]. The integration of MASt3R features into cost volumes or Gaussian Splatting pipelines represents a shift towards leveraging pre-trained 3D foundation models for generalizable reconstruction [S1, unofficial].
+
+## Sources
+[S1] SparSplat: Fast Multi-View Reconstruction with Generalizable 2D Gaussian Splatting, https://doi.org/10.48550/arXiv.2505.02175, fetched 2026-10-26 (unofficial)
+[S2] Splatt3R: Zero-Shot Gaussian Splatting from Uncalibrated Image Pairs, https://splatt3r.active.vision/, fetched 2026-10-30 (unofficial)

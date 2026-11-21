@@ -1,0 +1,4216 @@
+# Volume4D Viewer - interactive 4D volume visualization
+
+**Developer:** [Jonathon Brunson](https://github.com/jonathonb21) | [jonathonbrunson21@gmail.com](mailto:jonathonbrunson21@gmail.com)
+
+WebGPU/Rust-backed viewer I built for space + time volumetric data. Includes a Python API, Jupyter inline viewer, and WASM build for browser-based exploration.
+
+![Viewer screenshot](screenshot.png)
+
+| Burgers | Kuramoto-Sivashinsky | Gray-Scott |
+|:--:|:--:|:--:|
+| ![Burgers](references_3d/burgers_1.webp) | ![Kuramoto-Sivashinsky](references_3d/ks.webp) | ![Gray-Scott](references_3d/gray_scott.webp) |
+
+## Install
+
+```bash
+pip install vape4d
+```
+
+## Viewer (Jupyter)
+
+```python
+from vape4d import viewer
+import numpy as np
+from matplotlib import pyplot as plt
+viewer(np.random.rand(1, 1, 32, 32, 32), plt.get_cmap("viridis"))
+```
+
+## Docs
+
+See [docs/index.md](docs/index.md) for API notes and figures in `docs/img/`.
+
+## Repository
+
+https://github.com/jonathonb21/volume4d-viewer
+
+## License
+
+BSD 2-Clause - see [LICENCE](LICENCE).
+
+### colormaps.py
+```
+# %%
+import json
+from matplotlib import pyplot as plt
+from os import makedirs
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Colormap
+import numpy as np
+
+
+def export_colormaps(cm_module, folder: str):
+    makedirs(folder, exist_ok=True)
+    for name, cmap in vars(cm_module).items():
+        if not isinstance(cmap, Colormap):
+            continue
+        if name.endswith("_r"):
+            continue
+        if name.startswith("cmr."):
+            name = name[4:]
+        if isinstance(cmap, ListedColormap):
+            data = cmap(np.linspace(0, 1, 256)).astype(np.float32)
+            np.save("{}/{}.npy".format(folder, name), data)
+        elif isinstance(cmap, LinearSegmentedColormap):
+            segments = cmap._segmentdata
+
+            if any(
+                not isinstance(segments[c], np.ndarray)
+                and not isinstance(segments[c], list)
+                and not isinstance(segments[c], tuple)
+                for c in ["red", "green", "blue"]
+            ):
+                data = cmap(np.linspace(0, 1, 256)).astype(np.float32)
+                np.save("{}/{}.npy".format(folder, name), data)
+            else:
+                channels = {
+                    c: (
+                        segments[c].tolist()
+                        if isinstance(segments[c], np.ndarray)
+                        else segments[c]
+                    )
+                    for c in ["red", "green", "blue"]
+                }
+                if "alpha" in channels:
+                    channels["alpha"] = segments["alpha"].tolist()
+                with open("{}/{}.json".format(folder, name), "w") as f:
+                    json.dump(
+                        channels,
+                        f,
+                        indent=2,
+                    )
+        else:
+            raise TypeError(
+                "cmap must be either a ListedColormap or a LinearSegmentedColormap"
+            )
+
+
+export_colormaps(plt.cm, "colormaps/matplotlib")
+
+import seaborn as sns
+
+export_colormaps(sns.cm, "colormaps/seaborn")
+
+import cmasher
+
+export_colormaps(cmasher.cm, "colormaps/cmasher")
+```
+
+### src/camera.rs
+```
+use cgmath::*;
+
+use crate::volume::Aabb;
+
+pub type PerspectiveCamera = Camera<PerspectiveProjection>;
+pub type OrthographicCamera = Camera<OrthographicProjection>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera<P: Projection> {
+    pub position: Point3<f32>,
+    pub rotation: Quaternion<f32>,
+    pub projection: P,
+}
+impl<P: Projection> Camera<P> {
+    pub fn new(position: Point3<f32>, rotation: Quaternion<f32>, projection: P) -> Self {
+        Camera {
+            position,
+            rotation,
+            projection: projection,
+        }
+    }
+
+    pub fn new_aabb_iso(
+        aabb: Aabb<f32>,
+        projection: P,
+        angle: Option<(f32, f32)>,
+    ) -> Self {
+        let a = to_spherical(Vector3::new(-1., -1., -1.).normalize());
+        let angle = angle.unwrap_or((a.y, a.z));
+        let r = aabb.radius();
+        let corner =  from_spherical(angle.0, angle.1);
+        let view_dir = Quaternion::look_at(-corner, up_vector(corner));
+        Camera::new(
+            aabb.center() + corner * r * 2.8,
+            view_dir,
+            projection,
+        )
+    }
+
+    pub fn view_matrix(&self) -> Matrix4<f32> {
+        world2view(self.rotation, self.position)
+    }
+
+    pub fn proj_matrix(&self) -> Matrix4<f32> {
+        self.projection.projection_matrix()
+    }
+}
+
+impl Default for PerspectiveCamera {
+    fn default() -> Self {
+        Self {
+            position: Point3::new(0., 0., -1.),
+            rotation: Quaternion::new(1., 0., 0., 0.),
+            projection: PerspectiveProjection {
+                fovy: Deg(45.).into(),
+                fovx: Deg(45.).into(),
+                znear: 0.1,
+                zfar: 100.,
+                aspect_ratio: 1.0,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerspectiveProjection {
+    pub fovy: Rad<f32>,
+    pub fovx: Rad<f32>,
+    pub znear: f32,
+    pub zfar: f32,
+    pub aspect_ratio: f32,
+}
+
+impl Projection for PerspectiveProjection {
+    fn projection_matrix(&self) -> Matrix4<f32> {
+        build_proj(self.znear, self.zfar, self.fovx, self.fovy)
+    }
+}
+
+#[rustfmt::skip]
+pub const VIEWPORT_Y_FLIP: cgmath::Matrix4<f32> = cgmath::Matrix4::new(
+    1.0, 0.0, 0.0, 0.0,
+    0.0, -1.0, 0.0, 0.0,
+    0.0, 0.0, 1.0, 0.,
+    0.0, 0.0, 0., 1.0,
+);
+
+impl PerspectiveProjection {
+    pub fn new<F: Into<Rad<f32>>>(viewport: Vector2<u32>, fovy: F, znear: f32, zfar: f32) -> Self {
+        let vr = viewport.x as f32 / viewport.y as f32;
+        let fovyr = fovy.into();
+        Self {
+            fovy: fovyr,
+            fovx: fovyr * vr,
+            znear,
+            zfar,
+            aspect_ratio: vr,
+        }
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let ratio = width as f32 / height as f32;
+        if width > height {
+            self.fovy = self.fovx / ratio;
+        } else {
+            self.fovx = self.fovy * ratio;
+        }
+        self.aspect_ratio = ratio;
+    }
+}
+
+pub trait Projection {
+    fn projection_matrix(&self) -> Matrix4<f32>;
+}
+
+pub fn world2view(r: impl Into<Matrix3<f32>>, t: Point3<f32>) -> Matrix4<f32> {
+    let mut rt = Matrix4::from(r.into());
+    rt[0].w = t.x;
+    rt[1].w = t.y;
+    rt[2].w = t.z;
+    rt[3].w = 1.;
+    return rt.inverse_transform().unwrap().transpose();
+}
+
+pub fn build_proj(znear: f32, zfar: f32, fov_x: Rad<f32>, fov_y: Rad<f32>) -> Matrix4<f32> {
+    let tan_half_fov_y = (fov_y / 2.).tan();
+    let tan_half_fov_x = (fov_x / 2.).tan();
+
+    let top = tan_half_fov_y * znear;
+    let bottom = -top;
+    let right = tan_half_fov_x * znear;
+    let left = -right;
+
+    let mut p = Matrix4::zero();
+    p[0][0] = 2.0 * znear / (right - left);
+    p[1][1] = 2.0 * znear / (top - bottom);
+    p[0][2] = (right + left) / (right - left);
+    p[1][2] = (top + bottom) / (top - bottom);
+    p[3][2] = 1.;
+    p[2][2] = zfar / (zfar - znear);
+    p[2][3] = -(zfar * znear) / (zfar - znear);
+    return p.transpose();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrthographicProjection {
+    pub znear: f32,
+    pub zfar: f32,
+    pub viewport: Vector2<f32>,
+}
+
+impl OrthographicProjection {
+    #[allow(unused)]
+    pub fn new(viewport: Vector2<f32>, znear: f32, zfar: f32) -> Self {
+        Self {
+            viewport,
+            znear,
+            zfar,
+        }
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let ratio = width as f32 / height as f32;
+        if width > height {
+            self.viewport.x = self.viewport.y * ratio;
+        } else {
+            self.viewport.y = self.viewport.x / ratio;
+        }
+    }
+}
+
+impl Projection for OrthographicProjection {
+    fn projection_matrix(&self) -> Matrix4<f32> {
+        let width = self.viewport.x;
+        let right = width / 2.;
+        let top = self.viewport.y / 2.;
+
+        let mut p = Matrix4::zero();
+        p[0][0] = 1. / right;
+        p[1][1] = 1. / top;
+        p[2][2] = -2.0 / (self.zfar - self.znear);
+        p[2][3] = -(self.zfar + self.znear) / (self.zfar - self.znear);
+        p[3][3] = 1.0;
+        return p.transpose();
+    }
+}
+
+fn up_vector(view_dir: Vector3<f32>) -> Vector3<f32> {
+    let y_unit = Vector3::unit_y();
+    if view_dir.dot(y_unit).abs() > 0.99 {
+        Vector3::unit_z()
+    } else {
+        y_unit
+    }
+}
+
+pub fn to_spherical(p:Vector3<f32>) -> Vector3<f32> {
+    // Calculate rho
+    let rho = p.magnitude();
+
+    let mut theta = p.y.atan2(p.x);
+    if theta < 0.0 {
+        theta += 2.0 * std::f32::consts::PI;
+    }
+
+    // Calculate phi
+    // Handle the edge case where rho is zero to avoid division by zero.
+    // If rho is zero, the point is at the origin, and phi is conventionally 0.
+    let phi = if rho == 0.0 {
+        0.0
+    } else {
+        (p.z / rho).acos() // acos returns a value in the range [0, PI]
+    };
+
+    Vector3::new(rho, theta, phi)
+}
+
+
+pub fn from_spherical(theta: f32, phi: f32) -> Vector3<f32> {
+    let x = theta.sin() * phi.sin();
+    let y = theta.cos() * phi.sin();
+    let z = phi.cos();
+    Vector3::new(x, y, z)
+}
+```
+
+### src/cmap.rs
+```
+use std::{
+    hash::{Hash, Hasher},
+    io::{Read, Seek, SeekFrom, Write},
+};
+
+#[cfg(feature = "colormaps")]
+use std::{collections::HashMap, io::Cursor};
+
+use anyhow::Ok;
+use cgmath::Vector4;
+#[cfg(feature = "colormaps")]
+use include_dir::Dir;
+use npyz::WriterBuilder;
+#[cfg(feature = "python")]
+use numpy::ndarray::{ArrayViewD, Axis};
+use wgpu::{util::DeviceExt, Extent3d};
+
+#[cfg(feature = "colormaps")]
+use once_cell::sync::Lazy;
+
+#[cfg(feature = "colormaps")]
+use include_dir::include_dir;
+
+#[cfg(feature = "colormaps")]
+static COLORMAPS_MATPLOTLIB: include_dir::Dir = include_dir!("colormaps/matplotlib");
+#[cfg(feature = "colormaps")]
+static COLORMAPS_SEABORN: include_dir::Dir = include_dir!("colormaps/seaborn");
+#[cfg(feature = "colormaps")]
+static COLORMAPS_CMASHER: include_dir::Dir = include_dir!("colormaps/cmasher");
+
+#[cfg(feature = "colormaps")]
+fn load_cmaps(dir: &Dir) -> HashMap<String, GenericColorMap> {
+    let cmaps: HashMap<String, GenericColorMap> = dir
+        .files()
+        .filter_map(|f| {
+            let file_name = f.path();
+            let reader = Cursor::new(f.contents());
+            let name = file_name.file_stem().unwrap().to_str().unwrap().to_string();
+            let cmap = GenericColorMap::read(reader).unwrap();
+            return Some((name, cmap));
+        })
+        .collect();
+    cmaps
+}
+
+// list of predefined colormaps
+#[cfg(feature = "colormaps")]
+pub static COLORMAPS: Lazy<HashMap<String, HashMap<String, GenericColorMap>>> = Lazy::new(|| {
+    let mut cmaps = HashMap::new();
+    cmaps.insert("matplotlib".to_string(), load_cmaps(&COLORMAPS_MATPLOTLIB));
+    cmaps.insert("seaborn".to_string(), load_cmaps(&COLORMAPS_SEABORN));
+    cmaps.insert("cmasher".to_string(), load_cmaps(&COLORMAPS_CMASHER));
+
+    cmaps
+});
+
+#[derive(Debug, Clone)]
+pub struct ListedColorMap(Vec<Vector4<u8>>);
+
+impl Hash for ListedColorMap {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl ListedColorMap {
+    pub fn new(values: Vec<Vector4<u8>>) -> Self {
+        Self(values)
+    }
+
+    #[cfg(feature = "python")]
+    pub fn from_array(data: ArrayViewD<f32>) -> Self {
+        Self(
+            data.axis_iter(Axis(0))
+                .map(|v| {
+                    Vector4::new(
+                        (v[0] * 255.) as u8,
+                        (v[1] * 255.) as u8,
+                        (v[2] * 255.) as u8,
+                        (v[3] * 255.) as u8,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    pub fn from_npy<'a, R>(reader: R) -> anyhow::Result<Self>
+    where
+        R: Read + Seek,
+    {
+        let npz_file = npyz::NpyFile::new(reader)?;
+        let values: Vec<_> = npz_file
+            .into_vec::<f32>()?
+            .chunks_exact(4)
+            .map(|v| {
+                Vector4::new(
+                    (v[0] * 255.) as u8,
+                    (v[1] * 255.) as u8,
+                    (v[2] * 255.) as u8,
+                    (v[3] * 255.) as u8,
+                )
+            })
+            .collect();
+        Ok(Self::new(values))
+    }
+    pub fn update_alpha(&mut self, alphas: &[u8]) {
+        if alphas.len() != self.0.len() {
+            panic!("Alpha channel must have the same length as the color map")
+        }
+        self.0 = self
+            .0
+            .iter()
+            .zip(alphas)
+            .map(|(v, a)| Vector4::new(v[0], v[1], v[2], *a))
+            .collect();
+    }
+
+    pub fn save_npy<F: Write>(&self, f: F) -> anyhow::Result<()> {
+        let mut out_file = npyz::WriteOptions::new()
+            .order(npyz::Order::C)
+            .shape(&[self.0.len() as u64, 4])
+            .default_dtype()
+            .writer(f)
+            .begin_nd()?;
+        out_file.extend(self.0.iter().flat_map(|c| {
+            vec![
+                c.x as f32 / 255.,
+                c.y as f32 / 255.,
+                c.z as f32 / 255.,
+                c.w as f32 / 255.,
+            ]
+        }))?;
+        out_file.finish()?;
+        Ok(())
+    }
+}
+
+impl<'a> ColorMap for &'a ListedColorMap {
+    type Item = ListedColorMap;
+    fn sample(&self, x: f32) -> Vector4<u8> {
+        let n = self.0.len() as f32;
+        let i = (x * n).min(n - 1.0).max(0.0) as usize;
+        self.0[i] // TODO linear interpolation
+    }
+
+    fn reverse(&self) -> ListedColorMap {
+        let mut cmap = self.0.clone();
+        cmap.reverse();
+        ListedColorMap::new(cmap)
+    }
+}
+
+pub struct ColorMapGPU {
+    texture: wgpu::Texture,
+    bindgroup: wgpu::BindGroup,
+}
+
+pub trait ColorMap {
+    type Item;
+    fn sample(&self, x: f32) -> Vector4<u8>;
+
+    fn rasterize(&self, n: usize) -> Vec<Vector4<u8>> {
+        (0..n)
+            .map(|i| self.sample(i as f32 / (n - 1) as f32))
+            .collect()
+    }
+
+    fn reverse(&self) -> Self::Item;
+}
+
+impl ColorMapGPU {
+    pub fn new(cmap: impl ColorMap, device: &wgpu::Device, queue: &wgpu::Queue, n: u32) -> Self {
+        let (texture, bindgroup) = Self::create(device, queue, cmap, n);
+        Self { texture, bindgroup }
+    }
+
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub fn bindgroup(&self) -> &wgpu::BindGroup {
+        &self.bindgroup
+    }
+
+    fn create(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cmap: impl ColorMap,
+        n: u32,
+    ) -> (wgpu::Texture, wgpu::BindGroup) {
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("cmap texture"),
+                size: Extent3d {
+                    width: n,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&cmap.rasterize(n as usize)),
+        );
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("cmap sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let bindgroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cmap bind group"),
+            layout: &Self::bind_group_layout(device),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        (texture, bindgroup)
+    }
+
+    fn size(&self) -> u32 {
+        return self.texture.size().width;
+    }
+
+    pub(crate) fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cmap bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    pub fn update(&self, queue: &wgpu::Queue, cmap: impl ColorMap) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&cmap.rasterize(self.size() as usize)),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: None,
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: self.size() as u32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LinearSegmentedColorMap {
+    /// x, y0,y1
+    #[serde(alias = "red")]
+    pub r: Vec<(f32, f32, f32)>,
+    #[serde(alias = "green")]
+    pub g: Vec<(f32, f32, f32)>,
+    #[serde(alias = "blue")]
+    pub b: Vec<(f32, f32, f32)>,
+    #[serde(alias = "alpha")]
+    pub a: Option<Vec<(f32, f32, f32)>>,
+}
+
+impl LinearSegmentedColorMap {
+    pub fn new(
+        r: Vec<(f32, f32, f32)>,
+        g: Vec<(f32, f32, f32)>,
+        b: Vec<(f32, f32, f32)>,
+        a: Option<Vec<(f32, f32, f32)>>,
+    ) -> anyhow::Result<Self> {
+        if !Self::check_values(&r) {
+            return Err(anyhow::anyhow!(
+                "x values for red are not in (0,1) or ascending"
+            ));
+        };
+
+        if !Self::check_values(&g) {
+            return Err(anyhow::anyhow!(
+                "x values for green are not in (0,1) or ascending"
+            ));
+        };
+
+        if !Self::check_values(&b) {
+            return Err(anyhow::anyhow!(
+                "x values for blue are not in (0,1) or ascending"
+            ));
+        };
+
+        if let Some(a) = &a {
+            if !Self::check_values(&a) {
+                return Err(anyhow::anyhow!(
+                    "x values for alpha are not in (0,1) or ascending"
+                ));
+            };
+        }
+        Ok(Self { r, g, b, a })
+    }
+
+    pub fn from_json<R: Read>(reader: R) -> anyhow::Result<Self> {
+        Ok(serde_json::from_reader(reader)?)
+    }
+
+    fn check_values(v: &Vec<(f32, f32, f32)>) -> bool {
+        let mut last_x = 0.0;
+        for (x, _, _) in v.iter() {
+            if x < &last_x || x > &1.0 || x < &0.0 {
+                return false;
+            }
+            last_x = *x;
+        }
+        return true;
+    }
+    pub fn from_color_map(cmap: impl ColorMap, n: u32) -> Self {
+        let mut r = vec![];
+        let mut g = vec![];
+        let mut b = vec![];
+        let mut a = vec![];
+        for (i, v) in cmap.rasterize(n as usize).iter().enumerate() {
+            let x = i as f32 / (n - 1) as f32;
+            r.push((x, v.x as f32 / 255., v.x as f32 / 255.));
+            g.push((x, v.y as f32 / 255., v.y as f32 / 255.));
+            b.push((x, v.z as f32 / 255., v.z as f32 / 255.));
+            a.push((x, v.w as f32 / 255., v.w as f32 / 255.));
+        }
+
+        // merge neighboring points with the same alpha value
+        merge_neighbours(&mut r);
+        merge_neighbours(&mut g);
+        merge_neighbours(&mut b);
+        merge_neighbours(&mut a);
+
+        Self {
+            r,
+            g,
+            b,
+            a: Some(a),
+        }
+    }
+}
+
+impl ColorMap for &LinearSegmentedColorMap {
+    type Item = LinearSegmentedColorMap;
+    fn sample(&self, x: f32) -> Vector4<u8> {
+        let a = self
+            .a
+            .as_ref()
+            .map(|a| sample_channel(x, &a))
+            .unwrap_or(1.0);
+        Vector4::new(
+            (sample_channel(x, &self.r) * 255.) as u8,
+            (sample_channel(x, &self.g) * 255.) as u8,
+            (sample_channel(x, &self.b) * 255.) as u8,
+            (a * 255.) as u8,
+        )
+    }
+    fn reverse(&self) -> Self::Item {
+        let mut r: Vec<_> = self
+            .r
+            .iter()
+            .map(|(x, y1, y2)| (1.0 - x, *y1, *y2))
+            .collect();
+        let mut g: Vec<_> = self
+            .g
+            .iter()
+            .map(|(x, y1, y2)| (1.0 - x, *y1, *y2))
+            .collect();
+        let mut b: Vec<_> = self
+            .b
+            .iter()
+            .map(|(x, y1, y2)| (1.0 - x, *y1, *y2))
+            .collect();
+        let mut a: Option<Vec<(f32, f32, f32)>> = self
+            .a
+            .clone()
+            .map(|a| a.iter().map(|(x, y1, y2)| (1.0 - x, *y1, *y2)).collect());
+        r.reverse();
+        g.reverse();
+        b.reverse();
+        if let Some(a) = &mut a {
+            a.reverse();
+        }
+        LinearSegmentedColorMap { r, g, b, a }
+    }
+}
+impl Hash for LinearSegmentedColorMap {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for c in [&self.r, &self.g, &self.b].iter() {
+            c.iter().for_each(|(a, b, c)| {
+                state.write_u32(a.to_bits());
+                state.write_u32(b.to_bits());
+                state.write_u32(c.to_bits())
+            });
+        }
+        if let Some(a) = &self.a {
+            a.iter().for_each(|(a, b, c)| {
+                state.write_u32(a.to_bits());
+                state.write_u32(b.to_bits());
+                state.write_u32(c.to_bits())
+            });
+        }
+    }
+}
+
+pub fn rasterize_tf(points: &[(f32, f32, f32)], n: u32) -> Vec<u8> {
+    assert!(points.len() >= 2, "spline must have at least 2 points");
+    let mut values = vec![0; n as usize];
+    let mut last_i = 0;
+    let mut current_i = 1;
+    for i in 0..n {
+        let x = i as f32 / (n - 1) as f32;
+        let last = points[last_i];
+        let current = points[current_i];
+        if (last.0 - current.0).abs() < 0.5 / n as f32 {
+            values[i as usize] = (last.2 * 255.) as u8;
+        } else {
+            let y = last.2 + (current.1 - last.2) * (x - last.0) / (current.0 - last.0);
+            values[i as usize] = (y * 255.) as u8;
+        }
+        if x > points[current_i].0 {
+            last_i = current_i;
+            current_i += 1;
+        }
+    }
+    values
+}
+
+fn sample_channel(x: f32, values: &[(f32, f32, f32)]) -> f32 {
+    for i in 0..values.len() - 1 {
+        let (x0, _, y0) = values[i];
+        let (x1, y1, _) = values[i + 1];
+        if x0 <= x && x <= x1 {
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+        }
+    }
+    return 0.0;
+}
+
+fn merge_neighbours(values: &mut Vec<(f32, f32, f32)>) {
+    let mut i = 1;
+    while i < values.len() - 1 {
+        let (_, y0, y1) = values[i];
+        if y0 == y1 {
+            let y_prev = values[i - 1].2;
+            let y_next = values[i + 1].1;
+            if y_prev == y_next {
+                values.remove(i);
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
+pub const COLORMAP_RESOLUTION: u32 = 256;
+
+#[derive(Debug, Clone, Hash)]
+pub enum GenericColorMap {
+    Listed(ListedColorMap),
+    LinearSegmented(LinearSegmentedColorMap),
+}
+
+impl GenericColorMap {
+    pub fn read<R: Read + Seek>(mut reader: R) -> anyhow::Result<Self> {
+        let mut start = [0; 6];
+        reader.read_exact(&mut start)?;
+        reader.seek(SeekFrom::Start(0))?;
+        if start.eq(b"\x93NUMPY") {
+            // numpy file
+            Ok(GenericColorMap::Listed(ListedColorMap::from_npy(reader)?))
+        } else {
+            // json file
+            Ok(GenericColorMap::LinearSegmented(
+                LinearSegmentedColorMap::from_json(reader)?,
+            ))
+        }
+    }
+
+    pub fn into_linear_segmented(&self, n: u32) -> LinearSegmentedColorMap {
+        match self {
+            crate::cmap::GenericColorMap::Listed(c) => {
+                LinearSegmentedColorMap::from_color_map(c, n)
+            }
+            crate::cmap::GenericColorMap::LinearSegmented(c) => c.clone(),
+        }
+    }
+
+    /// if all alpha values are 1.0, the alpha channel is considered boring
+    #[allow(unused)]
+    pub(crate) fn has_boring_alpha_channel(&self) -> bool {
+        match self {
+            GenericColorMap::Listed(c) => c.0.iter().all(|v| v.w == 255),
+            GenericColorMap::LinearSegmented(c) => {
+                c.a.as_ref()
+                    .map(|a| a.iter().all(|(_, _, a)| *a == 1.0))
+                    .unwrap_or(true)
+            }
+        }
+    }
+}
+
+impl<'a> ColorMap for &'a GenericColorMap {
+    fn sample(&self, x: f32) -> Vector4<u8> {
+        match self {
+            GenericColorMap::Listed(c) => c.sample(x),
+            GenericColorMap::LinearSegmented(c) => c.sample(x),
+        }
+    }
+
+    type Item = GenericColorMap;
+
+    fn reverse(&self) -> Self::Item {
+        match self {
+            GenericColorMap::Listed(c) => GenericColorMap::Listed(c.reverse()),
+            GenericColorMap::LinearSegmented(c) => GenericColorMap::LinearSegmented(c.reverse()),
+        }
+    }
+}
+```
+
+### src/controller.rs
+```
+use cgmath::*;
+use num_traits::Float;
+use std::f32::consts::PI;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use web_time::Duration;
+
+use winit::keyboard::KeyCode;
+
+use crate::camera::{Camera, OrthographicProjection};
+
+#[derive(Debug)]
+pub struct CameraController {
+    pub center: Point3<f32>,
+    pub up: Option<Vector3<f32>>,
+    amount: Vector3<f32>,
+    shift: Vector2<f32>,
+    rotation: Vector3<f32>,
+    scroll: f32,
+    pub speed: f32,
+    pub sensitivity: f32,
+
+    pub left_mouse_pressed: bool,
+    pub right_mouse_pressed: bool,
+    pub alt_pressed: bool,
+    pub user_inptut: bool,
+}
+
+impl CameraController {
+    pub fn new(speed: f32, sensitivity: f32) -> Self {
+        Self {
+            center: Point3::origin(),
+            amount: Vector3::zero(),
+            shift: Vector2::zero(),
+            rotation: Vector3::zero(),
+            up: None,
+            scroll: 0.0,
+            speed,
+            sensitivity,
+            left_mouse_pressed: false,
+            right_mouse_pressed: false,
+            alt_pressed: false,
+            user_inptut: false,
+        }
+    }
+
+    pub fn process_keyboard(&mut self, key: KeyCode, pressed: bool) -> bool {
+        let amount = if pressed { 1.0 } else { 0.0 };
+        let processed = match key {
+            KeyCode::KeyW | KeyCode::ArrowUp => {
+                self.amount.z += amount;
+                true
+            }
+            KeyCode::KeyS | KeyCode::ArrowDown => {
+                self.amount.z += -amount;
+                true
+            }
+            KeyCode::KeyA | KeyCode::ArrowLeft => {
+                self.amount.x += -amount;
+                true
+            }
+            KeyCode::KeyD | KeyCode::ArrowRight => {
+                self.amount.x += amount;
+                true
+            }
+            KeyCode::KeyQ => {
+                self.rotation.z += amount / self.sensitivity;
+                true
+            }
+            KeyCode::KeyE => {
+                self.rotation.z += -amount / self.sensitivity;
+                true
+            }
+            KeyCode::Space => {
+                self.amount.y += amount;
+                true
+            }
+            KeyCode::ShiftLeft => {
+                self.amount.y += -amount;
+                true
+            }
+            _ => false,
+        };
+        self.user_inptut = processed;
+        return processed;
+    }
+
+    pub fn process_mouse(&mut self, mouse_dx: f32, mouse_dy: f32) {
+        if self.left_mouse_pressed {
+            self.rotation.x += mouse_dx as f32;
+            self.rotation.y += mouse_dy as f32;
+            self.user_inptut = true;
+        }
+        if self.right_mouse_pressed {
+            self.shift.y += -mouse_dx as f32;
+            self.shift.x += mouse_dy as f32;
+            self.user_inptut = true;
+        }
+    }
+
+    pub fn process_scroll(&mut self, dy: f32) {
+        self.scroll += -dy;
+        self.user_inptut = true;
+    }
+
+    pub fn update_camera(&mut self, camera: &mut Camera<OrthographicProjection>, dt: Duration) {
+        let dt: f32 = dt.as_secs_f32();
+        let dir = camera.position - self.center;
+        let distance = dir.magnitude();
+
+        let scale = camera.projection.viewport.magnitude();
+        let new_scale = (scale.ln() + self.scroll * dt * 10. * self.speed).exp();
+        camera.projection.viewport = camera.projection.viewport.normalize() * new_scale;
+
+        let view_t: Matrix3<f32> = camera.rotation.invert().into();
+
+        let x_axis = view_t.x;
+        let y_axis = self.up.unwrap_or(view_t.y);
+        let z_axis = view_t.z;
+
+        let offset =
+            (self.shift.y * x_axis - self.shift.x * y_axis) * dt * self.speed * 0.1 * distance;
+        self.center += offset;
+        camera.position += offset;
+        let mut theta = Rad((self.rotation.x) * dt * self.sensitivity);
+        let mut phi = Rad((-self.rotation.y) * dt * self.sensitivity);
+        let mut eta = Rad::zero();
+
+        if self.alt_pressed {
+            eta = Rad(-self.rotation.y * dt * self.sensitivity);
+            theta = Rad::zero();
+            phi = Rad::zero();
+        }
+
+        let rot_theta = Quaternion::from_axis_angle(y_axis, theta);
+        let rot_phi = Quaternion::from_axis_angle(x_axis, phi);
+        let rot_eta = Quaternion::from_axis_angle(z_axis, eta);
+        let rot = rot_theta * rot_phi * rot_eta;
+
+        let mut new_dir = rot.rotate_vector(dir);
+
+        if angle_short(y_axis, new_dir) < Rad(0.1) {
+            new_dir = dir;
+        }
+        camera.position = self.center + new_dir;
+
+        // update rotation
+        // camera.rotation = (rot * camera.rotation.invert()).invert();
+        camera.rotation = Quaternion::look_at(-new_dir, y_axis);
+
+        // decay based on fps
+        let mut decay = (0.8).powf(dt * 60.);
+        if decay < 1e-4 {
+            decay = 0.;
+        }
+        self.rotation *= decay;
+        if self.rotation.magnitude() < 1e-4 {
+            self.rotation = Vector3::zero();
+        }
+        self.shift *= decay;
+        if self.shift.magnitude() < 1e-4 {
+            self.shift = Vector2::zero();
+        }
+        self.scroll *= decay;
+        if self.scroll.abs() < 1e-4 {
+            self.scroll = 0.;
+        }
+        self.user_inptut = false;
+    }
+}
+
+fn angle_short(a: Vector3<f32>, b: Vector3<f32>) -> Rad<f32> {
+    let angle = a.angle(b);
+    if angle > Rad(PI / 2.) {
+        return Rad(PI) - angle;
+    } else {
+        return angle;
+    }
+}
+```
+
+### src/lib.rs
+```
+use camera::{Camera, OrthographicProjection};
+use cmap::LinearSegmentedColorMap;
+use controller::CameraController;
+use renderer::{RenderSettings, VolumeRenderer};
+use std::{path::PathBuf, sync::Arc};
+use volume::VolumeGPU;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
+#[cfg(target_arch = "wasm32")]
+use web_time::{Duration, Instant};
+
+use wgpu::Backends;
+
+#[cfg(target_arch = "wasm32")]
+mod web;
+#[cfg(target_arch = "wasm32")]
+pub use web::*;
+
+use cgmath::{Vector2, Zero};
+use winit::{
+    dpi::PhysicalSize,
+    event::{DeviceEvent, ElementState, Event, WindowEvent},
+    event_loop::EventLoop,
+    keyboard::{KeyCode, PhysicalKey},
+    window::{Window, WindowAttributes},
+};
+
+use crate::{
+    cmap::{ColorMapGPU, COLORMAP_RESOLUTION},
+    volume::Volume,
+};
+
+pub mod camera;
+pub mod cmap;
+mod controller;
+pub mod offline;
+pub mod renderer;
+mod ui;
+mod ui_renderer;
+mod viewer;
+pub mod volume;
+pub use viewer::viewer;
+#[cfg(feature = "python")]
+pub mod py;
+
+#[derive(Debug)]
+pub struct RenderConfig {
+    pub no_vsync: bool,
+    pub background_color: wgpu::Color,
+    pub show_colormap_editor: bool,
+    pub show_volume_info: bool,
+    pub vmin: Option<f32>,
+    pub vmax: Option<f32>,
+    pub distance_scale: f32,
+    #[cfg(feature = "colormaps")]
+    pub show_cmap_select: bool,
+    pub duration: Option<Duration>,
+}
+
+pub struct WGPUContext {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub adapter: wgpu::Adapter,
+}
+
+impl WGPUContext {
+    pub async fn new(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'static>>,
+    ) -> anyhow::Result<Self> {
+        let adapter = wgpu::util::initialize_adapter_from_env_or_default(instance, surface)
+            .await
+            .ok_or(anyhow::anyhow!("Failed to find a suitable adapter"))?;
+
+        let required_features = wgpu::Features::default();
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    required_features,
+                    required_limits: adapter.limits(),
+                    label: None,
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            )
+            .await?;
+
+        Ok(Self {
+            device,
+            queue,
+            adapter,
+        })
+    }
+}
+
+pub struct WindowContext {
+    wgpu_context: WGPUContext,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    window: Arc<Window>,
+    scale_factor: f32,
+
+    controller: CameraController,
+    camera: Camera<OrthographicProjection>,
+    ui_renderer: ui_renderer::EguiWGPU,
+    ui_visible: bool,
+
+    background_color: wgpu::Color,
+
+    volumes: Vec<VolumeGPU>,
+    renderer: VolumeRenderer,
+
+    render_settings: RenderSettings,
+    cmap_gpu: cmap::ColorMapGPU,
+    cmap: LinearSegmentedColorMap,
+
+    playing: bool,
+    animation_duration: Duration,
+    num_columns: u32,
+    selected_channel: Option<usize>,
+
+    colormap_editor_visible: bool,
+    volume_info_visible: bool,
+    #[cfg(feature = "colormaps")]
+    cmap_select_visible: bool,
+}
+
+impl WindowContext {
+    // Creating some of the wgpu types requires async code
+    async fn new(
+        window: Window,
+        volumes: Vec<Volume>,
+        cmap: LinearSegmentedColorMap,
+        render_config: &RenderConfig,
+    ) -> anyhow::Result<Self> {
+        let mut size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            size = PhysicalSize::new(800, 600);
+        }
+        let window = Arc::new(window);
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: Backends::all().symmetric_difference(Backends::BROWSER_WEBGPU),
+            ..Default::default()
+        });
+
+        let surface: wgpu::Surface = instance.create_surface(window.clone())?;
+
+        let wgpu_context = WGPUContext::new(&instance, Some(&surface)).await?;
+
+        log::info!("device: {:?}", wgpu_context.adapter.get_info().name);
+
+        let device = &wgpu_context.device;
+        let queue = &wgpu_context.queue;
+
+        let max_size = device.limits().max_texture_dimension_2d;
+        window.set_max_inner_size(Some(PhysicalSize::new(max_size, max_size)));
+
+        let surface_caps = surface.get_capabilities(&wgpu_context.adapter);
+
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .filter(|f| f.is_srgb())
+            .next()
+            .unwrap_or(&surface_caps.formats[0])
+            .clone();
+        let surface_format = surface_format;
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width,
+            height: size.height,
+            desired_maximum_frame_latency: 2,
+            present_mode: if render_config.no_vsync {
+                wgpu::PresentMode::AutoNoVsync
+            } else {
+                wgpu::PresentMode::AutoVsync
+            },
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        surface.configure(&device, &config);
+
+        let ui_renderer = ui_renderer::EguiWGPU::new(device, surface_format, &window);
+
+        let renderer = VolumeRenderer::new(device, surface_format);
+
+        let render_settings = RenderSettings {
+            clipping_aabb: None,
+            time: 0.,
+            step_size: 2. / 1000.,
+            spatial_filter: wgpu::FilterMode::Linear,
+            temporal_filter: wgpu::FilterMode::Linear,
+            distance_scale: render_config.distance_scale,
+            vmin: render_config.vmin,
+            vmax: render_config.vmax,
+            gamma_correction: !surface_format.is_srgb(),
+        };
+
+        let mut controller = CameraController::new(0.1, 0.05);
+        controller.center = volumes[0].aabb.center();
+
+        let radius = volumes[0].aabb.radius();
+        let ratio = size.width as f32 / size.height as f32;
+        let camera = Camera::new_aabb_iso(
+            volumes[0].aabb.clone(),
+            OrthographicProjection::new(Vector2::new(ratio, 1.) * 2. * radius, 1e-4, 100.),
+            None,
+        );
+
+        let animation_duration = render_config
+            .duration
+            .unwrap_or(Duration::from_secs_f32(5.));
+
+        let num_columns = volumes.len().min(4) as u32;
+        let volumes_gpu = volumes
+            .into_iter()
+            .map(|v| VolumeGPU::new(device, queue, v))
+            .collect();
+
+        let cmap_gpu = ColorMapGPU::new(&cmap, device, queue, COLORMAP_RESOLUTION);
+        Ok(Self {
+            wgpu_context,
+            scale_factor: window.scale_factor() as f32,
+            window,
+            surface,
+            config,
+            controller,
+            ui_renderer,
+            ui_visible: true,
+            background_color: render_config.background_color,
+            camera,
+
+            volumes: volumes_gpu,
+            renderer,
+            render_settings,
+            cmap_gpu,
+            cmap,
+            animation_duration,
+            playing: true,
+            num_columns,
+            selected_channel: None,
+            colormap_editor_visible: render_config.show_colormap_editor,
+            volume_info_visible: render_config.show_volume_info,
+            #[cfg(feature = "colormaps")]
+            cmap_select_visible: render_config.show_cmap_select,
+        })
+    }
+
+    fn load_file(&mut self, path: &PathBuf) -> anyhow::Result<()> {
+        let reader = std::fs::File::open(path)?;
+        let volume = Volume::load_numpy(reader, true)?;
+        let volume_gpu = volume
+            .into_iter()
+            .map(|v| VolumeGPU::new(&self.wgpu_context.device, &self.wgpu_context.queue, v))
+            .collect();
+        self.volumes = volume_gpu;
+        // self.controller.center = volume.aabb.center();
+        self.camera
+            .projection
+            .resize(self.config.width, self.config.height);
+        Ok(())
+    }
+
+    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>, scale_factor: Option<f32>) {
+        if new_size.width > 0 && new_size.height > 0 {
+            let new_width = new_size.width;
+            let new_height = new_size.height;
+            self.config.width = new_width;
+            self.config.height = new_height;
+            self.camera.projection.resize(new_width, new_height);
+            self.surface
+                .configure(&self.wgpu_context.device, &self.config);
+        }
+        if let Some(scale_factor) = scale_factor {
+            if scale_factor > 0. {
+                self.scale_factor = scale_factor;
+            }
+        }
+    }
+
+    fn update(&mut self, dt: Duration) {
+        self.controller.update_camera(&mut self.camera, dt);
+
+        if self.playing && self.volumes[0].volume.timesteps > 1 {
+            self.render_settings.time += dt.as_secs_f32() / self.animation_duration.as_secs_f32();
+            self.render_settings.time = self.render_settings.time.fract();
+        }
+    }
+
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let window_size = self.window.inner_size();
+        if window_size.width != self.config.width || window_size.height != self.config.height {
+            self.resize(window_size, None);
+        }
+
+        let output = self.surface.get_current_texture()?;
+        let view_rgb = output.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.config.format),
+            ..Default::default()
+        });
+
+        // do prepare stuff
+
+        let mut encoder =
+            self.wgpu_context
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("render command encoder"),
+                });
+
+        let columns = self.num_columns as usize;
+        let rows = (self.volumes.len() as f32 / columns as f32).ceil() as usize;
+        let cell_width = self.config.width as f32 / columns as f32;
+        let cell_height = self.config.height as f32 / rows as f32;
+
+        let ui_state = if self.ui_visible {
+            self.ui_renderer.begin_frame(&self.window);
+            ui::ui(self);
+
+            let shapes = self.ui_renderer.end_frame(&self.window);
+            Some(self.ui_renderer.prepare(
+                PhysicalSize {
+                    width: output.texture.size().width,
+                    height: output.texture.size().height,
+                },
+                self.scale_factor,
+                &self.wgpu_context.device,
+                &self.wgpu_context.queue,
+                &mut encoder,
+                shapes,
+            ))
+        } else {
+            None
+        };
+
+        let mut frame_data = Vec::new();
+
+        if let Some(selected_channel) = self.selected_channel {
+            let camera = self.camera.clone();
+            frame_data.push(self.renderer.prepare(
+                &self.wgpu_context.device,
+                &self.volumes[selected_channel],
+                &camera,
+                &self.render_settings,
+                &self.cmap_gpu,
+            ));
+        } else {
+            for v in &self.volumes {
+                let mut camera = self.camera.clone();
+                camera
+                    .projection
+                    .resize(cell_width as u32, cell_height as u32);
+                frame_data.push(self.renderer.prepare(
+                    &self.wgpu_context.device,
+                    &v,
+                    &camera,
+                    &self.render_settings,
+                    &self.cmap_gpu,
+                ));
+            }
+        }
+
+        {
+            let mut render_pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("render pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view_rgb,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(self.background_color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                })
+                .forget_lifetime();
+            for (i, v) in frame_data.iter().enumerate() {
+                if self.selected_channel.is_none() {
+                    let column = i % columns;
+                    let row = i / columns;
+                    render_pass.set_viewport(
+                        column as f32 * cell_width,
+                        row as f32 * cell_height,
+                        cell_width,
+                        cell_height,
+                        0.,
+                        1.,
+                    );
+                }
+                self.renderer.render(&mut render_pass, &v);
+            }
+
+            if let Some(state) = &ui_state {
+                // ui rendering
+
+                self.ui_renderer.render(&mut render_pass, state);
+            }
+        }
+        if let Some(ui_state) = ui_state {
+            self.ui_renderer.cleanup(ui_state)
+        }
+        self.wgpu_context
+            .queue
+            .submit(std::iter::once(encoder.finish()));
+
+        output.present();
+        Ok(())
+    }
+}
+
+pub async fn open_window(
+    window_attributes: WindowAttributes,
+    volumes: Vec<Volume>,
+    cmap: LinearSegmentedColorMap,
+    config: RenderConfig,
+) -> anyhow::Result<()> {
+    let event_loop = EventLoop::new()?;
+
+    let version = env!("CARGO_PKG_VERSION");
+    let name = env!("CARGO_PKG_NAME");
+
+    let attributes = window_attributes.with_title(format!("{name} {version}"));
+
+    #[allow(deprecated)]
+    let window = event_loop.create_window(attributes)?;
+
+    let mut state = WindowContext::new(window, volumes, cmap, &config).await?;
+
+    let mut last = Instant::now();
+    let mut last_touch_position = Vector2::zero();
+    #[allow(deprecated)]
+    event_loop.run(move |event,target|
+        match event {
+        Event::WindowEvent {
+            ref event,
+            window_id,
+        } if window_id == state.window.id() && !state.ui_renderer.on_event(&state.window,event) => match event {
+            WindowEvent::Resized(physical_size) => {
+                state.resize(*physical_size, None);
+            }
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                ..
+            } => {
+                state.scale_factor = *scale_factor as f32;
+            }
+            WindowEvent::CloseRequested => {log::info!("close!");target.exit()},
+            WindowEvent::ModifiersChanged(m)=>{
+                state.controller.alt_pressed = m.state().alt_key();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(key) = event.physical_key{
+                    state
+                        .controller
+                        .process_keyboard(key, event.state == ElementState::Pressed);
+                    if key == KeyCode::KeyU && event.state == ElementState::Released{
+                        state.ui_visible = !state.ui_visible;
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, dy) => {
+                    state.controller.process_scroll(*dy )
+                }
+                winit::event::MouseScrollDelta::PixelDelta(p) => {
+                    state.controller.process_scroll(p.y as f32 / 100.)
+                }
+            },
+            WindowEvent::Touch(touch)=>{
+                match  touch.phase{
+                    winit::event::TouchPhase::Started=>{
+                        state.controller.left_mouse_pressed = true;
+                        last_touch_position = Vector2::new(touch.location.x, touch.location.y);
+                    }
+                    winit::event::TouchPhase::Ended=>{
+                        state.controller.left_mouse_pressed = false;
+                    }
+                    winit::event::TouchPhase::Moved=>{
+                        state.controller.process_mouse((touch.location.x-last_touch_position.x) as f32, (touch.location.y-last_touch_position.y) as f32);
+                        last_touch_position = Vector2::new(touch.location.x, touch.location.y);
+                    }
+                    _=>{}
+                }
+            }
+            WindowEvent::MouseInput { state:button_state, button, .. }=>{
+                match button {
+                    winit::event::MouseButton::Left =>                         state.controller.left_mouse_pressed = *button_state == ElementState::Pressed,
+                    winit::event::MouseButton::Right => state.controller.right_mouse_pressed = *button_state == ElementState::Pressed,
+                    _=>{}
+                }
+            },
+            WindowEvent::DroppedFile(file) => {
+                if let Err(e) = state.load_file(file){
+                    log::error!("failed to load file: {:?}", e)
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let now = Instant::now();
+                let dt = now-last;
+                last = now;
+                state.update(dt);
+                match state.render() {
+                    Ok(_) => {}
+                    // Reconfigure the surface if lost
+                    Err(wgpu::SurfaceError::Lost) =>{
+                        log::error!("lost surface!");
+                         state.resize(state.window.inner_size(), None)
+
+                        },
+                    // The system is out of memory, we should probably quit
+                    Err(wgpu::SurfaceError::OutOfMemory) =>target.exit(),
+                    // All other errors (Outdated, Timeout) should be resolved by the next frame
+                    Err(e) => println!("error: {:?}", e),
+                }
+            }
+            _ => {}
+        },
+        Event::DeviceEvent {
+            event: DeviceEvent::MouseMotion{ delta, },
+            .. // We're not using device_id currently
+        } => {
+            state.controller.process_mouse(delta.0 as f32, delta.1 as f32)
+        }
+        Event::AboutToWait => {
+            #[cfg(target_arch = "wasm32")]
+            use winit::platform::web::WindowExtWebSys;
+            #[cfg(target_arch = "wasm32")]
+            if let Some(canvas) = state.window.canvas() {
+                if canvas.parent_node().is_none() {
+                    // The canvas has been removed from the DOM, we should exit
+                    target.exit();
+                    return;
+                }
+            }
+
+            // RedrawRequested will only trigger once, unless we manually
+            // request it.
+            state.window.request_redraw();
+        }
+        _ => {},
+    })?;
+    log::info!("exit!");
+    return Ok(());
+}
+```
+
+### src/offline.rs
+```
+use core::f32;
+
+use cgmath::Vector2;
+use image::{ImageBuffer, Rgba};
+
+use crate::{
+    camera::{Camera, OrthographicProjection, Projection},
+    cmap::{ColorMapGPU, GenericColorMap, COLORMAP_RESOLUTION},
+    renderer::{RenderSettings, VolumeRenderer},
+    volume::{Volume, VolumeGPU},
+    WGPUContext,
+};
+
+async fn render_view<P: Projection>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut VolumeRenderer,
+    volume: &VolumeGPU,
+    cmap: &ColorMapGPU,
+    camera: Camera<P>,
+    render_settings: &RenderSettings,
+    bg: wgpu::Color,
+    resolution: Vector2<u32>,
+) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("render texture"),
+        size: wgpu::Extent3d {
+            width: resolution.x,
+            height: resolution.y,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: renderer.format(),
+        usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("render encoder"),
+    });
+    let frame_data = renderer.prepare(device, volume, &camera, &render_settings, cmap);
+    {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(bg),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        renderer.render(&mut render_pass, &frame_data);
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+    return download_texture(&target, device, queue).await;
+}
+
+pub async fn render_volume(
+    volumes: Vec<Volume>,
+    cmap: GenericColorMap,
+    resolution: Vector2<u32>,
+    frames: &[f32],
+    bg: wgpu::Color,
+    vmin: Option<f32>,
+    vmax: Option<f32>,
+    distance_scale: f32,
+    spatial_interpolation: wgpu::FilterMode,
+    temporal_interpolation: wgpu::FilterMode,
+    camera_angle: Option<(f32, f32)>,
+) -> anyhow::Result<Vec<ImageBuffer<Rgba<u8>, Vec<u8>>>> {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let wgpu_context = WGPUContext::new(&instance, None).await?;
+    let device = &wgpu_context.device;
+    let queue = &wgpu_context.queue;
+
+    let aabb = volumes[0].aabb.clone();
+    let volume_gpu: Vec<VolumeGPU> = volumes
+        .into_iter()
+        .map(|v| VolumeGPU::new(device, queue, v))
+        .collect();
+    let cmap_gpu = ColorMapGPU::new(&cmap, device, queue, COLORMAP_RESOLUTION);
+
+    let render_format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let mut renderer = VolumeRenderer::new(&device, render_format);
+
+    let ratio = resolution.x as f32 / resolution.y as f32;
+    let radius = aabb.radius();
+    let camera = Camera::new_aabb_iso(
+        aabb,
+        OrthographicProjection::new(Vector2::new(ratio, 1.) * radius * 2., 0.01, 1000.),
+        camera_angle
+    );
+
+    let mut images: Vec<ImageBuffer<Rgba<u8>, Vec<u8>>> = Vec::with_capacity(frames.len());
+    for time in frames {
+        let img = render_view(
+            device,
+            queue,
+            &mut renderer,
+            &volume_gpu[0],
+            &cmap_gpu,
+            camera,
+            &RenderSettings {
+                time: *time,
+                vmin,
+                vmax,
+                distance_scale,
+                spatial_filter: spatial_interpolation,
+                temporal_filter: temporal_interpolation,
+                ..Default::default()
+            },
+            bg,
+            resolution,
+        )
+        .await?;
+        images.push(img);
+    }
+    Ok(images)
+}
+
+pub async fn download_texture(
+    texture: &wgpu::Texture,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    let texture_format = texture.format();
+
+    let texel_size: u32 = texture_format.block_copy_size(None).ok_or(anyhow::anyhow!(
+        "Failed to get texel size for format {:?}",
+        texture_format
+    ))?;
+    let fb_size = texture.size();
+    let align: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT - 1;
+    let bytes_per_row = (texel_size * fb_size.width) + align & !align;
+
+    let output_buffer_size = (bytes_per_row * fb_size.height) as wgpu::BufferAddress;
+
+    let output_buffer_desc = wgpu::BufferDescriptor {
+        size: output_buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        label: Some("texture download buffer"),
+        mapped_at_creation: false,
+    };
+    let staging_buffer = device.create_buffer(&output_buffer_desc);
+
+    let mut encoder: wgpu::CommandEncoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("download frame buffer encoder"),
+        });
+
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging_buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(fb_size.height),
+            },
+        },
+        fb_size,
+    );
+    let sub_idx = queue.submit(std::iter::once(encoder.finish()));
+
+    let mut image = {
+        let data: wgpu::BufferView<'_> =
+            download_buffer(device, &staging_buffer, Some(sub_idx)).await;
+
+        ImageBuffer::<Rgba<u8>, _>::from_raw(
+            bytes_per_row / texel_size,
+            fb_size.height,
+            data.to_vec(),
+        )
+        .ok_or(anyhow::anyhow!(
+            "Failed to create image buffer from raw data"
+        ))?
+    };
+    staging_buffer.unmap();
+
+    return Ok(image::imageops::crop(&mut image, 0, 0, fb_size.width, fb_size.height).to_image());
+}
+
+async fn download_buffer<'a>(
+    device: &wgpu::Device,
+    buffer: &'a wgpu::Buffer,
+    wait_idx: Option<wgpu::SubmissionIndex>,
+) -> wgpu::BufferView<'a> {
+    let slice = buffer.slice(..);
+
+    let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| tx.send(result).unwrap());
+    device.poll(match wait_idx {
+        Some(idx) => wgpu::Maintain::WaitForSubmissionIndex(idx),
+        None => wgpu::Maintain::Wait,
+    });
+    rx.receive().await.unwrap().unwrap();
+
+    let view = slice.get_mapped_range();
+    return view;
+}
+```
+
+### src/py.rs
+```
+use cgmath::Vector2;
+use half::f16;
+use image::{ImageBuffer, Rgba};
+use numpy::{ndarray::StrideShape, IntoPyArray, PyArray4, PyReadonlyArrayDyn};
+use pyo3::{exceptions::PyTypeError, prelude::*};
+use std::env::{self};
+
+use crate::{
+    cmap::{self, ListedColorMap},
+    offline::render_volume,
+    viewer,
+    volume::Volume,
+};
+
+#[pymodule]
+fn vape4d<'py>(m: &Bound<'py, PyModule>) -> PyResult<()> {
+    #[pyfn(m)]
+    fn render_video<'py>(
+        py: Python<'py>,
+        volume: PyReadonlyArrayDyn<'py, f16>,
+        cmap: PyReadonlyArrayDyn<'py, f32>,
+        width: u32,
+        height: u32,
+        time: Vec<f32>,
+        background: (f32, f32, f32, f32),
+        distance_scale: f32,
+        vmin: Option<f32>,
+        vmax: Option<f32>,
+        spatial_interpolation: Option<String>,
+        temporal_interpolation: Option<String>,
+        camera_angle: Option<(f32, f32)>,
+    ) -> PyResult<Bound<'py, PyArray4<u8>>> {
+        let volume = Volume::from_array(volume.as_array());
+        let cmap = ListedColorMap::from_array(cmap.as_array());
+
+        let spatial_interpolation = spatial_interpolation
+            .map(|s| parse_interpolation(&s))
+            .transpose()
+            .map_err(|e| PyTypeError::new_err(format!("{:?}", e)))?
+            .unwrap_or_default();
+
+        let temporal_interpolation = temporal_interpolation
+            .map(|s| parse_interpolation(&s))
+            .transpose()
+            .map_err(|e| PyTypeError::new_err(format!("{:?}", e)))?
+            .unwrap_or_default();
+
+        let img: Vec<ImageBuffer<Rgba<u8>, Vec<u8>>> = pollster::block_on(render_volume(
+            vec![volume],
+            cmap::GenericColorMap::Listed(cmap),
+            Vector2::new(width, height),
+            &time,
+            wgpu::Color {
+                r: background.0 as f64,
+                g: background.1 as f64,
+                b: background.2 as f64,
+                a: background.3 as f64,
+            },
+            vmin,
+            vmax,
+            distance_scale,
+            spatial_interpolation,
+            temporal_interpolation,
+            camera_angle,
+        ))
+        .map_err(|e| PyTypeError::new_err(format!("{:?}", e)))?;
+
+        let shape = StrideShape::from((time.len(), width as usize, height as usize, 4 as usize));
+        let arr = numpy::ndarray::Array4::from_shape_vec(
+            shape,
+            img.iter().flat_map(|img| img.to_vec()).collect(),
+        )
+        .map_err(|e| PyTypeError::new_err(format!("{:?}", e)))?;
+        return Ok(arr.into_pyarray(py));
+    }
+
+    #[pyfn(m)]
+    fn standalone<'py>(_py: Python<'py>) -> PyResult<()> {
+        // donts pass first argument (binary name) to parser
+        match pollster::block_on(viewer(env::args().skip(1))) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyException, _>(format!(
+                "{:?}",
+                e
+            ))),
+        }
+    }
+    Ok(())
+}
+
+fn parse_interpolation(text: &str) -> anyhow::Result<wgpu::FilterMode> {
+    match text.to_lowercase().as_str() {
+        "nearest" => Ok(wgpu::FilterMode::Nearest),
+        "linear" => Ok(wgpu::FilterMode::Linear),
+        _ => Err(anyhow::format_err!("Invalid interpolation mode")),
+    }
+}
+```
+
+### src/renderer.rs
+```
+use crate::{
+    camera::{Camera, Projection, VIEWPORT_Y_FLIP},
+    cmap::ColorMapGPU,
+    volume::{Aabb, Volume, VolumeGPU},
+};
+
+use cgmath::{EuclideanSpace, Matrix4, SquareMatrix, Vector4, Zero};
+use wgpu::util::DeviceExt;
+
+pub struct VolumeRenderer {
+    pipeline: wgpu::RenderPipeline,
+    sampler_nearest: wgpu::Sampler,
+    sampler_linear: wgpu::Sampler,
+    format: wgpu::TextureFormat,
+}
+
+impl VolumeRenderer {
+    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("render pipeline layout"),
+            bind_group_layouts: &[
+                &Self::bind_group_layout(device),
+                &ColorMapGPU::bind_group_layout(device),
+            ],
+            push_constant_ranges: &[],
+        });
+
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/raymarch.wgsl"));
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("volume render pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("volume sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("volume sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        VolumeRenderer {
+            pipeline,
+            sampler_nearest,
+            sampler_linear,
+            format: color_format,
+        }
+    }
+
+    pub fn prepare<'a, P: Projection>(
+        &self,
+        device: &wgpu::Device,
+        volume: &VolumeGPU,
+        camera: &Camera<P>,
+        render_settings: &RenderSettings,
+        cmap: &'a ColorMapGPU,
+    ) -> PerFrameData<'a> {
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera buffer"),
+            contents: bytemuck::bytes_of(&CameraUniform::from(camera)),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let settings_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("settnigs buffer"),
+            contents: bytemuck::bytes_of(&RenderSettingsUniform::from_settings(
+                &render_settings,
+                &volume.volume,
+            )),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        let step = ((volume.volume.timesteps - 1) as f32 * render_settings.time) as usize;
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("volume renderer bind group"),
+            layout: &Self::bind_group_layout(device),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &volume.textures[step].create_view(&wgpu::TextureViewDescriptor::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(
+                        &volume.textures[(step + 1) % volume.volume.timesteps as usize]
+                            .create_view(&wgpu::TextureViewDescriptor::default()),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(
+                        if render_settings.spatial_filter == wgpu::FilterMode::Nearest {
+                            &self.sampler_nearest
+                        } else {
+                            &self.sampler_linear
+                        },
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Buffer(
+                        camera_buffer.as_entire_buffer_binding(),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(
+                        settings_buffer.as_entire_buffer_binding(),
+                    ),
+                },
+            ],
+        });
+        PerFrameData {
+            bind_group,
+            cmap_bind_group: cmap.bindgroup(),
+        }
+    }
+
+    pub fn render<'rpass, 'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'rpass>,
+        frame_data: &'a PerFrameData,
+    ) {
+        render_pass.set_bind_group(0, &frame_data.bind_group, &[]);
+        render_pass.set_bind_group(1, frame_data.cmap_bind_group, &[]);
+        render_pass.set_pipeline(&self.pipeline);
+
+        render_pass.draw(0..4, 0..1);
+    }
+
+    fn bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("volume renderer bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        })
+    }
+    pub fn format(&self) -> wgpu::TextureFormat {
+        self.format
+    }
+}
+
+pub struct PerFrameData<'a> {
+    bind_group: wgpu::BindGroup,
+    cmap_bind_group: &'a wgpu::BindGroup,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CameraUniform {
+    /// the cameras view matrix
+    pub(crate) view_matrix: Matrix4<f32>,
+    /// inverse view matrix
+    pub(crate) view_inv_matrix: Matrix4<f32>,
+
+    // the cameras projection matrix
+    pub(crate) proj_matrix: Matrix4<f32>,
+
+    // inverse projection matrix
+    pub(crate) proj_inv_matrix: Matrix4<f32>,
+}
+
+impl Default for CameraUniform {
+    fn default() -> Self {
+        Self {
+            view_matrix: Matrix4::identity(),
+            view_inv_matrix: Matrix4::identity(),
+            proj_matrix: Matrix4::identity(),
+            proj_inv_matrix: Matrix4::identity(),
+        }
+    }
+}
+
+impl CameraUniform {
+    pub(crate) fn set_view_mat(&mut self, view_matrix: Matrix4<f32>) {
+        self.view_matrix = view_matrix;
+        self.view_inv_matrix = view_matrix.invert().unwrap();
+    }
+
+    pub(crate) fn set_proj_mat(&mut self, proj_matrix: Matrix4<f32>) {
+        self.proj_matrix = VIEWPORT_Y_FLIP * proj_matrix;
+        self.proj_inv_matrix = proj_matrix.invert().unwrap();
+    }
+
+    pub fn set_camera(&mut self, camera: &Camera<impl Projection>) {
+        self.set_proj_mat(camera.proj_matrix());
+        self.set_view_mat(camera.view_matrix());
+    }
+}
+
+impl<P: Projection> From<&Camera<P>> for CameraUniform {
+    fn from(camera: &Camera<P>) -> Self {
+        let mut uniform = CameraUniform::default();
+        uniform.set_camera(camera);
+        uniform
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderSettings {
+    pub clipping_aabb: Option<Aabb<f32>>,
+    pub time: f32,
+    pub step_size: f32,
+    pub spatial_filter: wgpu::FilterMode,
+    pub temporal_filter: wgpu::FilterMode,
+    pub distance_scale: f32,
+    pub vmin: Option<f32>,
+    pub vmax: Option<f32>,
+    pub gamma_correction: bool,
+}
+
+impl Default for RenderSettings {
+    fn default() -> Self {
+        Self {
+            clipping_aabb: None,
+            time: 0.,
+            step_size: 1e-4,
+            spatial_filter: wgpu::FilterMode::Linear,
+            temporal_filter: wgpu::FilterMode::Linear,
+            distance_scale: 1.,
+            vmin: None,
+            vmax: None,
+            gamma_correction: false,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RenderSettingsUniform {
+    volume_aabb_min: Vector4<f32>,
+    volume_aabb_max: Vector4<f32>,
+    clipping_min: Vector4<f32>,
+    clipping_max: Vector4<f32>,
+    time: f32,
+    time_steps: u32,
+    step_size: f32,
+    temporal_filter: u32,
+    distance_scale: f32,
+    vmin: f32,
+    vmax: f32,
+    gamma_correction: u32,
+}
+
+impl RenderSettingsUniform {
+    pub fn from_settings(settings: &RenderSettings, volume: &Volume) -> Self {
+        let volume_aabb = volume.aabb;
+
+        Self {
+            volume_aabb_min: volume_aabb.min.to_vec().extend(0.),
+            volume_aabb_max: volume_aabb.max.to_vec().extend(0.),
+            time: settings.time,
+            time_steps: volume.timesteps as u32,
+            clipping_min: settings
+                .clipping_aabb
+                .map(|bb| bb.min.to_vec().extend(0.))
+                .unwrap_or(RenderSettingsUniform::default().clipping_min),
+            clipping_max: settings
+                .clipping_aabb
+                .map(|bb| bb.max.to_vec().extend(0.))
+                .unwrap_or(RenderSettingsUniform::default().clipping_max),
+            step_size: settings.step_size,
+            temporal_filter: settings.temporal_filter as u32,
+            distance_scale: settings.distance_scale,
+            vmin: settings.vmin.unwrap_or(volume.min_value),
+            vmax: settings.vmax.unwrap_or(volume.max_value),
+            gamma_correction: settings.gamma_correction as u32,
+        }
+    }
+}
+
+impl Default for RenderSettingsUniform {
+    fn default() -> Self {
+        Self {
+            volume_aabb_min: Vector4::new(-1., -1., -1., 0.),
+            volume_aabb_max: Vector4::new(1., 1., 1., 0.),
+            clipping_min: Vector4::zero(),
+            clipping_max: Vector4::new(1., 1., 1., 0.),
+            time: 0.,
+            time_steps: 1,
+            step_size: 0.01,
+            temporal_filter: wgpu::FilterMode::Nearest as u32,
+            distance_scale: 1.,
+            vmin: 0.,
+            vmax: 1.,
+            gamma_correction: 0,
+        }
+    }
+}
+```
+
+### src/ui.rs
+```
+use std::{f32::consts::PI, ops::RangeInclusive, time::Duration};
+
+use egui::{emath::Numeric, epaint::TextShape, vec2};
+use egui_plot::{Plot, PlotImage, PlotPoint};
+
+use crate::{
+    cmap::{ColorMap, COLORMAP_RESOLUTION},
+    WindowContext,
+};
+
+#[cfg(feature = "colormaps")]
+use crate::cmap::COLORMAPS;
+
+pub(crate) fn ui(state: &mut WindowContext) {
+    let ctx = state.ui_renderer.winit.egui_ctx();
+    let with_animation = state.volumes[0].volume.timesteps > 1;
+    egui::Window::new("Render Settings").show(ctx, |ui| {
+        egui::Grid::new("render_settings")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                if with_animation {
+                    ui.label("Time");
+                    ui.add(
+                        egui::Slider::new(&mut state.render_settings.time, (0.)..=(1.))
+                            .clamping(egui::SliderClamping::Always)
+                            .custom_formatter(|v, _| format!("{:.2}", v)),
+                    );
+                    if ui.button(if state.playing { "||" } else { "▶" }).clicked() {
+                        state.playing = !state.playing;
+                    }
+                    ui.end_row();
+                    ui.label("Animation Duration");
+                    ui.add(
+                        egui::DragValue::from_get_set(|v| {
+                            if let Some(v) = v {
+                                state.animation_duration = Duration::from_secs_f64(v);
+                                return v;
+                            } else {
+                                return state.animation_duration.as_secs_f64();
+                            }
+                        })
+                        .suffix("s")
+                        .range((0.)..=1000.),
+                    );
+                    ui.end_row();
+                }
+
+                ui.label("Step Size");
+                ui.add(
+                    egui::DragValue::new(&mut state.render_settings.step_size)
+                        .speed(0.01)
+                        .range((1e-3)..=(0.1)),
+                );
+                ui.end_row();
+
+                ui.label("Distance Scale");
+                ui.add(
+                    egui::DragValue::new(&mut state.render_settings.distance_scale)
+                        .speed(0.01)
+                        .range((1e-4)..=(100000.)),
+                );
+                ui.end_row();
+                ui.label("Background Color");
+                let mut bg = [
+                    state.background_color.r as f32,
+                    state.background_color.g as f32,
+                    state.background_color.b as f32,
+                    state.background_color.a as f32,
+                ];
+                ui.color_edit_button_rgba_premultiplied(&mut bg);
+                state.background_color = wgpu::Color {
+                    r: bg[0] as f64,
+                    g: bg[1] as f64,
+                    b: bg[2] as f64,
+                    a: bg[3] as f64,
+                };
+                ui.end_row();
+                if state.volumes.len() > 1 {
+                    ui.label("Channel");
+                    egui::ComboBox::new("selected_channel", "")
+                        .selected_text(
+                            state
+                                .selected_channel
+                                .map_or("All".to_string(), |v| v.to_string()),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut state.selected_channel, None, "All");
+                            for i in 0..state.volumes.len() {
+                                ui.selectable_value(
+                                    &mut state.selected_channel,
+                                    Some(i),
+                                    format!("{}", i),
+                                );
+                            }
+                        });
+                    ui.end_row();
+                    if state.selected_channel.is_none() {
+                        ui.label("Number of Rows");
+                        let max_rows = state.volumes.len();
+                        ui.add(
+                            egui::DragValue::new(&mut state.num_columns)
+                                .range(1u32..=max_rows as u32),
+                        );
+                        ui.end_row();
+                    }
+                }
+
+                ui.label("Spatial Interpolation");
+
+                egui::ComboBox::new("spatial_interpolation", "")
+                    .selected_text(match state.render_settings.spatial_filter {
+                        wgpu::FilterMode::Nearest => "Nearest",
+                        wgpu::FilterMode::Linear => "Linear",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.render_settings.spatial_filter,
+                            wgpu::FilterMode::Nearest,
+                            "Nearest",
+                        );
+                        ui.selectable_value(
+                            &mut state.render_settings.spatial_filter,
+                            wgpu::FilterMode::Linear,
+                            "Linear",
+                        )
+                    });
+                ui.end_row();
+                ui.label("Temporal Interpolation");
+                egui::ComboBox::new("temporal_interpolation", "")
+                    .selected_text(match state.render_settings.temporal_filter {
+                        wgpu::FilterMode::Nearest => "Nearest",
+                        wgpu::FilterMode::Linear => "Linear",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.render_settings.temporal_filter,
+                            wgpu::FilterMode::Nearest,
+                            "Nearest",
+                        );
+                        ui.selectable_value(
+                            &mut state.render_settings.temporal_filter,
+                            wgpu::FilterMode::Linear,
+                            "Linear",
+                        )
+                    });
+                ui.end_row();
+            });
+    });
+
+    // let mut cmap = state.cmap.clone();
+
+    if state.colormap_editor_visible {
+        egui::Window::new("Transfer Function")
+            .default_size(vec2(300., 50.))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("vmin");
+                    let min_b = state
+                        .render_settings
+                        .vmin
+                        .unwrap_or(state.volumes[0].volume.min_value);
+                    let max_b = state
+                        .render_settings
+                        .vmax
+                        .unwrap_or(state.volumes[0].volume.max_value);
+
+                    let vmin_min = state.volumes[0].volume.min_value.min(min_b);
+                    let vmax_max = state.volumes[0].volume.max_value.max(max_b);
+                    optional_drag(
+                        ui,
+                        &mut state.render_settings.vmin,
+                        Some(vmin_min..=max_b),
+                        Some(0.01),
+                        Some(vmin_min),
+                    );
+                    ui.label("vmax");
+                    optional_drag(
+                        ui,
+                        &mut state.render_settings.vmax,
+                        Some(min_b..=vmax_max),
+                        Some(0.01),
+                        Some(vmax_max),
+                    );
+                });
+                #[cfg(feature = "colormaps")]
+                if state.cmap_select_visible {
+                    ui.horizontal(|ui| {
+                        let cmaps = &COLORMAPS;
+                        let mut selected_cmap: (String, String) = ui.ctx().data_mut(|d| {
+                            d.get_persisted_mut_or(
+                                "selected_cmap".into(),
+                                ("seaborn".to_string(), "icefire".to_string()),
+                            )
+                            .clone()
+                        });
+                        let mut search_term: String = ui.ctx().data_mut(|d| {
+                            d.get_temp_mut_or("cmap_search".into(), "".to_string())
+                                .clone()
+                        });
+                        ui.label("Colormap");
+                        let old_selected_cmap = selected_cmap.clone();
+                        egui::ComboBox::new("cmap_select", "")
+                            .selected_text(selected_cmap.1.clone())
+                            .show_ui(ui, |ui| {
+                                ui.add(
+                                    egui::text_edit::TextEdit::singleline(&mut search_term)
+                                        .hint_text("Search..."),
+                                );
+                                for (group, cmaps) in cmaps.iter() {
+                                    ui.label(group);
+                                    let mut sorted_cmaps: Vec<_> = cmaps.iter().collect();
+                                    sorted_cmaps.sort_by_key(|e| e.0);
+                                    for (name, cmap) in sorted_cmaps {
+                                        if name.contains(&search_term) {
+                                            let texture =
+                                                load_or_create(ui, cmap, COLORMAP_RESOLUTION);
+                                            ui.horizontal(|ui| {
+                                                ui.image(egui::ImageSource::Texture(
+                                                    egui::load::SizedTexture {
+                                                        id: texture,
+                                                        size: vec2(50., 10.),
+                                                    },
+                                                ));
+                                                ui.selectable_value(
+                                                    &mut selected_cmap,
+                                                    (group.clone(), name.clone()),
+                                                    name,
+                                                );
+                                            });
+                                        }
+                                    }
+                                    ui.separator();
+                                }
+                            });
+                        if old_selected_cmap != selected_cmap {
+                            let old_alpha = state.cmap.a.clone();
+                            state.cmap = cmaps[&selected_cmap.0][&selected_cmap.1]
+                                .into_linear_segmented(COLORMAP_RESOLUTION);
+                            if state.cmap.a.is_none()
+                                || cmaps[&selected_cmap.0][&selected_cmap.1]
+                                    .has_boring_alpha_channel()
+                            {
+                                state.cmap.a = old_alpha;
+                            }
+                            ui.ctx().data_mut(|d| {
+                                d.insert_persisted("selected_cmap".into(), selected_cmap);
+                            });
+                        }
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp("cmap_search".into(), search_term));
+                        if state.cmap.a.is_none() {
+                            state.cmap.a = Some(vec![(0.0, 1.0, 1.0), (1.0, 1.0, 1.0)]);
+                        }
+                        if ui.button("↔").clicked() {
+                            state.cmap = (&state.cmap).reverse();
+                        }
+                    });
+                }
+                let vmin = state
+                    .render_settings
+                    .vmin
+                    .unwrap_or(state.volumes[0].volume.min_value);
+                let vmax = state
+                    .render_settings
+                    .vmax
+                    .unwrap_or(state.volumes[0].volume.max_value);
+                show_cmap(ui, egui::Id::new("cmap preview"), &state.cmap, vmin, vmax);
+
+                ui.heading("Alpha Channel");
+                ui.end_row();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Presets:");
+                    let v_hack = ui
+                        .button("\\/")
+                        .on_hover_text("double click for smooth version");
+                    if v_hack.clicked() {
+                        state.cmap.a = Some(vec![(0.0, 1.0, 1.0), (0.5, 0., 0.), (1.0, 1.0, 1.0)]);
+                    }
+                    if v_hack.double_clicked() {
+                        state.cmap.a =
+                            Some(build_segments(25, |x| ((x * 2. * PI).cos() + 1.) / 2.));
+                    }
+                    let slope_hack = ui
+                        .button("/")
+                        .on_hover_text("double click for smooth version");
+                    if slope_hack.clicked() {
+                        state.cmap.a = Some(build_segments(2, |x| (-(x * PI).cos() + 1.) / 2.));
+                    }
+                    if slope_hack.double_clicked() {
+                        state.cmap.a = Some(build_segments(25, |x| (-(x * PI).cos() + 1.) / 2.));
+                    }
+                    let double_v_hack = ui
+                        .button("/\\/\\")
+                        .on_hover_text("double click for smooth version");
+                    if double_v_hack.clicked() {
+                        state.cmap.a =
+                            Some(build_segments(5, |x| (-(x * 4. * PI).cos() + 1.) / 2.));
+                    }
+                    if double_v_hack.double_clicked() {
+                        state.cmap.a =
+                            Some(build_segments(25, |x| (-(x * 4. * PI).cos() + 1.) / 2.));
+                    }
+                    if ui.button("-").clicked() {
+                        state.cmap.a = Some(vec![(0.0, 1.0, 1.0), (1.0, 1.0, 1.0)]);
+                    }
+                });
+
+                ui.separator();
+
+                if let Some(a) = &mut state.cmap.a {
+                    tf_ui(ui, a)
+                    .on_hover_text("Drag anchor points to change transfer function.\nLeft-Click for new anchor point.\nRight-Click to delete anchor point.");
+                }
+                ui.end_row();
+                if ui.button("Save Colormap").clicked(){
+                    let cmap_data = serde_json::to_vec(&state.cmap).unwrap();
+                    #[cfg(target_arch = "wasm32")]
+                    wasm_bindgen_futures::spawn_local(async move{
+                        let file = rfd::AsyncFileDialog::new().set_file_name("colormap.json").save_file().await;
+                        if let Some(file) = file{
+                            file.write(&cmap_data).await.unwrap();
+                        }
+                    });
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let file = rfd::FileDialog::new().set_file_name("colormap.json").save_file();
+                        if let Some(file) = file {
+                            std::fs::write(file, cmap_data).unwrap();
+                        }
+                    }
+                }
+            });
+    }
+    state
+        .cmap_gpu
+        .update(&state.wgpu_context.queue, &state.cmap);
+
+    if state.volume_info_visible {
+        egui::Window::new("Volume Info").show(ctx, |ui| {
+            egui::Grid::new("volume_info")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("timesteps");
+                    ui.label(state.volumes[0].volume.timesteps.to_string());
+                    ui.end_row();
+                    ui.label("channels");
+                    ui.label(state.volumes.len().to_string());
+                    ui.end_row();
+                    ui.label("resolution");
+                    let res = state.volumes[0].volume.resolution;
+                    ui.label(format!("{}x{}x{} (WxHxD)", res.x, res.y, res.z));
+                    ui.end_row();
+                    ui.label("value range");
+                    ui.label(format!(
+                        "[{} , {}]",
+                        state.volumes[0].volume.min_value, state.volumes[0].volume.max_value
+                    ));
+                    ui.end_row();
+                });
+        });
+    }
+
+    let frame_rect = ctx.available_rect();
+    egui::Area::new(egui::Id::new("orientation"))
+        .fixed_pos(Pos2::new(frame_rect.left(), frame_rect.bottom()))
+        .anchor(Align2::LEFT_BOTTOM, Vec2::new(0., 0.))
+        .interactable(false)
+        .order(Order::Background)
+        .show(ctx, |ui| {
+            let (response, painter) = ui.allocate_painter(vec2(100., 100.), Sense::empty());
+
+            let to_screen = emath::RectTransform::from_to(
+                Rect::from_two_pos(Pos2::new(-1.2, -1.2), Pos2::new(1.2, 1.2)),
+                response.rect,
+            );
+            let x_color = Color32::RED;
+            let y_color = Color32::GREEN;
+            let z_color = Color32::BLUE;
+
+            let view_matrix = state.camera.view_matrix();
+            let x_axis = view_matrix.transform_vector(Vector3::unit_x());
+            // multiply with -1 because in egui origin is top left
+            let y_axis = -view_matrix.transform_vector(Vector3::unit_y());
+            let z_axis = view_matrix.transform_vector(Vector3::unit_z());
+            let origin = view_matrix.transform_vector(Vector3::zero());
+
+            let axes = [
+                (x_axis, x_color, "X"),
+                (y_axis, y_color, "Y"),
+                (z_axis, z_color, "Z"),
+            ];
+            let depth = vec![-x_axis.z, -y_axis.z, -z_axis.z];
+            let draw_order = argsort(&depth);
+            for i in draw_order.iter() {
+                let (axis, color, label) = axes[*i];
+                let pos = to_screen.transform_pos(pos2(axis.x, axis.y));
+                painter.add(PathShape::line(
+                    vec![to_screen.transform_pos(pos2(origin.x, origin.y)), pos],
+                    Stroke::new(3., color),
+                ));
+                painter.add(TextShape::new(
+                    pos,
+                    painter.layout_no_wrap(label.to_string(), FontId::default(), color),
+                    color,
+                ));
+            }
+        });
+}
+
+pub fn argsort<T: PartialOrd>(data: &[T]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..data.len()).collect::<Vec<_>>();
+    indices.sort_by(|&a, &b| data[a].partial_cmp(&data[b]).unwrap());
+    indices
+}
+
+use cgmath::{Transform, Vector3, Zero};
+use egui::{epaint::PathShape, *};
+
+pub fn tf_ui(ui: &mut Ui, points: &mut Vec<(f32, f32, f32)>) -> egui::Response {
+    let (response, painter) = ui.allocate_painter(
+        vec2(ui.available_width(), 100.),
+        Sense::hover().union(Sense::click()),
+    );
+
+    let to_screen = emath::RectTransform::from_to(
+        Rect::from_two_pos(Pos2::ZERO, Pos2::new(1., 1.)),
+        response.rect,
+    );
+
+    let stroke = Stroke::new(1.0, Color32::from_rgb(25, 200, 100));
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let pp = to_screen.inverse().transform_pos(pos);
+            let pp = (pp.x, 1. - pp.y, 1. - pp.y);
+            let idx = points
+                .iter()
+                .enumerate()
+                .find_map(|p| if p.1 .0 > pp.0 { Some(p.0) } else { None })
+                .unwrap_or(points.len() - 1);
+            points.insert(idx, pp);
+        }
+    }
+
+    let control_point_radius = 8.0;
+
+    let n = points.len();
+    let mut new_points = Vec::with_capacity(n);
+    let mut control_point_shapes = Vec::with_capacity(n);
+    for (i, point) in points.iter().enumerate() {
+        let size = Vec2::splat(2.0 * control_point_radius);
+        let pos = pos2(point.0, 1. - point.1);
+        let point_in_screen = to_screen.transform_pos(pos);
+        let point_rect = Rect::from_center_size(point_in_screen, size);
+        let point_id = response.id.with(i);
+        let point_response = ui.interact(point_rect, point_id, Sense::drag().union(Sense::click()));
+
+        let is_edge = i == 0 || i == n - 1;
+
+        if !point_response.secondary_clicked() || is_edge {
+            let e = 1e-3;
+            let mut t = point_response.drag_delta();
+            if is_edge {
+                // cant move last and first point
+                t.x = 0.;
+            }
+            // point cannot move past its neighbors
+            let left = if i == 0 { 0. } else { points[i - 1].0 + e };
+            let right = if i == n - 1 { 1. } else { points[i + 1].0 - e };
+            let bbox = Rect::from_min_max(Pos2::new(left, 0.), Pos2::new(right, 1.));
+
+            let mut new_point = pos2(point.0, 1. - point.1);
+            new_point += to_screen.inverse().scale() * t;
+            new_point = to_screen.from().intersect(bbox).clamp(new_point);
+            new_points.push((new_point.x, 1. - new_point.y, 1. - new_point.y));
+
+            let point_in_screen = to_screen.transform_pos(new_point);
+            let stroke = ui.style().interact(&point_response).fg_stroke;
+
+            control_point_shapes.push(Shape::circle_stroke(
+                point_in_screen,
+                control_point_radius,
+                stroke,
+            ));
+        }
+    }
+    points.drain(0..n);
+    points.extend(new_points);
+
+    let points_in_screen: Vec<Pos2> = points
+        .iter()
+        .map(|p| to_screen.transform_pos(pos2(p.0, 1. - p.1)))
+        .collect();
+
+    painter.add(PathShape::line(points_in_screen, stroke));
+    painter.extend(control_point_shapes);
+    response
+}
+
+use std::hash::Hash;
+fn load_or_create<C>(ui: &egui::Ui, cmap: C, n: u32) -> egui::TextureId
+where
+    C: ColorMap + Hash,
+{
+    let id = Id::new(&cmap);
+    let tex: Option<egui::TextureHandle> = ui.ctx().data_mut(|d| d.get_temp(id));
+    match tex {
+        Some(tex) => tex.id(),
+        None => {
+            let tex = ui.ctx().load_texture(
+                id.value().to_string(),
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [n as usize, 1],
+                    bytemuck::cast_slice(&cmap.rasterize(n as usize)),
+                ),
+                egui::TextureOptions::LINEAR,
+            );
+            let tex_id = tex.id();
+            ui.ctx().data_mut(|d| d.insert_temp(id, tex));
+            return tex_id;
+        }
+    }
+}
+
+fn optional_drag<T: Numeric>(
+    ui: &mut egui::Ui,
+    opt: &mut Option<T>,
+    range: Option<RangeInclusive<T>>,
+    speed: Option<impl Into<f64>>,
+    default: Option<T>,
+) {
+    let mut placeholder = default.unwrap_or(T::from_f64(0.));
+    let mut drag = if let Some(ref mut val) = opt {
+        egui_winit::egui::DragValue::new(val)
+    } else {
+        egui_winit::egui::DragValue::new(&mut placeholder).custom_formatter(|_, _| {
+            if let Some(v) = default {
+                format!("{:.2}", v.to_f64())
+            } else {
+                "—".into()
+            }
+        })
+    };
+    if let Some(range) = range {
+        drag = drag.range(range);
+    }
+    if let Some(speed) = speed {
+        drag = drag.speed(speed);
+    }
+    let changed = ui.add(drag).changed();
+    if ui
+        .add_enabled(opt.is_some(), egui::Button::new("↺"))
+        .on_hover_text("Reset to default")
+        .clicked()
+    {
+        *opt = None;
+    }
+    if changed && opt.is_none() {
+        *opt = Some(placeholder);
+    }
+}
+
+fn show_cmap(ui: &mut egui::Ui, id: egui::Id, cmap: impl ColorMap + Hash, vmin: f32, vmax: f32) {
+    let texture = load_or_create(ui, cmap, COLORMAP_RESOLUTION);
+    let width = vmax - vmin;
+    let height = width / 5.;
+    let image = PlotImage::new(
+        "cmap preview image",
+        texture,
+        PlotPoint::new(vmin + width * 0.5, height / 2.),
+        vec2(width, height),
+    );
+    let plot = Plot::new(id)
+        .show_x(true)
+        .show_y(false)
+        .height(100.)
+        .show_background(false)
+        .show_grid(false)
+        .custom_y_axes(vec![])
+        .allow_boxed_zoom(false)
+        .allow_double_click_reset(false)
+        .allow_drag(false)
+        .allow_scroll(false)
+        .allow_zoom(false);
+    plot.show(ui, |plot_ui| {
+        plot_ui.image(image);
+    });
+}
+
+fn build_segments<F: Fn(f32) -> f32>(n: usize, f: F) -> Vec<(f32, f32, f32)> {
+    (0..n)
+        .map(|i| {
+            let x = i as f32 / (n as f32 - 1.);
+            let v = f(x);
+            (x, v, v)
+        })
+        .collect()
+}
+```
+
+### src/ui_renderer.rs
+```
+use egui::{FullOutput, ViewportId};
+// adapted from https://github.com/niklaskorz/linon/blob/main/src/egui_wgpu.rs
+use winit::dpi::PhysicalSize;
+
+pub struct EguiWGPU {
+    pub winit: egui_winit::State,
+    pub renderer: egui_wgpu::Renderer,
+}
+
+impl EguiWGPU {
+    pub fn new(
+        device: &wgpu::Device,
+        output_format: wgpu::TextureFormat,
+        window: &winit::window::Window,
+    ) -> Self {
+        let ctx = Default::default();
+        Self {
+            winit: egui_winit::State::new(ctx, ViewportId::ROOT, window, None, None, None),
+            renderer: egui_wgpu::Renderer::new(device, output_format, None, 1, false),
+        }
+    }
+
+    /// Returns `true` if egui wants exclusive use of this event
+    /// (e.g. a mouse click on an egui window, or entering text into a text field).
+    /// For instance, if you use egui for a game, you want to first call this
+    /// and only when this returns `false` pass on the events to your game.
+    ///
+    /// Note that egui uses `tab` to move focus between elements, so this will always return `true` for tabs.
+    pub fn on_event(
+        &mut self,
+        window: &winit::window::Window,
+        event: &winit::event::WindowEvent,
+    ) -> bool {
+        let resp = self.winit.on_window_event(window, event);
+        return resp.consumed;
+    }
+
+    pub fn begin_frame(&mut self, window: &winit::window::Window) {
+        let raw_input = self.winit.take_egui_input(window);
+        self.winit.egui_ctx().begin_pass(raw_input);
+    }
+
+    /// Returns `needs_repaint` and shapes to draw.
+    pub fn end_frame(&mut self, window: &winit::window::Window) -> FullOutput {
+        let output = self.winit.egui_ctx().end_pass();
+        self.winit
+            .handle_platform_output(window, output.platform_output.clone());
+        output
+    }
+
+    pub fn prepare(
+        &mut self,
+        size: PhysicalSize<u32>,
+        scale_factor: f32,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        output: FullOutput,
+    ) -> UIRenderState {
+        let clipped_meshes = self
+            .winit
+            .egui_ctx()
+            .tessellate(output.shapes.clone(), scale_factor);
+
+        // let size = window.inner_size();l
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [size.width, size.height],
+            pixels_per_point: self.winit.egui_ctx().pixels_per_point(),
+        };
+
+        for (id, delta) in &output.textures_delta.set {
+            self.renderer.update_texture(device, queue, *id, &delta);
+        }
+
+        self.renderer
+            .update_buffers(device, queue, encoder, &clipped_meshes, &screen_descriptor);
+
+        UIRenderState {
+            clipped_meshes,
+            screen_descriptor,
+            output,
+        }
+    }
+
+    pub fn render(&mut self, render_pass: &mut wgpu::RenderPass<'static>, state: &UIRenderState) {
+        self.renderer
+            .render(render_pass, &state.clipped_meshes, &state.screen_descriptor);
+    }
+
+    pub fn cleanup(&mut self, state: UIRenderState) {
+        for id in &state.output.textures_delta.free {
+            self.renderer.free_texture(&id);
+        }
+    }
+}
+
+pub struct UIRenderState {
+    clipped_meshes: Vec<egui::ClippedPrimitive>,
+    screen_descriptor: egui_wgpu::ScreenDescriptor,
+    output: FullOutput,
+}
+```
+
+### src/viewer.rs
+```
+use clap::Parser;
+use std::{ffi::OsString, fmt::Debug, fs::File, io::BufReader, path::PathBuf};
+use winit::{dpi::LogicalSize, window::WindowAttributes};
+
+use crate::{cmap, open_window, volume::Volume, RenderConfig};
+
+#[derive(Debug, Parser)]
+#[command(author, version, about)]
+struct Opt {
+    /// Input file
+    input: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    no_vsync: bool,
+
+    #[arg(long, default_value_t = false)]
+    channel_first: bool,
+
+    #[cfg(not(feature = "colormaps"))]
+    colormap: PathBuf,
+
+    #[cfg(feature = "colormaps")]
+    colormap: Option<PathBuf>,
+}
+
+pub async fn viewer<I, T>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    env_logger::init();
+    let opt = Opt::try_parse_from(args)?;
+
+    let data_file = File::open(&opt.input)?;
+
+    let volumes = Volume::load_numpy(BufReader::new(data_file), !opt.channel_first)
+        .expect("Failed to load volume");
+
+    #[cfg(feature = "colormaps")]
+    let cmap = opt
+        .colormap
+        .map_or(Ok(cmap::COLORMAPS["seaborn"]["icefire"].clone()), |path| {
+            let reader = File::open(path)?;
+            cmap::GenericColorMap::read(reader)
+        })?;
+    #[cfg(not(feature = "colormaps"))]
+    let cmap = {
+        let reader = File::open(&opt.colormap)?;
+        cmap::GenericColorMap::read(reader)?
+    };
+
+    open_window(
+        WindowAttributes::default().with_inner_size(LogicalSize::new(800, 600)),
+        volumes,
+        cmap.into_linear_segmented(cmap::COLORMAP_RESOLUTION),
+        RenderConfig {
+            no_vsync: opt.no_vsync,
+            background_color: wgpu::Color::BLACK,
+            show_colormap_editor: true,
+            show_volume_info: true,
+            vmin: None,
+            vmax: None,
+            #[cfg(feature = "colormaps")]
+            show_cmap_select: true,
+            duration: None,
+            distance_scale: 1.0,
+        },
+    )
+    .await
+}
+```
+
+### src/volume.rs
+```
+use bytemuck::Zeroable;
+use cgmath::{BaseNum, EuclideanSpace, MetricSpace, Point3, Vector3, Zero};
+use half::f16;
+use npyz::{npz, Deserialize, NpyFile};
+use num_traits::Float;
+#[cfg(feature = "python")]
+use numpy::ndarray::ArrayViewD;
+use std::io::{Read, Seek};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+use wgpu::util::{DeviceExt, TextureDataOrder};
+
+pub struct Volume {
+    pub timesteps: u32,
+    pub resolution: Vector3<u32>,
+    pub aabb: Aabb<f32>,
+    pub min_value: f32,
+    pub max_value: f32,
+    data: Vec<f16>,
+}
+
+impl Volume {
+    #[cfg(feature = "python")]
+    pub fn from_array(data: ArrayViewD<f16>) -> Self {
+        let shape = data.shape().to_vec();
+        let resolution = [shape[1] as u32, shape[2] as u32, shape[3] as u32];
+        let vec_data = data.to_slice().unwrap().to_vec();
+
+        let res_min = resolution.iter().min().unwrap();
+        let aabb = Aabb {
+            min: Point3::new(0.0, 0.0, 0.0),
+            max: Point3::new(
+                resolution[2] as f32 / *res_min as f32,
+                resolution[1] as f32 / *res_min as f32,
+                resolution[0] as f32 / *res_min as f32,
+            ),
+        };
+        let vmin = *vec_data
+            .iter()
+            .min_by(|a, b| a.total_cmp(b))
+            .unwrap_or(&f16::ZERO);
+        let vmax = *vec_data
+            .iter()
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap_or(&(vmin + f16::ONE));
+        Self {
+            timesteps: shape[0] as u32,
+            resolution: resolution.into(),
+            aabb,
+            min_value: vmin.to_f32(),
+            max_value: vmax.to_f32(),
+            data: vec_data,
+        }
+    }
+
+    pub fn load_npy<'a, R>(reader: R, time_first: bool) -> anyhow::Result<Vec<Self>>
+    where
+        R: Read + Seek,
+    {
+        let array = NpyFile::new(reader)?;
+        Self::read(array, time_first)
+    }
+
+    pub fn read_dyn<'a, R, P>(array: NpyFile<R>, time_first: bool) -> anyhow::Result<Vec<Self>>
+    where
+        R: Read,
+        P: Into<f64> + Deserialize,
+    {
+        let start = Instant::now();
+        let time_dim = if time_first { 0 } else { 1 };
+        let channel_dim = if time_first { 1 } else { 0 };
+        let timesteps = array.shape()[time_dim] as usize;
+        let channels = array.shape()[channel_dim] as usize;
+        log::debug!("size: {:?}", array.shape());
+        if array.shape().len() != 5 {
+            anyhow::bail!("unsupported shape: {:?}", array.shape());
+        }
+        let resolution = [
+            array.shape()[2] as u32,
+            array.shape()[3] as u32,
+            array.shape()[4] as u32,
+        ];
+        let numel = resolution.iter().product::<u32>() as usize;
+
+        let strides = array.strides().to_vec();
+        let mut volumes: Vec<Vec<f16>> = vec![vec![f16::zero(); numel * timesteps]; channels];
+
+        let mut min_value = f32::MAX;
+        let mut max_value = f32::MIN;
+        for (i, v) in array.data::<P>()?.enumerate() {
+            let v64: f64 = v.unwrap().into();
+            let v32: f32 = v64 as f32;
+            let v = f16::from_f32(v32);
+            if v32 > max_value {
+                max_value = v32;
+            }
+            if v32 < min_value {
+                min_value = v32;
+            }
+            let (c, idx) = if time_first {
+                let t = i / strides[0] as usize;
+                let c = (i - strides[0] as usize * t) / strides[1] as usize;
+                let idx = t * numel + (i - strides[0] as usize * t - strides[1] as usize * c);
+                (c, idx)
+            } else {
+                let c = i / strides[0] as usize;
+                let t = (i - strides[0] as usize * c) / strides[1] as usize;
+                let idx = t * numel + (i - strides[0] as usize * c - strides[1] as usize * t);
+                (c, idx)
+            };
+            volumes[c][idx] = v;
+        }
+
+        if min_value == max_value {
+            max_value = min_value + 1.0;
+        }
+        let res_min = resolution.iter().min().unwrap_or(&1);
+
+        let aabb = Aabb {
+            min: Point3::new(0.0, 0.0, 0.0),
+            max: Point3::new(
+                resolution[2] as f32 / *res_min as f32,
+                resolution[1] as f32 / *res_min as f32,
+                resolution[0] as f32 / *res_min as f32,
+            ),
+        };
+
+        let results = (0..channels as usize)
+            .map(|c| Self {
+                timesteps: timesteps as u32,
+                resolution: resolution.into(),
+                aabb,
+                max_value,
+                min_value,
+                data: volumes[c].clone(),
+            })
+            .collect();
+        log::info!("read volume in {:?}", start.elapsed());
+        Ok(results)
+    }
+
+    pub fn read<'a, R>(array: NpyFile<R>, time_first: bool) -> anyhow::Result<Vec<Self>>
+    where
+        R: Read,
+    {
+        match array.dtype() {
+            npyz::DType::Plain(d) => match d.type_char() {
+                npyz::TypeChar::Float => match d
+                    .num_bytes()
+                    .ok_or(anyhow::format_err!("unsupported type {:}", d))?
+                {
+                    2 => Self::read_dyn::<_, f16>(array, time_first),
+                    4 => Self::read_dyn::<_, f32>(array, time_first),
+                    8 => Self::read_dyn::<_, f64>(array, time_first),
+                    _ => anyhow::bail!("unsupported type {:}", d),
+                },
+                npyz::TypeChar::Uint => match d
+                    .num_bytes()
+                    .ok_or(anyhow::format_err!("unsupported type {:}", d))?
+                {
+                    1 => Self::read_dyn::<_, u8>(array, time_first),
+                    2 => Self::read_dyn::<_, u16>(array, time_first),
+                    _ => anyhow::bail!("unsupported type {:}", d),
+                },
+                npyz::TypeChar::Int => match d
+                    .num_bytes()
+                    .ok_or(anyhow::format_err!("unsupported type {:}", d))?
+                {
+                    1 => Self::read_dyn::<_, i8>(array, time_first),
+                    2 => Self::read_dyn::<_, i16>(array, time_first),
+                    _ => anyhow::bail!("unsupported type {:}", d),
+                },
+                _ => anyhow::bail!("unsupported type {:}", d),
+            },
+            d => anyhow::bail!("unsupported type {:}", d.descr()),
+        }
+    }
+    pub fn load_numpy<'a, R>(mut reader: R, time_first: bool) -> anyhow::Result<Vec<Self>>
+    where
+        R: Read + Seek,
+    {
+        let mut buffer = [0; 4];
+        reader.read_exact(&mut buffer)?;
+        reader.seek(std::io::SeekFrom::Current(-4))?;
+        let is_npz = buffer == *b"\x50\x4B\x03\x04";
+
+        if is_npz {
+            Self::load_npz(reader, time_first)
+        } else {
+            Self::load_npy(reader, time_first)
+        }
+    }
+
+    pub fn load_npz<'a, R>(reader: R, time_first: bool) -> anyhow::Result<Vec<Self>>
+    where
+        R: Read + Seek,
+    {
+        let mut reader = npz::NpzArchive::new(reader)?;
+        let arr_name = reader
+            .array_names()
+            .next()
+            .ok_or(anyhow::format_err!("no array present"))?
+            .to_string();
+        let array = reader
+            .by_name(arr_name.as_str())?
+            .ok_or(anyhow::format_err!("array '{}' not found", arr_name))?;
+        Self::read(array, time_first)
+    }
+}
+
+pub struct VolumeGPU {
+    pub(crate) textures: Vec<wgpu::Texture>,
+    pub(crate) volume: Volume,
+}
+
+impl VolumeGPU {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, volume: Volume) -> Self {
+        let textures = (0..volume.timesteps)
+            .map(|i| {
+                device.create_texture_with_data(
+                    queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some(format!("volume texture {}", i).as_str()),
+                        size: wgpu::Extent3d {
+                            width: volume.resolution[2],
+                            height: volume.resolution[1],
+                            depth_or_array_layers: volume.resolution[0],
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D3,
+                        format: wgpu::TextureFormat::R16Float,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    },
+                    TextureDataOrder::LayerMajor,
+                    bytemuck::cast_slice(
+                        &volume.data[(i
+                            * volume.resolution[0]
+                            * volume.resolution[1]
+                            * volume.resolution[2]) as usize
+                            ..((i + 1)
+                                * volume.resolution[0]
+                                * volume.resolution[1]
+                                * volume.resolution[2]) as usize],
+                    ),
+                )
+            })
+            .collect();
+        Self { textures, volume }
+    }
+}
+
+#[repr(C)]
+#[derive(Zeroable, Clone, Copy, Debug)]
+pub struct Aabb<F: Float + BaseNum> {
+    pub min: Point3<F>,
+    pub max: Point3<F>,
+}
+
+impl<F: Float + BaseNum> Aabb<F> {
+    pub fn unit() -> Self {
+        Self {
+            min: Point3::new(F::zero(), F::zero(), F::zero()),
+            max: Point3::new(F::one(), F::one(), F::one()),
+        }
+    }
+
+    pub fn center(&self) -> Point3<F> {
+        self.min.midpoint(self.max)
+    }
+
+    /// radius of a sphere that contains the aabb
+    pub fn radius(&self) -> F {
+        self.min.distance(self.max) / (F::one() + F::one())
+    }
+}
+```
+
+### src/web.rs
+```
+use std::io::Cursor;
+
+use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::{JsCast, JsError, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::js_sys::{ArrayBuffer, Uint8Array};
+use web_sys::{Request, RequestInit, RequestMode, Response};
+use web_time::Duration;
+use winit::platform::web::WindowAttributesExtWebSys;
+use winit::window::WindowAttributes;
+
+use crate::cmap::{self, GenericColorMap, COLORMAP_RESOLUTION};
+use crate::volume::Volume;
+use crate::{open_window, RenderConfig};
+
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub struct Color {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+}
+
+#[wasm_bindgen]
+impl Color {
+    #[wasm_bindgen(constructor)]
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
+impl From<Color> for wgpu::Color {
+    fn from(color: Color) -> Self {
+        Self {
+            r: color.r as f64,
+            g: color.g as f64,
+            b: color.b as f64,
+            a: color.a as f64,
+        }
+    }
+}
+
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct InlineViewerConfig {
+    pub background_color: Color,
+    pub show_colormap_editor: bool,
+    pub show_volume_info: bool,
+    pub show_cmap_select: bool,
+    // for normalization
+    pub vmin: Option<f32>,
+    pub vmax: Option<f32>,
+    pub distance_scale: f32,
+    pub duration: Option<f32>,
+}
+
+#[wasm_bindgen]
+impl InlineViewerConfig {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        background_color: Color,
+        show_colormap_editor: bool,
+        show_volume_info: bool,
+        show_cmap_select: bool,
+        vmin: Option<f32>,
+        vmax: Option<f32>,
+        distance_scale: f32,
+        duration: Option<f32>,
+    ) -> Self {
+        Self {
+            background_color,
+            show_colormap_editor,
+            show_volume_info,
+            show_cmap_select,
+            vmin,
+            vmax,
+            distance_scale,
+            duration,
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn wasm_setup() {
+    #[cfg(debug_assertions)]
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    console_log::init().expect("could not initialize logger");
+}
+
+/// Start the viewer with the given canvas id and optional volume data and colormap.
+#[wasm_bindgen]
+pub async fn viewer_wasm(
+    canvas_id: String,
+    volume_data: Option<Vec<u8>>,
+    colormap: Option<Vec<u8>>,
+    settings: Option<InlineViewerConfig>,
+) -> Result<(), JsValue> {
+    let render_config = match settings {
+        Some(settings) => RenderConfig {
+            no_vsync: false,
+            background_color: settings.background_color.into(),
+            show_colormap_editor: settings.show_colormap_editor,
+            show_volume_info: settings.show_volume_info,
+            vmin: settings.vmin,
+            vmax: settings.vmax,
+            distance_scale: settings.distance_scale,
+            #[cfg(feature = "colormaps")]
+            show_cmap_select: settings.show_cmap_select,
+            duration: settings.duration.map(Duration::from_secs_f32),
+        },
+        None => RenderConfig {
+            no_vsync: false,
+            background_color: wgpu::Color::BLACK,
+            show_colormap_editor: true,
+            show_volume_info: true,
+            show_cmap_select: true,
+            vmin: None,
+            vmax: None,
+            duration: None,
+            distance_scale: 1.0,
+        },
+    };
+
+    start_viewer(canvas_id, render_config, volume_data, colormap).await
+}
+
+/// Download a file from a given url
+/// returns body bytes
+pub async fn download_file(window: web_sys::Window, url: String) -> Result<Vec<u8>, JsValue> {
+    let opts = RequestInit::new();
+    opts.set_method("GET");
+    opts.set_mode(RequestMode::Cors);
+
+    let request = Request::new_with_str_and_init(&url, &opts)?;
+
+    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+
+    // `resp_value` is a `Response` object.
+    assert!(resp_value.is_instance_of::<Response>());
+    let resp: Response = resp_value.dyn_into()?;
+    if !resp.ok() {
+        if resp.status() == 404 {
+            return Err(JsError::new(&format!("File not found (404): {url}")).into());
+        } else {
+            return Err(
+                JsError::new(&format!("Failed to download file: {}", resp.status_text())).into(),
+            );
+        }
+    }
+
+    // Convert this other `Promise` into a rust `Future`.
+    let data = JsFuture::from(resp.array_buffer()?).await?;
+    let abuffer = data.dyn_into::<ArrayBuffer>()?;
+    let byte_buffer = Uint8Array::new(&abuffer);
+
+    Ok(byte_buffer.to_vec())
+}
+
+async fn load_colormap() -> Result<Option<Vec<u8>>, JsValue> {
+    let window = web_sys::window().ok_or(JsError::new("cannot access window"))?;
+    let search_string = window.location().search()?;
+    let file_param = web_sys::UrlSearchParams::new_with_str(&search_string)?.get("colormap");
+
+    return match file_param {
+        Some(url) => download_file(window, url).await.map(|v| Some(v)),
+        None => Ok(None),
+    };
+}
+
+/// load volume data from a file file promt or url (HTTP Get parameter "file")
+async fn load_data() -> Result<Vec<u8>, JsValue> {
+    let window = web_sys::window().ok_or(JsError::new("cannot access window"))?;
+    let search_string = window.location().search()?;
+    let file_param = web_sys::UrlSearchParams::new_with_str(&search_string)?.get("file");
+
+    let file_data: Vec<u8> = if let Some(url) = file_param {
+        // download file from url
+        download_file(window, url).await?
+    } else {
+        // loop until file is selected
+        let mut data = None;
+        loop {
+            if let Some(reader) = rfd::AsyncFileDialog::new()
+                .set_title("Select npy file")
+                .add_filter("numpy file", &["npy", "npz"])
+                .pick_file()
+                .await
+            {
+                data.replace(reader.read().await);
+                break;
+            }
+        }
+        data.unwrap()
+    };
+    return Ok(file_data);
+}
+
+fn show_error(document: &web_sys::Document, error: anyhow::Error) -> Result<(), JsValue> {
+    let error_div = document
+        .get_element_by_id("error-message")
+        .ok_or(JsError::new("cannot find error message div"))?
+        .dyn_into::<web_sys::HtmlElement>()?;
+    error_div.set_inner_html(&format!("Error: {:?}", error));
+    document
+        .get_element_by_id("loading-error")
+        .ok_or(JsError::new("cannot find loading error div"))?
+        .set_attribute("style", "display:block;")?;
+    Ok(())
+}
+
+/// Start the viewer with the given canvas id and optional volume data and colormap.
+/// If volume data and colormap are not provided, the viewer will prompt the user to select a file (or load from a url provided in the page url).
+async fn start_viewer(
+    canvas_id: String,
+    render_config: RenderConfig,
+    volume_data: Option<Vec<u8>>,
+    colormap: Option<Vec<u8>>,
+) -> Result<(), JsValue> {
+    let window = web_sys::window().ok_or(JsError::new("cannot access window"))?;
+    let document = window
+        .document()
+        .ok_or(JsError::new("cannot access document"))?;
+
+    document.set_title(&format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")));
+
+    let canvas = document
+        .get_element_by_id(&canvas_id)
+        .ok_or(JsError::new("cannot find canvas"))?
+        .dyn_into::<web_sys::HtmlCanvasElement>()?;
+
+    let window_attributes = WindowAttributes::default().with_canvas(Some(canvas));
+
+    let spinner = document
+        .get_element_by_id("spinner")
+        .ok_or(JsError::new("cannot find loading spinner"))?
+        .dyn_into::<web_sys::HtmlElement>()?;
+
+    let overlay = document
+        .get_element_by_id("overlay")
+        .ok_or(JsError::new("cannot find overlay item"))?
+        .dyn_into::<web_sys::HtmlElement>()?;
+
+    spinner.set_attribute("style", "display:flex;")?;
+    let volume_data = match volume_data {
+        Some(data) => data,
+        None => load_data().await?,
+    };
+    // load colormap from url if present
+    let colormap = match colormap {
+        Some(data) => Some(data),
+        None => load_colormap().await?,
+    };
+    let colormap = match colormap {
+        Some(data) => GenericColorMap::read(Cursor::new(data))
+            .map_err(|e| JsError::new(&format!("Failed to load colormap: {}", e)))?
+            .into_linear_segmented(COLORMAP_RESOLUTION),
+        None => cmap::COLORMAPS["seaborn"]["icefire"]
+            .clone()
+            .into_linear_segmented(COLORMAP_RESOLUTION),
+    };
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let reader_v = Cursor::new(volume_data);
+        let volumes = match Volume::load_numpy(reader_v, true) {
+            Ok(volumes) => volumes,
+            Err(err) => {
+                show_error(&document, err).ok();
+                return;
+            }
+        };
+        overlay.set_attribute("style", "display:none;").ok();
+
+        let err = open_window(window_attributes, volumes, colormap, render_config).await;
+        if let Err(err) = err {
+            show_error(&document, err).unwrap();
+        }
+    });
+    Ok(())
+}
+```
+
+### vape4d/__init__.py
+```
+from .render import render
+from . import utils
+
+try:
+    # check if ipython is available
+    import IPython as _
+    from .viewer import viewer, ViewerSettings, VolumeViewer
+except ImportError:
+    pass
+
+from . import vape4d as vape_py
+
+__doc__ = vape_py.__doc__
+if hasattr(vape_py, "__all__"):
+    __all__ = vape_py.__all__
+```
+
+### vape4d/render.py
+```
+from typing import Optional, Union,Tuple,List
+from matplotlib import pyplot as plt
+from matplotlib.colors import Colormap
+import numpy as np
+from . import vape4d
+
+
+def render(
+    volume: np.ndarray,
+    cmap: Optional[Colormap] = None,
+    time: Optional[Union[float, List[float]]] = 0.0,
+    width: int = 1024,
+    height: int = 1024,
+    background: Tuple[float, float, float, float] = (0, 0, 0, 1),
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    distance_scale: float = 1.0,
+    spatial_interpolation: str = "linear",
+    temporal_interpolation: str = "linear",
+    camera_angle: Optional[Tuple[float, float]] = None,
+) -> np.ndarray:
+    """renders a single or multiple images of a volume
+
+    Args:
+        volume (np.ndarray): volume data of shape [N, D, H, W]
+        cmap (Colormap): colormap to use for rendering. Defaults to matplotlib's default colormap.
+        time (Union[float, list[float]]): if a single value is given, a single image is rendered at that time. If a list of values is given, a video is rendered with the given times.
+        width (int, optional): image width. Defaults to 1024.
+        height (int, optional): image height. Defaults to 1024.
+        background (tuple[float, float, float, float], optional): background color. Defaults to (0, 0, 0, 1).
+        vmin (Optional[float], optional): minimum value for colormap. defaults to minimum value in volume.
+        vmax (Optional[float], optional): maximum value for colormap. defaults to maximum value in volume.
+        distance_scale (float, optional): distance scale for rendering. A larger value makes everything more opaque. Defaults to 1.0.
+        spatial_interpolation (str, optional): interpolation in space. Linear or Nearest. Defaults to "linear".
+        temporal_interpolation (str, optional): interpolation in time. Linear or Nearest. Defaults to "linear".
+        camera_angle (Optional[Tuple[float, float]], optional): camera angle for rendering in spherical coordinates (polar,azimuthal angle ). Defaults to None.
+
+    Returns:
+        np.ndarray: [T, H, W, 4] if time is a list, [H, W, 4] if time is a single value
+    """
+
+    if cmap is None:
+        cmap = plt.get_cmap()
+
+    if volume.ndim == 5:
+        # check if we have a single channel
+        if volume.shape[1] != 1:
+            raise ValueError("only one channel supported")
+    elif volume.ndim == 4:
+        pass
+    elif volume.ndim == 3:
+        # add one channel
+        volume = volume[:, None]
+    else:
+        raise ValueError(
+            "volume must have shape [T,1, D, H, W], [T, D, H, W] or [D,H,W] "
+        )
+
+    colormap_data = cmap(np.linspace(0, 1, 256)).astype(np.float32)
+
+    if isinstance(time, np.ndarray):
+        time = time.tolist()
+
+    if not isinstance(time, list):
+        time = [time]
+
+    frames = vape4d.render_video(
+        np.ascontiguousarray(volume).astype(np.float16),
+        colormap_data,
+        width,
+        height,
+        time,
+        background,
+        distance_scale,
+        vmin,
+        vmax,
+        spatial_interpolation,
+        temporal_interpolation,
+        camera_angle,
+    )
+    if len(time) == 1:
+        return frames[0]
+    return frames
+```
+
+### vape4d/utils.py
+```
+from copy import deepcopy
+from matplotlib.colors import Colormap, LinearSegmentedColormap, ListedColormap
+import numpy as np
+
+
+def diverging_alpha(cmap: Colormap) -> Colormap:
+    """changes the alpha channel of a colormap to be diverging (0->1, 0.5 > 0, 1->1)
+
+    Args:
+        cmap (Colormap): colormap
+
+    Returns:
+        Colormap: new colormap
+    """
+    cmap = cmap.copy()
+    if isinstance(cmap, ListedColormap):
+        cmap.colors = deepcopy(cmap.colors)
+        for i, a in enumerate(cmap.colors):
+            a.append(2 * abs(i / cmap.N - 0.5))
+    elif isinstance(cmap, LinearSegmentedColormap):
+        cmap._segmentdata["alpha"] = np.array(
+            [[0.0, 1.0, 1.0], [0.5, 0.0, 0.0], [1.0, 1.0, 1.0]]
+        )
+    else:
+        raise TypeError(
+            "cmap must be either a ListedColormap or a LinearSegmentedColormap"
+        )
+    return cmap
+
+
+def linear_increasing_alpha(cmap: Colormap) -> Colormap:
+    """changes the alpha channel of a colormap to be linear (0->0, 1->1)
+
+    Args:
+        cmap (Colormap): colormap
+
+    Returns:
+        Colormap: new colormap
+    """
+    cmap = cmap.copy()
+    if isinstance(cmap, ListedColormap):
+        cmap.colors = cmap.colors.copy()
+        for i, a in enumerate(cmap.colors):
+            a.append(i / (cmap.N - 1))
+    elif isinstance(cmap, LinearSegmentedColormap):
+        cmap._segmentdata["alpha"] = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]])
+    else:
+        raise TypeError(
+            "cmap must be either a ListedColormap or a LinearSegmentedColormap"
+        )
+    return cmap
+```
+
+### vape4d/viewer.py
+```
+import base64
+import dataclasses
+import io
+import json
+import os
+import random
+from dataclasses import dataclass
+from typing import Optional
+
+from matplotlib import pyplot as plt
+from matplotlib.colors import Colormap
+import numpy as np
+from IPython.display import DisplayObject
+
+VAPE_URL = os.environ.get("VAPE_URL", "https://jonathonb21.github.io/volume4d-viewer")
+
+
+_TEMPLATE_IFRAME = """
+    <div>
+        <iframe id="{canvas_id}" src="{viewer_url}/index.html?inline" width="{canvas_width}" height="{canvas_height}" frameBorder="0" sandbox="allow-same-origin allow-scripts"></iframe>
+    </div>
+    <script>
+
+        window.addEventListener(
+            "message",
+            (event) => {{
+                if (event.data !== "ready") {{
+                    return;
+                }}
+                let data_decoded = Uint8Array.from(atob("{data_code}"), c => c.charCodeAt(0));
+                let cmap_decoded = Uint8Array.from(atob("{cmap_code}"), c => c.charCodeAt(0));
+                const iframe = document.getElementById("{canvas_id}");
+                if (iframe === null) return;
+                iframe.focus();
+                iframe.contentWindow.postMessage({{
+                    volume: data_decoded,
+                    cmap: cmap_decoded,
+                    settings: {settings_json}
+                }},
+                "*");
+            }},
+            false,
+        );
+    </script>
+"""
+
+
+@dataclass(unsafe_hash=True)
+class ViewerSettings:
+    width: int
+    height: int
+    background_color: tuple
+    show_colormap_editor: bool
+    show_volume_info: bool
+    vmin: Optional[float]
+    vmax: Optional[float]
+    distance_scale: float
+    duration: Optional[float] = None
+
+
+def viewer(
+    data: np.ndarray,
+    colormap: Optional[Colormap] = None,
+    width: int = 800,
+    height: int = 600,
+    background_color=(0.0, 0.0, 0.0, 1.0),
+    show_colormap_editor=False,
+    show_volume_info=False,
+    vmin=None,
+    vmax=None,
+    distance_scale=1.0,
+    duration=None,
+):
+    """_summary_
+
+    Args:
+        data (np.ndarray): volume data of shape [T,C, D, H, W]
+        colormap (Optional[Colormap], optional): _description_. Defaults to matplotlib default colormap.
+        width (int, optional): viewer width. Defaults to 800.
+        height (int, optional): viewer height. Defaults to 600.
+        background_color (tuple, optional): background color in renderer. Defaults to black.
+        show_colormap_editor (bool, optional): show the transfer function editor. Defaults to False.
+        show_volume_info (bool, optional): show the volume info window. Defaults to False.
+        vmin (float, optional): all values in data are clamped to this value. Defaults to minimum value in data.
+        vmax (float, optional):  all values in data are clamped to this value. Defaults to maximum value in data.
+        distance_scale (float, optional): distance scale used for rendering. Defaults to 1.0.
+        duration (_type_, optional): duration of one animation cycle. Defaults to 5 seconds.
+    """
+    if colormap is None:
+        colormap = plt.get_cmap()
+    return VolumeViewer(
+        data,
+        colormap,
+        ViewerSettings(
+            width,
+            height,
+            background_color,
+            show_colormap_editor,
+            show_volume_info,
+            vmin,
+            vmax,
+            distance_scale,
+            duration,
+        ),
+    )
+
+
+class VolumeViewer(DisplayObject):
+    def __init__(self, data: np.ndarray, colormap: Colormap, settings: ViewerSettings):
+        super(VolumeViewer, self).__init__(
+            data={"volume": data, "cmap": colormap, "settings": settings}
+        )
+
+    def _repr_html_(self):
+
+        data = self.data["volume"]
+        colormap = self.data["cmap"]
+        settings = self.data["settings"]
+        buffer = io.BytesIO()
+        np.save(buffer, data.astype(np.float32))
+        data_code = base64.b64encode(buffer.getvalue())
+
+        buffer2 = io.BytesIO()
+        colormap_data = colormap(np.linspace(0, 1, 256)).astype(np.float32)
+        np.save(buffer2, colormap_data)
+        cmap_code = base64.b64encode(buffer2.getvalue())
+
+        canvas_id = f"vape4d_canvas_{str(random.randint(0,2**32))}"
+        html_code = _TEMPLATE_IFRAME.format(
+            canvas_id=canvas_id,
+            data_code=data_code.decode("utf-8"),
+            cmap_code=cmap_code.decode("utf-8"),
+            canvas_width=settings.width,
+            canvas_height=settings.height,
+            settings_json=json.dumps(dataclasses.asdict(settings)),
+            viewer_url=VAPE_URL,
+        )
+        return html_code
+
+    def __html__(self):
+        return self._repr_html_()
+```
+
+### src/bin/vape4d.rs
+```
+use std::env;
+
+use vape4d::viewer;
+
+#[pollster::main]
+async fn main() -> anyhow::Result<()> {
+    viewer(env::args()).await
+}
+```
+
+### src/shaders/raymarch.wgsl
+```
+const FILTER_NEAREST:u32 = 0;
+const FILTER_LINEAR:u32 = 1;
+
+const PI:f32 = 3.1415926535897932384626433832795;
+const TWO_PI:f32 = 6.283185307179586476925286766559;
+
+struct CameraUniforms {
+    view: mat4x4<f32>,
+    view_inv: mat4x4<f32>,
+    proj: mat4x4<f32>,
+    proj_inv: mat4x4<f32>,
+};
+
+struct Settings {
+    volume_aabb: Aabb,
+    clipping: Aabb,
+    time: f32,
+    time_steps: u32,
+    step_size: f32,
+    temporal_filter: u32,
+    distance_scale: f32,
+    vmin: f32,
+    vmax: f32,
+    gamma_correction: u32
+}
+
+
+struct Aabb {
+    @align(16) min: vec3<f32>,
+    @align(16) max: vec3<f32>,
+}
+
+struct Ray {
+    orig: vec3<f32>,
+    dir: vec3<f32>
+};
+
+/// adapted from https://github.com/evanw/webgl-path-tracing/blob/master/webgl-path-tracing.js
+fn intersectAABB(ray: Ray, box_min: vec3<f32>, box_max: vec3<f32>) -> vec2<f32> {
+    let tMin = (box_min - ray.orig) / ray.dir;
+    let tMax = (box_max - ray.orig) / ray.dir;
+    let t1 = min(tMin, tMax);
+    let t2 = max(tMin, tMax);
+    let tNear = max(max(t1.x, t1.y), t1.z);
+    let tFar = min(min(t2.x, t2.y), t2.z);
+    return vec2<f32>(tNear, tFar);
+}
+
+// ray is created based on view and proj matrix so
+// that it matches the rasterizer used for drawing other stuff
+fn create_ray(view_inv: mat4x4<f32>, proj_inv: mat4x4<f32>, px: vec2<f32>) -> Ray {
+    var far = vec4<f32>((px * 2. - (1.)), -1., 1.);
+    far.y *= -1.;
+    // depth prepass location
+    var far_w = view_inv * proj_inv * far;
+    far_w /= far_w.w + 1e-4;
+
+
+    var near = vec4<f32>((px * 2. - (1.)), 1., 1.);
+    near.y *= -1.;
+    // depth prepass location
+    var near_w = view_inv * proj_inv * near;
+    near_w /= near_w.w + 1e-4;
+
+    return Ray(
+        near_w.xyz,
+        normalize(far_w.xyz - near_w.xyz),
+    );
+}
+
+@group(0) @binding(0)
+var volume : texture_3d<f32>;
+@group(0) @binding(1)
+var volume_next : texture_3d<f32>;
+@group(0) @binding(2)
+var volume_sampler: sampler;
+
+@group(0) @binding(3)
+var<uniform> camera: CameraUniforms;
+
+@group(0) @binding(4)
+var<uniform> settings: Settings;
+
+@group(1) @binding(0)
+var cmap : texture_2d<f32>;
+@group(1) @binding(1)
+var cmap_sampler: sampler;
+
+struct VertexOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) tex_coord: vec2<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(vertex_index) in_vertex_index: u32,
+) -> VertexOut {
+
+    // creates two vertices that cover the whole screen
+    let xy = vec2<f32>(
+        f32(in_vertex_index % 2u == 0u),
+        f32(in_vertex_index < 2u)
+    );
+    return VertexOut(vec4<f32>(xy * 2. - (1.), 0., 1.), vec2<f32>(xy.x, 1. - xy.y));
+}
+
+// performs a step and returns the NDC cooidinate for the volume sampling
+fn next_pos(pos: ptr<function,vec3<f32>>, step_size: f32, ray_dir: vec3<f32>) -> vec4<f32> {
+    let aabb = settings.volume_aabb;
+    let aabb_size = aabb.max - aabb.min;
+    let sample_pos = ((*pos) - aabb.min) / aabb_size;
+    *pos += ray_dir * step_size;
+    return vec4<f32>(
+        sample_pos,
+        step_size,
+    );
+}
+
+fn sample_volume(pos: vec3<f32>) -> f32 {
+    //  origin is in bottom left corner so we need to flip y 
+    let pos_m = vec3<f32>(pos.x, 1. - pos.y, pos.z);
+    let sample_curr = textureSampleLevel(volume, volume_sampler, pos_m, 0.).r;
+    let sample_next = textureSampleLevel(volume_next, volume_sampler, pos_m, 0.).r;
+    if settings.temporal_filter == FILTER_NEAREST {
+        return sample_curr;
+    } else {
+        let time_fraction = fract(settings.time * f32(settings.time_steps - (1)));
+        return mix(sample_curr, sample_next, time_fraction);
+    }
+}
+
+fn sample_cmap(value: f32) -> vec4<f32> {
+    let value_n = (value - settings.vmin) / (settings.vmax - settings.vmin);
+    return textureSampleLevel(cmap, cmap_sampler, vec2<f32>(value_n, 0.5), 0.);
+}
+
+
+// traces ray trough volume and returns color
+fn trace_ray(ray_in: Ray) -> vec4<f32> {
+    let aabb = settings.volume_aabb;
+    let aabb_size = aabb.max - aabb.min;
+    var ray = ray_in;
+    let slice_min = settings.clipping.min;
+    let slice_max = settings.clipping.max;
+    // find closest point on volume
+    let aabb_min = (aabb.min + (slice_min * aabb_size)); //  zxy for tensorf alignment
+    let aabb_max = (aabb.max - ((1. - slice_max) * aabb_size)); //  zxy for tensorf alignment
+    let intersec = intersectAABB(ray, aabb_min, aabb_max);
+
+    if intersec.x > intersec.y {
+        return vec4<f32>(0.);
+    }
+
+    let start = max(0., intersec.x) + 1e-4;
+    ray.orig += start * ray.dir;
+
+    var iters = 0u;
+    var color = vec3<f32>(0.);
+    var transmittance = 1.;
+
+    let volume_size = textureDimensions(volume);
+
+    var distance_scale = settings.distance_scale;
+
+    var pos = ray.orig;
+
+    let early_stopping_t = 1. / 255.;
+    let step_size_g = settings.step_size;
+    var sample_pos: vec4<f32>;
+    loop{
+        sample_pos = next_pos(&pos, step_size_g, ray.dir);
+        let step_size = sample_pos.w;
+
+        let sample = sample_volume(sample_pos.xyz);
+        let color_tf = sample_cmap(sample);
+        // we try to avoid values that are exactly one as this can cause artifacts
+        let sigma = color_tf.a * (1. - 1e-6);
+
+        if sigma > 0. {
+            var sample_color = color_tf.rgb;
+            let a_i = 1. - pow(1. - sigma, step_size * distance_scale);
+            color += transmittance * a_i * sample_color;
+            transmittance *= 1. - a_i;
+
+            if exp(-transmittance) <= early_stopping_t {
+                break;
+            }
+        }
+        // check if within slice
+        let slice_test = any(sample_pos.xyz < settings.clipping.min) || any(sample_pos.xyz > settings.clipping.max) ;
+
+        if slice_test{
+            break;
+        }
+        iters += 1u;
+    }
+    return vec4<f32>(color, 1. - transmittance);
+}
+
+fn gamma_correction(color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(pow(color.rgb, vec3<f32>(1. / 2.2)), color.a);
+}
+
+
+@fragment
+fn fs_main(vertex_in: VertexOut) -> @location(0) vec4<f32> {
+    let r_pos = vec2<f32>(vertex_in.tex_coord.x, 1. - vertex_in.tex_coord.y);
+    let ray = create_ray(camera.view_inv, camera.proj_inv, r_pos);
+    var color = trace_ray(ray);
+    if settings.gamma_correction == 1u {
+        color = fromLinear(color);
+    }
+    return color;
+}
+
+
+fn fromLinear(color: vec4<f32>) -> vec4<f32> {
+    let cutoff = color.rgb < vec3<f32>(0.0031308);
+    let higher = vec3<f32>(1.055) * pow(color.rgb, vec3<f32>(1.0 / 2.4)) - 0.055;
+    let lower = color.rgb * 12.92;
+
+    return vec4<f32>(mix(higher, lower, vec3<f32>(cutoff)), color.a);
+}
+```

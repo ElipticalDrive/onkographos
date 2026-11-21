@@ -1,0 +1,175 @@
+# Grid Traversal Setup (DDA)
+
+Also called: Ray marching grid setup, Voxel traversal initialization
+
+## Overview
+Grid Traversal Setup (DDA) initializes the parameters required for a 3D Digital Differential Analyzer (DDA) to traverse a voxel grid along a ray [S2, unofficial]. It computes the initial voxel indices, step directions, and distances to the next voxel boundaries for the ray start and end points within the traversal range [S2, unofficial]. This method sets the stage for the iterative traversal loop, distinguishing itself from computational space traversal by operating directly in grid coordinates and from one-pass over-allocated methods by computing exact boundary distances [S1, S2, unofficial]. It solves the problem of robustly determining where a ray enters a voxel grid and how it progresses through adjacent voxels, handling edge cases such as rays parallel to grid axes [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- `ray.origin`: 3D vector, ray origin in world space.
+- `ray.dir`: 3D vector, ray direction in world space (normalized).
+- `ray.inv_dir`: 3D vector, inverse of ray direction ($1.0 / ray.dir$).
+- `tmin`: float, near plane distance along the ray.
+- `tmax`: float, far plane distance along the ray.
+- `aabb.min`: 3D vector, minimum corner of the grid's axis-aligned bounding box in world space.
+- `aabb.max`: 3D vector, maximum corner of the grid's axis-aligned bounding box in world space.
+- `resolution`: 3D integer vector, number of voxels along each axis $(N_x, N_y, N_z)$.
+- `eps`: float, small epsilon value for numerical stability (e.g., $10^{-6}$).
+
+**Outputs:**
+- `current_index`: 3D integer vector, the voxel index containing the ray start point.
+- `final_index`: 3D integer vector, the voxel index containing the ray end point.
+- `tdist`: 3D float vector, distance along the ray to the next voxel boundary in each axis direction.
+- `delta`: 3D float vector, distance along the ray to traverse one voxel in each axis direction.
+- `step_index`: 3D integer vector, direction of increment for each axis (+1 or -1).
+
+**Data Structures:**
+- `float3`: 3-component floating-point vector.
+- `int3`: 3-component integer vector.
+- `make_float3(x, y, z)`: Constructs a float3.
+- `make_int3(x, y, z)`: Constructs an int3.
+- `clamp(v, min_val, max_val)`: Clamps value `v` to `[min_val, max_val]`.
+- `apply_contraction(point, aabb_min, aabb_max)`: Maps a world-space point to the range $[0, 1]$ along each axis relative to the AABB. Specifically, for each component $i$, it computes $\frac{point_i - aabb\_min_i}{aabb\_max_i - aabb\_min_i}$.
+
+**Steps:**
+
+1.  **Compute Voxel Size:**
+    Calculate the physical size of a single voxel.
+    $$ voxel\_size = \frac{aabb.max - aabb.min}{resolution} $$
+    [S1, S2, unofficial]
+
+2.  **Compute Ray Start and End Points:**
+    Determine the world-space positions of the ray at `tmin` and `tmax`, adjusted by epsilon to avoid boundary precision issues.
+    $$ ray\_start = ray.origin + ray.dir \times (tmin + eps) $$
+    $$ ray\_end = ray.origin + ray.dir \times (tmax - eps) $$
+    [S1, S2, unofficial]
+
+3.  **Compute Current and Final Voxel Indices:**
+    Map the start and end points to voxel indices.
+    First, apply contraction to map world coordinates to $[0, 1]$ range relative to the AABB.
+    $$ contracted\_start = apply\_contraction(ray\_start, aabb.min, aabb.max) $$
+    $$ contracted\_end = apply\_contraction(ray\_end, aabb.min, aabb.max) $$
+    Then, scale by resolution and clamp to valid voxel indices $[0, resolution - 1]$.
+    $$ current\_index = clamp(contracted\_start \times resolution, 0, resolution - 1) $$
+    $$ final\_index = clamp(contracted\_end \times resolution, 0, resolution - 1) $$
+    [S1, S2, unofficial]
+
+4.  **Compute Step Direction (`step_index`):**
+    Determine the direction of traversal for each axis based on the ray direction.
+    $$ step\_index = make\_int3( \begin{cases} 1 & \text{if } ray.dir.x > 0 \\ 0 & \text{if } ray.dir.x == 0 \\ -1 & \text{if } ray.dir.x < 0 \end{cases}, \dots ) $$
+    Note: The source [S1, unofficial] describes `step_float` as 0 if direction is 0, 1 if positive, -1 if negative, and `step_index` is derived from this. [S2, unofficial] uses a ternary operator directly.
+    [S1, S2, unofficial]
+
+5.  **Compute Distance to Next Boundary (`tdist`):**
+    Calculate the distance along the ray to the next voxel boundary for each axis.
+    First, compute the start index for boundary calculation:
+    $$ start\_index = current\_index + step\_index $$
+    [S1, S2, unofficial]
+    
+    Calculate the intermediate distance to the boundary plane:
+    $$ tmax\_xyz = \left( \left( aabb.min + (start\_index \times voxel\_size) - ray\_start \right) \times ray.inv\_dir \right) + tmin $$
+    [S1, S2, unofficial]
+    
+    Handle rays parallel to axes (where `ray.dir` component is 0) to avoid division by zero or invalid distances. If the ray direction component is 0, set the corresponding `tdist` component to `tmax`. Otherwise, use the calculated `tmax_xyz` component.
+    $$ tdist.x = \begin{cases} tmax & \text{if } ray.dir.x == 0.0f \\ tmax\_xyz.x & \text{otherwise} \end{cases} $$
+    $$ tdist.y = \begin{cases} tmax & \text{if } ray.dir.y == 0.0f \\ tmax\_xyz.y & \text{otherwise} \end{cases} $$
+    $$ tdist.z = \begin{cases} tmax & \text{if } ray.dir.z == 0.0f \\ tmax\_xyz.z & \text{otherwise} \end{cases} $$
+    [S1, S2, unofficial]
+
+6.  **Compute Step Distance (`delta`):**
+    Calculate the distance along the ray to traverse one voxel in each axis direction.
+    First, compute the step float vector:
+    $$ step\_float.x = \begin{cases} 0.0f & \text{if } ray.dir.x == 0.0f \\ 1.0f & \text{if } ray.dir.x > 0.0f \\ -1.0f & \text{if } ray.dir.x < 0.0f \end{cases} $$
+    (Similarly for y and z)
+    [S1, S2, unofficial]
+    
+    Calculate the raw delta:
+    $$ delta\_temp = voxel\_size \times ray.inv\_dir \times step\_float $$
+    [S1, unofficial]
+    
+    Handle rays parallel to axes. If the ray direction component is 0, set the corresponding `delta` component to 0 (or effectively ignore it in traversal). The source [S1, unofficial] sets `delta` components to 0 if direction is 0. [S2, unofficial] does not explicitly show the delta assignment for zero direction but implies handling via `tdist` capping. We follow [S1, unofficial] for robustness.
+    $$ delta.x = \begin{cases} 0.0f & \text{if } ray.dir.x == 0.0f \\ delta\_temp.x & \text{otherwise} \end{cases} $$
+    (Similarly for y and z)
+    [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def grid_traversal_setup(ray_origin, ray_dir, ray_inv_dir, tmin, tmax, aabb_min, aabb_max, resolution, eps):
+    # 1. Compute Voxel Size
+    voxel_size = (aabb_max - aabb_min) / resolution
+
+    # 2. Compute Ray Start and End Points
+    ray_start = ray_origin + ray_dir * (tmin + eps)
+    ray_end = ray_origin + ray_dir * (tmax - eps)
+
+    # 3. Compute Current and Final Voxel Indices
+    # Contraction: map world point to [0, 1] relative to AABB
+    contracted_start = (ray_start - aabb_min) / (aabb_max - aabb_min)
+    contracted_end = (ray_end - aabb_min) / (aabb_max - aabb_min)
+    
+    # Scale by resolution and clamp
+    current_index = clamp(contracted_start * resolution, 0, resolution - 1)
+    final_index = clamp(contracted_end * resolution, 0, resolution - 1)
+
+    # 4. Compute Step Direction (step_index)
+    step_index_x = 1 if ray_dir.x > 0 else (-1 if ray_dir.x < 0 else 0)
+    step_index_y = 1 if ray_dir.y > 0 else (-1 if ray_dir.y < 0 else 0)
+    step_index_z = 1 if ray_dir.z > 0 else (-1 if ray_dir.z < 0 else 0)
+    step_index = (step_index_x, step_index_y, step_index_z)
+
+    # 5. Compute Distance to Next Boundary (tdist)
+    start_index = current_index + step_index
+    
+    # Intermediate distance to boundary plane
+    # Note: aabb_min + (start_index * voxel_size) is the world position of the next boundary plane
+    boundary_plane_pos = aabb_min + (start_index * voxel_size)
+    tmax_xyz = ((boundary_plane_pos - ray_start) * ray_inv_dir) + tmin
+
+    # Handle zero direction components
+    tdist_x = tmax if ray_dir.x == 0.0 else tmax_xyz.x
+    tdist_y = tmax if ray_dir.y == 0.0 else tmax_xyz.y
+    tdist_z = tmax if ray_dir.z == 0.0 else tmax_xyz.z
+    tdist = (tdist_x, tdist_y, tdist_z)
+
+    # 6. Compute Step Distance (delta)
+    # Step float for direction magnitude
+    step_float_x = 0.0 if ray_dir.x == 0.0 else (1.0 if ray_dir.x > 0.0 else -1.0)
+    step_float_y = 0.0 if ray_dir.y == 0.0 else (1.0 if ray_dir.y > 0.0 else -1.0)
+    step_float_z = 0.0 if ray_dir.z == 0.0 else (1.0 if ray_dir.z > 0.0 else -1.0)
+    step_float = (step_float_x, step_float_y, step_float_z)
+
+    # Raw delta
+    delta_temp = voxel_size * ray_inv_dir * step_float
+
+    # Handle zero direction components
+    delta_x = 0.0 if ray_dir.x == 0.0 else delta_temp.x
+    delta_y = 0.0 if ray_dir.y == 0.0 else delta_temp.y
+    delta_z = 0.0 if ray_dir.z == 0.0 else delta_temp.z
+    delta = (delta_x, delta_y, delta_z)
+
+    return current_index, final_index, tdist, delta, step_index
+```
+
+## Subtopics
+
+### [Binary Grid Ray Traversal Initialization](12500-binary-grid-ray-traversal-initialization.md)
+Binary Grid Ray Traversal Initialization computes the initial distances to the next voxel boundaries (`tdist`) and the distance steps between adjacent voxels (`delta`) for a ray traversing a binary occupancy grid. It handles rays parallel to grid axes by clamping distances to `tmax` and setting steps to zero, ensuring robust traversal without division by zero. It differs from continuous volume rendering methods by operating on discrete binary occupancy, making it suitable for sparse or binary voxel representations where only presence/absence matters.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per ray, as it involves a fixed number of arithmetic operations.
+- **Memory Complexity:** $O(1)$ per ray, storing only a few vectors.
+- **Strengths:** Robust handling of edge cases (parallel rays, boundary conditions); efficient setup for subsequent DDA traversal.
+- **Limitations:** Requires pre-computation of `inv_dir` and careful epsilon handling to avoid precision errors at boundaries.
+- **When to use:** When traversing uniform voxel grids for ray marching or volume rendering.
+- **When not to use:** For non-uniform grids or hierarchical structures (e.g., octrees) where different traversal logic is required.
+
+## Background
+The Digital Differential Analyzer (DDA) for grid traversal is a classic algorithm in computer graphics, originally described by Amanatides and Woo in 1987 [S1, S2, unofficial]. It is widely used in ray tracing and volume rendering for efficient traversal of uniform grids. The method is implemented in various open-source projects, including Taylor-NeRF and CNC [S1, S2, unofficial].
+
+## Sources
+[S1] taylor2nerf/taylor-nerf, https://github.com/taylor2nerf/taylor-nerf, fetched 2026-10-26 (unofficial)
+[S2] YihangChen-ee/CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -4,102 +4,109 @@
+ 
+ ## Overview
+-L2 Norm Wavelet Compression is a lossy compression method for volume data that selects a subset of wavelet coefficients to minimize the $L_2$ error norm between the original and reconstructed data [S1, unofficial]. It differs from sibling methods like [Biorthogonal Wavelet Compression](5381-biorthogonal-wavelet-compression.md) or [Wavelet Slice Compression (Video Coding Approach)](5379-wavelet-slice-compression-video-coding-approach.md) by using a global magnitude-based sorting and thresholding strategy rather than block-based coding or video-specific motion compensation [S1, unofficial]. It builds on [Wavelet and Pyramid Transforms](3856-wavelet-and-pyramid-transforms.md) by leveraging the orthonormality of the basis to guarantee that retaining the largest coefficients yields the optimal $L_2$ approximation [S1, unofficial].
++L2 Norm Wavelet Compression is a lossy compression method that selects a subset of wavelet coefficients to minimize the $L_2$ error norm of the reconstructed signal relative to the original [S1, unofficial]. It solves the problem of achieving a specific fidelity guarantee (bounded error) while maximizing compression ratio by discarding the smallest magnitude coefficients [S1, unofficial]. It differs from its siblings, such as [Laplacian Pyramid Volume Rendering](2261-laplacian-pyramid-volume-rendering.md) and [Biorthogonal Wavelet Compression](5381-biorthogonal-wavelet-compression.md), by explicitly using the sorted magnitude of coefficients to enforce a strict global error bound derived from Parseval's theorem, rather than relying on perceptual models or fixed bit-depth quantization alone [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A volume $V$ decomposed into a set of wavelet coefficients $C = \{c_0, c_1, \dots, c_{M-1}\}$ using the transform defined in [Wavelet and Pyramid Transforms](3856-wavelet-and-pyramid-transforms.md).
+-**Outputs:** A compressed bitstream containing the indices and values of the retained coefficients, or a threshold value and a list of coefficients above that threshold.
++**Inputs and Outputs:**
++*   **Input:** A volume $V$ (or image) of size $M$ voxels/pixels.
++*   **Output:** A compressed bitstream containing the indices and values of the retained coefficients, or a threshold value and a list of significant coefficients, depending on the implementation variant.
++
++**Data Structures:**
++*   **Coefficients Array:** A 1D array of size $M$ containing the wavelet coefficients $c_i$.
++*   **Sorted Sequence:** A permutation of the coefficients sorted by absolute magnitude: $c_{\sigma(0)}, c_{\sigma(1)}, \dots, c_{\sigma(M-1)}$ such that $|c_{\sigma(0)}| \ge |c_{\sigma(1)}| \ge \dots \ge |c_{\sigma(M-1)}|$ [S1, unofficial].
++
++**Steps:**
++1.  **Transform:** Compute the wavelet coefficients of the input data. The source specifies using the normalized two-dimensional Haar wavelet basis for images, which extends to 3D volumes via separable application [S1, unofficial]. Let the set of all coefficients be $\{c_0, c_1, \dots, c_{M-1}\}$.
++2.  **Sort:** Sort the coefficients in descending order of their absolute magnitude to produce the sequence $c_{\sigma(i)}$ [S1, unofficial].
++3.  **Thresholding:** Determine the number of retained coefficients $M'$ or a threshold value $\tau$ based on a user-specified error tolerance $\epsilon$ [S1, unofficial]. There are two primary approaches described:
++    *   **Exact $L_2$ Bound:** Find the least $M' < M$ such that the sum of squared discarded coefficients is less than $\epsilon^2$:
++        $$ \sum_{i=M'}^{M-1} (c_{\sigma(i)})^2 < \epsilon^2 $$
++        This relies on the orthonormality of the basis, where the $L_2$ error norm of the approximation $f_{M'}(x)$ is equal to the sum of the squares of the discarded coefficients [S1, unofficial].
++    *   **Iterative Thresholding:** Repeatedly discard all coefficients with magnitude smaller than a threshold $\tau$. Double the threshold in each iteration until the allowable error level is achieved [S1, unofficial]. This approach is noted as efficient for producing the results shown in the source figures [S1, unofficial].
++4.  **Encode:** Store the retained coefficients (indices and values) or the threshold and significant coefficients. The source notes that for RGB data, coefficients are stored in a 3-byte stream, potentially quantized to 1-byte indices of a color table to improve compression [S2, unofficial].
++
+ **Parameters:**
+ *   $\epsilon$: User-specified error tolerance. For lossless compression, $\epsilon = 0$ [S1, unofficial].
+-*   $M'$: The number of retained coefficients [S1, unofficial].
+-
+-**Data Structures:**
+-The coefficients are stored in a list or array. For RGB data, coefficients are 3-byte vectors [S2, unofficial].
+-
+-**Steps:**
+-1.  **Compute Coefficients:** Apply the wavelet transform to the input volume to obtain the coefficient set $C$ [S1, unofficial]. The basis used is typically the normalized two-dimensional Haar wavelet basis extended to 3D [S1, unofficial].
+-2.  **Sort Coefficients:** Sort the coefficients in order of decreasing magnitude to produce a sequence $c_{\sigma(0)}, c_{\sigma(1)}, \dots, c_{\sigma(M-1)}$ such that $|c_{\sigma(0)}| \ge |c_{\sigma(1)}| \ge \dots \ge |c_{\sigma(M-1)}|$ [S1, unofficial].
+-3.  **Determine Retention Count ($M'$):** Find the least integer $M' < M$ such that the sum of squared discarded coefficients is less than the error tolerance $\epsilon^2$:
+-    $$ \sum_{i=M'}^{M-1} (c_{\sigma(i)})^2 < \epsilon^2 $$
+-    This condition is derived from the orthonormality of the basis, where the $L_2$ error norm is equal to the sum of the squares of the discarded coefficients [S1, unofficial].
+-4.  **Encode:** Store the indices and values of the first $M'$ coefficients from the sorted sequence. Alternatively, an iterative thresholding approach may be used: repeatedly discard all coefficients smaller in magnitude than a threshold $T$, doubling $T$ in each iteration until the allowable error level is achieved [S1, unofficial].
++*   $M'$: Number of retained coefficients [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def l2_wavelet_compress(coefficients, epsilon):
++def l2_norm_wavelet_compress(volume, epsilon):
+     """
+-    Compress wavelet coefficients using L2 norm minimization.
++    Compress volume using L2 norm wavelet compression.
+     
+     Args:
+-        coefficients (list of float): The wavelet coefficients c_0 ... c_{M-1}.
+-        epsilon (float): The maximum allowed L2 error norm.
++        volume: 3D array of voxel values.
++        epsilon: Error tolerance. If 0, lossless.
+         
+     Returns:
+-        list of int: Indices of retained coefficients.
+-        list of float: Values of retained coefficients.
++        compressed_data: List of (index, value) tuples for retained coefficients.
++        M_prime: Number of retained coefficients.
+     """
++    # Step 1: Transform
++    # Apply separable 1D Haar wavelet transform along each axis.
++    # Result is a flat list of coefficients.
++    coefficients = haar_wavelet_transform_3d(volume)
+     M = len(coefficients)
+     
+-    # Step 2: Sort coefficients by magnitude, keeping track of original indices
+-    # Create pairs of (magnitude, original_index)
+-    indexed_coeffs = []
+-    for i, c in enumerate(coefficients):
+-        indexed_coeffs.append((abs(c), i))
++    # Step 2: Sort
++    # Create pairs of (index, absolute_value) and sort by absolute_value descending.
++    indexed_coeffs = [(i, abs(c)) for i, c in enumerate(coefficients)]
++    indexed_coeffs.sort(key=lambda x: x[1], reverse=True)
+     
+-    # Sort descending by magnitude
+-    indexed_coeffs.sort(key=lambda x: x[0], reverse=True)
++    # Step 3: Thresholding (Exact L2 Bound approach)
++    # Calculate cumulative sum of squared coefficients from the end (smallest)
++    # to find the cut-off M' where the tail sum < epsilon^2.
+     
+-    # Step 3: Find the least M' such that the tail sum of squares < epsilon^2
+-    # We iterate from the smallest coefficient upwards, accumulating the error
+-    # until the remaining coefficients (the head) satisfy the condition.
+-    # Alternatively, calculate total energy and subtract from largest.
++    # Precompute squared magnitudes
++    squared_mags = [c[1]**2 for c in indexed_coeffs]
+     
+-    total_energy = sum(c**2 for c in coefficients)
+-    current_retained_energy = 0.0
+-    retained_indices = []
+-    retained_values = []
+-    
+-    # Iterate through sorted coefficients (largest first)
+-    for mag, original_index in indexed_coeffs:
+-        # Check if adding this coefficient keeps the *discarded* energy below epsilon^2
+-        # Discarded energy = Total Energy - Retained Energy
+-        # We want: Total Energy - (Retained Energy + mag^2) < epsilon^2
+-        # Or: Retained Energy + mag^2 > Total Energy - epsilon^2
++    # Compute suffix sums of squared magnitudes
++    # suffix_sum[i] = sum(squared_mags[i:])
++    suffix_sum = [0] * (M + 1)
++    for i in range(M - 1, -1, -1):
++        suffix_sum[i] = suffix_sum[i+1] + squared_mags[i]
+         
+-        if current_retained_energy + mag**2 >= total_energy - epsilon**2:
+-            retained_indices.append(original_index)
+-            retained_values.append(coefficients[original_index])
+-            current_retained_energy += mag**2
+-        else:
+-            # If we can't add this coefficient and still meet the error bound,
+-            # we stop. However, the definition says "least M'".
+-            # This implies we take the largest coefficients until the condition is met.
+-            # The loop above adds coefficients as long as the condition holds.
+-            # If the condition fails for the current largest remaining, we stop.
++    # Find least M' such that sum of discarded (tail) < epsilon^2
++    # Discarded coefficients are from index M' to M-1 in the sorted list.
++    # Their squared sum is suffix_sum[M'].
++    M_prime = M
++    for i in range(M + 1):
++        if suffix_sum[i] < epsilon**2:
++            M_prime = i
+             break
+             
+-    return retained_indices, retained_values
++    # Step 4: Encode
++    # Retain the first M_prime coefficients from the sorted list.
++    retained = []
++    for i in range(M_prime):
++        original_index, _ = indexed_coeffs[i]
++        retained.append((original_index, coefficients[original_index]))
++        
++    return retained, M_prime
+ ```
+ 
+-**Edge Cases:**
+-*   **Lossless:** If $\epsilon = 0$, all coefficients must be retained ($M' = M$) [S1, unofficial].
+-*   **Precision:** The calculation of the sum of squares must handle floating-point precision carefully to ensure the error bound is strictly met [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Precision:** The calculation of the error norm relies on the orthonormality of the basis. Using non-orthonormal bases requires adjustment of the error metric [S1, unofficial].
++*   **Lossless Mode:** Setting $\epsilon = 0$ requires retaining all coefficients ($M' = M$), resulting in no compression unless entropy coding is applied to the sorted coefficients [S1, unofficial].
++*   **RGB Data:** For vector-valued voxels (RGB), the method treats components as a stream. Quantizing 3-byte vectors to 1-byte indices can improve compression but introduces additional quantization error not accounted for in the pure $L_2$ wavelet thresholding [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Reconstructed Data Storage with Greedy Optimization](6626-reconstructed-data-storage-with-greedy-optimization.md)
+-A method to select which wavelet tree nodes should have their data pre-reconstructed and stored to trade storage space for run-time efficiency, maximizing the reduction in reconstruction time subject to a storage constraint [6626-reconstructed-data-storage-with-greedy-optimization.md].
++This method selects which nodes in a wavelet tree should have their data pre-reconstructed and stored on disk to trade storage space for run-time efficiency. It solves the problem of limited storage by maximizing the reduction in reconstruction time subject to a per-processor storage constraint. It differs from its parent, [L2 Norm Wavelet Compression](3542-l2-norm-wavelet-compression.md), by introducing a greedy heuristic that balances visiting likelihood, load-balancing penalties, and time savings, rather than relying solely on error metrics for compression decisions.
+ 
+ ### RGB Vector Wavelet Compression
+-A compression method for RGB color images by treating them as volume data with vector-valued voxels (r,g,b), reusing the CT wavelet transform and compression scheme [S2, unofficial]. It quantizes the 3-byte vector coefficients to 1-byte indices of a color table to improve compression ratio [S2, unofficial]. The input bit depth is 24-bit per voxel, and coefficients are stored in a 3-byte stream [S2, unofficial].
++A compression method for RGB color images by treating them as volume data with vector-valued voxels (r,g,b), reusing the CT wavelet transform and compression scheme [S2, unofficial]. It differs from scalar compression by handling 3-byte streams and optionally quantizing vectors to 1-byte indices of a color table to improve compression ratio [S2, unofficial]. It is chosen when compressing color volume data where the L2 norm strategy is desired for color images [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** Sorting the coefficients takes $O(M \log M)$ where $M$ is the number of coefficients [S1, unofficial]. Finding $M'$ is linear in the sorted list [S1, unofficial].
+-**Memory Complexity:** Requires storing all coefficients for sorting, then a subset for output [S1, unofficial].
+-**Performance:** Demonstrated compression ratios of 1.22 bits/voxel (bpv), 0.4 bpv, and 0.10 bpv [S1, unofficial].
+-**Strengths:** Provides optimal $L_2$ approximation for a given number of coefficients; simple to implement [S1, unofficial].
+-**Limitations:** Sorting is computationally expensive for large volumes; does not exploit spatial locality as effectively as block-based methods [S1, unofficial].
++*   **Time Complexity:** The sorting step dominates at $O(M \log M)$, where $M$ is the number of voxels. The thresholding step is $O(M)$ with precomputed suffix sums. The transform is $O(M)$ for Haar wavelets.
++*   **Memory Complexity:** Requires storing all coefficients $O(M)$ for sorting and thresholding.
++*   **Measured Performance:** The source demonstrates compression ratios of 1.22 bits/voxel (bpv), 0.4 bpv, and 0.10 bpv [S1, unofficial].
++*   **Strengths:** Provides a strict, predictable error bound ($L_2$ norm). Simple to implement. Fast random access is possible if coefficients are stored with indices [S1, S2, unofficial].
++*   **Limitations:** Sorting coefficients globally can be memory-intensive for very large volumes. Artifacts may appear at high compression ratios (e.g., 0.10 bpv) [S1, unofficial].
++*   **When to use:** When a guaranteed maximum error is required. When the data is well-represented by the chosen wavelet basis (e.g., Haar for piecewise constant data).
+ 
+ ## Background
+-Originated in the context of wavelet image compression, specifically using the Haar wavelet basis [S1, unofficial]. It was applied to CT data and RGB images [S1, S2, unofficial]. The method relies on the mathematical property that for an orthonormal basis, the best approximation in the $L_2$ norm is obtained by keeping the coefficients with the largest magnitudes [S1, unofficial].
++The method originates from the application of wavelet transforms to image and volume compression, specifically leveraging the properties of orthonormal bases to minimize $L_2$ error [S1, unofficial]. The specific algorithm of sorting coefficients by magnitude to bound the $L_2$ error is detailed in works on multiresolution decomposition [S1, unofficial]. The application to RGB vector data extends this to color volumes [S2, unofficial].
+ 
+ ## Sources

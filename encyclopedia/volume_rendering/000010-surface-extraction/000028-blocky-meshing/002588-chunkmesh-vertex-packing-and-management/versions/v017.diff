@@ -1,0 +1,552 @@
+--- v016.md
++++ v017.md
+@@ -4,88 +4,45 @@
+ 
+ ## Overview
+-ChunkMesh Vertex Packing and Management is a dynamic mesh generation and memory management technique for voxel terrain that packs vertex attributes into dense 32-bit integer formats and manages buffer updates via a free-list allocator. It solves the problem of high memory overhead and frequent GPU buffer uploads in blocky meshing by minimizing vertex data size and enabling efficient incremental updates (addition/removal of faces) without full mesh regeneration. It differs from static meshing by supporting real-time block modification and from simple face culling by actively managing vertex index reuse and buffer synchronization [S1, unofficial].
++ChunkMesh Vertex Packing and Management is a dynamic mesh generation and buffer management technique for voxel terrain that packs vertex attributes into dense 32-bit integer formats to minimize GPU memory bandwidth and storage overhead [S1, unofficial]. It solves the problem of sparse, high-latency vertex buffer updates in blocky meshing by using free-list allocators and bitwise packing, allowing incremental face addition and removal without reallocation [S1, unofficial]. It sets itself apart from static meshing by supporting runtime modification of the voxel world and from pure face culling by managing the underlying vertex data structure and GPU buffer synchronization [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Voxel grid occupancy data, block type information, chunk coordinates, and camera position (for translucent sorting).
+-**Outputs:** GPU vertex buffers (`vertex0`, `vertex1`, `indices`) containing only visible faces.
+-
+-### Data Structures
+-The method uses three parallel arrays in CPU memory, converted to `Uint32Array` for GPU upload:
+-1.  `vertex0`: Array of 32-bit unsigned integers. Each vertex is packed into one `uint32`.
+-    *   **Layout:**
+-        *   Bits 0–9: X coordinate (10 bits, range 0–1023).
+-        *   Bits 10–19: Y coordinate (10 bits, range 0–1023).
+-        *   Bits 20–29: Z coordinate (10 bits, range 0–1023).
+-        *   Bits 30–31: Unused.
+-    *   **Formula:** `vertex0 = x | (y << 10) | (z << 20)`
+-2.  `vertex1`: Array of 32-bit unsigned integers. Each vertex is packed into one `uint32`.
+-    *   **Layout:**
+-        *   Bits 0–9: Texture layer index (10 bits).
+-        *   Bits 10–14: Texture coordinate U (5 bits, range 0–31).
+-        *   Bits 15–19: Texture coordinate V (5 bits, range 0–31).
+-        *   Bits 20–21: Lighting/shading value (2 bits, range 0–3).
+-        *   Bits 22–31: Unused.
+-    *   **Formula:** `vertex1 = textureLayer | (texcoordX << 10) | (texcoordY << 15) | (dLight << 20)`
+-3.  `indices`: Array of 32-bit unsigned integers. Stores triangle indices. Each face consists of 6 indices (2 triangles).
+-4.  `vertexSlots`: A stack (array) storing available vertex indices for reuse. Initially empty or pre-filled with valid indices.
+-
+-### Numbered Steps
+-
+-1.  **Face Visibility Determination:**
+-    For each voxel at position $(x, y, z)$ and each of the 6 directions $d \in \{0, 1, 2, 3, 4, 5\}$ (corresponding to $+X, -X, +Y, -Y, +Z, -Z$):
+-    *   Calculate neighbor position $P_{neighbor} = P + \vec{d}$.
+-    *   Retrieve block data for current block $B_0$ and neighbor block $B_1$.
+-    *   Apply `faceInteraction` logic:
+-        *   If adding a face ($B_0$ is new/visible): Add face if $B_1$ is invisible/translucent/transparent AND $B_0.type \neq B_1.type$.
+-        *   If removing a face ($B_0$ is being removed): Remove face if $B_1$ is invisible/translucent/transparent AND $B_0.type \neq B_1.type$.
+-        *   Remove face if $B_1$ is NOT invisible AND ($B_0$ is NOT translucent/transparent OR $B_0.type == B_1.type$).
+-    *   Note: Invisible blocks do not generate faces.
+-
+-2.  **Vertex Generation (Add Face):**
+-    If a face is visible:
+-    *   Call `cubeFacePosition(x, y, z, dir)` to get 12 floats (4 vertices $\times$ 3 coords).
+-        *   Block size $n=16$.
+-        *   Directions map to specific corner coordinates relative to the voxel.
+-    *   Call `cubeFaceTexcoord(orientation)` to get 8 floats (4 vertices $\times$ 2 coords).
+-        *   Orientation mapping: `[2, 3, 0, 0, 3, 2][dir]`.
+-    *   Determine lighting value $dLight$ using `[1, 1, 3, 0, 2, 2][dir]`.
+-    *   Reuse vertex indices:
+-        *   If `vertexSlots` is not empty, pop `start_index` from `vertexSlots`.
+-        *   Else, `start_index` is the current length of `vertex0`.
+-    *   For each of the 4 vertices $v \in \{a, b, c, d\}$:
+-        *   Pack position into `vertex0[start_index + i]` using bit shifts.
+-        *   Pack texture/lighting into `vertex1[start_index + i]` using bit shifts.
+-        *   Store index `start_index + i` in `indices`.
+-    *   Push 6 indices to `indices`: `(a, b, c, c, d, a)`.
+-    *   Set `this.update = true`.
+-
+-3.  **Face Removal (Remove Face):**
+-    If a face is no longer visible:
+-    *   Call `findFace(facePosition)` to locate the starting index in `vertex0`.
+-        *   `facePosition` is the packed `uint32` of the first vertex of the face.
+-        *   Search iterates by 4s, skipping `NaN` entries.
+-    *   If found at `vertexIndex`:
+-        *   Set `vertex0[vertexIndex ... vertexIndex+3]` to `NaN`.
+-        *   Set `vertex1[vertexIndex ... vertexIndex+3]` to `NaN`.
+-        *   Find the corresponding indices in `indices` array (search by starting vertex index).
+-        *   Remove 6 indices from `indices` using `splice`.
+-        *   Push `vertexIndex` to `vertexSlots` for reuse.
+-        *   Set `this.update = true`.
+-
+-4.  **Buffer Update:**
+-    If `this.update` is true:
+-    *   Bind VAO.
+-    *   Upload `vertex0` to `vertex0Buffer` with `gl.DYNAMIC_DRAW`.
+-    *   Upload `vertex1` to `vertex1Buffer` with `gl.DYNAMIC_DRAW`.
+-    *   Upload `indices` to `indexBuffer` with `gl.DYNAMIC_DRAW`.
+-    *   Reset `this.update = false`.
+-
+-5.  **Translucent Sorting (Optional Extension):**
+-    For translucent blocks, sort faces based on camera position.
+-    *   Determine `greatestDir` (axis with largest camera distance magnitude).
+-    *   Sort blocks along `greatestDir` from back to front.
+-    *   Rebuild `indices` array in sorted order.
+-
+-### Pseudocode
++**Inputs:** Voxel world state (block types, chunk positions), camera position (for translucent sorting), and block modification events (add/remove).
++**Outputs:** GPU vertex buffers (`vertex0`, `vertex1`) and index buffer (`indices`) representing the visible surface of a chunk.
++
++**Data Structures:**
++The mesh maintains three JavaScript arrays (mapped to GPU buffers):
++1.  `vertex0`: `Uint32Array` storing packed position data.
++2.  `vertex1`: `Uint32Array` storing packed texture, texcoord, and lighting data.
++3.  `indices`: `Uint32Array` storing triangle indices.
++4.  `vertexSlots`: Stack (free-list) storing available indices in `vertex0`/`vertex1` for reuse.
++
++**Bit Packing Layout:**
++Each vertex is represented by two 32-bit unsigned integers.
++
++*   `vertex0` (Position):
++    *   Bits 0–9: X coordinate (10 bits, range 0–1023).
++    *   Bits 10–19: Y coordinate (10 bits, range 0–1023).
++    *   Bits 20–29: Z coordinate (10 bits, range 0–1023).
++    *   Bits 30–31: Unused.
++*   `vertex1` (Attributes):
++    *   Bits 0–9: Texture layer index (10 bits).
++    *   Bits 10–14: Texture coordinate U (5 bits, range 0–31).
++    *   Bits 15–19: Texture coordinate V (5 bits, range 0–31).
++    *   Bits 20–21: Shading/Lighting value (2 bits, range 0–3).
++    *   Bits 22–31: Unused.
++
++**Vertex Generation:**
++A chunk consists of blocks of size $n=16$. For a block at integer coordinates $(x, y, z)$ and face direction $d \in \{0, \dots, 5\}$ (0: +X, 1: -X, 2: +Y, 3: -Y, 4: +Z, 5: -Z), the four vertices of the quad are calculated. The direction mapping for lighting is $L = [1, 1, 3, 0, 2, 2][d]$ [S1, unofficial]. The texture coordinate orientation mapping is $O = [2, 3, 0, 0, 3, 2][d]$ [S1, unofficial].
++
++**Face Interaction Logic:**
++When a block is added or removed, the algorithm checks the 6 neighbors. A face is generated or culled based on the neighbor's properties:
++*   **Add Face:** If the neighbor is invisible/translucent/transparent AND the current block type differs from the neighbor type.
++*   **Remove Face:** If the neighbor is NOT invisible AND (the current block is NOT translucent/transparent OR the block types are identical).
++*   **Invisible Blocks:** If the current block is invisible, no faces are generated for any direction [S1, unofficial].
++
++**Buffer Update:**
++The GPU buffers are updated using `gl.DYNAMIC_DRAW` hint. The vertex attributes are bound as integer attributes (`assignAttribI`) with stride 0 [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+@@ -93,169 +50,272 @@
+ BLOCK_SIZE = 16
+ DIRECTION_LIGHTING = [1, 1, 3, 0, 2, 2]
+-DIRECTION_TEXCOORD_ORIENT = [2, 3, 0, 0, 3, 2]
++DIRECTION_TEXCOORD = [2, 3, 0, 0, 3, 2]
+ 
+ class ChunkMesh:
+     def __init__(self):
+-        self.vertex0 = []  # List of uint32
+-        self.vertex1 = []  # List of uint32
+-        self.indices = []  # List of uint32
+-        self.vertexSlots = []  # Stack of available indices
++        self.vertex0 = []  # Packed positions
++        self.vertex1 = []  # Packed attributes
++        self.indices = []  # Triangle indices
++        self.vertexSlots = []  # Free list for vertex indices
+         self.update = False
+ 
+-    def pack_vertex0(self, x, y, z):
+-        return x | (y << 10) | (z << 20)
+-
+-    def pack_vertex1(self, texture_layer, tex_u, tex_v, light):
+-        return texture_layer | (tex_u << 10) | (tex_v << 15) | (light << 20)
+-
+-    def get_face_vertices(self, x, y, z, dir):
+-        # Returns 4 vertices as list of (x, y, z) tuples
+-        # Based on cubeFacePosition logic
+-        base_x = x * BLOCK_SIZE
+-        base_y = y * BLOCK_SIZE
+-        base_z = z * BLOCK_SIZE
+-        n = BLOCK_SIZE
++    def add_vertex(self, x, y, z, texture_layer, tex_u, tex_v, light, index_hint=-1):
++        """
++        Add a vertex to the mesh.
++        Returns the index of the vertex in the vertex0/vertex1 arrays.
++        """
++        # Pack position into vertex0
++        packed_pos = x | (y << 10) | (z << 20)
++        
++        # Pack attributes into vertex1
++        # tex_u, tex_v are 0-15 (5 bits). Scale to 0-31 for packing if needed, 
++        # but source uses direct bit shift. Assuming input is 0-15 range for 5 bits.
++        # Source: (texcoordX << 10). texcoordX is 0-15.
++        packed_attr = texture_layer | (tex_u << 10) | (tex_v << 15) | (light << 20)
++        
++        if index_hint >= 0:
++            # Reuse existing slot
++            self.vertex0[index_hint] = packed_pos
++            self.vertex1[index_hint] = packed_attr
++            return index_hint
++        else:
++            # Push new
++            self.vertex0.append(packed_pos)
++            self.vertex1.append(packed_attr)
++            return len(self.vertex0) - 1
++
++    def get_cube_face_vertices(self, x, y, z, dir):
++        """
++        Returns 4 vertices (each as [x,y,z]) for the face of the block at x,y,z in direction dir.
++        Coordinates are in world space (block_coord * 16).
++        """
++        bx = x * BLOCK_SIZE
++        by = y * BLOCK_SIZE
++        bz = z * BLOCK_SIZE
+         
+         if dir == 0: # +X
+-            return [(base_x+n, base_y, base_z), (base_x+n, base_y+n, base_z), (base_x+n, base_y+n, base_z+n), (base_x+n, base_y, base_z+n)]
++            return [
++                [bx + BLOCK_SIZE, by, bz],
++                [bx + BLOCK_SIZE, by + BLOCK_SIZE, bz],
++                [bx + BLOCK_SIZE, by + BLOCK_SIZE, bz + BLOCK_SIZE],
++                [bx + BLOCK_SIZE, by, bz + BLOCK_SIZE]
++            ]
+         elif dir == 1: # -X
+-            return [(base_x, base_y, base_z), (base_x, base_y, base_z+n), (base_x, base_y+n, base_z+n), (base_x, base_y+n, base_z)]
++            return [
++                [bx, by, bz],
++                [bx, by, bz + BLOCK_SIZE],
++                [bx, by + BLOCK_SIZE, bz + BLOCK_SIZE],
++                [bx, by + BLOCK_SIZE, bz]
++            ]
+         elif dir == 2: # +Y
+-            return [(base_x, base_y+n, base_z), (base_x, base_y+n, base_z+n), (base_x+n, base_y+n, base_z+n), (base_x+n, base_y+n, base_z)]
++            return [
++                [bx, by + BLOCK_SIZE, bz],
++                [bx, by + BLOCK_SIZE, bz + BLOCK_SIZE],
++                [bx + BLOCK_SIZE, by + BLOCK_SIZE, bz + BLOCK_SIZE],
++                [bx + BLOCK_SIZE, by + BLOCK_SIZE, bz]
++            ]
+         elif dir == 3: # -Y
+-            return [(base_x+n, base_y, base_z+n), (base_x, base_y, base_z+n), (base_x, base_y, base_z), (base_x+n, base_y, base_z)]
++            return [
++                [bx + BLOCK_SIZE, by, bz + BLOCK_SIZE],
++                [bx, by, bz + BLOCK_SIZE],
++                [bx, by, bz],
++                [bx + BLOCK_SIZE, by, bz]
++            ]
+         elif dir == 4: # +Z
+-            return [(base_x, base_y, base_z+n), (base_x+n, base_y, base_z+n), (base_x+n, base_y+n, base_z+n), (base_x, base_y+n, base_z+n)]
++            return [
++                [bx, by, bz + BLOCK_SIZE],
++                [bx + BLOCK_SIZE, by, bz + BLOCK_SIZE],
++                [bx + BLOCK_SIZE, by + BLOCK_SIZE, bz + BLOCK_SIZE],
++                [bx, by + BLOCK_SIZE, bz + BLOCK_SIZE]
++            ]
+         elif dir == 5: # -Z
+-            return [(base_x, base_y, base_z), (base_x, base_y+n, base_z), (base_x+n, base_y+n, base_z), (base_x+n, base_y, base_z)]
++            return [
++                [bx, by, bz],
++                [bx, by + BLOCK_SIZE, bz],
++                [bx + BLOCK_SIZE, by + BLOCK_SIZE, bz],
++                [bx + BLOCK_SIZE, by, bz]
++            ]
+ 
+     def get_face_texcoords(self, dir):
+-        # Returns 4 vertices as list of (u, v) tuples
+-        # Based on cubeFaceTexcoord logic, scaled to 0-1 range for shader
+-        orient = DIRECTION_TEXCOORD_ORIENT[dir]
+-        # Simplified mapping based on source switch cases
+-        # Note: Source uses 0-16 range, shader multiplies by 0.0625 (1/16)
+-        # We will store 0-15 range integers in vertex1 bits 10-14/15-19
+-        if orient == 0: return [(0, 0), (0, 15), (15, 15), (15, 0)]
+-        elif orient == 1: return [(15, 0), (0, 0), (0, 15), (15, 15)]
+-        elif orient == 2: return [(0, 15), (0, 0), (15, 0), (15, 15)]
+-        elif orient == 3: return [(15, 15), (15, 0), (0, 0), (0, 15)]
+-        return [(0, 0), (0, 15), (15, 15), (15, 0)] # Default
+-
+-    def add_face(self, x, y, z, dir, texture_layer):
++        """
++        Returns 4 texture coordinates (u, v) for the face.
++        Mapping from source: case 0 -> [0,0, 0,16, 16,16, 16,0] etc.
++        Assuming texcoords are 0-15 range for 5-bit packing.
++        """
++        # Source mapping: [2, 3, 0, 0, 3, 2][dir]
++        # Case 0: [0, 0, 0, 16, 16, 16, 16, 0] -> (0,0), (0,1), (1,1), (1,0) scaled by 16?
++        # Source code: float texcoordX = float((vertex1 & 31744u) >> 10u) * 0.0625f;
++        # 0.0625 is 1/16. So packed value 16 -> 1.0. Packed value 0 -> 0.0.
++        # So we pack 0-15.
++        
++        if dir == 0:
++            return [(0,0), (0,15), (15,15), (15,0)]
++        elif dir == 1:
++            return [(15,0), (0,0), (0,15), (15,15)]
++        elif dir == 2:
++            return [(0,0), (0,15), (15,15), (15,0)] # Simplified based on source pattern, exact mapping depends on texture atlas
++        elif dir == 3:
++            return [(15,0), (0,0), (0,15), (15,15)]
++        elif dir == 4:
++            return [(0,0), (15,0), (15,15), (0,15)]
++        elif dir == 5:
++            return [(0,0), (0,15), (15,15), (15,0)]
++        
++        # Note: The source code snippet for texcoords was truncated. 
++        # The logic relies on the orientation index [2,3,0,0,3,2][dir].
++        # We assume standard UV mapping for the specific orientation.
++
++    def add_cube_face(self, x, y, z, dir, texture_layer):
++        """
++        Adds a visible face to the mesh.
++        """
++        vertices = self.get_cube_face_vertices(x, y, z, dir)
++        texcoords = self.get_face_texcoords(dir)
+         light = DIRECTION_LIGHTING[dir]
+-        verts = self.get_face_vertices(x, y, z, dir)
+-        texs = self.get_face_texcoords(dir)
+-        
+-        # Reuse index
+-        if self.vertexSlots:
+-            start_idx = self.vertexSlots.pop()
++        
++        # Get reusable index
++        if len(self.vertexSlots) > 0:
++            start_index = self.vertexSlots.pop()
+         else:
+-            start_idx = len(self.vertex0)
+-            
+-        for i in range(4):
+-            vx, vy, vz = verts[i]
+-            # Convert world coords to block-local 0-15 range for packing
+-            # Note: Source packs absolute block coords? 
+-            # Source: cubeFacePosition returns world coords. 
+-            # But pack_vertex0 uses x,y,z directly. 
+-            # Looking at source: x,y,z passed to addVertex are from cubeFacePosition?
+-            # No, cubeFacePosition returns world floats. 
+-            # But pack_vertex0 expects integers. 
+-            # Source code: this.vertex0.push( x | (y << 10) ... )
+-            # Where x,y,z come from cubeFacePosition? 
+-            # cubeFacePosition returns floats. 
+-            # However, the packing logic implies x,y,z are integers 0-1023.
+-            # In the source, x,y,z are block coordinates (integers), 
+-            # and cubeFacePosition scales them by n=16 for world space.
+-            # But the packing in addVertex uses the unscaled x,y,z?
+-            # Let's check source: 
+-            # addCubeFace calls addVertex(pos[0]...) where pos is from cubeFacePosition.
+-            # cubeFacePosition returns world coords (e.g., 16, 0, 0).
+-            # But pack_vertex0 does x | (y<<10). If x=16, y=0, z=0 -> 16.
+-            # If x=32, y=0, z=0 -> 32.
+-            # So it packs WORLD coordinates, not block-local.
+-            # Max world coord for 10 bits is 1023. 1023/16 = 63.6 blocks.
+-            
+-            # Re-interpreting source:
+-            # cubeFacePosition(x,y,z,dir) takes block coords x,y,z.
+-            # It returns world coords.
+-            # addVertex takes world coords.
+-            # pack_vertex0 takes world coords.
+-            
+-            # So we must pass world coords to pack.
+-            wx, wy, wz = vx, vy, vz
+-            
+-            self.vertex0.append(self.pack_vertex0(wx, wy, wz))
+-            # Texcoords: source uses 0-16 range, stored in 5 bits (0-31).
+-            # We store integer 0-15.
+-            tu, tv = texs[i]
+-            self.vertex1.append(self.pack_vertex1(texture_layer, tu, tv, light))
+-            self.indices.append(start_idx + i)
+-            
+-        # Add second triangle
+-        self.indices.append(start_idx + 2)
+-        self.indices.append(start_idx + 3)
+-        self.indices.append(start_idx + 0)
+-        
++            start_index = len(self.vertex0)
++            
++        # Add 4 vertices
++        idx_a = self.add_vertex(vertices[0][0], vertices[0][1], vertices[0][2], texture_layer, texcoords[0][0], texcoords[0][1], light, start_index)
++        idx_b = self.add_vertex(vertices[1][0], vertices[1][1], vertices[1][2], texture_layer, texcoords[1][0], texcoords[1][1], light, start_index + 1)
++        idx_c = self.add_vertex(vertices[2][0], vertices[2][1], vertices[2][2], texture_layer, texcoords[2][0], texcoords[2][1], light, start_index + 2)
++        idx_d = self.add_vertex(vertices[3][0], vertices[3][1], vertices[3][2], texture_layer, texcoords[3][0], texcoords[3][1], light, start_index + 3)
++        
++        # Add indices (2 triangles: a,b,c and c,d,a)
++        self.indices.extend([idx_a, idx_b, idx_c, idx_c, idx_d, idx_a])
+         self.update = True
+ 
+-    def remove_face(self, x, y, z, dir):
+-        verts = self.get_face_vertices(x, y, z, dir)
+-        # Create packed uints for comparison
+-        packed_verts = [self.pack_vertex0(v[0], v[1], v[2]) for v in verts]
+-        
+-        start_idx = -1
++    def find_face(self, face_positions):
++        """
++        Finds the starting index of a face in vertex0 array.
++        face_positions: list of 4 vertices [v0, v1, v2, v3] where each v is [x,y,z].
++        Returns starting index or -1.
++        """
++        # Pack the expected positions
++        expected = []
++        for v in face_positions:
++            expected.append(v[0] | (v[1] << 10) | (v[2] << 20))
++            
+         for i in range(0, len(self.vertex0), 4):
+-            if self.vertex0[i] == packed_verts[0] and \
+-               self.vertex0[i+1] == packed_verts[1] and \
+-               self.vertex0[i+2] == packed_verts[2] and \
+-               self.vertex0[i+3] == packed_verts[3]:
+-                start_idx = i
+-                break
+-        
+-        if start_idx == -1:
++            if self.vertex0[i] == float('nan'): # Skip removed vertices
++                continue
++            if (self.vertex0[i] == expected[0] and
++                self.vertex0[i+1] == expected[1] and
++                self.vertex0[i+2] == expected[2] and
++                self.vertex0[i+3] == expected[3]):
++                return i
++        return -1
++
++    def remove_face(self, face_positions):
++        """
++        Removes a face from the mesh.
++        """
++        start_index = self.find_face(face_positions)
++        if start_index == -1:
+             return
+             
+-        # Mark as removed
+-        for i in range(4):
+-            self.vertex0[start_idx + i] = float('nan') # Or a sentinel uint if using pure uint array
+-            self.vertex1[start_idx + i] = float('nan')
+-            
++        # Mark vertices as NaN (removed)
++        self.vertex0[start_index] = float('nan')
++        self.vertex0[start_index+1] = float('nan')
++        self.vertex0[start_index+2] = float('nan')
++        self.vertex0[start_index+3] = float('nan')
++        
++        self.vertex1[start_index] = float('nan')
++        self.vertex1[start_index+1] = float('nan')
++        self.vertex1[start_index+2] = float('nan')
++        self.vertex1[start_index+3] = float('nan')
++        
+         # Remove indices
+-        # Find index in indices array
+-        idx_start = -1
++        # Find index in indices array where start_index is the first element
++        # Source uses a linear scan for this
++        idx_in_indices = -1
+         for i in range(0, len(self.indices), 6):
+-            if self.indices[i] == start_idx:
+-                idx_start = i
++            if self.indices[i] == start_index:
++                idx_in_indices = i
+                 break
+                 
+-        if idx_start != -1:
+-            self.indices[idx_start:idx_start+6] = []
+-            
+-        self.vertexSlots.append(start_idx)
++        if idx_in_indices != -1:
++            self.indices[idx_in_indices : idx_in_indices+6] = [] # Splice 6 elements
++            
++        # Push to free list
++        self.vertexSlots.append(start_index)
+         self.update = True
+ 
+-    def update_buffers(self, gl):
++    def update_block(self, x, y, z, is_adding, block_data):
++        """
++        Called when a block is added or removed.
++        is_adding: True if block is being added, False if removed.
++        block_data: Data of the block being added/removed.
++        """
++        for dir in range(6):
++            # Calculate neighbor coordinates
++            if dir == 0: tx, ty, tz = x + 1, y, z
++            elif dir == 1: tx, ty, tz = x - 1, y, z
++            elif dir == 2: tx, ty, tz = x, y + 1, z
++            elif dir == 3: tx, ty, tz = x, y - 1, z
++            elif dir == 4: tx, ty, tz = x, y, z + 1
++            elif dir == 5: tx, ty, tz = x, y, z - 1
++            
++            # Get neighbor block info
++            # Note: In a real implementation, this requires access to the world state
++            neighbor_data = get_block_data(tx, ty, tz)
++            if neighbor_data is None: continue
++            
++            neighbor_info = get_block_info(neighbor_data.type)
++            current_info = get_block_info(block_data.type)
++            
++            # Determine if face needs to be added/removed
++            add_face, remove_face = face_interaction(block_data, neighbor_data, is_adding, dir, current_info, neighbor_info)
++            
++            # Opposite direction for neighbor
++            opp_dir = dir + 1 if dir % 2 == 0 else dir - 1
++            
++            if add_face:
++                if is_adding:
++                    # Add face to current chunk
++                    self.add_cube_face(x, y, z, dir, get_texture_key(current_info.texture, dir))
++                else:
++                    # Remove face from neighbor chunk (exposed face)
++                    # Load neighbor mesh if needed
++                    if not chunk_mesh_exists(neighbor_data.chunk_pos):
++                        load_chunk_mesh(neighbor_data.chunk_pos)
++                    neighbor_mesh = get_chunk_mesh(neighbor_data.chunk_pos)
++                    neighbor_mesh.add_cube_face(tx, ty, tz, opp_dir, get_texture_key(neighbor_info.texture, opp_dir))
++                    
++            if remove_face:
++                if is_adding:
++                    # Remove face from neighbor chunk (covered face)
++                    if not chunk_mesh_exists(neighbor_data.chunk_pos):
++                        load_chunk_mesh(neighbor_data.chunk_pos)
++                    neighbor_mesh = get_chunk_mesh(neighbor_data.chunk_pos)
++                    neighbor_mesh.remove_face(get_cube_face_vertices(tx, ty, tz, opp_dir))
++                else:
++                    # Remove face from current chunk (block removed, face gone)
++                    self.remove_face(get_cube_face_vertices(x, y, z, dir))
++
++    def update_buffers(self):
++        """
++        Uploads data to GPU.
++        """
+         if not self.update:
+             return
+             
+-        gl.bind_buffer(gl.ARRAY_BUFFER, self.vertex0_buffer)
+-        gl.buffer_data(gl.ARRAY_BUFFER, Uint32Array(self.vertex0), gl.DYNAMIC_DRAW)
+-        
+-        gl.bind_buffer(gl.ARRAY_BUFFER, self.vertex1_buffer)
+-        gl.buffer_data(gl.ARRAY_BUFFER, Uint32Array(self.vertex1), gl.DYNAMIC_DRAW)
+-        
+-        gl.bind_buffer(gl.ELEMENT_ARRAY_BUFFER, self.index_buffer)
+-        gl.buffer_data(gl.ELEMENT_ARRAY_BUFFER, Uint32Array(self.indices), gl.DYNAMIC_DRAW)
++        # Bind buffers and upload
++        # gl.bindBuffer(gl.ARRAY_BUFFER, this.vertex0Buffer);
++        # gl.bufferData(gl.ARRAY_BUFFER, new Uint32Array(this.vertex0), gl.DYNAMIC_DRAW);
++        # ... repeat for vertex1 and indices
+         
+         self.update = False
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Neighbor Chunk Loading:** When removing a block, the neighbor chunk's mesh must be loaded if it doesn't exist before adding the exposed face to it [S1, unofficial].
+-*   **Precision:** Coordinates are packed into 10 bits (0–1023). This limits the chunk/world size to approximately 63 blocks in each dimension if using world coordinates, or requires block-local coordinates if the world is larger. The source uses block coordinates scaled by 16 for position, but packs the scaled values? No, the source packs `x` which is the block coordinate? Let's re-read. `cubeFacePosition` returns `x*n`. `addVertex` takes `pos[0]` which is `x*n`. `pack_vertex0` takes `x`. So it packs world coordinates. Max world coord 1023. Max block 63.
+-*   **NaN Handling:** Removed vertices are marked with `NaN`. The `findFace` function must skip these. In a strict `Uint32Array`, `NaN` cannot be stored. The source uses JavaScript arrays which allow `NaN`. In a strict GPU implementation, a sentinel value (e.g., `0xFFFFFFFF`) should be used for `vertex0` and `vertex1` to indicate invalid vertices.
+-*   **Index Reuse:** The `vertexSlots` stack must be managed carefully to avoid reusing indices that are still referenced in the `indices` array. The removal logic ensures indices are only added to `vertexSlots` after the corresponding indices are removed from the `indices` array.
++**Edge Cases and Pitfalls:**
++*   **Neighbor Chunk Loading:** When a block is removed, the neighbor chunk's mesh must be loaded if it does not already exist, before adding the newly exposed face to it [S1, unofficial].
++*   **NaN Handling:** Removed vertices are marked with `NaN` in `vertex0` and `vertex1`. The `findFace` function must skip these entries.
++*   **Index Search:** The `findFace` function performs a linear scan of `vertex0` in steps of 4. This is $O(V)$ where $V$ is the number of vertices. For large chunks, this may be slow. The source mentions a binary search helper `indexBinarySearch` but notes it is not used for face finding because indices are not sorted [S1, unofficial].
++*   **Precision:** The 10-bit coordinate packing limits block positions to a $1024 \times 1024 \times 1024$ range per chunk. If blocks are larger than 16 units, the coordinate range shrinks. The source uses $n=16$, so coordinates are $0 \dots 15$ per block, fitting in 4 bits, but the packing uses 10 bits, allowing for larger chunks or offsets [S1, unofficial].
+ 
+ ## Subtopics
+@@ -274,12 +334,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Face culling is $O(1)$ per voxel face. Buffer update is $O(V + I)$ where $V$ is the number of vertices and $I$ is the number of indices. Removal is $O(V)$ due to linear search for face location.
+-*   **Memory Complexity:** $O(V)$ for vertex data, $O(I)$ for indices. Packing reduces vertex size from 3 floats (12 bytes) + texcoords (8 bytes) + lighting (1 byte) to 8 bytes (2 uint32s).
+-*   **Performance:** Efficient for dynamic scenes with frequent block changes. The free-list allocator avoids memory fragmentation. Linear search for face removal is a bottleneck for large meshes; binary search or hash maps could optimize this.
++*   **Time Complexity:** Face addition/removal is $O(1)$ for buffer push/pop, but face removal requires $O(V)$ search to find the face in `vertex0` [S1, unofficial]. Buffer upload is $O(F)$ where $F$ is the number of faces.
++*   **Memory Complexity:** $O(F)$ for vertices and indices. The packing reduces memory bandwidth by 50% compared to storing positions and attributes separately as floats [S1, unofficial].
++*   **Performance:** The use of `Uint32Array` and `gl.DYNAMIC_DRAW` allows efficient incremental updates. The free-list allocator prevents memory fragmentation [S1, unofficial].
+ *   **Strengths:** Low memory footprint, fast incremental updates, simple implementation.
+-*   **Limitations:** Limited world size due to 10-bit coordinate packing. Linear search for face removal is slow for large chunks. Translucent sorting adds overhead.
++*   **Limitations:** Linear search for face removal is slow for large meshes. 10-bit coordinate limit restricts chunk size or block size. No support for complex geometry beyond quads.
+ 
+ ## Background
+-The method originates from the Exolands project, an open-source voxel engine. It is designed for real-time voxel terrain rendering where blocks are added and removed dynamically. The technique leverages GPU vertex attributes and efficient CPU-side buffer management to handle the high frequency of mesh updates typical in voxel games.
++The method originates from the Exolands project, an unofficial voxel engine implementation [S1, unofficial]. It is designed for real-time voxel terrain rendering where dynamic modification of the world is required. The technique builds on the principles of face culling and visibility optimization [3861-face-culling-and-visibility-optimization.md].
+ 
+ ## Sources

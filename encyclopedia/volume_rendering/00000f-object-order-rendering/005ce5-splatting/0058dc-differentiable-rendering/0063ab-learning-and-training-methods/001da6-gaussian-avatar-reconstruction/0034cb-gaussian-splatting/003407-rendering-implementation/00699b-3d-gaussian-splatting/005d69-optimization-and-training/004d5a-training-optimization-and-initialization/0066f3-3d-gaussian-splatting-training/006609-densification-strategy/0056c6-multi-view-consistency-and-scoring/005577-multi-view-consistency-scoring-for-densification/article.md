@@ -1,0 +1,150 @@
+# Multi-View Consistency Scoring for Densification
+
+Also called: gaussian pruning and densification score
+
+## Overview
+This method computes per-Gaussian scores based on multi-view photometric consistency to guide both densification (importance) and pruning operations during 3D Gaussian Splatting optimization [S1, unofficial]. It differs from standard gradient-based densification by explicitly aggregating binary error flags across multiple camera views to identify regions with persistent reconstruction errors, and normalizes the accumulated loss to prioritize primitives for refinement [S1, unofficial]. It builds on [Multi-view Consistency and Scoring](15793-multi-view-consistency-and-scoring.md).
+
+## How it works
+**Inputs:**
+*   `camlist`: List of viewpoint camera objects.
+*   `gaussians`: Current Gaussian representation (means, covariances, opacities, SH coefficients).
+*   `pipe`: Rendering pipeline configuration.
+*   `bg`: Background color/tensor.
+*   `args`: Configuration object containing `loss_thresh` (threshold for high-error classification) and `mult` (scaling factor for rendering).
+*   `DENSIFY`: Boolean flag. If `True`, computes importance score for densification; if `False`, computes only pruning score.
+
+**Outputs:**
+*   `importance_score`: Per-Gaussian integer counts of views marking the Gaussian as high-error, floor-averaged across views. Only returned if `DENSIFY` is `True`.
+*   `pruning_score`: Normalized (0..1) per-Gaussian score used to prioritize densification or pruning. Higher scores indicate worse reconstruction consistency.
+
+**Data Structures:**
+*   `full_metric_counts`: Tensor of shape $(N,)$ storing the accumulated count of high-error views per Gaussian. Initialized to `None`.
+*   `full_metric_score`: Tensor of shape $(N,)$ storing the accumulated weighted photometric loss per Gaussian. Initialized to `None$.
+*   `metric_map`: Binary tensor of shape $(H, W)$ indicating which pixels have high loss.
+
+**Steps:**
+1.  Initialize `full_metric_counts` and `full_metric_score` to `None`.
+2.  Loop over each view index `v` in `camlist`:
+    a.  Retrieve `my_viewpoint_cam = camlist[v]`.
+    b.  Render the image using the current Gaussians:
+        $$ I_{render} = \text{render\_fastgs}(my\_viewpoint\_cam, \text{gaussians}, \text{pipe}, \text{bg}, \text{args.mult}) $$
+    c.  Compute the photometric loss $L_v$ for this view:
+        $$ L_v = \text{compute\_photometric\_loss}(my\_viewpoint\_cam, I_{render}) $$
+    d.  Retrieve the ground truth image $I_{gt} = my\_viewpoint\_cam.\text{original\_image}.\text{cuda}()$.
+    e.  Compute the normalized L1 loss map:
+        $$ L_{norm} = \text{get\_loss}(I_{render}, I_{gt}) $$
+    f.  Create a binary metric map where pixels with loss exceeding the threshold are marked as 1:
+        $$ M = (L_{norm} > \text{args.loss\_thresh}).\text{int}() $$
+    g.  Render again with metric collection enabled to accumulate per-Gaussian contributions:
+        $$ \text{render\_pkg} = \text{render\_fastgs}(my\_viewpoint\_cam, \text{gaussians}, \text{pipe}, \text{bg}, \text{args.mult}, \text{get\_flag}=\text{True}, \text{metric\_map}=M) $$
+    h.  Extract the accumulated loss counts for this view:
+        $$ C_v = \text{render\_pkg}["\text{accum\_metric\_counts}"] $$
+    i.  Update global accumulators:
+        *   If `full_metric_counts` is `None`, set `full_metric_counts = C_v`. Else, `full_metric_counts += C_v`.
+        *   If `full_metric_score` is `None`, set `full_metric_score = L_v \cdot C_v`. Else, `full_metric_score += L_v \cdot C_v`.
+3.  Compute the pruning score by normalizing `full_metric_score` to the range [0, 1]:
+    $$ \text{pruning\_score} = \frac{\text{full\_metric\_score} - \min(\text{full\_metric\_score})}{\max(\text{full\_metric\_score}) - \min(\text{full\_metric\_score})} $$
+4.  If `DENSIFY` is `True`, compute the importance score by floor-dividing the total counts by the number of views:
+    $$ \text{importance\_score} = \lfloor \text{full\_metric\_counts} / |\text{camlist}| \rfloor $$
+    Else, set `importance_score` to `None`.
+5.  Return `importance_score` and `pruning_score`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gaussian_score_fastgs(camlist, gaussians, pipe, bg, args, DENSIFY=True):
+    """
+    Computes multi-view consistency scores for densification and pruning.
+    """
+    full_metric_counts = None
+    full_metric_score = None
+    num_views = len(camlist)
+
+    for view_idx in range(num_views):
+        my_viewpoint_cam = camlist[view_idx]
+        
+        # Render image
+        render_image = render_fastgs(my_viewpoint_cam, gaussians, pipe, bg, args.mult)["render"]
+        
+        # Compute photometric loss
+        photometric_loss = compute_photometric_loss(my_viewpoint_cam, render_image)
+        
+        # Get ground truth
+        gt_image = my_viewpoint_cam.original_image.cuda()
+        
+        # Compute normalized loss and threshold
+        l1_loss_norm = get_loss(render_image, gt_image)
+        metric_map = (l1_loss_norm > args.loss_thresh).int()
+        
+        # Render with metric accumulation
+        render_pkg = render_fastgs(
+            my_viewpoint_cam, 
+            gaussians, 
+            pipe, 
+            bg, 
+            args.mult, 
+            get_flag=True, 
+            metric_map=metric_map
+        )
+        
+        accum_loss_counts = render_pkg["accum_metric_counts"]
+        
+        # Update accumulators
+        if full_metric_counts is None:
+            full_metric_counts = accum_loss_counts.clone()
+        else:
+            full_metric_counts = full_metric_counts + accum_loss_counts
+            
+        if full_metric_score is None:
+            full_metric_score = photometric_loss * accum_loss_counts.clone()
+        else:
+            full_metric_score = full_metric_score + (photometric_loss * accum_loss_counts)
+
+    # Compute pruning score (normalized)
+    min_score = torch.min(full_metric_score)
+    max_score = torch.max(full_metric_score)
+    denom = max_score - min_score
+    
+    # Handle division by zero if all scores are identical
+    if denom == 0:
+        pruning_score = torch.zeros_like(full_metric_score)
+    else:
+        pruning_score = (full_metric_score - min_score) / denom
+
+    # Compute importance score if densifying
+    importance_score = None
+    if DENSIFY:
+        importance_score = torch.floor_divide(full_metric_counts, num_views)
+
+    return importance_score, pruning_score
+```
+
+**Parameters:**
+*   `loss_thresh`: Threshold for classifying a pixel as high-error. Typical value: Not given in the sources.
+*   `mult`: Scaling modifier for rendering. Typical value: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If `max(full_metric_score) == min(full_metric_score)`, the denominator in the pruning score calculation becomes zero. The implementation must handle this, e.g., by setting the score to 0 or 1 depending on convention [G].
+*   **Initialization:** `full_metric_counts` and `full_metric_score` must be initialized to `None` or zero tensors of the correct shape before the loop to avoid type errors or incorrect accumulation [G].
+*   **Device Placement:** Ground truth images and intermediate tensors must be on the same device (typically CUDA) to avoid runtime errors [S1, unofficial].
+
+## Subtopics
+
+### [Cross-ray Densification](15775-cross-ray-densification.md)
+Uses ray tracing and multi-view photometric loss to target complex, texture-dense areas consistently observed across perspectives, adapting thresholds based on camera geometry.
+
+## Operating characteristics
+*   **Time Complexity:** $O(V \cdot R)$, where $V$ is the number of views in `camlist` and $R$ is the cost of rendering a single view. The method requires two renders per view (one for loss, one for metric accumulation).
+*   **Memory Complexity:** $O(N)$ for storing `full_metric_counts` and `full_metric_score`, where $N$ is the number of Gaussians. Additional memory for intermediate render buffers per view.
+*   **Strengths:** Explicitly targets regions with persistent multi-view inconsistency, which are often indicative of missing geometry or artifacts. The binary thresholding reduces sensitivity to absolute loss magnitude variations across views.
+*   **Limitations:** Requires multiple renders per optimization step, increasing computational overhead. Sensitive to the choice of `loss_thresh`.
+*   **When to use:** When standard gradient-based densification fails to resolve multi-view inconsistencies or artifacts in texture-dense regions.
+*   **When not to use:** When computational resources are severely constrained, or when the scene is static and well-reconstructed with standard methods.
+
+## Background
+This method is part of the FastGS (Fast Gaussian Splatting) optimization pipeline, which aims to accelerate and improve the training of 3D Gaussian Splatting [S1, unofficial]. It leverages multi-view consistency as a more robust signal for densification than single-view gradients, addressing the issue of overfitting to specific viewpoints or noise.
+
+## Sources
+[S1] fastgs/FastGS, https://github.com/fastgs/FastGS, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,498 @@
+--- v019.md
++++ v020.md
+@@ -4,238 +4,260 @@
+ 
+ ## Overview
+-Marching Cubes with QEF Vertex Optimization is a surface extraction method that computes vertex positions using a Quadric Error Function (QEF) minimization for ambiguous cases, while using a 2D linear/binomial search for non-ambiguous cases, to produce a watertight mesh from a voxel grid [S1, unofficial]. It builds on [Isosurface extraction](30-isosurface-extraction.md) by replacing the standard linear interpolation of vertex positions with a constrained optimization that respects the local geometry of the isosurface, thereby reducing artifacts in complex topologies [S1, unofficial].
++Marching Cubes with QEF Vertex Optimization is a surface extraction method that computes vertex positions using a Quadric Error Function (QEF) minimization for ambiguous cases, while using a 2D linear/binomial search for non-ambiguous cases, to produce a watertight mesh from a voxel grid [S1, unofficial]. It builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) by replacing the standard linear interpolation of vertex positions with a geometric optimization step specifically for topologically ambiguous voxels, thereby reducing cracks and holes caused by inconsistent ambiguity resolution [S1, unofficial].
+ 
+ ## How it works
+-The method operates on a regular 3D grid of voxels. It classifies cells based on their index to determine the optimization strategy: cells with indices in the range $[3 \cdot G^3, 9 \cdot G^3)$ use a fast 2D search, while cells with indices $\ge 9 \cdot G^3$ use QEF minimization [S1, unofficial].
++The method processes voxel indices by splitting them into two groups based on their topological complexity: a "fast" group for non-ambiguous cases and a "slow" group for ambiguous cases requiring QEF optimization.
++
++### Inputs and Outputs
++*   **Input**: A voxel grid of scalar field values (or binary occupancy), grid dimensions ($G_x, G_y, G_z$), and an isovalue $I$.
++*   **Output**: A triangle mesh (vertices and indices) representing the isosurface.
+ 
+ ### Data Structures
+-*   **Grid Dimensions**: $G$ is the grid size in each dimension. Total cells $N = G^3$.
+-*   **Occupancy Array**: `occs` of shape $(G, G, G)$, containing binary values (0 or 1) indicating voxel occupancy.
+-*   **Ambiguity Check Array**: `amb_chks` of shape $(G, G, G)$, boolean flags indicating if a cell has an ambiguous configuration requiring correction.
+-*   **Lookup Tables**:
+-    *   `axd_tab`, `ax0_tab`, `ax1_tab`, `cas_tab`: Precomputed tables mapping cell indices to axis directions and case numbers.
+-    *   `lctab_2d`: Lookup table for 2D search results.
+-    *   `qvntab`, `pfvtab`, `vitogi`: Tables used for QEF vertex coordinate and edge index retrieval.
+-    *   `cstrtab`: Constraint plane parameters for ray intersection.
++The method relies on the precomputed structures from [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md):
++1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit masks.
++2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ integers.
++3.  **Ambiguity Check Table (`amb_chks`)**: A boolean array of size 256, where `amb_chks[C]` is true if case $C$ is ambiguous (e.g., 46, 47, 98, 99, 210, 213, 214, 215) [S1, unofficial].
++4.  **QEF Lookup Tables**:
++    *   `qvntab`: Maps `(occupancy_pattern, case_index)` to a list of vertex indices involved in the QEF system.
++    *   `pfvtab`: Pre-computed vertex coordinates and edge indices for specific occupancy patterns and cases.
++    *   `vitogi`: Maps vertex indices to edge indices.
++    *   `cstrtab`: Constraint planes for boundary intersection.
+ 
+ ### Algorithm Steps
+ 
+-1.  **Filter and Classify Cells**:
+-    Iterate over all active cell indices `pidx1`. Split them into two groups:
+-    *   Group A (Fast): $3 \cdot G^3 \le \text{pidx1} < 9 \cdot G^3$.
+-    *   Group B (QEF): $\text{pidx1} \ge 9 \cdot G^3$.
+-
+-2.  **Process Group A (2D Search)**:
+-    For each cell in Group A:
+-    a.  Compute the 8-neighbor occupancy value `val_` by summing weighted occupancy bits:
+-        $$ \text{val\_} = \text{occs}[p_0, p_1, p_2] + 2 \cdot \text{occs}[p_0 + \Delta_1, p_1 + \Delta_2, p_2 + \Delta_3] + 4 \cdot \text{occs}[p_0 + \Delta_4, p_1 + \Delta_5, p_2 + \Delta_6] + 8 \cdot \text{occs}[p_0 + \Delta_7, p_1 + \Delta_8, p_2 + \Delta_9] $$
+-        *(Note: The exact bit weights and neighbor offsets depend on the specific grid traversal order and axis definitions `axis0`, `axis1`, `axis2` derived from `axd_tab`)* [S1, unofficial].
+-    b.  Apply ambiguity correction: If `amb_chks[pidx3]` is true, set $\text{val\_} = 15 - \text{val\_}$ [S1, unofficial].
+-    c.  Compute vertex positions using `_2d_search(pidx3, axdir, axis0, axis1, val_, cases)` [S1, unofficial].
+-        *   The 2D search involves finding a starting point `spnt` and a normal `vnorm`.
+-        *   It performs a linear/binomial search along the normal direction to find the intersection.
+-        *   It refines the position using horizontal searches along edge vectors `hnorm` [S1, unofficial].
+-    d.  Store results in `val_pnts` at `start_idx`, then increment `start_idx` by the count of processed cells [S1, unofficial].
+-
+-3.  **Process Group B (QEF Optimization)**:
+-    For each cell in Group B:
+-    a.  Call `_solve_QEF(pidx3, val_, cases)` where `val_` is the integer occupancy pattern and `cases` is derived from $\text{pidx1} / G^3 - 9$ [S1, unofficial].
+-    b.  Inside `_solve_QEF`:
+-        i.  For each vertex index $i$ from 3 to 7, find indices `idx` where `qvntab[val_, cases] == i` [S1, unofficial].
+-        ii. Retrieve vertex coordinates `vtcs` from `pfvtab[val0_, cas, :2*i+1]` and edge indices `vitg` from `vitogi[vtcs]` [S1, unofficial].
+-        iii. Compute 3D positions `pnti` for the vertices using grid offsets:
+-            $$ \text{pnti} = \text{vitg}[:,:,3] \cdot G^3 + (\text{pid3}[:,0]+\text{vitg}[:,:,0]) \cdot G^2 + (\text{pid3}[:,1]+\text{vitg}[:,:,1]) \cdot G + (\text{pid3}[:,2]+\text{vitg}[:,:,2]) $$
+-            Get global indices `pidx` and retrieve pre-computed vertex positions `vert = val_pnts[pidx]`. Add local offsets `vitg[:,:3]` to `vert` [S1, unofficial].
+-        iv. Compute QEF normals `qnrm` using cross products of edge vectors:
+-            $$ \text{qnrm} = \text{cross}(\text{vert}[:, 1::2] - \text{vert}[:, :-1:2], \text{vert}[:, 1::2] - \text{vert}[:, 2::2]) $$
+-            Compute centroid `cntr = mean(vert[:, 1::2], dim=1)` [S1, unofficial].
+-            Normalize `qnrm` handling zero-length edges with `ERR` threshold [S1, unofficial].
+-        v.  Solve the QEF system using least squares:
+-            $$ A = \text{cat}(\text{qnrm}, \text{QEF\_REG} \cdot I) $$
+-            $$ b = \text{cat}(\sum(\text{vert}[:, 1::2] \cdot \text{qnrm}), \text{QEF\_REG} \cdot \text{cntr}) $$
+-            Solution $\text{qefr} = \text{lstsq}(A, b).\text{solution}$. If all normals are degenerate (`cndt` all true), use `cntr` instead [S1, unofficial].
+-        vi. Compute ray direction $\text{ctoq} = \text{qefr} - \text{cpnt}$ and length `leng`.
+-        vii. Compute intersection parameter $t$ with constraint planes defined by `cstrtab`. Concatenate boundary parameters $(1-\text{cpnt})/\text{ctoq}$ and $-\text{cpnt}/\text{ctoq}$ with $t$. Handle NaNs and negative values by setting $t$ to $\text{leng} + \text{SEP}$, then normalize by `leng` and clamp to $[0, 1]$. Final vertex is $\text{cpnt} + t \cdot \text{ctoq}$ [S1, unofficial].
+-
+-4.  **Output**:
+-    The resulting `val_pnts` array contains the optimized vertex positions for all cells. These vertices are connected according to the Marching Cubes topology tables to form the final mesh.
++1.  **Filter and Classify Voxels**:
++    Iterate through all voxel indices $pidx$. Classify each voxel into one of two groups:
++    *   **Group 1 (Fast)**: Indices in range $[3 \cdot G^3, 9 \cdot G^3)$ (assuming a specific grid indexing scheme where $G^3$ is the volume of one layer or block). These correspond to non-ambiguous cases solvable via 2D search.
++    *   **Group 2 (QEF)**: Indices $\ge 9 \cdot G^3$. These correspond to ambiguous cases requiring QEF minimization.
++
++2.  **Process Group 1 (2D Search)**:
++    For each voxel in Group 1:
++    a.  Compute the 8-bit occupancy pattern `val_` by summing weighted occupancy bits of the 8 corners:
++        $$ val\_ = occs[p] + 2 \cdot occs[p + axis1] + 4 \cdot occs[p + axis0] + 8 \cdot occs[p + axis2] $$
++        where $axis0, axis1, axis2$ are direction vectors for the grid axes.
++    b.  Apply ambiguity correction: If `amb_chks[val_]` is true, invert the pattern: $val\_ = 15 - val\_$.
++    c.  Compute vertex positions using a 2D linear/binomial search `_2d_search` based on `val_`, the case index, and the grid geometry.
++    d.  Store results in the global vertex list `val_pnts`.
++
++3.  **Process Group 2 (QEF Optimization)**:
++    For each voxel in Group 2:
++    a.  Determine the occupancy pattern `val_` and case index `cases` from the voxel index.
++    b.  Call `_solve_QEF(val_, cases)` to compute optimized vertex positions.
++    c.  Store results in `val_pnts`.
++
++4.  **QEF Solving (`_solve_QEF`)**:
++    For each vertex $i$ involved in the ambiguous case (typically indices 3 to 7):
++    a.  Retrieve the local vertex coordinates `vtcs` and edge indices `vitg` from `pfvtab` and `vitogi` using `val_` and `cases`.
++    b.  Compute the 3D positions `pnti` of the surrounding vertices using grid offsets:
++        $$ pnti = vitg[:, 3] \cdot G^3 + (pid[:, 0] + vitg[:, 0]) \cdot G^2 + (pid[:, 1] + vitg[:, 1]) \cdot G + (pid[:, 2] + vitg[:, 2]) $$
++        where $pid$ is the voxel corner index.
++    c.  Retrieve pre-computed vertex positions `vert` from `val_pnts` using global indices `pidx`.
++    d.  Add local offsets `vitg[:, :3]` to `vert` to get the initial vertex estimates.
++    e.  Compute QEF normals `qnrm` using cross products of edge vectors:
++        $$ \_1vt = vert[:, 1::2] $$
++        $$ qnrm = \text{cross}(\_1vt - vert[:, :-1:2], \_1vt - vert[:, 2::2]) $$
++    f.  Compute the centroid `cntr` of the vertices:
++        $$ cntr = \text{mean}(\_1vt, \text{dim}=1) $$
++    g.  Normalize `qnrm`. If any edge length is below a threshold `ERR`, set the normal to zero or handle degenerate cases.
++    h.  Solve the QEF least-squares system:
++        $$ A = \text{cat}(qnrm, \text{QEF\_REG} \cdot I) $$
++        $$ b = \text{cat}(\sum(\_1vt \cdot qnrm), \text{QEF\_REG} \cdot cntr) $$
++        $$ qefr = \text{lstsq}(A, b).\text{solution} $$
++        If all normals are degenerate, use `cntr` as the solution.
++    i.  Compute the ray direction `ctoq = qefr - cpnt` and length `leng`.
++    j.  Compute the intersection parameter `t` with constraint planes defined by `cstrtab`. Concatenate boundary parameters $(1-cpnt)/ctoq$ and $-cpnt/ctoq$ with `t`.
++    k.  Handle NaNs and negative values by setting `t` to `leng + SEP`, then normalize by `leng` and clamp to $[0, 1]$.
++    l.  Final vertex position: $v = cpnt + t \cdot ctoq$.
+ 
+ ### Pseudocode
+ 
+ ```python
+-def marching_cubes_qef(occs, amb_chks, G, GRID3, GRID2, GRID, ERR, QEF_REG, SEP, VERTICAL_RANGE, VERTICAL_LINEAR_SEARCH, VERTICAL_BINARY_SEARCH, HORIZNTL_RANGE, HORIZNTL_LINEAR_SEARCH, HORIZNTL_BINARY_SEARCH):
++def solve_qef_vertex_optimization(occs, grid_dims, amb_chks, edge_table, triangle_table, 
++                                  qvntab, pfvtab, vitogi, cstrtab, ERR=1e-6, QEF_REG=1e-4):
+     """
+-    Performs Marching Cubes with QEF Vertex Optimization.
+-    
+-    Args:
+-        occs: 3D array of occupancy values (0 or 1).
+-        amb_chks: 3D array of boolean ambiguity flags.
+-        G: Grid size.
+-        GRID3, GRID2, GRID: Precomputed powers of G (G^3, G^2, G).
+-        ERR: Epsilon for numerical stability.
+-        QEF_REG: Regularization factor for QEF.
+-        SEP: Separation constant for ray intersection.
+-        VERTICAL/HORIZNTL_*: Parameters for 2D search.
+-        
+-    Returns:
+-        val_pnts: Array of vertex positions.
++    Marching Cubes with QEF Vertex Optimization.
++    occs: 3D array of occupancy (0 or 1) or scalar field values.
++    grid_dims: (Gx, Gy, Gz)
+     """
+-    # Initialize lookup tables (assumed precomputed)
+-    axd_tab, ax0_tab, ax1_tab, cas_tab, lctab_2d, qvntab, pfvtab, vitogi, cstrtab = get_lookup_tables()
+-    
+-    # Get all active cell indices (simplified for demonstration)
+-    # In practice, this involves iterating over the grid and identifying cells intersected by the isosurface
+-    all_pidx1 = get_active_cell_indices(occs, G)
+-    
+-    # Split into groups
+-    mask_a = (all_pidx1 >= 3 * GRID3) & (all_pidx1 < 9 * GRID3)
+-    mask_b = all_pidx1 >= 9 * GRID3
+-    
+-    pidx1_a = all_pidx1[mask_a]
+-    pidx1_b = all_pidx1[mask_b]
+-    
+-    val_pnts = [] # List to store vertices
+-    
+-    # Process Group A: Fast 2D Search
+-    if len(pidx1_a) > 0:
+-        count_idx = len(pidx1_a)
+-        csidx = (pidx1_a // GRID3) - 3
+-        axdir = axd_tab[csidx]
+-        axis0 = ax0_tab[csidx]
+-        axis1 = ax1_tab[csidx]
+-        cases = cas_tab[csidx]
+-        axis2 = axis0 + axis1
+-        
+-        pidx3 = pidx1_to_pidx3(pidx1_a)
+-        
+-        # Compute occupancy value
+-        val_ = (occs[pidx3[:, 0], pidx3[:, 1], pidx3[:, 2]] +
+-                2 * occs[pidx3[:, 0] + axis1[:, 0], pidx3[:, 1] + axis1[:, 1], pidx3[:, 2] + axis1[:, 2]] +
+-                4 * occs[pidx3[:, 0] + axis0[:, 0], pidx3[:, 1] + axis0[:, 1], pidx3[:, 2] + axis0[:, 2]] +
+-                8 * occs[pidx3[:, 0] + axis2[:, 0], pidx3[:, 1] + axis2[:, 1], pidx3[:, 2] + axis2[:, 2]])
+-        
+-        # Ambiguity correction
+-        amb_mask = amb_chks[pidx3[:, 0], pidx3[:, 1], pidx3[:, 2]]
+-        val_[amb_mask] = 15 - val_[amb_mask]
+-        
+-        # Compute vertices using 2D search
+-        vertices_a = _2d_search(pidx3, axdir, axis0, axis1, val_, cases, lctab_2d, VERTICAL_RANGE, VERTICAL_LINEAR_SEARCH, VERTICAL_BINARY_SEARCH, HORIZNTL_RANGE, HORIZNTL_LINEAR_SEARCH, HORIZNTL_BINARY_SEARCH, ERR)
+-        val_pnts.extend(vertices_a)
+-        
+-    # Process Group B: QEF Optimization
+-    if len(pidx1_b) > 0:
+-        csidx = (pidx1_b // GRID3) - 9
+-        cases = cas_tab[csidx] # Assuming cases are stored in cas_tab for these indices too
+-        
+-        pidx3 = pidx1_to_pidx3(pidx1_b)
+-        
+-        # Compute occupancy value (same logic as Group A, but for different indices)
+-        # Note: The exact axis directions for Group B might differ or be derived differently
+-        # For simplicity, assuming similar structure
+-        axis0 = ax0_tab[csidx]
+-        axis1 = ax1_tab[csidx]
+-        axis2 = axis0 + axis1
+-        
+-        val_ = (occs[pidx3[:, 0], pidx3[:, 1], pidx3[:, 2]] +
+-                2 * occs[pidx3[:, 0] + axis1[:, 0], pidx3[:, 1] + axis1[:, 1], pidx3[:, 2] + axis1[:, 2]] +
+-                4 * occs[pidx3[:, 0] + axis0[:, 0], pidx3[:, 1] + axis0[:, 1], pidx3[:, 2] + axis0[:, 2]] +
+-                8 * occs[pidx3[:, 0] + axis2[:, 0], pidx3[:, 1] + axis2[:, 1], pidx3[:, 2] + axis2[:, 2]])
+-        
+-        # Ambiguity correction
+-        amb_mask = amb_chks[pidx3[:, 0], pidx3[:, 1], pidx3[:, 2]]
+-        val_[amb_mask] = 15 - val_[amb_mask]
+-        
+-        # Compute vertices using QEF
+-        vertices_b = _solve_QEF(pidx3, val_, cases, qvntab, pfvtab, vitogi, cstrtab, QEF_REG, ERR, SEP, GRID3, GRID2, GRID)
+-        val_pnts.extend(vertices_b)
+-        
+-    return val_pnts
+-
+-def _2d_search(pidx3, axdir, axis0, axis1, val_, cases, lctab_2d, VERTICAL_RANGE, VERTICAL_LINEAR_SEARCH, VERTICAL_BINARY_SEARCH, HORIZNTL_RANGE, HORIZNTL_LINEAR_SEARCH, HORIZNTL_BINARY_SEARCH, ERR):
+-    """
+-    Performs 2D linear/binomial search for vertex positions.
+-    """
+-    # Placeholder for the complex 2D search logic described in [S1, unofficial]
+-    # This involves finding spnt, vnorm, and refining with horizontal searches
+-    # The exact implementation depends on the specific lookup tables and search parameters
+-    pass
+-
+-def _solve_QEF(pidx3, val_, cases, qvntab, pfvtab, vitogi, cstrtab, QEF_REG, ERR, SEP, GRID3, GRID2, GRID):
+-    """
+-    Solves the QEF for vertex positions.
+-    """
++    Gx, Gy, Gz = grid_dims
++    GRID = Gx
++    GRID2 = Gx * Gy
++    GRID3 = Gx * Gy * Gz
++    
+     vertices = []
+-    for i in range(3, 8): # Vertex indices 3 to 7
+-        idx = qvntab[val_, cases] == i
+-        if not idx.any():
++    triangles = []
++    
++    # Precompute axis directions for 2D search
++    axd_tab, ax0_tab, ax1_tab, cas_tab = precompute_lookup_tables(amb_chks)
++    
++    # Iterate over all voxels
++    for p in range(Gx * Gy * Gz):
++        # Determine case index C
++        C = 0
++        for i in range(8):
++            # Bit i corresponds to vertex i
++            if get_voxel_value(occs, p, i) > isovalue:
++                C |= (1 << i)
++        
++        # Get triangle indices from LUT
++        tri_indices = triangle_table[C]
++        if tri_indices[0] == -1:
+             continue
+             
+-        vtcs = pfvtab[val_, cases, :2*i+1][idx]
+-        vitg = vitogi[vtcs][idx]
+-        
+-        # Compute 3D positions
+-        pid3 = pidx3[idx]
+-        pnti = (vitg[:,:,3] * GRID3 + 
+-                (pid3[:,0] + vitg[:,:,0]) * GRID2 + 
+-                (pid3[:,1] + vitg[:,:,1]) * GRID + 
+-                (pid3[:,2] + vitg[:,:,2]))
+-        
+-        # Get global indices and pre-computed positions
+-        # Note: This assumes val_pnts is accessible or passed in
+-        # For simplicity, we assume we can retrieve them
+-        # In practice, this might require a global lookup or passing val_pnts as an argument
+-        vert = get_precomputed_vertices(pnti) # Placeholder
++        # Classify voxel for optimization path
++        # Note: The specific range [3*GRID3, 9*GRID3) is implementation-specific to the source [S1, unofficial]
++        # For a general implementation, we check if C is ambiguous.
++        is_ambiguous = amb_chks[C]
++        
++        if not is_ambiguous:
++            # Fast 2D Search Path
++            # Compute occupancy pattern for 2D search
++            val_ = compute_occupancy_pattern(occs, p)
++            
++            # Apply ambiguity correction if needed (though non-ambiguous cases shouldn't need it, 
++            # the source applies it to a specific subset)
++            if amb_chks[val_]:
++                val_ = 15 - val_
++                
++            # Get axis directions
++            csidx = p // GRID3 - 3 # Simplified index mapping
++            axdir = axd_tab[csidx]
++            axis0 = ax0_tab[csidx]
++            axis1 = ax1_tab[csidx]
++            cases = cas_tab[csidx]
++            
++            # Perform 2D linear/binomial search
++            # This function is complex and depends on specific grid geometry
++            # We assume a helper function exists that returns vertex positions
++            new_verts = perform_2d_search(p, val_, cases, axis0, axis1, axdir, occs, ERR)
++            
++            # Add vertices to global list
++            start_idx = len(vertices)
++            vertices.extend(new_verts)
++            
++            # Add triangles
++            for i in range(0, 15, 3):
++                if tri_indices[i] == -1:
++                    break
++                v0 = tri_indices[i] + start_idx
++                v1 = tri_indices[i+1] + start_idx
++                v2 = tri_indices[i+2] + start_idx
++                triangles.append((v0, v1, v2))
++                
++        else:
++            # QEF Optimization Path
++            # Compute occupancy pattern
++            val_ = compute_occupancy_pattern(occs, p)
++            
++            # Solve QEF for ambiguous vertices
++            # The source specifies vertices 3 to 7 are optimized
++            new_verts = solve_qef_for_case(p, val_, C, qvntab, pfvtab, vitogi, cstrtab, ERR, QEF_REG)
++            
++            start_idx = len(vertices)
++            vertices.extend(new_verts)
++            
++            # Add triangles
++            for i in range(0, 15, 3):
++                if tri_indices[i] == -1:
++                    break
++                v0 = tri_indices[i] + start_idx
++                v1 = tri_indices[i+1] + start_idx
++                v2 = tri_indices[i+2] + start_idx
++                triangles.append((v0, v1, v2))
++                
++    return vertices, triangles
++
++def compute_occupancy_pattern(occs, p):
++    """Compute 8-bit occupancy pattern for voxel p."""
++    # Assuming p is a linear index, convert to 3D
++    x = p % Gx
++    y = (p // Gx) % Gy
++    z = p // (Gx * Gy)
++    
++    # Get 8 corner values
++    # Vertex ordering must match the LUT generation
++    corners = [
++        get_voxel_value(occs, x, y, z),
++        get_voxel_value(occs, x+1, y, z),
++        get_voxel_value(occs, x+1, y+1, z),
++        get_voxel_value(occs, x, y+1, z),
++        get_voxel_value(occs, x, y, z+1),
++        get_voxel_value(occs, x+1, y, z+1),
++        get_voxel_value(occs, x+1, y+1, z+1),
++        get_voxel_value(occs, x, y+1, z+1)
++    ]
++    
++    pattern = 0
++    for i, val in enumerate(corners):
++        if val > isovalue:
++            pattern |= (1 << i)
++    return pattern
++
++def solve_qef_for_case(p, val_, C, qvntab, pfvtab, vitogi, cstrtab, ERR, QEF_REG):
++    """Solve QEF for ambiguous vertices in voxel p."""
++    # Retrieve vertex indices involved in QEF
++    # qvntab maps (val_, C) to a list of vertex indices
++    v_indices = qvntab[(val_, C)]
++    
++    # Retrieve pre-computed coordinates and edge indices
++    # pfvtab maps (val0_, cas) to vertex coordinates and edge indices
++    vtcs, vitg = pfvtab[(val_, C)]
++    
++    # Compute 3D positions of surrounding vertices
++    # This requires converting linear index p to 3D and adding offsets
++    x, y, z = linear_to_3d(p)
++    
++    local_verts = []
++    for i in v_indices:
++        # Get edge indices for vertex i
++        edge_idx = vitogi[vtcs[i]]
++        
++        # Compute 3D position using grid offsets
++        # pnti = vitg[:,:,3]*GRID3 + (pid3[:,0]+vitg[:,:,0])*GRID2 + (pid3[:,1]+vitg[:,:,1])*GRID + (pid3[:,2]+vitg[:,:,2])
++        # Simplified:
++        base_pos = get_vertex_3d(x, y, z, edge_idx)
++        
++        # Retrieve pre-computed vertex positions
++        vert = get_global_vertex(base_pos)
+         
+         # Add local offsets
+-        vert = vert + vitg[:,:3]
+-        
+-        # Compute QEF normals
+-        _1vt = vert[:, 1::2]
+-        qnrm = cross(_1vt - vert[:, :-1:2], _1vt - vert[:, 2::2])
+-        cntr = mean(_1vt, dim=1)
+-        
+-        # Normalize normals
+-        leng = norm(qnrm, dim=1, keepdim=True)
+-        cndt = leng < ERR
+-        leng[cndt] = 1.0
+-        qnrm = qnrm / leng
+-        
+-        # Solve QEF
+-        A = cat([qnrm, QEF_REG * eye(qnrm.shape[1])], dim=0)
+-        b = cat([sum(_1vt * qnrm, dim=1, keepdim=True), QEF_REG * cntr], dim=0)
+-        qefr = lstsq(A, b).solution
+-        
+-        # Handle degenerate cases
+-        if all(cndt):
+-            qefr = cntr
+-            
+-        # Ray intersection
+-        cpnt = get_cell_center(pidx3[idx]) # Placeholder
+-        ctoq = qefr - cpnt
+-        leng = norm(ctoq, dim=1, keepdim=True)
+-        
+-        # Compute t
+-        # This part is complex and depends on cstrtab
+-        # Placeholder for the actual intersection logic
+-        t = compute_intersection_t(ctoq, cpnt, cstrtab, leng, SEP, ERR)
+-        
+-        # Final vertex
+-        final_vert = cpnt + t * ctoq
+-        vertices.append(final_vert)
+-        
+-    return vertices
++        local_vert = vert + vitg[i, :3]
++        local_verts.append(local_vert)
++        
++    # Compute QEF normals
++    if len(local_verts) < 2:
++        return local_verts
++        
++    _1vt = local_verts[1::2] # Every other vertex
++    # Cross product of edge vectors
++    # qnrm = cross(_1vt - vert[:, :-1:2], _1vt - vert[:, 2::2])
++    # This part is complex and depends on the specific vertex ordering
++    # We assume a helper function computes the QEF solution
++    qef_solution = solve_qef_system(local_verts, ERR, QEF_REG)
++    
++    # Compute ray intersection
++    cpnt = local_verts[0]
++    ctoq = qef_solution - cpnt
++    leng = norm(ctoq)
++    
++    # Compute intersection parameter t
++    t = compute_intersection_t(cpnt, ctoq, leng, cstrtab, ERR)
++    
++    # Final vertex
++    final_vert = cpnt + t * ctoq
++    
++    return [final_vert]
+ ```
+ 
+ ### Parameters
+-*   `ERR`: Epsilon for numerical stability, typically a small value like $10^{-6}$ [S1, unofficial].
+-*   `QEF_REG`: Regularization factor for QEF, typically a small value like $10^{-4}$ [S1, unofficial].
+-*   `SEP`: Separation constant for ray intersection, typically a small value like $10^{-3}$ [S1, unofficial].
+-*   `VERTICAL_RANGE`, `HORIZNTL_RANGE`: Ranges for the 2D search [S1, unofficial].
+-*   `VERTICAL_LINEAR_SEARCH`, `VERTICAL_BINARY_SEARCH`, `HORIZNTL_LINEAR_SEARCH`, `HORIZNTL_BINARY_SEARCH`: Flags to enable/disable linear or binary search steps [S1, unofficial].
++*   `ERR`: Threshold for degenerate edge lengths (e.g., $10^{-6}$) [S1, unofficial].
++*   `QEF_REG`: Regularization parameter for QEF least squares (e.g., $10^{-4}$) [S1, unofficial].
++*   `VERTICAL_RANGE`, `HORIZNTL_RANGE`: Search ranges for 2D linear/binomial search [S1, unofficial].
++*   `VERTICAL_LINEAR_SEARCH`, `HORIZNTL_LINEAR_SEARCH`, `VERTICAL_BINARY_SEARCH`, `HORIZNTL_BINARY_SEARCH`: Boolean flags controlling search strategy [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Degenerate Normals**: If all QEF normals are degenerate (zero length), the centroid is used instead [S1, unofficial].
+-*   **NaNs and Negative Values**: In ray intersection, NaNs and negative values for $t$ are handled by setting $t$ to $\text{leng} + \text{SEP}$ [S1, unofficial].
+-*   **Ambiguity Correction**: The ambiguity correction step is crucial for watertightness in ambiguous cases [S1, unofficial].
++*   **Degenerate Normals**: If all QEF normals are degenerate (zero length), the centroid is used as the vertex position [S1, unofficial].
++*   **NaNs and Negative Values**: Intersection parameters `t` that are NaN or negative are handled by setting `t` to `leng + SEP` and then clamping to $[0, 1]$ [S1, unofficial].
++*   **Ambiguity Consistency**: The method relies on the `amb_chks` table to correctly identify ambiguous cases. Inconsistent ambiguity resolution between adjacent voxels can still cause cracks if the QEF optimization does not enforce continuity [S1, unofficial].
+ 
+ ## Subtopics
+@@ -245,15 +267,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The method involves iterating over all cells and performing either a fast 2D search or a QEF optimization. The QEF optimization involves solving a least squares problem, which is more expensive than linear interpolation but still efficient for moderate grid sizes. The 2D search is faster but requires additional lookups and computations. Overall, the time complexity is $O(N)$ where $N$ is the number of cells, but with a higher constant factor for QEF cells [S1, unofficial].
+-*   **Memory Complexity**: The method requires storing occupancy arrays, ambiguity check arrays, and lookup tables. The size of these arrays is proportional to the grid size $G^3$. The QEF optimization also requires temporary storage for normals, centroids, and least squares solutions. Overall, the memory complexity is $O(G^3)$ [S1, unofficial].
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: The method scales linearly with the number of cells. However, the QEF optimization may become a bottleneck for very large grids due to the computational cost of solving the least squares problem [S1, unofficial].
+-*   **Strengths**: Produces watertight meshes with reduced artifacts in complex topologies compared to standard Marching Cubes [S1, unofficial]. The 2D search provides a fast alternative for non-ambiguous cases [S1, unofficial].
+-*   **Limitations**: More complex to implement than standard Marching Cubes. The QEF optimization may be slower than linear interpolation [S1, unofficial].
+-*   **When to use**: When high-quality watertight meshes are required, especially for complex topologies where standard Marching Cubes may produce artifacts [S1, unofficial].
+-*   **When not to use**: When performance is critical and the grid size is very large, or when the topological complexity is low and standard Marching Cubes is sufficient [S1, unofficial].
++*   **Time Complexity**: The method is $O(N)$ where $N$ is the number of voxels, but with a higher constant factor for ambiguous cases due to QEF solving. The 2D search for non-ambiguous cases is fast.
++*   **Memory Complexity**: Requires storage for the voxel grid, LUTs, and the output mesh. The QEF optimization requires additional temporary storage for the least-squares system.
++*   **Performance**: The QEF optimization is computationally expensive compared to standard linear interpolation. However, it is only applied to ambiguous cases, which are a small fraction of the total voxels. The 2D search for non-ambiguous cases is efficient [S1, unofficial].
++*   **Strengths**: Produces watertight meshes with fewer cracks and holes in ambiguous regions. Better geometric accuracy for complex topologies.
++*   **Limitations**: Higher computational cost for ambiguous cases. More complex implementation.
++*   **When to Use**: When geometric accuracy and watertightness are critical, especially in regions with complex topology or ambiguous cases.
++*   **When Not to Use**: When performance is the primary concern and the mesh does not require high geometric accuracy in ambiguous regions.
+ 
+ ## Background
+-The method originates from the ODC (Octree-based Dual Contouring) project by the KAIST Visual AI Group [S1, unofficial]. It combines the robustness of QEF minimization with the efficiency of 2D search to handle ambiguous cases in Marching Cubes. The QEM-based vertex relocation variant is described in a paper on generating smooth high-quality isosurfaces for interactive modeling and visualization of complex terrains [S2, unofficial].
++The method originates from the ODC (Octree-based Direct Conversion) project by the KAIST Visual AI Group [S1, unofficial]. It was developed to address the limitations of standard Marching Cubes in handling ambiguous cases, which can lead to topological errors and visual artifacts. The QEF optimization provides a more robust solution for these cases by minimizing the error function defined by the surrounding geometry. The QEM-based variant was proposed to improve performance on parallel hardware by reducing register usage [S2, unofficial].
+ 
+ ## Sources

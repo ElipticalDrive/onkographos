@@ -1,0 +1,144 @@
+# Light-weight 4D Gaussian Splatting (LGS)
+
+
+## Overview
+Light-weight 4D Gaussian Splatting (LGS) is a memory-efficient method for reconstructing and rendering dynamic scenes, specifically designed for surgical endoscopy [S1]. It addresses the high memory consumption and computational cost of standard 4D Gaussian Splatting by combining three compression techniques: Deformation-Aware Pruning (DAP), Gaussian-Attribute Pruning (GAP), and Feature Field Condensation (FFC) [S1]. Unlike [Explicit 4D Gaussian Splatting](14584-explicit-4d-gaussian-splatting.md) which stores full attributes, or [Gaussian Deformation Field (GauFRe)](15458-gaussian-deformation-field-gaufre.md) which uses a deformation network, LGS achieves compression by pruning redundant Gaussians and condensing the feature field resolution, maintaining real-time rendering speeds with significantly smaller model sizes [S1].
+
+## How it works
+LGS operates on a set of $N$ 3D Gaussians where attributes evolve over time $t \in [0, T]$ [14584-explicit-4d-gaussian-splatting.md][15458-gaussian-deformation-field-gaufre.md]. The method reduces memory usage through three sequential pruning/condensation steps, followed by a knowledge distillation optimization phase [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of initialized 3D Gaussians with temporal attributes (position $\mu$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients $C$, and feature field data) [S1].
+*   Ground truth images $I_{gt}(t)$ for a set of training timestamps $t$ [S1].
+*   A pre-trained, uncompressed "teacher" model [S1].
+
+**Outputs:**
+*   A compressed set of Gaussians and a condensed feature field capable of rendering high-quality dynamic scenes [S1].
+
+### Data Structures
+The core data structure remains the 3D Gaussian primitive, but its attribute storage is modified:
+1.  **Gaussian Attributes:** Standard parameters ($\mu, \Sigma, \alpha$) plus spherical harmonics (SH) coefficients. GAP reduces the dimensionality of SH coefficients in non-crucial areas [S1].
+2.  **Feature Field:** A 4D voxel grid representing spatial-temporal features. FFC reduces the resolution of this grid [S1].
+    *   Default resolution: $[16, 16, 16, 25]$ for axes $(x, y, z, t)$ [S1].
+3.  **Deformation MLP:** A tiny Multi-Layer Perceptron (MLP) $F$ used to preserve deformation calculation ability after feature field condensation [S1].
+
+### Steps
+
+1.  **Deformation-Aware Pruning (DAP):**
+    Prunes Gaussians based on their contribution to deformation. Gaussians with low impact on the scene's dynamic structure are removed to minimize redundancy [S1].
+    *   Parameters: Threshold $h = 0.5$, weight $\beta = 0.1$ [S1].
+
+2.  **Gaussian-Attribute Pruning (GAP):**
+    Prunes the dimensions of Gaussian attributes (specifically spherical harmonics) to simplify texture and lighting representation in non-crucial areas [S1].
+    *   Parameter: Threshold $h_{sh} = 2$ [S1].
+    *   Note: Without GAP, model size increases significantly (e.g., to 26.30MB on ENDONERF) and FPS drops (e.g., to 187.9), indicating GAP reduces Gaussian parameters by ~40% [S1].
+
+3.  **Feature Field Condensation (FFC):**
+    Reduces the resolution of the spatial-temporal feature field to tackle high-resolution redundancy [S1]. This is achieved via 3D adaptive pooling on each 4D voxel plane [S1].
+    *   The condensation preserves deformation calculation ability using a tiny MLP $F$ [S1].
+    *   The compressed feature value $E_{\Phi'}$ at indices $(i, j)$ is calculated from the original feature field $E_{\Phi}$ using Eq. 5:
+        $$
+        E_{\Phi'}(i, j) = \frac{1}{r_{\Phi1} r_{\Phi2}} \sum_{i'=i \cdot r_{\Phi1}}^{(i+1) \cdot r_{\Phi1}} \sum_{j'=j \cdot r_{\Phi2}}^{(j+1) \cdot r_{\Phi2}} E_{\Phi}(i', j')
+        $$
+        where $\Phi \in \{(x, y), (x, z), (y, z), (x, t), (y, t), (z, t)\}$ denotes the subplanes of the spatial-temporal feature field, and $r_{\Phi i}$ represents the compression rate on the $\Phi i$ axis [S1].
+
+4.  **Knowledge Distillation Optimization:**
+    The compressed "student" model is optimized to match the output of the uncompressed "teacher" model [S1].
+    *   The total loss $L$ is the sum of distillation loss $L_d$ and rendering loss $L_r$ [S1]:
+        $$
+        L = L_d + L_r
+        $$
+    *   Distillation Loss $L_d$: Mean squared error between teacher rendered image $\hat{I}_{tch}(t)$ and student rendered image $\hat{I}_{stu}(t)$ [S1]:
+        $$
+        L_d = \frac{1}{T} \sum_{t} \| \hat{I}_{tch}(t) - \hat{I}_{stu}(t) \|^2
+        $$
+    *   Rendering Loss $L_r$: Mean squared error between ground truth image $I_{gt}(t)$ and student rendered image $\hat{I}_{stu}(t)$ [S1]:
+        $$
+        L_r = \frac{1}{T} \sum_{t} \| I_{gt}(t) - \hat{I}_{stu}(t) \|^2
+        $$
+    *   $T$ is the number of training timestamps [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lgs_training(initial_gaussians, ground_truth_images, teacher_model, timestamps):
+    """
+    Implements the LGS training pipeline.
+    """
+    # Step 1: Deformation-Aware Pruning (DAP)
+    # Prunes Gaussians based on deformation contribution
+    # Parameters: h=0.5, beta=0.1
+    gaussians_dap = deformation_aware_pruning(initial_gaussians, h=0.5, beta=0.1)
+
+    # Step 2: Gaussian-Attribute Pruning (GAP)
+    # Prunes SH dimensions to simplify texture/lighting
+    # Parameter: h_sh=2
+    gaussians_pruned = gaussian_attribute_pruning(gaussians_dap, h_sh=2)
+
+    # Step 3: Feature Field Condensation (FFC)
+    # Condenses the 4D feature field resolution
+    # Default resolution: [16, 16, 16, 25]
+    feature_field = create_feature_field(gaussians_pruned, resolution=[16, 16, 16, 25])
+    
+    # Apply 3D adaptive pooling to condense the field
+    # Preserves deformation via tiny MLP F
+    condensed_field = feature_field_condensation(feature_field)
+    
+    # Initialize student model with pruned Gaussians and condensed field
+    student_model = StudentModel(gaussians_pruned, condensed_field)
+
+    # Step 4: Knowledge Distillation Optimization
+    optimizer = Adam(student_model.parameters())
+    
+    for epoch in range(max_epochs):
+        total_loss = 0
+        for t in timestamps:
+            # Render student image
+            img_stu = student_model.render(t)
+            
+            # Render teacher image (using pre-trained teacher)
+            img_tch = teacher_model.render(t)
+            
+            # Get ground truth
+            img_gt = ground_truth_images[t]
+            
+            # Calculate Losses
+            # L_d = MSE(img_tch, img_stu)
+            loss_d = mse_loss(img_tch, img_stu)
+            
+            # L_r = MSE(img_gt, img_stu)
+            loss_r = mse_loss(img_gt, img_stu)
+            
+            # L = L_d + L_r
+            loss = loss_d + loss_r
+            
+            total_loss += loss
+            
+            # Backpropagate
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+    return student_model
+```
+
+### Edge Cases and Pitfalls
+*   **Performance Degradation without GAP:** Removing GAP leads to a significant increase in model size (e.g., 26.30MB vs 25.00MB on ENDONERF) and a drop in FPS (187.9 vs 188.3), demonstrating that GAP is critical for reducing Gaussian parameters by ~40% and handling repetitive textures [S1].
+*   **Feature Field Resolution:** The resolution of the feature field must be carefully chosen. The default $[16, 16, 16, 25]$ is used to balance memory and quality [S1].
+*   **Distillation Dependency:** The method relies on a well-trained uncompressed teacher model. If the teacher is not well-trained, the student will inherit poor quality [S1].
+
+## Operating characteristics
+*   **Memory Efficiency:** LGS achieves significant compression compared to baseline 4D GS methods. On the ENDONERF dataset, it achieves a model size of 25.00MB, which is 15x smaller than EndoGaussian (334.5MB) [S1]. On the SCARED dataset, it achieves 20.40MB, 9x smaller than EndoGaussian (184.0MB) [S1].
+*   **Rendering Speed:** LGS maintains real-time rendering speeds. On ENDONERF, it achieves 188.3 FPS [S1]. On SCARED, it achieves 194.66 FPS [S1]. It is faster than EndoGaussian (by 21.8 FPS on ENDONERF) and EndoGS (by 87.9 FPS on ENDONERF) [S1].
+*   **Rendering Quality:** LGS maintains high quality with minimal loss. On ENDONERF, it achieves SSIM 0.963, PSNR 37.48, and LPIPS 0.068 [S1]. The quality difference compared to GS-based methods is negligible (0.3 lower PSNR and 0.05 lower SSIM on ENDONERF) [S1]. On SCARED, it achieves SSIM 0.826, PSNR 27.05, and LPIPS 0.297 [S1].
+*   **Strengths:** High memory efficiency (comparable to NeRF-based methods) while retaining the speed of Gaussian Splatting. Effective for dynamic surgical scenes with repetitive textures.
+*   **Limitations:** Requires a pre-trained teacher model for distillation. Performance is evaluated on specific surgical datasets (ENDONERF, SCARED); generalization to other dynamic scenes is not explicitly detailed in the sources [S1].
+
+## Background
+LGS was proposed by Liu et al. in the paper "LGS: A Light-Weight 4D Gaussian Splatting for Efficient Surgical Scene Reconstruction" [S1]. It was developed to address the challenges of rendering efficiency and memory efficiency in endoscopic surgical scene reconstruction [S1]. The method builds upon the principles of 4D Gaussian Splatting, extending them with specific compression techniques tailored for the constraints of surgical imaging [S1].
+
+## Sources
+[S1] LGS: A Light-Weight 4D Gaussian Splatting for Efficient Surgical Scene Reconstruction, https://doi.org/10.1007/978-3-031-72384-1_62, fetched 2026-10-27

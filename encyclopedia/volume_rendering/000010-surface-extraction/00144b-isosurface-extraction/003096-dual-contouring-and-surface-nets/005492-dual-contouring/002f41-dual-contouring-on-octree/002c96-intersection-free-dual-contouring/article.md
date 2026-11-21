@@ -1,0 +1,139 @@
+# Intersection-Free Dual Contouring
+
+Also called: DC No Inter, Dual Contouring Intersection-Free Algorithm, Ju et al. 2006, genContourNoInter2
+
+## Overview
+Intersection-Free Dual Contouring is a variant of Dual Contouring that ensures the resulting mesh is manifold and free of self-intersections by detecting intersecting triangles and performing local tessellation or vertex splitting [S2, unofficial]. It addresses the problem of self-intersecting triangles produced by the original Dual Contouring algorithm [S1, unofficial]. It sets itself apart from siblings like [Manifold Dual Contouring](2138-manifold-dual-contouring.md) by using explicit pairwise intersection tests and post-processing tessellation rather than modifying the underlying optimization or constraint formulation to inherently prevent intersections [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An octree structure representing the volume data, constructed with a `simplify_threshold` parameter (default -1, not set) [S1, unofficial].
+*   **Output:** A triangle mesh (`IndexedTriangleList` or `TriangleList`) that is free of self-intersections [S2, unofficial].
+
+**Data Structures:**
+*   `HashMap` / `HashMap2`: Used to track unique vertices and triangles during mesh generation to avoid duplicates and facilitate intersection checks [S2, unofficial].
+*   `IndexedTriangleList`: The container for the final output mesh [S2, unofficial].
+
+**Steps:**
+1.  **Check Flag:** Determine if the `nointer` flag is present in the execution arguments [S1, unofficial].
+2.  **Generate Contour:**
+    *   If `nointer` is present, call `genContourNoInter2` [S1, unofficial].
+    *   If `nointer` is not present, call the standard `genContour` [S1, unofficial].
+3.  **Intersection-Free Generation (`genContourNoInter2`):**
+    *   Initialize hash maps for vertex and triangle tracking [S2, unofficial].
+    *   Iterate through the octree leaves to generate dual vertices and constraints (as per parent method [Dual Contouring on Octree](4469-dual-contouring-on-octree.md)) [G].
+    *   Solve the least-squares system for each dual vertex to find the minimizer [S1, unofficial].
+    *   Generate triangles connecting the dual vertices with consistent outward winding [G].
+    *   **Intersection Testing:** Perform pairwise intersection tests on the generated triangles using `Intersection::testIntersection` [S2, unofficial].
+    *   **Resolution:** If intersections are detected, perform local tessellation or vertex splitting to resolve them [S2, unofficial].
+    *   Store non-intersecting triangles in the output list [S2, unofficial].
+4.  **Output:** Return the cleaned triangle list [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def genContourNoInter2(argv):
+    vertex_map = {}  # HashMap for unique vertices
+    triangle_list = []  # TriangleList for output
+    nointer = 'nointer' in argv  # Check flag [S1, unofficial]
+
+    if not nointer:
+        return genContour(argv)  # Fallback to standard method [S1, unofficial]
+
+    # Traverse octree leaves [G]
+    for leaf in octree.leaves:
+        # Collect constraints and normals from leaf neighbors [G]
+        constraints = []
+        normals = []
+        for neighbor in leaf.neighbors:
+            constraints.append(neighbor.plane_equation)
+            normals.append(neighbor.normal)
+
+        # Solve least-squares system to find dual vertex position [S1, unofficial]
+        # Uses QR decomposition or similar solver [G]
+        dual_vertex = solve_least_squares(constraints, normals)
+
+        # Project vertex to isosurface to prevent distance errors [G]
+        dual_vertex = project_to_surface(dual_vertex, leaf.grid_position)
+
+        # Generate triangles with consistent outward winding [G]
+        triangles = generate_triangles(leaf, dual_vertex)
+
+        # Check for intersections [S2, unofficial]
+        for tri in triangles:
+            is_intersecting = False
+            for existing_tri in triangle_list:
+                if test_intersection(tri, existing_tri):
+                    is_intersecting = True
+                    break
+
+            if is_intersecting:
+                # Resolve intersection via local tessellation or vertex splitting [S2, unofficial]
+                resolved = resolve_intersection(tri, triangle_list)
+                triangle_list.extend(resolved)
+            else:
+                triangle_list.append(tri)
+
+    return triangle_list
+
+def solve_least_squares(constraints, normals):
+    # Standard least-squares minimizer for hyperplane constraints [G]
+    A = [n for n in normals]
+    b = [-(c[0]*p[0] + c[1]*p[1] + c[2]*p[2] + c[3]) for c in constraints]
+    return numpy.linalg.lstsq(A, b, rcond=None)[0]
+
+def project_to_surface(vertex, grid_pos):
+    # Project dual vertex to the isosurface to ensure proximity [G]
+    return grid_pos + vertex
+
+def generate_triangles(leaf, dual_vertex):
+    # Generate triangles with consistent outward winding [G]
+    return [create_triangle(leaf, dual_vertex) for _ in range(leaf.face_count)]
+
+def test_intersection(tri1, tri2):
+    # Standard triangle-triangle intersection test [G]
+    return numpy.intersect_triangles(tri1, tri2)
+
+def resolve_intersection(tri, existing_list):
+    # Local tessellation or vertex splitting to remove self-intersection [S2, unofficial]
+    return split_triangle_into_non_intersecting(tri, existing_list)
+```
+
+**Parameters:**
+*   `simplify_threshold`: Controls the simplification threshold for octree construction. Default value is -1 (not set) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Performance:** Intersection testing is computationally expensive, especially for high-resolution meshes, as it involves pairwise comparisons [S2, unofficial].
+*   **Precision:** Numerical precision issues in intersection testing may lead to false positives or negatives, potentially leaving small self-intersections or removing valid geometry [G].
+*   **Boundary Handling:** Octree boundaries require special care to avoid missing triangles or creating non-manifold edges [G].
+
+## Subtopics
+
+### Manifold Dual Contouring
+Modifies the constraint system or topology during extraction to ensure manifoldness without post-processing intersection tests [2138-manifold-dual-contouring.md]. Choose when computational cost of intersection testing is prohibitive or strict manifold output is required without post-processing.
+
+### Adaptive Contouring via Octree Vertex Clustering
+Uses vertex clustering on an octree to adaptively refine the mesh, potentially reducing triangle count and intersection tests [2142-adaptive-contouring-via-octree-vertex-clustering.md]. Choose when adaptive resolution is needed.
+
+### Adaptive Dual Contouring
+Extends Dual Contouring with adaptive refinement based on error metrics [3664-adaptive-dual-contouring.md]. Choose when high-fidelity detail is needed in specific regions.
+
+### Kdtree-based Iso-surface Extraction
+Uses a k-d tree for efficient spatial queries, which may speed up intersection testing or neighbor lookups [3816-kdtree-based-iso-surface-extraction.md]. Choose when spatial indexing performance is critical.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Guarantees a mesh free of self-intersections, which is crucial for downstream applications like simulation or 3D printing [S2, unofficial].
+*   **Limitations:** High computational cost for intersection testing, especially on dense meshes [S2, unofficial].
+*   **When to Use:** When self-intersections are unacceptable and the mesh resolution is moderate enough for pairwise intersection testing to be feasible [S2, unofficial].
+*   **When Not to Use:** For very high-resolution meshes where intersection testing becomes prohibitively slow [S2, unofficial].
+
+## Background
+Intersection-Free Dual Contouring was introduced by Tao Ju in 2006, referenced as [Ju et al. 2006] [S1, unofficial]. It builds upon the original Dual Contouring algorithm by Ju et al. 2002 [S1, unofficial]. The method was developed to address the limitation of the original algorithm, which could produce self-intersecting triangles [S1, unofficial]. It is implemented in open-source repositories such as `aewallin/dualcontouring` and `ChessQian/DualContouring` [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] aewallin/dualcontouring, https://github.com/aewallin/dualcontouring, fetched 2026-10-26 (unofficial)
+[S2] ChessQian/DualContouring, https://github.com/ChessQian/DualContouring, fetched 2026-10-26 (unofficial)

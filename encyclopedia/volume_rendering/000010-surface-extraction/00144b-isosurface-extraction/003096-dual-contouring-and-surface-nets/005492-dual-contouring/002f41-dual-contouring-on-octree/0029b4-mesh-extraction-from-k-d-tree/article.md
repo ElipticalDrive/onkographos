@@ -1,0 +1,112 @@
+# Mesh Extraction from K-D Tree
+
+Also called: K-D Tree Contouring, Kdtree::extractMesh
+
+## Overview
+This method extracts a triangle mesh from a `RectilinearGrid` hierarchy by traversing the tree, generating vertex indices, and performing contouring operations on cells, faces, and edges [S1, unofficial]. It processes the grid nodes directly without requiring a separate uniform grid or octree build [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A `RectilinearGrid` tree, a scalar field $S$ defined on grid vertices, and a threshold value $T$ [S1, unofficial].
+*   **Output:** A `Mesh` object containing vertices and triangle indices [S1, unofficial].
+
+**Data Structures:**
+*   **GridHolder:** Represents a node in the hierarchy. Contains `grid` (bounding box with `minCode`, `maxCode`, and `vertices`), `children` (array of two pointers), `planeDir` (split plane normal), and `axis` (split dimension) [S1, unofficial].
+*   **FaceKd:** Represents the interface between two child subtrees [S1, unofficial].
+*   **PositionCode:** A structure storing grid coordinates used to index into the scalar field [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_mesh(grid_root, scalar_field, threshold):
+    mesh = Mesh()
+    traverse_and_add_vertices(grid_root, mesh)
+    contour_cell(grid_root, threshold)
+    return mesh
+
+def traverse_and_add_vertices(node, mesh):
+    if node is None:
+        return
+    if is_contouring_leaf(node):
+        for v in node.grid.vertices:
+            mesh.add_vertex(v)
+        return
+    traverse_and_add_vertices(node.children[0], mesh)
+    traverse_and_add_vertices(node.children[1], mesh)
+
+def contour_cell(node, threshold):
+    if node is None or is_contouring_leaf(node, threshold):
+        return
+    face_kd = FaceKd(node.children[0], node.children[1])
+    contour_face([node.children[0], node.children[1]], node.planeDir, node.axis())
+    contour_cell(node.children[0], threshold)
+    contour_cell(node.children[1], threshold)
+
+def contour_face(nodes, planeDir, dir):
+    if nodes[0] is None or nodes[1] is None:
+        return
+    if is_contouring_leaf(nodes[0]) and is_contouring_leaf(nodes[1]):
+        return
+    if not check_minial_face(nodes):
+        return
+    curr0, curr1 = nodes[0], nodes[1]
+    while curr0 is not None and curr1 is not None and not is_contouring_leaf(curr0) and not is_contouring_leaf(curr1) and curr0.axis() == dir and curr1.axis() == dir:
+        contour_face([curr0.children[0], curr0.children[1]], planeDir, dir)
+        # If node axis is within face bounds, construct line and call contour_edge
+        if axis_within_face_bounds(curr0, dir):
+            construct_line_and_contour_edge(curr0, dir)
+        curr0 = curr0.children[0]
+        curr1 = curr1.children[0]
+    if not is_contouring_leaf(curr0) and not is_contouring_leaf(curr1):
+        contour_face([curr0.children[0], curr0.children[1]], planeDir, dir)
+
+def check_sign(nodes, quadDir1, quadDir2, s, side, minEnd, maxEnd):
+    dir = 3 - quadDir1 - quadDir2
+    if nodes[0] != nodes[1]:
+        maxEnd = minEnd = nodes[0].grid.maxCode
+    else:
+        maxEnd = minEnd = nodes[3].grid.minCode
+    maxEnd[dir] = min(nodes[0].grid.maxCode[dir], nodes[1].grid.maxCode[dir],
+                      nodes[2].grid.maxCode[dir], nodes[3].grid.maxCode[dir])
+    minEnd[dir] = max(nodes[0].grid.minCode[dir], nodes[1].grid.minCode[dir],
+                      nodes[2].grid.minCode[dir], nodes[3].grid.minCode[dir])
+    if minEnd[dir] >= maxEnd[dir]:
+        return False
+    v1 = s.index(minEnd)
+    v2 = s.index(maxEnd)
+    if (v1 >= 0 and v2 >= 0) or (v1 < 0 and v2 < 0):
+        return False
+    side[0] = 0 if (v2 >= 0 and v1 <= 0) else 1
+    return True
+
+def generate_quad(nodes, quadDir1, quadDir2, mesh, t, threshold):
+    side = [0]
+    minEnd = PositionCode()
+    maxEnd = PositionCode()
+    if check_sign(nodes, quadDir1, quadDir2, t, side, minEnd, maxEnd):
+        mesh.add_quad(nodes, quadDir1, quadDir2, minEnd, maxEnd, side[0])
+```
+
+**Parameters:**
+*   `threshold`: The scalar value defining the isosurface [S1, unofficial].
+*   `unitSize`: A static float variable in `RectilinearGrid` representing voxel scaling [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Null Nodes:** The algorithm explicitly checks for null nodes in `contour_cell` and `contour_face` to prevent dereferencing errors [S1, unofficial].
+*   **Degenerate Intervals:** `check_sign` returns false when `minEnd[dir] >= maxEnd[dir]`, skipping invalid intersections [S1, unofficial].
+*   **Precision:** The sign check uses `v1 <= 0` and `v2 >= 0` boundaries, which handles zero-crossing cases explicitly [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Direct contouring on the grid hierarchy avoids intermediate resampling or global mesh generation [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+
+## Background
+This method originates from the `KdtreeISO` repository by Danielmelody [S1, unofficial]. It implements isosurface extraction directly on a `RectilinearGrid` structure without requiring a separate octree build [S1, unofficial].
+
+## Sources
+[S1] Danielmelody/KdtreeISO, https://github.com/Danielmelody/KdtreeISO, fetched 2026-10-27 (unofficial)

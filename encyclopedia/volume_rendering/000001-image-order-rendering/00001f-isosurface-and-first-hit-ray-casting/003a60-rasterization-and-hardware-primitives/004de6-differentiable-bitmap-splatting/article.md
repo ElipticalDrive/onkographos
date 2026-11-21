@@ -1,0 +1,172 @@
+# Differentiable Bitmap Splatting
+
+Also called: DiffBMP, DiffBMP Renderer, Differentiable Rendering with Bitmap Primitives
+
+## Overview
+Differentiable Bitmap Splatting (DiffBMP) is a scalable rendering engine for optimizing the position, rotation, scale, color, and opacity of thousands of bitmap primitives by computing exact gradients via custom CUDA kernels [S1, unofficial]. It distinguishes itself from vector-based differentiable renderers (e.g., DiffVG) by supporting raster image primitives and from prior bitmap methods by enabling full differentiability and parallel optimization of diverse, non-repetitive patterns [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of $N$ bitmap primitives. Each primitive $i$ has parameters: position $(x_i, y_i)$, scale $s_i$, rotation $\theta_i$, opacity logit $\nu_i$, and RGB color logit $\mathbf{c}_i \in \mathbb{R}^3$. Each primitive has an associated bitmap texture of size $H_i \times W_i$.
+*   **Outputs:** A rendered image $I(x,y)$ and gradients with respect to all primitive parameters.
+
+**Data Structures**
+*   **Primitive Parameters:** Stored in arrays for $x_i, y_i, s_i, \theta_i, \nu_i, \mathbf{c}_i$.
+*   **Textures:** Bitmap images sampled via bilinear interpolation.
+*   **Gradients:** Accumulated in packed `half2` buffers (two-channel FP16) to support atomic operations [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Tile Partitioning (CPU):** Partition the image plane into $T \times T$ tiles (default $T=32$). Assign each primitive to every tile whose bounding box on the image plane overlaps the tile region, with a small padding margin [S1, unofficial].
+2.  **Kernel Launch (GPU):** Launch one CUDA thread block per tile, with $T \times T$ threads, achieving pixel-level parallelism [S1, unofficial].
+3.  **Coordinate Transformation:** For each pixel $(x,y)$ and primitive $i$, compute normalized primitive coordinates $(u,v)$:
+    $$
+    \begin {bmatrix} u \\ v \end {bmatrix} = \begin {bmatrix} \cos \theta _i & \sin \theta _i \\ -\sin \theta _i & \cos \theta _i \end {bmatrix} \begin {bmatrix} (x-x_i)/s_i \\ (y-y_i)/s_i \end {bmatrix} \in [-1,1]^2
+    $$
+4.  **Bitmap Sampling:** Map $(u,v)$ to discrete bitmap coordinates $(U,V)$:
+    $$
+    \begin {bmatrix} U \\ V \end {bmatrix} = \begin {bmatrix} (u\!+\!1)/2 \cdot (W_i\!-\!1) \\ (v\!+\!1)/2 \cdot (H_i\!-\!1) \end {bmatrix} \in [0, W_i\!-\!1] \times [0, H_i\!-\!1]
+    $$
+    Since $U$ and $V$ are non-integer, compute the primitive contribution $M_i(x,y)$ via bilinear interpolation using the four nearest integer grid points $\{\lfloor U \rfloor, \lfloor U \rfloor+1\} \times \{\lfloor V \rfloor, \lfloor V \rfloor+1\}$ [S1, unofficial].
+5.  **Alpha Compositing:** Compute the alpha value for primitive $i$:
+    $$
+    \alpha _i(x,y) = \alpha _{\max } \cdot \sigma (\nu _i) \cdot M_i(x,y)
+    $$
+    where $\sigma$ is the sigmoid function and $\alpha_{\max} \in (0, 1]$ is a hyperparameter [S1, unofficial].
+6.  **Final Rendering:** Compute transmittance $T_k(x,y)$ and final color $I(x,y)$ using Porter-Duff over compositing:
+    $$
+    T_k(x,y) = \prod _{j=0}^{k-1}(1 - \alpha _j(x,y))
+    $$
+    $$
+    I(x,y) = \sum _{k=0}^{N-1} T_k(x,y) \alpha _k(x,y) \sigma (\mathbf{c}_k) \in [0,1]^3
+    $$
+    Primitives are composited in front-to-back order [S1, unofficial].
+7.  **Backward Pass:** Accumulate per-parameter gradients per pixel directly into packed `half2` buffers via `half2` `atomicAdd` over two-channel gradient groups. A lightweight post-pass unpacks these to legacy FP16 arrays [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Forward Pass (CUDA Kernel per Tile)
+def diffbmp_forward(tile_primitives, tile_pixels, textures, alpha_max):
+    # tile_primitives: list of primitives overlapping this tile
+    # tile_pixels: list of (x, y) coordinates in this tile
+    # textures: dict mapping primitive_id to bitmap array
+    
+    # Shared memory staging of primitive parameters would occur here
+    # For each pixel in the tile:
+    for (x, y) in tile_pixels:
+        # Initialize transmittance and color
+        T = 1.0
+        I = (0.0, 0.0, 0.0)
+        
+        # Composite primitives in front-to-back order
+        for prim in tile_primitives:
+            i = prim.id
+            
+            # 1. Coordinate Transformation
+            # Normalize pixel relative to primitive center and scale
+            dx = (x - prim.x) / prim.s
+            dy = (y - prim.y) / prim.s
+            
+            # Apply rotation
+            cos_t = cos(prim.theta)
+            sin_t = sin(prim.theta)
+            u = cos_t * dx + sin_t * dy
+            v = -sin_t * dx + cos_t * dy
+            
+            # 2. Bitmap Sampling (Bilinear Interpolation)
+            # Map to texture coordinates [0, W-1] x [0, H-1]
+            U = (u + 1) / 2 * (prim.W - 1)
+            V = (v + 1) / 2 * (prim.H - 1)
+            
+            # Get 4 nearest integer grid points
+            u0, v0 = floor(U), floor(V)
+            u1, v1 = u0 + 1, v0 + 1
+            
+            # Clamp to texture bounds [0, W-1], [0, H-1]
+            u0 = clamp(u0, 0, prim.W - 1)
+            u1 = clamp(u1, 0, prim.W - 1)
+            v0 = clamp(v0, 0, prim.H - 1)
+            v1 = clamp(v1, 0, prim.H - 1)
+            
+            # Fetch texture values
+            val_00 = textures[i][v0, u0]
+            val_10 = textures[i][v0, u1]
+            val_01 = textures[i][v1, u0]
+            val_11 = textures[i][v1, u1]
+            
+            # Bilinear interpolation weights
+            w_u = U - u0
+            w_v = V - v0
+            
+            # Interpolate
+            val_top = lerp(val_00, val_10, w_u)
+            val_bot = lerp(val_01, val_11, w_u)
+            M_i = lerp(val_top, val_bot, w_v)
+            
+            # 3. Alpha Compositing
+            alpha_i = alpha_max * sigmoid(prim.nu) * M_i
+            
+            # 4. Porter-Duff Over
+            color_i = sigmoid(prim.c) # RGB color logit to value
+            I = I + T * alpha_i * color_i
+            T = T * (1 - alpha_i)
+            
+            # Early exit if T is negligible
+            if T < 1e-6:
+                break
+                
+        return I
+
+# Backward Pass (Gradient Accumulation)
+def diffbmp_backward(tile_primitives, tile_pixels, textures, alpha_max, dI_dx, dI_dy):
+    # Gradients are accumulated into packed half2 buffers
+    # This requires computing d(alpha_i)/d(params) and d(I)/d(alpha_i)
+    # The paper specifies using half2 atomicAdd for efficiency
+    
+    for (x, y) in tile_pixels:
+        # Compute forward values first (or cache them)
+        # ... (same forward logic) ...
+        
+        # Compute gradients of I w.r.t alpha_k and T_k
+        # dI/d(alpha_k) = T_k * color_k
+        # dT/d(alpha_k) = -T_k (since T_{k+1} = T_k * (1-alpha_k))
+        
+        # Chain rule to get gradients for position, rotation, scale, nu, c
+        # dI/d(param) = sum_k ( dI/d(alpha_k) * d(alpha_k)/d(param) )
+        
+        # Accumulate into half2 buffers
+        # Example for position x_i:
+        # d(alpha_i)/d(x_i) involves derivative of u,v w.r.t x_i
+        # u = cos(t)*(x-x_i)/s => du/dx_i = -cos(t)/s
+        # v = -sin(t)*(x-x_i)/s => dv/dx_i = sin(t)/s
+        # dM_i/d(x_i) via bilinear interpolation gradients
+        
+        # atomicAdd(grad_buffer_x_i, dI/dx_i)
+        # atomicAdd(grad_buffer_y_i, dI/dy_i)
+        # ... etc for other parameters
+        pass
+```
+
+**Parameters**
+*   $T$: Tile size for partitioning the image plane on the CPU. Default value is 32 [S1, unofficial].
+*   $\alpha_{\max}$: Maximum alpha scaling factor. Hyperparameter in $(0, 1]$ [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Non-integer Coordinates:** $U$ and $V$ are almost surely non-integer, requiring bilinear interpolation for differentiable sampling [S1, unofficial].
+*   **Precision:** Texture fetches and per-pixel temporaries use FP16 (packed as `half2` where profitable). Accumulation of displayed color/transmittance is evaluated in FP16 arithmetic [S1, unofficial].
+*   **Export Limitations:** Atomic operations used in optimization kernels are unsuitable for generating layered PSD files. A dedicated export kernel using primitive-level parallelism is required for final high-resolution, editable layer export [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method is highly parallelized, with one CUDA thread block per tile. Optimization of thousands of primitives can be completed in under 1 minute on a consumer GPU [S1, unofficial].
+*   **Memory Complexity:** Uses FP16 arithmetic tailored to packed data paths, reducing bandwidth and VRAM usage [S1, unofficial].
+*   **Strengths:** Scalable to thousands of primitives; supports diverse bitmap patterns (not just repetitive/opaque); enables end-to-end differentiable optimization of spatial and color parameters [S1, unofficial].
+*   **Limitations:** Requires custom CUDA implementation for efficiency; prior bitmap methods lacked specialized parallelism [S1, unofficial]. Atomic operations prevent direct layered export during optimization [S1, unofficial].
+*   **When to Use:** When optimizing raster image compositions (e.g., painterly effects, assemblage) where vector graphics are insufficient [S1, unofficial].
+*   **When Not to Use:** When layered, editable output (PSD/SVG) is needed directly from the optimization pass without a separate export kernel [S1, unofficial].
+
+## Background
+DiffBMP was introduced to address the limitation that traditional differentiable renderers are constrained to vector graphics, despite most images being bitmaps [S1, unofficial]. It builds on Spatial Transformer Networks [17] and prior bitmap pattern methods [43], which were limited to repetitive, opaque patterns and lacked specialized parallelism [S1, unofficial]. The method was developed to integrate into creative workflows, supporting export to native layered file formats [S1, unofficial].
+
+## Sources
+[S1] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,103 @@
+A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.8 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes. - G63: Marching Cubes seam jobs read their participants in place by draquel · Pull Request #149 · draquel/VoxelWorlds
+
+G63: Marching Cubes seam jobs read their participants in place by draquel · Pull Request #149 · draquel/VoxelWorlds · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+draquel
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+World modes review G63 (WORLD_MODES_REVIEW_PLAN.md §20.29): Marching Cubes seam jobs cost about 23 times Dual Contouring's (7.7 ms a job on Review_Planet_L).
+Cause (traced)
+Per-stage timers in the MC seam mesher (voxel.Seam.MCStats), voxel.RemeshAll on MC duplicates of Review_Planet_L (45°N 20°E) and DemoSmoothWorldConfig (64³ chunks):
+Stage
+Review_Planet_L MC
+VoxelDemo MC
+Setup: the frame's whole volume copied (1 MB)
+25.5-28.0%
+27.9-28.1%
+Fill: neighbours' planes, edge grids, corner boxes gathered
+66.7-69.1%
+67.7-67.9%
+Band cells (ProcessCubeLOD)
+4.5-4.8%
+3.5-3.7%
+Each participant frame got a synthetic request: a face job copied two volumes, an edge job four, a corner job eight, to mesh one cell layer. The plane gathers are strided (a cache line per voxel), and the edge/corner deep grids are DC's: MC never reads them.
+Fix
+FVoxelMeshingRequest::VolumeViews (27 pointers by neighbour direction, read only by the CPU MC mesher): seam frames point at the participants' snapshots instead of copying them.
+GetVoxelAt reads a neighbour exactly as the copy held it (face planes to NeighborPlaneDepth with NeighborPlaneVoxel's clamp, edge strips and the corner one voxel deep); IsVoxelHeld and HasRequiredNeighborData test the views. Seam geometry is bit-identical.
+voxel.Seam.MCReadInPlace (1; 0 = the copies as before), voxel.Seam.MCStats [reset], FVoxelCPUMarchingCubesMesher::GetSeamJobStats.
+GPU MC has no seam path; DC and cubic code untouched. MC chunk meshes gain one pointer test per voxel read (a headless 64³ benchmark: within the run-to-run spread).
+Tests
+VoxelWorlds.Meshing.MarchingCubes.SeamClosure.MCS4_ReadInPlace: every face/edge/corner job at LOD 0/1/2 and three mixed-LOD sets, plane and planet-tilted up, copied vs in place: 84 of 84 bit-identical.
+VoxelWorlds.Streaming.{Planet,Plane}.MCSeamReadInPlace: MC worlds streamed with LOD 0/1/2, moved, settled; every chunk mesh and seam bucket the same bit for bit.
+Six suites: VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon 618/618 headless and 618/618 in the editor (GPU tests running, none skipped); the 114 GPU parity lines identical to main's; all 31 Meshing.MarchingCubes.* pass.
+A/B (one session, three runs per rule)
+Copied (0)
+In place (1)
+Review_Planet_L MC, voxel.RemeshAll seam worker
+34.1-37.5 s (5.98-6.57 ms a job)
+1.0-1.2 s (0.18-0.21 ms)
+VoxelDemo MC, voxel.RemeshAll seam worker
+44.1-46.0 s (8.34-8.69 ms)
+0.94-0.96 s (0.18 ms)
+Review_Planet_L MC great circle: frame P95 / manager P95 / catch-up
+73-98 ms / 19-25 ms / 2.7-4.1 s
+34-36 ms / 10-11 ms / 1.1-1.3 s
+VoxelDemo MC bench: frame P95 / manager P95 / catch-up
+71-75 ms / 17-19 ms / 0.8-1.4 s
+33-38 ms / 9-10 ms / 0.2 s
+Another session's editor ran on the machine throughout, so absolute times carry its load. DC VoxelDemo by the same cvar: within its own spread.
+Not to be merged without the user's go-ahead. The parent repo PR (draquel/UE5_PluginDev) points its gitlink at this branch.
+🤖 Generated with Claude Code
+G63: Marching Cubes seam jobs read their participants in place
+…
+84eaeda
+```
+Every MC seam frame built a synthetic request: InitFrameRequest copied the
+frame's whole volume (1 MB at 64^3) and FillFacePlanes / FillEdgeStrip /
+FillCorner gathered the neighbours' planes, edge grids and corner boxes
+(strided reads; the deep grids are Dual Contouring's, MC never reads them).
+A face job copied two volumes, an edge job four, a corner job eight, to mesh
+one cell layer. Traced with per-stage timers (voxel.Seam.MCStats): on MC
+Review_Planet_L at 45N 20E after voxel.RemeshAll the fill was 67-69% and the
+volume copies 26-28% of the seam worker time, the band cells 4-5%.
+
+Now each frame reads the participants' snapshots in place
+(FVoxelMeshingRequest::VolumeViews, read only by the CPU MC mesher):
+GetVoxelAt reads a neighbour as the copy held it (face planes to
+NeighborPlaneDepth with NeighborPlaneVoxel's clamp, edge strips and the
+corner one voxel deep), IsVoxelHeld and HasRequiredNeighborData test the
+views. voxel.Seam.MCReadInPlace (1; 0 = the copies as before).
+
+voxel.RemeshAll A/B (three runs per rule): Review_Planet_L MC seam worker
+34.1-37.5 s -> 1.0-1.2 s (5.98-6.57 -> 0.18-0.21 ms a job), VoxelDemo MC
+44.1-46.0 -> 0.94-0.96 s; the same triangles. Tests
+Meshing.MarchingCubes.SeamClosure.MCS4_ReadInPlace and
+Streaming.{Planet,Plane}.MCSeamReadInPlace: every seam mesh bit-identical.
+Docs: WORLD_MODES_REVIEW_PLAN.md section 20.29, G63's rows fixed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+draquel
+merged commit 65856b8
+into
+main
+Oct 24, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

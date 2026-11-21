@@ -1,0 +1,122 @@
+--- v012.md
++++ v013.md
+@@ -1,88 +1,81 @@
+ # Gaussian Representation and Truncation
+ 
+-Also called: Gaussian Splatting Primitives, 3D Gaussian Primitives, Gaussian Kernel Functions
++Also called: 3D Gaussian Primitives, Gaussian Splats, 3DGS Representation
+ 
+ ## Overview
+-This article defines the fundamental data structures, mathematical representation, and rendering pipeline for 3D Gaussian Splatting (3DGS) primitives, which serve as the basis for the methods in this family. It solves the problem of how to represent a continuous radiance field using discrete, differentiable volumetric primitives that can be efficiently rasterized. It sets apart from sibling methods by providing the standard, unmodified Gaussian kernel and truncation logic; siblings like [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md) or [Opacity-Independent Gaussian Truncation](10266-opacity-independent-gaussian-truncation.md) modify these core definitions to address specific artifacts or efficiency issues.
++This family defines the fundamental data structure and rendering pipeline for 3D Gaussian Splatting (3DGS), representing scenes as a set of learnable 3D Gaussian primitives. It solves the problem of efficient, high-fidelity novel view synthesis by replacing implicit neural fields or explicit polygon meshes with differentiable volumetric splats that can be rasterized in real-time. It differs from [Mesh Extraction and Representation](14095-mesh-extraction-and-representation.md) by focusing on the raw primitive representation and rendering mechanics rather than post-hoc geometric surface extraction, and from [3D Gaussian Splatting](52-3d-gaussian-splatting.md) by detailing the specific parameterization, projection, and truncation logic that enables the optimization.
+ 
+ ## Shared principles
+-All methods in this family operate on a set of $N$ 3D Gaussian primitives. Each primitive $i$ is defined by a set of learnable parameters that describe its geometry, appearance, and position in 3D space.
++All methods in this family operate on a set of $N$ 3D Gaussian primitives. Each primitive $i$ is defined by learnable parameters describing its geometry, appearance, and position.
+ 
+ **Data Structure:**
+ Each Gaussian $g_i$ is represented by the following attributes [S1]:
+-*   **Position ($\mu_i$):** A 3D vector $\mathbb{R}^3$ representing the centroid of the Gaussian in world space.
+-*   **Rotation ($q_i$):** A unit quaternion $\mathbb{R}^4$ representing the orientation of the Gaussian.
+-*   **Scale ($s_i$):** A 3D vector $\mathbb{R}^3$ representing the anisotropic scaling factors along the principal axes.
+-*   **Opacity ($\omega_i$):** A scalar $\mathbb{R}$ in the range $[0, 1]$ representing the maximum opacity of the primitive.
+-*   **Color ($c_i$):** Represented by Spherical Harmonic (SH) coefficients, typically degree 3 (48 coefficients for RGB), allowing for view-dependent color appearance.
++*   **Position ($\mu_i$):** A 3D vector $\mathbb{R}^3$ representing the centroid in world space.
++*   **Rotation ($q_i$):** A unit quaternion $\mathbb{R}^4$ representing orientation.
++*   **Scale ($s_i$):** A 3D vector $\mathbb{R}^3$ representing anisotropic scaling factors along principal axes.
++*   **Opacity ($\omega_i$):** A scalar $\mathbb{R} \in [0, 1]$ representing maximum opacity.
++*   **Color ($c_i$):** Represented by Spherical Harmonic (SH) coefficients (typically degree 3, 48 coefficients for RGB) for view-dependent appearance.
+ 
+ **Covariance Matrix:**
+-The spatial spread of the Gaussian is defined by a 3D covariance matrix $\Sigma_i$. It is constructed from the scale and rotation parameters:
++The spatial spread is defined by a 3D covariance matrix $\Sigma_i$, constructed from scale and rotation:
+ $$ \Sigma_i = R_i S_i S_i^T R_i^T $$
+-where $S_i = \text{diag}(s_i)$ is the scaling matrix and $R_i$ is the rotation matrix derived from the quaternion $q_i$ [S1].
++where $S_i = \text{diag}(s_i)$ is the scaling matrix and $R_i$ is the rotation matrix derived from $q_i$ [S1].
+ 
+ **Projection to 2D:**
+-During rendering, each 3D Gaussian is projected onto the 2D image plane of the camera. Let $J$ be the Jacobian of the affine approximation of the projective transformation from world space to camera space. The 3D covariance $\Sigma_i$ is projected to 2D using:
++During rendering, the 3D covariance $\Sigma_i$ is projected to the 2D image plane using the Jacobian $J$ of the affine approximation of the projective transformation:
+ $$ \Sigma' = J \Sigma_i J^T $$
+ The relevant part for rasterization is the top-left $2 \times 2$ submatrix $\Sigma'_{2 \times 2}$ [S1].
+ 
+ **Spatial Response (Kernel Function):**
+-The contribution of a Gaussian to a pixel at screen coordinates $x$ is determined by its spatial response $R(x)$, which follows a Gaussian kernel:
++The contribution of a Gaussian to a pixel at screen coordinates $x$ is determined by:
+ $$ R(x) = \exp\left(-\frac{1}{2} (x - \mu')^T (\Sigma'_{2 \times 2})^{-1} (x - \mu')\right) $$
+ where $\mu'$ is the projected 2D mean [S1].
+ 
+ **Alpha Compositing:**
+-The final opacity $\alpha$ contributed by a Gaussian to a pixel is the product of its learned opacity $\omega_i$ and the spatial response $R(x)$:
++The final opacity $\alpha$ contributed by a Gaussian is:
+ $$ \alpha = \omega_i \cdot R(x) $$
+-The color $C$ is evaluated using the SH coefficients based on the view direction. The pixel color is computed via alpha blending:
++The pixel color is computed via alpha blending with primitives sorted back-to-front:
+ $$ C_{pixel} = \sum_i T_i \alpha_i C_i, \quad T_i = \prod_{j < i} (1 - \alpha_j) $$
+-where primitives are sorted back-to-front [S1].
++where $C_i$ is evaluated using SH coefficients based on view direction [S1].
+ 
+ **Truncation:**
+-To optimize rendering speed, Gaussians are truncated when their spatial response falls below a threshold. In the standard implementation, the fragment is discarded if the final alpha $\alpha < \tau_\alpha$ (typically $1/255$) [S1]. This effectively limits the rendering to a region of approximately $3.33\sigma$ for typical opacities.
++To optimize speed, fragments are discarded if $\alpha < \tau_\alpha$ (typically $1/255$), limiting rendering to a region of approximately $3.33\sigma$ [S1].
++
++**Density Estimation for Mesh Extraction:**
++The scene density $\sigma(\mathbf{x})$ is the superposition of Gaussian contributions:
++$$ \sigma(\mathbf{x}) = \sum_{i=1}^{N} \alpha_i \exp\left(-\frac{1}{2} (\mathbf{x} - \mathbf{p}_i)^T \Sigma_i^{-1} (\mathbf{x} - \mathbf{p}_i)\right) $$
++where $\alpha_i$ is opacity, $\mathbf{p}_i$ is the mean, and $\Sigma_i$ is the covariance [S1].
+ 
+ ## Subtopics
+ 
+ ### [Inverse Multiquadric Splatting](9910-inverse-multiquadric-splatting.md)
+-Replaces the Gaussian kernel with an inverse multiquadric function to provide a slower decay tail, reducing artifacts in high-opacity regions. It differs from standard truncation by altering the kernel shape rather than the culling threshold.
++Replaces the Gaussian kernel with an inverse multiquadric function to reduce artifacts and stabilize gradients in high-opacity regions.
+ 
+ ### [Opacity-Independent Gaussian Truncation](10266-opacity-independent-gaussian-truncation.md)
+-Decouples the truncation threshold from the primitive's opacity by checking the spatial response $R$ against the threshold before multiplying by $\omega$. This allows for aggressive truncation (e.g., $1\sigma$) without losing low-opacity primitives.
++Decouples the spatial truncation threshold from the primitive's opacity, allowing consistent aggressive culling regardless of $\omega_i$.
+ 
+ ### [Content-Aware Texturing for Gaussian Splatting](12606-content-aware-texturing-for-gaussian-splatting.md)
+-Augments 2D Gaussians with spatially varying texture maps to add offsets to SH colors. It decouples texture resolution from geometry via world-space fixed texel sizing and uses splitting instead of cloning.
++Augments primitives with spatially varying texture maps and dynamic resolution management to capture high-frequency details.
+ 
+ ### [Directed Distance Field (DDF) for Gaussian Splatting](12854-directed-distance-field-ddf-for-gaussian-splatting.md)
+-Uses a neural implicit representation (hash grid + MLP) to provide constant-time ray queries for distance and visibility, enabling global illumination without BVH traversal.
++Uses a neural implicit field to provide constant-time ray queries for geometry, bypassing iterative Gaussian traversal.
+ 
+ ### [Atomized Proliferation](12924-atomized-proliferation.md)
+-Constrains fine-detail Gaussians into isotropic "Atom Gaussians" with fixed scales and prioritizes their proliferation. It merges large smooth surfaces to improve geometric precision and reduce noise.
++Constrains fine-detail Gaussians into uniform "Atom Gaussians" and merges smooth surfaces to improve geometric precision and training stability.
+ 
+ ### [Voxel-based Gaussian Splatting](13071-voxel-based-gaussian-splatting.md)
+-Fixes Gaussian positions to a regular 3D grid and removes view-dependent color, optimizing opacity, scale, and rotation from transformer tokens for efficient CT extraction.
++Fixes Gaussian positions to a regular grid and removes view-dependent color for stable differentiable X-ray rendering from sparse projections.
+ 
+ ### [Gaussian Voxel Kernel Functions (GVKF)](13979-gaussian-voxel-kernel-functions-gvkf.md)
+-Replaces discrete opacity values with Gaussian kernel functions decoded from shared feature vectors in a sparse voxel grid, enabling direct mesh extraction and reduced memory usage.
++Replaces discrete opacity with Gaussian kernel functions decoded from shared feature vectors in a sparse voxel grid to reduce memory and improve surface continuity.
+ 
+ ### [3D Gaussian Particle Approximation of VDB Datasets](14723-3d-gaussian-particle-approximation-of-vdb-datasets.md)
+-Converts OpenVDB volumetric datasets into non-overlapping 3D Gaussian particles with axis-aligned covariances, accelerated via NVIDIA OptiX for real-time sparse volume rendering.
++Converts OpenVDB volumes into non-overlapping Gaussian particles with LOD support for memory-efficient rendering of sparse volumetric data.
+ 
+ ### [Pruning and Reduction](14909-pruning-and-reduction.md)
+-Decreases the number of primitives to improve efficiency. Includes variants like POG, AtomGS, View-Dependent Opacity Kernel, and GS-IR.
+-
+-#### POG (Potentially Over-large Gaussians)
+-POG identifies and grows Gaussians in areas with high positional gradients. Ablation results show POG yields PSNR 26.26, SSIM 0.879, LPIPS 0.121 on Tanks&Temples, but degrades PSNR compared to Hard Gaussians (HG) which yields PSNR 26.36, SSIM 0.880, LPIPS 0.126. POG overgrows learned areas, causing redundancy [S1].
+-
+-#### AtomGS
+-AtomGS constrains ellipsoid Gaussians into uniformly-sized Atom Gaussians with a progressive split schedule. It retains larger anisotropic Gaussians for backgrounds and uses an Edge-Aware Normal Loss to smooth flat surfaces while preserving details. It merges Gaussians covering large surfaces during pruning, reducing count while maintaining quality [S2, unofficial].
+-
+-#### View-Dependent Opacity Kernel
+-Models opacity as a half-period cosine function to approximate specular reflectance lobes. The formula is $\hat{\alpha}(\theta, \beta, T, \alpha) = \alpha \cdot \frac{\cos(\max(0, \min(\frac{2\theta}{T}, \pi)))+1}{2}\exp(\beta)$, where $\theta$ is the angle between view direction and lobe orientation, $T$ controls span, and $\beta$ modulates sharpness. It adds 5 learnable parameters per Gaussian [S3, unofficial].
+-
+-#### GS-IR Representation
+-Extends vanilla 3DGS by adding a normal vector $n$ to geometric properties $T=\{p, s, q, n\}$ and material properties $M=\{a, \rho, m\}$ (albedo, roughness, metallicity) to appearance parameters $A=\{\alpha, f_c\}$. It enables inverse rendering by decomposing color into material and lighting components [S4].
++Decreases the number of primitives to improve efficiency and mitigate overfitting by evaluating geometric redundancy and spatial importance.
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1]. It emerged as a real-time alternative to Neural Radiance Fields (NeRFs), leveraging the efficiency of rasterization and the differentiability of Gaussian kernels. The method has since become a foundational representation for various extensions in novel view synthesis, geometry reconstruction, and inverse rendering.
++The 3D Gaussian Splatting representation was introduced by Kerbl et al. in "A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Static Scenes" (2023) [S1]. It emerged as a solution to the computational bottlenecks of neural radiance fields (NeRFs), offering real-time rendering speeds by leveraging differentiable rasterization of Gaussian primitives. The method has since become a standard baseline for novel view synthesis, with numerous extensions focusing on optimization efficiency, geometric accuracy, and specialized applications like medical imaging and inverse rendering.
+ 
+ ## Sources

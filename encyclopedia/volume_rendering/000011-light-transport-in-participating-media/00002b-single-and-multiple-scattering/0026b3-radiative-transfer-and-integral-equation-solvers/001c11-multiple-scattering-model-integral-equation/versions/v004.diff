@@ -1,0 +1,355 @@
+--- v003.md
++++ v004.md
+@@ -1,226 +1,196 @@
+ # Multiple Scattering Model (Integral Equation)
++
+ Also called: General integral equation for radiation transport, Radiation transport integral equation, Transport Theory Illumination Model
+ 
+ ## Overview
+-The Multiple Scattering Model (Integral Equation) is a physically based illumination model that computes the radiance arriving at a pixel by integrating the contributions of light undergoing multiple scattering events along a ray through a participating medium [S2, book]. It solves for the directional intensity $I(\mathbf{X}, \boldsymbol{\omega})$ by accounting for emission, absorption, and the redirection of light from all possible incoming directions [S1, unofficial]. Unlike single-scattering approximations, this model captures the complex interplay of light bounces, making it suitable for dense or high-albedo media where single-bounce assumptions fail [S1, unofficial][S2, book]. It is distinguished from its siblings by its formulation as a Fredholm integral equation of the second kind, where the unknown intensity appears on both sides of the equation, necessitating iterative solvers, spherical harmonic expansions, or stochastic sampling rather than direct evaluation [S1, unofficial][S2, book].
++The Multiple Scattering Model (Integral Equation) is a physically based illumination model that computes the radiance arriving at a pixel by integrating the contributions of light along a ray, explicitly accounting for emission, absorption, and multiple scattering events within a participating medium [S2, book]. It solves for the directional intensity $I(X, \omega)$ at every point $X$ and direction $\omega$ by treating the in-scattering term as a source that depends on the unknown intensity itself, resulting in a Fredholm integral equation of the second kind [S1, unofficial]. Unlike single-scattering approximations or differential solvers that may neglect angular complexity, this model provides the exact formal solution to the radiative transfer problem, serving as the foundational reference against which approximations like the Diffusion Approximation or Monte Carlo methods are compared [S1, unofficial][S2, book].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** Ray origin $\mathbf{X}$, ray direction $\boldsymbol{\omega}$, medium properties (extinction $\sigma_t$, scattering $\sigma_s$, absorption $\sigma_a$, emission $e$, phase function $r$ or $\rho_{sc}$), and external illumination $I_0$ at the volume boundary.
+-*   **Output:** Radiance $I(\mathbf{X}, \boldsymbol{\omega})$ at the ray origin.
++*   **Inputs:**
++    *   Ray origin $X$ and direction $\omega$ (unit vector).
++    *   Ray length $D$ (distance to the far clip plane or volume boundary).
++    *   Extinction coefficient $\tau(X)$ (or $\sigma_t(X) = \sigma_a(X) + \sigma_{sc}(X)$) [S1, unofficial][S2, book].
++    *   Scattering phase function $r(X, \omega, \omega')$ (or $\rho_{sc}(\omega' \to \omega)$), defining the probability of scattering from direction $\omega'$ to $\omega$ [S1, unofficial][S2, book].
++    *   Emission coefficient $e(X)$ (or $E(t)$), representing non-directional glow or black-body thermal radiation [S1, unofficial][S2, book].
++    *   External illumination $I_0(X + D\omega, \omega)$, the radiance entering the volume from the background or light sources [S1, unofficial].
++*   **Output:**
++    *   Radiance $I(X, \omega)$ at the ray origin $X$ in direction $\omega$.
+ 
+ **Data Structures**
+-The method operates on continuous functions defined over position $\mathbf{X}$ and direction $\boldsymbol{\omega}$. In discrete implementations, these are represented as:
+-*   **Spatial Grid:** Voxel grid storing coefficients $\sigma_t(\mathbf{X}), \sigma_s(\mathbf{X}), \sigma_a(\mathbf{X}), e(\mathbf{X})$.
+-*   **Angular Domain:** Discretized via spherical harmonics (coefficients), discrete ordinates (direction vectors), or Monte Carlo samples.
++The method requires storing volumetric fields for the extinction coefficient $\tau$, emission $e$, and phase function parameters. The phase function $r(X, \omega, \omega')$ is typically stored as a parametric function (e.g., Henyey-Greenstein) or a lookup table, as integrating over the full $4\pi$ solid angle for every sample is computationally prohibitive without approximation [S1, unofficial][S2, book].
+ 
+-**Formulas**
+-The general integral equation for radiation transport is [S1, unofficial]:
++**Mathematical Formulation**
++The general integral equation for radiation transport is given by [S1, unofficial]:
+ 
+ $$
+-I(\mathbf{X}, \boldsymbol{\omega}) = I_0(\mathbf{X} + D\boldsymbol{\omega}, \boldsymbol{\omega}) \exp\left(-\int_0^D \sigma_t(\mathbf{X} + t\boldsymbol{\omega}) \, dt\right) + \int_0^D g(s) \exp\left(-\int_0^s \sigma_t(\mathbf{X} + t\boldsymbol{\omega}) \, dt\right) \, ds
++I(X, \omega) = I_0(X + D\omega, \omega) \exp\left(-\int_0^D \tau(X + t\omega) \, dt\right) + \int_0^D \left[ \int_{4\pi} r(X + s\omega, \omega, \omega') I(X + s\omega, \omega') \, d\omega' + e(X + s\omega) \right] \exp\left(-\int_0^s \tau(X + t\omega) \, dt\right) \, ds
+ $$
+ 
+ Where:
+-*   $D$ is the distance to the volume boundary or far clip plane.
+-*   $I_0(\mathbf{X} + D\boldsymbol{\omega}, \boldsymbol{\omega})$ is the external illumination entering the volume at the far boundary.
+-*   $\sigma_t = \sigma_a + \sigma_s$ is the total extinction coefficient.
+-*   $g(s)$ is the source term at distance $s$ along the ray:
++*   $I(X, \omega)$ is the unknown intensity at position $X$ in direction $\omega$.
++*   The first term represents the background illumination attenuated by the total path length $D$.
++*   The second term integrates the "source term" $g(s)$ along the ray from $0$ to $D$.
++*   The source term $g(s)$ at distance $s$ along the ray is defined as [S1, unofficial]:
++    $$
++    g(s) = \int_{4\pi} r(X + s\omega, \omega, \omega') I(X + s\omega, \omega') \, d\omega' + e(X + s\omega)
++    $$
++*   The exponential terms represent the transmittance (Beer-Lambert law) from the sample point to the observer (for the inner integral's contribution) or from the ray origin to the sample point (for the outer integral's attenuation).
++
++An alternative formulation often used in computer graphics contexts defines the intensity at the near clip plane $t_0$ as [S2, book]:
+ 
+ $$
+-g(s) = \int_{4\pi} r(\mathbf{X}+s\boldsymbol{\omega}, \boldsymbol{\omega}, \boldsymbol{\omega}') I(\mathbf{X}+s\boldsymbol{\omega}, \boldsymbol{\omega}') \, d\boldsymbol{\omega}' + e(\mathbf{X}+s\boldsymbol{\omega})
++I(t_0, \vec{\omega}) = \int_{t_0}^{\infty} Q(\tau) e^{\left(-\int_{t_0}^{t} \sigma_a(\tau) + \sigma_{sc}(\tau) \, d\tau\right)} \, d\tau
+ $$
+ 
+-*   $r(\mathbf{X}, \boldsymbol{\omega}, \boldsymbol{\omega}')$ is the scattering phase function (probability density of scattering from $\boldsymbol{\omega}'$ to $\boldsymbol{\omega}$).
+-*   $e(\mathbf{X})$ is the nondirectional glow (emissive term, e.g., black body thermal radiation) [S1, unofficial].
+-
+-Alternatively, expressed as a path integral with contribution $Q(t)$ [S2, book]:
++Where the contribution $Q(t)$ at distance $t$ is [S2, book]:
+ 
+ $$
+-I(t_0, \boldsymbol{\omega}) = \int_{t_0}^{t_{far}} Q(t) \exp\left(-\int_{t_0}^{t} \sigma_t(\tau) \, d\tau\right) \, dt
++Q(t) = E(t) + \sigma_{sc}(t) \int_{\Omega} \rho_{sc}(\omega' \to \omega) I(t, \omega') \, d\omega'
+ $$
+ 
+-Where the contribution $Q(t)$ at distance $t$ is:
++**Algorithm Steps**
++Because the unknown $I(X, \omega)$ appears on both sides of the integral equation (inside the integral over $\omega'$), it cannot be solved directly in a single pass [S1, unofficial][S2, book]. The standard approach involves iterative solution methods or angular expansions [S1, unofficial]:
+ 
+-$$
+-Q(t) = E(t) + \sigma_s(t) \int_{\Omega} \rho_{sc}(\boldsymbol{\omega}' \to \boldsymbol{\omega}) I(t, \boldsymbol{\omega}') \, d\boldsymbol{\omega}'
+-$$
+-
+-*   $E(t)$ is the emitted light at $t$.
+-*   $\rho_{sc}$ is the scattering function defining the fraction of light from $\boldsymbol{\omega}'$ scattered into $\boldsymbol{\omega}$ [S2, book].
++1.  **Initialization:** Initialize the intensity field $I^{(0)}(X, \omega)$ to zero or to the direct illumination term (single-scattering approximation).
++2.  **Iteration:** For iteration $k = 1, 2, \dots$:
++    a.  Compute the source term $g^{(k-1)}(s)$ using the intensity from the previous iteration $I^{(k-1)}$:
++        $$
++        g^{(k-1)}(s) = \int_{4\pi} r(X + s\omega, \omega, \omega') I^{(k-1)}(X + s\omega, \omega') \, d\omega' + e(X + s\omega)
++        $$
++    b.  Update the intensity $I^{(k)}(X, \omega)$ by integrating the source term along the ray:
++        $$
++        I^{(k)}(X, \omega) = I_0(X + D\omega, \omega) T(0, D) + \int_0^D g^{(k-1)}(s) T(s, D) \, ds
++        $$
++        where $T(s_1, s_2) = \exp\left(-\int_{s_1}^{s_2} \tau(X + t\omega) \, dt\right)$ is the transmittance.
++3.  **Convergence:** Repeat until the change in $I$ between iterations is below a threshold, or a fixed number of bounces is reached.
+ 
+ **Pseudocode**
+-The integral equation is implicit because $I$ appears on both sides. A common numerical approach is fixed-point iteration (Neumann series) or discretization. Below is a fixed-point iteration scheme for a single ray segment, assuming a discretized angular domain with $M$ directions.
++The following pseudocode illustrates the iterative solution for a single ray, assuming a discrete set of directions $\Omega_{discrete}$ for the angular integration.
+ 
+ ```python
+-def solve_multiple_scattering_integral_equation(ray_origin, ray_direction, medium, num_iterations=10):
++def solve_multiple_scattering_integral_equation(ray_origin, ray_direction, ray_length, 
++                                                extinction_field, emission_field, 
++                                                phase_function, background_radiance, 
++                                                max_iterations, tolerance):
+     """
+-    Solves the integral equation for multiple scattering using fixed-point iteration.
++    Solves the integral equation for multiple scattering iteratively.
+     
+     Args:
+-        ray_origin: 3D vector, start of the ray.
+-        ray_direction: 3D vector, unit direction of the ray.
+-        medium: Object containing spatially varying sigma_a, sigma_s, sigma_t, emission, and phase function.
+-        num_iterations: Number of fixed-point iterations.
++        ray_origin: 3D vector X
++        ray_direction: 3D unit vector omega
++        ray_length: float D
++        extinction_field: function tau(X) returning extinction coefficient
++        emission_field: function e(X) returning emission coefficient
++        phase_function: function r(X, omega_in, omega_out) returning scattering probability
++        background_radiance: function I0(X, omega) returning external illumination
++        max_iterations: int
++        tolerance: float
+         
+     Returns:
+-        radiance: Float, computed radiance at ray_origin.
++        radiance: float I(X, omega)
+     """
+-    # 1. Discretize the ray into N samples
+-    N = 100  # Not given in sources; typical implementation detail
+-    ray_length = compute_ray_length(ray_origin, ray_direction, medium.bounds)
+-    dt = ray_length / N
+-    samples = [ray_origin + i * dt * ray_direction for i in range(N + 1)]
++    # 1. Initialize intensity to zero (or direct illumination for faster convergence)
++    # Direct illumination term (single scattering from background)
++    # T(0, D) is transmittance from origin to end of ray
++    transmittance_total = compute_transmittance(ray_origin, ray_direction, ray_length, extinction_field)
++    direct_term = background_radiance(ray_origin + ray_direction * ray_length, ray_direction) * transmittance_total
+     
+-    # 2. Discretize the angular domain into M directions (omega_m)
+-    # Implementation detail: Use spherical harmonics coefficients or discrete ordinates
+-    M = 16   # Not given in sources; typical implementation detail
+-    omega_m = get_discrete_directions(M)
++    current_intensity = direct_term # Initial guess
+     
+-    # 3. Initialize intensity guess I^0
+-    # I^0 is typically the single-scattering approximation or zero
+-    I = initialize_intensity_guess(samples, omega_m, medium, ray_direction)
++    # Discrete directions for angular integration (e.g., from a spherical grid)
++    # In practice, this integral is approximated via quadrature
++    discrete_directions = get_spherical_quadrature_points() 
+     
+-    # 4. Iterate to solve the implicit equation
+-    for k in range(num_iterations):
+-        I_new = zeros_like(I)
++    for iteration in range(max_iterations):
++        previous_intensity = current_intensity
++        source_integral = 0.0
+         
+-        for i in range(N):
+-            pos = samples[i]
++        # 2. Integrate along the ray (outer integral)
++        # Sample points along the ray
++        num_samples = 100 # Implementation detail: adaptive sampling preferred
++        for s in linspace(0, ray_length, num_samples):
++            sample_point = ray_origin + ray_direction * s
+             
+-            # Compute transmittance from sample i to the end of the ray (or next sample for local step)
+-            # For the full integral equation, we need transmittance from sample i to the boundary
+-            # However, in iterative solvers, we often compute the source term g(s) at each sample
+-            # and accumulate. Here we follow the structure of the integral equation directly.
++            # Compute transmittance from sample point to observer (origin)
++            # Note: In the integral equation, the source at s is attenuated by the path from s to 0
++            transmittance_sample_to_origin = compute_transmittance(sample_point, -ray_direction, s, extinction_field)
+             
+-            # Compute Source Term g(s) at sample i
+-            # g(s) = integral over 4pi of scattering + emission
+-            source_term = 0.0
++            # Compute source term g(s) (inner integral over 4pi)
++            source_term_g = emission_field(sample_point)
+             
+-            for m in range(M):
+-                omega_prime = omega_m[m]
++            for omega_prime in discrete_directions:
++                # Get intensity from previous iteration at this point and direction
++                # Note: current_intensity is a field in this general case, 
++                # but for a single ray trace, we assume we have access to I(X, omega') from other rays or a global field.
++                # Here we assume a global intensity field is maintained.
++                intensity_at_sample = get_intensity_from_field(sample_point, omega_prime, previous_intensity)
+                 
+-                # Get incoming intensity from previous iteration
+-                I_incoming = I[i][m]
+-                
+-                # Get phase function r(pos, ray_direction, omega_prime)
+-                # Note: The integral equation integrates over incoming directions omega'
+-                # scattering INTO the view direction omega (ray_direction)
+-                phase = medium.phase_function(pos, ray_direction, omega_prime)
+-                
+-                # Scattering contribution
+-                scattering_contribution = medium.sigma_s(pos) * phase * I_incoming
+-                
+-                # Add to source term
+-                source_term += scattering_contribution * solid_angle_element(m)
++                # Add scattered contribution
++                scattering_prob = phase_function(sample_point, omega_prime, ray_direction)
++                source_term_g += scattering_prob * intensity_at_sample
+             
+-            # Add emission
+-            source_term += medium.emission(pos)
++            # Accumulate weighted by transmittance and differential length ds
++            ds = ray_length / num_samples
++            source_integral += source_term_g * transmittance_sample_to_origin * ds
+             
+-            # Compute transmittance from sample i to the far boundary (D)
+-            # T(i -> D) = exp(-integral_i^D sigma_t dt)
+-            transmittance_to_end = compute_transmittance(pos, ray_direction, medium, ray_length - i * dt)
++        # 3. Update intensity
++        new_intensity = direct_term + source_integral
++        
++        # 4. Check convergence
++        if abs(new_intensity - previous_intensity) < tolerance:
++            return new_intensity
+             
+-            # The integral equation sums contributions from s=0 to D.
+-            # In a discrete solver, we approximate the integral as a sum.
+-            # The term for sample i is: g(s_i) * exp(-integral_0^s_i sigma_t dt) * ds
+-            # Note: The exponential term in the integral equation is exp(-integral_0^s sigma_t dt)
+-            # This represents attenuation from the origin to the scattering point s.
+-            
+-            transmittance_origin_to_i = compute_transmittance(ray_origin, ray_direction, medium, i * dt)
+-            
+-            # Accumulate contribution
+-            # I_new[i] represents the intensity at sample i? 
+-            # Actually, the equation solves for I(ray_origin). 
+-            # We must accumulate the integral along the ray.
+-            
+-            # Contribution of scattering at sample i to the radiance at ray_origin
+-            # is: g(s_i) * exp(-integral_0^s_i sigma_t dt) * ds
+-            # Wait, the integral equation is:
+-            # I(origin) = I_boundary * T(0->D) + integral_0^D [ g(s) * T(0->s) ] ds
+-            # So we sum the weighted source terms.
+-            
+-            I_new_origin = source_term * transmittance_origin_to_i * dt
+-            
+-            # Store for next iteration if we need spatial distribution, 
+-            # but for a single ray query, we just accumulate.
+-            # However, I(s) is needed for g(s) at subsequent points.
+-            # So we must update the intensity field along the ray.
+-            
+-            # The intensity at sample i, I(s_i), is determined by the integral from 0 to s_i
+-            # I(s_i) = I_boundary * T(s_i->D) + integral_0^{s_i} [ g(s) * T(s->s_i) ] ds
+-            # This requires a more complex solver or forward accumulation.
+-            
+-            # Simplified Fixed Point: Update I at each sample based on previous I
+-            # I^{k+1}(s) = I_boundary * T(s->D) + integral_0^s [ g^k(s') * T(s'->s) ] ds'
+-            
+-            # For brevity, assuming a standard iterative solver updates the full field
+-            pass 
+-            
+-        # Update intensity field
+-        I = I_new
++        current_intensity = new_intensity
+         
+-    # Final result is the accumulated integral
+-    # In practice, this is computed during the loop or via a final pass
+-    return compute_final_radiance(I, ray_origin, ray_direction, medium)
++    return current_intensity
+ 
+-def compute_transmittance(start_pos, direction, medium, distance):
+-    """Computes exp(-integral_0^distance sigma_t(start + t*dir) dt)"""
+-    # Numerical integration of sigma_t along the segment
+-    integral_sigma_t = 0.0
+-    steps = 10
+-    dt = distance / steps
+-    for i in range(steps):
+-        pos = start_pos + (i + 0.5) * dt * direction
+-        integral_sigma_t += medium.sigma_t(pos) * dt
+-    return exp(-integral_sigma_t)
+-
+-def initialize_intensity_guess(samples, omega_m, medium, ray_direction):
+-    """Initial guess: Single scattering approximation or zero"""
+-    # I^0(s, omega) = 0 or single scatter from lights
+-    return zeros((len(samples), len(omega_m)))
++def compute_transmittance(start_point, direction, distance, extinction_field):
++    """Computes exp(-integral of extinction along path)."""
++    # Simplified: assume constant extinction over small steps or use midpoint rule
++    # For exact implementation, integrate tau along the line
++    mid_point = start_point + direction * (distance / 2.0)
++    avg_extinction = extinction_field(mid_point)
++    return exp(-avg_extinction * distance)
+ ```
+ 
+ **Parameters**
+-*   $\sigma_a, \sigma_s$: Extinction and scattering coefficients. Typical values depend on the medium (e.g., fog, skin, clouds).
+-*   $\eta = \sigma_s / \sigma_t$: Single-scattering albedo. Ranges from 0 (pure absorber) to 1 (pure scatterer) [S3, unofficial].
+-*   $N$: Number of spatial samples along the ray.
+-*   $M$: Number of angular directions (for discrete ordinates) or harmonic orders (for P-N).
++*   **Albedo ($\eta$):** Defined as $\eta = \sigma_s / \sigma_t$ (or $\mu_s / \mu_t$) [S3, unofficial]. High albedo implies strong multiple scattering.
++*   **Mean Free Path ($l$):** $l = 1/\sigma_t$ [S3, unofficial].
++*   **Phase Function:** Common choices include Henyey-Greenstein or Mie theory, defined by asymmetry parameter $g$ [S1, S3, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+-*   **Implicit Nature:** The unknown $I(\mathbf{X}, \boldsymbol{\omega})$ appears on both sides of the equation, requiring iterative methods or expansions [S1, unofficial]. Direct evaluation is impossible [S2, book].
+-*   **Complexity:** The model is too complex for direct evaluation; approximations are necessary for practical implementation [S2, book].
+-*   **Convergence:** Iterative methods may converge slowly for high-albedo media ($\eta \approx 1$) [S1, unofficial].
+-*   **Angular Discretization:** Discretizing the $4\pi$ solid angle introduces errors (ray effects in discrete ordinates, truncation errors in spherical harmonics) [S1, unofficial].
++*   **Circular Dependency:** The unknown $I(X, \omega)$ appears on both sides of the equation, requiring iterative solvers or angular expansions (like P-N method) [S1, unofficial]. Direct evaluation is impossible without approximation [S2, book].
++*   **Computational Complexity:** The inner integral over $4\pi$ makes the evaluation expensive. Discretizing the angular domain (Discrete Ordinates) or expanding in Spherical Harmonics are common approximations [S1, unofficial].
++*   **Precision:** In highly scattering media (high albedo), convergence of iterative methods can be slow.
++*   **Boundary Conditions:** Accurate specification of $I_0$ (background illumination) is critical, especially for thin volumes where background light dominates [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Full Propagator Approximation for Multiply-Scattered Radiance](1298-full-propagator-approximation-for-multiply-scattered-radianc.md)
+-The Full Propagator Approximation computes the radiance contribution from multiple scattering events by approximating the path integral over a reduced subset of paths surrounding the Most Probable Path (MPP). It replaces the intractable integration over complete path space with an integration over a Gaussian support perpendicular to the MPP. Choose this method when high accuracy for multiple scattering is needed in moderately scattering media, and computational resources allow for Gaussian integration. Link: [Full Propagator Approximation for Multiply-Scattered Radiance](1298-full-propagator-approximation-for-multiply-scattered-radianc.md).
++Approximates the path integral by integrating over a Gaussian support perpendicular to the Most Probable Path (MPP), reducing the intractable integration over complete path space.
+ 
+ ### [P-N Method (Spherical Harmonics)](1395-p-n-method-spherical-harmonics.md)
+-The P-N method solves the multiple scattering integral equation by expanding the directional intensity $I(\mathbf{X}, \boldsymbol{\omega})$ into spherical harmonics over the unit sphere direction $\boldsymbol{\omega}$, converting the integral equation into a coupled system of partial differential equations for the harmonic coefficients. It is mathematically equivalent to the discrete ordinates method with $M$ properly placed directions, which specify the directional intensity distribution to the same detail as $M$ spherical harmonic coefficients. Choose this method for smooth, highly scattering media where angular distribution is nearly isotropic. Link: [P-N Method (Spherical Harmonics)](1395-p-n-method-spherical-harmonics.md).
++Expands directional radiance into a truncated spherical harmonics basis, converting the integral equation into a coupled system of PDEs for the coefficients, handling anisotropic scattering better than diffusion.
+ 
+ ### [Monte Carlo Method for Multiple Scattering](1940-monte-carlo-method-for-multiple-scattering.md)
+-The Monte Carlo method for multiple scattering solves the integral equation for directional scattering intensity $I(\mathbf{X}, \boldsymbol{\omega})$ by stochastically tracing rays that undergo random absorption or scattering events based on the medium's optical properties. It is distinguished from deterministic solvers (such as the P-N method or Diffusion Approximation) by its ability to handle complex phase functions and geometries without discretizing the angular domain, though this comes at the cost of high variance and slow convergence. Choose this method for complex geometries and anisotropic scattering where deterministic methods fail. Link: [Monte Carlo Method for Multiple Scattering](1940-monte-carlo-method-for-multiple-scattering.md).
++Solves the integral equation stochastically by tracing random walks, addressing visibility problems in dense media where deterministic integration is too costly.
+ 
+ ### [Diffusion Approximation](2372-diffusion-approximation.md)
+-The Diffusion Approximation is a method for computing multiple scattering in participating media by replacing the computationally expensive integral form of the Radiative Transfer Equation (RTE) with a partial differential equation (PDE). It models the medium radiance as a function of the first two angular moments of the radiation field: the scalar irradiance (fluence) and the vector irradiance (flux). Unlike [Full Propagator Approximation for Multiply-Scattered Radiance](1298-full-propagator-approximation-for-multiply-scattered-radianc.md) or [Monte Carlo Method for Multiple Scattering](1940-monte-carlo-method-for-multiple-scattering.md), which track angular distribution or stochastic paths, the diffusion approximation assumes that in highly scattering media, light distribution becomes nearly isotropic, allowing angular dependence to be smoothed out. It is particularly efficient for dense, high-opacity media where photons undergo long random walks. Link: [Diffusion Approximation](2372-diffusion-approximation.md).
++Replaces the integral RTE with a PDE based on the first two angular moments (irradiance and flux), assuming near-isotropic radiance in highly scattering media.
+ 
+ ### Neural Network RTE Simplification via Albedo Series
+-This variant simplifies the classical radiation transfer equation to express the co-scattering term $F(\mathbf{p}, \boldsymbol{\omega})$ as an infinite series of albedo powers, enabling neural network prediction. The co-scattering term is expanded as $F(\mathbf{p}, \boldsymbol{\omega}) = \sum_{i=0}^{\infty} \eta^i F_i(\mathbf{p}, \boldsymbol{\omega})$, where $\eta = \mu_s/\mu_t$ is the albedo, and $F_{i+1} = \Pi F_i$. This allows the radiance to be predicted by a neural network without solving the integral equation iteratively. Choose this method for real-time rendering of high-albedo anisotropic materials where pre-computation is feasible. Link: [Neural Network RTE Simplification via Albedo Series](1298-neural-network-rte-simplification-via-albedo-series.md) (Note: No separate article exists, so this is a subtopic entry).
++Simplifies the classical radiation transfer equation by expressing the co-scattering term $F(p, \omega)$ as an infinite series of albedo powers $\eta^i$, enabling prediction via neural networks. The co-scattering term is defined as $F(p, \omega) = \sum_{i=0}^{\infty} \eta^i F_i(p, \omega)$, where $F_0 = f_p T I$ and $F_{i+1} = \Pi F_i$, with $\Pi$ being an integral operator involving transmittance $T$ and phase function $f_p$ [S3, unofficial]. This allows the complex integral equation to be approximated by a neural network predicting the series coefficients, leveraging the pre-calculated sampling features (density, transmittance, phase) [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The integral equation itself is $O(1)$ in formulation but $O(N \cdot M)$ or higher in evaluation, where $N$ is spatial samples and $M$ is angular samples. Iterative solvers add a factor of $K$ (iterations). Monte Carlo methods have $O(1/\epsilon^2)$ convergence for error $\epsilon$.
+-*   **Memory Complexity:** $O(N \cdot M)$ to store the intensity field or angular coefficients.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales poorly with increasing albedo and scattering density due to increased number of scattering events and slower convergence of iterative solvers.
+-*   **Strengths:** Physically accurate; handles complex lighting and geometry; captures deep multiple scattering effects.
+-*   **Limitations:** Computationally expensive; requires approximations for real-time use; sensitive to angular discretization errors.
+-*   **When to use:** Offline rendering, high-fidelity visualization, media with high albedo or density.
+-*   **When not to use:** Real-time applications with simple media (use single scattering or diffusion approximation).
++*   **Time Complexity:** The direct evaluation of the integral equation is $O(N \cdot M)$, where $N$ is the number of spatial samples along the ray and $M$ is the number of discrete directions in the angular integration. Iterative solutions multiply this by the number of iterations required for convergence.
++*   **Memory Complexity:** Requires storage of volumetric fields for extinction, emission, and potentially the full angular radiance field if solving globally.
++*   **Strengths:** Physically accurate; captures complex lighting effects like color bleeding and subsurface scattering in dense media; serves as the ground truth for approximations.
++*   **Limitations:** Computationally expensive due to the nested integrals (spatial and angular); requires iterative solvers which can be slow to converge for high-albedo media; difficult to implement efficiently on GPUs without approximations [S2, book].
++*   **When to Use:** When physical accuracy is paramount and computational resources allow for iterative or expanded solutions (e.g., offline rendering, scientific visualization).
++*   **When Not to Use:** For real-time applications with high-albedo media, where approximations like Diffusion or Neural Network simplifications are preferred [S3, unofficial].
+ 
+ ## Background
+-The multiple scattering integral equation originates from transport theory in thermal engineering and neutron transport [S1, unofficial]. It was adapted to computer graphics by Kajiya and Von Herzen, who expanded the intensity in spherical harmonics to solve the equation [S1, unofficial]. The formulation is also known as the general integral equation for radiation transport [S1, unofficial]. It is used in volume rendering to achieve realistic lighting effects in participating media, such as fog, smoke, and skin [S2, book].
++The integral equation for radiation transport originates from thermal engineering and neutron transport theory, where it is used to model the flow of energy or particles through absorbing and scattering media [S1, unofficial]. In computer graphics, it was adapted as a physically based illumination model to accurately simulate light transport in participating media, such as fog, clouds, and subsurface scattering materials [S2, book]. The formulation is attributed to the general theory of radiative transfer, with specific applications in volume rendering discussed by authors like Kajiya and Von Herzen, who explored spherical harmonic expansions to solve the equation [S1, unofficial]. The model is distinct from the differential form of the RTE (Radiative Transfer Equation) in that it expresses the solution as a path integral rather than a differential balance, making it suitable for global illumination techniques that trace paths [S1, unofficial][S2, book].
+ 
+ ## Sources

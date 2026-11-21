@@ -1,0 +1,202 @@
+--- v004.md
++++ v005.md
+@@ -4,71 +4,60 @@
+ 
+ ## Overview
+-This method computes the expected color $\hat{C}(r)$ for a ray $r$ by discretizing the medium interaction interval into a fixed number of steps and accumulating emission weighted by opacity [S1, unofficial]. It differs from standard NeRF implementations by using a dense grid for density queries rather than a neural network, and by supporting both primal and adjoint (gradient) modes for inverse rendering [S1, unofficial]. It serves as the forward pass component in differentiable volume rendering pipelines [S1, unofficial].
++This method computes the expected color $\hat{C}(r)$ for a ray $r$ by discretizing the medium interaction interval into fixed steps and accumulating emission weighted by transmittance [S1, unofficial]. It differs from its sibling [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md) by using a fixed-step marching loop with explicit throughput tracking and jittering, rather than bin-based stratified sampling [S1, unofficial]. It is designed for dense grid-based media where direction-dependent emission is not required [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Ray $r(t) = o + td$, medium exit distance $t_f$ (from intersection), number of queries per ray $N$ (default 128), jittering flag, density noise standard deviation, activation function type.
+-*   **Output:** Accumulated color $\hat{C}(r)$ and transmittance/weight sums for gradient computation.
++**Inputs:**
++- Ray origin $o$ and direction $d$.
++- Medium exit distance $t_f$ (from intersection).
++- Density field $\sigma(x)$ and emission field $c(x)$.
++- Parameters: `queries_per_ray` ($N$), `density_noise_std`, `jittering_enabled`, `activation`.
++
++**Outputs:**
++- Accumulated color $\hat{C}(r)$.
+ 
+ **Data Structures:**
+-*   **State Variables:** `result` (color accumulator), `throughput` (accumulated transmittance $T$), `weights_sum` (accumulated weight $\sum w_i$), `step_j` (current step index), `t_a` (previous sample position), `t_b` (current sample position).
+-*   **Mask:** `active_mask` (boolean vector indicating which rays are still valid/inside the medium).
++- `throughput`: Scalar float, initialized to 1.0.
++- `result`: Vector float (color), initialized to 0.
++- `weights_sum`: Scalar float, initialized to 0.
++- `step_j`: Integer counter, initialized to 0.
++- `t_a`: Scalar float, current position along ray, initialized to 0.
++- `active_mask`: Boolean mask for active rays.
+ 
+-**Parameters:**
+-*   `queries_per_ray` ($N$): Number of steps. Default: 128 [S1, unofficial].
+-*   `density_noise_std`: Standard deviation for density noise. Default: 0 [S1, unofficial].
+-*   `jittering_enabled`: Enable stratified jittering. Default: True [S1, unofficial].
+-*   `activation`: Density activation ('identity', 'relu'). Default: 'identity' [S1, unofficial].
+-*   `hide_emitters`: Hide background if weights_sum is zero. Default: False [S1, unofficial].
+-
+-**Algorithm Steps:**
+-1.  **Initialization:** Initialize `result` = 0, `throughput` = 1, `weights_sum` = 0, `step_j` = 0, `t_a` = 0. Determine if the current mode is primal or adjoint.
+-2.  **Ray Intersection:** Intersect the ray with the medium boundary to find the exit distance $t_f$. Update `active_mask` to exclude rays that do not hit the medium.
+-3.  **Step Size Calculation:** Calculate `step_size` based on $t_f$, $N$, and jittering. If jittering is enabled, draw a random offset `jitter_sample` from the sampler [S1, unofficial].
+-4.  **Marching Loop:** While `step_j < N` and `active_mask` is true:
+-    a.  **Sample Position:** Calculate $t_b$ using `query_t_for_step(step_j + 1, step_size, jitter_sample, jittering_enabled)`. Calculate `actual_step` = $t_b - t_a$.
+-    b.  **Density Query:** Query the density grid at position $r(t_b)$. Apply `activation` and add noise if `density_noise_std > 0`. Let the result be $\sigma$.
+-    c.  **Alpha/Weight Calculation:**
+-        *   If `step_j + 1 < N`: Calculate `alpha_recip` = $\exp(-\sigma \cdot \text{actual\_step})$.
+-        *   Else (last step): `alpha_recip` = 1.0.
+-        *   Add epsilon ($10^{-10}$) to `alpha_recip` for numerical stability [S1, unofficial].
+-        *   Calculate `weight` = $(1.0 - \text{alpha\_recip}) \cdot \text{throughput}$.
+-    d.  **Accumulation:**
+-        *   If primal mode: `result` += `weight` * emission($r(t_b)$).
+-        *   If adjoint mode: `result` -= `weight` * emission($r(t_b)$) [S1, unofficial].
+-    e.  **Update State:**
+-        *   `step_j` += 1.
+-        *   `t_a` = $t_b$.
+-        *   `throughput` *= `alpha_recip`.
+-        *   `weights_sum` += `weight`.
+-        *   Update `active_mask`: false if `step_j >= N`.
+-5.  **Background Contribution:** Calculate background term: `contribution` = $(1 - \text{weights\_sum}) \cdot c_{bg}$ (where $c_{bg}$ is the background color, typically white). Add to `result` for active pixels [S1, unofficial].
+-6.  **Emitter Hiding:** If `hide_emitters` is true and `weights_sum` is zero, do not add emitter contributions [S1, unofficial].
++**Steps:**
++1. **Initialization:** Set `result` = 0, `delta_L` = 0, `throughput` = 1.0, `weights_sum` = 0, `step_j` = 0, `t_a` = 0. Determine primal mode. Intersect ray to find medium exit $t_f$. Update `active_mask` to rays hitting the exit [S1, unofficial].
++2. **Step Size Calculation:** Calculate `step_size` using `step_size_for_marching(queries_per_ray, 0, t_f, jittering_enabled)`. Sample `jitter_sample` from sampler [S1, unofficial].
++3. **Marching Loop:** While `still_walking` (mask: `step_j < queries_per_ray`):
++    a. Calculate $t_b$ using `query_t_for_step(step_j + 1, step_size, jitter_sample, jittering_enabled)`.
++    b. Calculate `actual_step` = $t_b - t_a$.
++    c. Calculate `alpha_recip`:
++       - If `step_j + 1 < queries_per_ray`: $\alpha_{recip} = \exp(-\sigma \cdot \text{actual\_step})$.
++       - Else: $\alpha_{recip} = 1.0$.
++       - Add $10^{-10}$ to `alpha_recip` for numerical stability [S1, unofficial].
++    d. Calculate `weight` = $(1.0 - \alpha_{recip}) \cdot \text{throughput}$.
++    e. Update `result`:
++       - If primal: `result` += `weight` * emission.
++       - Else: `result` -= `weight` * emission.
++    f. Increment `step_j`. Update $t_a = t_b$.
++    g. Update `throughput` *= `safe_alpha_recip` (where `safe_alpha_recip` is `alpha_recip` with epsilon guard).
++    h. Update `weights_sum` += `weight` [S1, unofficial].
++4. **Background Contribution:** Calculate `contribution` = $(1 - \text{weights\_sum}) \cdot c_{bg}$. Add to `result` for active pixels [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def nerf_integrator(ray_o, ray_d, t_f, N=128, jittering=True, density_noise_std=0.0, activation='identity'):
+-    # Initialize state
++def nerf_integrator(ray_o, ray_d, t_f, sigma_func, c_func, N=128, jitter=True, eps=1e-10):
++    throughput = 1.0
+     result = 0.0
+-    throughput = 1.0
+     weights_sum = 0.0
+     step_j = 0
+     t_a = 0.0
+     
+-    # Determine mode (primal/adjoint) - assumed passed or global context
+-    is_primal = True 
+-    
+-    # Calculate step size
++    # Step size calculation (simplified)
+     step_size = t_f / N
+-    jitter_sample = random.uniform(0, 1) if jittering else 0.0
+-    
+-    # Pre-calculate jittered step positions if needed, or compute on fly
+-    # For clarity, we compute t_b iteratively
++    jitter_sample = random.uniform(0, 1) if jitter else 0.0
+     
+     while step_j < N:
+-        # Calculate current sample position t_b
+-        # query_t_for_step implements stratified sampling logic
+-        t_b = t_a + step_size * (step_j + 1) + (jitter_sample * step_size if jittering else 0)
+-        # Clamp t_b to t_f if necessary, though loop condition handles N steps
++        # Calculate next sample position
++        t_b = (step_j + 1) * step_size + (jitter_sample * step_size if jitter else 0.0)
++        # Clamp to t_f if necessary, though logic assumes t_f is exit
+         if t_b > t_f:
+             t_b = t_f
+@@ -76,19 +65,9 @@
+         actual_step = t_b - t_a
+         
+-        # Query density
+-        pos = ray_o + ray_d * t_b
+-        sigma = query_density_grid(pos)
++        # Density query
++        pos = ray_o + t_a * ray_d # Approximate position for sigma
++        sigma = sigma_func(pos)
+         
+-        # Apply activation
+-        if activation == 'relu':
+-            sigma = max(0.0, sigma)
+-        elif activation == 'identity':
+-            pass
+-            
+-        # Add noise
+-        if density_noise_std > 0:
+-            sigma += random.gauss(0, density_noise_std)
+-            
+-        # Calculate alpha_recip and weight
++        # Alpha reciprocal calculation
+         if step_j + 1 < N:
+             alpha_recip = math.exp(-sigma * actual_step)
+@@ -97,15 +76,15 @@
+             
+         # Numerical stability
+-        alpha_recip_safe = alpha_recip + 1e-10
++        alpha_recip_safe = alpha_recip + eps
+         
++        # Weight calculation
+         weight = (1.0 - alpha_recip_safe) * throughput
+         
+-        # Accumulate result
+-        emission = query_emission_grid(pos) # Assuming emission query
+-        if is_primal:
+-            result += weight * emission
+-        else:
+-            result -= weight * emission
+-            
++        # Emission query
++        c = c_func(pos)
++        
++        # Accumulate result (primal mode assumed)
++        result += weight * c
++        
+         # Update state
+         step_j += 1
+@@ -115,22 +94,29 @@
+         
+     # Background contribution
+-    background_color = [1.0, 1.0, 1.0] # Default white
+-    background_term = (1.0 - weights_sum) * background_color
+-    result += background_term
++    result += (1.0 - weights_sum) * c_bg
+     
+     return result
+ ```
+ 
++**Parameters:**
++- `queries_per_ray` ($N$): Number of steps. Default 128 [S1, unofficial].
++- `density_noise_std`: Standard deviation for density noise. Default 0 [S1, unofficial].
++- `jittering_enabled`: Enable jittering. Default True [S1, unofficial].
++- `activation`: Activation for density ('identity', 'relu'). Default 'identity' [S1, unofficial].
++
++**Edge Cases:**
++- If `weights_sum` is zero, background emitters may be hidden if `hide_emitters` is True [S1, unofficial].
++- Epsilon ($10^{-10}$) is added to `alpha_recip` to prevent NaNs in gradients [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per ray, where $N$ is `queries_per_ray`.
+-*   **Memory Complexity:** $O(1)$ per ray for state variables, plus $O(V)$ for the density grid storage $V$.
+-*   **Strengths:** Simple, differentiable, supports dense grids for fast lookup.
+-*   **Limitations:** Fixed number of steps may lead to aliasing or insufficient sampling in complex regions. Dense grids consume significant memory for large scenes.
+-*   **When to use:** When using dense voxel grids for density representation and needing differentiable rendering.
+-*   **When not to use:** For sparse scenes where sparse data structures (like Octrees) are more efficient, or when direction-dependent emission is required (this method assumes no direction dependence [S1, unofficial]).
++- **Time Complexity:** $O(N)$ per ray, where $N$ is `queries_per_ray`.
++- **Memory Complexity:** $O(1)$ per ray (excluding density grid storage).
++- **Strengths:** Simple implementation, differentiable, suitable for dense grids [S1, unofficial].
++- **Limitations:** Fixed step size may undersample complex media; no direction-dependent emission [S1, unofficial].
++- **When to use:** When using dense grid representations and direction-independent emission is sufficient [S1, unofficial].
+ 
+ ## Background
+-This integrator is derived from the NeRF framework but adapted for unbiased inverse volume rendering using dense grids [S1, unofficial]. It originates from research into differentiable volume rendering for inverse problems [S1, unofficial].
++Originated from NeRF-style volume rendering approaches, adapted for unbiased inverse volume rendering with dense grids [S1, unofficial].
+ 
+ ## Sources
+-[S1] https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, fetched 2026-10-26 (unofficial)+[S1] Unbiased Inverse Volume Rendering, https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, fetched 2026-10-26 (unofficial)

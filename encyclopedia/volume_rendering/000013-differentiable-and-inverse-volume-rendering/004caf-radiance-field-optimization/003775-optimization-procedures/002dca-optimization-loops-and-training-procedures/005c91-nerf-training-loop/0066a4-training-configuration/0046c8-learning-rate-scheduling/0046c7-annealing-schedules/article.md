@@ -1,0 +1,99 @@
+# Annealing Schedules
+
+Also called: Constant Schedule, Exponential Schedule, Linear Schedule, Parameter Annealing Framework
+
+## Overview
+Annealing Schedules provide a unified framework for parameter annealing during training, supporting constant, linear, and exponential schedules [S1, unofficial]. Unlike specialized schedules that implement only one decay strategy, this framework offers multiple decay modes within a single implementation [S1, unofficial].
+
+## How it works
+The method computes a scalar value based on the current training step, the total number of steps, and configured bounds [S1, unofficial].
+
+**Inputs and Outputs:**
+- `step`: Current training step (integer or array) [S1, unofficial].
+- `num_steps`: Total number of training steps (integer) [S1, unofficial].
+- `initial_value`: Starting value for the schedule (float) [S1, unofficial].
+- `final_value`: Ending value for the schedule (float) [S1, unofficial].
+- `schedule_type`: String identifier for the schedule ('constant', 'linear', 'exponential') [S1, unofficial].
+- Output: The computed parameter value (float32) [S1, unofficial].
+
+**Data Structures:**
+No complex data structures are required. The implementation relies on vectorized operations over the step index [S1, unofficial].
+
+**Steps:**
+1. Calculate the progress ratio $\alpha$ as the minimum of the normalized step and 1.0:
+   $$ \alpha = \min\left(\frac{\text{step}}{\text{num\_steps}}, 1.0\right) $$
+2. Apply the specific formula based on `schedule_type`:
+   - **Constant**: Return a constant value for all steps: `value` [S1, unofficial].
+   - **Linear**: Interpolate between `initial_value` and `final_value`:
+     $$ \text{value} = (1.0 - \alpha) \cdot \text{initial\_value} + \alpha \cdot \text{final\_value} $$
+   - **Exponential**: Decay exponentially from `initial_value` to `final_value`:
+     $$ \text{base} = \frac{\text{final\_value}}{\text{initial\_value}} $$
+     $$ \text{value} = \text{initial\_value} \cdot (\text{base})^{\alpha} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import jax.numpy as jnp
+
+def anneal_schedule(step, num_steps, initial_value, final_value, schedule_type='linear', constant_value=None):
+    """
+    Compute the annealed parameter value.
+    
+    Args:
+        step: Current training step (int or jnp.ndarray).
+        num_steps: Total number of training steps (int).
+        initial_value: Starting value (float).
+        final_value: Ending value (float).
+        schedule_type: 'constant', 'linear', or 'exponential'.
+        constant_value: Value to return for constant schedule. Defaults to initial_value if None.
+        
+    Returns:
+        The computed parameter value (jnp.ndarray).
+    """
+    # Calculate progress ratio alpha, capped at 1.0
+    alpha = jnp.minimum(step / num_steps, 1.0)
+    
+    if schedule_type == 'constant':
+        # Constant schedule returns a fixed value for all steps
+        val = constant_value if constant_value is not None else initial_value
+        return jnp.full_like(step, val, dtype=jnp.float32)
+        
+    elif schedule_type == 'linear':
+        # Linear interpolation between initial and final
+        return (1.0 - alpha) * initial_value + alpha * final_value
+        
+    elif schedule_type == 'exponential':
+        # Exponential interpolation
+        # Handle division by zero if initial_value is 0 [G]
+        if initial_value == 0:
+            return jnp.full_like(step, final_value, dtype=jnp.float32)
+        
+        base = final_value / initial_value
+        return initial_value * (base ** alpha)
+        
+    else:
+        raise ValueError(f"Unknown schedule type: {schedule_type}")
+```
+
+**Parameters:**
+- `initial_value`: Starting value for the schedule [S1, unofficial].
+- `final_value`: Ending value for the schedule [S1, unofficial].
+- `num_steps`: Total number of training steps [S1, unofficial].
+
+**Edge Cases:**
+- If `initial_value` is 0, the exponential base calculation results in division by zero. The implementation must handle this, typically by returning `final_value` or `initial_value` directly [G].
+- If `step` exceeds `num_steps`, $\alpha$ is capped at 1.0 to prevent extrapolation [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per step, involving basic arithmetic operations [G].
+- **Memory Complexity**: $O(1)$ for scalar inputs, or $O(N)$ for batched inputs of size $N$ [G].
+- **Strengths**: Simple to implement, flexible, and covers common decay patterns [G].
+- **Limitations**: Does not account for loss landscape geometry (unlike adaptive methods). The exponential schedule can be sensitive to the choice of `final_value` if `initial_value` is small [G].
+- **When to use**: When a simple, predictable decay of hyperparameters is desired [G].
+
+## Background
+The framework is implemented in the Nerfies repository, which provides code for "Deformable Neural Radiance Fields" [S1, unofficial]. It was developed by Keunhong Park et al. at Google and the University of Washington [S1, unofficial]. The implementation uses JAX for efficient computation [S1, unofficial].
+
+## Sources
+[S1] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)

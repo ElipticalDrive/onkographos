@@ -1,0 +1,126 @@
+--- v022.md
++++ v023.md
+@@ -37,5 +37,5 @@
+     $$ \hat{\mathbf{x}}_k = \left( \frac{u_{k_0}}{u_{k_2}}, \frac{u_{k_1}}{u_{k_2}} \right) $$
+ 
+-6.  **Compute EWA Resampling Filter:** The footprint function is convolved with a 2D Gaussian low-pass filter $\mathcal{G}_{\mathbf{V}_h}$ to prevent aliasing [S13]. Let $\mathbf{V}_h$ be the 2x2 variance of the low-pass filter (typically the identity matrix $\mathbf{I}$) [S13]. The combined variance is $\hat{\mathbf{V}}_k + \mathbf{V}_h$. The EWA resampling filter $\rho_k(\mathbf{x})$ is a 2D Gaussian:
++6.  **Compute EWA Resampling Filter:** The footprint function is convolved with a 2D Gaussian low-pass filter $\mathcal{G}_{\mathbf{V}_h}$ to prevent aliasing [S13]. Let $\mathbf{V}_h$ be the 2x2 variance of the low-pass filter (typically the identity matrix $\mathbf{I}$) [S13]. The combined variance is $\hat{\mathbf{V}}_k + \mathbf{V}_h$ [S6, unofficial][S13]. The EWA resampling filter $\rho_k(\mathbf{x})$ is a 2D Gaussian:
+     $$ \rho_k(\mathbf{x}) = \frac{1}{2\pi |\mathbf{J}_{\mathbf{u}_k}^{-1}| |\mathbf{W}^{-1}| |\hat{\mathbf{V}}_k + \mathbf{V}_h|^{\frac{1}{2}}} e^{-\frac{1}{2} (\mathbf{x} - \hat{\mathbf{x}}_k)^T \mathbf{M}_k (\mathbf{x} - \hat{\mathbf{x}}_k)} $$
+     where $\mathbf{M}_k = (\hat{\mathbf{V}}_k + \mathbf{V}_h)^{-1}$ [S6, unofficial][S13].
+@@ -52,6 +52,9 @@
+ import math
+ 
+-def ewa_splatting(particles, view_matrix, image_width, image_height, cutoff_radius=2.0):
+-    # Helper classes for vectors and matrices
++def ewa_splatting(particles, W, d, image_width, image_height, cutoff_radius=2.0):
++    # W: 3x3 rotation matrix from object to camera space
++    # d: 3x1 translation vector from object to camera space
++    # particles: list of dicts with 'center' (vec3), 'variance' (mat3), 'extinction' (float), 'color' (vec3)
++    
+     class Vec2:
+         def __init__(self, x, y): self.x, self.y = x, y
+@@ -84,7 +87,6 @@
+     for k in particles:
+         # Object to Camera
+-        u_k = mat_vec_mul(view_matrix, k.center)
+-        W = view_matrix.rotation
+-        V_prime_k = W @ k.variance @ W.transpose()
++        u_k = mat_vec_mul(W, k.center)
++        u_k.x += d.x; u_k.y += d.y; u_k.z += d.z
+         
+         u0, u1, u2 = u_k.x, u_k.y, u_k.z
+@@ -99,4 +101,5 @@
+         
+         # Image Space Variance (3x3)
++        V_prime_k = W @ k.variance @ W.transpose()
+         V_img_k = J @ V_prime_k @ J.transpose()
+         
+@@ -118,10 +121,11 @@
+                     [-V_combined_data[1][0]/det_V_combined, V_combined_data[0][0]/det_V_combined]]
+         
+-        # Normalization Factors
+-        det_V_combined_sqrt = math.sqrt(abs(det_V_combined))
+-        norm_factor = 1.0 / (2 * math.pi * det_V_combined_sqrt)
++        # Normalization Factors: 1 / (2*pi * |J_inv| * |W_inv| * sqrt(|V_combined|))
++        # |J_inv| = 1/u2^2, |W_inv| = 1 (rotation matrix)
++        det_J_inv = 1.0 / (u2**2)
++        det_W_inv = 1.0
++        norm_factor = 1.0 / (2.0 * math.pi * abs(det_J_inv) * abs(det_W_inv) * math.sqrt(abs(det_V_combined)))
+         
+         # Compute bounding box for rasterization
+-        # Eigenvalues of V_combined determine axis lengths
+         trace = V_combined_data[0][0] + V_combined_data[1][1]
+         det = det_V_combined
+@@ -146,5 +150,5 @@
+     # Initialize image buffers
+     image_color = [[(0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
+-    image_opacity = [[0.0 for _ in range(image_width)] for _ in range(image_height)]
++    image_transmittance = [[1.0 for _ in range(image_width)] for _ in range(image_height)]
+     
+     for s in splats:
+@@ -161,28 +165,24 @@
+                 # Evaluate Gaussian: exp(-0.5 * pos^T M pos)
+                 exponent = -0.5 * (dx * (s['M'][0][0]*dx + s['M'][0][1]*dy) + dy * (s['M'][1][0]*dx + s['M'][1][1]*dy))
+-                if exponent > -cutoff_radius**2:
++                if exponent > -0.5 * cutoff_radius**2:
+                     weight = s['norm_factor'] * math.exp(exponent)
++                    alpha = s['extinction'] * weight
+                     
+-                    current_opacity = image_opacity[y][x]
+-                    contribution = (s['color'][0] * s['extinction'] * weight,
+-                                    s['color'][1] * s['extinction'] * weight,
+-                                    s['color'][2] * s['extinction'] * weight)
+-                    new_opacity = min(1.0, current_opacity + s['extinction'] * weight)
++                    # Discrete volume rendering accumulation matching the formula
++                    transmittance = image_transmittance[y][x]
++                    image_color[y][x] = (
++                        image_color[y][x][0] + s['color'][0] * alpha * transmittance,
++                        image_color[y][x][1] + s['color'][1] * alpha * transmittance,
++                        image_color[y][x][2] + s['color'][2] * alpha * transmittance
++                    )
++                    image_transmittance[y][x] *= (1.0 - alpha)
+                     
+-                    alpha_blend = (1.0 - current_opacity)
+-                    image_color[y][x] = (
+-                        image_color[y][x][0] * (1.0 - s['extinction'] * weight) + contribution[0] * alpha_blend,
+-                        image_color[y][x][1] * (1.0 - s['extinction'] * weight) + contribution[1] * alpha_blend,
+-                        image_color[y][x][2] * (1.0 - s['extinction'] * weight) + contribution[2] * alpha_blend
+-                    )
+-                    image_opacity[y][x] = new_opacity
+-                    
+-    return image_color, image_opacity
++    return image_color, image_transmittance
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Singularity at $u_2=0$:** If a particle is at the center of projection, the Jacobian is undefined.
+-*   **Precision:** The determinant calculations and matrix inversions can suffer from precision issues if the splat is extremely elongated or small. Use stable linear algebra routines. [G]
+-*   **Overlap Assumption:** The back-to-front compositing formula assumes kernels do not overlap along the ray.
++*   **Singularity at $u_2=0$:** If a particle is at the center of projection, the Jacobian is undefined [G].
++*   **Precision:** The determinant calculations and matrix inversions can suffer from precision issues if the splat is extremely elongated or small. Use stable linear algebra routines [G].
++*   **Overlap Assumption:** The back-to-front compositing formula assumes kernels do not overlap along the ray [S8, unofficial][S10, unofficial].
+ 
+ ## Subtopics
+@@ -218,15 +218,18 @@
+ Gathering is a rendering technique where, for each output pixel, contributions are gathered from neighboring pixels to compute the new value. It fits GPUs better than splatting because it writes to a single pixel per iteration, allowing parallel execution.
+ 
++### [Soft Point Splatting](18505-soft-point-splatting.md)
++A point cloud rendering technique that reconstructs a continuous signal from irregularly distributed discrete samples using local reconstruction kernels, then resamples the signal in image space. It blends discrete samples with deterministic blurring kernels to project features into a 2D feature map.
++
+ ### EWA-based Attribute Interpolation
+ An interpolation method for smooth attribute interpolation of normals and other attributes, based on Elliptical Weighted-Average (EWA) splatting [S19]. It is implemented as a post-rasterisation pass to smoothly interpolate normals and other attributes using EWA splatting, because the CGC data structure does not allow random access to neighboring grid cells [S19]. The method renders cells as round splats with a weighted footprint and accumulates attributes (normals) to the G-buffer [S19]. It provides smooth attribute interpolation compared to standard point-based methods, improving visual quality [S19]. Unlike Laine et al. [12] who use post-processing Poisson disk averaging (expensive, up to 96 samples, fails on specular surfaces), this method interpolates before shading and provides smoother normals without needing TAA or excessive samples [S19]. Unlike Jablonski et al. [10] who use a 3x3 Gaussian filter, this method uses EWA splatting which provides smoother normals [S19]. Unlike storing additional corner values (e.g., 32 instead of 8) which increases memory significantly, this method uses interpolation [S19].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot A)$, where $N$ is the number of particles and $A$ is the average number of pixels covered by a splat. The computation of the EWA filter (matrix inversion, determinant) is done per particle, making it more expensive per particle than simple splatting, but the rasterization is efficient. [S6, unofficial][S13]
+-*   **Memory Complexity:** $O(N)$ to store particle data and splat primitives. The image buffer is $O(W \cdot H)$. [G]
++*   **Time Complexity:** $O(N \cdot A)$, where $N$ is the number of particles and $A$ is the average number of pixels covered by a splat. The computation of the EWA filter (matrix inversion, determinant) is done per particle, making it more expensive per particle than simple splatting, but the rasterization is efficient [G].
++*   **Memory Complexity:** $O(N)$ to store particle data and splat primitives. The image buffer is $O(W \cdot H)$ [G].
+ *   **Measured Performance:** Zwicker et al. reported rendering times of 11 seconds for the Skull dataset on an 866 MHz Pentium-III [S1, unofficial]. Adaptive EWA splatting reduces this cost significantly for distant particles [S6, unofficial].
+ *   **Strengths:** High image quality, aliasing-free, handles arbitrary elliptical kernels, works with regular and irregular grids [S2][S8, unofficial].
+ *   **Limitations:** Computationally expensive due to matrix operations and per-pixel filter evaluation. Requires sorting particles back-to-front. [S6, unofficial][S13]
+-*   **When to use:** When high-quality, aliasing-free volume rendering is required, and performance allows for the computational cost. [S13]
+-*   **When not to use:** For real-time applications with very large datasets where adaptive approximations or simpler splatting methods are necessary. [S6, unofficial]
++*   **When to use:** When high-quality, aliasing-free volume rendering is required, and performance allows for the computational cost [S13].
++*   **When not to use:** For real-time applications with very large datasets where adaptive approximations or simpler splatting methods are necessary [S6, unofficial].
+ 
+ ## Background

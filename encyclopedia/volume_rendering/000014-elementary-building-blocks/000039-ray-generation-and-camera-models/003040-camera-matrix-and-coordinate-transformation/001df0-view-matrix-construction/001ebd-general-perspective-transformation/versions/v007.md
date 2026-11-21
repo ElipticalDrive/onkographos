@@ -1,0 +1,67 @@
+# General Perspective Transformation
+
+Also called: Eye-to-screen transformation, Perspective Transformation with Eye and Projection Plane Off-Origin
+
+## Overview
+This method defines a perspective projection where both the camera eye and the projection plane are displaced from the world origin, ensuring the Jacobian of the transformation is the identity at the center of the visibility bounding box (Vbb) [S1]. It solves the problem of geometric distortion and floating-point precision loss in screen-z values that occurs when standard perspective projections (with the eye at the origin) are applied to scenes where the center of interest is far from the origin [S1]. Unlike standard parallel projections which preserve relative screen space, this method creates an illusion of depth by causing background objects to occupy less screen space than foreground objects of the same size [S2, unofficial].
+
+## How it works
+**Inputs:**
+- Eye position offset parameter $e_o$ [S1].
+- Translation parameter $z_t$ [S1].
+- Visibility bounding box (Vbb) center (implicitly used to define the identity Jacobian point) [S1].
+
+**Outputs:**
+- Transformed eye position [S1].
+- Transformed projection plane equation [S1].
+
+**Data Structures:**
+- No specific complex data structures are required beyond standard 3D coordinate vectors. The transformation is defined by scalar parameters and a resulting plane equation.
+
+**Steps:**
+1.  **Define Base Geometry:** Establish the initial geometric basis where the eye is at $(0, 0, e_o)$ and the projection plane is at $z=0$ (or centered at $(0, 0, -e_o)$ relative to the Vbb center before translation) [S1].
+2.  **Apply Z-Translation:** The user applies a translation in the z-direction, denoted by $z_t$. This translation simultaneously moves the eye point and the projection plane away from the world origin [S1].
+3.  **Calculate Eye Position:** The new eye position is calculated as:
+    $$ \text{Eye} = (0, 0, e_o - z_t) $$
+    [S1]
+4.  **Calculate Projection Plane:** The new projection plane is defined by the equation:
+    $$ z = -z_t $$
+    [S1]
+5.  **Verify Jacobian:** Ensure that at the center of the Vbb, the Jacobian of the transformation is the identity matrix. This condition is satisfied by the specific placement of the eye and plane relative to the Vbb center, minimizing relative errors in screen-z values [S1].
+
+**Parameters:**
+- $e_o$: Base eye distance parameter [S1].
+- $z_t$: User-specified translation in z [S1].
+
+**Edge Cases and Pitfalls:**
+- If the Vbb center is not properly aligned with the identity Jacobian point, the transformation may introduce distortion [S1].
+- Standard perspective transformations where the projection plane passes through the origin are insufficient for scenes where the center of the screen-z values is near the center of the Vbb but the Vbb itself is far from the origin [S1].
+
+## Subtopics
+
+### [Numerically Stable Perspective Transformation](2008-numerically-stable-perspective-transformation.md)
+This variant prevents floating-point errors in screen-z values that occur when translating vertices far from the origin in standard perspective projections, which otherwise cause ordering inconsistencies during the compositing of thousands of closely spaced triangles. It differs from standard perspective transformations by positioning the eye away from the world origin, thereby establishing a geometric basis where relative errors are minimized without requiring double-precision arithmetic.
+
+### [Custom Perspective Projection Matrix Construction](2175-custom-perspective-projection-matrix-construction.md)
+This method constructs the perspective projection matrix and view matrix required to transform 3D world coordinates into clip space for volume rendering and rasterization. It solves the problem of defining the camera's field of view, aspect ratio, and depth clipping planes in a way that is compatible with specific rendering pipelines, such as those used in Gaussian Splatting or standard OpenGL-based volume renderers. It differs from generic graphics pipelines by explicitly managing intrinsic scaling (focal lengths) for multi-resolution training and constructing a specific projection matrix tailored for the near/far plane constraints of the rendering engine. It builds on [General Perspective Transformation](1845-general-perspective-transformation.md).
+
+### Film Shift
+This variant constrains the film position by the refraction of the ray connecting the lens to the pivot. The shifted film interaction position $x'_{\text{film}}$ is evaluated using $x'_{\text{lens}}$ and $x'_{\text{pivot}}$ [S3]. The change of measure between the base film interaction and the shifted one is accounted for with the Jacobian:
+$$ |S'_{i \rightarrow j}(x_{\text{film}})| = \frac{g(x_{\text{lens}}, x_{\text{pivot}})}{g(x_{\text{lens}}, x_{\text{film}})} \times \frac{g(x'_{\text{lens}}, x'_{\text{pivot}})}{g(x'_{\text{lens}}, x'_{\text{film}})} $$
+where $g(a,b) = D(a,b) / |b-a|^2$ and $D(a,b) = |\tilde{\boldsymbol{u}}_{ab} \times \tilde{\boldsymbol{n}}_b|$ if $b$ is on a surface, else $D(a,b) = 1$ [S3].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Minimizes floating-point precision errors in screen-z values for scenes with large offsets from the origin [S1]. Ensures the Jacobian is identity at the Vbb center, aiding in accurate volume rendering [S1].
+- **Limitations:** Requires careful calculation of eye and plane positions relative to the Vbb [S1].
+- **When to use:** When rendering scenes where the center of interest (Vbb) is far from the world origin, and standard perspective projections cause precision issues [S1].
+- **When not to use:** For simple scenes centered at the origin where standard perspective projection suffices.
+
+## Background
+The method originates from work on hierarchical and parallelizable direct volume rendering for irregular and multiple grids [S1]. It was developed to address the limitations of standard perspective transformations where the projection plane passes through the origin, which was insufficient for maintaining precision in screen-z values for large visibility bounding boxes [S1]. The concept of perspective projection creating an illusion of depth is a fundamental principle in computer graphics, often implemented using functions like `glFrustum` in OpenGL-based tools like Smokeview [S2, unofficial].
+
+## Sources
+[S1] Hierarchical and parallelizable direct volume rendering for irregular and multiple grids, https://doi.org/10.1109/visual.1996.567606, fetched 2026-10-24
+[S2] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
+[S3] Volumetric Multi‐View Rendering, https://doi.org/10.1111/cgf.14481, fetched 2026-10-26

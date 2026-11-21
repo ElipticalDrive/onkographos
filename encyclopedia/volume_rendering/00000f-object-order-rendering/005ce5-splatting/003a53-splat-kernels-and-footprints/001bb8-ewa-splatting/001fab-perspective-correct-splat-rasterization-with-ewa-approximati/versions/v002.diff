@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-This method is an improved splat rendering pipeline that combines a perspectively correct fast splat rasterization procedure with an approximation of the Elliptical Weighted Average (EWA) filter [S1][S2, unofficial]. It solves the problem of aliasing artifacts and visual holes in point-sampled geometry rendering, particularly when the model is viewed from flat angles or shifted from the viewing axis [S2, unofficial]. Unlike its siblings, it uses an affine approximation to the projective mapping to ensure perspective-correct splat shapes without requiring per-point normals or complex anisotropic footprint calculations, trading exact band-limited footprints for a formulation that avoids holes and Moiré patterns [S2, unofficial]. It builds on [EWA Splatting](1069-ewa-splatting.md) by replacing the standard EWA covariance computation with a faster, perspective-correct affine approximation.
++This method is an improved splat rendering pipeline that combines a perspectively correct fast splat rasterization procedure with an approximation of the Elliptical Weighted Average (EWA) filter [S1][S2, unofficial]. It solves the problem of aliasing artifacts and visual holes in point-sampled geometry rendering, particularly when the model is viewed from flat angles or shifted from the viewing axis [S2, unofficial]. Unlike its siblings, it uses an affine approximation to the projective mapping to ensure perspective-correct splat shapes without requiring per-point normals or complex anisotropic footprint calculations, trading exact band-limited footprints for a formulation that avoids holes and Moiré patterns [S2, unofficial]. It builds on [EWA Splatting](1069-ewa-splatting.md) by replacing the standard EWA covariance computation with a faster, perspective-correct affine approximation [S2, unofficial].
+ 
+ ## How it works
+-The method operates in a multi-pass pipeline, typically involving a visibility pass, an attribute pass, and a normalization pass. It relies on an affine approximation of the projective mapping to compute the splat's screen-space shape.
++The method operates in a multi-pass pipeline, typically involving a visibility pass, an attribute pass, and a normalization pass [S2, unofficial]. It relies on an affine approximation of the projective mapping to compute the splat's screen-space shape [S2, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -14,6 +14,6 @@
+ 
+ ### Data Structures
+-*   **Lookup Table (LUT):** A 1D texture storing Gaussian filter weights. The index is determined by the squared distance $r^2$ from the splat center in screen space, normalized by the filter width.
+-*   **Conic Matrix:** A $2 \times 2$ matrix representing the inverse of the resampling filter's variance in screen space.
++*   **Lookup Table (LUT):** A 1D texture storing Gaussian filter weights. The index is determined by the squared distance $r^2$ from the splat center in screen space [S2, unofficial].
++*   **Conic Matrix:** A $2 \times 2$ matrix representing the inverse of the resampling filter's variance in screen space, computed as $(Q_{000} + H)^{-1}$ [S2, unofficial].
+ 
+ ### Numbered Steps
+@@ -21,5 +21,5 @@
+ 1.  **Vertex Processing (Visibility and Shape Approximation):**
+     For each splat $k$:
+-    a.  Compute the projective mapping matrix $M_k$ that maps the local Gaussian reconstruction kernel to screen space.
++    a.  Compute the projective mapping matrix $M_k$ that maps the local Gaussian reconstruction kernel to screen space [S2, unofficial].
+     b.  Compute the inverse $M_k^{-1}$ to derive the approximate variance matrix $Q_{000}$ [S2, unofficial].
+     c.  **Numerical Stability Check:** Calculate the condition number of $M_k$. If it exceeds a threshold (indicating the splat is degenerating into a line segment or is numerically ill-conditioned), discard the splat [S2, unofficial].
+@@ -35,9 +35,9 @@
+     b.  If $r^2 < F_g^2$ (where $F_g$ is the Gaussian filter width threshold), use $r^2$ as an index into the 1D LUT to retrieve the Gaussian filter weight [S2, unofficial].
+     c.  Otherwise, discard the fragment [S2, unofficial].
+-    d.  Output the weighted attribute value and alpha.
++    d.  Output the weighted attribute value and alpha [S2, unofficial].
+ 
+ 3.  **Normalization Pass:**
+-    a.  Copy the result of the attribute pass (weighted sum of attributes and alpha) to a texture.
+-    b.  Render a window-sized rectangle using this texture.
++    a.  Copy the result of the attribute pass (weighted sum of attributes and alpha) to a texture [S2, unofficial].
++    b.  Render a window-sized rectangle using this texture [S2, unofficial].
+     c.  In the fragment program, perform the division by the accumulated alpha to normalize the color values [S2, unofficial].
+ 
+@@ -45,45 +45,34 @@
+ 
+ ```python
+-# Vertex Program
+ def vertex_program(splat_position, projection_matrix, view_matrix):
+     # 1. Compute projective mapping matrix Mk
+-    Mk = compute_projective_mapping(splat_position, projection_matrix, view_matrix)
+-    
++    Mk = compute_projective_mapping(splat_position, projection_matrix, view_matrix) # [G]
+     # 2. Invert Mk to get Q000
+     Mk_inv = invert_2x2_matrix(Mk)
+-    Q000 = compute_variance_from_inverse(Mk_inv)
+-    
++    Q000 = compute_variance_from_inverse(Mk_inv) # [G]
+     # 3. Check condition number for numerical stability
+     cond_number = condition_number(Mk)
+     if cond_number > THRESHOLD:
+-        return discard_splat()
+-        
++        return None
+     # 4. Check if conic is an ellipse
+     if not is_ellipse(Q000):
+-        return discard_splat()
+-        
++        return None
+     # 5. Compute bounding box for OpenGL point size
+-    point_size = compute_bounding_box_size(Q000)
+-    
++    point_size = compute_bounding_box_size(Q000) # [G]
+     # 6. Compute final conic matrix for fragment shader
+-    # H is the Gaussian prefilter variance (constant or per-splat)
+-    H = get_gaussian_prefilter_variance()
++    H = get_gaussian_prefilter_variance() # [G]
+     conic_matrix = invert_2x2_matrix(Q000 + H)
+-    
+     return {
+         'point_size': point_size,
+         'conic_matrix': conic_matrix,
+-        'splat_center': project_to_screen(splat_position)
++        'splat_center': project_to_screen(splat_position) # [G]
+     }
+ 
+-# Fragment Program
+-def fragment_program(conic_matrix, splat_center, wpos):
++def fragment_program(conic_matrix, splat_center, wpos, splat_color, splat_alpha):
+     # wpos is the pixel coordinate
+     x = wpos - splat_center
+-    
+     # Evaluate ellipse equation r^2 = x * (Q000 + H)^-1 * x^T
+-    # Note: x is a row vector, so x^T is column
+-    r_squared = dot_product(x, multiply_matrix_vector(conic_matrix, transpose(x)))
+-    
++    r_squared = (x[0] * (conic_matrix[0][0] * x[0] + conic_matrix[0][1] * x[1]) +
++                 x[1] * (conic_matrix[1][0] * x[0] + conic_matrix[1][1] * x[1]))
+     # F_g is the Gaussian filter width threshold
+     if r_squared < F_g_squared:
+@@ -95,24 +84,22 @@
+         }
+     else:
+-        return discard_fragment()
++        return None
+ 
+-# Normalization Pass
+ def normalization_pass(rendered_texture):
+     # Render full-screen quad
+-    for each pixel:
++    for pixel_coord in screen_pixels:
+         accumulated_color = texture_lookup(rendered_texture, pixel_coord).color
+         accumulated_alpha = texture_lookup(rendered_texture, pixel_coord).alpha
+-        
+         if accumulated_alpha > 0:
+             final_color = accumulated_color / accumulated_alpha
+         else:
+             final_color = 0
+-        return final_color
++        yield final_color
+ ```
+ 
+ ### Parameters
+-*   **Threshold for Condition Number:** Not given in the sources.
+-*   **Gaussian Filter Width ($F_g$):** Not given in the sources.
+-*   **Prefilter Variance ($H$):** Not given in the sources.
++*   **Threshold for Condition Number:** Not given in the sources [S2, unofficial].
++*   **Gaussian Filter Width ($F_g$):** Not given in the sources [S2, unofficial].
++*   **Prefilter Variance ($H$):** Not given in the sources [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+@@ -125,32 +112,29 @@
+ 
+ ### Deferred Surface Splatting
+-Renders splats by first computing surface normals and then projecting them. It differs by explicitly handling surface orientation, whereas this method uses an affine approximation to projective mapping for perspective correctness without explicit normals. [Link](1072-deferred-surface-splatting.md)
++Computes surface normals for splat projection [G]. Differs by explicitly handling surface orientation, whereas this method uses an affine approximation to projective mapping for perspective correctness without explicit normals. [Link](1072-deferred-surface-splatting.md)
+ 
+ ### Opacity-Thin-Side (OTS)
+-Optimizes rendering for thin surfaces by adjusting opacity based on viewing angle. It differs by focusing on opacity adjustment for thin geometry, while this method focuses on perspective-correct shape and EWA filtering. [Link](1155-opacity-thin-side-ots.md)
++Adjusts opacity based on viewing angle for thin surfaces [G]. Differs by focusing on opacity adjustment for thin geometry, while this method focuses on perspective-correct shape and EWA filtering. [Link](1155-opacity-thin-side-ots.md)
+ 
+ ### OTS (EWA-Based Splatting)
+-Combines OTS with EWA filtering. It differs by integrating opacity thin-side logic with the EWA filter, whereas this method uses a simpler affine approximation for perspective correction. [Link](1181-ots-ewa-based-splatting.md)
++Combines OTS with EWA filtering [G]. Differs by integrating opacity thin-side logic with the EWA filter, whereas this method uses a simpler affine approximation for perspective correction. [Link](1181-ots-ewa-based-splatting.md)
+ 
+ ### GPU-Accelerated Volume Splatting With Elliptical RBFs
+-Uses elliptical Radial Basis Functions for volume rendering. It differs by using elliptical RBFs for volume data, while this method is for point-sampled geometry with an affine EWA approximation. [Link](1186-gpu-accelerated-volume-splatting-with-elliptical-rbfs.md)
++Uses elliptical Radial Basis Functions for volume rendering [G]. Differs by using elliptical RBFs for volume data, while this method is for point-sampled geometry with an affine EWA approximation. [Link](1186-gpu-accelerated-volume-splatting-with-elliptical-rbfs.md)
+ 
+ ### Ellipsoidal Kernel Splatting with Warped Slicing
+-Uses warped slicing to handle ellipsoidal kernels. It differs by using a slicing-based approach for ellipsoidal kernels, whereas this method uses direct splat rasterization with an affine approximation. [Link](1290-ellipsoidal-kernel-splatting-with-warped-slicing.md)
++Uses warped slicing to handle ellipsoidal kernels [G]. Differs by using a slicing-based approach for ellipsoidal kernels, whereas this method uses direct splat rasterization with an affine approximation. [Link](1290-ellipsoidal-kernel-splatting-with-warped-slicing.md)
+ 
+ ### Adaptive EWA Volume Splatting
+-Adapts the EWA filter based on local density. It differs by adapting the filter size, while this method uses a fixed affine approximation for perspective correctness. [Link](2137-adaptive-ewa-volume-splatting.md)
++Adapts the EWA filter based on local density [G]. Differs by adapting the filter size, while this method uses a fixed affine approximation for perspective correctness. [Link](2137-adaptive-ewa-volume-splatting.md)
+ 
+ ### EWA Approximation with Tangent Vector Adjustment
+-Adjusts tangent vectors to improve EWA approximation. It differs by adjusting tangent vectors, whereas this method uses an affine approximation to the projective mapping. [Link](2143-ewa-approximation-with-tangent-vector-adjustment.md)
++Adjusts tangent vectors to improve EWA approximation [G]. Differs by adjusting tangent vectors, whereas this method uses an affine approximation to the projective mapping. [Link](2143-ewa-approximation-with-tangent-vector-adjustment.md)
+ 
+ ### Phong Splatting
+-Applies Phong shading to splats. It differs by adding shading, while this method focuses on perspective-correct rasterization and EWA filtering. [Link](2802-phong-splatting.md)
++Applies Phong shading to splats [G]. Differs by adding shading, while this method focuses on perspective-correct rasterization and EWA filtering. [Link](2802-phong-splatting.md)
+ 
+ ### EWA Splatting Renderer (Mesh-Free)
+-A general EWA splatting renderer for mesh-free data. It differs by being a general renderer, while this method specifically uses an affine approximation for perspective correctness. [Link](4665-ewa-splatting-renderer-mesh-free.md)
+-
+-### EWA Splatting with kNN Covariance Estimation
+-Uses k-NN for covariance estimation. It differs by using k-NN for covariance, whereas this method uses an affine approximation to the projective mapping. [Link](4690-ewa-splatting-with-knn-covariance-estimation.md)
++A general EWA splatting renderer for mesh-free data [G]. Differs by being a general renderer, while this method specifically uses an affine approximation for perspective correctness. [Link](4665-ewa-splatting-renderer-mesh-free.md)
+ 
+ ## Operating characteristics

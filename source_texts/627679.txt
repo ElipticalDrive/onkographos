@@ -1,0 +1,136 @@
+for files on supporting filesystems, we have the SEEK_HOLE/SEEK_DATA api. but this does not apply to block devices, we need something else to detect unused blocks in these. For block devices, sometimes another API is supported: nbd: BLOC...
+
+"sparse" block devices · Issue #5609 · borgbackup/borg · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+"sparse" block devices #5609
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+"sparse" block devices#5609
+Copy link
+Labels
+help wantedquestion
+Milestone
+2.x
+Description
+ThomasWaldmann
+opened on Jan 3, 2021
+Issue body actions
+for files on supporting filesystems, we have the SEEK_HOLE/SEEK_DATA api.
+but this does not apply to block devices, we need something else to detect unused blocks in these.
+For block devices, sometimes another API is supported:
+nbd: BLOCK_STATUS, see e.g.: https://github.com/xapi-project/vhd-tool/blob/master/scripts/get_nbd_extents.py
+(add other APIs)
+Since recently, borg fixed blocksize chunker can accept a sparse map / file map, but there is no way yet to build that map for a block device.
+Related to #14.
+Activity
+ThomasWaldmann
+added
+help wanted
+question
+on Jan 3, 2021
+ThomasWaldmann
+added this to the hydrogen milestone on Jan 3, 2021
+ThomasWaldmann
+modified the milestones: hydrogen aka 1.2.0, 1.2.x on Jan 20, 2022
+ThomasWaldmann
+modified the milestones: 1.2.x, 2.x on Jun 26, 2022
+ThomasWaldmann commented on Nov 11, 2025
+ThomasWaldmann
+on Nov 11, 2025
+MemberAuthor
+More actions
+Junie AI generated info, not verified:
+What issue #5609 asks
+You asked whether there’s an equivalent to filesystem SEEK_HOLE/SEEK_DATA for block devices and to give examples. Per the GitHub issue you referenced, filesystems have SEEK_HOLE/SEEK_DATA, but block devices need different mechanisms to discover unallocated/zeroed areas. The issue notes one such mechanism for NBD and invites more.
+Short answer
+Yes. Several block-device protocols and subsystems expose APIs to query allocation/sparse extents (or provisioning status) on block devices. Examples include:
+NBD: BLOCK_STATUS (extent mapping)
+SCSI: GET LBA STATUS for thin-provisioned LUNs
+NVMe: Get LBA Status (NVMe 1.4+)
+Linux device-mapper thin provisioning (LVM thin): tooling like thin_ls/thin_dump to list mapped extents
+Windows: volume-level bitmaps via FSCTL_GET_VOLUME_BITMAP (and related), which report used clusters of a volume/block device
+Below are details and example commands.
+Examples by technology
+1) Network Block Device (NBD) — BLOCK_STATUS
+What it does: Reports extents with flags like ALLOCATED and ZERO across the export.
+Example tooling:
+nbdinfo --map nbd://server/export
+qemu-img map --output=json nbd:unix:/path/to/socket
+Example Python reference: NBD CMD_BLOCK_STATUS (used by tools like libnbd, qemu-nbd).
+2) SCSI thin-provisioned LUNs — GET LBA STATUS
+What it does: Reports provisioning (mapped/unmapped) per-LBA ranges for thin-provisioned devices.
+Indicators: READ CAPACITY(16) flags LBPME/LBPRZ indicate thin provisioning and zero-after-unmap behavior.
+Example tooling:
+sg_get_lba_status /dev/sdX (from sg3_utils) to list extents and their provisioning status.
+Some storages surface this via vendor tools/APIs as well.
+3) NVMe namespaces — Get LBA Status (NVMe 1.4+)
+What it does: Reports LBA allocation status for ranges, similar in spirit to SCSI’s GET LBA STATUS.
+Example tooling:
+nvme get-lba-status /dev/nvme0n1 --start-lba=0 --length=<blocks> (from nvme-cli, where supported by the device/firmware).
+Notes: Requires NVMe 1.4+ and controller/namespace support.
+4) Linux device-mapper thin provisioning (LVM thin)
+What it does: Reports which blocks of a thin volume are actually mapped in the thin-pool metadata.
+Example tooling:
+thin_ls --mappings --dev /dev/mapper/vg/thinvol (from thin-provisioning-tools)
+thin_dump /dev/vg/thinpool_tmeta | ... to analyze the metadata directly.
+dmsetup status /dev/mapper/vg-thinpool (summary stats); for per-extent maps, use thin_ls.
+5) Windows volumes (NTFS, etc.) — volume bitmap
+What it does: Yields a bitmap of used clusters on a volume device.
+Example APIs:
+FSCTL_GET_VOLUME_BITMAP via DeviceIoControl returns which clusters are allocated.
+Related: FSCTL_QUERY_ALLOCATED_RANGES (file-level), FSCTL_GET_RETRIEVAL_POINTERS (file extents).
+Example tooling: Various defrag/backup tools use FSCTL_GET_VOLUME_BITMAP to skip unused clusters when imaging a volume.
+Additional notes and non-examples
+ATA/SATA TRIM (DSM) and SCSI UNMAP/NVMe DEALLOCATE are for telling devices which LBAs can be discarded, not typically for querying maps. Query capabilities are vendor/protocol specific (e.g., SCSI/NVMe LBA status, not generic ATA).
+Zoned block devices: BLKREPORTZONE reports zone states, which is orthogonal to sparse mappings.
+Filesystem ioctls like FIEMAP/FIBMAP apply to files, not raw block devices.
+How this could integrate with Borg’s fixed-block chunker
+Since Borg’s fixed-block chunker can now accept a sparse/block map, any of the above sources can be used to build that map for a block device:
+NBD: parse nbdinfo --map (or qemu-img map) output and feed allocated/zero extents.
+SCSI: parse sg_get_lba_status output to collect mapped vs. unmapped LBAs.
+NVMe: parse nvme get-lba-status extents similarly.
+LVM thin: parse thin_ls --mappings to collect mapped extents of a thin volume.
+Quick reference: commands
+```
+# NBD extent map
+nbdinfo --map nbd://host/export
+qemu-img map --output=json nbd:unix:/run/nbd.sock
+
+# SCSI thin: LBA status
+sg_get_lba_status /dev/sdX
+
+# NVMe: LBA status (NVMe 1.4+)
+nvme get-lba-status /dev/nvme0n1 --start-lba=0 --length=0   # 0 may mean "entire ns" if supported
+
+# LVM thin: mapped blocks
+thin_ls --mappings --dev /dev/mapper/vg-thinvol
+```
+If you can share which block device type you’re targeting (e.g., NVMe SSD, iSCSI LUN, LVM-thin volume, NBD export), I can outline the exact steps to extract a sparse map suitable for Borg.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+help wantedquestion
+Type
+No type
+Projects
+No projects
+Milestone
+2.xNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

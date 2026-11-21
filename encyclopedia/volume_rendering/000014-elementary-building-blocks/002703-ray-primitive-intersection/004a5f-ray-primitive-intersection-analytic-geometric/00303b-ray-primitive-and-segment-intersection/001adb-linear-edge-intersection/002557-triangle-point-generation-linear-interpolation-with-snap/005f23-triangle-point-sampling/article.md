@@ -1,0 +1,155 @@
+# Triangle Point Sampling
+
+Also called: Barycentric Coordinate Sampling, Barycentric Triangle Sampling, Triangle Sampling, Uniform Triangle Sampling
+
+## Overview
+Triangle Point Sampling is a method to uniformly sample points over a mesh surface by selecting triangles proportional to their area and then sampling a point uniformly within the selected triangle using barycentric coordinates [S1, unofficial]. It builds on [Triangle Point Generation (Linear Interpolation with Snap)](3506-triangle-point-generation-linear-interpolation-with-snap.md) by providing the probabilistic selection and coordinate transformation logic required to ensure uniform spatial distribution across the entire mesh surface, correcting for the non-linear area distortion inherent in simple linear interpolation of random variables [S1, unofficial].
+
+## How it works
+The method consists of two phases: triangle selection based on cumulative area, and point generation within the selected triangle using square-root-transformed barycentric coordinates.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `vertices`: A list of $N$ triangles, where each triangle is defined by 3 vertices. Each vertex is a 3D vector $(V_x, V_y, V_z)$.
+    *   `areas`: A list of $N$ floats, where `areas[i]` is the area of triangle $i$.
+    *   `cumulative_areas`: A list of $N$ floats, where `cumulative_areas[i]` is the sum of areas of triangles $0$ through $i$. `total_area` is `cumulative_areas[-1]`.
+    *   `rng`: A seeded random number generator capable of producing uniform random numbers in $[0, 1)$.
+    *   `uvs` (optional): A list of $N$ triangles, where each triangle has 3 UV coordinates corresponding to the vertices.
+*   **Outputs**:
+    *   `point`: A 3D vector $(P_x, P_y, P_z)$ representing the sampled point on the mesh surface.
+    *   `uv` (optional): A 2D vector $(U, V)$ representing the interpolated UV coordinate at the sampled point.
+
+### Data Structures
+*   **`cumulative_areas`**: An array of floats. `cumulative_areas[i] = \sum_{k=0}^{i} areas[k]`. The last element is `total_area`.
+*   **`vertices`**: A list of lists or arrays. `vertices[i]` contains 3 vertices. `vertices[i][j]` is the $j$-th vertex of the $i$-th triangle. Each vertex is a tuple or array of 3 floats $(x, y, z)$.
+*   **`uvs`**: Optional. Same structure as `vertices`, but each vertex is a tuple or array of 2 floats $(u, v)$.
+
+### Steps
+1.  **Triangle Selection**:
+    1.  Generate a random number `pick` in the range $[0, \text{total\_area})$ using `rng`.
+    2.  Find the index of the triangle containing `pick` using binary search on `cumulative_areas`. Specifically, find the first index `triangle_index` such that `cumulative_areas[triangle_index] > pick`.
+    3.  Handle the boundary case: if `triangle_index` equals the number of triangles (which can happen if `pick` is very close to `total_area` due to floating-point precision), clamp it to the last valid index (`len(vertices) - 1`).
+2.  **Point Generation**:
+    1.  Generate two independent uniform random numbers `r1` and `r2` in $[0, 1)$ using `rng`.
+    2.  Compute `sqrt_r1` as the square root of `r1`.
+    3.  Calculate barycentric weights:
+        $$w_A = 1 - \sqrt{r_1}$$
+        $$w_B = \sqrt{r_1}(1 - r_2)$$
+        $$w_C = \sqrt{r_1}r_2$$
+    4.  Retrieve the vertices of the selected triangle: $V_A = \text{vertices}[\text{triangle\_index}][0]$, $V_B = \text{vertices}[\text{triangle\_index}][1]$, $V_C = \text{vertices}[\text{triangle\_index}][2]$.
+    5.  Compute the 3D point coordinates by linear combination:
+        $$P_x = w_A V_{A,x} + w_B V_{B,x} + w_C V_{C,x}$$
+        $$P_y = w_A V_{A,y} + w_B V_{B,y} + w_C V_{C,y}$$
+        $$P_z = w_A V_{A,z} + w_B V_{B,z} + w_C V_{C,z}$$
+    6.  If `uvs` is available, interpolate UV coordinates using the same weights:
+        $$U = w_A UV_{A,u} + w_B UV_{B,u} + w_C UV_{C,u}$$
+        $$V = w_A UV_{A,v} + w_B UV_{B,v} + w_C UV_{C,v}$$
+    7.  Return `point` and `uv` (or `None` if `uvs` is not provided).
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def triangle_point_sampling(vertices, cumulative_areas, total_area, rng, uvs=None):
+    """
+    Samples a point uniformly on the mesh surface defined by vertices.
+    
+    Args:
+        vertices: List of triangles, each triangle is a list of 3 vertices.
+                  Each vertex is a tuple/list of 3 floats (x, y, z).
+        cumulative_areas: List of floats, cumulative_areas[i] is sum of areas[0..i].
+        total_area: Float, total area of all triangles.
+        rng: Random number generator with method 'random()' returning float in [0, 1).
+        uvs: Optional list of triangles, each triangle is a list of 3 UVs.
+             Each UV is a tuple/list of 2 floats (u, v).
+             
+    Returns:
+        point: Tuple of 3 floats (x, y, z).
+        uv: Tuple of 2 floats (u, v) or None.
+    """
+    # Step 1: Triangle Selection
+    pick = rng.random() * total_area
+    
+    # Binary search for the first index where cumulative_areas[i] > pick
+    triangle_index = 0
+    left, right = 0, len(cumulative_areas) - 1
+    while left <= right:
+        mid = (left + right) // 2
+        if cumulative_areas[mid] > pick:
+            triangle_index = mid
+            right = mid - 1
+        else:
+            left = mid + 1
+            
+    # Handle boundary case: if pick >= total_area, clamp to last triangle
+    if triangle_index >= len(vertices):
+        triangle_index = len(vertices) - 1
+        
+    # Step 2: Point Generation
+    r1 = rng.random()
+    r2 = rng.random()
+    
+    sqrt_r1 = math.sqrt(r1)
+    
+    # Barycentric weights
+    w_A = 1.0 - sqrt_r1
+    w_B = sqrt_r1 * (1.0 - r2)
+    w_C = sqrt_r1 * r2
+    
+    # Get vertices of the selected triangle
+    tri_verts = vertices[triangle_index]
+    V_A = tri_verts[0]
+    V_B = tri_verts[1]
+    V_C = tri_verts[2]
+    
+    # Compute 3D point
+    P_x = w_A * V_A[0] + w_B * V_B[0] + w_C * V_C[0]
+    P_y = w_A * V_A[1] + w_B * V_B[1] + w_C * V_C[1]
+    P_z = w_A * V_A[2] + w_B * V_B[2] + w_C * V_C[2]
+    
+    point = (P_x, P_y, P_z)
+    
+    # Interpolate UVs if available
+    uv = None
+    if uvs is not None:
+        tri_uvs = uvs[triangle_index]
+        UV_A = tri_uvs[0]
+        UV_B = tri_uvs[1]
+        UV_C = tri_uvs[2]
+        
+        U = w_A * UV_A[0] + w_B * UV_B[0] + w_C * UV_C[0]
+        V = w_A * UV_A[1] + w_B * UV_B[1] + w_C * UV_C[1]
+        
+        uv = (U, V)
+        
+    return point, uv
+```
+
+### Parameters and Edge Cases
+*   **Random Number Generator**: Must produce uniform random numbers in $[0, 1)$. The seed should be set appropriately for reproducibility.
+*   **Boundary Case**: If `pick` is exactly `total_area` (or very close due to floating-point error), `triangle_index` might exceed the array bounds. Clamping to the last index is required [S1, unofficial].
+*   **Degenerate Triangles**: Triangles with zero area (collinear vertices) will have zero probability of being selected if `areas` are computed correctly. However, if `areas` are not precomputed or are incorrect, degenerate triangles may cause issues. The method assumes valid, non-degenerate triangles with positive area.
+*   **Precision**: Floating-point precision in `cumulative_areas` can affect triangle selection probability for very large meshes. Using double precision is recommended for `cumulative_areas` and `pick` [S1, unofficial].
+
+## Subtopics
+
+### Cumulative Area Triangle Selection
+A technique to select a triangle with probability proportional to its area by using a precomputed array of cumulative triangle areas and binary search [S1, unofficial]. It uses binary search (`bisect_left` or equivalent) on the `cumulative_areas` array to find the first index where the cumulative area exceeds the random pick value [S1, unofficial]. The data structure `cumulative_areas` is a sequence of floats where `cumulative_areas[i]` is the sum of areas of triangles 0 through $i$, and `total_area` is the last element [S1, unofficial]. This method ensures that triangles with larger areas have a higher probability of being selected, which is necessary for uniform sampling over the mesh surface [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Triangle selection is $O(\log N)$ due to binary search, where $N$ is the number of triangles. Point generation is $O(1)$. Total time per sample is $O(\log N)$.
+*   **Memory Complexity**: $O(N)$ to store `cumulative_areas` and `vertices`. If `uvs` are stored, an additional $O(N)$ memory is required.
+*   **Measured Performance**: Performance depends on the efficiency of the random number generator and the binary search implementation. For large meshes, the $O(\log N)$ selection cost is negligible compared to the cost of ray tracing or shading.
+*   **Strengths**: Guarantees uniform sampling over the mesh surface. Simple to implement. Efficient for static meshes.
+*   **Limitations**: Requires precomputation of triangle areas and cumulative areas. Binary search adds a small overhead. Not suitable for dynamic meshes where topology changes frequently.
+*   **When to Use**: When uniform sampling over a mesh surface is required, such as in Monte Carlo integration for rendering, physics simulations, or texture mapping.
+*   **When Not to Use**: When the mesh is dynamic and triangles are frequently added/removed. When non-uniform sampling is desired (e.g., sampling based on material properties).
+
+## Background
+Triangle Point Sampling is a fundamental technique in computer graphics for generating uniformly distributed points on mesh surfaces. It is widely used in rendering algorithms, particularly in path tracing and Monte Carlo integration, where uniform sampling is required to reduce variance. The method relies on the mathematical property that barycentric coordinates with square-root-transformed random variables yield a uniform distribution within a triangle [S1, unofficial]. The technique is commonly implemented in 3D asset processing tools and dataset builders for neural rendering methods like 3D Gaussian Splatting [S1, unofficial].
+
+## Sources
+[S1] yumehiko/3dgs-dataset-builder, https://github.com/yumehiko/3dgs-dataset-builder, fetched 2026-10-27 (unofficial)

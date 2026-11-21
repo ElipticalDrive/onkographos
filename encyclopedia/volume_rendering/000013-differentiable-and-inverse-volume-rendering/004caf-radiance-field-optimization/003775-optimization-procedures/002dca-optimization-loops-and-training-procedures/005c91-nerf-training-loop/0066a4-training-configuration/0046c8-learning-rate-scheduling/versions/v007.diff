@@ -1,0 +1,350 @@
+--- v006.md
++++ v007.md
+@@ -4,185 +4,191 @@
+ 
+ ## Overview
+-Learning rate scheduling adjusts the optimization step size during radiance field training to balance convergence speed and reconstruction quality [S2, S3, S1, unofficial]. It applies a decay function to the learning rate(s) of the optimizer(s) based on the current training step, epoch, or specific training events [S2, unofficial]. What sets this method apart from its siblings is the variety of decay strategies employed, ranging from simple exponential power-of-2 decay [S2, unofficial] to log-linear interpolation with delay phases [S3, unofficial] and event-driven spikes for densification [S7, unofficial], allowing fine-grained control over parameter groups (e.g., positions vs. features) [S1, unofficial].
++Learning rate scheduling adjusts the optimizer's step size during the training of radiance fields to balance convergence speed and stability. It prevents overshooting during fine-tuning phases and manages the trade-off between rapid initial geometric alignment and precise detail refinement. Unlike [Training Schedule](3154-training-schedule.md), which modifies the active set of losses and structural representation states, learning rate scheduling specifically controls the magnitude of parameter updates [G].
+ 
+ ## How it works
++The method defines a function or rule that maps the current training step (or epoch) to a scalar learning rate value. This value is applied to the optimizer's parameter groups. Common implementations include exponential decay, log-linear interpolation, and piecewise schedules.
++
+ ### Inputs and Outputs
+-*   **Inputs:** Current step/iteration index ($i$ or $t$), maximum steps ($max\_steps$ or $maxSteps$), initial learning rate ($lr\_init$ or $lr\_0$), final learning rate ($lr\_final$ or $lr\_end$), and schedule-specific parameters (e.g., $gamma$, $step\_size$, $L$, $I$) [S3, S4, S5, S7, unofficial].
+-*   **Outputs:** The scaled learning rate value(s) for the current step.
++- **Inputs**: Current step index $i$, maximum steps $N$, initial learning rate $lr_{init}$, final learning rate $lr_{final}$, and schedule-specific parameters (e.g., delay steps, gamma).
++- **Output**: A scalar learning rate $lr(i)$.
+ 
+ ### Data Structures
+-No specific global data structures are required beyond the optimizer's parameter groups. Some implementations maintain lists for dynamic events, such as `upsamp_list` and `N_voxel_list` for upsampling triggers [S8, unofficial].
+-
+-### Numbered Steps and Formulas
+-
+-#### 1. Log-Linear Decay with Delay [S3, unofficial]
+-This schedule decays log-linearly from `lr_init` to `lr_final` over `max_steps`, with an optional initial delay phase [S3, unofficial].
+-1.  **Check for early exit:** If `step < 0` or both `lr_init` and `lr_final` are 0.0, return 0.0 [S3, unofficial].
+-2.  **Calculate normalized progress:** Compute $t = \text{clip}(step / max\_steps, 0, 1)$ [S3, unofficial].
+-3.  **Calculate log-linear interpolation:**
+-    $$ log\_lerp = \exp( \log(lr\_init) \cdot (1 - t) + \log(lr\_final) \cdot t ) $$ [S3, unofficial].
+-4.  **Calculate delay multiplier:**
+-    *   If `lr_delay_steps > 0`:
+-        $$ delay\_rate = lr\_delay\_mult + (1 - lr\_delay\_mult) \cdot \sin\left(0.5 \cdot \pi \cdot \text{clip}\left(\frac{step}{lr\_delay\_steps}, 0, 1\right)\right) $$ [S3, unofficial].
+-    *   Else:
+-        $$ delay\_rate = 1.0 $$ [S3, unofficial].
+-5.  **Return result:**
+-    $$ lr = delay\_rate \cdot log\_lerp $$ [S3, unofficial].
+-
+-**Parameters:** `lr_delay_steps` (default 0), `lr_delay_mult` (default 1.0), `max_steps` (default 1,000,000) [S3, unofficial].
+-
+-#### 2. Exponential Decay via Power-of-2 [S2, unofficial]
+-Divides the learning rate by a power of 2 after each batch, dependent on batch count and epoch [S2, unofficial].
+-1.  **Calculate decay factor:**
+-    $$ factor = 2^{1 / (batchCount \cdot (epoch + 1))} $$ [S2, unofficial].
+-2.  **Update learning rate:**
+-    $$ LR_{new} = \frac{LR_{old}}{factor} $$ [S2, unofficial].
+-    This is applied separately to `configs->learningRate` and `configs->shLearningRate` [S2, unofficial].
+-
+-#### 3. Linear Interpolation with Clamping [S5, unofficial]
+-A piecewise linear schedule defined by start/end steps and values [S5, unofficial].
+-1.  **Unpack parameters:** `start_step`, `start_value`, `end_value`, `end_step` [S5, unofficial].
+-2.  **Calculate progress:**
+-    $$ t = \max\left(\min\left(1.0, \frac{current\_step - start\_step}{end\_step - start\_step}\right), 0.0\right) $$ [S5, unofficial].
+-3.  **Interpolate:**
+-    $$ value = start\_value + (end\_value - start\_value) \cdot t $$ [S5, unofficial].
+-4.  **Handle list inputs:** If the value is not a scalar, parse it from config. If it is a list of length 3, prepend 0 to make it length 4 [S5, unofficial].
+-
+-#### 4. LambdaLR Scheduler [S4, unofficial]
+-Defines a lambda function for the scheduler [S4, unofficial].
+-1.  **Define lambda function:**
+-    $$ lr\_lambda(epoch) = gamma^{(epoch / step\_size)} $$ [S4, unofficial].
+-2.  **Create Scheduler:**
+-    $$ lr\_scheduler = \text{torch.optim.lr\_scheduler.LambdaLR}(optimizer, lr\_lambda, last\_epoch=start\_epoch - 1) $$ [S4, unofficial].
+-
+-**Parameters:** `lr_scheduler_gamma`, `lr_scheduler_step_size` [S4, unofficial].
+-
+-#### 5. Gaussian Means Exponential Decay [S1, unofficial]
+-Schedules the learning rate for means (Adam group 0) exponentially [S1, unofficial].
+-1.  **Calculate normalized step:**
+-    $$ t = \text{clamp}\left(\frac{step}{maxSteps}, 0, 1\right) $$ [S1, unofficial].
+-2.  **Calculate LR:**
+-    $$ lr\_means(t) = \exp( \log(lr\_init) \cdot (1 - t) + \log(lr\_final) \cdot t ) $$ [S1, unofficial].
+-
+-#### 6. Learning Rate Spike [S7, unofficial]
+-Increases the learning rate of specific parameters (instant NGP weights and vertex coordinates) after a densification event [S7, unofficial].
+-1.  **Identify event:** Let $I$ be the iteration of densification [S7, unofficial].
+-2.  **Calculate spike contribution:**
+-    $$ spike(i) = \mathbb{1}\{i - I > 0\} \cdot (l(0) - l(I)) \cdot \exp\left(-\frac{6(i - I)}{L}\right) $$ [S7, unofficial].
+-    Where $i$ is the current iteration, $l(0)$ is the initial learning rate, $l(I)$ is the learning rate at iteration $I$, and $L$ is the duration of the spike [S7, unofficial].
+-3.  **Update LR:**
+-    $$ lr_{new}(i) = lr_{decay}(i) + spike(i) $$ [S7, unofficial].
+-    This increases the decaying learning rate back up to its maximum (initial) value, before decaying it back down in $L$ iterations [S7, unofficial].
+-
+-**Parameter:** $L$ (duration of the spike in iterations) [S7, unofficial].
+-
+-#### 7. Learning Rate Reset on Upsampling [S8, unofficial]
+-Resets or scales the learning rate when the volume grid is upsampled [S8, unofficial].
+-1.  **Check for upsampling:** If current iteration is in `upsamp_list`:
+-    *   Pop target voxel count: $n\_voxels = N\_voxel\_list.pop(0)$ [S8, unofficial].
+-    *   Compute resolution: $reso\_cur = N\_to\_reso(n\_voxels, tensorf.aabb)$ [S8, unofficial].
+-    *   Limit samples: $nSamples = \min(args.nSamples, cal\_n\_samples(reso\_cur, args.step\_ratio))$ [S8, unofficial].
+-    *   Call `tensorf.upsample_volume_grid(reso_cur)` [S8, unofficial].
+-2.  **Adjust Learning Rate:**
+-    *   If `args.lr_upsample_reset` is true:
+-        $$ lr\_scale = 1 $$ [S8, unofficial].
+-    *   Else:
+-        $$ lr\_scale = args.lr\_decay\_target\_ratio^{(iteration / args.n\_iters)} $$ [S8, unofficial].
+-3.  **Reinitialize Optimizer:**
+-    *   Get optimizer groups: $grad\_vars = tensorf.get\_optparam\_groups(args.lr\_init \cdot lr\_scale, args.lr\_basis \cdot lr\_scale)$ [S8, unofficial].
+-    *   Reinitialize: $optimizer = \text{torch.optim.Adam}(grad\_vars, betas=(0.9, 0.99))$ [S8, unofficial].
++- **Optimizer Groups**: Parameters are typically grouped (e.g., by type such as means, features, scales) to allow different learning rates for different components [S1, unofficial][S11, unofficial].
++- **Schedule Config**: A configuration object or dictionary containing parameters like `lr_init`, `lr_final`, `max_steps`, `lr_delay_steps`, and `lr_delay_mult` [S3, unofficial].
++
++### Numbered Steps
++
++1. **Initialize Parameters**: Define $lr_{init}$, $lr_{final}$, and total steps $N$. For exponential schedules, define gamma $\gamma$ and step size $s$ [S4, unofficial]. For delay schedules, define $N_{delay}$ and multiplier $\mu$ [S3, unofficial].
++2. **Calculate Normalized Progress**: Compute the normalized step $t = \text{clamp}(i / N, 0, 1)$ [S1, unofficial][S3, unofficial].
++3. **Compute Base Learning Rate**:
++   - **Exponential Decay**: Calculate $lr_{base} = lr_{init} \cdot \gamma^{(i/s)}$ [S4, unofficial].
++   - **Log-Linear Decay**: Calculate $lr_{base} = \exp(\ln(lr_{init}) \cdot (1 - t) + \ln(lr_{final}) \cdot t)$ [S3, unofficial].
++   - **Linear Decay**: Calculate $lr_{base} = lr_{init} + (lr_{final} - lr_{init}) \cdot t$ [S1, unofficial].
++   - **Cosine Decay**: Apply cosine annealing from $lr_{init}$ to $lr_{final}$ over $N$ steps [S13].
++4. **Apply Delay (Optional)**: If $i < N_{delay}$, apply a delay multiplier. Calculate $r = \text{clamp}(i / N_{delay}, 0, 1)$. Then $delay\_rate = \mu + (1 - \mu) \cdot \sin(0.5 \pi r)$ [S3, unofficial]. If $N_{delay} = 0$, $delay\_rate = 1.0$.
++5. **Combine**: The final learning rate is $lr(i) = lr_{base} \cdot delay\_rate$ [S3, unofficial].
++6. **Update Optimizer**: Set the learning rate for the relevant parameter groups in the optimizer to $lr(i)$ [S4, unofficial].
++
++### Formulas
++
++**Log-Linear Decay with Delay [S3, unofficial]:**
++$$
++t = \text{clamp}\left(\frac{i}{N}, 0, 1\right)
++$$
++$$
++lr_{base} = \exp\left(\ln(lr_{init}) \cdot (1 - t) + \ln(lr_{final}) \cdot t\right)
++$$
++$$
++r = \text{clamp}\left(\frac{i}{N_{delay}}, 0, 1\right)
++$$
++$$
++delay\_rate = \mu + (1 - \mu) \cdot \sin\left(\frac{\pi}{2} r\right)
++$$
++$$
++lr(i) = lr_{base} \cdot delay\_rate
++$$
++
++**Exponential Decay [S4, unofficial]:**
++$$
++lr(i) = lr_{init} \cdot \gamma^{\lfloor i / s \rfloor}
++$$
++
++**Piecewise Schedule [S12, unofficial]:**
++$$
++idx = \text{searchsorted}(milestones, i)
++$$
++$$
++base\_idx = milestones[idx - 1] \text{ if } idx \ge 1 \text{ else } 0
++$$
++$$
++lr(i) = schedules[idx].get(i - base\_idx)
++$$
++
++**Learning Rate Spike after Densification [S7, unofficial]:**
++When densification occurs at iteration $I$, a spike is added to the decaying learning rate $l(i)$ for duration $L$:
++$$
++\text{Spike}(i) = \mathbb{1}\{i - I > 0\} \cdot (l(0) - l(I)) \cdot \exp\left(-\frac{6(i - I)}{L}\right)
++$$
++$$
++lr_{total}(i) = l(i) + \text{Spike}(i)
++$$
++
++### Parameters
++- **$lr_{init}$**: Initial learning rate. Typical values: $10^{-3}$ [S13], $10^{-2}$ [S11, unofficial].
++- **$lr_{final}$**: Final learning rate. Typical values: $5 \times 10^{-5}$ [S13], $10^{-6}$ [S11, unofficial].
++- **$N$**: Total number of optimization steps. Typical values: 100,000 to 30,000 [S3, unofficial][S9].
++- **$N_{delay}$**: Number of steps for the initial delay phase. Default: 0 [S3, unofficial].
++- **$\mu$**: Multiplier for the learning rate during the delay phase. Default: 1.0 [S3, unofficial].
++- **$\gamma$**: Gamma value for exponential decay.
++- **$s$**: Step size for exponential decay.
++- **$L$**: Duration of the learning rate spike in iterations [S7, unofficial].
++
++### Edge Cases and Pitfalls
++- **Zero Learning Rate**: If $lr_{init}$ and $lr_{final}$ are both 0.0, return 0.0 [S3, unofficial].
++- **View-Count Prior**: Without view-count based learning rate adjustments, PSNR can degrade significantly (up to -1.22) [S6].
++- **Feature LR**: Setting feature learning rate to 0 does not significantly change speed or quality, indicating lower impact on improvement [S11, unofficial].
++- **Scaling LR**: Optimal scaling learning rates are typically in the range $[10^{-3}, 10^{-6}]$ [S11, unofficial].
+ 
+ ### Pseudocode
+-The following Python-like pseudocode implements the log-linear decay with delay, as it is widely used in modern Gaussian Splatting implementations [S3, unofficial].
+ 
+ ```python
+ import numpy as np
+ 
+-def get_learning_rate(
+-    step: int,
+-    max_steps: int = 1000000,
+-    lr_init: float = 1.6e-4,
+-    lr_final: float = 1.6e-6,
+-    lr_delay_steps: int = 0,
+-    lr_delay_mult: float = 1.0
+-) -> float:
+-    """
+-    Calculates the learning rate using log-linear decay with an optional delay phase.
+-    Based on [S3, unofficial].
+-    """
+-    # Edge case: invalid step or zero rates
+-    if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+-        return 0.0
+-
+-    # 1. Calculate normalized progress t
+-    t = np.clip(step / max_steps, 0, 1)
+-
+-    # 2. Calculate log-linear interpolation
+-    log_lr_init = np.log(lr_init)
+-    log_lr_final = np.log(lr_final)
+-    log_lerp = np.exp(log_lr_init * (1 - t) + log_lr_final * t)
+-
+-    # 3. Calculate delay multiplier
+-    if lr_delay_steps > 0:
+-        progress_in_delay = np.clip(step / lr_delay_steps, 0, 1)
+-        delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(0.5 * np.pi * progress_in_delay)
+-    else:
+-        delay_rate = 1.0
+-
+-    # 4. Return final learning rate
+-    return delay_rate * log_lerp
++def get_exponential_lr_func(lr_init, lr_final, max_steps, lr_delay_steps=0, lr_delay_mult=1.0):
++    """
++    Generates a learning rate function that decays log-linearly from lr_init to lr_final
++    over max_steps, with an optional initial delay phase.
++    """
++    def lr_func(step):
++        if step < 0:
++            return 0.0
++        if lr_init == 0.0 and lr_final == 0.0:
++            return 0.0
++        
++        # Calculate normalized step t
++        t = np.clip(step / max_steps, 0, 1)
++        
++        # Calculate log-linear interpolation
++        log_lr_init = np.log(lr_init)
++        log_lr_final = np.log(lr_final)
++        log_lerp = np.exp(log_lr_init * (1 - t) + log_lr_final * t)
++        
++        # Calculate delay rate
++        if lr_delay_steps > 0:
++            delay_t = np.clip(step / lr_delay_steps, 0, 1)
++            delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(0.5 * np.pi * delay_t)
++        else:
++            delay_rate = 1.0
++            
++        return delay_rate * log_lerp
++        
++    return lr_func
++
++def apply_lambda_lr_scheduler(optimizer, lr_lambda, last_epoch=-1):
++    """
++    Simulates torch.optim.lr_scheduler.LambdaLR behavior.
++    """
++    for param_group in optimizer.param_groups:
++        # Assuming lr_lambda is a function of epoch/step
++        # In practice, this might need to track the current step
++        param_group['lr'] = lr_lambda(last_epoch)
+ ```
+ 
+-### Parameters with Typical Values
+-*   `lr_init`: $1.6 \times 10^{-4}$ [S3, unofficial].
+-*   `lr_final`: $1.6 \times 10^{-6}$ [S3, unofficial].
+-*   `max_steps`: 1,000,000 [S3, unofficial].
+-*   `lr_delay_steps`: 0 [S3, unofficial].
+-*   `lr_delay_mult`: 1.0 [S3, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Zero Learning Rate:** If `lr_init` and `lr_final` are both 0.0, return 0.0 to avoid NaNs [S3, unofficial].
+-*   **Division by Zero in Delay:** If `lr_delay_steps` is 0, avoid division; use the `else` branch [S3, unofficial].
+-*   **Precision:** Log-linear decay involves exponentials and logarithms; ensure inputs are positive [S3, unofficial].
+-*   **Densification Timing:** For LR spikes, duration $L$ must be chosen carefully to balance adaptation and stability [S7, unofficial].
+-*   **Upsampling Reset:** If `lr_upsample_reset` is false, the learning rate continues to decay, which might be too low for the new grid; if true, it resets to initial, which might be too high [S8, unofficial].
+-
+ ## Subtopics
+ 
++### [Training Loop with Adaptive Regularization & LR Decay](2408-training-loop-with-adaptive-regularization-lr-decay.md)
++Defines the standard iterative optimization protocol for NeRF, combining ray-batched SGD with a two-phase loss schedule and exponential learning rate decay. It differs from [FreeNeRF](7471-pixelnerf.md) by using simpler auxiliary models for depth supervision and explicitly managing regularization weights that decay alongside the learning rate.
++
++### [Training Schedule](3154-training-schedule.md)
++Defines the temporal progression of hyperparameters, loss functions, and structural updates. Unlike learning rate scheduling which adjusts only step size, a training schedule actively changes the *active set* of losses and the *structural state* of the representation (e.g., enabling densification) over specific iteration intervals [G].
++
+ ### [Hyperparameter Configuration for Stochastic Gradient Estimation](6748-hyperparameter-configuration-for-stochastic-gradient-estimat.md)
+-This variant configures learning rates for first-order (OurG, OurH) and second-order (OurHVP, OurHVPA) stochastic gradient estimators. It solves the problem of selecting optimal sampling, learning rate, and trust region parameters for inverse rendering tasks such as caustic optimization, shape reconstruction, and texture mapping. What sets this configuration apart from standard NeRF training is the explicit use of **Sigma annealing** for distribution bandwidth control and **antithetic sampling** to reduce variance, alongside distinct parameter sets for first-order versus second-order optimization loops.
++Defines hyperparameters for optimizing differentiable rendering using first-order and second-order stochastic gradient estimators. It sets apart from standard NeRF training by using **Sigma annealing** for distribution bandwidth control and **antithetic sampling** to reduce variance.
++
++### [Exponential Decay Learning Rate Schedule](9145-exponential-decay-learning-rate-schedule.md)
++An exponentially decaying schedule transitioning from an initial to a final value using a base raised to a normalized step exponent. It provides a non-linear, accelerating reduction in step size, preferred for stabilizing MLP weight convergence compared to linear schedules.
++
++### [XYZ Learning Rate Scheduling](11823-xyz-learning-rate-scheduling.md)
++Adjusts the learning rate specifically for 3D Gaussian point locations (xyz) to balance training speed and rendering quality. It targets spatial parameters sensitive to large learning rates, distinguishing itself from general scalar schedules.
++
++### [Annealing Schedules](11839-annealing-schedules.md)
++A unified framework supporting constant, linear, and exponential interpolation between initial and final values. It differs from exponential decay by using interpolation between bounds rather than a fixed decay rate, and from linear schedules by offering multiple decay modes.
++
++### [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md)
++A schedule transitioning from an initial to a final value using linear interpolation. It provides a deterministic, monotonic decay path, changing the rate by a constant absolute amount per step, unlike exponential decay which changes proportionally.
+ 
+ ### View-count-based Learning Rate
+-This variant adjusts learning rates based on a view-count prior [S6]. It solves the problem of overfitting to frequently viewed regions by down-weighting their learning rates [S6]. What sets this apart is the dynamic adjustment of LR based on observation frequency rather than time [S6]. A pitfall is that without the view-count prior, PSNR can degrade up to -1.22 in the worst case [S6].
++Adjusts learning rates based on a view-count prior. Without this prior, PSNR can degrade up to -1.22 in the worst case [S6].
+ 
+ ### Learning Rate Spike
+-This variant increases the learning rate of specific model parameters (instant NGP weights and vertex coordinates) after a densification event to allow rapid accommodation for changes [S7, unofficial]. It solves the problem of slow convergence after structural changes in the representation [S7, unofficial]. What sets this apart is the use of an exponential spike function added to the decaying learning rate [S7, unofficial].
++A technique to increase the learning rate of specific parameters (instant NGP weights and vertex coordinates) after a densification event. It adds a spike function with duration $L$ on top of the decay function, increasing the rate back to its maximum before decaying again [S7, unofficial].
+ 
+ ### Learning Rate Reset on Upsampling
+-This variant resets or scales the learning rate when the volume grid is upsampled [S8, unofficial]. It solves the problem of the learning rate being too low for the newly introduced high-frequency details [S8, unofficial]. What sets this apart is the explicit reinitialization of the optimizer with scaled learning rates upon grid expansion [S8, unofficial].
++If iteration is in the upsampling list, the learning rate scale is reset to 1. Otherwise, it is computed based on a decay target ratio. The optimizer is reinitialized with the new learning rates [S8, unofficial].
+ 
+ ### Halving Training Iterations with Schedules
+-This variant compensates for reduced training iterations (e.g., 15K instead of 30K) by applying additional learning rate schedules for scale, rotation, and SH DC coefficients, and increasing the SH higher-order coefficient learning rate 5× to 0.000625 [S9]. It solves the problem of quality degradation at reduced iteration counts [S9]. What sets this apart is the assignment of higher LR values early during training while decaying them progressively to standard values [S9]. Training for 15K iterations with these schedules yields PSNR 26.47, LPIPS 0.236, and Opt Time 05:40, halving the training time compared to 30K iterations (10:24) with only a slight PSNR decrease (26.51 → 26.47) [S9].
++Training for 15K iterations instead of 30K, compensated by learning rate schedules for scale, rotation, and SH DC coefficients, and increased SH higher-order LR. This halves training time (10:24 → 05:40) with minimal quality loss (PSNR 26.51 → 26.47) [S9].
+ 
+ ### SH Degree Scheduling
+-This variant gradually increases the Spherical Harmonics (SH) degree during training to improve image quality, as higher degrees do not significantly contribute if used from the start [S10, unofficial]. It solves the problem of inefficient early training on high-degree SH coefficients [S10, unofficial]. What sets this apart is the staged increase: from 0 to 1 during coarse training, then gradually from 1 to the target degree $n$ during fine training, with each increase occurring after 10% of the total fine training iterations [S10, unofficial]. The default SH degree is 1, and the target degree $n$ is chosen based on scene requirements [S10, unofficial].
++Gradually increases the Spherical Harmonics (SH) degree during training. It increases from 0 to 1 during coarse training, and then from 1 to the target degree $n$ during fine training, with each increase occurring after 10% of the total fine training iterations [S10, unofficial].
+ 
+ ### Per-Parameter Learning Rate Scheduling
+-This variant adjusts learning rates for scaling, opacity, rotation, and feature parameters in each training iteration [S11, unofficial]. It solves the problem of suboptimal convergence for specific parameter types [S11, unofficial]. What sets this apart is the independent tuning of each parameter's LR, with scaling LR optimal values mainly located in $[10^{-3}, 10^{-6}]$ [S11, unofficial]. Setting feature LR to 0 does not significantly change speed or quality, indicating less impact on improvement [S11, unofficial].
++Adjusts learning rates for scaling, opacity, rotation, and feature parameters individually. Scaling LR has an optimal range of $[10^{-3}, 10^{-6}]$. Setting feature LR to 0 has little impact on speed or quality [S11, unofficial].
+ 
+ ### Piecewise Schedule
+-This variant composes multiple sub-schedules applied sequentially at specified milestone steps [S12, unofficial]. It solves the problem of needing complex, multi-phase training schedules [S12, unofficial]. What sets this apart is the use of a list of Schedule objects and a 1D array of cumulative milestone steps to route the current step to the correct sub-schedule [S12, unofficial]. The implementation uses `jnp.searchsorted` on milestones to find the active schedule and returns `schedule.get(step - base_idx)` [S12, unofficial].
++A schedule composed of multiple sub-schedules applied sequentially at specified milestone steps. It uses `searchsorted` to find the active sub-schedule based on the current step [S12, unofficial].
++
++### Cosine Decay Learning Rate Schedule
++Optimizes networks using Adam with a learning rate linearly warmed up from 0 to $10^{-3}$ over the first 5,000 iterations, then cosine decayed to a minimum of $5 \times 10^{-5}$ [S13].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per step for standard schedules [S3, unofficial].
+-*   **Memory Complexity:** $O(1)$ additional memory for schedule parameters [S3, unofficial].
+-*   **Scaling:** Schedules are generally independent of batch size, though step counts may scale with dataset size [S3, unofficial].
+-*   **Strengths:** Adapts to the changing loss landscape; prevents overshooting; handles structural changes like densification and upsampling [S7, S8, unofficial].
+-*   **Limitations:** Requires careful tuning of schedule parameters (e.g., $L$, $gamma$, $max\_steps$) [S7, unofficial][S9].
+-*   **When to use:** Standard practice for most radiance field optimizations [S3, unofficial][S9].
+-*   **When not to use:** If training is very short or the representation is static and simple, a constant learning rate might suffice [G].
++- **Time Complexity**: The calculation of the learning rate is $O(1)$ per step. The overhead is negligible compared to the rendering and gradient computation steps.
++- **Memory Complexity**: $O(1)$ additional memory for storing schedule parameters.
++- **Performance**: Exponential and log-linear schedules are effective in preventing overshooting during the fine-tuning phase of radiance field optimization [S2, unofficial]. Cosine decay with warmup is effective for neural SDF reconstruction [S13].
++- **Strengths**: Stabilizes convergence, allows for faster initial training, and enables reduction in total training iterations when combined with other schedules (e.g., halving iterations with LR schedules) [S9].
++- **Limitations**: Requires careful tuning of parameters like delay steps and decay rates. Incorrect scheduling can lead to poor convergence or suboptimal final quality [S6].
+ 
+ ## Background
+-Learning rate scheduling was adopted in volume rendering and NeRFs to handle the slow convergence and instability of training neural radiance fields. The log-linear decay with delay is implemented in InstantSplat [S3, unofficial]. The exponential decay schedule is used in Neural Harmonic Textures [S9]. The learning rate spike technique is introduced in Radiance Meshes [S7, unofficial]. The view-count-based LR is discussed in Direct Voxel Grid Optimization [S6].
++Learning rate scheduling is a fundamental technique in optimization, widely used in deep learning. In the context of Neural Radiance Fields (NeRF) and 3D Gaussian Splatting, it has been adapted to handle the specific challenges of differentiable volume rendering, such as the need for stable convergence of MLP weights and the management of geometric primitives [S2, unofficial][S7, unofficial][S13]. The specific implementations cited here originate from various NeRF and Gaussian Splatting research projects and implementations [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial][S5, unofficial][S6][S7, unofficial][S8, unofficial][S9][S10, unofficial][S11, unofficial][S12, unofficial][S13].
+ 
+ ## Sources
+@@ -195,6 +201,7 @@
+ [S7] Radiance Meshes for Volumetric Reconstruction, https://arxiv.org/abs/2512.04076v1, fetched 2026-10-26 (unofficial)
+ [S8] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+-[S9] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
++[S9] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29
+ [S10] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+ [S11] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)
+-[S12] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)+[S12] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
++[S13] ShadowNeuS: Neural SDF Reconstruction by Shadow Ray Supervision, https://doi.org/10.1109/cvpr52729.2023.00025, fetched 2026-10-26

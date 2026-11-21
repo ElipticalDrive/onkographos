@@ -1,0 +1,133 @@
+# Octree Volume Construction
+
+
+## Overview
+Constructs a hierarchical octree data structure from a 3D volume grid to accelerate ray marching, where leaf nodes store a bitmask representing the presence of density values in their spatial extent [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `volume`: A 3D scalar field providing density samples [S1, unofficial].
+*   `settings.brackets`: An array of threshold coefficients used to quantize volume samples into discrete bracket indices [S1, unofficial].
+*   `levels`: The maximum depth of the octree recursion [S1, unofficial].
+*   `bounding_box`: The spatial extent defining the node's region [S1, unofficial].
+
+**Outputs:**
+*   `octree`: The root node of the constructed octree [S1, unofficial].
+
+**Data Structures:**
+*   `OctreeNode`: Contains `mask` (integer bitmask), `children` (list of 8 child nodes or `None`), and `bounding_box` (spatial bounds) [S1, unofficial].
+*   `BoundingBox`: Contains `min` and `max` coordinate vectors, and a `midpoint()` method returning the center coordinates [G].
+*   `Vec3f`: A 3D vector structure with `x`, `y`, `z` components [G].
+
+**Algorithm:**
+1.  **Base Case (Leaf):** If `levels == 0`, the node is a leaf [S1, unofficial].
+2.  Iterate over the bounding box coordinates expanded by 1 unit in all directions: `x` from `round(bb.min.x - 1)` to `round(bb.max.x + 1)`, `y` from `round(bb.min.y - 1)` to `round(bb.max.y + 1)`, and `z` from `round(bb.min.z - 1)` to `round(bb.max.z + 1)` [S1, unofficial].
+3.  Sample the volume at integer coordinates `(x, y, z)` to get `coef` [S1, unofficial].
+4.  Determine the bracket index by incrementing `bracket` while `settings.brackets[bracket + 1] <= coef` [S1, unofficial].
+5.  Set the bit corresponding to the bracket index in the leaf node's mask: `octree.mask |= (1 << bracket)` [S1, unofficial].
+6.  **Recursive Case (Non-Leaf):** If `levels > 0`, recursively create 8 child octants defined by splitting the current bounding box at its midpoint (`bb.mid`) [S1, unofficial].
+7.  The children are indexed 0-7 corresponding to binary coordinates `(x, y, z)` relative to the midpoint [S1, unofficial].
+8.  Recursively construct each child with `levels - 1` [S1, unofficial].
+9.  After building children, aggregate their masks: `octree.mask` is the bitwise OR of all children's masks, and `maskAll` is the bitwise AND of all children's masks [S1, unofficial].
+10. **Compression:** If `octree.mask == maskAll`, the current node is converted to a leaf node to compress the tree [S1, unofficial]. Memory for children is not freed in this implementation [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Vec3f:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+
+class BoundingBox:
+    def __init__(self, min_val, max_val):
+        self.min = min_val
+        self.max = max_val
+    def midpoint(self):
+        return Vec3f((self.min.x + self.max.x) / 2, (self.min.y + self.max.y) / 2, (self.min.z + self.max.z) / 2)
+
+class OctreeNode:
+    def __init__(self):
+        self.mask = 0
+        self.children = None
+        self.bounding_box = None
+
+def build_octree(volume, settings, levels, bounding_box):
+    node = OctreeNode()
+    node.bounding_box = bounding_box
+
+    if levels == 0:
+        node.mask = 0
+        start_x = round(bounding_box.min.x - 1)
+        end_x = round(bounding_box.max.x + 1)
+        start_y = round(bounding_box.min.y - 1)
+        end_y = round(bounding_box.max.y + 1)
+        start_z = round(bounding_box.min.z - 1)
+        end_z = round(bounding_box.max.z + 1)
+
+        for x in range(start_x, end_x + 1):
+            for y in range(start_y, end_y + 1):
+                for z in range(start_z, end_z + 1):
+                    coef = volume.sample(x, y, z)
+                    bracket = 0
+                    while bracket + 1 < len(settings.brackets) and settings.brackets[bracket + 1] <= coef:
+                        bracket += 1
+                    node.mask |= (1 << bracket)
+        return node
+
+    mid = bounding_box.midpoint()
+    children = []
+    for i in range(8):
+        x_bit = (i >> 2) & 1
+        y_bit = (i >> 1) & 1
+        z_bit = i & 1
+
+        child_min = Vec3f(bounding_box.min.x, bounding_box.min.y, bounding_box.min.z)
+        child_max = Vec3f(bounding_box.max.x, bounding_box.max.y, bounding_box.max.z)
+
+        if x_bit: child_min.x = mid.x
+        else: child_max.x = mid.x
+        if y_bit: child_min.y = mid.y
+        else: child_max.y = mid.y
+        if z_bit: child_min.z = mid.z
+        else: child_max.z = mid.z
+
+        child_box = BoundingBox(child_min, child_max)
+        child_node = build_octree(volume, settings, levels - 1, child_box)
+        children.append(child_node)
+
+    node.children = children
+
+    combined_mask = 0
+    all_mask = -1
+    for child in children:
+        combined_mask |= child.mask
+        all_mask &= child.mask
+
+    node.mask = combined_mask
+
+    if combined_mask == all_mask:
+        node.children = None
+        # Memory for children is not freed [S1, unofficial]
+
+    return node
+```
+
+**Parameters:**
+*   `levels`: The maximum depth of the octree recursion; when `levels == 0`, the node is a leaf [S1, unofficial].
+*   `settings.brackets`: An array of threshold coefficients used to quantize volume samples into discrete bracket indices for the mask [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Compression Memory Handling:** If all children have identical masks (`octree.mask == maskAll`), the current node is converted to a leaf node to compress the tree, though memory for children is not freed [S1, unofficial].
+*   **Bracket Bounds:** The bracket index determination relies on incrementing through `settings.brackets`; a bounds check is required to prevent out-of-bounds access when `coef` exceeds all threshold values [G].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] thewildnath/PathTracer, https://github.com/thewildnath/PathTracer, fetched 2026-10-26 (unofficial)

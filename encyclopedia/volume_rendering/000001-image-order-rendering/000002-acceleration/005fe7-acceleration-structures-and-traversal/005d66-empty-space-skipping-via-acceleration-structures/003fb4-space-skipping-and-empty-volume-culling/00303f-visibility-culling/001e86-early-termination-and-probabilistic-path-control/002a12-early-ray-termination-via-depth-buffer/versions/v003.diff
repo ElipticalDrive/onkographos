@@ -1,0 +1,123 @@
+--- v002.md
++++ v003.md
+@@ -4,80 +4,65 @@
+ 
+ ## Overview
+-Early Ray Termination via Depth Buffer is a GPU optimization technique that skips fragment shader execution for rays that have already accumulated sufficient opacity (are saturated) by performing a depth test before the main volume rendering pass [S1, unofficial]. It sets itself apart from [Opacity-based Early Termination](7920-opacity-based-early-termination.md) by deferring the termination decision to the rasterizer's depth buffer, thereby avoiding the computational cost of evaluating the transfer function and compositing loop for saturated pixels, and from [Empty-space skipping](1002-empty-space-skipping.md) by operating on the accumulated result of previous bricks rather than pre-computed empty regions.
++Early Ray Termination via Depth Buffer is an acceleration technique that skips fragment shader execution for rays that have already reached saturation (opacity $\approx 1$) by testing against a depth buffer before processing the volume data [S1, S2, unofficial]. It solves the problem of redundant computation in opaque regions by preventing the GPU from generating fragments for occluded or saturated positions [S2, unofficial]. It sets itself apart from sibling methods like [Empty-space skipping](1002-empty-space-skipping.md) (which skips empty geometry) and [Opacity-based Early Termination](7920-opacity-based-early-termination.md) (which terminates inside the shader) by using a hardware-level depth test to cull work *before* the expensive volume sampling occurs [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   Input: A volume dataset divided into bricks, a depth buffer containing the depth of the nearest opaque surface rendered so far, and the current brick's geometry.
+-*   Output: A color buffer where saturated pixels are skipped, reducing fragment shader load.
++**Inputs:**
++*   Volume data (voxels or bricks).
++*   Current depth buffer (initialized from previous frame or clear).
++*   Opacity threshold $\tau$ (typically $0.95 \dots 1.0$, varying by rendering mode) [S2, unofficial].
++
++**Outputs:**
++*   Final color buffer.
++*   Updated depth buffer reflecting saturated rays.
+ 
+ **Data Structures:**
+-*   **Depth Buffer:** Standard GPU depth buffer storing depth values ($z$) for each pixel.
+-*   **Brick Geometry:** A solid bounding box representing the brick, rendered with back-face culling enabled.
++*   **Depth Buffer:** Standard 24-bit or 32-bit floating-point buffer storing the maximum depth $z_{max}$ encountered so far for each pixel.
++*   **Brick Bounding Box:** A solid mesh representing the spatial extent of the current volume brick, used for the depth test.
+ 
+-**Steps:**
+-1.  **Traversal Order:** Ensure the volume is traversed in front-to-back order. This is a prerequisite for early ray termination to be valid, as saturation must be detected before it is obscured by further samples [S1, unofficial].
+-2.  **Pre-pass for Saturation Detection:** Before rendering the actual brick texture, execute a preliminary fragment shader program. This is done by drawing a solid bounding box around the brick with back-face culling switched on [S1, unofficial].
+-3.  **Depth Update:** The fragment shader in the pre-pass writes the maximal depth value in the depth buffer for rays that are already saturated. A ray is considered saturated when its accumulated opacity $A_i$ approximates 1 [S1, unofficial].
+-4.  **Main Rendering Pass:** Render the brick's texture slices. The GPU's early Z-test compares the depth of the current fragment against the depth buffer.
+-5.  **Termination:** If the depth test fails (indicating the ray is already saturated and occluded by the depth written in step 3), fragment operations are prevented. This reduces the load on rasterization and fragment shader bottlenecks [S1, unofficial].
++**Algorithm Steps:**
++The method requires traversing the volume in front-to-back order [S1, S2, unofficial].
++
++1.  **Reconstruct Slice Stack:** Compute the current slice from all projections in front-to-back order [S2, unofficial].
++2.  **Composite with Frame Buffer:** Composite the current slice with the existing frame buffer to update color and opacity [S2, unofficial].
++3.  **Update Depth Buffer (Saturation Pass):**
++    *   Examine every fragment's accumulated opacity $A$.
++    *   If $A > \tau$, record the fragment's depth $z$ to update the depth buffer. Specifically, write the maximal depth value for saturated rays [S1, S2, unofficial].
++    *   *Note:* This step ensures the depth buffer reflects where rays are already opaque [S2, unofficial].
++4.  **Render Next Brick with Early Z-Test:**
++    *   Before rendering the texture of the next brick, execute a fragment shader program while drawing a solid bounding box around the brick with back face culling switched on [S1, unofficial].
++    *   This shader writes the maximal depth value in the depth buffer for saturated rays [S1, unofficial].
++    *   When slicing the brick texture, perform an early Z-test. If the depth test fails (indicating the ray is already saturated/occluded by a previous brick), prevent any fragment operations from being executed [S1, unofficial].
++5.  **Repeat:** Proceed to the next slice/brick.
+ 
+ **Formulas:**
+-The compositing loop determines saturation. Let $C_i$ and $A_i$ be the accumulated color and opacity at sample index $i$, and $c_i, \alpha_i$ be the sample color and opacity from the transfer function:
+-
++The standard front-to-back compositing equations are:
+ $$ C_{i+1} = (1 - A_i) \cdot \alpha_i \cdot c_i + C_i $$
+ $$ A_{i+1} = (1 - A_i) \cdot \alpha_i + A_i $$
+-
+-A ray is saturated when $A_i \approx 1$ [S1, unofficial].
++Where $C, A$ are the current ray color and opacity, $c, \alpha$ are the sample color and opacity from the transfer function, and $i$ is the sample index [S1, unofficial]. A ray is considered saturated when $A_i \approx 1$ [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Saturation Threshold:** Not explicitly defined in sources, but implied to be $A_i \approx 1$ [S1, unofficial].
+-*   **Brick Size:** Depends on available texture memory, optimal texture size, data nature, and hardware constraints [S1, unofficial].
++*   **Opacity Threshold ($\tau$):** Varies between 0.0 and 1.0 depending on rendering mode (isosurface vs. full volume) [S2, unofficial]. Typical values are high (e.g., 0.99) for full volume to ensure only truly opaque rays are culled.
+ 
+-**Pitfalls:**
+-*   **Granularity:** Early ray termination is performed only once per brick, not per octree node or per sample. Performing it more frequently (e.g., for every sample) would incur overhead from changing fragment shaders and performing tests that would annihilate the benefits [S1, unofficial].
+-*   **Ordering:** Front-to-back traversal is mandatory. Back-to-front traversal would not allow early termination based on accumulated opacity [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def render_brick_with_early_termination(brick, depth_buffer):
+-    # Step 1: Pre-pass to mark saturated rays in depth buffer
+-    # Draw solid bounding box of the brick with back-face culling ON
+-    set_fragment_shader(mark_saturated_depth_shader)
+-    set_depth_write_enabled(True)
+-    set_depth_func(GREATER) # Write if current depth is greater (further)
+-    draw_brick_bounding_box()
+-    
+-    # Step 2: Main pass to render brick texture
+-    # The early Z-test will now skip fragments where depth test fails
+-    # (i.e., where the ray was marked as saturated in the pre-pass)
+-    set_fragment_shader(volume_rendering_shader)
+-    set_depth_write_enabled(False) # Or keep write, depending on specific implementation
+-    set_depth_func(LESS) # Standard depth test
+-    draw_brick_texture_slices()
+-
+-def mark_saturated_depth_shader(pixel):
+-    # This shader is executed for the bounding box
+-    # It checks if the ray corresponding to this pixel is saturated
+-    # If saturated, it writes the maximal depth value to the depth buffer
+-    if is_ray_saturated(pixel.ray):
+-        write_depth_to_buffer(pixel, MAX_DEPTH)
+-```
++**Edge Cases and Pitfalls:**
++*   **Overhead:** Early ray termination is performed only once per brick, not per octree node or sample. Performing it more frequently (e.g., changing fragment shaders per sample) would annihilate the benefits due to overhead [S1, unofficial].
++*   **Low Computational Effort:** If the fragment shader has low computational effort, the overhead of the depth test and culling mechanism may offset the advantages [S2, unofficial]. This method benefits more from spreading methods with longer fragment shaders [S2, unofficial].
++*   **Order Dependency:** The technique strictly requires front-to-back traversal to correctly identify saturation [S1, S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Depth Prepass with Equal-Depth Shading](15884-depth-prepass-with-equal-depth-shading.md)
+-Optimizes rendering of overlapping opaque primitives by using a dedicated prepass and `depth_compare: Equal` to select the closest hit, bypassing GPU hidden-surface removal issues caused by discard-based impostors.
++Optimizes rendering of overlapping opaque primitives (spheres) by using a dedicated prepass and `depth_compare: Equal` to select the closest hit, bypassing GPU hidden-surface removal issues caused by discard-based impostors.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces fragment shader execution time for saturated pixels. The overhead is limited to one additional draw call (the bounding box) per brick [S1, unofficial].
+-*   **Memory Complexity:** Requires a depth buffer. No additional significant memory structures are described beyond the standard depth buffer [S1, unofficial].
+-*   **Strengths:** Significantly reduces load on rasterization and fragment shader bottlenecks for scenes with high opacity or saturated regions [S1, unofficial].
+-*   **Limitations:** Only effective when rays are saturated. Overhead of the pre-pass must be justified by the number of skipped fragments. Not suitable for back-to-front traversal [S1, unofficial].
+-*   **When to use:** When rendering volumes with significant opaque regions and using a GPU architecture where fragment shader execution is a bottleneck.
+-*   **When not to use:** When the volume is mostly transparent, or when the overhead of the pre-pass exceeds the savings from skipped fragments.
++*   **Time Complexity:** Reduces fragment shader invocations for saturated rays. The cost is proportional to the number of saturated pixels plus the overhead of the depth update pass.
++*   **Memory Complexity:** Requires storage for the depth buffer and the brick bounding boxes.
++*   **Performance:** Achieves good speed-ups for iso-surface rendering where rays are generally terminated early [S2, unofficial]. Effectiveness depends on the ratio of computational effort per fragment; it is most beneficial when fragment shaders are expensive [S2, unofficial].
++*   **Strengths:** Eliminates reconstruction of voxels that do not contribute to rendering [S2, unofficial]. Reduces load on rasterization and fragment shader bottlenecks [S1, unofficial].
++*   **Limitations:** Only effective if the volume traversal is front-to-back. Overhead can negate benefits if the shading is simple or if the test is performed too frequently (e.g., per sample) [S1, S2, unofficial].
+ 
+ ## Background
+-The technique was described by Danny Ruijters in "Optimizing GPU Volume Rendering" [S1, unofficial]. It builds on earlier work by Kruger and Westin [KW03] and Ropinski et al. [RGW+03], cited within the source [S1, unofficial]. The method leverages standard GPU depth testing capabilities to implement early termination, a common optimization in rasterization-based volume rendering.
++The technique was introduced in the context of optimizing GPU volume rendering, specifically for brick-based rendering and distributed volume rendering (D2VR) [S1, S2, unofficial]. It relies on the under operator for front-to-back compositing [S1, unofficial]. The method was cited in works by Krueger et al. [KW03] and Ropinski et al. [RGW+03] [S1, unofficial].
+ 
+ ## Sources
+-[S1] Optimizing GPU Volume Rendering - Danny Ruijters, https://dannyruijters.nl/docs/OptimizingGPUVolumeRendering_final.pdf, fetched 2026-10-26 (unofficial)+[S1] Optimizing GPU Volume Rendering, Danny Ruijters, https://dannyruijters.nl/docs/OptimizingGPUVolumeRendering_final.pdf, fetched 2026-10-26 (unofficial)
++[S2] GPU-Accelerated D2VR, https://doi.org/10.2312/vg/vg06/023-030, fetched 2026-10-26 (unofficial)

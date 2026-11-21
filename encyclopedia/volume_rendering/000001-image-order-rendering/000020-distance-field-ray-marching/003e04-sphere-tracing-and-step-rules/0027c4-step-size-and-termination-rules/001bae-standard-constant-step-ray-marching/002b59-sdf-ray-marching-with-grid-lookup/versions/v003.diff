@@ -1,0 +1,269 @@
+--- v002.md
++++ v003.md
+@@ -4,137 +4,75 @@
+ 
+ ## Overview
+-A GPU-based ray marching algorithm that samples a 3D Signed Distance Function (SDF) grid to find the first intersection point of a ray with the zero-level set (surface) [S1, unofficial]. It differs from [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) by utilizing a pre-computed grid structure and specific termination logic based on pixel-wise distance thresholds rather than simple fixed-step traversal to the first root [S1, unofficial].
++A GPU-based ray marching algorithm that samples a 3D Signed Distance Function (SDF) grid to find the first intersection point of a ray with the zero-level set (surface) [S1, unofficial]. It sets itself apart from [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) by using linear interpolation to evaluate the SDF at arbitrary points within the grid bounds, allowing for precise intersection detection without fixed step constraints [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   `grid`: Float tensor, 3D SDF values [S1, unofficial].
+-*   `origins`: Float tensor, shape $(N, 3)$, ray origins [S1, unofficial].
+-*   `directions`: Float tensor, shape $(N, 3)$, ray directions [S1, unofficial].
+-*   `origin_image_distances`: Float tensor, shape $(N)$, distance from camera origin to image plane [S1, unofficial].
+-*   `pixel_distances`: Float tensor, shape $(N)$, distance from camera origin to the pixel's target depth or reference plane [S1, unofficial].
+-*   `voxel_position`: Float tensor, shape $(N, 3)$, output voxel coordinates of the intersection [S1, unofficial].
+-*   `intersection_pos`: Float tensor, shape $(N, 3)$, output world coordinates of the intersection [S1, unofficial].
++*   `grid`: 3D tensor of float SDF values, shape `(grid_res_x, grid_res_y, grid_res_z)`.
++*   `origins`: 2D tensor of float ray origins, shape `(N, 3)`.
++*   `directions`: 2D tensor of float ray directions, shape `(N, 3)`.
++*   `origin_image_distances`: 1D tensor of float distances from camera origin to image plane, shape `(N,)`.
++*   `pixel_distances`: 1D tensor of float distances from camera origin to pixel locations, shape `(N,)`.
++*   `bounding_box_min`: 3D vector defining the minimum corner of the SDF grid's axis-aligned bounding box.
++*   `bounding_box_max`: 3D vector defining the maximum corner of the SDF grid's axis-aligned bounding box.
++*   `grid_res_x`, `grid_res_y`, `grid_res_z`: Integer resolutions of the SDF grid along each axis.
++*   `max_steps`: Integer maximum number of marching steps per ray (default: 1000) [S1, unofficial].
++
++**Outputs:**
++*   `voxel_position`: 2D tensor of float, shape `(N, 3)`, storing the voxel coordinates of the intersection.
++*   `intersection_pos`: 2D tensor of float, shape `(N, 3)`, storing the 3D world coordinates of the intersection.
++*   `gotten_result`: 1D tensor of int, shape `(N,)`, flag indicating if an intersection was found (1) or not (0).
+ 
+ **Data Structures:**
+-The SDF grid is defined by resolution `grid_res_x`, `grid_res_y`, `grid_res_z` and an axis-aligned bounding box defined by `bounding_box_min` and `bounding_box_max` (coordinates for x, y, z) [S1, unofficial].
++The SDF grid is stored as a contiguous 3D array. Ray parameters are stored in parallel arrays for batch processing.
+ 
+-**Parameters:**
+-*   `max_steps`: Maximum number of marching steps per ray. Value: 1000 [S1, unofficial].
+-*   `step_size`: Fixed distance increment per step. Typical value: 0.01 [G].
++**Steps:**
++1.  Initialize `depth = 0`, `first_time = true`, `gotten_result = 0` for each ray [S1, unofficial].
++2.  Loop for `max_steps` [S1, unofficial]:
++    a.  Calculate current point: `reached_point_x = origins[i] + depth * directions[i]` (and y, z) [S1, unofficial].
++    b.  Call `ValueAt` to get SDF distance at `reached_point` [S1, unofficial].
++    c.  Check for exit: If `distance == -1`, set `voxel_position` and `intersection_pos` to -1, set `gotten_result = 1`, and break [S1, unofficial].
++    d.  Check for intersection: If `distance < pixel_distances[pixel_index] / origin_image_distances[pixel_index] * depth` AND `distance` is truthy (non-zero), record intersection. Set `voxel_position` to floor of current point (clamped to `grid_res - 1`). Set `intersection_pos` to current point. Set `gotten_result = 1` and break [S1, unofficial].
++    e.  Increment `depth` [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  Initialize state variables for each ray: `depth = 0`, `first_time = true`, `gotten_result = 0` [S1, unofficial].
+-2.  Loop up to `max_steps`:
+-    a.  Calculate current world point: $P = \text{origins}[i] + \text{depth} \times \text{directions}[i]$ [S1, unofficial].
+-    b.  Evaluate SDF distance $d = \text{ValueAt}(P)$ using trilinear interpolation [S1, unofficial].
+-    c.  Check for exit: If $d == -1$, set `voxel_position` and `intersection_pos` to -1, set `gotten_result = 1`, and break [S1, unofficial].
+-    d.  Check for intersection: If $d < \frac{\text{pixel\_distances}[i]}{\text{origin\_image\_distances}[i]} \times \text{depth}$ AND $d \neq 0$, record intersection [S1, unofficial]. Set `voxel_position` to $\lfloor P \rfloor$ (clamped to `grid_res - 1`) [S1, unofficial]. Set `intersection_pos` to $P$ [S1, unofficial]. Set `gotten_result = 1` and break [S1, unofficial].
+-    e.  Increment `depth` by `step_size` [G].
+-
+-**Trilinear Interpolation (`ValueAt`):**
+-Given point $P$ with fractional coordinates $t_x, t_y, t_z$ relative to the grid cell:
+-1.  Interpolate along X to get $c_{01}, c_{23}, c_{45}, c_{67}$ [S1, unofficial].
+-2.  Interpolate along Y to get $c_0, c_1$ [S1, unofficial].
+-3.  Interpolate along Z for final result [S1, unofficial].
++**ValueAt (Trilinear Interpolation):**
++1.  Compute fractional coordinates `tx`, `ty`, `tz` relative to the grid cell containing the point [S1, unofficial].
++2.  Interpolate along X to get `c01, c23, c45, c67` [S1, unofficial].
++3.  Interpolate along Y to get `c0, c1` [S1, unofficial].
++4.  Interpolate along Z for final result [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-class Vec3:
+-    def __init__(self, x, y, z):
+-        self.x = x
+-        self.y = y
+-        self.z = z
+-    def __add__(self, other):
+-        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+-    def __mul__(self, scalar):
+-        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
+-    def floor(self):
+-        return Vec3(math.floor(self.x), math.floor(self.y), math.floor(self.z))
+-
+-def sdf_ray_marching_with_grid_lookup(grid, origins, directions, origin_image_distances, pixel_distances, grid_res, bounding_box_min, bounding_box_max, max_steps=1000, step_size=0.01):
+-    N = len(origins)
+-    voxel_position = [Vec3(-1.0, -1.0, -1.0) for _ in range(N)]
+-    intersection_pos = [Vec3(-1.0, -1.0, -1.0) for _ in range(N)]
+-    gotten_result = [False] * N
+-
+-    grid_res_arr = [grid_res[0], grid_res[1], grid_res[2]]
+-    bbox_min = Vec3(bounding_box_min[0], bounding_box_min[1], bounding_box_min[2])
+-    bbox_max = Vec3(bounding_box_max[0], bounding_box_max[1], bounding_box_max[2])
+-    bbox_size = Vec3(bbox_max.x - bbox_min.x, bbox_max.y - bbox_min.y, bbox_max.z - bbox_min.z)
+-
+-    for step in range(max_steps):
+-        depth = step * step_size
+-        for i in range(N):
+-            if gotten_result[i]:
+-                continue
+-
+-            # Calculate current world point
+-            p = Vec3(
+-                origins[i].x + depth * directions[i].x,
+-                origins[i].y + depth * directions[i].y,
+-                origins[i].z + depth * directions[i].z
+-            )
+-
+-            # Evaluate SDF distance
+-            d = value_at(p, grid, grid_res_arr, bbox_min, bbox_size)
+-
+-            # Check for exit
+-            if d == -1.0:
+-                voxel_position[i] = Vec3(-1.0, -1.0, -1.0)
+-                intersection_pos[i] = Vec3(-1.0, -1.0, -1.0)
+-                gotten_result[i] = True
+-                continue
+-
+-            # Check for intersection
+-            threshold = (pixel_distances[i] / origin_image_distances[i]) * depth
+-            if d < threshold and d != 0.0:
+-                voxel_position[i] = p.floor()
+-                # Clamp voxel position to grid bounds
+-                voxel_position[i].x = max(0.0, min(voxel_position[i].x, grid_res_arr[0] - 1))
+-                voxel_position[i].y = max(0.0, min(voxel_position[i].y, grid_res_arr[1] - 1))
+-                voxel_position[i].z = max(0.0, min(voxel_position[i].z, grid_res_arr[2] - 1))
+-                intersection_pos[i] = p
+-                gotten_result[i] = True
+-
+-    return voxel_position, intersection_pos
+-
+-def value_at(p, grid, grid_res, bbox_min, bbox_size):
+-    # Normalize point to [0, 1]
+-    nx = (p.x - bbox_min.x) / bbox_size.x
+-    ny = (p.y - bbox_min.y) / bbox_size.y
+-    nz = (p.z - bbox_min.z) / bbox_size.z
++def value_at(grid, point, grid_res, bounding_box_min, bounding_box_max):
++    # Map world point to grid coordinates
++    grid_x = (point[0] - bounding_box_min[0]) / (bounding_box_max[0] - bounding_box_min[0]) * (grid_res[0] - 1)
++    grid_y = (point[1] - bounding_box_min[1]) / (bounding_box_max[1] - bounding_box_min[1]) * (grid_res[1] - 1)
++    grid_z = (point[2] - bounding_box_min[2]) / (bounding_box_max[2] - bounding_box_min[2]) * (grid_res[2] - 1)
+ 
+     # Check bounds
+-    if nx < 0 or nx > 1 or ny < 0 or ny > 1 or nz < 0 or nz > 1:
++    if not (0 <= grid_x < grid_res[0] and 0 <= grid_y < grid_res[1] and 0 <= grid_z < grid_res[2]):
+         return -1.0
+ 
+-    # Convert to grid coordinates
+-    gx = nx * (grid_res[0] - 1)
+-    gy = ny * (grid_res[1] - 1)
+-    gz = nz * (grid_res[2] - 1)
++    # Get integer and fractional parts
++    ix = int(grid_x)
++    iy = int(grid_y)
++    iz = int(grid_z)
++    fx = grid_x - ix
++    fy = grid_y - iy
++    fz = grid_z - iz
+ 
+-    # Integer and fractional parts
+-    x0 = int(math.floor(gx))
+-    y0 = int(math.floor(gy))
+-    z0 = int(math.floor(gz))
+-    x1 = min(x0 + 1, grid_res[0] - 1)
+-    y1 = min(y0 + 1, grid_res[1] - 1)
+-    z1 = min(z0 + 1, grid_res[2] - 1)
++    # Clamp indices
++    ix = max(0, min(ix, grid_res[0] - 1))
++    iy = max(0, min(iy, grid_res[1] - 1))
++    iz = max(0, min(iz, grid_res[2] - 1))
+ 
+-    fx = gx - x0
+-    fy = gy - y0
+-    fz = gz - z0
+-
+-    # Fetch 8 corners
+-    c000 = grid[x0][y0][z0]
+-    c100 = grid[x1][y0][z0]
+-    c010 = grid[x0][y1][z0]
+-    c110 = grid[x1][y1][z0]
+-    c001 = grid[x0][y0][z1]
+-    c101 = grid[x1][y0][z1]
+-    c011 = grid[x0][y1][z1]
+-    c111 = grid[x1][y1][z1]
++    # Trilinear interpolation
++    c000 = grid[ix, iy, iz]
++    c100 = grid[min(ix + 1, grid_res[0] - 1), iy, iz]
++    c010 = grid[ix, min(iy + 1, grid_res[1] - 1), iz]
++    c110 = grid[min(ix + 1, grid_res[0] - 1), min(iy + 1, grid_res[1] - 1), iz]
++    c001 = grid[ix, iy, min(iz + 1, grid_res[2] - 1)]
++    c101 = grid[min(ix + 1, grid_res[0] - 1), iy, min(iz + 1, grid_res[2] - 1)]
++    c011 = grid[ix, min(iy + 1, grid_res[1] - 1), min(iz + 1, grid_res[2] - 1)]
++    c111 = grid[min(ix + 1, grid_res[0] - 1), min(iy + 1, grid_res[1] - 1), min(iz + 1, grid_res[2] - 1)]
+ 
+     # Interpolate along X
+@@ -149,17 +87,65 @@
+ 
+     # Interpolate along Z
+-    result = c0 * (1 - fz) + c1 * fz
+-    return result
++    return c0 * (1 - fz) + c1 * fz
++
++def ray_marching_with_grid_lookup(grid, origins, directions, origin_image_distances, pixel_distances, grid_res, bounding_box_min, bounding_box_max, max_steps=1000):
++    N = origins.shape[0]
++    voxel_position = torch.full((N, 3), -1.0)
++    intersection_pos = torch.full((N, 3), -1.0)
++    gotten_result = torch.zeros(N, dtype=torch.int)
++
++    for i in range(N):
++        depth = 0.0
++        gotten_result[i] = 0
++        for step in range(max_steps):
++            # Calculate current point
++            reached_point = origins[i] + depth * directions[i]
++
++            # Get SDF distance
++            distance = value_at(grid, reached_point, grid_res, bounding_box_min, bounding_box_max)
++
++            # Check for exit
++            if distance == -1.0:
++                voxel_position[i] = -1.0
++                intersection_pos[i] = -1.0
++                gotten_result[i] = 1
++                break
++
++            # Check for intersection
++            # Note: The condition uses pixel_distances and origin_image_distances
++            # to scale the distance check relative to the ray's progress
++            threshold = pixel_distances[i] / origin_image_distances[i] * depth
++            if distance < threshold and distance != 0.0:
++                # Record intersection
++                voxel_position[i] = torch.floor(reached_point).clamp(0, torch.tensor(grid_res) - 1)
++                intersection_pos[i] = reached_point
++                gotten_result[i] = 1
++                break
++
++            depth += 1.0 # Increment depth
++
++    return voxel_position, intersection_pos, gotten_result
+ ```
+ 
++## Subtopics
++
++### [Raycasting with Irregular Grid Interpolation](12445-raycasting-with-irregular-grid-interpolation.md)
++This method extends SDF ray marching to handle hierarchical voxel grids with varying resolutions. It solves the problem of evaluating the Signed Distance Function (SDF) at arbitrary points near boundaries between different resolution levels, where standard tri-linear interpolation is invalid. It sets itself apart from its parent by replacing the uniform interpolation kernel with a local polynomial fit derived from a linear system, ensuring continuity across resolution boundaries.
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \times S)$, where $N$ is the number of rays and $S$ is the number of steps (up to `max_steps`) [G].
+-*   **Memory Complexity:** $O(N)$ for output tensors and intermediate state [G].
+-*   **Performance:** Performance depends on `max_steps` and the density of the SDF grid [S1, unofficial].
+-*   **Strengths:** Efficient GPU implementation using tensor operations [S1, unofficial].
+-*   **Limitations:** Fixed step size may lead to aliasing or missed intersections if not tuned [G]. Precision issues with floating point comparisons [G].
++**Time and Memory Complexity:**
++Time complexity is $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of steps per ray (up to `max_steps`). Memory complexity is $O(N)$ for storing ray results, plus $O(grid\_res\_x \cdot grid\_res\_y \cdot grid\_res\_z)$ for the SDF grid [S1, unofficial].
++
++**Measured Performance:**
++Performance depends on the grid resolution and the number of steps required to find the intersection. The use of trilinear interpolation allows for efficient GPU implementation [S1, unofficial].
++
++**Strengths and Limitations:**
++Strengths include precise intersection detection and efficient GPU implementation. Limitations include the need for a pre-computed SDF grid and potential artifacts near resolution boundaries if not handled correctly [S1, unofficial].
++
++**When to Use:**
++Use when precise intersection detection is required and an SDF grid is available. Not suitable for dynamic scenes where the SDF grid changes frequently [S1, unofficial].
+ 
+ ## Background
+-Originated from the codebase in [S1, unofficial]. It is used in neural rendering pipelines to compute surface intersections for gradient-based optimization of SDF representations [G].
++Originated in the context of differentiable rendering and neural implicit representations, specifically in the CVPR 2020 paper "SDFDiff: Difficult Rendering with Signed Distance Functions" [S1, unofficial]. The method is used in neural rendering pipelines to optimize 3D shapes from 2D images [S1, unofficial].
+ 
+ ## Sources

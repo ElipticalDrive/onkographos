@@ -1,0 +1,177 @@
+--- v006.md
++++ v007.md
+@@ -1,24 +1,22 @@
+ # Structure-from-Motion (SfM)
+-
+-
+ ## Overview
+-Structure-from-Motion (SfM) is a sparse reconstruction technique that estimates camera poses (extrinsics), camera calibration (intrinsics), and a sparse 3D point cloud from a set of uncalibrated photographs [S3, unofficial]. It serves as the foundational "load-bearing" preprocessing step for modern implicit and explicit radiance field methods (such as NeRF and Gaussian Splatting), providing the known camera positions required to optimize scene representations against source images [S3, unofficial]. Unlike general alignment methods that rely on semantic features or local priors, SfM anchors the coordinate system to the geometric consistency of the scene itself [S1, S2].
++Structure-from-Motion (SfM) is a sparse reconstruction technique that estimates camera poses (extrinsics), camera calibration (intrinsics), and a sparse 3D point cloud from a set of uncalibrated photographs [S3, unofficial]. It serves as the foundational "load-bearing" preprocessing step for modern implicit and explicit radiance field methods (such as NeRF and Gaussian Splatting), providing the known camera positions required to optimize scene representations against source images [S3, unofficial]. Unlike methods that anchor the coordinate system to semantic features, SfM establishes the global frame through geometric consistency across the scene [S1, S2].
+ 
+ ## How it works
+-The method reconstructs the scene incrementally by recovering the relative and absolute geometry of cameras and 3D points.
++The method reconstructs the scene incrementally by recovering the relative and absolute geometry of cameras and 3D points [S3, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A set of $N$ images $\{I_1, \dots, I_N\}$, optionally with EXIF metadata (focal length, principal point, distortion).
++*   **Input:** A set of $N$ images $\{I_1, \dots, I_N\}$ [S3, unofficial].
+ *   **Output:**
+-    *   Camera poses: A rotation matrix $R_i \in SO(3)$ and translation vector $t_i \in \mathbb{R}^3$ for each image $i$, forming the projection matrix $P_i = K [R_i | t_i]$.
+-    *   Intrinsics: The camera calibration matrix $K$ (focal lengths $f_x, f_y$, principal point $c_x, c_y$, and distortion coefficients).
+-    *   Sparse point cloud: A set of 3D points $X_j \in \mathbb{R}^3$ with associated color/normal data.
++    *   Camera poses: A rotation matrix $R_i \in SO(3)$ and translation vector $t_i \in \mathbb{R}^3$ for each image $i$, forming the projection matrix $P_i = K [R_i | t_i]$ [S3, unofficial].
++    *   Intrinsics: The camera calibration matrix $K$ (focal lengths $f_x, f_y$, principal point $c_x, c_y$, and distortion coefficients) [S3, unofficial].
++    *   Sparse point cloud: A set of 3D points $X_j \in \mathbb{R}^3$ with associated color/normal data [S3, unofficial].
+ 
+ ### Data Structures
+-1.  **Keypoints:** For each image $i$, a list of 2D points $u_{i,k} \in \mathbb{R}^2$ and their descriptors $d_{i,k} \in \mathbb{R}^D$ (typically $D=128$ for SIFT).
+-2.  **Matches:** A list of correspondences $(u_{i,k}, u_{j,l})$ between images $i$ and $j$.
++1.  **Keypoints:** For each image $i$, a list of 2D points $u_{i,k} \in \mathbb{R}^2$ and their descriptors $d_{i,k} \in \mathbb{R}^D$ (typically $D=128$ for SIFT) [S3, unofficial].
++2.  **Matches:** A list of correspondences $(u_{i,k}, u_{j,l})$ between images $i$ and $j$ [S3, unofficial].
+ 3.  **Reconstruction:**
+-    *   Cameras: Array of $(R_i, t_i, K)$.
+-    *   Points: Array of $X_j$ with visibility mask $V_{j,i} \in \{0, 1\}$ indicating if point $j$ is visible in image $i$.
++    *   Cameras: Array of $(R_i, t_i, K)$ [S3, unofficial].
++    *   Points: Array of $X_j$ with visibility mask $V_{j,i} \in \{0, 1\}$ indicating if point $j$ is visible in image $i$ [S3, unofficial].
+ 
+ ### Steps
+@@ -30,5 +28,5 @@
+         descriptors = []
+         for image in images:
+-            kp, desc = extract_sift(image) # Returns list of (x, y, scale, orientation) and descriptor vector
++            kp, desc = extract_sift(image) # Standard SIFT: returns list of (x, y, scale, orientation) and 128-dim descriptor vector
+             keypoints.append(kp)
+             descriptors.append(desc)
+@@ -41,44 +39,54 @@
+         for i in range(N):
+             for j in range(i + 1, N):
+-                # Find nearest neighbors in descriptor space
+-                candidate_pairs = match_descriptors(descriptors[i], descriptors[j])
+-                matches.append((i, j, candidate_pairs))
++                candidates = []
++                for u, d_u in zip(keypoints[i], descriptors[i]):
++                    best_v, best_d_v = None, None
++                    min_dist = float('inf')
++                    for v, d_v in zip(keypoints[j], descriptors[j]):
++                        dist = sum((a-b)**2 for a, b in zip(d_u, d_v))
++                        if dist < min_dist:
++                            min_dist = dist
++                            best_v, best_d_v = v, d_v
++                    candidates.append((u, best_v))
++                matches.append((i, j, candidates))
+         ```
+ 
+-3.  **Geometric Verification (RANSAC):** Discard incorrect matches using epipolar geometry. True matches must satisfy the constraint that a point in one image lies on a specific line (epipolar line) in the other.
+-    *   Use the Fundamental Matrix $F$ (uncalibrated) or Essential Matrix $E$ (calibrated).
+-    *   RANSAC iteratively guesses a model from a minimal subset (e.g., 7 points for $F$, 5 for $E$), counts inliers (matches satisfying the geometric constraint within a threshold), and selects the model with the most inliers [S3, unofficial].
++3.  **Geometric Verification (RANSAC):** Discard incorrect matches using epipolar geometry. True matches must satisfy the constraint that a point in one image lies on a specific line (epipolar line) in the other. Use the Fundamental Matrix $F$ (uncalibrated) or Essential Matrix $E$ (calibrated) [S3, unofficial]. RANSAC iteratively guesses a model from a minimal subset, counts inliers (matches satisfying the geometric constraint within a threshold), and selects the model with the most inliers [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+         verified_matches = []
+         for (i, j, candidates) in matches:
+-            inliers = []
+             best_model = None
+-            best_inlier_count = 0
+-            for _ in range(max_iterations):
+-                subset = random_sample(candidates, k=7) # Minimal sample
+-                model = estimate_fundamental_matrix(subset)
+-                inlier_count = count_inliers(model, candidates, threshold)
+-                if inlier_count > best_inlier_count:
+-                    best_inlier_count = inlier_count
+-                    best_model = model
+-            if best_inlier_count > min_inliers:
++            best_inliers = []
++            for _ in range(1000): # Standard iteration count [G]
++                subset = random.sample(candidates, 4) # Minimal sample for F matrix [G]
++                F = estimate_fundamental_matrix(subset) # Standard 8-point algorithm [G]
++                inliers = []
++                for u, v in candidates:
++                    # Epipolar constraint: v^T F u = 0
++                    if abs(v[0]*(F[0][0]*u[0] + F[0][1]*u[1] + F[0][2]) +
++                         v[1]*(F[1][0]*u[0] + F[1][1]*u[1] + F[1][2]) +
++                         1*(F[2][0]*u[0] + F[2][1]*u[1] + F[2][2])) < 1.0:
++                        inliers.append((u, v))
++                if len(inliers) > len(best_inliers):
++                    best_inliers = inliers
++                    best_model = F
++            if len(best_inliers) > 10: # Minimum inlier threshold [G]
+                 verified_matches.append((i, j, best_model, best_inliers))
+         ```
+ 
+-4.  **Incremental Reconstruction:**
+-    *   **Initialization:** Select a good starting pair of images with a wide baseline and many verified matches. Reconstruct the two camera poses and triangulate the 3D points shared by them [S3, unofficial].
+-    *   **Registration:** For each new image, find images that share enough 3D points. Solve for the new camera pose using Perspective-n-Point (PnP) given the known 3D points and their 2D projections [S3, unofficial].
+-    *   **Triangulation:** Triangulate new 3D points from the matched features in the new view and existing views. Rays from camera centers through feature locations are computed; the 3D point is the midpoint of the closest approach of these rays [S3, unofficial].
++4.  **Incremental Reconstruction:** Pick a good starting pair with a wide baseline and many matches. Reconstruct those two cameras and triangulate their shared points. Find another image that sees a bunch of the points you already have. Because you know where those points are in 3D and where they landed in the new image, you can solve for that camera's position using Perspective-n-Point (PnP). Triangulate the new points that camera adds, then repeat [S3, unofficial]. Triangulation finds the closest approach of rays from camera centers through feature locations [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+         cameras = []
+-        points = []
++        points_3d = []
+         
+         # Initialize with best pair (img_a, img_b)
+-        R_a, t_a, R_b, t_b = recover_pose_from_epipolar(verified_matches[(img_a, img_b)])
+-        cameras.append((img_a, R_a, t_a, K))
+-        cameras.append((img_b, R_b, t_b, K))
+-        points = triangulate_points(keypoints[img_a], keypoints[img_b], R_a, t_a, R_b, t_b)
++        img_a, img_b, F_ab, inliers_ab = verified_matches[0]
++        R_a, t_a = np.eye(3), np.zeros(3) # First camera at origin [G]
++        R_b, t_b = recover_pose_from_epipolar(F_ab, inliers_ab) # Standard recovery [G]
++        cameras.append((img_a, R_a, t_a))
++        cameras.append((img_b, R_b, t_b))
++        points_3d = triangulate_points(keypoints[img_a], keypoints[img_b], R_a, t_a, R_b, t_b) # Linear triangulation [G]
+         
+         registered_images = {img_a, img_b}
+@@ -87,13 +95,13 @@
+         while unregistered_images:
+             # Find image with most matches to registered points
+-            next_img = select_best_candidate(unregistered_images, points, cameras)
++            next_img = max(unregistered_images, key=lambda x: count_shared_points(x, points_3d, cameras))
+             
+             # PnP to find pose
+-            R_new, t_new = solve_pnp(keypoints[next_img], points, cameras)
+-            cameras.append((next_img, R_new, t_new, K))
++            R_new, t_new = solve_pnp(keypoints[next_img], points_3d, cameras) # Standard PnP solver [G]
++            cameras.append((next_img, R_new, t_new))
+             
+             # Triangulate new points
+-            new_points = triangulate_new_points(keypoints[next_img], R_new, t_new, points, cameras)
+-            points.extend(new_points)
++            new_points = triangulate_new_points(keypoints[next_img], R_new, t_new, points_3d, cameras)
++            points_3d.extend(new_points)
+             
+             registered_images.add(next_img)
+@@ -101,17 +109,16 @@
+         ```
+ 
+-5.  **Bundle Adjustment (BA):** Periodically optimize all camera poses and 3D points simultaneously to minimize the total reprojection error. The error is the pixel distance between the actual 2D projection and the estimated projection of each 3D point [S3, unofficial].
+-    *   *Objective:* Minimize $\sum_{i,j} \| u_{i,j} - \pi(P_i, X_j) \|^2$, where $\pi$ is the projection function.
+-    *   Intrinsics are often treated as unknowns to be recovered via self-calibration within BA, rather than relying solely on EXIF metadata [S3, unofficial]. If photos come from the same physical camera with a fixed lens, intrinsics are shared across the whole set [S3, unofficial].
++5.  **Bundle Adjustment (BA):** Periodically optimize all camera poses and 3D points simultaneously to minimize the total reprojection error. The error is the pixel distance between the actual 2D projection and the estimated projection of each 3D point [S3, unofficial]. Intrinsics are often treated as unknowns to be recovered via self-calibration within BA, rather than relying solely on EXIF metadata [S3, unofficial]. If photos come from the same physical camera with a fixed lens, intrinsics are shared across the whole set [S3, unofficial].
+     *   *Pseudocode:*
+         ```python
+-        def bundle_adjustment(cameras, points):
+-            # Non-linear least squares optimization (e.g., Levenberg-Marquardt)
++        def bundle_adjustment(cameras, points_3d):
++            # Non-linear least squares optimization (e.g., Levenberg-Marquardt) [G]
+             # Variables: Flatten all R, t, X, and optionally K
+             while not converged:
+-                residuals = compute_reprojection_errors(cameras, points)
+-                jacobian = compute_jacobian(cameras, points)
++                residuals = compute_reprojection_errors(cameras, points_3d)
++                jacobian = compute_jacobian(cameras, points_3d)
+                 update = solve_linear_system(jacobian, residuals)
+-                update_cameras_and_points(cameras, points, update)
++                update_cameras_and_points(cameras, points_3d, update)
++            return cameras, points_3d
+         ```
+ 
+@@ -119,7 +126,6 @@
+ *   **Feature Detector:** SIFT (default in COLMAP) or SuperPoint [S2][S3, unofficial].
+ *   **Matcher:** Brute-force or LightGlue [S2, S4].
+-*   **RANSAC Threshold:** Geometric error threshold for inlier classification (e.g., 1-2 pixels) [S3, unofficial].
+ *   **Baseline:** Initial pair selection should maximize baseline to improve triangulation accuracy [S3, unofficial].
+-*   **Segmentation Interval:** In progressive motion sequences, the trajectory may be segmented (e.g., every 5 frames) to introduce local priors, initializing new poses using the last frame of the previous segment: $[R|t]_{p+1} \leftarrow [R|t]_p$ [S1].
++*   **Segmentation Interval:** In progressive motion sequences, the trajectory may be segmented (e.g., every 5 frames) to introduce a local prior, initializing new poses using the last frame of the previous segment: $[R|t]_{p+1} \leftarrow [R|t]_p$ [S1].
+ 
+ ### Edge Cases and Pitfalls

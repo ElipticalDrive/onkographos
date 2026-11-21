@@ -1,0 +1,320 @@
+--- v001.md
++++ v002.md
+@@ -8,203 +8,129 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Initial set of posed images (training set), camera poses, and a budget for additional observations.
+-*   **Outputs:** A trained radiance field model (coarse and fine networks with uncertainty branches) and a sequence of selected new viewpoints to capture.
++*   **Inputs:** Initial set of posed images (training data), camera poses, and a budget for additional captures.
++*   **Outputs:** A trained Neural Radiance Field (NeRF) with uncertainty estimation, and a sequence of selected viewpoints for active capture.
+ 
+ **Data Structures:**
+-The model consists of two parallel networks: a coarse model and a fine model.
+-*   **Coarse Model:** Identical to vanilla NeRF. Outputs density $\sigma$ and feature $f$.
+-*   **Fine Model:** Includes an additional uncertainty branch. Outputs density $\sigma$, feature $f$, and variance $\beta^2$.
+-*   **Positional Encoding:** $\gamma_x(\mathbf{x})$ for 3D coordinates and $\gamma_d(\mathbf{d})$ for viewing direction $\mathbf{d}$ (unit vector).
++The model consists of two parallel Multi-Layer Perceptrons (MLPs): a coarse model and a fine model.
++*   **Coarse Model:** Identical to vanilla NeRF. Outputs density $\sigma$ and feature vector $f$ from positional encoding $\gamma_x(x)$, and color $c$ from $f$ and direction encoding $\gamma_d(d)$.
++    *   $[\sigma, f] = \text{MLP}_{\theta_1}(\gamma_x(x))$
++    *   $c = \text{MLP}_{\theta_2}(f, \gamma_d(d))$
++*   **Fine Model:** Includes an additional uncertainty branch. Outputs density $\sigma$, feature $f$, and variance $\beta^2(r(t))$ from coordinates.
++    *   $[\sigma, f, \beta^2(r(t))] = \text{MLP}_{\theta_1, \theta_3}(\gamma_x(r(t)))$
++    *   The mean color $\bar{c}(r(t))$ is output by a separate MLP: $\bar{c}(r(t)) = \text{MLP}_{\theta_2}(f, \gamma_d(d))$.
++    *   The variance is regularized via softplus to ensure validity: $\bar{\beta}^2(r(t)) = \beta_0^2 + \log(1 + \exp(\beta^2(r(t))))$, where $\beta_0^2$ ensures a minimum variance for all locations [S1].
+ 
+-**Network Architecture:**
+-The coarse model computes:
+-$$ [\sigma, f] = \text{MLP}_{\theta_1}(\gamma_x(\mathbf{x})) $$
+-$$ c = \text{MLP}_{\theta_2}(f, \gamma_d(\mathbf{d})) $$
+-
+-The fine model computes:
+-$$ [\sigma, f, \beta^2(\mathbf{r}(t))] = \text{MLP}_{\theta_1, \theta_3}(\gamma_x(\mathbf{r}(t))) $$
+-$$ \bar{c}(\mathbf{r}(t)) = \text{MLP}_{\theta_2}(f, \gamma_d(\mathbf{d})) $$
+-$$ \bar{\beta}^2(\mathbf{r}(t)) = \beta_0^2 + \log(1 + \exp(\beta^2(\mathbf{r}(t)))) $$
+-where $\beta_0^2$ ensures a minimum variance for all locations [S1].
+-
+-**Rendering with Uncertainty:**
+-The rendered color $C(\mathbf{r})$ for a ray $\mathbf{r}$ follows a Gaussian distribution $\mathcal{N}(\bar{C}(\mathbf{r}), \bar{\beta}^2(\mathbf{r}))$ [S1]:
+-$$ \bar{C}(\mathbf{r}) = \sum_{i=1}^{N_s} \alpha_i \bar{c}(\mathbf{r}(t_i)) $$
+-$$ \bar{\beta}^2(\mathbf{r}) = \sum_{i=1}^{N_s} \alpha_i^2 \bar{\beta}^2(\mathbf{r}(t_i)) $$
+-where $N_s$ is the number of sampled locations per ray, and $\alpha_i$ are the alpha weights from volume rendering [S1].
+-
+-**Loss Function:**
+-The optimization objective minimizes the negative log-likelihood of rays in a batch $\mathcal{B}$:
+-$$ \min_\theta -\log p_\theta(\mathcal{B}) = \frac{1}{N} \sum_{i=1}^N \left[ \frac{\|C(\mathbf{r}_i) - \bar{C}(\mathbf{r}_i)\|_2^2}{2 \bar{\beta}^2(\mathbf{r}_i)} + \frac{\log \bar{\beta}^2(\mathbf{r}_i)}{2} \right] $$
+-Simply minimizing this leads to suboptimal solutions where weights $\alpha_i$ are driven closer, causing large fractions of non-zero density and blurs [S1]. Therefore, an uncertainty loss $\mathcal{L}^{uct}$ adds a regularization term to force sparser volume density:
+-$$ \mathcal{L}^{uct} = \frac{1}{N} \sum_{i=1}^N \left( \frac{\|C(\mathbf{r}_i) - \bar{C}(\mathbf{r}_i)\|_2^2}{2 \bar{\beta}^2(\mathbf{r}_i)} + \frac{\log \bar{\beta}^2(\mathbf{r}_i)}{2} + \frac{\lambda}{N_s} \sum_{j=1}^{N_s} \sigma_i(\mathbf{r}_i(t_j)) \right) $$
+-where $\lambda$ controls the regularization strength [S1].
+-
+-The final training loss combines the uncertainty loss for the fine model and the squared reconstruction error for the coarse model:
+-$$ \mathcal{L}^{uct}(C(\mathbf{r}), \bar{C}^f(\mathbf{r})) + \frac{1}{N} \sum_{i=1}^N \|C(\mathbf{r}_i) - \hat{C}^c(\mathbf{r}_i)\|_2^2 $$
+-The coarse model remains the same as vanilla NeRF, while only the fine model includes the uncertainty branch [S1].
+-
+-**Active Learning Pipeline:**
+-The pipeline consists of 4 steps [S1]:
+-1.  **Train:** Train an ActiveNeRF model using initial observation data.
+-2.  **Render:** Render novel views from the trained model to estimate uncertainty.
+-3.  **Select:** Estimate the new viewpoint that most reduces uncertainty using an acquisition function.
+-4.  **Capture:** Capture a new perception and add it to the training set.
+-
+-**Acquisition Function:**
+-Given a hypothetical new input, the posterior distribution of the whole scene is analyzed via Bayesian estimation. The information gain is the subtraction of the variance from the prior to posterior distribution [S1].
+-
+-For a single new ray $\mathbf{r}_2$, the likelihood of the observed color $C(\mathbf{r}_2)$ given the specific location color $c(\mathbf{r}_2(t_k))$ is modeled as a Gaussian:
+-$$ p(C(\mathbf{r}_2)|c(\mathbf{r}_2(t_k))) \sim \mathcal{N}(\alpha_k \bar{c}(\mathbf{r}_2(t_k)) + b(t_k), \bar{\beta}^2(\mathbf{r}_2)) $$
+-where $b(t_k)$ represents the contribution of unrelated sampled locations in the ray [S1].
+-
+-The posterior distribution $P^{(\text{post})}$ for a location $\mathbf{r}_2(t_k)$ given new ray $\mathbf{r}_2$ and existing data $D_1$ is Gaussian with mean:
+-$$ \mu^{(\text{post})} = \gamma \frac{C(\mathbf{r}_2) - b(t_k)}{\alpha_k} + (1 - \gamma) \bar{c}(\mathbf{r}_2(t_k)) $$
+-and variance:
+-$$ \text{Var}^{(\text{post})}(\mathbf{r}_2(t_k)) = \frac{\bar{\beta}^2(\mathbf{r}_2(t_k)) \bar{\beta}^2(\mathbf{r}_2)}{\alpha_k^2 \bar{\beta}^2(\mathbf{r}_2(t_k)) + \bar{\beta}^2(\mathbf{r}_2)} $$
+-where $\gamma = \frac{\alpha_k^2 \bar{\beta}^2(\mathbf{r}_2(t_k))}{\alpha_k^2 \bar{\beta}^2(\mathbf{r}_2(t_k)) + \bar{\beta}^2(\mathbf{r}_2)}$ [S1].
+-
+-For multiple input images, the posterior variance is:
+-$$ \text{Var}^{(\text{post})}(\mathbf{x}) = \left( \frac{1}{\bar{\beta}^2(\mathbf{x})} + \sum_i \frac{\alpha_{k_i}^2}{\bar{\beta}^2(\mathbf{r}_i(t_{k_i}))} \right)^{-1} $$
+-where $\mathbf{r}_i$ denotes a ray from different images and $\mathbf{x} = \mathbf{r}_i(t_{k_i})$ [S1].
+-
+-The acquisition function $\mathcal{A}(D_2)$ for a candidate image $D_2$ is the sum of variance reductions over all sampled rays $\mathbf{r}_i$ and locations $j$:
+-$$ \mathcal{A}(D_2) = \sum_{\mathbf{r}_i \in D_2} \sum_{j=1}^{N_s} \left( \text{Var}^{(\text{pri})}(\mathbf{r}_i(t_j)) - \text{Var}^{(\text{post})}(\mathbf{r}_i(t_j)) \right) $$
+-where $N = H \times W$ is the number of independent rays for image resolution $H, W$, and $N_s$ is the number of sampled locations per ray [S1].
+-
+-**View Selection:**
+-1.  Sample candidate views from a spherical space [S1].
+-2.  Evaluate candidates using the acquisition function. To achieve quality-efficiency trade-off, evaluate new inputs with lower resolution by sampling $H/r \times W/r$ rays instead of full $H \times W$ rays, approximating the influence of the whole image with $1/r^2$ time consumption [S1].
+-3.  Choose the top-$k$ candidates that score highest in the acquisition function as the supplementary of the current training set [S1].
+-
+-**Incorporation Strategies:**
+-Two approaches to incorporate new inputs are provided [S1]:
+-*   **Bayesian Estimation (BE):** Compute the posterior distribution of scene locations using ground-truth values from new inputs, avoiding collateral training. The mean of the distribution becomes the Bayesian estimation of emitted radiance value [S1].
+-*   **Continuous Learning (CL):** Add captured inputs to the training set and tune the model based on the current one. The fraction of training rays from new images can be controlled to optimize newly observed regions [S1].
++**Numbered Steps:**
++1.  **Train ActiveNeRF Model:** Train the coarse and fine models using the initial observation data. The optimization minimizes the negative log-likelihood of rays in a batch $B$, combined with a regularization term for sparser density.
++    *   Loss: $\mathcal{L}^{uct} = \frac{1}{N}\sum_{i=1}^N \left( \frac{\|C(r_i) - \bar{C}(r_i)\|_2^2}{2\bar{\beta}^2(r_i)} + \frac{\log \bar{\beta}^2(r_i)}{2} + \frac{\lambda}{N_s}\sum_{j=1}^{N_s} \sigma_i(r_i(t_j)) \right)$
++    *   Total Loss: $\mathcal{L}^{uct}(C(r), \bar{C}^f(r)) + \frac{1}{N}\sum_{i=1}^N \|C(r_i) - \hat{C}^c(r_i)\|_2^2$ [S1].
++2.  **Render Novel Views:** Render novel views from the trained model to estimate uncertainty. The rendered color $C(r)$ follows a Gaussian distribution $\mathcal{N}(\bar{C}(r), \bar{\beta}^2(r))$ where $\bar{C}(r) = \sum_{i=1}^{N_s} \alpha_i \bar{c}(r(t_i))$ and $\bar{\beta}^2(r) = \sum_{i=1}^{N_s} \alpha_i^2 \bar{\beta}^2(r(t_i))$ [S1].
++3.  **Estimate New Viewpoint:** Evaluate candidate views to find the one that most reduces uncertainty.
++    *   Sample candidate views from a spherical space.
++    *   For efficiency, evaluate new inputs with lower resolution by sampling $H/r \times W/r$ rays instead of full $H \times W$ rays, approximating the influence of the whole image with $1/r^2$ time consumption [S1].
++    *   Calculate the information gain as the subtraction of the variance from the prior to posterior distribution.
++    *   The acquisition function $\mathcal{A}(D_2)$ is defined as the sum of variance reductions for all sampled locations across all rays in an image:
++        $$ \mathcal{A}(D_2) = \sum_{r_i \in D_2} \sum_{j=1}^{N_s} \left( \text{Var}^{(\text{pri})}(r_i(t_j)) - \text{Var}^{(\text{post})}(r_i(t_j)) \right) $$
++    *   The posterior variance for a sampled location $r_2(t_k)$ given a new ray $r_2$ is:
++        $$ \text{Var}^{(\text{post})}(r_2(t_k)) = \left( \frac{1}{\bar{\beta}^2(r_2(t_k))} + \frac{\alpha_k^2}{\bar{\beta}^2(r_2)} \right)^{-1} = \frac{\bar{\beta}^2(r_2(t_k))\bar{\beta}^2(r_2)}{\alpha_k^2\bar{\beta}^2(r_2(t_k)) + \bar{\beta}^2(r_2)} $$
++    *   This is always less than the prior variance $\bar{\beta}^2(r_2(t_k))$ [S1].
++    *   Choose the top-$k$ candidates that score highest in the acquisition function as the supplementary of the current training set [S1].
++4.  **Capture and Add:** Capture a new perception and add it to the training set. Two approaches exist for incorporation:
++    *   **Bayesian Estimation (BE):** Compute the posterior distribution of scene locations using ground-truth values from new inputs, avoiding collateral training. The posterior mean is used as the estimate.
++        $$ \text{Mean} = \gamma \frac{C(r_2) - b(t_k)}{\alpha_k} + (1 - \gamma) \bar{c}(r_2(t_k)) $$
++        where $\gamma = \frac{\alpha_k^2 \bar{\beta}^2(r_2(t_k))}{\alpha_k^2 \bar{\beta}^2(r_2(t_k)) + \bar{\beta}^2(r_2)}$ and $b(t_k)$ represents the contribution of unrelated sampled locations in the ray [S1].
++    *   **Continuous Learning (CL):** Add captured inputs to the training set and tune the model based on the current one. The fraction of training rays from new images can be controlled to optimize newly observed regions [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import numpy as np
+-
+-def softplus(x):
+-    return np.log(1 + np.exp(x))
+-
+-def train_activenrf(initial_images, initial_poses, num_iterations=200000, 
+-                    active_interval=40000, num_initial_images=4, 
+-                    num_new_images_per_step=4, top_k=4, resolution_scale=1):
+-    """
+-    Main training loop for ActiveNeRF.
+-    """
+-    # 1. Initialize Model
+-    # Coarse MLP: outputs sigma, f
+-    # Fine MLP: outputs sigma, f, beta_sq
+-    # beta_sq is passed through softplus + beta_0^2 to get variance
+-    model = initialize_activenrf_model()
++def train_active_nerf(initial_images, num_iterations=200000, active_interval=40000):
++    # Initialize coarse and fine models
++    coarse_model = init_nerf()
++    fine_model = init_nerf_with_uncertainty()
+     
+-    # 2. Initial Training
+-    training_set = initial_images[:num_initial_images]
+-    poses = initial_poses[:num_initial_images]
++    # Optimizer settings
++    optimizer = Adam(lr=5e-4)
+     
+     for iteration in range(1, num_iterations + 1):
+-        # Sample rays from current training set
+-        rays = sample_rays(training_set, poses, batch_size=1024)
++        # Standard training step
++        rays = sample_rays(initial_images, batch_size=1024)
+         
+-        # Forward pass: Coarse and Fine models
+-        coarse_outputs = model.coarse_mlp(rays.coords, rays.directions)
+-        fine_outputs = model.fine_mlp(rays.coords, rays.directions)
++        # Coarse pass
++        coarse_outputs = coarse_model.forward(rays)
++        coarse_loss = mean_squared_error(rays.colors, coarse_outputs.colors)
+         
+-        # Render with uncertainty
+-        # Coarse render: standard NeRF
+-        coarse_color = volume_render_coarse(coarse_outputs)
++        # Fine pass with uncertainty
++        fine_outputs = fine_model.forward(rays)
++        # Uncertainty loss includes NLL and density regularization
++        uncertainty_loss = compute_uncertainty_loss(rays, fine_outputs, lambda_reg=0.1)
+         
+-        # Fine render: Gaussian distribution parameters
+-        fine_mean = volume_render_mean(fine_outputs)
+-        fine_var = volume_render_variance(fine_outputs)
++        total_loss = uncertainty_loss + coarse_loss
++        optimizer.zero_grad()
++        total_loss.backward()
++        optimizer.step()
+         
+-        # Compute Loss
+-        # Coarse loss: MSE
+-        loss_coarse = mse(rays.colors, coarse_color)
+-        
+-        # Fine loss: Negative Log Likelihood + Regularization
+-        # L_uct = 1/N sum [ (||C - C_bar||^2 / (2*beta^2)) + (log beta^2 / 2) + (lambda/Ns) sum sigma ]
+-        nll_term = (np.square(rays.colors - fine_mean) / (2 * fine_var) + 
+-                    np.log(fine_var) / 2)
+-        reg_term = (model.lambda_param / fine_outputs.num_samples) * np.sum(fine_outputs.density, axis=1)
+-        loss_fine = np.mean(nll_term + reg_term)
+-        
+-        total_loss = loss_fine + loss_coarse
+-        
+-        # Backpropagate and update
+-        update_model(model, total_loss)
+-        
+-        # 3. Active Learning Step
++        # Decay learning rate
++        if iteration % 10000 == 0:
++            optimizer.lr *= 0.1
++            
++        # Active learning step
+         if iteration % active_interval == 0 and iteration > 0:
+-            # Render novel views to estimate uncertainty
+-            candidate_views = sample_candidate_views(spherical_space, num_candidates=100)
++            # 1. Render novel views to estimate uncertainty
++            candidate_views = sample_spherical_candidates(num_candidates=100)
+             
+-            acquisition_scores = []
++            # 2. Evaluate information gain for each candidate
++            gains = []
+             for view in candidate_views:
+                 # Render with lower resolution for efficiency
+-                low_res_rays = sample_rays_from_view(view, resolution_scale=resolution_scale)
++                low_res_rays = render_rays(view, resolution_factor=2)
++                prior_variance = fine_model.predict_variance(low_res_rays)
+                 
+-                # Get prior variance from fine model
+-                prior_var = get_prior_variance(model, low_res_rays)
++                # Estimate posterior variance assuming new data
++                # This requires simulating the update or using the analytical form
++                posterior_variance = compute_posterior_variance(prior_variance, low_res_rays)
+                 
+-                # Estimate posterior variance assuming hypothetical observation
+-                # Using Bayesian update formulas
+-                posterior_var = estimate_posterior_variance(prior_var, model)
+-                
+-                # Information Gain = Prior Var - Posterior Var
+-                info_gain = np.sum(prior_var - posterior_var)
+-                acquisition_scores.append(info_gain)
++                # Information gain is reduction in variance
++                gain = sum(prior_variance - posterior_variance)
++                gains.append((view, gain))
+             
+-            # Select top-k candidates
+-            selected_indices = np.argsort(acquisition_scores)[-top_k:]
+-            selected_views = [candidate_views[i] for i in selected_indices]
++            # 3. Select top-k candidates
++            gains.sort(key=lambda x: x[1], reverse=True)
++            selected_views = [g[0] for g in gains[:4]] # Capture 4 new perceptions
+             
+-            # Capture new perceptions (simulated by adding to training set)
+-            new_images = capture_new_perceptions(selected_views)
+-            training_set.extend(new_images)
+-            poses.extend(selected_views)
++            # 4. Capture and add to training set
++            # In simulation, these are added to initial_images
++            # In practice, this triggers physical capture
++            initial_images.extend(selected_views)
+             
+-            print(f"Iteration {iteration}: Captured {len(new_images)} new images.")
++            # Optional: Re-train or continue training with new data
++            # For BE, no re-training is needed for inference, but for CL, 
++            # the model is tuned on the new set.
++            
++    return fine_model
++```
+ 
+-    return model, training_set
++**Parameters:**
++*   **Initial training set size:** Empirically adjusted (e.g., 4 or 2 initial observations) [S1].
++*   **Active iteration interval:** New perceptions are captured every 40K iterations (e.g., at 40K, 80K, 120K, 160K) [S1].
++*   **Sampling points:** 64 points per ray for the coarse model, 128 for the fine model [S1].
++*   **Optimizer:** Adam with initial learning rate $5\times10^{-4}$, decaying exponentially to $5\times10^{-5}$ [S1].
++*   **Batch size:** 1024 rays [S1].
++*   **Hardware:** Single RTX2080Ti GPU [S1].
++*   **$\lambda$:** Hyper-parameter controlling the strength of the regularization term in the uncertainty loss function [S1].
+ 
+-def get_prior_variance(model, rays):
+-    """
+-    Returns the prior variance beta_bar^2 for each sample point along the rays.
+-    """
+-    # Forward pass to get beta^2
+-    _, _, beta_sq_raw = model.fine_mlp(rays.coords, rays.directions)
+-    beta_sq = softplus(beta_sq_raw) + model.beta_0_sq
+-    return beta_sq
+-
+-def estimate_posterior_variance(prior_var, model):
+-    """
+-    Estimates the posterior variance after observing a new ray.
+-    Simplified for single ray update logic as per source derivation.
+-    In practice, this involves summing contributions from all rays in the candidate image.
+-    """
+-    # Formula: Var_post = (1/Var_prior + sum(alpha_k^2 / Var_ray))^-1
+-    # For a single new ray observation, we approximate the reduction.
+-    # The source defines Var_post for a location x given new ray r2.
+-    # Here we return the estimated posterior variance structure for the acquisition function.
+-    # Note: The exact implementation requires iterating over samples in the ray.
+-    # This is a placeholder for the complex Bayesian update logic described in [S1].
+-    # The acquisition function sums (Var_pri - Var_post) over all locations.
+-    return prior_var * 0.5 # Placeholder for actual Bayesian update calculation
+-```
++**Edge Cases and Pitfalls:**
++*   Simply minimizing the negative log-likelihood objective leads to a suboptimal solution where weights $\alpha_i$ for different samples in a ray are driven closer. This results in an unexpectedly large fraction of non-zero density in the whole scene, causing blurs on the object’s surface [S1]. The regularization term is necessary to force sparser volume density [S1].
++*   NeRF fails to generalize well from one or few input views and may collapse to trivial solutions in unobserved regions. The uncertainty estimation ensures robustness by providing larger variances in unobserved regions instead of collapsing [S1].
+ 
+ ## Subtopics
+ 
+ ### Uncertainty-Guided Novel View Selection Policy
+-A view selection policy that uses U-NeRF's color/depth uncertainties and E-SCRNet's epistemic uncertainties to select samples with the most information gain, improving data efficiency [S2]. It generates a novel view dataset $S_{new}$ by synthesizing more views within the scene boundary using U-NeRF [S2]. It prunes invalid views from $S_{new}$ based on U-NeRF’s uncertainties (color and depth reliability) [S2]. It selects views with high information gain ($S_{high}$) based on E-SCRNet’s epistemic uncertainties from the pruned set [S2]. Unlike random view synthesis which may contain large redundancy, this policy selects samples with the most information gain [S2].
++A view selection policy that uses U-NeRF's color/depth uncertainties and E-SCRNet's epistemic uncertainties to select samples with the most information gain, improving data efficiency [S2]. It generates a novel view dataset $S_{new}$ by synthesizing more views within the scene boundary using U-NeRF, prunes invalid views from $S_{new}$ based on U-NeRF’s uncertainties (color and depth reliability), and selects views with high information gain ($S_{high}$) based on E-SCRNet’s epistemic uncertainties from the pruned set [S2]. Unlike random view synthesis which may contain large redundancy, this policy selects samples with the most information gain [S2].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Bayesian Estimation (BE):** Saves 75% of time consumption compared to Continuous Learning (CL) [S1]. It avoids collateral training by computing the posterior distribution directly [S1].
+-*   **Continuous Learning (CL):** Requires retraining or fine-tuning the model on the expanded dataset, which is computationally more expensive [S1].
++*   **Bayesian Estimation (BE):** Saves 75% of time consumption compared to Continuous Learning (CL) because it avoids collateral training [S1].
++*   **Continuous Learning (CL):** Requires re-training or fine-tuning the model on the expanded dataset, which is computationally more expensive [S1].
++*   **Acquisition Function:** Evaluating candidate views involves rendering and variance calculation. Using lower resolution ($H/r \times W/r$) reduces time consumption by a factor of $1/r^2$ [S1].
+ 
+ **Measured Performance:**
+@@ -214,13 +140,14 @@
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Improves the upper bound of model performance under limited budgets; robust under few observations; provides interpretation of how NeRF understands the scene via uncertainty [S1].
+-*   **Limitations:** BE shows inferior performance to CL, though it is competitive with heuristic approaches under CL [S1]. Requires careful tuning of hyperparameters like $\lambda$ and $\beta_0^2$ [S1].
++*   **Strengths:** Improves the upper bound of model performances by actively selecting new viewpoints, addressing blind spots in previous works [S1]. Provides robustness under few observations [S1]. BE allows for instant offline inference on resource-constrained edge devices [S1].
++*   **Limitations:** BE shows inferior performance to CL, though it is competitive with heuristic approaches under CL [S1]. Requires an initial training phase before active selection can begin.
+ 
+ **When to Use:**
+-*   Use when training data is scarce and computational resources for retraining are limited (prefer BE).
+-*   Use when maximum quality is required and sufficient time/compute is available (prefer CL) [S1].
++*   Use when the training data budget is constrained and the goal is to maximize performance with minimal additional resources [S1].
++*   Use BE when time and computation resources are bottlenecks or for edge devices [S1].
++*   Use CL when time and computation resources are not bottlenecks and higher quality is desired [S1].
+ 
+ ## Background
+-ActiveNeRF is presented in a paper by X. Pan et al., building on the NeRF framework and Bayesian neural network concepts for uncertainty estimation [S1]. It addresses the limitation that NeRF fails to generalize well from one or few input views and may collapse to trivial solutions in unobserved regions [S1]. The work leverages active learning to supplement training data efficiently [S1].
++ActiveNeRF is presented in a paper by X. Pan et al., building on the NeRF framework and Bayesian neural network concepts for uncertainty estimation [S1]. It addresses the limitation of NeRF failing to generalize well to novel views with sparse observations [S1]. The work incorporates insights from active learning to supplement training data efficiently [S1].
+ 
+ ## Sources

@@ -1,0 +1,140 @@
+--- v004.md
++++ v005.md
+@@ -4,55 +4,63 @@
+ 
+ ## Overview
+-This method prevents infinite rendering loops in interactive volume visualization by detecting when the rendering pipeline cannot keep up with the frame budget and forcing a quality reduction on the subsequent frame [S1, unofficial]. It acts as a safety mechanism within the traversal loop, distinct from standard early termination which stops a single ray based on opacity [1791-early-termination-and-probabilistic-path-control.md]. Unlike [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) which culls based on precomputed depth, this method reacts to runtime performance failures by lowering the sampling density or resolution [S1, unofficial].
++This method prevents infinite rendering loops in interactive volume visualization by detecting when the rendering pipeline exceeds the frame budget and forcing a quality reduction on the subsequent frame [S1, unofficial]. It acts as a safety mechanism distinct from standard early termination, which stops individual rays based on opacity [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md).
+ 
+ ## How it works
+-The method integrates with an octree-based traversal loop. It relies on a flag indicating that the previous frame's rendering was not completed in time, triggering a fallback to a lower-quality estimation.
+-
+-**Inputs:**
+-- Current frame status flag: `OCTREE_RENDERING_CANCELED` (boolean).
+-- Quality threshold parameter: `OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD` (float).
+-- Current octree structure and camera state.
+-
+-**Outputs:**
+-- A reduced set of samples or a lower-resolution image for the current frame.
+-- A signal to skip the full rendering loop.
+-
++**Inputs:** Octree structure, camera state, rendering state container.
++**Outputs:** Rendered frame data or an early return signal containing reduced quality parameters.
+ **Data Structures:**
+-- `_renderingRequired`: A structure or flag container holding the `OCTREE_RENDERING_CANCELED` state.
+-- `OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD`: A scalar value defining the minimum acceptable quality level (e.g., minimum point size or maximum step size) when cancellation occurs.
++- `_renderingRequired`: Container holding the boolean flag `OCTREE_RENDERING_CANCELED` [S1, unofficial].
++- `OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD`: Scalar threshold used to estimate a safe render quality when interactive traversal is canceled [S1, unofficial].
+ 
+ **Steps:**
+-1. **Check Cancellation Flag:** At the start of the frame or after octree traversal, inspect `_renderingRequired` for the `OCTREE_RENDERING_CANCELED` flag [S1, unofficial].
+-2. **Evaluate Condition:** If the flag is set, it indicates that the previous frame exceeded the time budget, risking an infinite loop if the same high-quality parameters are reused [S1, unofficial].
+-3. **Estimate Lower Quality:** Calculate a safe, lower render quality using `OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD` [S1, unofficial]. This typically involves increasing the step size (coarser sampling) or reducing the number of samples per ray.
+-4. **Unlock and Return:** Unlock the rendering API/resources and return early from the current rendering loop, skipping the expensive full-resolution traversal [S1, unofficial].
+-5. **Next Frame:** The next frame will render with the reduced quality parameters, ensuring the frame completes within the budget and the flag is cleared.
++1. **Check Cancellation Flag:** After octree traversal or at frame start, inspect `_renderingRequired` for the `OCTREE_RENDERING_CANCELED` flag [S1, unofficial].
++2. **Evaluate Condition:** If the flag is set, the previous frame exceeded the time budget, risking an infinite loop if the same high-quality parameters are reused [S1, unofficial].
++3. **Estimate Lower Quality:** Calculate a safe, lower render quality using `OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD` [S1, unofficial]. This typically involves increasing the step size (coarser sampling) or reducing the number of samples per ray [G].
++4. **Unlock and Return:** Unlock the rendering API/resources and return early to skip the expensive full-resolution traversal loop [S1, unofficial].
++5. **Next Frame Execution:** The subsequent frame renders with the reduced quality parameters, ensuring completion and clearing the flag [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def render_frame(octree, camera, rendering_state):
+-    # Check if previous frame was canceled due to time budget overflow
++    # Check if previous frame exceeded time budget
+     if rendering_state._rendering_required.OCTREE_RENDERING_CANCELED:
+-        # Estimate a lower interactive render quality based on the threshold
+-        # This forces a coarser sampling or lower resolution to guarantee completion
+-        quality = estimate_interactive_quality(
+-            threshold=rendering_state.OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD
+-        )
+-        
+-        # Unlock API/resources to prevent deadlock
++        # Estimate lower interactive render quality using the threshold
++        quality = compute_quality(rendering_state.OCTREE_INTERACTIVE_RENDERING_POINT_THRESHOLD)
++        # Unlock API to prevent deadlock
+         rendering_state.unlock_api()
+-        
+-        # Return early to avoid the expensive rendering loop
+-        return render_low_quality(octree, camera, quality)
+-    
+-    # Normal high-quality rendering path
++        # Return early to skip expensive traversal
++        return quality
+     try:
+-        result = full_octree_traversal(octree, camera)
++        # Standard high-quality front-to-back traversal
++        result = standard_traversal(octree, camera)
+         rendering_state._rendering_required.OCTREE_RENDERING_CANCELED = False
+         return result
+     except TimeLimitExceeded:
+-        # Set flag for next frame to trigger cancellation logic
++        # Set flag to trigger cancellation on next frame
+         rendering_state._rendering_required.OCTREE_RENDERING_CANCELED = True
+         raise
++
++def compute_quality(threshold):
++    # [G] Maps the threshold to a coarser step size or reduced sample count
++    return {"step_size": threshold * 2.0, "samples_per_ray": max(1, threshold)}
++
++def standard_traversal(octree, camera):
++    # [G] Standard front-to-back volume integration loop
++    acc_color = [0.0, 0.0, 0.0]
++    acc_alpha = 0.0
++    for ray in camera.rays:
++        for voxel in octree.intersect(ray):
++            C, alpha = sample_voxel(voxel)
++            acc_color = [acc_color[i] + C[i] * alpha * (1.0 - acc_alpha) for i in range(3)]
++            acc_alpha += alpha * (1.0 - acc_alpha)
++    return acc_color
++
++def sample_voxel(voxel):
++    # [G] Returns color C and opacity alpha for the voxel
++    return voxel.color, voxel.alpha
++
++def unlock_api():
++    # [G] Releases rendering context locks
++    pass
+ ```
+ 
+@@ -66,27 +74,23 @@
+ 
+ ### Visibility Coefficient Computation
+-A preprocessing step to compute view-dependent visibility coefficients for each octree leaf, used by the Prioritized-Layered Projection (PLP) algorithm to prioritize visible nodes [S2, unofficial]. It estimates the likelihood of a node blocking light by rasterizing the node's contents against its bounding box from multiple viewpoints [S2, unofficial].
++A preprocessing step that computes view-dependent visibility coefficients for each octree leaf, used by the Prioritized-Layered Projection (PLP) algorithm to prioritize visible nodes at runtime [S2, unofficial]. It estimates the likelihood of a node blocking light by rasterizing its contents against its bounding box from multiple sample viewpoints [S2, unofficial].
+ - **Steps:**
+-    1. For each octree leaf, place an arbitrary number of sample viewpoints around the leaf [S2, unofficial].
+-    2. Pick viewpoints such that the entire node is visible from the viewpoint towards the center, maximizing the projected screen area of the node's bounding box [S2, unofficial].
+-    3. For each sample viewpoint:
+-        a. Rasterize the node's bounding box in green [S2, unofficial].
+-        b. Rasterize the node's contents in red over a black background, without depth tests [S2, unofficial].
+-        c. Read back the frame buffer [S2, unofficial].
+-        d. Count green pixels ($n_g$) and red pixels ($n_r$) [S2, unofficial].
+-        e. Compute coefficient as $n_r / (n_r + n_g)$ [S2, unofficial].
+-    4. At runtime, pick the coefficient whose corresponding sampling direction is closest to the current viewing direction [S2, unofficial].
++  1. For each octree leaf, place an arbitrary number of sample viewpoints around the leaf [S2, unofficial].
++  2. Select viewpoints such that the entire node is visible towards its center, maximizing the projected screen area of the node's bounding box [S2, unofficial].
++  3. For each sample viewpoint: rasterize the node's bounding box in green; rasterize the node's contents in red over a black background without depth tests; read back the frame buffer; count green pixels ($n_g$) and red pixels ($n_r$) [S2, unofficial].
++  4. Compute the visibility coefficient as $n_r / (n_r + n_g)$ [S2, unofficial].
++  5. At runtime, select the coefficient whose corresponding sampling direction is closest to the current viewing direction [S2, unofficial].
+ - **Parameters:**
+-    - `num_coefficients`: The number of visibility coefficients stored per node. Typical value is 20 [S2, unofficial].
++  - `num_coefficients`: The number of visibility coefficients stored per node. Typical value is 20 [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The cancellation check is $O(1)$. The quality estimation is $O(1)$ if the threshold maps directly to a parameter. The actual rendering cost is reduced significantly compared to full traversal.
+-- **Memory Complexity:** Minimal additional memory for the flag and threshold. The visibility coefficients (if used in conjunction) add $O(N \cdot K)$ memory where $N$ is the number of leaves and $K$ is the number of coefficients [S2, unofficial].
++- **Time Complexity:** The cancellation check is $O(1)$ [S1, unofficial]. Quality estimation is $O(1)$ [G]. Actual rendering cost is reduced significantly by skipping the full traversal loop [S1, unofficial].
++- **Memory Complexity:** Minimal additional memory for the flag and threshold. Visibility coefficients add constant memory per node [S2, unofficial].
+ - **Performance:** Guarantees frame completion by degrading quality, preventing hangs [S1, unofficial].
+-- **Strengths:** Robust against infinite loops; simple to implement.
+-- **Limitations:** Visual quality may fluctuate between frames; does not optimize the *current* frame's quality, only ensures *completion*.
++- **Strengths:** Robust against infinite loops; simple to implement [S1, unofficial].
++- **Limitations:** Visual quality may fluctuate between frames; does not optimize the current frame's quality, only ensures completion [S1, unofficial].
+ 
+ ## Background
+-The method originates from interactive visualization systems for large datasets, specifically those using octree structures for out-of-core rendering [S2, unofficial]. It is implemented in systems like iVoxel to handle the latency of interactive traversal [S1, unofficial]. The visibility coefficient variant is described in Wagner Correa's thesis on out-of-core visualization techniques [S2, unofficial].
++The method originates from interactive visualization systems for large datasets, specifically those using octree structures for out-of-core rendering [S2, unofficial]. The cancellation mechanism is documented in the iVoxel repository [S1, unofficial]. The visibility coefficient variant is described in Wagner Correa's thesis on out-of-core visualization techniques [S2, unofficial].
+ 
+ ## Sources

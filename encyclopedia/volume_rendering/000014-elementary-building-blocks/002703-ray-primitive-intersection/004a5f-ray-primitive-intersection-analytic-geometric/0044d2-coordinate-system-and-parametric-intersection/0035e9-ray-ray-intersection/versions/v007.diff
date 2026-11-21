@@ -1,0 +1,210 @@
+--- v006.md
++++ v007.md
+@@ -1,59 +1,174 @@
+ # Ray-Ray Intersection
++
+ Also called: Least-squares ray intersection, Ray vs. Ray Intersection
+ 
+ ## Overview
+-Computes the least-squares intersection point of two rays in 3D space, finding the point that minimizes the squared distance to both rays when they do not intersect exactly due to noise or parallax [S1, unofficial]. This method operates in full 3D space to resolve non-intersecting rays [S1, unofficial].
++Computes the least-squares intersection point of two rays in 3D space, finding the point that minimizes the squared distance to both rays when they do not intersect exactly due to noise or parallax [S1, unofficial]. It differs from exact analytic intersection methods by providing a robust solution for non-intersecting (skew) rays, which is essential for multi-view geometry consistency checks [S2].
+ 
+ ## How it works
+-**Inputs:** Two rays, each defined by an origin vector $\mathbf{o} \in \mathbb{R}^3$ and a direction vector $\mathbf{d} \in \mathbb{R}^3$ [S1, unofficial]. The inputs are batched, with shapes broadcastable to a common shape [S1, unofficial].
+-**Outputs:** A tensor of shape `(*shape, 3)` containing the 3D coordinates of the least-squares intersection point for each ray pair [S1, unofficial]. Parallel rays return a value of `inf` (specifically `1e10`) [S1, unofficial].
++**Inputs:** Two rays defined by origins $o_1, o_2 \in \mathbb{R}^3$ and unit direction vectors $d_1, d_2 \in \mathbb{R}^3$.
++**Output:** A point $p \in \mathbb{R}^3$ representing the midpoint of the shortest segment connecting the two rays. If rays are parallel, returns a designated infinity value.
+ 
+ **Data Structures:**
+-*   Tensors for origins $\mathbf{o}_r$ and directions $\mathbf{d}_r$ where $r \in \{0, 1\}$ indexes the ray [S1, unofficial].
+-*   Intermediate tensor $n$ of shape `(2, *shape, 3, 3)` [S1, unofficial].
+-*   Left-hand side matrix $L$ of shape `(*shape, 3, 3)` [S1, unofficial].
+-*   Right-hand side vector $R$ of shape `(*shape, 3)` [S1, unofficial].
++- Tensors for origins and directions with shape `(*batch_shape, 3)`.
++- Intermediate tensor $n$ with shape `(*batch_shape, 2, 3, 3)` storing the outer product components minus identity.
++- Matrix $L$ with shape `(*batch_shape, 3, 3)`.
++- Vector $R$ with shape `(*batch_shape, 3)`.
+ 
+ **Parameters:**
+-*   `eps`: Float threshold for parallel detection, default $10^{-5}$ [S1, unofficial].
+-*   `inf_val`: Float value for parallel ray output, default $10^{10}$ [S1, unofficial].
++- `eps`: Float threshold for parallel detection, typically $10^{-5}$ [S1, unofficial].
++- `inf_val`: Float value for parallel ray output, typically $10^{10}$ [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Broadcast:** Broadcast $\mathbf{o}_0, \mathbf{d}_0, \mathbf{o}_1, \mathbf{d}_1$ to a common shape [S1, unofficial].
+-2.  **Parallel Detection:** Compute the dot product of the direction vectors: $dot = \mathbf{d}_0 \cdot \mathbf{d}_1$ [S1, unofficial]. Identify parallel rays where $dot > 1 - \text{eps}$ [S1, unofficial]. Filter out parallel ray pairs from all tensors [S1, unofficial].
+-3.  **Stack:** Stack origins and directions into tensors of shape `(2, *shape, 3)` for batch processing over the two rays [S1, unofficial].
+-4.  **Compute Outer Product Matrix ($n$):** For each ray $r$, compute the matrix $n_r$ [S1, unofficial].
+-5.  **Compute Left-Hand Side ($L$):** Sum the matrices $n_r$ over the two rays [S1, unofficial].
+-6.  **Compute Right-Hand Side ($R$):** Compute the vector $R$ using the origins and the matrix $n$ [S1, unofficial].
+-7.  **Solve:** Solve the linear system $L p = R$ for $p$ using a least-squares solver [S1, unofficial]. The solution $p$ is the least-squares intersection point [S1, unofficial].
+-8.  **Handle Parallel Rays:** Initialize the output tensor with `inf_val` [S1, unofficial]. Assign the computed solution $p$ to indices corresponding to non-parallel rays [S1, unofficial]. Return the result [S1, unofficial].
++1.  **Broadcast:** Ensure origins and directions for both rays share a common batch shape.
++2.  **Parallel Detection:** Compute the dot product of the direction vectors. If $|d_1 \cdot d_2| > 1 - \text{eps}$, the rays are considered parallel. Create a boolean mask `is_parallel` for these cases [S1, unofficial].
++3.  **Construct Outer Product Matrix:** For each ray $r \in \{0, 1\}$, compute the matrix $n_r$ where elements are $n_{r,i,j} = d_{r,i} d_{r,j} - \delta_{i,j}$. This is the outer product of the direction vector minus the $3 \times 3$ identity matrix [S1, unofficial].
++4.  **Assemble Linear System:**
++    -   Compute the left-hand side matrix $L$ by summing $n_r$ over both rays: $L = \sum_{r=0}^{1} n_r$ [S1, unofficial].
++    -   Compute the right-hand side vector $R$ by summing the interaction of $n_r$ with origins: $R = \sum_{r=0}^{1} \sum_{j=0}^{2} n_{r,i,j} o_{r,j}$ [S1, unofficial].
++5.  **Solve:** Solve the linear system $L p = R$ for $p$ using a least-squares solver [S1, unofficial].
++6.  **Handle Parallel Rays:** Initialize the output tensor with `inf_val`. Assign the computed solution $p$ to indices where `is_parallel` is false [S1, unofficial].
+ 
+-**Formulas:**
+-*   $n_{r,b,i,j} = d_{r,b,i} d_{r,b,j} - \delta_{i,j}$, where $d$ is the direction vector and $\delta$ is the Kronecker delta (identity matrix) [S1, unofficial].
+-*   $L_{b,i,j} = \sum_{r=0}^{1} n_{r,b,i,j}$, representing the left-hand side matrix of the least-squares system [S1, unofficial].
+-*   $R_{b,i} = \sum_{r=0}^{1} \sum_{j=0}^{2} n_{r,b,i,j} o_{r,b,j}$, representing the right-hand side vector [S1, unofficial].
++**Pseudocode:**
++
++```python
++import torch
++import torch.nn.functional as F
++
++def ray_ray_intersection(origins_x, directions_x, origins_y, directions_y, eps=1e-5, inf_val=1e10):
++    """
++    Computes the least-squares intersection point of two rays.
++    
++    Args:
++        origins_x, origins_y: Tensor of shape (*batch, 3)
++        directions_x, directions_y: Tensor of shape (*batch, 3), assumed normalized
++        eps: Threshold for parallel detection
++        inf_val: Value to return for parallel rays
++        
++    Returns:
++        Tensor of shape (*batch, 3) containing the intersection point or inf_val
++    """
++    # 1. Broadcast to common shape
++    # Assuming inputs are already broadcastable or have same shape
++    # Stack into (2, *batch, 3)
++    origins = torch.stack([origins_x, origins_y], dim=0) # Shape: (2, *batch, 3)
++    directions = torch.stack([directions_x, directions_y], dim=0) # Shape: (2, *batch, 3)
++    
++    # 2. Detect parallel rays
++    # Dot product of directions: einsum("... i, ... i -> ...")
++    dot_prod = torch.einsum("... i, ... i -> ...", directions_x, directions_y)
++    # Parallel if dot product is close to 1 (assuming unit vectors)
++    is_parallel = dot_prod > (1.0 - eps)
++    
++    # 3. Compute n matrix: n_r_ij = d_ri * d_rj - delta_ij
++    # Outer product: einsum("r b i, r b j -> r b i j")
++    outer_prod = torch.einsum("r b i, r b j -> r b i j", directions, directions)
++    # Subtract identity for each ray
++    # eye(3) needs to be broadcasted to (2, *batch, 3, 3)
++    eye = torch.eye(3, device=directions.device, dtype=directions.dtype)
++    # Expand eye to match batch dimensions if necessary, or rely on broadcasting
++    # torch.eye(3) is (3,3). Broadcasting works if batch dims are handled correctly.
++    # To be safe with arbitrary batch shapes:
++    eye_expanded = eye.view(1, 1, 3, 3).expand(2, *directions.shape[:-1], 3, 3)
++    n = outer_prod - eye_expanded
++    
++    # 4. Assemble L and R
++    # L = sum over r=0,1 of n
++    # reduce "r b i j -> b i j"
++    L = torch.sum(n, dim=0)
++    
++    # R = sum over r=0,1 of (sum over j of n_r_ij * o_rj)
++    # First, einsum n("r b i j") * origins("r b j") -> "r b i"
++    term = torch.einsum("r b i j, r b j -> r b i", n, origins)
++    # Then sum over r
++    R = torch.sum(term, dim=0)
++    
++    # 5. Solve L p = R using least squares
++    # torch.linalg.lstsq returns a solution object
++    # lhs is L, rhs is R
++    # Note: lstsq expects (..., M, N) and (..., M, K)
++    # L is (..., 3, 3), R is (..., 3) -> treat as (..., 3, 1) for rhs
++    R_col = R.unsqueeze(-1)
++    try:
++        solution = torch.linalg.lstsq(L, R_col).solution
++        p = solution.squeeze(-1)
++    except RuntimeError:
++        # Fallback if singular, though parallel check should handle most
++        p = torch.full_like(R, inf_val)
++        
++    # 6. Handle parallel rays
++    # Initialize with inf_val
++    result = torch.full_like(R, inf_val)
++    # Assign valid solutions where not parallel
++    result[~is_parallel] = p[~is_parallel]
++    
++    return result
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Parallel Rays:** The matrix $L$ becomes singular when rays are parallel [S1, unofficial]. The method explicitly detects this using the dot product threshold `eps` and returns `inf_val` [S1, unofficial].
++-   **Parallel Rays:** The matrix $L$ becomes singular if rays are parallel. The method explicitly detects this via the dot product threshold and returns a predefined infinity value rather than failing or returning NaN [S1, unofficial].
++-   **Precision:** Using `eps = 1e-5` is standard for detecting near-parallelism in single-precision floating point arithmetic [S1, unofficial].
++-   **Normalization:** The parallel detection assumes direction vectors are normalized. If not, the dot product threshold should be adjusted or vectors normalized first.
+ 
+ ## Subtopics
+ 
+-### [Azimuthal Hit Detection](3885-azimuthal-hit-detetection.md)
+-Computes intersections in the azimuthal plane using 2D cross products. Choose when working with spherical grids and azimuthal symmetry.
++### Geometry Consistent Filter
++A post-processing filter used in sparse geometry regularization to eliminate inaccurate ray correspondences. It computes the minimal Euclidean distance $d_{ray}$ between two rays; true correspondences should have $d_{ray} \approx 0$. Rays with $d_{ray} > \tau_{ray}$ are discarded [S2].
+ 
+-### [Ray-Polar Section Intersection](3886-ray-polar-section-intersection.md)
+-Computes intersections in the polar section. Choose when working with spherical grids and polar symmetry.
++**Definition:**
++Calculates the shortest distance between two skew lines defined by origins $o_1, o_2$ and directions $d_1, d_2$ [S2].
++
++**Steps:**
++1.  Define points on the rays: $P_1 = o_1 + m d_1$ and $P_2 = o_2 + n d_2$, where $m, n$ are scalar distances from the origins to the closest points [S2].
++2.  Enforce orthogonality: The vector $P_1 - P_2$ must be perpendicular to both directions $d_1$ and $d_2$. This yields the system:
++    $$
++    \begin{cases}
++    d_1 \cdot (P_1 - P_2) = 0 \\
++    d_2 \cdot (P_1 - P_2) = 0
++    \end{cases}
++    $$
++3.  Substitute $P_1, P_2$ and simplify to solve for $m$ and $n$:
++    $$
++    \begin{cases}
++    m(d_1 \cdot d_2) - n(d_1 \cdot d_2) = d_1 \cdot o_2 - d_1 \cdot o_1 \\
++    m(d_1 \cdot d_2) - n(d_2 \cdot d_2) = d_2 \cdot o_2 - d_2 \cdot o_1
++    \end{cases}
++    $$
++    *(Note: The source text [S2] contains a typo in the second equation's LHS term $n(d_1 \cdot d_2)$ vs $n(d_2 \cdot d_2)$ in the simplified system description, but the solution formula clarifies the coefficients. The standard derivation for the shortest segment between skew lines leads to the solution provided below.)*
++4.  Solve for $m$ and $n$ using the following closed-form solution:
++    Let:
++    $$
++    \begin{aligned}
++    a &= d_1 \cdot d_1 \\
++    b &= d_2 \cdot d_2 \\
++    c &= d_1 \cdot d_2 \\
++    d &= d_1 \cdot o_1 \\
++    e &= d_1 \cdot o_2 \\
++    f &= d_2 \cdot o_1 \\
++    g &= d_2 \cdot o_2
++    \end{aligned}
++    $$
++    Then:
++    $$
++    m = \frac{be + cf - cg - bd}{ab - c^2}, \quad n = \frac{ce + af - cd - ag}{ab - c^2}
++    $$
++    *(Note: The source [S2] writes the denominator as $ab - cc$, which is $ab - c^2$. The numerators are derived from Cramer's rule or matrix inversion of the system.)*
++5.  Compute the distance: $d_{ray} = \|o_1 - o_2 + m d_1 - n d_2\|_2$ [S2].
++6.  Discard the ray pair if $d_{ray} > \tau_{ray}$ [S2].
++
++**When to choose:** Use this when validating feature matches in multi-view NeRF training to enforce geometric consistency, rather than finding the intersection point itself [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the linear system solve and einsum operations, which scale linearly with batch size $O(N)$ [G].
+-*   **Memory Complexity:** $O(N)$ for storing intermediate tensors $n, L, R$ and the output [G].
+-*   **Strengths:** Robust to noise and parallax; provides a unique solution for non-parallel rays [S1, unofficial].
+-*   **Limitations:** Does not provide an exact intersection for non-intersecting rays (only a least-squares approximation); fails for parallel rays without special handling [S1, unofficial].
+-*   **When to Use:** When rays are expected to be close to intersecting but not exactly so, such as in multi-view stereo or volumetric reconstruction with noise [S1, unofficial].
+-*   **When Not to Use:** When exact intersections are required, or when rays are known to be parallel [S1, unofficial].
++-   **Time Complexity:** $O(1)$ per ray pair for the least-squares method (fixed size $3 \times 3$ system). The Geometry Consistent Filter is also $O(1)$ per pair.
++-   **Memory Complexity:** $O(1)$ auxiliary storage per ray pair.
++-   **Strengths:** Robust to noise; provides a unique solution for skew rays; computationally efficient for batched operations [S1, unofficial].
++-   **Limitations:** Does not provide a physical intersection if rays are truly skew; the result is an approximation. Parallel rays require special handling [S1, unofficial].
++-   **When to use:** Multi-view geometry consistency checks, bundle adjustment initialization, or any scenario where rays from different views do not intersect perfectly due to calibration errors or noise [S1, unofficial][S2].
++-   **When not to use:** When exact intersection is required for convex primitives (use analytic intersection instead) [Parent].
+ 
+ ## Background
+-The method originates from the VolSplat repository by ziplab [S1, unofficial]. It is used in volumetric rendering contexts where precise ray alignment is difficult to achieve [S1, unofficial]. The approach is a standard least-squares solution for the closest points between two lines in 3D space [G].
++The least-squares ray intersection is implemented in the VolSplat repository [S1, unofficial]. The Geometry Consistent Filter variant is described in the SGCNeRF paper for few-shot neural rendering via sparse geometric consistency guidance [S2].
+ 
+ ## Sources
+-[S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)+[S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
++[S2] SGCNeRF: Few-Shot Neural Rendering via Sparse Geometric Consistency Guidance, https://doi.org/10.1109/tcsvt.2025.3610950, fetched 2026-10-30

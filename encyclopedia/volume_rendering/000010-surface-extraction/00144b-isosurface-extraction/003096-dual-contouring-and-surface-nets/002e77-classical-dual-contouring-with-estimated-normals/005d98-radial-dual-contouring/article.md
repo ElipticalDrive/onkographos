@@ -1,0 +1,198 @@
+# Radial Dual Contouring
+
+Also called: RadialDC
+
+## Overview
+Radial Dual Contouring (RadialDC) is a method for large-scale world mesh generation that extends Classical Dual Contouring with Dynamic Voxel Sizing and Dynamic Voxel Density Evaluation [S1, unofficial]. It solves the performance bottleneck of generating massive, high-detail terrains by adapting voxel resolution and density function complexity based on the distance from a central player position [S1, unofficial]. Unlike standard Dual Contouring, which uses a uniform grid, RadialDC ensures a crack-free mesh by generating voxels radially outward from a high-detail center, allowing for seamless regeneration as the player moves [S1, unofficial].
+
+## How it works
+RadialDC builds upon the vertex placement and quad-mesh generation of Classical Dual Contouring [S1, unofficial]. It introduces a radial hierarchy of voxels and a multi-threaded execution pipeline to achieve real-time generation of large volumes (e.g., a 4-mile cube in 1-2 seconds) [S1, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   Player position ($P$).
+*   World center ($C$) for the current mesh chunk.
+*   Configuration parameters:
+    *   $V_{min}$: Smallest voxel size (high detail).
+    *   $V_{max}$: Largest voxel size (low detail limit).
+    *   $R_{regen}$: Regeneration radius threshold.
+    *   $T_{core}$: Number of tiers in the Core Voxel region.
+*   Density function definitions (e.g., Simplex noise octaves, Recipe Blocks) [S1, unofficial].
+
+**Outputs:**
+*   A `Mesh` object containing position, normal, UV, and triangle arrays.
+*   A boolean flag indicating completion status.
+
+### Data Structures
+The world is divided into two primary voxel categories [S1, unofficial]:
+1.  **Core Voxels:** Voxels comprising the highest detail tiers, located closest to the center $C$.
+2.  **Outer Voxels:** Voxels that expand in size as distance from $C$ increases, up to $V_{max}$.
+
+Each voxel $V_i$ is defined by its spatial bounds and a detail level $L_i$. The detail level determines the complexity of the density function evaluation [S1, unofficial].
+
+### Algorithm Steps
+
+#### 1. Setup and Initialization
+Initialize the system with $V_{min}$, tier sizes, and threading flags [S1, unofficial].
+
+#### 2. Regeneration Trigger Check
+Determine if a new mesh center is required. Let $D$ be the distance from the player $P$ to the current center $C$. Let $R_{max}$ be the radius of the high-detail area.
+If $D > \frac{1}{2} R_{max}$, a regeneration is triggered [S1, unofficial].
+
+#### 3. Recentering
+If regeneration is triggered, find a new center $C'$ [S1, unofficial]:
+1.  Define a set of candidate recenter points (e.g., a $3 \times 3 \times 3$ grid of voxel centers surrounding the current region).
+2.  Calculate the distance from $P$ to each candidate.
+3.  Select the candidate $C'$ with the minimum distance to $P$ [S1, unofficial].
+
+#### 4. Voxel Generation (Step 1)
+Generate the voxel grid radially from $C'$ [S1, unofficial]:
+1.  **Core Region:** Create voxels with size $V_{min}$ for the first $T_{core}$ tiers.
+2.  **Outer Region:** For tiers beyond $T_{core}$, increase voxel size linearly or exponentially with distance from $C'$ until $V_{max}$ is reached.
+3.  **Crack-Free Rule:** Ensure adjacent voxels share boundary vertices. The radial generation order ensures that coarser voxels are always adjacent to finer voxels in a controlled manner, preventing gaps [S1, unofficial].
+
+#### 5. Density Evaluation (Step 2)
+For each voxel $V_i$, evaluate the density function $f(x)$ to find the isosurface intersection and normal [S1, unofficial].
+*   **Dynamic Density Evaluation:** The complexity of $f(x)$ depends on the voxel's detail level $L_i$ [S1, unofficial].
+    *   High $L_i$ (Core): Use multiple octaves of Simplex noise or complex Recipe Blocks.
+    *   Low $L_i$ (Outer): Use simpler functions or fewer noise octaves.
+*   **Parallel Execution:** Each voxel's evaluation is independent and executed on a separate thread [S1, unofficial].
+
+#### 6. Mesh Data Generation (Step 3)
+Using the vertices and normals computed in Step 2, generate the triangle arrays [S1, unofficial]. This step aggregates the per-voxel data into a single mesh structure [S1, unofficial].
+
+#### 7. Mesh Assembly
+Create the final `Mesh` object from the position, normal, UV, and triangle arrays. Return the mesh pointer and a completion boolean [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def RadialDC(player_pos, current_center, config):
+    """
+    Main entry point for Radial Dual Contouring.
+    Returns (mesh, is_complete).
+    """
+    # Step 2: Check for regeneration
+    dist_to_center = vector_distance(player_pos, current_center)
+    threshold = config.regen_radius / 2.0
+    
+    new_center = current_center
+    regenerate = False
+    
+    if dist_to_center > threshold:
+        new_center = find_closest_recenter_point(player_pos, config.candidate_points)
+        regenerate = True
+        
+    if regenerate:
+        current_center = new_center
+        # Trigger full regeneration pipeline
+        return generate_mesh_pipeline(current_center, player_pos, config)
+    else:
+        # If not regenerating, return existing mesh or null if not yet generated
+        return existing_mesh, True
+
+def find_closest_recenter_point(player_pos, candidate_points):
+    """
+    Finds the voxel center from candidate_points closest to player_pos.
+    """
+    min_dist = infinity
+    best_point = candidate_points[0]
+    
+    for point in candidate_points:
+        d = vector_distance(player_pos, point)
+        if d < min_dist:
+            min_dist = d
+            best_point = point
+            
+    return best_point
+
+def generate_mesh_pipeline(center, player_pos, config):
+    """
+    Executes the 3-stage pipeline: Voxel Creation, Density Eval, Mesh Gen.
+    """
+    # Stage 1: Voxel Creation (Single Core)
+    voxels = create_radial_voxels(center, config.min_voxel_size, config.max_voxel_size, config.core_tiers)
+    
+    # Stage 2: Density Evaluation (Multi-threaded)
+    # Each voxel is evaluated in parallel
+    voxel_results = parallel_map(evaluate_voxel, voxels, config.density_functions)
+    
+    # Stage 3: Mesh Data Generation (Single Core)
+    mesh_data = assemble_mesh_data(voxel_results)
+    
+    # Final Assembly
+    mesh = create_mesh_object(mesh_data.positions, mesh_data.normals, mesh_data.uvs, mesh_data.triangles)
+    
+    return mesh, True
+
+def evaluate_voxel(voxel, density_functions):
+    """
+    Evaluates the density function for a single voxel.
+    Uses dynamic complexity based on voxel detail level.
+    """
+    detail_level = voxel.detail_level
+    
+    # Select density function complexity
+    if detail_level > config.core_tiers:
+        func = density_functions.simple
+    else:
+        func = density_functions.complex # e.g., multiple noise octaves
+        
+    # Perform Dual Contouring steps:
+    # 1. Sample density at voxel corners
+    # 2. Compute normals
+    # 3. Solve QEF for vertex position
+    # 4. Generate quad mesh for the voxel
+    
+    return voxel_result
+
+def create_radial_voxels(center, min_size, max_size, core_tiers):
+    """
+    Generates voxels radially from center.
+    Core voxels use min_size. Outer voxels grow in size.
+    """
+    voxels = []
+    # Iterate through grid layers
+    for layer in range(max_layers):
+        # Determine voxel size for this layer
+        if layer <= core_tiers:
+            size = min_size
+        else:
+            # Expand size as we move away
+            size = min_size + (layer - core_tiers) * expansion_rate
+            if size > max_size:
+                size = max_size
+                
+        # Generate voxels for this layer
+        layer_voxels = generate_layer_voxels(center, size, layer)
+        voxels.extend(layer_voxels)
+        
+    return voxels
+```
+
+### Edge Cases and Pitfalls
+*   **Regeneration Timing:** Regeneration must occur off the main thread and before the player leaves the high-detail area to avoid loading screens or visual popping [S1, unofficial].
+*   **Crack Prevention:** The radial generation order and strict rules for voxel sizing are critical. If outer voxels are not sized correctly relative to their neighbors, cracks will appear at boundaries [S1, unofficial].
+*   **Unity Main Thread:** The implementation uses a "flow gate" style because Unity requires the main thread to run continuously. The main thread checks and advances the process once per frame [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** Capable of generating a roughly 4-mile cube in 1-2 seconds [S1, unofficial].
+*   **Complexity:**
+    *   Time: $O(N \cdot C)$, where $N$ is the number of voxels and $C$ is the complexity of the density function for that voxel. Parallelization reduces wall-clock time significantly for Step 2.
+    *   Memory: Proportional to the number of voxels and the size of the mesh data arrays.
+*   **Strengths:**
+    *   Handles extremely large worlds efficiently.
+    *   Seamless regeneration as the player moves.
+    *   Adaptive detail reduces computational load in distant areas.
+*   **Limitations:**
+    *   Requires careful tuning of voxel sizing rules to prevent cracks.
+    *   Implementation complexity is high due to multi-threading and radial logic.
+    *   Dependent on the specific "Recipe Block" abstraction for density definition [S1, unofficial].
+
+## Background
+Radial Dual Contouring was introduced by James Pardue as an extension of the Dual Contouring algorithm [S1, unofficial]. It was developed to address the limitations of standard Dual Contouring in large-scale world generation, specifically the inability to efficiently handle varying levels of detail across a massive grid. The method is implemented in the `RadialDualContouring` repository, often in the context of the Unity engine [S1, unofficial].
+
+## Sources
+[S1] JamesPardue/RadialDualContouring, https://github.com/JamesPardue/RadialDualContouring, fetched 2026-10-26 (unofficial)

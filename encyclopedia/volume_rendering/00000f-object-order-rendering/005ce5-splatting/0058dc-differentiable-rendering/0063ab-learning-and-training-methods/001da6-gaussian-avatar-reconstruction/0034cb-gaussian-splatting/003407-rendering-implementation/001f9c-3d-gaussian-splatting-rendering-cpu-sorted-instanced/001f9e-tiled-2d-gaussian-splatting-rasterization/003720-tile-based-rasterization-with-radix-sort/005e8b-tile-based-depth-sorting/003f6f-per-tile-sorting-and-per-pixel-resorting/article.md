@@ -1,0 +1,146 @@
+# Per-tile Sorting and Per-pixel Resorting
+
+Also called: StopThePop's per-tile sorting and per-pixel resorting
+
+## Overview
+Per-tile sorting and per-pixel resorting is a rasterization strategy designed to mitigate "popping" artifacts in surface-based volumetric representations (such as 2DGS and QGS) where Gaussian distributions are concentrated on surfaces. It addresses the sensitivity of alpha-blending order by replacing inconsistent per-ray depth sorting with a two-stage approach: coarse global ordering via per-tile depth approximation and fine local ordering via per-pixel resorting. This method sets itself apart from standard 3D Gaussian Splatting by enforcing strict consistency between forward rendering and backward gradient computation traversal orders, thereby eliminating streak-like and blocky artifacts introduced by single-ray approximations.
+
+## How it works
+The method operates on a tile-based rasterization pipeline, building on [Tile-based Depth Sorting](8038-tile-based-depth-sorting.md). It assumes a tile size of $16 \times 16$ pixels, resulting in 256 pixels per tile.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Camera parameters (origin $\hat{\mathbf{o}}$, ray direction $\hat{\mathbf{r}}$).
+    *   Set of projected 3D Gaussians (or quadric primitives) covering the current tile.
+    *   Gaussian properties: opacity $\alpha$, scale, rotation, color, normal, curvature, etc.
+*   **Outputs:**
+    *   Final rendered color, depth, normal, and other volumetric maps $\hat{X}$ for each pixel.
+    *   Gradients for optimization.
+
+### Data Structures
+1.  **Tile Depth Buffer:** A single depth value $d_{tile}$ per $16 \times 16$ tile.
+2.  **Gaussian Property Buffer:** An array of size 8 used to store intermediate Gaussian properties (depth, normal, etc.) for a specific pixel before blending. This buffer acts as a local priority queue or staging area.
+3.  **Sorted Gaussian List:** A list of Gaussians covering the tile, sorted by the tile depth $d_{tile}$.
+
+### Steps
+
+1.  **Tile Depth Approximation:**
+    For each $16 \times 16$ pixel tile, identify the pixel closest to the projected vertex of the underlying quadric surface (or the centroid of the Gaussians). Compute the intersection depth $d_{tile}$ along the ray from this specific pixel. Apply this single depth value $d_{tile}$ to all 256 pixels in the tile. Use $d_{tile}$ to perform global sorting of all Gaussians covering the tile. This removes streak-like inconsistencies but may introduce blocky artifacts due to the single-ray approximation.
+
+2.  **Per-Pixel Local Resorting:**
+    For each pixel within the tile:
+    *   Retrieve the globally sorted list of Gaussians.
+    *   Filter and reorder the Gaussians based on the actual per-ray depth for that specific pixel. This step eliminates the blocky artifacts introduced in Step 1.
+    *   Store the calculated properties (depth, normal, opacity $\alpha$, etc.) of the Gaussians in the 8-length buffer array. Do not blend immediately.
+    *   Once the buffer is full (or when processing the final Gaussian), select the closest Gaussian (front-most) for alpha-blending. This ensures a strict near-to-far traversal order.
+
+3.  **Volumetric Rendering:**
+    Perform alpha-blending in the near-to-far order established by the resorting. The color $\hat{X}$ (where $X$ can be color, depth, normal, or curvature) is computed as:
+    $$ \hat{X} = \sum_{i=0}^{N-1} \bar{\alpha}_i T_i X_i $$
+    where:
+    *   $N$ is the number of Gaussians along the ray.
+    *   $\bar{\alpha}_i = \alpha_i g_i$ is the effective opacity (product of Gaussian opacity $\alpha_i$ and visibility factor $g_i$).
+    *   $T_i = \prod_{j=0}^{i-1} (1 - \bar{\alpha}_j)$ is the accumulated transmittance before Gaussian $i$.
+    *   $X_i$ represents the property value of the $i$-th Gaussian.
+
+4.  **Gradient Computation:**
+    Compute gradients in the same near-to-far order as the forward pass to ensure consistency. The gradient of the rendered value $\hat{X}$ with respect to the effective opacity $\bar{\alpha}_i$ is:
+    $$ \frac{\partial \hat{X}}{\partial \bar{\alpha}_i} = \left( X_i - \frac{\hat{X} - \sum_{j=0}^i X_j \bar{\alpha}_j T_j}{T_{i+1}} \right) T_i $$
+    This front-to-back form ensures the backward computation follows the same order as the forward computation. Note that the distortion loss gradient does not require modification as its computation order is unaffected.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_tile(tile_pixels, gaussians, tile_size=16):
+    """
+    Renders a single tile using per-tile sorting and per-pixel resorting.
+    tile_pixels: List of pixel coordinates in the tile.
+    gaussians: List of Gaussian primitives covering the tile.
+    """
+    # Step 1: Tile Depth Approximation
+    # Find the pixel closest to the projected vertex of the quadric surface
+    reference_pixel = find_closest_pixel_to_vertex(tile_pixels)
+    ray = get_ray_for_pixel(reference_pixel)
+    
+    # Compute intersection depth for the reference ray
+    tile_depth = compute_intersection_depth(ray, gaussians)
+    
+    # Global sort: Sort all gaussians by tile_depth
+    # Note: In practice, this is a coarse sort; actual per-pixel sort happens next
+    sorted_gaussians = sort_gaussians_by_depth(gaussians, tile_depth)
+    
+    # Initialize output buffers for the tile
+    tile_color = zeros((tile_size, tile_size, 3))
+    tile_depth_map = zeros((tile_size, tile_size))
+    
+    for pixel in tile_pixels:
+        # Step 2: Per-Pixel Local Resorting
+        ray_pixel = get_ray_for_pixel(pixel)
+        
+        # Re-sort gaussians based on actual per-pixel depth
+        local_sorted_gaussians = sort_gaussians_by_depth(gaussians, ray_pixel)
+        
+        # Buffer for local processing
+        buffer = []
+        
+        # Accumulate transmittance
+        T = 1.0
+        accumulated_color = zeros(3)
+        accumulated_depth = 0.0
+        
+        # Step 3: Volumetric Rendering (Near-to-Far)
+        for gaussian in local_sorted_gaussians:
+            # Calculate properties
+            alpha = gaussian.opacity * gaussian.visibility
+            if alpha < epsilon:
+                continue
+                
+            # Store in buffer (conceptually, though here we blend immediately 
+            # after ensuring order. The buffer size 8 implies a small window 
+            # or specific hardware constraint, but logically it enforces order)
+            buffer.append(gaussian)
+            
+            # Alpha blending
+            effective_alpha = alpha
+            color = gaussian.color
+            depth = gaussian.depth
+            
+            accumulated_color += effective_alpha * T * color
+            accumulated_depth += effective_alpha * T * depth
+            T *= (1.0 - effective_alpha)
+            
+            if T < epsilon:
+                break
+        
+        tile_color[pixel] = accumulated_color
+        tile_depth_map[pixel] = accumulated_depth
+        
+        # Step 4: Gradient Computation (Backward Pass)
+        # Compute gradients in near-to-far order
+        # Gradient formula: dX/d_alpha_i = (X_i - (X_hat - sum_{j=0}^i X_j * alpha_j * T_j) / T_{i+1}) * T_i
+        # This requires storing intermediate sums during forward pass or recomputing
+        compute_gradients_nearly_far(local_sorted_gaussians, accumulated_color, accumulated_depth)
+        
+    return tile_color, tile_depth_map
+```
+
+### Parameters and Edge Cases
+*   **Tile Size:** Fixed at $16 \times 16$ pixels in the source [S1].
+*   **Buffer Size:** 8 elements. This likely refers to a hardware register or cache line constraint for local sorting, ensuring that the closest 8 Gaussians are readily accessible for blending.
+*   **Precision:** The method relies on accurate depth intersection. Degenerate cases where the ray is parallel to the surface or the intersection is undefined should be handled by falling back to a default depth or skipping the Gaussian.
+*   **Consistency:** The critical pitfall is the mismatch between forward and backward traversal orders. If the backward pass uses a different order (e.g., far-to-near) than the forward pass (near-to-far), the gradients will be incorrect, leading to training instability. The rewritten gradient formula ensures alignment.
+
+## Operating characteristics
+*   **Time Complexity:** The global sort is $O(N \log N)$ or $O(N)$ with radix sort, where $N$ is the number of Gaussians per tile. The per-pixel resorting adds a local sorting cost, effectively making the total complexity $O(P \cdot K \log K)$, where $P$ is the number of pixels in the tile (256) and $K$ is the number of Gaussians per pixel. This is generally more expensive than simple per-ray sorting but reduces popping artifacts.
+*   **Memory Complexity:** Requires storage for the tile depth buffer and the per-pixel property buffer. The 8-length buffer is constant space per pixel.
+*   **Strengths:** Effectively removes streak-like and blocky artifacts in surface-based representations. Ensures gradient consistency.
+*   **Limitations:** Introduces overhead due to per-pixel resorting. The single-ray approximation for tile depth can still cause minor blocky artifacts if not corrected by the per-pixel step.
+*   **When to Use:** Recommended for surface-based Gaussian splatting (2DGS, QGS) where popping artifacts are prominent. Not necessary for standard 3DGS where Gaussians are volumetric and less sensitive to order.
+
+## Background
+This method originates from the "StopThePop" paper [S1], which addresses the popping artifacts in 3D Gaussian Splatting when applied to surface-based representations. The core insight is that alpha-blending order sensitivity is higher for surface-concentrated Gaussians. The method was introduced to improve the visual quality of reconstructed surfaces by ensuring consistent depth ordering during both rendering and gradient computation.
+
+## Sources
+[S1] Quadratic Gaussian Splatting: High Quality Surface Reconstruction with Second-Order Geometric Primitives, https://doi.org/10.1109/ICCV51701.2025.02624, fetched 2026-10-30

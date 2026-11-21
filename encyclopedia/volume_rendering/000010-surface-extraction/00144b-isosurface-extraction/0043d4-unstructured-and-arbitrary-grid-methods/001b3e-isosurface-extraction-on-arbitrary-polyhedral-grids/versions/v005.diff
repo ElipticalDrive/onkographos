@@ -1,0 +1,466 @@
+--- v004.md
++++ v005.md
+@@ -4,182 +4,278 @@
+ 
+ ## Overview
+-This method extracts isosurfaces from scalar fields defined on arbitrary polyhedral cells (convex, non-convex, planar, or non-planar) by approximating the local surface as a polygonal "isopolygon" within each cell [S1]. It solves the topological inconsistencies and holes inherent in standard Marching Cubes on ambiguous faces by treating face boundaries systematically via a general polygon tracing procedure, ensuring a consistent 2-manifold surface without relying on predefined configuration lookup tables [S1]. Unlike Marching Tetrahedra, it operates directly on arbitrary polyhedra without requiring cell decomposition [S1].
++This method extracts isosurfaces from scalar fields defined on arbitrary polyhedral cells (convex, non-convex, planar, or non-planar faces) by approximating the local isosurface as a polygonal surface (isopolygon) using a general polygon tracing procedure [S1]. It solves the topological inconsistencies and non-2-manifold artifacts inherent in standard [Marching Cubes](52-marching-cubes.md) when handling ambiguous face configurations by systematically treating face boundaries and avoiding reliance on predefined configuration lookup tables [S1]. Unlike [Marching Tetrahedra](52-marching-tetrahedra.md), it operates directly on arbitrary polyhedra without decomposing cells into tetrahedra, offering geometric flexibility at the cost of higher computational complexity per cell [S1].
+ 
+ ## How it works
+-**Inputs:**
+-- Scalar field values $\phi_{ip}$ at every vertex $ip$ of the grid.
+-- Isovalue $\tilde{\phi}$ defining the surface.
+-- Geometric coordinates $\mathbf{x}_{ip}$ of every vertex.
+-- Connectivity data: for each cell, the list of faces, and for each face, the list of vertices defining its boundary.
+-
+-**Outputs:**
+-- A set of isopolygons, where each polygon is defined by an ordered sequence of 3D points (vertices) lying on the cell edges.
+-
+-**Data Structures:**
+-- `IA[ip]`: Integer tag for vertex $ip$. $IA(ip) = 1$ if $\phi_{ip} > \tilde{\phi}$, else $0$. Strict inequality is used to prevent division by zero [S1].
+-- `IPV[j, i]`: Vertex index of the $i$-th vertex of face boundary $j$.
+-- `IPVINT[j, i']`: Index of the $\tilde{\phi}$-vertex inserted on the $i'$-th edge of face boundary $j$.
+-- `NIPVINT[j]`: Count of intersected edges on face boundary $j$.
+-- `IPVISO[k, ik]`: Index of the $ik$-th vertex of the $k$-th isopolygon.
+-- `visited(ip1, ip2)`: Boolean flag to track if an edge has been processed to avoid double-counting shared edges between faces [S1].
+-
+-**Steps:**
++The method extracts an isosurface for a given isovalue $\tilde{\phi}$ from a scalar field $\phi$ defined on the vertices of an arbitrary polyhedral grid. The output is a set of non-planar polygons (isopolygons) representing the isosurface within each intersected cell [S1].
++
++### Inputs and Outputs
++*   **Input:**
++    *   Grid geometry: List of cells, where each cell is defined by a list of faces, and each face by a list of vertex indices.
++    *   Scalar field: Values $\phi_{ip}$ at each vertex $ip$.
++    *   Isovalue: $\tilde{\phi}$ (scalar threshold).
++*   **Output:**
++    *   List of isopolygons, where each polygon is defined by an ordered sequence of 3D position vectors $\tilde{\mathbf{x}}_{\tilde{\phi}}$.
++
++### Data Structures
++For each cell, the algorithm uses the following structures (based on [S1]):
++*   `IA[ip]`: Integer tag for vertex $ip$. $1$ if $\phi_{ip} > \tilde{\phi}$, $0$ otherwise. Strict inequality prevents division by zero in interpolation.
++*   `IPV(j, i)`: Index of the $i$-th vertex of face boundary $j$.
++*   `NIPV(j)`: Number of vertices in face boundary $j$.
++*   `IPVINT(j, i)`: Stores the global index $\tilde{\phi}$ of the intersection point on the $i$-th edge of face boundary $j$. If the edge is not intersected, this value is undefined or zero.
++*   `NIPVINT(j)`: Count of intersected edges on face boundary $j$.
++*   `visited(ip1, ip2)`: Boolean flag to track if the edge between vertices $ip1$ and $ip2$ has been processed to avoid double-counting shared edges.
++*   `key[tilde_phi_index]`: Boolean flag marking a $\tilde{\phi}$-vertex as a "key" vertex. A vertex is key if it lies on an edge $(ip1, ip2)$ where $IA(ip2) = 1$ [S1].
++*   `IPVISO(k, ik)`: 2D array storing the global index of the $ik$-th vertex of the $k$-th isopolygon.
++
++### Steps
+ 
+ 1.  **Tagging:** For every vertex $ip$ in the grid, compute $IA(ip) = 1$ if $\phi_{ip} > \tilde{\phi}$, else $0$ [S1].
+-2.  **Cell Selection:** Identify cells where the scalar field crosses the isovalue. A cell is selected if $\max(\phi) > \tilde{\phi}$ and $\min(\phi) < \tilde{\phi}$ [S1].
+-3.  **Vertex Insertion (Indexing):** For each selected cell, iterate through all face boundaries $j$. For each edge $i'$ in face $j$, defined by vertices $ip1 = IPV(j, i)$ and $ip2 = IPV(j, i+1)$ (with wrap-around):
+-    -   If $IA(ip1) \neq IA(ip2)$, the edge is intersected.
+-    -   If the edge has not been visited, assign a new unique index $\tilde{\phi}$ to this intersection point and mark the edge as visited. If already visited, retrieve the existing index.
+-    -   Store this index in `IPVINT[j, i']`.
+-    -   If $IA(ip2) == 1$, mark the inserted vertex as a "key vertex" [S1].
+-4.  **Vertex Arrangement (Tracing):** Construct the isopolygons by linking the inserted vertices.
+-    -   Initialize the first vertex of the first isopolygon ($k=1, i_k=1$) to the first inserted vertex index ($\tilde{\phi}=1$) [S1].
+-    -   Recursively find the next vertex: For the current vertex index stored in `IPVISO(k, ik)`, find the face boundary $j$ where this vertex is a "key vertex" (i.e., `IPVINT[j, i']` matches and is marked key).
+-    -   The next vertex in the polygon is the vertex preceding the current one in that face boundary's intersection list: `prev_φ = IPVINT(j, i'-1)` (handling wrap-around) [S1].
+-    -   If `prev_φ` is not the first vertex of the current polygon, add it to the polygon.
+-    -   If the loop closes (next vertex equals the first vertex), start a new isopolygon if unassigned vertices remain [S1].
+-5.  **Positioning:** For each $\tilde{\phi}$-vertex on an edge defined by $ip1$ and $ip2$, compute its 3D position $\tilde{\mathbf{x}}_\phi$ using linear interpolation [S1]:
+-
+-    $$
+-    \tilde{\mathbf{x}}_\phi = \mathbf{x}_{ip2} - \frac{\phi_{ip2} - \tilde{\phi}}{\phi_{ip2} - \phi_{ip1}} (\mathbf{x}_{ip2} - \mathbf{x}_{ip1})
+-    $$
+-
+-    Strict inequalities in step 1 ensure $\phi_{ip2} \neq \phi_{ip1}$, preventing division by zero [S1].
+-
+-**Pseudocode:**
++2.  **Cell Selection:** Identify cells where the scalar field crosses the isovalue. A cell is selected if $\max(\phi_{vertices}) > \tilde{\phi}$ and $\min(\phi_{vertices}) < \tilde{\phi}$ [S1].
++3.  **Insertion of $\tilde{\phi}$-vertex indices:** Iterate through all faces of all selected cells to identify intersected edges and assign global indices to intersection points [S1].
++4.  **Arrangement of $\tilde{\phi}$-vertices:** Trace the boundaries of the isosurface within each cell to order the intersection points into closed polygons (isopolygons) [S1].
++5.  **Positioning:** Compute the 3D coordinates of each $\tilde{\phi}$-vertex using linear interpolation [S1].
++
++#### Step 3: Insertion of $\tilde{\phi}$-vertex indices
++For each selected cell, iterate through its face boundaries $j = 1 \dots N_{faces}$. For each face, iterate through its edges $i = 1 \dots NIPV(j)$. Let $ip1 = IPV(j, i)$ and $ip2 = IPV(j, i+1)$ (with wrap-around for the last edge).
++
++1.  Check if the edge is intersected: if $IA(ip1) \neq IA(ip2)$.
++2.  If intersected:
++    *   Check if the edge $(ip1, ip2)$ has been visited.
++    *   If not visited:
++        *   Increment global counter $\tilde{\phi}_{count}$.
++        *   Mark edge $(ip1, ip2)$ as visited.
++        *   Assign new index $\tilde{\phi} = \tilde{\phi}_{count}$.
++    *   If already visited:
++        *   Retrieve existing index $\tilde{\phi}$ for edge $(ip1, ip2)$.
++    *   Store this index in `IPVINT(j, i) = \tilde{\phi}`.
++    *   Mark this $\tilde{\phi}$-vertex as a "key" vertex if $IA(ip2) = 1$ [S1].
++    *   Increment `NIPVINT(j)`.
++
++#### Step 4: Arrangement of $\tilde{\phi}$-vertices
++This step orders the $\tilde{\phi}$-vertices into polygons. It assumes an anticlockwise order when viewed from the outside of the region with positive scalar field ($IA=1$) [S1].
++
++1.  Initialize polygon counter $k=1$ and vertex index within polygon $i_k=1$.
++2.  Select the first unassigned $\tilde{\phi}$-vertex index as the start of the first polygon: `IPVISO(k, 1) = 1` (assuming index 1 is unassigned, or finding the first unassigned) [S1].
++3.  Loop while there are unassigned $\tilde{\phi}$-vertices:
++    *   Let current vertex index be `curr = IPVISO(k, i_k)`.
++    *   Find the face boundary $j$ and edge index $i'$ such that `IPVINT(j, i') == curr` AND `curr` is marked as a key vertex [S1].
++    *   The next vertex in the polygon is the previous vertex on that face boundary: `prev_idx = IPVINT(j, i'-1)` (with wrap-around modulo `NIPVINT(j)`) [S1].
++    *   If `prev_idx` is not the start vertex of the current polygon (`IPVISO(k, 1)`):
++        *   Increment $i_k$.
++        *   Set `IPVISO(k, i_k) = prev_idx`.
++        *   Mark `prev_idx` as assigned.
++    *   Else (loop closed):
++        *   If there are still unassigned $\tilde{\phi}$-vertices:
++            *   Increment $k$.
++            *   Set $i_k = 1$.
++            *   Find the next unassigned $\tilde{\phi}$-vertex index.
++            *   Set `IPVISO(k, 1) = next_unassigned`.
++        *   Else:
++            *   Terminate loop.
++
++#### Step 5: Positioning by interpolation
++For each $\tilde{\phi}$-vertex with global index $\tilde{\phi}$, located on the edge between vertices $ip1$ and $ip2$:
++$$ \tilde{\mathbf{x}}_{\tilde{\phi}} = \mathbf{x}_{ip2} - \frac{\phi_{ip2} - \tilde{\phi}}{\phi_{ip2} - \phi_{ip1}} (\mathbf{x}_{ip2} - \mathbf{x}_{ip1}) $$
++where $\mathbf{x}_{ip1}, \mathbf{x}_{ip2}$ are the 3D positions and $\phi_{ip1}, \phi_{ip2}$ are the scalar values [S1].
++
++### Pseudocode
+ 
+ ```python
+-def extract_isosurface(vertices, scalar_values, cell_faces, isovalue):
++def extract_isosurface_arbitrary_polyhedra(cells, vertices, scalar_field, isovalue):
+     """
+-    vertices: List of 3D coordinates [x, y, z]
+-    scalar_values: List of scalar values at each vertex
+-    cell_faces: List of cells, where each cell is a list of faces, 
+-                and each face is a list of vertex indices
+-    isovalue: The threshold scalar value
++    cells: List of cells. Each cell is a list of faces. Each face is a list of vertex indices.
++    vertices: List of 3D position vectors.
++    scalar_field: List of scalar values corresponding to vertices.
++    isovalue: The threshold value for the isosurface.
++    Returns: List of polygons. Each polygon is a list of 3D position vectors.
+     """
+-    n_vertices = len(vertices)
++    
+     # Step 1: Tagging
+-    IA = [1 if s > isovalue else 0 for s in scalar_values]
+-    
+-    isopolygons = []
+-    # Data structures for a single cell processing
+-    # IPVINT stores the global index of the phi-vertex for each edge in a face
+-    # We need to map edge (ip1, ip2) to a unique global index
+-    
+-    global_phi_vertex_count = 0
+-    edge_to_phi_index = {} # Maps tuple(sorted(ip1, ip2)) -> global_index
+-    
+-    # Process each cell
+-    for cell in cell_faces:
+-        # Step 2: Cell Selection
+-        cell_scalars = [scalar_values[v] for v in cell]
+-        if max(cell_scalars) <= isovalue or min(cell_scalars) >= isovalue:
+-            continue
+-            
+-        cell_phi_vertices = [] # Local list of phi vertices for this cell
+-        local_edge_map = {}    # Maps local edge tuple -> local phi index
+-        
+-        # Step 3: Vertex Insertion
++    # IA[ip] = 1 if scalar_field[ip] > isovalue, else 0
++    # Using strict inequality to prevent division by zero in interpolation
++    IA = [1 if s > isovalue else 0 for s in scalar_field]
++    
++    # Step 2: Cell Selection
++    # Identify cells where max(scalar) > isovalue and min(scalar) < isovalue
++    selected_cells = []
++    for cell in cells:
++        cell_vertices = []
+         for face in cell:
+-            n_face_verts = len(face)
+-            for i in range(n_face_verts):
++            cell_vertices.extend(face)
++        cell_scalars = [scalar_field[v] for v in cell_vertices]
++        if max(cell_scalars) > isovalue and min(cell_scalars) < isovalue:
++            selected_cells.append(cell)
++            
++    # Data structures for Step 3
++    # Global counter for phi-vertices
++    phi_vertex_count = 0
++    # Map edge (min(ip1, ip2), max(ip1, ip2)) -> phi_index
++    edge_to_phi_index = {}
++    # Map phi_index -> is_key (boolean)
++    is_key_vertex = {}
++    # Store intersected edges per face: face_idx -> list of phi_indices
++    # Note: The algorithm processes face boundaries sequentially. 
++    # We need to store the phi_index for each edge of each face to facilitate tracing.
++    # Structure: face_boundary_list[face_idx][edge_idx] = phi_index
++    face_boundary_phi_indices = []
++    
++    # Step 3: Insertion of phi-vertex indices
++    for cell in selected_cells:
++        current_face_phi_indices = []
++        for face in cell:
++            n_verts = len(face)
++            face_phi_list = []
++            for i in range(n_verts):
+                 ip1 = face[i]
+-                ip2 = face[(i + 1) % n_face_verts]
+-                
+-                # Check intersection
++                ip2 = face[(i + 1) % n_verts]
++                
++                # Check if edge is intersected
+                 if IA[ip1] != IA[ip2]:
+-                    edge_key = tuple(sorted((ip1, ip2)))
++                    # Normalize edge key to avoid double counting
++                    edge_key = (min(ip1, ip2), max(ip1, ip2))
+                     
+-                    if edge_key in edge_to_phi_index:
+-                        # Edge shared with previous face in this cell or global context?
+-                        # The algorithm implies sequential traversal within a cell.
+-                        # If the edge was visited in this cell's face loop, reuse index.
+-                        # Note: The source algorithm 2 iterates faces j=1..N_faces.
+-                        # It checks 'visited' status. We simulate this with local_edge_map.
+-                        if edge_key in local_edge_map:
+-                            phi_idx = local_edge_map[edge_key]
+-                        else:
+-                            # New global vertex
+-                            phi_idx = global_phi_vertex_count
+-                            global_phi_vertex_count += 1
+-                            local_edge_map[edge_key] = phi_idx
+-                            # Mark as key if ip2 is positive
+-                            if IA[ip2] == 1:
+-                                # Store key status in a global structure or pass along
+-                                # For simplicity, we assume a global 'is_key' array
+-                                pass 
++                    if edge_key not in edge_to_phi_index:
++                        phi_vertex_count += 1
++                        edge_to_phi_index[edge_key] = phi_vertex_count
++                        is_key_vertex[phi_vertex_count] = (IA[ip2] == 1)
+                     else:
+-                        # This edge was not visited in this cell's processing
+-                        # But wait, the source algorithm 2 uses a global 'visited' check 
+-                        # across all faces of the cell? 
+-                        # "index i_phi is increased by one only if the corresponding edge 
+-                        # was not previously visited in this sequential procedure over all 
+-                        # the intersected face boundaries"
+-                        
+-                        # Re-reading Algorithm 2: It iterates j=1..N_faces. 
+-                        # It checks 'visited(ip1, ip2)'. 
+-                        # This implies a global visited set for the cell's faces.
+-                        
+-                        # Let's refine:
+-                        pass 
++                        phi_vertex_count = edge_to_phi_index[edge_key] # Reuse existing
+                     
+-                    # Correct logic based on Algorithm 2:
+-                    # We need to track visited edges within the current cell's face iteration.
+-                    pass
+-
+-    # Refined Pseudocode for a single cell to match Algorithm 2/3 exactly
+-    def process_cell(cell_vertices_indices, cell_face_vertex_lists, IA, global_phi_counter, global_phi_vertices, global_is_key):
+-        n_faces = len(cell_face_vertex_lists)
+-        # IPVINT[j][i] stores the global phi index for the i-th edge of face j
+-        IPVINT = [[None] * len(face) for face in cell_face_vertex_lists]
+-        NIPVINT = [0] * n_faces
+-        
+-        # Track visited edges within this cell to avoid double counting shared edges
+-        visited_edges = set()
+-        
+-        phi_vertex_count_in_cell = 0
+-        
+-        # Step 3: Insertion
+-        for j in range(n_faces):
+-            face = cell_face_vertex_lists[j]
+-            n_face = len(face)
+-            for i in range(n_face):
+-                ip1 = face[i]
+-                ip2 = face[(i + 1) % n_face]
+-                
+-                if IA[ip1] != IA[ip2]:
+-                    edge_key = tuple(sorted((ip1, ip2)))
+-                    
+-                    if edge_key not in visited_edges:
+-                        visited_edges.add(edge_key)
+-                        phi_idx = global_phi_counter[0]
+-                        global_phi_counter[0] += 1
+-                        phi_vertex_count_in_cell += 1
+-                        
+-                        # Store position later, for now just index
+-                        # We need to store the edge endpoints to interpolate later
+-                        # But Algorithm 2 only stores indices. 
+-                        # We assume a global structure stores the edge endpoints for each phi index.
+-                        
+-                        # Mark as key if ip2 is positive
+-                        is_key = (IA[ip2] == 1)
+-                        
+-                        # Append to global structures
+-                        global_phi_vertices.append((ip1, ip2)) # Store edge for interpolation
+-                        global_is_key.append(is_key)
+-                        
+-                    else:
+-                        # Find existing index
+-                        # This requires a map from edge_key to phi_idx. 
+-                        # The source algorithm 2 implies IPVINT stores the index.
+-                        # If visited, we must have stored the index in a previous face.
+-                        # We need to retrieve it.
+-                        # Let's assume a map `edge_to_phi_idx` exists for the cell
+-                        pass
+-
+-    # Due to complexity of state management in pure Python without C-like arrays,
+-    # the following is a high-level representation of the core logic described.
+-    pass
++                    face_phi_list.append(phi_vertex_count)
++            
++            current_face_phi_indices.append(face_phi_list)
++        face_boundary_phi_indices.append(current_face_phi_indices)
++
++    # Step 4: Arrangement of phi-vertices
++    # We need to trace polygons within each cell.
++    # The algorithm in [S1] describes a recursive tracing procedure.
++    # We will implement it per cell.
++    
++    all_polygons = []
++    
++    for cell_idx, cell in enumerate(selected_cells):
++        # Get phi indices for this cell's faces
++        cell_face_phi = face_boundary_phi_indices[cell_idx]
++        
++        # Track assigned phi vertices for this cell
++        assigned_phi = set()
++        
++        # Find first unassigned phi vertex in this cell
++        # Flatten all phi indices in this cell
++        cell_phi_indices = []
++        for face_phi in cell_face_phi:
++            cell_phi_indices.extend(face_phi)
++        
++        cell_phi_indices = list(set(cell_phi_indices)) # Unique
++        
++        k = 1
++        while cell_phi_indices:
++            # Find first unassigned
++            start_phi = None
++            for phi in cell_phi_indices:
++                if phi not in assigned_phi:
++                    start_phi = phi
++                    break
++            
++            if start_phi is None:
++                break
++                
++            # Start new polygon
++            polygon_vertices = [start_phi]
++            assigned_phi.add(start_phi)
++            current_phi = start_phi
++            
++            # Trace loop
++            while True:
++                # Find face boundary j and edge index i' where IPVINT(j, i') == current_phi AND is_key
++                found_next = False
++                next_phi = None
++                
++                for j, face_phi in enumerate(cell_face_phi):
++                    for i, phi in enumerate(face_phi):
++                        if phi == current_phi and is_key_vertex.get(phi, False):
++                            # This is a key vertex. The next vertex is the previous one in this face boundary.
++                            # i' is i. Previous is i-1.
++                            prev_i = (i - 1) % len(face_phi)
++                            prev_phi = face_phi[prev_i]
++                            
++                            if prev_phi == start_phi:
++                                # Loop closed
++                                found_next = False
++                                break
++                            else:
++                                next_phi = prev_phi
++                                found_next = True
++                                break
++                    if found_next:
++                        break
++                
++                if not found_next:
++                    # Loop closed or no key vertex found (should not happen if logic is correct)
++                    break
++                
++                assigned_phi.add(next_phi)
++                polygon_vertices.append(next_phi)
++                current_phi = next_phi
++            
++            # Convert phi indices to 3D positions
++            polygon_3d = []
++            for phi_idx in polygon_vertices:
++                # Find which edge this phi_idx belongs to
++                # We need to reverse lookup edge_to_phi_index
++                # This is inefficient but correct for implementation from text.
++                # In practice, store edge->pos during insertion.
++                pos = get_position_from_phi_index(phi_idx, vertices, scalar_field, isovalue, edge_to_phi_index)
++                polygon_3d.append(pos)
++            
++            all_polygons.append(polygon_3d)
++            
++            # Remove assigned from list
++            for phi in assigned_phi:
++                if phi in cell_phi_indices:
++                    cell_phi_indices.remove(phi)
++
++    return all_polygons
++
++def get_position_from_phi_index(phi_idx, vertices, scalar_field, isovalue, edge_to_phi_index):
++    """
++    Helper to find the 3D position of a phi vertex given its global index.
++    """
++    # Find the edge corresponding to this phi index
++    target_edge = None
++    for edge, idx in edge_to_phi_index.items():
++        if idx == phi_idx:
++            target_edge = edge
++            break
++    
++    if target_edge is None:
++        raise ValueError("Phi index not found")
++        
++    ip1, ip2 = target_edge
++    
++    # Interpolation formula
++    # x_tilde = x_ip2 - (phi_ip2 - isovalue) / (phi_ip2 - phi_ip1) * (x_ip2 - x_ip1)
++    x_ip1 = vertices[ip1]
++    x_ip2 = vertices[ip2]
++    phi_ip1 = scalar_field[ip1]
++    phi_ip2 = scalar_field[ip2]
++    
++    # Strict inequality ensures phi_ip2 != phi_ip1
++    t = (phi_ip2 - isovalue) / (phi_ip2 - phi_ip1)
++    
++    # Vector subtraction
++    diff = [x_ip2[i] - x_ip1[i] for i in range(3)]
++    scaled_diff = [t * d for d in diff]
++    
++    pos = [x_ip2[i] - scaled_diff[i] for i in range(3)]
++    return pos
+ ```
++
++### Parameters and Edge Cases
++*   **Isovalue ($\tilde{\phi}$):** Typical value is $0$ for signed distance fields or volume fractions [S1].
++*   **Division by Zero:** Prevented by using strict inequalities ($IA(ip)=1$ if $\phi_{ip} > \tilde{\phi}$) to determine intersected edges. This ensures one vertex is strictly above and one strictly below $\tilde{\phi}$, so $\phi_{ip2} \neq \phi_{ip1}$ [S1].
++*   **Double-Counting:** Handled by checking if an edge was previously visited during the sequential traversal of face boundaries. If already visited, the existing index is reused [S1].
++*   **Ambiguities:** Discrete data may introduce ambiguities (e.g., interpolation issues). The method handles this via general tracing rules rather than configuration tables, ensuring consistent results even in ambiguous configurations that cause holes in Marching Cubes [S1].
++*   **Non-Planar Polygons:** The resulting isopolygons may be non-planar. Most visualization applications can handle these, or they can be decomposed into triangles [S1].
+ 
+ ## Subtopics
+@@ -192,14 +288,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method involves iterating over cells and faces, performing edge checks, and tracing polygons. Without pre-computation, it is slower than optimized Marching Cubes. On an iMac Pro (2017) with 2.3 GHz Intel Xeon W, gcc -O3, the proposed method is on average 1.8 times slower than Marching Cubes with an extended lookup table (21 patterns) [S1].
+-- **Parallelization:** The algorithm can be parallelized using OpenMP to speed up operations over grids [S1]. With `-fopenmp`, a 6x speedup is achieved [S1].
+-- **Memory Complexity:** Requires storage for vertex tags, edge-to-vertex mappings, and the resulting polygon lists. The method does not require storing the full mesh topology if processed cell-by-cell, but typically requires global arrays for vertex indexing [S1].
+-- **Strengths:** Handles arbitrary polyhedral cells (convex/non-convex, planar/non-planar) without decomposition. Avoids topological inconsistencies (holes, non-2-manifold surfaces) found in Marching Cubes on ambiguous faces. Produces consistent results using general rules rather than lookup tables [S1].
+-- **Limitations:** Slower than lookup-table-based methods like Marching Cubes if not optimized. Produces non-planar polygons, which may require decomposition into triangles for some rendering pipelines (though many tools handle non-planar polygons) [S1].
+-- **When to use:** When working with unstructured or arbitrary polyhedral grids (e.g., CFD, VOF methods) where cell geometry varies and topological consistency is critical.
+-- **When not to use:** When maximum performance is required on regular hexahedral grids and standard Marching Cubes with lookup tables is sufficient.
++*   **Time Complexity:** The method is generally slower than optimized [Marching Cubes](52-marching-cubes.md) due to the lack of pre-computed lookup tables for arbitrary geometries. On an iMac Pro (2017) with 2.3 GHz Intel Xeon W, gcc -O3, the proposed method is on average 1.8 times slower than Marching Cubes with an extended lookup table (21 patterns) [S1].
++*   **Parallelization:** The algorithm can be parallelized using the OpenMP API to speed up operations over grids, achieving up to a 6x speedup with all available threads [S1].
++*   **Memory:** Requires storage for cell geometry, scalar field, and intermediate structures for edge intersection tracking and polygon tracing.
++*   **Strengths:** Handles arbitrary polyhedral grids (convex/non-convex, planar/non-planar faces) without cell decomposition. Avoids topological inconsistencies (holes, non-2-manifold surfaces) common in Marching Cubes on ambiguous faces.
++*   **Limitations:** Slower than lookup-table-based methods on regular grids. Produces non-planar polygons which may require decomposition for some rendering pipelines.
++*   **When to use:** When working with unstructured or arbitrary polyhedral grids where topological consistency is critical and cell decomposition (e.g., Marching Tetrahedra) is undesirable or too costly.
++*   **When not to use:** When maximum performance on regular hexahedral grids is required and topological ambiguities are not a concern (use [Marching Cubes](52-marching-cubes.md)).
+ 
+ ## Background
+-The method was proposed to address the limitations of Marching Cubes and Marching Tetrahedra on complex unstructured grids. Marching Cubes suffers from topological inconsistencies in ambiguous configurations (e.g., opposite vertices on a face crossing the isosurface), leading to holes and non-2-manifold surfaces [S1]. Marching Tetrahedra handles unstructured grids but adds computational cost by decomposing polyhedral cells into tetrahedra [S1]. The proposed method, implemented in the open-source library `isoap` (GPLv3), is used in Volume of Fluid (VOF) methods for advanced PLIC (Piecewise Linear Interface Calculation) schemes, CFD visualization, and medical imaging [S1]. It was implemented in C and FORTRAN with C interfaces [S1].
++The method was proposed to address the limitations of standard [Marching Cubes](52-marching-cubes.md) and [Marching Tetrahedra](52-marching-tetrahedra.md) when applied to complex unstructured grids. Marching Cubes suffers from topological inconsistencies in ambiguous configurations, while Marching Tetrahedra requires decomposing complex polyhedral cells into tetrahedra, adding computational cost [S1]. The method is implemented in the open-source library `isoap` (GPLv3 license) for interface reconstruction in Volume of Fluid (VOF) methods, CFD visualization, and medical imaging [S1]. It is used in advanced PLIC (Piecewise Linear Interface Calculation) schemes and for visualization with conventional graphics-rendering tools [S1].
+ 
+ ## Sources

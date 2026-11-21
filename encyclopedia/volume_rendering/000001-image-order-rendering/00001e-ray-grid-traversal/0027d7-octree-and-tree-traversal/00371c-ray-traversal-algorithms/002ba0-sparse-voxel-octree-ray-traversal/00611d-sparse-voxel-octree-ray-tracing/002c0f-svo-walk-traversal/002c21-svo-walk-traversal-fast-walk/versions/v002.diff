@@ -1,0 +1,271 @@
+--- v001.md
++++ v002.md
+@@ -4,59 +4,28 @@
+ 
+ ## Overview
+-`fast_walk` is a hybrid ray traversal algorithm that combines a Bounding Volume Hierarchy (BVH) for coarse culling with Sparse Voxel Octree (SVO) structures for fine-grained density evaluation. It solves the problem of efficiently rendering large, sparse volumetric datasets by delegating leaf-node processing to an SVO ray marcher while using BVH ray-sphere intersection to skip empty regions of the scene. It differs from pure SVO traversal by reducing the number of visited nodes through hierarchical culling, and from pure BVH traversal by maintaining the memory efficiency and adaptive resolution of the SVO at the leaves.
++This method is a hybrid ray traversal algorithm that combines a Bounding Volume Hierarchy (BVH) for coarse culling with Sparse Voxel Octree (SVO) structures for fine-grained density evaluation [S1, unofficial]. It efficiently renders large, sparse volumetric datasets by delegating leaf-node processing to an SVO ray marcher while using BVH ray-sphere intersection to skip empty regions [S1, unofficial]. It reduces visited nodes compared to pure SVO traversal and maintains SVO memory efficiency at the leaves compared to pure BVH traversal [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Ray origin $O$ and direction $D$.
+-- BVH node buffer (`BVHNodes`).
+-- BVH leaf buffer (`BVHLeafs`).
+-- SVO data structures (accessed via leaf `address`).
+-- Output accumulators: `min_t` (initialized to $\infty$), `o_t`, `o_color`, `o_normal`.
+-
+-**Data Structures:**
+-- `BVHNode`: Struct containing:
+-  - `center`: `vec4` (x, y, z coordinates of the bounding sphere center; w is unused or padding).
+-  - `radius`: `float` (radius of the bounding sphere).
+-  - `left_child`: `uint` (index of left child; if bit 31 is set, it is a leaf index).
+-  - `right_child`: `uint` (index of right child; if bit 31 is set, it is a leaf index).
+-- `BVHLeaf`: Struct containing:
+-  - `inv_model`: `mat4` (inverse model matrix for the leaf's coordinate space).
+-  - `address`: `uint` (pointer/index to the root of the SVO structure for this leaf).
+-
+-**Parameters:**
+-- `BVH_STACK_SIZE`: Maximum depth of the traversal stack, set to 64 [S1, unofficial].
+-- `MAX_T`: Termination threshold, set to 10000.0 [S1, unofficial].
+-
++**Inputs:** Ray origin $O$ and direction $D$; BVH node buffer `BVHNodes`; BVH leaf buffer `BVHLeafs`; SVO data structures accessed via leaf `address`; output accumulators `min_t`, `o_t`, `o_color`, `o_normal` [S1, unofficial].
++**Data Structures:** `BVHNode` contains `center` (`vec4`), `radius` (`float`), `left_child` (`uint`), `right_child` (`uint`); stored in `BVHNodes` buffer [S1, unofficial]. `BVHLeaf` contains `inv_model` (`mat4`), `address` (`uint`); stored in `BVHLeafs` buffer [S1, unofficial].
++**Parameters:** `BVH_STACK_SIZE` is 64 [S1, unofficial]. `MAX_T` is 10000.0 [S1, unofficial].
+ **Algorithm Steps:**
+-1. Initialize a stack `S` of size `BVH_STACK_SIZE`. Push the root node index onto `S`.
+-2. While `S` is not empty:
+-   a. Pop the current node index `idx` from `S`.
+-   b. Load `node = BVHNodes[idx]`.
+-   c. Check if `node.left_child` is a leaf: `is_leaf = (node.left_child & 0x80000000) != 0`.
+-   d. If `is_leaf`:
+-      i. Call `bvh_trace_leaf` for the left child. The actual leaf index is `node.left_child ^ 0x80000000`.
+-      ii. Call `bvh_trace_leaf` for the right child. The actual leaf index is `node.right_child ^ 0x80000000`.
+-      iii. If a hit is found in either leaf, update `min_t`, `o_t`, `o_color`, and `o_normal` with the closest hit.
+-   e. If not `is_leaf`:
+-      i. Load `left_node = BVHNodes[node.left_child]` and `right_node = BVHNodes[node.right_child]`.
+-      ii. Perform ray-sphere intersection for the ray $(O, D)$ against `left_node.center` and `left_node.radius`. Set `left_descend` to true if the ray intersects the sphere within `min_t`.
+-      iii. Perform ray-sphere intersection for the ray $(O, D)$ against `right_node.center` and `right_node.radius`. Set `right_descend` to true if the ray intersects the sphere within `min_t`.
+-      iv. If neither `left_descend` nor `right_descend` is true:
+-         - Continue to next iteration (pop next from stack).
+-      v. If only one child is descended into:
+-         - Push the non-descended child's index onto `S` (if stack is not full).
+-         - Set current node to the descended child.
+-      vi. If both children are descended into:
+-         - Determine which child is farther from the ray origin.
+-         - Push the farther child's index onto `S` (if stack is not full).
+-         - Set current node to the nearer child.
+-3. After the loop, set `o_t = min_t`.
+-4. Return `true` if `min_t < MAX_T`, else `false`.
++1. Initialize stack `S` with root index 0. Set `min_t = ∞`, `o_t = 0`, `o_color = (0,0,0,0)`, `o_normal = (0,0,0)` [S1, unofficial].
++2. Loop:
++   a. Pop `idx` from `S`. If empty, break [S1, unofficial].
++   b. Load `node = BVHNodes[idx]` [S1, unofficial].
++   c. Check leaf: `is_leaf = (node.left_child & 0x80000000) != 0` [S1, unofficial].
++   d. If leaf: call leaf tracer for left (`node.left_child ^ 0x80000000`) and right (`node.right_child ^ 0x80000000`). Update accumulators on hit [S1, unofficial].
++   e. If not leaf: load children. Ray-sphere test for both. Set `left_descend`, `right_descend` [S1, unofficial].
++   f. If neither: continue (pop next) [S1, unofficial].
++   g. If one: set current to that child [S1, unofficial].
++   h. If both: push farther to `S`, set current to nearer [S1, unofficial].
++3. After loop: `o_t = min_t` [S1, unofficial].
++4. Return `min_t < 10000.0` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def fast_walk(ray_origin, ray_direction, bvh_nodes, bvh_leaves, svo_data, max_t=10000.0):
+-    stack = []
+-    stack.append(0)  # Assume root is index 0
++    stack = [0]
+     min_t = float('inf')
+     o_t = 0.0
+@@ -64,55 +33,32 @@
+     o_normal = (0.0, 0.0, 0.0)
+ 
+-    while stack:
++    while True:
+         if not stack:
+             break
+-        
+         idx = stack.pop()
+         node = bvh_nodes[idx]
+-        
+-        # Check if left child is a leaf
++
+         is_leaf = (node.left_child & 0x80000000) != 0
+-        
+         if is_leaf:
+-            # Process left leaf
+-            left_leaf_idx = node.left_child ^ 0x80000000
+-            hit_t, hit_color, hit_normal = bvh_trace_leaf(
+-                ray_origin, ray_direction, 
+-                bvh_leaves[left_leaf_idx], svo_data, min_t
+-            )
+-            if hit_t < min_t:
+-                min_t = hit_t
+-                o_t = hit_t
+-                o_color = hit_color
+-                o_normal = hit_normal
+-            
+-            # Process right leaf
+-            right_leaf_idx = node.right_child ^ 0x80000000
+-            hit_t, hit_color, hit_normal = bvh_trace_leaf(
+-                ray_origin, ray_direction, 
+-                bvh_leaves[right_leaf_idx], svo_data, min_t
+-            )
+-            if hit_t < min_t:
+-                min_t = hit_t
+-                o_t = hit_t
+-                o_color = hit_color
+-                o_normal = hit_normal
++            for child_mask in [node.left_child, node.right_child]:
++                leaf_idx = child_mask ^ 0x80000000
++                hit_t, hit_color, hit_normal = trace_leaf(ray_origin, ray_direction, bvh_leaves[leaf_idx], svo_data, min_t)
++                if hit_t < min_t:
++                    min_t = hit_t
++                    o_t = hit_t
++                    o_color = hit_color
++                    o_normal = hit_normal
+         else:
+-            # Load children
+             left_node = bvh_nodes[node.left_child]
+             right_node = bvh_nodes[node.right_child]
+-            
+-            # Ray-sphere intersection
++
+             left_descend = ray_sphere_intersect(ray_origin, ray_direction, left_node.center, left_node.radius, min_t)
+             right_descend = ray_sphere_intersect(ray_origin, ray_direction, right_node.center, right_node.radius, min_t)
+-            
++
+             if not left_descend and not right_descend:
+                 continue
+-            
+-            if left_descend and right_descend:
+-                # Push farther child
+-                dist_left = ray_sphere_distance(ray_origin, left_node.center)
+-                dist_right = ray_sphere_distance(ray_origin, right_node.center)
+-                
++            elif left_descend and right_descend:
++                dist_left = length(left_node.center - ray_origin)
++                dist_right = length(right_node.center - ray_origin)
+                 if dist_left > dist_right:
+                     if len(stack) < 64:
+@@ -125,74 +71,38 @@
+             elif left_descend:
+                 idx = node.left_child
+-            else: # right_descend
++            else:
+                 idx = node.right_child
+-        
+-        # Update current node for next iteration if not leaf
+-        if not is_leaf:
+-            # In a real implementation, the loop structure might need adjustment
+-            # to handle the "move to child" logic correctly. 
+-            # The source implies a single-pass loop where 'idx' is updated.
+-            # However, standard stack-based traversal usually pushes and pops.
+-            # The source description: "If one child is descended into, move to that child."
+-            # This suggests a tail-call optimization or iterative deepening.
+-            # We will follow the source's logic: update idx and continue loop.
+-            # But wait, if we update idx, we need to process it in the next iteration.
+-            # The source says "pop from stack... else break".
+-            # Let's re-read carefully: "If neither... pop... If one... move to that child. If both... push farther... move to nearer."
+-            # This implies the 'move to child' is the next iteration's 'idx'.
+-            # So we don't push the current node, we just set idx to the child.
+-            # But we already popped the current node.
+-            # So the logic is:
+-            # 1. Pop current.
+-            # 2. If leaf, process both, done with this node.
+-            # 3. If not leaf, check children.
+-            #    a. If none, continue (next pop).
+-            #    b. If one, set idx to that child, continue (next pop? No, "move to").
+-            #       If we "move to", we should process it immediately? 
+-            #       The source says "move to that child". In a loop, this means 
+-            #       the next iteration processes that child.
+-            #       So we set idx = child_idx and continue.
+-            #    c. If both, push farther, set idx = nearer, continue.
+-            pass # Logic handled in the if/else blocks above by setting idx
++
++            stack.append(idx)
+ 
+     o_t = min_t
+     return min_t < max_t, o_t, o_color, o_normal
+ 
+-def bvh_trace_leaf(ray_origin, ray_direction, leaf, svo_data, min_t):
+-    # Transform ray to leaf's local space using inv_model
+-    inv_model = leaf.inv_model
+-    # Apply inverse model matrix to ray origin and direction
+-    # This is a simplified representation; actual matrix multiplication required
+-    local_origin = transform_point(inv_model, ray_origin)
+-    local_direction = transform_vector(inv_model, ray_direction)
+-    
+-    # Call SVO ray marcher
+-    hit_t, hit_color, hit_normal = svo_ray_march(local_origin, local_direction, svo_data, leaf.address, min_t)
+-    return hit_t, hit_color, hit_normal
++def trace_leaf(ray_origin, ray_direction, leaf, svo_data, min_t):
++    inv = leaf.inv_model
++    local_origin = transform_point(inv, ray_origin)
++    local_direction = transform_vector(inv, ray_direction)
++    return svo_march(local_origin, local_direction, svo_data, leaf.address, min_t)
+ 
+-def ray_sphere_intersect(ray_origin, ray_direction, sphere_center, radius, min_t):
+-    # Standard ray-sphere intersection
+-    oc = ray_origin - sphere_center
+-    a = dot(ray_direction, ray_direction)
+-    b = 2.0 * dot(oc, ray_direction)
++def ray_sphere_intersect(origin, direction, center, radius, min_t):
++    oc = origin - center
++    b = dot(oc, direction)
+     c = dot(oc, oc) - radius * radius
+-    discriminant = b * b - 4 * a * c
+-    
+-    if discriminant < 0:
++    disc = b * b - c
++    if disc < 0:
+         return False
+-    
+-    sqrt_disc = sqrt(discriminant)
+-    t1 = (-b - sqrt_disc) / (2 * a)
+-    t2 = (-b + sqrt_disc) / (2 * a)
+-    
+-    t = t1 if t1 > 0 else t2
+-    return t < min_t
++    sqrt_disc = sqrt(disc)
++    t_hit = -b - sqrt_disc
++    if t_hit < 0:
++        return False
++    return t_hit < min_t
+ 
+-def ray_sphere_distance(ray_origin, sphere_center):
+-    # Distance from ray origin to sphere center
+-    return length(sphere_center - ray_origin)
++def svo_march(origin, direction, svo_data, root_address, min_t):
++    # Standard SVO ray marcher [G]
++    # Traverses SVO from root_address, accumulating color/normal until min_t or empty
++    # Returns (t_hit, color, normal) or (inf, (0,0,0,0), (0,0,0))
++    return (float('inf'), (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+ 
+ def transform_point(matrix, point):
+-    # Homogeneous transformation
+     w = matrix[3][0]*point.x + matrix[3][1]*point.y + matrix[3][2]*point.z + matrix[3][3]
+     x = (matrix[0][0]*point.x + matrix[0][1]*point.y + matrix[0][2]*point.z + matrix[0][3]) / w
+@@ -202,5 +112,4 @@
+ 
+ def transform_vector(matrix, vector):
+-    # Linear transformation (no translation)
+     x = matrix[0][0]*vector.x + matrix[0][1]*vector.y + matrix[0][2]*vector.z
+     y = matrix[1][0]*vector.x + matrix[1][1]*vector.y + matrix[1][2]*vector.z
+@@ -215,12 +124,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(\log N)$ for BVH traversal, where $N$ is the number of BVH nodes. SVO traversal is proportional to the number of occupied voxels along the ray.
+-- **Memory Complexity:** $O(N)$ for BVH nodes and $O(M)$ for SVO nodes, where $M$ is the number of SVO nodes. Stack space is $O(D)$, where $D$ is the BVH depth, capped at 64 [S1, unofficial].
+-- **Performance:** Faster than pure SVO traversal for sparse scenes due to BVH culling. Slower than pure BVH for dense scenes due to SVO overhead.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
+ - **Strengths:** Efficient for large, sparse datasets. Good balance between memory usage and traversal speed.
+ - **Limitations:** Stack size limitation. Complexity of implementation due to hybrid nature.
+ 
+ ## Background
+-The `fast_walk` algorithm is described in the unofficial source [S1, unofficial]. It is part of the `mxbrt/svo` project. The approach combines BVH and SVO techniques, which are common in volume rendering.
++The hybrid BVH-SVO traversal approach is described in the unofficial source [S1, unofficial]. It is part of the `mxbrt/svo` project. The approach combines BVH and SVO techniques, which are common in volume rendering.
+ 
+ ## Sources

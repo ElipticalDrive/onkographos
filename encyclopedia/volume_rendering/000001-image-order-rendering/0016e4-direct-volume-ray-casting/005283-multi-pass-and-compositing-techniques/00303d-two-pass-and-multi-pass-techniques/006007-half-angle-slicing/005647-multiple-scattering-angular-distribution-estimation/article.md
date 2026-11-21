@@ -1,0 +1,173 @@
+# Multiple-Scattering Angular Distribution Estimation
+
+Also called: Angular Distribution Approximation
+
+## Overview
+A technique to approximate the angular distribution of light after multiple scattering events by convolving the particle phase function with itself, extending [Half-angle slicing](1255-half-angle-slicing.md) to handle gradual angular spreading rather than just unscattered or diffuse light. It separates the radiance into an intensity component and an angular distribution component, allowing efficient single-pass rendering of atmospheric phenomena with large forward-scattering particles.
+
+## How it works
+**Inputs:**
+- Particle phase function $P_\lambda(\Omega)$.
+- Extinction coefficient $\beta_{ex}(\vec{s})$ and scattering coefficient $\beta_{sca}(\vec{s})$ (where $\beta_{sca} \le \beta_{ex}$).
+- Absorption coefficient $\alpha_\gamma(\vec{s})$ (often $\alpha_\gamma = \beta_{ex} - \beta_{sca}$ or similar, defined by the medium's albedo properties).
+- Light source direction $\Omega_{lt}$ and intensity $I_s^\lambda$.
+- Background radiance function $L_\lambda(\vec{s}_{bg}(\vec{s}, \Omega), \Omega)$.
+
+**Outputs:**
+- Final radiance $L_\lambda(\vec{s}, \Omega)$ for each sample point $\vec{s}$ and view direction.
+- Intensity buffer $I_\lambda(\vec{s})$ storing the scalar light intensity reaching the volume.
+
+**Data Structures:**
+- **Pre-computed Angular Distribution Texture:** A floating-point precision texture storing $A^{ms}_\lambda^n(\Omega)$ for $n \in [0, N_{max}]$. The index $n$ represents the number of scattering events.
+- **Light Buffer:** A texture storing the scalar intensity $I_\lambda(\vec{s})$ accumulated along the light path.
+
+**Definitions:**
+- Radiance separation: $L_\lambda(\vec{s}, \Omega) = I_\lambda(\vec{s})A_\lambda(\vec{s}, \Omega)$ [S1].
+- Normalization constraint: $\int_{4\pi} A_\lambda(\vec{s}, \Omega)d\Omega = 1, \forall\vec{s}, \lambda$ [S1].
+- Boundary condition (collimated source): $L_\lambda(\vec{s}_{bg}(\vec{s}, \Omega), \Omega) = I_s^\lambda \delta(\Omega - \Omega_{lt})$ [S1].
+
+**Pre-computation:**
+The multiple-scattering angular distribution function $A^{ms}_\lambda^n(\Omega)$ approximates the distribution of light after $n$ scattering events [S1]:
+$$ A^{ms}_\lambda^n(\Omega) = \underbrace{\delta(\Omega - \Omega_{lt}) * P_\lambda * \dots * P_\lambda}_{n-1 \text{ times}}(\Omega) $$
+where $*$ denotes convolution over the sphere $4\pi$ [S1].
+The maximum pre-computed scattering events is $N_{max} = 26$. This value is chosen because the angular distribution for rain (the worst-case forward peak scenario) becomes isotropic to within 0.0001% at this point [S1].
+
+**Runtime Estimation:**
+For a ray segment traversing from $\vec{s}$ to $\vec{s} + \vec{m}\Omega_{lt}\Delta$ (where $\vec{m}$ is the light direction vector and $\Delta$ is step size), the expected number of scattering events $n(\vec{s})$ is estimated based on the transparency $T$ from the light source [S1]:
+$$ n(\vec{s}) = -\frac{\gamma}{\alpha_\gamma \beta_{ex}(\vec{s}')} \ln T(\vec{s}, \vec{s}_{bg}(\vec{s}, \Omega_{lt})) $$
+Note: The source text presents this formula with $\gamma$ and $\alpha_\gamma \beta_{ex}$ in the denominator, but also references Equation 22 as $n(\vec{s}) = -\frac{\gamma}{\alpha_\gamma \beta_{ex}(\vec{s}')} \ln T$. In standard radiative transfer, the mean free path is $1/\beta_{ex}$. The parameter $\gamma$ likely represents a scaling factor or albedo-related term specific to the implementation. The text states "In terms of transparency from the source: $n(\vec{s}) = -\frac{\gamma}{\alpha_\gamma \beta_{ex}(\vec{s}')} \ln T$". We retain the source's notation [S1].
+
+**Intensity Update (Light Buffer Pass):**
+The intensity $I_\lambda$ is updated along the light path. For a step from $\vec{s}$ to $\vec{s} + \vec{m}\Omega_{lt}\Delta$:
+$$ I_\lambda(\vec{s} + \vec{m}\Omega_{lt}\Delta) = I_\lambda(\vec{s})T(\vec{s}, \vec{s} + \vec{m}\Omega_{lt}\Delta) + I_\lambda(\vec{s})(1 - T(\vec{s}, \vec{s} + \vec{m}\Omega_{lt}\Delta)) \frac{\beta_{sca}^\lambda \Delta}{\alpha(\vec{s})} A^{ms}_\lambda^{\lfloor n(\vec{s}) \rfloor + 1 + \beta_{ex}^\lambda \Delta}(\Omega - \Omega_{lt}) + \xi \beta_{sca}^\lambda \Delta $$
+*Correction/Clarification based on Eq 25 and 26 in [S1]:*
+The source provides Eq 25 for intensity update and Eq 26 for the angular distribution term.
+Eq 25: $I(\vec{s} + \vec{m}\Omega_{lt}\Delta) = I(\vec{s})T(\vec{s}, \vec{s} + \vec{m}\Omega_{lt}\Delta) + I(\vec{s})(1 - T(\vec{s}, \vec{s} + \vec{m}\Omega_{lt}\Delta)) \frac{\beta_{ex}^\lambda \Delta}{\alpha(\vec{s})} F_{\lfloor n(\vec{s}) \rfloor + 1 + \beta_{ex}^\lambda \Delta}$
+Where $F$ is the pre-computed angular distribution function sampled at the appropriate index.
+The term $\xi$ in Eq 26 appears to be a noise or residual term, or potentially a typo in the source transcription for a specific scattering term. Given the context of "sum over sampling slabs", the intensity accumulation sums contributions.
+The index for the angular distribution texture is $k = \lfloor n(\vec{s}) \rfloor + 1 + \beta_{ex}^\lambda \Delta$. If $k > N_{max}$, clamp to $N_{max}$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-computation Phase
+def precompute_angular_distributions(phase_function, num_scatterings_max=26):
+    """
+    Pre-compute A_ms^n by convolving the phase function n-1 times.
+    """
+    distributions = []
+    # n=0: Delta function at light direction
+    distributions.append(delta_function(phase_function.light_direction))
+    
+    current_dist = distributions[0]
+    
+    for n in range(1, num_scatterings_max + 1):
+        # Convolve current distribution with phase function
+        # Note: Convolution on sphere is complex; source implies iterative convolution
+        next_dist = convolve_sphere(current_dist, phase_function)
+        distributions.append(next_dist)
+        current_dist = next_dist
+        
+    return distributions
+
+# Runtime Phase: Light Buffer Update
+def update_light_buffer(ray_origin, ray_direction, step_size, distributions, 
+                        extinction_coeffs, scattering_coeffs, absorption_coeffs, 
+                        light_intensity, light_direction):
+    """
+    Accumulate intensity in the light buffer along the light path.
+    """
+    current_pos = ray_origin
+    current_intensity = light_intensity # Initial collimated intensity
+    
+    while current_pos is within volume bounds:
+        # Calculate transparency for the step
+        # T = exp(-integral of beta_ex)
+        # Approximation for small step Delta: T = exp(-beta_ex * Delta)
+        beta_ex = extinction_coeffs.sample(current_pos)
+        beta_sca = scattering_coeffs.sample(current_pos)
+        alpha = absorption_coeffs.sample(current_pos) # Or derived from beta_ex, beta_sca
+        
+        delta = step_size
+        T = exp(-beta_ex * delta)
+        
+        # Estimate number of scattering events
+        # n(s) = - (gamma / (alpha_gamma * beta_ex)) * ln(T)
+        # Note: Source uses alpha_gamma * beta_ex in denominator. 
+        # Assuming alpha_gamma is a constant or specific coefficient from source.
+        # If alpha_gamma is not provided, this step is ambiguous. 
+        # We assume gamma and alpha_gamma are known parameters.
+        gamma = 1.0 # Placeholder if not specified, but source implies specific physics
+        alpha_gamma = 1.0 # Placeholder
+        
+        # Re-reading Eq 22: n(s) = - (gamma / (alpha_gamma * beta_ex)) * ln(T)
+        # However, ln(T) = -beta_ex * delta.
+        # So n(s) = (gamma / alpha_gamma) * delta.
+        # This implies n is proportional to path length.
+        
+        n_est = -(gamma / (alpha_gamma * beta_ex)) * log(T)
+        
+        # Determine texture index
+        # Index = floor(n) + 1 + beta_ex * delta
+        # Note: Source Eq 25 uses floor(n(s)) + 1 + beta_ex * delta
+        index = floor(n_est) + 1 + beta_ex * delta
+        
+        # Clamp index to max pre-computed
+        if index > len(distributions) - 1:
+            index = len(distributions) - 1
+            
+        # Get angular distribution
+        A_ms = distributions[index]
+        
+        # Sample angular distribution at the scattering angle relative to light direction
+        # The source uses A_ms(Omega - Omega_lt). 
+        # In the light buffer pass, we are integrating light FROM the light source.
+        # The term (1 - T) represents the fraction of light scattered out of the beam.
+        # The intensity contribution is proportional to the probability of scattering 
+        # in the direction of the next sample (which is along the light ray).
+        
+        # Source Eq 25: I_new = I_old * T + I_old * (1 - T) * (beta_sca * Delta / alpha) * F
+        # Note: Source Eq 25 has beta_ex in numerator in one place and beta_sca in another?
+        # Eq 25 text: "I(s+m...) = I(s)T + I(s)(1-T) (alpha(s) F ...)" -> Wait, Eq 25 in source:
+        # I(s+m...) = I(s)T + I(s)(1-T) (beta_ex^lambda Delta / alpha(s)) F ...
+        # But physically, scattering depends on beta_sca. 
+        # Source Eq 25 explicitly writes: beta_ex^lambda Delta / alpha(s).
+        # We follow source exactly.
+        
+        scattering_term = (beta_ex * delta / alpha) * A_ms.sample(light_direction)
+        
+        # Add contribution
+        # Note: Source Eq 25 adds this to the transmitted light.
+        # The term I(s)(1-T) is the light removed from the beam.
+        # It is redistributed according to F.
+        
+        new_intensity = current_intensity * T + current_intensity * (1 - T) * scattering_term
+        
+        # Update position
+        current_pos += light_direction * delta
+        current_intensity = new_intensity
+        
+        # Store current_intensity in Light Buffer at current_pos
+        light_buffer.set(current_pos, current_intensity)
+```
+
+**Edge Cases and Pitfalls:**
+- The approximation performs best in optically thin regions and for the first few scattering events [S1].
+- Errors increase with the number of scattering events as the backward-directed light contribution becomes large, which the forward-peaked convolution approximation may not capture accurately [S1].
+- If $n(\vec{s})$ is large, the angular distribution becomes isotropic; clamping to $N_{max}=26$ is sufficient for most atmospheric cases (e.g., rain) [S1].
+
+## Operating characteristics
+- **Time Complexity:** Pre-computation is $O(N_{max} \cdot S^2)$ where $S$ is the discretization of the sphere for convolution. Runtime is $O(1)$ per sample for texture lookup and intensity update, making it efficient for single-pass rendering.
+- **Memory Complexity:** Requires storing $N_{max}$ angular distribution textures. For $N_{max}=26$, this is a fixed, small overhead.
+- **Strengths:** Captures fine angularly dependent effects in the presence of large atmospheric scattering particles (forward scattering) without the cost of full path tracing. Efficient single-pass implementation.
+- **Limitations:** Accuracy degrades for high scattering counts (optically thick regions) due to the neglect of backward scattering contributions in the convolution model.
+- **When to use:** Atmospheric rendering with forward-scattering particles (clouds, fog, rain) where performance is critical and optical thickness is moderate.
+- **When not to use:** Highly optically thick media where backward scattering dominates, or when high-fidelity multiple scattering beyond 26 events is required.
+
+## Background
+Originated in the work of Riley, Ebert, Kraus, Tessendorf, and Hansen (2004) for the efficient rendering of atmospheric phenomena. It extends the half-angle slicing technique by Kniss et al. (2002) to handle multiple scattering. The method is designed for programmable graphics hardware, leveraging pre-computed textures to approximate the radiative transfer equation's angular dependence.
+
+## Sources
+[S1] Efficient Rendering of Atmospheric Phenomena, https://doi.org/10.2312/egwr/egsr04/375-386, fetched 2026-10-26

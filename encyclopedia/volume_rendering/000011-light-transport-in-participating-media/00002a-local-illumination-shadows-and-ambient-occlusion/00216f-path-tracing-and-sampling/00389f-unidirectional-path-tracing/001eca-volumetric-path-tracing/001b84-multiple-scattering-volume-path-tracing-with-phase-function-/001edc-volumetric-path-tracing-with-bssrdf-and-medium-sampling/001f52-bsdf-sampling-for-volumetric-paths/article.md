@@ -1,0 +1,214 @@
+# BSDF Sampling for Volumetric Paths
+
+Also called: GoTracer, Implicit Path Tracing with Volume Interaction, Ray Tracing in One Weekend Go Implementation, Surface scattering in volumetric path tracing
+
+## Overview
+BSDF Sampling for Volumetric Paths handles the surface interaction component of path tracing within participating media, calculating indirect lighting contributions based on surface BRDFs and sampling strategies [S1, unofficial][S3]. It determines the new direction of a volumetric path upon hitting a surface, updating throughput and rescaled probabilities to account for the surface scattering event [S3]. Unlike pure volume integrators, this method bridges surface geometry and participating media by treating surface interactions as scattering events that redirect rays back into the medium or to other surfaces [S2, unofficial][S3].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+- Incoming ray $r$ (origin, direction).
+- Scene geometry and materials (including participating media definitions).
+- Current path throughput $\beta$.
+- Random number generator state (for sampling directions and distances).
+- Maximum recursion depth.
+
+**Outputs:**
+- Scattered ray direction and origin.
+- Updated throughput $\beta'$.
+- Boolean flag indicating if the path terminates or continues.
+
+### Data Structures
+
+**HitRecord** [S2, unofficial]:
+- `P`: Vector, intersection point.
+- `Normal`: Vector, surface normal at intersection.
+- `T`: float64, distance along ray to intersection.
+- `FrontFace`: bool, true if normal points against ray direction.
+- `Mat`: Material, material properties at intersection.
+
+**Material** [S2, unofficial]:
+- `Scatter`: Function pointer, scattering function (e.g., Lambertian, Metal, Dielectric).
+- `Colour`: Vector (RGB), albedo or emission color.
+- `Fuzz`: float64, roughness factor for metallic reflections.
+- `Light`: bool, true if the material is an emissive light source.
+
+**ConstantMedium** [S2, unofficial]:
+- `Obj`: Object, the enclosed geometry.
+- `Density`: float64, density of the participating medium.
+- `Colour`: Vector (RGB), color of the medium.
+
+**Ray** [S2, unofficial]:
+- `Origin`: Vector.
+- `Direction`: Vector.
+
+### Steps
+
+1.  **Ray-Scene Intersection**:
+    Cast the incoming ray against the scene. If the ray hits an object, retrieve the `HitRecord` containing the intersection point, normal, and material [S2, unofficial]. If the ray hits a `ConstantMedium`, perform a two-step hit test against the inner object to determine entry and exit points, then sample the distance to the first scattering event within the medium using the density [S2, unofficial].
+
+2.  **Surface Interaction Check**:
+    If a surface intersection occurs:
+    - If the material is emissive (`Mat.Light` is true), return the material's color as the direct lighting contribution and terminate the path [S2, unofficial].
+    - If the material is not emissive, proceed to BSDF sampling [S2, unofficial].
+
+3.  **BSDF Sampling**:
+    Sample the Bidirectional Scattering Distribution Function (BSDF) to determine the outgoing direction $w_o$ [S3].
+    - Generate random numbers $u_1, u_2$ from a uniform distribution $[0, 1)$ [S3].
+    - Call the material's specific scatter function (e.g., `LambertianScatter`, `MetalScatter`, `DielectricScatter`) using the incoming direction $w_i$, the surface normal, and the random numbers [S2, unofficial][S3].
+    - The scatter function returns the scattered ray direction and the attenuation color [S2, unofficial].
+
+4.  **Throughput Update**:
+    Update the path throughput $\beta$ to account for the surface scattering [S3].
+    $$ \beta' = \beta \cdot \frac{f_r(w_i, w_o) \cdot |\cos \theta_i|}{p(w_o)} $$
+    Where:
+    - $f_r(w_i, w_o)$ is the BSDF value (often hardcoded or derived from the material color, e.g., $1/\pi$ for Lambertian) [S1, unofficial][S3].
+    - $\theta_i$ is the angle between the surface normal and the outgoing direction [S1, unofficial][S3].
+    - $p(w_o)$ is the probability density function (PDF) of the sampled direction [S3].
+
+    *Note on PDFs:*
+    - For Uniform Hemisphere sampling: $p(w_o) = \frac{1}{2\pi}$ [S1, unofficial].
+    - For Cosine-Weighted Hemisphere sampling: $p(w_o) = \frac{1}{\pi}$ [S1, unofficial].
+    - For specific material implementations (like GoTracer), the PDF may be implicit in the scatter function, and the throughput update might simply multiply by the attenuation and cosine factor if the sampling is uniform over the hemisphere [S2, unofficial].
+
+5.  **Rescaled Probabilities (Optional/Advanced)**:
+    If using resampled path tracking or specific BSDF implementations that track proportional PDFs:
+    - If `bs->pdfIsProportional` is true: $r_l = r_u / \text{bsdf.PDF}(w_o, w_i)$ [S3].
+    - Else: $r_l = r_u / \text{bs->pdf}$ [S3].
+    This step is critical for unbiased estimation when using multiple importance sampling or resampling techniques [S3].
+
+6.  **State Update**:
+    - Update `specularBounce` flag based on whether the BSDF sample is specular [S3].
+    - Update `anyNonSpecularBounces` flag [S3].
+    - If the interaction is a transmission (refraction), update the eta scale factor: $\eta_{scale} *= \eta^2$ [S3].
+    - Spawn the new ray with the updated direction and origin [S3].
+
+7.  **Recursive Path Tracing**:
+    Recursively call the path tracer with the new scattered ray, decrementing the depth counter [S2, unofficial].
+    $$ L_{indirect} = \text{Color} \cdot \text{rayColour}(scattered\_ray, scene, depth-1) \cdot \beta' $$
+    Accumulate this indirect radiance into the pixel color [S1, unofficial].
+
+8.  **Termination**:
+    - If depth reaches 0, return black (0,0,0) [S2, unofficial].
+    - If the BSDF sample fails (e.g., metal reflection dot product is negative), terminate the path [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_colour(ray, scene, depth, samples_per_pixel):
+    """
+    Recursively trace a ray through the scene.
+    """
+    if depth <= 0:
+        return Color(0.0, 0.0, 0.0)
+
+    hit_record = HitRecord()
+    if scene.hit(ray, t_min=0.001, t_max=INF, rec=hit_record):
+        scattered_ray = Ray()
+        attenuation = Color(0.0, 0.0, 0.0)
+        
+        # Sample BSDF
+        scatter_success = hit_record.mat.scatter(ray, hit_record, attenuation, scattered_ray)
+        
+        if scatter_success:
+            # Calculate throughput update
+            # Note: In simple implementations like GoTracer, the scatter function
+            # handles the direction, and attenuation is the color.
+            # The PDF is often implicit or uniform.
+            
+            # Cosine factor
+            cos_theta = abs(dot(hit_record.normal, scattered_ray.direction))
+            
+            # PDF depends on sampling strategy. 
+            # For Lambertian: pdf = 1/pi. For Uniform: pdf = 1/(2*pi).
+            # GoTracer uses simple random vectors, implying uniform hemisphere sampling for Lambertian/Isotropic.
+            # However, the throughput update in GoTracer is implicit in the recursive call 
+            # via the attenuation color multiplication.
+            
+            # General BSDF update:
+            # beta_new = beta_old * (f_r * cos_theta) / pdf
+            
+            # For GoTracer's Lambertian:
+            # f_r = color / pi
+            # pdf = 1 / (2 * pi) (if uniform hemisphere)
+            # factor = (color / pi) * cos_theta / (1 / (2 * pi)) = 2 * color * cos_theta
+            
+            # But GoTracer simply multiplies by attenuation (color) and relies on 
+            # the random sampling distribution for unbiasedness.
+            
+            return attenuation.multiply(ray_colour(scattered_ray, scene, depth - 1, samples_per_pixel))
+        
+        if hit_record.mat.light:
+            return hit_record.mat.colour
+            
+    return Color(0.0, 0.0, 0.0)
+
+def render_row(j, image_width, image_height, samples_per_pixel, max_depth, inv_width, inv_height, camera, scene, img):
+    y = -j + image_height
+    for i in range(image_width):
+        pixel = Color(0.0, 0.0, 0.0)
+        for s in range(samples_per_pixel):
+            u = (i + random_float()) * inv_width
+            v = (j + random_float()) * inv_height
+            ray = camera.get_ray(u, v)
+            pixel = pixel.add(ray_colour(ray, scene, max_depth, samples_per_pixel))
+        img.write_colour(i, y, pixel)
+```
+
+### Parameters
+- `samplesPerPixel`: Number of samples per pixel for anti-aliasing. Default: 300 [S2, unofficial].
+- `maxDepth`: Maximum recursion depth for path tracing. Default: 50 [S2, unofficial].
+- `aperture`: Depth of field aperture size. Default: 0.0 [S2, unofficial].
+- `vfov`: Vertical field of view in degrees. Default: 40.0 [S2, unofficial].
+- `refractionIndex`: Index of refraction for dielectric materials. Default: 1.5 [S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Metal Scatter Direction**: The reflected ray direction must have a positive dot product with the surface normal. If `dot(normal, scattered_direction) <= 0`, the ray is absorbed, and the path terminates [S2, unofficial].
+- **Dielectric Total Internal Reflection**: If `refractionRatio * sinTheta > 1.0`, total internal reflection occurs, and the ray is reflected instead of refracted [S2, unofficial].
+- **Constant Medium Hit Test**: A small epsilon (0.0001) is added to the inner object's hit distance to avoid self-intersection when finding the second hit point [S2, unofficial].
+- **Lambertian Degeneracy**: If the random unit vector added to the normal results in a near-zero vector, the scatter direction is clamped to the normal to avoid degenerate rays [S2, unofficial].
+- **Gamma Correction**: Output values are gamma-corrected using `sqrt(pixel_value / samplesPerPixel)` before display [S2, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+- **Time Complexity**: $O(N \cdot S \cdot D)$, where $N$ is the number of pixels, $S$ is the number of samples per pixel, and $D$ is the maximum path depth. Each sample involves a recursive ray tracing process with potential intersections against scene geometry.
+- **Memory Complexity**: $O(D)$ for the recursion stack, plus $O(G)$ for the scene geometry storage, where $G$ is the number of primitives.
+
+### Measured Performance
+- Performance depends heavily on scene complexity and the number of samples. GoTracer uses parallelism via goroutines to process image rows in parallel, leveraging multi-core CPUs [S2, unofficial].
+- Default settings (800x533 resolution, 300 samples, depth 50) provide high-quality images but require significant computation time [S2, unofficial].
+
+### Strengths and Limitations
+- **Strengths**: Simple implementation, supports multiple surface types (Lambertian, Metal, Dielectric, Isotropic), handles participating media (Constant Medium), supports depth of field and anti-aliasing [S2, unofficial].
+- **Limitations**: Limited to simple geometries (Spheres, Boxes, Rectangles), no advanced material models, no global illumination beyond path tracing, limited to constant density media [S2, unofficial].
+
+### When to Use
+- Suitable for educational purposes and simple volumetric rendering demonstrations [S2, unofficial].
+- Not suitable for production-quality rendering due to limited material models and lack of advanced optimization techniques [S2, unofficial].
+
+## Background
+
+### Origin
+The method is based on the "Ray Tracing in One Weekend" series by Peter Shirley, implemented in Go as "GoTracer" by hexhowells [S2, unofficial]. It also draws concepts from the "Volume Single Scattering" project by wangyuehi [S1, unofficial] and the theoretical framework of volume scattering integrators from the "Physically Based Rendering" (pbr-book) 4th edition [S3].
+
+### History and Development
+- **Ray Tracing in One Weekend**: Popularized simple path tracing techniques for educational purposes [S2, unofficial].
+- **GoTracer**: Extended the original C++ implementation to Go, adding parallelism and supporting participating media [S2, unofficial].
+- **Volume Single Scattering**: Explored single scattering in volumes, providing a foundation for more complex volume rendering techniques [S1, unofficial].
+- **pbr-book**: Provided the theoretical basis for volume scattering integrators, including BSDF sampling and throughput updates [S3].
+
+### Applications
+- Educational ray tracers [S2, unofficial].
+- Simple volumetric rendering demonstrations [S1, unofficial].
+- Research prototyping for volume rendering algorithms [S3].
+
+## Sources
+
+[S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
+[S2] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)
+[S3] 14.2 Volume Scattering Integrators, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/Volume_Scattering_Integrators, fetched 2026-10-29

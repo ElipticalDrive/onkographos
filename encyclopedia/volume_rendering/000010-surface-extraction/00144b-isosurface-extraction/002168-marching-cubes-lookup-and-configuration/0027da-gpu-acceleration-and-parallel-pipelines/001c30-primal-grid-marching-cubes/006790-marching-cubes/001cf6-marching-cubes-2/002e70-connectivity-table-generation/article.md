@@ -1,0 +1,134 @@
+# Connectivity Table Generation
+
+Also called: MC Connectivity Table, Vertex Index Mapping
+
+## Overview
+Connectivity Table Generation constructs a mapping from Marching Cubes edge indices to vertex indices for each of the 256 configuration cases, enabling efficient triangle reconstruction during isosurface extraction. It differs from standard lookup table usage by explicitly resolving the geometric connectivity between vertices and edges, which is necessary for implementing variants like Marching Cubes 2 or handling fiber surfaces where derived scalar fields are computed on the fly.
+
+## How it works
+The method processes the standard Marching Cubes `tri_table` to produce a connectivity structure that maps edge references to vertex indices. This allows the renderer to retrieve vertex positions and normals directly during the mesh generation phase without repeated lookups or complex index arithmetic.
+
+### Inputs and Outputs
+- **Input**: The standard 256-case `tri_table` where each case is a list of 18 integers (three triangles per case, six integers per triangle, padded with -1).
+- **Output**: A connectivity table (or vertex index map) where each entry corresponds to a case and contains the vertex indices for the active edges.
+
+### Data Structures
+The `tri_table` is a 256-element array. Each element is a fixed-size array of 18 integers.
+- **Layout**: `[e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18]`
+- **Encoding**: Each triangle is defined by three edge indices. If an edge is not part of the triangulation for that case, the value is -1.
+- **Edge to Vertex Mapping**: A separate mapping `_mc_verts` (or equivalent) maps each of the 12 possible edge indices (1-12) to the two vertex indices that define that edge.
+
+### Steps
+1. **Initialize Connectivity Table**: Create an array `connectivity_table` of size 256.
+2. **Iterate Cases**: For each case index `i` from 0 to 255:
+    a. Retrieve the triangle list `tri_list` from `tri_table[i]`.
+    b. Initialize a local vertex map `vertex_map` of size 12 (for edges 1-12) with zeros or nulls.
+    c. **Process Triangles**: Iterate through the triangle definitions in `tri_list`. Each triangle is defined by three edge indices `e1, e2, e3`.
+    d. **Map Edges to Vertices**: For each edge index `e` in `{e1, e2, e3}`:
+        i. If `e` is valid (i.e., `e > 0` and `e <= 12`):
+            - Retrieve the vertex indices `v_a, v_b` associated with edge `e` from the edge-to-vertex mapping `_mc_verts`.
+            - Store `v_a` and `v_b` in `vertex_map[e]`.
+        ii. If `e` is invalid (0 or -1), assign 0 or null to `vertex_map[e]`.
+    e. **Store Result**: Save `vertex_map` into `connectivity_table[i]`.
+
+### Formulas
+For fiber surfaces, the derived scalar field $g(x)$ is computed as:
+$$ g(x) = n_1 f_1(x) + n_2 f_2(x) $$
+where $\vec{n} = (n_1, n_2)$ is the normal vector of the line in the range, and $c$ is the isovalue. The gradient is:
+$$ \nabla g = n_1 \nabla f_1 + n_2 \nabla f_2 $$
+This allows computing vertex values and normals on the fly during the connectivity generation and mesh extraction phases [S1].
+
+### Parameters
+- **$\vec{n}$**: Normal vector of the range line. Typical values depend on the desired fiber direction.
+- **$c$**: Isovalue (distance from origin). Typical values depend on the data range.
+
+### Edge Cases and Pitfalls
+- **Degenerate Cases**: Some cases in the `tri_table` may have fewer than 3 triangles. The connectivity table must handle cases where fewer than 12 edges are active.
+- **Invalid Edge Indices**: Edge indices of 0 or -1 must be explicitly handled to avoid out-of-bounds access in the vertex lookup.
+- **Precision**: When computing derived values $g(x)$, floating-point precision errors may cause vertices to be incorrectly classified as inside or outside the isosurface, leading to topological errors. Use a small epsilon for comparisons [G].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_connectivity_table(tri_table, edge_to_vertices):
+    """
+    Generates a connectivity table from the Marching Cubes tri_table.
+    
+    Args:
+        tri_table: List of 256 lists, each containing 18 integers (edge indices).
+        edge_to_vertices: Dict mapping edge index (1-12) to tuple of vertex indices (v1, v2).
+        
+    Returns:
+        connectivity_table: List of 256 dicts, each mapping edge index to vertex indices.
+    """
+    connectivity_table = []
+    
+    for case_idx in range(256):
+        tri_list = tri_table[case_idx]
+        vertex_map = {}
+        
+        # Process triangles in groups of 3 edge indices
+        for tri_idx in range(0, 18, 3):
+            e1 = tri_list[tri_idx]
+            e2 = tri_list[tri_idx + 1]
+            e3 = tri_list[tri_idx + 2]
+            
+            # Helper to map edge to vertices
+            def map_edge(e):
+                if e > 0 and e <= 12:
+                    return edge_to_vertices[e]
+                else:
+                    return None
+            
+            v1 = map_edge(e1)
+            v2 = map_edge(e2)
+            v3 = map_edge(e3)
+            
+            if v1: vertex_map[e1] = v1
+            if v2: vertex_map[e2] = v2
+            if v3: vertex_map[e3] = v3
+            
+        connectivity_table.append(vertex_map)
+        
+    return connectivity_table
+```
+
+## Subtopics
+
+### [Extended Marching Cubes with No Degenerate Triangles](2186-extended-marching-cubes-with-no-degenerate-triangles.md)
+Handles degenerate cases by modifying the lookup table. Choose when topological correctness is critical.
+
+### [Extended Marching Cubes Lookup Table](2187-extended-marching-cubes-lookup-table.md)
+Uses an extended table for more complex configurations. Choose when standard MC fails to capture topology.
+
+### [Contouring Discrete Indicator Functions](4087-contouring-discrete-indicator-functions.md)
+Specialized for binary data. Choose when working with discrete volumes.
+
+### [2D Reduction for 3D DIF Contouring](4301-2d-reduction-for-3d-dif-contouring.md)
+Reduces 3D problem to 2D. Choose for performance on binary data.
+
+### [Marching Cubes with Topological Correction (Case 6c)](4349-marching-cubes-with-topological-correction-case-6c.md)
+Corrects specific topological errors. Choose when case 6c artifacts are observed.
+
+### [Finite State Machine for Interpolant Modelling](4762-finite-state-machine-for-interpolant-modelling.md)
+Uses FSM for interpolation. Choose for custom interpolant behavior.
+
+### [Marching Cubes 33](5986-marching-cubes-33.md)
+Uses 33 cases. Choose for simplified topology handling.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for table generation (fixed 256 cases). $O(N)$ for mesh extraction, where $N$ is the number of cells.
+- **Memory Complexity**: $O(1)$ for the connectivity table (fixed size).
+- **Performance**: Fast due to table lookup. Performance depends on the efficiency of the edge-to-vertex mapping.
+- **Strengths**: Simple, fast, and widely supported.
+- **Limitations**: Does not handle degenerate cases automatically. Requires careful handling of edge indices.
+- **When to Use**: Standard isosurface extraction.
+- **When Not to Use**: When topological correctness is critical and degenerate cases are common.
+
+## Background
+The method is based on the standard Marching Cubes algorithm [S2, unofficial]. The concept of fiber surfaces and derived scalar fields was introduced by Nielson [S1], allowing isosurface extraction techniques to be applied to bivariate data.
+
+## Sources
+[S1] Fiber Surfaces: Generalizing Isosurfaces to Bivariate Data, https://doi.org/10.1111/cgf.12636, fetched 2026-10-26
+[S2] JuliaGeometry/Meshing.jl, https://github.com/JuliaGeometry/Meshing.jl, fetched 2026-10-27 (unofficial)

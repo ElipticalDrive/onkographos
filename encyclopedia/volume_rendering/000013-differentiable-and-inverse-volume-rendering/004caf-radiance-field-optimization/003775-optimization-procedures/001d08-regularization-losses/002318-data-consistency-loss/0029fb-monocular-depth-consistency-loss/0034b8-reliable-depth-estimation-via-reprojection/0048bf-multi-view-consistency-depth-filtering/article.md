@@ -1,0 +1,182 @@
+# Multi-view Consistency Depth Filtering
+
+Also called: Confidence Modeling, Multi-view consistency depth masking, Ray confidence filtering, Self-training confidence
+
+## Overview
+Multi-view Consistency Depth Filtering is a mechanism to verify the accuracy and reliability of monocular depth estimates before distilling them into a radiance field [S1, unofficial]. It generates a binary confidence map by measuring the consistency between scaled monocular depth predictions and rendered NeRF depth across multiple viewpoints, filtering out inaccurate rays [S1, unofficial]. It differs from sibling methods by explicitly leveraging the geometric consistency of the learned NeRF itself as a ground-truth proxy to mask noisy monocular depth, rather than relying solely on static thresholds or external consistency checks [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Input image $I_i$ from a seen viewpoint $i$.
+- Initial Monocular Depth Estimation (MDE) depth map $D_i^*(p)$ for pixel $p$.
+- Camera intrinsic matrix $K$.
+- Rotation matrix $R_{i \to l}$ representing the viewpoint difference from seen view $i$ to target view $l$ [S1, unofficial].
+- Rendered depth map $\bar{D}_l(p')$ from the NeRF at target viewpoint $l$ [S1, unofficial].
+- Threshold parameter $\tau$ [S1, unofficial].
+
+**Outputs:**
+- Binary confidence mask $M_i(p)$ indicating valid depth values [S1, unofficial].
+- Masked MDE depth map used for loss computation [S1, unofficial].
+
+**Data Structures:**
+- $D_i^*(p)$: 2D array of depth values, same resolution as input image.
+- $\bar{D}_l(p')$: 2D array of depth values, same resolution as target view.
+- $M_i(p)$: 2D binary array (0 or 1) of same resolution.
+
+**Steps:**
+1. **Predict Initial Depth:** Predict the initial MDE depth map $D_i^*(p)$ from the input image $I_i$ [S1, unofficial].
+2. **Scale and Shift Adjustment:** Fit $D_i^*$ to the absolute scale of the NeRF depth $\bar{D}_i$ at the same viewpoint $i$ by computing scale $w_i$ and shift $q_i$ parameters using least squares [S1, unofficial]. The adjusted depth is $w_i D_i^*(p) + q_i$.
+3. **Reprojection:** Transform pixel $p$ in the seen viewpoint $i$ to pixel $p'$ in the target viewpoint $l$. The homogeneous coordinates are transformed as follows [S1, unofficial]:
+   $$ p' \sim K R_{i \to l} D_i^*(p) K^{-1} p $$
+   *Note: $D_i^*(p)$ is treated as a depth value to unproject $p$ to 3D, then project to view $l$.*
+4. **Consistency Check:** Measure the distance between the scaled MDE depth from the seen viewpoint and the rendered NeRF depth at the reprojected pixel $p'$ in the target view [S1, unofficial].
+5. **Generate Confidence Mask:** Generate the binary confidence map $M_i(p)$ using the Iverson bracket notation [S1, unofficial]:
+   $$ M_i(p) = \left[ \left\| (w_i D_i^*(p) + q_i) - \bar{D}_l(p') \right\| < \tau \right] $$
+   Where $[\cdot]$ is 1 if the condition is true, and 0 otherwise [S1, unofficial].
+6. **Filtering:** Apply $M_i(p)$ to filter the MDE depth values. Only pixels where $M_i(p)=1$ are used in the distillation loss [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_view_consistency_filtering(
+    input_image, 
+    mde_network, 
+    nerf_model, 
+    camera_intrinsics_K, 
+    rotation_matrix_R_i_to_l, 
+    threshold_tau
+):
+    """
+    Generates a confidence mask for monocular depth based on multi-view consistency.
+    
+    Args:
+        input_image: Input RGB image from seen viewpoint i.
+        mde_network: Pre-trained Monocular Depth Estimation network.
+        nerf_model: Current NeRF model.
+        camera_intrinsics_K: 3x3 camera intrinsic matrix.
+        rotation_matrix_R_i_to_l: 3x3 rotation matrix from view i to view l.
+        threshold_tau: Scalar threshold for consistency check.
+        
+    Returns:
+        confidence_mask: 2D binary array (H, W).
+        scaled_mde_depth: 2D array of scaled monocular depth.
+    """
+    # Step 1: Predict initial MDE depth
+    # D_i_star is (H, W)
+    D_i_star = mde_network.predict(input_image)
+    
+    # Step 2: Scale and Shift Adjustment
+    # Get NeRF rendered depth at the SAME viewpoint i for calibration
+    # D_bar_i is (H, W)
+    D_bar_i = nerf_model.render_depth(viewpoint=i)
+    
+    # Compute scale w_i and shift q_i via least squares between D_i_star and D_bar_i
+    # Flatten arrays for linear regression: y = w*x + q
+    y = D_bar_i.flatten()
+    x = D_i_star.flatten()
+    
+    # Solve for w and q using least squares (e.g., numpy.linalg.lstsq)
+    # [w_i, q_i] = argmin || w*x + q - y ||^2
+    w_i, q_i = solve_least_squares(x, y)
+    
+    # Compute scaled MDE depth
+    scaled_mde_depth = w_i * D_i_star + q_i
+    
+    # Step 3 & 4: Reprojection and Consistency Check
+    # We need to check consistency against a TARGET viewpoint l (seen or unseen)
+    # Get NeRF rendered depth at target viewpoint l
+    # D_bar_l is (H_l, W_l)
+    D_bar_l = nerf_model.render_depth(viewpoint=l)
+    
+    H, W = D_i_star.shape
+    confidence_mask = np.zeros((H, W), dtype=bool)
+    
+    for p_y in range(H):
+        for p_x in range(W):
+            # Get pixel coordinates in homogeneous form for view i
+            # p = [p_x, p_y, 1]
+            p_homogeneous = np.array([p_x, p_y, 1.0])
+            
+            # Get depth value at p
+            depth_val = D_i_star[p_y, p_x]
+            
+            # Unproject p to 3D using K and depth
+            # X_3D = K^-1 * [p_x, p_y, 1]^T * depth_val
+            # Note: Standard unprojection assumes depth is along Z. 
+            # The formula in source uses K * R * D * K^-1 * p
+            # This implies: p' ~ K * R * (D(p) * K^-1 * p)
+            
+            # 1. Unproject to normalized camera coordinates
+            # x_norm = K^-1 * p_homogeneous
+            x_norm = np.linalg.inv(camera_intrinsics_K) @ p_homogeneous
+            
+            # 2. Scale by depth
+            # X_3D_cam = x_norm * depth_val
+            X_3D_cam = x_norm * depth_val
+            
+            # 3. Rotate to target view l
+            # X_3D_target = R_i_to_l * X_3D_cam
+            X_3D_target = rotation_matrix_R_i_to_l @ X_3D_cam
+            
+            # 4. Project to target view pixel coordinates
+            # p'_homogeneous = K * X_3D_target
+            p_prime_homogeneous = camera_intrinsics_K @ X_3D_target
+            
+            # Normalize homogeneous coordinates
+            p_prime_x = p_prime_homogeneous[0] / p_prime_homogeneous[2]
+            p_prime_y = p_prime_homogeneous[1] / p_prime_homogeneous[2]
+            
+            # Check if p' is within bounds of target image
+            if 0 <= p_prime_x < D_bar_l.shape[1] and 0 <= p_prime_y < D_bar_l.shape[0]:
+                # Get depth at reprojected pixel in target view
+                # D_bar_l(p')
+                # Note: Interpolation may be needed for non-integer coordinates
+                depth_target = interpolate_depth(D_bar_l, p_prime_x, p_prime_y)
+                
+                # Get scaled MDE depth at original pixel
+                depth_source = scaled_mde_depth[p_y, p_x]
+                
+                # Step 5: Generate Confidence Mask
+                # Check if absolute difference is less than tau
+                if abs(depth_source - depth_target) < threshold_tau:
+                    confidence_mask[p_y, p_x] = True
+                else:
+                    confidence_mask[p_y, p_x] = False
+            else:
+                # Out of bounds, mark as invalid (0)
+                confidence_mask[p_y, p_x] = False
+                
+    return confidence_mask, scaled_mde_depth
+```
+
+**Parameters:**
+- $\tau$: Threshold parameter for the confidence map. Not given in the sources.
+- $w_i, q_i$: Scale and shift parameters obtained by least squares between $D_i^*$ and $\bar{D}_i$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Reprojection Bounds:** If $p'$ falls outside the image boundaries of the target view, the consistency check cannot be performed. The method marks these as invalid (0) [S1, unofficial].
+- **Occlusions:** Multi-view consistency may fail at occlusion boundaries where the NeRF depth and MDE depth disagree due to different geometric interpretations. The threshold $\tau$ must be tuned to handle these discrepancies [S1, unofficial].
+- **NeRF Accuracy:** The method relies on the NeRF depth $\bar{D}_l$ being reasonably accurate. If the NeRF is poorly trained, the confidence mask may incorrectly filter valid MDE depth or retain invalid depth [S1, unofficial].
+
+## Subtopics
+
+### Depth Supervision Loss (Laug)
+Uses augmented monocular depth for supervision. Focuses on loss formulation rather than filtering. [Link](8111-depth-supervision-loss-laug.md)
+
+### Depth Consistency Check / Depth Outlier Removal
+General term for removing outliers. This method specifically uses NeRF-rendered depth as the consistency reference. [Link](9363-depth-consistency-check-depth-outlier-removal.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(H \times W)$ per pixel for the consistency check, where $H, W$ are image dimensions. Requires rendering NeRF depth for target viewpoints.
+- **Memory Complexity:** Requires storing depth maps for seen and target viewpoints.
+- **Strengths:** Effectively eliminates inaccurate information from both NeRF and MDE networks by leveraging multi-view consistency [S1, unofficial].
+- **Limitations:** Depends on the quality of the initial NeRF depth. If NeRF is inaccurate, the mask may be misleading.
+- **When to use:** When distilling monocular depth into sparse-view NeRF and MDE errors are significant.
+- **When not to use:** When computational resources are extremely limited and NeRF rendering is too slow.
+
+## Background
+Originated in the DaRF paper (2023) by [S1, unofficial]. It is inspired by self-training approaches [S1, unofficial]. It addresses the propagation of errors from both few-shot NeRF and estimated monocular depths during the distillation process [S1, unofficial].
+
+## Sources
+[S1] DaRF: Boosting Radiance Fields from Sparse Inputs with Monocular Depth Adaptation, https://doi.org/10.48550/arxiv.2305.19201, fetched 2026-10-29 (unofficial)

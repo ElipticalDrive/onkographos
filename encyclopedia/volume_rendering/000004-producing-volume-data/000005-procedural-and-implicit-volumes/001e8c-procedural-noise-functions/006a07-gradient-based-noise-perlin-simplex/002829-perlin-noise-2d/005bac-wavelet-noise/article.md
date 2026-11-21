@@ -1,0 +1,136 @@
+# Wavelet Noise
+Also called: Cook and DeRose Noise
+## Overview
+Wavelet noise is an explicit noise function introduced by Cook and DeRose that generates values by representing the noise field as a quadratic B-spline surface, achieving near-perfect band-limiting to solve the aliasing and detail loss inherent in weakly band-limited methods like [Perlin Noise 2D](4211-perlin-noise-2d.md). It differs from siblings such as [Fractal Brownian Motion (fBm) with Perlin Noise](4253-fractal-brownian-motion-fbm-with-perlin-noise.md) by providing strict spectral control via a weighted sum and supporting solid noise with isotropic filtering.
+## How it works
+**Inputs:** A tile size (period $N$), spatial coordinates $\mathbf{x}$, and dimensionality $d$.
+**Outputs:** A scalar noise value $N(\mathbf{x})$.
+
+**Data Structures:**
+*   **Noise Coefficients Tile ($N$):** A 3D array (for 3D noise) or 2D array (for 2D noise) of size $N \times N \times N$ (or $N \times N$). Each element stores a floating-point value representing the coefficient at that grid point. The space is tiled periodically with this volume.
+
+**Preprocessing Steps:**
+1.  **Generate Random Image ($R$):** Create an image $R$ of size $M \times M \times M$ (where $M = 2N$) filled with independent random values uniformly distributed in $[0, 1)$ (or another suitable distribution).
+2.  **Downsample ($R \downarrow$):** Downsample $R$ by a factor of 2 using a specific analysis filter derived from the uniform quadratic B-spline basis. The result is an image $R \downarrow$ of size $N \times N \times N$.
+3.  **Upsample ($R \downarrow \uparrow$):** Upsample $R \downarrow$ by a factor of 2 using a specific refinement filter derived from the uniform quadratic B-spline basis. The result is an image $R \downarrow \uparrow$ of size $M \times M \times M$.
+4.  **Compute Coefficients ($N$):** Subtract the upsampled image from the original random image: $N = R - R \downarrow \uparrow$. The resulting tile $N$ contains the noise coefficients.
+
+**Runtime Evaluation:**
+1.  **Tiling:** Map the query coordinate $\mathbf{x}$ to the local tile coordinates by taking $\mathbf{x} \mod N$.
+2.  **B-Spline Evaluation:** Evaluate the quadratic B-spline basis function at the local coordinates using the precomputed coefficients $N$. Let $\mathbf{x}_{local}$ be the fractional position within the tile. The value is computed as a convolution of the coefficients with the quadratic B-spline kernel.
+
+**Formulas:**
+The noise function is defined as:
+$$ N(\mathbf{x}) = \sum_{\mathbf{k}} n_{\mathbf{k}} B(\mathbf{x} - \mathbf{k}) $$
+where:
+*   $n_{\mathbf{k}}$ are the precomputed coefficients from the tile $N$.
+*   $B(\mathbf{x})$ is the uniform quadratic B-spline basis function.
+*   The sum is over the grid indices $\mathbf{k}$ in the vicinity of $\mathbf{x}$.
+
+The filters used in downsampling and upsampling correspond to the analysis and refinement coefficients of the uniform quadratic B-spline basis function. Specifically, the downsampling filter $h$ and upsampling filter $g$ are determined by the wavelet analysis of the quadratic B-spline. For a quadratic B-spline, the refinement mask coefficients $g$ are typically $[1/4, 3/4, 3/4, 1/4]$ (normalized appropriately for the specific implementation) or derived from the subdivision scheme. The analysis filter $h$ satisfies the perfect reconstruction condition with $g$.
+
+**Parameters:**
+*   **Tile Size ($N$):** The period of the noise. Typical values depend on the application, but must be powers of 2 for the dyadic downsampling/upsampling to work cleanly with the B-spline filters.
+*   **Random Seed:** Determines the initial random image $R$.
+
+**Edge Cases and Pitfalls:**
+*   **Sampling 2D from 3D:** Sampling a 3D band-limited noise function on a 2D surface does not result in a band-limited texture, potentially causing aliasing artifacts on the surface despite the 3D function being band-limited [S1, S2].
+*   **Precision:** The subtraction $R - R \downarrow \uparrow$ may suffer from precision loss if $R$ and $R \downarrow \uparrow$ are very large or if the filters introduce significant rounding errors.
+*   **Boundary Conditions:** The method assumes periodic tiling. Care must be taken when querying coordinates near the boundaries of the tile to wrap correctly.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_wavelet_noise(tile_size: int, random_seed: int) -> List[List[List[float]]]:
+    """
+    Preprocesses to create the noise coefficient tile.
+    tile_size: N, the size of the coefficient tile.
+    Returns: 3D array of size N x N x N.
+    """
+    M = 2 * tile_size
+    
+    # Step 1: Generate random image R
+    R = generate_random_image(M, M, M, seed=random_seed)
+    
+    # Step 2: Downsample R to create R_down
+    # Uses analysis filter of quadratic B-spline
+    R_down = downsample(R, filter=quadratic_bpspline_analysis_filter)
+    
+    # Step 3: Upsample R_down to create R_down_up
+    # Uses refinement filter of quadratic B-spline
+    R_down_up = upsample(R_down, filter=quadratic_bpspline_refinement_filter)
+    
+    # Step 4: Compute noise coefficients N
+    N = subtract_images(R, R_down_up)
+    
+    return N
+
+def evaluate_wavelet_noise(x: float, y: float, z: float, coefficients: List[List[List[float]]], tile_size: int) -> float:
+    """
+    Evaluates the wavelet noise at point (x, y, z).
+    coefficients: The precomputed tile N.
+    tile_size: N.
+    """
+    # Map to local tile coordinates
+    x_local = x % tile_size
+    y_local = y % tile_size
+    z_local = z % tile_size
+    
+    # Evaluate quadratic B-spline at local coordinates
+    # This involves convolving the local neighborhood of coefficients with the B-spline kernel
+    return evaluate_quadratic_b_spline(x_local, y_local, z_local, coefficients)
+
+def generate_random_image(width: int, height: int, depth: int, seed: int) -> List[List[List[float]]]:
+    """Generates a 3D array of random floats in [0, 1)."""
+    import random
+    random.seed(seed)
+    return [[[random.random() for _ in range(depth)] for _ in range(height)] for _ in range(width)]
+
+def downsample(image: List[List[List[float]]], filter: List[float]) -> List[List[List[float]]]:
+    """
+    Downscales a 3D image by a factor of 2 using a 1D filter applied in each dimension.
+    filter: The analysis filter coefficients for quadratic B-spline.
+    """
+    # Implementation details for downsampling using convolution and stride-2 sampling
+    # Not given in the sources, but standard for wavelet transforms.
+    # The filter corresponds to the analysis coefficients of the uniform quadratic B-spline basis function.
+    pass
+
+def upsample(image: List[List[List[float]]], filter: List[float]) -> List[List[List[float]]]:
+    """
+    Upscales a 3D image by a factor of 2 using a 1D filter applied in each dimension.
+    filter: The refinement filter coefficients for quadratic B-spline.
+    """
+    # Implementation details for upsampling using interpolation with the refinement filter.
+    # The filter corresponds to the refinement coefficients of the uniform quadratic B-spline basis function.
+    pass
+
+def subtract_images(A: List[List[List[float]]], B: List[List[List[float]]]) -> List[List[List[float]]]:
+    """Element-wise subtraction of two 3D arrays."""
+    return [[[A[i][j][k] - B[i][j][k] for k in range(len(A[0][0]))] for j in range(len(A[0]))] for i in range(len(A))]
+
+def evaluate_quadratic_b_spline(x: float, y: float, z: float, coefficients: List[List[List[float]]]) -> float:
+    """
+    Evaluates the quadratic B-spline surface at (x, y, z) using the coefficients.
+    """
+    # Not given in the sources. Standard quadratic B-spline evaluation involves
+    # computing the basis functions at the fractional coordinates and summing
+    # the products with the nearby coefficients.
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Generally slower than Perlin noise due to the complexity of the B-spline evaluation and the preprocessing cost [S2].
+*   **Memory Complexity:** Requires storing the coefficient tile, which is $O(N^d)$ where $N$ is the tile size and $d$ is the dimensionality [S2]. However, since the tile is small and tiled, the effective memory usage per query is low, but the initial storage is higher than $O(1)$ methods like Perlin noise.
+*   **Strengths:** Almost perfect band-limiting, which prevents aliasing and detail loss. Supports solid noise and isotropic filtering. Provides strict spectral control [S2].
+*   **Limitations:** Slower than Perlin noise. Sampling a 3D function on a 2D surface can still cause aliasing [S1, S2].
+*   **When to Use:** When high-quality, band-limited noise is required, particularly for rendering where aliasing artifacts are unacceptable.
+*   **When Not to Use:** When performance is critical and some aliasing is acceptable, or when $O(1)$ memory usage is strictly required.
+
+## Background
+Wavelet noise was introduced by Cook and DeRose in 2005 [S1, S2]. They observed that Perlin noise, while widely used, is only weakly band-limited, leading to aliasing and detail loss. Wavelet noise addresses this by explicitly constructing a band-limited noise field using quadratic B-splines. The method extends the concept of wavelet-based noise generation to provide a smooth, band-limited alternative to gradient-based noise functions. It is part of the family of explicit noise functions, alongside anisotropic noise [S1, S2].
+
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27
+[S2] State of the Art in Procedural Noise Functions, https://www-sop.inria.fr/reves/Basilic/2010/LLCDDELPZ10/LLCDDELPZ10STARPNF.pdf, fetched 2026-10-27

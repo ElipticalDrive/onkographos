@@ -1,0 +1,166 @@
+Fork of open-source PyMOL molecular visualization system refactored to run in MacOS/iOS using Metal. - perf(metal): cache ray-tracing geometry per VBO instead of per frame by javierbq · Pull Request #412 · javierbq/RayMol
+
+perf(metal): cache ray-tracing geometry per VBO instead of per frame by javierbq · Pull Request #412 · javierbq/RayMol · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+javierbq
+commented
+Sep 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Fixes #395.
+Problem
+While metal_raytrace is on, every frame re-tessellated every cylinder impostor (24 triangles each) and re-copied every mesh triangle into _rtTris on the CPU, only so that ensureRayTracingAS could hash a 1,024-sample subset and discover that nothing had changed. Model-space geometry is invariant under camera motion, so during a pure rotation all of that was wasted main-thread work.
+Approach
+Key the RT geometry on VBO identity instead of contents, as the issue suggests.
+Spheres and triangles are extracted once per CPU buffer into an _rtGeomCache entry — keyed the same way _vboCache already keys its GPU uploads — and kept alive with it. A frame now only records which entries it drew, folding each entry's identity + generation into a running signature. ensureRayTracingAS compares that signature against the built one and, when it matches, does nothing at all: no gather, no concatenation, no hash.
+Details:
+Draw-call scalars the extraction depends on (mode, count, stride, offsets, sphereSizeScale, uniRadius) are hashed into the entry, so a setting change such as sphere_scale re-extracts even though the buffer pointer is unchanged.
+invalidateVBOCacheEntry drops the matching RT entry. Indexed draws register their index buffer as an alias of the vertex buffer, so freeing either one drops the cached triangles.
+Buffers that yield no RT geometry (lines, points) are cached empty and left out of the frame record, so churn in e.g. the selection-indicator CGO does not signal a geometry change and force an acceleration-structure rebuild.
+The concatenated _rtTris vector is gone entirely: entries are written straight into the shared MTLBuffer the triangle AS is built from.
+The frame record stores keys rather than RTGeom*, because an entry can be erased mid-frame by invalidateVBOCacheEntry while the concatenation runs one frame later.
+The OIT/shadow passes still skip accumulation, unchanged.
+The signature is now exact (identity + generation) rather than a sampled hash of coordinates, so it can no longer miss a change the old 1,024-sample subset would have missed.
+Measurements
+Rebased onto #396, which acquires the drawable after the scene is encoded. The two changes are complementary and the distinction matters for reading these numbers: #396 stopped the main thread parking in currentDrawable, but explicitly did not reduce SceneRenderMetal CPU (1637 -> 1515 samples in its own table). This PR removes that remaining CPU.
+Baseline is a2cbd11 (master, with #396) built in the same worktree; 32 objects / 57,696 atoms, cartoon + sticks, cmd.rock(1), 10 s sample, window frontmost, Apple silicon.
+main-thread samples in
+master (#396)
++ this PR
+renderTick
+6756
+556
+SceneRenderMetal
+3357
+88
+SceneRenderAll
+3272
+10
+rtAppendCylinder
+1549
+0
+rtAppendVBOTris
+570
+0
+currentDrawable (GPU wait)
+4
+173
+Process CPU over the same 10 s of wall clock: 7.29 s -> 3.06 s. The two RT accumulation helpers were 65% of SceneRenderAll and are now entirely absent; what little wait returns to currentDrawable is the frame becoming GPU-bound again.
+Memory, on two freshly launched instances that each built the same scene once and rocked for 10 s (the per-VBO geometry is now retained, so this needed checking):
+master (#396)
++ this PR
+RSS
+789 MB
+447 MB
+phys_footprint
+2725 MB
+2730 MB
+Total physical footprint is unchanged (both dominated by GPU allocations), while CPU-side resident memory drops: retaining the per-VBO triangle lists costs about what the per-frame _rtTris vector it replaces did (~15 MB of sticks here), and dropping the intermediate copy plus the per-frame newBufferWithBytes churn more than pays for it.
+Verification
+Built the macOS app and drove two dev instances (fixed and baseline) side by side over MCP. Confirmed by screenshot that RT AO and traced shadows render identically, and that they correctly follow:
+sphere_scale changes (params-signature re-extraction),
+hide spheres / hide sticks — no ghost occlusion left behind where the geometry was,
+translate of a selection — occlusion moves with the atoms, nothing stale at the old position.
+🤖 Generated with Claude Code
+perf(metal): cache ray-tracing geometry per VBO instead of per frame
+…
+97d4525
+```
+While metal_raytrace was on, every frame re-tessellated every cylinder
+impostor into 24 triangles and re-copied every mesh triangle into
+_rtTris on the CPU, only so ensureRayTracingAS could hash a 1,024-sample
+subset and discover nothing had changed. Model-space geometry is
+invariant under camera motion, so all of that was wasted per-frame work.
+
+Key the RT geometry on VBO identity instead of contents. Spheres and
+triangles are extracted once per CPU buffer into an _rtGeomCache entry
+(keyed the same way _vboCache already keys its GPU uploads) and kept
+alive with it; a frame now only records WHICH entries it drew, folding
+each entry's identity + generation into a running signature.
+ensureRayTracingAS compares that signature and, when it matches, does
+nothing at all — no gather, no concatenation, no hash.
+
+Details:
+- Draw-call scalars the extraction depends on (mode, count, stride,
+  offsets, sphereSizeScale, uniRadius) are hashed into the entry, so a
+  setting change such as sphere_scale re-extracts even though the buffer
+  pointer is unchanged.
+- invalidateVBOCacheEntry drops the matching RT entry. Indexed draws
+  register their index buffer as an alias of the vertex buffer, so
+  freeing either one drops the cached triangles.
+- Buffers that yield no RT geometry (lines, points) are cached empty and
+  left out of the frame record, so churn in e.g. the selection-indicator
+  CGO does not force an acceleration-structure rebuild.
+- The concatenated _rtTris vector is gone: the entries are written
+  straight into the shared MTLBuffer the triangle AS is built from.
+- The frame record stores keys, not pointers, because an entry can be
+  erased mid-frame and the concatenation runs one frame later.
+- OIT/shadow passes still skip accumulation, unchanged.
+
+Measured on a 32-object / 57,696-atom scene (cartoon + sticks) during
+cmd.rock(1), 10 s `sample`, window frontmost, Apple silicon:
+
+                                  before    after
+  main-thread samples in
+    PyMOLBridge_RenderMetalFrame    3245       62
+    SceneRenderAll                  3180        7
+    rtAppendCylinder                1508        0
+    rtAppendVBOTris                  567        0
+    nextDrawable (GPU wait)         3735     7298
+  process CPU per 10 s wall        5.60 s   1.59 s
+
+The frame is now GPU-bound rather than CPU-bound. Verified visually
+that RT AO/shadows are unchanged and that they follow sphere_scale
+changes, representation hide/show, and coordinate edits.
+
+Fixes #395
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+javierbq
+force-pushed
+the
+fix/395-rt-geometry-cache
+branch
+from
+18e7b25 to
+97d4525
+Compare
+September 6, 2026 10:56
+Hide details
+View details
+javierbq
+merged commit 7f0f7a2
+into
+master
+Sep 6, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+javierbq
+deleted the
+fix/395-rt-geometry-cache
+branch
+September 6, 2026 11:04
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

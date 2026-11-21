@@ -1,0 +1,168 @@
+
+iPhoneで撮った動画から、3D Gaussian Splatting(3DGS)で3Dモデルを作るまでの手順をまとめたものです。
+
+## 全体の流れ
+
+
+![pipeline_overview.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4499412/c16bbb7e-3b16-4792-9cad-d351bbc5d57d.png)
+
+
+1. 動画からフレームを抽出する
+2. COLMAPでカメラの位置・向きとスパース(疎)な3D点群を推定する(SfM)
+3. COLMAPで画像の歪みを補正する(3DGS学習の前準備)
+4. 3D Gaussian Splattingで学習する
+5. ブラウザ(WebGL)で結果を確認する
+
+---
+
+3DGS作成ガイド
+https://qiita.com/kazuyattu/items/a050491ee450670b34ef
+pythonのコードはこちら
+https://github.com/kazuyattu-stack/3DGS
+pythonコード説明
+https://qiita.com/kazuyattu/items/6efc5d2ace09d6bc06ac
+colmap説明
+https://qiita.com/kazuyattu/items/c6226f3dcc6f7abb5016
+
+
+
+## 事前準備(環境構築)
+
+このマシンではWindows版COLMAPがスマートアプリコントロールに実行をブロックされたため、
+**WSL2(Ubuntu)上にLinux版COLMAPと3D Gaussian Splattingの環境を作る**方式にしています。
+
+必要なもの:
+- WSL2 + Ubuntu(`wsl --install`)
+- NVIDIA CUDA Toolkit(WSL2内。GPUドライバ自体はWindows側のものを共有できる)
+- COLMAP(CUDA有効でソースからビルド。`apt install colmap`だとCUDA無し版になる)
+- 3D Gaussian Splatting公式リポジトリ一式(PyTorch, diff-gaussian-rasterization, simple-knn, fused-ssim)
+
+環境構築だけでかなりの試行錯誤が必要だったので、詳細は末尾の「つまずいたポイント」を参照してください。
+
+---
+
+## Step 1: 動画からフレーム抽出 & COLMAPでカメラ姿勢・スパース点群を推定
+
+`scripts/1_colmap_reconstruct.py` を使います。やっていること:
+
+1. OpenCVで動画から一定間隔(`frame_step`)でフレームを抽出し、カラーのままJPEGとして保存
+2. WSL2上のCOLMAP(`colmap automatic_reconstructor`)を呼び出し、
+   - 特徴点抽出・マッチング(SIFT)
+   - Incremental SfMでカメラの姿勢とスパース点群を推定
+   - `image_undistorter`で3DGS学習用に画像の歪みを補正
+
+抽出されたフレームの例:
+
+![00_sample_frame.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4499412/9924ea62-14fa-43fc-b9b2-d811c5e509bb.jpeg)
+
+
+フレーム間の特徴点マッチングの様子(SIFT):
+
+![01_sift_matching.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4499412/8ea630c7-d8dd-4f1a-9c9c-3744ee276f7f.jpeg)
+
+
+推定されたスパース点群(42,554点、Open3Dでレンダリング):
+
+![03_sparse_pointcloud.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4499412/94d21169-e07a-4110-a37a-062b4d9b268f.png)
+
+
+実行コマンド:
+```bash
+py colmap_reconstruct.py
+```
+`video_path`、`frame_step`、`quality`などはスクリプト冒頭の変数で調整します。
+
+---
+
+## Step 2(任意): 密なステレオ復元(MVS)
+
+3DGSの学習自体には Step 1 の歪み補正済み画像とスパース点群があれば十分ですが、
+CUDA対応のCOLMAPが使える場合は`patch_match_stereo`→`stereo_fusion`で密な点群も作れます。
+
+視差マップの例:
+
+![02_disparity_map.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4499412/2ef1ec57-97b1-4a24-b081-eb79cb170965.jpeg)
+
+
+---
+
+## Step 3: 3D Gaussian Splattingで学習
+
+`scripts/3_train_3dgs.py` から、WSL2内にセットアップした
+[graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) の
+`train.py` を呼び出します。
+
+- 入力: Step 1で作った歪み補正済みデータセット(`images/` + `sparse/0/*.bin`)
+- 学習: 30,000イテレーション(デフォルト)
+- 出力: `point_cloud/iteration_30000/point_cloud.ply`(ガウシアンのパラメータ入りPLY)
+
+今回のケースでは 64枚の画像・42,554個のスパース点から出発し、
+最終的に **690,781個のガウシアンスプラット** が生成されました
+(再投影誤差 PSNR: train 35.7 / test 30.1)。
+
+```bash
+py train_3dgs.py
+```
+
+---
+
+## Step 4: 結果をブラウザで確認する
+
+3DGSが出力するPLYは、位置・スケール・回転(クォータニオン)・不透明度・
+球面調和関数(色)を持つ特殊な形式なので、**通常の点群ビューア(Open3Dなど)では正しく表示できません**。
+
+そこで [antimatter15/splat](https://github.com/antimatter15/splat) というWebGLベースの
+軽量ビューアを使います。手順:
+
+1. PLYを軽量な`.splat`形式に変換する
+   ```bash
+   cd splat_viewer
+   py ply_to_splat.py "<point_cloud.plyのパス>" model.splat
+   ```
+2. ローカルサーバーを立てる(`file://`で直接開くとCORSでブロックされるため)
+   ```bash
+   py -m http.server 8080
+   ```
+3. ブラウザで `http://localhost:8080/` を開く
+
+マウスドラッグで視点回転、スクロールで周回移動、右ドラッグで前後移動ができます。
+
+---
+
+## つまずいたポイント
+
+このパイプラインを動かすまでに、実際に遭遇した問題と対処です。
+
+| 問題 | 原因 | 対処 |
+|---|---|---|
+| Windows版COLMAPが起動直後に無言で落ちる | Windowsの**スマートアプリコントロール**が未署名DLL(`gmp-10.dll`等)の読み込みをブロック | WSL2上でLinux版COLMAPを使う方針に変更 |
+| COLMAPのCUDAビルドでnvccが謎のエラー | RTX 50シリーズ(Blackwell)向けのnvccコンパイラバグ | `CMAKE_CUDA_ARCHITECTURES`をPTXのみ(`90-virtual`)にして回避(CMakeが自動で警告・対処) |
+| `patch_match_stereo`が「unsupported toolchain」で落ちる | CUDA Toolkitのバージョン(13.3)がGPUドライバの対応上限(13.2)より新しかった | ドライバに合わせてCUDA 13.2を追加インストールし、そちらでCUDA部分を再ビルド |
+| SIBR_viewersのビルドで`boost_system`が見つからない | Boost 1.90で`boost_system`が完全ヘッダオンリー化され、コンパイル済みライブラリが廃止 | cmakeの依存コンポーネントから`system`を除外 |
+| `embree3/rtcore.h`が無い | 新しいUbuntuにはembree4しか無く、SIBR側のコードはembree3 API前提 | ヘッダ・ライブラリにシンボリックリンクを張り、`RTCIntersectContext`など廃止されたAPIを新APIに移植 |
+| ビューアのウィンドウがWindowsデスクトップに出ない | GLFWがWSLgのネイティブWayland用ウィンドウを作成するが、WSLg側の転送機構がそれを認識しない | `glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11)`でX11強制まで試したが解決せず、最終的に**WebGLビューアに切り替え**て解決 |
+
+一番の教訓は、**GUIアプリの表示にこだわるより、ブラウザで完結するWebGLビューアに逃げた方が早い**ということでした。
+
+---
+
+## フォルダ構成
+
+```
+3DGS_ガイド/
+├── README.md              (このファイル)
+├── images/                (説明用の画像)
+└── scripts/
+    ├── 1_colmap_reconstruct.py   (動画→COLMAP)
+    ├── 2_ply_to_splat.py         (PLY→軽量.splat変換)
+    ├── 3_train_3dgs.py           (3DGS学習の実行)
+    ├── render_previews.py        (点群のオフスクリーンレンダリング)
+    ├── crop_preview.py           (レンダリング画像の自動クロップ)
+    └── make_pipeline_diagram.py  (全体図の生成)
+```
+
+## 参考リンク
+
+- COLMAP: https://colmap.github.io/
+- 3D Gaussian Splatting(公式実装): https://github.com/graphdeco-inria/gaussian-splatting
+- WebGLビューア: https://github.com/antimatter15/splat

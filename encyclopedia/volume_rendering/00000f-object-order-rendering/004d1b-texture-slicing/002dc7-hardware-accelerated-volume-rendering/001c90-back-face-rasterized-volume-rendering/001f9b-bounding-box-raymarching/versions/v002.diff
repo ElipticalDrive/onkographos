@@ -1,0 +1,185 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,4 @@
+ # Bounding Box Raymarching
+-Also called: WebGL2 Bounding Box Raymarching, Back-Face Rasterized Raycasting
++Also called: WebGL2 Bounding Box Raymarching
+ 
+ ## Overview
+@@ -7,6 +7,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset (stored as a 3D texture or 2D slice maps), a unit cube geometry representing the volume bounds, and camera parameters (view/projection matrices).
+-*   **Output:** A 2D color buffer containing the rendered volume image.
++*   **Input:** A 3D volume dataset (stored as a 3D texture or 2D slice maps), a unit cube geometry representing the volume bounds, and camera parameters (view/projection matrices) [S2, S3, unofficial].
++*   **Output:** A 2D color buffer containing the rendered volume image [S1, S3, unofficial].
+ 
+ **Data Structures:**
+@@ -20,5 +20,5 @@
+         *   Up: $(2,3,7), (7,6,2)$
+         *   Down: $(1,0,4), (4,5,1)$ [S2, unofficial].
+-2.  **Back-Face Texture (`fb_texture`):** A 2D texture (e.g., `GL_RGBA16F`) attached to a Framebuffer Object (FBO) [S1, S2, unofficial]. Stores the world-space coordinates of the back-face intersection points [S1, S3, unofficial].
++2.  **Back-Face Texture (`fb_texture`):** A 2D texture (e.g., `GL_RGBA16F`) attached to a Framebuffer Object (FBO) [S1, S2, unofficial]. Stores the object-space coordinates of the back-face intersection points [S3, unofficial].
+ 3.  **Volume Texture:** A 3D texture (e.g., `GL_INTENSITY`/`GL_LUMINANCE`, `GL_UNSIGNED_BYTE`) or a set of 2D slice textures [S1, S2, S3, unofficial].
+ 4.  **Transfer Function:** A 1D or 2D texture mapping scalar values to color and opacity [S2, S3, unofficial].
+@@ -27,48 +27,46 @@
+ *   `steps`: Number of samples per ray. Default: 256 [S1, unofficial].
+ *   `alphaCorrection` / `uOpacityVal`: Opacity factor per sample. Default: 0.08 [S1, unofficial].
+-*   `uColorVal`: Color multiplier.
++*   `uColorVal`: Color multiplier [S3, unofficial].
+ *   `g_stepSize`: Fixed step size alternative. Default: 0.001 [S2, unofficial].
+ *   `uMinGrayVal`, `uMaxGrayVal`: Scalar value range for transfer function normalization [S3, unofficial].
++*   `uAbsorptionModeIndex`: Rendering mode selector (0=Standard, 1=Absorption, 2=MIP) [S3, unofficial].
++
++**Formulas:**
++*   Ray direction: $\vec{dir} = \vec{backColor} - \vec{frontColor}$ [S3, unofficial].
++*   Step vector: $\vec{Step} = \vec{dir} / uSteps$ [S3, unofficial].
++*   Transfer function position: $tf\_pos.x = (gray\_val - uMinGrayVal) / (uMaxGrayVal - uMinGrayVal)$ [S3, unofficial].
++*   Sample opacity: $\alpha_{sample} = colorValue.a \times uOpacityVal$ [S3, unofficial].
++*   Sample color: $\vec{c}_{sample} = colorValue.rgb \times uColorVal$ [S3, unofficial].
++*   Accumulation: $\vec{accum} += \vec{sample}$ [S3, unofficial].
++*   Termination: Break if $\vec{accum}.a \ge 1.0$ [S3, unofficial].
+ 
+ **Numbered Steps:**
+-
+-1.  **Initialization:** Create an FBO with a color attachment (`fb_texture`) and a depth attachment. Load volume data and transfer function. Ensure `WEBGL_depth_texture` extension is supported if using depth textures for back coordinates [S1, unofficial].
+-2.  **Pass 1 (Back-Face Capture):**
+-    *   Bind the FBO.
+-    *   Enable front-face culling (`gl.CULL_FACE` with `gl.FRONT`) to render only the back faces of the unit cube [S1, S3, unofficial].
+-    *   Execute the **Back-Face Fragment Shader**. For each fragment, output the world-space position of the back face intersection.
+-    *   *Note:* In some implementations, this pass simply outputs the interpolated vertex colors (which are set to world coordinates) [S3, unofficial].
+-3.  **Pass 2 (Ray Marching):**
+-    *   Bind the default framebuffer (screen).
+-    *   Disable culling or enable back-face culling (depending on implementation; typically renders the full cube or just front face to trigger fragments for all pixels) [S1, S3, unofficial].
+-    *   Execute the **Front-Face Fragment Shader** (or a combined shader).
+-    *   For each pixel:
+-        a.  Read the back-face coordinate from `fb_texture` using the current screen coordinates [S1, S3, unofficial].
+-        b.  Obtain the front-face coordinate from the current fragment's world position (passed as a varying attribute) [S1, S3, unofficial].
+-        c.  Compute ray direction: $\vec{dir} = \vec{backColor} - \vec{frontColor}$ [S3, unofficial].
+-        d.  Compute step vector: $\vec{Step} = \vec{dir} / uSteps$ [S3, unofficial].
+-        e.  Initialize accumulation buffer $\vec{accum} = (0,0,0,0)$ and current position $\vec{vpos} = \vec{frontColor}$ [S3, unofficial].
+-        f.  Loop $i$ from $0$ to $uSteps - 1$:
+-            i.  Sample volume value $v$ at $\vec{vpos}$ [S1, S3, unofficial].
+-            ii. Map $v$ to transfer function to get color $\vec{c}$ and opacity $\alpha_{raw}$ [S3, unofficial].
+-            iii. Compute sample opacity: $\alpha_{sample} = \alpha_{raw} \times uOpacityVal$ [S3, unofficial].
+-            iv. Compute sample color: $\vec{c}_{sample} = \vec{c} \times uColorVal$ [S3, unofficial].
+-            v.  Accumulate using front-to-back compositing:
+-                $$ \vec{accum}.rgb += (1.0 - \vec{accum}.a) \times \vec{c}_{sample} \times \alpha_{sample} $$
+-                $$ \vec{accum}.a += \alpha_{sample} \times (1.0 - \vec{accum}.a) $$
+-                *(Note: [S3, unofficial] describes a simplified accumulation: $accum += sample$, where $sample.a = colorValue.a \times uOpacityVal$ and $sample.rgb = colorValue.rgb \times uColorVal$. This is an approximation. Standard alpha blending is preferred for correctness [G].)*
+-            vi. Break if $\vec{accum}.a \ge 1.0$ [S3, unofficial].
+-            vii. Advance position: $\vec{vpos} += \vec{Step}$ [S3, unofficial].
+-            viii. Check bounds: Break if $\vec{vpos}$ exceeds unit cube bounds ($x,y,z > 1.0$ or $< 0.0$) [S3, unofficial].
+-        g.  Output $\vec{accum}$ as the pixel color.
++1.  **Initialization:** Create an FBO with a color attachment (`fb_texture`) and a depth attachment (e.g., 512x512 `DEPTH_COMPONENT16` renderbuffer) [S1, S2, unofficial]. Load volume data and transfer function. Ensure `WEBGL_depth_texture` extension is supported if using depth textures for back coordinates [S1, unofficial]. If the voxel texture is not yet loaded, the render function returns early and retries via `requestAnimFrame` [S1, unofficial].
++2.  **Pass 1 (Back-Face Capture):** Bind the FBO [S1, S3, unofficial]. Enable front-face culling (`gl.CULL_FACE` with `gl.FRONT`) to render only the back faces of the unit cube [S1, S3, unofficial]. Execute the Back-Face Fragment Shader [S1, S3, unofficial]. For each fragment, output the object-space position of the back face intersection [S3, unofficial].
++3.  **Pass 2 (Ray Marching):** Bind the default framebuffer (screen) [S1, S3, unofficial]. Disable culling or enable back-face culling to trigger fragments for all pixels [S1, S3, unofficial]. Execute the Front-Face Fragment Shader [S1, S3, unofficial]. For each pixel:
++    a.  Read the back-face coordinate from `fb_texture` using the current screen coordinates [S1, S3, unofficial].
++    b.  Obtain the front-face coordinate from the current fragment's world position (passed as a varying attribute) [S1, S3, unofficial].
++    c.  Compute ray direction: $\vec{dir} = \vec{backColor} - \vec{frontColor}$ [S3, unofficial].
++    d.  Compute step vector: $\vec{Step} = \vec{dir} / uSteps$ [S3, unofficial].
++    e.  Initialize accumulation buffer $\vec{accum} = (0,0,0,0)$ and current position $\vec{vpos} = \vec{frontColor}$ [S3, unofficial].
++    f.  Loop $i$ from $0$ to $uSteps - 1$:
++        i.  Sample volume value $v$ at $\vec{vpos}$ [S1, S3, unofficial].
++        ii. If $v < uMinGrayVal$ or $v > uMaxGrayVal$, set sample color to zero and opacity to zero [S3, unofficial].
++        iii. Otherwise, compute normalized transfer function position $tf\_pos.x = (v - uMinGrayVal) / (uMaxGrayVal - uMinGrayVal)$ and sample color/opacity [S3, unofficial].
++        iv. Compute sample opacity: $\alpha_{sample} = colorValue.a \times uOpacityVal$ [S3, unofficial].
++        v.  Compute sample color: $\vec{c}_{sample} = colorValue.rgb \times uColorVal$ [S3, unofficial].
++        vi. Accumulate: $\vec{accum} += \vec{sample}$ [S3, unofficial].
++        vii. Break if $\vec{accum}.a \ge 1.0$ [S3, unofficial].
++        viii. Advance position: $\vec{vpos} += \vec{Step}$ [S3, unofficial].
++        ix.  Break if $\vec{vpos}$ exceeds unit cube bounds ($x,y,z > 1.0$ or $< 0.0$) [S3, unofficial].
++    g.  Output $\vec{accum}$ as the pixel color [S3, unofficial].
+ 
+ **Pseudocode (Pass 2 Fragment Shader Logic):**
+-
+ ```python
+-# Inputs:
+-# frontColor: vec4 (world space position of front face, passed as varying)
+-# uBackCoord: sampler2D (texture storing back face world positions)
++# Inputs (defined as shader uniforms/varyings):
++# frontColor: vec4 (world space position of front face, varying)
++# uBackCoord: sampler2D (texture storing back face object coordinates)
+ # uVolumeTex: sampler3D (volume data)
+-# uTransferFunc: sampler1D or sampler2D (transfer function)
++# uTransferFunc: sampler2D (transfer function mapping [0,1]x[0,1] to RGBA)
+ # uSteps: float (number of steps)
+ # uOpacityVal: float (opacity multiplier)
+@@ -88,44 +86,35 @@
+     
+     # 3. Initialize Accumulation
+-    accum_rgb = vec3(0.0)
+-    accum_a = 0.0
++    accum = vec4(0.0, 0.0, 0.0, 0.0)
+     
+     # 4. Marching Loop
+     for i in range(int(uSteps)):
+-        # Check bounds (optional if steps are calculated to fit, but good for safety)
++        # Check bounds
+         if not is_inside_cube(vpos):
+             break
+             
+         # Sample Volume
+-        # Note: getVolumeValue handles 3D texture sampling or 2D slice mapping
+-        gray_val = get_volume_value(vpos)
++        gray_val = texture(uVolumeTex, vpos).r
+         
+         # Handle out-of-bounds gray values
+         if gray_val < uMinGrayVal or gray_val > uMaxGrayVal:
+-            sample_color = vec3(0.0)
+-            sample_alpha = 0.0
++            sample = vec4(0.0, 0.0, 0.0, 0.0)
+         else:
+             # Normalize for Transfer Function
+             tf_x = (gray_val - uMinGrayVal) / (uMaxGrayVal - uMinGrayVal)
++            tf_pos = vec2(tf_x, 0.5)
+             
+             # Sample Transfer Function
+-            tf_result = texture(uTransferFunc, vec2(tf_x, 0.5)) # Assuming 2D TF or specific layout
+-            raw_color = tf_result.rgb
+-            raw_alpha = tf_result.a
++            colorValue = texture(uTransferFunc, tf_pos)
+             
+-            # Apply User Multipliers
+-            sample_alpha = raw_alpha * uOpacityVal
+-            sample_color = raw_color * uColorVal
++            # Apply User Multipliers (Standard Mode per [S3, unofficial])
++            sample.a = colorValue.a * uOpacityVal
++            sample.rgb = colorValue.rgb * uColorVal
+             
+-        # Front-to-Back Compositing
+-        # Contribution of current sample
+-        contribution_rgb = sample_color * sample_alpha * (1.0 - accum_a)
+-        contribution_a = sample_alpha * (1.0 - accum_a)
+-        
+-        accum_rgb += contribution_rgb
+-        accum_a += contribution_a
++        # Accumulate
++        accum += sample
+         
+         # Early exit if fully opaque
+-        if accum_a >= 1.0:
++        if accum.a >= 1.0:
+             break
+             
+@@ -133,12 +122,8 @@
+         vpos += step
+         
+-    return vec4(accum_rgb, 1.0) # Or accum_a depending on requirements
++    return accum
+ 
+ def is_inside_cube(pos):
+     return all(pos >= 0.0) and all(pos <= 1.0)
+-
+-def get_volume_value(pos):
+-    # Standard 3D texture sampling
+-    return texture(uVolumeTex, pos).r
+ ```
+ 
+@@ -157,6 +142,4 @@
+ *   **Strengths:** Simple implementation; handles zooming and rotation correctly via standard projection matrices; no need for explicit ray-cube intersection math [S1, S2, unofficial].
+ *   **Limitations:** Fixed step count may lead to aliasing or slow performance; requires full cube rasterization; precision issues with `RGBA16F` back-face texture if not careful [S1, S2, S3, unofficial].
+-*   **When to use:** Real-time volume rendering in WebGL/OpenGL for moderate resolution volumes.
+-*   **When not to use:** High-precision medical imaging requiring adaptive step sizes or complex clipping volumes.
+ 
+ ## Background

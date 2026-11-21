@@ -1,0 +1,191 @@
+--- v002.md
++++ v003.md
+@@ -4,56 +4,72 @@
+ 
+ ## Overview
+-This method loads LLFF-style datasets, corrects coordinate system conventions, rescales poses and bounds, and generates a spiral camera path for novel view synthesis [S1, unofficial]. It differs from sibling preprocessing methods by specifically handling the axis-flip correction required for LLFF data and constructing the parametric spiral trajectory used for testing [S1, unofficial].
++This method prepares LLFF-style datasets for NeRF training by loading poses and images, applying geometric normalization, and generating a spiral render path for novel view synthesis. It differs from standard loading by explicitly handling the minification step via external tools and enforcing a specific train/test split protocol (every 8th image for testing) [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Raw poses (N x 4 x 4 or N x 3 x 4), bounds (bds), images, and dataset directory.
+-- Parameters: `recenter` (bool), `bd_factor` (float, default 0.75), `spherify` (bool), `N_views` (int), `path_zflat` (bool), `zdelta` (float), `zrate` (float, default 0.5).
++- Raw poses and bounds (`bds`) from `poses_bounds.npy`.
++- Images directory.
++- Parameters: `recenter` (bool, default True), `bd_factor` (float, default 0.75), `spherify` (bool), `N_views` (int, default 64), `path_zflat` (bool, default False), `zdelta` (float, default 0.0), `zrate` (float, default 0.5).
+ 
+ **Outputs:**
+-- Rescaled poses (N_train x 4 x 4), render poses (N_test x 4 x 4), intrinsic matrix K, and image lists.
++- `images`: Tensor of shape `[N, H, W, 3]`.
++- `poses`: Tensor of shape `[N, 3, 4]` (camera-to-world).
++- `hwf`: `[H, W, focal]`.
++- `render_poses`: Tensor of shape `[N_views, 3, 4]` for spiral path.
++- `bds`: Near/far bounds.
+ 
+ **Data Structures:**
+-- `poses`: Tensor of shape $(N, 4, 4)$, column-major 4x4 transformation matrices.
+-- `bds`: Array of shape $(N, 2)$, containing min and max depth bounds for each pose.
+-- `hwf`: Tuple $(H, W, focal)$.
++- `poses`: $N \times 3 \times 4$ matrix. Rows are camera positions and rotation vectors.
++- `bds`: $N \times 2$ matrix. Columns are `[min_depth, max_depth]` for each pose.
+ 
+ **Steps:**
+-1. **Load and Downsample:** Load raw poses, bounds, and images. Downsample images by a specified factor if provided [S1, unofficial].
+-2. **Axis Correction:** Correct the rotation matrix ordering to match standard conventions. Concatenate `poses[:, 1:2, :]`, `-poses[:, 0:1, :]`, and `poses[:, 2:, :]`, then move the last axis to the first position [S1, unofficial].
+-3. **Rescaling:** Calculate scale factor $sc = 1 / (\min(\text{bds}) \times \text{bd\_factor})$ if `bd_factor` is not None. Rescale poses and bounds by $sc$ [S1, unofficial].
+-4. **Recentering:** If `recenter` is True, apply `recenter_poses(poses)` to center the camera positions around the origin [S1, unofficial].
+-5. **Spherification:** If `spherify` is True, apply `spherify_poses(poses, bds, N_views)` and update $sc$ accordingly [S1, unofficial].
+-6. **Average Pose and Up Vector:** If not spherifying, compute the average pose $c2w = \text{poses\_avg}(poses)$. Compute the up vector: $\text{up} = \text{normalize}(\sum_{i} \text{poses}_i[:, :3, 1])$ [S1, unofficial].
+-7. **Focus Depth Calculation:**
+-   - $\text{close\_depth} = \min(\text{bds}) \times 0.9$
+-   - $\text{inf\_depth} = \max(\text{bds}) \times 5.0$
+-   - $\text{mean\_dz} = \frac{1}{\frac{1-0.75}{\text{close\_depth}} + \frac{0.75}{\text{inf\_depth}}}$
+-   - $\text{focal} = \text{mean\_dz}$ [S1, unofficial].
+-8. **Path Parameters:**
++1. **Load Data:** Load raw poses, bounds, and images. Downsample images by a specified factor if required [S1, unofficial].
++2. **Axis Correction:** Correct rotation matrix ordering. Concatenate `poses[:, 1:2, :]`, `-poses[:, 0:1, :]`, and `poses[:, 2:, :]`. Move axis -1 to 0 [S1, unofficial].
++3. **Rescale:** Calculate scale factor `sc = 1 / (bds.min() * bd_factor)` if `bd_factor` is not None. Rescale `poses` and `bds` by `sc` [S1, unofficial].
++4. **Recenter:** If `recenter` is True, call `recenter_poses(poses)` to center the camera trajectories [S1, unofficial].
++5. **Spherify (Optional):** If `spherify` is True, call `spherify_poses(poses, bds, N_views)` and update `sc` [S1, unofficial].
++6. **Average Pose:** If not spherify, compute average pose `c2w = poses_avg(poses)` [S1, unofficial].
++7. **Up Vector:** Compute `up = normalize(sum(poses[:, :3, 1], axis=0))` [S1, unofficial].
++8. **Focus Depth:**
++   - `close_depth = bds.min() * 0.9`
++   - `inf_depth = bds.max() * 5.0`
++   - `mean_dz = 1 / ((1 - 0.75) / close_depth + 0.75 / inf_depth)`
++   - `focal = mean_dz` [S1, unofficial].
++9. **Path Configuration:**
+    - If `path_zflat` is True:
+-     - $\text{zloc} = -\text{close\_depth} \times 0.1$
+-     - Adjust $c2w\_path[:3, 3] \leftarrow c2w\_path[:3, 3] + \text{zloc} \times c2w\_path[:3, 2]$
+-     - Set $\text{rads}[2] = 0$
+-     - $N\_rots = 1$
+-     - $N\_views \leftarrow N\_views / 2$
+-   - Else: $N\_rots = 2$ [S1, unofficial].
+-9. **Spiral Generation:** Generate render poses using `render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=0.5, rots=N_rots, N=N_views)` [S1, unofficial].
+-10. **Splitting:** Split images into train and test sets based on `train.txt` and `test.txt` files in the base directory [S1, unofficial].
++     - `zloc = -close_depth * 0.1`
++     - Adjust `c2w_path[:3, 3] += zloc * c2w_path[:3, 2]`
++     - Set `rads[2] = 0`
++     - `N_rots = 1`
++     - `N_views /= 2`
++   - Else: `N_rots = 2` [S1, unofficial].
++10. **Generate Spiral:** Call `render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=0.5, rots=N_rots, N=N_views)` to generate `render_poses` [S1, unofficial].
++11. **Split:** Split images into train and test sets based on `train.txt` and `test.txt` files in `basedir` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def load_llff_data(basedir, factor=8, recenter=True, bd_factor=0.75, spherify=False, path_zflat=False, N_views=120):
++import numpy as np
++import torch
++
++def load_llff_data(basedir, factor=8, recenter=True, bd_factor=0.75, spherify=False, path_zflat=False):
+     # 1. Load raw data
+-    poses, bds, imgs = load_raw_llff(basedir)
++    poses_arr = load_poses(basedir)
++    bds = load_bounds(basedir)
++    images = load_images(basedir)
++    
++    # Downsample
++    if factor != 1:
++        H, W = images.shape[1:3]
++        images = resize_images(images, H // factor, W // factor)
++        factor = factor
+     
+     # 2. Axis Correction
+-    # Concatenate col1, -col0, col2; move axis -1 to 0
+-    poses_corrected = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], axis=1)
+-    poses_corrected = np.moveaxis(poses_corrected, -1, 0)
+-    poses = poses_corrected
++    # Concatenate poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]
++    poses = np.concatenate([poses_arr[:, 1:2, :], -poses_arr[:, 0:1, :], poses_arr[:, 2:, :]], axis=1)
++    # Move axis -1 to 0
++    poses = np.moveaxis(poses, -1, 0).reshape([-1, 3, 4])
+     
+     # 3. Rescale
+-    sc = 1.0 / (np.min(bds) * bd_factor) if bd_factor is not None else 1.0
++    sc = 1.0 / (bds.min() * bd_factor) if bd_factor is not None else 1.0
+     poses[:, :3, 3] *= sc
+     bds *= sc
+@@ -65,36 +81,44 @@
+     # 5. Spherify
+     if spherify:
+-        poses, bds, sc = spherify_poses(poses, bds, N_views)
++        poses, bds, sc = spherify_poses(poses, bds)
+         
+-    # 6. Average Pose and Up
++    # 6. Average Pose
+     c2w = poses_avg(poses)
++    
++    # 7. Up Vector
+     up = normalize(np.sum(poses[:, :3, 1], axis=0))
+     
+-    # 7. Focus Depth
+-    close_depth = np.min(bds) * 0.9
+-    inf_depth = np.max(bds) * 5.0
++    # 8. Focus Depth
++    close_depth = bds.min() * 0.9
++    inf_depth = bds.max() * 5.0
+     mean_dz = 1.0 / (((1 - 0.75) / close_depth) + (0.75 / inf_depth))
+     focal = mean_dz
+     
+-    # 8. Path Params
++    # 9. Path Configuration
++    hwf = [poses[0, :3, -1]] # H, W, focal
++    H, W, focal = hwf
++    H, W = int(H), int(W)
++    
++    rads = np.abs(poses[:, :3, 3]).max() / 2.0
++    N_views = 64
++    
+     if path_zflat:
+         zloc = -close_depth * 0.1
+         c2w_path = c2w.copy()
+         c2w_path[:3, 3] += zloc * c2w_path[:3, 2]
+-        rads = np.array([1.0, 1.0, 0.0]) # Assuming rads[2]=0
++        rads[2] = 0
+         N_rots = 1
+         N_views = N_views // 2
+     else:
+         c2w_path = c2w.copy()
+-        rads = np.array([1.0, 1.0, 1.0]) # Placeholder for radius
+         N_rots = 2
+         
+-    # 9. Generate Spiral
++    # 10. Generate Spiral
+     render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta=0.0, zrate=0.5, rots=N_rots, N=N_views)
+     
+-    # 10. Split
+-    i_train, i_test = split_train_test(basedir)
++    # 11. Split
++    i_train, i_test = load_split(basedir)
+     
+-    return poses, render_poses, i_train, i_test, focal
++    return images, poses, render_poses, hwf, bds, i_train, i_test
+ ```
+ 
+@@ -102,15 +126,18 @@
+ 
+ ### [LLFF Data Loading and Minification](11293-llff-data-loading-and-minification.md)
+-Loads LLFF dataset poses and images, optionally downscales images to a specified factor or resolution using ImageMagick.
++This method prepares LLFF-style datasets for NeRF training by loading poses and images, applying geometric normalization, and downsampling image resolution to reduce computational cost. It differs from standard loading by explicitly handling the minification step via external tools and enforcing a specific train/test split protocol (every 8th image for testing).
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of images for loading and splitting. Spiral generation is $O(N_{views})$.
+-- **Memory Complexity:** Linear with respect to image resolution and number of poses.
+-- **Strengths:** Handles the specific axis conventions of LLFF data; provides a standardized novel view path.
+-- **Limitations:** Relies on heuristic depth bounds for focal length calculation; spiral path may not fit all scene geometries.
++- **Time Complexity:** Linear with respect to the number of images for loading and resizing. Spiral path generation is constant time relative to scene size but depends on `N_views`.
++- **Memory Complexity:** Proportional to the number of images and their resolution.
++- **Strengths:** Handles real-world LLFF data conventions automatically. Generates smooth novel view paths.
++- **Limitations:** Assumes LLFF-style data structure. `bd_factor` tuning may be needed for scenes with large depth variations.
++- **When to use:** When training NeRF on LLFF dataset.
++- **When not to use:** For non-LLFF datasets or when precise control over camera path is required beyond spiral.
+ 
+ ## Background
+-Originated in the NeRF paper and implemented in various unofficial repositories such as NerfingMVS [S1, unofficial]. It is used to prepare real-world LLFF scenes for differentiable volume rendering optimization.
++Originated from the NeRF paper and subsequent implementations for LLFF dataset. The method is widely used in differentiable volume rendering pipelines for real-world scenes.
+ 
+ ## Sources
+-[S1] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)+[S1] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)
++[S2] https://github.com/bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-27 (unofficial)

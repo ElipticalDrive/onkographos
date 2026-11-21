@@ -1,0 +1,4764 @@
+# Voxel Cone Traced Global Illumination
+This is my attempt (which is still in development) of implementing Real-Time global illumination using voxel cone tracing.
+
+This work also serves to show me how to correctly write abstraction over vulkan. More on that later.
+
+## About the method
+Idea introduced in 2011 by [Cyrill Crassin et al.](https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf) uses voxels to approximate global illumination, bringing the technique into the realm of real-time rendering.
+
+First, one should voxelize the scene. There are two main ways: sparse voxel octrees, plain old 3D texture. I chose the latter for simplicity, ease of implementing and ability to support moving position of the camera because of no high cost of octree reconstruction. Here is how the scene would look like:
+Normal Scene | Voxelized Scene
+:--:|:--:
+![](readme_images/direct_light.png) | ![](readme_images/voxelized_direct_light.png)
+
+*Source: [https://jose-villegas.github.io/post/deferred_voxel_shading/](https://jose-villegas.github.io/post/deferred_voxel_shading/)*
+
+In this step I gather information like: surface color, surface normal, surface emission etc.
+Here it is also important to mention the **Conservative Rasterization**, which in vulkan is very easy to toggle, but in OpenGL needs manual intervention.
+Conservative rasterization ensures there are no holes in the voxelized mesh. Holes can appear when rasterized triangle doesn't cover the center of a pixel, which makes it to be discarded and so will not get recorded into the voxel texture. Triangles are projected in the geometry shader based on the greatest compomnent of the normal vector (you may want to recalculate it when using projection matrix). So, for example, if the Z component is the greates, we project the triangle on the XY plane because on this one it has the biggest area covered and consequently will produce the highest amount of rasterized fragments.
+
+Now, when saving the values into the 3D texture, you have to be aware that shaders are running concurrently in warps, which means parts of your texture will be accessed and written-to from multiple threads in unsynchronized manner.
+To alleviate this, as far as I know, you have to options:
+use CAS-loop with moving averade, and convert your RGBA8 into R32UI beforhand, as explained in [OpenGL Insights, Chapter22, Page 344](https://xeolabs.com/pdfs/OpenGLInsights.pdf), or, if you're on NVidia, enable the `NV_shader_atomic_float`, which introduces functions `imageAtomicAdd` that work on floats.
+
+The next step is to combine gathered data into single 3D texture, that will essentialy store view-independent radiance of the scene. Here we will take scene's lights into account, as well as voxelized colors, normals and emissision. It is also possible to calculate shadows and bake them into the resulting texture.
+
+The last step is to create mip maps of this texture with our scene's radiance using trilinear interpolation. Here it also good place to consider creating anisotropic mip maps, which help reduce light bleeding. The implementation is described in [GigaVoxels: A Voxel-Based Rendering Pipeline For Efficient Exploration Of Large And Detailed Scenes](https://www.researchgate.net/publication/268023043_GigaVoxels_A_Voxel-Based_Rendering_Pipeline_For_Efficient_Exploration_Of_Large_And_Detailed_Scenes), and the result they give can be seen in the picture below:
+Isotropic voxels | Anisotropic voxels
+:--:|:--:
+![](readme_images/isotropic_voxels.png) | ![](readme_images/anisotropic_voxels.png)
+
+*Source: [GigaVoxels: A Voxel-Based Rendering Pipeline For Efficient Exploration Of Large And Detailed Scenes](https://www.researchgate.net/publication/268023043_GigaVoxels_A_Voxel-Based_Rendering_Pipeline_For_Efficient_Exploration_Of_Large_And_Detailed_Scenes)*
+
+## Lighting
+After creating mip maps, we are ready to draw our scene.
+From each fragment we shoot a few cones around the hemisphere oriented along the surface's normal vector as pictured:
+![](readme_images/cones.png)
+
+You then average the result, just like in Monte Carlo solution, and each partial result can be weighted with cosine similarity weighting using the deviation from the surface's normal vector.
+
+*Source: [Cyrill Crassin et al.](https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf)*
+
+Usually, there are 3 types of cones with varying aperture: diffuse cones, specular cones, ambient occlusion cones. Diffuse cones approximate the general "ambient" radiance and will much have bigger aperture than specular cones, which operate in the lower mip maps with smaller aperture.
+
+The aperture of the cone determines the speed with which the diameter will increase as the distance from the surface grows. The diameter is the primary selector of the appropriate mipmap, which can be seen below:
+![](readme_images/cone_sampling.png)
+*Source: [Cyrill Crassin et al.](https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf)*
+
+Traversing the voxel structure uses the classical front-to-back accumulation given as: 
+
+ `color = opacity*color + (1 - opacity) * read_opacity * read_color`
+
+ and
+
+ `opacity = opacity + (1 - opacity) * read_opacity`.
+
+# My results
+Here are my current results:
+![](readme_images/result.png)
+
+The image above was rendered in 1024x768 resolution, the scene contains ~70000 triangles. Each fragment averages the result of 16 diffuse cones, 1 specular cone and produces soft shadows in creases and around occluders.
+The averaged frame times, gathered from 800 frames, in milliseconds, measerued with timestamp hardware queries, are as follows:
+Voxelization | Radiance volume | Isotropic mipmaps | Lighting
+:--:|:--:|:--:|:--:|
+0.97ms|4.96ms|0.09ms|5.1ms
+
+Do keep in mind, that for static scenes, voxelization, radiance volume computation and isotropic mipmaps need not recalculating, and as such, only the lighting pass should happen. The times given above, especially in the lighting pass, will change, for the better I hope, as I optimize the code and tune the parameters.
+
+The demo can be downloaded in the Releases section.
+
+# To-do
+- [ ] Anisotropic voxels
+- [ ] Swapchain resizing
+- [x] Render graph for layout transitions and cache invalidations and flushes
+- [ ] Deletion queue
+- [ ] Proper materials
+- [ ] Scene graph
+- [ ] More lights
+- [ ] Clipmaps for bigger scenes
+- [ ] Textures
+
+# Summary
+The technique feels very natural and easy to work with. In fact, it was actually used in a video game "The Tomorrow Children". I still have a lot of work to do, especially with Vulkan, but the project at this stage already showed, where the proper API abstractions are needed, and now I know specifically, what job they need to do, which a lack thereof is a bane of many aspiring engine designers.
+
+# How to compile the project
+- Clone the repo
+- Download git submodules with `git submodule update --init --jobs 12 --depth 1`
+- Configure the project with CMake
+- Compile the project
+
+Last two steps can be simplified by opening the project folder with VSCode with CMakeTools extension
+
+# Used libraries
+- [fastgltf](https://github.com/spnda/fastgltf)
+- [glfw](https://github.com/glfw/glfw#head1234)
+- [glm](https://github.com/g-truc/glm)
+- [dear imgui](https://github.com/ocornut/imgui)
+- [stb_image stb_include](https://github.com/nothings/stb)
+- [spdlog](https://github.com/gabime/spdlog)
+- [vk-bootstrap](https://github.com/charles-lunarg/vk-bootstrap)
+- [VulkanMemoryAllocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator)
+
+### source/allocator.cpp
+```
+#include "allocator.hpp"
+#include "renderer.hpp"
+#include <spdlog/spdlog.h>
+
+Handle<TextureAllocation> RendererAllocator::create_texture_storage(std::string_view label, const vk::ImageCreateInfo& info, std::span<const std::byte> optional_data) {
+    auto* texture = create_texture_ptr(label, info);
+    if(!texture) { return {}; }
+
+    if(optional_data.size_bytes() == 0ull) { return *texture; }
+
+    jobs.emplace_back(*texture, optional_data);
+    return *texture;
+}
+
+Handle<BufferAllocation> RendererAllocator::create_buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, u64 size_bytes) {
+    if(size_bytes == 0ull) { 
+        spdlog::warn("Requested buffer ({}) size is 0. This is probably a bug.", label);
+        return {};
+    }
+
+    auto* buffer = create_buffer_ptr(label, usage, map_memory, size_bytes);
+    if(!buffer) { return {}; }
+    return *buffer;
+}
+
+Handle<BufferAllocation> RendererAllocator::create_buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, std::span<const std::byte> optional_data) {
+    if(optional_data.size_bytes() == 0) { 
+        spdlog::warn("Requested buffer ({}) size is 0. This is probably a bug.", label);
+        return {};
+    }
+    
+    auto* buffer = create_buffer_ptr(label, usage, map_memory, optional_data.size_bytes());
+    if(!buffer) { return {}; }
+
+    if(optional_data.size_bytes() == 0ull) { return *buffer; }
+
+    if(map_memory && buffer->data) {
+        memcpy(buffer->data, optional_data.data(), optional_data.size_bytes());
+    } else {
+        jobs.emplace_back(*buffer, optional_data);
+    }
+
+    return *buffer;
+}
+
+void RendererAllocator::complete_jobs(vk::CommandBuffer cmd) {
+    const auto total_upload_size = [&jobs = this->jobs] {
+        u64 sum = 0;
+        for(const auto& e : jobs) {
+            sum += e.data.size();
+        }
+        return sum;
+    }();
+
+    std::vector<std::byte> upload_data;
+    upload_data.reserve(total_upload_size);
+
+    for(auto& e : jobs) {
+        upload_data.insert(upload_data.end(), e.data.begin(), e.data.end());
+    }
+
+    auto staging_buffer = Buffer{"allocator_staging_buffer", vk::BufferUsageFlagBits::eTransferSrc, true, std::span{upload_data}};
+
+    u64 offset = 0ull;
+    for(auto& job : jobs) {
+        if(auto* handle = std::get_if<Handle<TextureAllocation>>(&job.storage)) {
+            auto& texture = get_texture(*handle);
+
+            vk::ImageMemoryBarrier2 barrier{
+                vk::PipelineStageFlagBits2::eTopOfPipe, vk::AccessFlagBits2::eNone,
+                vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+                {}, {}, texture.image, {deduce_vk_image_aspect(texture.format), 0, 1, 0, texture.layers}
+            };
+
+            cmd.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, barrier});
+
+            const auto copy_region = vk::BufferImageCopy2{offset, texture.width, texture.height, 
+                vk::ImageSubresourceLayers{deduce_vk_image_aspect(texture.format), 0, 0, texture.layers},
+                vk::Offset3D{0, 0, 0},
+                vk::Extent3D{texture.width, texture.height, texture.depth}
+            };
+
+            cmd.copyBufferToImage2(vk::CopyBufferToImageInfo2{
+                staging_buffer.buffer, texture.image, vk::ImageLayout::eTransferDstOptimal, copy_region
+            });
+
+            if(texture.mips > 1) {
+                barrier = {
+                    vk::PipelineStageFlagBits2::eTopOfPipe, vk::AccessFlagBits2::eNone,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                    vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+                    {}, {}, texture.image, {deduce_vk_image_aspect(texture.format), 1, texture.mips - 1, 0, texture.layers}
+                };
+
+                cmd.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, barrier});
+
+                for(u32 mip = 1; mip < texture.mips; ++mip) {
+                    const auto pw = std::max(texture.width >> (mip - 1), 1u);
+                    const auto cw = std::max(texture.width >> (mip - 0), 1u);
+                    const auto ph = std::max(texture.height >> (mip - 1), 1u);
+                    const auto ch = std::max(texture.height >> (mip - 0), 1u);
+                    const auto pd = std::max(texture.depth >> (mip - 1), 1u);
+                    const auto cd = std::max(texture.depth >> (mip - 0), 1u);
+                    
+                    barrier = {
+                        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead,
+                        vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eTransferSrcOptimal,
+                        {}, {}, texture.image, {deduce_vk_image_aspect(texture.format), mip-1, 1, 0, texture.layers}
+                    };
+
+                    cmd.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, barrier});
+
+                    const auto blit = vk::ImageBlit2{
+                        vk::ImageSubresourceLayers{deduce_vk_image_aspect(texture.format), mip-1, 0, texture.layers},
+                        {
+                            vk::Offset3D{0, 0, 0},
+                            vk::Offset3D{(i32)pw, (i32)ph, (i32)pd},
+                        },
+                        vk::ImageSubresourceLayers{deduce_vk_image_aspect(texture.format), mip, 0, texture.layers},
+                        {
+                            vk::Offset3D{0, 0, 0},
+                            vk::Offset3D{(i32)cw, (i32)ch, (i32)cd},
+                        },
+                    };
+
+                    cmd.blitImage2(vk::BlitImageInfo2{
+                        texture.image, vk::ImageLayout::eTransferSrcOptimal,
+                        texture.image, vk::ImageLayout::eTransferDstOptimal,
+                        blit,
+                        vk::Filter::eLinear
+                    });
+
+                    barrier = {
+                        vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead,
+                        vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderSampledRead,
+                        vk::ImageLayout::eTransferSrcOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+                        {}, {}, texture.image, {deduce_vk_image_aspect(texture.format), mip-1, 1, 0, texture.layers}
+                    };
+
+                    cmd.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, barrier});
+
+                    if(mip == texture.mips - 1) {
+                        barrier = {
+                            vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                            vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderSampledRead,
+                            vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+                            {}, {}, texture.image, {deduce_vk_image_aspect(texture.format), mip, 1, 0, texture.layers}
+                        };
+
+                        cmd.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, barrier});
+                    }
+                }
+            } else {
+                barrier = {
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                    vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead,
+                    vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    {}, {}, texture.image, {deduce_vk_image_aspect(texture.format), 0, 1, 0, 1}
+                };
+
+                cmd.pipelineBarrier2(vk::DependencyInfo{{}, {}, {}, barrier});
+            }
+
+            texture.current_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
+        } else if(auto* handle = std::get_if<Handle<BufferAllocation>>(&job.storage)) {
+            const auto copy_region = vk::BufferCopy2{offset, 0, job.data.size()};
+            cmd.copyBuffer2(vk::CopyBufferInfo2{
+                staging_buffer.buffer,
+                get_buffer(*handle).buffer,
+                copy_region
+            });
+        } else { std::terminate(); }
+
+        offset += job.data.size();
+    }
+
+    get_context().renderer->deletion_queue.push_back([this, vma = this->vma, buffer = staging_buffer.allocation.handle] {
+        auto it = std::lower_bound(buffers.begin(), buffers.end(), buffer);
+        if(it == buffers.end()) { return; }
+        vmaDestroyBuffer(vma, it->buffer, it->alloc);
+        buffers.erase(it);
+    });
+    jobs.clear();
+}
+
+BufferAllocation* RendererAllocator::create_buffer_ptr(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, u64 size_bytes) {
+    if(!map_memory) {
+        usage |= vk::BufferUsageFlagBits::eTransferDst;
+    }
+
+    vk::BufferCreateInfo buffer_info{
+        {},
+        (VkDeviceSize)size_bytes,
+        usage
+    };
+
+    VmaAllocationCreateInfo alloc_info = {};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    if(map_memory) { alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT; }    
+
+    VkBuffer buffer;
+    VmaAllocation alloc;
+    VmaAllocationInfo alloc_i;
+    if(VK_SUCCESS != vmaCreateBuffer(vma, (VkBufferCreateInfo*)&buffer_info, &alloc_info, &buffer, &alloc, &alloc_i)) {
+        return nullptr;
+    }
+
+    auto& b = buffers.emplace_back(
+        buffer,
+        usage,
+        alloc_i.pMappedData,
+        size_bytes,
+        alloc
+    );
+
+    set_debug_name(b.buffer, label);
+
+    return &b;
+}
+
+TextureAllocation* RendererAllocator::create_texture_ptr(std::string_view label, const vk::ImageCreateInfo& info) {
+    VmaAllocationCreateInfo alloc_info = {};
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+    
+    VkImage image;
+    VmaAllocation alloc;
+    VmaAllocationInfo alloc_i;
+    if(VK_SUCCESS != vmaCreateImage(vma, (VkImageCreateInfo*)&info, &alloc_info, &image, &alloc, &alloc_i)) {
+        return nullptr;
+    }
+
+    auto& texture = textures.emplace_back(
+        info.imageType,
+        info.extent.width,
+        info.extent.height,
+        info.extent.depth,
+        info.mipLevels,
+        info.arrayLayers,
+        info.format,
+        vk::ImageLayout::eUndefined,
+        image,
+        alloc,
+        get_context().renderer->device.createImageView(vk::ImageViewCreateInfo{
+            {}, 
+            image,
+            to_vk_view_type(info.imageType),
+            info.format,
+            {},
+            vk::ImageSubresourceRange{deduce_vk_image_aspect(info.format), 0, info.mipLevels, 0, info.arrayLayers}
+        })
+    );
+
+    set_debug_name(texture.image, label);
+    set_debug_name(texture.default_view, std::format("{}_default_view", label));
+
+    return &texture;
+}
+```
+
+### source/allocator.hpp
+```
+#pragma once
+
+#include "renderer_types.hpp"
+#include <vulkan/vulkan_structs.hpp>
+#include <vk_mem_alloc.h>
+#include <variant>
+#include <span>
+#include <string_view>
+#include <vector>
+
+class RendererAllocator {
+    struct UploadJob {
+        UploadJob(std::variant<Handle<TextureAllocation>, Handle<BufferAllocation>> storage, std::span<const std::byte> data): storage(storage) {
+            this->data.resize(data.size_bytes());
+            std::memcpy(this->data.data(), data.data(), data.size_bytes());
+        }
+        std::variant<Handle<TextureAllocation>, Handle<BufferAllocation>> storage;
+        std::vector<std::byte> data;
+    };
+    
+public:
+    explicit RendererAllocator(vk::Device device, VmaAllocator vma): device(device), vma(vma) {}
+
+    Handle<TextureAllocation> create_texture_storage(std::string_view label, const vk::ImageCreateInfo& info, std::span<const std::byte> optional_data = {});
+    Handle<BufferAllocation> create_buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, u64 size_bytes);
+    Handle<BufferAllocation> create_buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, std::span<const std::byte> optional_data = {});
+
+    void destroy_buffer(Handle<BufferAllocation> handle) {
+        if(!handle) { return; }
+        auto* ptr = find_with_handle(handle, buffers);
+        if(!ptr) { return; }
+        vmaDestroyBuffer(vma, ptr->buffer, ptr->alloc);
+    }
+
+    TextureAllocation& get_texture(Handle<TextureAllocation> handle) { return *find_with_handle(handle, textures); }
+    BufferAllocation& get_buffer(Handle<BufferAllocation> handle) { return *find_with_handle(handle, buffers); }
+    const BufferAllocation& get_buffer(Handle<BufferAllocation> handle) const { return *find_with_handle(handle, buffers); }
+
+    bool has_jobs() const { return !jobs.empty(); }
+    void complete_jobs(vk::CommandBuffer cmd);
+
+private:
+    template<typename T> T* find_with_handle(Handle<T> handle, std::vector<T>& storage) {
+        auto it = std::lower_bound(storage.begin(), storage.end(), handle);
+        if(it == storage.end() || *it != handle) { return nullptr; }
+        return &*it;
+    }
+    template<typename T> const T* find_with_handle(Handle<T> handle, const std::vector<T>& storage) const {
+        auto it = std::lower_bound(storage.begin(), storage.end(), handle);
+        if(it == storage.end() || *it != handle) { return nullptr; }
+        return &*it;
+    }
+    BufferAllocation* create_buffer_ptr(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, u64 size_bytes);
+    TextureAllocation* create_texture_ptr(std::string_view label, const vk::ImageCreateInfo& info);
+
+    vk::Device device;
+    VmaAllocator vma;
+    std::vector<TextureAllocation> textures;
+    std::vector<BufferAllocation> buffers;
+    std::vector<UploadJob> jobs;
+};
+```
+
+### source/build_stb.cpp
+```
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_INCLUDE_IMPLEMENTATION
+#define STB_INCLUDE_LINE_GLSL
+#include "../third_party/stb/stb_image.h"
+#include "../third_party/stb/stb_include.h"
+```
+
+### source/build_vma.cpp
+```
+#define VMA_IMPLEMENTATION
+#define VMA_STATIC_VULKAN_FUNCTIONS 0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+
+#include <vk_mem_alloc.h>
+```
+
+### source/context.cpp
+```
+#include "context.hpp"
+
+static Context ctx{};
+
+Context& get_context() {
+    return ctx;
+}
+```
+
+### source/context.hpp
+```
+#pragma once
+
+class Scene;
+class Camera;
+class Renderer;
+struct Input;
+
+struct Context {
+    Scene* scene;
+    Camera* camera;
+    Renderer* renderer;
+    Input* input;
+};
+
+Context& get_context();
+```
+
+### source/descriptor.cpp
+```
+#include "descriptor.hpp"
+#include "renderer.hpp"
+#include "pipelines.hpp"
+#include <vulkan/vulkan.hpp>
+
+void DescriptorSet::update(u32 binding, u32 array_element, const std::vector<DescriptorUpdate>& updates) {
+    std::vector<vk::WriteDescriptorSet> write_sets;
+    std::vector<vk::DescriptorBufferInfo> buffer_infos;
+    std::vector<vk::DescriptorImageInfo> image_infos;
+
+    write_sets.reserve(updates.size());
+    buffer_infos.reserve(updates.size());
+    image_infos.reserve(updates.size());
+
+    const auto* alloc = allocator->find_allocation(allocation);
+    if(!alloc) { 
+        spdlog::error("Cannot find allocation in descriptorallocator that was supposed to be valid. This is serious error");
+        return;
+    }
+
+    const auto& layout = allocator->layouts.at(alloc->layout_idx);
+    if(layout.count == 0u) { 
+        spdlog::warn("Trying to update bindings in a layout that has 0 bindings.");
+        return;
+    }
+
+    for(const auto& e : updates) {
+        const auto& b = layout.bindings.at(binding);
+        const auto is_last = layout.count == binding + 1u;
+        const auto count = is_last && layout.variable_sized ? alloc->variable_size : b.count;
+
+        vk::WriteDescriptorSet ws{
+            set, binding, array_element, 1, b.type
+        };
+
+        if(auto* img = std::get_if<0>(&e.data)) {
+            const auto& [view, layout, sampler] = *img;
+            image_infos.push_back(vk::DescriptorImageInfo{sampler, view, layout});
+            ws.setImageInfo(image_infos.back());
+        } else if(auto* buff = std::get_if<1>(&e.data)) {
+            buffer_infos.push_back(vk::DescriptorBufferInfo{
+                (*buff)->buffer, 0, vk::WholeSize
+            });
+
+            ws.setBufferInfo(buffer_infos.back());
+        } else { spdlog::error("Unhandled descriptor udpate type: {}", (u32)e.data.index()); return; }
+
+        write_sets.push_back(ws);
+
+        if(count <= array_element + 1u) {
+            binding++;
+            array_element = 0;
+        } else if(count > array_element + 1u) {
+            array_element++;
+        }
+    }
+
+    allocator->device.updateDescriptorSets(write_sets, {});
+}
+
+DescriptorSet DescriptorAllocator::allocate(std::string_view label, const DescriptorLayout& layout, u32 max_sets, u32 variable_size) {
+    Pools* pools{nullptr};
+    u32 idx = 0;
+    std::tie(pools, idx) = find_matching_pools(layout);
+    DescriptorPool* pool = nullptr;
+
+    if(!pools) {
+        layouts.push_back(layout);
+        build_layout(std::format("{}_layout", label), device, layouts.back());
+        idx = this->pools.size();
+        pools = &this->pools.emplace_back();
+        pool = create_pool(layout, max_sets, *pools);
+        set_debug_name(pool->pool, std::format("{}_pool_{}", label, pools->pools.size()));
+    } else { pool = &pools->pools.back(); }
+
+    if(!pool) { 
+        spdlog::error("Corrupted descriptor pools vector");
+        std::terminate();
+    }
+
+    int tries = 0;
+    do {
+        ++tries;
+        try {
+            vk::DescriptorSetVariableDescriptorCountAllocateInfo variable_info;
+            if(layout.variable_sized) {
+                variable_info.setDescriptorCounts(variable_size);
+            }
+
+            auto set = device.allocateDescriptorSets(vk::DescriptorSetAllocateInfo{
+                pool->pool,
+                layouts.at(idx).layout,
+                &variable_info
+            })[0];
+
+            set_debug_name(set, label);
+            
+            pool->allocations++;
+
+            const auto layout_idx = [&pools, this] {
+                for(u32 i = 0; i < this->pools.size(); ++i) { if(&this->pools.at(i) == pools) { return i; } }
+                return 0u;
+            }();
+            const auto& allocation = allocations.emplace_back(layout_idx, pool->pool, variable_size);
+
+            return DescriptorSet{this, set, allocation};
+        } catch(const std::exception& err) {
+            spdlog::error("Could not allocate descriptor set: {}. Retrying...", err.what());
+            pool = create_pool(layout, max_sets, *pools);
+        }
+    } while(tries < 2);
+
+    spdlog::error("Retrying failed. Returning invalid descriptor set");
+    return DescriptorSet{};
+}
+
+DescriptorAllocation* DescriptorAllocator::find_allocation(Handle<DescriptorAllocation> allocation) {
+    auto it = std::find(begin(allocations), end(allocations), allocation);
+    if(it == end(allocations)) { return nullptr; }
+    return &*it;
+}
+
+std::pair<DescriptorAllocator::Pools*, u32> DescriptorAllocator::find_matching_pools(const DescriptorLayout& layout) {
+    assert("Layouts and pools must be same in length" && layouts.size() == pools.size());
+
+    for(u32 i = 0; i < layouts.size(); ++i) {
+        const auto& l = layouts.at(i);
+        auto& ps = pools.at(i);
+
+        if(l.count != layout.count) { continue; }
+        if(l.variable_sized != layout.variable_sized) { continue; }
+
+        bool invalid_bindings = false;
+        for(u32 j = 0; j < l.count; ++j) {
+            if(l.bindings.at(j).type != layout.bindings.at(j).type) { invalid_bindings = true; break; }
+            if(l.bindings.at(j).count != layout.bindings.at(j).count) { invalid_bindings = true; break; }
+        }
+
+        if(invalid_bindings) { continue; }
+
+        return {&ps, i};
+    }
+
+    return {nullptr, 0u};
+}
+
+DescriptorPool* DescriptorAllocator::create_pool(const DescriptorLayout& layout, u32 max_sets, DescriptorAllocator::Pools& pools) {
+    std::unordered_map<vk::DescriptorType, u32> counts;
+    for(u32 i = 0; i < layout.count; ++i) {
+        counts[layout.bindings[i].type]++;
+    }
+
+    std::vector<vk::DescriptorPoolSize> sizes;
+    sizes.reserve(counts.size());
+
+    for(const auto& [type, count] : counts) {
+        sizes.push_back(vk::DescriptorPoolSize{type, count * max_sets});
+    }
+    
+    try {
+        auto pool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{
+            vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet | vk::DescriptorPoolCreateFlagBits::eUpdateAfterBind,
+            max_sets,
+            (u32)sizes.size(),
+            sizes.data()
+        });
+
+        return &pools.pools.emplace_back(
+            pool,
+            max_sets,
+            0
+        );
+    } catch(const std::exception& err) {
+        spdlog::error("Could not create descriptor pool: {}", err.what());
+        return nullptr;
+    }
+}
+```
+
+### source/descriptor.hpp
+```
+#pragma once
+
+#include "types.hpp"
+#include "pipelines.hpp"
+#include <vulkan/vulkan_structs.hpp>
+#include <vector>
+#include <variant>
+
+struct DescriptorUpdate {
+    std::variant<
+        std::tuple<vk::ImageView, vk::ImageLayout, vk::Sampler>,
+        const Buffer* // buffer, offset = 0, size = read
+    > data;
+};
+
+struct DescriptorPool {
+    vk::DescriptorPool pool; 
+    u32 max_allocations;
+    u32 allocations;
+};
+
+struct DescriptorAllocation : public Handle<DescriptorAllocation> {
+    constexpr DescriptorAllocation(u32 layout_idx, vk::DescriptorPool pool, u32 variable_size): Handle(HandleGenerate), layout_idx(layout_idx), pool(pool), variable_size(variable_size) {}
+    u32 layout_idx;
+    vk::DescriptorPool pool;
+    u32 variable_size;
+};
+
+class DescriptorAllocator;
+
+class DescriptorSet {
+public:
+    constexpr DescriptorSet() noexcept = default;
+    constexpr DescriptorSet(DescriptorAllocator* allocator, vk::DescriptorSet set, Handle<DescriptorAllocation> allocation): allocator(allocator), set(set), allocation(allocation) {}
+
+    void update(u32 binding, u32 array_element, const std::vector<DescriptorUpdate>& updates);
+
+    vk::DescriptorSet set;
+
+private:
+    DescriptorAllocator* allocator;
+    Handle<DescriptorAllocation> allocation; 
+};
+
+class DescriptorAllocator {
+public: 
+    DescriptorAllocator() noexcept = default;
+    DescriptorAllocator(vk::Device device) noexcept: device(device) {};
+
+    DescriptorSet allocate(std::string_view label, const DescriptorLayout& layout, u32 max_sets = 8, u32 variable_size = 0);
+    DescriptorAllocation* find_allocation(Handle<DescriptorAllocation> allocation);
+
+private:
+    struct Pools {
+        std::vector<DescriptorPool> pools;
+    };
+
+    std::pair<DescriptorAllocator::Pools*, u32> find_matching_pools(const DescriptorLayout& layout);
+    DescriptorPool* create_pool(const DescriptorLayout& layout, u32 max_sets, Pools& pools);
+
+    vk::Device device;
+    std::vector<DescriptorLayout> layouts;
+    std::vector<Pools> pools;
+    std::vector<DescriptorAllocation> allocations;
+
+    friend class DescriptorSet;
+};
+```
+
+### source/input.cpp
+```
+#include "input.hpp"
+#include "renderer.hpp"
+#include "context.hpp"
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <GLFW/glfw3.h>
+
+void Input::glfw_key_callback(int key, int action) {
+    if(action == GLFW_PRESS && key_action[key] == GLFW_RELEASE) {
+        pressed_keys.insert(key);
+    }
+
+    key_action[key] = action;
+}
+
+bool Input::key_down(int key) const { 
+    if(!key_action.contains(key)) { return false; }
+    return key_action.at(key) & (GLFW_PRESS | GLFW_REPEAT);
+}
+
+int Input::get_key_state(int key) const {
+    if(!key_action.contains(key)) { return 0; }
+    return key_action.at(key);
+}
+
+bool Input::key_just_pressed(int key) const {
+    return pressed_keys.contains(key);
+}
+
+void Input::update() {
+    pressed_keys.clear();
+}
+
+void Input::set_cursor(int mode) {
+    glfwSetInputMode(get_context().renderer->window, GLFW_CURSOR, mode);
+}
+
+void Input::set_cursor_pos(f64 x, f64 y) {
+    glfwSetCursorPos(get_context().renderer->window, x, y);
+}
+
+glm::mat4 Camera::update() {
+    if(get_context().input->key_just_pressed(GLFW_KEY_TAB)) {
+        unlocked = 1.0f - unlocked;
+        if(unlocked > 0.0f) {
+            get_context().input->set_cursor(GLFW_CURSOR_DISABLED);
+        } else {
+            get_context().input->set_cursor(GLFW_CURSOR_NORMAL);
+            get_context().input->set_cursor_pos(get_context().renderer->window_width*0.5f, get_context().renderer->window_height*0.5f);
+        }
+    }
+    
+    double x, y;
+    u32 ww = get_context().renderer->window_width;
+    u32 wh = get_context().renderer->window_height;
+    glfwGetCursorPos(get_context().renderer->window, &x, &y);
+    x = ((f32)x/ww) * 2.0 - 1.0;
+    y = ((f32)y/wh) * 2.0 - 1.0;
+    f32 dx = unlocked * (-(x - px) / 1.0);
+    f32 dy = unlocked * (-(y - py) / 1.0);
+    px = x;
+    py = y;
+    
+    yaw += dx * 80.0f;
+    pitch = glm::clamp(pitch+dy * 80.0f, -89.0f, 89.0f);
+    
+    auto orientation = glm::angleAxis(glm::radians(yaw), glm::vec3{0,1,0});
+    orientation *= glm::angleAxis(glm::radians(pitch), glm::vec3{1,0,0});
+    
+    auto forward = glm::normalize(orientation * glm::vec3{0.f, 0.f, -1.f});
+    auto right   = glm::normalize(glm::cross(forward, {0,1,0}));
+
+    if(get_context().input->key_down(GLFW_KEY_W)) { speed.z += 2.0f * acceleration; }
+    if(get_context().input->key_down(GLFW_KEY_S)) { speed.z += 2.0f * -acceleration; }
+    if(get_context().input->key_down(GLFW_KEY_A)) { speed.x += 2.0f * -acceleration; }
+    if(get_context().input->key_down(GLFW_KEY_D)) { speed.x += 2.0f * acceleration; }
+    if(get_context().input->key_down(GLFW_KEY_SPACE)) { speed.y += 2.0f * acceleration; }
+    if(get_context().input->key_down(GLFW_KEY_LEFT_SHIFT)) { speed.y += 2.0f * -acceleration; }
+
+    auto i = glm::vec3{glm::lessThan(glm::floor(glm::abs(speed) / glm::vec3{acceleration}), glm::vec3{1.0f})};
+    speed -= glm::mix(glm::vec3{acceleration}, glm::abs(speed), i) * glm::sign(speed);
+    speed = glm::min(speed, max_speed);
+
+    pos += right   * speed.x * glm::vec3{1, 0, 1};
+    pos += forward * speed.z * glm::vec3{1, 0, 1};
+    pos.y += speed.y;
+    // spdlog::info("CAMREA PS {} {} {}", pos.x, pos.y, pos.z);
+
+    view = glm::lookAt(pos, pos + forward, {0,1,0});
+    return view;
+}
+```
+
+### source/input.hpp
+```
+#pragma once
+
+#include "types.hpp"
+#include <unordered_set>
+#include <unordered_map>
+#include <glm/glm.hpp>
+
+struct Input {
+    void glfw_key_callback(int key, int action);
+    bool key_down(int key) const;
+    int get_key_state(int key) const;
+    bool key_just_pressed(int key) const;
+    void update();
+    void set_cursor(int mode);
+    void set_cursor_pos(f64 x, f64 y);
+
+    std::unordered_map<int, int> key_action;
+    std::unordered_set<int> pressed_keys;
+};
+
+struct Camera {
+    glm::mat4 update();
+
+    glm::mat4 view;
+    f32 unlocked = 0.0f;
+    f32 px{0.0f}, py{0.0f};
+    f32 yaw{}, pitch{};
+    glm::vec3 pos{-0.09, 0.27, 0.04};
+    glm::vec3 speed{0.0f};
+    static inline float acceleration = 0.0002f;
+    static inline float max_speed = 0.01f;
+};
+```
+
+### source/main.cpp
+```
+#include "types.hpp"
+#include "input.hpp"
+#include "context.hpp"
+#include "renderer.hpp"
+#include <vulkan/vulkan.hpp>
+#include <shaderc/shaderc.hpp>
+#include <VkBootstrap.h>
+#include <GLFW/glfw3.h>
+#include <spdlog/spdlog.h>
+#include <vk_mem_alloc.h>
+#include <stb/stb_include.h>
+#include <glm/glm.hpp>
+#include <tracy/Tracy.hpp>
+
+int main() {
+    auto& ctx = get_context();
+    ctx.scene = new Scene{};
+    ctx.camera = new Camera{};
+    ctx.input = new Input{};
+    ctx.renderer = new Renderer{};
+
+    auto &r = *ctx.renderer;
+
+    spdlog::set_level(spdlog::level::debug);
+
+    if(!r.initialize()) {
+        return -1;
+    }
+
+    // const auto gi_box = ctx.scene->load_model("../../data/models/gi_box.gltf");    
+    const auto sponza = ctx.scene->load_model("../../data/models/sponza/Sponza.gltf");    
+    // ctx.scene->add_model("gibox", gi_box);
+    ctx.scene->add_model("sponza", sponza);
+
+
+    glfwSetKeyCallback(r.window, [](GLFWwindow* window, int key, int scancode, int action, int mods) {
+        get_context().input->glfw_key_callback(key, action);
+    });
+
+    while(!glfwWindowShouldClose(r.window)) {
+        glfwPollEvents();
+        ctx.camera->update();
+
+        r.render();
+
+        get_context().input->update();
+    }
+}
+```
+
+### source/pipelines.cpp
+```
+#include "pipelines.hpp"
+#include "renderer.hpp"
+#include <spdlog/spdlog.h>
+#include <shaderc/shaderc.hpp>
+#include <spirv_cross/spirv_cross.hpp>
+#include <stb/stb_include.h>
+
+static char* read_shader_file(const std::filesystem::path& path);
+static vk::ShaderStageFlagBits deduce_shader_type(const std::filesystem::path& path);
+static shaderc_shader_kind to_shaderc_type(vk::ShaderStageFlagBits stage);
+static std::vector<u32> compile_glsl_to_spv(const std::filesystem::path& path);
+static ShaderResources get_shader_resources(const std::vector<u32>& ir, vk::ShaderStageFlagBits type);
+
+Shader::Shader(vk::Device device, const std::filesystem::path& path) {
+    const auto code = compile_glsl_to_spv(path);
+
+    module = device.createShaderModule(vk::ShaderModuleCreateInfo{
+        {}, code.size() * sizeof(code[0]), code.data()
+    });
+
+    set_debug_name(module, path.string());
+
+    resources = get_shader_resources(code, deduce_shader_type(path));
+}
+
+void build_layout(std::string_view label, vk::Device device, DescriptorLayout& layout) {
+    static constexpr vk::ShaderStageFlags ALL_STAGE_FLAGS = 
+        vk::ShaderStageFlagBits::eFragment | 
+        vk::ShaderStageFlagBits::eVertex |
+        vk::ShaderStageFlagBits::eCompute | 
+        vk::ShaderStageFlagBits::eGeometry;
+
+    std::array<vk::DescriptorSetLayoutBinding, DescriptorLayout::MAX_BINDINGS> bindings{};
+    std::array<vk::DescriptorBindingFlags, DescriptorLayout::MAX_BINDINGS> flags{};
+
+    for(u32 b = 0; b < layout.count; ++b) {
+        bindings.at(b) = {b, layout.bindings.at(b).type, layout.bindings.at(b).count, ALL_STAGE_FLAGS};
+        flags.at(b) = vk::DescriptorBindingFlagBits::eUpdateAfterBind | vk::DescriptorBindingFlagBits::ePartiallyBound;
+        if(layout.variable_sized && b + 1u == layout.count) { flags.at(b) |= vk::DescriptorBindingFlagBits::eVariableDescriptorCount; }
+    }
+
+    vk::DescriptorSetLayoutBindingFlagsCreateInfo flag_info{layout.count, flags.data()};
+
+    layout.layout = device.createDescriptorSetLayout(vk::DescriptorSetLayoutCreateInfo{
+        vk::DescriptorSetLayoutCreateFlagBits::eUpdateAfterBindPool,
+        layout.count,
+        bindings.data(),
+        &flag_info
+    });
+
+    if(!label.empty()) { set_debug_name(layout.layout, label); }
+}
+
+void build_layout(std::string_view label, vk::Device device, PipelineLayout& layout) {
+    std::array<vk::DescriptorSetLayout, PipelineLayout::MAX_SETS> sets{};
+    for(u32 set = 0; set < layout.sets.size(); ++set) {
+        build_layout(std::format("{}_set_{}", label, set), device, layout.sets.at(set));
+        sets.at(set) = layout.sets.at(set).layout;
+    }
+    
+    layout.layout = device.createPipelineLayout(vk::PipelineLayoutCreateInfo{
+        {},
+        sets.size(),
+        sets.data(),
+        layout.range.size > 0u ? 1u : 0u,
+        &layout.range
+    });
+
+    if(!label.empty()) { set_debug_name(layout.layout, label); }
+}
+
+Pipeline PipelineBuilder::build_graphics(std::string_view label) {
+    std::vector<vk::PipelineShaderStageCreateInfo> stages;
+    std::vector<Shader> compiled_shaders;
+    for(const auto& sh_path : shaders) { 
+        auto& shader = compiled_shaders.emplace_back(renderer->device, sh_path);
+        stages.push_back(vk::PipelineShaderStageCreateInfo{{}, deduce_shader_type(sh_path), shader.module, "main"}); 
+    }
+
+    vk::PipelineVertexInputStateCreateInfo   VertexInputState_   = {
+        {}, bindings, attributes
+    };
+
+    vk::PipelineInputAssemblyStateCreateInfo InputAssemblyState_ = {
+        {}, vk::PrimitiveTopology::eTriangleList
+    };
+
+    vk::PipelineTessellationStateCreateInfo  TessellationState_  = {};
+
+    vk::PipelineViewportStateCreateInfo      ViewportState_      = {};
+
+    vk::PipelineRasterizationStateCreateInfo RasterizationState_ = {
+        {}, 
+        false,
+        false,
+        vk::PolygonMode::eFill,
+        cull_mode,
+        front_face,
+        false,
+        0.0f,
+        false,
+        0.0f,
+        1.0f
+    };
+
+    vk::PipelineMultisampleStateCreateInfo   MultisampleState_   = {};
+
+    vk::PipelineDepthStencilStateCreateInfo  DepthStencilState_  = {
+        {},
+        depth_test,
+        depth_write,
+        depth_compare,
+        false, 
+        false,
+        {},
+        {},
+        0.0f,
+        1.0f,
+    };
+
+    vk::PipelineColorBlendAttachmentState    ColorBlendAtt1_     = {
+        false,
+        vk::BlendFactor::eOne,
+        vk::BlendFactor::eZero,
+        vk::BlendOp::eAdd,
+        vk::BlendFactor::eOne,
+        vk::BlendFactor::eZero,
+        vk::BlendOp::eAdd,
+        vk::ColorComponentFlagBits::eR | 
+        vk::ColorComponentFlagBits::eG | 
+        vk::ColorComponentFlagBits::eB | 
+        vk::ColorComponentFlagBits::eA
+    };
+
+    vk::PipelineColorBlendStateCreateInfo    ColorBlendState_    = {
+        {},
+        false,
+        vk::LogicOp::eClear,
+        ColorBlendAtt1_
+    };
+
+    vk::DynamicState                         DynamicStates[] = {
+        vk::DynamicState::eScissorWithCount,
+        vk::DynamicState::eViewportWithCount
+    };
+
+    vk::PipelineDynamicStateCreateInfo       DynamicState_       = {
+        {}, DynamicStates            
+    };
+
+    PipelineLayout layout = coalesce_shader_resources_into_layout(compiled_shaders);
+    build_layout(std::format("{}_layout", label), renderer->device, layout);
+
+    vk::PipelineRenderingCreateInfo dynamic_rendering = {
+        {}, color_attachment_formats, depth_attachment_format
+    };
+
+    vk::PipelineRasterizationConservativeStateCreateInfoEXT conservative_rasterization = {
+        {}, vk::ConservativeRasterizationModeEXT::eOverestimate
+    };
+    RasterizationState_.pNext = &conservative_rasterization;
+
+    vk::GraphicsPipelineCreateInfo info{
+        {},
+        stages,
+        &VertexInputState_,
+        &InputAssemblyState_,
+        &TessellationState_,
+        &ViewportState_,
+        &RasterizationState_,
+        &MultisampleState_,
+        &DepthStencilState_,
+        &ColorBlendState_,
+        &DynamicState_,
+        layout.layout,
+        {},
+        {},
+        {},
+        {},
+        &dynamic_rendering
+    };
+
+    auto pipeline = renderer->device.createGraphicsPipelines({}, info).value[0];
+    set_debug_name(pipeline, label);
+
+    return Pipeline{
+        .type = vk::PipelineBindPoint::eGraphics,
+        .pipeline = pipeline,
+        .layout = layout,
+    };
+} 
+
+Pipeline PipelineBuilder::build_compute(std::string_view label) {
+    Shader compute_shader{renderer->device, shaders.at(0)};
+
+    PipelineLayout layout = coalesce_shader_resources_into_layout({compute_shader});
+    build_layout(std::format("{}_layout", label), renderer->device, layout);
+
+    const auto type = deduce_shader_type(shaders.at(0));
+    assert("Shader type must be compute" && type == vk::ShaderStageFlagBits::eCompute);
+
+    vk::ComputePipelineCreateInfo info{
+        {},
+        vk::PipelineShaderStageCreateInfo{
+            {}, type, compute_shader.module, "main"
+        },
+        layout.layout
+    };
+
+    auto pipeline = renderer->device.createComputePipeline({}, info).value;
+    set_debug_name(pipeline, label);
+
+    return Pipeline{
+        .type = vk::PipelineBindPoint::eCompute,
+        .pipeline = pipeline,
+        .layout = layout,
+    };
+}
+
+PipelineLayout PipelineBuilder::coalesce_shader_resources_into_layout(const std::vector<Shader>& shaders) {
+    PipelineLayout pipeline_layout{};
+
+    // Merge shaders's descriptor layouts
+    for(const auto& s : shaders) {
+        u32 variable_binding_counter = 0;
+        for(u32 set = 0; set<s.resources.bindings.size(); ++set) {
+            const auto& rs = s.resources.bindings.at(set);
+            auto& layout = pipeline_layout.sets.at(set);
+            layout.names.resize(rs.size());
+
+            for(u32 binding = 0; binding < rs.size(); ++binding) {
+                const auto& r = rs.at(binding);
+                layout.bindings.at(binding) = r.binding;
+                layout.names.at(binding) = r.name;
+
+                if(binding == rs.size() - 1u && r.binding.count == 0) {
+                    layout.variable_sized = true;
+                    layout.bindings.at(binding).count = variable_limits.at(variable_binding_counter);
+                    variable_binding_counter++;
+                }
+            } 
+
+            layout.count = std::max(layout.count, (u32)rs.size());
+        }
+
+        pipeline_layout.range.stageFlags |= s.resources.range.stageFlags;
+        pipeline_layout.range.offset = std::max(pipeline_layout.range.offset, s.resources.range.offset);
+        pipeline_layout.range.size = std::max(pipeline_layout.range.size, s.resources.range.size);
+    }
+
+    return pipeline_layout;
+}
+
+static char* read_shader_file(const std::filesystem::path& path) {
+    static std::filesystem::path shader_path = "data/shaders";
+    char error[256] = {};
+    auto full_path = shader_path / path;
+    auto path_str = full_path.string();
+    auto parent_path_str = shader_path.string();
+    auto file = stb_include_file((char*) path_str.c_str(), 0, (char*)parent_path_str.c_str(), error);
+    
+    if(error[0] != 0) {
+        spdlog::error("stb_include: Error {}", error);
+    }
+
+    return file;
+}
+
+static vk::ShaderStageFlagBits deduce_shader_type(const std::filesystem::path& path) {
+    const auto ext = path.extension();
+    if(ext.string() == ".vert") { return vk::ShaderStageFlagBits::eVertex; }
+    if(ext.string() == ".geom") { return vk::ShaderStageFlagBits::eGeometry; }
+    if(ext.string() == ".frag") { return vk::ShaderStageFlagBits::eFragment; }
+    if(ext.string() == ".comp") { return vk::ShaderStageFlagBits::eCompute; }
+    spdlog::error("Unrecognized shader extension: {}", ext.string());
+    std::abort();
+    return vk::ShaderStageFlagBits::eAll;
+}
+
+static shaderc_shader_kind to_shaderc_type(vk::ShaderStageFlagBits stage) {
+    switch (stage) {
+        case vk::ShaderStageFlagBits::eVertex: { return shaderc_vertex_shader; }
+        case vk::ShaderStageFlagBits::eGeometry: { return shaderc_geometry_shader; }
+        case vk::ShaderStageFlagBits::eFragment: { return shaderc_fragment_shader; }
+        case vk::ShaderStageFlagBits::eCompute: { return shaderc_compute_shader; }
+        default: { assert(std::format("Unrecognized shader type: {}", vk::to_string(stage)).c_str() && false); return {}; }
+    }
+}
+
+static std::vector<u32> compile_glsl_to_spv(const std::filesystem::path& path) {
+    auto file = read_shader_file(path);
+    shaderc::Compiler compiler;
+    auto result = compiler.CompileGlslToSpv(file, to_shaderc_type(deduce_shader_type(path)), path.filename().string().c_str());
+    if(result.GetCompilationStatus() != shaderc_compilation_status_success) {
+        spdlog::error("Shader {} compilation error: {}", path.filename().string(), result.GetErrorMessage().c_str());
+        return {};
+    }
+    free(file);
+
+    return std::vector<u32>{result.begin(), result.end()};
+}
+
+static ShaderResources get_shader_resources(const std::vector<u32>& ir, vk::ShaderStageFlagBits type) {
+    spirv_cross::Compiler compiler{ir}; 
+    const auto& resources = compiler.get_shader_resources();
+
+    const spirv_cross::SmallVector<spirv_cross::Resource>* resources_list[] {
+        &resources.separate_images,
+        &resources.storage_images,
+        &resources.separate_samplers,
+        &resources.uniform_buffers,
+        &resources.storage_buffers,
+        &resources.sampled_images,
+    };
+
+    vk::DescriptorType resource_types[] {
+        vk::DescriptorType::eSampledImage,
+        vk::DescriptorType::eStorageImage,
+        vk::DescriptorType::eSampler,
+        vk::DescriptorType::eUniformBuffer,
+        vk::DescriptorType::eStorageBuffer,
+        vk::DescriptorType::eCombinedImageSampler,
+    };
+
+    ShaderResources shader_resources;
+
+    if(!resources.push_constant_buffers.empty()) {
+        shader_resources.range = vk::PushConstantRange{type, 0, 0};
+        for(const auto range : compiler.get_active_buffer_ranges(resources.push_constant_buffers.front().id)) {
+            shader_resources.range.size += range.range;
+        }
+    }
+
+    for(u32 i=0; i<sizeof(resources_list)/sizeof(resources_list[0]); ++i) {
+        auto* rs = resources_list[i];
+        auto rt = resource_types[i];
+
+        for(const auto& r : *rs) {
+            const auto& type = compiler.get_type(r.base_type_id);
+            const auto set = compiler.get_decoration(r.id, spv::Decoration::DecorationDescriptorSet);
+            const auto binding = compiler.get_decoration(r.id, spv::Decoration::DecorationBinding);
+            const auto is_struct = type.basetype == spirv_cross::SPIRType::Struct;
+            const auto is_runtime_sized = [is_struct, &r, &compiler, &type, rt] {
+                if(is_struct && type.member_types.empty()) { return false; }
+                if(rt == vk::DescriptorType::eStorageBuffer) { return false; }
+
+                const auto& last_type = is_struct ? compiler.get_type(type.member_types.back()) : compiler.get_type(r.type_id);
+                
+                if(last_type.array.empty()) { return false; }
+                if(last_type.array.size() > 1u) { return false; }
+                if(last_type.array_size_literal[0] == false) {
+                    spdlog::error("SPIRV_CROSS array size literal at index 0 is false.");
+                    std::terminate();
+                }
+                return last_type.array[0] == 0u;
+            }();
+            
+            const auto count = [&r, &compiler] {
+                const auto type = compiler.get_type(r.type_id);
+                u32 count = 1;
+                for(const auto& e : type.array) { count *= e; } // if runtime-sized, count will be zero
+                return count;
+            }();
+
+            shader_resources.bindings.at(set).push_back({
+                .name = r.name,
+                .index = binding,
+                .binding = {
+                    .count = count,
+                    .type = rt
+                }
+            });
+        }
+    }
+
+    for(auto& e : shader_resources.bindings) {
+        std::sort(begin(e), end(e), [](auto&& a, auto&& b) { return a.index < b.index; });
+    }
+
+    return shader_resources;
+}
+```
+
+### source/pipelines.hpp
+```
+#pragma once
+
+#include "renderer_types.hpp"
+#include <vector>
+#include <string_view>
+#include <filesystem>
+
+class Renderer;
+
+struct DescriptorBinding {
+    u32 count;
+    vk::DescriptorType type;
+};
+
+struct DescriptorLayout {
+    static inline constexpr u32 MAX_BINDINGS = 32;
+
+    vk::DescriptorSetLayout layout;
+    std::array<DescriptorBinding, MAX_BINDINGS> bindings;
+    std::vector<std::string> names;
+    u32 count : 31{};
+    u32 variable_sized : 1{};
+};
+
+struct PipelineLayout {
+    inline static constexpr u32 MAX_SETS = 4u;
+
+    DescriptorBinding* find_binding(std::string_view name) {
+        for(auto& e : sets) { 
+            u32 i = 0;
+            for(u32 i=0; i<e.names.size(); ++i) { 
+                if(e.names.at(i) == name) { return &e.bindings.at(i); }
+            }
+        }
+        return nullptr;
+    }
+
+    vk::PipelineLayout layout;
+    std::array<DescriptorLayout, MAX_SETS> sets{};
+    vk::PushConstantRange range{};
+};
+
+struct ShaderResources {
+    struct NamedBinding {
+        std::string name;
+        u32 index;
+        DescriptorBinding binding;
+    };
+
+    std::array<std::vector<NamedBinding>, PipelineLayout::MAX_SETS> bindings{};
+    vk::PushConstantRange range;
+};
+
+struct Shader {
+    Shader(vk::Device device, const std::filesystem::path& path);
+    
+    vk::ShaderModule module;
+    ShaderResources resources;
+};
+
+struct Pipeline {
+    vk::PipelineBindPoint type;
+    vk::Pipeline pipeline;
+    PipelineLayout layout;
+};
+
+void build_layout(std::string_view label, vk::Device device, DescriptorLayout& layout);
+void build_layout(std::string_view label, vk::Device device, PipelineLayout& layout);
+
+class PipelineBuilder {
+public:
+    PipelineBuilder(const Renderer* renderer): renderer(renderer) {}
+
+    PipelineBuilder& with_shaders(const std::vector<std::filesystem::path>& shaders) {
+        this->shaders = shaders;        
+        return *this;
+    }
+
+    PipelineBuilder &with_vertex_input(const std::vector<vk::VertexInputBindingDescription> &bindings,
+                                       const std::vector<vk::VertexInputAttributeDescription> &attributes) {
+        this->bindings = bindings;
+        this->attributes = attributes;
+        return *this;
+    }
+
+    PipelineBuilder& with_culling(vk::CullModeFlagBits culling, vk::FrontFace front_face) {
+        cull_mode = culling;
+        this->front_face = front_face;
+        return *this;
+    } 
+
+    PipelineBuilder& with_depth_testing(bool depth_test, bool depth_write, vk::CompareOp depth_compare) {
+        this->depth_test = depth_test;
+        this->depth_write = depth_write;
+        this->depth_compare = depth_compare;
+        return *this;
+    }
+
+    PipelineBuilder& with_color_attachments(const std::vector<vk::Format>& formats) {
+        color_attachment_formats = formats;
+        return *this;
+    }
+
+    PipelineBuilder& with_depth_attachment(vk::Format format) {
+        depth_attachment_format = format;
+        return *this;
+    }
+
+    PipelineBuilder& with_variable_upper_limits(std::array<u32, PipelineLayout::MAX_SETS> limits) {
+        variable_limits = limits;
+        return *this;
+    }
+
+    Pipeline build_graphics(std::string_view label);
+    Pipeline build_compute(std::string_view label);
+
+private:
+    PipelineLayout coalesce_shader_resources_into_layout(const std::vector<Shader>& shaders);
+
+    const Renderer* renderer;
+    std::vector<std::filesystem::path> shaders;
+    std::vector<vk::VertexInputBindingDescription> bindings;
+    std::vector<vk::VertexInputAttributeDescription> attributes;
+    std::array<u32, PipelineLayout::MAX_SETS> variable_limits;
+    vk::CullModeFlagBits cull_mode{vk::CullModeFlagBits::eBack};
+    vk::FrontFace front_face{vk::FrontFace::eCounterClockwise};
+    bool depth_test{true};
+    bool depth_write{true};
+    vk::CompareOp depth_compare{vk::CompareOp::eLess};
+    std::vector<vk::Format> color_attachment_formats;
+    vk::Format depth_attachment_format{vk::Format::eUndefined};
+};
+```
+
+### source/render_graph.cpp
+```
+#include "render_graph.hpp"
+#include "renderer_types.hpp"
+#include "pipelines.hpp"
+#include "descriptor.hpp"
+#include "context.hpp"
+#include "renderer.hpp"
+#include <spdlog/spdlog.h>
+#include <vulkan/vulkan_structs.hpp>
+#include <vulkan/vulkan_to_string.hpp>
+
+// #define RG_DEBUG_PRINT
+
+static constexpr vk::PipelineStageFlags2 to_vk_pipeline_stage(RGSyncStage stage);
+static constexpr vk::ImageAspectFlags to_vk_aspect(RGImageAspect aspect);
+static constexpr vk::ImageSubresourceRange to_vk_subresource_range(TextureRange range, RGImageAspect aspect);
+static constexpr vk::ImageLayout to_vk_layout(RGImageLayout layout);
+static constexpr vk::AttachmentLoadOp to_vk_load_op(RGAttachmentLoadStoreOp op);
+static constexpr vk::AttachmentStoreOp to_vk_store_op(RGAttachmentLoadStoreOp op);
+static constexpr vk::ImageViewType vk_img_type_to_vk_img_view_type(vk::ImageType type);
+static constexpr vk::Format to_vk_format(RGImageFormat format);
+static constexpr RGImageAspect deduce_img_aspect(RGResourceUsage usage);
+
+bool TextureRange::intersects(TextureRange r) const {
+    return (
+        base_layer < r.base_layer + r.layers &&
+        base_layer + layers > r.base_layer &&
+        base_mip < r.base_mip + r.mips &&
+        base_mip + mips > r.base_mip
+    );
+}
+
+bool TextureRange::fully_contains(TextureRange r) const {
+    return (
+        base_mip <= r.base_mip &&
+        base_mip + mips >= r.base_mip + r.mips &&
+        base_layer <= r.base_layer &&
+        base_layer + layers >= r.base_layer + r.layers
+    );
+}
+
+TextureRange TextureRange::get_overlap(TextureRange r) const {
+    const auto a = std::max(base_mip, r.base_mip);
+    const auto b = std::max(base_layer, r.base_layer);
+    const auto x = std::min(base_mip+mips, r.base_mip+r.mips);
+    const auto y = std::min(base_layer+layers, r.base_layer+r.layers);
+    return TextureRange{
+        .base_mip = a,
+        .mips = x - std::min(x, a),
+        .base_layer = b,
+        .layers = y - std::min(y, b)
+    };
+}
+
+void RGLayoutRanges::subtract(TextureRange range) {
+    std::vector<TextureRange> new_ranges;
+    new_ranges.reserve(ranges.size());
+
+    for(auto& r : ranges) {
+        if(!range.intersects(r)) { new_ranges.push_back(r); continue; }
+        if(range.fully_contains(r)) { continue; }
+        handle_subdivision(range, r, new_ranges);
+    }   
+
+    new_ranges.shrink_to_fit();
+    ranges = std::move(new_ranges);
+}
+
+void RGLayoutRanges::handle_subdivision(TextureRange range, TextureRange r, std::vector<TextureRange>& new_ranges) {
+    /*
+        During range subtraction, there are multiple cases. 
+        Let [] denote a range which the intersection with another range, (), 
+        will be subtracted from.
+
+        Each range is a continous range of layers, that each have equal number of mips.
+        Case 1: ( [ ) ] - range () overlaps with only the left part of the range [] -> divide into ()[]
+        Case 2: [ ( ] ) - range () ovelaps with only the right part of the range [] -> divide into []()
+        Case 3: [ ( ) ] - range () is contained within range [] -> divide into ()[]()
+        Case 4: [(   )] - range () spans exactly the same range of layers as the range [] -> divide by mip regions.
+
+        Additionaly, range () can overlap different part of mips in the range []. In all cases,
+        a small region of only mips can be either above or below the range ().
+    */
+
+    const auto overlap = range.get_overlap(r);
+
+    if(range.base_layer <= r.base_layer && range.base_layer + range.layers < r.base_layer + r.layers) {
+        // Case 1
+        handle_mips(overlap, r, new_ranges);
+        r.layers = r.base_layer + r.layers - (overlap.base_layer + overlap.layers);
+        r.base_layer = overlap.base_layer + overlap.layers;
+    } else if(range.base_layer > r.base_layer && range.base_layer + range.layers <= r.base_layer + r.layers) {
+        // Case 2
+        handle_mips(overlap, r, new_ranges);
+        r.layers = overlap.base_layer;
+    } else if(range.base_layer > r.base_layer && range.base_layer + range.layers < r.base_layer + r.layers) {
+        // Case 3
+        handle_mips(overlap, r, new_ranges);
+        auto right = r;
+        right.layers = right.base_layer + right.layers - (overlap.base_layer + overlap.layers);
+        right.base_layer = overlap.base_layer + overlap.layers;
+        new_ranges.push_back(right);
+        r.layers = overlap.base_layer;
+    } else if(range.base_layer == r.base_layer && range.layers == r.layers) {
+        // Case 4
+        handle_mips(overlap, r, new_ranges);
+        return;
+    } else {
+        spdlog::error("No more cases to cover. This is an error.");
+        std::abort();
+    }
+
+    new_ranges.push_back(r);
+}
+
+void RGLayoutRanges::handle_mips(TextureRange overlap, TextureRange r, std::vector<TextureRange>& new_ranges) {
+    r.base_layer = overlap.base_layer;
+    r.layers = overlap.layers;
+    if(r.base_mip < overlap.base_mip) {
+        r.mips = overlap.base_mip;
+    } else if(r.base_mip > overlap.base_mip) {
+        r.mips = r.base_mip + r.mips - (overlap.base_mip + overlap.mips);
+        r.base_mip = overlap.base_mip + overlap.mips;
+    } else {
+        return;
+    }
+    new_ranges.push_back(r);
+}
+    
+void RGTextureAccesses::insert_read(RGTextureAccess access) {
+    layouts.emplace_back(last_read.size(), true);
+    last_read.push_back(access);
+}
+
+void RGTextureAccesses::insert_write(RGTextureAccess access) {
+    layouts.emplace_back(last_written.size(), false);
+    last_written.push_back(access);
+}
+
+RGTextureAccess& RGTextureAccesses::get_layout_texture_access(RGLayoutAccess access) {
+    auto* vec = &last_read;
+    if(!access.is_read) { vec = &last_written; }
+    return vec->at(access.access_idx);
+}
+
+const RGTextureAccess& RGTextureAccesses::get_layout_texture_access(RGLayoutAccess access) const {
+    auto* vec = &last_read;
+    if(!access.is_read) { vec = &last_written; }
+    return vec->at(access.access_idx);
+}
+
+RGLayoutChangeQuery RGTextureAccesses::query_layout_changes(TextureRange range, bool is_read) const {
+    RGLayoutChangeQuery query;
+    query.previously_unaccessed.ranges.push_back(range);
+    for(auto it = layouts.rbegin(); it != layouts.rend(); ++it) {
+        auto& access = *it;
+        auto& txt_access = access.is_read ? last_read.at(access.access_idx) : last_written.at(access.access_idx);
+        if(auto overlap = txt_access.range.get_overlap(range); overlap.mips * overlap.layers != 0u) {
+            if(std::find_if(begin(query.accesses), end(query.accesses), [&overlap](auto& e) { return e.second.fully_contains(overlap); }) == end(query.accesses)) {
+                query.accesses.emplace_back(access, overlap);
+                query.previously_unaccessed.subtract(overlap);
+            }
+        }
+
+        if(query.previously_unaccessed.empty()) { break; }
+    }
+
+    return query;
+}
+
+void RGTextureAccesses::clear() {
+    last_read.clear();
+    last_written.clear();
+    layouts.clear();
+}
+
+RenderPass& RenderPass::set_name(const std::string& name) {
+    this->name = name;
+    return *this;
+}
+
+RenderPass& RenderPass::set_draw_func(std::function<void(vk::CommandBuffer)>&& f) {
+    func = std::move(f);
+    return *this;
+}
+
+RenderPass& RenderPass::write_to_image(RPResource info) {
+    info.usage = RGResourceUsage::Image;
+    info.is_read = false;
+    resources.push_back(info);
+    return *this;
+}
+
+RenderPass& RenderPass::read_from_image(RPResource info) {
+    info.usage = RGResourceUsage::Image;
+    info.is_read = true;
+    resources.push_back(info);
+    return *this;
+}
+
+RenderPass& RenderPass::write_color_attachment(RPResource info) {
+    info.usage = RGResourceUsage::ColorAttachment;
+    info.is_read = false;
+    resources.push_back(info);
+    color_attachments.push_back(resources.size() - 1);
+    return *this;
+}
+
+RenderPass& RenderPass::read_color_attachment(RPResource info) {
+    info.usage = RGResourceUsage::ColorAttachment;
+    info.is_read = true;
+    resources.push_back(info);
+    color_attachments.push_back(resources.size() - 1);
+    return *this;
+}
+
+RenderPass& RenderPass::write_depth_attachment(RPResource info) {
+    info.usage = RGResourceUsage::DepthAttachment;
+    info.is_read = false;
+    resources.push_back(info);
+    depth_attachment = resources.size() - 1;
+    return *this;
+}
+
+RenderPass& RenderPass::set_sampler(RPResource info) {
+    info.usage = RGResourceUsage::Sampler;
+    info.is_read = true;
+    resources.push_back(info);
+    samplers.push_back(resources.size() - 1);
+    return *this;
+}
+
+RenderPass& RenderPass::set_rendering_extent(const RenderPassRenderingExtent& extent) {
+    this->extent = extent;
+    return *this;
+}
+
+RenderPass& RenderPass::set_pipeline(Pipeline* pipeline) {
+    this->pipeline = pipeline;
+    return *this;
+}
+
+const RPResource* RenderPass::get_resource(RgResourceHandle handle) const {
+    for(auto& r : resources) {
+        if(r.resource == handle) { return &r; }
+    }
+    return nullptr;
+}
+
+void RenderGraph::create_rendering_resources() {
+    auto* renderer = get_context().renderer;
+
+    std::vector<DescriptorLayout> descriptor_layouts;
+    std::vector<std::vector<DescriptorUpdate>> descriptors;
+    std::vector<const std::string*> names;
+    descriptor_layouts.reserve(renderpasses.size());
+    descriptors.resize(renderpasses.size());
+    names.reserve(renderpasses.size());
+
+    for(u32 i=0; i<renderpasses.size(); ++i) {
+        auto& pass = renderpasses.at(i);
+        auto& descriptor_layout = descriptor_layouts.emplace_back(DescriptorLayout{{}, {}, {}, 0, false});
+        names.push_back(&pass.name);
+        descriptors.at(i).reserve(pass.resources.size());
+
+        for(const auto& rp_resource : pass.resources) {
+            const auto& rg_resource = resources.at(rp_resource.resource);
+
+            if(auto* resource = std::get_if<std::pair<Texture, RGTextureAccesses>>(&rg_resource.resource)) {
+                const auto& [texture, accesses] = *resource;
+                if(!texture) { continue; /*Swapchain image*/ }
+
+                auto view = renderer->device.createImageView(vk::ImageViewCreateInfo{
+                    {},
+                    texture.image,
+                    vk_img_type_to_vk_img_view_type(texture->type),
+                    rp_resource.texture_info.mutable_format == RGImageFormat::CopyFromVkImage ? texture->format : to_vk_format(rp_resource.texture_info.mutable_format),
+                    {},
+                    to_vk_subresource_range(rp_resource.texture_info.range, deduce_img_aspect(rp_resource.usage))
+                });
+                set_debug_name(view, std::format("{}_rgview", rg_resource.name));
+
+                image_views.emplace(std::make_pair(&pass, rp_resource.resource), view);
+
+                if(rp_resource.usage != RGResourceUsage::Image) { continue; }
+
+                if(pass.pipeline) {
+                    auto* binding = pass.pipeline->layout.find_binding(rg_resource.name);
+                    if(!binding) { continue; }
+
+                    descriptor_layout.bindings[descriptor_layout.count++] = DescriptorBinding{1, binding->type};
+
+                    auto sampler = renderer->device.createSampler(vk::SamplerCreateInfo{
+                        {},
+                        rp_resource.texture_info.min,
+                        rp_resource.texture_info.mag,
+                        rp_resource.texture_info.mip,
+                        {}, {}, {}, 0.0f, false, 0.0f, false, {},
+                        rp_resource.texture_info.min_lod,
+                        rp_resource.texture_info.max_lod
+                    });
+
+                    descriptors.at(i).push_back(DescriptorUpdate{
+                        std::make_tuple(view, to_vk_layout(rp_resource.texture_info.required_layout), sampler)
+                    });
+                }
+            } else if(auto* sampler = std::get_if<vk::Sampler>(&rg_resource.resource)) {
+                descriptor_layout.bindings[descriptor_layout.count++] = DescriptorBinding{1, vk::DescriptorType::eSampler};
+                descriptors.at(i).push_back(DescriptorUpdate{
+                    std::make_tuple(vk::ImageView{}, vk::ImageLayout{}, *sampler)
+                });
+            } else { std::terminate(); }
+        }
+    }
+
+    for(u32 i=0; i<descriptor_layouts.size(); ++i) {
+        if(descriptor_layouts.at(i).count == 0) { continue; }
+        auto set = descriptor_allocator->allocate(*names.at(i), descriptor_layouts.at(i));
+        renderpasses.at(i).descriptor = set;
+        set.update(0, 0, descriptors.at(i));
+    }
+}
+
+RenderGraph::BarrierStages RenderGraph::deduce_stages_and_accesses(const RenderPass* src_pass, const RenderPass* dst_pass, const RPResource& src_resource, const RPResource& dst_resource, bool src_read, bool dst_read) const {
+    const auto get_access = [&](RGSyncStage stage, const RPResource& resource, bool read) {
+        switch (stage) {
+            case RGSyncStage::Transfer: {
+                if(read) { return vk::AccessFlagBits2::eTransferRead; }
+                else     { return vk::AccessFlagBits2::eTransferWrite; }
+            }
+            case RGSyncStage::EarlyFragment:
+            case RGSyncStage::LateFragment: {
+                if(read) { return vk::AccessFlagBits2::eDepthStencilAttachmentRead; }
+                else     { return vk::AccessFlagBits2::eDepthStencilAttachmentWrite; }
+            }
+            case RGSyncStage::ColorAttachmentOutput: {
+                if(read) { return vk::AccessFlagBits2::eColorAttachmentRead; }   
+                else     { return vk::AccessFlagBits2::eColorAttachmentWrite; }   
+            }
+            case RGSyncStage::AllGraphics:
+            case RGSyncStage::Compute:
+            case RGSyncStage::Fragment: {
+                switch(resource.usage) {
+                    case RGResourceUsage::Image: {
+                        auto& rg_resource = resources.at(resource.resource);
+                        const DescriptorBinding* binding = nullptr;
+                        if(src_pass && src_pass->pipeline) {
+                            binding = src_pass->pipeline->layout.find_binding(rg_resource.name);
+                        }
+                        if(!binding && dst_pass && dst_pass->pipeline) {
+                            binding = dst_pass->pipeline->layout.find_binding(rg_resource.name);
+                        }
+                        if(!binding) {
+                            spdlog::error("Trying to synchronize image resource {} that is not found in both passes' layouts {} {}", rg_resource.name, src_pass->name, dst_pass->name);
+                            std::abort();
+                        }
+
+                        if(binding->type == vk::DescriptorType::eStorageImage) {
+                            if(read)    { return vk::AccessFlagBits2::eShaderStorageRead; }
+                            else        { return vk::AccessFlagBits2::eShaderStorageWrite; }
+                        } else if(binding->type == vk::DescriptorType::eSampledImage || binding->type == vk::DescriptorType::eCombinedImageSampler) {
+                            if(read)    { return vk::AccessFlagBits2::eShaderSampledRead; }
+                            else {
+                                spdlog::error("You cannot write to a sampled image.");
+                                std::abort();
+                            }
+                        } else {
+                            spdlog::error("Unrecognized binding type {} for Image resource {} in stages {} {}", (u32)binding->type, rg_resource.name, src_pass->name, dst_pass->name);
+                            std::abort();
+                        }
+                    }
+                    case RGResourceUsage::ColorAttachment: { 
+                        return read ? vk::AccessFlagBits2::eColorAttachmentRead : vk::AccessFlagBits2::eColorAttachmentWrite;
+                    }
+                    default: {
+                        spdlog::error("Unsupported resource usage");
+                        std::abort();
+                    }
+                }   
+            }
+            default: {
+                spdlog::error("Unrecognized RGSyncStage {}", (u32)stage);
+                std::abort();
+            }
+        }
+    };
+
+    return BarrierStages{
+        .src_stage = src_pass ? to_vk_pipeline_stage(src_resource.stage) : vk::PipelineStageFlagBits2::eNone,
+        .dst_stage = dst_pass ? to_vk_pipeline_stage(dst_resource.stage) : vk::PipelineStageFlagBits2::eNone,
+        .src_access = src_pass ? get_access(src_resource.stage, src_resource, src_read) : vk::AccessFlagBits2::eNone,
+        .dst_access = dst_pass ? get_access(dst_resource.stage, dst_resource, dst_read) : vk::AccessFlagBits2::eNone,
+    };
+}
+
+void RenderGraph::clear_resources() {
+    resources.clear(); 
+    for(auto& rp : renderpasses) {
+        // descriptor_set->free_allocation(rp.descriptor);
+    }
+    renderpasses.clear();
+    stage_deps.clear();
+    stage_deps_counts.clear();
+    for(auto& e : image_views) { 
+        get_context().renderer->deletion_queue.push_back([view = e.second] {
+            get_context().renderer->device.destroyImageView(view);
+        });
+    }
+    image_views.clear();
+}
+
+void RenderGraph::bake_graph() {
+    using ResourceIndex = u32;
+
+#ifdef RG_DEBUG_PRINT
+    const auto t1 = std::chrono::steady_clock::now();
+#endif
+
+    for(auto& e : resources) { 
+        if(auto* texture = std::get_if<std::pair<Texture, RGTextureAccesses>>(&e.resource)) {
+            texture->second.clear();
+        }
+    }
+
+    std::vector<PassBarriers> rendering_stages;
+    std::unordered_map<RenderPass*, u32> renderpass_stage;
+
+    const auto get_stage = [&rendering_stages](u64 idx) -> auto& { 
+        rendering_stages.resize(std::max(rendering_stages.size(), idx+1));
+        return rendering_stages.at(idx);
+    };
+
+    const auto insert_image_barrier = [&](u64 stage, const RenderPass* src_pass, const RenderPass* dst_pass, const RPResource& src_resource, const RPResource& dst_resource, vk::ImageLayout old_layout, vk::ImageLayout new_layout, bool src_read, bool dst_read, TextureRange range) {
+        const auto stages = deduce_stages_and_accesses(src_pass, dst_pass, src_resource, dst_resource, src_read, dst_read);
+        auto& deps = get_stage(stage).deps;
+        auto& graph_resource = resources.at(dst_resource.resource);
+            
+        vk::ImageMemoryBarrier2 barrier{
+            stages.src_stage,
+            stages.src_access,
+            stages.dst_stage,
+            stages.dst_access,
+            old_layout,
+            new_layout,
+            vk::QueueFamilyIgnored,
+            vk::QueueFamilyIgnored,
+            std::get<1>(graph_resource.resource).first.image,
+            to_vk_subresource_range(range, deduce_img_aspect(dst_resource.usage))
+        };
+
+        if(barrier.image) { deps.image_barriers.push_back(barrier); }
+        else { deps.swapchain_image_barrier = barrier; }
+    };
+    
+    for(u32 i=0; i<renderpasses.size(); ++i) {
+        auto& renderpass = renderpasses.at(i);
+        u32 rpass_stage = 0u;
+
+        for(auto& pass_resource : renderpass.resources) {
+            auto& graph_resource = resources.at(pass_resource.resource); 
+
+            switch (pass_resource.usage) {
+                case RGResourceUsage::ColorAttachment:
+                case RGResourceUsage::DepthAttachment:
+                case RGResourceUsage::Image: {
+                    auto& prti = pass_resource.texture_info;
+                    const auto is_read = pass_resource.is_read;
+                    const auto& [texture, accesses] = std::get<1>(graph_resource.resource);
+                    const auto query = accesses.query_layout_changes(prti.range, is_read);
+
+                    for(const auto& [layout_access, overlap] : query.accesses) {
+                        const auto& texture_access = accesses.get_layout_texture_access(layout_access);
+                        const auto barrier_stage = renderpass_stage.at(texture_access.pass) + 1u;    
+                        rpass_stage = std::max(rpass_stage, barrier_stage);
+                        const auto& src_resource = *texture_access.pass->get_resource(pass_resource.resource);
+                        insert_image_barrier(barrier_stage, texture_access.pass, &renderpass, src_resource, pass_resource, to_vk_layout(texture_access.layout), to_vk_layout(pass_resource.texture_info.required_layout), layout_access.is_read, is_read, overlap);
+                    }
+                    for(const auto& r : query.previously_unaccessed.ranges) {
+                        vk::ImageLayout old_layout{vk::ImageLayout::eUndefined};
+                        if(texture) { old_layout = texture->current_layout; }
+                        insert_image_barrier(0u, nullptr, &renderpass, pass_resource, pass_resource, old_layout, to_vk_layout(pass_resource.texture_info.required_layout), false, is_read, r);
+                    }
+                } break;
+                case RGResourceUsage::Sampler: { continue; } break;
+                default: {
+                    spdlog::error("Unrecognized pass resource usage {}", (u32)pass_resource.usage);
+                    std::abort();
+                }
+            }
+        }
+
+        renderpass_stage[&renderpass] = rpass_stage;
+        get_stage(rpass_stage).passes.push_back(&renderpass);
+
+        for(auto& pass_resource : renderpass.resources) {
+            auto& graph_resource = resources.at(pass_resource.resource);
+            std::visit(
+                visitor{
+                    [&graph_resource](auto&&) { spdlog::error("Unsupported graph_resource type: {}", (u32)graph_resource.resource.index()); std::terminate(); },
+                    [&pass_resource, &renderpass](std::pair<Texture, RGTextureAccesses>& resource) {
+                        if(pass_resource.is_read) {
+                            resource.second.insert_read(RGTextureAccess{&renderpass, pass_resource.texture_info.required_layout, pass_resource.texture_info.range});
+                        } else {
+                            resource.second.insert_write(RGTextureAccess{&renderpass, pass_resource.texture_info.required_layout, pass_resource.texture_info.range});
+                        }
+                    },
+                    [](vk::Sampler) {}
+                },
+                graph_resource.resource
+            );
+        }
+    }
+
+    std::vector<RenderPass> flat_resources;
+    flat_resources.reserve(renderpasses.size());
+    stage_deps = [&rendering_stages] {
+        std::vector<PassDependencies> deps;
+        for(auto& e : rendering_stages) { deps.push_back(e.deps); }
+        return deps;
+    }();
+    stage_deps_counts.resize(rendering_stages.size());
+    for(u32 i=0; i<rendering_stages.size(); ++i) {
+        for(auto &e : rendering_stages.at(i).passes) {
+            flat_resources.push_back(std::move(*e));
+        }
+        stage_deps_counts.at(i) = rendering_stages.at(i).passes.size();
+    }
+    renderpasses = std::move(flat_resources);
+
+#ifdef RG_DEBUG_PRINT
+    const auto t2 = std::chrono::steady_clock::now();
+    const auto dt = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+    spdlog::info("Baked graph in: {}ns", dt);
+
+    for(auto stage=0u,offset=0u; auto c : stage_deps_counts) {
+        spdlog::debug("stage: {}", stage);
+
+        auto& sd = stage_deps.at(stage);
+        spdlog::debug("barriers: {}", sd.image_barriers.size() + (sd.swapchain_image_barrier.has_value() ? 1u : 0u));
+        auto bs = sd.image_barriers;
+        if(sd.swapchain_image_barrier) { bs.push_back(sd.swapchain_image_barrier.value()); }
+
+        for(auto& ib : bs) {
+            spdlog::debug("[{} {}] -> [{} {}] {}->{} [{}:{} {}:{}]",
+                vk::to_string(ib.srcStageMask), 
+                vk::to_string(ib.srcAccessMask), 
+                vk::to_string(ib.dstStageMask), 
+                vk::to_string(ib.dstAccessMask), 
+                vk::to_string(ib.oldLayout), 
+                vk::to_string(ib.newLayout), 
+                ib.subresourceRange.baseMipLevel, 
+                ib.subresourceRange.levelCount, 
+                ib.subresourceRange.baseArrayLayer, 
+                ib.subresourceRange.layerCount);
+        }
+
+        for(auto i=offset; i<offset + c; ++i) {
+            auto& p = renderpasses.at(i);
+            spdlog::debug("pass: {}", p.name);
+        }
+
+        ++stage;
+        offset += c;
+    }
+#endif
+
+    create_rendering_resources();
+}
+
+void RenderGraph::render(vk::CommandBuffer cmd, vk::Image swapchain_image, vk::ImageView swapchain_view) {
+    for(u32 offset = 0, stage = 0; auto pass_count : stage_deps_counts) {
+        auto& barriers = stage_deps.at(stage);
+        std::vector<vk::ImageMemoryBarrier2> image_barriers;
+        image_barriers.reserve(barriers.image_barriers.size() + 1u);
+        image_barriers.insert(image_barriers.end(), barriers.image_barriers.begin(), barriers.image_barriers.end());
+        if(barriers.swapchain_image_barrier) {
+            barriers.swapchain_image_barrier.value().setImage(swapchain_image);
+            image_barriers.push_back(barriers.swapchain_image_barrier.value());
+        }
+
+        vk::DependencyInfo dependency_info{};
+        dependency_info.setImageMemoryBarriers(image_barriers);
+        cmd.pipelineBarrier2(dependency_info);
+
+        for(u32 i=0; i<dependency_info.imageMemoryBarrierCount; ++i) {
+            auto& barrier = dependency_info.pImageMemoryBarriers[i];
+
+#ifdef RG_DEBUG_PRINT
+            spdlog::debug("({}) {}:{} -> {}:{} {} -> {} RNG: {} - {} {} - {}",
+                (u64)(VkImage)barrier.image,
+                vk::to_string(barrier.srcStageMask),
+                vk::to_string(barrier.srcAccessMask),
+                vk::to_string(barrier.dstStageMask),
+                vk::to_string(barrier.dstAccessMask),
+                vk::to_string(barrier.oldLayout),
+                vk::to_string(barrier.newLayout),
+                barrier.subresourceRange.baseMipLevel,
+                barrier.subresourceRange.levelCount,
+                barrier.subresourceRange.baseArrayLayer,
+                barrier.subresourceRange.layerCount);
+#endif
+        }
+
+        for(u32 i = offset; i < offset + pass_count; ++i) {
+            const auto& pass = renderpasses.at(i);
+
+#ifdef RG_DEBUG_PRINT
+            spdlog::debug("{}", pass.name);
+#endif
+
+            if(pass.pipeline) {
+                auto* renderer = get_context().renderer;
+                cmd.bindPipeline(pass.pipeline->type, pass.pipeline->pipeline);
+
+                if(pass.descriptor.set) {
+                    cmd.bindDescriptorSets(pass.pipeline->type, pass.pipeline->layout.layout, 2, pass.descriptor.set, {});
+                }
+
+                if(pass.pipeline->type == vk::PipelineBindPoint::eGraphics) {
+                    std::vector<vk::RenderingAttachmentInfo> color_attachments;
+                    color_attachments.reserve(pass.color_attachments.size());
+                    vk::RenderingAttachmentInfo depth_attachment;
+
+                    for(auto color : pass.color_attachments) {
+                        const auto& rp_resource = pass.resources.at(color);
+                        const auto& rg_resource = resources.at(rp_resource.resource);
+
+                        vk::RenderingAttachmentInfo attachment{
+                            {},
+                            vk::ImageLayout::eUndefined,
+                            {},
+                            {},
+                            {},
+                            to_vk_load_op(rp_resource.load_op),
+                            to_vk_store_op(rp_resource.store_op),
+                            vk::ClearColorValue{0.0f, 0.0f, 0.0f, 0.0f}
+                        };
+
+                        if(std::get<1>(rg_resource.resource).first) {
+                            attachment.imageView = image_views.at(std::make_pair(&pass, rp_resource.resource));
+                            attachment.imageLayout = to_vk_layout(rp_resource.texture_info.required_layout);
+                        } else {
+                            attachment.imageView = swapchain_view;
+                            attachment.imageLayout = to_vk_layout(rp_resource.texture_info.required_layout);
+                        }
+
+                        color_attachments.push_back(attachment);
+                    }
+
+                    if(pass.depth_attachment) {
+                        const auto& rp_resource = pass.resources.at(pass.depth_attachment.value());
+                        const auto& rg_resource = resources.at(rp_resource.resource);
+                        depth_attachment = vk::RenderingAttachmentInfo{
+                            image_views.at(std::make_pair(&pass, rp_resource.resource)),
+                            to_vk_layout(rp_resource.texture_info.required_layout),
+                            {},
+                            {},
+                            {},
+                            to_vk_load_op(rp_resource.load_op),
+                            to_vk_store_op(rp_resource.store_op),
+                            vk::ClearDepthStencilValue{1.0f, 0}
+                        };
+                    }
+
+                    cmd.beginRendering(vk::RenderingInfo{
+                        {},
+                        {{(i32)pass.extent.scissor.scissor_x, (i32)pass.extent.scissor.scissor_y}, {pass.extent.scissor.scissor_width, pass.extent.scissor.scissor_height}},
+                        pass.extent.layers,
+                        pass.extent.viewmask,
+                        color_attachments,
+                        pass.depth_attachment ? &depth_attachment : nullptr,
+                        nullptr
+                    });
+                    cmd.setViewportWithCount(vk::Viewport{
+                        pass.extent.viewport.offset_x,
+                        pass.extent.viewport.offset_y,
+                        pass.extent.viewport.width,
+                        pass.extent.viewport.height,
+                        pass.extent.viewport.min_depth,
+                        pass.extent.viewport.max_depth
+                    });
+                    cmd.setScissorWithCount(vk::Rect2D{
+                        {
+                            (i32)pass.extent.scissor.scissor_x,
+                            (i32)pass.extent.scissor.scissor_y,
+                        }, 
+                        {
+                            pass.extent.scissor.scissor_width,
+                            pass.extent.scissor.scissor_height,
+                        }
+                    });
+                }
+            }
+
+            if(pass.func) { pass.func(cmd); }
+
+            if(pass.pipeline && pass.pipeline->type == vk::PipelineBindPoint::eGraphics) {
+                cmd.endRendering();
+            }
+        }
+
+        ++stage;
+        offset += pass_count;
+    }
+}
+
+static constexpr vk::PipelineStageFlags2 to_vk_pipeline_stage(RGSyncStage stage) {
+    switch (stage) {
+        case RGSyncStage::None:          { return vk::PipelineStageFlagBits2::eNone; }
+        case RGSyncStage::Transfer:      { return vk::PipelineStageFlagBits2::eTransfer; }
+        case RGSyncStage::Fragment:      { return vk::PipelineStageFlagBits2::eFragmentShader; }
+        case RGSyncStage::EarlyFragment: { return vk::PipelineStageFlagBits2::eEarlyFragmentTests; }
+        case RGSyncStage::LateFragment:  { return vk::PipelineStageFlagBits2::eLateFragmentTests; }
+        case RGSyncStage::Compute:       { return vk::PipelineStageFlagBits2::eComputeShader; }
+        case RGSyncStage::ColorAttachmentOutput: { return vk::PipelineStageFlagBits2::eColorAttachmentOutput; }
+        case RGSyncStage::AllGraphics: { return vk::PipelineStageFlagBits2::eAllGraphics; }
+        default: {
+            spdlog::error("Unrecognized RGSyncStage {}", (u32)stage);
+            std::abort();
+        }
+    }
+}
+
+static constexpr vk::ImageAspectFlags to_vk_aspect(RGImageAspect aspect) {
+    switch (aspect) {
+        case RGImageAspect::Color: { return vk::ImageAspectFlagBits::eColor; }
+        case RGImageAspect::Depth: { return vk::ImageAspectFlagBits::eDepth; }
+        default: {
+            spdlog::error("Unrecognized RgImageAspect: {}", (u32)aspect);
+            std::abort();
+        }
+    }
+}
+
+static constexpr vk::ImageSubresourceRange to_vk_subresource_range(TextureRange range, RGImageAspect aspect) {
+    return vk::ImageSubresourceRange{
+        to_vk_aspect(aspect),
+        range.base_mip, range.mips,
+        range.base_layer, range.layers
+    };
+}
+
+static constexpr vk::ImageLayout to_vk_layout(RGImageLayout layout) {
+    switch(layout) {
+        case RGImageLayout::Attachment: { return vk::ImageLayout::eAttachmentOptimal; }
+        case RGImageLayout::General: { return vk::ImageLayout::eGeneral; }
+        case RGImageLayout::ReadOnly: { return vk::ImageLayout::eShaderReadOnlyOptimal; }
+        case RGImageLayout::TransferSrc: { return vk::ImageLayout::eTransferSrcOptimal; }
+        case RGImageLayout::TransferDst: { return vk::ImageLayout::eTransferDstOptimal; }
+        case RGImageLayout::PresentSrc: { return vk::ImageLayout::ePresentSrcKHR; }
+        case RGImageLayout::Undefined: { return vk::ImageLayout::eUndefined; }
+        default: {
+            spdlog::error("Unrecognized RGImageLayout: {}", (u32)layout);
+            std::abort();
+        }
+    }
+}
+
+static constexpr vk::AttachmentLoadOp to_vk_load_op(RGAttachmentLoadStoreOp op) {
+    switch(op) {
+        case RGAttachmentLoadStoreOp::DontCare: { return vk::AttachmentLoadOp::eDontCare; }
+        case RGAttachmentLoadStoreOp::Clear: { return vk::AttachmentLoadOp::eClear; }
+        case RGAttachmentLoadStoreOp::Load: { return vk::AttachmentLoadOp::eLoad; }
+        default: {
+            spdlog::error("Unrecognized RGAttachmentLoadOp {}", (u32)op);
+            std::abort();
+        }
+    }
+}
+
+static constexpr vk::AttachmentStoreOp to_vk_store_op(RGAttachmentLoadStoreOp op) {
+    switch(op) {
+        case RGAttachmentLoadStoreOp::DontCare: { return vk::AttachmentStoreOp::eDontCare; }
+        case RGAttachmentLoadStoreOp::Store: { return vk::AttachmentStoreOp::eStore; }
+        case RGAttachmentLoadStoreOp::None: { return vk::AttachmentStoreOp::eNone; }
+        default: {
+            spdlog::error("Unrecognized RGAttachmentStoreOp {}", (u32)op);
+            std::abort();
+        }
+    }
+}
+
+static constexpr vk::ImageViewType vk_img_type_to_vk_img_view_type(vk::ImageType type) {
+    switch(type) {
+        case vk::ImageType::e2D: { return vk::ImageViewType::e2D; }
+        case vk::ImageType::e3D: { return vk::ImageViewType::e3D; }
+        default: {
+            spdlog::error("Unsupported vk::ImageType {}", (u32)type);
+            std::abort();
+        }
+    }
+}
+
+static constexpr vk::Format to_vk_format(RGImageFormat format) {
+    switch(format) {
+        case RGImageFormat::R32UI: { return vk::Format::eR32Uint; }
+        case RGImageFormat::RGBA8Unorm: { return vk::Format::eR8G8B8A8Unorm; }
+        default: {
+            spdlog::error("Unrecognized RGImageFormat {}", (u32)format);
+            std::abort();
+        }
+    }
+}
+
+static constexpr RGImageAspect deduce_img_aspect(RGResourceUsage usage) {
+    return usage == RGResourceUsage::DepthAttachment ? RGImageAspect::Depth : RGImageAspect::Color;
+}
+```
+
+### source/render_graph.hpp
+```
+#pragma once
+#include "types.hpp"
+#include "renderer_types.hpp"
+#include "descriptor.hpp"
+#include <vector>
+#include <string>
+#include <optional>
+#include <map>
+#include <functional>
+#include <variant>
+
+struct Pipeline;
+
+#if 1
+enum class RGResourceType {
+    None, Buffer, Texture
+};
+
+enum class RGResourceUsage {
+    None, Image, ColorAttachment, DepthAttachment, Sampler
+};
+
+enum class RGAccessType { 
+    None, Read, Write 
+};
+
+enum class RGImageAspect { 
+    None, Color, Depth 
+};
+
+enum class RGAttachmentLoadStoreOp {
+    DontCare, Clear, Load, Store, None
+};
+
+using RgResourceHandle = uint64_t;
+
+enum class RGSyncStage {
+    None, Transfer, Fragment, EarlyFragment, LateFragment, Compute, 
+    ColorAttachmentOutput, AllGraphics
+};
+
+struct BufferInfo {
+};
+
+enum class RGImageLayout {
+    Undefined, General, Attachment, ReadOnly,
+    TransferDst, TransferSrc, PresentSrc
+};
+
+enum class RGImageFormat {
+    CopyFromVkImage, RGBA8Unorm, R32UI
+};
+
+struct TextureRange {
+    bool intersects(TextureRange r) const;
+    bool fully_contains(TextureRange r) const;
+    TextureRange get_overlap(TextureRange r) const;
+    
+    u32 base_mip{0}, mips{1}, base_layer{0}, layers{1};
+};
+
+struct TextureInfo {
+    RGImageLayout required_layout;
+    RGImageFormat mutable_format{RGImageFormat::CopyFromVkImage};
+    TextureRange range;
+    vk::Filter min{vk::Filter::eLinear}, mag{vk::Filter::eLinear};
+    vk::SamplerMipmapMode mip{vk::SamplerMipmapMode::eLinear};
+    float min_lod{0.0f}, max_lod{1.0f};
+};
+
+struct RenderPass;
+struct RGTextureAccess {
+    RGTextureAccess(RenderPass* pass, RGImageLayout layout, TextureRange range)
+        : pass(pass), layout(layout), range(range) {}
+    
+    RenderPass* pass{};
+    RGImageLayout layout{RGImageLayout::Undefined};
+    TextureRange range;
+};
+
+/*
+    Represents a single access to a texture
+*/
+struct RGLayoutAccess {
+    u32 access_idx : 31;
+    u32 is_read : 1;
+};
+
+/*
+    Represents a range of texture MIPs and LAYERs, but with
+    the ability to subtract other ranges from it.
+    It's purpose is to accumulate-by-subtracting subranges in which a texture
+    has not been accessed.
+*/
+struct RGLayoutRanges {
+    bool empty() const { return ranges.empty(); }
+    void subtract(TextureRange range);
+    void handle_subdivision(TextureRange range, TextureRange r, std::vector<TextureRange>& new_ranges);
+    void handle_mips(TextureRange overlap, TextureRange r, std::vector<TextureRange>& new_ranges);
+    
+    std::vector<TextureRange> ranges;
+};
+
+struct RGLayoutChangeQuery {
+    std::vector<std::pair<RGLayoutAccess, TextureRange>> accesses;
+    RGLayoutRanges previously_unaccessed;
+};
+
+/*
+    Represents the history of accesses to a texture resource.
+    Latest ones are at the end of the vectors.
+*/
+class RGTextureAccesses {
+public:
+    void insert_read(RGTextureAccess access);
+    void insert_write(RGTextureAccess access);
+    RGTextureAccess& get_layout_texture_access(RGLayoutAccess access);
+    const RGTextureAccess& get_layout_texture_access(RGLayoutAccess access) const;
+    RGLayoutChangeQuery query_layout_changes(TextureRange range, bool is_read) const;
+    void clear();
+
+private:
+    std::vector<RGTextureAccess> last_read, last_written;
+    std::vector<RGLayoutAccess> layouts;
+};
+
+struct RGResource {
+    RGResource(const std::string& name, const Texture& texture): name(name), resource(std::make_pair(texture, RGTextureAccesses{})) {}
+    RGResource(const std::string& name, vk::Sampler sampler): name(name), resource(sampler) {}
+
+    RGResource(const RGResource& o) noexcept = delete;
+    RGResource& operator=(const RGResource& o) noexcept = delete;
+    RGResource(RGResource&& o) noexcept { *this = std::move(o); }
+    RGResource& operator=(RGResource&& o) noexcept {
+        name = o.name;
+        resource = std::move(o.resource);
+        return *this;
+    }
+    
+    std::string name;
+    std::variant<Buffer, std::pair<Texture, RGTextureAccesses>, vk::Sampler> resource;
+};
+
+struct RPResource {
+    RPResource(RgResourceHandle resource, RGSyncStage stage, const BufferInfo& info)
+        : resource(resource), stage(stage), buffer_info(info) {}
+    RPResource(RgResourceHandle resource, RGSyncStage stage, const TextureInfo& info, RGAttachmentLoadStoreOp load_op = RGAttachmentLoadStoreOp::Clear, RGAttachmentLoadStoreOp store_op = RGAttachmentLoadStoreOp::Store)
+        : resource(resource), stage(stage), load_op(load_op), store_op(store_op), texture_info(info) {}
+    // for samplers
+    RPResource(RgResourceHandle resource): resource(resource) {}
+    
+    RgResourceHandle resource;
+    RGSyncStage stage;
+    RGResourceUsage usage{RGResourceUsage::None};
+    RGAttachmentLoadStoreOp load_op{RGAttachmentLoadStoreOp::Clear}, store_op{RGAttachmentLoadStoreOp::Store};
+    union {
+        BufferInfo buffer_info;
+        TextureInfo texture_info;
+    };
+    bool is_read;
+};
+
+struct RenderPassRenderingViewport {
+    f32 offset_x, offset_y, width, height, min_depth, max_depth;
+};
+
+struct RenderPassRenderingScissor {
+    u32 scissor_x{0}, scissor_y{0}, scissor_width{0}, scissor_height{0}; 
+};
+
+struct RenderPassRenderingExtent {
+    RenderPassRenderingViewport viewport;
+    RenderPassRenderingScissor scissor;
+    u32 layers{1}, viewmask{0};
+};
+
+struct RenderPass {
+    RenderPass& set_name(const std::string& name);
+    RenderPass& set_draw_func(std::function<void(vk::CommandBuffer)>&& f);
+    RenderPass& write_to_image(RPResource info);
+    RenderPass& read_from_image(RPResource info);
+    RenderPass& write_color_attachment(RPResource info);
+    RenderPass& read_color_attachment(RPResource info);
+    RenderPass& write_depth_attachment(RPResource info);
+    RenderPass& set_sampler(RPResource info);
+    RenderPass& set_rendering_extent(const RenderPassRenderingExtent& extent);
+    RenderPass& set_pipeline(Pipeline* pipeline);
+    const RPResource* get_resource(RgResourceHandle handle) const;
+
+    std::string name;
+    Pipeline* pipeline{};
+    DescriptorSet descriptor;
+    std::function<void(vk::CommandBuffer)> func;
+    RenderPassRenderingExtent extent;
+    std::vector<RPResource> resources;
+    std::vector<u32> color_attachments; 
+    std::optional<u32> depth_attachment;
+    std::vector<u32> samplers; 
+};
+
+class RenderGraph {
+public:
+    RenderGraph() = default;
+    explicit RenderGraph(DescriptorAllocator* descriptor_allocator): descriptor_allocator(descriptor_allocator) {}
+
+    RgResourceHandle add_resource(RGResource resource) {
+        resources.push_back(std::move(resource));
+        return resources.size() - 1;
+    }
+
+    RenderGraph& add_render_pass(const RenderPass& pass) {
+        renderpasses.push_back(pass);
+        return *this;
+    }
+
+    const RGResource& get_resource(RgResourceHandle resource) const {
+        return resources.at(resource);
+    }
+
+    void clear_resources();
+    void bake_graph();
+    void render(vk::CommandBuffer cmd, vk::Image swapchain_image, vk::ImageView swapchain_view);
+    
+private:
+    struct PassDependencies {
+        std::vector<vk::ImageMemoryBarrier2> image_barriers;
+        std::optional<vk::ImageMemoryBarrier2> swapchain_image_barrier; // need special handling like vk::Image patching during rendering
+    };
+    struct BarrierStages {
+        vk::PipelineStageFlags2 src_stage, dst_stage;
+        vk::AccessFlags2 src_access, dst_access;
+    };
+    struct PassBarriers {
+        PassDependencies deps;
+        std::vector<RenderPass*> passes;
+    };
+
+    void handle_image_pass_resource();
+    void create_rendering_resources();
+    BarrierStages deduce_stages_and_accesses(const RenderPass* src_pass, const RenderPass* dst_pass, const RPResource& src_resource, const RPResource& dst_resource, bool src_read, bool dst_read) const;
+
+    DescriptorAllocator* descriptor_allocator;
+    std::vector<RGResource> resources;
+    std::vector<RenderPass> renderpasses;
+    std::vector<PassDependencies> stage_deps;
+    std::vector<u32> stage_deps_counts;
+    std::map<std::pair<const RenderPass*, RgResourceHandle>, vk::ImageView> image_views;
+};
+#endif
+```
+
+### source/renderer.cpp
+```
+#include <vulkan/vulkan.hpp>
+VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
+#include "renderer.hpp"
+#include "input.hpp"
+#include "pipelines.hpp"
+#include "render_graph.hpp"
+#include "allocator.hpp"
+#include <spdlog/spdlog.h>
+#include <glm/gtc/matrix_transform.hpp>
+#include <VkBootstrap.h>
+#include <imgui/imgui.h>
+#include <imgui/backends/imgui_impl_glfw.h>
+#include <imgui/backends/imgui_impl_vulkan.h>
+#include <format>
+#include <tracy/Tracy.hpp>
+
+vk::Device SetDebugNameDetails::device() {
+    return get_context().renderer->device;
+}
+
+vk::Instance SetDebugNameDetails::instance() {
+    return get_context().renderer->instance;
+}
+
+PFN_vkGetInstanceProcAddr SetDebugNameDetails::get_instance_proc_addr() {
+    return get_context().renderer->vulkan_function_pointers.get_instance_proc_addr;
+}
+
+PFN_vkGetDeviceProcAddr SetDebugNameDetails::get_device_proc_addr() {
+    return get_context().renderer->vulkan_function_pointers.get_device_proc_addr;
+}
+
+void GpuScene::render(vk::CommandBuffer cmd) {
+    cmd.drawIndexedIndirect(indirect_commands_buffer.buffer, 0, draw_count, sizeof(vk::DrawIndexedIndirectCommand));
+}
+
+Buffer::Buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, u64 size)
+    : allocation(get_context().renderer->allocator->create_buffer(label, usage, map_memory, size)) { 
+    buffer = Buffer::operator->()->buffer;
+}
+
+Buffer::Buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, std::span<const std::byte> optional_data)
+    : allocation(get_context().renderer->allocator->create_buffer(label, usage, map_memory, optional_data)) { 
+    buffer = Buffer::operator->()->buffer;
+}
+
+BufferAllocation* Buffer::operator->() { return &get_context().renderer->allocator->get_buffer(allocation); }
+
+const BufferAllocation* Buffer::operator->() const { return &get_context().renderer->allocator->get_buffer(allocation); }
+
+TextureAllocation* Texture::operator->() { return &get_context().renderer->allocator->get_texture(storage); }
+
+const TextureAllocation* Texture::operator->() const { return &get_context().renderer->allocator->get_texture(storage); }
+
+Texture2D::Texture2D(std::string_view label, u32 width, u32 height, vk::Format format, u32 mips, vk::ImageUsageFlags usage, std::span<const std::byte> optional_data) 
+    : Texture(get_context().renderer->allocator->create_texture_storage(
+        label,
+        vk::ImageCreateInfo{
+            {},
+            vk::ImageType::e2D,
+            format,
+            {width, height, 1},
+            mips,
+            1,
+            vk::SampleCountFlagBits::e1,
+            vk::ImageTiling::eOptimal,
+            usage
+        }, 
+        optional_data)) { }
+
+Texture3D::Texture3D(std::string_view label, u32 width, u32 height, u32 depth, vk::Format format, u32 mips, vk::ImageUsageFlags usage) 
+    : Texture(get_context().renderer->allocator->create_texture_storage(
+        label,
+        vk::ImageCreateInfo{
+            vk::ImageCreateFlagBits::eMutableFormat,
+            vk::ImageType::e3D,
+            format,
+            {width, height, depth},
+            mips,
+            1,
+            vk::SampleCountFlagBits::e1,
+            vk::ImageTiling::eOptimal,
+            usage
+        })) { }
+
+bool Renderer::initialize() {
+    if(!glfwInit()) {
+        spdlog::error("GLFW: unable to initialize");
+        return false;
+    }
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+
+    window = glfwCreateWindow(window_width, window_height, "vxgi", nullptr, nullptr);
+    if(!window) {
+        spdlog::error("GLFW: unable to create window");
+        glfwTerminate();
+        return false;
+    }
+
+    if(!initialize_vulkan()) {
+        return false;
+    }
+
+    if(!initialize_swapchain()) {
+        return false;
+    }
+
+    if(!initialize_frame_resources()) {
+        return false;
+    }
+
+    if(!initialize_render_passes()) {
+        return false;
+    }
+
+    if(!initialize_imgui()) {
+        return false;
+    }
+
+    return true;
+}
+
+void Renderer::setup_scene() {
+    auto& context = get_context();
+    auto& scene = *context.scene;
+
+    std::unordered_map<const TextureAllocation*, u64> texture_indices;
+    std::vector<const TextureAllocation*> material_textures{}; // index 0 reserved for lack of texture
+    material_textures.reserve(scene.material_textures.size());
+    std::vector<GpuInstancedMesh> instanced_meshes;
+
+    const auto add_or_get_material_texture = [&](const Texture2D& tex) {
+        if(!tex) { return 0ull; }
+
+        auto& tex_storage = allocator->get_texture(tex.storage);
+        if(texture_indices.contains(&tex_storage)) { return texture_indices.at(&tex_storage); } 
+        texture_indices[&tex_storage] = material_textures.size();
+        material_textures.push_back(&tex_storage);
+        return material_textures.size() - 1ull;
+    };
+
+    const auto model_instance_counts = [&] {
+        std::unordered_map<Handle<Model>, u32> instances;
+        for(const auto& e : scene.scene_models) {
+            ++instances[e.model];
+        }
+        return instances;
+    }();
+    const auto total_instanced_meshes = [&] {
+        u32 count = 0;
+        for(const auto& [handle, instance_count] : model_instance_counts) {
+            const auto& model = scene.get_model(handle);
+            count += instance_count * model.meshes.size();
+        }
+        return count;
+    }();
+    const auto total_meshes = [&scene] { 
+        u32 count = 0;
+        for(const auto& e : scene.models) { count += e.meshes.size(); }
+        return count;
+    }();
+    const auto instanced_models_offsets = [&] {
+        std::unordered_map<Handle<Model>, u64> offsets;
+        for(u64 i=0; i<scene.models.size(); ++i) {
+            const auto& model = scene.models.at(i);
+            if(i==0) { offsets[model] = 0; continue; }
+            offsets[model] = offsets[scene.models.at(i-1)] + model_instance_counts.at(scene.models.at(i-1)) * scene.models.at(i-1).meshes.size();
+        }
+        return offsets;
+    }();
+    const auto [total_vertex_count, total_index_count] = [&] {
+        u64 total_vertex_count = 0, total_index_count = 0;
+        for(const auto& e : scene.models) {
+            for(const auto& f : e.meshes) { 
+                total_vertex_count += f.vertices.size();
+                total_index_count += f.indices.size();
+            }
+        }
+        return std::make_pair(total_vertex_count, total_index_count);
+    }();
+
+    std::vector<Vertex> vertices;
+    std::vector<u32> indices;
+    vertices.reserve(total_vertex_count);
+    indices.reserve(total_index_count);
+    
+    render_scene.models.reserve(model_instance_counts.size());
+    render_scene.meshes.reserve(total_meshes);
+    for(u64 offset = 0; const auto& e : scene.models) {
+        render_scene.models.emplace_back(e, offset);
+        offset += e.meshes.size();
+
+        for(const auto& f : e.meshes) {
+            GpuMesh last_mesh{};
+            if(!render_scene.meshes.empty()) { last_mesh = render_scene.meshes.back(); }
+
+            render_scene.meshes.push_back(GpuMesh{
+                .mesh = &f,
+                .vertex_offset = last_mesh.vertex_offset + last_mesh.vertex_count,
+                .vertex_count = (u32)f.vertices.size(),
+                .index_offset = last_mesh.index_offset + last_mesh.index_count,
+                .index_count = (u32)f.indices.size(),
+                .instance_offset = last_mesh.instance_offset + last_mesh.instance_count,
+                .instance_count = model_instance_counts.at(e)
+            });
+
+            vertices.insert(vertices.end(), f.vertices.begin(), f.vertices.end());
+            indices.insert(indices.end(), f.indices.begin(), f.indices.end());
+        }
+    }
+
+    std::unordered_map<Handle<Model>, u32> parsed_gpu_model_instances;
+    instanced_meshes.resize(total_instanced_meshes);
+    for(const auto& e : scene.scene_models) {
+        GpuModel previous_gpu_model;
+        if(!render_scene.models.empty()) {
+            previous_gpu_model = render_scene.models.back();
+        }
+
+        for(u64 idx = 0u; const auto& f : scene.get_model(e.model).meshes) {
+            const auto instanced_mesh_idx = instanced_models_offsets.at(e.model) + parsed_gpu_model_instances[e.model] + idx;
+            auto& instanced_mesh = instanced_meshes.at(instanced_mesh_idx); 
+            instanced_mesh.diffuse_texture_idx = add_or_get_material_texture(f.material.diffuse_texture);
+            instanced_mesh.normal_texture_idx = add_or_get_material_texture(f.material.normal_texture);
+            ++idx;
+        }
+        ++parsed_gpu_model_instances[e.model];
+    }
+
+    std::vector<vk::DrawIndexedIndirectCommand> indirect_commands;
+    indirect_commands.reserve(render_scene.meshes.size());
+    for(const auto& e : render_scene.meshes) {
+        indirect_commands.push_back(vk::DrawIndexedIndirectCommand{
+            e.index_count,
+            e.instance_count,
+            e.index_offset,
+            (i32)e.vertex_offset,
+            e.instance_offset
+        });
+    }
+
+    render_scene.vertex_buffer = Buffer{"scene_vertex_buffer", vk::BufferUsageFlagBits::eVertexBuffer, false, std::as_bytes(std::span{vertices})};
+    render_scene.index_buffer = Buffer{"scene_index_buffer", vk::BufferUsageFlagBits::eIndexBuffer, false, std::as_bytes(std::span{indices})};
+    render_scene.instance_buffer = Buffer{"scene_instance_buffer", vk::BufferUsageFlagBits::eStorageBuffer, true, std::as_bytes(std::span{instanced_meshes})};
+    render_scene.indirect_commands_buffer = Buffer{"scene_indirect_buffer", vk::BufferUsageFlagBits::eIndirectBuffer, true, std::as_bytes(std::span{indirect_commands})};
+    render_scene.draw_count = indirect_commands.size();
+
+    auto sampler = device.createSampler(vk::SamplerCreateInfo{
+        {}, vk::Filter::eLinear, vk::Filter::eLinear, vk::SamplerMipmapMode::eLinear, vk::SamplerAddressMode::eRepeat, vk::SamplerAddressMode::eRepeat, vk::SamplerAddressMode::eRepeat,
+        {}, false, {}, false, {}, 0, 11.0f
+    });
+
+    std::vector<DescriptorUpdate> updates;
+    updates.reserve(material_textures.size() + 1u);
+
+    updates.emplace_back(&render_scene.instance_buffer);
+    for(auto& e : material_textures) {
+        if(!e) { continue; }
+        updates.emplace_back(std::make_tuple(e->default_view, vk::ImageLayout::eShaderReadOnlyOptimal, sampler));
+    }
+
+    material_set = descriptor_allocator->allocate("material_set", DescriptorLayout{{}, {
+        DescriptorBinding{1, vk::DescriptorType::eStorageBuffer},
+        DescriptorBinding{128, vk::DescriptorType::eCombinedImageSampler},
+    }, {}, 2, true}, 128, material_textures.size());
+
+    material_set.update(0, 0, updates);
+}
+
+void Renderer::render() { 
+    static const auto P = glm::perspectiveFov(glm::radians(75.0f), 1024.0f, 768.0f, 0.01f, 25.0f);
+    auto V = get_context().camera->view;
+    glm::mat4 global_buffer_data[] {
+        P, V
+    };
+    memcpy(global_buffer->data, global_buffer_data, sizeof(global_buffer_data));
+
+    auto& fr = get_frame_res();
+    auto& cmd = fr.cmd;
+
+    auto img = device.acquireNextImageKHR(swapchain, -1ull, fr.swapchain_semaphore).value;
+    
+    cmd.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+    if(allocator->has_jobs()) {
+        allocator->complete_jobs(cmd);
+        cmd.end();
+        graphics_queue.submit(vk::SubmitInfo{{}, {}, cmd});
+        graphics_queue.waitIdle();
+
+        [this] {
+            static bool once = true;
+            if(once) setup_scene();
+            once = false;
+        }();
+        cmd.begin({vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+    }
+
+    cmd.bindVertexBuffers(0, render_scene.vertex_buffer->buffer, 0ull);
+    cmd.bindIndexBuffer(render_scene.index_buffer->buffer, 0, vk::IndexType::eUint32);
+
+    vk::DescriptorSet sets[] {
+        global_set.set,
+        material_set.set,
+    };
+    cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pp_default_lit.layout.layout, 0, sets, {});
+
+    cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pp_default_lit.pipeline);
+
+    render_graph->render(cmd, swapchain_images.at(img), swapchain_views.at(img));
+
+    cmd.end();
+    vk::PipelineStageFlags wait_masks[] {
+        vk::PipelineStageFlagBits::eColorAttachmentOutput
+    };
+    graphics_queue.submit(vk::SubmitInfo{fr.swapchain_semaphore, wait_masks, cmd, fr.rendering_semaphore});
+    u32 image_indices[] {img};
+    presentation_queue.presentKHR(vk::PresentInfoKHR{
+        fr.rendering_semaphore, swapchain, image_indices
+    });
+
+    device.waitIdle();
+
+    for(auto& e : deletion_queue) { e(); }
+}
+
+bool Renderer::initialize_vulkan() {
+    if(!glfwVulkanSupported()) {
+        spdlog::error("Vulkan is not supported");
+        return false;
+    }
+
+    VULKAN_HPP_DEFAULT_DISPATCHER.init();
+    vkb::InstanceBuilder instance_builder;
+    auto instance_result = instance_builder
+        .set_app_name("vxgi")
+        .require_api_version(1, 3)
+        .request_validation_layers()
+        .enable_validation_layers()
+        .use_default_debug_messenger()
+        .enable_extension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)
+        .build();
+    if(!instance_result) {
+        spdlog::error("Failed to create vulkan instance: {}", instance_result.error().message());
+        return false;
+    }
+    instance = instance_result->instance;
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(instance_result->fp_vkGetInstanceProcAddr);
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
+
+    VkSurfaceKHR _surface;
+    glfwCreateWindowSurface(instance, window, 0, &_surface);
+    if(!_surface) {
+        spdlog::error("Failed to create window surface");
+        return false;
+    }
+    surface = _surface;
+
+    vkb::PhysicalDeviceSelector pdev_sel{instance_result.value(), _surface};
+    auto pdev_sel_result = pdev_sel
+        .set_minimum_version(1, 3)
+        .select();
+    if(!pdev_sel_result) {
+        spdlog::error("Vulkan: failed to find suitable physical device: {}", pdev_sel_result.error().message());
+        return false;
+    }
+    physical_device = pdev_sel_result->physical_device;
+
+    vk::PhysicalDeviceSynchronization2Features synch2_features;
+    synch2_features.synchronization2 = true;
+
+    vk::PhysicalDeviceHostQueryResetFeatures host_query_features;
+    host_query_features.hostQueryReset = true;
+
+    vk::PhysicalDeviceDynamicRenderingFeatures dyn_rend_features;
+    dyn_rend_features.dynamicRendering = true;
+
+    vk::PhysicalDeviceDescriptorIndexingFeatures desc_idx_features;
+    desc_idx_features.descriptorBindingVariableDescriptorCount = true;
+    desc_idx_features.descriptorBindingPartiallyBound = true;
+    desc_idx_features.shaderSampledImageArrayNonUniformIndexing = true;
+    desc_idx_features.shaderStorageImageArrayNonUniformIndexing = true;
+    desc_idx_features.descriptorBindingSampledImageUpdateAfterBind = true;
+    desc_idx_features.descriptorBindingStorageImageUpdateAfterBind = true;
+    desc_idx_features.descriptorBindingUniformBufferUpdateAfterBind = true;
+    desc_idx_features.descriptorBindingStorageBufferUpdateAfterBind = true;
+    desc_idx_features.runtimeDescriptorArray = true;
+
+    vk::PhysicalDeviceFeatures2 features;
+    features.features.fragmentStoresAndAtomics = true;
+    features.features.geometryShader = true;
+    features.features.multiDrawIndirect = true;
+    
+    vkb::DeviceBuilder device_builder{pdev_sel_result.value()};
+    auto device_builder_result = device_builder
+        .add_pNext(&features)
+        .add_pNext(&desc_idx_features)
+        .add_pNext(&dyn_rend_features)
+        .add_pNext(&host_query_features)
+        .add_pNext(&synch2_features)
+        .build();
+    if(!device_builder_result) {
+        spdlog::error("Vulkan: failed to create device: {}", device_builder_result.error().message());
+        return false;
+    }
+    device = device_builder_result->device;
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(device);
+
+    graphics_queue_idx = device_builder_result->get_queue_index(vkb::QueueType::graphics).value();
+    presentation_queue_idx = device_builder_result->get_queue_index(vkb::QueueType::present).value();
+    graphics_queue = device_builder_result->get_queue(vkb::QueueType::graphics).value();
+    presentation_queue = device_builder_result->get_queue(vkb::QueueType::present).value();
+
+    VmaVulkanFunctions vma_vk_funcs{
+        .vkGetInstanceProcAddr = instance_result->fp_vkGetInstanceProcAddr,
+        .vkGetDeviceProcAddr = instance_result->fp_vkGetDeviceProcAddr
+    };
+    VmaAllocatorCreateInfo vma_info{
+        .flags = {},
+        .physicalDevice = physical_device,
+        .device = device,
+        .pVulkanFunctions = &vma_vk_funcs,
+        .instance = instance,
+        .vulkanApiVersion = VK_MAKE_API_VERSION(0, 1, 3, 0),
+    };
+    auto vma_result = vmaCreateAllocator(&vma_info, &vma);
+    if(vma_result != VK_SUCCESS) {
+        spdlog::error("VMA: could not create allocator");
+    }
+
+    vulkan_function_pointers = {
+        .get_instance_proc_addr = instance_result->fp_vkGetInstanceProcAddr,
+        .get_device_proc_addr = instance_result->fp_vkGetDeviceProcAddr,
+    };
+
+    allocator = new RendererAllocator{device, vma};
+
+    return true;
+}
+
+bool Renderer::initialize_swapchain() {
+    vkb::SwapchainBuilder swapchain_builder{physical_device, device, surface, graphics_queue_idx, presentation_queue_idx};
+    auto swapchain_result = swapchain_builder
+        .set_desired_extent(window_width, window_height)
+        .set_desired_format(VkSurfaceFormatKHR{
+            VK_FORMAT_B8G8R8A8_UNORM,
+            VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
+        .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+        .build();
+    if(!swapchain_result) {
+        spdlog::error("Vulkan: could not create swapchain");
+        return false;
+    }
+
+    auto _swapchain = swapchain_result.value();
+    swapchain = _swapchain;
+    auto images = _swapchain.get_images().value();
+    auto views = _swapchain.get_image_views().value();
+    for(auto &img : images) { swapchain_images.push_back(img); }
+    for(auto &view : views) { swapchain_views.push_back(view); }
+    swapchain_format = vk::Format{_swapchain.image_format};
+
+    set_debug_name(swapchain, "swapchain");
+
+    return true;
+}
+
+bool Renderer::initialize_frame_resources() {
+    for(u32 i=0; i<FRAMES_IN_FLIGHT; ++i) {
+        frames.at(i).pool = device.createCommandPool(vk::CommandPoolCreateInfo{
+            vk::CommandPoolCreateFlagBits::eResetCommandBuffer, graphics_queue_idx
+        });
+        frames.at(i).cmd = device.allocateCommandBuffers(vk::CommandBufferAllocateInfo{
+            frames.at(i).pool, vk::CommandBufferLevel::ePrimary, 1
+        })[0];
+        frames.at(i).swapchain_semaphore = device.createSemaphore({});
+        frames.at(i).rendering_semaphore = device.createSemaphore({});
+        frames.at(i).in_flight_fence = device.createFence({vk::FenceCreateFlagBits::eSignaled});
+
+        set_debug_name(frames.at(i).pool, std::format("frame_pool_{}", i));
+        set_debug_name(frames.at(i).cmd, std::format("frame_cmd_{}", i));
+        set_debug_name(frames.at(i).swapchain_semaphore, std::format("frame_swapchain_semaphore_{}", i));
+        set_debug_name(frames.at(i).rendering_semaphore, std::format("frame_rendering_semaphore_{}", i));
+        set_debug_name(frames.at(i).in_flight_fence, std::format("frame_in_flight_fence_{}", i));
+    }
+
+    descriptor_allocator = new DescriptorAllocator{device};
+    global_set = descriptor_allocator->allocate("global_set", DescriptorLayout{{}, {
+        DescriptorBinding{1, vk::DescriptorType::eUniformBuffer},
+        DescriptorBinding{1, vk::DescriptorType::eUniformBuffer},
+        DescriptorBinding{1, vk::DescriptorType::eUniformBuffer},
+    }, {}, 3, false}, 8);
+    imgui_set = descriptor_allocator->allocate("imgui_set", DescriptorLayout{{}, {
+        DescriptorBinding{1, vk::DescriptorType::eCombinedImageSampler}
+    }, {}, 1, false}, 8);
+
+    gi_settings_buffer = Buffer{"gi_settings_buffer", vk::BufferUsageFlagBits::eUniformBuffer, true, sizeof(GlobalIlluminationSettings)};
+    new(gi_settings_buffer->data) GlobalIlluminationSettings{};
+    gi_settings = static_cast<GlobalIlluminationSettings*>(gi_settings_buffer->data);
+
+    light_settings_buffer = Buffer{"light_settings_buffer", vk::BufferUsageFlagBits::eUniformBuffer, true, sizeof(LightsUBO)};
+    new(light_settings_buffer->data) LightsUBO{};
+    light_settings = static_cast<LightsUBO*>(light_settings_buffer->data);
+
+    return true;
+}
+
+bool Renderer::initialize_imgui() {
+    #if 1
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    ImGui::StyleColorsDark();
+
+    if(!ImGui_ImplGlfw_InitForVulkan(window, true)) {
+        spdlog::error("IMGUI: could not init glfw for vulkan");
+        return false;
+    }
+            
+    vk::DescriptorPoolSize sizes[] {
+        vk::DescriptorPoolSize{vk::DescriptorType::eCombinedImageSampler, 4u}
+    };
+
+    auto pool = device.createDescriptorPool(vk::DescriptorPoolCreateInfo{{}, 4, sizes});
+    ImGui_ImplVulkan_InitInfo init_info = {};
+    init_info.Instance = instance;
+    init_info.PhysicalDevice = physical_device;
+    init_info.Device = device;
+    init_info.QueueFamily = graphics_queue_idx;
+    init_info.Queue = graphics_queue;
+    init_info.DescriptorPool = pool;
+    init_info.MinImageCount = swapchain_images.size();
+    init_info.ImageCount = swapchain_images.size();
+    init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    init_info.UseDynamicRendering = true;
+    init_info.PipelineRenderingCreateInfo = vk::PipelineRenderingCreateInfo{
+        0, swapchain_format, depth_texture->format
+    };
+
+    ImGui_ImplVulkan_LoadFunctions([](const char* function_name, void* user_data) {
+        return VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(get_context().renderer->instance, function_name);
+    });
+
+    if(!ImGui_ImplVulkan_Init(&init_info)) {
+        spdlog::error("IMGUI: could not init vulkan impl");
+        return false;
+    }
+
+    #endif
+
+    return true;
+}
+
+bool Renderer::initialize_render_passes() {
+    render_graph = new RenderGraph{descriptor_allocator};
+    
+    voxel_albedo = Texture3D{"voxel_albedo", 256, 256, 256, vk::Format::eR32Uint, 1, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled};
+    voxel_normal = Texture3D{"voxel_normal", 256, 256, 256, vk::Format::eR32Uint, 1, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled};
+    voxel_radiance = Texture3D{"voxel_radiance", 256, 256, 256, vk::Format::eR8G8B8A8Unorm, (u32)std::log2f(256.0f)+1, vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled};
+    depth_texture = Texture2D{"depth_texture", window_width, window_height, vk::Format::eD32Sfloat, 1, vk::ImageUsageFlagBits::eDepthStencilAttachment};
+    vk::Sampler radiance_sampler = device.createSampler(vk::SamplerCreateInfo{
+        {}, vk::Filter::eLinear, vk::Filter::eLinear, vk::SamplerMipmapMode::eLinear, 
+        vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge, vk::SamplerAddressMode::eClampToEdge,
+        0.0f, false, 0.0f, false, {}, 0.0f, (f32)voxel_radiance->mips
+    });
+
+    const std::vector<vk::VertexInputBindingDescription> common_input_bindings{
+        vk::VertexInputBindingDescription{0, sizeof(Vertex), vk::VertexInputRate::eVertex}
+    };
+    const std::vector<vk::VertexInputAttributeDescription> common_input_attributes{
+        vk::VertexInputAttributeDescription{0, 0, vk::Format::eR32G32B32Sfloat, 0},
+        vk::VertexInputAttributeDescription{1, 0, vk::Format::eR32G32B32Sfloat, 12},
+        vk::VertexInputAttributeDescription{2, 0, vk::Format::eR32G32B32Sfloat, 24},
+        vk::VertexInputAttributeDescription{3, 0, vk::Format::eR32G32Sfloat, 36},
+        vk::VertexInputAttributeDescription{4, 0, vk::Format::eR32G32B32Sfloat, 44},
+    };
+
+    PipelineBuilder default_lit_builder{this};
+    pp_default_lit = default_lit_builder
+        .with_vertex_input(common_input_bindings, common_input_attributes)
+        .with_depth_testing(true, true, vk::CompareOp::eLess)
+        .with_culling(vk::CullModeFlagBits::eBack, vk::FrontFace::eCounterClockwise)
+        .with_shaders({"default_lit.vert", "default_lit.frag"})
+        .with_color_attachments({swapchain_format})
+        .with_depth_attachment(vk::Format::eD32Sfloat)
+        .with_variable_upper_limits({128})
+        .build_graphics("default_lit_pipeline");
+
+    PipelineBuilder voxelize_builder{this};
+    pp_voxelize = voxelize_builder
+        .with_vertex_input(common_input_bindings, common_input_attributes)
+        .with_depth_testing(false, false, vk::CompareOp::eAlways)
+        .with_culling(vk::CullModeFlagBits::eNone, vk::FrontFace::eCounterClockwise)
+        .with_shaders({"voxelize.vert", "voxelize.geom", "voxelize.frag"})
+        .with_variable_upper_limits({128})
+        .build_graphics("voxelize_pipeline");
+
+    PipelineBuilder merge_voxels_builder{this};
+    pp_merge_voxels = merge_voxels_builder
+        .with_shaders({"merge_voxels.comp"})
+        .with_variable_upper_limits({128})
+        .build_compute("merge_voxels_pipeline");
+
+    PipelineBuilder imgui_builder{this};
+    pp_imgui = imgui_builder
+        .with_vertex_input(common_input_bindings, common_input_attributes)
+        .with_depth_testing(false, false, vk::CompareOp::eAlways)
+        .with_shaders({ "imgui.vert", "imgui.frag"})
+        .build_graphics("imgui_pipeline");
+
+    glm::mat4 global_buffer_size[2];
+    global_buffer = Buffer{"global_ubo", vk::BufferUsageFlagBits::eUniformBuffer, true, std::as_bytes(std::span{global_buffer_size})};
+    global_set.update(0, 0, {{&global_buffer}, {&gi_settings_buffer}, {&light_settings_buffer}});
+
+    #if 1
+    const auto res_voxel_albedo = render_graph->add_resource(RGResource{"voxel_albedo", voxel_albedo});
+    const auto res_voxel_normal = render_graph->add_resource(RGResource{"voxel_normal", voxel_normal});
+    const auto res_voxel_radiance = render_graph->add_resource(RGResource{"voxel_radiance", voxel_radiance});
+    const auto res_color_attachment = render_graph->add_resource(RGResource{"color_attachment", Texture{}});
+    const auto res_depth_attachment = render_graph->add_resource(RGResource{"depth_attachment", depth_texture});
+    const auto res_radiance_sampler = render_graph->add_resource(RGResource{"radiance_sampler", radiance_sampler});
+
+    static bool once = true;
+
+    const auto create_clear_pass = [&](RgResourceHandle resource) {
+        RenderPass pass_clear;
+        pass_clear
+            .set_name(std::format("clear_{}", render_graph->get_resource(resource).name))
+            .write_to_image(RPResource{
+                resource,
+                RGSyncStage::Transfer,
+                TextureInfo{
+                    .required_layout = RGImageLayout::TransferDst,
+                    .range = {0, vk::RemainingMipLevels, 0, vk::RemainingArrayLayers}
+                }
+            })
+            .set_draw_func([rg = render_graph, resource](vk::CommandBuffer cmd) {
+                if(!once) { return; }
+                const auto& r = rg->get_resource(resource);
+                cmd.clearColorImage(std::get<1>(r.resource).first.image, vk::ImageLayout::eTransferDstOptimal, vk::ClearColorValue{0.0f, 0.0f, 0.0f, 0.0f}, vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, vk::RemainingMipLevels, 0, vk::RemainingArrayLayers});
+            });
+        return pass_clear;
+    };
+
+    render_graph->add_render_pass(create_clear_pass(res_voxel_albedo));
+    render_graph->add_render_pass(create_clear_pass(res_voxel_normal));
+    render_graph->add_render_pass(create_clear_pass(res_voxel_radiance));
+
+    RenderPass pass_voxelization;
+    pass_voxelization
+        .set_name("voxelization")
+        .set_pipeline(&pp_voxelize)
+        .set_rendering_extent(RenderPassRenderingExtent{
+            .viewport = {0.0f, 0.0f, 256.0f, 256.0f, 0.0f, 1.0f},
+            .scissor = {0, 0, 256, 256}
+        })
+        .write_to_image(RPResource{
+            res_voxel_albedo,
+            RGSyncStage::Fragment,
+            TextureInfo{
+                .required_layout = RGImageLayout::General,
+            }
+        })
+        .write_to_image(RPResource{
+            res_voxel_normal,
+            RGSyncStage::Fragment,
+            TextureInfo{
+                .required_layout = RGImageLayout::General,
+            }
+        })
+        .set_draw_func([this](vk::CommandBuffer cmd) {
+            if(!once) { return; }
+            render_scene.render(cmd);
+        });
+    render_graph->add_render_pass(pass_voxelization);
+
+    RenderPass pass_radiance_inject;
+    pass_radiance_inject
+        .set_name("radiance_inject")
+        .set_pipeline(&pp_merge_voxels)
+        .set_rendering_extent(RenderPassRenderingExtent{
+            .viewport = {0.0f, 0.0f, 256.0f, 256.0f, 0.0f, 1.0f},
+            .scissor = {0, 0, 256, 256}
+        })
+        .read_from_image(RPResource{
+            res_voxel_albedo, 
+            RGSyncStage::Compute,
+            TextureInfo{
+                .required_layout = RGImageLayout::General,
+                .mutable_format = RGImageFormat::RGBA8Unorm
+            }
+        })
+        .read_from_image(RPResource{
+            res_voxel_normal, 
+            RGSyncStage::Compute,
+            TextureInfo{
+                .required_layout = RGImageLayout::General,
+                .mutable_format = RGImageFormat::RGBA8Unorm
+            }
+        })
+        .write_to_image(RPResource{
+            res_voxel_radiance, 
+            RGSyncStage::Compute,
+            TextureInfo{
+                .required_layout = RGImageLayout::General,
+            }
+        })
+        .set_sampler(res_radiance_sampler) 
+        .set_draw_func([this](vk::CommandBuffer cmd) {
+            cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pp_merge_voxels.layout.layout, 0, global_set.set, {});
+            cmd.dispatch(256/8, 256/8, 256/8);
+        });
+    render_graph->add_render_pass(pass_radiance_inject);
+
+    for(u32 i=1; i<voxel_radiance->mips; ++i) {
+        RenderPass mip_pass;
+        mip_pass
+            .set_name(std::format("radiance_mip_{}", i))
+            .read_from_image(RPResource{
+                res_voxel_radiance, 
+                RGSyncStage::Transfer,
+                TextureInfo{
+                    .required_layout = RGImageLayout::General,
+                    .range = {i-1, 1, 0, 1}
+                }
+            })
+            .write_to_image(RPResource{
+                res_voxel_radiance, 
+                RGSyncStage::Transfer,
+                TextureInfo{
+                    .required_layout = RGImageLayout::General,
+                    .range = {i, 1, 0, 1}
+                }
+            })
+            .set_draw_func([&, i](vk::CommandBuffer cmd) {
+                if(!once) { return; }
+                i32 mip_size = 256u >> i;
+                cmd.blitImage(voxel_radiance->image, vk::ImageLayout::eGeneral,
+                    voxel_radiance->image, vk::ImageLayout::eGeneral,
+                    vk::ImageBlit{
+                        vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, i-1, 0, 1},
+                        { vk::Offset3D{}, vk::Offset3D{mip_size<<1, mip_size<<1, mip_size<<1} },
+                        vk::ImageSubresourceLayers{vk::ImageAspectFlagBits::eColor, i, 0, 1},
+                        { vk::Offset3D{}, vk::Offset3D{mip_size, mip_size, mip_size} },
+                    },
+                    vk::Filter::eLinear);
+            });
+        render_graph->add_render_pass(mip_pass);
+    }
+        
+    RenderPass pass_default_lit;
+    pass_default_lit
+        .set_name("default_lit")
+        .set_pipeline(&pp_default_lit)
+        .set_rendering_extent(RenderPassRenderingExtent{
+            .viewport = {0.0f, 768.0f, 1024.0f, -768.0f, 0.0f, 1.0f},
+            .scissor = {0, 0, 1024, 768}
+        })
+        .read_from_image(RPResource{
+            res_voxel_radiance, 
+            RGSyncStage::Fragment,
+            TextureInfo{
+                .required_layout = RGImageLayout::General,
+                .range = {0, voxel_radiance->mips, 0, 1}
+            }
+        })
+        .write_color_attachment(RPResource{
+            res_color_attachment,
+            RGSyncStage::ColorAttachmentOutput,
+            TextureInfo{
+                .required_layout = RGImageLayout::Attachment
+            }
+        })
+        .write_depth_attachment(RPResource{
+            res_depth_attachment,
+            RGSyncStage::EarlyFragment,
+            TextureInfo{
+                .required_layout = RGImageLayout::Attachment
+            }
+        })
+        .set_draw_func([&](vk::CommandBuffer cmd) {
+            render_scene.render(cmd);
+        });
+    render_graph->add_render_pass(pass_default_lit);
+
+    RenderPass pass_imgui;
+    pass_imgui
+        .set_name("pass imgui")
+        .set_pipeline(&pp_imgui)
+        .set_rendering_extent(RenderPassRenderingExtent{
+            .viewport = {0.0f, 768.0f, 1024.0f, -768.0f, 0.0f, 1.0f},
+            .scissor = {0, 0, 1024, 768}
+        })
+        .write_color_attachment(RPResource{
+            res_color_attachment,
+            RGSyncStage::ColorAttachmentOutput,
+            TextureInfo{
+                .required_layout = RGImageLayout::Attachment
+            },
+            RGAttachmentLoadStoreOp::Load
+        })
+        .set_draw_func([&](vk::CommandBuffer cmd) {
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            ImGui::Begin("asd");
+            if(ImGui::CollapsingHeader("gi_settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("voxel_resolution",                 &gi_settings->voxel_resolution, 1.0f, 512.0f);
+                ImGui::SliderFloat("voxel_area",                       &gi_settings->voxel_area, 0.0f, 512.0f);
+                ImGui::SliderFloat("voxel_size",                       &gi_settings->voxel_size, 0.0f, 100.0f);
+                ImGui::SliderFloat("trace_distance",                   &gi_settings->trace_distance, 0.0f, 512.0f);
+                ImGui::SliderFloat("diffuse_cone_aperture",            &gi_settings->diffuse_cone_aperture, 0.0f, glm::pi<float>());
+                ImGui::SliderFloat("specular_cone_aperture",           &gi_settings->specular_cone_aperture, 0.0f, glm::pi<float>());
+                ImGui::SliderFloat("occlusion_cone_aperture",          &gi_settings->occlusion_cone_aperture, 0.001f, glm::pi<float>());
+                ImGui::SliderFloat("aoalpha",          &gi_settings->aoAlpha, 0.0f, 2.0f);
+                ImGui::SliderFloat("aofallof",          &gi_settings->aoFalloff, 0.0f, 1000.0f);
+                ImGui::SliderFloat("traceshadowhit",          &gi_settings->traceShadowHit, 0.0f, 100.0f);
+                ImGui::Checkbox("merge_voxels_calc_occlusion",         reinterpret_cast<bool*>(&gi_settings->merge_voxels_calc_occlusion));
+                ImGui::Checkbox("lighting_use_merge_voxels_occlusion", reinterpret_cast<bool*>(&gi_settings->lighting_use_merge_voxels_occlusion));
+                ImGui::Checkbox("lighting_calc_occlusion",             reinterpret_cast<bool*>(&gi_settings->lighting_calc_occlusion));
+            }   
+            if(ImGui::CollapsingHeader("light_settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                for(u32 i=0; i<light_settings->num_dirs; ++i) {
+                    const auto dir = std::format("dir_light_{}", i+1);
+                    const auto col = std::format("col_light_{}", i+1);
+                    const auto str = std::format("str_ligh_{}", i+1);
+                    ImGui::PushID(i);
+                    if(ImGui::SliderFloat3(dir.c_str(), &light_settings->dirs[i].dir.x, -1.0f, 1.0f)) {
+                        light_settings->dirs[i].dir = glm::normalize(light_settings->dirs[i].dir);
+                    }
+                    ImGui::ColorEdit3(col.c_str(), &light_settings->dirs[i].col.x);
+                    ImGui::SliderFloat(str.c_str(), &light_settings->dirs[i].col.w, 0.0f, 10.0f);
+                    ImGui::PopID();
+                }
+            }
+            if(ImGui::CollapsingHeader("Other", ImGuiTreeNodeFlags_DefaultOpen)) {
+                if(ImGui::Button("Recompile shaders")) {
+                    initialize_render_passes();
+                }
+            }
+            ImGui::End();
+
+            ImGui::Render();
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), get_frame_res().cmd);
+        });
+    render_graph->add_render_pass(pass_imgui);
+
+    RenderPass pass_presentation;
+    pass_presentation
+        .set_name("presentation")
+        .read_color_attachment(RPResource{
+            res_color_attachment,
+            RGSyncStage::AllGraphics,
+            TextureInfo{
+                .required_layout = RGImageLayout::PresentSrc
+            }
+        });
+    render_graph->add_render_pass(pass_presentation);
+    render_graph->bake_graph();
+    #endif
+
+    return true;
+}
+```
+
+### source/renderer.hpp
+```
+#pragma once
+#include "types.hpp"
+#include "renderer_types.hpp"
+#include "pipelines.hpp"
+#include "descriptor.hpp"
+#include "context.hpp"
+#include "scene.hpp"
+#include <vulkan/vulkan.hpp>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <vector>
+#include <array>
+
+class RenderGraph;
+class RendererAllocator;
+
+struct PointLight {
+    alignas(16) glm::vec3 pos;
+    alignas(16) glm::vec4 col;
+    alignas(16) glm::vec3 att;
+};
+
+struct DirectionLight {
+    alignas(16) glm::vec3 dir;
+    alignas(16) glm::vec4 col;
+};
+
+struct LightsUBO {
+    u32 num_points{0}, num_dirs{1};
+    PointLight points[8];
+    DirectionLight dirs[8] = {
+        {glm::normalize(glm::vec3{0.0, -0.877, 0.48}), glm::vec4{238.0f/255.0f, 228.0f/255.0f, 203.0f/255.0f, 3.5f}}
+    };
+};
+
+struct GpuMesh {
+    const Mesh* mesh;
+    u32 vertex_offset, vertex_count;
+    u32 index_offset, index_count;
+    u32 instance_offset, instance_count;
+};
+
+struct GpuInstancedMesh {
+    u32 diffuse_texture_idx{0};
+    u32 normal_texture_idx{0};
+};
+
+struct GpuModel { 
+    Handle<Model> model;
+    u64 offset_to_gpu_meshes{0};
+    u64 offset_to_instanced_meshes{0};
+};
+
+struct GpuScene {
+    void render(vk::CommandBuffer cmd);
+    
+    std::vector<GpuModel> models;
+    std::vector<GpuMesh> meshes;
+    Buffer vertex_buffer;
+    Buffer index_buffer;
+    Buffer instance_buffer;
+    Buffer indirect_commands_buffer;
+    u32 draw_count; 
+};
+
+struct GlobalIlluminationSettings {
+    float voxel_resolution{256.0f};
+    float voxel_area{2.0f}; // from -1 to 1 would be 2
+    float voxel_size{2.0f / 256.0f}; // area / res
+    float trace_distance{2.0f}; // [0, res*sqrt(2)]
+    float diffuse_cone_aperture{0.25};
+    float specular_cone_aperture{0.08f};
+    float occlusion_cone_aperture{0.08f};
+    float aoAlpha{0.0f};
+    float aoFalloff{800.0f};
+    float traceShadowHit{1.0f};
+    int merge_voxels_calc_occlusion{1};
+    int lighting_use_merge_voxels_occlusion{1};
+    int lighting_calc_occlusion{1};
+};
+
+inline vk::ImageViewType to_vk_view_type(vk::ImageType type) {
+    switch (type) {
+        case vk::ImageType::e1D: { return vk::ImageViewType::e1D; }
+        case vk::ImageType::e2D: { return vk::ImageViewType::e2D; }
+        case vk::ImageType::e3D: { return vk::ImageViewType::e3D; }
+        default: {
+            spdlog::error("Unrecognized ImageType: {}", (u32)type);
+            std::terminate();
+        }
+    }
+}
+
+inline vk::ImageAspectFlags deduce_vk_image_aspect(vk::Format format) {
+    switch(format) {
+        case vk::Format::eD16Unorm:
+        case vk::Format::eD32Sfloat: {
+            return vk::ImageAspectFlagBits::eDepth;
+        }
+        case vk::Format::eD16UnormS8Uint:
+        case vk::Format::eD24UnormS8Uint:
+        case vk::Format::eD32SfloatS8Uint: {
+            return vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+        }
+        default: {
+            return vk::ImageAspectFlagBits::eColor;
+        }
+    }
+}
+
+class Renderer {
+public:
+    bool initialize();
+    void setup_scene();
+    void render();
+
+private:
+    bool initialize_vulkan();
+    bool initialize_swapchain();
+    bool initialize_frame_resources();
+    bool initialize_imgui();
+    bool initialize_render_passes();
+
+    void load_waiting_textures(vk::CommandBuffer cmd);
+
+    FrameResources& get_frame_res() { return frames.at(frame_number % FRAMES_IN_FLIGHT); }
+
+public:
+    static constexpr inline u32 FRAMES_IN_FLIGHT = 2;
+
+    u32 frame_number{0};
+    u32 window_width{1024}, window_height{768};
+    GLFWwindow *window{nullptr};
+    vk::Instance instance;
+    vk::SurfaceKHR surface;
+    vk::PhysicalDevice physical_device;
+    vk::Device device;
+    u32 graphics_queue_idx, presentation_queue_idx;
+    vk::Queue graphics_queue, presentation_queue;
+    VmaAllocator vma;
+    vk::SwapchainKHR swapchain;
+    std::vector<vk::Image> swapchain_images;
+    std::vector<vk::ImageView> swapchain_views;
+    vk::Format swapchain_format;
+    std::array<FrameResources, FRAMES_IN_FLIGHT> frames{};
+    struct {
+        PFN_vkGetInstanceProcAddr get_instance_proc_addr;
+        PFN_vkGetDeviceProcAddr get_device_proc_addr;
+    } vulkan_function_pointers;
+    
+    DescriptorSet global_set, material_set, imgui_set;
+    Texture3D voxel_albedo, voxel_normal, voxel_radiance;
+    Texture2D depth_texture;
+    Buffer global_buffer, gi_settings_buffer, light_settings_buffer;
+    GlobalIlluminationSettings* gi_settings;
+    LightsUBO* light_settings;
+
+    Pipeline pp_default_lit;
+    Pipeline pp_voxelize;
+    Pipeline pp_merge_voxels;
+    Pipeline pp_imgui;
+    bool recompile_pipelines = false;
+
+    DescriptorAllocator* descriptor_allocator;
+    RenderGraph* render_graph;
+    RendererAllocator* allocator;
+    GpuScene render_scene;
+
+    std::vector<std::function<void()>> deletion_queue;
+};
+```
+
+### source/renderer_types.hpp
+```
+#pragma once
+
+#include "types.hpp"
+#include "context.hpp"
+#include <vulkan/vulkan_structs.hpp>
+#include <vk_mem_alloc.h>
+#include <vector>
+#include <array>
+
+struct BufferAllocation : public Handle<BufferAllocation> {
+    constexpr BufferAllocation() = default;
+    BufferAllocation(vk::Buffer buffer, vk::BufferUsageFlags usage, void* data, u64 size, VmaAllocation alloc)
+        : Handle(HandleGenerate), buffer(buffer), usage(usage), data(data), size(size) {}
+
+    vk::Buffer buffer;
+    vk::BufferUsageFlags usage;
+    void* data;
+    u64 size;
+    VmaAllocation alloc;
+};
+
+struct Buffer {
+    constexpr Buffer() = default;
+    Buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, u64 size);
+    Buffer(std::string_view label, vk::BufferUsageFlags usage, bool map_memory, std::span<const std::byte> optional_data = {});
+
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+    constexpr Buffer(Buffer&& other) noexcept { *this = std::move(other); }
+    constexpr Buffer& operator=(Buffer&& other) noexcept {
+        allocation = std::move(other.allocation);
+        buffer = std::exchange(other.buffer, nullptr);
+        return *this;
+    }
+
+    constexpr operator bool() const noexcept { return static_cast<bool>(allocation); }
+    BufferAllocation* operator->();
+    const BufferAllocation* operator->() const;
+
+    Handle<BufferAllocation> allocation;
+    vk::Buffer buffer;
+};
+
+struct FrameResources {
+    vk::CommandPool pool;
+    vk::CommandBuffer cmd;
+    vk::Semaphore swapchain_semaphore, rendering_semaphore;
+    vk::Fence in_flight_fence;
+};
+
+struct TextureAllocation : public Handle<TextureAllocation> {
+    constexpr TextureAllocation() = default;
+    TextureAllocation(
+        vk::ImageType type,
+        u32 width, 
+        u32 height, 
+        u32 depth,
+        u32 mips, 
+        u32 layers,
+        vk::Format format,
+        vk::ImageLayout current_layout,
+        vk::Image image,
+        VmaAllocation alloc,
+        vk::ImageView default_view,
+        vk::Filter min_filter = vk::Filter::eLinear,
+        vk::Filter mag_filter = vk::Filter::eLinear,
+        vk::SamplerMipmapMode mip_filter = vk::SamplerMipmapMode::eLinear)
+        : Handle(HandleGenerate), type(type), width(width), height(height), depth(depth),
+            mips(mips), layers(layers), format(format), current_layout(current_layout), image(image),
+            alloc(alloc), default_view(default_view), min_filter(min_filter), mag_filter(mag_filter),
+            mip_filter(mip_filter)
+        {}
+    
+    vk::ImageType type;
+    u32 width, height, depth;
+    u32 mips, layers;
+    vk::Format format;
+    vk::ImageLayout current_layout;
+    vk::Image image;
+    VmaAllocation alloc;
+    vk::ImageView default_view;
+    vk::Filter min_filter{vk::Filter::eLinear}, mag_filter{vk::Filter::eLinear};
+    vk::SamplerMipmapMode mip_filter{vk::SamplerMipmapMode::eLinear};
+};
+
+struct Texture {
+    constexpr Texture() = default;
+    Texture(Handle<TextureAllocation> storage): storage(storage) {
+        image = Texture::operator->()->image;
+    }
+
+    constexpr operator bool() const noexcept { return static_cast<bool>(storage); }
+    TextureAllocation* operator->();
+    const TextureAllocation* operator->() const;
+
+    Handle<TextureAllocation> storage;
+    vk::Image image;
+};
+
+struct Texture2D : public Texture {
+    constexpr Texture2D() = default;
+    Texture2D(std::string_view label, u32 width, u32 height, vk::Format format, u32 mips, vk::ImageUsageFlags usage, std::span<const std::byte> optional_data = {});
+};
+
+struct Texture3D : public Texture {
+    constexpr Texture3D() = default;
+    Texture3D(std::string_view label, u32 width, u32 height, u32 depth, vk::Format format, u32 mips, vk::ImageUsageFlags usage); 
+};
+
+struct GLFWwindow;
+struct Window {
+    u32 width{1024}, height{768};
+    GLFWwindow* window{nullptr};
+};
+
+template<typename VkObject> struct VulkanObjectType;
+template<> struct VulkanObjectType<vk::SwapchainKHR> { static inline constexpr vk::ObjectType type = vk::ObjectType::eSwapchainKHR; };
+template<> struct VulkanObjectType<vk::CommandPool> { static inline constexpr vk::ObjectType type = vk::ObjectType::eCommandPool; };
+template<> struct VulkanObjectType<vk::CommandBuffer> { static inline constexpr vk::ObjectType type = vk::ObjectType::eCommandBuffer; };
+template<> struct VulkanObjectType<vk::Fence> { static inline constexpr vk::ObjectType type = vk::ObjectType::eFence; };
+template<> struct VulkanObjectType<vk::Semaphore> { static inline constexpr vk::ObjectType type = vk::ObjectType::eSemaphore; };
+template<> struct VulkanObjectType<vk::Buffer> { static inline constexpr vk::ObjectType type = vk::ObjectType::eBuffer; };
+template<> struct VulkanObjectType<vk::Pipeline> { static inline constexpr vk::ObjectType type = vk::ObjectType::ePipeline; };
+template<> struct VulkanObjectType<vk::PipelineLayout> { static inline constexpr vk::ObjectType type = vk::ObjectType::ePipelineLayout; };
+template<> struct VulkanObjectType<vk::ShaderModule> { static inline constexpr vk::ObjectType type = vk::ObjectType::eShaderModule; };
+template<> struct VulkanObjectType<vk::DescriptorSetLayout> { static inline constexpr vk::ObjectType type = vk::ObjectType::eDescriptorSetLayout; };
+template<> struct VulkanObjectType<vk::DescriptorPool> { static inline constexpr vk::ObjectType type = vk::ObjectType::eDescriptorPool; };
+template<> struct VulkanObjectType<vk::DescriptorSet> { static inline constexpr vk::ObjectType type = vk::ObjectType::eDescriptorSet; };
+template<> struct VulkanObjectType<vk::Image> { static inline constexpr vk::ObjectType type = vk::ObjectType::eImage; };
+template<> struct VulkanObjectType<vk::ImageView> { static inline constexpr vk::ObjectType type = vk::ObjectType::eImageView; };
+
+struct SetDebugNameDetails {
+    static vk::Device device();
+    static vk::Instance instance();
+    static PFN_vkGetInstanceProcAddr get_instance_proc_addr();
+    static PFN_vkGetDeviceProcAddr get_device_proc_addr();
+};
+
+template<typename T> inline void set_debug_name(T object, std::string_view name) {
+    SetDebugNameDetails::device().setDebugUtilsObjectNameEXT(vk::DebugUtilsObjectNameInfoEXT{
+        VulkanObjectType<T>::type, (u64)static_cast<T::NativeType>(object), name.data()
+    }, vk::DispatchLoaderDynamic{
+            SetDebugNameDetails::instance(),
+            SetDebugNameDetails::get_instance_proc_addr(),
+            SetDebugNameDetails::device(),
+            SetDebugNameDetails::get_device_proc_addr(),
+        }
+    );
+}
+```
+
+### source/scene.cpp
+```
+#include "scene.hpp"
+
+#include <spdlog/spdlog.h>
+#include <fastgltf/core.hpp>
+#include <fastgltf/types.hpp>
+#include <fastgltf/tools.hpp>
+#include <fastgltf/glm_element_traits.hpp>
+#include <stb/stb_image.h>
+
+static Texture2D get_asset_texture(const fastgltf::Asset* asset, u64 texture_index, std::unordered_map<std::filesystem::path, Texture2D>* cache) {
+    const auto& texture = asset->textures.at(texture_index);
+    const auto& image = asset->images.at(texture.imageIndex.value()); // watch out for this, should further extensions be enabled.
+
+    if(auto tex = cache->find(image.name); tex != cache->end()) {
+        return tex->second;
+    } 
+
+    if(const auto* array = std::get_if<fastgltf::sources::Array>(&image.data)) {
+        int x, y, ch;
+        auto raw_image = reinterpret_cast<std::byte*>(stbi_load_from_memory(array->bytes.data(), array->bytes.size(), &x, &y, &ch, 4));
+        auto& new_tex = cache->insert({
+            image.name,
+            Texture2D{std::format("scene_texture_2d_{}", image.name), (u32)x, (u32)y, vk::Format::eR8G8B8A8Unorm, (u32)std::log2f(std::min(x, y)) + 1, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc, std::span{raw_image, x*y*4u}}
+            // Texture2D{std::format("scene_texture_2d_{}", image.name), (u32)x, (u32)y, vk::Format::eR8G8B8A8Unorm, 1u, vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc, std::span{raw_image, x*y*4u}}
+        }).first->second;
+        return new_tex;
+    } else {
+        std::terminate();
+        return {};
+    }
+}
+
+Handle<Model> Scene::load_model(const std::filesystem::path& path) {
+    fastgltf::Parser parser;
+
+    fastgltf::GltfDataBuffer data;
+    data.loadFromFile(path);
+
+    static constexpr auto options = 
+        fastgltf::Options::DontRequireValidAssetMember |
+        fastgltf::Options::LoadExternalBuffers |
+        fastgltf::Options::LoadExternalImages;
+
+    auto asset = parser.loadGltf(&data, path.parent_path(), options);
+    if(auto error = asset.error(); error != fastgltf::Error::None) {
+        spdlog::error("fastgltf: Unable to load file: {}", fastgltf::getErrorMessage(error));
+        return Handle<Model>{0ull};
+    }
+
+    std::stack<const fastgltf::Node*> node_stack;
+    for(auto node : asset->scenes[0].nodeIndices) {
+        node_stack.emplace(&asset->nodes[node]);
+    }
+
+    Model model;
+    model.handle = HandleGenerator<Model>::generate();
+
+    while(!node_stack.empty()) {
+        auto node = node_stack.top();
+        node_stack.pop();
+
+        for(auto node : node->children) {
+            node_stack.emplace(&asset->nodes[node]);
+        }
+
+        if(!node->meshIndex.has_value()) { continue; }
+        const auto& fgmesh = asset->meshes[node->meshIndex.value()];
+
+        for(const auto& primitive : fgmesh.primitives) {
+            if(!primitive.indicesAccessor.has_value()) {
+                spdlog::error("Primitive in mesh {} has no indices. Skipping.", fgmesh.name);
+                continue;
+            }
+
+            Mesh& mesh = model.meshes.emplace_back();
+            mesh.name = fgmesh.name;
+
+            auto& positions = asset->accessors[primitive.findAttribute("POSITION")->second];
+            auto& normals = asset->accessors[primitive.findAttribute("NORMAL")->second];
+            auto& indices = asset->accessors[primitive.indicesAccessor.value()];
+            auto initial_index = mesh.vertices.size();
+
+            mesh.vertices.resize(mesh.vertices.size() + positions.count);
+            fastgltf::iterateAccessorWithIndex<glm::vec3>(asset.get(), positions, [&](glm::vec3 vec, size_t idx) {
+                mesh.vertices[initial_index + idx].position = vec; 
+            });
+            fastgltf::iterateAccessorWithIndex<glm::vec3>(asset.get(), normals, [&](glm::vec3 vec, size_t idx) {
+                mesh.vertices[initial_index + idx].normal = vec; 
+            });
+            if(primitive.findAttribute("COLOR_0") != primitive.attributes.end()) {
+                auto& colors = asset->accessors[primitive.findAttribute("COLOR_0")->second];
+                fastgltf::iterateAccessorWithIndex<glm::vec4>(asset.get(), colors, [&](glm::vec4 vec, size_t idx) {
+                    mesh.vertices[initial_index + idx].color = glm::vec3{vec.x, vec.y, vec.z}; 
+                });
+            } else {
+                fastgltf::iterateAccessorWithIndex<glm::vec3>(asset.get(), positions, [&](glm::vec3 vec, size_t idx) {
+                    mesh.vertices[initial_index + idx].color = glm::vec3{1.0};
+                });
+            }
+            if(primitive.findAttribute("TEXCOORD_0") != primitive.attributes.end()) {
+                auto& uvs = asset->accessors[primitive.findAttribute("TEXCOORD_0")->second];
+                fastgltf::iterateAccessorWithIndex<glm::vec2>(asset.get(), uvs, [&](glm::vec2 vec, size_t idx) {
+                    mesh.vertices[initial_index + idx].uv = vec;
+                });
+            } else {
+                fastgltf::iterateAccessorWithIndex<glm::vec3>(asset.get(), positions, [&](glm::vec3 vec, size_t idx) {
+                    mesh.vertices[initial_index + idx].uv = glm::vec2{0.0f};
+                });
+            }
+            if(primitive.findAttribute("TANGENT") != primitive.attributes.end()) {
+                auto& tans = asset->accessors[primitive.findAttribute("TANGENT")->second];
+                fastgltf::iterateAccessorWithIndex<glm::vec4>(asset.get(), tans, [&](glm::vec4 vec, size_t idx) {
+                    mesh.vertices[initial_index + idx].tangent = vec;
+                });
+            } else {
+                fastgltf::iterateAccessorWithIndex<glm::vec3>(asset.get(), positions, [&](glm::vec3 vec, size_t idx) {
+                    mesh.vertices[initial_index + idx].tangent = glm::vec3{0.0f};
+                });
+            }
+
+            initial_index = mesh.indices.size();
+            mesh.indices.resize(mesh.indices.size() + indices.count);
+            fastgltf::iterateAccessorWithIndex<u32>(asset.get(), indices, [&mesh, initial_index](u32 index, u32 idx) {
+                mesh.indices[initial_index + idx] = index;
+            });
+
+            if(!primitive.materialIndex.has_value()) { continue; }
+
+            const auto& material = asset->materials[primitive.materialIndex.value()];
+            if(material.pbrData.baseColorTexture.has_value()) {
+                mesh.material.diffuse_texture = get_asset_texture(&asset.get(), material.pbrData.baseColorTexture->textureIndex, &material_textures);
+            }
+            if(material.normalTexture.has_value()) {
+                mesh.material.normal_texture = get_asset_texture(&asset.get(), material.normalTexture->textureIndex, &material_textures);
+            }
+        }
+    }
+
+    models.push_back(std::move(model));
+    return models.back();
+}
+
+Handle<SceneModel> Scene::add_model(const std::string& name, Handle<Model> model) {
+    return scene_models.emplace_back(name, model);
+}
+
+Model& Scene::get_model(Handle<Model> model) {
+    return *std::find(models.begin(), models.end(), model);
+}
+```
+
+### source/scene.hpp
+```
+#pragma once
+
+#include "types.hpp"
+#include "renderer_types.hpp"
+#include <glm/glm.hpp>
+#include <filesystem>
+#include <string>
+#include <vector>
+#include <optional>
+
+struct Vertex {
+    glm::vec3 position;
+    glm::vec3 normal;
+    glm::vec3 color;
+    glm::vec2 uv;
+    glm::vec3 tangent;
+};
+
+struct Material {
+    Texture2D diffuse_texture{};
+    Texture2D normal_texture{};
+};
+
+struct Mesh {
+    std::string name;
+    std::vector<Vertex> vertices;
+    std::vector<u32> indices;
+    Material material;
+};
+
+struct Model : public Handle<Model> {
+    std::vector<Mesh> meshes;
+};
+
+struct SceneModel : public Handle<SceneModel> {
+    constexpr SceneModel() = default;
+    SceneModel(const std::string& name, Handle<Model> model): Handle(HandleGenerate), name(name), model(model) {}
+    std::string name;
+    Handle<Model> model;
+};
+
+class Scene {
+public:
+    Handle<Model> load_model(const std::filesystem::path& path);
+    Handle<SceneModel> add_model(const std::string& name, Handle<Model> model);
+    Model& get_model(Handle<Model> model);
+    
+private:
+    friend class Renderer;
+
+    std::vector<Model> models;
+    std::vector<SceneModel> scene_models;
+    std::unordered_map<std::filesystem::path, Texture2D> material_textures;
+};
+```
+
+### source/types.hpp
+```
+#pragma once
+
+#include <cstdint>
+#include <atomic>
+#include <compare>
+
+typedef int8_t i8;
+typedef uint8_t u8;
+typedef int32_t i32;
+typedef uint32_t u32;
+typedef int64_t i64;
+typedef uint64_t u64;
+typedef float f32;
+typedef double f64;
+typedef const char* cstring;
+
+struct HandleGenerate_T {};
+inline constexpr HandleGenerate_T HandleGenerate;
+
+template<typename T> struct Handle;
+
+template<typename T> struct HandleGenerator {
+    inline static u64 generate() { return ++counter; }
+    inline static std::atomic_uint64_t counter{0ull};
+};
+
+template<typename T> struct Handle { 
+    constexpr Handle() = default;
+    constexpr explicit Handle(u64 handle): handle(handle) {}
+    constexpr explicit Handle(HandleGenerate_T): Handle(HandleGenerator<T>::generate()) {}
+    constexpr Handle(const Handle& other) noexcept = default;
+    constexpr Handle& operator=(const Handle& other) noexcept = default;
+    constexpr Handle(Handle&& other) noexcept { *this = std::move(other); }
+    constexpr Handle& operator=(Handle&& other) noexcept {
+        handle = std::exchange(other.handle, 0u);
+        return *this;
+    }
+    constexpr operator bool() const noexcept { return handle != 0ull; }
+    constexpr auto operator<=>(const Handle<T>& other) const noexcept = default;
+    u64 handle{0ull}; 
+};
+
+namespace std {
+    template<typename T> struct hash<Handle<T>> {
+        size_t operator()(const Handle<T>& h) const { return h.handle; }
+    };
+}
+
+template<class... Ts> struct visitor : Ts...  { using Ts::operator()...; };
+template<class... Ts> visitor(Ts...) -> visitor<Ts...>;
+```
+
+### data/shaders/default_lit.frag
+```
+#version 460 core
+#extension GL_EXT_nonuniform_qualifier : require
+
+#define PI 3.14159265359
+#define EPSILON 1e-8
+
+layout(location=0) out vec4 outColor;
+
+layout(location=0) in FS_IN {
+    vec3 frag_pos;
+    vec3 frag_normal;
+    vec3 frag_color;
+    vec2 frag_uv;
+    vec3 frag_tan;
+    vec3 frag_bitan;
+    mat3 frag_tbn;
+    flat int frag_instance_index;
+};
+
+#include "global_set"
+#include "material_set"
+
+layout(set=2, binding=0) uniform sampler3D voxel_radiance;
+
+const vec3 diffuseConeDirections[] =
+{
+    vec3(0.0, 1.0, 0.0),
+    vec3(0.0, 0.5, 0.866025),
+    vec3(0.823639, 0.5, 0.267617),
+    vec3(0.509037, 0.5, -0.7006629),
+    vec3(-0.50937, 0.5, -0.7006629),
+    vec3(-0.823639, 0.5, 0.267617)
+};
+
+const float diffuseConeWeights[] =
+{
+    PI / 4.0,
+    3.0 * PI / 20.0,
+    3.0 * PI / 20.0,
+    3.0 * PI / 20.0,
+    3.0 * PI / 20.0,
+    3.0 * PI / 20.0,
+};
+
+vec3 position;
+vec3 albedo;
+vec3 normal;
+
+vec3 WorldToVoxel(vec3 position)
+{
+    vec3 voxelPos = position * 0.5 + 0.5; // position: [-1 - +1]*0.5+0.5 -> [0 - 1]*vxscale -> [0, 256]
+    return voxelPos;
+}
+
+bool IntersectRayWithWorldAABB(vec3 ro, vec3 rd, out float enter, out float leave)
+{
+    vec3 worldMinPoint = vec3(-2.0);
+    vec3 worldMaxPoint = vec3(2.0);
+
+    vec3 tempMin = (worldMinPoint - ro) / rd; 
+    vec3 tempMax = (worldMaxPoint - ro) / rd;
+    
+    vec3 v3Max = max (tempMax, tempMin);
+    vec3 v3Min = min (tempMax, tempMin);
+    
+    leave = min (v3Max.x, min (v3Max.y, v3Max.z));
+    enter = max (max (v3Min.x, 0.0), max (v3Min.y, v3Min.z));    
+    
+    return leave > enter;
+}
+
+vec4 TraceCone(vec3 position, vec3 normal, vec3 direction, float aperture, bool traceOcclusion)
+{
+    float aoAlpha = gi_settings.aoAlpha;
+    uvec3 visibleFace;
+    visibleFace.x = (direction.x < 0.0) ? 0 : 1;
+    visibleFace.y = (direction.y < 0.0) ? 2 : 3;
+    visibleFace.z = (direction.z < 0.0) ? 4 : 5;
+    traceOcclusion = traceOcclusion && aoAlpha < 1.0;
+    // world space grid voxel size
+    float voxelWorldSize = gi_settings.voxel_size;
+    // weight per axis for aniso sampling
+    vec3 weight = direction * direction;
+    // move further to avoid self collision
+    float dst = voxelWorldSize;
+    vec3 startPosition = position + normal * dst;
+    // final results
+    vec4 coneSample = vec4(0.0);
+    float occlusion = 0.0;
+    float maxDistance = gi_settings.trace_distance;
+    float aoFalloff = gi_settings.aoFalloff;
+    float falloff =aoFalloff;
+    // out of boundaries check
+    float enter = 0.0; float leave = 0.0;
+
+    if(!IntersectRayWithWorldAABB(position, direction, enter, leave))
+    {
+        coneSample.a = 1.0;
+    }
+
+    while(coneSample.a < 1.0 && dst <= maxDistance)
+    {
+        vec3 conePosition = startPosition + direction * dst;
+        // cone expansion and respective mip level based on diameter
+        float diameter = 2.0 * aperture * dst;
+        float mipLevel = log2(diameter / voxelWorldSize);
+        // convert position to texture coord
+        vec3 coord = WorldToVoxel(conePosition);
+        // get directional sample from anisotropic representation
+        vec4 anisoSample = textureLod(voxel_radiance, coord, mipLevel); //AnistropicSample(coord, weight, visibleFace, mipLevel);
+        // front to back composition
+        coneSample += (1.0 - coneSample.a) * anisoSample;
+        // ambient occlusion
+        if(traceOcclusion && occlusion < 1.0)
+        {
+            occlusion += ((1.0 - occlusion) * anisoSample.a) / (1.0 + falloff * diameter);
+        }
+        // move further into volume
+        float samplingFactor = 1.0;
+        dst += diameter * samplingFactor;
+    }
+
+    return vec4(coneSample.rgb, occlusion);
+}
+
+float TraceShadowCone(vec3 position, vec3 direction, float aperture, float maxTracingDistance) 
+{
+    bool hardShadows = false;
+
+    float coneShadowTolerance = 0.51;
+    if(coneShadowTolerance == 1.0) { hardShadows = true; }
+
+    float voxelWorldSize = gi_settings.voxel_size;
+    vec3 weight = direction * direction;
+    float dst = voxelWorldSize;
+    vec3 startPosition = position + direction * dst;
+    float mipMaxLevel = max(0.0, log2(gi_settings.voxel_resolution));
+    float visibility = 0.0;
+    float k = exp2(7.0 * coneShadowTolerance);
+    float maxDistance = maxTracingDistance;
+    float enter = 0.0; float leave = 0.0;
+
+    if(!IntersectRayWithWorldAABB(position, direction, enter, leave)) { visibility = 1.0; }
+    
+    while(visibility < 1.0 && dst <= maxDistance)
+    {
+        vec3 conePosition = startPosition + direction * dst;
+        float diameter = 2.0 * aperture * dst;
+        float mipLevel = log2(diameter / voxelWorldSize);
+        vec3 coord = WorldToVoxel(conePosition);
+        vec4 anisoSample = textureLod(voxel_radiance, coord, mipLevel);
+
+        // hard shadows exit as soon cone hits something
+        if(hardShadows && anisoSample.a > EPSILON) { return 0.0; }  
+        // accumulate
+        visibility += (1.0 - visibility) * anisoSample.a * k;
+        // move further into volume
+        float samplingFactor = 1.0;
+        dst += diameter * samplingFactor;
+    }
+
+    return clamp(1.0 - visibility, 0.0, 1.0);
+}
+
+vec3 BRDF(DirectionLight light, vec3 N, vec3 X, vec3 ka)
+{
+    const vec3 L = light.dir;
+    const vec3 V = normalize((V * vec4(0.0, 0.0, 0.0, 1.0)).xyz - X);
+    const vec3 H = normalize(V + L);
+
+    const float dotNL = max(dot(N, L), 0.0);
+    const float dotNH = max(dot(N, H), 0.0);
+    const float dotLH = max(dot(L, H), 0.0);
+    
+    const vec3 diffuse = ka.rgb * light.col.rgb * light.col.a;
+   
+    return diffuse * dotNL;
+}
+
+vec3 CalculateDirectional(DirectionLight light, vec3 normal, vec3 position, vec3 albedo)
+{
+    float visibility = 1.0;
+
+    visibility = max(0.0, TraceShadowCone(position, light.dir, gi_settings.occlusion_cone_aperture, gi_settings.trace_distance));
+
+    if(visibility <= 0.0) return vec3(0.0);  
+
+    return BRDF(light, normal, position, albedo) * visibility;
+}
+
+vec4 CalculateIndirectLighting(vec3 position, vec3 normal, vec3 albedo, bool ambientOcclusion)
+{
+    vec4 specularTrace = vec4(0.0);
+    vec4 diffuseTrace = vec4(0.0);
+    vec3 coneDirection = vec3(0.0);
+
+    // component greater than zero
+    if(any(greaterThan(albedo, diffuseTrace.rgb)))
+    {
+        // diffuse cone setup
+        const float aperture = gi_settings.diffuse_cone_aperture;
+        vec3 guide = vec3(0.0, 1.0, 0.0);
+
+        if (abs(dot(normal,guide)) == 1.0)
+        {
+            guide = vec3(0.0, 0.0, 1.0);
+        }
+
+        // Find a tangent and a bitangent
+        vec3 right = normalize(guide - dot(normal, guide) * normal);
+        vec3 up = cross(right, normal);
+
+        for(int i = 0; i < 6; i++)
+        {
+            coneDirection = normal;
+            coneDirection += diffuseConeDirections[i].x * right + diffuseConeDirections[i].z * up;
+            coneDirection = normalize(coneDirection);
+            
+            diffuseTrace += TraceCone(position, normal, coneDirection, aperture, ambientOcclusion) * diffuseConeWeights[i];
+        }
+
+        diffuseTrace.rgb *= albedo;
+    }
+
+    const float bounceStrength = 2.0;
+    vec3 result = bounceStrength * (diffuseTrace.rgb);
+
+    const float aoAlpha = gi_settings.aoAlpha;
+    return vec4(result, ambientOcclusion ? clamp(1.0 - diffuseTrace.a + aoAlpha, 0.0, 1.0) : 1.0);
+}
+
+vec3 CalculateDirectLighting(vec3 position, vec3 normal, vec3 albedo)
+{
+    vec3 directLighting = vec3(0.0);
+
+    for(int i = 0; i < direction_light_count; ++i)
+    {
+        directLighting += CalculateDirectional(direction_lights[i], normal, position, albedo);
+    }
+
+    return directLighting;
+}
+
+void main() {
+    position = frag_pos;
+    albedo = frag_color;
+    normal = frag_normal;
+
+    Material mat = materials[frag_instance_index];
+
+    if(mat.diffuse_idx > 0) {
+        albedo = texture(material_textures[mat.diffuse_idx], frag_uv).rgb;
+    }
+    if(mat.normal_idx > 0) {
+        normal = normalize(texture(material_textures[mat.normal_idx], frag_uv).rgb) * 2.0 - 1.0;
+        normal = normalize(frag_tbn * normal);
+    }
+
+    vec3 baseColor = albedo;
+    vec3 directLighting = vec3(1.0);
+    vec4 indirectLighting = vec4(1.0);
+    vec3 compositeLighting = vec3(1.0);
+    int mode = 0;
+
+    if(mode == 0)   // direct + indirect + ao
+    {
+        indirectLighting = CalculateIndirectLighting(position, normal, baseColor, true);
+        directLighting = CalculateDirectLighting(position, normal, albedo);
+    }
+    else if(mode == 1)  // direct + indirect
+    {
+        indirectLighting = CalculateIndirectLighting(position, normal, baseColor, false);
+        directLighting = CalculateDirectLighting(position, normal, albedo);
+    }
+    else if(mode == 2) // direct only
+    {
+        indirectLighting = vec4(0.0, 0.0, 0.0, 1.0);
+        directLighting = CalculateDirectLighting(position, normal, albedo);
+    }
+    else if(mode == 3) // indirect only
+    {
+        directLighting = vec3(0.0);
+        baseColor.rgb = vec3(1.0);
+        indirectLighting = CalculateIndirectLighting(position, normal, baseColor, false);
+    }
+    else if(mode == 4) // ambient occlusion only
+    {
+        directLighting = vec3(0.0);
+        indirectLighting = CalculateIndirectLighting(position, normal, baseColor, true);
+        indirectLighting.rgb = vec3(1.0);
+    }
+
+    // convert indirect to linear space
+    compositeLighting = (directLighting + indirectLighting.rgb) * indirectLighting.a;
+    // -- this could be done in a post-process pass -- 
+
+    // Reinhard tone mapping
+    compositeLighting = compositeLighting / (compositeLighting + 1.0);
+
+    outColor = vec4(compositeLighting, 1.0);
+}
+```
+
+### data/shaders/default_lit.vert
+```
+#version 460 core
+
+layout(location=0) in vec3 pos;
+layout(location=1) in vec3 normal;
+layout(location=2) in vec3 color;
+layout(location=3) in vec2 uv;
+layout(location=4) in vec3 tangent;
+
+layout(location=0) out VS_OUT {
+    vec3 frag_pos;
+    vec3 frag_normal;
+    vec3 frag_color;
+    vec2 frag_uv;
+    vec3 frag_tan;
+    vec3 frag_bitan;
+    mat3 frag_tbn;
+    flat int frag_instance_index;
+};
+
+#include "global_set"
+
+void main() {
+    frag_pos = pos;
+    frag_normal = normal;
+    frag_color = color;
+    frag_uv = uv;
+    frag_tan = tangent;
+    frag_bitan = cross(normal, tangent);
+    frag_tbn = mat3(frag_tan, frag_bitan, frag_normal);
+    frag_instance_index = gl_InstanceIndex;
+
+    gl_Position = P * V * vec4(frag_pos, 1.0);
+}
+```
+
+### data/shaders/imgui.frag
+```
+#version 450 core
+#pragma shader_stage(fragment)
+layout(location = 0) out vec4 fColor;
+
+layout(set=0, binding=0) uniform sampler2D sTexture;
+
+layout(location = 0) in struct {
+    vec4 Color;
+    vec2 UV;
+} In;
+
+void main()
+{
+    fColor = In.Color * texture(sTexture, In.UV.st);
+}
+```
+
+### data/shaders/imgui.vert
+```
+#version 450 core
+#pragma shader_stage(vertex)
+layout(location = 0) in vec2 aPos;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec4 aColor;
+
+layout(push_constant) uniform uPushConstant {
+    vec2 uScale;
+    vec2 uTranslate;
+} pc;
+
+out gl_PerVertex {
+    vec4 gl_Position;
+};
+
+layout(location = 0) out struct {
+    vec4 Color;
+    vec2 UV;
+} Out;
+
+void main()
+{
+    Out.Color = aColor;
+    Out.UV = aUV;
+    gl_Position = vec4(aPos * pc.uScale + pc.uTranslate, 0, 1);
+}
+```
+
+### data/shaders/merge_voxels.comp
+```
+#version 460 core
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+
+#include "global_set"
+
+layout(set=2, binding=0) uniform texture3D voxel_albedo;
+layout(set=2, binding=1, rgba8) uniform image3D voxel_normal;
+layout(set=2, binding=2, rgba8) uniform writeonly image3D voxel_radiance;
+layout(set=2, binding=3) uniform sampler voxel_sampler;
+
+const float PI = 3.14159265;
+const float EPSILON = 1e-12;
+
+vec3 VoxelToWorld(ivec3 pos)
+{
+    vec3 result = vec3(pos);
+    result *= gi_settings.voxel_size; // pos: [0, 255] * 2/256 -> [0, ~2] - 1 -> [-1 - +1] -> assumed scene boundary
+
+    return result - 1.0;
+}
+
+vec3 WorldToVoxel(vec3 position)
+{
+    vec3 voxelPos = position * 0.5 + 0.5; // position: [-1 - +1]*0.5+0.5 -> [0 - 1]*vxscale -> [0, 256]
+    return voxelPos;
+}
+
+float TraceShadow(vec3 position, vec3 direction, float maxTracingDistance) 
+{
+    float traceShadowHit = gi_settings.traceShadowHit;
+    float k = traceShadowHit * traceShadowHit;
+    float voxelTexSize = gi_settings.voxel_size;
+    float dst = voxelTexSize * 1.0;
+    vec3 samplePos = direction * dst + position;
+    float visibility = 0.0;
+    float traceSample = 0.0;
+
+    while (visibility <= 1.0 && dst <= maxTracingDistance) 
+    {
+        if (samplePos.x < 0.0 || samplePos.y < 0.0 || samplePos.z < 0.0
+            || samplePos.x > 1.0 || samplePos.y > 1.0 || samplePos.z > 1.0) 
+        { 
+            break; 
+        }
+        
+        traceSample = ceil(texture(sampler3D(voxel_albedo, voxel_sampler), samplePos).a) * k;
+
+        // hard shadows mode
+        if(traceSample > 1.0 - EPSILON) { return 0.0; }
+
+        // accumulate
+        visibility += (1.0 - visibility) * traceSample / (1.0 + dst);
+        // move further into volume
+        dst += voxelTexSize;
+        samplePos = direction * dst + position;
+    }
+
+    return 1.0 - visibility;
+}
+
+vec3 BRDF(DirectionLight light, vec3 normal, vec3 albedo)
+{
+    float nDotL = 0.0;
+
+    // if(normalWeightedLambert == 1)
+    if(0 == 1)
+    {
+    }
+    else
+    {
+        nDotL = max(dot(normal, light.dir), 0.0);
+    }
+
+    return light.col.rgb * albedo * nDotL * light.col.a;
+}
+
+vec4 CalculateDirectional(DirectionLight light, vec3 normal, vec3 position, vec3 albedo)
+{
+    float visibility = 1.0;
+
+    vec3 voxelPos = WorldToVoxel(position);
+    visibility = TraceShadow(voxelPos, light.dir, gi_settings.trace_distance);
+
+    if(visibility == 0.0) return vec4(0.0); 
+
+    return vec4(BRDF(light, normal, albedo) * visibility, visibility);
+}
+
+vec4 CalculateDirectLighting(vec3 position, vec3 normal, vec3 albedo)
+{
+    normal = normalize(normal);
+    float voxelWorldSize = gi_settings.voxel_size;
+    vec4 directLighting = vec4(0.0, 0.0, 0.0, 0.0);
+    vec4 current =  vec4(0.0); int count = 0;
+    position = position + normal * voxelWorldSize;
+
+    for(int i = 0; i < direction_light_count; ++i)
+    {
+        current = CalculateDirectional(direction_lights[i], normal, position, albedo);
+        directLighting.rgb += current.rgb;
+        directLighting.a += current.a; count++;
+    }
+
+    if(count > 0) { directLighting.a /= count; }
+
+    return directLighting;
+}
+
+vec3 EncodeNormal(vec3 normal)
+{
+    return normal * 0.5f + vec3(0.5f);
+}
+
+vec3 DecodeNormal(vec3 normal)
+{
+    return normal * 2.0 - vec3(1.0);
+}
+
+void main() {
+    if(    gl_GlobalInvocationID.x >= gi_settings.voxel_resolution
+        || gl_GlobalInvocationID.y >= gi_settings.voxel_resolution
+        || gl_GlobalInvocationID.z >= gi_settings.voxel_resolution) { return; }
+
+    ivec3 writePos = ivec3(gl_GlobalInvocationID);
+	vec4 albedo = texelFetch(voxel_albedo, writePos, 0);
+
+    if(albedo.a < EPSILON) { return; }
+
+    albedo.a = 0.0;
+    vec3 baseNormal = imageLoad(voxel_normal, writePos).xyz;
+    vec3 normal = DecodeNormal(baseNormal);
+
+    if(any(greaterThan(albedo.rgb, vec3(0.0))))
+    {
+        vec3 wsPosition = VoxelToWorld(writePos);
+        albedo = CalculateDirectLighting(wsPosition, normal, albedo.rgb);
+    }
+
+    imageStore(voxel_normal, writePos, vec4(baseNormal, albedo.a));
+    albedo.a = 1.0;
+
+    imageStore(voxel_radiance, writePos, albedo);
+}
+```
+
+### data/shaders/point_shadow.frag
+```
+#version 460 core
+#pragma shader_stage(fragment)
+layout(location=0) in vec4 FragPos;
+
+#include "global_set"
+
+layout(std140, set=1, binding=0) uniform LIGHT_VIEW_DIRS {
+    mat4 shadowMatrices[6];
+    float far_plane;
+};
+
+void main()
+{
+    float lightDistance = length(FragPos.xyz - point_lights[0].pos);
+    
+    // map to [0;1] range by dividing by far_plane
+    lightDistance = lightDistance / 25.0;
+    
+    // write this as modified depth
+    gl_FragDepth = lightDistance;
+}
+```
+
+### data/shaders/point_shadow.geom
+```
+#version 460 core
+#pragma shader_stage(geometry)
+layout (triangles) in;
+layout (triangle_strip, max_vertices=18) out;
+
+layout(std140, set=1, binding=0) uniform LIGHT_VIEW_DIRS {
+    mat4 shadowMatrices[6];
+    float far_plane;
+};
+
+layout(location=0) out vec4 FragPos; // FragPos from GS (output per emitvertex)
+
+void main()
+{
+    for(int face = 0; face < 6; ++face)
+    {
+        gl_Layer = face; // built-in variable that specifies to which face we render.
+        for(int i = 0; i < 3; ++i) // for each triangle's vertices
+        {
+            FragPos = gl_in[i].gl_Position;
+            gl_Position = shadowMatrices[face] * FragPos;
+            // gl_Position = FragPos;
+            EmitVertex();
+        }    
+        EndPrimitive();
+    }
+}
+```
+
+### data/shaders/point_shadow.vert
+```
+#version 460 core
+#pragma shader_stage(vertex)
+layout (location = 0) in vec3 aPos;
+
+void main()
+{
+    gl_Position = vec4(aPos, 1.0);
+}
+```
+
+### data/shaders/voxelize.frag
+```
+#version 460 core
+#extension GL_EXT_nonuniform_qualifier : require
+
+#define DIST_FACTOR 1.1 /* Distance is multiplied by this when calculating attenuation. */
+
+layout(location=0) in FS_IN {
+	vec3 position;
+	vec3 position_proj;
+	vec3 normal;
+	vec3 color;
+	vec2 uv;
+	mat3 TBN;
+    flat uint instance_index;
+} frag;
+
+#include "global_set"
+#include "material_set"
+
+layout(set=2, binding=0, r32ui) uniform coherent volatile uimage3D voxel_albedo;
+layout(set=2, binding=1, r32ui) uniform coherent volatile uimage3D voxel_normal;
+
+vec4 convRGBA8ToVec4(uint val){
+	return vec4( 
+		float((val & 0x000000ff) >> 0),
+		float((val & 0x0000ff00) >> 8),
+		float((val & 0x00ff0000) >> 16),
+		float((val & 0xff000000) >> 24)
+	);
+}
+
+uint convVec4ToRGBA8(vec4 val) {
+	return (
+		(uint(val.w) & 0xff) << 24 |
+		(uint(val.z) & 0xff) << 16 |
+		(uint(val.y) & 0xff) << 8  |
+		(uint(val.x) & 0xff) << 0
+	);
+}
+
+vec3 scaleAndBias(vec3 p) { return 0.5 * p + vec3(0.5); }
+
+void imageAtomicRGBA8Avg(int grid_sel, ivec3 coords, vec4 val) {
+	val.rgb *= 255.0;
+	uint newVal = convVec4ToRGBA8(val), prevStoredVal = 0, curStoredVal;
+	int iterations = 0;
+
+	// loop until moving average is saved for this thread
+	// if this thread is the first one, then voxels[coords] == 0 == prevstoredval,
+	// so newval is assigned, and the loop never runs
+	// if not, then curval = voxel[coords], prev = cur
+	// do moving average with count in w component
+	// store in new val
+	// then next iteration hopefully will be the next one amongst other threads, and
+	// curstoredval will be equal to prevstored val, so that new val can be saved
+	if(grid_sel == 0) {
+		while((curStoredVal = imageAtomicCompSwap(voxel_albedo, coords, prevStoredVal, newVal)) != prevStoredVal && iterations < 255) {
+			prevStoredVal = curStoredVal;
+			vec4 rval = convRGBA8ToVec4(curStoredVal);
+			rval.xyz = (rval.xyz * rval.w);
+			vec4 curValF = rval + val;
+			curValF.xyz /= curValF.w;
+			newVal = convVec4ToRGBA8(curValF);
+			++iterations;
+		}
+	} else if(grid_sel == 1) {
+		while((curStoredVal = imageAtomicCompSwap(voxel_normal, coords, prevStoredVal, newVal)) != prevStoredVal && iterations < 255) {
+			prevStoredVal = curStoredVal;
+			vec4 rval = convRGBA8ToVec4(curStoredVal);
+			rval.xyz = (rval.xyz * rval.w);
+			vec4 curValF = rval + val;
+			curValF.xyz /= curValF.w;
+			newVal = convVec4ToRGBA8(curValF);
+			++iterations;
+		}
+	}
+}
+
+void main() {
+	vec3 p = abs(frag.position_proj);
+	if(max(max(p.x, p.y), p.z) > 1.0) { discard; }
+	
+	vec3 albedo = frag.color;
+    vec3 normal = frag.normal;
+    Material mat = materials[frag.instance_index];
+    if(mat.diffuse_idx >= 0) {
+        albedo = texture(material_textures[nonuniformEXT(mat.diffuse_idx)], frag.uv).rgb;
+        normal = texture(material_textures[nonuniformEXT(mat.normal_idx)], frag.uv).rgb;
+        normal = normalize(frag.TBN * (normal * 2.0 - 1.0));
+    }
+
+	vec3 voxel = frag.position * 0.5 + 0.5;
+	ivec3 pos = ivec3(256.0 * voxel);
+	vec4 frag_diff_rgba = vec4(albedo, 1.0);
+	vec3 frag_diff = frag_diff_rgba.rgb;
+	float opacity = frag_diff_rgba.a;
+	vec3 frag_nrm = normal;
+
+	if(opacity < 1e-6) { return; }
+
+	frag_diff.rgb *= opacity;
+	frag_nrm = frag_nrm*0.5+0.5;
+
+	imageAtomicRGBA8Avg(0, pos, vec4(frag_diff, 1.0));
+	imageAtomicRGBA8Avg(1, pos, vec4(frag_nrm, 1.0));
+}
+```
+
+### data/shaders/voxelize.geom
+```
+#version 460 core
+
+layout(triangles) in;
+layout(triangle_strip, max_vertices = 3) out;
+
+layout(location = 0) in GS_IN {
+	vec3 position;
+	vec3 position_proj;
+	vec3 normal;
+	vec3 color;
+	vec2 uv;
+	mat3 TBN;
+    flat uint instance_index;
+} vert[];
+
+layout(location=0) out GS_OUT {
+	vec3 position;
+	vec3 position_proj;
+	vec3 normal;
+	vec3 color;
+	vec2 uv;
+	mat3 TBN;
+    flat uint instance_index;
+} geom;
+
+#include "global_set"
+
+void main(){
+	const vec3 p1 = vert[1].position_proj - vert[0].position_proj;
+	const vec3 p2 = vert[2].position_proj - vert[0].position_proj;
+	const vec3 p = abs(cross(p1, p2)); 
+	for(uint i = 0; i < 3; ++i){
+		geom.position = vert[i].position;
+		geom.position_proj = vec3(vec4(vert[i].position_proj, 1.0));
+		geom.normal = vert[i].normal;
+		geom.color = vert[i].color;
+		geom.uv = vert[i].uv;
+		geom.TBN = vert[i].TBN;
+		geom.instance_index = vert[i].instance_index;
+		if(p.z > p.x && p.z > p.y){
+			gl_Position = vec4(vert[i].position_proj.xy, 0, 1);
+		} else if (p.x > p.y && p.x > p.z){
+			gl_Position = vec4(vert[i].position_proj.yz, 0, 1);
+		} else {
+			gl_Position = vec4(vert[i].position_proj.xz, 0, 1);
+		}
+		EmitVertex();
+	}
+    EndPrimitive();
+}
+```
+
+### data/shaders/voxelize.vert
+```
+#version 460 core
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec3 normal;
+layout(location = 2) in vec3 color;
+layout(location = 3) in vec2 uv;
+layout(location = 4) in vec3 tangent;
+
+#include "global_set"
+
+layout(location = 0) out VS_OUT {
+	vec3 position;
+	vec3 position_proj;
+	vec3 normal;
+	vec3 color;
+	vec2 uv;
+	mat3 TBN;
+    flat uint instance_index;
+} vert;
+
+void main(){
+	vec4 pos = vec4(position, 1.0);
+	vert.position = pos.xyz;
+	vert.uv = uv;
+	vert.normal = normal;
+	vert.color = color;
+	vert.TBN = mat3(tangent, cross(normal, tangent), normal);
+    vert.instance_index = gl_InstanceIndex;
+	vert.position_proj = pos.xyz;
+	gl_Position = pos;
+}
+```

@@ -1,0 +1,395 @@
+Implements resampling of recti- and curvi-linear QuadMeshes. The input for the rectilinear case can be a xr.DataArray or xr.Dataset and for the curvilinear case must be a xr.Dataset. Compared to the approach in HoloViews which creates an intermediate trimesh from a quadmesh this represents a 600-700x speedup for the rectilinear case and a 17x speedup in the curvilinear case.
+
+ Implement rectilinear resampling
+ Implement curvilinear resampling
+ Implement aggregators
+
+ count
+ sum
+ mean
+ first
+ last
+ min
+ max
+ std?
+ var?
+ mode?
+
+
+ Implement distributed version?
+ Add examples/docs
+ Add tests
+
+Implemented QuadMesh resampling by philippjfr · Pull Request #769 · holoviz/datashader · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Implemented QuadMesh resampling
+#769
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Closed
+philippjfr
+wants to merge
+3
+commits into
+master
+from
+philippjfr/qmesh_rasterize
+Uh oh!
+There was an error while loading. Please reload this page.
+Closed
+Implemented QuadMesh resampling
+#769
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+3 commits
+Select commit
+Hold shift + click to select a range
+7a0ba32
+Implemented QuadMesh resampling
+philippjfr Jul 19, 2019
+364cb83
+Fixed flake
+philippjfr Jul 19, 2019
+eebf4ff
+Fixed doc test
+philippjfr Jul 19, 2019
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Next
+Next commit
+Implemented QuadMesh resampling
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+philippjfr
+committed
+Jul 19, 2019
+commit 7a0ba3283ab9dcaa9cb8f95dcedf0162e61a269c
+There are no files selected for viewing
+120 changes: 119 additions & 1 deletion
+120
+datashader/core.py
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,5 +1,7 @@
+from __future__ import absolute_import, division, print_function
+import warnings
+from numbers import Number
+import numpy as np
+Expand All
+@@ -14,7 +16,9 @@
+from .utils import Dispatcher, ngjit, calc_res, calc_bbox, orient_array, compute_coords
+from .utils import get_indices, dshape_from_pandas, dshape_from_dask
+from .utils import Expr # noqa (API import)
+from .resampling import resample_2d, resample_2d_distributed
+from .resampling import (
+resample_2d, resample_2d_distributed, aggregators, rectilinear_agg,
+curvilinear_agg, infer_interval_breaks)
+from . import reductions as rd
+Expand Down
+Expand Up
+@@ -889,6 +893,120 @@ def raster(self,
+dims = [layer_dim]+dims
+return DataArray(data, coords=coords, dims=dims, attrs=attrs)
+def quadmesh(self, source, x=None, y=None, agg='mean'):
+"""Samples a recti- or curvi-linear quadmesh by canvas size and bounds.
+Parameters
+----------
+source : xarray.DataArray or Dataset
+The input datasource.
+x, y : str
+Column names for the x and y coordinates of each point.
+agg : Reduction, optional
+Reduction to compute. Default is ``mean()``.
+Returns
+-------
+data : xarray.DataArray
+"""
+column = None
+if isinstance(agg, rd.Reduction):
+agg, column = type(agg).__name__, agg.column
+if isinstance(source, Dataset):
+if column is None:
+column = list(source.data_vars)[0]
+source = source[column]
+if x is None and y is None:
+y, x = source.dims
+elif not x or not y:
+raise ValueError("Either specify both x and y coordinates"
+"or allow them to be inferred.")
+yarr, xarr = source[y], source[x]
+if (yarr.ndim > 1 or xarr.ndim > 1) and xarr.dims != yarr.dims:
+raise ValueError("Ensure that x- and y-coordinate arrays "
+"share the same dimensions. x-coordinates "
+"are indexed by %s dims while "
+"y-coordinates are indexed by %s dims." %
+(xarr.dims, yarr.dims))
+xarr, yarr = xarr.values, yarr.values
+zs = source.values
+ys, xs = source.shape
+if source.name is not None and column != source.name:
+agg_repr = '%s(%r)' % (agg, column)
+raise ValueError('DataArray name %r does not match '
+'supplied reduction %s.' %
+(source.name, agg_repr))
+if xarr.ndim == 1 and len(xarr) != xs:
+xarr = infer_interval_breaks(xarr)
+elif xarr.ndim == 2 and xarr.shape == zs.shape:
+xarr = infer_interval_breaks(xarr, axis=1)
+xarr = infer_interval_breaks(xarr, axis=0)
+if yarr.ndim == 1 and len(yarr) != ys:
+yarr = infer_interval_breaks(yarr)
+elif yarr.ndim == 2 and yarr.shape == zs.shape:
+yarr = infer_interval_breaks(yarr, axis=1)
+yarr = infer_interval_breaks(yarr, axis=0)
+x0, x1 = self.x_range or (np.nanmin(xarr), np.nanmax(xarr))
+y0, y1 = self.y_range or (np.nanmin(yarr), np.nanmax(yarr))
+xspan = x1 - x0
+yspan = y1 - y0
+xscaled = (xarr-x0) / xspan
+yscaled = (yarr-y0) / yspan
+if xscaled.ndim == 1:
+xmask = np.where((xscaled >= 0) & (xscaled <= 1))
+ymask = np.where((yscaled >= 0) & (yscaled <= 1))
+xm0, xm1 = max(xmask[0].min()-1, 0), min(xmask[0].max()+1, xs)
+ym0, ym1 = max(ymask[0].min()-1, 0), min(ymask[0].max()+1, ys)
+xarr = (xscaled[xm0:xm1+1] * self.plot_width).astype(int)
+yarr = (yscaled[ym0:ym1+1] * self.plot_height).astype(int)
+zs = zs[ym0:ym1, xm0:xm1]
+mask = None
+else:
+x = (xscaled * self.plot_width).astype(int)
+y = (yscaled * self.plot_height).astype(int)
+if agg in ['count', 'any', 'sum', 'mean']:
+fill_val = 0.
+else:
+fill_val = np.nan
+agg = aggregators[agg]
+out = np.full((self.plot_height, self.plot_width), fill_val)
+if xscaled.ndim == 1:
+if agg is aggregators['mean']:
+out_count = np.zeros((self.plot_height, self.plot_width))
+rectilinear_agg(xarr, yarr, zs, agg, out, out_count)
+with warnings.catch_warnings():
+warnings.filterwarnings('ignore', r'invalid value encountered')
+warnings.filterwarnings('ignore', r'divide by zero encountered in true_divide')
+out /= out_count
+else:
+rectilinear_agg(xarr, yarr, zs, agg, out)
+else:
+if agg is aggregators['mean']:
+out_count = np.zeros((self.plot_height, self.plot_width), dtype='uint32')
+curvilinear_agg(x, y, zs, agg, out, out_count)
+with warnings.catch_warnings():
+warnings.filterwarnings('ignore', r'invalid value encountered')
+warnings.filterwarnings('ignore', r'divide by zero encountered in true_divide')
+out /= out_count
+else:
+curvilinear_agg(x, y, zs, agg, out)
+xs, ys = compute_coords(self.plot_width, self.plot_height, (x0, x1), (y0, y1), (0, 0))
+coords = {'x': xs, 'y': ys}
+return DataArray(out, coords=coords, dims=('y', 'x'))
+def validate(self):
+"""Check that parameter settings are valid for this object"""
+self.x_axis.validate(self.x_range)
+Expand Down
+140 changes: 139 additions & 1 deletion
+140
+datashader/resampling.py
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,5 +1,6 @@
+"""
+This module was adapted from https://github.com/CAB-LAB/gridtools
+The image resampling code in this module was adapted from
+https://github.com/CAB-LAB/gridtools
+The MIT License (MIT)
+Expand All
+@@ -26,6 +27,9 @@
+from __future__ import absolute_import, division, print_function
+import sys
+import datetime as dt
+from itertools import groupby
+from math import floor, ceil
+Expand All
+@@ -35,6 +39,7 @@
+from dask.delayed import delayed
+from numba import prange
+from .utils import ngjit
+try:
+Expand Down
+Expand Up
+@@ -952,3 +957,136 @@ def _downsample_2d_std_var(src, mask, use_mask, method, fill_value,
+DS_MODE: _downsample_2d_mode,
+DS_STD: _downsample_2d_std_var,
+DS_VAR: _downsample_2d_std_var}
+def infer_interval_breaks(coord, axis=0):
+"""
+>>> infer_interval_breaks(np.arange(5))
+array([-0.5, 0.5, 1.5, 2.5, 3.5, 4.5])
+>>> infer_interval_breaks([[0, 1], [3, 4]], axis=1)
+array([[-0.5, 0.5, 1.5],
+[ 2.5, 3.5, 4.5]])
+"""
+coord = np.asarray(coord)
+if sys.version_info.major == 2 and len(coord) and isinstance(coord[0], (dt.datetime, dt.date)):
+# np.diff does not work on datetimes in python 2
+coord = coord.astype('datetime64')
+if len(coord) == 0:
+return np.array([], dtype=coord.dtype)
+deltas = 0.5 * np.diff(coord, axis=axis)
+first = np.take(coord, [0], axis=axis) - np.take(deltas, [0], axis=axis)
+last = np.take(coord, [-1], axis=axis) + np.take(deltas, [-1], axis=axis)
+trim_last = tuple(slice(None, -1) if n == axis else slice(None)
+for n in range(coord.ndim))
+return np.concatenate([first, coord[trim_last] + deltas, last], axis=axis)
+@ngjit
+def area(x1, y1, x2, y2, x3, y3):
+return abs((x1 * (y2 - y3) +
+x2 * (y3 - y1) +
+x3 * (y1 - y2)) / 2.0)
+@ngjit
+def point_in_rectangle(x1, x2, x3, x4, y1, y2, y3, y4, x, y):
+A = (area(x1, y1, x2, y2, x3, y3) +
+area(x1, y1, x4, y4, x3, y3))
+A1 = area(x, y, x1, y1, x2, y2)
+A2 = area(x, y, x2, y2, x3, y3)
+A3 = area(x, y, x3, y3, x4, y4)
+A4 = area(x, y, x1, y1, x4, y4)
+return (A == (A1 + A2 + A3 + A4))
+@ngjit
+def pixel_in_rectangle(x1, x2, x3, x4, y1, y2, y3, y4, x0, y0):
+return (point_in_rectangle(x1, x2, x3, x4, y1, y2, y3, y4, x0, y0) |
+point_in_rectangle(x1, x2, x3, x4, y1, y2, y3, y4, x0+1, y0) |
+point_in_rectangle(x1, x2, x3, x4, y1, y2, y3, y4, x0, y0+1) |
+point_in_rectangle(x1, x2, x3, x4, y1, y2, y3, y4, x0+1, y0+1))
+## Aggregators
+@ngjit
+def count_agg(xi, yi, value, out, out2):
+out[yi, xi] += 1
+@ngjit
+def sum_agg(xi, yi, value, out, out2):
+out[yi, xi] += value
+@ngjit
+def mean_agg(xi, yi, value, out, out2):
+out[yi, xi] += value
+out2[yi, xi] += 1
+@ngjit
+def min_agg(xi, yi, value, out, out2):
+old = out[yi, xi]
+if np.isnan(old):
+out[yi, xi] = value
+else:
+out[yi, xi] = min(value, old)
+@ngjit
+def max_agg(xi, yi, value, out, out2):
+old = out[yi, xi]
+if np.isnan(old):
+out[yi, xi] = value
+else:
+out[yi, xi] = max(value, old)
+@ngjit
+def first_agg(xi, yi, value, out, out2):
+old = out[yi, xi]
+if np.isnan(old):
+out[yi, xi] = value
+@ngjit
+def last_agg(xi, yi, value, out, out2):
+out[yi, xi] = value
+aggregators = {
+'first': first_agg,
+'last': last_agg,
+'count': count_agg,
+'sum': sum_agg,
+'mean': mean_agg,
+'min': min_agg,
+'max': max_agg
+}
+@ngjit_parallel
+def rectilinear_agg(x, y, z, agg, out, out2=None):
+ys, xs = out.shape
+for i in prange(len(x)-1):
+for j in range(len(y)-1):
+value = z[j, i]
+if not np.isfinite(value):
+continue
+x0, x1 = max(x[i], 0), min(x[i+1], xs)
+y0, y1 = max(y[j], 0), min(y[j+1], ys)
+for xi in range(x0, x1):
+for yi in range(y0, y1):
+agg(xi, yi, value, out, out2)
+@ngjit_parallel
+def curvilinear_agg(x, y, z, agg, out, out2=None):
+ys, xs = x.shape
+oys, oxs = out.shape[0]-1, out.shape[1]-1
+for i in prange(xs-1):
+for j in range(ys-1):
+value = z[j, i]
+if not np.isfinite(value):
+continue
+x1, x2, x3, x4 = (x[j, i], x[j, i+1], x[j+1, i+1], x[j+1, i])
+y1, y2, y3, y4 = (y[j, i], y[j, i+1], y[j+1, i+1], y[j+1, i])
+xmin = max(min(x1, x2, x3, x4), 0)
+xmax = min(max(x1, x2, x3, x4), oxs)
+ymin = max(min(y1, y2, y3, y4), 0)
+ymax = min(max(y1, y2, y3, y4), oys)
+for xi in range(xmin, xmax):
+for yi in range(ymin, ymax):
+if pixel_in_rectangle(x1, x2, x3, x4, y1, y2, y3, y4, xi, yi):
+agg(xi, yi, value, out, out2)
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

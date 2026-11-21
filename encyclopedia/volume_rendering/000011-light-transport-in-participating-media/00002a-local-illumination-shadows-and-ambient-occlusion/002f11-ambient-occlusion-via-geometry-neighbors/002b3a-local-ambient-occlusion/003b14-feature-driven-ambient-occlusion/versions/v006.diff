@@ -1,0 +1,286 @@
+--- v005.md
++++ v006.md
+@@ -18,19 +18,26 @@
+ **Algorithm Steps:**
+ 
+-1.  **Preprocessing (Bricking):** Decompose the 3D dataset into equal-sized bricks. Scan each brick to determine if it contains only empty voxels. Store this as a boolean flag. Use overlapping bricks to prevent discontinuities at borders [S1].
+-2.  **Per-Feature Occlusion Computation:** For each feature $k$ from $1$ to $n_f$:
+-    a. Initialize an empty 3D texture $T_k$.
+-    b. For each voxel $v_k$ belonging to feature $k$:
+-        i. Cast $L$ rays uniformly scattered in the hemisphere around the voxel normal (or using pseudo-random rays in polar coordinates) [S1].
+-        ii. For each ray, compute the light contribution $I_l(x_v, k)$ using $M$ samples in a front-to-back compositing scheme.
++1.  **Preprocessing (Bricking):**
++    Decompose the 3D dataset into equal-sized bricks. Scan each brick to determine if it contains only empty voxels. Store this as a boolean flag. Use overlapping bricks to prevent discontinuities at borders [S1].
++
++2.  **Per-Feature Occlusion Computation:**
++    For each feature $k$ from $1$ to $n_f$:
++    a.  Initialize an empty 3D texture $T_k$.
++    b.  For each voxel $v_k$ belonging to feature $k$:
++        i.  Cast $L$ rays uniformly scattered in the hemisphere around the voxel normal (or using pseudo-random rays in polar coordinates) [S1].
++        ii. For each ray, compute the light contribution $I_l(x_v, k)$ using $M$ samples in a front-to-back compositing scheme [S1].
+         iii. During sampling, for any sample point $x_i$ along the ray:
+-            * If the sample point belongs to feature $k$, use its actual opacity $\alpha_{i,k}$ obtained via the transfer function.
+-            * If the sample point belongs to a different feature $j \neq k$ or is empty, set its opacity $\alpha_{i,j} = 0$ [S1].
++            *   If the sample point belongs to feature $k$, use its actual opacity $\alpha_{i,k}$ obtained via the transfer function [S1].
++            *   If the sample point belongs to a different feature $j \neq k$ or is empty, set its opacity $\alpha_{i,j} = 0$ [S1].
+         iv. Store the resulting occlusion factor in $T_k(v_k)$ [S1].
+-    c. Raycast only non-empty voxels during this phase to optimize performance, skipping large blocks of empty voxels [S1].
+-3.  **Recombination:** Combine the separate occlusion textures $T_k$ into the final ambient occlusion volume $AO(v)$ using the maximum operator:
++    c.  Raycast only non-empty voxels during this phase to optimize performance, skipping large blocks of empty voxels [S1].
++
++3.  **Recombination:**
++    Combine the separate occlusion textures $T_k$ into the final ambient occlusion volume $AO(v)$ using the maximum operator:
+     $$ AO(v) = \max \{ T_k(v) \mid \forall k \in [1, n_f] \} $$
+     This operator is preferred over averaging because it reduces artifacts, improves contrast, and extends the influence of opaque features to neighboring less opaque ones, which is acceptable as less opaque features are less visible [S1].
+-4.  **Rendering:** Perform final rendering using a traditional volume raycasting algorithm in GLSL. Fetch one additional texture for the precomputed ambient occlusion factor $AO(v)$ and two additional textures for preintegrated volume rendering [S1].
++
++4.  **Rendering:**
++    Perform final rendering using a traditional volume raycasting algorithm (e.g., in GLSL) [S1]. Fetch one additional texture for the precomputed ambient occlusion factor $AO(v)$ and two additional textures for preintegrated volume rendering [S1].
+ 
+ **Formulas:**
+@@ -40,10 +47,10 @@
+ where $\alpha_{i,k}$ is the opacity of sample $i$ for feature $k$. If sample $i$ does not belong to feature $k$, $\alpha_{i,k} = 0$ [S1].
+ 
+-The ambient occlusion texture $T_k(v)$ for feature $k$ at voxel $v$ is the average light contribution over $L$ rays:
+-$$ T_k(v) = \frac{1}{L} \sum_{l=1}^{L} I_l(x_v, k) $$
+-
+-The final ambient occlusion volume $AO(v)$ is computed by recombining the per-feature textures with the maximum operator:
++The total light contribution for voxel $v$ is the sum of contributions from all features:
++$$ I_l(x_v) = \sum_{k=1}^{n_f} I_l(x_v, k) $$
++
++The ambient occlusion factor $AO(v)$ is computed by averaging the light contributions over $L$ rays for each feature texture $T_k$, then recombining with the maximum operator:
+ $$ AO(v) = \max \{ T_k(v) \mid \forall k \in [1, n_f] \} $$
+-This replaces the classical feature-summation approach to prevent overdarkening while preserving auto-occlusions [S1].
++where $T_k(v)$ stores the averaged light contribution $\frac{1}{L} \sum_{l=1}^{L} I_l(x_v, k)$ [S1].
+ 
+ **Parameters:**
+@@ -55,5 +62,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Visual Artifacts at Borders:** Naively setting opacity of neighboring features to $0$ during a single pass causes visual artifacts (white dots) at feature borders due to ray sampling and trilinear interpolation when there is a connected area with a different ambient occlusion value [S1].
++*   **Visual Artifacts at Borders:** Naively setting opacity of neighboring features to 0 during a single pass causes visual artifacts (white dots) at feature borders due to ray sampling and trilinear interpolation when there is a connected area with a different ambient occlusion value [S1].
+ *   **Inaccurate Averaging:** Averaging all occlusion textures $T_k$ results in inaccurate ambient occlusion values, especially when a low occluding feature borders a high occluding one [S1].
+ *   **Performance Cost:** Computing separate ambient occlusion textures increases computation cost by a factor equal to the number of features $n_f$ [S1].
+@@ -70,5 +77,5 @@
+         volume: 3D array of scalar values.
+         features: List of 3D boolean masks, one for each feature k.
+-        transfer_function: Function mapping scalar value to (color, opacity).
++        transfer_function: Function mapping scalar value to opacity.
+         L: Number of rays per voxel.
+         M: Number of samples per ray.
+@@ -78,19 +85,68 @@
+         ao_volume: 3D array of ambient occlusion factors.
+     """
++    import random
++    import math
+     n_f = len(features)
+     shape = volume.shape
+-    # T[k] stores the averaged light contribution over L rays for feature k
+-    T = [[[0.0 for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(n_f)]
+     
+-    # Brick optimization: skip empty regions (conceptual implementation)
+-    # In practice, bricks are pre-scanned for empty voxels to skip raycasting.
+-    def is_brick_empty(brick_coords):
+-        # Returns True if all voxels in brick_coords are empty (opacity 0)
+-        # Implementation depends on volume layout; omitted for brevity.
+-        return False
++    # Initialize per-feature occlusion textures T_k
++    T = [ [[[0.0 for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])] for _ in range(n_f) ]
++    
++    # Brick preprocessing: scan for empty bricks [S1]
++    # Bricks are equal-sized and overlap at borders to prevent discontinuities [S1].
++    brick_size = 16
++    brick_flags = {}
++    for x in range(0, shape[0], brick_size):
++        for y in range(0, shape[1], brick_size):
++            for z in range(0, shape[2], brick_size):
++                is_empty = True
++                for dx in range(brick_size):
++                    for dy in range(brick_size):
++                        for dz in range(brick_size):
++                            nx, ny, nz = x+dx, y+dy, z+dz
++                            if nx < shape[0] and ny < shape[1] and nz < shape[2]:
++                                if volume[nx][ny][nz] != 0:
++                                    is_empty = False
++                                    break
++                            if not is_empty: break
++                        if not is_empty: break
++                    if not is_empty: break
++                if not is_empty:
++                    brick_flags[(x//brick_size, y//brick_size, z//brick_size)] = True
++
++    def get_ray_direction():
++        # Pseudo-random rays uniformly scattered using polar coordinates [S1]
++        theta = random.uniform(0, 2 * math.pi)
++        phi = random.uniform(0, math.pi / 2)
++        return (math.sin(phi) * math.cos(theta), math.sin(phi) * math.sin(theta), math.cos(phi))
++
++    def interpolate_volume(pos):
++        # Standard trilinear interpolation [G]
++        x, y, z = pos
++        ix, fx = math.floor(x), x - math.floor(x)
++        iy, fy = math.floor(y), y - math.floor(y)
++        iz, fz = math.floor(z), z - math.floor(z)
++        def v(nx, ny, nz):
++            if 0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2]:
++                return volume[nx][ny][nz]
++            return 0.0
++        v000 = v(ix, iy, iz)
++        v100 = v(ix+1, iy, iz)
++        v010 = v(ix, iy+1, iz)
++        v110 = v(ix+1, iy+1, iz)
++        v001 = v(ix, iy, iz+1)
++        v101 = v(ix+1, iy, iz+1)
++        v011 = v(ix, iy+1, iz+1)
++        v111 = v(ix+1, iy+1, iz+1)
++        c00 = v000 * (1-fx) + v100 * fx
++        c01 = v010 * (1-fx) + v110 * fx
++        c10 = v001 * (1-fx) + v101 * fx
++        c11 = v011 * (1-fx) + v111 * fx
++        d0 = c00 * (1-fy) + c01 * fy
++        d1 = c10 * (1-fy) + c11 * fy
++        return d0 * (1-fz) + d1 * fz
+ 
+     for k in range(n_f):
+         feature_mask = features[k]
+-        # Iterate over all voxels (optimized by skipping empty bricks)
+         for x in range(shape[0]):
+             for y in range(shape[1]):
+@@ -99,67 +155,39 @@
+                         continue
+                     
++                    # Skip empty bricks for optimization [S1]
++                    bx, by, bz = x // brick_size, y // brick_size, z // brick_size
++                    if (bx, by, bz) not in brick_flags:
++                        continue
++
+                     occlusion_sum = 0.0
+-                    
+-                    # Cast L rays
+-                    for l in range(L):
+-                        # Uniform hemisphere sampling (pseudo-random polar coordinates)
+-                        theta = 2.0 * 3.14159265358979 * l / L
+-                        phi = 3.14159265358979 / 2.0 * (l + 0.5) / L
+-                        ray_dir = [
+-                            math.sin(phi) * math.cos(theta),
+-                            math.sin(phi) * math.sin(theta),
+-                            math.cos(phi)
+-                        ]
++                    for _ in range(L):
++                        ray_dir = get_ray_direction()
++                        light_contribution = 0.0
++                        transmittance = 1.0
+                         
+-                        light_contribution = 0.0
+-                        
+-                        # Sample along the ray
+                         for m in range(M):
+-                            # Compute sample position
+-                            dist = (m + 0.5) * R_Omega / M
+-                            sx = x + ray_dir[0] * dist
+-                            sy = y + ray_dir[1] * dist
+-                            sz = z + ray_dir[2] * dist
+-                            
+-                            # Get opacity at sample position
+-                            if sx < 0 or sx >= shape[0] or sy < 0 or sy >= shape[1] or sz < 0 or sz >= shape[2]:
++                            # Sample position along ray
++                            step = (m + 0.5) * (R_Omega / M)
++                            sample_pos = (x + ray_dir[0] * step, y + ray_dir[1] * step, z + ray_dir[2] * step)
++                            
++                            # Get opacity
++                            scalar_val = interpolate_volume(sample_pos)
++                            alpha = transfer_function(scalar_val)
++                            
++                            # Key step: If sample does not belong to feature k, set opacity to 0 [S1]
++                            sx, sy, sz = int(sample_pos[0]), int(sample_pos[1]), int(sample_pos[2])
++                            if not (0 <= sx < shape[0] and 0 <= sy < shape[1] and 0 <= sz < shape[2] and feature_mask[sx][sy][sz]):
+                                 alpha = 0.0
+-                            else:
+-                                # Trilinear interpolation of scalar value
+-                                scalar_val = interpolate_volume(volume, sx, sy, sz)
+-                                _, alpha = transfer_function(scalar_val)
+-                                
+-                                # Key step: If sample does not belong to feature k, set opacity to 0
+-                                # This ignores inter-occlusions from other features
+-                                if not feature_mask[int(round(sx))][int(round(sy))][int(round(sz))]:
+-                                    alpha = 0.0
+-                            
+-                            # Front-to-back compositing for light contribution
+-                            # Product of (1 - alpha) for previous samples
+-                            transmittance = 1.0
+-                            for i in range(m):
+-                                prev_dist = (i + 0.5) * R_Omega / M
+-                                psx = x + ray_dir[0] * prev_dist
+-                                psy = y + ray_dir[1] * prev_dist
+-                                psz = z + ray_dir[2] * prev_dist
+-                                
+-                                if psx < 0 or psx >= shape[0] or psy < 0 or psy >= shape[1] or psz < 0 or psz >= shape[2]:
+-                                    prev_alpha = 0.0
+-                                else:
+-                                    prev_scalar = interpolate_volume(volume, psx, psy, psz)
+-                                    _, prev_alpha = transfer_function(prev_scalar)
+-                                    if not feature_mask[int(round(psx))][int(round(psy))][int(round(psz))]:
+-                                        prev_alpha = 0.0
+-                                transmittance *= (1.0 - prev_alpha)
+-                            
++                            
++                            # Accumulate light contribution per formula [S1]
+                             light_contribution += transmittance
+-                        
++                            transmittance *= (1.0 - alpha)
++                            
+                         light_contribution /= M
+                         occlusion_sum += light_contribution
+-                    
+-                    # Average over L rays to get T_k(v)
++                        
+                     T[k][x][y][z] = occlusion_sum / L
+ 
+-    # Recombine using maximum operator: AO(v) = max{T_k(v) | ∀k}
++    # Recombine using maximum operator [S1]
+     ao_volume = [[[0.0 for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
+     for x in range(shape[0]):
+@@ -172,19 +200,4 @@
+                 
+     return ao_volume
+-
+-def interpolate_volume(volume, x, y, z):
+-    # Standard trilinear interpolation stub
+-    ix, iy, iz = int(x), int(y), int(z)
+-    fx, fy, fz = x - ix, y - iy, z - iz
+-    v000 = volume[ix][iy][iz]
+-    v100 = volume[min(ix+1, len(volume)-1)][iy][iz]
+-    v010 = volume[ix][min(iy+1, len(volume[0])-1)][iz]
+-    v001 = volume[ix][iy][min(iz+1, len(volume[0][0])-1)]
+-    v110 = volume[min(ix+1, len(volume)-1)][min(iy+1, len(volume[0])-1)][iz]
+-    v101 = volume[min(ix+1, len(volume)-1)][iy][min(iz+1, len(volume[0][0])-1)]
+-    v011 = volume[ix][min(iy+1, len(volume[0])-1)][min(iz+1, len(volume[0][0])-1)]
+-    v111 = volume[min(ix+1, len(volume)-1)][min(iy+1, len(volume[0])-1)][min(iz+1, len(volume[0][0])-1)]
+-    return (v000*(1-fx)*(1-fy)*(1-fz) + v100*fx*(1-fy)*(1-fz) + v010*(1-fx)*fy*(1-fz) + v001*(1-fx)*(1-fy)*fz +
+-            v110*fx*fy*(1-fz) + v101*fx*(1-fy)*fz + v011*(1-fx)*fy*fz + v111*fx*fy*fz)
+ ```
+ 
+@@ -192,15 +205,18 @@
+ 
+ ### Local Ambient Occlusion for Volume Rendering
+-A general method for computing AO in volumes without feature separation [S1]. Choose when feature boundaries are not distinct or when computational cost must be minimized [S1]. [Link](4300-local-ambient-occlusion-for-volume-rendering.md)
++A general method for computing AO in volumes without feature separation [G]. Choose when feature boundaries are not distinct or when computational cost must be minimized [G]. [Link](4300-local-ambient-occlusion-for-volume-rendering.md)
+ 
+ ### Local Ambient Occlusion (LAO)
+-Uses occlusion for data classification [S1]. Choose when the goal is to segment or classify data based on local geometry rather than shading enhancement [S1]. [Link](4502-local-ambient-occlusion-lao.md)
++Uses occlusion for data classification [S1]. Choose when the goal is to segment or classify data based on local geometry rather than shading enhancement [G]. [Link](4502-local-ambient-occlusion-lao.md)
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Computing separate ambient occlusion textures increases computation cost by a factor equal to the number of features $n_f$ [S1].
+ *   **Memory Complexity:** Requires storing $n_f$ separate 3D occlusion textures plus the final recombined texture, plus brick structures [S1].
+-*   **Measured Performance:** On AMD Opteron 2431 with Nvidia GTX 295 (1024x768 viewport), Feature-Driven AO achieves ~130 fps on the Orange dataset (256x256x64) and ~45 fps on the CT Knee dataset (379x229x305), matching classical AO performance while providing superior visual quality for multi-layer data [S1].
+-*   **Strengths:** Improves visual quality of multi-layer volumes by preventing overdarkening of internal layers. Less parameter-sensitive than classical AO, improving usability for non-experts. Preserves auto-occlusions for shape perception [S1].
+-*   **Limitations:** Computationally more expensive than classical AO by a factor of $n_f$. Requires prior feature segmentation (though the method itself does not perform segmentation). Artifacts can occur at feature borders if not handled correctly (mitigated by the max recombination operator) [S1].
++*   **Measured Performance:**
++    *   On AMD Opteron 2431 with Nvidia GTX 295 (1024x768 viewport):
++        *   Orange dataset (256x256x64): No shading ~200 fps, Phong shading ~125 fps, Classical AO ~130 fps, Feature-driven AO ~130 fps [S1].
++        *   CT Knee dataset (379x229x305): No shading ~60 fps, Phong shading ~50 fps, Classical AO ~45 fps, Feature-driven AO ~45 fps [S1].
++*   **Strengths:** Improves visual quality of multi-layer volumes by preventing overdarkening of internal layers. Less parameter-sensitive than classical AO, improving usability for non-experts [S1]. Preserves auto-occlusions for shape perception [S1].
++*   **Limitations:** Computationally more expensive than classical AO by a factor of $n_f$. Requires prior feature segmentation (though the method itself does not perform segmentation) [S1]. Artifacts can occur at feature borders if not handled correctly (mitigated by the max recombination operator) [S1].
+ *   **When to Use:** Direct volume rendering of multi-layer datasets (e.g., CT scans) where features are interleaved and distinct, and visual clarity of internal structures is critical [S1].
+ *   **When Not to Use:** Single-layer volumes, or when computational resources are severely constrained and $n_f$ is large [S1].

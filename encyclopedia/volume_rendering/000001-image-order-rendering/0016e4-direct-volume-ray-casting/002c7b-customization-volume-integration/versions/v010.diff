@@ -1,0 +1,171 @@
+--- v009.md
++++ v010.md
+@@ -4,46 +4,58 @@
+ 
+ ## Overview
+-Customization Volume Integration is a method that integrates a pre-computed customization volume into the volume rendering pipeline to apply position-dependent modifications to visualization parameters, such as gamma correction of intensity values [S1]. Unlike global transfer function adjustments or standard ray casting [12643-standard-ray-casting.md], this method decouples the modification logic from the ray-casting loop's core compositing, allowing for complex, spatially coherent parameter fields (e.g., Voronoi-based seeds) to drive the visualization [S1].
++Customization Volume Integration is a method that integrates a pre-computed customization volume into the volume rendering pipeline to apply position-dependent modifications to visualization parameters, such as gamma correction of intensity values [S1]. It enables localized control over rendering appearance without altering the underlying scalar field [S1]. Unlike global transfer function adjustments, this approach decouples the modification logic from the core compositing loop, allowing spatially coherent parameter fields to drive the visualization [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **InputVolume**: The primary scalar volume dataset to be visualized [S1].
+-*   **CustomizationVolume**: A pre-computed 3D grid of scalar values containing position-dependent visualization parameters (e.g., gamma values) [S1].
++*   **CustomizationVolume**: A pre-computed 3D grid containing position-dependent visualization parameters (e.g., gamma values) [S1].
+ *   **Output**: The final composited image with position-dependent parameter modifications applied [S1].
+ 
+ **Data Structures:**
+-*   **InputVolume**: 3D grid of scalar values [S1].
+-*   **CustomizationVolume**: 3D grid of scalar values representing the parameter to be applied [S1]. The resolution typically ranges from $32^3$ to $128^3$ [S1].
+-*   **sample_volume(volume, position)**: A helper function that retrieves the value from a volume at a given 3D position using linear filtering [S1].
++*   **InputVolume**: A 3D grid of scalar values representing the target dataset [S1].
++*   **CustomizationVolume**: A 3D grid of scalar values representing the parameter field, typically with a resolution between $32^3$ and $128^3$ [S1].
++*   **Linear Filtering Helper**: A function that retrieves a value from a volume at a continuous 3D position using linear interpolation [S1].
+ 
+ **Numbered Steps:**
+-1.  **Pass Volumes**: The `CustomizationVolume` is passed to the shader performing the volume rendering alongside the `InputVolume` [S1].
+-2.  **Ray Casting Loop**: For each sample position along the ray:
+-    a. Fetch the intensity value from the `InputVolume` at the current sampling position [S1].
+-    b. Fetch the visualization parameter (e.g., gamma) from the `CustomizationVolume` at the same sampling position using linear filtering [S1].
+-    c. Apply the fetched parameter to the intensity value. For example, if the parameter is gamma, compute $intensity_{modified} = pow(intensity, gamma)$ [S1]. The intensity values are assumed to be in the range $[0, 1]$ for this operation [S1].
+-    d. Apply the transfer function to the modified intensity to obtain color and opacity [S1].
+-    e. Composite the result using the standard front-to-back accumulation [S1].
++1.  **Pass Volumes**: The `CustomizationVolume` is passed to the rendering shader alongside the `InputVolume` [S1].
++2.  **Ray Sampling**: For each sample position along the ray segment, fetch the intensity value from the `InputVolume` [S1].
++3.  **Parameter Fetch**: Fetch the visualization parameter from the `CustomizationVolume` at the identical sampling position using linear filtering [S1].
++4.  **Apply Modification**: Apply the fetched parameter to the intensity value [S1]. For gamma correction, compute $intensity_{modified} = \text{pow}(intensity, \gamma)$ [S1]. The intensity values are assumed to be normalized to the range $[0, 1]$ to justify this operation [S1].
++5.  **Classification**: Apply the transfer function to the modified intensity to obtain the color vector and opacity scalar [S1].
++6.  **Compositing**: Accumulate the color and opacity using the standard front-to-back volume rendering equation [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def ray_cast_with_customization(InputVolume, CustomizationVolume, ray_origin, ray_direction, t_near, t_far, num_samples, transfer_function):
+-    # Standard front-to-back initialization [G]
++def ray_casting_with_customization(InputVolume, CustomizationVolume, ray_origin, ray_direction, ray_begin, ray_end, num_samples, transfer_function):
++    """
++    Performs volume rendering with position-dependent customization.
++    Args:
++        InputVolume: Primary scalar volume.
++        CustomizationVolume: Pre-computed parameter volume.
++        ray_origin: Camera origin point.
++        ray_direction: Normalized viewing direction vector.
++        ray_begin: Entry t parameter of the ray segment.
++        ray_end: Exit t parameter of the ray segment.
++        num_samples: Discretization count for the ray segment.
++        transfer_function: Maps intensity to (color, opacity).
++    Returns:
++        Final composited color and accumulated opacity.
++    """
+     acc_color = vec3(0.0, 0.0, 0.0)
+     acc_opacity = 0.0
+-    delta_t = (t_far - t_near) / num_samples
++    delta_t = (ray_end - ray_begin) / num_samples
+ 
+     for i in range(num_samples):
+-        t = t_near + i * delta_t
++        t = ray_begin + i * delta_t
+         position = ray_origin + t * ray_direction
+ 
+         # 1. Fetch intensity from input volume
+-        intensity = sample_volume(InputVolume, position)
++        intensity = linear_filter_sample(InputVolume, position)
+ 
+         # 2. Fetch customization parameter (e.g., gamma) from customization volume
+-        gamma = sample_volume(CustomizationVolume, position)
++        gamma = linear_filter_sample(CustomizationVolume, position)
+ 
+         # 3. Apply modification (e.g., gamma correction)
+-        # Note: intensity is assumed to be in [0, 1] [S1]
++        # Note: intensity is assumed to be in [0, 1]
+         intensity = pow(intensity, gamma)
+ 
+@@ -53,69 +65,41 @@
+         # 5. Front-to-back compositing
+         alpha_term = opacity * (1.0 - acc_opacity)
+-        acc_color = acc_color + alpha_term * color
+-        acc_opacity = acc_opacity + alpha_term
++        acc_color += alpha_term * color
++        acc_opacity += alpha_term
+ 
+         # Early ray termination optimization
+-        if acc_opacity > 0.99:
++        if acc_opacity >= 1.0:
+             break
+ 
+     return acc_color, acc_opacity
+ 
+-def sample_volume(volume, position):
+-    # [G] Standard trilinear interpolation implementing linear filtering [S1]
+-    # 1. Transform world position to voxel grid coordinates
+-    x, y, z = position / volume.voxel_size
+-    x0, y0, z0 = floor(x), floor(y), floor(z)
+-    dx, dy, dz = x - x0, y - y0, z - z0
+-    # 2. Clamp to volume bounds
+-    x0 = clamp(x0, 0, volume.width - 1)
+-    y0 = clamp(y0, 0, volume.height - 1)
+-    z0 = clamp(z0, 0, volume.depth - 1)
+-    # 3. Fetch 8 surrounding voxels
+-    v000 = volume[x0, y0, z0]
+-    v100 = volume[x0+1, y0, z0]
+-    v010 = volume[x0, y0+1, z0]
+-    v110 = volume[x0+1, y0+1, z0]
+-    v001 = volume[x0, y0, z0+1]
+-    v101 = volume[x0+1, y0, z0+1]
+-    v011 = volume[x0, y0+1, z0+1]
+-    v111 = volume[x0+1, y0+1, z0+1]
+-    # 4. Interpolate along x, y, z axes
+-    c00 = lerp(v000, v100, dx)
+-    c10 = lerp(v010, v110, dx)
+-    c01 = lerp(v001, v101, dx)
+-    c11 = lerp(v011, v111, dx)
+-    b0 = lerp(c00, c10, dy)
+-    b1 = lerp(c01, c11, dy)
+-    return lerp(b0, b1, dz)
+-
+-# Standard math/vector operations used above
+-def lerp(a, b, t): return a + t * (b - a)
+-def clamp(v, mn, mx): return max(mn, min(mx, v))
+-def floor(x): return int(x) if x >= 0 else int(x) - 1
++def linear_filter_sample(volume, position):
++    # [G] Standard trilinear interpolation of volume texture at position.
++    # Implementation involves coordinate scaling, voxel indexing, and 7 lerp operations.
++    pass
+ ```
+ 
+ **Parameters:**
+-*   **CustomizationVolume Resolution**: Ranges from $32^3$ to $128^3$ [S1]. Higher resolution increases computational complexity for interpolation but provides smoother parameter fields [S1].
+-*   **Intensity Range**: The input intensity values should be normalized to $[0, 1]$ for operations like gamma correction [S1].
++*   **CustomizationVolume Resolution**: Typically ranges from $32^3$ to $128^3$ [S1].
++*   **Intensity Range**: Input intensity values must be normalized to $[0, 1]$ for operations like gamma correction [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Performance Impact**: Additional lookups and computations (e.g., power function) reduce rendering performance [S1]. The impact depends on the number of samples and the complexity of the customization computation [S1].
+-*   **Resolution Trade-off**: Changing the customization volume resolution between $32^3$ and $128^3$ has no significant impact on rendering performance, but higher resolution increases computational complexity for Voronoi/interpolation, diminishing interactivity when adjusting seed points [S1]. Mitigation: Use lower resolution for interactive customization and higher resolution for actual rendering [S1].
+-*   **Memory Bottleneck**: For large out-of-core volume datasets, the bottleneck is memory transfer to the GPU, making the performance impact of the customization step negligible [S1].
++*   **Performance Impact**: Additional lookups and computations (e.g., the power function) reduce overall rendering performance [S1]. The impact scales with the number of samples and the complexity of the customization computation [S1].
++*   **Resolution Trade-off**: Changing the customization volume resolution between $32^3$ and $128^3$ has no significant impact on rendering performance, but higher resolution increases interpolation complexity, diminishing interactivity when adjusting seed points [S1]. Mitigation: Use lower resolution for interactive customization and higher resolution for final rendering [S1].
++*   **Memory Bottleneck**: For large out-of-core volume datasets, memory transfer to the GPU is the primary bottleneck, making the performance impact of the customization step negligible [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Adds constant overhead per sample for the additional lookup and parameter application [S1]. Total rendering time scales linearly with the number of samples per ray, consistent with standard ray casting [G].
+-*   **Memory Complexity**: Requires storing an additional volume of size $R^3$ where $R$ is the resolution of the customization volume [S1].
+-*   **Performance**: The performance impact depends on the number of samples and the complexity of the customization computation [S1]. For large out-of-core volume datasets, the bottleneck is memory transfer to the GPU, making the performance impact of the customization step negligible [S1].
+-*   **Strengths**: Allows spatially varying, position-dependent control over visualization parameters without modifying the core ray-casting algorithm significantly [S1]. Easy to integrate into existing pipelines [S1].
+-*   **Limitations**: Requires pre-computation of the customization volume (e.g., via Voronoi tessellation) [S1]. Performance can be affected by the complexity of the customization function and the resolution of the customization volume [S1].
+-*   **When to Use**: When spatially varying adjustments to visualization parameters (like gamma, opacity scaling, or color mapping) are needed, and the parameter field can be pre-computed or interactively adjusted with lower resolution [S1].
+-*   **When Not to Use**: When real-time, per-sample dynamic parameter generation is required without pre-computation, or when the customization function is extremely complex and performance is critical [S1].
++*   **Time Complexity**: Adds $O(1)$ overhead per sample for the additional lookup and parameter application [S1]. The total rendering time increases proportionally to the number of samples and the computational cost of the customization function [S1].
++*   **Memory Complexity**: Requires storing an additional volume of size $R^3$, where $R$ is the resolution of the customization volume [S1].
++*   **Performance**: The performance impact is generally small, especially for large datasets where memory bandwidth limits throughput [S1]. Complex customization functions or high-resolution parameter fields can degrade interactivity [S1].
++*   **Strengths**: Enables spatially varying, position-dependent control over visualization parameters without significantly altering the core ray-casting algorithm [S1]. Integrates easily into existing rendering pipelines [S1].
++*   **Limitations**: Requires pre-computation of the customization volume (e.g., via Voronoi tessellation) [S1]. Performance degrades with high customization volume resolution or complex per-sample functions [S1].
++*   **When to Use**: When spatially varying adjustments to visualization parameters (gamma, opacity scaling, color mapping) are required, and the parameter field can be pre-computed or interactively adjusted at lower resolution [S1].
++*   **When Not to Use**: When real-time, per-sample dynamic parameter generation without pre-computation is required, or when the customization function is extremely complex and strict performance constraints exist [S1].
+ 
+ ## Background
+ *   **Origin**: The method was introduced in the paper "Interactive Position-dependent Customization of Transfer Function Classification Parameters in Volume Rendering" [S1].
+-*   **History**: The technique was developed to address the need for localized control over volume rendering parameters, allowing users to adjust visualization aspects (like gamma correction) in specific regions of the volume without affecting the entire dataset [S1].
+-*   **Usage**: It is used in interactive volume rendering systems where users need to fine-tune the appearance of specific structures or regions within a volume dataset [S1].
++*   **History**: The technique was developed to address the need for localized control over volume rendering parameters, allowing users to adjust visualization aspects in specific regions without affecting the entire dataset [S1].
++*   **Usage**: It is employed in interactive volume rendering systems where users require fine-tuned control over the appearance of specific structures or regions within a volume dataset [S1].
+ 
+ ## Sources

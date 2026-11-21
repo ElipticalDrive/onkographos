@@ -1,0 +1,113 @@
+--- v005.md
++++ v006.md
+@@ -4,62 +4,70 @@
+ 
+ ## Overview
+-Autoencoder/Autodecoder Conditioning represents a family of neural field architectures where each instance is conditioned by a learnable latent vector $z_i$ rather than a fixed encoder output or concatenated input. It solves the problem of representing multiple distinct shapes or signals with a single shared decoder network [S1, unofficial][S2, unofficial]. Unlike [Concatenation Conditioning](12582-concatenation-conditioning.md), which appends instance-specific data to the coordinate input, this method optimizes a separate latent code per instance, allowing the decoder to focus on the canonical geometry while the latent code encodes instance-specific variations [S1, unofficial]. It differs from [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md) by avoiding the generation of decoder weights, instead modulating the output via direct concatenation or modulation of the latent vector [S2, unofficial].
++This method conditions a shared neural field decoder on per-instance latent codes to represent multiple distinct shapes or signals within a single model. It solves the problem of multi-instance representation by either optimizing a learnable latent vector per sample jointly with decoder weights (autodecoder) or using an encoder to produce these codes (autoencoder) [S2, unofficial]. It differs from [Concatenation Conditioning](12582-concatenation-conditioning.md) by treating the latent code as an independent optimization variable or encoder output rather than simply concatenating it with spatial coordinates, and from [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md) by not generating decoder weights dynamically [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of training examples $J$ (e.g., point clouds or meshes). For each example $j \in J$, a latent vector $z_j \in \mathbb{R}^D$ is associated.
+-*   **Output:** A neural field function $f(x; \theta, z_j)$ that maps 3D coordinates $x$ to a scalar value (e.g., SDF or occupancy).
++*   **Input:** A set of training examples $J$ (e.g., point clouds or images). For each example $j \in J$, the method requires spatial coordinates $x$ and ground truth targets (e.g., SDF values, colors).
++*   **Output:** A trained shared decoder network $f_\theta$ and, for each instance $j$, a latent vector $z_j \in \mathbb{R}^L$ (autodecoder) or a trained encoder $E$ that maps instance data to $z_j$ (autoencoder) [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Latent Vector $z_j$:** A learnable parameter vector of dimension $D$. Typical values are $D=256$ [S1, unofficial], though $D=64$ or $D=512$ are used in specific applications [S2, unofficial].
+-*   **Decoder Weights $\theta$:** Shared across all instances.
+-*   **Network Architecture:** A Multi-Layer Perceptron (MLP). The input dimension is $3 + D$. The architecture typically includes skip connections from the input to intermediate layers [S1, unofficial].
++*   **Latent Vector ($z_j$):** A learnable parameter vector of dimension $L$.
++    *   For shape reconstruction, $L=0$ (effectively no conditioning, or shared across all).
++    *   For shape space learning, $L=256$ [S1, unofficial].
++    *   Initialized to zero: $z_j \leftarrow \mathbf{0} \in \mathbb{R}^L$ [S1, unofficial].
++*   **Decoder Network ($f_\theta$):** An MLP with weights $\theta$.
++    *   **Architecture:**
++        1.  Input dimension: $3 + L$ (3 for spatial coordinates $x$, $L$ for latent code $z_j$) [S1, unofficial].
++        2.  Layer Sequence:
++            *   Layer 1: `FC+` (Fully Connected + Softplus)
++            *   Layer 2: `FC+`
++            *   Layer 3: `FC+`
++            *   Layer 4: `FC+`
++            *   Layer 5: `FC` (Linear, 512 units)
++            *   Layer 6: `FC+`
++            *   Layer 7: `FC+`
++            *   Layer 8: `FC` (Linear, output dimension depends on task, e.g., 1 for SDF)
++        3.  **Skip Connection:** Direct connection from input to Layer 4 [S1, unofficial].
++    *   **Activation:** Softplus with $\beta = 100$. Formula: $\text{softplus}(x) = \frac{1}{\beta} \ln(1 + e^{\beta x})$ [S1, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Initialization:** For each training example $j \in J$, initialize the latent vector $z_j$ to zero: $z_j \leftarrow \mathbf{0} \in \mathbb{R}^D$ [S1, unofficial].
+-2.  **Forward Pass:** For a batch $B \subset J$, sample points $x$ from the input data. Compute the output $y = f(x; \theta, z_j)$ for each $j \in B$. The latent vector $z_j$ is concatenated with the coordinate $x$ before entering the MLP [S1, unofficial][S2, unofficial].
+-3.  **Loss Computation:** Compute the reconstruction loss $\ell(\theta, z_j)$ based on the task (e.g., SDF loss, Chamfer distance) [S1, unofficial]. Add a regularization term for the latent code: $\alpha \|z_j\|_2$ [S1, unofficial].
+-4.  **Optimization:** Update both the shared weights $\theta$ and the latent vectors $z_j$ for the batch using an optimizer (e.g., Adam) [S1, unofficial].
+-5.  **Inference (Autodecoder):** For a new test shape, optimize the latent vector $z_{test}$ from scratch using the trained decoder $f(\cdot; \theta, z_{test})$ and the test data. This typically requires a fixed number of iterations (e.g., 800 iterations) [S1, unofficial].
+-
+-**Formulas:**
+-The total loss for a batch $B$ is:
+-$$ \mathcal{L} = \frac{1}{|B|} \sum_{j \in B} \left( \ell(\theta, z_j) + \alpha \|z_j\|_2 \right) $$
+-where $\ell$ is the task-specific loss (e.g., Eq. 2 in [S1, unofficial]), and $\alpha$ is a regularization weight (typically $\alpha = 0.01$) [S1, unofficial].
+-
+-The latent code regularizer specifically is:
+-$$ \mathcal{L}_l(z) = \|z\|_2 $$
+-This penalizes large magnitudes to keep latent codes close to zero and ensure similarity between different shapes in the autodecoder framework [S3].
++1.  **Initialization:** For each training example $j \in J$, initialize latent vector $z_j = \mathbf{0} \in \mathbb{R}^L$ [S1, unofficial].
++2.  **Batch Sampling:** Sample a batch $B \subset J$ of training examples. For each $j \in B$, sample spatial points $x$ and corresponding ground truth targets.
++3.  **Forward Pass:** Compute the output $y_j = f_\theta(x, z_j)$ using the shared decoder weights $\theta$ and the instance-specific latent code $z_j$ [S1, unofficial].
++4.  **Loss Calculation:** Compute the loss for the batch. The total loss $\mathcal{L}$ includes the reconstruction loss $\ell(\theta, z_j)$ and a latent code regularizer $\mathcal{L}_l(z_j)$ [S3]:
++    $$ \mathcal{L} = \frac{1}{|B|} \sum_{j \in B} \left( \ell(\theta, z_j) + \alpha \|z_j\|_2 \right) $$
++    Where $\alpha = 0.01$ is the regularization weight [S1, unofficial].
++    *   Note: In complex setups (e.g., FIRe), the total loss may include additional terms like depth loss $\mathcal{L}_D$, silhouette loss $\mathcal{L}_S$, and total variation $\mathcal{L}_{tv}$, weighted by $w_s, w_d, w_\sigma, w_{tv}, w_{ts}, w_l$ [S3].
++5.  **Optimization:** Update both the decoder weights $\theta$ and the latent vectors $z_j$ for $j \in B$ using gradient descent (e.g., Adam) [S1, unofficial].
++6.  **Inference (Autodecoder):** For a test shape, perform optimization of the latent vector $z$ alone (keeping $\theta$ fixed) for a fixed number of iterations (e.g., 800 iterations) to minimize the reconstruction loss $\ell$ [S1, unofficial].
++7.  **Inference (Autoencoder):** If an encoder is used, pass the test instance data through the trained encoder $E$ to obtain $z$, then compute $f_\theta(x, z)$ [S2, unofficial].
+ 
+ **Parameters:**
+-*   **Latent Dimension $D$:** 256 is standard for shape space experiments [S1, unofficial]. For simple reconstruction, $D=0$ may be used [S1, unofficial].
+-*   **Regularization Weight $\alpha$:** 0.01 [S1, unofficial].
+-*   **Optimization Iterations (Test):** 800 iterations for latent vector optimization [S1, unofficial].
+-*   **Activation Function:** Softplus is used in some architectures: $x \mapsto \frac{1}{\beta} \ln(1 + e^{\beta x})$ with $\beta = 100$ [S1, unofficial].
++*   $L$: Latent vector size. $L=256$ for shape space learning [S1, unofficial].
++*   $\alpha$: Regularization weight. $\alpha = 0.01$ [S1, unofficial].
++*   $\beta$: Softplus smoothness. $\beta = 100$ [S1, unofficial].
++*   Optimizer: Adam [S1, unofficial].
++*   Learning Rate: $0.0001$ for reconstruction, $0.0005$ for shape space learning (with scheduling) [S1, unofficial].
++*   Iterations: 800 for test shape latent optimization [S1, unofficial].
+ 
+-**Pitfalls:**
+-*   **Shared Latent Code:** In some implementations (e.g., FIRe), the SDF and DDF models share the same latent code for a given shape, which may limit independent control over geometry and directionality [S3].
+-*   **Optimization Stability:** Optimizing latent codes at test time can be sensitive to initialization and learning rate; zero initialization is common but may require careful tuning [S1, unofficial].
+-*   **Overfitting:** Without regularization ($\alpha$), latent codes may overfit to noise in the input data [S3].
++**Edge Cases and Pitfalls:**
++*   **SDF/DDF Sharing:** In inverse rendering contexts, the Signed Distance Function (SDF) and Directional Distance Function (DDF) share the same latent code $z$ for a given shape [S3].
++*   **Regularization Strength:** The L2 regularizer $\|z\|_2$ is critical to keep latent codes close to zero, ensuring similarity between different shapes in the autodecoder framework [S3].
++*   **Initialization:** Initializing $z_j$ to zero is standard [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Latent Code Regularizer
+-A specific technique used within the autodecoder framework to prevent latent codes from diverging. It applies an L2 norm penalty $\mathcal{L}_l(z) = \|z\|_2$ to the latent codes [S3]. This keeps the codes close to zero, ensuring that different shapes in the latent space remain similar and do not occupy extreme regions [S3]. It is crucial for stability in multi-shape learning [S3].
+-
+-### Auto-Decoder Network Architecture
+-The specific MLP structure used in the auto-decoder setup. It accepts an input of dimension $3 + L$ (coordinates + latent vector) [S1, unofficial]. The layer sequence is: FC+ $\rightarrow$ FC+ $\rightarrow$ FC+ $\rightarrow$ FC+ $\rightarrow$ 512 $\rightarrow$ FC+ $\rightarrow$ FC+ $\rightarrow$ FC, where FC is a fully connected linear layer and FC+ is FC followed by softplus activation [S1, unofficial]. A skip connection connects the input directly to the 4th layer [S1, unofficial]. The latent vector size $L$ is 256 for shape space experiments and 0 for simple reconstruction [S1, unofficial].
++A specific component of the autodecoder training setup. It applies an L2 norm penalty $\mathcal{L}_l(z) = \|z\|_2$ to the latent codes [S3]. This keeps latent codes close to zero, enforcing similarity between different shapes in the latent space [S3]. It is used in the total loss equation $\mathcal{L} = w_s\mathcal{L}_s + w_d\mathcal{L}_d + w_\sigma\mathcal{L}_\sigma + w_{tv}\mathcal{L}_{tv} + w_{ts}\mathcal{L}_{ts} + w_l\mathcal{L}_l$ [S3]. A pitfall is that SDF and DDF models must share the same latent code for a given shape to maintain consistency [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is proportional to the number of instances and the number of optimization steps per instance. Test-time inference requires optimizing the latent vector from scratch, which is computationally expensive (e.g., 800 iterations per shape) [S1, unofficial].
+-*   **Memory Complexity:** Memory usage scales linearly with the number of instances $|J|$ due to the storage of latent vectors $z_j$. For $N$ shapes and latent dimension $D$, memory is $O(N \cdot D)$ [S1, unofficial].
+-*   **Performance:** Achieves high-quality reconstructions on complex shapes (e.g., human bodies) [S1, unofficial]. Outperforms methods that do not use latent conditioning for multi-shape representation [S1, unofficial].
+-*   **Strengths:** Flexible representation of multiple shapes with a single network; latent space can be interpolated for shape blending [S1, unofficial].
+-*   **Limitations:** Slow inference due to per-shape optimization; requires careful tuning of regularization and learning rates [S1, unofficial].
+-*   **When to Use:** When representing a collection of distinct shapes with a shared canonical structure [S1, unofficial].
+-*   **When Not to Use:** When real-time inference is required without per-shape optimization [S1, unofficial].
++*   **Time Complexity:** Training requires joint optimization of $\theta$ and $z_j$. Inference for a single shape in the autodecoder setting requires iterative optimization of $z$ (e.g., 800 iterations) [S1, unofficial].
++*   **Memory Complexity:** Requires storing one latent vector $z_j \in \mathbb{R}^L$ per training example. For $L=256$, this is 1 KB per shape [S1, unofficial].
++*   **Scaling:** The method scales to multiple shapes by adding latent vectors. The shared decoder weights $\theta$ remain constant [S2, unofficial].
++*   **Strengths:** Enables learning a continuous shape space; allows interpolation of shapes by interpolating latent vectors [S1, unofficial].
++*   **Limitations:** Inference is slow for autodecoders due to per-shape optimization [S1, unofficial]. Requires careful tuning of regularization $\alpha$ [S1, unofficial].
+ 
+ ## Background
+-The auto-decoder setup was introduced by Park et al. (2019) in "Implicit Geometric Regularization for Learning Shapes" [S1, unofficial]. It builds on the idea of learning a shape space from raw scans, such as the D-Faust dataset [S1, unofficial]. The method allows for the representation of multiple shapes using a single MLP, where each shape is associated with a unique latent vector [S1, unofficial]. It has been widely adopted in neural implicit representations for 3D shape reconstruction and generation [S1, unofficial][S2, unofficial].
++The auto-decoder setup was introduced by Park et al. (2019) in "Implicit Geometric Regularization for Learning Shapes" [S1, unofficial]. It was used to learn shape spaces from raw scans (e.g., D-Faust dataset) and to generalize to unseen humans [S1, unofficial]. The concept of conditioning neural fields on latent codes is discussed in broader introductions to neural fields [S2, unofficial]. The specific use of latent code regularization in inverse rendering contexts is detailed in FIRe [S3].
+ 
+ ## Sources

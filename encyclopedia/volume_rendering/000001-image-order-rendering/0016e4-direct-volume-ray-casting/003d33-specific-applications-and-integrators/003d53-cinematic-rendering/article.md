@@ -1,0 +1,199 @@
+# Cinematic Rendering
+
+Also called: Cinematic Volume Rendering, Hybrid Cinematic Volume Rendering
+
+## Overview
+Cinematic Rendering (CR) is a physically based, real-time volume rendering technique for medical image data (CT and MRI) that solves the multi-dimensional and non-continuous rendering equation to integrate light scattered from all possible directions along a ray, generating a photo-realistic depiction using random sampling [S1, unofficial][S5, unofficial][S6, unofficial]. Unlike standard Direct Volume Ray Casting [19-direct-volume-ray-casting.md], which uses a single straight ray and local gradient shading, CR traces hundreds or thousands of photon paths per pixel to simulate complex light-matter interactions, including multiple scattering, absorption, and extinction [S5, unofficial][S6, unofficial]. It differs from its siblings by using High Dynamic Range (HDR) light maps for natural illumination and Monte Carlo path tracing to account for global illumination effects like soft shadows and ambient occlusion, rather than synthetic point lights or simple shading models [S1, unofficial][S2][S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Volumetric medical image data (CT or MRI), typically stored as a 3D grid of voxels with attenuation values (e.g., Hounsfield Units for CT) [S4, unofficial][S6, unofficial].
+*   **Input:** Transfer Function mapping voxel attenuation values to color and opacity [S4, unofficial][S6, unofficial][S7, unofficial].
+*   **Input:** HDR Light Map (spherical panorama) capturing environmental lighting from all directions [S1, unofficial][S2][S7, unofficial].
+*   **Input:** Camera parameters (aperture, focal length, exposure, shutter speed) [S5, unofficial][S7, unofficial].
+*   **Output:** A 2D photorealistic image where each pixel represents the accumulated radiance from traced photon paths [S1, unofficial][S5, unofficial].
+
+**Data Structures:**
+*   **Volume Data:** A 3D array $V$ of size $W \times H \times D$ containing voxel attenuation values [S4, unofficial][S6, unofficial].
+*   **Transfer Function:** A mapping $T: \text{HU} \rightarrow (r, g, b, \alpha)$, where $r,g,b \in [0,1]$ and $\alpha \in [0,1]$ [S4, unofficial][S6, unofficial][S7, unofficial].
+*   **Light Map:** A spherical environment map $L(\omega)$ providing incident radiance $L_i$ for any direction $\omega$ [S1, unofficial][S2][S7, unofficial].
+*   **Sample Buffer:** Accumulator for Monte Carlo samples per pixel [S1, unofficial][S7, unofficial].
+
+**Parameters:**
+*   **Samples per Pixel ($N$):** Hundreds to thousands of paths per pixel [S5, unofficial].
+*   **Rendering Time:** 5 to 30 seconds for final image quality, depending on $N$ and scene complexity [S2][S6, unofficial].
+*   **Progressive Rendering:** Iterative refinement allows real-time interaction (zoom, pan, rotate) while the image refines in the background [S5, unofficial][S7, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** For each pixel $(u, v)$ in the image, initialize an accumulator $C_{acc} = (0, 0, 0, 0)$ and a sample count $n = 0$ [S1, unofficial][S7, unofficial].
+2.  **Ray Definition:** Define the primary ray origin and direction from the camera center through pixel $(u, v)$ based on camera intrinsics (aperture, focal length) [S5, unofficial][S7, unofficial].
+3.  **Path Tracing Loop:** Repeat for $N$ samples:
+    a.  **Sample Direction:** Generate a random direction $\omega$ for the first light interaction, prioritizing paths that reach the eye (importance sampling) [S5, unofficial][S7, unofficial].
+    b.  **Trace Path:** Trace the photon path through the volume $V$ [S3][S7, unofficial]. At each step along the path:
+        i.  **Sample Position:** Interpolate the voxel value $v_{val}$ at the current position in $V$ using trilinear interpolation [G].
+        ii. **Transfer Function:** Map $v_{val}$ to color $c = T(v_{val}).rgb$ and opacity $\alpha = T(v_{val}).\alpha$ [S4, unofficial][S6, unofficial][S7, unofficial].
+        iii. **Lighting:** Sample the incident radiance $L_i$ from the HDR Light Map $L(\omega)$ for the current direction [S1, unofficial][S5, unofficial].
+        iv. **Interaction:** Compute the contribution of the voxel to the path. The method omits emission and background radiance terms from the volume rendering equation, estimating the integral via discrete sampling [S5, unofficial]. The interaction accounts for scattering, absorption, and potential direction changes (multiple bounces) [S5, unofficial].
+        v.  **Accumulate:** Add the scattered radiance to the path's current radiance estimate [S5, unofficial].
+    c.  **Terminate:** Stop tracing when the path is fully absorbed or a maximum bounce limit is reached [G].
+4.  **Averaging:** After $N$ samples, compute the pixel color $C_{pixel} = C_{acc} / N$ [S1, unofficial][S7, unofficial].
+5.  **Progressive Update:** Display the current $C_{pixel}$ immediately. As $N$ increases, the image converges to the final cinematic quality [S5, unofficial][S7, unofficial].
+6.  **Camera Effects:** Apply post-processing effects based on camera parameters, such as depth-of-field (blur based on aperture/focal length) and motion blur (based on shutter speed) [S5, unofficial][S7, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cinematic_render(volume, transfer_function, light_map, camera, samples_per_pixel):
+    """
+    Renders a volume using Cinematic Rendering principles.
+    
+    Args:
+        volume: 3D array of voxel values (e.g., HU).
+        transfer_function: Function mapping voxel value to (r, g, b, alpha).
+        light_map: Function returning incident radiance for a direction.
+        camera: Camera object with resolution, get_origin, get_direction, exposure.
+        samples_per_pixel: Number of Monte Carlo samples per pixel.
+        
+    Returns:
+        2D image array.
+    """
+    height, width = camera.resolution
+    image = [[0.0, 0.0, 0.0] for _ in range(height)]
+    
+    for y in range(height):
+        for x in range(width):
+            pixel_accumulator = [0.0, 0.0, 0.0]
+            
+            for _ in range(samples_per_pixel):
+                ray_origin = camera.get_origin(x, y)
+                ray_direction = camera.get_direction(x, y)
+                
+                current_radiance = [0.0, 0.0, 0.0]
+                throughput = [1.0, 1.0, 1.0]
+                current_pos = ray_origin
+                current_dir = ray_direction
+                
+                max_bounces = 10
+                for bounce in range(max_bounces):
+                    voxel_val = trilinear_interpolate(volume, current_pos)
+                    color, alpha = transfer_function(voxel_val)
+                    
+                    incident_light = light_map(current_dir)
+                    
+                    contribution = [
+                        incident_light[0] * color[0] * alpha * throughput[0],
+                        incident_light[1] * color[1] * alpha * throughput[1],
+                        incident_light[2] * color[2] * alpha * throughput[2]
+                    ]
+                    
+                    current_radiance = [
+                        current_radiance[0] + contribution[0],
+                        current_radiance[1] + contribution[1],
+                        current_radiance[2] + contribution[2]
+                    ]
+                    
+                    throughput = [
+                        throughput[0] * (1.0 - alpha),
+                        throughput[1] * (1.0 - alpha),
+                        throughput[2] * (1.0 - alpha)
+                    ]
+                    
+                    if throughput[0] < 0.01 and throughput[1] < 0.01 and throughput[2] < 0.01:
+                        break
+                    
+                    step_size = 0.5
+                    current_pos = [
+                        current_pos[0] + current_dir[0] * step_size,
+                        current_pos[1] + current_dir[1] * step_size,
+                        current_pos[2] + current_dir[2] * step_size
+                    ]
+                    
+                    current_dir = sample_cosine_hemisphere(current_dir)
+                    
+                pixel_accumulator = [
+                    pixel_accumulator[0] + current_radiance[0],
+                    pixel_accumulator[1] + current_radiance[1],
+                    pixel_accumulator[2] + current_radiance[2]
+                ]
+            
+            image[y][x] = [
+                pixel_accumulator[0] / samples_per_pixel * camera.exposure,
+                pixel_accumulator[1] / samples_per_pixel * camera.exposure,
+                pixel_accumulator[2] / samples_per_pixel * camera.exposure
+            ]
+    return image
+
+def trilinear_interpolate(volume, pos):
+    ix, iy, iz = int(pos[0]), int(pos[1]), int(pos[2])
+    fx, fy, fz = pos[0] - ix, pos[1] - iy, pos[2] - iz
+    ix = max(0, min(ix, volume.width - 1))
+    iy = max(0, min(iy, volume.height - 1))
+    iz = max(0, min(iz, volume.depth - 1))
+    v000 = volume[ix][iy][iz]
+    v100 = volume[min(ix+1, volume.width-1)][iy][iz]
+    v010 = volume[ix][min(iy+1, volume.height-1)][iz]
+    v110 = volume[min(ix+1, volume.width-1)][min(iy+1, volume.height-1)][iz]
+    v001 = volume[ix][iy][min(iz+1, volume.depth-1)]
+    v101 = volume[min(ix+1, volume.width-1)][iy][min(iz+1, volume.depth-1)]
+    v011 = volume[ix][min(iy+1, volume.height-1)][min(iz+1, volume.depth-1)]
+    v111 = volume[min(ix+1, volume.width-1)][min(iy+1, volume.height-1)][min(iz+1, volume.depth-1)]
+    return (v000*(1-fx)*(1-fy)*(1-fz) + v100*fx*(1-fy)*(1-fz) + 
+            v010*(1-fx)*fy*(1-fz) + v110*fx*fy*(1-fz) + 
+            v001*(1-fx)*(1-fy)*fz + v101*fx*(1-fy)*fz + 
+            v011*(1-fx)*fy*fz + v111*fx*fy*fz)
+
+def sample_cosine_hemisphere(normal):
+    import math
+    u = math.random()
+    v = math.random()
+    theta = 2.0 * math.pi * u
+    phi = math.acos(math.sqrt(v))
+    x = math.cos(theta) * math.sin(phi)
+    y = math.sin(theta) * math.sin(phi)
+    z = math.cos(phi)
+    return [x, y, z]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** Tracing infinite light paths is computationally expensive. Monte Carlo simulations are required to generate a randomized subset [S1, unofficial][S5, unofficial].
+*   **Real-time Interruption:** Real-time display of rotating images is interrupted by repetitive recalculation processes due to high computational demand [S1, unofficial][S6, unofficial].
+*   **Clinical Use:** The prototype is not intended for clinical use at the time of publication and lacks real-time high-end quality reconstruction [S2].
+*   **Masking Findings:** Like conventional VR, inappropriate transfer function parameters can mask findings by adjacent structures [S1, unofficial].
+
+## Subtopics
+
+### Hybrid Cinematic Volume Rendering
+A variant that blends surface and volumetric characteristics, useful for compensating for speckle noise in ultrasound data [S5, unofficial].
+
+### TVAM Integrator
+A sibling method that modifies the accumulation step, potentially using different integration strategies [9443-specific-applications-and-integrators.md].
+
+### Directional Occlusion Shading
+A sibling method that integrates in-scattered radiance approximations using cone-shaped phase functions during slice traversal [9443-specific-applications-and-integrators.md].
+
+### Compositional Rendering
+A sibling method that renders distinct material styles into separate layers and composites them post-hoc [9443-specific-applications-and-integrators.md].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Rendering time ranges from 5 to 30 seconds for final image quality, depending on the desired quality and scene complexity [S2][S6, unofficial].
+*   **Scaling:** Performance scales linearly with the number of samples and volume resolution. Real-time interaction is supported via progressive rendering, where the image refines in the background while the user interacts [S5, unofficial][S7, unofficial].
+*   **Strengths:** Provides a more natural and photo-realistic representation with enhanced depth and shape perception, particularly for high-contrast structures like bones and vessels [S1, unofficial][S6, unofficial]. Models complex lighting effects including soft shadows, ambient occlusion, and subsurface scattering [S2][S5, unofficial].
+*   **Limitations:** High computational power demand. Real-time display of rotating images is interrupted by recalculation [S1, unofficial][S6, unofficial]. Not approved for clinical use as of the document date [S1, unofficial][S6, unofficial]. Limited display options in pre-clinical research tools [S1, unofficial].
+*   **When to Use:** When photorealistic visualization is prioritized over real-time interactivity, such as for patient education, surgical planning, or teaching anatomy [S2][S5, unofficial].
+*   **When Not to Use:** When real-time high-end quality reconstruction is required for interactive diagnosis, or when computational resources are limited [S2][S6, unofficial].
+
+## Background
+Cinematic Rendering (CR) was developed by Siemens Healthineers, inspired by the quality of computer animation programs in the entertainment industry, specifically big-screen films [S1, unofficial][S2]. It was introduced as a research tool in prototype software such as Frontier (version 1.0.0) and syngo.Via (version VB10A) [S1, unofficial][S6, unofficial]. The technique aims to generate more photo-realistic representations of the human body from CT and MR image data sets by simulating the complex interaction of photons with human anatomy [S2][S6, unofficial]. It is available as a research tool in an open research environment but has no approval for clinical use as of the document date [S1, unofficial][S6, unofficial].
+
+## Sources
+[S1] Cinematic rendering – an alternative to volume rendering for 3D CT, https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5110476/#, fetched 2026-10-26 (unofficial)
+[S2] Introducing Cinematic Rendering: A Novel Technique for Post-Processing Medical Imaging Data, https://doi.org/10.4236/jbise.2016.93013, fetched 2026-10-26
+[S3] Cinematic Rendering in CT: A Novel, Lifelike 3D Visualization Technique, https://doi.org/10.2214/ajr.17.17850, fetched 2026-10-26
+[S4] Cinematic Volume Rendering in Your Web Browser: VolView and VTK.js, https://www.kitware.com/cinematic-volume-rendering/, fetched 2026-10-27 (unofficial)
+[S5] PDF Cinematic Rendering for Medical Imaging - cdn0.scrvt.com, https://cdn0.scrvt.com/39b415fb07de4d9656c7b516d8e2d907/1800000004349360/6658a1860496/DI_SY_CinematicRendering_1800000004349360.pdf, fetched 2026-10-29 (unofficial)
+[S6] Cinematic rendering – an alternative to volume ... - PMC - NIH, https://pmc.ncbi.nlm.nih.gov/articles/PMC5110476/, fetched 2026-10-29 (unofficial)

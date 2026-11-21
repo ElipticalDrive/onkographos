@@ -1,0 +1,180 @@
+--- v008.md
++++ v009.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures**
+-*   **Initial Edge Set $\hat{I}$:** A collection of interface samples. Each sample is a pair of intensity values $(L, H)$ representing the low and high sides of an interface [S1, unofficial].
++*   **Initial Edge Set $\hat{I}$:** A collection of interface samples, where each sample is a pair of intensity values $(L, H)$ representing the low and high sides of an interface [S1, unofficial].
+ *   **Distance Matrix $D$:** A symmetric matrix where $D_{ij}$ is the Bhattacharyya distance between material distributions $V_i$ and $V_j$ [S1, unofficial].
+ *   **Material Graph $G$:** A graph structure with nodes $M$ and edges $I$ [S1, unofficial].
+@@ -35,5 +35,5 @@
+ 
+ 5.  **Greedy Merging (for a fixed $\theta$):**
+-    *   **Find Materials to Merge:** Walk through the distance matrix $D$ to create sets of similar materials. A set may include a material from an interface, but not both materials of that interface (to avoid collapsing an interface into a single material) [S1, unofficial]. Reduce each set to a single material using a parent-child hierarchy, merging all children with their respective parents [S1, unofficial].
++    *   **Find Materials to Merge:** Walk through the distance matrix $D$ to create sets of similar materials [S1, unofficial]. A set may include a material from an interface, but not both materials of that interface (to avoid collapsing an interface into a single material) [S1, unofficial]. Reduce each set to a single material using a parent-child hierarchy, merging all children with their respective parents [S1, unofficial].
+     *   **Reconstruct Graph:** Merge nodes of similar materials and merge repeating interface edges into a single interface edge [S1, unofficial].
+     *   **Update Distributions:** Compute the resulting material intensity distributions as a weighted average of the constituent material distributions (means and standard deviations) [S1, unofficial].
+@@ -46,5 +46,4 @@
+ ```python
+ import math
+-import random
+ 
+ def robust_material_graph_deduction(volume):
+@@ -56,12 +55,7 @@
+ 
+     # Step 2: Cluster interfaces and subsample
+-    # Subsample for tractability on large volumes [S1, unofficial]
+-    sampled_edges = random.sample(initial_edges, min(1000, len(initial_edges)))
+-    # HDBSCAN clustering of (L, H) samples [S1, unofficial]
+-    cluster_ids = hdbscan_cluster(sampled_edges)
+-    clusters = {}
+-    for edge, cid in zip(sampled_edges, cluster_ids):
+-        clusters.setdefault(cid, []).append(edge)
+-
++    sampled_edges = initial_edges[:min(1000, len(initial_edges))]
++    clusters = cluster_edges(sampled_edges)
++    
+     materials = []
+     for cid, edges in clusters.items():
+@@ -126,52 +120,18 @@
+     return dist_sq + coeff
+ 
+-def greedy_merge(materials, distances, theta):
+-    n = len(materials)
+-    parent = {i: i for i in range(n)}
+-    for i in range(n):
+-        for j in range(i + 1, n):
+-            if distances[i][j] < theta and not interface_collapses(materials[i], materials[j], materials):
+-                parent[j] = i
+-    unique_materials = []
+-    for i in range(n):
+-        root = i
+-        while parent[root] != root:
+-            root = parent[root]
+-        if root not in [m['id'] for m in unique_materials]:
+-            unique_materials.append(materials[i])
+-    interfaces = []
+-    for i, m1 in enumerate(unique_materials):
+-        for j, m2 in enumerate(unique_materials):
+-            if i < j and are_adjacent(m1, m2, materials):
+-                merged_dist = weighted_average_dist(m1, m2)
+-                interfaces.append((merged_dist, merged_dist))
+-    return unique_materials, interfaces
+-
+-def interface_collapses(m1, m2, materials):
+-    for mat in materials:
+-        ids = {e[0] for e in mat['edges']}
+-        if m1['id'] in ids and m2['id'] in ids:
+-            return True
+-    return False
+-
+-def are_adjacent(m1, m2, materials):
+-    for mat in materials:
+-        ids = {e[0] for e in mat['edges']}
+-        if m1['id'] in ids and m2['id'] in ids:
+-            return True
+-    return False
+-
+-def weighted_average_dist(v1, v2):
+-    w1, w2 = v1['sigma'], v2['sigma']
+-    total_w = w1 + w2
+-    return {'mu': (w1*v1['mu'] + w2*v2['mu'])/total_w, 'sigma': (w1*v1['sigma'] + w2*v2['sigma'])/total_w}
+-
+-def compute_mean_occlusion(material, volume):
+-    # Not given in the sources. Computes depth-based transparency weight [G]
+-    return 0.5
+-
+-def hdbscan_cluster(edges):
+-    # Standard HDBSCAN clustering algorithm [S1, unofficial]
+-    return [0] * len(edges)
++def cluster_edges(edges):
++    # Groups edges by proximity using a simple distance threshold [G]
++    clusters = {}
++    threshold = 0.5
++    for edge in edges:
++        placed = False
++        for cid, clust_edges in clusters.items():
++            if any(math.sqrt((e[0]-edge[0])**2 + (e[1]-edge[1])**2) < threshold for e in clust_edges):
++                clusters[cid].append(edge)
++                placed = True
++                break
++        if not placed:
++            clusters[len(clusters)] = [edge]
++    return clusters
+ 
+ def get_interface_pairs(materials):
+@@ -184,4 +144,56 @@
+                     pairs.append((materials[e1[0]], materials[e2[0]]))
+     return pairs
++
++def greedy_merge(materials, distances, theta):
++    n = len(materials)
++    parent = {i: i for i in range(n)}
++    
++    # Step 5a: Find materials to merge
++    for i in range(n):
++        for j in range(i + 1, n):
++            if distances[i][j] < theta and not interface_collapses(materials[i], materials[j], materials):
++                parent[j] = i
++                
++    # Reduce sets to single materials via parent-child hierarchy
++    unique_materials = []
++    for i in range(n):
++        root = i
++        while parent[root] != root:
++            root = parent[root]
++        if root not in [m['id'] for m in unique_materials]:
++            unique_materials.append(materials[i])
++            
++    # Step 5b: Reconstruct graph and merge repeating interfaces
++    interfaces = []
++    for i, m1 in enumerate(unique_materials):
++        for j, m2 in enumerate(unique_materials):
++            if i < j and are_adjacent(m1, m2, materials):
++                merged_dist = weighted_average_dist(m1, m2)
++                interfaces.append((merged_dist, merged_dist))
++                
++    return unique_materials, interfaces
++
++def interface_collapses(m1, m2, materials):
++    for mat in materials:
++        ids = {e[0] for e in mat['edges']}
++        if m1['id'] in ids and m2['id'] in ids:
++            return True
++    return False
++
++def are_adjacent(m1, m2, materials):
++    for mat in materials:
++        ids = {e[0] for e in mat['edges']}
++        if m1['id'] in ids and m2['id'] in ids:
++            return True
++    return False
++
++def weighted_average_dist(v1, v2):
++    w1, w2 = v1['sigma'], v2['sigma']
++    total_w = w1 + w2
++    return {'mu': (w1*v1['mu'] + w2*v2['mu'])/total_w, 'sigma': (w1*v1['sigma'] + w2*v2['sigma'])/total_w}
++
++def compute_mean_occlusion(material, volume):
++    # Not given in the sources. Computes depth-based transparency weight [G]
++    return 0.5
+ ```
+ 
+@@ -192,12 +204,12 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Noise:** Noise in volume data can result in repeating boundaries for the same interface. The clustering and merging steps help mitigate this, but subsampling is critical for performance [S1, unofficial].
+-*   **Disconnected Components:** Materials may have multiple disconnected components. The graph deduction assumes valid material-material interfaces from clustering [S1, unofficial].
++*   **Noise:** Noise in volume data can result in repeating boundaries for the same interface [S1, unofficial]. The clustering and merging steps help mitigate this, but subsampling is critical for performance [S1, unofficial].
++*   **Disconnected Components:** Materials may have multiple disconnected components [S1, unofficial]. The graph deduction assumes valid material-material interfaces from clustering [S1, unofficial].
+ *   **Background:** The background material is typically set to invisible (white node) to hide it from rendering [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The complexity is dominated by the initial edge detection and the HDBSCAN clustering. The greedy merging is efficient, but the search for optimal $\theta$ requires evaluating multiple graph configurations [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the initial edge set, distance matrix, and the final graph. Subsampling helps manage memory for large volumes [S1, unofficial].
+-*   **Performance:** Implemented in a real-time GPU volume renderer with a Python backend. Running times for graph deduction are reported in seconds for typical datasets (e.g., 2-4 seconds for graph deduction on standard datasets) [S1, unofficial].
++*   **Time Complexity:** The complexity is dominated by the initial edge detection and the HDBSCAN clustering [S1, unofficial]. The greedy merging is efficient, but the search for optimal $\theta$ requires evaluating multiple graph configurations [S1, unofficial].
++*   **Memory Complexity:** Requires storing the initial edge set, distance matrix, and the final graph [S1, unofficial]. Subsampling helps manage memory for large volumes [S1, unofficial].
++*   **Performance:** Implemented in a real-time GPU volume renderer with a Python backend [S1, unofficial]. Graph deduction takes approximately 2 seconds on standard datasets, with voxel classification taking ~4 seconds and interface clustering taking negligible time [S1, unofficial].
+ *   **Strengths:** Automatic discovery of materials and interfaces; fine control over color and opacity; automatic background removal; robust to noise via clustering [S1, unofficial].
+ *   **Limitations:** Relies on the quality of the initial edge detection; assumes materials can be modeled by Gaussian distributions; may struggle with highly complex or overlapping intensity distributions [S1, unofficial].

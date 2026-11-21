@@ -1,0 +1,327 @@
+A refreshingly simple data-driven game engine built in Rust - Feature/unlock gpu occ on webgpu by alexander-busarov · Pull Request #1 · motif-io/bevy
+
+Feature/unlock gpu occ on webgpu by alexander-busarov · Pull Request #1 · motif-io/bevy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+alexander-busarov
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Objective
+Allow GPU-driven rendering with occlusion culling on WebGPU devices that lack immediates or expose fewer than 12 storage textures per shader stage.
+Solution
+Add a dynamic uniform buffer fallback for immediates. Preserve the existing immediates path on devices that support it, and use a dynamic uniform buffer (UBO) otherwise. This extends device compatibility while keeping the existing behavior unchanged on devices with immediates support.
+Add depth pyramid generation with one dispatch per mip when fewer than 12 storage textures are available, preserving SPD on supported devices. Paths are selected during initialization. The existing requirement for 10 storage buffers per shader stage remains unchanged.
+Fix WebGPU WGSL validation errors in the mesh preprocessing shader, mesh_preprocess.wgsl, caused by infinite constants and atomics in read-only storage buffers.
+Testing
+Tested on configurations supporting the original rendering path and on configurations requiring the uniform buffer and depth pyramid fallbacks.
+Native and wasm32 Cargo checks passed.
+Local Metal checks compared fallback mip values against a CPU reference, covering odd and rectangular sizes and MSAA ×4.
+To reproduce, enable DepthPrepass and OcclusionCulling on a Camera3d. Test devices with fewer than 12 storage textures and devices supporting the original SPD path. Both require at least 10 storage buffers per stage.
+alexander-busarov
+added 3 commits
+October 23, 2026 10:58
+Add uniform fallback for GPU culling and depth pyramids
+…
+3c4dbaf
+```
+Use dynamic uniforms when IMMEDIATES are unavailable, removing a blocker for GPU-driven rendering on WebGPU while preserving push constants on supported devices.
+```
+Fix OCC shader compilation on WebGPU
+…
+c174b75
+```
+Replace infinite AABB bounds with finite f32 extrema and use plain u32
+counters in the read-only late-pass buffer. Preserve early-pass atomics
+and the existing buffer layout
+```
+Add depth pyramid fallback for WebGPU
+…
+31cd7da
+```
+Generate depth mips one level per dispatch when fewer than 12 storage
+texture bindings are available. Select the path at initialization,
+preserving SPD on supported devices and the 10-storage-buffer requirement
+for GPU culling
+```
+alexander-busarov
+requested review from
+apetrock,
+motif-brian and
+venhelhardt
+October 23, 2026 21:46
+venhelhardt
+reviewed
+Oct 26, 2026
+View reviewed changes
+venhelhardt
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Overall, this looks good! Great work on enabling GPU-driven rendering for WebGPU.
+A couple of important things before we move forward:
+Please check the README for our branching and tagging workflow. This PR should not be merged directly. Instead, we need to create a separate branch and tag it according to the documented process.
+We should definitely open an upstream PR in bevy. We are not bevy experts, and it's important that these changes are reviewed by its maintainers. More importantly, we want these changes upstream so that bevy maintainers can maintain the immediates, fallbacks, and related functionality going forward.
+I believe enabling GPU-driven rendering on webgpu would be a welcome improvement for bevy. However, the maintainers may suggest significant architectural or implementation changes, potentially requiring us to rework parts of the current solution.
+That's why I think getting upstream feedback is essential before we commit to this implementation.
+Comment thread
+crates/bevy_render/src/render_resource/tiny_u32_immediates.rs
+//! A scalar compute parameter, passed as an immediate or an immutable uniform record.
+use core::num::NonZeroU64;
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+nit: remove empty lines between imports (so they can be sorted)
+Comment thread
+crates/bevy_render/src/render_resource/u32_immediates.rs
+Outdated
+/// Whether the device needs the uniform variant of a four-byte immediate.
+pub fn uses_uniforms(device: &RenderDevice) -> bool {
+!device.features().contains(WgpuFeatures::IMMEDIATES)
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+minor: requesting features can be potentially heavy (even just crossing wasm-js boundary), what if this function accepts &wgpu::Features and the caller can have an option for caching device features
+alexander-busarov
+Oct 26, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I'd prefer to keep the current signature:
+Within Bevy, this check is only used during construction.
+RenderDevice already caches both features and limits, thanks to John Delaney’s change.
+Additional caching would introduce redundant state, more complexity, and more potential failure points.
+This is not a hot path, so I don’t see a performance benefit that would justify the change.
+That said, when I submit an equivalent PR upstream, I’ll probably need to add caching there, since John’s PR hasn’t been merged yet
+apetrock
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Here is the PR to bevy:
+bevyengine#25998
+and the pr to WGPU for the same caching:
+gfx-rs/wgpu#10513
+Comment thread
+crates/bevy_render/src/render_resource/u32_immediates.rs
+Outdated
+/// Whether the device needs the uniform variant of a four-byte immediate.
+pub fn uses_uniforms(device: &RenderDevice) -> bool {
+!device.features().contains(WgpuFeatures::IMMEDIATES)
+|| device.limits().max_immediate_size < 4
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+same here for limits
+apetrock
+Oct 27, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Limits are now cached and borrowed as above.
+Comment thread
+crates/bevy_render/src/render_resource/u32_immediates.rs
+Outdated
+}
+/// Whether the device needs the uniform variant of a four-byte immediate.
+pub fn uses_uniforms(device: &RenderDevice) -> bool {
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+nit: just another name candidate immediates_supported/available/enabled (better correlates with the struct name), is_uniform => uses_uniform
+alexander-busarov
+Oct 26, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Agreed, the name is easy to confuse with is_uniform. I suggest renaming it to immediates_available, which also makes the purpose of this check clearer
+Comment thread
+crates/bevy_render/src/render_resource/tiny_u32_immediates.rs
+}
+/// Configures a pipeline's scalar immediate, leaving pipelines without immediates unchanged.
+pub fn configure_pipeline(&self, descriptor: &mut ComputePipelineDescriptor) {
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+comment: I wonder if it is possible or make sense to decouple it from 'compute' and make it workable for render pipelines as well.
+alexander-busarov
+Oct 26, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+That could be a sensible extension, but supporting render pipelines would require changes beyond this method and would significantly expand the scope of the current task. I’d prefer to leave it for a follow-up when we have a concrete render-pipeline use case.
+Comment thread
+crates/bevy_render/src/render_resource/tiny_u32_immediates.rs
+});
+let layout = Self::uniform_layout();
+let layout = device.create_bind_group_layout(Some(layout.label.as_ref()), &layout.entries);
+uniforms.bind_group = Some(device.create_bind_group(
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+nit: does it make sense to release bind_group before realloc? e.g., uniforms.bind_group = None in the beginning
+alexander-busarov
+Oct 26, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I don’t think this is critical here, since the buffer is intended to remain small. If it grows large enough for this overlap to matter, its allocation and initialization costs would already be a concern before we reach the bind-group replacement.
+Comment thread
+crates/bevy_render/src/render_resource/u32_immediates.rs
+Outdated
+/// The mode is fixed by the enabled features and limits of the render device.
+/// Uniform records contain their own indices and are uploaded only on growth.
+/// Pipelines using this helper reserve bind group 1 for the fallback.
+pub struct U32Immediates {
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+It's worth noting that this should be used with care, as memory usage scales with the constant. For example, a value of 1_000_000 would require a 256 MB buffer, with 252 MB wasted.
+Hopefully, bevy do not use such large values, but that could change in the future. It might be worth adding a warning when the value exceeds some threshold (1k, 10k, or 100k). Or even better - rename this to TinyU32Immediates and provide some limitation, e.g., assert(capacity < Self::MAX_CAPACITY) where MAX_CAPACITY = 1000. Otherwise, this implementation hides a potentially significant memory cost.
+Comment thread
+crates/bevy_render/src/batching/gpu_preprocessing.rs
+Outdated
+device.limits().max_storage_buffers_per_shader_stage >= 10 &&
+.contains(Features::INDIRECT_FIRST_INSTANCE);
+// The early occlusion culling pass requires 10 storage buffers.
+// Depth downsampling has a fallback for devices with fewer than 12 storage textures.
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+nit: This comment (about texture limitation) lost the context, probably better to remove it and add this comment to PR itself
+Comment thread
+crates/bevy_pbr/src/render/mesh_preprocess.wgsl
+var aabb = vec4(infinity, infinity, neg_infinity, neg_infinity);
+var max_depth_view = neg_infinity;
+// WebGPU rejects non-finite constant expressions.
+let max_f32 = bitcast<f32>(0x7f7fffffu);
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+nit: const and f32 instead of bitcast const F32_MAX: f32 = 3.402+e38;
+alexander-busarov
+Oct 26, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I’d prefer to keep the bitcast. The original code already used one, so this change doesn’t introduce any additional operations. A decimal floating-point literal relies on the compiler’s decimal-to-binary conversion and rounding, and we don’t control all the compilers involved. The bitcast specifies the exact bit pattern directly, making it a more robust choice without adding runtime overhead
+Comment thread
+crates/bevy_core_pipeline/src/mip_generation/experimental/depth_2mips_fallback.rs
+{
+pass.set_pipeline(if mip == 0 { first } else { reduce });
+pass.set_bind_group(0, bind_group, &[]);
+pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+venhelhardt
+Oct 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+comment: I wonder it is possible to use barriers and dispatch once all chains
+alexander-busarov
+Oct 26, 2026
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The original pass already processes multiple mip levels per dispatch, but it requires 12 storage texture slots. The goal of this fallback is to keep the implementation as simple as possible and ensure it works reliably within lower binding limits.
+The mip chain is short, with at most 11 reduction steps, and this is per-frame work rather than per-mesh work. I don’t think aggressive optimization is justified here, especially since the optimized path remains available whenever the device has enough storage texture slots.
+Add depth pyramid fallback for WebGPU
+…
+4a746bc
+```
+minor refactoring and renaming
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

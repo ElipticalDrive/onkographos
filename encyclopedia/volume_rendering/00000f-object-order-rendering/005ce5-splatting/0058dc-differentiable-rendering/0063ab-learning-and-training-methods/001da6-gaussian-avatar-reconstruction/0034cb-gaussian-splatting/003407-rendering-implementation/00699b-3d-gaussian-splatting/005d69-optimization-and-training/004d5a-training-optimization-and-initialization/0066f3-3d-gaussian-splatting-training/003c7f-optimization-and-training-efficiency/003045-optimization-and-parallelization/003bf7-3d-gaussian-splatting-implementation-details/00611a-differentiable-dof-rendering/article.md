@@ -1,0 +1,128 @@
+# Differentiable DOF Rendering
+
+Also called: Differentiable Depth of Field Rendering
+
+## Overview
+Differentiable DOF Rendering is a method that generates blurred images by convolving projected 2D Gaussians with depth-dependent blur kernels derived from a finite-aperture camera model, enabling the differentiable optimization of camera parameters and scene geometry [S1]. It sets itself apart from standard 3D Gaussian Splatting by explicitly modeling defocus blur as a differentiable operation, allowing the joint optimization of scene structure and camera intrinsic/extrinsic parameters (specifically focal distance and aperture) rather than treating them as fixed inputs [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of 3D Gaussians $\mathcal{S}$, camera parameters for each training view $m$ (focal distance $f_m$, aperture parameter $Q_m$), and training images $I_m$.
+*   **Outputs:** A rendered color image $\tilde{I}$, a depth map $\tilde{D}$, and a Circle of Confusion (CoC) map $\tilde{M}^{(coc)}$.
+
+**Data Structures**
+*   **3D Gaussian:** Defined by position, covariance, opacity, and spherical harmonics coefficients (standard 3DGS representation).
+*   **2D Gaussian ($G_k'$):** The projection of a 3D Gaussian into screen space.
+*   **Blur Kernel ($G_k^{(coc)}$):** An isotropic 2D Gaussian kernel defined by covariance $\Sigma_k^{(coc)} = a \mathbf{I}$, where $a$ is a scalar derived from the CoC radius.
+
+**Formulas**
+The Circle of Confusion (CoC) radius $R_k^{(coc)}$ for a Gaussian $k$ with center depth $z_k$ is calculated as [S1]:
+$$
+R_k^{(coc)} = \frac{1}{2} Q \left| \frac{1}{z_k} - \frac{1}{f} \right|
+$$
+where $Q = \frac{F}{A}$ is the simplified aperture parameter ($F$ is lens focal length, $A$ is aperture), $z_k$ is the object point depth, and $f$ is the focal distance [S1].
+
+The blur kernel $G_k^{(coc)}$ is defined as [S1]:
+$$
+G_k^{(coc)}(\mathbf{x}) = \exp \left( -\frac{1}{2} \mathbf{x}^T \Sigma_k^{(coc)} \mathbf{x} \right)
+$$
+where $\Sigma_k^{(coc)} = a \mathbf{I}$ is an isotropic covariance matrix. The scalar $a$ is determined by minimizing the $L_2$ distance between the Gaussian kernel and a uniform intensity distribution within the CoC radius, yielding [S1]:
+$$
+a = \frac{(R_k^{(coc)})^2}{2 \ln 4}
+$$
+
+The convolved 2D Gaussian $G_k''$ is obtained by convolving the projected Gaussian $G_k'$ with the blur kernel [S1]:
+$$
+G_k'' = G_k' * G_k^{(coc)}
+$$
+Since the convolution of two Gaussians is another Gaussian, $G_k''$ remains a valid Gaussian primitive, preserving the rasterization consistency [S1].
+
+**Numbered Steps**
+1.  **Projection:** Project each 3D Gaussian $k$ from the scene into 2D screen space to obtain $G_k'$ [S1].
+2.  **CoC Calculation:** For each projected Gaussian $G_k'$, calculate its CoC radius $R_k^{(coc)}$ using its center depth $z_k$ and the current camera parameters $f, Q$ via Equation (7) [S1].
+3.  **Kernel Construction:** Construct the isotropic blur kernel $G_k^{(coc)}$ using the calculated radius $R_k^{(coc)}$ to determine the scalar $a$ [S1].
+4.  **Convolution:** Convolve the projected Gaussian $G_k'$ with the blur kernel $G_k^{(coc)}$ to produce the blurred Gaussian $G_k''$ [S1].
+5.  **Re-evaluation:** Re-evaluate the number of Gaussians linked to each pixel, denoted as $N_{x'}$, because the convolution changes the spatial support and associations between Gaussians and pixels [S1].
+6.  **Compositing:** Accumulate contributions from the convolved Gaussians $G_k''$ to render the final color image $\tilde{I}$, depth map $\tilde{D}$, and CoC map $\tilde{M}^{(coc)}$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def differentiable_dof_render(gaussians_3d, camera_params, image_width, image_height):
+    """
+    gaussians_3d: List of 3D Gaussian primitives.
+    camera_params: Dict containing 'f' (focal distance) and 'Q' (aperture parameter).
+    """
+    f = camera_params['f']
+    Q = camera_params['Q']
+    
+    # Step 1: Project 3D Gaussians to 2D
+    # Returns list of 2D Gaussians G_k' with properties: center (x, y), 
+    # covariance matrix Sigma_2d, opacity alpha, color c, and depth z_k
+    projected_gaussians = project_to_screen(gaussians_3d, camera_params)
+    
+    blurred_gaussians = []
+    
+    for g_prime in projected_gaussians:
+        # Step 2: Calculate CoC radius
+        # R_coc = 0.5 * Q * |1/z_k - 1/f|
+        z_k = g_prime.depth
+        R_coc = 0.5 * Q * abs(1.0 / z_k - 1.0 / f)
+        
+        # Step 3: Construct blur kernel parameters
+        # a = R_coc^2 / (2 * ln(4))
+        a = (R_coc ** 2) / (2.0 * math.log(4))
+        
+        # The blur kernel is an isotropic Gaussian with covariance a*I
+        # Step 4: Convolve G_k' with blur kernel
+        # Convolution of two Gaussians results in a Gaussian with summed covariances
+        # Sigma_blurred = Sigma_2d + a * I
+        Sigma_blurred = g_prime.covariance + a * np.eye(2)
+        
+        # Create the new blurred Gaussian G_k''
+        g_double_prime = Gaussian2D(
+            center=g_prime.center,
+            covariance=Sigma_blurred,
+            opacity=g_prime.opacity, # Opacity remains unchanged by convolution in this model
+            color=g_prime.color
+        )
+        blurred_gaussians.append(g_double_prime)
+        
+    # Step 5 & 6: Re-evaluate pixel associations and composite
+    # Sort blurred_gaussians by depth for correct alpha blending
+    blurred_gaussians.sort(key=lambda g: g.depth, reverse=True)
+    
+    # Initialize output buffers
+    color_image = np.zeros((image_height, image_width, 3))
+    depth_map = np.zeros((image_height, image_width))
+    coc_map = np.zeros((image_height, image_width))
+    
+    # Standard alpha blending rasterization using the blurred Gaussians
+    for g in blurred_gaussians:
+        # Rasterize g into the image buffers
+        # This step involves re-evaluating which pixels are covered by g
+        # due to the changed covariance Sigma_blurred
+        rasterize_gaussian(g, color_image, depth_map, coc_map)
+        
+    return color_image, depth_map, coc_map
+```
+
+**Edge Cases and Pitfalls**
+*   **Precision:** The simplification of the CoC formula assumes $F \ll f$ and $F \ll z_o$ [S1]. If these conditions are not met, the approximation error increases.
+*   **Boundaries:** The method assumes uniform depth across each 2D Gaussian’s support, set as the $z$-coordinate of the center position [S1]. This approximation may introduce artifacts for Gaussians with large depth variance or extreme perspective distortion.
+*   **Degenerate Input:** If $z_k = f$, the CoC radius becomes zero, resulting in no blur. This is the focal plane.
+
+## Operating characteristics
+*   **Time Complexity:** The method adds a convolution step per Gaussian. However, since the convolution of Gaussians is closed-form (sum of covariances), the computational overhead is minimal compared to standard rasterization, provided the rasterization is CUDA-customized [S1].
+*   **Memory Complexity:** Requires storing the additional blur kernel parameters (scalar $a$) and potentially re-evaluating pixel-Gaussian associations, which may increase memory bandwidth usage during the compositing pass [S1].
+*   **Strengths:** Enables differentiable optimization of camera parameters ($f, Q$) and scene geometry simultaneously. It leverages natural defocus blur in training images as a geometric cue [S1].
+*   **Limitations:** The assumption of uniform depth within a Gaussian's support may lead to reconstruction artifacts in regions with significant depth discontinuities or large Gaussians [S1].
+*   **When to use:** When training data contains defocus blur and the goal is to reconstruct a scene with accurate geometry and potentially optimize camera intrinsics.
+*   **When not to use:** When high-precision depth estimation is required for very large primitives or when the camera model assumptions ($F \ll f$) are violated.
+
+## Background
+Differentiable DOF Rendering was introduced in the paper "DOF-GS: Adjustable Depth-of-Field 3D Gaussian Splatting for Post-Capture Refocusing, Defocus Rendering and Blur Removal" [S1]. It extends the 3D Gaussian Splatting framework to handle depth-of-field effects, allowing for post-capture refocusing and blur removal by making the blur process differentiable with respect to scene and camera parameters [S1].
+
+## Sources
+[S1] DOF-GS: Adjustable Depth-of-Field 3D Gaussian Splatting for Post-Capture Refocusing, Defocus Rendering and Blur Removal, https://doi.org/10.1109/cvpr52734.2025.01984, fetched 2026-10-29

@@ -1,0 +1,182 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Ray Generation from Pixel Coordinates
+ 
+-Also called: Camera Ray Generation, Camera Raycasting, Pixel to Ray Unprojection, Ray Direction Calculation, Ray Generation from Pixels, Ray Generation from Screen Coordinates
++Also called: Camera Ray Generation, Camera Raycasting, Pixel to Ray Unprojection, Ray Direction Calculation, Ray Generation from Camera/NDC, Ray Generation from Pixels, Ray Generation from Screen Coordinates
+ 
+ ## Overview
+@@ -7,69 +7,43 @@
+ 
+ ## How it works
+-The method generally follows two primary approaches: matrix-based unprojection (common in OpenGL/NDC pipelines) and intrinsic-based geometric calculation (common in PyTorch3D/Metal implementations). Both approaches require pixel coordinates $(u, v)$, image resolution $(W, H)$, and camera parameters (intrinsics or projection matrices).
+-
+ ### Inputs and Outputs
+-- **Inputs**:
+-  - Pixel coordinates: $(u, v)$ or a grid of indices.
+-  - Image resolution: Width $W$, Height $H$.
+-  - Camera parameters: Either an inverse Projection-View matrix ($M_{inv}$) or intrinsic parameters (Field of View $FOV$, aspect ratio, or focal length).
+-  - Near plane depth $z_{near}$ (often 0 or 1 depending on coordinate system).
+-- **Outputs**:
+-  - Ray origins: $\mathbf{r}_o \in \mathbb{R}^3$ (usually the camera center).
+-  - Ray directions: $\mathbf{r}_d \in \mathbb{R}^3$ (normalized vectors pointing from origin through the pixel).
++- **Inputs**: Pixel coordinates $(u, v)$ or a grid of indices [S4, S5, S7, unofficial]. Image resolution: Width $W$, Height $H$ [S1, S3, S5, unofficial]. Camera parameters: Either an inverse Projection-View matrix $M_{inv}$ [S1, S4, unofficial] or intrinsic parameters like vertical Field of View (FOV) [S5, S7, unofficial]. Near plane depth $z_{near}$ in NDC, typically $0$ or $1$ [S1, S8, unofficial].
++- **Outputs**: Ray origins $\mathbf{r}_o \in \mathbb{R}^3$ (usually the camera center) [S2, S4, S6, unofficial]. Ray directions $\mathbf{r}_d \in \mathbb{R}^3$ (normalized vectors pointing from origin through the pixel) [S4, S6, unofficial].
+ 
+ ### Data Structures
+-- **Pixel Grid**: A tensor or array of shape $(H, W, 2)$ or $(N, 2)$ containing $(u, v)$ coordinates.
+-- **NDC Points**: Homogeneous coordinates in Normalized Device Coordinates, shape $(N, 4)$ or $(N, 3)$ with appended $w=1$.
+-- **RayBundle**: A structure containing:
+-  - `rays_o`: Tensor of shape $(N, 3)$ for origins.
+-  - `rays_d`: Tensor of shape $(N, 3)$ for directions.
+-  - `sample_points`: Zero-initialized tensor for marching results.
++- **Pixel Grid**: A tensor or array of shape $(H, W, 2)$ or $(N, 2)$ containing $(u, v)$ coordinates [S2, S3, S4, unofficial].
++- **NDC Points**: Homogeneous coordinates in Normalized Device Coordinates, shape $(N, 4)$ or $(N, 3)$ with appended $w=1$ [S2, S3, S4, unofficial].
++- **RayBundle**: A structure containing `rays_o` (shape $(N, 3)$), `rays_d` (shape $(N, 3)$), and zero-initialized `sample_points` and `sample_lengths` [S4, S6, unofficial].
+ 
+ ### Method 1: Matrix Unprojection (NDC to World)
+-This approach uses the inverse of the combined Projection and View matrices. It is standard in OpenGL-style pipelines where NDC ranges from $[-1, 1]$.
+-
+-1.  **Convert to NDC**: Map pixel coordinates $(u, v)$ to NDC space $(x_{ndc}, y_{ndc})$.
+-    $$ x_{ndc} = \frac{2u}{W} - 1 $$
+-    $$ y_{ndc} = \frac{2v}{H} - 1 $$
+-    The $z$ component is set to the near plane depth in NDC, typically $0$ for OpenGL (where near is 0) or $-1$ for others. Let $z_{ndc} = 0$ [S1, unofficial].
+-    $$ \mathbf{p}_{ndc} = [x_{ndc}, y_{ndc}, z_{ndc}, 1]^T $$
+-
+-2.  **Transform to World**: Multiply by the inverse Projection-View matrix $M_{inv}$.
+-    $$ \mathbf{p}_{clip} = M_{inv} \times \mathbf{p}_{ndc} $$
+-    $$ \mathbf{p}_{world\_homo} = [x_w, y_w, z_w, w_w]^T $$
+-
+-3.  **Perspective Division**: Convert to Cartesian coordinates.
+-    $$ \mathbf{p}_{world} = \left[ \frac{x_w}{w_w}, \frac{y_w}{w_w}, \frac{z_w}{w_w} \right]^T $$
+-
+-4.  **Generate Origin and Direction**:
+-    - Calculate $\mathbf{p}_{world}$ for $z_{ndc}=0$ (near plane) to get the ray origin $\mathbf{r}_o$. Note: In many camera models, the origin is simply the camera center, but unprojecting the near plane provides the intersection with the view frustum's front face [S1, unofficial].
+-    - Calculate $\mathbf{p}_{world}$ for $z_{ndc}=1$ (or another depth) to get a second point $\mathbf{p}_{far}$.
+-    - Compute direction: $\mathbf{r}_d = \text{normalize}(\mathbf{p}_{far} - \mathbf{r}_o)$ [S1, unofficial].
++This approach uses the inverse of the combined Projection and View matrices [S1, S4, unofficial]. It is standard in OpenGL-style pipelines where NDC ranges from $[-1, 1]$ [S3, unofficial].
++1. **Convert to NDC**: Map pixel coordinates $(u, v)$ to NDC space $(x_{ndc}, y_{ndc})$ [S3, unofficial].
++   $$ x_{ndc} = \frac{2u}{W} - 1 $$
++   $$ y_{ndc} = \frac{2v}{H} - 1 $$
++   The $z$ component is computed as $z_{ndc} = 2z_{near} - 1$ for the near plane [S1, unofficial].
++   $$ \mathbf{p}_{ndc} = [x_{ndc}, y_{ndc}, z_{ndc}, 1]^T $$
++2. **Transform to World**: Multiply by the inverse Projection-View matrix $M_{inv}$ [S1, unofficial].
++   $$ \mathbf{p}_{world\_homo} = M_{inv} \times \mathbf{p}_{ndc} $$
++3. **Perspective Division**: Convert to Cartesian coordinates [G].
++   $$ \mathbf{p}_{world} = \left[ \frac{x_w}{w_w}, \frac{y_w}{w_w}, \frac{z_w}{w_w} \right]^T $$
++4. **Generate Origin and Direction**: Calculate $\mathbf{p}_{world}$ for $z_{ndc}=0$ (near plane) to get the ray origin $\mathbf{r}_o$ [S1, unofficial]. Calculate $\mathbf{p}_{world}$ for $z_{ndc}=1$ to get a second point $\mathbf{p}_{far}$ [S1, unofficial]. Compute direction: $\mathbf{r}_d = \text{normalize}(\mathbf{p}_{far} - \mathbf{r}_o)$ [S1, S4, unofficial].
+ 
+ ### Method 2: Intrinsic-Based Geometric Calculation
+-This approach is common in deep learning frameworks (e.g., PyTorch3D) and Metal shaders, using Field of View (FOV) and resolution.
++This approach is common in deep learning frameworks (e.g., PyTorch3D) and Metal shaders, using Field of View (FOV) and resolution [S5, S7, unofficial].
++1. **Calculate Centered Coordinates**:
++   $$ x_{center} = u - \frac{W}{2} $$
++   $$ y_{center} = v - \frac{H}{2} $$
++   [S5, unofficial]. Note that Metal's coordinate system places $(0,0)$ at the top-left, requiring this centering adjustment [S5, unofficial].
++2. **Calculate Z-component (Depth)**: Using the vertical field of view $FOV$ (in degrees):
++   $$ z = \frac{H}{\tan\left(\frac{FOV \cdot \pi}{360}\right)} $$
++   [S5, unofficial].
++3. **Construct Ray Direction**: The direction vector in camera space (assuming camera looks down negative Z) is:
++   $$ \mathbf{d}_{cam} = [x_{center}, y_{center}, -z] $$
++   $$ \mathbf{r}_d = \text{normalize}(\mathbf{d}_{cam}) $$
++   [S5, unofficial].
++4. **Set Origin**: The ray origin is the camera center $\mathbf{C}$ [S2, S4, S6, unofficial].
++   $$ \mathbf{r}_o = \mathbf{C} $$
+ 
+-1.  **Calculate Centered Coordinates**:
+-    $$ x_{center} = u - \frac{W}{2} $$
+-    $$ y_{center} = v - \frac{H}{2} $$
+-    [S4, unofficial]
+-
+-2.  **Calculate Z-component (Depth)**:
+-    Using the vertical field of view $FOV$ (in degrees):
+-    $$ z = \frac{H}{\tan\left(\frac{FOV \cdot \pi}{360}\right)} $$
+-    [S4, unofficial]
+-
+-3.  **Construct Ray Direction**:
+-    The direction vector in camera space (assuming camera looks down negative Z) is:
+-    $$ \mathbf{d}_{cam} = [x_{center}, y_{center}, -z] $$
+-    $$ \mathbf{r}_d = \text{normalize}(\mathbf{d}_{cam}) $$
+-    [S4, unofficial]
+-
+-4.  **Set Origin**:
+-    The ray origin is the camera center $\mathbf{C}$ [S2, S5, unofficial].
+-    $$ \mathbf{r}_o = \mathbf{C} $$
+-
+-### Pseudocode (Matrix Unprojection)
++### Pseudocode
+ ```python
+ import numpy as np
+@@ -91,35 +65,24 @@
+     """
+     # 1. Convert to NDC
+-    # OpenGL NDC: x, y in [-1, 1], z in [0, 1] (or -1 to 1 depending on API)
+-    # Here we assume z_ndc = 0 for near plane as per [S1, unofficial]
+     x_ndc = (2.0 * pixel_u) / width - 1.0
+     y_ndc = (2.0 * pixel_v) / height - 1.0
+-    z_ndc = 0.0
++    z_ndc = 0.0  # Near plane depth mapped to NDC
+     
+     # 2. Transform NDC to World Space (Near Plane)
+-    p_ndc = np.array([x_ndc, y_ndc, z_ndc, 1.0])
+-    p_world_homo = inv_proj_view @ p_ndc
+-    
+-    # Perspective division
+-    p_world_near = p_world_homo[:3] / p_world_homo[3]
+-    origin = p_world_near
++    p_ndc_near = np.array([x_ndc, y_ndc, z_ndc, 1.0])
++    p_world_homo_near = inv_proj_view @ p_ndc_near
++    origin = p_world_homo_near[:3] / p_world_homo_near[3]
+     
+     # 3. Transform NDC to World Space (Far Point for Direction)
+-    # Using z_ndc = 1.0 to get a point further along the ray [S1, unofficial]
+     z_ndc_far = 1.0
+     p_ndc_far = np.array([x_ndc, y_ndc, z_ndc_far, 1.0])
+-    p_world_far_homo = inv_proj_view @ p_ndc_far
+-    p_world_far = p_world_far_homo[:3] / p_world_far_homo[3]
++    p_world_homo_far = inv_proj_view @ p_ndc_far
++    p_far = p_world_homo_far[:3] / p_world_homo_far[3]
+     
+     # 4. Compute Direction
+-    direction = p_world_far - origin
++    direction = p_far - origin
+     direction = direction / np.linalg.norm(direction)
+     
+     return origin, direction
+-```
+-
+-### Pseudocode (Intrinsic-Based)
+-```python
+-import numpy as np
+ 
+ def generate_rays_intrinsic(pixel_u, pixel_v, width, height, fov_deg):
+@@ -143,5 +106,4 @@
+     
+     # 2. Z component
+-    # tan(fov/2) where fov is in radians
+     fov_rad = np.radians(fov_deg)
+     z = height / np.tan(fov_rad / 2.0)
+@@ -163,8 +125,8 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **Coordinate System Origin**: Metal and some graphics APIs place $(0,0)$ at the top-left, while mathematical conventions may place it at the center. Adjustments like `fragCoord - size / 2.0` are necessary to center the coordinate system [S4, unofficial].
++- **Coordinate System Origin**: Metal and some graphics APIs place $(0,0)$ at the top-left, while mathematical conventions may place it at the center. Adjustments like `fragCoord - size / 2.0` are necessary to center the coordinate system [S5, unofficial].
+ - **Aspect Ratio**: If using horizontal FOV, the vertical component must be scaled by the aspect ratio $H/W$ [S7, unofficial].
+-- **Perspective Division**: If $w_w$ (the w-component after matrix multiplication) is zero or very close to zero, the ray is at infinity or the matrix is singular. Guard against division by zero [S1, unofficial].
+-- **NDC Convention**: OpenGL uses $z \in [0, 1]$ (or $[-1, 1]$ in newer versions), while Vulkan/DirectX use $z \in [0, 1]$ or $[-1, 1]$. Ensure the $z_{ndc}$ value matches the projection matrix's expectation [S1, S7, unofficial].
++- **Perspective Division**: Division by $w$ assumes $w \neq 0$ [G].
++- **NDC Convention**: $z_{ndc}$ maps linear depth via $2z_{near}-1$ [S1, unofficial].
+ 
+ ## Subtopics
+@@ -174,8 +136,8 @@
+ 
+ ### NDC-to-World Ray Generation
+-Computes the world-space position of a ray origin for a given NDC pixel, assuming the camera is at the origin in view space, facing positive Z, with a near plane at $Z=1$. It explicitly constructs the view frustum geometry using rotation matrices and basis vectors. Choose this for custom ray marchers that operate in view space or require explicit near-plane intersection calculations [S7, unofficial].
++Computes the world-space position of a ray origin for a given NDC pixel, assuming the camera is at the origin in view space, facing positive Z, with a near plane at $Z=1$. It explicitly constructs the view frustum geometry using rotation matrices and basis vectors. Choose this for custom ray marchers that operate in view space or require explicit near-plane intersection calculations [S8, unofficial].
+ 
+ ### NDC to Screen Camera Conversion
+-Transforms a camera from normalized device coordinates (NDC) space to screen pixel coordinates for rasterization. It converts focal lengths and principal points to screen-space units. This is the inverse operation of ray generation, used for rendering or visualization rather than ray marching [S8, unofficial].
++Transforms a camera from normalized device coordinates (NDC) space to screen pixel coordinates for rasterization. It converts focal lengths and principal points to screen-space units. This is the inverse operation of ray generation, used for rendering or visualization rather than ray marching [S9, unofficial].
+ 
+ ## Operating characteristics

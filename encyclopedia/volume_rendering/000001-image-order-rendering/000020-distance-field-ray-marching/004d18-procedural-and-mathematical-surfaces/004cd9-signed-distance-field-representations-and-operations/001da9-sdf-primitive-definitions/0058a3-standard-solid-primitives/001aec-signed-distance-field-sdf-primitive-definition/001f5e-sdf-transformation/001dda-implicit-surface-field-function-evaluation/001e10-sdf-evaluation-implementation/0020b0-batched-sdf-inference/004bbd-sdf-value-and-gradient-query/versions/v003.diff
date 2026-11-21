@@ -1,0 +1,295 @@
+--- v002.md
++++ v003.md
+@@ -4,143 +4,186 @@
+ 
+ ## Overview
+-This method provides real-time inspection of Signed Distance Field (SDF) properties at specific 3D coordinates, typically under a user cursor or for a batch of query points. It outputs the signed distance value, the analytical gradient (normal), and hit classification (e.g., surface, sky, abyss) [S1, S2, unofficial]. It distinguishes itself from [SDF Value Computation](6443-sdf-value-computation.md) by explicitly exposing the gradient for normal verification and from [Batched SDF Inference](2329-batched-sdf-inference.md) by focusing on interactive, single-point or small-batch debug inspection rather than large-scale memory-managed inference [S1, S2, unofficial].
++SDF Value and Gradient Query is a method for evaluating the signed distance function (SDF) and its spatial gradient at specific 3D points, serving as a debugging and measurement tool for procedural and mathematical surfaces. It solves the problem of verifying SDF correctness and visualizing surface proximity in real-time by providing exact analytical properties under a cursor or for a batch of points. It differs from [Batched SDF Inference](2329-batched-sdf-inference.md) by focusing on precise, per-point analytical verification (including gradient normalization checks) rather than memory-optimized bulk evaluation, and from [SDF Value Computation](6443-sdf-value-computation.md) by explicitly exposing the gradient vector and associated raymarching step metrics for debugging [SDF Transformation](52-name.md) pipelines.
+ 
+ ## How it works
+-**Inputs:**
+-1.  A set of query points $\mathbf{P} = \{\mathbf{p}_1, \dots, \mathbf{p}_N\}$ in 3D space (World Frame or Object Frame) [S1, S2, unofficial].
+-2.  A boolean flag `compute_grad` indicating whether to calculate the gradient [S2, unofficial].
++The method operates in two primary modes: interactive cursor inspection (CPU-side) and programmatic object-frame querying.
+ 
+-**Outputs:**
+-1.  Signed distance values $d(\mathbf{p})$ for each point [S1, S2, unofficial].
+-2.  Gradient vectors $\nabla d(\mathbf{p})$ (normals) if `compute_grad` is True [S1, S2, unofficial].
+-3.  Hit classification (e.g., COURSE SURFACE, GLASS MARBLE, ABYSS, SKY RAY) [S1, unofficial].
+-4.  Debug metrics: Raymarch step counts (optimized vs. legacy) and CSG latency [S1, unofficial].
++### Inputs and Outputs
++**Interactive Mode Inputs:**
++- Mouse cursor position mapped to a 3D world point $\mathbf{p} = [x, y, z]$.
++- Scene SDF representation (e.g., CSG combination of primitives).
+ 
+-**Data Structures:**
+-*   **Query Points:** Array of shape $(N, 3)$ or $(B, N, 3)$ for batched inputs [S2, unofficial].
+-*   **SDF Values:** Array of shape $(N)$ or $(B, N)$ [S2, unofficial].
+-*   **SDF Gradients:** Array of shape $(N, 3)$ or $(B, N, 3)$ [S2, unofficial].
++**Interactive Mode Outputs:**
++- A 5-column debug readout:
++    1. 3D World Point $\mathbf{p}$.
++    2. Hit Target Classification (COURSE SURFACE, GLASS MARBLE, ABYSS, SKY RAY).
++    3. Signed Distance $d(\mathbf{p})$ with a +1m Free-Space Probe offset.
++    4. Analytical Normal $\nabla d(\mathbf{p})$ and its norm verification.
++    5. Raymarch Step Ruler metrics (optimized steps vs. legacy steps, % reduction).
+ 
+-**Steps:**
+-1.  **Point Acquisition:** Determine the 3D world point $\mathbf{p}$ under the cursor or generate points using a grid resolution and query range [S1, S2, unofficial].
+-2.  **SDF Evaluation:** Query the SDF primitive or scene for the distance $d(\mathbf{p})$ [S1, S2, unofficial].
+-    *   *Note:* A +1m Free-Space Probe offset may be applied to the distance value for debugging purposes [S1, unofficial].
+-3.  **Gradient Computation (Optional):**
+-    *   If `compute_grad` is True, compute the analytical normal $\nabla d(\mathbf{p})$ [S1, unofficial].
+-    *   For mesh-based SDFs (ObjectFrameSDF), the gradient is derived from the vector pointing from the query point to the closest point on the mesh surface, normalized [S2, unofficial].
+-    *   Verify that $\|\nabla d(\mathbf{p})\| = 1.000$ [S1, unofficial].
+-4.  **Hit Classification:** Classify the point based on $d(\mathbf{p})$ and raymarch results (e.g., if the ray hits a surface, it is a surface hit; otherwise, it is sky or abyss) [S1, unofficial].
+-5.  **Step Optimization Analysis:** Compare the number of steps taken by an optimized raymarcher (using bounds and $\kappa$-March) against a legacy raymarcher to calculate the percentage reduction in steps [S1, unofficial].
+-6.  **CSG Latency Measurement:** Measure the time taken for Constructive Solid Geometry operations, if applicable [S1, unofficial].
++**Programmatic Mode Inputs:**
++- Tensor or array of points $\mathbf{P}$ in object frame coordinates.
++- Boolean flag `compute_grad` (default `True`).
+ 
+-**Pseudocode:**
++**Programmatic Mode Outputs:**
++- SDF values: $\mathbf{v} \in \mathbb{R}^N$ or $\mathbb{R}^{B \times N}$.
++- SDF gradients: $\mathbf{g} \in \mathbb{R}^{N \times 3}$ or $\mathbb{R}^{B \times N \times 3}$.
++
++### Data Structures
++- **Point Array:** Float32 array of shape $(N, 3)$ or $(B, N, 3)$.
++- **Gradient Vector:** Float32 array of shape $(N, 3)$ or $(B, N, 3)$.
++- **Hit Target Enum:** String or integer classification for ray termination type.
++
++### Steps
++1. **Point Generation/Selection:**
++   - For interactive mode: Map 2D screen coordinates to a 3D ray and sample point $\mathbf{p}$ along the ray.
++   - For programmatic mode: Generate query points using a grid sampler (e.g., `pv.get_coordinates_and_points_in_grid`) with specified resolution and query range [S2, unofficial].
++
++2. **SDF Evaluation:**
++   - Evaluate the SDF primitive or CSG combination at $\mathbf{p}$ to obtain $d(\mathbf{p})$ [S1, unofficial].
++   - If `compute_grad` is `True`, compute the gradient $\nabla d(\mathbf{p})$ [S2, unofficial].
++
++3. **Gradient Computation (Programmatic):**
++   - Compute the vector from the query point to the closest surface point $\mathbf{p}_{closest}$: $\mathbf{g}_{raw} = \mathbf{p}_{closest} - \mathbf{p}$ [S2, unofficial].
++   - Calculate distance: $dist = \|\mathbf{g}_{raw}\|$ [S2, unofficial].
++   - Normalize gradient where $dist > 0$: $\nabla d(\mathbf{p}) = \mathbf{g}_{raw} / dist$ [S2, unofficial].
++   - Note: The gradient points outward for negative SDF (outside) and inward for positive SDF (inside) [S2, unofficial].
++
++4. **Verification and Metrics:**
++   - Verify $\|\nabla d(\mathbf{p})\| = 1.000$ [S1, unofficial].
++   - Compare raymarching steps: Calculate the percentage reduction in steps achieved by optimized bounds (e.g., `sdCourseBounds`) and $\kappa$-March optimization compared to legacy methods [S1, unofficial].
++   - Measure CSG latency (e.g., 0.0018 ms for 0 triangles) [S1, unofficial].
++
++5. **Output Formatting:**
++   - Display the 5-column caliper readout for interactive mode [S1, unofficial].
++   - Return tensors for programmatic mode [S2, unofficial].
++
++### Pseudocode
+ ```python
+-def query_sdf_value_and_gradient(points, sdf_engine, compute_grad=True):
++import numpy as np
++
++def query_sdf_gradient(points, sdf_function, compute_grad=True):
+     """
+-    Queries SDF values and gradients for a set of points.
++    Query SDF value and gradient for a set of points.
+     
+     Args:
+-        points: numpy array of shape (N, 3) or (B, N, 3) containing query coordinates.
+-        sdf_engine: Object providing SDF evaluation (e.g., ObjectFrameSDF or VoxelGenerator).
+-        compute_grad: Boolean flag to enable gradient calculation.
++        points: np.ndarray of shape (N, 3) or (B, N, 3)
++        sdf_function: Callable that returns (distance, closest_point)
++        compute_grad: bool, whether to compute gradient
+         
+     Returns:
+-        distances: numpy array of SDF values.
+-        gradients: numpy array of shape (N, 3) or (B, N, 3) if compute_grad is True, else None.
+-        hit_class: List of strings classifying each point (e.g., 'SURFACE', 'SKY').
+-        step_metrics: Dictionary with 'optimized_steps', 'legacy_steps', 'pct_reduction'.
++        distances: np.ndarray
++        gradients: np.ndarray (if compute_grad else None)
+     """
+-    # 1. Prepare points
+-    # Ensure points are in the correct frame (World or Object)
+-    # [G] Handle device transfer if sdf_engine expects specific tensor types
+-    pts = np.asarray(points, dtype=np.float32)
++    # Flatten for processing if batched
++    original_shape = points.shape
++    if points.ndim == 3:
++        points_flat = points.reshape(-1, 3)
++        is_batched = True
++    else:
++        points_flat = points
++        is_batched = False
++        
++    n_points = points_flat.shape[0]
++    distances = np.zeros(n_points)
++    gradients = None
+     
+-    # 2. Query SDF Values
+-    # [S2, unofficial] Call the SDF engine's query method
+-    # For ObjectFrameSDF, this might involve raycasting to find closest points
+-    if hasattr(sdf_engine, 'sdf'):
+-        # [S2, unofficial] General SDF query interface
+-        distances = sdf_engine.sdf(pts, compute_grad=compute_grad)
++    if compute_grad:
++        gradients = np.zeros((n_points, 3))
++        
++    for i in range(n_points):
++        p = points_flat[i]
++        
++        # Evaluate SDF and get closest point on surface
++        # sdf_function returns (signed_distance, closest_point_on_surface)
++        d, p_closest = sdf_function(p)
++        distances[i] = d
+         
+         if compute_grad:
+-            # [S2, unofficial] If compute_grad is True, sdf() returns both values and gradients
+-            # Assuming sdf() returns a tuple (values, gradients) when compute_grad=True
+-            # [G] This assumes a specific API signature; adjust based on actual engine
+-            distances, gradients = distances
+-        else:
+-            gradients = None
++            # Gradient is vector from query point to closest surface point
++            # Outside: p_closest - p (points outward)
++            # Inside: p_closest - p (points inward)
++            grad_raw = p_closest - p
++            dist_norm = np.linalg.norm(grad_raw)
+             
++            if dist_norm > 0:
++                gradients[i] = grad_raw / dist_norm
++            else:
++                gradients[i] = np.zeros(3) # Degenerate case
++                
++    # Reshape if batched
++    if is_batched:
++        distances = distances.reshape(original_shape[:-1])
++        if compute_grad:
++            gradients = gradients.reshape(original_shape)
++            
++    return distances, gradients
++
++def interactive_caliper(cursor_pos, scene_sdf):
++    """
++    Interactive debug tool for real-time SDF inspection.
++    """
++    # 1. Map cursor to 3D point p
++    p = map_cursor_to_3d(cursor_pos)
++    
++    # 2. Evaluate SDF
++    d, p_closest = scene_sdf.evaluate(p)
++    
++    # 3. Compute Gradient
++    grad_raw = p_closest - p
++    norm = np.linalg.norm(grad_raw)
++    if norm > 0:
++        grad = grad_raw / norm
+     else:
+-        # [S1, unofficial] Fallback for debug wizard style query
+-        distances = np.zeros(pts.shape[:-1])
+-        gradients = None
+-        # [S1, unofficial] Compute analytical normal if possible
+-        if compute_grad:
+-            # [G] For primitive SDFs, compute gradient analytically
+-            # For mesh-based, use closest point vector
+-            # [S2, unofficial] gradient = closest_point - query_point
+-            # [S2, unofficial] normalize gradient
+-            pass 
+-            
+-    # 3. Hit Classification
+-    # [S1, unofficial] Classify based on distance and raymarch results
+-    hit_class = []
+-    for i, d in enumerate(distances):
+-        if d < 0:
+-            hit_class.append("COURSE SURFACE") # [S1, unofficial]
+-        elif d < 1.0: # [S1, unofficial] +1m Free-Space Probe offset context
+-            hit_class.append("GLASS MARBLE") # [S1, unofficial]
+-        else:
+-            hit_class.append("SKY RAY") # [S1, unofficial]
+-            
+-    # 4. Step Optimization Analysis
+-    # [S1, unofficial] Compare optimized vs legacy steps
+-    # [G] This requires access to the raymarcher's internal step counters
+-    optimized_steps = 0
+-    legacy_steps = 0
+-    pct_reduction = 0.0
+-    if legacy_steps > 0:
+-        pct_reduction = (1 - optimized_steps / legacy_steps) * 100
++        grad = np.zeros(3)
+         
+-    step_metrics = {
+-        "optimized_steps": optimized_steps,
+-        "legacy_steps": legacy_steps,
+-        "pct_reduction": pct_reduction
++    # 4. Verify Normalization
++    assert np.isclose(np.linalg.norm(grad), 1.0, atol=1e-3), "Gradient norm != 1.0"
++    
++    # 5. Classify Hit Target
++    # Logic depends on scene structure (e.g., glass marble vs course surface)
++    target = classify_hit(p, d, scene_sdf)
++    
++    # 6. Compute Step Metrics
++    optimized_steps = count_steps_optimized(p, scene_sdf)
++    legacy_steps = count_steps_legacy(p, scene_sdf)
++    step_reduction = (1 - optimized_steps / legacy_steps) * 100
++    
++    # 7. Return 5-column readout
++    return {
++        "point": p,
++        "target": target,
++        "distance": d + 1.0, # +1m Free-Space Probe offset
++        "normal": grad,
++        "step_reduction": step_reduction
+     }
+-    
+-    return distances, gradients, hit_class, step_metrics
+ ```
+ 
+-**Parameters:**
+-*   `compute_grad`: Boolean. If `False`, gradient computation is skipped to improve performance [S2, unofficial].
++### Parameters
++- `compute_grad`: Boolean. If `False`, gradient computation is skipped for speed [S2, unofficial].
++- `offset`: Float. Default +1.0m for Free-Space Probe visualization [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Ensure $\|\nabla d(\mathbf{p})\| = 1.000$ for analytical normals [S1, unofficial].
+-*   **Boundaries:** Handle points far from the surface where SDF values may be less accurate or undefined [S3].
+-*   **Degenerate Input:** Points exactly on the surface ($d(\mathbf{p}) = 0$) may have undefined or noisy gradients in mesh-based SDFs [S2, unofficial].
++### Edge Cases and Pitfalls
++- **Zero Distance:** If the query point lies exactly on the surface, the gradient vector magnitude is zero. The implementation must handle division by zero by returning a zero vector or a default normal [S2, unofficial].
++- **Degenerate Primitives:** CSG operations involving degenerate geometry may produce undefined normals. Verification of $\|\nabla d\| = 1.0$ helps detect these issues [S1, unofficial].
++- **Precision:** Floating-point errors in SDF evaluation can lead to gradient norms slightly deviating from 1.0. Tolerance should be applied during verification [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Cached SDF](13075-cached-sdf.md)
+-Accelerates SDF queries by storing values in a voxel grid, falling back to a ground truth SDF for points outside the cache [13075-cached-sdf.md].
++Accelerates SDF queries by storing values in a voxel grid, falling back to a ground truth SDF for points outside the cache. This method trades memory for query speed, particularly useful for complex procedural surfaces where repeated evaluations are costly. It is preferred when LOD index > 0, as LOD0 already provides maximum precision without caching overhead [13075-cached-sdf.md].
+ 
+ ### SDF Snapping
+-Queries the VoxelGenerator at floating-point positions to approximate the surface using SDF values, snapping instances closer to the surface [S3].
+-*   **Definition:** Uses at least 2 nearby SDF samples to interpolate the surface distance [S3].
+-*   **Formula:** $P_{snapped} = P_{mesh} + \text{interpolation}(SDF(P_{mesh}), \text{samples})$ [S3].
+-*   **Pitfalls:**
+-    *   **Terrain Modification:** Snapping fails if the terrain is modified after initial generation, as generator estimations won't account for edited areas. Workaround: Set instances as persistent to save positions and avoid regeneration [S3].
+-    *   **Far Distance Artifacts:** Snapping can cause instances to 'bury' or 'float' far away when low-resolution meshes are active, as they are moved closer to the high-resolution surface estimate [S3].
+-*   **Comparison:** Snapping improves positioning significantly but is slower. No snapping is faster but less precise. Snapping is preferably used when `lod_index > 0`, as LOD0 already has maximum precision [S3].
++Queries the VoxelGenerator at floating-point positions to approximate the surface using SDF values, snapping instances closer to the surface. It uses at least 2 nearby SDF samples to interpolate the surface distance: $P_{snapped} = P_{mesh} + \text{interpolation}(SDF(P_{mesh}), \text{samples})$. This improves positioning significantly but is slower than non-snapping. It is preferably used when `lod_index > 0`. Pitfalls include failure to work if terrain is modified after initial generation (requiring persistent instances to save positions) and far-distance artifacts where instances may "bury" or "float" when low-resolution meshes are active [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ for $N$ query points, assuming constant-time SDF evaluation [S1, S2, unofficial].
+-*   **Memory Complexity:** $O(N)$ to store query results [S2, unofficial].
+-*   **Performance:** Real-time inspection is feasible with optimized raymarching (e.g., $\kappa$-March) [S1, unofficial]. CSG latency is reported as low as 0.0018 ms for simple cases [S1, unofficial].
+-*   **Strengths:** Provides exact analytical normals and hit classification, useful for debugging and interactive tools [S1, unofficial].
+-*   **Limitations:** Gradient computation can be expensive if not optimized [S2, unofficial]. Snapping variants are slower than non-snapping [S3].
++- **Time Complexity:** $O(1)$ per point for analytical SDF primitives; $O(N)$ for batched queries. Snapping adds overhead due to multiple SDF evaluations and interpolation [S3].
++- **Memory Complexity:** $O(N)$ for storing query results. Cached SDF adds $O(V)$ for voxel grid storage [13075-cached-sdf.md].
++- **Performance:** Real-time interactive mode achieves 60 FPS with optimized raymarching steps. CSG latency is minimal (e.g., 0.0018 ms for 0 triangles) [S1, unofficial]. Snapping is slower than non-snapping but provides better precision [S3].
++- **Strengths:** Provides exact analytical gradients for debugging; real-time visualization aids in understanding surface properties; batched mode supports large-scale queries.
++- **Limitations:** Interactive mode is CPU-bound and may not scale to massive point clouds without batching; snapping relies on VoxelGenerator support and fails on modified terrain [S3].
+ 
+ ## Background
+-The method originates from interactive SDF debugging tools, specifically the "Live Cursor Measurement Caliper" and "Step Ruler" implemented in the `sdf-wizard` feature [S1, unofficial]. It is also used in volumetric structure libraries like `pytorch_volumetric` for querying ObjectFrameSDFs [S2, unofficial]. The concept of SDF snapping for instancing is documented in Voxel Tools for terrain generation [S3].
++The method originated as a debugging tool for SDF-based rendering and physics, specifically within the context of "SDF X-Ray" visualizations and live cursor measurement calipers. It was developed to verify the correctness of SDF transformations and CSG operations in real-time applications, such as game engines and procedural modeling tools. The "Live Cursor Measurement Caliper" was introduced in a 2026 pull request for a hackathon project, providing a 5-column debug readout for SDF properties [S1, unofficial]. The programmatic interface was developed in the `pytorch_volumetric` library to support volumetric structure analysis [S2, unofficial]. Snapping variants were introduced in Voxel Tools to improve instance positioning on procedural terrain [S3].
+ 
+ ## Sources

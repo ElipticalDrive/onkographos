@@ -1,0 +1,62 @@
+# AR mapping to 3D texture
+
+Also called: 3D texture mapping, texture-based volume rendering
+
+## Overview
+AR mapping to 3D texture is an object-order volume rendering technique that maps a 3D scalar field directly into a 3D texture unit, using parallel polygon slices to composite the volume via linear alpha blending [S1, unofficial][S2]. It solves the problem of high computational cost associated with ray-casting by leveraging hardware-accelerated texture interpolation and framebuffer compositing [S2]. Unlike [3D Texture Generation via Slicing](4891-3d-texture-generation-via-slicing.md), which explicitly calculates ray intersections and integrates transfer functions, this method avoids non-linear formulae by relying on a linear mapping of color and opacity into the texture coordinates, allowing for pre-cached geometry in display lists [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D scalar field (volume data), a transfer function mapping scalars to color and opacity, and a set of parallel polygons (typically quads) representing the view-aligned slices.
+*   **Output:** A 2D image rendered to the framebuffer.
+
+**Data Structures**
+*   **3D Texture:** A 3D texture object with dimensions matching the volume data resolution. Each texel stores a 4-component vector (RGBA). The RGB components store the mapped color, and the A component stores the mapped opacity [S1, unofficial].
+*   **Polygon Set:** A collection of parallel quads. The texture coordinates for these quads are defined once and remain constant regardless of view rotation [S1, unofficial].
+
+**Steps**
+1.  **Texture Population:** Map the scalar values from the input volume data into the 3D texture. For each voxel at position $(i, j, k)$ with scalar value $s$, compute the color $C$ and opacity $\alpha$ using the transfer function $T(s) = (R, G, B, \alpha)$. Store $(R, G, B, \alpha)$ in the texel at $(i, j, k)$ [S1, unofficial].
+2.  **Coordinate Definition:** Define texture coordinates for the parallel polygons. The coordinates are linearly mapped to the 3D texture space. Because the mapping is linear, the texture coordinates do not need to be recalculated when the view rotates [S1, unofficial].
+3.  **Geometry Setup:** Place the set of parallel polygons into a display list. A display list is a group of precomputed OpenGL commands cached for later execution, improving performance when redrawing the same geometry multiple times [S1, unofficial].
+4.  **Rendering:**
+    a. Enable 3D texture mapping and linear interpolation (trilinear filtering) [S2].
+    b. Enable alpha blending with the standard linear alpha blending equation: $C_{out} = C_{src} \cdot \alpha_{src} + C_{dst} \cdot (1 - \alpha_{src})$ [S1, unofficial].
+    c. Render the parallel polygons in back-to-front order (or front-to-back with appropriate blending setup) through the 3D texture. The hardware interpolates the RGBA values from the 3D texture based on the polygon's position and the linear texture coordinates [S1, unofficial].
+    d. Composite the results into the framebuffer [S1, unofficial].
+
+**Parameters**
+*   **Framebuffer Resolution:** A color/RGBA resolution of at least 16 bits is desirable for good quality [S2].
+*   **Interpolation:** Trilinear interpolation is used for texture sampling [S2].
+
+**Pitfalls**
+*   **Quality Limitation:** The quality is limited due to the lack of bit accuracy and the approximation inherent in linear blending and interpolation [S2].
+*   **Off-Axis Degradation:** Image quality degrades at off-axis views compared to on-axis views [S2].
+*   **Estimation Error:** The linear estimation method for texture coordinate mapping is likely worse than Wilson's depth integration, but visualizations remain effective [S1, unofficial].
+*   **Screen Size Threshold:** There is a critical screen size where the cost of increased trilinear interpolations overtakes the cost of footprint mappings [S2].
+
+## Subtopics
+
+### [Gradient-Isosurface Texture Packing](889-gradient-isosurface-texture-packing.md)
+A data layout strategy storing gradients in RGB and isovalue in Alpha, enabling hardware-accelerated normal interpolation.
+
+### [Uniform Grid](920-uniform-grid.md)
+The foundational structured mesh data structure for storing scalar fields, enabling efficient spatial indexing.
+
+### [Röttger et al. Rendering](938-r-ttger-et-al-rendering.md)
+An object-order technique using 3D textures and pre-integration in a lookup table to support arbitrary transfer functions.
+
+## Operating characteristics
+*   **Time Complexity:** Sub-second rendering times for moderately-sized datasets [S2]. The cost is dominated by texture interpolation and framebuffer compositing.
+*   **Memory Complexity:** Requires memory proportional to the volume resolution for the 3D texture ($O(N^3)$ for $N \times N \times N$ volume) [S1, unofficial].
+*   **Performance:** High performance due to hardware acceleration of texture mapping and blending [S2].
+*   **Strengths:** Simple implementation, high frame rates for moderate resolutions, effective visualization [S1, unofficial].
+*   **Limitations:** Limited quality due to lack of bit accuracy, degradation at off-axis views, and potential artifacts from linear interpolation [S2]. Not suitable for high-precision requirements or complex transfer functions that require non-linear integration [S1, unofficial].
+*   **When to Use:** When high performance is required for moderately-sized datasets and high visual fidelity is not critical [S2].
+*   **When Not to Use:** When high bit accuracy, off-axis quality, or complex transfer function integration is required [S2].
+
+## Background
+The method was described in the context of Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration [S1, unofficial]. It is also discussed in A Practical Evaluation of Popular Volume Rendering Algorithms [S2]. The approach leverages early OpenGL capabilities for 3D texture mapping and display lists to achieve real-time performance.
+
+## Sources
+[S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+[S2] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29

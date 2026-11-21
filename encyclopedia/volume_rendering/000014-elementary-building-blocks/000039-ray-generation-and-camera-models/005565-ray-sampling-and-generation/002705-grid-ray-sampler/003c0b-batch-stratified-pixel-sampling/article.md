@@ -1,0 +1,135 @@
+# Batch Stratified Pixel Sampling
+
+Also called: Pixel Sampling and Ground Truth Retrieval, Stratified Sampling
+
+## Overview
+Batch Stratified Pixel Sampling is a ray generation method used in neural reconstruction pipelines to select a subset of pixels for optimization at each training iteration [S1]. It solves the problem of efficiently computing gradients by avoiding the memory overhead of processing the entire image grid while ensuring uniform coverage through stratification [S1]. It differs from its sibling [Grid-based Stratified Camera Sampling](11819-grid-based-stratified-camera-sampling.md) by focusing on batched pixel selection for ground-truth retrieval via bilinear interpolation, rather than generating continuous camera rays for volumetric traversal.
+
+## How it works
+**Inputs:**
+- Target image (texture) containing ground-truth color values.
+- Batch size $N_b$ (number of pixels to sample).
+- Image dimensions $W \times H$.
+
+**Outputs:**
+- A set of $N_b$ pixel coordinates $(u, v)$ and their corresponding ground-truth color values.
+
+**Data Structures:**
+- Pixel coordinates: Integer pairs $(u, v)$ where $0 \le u < W$ and $0 \le v < H$.
+- Ground-truth values: Floating-point vectors (e.g., RGB) retrieved via interpolation.
+
+**Steps:**
+1. **Stratified Sampling:** Divide the image grid into a grid of strata (sub-regions). Sample one pixel coordinate uniformly at random from within each stratum to ensure even coverage across the image [S1].
+2. **Ground-Truth Retrieval:** For each sampled integer pixel coordinate, obtain the ground-truth value. Since the sampling may target sub-pixel locations or the implementation requires continuous access, values are obtained via bilinear interpolation on the target image [S1].
+3. **Efficient Lookup:** The bilinear interpolation is implemented as a CUDA texture lookup for hardware-accelerated efficiency [S1].
+
+**Parameters:**
+- Batch size: Not specified in sources.
+- Strata count: Not specified in sources.
+
+**Edge Cases:**
+- Boundary conditions: Standard bilinear interpolation handles edge pixels by clamping or wrapping, depending on the texture sampler configuration [S1].
+- Precision: Floating-point interpolation introduces minor quantization errors compared to direct pixel access, but this is negligible for training [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def batch_stratified_pixel_sampling(target_texture, batch_size, width, height):
+    """
+    Samples a batch of pixels using stratified sampling and retrieves ground truth.
+    
+    Args:
+        target_texture: CUDA texture object supporting bilinear interpolation.
+        batch_size: Number of pixels to sample.
+        width: Image width in pixels.
+        height: Image height in pixels.
+        
+    Returns:
+        pixels: List of (u, v) coordinates.
+        gt_values: List of interpolated color values.
+    """
+    # Calculate strata dimensions to ensure even coverage
+    # Note: Exact strata grid dimensions are not specified in sources [S1]
+    # We assume a grid that results in batch_size samples
+    strata_count = batch_size
+    
+    # Determine strata grid size (e.g., sqrt(strata_count) x sqrt(strata_count))
+    # This is a common implementation detail [G]
+    strata_side = int(round(strata_count ** 0.5))
+    if strata_side * strata_side < strata_count:
+        strata_side += 1
+        
+    strata_width = width / strata_side
+    strata_height = height / strata_side
+    
+    pixels = []
+    gt_values = []
+    
+    for i in range(strata_side):
+        for j in range(strata_side):
+            if len(pixels) >= batch_size:
+                break
+                
+            # Sample a random point within the stratum
+            u_min = i * strata_width
+            u_max = (i + 1) * strata_width
+            v_min = j * strata_height
+            v_max = (j + 1) * strata_height
+            
+            # Random sub-pixel coordinate within stratum
+            u = u_min + random.uniform(0, strata_width)
+            v = v_min + random.uniform(0, strata_height)
+            
+            # Clip to image bounds
+            u = max(0, min(u, width - 1))
+            v = max(0, min(v, height - 1))
+            
+            pixels.append((u, v))
+            
+            # Retrieve ground truth via bilinear interpolation (CUDA texture lookup) [S1]
+            # The texture lookup handles the interpolation internally
+            gt = target_texture.sample(u, v)
+            gt_values.append(gt)
+            
+        if len(pixels) >= batch_size:
+            break
+            
+    return pixels, gt_values
+```
+
+## Subtopics
+
+### Representative Pixel Selection
+A variant used in interaction-aware pruning of 3D Gaussian Splatting [S2, unofficial]. It selects view-pixel pairs by sampling around projected Gaussian centers and their neighbors to evaluate opacity responses, rather than using uniform stratified sampling [S2, unofficial]. It is chosen when the goal is to optimize for specific Gaussian primitives rather than global image reconstruction [S2, unofficial].
+
+**Definition:** Selects a set of view-pixel pairs $P_b$ for a block $C_b$ by sampling around projected Gaussian centers and their neighbors [S2, unofficial].
+
+**Steps:**
+1. Initialize $P_b \leftarrow \emptyset$ and $D \leftarrow \{(0, 0), (\pm0.5, 0), (0, \pm0.5), (\pm0.35, \pm0.35)\}$ [S2, unofficial].
+2. For each selected view $v$:
+   a. Obtain projected centers $u_{vi}$ and screen radii $h_{vi}$ for $i \in C_b$ [S2, unofficial].
+   b. Generate pixel locations $p = \text{round}(u_{vi} + \max(h_{vi}, 1)\delta)$ for $h_{vi} > 0$ and $\delta \in D$ [S2, unofficial].
+   c. Remove duplicate pixels and discard those outside the image boundaries [S2, unofficial].
+   d. Add remaining view-pixel pairs $(v, p)$ to $P_b$ [S2, unofficial].
+3. Return $P_b$ [S2, unofficial].
+
+**Formula:**
+Candidate locations: $u_{vi} + \max(h_{vi}, 1)\delta$, where $\delta \in D = \{(0, 0), (\pm0.5, 0), (0, \pm0.5), (\pm0.35, \pm0.35)\}$ [S2, unofficial].
+
+**Parameters:**
+- $D$: Set of 9 offset vectors (center + 8 neighbors) used for pixel sampling [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N_b)$ for sampling and interpolation, where $N_b$ is the batch size [S1].
+- **Memory Complexity:** $O(N_b)$ to store the sampled pixels and ground-truth values [S1].
+- **Performance:** Efficient due to CUDA texture lookup optimization [S1].
+- **Strengths:** Ensures uniform coverage of the image plane, reducing bias in training [S1].
+- **Limitations:** Does not adapt to scene complexity or Gaussian density [S1].
+
+## Background
+Originated in the context of neural reconstruction and 3D Gaussian Splatting optimization [S1][S2, unofficial]. It is used in training pipelines where efficient gradient computation is required without processing the entire image [S1][S2, unofficial].
+
+## Sources
+[S1] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
+[S2] SplatQ: Interaction-Aware Pruning of 3D Gaussian Splatting via Quadratic Selection, https://arxiv.org/abs/2610.13503, fetched 2026-10-29 (unofficial)

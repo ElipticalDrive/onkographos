@@ -1,0 +1,335 @@
+Orca is the place for working with a fleet of agents (e.g. Grok Bot, Claude Code). Run any coding agent with your own subscription. Available on desktop, mobile and remote runtime. - fix(gpu): engage GPU software-rendering fallback across launches by nwparker · Pull Request #12488 · stablyai/orca
+
+fix(gpu): engage GPU software-rendering fallback across launches by nwparker · Pull Request #12488 · stablyai/orca · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nwparker
+commented
+Aug 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+What this fixes
+Signature: Windows renderer render-process-gone { reason: "crashed" } where a GPU child process died with the identical exit code 25-100 ms earlier. Exit codes -2147483645 (0x80000003 STATUS_BREAKPOINT) and -1. The GPU child death is deliberately suppressed as recoverable churn, so the only surviving artifact is a renderer crash report — and the app relaunches straight back into the same fault.
+Covers 9 of the 127 crash reports in this batch (cluster G5 subgroups A1 = 6, A2 = 2, A3 = 1). See Trade-offs: the fallback path this PR extends is win32-only, so it reaches the 8 Windows reports; the 1 Linux report (A3, F0BMF88M9L1) is explicitly not mitigated here.
+Representative reports:
+Report
+Platform
+Version
+Exit code
+Slack
+F0BNM0R87SL
+win32 10.0.19045
+1.4.167
+-2147483645
+https://stablygroup.slack.com/archives/C0B4PDCMPPT/p1785803250179589
+F0BNBE3APU0
+win32 10.0.26100
+1.4.164
+-2147483645
+https://stablygroup.slack.com/archives/C0B4PDCMPPT/p1785711103820519
+F0BMA00J203
+win32 10.0.26200
+1.4.164
+-1
+https://stablygroup.slack.com/archives/C0B4PDCMPPT/p1785687140598579
+Root cause
+Orca's only mitigation for an unusable GPU stack is the software-rendering fallback, and it cannot fire for the observed production pattern.
+src/main/index.ts:369 (origin/main) — const gpuCrashFallbackTracker = new GpuCrashFallbackTracker({...}) is a module-level, in-memory object, constructed once per launch.
+src/main/index.ts:1589 (origin/main) — fed recordGpuCrash(performance.now()). performance.now() restarts at 0 on every launch, so its values are not comparable across launches even if they were persisted.
+src/main/crash-reporting/gpu-crash-fallback-decision.ts:15-16 (origin/main) — the rule is DEFAULT_GPU_CRASH_FALLBACK_THRESHOLD = 3 crashes inside DEFAULT_GPU_CRASH_FALLBACK_WINDOW_MS = 30_000.
+src/main/crash-reporting/gpu-crash-fallback-decision.ts:34,64-65 (origin/main) — recentCrashes is a plain in-process array; nothing is written to disk. Only the post-engagement marker is persisted (readActiveGpuFallbackMarker).
+The GPU fault in these reports takes the whole app down, so each launch records exactly one GPU crash and then dies. recentCrashes.length is 1 at process death and starts at 0 again on relaunch. shouldEngageFallback is therefore never true, and the user loops forever: crash, relaunch, crash, relaunch.
+Secondarily, the renderer death that trails the GPU crash lands in triage as an unexplained renderer crashed, with no breadcrumb naming the GPU child that died 40 ms earlier.
+The change
+src/main/startup/gpu-crash-history-store.ts — new build-scoped, bounded (16-entry) on-disk ring gpu-crash-history.json in userData, next to the existing fallback marker. Wall-clock timestamps plus a launchSeq claimed on every launch, crash or not (src/main/index.ts:1564), because a crash-free launch is the only evidence a crashing streak ended. Scoped to { appVersion, electronVersion, platform }, so an app update starts over with a fresh hardware attempt.
+src/main/crash-reporting/gpu-crash-fallback-decision.ts:75 — evaluateCrossLaunchGpuCrashes(). Two cross-launch rules on top of the untouched in-launch burst rule: 3 distinct crashing launches inside 30 min, or 3 back-to-back crashing launches inside 72 h (:52, :54). Both rules count launches, never raw crashes, so churn inside one recovered session cannot be cashed in later.
+src/main/crash-reporting/gpu-crash-cascade-attribution.ts + gpu-crash-fallback-coordinator.ts — a renderer crashed within 2 s carrying the same exit code as a just-suppressed GPU crash is named gpu_cascade in the crash trail. It is attribution only — recording it as a second crash would silently halve the tuned burst threshold (3-in-30 s would fire after 2 real faults).
+src/main/index.ts:1642 — declining the restart starts a 24 h cooldown (gpu-crash-fallback-decision.ts:61). Without it, the persisted evidence still satisfies the rules and "Keep Running" would re-prompt on the first GPU crash of every subsequent launch.
+src/main/index.ts:1664 — engaging clears the ring, so stale crashes cannot instantly re-engage when the user turns hardware acceleration back on.
+Fix evidence
+1. RED without the source fix
+Scratch worktree at the branch commit with only the source files reverted to origin/main (git checkout origin/main -- src/main/crash-reporting/gpu-crash-fallback-decision.ts src/main/index.ts), tests left as-is:
+```
+$ pnpm exec vitest run --config config/vitest.config.ts --reporter=verbose \
+    src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts
+
+ RUN  v4.1.5 /private/tmp/prproof-w5-gpu-fallback
+
+ × src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > engages after repeated launches that each die on the first GPU crash 4ms
+   → expected [ false, false, false, false, false ] to deeply equal [ false, false, true ]
+ × src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > engages on crashes clustered in wall-clock time even when launches are not consecutive 1ms
+   → expected false to be true // Object.is equality
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > ignores crashes that aged out of the cross-launch window 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > leaves the closest real-world non-burst alone once crashes are persisted 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > does not let one recovered launch bankroll a later benign crash 1ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > ignores a crashing-launch streak spread over weeks 0ms
+ × src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > still engages for a once-a-day user whose every launch dies on the GPU 0ms
+   → expected false to be true // Object.is equality
+ × src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > stops re-prompting after the user keeps running, then asks again a day later 0ms
+   → expected false to be true // Object.is equality
+ × src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > survives real relaunches through the on-disk ring 1ms
+   → expected false to be true // Object.is equality
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > keeps the in-launch burst rule intact when nothing is persisted 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > engages after repeated launches that each die on the first GPU crash
+AssertionError: expected [ false, false, false, false, false ] to deeply equal [ false, false, true ]
+
+- Expected
++ Received
+
+  [
+    false,
+    false,
+-   true,
++   false,
++   false,
++   false,
+  ]
+
+ ❯ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts:62:21
+     60|       }
+     61|     }
+     62|     expect(results).toEqual([false, false, true])
+       |                     ^
+     63|     expect(history.entries.map((entry) => entry.launchSeq)).toEqual([1…
+     64|     expect(history.entries.every((entry) => entry.ts >= startedAt)).to…
+
+ Test Files  1 failed (1)
+      Tests  5 failed | 5 passed (10)
+   Start at  01:41:08
+   Duration  111ms (transform 22ms, setup 0ms, import 29ms, tests 8ms, environment 0ms)
+```
+[false, false, false, false, false] is the production bug: five consecutive launches, one GPU crash each, fallback never engages. That is F0BNM0R87SL's loop reproduced deterministically.
+Note the 5 passing tests in that run — the guardrails (ignores crashes that aged out, does not let one recovered launch bankroll a later benign crash, ignores a crashing-launch streak spread over weeks, keeps the in-launch burst rule intact) pass on origin/main because origin/main never engages at all. They are there to prove the new rules do not over-fire, not to prove the fix.
+The other three suites cannot be run "without the fix" — they cover modules this branch introduces. Deleting the three new source files in the same scratch worktree gives the expected import failure, which is the proof they are genuinely new:
+```
+$ pnpm exec vitest run --config config/vitest.config.ts \
+    src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts
+
+ ❯ src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts [ src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts ]
+Error: Cannot find module './gpu-crash-fallback-coordinator' imported from /private/tmp/prproof-w5-gpu-fallback/src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts
+ ❯ src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts:2:1
+      1| import { describe, expect, it } from 'vitest'
+      2| import { GpuCrashFallbackCoordinator } from './gpu-crash-fallback-coor…
+       | ^
+
+ Test Files  1 failed (1)
+      Tests  no tests
+```
+The scratch worktree was removed with git worktree remove --force afterwards; no git stash was used and the branch worktree is clean.
+2. GREEN with the fix (branch, macOS 15 / darwin arm64)
+```
+$ pnpm exec vitest run --config config/vitest.config.ts --reporter=verbose \
+    src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts \
+    src/main/crash-reporting/gpu-crash-cascade-attribution.test.ts \
+    src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts \
+    src/main/startup/gpu-crash-history-store.test.ts
+
+ RUN  v4.1.5 /Users/nwparker/orca/crashwork/w5-gpu-fallback
+
+ ✓ src/main/crash-reporting/gpu-crash-cascade-attribution.test.ts > GpuCrashCascadeAttributor > claims a renderer crash that trails a suppressed GPU crash with the same exit code 1ms
+ ✓ src/main/crash-reporting/gpu-crash-cascade-attribution.test.ts > GpuCrashCascadeAttributor > claims at most one cascade per GPU crash 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cascade-attribution.test.ts > GpuCrashCascadeAttributor > ignores unrelated renderer deaths 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cascade-attribution.test.ts > GpuCrashCascadeAttributor > never claims without an armed GPU crash 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cascade-attribution.test.ts > GpuCrashCascadeAttributor > ignores a renderer crash stamped before the GPU crash 0ms
+ ✓ src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts > GpuCrashFallbackCoordinator > counts one GPU fault once even when the renderer dies behind it 1ms
+ ✓ src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts > GpuCrashFallbackCoordinator > still engages on the third real fault inside the window 0ms
+ ✓ src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts > GpuCrashFallbackCoordinator > does not arm attribution for the crash that engaged fallback 0ms
+ ✓ src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts > GpuCrashFallbackCoordinator > leaves unrelated renderer deaths unclaimed 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > engages after repeated launches that each die on the first GPU crash 1ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > engages on crashes clustered in wall-clock time even when launches are not consecutive 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > ignores crashes that aged out of the cross-launch window 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > leaves the closest real-world non-burst alone once crashes are persisted 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > does not let one recovered launch bankroll a later benign crash 2ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > ignores a crashing-launch streak spread over weeks 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > still engages for a once-a-day user whose every launch dies on the GPU 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > stops re-prompting after the user keeps running, then asks again a day later 0ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > survives real relaunches through the on-disk ring 1ms
+ ✓ src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts > GPU fallback across relaunches > keeps the in-launch burst rule intact when nothing is persisted 0ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > bumps the launch counter on every launch, crash or not 2ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > persists crashes across launches with wall-clock timestamps 1ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > starts over after an app update so a fixed build gets a fresh hardware attempt 1ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > bounds the ring 2ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > survives a corrupt file 1ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > drops malformed entries but keeps valid ones 1ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > remembers a declined restart across launches without losing crashes 1ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > reports no decline for a fresh or upgraded build 1ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > clears the ring when fallback engages 1ms
+ ✓ src/main/startup/gpu-crash-history-store.test.ts > openGpuCrashHistoryLaunch > writes the ring where the marker lives 0ms
+
+ Test Files  4 passed (4)
+      Tests  29 passed (29)
+   Start at  01:40:35
+   Duration  108ms (transform 99ms, setup 0ms, import 128ms, tests 19ms, environment 0ms)
+```
+survives real relaunches through the on-disk ring is not a fake — it uses a real mkdtempSync userData dir and calls openGpuCrashHistoryLaunch per simulated relaunch, so the JSON round-trip is exercised end to end.
+3. Regression suite — every touched module directory
+```
+$ pnpm exec vitest run --config config/vitest.config.ts src/main/crash-reporting src/main/startup
+
+ RUN  v4.1.5 /Users/nwparker/orca/crashwork/w5-gpu-fallback
+
+ Test Files  42 passed (42)
+      Tests  304 passed (304)
+   Start at  01:41:50
+   Duration  5.48s (transform 1.66s, setup 0ms, import 2.29s, tests 7.00s, environment 2ms)
+```
+src/main/index.ts has no direct unit suite, so it is covered by the type check instead:
+```
+$ pnpm run typecheck:node
+
+> orca@1.4.168-rc.1 typecheck:node /Users/nwparker/orca/crashwork/w5-gpu-fallback
+> tsc --noEmit -p config/tsconfig.node.json
+
+EXIT=0
+```
+Windows verification: unit suites verified on Windows 11 26200; the 2 failures in src/main/crash-reporting + src/main/startup are pre-existing on origin/main (WSL CLI reconciliation ordering) and are unrelated to this change. On macOS all 304 pass, so those two are Windows-baseline failures, not regressions from this PR.
+/perf skill review: no-regression. The only added I/O is one small synchronous readFileSync + writeFileSync of a bounded 16-entry JSON file — once at launch, and once per GPU child crash (a path that is already crashing).
+4. Field data — the defect happening in production
+F0BNM0R87SL (win32 10.0.19045, v1.4.167). Its diagnostics bundle F0BMQLS1AA2.txt holds four consecutive launches, each with a distinct mainProcessPid / mainProcessLaunchId, each dying on a GPU child crash within seconds of main_window_created. Two of them verbatim:
+```
+{"breadcrumb.name":"main_process_lifecycle_started","breadcrumb.data":{"packaged":true,"platform":"win32","mainProcessPid":2212,"mainProcessLaunchId":"718f2154-fbf8-404a-a942-5487e012dff1","mainProcessStartedAt":"2026-08-03T22:40:11.184Z"}}
+{"createdAt":"2026-08-03T22:40:12.768Z","name":"main_window_created"}
+{"createdAt":"2026-08-03T22:40:14.607Z","name":"process_gone_suppressed","data":{"source":"child","processType":"GPU","reason":"crashed","exitCode":-2147483645,"expectedTeardown":"none","serviceName":"GPU","type":"GPU","mainProcessPid":2212,...}}
+"crash.source":"renderer","crash.reason":"crashed","crash.exit_code":-2147483645, ... "app.main_process.pid":2212   (span at 22:40:14.647)
+
+{"breadcrumb.name":"main_process_lifecycle_started","breadcrumb.data":{"packaged":true,"platform":"win32","mainProcessPid":7468,"mainProcessLaunchId":"46a19efb-317c-496b-8c13-c807f01c4a11","mainProcessStartedAt":"2026-08-03T22:41:37.772Z"}}
+{"createdAt":"2026-08-03T22:41:39.877Z","name":"main_window_created"}
+{"createdAt":"2026-08-03T22:41:42.311Z","name":"process_gone_suppressed","data":{"source":"child","processType":"GPU","reason":"crashed","exitCode":-2147483645,"expectedTeardown":"none","serviceName":"GPU","type":"GPU","mainProcessPid":7468,...}}
+"crash.source":"renderer","crash.reason":"crashed","crash.exit_code":-2147483645, ... "app.main_process.pid":7468   (span at 22:41:42.349)
+```
+Launch 2212 starts at 22:40:11, GPU child dies at 22:40:14.607, renderer dies 40 ms later at 22:40:14.647 with the identical exit code. New launch 7468 at 22:41:37 does exactly the same thing 88 seconds later — one GPU crash each, so recentCrashes.length never exceeds 1 in either process.
+The whole-bundle breadcrumb census confirms nothing engaged across those launches:
+```
+$ grep -c 'gpu_fallback_applied'          F0BMQLS1AA2.txt   → 0
+$ grep -c 'gpu_fallback_restart_deferred' F0BMQLS1AA2.txt   → 0
+$ grep -c 'gpu_fallback_engaged'          F0BMQLS1AA2.txt   → 1
+```
+The single gpu_fallback_engaged is from an earlier, different launch (pid 17908) that happened to take three GPU crashes inside one 30 s session — {"createdAt":"2026-08-03T22:37:52.796Z","name":"gpu_fallback_engaged","data":{"reason":"crashed","exitCode":-2147483645,"crashesInWindow":3}} — and it is not followed by gpu_fallback_applied anywhere in the bundle. So the in-launch rule fires only in the rare case where the app survives three faults in half a minute, and even there it did not complete. Every one-crash-per-launch iteration is invisible to it.
+F0BNBE3APU0 (win32 10.0.26100, v1.4.164) shows the same cascade in the human-readable report itself:
+```
+Created: 2026-08-02T22:49:42.485Z
+- 2026-08-02T22:49:41.325Z: main_process_lifecycle_started (packaged=true, platform=win32, mainProcessPid=26076, mainProcessLaunchId=1a843ff3-5a0a-44ca-bddb-2872be94c97f, mainProcessStartedAt=2026-08-02T22:49:35.738Z)
+- 2026-08-02T22:49:41.484Z: main_window_created
+- 2026-08-02T22:49:42.460Z: process_gone_suppressed (source=child, processType=GPU, reason=crashed, exitCode=-2147483645, expectedTeardown=none, serviceName=GPU, type=GPU, mainProcessPid=26076, ...)
+```
+GPU child at 22:49:42.460, renderer crash report Created: 22:49:42.485 — 25 ms apart, same exit code. Today that lands in renderer triage with no GPU attribution; with this PR it also records a gpu_cascade breadcrumb naming the GPU child.
+F0BMA00J203 (win32 10.0.26200, v1.4.164, Reason: crashed, Created: 2026-08-02T16:12:10.779Z) is the -1 variant — its diagnostics bundle F0BM0RL7ZN3.txt carries the matching suppressed GPU death:
+```
+"breadcrumb.name":"process_gone_suppressed","breadcrumb.data":{"source":"child","processType":"GPU","reason":"crashed","exitCode":-1,"expectedTeardown":"none","serviceName":"GPU","type":"GPU","mainProcessPid":18028,"mainProcessLaunchId":"4b1e74fb-0b19-4a25-99b0-4975886c7b44","mainProcessStartedAt":"2026-08-02T15:54:51.629Z"}
+```
+ELI5
+Imagine a car whose engine sometimes stalls. The mechanic built a safety rule: "if the engine stalls three times within thirty seconds, switch to the slow-but-reliable backup engine." Sensible rule.
+The problem: the stall counter is a sticky note on the dashboard, and the note gets shredded every time you restart the car. On the affected machines, the engine stalls once, and the stall is violent enough that the car shuts off completely. You restart. Fresh sticky note, count zero. It stalls again. Restart. Fresh note again. The counter never gets past one, so the backup engine is never switched on — the driver just loops forever, and the only thing anybody sees afterwards is "the dashboard died", not "the engine stalled".
+The fix writes the tally in a notebook that lives in the glovebox instead of on a sticky note, with real dates on each entry. Now the rule can say: three separate trips that each ended in a stall — whether that is three in half an hour or three days in a row — means this engine is bad, switch to the backup. Two extra details: the notebook is thrown away when you get a new car (an app update, which may have fixed the engine, gets a fresh chance at the fast engine), and if you say "no thanks, keep driving", it stops nagging you for a day instead of asking again on every single trip. Finally, when the dashboard dies right after the engine stalls, we now write "the engine stalled" next to it, so the next person reading the logbook doesn't waste a week investigating the dashboard.
+Trade-offs
+Stated plainly. Several of these are real.
+This is a mitigation, not a cure. It does not fix the underlying Chromium/driver fault that produces STATUS_BREAKPOINT. It makes the app notice the loop and offer software rendering. Users who accept get a working but slower app; the GPU fault itself is still there.
+The Linux report in this cluster is not fixed. maybeApplyGpuFallbackForThisLaunch still returns early off-win32 (src/main/index.ts:1558) and resolveGpuFallbackSwitches still returns [] for non-win32. So of the 9 reports, the 8 Windows ones are addressed and F0BMF88M9L1 (Linux, SIGTRAP 133) is not. The Linux DOM-renderer fallback was deliberately split into a follow-up PR (plan item 5b) rather than bolted on here.
+Causation is not proven end to end. What is proven: the tracker cannot fire across launches, and the field bundles show exactly the one-crash-per-launch pattern that defeats it. What is not proven: that engaging software rendering actually stops the crash on this specific hardware. Nobody on the team has an affected GPU/driver; verification was unit-level plus a Windows 11 26200 suite run, not a reproduction on a crashing machine.
+New writes on the crash path. A GPU child crash now performs a small synchronous writeFileSync before the fallback decision. This is intentional (async would lose the record when the process dies moments later) but it is real synchronous I/O on the main process during a fault. Bounded at 16 entries.
+New file in userData. gpu-crash-history.json. It is not migrated, not user-visible, and is silently discarded on version/Electron/platform change or corruption — but it is another file that can go stale on disk.
+Users who genuinely launch rarely can now trip the fallback. The 72 h streak window means someone who opens Orca once a day and hits a GPU crash on three consecutive days gets prompted, even though those crashes are 48 h apart. This is deliberate — that user is looking at a broken driver — but it is a behavior change from "never prompts" and it will produce prompts that previously did not exist.
+"Keep Running" now suppresses the prompt for 24 h. If a user declines once and their driver then degrades further within the same day, they will not be re-asked until the cooldown expires. Chosen over the previous behavior only because the alternative (with persistence) is re-prompting on the first GPU crash of every launch, which is worse.
+Known follow-up, deliberately not fixed here (flagged as minor in review): the cascade attributor keeps its own single-slot pending state rather than reading a shared recent-process-gone ring. This duplicates machinery that work item 2 (w2-sibling-kill) is building. There is an explicit TODO at src/main/crash-reporting/gpu-crash-cascade-attribution.ts to fold it into process-gone-recorder's ring once that lands. Mitigation until then: the attributor's state is per-launch, in-memory, single-slot and only ever labels — it can never influence the fallback rules, so divergence between the two rings cannot change crash-handling behavior, only breadcrumb text.
+The 30 min / 3-launch and 72 h / 3-streak constants are judgement calls, not measured optima. They were picked to cover the observed field cadence (88 s between launches in F0BNM0R87SL) with margin, and the guardrail tests pin the intended non-firing cases, but no telemetry exists yet to confirm the false-positive rate in the wild.
+Adversarial review
+2 independent adversarial review rounds were run against this branch. Each round used a fresh reviewer with no memory of the prior round — no shared context, no summary of earlier findings handed forward.
+The rounds produced 1 fix round of changes, all applied in-branch. The over-firing risks they closed are the ones now pinned by the guardrail tests, and each is documented in-code: both cross-launch rules count launches, never raw crashes, so a single churny-but-recovered session cannot bank evidence that a later benign crash cashes in (does not let one recovered launch bankroll a later benign crash, referencing real field session F0BGRN5912M — 4 recovered crashes in 74 s); the crashing-launch streak is wall-clock bounded to 72 h so three launches spread over weeks are not read as one broken driver (ignores a crashing-launch streak spread over weeks); the renderer cascade is attribution-only so it cannot silently halve the tuned 3-in-30 s burst threshold (counts one GPU fault once even when the renderer dies behind it); and declining the restart starts a 24 h cooldown instead of leaving persisted evidence that re-prompts on every later launch (stops re-prompting after the user keeps running, then asks again a day later).
+The final round found zero blocking and zero major issues. The one minor finding was the duplicated recent-process-gone ring, deliberately left as a follow-up and documented in Trade-offs item 8 with its mitigation.
+Final verdict: clean — zero blocking, zero major.
+/perf skill review verdict: no-regression.
+Made with Orca 🐋
+fix(gpu): engage GPU software-rendering fallback across launches
+…
+aa1c91d
+```
+The GPU crash tracker lived only in memory, so a GPU fault that took the
+whole app down reset it on every relaunch and the 3-in-30s burst rule could
+never fire. Persist a build-scoped ring of wall-clock crashes next to the
+fallback marker and engage when separate launches crash inside the window or
+when consecutive recent launches each die on the GPU.
+
+Both cross-launch rules count launches, never raw crashes, so recovered churn
+inside one session cannot be cashed in by a later benign crash, and the streak
+is bounded to 72h so launches weeks apart are not treated as one broken driver.
+A renderer death trailing a suppressed GPU crash is named gpu_cascade in the
+crash trail but is not recorded as a second crash, keeping the burst threshold
+at 3 real faults. Declining the restart starts a 24h cooldown so "Keep Running"
+is not re-asked on the first GPU crash of every later launch.
+
+Co-authored-by: Orca <help@stably.ai>
+```
+coderabbitai
+Bot
+commented
+Aug 4, 2026
+Copy link
+Copy Markdown
+Contributor
+Warning
+Review limit reached
+@nwparker, you've reached your PR review limit, so we couldn't start this review.
+Next review available in: 35 minutes
+You've used all free OSS reviews for now. Wait for the free limit to reset to keep reviewing this public repository.
+How can I continue?
+After more reviews become available, a review can be triggered using the @coderabbitai review command as a PR comment. Alternatively, push new commits to this PR.
+To avoid repeated limits, reduce automatic review volume by pausing incremental auto-reviews earlier, using label-based review opt-in, excluding WIP or generated PR titles, or requesting reviews manually when the PR is ready. If your team needs uninterrupted high-volume reviews, an organization admin can enable usage-based reviews.
+How do review limits work?
+CodeRabbit enforces per-developer PR review limits for each organization. Most developers receive the normal plan review availability.
+For paid Pro and Pro+ PR reviews, CodeRabbit uses adaptive limits for sustained high-volume activity. When a developer's recent PR review activity reaches the 95th percentile or higher among CodeRabbit users, additional reviews become available more gradually as earlier reviews age out of the rolling window.
+Please refer docs for additional details.
+Review details
+⚙️ Run configuration
+Configuration used: Repository UI
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 72519872-0d0a-4daa-b681-33b590948860
+📥 Commits
+Reviewing files that changed from the base of the PR and between e9cf106 and aa1c91d.
+📒 Files selected for processing (9)
+src/main/crash-reporting/gpu-crash-cascade-attribution.test.ts
+src/main/crash-reporting/gpu-crash-cascade-attribution.ts
+src/main/crash-reporting/gpu-crash-cross-launch-fallback.test.ts
+src/main/crash-reporting/gpu-crash-fallback-coordinator.test.ts
+src/main/crash-reporting/gpu-crash-fallback-coordinator.ts
+src/main/crash-reporting/gpu-crash-fallback-decision.ts
+src/main/index.ts
+src/main/startup/gpu-crash-history-store.test.ts
+src/main/startup/gpu-crash-history-store.ts
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,387 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-Edge-aware surface rendering for neural Signed Distance Fields (SDFs) is a technique that correctly computes gradients at edge pixels by detecting 3D edge points, reparameterizing their location to allow back-propagation along the surface normal, and blending colors from disconnected surface pieces based on subpixel edge geometry [S1]. It solves the problem where standard differentiable rendering assumes smooth surfaces within each pixel footprint, causing neural SDFs to fail to deform or converge to valid silhouettes when geometric discontinuities are present [S1]. Unlike mesh-based differentiable rendering which degrades topology, this method allows neural SDFs to change topology readily while handling silhouettes correctly [S1].
++Edge-aware surface rendering for neural Signed Distance Fields (SDFs) is a technique that correctly computes gradients at edge pixels by detecting 3D edge points, reparameterizing their location to allow back-propagation along the surface normal, and blending colors from disconnected surface pieces based on subpixel edge geometry [S1]. It solves the problem where standard differentiable rendering assumes smooth surfaces within each pixel footprint, causing neural SDFs to fail to deform or converge to valid silhouettes when geometric discontinuities are present [S1]. Unlike mesh-based differentiable rendering which degrades topology without intermediate remeshing, this method allows neural SDFs to change topology readily while handling silhouettes correctly [S1].
+ 
+ ## How it works
+-The method operates on a neural SDF $S_{\Theta_s}(x)$ parameterized by weights $\Theta_s$. It processes each pixel by first determining if it contains a depth discontinuity, then localizing the edge, reparameterizing the intersection for gradient flow, and finally blending colors based on subpixel geometry.
++The method operates on a neural SDF $S_{\Theta_s}(x)$ parameterized by weights $\Theta_s$ [S1]. It processes each pixel by first determining if it contains a depth discontinuity, then localizing the edge, reparameterizing the intersection for gradient flow, and finally blending colors based on subpixel geometry [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Camera origin $o$, viewing direction, neural SDF $S_{\Theta_s}$, neural material/shading function, image resolution.
+-*   **Outputs**: Rendered color $C$ for each pixel, gradients with respect to $\Theta_s$.
++*   **Inputs**: Camera origin $o$, viewing direction, neural SDF $S_{\Theta_s}$, neural material/shading function, image resolution [S1].
++*   **Outputs**: Rendered color $C$ for each pixel, gradients with respect to $\Theta_s$ [S1].
+ 
+ ### Data Structures
+-*   **Edge Mask**: A boolean mask of the same resolution as the image, marking pixels identified as containing depth discontinuities.
+-*   **Subpixel Edge Coordinates**: For each edge pixel, a 2D vector $[u, v]$ representing the projected location of the 3D edge point in continuous image space.
+-*   **2D Edge Normal**: For each edge pixel, a 2D vector $[du, dv]$ representing the projection of the 3D surface normal at the edge point.
++*   **Edge Mask**: A boolean mask of the same resolution as the image, marking pixels identified as containing depth discontinuities [S1].
++*   **Subpixel Edge Coordinates**: For each edge pixel, a 2D vector $[u, v]$ representing the projected location of the 3D edge point in continuous image space [S1].
++*   **2D Edge Normal**: For each edge pixel, a 2D vector $[du, dv]$ representing the projection of the 3D surface normal at the edge point [S1].
+ 
+ ### Parameters
+@@ -30,5 +30,5 @@
+     *   Project the detected 3D edge point to image space to obtain subpixel-accurate 2D coordinates $[u, v]$ [S1].
+     *   Project the 3D surface normal $n$ at the edge point to 2D to obtain the 2D edge normal direction $[du, dv]$ [S1].
+-    *   Mark these pixels in the Edge Mask.
++    *   Mark these pixels in the Edge Mask [S1].
+ 
+ 2.  **Reparameterize Edge Points**
+@@ -60,5 +60,5 @@
+ import numpy as np
+ 
+-def edge_aware_rendering(camera_origin, viewing_direction, neural_sdf, neural_material, image_width, image_height, tau, max_steps):
++def edge_aware_rendering(camera_origin, camera_focal_length, principal_point, neural_sdf, neural_material, image_width, image_height, tau, max_steps):
+     """
+     Renders an image using edge-aware surface rendering for neural SDFs.
+@@ -66,5 +66,6 @@
+     Args:
+         camera_origin: 3D vector, camera origin o.
+-        viewing_direction: 2D array of shape (H, W, 3), viewing directions for each pixel.
++        camera_focal_length: float, focal length of the camera.
++        principal_point: 2D vector, principal point (cx, cy).
+         neural_sdf: Function S_theta(x) returning SDF value and gradient (normal).
+         neural_material: Function shading(normal, view_dir, point) returning color.
+@@ -79,148 +80,78 @@
+     rendered_image = np.zeros((image_height, image_width, 3))
+     edge_mask = np.zeros((image_height, image_width), dtype=bool)
+-    
+-    # Precompute depth map for Sobel filter
+     depth_map = np.zeros((image_height, image_width))
++
++    # Step 0: Initial sphere tracing for all pixels to get depth and normals
+     for y in range(image_height):
+         for x in range(image_width):
+-            # Standard sphere tracing for center ray
+-            ray_dir = viewing_direction[y, x]
++            ray_dir = unproject_2d_to_ray(x, y, camera_origin, camera_focal_length, principal_point, image_width, image_height)
+             t, point, normal = sphere_trace(camera_origin, ray_dir, neural_sdf)
+             depth_map[y, x] = t
+-            # Store for later use if needed, but we re-trace or store intermediates
+-            # For simplicity, assume we store point and normal in a buffer or recompute
+-            # Here we just store depth for edge detection
+-            
++
+     # Detect depth discontinuities
+-    # Compute Sobel gradient magnitude on depth_map
+     depth_grad_mag = compute_sobel_gradient_magnitude(depth_map)
+     discontinuity_pixels = np.where(depth_grad_mag > tau)
+-    
++
+     for y, x in zip(discontinuity_pixels[0], discontinuity_pixels[1]):
+-        ray_dir = viewing_direction[y, x]
+-        
+-        # Step 1: Localize Edge
+-        # Initial intersection
++        ray_dir = unproject_2d_to_ray(x, y, camera_origin, camera_focal_length, principal_point, image_width, image_height)
+         t, point, normal = sphere_trace(camera_origin, ray_dir, neural_sdf)
+-        
+-        # Surface walk to find 3D edge point
++
++        # Step 1: Localize Edge via surface walk
+         edge_point = point
+         edge_normal = normal
+-        for step in range(max_steps):
++        for _ in range(max_steps):
+             # Walk along surface tangent direction
+-            # Define tangent direction perpendicular to normal and view direction
+-            # Or use a predefined walk direction as per Alg 1 in source
+-            # Assuming a generic walk direction 'walk_dir' derived from normal and view
+-            walk_dir = compute_walk_direction(normal, ray_dir)
+-            
+-            # Move along surface
+-            # Note: Exact walk logic depends on specific implementation of "line 6 of Alg 1"
+-            # We approximate by moving along the tangent plane
+-            step_size = 0.01 # Small step size
+-            new_point = edge_point + walk_dir * step_size
+-            
+-            # Check if new_point is on surface (SDF approx 0) or use SDF to guide
+-            # The source says "walk on the surface along the direction defined"
+-            # We assume the walk direction keeps us on the zero level set or close to it
+-            # For implementation, one might use Newton-Raphson to project back to surface
++            walk_dir = compute_tangent(normal, ray_dir)
++            # Move along tangent and project back to surface (Newton step)
++            new_point = edge_point + walk_dir * 0.01
+             sdf_val, grad = neural_sdf(new_point)
+-            # Project back to surface
+-            edge_point = new_point - grad * sdf_val / np.linalg.norm(grad)**2
+-            edge_normal = grad / np.linalg.norm(grad)
+-            
+-            # Check for edge condition (e.g., silhouette)
+-            # Source implies reaching a 3D edge point. 
+-            # In practice, this might be detected by the depth discontinuity logic 
+-            # or by checking if the point is on the silhouette.
+-            # Since we started from a discontinuity pixel, we assume the walk finds the edge.
+-            if is_edge_point(edge_point, edge_normal, camera_origin):
+-                break
+-        
++            edge_point = new_point - grad * sdf_val / (np.linalg.norm(grad)**2 + 1e-8)
++            edge_normal = grad / (np.linalg.norm(grad) + 1e-8)
++
+         # Project 3D edge point to 2D subpixel coordinates
+-        u, v = project_to_image(edge_point, camera_origin, viewing_direction[y, x])
+-        
++        u, v = project_3d_to_2d(edge_point, camera_origin, camera_focal_length, principal_point, image_width, image_height)
+         # Project 3D normal to 2D
+-        du, dv = project_normal_to_2d(edge_normal, camera_origin, viewing_direction[y, x])
+-        
++        du, dv = project_normal_to_2d(edge_normal, camera_origin, camera_focal_length, principal_point, image_width, image_height)
++
+         edge_mask[y, x] = True
+-        
+-        # Step 2: Reparameterize (Implicit in shading for edge pixels)
+-        # The reparameterization x_theta = x - n * S(x) is used for gradient flow.
+-        # In shading, we use the edge point location.
+-        
+-        # Step 3: Compute Shading
+-        # Pixel center
++
++        # Step 3: Compute Shading at Edge Pixel
+         uc = math.floor(u) + 0.5
+         vc = math.floor(v) + 0.5
+-        
+-        # Circle radius
+         r = math.sqrt(2) / 2
+-        
+-        # Define edge line in 2D: passing through (u, v) with normal (du, dv)
+-        # Points A and B are on the circle on either side of the edge
+-        # Vector from center to edge
++
+         vec_to_edge = np.array([u - uc, v - vc])
+-        
+-        # Normalize vec_to_edge
+-        vec_to_edge_norm = vec_to_edge / np.linalg.norm(vec_to_edge)
+-        
+-        # Edge normal in 2D
+         edge_normal_2d = np.array([du, dv])
+-        edge_normal_2d_norm = edge_normal_2d / np.linalg.norm(edge_normal_2d)
+-        
++
+         # Calculate angle alpha
+-        # alpha = 2 * arccos(sqrt(2) * [du, dv] . [u - uc, v - vc])
+-        # Note: The source formula uses sqrt(2) * dot product.
+-        # The dot product is between 2D normal and vector from center to edge.
+-        dot_product = np.dot(edge_normal_2d_norm, vec_to_edge_norm)
+-        
+-        # Clamp dot product for arccos
+-        dot_product = np.clip(dot_product, -1.0, 1.0)
+-        
+-        alpha = 2 * math.acos(math.sqrt(2) * dot_product)
+-        
++        dot_product = np.dot(edge_normal_2d, vec_to_edge)
++        arg = math.sqrt(2) * dot_product
++        arg = np.clip(arg, -1.0, 1.0)
++        alpha = 2 * math.acos(arg)
++
+         # Calculate weight wA
+         wA = 1 - (1 / (2 * math.pi)) * (alpha - math.sin(alpha))
+-        
+-        # Pick points A and B on the circle
+-        # A and B are on opposite sides of the edge line
+-        # We can define A and B by rotating the vector to edge by +/- 90 degrees?
+-        # Or simply pick two points on the circle separated by the edge line.
+-        # The source says "pick 2D locations A and B on the circle on either side of the edge"
+-        # A common approach is to pick points along the direction perpendicular to the edge normal
+-        # But the source doesn't specify exactly how A and B are chosen, only that they are on either side.
+-        # For implementation, we can pick A and B as the intersections of the circle with the line 
+-        # perpendicular to the edge normal passing through the center? No, that's not right.
+-        # The source implies A and B are specific points. 
+-        # Let's assume A and B are chosen such that the line segment AB is the chord defined by the edge line?
+-        # No, A and B are points on the circle.
+-        # Let's pick A and B as the points on the circle that are furthest from the edge line?
+-        # Or simply pick two points symmetric with respect to the edge normal?
+-        # Given the ambiguity, we pick A and B as the points on the circle where the edge line intersects?
+-        # No, the edge line passes through (u,v) which is inside the circle.
+-        # The edge line divides the circle into two segments.
+-        # A and B are likely the midpoints of the arcs? Or just any two points on opposite sides.
+-        # The source says "Pick 2D locations A and B on the circle on either side of the edge."
+-        # And "Raytrace and shade these locations".
+-        # To be deterministic, let's pick A and B as the points on the circle along the direction 
+-        # perpendicular to the edge normal, i.e., along the tangent of the edge.
+-        # Tangent direction in 2D: (-dv, du)
++
++        # Pick points A and B on the circle on either side of the edge
++        # Tangent direction to the edge line in 2D
+         tangent_dir = np.array([-dv, du])
+-        tangent_dir_norm = tangent_dir / np.linalg.norm(tangent_dir)
+-        
+-        A_2d = np.array([uc, vc]) + r * tangent_dir_norm
+-        B_2d = np.array([uc, vc]) - r * tangent_dir_norm
+-        
+-        # Convert 2D coordinates back to 3D rays
+-        ray_A = unproject_2d_to_ray(A_2d, camera_origin, viewing_direction)
+-        ray_B = unproject_2d_to_ray(B_2d, camera_origin, viewing_direction)
+-        
+-        # Raytrace and shade
++        tangent_len = np.linalg.norm(tangent_dir)
++        if tangent_len > 1e-8:
++            tangent_dir /= tangent_len
++        else:
++            tangent_dir = np.array([1.0, 0.0])
++
++        A_2d = np.array([uc, vc]) + r * tangent_dir
++        B_2d = np.array([uc, vc]) - r * tangent_dir
++
++        # Convert 2D to 3D rays and shade
++        ray_A = unproject_2d_to_ray(A_2d[0], A_2d[1], camera_origin, camera_focal_length, principal_point, image_width, image_height)
+         t_A, point_A, normal_A = sphere_trace(camera_origin, ray_A, neural_sdf)
+         C_A = neural_material(normal_A, ray_A, point_A)
+-        
++
++        ray_B = unproject_2d_to_ray(B_2d[0], B_2d[1], camera_origin, camera_focal_length, principal_point, image_width, image_height)
+         t_B, point_B, normal_B = sphere_trace(camera_origin, ray_B, neural_sdf)
+         C_B = neural_material(normal_B, ray_B, point_B)
+-        
++
+         # Blend
+         C = wA * C_A + (1 - wA) * C_B
+@@ -231,91 +162,87 @@
+         for x in range(image_width):
+             if not edge_mask[y, x]:
+-                ray_dir = viewing_direction[y, x]
++                ray_dir = unproject_2d_to_ray(x, y, camera_origin, camera_focal_length, principal_point, image_width, image_height)
+                 t, point, normal = sphere_trace(camera_origin, ray_dir, neural_sdf)
+-                # Standard differentiable intersection
+-                # x_theta = x - (o - x) / (n^T(o - x)) * S(x)
+-                # But for shading, we just use the point
+                 C = neural_material(normal, ray_dir, point)
+                 rendered_image[y, x] = C
+-                
++
+     return rendered_image
+ 
+-def sphere_trace(origin, direction, sdf, max_steps=64, max_dist=100.0, step_size=0.01):
++def sphere_trace(origin, direction, sdf, max_steps=64, max_dist=100.0):
+     """Standard sphere tracing."""
++    t = 0.0
+     point = origin
+     for _ in range(max_steps):
+         dist = sdf(point)
+         if dist < 1e-4:
+-            return 0, point, sdf.gradient(point)
++            return t, point, sdf.gradient(point)
+         if dist > max_dist:
+-            return max_dist, point, sdf.gradient(point)
+-        point += direction * dist
+-    return 0, point, sdf.gradient(point)
++            return t, point, sdf.gradient(point)
++        t += dist
++        point = origin + direction * t
++    return t, point, sdf.gradient(point)
+ 
+ def compute_sobel_gradient_magnitude(depth_map):
+     """Compute Sobel gradient magnitude."""
+-    # Implement Sobel filters
+-    pass
+-
+-def compute_walk_direction(normal, view_dir):
++    kx = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
++    ky = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
++    gx = np.convolve(depth_map.ravel(), kx.ravel(), mode='same').reshape(depth_map.shape)
++    gy = np.convolve(depth_map.ravel(), ky.ravel(), mode='same').reshape(depth_map.shape)
++    return np.sqrt(gx**2 + gy**2)
++
++def compute_tangent(normal, view_dir):
+     """Compute a direction tangent to the surface."""
+-    # Cross product of normal and view direction gives a tangent
+     tangent = np.cross(normal, view_dir)
+-    if np.linalg.norm(tangent) < 1e-6:
+-        # View direction is parallel to normal, pick arbitrary tangent
+-        tangent = np.array([1, 0, 0])
++    norm = np.linalg.norm(tangent)
++    if norm < 1e-8:
++        tangent = np.array([1.0, 0.0, 0.0])
+         if abs(np.dot(tangent, normal)) > 0.9:
+-            tangent = np.array([0, 1, 0])
+-    return tangent / np.linalg.norm(tangent)
+-
+-def is_edge_point(point, normal, camera_origin):
+-    """Check if point is on silhouette."""
+-    view_dir = point - camera_origin
++            tangent = np.array([0.0, 1.0, 0.0])
++    return tangent / norm
++
++def project_3d_to_2d(point, origin, focal_length, principal_point, width, height):
++    """Project 3D point to 2D image coordinates."""
++    relative = point - origin
++    if relative[2] <= 0:
++        return 0.0, 0.0
++    u = focal_length * relative[0] / relative[2] + principal_point[0]
++    v = focal_length * relative[1] / relative[2] + principal_point[1]
++    return u, v
++
++def project_normal_to_2d(normal, origin, focal_length, principal_point, width, height):
++    """Project 3D normal to 2D image coordinates [G]."""
++    # Standard projection: align normal with camera frame and take image plane components
++    view_dir = origin - normal
+     view_dir = view_dir / np.linalg.norm(view_dir)
+-    # Silhouette if normal is perpendicular to view direction
+-    return abs(np.dot(normal, view_dir)) < 1e-3
+-
+-def project_to_image(point, camera_origin, view_dir):
+-    """Project 3D point to 2D image coordinates."""
+-    # This depends on camera projection matrix
+-    # Assuming perspective projection
+-    pass
+-
+-def project_normal_to_2d(normal, camera_origin, view_dir):
+-    """Project 3D normal to 2D image coordinates."""
+-    # Project normal to image plane
+-    pass
+-
+-def unproject_2d_to_ray(uv, camera_origin, viewing_direction):
++    up = np.array([0.0, 1.0, 0.0])
++    if abs(np.dot(view_dir, up)) > 0.9:
++        up = np.array([1.0, 0.0, 0.0])
++    right = np.cross(view_dir, up)
++    right = right / np.linalg.norm(right)
++    up = np.cross(right, view_dir)
++    n_cam_x = np.dot(normal, right)
++    n_cam_y = np.dot(normal, up)
++    return n_cam_x, n_cam_y
++
++def unproject_2d_to_ray(u, v, origin, focal_length, principal_point, width, height):
+     """Unproject 2D coordinates to 3D ray."""
+-    # Find the viewing direction corresponding to the 2D coordinate
+-    # This requires mapping uv back to pixel indices and then to view_dir
+-    pass
++    x = (u - principal_point[0]) / focal_length
++    y = (v - principal_point[1]) / focal_length
++    z = 1.0
++    dir = np.array([x, y, z])
++    return dir / np.linalg.norm(dir)
+ ```
+ 
+ ### Edge Cases and Pitfalls
+ *   **Precision**: The calculation of $\alpha$ involves `arccos` of a dot product. Ensure the dot product is clamped to $[-1, 1]$ to avoid numerical errors [S1].
+-*   **Boundaries**: The surface walk must handle cases where the edge is not found within `Max Steps`. In such cases, fallback to standard rendering or mark as non-edge [S1].
+ *   **Degenerate Input**: If the surface normal is parallel to the view direction, the walk direction computation may fail. A fallback tangent must be provided [G].
+ *   **Topology Changes**: Unlike mesh-based methods, this method handles topology changes (e.g., holes) naturally because it relies on the SDF zero level set [S1].
+ 
+-## Subtopics
+-
+-### Neural Surface Rendering
+-The parent method that uses a neural shader to approximate PBR. Edge-aware rendering is a specific technique within this family to handle silhouettes [9960-neural-surface-rendering.md].
+-
+-### IDR (Implicit Depth Representation)
+-A prior neural surface rendering method that assumes smooth surfaces and fails to deform SDFs to match silhouettes [S1].
+-
+-### PSDR (Pixel-Space Differentiable Rendering)
+-A mesh-based differentiable rendering method that can handle silhouettes but degrades mesh quality without intermediate remeshing [S1].
+-
+ ## Operating characteristics
+ *   **Time Complexity**: The method adds overhead for edge detection (Sobel filter) and surface walking for discontinuity pixels. The surface walk is limited to `Max Steps` (3-7) and only performed on edge pixels, making it efficient [S1].
+-*   **Memory Complexity**: Requires storing the depth map, edge mask, and subpixel edge coordinates. Memory usage is linear with image resolution [S1].
+ *   **Measured Performance**: The method allows convergence to valid silhouettes where IDR fails and avoids mesh degradation issues of PSDR [S1].
+ *   **Strengths**: Correctly handles geometric discontinuities, allows in-plane deformations, and supports topology changes [S1].
+-*   **Limitations**: Requires careful tuning of the threshold $\tau$ and `Max Steps`. The surface walk may not always find the exact edge point if the initial intersection is far from the edge [S1].
+-*   **When to Use**: Use when rendering neural SDFs with complex silhouettes or topology changes. Avoid if performance is critical and scenes are simple [S1].
++*   **Limitations**: Requires careful tuning of the threshold $\tau$ and `Max Steps` [S1].
++*   **When to Use**: Use when rendering neural SDFs with complex silhouettes or topology changes [S1].
+ 
+ ## Background

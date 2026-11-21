@@ -1,0 +1,48 @@
+# Ray-Centric Adaptive Step and Termination
+
+## Overview
+Ray-Centric Adaptive Step and Termination is a family of volume rendering acceleration techniques that dynamically adjust the sampling step size $\Delta t$ and ray termination conditions based on local data metrics or geometric properties, rather than using a fixed uniform grid. It solves the inefficiency of uniform sampling, which wastes queries in homogeneous regions and fails to capture high-frequency details without excessive cost [G]. Unlike sibling methods that focus on spatial subdivision or global resolution scaling, this family modulates the ray's internal progression directly, often building on [Adaptive Sampling and Resolution](1412-adaptive-sampling-and-resolution.md) by implementing specific adaptation laws for step size and opacity thresholds [G].
+
+## Shared principles
+The core mechanism shared by all children is the deviation from a fixed, uniform sampling strategy [G]. Instead of casting a constant number of rays or samples per pixel/ray, the method computes a metric (such as gradient magnitude, rendering error, or temporal difference) and uses it to modulate the sampling rate or resolution [G].
+
+Mathematically, this often involves a control loop:
+1. **Metric Evaluation:** Compute a scalar value $M$ representing local complexity or error [G].
+2. **Adaptation:** Adjust a parameter $P$ (step size $\Delta t$, resolution $R$, or sampling probability $w$) based on $M$ [G].
+3. **Rendering/Training:** Execute the volume integral or loss computation with the adjusted parameter [G].
+
+Common adaptation laws include:
+* **Step Size Adaptation:** $\Delta t \propto \frac{1}{M}$ or $\Delta t = \min(\Delta t_{max}, \max(\Delta t_{min}, \frac{k}{M}))$ [G].
+* **Resolution Control:** $R_{new} = R_{old} + \alpha \cdot (t_{target} - t_{actual})$ or threshold-based switching [G].
+* **Probability Weighting:** $w_i \propto M_i$ for importance sampling [G].
+
+All methods in this family aim to maintain visual fidelity while reducing the total number of volume queries [G].
+
+## Subtopics
+
+### [Adaptive Sampling](1385-adaptive-sampling.md)
+Adaptive sampling is a volume rendering optimization that adjusts the sampling density along rays based on local data significance, sampling non-homogeneous regions more densely than homogeneous ones to achieve higher quality than uniform sampling with fewer total samples. It differs from its parent [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by explicitly focusing on the modulation of the sampling *rate* (step size or ray count) rather than just step size or termination, and from its siblings by encompassing a broader range of adaptation metrics including variance, gradient magnitude, and opacity.
+
+### [Adaptive Sampling Step with Early Ray Termination](4573-adaptive-sampling-step-with-early-ray-termination.md)
+This method optimizes volume rendering performance by reducing sampling density for distant data and terminating ray evaluation once total opacity is reached. It addresses the inefficiency of uniform sampling in large, extended volumes where distant regions require less precision. Unlike its siblings, which often focus on error metrics or interaction latency, this approach relies on geometric distance from the viewpoint and opacity accumulation thresholds. It builds on [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by implementing distance-based step adaptation and brick-level opacity checks.
+
+### [Adaptive Sampling with Uniform Fallback](4816-adaptive-sampling-with-uniform-fallback.md)
+Adaptive Sampling with Uniform Fallback is a ray-marching strategy that combines importance-driven adaptive sampling with a deterministic uniform sampling backup. It addresses the problem of insufficient sample coverage in sparse or empty regions of a volume, where adaptive estimators may return too few points, leading to visual artifacts or incomplete rendering. It distinguishes itself from pure adaptive methods by guaranteeing a minimum sampling density through a fallback mechanism, ensuring robustness at the cost of increased computation in empty space.
+
+### [Adaptive Sampling for Interaction](5643-adaptive-sampling-for-interaction.md)
+Adaptive Sampling for Interaction is a technique to maintain smooth user interaction with large volume datasets by dynamically lowering the rendering sampling rate during camera movement or parameter adjustment, then restoring high-quality rendering after the interaction ceases. It differs from static resolution scaling by being triggered by user activity rather than a fixed timer, and from purely error-based adaptive sampling by decoupling visual fidelity from local data complexity in favor of temporal responsiveness. This method bridges the gap between interactive responsiveness and final image quality, ensuring that coarse feedback is provided during exploration while preserving detail for static inspection.
+
+### [Loss-based Adaptive Sampling](6928-loss-based-adaptive-sampling.md)
+Loss-based Adaptive Sampling is a ray sampling strategy that allocates more samples to image regions with higher rendering loss, identified by partitioning the image into an 8x8 grid and computing mean loss per region. It differs from sibling methods like [Adaptive Sampling](1385-adaptive-sampling.md) by explicitly using a composite loss metric (gradient and pixel error) to drive a probability distribution for resampling, rather than relying solely on geometric depth or simple gradient magnitude.
+
+### [Adaptive Sampling Rate Control](8896-adaptive-sampling-rate-control.md)
+Adaptive Sampling Rate Control modulates the number of samples or slices used to render volumetric geometry to balance image quality and performance. It solves the problem of undersampling artifacts during zoom or anisotropic data distortion by dynamically adjusting the sampling density based on view direction and data characteristics. Unlike fixed-rate methods, it allows for non-uniform sampling along data dimensions to compensate for anisotropy.
+
+### [Adaptive Preintegration Termination Criteria](9804-adaptive-preintegration-termination-criteria.md)
+Adaptive Preintegration Termination Criteria determines when to stop subdividing a ray segment during volume rendering with preintegration. It recursively splits intervals until the difference in the volume integral approximation over the entire interval changes by only a small amount. It differs from fixed-step preintegration by dynamically adjusting sampling density based on local scalar field and transfer function complexity.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)

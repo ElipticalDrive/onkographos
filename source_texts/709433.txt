@@ -1,0 +1,98 @@
+Summary Rays avoid self-intersection (hitting the surface they just left) in three overlapping ways, and only one of them is needed: OffsetRayOrigin: Intersection::SpawnRay/SpawnTo move the origin off the surface using the hit point's fl...
+
+Ray self-intersection handling (Ray::mTmin, RAY_EPS offset) and PT direct lighting at delta BSDFs · Issue #68 · xiaoyxue/Gyunity · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Ray self-intersection handling (Ray::mTmin, RAY_EPS offset) and PT direct lighting at delta BSDFs #68
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Ray self-intersection handling (Ray::mTmin, RAY_EPS offset) and PT direct lighting at delta BSDFs#68
+Copy link
+Description
+xiaoyxue
+opened on Oct 23, 2026
+Issue body actions
+Summary
+Rays avoid self-intersection (hitting the surface they just left) in three overlapping ways, and only one of them is needed:
+OffsetRayOrigin: Intersection::SpawnRay/SpawnTo move the origin off the surface using the hit point's floating-point error bound (mPointError). This is pbrt-v3's approach.
+Ray::mTmin: spawned rays get tmin = mRayEps, and shapes reject hits with t < mTmin.
+RAY_EPS origin offset: the Ray constructor moves every origin by RAY_EPS along the direction (mOrig(orig + dir * RAY_EPS)).
+This issue tracks simplifying that to (1). It also tracks a related path-tracer change found in the same local experiment.
+1. Retire Ray::mTmin
+Findings
+mRayEps defaults to 0, so tmin is effectively 0 for every triangle and sphere hit. Self-intersection there is already handled by OffsetRayOrigin.
+Exception: HeartSurface sets mRayEps = 5e-3 (HeartSurface.cpp:52) and uses std::max(ray.mTmin, t0) - 1e-3. Its hit points are found numerically, have no exact error bound, and rely on the non-zero tmin.
+Readers of mTmin: Triangle.cpp, Sphere.h, HeartSurface.cpp, BVHAccel.cpp (box test), Transform.h (passes it through), Ray.cpp (printing).
+Plan: migrate one reader at a time, triangles first, because every regression scene is triangle meshes. Then remove the member. A [[deprecated]] attribute would warn at every remaining use, so the member is marked with a comment for now.
+Triangle: reject tHit < 0 instead of tHit < ray.mTmin (same behavior, byte-identical renders), and add a comment in Ray.h marking mTmin deprecated (Triangle: stop using Ray::mTmin; mark mTmin deprecated #69).
+BVH box test: accept a node when tmax > 0 instead of tmax > ray.mTmin (same behavior, byte-identical renders) (BVHAccel: stop using Ray::mTmin in the box test #70).
+Sphere (Sphere: return hit details; fix occlusion test; stop using Ray::mTmin #78): fixed the crash (hit details were discarded, so sphere hits had a zero normal), the occlusion test and Sample's normal; hit tests now reject tHit <= 0. CornellBoxSphere renders and is in the render regression set. Original findings:
+Every scene with spheres (CornellBoxSphere, CornellBoxTriangle2) crashes with an access violation, so sphere changes can't be render-tested.
+Sphere::Intersect(const Ray&) (occlusion test) calls mWorldToObject(ray); and discards the result, so it tests a default Ray with a zero direction: tHit is 0/0 = NaN, which passes the range check, and the function reports "occluded".
+Sphere::Intersect(ray, isect, t) tests the object-space ray from Transform::operator()(const Ray&), which adds the origin error margin to tmin (tMin += dt). So for spheres mTmin is not 0, and dropping it is a (small) behavior change.
+HeartSurface: removed instead of migrated, together with Intersection::mRayEps (Remove HeartSurface and Intersection::mRayEps #76).
+Transform: stop carrying tMin; remove Ray::mTmin and the tmin constructor parameter. (Remove Ray::mTmin #79)
+Expected render impact: none for the regression scenes, because tmin is already 0 there. HeartSurface scenes need a before/after comparison.
+2. Remove the RAY_EPS origin offset in the Ray constructor
+```
+ 	Ray(Vec3 orig, Vec3 dir, real tmax = INF, real tmin = 0.f, const Medium* medium = nullptr)
+-		: mOrig(orig + dir * RAY_EPS), mDir(dir), mTmax(tmax), mTmin(tmin), mMedium(medium)
++		: mOrig(orig), mDir(dir), mTmax(tmax), mTmin(tmin), mMedium(medium)
+```
+Spawned rays are already offset by OffsetRayOrigin, so this extra offset is redundant for them. It also shifts camera rays and any ray built directly. Removing it changes every render, so it needs a new render baseline and a check for acne and light leaks. Best done after part 1.
+Remove the offset, check renders for acne and light leaks, and update the regression baseline. (Remove the RAY_EPS origin offset from the Ray constructor #71) No acne or leaks at 1024 spp. It also fixed a kd-tree bias: old kd-tree renders were darker than BVH (mesh mean 143.31 vs 143.84), and the two accelerators now agree.
+In the same PR, make the hit tests reject tHit <= 0 instead of tHit < 0 (as in pbrt): a hit at exactly zero distance is the ray hitting the surface it starts on. Tried in Triangle: stop using Ray::mTmin; mark mTmin deprecated #69: on its own it changes the kd-tree renders of CornellBoxMesh (444 px) and CornellBoxMeshWithSlope (98 px) through shifted noise, with no visible bias, so it is done here where the baseline changes anyway. (Remove the RAY_EPS origin offset from the Ray constructor #71)
+Light tracer: LT.h builds its rays by hand with Ray(isect.mPos + dir * RAY_EPS, dir) (lines 98 and 130) instead of isect.SpawnRay(dir), which every other integrator uses. Switch it to SpawnRay (robust OffsetRayOrigin offset), then delete the RAY_EPS constant. Changes light-tracing renders only; needs a light-tracing scene in the render test. (Light tracer: spawn rays with SpawnRay; remove RAY_EPS #73; also fixed a light-tracing regression from Remove the RAY_EPS origin offset from the Ray constructor #71: the camera-connection ray started exactly on the surface)
+3. PT: skip direct lighting at delta BSDFs
+```
+-		else {
++		else if (!bsdf->IsDelta()) {
+ 			L += throughput * DirectIllumination(scene, isect, rand(), Vec2(rand(), rand()), Vec3(rand(), rand(), rand()), rand);
+```
+Next-event estimation can't contribute at a perfectly specular (delta) surface, so this saves work. It changes which random numbers are consumed, so renders won't be byte-identical to the current baseline.
+Added (PT: skip direct lighting at delta BSDFs #74). It also removed double counting: DirectIllumination's BSDF-sampling half added light reached through a specular bounce, and the path then added the same emission again via deltaBoundEvent. CornellBoxMesh mean drops by 0.05 (5x the noise), mostly in the caustic under the glass bunny.
+Local experiment cleanup
+Changes 2 and 3, plus an experiment setup in GyunityApp/main.cpp (2048², 512 spp, depth 20, EnvironmentMapScene, output ../Test/Test.bmp), were made uncommitted on local main. They will be reverted there and redone through PRs as above.
+Revert on local main: git restore Gyunity/src/integrator/PT.cpp Gyunity/src/math/Ray.h GyunityApp/main.cpp Both renderer changes from that experiment are now done properly: the RAY_EPS offset removal in Remove the RAY_EPS origin offset from the Ray constructor #71 and the delta-BSDF skip in PT: skip direct lighting at delta BSDFs #74.
+Activity
+xiaoyxue
+changed the title [-]Local experimental changes on main (to be reverted)[/-] [+]Ray self-intersection handling (Ray::mTmin, RAY_EPS offset) and PT direct lighting at delta BSDFs[/+] on Oct 23, 2026
+xiaoyxue
+added a commit that references this issue on Oct 23, 2026
+Merge pull request #80 from xiaoyxue/feature/refactor
+...
+f3be94b
+xiaoyxue commented on Oct 24, 2026
+xiaoyxue
+on Oct 24, 2026
+OwnerAuthor
+More actions
+Verified completion: ray-offset, light-tracer, sphere, tmin-removal and delta-NEE changes are merged through #69–#79 and integration #80. Current feature/refactor uses the unshifted Ray origin and skips delta-BSDF NEE. The local main checkout is clean, including the three experiment files, so the last cleanup checkbox was stale and has been marked complete. No working files were reverted.
+xiaoyxue
+closed this as completedon Oct 24, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

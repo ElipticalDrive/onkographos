@@ -1,0 +1,140 @@
+# 360 Gaussian Splatting
+
+Also called: 360-GS
+
+## Overview
+360 Gaussian Splatting is a method for generating high-quality 3D spatial representations from 360-degree camera images by combining OpenSfM for sparse point cloud generation and Gaussian Splatting for dense Gaussian conversion [S1, unofficial]. It solves the problem that standard Gaussian Splatting assumes perspective cameras and cannot directly process equirectangular images from 360-degree cameras, a limitation that previously forced users to crop or split images [S1, unofficial]. It sets itself apart from standard implementations by modifying the differentiable rasterization module to support spherical rendering and using OpenSfM, which natively supports equirectangular inputs, unlike Colmap [S1, unofficial].
+
+## How it works
+**Inputs:** A set of 360-degree equirectangular images.
+**Outputs:** A set of 3D Gaussians (positions, covariances, colors, opacities) optimized to render the input images.
+
+**Data Structures:**
+*   **Sparse Point Cloud:** Derived from OpenSfM's `reconstruction.json`. Contains 3D positions. The `error` field present in the source data is ignored during training and set to 0 [S1, unofficial].
+*   **Camera Data:** Derived from OpenSfM's `reconstruction.json`. Contains camera positions and intrinsic/extrinsic parameters [S1, unofficial].
+*   **Gaussian Representation:** Standard 3D Gaussian Splatting representation (position $\mathbf{\mu}$, covariance $\mathbf{\Sigma}$, spherical harmonics coefficients, opacity $\alpha$, color $c$).
+
+**Steps:**
+1.  **Structure from Motion (SfM):** Generate a sparse point cloud and camera poses from the 360-degree images using OpenSfM. OpenSfM is chosen because it supports equirectangular images directly, whereas Colmap does not [S1, unofficial].
+2.  **Data Loading:**
+    *   Read camera positions and parameters from `reconstruction.json` using a function analogous to `read_opensfm` [S1, unofficial].
+    *   Read sparse point cloud positions from `reconstruction.json` using a function analogous to `read_opensfm_points3D`. Initialize the `error` attribute to 0 [S1, unofficial].
+3.  **Rasterization Modification:** Modify the differentiable Gaussian rasterization module (specifically `diff_gaussian_rasterization`) to support equirectangular rendering. This involves adding a `render_spherical` function to the Python interface and updating the CUDA kernels (`forward.cu`, `backward.cu`, `auxiliary.h`) [S1, unofficial].
+4.  **Projection:** Project 3D points to equirectangular coordinates. In `auxiliary.h`, the device function `point_to_equirect` transforms a point $\mathbf{p}_{orig}$ using the view matrix $\mathbf{V}$:
+    $$ \mathbf{d} = \mathbf{V} \cdot \mathbf{p}_{orig} $$
+    $$ \text{length} = \|\mathbf{d}\| $$
+    $$ \text{longitude} = \operatorname{atan2}(d_x, d_z) $$
+    $$ \text{latitude} = \operatorname{atan2}(d_y, \sqrt{d_x^2 + d_z^2}) $$
+    $$ u = \frac{\text{longitude}}{\pi} $$
+    $$ v = \frac{\text{latitude}}{\pi/2} $$
+    The resulting normalized coordinates $(u, v)$ map to the equirectangular image plane [S1, unofficial].
+5.  **Training:** Optimize the Gaussian parameters to minimize the difference between rendered equirectangular images and input images. To manage VRAM, training images are loaded onto the GPU only during the forward/backward pass, not kept resident in memory [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def point_to_equirect(p_orig: torch.Tensor, viewmatrix: torch.Tensor) -> torch.Tensor:
+    """
+    Project 3D points to equirectangular coordinates.
+    p_orig: (N, 3) tensor of 3D points in world space.
+    viewmatrix: (4, 4) camera-to-world or world-to-camera matrix as defined in the source.
+                Note: The source code uses transformPoint4x3 which implies a specific matrix layout.
+                Based on the formula: direction_vector = transformPoint4x3(p_orig, viewmatrix)
+                and subsequent atan2 logic, this transforms the point into the camera's coordinate system.
+    Returns: (N, 2) tensor of normalized [u, v] coordinates in [-1, 1] range for longitude/latitude.
+    """
+    # Apply view matrix transformation. 
+    # Assuming standard 3D to camera space projection where the last row is ignored for direction.
+    # transformPoint4x3 typically performs: p_cam = V * [p, 1]^T
+    p_homogeneous = torch.cat([p_orig, torch.ones(p_orig.shape[0], 1, device=p_orig.device)], dim=1)
+    direction_vector = torch.matmul(p_homogeneous, viewmatrix.t())[:, :3]
+    
+    # Calculate length
+    length = torch.sqrt(torch.sum(direction_vector ** 2, dim=1))
+    
+    # Avoid division by zero
+    length = torch.clamp(length, min=1e-6)
+    
+    # Normalize direction
+    direction_norm = direction_vector / length.unsqueeze(1)
+    
+    # Extract components
+    dx = direction_norm[:, 0]
+    dy = direction_norm[:, 1]
+    dz = direction_norm[:, 2]
+    
+    # Calculate longitude and latitude
+    # longitude = atan2(x, z)
+    longitude = torch.atan2(dx, dz)
+    
+    # latitude = atan2(y, sqrt(x^2 + z^2))
+    latitude = torch.atan2(dy, torch.sqrt(dx**2 + dz**2))
+    
+    # Normalize to [-1, 1] range
+    # longitude is in [-pi, pi], divide by pi -> [-1, 1]
+    u = longitude / np.pi
+    
+    # latitude is in [-pi/2, pi/2], divide by pi/2 -> [-1, 1]
+    v = latitude / (np.pi / 2.0)
+    
+    return torch.stack([u, v], dim=1)
+
+def read_opensfm_points3d(reconstruction_path: str) -> torch.Tensor:
+    """
+    Read sparse point cloud positions from OpenSfM reconstruction.json.
+    """
+    import json
+    with open(reconstruction_path, 'r') as f:
+        data = json.load(f)
+    
+    points_3d = []
+    for point_id, point_data in data['points3D'].items():
+        coords = point_data['position']
+        # Ignore 'error' value, set to 0 as per source
+        points_3d.append(coords)
+        
+    return torch.tensor(points_3d, dtype=torch.float32)
+
+def read_opensfm_cameras(reconstruction_path: str) -> tuple:
+    """
+    Read camera positions and parameters from OpenSfM reconstruction.json.
+    """
+    import json
+    with open(reconstruction_path, 'r') as f:
+        data = json.load(f)
+        
+    cameras = []
+    for camera_id, camera_data in data['cameras'].items():
+        # Extract necessary parameters (intrinsic, extrinsic)
+        # Structure depends on OpenSfM's specific JSON format
+        cameras.append(camera_data)
+        
+    return cameras
+
+def render_spherical(gaussians, cameras, image_width, image_height):
+    """
+    Modified rasterization function supporting equirectangular rendering.
+    This function wraps the CUDA kernel modifications in auxiliary.h.
+    """
+    # Implementation details of the CUDA kernel modification are not fully specified in the source.
+    # The core logic involves using point_to_equirect for projection instead of standard perspective projection.
+    # [G] Standard Gaussian Splatting rasterization is performed here, but with the custom projection logic.
+    pass
+```
+
+## Operating characteristics
+*   **VRAM Usage:** Training images are loaded onto the GPU only during the training step, not kept resident. This reduces VRAM usage to approximately 11GB, allowing training on a 16GB GPU (e.g., NVIDIA T4 on Paperspace) with 5,000 images [S1, unofficial].
+*   **Performance:** Training is slower compared to keeping images in VRAM, but feasible on consumer/prosumer hardware [S1, unofficial].
+*   **Strengths:** Direct support for 360-degree equirectangular images without cropping; lower VRAM requirements than standard 24GB+ recommendations [S1, unofficial].
+*   **Limitations:** Relies on OpenSfM, which may have different feature matching characteristics (e.g., using SuperPoint, Disk, or ALIKED with LightGlue) compared to Colmap [S1, unofficial].
+
+## Background
+360 Gaussian Splatting was developed to address the incompatibility of the original Gaussian Splatting method with 360-degree cameras. Standard Gaussian Splatting relies on Colmap for SfM, which does not support equirectangular images directly, requiring users to crop images [S1, unofficial]. The method was presented in an unofficial blog post by inuex35, detailing modifications to the Gaussian Splatting repository to integrate OpenSfM and spherical rasterization [S1, unofficial].
+
+## Sources
+[S1] 360度カメラ画像からの空間再構成 - 360 Gaussian Splatting, https://qiita.com/inuex35/items/af720689e253cd3b617b, fetched 2026-10-29 (unofficial)

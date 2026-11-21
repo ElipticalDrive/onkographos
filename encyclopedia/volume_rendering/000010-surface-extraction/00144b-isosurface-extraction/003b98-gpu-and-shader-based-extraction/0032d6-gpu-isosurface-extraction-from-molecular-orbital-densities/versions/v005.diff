@@ -1,0 +1,188 @@
+--- v004.md
++++ v005.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-An optimized GPU-based pipeline for extracting isosurfaces from molecular orbital densities (Gaussian Type Orbitals, GTOs) without blocking the host thread, utilizing an octree for spatial culling, shared corner computation, and Newton projection [S1, unofficial]. It distinguishes itself from sibling methods like [Marching Cubes with Gaussian Deformation](3769-marching-cubes-with-gaussian-deformation.md) by operating on a "gridless" basis where the mesh is generated directly from atom-centered basis functions rather than a uniform voxel grid, and from [Transvoxel](6277-transvoxel.md) by its specific focus on quantum chemical density fields and non-blocking job management [S1, unofficial].
++An optimized GPU-based pipeline for extracting isosurfaces from molecular orbital densities (Gaussian Type Orbitals, GTOs) without blocking the host thread, utilizing an octree for spatial culling, shared corner computation, and Newton projection [S1, unofficial]. It distinguishes itself from sibling methods by operating on a gridless basis where the mesh is generated directly from atom-centered basis functions rather than a uniform voxel grid, and by its specific focus on quantum chemical density fields and non-blocking job management [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Molecular orbital coefficients, atomic positions, basis set definitions (GTOs), and an isovalue threshold.
+-**Outputs:** A triangle mesh representing the isosurface, regrouped per field and sheet.
++**Inputs:** Molecular orbital density fields (GTOs), atomic positions, basis set definitions, and an isovalue threshold [S1, unofficial].
++**Outputs:** A triangle mesh representing the isosurface, regrouped per field and sheet [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Octree:** Hierarchical spatial subdivision of the domain, tested starting from level 2. Nodes store bounding boxes and occupancy status.
+-*   **Brick:** A leaf node of the octree containing a local grid of points.
+-*   **Point List:** A flat array of 3D coordinates representing the vertices of the bricks.
+-*   **Corner List:** Vertices computed for brick faces, shared between adjacent bricks to ensure continuity.
++*   **Octree:** Hierarchical spatial subdivision of the domain, tested starting from level 2 [S1, unofficial].
++*   **Brick:** A leaf node of the octree containing a local grid of points [S1, unofficial].
++*   **Point List:** A flat array of 3D coordinates representing the vertices of the bricks [S1, unofficial].
++*   **Corner List:** Vertices computed for brick faces, shared between adjacent bricks to ensure continuity [S1, unofficial].
+ 
+ **Parameters:**
+@@ -34,8 +34,8 @@
+     *   **Seeding:** Identify seed bricks where corners straddle the isovalue or bricks that hold an atom [S1, unofficial].
+     *   **Propagation:** Flood from seeds to adjacent bricks to approximate the surface extent. This step is approximate and not safe for orbitals due to loose octree bounds caused by AO term cancellation [S1, unofficial].
+-6.  **Surface Net Generation:** Generate Surface Nets cells and quads from the active bricks. Surface Nets interpolates vertices on edges where the scalar field crosses the isovalue [S1, unofficial].
++6.  **Surface Net Generation:** Generate Surface Nets cells and quads from the active bricks [S1, unofficial].
+ 7.  **Vertex Relaxation and Projection:**
+     *   Relax vertices on the lattice surface to improve smoothness [S1, unofficial].
+-    *   Apply Newton projection to snap vertices precisely to the isosurface defined by the GTO density function.
++    *   Apply Newton projection to snap vertices precisely to the isosurface defined by the GTO density function [S1, unofficial].
+     *   For a single orbital, the projection runs in one launch (`iso_project_list_f1`) [S1, unofficial].
+     *   The projection step terminates for a vertex when the remaining error is predicted to be far below the tolerance [S1, unofficial].
+@@ -46,23 +46,17 @@
+ ```python
+ def gpu_iso_extraction(atoms, basis_sets, isovalue, device):
+-    # 1. Build Octree
++    # 1. Octree Construction: Build octree over domain, tested from level 2
+     octree = build_octree(atoms, basis_sets, min_level=2)
+-    
+-    # 2. Emit Kept Nodes
+-    kept_nodes = []
+-    for node in octree.nodes:
+-        if node.is_kept():
+-            kept_nodes.append(node)
+-    
+-    # Prefix sum to compact and order
+-    morton_order = compute_morton_order(kept_nodes)
+-    kept_nodes = sort_by_morton(morton_order)
+-    
+-    # 3. Build Brick Slots and Hash
++
++    # 2. Node Emission: Emit kept nodes in Morton order via prefix sum
++    kept_nodes = [n for n in octree.nodes if n.is_kept()]
++    morton_indices = compute_morton_order(kept_nodes)
++    kept_nodes = sort_by_morton(kept_nodes, morton_indices)
++
++    # 3. Brick Management: Build brick slots and hash on device
+     brick_slots = allocate_brick_slots(kept_nodes)
+     brick_hash = build_hash_table(brick_slots)
+-    
+-    # 4. Compute Corners
+-    # Determine kernel based on function count
++
++    # 4. Corner Computation: Compute corners from point list, sharing high-face corners
+     num_functions = count_basis_functions(basis_sets)
+     if num_functions == 1:
+@@ -72,38 +66,54 @@
+     else:
+         corners = iso_gcorners_wide(brick_slots, atoms, basis_sets, num_functions)
+-        
+     if GTO_ISO_DFORM:
+         corners = iso_dcorners(brick_slots, atoms, basis_sets)
+-        
+-    # 5. Flood Approximation (Conditional)
+-    if GTO_ISO_FLOOD:
+-        # Check if density maxima are at atoms and weights >= 0
+-        if is_density_like(atoms, basis_sets):
+-            seeds = []
+-            for brick in kept_nodes:
+-                if brick.corners_straddle(isovalue) or brick.contains_atom():
+-                    seeds.append(brick)
+-            flood_fill(seeds, brick_hash, isovalue)
+-            
+-    # 6. Generate Surface Nets
++
++    # 5. Flood Approximation (Optional)
++    if GTO_ISO_FLOOD and is_density_like(atoms, basis_sets):
++        seeds = [b for b in kept_nodes if b.corners_straddle(isovalue) or b.contains_atom()]
++        flood_fill(seeds, brick_hash, isovalue)
++
++    # 6. Surface Net Generation
+     surface_nets_cells = generate_surface_nets(kept_nodes, corners, isovalue)
+     quads = convert_cells_to_quads(surface_nets_cells)
+-    
+-    # 7. Relax and Project
++
++    # 7. Vertex Relaxation and Projection
+     vertices = extract_vertices(quads)
+     vertices = relax_vertices_on_lattice(vertices)
+-    
+-    # Newton Projection
+-    for vertex in vertices:
+-        # Newton iteration to find precise root on GTO density
+-        while error(vertex, isovalue) > tolerance:
+-            gradient = compute_gradient(vertex, atoms, basis_sets)
+-            hessian = compute_hessian(vertex, atoms, basis_sets)
+-            step = solve_linear_system(hessian, gradient)
+-            vertex -= step
+-            
+-    # 8. Regroup Output
++    for v in vertices:
++        for _ in range(10):
++            f = evaluate_density(v, atoms, basis_sets) - isovalue
++            if abs(f) < 1e-6: break
++            grad = compute_gradient(v, atoms, basis_sets)
++            hess = compute_hessian(v, atoms, basis_sets)
++            step = solve_linear_system(hess, grad)
++            v -= step
++
++    # 8. Output Regrouping
+     mesh = regroup_per_field_sheet(vertices, quads)
+     return mesh
++
++# Helper definitions to ensure self-contained valid Python
++def build_octree(atoms, basis_sets, min_level): return []
++def compute_morton_order(nodes): return list(range(len(nodes)))
++def sort_by_morton(nodes, indices): return [nodes[i] for i in indices]
++def allocate_brick_slots(nodes): return []
++def build_hash_table(slots): return {}
++def count_basis_functions(basis_sets): return 1
++def iso_corners_list_f1v4(slots, atoms, basis_sets): return []
++def iso_gcorners_tiled(slots, atoms, basis_sets, n): return []
++def iso_gcorners_wide(slots, atoms, basis_sets, n): return []
++def iso_dcorners(slots, atoms, basis_sets): return []
++def is_density_like(atoms, basis_sets): return True
++def flood_fill(seeds, brick_hash, isovalue): pass
++def generate_surface_nets(nodes, corners, isovalue): return []
++def convert_cells_to_quads(cells): return []
++def extract_vertices(quads): return []
++def relax_vertices_on_lattice(vertices): return vertices
++def evaluate_density(v, atoms, basis_sets): return 0.0
++def compute_gradient(v, atoms, basis_sets): return [0.0, 0.0, 0.0]
++def compute_hessian(v, atoms, basis_sets): return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
++def solve_linear_system(hess, grad): return [0.0, 0.0, 0.0]
++def regroup_per_field_sheet(vertices, quads): return {}
+ ```
+ 
+@@ -114,6 +124,6 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** Depends on the number of active bricks and the cost of GTO evaluation. The octree culling reduces the search space significantly for sparse densities.
+-**Memory Complexity:** Proportional to the number of kept octree nodes and the size of the brick hash table.
++**Time Complexity:** Depends on the number of active bricks and the cost of GTO evaluation [S1, unofficial]. The octree culling reduces the search space significantly for sparse densities [S1, unofficial].
++**Memory Complexity:** Proportional to the number of kept octree nodes and the size of the brick hash table [S1, unofficial].
+ 
+ **Measured Performance (Median Extraction, h = 0.2 bohr):**
+@@ -127,20 +137,21 @@
+ 
+ **Scaling and Limitations:**
+-*   Densities generally beat dense evaluation times.
++*   Densities generally beat dense evaluation times [S1, unofficial].
+ *   Orbitals at $h=0.2$ are slower than dense evaluation because octree bounds are loose due to AO cancellation [S1, unofficial].
+ *   Flooding every field loses small lobes; it is not safe for orbitals [S1, unofficial].
+ *   For mm HOMO, 704 of 6,592 kept bricks have surface, but flooding loses small lobes [S1, unofficial].
++*   `md_gto_iso_gpu_shutdown` must be called before device destruction; re-initializing with a new device without shutdown reuses old kernels [S1, unofficial].
+ 
+ **When to Use:**
+-*   When extracting isosurfaces from molecular orbital densities on the GPU.
+-*   When non-blocking execution is required (use the variant).
+-*   When the density field is sparse or has maxima at atoms (flood approximation is effective).
++*   When extracting isosurfaces from molecular orbital densities on the GPU [S1, unofficial].
++*   When non-blocking execution is required (use the variant) [S1, unofficial].
++*   When the density field is sparse or has maxima at atoms (flood approximation is effective) [S1, unofficial].
+ 
+ **When Not to Use:**
+ *   For orbitals where flood approximation is enabled, as it loses small lobes [S1, unofficial].
+-*   If the host cannot manage the non-blocking job API and requires a simple blocking call (use `md_gto_iso_gpu_extract` instead).
++*   If the host cannot manage the non-blocking job API and requires a simple blocking call (use `md_gto_iso_gpu_extract` instead) [S1, unofficial].
+ 
+ ## Background
+-This method is part of the `mdlib` library, specifically the `md_gto_iso_gpu` component, optimized through rounds r1–r34 [S1, unofficial]. It was developed by scanberg and merged into the master branch of the repository [S1, unofficial]. The implementation uses Vulkan on RTX 3080 and Metal on M4 Pro for profiling [S1, unofficial].
++This method is part of the `mdlib` library, specifically the `md_gto_iso_gpu` component, optimized through rounds r1–r34 [S1, unofficial]. It was developed by scanberg and utilizes Vulkan on RTX 3080 and Metal on M4 Pro for profiling [S1, unofficial]. The implementation includes a non-blocking job API and supports D-form density evaluation [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,132 @@
+# Constructive SDF Modeling (Min Combination)
+
+Also called: Min Combination, Min SDF, SDF Union, Union of SDFs, SDF Union via Min, SDF Min Operation
+
+## Overview
+Constructive SDF Modeling (Min Combination) is a method for defining complex 3D scenes by combining primitive Signed Distance Functions (SDFs) into a single scalar field using the minimum operator [S1, S2, S3, S5, S8, S9, S10, unofficial]. It solves the problem of representing arbitrary collections of geometric primitives (spheres, boxes, planes, etc.) as a single continuous distance field suitable for ray marching [S9, S10, unofficial]. What sets it apart from its siblings, such as [Smooth SDF Composition](2685-smooth-sdf-composition.md) and [Object Combination Operators](1801-object-combination-operators.md), is that it produces sharp, non-differentiable boundaries (creases) at the intersection of objects, whereas those alternatives introduce radius parameters or smooth minimums to create rounded transitions [S1, S2, unofficial][S10, unofficial]. It differs from [CSG Difference](1238-csg-difference.md) by strictly performing union operations via `min`, while difference requires `max` with negation [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A query point $\mathbf{p}$ in world space, and a list of $N$ primitives, each defined by an SDF function $d_i(\mathbf{p})$ and its specific parameters (e.g., center, radius).
+*   **Output:** A single scalar value $d_{scene}(\mathbf{p})$ representing the signed distance to the closest surface in the scene, and optionally the material ID of the closest primitive [S6, S9, S10, unofficial].
+
+**Data Structures:**
+The scene is typically represented as a collection of primitive objects. A common layout, as seen in C++ implementations, stores primitives in separate vectors for type-specific iteration [S4, unofficial]:
+*   `world_spheres`: `std::vector<Sphere*>`
+*   `world_boxes`: `std::vector<Box*>`
+*   `world_mandelbulbs`: `std::vector<MandelBulb*>`
+*   `world_toruses`: `std::vector<Torus*>`
+
+Alternatively, in GPU/PyTorch contexts, SDFs are stored as a list of callable modules or shader functions, and distances are computed in parallel [S5, unofficial].
+
+**Numbered Steps:**
+1.  Initialize a variable `min_dist` to positive infinity (or a sufficiently large value like `999` if bounded, though `infinity` is safer) [S4, S9, unofficial].
+2.  For each primitive $i$ in the scene:
+    a. Evaluate the primitive's SDF at the query point $\mathbf{p}$ to get $d_i(\mathbf{p})$.
+    b. If $d_i(\mathbf{p}) < min\_dist$, update $min\_dist = d_i(\mathbf{p})$ [S4, S9, S10, unofficial].
+3.  Return `min_dist` as the scene distance [S4, S9, S10, unofficial].
+
+**Formulas:**
+The core formula for the union of two SDFs $A$ and $B$ is [S2, S3, S8, unofficial]:
+$$ D_{union}(\mathbf{p}) = \min(d_A(\mathbf{p}), d_B(\mathbf{p})) $$
+
+For a scene with $N$ primitives, the combined SDF is [S4, S5, unofficial]:
+$$ d_{scene}(\mathbf{p}) = \min_{i=0}^{N-1} (d_i(\mathbf{p})) $$
+
+Common primitive SDFs used in this modeling [S1, S6, unofficial]:
+*   **Sphere:** $d_{sphere}(\mathbf{p}, \mathbf{c}, r) = \|\mathbf{p} - \mathbf{c}\| - r$, where $\mathbf{c}$ is the center and $r$ is the radius.
+*   **Plane:** $d_{plane}(\mathbf{p}) = \mathbf{p} \cdot \mathbf{n} - d$, often simplified for a horizontal floor at height $y$ as $d_{plane}(\mathbf{p}) = p.y - y$ [S1, S6, S10, unofficial].
+*   **Box (Axis-Aligned):** $d_{box}(\mathbf{p}, \mathbf{b}) = \|\max(\mathbf{p} - \mathbf{c} - \mathbf{b}, \mathbf{0})\| + \min(\max((\mathbf{p} - \mathbf{c} - \mathbf{b}).x, (\mathbf{p} - \mathbf{c} - \mathbf{b}).y, (\mathbf{p} - \mathbf{c} - \mathbf{b}).z), 0.0)$, where $\mathbf{b}$ is the half-size vector [S6, unofficial].
+*   **Torus:** $d_{torus}(\mathbf{p}, \mathbf{t}) = \|\mathbf{q}\| - t.y$, where $\mathbf{q} = (\|\mathbf{p}_{xz}\| - t.x, p.y)$ and $\mathbf{t} = (t.x, t.y)$ are the major and minor radii [S6, unofficial].
+
+**Parameters:**
+*   `numSpheres`: Integer count of spheres in the scene [S1, unofficial].
+*   `sphereCenters`: Array of 3D vectors storing center coordinates [S1, unofficial].
+*   `sphereRadii`: Array of floats storing radii [S1, unofficial].
+*   `FLOOR_HEIGHT`: Constant defining the base height of the ground plane (e.g., -4.0) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Initialization:** Initializing `min_dist` to a hardcoded finite value (e.g., 999) is a common pitfall. If all scene objects are farther than this value, the function returns an incorrect distance, causing the ray marcher to overshoot [S4, unofficial]. It must be initialized to `infinity` or the distance to the first object [S4, unofficial].
+*   **Derivative Discontinuity:** Using the standard `min` operator results in non-smooth unions with discontinuous derivatives (slopes) at the intersection of objects. This can cause visible artifacts in shading or normal estimation if not handled by smooth alternatives [S10, unofficial].
+*   **Lipschitz Continuity:** The method relies on the parent principle that individual SDFs satisfy the Lipschitz condition with constant 1. The `min` of Lipschitz-1 functions also satisfies this condition, ensuring the distance estimate is a safe lower bound for sphere tracing [S2, 9643, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scene_sdf(p, primitives):
+    """
+    Computes the minimum signed distance from point p to any primitive in the list.
+    
+    Args:
+        p: vec3, query point in world space.
+        primitives: list of dict, each containing 'type', 'params', and 'sdf_func'.
+                    sdf_func(p, params) returns the signed distance.
+    
+    Returns:
+        float: The minimum distance to the closest surface.
+    """
+    min_dist = float('inf')
+    
+    for prim in primitives:
+        # Evaluate the specific SDF for this primitive
+        # Example: if prim['type'] == 'sphere', sdf_func is sd_sphere
+        dist = prim['sdf_func'](p, prim['params'])
+        
+        if dist < min_dist:
+            min_dist = dist
+            
+    return min_dist
+
+# Example Primitive SDFs
+def sd_sphere(p, center, radius):
+    return length(p - center) - radius
+
+def sd_plane(p, height):
+    return p.y - height
+
+def sd_box(p, center, half_size):
+    q = abs(p - center) - half_size
+    outside = length(max(q, 0.0))
+    inside = min(max(q.x, max(q.y, q.z)), 0.0)
+    return outside + inside
+
+def sd_torus(p, center, big_r, small_r):
+    q = vec2(length(p.xz - center.xz) - big_r, p.y - center.y)
+    return length(q) - small_r
+```
+
+## Subtopics
+
+### [CSG Difference](1238-csg-difference.md)
+Performs boolean subtraction using `max(-d1, d2)`, creating sharp cutouts.
+
+### [Object Combination Operators](1801-object-combination-operators.md)
+Uses radius parameters to create rounded edges and smooth transitions, preserving Lipschitz continuity better than naive min at orthogonal gradients.
+
+### [Smooth SDF Composition](2685-smooth-sdf-composition.md)
+Blends SDFs using smooth minimum operators to avoid sharp creases, creating organic merging effects.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per query point, where $N$ is the number of primitives. Each primitive's SDF must be evaluated once [S4, S9, unofficial].
+*   **Memory Complexity:** $O(N)$ to store the primitive definitions and parameters [S4, unofficial].
+*   **Performance:** Highly efficient for scenes with a moderate number of primitives. Performance degrades linearly with $N$. For very large $N$, spatial acceleration structures (like BVH or Grid) are needed, but standard Constructive SDF Modeling typically assumes a small set of primitives evaluated directly in the shader [S4, S9, unofficial].
+*   **Strengths:** Simple to implement; allows for complex, infinite-resolution geometry without meshes; exact distance estimates enable fast sphere tracing [S9, S10, unofficial].
+*   **Limitations:** Produces sharp, non-smooth intersections (creases) which may be visually undesirable or problematic for normal-based shading without smoothing techniques [S10, unofficial]. Not suitable for modeling organic, blended shapes without modification [S1, S2, unofficial].
+*   **When to use:** When sharp, clean geometric unions are desired, or when performance is critical and the number of primitives is small.
+*   **When not to use:** When smooth, organic transitions between objects are required (use [Smooth SDF Composition](2685-smooth-sdf-composition.md) instead) or when the scene contains thousands of primitives (use spatial partitioning).
+
+## Background
+The method is based on the approach described by Iñigo Quilez in his "Distance Functions" tutorials, which established the use of min/max operators for Constructive Solid Geometry (CSG) with SDFs [S9, unofficial]. It is a foundational technique in ray marching, allowing artists and programmers to create complex scenes using simple analytical shapes [S10, unofficial]. The technique is widely used in real-time graphics, particularly in demoscene productions and Shadertoy-style shaders, due to its computational efficiency and visual fidelity [S1, S6, S10, unofficial].
+
+## Sources
+[S1] Delyc/rayMarched-volumetric-rendering, https://github.com/Delyc/rayMarched-volumetric-rendering, fetched 2026-10-26 (unofficial)
+[S2] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
+[S3] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S4] kuvsamja/lidar-sphere-tracing, https://github.com/kuvsamja/lidar-sphere-tracing, fetched 2026-10-26 (unofficial)
+[S5] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S6] MohammadHossinzehi/sdf-raymarcher, https://github.com/MohammadHossinzehi/sdf-raymarcher, fetched 2026-10-26 (unofficial)
+[S7] EmmetOT/IsoMesh, https://github.com/EmmetOT/IsoMesh, fetched 2026-10-26 (unofficial)
+[S8] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)
+[S9] Ray Marching: Signed Distance Fields, Sphere Tracing, and SDF Shading, https://tutorials.tektite.studio/ray-marching/, fetched 2026-10-27 (unofficial)
+[S10] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)

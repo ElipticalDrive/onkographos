@@ -1,0 +1,46 @@
+# GS-LRM
+Also called: Gaussian Large Reconstruction Model
+## Overview
+GS-LRM is a feed-forward transformer-based method that reconstructs a 3D Gaussian Splatting (3DGS) representation from a small set of input images. It solves the problem of sparse-view 3D reconstruction by directly predicting Gaussian parameters from image tokens, bypassing iterative optimization. It differs from its siblings by using a transformer architecture to decode concatenated image and camera tokens into Gaussians, whereas [Flash3D](1481-flash3d.md) and [LRM](5959-large-reconstruction-model-lrm.md) typically target mesh or NeRF outputs, and [Reconstruction-based Generation](11811-reconstruction-based-generation.md) is a broader category.
+## How it works
+**Inputs:** A set of $N$ input images (typically $N=2$ to $4$) and their corresponding camera parameters (extrinsics and intrinsics).
+**Outputs:** A set of 3D Gaussians defined by position, covariance, opacity, and spherical harmonics coefficients.
+
+**Data Structures:**
+1.  **Image Tokens:** Each input image is processed through a vision encoder (e.g., ViT) to produce a sequence of feature tokens.
+2.  **Camera Tokens:** Camera parameters are encoded into a fixed-size token embedding.
+3.  **Concatenated Sequence:** Image tokens and camera tokens are concatenated along the sequence dimension to form a single input sequence for the transformer.
+4.  **Transformer Block:** A standard transformer encoder processes the concatenated sequence.
+5.  **Decoder:** The output tokens from the transformer are passed to a decoder network.
+
+**Steps:**
+1.  **Tokenization:** Encode each of the $N$ input images into image tokens $T_{img}$. Encode the camera parameters into camera tokens $T_{cam}$.
+2.  **Concatenation:** Form the input sequence $S = [T_{img}; T_{cam}]$.
+3.  **Transformer Processing:** Pass $S$ through a transformer block to obtain output tokens $T_{out}$.
+4.  **Decoding:** Decode $T_{out}$ into Gaussian parameters. This typically involves a linear projection or small MLP to predict the mean $\mu$, covariance $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, and spherical harmonics coefficients $c_{SH}$ for each Gaussian.
+5.  **Rendering:** The predicted Gaussians are rendered using standard differentiable rasterization to produce the output image, which can be used for training if ground truth is available.
+
+**Parameters:**
+-   Number of input images: Typically 2-4 [S1, unofficial].
+-   Transformer depth/width: Not specified in sources.
+-   Decoder architecture: Not specified in sources.
+
+**Edge Cases:**
+-   **Camera Pose Accuracy:** The method relies on known camera parameters. Incorrect poses may lead to misaligned Gaussians.
+-   **Sparse Views:** Performance may degrade with very few views or large view gaps, though it is designed for sparse inputs.
+-   **Scale Ambiguity:** Unlike methods like [NoPoSplat](11811-reconstruction-based-generation.md) which use canonical coordinates to resolve scale, GS-LRM assumes known camera intrinsics/extrinsics, which may carry scale ambiguity if not calibrated.
+
+## Subtopics
+## Operating characteristics
+**Time Complexity:** Feed-forward inference, typically fast (seconds per scene).
+**Memory Complexity:** Depends on the number of Gaussians and transformer size.
+**Strengths:** Fast inference, no iterative optimization, handles sparse views.
+**Limitations:** Requires known camera poses, may lack detail compared to iterative methods.
+**When to use:** When fast reconstruction from few views is needed and camera poses are known.
+**When not to use:** When camera poses are unknown or high-fidelity detail is critical and iterative optimization is feasible.
+
+## Background
+GS-LRM was introduced as part of the trend towards large reconstruction models for 3D Gaussian Splatting. It builds on the success of transformer-based image-to-3D models like LRM but adapts the output to Gaussian Splatting representations. It is cited in tutorials on 3D Gaussian Splatting [S1, unofficial].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

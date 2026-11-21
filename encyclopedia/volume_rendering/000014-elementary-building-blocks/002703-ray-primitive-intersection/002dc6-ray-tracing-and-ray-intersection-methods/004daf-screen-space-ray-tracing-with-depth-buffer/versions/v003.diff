@@ -1,0 +1,127 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Screen-Space Ray Tracing with Depth Buffer (SSRT) is a technique to trace rays in screen space against a depth buffer to find surface intersections, supporting up to four depth layers per pixel [S1, unofficial]. It solves the problem of efficiently determining ray-surface intersections for effects like reflections, refractions, and ambient occlusion without traversing complex scene graphs or voxel structures [S1, unofficial]. What sets it apart from [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) and [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) is that it operates directly on the rendered depth buffer rather than a volumetric or implicit representation, allowing it to capture any geometry already present in the frame buffer [S1, unofficial]. Unlike [Ray Tracing](8334-ray-tracing.md) which traverses acceleration structures, SSRT traverses the 2D screen grid, making it highly parallelizable on GPUs but limited to visible surfaces [S1, unofficial].
++Screen-Space Ray Tracing with Depth Buffer (SSRT) traces rays in screen space against a depth buffer to find surface intersections, supporting up to four depth layers per pixel [S1, unofficial]. It solves the problem of efficiently determining ray-surface intersections for effects like reflections, refractions, and ambient occlusion without traversing complex scene graphs or voxel structures [S1, unofficial]. What sets it apart from [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) and [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) is that it operates directly on the rendered depth buffer rather than a volumetric or implicit representation, allowing it to capture any geometry already present in the frame buffer [S1, unofficial]. Unlike [Ray Tracing](8334-ray-tracing.md) which traverses acceleration structures, SSRT traverses the 2D screen grid, making it highly parallelizable on GPUs but limited to visible surfaces [S1, unofficial].
+ 
+ ## How it works
+@@ -104,20 +104,42 @@
+ 
+ **Pseudocode**
+-
+ ```python
++# Minimal vector types for self-contained Python execution
++class Vec2:
++    def __init__(self, x, y): self.x, self.y = x, y
++    def __add__(self, o): return Vec2(self.x + o.x, self.y + o.y)
++    def __sub__(self, o): return Vec2(self.x - o.x, self.y - o.y)
++    def __mul__(self, s): return Vec2(self.x * s, self.y * s)
++    def __truediv__(self, s): return Vec2(self.x / s, self.y / s)
++    def __abs__(self): return Vec2(abs(self.x), abs(self.y))
++    @property
++    def yx(self): return Vec2(self.y, self.x)
++    @property
++    def xy(self): return Vec2(self.x, self.y)
++
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, o): return Vec3(self.x + o.x, self.y + o.y, self.z + o.z)
++    def __sub__(self, o): return Vec3(self.x - o.x, self.y - o.y, self.z - o.z)
++    def __mul__(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
++    def __truediv__(self, s): return Vec3(self.x / s, self.y / s, self.z / s)
++    @property
++    def xy(self): return Vec2(self.x, self.y)
++    @xy.setter
++    def xy(self, v): self.x, self.y = v.x, v.y
++
++class Vec4:
++    def __init__(self, x, y, z, w): self.x, self.y, self.z, self.w = x, y, z, w
++    def __add__(self, o): return Vec4(self.x + o.x, self.y + o.y, self.z + o.z, self.w + o.w)
++    def __sub__(self, o): return Vec4(self.x - o.x, self.y - o.y, self.z - o.z, self.w - o.w)
++    def __mul__(self, s): return Vec4(self.x * s, self.y * s, self.z * s, self.w * s)
++
+ def trace_screen_space_ray(csOrig, csDir, proj, csZBuffer, csZBufferSize, zThickness, csZBufferIsHyperbolic, clipInfo, nearPlaneZ, stride, jitter, maxSteps, maxDistance):
+-    # Helper definitions for standard operations
+-    def distance_squared(a, b):
+-        return (a[0] - b[0])**2 + (a[1] - b[1])**2
+-    def int2(v):
+-        return (int(v[0]), int(v[1]))
+-    def swap(a, b):
+-        return b, a
+-    # texel_fetch and reconstruct_cs_z are standard graphics operations not detailed in sources
+-    def texel_fetch(tex, coord, level):
+-        # Standard texture fetch returning a vec4-like list
+-        return [0.0, 0.0, 0.0, 0.0]
++    def distance_squared(a, b): return (a.x - b.x)**2 + (a.y - b.y)**2
++    def int2(v): return (int(v.x), int(v.y))
++    def swap(a, b): return b, a
++    def texel_fetch(tex, coord, level): return [0.0, 0.0, 0.0, 0.0] # Placeholder for texture fetch
+     def reconstruct_cs_z(depth, clipInfo):
+-        # Standard hyperbolic reconstruction
++        # Formula for reconstructing camera-space Z from hyperbolic depth not provided in sources [G]
+         return depth
+ 
+@@ -130,16 +152,16 @@
+ 
+     # 2. Project to screen space
+-    H0 = proj * vec4(csOrig, 1.0)
+-    H1 = proj * vec4(csEndPoint, 1.0)
++    H0 = proj * Vec4(csOrig.x, csOrig.y, csOrig.z, 1.0)
++    H1 = proj * Vec4(csEndPoint.x, csEndPoint.y, csEndPoint.z, 1.0)
+     k0 = 1.0 / H0.w
+     k1 = 1.0 / H1.w
+-    Q0 = csOrig * k0
+-    Q1 = csEndPoint * k1
+-    P0 = H0.xy * k0
+-    P1 = H1.xy * k1  # Fixed: was k0 in draft
++    Q0 = Vec3(csOrig.x * k0, csOrig.y * k0, csOrig.z * k0)
++    Q1 = Vec3(csEndPoint.x * k1, csEndPoint.y * k1, csEndPoint.z * k1)
++    P0 = Vec2(H0.x * k0, H0.y * k0)
++    P1 = Vec2(H1.x * k1, H1.y * k1)
+ 
+     # 3. Handle single-pixel lines
+     if distance_squared(P0, P1) < 0.0001:
+-        P1 = P1 + vec2(0.01)
++        P1 = P1 + Vec2(0.01)
+ 
+     delta = P1 - P0
+@@ -151,7 +173,7 @@
+         P1 = P1.yx
+ 
+-    stepDir = sign(delta.x)
++    stepDir = 1.0 if delta.x > 0 else (-1.0 if delta.x < 0 else 0.0)
+     invdx = stepDir / delta.x
+-    dP = vec2(stepDir, delta.y * invdx) * stride
++    dP = Vec2(stepDir, delta.y * invdx) * stride
+     dQ = (Q1 - Q0) * invdx * stride
+     dk = (k1 - k0) * invdx * stride
+@@ -169,7 +191,7 @@
+     end = P1.x * stepDir
+ 
+-    hitPixel = vec2(-1, -1)
++    hitPixel = Vec2(-1, -1)
+     hitLayer = -1
+-    csHitPoint = vec3(0, 0, 0)
++    csHitPoint = Vec3(0, 0, 0)
+ 
+     # 6. Loop over pixels
+@@ -193,5 +215,5 @@
+ 
+         # Check intersection
+-        sceneZMin = sceneZMax - zThickness
++        sceneZMin = [sceneZMax[i] - zThickness for i in range(4)]
+         hit_found = False
+         for L in range(4):
+@@ -211,8 +233,8 @@
+     # 7. Post-Loop - Compute Hit Point
+     Q.xy = Q.xy + dQ.xy * stepCount
+-    csHitPoint = Q * (1.0 / k)
++    csHitPoint = Vec3(Q.x * (1.0 / k), Q.y * (1.0 / k), Q.z * (1.0 / k))
+ 
+     # 8. Return Result
+-    bounds_check = all(abs(hitPixel - (csZBufferSize * 0.5)) <= (csZBufferSize * 0.5))
++    bounds_check = all(abs(hitPixel.x - (csZBufferSize.x * 0.5)) <= (csZBufferSize.x * 0.5)) and all(abs(hitPixel.y - (csZBufferSize.y * 0.5)) <= (csZBufferSize.y * 0.5))
+     return bounds_check, hitPixel, hitLayer, csHitPoint
+ ```

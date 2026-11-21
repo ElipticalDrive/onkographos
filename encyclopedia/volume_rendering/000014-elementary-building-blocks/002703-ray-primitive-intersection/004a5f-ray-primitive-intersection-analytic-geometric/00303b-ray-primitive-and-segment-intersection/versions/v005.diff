@@ -1,0 +1,337 @@
+--- v004.md
++++ v005.md
+@@ -4,138 +4,224 @@
+ 
+ ## Overview
+-This method optimizes the evaluation of multiple ray-primitive intersections along a single ray by establishing a strict processing order based on bounding box distances, thereby reducing the computational load of expensive primitive intersection tests [S1, unofficial]. It distinguishes itself from standard intersection tests by focusing on the *sequence* of calculations rather than the geometric solution itself, ensuring that faster, coarser intersection points are resolved before slower, finer segment evaluations [S1, unofficial].
++This method optimizes the evaluation of volumetric ray-object intersections by determining the correct processing order of intersection points and segments, and by providing the geometric primitives to compute exact intersection locations. It solves the problem of redundant or incorrect shading calculations when multiple objects or intersection types (points vs. segments) lie along a single ray. It sets itself apart from sibling methods like [Sphere Intersection](1620-sphere-intersection.md) and [Ray-Triangle Intersection](11312-ray-triangle-intersection.md) by focusing on the *ordering* and *dependency* of these geometric tests rather than the analytic solution of a single primitive, ensuring that faster point calculations are performed before slower segment calculations to enable early termination [S1, unofficial].
+ 
+ ## How it works
+-The method operates on a set of potential intersection points ($P$) and intersection segments ($S$) derived from bounding boxes intersected by the ray [S1, unofficial]. The goal is to determine the closest valid intersection to minimize unnecessary shader or primitive evaluations [S1, unofficial].
+-
+-**Inputs and Outputs**
+-- **Input**: A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a list of objects, each with a bounding box and an intersection class (1, 2, 3, or 4) [S1, unofficial].
+-- **Output**: An ordered list of intersection events (points and segments) processed in a specific sequence, and the final closest intersection distance $D_{min}$ [S1, unofficial].
+-
+-**Data Structures**
+-- **Intersection Point ($P$)**: Represents a specific location where a ray intersects a surface or boundary [S1, unofficial].
+-- **Intersection Segment ($S$)**: Represents a range along the ray where an object's volume or property is evaluated [S1, unofficial].
+-- **Classes**:
+-    - **Class 1**: Surface intersection point (e.g., exact hit) [S1, unofficial].
+-    - **Class 2**: Segment-based intersection (e.g., average value projection) [S1, unofficial].
+-    - **Class 3**: Max-value projection segment [S1, unofficial].
+-    - **Class 4**: Segment where Class 1 points may occur [S1, unofficial].
+-
+-**Steps**
+-1. **Bounding Box Intersection**: For each object, compute the entry and exit points of the ray relative to its bounding box to determine potential intersections [S1, unofficial].
+-2. **Sorting**: Sort all potential intersection points ($P$) and segments ($S$) based on their associated distances [S1, unofficial]. For Class 1 objects, the distance is the ray entry point into the bounding box [S1, unofficial]. For Class 2 and Class 3 objects, the distance is the ray exit point from the bounding box [S1, unofficial].
+-3. **Initialization**: Initialize a variable $D_{min}$ to infinity [S1, unofficial]. This tracks the distance of the closest intersection point found so far [S1, unofficial].
+-4. **Process Intersection Points**: Iterate through the sorted list of intersection points ($P$) [S1, unofficial]. For each point, if its distance is less than $D_{min}$, update $D_{min}$ to this distance [S1, unofficial]. This step establishes the closest surface hit, which may truncate subsequent segment calculations [S1, unofficial].
+-5. **Process Intersection Segments**: Iterate through the sorted list of intersection segments ($S$) [S1, unofficial]. Use $D_{min}$ to optimize calculations: if a segment starts after $D_{min}$, it can be ignored or terminated early [S1, unofficial]; if a segment contains $D_{min}$, only the portion of the segment *after* $D_{min}$ is computed [S1, unofficial]. Specifically, if a Class 1 intersection occurs within a Class 4 segment, compute the average value only for the sub-segment outside the Class 1 intersection [S1, unofficial].
+-6. **Class-Specific Optimizations**: If a Class 1 intersection occurs after the start of a Class 2 or Class 3 segment, perform the Class 1 calculation first [S1, unofficial]. This reduces the length of the segment for the Class 2/3 calculation or allows early termination of Class 3 [S1, unofficial]. For max-value projections (Class 3), if a value $v_2$ is encountered such that $v_2 > v_t$ (where $v_t$ is the max value up to point $P_t$), terminate the Class 3 calculation early [S1, unofficial]. This requires the Class 1 calculation to be performed first to establish $P_t$ [S1, unofficial].
+-
+-**Pseudocode**
++The method consists of two parts: the geometric computation of ray-segment intersections and the algorithmic ordering of intersection events (points and segments) along the ray.
++
++### Inputs and Outputs
++**Inputs:**
++- Ray: Origin $\mathbf{o} = (o_x, o_y)$, Direction $\mathbf{d} = (d_x, d_y)$ (typically normalized).
++- Segments: List of line segments defined by endpoints $\mathbf{A} = (a_x, a_y)$ and $\mathbf{B} = (b_x, b_y)$.
++- Objects: List of objects, each with a bounding box and an intersection class (1, 2, 3, or 4).
++
++**Outputs:**
++- Sorted list of intersection events (points and segments) ordered by their relevance to the closest intersection.
++- Intersection parameters $t$ (ray distance) and $s$ (segment parameter) for valid intersections.
++
++### Data Structures
++1.  **Intersection Point Event:**
++    -   `object_id`: Identifier of the object.
++    -   `distance`: The $t$ value where the ray enters (Class 1) or exits (Class 2, 3) the bounding box.
++    -   `type`: Enum `POINT`.
++2.  **Intersection Segment Event:**
++    -   `object_id`: Identifier of the object.
++    -   `t_start`: The $t$ value where the ray enters the bounding box.
++    -   `t_end`: The $t$ value where the ray exits the bounding box.
++    -   `type`: Enum `SEGMENT`.
++3.  **Ray-Segment Intersection Result:**
++    -   `t`: Distance along the ray.
++    -   `s`: Parameter along the segment ($0 \le s \le 1$).
++    -   `valid`: Boolean indicating if the intersection is within the segment bounds and ray direction.
++
++### Numbered Steps
++
++#### 1. Bounding Box and Initial Intersection
++For each object, compute the entry and exit points of the ray with its bounding box [S1, unofficial].
++-   Calculate the distance $t_{enter}$ and $t_{exit}$ where the ray intersects the bounding box.
++-   If the ray does not intersect the bounding box, discard the object.
++
++#### 2. Classification and Distance Assignment
++Assign a distance value to each object based on its intersection class to determine processing priority [S1, unofficial]:
++-   **Class 1 (Point Intersection):** Distance is $t_{enter}$ (where the ray enters the box). Point calculations are fast and should be done first.
++-   **Class 2 (Average/Min Projection):** Distance is $t_{exit}$ (where the ray exits the box).
++-   **Class 3 (Max Projection):** Distance is $t_{exit}$ (where the ray exits the box).
++-   **Class 4 (Segment):** These are processed after points.
++
++#### 3. Sorting
++Sort all objects (and their associated points/segments) by their assigned distance in ascending order [S1, unofficial]. This ensures that Class 1 intersections are processed before Class 2/3 intersections, even if the Class 2/3 object's bounding box is entered first.
++
++#### 4. Ray-Segment Intersection Computation
++For each segment associated with an object, compute the exact intersection with the ray using the analytic formula [S2, unofficial].
++
++**Formula:**
++Given ray $\mathbf{o}, \mathbf{d}$ and segment $\mathbf{A}, \mathbf{B}$:
++$$ s_x = b_x - a_x, \quad s_y = b_y - a_y $$
++$$ \text{denom} = d_x s_y - d_y s_x $$
++$$ t = \frac{(a_x - o_x) s_y - (a_y - o_y) s_x}{\text{denom}} $$
++$$ s = \frac{(a_x - o_x) d_y - (a_y - o_y) d_x}{\text{denom}} $$
++
++**Validity Check:**
++$$ \text{valid} = (t \ge 0) \land (0 \le s \le 1) $$
++
++**Intersection Point:**
++$$ \mathbf{p} = \mathbf{o} + t \mathbf{d} $$
++
++#### 5. Processing Order and Early Termination
++Process the sorted events using a variable $D_{min}$ initialized to infinity [S1, unofficial].
++
++1.  **Process Points First:** Iterate through the sorted list. If an event is a **Point** (Class 1):
++    -   If $t < D_{min}$, update $D_{min} = t$.
++    -   This establishes the closest intersection point.
++
++2.  **Process Segments:** Iterate through the sorted list. If an event is a **Segment**:
++    -   Use $D_{min}$ to optimize the segment calculation [S1, unofficial]:
++        -   If the segment's $t_{start} \ge D_{min}$, skip the segment (it is behind the closest point).
++        -   If the segment contains $D_{min}$ (i.e., $t_{start} < D_{min} < t_{end}$), only compute the intersection for the sub-segment *outside* the point (typically the part after $D_{min}$ for Class 1, or adjust based on projection type).
++        -   For **Class 3 (Max Projection)**: If a value $v_2$ is encountered such that $v_2 > v_t$ (where $v_t$ is the max value up to point $P_t$), terminate the segment calculation early [S1, unofficial]. This requires the Class 1 calculation to have established $P_t$ first.
++
++### Pseudocode
++
+ ```python
+-def process_ray_intersections(ray_origin, ray_direction, objects):
+-    """
+-    Process intersections for a ray, optimizing order based on bounding boxes.
+-    objects: list of dicts with keys: 'bbox_entry', 'bbox_exit', 'class', 'intersect'
+-    """
+-    points = []
+-    segments = []
+-    
++def ray_segment_intersect(ox, oy, dx, dy, ax, ay, bx, by):
++    """
++    Computes intersection between ray (O, D) and segment (A, B).
++    Returns intersection data or None if parallel/invalid.
++    """
++    sx = bx - ax
++    sy = by - ay
++    denom = dx * sy - dy * sx
++    
++    # Check for parallel rays/segments
++    if abs(denom) < 1e-9:
++        return None
++        
++    t = ((ax - ox) * sy - (ay - oy) * sx) / denom
++    s = ((ax - ox) * dy - (ay - oy) * dx) / denom
++    
++    valid = (t >= 0) and (0 <= s <= 1)
++    
++    if valid:
++        hit_x = ox + dx * t
++        hit_y = oy + dy * t
++        return {
++            't': t,
++            's': s,
++            'x': hit_x,
++            'y': hit_y,
++            'valid': True
++        }
++    else:
++        return None
++
++def process_ray_intersections(ray_origin, ray_dir, objects):
++    """
++    Processes intersections with ordering optimization.
++    objects: List of dicts with 'id', 'bbox', 'class' (1, 2, 3, 4)
++    """
++    events = []
++    
++    # Step 1 & 2: Compute bounding box intersections and assign distances
+     for obj in objects:
+-        if not obj['intersect']:
+-            continue
+-            
+-        # Distance logic for sorting: Class 1 uses entry, Class 2/3 use exit
+-        dist = obj['bbox_entry'] if obj['class'] == 1 else obj['bbox_exit']
++        # Compute t_enter and t_exit for bbox
++        # (Implementation of ray-box intersection omitted for brevity, assumed available)
++        t_enter, t_exit = compute_ray_bbox_intersection(ray_origin, ray_dir, obj['bbox'])
+         
++        if t_exit < 0:
++            continue # Ray misses bbox
++            
++        # Assign distance based on class
+         if obj['class'] == 1:
+-            points.append({'dist': dist, 'obj': obj})
++            dist = t_enter
+         else:
+-            segments.append({'dist': dist, 'obj': obj})
+-            
+-    points.sort(key=lambda x: x['dist'])
+-    segments.sort(key=lambda x: x['dist'])
+-    
+-    # Initialize Dmin to infinity
++            dist = t_exit
++            
++        events.append({
++            'type': 'POINT' if obj['class'] == 1 else 'SEGMENT',
++            'obj_id': obj['id'],
++            'dist': dist,
++            't_start': t_enter,
++            't_end': t_exit,
++            'class': obj['class']
++        })
++        
++    # Step 3: Sort events by distance
++    events.sort(key=lambda e: e['dist'])
++    
++    # Step 5: Process with Dmin
+     d_min = float('inf')
+-    
+-    # Process points first to establish closest intersection
+-    for p in points:
+-        if p['dist'] < d_min:
+-            d_min = p['dist']
+-            # Perform Class 1 intersection calculation here
+-            # Not given in the sources.
+-            
+-    # Process segments, using Dmin for early termination/truncation
+-    for s in segments:
+-        obj = s['obj']
+-        
+-        # Skip if segment starts after closest point
+-        if obj['bbox_entry'] >= d_min:
+-            continue
+-            
+-        start_t = obj['bbox_entry']
+-        end_t = obj['bbox_exit']
+-        
+-        # Truncate segment if it contains d_min
+-        if start_t < d_min < end_t:
+-            start_t = d_min
+-            
+-        if start_t >= end_t:
+-            continue
+-            
+-        # Class-specific logic
+-        if obj['class'] == 3:
+-            # Max-value projection
+-            # Perform calculation from start_t to end_t
+-            # If value v2 > vt (max so far), terminate early
+-            # Not given in the sources.
+-            pass
+-        elif obj['class'] == 2:
+-            # Average value projection
+-            # Compute average over [start_t, end_t]
+-            # Not given in the sources.
+-            pass
+-        elif obj['class'] == 4:
+-            # Segment where Class 1 might occur
+-            # If Class 1 occurred within this segment, only compute outside
+-            # Not given in the sources.
+-            pass
++    results = []
++    
++    for event in events:
++        if event['type'] == 'POINT':
++            # Process Point (Class 1)
++            if event['dist'] < d_min:
++                d_min = event['dist']
++                # Perform Class 1 intersection calculation
++                # (e.g., compute exact point intersection)
++                results.append(('POINT', event['obj_id'], d_min))
++                
++        elif event['type'] == 'SEGMENT':
++            # Process Segment (Class 2, 3, 4)
++            # Optimization: Skip if segment starts after closest point
++            if event['t_start'] >= d_min:
++                continue
++                
++            # Optimization: If segment contains d_min, adjust range
++            # For Class 1 point inside Class 4 segment, compute only outside part
++            # For Class 3, check for early termination based on values
++            
++            # Compute ray-segment intersection for the relevant part
++            # This involves calling ray_segment_intersect for the segment endpoints
++            # or sub-segments if clipped by d_min
++            
++            # Example: Check if segment intersects
++            seg_intersect = ray_segment_intersect(
++                ray_origin[0], ray_origin[1], 
++                ray_dir[0], ray_dir[1],
++                event['seg_a'][0], event['seg_a'][1],
++                event['seg_b'][0], event['seg_b'][1]
++            )
++            
++            if seg_intersect and seg_intersect['valid']:
++                # Apply Class-specific logic
++                if event['class'] == 3:
++                    # Max projection: check if value > current max
++                    # If so, terminate early
++                    pass 
++                
++                results.append(('SEGMENT', event['obj_id'], seg_intersect))
++                
++    return results
+ ```
+ 
+-**Parameters**
+-- **Threshold for Parallelism**: Not given in the sources [G].
+-- **Infinity Value**: Typically the maximum representable float or a value larger than the scene bounds [G].
+-
+-**Edge Cases and Pitfalls**
+-- **Degenerate Bounding Boxes**: If an object has no depth along the ray direction, entry and exit points may be equal [G].
+-- **Precision Errors**: Floating-point comparisons near $D_{min}$ may cause incorrect truncation. A small epsilon should be used when comparing distances [G].
+-- **Ordering Ambiguity**: If multiple objects have the same bounding box distance, the order of processing may affect the result if the intersection classes are interdependent [G].
++### Parameters and Edge Cases
++-   **Threshold:** A threshold of $10^{-9}$ is used for the denominator check to handle parallel rays/segments [S2, unofficial].
++-   **Inside Solid:** If a ray starts inside a solid, it must report the exit point to prevent holes or inside-out meshes from passing as outside intersections [S3, unofficial].
++-   **Precision:** Floating-point precision issues may arise when $t$ is very close to $D_{min}$. Guard clauses should be used to avoid double-processing or gaps.
+ 
+ ## Subtopics
+ 
+ ### [Linear Edge Intersection](868-linear-edge-intersection.md)
+-Linear Edge Intersection calculates the exact position where an isosurface intersects a straight edge connecting two grid vertices, assuming linear variation of the scalar field. It differs from Voxel selection via pick ray intersection by locating the surface on a segment rather than selecting a voxel. It is distinguished from Linear Intersection Approximation by using actual endpoint scalar values.
++Linear Edge Intersection determines the precise position where an isosurface intersects a grid edge by linearly interpolating between the scalar field values at the two vertices defining that edge. It solves the problem of locating surface geometry within a discrete voxel grid, serving as the fundamental geometric primitive for contouring algorithms like Marching Cubes and ray-marching isosurface extraction. It sets itself apart from its siblings by assuming a strictly linear variation of the scalar field along the edge, providing an exact algebraic solution for the intersection point under that assumption, whereas [Iterative Bisection Intersection Refinement](880-iterative-bisection-intersection-refinement.md) uses numerical approximation and [Hermite Interpolation for Isosurface Extraction](13666-hermite-interpolation-for-isosurface-extraction.md) uses gradient data for higher-order accuracy.
+ 
+ ### [Voxel selection via pick ray intersection](893-voxel-selection-via-pick-ray-intersection.md)
+-This method determines which voxel corresponds to a screen coordinate click, extracting spatial information for direct manipulation. It differs from Ray-Box Intersection for Interaction by focusing on discrete voxel traversal [G]. It differs from Linear Edge Intersection by operating on the volume grid [G].
++This method extracts spatial information from a simulation by mapping 2D screen coordinates to 3D voxel indices, serving as a direct manipulation interface for tasks such as segmentation seed selection. It differs from [Reverse Index Map for Voxel Location](1097-reverse-index-map-for-voxel-location.md) by computing the intersection dynamically rather than relying on a pre-computed index texture, and from [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md) by focusing on identifying the specific seed voxel for segmentation rather than just the entry point for fluid injection.
+ 
+ ### [Boundary Segment Validity Conditions](7652-boundary-segment-validity-conditions.md)
+-These conditions define geometric constraints for line segments on surface meshes to be valid "boundary segments" in path-space differentiable rendering. They ensure direct, unobstructed paths along the surface boundary for correct Jacobian computation.
+-
+-### Ray-Segment Intersection
+-Computes the intersection between a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and a line segment defined by endpoints $\mathbf{A}$ and $\mathbf{B}$ [S2, unofficial]. Returns the intersection point and validity parameters $t$ and $s$ [S2, unofficial].
+-**Formula**: $s_x = b_x - a_x$, $s_y = b_y - a_y$; $\text{denom} = d_x s_y - d_y s_x$; $t = ((a_x - o_x) s_y - (a_y - o_y) s_x) / \text{denom}$; $s = ((a_x - o_x) d_y - (a_y - o_y) d_x) / \text{denom}$ [S2, unofficial]. Validity requires $t \ge 0$ and $0 \le s \le 1$ [S2, unofficial]. The hit point is $\mathbf{h} = \mathbf{o} + \mathbf{d} t$ [S2, unofficial].
+-**Pitfall**: If the denominator is near zero (parallel rays/segments), the intersection is invalid; a threshold of $10^{-9}$ is typically used [S2, unofficial].
++Boundary Segment Validity Conditions define the geometric and topological constraints required for a line segment connecting two points on a polygonal mesh to be classified as a valid spatial boundary segment. These conditions ensure that the segment represents a true visibility boundary (e.g., a silhouette or occlusion edge) rather than a segment penetrating the geometry. This method is distinct from sibling methods like [Linear Edge Intersection](868-linear-edge-intersection.md) and [Voxel selection via pick ray intersection](893-voxel-selection-via-pick-ray-intersection.md) by explicitly validating the segment against the mesh normals and intersection geometry to prevent self-intersection or penetration artifacts in volume rendering integrals.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Sorting takes $O(N \log N)$ for $N$ objects [G]. Processing is $O(N)$ but with reduced constant factors due to early termination [S1, unofficial].
+-- **Memory Complexity**: $O(N)$ to store the sorted lists of points and segments [S1, unofficial].
+-- **Strengths**: Significantly reduces the number of expensive primitive intersection calculations by leveraging cheap bounding box tests and early termination [S1, unofficial].
+-- **Limitations**: Requires pre-computation of bounding boxes and sorting [G]. Less effective if the scene has many small objects with overlapping bounding boxes [G].
+-- **When to Use**: Scenes with multiple objects where intersection calculations are expensive relative to bounding box tests [G].
++-   **Time Complexity:** Sorting objects takes $O(N \log N)$ where $N$ is the number of objects. Intersection calculations are $O(1)$ per object/segment. Early termination reduces the average number of segment calculations.
++-   **Memory Complexity:** $O(N)$ to store the events list.
++-   **Strengths:** Significantly reduces shading computation time by avoiding unnecessary segment evaluations. Ensures correct handling of overlapping objects and different projection types (max, min, average).
++-   **Limitations:** Requires pre-computation of bounding boxes and classification of objects. Sorting adds overhead for very small numbers of objects.
++-   **When to Use:** When rendering scenes with multiple volumetric objects or complex intersection types where some intersections are faster to compute than others.
++-   **When Not to Use:** For simple scenes with a single object or where all intersections are of the same type and cost.
+ 
+ ## Background
+-The method was described in the context of volumetric ray tracing to optimize shader evaluation [S1, unofficial]. It relies on the principle that intersection points are generally faster to compute than intersection segments, and that resolving the closest point first can truncate subsequent segment calculations [S1, unofficial].
++The method originates from volumetric ray tracing optimization techniques, specifically described in "Volumetric Ray Tracing" by Sobierajski et al. [S1, unofficial]. It addresses the computational bottleneck of evaluating multiple intersection types along a ray. The geometric ray-segment intersection formula is a standard technique in computer graphics, often implemented in interactive raycasting tutorials [S2, unofficial]. The concept of device-callable ray queries for any shape type, including handling rays starting inside solids, is discussed in the context of EBGeometry [S3, unofficial].
+ 
+ ## Sources
+ [S1] Volumetric Ray Tracing, https://www.cs.drexel.edu/~david/Classes/Papers/p11-sobierajski.pdf, fetched 2026-10-28 (unofficial)
+-[S2] mithraskuipers/InteractiveLearning-Raycasting, https://github.com/mithraskuipers/InteractiveLearning-Raycasting, fetched 2026-10-24 (unofficial)+[S2] mithraskuipers/InteractiveLearning-Raycasting, https://github.com/mithraskuipers/InteractiveLearning-Raycasting, fetched 2026-10-24 (unofficial)
++[S3] [DO NOT MERGE] Renderer: ray queries on any shape, a renderer and an SDL2 viewer (1/3), https://github.com/rmrsk/EBGeometry/pull/214, fetched 2026-10-26 (unofficial)

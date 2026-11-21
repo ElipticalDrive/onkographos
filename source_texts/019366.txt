@@ -1,0 +1,378 @@
+# DiffTetVR: Differentiable Tetrahedral Volume Rendering
+
+Christoph Neuhauser
+
+January 5, 2026
+
+Differentiable rendering is a technique that aims to invert the rendering process to enable optimizing rendering parameters from a set of images. In this article, we present a differentiable volume rendering solution called DiffTetVR for tetrahedral meshes. Unlike previous works based on regular grids, this enables the optimization of vertex positions and the local subdivision of the mesh without relying on multigrid methods. We present an efficient implementation of the forward rendering process, deduce the derivatives for the backwards pass and regularization terms for avoiding degenerate tetrahedra, and finally show how the tetrahedral mesh can be subdivided locally to enable a coarse-to-fine optimization process. The source code is made publicly available on GitHub at .
+
+Disclaimer: While the method presented in this article is promising, I have chosen to not further pursue it, as I have left academia after finishing my PhD thesis. The results section summarizes the intermediate results and weaknesses of the technique that need to be overcome to reach (and potentially outperform) state-of-the-art results. I encourage readers to take inspiration from the presented ideas and to reuse code that was written as part of this work to build future works that are able to achieve the goal DiffTetVR set out to solve and enable adaptive reconstruction of volumetric data from images.
+
+# 1 Introduction
+
+Differentiable rendering [1] is a technique that has gained attention in the computer graphics and vision communities in recent years. While the forward rendering process is concerned with generating images from a set of rendering parameters such as geometry, materials and textures, differentiable rendering aims to invert this process in order to optimize the rendering parameters to best match a set of images. Differentiable rendering has been used in previous works for reversing the rendering process for representations such as meshes [2, 3], point clouds [4] and 3D Gaussian splats [5]. A recent survey by Kato et al. [1] gives an overview of this wide field of works.
+
+Differentiable direct volume rendering (DiffDVR) was first introduced by Weiss and Westermann [6]. Their work aims to invert the direct volume rendering process, which is concerned with generating images for volumetric fields. This rendering process usually involves marching through the volume along view rays and using alpha blending operations [7] for blending semi-transparent colors sampled along the ray. Weiss and Westermann [6] use DiffDVR for solving tasks such as automatic viewpoint selection, or transfer function, density field and color field reconstruction. Unlike previous works such as the Mitsuba 2 rendering framework [8], Weiss and Westermann do not require intermediate values to be saved for backpropagation, which strongly reduces the memory requirements of their method. Kerbl et al. [5] later chose a similar strategy for inverting the alpha blending process in their differentiable 3D Gaussian splat (3DGS) optimizer, which has gained immense popularity in the field of differentiable rendering.
+
+A limitation of the approach by Weiss and Westermann [6] is that they are constrained to regular grids. This makes it harder to not only optimize grid properties such as stored densities or colors, but also the grid vertex positions. Furthermore, local subdivision of the mesh during the training process without relying on multigrid methods becomes infeasible. Thus, in this work, we introduce an approach for the differentiable direct volume rendering of unstructured tetrahedral meshes, which we call DiffTetVR. The contributions of this work are as follows.
+
+- We derive equations for more accurate accumulation of color along view rays than simple alpha blending of locally sampled colors using ray marching (Section 3\).
+- We introduce a fast rasterization-based renderer for tetrahedral meshes based on the concept of per-pixel linked lists [9] (Section 4\).
+- We deduce derivatives for the rendering process to enable backpropagation in the rendering pipeline regarding parameters such as vertex colors and positions (Sections 5 and 12\).
+- We introduce a differentiable regularization term for avoiding degeneration of tetrahedral elements during the optimization process (Section 6\).
+- We show how the tetrahedral mesh can be locally refined to enable a coarse-to-fine optimization approach (Section 7\).
+- We demonstrate the reconstruction of pre-shaded volumes from images of scientific visualization volume data sets and synthetic surface renderings (Section 8\). We further evaluate strengths and weaknesses of the method (Section 9\).
+
+## 2 Related work
+
+Differentiable rendering. As mentioned in the introduction, differentiable rendering has been used in previous works for reversing the rendering process for representations such as meshes [2, 3], point clouds [4] and 3D Gaussian splats [5]. A recent survey by Kato et al. [1] gives an overview of this wide field of works. The Mitsuba 2 rendering framework [8] and Weiss and Westermann [6] support differentiable volume rendering. The latter aims to solve the memory problems the former faces due to saving intermediate results for the backward pass. While Weiss and Westermann only take into consideration volumetric absorption and emission, Nimier-David et al. [10] also take into account volumetric scattering using a differential ratio tracking [11] approach. Similarly, Leonard et al. [12] provide a differential volume renderer for single-view reconstruction of 3D volumes while supporting multiple scattering effects. Shen et al. [13] introduced deep marching tetrahedra (DMTet), which builds upon the marching tetrahedra algorithm [14] for surface reconstruction from images. Similarly, Yu et al. [15] also make use of the marching tetrahedra to extract a surface mesh from a 3DGS representation [5]. Tetra-NeRF [16] generalizes the neural radiance field (NeRF) concept initially introduced by Mildenhall et al. [17] to use a dense tetrahedral grid constructed via Delaunay triangulation from an initial point cloud. Gu et al. [18] introduce TeT-Splatting, which builds upon the work on 3DGS by Kerbl et al. [5]. At every vertex of a tetrahedral mesh, they store the signed distance to the closest surface. Similar to our work, they interpolate these values using barycentric interpolation. However, they do not aim to support differentiable volume rendering nor locally subdividing the mesh through the splitting of tetrahedral elements. In Appendix A.3 of their work, they describe the derivation of the gradient of the SDF values, but not the gradients wrt. the vertex positions. In [their code,](https://github.com/fudan-zvg/tet-splatting/blob/fd3d20dd8e151e1fca531a71fe631f574d7dbe7d/TetrahedronRender/src/tet_gradients.cu#L42) however, they use a constant term for the position gradients that does not seem to take into account derivatives wrt. the barycentric coordinates. As this is not described in their work, it is unclear what the authors aim to achieve.
+
+Govindarajan et al. [19] introduce a method named Radiant Foam that uses a polyhedral Voronoi tessellation of 3D space. While a Delaunay triangulation of a set of points is sensitive to edge flips, the authors describe that for the dual Voronoi diagram the "shapes of the cells vary continuously with the positions of the points". In our work, we do not re-tesselate the space after each optimization step, and aim to avoid edge flips by introducing a regularization term (cf. Section 6\).
+
+Tet mesh rendering. Rendering volumetric tetrahedral meshes is a difficult task. The first question that arises is how to do optical accumulation of color within a single tetrahedral element. Williams and Max [20] were the first to derive an exact formula for the accumulation of color along a ray in a tetrahedral element when using barycentric interpolation of color and opacity. We also provide a comparable formula in Section 11, but found the difference of two imaginary error functions to have a far too high numerical instability to be usable in real-world workflows on GPUs when using only 32-bit floating point precision. Thus, we derive a simplified formula with still higher accuracy than regular alpha blending in Section 3.
+
+Recent works have shown how ray tracing of tetrahedral meshes [21, 22] and point location in tetrahedral meshes [23] can be performed efficiently on modern hardware using specially crafted acceleration structures and hardware-accelerated ray tracing functionality. Historically used techniques often rely on rasterization-based techniques, especially the Painter's algorithm. The Painter's algorithm first sorts all polygons (or polyhedra) by their relative depth order before rasterizing them in this order. This depth order, however, can usually not be obtained by simply sorting by a linear depth value assigned to each element, but requires topological sorting [24]. One example for a data structure that can be used for such a task is the binary space partitioning (BSP) tree [25]. Chen et al. [26] provide an approach for pre-sorting triangles and discuss a wide range of references on sorting directed acyclic graphs (DAGs), utilizing BSP trees and similar methods. Williams [27] introduces a sorting technique for unstructured volumetric meshes with convex elements using directed acyclic graphs (DAGs), which they call the "meshed polyhedra visibility ordering (MPVO)". The concurrent work by Nelson et al. [28] describes a similar approach. A disadvantage of the MPVO technique is that a topological sort of the generated DAG is required every frame. Only few prior works have tackled the topic of parallel sorting of DAGs on GPUs, and usually assume certain constraints on the DAGs [29]. Shirley and Tuchman [30] and Kraus et al. [31] describe a technique called projected tetrahedra (PT), where they project tetrahedra to a set of triangular faces that can then be rasterized. Kraus et al. [31] improve the technique by ensuring perspective correct interpolation without rendering artifacts. The PT approach suffers from the same problem as directly rasterizing the tetrahedra, which is that topological sorting is required. Stein et al. [32] extend the work by Shirley and Tuchmann to take into account that non-linear terms such as e −αt (for an opacity α and a segment length t) introduced by the Beer-Lambert law should not be interpolated linearly. This is also utilized in the implementation of PT in the VTK toolkit [33], where the segment length is interpolated linearly instead of interpolating the non-linear terms.
+
+Order-independent transparency (OIT). As discussed in the last paragraphs, the difficulty to implement parallel topological sorting on GPUs makes the Painter's algorithm hard to use for efficient rendering. While the z-buffer has made the Painter's algorithm obsolete for rendering opaque meshes on modern graphics hardware, it can only be used to resolve the closest visible surface. The A-buffer [34] aims to overcome some of the restrictions of the z-buffer, but cannot be implemented as-is on modern graphics hardware. Yang et al. [9] build on the idea of the A-buffer and describe an algorithm for storing per-pixel linked lists to gather generated fragments in a first rendering pass before sorting them per-pixel in a second rendering pass. A disadvantage of this kind of technique is the potentially unbounded memory requirement. Depth peeling [35, 36], on the other hand, trades the unbounded memory requirement for needing as many rendering passes as there are elements on top of each other (called the depth complexity of a scene). Approximate techniques such as multilayer alpha blending (MLAB) [37], moment-based order-independent transparency (MBOIT) [38] or stochastic transparency [39] trade potential rendering inaccuracies for bounded memory requirements and a bounded number of render passes.
+
+#### 3 Forward rendering
+
+Given a tetrahedral mesh with vertex colors, opacities and positions, we want to compute for each pixel of a virtual camera the final color of the view ray passing through the mesh. Like Weiss and Westermann [6], we only take into consideration absorption and emission effects in direct volume rendering and ignore volumetric scattering. For each tetrahedron the ray intersects with, the color is accumulated using Eq. \(1\). We assume a function lerp(val0, val1, x) = (1 − x) · val0 + x · val1 is given that linearly interpolates between two values. c0, α0 and c1, α1 are the color and opacity at the entry and exit face obtained using barycentric interpolation.
+
+
+$$\begin{aligned} c_{accum}(t, c_0, c_1, \alpha_0, \alpha_1) &= \int_0^t \text{lerp}(c_0, c_1, x) \text{lerp}(\alpha_0, \alpha_1, x) e^{-\int_0^x \text{lerp}(\alpha_0, \alpha_1, u) du} dx \\ &= \int_0^t ((1-x) c_0 + x c_1) ((1-x) \alpha_0 + x \alpha_1) e^{-\int_0^x (1-u) \alpha_0 + u \alpha_1 du} dx \quad (1) \\ &= \int_0^t (r_0 + r_1 x + r_2 x^2) e^{q_1 x + q_2 x^2} dx \end{aligned}$$
+
+r0, r1, r2, q1 and q2 are five coefficients obtained from c0, α0 and c1, α1. A challenge in solving Eq. \(1\) is the term q2x 2 in the exponent, as R e q2x dx is considered a nonelementary integral. In Section 11, we provide a full derivation of Eq. \(1\) based on the error function erf(z) and the imaginary error function ierf(z), but we found it generally not suitable for actual implementation on a GPU. Firstly, while the B¨urmann series can be used as a numerically stable approximation of the error function [40], we were not able to implement a fast and numerically stable approximation for the imaginary error function. The latter might be due to limz→∞ erf(z) = 1, but limz→∞ ierf(z) = ∞ and additional cancellation effects due to the subtraction of large floating point values. With realistic values for the opacities, the evaluations of erfi may assume values of a magnitude of 1020. Finally, the partial derivatives for the colors and opacities become very convoluted. Consequently, we have decided to simplify Eq. \(1\) by assuming that α0 equals α1. In this case, both q2x 2 and r2x 2 vanish and the integral can be expressed using elementary functions (see Algorithm 3\). In order to be able to use this approximation, we separate the whole interval from Eq. \(1\) into multiple sub-intervals and assume that the linearly interpolated opacity at the center is constant over the sub-interval.
+
+In Algorithm 1, it is shown how the computation of the accumulated color within a tetrahedral cell is performed. It relies on Algorithm 2 for barycentric interpolation and Algorithm 3 for accumulation along a sub-interval with constant opacity.
+
+
+
+|     |         | Algorithm |             | 1:    |       |       | Tetrahedron |         |     |     | color     |       |   |        | accumulation                                               |
+|-----|---------|-----------|-------------|-------|-------|-------|-------------|---------|-----|-----|-----------|-------|---|--------|------------------------------------------------------------|
+|     | Input   |           |             |       | :     | Face  |             | indices |     | f   | 0         | and   |   | f 1    | of hit tet and corresponding depths d 0 , d 1 , previously |
+|     |         |           |             |       |       |       | accumulated |         |     |     | color     |       |   | and    | opacity C ray , α ray , number of subdivision steps N sub  |
+|     |         |           | Parameters: |       |       | Tet   |             | vertex  |     |     | positions |       |   | P      | T , vertex colors C T                                      |
+| 1   | p 0 , c | 0         | =           | Bary  | (     | d 0 , | f 0         | );      |     |     |           |       |   |        |                                                            |
+| 2   | p 1 , c | 1         | =           | Bary  | (     | d 1 , | f 1         | );      |     |     |           |       |   |        |                                                            |
+| 3 t | total   | =         | ∥ p         | 1 −   | p     | 0 ∥   | 2 ;         |         |     |     |           |       |   |        |                                                            |
+| 4 t | =       | t         | total       | /N    | sub   | ;     |             |         |     |     |           |       |   |        |                                                            |
+| 5   | c ray,  | 0         | = c         | ray ; |       |       |             |         |     |     |           |       |   |        |                                                            |
+| 6   | α ray,  | 0         | = α         | ray   | ;     |       |             |         |     |     |           |       |   |        |                                                            |
+| 7   | for     | i =       | 0           | to    | N     | sub   | − 1         | do      |     |     |           |       |   |        |                                                            |
+| 8   | c       | i 0       | =           | lerp  | (     | c 0 , | c 1 ,       | i/N     |     | sub | );        |       |   |        |                                                            |
+| 9   | c       | i 1       | =           | lerp  | (     | c 0 , | c 1 ,       | ( i     | +   | 1)  | /N        | sub   |   | );     |                                                            |
+| 10  |         | α i       | =           | lerp  | (     | α 0 , | α 1 ,       | ( i     | +   | 0   | 5)        | /N    |   | sub ); |                                                            |
+| 11  | c       | acc,i     | ,           | α     | acc,i | =     |             | Accum   |     | ( t | , c       | i 0 , | c | i 1 ,  | α i );                                                     |
+| 12  | c       | ray,i     | +1          | =     | c     | ray,i | +           | (1      | −   | α   | ray,i     | )     | c | acc,i  | ;                                                          |
+| 13  |         | α         | ray,i +1    | =     |       | α     | ray,i       | +       | (1  | −   | α         | ray,i | ) | α      | acc,i ;                                                    |
+| 14  | end     |           |             |       |       |       |             |         |     |     |           |       |   |        |                                                            |
+| 15  | return  |           | c           | ray,N |       | sub , | α           | ray,N   | sub | ;   |           |       |   |        |                                                            |
+
+#### Algorithm 2: Barycentric interpolation
+
+1 Bary (d, f);
+
+Input : Hit depth d, tet face index f, screen position gl FragCoord.xy, global tet face
+
+vertex table F : {0, . . . , Nf − 1} → {0, . . . , Nv − 1}
+
+3
+
+Parameters: Tet vertex positions PT , vertex colors CT
+
+/\* NDC: Normalized device coordinates \*/
+
+2 pNDC = (2 ∗ gl FragCoord.xy/viewportSize − 1, d, 0);
+
+3 pH = invViewProjMat · pNDC ;
+
+4 p = pH,xyz/pH,w; 5 i0, i1, i2 = F(f);
+
+ p0 = PT (i0), p1 = PT (i1), p2 = PT (i2); c0 = CT (i0), c1 = CT (i1), c2 = CT (i2); area = ∥(p2 − p0) × (p2 − p1)∥2; u = ∥(p2 − p1) × (p2 − p1)∥2/area; v = ∥(p2 − p0) × (p2 − p1)∥2/area; c = c0 · u + c1 · v + c2 · (1 − u − v);
+
+/\* for gradient: p = p0 · u + p1 · v + p2 · (1 − u − v) \*/
+
+12 return p, c;
+
+#### Algorithm 3: Linear color accumulation
+
+1 Accum (t, c0, c1, α); Input : Optical depth t, entry color c0, exit color c1, constant opacity α 2 A = e −αt; 3 cacc = (1 − A) · c0 + t + α · A − α · (c0 − c1); 4 αacc = 1 − A; 5 return cacc, αacc;
+
+#### 4 Implementation
+
+As outlined in the last section, we need to find the intersections of all tetrahedra with the view rays of a virtual camera for all rendered pixels. While it is possible to use raycasting for determining the intersections of the view rays with the tetrahedral cells, a disadvantage is that an acceleration structure needs to be built for fast rendering, which becomes invalid in each iteration of the optimizer when the vertex positions of the mesh are updated. Another alternative would be using the Painter's algorithm described in Section 2, but as outlined in that section, to our knowledge no efficient parallel DAG sorter implementation exists for GPUs. Thus, we use per-pixel linked lists [9] to first rasterize the faces of the tetrahedra and then sort the intersections of the view rays in front-to-back order. We make use of the GPU-friendly heap-sort implementation provided by Kern et al. [41]. In the backward pass, the intersections are sorted in reverse order to enable backpropagation using the inversion trick by Weiß and Westermann [6]. Our implementation is provided in a software framework using the Vulkan graphics API [42] at . Vulkan has the advantage over pure compute-based APIs like NVIDIA CUDA that it supports hardware rasterization. Thus, it is not necessary to develop a (likely slower) tile-based software rasterizer as was done, for example, by Kerbl et al. [5]. We use Vulkan-CUDA API interop to share buffers and semaphores between CUDA and Vulkan when accessing data via PyTorch bindings.
+
+A final question is how to efficiently store unstructured meshes in memory. Kremer et al. [43] provide a software library called OpenVolumeMesh that enables the efficient storage and manipulation of unstructured meshes, which we make use of in our work. In Section 7, we show how we use the prism tesselation technique described by Erleben et al. [44] in order to subdivide tetrahedra during the optimization process. Given a triangular mesh as a boundary representation, they aim to construct a so-called thin shell tetrahedral mesh. For this, the triangles are extruded to form prisms, which are then tessellated into tetrahedra. We utilize OpenVolumeMesh for efficiently adding vertices, edges and tetrahedra to the underlying data structure.
+
+#### 5 Backward rendering
+
+We assume that a target image and camera intrinsics and extrinsics are given. During backward rendering, the loss between the target image and the image obtained using the forward renderer is computed. Our software framework currently supports an l1 or l2 loss, but support for arbitrary losses can be implemented. By differentiating the loss, gradients cadj , αadj for all input pixel colors and opacities are obtained. In order to backpropagate the gradients through the renderer, the generated fragments are no longer sorted front-to-back like in the forward pass, but back-to-front. Hits with the tetrahedra and the discretized accumulations are computed in reverse order. Our goal is to obtain gradients for the tetrahedron vertex positions, colors and opacities. Consequently, gradients need to be backpropagated using the chain rule for any variable depending on one of those attributes.
+
+$$c_{acc}(t, c_0, c_1, \alpha) = (1 - e^{-\alpha t}) c_0 + \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right) (c_0 - c_1) \quad (2)$$
+
+| $a_{acc}(t, \alpha) = 1 - e^{-\alpha t}$ | (3) |
+|------------------------------------------|-----|
+|------------------------------------------|-----|
+
+$$\frac{\partial c_{acc}(t, c_0, c_1, \alpha)}{\partial c_0} = (1 - e^{-\alpha t}) + \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right) \quad (4)$$
+
+$$\frac{\partial c_{acc}(t, c_0, c_1, \alpha)}{\partial c_1} = - \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right) \quad (5)$$
+
+$$\frac{\partial c_{acc}(t, c_0, c_1, \alpha)}{\partial \alpha} = te^{-\alpha t} c_0 + \left( \frac{1}{\alpha^2} - \left( t^2 + \frac{1}{\alpha^2} + \frac{t}{a} \right) e^{-\alpha t} \right) (c_0 - c_1) \quad (6)$$
+
+$$\frac{\partial c_{acc}(t, c_0, c_1, \alpha)}{\partial t} = (\alpha c_0 + (\alpha c_1 - \alpha c_0) t) e^{-\alpha t} \quad (7)$$
+
+$$\frac{\partial a_{acc}(t, \alpha)}{\partial \alpha} = t e^{-\alpha t} \quad (8)$$
+
+$$\frac{\partial a_{acc}(t, \alpha)}{\partial t} = \alpha e^{-\alpha t} \quad (9)$$
+
+Furthermore, for α = 0 with application of L'Hˆopital's rule:
+
+$$\lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}(t, c_0, c_1, \alpha)}{\partial \alpha} = tc_0 + \frac{1}{2}t^2 (c_1 - c_0) \quad (10)$$
+
+$$\lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}(t, c_0, c_1, \alpha)}{\partial c_0} = \lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}(t, c_0, c_1, \alpha)}{\partial c_1} = 0 \quad (11)$$
+
+We use the inversion trick by Weiß and Westermann [6].
+
+| $c_{ray,i+1} = c_{ray,i} + (1 - \alpha_{ray,i})c_{acc,i}$ | (12) |
+|-----------------------------------------------------------|------|
+|-----------------------------------------------------------|------|
+
+$$\alpha_{ray,i+1} = \alpha_{ray,i} + (1 - \alpha_{ray,i})\alpha_{acc,i} \quad (13)$$
+
+$$\Rightarrow \alpha_{ray,i} = \frac{\alpha_{acc,i} - \alpha_{ray,i+1}}{\alpha_{acc,i} - 1} \quad (14)$$
+
+$$\Rightarrow c_{ray,i} = c_{ray,i+1} - (1 - \alpha_{ray,i})c_{acc,i} \quad (15)$$
+
+The analytic derivatives of the barycentric coordinates with respect to the vertex positions have been automatically deduced using the SymPy library [45] and can be found in the accompanying source code in the file [Data/Shaders/Common/BackwardCommon.glsl](https://github.com/chrismile/DiffTetVR/blob/main/Data/Shaders/Common/BackwardCommon.glsl) together with the derivatives of the optical depth t of the view ray within a tetrahedron.
+
+
+
+Figure 1: Used function for mapping the tetrahedral element quality to the regularization penalty and its derivative.
+
+
+
+Figure 2: Regularizer (β = 10) applied to a non-regular tetrahedron. Setting a higher value for β penalizes only slightly deformed tetrahedra less (cf. Fig. 1\).
+
+# 6 Regularization
+
+When rendering tetrahedral meshes, our face-based rendering technique requires that self-intersections may not happen and that tetrahedral elements are not inverted, i.e., their volume may not become negative. Also, tetrahedral elements should not degenerate, i.e., their volume should not approach zero. This can happen during the optimization process due to the C0-continuity of the color field and when using too high learning rates.
+
+Shewchuk [46, 47] discusses different choices of quality measures for triangles and tetrahedra. These measures are derived in different ways such that they fulfill certain properties with respect to interpolation errors or stiffness matrix conditioning. For tetrahedra, they are based on individual sub-measures such as the signed volume, the face areas and the edge lengths. Shewchuck says that "smooth measures simplify optimization-based smoothing, but they are based on weaker bounds, so they are less accurate indicators than the nonsmooth measures" [47]. In our application, we are not directly interested in tet regularization due to interpolation properties themselves, but to add a regularization term to the optimization process that helps to avoid tetrahedral element degeneration. For us, the smoothness property is thus of greater importance. For our regularizer, we have chosen the regularization term Softplus(−Q) using the smooth measure Q in Eq. \(16\), which Shewchuk [47] attributes to Parthasarathy et al. [48]. As shown in Fig. 1, a regularizer using the softplus term penalizes inverted and degenerate tetrahedra with negative or close to zero volume. Fig. 2 shows the effect of the regularizer (without any other image-based loss) on a tetrahedron after multiple iterations. The tetrahedron slowly approaches a regular tetrahedron (i.e., the four faces become equilateral triangles). Depending on the softplus parameter β and the weight λ assigned to the regularizer in the complete loss term, only strongly degenerate tetrahedra can be penalized and the penalization factor can be reduced.
+
+
+$$Q = 6\sqrt{2} \frac{V}{l_{rms}^3} \quad (16)$$
+
+$$V = \langle (p_3 - p_0), (p_1 - p_0) \times (p_2 - p_0) \rangle \quad (17)$$
+
+$$l_{rms} = \sqrt{\frac{1}{6} \sum_{i=0}^5 l_i^2} \quad (18)$$
+
+| Softplus( $x$ ) = $\frac{1}{\beta} \log(1 + \exp(\beta x))$ | (19) |
+|-------------------------------------------------------------|------|
+|-------------------------------------------------------------|------|
+
+$$\frac{\partial \text{Softplus}(x)}{\partial x} = \frac{1}{1 + \exp(-\beta x)} \quad (20)$$
+
+The analytic derivatives of the quality metric Q with respect to the tet vertex positions p{0,1,2,3} has been automatically deduced using the SymPy library [45] and can be found in the accompanying source code in the file [Data/Shaders/Optimizer/TetRegularizer.glsl](https://github.com/chrismile/DiffTetVR/blob/main/Data/Shaders/Optimizer/TetRegularizer.glsl). The complete loss term is given below, where T is the set of all tetrahedra.
+
+$$\text{loss} = \text{loss}_{\text{img}} + \lambda \sum_{t \in T} \text{Softplus}(Q(t)) \quad (21)$$
+
+
+
+
+
+Figure 3: Left: All edges incident to vertex a are split. Middle: The incident tetrahedra are split by first removing the newly formed tetrahedron incident to a and then splitting the remaining truncated pyramid in the form of a triangular prism formed by b, c, d, b ′ , c ′ and d ′ . Right: Top-down view indicating how the quad faces of a truncated pyramid prism are split using rising (R) and falling (F) edges.
+
+
+
+Figure 4: Left: The split of a quad face incident to two adjacent truncated pyramid prisms are compatible. Right: The splits are in opposite directions and thus incompatible.
+
+## 7 Tet subdivision
+
+When optimizing the properties of the vertices of a tetrahedral mesh, a coarse-to-fine approach can be chosen for better convergence. In this case, the optimization process is started with a relatively coarse mesh. When accumulating gradients over multiple images and corresponding camera poses, some vertices may have larger gradients than others. This may indicate an insufficient local resolution of the mesh that is unable to represent certain patterns of high-frequency scales. In this case, we may decide to refine and subdivide the mesh only in the vicinity of these vertices. Similarly to AbsGS [49], we also found that absolute gradients result in better results for splitting.
+
+Consequently, we propose the following approach. After the gradients have been accumulated, we select a set of Nˆ vertices with the largest gradient magnitudes. Then, we iterate over all of these vertices and split all incident edges by inserting a new vertex at, e.g., the middle of each edge. However, this also requires splitting the incident tetrahedra using the newly inserted vertices. As indicated in Fig. 3, this splitting operation results in a new tetrahedron incident with the splitting vertex a and a truncated pyramid in the form of a triangular prism.
+
+Erleben et al. [44] describe an algorithm for splitting a triangular prism mesh into a tetrahedral mesh in section 4 of their work. Each triangular prism can be split into exactly three tetrahedra. However, care needs to be taken so that the face splits are compatible with the splits of adjacent tetrahedra. As indicated in Fig. 4 right, when adjacent prisms sharing a quad face decide for incompatible splitting directions of the quad face, the triangle faces of the subdivided tetrahedra cannot be shared, which leads to an infinitesimally thin hole in the underlying tet mesh. Erleben et al. categorize split edges as falling (F) or rising (R) depending on "whether the tesselation edge is falling or rising as we travel along the extruded prism face in counter clock wise manner" [44]. Two splits of a shared quad face are compatible if one of them is a rising edge split and the other one is a falling edge split. This leads to a constraint satisfaction problem (CSP) with the following constraints:
+
+- The splits for one prism may not be FFF or RRR.
+- Two adjacent prisms must split a shared quad face using exactly one F and one R split.
+
+While this CSP could be solved with general constraint satisfaction libraries, Erleben et al. give a specialized algorithm with pseudo-code for solving this problem. Unfortunately, their pseudo-code leaves open many implementation details. In our code, we provide an implementation of their approach in the file [FlipSolver.cpp](https://github.com/chrismile/DiffTetVR/blob/main/src/Tet/CSP/FlipSolver.cpp). In Table 1, we provide a tesselation look-up table for the vertex indices as
+
+
+
+| Tet index |      |    | FRR |   |     |    |    | RFR |   |     |    |    | FFR |   | Prism | splits |    | RRF |   |     |    |    | FRF |   |     |    |    | RFF |   |   |
+|-----------|------|----|-----|---|-----|----|----|-----|---|-----|----|----|-----|---|-------|--------|----|-----|---|-----|----|----|-----|---|-----|----|----|-----|---|---|
+| 0         | { 0, | 1, | 3,  | 2 | } { | 0, | 1, | 4,  | 2 | } { | 0, | 1, | 3,  | 2 | } {   | 0,     | 1, | 5,  | 2 | } { | 0, | 1, | 5,  | 2 | } { | 0, | 1, | 4,  | 2 | } |
+| 1         | { 3, | 4, | 5,  | 1 | } { | 3, | 4, | 5,  | 2 | } { | 3, | 4, | 5,  | 2 | } {   | 3,     | 4, | 5,  | 0 | } { | 3, | 4, | 5,  | 1 | } { | 3, | 4, | 5,  | 0 | } |
+| 2         | { 1, | 2, | 5,  | 3 | } { | 0, | 2, | 4,  | 3 | } { | 1, | 2, | 4,  | 3 | } {   | 0,     | 1, | 4,  | 5 | } { | 0, | 1, | 3,  | 5 | } { | 0, | 2, | 4,  | 5 | } |
+
+Table 1: Look-up table for splitting a triangular prism using different splitting edge patterns. The indices correspond to prism vertices as specified in Fig. 3.
+
+
+
+Figure 5: Dual graph of a solved CSP problem. The nodes represent prisms and the edges the splits of shared incident quad faces.
+
+assigned in Fig. 3 and specific tesselation patterns. An example for a solved CSP problem dual graph can be found in Fig. 5.
+
+For the initial tetrahedral mesh, the user can either specify to use a regular grid aligned with the bounding box of the scene to be optimized, or to tetrahedralize the sparse point cloud generated by the structure from motion (SfM) algorithm provided by, e.g., COLMAP [50, 51]. For this, a Delaunay triangulation is used. The regular grid tetrahedral mesh can either be generated by converting the hexahedral mesh cells separately to tetrahedral cells, or by using the meshing libraries fTetWild [52] or TetGen [53].
+
+
+
+Figure 6: Left: Ground truth rendering of Tooth data set. Middle: Color-only tet mesh reconstruction with a regular grid of 177 × 100 × 100 converted into a tetrahedral mesh (lrc = 0.08, PSNR 33.2). Right: Joint color and position optimization (lrc = 0.08, lrp = 10−6 , λ = 10, β = 100, PSNR 26.3).
+
+
+
+Figure 7: Training for synthetic Hotdog data set. Left: Ground truth test set rendering [17]. Right: Tetrahedral mesh reconstruction using a regular grid of size 1283 converted into a tetrahedral mesh (lrc = 0.08, PSNR 25.2). Without adaptive subdivision, most tetrahedra are fully transparent.
+
+#### 8 Results
+
+Weiss and Westermann [6] have demonstrated how DiffDVR can be used to reconstruct transfer functions, voxel densities and pre-shaded volumes from pre-rendered images. In this section, we evaluate the ability of DiffTetVR to not only accurately reconstruct pre-shaded vertex colors from images rendered with an emission-absorption volume rendering model, but to also optimize the number of overall tetrahedral elements and their placement. Unlike DiffDVR, DiffTetVR can use a coarse-to-fine optimization approach where more elements are placed in regions with higher reconstruction error. For this, the technique described in Section 7 is used. All tests were performed on an NVIDIA RTX 3090 GPU and a 12-core AMD Ryzen 3900X CPU. Images were all rendered at a resolution of 512 × 512 during training.
+
+In our tests, we use two different types of data sets. First, it is evaluated how DiffTetVR fares at reconstructing preshaded volumes from a set of rendered scientific volume data set images and associated camera poses. To mirror the experiments by Weiss and Westermann [6], we use the Tooth data set from the [Open SciVis Datasets](http://klacansky.com/open-scivis-datasets/) and apply the same "tooth3gauss" transfer function, which was obtained from . Secondly, we show the general correctness of the technique by applying it to some of the synthetic surface mesh test data sets provided by Mildenhall et al. [17]. We use the data set [Hotdog by erickfree](https://www.blendswap.com/blend/23962) (CC-0) as an example for a scene with hard surfaces.
+
+#### 8.1 Color-only optimization
+
+In Fig. 6, it can be seen that DiffTetVR can successfully reconstruct vertex colors through inverse rendering for the volumetric Tooth data set using the same transfer function as employed by Weiss and Westermann [6]. Some differences between the ground truth and reconstruction are visible and can be attributed to interpolation errors. While for the ground truth image, scalar densities are interpolated before applying the color and opacity transfer function, reconstructing a pre-shaded volume means
+
+
+
+Figure 8: Hyperparameter analysis for reconstructing a preshaded volume for the Tooth data set. A red "X" indicates that the final tetrahedral mesh contained degenerate elements with volume ≤ 0. Top left: The color learning rate peaked at about 33.5 PSNR for [0.08, 0.1]. Top right: Training with position learning rate ̸= 0 lead to stable results only for the lowest learning rates (albeit with lower PSNR than color-only optimization). Bottom: Fine-tuning regularization parameters as outlined in Section 6 did not lead to a significant improvement. Regularization not able to stabilize results at lrp = 10−5 to result in tet meshes with non-degenerate elements. Unspecified hyperparameters can be found [online.](https://github.com/chrismile/DiffTetVR/blob/0643199f745c98895ae973b40a99ee7462d945b3/pytests/run.py#L114)
+
+that DiffTetVR directly interpolates the vertex colors instead of the scalar quantity. To avoid these issues, the code of DiffTetVR would simply need to be adapted to not only support reconstruction of pre-shaded volumes, but also scalar density volumes and transfer functions. On the test system, convergence of the optimization process was achieved in about 3 seconds even when using a constant vertex color learning rate of 0.08. Further speedup can be achieved by starting with a higher learning rate and using consecutive learning rate decay. This shows the great speed of the Vulkan renderer detailed in Section 4.
+
+In Fig. 7, we see that DiffTetVR also reconstructs surface renderings at an acceptable quality level. Here, two weaknesses of the technique can be seen. Firstly, DiffTetVR employs a volumetric emissionabsorption model, which is unnecessary for reconstructing surface meshes without any volumetric component. In such a case, one would usually prefer to reconstruct a triangle mesh, and it may be more meaningful to use marching tetrahedra-based techniques like DMTet [13] when no volumetric component needs to be reconstructed. Secondly, while a triangle mesh can be extracted from the volumetric tetrahedra, a lot of resolution is wasted in empty regions. A solution for this that increases performance and reduces memory consumption could be to remove tetrahedra that are still empty after a few training epochs.
+
+
+
+Figure 9: Reconstruction of Tooth data set using adaptive subdivision as described in Section 8.2. While optimization results are better than using vertex position optimization without subdivision (cf. Fig. 8 top right), final PSNR results cannot reach color-only optimization quality as shown in Fig. 6 middle and Fig. 8 top left. Hyperparameter choices can be found [online.](https://github.com/chrismile/DiffTetVR/blob/0643199f745c98895ae973b40a99ee7462d945b3/pytests/run.py#L175)
+
+
+
+
+
+Figure 10: Reconstruction of Hotdog data set using adaptive subdivision. Vertex position optimization has been disabled. Test set PSNR of 24.4 is lower than using color-only optimization in Fig. 7 with PSNR of 25.2. Hyperparameter choices can be found [online.](https://github.com/chrismile/DiffTetVR/blob/0643199f745c98895ae973b40a99ee7462d945b3/pytests/run.py#L250)
+
+#### 8.2 Adaptive subdivision
+
+The conclusion of the last section about unneeded empty tetrahedra directly raises the question whether adaptive subdivision paired with vertex position optimization and a tetrahedral shape regularizer can solve this concern. Unfortunately, our experiments have shown that this does not work well as it is currently implemented in DiffTetVR.
+
+In a first experiment, we have tested what happens when enabling the optimization of vertex positions in addition to the optimization of vertex colors for the Tooth data set. In different experiments, we have checked how concergence changes with different settings of the vertex position learning rate lrp, the regularization strength λ and the softplus parameter β. When fixing β = 100 and λ = 10, it can be seen in Fig. 8 that the optimization process is only stable (i.e., does not generate degenerate tetrahedra) for the lowest learning rates of 1e-6 and 5e-6. But even then, the PSNR of approx. 26.9 is significantly lower than the peak of 33.5 that can be seen for color-only optimization. This raises the concern whether the local optimization of vertex positions by backpropagating color image differences through the rendering process and barycentric interpolation can somehow lead to a better global optimum. Our results do not indicate that this is the case, at least not how it is currently implemented.
+
+In a second experiment, we enabled adaptive refinement for the tetrahedral mesh. The training process is conducted as follows. One epoch is defined as training with 800 Tooth data set renderings. For one epoch, only vertex colors are optimized. Then, for one epoch, the vertex colors and positions are jointly optimized. For the next epoch, absolute color gradients are accumulated at every vertex without doing optimization steps. Finally, the 5% vertices with the highest absolute color gradients are taken and the incident tetrahedra are subdivided as demonstrated in Section 7. This process is repeated until a target amount of tetrahedra is reached. In the last iteration, only vertex colors are optimized for the final result.
+
+However, results with adaptive subdivision were also not producing satisfactory results (cf. Fig. 9\). Even when setting the vertex position learning rate to 0, the local error did not decrease. This is potentially due to the interpolation error of the prolongated tetrahedra generated during subdivision (compare Fig. 10\). And as mentioned in the last section, we have not been able to stabilize the training process when using vertex position learning rates not equal to zero.
+
+#### 9 Discussion and Conclusion
+
+The greatest strength of DiffTetVR is the generalization of DiffDVR by Weiss and Westermann [6] from regular grids to tetrahedral meshes. This allows mesh refinement only close to the surface to assign high mesh resolution to where it is truly necessary, thus potentially avoiding high tessellation in empty regions.
+
+Unfortunately, the optimization of vertex positions has proven to be quite fickle. Below, a summary of the largest weaknesses of the presented approach can be found.
+
+- The optimization of vertex positions using the presented technique has proven to be quite unstable. This gets worse the more subdivided the mesh becomes. As tetrahedra get smaller, the chance of inversion increases. Re-tesselation after each step as done by other works like Govindarajan et al. [19] has the advantage of avoiding these issues and may turn out to be the more stable approach.
+- Subdivision using the technique described in Section 7 does not seem to sufficiently lower the local error, so the same region of the mesh gets recursively subdivided more and more. After too many optimization epochs, solving the CSPs and updating the OpenVolumeMesh data structure dominates computation time and the optimization progress slowly comes to a halt.
+- Unlike classical NeRF approaches, DiffTetVR, just like DiffDVR [6], does not model any directional lighting effects, nor does it model volume scattering like the work by Leonard et al. [12].
+- Real world applications often prefer triangle meshes, and thus it can be better to directly use marching tetrahedra-based techniques like DMTet [13] instead of employing volume rendering approaches.
+
+We encourage readers to take inspiration from our ideas and to reuse code that was written as part of this work to build future works that are able to achieve the goal DiffTetVR set out to solve and enable adaptive reconstruction of volumetric data from images.
+
+
+
+Figure 11: Execution pipeline for the differentiable projected triangles implementation. After generating the projected triangles using the technique by Shirley and Tuchman [30], indirect command buffers are generated for subsequent passes, as the number of execution threads depends on the number of generated triangles. Next, depths are generated for all triangles and they are sorted using a GPUbased radix sort algorithm. Finally, the projected triangles are rasterized in sorted order and an image is generated. The loss between the generated image and a ground truth image is generated. In the backward pass, by differentiating the loss, an adjoint image is generated. An adjoint raster pass uses the inversion trick by Weiß and Westermann [6] and a backward pass for the barycentric interpolation to compute gradients for the properties of the projected tetrahedra triangles. A compaction pass computes which tetrahedra have resulted in visible triangles and computes a map from the tetrahedron index to the index of the first triangle. Again, an indirect command buffer is generated dependent on the number of visible tetrahedra. Finally, an adjoint triangle projection pass uses the chain rule to transfer projected tetrahedra triangle gradients to world space tetrahedra gradients.
+
+## 10 Appendix: Painter's algorithm
+
+As discussed in the main manuscript, a topological sorting pass is necessary for implementing the Painter's algorithm [24, 25]. While the directed acyclic graph (DAG) described by Williams [27] could be constructed efficiently on a GPU, to our knowledge no efficient parallel DAG sorter implementation currently exists for GPUs.
+
+The VTK toolkit [33] provides an implementation of projected tetrahedra (PT) [30] based on sorting by the depth of the centroid of the tetrahedral elements. While this can lead to incorrect depth order and rendering artifacts, in many cases this approximation provides sufficient quality. While VTK implements the generation of the projected tetrahedra triangles on the CPU, we have ported their code to a compute shader in Vulkan. Generated triangles are appended linearly to a large buffer in GPU memory by using a global atomic triangle counter variable. We make use of the Vulkan radix sort implementation provided by the Fuchsia project [54] for fast sorting of the triangles on the GPU.
+
+One more challenge for a Painter's algorithm-based differentiable renderer besides topological sorting is the backward pass. While it is easy to just rasterize the tetrahedra in inverse depth order in the backward pass, one needs access to intermediate values and gradients during the backpropagation process (cf. Section 5\).
+
+To solve this issue, we propose the use of a GPU feature called fragment shader interlock (Vulkan and OpenGL) [55] and raster order views (Direct3D). Using this feature, we can load and store the intermediate values and gradients from and to a per-pixel data structure in global GPU memory, and provide critical sections in the shader that ensure that memory accesses are linearized for the same pixel. This way, race conditions can be avoided.
+
+In our source code, we provide an alternative implementation using fragment shader interlock that currently uses a naive sort by the center point depth of the tets. The execution pipeline is shown in Fig. 11. If an efficient parallel DAG sorter should ever become possible to implement on a GPU, the sorter can be replaced and this renderer can be used as a potentially even more performant alternative to our proposed method using per-pixel linked lists [9]. Per-pixel linked list also suffer from unbounded memory requirements, while PT can work with a fixed amount of memory.
+
+### 11 Appendix: Forward rendering
+
+In this section, the forward rendering equations are given for the case α0 ̸= α1 for Eq. \(1\).
+
+$$a(\alpha_0, \alpha_1) = \frac{\alpha_0 - \alpha_1}{2} \quad (22)$$
+
+We will assume that a(α0, α1) ̸= 0, as otherwise α0 = α1, and the simplified formulas derived in the last sections could be used. We use the helper function below to simplify the formulas.
+
+$$b(\alpha_0, \alpha_1) = \frac{\alpha_0}{\alpha_1 - \alpha_0} \quad (23)$$
+
+In the following equations, the arguments of the used auxiliary functions will be omitted for the sake of readability.
+
+| $G(t, c_0, c_1, \alpha_0, \alpha_1) = \begin{cases} \text{erfi}(\sqrt{a}(t+b)), & \text{if } a \geq 0 \\ \text{erf}(\sqrt{-a}(t+b)), & \text{else} \end{cases} \quad (24)$ |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+| $H(t, c_0, c_1, \alpha_0, \alpha_1) = \begin{cases} \text{erfi}(\sqrt{ab}), & \text{if } a \geq 0 \\ \text{erf}(\sqrt{-ab}), & \text{else} \end{cases} \quad (25)$ |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+| $p_0(c_0, \alpha_0) = \alpha_0 c_0$ | (26) |
+|-------------------------------------|------|
+|-------------------------------------|------|
+
+$$p_1(c_0, c_1, \alpha_0, \alpha_1) = -2\alpha_0c_0 + \alpha_1c_0 + \alpha_0c_1 \quad (27)$$
+
+$$p_2(c_0, c_1, \alpha_0, \alpha_1) = \alpha_0 c_0 - \alpha_1 c_0 - \alpha_0 c_1 + \alpha_1 c_1 \quad (28)$$
+
+$$A(t, c_0, c_1, \alpha_0, \alpha_1) = \frac{\sqrt{\pi}(G - H)(p_0 - bp_1 + b^2p_2)}{2\sqrt{a}} \quad (29)$$
+
+$$B(t, c_0, c_1, \alpha_0, \alpha_1) = \frac{(p_1 - 2bp_2)(e^{a(t+b)^2} - e^{ab^2})}{2a} \quad (30)$$
+
+$$C(t, c_0, c_1, \alpha_0, \alpha_1) = \frac{p_2 \left( (t+b)e^{a(t+b)^2} - be^{ab^2} + \frac{\sqrt{\pi}(H-G)}{2\sqrt{|a|}} \right)}{2a} \quad (31)$$
+
+| $c_{acc}(t, c_0, c_1, \alpha_0, \alpha_1) = e^a * (A + B + C)$ | (32) |
+|----------------------------------------------------------------|------|
+|----------------------------------------------------------------|------|
+
+$$\alpha_{acc}(t, c_0, c_1, \alpha_0, \alpha_1) = 1 - e^{-\alpha_0 t + at^2} \quad (33)$$
+
+Other formulas:
+
+| $\text{erfi}(z) = -i \text{erf}(iz)$ | (34) |
+|--------------------------------------|------|
+|--------------------------------------|------|
+
+These formulas are comparable to the ones derived by Williams and Max [20] for the exact accumulation of color along a ray in a tetrahedral element. In their work they state that "it remains to be seen if these expressions can be evaluated so as to permit interactive rendering" [20]. As mentioned in Section 3, using this formula has proven to be infeasible due to the numeric instability of computing the difference of the erfi functions used in the auxiliary terms G and H.
+
+# 12 Appendix: Backward rendering constant per-cell color
+
+| $c_{acc}(t, c, a) = (1 - e^{-\alpha t}) c$ | (35) |
+|--------------------------------------------|------|
+|--------------------------------------------|------|
+
+| $a_{acc}(t, \alpha) = 1 - e^{-\alpha t}$ | (36) |
+|------------------------------------------|------|
+|------------------------------------------|------|
+
+$$\frac{\partial c_{acc}(t, c, \alpha)}{\partial c} = 1 - e^{-\alpha t} \quad (37)$$
+
+$$\frac{\partial c_{acc}(t, c, \alpha)}{\partial \alpha} = t e^{-\alpha t} c \quad (38)$$
+
+$$\frac{\partial c_{acc}(t, c, \alpha)}{\partial t} = \alpha e^{-\alpha t} c \quad (39)$$
+
+$$\frac{\partial a_{acc}(t, \alpha)}{\partial \alpha} = t e^{-\alpha t} \quad (40)$$
+
+$$\frac{\partial a_{acc}(t, \alpha)}{\partial t} = \alpha e^{-\alpha t} \quad (41)$$
+
+#### References
+
+[1] H. Kato, D. Beker, M. Morariu, T. Ando, T. Matsuoka, W. Kehl, and A. Gaidon, "Differentiable rendering: A survey," 2020. [Online]. Available:  [2] S. Liu, T. Li, W. Chen, and H. Li, "Soft rasterizer: A differentiable renderer for image-based 3d reasoning," 2019. [Online]. Available:  [3] S. Laine, J. Hellsten, T. Karras, Y. Seol, J. Lehtinen, and T. Aila, "Modular primitives for high-performance differentiable rendering," ACM Trans. Graph., vol. 39, no. 6, Nov. 2020. [Online]. Available:  [4] C.-H. Lin, C. Kong, and S. Lucey, "Learning efficient point cloud generation for dense 3d object reconstruction," 2017. [Online]. Available:  [5] B. Kerbl, G. Kopanas, T. Leimk¨uhler, and G. Drettakis, "3D gaussian splatting for real-time radiance field rendering," 2023. [Online]. Available:  [6] S. Weiss and R. Westermann, "Differentiable direct volume rendering," IEEE Transactions on Visualization and Computer Graphics, vol. 28, no. 1, pp. 562–572, 2022. [Online]. Available:  [7] T. Porter and T. Duff, "Compositing digital images," SIGGRAPH Comput. Graph., vol. 18, no. 3, pp. 253–259, Jan. 1984. [Online]. Available:  [8] M. Nimier-David, D. Vicini, T. Zeltner, and W. Jakob, "Mitsuba 2: a retargetable forward and inverse renderer," ACM Trans. Graph., vol. 38, no. 6, Nov. 2019. [Online]. Available:  [9] J. C. Yang, J. Hensley, H. Gr¨un, and N. Thibieroz, "Real-time concurrent linked list construction on the gpu," in Proceedings of the 21st Eurographics Conference on Rendering, ser. EGSR'10. Goslar, DEU: Eurographics Association, 2010, pp. 1297–1304. [Online]. Available:  [10] M. Nimier-David, T. M¨uller, A. Keller, and W. Jakob, "Unbiased inverse volume rendering with differential trackers," ACM Trans. Graph., vol. 41, no. 4, pp. 44:1–44:20, Jul. 2022. [Online]. Available:  [11] J. Nov´ak, A. Selle, and W. Jarosz, "Residual ratio tracking for estimating attenuation in participating media," ACM Transactions on Graphics (Proceedings of SIGGRAPH Asia), vol. 33, no. 6, Nov. 2014. [Online]. Available:  [12] L. Leonard, N. Thuerey, and R. Westermann, "Light transport-aware diffusion posterior sampling for single-view reconstruction of 3d volumes," 2025. [Online]. Available: [https:](https://arxiv.org/abs/2501.05226) [//arxiv.org/abs/2501.05226](https://arxiv.org/abs/2501.05226) [13] T. Shen, J. Gao, K. Yin, M.-Y. Liu, and S. Fidler, "Deep marching tetrahedra: a hybrid representation for high-resolution 3d shape synthesis," in Advances in Neural Information Processing Systems (NeurIPS), 2021. [Online]. Available: [https://research.nvidia.com/labs/](https://research.nvidia.com/labs/toronto-ai/DMTet/) [toronto-ai/DMTet/](https://research.nvidia.com/labs/toronto-ai/DMTet/) [14] A. Doi and A. Koide, "An efficient method of triangulating equi-valued surfaces by using tetrahedral cells," IEICE Transactions on Information and Systems, vol. 74, pp. 214–224, 1991. [Online]. Available: [https://search.ieice.org/bin/summary.php?id=e74-d](https://search.ieice.org/bin/summary.php?id=e74-d_1_214) 1 214 [15] Z. Yu, T. Sattler, and A. Geiger, "Gaussian opacity fields: Efficient adaptive surface reconstruction in unbounded scenes," 2024. [Online]. Available:  [16] J. Kulhanek and T. Sattler, "Tetra-nerf: Representing neural radiance fields using tetrahedra," 2023. [Online]. Available: 
+
+- [17] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, "Nerf: representing scenes as neural radiance fields for view synthesis," Commun. ACM, vol. 65, no. 1,
+- p. 99–106, Dec. 2021. [Online]. Available:  [18] C. Gu, Z. Yang, Z. Pan, X. Zhu, and L. Zhang, "Tetrahedron splatting for 3d generation," 2024. [Online]. Available:  [19] S. Govindarajan, D. Rebain, K. M. Yi, and A. Tagliasacchi, "Radiant foam: Real-time differentiable ray tracing," 2025. [Online]. Available:  [20] P. L. Williams and N. Max, "A volume density optical model," in Proceedings of the 1992 Workshop on Volume Visualization, ser. VVS '92. New York, NY, USA: Association for Computing Machinery, 1992, p. 61–68. [Online]. Available:  [21] A. S¸ahıstan, S. Demirci, N. Morrical, S. Zellmann, A. Aman, I. Wald, and U. G¨ud¨ukbay, "Ray-traced shell traversal of tetrahedral meshes for direct volume visualization," in 2021 IEEE Visualization Conference (VIS), 2021, pp. 91–95. [Online]. Available: [https:](https://doi.org/10.1109/VIS49827.2021.9623298) [//doi.org/10.1109/VIS49827.2021.9623298](https://doi.org/10.1109/VIS49827.2021.9623298) [22] N. Morrical, W. Usher, I. Wald, and V. Pascucci, "Efficient space skipping and adaptive sampling of unstructured volumes using hardware accelerated ray tracing," in 2019 IEEE Visualization Conference (VIS), 2019, pp. 256–260. [Online]. Available:  [23] I. Wald, W. Usher, N. Morrical, L. Lediaev, and V. Pascucci, "Rtx beyond ray tracing: exploring the use of hardware ray tracing cores for tet-mesh point location," in Proceedings of the Conference on High-Performance Graphics, ser. HPG '19. Goslar, DEU: Eurographics Association, 2022, p. 7–13. [Online]. Available:  [24] M. de Berg, Depth orders in three dimensions. Berlin, Heidelberg: Springer Berlin Heidelberg, 1993, pp. 135–144. [Online]. Available:  [25] M. de Berg, O. Cheong, M. van Krefeld, and M. Overmars, Binary Space Partitions. Berlin, Heidelberg: Springer Berlin Heidelberg, 2008, pp. 259–281. [Online]. Available: [https://doi.org/10.1007/978-3-540-77974-2](https://doi.org/10.1007/978-3-540-77974-2_12) 12 [26] G. Chen, P. V. Sander, D. Nehab, L. Yang, and L. Hu, "Depth-presorted triangle lists," ACM Trans. Graph., vol. 31, no. 6, Nov. 2012. [Online]. Available: [https:](https://doi.org/10.1145/2366145.2366179) [//doi.org/10.1145/2366145.2366179](https://doi.org/10.1145/2366145.2366179) [27] P. L. Williams, "Visibility-ordering meshed polyhedra," ACM Trans. Graph., vol. 11, no. 2, p. 103–126, Apr. 1992. [Online]. Available:  [28] N. Max, P. Hanrahan, and R. Crawfis, "Area and volume coherence for efficient visualization of 3d scalar functions," SIGGRAPH Comput. Graph., vol. 24, no. 5, p. 27–33, Nov. 1990. [Online]. Available:  [29] R. Saxena, M. Jain, and D. P. Sharma, "Gpu-based parallelization of topological sorting," in Proceedings of First International Conference on Smart System, Innovations and Computing,
+- A. K. Somani, S. Srivastava, A. Mundra, and S. Rawat, Eds. Singapore: Springer Singapore, 2018, pp. 411–421. [30] P. Shirley and A. Tuchman, "A polygonal approximation to direct scalar volume rendering," SIGGRAPH Comput. Graph., vol. 24, no. 5, p. 63–70, nov 1990. [Online]. Available:  [31] M. Kraus, W. Qiao, and D. Ebert, "Projecting tetrahedra without rendering artifacts," in IEEE Visualization 2004, 2004, pp. 27–34. [32] C. M. Stein, B. G. Becker, and N. L. Max, "Sorting and hardware assisted rendering for volume visualization," in Proceedings of the 1994 Symposium on Volume Visualization, ser. VVS '94. New York, NY, USA: Association for Computing Machinery, 1994, p. 83–89. [Online]. Available: 
+
+- [33] W. Schroeder, K. Martin, and B. Lorensen, The Visualization Toolkit (4th ed.). Kitware, 2006. [34] L. Carpenter, "The a -buffer, an antialiased hidden surface method," in Proceedings of the 11th Annual Conference on Computer Graphics and Interactive Techniques, ser. SIGGRAPH '84. New York, NY, USA: Association for Computing Machinery, 1984, p. 103–108. [Online]. Available:  [35] C. Everitt, "Interactive order-independent transparency," NVIDIA Corporation, Oct. 2001. [Online]. Available: [https://my.eng.utah.edu/](https://my.eng.utah.edu/~cs5610/handouts/order_independent_transparency.pdf)∼cs5610/handouts/order independent transparency. [pdf](https://my.eng.utah.edu/~cs5610/handouts/order_independent_transparency.pdf) [36] L. Bavoil and K. Myers, "Order independent transparency with dual depth peeling," Jan. 2008. [37] M. Salvi and K. Vaidyanathan, "Multi-layer alpha blending," in Proceedings of the 18th Meeting of the ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games, ser. I3D '14. New York, NY, USA: ACM, 2014, pp. 151–158. [38] C. M¨unstermann, S. Krumpen, R. Klein, and C. Peters, "Moment-based order-independent transparency," Proc. ACM Comput. Graph. Interact. Tech., vol. 1, no. 1, Jul. 2018. [Online]. Available:  [39] E. Enderton, E. Sintorn, P. Shirley, and D. Luebke, "Stochastic transparency," in I3D '10: Proceedings of the 2010 symposium on Interactive 3D graphics and games, New York, NY, USA, 2010, pp. 157–164. [40] H. M. Sch¨opf and P. H. Supancic, "On B¨urmann's theorem and its application to problems of linear and nonlinear heat transfer and diffusion," The Mathematica Journal, vol. 16, no. 11, 2014. [Online]. Available:  [41] M. Kern, C. Neuhauser, T. Maack, M. Han, W. Usher, and R. Westermann, "A comparison of rendering techniques for 3d line sets with transparency," IEEE Transactions on Visualization and Computer Graphics, vol. 27, no. 8, pp. 3361–3376, 2021. [42] The Khronos Vulkan Working Group. (2024) Vulkan 1.3.291 - A Specification. [Online]. Available:  [43] M. Kremer, D. Bommes, and L. Kobbelt, "Openvolumemesh – a versatile index-based data structure for 3d polytopal complexes," in Proceedings of the 21st International Meshing Roundtable, X. Jiao and J.-C. Weill, Eds. Berlin, Heidelberg: Springer Berlin Heidelberg, 2013, pp. 531–548. [Online]. Available: [https://www.graphics.rwth-aachen.de/media/papers/](https://www.graphics.rwth-aachen.de/media/papers/MKremer_OVM.pdf) MKremer [OVM.pdf](https://www.graphics.rwth-aachen.de/media/papers/MKremer_OVM.pdf) [44] K. Erleben, H. Dohlmann, and J. Sporring, "The adaptive thin shell tetrahedral mesh," in Journal of WSCG, 01 2005, pp. 17–24. [45] A. Meurer, C. P. Smith, M. Paprocki, O. Cert´ık, S. B. Kirpichev, M. Rocklin, A. Kumar, ˇ
+  - S. Ivanov, J. K. Moore, S. Singh, T. Rathnayake, S. Vig, B. E. Granger, R. P. Muller,
+  - F. Bonazzi, H. Gupta, S. Vats, F. Johansson, F. Pedregosa, M. J. Curry, A. R. Terrel,
+- v. Rouˇcka, A. Saboo, I. Fernando, S. Kulal, R. Cimrman, and A. Scopatz, "SymPy: Symbolic computing in Python," PeerJ Computer Science, vol. 3, p. e103, Jan. 2017. [Online]. Available:  [46] J. R. Shewchuk, "What is a good linear element? Interpolation, conditioning, and quality measures," in Proceedings of the 11th International Meshing Roundtable, IMR 2002, Ithaca, New York, USA, September 15-18, 2002, 2002, pp. 115–126. [Online]. Available:  [47] ——, "What is a good linear finite element? Interpolation, conditioning, anisotropy, and quality measures," 2002, unpublished preprint. [Online]. Available: [http://www.cs.berkeley.edu/](http://www.cs.berkeley.edu/~jrs/papers/elemj.pdf)∼jrs/ [papers/elemj.pdf](http://www.cs.berkeley.edu/~jrs/papers/elemj.pdf)
+
+[48] V. N. Parthasarathy, C. M. Graichen, and A. Hathaway, "Fast evaluation & improvement of tetrahedral 3-d grid quality," 1991. [49] Z. Ye, W. Li, S. Liu, P. Qiao, and Y. Dou, "Absgs: Recovering fine details for 3d gaussian splatting," 2024. [Online]. Available:  [50] J. L. Sch¨onberger and J.-M. Frahm, "Structure-from-motion revisited," in Conference on Computer Vision and Pattern Recognition (CVPR), 2016. [51] J. L. Sch¨onberger, E. Zheng, M. Pollefeys, and J.-M. Frahm, "Pixelwise view selection for unstructured multi-view stereo," in European Conference on Computer Vision (ECCV), 2016. [52] Y. Hu, T. Schneider, B. Wang, D. Zorin, and D. Panozzo, "Fast tetrahedral meshing in the wild," ACM Trans. Graph., vol. 39, no. 4, Jul. 2020. [Online]. Available:  [53] H. Si, "Tetgen, a delaunay-based quality tetrahedral mesh generator," ACM Trans. Math. Softw., vol. 41, no. 2, Feb. 2015. [Online]. Available:  [54] Google. (2024) RadixSort/VK. [Online]. Available: [https://fuchsia.googlesource.com/fuchsia/+/](https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/src/graphics/lib/compute/radix_sort/) [refs/heads/main/src/graphics/lib/compute/radix](https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/src/graphics/lib/compute/radix_sort/) sort/ [55] S. Grajewski. (2015) ARB fragment shader interlock. [Online]. Available: [https://registry.](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_fragment_shader_interlock.txt) [khronos.org/OpenGL/extensions/ARB/ARB](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_fragment_shader_interlock.txt) fragment shader interlock.txt

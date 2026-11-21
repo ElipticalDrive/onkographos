@@ -1,0 +1,192 @@
+# Solid Voxelization via 6-Direction Odd-Even Ray Parity
+
+Also called: 6-direction majority vote, Odd-Even Ray Parity Voxelization, Parity Count Method, Ray Stabbing Method, odd-even ray parity solid voxelization
+
+## Overview
+This method converts a normalized, watertight mesh into a solid voxel volume by determining the inside/outside status of each voxel center. It sets itself apart from [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) by using deterministic, axis-aligned rays instead of random directions, and from [Monte Carlo Voxelization with Ray-Casting Optimization](14300-monte-carlo-voxelization-with-ray-casting-optimization.md) by relying on a strict parity count rather than statistical sampling. It solves the problem of robustly filling the interior of a mesh for downstream assembly or growth operations.
+
+## How it works
+**Inputs:** A watertight `MeshData` (positions, indices), voxel size `voxelMm`, and a `colorId`.
+**Outputs:** A map of voxel keys `"i,j,k"` to `colorId`, and a `seed` voxel key. Voxel centers are located at $(i,j,k) \cdot \text{voxelMm}$.
+
+### Data Structures
+1.  **Per-Axis Uniform Triangle Grids:** Three shared grids are used (one for each axis pair: XY, YZ, ZX). Each grid maps a 2D cell index (e.g., `ui,vi`) to a list of triangle indices that intersect the projection of that cell along the third axis.
+2.  **Voxel Map:** A dictionary mapping string keys `"i,j,k"` to integer `colorId`.
+
+### Steps
+1.  **Grid Construction:** Build the three per-axis uniform triangle grids. For each axis pair, project triangles onto the 2D plane perpendicular to the ray direction. Assign each triangle to the 2D grid cells it overlaps. This accelerates ray-triangle intersection by only checking triangles in relevant cells [S1, unofficial].
+2.  **Seed Selection:** Identify the lowest-$k$ layer of filled voxels (initially empty, so this step is conceptual or relies on a preliminary pass; in practice, the seed is determined after voxelization or as the first filled voxel found). Find the $(i,j)$ bounding box center of the filled voxels in the lowest-$k$ layer. Select the filled voxel in that layer nearest to this $(i,j)$ center as the seed [S1, unofficial].
+3.  **Voxelization Loop:** For each voxel $(i,j,k)$ in the target volume:
+    a.  Calculate the voxel center $C = (i \cdot \text{voxelMm}, j \cdot \text{voxelMm}, k \cdot \text{voxelMm})$.
+    b.  Cast six rays from $C$ along the axis directions: $+X, -X, +Y, -Y, +Z, -Z$.
+    c.  For each ray, count the number of intersections with mesh triangles using the corresponding per-axis grid to cull non-intersecting triangles. Use a hand-rolled Möller–Trumbore ray-triangle intersection test [S1, unofficial].
+    d.  Determine the parity (odd/even) of the intersection count for each direction. An odd count implies the ray starts inside and exits, or starts outside and enters; an even count implies it starts outside and exits, or starts inside and enters.
+    e.  Perform a majority vote on the six parity results. A voxel is considered **inside** if the number of "inside" votes is $\ge 3$. Ties (3-3) count as inside [S1, unofficial].
+    f.  If inside, add the voxel to the output map with `colorId`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def solid_voxelize(mesh, voxel_mm, color_id):
+    # mesh: { positions: [[x,y,z],...], indices: [i,j,k,...] }
+    # Returns: { voxels: Map<"i,j,k", color_id>, seed: "i,j,k" }
+    
+    # 1. Build 3 per-axis triangle grids
+    # Grids are indexed by 2D cell coordinates (u,v) for the projection plane
+    grid_xy = build_grid(mesh, axis='z') # Projects onto XY plane, rays along Z
+    grid_yz = build_grid(mesh, axis='x') # Projects onto YZ plane, rays along X
+    grid_zx = build_grid(mesh, axis='y') # Projects onto ZX plane, rays along Y
+    
+    voxels = {}
+    filled_cells = [] # List of (i,j,k) for filled voxels
+    
+    # Determine volume bounds from mesh and voxel_mm
+    bounds = get_mesh_bounds(mesh)
+    min_i, max_i = bounds_to_indices(bounds.min_x, bounds.max_x, voxel_mm)
+    min_j, max_j = bounds_to_indices(bounds.min_y, bounds.max_y, voxel_mm)
+    min_k, max_k = bounds_to_indices(bounds.min_z, bounds.max_z, voxel_mm)
+    
+    for k in range(min_k, max_k + 1):
+        for j in range(min_j, max_j + 1):
+            for i in range(min_i, max_i + 1):
+                # Voxel center
+                cx = i * voxel_mm
+                cy = j * voxel_mm
+                cz = k * voxel_mm
+                
+                inside_votes = 0
+                
+                # Ray +X
+                if count_intersections_ray(cx, cy, cz, 1, 0, 0, grid_yz) % 2 == 1:
+                    inside_votes += 1
+                # Ray -X
+                if count_intersections_ray(cx, cy, cz, -1, 0, 0, grid_yz) % 2 == 1:
+                    inside_votes += 1
+                # Ray +Y
+                if count_intersections_ray(cx, cy, cz, 0, 1, 0, grid_zx) % 2 == 1:
+                    inside_votes += 1
+                # Ray -Y
+                if count_intersections_ray(cx, cy, cz, 0, -1, 0, grid_zx) % 2 == 1:
+                    inside_votes += 1
+                # Ray +Z
+                if count_intersections_ray(cx, cy, cz, 0, 0, 1, grid_xy) % 2 == 1:
+                    inside_votes += 1
+                # Ray -Z
+                if count_intersections_ray(cx, cy, cz, 0, 0, -1, grid_xy) % 2 == 1:
+                    inside_votes += 1
+                
+                # Majority vote: >= 3 means inside (ties count as inside)
+                if inside_votes >= 3:
+                    voxels[f"{i},{j},{k}"] = color_id
+                    filled_cells.append((i, j, k))
+    
+    # 2. Seed Selection
+    seed = pick_seed(filled_cells)
+    
+    return { "voxels": voxels, "seed": seed }
+
+def build_grid(mesh, axis):
+    # axis: 'x', 'y', or 'z'
+    # Determine projection plane axes
+    if axis == 'x': u, v = 'y', 'z'
+    elif axis == 'y': u, v = 'z', 'x'
+    else: u, v = 'x', 'y'
+    
+    grid = {} # Map "ui,vi" -> list of triangle indices
+    # Get mesh bounds to determine grid cell size and origin
+    bounds = get_mesh_bounds(mesh)
+    # ... calculate grid dimensions and origin based on axis and bounds ...
+    
+    for tri_idx in range(mesh.indices.length / 3):
+        p0, p1, p2 = get_triangle_vertices(mesh, tri_idx)
+        # Project vertices to 2D
+        u0, v0 = p0[u], p0[v]
+        u1, v1 = p1[u], p1[v]
+        u2, v2 = p2[u], p2[v]
+        
+        # Find all 2D grid cells intersected by the triangle
+        cells = get_intersected_2d_cells(u0, v0, u1, v1, u2, v2, grid_cell_size, grid_origin)
+        for cell_key in cells:
+            if cell_key not in grid:
+                grid[cell_key] = []
+            grid[cell_key].append(tri_idx)
+    return grid
+
+def count_intersections_ray(cx, cy, cz, dx, dy, dz, grid):
+    # Determine which grid to use based on ray direction
+    # If ray is along X, use grid_yz (projected on YZ)
+    # If ray is along Y, use grid_zx (projected on ZX)
+    # If ray is along Z, use grid_xy (projected on XY)
+    
+    # Get 2D coordinates for grid lookup
+    if abs(dx) > 0: # Ray along X
+        u, v = cy, cz
+        grid_key_func = lambda u, v: f"{u},{v}" # Simplified, actual grid uses indices
+    elif abs(dy) > 0: # Ray along Y
+        u, v = cz, cx
+    else: # Ray along Z
+        u, v = cx, cy
+    
+    # Map u,v to grid cell indices
+    ui, vi = get_cell_index(u, v, grid_origin, grid_cell_size)
+    cell_key = f"{ui},{vi}"
+    
+    triangles = grid.get(cell_key, [])
+    count = 0
+    for tri_idx in triangles:
+        if ray_triangle_intersect(cx, cy, cz, dx, dy, dz, tri_idx):
+            count += 1
+    return count
+
+def ray_triangle_intersect(rx, ry, rz, dx, dy, dz, tri_idx):
+    # Hand-rolled Möller–Trumbore algorithm
+    # Returns true if ray intersects triangle
+    # ... implementation details ...
+    pass
+
+def pick_seed(filled_cells):
+    if not filled_cells:
+        return None
+    # Find lowest k layer
+    min_k = min(c[2] for c in filled_cells)
+    min_k_cells = [c for c in filled_cells if c[2] == min_k]
+    
+    # Find (i,j) bounding box center
+    is_vals = [c[0] for c in min_k_cells]
+    js_vals = [c[1] for c in min_k_cells]
+    cx = (min(is_vals) + max(is_vals)) / 2
+    cy = (min(js_vals) + max(js_vals)) / 2
+    
+    best = None
+    best_d = Infinity
+    for c in min_k_cells:
+        d = (c[0] - cx)**2 + (c[1] - cy)**2
+        if d < best_d:
+            best_d = d
+            best = c
+    return f"{best[0]},{best[1]},{best[2]}"
+```
+
+### Parameters
+-   **Majority Threshold:** 3. A voxel is inside if $\ge 3$ of the 6 axis-aligned rays have odd intersection parity [S1, unofficial].
+-   **Voxel Size:** `voxelMm`. Determines the resolution.
+
+### Pitfalls
+-   **Axis-Aligned Ray Degeneracy:** Rays aligned with mesh features (e.g., sphere placed at origin) can cause degenerate intersections. Mitigation: Place the mesh or sphere off-origin to avoid this known issue [S1, unofficial].
+-   **Non-Watertight Meshes:** The method assumes a watertight mesh. Non-manifold or broken meshes may produce incorrect parity counts [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** $O(V \cdot T_{avg})$, where $V$ is the number of voxels and $T_{avg}$ is the average number of triangles checked per ray. Accelerated by per-axis uniform triangle grids, reducing $T_{avg}$ significantly.
+-   **Memory Complexity:** $O(T + V)$, where $T$ is the number of triangles (for grid storage) and $V$ is the number of voxels (for output map).
+-   **Measured Performance:** ~75ms for a 40³-equivalent icosphere (20,480 faces, 32,764 voxels) [S1, unofficial]. Spike measured 85–103ms [S1, unofficial].
+-   **Accuracy:** Sphere error rate 1.44% (r=20mm, 1280 faces). Box error rate 0.0047%. Criterion was $\le 2\%$ [S1, unofficial].
+-   **Strengths:** Deterministic, robust for watertight meshes, fast with grid acceleration.
+-   **Limitations:** Requires watertight mesh, sensitive to axis-aligned degeneracies if not mitigated.
+
+## Background
+Described by Fakir Nooruddin and Greg Turk in "Simplification and Repair of Polygonal Models Using Volumetric Techniques", GVU technical report 99-37, later published in IEEE Trans. on Visualization and Computer Graphics, vol. 9, nr. 2, April 2003, pages 191-205 [S2]. The method is used by binvox [S2].
+
+## Sources
+[S1] feat: solid voxelization of normalized meshes (issue 0010), https://github.com/fumito-ito/Clothespin-Studio/pull/6, fetched 2026-10-26 (unofficial)
+[S2] binvox 3D mesh voxelizer, keywords: voxelization, voxelisation, 3D model, https://www.patrickmin.com/binvox/, fetched 2026-10-29

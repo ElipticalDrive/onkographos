@@ -1,0 +1,200 @@
+# Average Intensity Projection
+
+Also called: AIP, Average Depth, Average Intensity, Average Intensity Ray Traversal, Average Projection, Mean Density Projection, Ray Traversal -Average
+
+## Overview
+Average Intensity Projection (AIP) is a ray traversal scheme that computes the image by averaging the scalar intensities of voxels along rays through the volume onto the image plane [S3, unofficial]. It produces an X-ray-like picture equivalent to an additive reprojection [S1, S3, unofficial]. Unlike front-to-back compositing, AIP treats the volume as a transparent medium where every sample contributes equally to the final pixel value, making it computationally inexpensive but prone to low contrast and obscured structural details [S3, S10, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   **Volume Data:** A 3D grid of scalar values. Sources describe two common layouts:
+    1.  **3D Texture:** Dimensions $X \times Y \times Z$ (e.g., $256 \times 256 \times 109$), stored in a `GL_TEXTURE_3D` with `GL_RGBA` internal format but `GL_RED` base format, using `GL_UNSIGNED_BYTE` type [S4, unofficial].
+    2.  **Raw Array:** 1D array of `unsigned char` values with dimensions $N_x \times N_y \times N_z$, stored in row-major order [S7, unofficial].
+*   **Camera/View:** Defined by a view position (`viewPos`) and a bounding box for the volume (e.g., min `vec3(-1.0)`, max `vec3(1.0)` or centered at volume origin) [S4, S7, unofficial].
+*   **Parameters:**
+    *   `num_steps`: Fixed number of sampling steps along the ray (e.g., 256) [S4, unofficial].
+    *   `scale`: Scaling factor for output image dimensions ($ImageWidth = VolumeWidth \times scale$) [S7, unofficial].
+    *   `isoSurf`: Optional uniform float for isosurface extraction mode, processed as `iso = isoSurf - floor(isoSurf)` [S4, unofficial].
+
+**Outputs:**
+*   **Image:** A 2D grid of pixel values.
+    *   **Format:** `unsigned char` (0-255 range) [S7, unofficial].
+    *   **Dimensions:** Scaled width and height [S7, unofficial].
+    *   **Value:** The arithmetic mean of the sampled voxel intensities along the ray [S3, S6, unofficial].
+
+### Data Structures
+*   **Ray:** Defined by origin `or` and direction `dir` [S4, unofficial].
+*   **Transfer Function (Optional):** A 1D texture (`GL_TEXTURE_1D`) mapping scalar values to color/opacity. In some implementations, color is accumulated per sample; in others, the mean scalar is mapped to color at the end [S4, S6, unofficial].
+*   **Accumulators:**
+    *   `totalVoxelValue` or `meanSum`: Accumulates the sum of sampled intensities [S7, S6, unofficial].
+    *   `cnt` or `validSamples`: Counts the number of valid samples taken [S4, S6, unofficial].
+
+### Steps
+1.  **Initialize:** For each pixel, initialize `totalVoxelValue = 0.0` and `cnt = 1` (to avoid division by zero) [S4, S7, unofficial].
+2.  **Ray Setup:**
+    *   Compute ray origin `fpos` (fragment position) and direction `direction = normalize(fpos - viewPos)` [S4, unofficial].
+    *   Alternatively, for orthographic projections, map pixel coordinates to volume space: `originalX = pixelX / scale`, `originalY = pixelY / scale`, with ray origin at `(originalX, originalY, 0)` and direction `(0, 0, 1)` [S7, unofficial].
+3.  **Intersection (Perspective):** Intersect the ray with the volume bounding box to find entry (`t_enter`) and exit (`t_exit`) distances using the slab method [S4, unofficial].
+4.  **Step Calculation:** Calculate ray length `dist = distance(entry, exit)` and step size `stepsize = dist / num_steps` [S4, unofficial].
+5.  **Sampling Loop:** Iterate `i` from 0 to `num_steps - 1`:
+    *   Increment counter `cnt++` [S4, unofficial].
+    *   Determine sample position `curPos` along the ray [S4, unofficial].
+    *   **Coordinate Transformation:**
+        *   Scale Z-coordinate if necessary: `tmp.z = curPos.z * 2.3486238532110093` (to handle non-isotropic data or texture normalization) [S4, unofficial].
+        *   Map to texture coordinates: `texPos = (1 + tmp) / 2` [S4, unofficial].
+        *   Invert Y-axis: `texPos.y = 1 - texPos.y` (due to image data inversion) [S4, unofficial].
+    *   **Sampling:** Fetch value `val = texture(texVol, texPos).x` [S4, unofficial].
+    *   **Accumulation:**
+        *   If using raw array indexing (orthographic case): Translate sample to volume center, apply rotation matrix, translate back, check bounds, compute linear index, and fetch `voxelIntensity = vol.data[index] / 255.0f` [S7, unofficial].
+        *   Add to sum: `totalVoxelValue += val` (or `voxelIntensity`) [S4, S7, unofficial].
+    *   **Advance:** `curPos = curPos + direction * stepsize` [S4, unofficial].
+6.  **Finalize:** Compute the average: `meanValue = totalVoxelValue / cnt` [S4, S6, unofficial].
+7.  **Color Mapping:** Map `meanValue` to a final color using a transfer function or color map [S6, unofficial]. If lighting is enabled, calculate normals from the mean position and apply lighting [S6, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def average_intensity_projection(volume_data, view_pos, image_width, image_height, num_steps=256, scale=1.0, fov_deg=60.0):
+    """
+    Renders an Average Intensity Projection of a 3D volume.
+    
+    Args:
+        volume_data: 3D array of shape (Z, Y, X) with values in [0, 1]
+        view_pos: Camera position (list/tuple of 3 floats)
+        image_width: Output image width
+        image_height: Output image height
+        num_steps: Number of samples per ray
+        scale: Scaling factor for image dimensions relative to volume
+        fov_deg: Field of view in degrees for perspective projection
+        
+    Returns:
+        image_data: 2D array of floats (0.0 to 1.0) representing average intensity
+    """
+    image_data = [[0.0 for _ in range(image_width)] for _ in range(image_height)]
+    
+    # Define bounding box for intersection (example: unit cube centered at origin)
+    bbox_min = [-1.0, -1.0, -1.0]
+    bbox_max = [1.0, 1.0, 1.0]
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            direction = compute_ray_direction(x, y, image_width, image_height, fov_deg)
+            
+            result = intersect_box(view_pos, direction, bbox_min, bbox_max)
+            if result is None:
+                continue
+                
+            t_enter, t_exit = result
+            dist = t_exit - t_enter
+            step_size = dist / num_steps
+            
+            total_value = 0.0
+            count = 1  # Avoid division by zero [S4, unofficial]
+            
+            current_pos = [
+                view_pos[0] + direction[0] * t_enter,
+                view_pos[1] + direction[1] * t_enter,
+                view_pos[2] + direction[2] * t_enter
+            ]
+            
+            for _ in range(num_steps):
+                count += 1
+                
+                # Coordinate transformation [S4, unofficial]
+                tmp = [current_pos[0], current_pos[1], current_pos[2] * 2.3486238532110093]
+                tex_pos = [(1.0 + tmp[0]) / 2.0, (1.0 + tmp[1]) / 2.0, (1.0 + tmp[2]) / 2.0]
+                tex_pos[1] = 1.0 - tex_pos[1]  # Invert Y-axis [S4, unofficial]
+                
+                val = sample_volume(volume_data, tex_pos)
+                total_value += val
+                
+                current_pos = [
+                    current_pos[0] + direction[0] * step_size,
+                    current_pos[1] + direction[1] * step_size,
+                    current_pos[2] + direction[2] * step_size
+                ]
+                
+            mean_value = total_value / count  # Compute average [S4, S6, unofficial]
+            image_data[y][x] = mean_value
+            
+    return image_data
+
+def compute_ray_direction(pixel_x, pixel_y, img_w, img_h, fov_deg=60.0):
+    aspect = img_w / img_h
+    fov_rad = math.radians(fov_deg)
+    half_h = math.tan(fov_rad / 2.0)
+    half_w = half_h * aspect
+    dx = (pixel_x / img_w - 0.5) * 2.0 * half_w
+    dy = (0.5 - pixel_y / img_h) * 2.0 * half_h
+    dir_vec = [dx, dy, -1.0]
+    length = math.sqrt(dir_vec[0]**2 + dir_vec[1]**2 + dir_vec[2]**2)
+    return [dir_vec[0]/length, dir_vec[1]/length, dir_vec[2]/length]
+
+def intersect_box(origin, direction, min_b, max_b):
+    t_min = [0.0, 0.0, 0.0]
+    t_max = [0.0, 0.0, 0.0]
+    
+    for i in range(3):
+        if direction[i] == 0.0:
+            if origin[i] < min_b[i] or origin[i] > max_b[i]:
+                return None
+            t_min[i] = -float('inf')
+            t_max[i] = float('inf')
+        else:
+            t_min[i] = (min_b[i] - origin[i]) / direction[i]
+            t_max[i] = (max_b[i] - origin[i]) / direction[i]
+            
+    t_enter = max(t_min[0], t_min[1], t_min[2])
+    t_exit = min(t_max[0], t_max[1], t_max[2])
+    
+    if t_enter > t_exit:
+        return None
+    if t_exit < 0:
+        return None
+        
+    if t_enter < 0:
+        t_enter = 0
+    return t_enter, t_exit
+
+def sample_volume(volume_data, tex_coords):
+    c = [max(0.0, min(1.0, v)) for v in tex_coords]
+    z_idx = int(c[2] * (len(volume_data) - 1))
+    y_idx = int(c[1] * (len(volume_data[0]) - 1))
+    x_idx = int(c[0] * (len(volume_data[0][0]) - 1))
+    return volume_data[z_idx][y_idx][x_idx]
+```
+
+### Edge Cases and Pitfalls
+*   **Division by Zero:** The sample counter `cnt` is initialized to 1 and incremented before sampling to ensure `color /= cnt` never divides by zero [S4, unofficial].
+*   **Coordinate Inversion:** The texture Y-coordinate must be inverted (`1 - texPos.y`) because image data is often inverted on the Y-axis [S4, unofficial].
+*   **Non-Isotropic Data:** The Z-coordinate may require scaling by a specific constant (e.g., `2.3486238532110093`) before mapping to texture space to handle non-isotropic voxels or specific normalization requirements [S4, unofficial].
+*   **Low Contrast:** Additive projection techniques suffer from a confused or unclear appearance because all information is projected, resulting in very little contrast to distinguish gradual variations or small abrupt changes [S3, unofficial].
+*   **Occlusion:** Unlike front-to-back compositing, AIP does not handle obscuration, which can hide structural details [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per ray [G].
+*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [G].
+*   **Performance:** Very fast due to the lack of complex compositing (opacity/alpha blending) and lighting calculations [G].
+*   **Strengths:** Simple implementation, fast rendering, useful for quick overviews or X-ray-like visualizations [G].
+*   **Limitations:** Low contrast, no depth cues from occlusion, sensitive to noise and background clutter [S3, unofficial].
+*   **When to Use:** When speed is critical and depth perception is not required, or for initial data exploration [G].
+*   **When Not to Use:** When detailed structural visualization, depth cues, or high contrast is needed [S3, unofficial].
+
+## Background
+Average Intensity Projection, also known as additive reprojection, was developed by Hohne et al. for medical imaging applications, specifically stereotactic neurosurgery planning [S3, unofficial]. It is one of their generalized projection images, designed to directly image the volume of data without surface shading [S3, unofficial]. The technique is equivalent to an X-ray projection through the volume [S3, unofficial]. It is often contrasted with techniques that use partial volume effects for surface shading or segmentation [S3, unofficial].
+
+## Sources
+[S1] Volume Rendering Volume Rendering. Lecture 21. Acknowledgements. These slides are collected from many sources. A particularly valuable source is the IEEE Visualization conference tutorials. Sources fr, https://www.slideserve.com/hayes-levine/volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-25 (unofficial)
+[S2] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
+[S3] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+[S4] ShashwatC/Ray, https://github.com/ShashwatC/Ray, fetched 2026-10-26 (unofficial)
+[S5] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S6] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
+[S7] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
+[S8] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S9] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)
+[S10] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)

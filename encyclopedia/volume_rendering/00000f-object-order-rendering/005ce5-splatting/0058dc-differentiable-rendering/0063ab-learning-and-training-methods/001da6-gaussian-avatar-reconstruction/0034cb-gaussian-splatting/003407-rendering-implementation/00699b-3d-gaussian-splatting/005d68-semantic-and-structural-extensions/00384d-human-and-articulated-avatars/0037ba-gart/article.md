@@ -1,0 +1,64 @@
+# GART
+
+Also called: GART, A method that extends the human to more articulated models (e.g, animals) based on the 3DGS representation
+
+## Overview
+GART is a 3D Gaussian Splatting-based approach designed to animate articulated non-human models, such as animals, by extending the canonical space deformation principles originally developed for human avatars [S1][S2, unofficial]. Unlike sibling methods like [GaussianHead](8051-gaussianhead.md) or [D3GA](8094-d3ga.md) which focus on specific human facial or body parts, GART generalizes the template-guided parameterization to broader articulated skeletons [S1][S2, unofficial]. It solves the problem of realistic, real-time rendering of complex, non-human articulated figures by mapping canonical 3D Gaussians to target poses via a differentiable deformation function [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of multi-view images of an articulated model (e.g., animal) in various poses; a canonical template mesh or skeleton structure defining the reference pose; pose parameters $\theta$ (joint angles/transforms) for the target frame.
+*   **Outputs:** Rendered image $\mathbf{C}(p)$ for each pixel $p$; optimized Gaussian attributes (position, scale, rotation, opacity, color) and deformation weights.
+
+**Data Structures:**
+*   **Canonical Gaussians:** A set $\mathcal{G}_{canon}$ where each Gaussian $i$ has attributes $\{\mathbf{p}_i^{canonical}, \mathbf{q}_i^{canonical}, \mathbf{s}_i^{canonical}, \mathbf{c}_i, \alpha_i\}$ defined in the neutral/reference pose space.
+*   **Deformation Weights:** For each Gaussian, a set of weights $w_{i,k}$ corresponding to the influence of skeleton joint $k$ on the Gaussian's position and orientation.
+*   **Skeleton/Joint Tree:** A hierarchical structure defining the parent-child relationships of the articulated model's joints, allowing forward kinematics to compute global joint transforms from local pose parameters $\theta$.
+
+**Steps:**
+1.  **Initialization:** Initialize 3D Gaussians in the canonical space, typically using a template mesh or point cloud from the neutral pose. Assign initial deformation weights based on proximity to skeleton joints or mesh skinning [S1][S2, unofficial].
+2.  **Pose Parameterization:** Define the target pose $\theta$ for the current frame. Compute the global transform $T_k(\theta)$ for each joint $k$ in the skeleton using forward kinematics.
+3.  **Deformation:** For each Gaussian $i$, compute its deformed position $\mathbf{p}_i^{target}$ and orientation $\mathbf{q}_i^{target}$ by blending the transforms of the influencing joints $k$ based on weights $w_{i,k}$:
+    $$
+    \mathbf{p}_i^{target} = \sum_{k} w_{i,k} \cdot T_k(\theta) \cdot \mathbf{p}_i^{canonical}
+    $$
+    $$
+    \mathbf{q}_i^{target} = \text{Slerp}\left(\mathbf{q}_i^{canonical}, \sum_{k} w_{i,k} \cdot \text{Rot}(T_k(\theta)), \dots\right) \quad \text{[G]}
+    $$
+    *Note: The exact blending formula for rotation and scale is not detailed in the provided sources, but typically involves weighted combination of joint transforms [G].*
+4.  **Rendering:** Project the deformed Gaussians to screen space. For each pixel $p$, sort the overlapping deformed Gaussians $\mathcal{O}_p$ front-to-back. Compute the color $\mathbf{C}(p)$ using the standard alpha blending equation provided in the parent article.
+5.  **Optimization:** Minimize a photometric loss between the rendered image and the ground truth multi-view images. Optimize Gaussian attributes, deformation weights, and potentially pose parameters if tracking is involved.
+
+**Parameters:**
+*   **Number of Gaussians:** Not given in the sources.
+*   **Skeleton Complexity:** Depends on the target model (e.g., animal rig).
+*   **Learning Rate:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Poses:** Extreme joint angles may cause self-intersection or unnatural deformation if weights are not properly constrained [G].
+*   **Precision:** Floating-point precision in transform calculations may affect accuracy for very small or distant Gaussians [G].
+*   **Boundary Handling:** Gaussians near the boundary of the canonical space may have ambiguous joint influences [G].
+
+## Subtopics
+
+### Template-Guided Parameterization
+Uses a canonical mesh or skeleton to define deformation weights, ensuring smooth transitions between poses. Chosen when a template is available. Link to [Human and Articulated Avatars](8209-human-and-articulated-avatars.md).
+
+### Pose Projection Mechanism
+Maps 2D image coordinates to 3D canonical space for initialization or refinement. Chosen when multi-view consistency is critical. Link to [Human and Articulated Avatars](8209-human-and-articulated-avatars.md).
+
+## Operating characteristics
+*   **Time Complexity:** Rendering is $O(N \log N)$ due to sorting, where $N$ is the number of Gaussians. Deformation is $O(N \cdot K)$ where $K$ is the number of influencing joints per Gaussian.
+*   **Memory Complexity:** $O(N)$ for Gaussian attributes and weights.
+*   **Measured Performance:** Real-time rendering on consumer-level devices is claimed, similar to standard 3DGS [S1][S2, unofficial].
+*   **Strengths:** Generalizes to non-human articulated models; real-time performance; differentiable optimization.
+*   **Limitations:** Requires a canonical template; deformation quality depends on weight initialization and optimization; may struggle with complex non-rigid deformations not captured by skeleton [G].
+*   **When to Use:** When animating articulated non-human models (e.g., animals) with high fidelity and real-time requirements.
+*   **When Not to Use:** For non-articulated objects or when a canonical template is unavailable.
+
+## Background
+GART was introduced in the context of recent advances in 3D Gaussian Splatting, specifically extending the human-centric 3DGS animation methods to broader articulated models like animals [S1][S2, unofficial]. It builds upon the foundational work of 3D Gaussian Splatting [S1][S2, unofficial]. The method is part of a growing family of differentiable rendering techniques for avatar reconstruction and animation [S1][S2, unofficial].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

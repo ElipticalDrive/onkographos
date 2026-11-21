@@ -1,0 +1,168 @@
+# Flux Tube Filament Generation
+
+Also called: Dataset Generation and Encoding, Saturn Polar Magnetic Flux Tube Generation, flux tube filament tracing
+
+## Overview
+Flux Tube Filament Generation is a procedural algorithm that traces sample points along magnetic field lines (filaments) within a synthetic flux tube volume, incorporating radial convergence and stochastic noise to simulate magnetic field line wandering [S1, unofficial]. It solves the problem of generating structured, volumetric magnetic field data for visualization by converting a parametric tube geometry into a discrete set of 3D points with associated vector field values and intensity [S1, unofficial]. It differs from direct field evaluation methods by explicitly tracing a path with a restoring force and random walk, rather than sampling a static analytical field at grid points [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Parameters defining the tube geometry (`TUBE_RADIUS`, `TUBE_HEIGHT`), filament count (`N_STRANDS`), sampling density (`POINTS_PER_STRAND`), noise magnitude (`NOISE_SCALE`), dipole tilt (`DIPOLE_TILT_DEG`), and a global point limit (`MAX_POINTS`).
+- **Outputs:** A list of point records, each containing position $(x, y, z)$, magnetic field vector $(B_x, B_y, B_z)$, intensity, and a derived grayscale value, saved as a compact JSON dataset [S1, unofficial].
+
+**Data Structures:**
+- **Point Record:** A dictionary with keys `x`, `y`, `z` (float, 5 decimal precision), `Bx`, `By`, `Bz` (float, 4 decimal precision), and `intensity` (float, 4 decimal precision) [S1, unofficial].
+- **Dataset:** A list of point records, serialized to JSON with compact separators (no spaces) [S1, unofficial].
+
+**Parameters:**
+- `TUBE_HEIGHT`: 10.0 [scene units] [S1, unofficial].
+- `TUBE_RADIUS`: 0.6 [scene units] [S1, unofficial].
+- `N_STRANDS`: 8 [S1, unofficial].
+- `POINTS_PER_STRAND`: 500 [S1, unofficial].
+- `NOISE_SCALE`: 0.08 [standard deviation per step] [S1, unofficial].
+- `DIPOLE_TILT_DEG`: 3.0 [degrees] [S1, unofficial].
+- `FIELD_STRENGTH`: 20,000.0 [arbitrary units] [S1, unofficial].
+- `MAX_POINTS`: 5000 [absolute ceiling] [S1, unofficial].
+
+**Steps:**
+1. Initialize an empty list `all_points`.
+2. Loop `filament_idx` from 0 to `N_STRANDS - 1`:
+    a. Initialize a deterministic random number generator `rng` with seed `filament_idx * 7919` [S1, unofficial].
+    b. Calculate initial angular position: $\phi_0 = \frac{2.0 \pi \cdot \text{filament\_idx}}{\text{N\_STRANDS}}$ [S1, unofficial].
+    c. Calculate initial radial offset: $r_0 = \text{TUBE\_RADIUS} \cdot \text{rng.uniform}(0.15, 0.85)$ [S1, unofficial].
+    d. Initialize position at the lower boundary:
+       $$c_x = r_0 \cos(\phi_0)$$
+       $$c_y = r_0 \sin(\phi_0)$$
+       $$c_z = -\frac{\text{TUBE\_HEIGHT}}{2.0}$$
+    e. Calculate vertical step size: $\text{step\_z} = \frac{\text{TUBE\_HEIGHT}}{\text{POINTS\_PER\_STRAND}}$ [S1, unofficial].
+    f. Calculate tilt offset: $\text{tilt\_rad} = \text{radians}(\text{DIPOLE\_TILT\_DEG})$, $\text{tilt\_x} = \sin(\text{tilt\_rad})$ [S1, unofficial].
+    g. Loop `i` from 0 to `POINTS_PER_STRAND - 1`:
+        i. Calculate normalized height: $\text{frac} = \frac{i}{\text{POINTS\_PER\_STRAND}}$ [S1, unofficial].
+        ii. Calculate radial convergence: $r_{\text{now}} = r_0 (1.0 - 0.4 \cdot \text{frac})$ [S1, unofficial].
+        iii. Calculate target position:
+             $$\text{target\_x} = r_{\text{now}} \cos(\phi_0) + \text{tilt\_x} \cdot c_z \cdot 0.1$$
+             $$\text{target\_y} = r_{\text{now}} \sin(\phi_0)$$
+        iv. Update position using Euler integration with restoring force and noise:
+             $$c_x \leftarrow c_x + (\text{target\_x} - c_x) \cdot 0.08 + \mathcal{N}(0, \text{NOISE\_SCALE})$$
+             $$c_y \leftarrow c_y + (\text{target\_y} - c_y) \cdot 0.08 + \mathcal{N}(0, \text{NOISE\_SCALE})$$
+             $$c_z \leftarrow c_z + \text{step\_z}$$
+        v. Evaluate dipole field at $(c_x, c_y, c_z)$ to get $B_x, B_y, B_z$. [G: The specific dipole formula is not provided in the source, but it uses `FIELD_STRENGTH` as a scaling constant. A standard dipole field $\mathbf{B} = \frac{3(\mathbf{m}\cdot\hat{\mathbf{r}})\hat{\mathbf{r}} - \mathbf{m}}{r^3}$ scaled by `FIELD_STRENGTH` is implied, but the source does not specify the dipole moment vector orientation. The source simply states "Evaluate dipole field".]
+        vi. Calculate magnitude: $\text{mag} = \sqrt{B_x^2 + B_y^2 + B_z^2}$ [S1, unofficial].
+        vii. Create a record with rounded coordinates (5 decimals for pos, 4 for field) and intensity (4 decimals). [S1, unofficial].
+        viii. Append record to `all_points`.
+3. If `len(all_points) > MAX_POINTS`, truncate `all_points` to the first `MAX_POINTS` elements [S1, unofficial].
+4. Extract intensities from all points to find $i_{\min}$ and $i_{\max}$ [S1, unofficial].
+5. For each point, compute grayscale value using `intensity_to_gray(p['intensity'], i_min, i_max)` [S1, unofficial].
+6. Save dataset to `magnetosphere_data.json` in compact JSON format [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+import json
+
+def generate_flux_tube_filaments():
+    # Parameters
+    TUBE_HEIGHT = 10.0
+    TUBE_RADIUS = 0.6
+    N_STRANDS = 8
+    POINTS_PER_STRAND = 500
+    NOISE_SCALE = 0.08
+    DIPOLE_TILT_DEG = 3.0
+    FIELD_STRENGTH = 20000.0
+    MAX_POINTS = 5000
+
+    all_points = []
+
+    for filament_idx in range(N_STRANDS):
+        # Deterministic seeding
+        rng = random.Random(filament_idx * 7919)
+        
+        # Initial conditions
+        phi0 = (2.0 * math.pi * filament_idx) / N_STRANDS
+        r0 = TUBE_RADIUS * rng.uniform(0.15, 0.85)
+        
+        cx = r0 * math.cos(phi0)
+        cy = r0 * math.sin(phi0)
+        cz = -TUBE_HEIGHT / 2.0
+        
+        step_z = TUBE_HEIGHT / POINTS_PER_STRAND
+        tilt_rad = math.radians(DIPOLE_TILT_DEG)
+        tilt_x = math.sin(tilt_rad)
+        
+        for i in range(POINTS_PER_STRAND):
+            frac = i / POINTS_PER_STRAND
+            r_now = r0 * (1.0 - 0.4 * frac)
+            
+            target_x = r_now * math.cos(phi0) + tilt_x * cz * 0.1
+            target_y = r_now * math.sin(phi0)
+            
+            # Euler integration with restoring force and noise
+            cx += (target_x - cx) * 0.08 + rng.gauss(0, NOISE_SCALE)
+            cy += (target_y - cy) * 0.08 + rng.gauss(0, NOISE_SCALE)
+            cz += step_z
+            
+            # Evaluate dipole field [G: Source does not provide explicit dipole formula]
+            # Assuming a standard dipole aligned with Z axis for this implementation gap
+            r_mag = math.sqrt(cx**2 + cy**2 + cz**2)
+            if r_mag == 0:
+                bx, by, bz = 0.0, 0.0, 0.0
+            else:
+                # Dipole field B = (3(m.r)r - m r^2) / r^5 * FIELD_STRENGTH
+                # Assuming m = (0, 0, 1)
+                bx = FIELD_STRENGTH * (3 * cz * cx) / (r_mag**5)
+                by = FIELD_STRENGTH * (3 * cz * cy) / (r_mag**5)
+                bz = FIELD_STRENGTH * (3 * cz**2 - r_mag**2) / (r_mag**5)
+            
+            mag = math.sqrt(bx**2 + by**2 + bz**2)
+            
+            # Create record
+            record = {
+                'x': round(cx, 5),
+                'y': round(cy, 5),
+                'z': round(cz, 5),
+                'Bx': round(bx, 4),
+                'By': round(by, 4),
+                'Bz': round(bz, 4),
+                'intensity': round(mag, 4)
+            }
+            all_points.append(record)
+            
+            if len(all_points) > MAX_POINTS:
+                all_points = all_points[:MAX_POINTS]
+                break
+
+    # Normalize intensity to grayscale
+    if all_points:
+        intensities = [p['intensity'] for p in all_points]
+        i_min = min(intensities)
+        i_max = max(intensities)
+        
+        for p in all_points:
+            if i_max == i_min:
+                p['gray'] = 0.5
+            else:
+                p['gray'] = (p['intensity'] - i_min) / (i_max - i_min)
+
+    # Save to JSON
+    with open('magnetosphere_data.json', 'w') as f:
+        json.dump(all_points, f, separators=(',', ':'))
+
+    return all_points
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot S)$, where $N$ is `POINTS_PER_STRAND` and $S$ is `N_STRANDS`. Each point requires a constant number of arithmetic operations and a random number generation.
+- **Memory Complexity:** $O(N \cdot S)$ to store the point records. The `MAX_POINTS` constraint caps this at a fixed size.
+- **Strengths:** Produces reproducible data via deterministic seeding. The stochastic noise simulates realistic field line wandering. The radial convergence creates a physically plausible tube shape.
+- **Limitations:** The dipole field evaluation is a simplification and may not accurately represent complex magnetic topologies. The noise is isotropic and may not reflect anisotropic diffusion. The method generates a sparse set of lines rather than a dense volume, requiring interpolation for volumetric rendering.
+- **When to use:** When visualizing magnetic flux tubes in astrophysical contexts (e.g., solar active regions) where field line tracing and stochastic effects are important.
+- **When not to use:** When a dense, voxel-based volume is required directly, or when high-fidelity magnetic field solutions (e.g., MHD simulations) are needed.
+
+## Background
+The method originates from the `AstroSplat-Browser` project, which focuses on native volumetric visualization for astrophysical vector fields [S1, unofficial]. It is part of a pipeline that generates synthetic active region magnetograms and converts them into splat-based visualizations. The specific algorithm for flux tube filament generation is designed to create sample points along magnetic field lines within a flux tube, incorporating radial convergence and stochastic noise [S1, unofficial].
+
+## Sources
+[S1] VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, https://github.com/VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, fetched 2026-10-26 (unofficial)

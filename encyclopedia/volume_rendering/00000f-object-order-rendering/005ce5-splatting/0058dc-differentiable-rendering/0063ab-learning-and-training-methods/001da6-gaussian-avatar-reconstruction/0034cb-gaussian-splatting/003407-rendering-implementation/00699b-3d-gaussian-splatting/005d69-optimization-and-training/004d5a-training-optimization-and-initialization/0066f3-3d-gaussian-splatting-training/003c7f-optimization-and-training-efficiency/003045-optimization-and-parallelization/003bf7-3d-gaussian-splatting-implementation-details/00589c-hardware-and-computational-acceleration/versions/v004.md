@@ -1,0 +1,69 @@
+# Hardware and Computational Acceleration
+
+Also called: 3DGS Acceleration, 3D Gaussian Splatting Optimization
+
+## Overview
+This family addresses the computational bottlenecks in the 3D Gaussian Splatting (3DGS) rendering and training pipelines, specifically targeting the memory-bound front-end (projection and sorting) and the compute-bound rasterization stage [12180]. It sets itself apart from generic optimization by employing hardware-aware strategies, such as leveraging Tensor Cores via GEMM transformation [S1], and algorithmic innovations like comparison-free sorting [12180], index-parity sharding [15108], and cache-based lazy memory management [17592] to overcome single-GPU memory and compute limits.
+
+## Shared principles
+The 3DGS rendering pipeline consists of two primary stages, each with distinct optimization goals [12180]:
+
+1.  **Front-End (Memory-Bound):**
+    *   **Projection and Sorting:** 3D Gaussians are projected to 2D, generating a depth key for each. To ensure correct alpha compositing, Gaussians must be sorted front-to-back (increasing depth) within each image tile.
+    *   **Attribute Fetching:** For each Gaussian-pixel pair, attributes (opacity, spherical harmonic coefficients) are fetched from global memory.
+    *   **Optimization Goal:** Reduce global memory traffic and bandwidth usage. This is achieved by compressing data (quantization, key compression) and fusing kernels to avoid intermediate writes [12180].
+
+2.  **Rasterization (Compute-Bound):**
+    *   **Alpha Compositing:** The final pixel color $C$ is computed via alpha blending:
+        $$C = \sum_{i=1}^N c_i \alpha_i T_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$$
+        where $c_i$ is the color, $\alpha_i$ is the opacity, and $T_i$ is the transmittance [12180].
+    *   **Gaussian Evaluation:** The opacity $\alpha_i$ for a pixel at $(x,y)$ relative to a Gaussian center $(u,v)$ is computed as [12180]:
+        $$\alpha_i = o \exp(p(x, y))$$
+        where $o$ is the base opacity and $p(x, y)$ is the Gaussian power:
+        $$p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right)$$
+        Here, $a, b, c$ are derived from the projected 2D covariance matrix, and $(w, v)$ are the center coordinates [12180].
+    *   **Optimization Goal:** Increase instruction-level parallelism (ILP) and reduce expensive operations (like `exp`) within the per-pixel loop [12180].
+
+For distributed training, the global set of 3D Gaussians $\mathcal{G}$ is partitioned across $M$ GPUs. Each GPU maintains a local shard $\mathcal{G}^{(m)}$ and its optimizer state. The training loop involves local projection of the shard, communication (e.g., all-to-all exchange) to route Gaussians to responsible GPUs, filtering via importance scoring or pruning, and local rasterization with gradient updates [15108].
+
+## Subtopics
+
+### [Sorting and Rendering Pipeline Optimization](12180-sorting-and-rendering-pipeline-optimization.md)
+Addresses the computational bottlenecks in the 3DGS rendering pipeline, specifically targeting the memory-bound front-end (projection and sorting) and the compute-bound rasterization stage [12180]. It sets itself apart from generic optimization by employing hardware-aware strategies, such as the Roofline model to identify resource constraints, and algorithmic innovations like comparison-free sorting to reduce synchronization overhead.
+
+### [Distributed Training and Sharding](15108-distributed-training-and-sharding.md)
+Distributed training and sharding partition the global set of 3D Gaussians $\mathcal{G}$ and optimizer states across $M$ GPUs to enable city-scale optimization that exceeds single-GPU memory and compute limits. Unlike spatial block partitioning, which suffers from cross-block visibility waste, imbalanced shards, and expensive merge steps, BlitzGS uses index-parity sharding combined with all-to-all communication to route Gaussians to responsible tiles, ensuring balanced loads without final merging.
+
+### [Distributed 3D Gaussian Splatting](16979-distributed-3d-gaussian-splatting.md)
+Distributed 3D Gaussian Splatting is a multi-GPU extension of the 3D Gaussian Splatting (3D-GS) pipeline designed for scientific visualization, enabling the scalable processing of large datasets that exceed the memory capacity of a single GPU. Unlike standard 3D-GS which operates on a single device, this method distributes the optimization of Gaussian primitives across multiple GPUs using a data-parallel approach adapted from Grendel-GS, allowing for high-resolution reconstruction of complex scientific isosurfaces. It sets itself apart by bypassing image-based reconstruction in favor of direct initialization from volume data, specifically targeting the memory bottlenecks encountered when handling millions of Gaussians in HPC environments.
+
+### [Cache-based Lazy Memory Management](17592-cache-based-lazy-memory-management.md)
+Cache-based Lazy Memory Management (CLM) is a memory offloading system that enables the training of large-scale 3D Gaussian Splatting (3DGS) scenes on a single consumer-grade GPU by exploiting the inherent sparsity of memory access patterns. Unlike naive offloading strategies that load the entire scene representation to the GPU, CLM keeps Gaussians in CPU memory and loads only the subset accessed by the current view, overlapping communication with computation to hide latency. This approach allows training scenes with over 100 million Gaussians on hardware with limited VRAM, such as the NVIDIA RTX 4090, without requiring multi-GPU setups or compromising rendering quality.
+
+### [Cache-Less Memory (CLM)](17594-cache-less-memory-clm.md)
+Cache-Less Memory (CLM) is a system design that enables the training and rendering of large or highly detailed 3D Gaussian Splatting scenes on a single consumer-grade GPU by offloading non-critical Gaussian parameters and optimizer state to the CPU. It solves the GPU memory bottleneck inherent in standard 3D Gaussian Splatting by leveraging attribute-wise offloading, microbatch pipelining, and spatial locality to minimize GPU-CPU communication overhead. Unlike sibling methods that focus on compression or hierarchical structures, CLM retains full precision by keeping selection-critical attributes (position, rotation, scale) in GPU memory for frustum culling while moving color and opacity to CPU memory.
+
+### GEMM-GS
+**Definition**
+An acceleration approach for 3D Gaussian Splatting that utilizes Tensor Cores on GPUs by reformulating the blending process into a GEMM-compatible form [S1].
+
+**Step**
+Transform the conventional 3DGS blending process into a GEMM-style formulation equivalently to leverage Tensor Cores [S1]. Develop a CUDA kernel implementing the transformed blending process, designed as a three-stage double-buffered pipeline with asynchronous memory copy to overlap computation and memory access [S1].
+
+**Parameter**
+Tile size: The 2D screen is divided into tiles, with 16x16 pixels mentioned as an example [S1]. Thread block size: Rendering a 16x16 tile is assigned to a thread block of 256 threads [S1].
+
+**Layout**
+Gaussian features computed in preprocessing include depth $d$ and RGB color $c$ [S1].
+
+**Number**
+GEMM-GS achieves an average 1.42× speedup over vanilla 3DGS implementation [S1]. GEMM-GS provides an additional 1.47× speedup when combined with existing acceleration approaches [S1].
+
+**Comparison**
+GEMM-GS is orthogonal to existing acceleration methods (compression-based or preprocessing-based), allowing it to provide additional speedup when combined with them [S1].
+
+## Background
+Origin: GEMM-GS was introduced in 2026 to address the lack of General Matrix Multiplication (GEMM) operations in the standard 3DGS pipeline, which overlooks the evolving Tensor Cores of modern GPUs [S1]. Distributed 3D Gaussian Splatting targets scientific visualization, adapting data-parallel approaches from Grendel-GS to handle large datasets [16979]. Cache-based Lazy Memory Management addresses the VRAM limitations of consumer-grade GPUs for large-scale scenes [17592].
+
+## Sources
+[S1] GEMM-GS: Accelerating 3D Gaussian Splatting on Tensor Cores with GEMM-Compatible Blending, https://doi.org/10.1145/3770743.3803899, fetched 2026-10-28

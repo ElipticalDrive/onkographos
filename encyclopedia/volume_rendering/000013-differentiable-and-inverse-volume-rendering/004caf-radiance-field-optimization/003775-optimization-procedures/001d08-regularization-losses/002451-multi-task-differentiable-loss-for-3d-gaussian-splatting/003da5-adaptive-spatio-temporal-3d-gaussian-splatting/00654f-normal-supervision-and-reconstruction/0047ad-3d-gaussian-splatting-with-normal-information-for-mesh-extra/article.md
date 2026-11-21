@@ -1,0 +1,204 @@
+# 3D Gaussian Splatting with Normal Information for Mesh Extraction
+
+Also called: GS with Normal Regularization, SDF Gradient Normal Supervision
+
+## Overview
+This method extends 3D Gaussian Splatting (GS) by introducing a regularization term based on the gradients of an estimated Signed Distance Function (SDF) to enforce surface-aligned geometry [S1]. While standard GS relies on photometric losses that often result in imprecise geometry and noisy normals, this approach enables high-quality surface mesh extraction and improved rendering fidelity, particularly in regions with high curvature or fine detail [S1]. It distinguishes itself from sibling methods like [Gaussian Frosting Layer Creation](12579-gaussian-frosting-layer-creation.md) and [Dual-Domain Deformation Model](12804-dual-domain-deformation-model.md) by explicitly supervising the SDF gradient direction against monocular normal estimates to ensure the Gaussians represent a coherent surface rather than a volumetric density field.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of calibrated camera poses and intrinsics obtained via Structure-from-Motion (SfM) [S1].
+*   A sparse point cloud derived from the SfM process [S1].
+*   Training images for novel-view synthesis [S1].
+*   Pretrained monocular normal estimation network (e.g., Omnidata [S1] or MiDaS [S1]) to generate ground-truth normal maps from training images [S1].
+
+**Outputs:**
+*   Optimized 3D Gaussian parameters (means $\mu$, covariances $\Sigma$, opacities $\alpha$, and spherical harmonics coefficients) [S1].
+*   A surface mesh extracted via Poisson reconstruction from the optimized Gaussians [S1].
+
+### Data Structures
+The scene is represented by a set of $N$ 3D Gaussians. Each Gaussian $g$ is defined by:
+*   **Mean ($\mu_g$):** A 3D vector $(x, y, z)$ representing the center of the Gaussian [S1].
+*   **Covariance ($\Sigma_g$):** A $3 \times 3$ symmetric positive semi-definite matrix [S1]. To ensure this property during optimization, $\Sigma_g$ is parameterized by a rotation matrix $R$ (derived from a quaternion) and a scaling matrix $S$ (diagonal) such that:
+    $$ \Sigma_g = R S S^T R^T $$
+    where $S = \text{diag}(s_1, s_2, s_3)$ [S1].
+*   **Opacity ($\alpha_g$):** A scalar in $[0, 1]$ [S1].
+*   **Color:** Represented by spherical harmonics coefficients [S1].
+
+### Numbered Steps
+
+1.  **Initialization:** Initialize the Gaussian positions using the sparse point cloud obtained from the SfM process [S1]. Initialize covariance matrices using the rotation $R$ and scaling $S$ parameterization [S1]. Initialize opacities and spherical harmonics coefficients [S1].
+
+2.  **Rasterization and Rendering:** Project the 3D Gaussians onto the 2D image plane as splats. The density function $d(p)$ at any spatial location $p$ is defined as the sum of Gaussian values weighted by their alpha-blending coefficients:
+    $$ d(p) = \sum_{g} \alpha_g \exp\left(-\frac{1}{2} (p - \mu_g)^T \Sigma_g^{-1} (p - \mu_g)\right) $$
+    Render the color and depth maps using fast tile-based rasterization and $\alpha$-blending [S1].
+
+3.  **Adaptive Density Control:** Interleave optimization with adaptive density control. Add new Gaussians to "empty" areas (missing geometric features) or areas where a single Gaussian covers a large part of the scene. Prune transparent Gaussians with opacities close to 0 [S1].
+
+4.  **SDF Estimation:** For a point $p$ visible from a training viewpoint, estimate the SDF value $\hat{f}(p)$ as the difference between the depth of $p$ and the depth value in the corresponding rendered depth map at the projection of $p$ [S1].
+
+5.  **Monocular Normal Extraction:** Obtain monocular normal maps $n_p$ for the training images using a pretrained neural network (e.g., Omnidata or MiDaS) [S1].
+
+6.  **Gradient Projection and Rasterization:**
+    *   Compute the gradient of the estimated SDF, $\nabla \hat{f}_p$, at point $p$ [S1].
+    *   Project this gradient into camera space using the world-to-view transform [S1].
+    *   Rasterize the projected gradient values to the corresponding pixel positions using the GS rasterizer. Let the rasterized gradient at pixel $p$ be denoted as $\nabla \hat{f}_p$ [S1].
+
+7.  **Normal Regularization Loss:** Compute the normal regularization term $R(\hat{f})$ by measuring the cosine similarity between the rasterized SDF gradient $\nabla \hat{f}_p$ and the monocular normal $n_p$:
+    $$ R(\hat{f}) = \sum_{p \in P} \frac{|\nabla \hat{f}_p \cdot n_p|}{\|\nabla \hat{f}_p\| \|n_p\|} $$
+    where $P$ is the set of pixel points in the training images [S1].
+
+8.  **Total Loss Calculation:** Compute the total loss $L$ for the current iteration:
+    $$ L = L_1 + \lambda_{DSSIM} L_{DSSIM} + \lambda_r R(\hat{f}) $$
+    where $L_1$ is the L1 norm loss between rendered and ground-truth colors, $L_{DSSIM}$ is the D-SSIM loss, $\lambda_{DSSIM}$ is the weight for D-SSIM, and $\lambda_r$ is the weight for the normal regularization term [S1].
+
+9.  **Opacity Entropy Regularization:** Apply entropy regularization for a short number of iterations to encourage opacities to be binary (0 or 1), avoiding semi-transparent Gaussians, as the goal is surface representation [S1].
+
+10. **Optimization:** Update Gaussian parameters (means, covariances, opacities, spherical harmonics) using gradient descent to minimize $L$ [S1]. Repeat steps 2-9 for the training iterations.
+
+11. **Mesh Extraction:** After optimization, extract a mesh by running Poisson reconstruction on points sampled from the optimized Gaussians [S1].
+
+### Parameters
+*   $\lambda_{DSSIM}$: Weight for the D-SSIM loss term. Typically set to 0.2 [S1].
+*   $\lambda_r$: Weight for the normal regularization term $R(\hat{f})$. Tuned per scene, typically between 0.1 and 0.4 [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_gaussian_splatting_with_normal_regularization(
+    cameras, 
+    sparse_point_cloud, 
+    training_images, 
+    normal_estimator, 
+    num_iterations,
+    lambda_dssim=0.2,
+    lambda_r=0.2
+):
+    # 1. Initialization
+    gaussians = initialize_gaussians(sparse_point_cloud)
+    # Each gaussian has: mean, R (rotation), S (scaling), alpha, sh_coeffs
+    
+    # 2. Setup rasterizer and loss functions
+    rasterizer = TileBasedRasterizer()
+    l1_loss = L1Loss()
+    dssim_loss = DSSIMLoss()
+    
+    for iteration in range(num_iterations):
+        # 3. Adaptive Density Control
+        gaussians = adaptive_density_control(gaussians, cameras, rasterizer)
+        
+        # 4. Render
+        rendered_colors, rendered_depths = rasterizer.render(gaussians, cameras)
+        
+        # 5. Compute Photometric Losses
+        loss_l1 = l1_loss(rendered_colors, training_images)
+        loss_dssim = dssim_loss(rendered_colors, training_images)
+        
+        # 6. Compute Normal Regularization
+        # Get monocular normals from pretrained network
+        monocular_normals = normal_estimator(training_images)
+        
+        # Estimate SDF gradients
+        # For each pixel p in training images:
+        #   p_3d = unproject(p, rendered_depths[p])
+        #   f_hat(p) = depth(p_3d) - rendered_depths[p]
+        #   grad_f_hat = compute_sdf_gradient(f_hat, p_3d)
+        #   grad_f_hat_cam = project_to_camera_space(grad_f_hat, cameras[p])
+        #   rasterized_grad = rasterize_gradient(grad_f_hat_cam, gaussians)
+        
+        # Compute cosine similarity term
+        normal_reg_loss = 0.0
+        for p in training_images:
+            # Reconstruct 3D point from depth
+            p_3d = unproject_pixel(p, rendered_depths[p], cameras[p])
+            
+            # Estimate SDF value
+            # Note: In practice, this requires querying the Gaussian density field
+            # or using the depth difference as described in [S1]
+            sdf_val = compute_sdf_value(p_3d, gaussians, rendered_depths[p])
+            
+            # Compute SDF gradient
+            grad_sdf = compute_gradient(sdf_val, p_3d)
+            
+            # Project to camera space
+            grad_sdf_cam = world_to_view_transform(grad_sdf, cameras[p])
+            
+            # Rasterize gradient to pixel position
+            rasterized_grad = rasterize_gradient_field(grad_sdf_cam, gaussians, p)
+            
+            # Get monocular normal
+            n_p = monocular_normals[p]
+            
+            # Compute cosine similarity
+            cos_sim = abs(dot(rasterized_grad, n_p)) / (norm(rasterized_grad) * norm(n_p))
+            normal_reg_loss += cos_sim
+            
+        # Normalize loss
+        normal_reg_loss /= len(training_images)
+        
+        # 7. Total Loss
+        total_loss = loss_l1 + lambda_dssim * loss_dssim + lambda_r * normal_reg_loss
+        
+        # 8. Opacity Entropy Regularization (for short number of iterations)
+        if iteration < entropy_reg_iterations:
+            total_loss += entropy_regularization(gaussians.alpha)
+            
+        # 9. Backpropagation and Update
+        gradients = compute_gradients(total_loss, gaussians)
+        update_gaussians(gaussians, gradients)
+        
+    # 10. Mesh Extraction
+    points = sample_points_from_gaussians(gaussians)
+    mesh = poisson_reconstruction(points)
+    
+    return gaussians, mesh
+```
+
+### Edge Cases and Pitfalls
+*   **Semi-transparent Gaussians:** Standard GS optimization may result in semi-transparent Gaussians which are undesirable for mesh extraction. The entropy regularization step is critical to force opacities towards binary values [S1].
+*   **Monocular Normal Accuracy:** The quality of the normal regularization depends on the accuracy of the pretrained monocular normal estimator (e.g., Omnidata, MiDaS). Errors in these estimates may lead to incorrect surface alignment [S1].
+*   **SDF Estimation:** The SDF is estimated from depth maps. In regions with occlusions or self-occlusions, the depth difference may not accurately represent the true SDF, potentially leading to noisy gradients [S1].
+*   **Parameter Tuning:** The weight $\lambda_r$ needs to be tuned per scene. Too high a value may over-constrain the geometry, while too low a value may not provide sufficient surface alignment [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity:** The method adds the overhead of monocular normal estimation and SDF gradient computation to the standard GS optimization. The rasterization of gradients adds computational cost per iteration [S1].
+*   **Memory Complexity:** Requires storing additional data for SDF gradients and monocular normals. The Gaussian representation itself remains similar to standard GS [S1].
+
+### Measured Performance
+*   Evaluated on Mip-NeRF360, Tanks and Temples, and Deep-Blending datasets [S1].
+*   Scores higher on photorealism metrics (PSNR, SSIM) compared to other mesh-extracting rendering methods like SuGaR and Baked-SDF without compromising mesh quality [S1].
+*   On Mip-NeRF360 indoor scenes, achieves PSNR of 29.87 and SSIM of 0.921, outperforming SuGaR (PSNR 29.43, SSIM 0.910) [S1].
+*   On Mip-NeRF360 outdoor scenes, achieves PSNR of 24.61 and SSIM of 0.719, outperforming SuGaR (PSNR 24.40, SSIM 0.699) [S1].
+
+### Strengths and Limitations
+*   **Strengths:** Improves rendering quality and enables high-quality mesh extraction. Addresses the issue of imprecise geometry and noisy normals in photometric-only optimization [S1].
+*   **Limitations:** Relies on the accuracy of monocular normal estimators. Requires careful tuning of the regularization weight $\lambda_r$ [S1].
+
+### When to Use
+*   Use when high-quality surface mesh extraction is required from 2D images.
+*   Use when photometric-only optimization leads to imprecise geometry, especially in regions with high curvature or fine detail [S1].
+
+### When Not to Use
+*   Use standard GS if mesh extraction is not required and photometric quality is the sole metric.
+*   Use if computational resources are extremely limited, as the additional regularization steps add overhead [S1].
+
+## Background
+
+### Origin
+The method was proposed by Meenakshi Krishnan, Liam Fowl, and Ramani Duraiswami from the University of Maryland, College Park, and Google [S1]. It was published in January 2025 [S1].
+
+### History and Development
+The method builds upon the original 3D Gaussian Splatting paper [1] and addresses its limitations in geometry reconstruction. It incorporates ideas from density function-based regularization [8] and extends them with normal supervision [S1].
+
+### Applications
+The method is crucial for downstream applications in video generation, animation, AR-VR, and gaming, where high-quality surface meshes and realistic rendering are required [S1].
+
+## Sources
+
+[S1] 3D Gaussian Splatting with Normal Information for Mesh Extraction and Improved Rendering, https://doi.org/10.1109/icasspw65056.2025.11011170, fetched 2026-10-26

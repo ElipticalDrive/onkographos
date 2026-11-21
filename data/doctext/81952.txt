@@ -1,0 +1,3667 @@
+VoxelTerrain
+============
+
+Simple OpenGL voxelized terrain engine. Creates voxel terrain based on any heightmap you supply available for freelook and rendering tests using different methods. You can select the way your terrain is loaded into memory and how is it rendered. You can choose from set of additional performance optimizations and measure time of all the operations.
+
+Currently Working
+============
+
+1. Opening heightmap and reading it into memory using simplified or complex algorithm.
+  - Includes time measuring for these operations
+  - Includes breaking terrain into CHUNK_SIZE x CHUNK_SIZE chunks
+  - Includes checking for surface and empty/full chunked analyzis
+2. Meshing chunks for different rendering methods
+  - Meshing for triangles
+  - Meshing for quads
+  - Meshing for indexed quads
+  - Meshing for optimized indexed quad surface
+  - Includes active voxel, primitive and vertex counters
+3. Rendering with different methods
+  - Triangle rendering
+  - Quad rendering
+  - Indexed quad rendering
+4. Optimizations
+  - Primitive reducing using optimized meshing
+  - Frustum and proximity culling
+  - Include active chunks check on move
+  
+Immediate needs
+============
+
+1. Frustum and proximity culling
+  - Needs fixing for accuarcy. For some reason sometimes chunks disappear when they should be visible. Visibility check is based on chunk centers generated as early as map loading. Uses spherical boundary for frustum and euclidean distance for proximity. Both have visible issues though not with the check itself, probably it's an issue with calculating chunk centers.
+  - For the time beeing both cullings cannot be used together, but best visual and performance effects could probably be achieved when mixed. For instance, proximity could be set just a chunk away from far vision boundary allowing to load chunks that are not yet visible.
+2. Memory release
+  - Maps as big as 512x512 require a lot of memory to load. Program needs a mechanism to clean unused memory objects, such as block table in each chunk containing active elements provided by heightmap loading algorithm. Mesh geometry could also be released as soon as it's loaded into VBO objects. Removing both memory loads would leave us with only VBO memory usage so VRAM + some system RAM for large maps. 
+3. Threading
+  - Program needs a thread split for producing chunks on the run instead of loading whole map beforehand.
+4. Interface changes
+  - Needs mesageboxes for several cases that cannot work together i.e. indexed triangles (or implement proper mesh creating algorithm for the case).
+
+### VoxelTerrain/Block.cpp
+```
+#include "stdafx.h"
+#include "Block.h"
+
+Block::Block()
+{
+	this->blockType = BLOCK_DIRT;
+	this->activationState = false;
+}
+Block::~Block()
+{
+
+}
+bool Block::IsActive()
+{
+	return this->activationState;
+}
+void Block::SetActive(bool active)
+{
+	this->activationState = active;
+}
+void Block::SetBlockType(unsigned char blockType)
+{
+	this->blockType = blockType;
+}
+unsigned char Block::GetBlockType()
+{
+	return this->blockType;
+}
+```
+
+### VoxelTerrain/Block.h
+```
+#define BLOCK_GRASS 0
+#define BLOCK_DIRT 1
+#define BLOCK_STONE 2
+#define BLOCK_SIZE 0.5f
+
+class Block
+{
+
+public:
+	Block();
+	~Block();
+	bool IsActive();
+	void SetActive(bool active);
+	void SetBlockType(unsigned char blockType);
+	unsigned char GetBlockType();
+private:
+	bool activationState;
+	unsigned char blockType;
+};
+```
+
+### VoxelTerrain/Chunk.cpp
+```
+#include "stdafx.h"
+#include "Chunk.h"
+
+
+Chunk::Chunk(void)
+{
+	this->voxels =  new Block**[CHUNK_SIZE];
+	for(int i=0; i<CHUNK_SIZE; i++)
+	{
+		this->voxels[i] = new Block*[CHUNK_SIZE];
+		for(int j = 0; j<CHUNK_SIZE; j++)
+		{
+			this->voxels[i][j] = new Block[CHUNK_SIZE];
+		}
+	}
+	this->empty = GL_FALSE;
+	this->full = GL_FALSE;
+}
+Chunk::Chunk(glm::vec3 position, int ID)
+{
+	this->ChunkID = ID;
+	this->chunkPosition = new glm::vec3(position.x, position.y, position.z);
+	this->chunkCenter = glm::vec3(((chunkPosition->x)*Chunk::CHUNK_SIZE+CHUNK_SIZE)/2.0f,
+									((chunkPosition->y)*Chunk::CHUNK_SIZE+CHUNK_SIZE)/2.0f,
+									((chunkPosition->z)*Chunk::CHUNK_SIZE+CHUNK_SIZE)/2.0f);
+	this->voxels =  new Block**[CHUNK_SIZE];
+	for(int i=0; i<CHUNK_SIZE; i++)
+	{
+		this->voxels[i] = new Block*[CHUNK_SIZE];
+		for(int j = 0; j<CHUNK_SIZE; j++)
+		{
+			this->voxels[i][j] = new Block[CHUNK_SIZE];
+		}
+	}
+	this->empty = GL_FALSE;
+	this->full = GL_FALSE;
+	this->geometryID = -1;
+}
+Chunk::~Chunk(void)
+{
+	for(int i=0; i<CHUNK_SIZE; i++)
+	{
+		for(int j=0; j<CHUNK_SIZE; j++)
+		{
+			delete [] voxels[i][j];
+		}
+		delete [] voxels[i];
+	}
+	delete [] voxels;
+}
+
+GLboolean Chunk::IsVoxelActive(glm::vec3 voxelPosition)
+{
+	return this->voxels[(int)voxelPosition.x][(int)voxelPosition.y][(int)voxelPosition.z].IsActive();
+}
+void Chunk::SetVoxelToActive(glm::vec3 voxelPosition, int blockType)
+{
+	this->voxels[(int)voxelPosition.x][(int)voxelPosition.y][(int)voxelPosition.z].SetActive(true);
+	this->voxels[(int)voxelPosition.x][(int)voxelPosition.y][(int)voxelPosition.z].SetBlockType(blockType);
+}
+int Chunk::GetBlockType(glm::vec3 voxelPosition)
+{
+	return this->voxels[(int)voxelPosition.x][(int)voxelPosition.y][(int)voxelPosition.z].GetBlockType();
+}
+```
+
+### VoxelTerrain/Chunk.h
+```
+#pragma once
+#include "stdafx.h"
+#include "Block.h"
+#include "Renderer.h"
+
+class Chunk
+{
+public:
+	static const int CHUNK_SIZE = 16;
+	GLboolean empty,full;
+	glm::vec3* chunkPosition;
+	glm::vec3 chunkCenter;
+	GLuint ChunkID;
+	GLint geometryID;
+public:
+	Chunk(void);
+	Chunk(glm::vec3, int ID);
+	~Chunk(void);
+	int GetBlockType(glm::vec3 voxelPosition);
+	GLboolean IsVoxelActive(glm::vec3 voxelPosition);
+	void SetVoxelToActive(glm::vec3 voxelPosition,int blockType);
+private:
+	Block*** voxels;
+};
+```
+
+### VoxelTerrain/ChunkManager.cpp
+```
+#include "stdafx.h"
+#include "ChunkManager.h"
+
+
+ChunkManager::ChunkManager(GeometryManager* pManager)
+{
+	this->pGeometryManager = pManager;
+	this->heightfield = new Heightfield();
+	this->chunkLoadList = new std::vector<Chunk*>();
+	this->chunkSurfaceList = new std::vector<GLint>();
+	this->chunkVisibleList = new std::vector<GLint>();
+	this->chunkUnloadList = new std::vector<GLint>();
+	this->mutex = new std::mutex();
+}
+ChunkManager::~ChunkManager(void)
+{
+}
+void ChunkManager::SetupLights()
+{
+	this->pGeometryManager->pRenderer->SetupLights(heightfield->layersCount,Chunk::CHUNK_SIZE);
+}
+void ChunkManager::LoadAllMap(bool complex)
+{
+	if(complex)
+	{
+		for(int x=0; x <this->heightfield->layersCount.x; x++)
+		{
+			for(int z=0; z < this->heightfield->layersCount.z; z++)
+			{
+				for(int y=0; y < this->heightfield->layersCount.y; y++)
+				{
+					glm::vec3 currentLayer(x,y,z);
+					chunkLoadList->push_back(new Chunk(this->heightfield->PrepareComplexChunk(currentLayer,x+y+z)));
+				}
+			}
+		}
+	}
+	else
+	{
+		for(int x=0; x <this->heightfield->layersCount.x; x++)
+		{
+			for(int z=0; z < this->heightfield->layersCount.z; z++)
+			{
+				for(int y=0; y < this->heightfield->layersCount.y; y++)
+				{
+					glm::vec3 currentLayer(x,y,z);
+					chunkLoadList->push_back(new Chunk(this->heightfield->PrepareChunk(currentLayer,x+y+z)));
+				}
+			}
+		}
+	}
+}
+void ChunkManager::LoadAllMapThreaded()
+{
+	std::vector<std::thread> loadingThreads;
+	for(int y=0; y < this->heightfield->layersCount.y; y++)
+	{
+		loadingThreads.push_back(std::thread(&ChunkManager::AddLayerToLoadList, this, y));
+	}
+	for(auto& th : loadingThreads)
+		th.join();
+}
+void ChunkManager::AddLayerToLoadList(int layerY)
+{
+	
+	for(int x=0; x <this->heightfield->layersCount.x; x++)
+	{
+		for(int z=0; z < this->heightfield->layersCount.z; z++)
+		{
+			glm::vec3 currentLayer(x,layerY,z);
+			//Mutex zadzia�a� :)
+			this->mutex->lock();
+			chunkLoadList->push_back(new Chunk(this->heightfield->PrepareChunk(currentLayer,(x+z+layerY))));
+			this->mutex->unlock();
+		}
+	}
+}
+void ChunkManager::ScanForSurface()
+{
+	for(auto i = 0; i < this->chunkLoadList->size(); i++)
+	{
+		if(!chunkLoadList->at(i)->empty && !chunkLoadList->at(i)->full)
+		{
+			this->chunkSurfaceList->push_back(i);
+		}
+	}
+}
+void ChunkManager::ObtainFrustum()
+{
+	frustum.ObtainFrustum();
+}
+void ChunkManager::UpdateVisibility(GLint flags, glm::vec3 playerPosition)
+{
+	if(flags & 8 && !(flags & 16))
+	{
+		frustum.ObtainFrustum();
+		glm::vec3 chunkCenter;
+		chunkVisibleList = new std::vector<GLint>();
+		for(int i=0; i < this->chunkSurfaceList->size(); i++)
+		{
+			int workingChunk = chunkSurfaceList->at(i);
+			GLboolean visible = frustum.IsChunkInFrustum(chunkLoadList->at(workingChunk)->chunkCenter,(Chunk::CHUNK_SIZE/2.0f));
+			if(visible)
+				chunkVisibleList->push_back(workingChunk);
+		}
+	}
+	else if(flags & 16)
+	{
+		UpdateProximityVisiblity(playerPosition);
+	}
+}
+void ChunkManager::UpdateProximityVisiblity(glm::vec3 playerPosition)
+{
+	glm::vec3 chunkCenter;
+	chunkVisibleList = new std::vector<GLint>();
+	for(int i=0; i < this->chunkSurfaceList->size(); i++)
+	{
+		int workingChunk = chunkSurfaceList->at(i);
+		GLboolean visible = frustum.isChunkInProximityFrustum(chunkLoadList->at(workingChunk)->chunkCenter,playerPosition,Chunk::CHUNK_SIZE*2);
+		if(visible)
+			chunkVisibleList->push_back(workingChunk);
+	}
+}
+void ChunkManager::CreateUnindexedSurfaceMesh(GLint primitive)
+{
+	if(primitive)
+	{
+		for(int i=0; i < this->chunkSurfaceList->size(); i++)
+		{ 
+			int workingChunk = chunkSurfaceList->at(i);
+			pGeometryManager->AddMesh(chunkLoadList->at(workingChunk)->ChunkID,&chunkLoadList->at(workingChunk)->geometryID);
+			pGeometryManager->CreateUnindexedQuadGeometry(chunkLoadList->at(workingChunk));
+		}
+	}
+	else
+	{
+		for(int i=0; i < this->chunkSurfaceList->size(); i++)
+		{ 
+			int workingChunk = chunkSurfaceList->at(i);
+			pGeometryManager->AddMesh(chunkLoadList->at(workingChunk)->ChunkID,&chunkLoadList->at(workingChunk)->geometryID);
+			pGeometryManager->CreateUnindexedTriangleGeometry(chunkLoadList->at(workingChunk));
+		}
+	}
+}
+void ChunkManager::CreateIndexedSurfaceMesh(GLboolean optimized)
+{
+	if(optimized)
+	{
+		for(int i=0; i < this->chunkSurfaceList->size(); i++)
+		{ 
+			int workingChunk = chunkSurfaceList->at(i);
+			pGeometryManager->AddMesh(chunkLoadList->at(workingChunk)->ChunkID,&chunkLoadList->at(workingChunk)->geometryID);
+			pGeometryManager->CreateOptimizedIndexedGeometry(chunkLoadList->at(workingChunk), *heightfield);
+		}
+	}
+	else
+	{
+		for(int i=0; i < this->chunkSurfaceList->size(); i++)
+		{ 
+			int workingChunk = chunkSurfaceList->at(i);
+			pGeometryManager->AddMesh(chunkLoadList->at(workingChunk)->ChunkID,&chunkLoadList->at(workingChunk)->geometryID);
+			pGeometryManager->CreateIndexedQuadGeometry(chunkLoadList->at(workingChunk));
+		}
+	}
+}
+void ChunkManager::LoadIndexedSurface()
+{
+	for(int i=0; i < this->chunkSurfaceList->size(); i++)
+	{
+		int workingChunk = chunkSurfaceList->at(i);
+		pGeometryManager->LoadIndexedGeometry(chunkLoadList->at(workingChunk)->geometryID);
+	}
+}
+void ChunkManager::LoadUnindexedSurface()
+{
+	for(int i=0; i < this->chunkSurfaceList->size(); i++)
+	{
+		int workingChunk = chunkSurfaceList->at(i);
+		pGeometryManager->LoadUnindexedGeometry(chunkLoadList->at(workingChunk)->geometryID);
+	}
+}
+void ChunkManager::RenderUnindexedSurface(GLint primitive)
+{
+	
+	if(primitive)
+	{
+		for(int i=0; i < this->chunkSurfaceList->size(); i++)
+		{
+			int workingChunk = chunkSurfaceList->at(i);
+			glm::vec3 position = *chunkLoadList->at(workingChunk)->chunkPosition;
+			pGeometryManager->RenderQuadArrays(position,chunkLoadList->at(workingChunk)->geometryID);
+		}
+	}
+	else
+	{
+		for(int i=0; i < this->chunkSurfaceList->size(); i++)
+		{
+			int workingChunk = chunkSurfaceList->at(i);
+			glm::vec3 position = *chunkLoadList->at(workingChunk)->chunkPosition;
+			pGeometryManager->RenderTriangleArrays(position,chunkLoadList->at(workingChunk)->geometryID);
+		}
+	}
+}
+void ChunkManager::RenderIndexedQuadSurface()
+{
+
+	for(int i=0; i < this->chunkSurfaceList->size(); i++)
+	{
+		int workingChunk = chunkSurfaceList->at(i);
+		glm::vec3 position = *chunkLoadList->at(workingChunk)->chunkPosition;
+		pGeometryManager->RenderQuadGeometry(position,chunkLoadList->at(workingChunk)->geometryID);
+	}
+}
+void ChunkManager::RenderVisibleSurface()
+{
+	pGeometryManager->pRenderer->SetRenderMode(GL_FILL);
+	for(int i=0; i < this->chunkVisibleList->size(); i++)
+	{
+		int workingChunk = chunkVisibleList->at(i);
+		glm::vec3 position = *chunkLoadList->at(workingChunk)->chunkPosition;
+		pGeometryManager->RenderQuadArrays(position,chunkLoadList->at(workingChunk)->geometryID);
+	}
+}
+void ChunkManager::RenderVisibleQuadSurface()
+{
+	pGeometryManager->pRenderer->SetRenderMode(GL_FILL);
+	for(int i=0; i < this->chunkVisibleList->size(); i++)
+	{
+		int workingChunk = chunkVisibleList->at(i);
+		glm::vec3 position = *chunkLoadList->at(workingChunk)->chunkPosition;
+		pGeometryManager->RenderQuadGeometry(position,chunkLoadList->at(workingChunk)->geometryID);
+	}
+}
+void ChunkManager::UpdateLights()
+{
+	glm::vec3 layers = this->heightfield->layersCount;
+	layers.x = (layers.x*Chunk::CHUNK_SIZE)/2.0f;
+	layers.y = 70.0f;
+	layers.z = (layers.z*Chunk::CHUNK_SIZE)/2.0f;
+	this->pGeometryManager->pRenderer->UpdateLights(layers);
+}
+void ChunkManager::GetActiveChunksCount(GLint* result)
+{
+	*result = this->chunkSurfaceList->size();
+}
+void ChunkManager::GetVisibleChunksCount(GLint* result)
+{
+	*result = this->chunkVisibleList->size();
+}
+```
+
+### VoxelTerrain/ChunkManager.h
+```
+#pragma once
+#include "Chunk.h"
+#include "GeometryManager.h"
+#include "Heightfield.h"
+#include "Frustum.h"
+#include <vector>
+
+#define TRIS 0
+#define QUADS 1
+
+class ChunkManager
+{
+public:
+	Heightfield* heightfield;
+private:
+	std::vector<Chunk*>* chunkLoadList; 
+	std::vector<GLint>* chunkSurfaceList; 
+	std::vector<GLint>* chunkVisibleList; 
+	std::vector<GLint>* chunkUnloadList;
+	GeometryManager* pGeometryManager;
+	Frustum frustum;
+	std::mutex* mutex;
+public:
+	ChunkManager(GeometryManager* pManager);
+	~ChunkManager(void);
+	void SetupLights();
+	void LoadAllMap(bool complex);
+	void LoadAllMapThreaded();
+	void LoadIndexedSurface();
+	void LoadUnindexedSurface();
+	void ScanForSurface();
+	void CreateUnindexedSurfaceMesh(GLint);
+	void CreateIndexedSurfaceMesh(GLboolean);
+	void RenderUnindexedSurface(GLint);
+	void RenderIndexedQuadSurface();
+	void RenderVisibleSurface();
+	void RenderVisibleQuadSurface();
+	void ObtainFrustum();
+	void UpdateVisibility(GLint flags, glm::vec3 playerPosition);
+	void UpdateProximityVisiblity(glm::vec3 playerPosition);
+	void UpdateLights();
+	void GetActiveChunksCount(GLint* result);
+	void GetVisibleChunksCount(GLint* result);
+private:
+	void AddLayerToLoadList(int layerZ);
+};
+```
+
+### VoxelTerrain/Frustum.cpp
+```
+#include "stdafx.h"
+#include "Frustum.h"
+
+
+Frustum::Frustum(void)
+{
+}
+
+
+Frustum::~Frustum(void)
+{
+}
+void Frustum::ObtainFrustum()
+{
+	glGetFloatv(GL_PROJECTION_MATRIX,this->projection);
+	glGetFloatv(GL_MODELVIEW_MATRIX,this->model);
+
+	clip[ 0] = model[ 0] * projection[ 0] + model[ 1] * projection[ 4] + model[ 2] * projection[ 8] + model[ 3] * projection[12];
+    clip[ 1] = model[ 0] * projection[ 1] + model[ 1] * projection[ 5] + model[ 2] * projection[ 9] + model[ 3] * projection[13];
+    clip[ 2] = model[ 0] * projection[ 2] + model[ 1] * projection[ 6] + model[ 2] * projection[10] + model[ 3] * projection[14];
+    clip[ 3] = model[ 0] * projection[ 3] + model[ 1] * projection[ 7] + model[ 2] * projection[11] + model[ 3] * projection[15];
+
+    clip[ 4] = model[ 4] * projection[ 0] + model[ 5] * projection[ 4] + model[ 6] * projection[ 8] + model[ 7] * projection[12];
+    clip[ 5] = model[ 4] * projection[ 1] + model[ 5] * projection[ 5] + model[ 6] * projection[ 9] + model[ 7] * projection[13];
+    clip[ 6] = model[ 4] * projection[ 2] + model[ 5] * projection[ 6] + model[ 6] * projection[10] + model[ 7] * projection[14];
+    clip[ 7] = model[ 4] * projection[ 3] + model[ 5] * projection[ 7] + model[ 6] * projection[11] + model[ 7] * projection[15];
+
+    clip[ 8] = model[ 8] * projection[ 0] + model[ 9] * projection[ 4] + model[10] * projection[ 8] + model[11] * projection[12];
+    clip[ 9] = model[ 8] * projection[ 1] + model[ 9] * projection[ 5] + model[10] * projection[ 9] + model[11] * projection[13];
+    clip[10] = model[ 8] * projection[ 2] + model[ 9] * projection[ 6] + model[10] * projection[10] + model[11] * projection[14];
+    clip[11] = model[ 8] * projection[ 3] + model[ 9] * projection[ 7] + model[10] * projection[11] + model[11] * projection[15];
+
+    clip[12] = model[12] * projection[ 0] + model[13] * projection[ 4] + model[14] * projection[ 8] + model[15] * projection[12];
+    clip[13] = model[12] * projection[ 1] + model[13] * projection[ 5] + model[14] * projection[ 9] + model[15] * projection[13];
+    clip[14] = model[12] * projection[ 2] + model[13] * projection[ 6] + model[14] * projection[10] + model[15] * projection[14];
+    clip[15] = model[12] * projection[ 3] + model[13] * projection[ 7] + model[14] * projection[11] + model[15] * projection[15];
+	/* RIGHT */
+   frustum[0][0] = clip[ 3] - clip[ 0];
+   frustum[0][1] = clip[ 7] - clip[ 4];
+   frustum[0][2] = clip[11] - clip[ 8];
+   frustum[0][3] = clip[15] - clip[12];
+
+	t = sqrt( frustum[0][0] * frustum[0][0] + frustum[0][1] * frustum[0][1] + frustum[0][2] * frustum[0][2] );
+	frustum[0][0] /= t;
+	frustum[0][1] /= t;
+	frustum[0][2] /= t;
+	frustum[0][3] /= t;
+
+	/* Extract the numbers for the LEFT plane */
+   frustum[1][0] = clip[ 3] + clip[ 0];
+   frustum[1][1] = clip[ 7] + clip[ 4];
+   frustum[1][2] = clip[11] + clip[ 8];
+   frustum[1][3] = clip[15] + clip[12];
+
+   /* Normalize the result */
+   t = sqrt( frustum[1][0] * frustum[1][0] + frustum[1][1] * frustum[1][1] + frustum[1][2] * frustum[1][2] );
+   frustum[1][0] /= t;
+   frustum[1][1] /= t;
+   frustum[1][2] /= t;
+   frustum[1][3] /= t;
+
+   /* Extract the BOTTOM plane */
+   frustum[2][0] = clip[ 3] + clip[ 1];
+   frustum[2][1] = clip[ 7] + clip[ 5];
+   frustum[2][2] = clip[11] + clip[ 9];
+   frustum[2][3] = clip[15] + clip[13];
+
+   /* Normalize the result */
+   t = sqrt( frustum[2][0] * frustum[2][0] + frustum[2][1] * frustum[2][1] + frustum[2][2] * frustum[2][2] );
+   frustum[2][0] /= t;
+   frustum[2][1] /= t;
+   frustum[2][2] /= t;
+   frustum[2][3] /= t;
+
+   /* Extract the TOP plane */
+   frustum[3][0] = clip[ 3] - clip[ 1];
+   frustum[3][1] = clip[ 7] - clip[ 5];
+   frustum[3][2] = clip[11] - clip[ 9];
+   frustum[3][3] = clip[15] - clip[13];
+
+   /* Normalize the result */
+   t = sqrt( frustum[3][0] * frustum[3][0] + frustum[3][1] * frustum[3][1] + frustum[3][2] * frustum[3][2] );
+   frustum[3][0] /= t;
+   frustum[3][1] /= t;
+   frustum[3][2] /= t;
+   frustum[3][3] /= t;
+
+   /* Extract the FAR plane */
+   frustum[4][0] = clip[ 3] - clip[ 2];
+   frustum[4][1] = clip[ 7] - clip[ 6];
+   frustum[4][2] = clip[11] - clip[10];
+   frustum[4][3] = clip[15] - clip[14];
+
+   /* Normalize the result */
+   t = sqrt( frustum[4][0] * frustum[4][0] + frustum[4][1] * frustum[4][1] + frustum[4][2] * frustum[4][2] );
+   frustum[4][0] /= t;
+   frustum[4][1] /= t;
+   frustum[4][2] /= t;
+   frustum[4][3] /= t;
+
+   /* Extract the NEAR plane */
+   frustum[5][0] = clip[ 3] + clip[ 2];
+   frustum[5][1] = clip[ 7] + clip[ 6];
+   frustum[5][2] = clip[11] + clip[10];
+   frustum[5][3] = clip[15] + clip[14];
+
+   /* Normalize the result */
+   t = sqrt( frustum[5][0] * frustum[5][0] + frustum[5][1] * frustum[5][1] + frustum[5][2] * frustum[5][2] );
+   frustum[5][0] /= t;
+   frustum[5][1] /= t;
+   frustum[5][2] /= t;
+   frustum[5][3] /= t;
+}
+bool Frustum::IsChunkInFrustum(glm::vec3 chunkCenter, float size)
+{
+	/*for(int plane=0; plane < 6; plane++)
+	{
+	  if( frustum[plane][0] * (chunkCenter.x - size) + frustum[plane][1] * (chunkCenter.y - size) + frustum[plane][2] * (chunkCenter.z - size) + frustum[plane][3] > 0 )
+         continue;
+      if( frustum[plane][0] * (chunkCenter.x + size) + frustum[plane][1] * (chunkCenter.y - size) + frustum[plane][2] * (chunkCenter.z - size) + frustum[plane][3] > 0 )
+         continue;
+      if( frustum[plane][0] * (chunkCenter.x - size) + frustum[plane][1] * (chunkCenter.y + size) + frustum[plane][2] * (chunkCenter.z - size) + frustum[plane][3] > 0 )
+         continue;
+      if( frustum[plane][0] * (chunkCenter.x + size) + frustum[plane][1] * (chunkCenter.y + size) + frustum[plane][2] * (chunkCenter.z - size) + frustum[plane][3] > 0 )
+         continue;
+      if( frustum[plane][0] * (chunkCenter.x - size) + frustum[plane][1] * (chunkCenter.y - size) + frustum[plane][2] * (chunkCenter.z + size) + frustum[plane][3] > 0 )
+         continue;
+      if( frustum[plane][0] * (chunkCenter.x + size) + frustum[plane][1] * (chunkCenter.y - size) + frustum[plane][2] * (chunkCenter.z + size) + frustum[plane][3] > 0 )
+         continue;
+      if( frustum[plane][0] * (chunkCenter.x - size) + frustum[plane][1] * (chunkCenter.y + size) + frustum[plane][2] * (chunkCenter.z + size) + frustum[plane][3] > 0 )
+         continue;
+      if( frustum[plane][0] * (chunkCenter.x + size) + frustum[plane][1] * (chunkCenter.y + size) + frustum[plane][2] * (chunkCenter.z + size) + frustum[plane][3] > 0 )
+         continue;
+      return false;
+	}
+	return true;*/
+	for(int plane = 0; plane < 6; plane++)
+		if( frustum[plane][0] * chunkCenter.x + frustum[plane][1] * chunkCenter.y + frustum[plane][2] * chunkCenter.z + frustum[plane][3] <= -size )
+			return false;
+	return true;
+}
+GLboolean Frustum::isChunkInProximityFrustum(glm::vec3 chunkCenter, glm::vec3 playerPosition, float radius)
+{
+	float distance = sqrt(pow(chunkCenter.x - playerPosition.x,2.0f) + pow(chunkCenter.z - playerPosition.z, 2.0f) + pow(chunkCenter.y - playerPosition.y, 2.0f));
+	if(distance < radius)
+		return GL_TRUE;
+	return GL_FALSE;
+}
+```
+
+### VoxelTerrain/Frustum.h
+```
+#pragma once
+#include "stdafx.h"
+#include <GL\glew.h>
+#include <gl\GL.h>
+#include <gl\GLU.h>
+#include <cmath>
+
+#define HALF_ANG2RAD 3.14159265358979323846/360.0
+
+class Frustum
+{
+
+private:
+	GLfloat frustum[6][4];
+	GLfloat projection[16];
+	GLfloat model[16];
+	GLfloat clip[16];
+	GLfloat t;
+public:
+	Frustum(void);
+	~Frustum(void);
+	void ObtainFrustum();
+	bool IsChunkInFrustum(glm::vec3 chunkPosition, float chunkSize);
+	GLboolean isChunkInProximityFrustum(glm::vec3 chunkCenter, glm::vec3 playerPosition, float radius);
+};
+```
+
+### VoxelTerrain/GeometryManager.cpp
+```
+#include "stdafx.h"
+#include "GeometryManager.h"
+
+
+GeometryManager::GeometryManager(void)
+{
+	this->meshArray = new std::vector<CMesh*>();
+	this->pRenderer = new Renderer();
+	this->statistics = glm::vec4(0,0,0,0);
+}
+
+/* ************ TODO: Add proper cleanup ************** */
+GeometryManager::~GeometryManager(void)
+{
+	for(auto i = meshArray->begin(); i < meshArray->end(); i++)
+	{
+			delete [] *i;
+	}
+}
+void GeometryManager::AddMesh(GLuint chunkID, GLint* geometryID)
+{
+	this->meshArray->push_back(new CMesh(chunkID));
+	*geometryID = this->meshArray->size()-1; //Return index to CMesh created for ChunkID
+}
+void GeometryManager::CreateUnindexedTriangleGeometry(Chunk* chunk)
+{
+	voxelCounter = 0; 
+	for(int x = 0; x < Chunk::CHUNK_SIZE; x++)
+	{
+		for(int y = 0; y < Chunk::CHUNK_SIZE; y++)
+		{
+			for(int z = 0; z < Chunk::CHUNK_SIZE; z++)
+			{
+				if(chunk->IsVoxelActive(glm::vec3(x,y,z)) == GL_TRUE)
+				{
+					CreateVoxel(chunk, glm::vec3(x,y,z));
+					voxelCounter += 1;
+				}	
+			}
+		}
+	}
+	statistics.x += voxelCounter; // Summing up voxels for every generated chunk
+	statistics.y += voxelCounter*12; // Summing up primitives generated for every chunk
+	statistics.z += voxelCounter*36; // Summing up vertexes generated for every chunk
+}
+void GeometryManager::CreateUnindexedQuadGeometry(Chunk* chunk)
+{
+	voxelCounter = 0;
+	for(int x = 0; x < Chunk::CHUNK_SIZE; x++)
+	{
+		for(int y = 0; y < Chunk::CHUNK_SIZE; y++)
+		{
+			for(int z = 0; z < Chunk::CHUNK_SIZE; z++)
+			{
+				if(chunk->IsVoxelActive(glm::vec3(x,y,z)) == GL_TRUE)
+				{
+					CreateQuadSmoothVoxel(chunk, glm::vec3(x,y,z));
+					voxelCounter += 1;
+				}	
+			}
+		}
+	}
+	statistics.x += voxelCounter; // Summing up voxels for every generated chunk
+	statistics.y += voxelCounter*6; // Summing up primitives generated for every chunk
+	statistics.z += voxelCounter*24; // Summing up vertexes generated for every chunk
+}
+void GeometryManager::CreateIndexedQuadGeometry(Chunk* chunk)
+{
+	voxelCounter = 0;
+	for(int x = 0; x < Chunk::CHUNK_SIZE; x++)
+	{
+		for(int y = 0; y < Chunk::CHUNK_SIZE; y++)
+		{
+			for(int z = 0; z < Chunk::CHUNK_SIZE; z++)
+			{
+				if(chunk->IsVoxelActive(glm::vec3(x,y,z)) == GL_TRUE)
+				{
+					CreateQuadVoxel(chunk, glm::vec3(x,y,z));
+					voxelCounter += 1;
+				}	
+			}
+		}
+	}
+	statistics.x += voxelCounter; // Summing up voxels for every generated chunk
+	statistics.y += voxelCounter*6; // Summing up primitives generated for every chunk
+	statistics.z += voxelCounter*8; // Summing up vertexes generated for every chunk
+	statistics.w += voxelCounter*24; // Summing up indices generated for every chunk
+}
+void GeometryManager::CreateOptimizedIndexedGeometry(Chunk* chunk, Heightfield heightfield)
+{
+	voxelCounter = 0;
+	for(int x = 0; x < Chunk::CHUNK_SIZE; x++)
+	{
+		for(int y = 0; y < Chunk::CHUNK_SIZE; y++)
+		{
+			for(int z = 0; z < Chunk::CHUNK_SIZE; z++)
+			{
+				if(chunk->IsVoxelActive(glm::vec3(x,y,z)) == GL_TRUE)
+				{
+					CreateOptimizedQuadVoxel(chunk, glm::vec3(x,y,z));
+					voxelCounter += 1;
+				}	
+			}
+		}
+	}
+	statistics.x += voxelCounter; // Summing up voxels for every generated chunk
+	statistics.z += voxelCounter*8; // Summing up vertexes generated for every chunk
+}
+void GeometryManager::CreateVoxel(Chunk* chunk, glm::vec3 relativePosition)
+{
+	int stride = 36*voxelCounter;
+	int blockType = chunk->GetBlockType(relativePosition);
+
+	glm::vec3 point1(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point2(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point3(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point4(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point5(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+	glm::vec3 point6(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point7(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point8(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+
+	//Front
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	//Back
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+	// Right
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	//Left
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	//Top
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	//Bottom
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	//Front
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,1.0f));
+	//Back
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,0.0f,-1.0f));
+	//Right
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0,0.0f,0.0f));
+	//Left
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0,0.0f,0.0f));
+	//Top
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,1.0f,0.0f));
+	//Bottom
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0,-1.0f,0.0f));
+	
+	if(blockType == BLOCK_GRASS)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+	}
+	else if(blockType == BLOCK_DIRT)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+	}
+	else if(blockType == BLOCK_STONE)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+	}
+
+	/*//Front
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(0+stride,1+stride,2+stride));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(3+stride,4+stride,5+stride));
+	//Back
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(6+stride,7+stride,8+stride));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(9+stride,10+stride,11+stride));
+	//Right
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(12+stride,13+stride,14+stride));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(15+stride,16+stride,17+stride));
+	//Left
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(18+stride,19+stride,20+stride));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(21+stride,22+stride,23+stride));
+	//Top
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(24+stride,25+stride,26+stride));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(27+stride,28+stride,29+stride));
+	//Bottom
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(30+stride,31+stride,32+stride));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(33+stride,34+stride,35+stride));
+	//Front
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(0+8*voxelCounter,1+8*voxelCounter,3+8*voxelCounter));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(1+8*voxelCounter,3+8*voxelCounter,2+8*voxelCounter));
+	//Back
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(1+8*voxelCounter,5+8*voxelCounter,2+8*voxelCounter));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(5+8*voxelCounter,2+8*voxelCounter,6+8*voxelCounter));
+	//Right
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(5+8*voxelCounter,4+8*voxelCounter,6+8*voxelCounter));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(4+8*voxelCounter,6+8*voxelCounter,7+8*voxelCounter));
+	//Left
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(4+8*voxelCounter,0+8*voxelCounter,7+8*voxelCounter));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(0+8*voxelCounter,7+8*voxelCounter,3+8*voxelCounter));
+	//Top
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(3+8*voxelCounter,2+8*voxelCounter,7+8*voxelCounter));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(2+8*voxelCounter,7+8*voxelCounter,6+8*voxelCounter));
+	//Bottom
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(0+8*voxelCounter,1+8*voxelCounter,4+8*voxelCounter));
+	meshArray->at(chunk->geometryID)->addTriangleToMesh(glm::vec3(1+8*voxelCounter,4+8*voxelCounter,5+8*voxelCounter));
+	*/
+}
+void GeometryManager::CreateQuadVoxel(Chunk* chunk, glm::vec3 relativePosition)
+{
+	int stride = 8*voxelCounter;
+	int blockType = chunk->GetBlockType(relativePosition);
+
+	glm::vec3 point1(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point2(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point3(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point4(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point5(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+	glm::vec3 point6(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point7(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point8(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	
+	if(blockType == BLOCK_GRASS)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+	}
+	else if(blockType == BLOCK_DIRT)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+	}
+	else if(blockType == BLOCK_STONE)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+	}
+	//Front
+	meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(0+stride,1+stride,2+stride,3+stride));
+	//Back
+	meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(5+stride,6+stride,7+stride,4+stride));
+	//Right
+	meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(1+stride,5+stride,6+stride,2+stride));
+	//Left
+	meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(3+stride,7+stride,4+stride,0+stride));
+	//Top
+	meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(2+stride,6+stride,7+stride,3+stride));
+	//Bottom
+	meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(4+stride,0+stride,1+stride,5+stride));
+}
+void GeometryManager::CreateQuadSmoothVoxel(Chunk* chunk, glm::vec3 relativePosition)
+{
+	int stride = 24*voxelCounter;
+	int blockType = chunk->GetBlockType(relativePosition);
+
+	glm::vec3 point1(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point2(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point3(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point4(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point5(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+	glm::vec3 point6(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point7(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point8(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+
+	//Front
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	//Back
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+	//Right
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	//Left
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+	//Top
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+	//Bottom
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,1.0f));
+
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,-1.0f));
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0f,0.0f,0.0f));
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,1.0f,0.0f));
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,-1.0f,0.0f));
+	
+	if(blockType == BLOCK_GRASS)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+	}
+	else if(blockType == BLOCK_DIRT)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+	}
+	else if(blockType == BLOCK_STONE)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+	}
+}
+void GeometryManager::CreateOptimizedQuadVoxel(Chunk* chunk, glm::vec3 relativePosition)
+{
+	int stride = 8*voxelCounter;
+	int blockType = chunk->GetBlockType(relativePosition);
+	std::vector<GLboolean> neighbours;
+	/*glm::vec3 realPosition(chunk->chunkPosition->x*Chunk::CHUNK_SIZE+relativePosition.x,
+							chunk->chunkPosition->y*Chunk::CHUNK_SIZE+relativePosition.y,
+							chunk->chunkPosition->z*Chunk::CHUNK_SIZE+relativePosition.z);*/
+	if(relativePosition.x == 0 || relativePosition.z == 0 || relativePosition.y == 0 || 
+		relativePosition.x == Chunk::CHUNK_SIZE-1 ||
+		relativePosition.z == Chunk::CHUNK_SIZE-1 ||
+		relativePosition.y == Chunk::CHUNK_SIZE-1)
+	{
+		neighbours.push_back(GL_TRUE);
+		neighbours.push_back(GL_TRUE);
+		neighbours.push_back(GL_TRUE);
+		neighbours.push_back(GL_TRUE);
+		neighbours.push_back(GL_TRUE);
+		neighbours.push_back(GL_TRUE);
+	}
+	else
+	{
+		//if(realPosition.y <= heightfield.GetHeightAtPoint(realPosition.x-1,realPosition.z))
+		//	neighbours.push_back(0);
+		//else
+		//	neighbours.push_back(1);
+		if(IsNeighbourActive(chunk,relativePosition,FRONT_SIDE))
+			neighbours.push_back(GL_FALSE);
+		else
+			neighbours.push_back(GL_TRUE);
+
+		if(IsNeighbourActive(chunk,relativePosition,BACK_SIDE))
+			neighbours.push_back(GL_FALSE);	
+		else
+			neighbours.push_back(GL_TRUE);
+
+		if(IsNeighbourActive(chunk,relativePosition,LEFT_SIDE))
+			neighbours.push_back(GL_FALSE);
+		else
+			neighbours.push_back(GL_TRUE);
+
+		if(IsNeighbourActive(chunk,relativePosition,RIGHT_SIDE))
+			neighbours.push_back(GL_FALSE);
+		else
+			neighbours.push_back(GL_TRUE);
+
+		if(IsNeighbourActive(chunk,relativePosition,TOP_SIDE))
+			neighbours.push_back(GL_FALSE);
+		else
+			neighbours.push_back(GL_TRUE);
+
+		if(IsNeighbourActive(chunk,relativePosition,BOTTOM_SIDE))
+			neighbours.push_back(GL_FALSE);
+		else
+			neighbours.push_back(GL_TRUE);
+	}
+
+	
+
+	glm::vec3 point1(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point2(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point3(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point4(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z+BLOCK_SIZE);
+	glm::vec3 point5(relativePosition.x-BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+	glm::vec3 point6(relativePosition.x+BLOCK_SIZE, relativePosition.y-BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point7(relativePosition.x+BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+    glm::vec3 point8(relativePosition.x-BLOCK_SIZE, relativePosition.y+BLOCK_SIZE, relativePosition.z-BLOCK_SIZE);
+
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point1);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point2);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point3);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point4);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point5);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point6);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point7);
+	meshArray->at(chunk->geometryID)->addVertexToMesh(point8);
+
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(-1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,-1.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(0.0f,0.0f,-1.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	meshArray->at(chunk->geometryID)->addNormalForTriangle(glm::vec3(1.0f,0.0f,0.0f));
+	
+	if(blockType == BLOCK_GRASS)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.0f,1.0f,0.0f,1.0f));
+	}
+	else if(blockType == BLOCK_DIRT)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.435f,0.305f,0.215f,1.0f));
+	}
+	else if(blockType == BLOCK_STONE)
+	{
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+		meshArray->at(chunk->geometryID)->addColorForVert(glm::vec4(0.45f,0.45f,0.45f,1.0f));
+	}
+	
+	//Front
+	if(neighbours.at(FRONT_SIDE))
+	{
+		meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(0+stride,1+stride,2+stride,3+stride));
+		statistics.y++;
+		statistics.w+=4;
+	}
+	//Back
+	if(neighbours.at(BACK_SIDE))
+	{
+		meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(5+stride,6+stride,7+stride,4+stride));
+		statistics.y++;
+		statistics.w+=4;
+	}
+	//Right
+	if(neighbours.at(RIGHT_SIDE))
+	{
+		meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(1+stride,5+stride,6+stride,2+stride));
+		statistics.y++;
+		statistics.w+=4;
+	}
+	//Left
+	if(neighbours.at(LEFT_SIDE))
+	{
+		meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(3+stride,7+stride,4+stride,0+stride));
+		statistics.y++;
+		statistics.w+=4;
+	}
+	//Top
+	if(neighbours.at(TOP_SIDE))
+	{
+		meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(2+stride,6+stride,7+stride,3+stride));
+		statistics.y++;
+		statistics.w+=4;
+	}
+	//Bottom
+	if(neighbours.at(BOTTOM_SIDE))
+	{
+		meshArray->at(chunk->geometryID)->addQuadToMesh(glm::vec4(4+stride,0+stride,1+stride,5+stride));
+		statistics.y++;
+		statistics.w+=4;
+	}
+}
+GLboolean GeometryManager::IsNeighbourActive(Chunk* chunk, glm::vec3 voxelPosition,GLint type)
+{
+		if(type == FRONT_SIDE)
+			return chunk->IsVoxelActive(glm::vec3(voxelPosition.x,voxelPosition.y,voxelPosition.z+1));
+		
+		if(type == BACK_SIDE)
+			return chunk->IsVoxelActive(glm::vec3(voxelPosition.x,voxelPosition.y,voxelPosition.z-1)); 
+	
+		if(type == LEFT_SIDE)
+			//if(realPosition.y <= heightfield.GetHeightAtPoint(realPosition.x-1,realPosition.z))
+			//	return GL_TRUE;
+			 return chunk->IsVoxelActive(glm::vec3(voxelPosition.x-1,voxelPosition.y,voxelPosition.z));
+
+	
+		if(type == RIGHT_SIDE)
+			return chunk->IsVoxelActive(glm::vec3(voxelPosition.x+1,voxelPosition.y,voxelPosition.z));
+		
+		if(type == TOP_SIDE)
+			return chunk->IsVoxelActive(glm::vec3(voxelPosition.x,voxelPosition.y+1,voxelPosition.z));
+		
+		if(type == BOTTOM_SIDE)
+			return chunk->IsVoxelActive(glm::vec3(voxelPosition.x,voxelPosition.y-1,voxelPosition.z)); 
+
+		//return GL_FALSE;
+}
+void GeometryManager::LoadIndexedGeometry(GLint geometryID)
+{
+	this->meshArray->at(geometryID)->generateVertexBufferData();
+	this->meshArray->at(geometryID)->generateIndexBufferData();
+	this->meshArray->at(geometryID)->generateNormalBufferData();
+	this->meshArray->at(geometryID)->generateColorBufferData();
+}
+void GeometryManager::LoadUnindexedGeometry(GLint geometryID)
+{
+	this->meshArray->at(geometryID)->generateVertexBufferData();
+	this->meshArray->at(geometryID)->generateNormalBufferData();
+	this->meshArray->at(geometryID)->generateColorBufferData();
+}
+void GeometryManager::RenderTriangleArrays(glm::vec3 geometryPosition,GLint geometryID)
+{
+	glPushMatrix();
+
+		pRenderer->TranslateWorldMatrix(geometryPosition*(float)Chunk::CHUNK_SIZE);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->vertexBuffer);
+		glEnableClientState(GL_VERTEX_ARRAY);
+		glVertexPointer(3,GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glEnableClientState(GL_NORMAL_ARRAY);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->normalBuffer);
+		glNormalPointer(GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glEnableClientState(GL_COLOR_ARRAY);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->colorBuffer);
+		glColorPointer(4,GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glDrawArrays(GL_TRIANGLES,0,meshArray->at(geometryID)->vertexCount);
+		glDisableClientState(GL_VERTEX_ARRAY);
+		glDisableClientState(GL_NORMAL_ARRAY);
+		glDisableClientState(GL_COLOR_ARRAY);
+
+	glPopMatrix();
+}
+void GeometryManager::RenderQuadArrays(glm::vec3 geometryPosition,GLint geometryID)
+{
+	glPushMatrix();
+
+		pRenderer->TranslateWorldMatrix(geometryPosition*(float)Chunk::CHUNK_SIZE);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->vertexBuffer);
+		glEnableClientState(GL_VERTEX_ARRAY);
+		glVertexPointer(3,GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glEnableClientState(GL_NORMAL_ARRAY);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->normalBuffer);
+		glNormalPointer(GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glEnableClientState(GL_COLOR_ARRAY);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->colorBuffer);
+		glColorPointer(4,GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glDrawArrays(GL_QUADS,0,meshArray->at(geometryID)->vertexCount);
+		glDisableClientState(GL_VERTEX_ARRAY);
+		glDisableClientState(GL_NORMAL_ARRAY);
+		glDisableClientState(GL_COLOR_ARRAY);
+
+	glPopMatrix();
+}
+void GeometryManager::RenderQuadGeometry(glm::vec3 geometryPosition,GLint geometryID)
+{
+	glProvokingVertex(GL_FIRST_VERTEX_CONVENTION);
+	glPushMatrix();
+
+		pRenderer->TranslateWorldMatrix(geometryPosition*(float)Chunk::CHUNK_SIZE);
+
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->vertexBuffer);
+		glEnableClientState(GL_VERTEX_ARRAY);
+		glVertexPointer(3,GL_FLOAT,0,BUFFER_OFFSET(0));
+		
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,meshArray->at(geometryID)->indexBuffer);
+	
+		glEnableClientState(GL_NORMAL_ARRAY);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->normalBuffer);
+		glNormalPointer(GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glEnableClientState(GL_COLOR_ARRAY);
+		glBindBuffer(GL_ARRAY_BUFFER,meshArray->at(geometryID)->colorBuffer);
+		glColorPointer(4,GL_FLOAT,0,BUFFER_OFFSET(0));
+
+		glDrawElements(GL_QUADS,meshArray->at(geometryID)->indexCount,GL_UNSIGNED_INT,BUFFER_OFFSET(0));
+		glDisableClientState(GL_VERTEX_ARRAY);
+		glDisableClientState(GL_NORMAL_ARRAY);
+		glDisableClientState(GL_COLOR_ARRAY);
+	glPopMatrix();
+}
+```
+
+### VoxelTerrain/GeometryManager.h
+```
+#pragma once
+#include "Mesh.h"
+#include "Renderer.h"
+#include "Chunk.h"
+#include "Heightfield.h"
+#define FRONT_SIDE 0
+#define BACK_SIDE 1
+#define LEFT_SIDE 2
+#define RIGHT_SIDE 3
+#define TOP_SIDE 4
+#define BOTTOM_SIDE 5
+class GeometryManager
+{
+	public:
+		Renderer* pRenderer;
+		glm::vec4 statistics; // x - VoxelCount, y - Primitive Count, z - VertexCount, w - Indices count
+	private:
+		std::vector<CMesh*>* meshArray;
+		int voxelCounter;
+	public:
+		GeometryManager(void);
+		~GeometryManager(void);
+
+		void AddMesh(GLuint chunkID, GLint* geometryID);
+		void CreateUnindexedTriangleGeometry(Chunk* chunk);
+		void CreateUnindexedQuadGeometry(Chunk* chunk);
+		void CreateIndexedQuadGeometry(Chunk* chunk);
+		void CreateOptimizedIndexedGeometry(Chunk* chunk, Heightfield heightfield);
+		void LoadIndexedGeometry(GLint geometryID);
+		void LoadUnindexedGeometry(GLint geometryID);
+		void RenderTriangleArrays(glm::vec3 geometryPosition,GLint geometryID);
+		void RenderQuadArrays(glm::vec3 geometryPosition,GLint geometryID);
+		void RenderQuadGeometry(glm::vec3 geometryPosition,GLint geometryID);
+	private:
+		void CreateVoxel(Chunk* chunk, glm::vec3 relativePosition);
+		void CreateQuadVoxel(Chunk* chunk, glm::vec3 relativePosition);
+		void CreateQuadSmoothVoxel(Chunk* chunk, glm::vec3 relativePosition);
+		void CreateOptimizedQuadVoxel(Chunk* chunk, glm::vec3 relativePosition);
+		GLboolean IsNeighbourActive(Chunk* chunk, glm::vec3 voxelPosition,GLint type);
+		void VertexAdder(Chunk* chunk,glm::vec3 voxelPosition, std::vector<GLboolean> positions, GLint* activeVerts);
+};
+```
+
+### VoxelTerrain/Heightfield.cpp
+```
+#include "stdafx.h"
+#include "Heightfield.h"
+
+
+Heightfield::Heightfield(void)
+{
+	this->imageReader = new ImageReader();
+	this->chunk_check_mutex = new std::mutex();
+	this->scale = 0.5f;
+}
+
+
+Heightfield::~Heightfield(void)
+{
+}
+/* zmieniamy odczyt mapy y i z, z powodu niezgodnosci z ukladem oGL */
+void Heightfield::LoadHeightfield(LPCTSTR bmpFile)
+{
+	this->imageReader->ReadBitmap(bmpFile);
+	this->layersCount.x = this->imageReader->mapWidth/Chunk::CHUNK_SIZE;
+	this->layersCount.y  = 128/Chunk::CHUNK_SIZE; // Wysokosc jest zawsze rozmiaru char
+	this->layersCount.z  = this->imageReader->mapHeight/Chunk::CHUNK_SIZE;
+}
+Chunk Heightfield::PrepareChunk(glm::vec3 layer,int ID)
+{
+	Chunk* chunk = new Chunk(layer, ID);
+	//Optymalizacja: je�eli Chunk jest full, to nie sprawdzamy dalej tlyko od razu zwracamy
+	chunk->full = isFull(layer);
+	chunk->empty = isEmpty(layer);
+	if(!chunk->full && !chunk->empty)
+	{
+		MakeSurface(chunk,layer);
+		//MakeComplexSurface(chunk,layer);
+	}
+	return *chunk;
+}
+Chunk Heightfield::PrepareComplexChunk(glm::vec3 layer, int ID)
+{
+	Chunk* chunk = new Chunk(layer, ID);
+	//Optymalizacja: je�eli Chunk jest full, to nie sprawdzamy dalej tlyko od razu zwracamy
+	chunk->full = isFull(layer);
+	chunk->empty = isEmpty(layer);
+	if(!chunk->full && !chunk->empty)
+	{
+		MakeComplexSurface(chunk,layer);
+	}
+	return *chunk;
+}
+GLboolean Heightfield::isEmpty(glm::vec3 layer)
+{
+	for(int x=layer.x*Chunk::CHUNK_SIZE; x < (layer.x*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); x++)
+	{
+		for(int z=layer.z*Chunk::CHUNK_SIZE; z < (layer.z*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); z++)
+		{
+			int surfaceHeight = this->imageReader->getValueAt(x,z)*scale;
+			//Check if bottom of the chunk is higher than map surface at this x,y(x,z) coordinates
+			if(surfaceHeight > layer.y*Chunk::CHUNK_SIZE)
+				return GL_FALSE;
+		}
+	}
+	return GL_TRUE;
+}
+GLboolean Heightfield::isFull(glm::vec3 layer)
+{
+	for(int x=layer.x*Chunk::CHUNK_SIZE; x < (layer.x*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); x++)
+	{
+		for(int z=layer.z*Chunk::CHUNK_SIZE; z < (layer.z*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); z++)
+		{
+			int surfaceHeight = this->imageReader->getValueAt(x,z)*scale;
+			//Check if top of the chunk is lower than map surface at this x,y coordinates
+			if(surfaceHeight < (layer.y*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE))
+				return GL_FALSE;
+			
+		}
+	}
+	return GL_TRUE;
+}
+void Heightfield::MakeSurface(Chunk* chunk, glm::vec3 layer)
+{
+	for(int x=layer.x*Chunk::CHUNK_SIZE; x < (layer.x*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); x++)
+	{
+		for(int z=layer.z*Chunk::CHUNK_SIZE; z < (layer.z*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); z++)
+		{
+			int surfaceHeight = GetHeightAtPoint(x,z);
+			for(int y=layer.y*Chunk::CHUNK_SIZE; y < surfaceHeight; y++)
+			{
+				
+				if(y > layer.y*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE)
+					break;
+				//We are back into chunk coordinates so we have to divide by 16
+				glm::vec3 relativePosition(x%Chunk::CHUNK_SIZE,y%Chunk::CHUNK_SIZE,z%Chunk::CHUNK_SIZE);
+				if(y==surfaceHeight-1 && y < 100)
+					chunk->SetVoxelToActive(relativePosition,BLOCK_GRASS);
+				else if(y > 100)
+					chunk->SetVoxelToActive(relativePosition,BLOCK_STONE);
+				else
+					chunk->SetVoxelToActive(relativePosition,BLOCK_DIRT);
+			}
+		}
+	}
+}
+void Heightfield::MakeComplexSurface(Chunk* chunk,glm::vec3 layer)
+{
+	
+	//std::vector<std::thread> loadingThreads;
+	for(int y=layer.y*Chunk::CHUNK_SIZE; y < layer.y*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE; y++)
+	{
+		for(int x=layer.x*Chunk::CHUNK_SIZE; x < (layer.x*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); x++)
+		{
+			for(int z=layer.z*Chunk::CHUNK_SIZE; z < (layer.z*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); z++)
+			{
+				int surfaceHeight = GetHeightAtPoint(x,z);
+				if( y == surfaceHeight)
+				{
+						glm::vec3 relativePosition(x%Chunk::CHUNK_SIZE,y%Chunk::CHUNK_SIZE,z%Chunk::CHUNK_SIZE);
+						if(y==surfaceHeight && y < 100)
+							chunk->SetVoxelToActive(relativePosition,BLOCK_GRASS);
+						else if(y > 100)
+							chunk->SetVoxelToActive(relativePosition,BLOCK_STONE);
+						else
+							chunk->SetVoxelToActive(relativePosition,BLOCK_DIRT);
+				}
+				else if( y < surfaceHeight)
+				{
+					if(checkNeighbourForWall(glm::vec2(x,z),y))
+					{
+						glm::vec3 relativePosition(x%Chunk::CHUNK_SIZE,y%Chunk::CHUNK_SIZE,z%Chunk::CHUNK_SIZE);
+						if(y > 100)
+							chunk->SetVoxelToActive(relativePosition,BLOCK_STONE);
+						else
+							chunk->SetVoxelToActive(relativePosition,BLOCK_DIRT);
+					}
+					/*if(x == layer.x*Chunk::CHUNK_SIZE || x == (layer.x*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE)-1 ||
+						z == layer.z*Chunk::CHUNK_SIZE || z == (layer.z*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE)-1)
+					{
+						if(checkNeighbourForWall(glm::vec2(x,z),y))
+						{
+							glm::vec3 relativePosition(x%Chunk::CHUNK_SIZE,y%Chunk::CHUNK_SIZE,z%Chunk::CHUNK_SIZE);
+							//if(y==surfaceHeight && y < 100)
+							//	chunk->SetVoxelToActive(relativePosition,BLOCK_GRASS);
+							if(y > 100)
+								chunk->SetVoxelToActive(relativePosition,BLOCK_STONE);
+							else
+								chunk->SetVoxelToActive(relativePosition,BLOCK_DIRT);
+						}
+					}
+					else
+					{
+						if(isAnyNeighbourLower(glm::vec2(x,z),y))
+						{
+							glm::vec3 relativePosition(x%Chunk::CHUNK_SIZE,y%Chunk::CHUNK_SIZE,z%Chunk::CHUNK_SIZE);
+							//if(y==surfaceHeight && y < 100)
+							//	chunk->SetVoxelToActive(relativePosition,BLOCK_GRASS);
+							if(y > 100)
+								chunk->SetVoxelToActive(relativePosition,BLOCK_STONE);
+							else
+								chunk->SetVoxelToActive(relativePosition,BLOCK_DIRT);
+						}
+					}*/
+				}
+			}
+		}
+	}
+		//loadingThreads.push_back(std::thread(&Heightfield::ConstructLayer, this, chunk,glm::vec3(layer.x,y,layer.z)));
+	//for(auto& th : loadingThreads)
+	//	th.join();
+}
+void Heightfield::ConstructLayer(Chunk* chunk,glm::vec3 layerConstHeight)
+{
+	int workingHeight = layerConstHeight.y;
+	for(int x=layerConstHeight.x*Chunk::CHUNK_SIZE; x < (layerConstHeight.x*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); x++)
+	{
+		for(int z=layerConstHeight.z*Chunk::CHUNK_SIZE; z < (layerConstHeight.z*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE); z++)
+		{
+			if(x == layerConstHeight.x*Chunk::CHUNK_SIZE || x == (layerConstHeight.x*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE)-1 ||
+			   z == layerConstHeight.z*Chunk::CHUNK_SIZE || z == (layerConstHeight.z*Chunk::CHUNK_SIZE+Chunk::CHUNK_SIZE)-1 )
+			{
+				int surfaceHeight = GetHeightAtPoint(x,z);
+				if(workingHeight < surfaceHeight)
+				{
+					//We are back into chunk coordinates so we have to divide by 16
+					glm::vec3 relativePosition(x%Chunk::CHUNK_SIZE,workingHeight%Chunk::CHUNK_SIZE,z%Chunk::CHUNK_SIZE);
+					if(workingHeight==surfaceHeight-1 && workingHeight < 100)
+						chunk->SetVoxelToActive(relativePosition,BLOCK_GRASS);
+					else if(workingHeight > 100)
+						chunk->SetVoxelToActive(relativePosition,BLOCK_STONE);
+					else
+						chunk->SetVoxelToActive(relativePosition,BLOCK_DIRT);
+				}
+			}
+		}
+	}
+}
+int Heightfield::GetHeightAtPoint(int x, int z)
+{
+	return imageReader->getValueAt(x,z)*scale;
+}
+GLboolean Heightfield::isAnyNeighbourLower(glm::vec2 pos, int pointHeight)
+{
+	//This is only 2D vector so it uses (x,y) notation, but is supplied the actual (x,z) world coordinates
+	int test;
+	test = GetHeightAtPoint(pos.x-1,pos.y);
+	if(test <= pointHeight)
+		return GL_TRUE;
+	test = GetHeightAtPoint(pos.x-1,pos.y+1);
+	if(test <= pointHeight)
+		return GL_TRUE;
+	test = GetHeightAtPoint(pos.x,pos.y+1);
+	if(test <= pointHeight)
+		return GL_TRUE;
+	test = GetHeightAtPoint(pos.x+1,pos.y+1);
+	if(test <= pointHeight)
+		return GL_TRUE;
+	test = GetHeightAtPoint(pos.x+1,pos.y);
+	if(test <= pointHeight)
+		return GL_TRUE;
+	test = GetHeightAtPoint(pos.x+1,pos.y-1);
+	if(test <= pointHeight)
+		return GL_TRUE;
+	test = GetHeightAtPoint(pos.x,pos.y-1);
+	if(test <= pointHeight)
+		return GL_TRUE;
+	test = GetHeightAtPoint(pos.x-1,pos.y-1);
+	if(test <= pointHeight)
+		return GL_TRUE;
+
+	return GL_FALSE;
+}
+GLboolean Heightfield::checkNeighbourForWall(glm::vec2 pos, int pointHeight)
+{
+	if(pos.x == 0 || pos.y == 0 || pos.x == (layersCount.x*Chunk::CHUNK_SIZE)-1 || pos.y == (layersCount.z*Chunk::CHUNK_SIZE)-1)
+	{
+		int test;
+		if(pos.x == 0 && pos.y == 0)
+		{
+			test = GetHeightAtPoint(pos.x,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+		else if(pos.x == 0 && pos.y == (layersCount.z*Chunk::CHUNK_SIZE)-1)
+		{
+			test = GetHeightAtPoint(pos.x+1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+		else if(pos.x == (layersCount.x*Chunk::CHUNK_SIZE)-1 && pos.y == 0)
+		{
+			test = GetHeightAtPoint(pos.x-1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x-1,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+		else if(pos.x == (layersCount.x*Chunk::CHUNK_SIZE)-1 && pos.y == (layersCount.z*Chunk::CHUNK_SIZE)-1)
+		{
+			test = GetHeightAtPoint(pos.x-1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x-1,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+		else if(pos.x == 0)
+		{
+			test = GetHeightAtPoint(pos.x,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+		else if(pos.x == (layersCount.x*Chunk::CHUNK_SIZE)-1)
+		{
+			test = GetHeightAtPoint(pos.x-1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x-1,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x-1,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+		else if(pos.y == 0)
+		{
+			test = GetHeightAtPoint(pos.x-1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x-1,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y+1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+		else if(pos.y == (layersCount.z*Chunk::CHUNK_SIZE)-1)
+		{
+			test = GetHeightAtPoint(pos.x-1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x+1,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+			test = GetHeightAtPoint(pos.x-1,pos.y-1);
+			if(test <= pointHeight)
+				return GL_TRUE;
+
+			return GL_FALSE;
+		}
+	}
+	else
+	{
+		return isAnyNeighbourLower(pos,pointHeight);
+	}
+}
+```
+
+### VoxelTerrain/Heightfield.h
+```
+#pragma once
+#include "ImageReader.h"
+#include "Chunk.h"
+#include <mutex>
+#include <thread>
+#include <future>
+
+class Heightfield
+{
+public:
+	glm::vec3 layersCount;
+	float scale;
+private:
+	ImageReader* imageReader;
+	std::mutex* chunk_check_mutex;
+public:
+	Heightfield(void);
+	~Heightfield(void);
+	void LoadHeightfield(LPCTSTR bmpFile);
+	Chunk PrepareChunk(glm::vec3 layer, int ID);
+	Chunk PrepareComplexChunk(glm::vec3 layer, int ID);
+	int GetHeightAtPoint(int x, int z);
+private:
+	GLboolean isEmpty(glm::vec3 layer);
+	GLboolean isFull(glm::vec3 layer);
+	void MakeSurface(Chunk* ,glm::vec3 layer);
+	void MakeComplexSurface(Chunk*,glm::vec3 layer);
+	void ConstructLayer(Chunk*,glm::vec3 layerConstHeight);
+	GLboolean isAnyNeighbourLower(glm::vec2 currentPosition, int pointHeight);
+	GLboolean checkNeighbourForWall(glm::vec2 currentPosition, int pointHeight);
+};
+```
+
+### VoxelTerrain/ImageReader.cpp
+```
+#include "stdafx.h"
+#include "ImageReader.h"
+
+
+
+ImageReader::ImageReader(void)
+{
+	this->heightmap = new CImage();
+}
+
+
+ImageReader::~ImageReader(void)
+{
+}
+void ImageReader::ReadBitmap(LPCTSTR bmpFile)
+{
+	this->heightmap->Load(bmpFile);
+	this->mapHeight = this->heightmap->GetHeight();
+	this->mapWidth = this->heightmap->GetWidth();
+}
+void ImageReader::Cleanup()
+{
+	
+}
+int ImageReader::getValueAt(int x, int y)
+{
+	COLORREF color = this->heightmap->GetPixel(x,y);
+	return (GetRValue(color) + GetGValue(color) + GetBValue(color))/3;
+}
+```
+
+### VoxelTerrain/ImageReader.h
+```
+#pragma once
+#include "stdafx.h"
+#include <vector>
+class ImageReader
+{
+public:
+	int mapWidth;
+	int mapHeight;
+private:
+	CImage* heightmap;
+public:
+	ImageReader(void);
+	~ImageReader(void);
+	void ReadBitmap(LPCTSTR bmpFile);
+	int getValueAt(int x, int y);
+	void Cleanup();
+};
+```
+
+### VoxelTerrain/Mesh.cpp
+```
+#include "stdafx.h"
+#include "Mesh.h"
+
+
+CMesh::CMesh(void)
+{
+	meshID = 0;
+}
+CMesh::CMesh(GLuint meshID)
+{
+	this->meshID = meshID;
+	this->meshVertexData = new std::vector<GLfloat>();
+	this->meshIndexData = new std::vector<GLuint>();
+
+}
+/* ********************* TODO: Add proper cleanup ********************* */
+CMesh::~CMesh(void)
+{
+	delete meshVertexData;
+	delete meshIndexData;
+	glDeleteBuffers(1,&vertexBuffer);
+	glDeleteBuffers(1,&indexBuffer);
+	glDeleteBuffers(1,&normalBuffer);
+	glDeleteBuffers(1,&colorBuffer);
+}
+void CMesh::addVertexToMesh(glm::vec3 vertexPosition)
+{
+	this->meshVertexData->push_back((GLfloat)vertexPosition.x);
+	this->meshVertexData->push_back((GLfloat)vertexPosition.y);
+	this->meshVertexData->push_back((GLfloat)vertexPosition.z);
+}
+void CMesh::addTriangleToMesh(glm::vec3 indexVector)
+{
+	this->meshIndexData->push_back((GLuint)indexVector.x);
+	this->meshIndexData->push_back((GLuint)indexVector.y);
+	this->meshIndexData->push_back((GLuint)indexVector.z);
+}
+void CMesh::addQuadToMesh(glm::vec4 indexVector)
+{
+	this->meshIndexData->push_back((GLuint)indexVector.x);
+	this->meshIndexData->push_back((GLuint)indexVector.y);
+	this->meshIndexData->push_back((GLuint)indexVector.z);
+	this->meshIndexData->push_back((GLuint)indexVector.w);
+}
+void CMesh::addNormalForTriangle(glm::vec3 normalVector)
+{
+	this->meshNormalData.push_back((GLfloat)normalVector.x);
+	this->meshNormalData.push_back((GLfloat)normalVector.y);
+	this->meshNormalData.push_back((GLfloat)normalVector.z);
+}
+void CMesh::addColorForVert(glm::vec4 colorVector)
+{
+	this->meshColorData.push_back((GLfloat)colorVector.r);
+	this->meshColorData.push_back((GLfloat)colorVector.g);
+	this->meshColorData.push_back((GLfloat)colorVector.b);
+	this->meshColorData.push_back((GLfloat)colorVector.a);
+}
+void CMesh::generateVertexBufferData()
+{
+	glGenBuffers(1,&vertexBuffer);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat)*meshVertexData->size(),&(meshVertexData->at(0)),GL_STATIC_DRAW);
+	this->vertexCount = meshVertexData->size();
+}
+void CMesh::generateIndexBufferData()
+{
+	glGenBuffers(1,&indexBuffer);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLuint)*meshIndexData->size(),&(meshIndexData->at(0)),GL_STATIC_DRAW);
+	this->indexCount = meshIndexData->size();
+}
+void CMesh::generateNormalBufferData()
+{
+	glGenBuffers(1,&normalBuffer);
+	glBindBuffer(GL_ARRAY_BUFFER,normalBuffer);
+	glBufferData(GL_ARRAY_BUFFER,sizeof(GLfloat)*meshNormalData.size(),&meshNormalData[0],GL_STATIC_DRAW);
+}
+void CMesh::generateColorBufferData()
+{
+	glGenBuffers(1,&colorBuffer);
+	glBindBuffer(GL_ARRAY_BUFFER,colorBuffer);
+	glBufferData(GL_ARRAY_BUFFER,sizeof(GLfloat)*meshColorData.size(),&meshColorData[0],GL_STATIC_DRAW);
+}
+GLuint* CMesh::getBuffer(int bufferType)
+{
+	if(bufferType == VERTEX_BUFFER)
+		return &vertexBuffer;
+	else if(bufferType == INDEX_BUFFER)
+		return &indexBuffer;
+	else if(bufferType == NORMAL_BUFFER)
+		return &normalBuffer;
+	else
+		return NULL;
+}
+```
+
+### VoxelTerrain/Mesh.h
+```
+#pragma once
+#include <GL\glew.h>
+#include <GL\GL.h>
+#include <glm.hpp>
+#include <vector>
+
+#define VERTEX_BUFFER 0
+#define INDEX_BUFFER 1
+#define NORMAL_BUFFER 2
+#define COLOR_BUFFER 3
+
+class CMesh
+{
+public:
+	GLuint meshID,indexCount,vertexCount;
+	GLuint vertexBuffer;
+	GLuint indexBuffer;
+	GLuint normalBuffer;
+	GLuint colorBuffer;
+private:
+	std::vector<GLfloat>* meshVertexData; 
+	std::vector<GLuint>* meshIndexData;
+	std::vector<GLfloat> meshNormalData;
+	std::vector<GLfloat> meshColorData;
+public:
+	CMesh(void);
+	CMesh(GLuint meshID);
+	~CMesh(void);
+	void addVertexToMesh(glm::vec3 vertexPosition);
+	void addTriangleToMesh(glm::vec3 indexVector);
+	void addQuadToMesh(glm::vec4 indexVector);
+	void addNormalForTriangle(glm::vec3 normalVector);
+	void addColorForVert(glm::vec4 colorVector);
+	void generateVertexBufferData();
+	void generateIndexBufferData();
+	void generateNormalBufferData();
+	void generateColorBufferData();
+	GLuint* getBuffer(int bufferType);
+};
+```
+
+### VoxelTerrain/OpenGLControl.cpp
+```
+#include "stdafx.h"
+#include "OpenGLControl.h"
+
+
+COpenGLControl::COpenGLControl(void)
+{
+	player = new Player();
+	isMaximized = false;
+	this->geometryManager = new GeometryManager();
+	this->chunkManager = new ChunkManager(geometryManager);
+	this->mapLoaded = false;
+	this->geometryLoaded = false;
+	this->renderingFlags = 0;
+	//this->chunkManager->heightfield->LoadHeightfield(L"G:\\Dropbox\\Dropbox\\Seminarium\\Heightmaps\\heightmap64.bmp");
+	//StartupCamera();
+}
+COpenGLControl::~COpenGLControl(void)
+{
+	this->text.deleteBitmapFont(this->font);
+}
+
+BEGIN_MESSAGE_MAP(COpenGLControl, CWnd)
+	ON_WM_PAINT()
+	ON_WM_SIZE()
+	ON_WM_CREATE()
+	ON_WM_TIMER()
+	ON_WM_MOUSEMOVE()
+END_MESSAGE_MAP()
+
+void COpenGLControl::oglCreate(CRect rect,CWnd *parentWindow)
+{
+	CString className = AfxRegisterWndClass(CS_HREDRAW | CS_VREDRAW | CS_OWNDC, NULL,(HBRUSH)GetStockObject(BLACK_BRUSH),NULL);
+	CreateEx(0,className,L"OpenGL",WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS|WS_CLIPCHILDREN,rect,parentWindow,0,(LPVOID) 0);
+	this->oldWindow = rect;
+	this->originalRect = rect;
+	this->windowHandle = parentWindow;
+}
+void COpenGLControl::oglInitialize()
+{
+	static PIXELFORMATDESCRIPTOR pfd = 
+	{
+		sizeof(PIXELFORMATDESCRIPTOR),
+		1,
+		PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+		PFD_TYPE_RGBA,
+		32, // 32 bity
+		0,0,0,0,0,0,0,0,0,0,0,0,0,
+		16, //z-buffer depth
+		0,0,0,0,0,0,0,
+	};
+
+	handleDeviceContext = GetDC()->m_hDC;
+
+	pixelFormat = ChoosePixelFormat(handleDeviceContext,&pfd);
+	SetPixelFormat(handleDeviceContext,pixelFormat,&pfd);
+
+	//Rendering context
+	hrc = wglCreateContext(handleDeviceContext);
+	wglMakeCurrent(handleDeviceContext,hrc);
+
+	/* ******** OpenGL Setup ****** */
+	glClearColor(0.529f,0.807f,0.921f,1.0f);
+	glClearDepth(1.0f);
+
+	glFrontFace(GL_CCW);
+	glCullFace(GL_BACK);
+
+	glEnable(GL_DEPTH_TEST);
+
+	glEnable(GL_LIGHTING);
+	this->chunkManager->SetupLights();
+
+	glDepthFunc(GL_LEQUAL);
+
+	glewExperimental = GL_TRUE;
+	GLenum test = glewInit();
+
+	/*if(int z = text.InnitializeText())
+	{
+		wchar_t error[256];
+		wsprintfW(error , L"%d", z);
+		MessageBoxEx(0,error,L"Error",0,0);
+	}*/
+//	font = text.createBitmapFont(handleDeviceContext,"Times New Roman",48);
+
+	//double executionTime;
+	//GLint surfaceSize;
+	//glm::vec4 stats;
+	//clock_t startTime = clock();
+	//this->chunkManager->LoadAllMap();
+	//executionTime = double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+
+	//startTime = clock();
+	//chunkManager->ScanForSurface();
+	//executionTime += double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+
+	//startTime = clock();
+	////chunkManager->CreateUnindexedSurfaceMesh(QUADS);
+	//chunkManager->CreateIndexedSurfaceMesh(GL_FALSE);
+	//executionTime += double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+
+	//startTime = clock();
+	////chunkManager->LoadUnindexedSurface();
+	//chunkManager->LoadIndexedSurface();
+	//executionTime += double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+
+	//stats = geometryManager->statistics;
+	//chunkManager->GetActiveChunksCount(&surfaceSize);
+	OnDraw(NULL);
+}
+void COpenGLControl::OnPaint()
+{
+	ValidateRect(NULL);
+}
+int COpenGLControl::OnCreate(LPCREATESTRUCT lpCreateStruct)
+{
+	if(CWnd::OnCreate(lpCreateStruct) == -1)
+		return -1;
+
+	oglInitialize();
+	return 0;
+}
+void COpenGLControl::OnDraw(CDC *pDC)
+{
+	glLoadIdentity();
+	glm::vec3 position = player->GetCamera(CAMERA_POSITION);
+	//position.y = chunkManager->heightfield->GetHeightAtPoint(position.x,position.z);
+	this->geometryManager->pRenderer->RotateWorldMatrix(player->GetCamera(CAMERA_ROTATION));
+	gluLookAt(position.x,position.y,position.z,position.x,position.y,position.z-1.0f,0.0f,1.0f,0.0f);
+	chunkManager->UpdateLights();
+	chunkManager->UpdateVisibility(renderingFlags,player->GetCamera(CAMERA_POSITION));
+	//chunkManager->UpdateProximityVisiblity(player->GetCamera(CAMERA_POSITION));
+	//chunkManager->UpdateVisibility();
+}
+void COpenGLControl::OnTimer(UINT nIDEvent)
+{
+	switch (nIDEvent)
+	{
+	case 1:
+		{
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+			renderScene(renderingFlags);
+			//chunkManager->UpdateVisibility();
+			//chunkManager->RenderVisibleQuadSurface();
+			//chunkManager->RenderVisibleSurface();
+			//chunkManager->RenderUnindexedSurface(QUADS);
+			//chunkManager->RenderIndexedQuadSurface();
+			SwapBuffers(handleDeviceContext);
+			break;
+		}
+	default:
+		break;
+	}
+	CWnd::OnTimer(nIDEvent);
+}
+void COpenGLControl::OnSize(UINT type, int x, int y)
+{
+	CWnd::OnSize(type,x,y);
+	viewportW = x;
+	viewportH = y;
+	if( 0 >= x || 0 >= y || type == SIZE_MINIMIZED)
+		return;
+
+	glViewport(0,0,x,y);
+	glMatrixMode(GL_PROJECTION);
+
+	glLoadIdentity();
+	gluPerspective(60.0f,(float)x/(float)y,1.0f,400.0f);
+
+	glMatrixMode(GL_MODELVIEW);
+	switch (type)
+	{
+		// If window resize token is "maximize"
+		case SIZE_MAXIMIZED:
+		{
+			// Get the current window rect
+			GetWindowRect(rect);
+
+			// Move the window accordingly
+			MoveWindow(6, 6, x - 14, y - 14);
+
+			// Get the new window rect
+			GetWindowRect(rect);
+
+			// Store our old window as the new rect
+			oldWindow = rect;
+
+			break;
+		}
+
+		// If window resize token is "restore"
+		case SIZE_RESTORED:
+		{
+			// If the window is currently maximized
+			if (isMaximized)
+			{
+				// Get the current window rect
+				GetWindowRect(rect);
+
+				// Move the window accordingly (to our stored old window)
+				MoveWindow(oldWindow.left, oldWindow.top - 18, originalRect.Width() - 4, originalRect.Height() - 4);
+
+				// Get the new window rect
+				GetWindowRect(rect);
+
+				// Store our old window as the new rect
+				oldWindow = rect;
+			}
+		
+			break;
+		}
+	}
+}
+void COpenGLControl::OnMouseMove(UINT nFlags, CPoint point)
+{
+	player->UpdateLook(point);   
+	OnDraw(NULL);
+	CWnd::OnMouseMove(nFlags,point);
+}
+void COpenGLControl::StartupCamera()
+{
+	SetCursorPos(960,540);
+	glLoadIdentity();
+	glm::vec3 layers = chunkManager->heightfield->layersCount;
+	int width = layers.x*Chunk::CHUNK_SIZE;
+	int height = layers.z*Chunk::CHUNK_SIZE;
+	int startHeight = chunkManager->heightfield->GetHeightAtPoint(width/2.0f,height/2.0f);
+	//player->SetCamera(CAMERA_POSITION, glm::vec3(width/2.0f,startHeight+1.0f,height/2.0f));
+	player->SetCamera(CAMERA_POSITION, glm::vec3(0.0f,startHeight+1.0f,0.0f));
+}
+void COpenGLControl::MovePlayer(int direction)
+{
+	player->Move(direction);
+	OnDraw(NULL);
+}
+void COpenGLControl::LoadHeightmap(LPCTSTR mapName)
+{
+	this->chunkManager->heightfield->LoadHeightfield(mapName);
+}
+void COpenGLControl::LoadAllMap(bool complex)
+{
+	this->chunkManager->LoadAllMap(complex);
+}
+void COpenGLControl::findSurface()
+{
+	this->chunkManager->ScanForSurface();
+}
+void COpenGLControl::renderScene(GLint flags)
+{
+	if(flags & R_CULLING)
+	{
+		if(flags & R_INDEXED)
+		{
+			chunkManager->RenderVisibleQuadSurface();
+		}
+		else
+		{
+			chunkManager->RenderVisibleSurface();
+		}
+	}
+	else
+	{
+		if(geometryLoaded && flags == R_QUAD)
+		{
+			chunkManager->RenderUnindexedSurface(QUADS);
+		}
+		else if(flags == R_TRIANGLE)
+		{
+			chunkManager->RenderUnindexedSurface(TRIS);
+		}
+		else if(flags & R_INDEXED)
+		{
+			chunkManager->RenderIndexedQuadSurface();
+		}
+	}
+	
+}
+void COpenGLControl::LoadGeometry()
+{
+	if(!renderingFlags)
+	{
+		chunkManager->CreateUnindexedSurfaceMesh(QUADS);
+	}
+	else if(renderingFlags == R_TRIANGLE)
+	{
+		chunkManager->CreateUnindexedSurfaceMesh(TRIS);
+	}
+	else if(renderingFlags == R_QUAD | R_INDEXED)
+	{
+		chunkManager->CreateIndexedSurfaceMesh(GL_FALSE);
+	}
+	else if(renderingFlags == R_QUAD | R_INDEXED | R_OPTIMIZED)
+	{
+		chunkManager->CreateIndexedSurfaceMesh(GL_TRUE);
+	}
+}
+void COpenGLControl::LoadBuffers()
+{
+	if(renderingFlags & 2)
+		chunkManager->LoadIndexedSurface();
+	else
+		chunkManager->LoadUnindexedSurface();
+}
+glm::vec4 COpenGLControl::GetStatistics()
+{
+	return geometryManager->statistics;
+}
+glm::vec2 COpenGLControl::GetSizes()
+{
+	glm::vec2 stats;
+	GLint activeChunks, visibleChunks;
+	chunkManager->GetActiveChunksCount(&activeChunks);
+	chunkManager->GetVisibleChunksCount(&visibleChunks);
+	stats.x = activeChunks;
+	stats.y = visibleChunks;
+	return stats;
+}
+glm::vec3 COpenGLControl::GetCameraPosition()
+{
+	return player->GetCamera(CAMERA_POSITION);
+}
+```
+
+### VoxelTerrain/OpenGLControl.h
+```
+#pragma once
+#include "afxwin.h"
+
+#include <glm.hpp>
+#include <GL\glew.h>
+#include <gl\GL.h>
+#include <gl\GLU.h>
+#include "Player.h"
+#include "GeometryManager.h"
+#include "ChunkManager.h"
+#include "Text.h"
+
+#define R_QUAD 0
+#define R_TRIANGLE 1
+#define R_INDEXED 2
+#define R_OPTIMIZED 4
+#define R_CULLING 8
+#define R_PROXIMITY 16
+class COpenGLControl :
+	public CWnd
+{
+public:
+	UINT_PTR timer;
+	bool isMaximized;
+	bool mapLoaded, geometryLoaded;
+	GLint renderingFlags;
+private:
+	CWnd *windowHandle;
+	HDC handleDeviceContext;
+	HGLRC hrc;
+	int pixelFormat,viewportW,viewportH;
+	CRect rect;
+	CRect oldWindow;
+	CRect originalRect;
+	Player* player;
+	ChunkManager* chunkManager;
+	GeometryManager* geometryManager;
+	Text text;
+	unsigned int font;
+public:
+	COpenGLControl(void);
+	virtual ~COpenGLControl(void);
+
+	void oglCreate(CRect rect,CWnd *parentWindow);
+	void LoadHeightmap(LPCTSTR);
+	void LoadAllMap(bool complex);
+	void findSurface();
+	void LoadGeometry();
+	void LoadBuffers();
+	glm::vec4 GetStatistics();
+	glm::vec2 GetSizes();
+	glm::vec3 GetCameraPosition();
+	void MovePlayer(int direction);
+	void oglInitialize();
+	void StartupCamera();
+
+	afx_msg void OnPaint();
+	afx_msg int OnCreate(LPCREATESTRUCT lpCreateStruct);
+	afx_msg void OnDraw(CDC *pDC);
+	afx_msg void OnTimer(UINT nIDEvent);
+	afx_msg void OnSize(UINT type, int x, int y);
+	afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+	DECLARE_MESSAGE_MAP()
+protected:
+	void renderScene(GLint flags);
+};
+```
+
+### VoxelTerrain/Player.cpp
+```
+#include "stdafx.h"
+#include "Player.h"
+
+
+Player::Player(void)
+{
+	cameraPosition = glm::vec3(0.0f,0.0f,0.0f);
+	cameraRotation = glm::vec3(0.0f,0.0f,0.0f);
+	lastCameraPosition = glm::vec3(0.0f,0.0f,0.0f);
+	speed = 1.0f;
+}
+
+
+Player::~Player(void)
+{
+
+}
+void Player::SetCamera(int cameraType, glm::vec3 cameraVector)
+{
+	switch(cameraType)
+	{
+	case CAMERA_POSITION:
+		{
+			cameraPosition = cameraVector;
+			break;
+		}
+	case CAMERA_ROTATION:
+		{
+			cameraRotation = cameraVector;
+			break;
+		}
+	}
+}
+glm::vec3 Player::GetCamera(int cameraType)
+{
+	switch(cameraType)
+	{
+	case CAMERA_POSITION:
+		{
+			return cameraPosition;
+		}
+	case CAMERA_ROTATION:
+		{
+			return cameraRotation;
+		}
+	default:
+		{
+			return cameraPosition;
+		}
+	}
+}
+void Player::UpdateLook(CPoint point)
+{
+	deltaX = (int)(point.x - lastCameraPosition.x);
+	deltaY = (int)(point.y - lastCameraPosition.y);
+	lastCameraPosition.x = (float) point.x;
+	lastCameraPosition.y = (float) point.y;
+
+	cameraRotation.x += (float) deltaX * 1.0f;
+	cameraRotation.y += (float) deltaY * 1.0f;
+
+	if(cameraRotation.y >= 90.0f)
+		cameraRotation.y = 90.0f;
+	if(cameraRotation.y <= -90.0f)
+		cameraRotation.y = -90.0f;
+}
+void Player::Move(int direction)
+{
+	switch(direction)
+	{
+		case FORWARD:
+			{
+				cameraPosition.x += (float)sin(cameraRotation.x * 3.14f/180.0f) * speed;
+				cameraPosition.z -= (float)cos(cameraRotation.x * 3.14f/180.0f) * speed;
+				break;
+			}
+		case BACKWARDS:
+			{
+				cameraPosition.x -= (float)sin(cameraRotation.x * 3.14f/180.0f) * speed;
+				cameraPosition.z += (float)cos(cameraRotation.x * 3.14f/180.0f) * speed;
+				break;
+			}
+		case LEFT:
+			{
+				cameraPosition.x += (float)sin((cameraRotation.x - 90.0f) * 3.14f/180.0f) * speed;
+				cameraPosition.z -= (float)cos((cameraRotation.x - 90.0f) * 3.14f/180.0f) * speed;
+				break;
+			}
+		case RIGHT:
+			{
+				cameraPosition.x += (float)sin((cameraRotation.x + 90.0f) * 3.14f/180.0f) * speed;
+				cameraPosition.z -= (float)cos((cameraRotation.x + 90.0f) * 3.14f/180.0f) * speed;
+				break;
+			}
+		case UP:
+			{
+				cameraPosition.y += speed;
+				break;
+			}
+		case DOWN:
+			{
+				cameraPosition.y -= speed;
+				break;
+			}
+	}
+}
+```
+
+### VoxelTerrain/Player.h
+```
+#pragma once
+#include <cmath>
+#include <glm.hpp>
+#define FORWARD 1
+#define BACKWARDS 2
+#define LEFT 3
+#define RIGHT 4
+#define UP 5
+#define DOWN 6
+#define CAMERA_POSITION 10
+#define CAMERA_ROTATION 11
+class Player
+{
+private:
+	int deltaX;
+	int deltaY;
+	float speed;
+	glm::vec3 lastCameraPosition;
+	glm::vec3 cameraPosition;
+	glm::vec3 cameraRotation;
+public:
+	Player(void);
+	~Player(void);
+	void SetCamera(int cameraType, glm::vec3 cameraVector);
+	glm::vec3 GetCamera(int cameraType);
+	void UpdateLook(CPoint point);
+	void Move(int direction);
+};
+```
+
+### VoxelTerrain/Renderer.cpp
+```
+#include "stdafx.h"
+#include "Renderer.h"
+
+
+Renderer::Renderer(void)
+{
+	this->voxelHeight = 1.0f;
+	this->voxelWidth  = 1.0f;
+	this->voxelLength = 1.0f;
+}
+
+
+Renderer::~Renderer(void)
+{
+	
+}
+
+void Renderer::TranslateWorldMatrix(glm::vec3 translationVector)
+{
+	glTranslatef((float)translationVector.x,(float)translationVector.y,(float)translationVector.z);
+}
+void Renderer::TranslateWorldMatrix(float x, float y, float z)
+{
+	glTranslatef(x,y,z);
+}
+void Renderer::RotateWorldMatrix(glm::vec3 rotationVector)
+{
+	glRotatef((float)rotationVector.y,1.0f,0.0f,0.0f);
+	glRotatef((float)rotationVector.x,0.0f,1.0f,0.0f);
+	glRotatef((float)rotationVector.z,0.0f,0.0f,1.0f);
+}
+void Renderer::SetRenderMode(UINT mode)
+{
+	glPolygonMode(GL_FRONT_AND_BACK,mode);
+}
+void Renderer::EnableImmediateDraw(UINT mode)
+{
+	glBegin(mode);
+}
+void Renderer::DisableImmediateDraw()
+{
+	glEnd();
+}
+void Renderer::ImmediateVertex(float x, float y, float z)
+{
+	glVertex3f(x,y,z);
+}
+void Renderer::ImmediateColorAlpha(float r,float g, float b, float a)
+{
+	glColor4f(r,g,b,a);
+}
+void Renderer::ImmediateNormal(float x, float y, float z)
+{
+	glNormal3f(x,y,z);
+}
+void Renderer::SetupLights(glm::vec3 layersCount, GLint chunkSize)
+{
+	glShadeModel(GL_FLAT);
+	glEnable(GL_LIGHT0);
+	glEnable(GL_COLOR_MATERIAL);
+	glColorMaterial(GL_FRONT_AND_BACK,GL_AMBIENT_AND_DIFFUSE);
+	//int width = layersCount.x*chunkSize;
+	//int height = layersCount.z*chunkSize;
+	//lightpos[0] = 0.0f;
+	//lightpos[1] = 0.0f;
+	//lightpos[2] = 40.0f;
+	lightpos[3] = 1.0f;
+	//glLightfv(GL_LIGHT0,GL_POSITION,lightpos);
+}
+void Renderer::UpdateLights(glm::vec3 newPosition)
+{
+	lightpos[0] = newPosition.x;
+	lightpos[1] = newPosition.y;
+	lightpos[2] = newPosition.z;
+	glLightfv(GL_LIGHT0,GL_POSITION,lightpos);
+}
+```
+
+### VoxelTerrain/Renderer.h
+```
+#pragma once
+
+#include <GL\glew.h>
+#include <gl\GL.h>
+#include <gl\GLU.h>
+#include <vector>
+#include "Mesh.h"
+
+#define BUFFER_OFFSET(i) ((void*)(i))
+
+class Renderer
+{
+private:
+	enum{lightPosSize = 4};
+	GLfloat lightpos[lightPosSize];
+public: 
+	float voxelLength;
+	float voxelHeight;
+	float voxelWidth;
+public:
+	Renderer(void);
+	~Renderer(void);
+	void TranslateWorldMatrix(glm::vec3 translationVector);
+	void TranslateWorldMatrix(float x, float y, float z);
+	void RotateWorldMatrix(glm::vec3 rotationVector);
+	void SetRenderMode(UINT mode);
+	void EnableImmediateDraw(UINT mode);
+	void DisableImmediateDraw();
+	void ImmediateColorAlpha(float r,float g, float b, float a);
+	void ImmediateNormal(float x, float y, float z);
+	void ImmediateVertex(float x, float y, float z);
+	void SetupLights(glm::vec3 layersCount,GLint chunkSize);
+	void UpdateLights(glm::vec3 newPosition);
+};
+```
+
+### VoxelTerrain/Text.cpp
+```
+#include "stdafx.h"
+#include "Text.h"
+
+
+Text::Text(void)
+{
+	textPosition = glm::vec3(0.0f,0.0f,0.0f);
+}
+
+
+Text::~Text(void)
+{
+}
+
+int Text::InnitializeText()
+{
+	if(FT_Init_FreeType(&this->fontLib))
+		return 1; //Cannot load library
+
+	if(FT_New_Face(this->fontLib,"G:\\Dropbox\\Dropbox\\Seminarium\\sourcetest.ttf",0,&this->fontFace))
+		return 2; //Cannot load Font Face
+
+	if(FT_Set_Char_Size(this->fontFace,0,16*64,300,300))
+		return 3;
+	return 0;
+}
+unsigned int Text::createBitmapFont(HDC hDC,char* fontName, int fontSize)
+{
+	unsigned int font;
+	HFONT fontHandle;
+	LOGFONT logFont;
+
+	logFont.lfHeight = fontSize;
+	logFont.lfEscapement = 0;
+	logFont.lfWeight = FW_BOLD;
+	logFont.lfItalic = FALSE;
+	logFont.lfUnderline = FALSE;
+	logFont.lfStrikeOut = FALSE;
+	logFont.lfCharSet = DEFAULT_CHARSET;
+	_tcscpy_s(logFont.lfFaceName,_countof(_T("Times New Roman")),_T("Times New Roman"));
+
+	fontHandle = CreateFontIndirect(&logFont);
+
+	font = glGenLists(256);
+	SelectObject(hDC,fontHandle);
+	wglUseFontBitmaps(hDC,0,256,font);
+
+	return font;
+}
+void Text::deleteBitmapFont(unsigned int font)
+{
+	glDeleteLists(font, 256);
+}
+void Text::printString(unsigned int font,char* text)
+{
+	glListBase(font);
+	glCallLists(strlen(text),GL_UNSIGNED_BYTE,text);
+}
+void Text::UpdateTextPosition()
+{
+	textPosition = glm::vec3(0.0f,0.0f,0.0f);
+}
+```
+
+### VoxelTerrain/Text.h
+```
+#pragma once
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include <gl\GL.h>
+
+class Text
+{
+private:
+	FT_Library fontLib;
+	FT_Face fontFace;
+public:
+	glm::vec3 textPosition;
+	Text(void);
+	~Text(void);
+	
+	int InnitializeText();
+	unsigned int createBitmapFont(HDC hDC,char* fontName, int fontSize);
+	void deleteBitmapFont(unsigned int font);
+	void printString(unsigned int font,char* text);
+	void UpdateTextPosition();
+};
+```
+
+### VoxelTerrain/VoxelTerrain.cpp
+```
+// VoxelTerrain.cpp : Defines the class behaviors for the application.
+//
+
+#include "stdafx.h"
+#include "VoxelTerrain.h"
+#include "VoxelTerrainDlg.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#endif
+
+
+// CVoxelTerrainApp
+
+BEGIN_MESSAGE_MAP(CVoxelTerrainApp, CWinApp)
+	ON_COMMAND(ID_HELP, &CWinApp::OnHelp)
+END_MESSAGE_MAP()
+
+
+// CVoxelTerrainApp construction
+
+CVoxelTerrainApp::CVoxelTerrainApp()
+{
+	// support Restart Manager
+	m_dwRestartManagerSupportFlags = AFX_RESTART_MANAGER_SUPPORT_RESTART;
+
+	// TODO: add construction code here,
+	// Place all significant initialization in InitInstance
+}
+
+
+// The one and only CVoxelTerrainApp object
+
+CVoxelTerrainApp theApp;
+
+
+// CVoxelTerrainApp initialization
+
+BOOL CVoxelTerrainApp::InitInstance()
+{
+	// InitCommonControlsEx() is required on Windows XP if an application
+	// manifest specifies use of ComCtl32.dll version 6 or later to enable
+	// visual styles.  Otherwise, any window creation will fail.
+	INITCOMMONCONTROLSEX InitCtrls;
+	InitCtrls.dwSize = sizeof(InitCtrls);
+	// Set this to include all the common control classes you want to use
+	// in your application.
+	InitCtrls.dwICC = ICC_WIN95_CLASSES;
+	InitCommonControlsEx(&InitCtrls);
+
+	CWinApp::InitInstance();
+
+
+	AfxEnableControlContainer();
+
+	// Create the shell manager, in case the dialog contains
+	// any shell tree view or shell list view controls.
+	CShellManager *pShellManager = new CShellManager;
+
+	// Activate "Windows Native" visual manager for enabling themes in MFC controls
+	CMFCVisualManager::SetDefaultManager(RUNTIME_CLASS(CMFCVisualManagerWindows));
+
+	// Standard initialization
+	// If you are not using these features and wish to reduce the size
+	// of your final executable, you should remove from the following
+	// the specific initialization routines you do not need
+	// Change the registry key under which our settings are stored
+	// TODO: You should modify this string to be something appropriate
+	// such as the name of your company or organization
+	SetRegistryKey(_T("Local AppWizard-Generated Applications"));
+
+	CVoxelTerrainDlg dlg;
+	m_pMainWnd = &dlg;
+	INT_PTR nResponse = dlg.DoModal();
+	if (nResponse == IDOK)
+	{
+		// TODO: Place code here to handle when the dialog is
+		//  dismissed with OK
+	}
+	else if (nResponse == IDCANCEL)
+	{
+		// TODO: Place code here to handle when the dialog is
+		//  dismissed with Cancel
+	}
+	else if (nResponse == -1)
+	{
+		TRACE(traceAppMsg, 0, "Warning: dialog creation failed, so application is terminating unexpectedly.\n");
+		TRACE(traceAppMsg, 0, "Warning: if you are using MFC controls on the dialog, you cannot #define _AFX_NO_MFC_CONTROLS_IN_DIALOGS.\n");
+	}
+
+	// Delete the shell manager created above.
+	if (pShellManager != NULL)
+	{
+		delete pShellManager;
+	}
+
+	// Since the dialog has been closed, return FALSE so that we exit the
+	//  application, rather than start the application's message pump.
+	return FALSE;
+}
+```
+
+### VoxelTerrain/VoxelTerrain.h
+```
+// VoxelTerrain.h : main header file for the PROJECT_NAME application
+//
+
+#pragma once
+
+#ifndef __AFXWIN_H__
+	#error "include 'stdafx.h' before including this file for PCH"
+#endif
+
+#include "resource.h"		// main symbols
+
+
+// CVoxelTerrainApp:
+// See VoxelTerrain.cpp for the implementation of this class
+//
+
+class CVoxelTerrainApp : public CWinApp
+{
+public:
+	CVoxelTerrainApp();
+// Overrides
+public:
+	virtual BOOL InitInstance();
+
+// Implementation
+
+	DECLARE_MESSAGE_MAP()
+};
+
+extern CVoxelTerrainApp theApp;
+```
+
+### VoxelTerrain/VoxelTerrainDlg.cpp
+```
+// VoxelTerrainDlg.cpp : implementation file
+//
+
+#include "stdafx.h"
+#include "VoxelTerrain.h"
+#include "VoxelTerrainDlg.h"
+#include "afxdialogex.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#endif
+
+
+// CAboutDlg dialog used for App About
+
+class CAboutDlg : public CDialogEx
+{
+public:
+	CAboutDlg();
+
+// Dialog Data
+	enum { IDD = IDD_ABOUTBOX };
+
+	protected:
+	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV support
+
+// Implementation
+protected:
+	DECLARE_MESSAGE_MAP()
+};
+
+CAboutDlg::CAboutDlg() : CDialogEx(CAboutDlg::IDD)
+{
+}
+
+void CAboutDlg::DoDataExchange(CDataExchange* pDX)
+{
+	CDialogEx::DoDataExchange(pDX);
+}
+
+BEGIN_MESSAGE_MAP(CAboutDlg, CDialogEx)
+END_MESSAGE_MAP()
+
+
+// CVoxelTerrainDlg dialog
+
+
+
+CVoxelTerrainDlg::CVoxelTerrainDlg(CWnd* pParent /*=NULL*/)
+	: CDialogEx(CVoxelTerrainDlg::IDD, pParent)
+	, filePath(_T(""))
+{
+	m_hIcon = AfxGetApp()->LoadIcon(IDR_MAINFRAME);
+}
+
+void CVoxelTerrainDlg::DoDataExchange(CDataExchange* pDX)
+{
+	CDialogEx::DoDataExchange(pDX);
+	DDX_Text(pDX, IDC_EDIT1, filePath);
+	DDX_Control(pDX, IDC_EDIT1, filePathControl);
+	DDX_Control(pDX, IDC_SURFACE_TIME, surfaceLoadTime);
+	DDX_Control(pDX, IDC_ALGORITHM, loadingAlgorithm);
+	DDX_Control(pDX, IDC_SCANTIME, scanTime);
+	DDX_Control(pDX, IDC_INDEXED, indexedCheck);
+	DDX_Control(pDX, IDC_PRIMITIVE, renderingPrimitive);
+	DDX_Control(pDX, IDC_CULLING, culling);
+	DDX_Control(pDX, IDC_OPTIMIZED, optimizedCheck);
+	DDX_Control(pDX, IDC_GEOMETRYTIME, geometryTime);
+	DDX_Control(pDX, IDC_VBOTIME, vboTime);
+	DDX_Control(pDX, IDC_VOXELCOUNT, voxelCount);
+	DDX_Control(pDX, IDC_PRIMITIVECOUNT, primitiveCount);
+	DDX_Control(pDX, IDC_VERTEXCOUNT, vertexCount);
+	DDX_Control(pDX, IDC_SURFACESIZE, surfaceSize);
+	DDX_Control(pDX, IDC_ACTIVECHUNKS, activeChunks);
+	DDX_Control(pDX, IDC_INDICESCOUNT, indicesCount);
+	DDX_Control(pDX, IDC_COORDX, coordX);
+	DDX_Control(pDX, IDC_COORDY, coordY);
+	DDX_Control(pDX, IDC_COORDZ, coordZ);
+}
+
+BEGIN_MESSAGE_MAP(CVoxelTerrainDlg, CDialogEx)
+	ON_WM_SYSCOMMAND()
+	ON_WM_PAINT()
+	ON_WM_QUERYDRAGICON()
+	ON_WM_SIZE()
+	ON_BN_CLICKED(IDC_BROWSE, &CVoxelTerrainDlg::OnBnClickedBrowse)
+	ON_BN_CLICKED(IDC_LOADMAP, &CVoxelTerrainDlg::OnBnClickedLoadmap)
+	ON_BN_CLICKED(IDC_LOADGEOMETRY, &CVoxelTerrainDlg::OnBnClickedLoadgeometry)
+END_MESSAGE_MAP()
+
+
+// CVoxelTerrainDlg message handlers
+
+BOOL CVoxelTerrainDlg::OnInitDialog()
+{
+	CDialogEx::OnInitDialog();
+	CRect rect;
+	// Add "About..." menu item to system menu.
+
+	// IDM_ABOUTBOX must be in the system command range.
+	ASSERT((IDM_ABOUTBOX & 0xFFF0) == IDM_ABOUTBOX);
+	ASSERT(IDM_ABOUTBOX < 0xF000);
+
+	CMenu* pSysMenu = GetSystemMenu(FALSE);
+	if (pSysMenu != NULL)
+	{
+		BOOL bNameValid;
+		CString strAboutMenu;
+		bNameValid = strAboutMenu.LoadString(IDS_ABOUTBOX);
+		ASSERT(bNameValid);
+		if (!strAboutMenu.IsEmpty())
+		{
+			pSysMenu->AppendMenu(MF_SEPARATOR);
+			pSysMenu->AppendMenu(MF_STRING, IDM_ABOUTBOX, strAboutMenu);
+		}
+	}
+
+	// Set the icon for this dialog.  The framework does this automatically
+	//  when the application's main window is not a dialog
+	SetIcon(m_hIcon, TRUE);			// Set big icon
+	SetIcon(m_hIcon, FALSE);		// Set small icon
+
+	// TODO: Add extra initialization here
+	GetDlgItem(IDC_OPENGL)->GetWindowRect(rect);
+	ScreenToClient(rect);
+
+	oglWindow.oglCreate(rect,this);
+	oglWindow.timer = oglWindow.SetTimer(1,1,0);
+
+	return TRUE;  // return TRUE  unless you set the focus to a control
+}
+
+void CVoxelTerrainDlg::OnSysCommand(UINT nID, LPARAM lParam)
+{
+	if ((nID & 0xFFF0) == IDM_ABOUTBOX)
+	{
+		CAboutDlg dlgAbout;
+		dlgAbout.DoModal();
+	}
+	else
+	{
+		CDialogEx::OnSysCommand(nID, lParam);
+	}
+}
+
+// If you add a minimize button to your dialog, you will need the code below
+//  to draw the icon.  For MFC applications using the document/view model,
+//  this is automatically done for you by the framework.
+
+void CVoxelTerrainDlg::OnPaint()
+{
+	if (IsIconic())
+	{
+		CPaintDC dc(this); // device context for painting
+
+		SendMessage(WM_ICONERASEBKGND, reinterpret_cast<WPARAM>(dc.GetSafeHdc()), 0);
+
+		// Center icon in client rectangle
+		int cxIcon = GetSystemMetrics(SM_CXICON);
+		int cyIcon = GetSystemMetrics(SM_CYICON);
+		CRect rect;
+		GetClientRect(&rect);
+		int x = (rect.Width() - cxIcon + 1) / 2;
+		int y = (rect.Height() - cyIcon + 1) / 2;
+
+		// Draw the icon
+		dc.DrawIcon(x, y, m_hIcon);
+		UpdateData();
+	}
+	else
+	{
+		CDialogEx::OnPaint();
+	}
+}
+
+// The system calls this function to obtain the cursor to display while the user drags
+//  the minimized window.
+HCURSOR CVoxelTerrainDlg::OnQueryDragIcon()
+{
+	return static_cast<HCURSOR>(m_hIcon);
+}
+
+
+
+void CVoxelTerrainDlg::OnSize(UINT nType, int cx, int cy)
+{
+	CDialogEx::OnSize(nType, cx, cy);
+    
+	switch (nType)
+	{
+		case SIZE_RESTORED:
+		{
+			if (oglWindow.isMaximized)
+			{
+				oglWindow.OnSize(nType, cx, cy);
+				oglWindow.isMaximized = false;
+			}
+
+			break;
+		}
+
+		case SIZE_MAXIMIZED:
+		{
+			oglWindow.OnSize(nType, cx, cy);
+			oglWindow.isMaximized = true;
+
+			break;
+		}
+	}
+}
+BOOL CVoxelTerrainDlg::PreTranslateMessage(MSG* message)
+{
+	if(message->message == WM_KEYDOWN)
+	{
+		if(message->wParam == 'W')
+		{
+			oglWindow.MovePlayer(FORWARD);
+			UpdateData();
+			return true;
+		}
+		else if(message->wParam == 'S')
+		{
+			oglWindow.MovePlayer(BACKWARDS);
+			UpdateData();
+			return true;
+		}
+		else if(message->wParam == 'A')
+		{
+			oglWindow.MovePlayer(LEFT);
+			UpdateData();
+			return true;
+		}
+		else if(message->wParam == 'D')
+		{
+			oglWindow.MovePlayer(RIGHT);
+			UpdateData();
+			return true;
+		}
+		else if(message->wParam == VK_SPACE)
+		{
+			oglWindow.MovePlayer(UP);
+			UpdateData();
+			return true;
+		}
+		else if(message->wParam == VK_CONTROL)
+		{
+			oglWindow.MovePlayer(DOWN);
+			UpdateData();
+			return true;
+		}
+	}
+	return CDialogEx::PreTranslateMessage(message);
+}
+CString CVoxelTerrainDlg::doubleToLPCTSTR(double value)
+{
+	CString string;
+	string.Format(_T("%.3f"),value);
+	return string;
+}
+CString CVoxelTerrainDlg::intToLPCTSTR(double value)
+{
+	CString string;
+	string.Format(_T("%.1f"),value);
+	return string;
+}
+
+void CVoxelTerrainDlg::OnBnClickedBrowse()
+{
+	CFileDialog browseFile(true,NULL,NULL,OFN_OVERWRITEPROMPT,_T("Bmp Files (*.bmp)|*.bmp|"));
+	int err = browseFile.DoModal();
+	filePath = browseFile.GetPathName();
+	if(err == IDOK)
+		filePathControl.SetWindowTextW(filePath);
+}
+
+
+void CVoxelTerrainDlg::OnBnClickedLoadmap()
+{
+	int selectedAlgorithm = loadingAlgorithm.GetCurSel();
+	int size = filePath.GetLength();
+	if(size == 0)
+	{
+		MessageBox(L"Choose map to load first!",L"Warning!",0);
+	}
+	else
+	{
+		double executionTime;
+		clock_t startTime = clock();
+
+		oglWindow.LoadHeightmap((LPCTSTR)filePath);
+		if(selectedAlgorithm <= 0)
+			oglWindow.LoadAllMap(true);
+		else
+			oglWindow.LoadAllMap(false);
+
+		executionTime = double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+		surfaceLoadTime.SetWindowTextW(doubleToLPCTSTR(executionTime));
+
+		startTime = clock();
+		oglWindow.findSurface();
+		executionTime = double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+		scanTime.SetWindowTextW(doubleToLPCTSTR(executionTime));
+		oglWindow.StartupCamera();
+		oglWindow.mapLoaded = true;
+		UpdateData();
+	}
+}
+
+
+void CVoxelTerrainDlg::OnBnClickedLoadgeometry()
+{
+	double executionTime;
+	clock_t startTime = clock();
+	int selectedPrimitive = renderingPrimitive.GetCurSel();
+	int cullingType = culling.GetCurSel();
+	if(selectedPrimitive == -1)
+		selectedPrimitive = 0;
+	if(oglWindow.mapLoaded)
+	{
+		if(cullingType == 1 || cullingType == -1)
+			oglWindow.renderingFlags = selectedPrimitive;
+		else if(cullingType == 0)
+			oglWindow.renderingFlags = selectedPrimitive | R_CULLING;
+		else if(cullingType == 2)
+			oglWindow.renderingFlags = selectedPrimitive | R_CULLING | R_PROXIMITY;
+
+		if(indexedCheck.GetCheck() == BST_CHECKED)
+			oglWindow.renderingFlags = oglWindow.renderingFlags | R_INDEXED;
+		if(optimizedCheck.GetCheck() == BST_CHECKED)
+			oglWindow.renderingFlags = oglWindow.renderingFlags | R_OPTIMIZED;
+
+		startTime = clock();
+		oglWindow.LoadGeometry();
+		executionTime = double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+		geometryTime.SetWindowTextW(doubleToLPCTSTR(executionTime));
+
+		startTime = clock();
+		oglWindow.LoadBuffers();
+		executionTime = double(clock()-startTime)/(double)CLOCKS_PER_SEC;
+		vboTime.SetWindowTextW(doubleToLPCTSTR(executionTime));
+
+		oglWindow.geometryLoaded = true;
+		glm::vec4 geometryStats = oglWindow.GetStatistics();
+		glm::vec2 sizes = oglWindow.GetSizes();
+		voxelCount.SetWindowTextW(intToLPCTSTR(geometryStats.x));
+		primitiveCount.SetWindowTextW(intToLPCTSTR(geometryStats.y));
+		vertexCount.SetWindowTextW(intToLPCTSTR(geometryStats.z));
+		indicesCount.SetWindowTextW(intToLPCTSTR(geometryStats.w));
+		surfaceSize.SetWindowTextW(intToLPCTSTR(sizes.x));
+		if(oglWindow.renderingFlags & R_CULLING)
+			activeChunks.SetWindowTextW(intToLPCTSTR(sizes.y));
+	}
+	else
+	{
+		MessageBox(L"There is no heightmap loaded! Please load any map first!",L"Map not loaded!",0);
+	}
+}
+void CVoxelTerrainDlg::UpdateData()
+{
+	glm::vec3 position = oglWindow.GetCameraPosition();
+	glm::vec2 sizes = oglWindow.GetSizes();
+
+	coordX.SetWindowTextW(doubleToLPCTSTR(position.x));
+	coordY.SetWindowTextW(doubleToLPCTSTR(position.y));
+	coordZ.SetWindowTextW(doubleToLPCTSTR(position.z));
+
+	if(oglWindow.renderingFlags & R_CULLING)
+			activeChunks.SetWindowTextW(intToLPCTSTR(sizes.y));
+}
+```
+
+### VoxelTerrain/VoxelTerrainDlg.h
+```
+// VoxelTerrainDlg.h : header file
+//
+
+#pragma once
+#include "OpenGLControl.h"
+#include "afxwin.h"
+#include <sstream>
+
+
+// CVoxelTerrainDlg dialog
+class CVoxelTerrainDlg : public CDialogEx
+{
+private:
+	COpenGLControl oglWindow;
+// Construction
+public:
+	CVoxelTerrainDlg(CWnd* pParent = NULL);	// standard constructor
+
+// Dialog Data
+	enum { IDD = IDD_VOXELTERRAIN_DIALOG };
+
+	protected:
+	virtual void DoDataExchange(CDataExchange* pDX);	// DDX/DDV support
+
+
+// Implementation
+protected:
+	HICON m_hIcon;
+
+	// Generated message map functions
+	virtual BOOL OnInitDialog();
+	BOOL PreTranslateMessage(MSG* message);
+	CString doubleToLPCTSTR(double value);
+	CString intToLPCTSTR(double value);
+	void UpdateData();
+
+	afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
+	afx_msg void OnPaint();
+	afx_msg HCURSOR OnQueryDragIcon();
+	DECLARE_MESSAGE_MAP()
+public:
+	afx_msg void OnSize(UINT nType, int cx, int cy);
+	afx_msg void OnBnClickedBrowse();
+	afx_msg void OnBnClickedLoadmap();
+	afx_msg void OnBnClickedLoadgeometry();
+
+	CEdit filePathControl;
+	CString filePath;
+	CEdit surfaceLoadTime;
+	CComboBox loadingAlgorithm;
+	CEdit scanTime;
+	CButton indexedCheck;
+	CComboBox renderingPrimitive;
+	CComboBox culling;
+	CButton optimizedCheck;
+	CEdit geometryTime;
+	CEdit vboTime;
+	CEdit voxelCount;
+	CEdit primitiveCount;
+	CEdit vertexCount;
+	CEdit surfaceSize;
+	CEdit activeChunks;
+	CEdit indicesCount;
+	CEdit coordX;
+	CEdit coordY;
+	CEdit coordZ;
+};
+```
+
+### VoxelTerrain/resource.h
+```
+��/ / { { N O _ D E P E N D E N C I E S } }  
+ / /   M i c r o s o f t   V i s u a l   C + +   g e n e r a t e d   i n c l u d e   f i l e .  
+ / /   U s e d   b y   V o x e l T e r r a i n . r c  
+ / /  
+ # d e f i n e   I D M _ A B O U T B O X                                         0 x 0 0 1 0  
+ # d e f i n e   I D D _ A B O U T B O X                                         1 0 0  
+ # d e f i n e   I D S _ A B O U T B O X                                         1 0 1  
+ # d e f i n e   I D D _ V O X E L T E R R A I N _ D I A L O G                   1 0 2  
+ # d e f i n e   I D R _ M A I N F R A M E                                       1 2 8  
+ # d e f i n e   I D C _ O P E N G L                                             1 0 0 0  
+ # d e f i n e   I D C _ E D I T 1                                               1 0 0 1  
+ # d e f i n e   I D C _ B R O W S E                                             1 0 0 2  
+ # d e f i n e   I D C _ P R I M I T I V E                                       1 0 0 3  
+ # d e f i n e   I D C _ A L G O R I T H M                                       1 0 0 4  
+ # d e f i n e   I D C _ O P T I M I Z E D                                       1 0 0 5  
+ # d e f i n e   I D C _ C U L L I N G                                           1 0 0 6  
+ # d e f i n e   I D C _ L O A D M A P                                           1 0 0 7  
+ # d e f i n e   I D C _ L O A D G E O M E T R Y                                 1 0 0 8  
+ # d e f i n e   I D C _ I N D E X E D                                           1 0 0 9  
+ # d e f i n e   I D C _ S U R F A C E _ T I M E                                 1 0 1 3  
+ # d e f i n e   I D C _ C O O R D X                                             1 0 1 4  
+ # d e f i n e   I D C _ C O O R D Y                                             1 0 1 5  
+ # d e f i n e   I D C _ C O O R D Z                                             1 0 1 6  
+ # d e f i n e   I D C _ S C A N T I M E                                         1 0 1 7  
+ # d e f i n e   I D C _ G E O M E T R Y T I M E                                 1 0 1 8  
+ # d e f i n e   I D C _ V B O T I M E                                           1 0 1 9  
+ # d e f i n e   I D C _ V O X E L C O U N T                                     1 0 2 0  
+ # d e f i n e   I D C _ P R I M I T I V E C O U N T                             1 0 2 1  
+ # d e f i n e   I D C _ V E R T E X C O U N T                                   1 0 2 2  
+ # d e f i n e   I D C _ S U R F A C E S I Z E                                   1 0 2 3  
+ # d e f i n e   I D C _ A C T I V E C H U N K S                                 1 0 2 4  
+ # d e f i n e   I D C _ E D I T 8                                               1 0 2 5  
+ # d e f i n e   I D C _ I N D I C E S C O U N T                                 1 0 2 5  
+  
+ / /   N e x t   d e f a u l t   v a l u e s   f o r   n e w   o b j e c t s  
+ / /    
+ # i f d e f   A P S T U D I O _ I N V O K E D  
+ # i f n d e f   A P S T U D I O _ R E A D O N L Y _ S Y M B O L S  
+ # d e f i n e   _ A P S _ N E X T _ R E S O U R C E _ V A L U E                 1 3 0  
+ # d e f i n e   _ A P S _ N E X T _ C O M M A N D _ V A L U E                   3 2 7 7 1  
+ # d e f i n e   _ A P S _ N E X T _ C O N T R O L _ V A L U E                   1 0 2 6  
+ # d e f i n e   _ A P S _ N E X T _ S Y M E D _ V A L U E                       1 0 1  
+ # e n d i f  
+ # e n d i f  
+ 
+```
+
+### VoxelTerrain/stdafx.cpp
+```
+// stdafx.cpp : source file that includes just the standard includes
+// VoxelTerrain.pch will be the pre-compiled header
+// stdafx.obj will contain the pre-compiled type information
+
+#include "stdafx.h"
+```
+
+### VoxelTerrain/stdafx.h
+```
+// stdafx.h : include file for standard system include files,
+// or project specific include files that are used frequently,
+// but are changed infrequently
+
+#pragma once
+
+#ifndef VC_EXTRALEAN
+#define VC_EXTRALEAN            // Exclude rarely-used stuff from Windows headers
+#endif
+
+#include "targetver.h"
+
+#define _ATL_CSTRING_EXPLICIT_CONSTRUCTORS      // some CString constructors will be explicit
+
+// turns off MFC's hiding of some common and often safely ignored warning messages
+#define _AFX_ALL_WARNINGS
+
+#include <afxwin.h>         // MFC core and standard components
+#include <afxext.h>         // MFC extensions
+
+
+#include <afxdisp.h>        // MFC Automation classes
+
+
+
+#ifndef _AFX_NO_OLE_SUPPORT
+#include <afxdtctl.h>           // MFC support for Internet Explorer 4 Common Controls
+#endif
+#ifndef _AFX_NO_AFXCMN_SUPPORT
+#include <afxcmn.h>             // MFC support for Windows Common Controls
+#endif // _AFX_NO_AFXCMN_SUPPORT
+
+#include <afxcontrolbars.h>     // MFC support for ribbons and control bars
+#include <glm.hpp>
+
+
+
+
+
+
+
+
+#ifdef _UNICODE
+#if defined _M_IX86
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='x86' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#elif defined _M_X64
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='amd64' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#else
+#pragma comment(linker,"/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
+#endif
+```
+
+### VoxelTerrain/targetver.h
+```
+#pragma once
+
+// Including SDKDDKVer.h defines the highest available Windows platform.
+
+// If you wish to build your application for a previous Windows platform, include WinSDKVer.h and
+// set the _WIN32_WINNT macro to the platform you wish to support before including SDKDDKVer.h.
+
+#include <SDKDDKVer.h>
+```

@@ -1,0 +1,235 @@
+--- v005.md
++++ v006.md
+@@ -4,115 +4,153 @@
+ 
+ ## Overview
+-The flex-block tree is a hierarchical data structure derived from a kd-tree partition, designed primarily for load balancing and efficient data distribution in distributed volume rendering [S1, unofficial]. It partitions a volume into "flex-blocks," which are cells containing tightly cropped subvolumes that do not necessarily occupy the entire cell volume [S1, unofficial]. Unlike traditional space subdivision methods, it does not restrict partition cuts to alternate between axes, allowing it to handle scenes with disproportionate dimensions effectively [S1, unofficial]. It serves as a dependency graph that determines the deterministic depth order for ray casting compositing and accelerates ray traversal in ray tracing by indicating potential neighbor cells [S1, unofficial].
++The flex-block tree is a hierarchical data structure derived from a kd-tree partition, designed primarily for load balancing in distributed volume rendering (both ray casting and ray tracing) [S1, unofficial]. It partitions a volume into "flex-blocks," which are cells containing tightly cropped subvolumes that do not necessarily occupy the entire cell volume [S1, unofficial]. Unlike traditional space subdivision methods, the flex-block partition does not restrict partition cuts to alternate between axes, allowing it to handle scenes with disproportionate dimensions effectively [S1, unofficial]. It serves as a dependency graph that determines the deterministic depth order of blocks for image compositing in ray casting and accelerates ray traversal by indicating potential neighbor cells in ray tracing [S1, unofficial].
+ 
+ ## How it works
+-The method constructs a partition that balances computational load across render nodes while minimizing empty space and network communication overhead.
++The method constructs a tree where internal nodes define partition boundaries and leaf nodes represent the data containers (flex-blocks). The construction involves preprocessing the volume to remove empty space, partitioning the remaining data using a modified kd-tree algorithm, and extracting view-dependent ordering information.
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-1.  Raw volume data (slices or voxels).
+-2.  A mask volume (optional; if not provided, out-of-core region growing is used to create one) [S1, unofficial].
+-3.  View directions (typically eight quantized view directions) [S1, unofficial].
+-4.  Render-node configuration (number of nodes, network topology) [S1, unofficial].
++*   Raw volume data (slices or voxels).
++*   Optional mask volume defining regions of interest [S1, unofficial].
++*   Number of render-nodes (for distributed systems) [S1, unofficial].
++*   View directions (typically 8 quantized directions) [S1, unofficial].
+ 
+ **Outputs:**
+-1.  A flex-block tree (dependency graph) representing the partition [S1, unofficial].
+-2.  Cropped volume data (bricks) distributed to render nodes [S1, unofficial].
+-3.  A look-up table storing image priority order for the eight quantized view directions [S1, unofficial].
++*   A flex-block tree (dependency graph) [S1, unofficial].
++*   Cropped volume data (bricks) distributed to render-nodes [S1, unofficial].
++*   Look-up tables mapping view directions to flex-block traversal orders [S1, unofficial].
+ 
+ ### Data Structures
+ 
+-**Flex-block Tree Node:**
+-*   **Type:** Internal node (non-leaf).
+-*   **Fields:**
+-    *   `cut_plane`: The plane equation or coordinate defining the split.
+-    *   `child_nodes`: References to the two child nodes (left and right).
+-*   **Layout:** Structurally identical to a traditional binary tree node [S1, unofficial].
++**Flex-block Tree Node**
++Internal nodes in the tree store partitioning information similar to a traditional binary tree:
++*   `cut_plane`: The position and normal of the splitting plane.
++*   `children`: Pointers or indices to the left and right child nodes.
+ 
+-**Flex-block (Leaf Node):**
+-*   **Type:** Leaf node in the tree.
+-*   **Fields:**
+-    *   `cell_id`: Identifier for the cell in the partition.
+-    *   `subvolume`: The tightly cropped subvolume data.
+-    *   `bounding_box`: The tight axis-aligned bounding box (AABB) enclosing the non-empty data within the cell.
+-*   **Layout:** Represents a cell that contains a tightly cropped subvolume, which may not occupy the whole cell volume [S1, unofficial].
++**Flex-block (Leaf Node)**
++Each leaf node represents a cell in the partition:
++*   `bbox`: A tightly cropped axis-aligned bounding box (AABB) enclosing the non-empty data within the cell.
++*   `data_ref`: Reference to the subvolume data (brick) stored in memory or on disk.
++*   `dependencies`: Information used for ray-task scheduling and traversal speedup [S1, unofficial].
+ 
+-**Cell-tree (Compact Dependency Representation):**
+-*   **Type:** Graph structure.
+-*   **Fields:**
+-    *   `cells`: List of flex-blocks.
+-    *   `dependencies`: Compact representation of ray dependencies between cells.
+-*   **Layout:** Several orders of magnitude smaller than the full dependency set; used for ray-task scheduling [S1, unofficial].
++### Construction Steps
+ 
+-### Construction Algorithm
+-The construction involves preprocessing, partitioning, and tree extraction.
+-
+-1.  **Data Reduction (Cropping):**
+-    *   Read raw data slices.
+-    *   Generate a mask volume using out-of-core region growing if a mask is not provided [S1, unofficial].
+-    *   Align a tight axis-aligned bounding box around cohesive non-empty areas of the volume.
+-    *   Crop slices to these bounding rectangles to remove empty space [S1, unofficial].
++1.  **Empty Space Reduction:**
++    *   If a mask volume is not provided, perform out-of-core region growing on raw data slices to create a mask [S1, unofficial].
++    *   Crop each slice to bounding rectangles of non-empty regions defined by the mask [S1, unofficial].
++    *   Align a tight AABB around cohesive non-empty areas of the volume to eliminate empty space [S1, unofficial].
+ 
+ 2.  **Partitioning (Moving Walls):**
+-    *   Apply a "moving walls" algorithm to partition the scene.
+-    *   Move partition walls to simultaneously accommodate non-empty subvolume boundaries and render-node constraints for load balancing [S1, unofficial].
++    *   Apply a "moving walls" algorithm to partition the scene. This algorithm moves partition walls to simultaneously accommodate non-empty subvolume boundaries and balance the load across render-nodes [S1, unofficial].
++    *   This step generates a partition structure that respects the data distribution requirements [S1, unofficial].
+ 
+ 3.  **kd-tree Extraction:**
+     *   Extract a kd-tree from the output of the moving walls procedure [S1, unofficial].
+-    *   Note: The partition cuts do not alternate between axes [S1, unofficial].
++    *   Unlike standard kd-trees, this partition does not enforce alternating axis cuts. The cut axis is chosen to optimize load balancing and accommodate disproportionate scene dimensions [S1, unofficial].
+ 
+-4.  **Dynamic Programming (Load Balancing):**
+-    *   Apply a Dynamic Programming (DP) algorithm (based on the Multipass Partition Problem) to create load-balanced network distributions [S1, unofficial].
+-    *   This step defines the flex-blocks within the kd-tree partition [S1, unofficial].
++4.  **Dynamic Programming for Load Balancing:**
++    *   Use a dynamic programming (DP) algorithm to group bricks and solve the Load Balanced Network Distribution (LBND) problem [S1, unofficial].
++    *   The DP evaluates a cost function to minimize end-to-end rendering time, which is a function of the slowest render-node, image composition time, and network communication time [S1, unofficial].
++    *   This step creates the final flex-blocks within the kd-tree-like partition [S1, unofficial].
+ 
+-5.  **Tree Construction:**
+-    *   Construct the flex-block tree where internal nodes are kd-tree split nodes and leaf nodes are flex-blocks [S1, unofficial].
+-    *   For each leaf (flex-block), store the tight AABB of its subvolume [S1, unofficial].
++5.  **Dependency Graph Construction:**
++    *   For each of the eight quantized view directions, extract the image priority order (depth order) of the flex-blocks from the kd-tree [S1, unofficial].
++    *   Store these orders in look-up tables. These tables form the dependency graph of flex-blocks [S1, unofficial].
++    *   This graph is used for:
++        *   **Ray Casting:** Determining the order for compositing images from different nodes [S1, unofficial].
++        *   **Ray Tracing:** Accelerating traversal by indicating potential neighbors a ray may enter [S1, unofficial].
+ 
+-6.  **Dependency Graph Generation:**
+-    *   For each of the eight quantized view directions, traverse the tree to determine the image priority order (depth order).
+-    *   Store these orders in a look-up table [S1, unofficial].
+-    *   Generate the cell-tree (compact dependency graph) from the flex-block tree [S1, unofficial].
++### Pseudocode
+ 
+-### Ray Traversal and Scheduling (Runtime)
+-
+-**For Ray Casting (Compositing):**
+-1.  Traverse the flex-block tree to determine the compositing order based on the precomputed look-up table for the current view direction [S1, unofficial].
+-2.  Render bricks on render nodes.
+-3.  Composite images using alpha blending, respecting the determined depth order [S1, unofficial].
+-
+-**For Ray Tracing (Traversal):**
+-1.  **Initialization:** Distribute data using the flex-block partition. Initialize a ray queue for each cell [S1, unofficial].
+-2.  **Traversal Loop:**
+-    *   Process one cell at a time.
+-    *   If a cell is in main memory, trace each ray in the corresponding ray queue through that cell [S1, unofficial].
+-    *   **Space Skipping:** Automate space skipping within each cell by advancing the ray forward according to the data extents (tight AABB) of the flex-block [S1, unofficial].
+-    *   **Ray Queue Management:** When a spawned ray exits the current cell, place it on the queue of the next cell it intersects (determined by the dependency graph/cell-tree) [S1, unofficial].
+-3.  **Dynamic Scheduling:** Update ray-task scheduling dynamically within the local partition of each render node [S1, unofficial].
++```python
++def build_flex_block_tree(volume_data, mask=None, num_nodes=1, view_directions=8):
++    """
++    Constructs a flex-block tree for distributed volume rendering.
++    
++    Args:
++        volume_data: Raw volume slices or voxels.
++        mask: Optional mask volume. If None, generated via region growing.
++        num_nodes: Number of render-nodes for load balancing.
++        view_directions: Number of quantized view directions (typically 8).
++        
++    Returns:
++        flex_block_tree: The constructed tree structure.
++        dependency_tables: Look-up tables for view-dependent traversal orders.
++        cropped_data: Cropped volume bricks distributed to nodes.
++    """
++    
++    # Step 1: Empty Space Reduction
++    if mask is None:
++        # Out-of-core region growing to create mask
++        mask = region_growing(volume_data)
++    
++    # Crop slices to bounding rectangles of non-empty regions
++    cropped_slices = crop_slices(volume_data, mask)
++    
++    # Align tight AABBs around cohesive non-empty areas
++    # This reduces data size and simplifies partitioning
++    volume_data_reduced = align_tight_bboxes(cropped_slices)
++    
++    # Step 2: Partitioning with Moving Walls
++    # Moves walls to balance load across num_nodes and respect data boundaries
++    partition_structure = moving_walls_algorithm(volume_data_reduced, num_nodes)
++    
++    # Step 3: Extract kd-tree
++    # Does not restrict cuts to alternate axes
++    kd_tree = extract_kd_tree(partition_structure)
++    
++    # Step 4: Dynamic Programming for Load Balancing
++    # Solves LBND problem to minimize end-to-end render time
++    # Cost function considers slowest node, composition time, and network time
++    flex_blocks = dynamic_programming_partition(kd_tree, num_nodes)
++    
++    # Step 5: Construct Dependency Graph
++    dependency_tables = {}
++    
++    for direction in get_quantized_view_directions(view_directions):
++        # Extract depth order of flex-blocks for this view
++        order = get_image_priority_order(kd_tree, flex_blocks, direction)
++        dependency_tables[direction] = order
++        
++    # Build the final tree structure
++    # Internal nodes: cut_plane, children
++    # Leaf nodes: flex-block (bbox, data_ref, dependencies)
++    flex_block_tree = build_tree_structure(kd_tree, flex_blocks)
++    
++    return flex_block_tree, dependency_tables, flex_blocks
++```
+ 
+ ### Parameters
+-*   **View Directions:** Eight quantized view directions are typically used to extract image priority orders [S1, unofficial].
+-*   **Load Balancing Cost Function:** The DP algorithm evaluates a cost function to minimize end-to-end rendering time, which is a function of the slowest render-node, image composition time, and network communication time [S1, unofficial].
++*   **View Directions:** Typically 8 quantized directions are used to extract image priority orders [S1, unofficial].
++*   **Render-nodes:** The number of processing units in the distributed system, used to balance the partition [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **NP-Completeness:** Determining the optimum order in which cells are cached for ray tracing is NP-Complete; optimizations are required [S1, unofficial].
+-*   **Multiple Fetches:** It is not generally possible to create a schedule which fetches each cell only once for ray tracing algorithms; rays may need to revisit cells or rely on caching [S1, unofficial].
+-*   **Disproportionate Scenes:** Traditional alternating-axis partitions fail here; the flex-block partition's lack of axis alternation restriction is critical [S1, unofficial].
++*   **Disproportionate Scenes:** Standard kd-trees may perform poorly on scenes with disproportionate dimensions. The flex-block partition addresses this by not restricting cut axes [S1, unofficial].
++*   **NP-Completeness:** Determining the optimum order for caching cells in ray tracing is NP-Complete. The method uses heuristics and dynamic programming approximations [S1, unofficial].
++*   **Data Movement:** Reducing empty space early in the pipeline reduces run-time for preprocessing and network data movement [S1, unofficial]. Failure to crop empty space effectively can lead to inefficient load balancing.
++
++## Subtopics
++
++### Cell-tree
++A compact representation of ray dependencies between cells, where a cell is a flex-block. It is used for ray-task scheduling and ray traversal speedup in ray tracing [S1, unofficial].
++
++### Flex-block Partition
++The underlying data distribution method derived from the flex-block tree. It defines how data is split among render-nodes and how bricks are scheduled [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Construction involves KD-tree partitioning and Dynamic Programming, which is computationally intensive but done offline. Runtime traversal is accelerated by space skipping via tight AABBs and optimized scheduling.
+-*   **Memory Complexity:** The cell-tree representation is several orders of magnitude smaller than the full dependency graph, reducing memory overhead for dependency tracking [S1, unofficial].
++*   **Time Complexity:** The construction involves region growing, partitioning, and dynamic programming. The DP solution for LBND is optimized to minimize end-to-end rendering time, which depends on the slowest node, composition time, and network communication [S1, unofficial]. The exact complexity of the DP step is not specified, but the problem of optimal caching order is NP-Complete [S1, unofficial].
++*   **Memory Complexity:** The cell-tree (dependency graph) is described as being several orders of magnitude smaller than the number of dependencies it represents [S1, unofficial].
+ *   **Strengths:**
+-    *   Effective load balancing in distributed rendering by accommodating render-node boundaries and non-empty subvolume shapes simultaneously [S1, unofficial].
+-    *   Significant reduction in empty space through tight cropping, reducing data movement and preprocessing time [S1, unofficial].
+-    *   Deterministic depth order for ray casting compositing [S1, unofficial].
++    *   Effective load balancing for distributed rendering [S1, unofficial].
++    *   Handles scenes with disproportionate dimensions [S1, unofficial].
++    *   Automates space skipping by using data extents of flex-blocks [S1, unofficial].
++    *   Reduces data movement by cropping empty space early [S1, unofficial].
+ *   **Limitations:**
+-    *   Ray tracing scheduling is complex due to the NP-Complete nature of optimal caching; dynamic updates are required [S1, unofficial].
+-    *   Requires significant preprocessing (region growing, cropping, DP) before rendering can begin [S1, unofficial].
+-*   **When to use:** Ideal for massive volume visualization in distributed clusters where load balancing and network communication costs are critical bottlenecks.
+-*   **When not to use:** For single-node rendering or scenes where preprocessing time outweighs rendering benefits, or where simple uniform grids suffice.
++    *   Requires preprocessing (region growing, cropping, partitioning) [S1, unofficial].
++    *   Dynamic task scheduling is complex due to the NP-Complete nature of optimal caching [S1, unofficial].
++*   **When to Use:** Suitable for distributed volume visualization of massive datasets where load balancing and efficient data distribution are critical [S1, unofficial].
+ 
+ ## Background
+-The flex-block tree was introduced in the context of massive data management for distributed volume visualization [S1, unofficial]. It addresses the "Load Balanced Network Distribution" (LBND) problem, which optimizes data partitioning to minimize end-to-end rendering time in a cluster [S1, unofficial]. The method was developed to overcome the limitations of traditional space subdivision methods that do not account for load balancing or non-axis-aligned data distributions [S1, unofficial]. It builds on concepts from kd-trees and dynamic programming for multipass partitioning [S1, unofficial].
++The flex-block tree was introduced in the context of massive data management for distributed volume visualization [S1, unofficial]. It addresses the limitations of traditional space subdivision methods, which do not adequately handle load balancing in distributed rendering environments [S1, unofficial]. The method was developed to support both software ray tracing and hardware ray casting in a distributed cluster setting [S1, unofficial]. It builds upon concepts from kd-trees and dynamic programming for load balanced network distribution (LBND) [S1, unofficial].
+ 
+ ## Sources

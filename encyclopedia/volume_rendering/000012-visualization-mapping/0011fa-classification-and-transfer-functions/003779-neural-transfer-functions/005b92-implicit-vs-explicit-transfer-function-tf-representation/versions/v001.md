@@ -1,0 +1,54 @@
+# Implicit vs. Explicit Transfer Function (TF) Representation
+
+Also called: Explicit TF Representation, Implicit TF Representation, Implicit vs Explicit TF
+
+## Overview
+This family defines how a neural transfer function (TF) is represented within a neural network architecture, specifically contrasting methods that use pre-classified volume data against those that use raw TF parameters. Implicit representations map input features to a pre-classified volume, making the network invariant to input modality and simplifying the learning task by removing the need to learn TF application logic [S1]. Explicit representations require the network to learn the TF application directly on top of the illumination task, stepping away from hand-engineered features and offering potential efficiency gains in inference time and memory, though at the cost of a significantly harder optimization landscape [S1].
+
+## Shared principles
+The core distinction lies in the input domain and the resulting learning objective. Both approaches aim to map volumetric data to optical properties (e.g., color, opacity) but differ in how the transfer function itself is encoded.
+
+1.  **Implicit Representation**: The TF is represented as a pre-classified volume or feature map. The neural network does not need to learn *how* to apply the TF; it only needs to predict the classification or features that correspond to the TF's output. This approach leverages the fact that structures are unseen, but the general input scale remains consistent, aiding generalization across modalities [S1].
+2.  **Explicit Representation**: The TF is represented as raw parameters (e.g., a list of points or a texture) that the network must interpret. The network must jointly learn the illumination task and the application of the TF. This approach adheres to the paradigm of learning representations from raw input data rather than relying on hand-engineered features [S1].
+
+## Subtopics
+
+### Implicit TF Representation
+An implicit TF representation uses a pre-classified volume to encode TF information [S1].
+
+*   **Mechanism**: The network outputs a representation that is already classified or structured in a way that directly corresponds to the desired optical properties, bypassing the need for a separate TF application step during inference.
+*   **Advantages**:
+    *   **Easier Learning**: The network is relieved of the burden of learning the TF application logic on top of the illumination task [S1].
+    *   **Generalization**: It makes the network invariant to the specific input modality. Since only the structures are unseen (not the general input scale), it generalizes better to different modalities [S1].
+*   **Disadvantages**:
+    *   **Inference Cost**: The approach requires running the full network during inference, leading to increased running times and memory requirements, especially for large volumes [S1].
+    *   **Hand-Engineered Features**: It steps away from the paradigm of learning raw representations, relying instead on pre-classified structures [S1].
+*   **When to Choose**: Use when generalization across modalities is critical and computational resources allow for the overhead of full network inference during rendering [S1].
+
+### Explicit TF Representation
+An explicit TF representation encodes the TF as raw parameters that the network must process and apply [S1].
+
+*   **Mechanism**: The network takes raw TF parameters as input and learns to apply them to the volumetric data. This requires the network to solve a harder task: learning both the illumination and the TF application simultaneously [S1].
+*   **Advantages**:
+    *   **Efficiency**: Can save running time and memory compared to implicit approaches if efficient representations are learned [S1].
+    *   **Editability**: Learned feature spaces may enable the design or editing of TFs using the learned features rather than intensity-based inputs [S1].
+    *   **Raw Learning**: Adheres to the paradigm of learning representations from raw data without hand-engineering [S1].
+*   **Disadvantages**:
+    *   **Training Difficulty**: Solves a significantly harder task, often requiring larger networks with more parameters to match the quality of implicit approaches [S1].
+    *   **Performance**: Reported tests show inferior performance compared to implicit methods [S1].
+*   **When to Choose**: Use when inference efficiency is paramount and sufficient computational resources are available to train larger, more complex networks [S1].
+
+### Explicit point-based representation
+A specific variant of explicit TF representation that encodes the TF as a list of points $S$ [S1].
+
+*   **Definition**: The TF is represented as an unstructured set of points $S$ with varying length, which is inherently incompatible with standard CNNs that require fixed-shape tensors [S1].
+*   **Implementation**: To resolve the issues of order independence and varying length, the representation is processed using an architecture similar to PointNet [S1]:
+    1.  Each point in the set $S$ is processed individually by three shared multilayer perceptrons (MLPs) to produce a feature descriptor of size 64 [S1].
+    2.  The set of point features is reduced to a fixed-length TF descriptor using max pooling [S1].
+*   **Result**: The output is a fixed-length feature vector that is compatible with downstream CNN strategies, though not directly with the input layer of a standard CNN without further processing [S1].
+
+## Background
+This classification originates from the work on Deep Volumetric Ambient Occlusion (DVAO) [S1]. The authors compared implicit and explicit representations to determine the most effective way to integrate transfer functions into neural volumetric rendering. While implicit methods performed better in their experiments, the authors argued for future investigation into explicit methods due to their potential for efficiency and editability, noting that explicit approaches might require larger networks to achieve comparable quality [S1].
+
+## Sources
+[S1] Deep Volumetric Ambient Occlusion, https://arxiv.org/abs/2008.08345v2, fetched 2026-10-26

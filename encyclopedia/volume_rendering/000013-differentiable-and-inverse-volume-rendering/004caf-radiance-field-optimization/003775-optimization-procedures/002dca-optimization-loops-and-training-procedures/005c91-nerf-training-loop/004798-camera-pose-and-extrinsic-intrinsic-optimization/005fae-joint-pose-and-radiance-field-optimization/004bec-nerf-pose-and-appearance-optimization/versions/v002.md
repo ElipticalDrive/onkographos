@@ -1,0 +1,62 @@
+# NeRF Pose and Appearance Optimization
+Also called: UP-NeRF, Unconstrained Pose-prior-Free Neural Radiance Fields
+
+## Overview
+This method jointly optimizes camera poses and neural scene representations for unconstrained image collections containing varying illumination and transient occluders, without requiring camera pose priors [S1, unofficial]. It distinguishes itself from sibling methods by introducing a "candidate head" with image-dependent embeddings to handle "hard-pose" images during initial training, combined with a loss scheduling mechanism that gradually transitions from candidate-specific to shared scene representations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ unposed images $\{I_i\}_{i=1}^N$ with known intrinsics (focal length $f$, resolution $W \times H$) and unknown poses. Ground-truth colors $C(r)$ and optionally deep feature maps $F(r)$ [S1, unofficial].
+*   **Outputs:** Optimized NeRF parameters $\Theta$ (shared MLP weights), optimized camera poses $P = \{p_i\}_{i=1}^N$, and candidate embeddings $L = \{\ell_i\}_{i=1}^N$ [S1, unofficial].
+
+**Data Structures:**
+1.  **Shared MLPs:** Two networks $\Pi_{\theta_1}$ and $\Pi_{\theta_2}$ mapping 3D point $x$ and direction $d$ to density $\sigma$, intermediate feature $z$, and color $c$ [S1, unofficial].
+2.  **Candidate Head MLP:** Network $\Pi_{\theta_3}$ mapping intermediate feature $z$ and candidate embedding $\ell_i$ to candidate density $\sigma_i^{(c)}$ and candidate color $c_i^{(c)}$ [S1, unofficial].
+3.  **Candidate Embeddings:** A learnable vector $\ell_i \in \mathbb{R}^d$ for each image $i$ [S1, unofficial].
+4.  **Camera Poses:** Parameterized as 6 degrees of freedom using the $se(3)$ Lie algebra [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Ray Casting:** For each pixel $(u, v)$ in image $i$, compute ray origin $\hat{o}_i$ and direction $\hat{d}_i$ using the current pose estimate $p_i$ and known intrinsics, following the shared principles [Parent].
+2.  **Sampling:** Sample $K$ points $t_k$ along the ray $r(t) = \hat{o}_i + t\hat{d}_i$ using hierarchical sampling (coarse and fine models) [S1, unofficial].
+3.  **Shared Representation:** For each sample point $t_k$, compute shared density $\sigma(t_k)$, intermediate feature $z(t_k)$, and color $c(t_k)$ using $\Pi_{\theta_1}$ and $\Pi_{\theta_2}$ [S1, unofficial]:
+    $$ [\sigma(t_k), z(t_k)] = \Pi_{\theta_1}(\gamma_x(r(t_k))) $$
+    $$ c(t_k) = \Pi_{\theta_2}(z(t_k), \gamma_d(\hat{d}_i)) $$
+    where $\gamma_x$ and $\gamma_d$ are positional encoding functions [S1, unofficial].
+4.  **Candidate Representation:** For each sample point $t_k$, compute candidate density $\sigma_i^{(c)}(t_k)$ and candidate color $c_i^{(c)}(t_k)$ using the candidate head $\Pi_{\theta_3}$ and image-specific embedding $\ell_i$ [S1, unofficial]:
+    $$ [\sigma_i^{(c)}(t_k), c_i^{(c)}(t_k)] = \Pi_{\theta_3}(z(t_k), \ell_i) $$
+5.  **Joint Volumetric Rendering:** Compute the candidate synthesized RGB value $\hat{C}_i^{(c)}(r)$ by combining shared and candidate representations [S1, unofficial]:
+    $$ \hat{C}_i^{(c)}(r) = \sum_{k=1}^K T_i(t_k) \left[ \alpha(\sigma(t_k)\delta_k)c(t_k) + \alpha(\sigma_i^{(c)}(t_k)\delta_k)c_i^{(c)}(t_k) \right] $$
+    where $\delta_k = t_{k+1} - t_k$, $\alpha(\sigma \delta) = 1 - \exp(-\sigma \delta)$, and transmittance $T_i(t_k)$ accounts for both densities [S1, unofficial]:
+    $$ T_i(t_k) = \exp\left( -\sum_{k'=1}^{k-1} (\sigma(t_{k'}) + \sigma_i^{(c)}(t_{k'})) \delta_{k'} \right) $$
+6.  **Shared Rendering:** Compute the shared synthesized RGB value $\hat{C}_i(r)$ using only the shared representation (standard NeRF rendering) [S1, unofficial]:
+    $$ \hat{C}_i(r) = \sum_{k=1}^K T(t_k) \alpha(\sigma(t_k)\delta_k)c(t_k) $$
+    where $T(t_k) = \exp\left( -\sum_{k'=1}^{k-1} \sigma(t_{k'}) \delta_{k'} \right)$ [S1, unofficial].
+7.  **Loss Scheduling:** Calculate the training progress $l \in [0, 1]$. Determine the weight $w_{u,v}(l)$ using hyperparameters $u, v \in [0, 1]$ [S1, unofficial]:
+    $$ w_{u,v}(l) = \begin{cases} 0 & \text{if } l < u \\ \frac{1 - \cos(\pi(l - u)/(v - u))}{2} & \text{if } u \le l < v \\ 1 & \text{if } l \ge v \end{cases} $$
+8.  **Loss Computation:** Compute the total loss $\mathcal{L}$ as a weighted sum of photometric losses for shared and candidate renderings [S1, unofficial]:
+    $$ \mathcal{L} = w_{u,v} \mathcal{L}_{rgb}(\hat{C}_i | C_i) + (1 - w_{u,v}) \mathcal{L}_{rgb}(\hat{C}_i^{(c)} | C_i) $$
+    where $\mathcal{L}_{rgb}$ is the mean squared error $\|C_i - \hat{C}\|_2^2$ [S1, unofficial].
+9.  **Optimization:** Update NeRF parameters $\Theta$, camera poses $P$, and candidate embeddings $L$ using an optimizer (e.g., Adam) [S1, unofficial].
+
+**Parameters:**
+*   $u, v$: Loss scheduling hyperparameters. Typical values not given in the sources.
+*   $\ell_i$: Candidate embedding dimension. Size adjusted based on pose difficulty [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Hard-Pose Images:** Images with little overlap or unique details may cause incorrect pose estimation if only the shared representation is used initially. The candidate head mitigates this [S1, unofficial].
+*   **Transient Occluders:** The candidate head helps block the influence of transient occluders on pose estimation by allowing image-specific appearance modeling [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Higher than standard NeRF due to the additional candidate head forward pass and joint rendering calculation for each ray [S1, unofficial].
+*   **Memory Complexity:** Increased by storing candidate embeddings $\ell_i$ for each image and the additional MLP weights for the candidate head [S1, unofficial].
+*   **Strengths:** Handles unconstrained image collections with varying illumination and transient occluders without pose priors [S1, unofficial]. Robust to "hard-pose" images [S1, unofficial].
+*   **Limitations:** Requires careful tuning of loss scheduling hyperparameters $u, v$ [S1, unofficial]. Computationally more expensive than methods using only shared representations [S1, unofficial].
+*   **When to use:** When dealing with internet photo collections (e.g., Phototourism dataset) where poses are unknown and images contain transients or illumination changes [S1, unofficial].
+*   **When not to use:** When high-quality, pose-accurate image collections are available, or when computational resources are severely limited [S1, unofficial].
+
+## Background
+UP-NeRF was proposed to address the limitations of existing NeRF pose estimation methods that struggle with unconstrained images [S1, unofficial]. It builds on prior work like BARF, which uses coarse-to-fine positional encoding for stable joint optimization [S1, unofficial]. The method was introduced in the paper "UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields" [S1, unofficial].
+
+## Sources
+[S1] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)

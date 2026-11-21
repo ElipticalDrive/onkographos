@@ -1,0 +1,212 @@
+--- v003.md
++++ v004.md
+@@ -4,92 +4,147 @@
+ 
+ ## Overview
+-Adaptive screen sampling is an image-order acceleration technique that dynamically adjusts the number of rays cast per pixel based on local color variance [S1, S3, unofficial]. It solves the problem of inefficient uniform sampling by tracing additional rays only in regions with high value gradients, replacing interpolated estimates with exact samples where scene complexity is high [S1, S3, unofficial]. Unlike sibling methods that may use hierarchical data structures or formal error bounds, this approach relies on a heuristic comparison of initial sample colors within a small neighborhood to decide whether to refine [S2, unofficial].
++Adaptive screen sampling is a dynamic sampling technique that reduces the average number of rays cast per pixel by evaluating local color variance and refining samples only where the scene changes rapidly [S1, S2, S3, unofficial]. Introduced by Levoy [S1, S3, unofficial], it adapts the sampling rate based on color change in a small pixel neighborhood, switching to a higher sampling rate in areas with high value gradients to replace interpolated values with exact color values [S1, S3, unofficial]. It differs from fixed-rate sampling by trading uniform compute time for variable quality, and from hierarchical spatial methods by operating directly on the screen-space pixel grid rather than the volume data structure.
+ 
+ ## How it works
+ **Inputs:**
+-*   Volume dataset (implicit or explicit).
+-*   Camera parameters (position, orientation, field of view).
+-*   Initial sampling rate $N_{init}$ (typically small, e.g., 1–4 rays per pixel) [S2, unofficial].
+-*   Threshold $\tau$ for color variation (heuristic value) [S2, unofficial].
+-*   Neighborhood size $k \times k$ for gradient estimation [S1, unofficial].
++*   A volume dataset $V$.
++*   A camera model defining ray origins and directions.
++*   A target image resolution $W \times H$.
++*   A neighborhood radius $r$ (typically small, e.g., 1-2 pixels) for gradient estimation.
++*   A threshold $\tau$ for color variance.
+ 
+ **Outputs:**
+-*   Final color buffer $C_{final}$ with adaptive resolution.
++*   A final rendered image $I$ of size $W \times H$.
+ 
+ **Data Structures:**
+-*   **Color Buffer:** 2D array of size $W \times H$, storing RGB(A) values for each pixel.
+-*   **Sample List:** Per-pixel list of ray origins and directions, or accumulated color values.
++*   `ImageBuffer`: A 2D array of color values $C(x,y)$ and accumulation counts $N(x,y)$.
++*   `RayQueue`: A list of rays to be traced, initially containing one ray per pixel.
+ 
+-**Steps:**
+-1.  **Initial Sampling:** Cast $N_{init}$ rays per pixel through the volume. For each ray, evaluate the volume rendering integral to obtain a color value $c_i$ [S2, unofficial].
+-    $$ c_i = \int_0^{L} E(w) \exp\left(-\int_0^t A(w) ds\right) dt $$
+-    where $E$ is emission and $A$ is absorption [S2, unofficial].
+-2.  **Color Comparison:** Compare the color values $c_i$ obtained from the initial samples within each pixel [S2, unofficial]. Calculate the variance or difference between these samples.
+-3.  **Decision:**
+-    *   If the color variation is low (below threshold $\tau$), terminate sampling for that pixel. Use the accumulated result or interpolate missing values if rays missed the surface [S2, unofficial].
+-    *   If the color variation is high (above threshold $\tau$), mark the pixel for refinement [S2, unofficial].
+-4.  **Refinement:** For marked pixels, cast additional rays at a higher sampling rate to capture rapid scene changes [S1, S3, unofficial]. These new rays replace the interpolated values with exact color values from the second sampling step [S1, S3, unofficial].
+-5.  **Interpolation (Pitfall Handling):** If rays miss the surface during sampling, interpolate the missing values [S1, S3, unofficial]. This is a known limitation where exact values are not available [S1, unofficial].
++**Algorithm:**
++
++1.  **Initial Sampling:** Cast an initial small number of rays $k$ (e.g., $k=1$ or $k=2$) per pixel. For each ray, perform volume integration (e.g., ray marching) to obtain a color value $C_i$. [S2, unofficial]
++2.  **Metric Evaluation:** For each pixel $(x,y)$, compute the color variance $M$ within the neighborhood defined by radius $r$. Let $C_{i,j}$ be the color values of the $k$ samples taken at pixel $(x,y)$ and its neighbors.
++    $$ M(x,y) = \text{Var}(\{C_{i,j}\}) $$
++    If $k=1$, $M$ may be estimated by comparing the current pixel's color to its neighbors' colors from previous iterations or a coarse pass. [S1, S3, unofficial]
++3.  **Adaptation Decision:**
++    *   If $M(x,y) < \tau$: The scene is homogeneous. Terminate sampling for this pixel. Use the accumulated result $C_{avg} = \frac{1}{k}\sum C_i$. [S2, unofficial]
++    *   If $M(x,y) \ge \tau$: The scene has high value gradients. Proceed to Step 4. [S1, S3, unofficial]
++4.  **Refinement:**
++    *   Cast additional rays in the pixel region to capture rapid scene changes. The number of additional rays $k_{add}$ is determined by the magnitude of $M$ or a fixed higher sampling rate. [S1, S3, unofficial]
++    *   Trace these rays and accumulate their color values. [S2, unofficial]
++5.  **Handling Misses:** If rays miss the volume surface (e.g., due to sparse sampling or geometry gaps), interpolate missing values from surrounding valid samples. [S1, S3, unofficial]
++6.  **Iteration:** Repeat Steps 2-5 until the variance $M$ falls below $\tau$ or a maximum number of samples is reached. [S2, unofficial]
+ 
+ **Pseudocode:**
++
+ ```python
+-def adaptive_screen_sampling(volume, camera, width, height, init_samples=2, threshold=0.1):
+-    final_buffer = zeros((height, width, 3))
++def adaptive_screen_sampling(volume, camera, width, height, threshold, max_samples, neighborhood_radius):
++    # Initialize image buffer
++    image = zeros((height, width, 3))
++    sample_counts = zeros((height, width))
+     
+-    # Step 1: Initial Sampling
++    # Initial ray generation: one ray per pixel
++    rays = []
+     for y in range(height):
+         for x in range(width):
+-            pixel_colors = []
+-            for _ in range(init_samples):
+-                # Generate ray direction based on camera and pixel coordinates
+-                ray = camera.generate_ray(x, y)
+-                # Trace ray through volume
+-                color = trace_volume_ray(volume, ray)
+-                pixel_colors.append(color)
++            rays.append(camera.get_ray(x, y))
+             
+-            # Step 2: Color Comparison
+-            # Calculate variance of the initial samples
+-            mean_color = mean(pixel_colors, axis=0)
+-            variance = sum((c - mean_color)**2 for c in pixel_colors) / len(pixel_colors)
++    # First pass: initial sampling
++    for ray in rays:
++        color = trace_volume(volume, ray)
++        x, y = ray.screen_position
++        image[y, x] += color
++        sample_counts[y, x] += 1
++        
++    # Adaptive refinement loop
++    changed = True
++    while changed and sample_counts.max() < max_samples:
++        changed = False
++        next_rays = []
++        
++        for y in range(height):
++            for x in range(width):
++                if sample_counts[y, x] >= max_samples:
++                    continue
++                    
++                # Calculate variance in neighborhood
++                neighbors = []
++                for dy in range(-neighborhood_radius, neighborhood_radius + 1):
++                    for dx in range(-neighborhood_radius, neighborhood_radius + 1):
++                        ny, nx = y + dy, x + dx
++                        if 0 <= ny < height and 0 <= nx < width:
++                            neighbors.append(image[ny, nx])
++                
++                if len(neighbors) < 2:
++                    continue
++                    
++                variance = compute_variance(neighbors)
++                
++                if variance >= threshold:
++                    # High gradient: cast additional rays
++                    num_additional = estimate_additional_rays(variance)
++                    for _ in range(num_additional):
++                        # Perturb ray direction or origin slightly for distributed sampling
++                        perturbed_ray = camera.get_ray(x, y, perturbation=True)
++                        next_rays.append(perturbed_ray)
++                    changed = True
++                else:
++                    # Low gradient: finalize pixel
++                    image[y, x] /= sample_counts[y, x]
++                    sample_counts[y, x] = max_samples # Mark as done
++                    
++        # Trace new rays
++        for ray in next_rays:
++            color = trace_volume(volume, ray)
++            x, y = ray.screen_position
++            image[y, x] += color
++            sample_counts[y, x] += 1
+             
+-            # Step 3: Decision
+-            if variance < threshold:
+-                # Low variation: use accumulated or interpolated result
+-                final_buffer[y, x] = mean_color
+-            else:
+-                # High variation: refine
+-                refined_colors = []
+-                # Cast additional rays (higher sampling rate)
+-                for _ in range(init_samples * 4): # Example higher rate
+-                    ray = camera.generate_ray(x, y)
+-                    color = trace_volume_ray(volume, ray)
+-                    refined_colors.append(color)
++    # Finalize remaining pixels
++    for y in range(height):
++        for x in range(width):
++            if sample_counts[y, x] > 0:
++                image[y, x] /= sample_counts[y, x]
+                 
+-                # Step 4: Refinement
+-                final_buffer[y, x] = mean(refined_colors, axis=0)
+-                
+-    return final_buffer
++    return image
++
++def trace_volume(volume, ray):
++    # Standard ray marching implementation
++    # Returns color and handles misses by interpolation if needed
++    pass
++
++def compute_variance(colors):
++    # Compute variance of color vectors
++    mean = sum(colors) / len(colors)
++    var = sum(dot(c - mean, c - mean) for c in colors) / len(colors)
++    return var
++
++def estimate_additional_rays(variance):
++    # Heuristic: more rays for higher variance
++    return max(1, int(variance * 10))
+ ```
+ 
+ **Parameters:**
+-*   `init_samples`: Number of initial rays per pixel. Typical value: 2–4 [S2, unofficial].
+-*   `threshold`: Color variance threshold. Value depends on scene and desired quality [S2, unofficial].
+-*   `refinement_factor`: Multiplier for additional rays. Not given in the sources.
++*   $\tau$: Variance threshold. Not given in the sources.
++*   $r$: Neighborhood radius. Not given in the sources.
++*   $k$: Initial samples per pixel. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Ray Misses:** Rays may occasionally miss the surface; missing values are interpolated, which can introduce artifacts [S1, S3, unofficial].
+-*   **Heuristic Failure:** The heuristic-based decision making often fails to produce desired visual results, especially in non-homogeneous scenes [S2, unofficial].
+-*   **Overhead:** The computation time spent determining the sample rate can be very close to or exceed the time spent sampling at a constant rate [S2, unofficial].
++*   **Ray Misses:** Rays may occasionally miss the surface, requiring interpolation of missing values [S1, S3, unofficial].
++*   **Heuristic Failure:** The method is heuristic-based and may fail to produce desired visual results if parameters are not carefully tuned [S2, unofficial].
++*   **Overhead:** The computation time spent determining sample rates can equal or exceed the cost of constant-rate sampling, especially in non-homogeneous scenes [S2, unofficial].
++*   **Aliasing:** If not carefully tuned, the method risks aliasing and quality loss in non-homogeneous regions [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on scene homogeneity. Reduces average compute time for homogeneous scenes but risks aliasing and quality loss in non-homogeneous regions if not carefully tuned [S2, unofficial].
+-*   **Memory Complexity:** Low, as it primarily stores the color buffer and temporary sample values.
+-*   **Strengths:** Reduces ray count in uniform areas, potentially speeding up rendering of simple scenes [S2, unofficial].
+-*   **Limitations:** Heuristic nature can lead to suboptimal sampling; overhead may negate benefits; interpolation artifacts from missed rays [S1, S2, unofficial].
+-*   **When to Use:** Scenes with large homogeneous regions and distinct boundaries.
+-*   **When Not to Use:** Highly complex, non-homogeneous scenes where constant sampling might be more predictable and efficient [S2, unofficial].
++*   **Time Complexity:** Variable. Average case is $O(W \cdot H \cdot k_{avg})$ where $k_{avg}$ is the average samples per pixel. Worst case is $O(W \cdot H \cdot k_{max})$.
++*   **Memory Complexity:** $O(W \cdot H)$ for the image buffer and sample counts.
++*   **Performance:** Reduces average compute time for homogeneous scenes [S2, unofficial]. However, in non-homogeneous scenes, the overhead of variance calculation and ray management can negate savings [S2, unofficial].
++*   **Strengths:** Efficient for scenes with large homogeneous regions; reduces ray count where detail is low.
++*   **Limitations:** Heuristic nature makes it difficult to guarantee quality; overhead can be significant; prone to aliasing if thresholds are poorly chosen [S2, unofficial].
++*   **When to use:** Scenes with large uniform areas and distinct boundaries; when computational resources are limited and homogeneous regions dominate.
++*   **When not to use:** Highly heterogeneous scenes; when consistent quality is required regardless of scene content; when overhead of variance calculation is prohibitive.
+ 
+ ## Background
+-Adaptive screen sampling was introduced by Levoy in 1990 [S1, S3, unofficial]. It is well known in traditional ray tracing and has been adapted for volume rendering. The method is based on the idea that the number of rays emitted from a given pixel should be adapted to the color change in a subset of pixels in a small neighborhood [S1, S3, unofficial].
++Adaptive screen sampling was introduced by Levoy in 1990 [S1, S3, unofficial]. It is well known in traditional ray tracing and has been applied to volume rendering as a method to adaptively switch sampling rates based on color change in a pixel neighborhood [S1, S3, unofficial]. The technique is part of the broader family of adaptive sampling methods aimed at reducing aliasing and computational cost by focusing samples where they are most needed [S2, unofficial].
+ 
+ ## Sources

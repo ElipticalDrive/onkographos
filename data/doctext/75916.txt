@@ -1,0 +1,2263 @@
+# csRaymarching (Terminal Raymarcher)
+
+A real-time CPU raymarcher that renders signed-distance-field scenes directly inside a terminal using ANSI / VT escape sequences and Unicode block characters.
+
+It is intentionally "overkill ASCII art": multi-core raymarching, shading, and a smooth free-fly camera, all presented as chunky terminal pixels.
+
+![Screen1](/screenshots/screenshot%20(3).png)
+![Screen1](/screenshots/screenshot%20(4).png)
+
+## Features
+
+- CPU raymarching using signed distance fields (SDF)
+- Parallel rendering using Parallel.For (scales well with core count)
+- Half-block rendering mode for effectively double vertical resolution
+- Basic shading using surface normals and optional fog
+- Dirty-row terminal flushing for fast and stable redraws
+- Smooth camera controls with adjustable movement speed
+
+## Controls
+
+- W / A / S / D - Move (x)
+- E / Q - Move up / down (z)
+- Arrow keys - Look (yaw / pitch)
+- Left Shift - Sprint
+- 1 / 2 / 3 / 4 - Set movement speed
+- Space - Pause
+- H - Toggle half-block rendering
+- F - Toggle fog
+- G - Toggle gamma colorization
+- C - Cycle color theme
+- R - Reset scene
+- I - Toggle debug / info overlay
+- F1 / F2 / F3 / F4 - Target FPS (30 / 60 [Default] / 120 / 144)
+- Esc - Quit
+- Num 0 - 5 - Scenes
+
+## Requirements
+
+- .NET 10
+- A terminal that supports ANSI / VT escape sequences and Unicode block glyphs
+
+Recommended terminal:
+- Windows Terminal on Windows 11 (very stable under heavy redraw)
+
+This project is intentionally CPU-heavy. Performance depends strongly on core count,
+cache size, and sustained clock speed. Larger window will be harder to run smoothly. 
+@ 1920x1080 terminal size, I get about 30-40 FPS with a R9 9900X3D.
+
+![Screen1](/screenshots/screenshot%20(2).png)
+
+## Project Layout (High Level)
+
+- Program.cs  
+  Main loop, frame pacing, input polling, resize handling, UI overlay
+
+- RaymarchRenderer.cs  
+  Core raymarch and shading pipeline (parallel rendering, half / full block modes)
+
+- Scene.cs / DistanceFields.cs  
+  Signed distance field scene description and distance functions
+
+- Camera3D.cs / Ray.cs  
+  Free-fly camera model and ray generation
+
+- Shading.cs  
+  Color, lighting, fog, and background shading
+
+- ConsoleCanvas.cs / WindowsConsole.cs / ConsoleInteraction.cs  
+  Fast terminal output, VT handling, and buffered rendering
+
+- Settings.cs / Theme.cs  
+  Runtime settings and visual themes
+
+## Tweaking
+
+Most tuning parameters live in Settings.cs (initialized in Program.cs), including:
+
+- MaxRaymarchSteps
+- MaxRenderDistance
+- FieldOfView
+- MoveSpeed
+- EnableFog / FogDensity
+- UseHalfBlocks
+- TargetFps
+- MapColorsWithGamma
+
+## License
+
+MIT License — see LICENSE file.
+
+(c) 2026 NiTROZ
+
+### Program.cs
+```
+﻿using static csRaymarching.Console.ConsoleInteraction;
+using csRaymarching.Render;
+using csRaymarching.Core;
+using csRaymarching.Console;
+
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Diagnostics;
+using System.Numerics;
+using System.Text;
+
+// ####  csRaymarching  ####
+// ####  2026 © NiTROZ  ####
+
+internal static partial class Program
+{
+    [LibraryImport("kernel32.dll")] static private partial IntPtr GetConsoleWindow();
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static private partial bool ShowScrollBar(IntPtr hWnd, int wBar, [MarshalAs(UnmanagedType.Bool)] bool bShow);
+    [LibraryImport("user32.dll")] static private partial short GetAsyncKeyState(int vKey);
+
+    static bool KeyDown(int vKey) => (GetAsyncKeyState(vKey) & 0x8000) != 0;
+
+    const int MinWidth = 60;
+    const int MinHeight = 40;
+
+    // App state
+    static ConsoleTheme _theme = ConsoleTheme.Dark;
+    static volatile bool _paused = false;
+    static int _lastW = -1, _lastH = -1;
+    static bool _firstFrame = true;
+    private static readonly CancellationTokenSource _cts = new();
+
+    // Input state
+    static readonly InputState _input = new();
+
+    // Used for edge-triggered toggle keys (0 .. 255)
+    static readonly bool[] _prevDown = new bool[256];
+
+    static bool Pressed(int vKey)
+    {
+        if ((uint)vKey >= (uint)_prevDown.Length)
+        {
+            bool down = KeyDown(vKey);
+            return down;
+        }
+
+        bool downNow = KeyDown(vKey);
+        bool wasDown = _prevDown[vKey];
+        _prevDown[vKey] = downNow;
+        return downNow && !wasDown;
+    }
+
+    // Canvas
+    static char[,] _canvas = new char[0, 0];
+    static string?[,] _colors = new string?[0, 0];
+
+    // Previous frame buffers for dirty-row rendering
+    static char[,] _prevCanvas = new char[0, 0];
+    static string?[,] _prevColors = new string?[0, 0];
+    static uint[] _prevRowHash = [];
+    static bool _prevValid = false;
+
+    // Settings
+    static readonly Settings _settings = new()
+    {
+        TargetFps = 60,
+        UseHalfBlocks = true,
+        MaxRaymarchSteps = 80,
+        MaxRenderDistance = 100f,
+        MouseSensitivity = 2.5f,
+        MoveSpeed = 3.0f,
+        FieldOfView = 60f,
+        ShowDebugInfo = true,
+        EnableFog = false, 
+        FogDensity = 0.02f,
+        MapColorsWithGamma = true
+    };
+
+    const float ArrowLookScale = 0.55f; // Arrow key sensitivity multiplier, higher = faster
+
+    // Performance tracking
+    static double _lastFrameMs = 0;
+    static int _fps = 0;
+    static int _frameCount = 0;
+    static double _fpsTimer = 0;
+
+    static void SyncBufferToWindow()
+    {
+        try
+        {
+            int w = Math.Max(MinWidth, Console.WindowWidth);
+            int h = Math.Max(MinHeight, Console.WindowHeight);
+
+#pragma warning disable CA1416
+            if (Console.BufferWidth < w) Console.SetBufferSize(w, Console.BufferHeight);
+            if (Console.BufferHeight < h) Console.SetBufferSize(Console.BufferWidth, h);
+
+            Console.SetWindowSize(w, h);
+            Console.SetBufferSize(w, h);
+#pragma warning restore CA1416
+        }
+        catch
+        {
+            /* ignore */
+            // Resize races or terminal limitations
+        }
+    }
+
+    static void ReinitPrevBuffers()
+    {
+        int h = _canvas.GetLength(0);
+        int w = _canvas.GetLength(1);
+
+        _prevCanvas = new char[h, w];
+        _prevColors = new string?[h, w];
+        _prevRowHash = new uint[h];
+
+        _prevValid = false; // Force full redraw once after resize
+    }
+
+    static bool HandleResizeIfNeeded()
+    {
+        int curW = Math.Max(MinWidth, Console.WindowWidth);
+        int curH = Math.Max(MinHeight, Console.WindowHeight);
+
+        if (_firstFrame || curW != _lastW || curH != _lastH)
+        {
+            try { Console.Write("\x1b[2J\x1b[H"); } catch { }
+
+            _firstFrame = false;
+            _lastW = curW;
+            _lastH = curH;
+
+            SyncBufferToWindow();
+            ConsoleCanvas.Ensure();
+
+            // Explicitly refresh canvas refs + prev buffers on resize
+            _canvas = ConsoleCanvas.Chars;
+            _colors = ConsoleCanvas.Colors;
+            ReinitPrevBuffers();
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static void StartupConsoleSequence()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                ShowScrollBar(GetConsoleWindow(), 1, false);
+            }
+            catch { }
+        }
+
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try
+            {   // Finalizer guard
+                Console.Write("\x1b[?25h\x1b[?7h\x1b[?1049l\x1b[0m");
+            }
+            catch { }
+        };
+
+        Console.Write("\x1b[?1049h");   // Enter alt screen
+        Console.Write("\x1b[2J");       // Clear
+        Console.Write("\x1b[3J");       // Clear scrollback
+        Console.Write("\x1b[H");        // Home cursor
+        Console.Write("\x1b[?7l");      // Disable line wrap
+        Console.Write("\x1b[?25l");     // Hide cursor
+
+        SyncBufferToWindow();
+        Thread.Sleep(50);
+
+        _lastW = Console.WindowWidth;
+        _lastH = Console.WindowHeight;
+
+        ConsoleCanvas.Ensure();
+        _canvas = ConsoleCanvas.Chars;
+        _colors = ConsoleCanvas.Colors;
+        ReinitPrevBuffers();
+    }
+
+    private static void UpdateTitle()
+    {
+        Console.Title = $"csRaymarching | FPS: {_fps} (Target: {_settings.TargetFps}) | {(_paused ? "PAUSED" : "Running")}";
+    }
+
+    public static void Main()
+    {
+        StartupConsoleSequence();
+
+        Console.Title = "...crunching bytes...";
+        Console.OutputEncoding = Encoding.UTF8;
+        Console.CursorVisible = false;
+        AnsiConsoleVT.EnableVirtualTerminal();
+
+        if (OperatingSystem.IsWindows())
+            WindowsConsole.CenterConsoleOnMonitor();
+
+        Console.CancelKeyPress += (s, e) =>
+        {
+            e.Cancel = true;
+            _cts.Cancel();
+        };
+
+        // Initialize renderer and scene
+        var renderer = new RaymarchRenderer(_settings, _theme);
+        var scene = new Scene();
+        scene.CreateDefaultScene();
+
+        var camera = new Camera3D(
+            position: new Vector3(0, 1, -8),
+            yaw: 0f,
+            pitch: 0f
+        );
+
+        // Main render thread (update + input + draw)
+        var renderTask = Task.Run(() =>
+        {
+            Thread.CurrentThread.Priority = ThreadPriority.Normal;
+            RenderLoop(renderer, scene, camera, _cts.Token);
+        });
+
+        // Main thread waits until exit
+        while (!_cts.IsCancellationRequested)
+            Thread.Sleep(25);
+
+        try { renderTask.Wait(); } catch { /* ignore */ }
+
+        Console.CursorVisible = true;
+        Console.Write("\x1b[?7h\x1b[?1049l");
+        AnsiConsoleVT.WriteReset();
+    }
+
+    /// <summary>
+    /// Only toggles / one-shot controls. Safe to call while paused.
+    /// Returns false when app should exit.
+    /// </summary>
+    static bool PollToggles(Scene scene, Camera3D camera)
+    {
+        if (Pressed(VkKeyCodes.VK_ESCAPE)) { _cts.Cancel(); return false; }
+        if (Pressed(VkKeyCodes.VK_SPACE)) _paused = !_paused;
+        if (Pressed(VkKeyCodes.VK_C)) _theme = _theme.Next();
+        if (Pressed(VkKeyCodes.VK_H)) _settings.UseHalfBlocks = !_settings.UseHalfBlocks;
+        if (Pressed(VkKeyCodes.VK_F)) _settings.EnableFog = !_settings.EnableFog;
+        if (Pressed(VkKeyCodes.VK_G)) _settings.MapColorsWithGamma = !_settings.MapColorsWithGamma;
+        if (Pressed(VkKeyCodes.VK_1)) _settings.MoveSpeed = 1f;
+        if (Pressed(VkKeyCodes.VK_2)) _settings.MoveSpeed = 3f;
+        if (Pressed(VkKeyCodes.VK_3)) _settings.MoveSpeed = 6f;
+        if (Pressed(VkKeyCodes.VK_4)) _settings.MoveSpeed = 12f;
+
+        // R resets scene AND camera
+        if (Pressed(VkKeyCodes.VK_R))
+        {
+            scene.CreateDefaultScene();
+            camera.Reset();
+        }
+
+        if (Pressed(VkKeyCodes.VK_I)) _settings.ShowDebugInfo = !_settings.ShowDebugInfo;
+        if (Pressed(VkKeyCodes.VK_F1)) _settings.TargetFps = 30;
+        if (Pressed(VkKeyCodes.VK_F2)) _settings.TargetFps = 60;
+        if (Pressed(VkKeyCodes.VK_F3)) _settings.TargetFps = 120;
+        if (Pressed(VkKeyCodes.VK_F4)) _settings.TargetFps = 144;
+
+        // Scene switching with camera reset
+        if (Pressed(VkKeyCodes.VK_NUMPAD0)) { scene.CreateDefaultScene(); camera.Reset(); }
+        if (Pressed(VkKeyCodes.VK_NUMPAD1)) { scene.CreateRingsScene(); camera.Reset(); }
+        if (Pressed(VkKeyCodes.VK_NUMPAD2)) { scene.CreateZenScene(); camera.Reset(); }
+        if (Pressed(VkKeyCodes.VK_NUMPAD3))
+        {
+            var (pos, yaw, pitch) = scene.CreateCorridorScene();
+            camera.Position = pos;
+            camera.Yaw = yaw;
+            camera.Pitch = pitch;
+        }
+        if (Pressed(VkKeyCodes.VK_NUMPAD4)) { scene.CreatePlaygroundScene(); camera.Reset(); }
+        if (Pressed(VkKeyCodes.VK_NUMPAD5)) { scene.CreateShowcaseScene(); camera.Reset(); }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Movement/look polling. Not called while paused.
+    /// </summary>
+    static void PollMovement()
+    {
+        float fwd = 0f;
+        if (KeyDown(VkKeyCodes.VK_W)) fwd += 1f;
+        if (KeyDown(VkKeyCodes.VK_S)) fwd -= 1f;
+
+        float right = 0f;
+        if (KeyDown(VkKeyCodes.VK_D)) right += 1f;
+        if (KeyDown(VkKeyCodes.VK_A)) right -= 1f;
+
+        float up = 0f;
+        if (KeyDown(VkKeyCodes.VK_E)) up += 1f;
+        if (KeyDown(VkKeyCodes.VK_Q)) up -= 1f;
+
+        float yaw = 0f;
+        // Camera system inverted: left = +yaw, right = -yaw
+        if (KeyDown(VkKeyCodes.VK_LEFT)) yaw += ArrowLookScale;
+        if (KeyDown(VkKeyCodes.VK_RIGHT)) yaw -= ArrowLookScale;
+
+        float pitch = 0f;
+        if (KeyDown(VkKeyCodes.VK_UP)) pitch += ArrowLookScale;
+        if (KeyDown(VkKeyCodes.VK_DOWN)) pitch -= ArrowLookScale;
+
+        _input.Sprint = KeyDown(VkKeyCodes.VK_SHIFT);
+        _input.Forward = fwd;
+        _input.Right = right;
+        _input.Up = up;
+        _input.Yaw = yaw;
+        _input.Pitch = pitch;
+    }
+
+    static void ClearMovementInput()
+    {
+        _input.Sprint = false;
+        _input.Forward = 0f;
+        _input.Right = 0f;
+        _input.Up = 0f;
+        _input.Yaw = 0f;
+        _input.Pitch = 0f;
+    }
+
+    static void RenderLoop(RaymarchRenderer renderer, Scene scene, Camera3D camera, CancellationToken token)
+    {
+        // Frame pacing state
+        int lastTargetFps = Math.Max(1, _settings.TargetFps);
+        long frameTicks = (long)(Stopwatch.Frequency / (double)lastTargetFps);
+
+        long nextTick = Stopwatch.GetTimestamp() + frameTicks;
+        long lastFrameTick = Stopwatch.GetTimestamp();
+
+        // Hitch harder than this then resync instead of chasing forever
+        long maxLagTicks = Stopwatch.Frequency / 2; // 0.5s
+
+        var sb = new StringBuilder(1 << 16);
+
+        while (!token.IsCancellationRequested)
+        {
+            // Honor the requested 'TargetFps'
+            int targetFps = Math.Max(1, _settings.TargetFps);
+            if (targetFps != lastTargetFps)
+            {
+                lastTargetFps = targetFps;
+                frameTicks = (long)(Stopwatch.Frequency / (double)lastTargetFps);
+
+                // Resync schedule to avoid burst/stutter after changing FPS
+                long now0 = Stopwatch.GetTimestamp();
+                nextTick = now0 + frameTicks;
+            }
+
+            long now = Stopwatch.GetTimestamp();
+
+            // Spin until we reach our scheduled tick
+            if (now < nextTick)
+            {
+                int remainingMs = (int)(((nextTick - now) * 1000) / Stopwatch.Frequency);
+                if (remainingMs > 2) Thread.Sleep(remainingMs - 1);
+                else Thread.SpinWait(200);
+                continue;
+            }
+
+            // If we are too far behind (GC pause, resize drag, debugger, whatever...), resync
+            if (now > nextTick + maxLagTicks)
+                nextTick = now;
+
+            // Catch up schedule in one go
+            do { nextTick += frameTicks; }
+            while (now >= nextTick);
+
+            // Base Delta time on real elapsed
+            double dt = Math.Max(1e-6, (now - lastFrameTick) / (double)Stopwatch.Frequency);
+            lastFrameTick = now;
+
+            bool resized = HandleResizeIfNeeded();
+            if (!resized)
+            {
+                ConsoleCanvas.Ensure();
+                _canvas = ConsoleCanvas.Chars;
+                _colors = ConsoleCanvas.Colors;
+            }
+
+            // If 'Ensure' changed dimensions unexpectedly, keep prev buffers in sync
+            if (_prevCanvas.GetLength(0) != _canvas.GetLength(0) || _prevCanvas.GetLength(1) != _canvas.GetLength(1))
+                ReinitPrevBuffers();
+
+            if (!PollToggles(scene, camera) || token.IsCancellationRequested)
+                break;
+
+            if (_paused)
+            {
+                ClearMovementInput();
+                DrawPausedScreen();
+                DrawUI(renderer);
+                FlushCanvasDirtyRows(sb);
+                continue;
+            }
+
+            PollMovement();
+
+            // Update scene/camera
+            scene.Update(dt);
+            camera.Update(dt, _input, _settings);
+
+            // Render
+            long renderStart = Stopwatch.GetTimestamp();
+            renderer.Render(scene, camera, _canvas, _colors);
+            long renderEnd = Stopwatch.GetTimestamp();
+
+            _lastFrameMs = 1000.0 * (renderEnd - renderStart) / Stopwatch.Frequency;
+
+            // FPS counter
+            _frameCount++;
+            _fpsTimer += dt;
+            if (_fpsTimer >= 0.5)
+            {
+                _fps = (int)(_frameCount / _fpsTimer);
+                _frameCount = 0;
+                _fpsTimer = 0;
+                UpdateTitle();
+            }
+
+            // UI + Flush
+            DrawUI(renderer);
+            FlushCanvasDirtyRows(sb);
+        }
+    }
+
+    static void DrawUI(RaymarchRenderer renderer)
+    {
+        int width = _canvas.GetLength(1);
+
+        string controls =
+            "[WASD:Move]  [←→↑↓:Look]  [E/Q:Up/Down]  [1-4:Speed]  [SPCEBAR:Pause]  [C:Color]  [R:Reset]  [I:Hide Metrics]  [ESC:Quit]  [F1-4:FPS Target] [NUMPAD0-5:Cycle Scenes]";
+        if (controls.Length > width)
+            controls = controls[..Math.Max(0, width - 3)] + "...";
+
+        ConsoleCanvas.PutString(_canvas, _colors, 0, 0, controls, AnsiConsoleVT.BrightBlack);
+
+        if (_settings.ShowDebugInfo)
+        {
+            var (rays, steps) = renderer.GetStats();
+            string info =
+                $"FPS: {_fps} | Frame: {_lastFrameMs:F1}ms | Rays: {rays:N0} | Steps: {steps:N0} | Speed: {_settings.MoveSpeed:F1}x";
+
+            if (info.Length > width)
+                info = $"FPS: {_fps} | {_lastFrameMs:F1}ms";
+
+            ConsoleCanvas.PutString(_canvas, _colors, 1, 0, info, AnsiConsoleVT.White);
+        }
+
+        int y = _settings.ShowDebugInfo ? 2 : 1;
+        int x = 0;
+
+        string halfBlk = _settings.UseHalfBlocks ? "[H]HalfBlkRender:ON " : "[H]HalfBlkRender:OFF ";
+        ConsoleCanvas.PutString(
+            _canvas, _colors, y, x, halfBlk,
+            _settings.UseHalfBlocks ? AnsiConsoleVT.Green : AnsiConsoleVT.Red);
+        x += halfBlk.Length;
+
+        string fog = _settings.EnableFog ? "[F]Fog:ON " : "[F]Fog:OFF ";
+        ConsoleCanvas.PutString(
+            _canvas, _colors, y, x, fog,
+            _settings.EnableFog ? AnsiConsoleVT.Green : AnsiConsoleVT.Red);
+
+        string gamma = _settings.MapColorsWithGamma ? "[G]GammaColorMap:ON " : "[G]GammaColorMap:OFF ";
+        ConsoleCanvas.PutString(
+            _canvas, _colors, y, x + fog.Length, gamma,
+            _settings.MapColorsWithGamma ? AnsiConsoleVT.Green : AnsiConsoleVT.Red);
+
+        if (_paused)
+        {
+            x += fog.Length;
+            ConsoleCanvas.PutString(_canvas, _colors, y, x, "PAUSED ", AnsiConsoleVT.BrightYellow);
+        }
+    }
+
+    static void DrawPausedScreen()
+    {
+        int height = _canvas.GetLength(0);
+        int width = _canvas.GetLength(1);
+        int midY = height / 2;
+        int midX = width / 2;
+
+        const string msg = "[ PAUSED ]";
+        int msgX = Math.Max(0, midX - msg.Length / 2);
+
+        ConsoleCanvas.PutString(_canvas, _colors, midY, msgX, msg, AnsiConsoleVT.BrightYellow);
+    }
+
+    // Fast-ish per-row hash (FNV-1a) across chars + color identity
+    // Using RuntimeHelpers.GetHashCode for reference-identity-ish hashing of strings
+    // This is stable for the life of the object and cheap
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static uint HashRow(int y, int W)
+    {
+        const uint FNV_OFFSET = 2166136261u;
+        const uint FNV_PRIME = 16777619u;
+
+        uint h = FNV_OFFSET;
+
+        for (int x = 0; x < W; x++)
+        {
+            char ch = _canvas[y, x];
+            h ^= (ushort)ch;
+            h *= FNV_PRIME;
+
+            string? col = _colors[y, x];
+            int colId = col is null ? 0 : RuntimeHelpers.GetHashCode(col);
+            h ^= (uint)colId;
+            h *= FNV_PRIME;
+        }
+
+        return h;
+    }
+
+    /// <summary>
+    /// Dirty-row flush:
+    /// - Uses a per-row hash to skip unchanged rows quickly.
+    /// - Only copies prev buffers for rows that changed.
+    /// - On resize / first draw, forces a full redraw.
+    /// </summary>
+    static void FlushCanvasDirtyRows(StringBuilder sb)
+    {
+        sb.Clear();
+
+        try
+        {
+            int winH = Console.WindowHeight;
+            int winW = Console.WindowWidth;
+            if (winH <= 0 || winW <= 0) return;
+
+            int H = Math.Min(_canvas.GetLength(0), winH);
+            int W = Math.Min(_canvas.GetLength(1), winW);
+
+            // Ensure prev buffers match current
+            if (_prevCanvas.GetLength(0) != _canvas.GetLength(0) || _prevCanvas.GetLength(1) != _canvas.GetLength(1))
+                ReinitPrevBuffers();
+
+            bool anyWrites = false;
+
+            for (int y = 0; y < H; y++)
+            {
+                bool changed;
+
+                uint rowHash = HashRow(y, W);
+
+                if (!_prevValid)
+                {
+                    changed = true;
+                }
+                else
+                {
+                    // Fast path, if row hash matches, assume unchanged
+                    changed = rowHash != _prevRowHash[y];
+                }
+
+                if (!changed)
+                    continue;
+
+                // Copy changed row into prev buffers (no need to copy unchanged rows)
+                for (int x = 0; x < W; x++)
+                {
+                    _prevCanvas[y, x] = _canvas[y, x];
+                    _prevColors[y, x] = _colors[y, x];
+                }
+                _prevRowHash[y] = rowHash;
+
+                anyWrites = true;
+
+                // Move cursor to row start (1-based coords)
+                sb.Append("\x1b[");
+                sb.Append(y + 1);
+                sb.Append(";1H");
+
+                string? last = null;
+
+                for (int x = 0; x < W; x++)
+                {
+                    string? col = _colors[y, x];
+                    if (col != last)
+                    {
+                        sb.Append(col ?? AnsiConsoleVT.ResetCode);
+                        last = col;
+                    }
+
+                    char ch = _canvas[y, x];
+                    sb.Append(ch == '\0' ? ' ' : ch);
+                }
+
+                sb.Append(AnsiConsoleVT.ResetCode);
+                sb.Append("\x1b[0K"); // Clear to end-of-line
+            }
+
+            _prevValid = true;
+
+            if (!anyWrites)
+                return;
+
+            Console.Write(sb.ToString());
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // Resize race
+            ConsoleCanvas.Ensure();
+            _canvas = ConsoleCanvas.Chars;
+            _colors = ConsoleCanvas.Colors;
+            ReinitPrevBuffers();
+        }
+        catch (IOException)
+        {
+            /* ignore */
+            // Redirected/terminal hiccup
+        }
+        catch
+        {
+            /* ignore */
+            // Keep loop alive on terminal quirks
+        }
+    }
+}
+```
+
+### Console/ConsoleCanvas.cs
+```
+﻿using System;
+
+// ####  2026 © NiTROZ  ####
+
+namespace csRaymarching.Console
+{
+    /// <summary>
+    /// Provides a 2D character-based canvas for rendering to the console with color support
+    /// and half-block Unicode graphics for higher vertical resolution.
+    /// </summary>
+    public sealed class ConsoleCanvas
+    {
+        // Half-block Unicode characters for pseudo-pixel rendering
+        private const char EmptyChar = ' ';
+        private const char FullBlock = '█';
+        private const char UpperHalfBlock = '▀';
+        private const char LowerHalfBlock = '▄';
+
+        // Bit flags for half-block state
+        private const int TopHalfMask = 1;
+        private const int BottomHalfMask = 2;
+        private const int BothHalvesMask = TopHalfMask | BottomHalfMask;
+
+        private static readonly object _lock = new();
+
+        /// <summary>
+        /// The character buffer representing the canvas content.
+        /// Dimensions are [height, width].
+        /// </summary>
+        public static char[,] Chars { get; private set; } = new char[0, 0];
+
+        /// <summary>
+        /// The color buffer for each character position.
+        /// Null entries indicate no color override (use default).
+        /// Dimensions are [height, width].
+        /// </summary>
+        public static string?[,] Colors { get; private set; } = new string?[0, 0];
+
+        /// <summary>
+        /// Current canvas width in characters.
+        /// </summary>
+        public static int Width => Chars.GetLength(1);
+
+        /// <summary>
+        /// Current canvas height in characters.
+        /// </summary>
+        public static int Height => Chars.GetLength(0);
+
+        /// <summary>
+        /// Ensures the canvas buffers match the current console window size.
+        /// Reinitializes buffers if the size has changed, otherwise clears them.
+        /// </summary>
+        public static void Ensure()
+        {
+            int width, height;
+
+            try
+            {
+                width = System.Console.WindowWidth;
+                height = System.Console.WindowHeight;
+            }
+            catch (IOException)
+            {
+                // Console not available (e.g., redirected output)
+                return;
+            }
+
+            if (width <= 0 || height <= 0)
+                return;
+
+            lock (_lock)
+            {
+                bool sizeChanged = Height != height || Width != width;
+
+                if (sizeChanged)
+                {
+                    Chars = new char[height, width];
+                    Colors = new string?[height, width];
+                    FillWithSpaces(Chars);
+                }
+                else
+                {
+                    ClearBuffers();
+                }
+            }
+        }
+
+        /// <summary>
+        /// Writes a string to the canvas at the specified position.
+        /// Characters outside the canvas bounds are clipped.
+        /// </summary>
+        /// <param name="canvas">The character buffer to write to.</param>
+        /// <param name="colors">The color buffer to write to.</param>
+        /// <param name="row">The row (y-coordinate) to write at.</param>
+        /// <param name="col">The starting column (x-coordinate).</param>
+        /// <param name="text">The string to write.</param>
+        /// <param name="color">Optional color for all characters (null preserves existing colors).</param>
+        public static void PutString(
+            char[,] canvas,
+            string?[,] colors,
+            int row,
+            int col,
+            string text,
+            string? color = null)
+        {
+            if (canvas is null || colors is null || text is null)
+                return;
+
+            int canvasHeight = canvas.GetLength(0);
+            int canvasWidth = canvas.GetLength(1);
+
+            if (row < 0 || row >= canvasHeight)
+                return;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                int targetCol = col + i;
+
+                if (targetCol < 0)
+                    continue;
+
+                if (targetCol >= canvasWidth)
+                    break; // No point continuing past the right edge
+
+                canvas[row, targetCol] = text[i];
+
+                if (color is not null)
+                    colors[row, targetCol] = color;
+            }
+        }
+
+        /// <summary>
+        /// Checks whether the specified position is empty (space or null character).
+        /// </summary>
+        /// <param name="canvas">The character buffer to check.</param>
+        /// <param name="row">The row to check.</param>
+        /// <param name="col">The column to check.</param>
+        /// <returns>True if the position is within bounds and empty; false otherwise.</returns>
+        public static bool IsEmptyAt(char[,] canvas, int row, int col)
+        {
+            if (canvas is null)
+                return false;
+
+            if (!IsInBounds(canvas, row, col))
+                return false;
+
+            char c = canvas[row, col];
+            return c == '\0' || c == EmptyChar;
+        }
+
+        /// <summary>
+        /// Sets a half-block character at the specified position, combining with any
+        /// existing half-block to create full blocks when both halves are filled.
+        /// This enables pseudo-pixel rendering with double vertical resolution.
+        /// </summary>
+        /// <param name="canvas">The character buffer to modify.</param>
+        /// <param name="colors">The color buffer to modify.</param>
+        /// <param name="row">The row to modify.</param>
+        /// <param name="col">The column to modify.</param>
+        /// <param name="isTopHalf">True for upper half-block, false for lower.</param>
+        /// <param name="color">The color to apply.</param>
+        public static void SetHalfBlock(
+            char[,] canvas,
+            string?[,] colors,
+            int row,
+            int col,
+            bool isTopHalf,
+            string color)
+        {
+            if (canvas is null || colors is null)
+                return;
+
+            if (!IsInBounds(canvas, row, col))
+                return;
+
+            int currentMask = DecodeHalfBlockMask(canvas[row, col]);
+            int newMask = currentMask | (isTopHalf ? TopHalfMask : BottomHalfMask);
+
+            canvas[row, col] = EncodeHalfBlockChar(newMask);
+            colors[row, col] = color;
+        }
+
+        /// <summary>
+        /// Checks whether the specified coordinates are within the canvas bounds.
+        /// </summary>
+        private static bool IsInBounds(char[,] canvas, int row, int col)
+            => row >= 0
+            && row < canvas.GetLength(0)
+            && col >= 0
+            && col < canvas.GetLength(1);
+
+        /// <summary>
+        /// Decodes a half-block character into its bit mask representation.
+        /// </summary>
+        private static int DecodeHalfBlockMask(char c) => c switch
+        {
+            FullBlock => BothHalvesMask,
+            UpperHalfBlock => TopHalfMask,
+            LowerHalfBlock => BottomHalfMask,
+            _ => 0
+        };
+
+        /// <summary>
+        /// Encodes a bit mask into the corresponding half-block character.
+        /// </summary>
+        private static char EncodeHalfBlockChar(int mask) => mask switch
+        {
+            TopHalfMask => UpperHalfBlock,
+            BottomHalfMask => LowerHalfBlock,
+            BothHalvesMask => FullBlock,
+            _ => EmptyChar
+        };
+
+        /// <summary>
+        /// Fills the entire character buffer with spaces.
+        /// </summary>
+        private static void FillWithSpaces(char[,] canvas)
+        {
+            int height = canvas.GetLength(0);
+            int width = canvas.GetLength(1);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    canvas[y, x] = EmptyChar;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Clears both buffers - fills Chars with spaces and Colors with null.
+        /// </summary>
+        private static void ClearBuffers()
+        {
+            FillWithSpaces(Chars);
+            Array.Clear(Colors, 0, Colors.Length);
+        }
+    }
+}
+```
+
+### Console/ConsoleInteraction.cs
+```
+﻿namespace csRaymarching.Console
+{
+    public class ConsoleInteraction
+    {
+        public static class AnsiConsoleVT
+        {
+            // Basic ANSI helpers, on Windows 10+ enable VT mode for colors
+            public const string ResetCode = "\u001b[0m";
+            public static string Fg(string colorCode) => colorCode;
+
+            // Standard colors
+            public static string Black => "\u001b[30m";
+            public static string Red => "\u001b[31m";
+            public static string Green => "\u001b[32m";
+            public static string Yellow => "\u001b[33m";
+            public static string Blue => "\u001b[34m";
+            public static string Magenta => "\u001b[35m";
+            public static string Cyan => "\u001b[36m";
+            public static string White => "\u001b[97m";         // Supposed to be light gray, but inverted with brightwhite for backwards compatibility
+
+            // Bright colors
+            public static string BrightBlack => "\u001b[90m";   // Dark gray
+            public static string BrightRed => "\u001b[91m";
+            public static string BrightGreen => "\u001b[92m";
+            public static string BrightYellow => "\u001b[93m";
+            public static string BrightBlue => "\u001b[94m";
+            public static string BrightMagenta => "\u001b[95m";
+            public static string BrightCyan => "\u001b[96m";
+            public static string LightWhite => "\u001b[37m";    // Darker shade
+
+            public static void EnableVirtualTerminal()
+            {
+                try
+                {
+                    if (OperatingSystem.IsWindows())
+                    {
+                        WindowsConsole.EnableVirtualTerminalProcessing();
+                    }
+                }
+                catch { /* ignore */ }
+            }
+
+            public static void WriteReset()
+            {
+                try { System.Console.Write(ResetCode); } catch { }
+            }
+        }
+    }
+}
+```
+
+### Console/WindowsConsole.cs
+```
+﻿using System.Runtime.InteropServices;
+
+namespace csRaymarching.Console
+{
+    public static class WindowsConsole
+    {
+        // I suppose these should be LibraryImports?...
+        private const int STD_OUTPUT_HANDLE = -11;
+        private const uint ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern nint GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetConsoleMode(nint hConsoleHandle, out uint lpMode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetConsoleMode(nint hConsoleHandle, uint dwMode);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool GetWindowRect(nint hWnd, out RECT lpRect);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool MoveWindow(nint hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern nint MonitorFromWindow(nint hwnd, uint dwFlags);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        private static extern bool GetMonitorInfo(nint hMonitor, ref MONITORINFO lpmi);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern nint GetConsoleWindow();
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;  // Total monitor area
+            public RECT rcWork;     // Work area (Taskbar excluded)
+            public uint dwFlags;
+        }
+
+        public static void EnableVirtualTerminalProcessing()
+        {
+            var handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (!GetConsoleMode(handle, out uint mode)) 
+                return;
+            mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(handle, mode);
+        }
+
+        public static void CenterConsoleOnMonitor()
+        {
+            try
+            {
+                var hwnd = GetConsoleWindow();
+                if (hwnd == nint.Zero) 
+                    return;
+
+                // Current console rect
+                if (!GetWindowRect(hwnd, out var wr)) 
+                    return;
+                int width = wr.Right - wr.Left;
+                int height = wr.Bottom - wr.Top;
+
+                // Monitor work area for the window
+                nint hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+                if (!GetMonitorInfo(hmon, ref mi)) 
+                    return;
+
+                // Center within work area
+                int workW = mi.rcWork.Right - mi.rcWork.Left;
+                int workH = mi.rcWork.Bottom - mi.rcWork.Top;
+                int x = mi.rcWork.Left + (workW - width) / 2;
+                int y = mi.rcWork.Top + (workH - height) / 2;
+
+                MoveWindow(hwnd, x, y, width, height, true);
+            }
+            catch { /* ignore */ }
+        }
+    }
+}
+```
+
+### Core/InputState.cs
+```
+﻿namespace csRaymarching.Core
+{
+    public sealed class InputState
+    {
+        // Movement
+        public float Forward { get; set; }  // -1 to 1
+        public float Right { get; set; }    // -1 to 1
+        public float Up { get; set; }       // -1 to 1
+
+        // Look
+        public float Yaw { get; set; }      // Horizontal rotation
+        public float Pitch { get; set; }    // Vertical rotation
+
+        // Actions
+        public bool Sprint { get; set; }
+        public bool Interact { get; set; }  // No use for this yet...
+
+        public void Reset()
+        {
+            Forward = 0;
+            Right = 0;
+            Up = 0;
+        }
+    }
+}
+```
+
+### Core/Ray.cs
+```
+﻿using System.Numerics;
+
+namespace csRaymarching.Core
+{
+    public readonly struct Ray(Vector3 origin, Vector3 direction)
+    {
+        public readonly Vector3 Origin = origin;
+        public readonly Vector3 Direction = Vector3.Normalize(direction);
+
+        public Vector3 GetPoint(float distance)
+        {
+            return Origin + Direction * distance;
+        }
+    }
+}
+```
+
+### Core/Settings.cs
+```
+﻿namespace csRaymarching.Core
+{
+    public sealed class Settings
+    {
+        // Rendering
+        public int TargetFps { get; set; } = 60;
+        public bool UseHalfBlocks { get; set; } = true;
+        public int MaxRaymarchSteps { get; set; } = 80;
+        public float MaxRenderDistance { get; set; } = 100f;
+
+        // Camera
+        public float MouseSensitivity { get; set; } = 0.15f;      // Might be worth implementing real mouse input later
+        public float MoveSpeed { get; set; } = 3.5f;
+        public float FieldOfView { get; set; } = 80f;
+
+        // Quality
+        public bool EnableShadows { get; set; } = false;          // Not implemented yet
+        public bool EnableAmbientOcclusion { get; set; } = false; // Not implemented yet
+        public int ResolutionScale { get; set; } = 1;             // Not implemented yet
+
+        // Visuals
+        public bool ShowDebugInfo { get; set; } = true;
+        public bool EnableFog { get; set; } = true;
+        public float FogDensity { get; set; } = 0.03f;
+        public bool MapColorsWithGamma { get; set; } = true;
+    }
+}
+```
+
+### Core/Theme.cs
+```
+﻿using static csRaymarching.Console.ConsoleInteraction;
+
+namespace csRaymarching.Core
+{
+    public enum ConsoleTheme
+    {
+        Dark,
+        Light,
+        Cyan,
+        Green,
+        Amber
+    }
+
+    public static class ConsoleThemeExtensions
+    {
+        public static ConsoleTheme Next(this ConsoleTheme theme)
+        {
+            var values = Enum.GetValues<ConsoleTheme>();
+            int next = ((int)theme + 1) % values.Length;
+            return values[next];
+        }
+
+        public static string Primary(this ConsoleTheme theme) => theme switch
+        {
+            ConsoleTheme.Dark => AnsiConsoleVT.Cyan,
+            ConsoleTheme.Light => AnsiConsoleVT.Blue,
+            ConsoleTheme.Cyan => AnsiConsoleVT.BrightCyan,
+            ConsoleTheme.Green => AnsiConsoleVT.BrightGreen,
+            ConsoleTheme.Amber => AnsiConsoleVT.Yellow,
+            _ => AnsiConsoleVT.Cyan
+        };
+
+        public static string Secondary(this ConsoleTheme theme) => theme switch
+        {
+            ConsoleTheme.Dark => AnsiConsoleVT.BrightBlack,
+            ConsoleTheme.Light => AnsiConsoleVT.LightWhite,
+            ConsoleTheme.Cyan => AnsiConsoleVT.Cyan,
+            ConsoleTheme.Green => AnsiConsoleVT.Green,
+            ConsoleTheme.Amber => AnsiConsoleVT.BrightYellow,
+            _ => AnsiConsoleVT.BrightBlack
+        };
+    }
+}
+```
+
+### Core/VkKeyCodes.cs
+```
+﻿namespace csRaymarching.Core
+{
+    internal static class VkKeyCodes
+    {
+        // Letters
+        public const int VK_A = 0x41;
+        public const int VK_B = 0x42;
+        public const int VK_C = 0x43;
+        public const int VK_D = 0x44;
+        public const int VK_E = 0x45;
+        public const int VK_F = 0x46;
+        public const int VK_G = 0x47;
+        public const int VK_H = 0x48;
+        public const int VK_I = 0x49;
+        public const int VK_J = 0x4A;
+        public const int VK_K = 0x4B;
+        public const int VK_L = 0x4C;
+        public const int VK_M = 0x4D;
+        public const int VK_N = 0x4E;
+        public const int VK_O = 0x4F;
+        public const int VK_P = 0x50;
+        public const int VK_Q = 0x51;
+        public const int VK_R = 0x52;
+        public const int VK_S = 0x53;
+        public const int VK_T = 0x54;
+        public const int VK_U = 0x55;
+        public const int VK_V = 0x56;
+        public const int VK_W = 0x57;
+        public const int VK_X = 0x58;
+        public const int VK_Y = 0x59;
+        public const int VK_Z = 0x5A;
+
+        // Digits
+        public const int VK_0 = 0x30;
+        public const int VK_1 = 0x31;
+        public const int VK_2 = 0x32;
+        public const int VK_3 = 0x33;
+        public const int VK_4 = 0x34;
+        public const int VK_5 = 0x35;
+        public const int VK_6 = 0x36;
+        public const int VK_7 = 0x37;
+        public const int VK_8 = 0x38;
+        public const int VK_9 = 0x39;
+
+        // Numpad
+        public const int VK_NUMPAD0 = 0x60;
+        public const int VK_NUMPAD1 = 0x61;
+        public const int VK_NUMPAD2 = 0x62;
+        public const int VK_NUMPAD3 = 0x63;
+        public const int VK_NUMPAD4 = 0x64;
+        public const int VK_NUMPAD5 = 0x65;
+        public const int VK_NUMPAD6 = 0x66;
+        public const int VK_NUMPAD7 = 0x67;
+        public const int VK_NUMPAD8 = 0x68;
+        public const int VK_NUMPAD9 = 0x69;
+
+        // Function keys
+        public const int VK_F1 = 0x70;
+        public const int VK_F2 = 0x71;
+        public const int VK_F3 = 0x72;
+        public const int VK_F4 = 0x73;
+
+        // Arrows
+        public const int VK_LEFT = 0x25;
+        public const int VK_UP = 0x26;
+        public const int VK_RIGHT = 0x27;
+        public const int VK_DOWN = 0x28;
+
+        // Modifiers
+        public const int VK_SHIFT = 0x10;
+
+        // Special
+        public const int VK_SPACE = 0x20;
+        public const int VK_ESCAPE = 0x1B;
+        public const int VK_TAB = 0x09;
+    }
+}
+```
+
+### Math/DistanceFields.cs
+```
+﻿using System.Numerics;
+
+namespace csRaymarching.Math
+{
+    /// <summary>
+    /// Signed Distance Field (SDF) functions for primitive shapes
+    /// </summary>
+    public static class DistanceFields
+    {
+        // Basic Primitives and Shapes
+        public static float Sphere(Vector3 point, float radius)
+        {
+            return point.Length() - radius;
+        }
+
+        public static float Box(Vector3 point, Vector3 size)
+        {
+            Vector3 q = Abs(point) - size;
+            return Max(q).Length() + MathF.Min(MathF.Max(q.X, MathF.Max(q.Y, q.Z)), 0f);
+        }
+
+        public static float Plane(Vector3 point, Vector3 normal, float distance)
+        {
+            return Vector3.Dot(point, normal) + distance;
+        }
+
+        public static float Torus(Vector3 point, float majorRadius, float minorRadius)
+        {
+            Vector2 q = new(
+                new Vector2(point.X, point.Z).Length() - majorRadius,
+                point.Y
+            );
+            return q.Length() - minorRadius;
+        }
+
+        public static float Cylinder(Vector3 point, float radius, float height)
+        {
+            Vector2 d = Abs(new Vector2(
+                new Vector2(point.X, point.Z).Length(),
+                point.Y
+            )) - new Vector2(radius, height);
+
+            return MathF.Min(MathF.Max(d.X, d.Y), 0f) + Max(d).Length();
+        }
+
+        public static float Capsule(Vector3 point, Vector3 a, Vector3 b, float radius)
+        {
+            Vector3 pa = point - a;
+            Vector3 ba = b - a;
+            float h = MathF.Max(0f, MathF.Min(1f, Vector3.Dot(pa, ba) / Vector3.Dot(ba, ba)));
+            return (pa - ba * h).Length() - radius;
+        }
+
+        // Fractals and Complex Shapes
+        public static float SierpinskiPyramid(Vector3 p, int iterations)
+        {
+            float scale = 2f;
+            Vector3 offset = new(1f);
+
+            // Not really working? Idk
+            for (int i = 0; i < iterations; i++)
+            {
+                // Fold into pyramid shape
+                if (p.X + p.Y < 0) { float t = -p.Y; p.Y = -p.X; p.X = t; }
+                if (p.X + p.Z < 0) { float t = -p.Z; p.Z = -p.X; p.X = t; }
+                if (p.Y + p.Z < 0) { float t = -p.Z; p.Z = -p.Y; p.Y = t; }
+
+                // Scale and translate
+                p = p * scale - offset * (scale - 1f);
+            }
+
+            // Tetrahedron
+            return (Tetrahedron(p)) / MathF.Pow(scale, iterations);
+        }
+
+        private static float Tetrahedron(Vector3 p)
+        {
+            float md = MathF.Max(MathF.Max(-p.X - p.Y - p.Z, p.X + p.Y - p.Z),
+                                 MathF.Max(-p.X + p.Y + p.Z, p.X - p.Y + p.Z));
+            return md / MathF.Sqrt(3f);
+        }
+
+        // Boolean Operations
+        public static float Union(float d1, float d2)
+        {
+            return MathF.Min(d1, d2);
+        }
+
+        public static float Subtraction(float d1, float d2)
+        {
+            return MathF.Max(-d1, d2);
+        }
+
+        public static float Intersection(float d1, float d2)
+        {
+            return MathF.Max(d1, d2);
+        }
+
+        public static float SmoothUnion(float d1, float d2, float k)
+        {
+            float h = MathF.Max(k - MathF.Abs(d1 - d2), 0f) / k;
+            return MathF.Min(d1, d2) - h * h * k * 0.25f;
+        }
+
+        // Domain Operations
+        public static Vector3 Repeat(Vector3 point, Vector3 spacing)
+        {
+            return new Vector3(
+                Mod(point.X + spacing.X * 0.5f, spacing.X) - spacing.X * 0.5f,
+                Mod(point.Y + spacing.Y * 0.5f, spacing.Y) - spacing.Y * 0.5f,
+                Mod(point.Z + spacing.Z * 0.5f, spacing.Z) - spacing.Z * 0.5f
+            );
+        }
+
+        public static Vector3 RotateY(Vector3 point, float angle)
+        {
+            float c = MathF.Cos(angle);
+            float s = MathF.Sin(angle);
+            return new Vector3(
+                point.X * c - point.Z * s,
+                point.Y,
+                point.X * s + point.Z * c
+            );
+        }
+
+        // Helpers
+        private static Vector3 Abs(Vector3 v)
+        {
+            return new Vector3(MathF.Abs(v.X), MathF.Abs(v.Y), MathF.Abs(v.Z));
+        }
+
+        private static Vector2 Abs(Vector2 v)
+        {
+            return new Vector2(MathF.Abs(v.X), MathF.Abs(v.Y));
+        }
+
+        private static Vector3 Max(Vector3 v)
+        {
+            return new Vector3(
+                MathF.Max(v.X, 0),
+                MathF.Max(v.Y, 0),
+                MathF.Max(v.Z, 0)
+            );
+        }
+
+        private static Vector2 Max(Vector2 v)
+        {
+            return new Vector2(MathF.Max(v.X, 0), MathF.Max(v.Y, 0));
+        }
+
+        private static float Mod(float x, float y)
+        {
+            return x - y * MathF.Floor(x / y);
+        }
+    }
+}
+```
+
+### Math/MathUtils.cs
+```
+﻿using System.Numerics;
+
+namespace csRaymarching.Math
+{
+    public static class MathUtils
+    {
+        public const float Pi = MathF.PI;
+        public const float TwoPi = MathF.PI * 2f;
+        public const float HalfPi = MathF.PI * 0.5f;
+        public const float Epsilon = 0.001f;
+
+        public static float Clamp(float value, float min, float max)
+        {
+            return MathF.Max(min, MathF.Min(max, value));
+        }
+
+        public static float Clamp01(float value)
+        {
+            return Clamp(value, 0f, 1f);
+        }
+
+        public static float Lerp(float a, float b, float t)
+        {
+            return a + (b - a) * t;
+        }
+
+        public static Vector3 Lerp(Vector3 a, Vector3 b, float t)
+        {
+            return a + (b - a) * t;
+        }
+
+        public static float SmoothStep(float t)
+        {
+            t = Clamp01(t);
+            return t * t * (3f - 2f * t);
+        }
+
+        public static float DegToRad(float degrees)
+        {
+            return degrees * (Pi / 180f);
+        }
+
+        public static float RadToDeg(float radians)
+        {
+            return radians * (180f / Pi);
+        }
+
+        public static Vector3 ProjectOnPlane(Vector3 vector, Vector3 planeNormal)
+        {
+            float sqrMag = Vector3.Dot(planeNormal, planeNormal);
+            if (sqrMag < Epsilon)
+                return vector;
+
+            float dot = Vector3.Dot(vector, planeNormal);
+            return vector - planeNormal * dot / sqrMag;
+        }
+    }
+}
+```
+
+### Render/Camera3D.cs
+```
+﻿using csRaymarching.Core;
+
+using System.Numerics;
+
+namespace csRaymarching.Render
+{
+    public sealed class Camera3D
+    {
+        public Vector3 Position { get; set; }
+        public float Yaw { get; set; }      // Horizontal rotation (radians)
+        public float Pitch { get; set; }    // Vertical rotation (radians)
+        public float FieldOfView { get; set; } = 60f;
+
+        // Store initial state for reset
+        private readonly Vector3 _initialPosition;
+        private readonly float _initialYaw;
+        private readonly float _initialPitch;
+
+        private Vector3 _forward;
+        private Vector3 _right;
+        private Vector3 _up;
+        private bool _vectorsDirty = true; // Not implemented yet, but could be used for optimization
+
+        public Camera3D(Vector3 position, float yaw = 0f, float pitch = 0f)
+        {
+            Position = position;
+            Yaw = yaw;
+            Pitch = pitch;
+
+            // Store initial values
+            _initialPosition = position;
+            _initialYaw = yaw;
+            _initialPitch = pitch;
+
+            UpdateVectors();
+        }
+
+        public void Reset()
+        {
+            Position = _initialPosition;
+            Yaw = _initialYaw;
+            Pitch = _initialPitch;
+            _vectorsDirty = true;
+            UpdateVectors();
+        }
+
+        public void Update(double deltaTime, InputState input, Settings settings)
+        {
+            // Update rotation
+            Yaw += input.Yaw * settings.MouseSensitivity * (float)deltaTime;
+
+            // Keep yaw bounded to avoid float precision decay over long runtimes
+            Yaw = WrapAnglePi(Yaw);
+
+            Pitch += input.Pitch * settings.MouseSensitivity * (float)deltaTime;
+            Pitch = MathF.Max(-MathF.PI * 0.49f, MathF.Min(MathF.PI * 0.49f, Pitch));
+
+            static float WrapAnglePi(float a)
+            {
+                const float TwoPi = MathF.PI * 2f;
+                a %= TwoPi;
+                if (a > MathF.PI) a -= TwoPi;
+                if (a < -MathF.PI) a += TwoPi;
+                return a;
+            }
+            UpdateVectors();
+
+            // Calculate movement speed
+            float speed = settings.MoveSpeed * (float)deltaTime;
+            if (input.Sprint) speed *= 2f;
+
+            // Move
+            if (input.Forward != 0)
+                Position += _forward * (input.Forward * speed);
+            if (input.Right != 0)
+                Position += _right * (input.Right * speed);
+            if (input.Up != 0)
+                Position += Vector3.UnitY * (input.Up * speed);
+        }
+
+        private void UpdateVectors()
+        {
+            // Calculate forward vector from yaw and pitch
+            _forward = new Vector3(
+                MathF.Cos(Pitch) * MathF.Sin(Yaw),
+                MathF.Sin(Pitch),
+                MathF.Cos(Pitch) * MathF.Cos(Yaw)
+            );
+            _forward = Vector3.Normalize(_forward);
+
+            // Right vector is perpendicular to forward on XZ plane
+            _right = Vector3.Normalize(Vector3.Cross(_forward, Vector3.UnitY));
+
+            // Up vector
+            _up = Vector3.Cross(_right, _forward);
+        }
+
+        public Ray GetRay(int x, int y, int screenWidth, int screenHeight)
+        {
+            // Convert screen coordinates to NDC (-1 to 1)
+            float ndcX = (2f * x / screenWidth) - 1f;
+            float ndcY = 1f - (2f * y / screenHeight);
+
+            // Calculate aspect ratio
+            float aspect = (float)screenWidth / screenHeight;
+
+            // Calculate FOV scaling
+            float fovScale = MathF.Tan(FieldOfView * 0.5f * MathF.PI / 180f);
+
+            // Create ray direction in camera space
+            Vector3 rayDir = Vector3.Normalize(
+                _right * (ndcX * aspect * fovScale) +
+                _up * (ndcY * fovScale) +
+                _forward
+            );
+
+            return new Ray(Position, rayDir);
+        }
+
+        public Vector3 Forward => _forward;
+        public Vector3 Right => _right;
+        public Vector3 Up => _up;
+    }
+}
+```
+
+### Render/RaymarchRenderer.cs
+```
+﻿using csRaymarching.Core;
+
+using System.Numerics;
+
+namespace csRaymarching.Render
+{
+    public sealed class RaymarchRenderer(Settings settings, ConsoleTheme theme)
+    {
+        private const float MinHitDistance = 0.001f;
+        private ConsoleTheme _theme = theme;
+        private readonly Settings _settings = settings;
+
+        // Performance tracking
+        private int _totalRays;
+        private int _totalSteps;
+
+        public void SetTheme(ConsoleTheme theme)
+        {
+            _theme = theme;
+        }
+
+        public (int rays, int steps) GetStats()
+        {
+            var result = (_totalRays, _totalSteps);
+            _totalRays = 0;
+            _totalSteps = 0;
+            return result;
+        }
+
+        public void Render(Scene scene,Camera3D camera,char[,] canvas,string?[,] colors)
+        {
+            int width = canvas.GetLength(1);
+            int height = canvas.GetLength(0);
+
+            if (_settings.UseHalfBlocks)
+            {
+                RenderHalfBlocks(scene, camera, canvas, colors, width, height);
+            }
+            else
+            {
+                RenderFullBlocks(scene, camera, canvas, colors, width, height);
+            }
+        }
+
+        private void RenderHalfBlocks(Scene scene,Camera3D camera,char[,] canvas,string?[,] colors,int width,int height)
+        {
+            int resolutionY = height * 2;
+
+            Parallel.For(0, height, y =>
+            {
+                int localSteps = 0;
+                int localRays = 0;
+
+                for (int x = 0; x < width; x++)
+                {
+                    var ray1 = camera.GetRay(x, y * 2, width, resolutionY);
+                    var ray2 = camera.GetRay(x, y * 2 + 1, width, resolutionY);
+
+                    var (dist1, steps1, obj1) = Raymarch(scene, ray1);
+                    var (dist2, steps2, obj2) = Raymarch(scene, ray2);
+
+                    localSteps += steps1 + steps2;
+                    localRays += 2;
+
+                    string color1 = ShadePixel(scene, ray1, dist1, obj1);
+                    string color2 = ShadePixel(scene, ray2, dist2, obj2);
+
+                    SetHalfBlockWithColors(canvas, colors, y, x, color1, color2);
+                }
+
+                Interlocked.Add(ref _totalSteps, localSteps);
+                Interlocked.Add(ref _totalRays, localRays);
+            });
+        }
+
+        private void RenderFullBlocks(Scene scene,Camera3D camera,char[,] canvas,string?[,] colors,int width,int height)
+        {
+            Parallel.For(0, height, y =>
+            {
+                int localSteps = 0;
+                int localRays = 0;
+
+                for (int x = 0; x < width; x++)
+                {
+                    var ray = camera.GetRay(x, y, width, height);
+
+                    var (dist, steps, obj) = Raymarch(scene, ray);
+
+                    localSteps += steps;
+                    localRays++;
+
+                    string color = ShadePixel(scene, ray, dist, obj);
+
+                    canvas[y, x] = '█';
+                    colors[y, x] = color;
+                }
+
+                Interlocked.Add(ref _totalSteps, localSteps);
+                Interlocked.Add(ref _totalRays, localRays);
+            });
+        }
+
+        private (float distance, int steps, int hitObj) Raymarch(Scene scene, Ray ray)
+        {
+            float totalDist = 0f;
+
+            for (int steps = 0; steps < _settings.MaxRaymarchSteps; steps++)
+            {
+                Vector3 pos = ray.GetPoint(totalDist);
+
+                var (dist, objIdx) = scene.GetDistanceAndObject(pos);
+
+                if (dist < MinHitDistance)
+                    return (totalDist, steps, objIdx);
+
+                totalDist += dist;
+
+                if (totalDist > _settings.MaxRenderDistance)
+                    return (_settings.MaxRenderDistance, steps, -1);
+            }
+
+            return (_settings.MaxRenderDistance, _settings.MaxRaymarchSteps, -1);
+        }
+
+        private string ShadePixel(Scene scene, Ray ray, float depth, int hitObj)
+        {
+            if (depth >= _settings.MaxRenderDistance || hitObj < 0)
+                return Shading.GetBackgroundColor(_theme);
+
+            Vector3 hitPoint = ray.GetPoint(depth);
+
+            // Fast normal
+            Vector3 normal = scene.GetNormalForObject(hitPoint, hitObj);
+
+            Vector3 materialColor = scene.GetColorByIndex(hitObj);
+
+            return Shading.ComputeShading(hitPoint, normal, materialColor, depth, _settings, _theme);
+        }
+
+        private static string ConvertToBgColor(string fg)
+        {
+            if (fg is null) return "\x1b[49m";
+
+            // Truecolor: ESC[38;2;r;g;bm -> ESC[48;2;r;g;bm
+            if (fg.Contains("\x1b[38;2;"))
+                return fg.Replace("\x1b[38;2;", "\x1b[48;2;");
+
+            // 256-color: ESC[38;5;Nm -> ESC[48;5;Nm
+            if (fg.Contains("\x1b[38;5;"))
+                return fg.Replace("\x1b[38;5;", "\x1b[48;5;");
+
+            // A bit hacky?... Standard Colors
+            return fg
+                .Replace("\x1b[30m", "\x1b[40m")
+                .Replace("\x1b[31m", "\x1b[41m")
+                .Replace("\x1b[32m", "\x1b[42m")
+                .Replace("\x1b[33m", "\x1b[43m")
+                .Replace("\x1b[34m", "\x1b[44m")
+                .Replace("\x1b[35m", "\x1b[45m")
+                .Replace("\x1b[36m", "\x1b[46m")
+                .Replace("\x1b[37m", "\x1b[47m")
+                .Replace("\x1b[90m", "\x1b[100m")
+                .Replace("\x1b[91m", "\x1b[101m")
+                .Replace("\x1b[92m", "\x1b[102m")
+                .Replace("\x1b[93m", "\x1b[103m")
+                .Replace("\x1b[94m", "\x1b[104m")
+                .Replace("\x1b[95m", "\x1b[105m")
+                .Replace("\x1b[96m", "\x1b[106m")
+                .Replace("\x1b[97m", "\x1b[107m");
+        }
+
+
+        // In half-block mode, every _colors[y,x] must set BOTH foreground and background ANSI
+        private static void SetHalfBlockWithColors(
+            char[,] canvas,
+            string?[,] colors,
+            int y,
+            int x,
+            string topColor,
+            string bottomColor)
+        {
+            if (y < 0 || y >= canvas.GetLength(0) || x < 0 || x >= canvas.GetLength(1))
+                return;
+
+            canvas[y, x] = '▀';
+            colors[y, x] = topColor + ConvertToBgColor(bottomColor);
+        }
+    }
+}
+```
+
+### Render/Scene.cs
+```
+﻿using csRaymarching.Math;
+using System.Numerics;
+using System.Runtime.InteropServices;
+
+namespace csRaymarching.Render
+{
+    public sealed class Scene
+    {
+        public enum ObjectType
+        {
+            Sphere,
+            Box,
+            Plane,
+            Torus,
+            MengerSponge,
+            Cylinder,
+            Capsule
+        }
+
+        public struct SceneObject
+        {
+            public ObjectType Type;
+            public Vector3 Position;
+            public Vector3 Size;
+            public Vector3 Color;
+        }
+
+        private readonly List<SceneObject> _objects = [];
+        private float _time = 0f;
+
+        public void Update(double deltaTime) => _time += (float)deltaTime;
+        public void Clear() => _objects.Clear();
+
+        // Object creation
+        public void AddSphere(Vector3 position, float radius, Vector3 color) =>
+            _objects.Add(new SceneObject { Type = ObjectType.Sphere, Position = position, Size = new Vector3(radius, 0, 0), Color = color });
+
+        public void AddBox(Vector3 position, Vector3 size, Vector3 color) =>
+            _objects.Add(new SceneObject { Type = ObjectType.Box, Position = position, Size = size, Color = color });
+
+        public void AddPlane(Vector3 normal, float distance, Vector3 color) =>
+            _objects.Add(new SceneObject { Type = ObjectType.Plane, Position = normal, Size = new Vector3(distance, 0, 0), Color = color });
+
+        public void AddTorus(Vector3 position, float majorRadius, float minorRadius, Vector3 color) =>
+            _objects.Add(new SceneObject { Type = ObjectType.Torus, Position = position, Size = new Vector3(majorRadius, minorRadius, 0), Color = color });
+
+        public void AddCylinder(Vector3 position, float radius, float height, Vector3 color) =>
+            _objects.Add(new SceneObject { Type = ObjectType.Cylinder, Position = position, Size = new Vector3(radius, height, 0), Color = color });
+
+        public void AddCapsule(Vector3 position, float radius, float halfHeight, Vector3 color) =>
+            _objects.Add(new SceneObject { Type = ObjectType.Capsule, Position = position, Size = new Vector3(radius, halfHeight, 0), Color = color });
+
+        // Fast scene query helpers
+        public Vector3 GetColorByIndex(int idx)
+        {
+            if ((uint)idx >= (uint)_objects.Count) return new Vector3(0.5f);
+            return _objects[idx].Color;
+        }
+
+        // Distance to one specific object
+        public float GetDistanceToObject(Vector3 point, int i)
+        {
+            // Safe for callers that might pass -1
+            if ((uint)i >= (uint)_objects.Count) return 1e6f;
+
+            SceneObject obj = _objects[i];
+
+            return obj.Type switch
+            {
+                ObjectType.Sphere => DistanceFields.Sphere(point - obj.Position, obj.Size.X),
+                ObjectType.Box => DistanceFields.Box(point - obj.Position, obj.Size),
+                ObjectType.Plane => DistanceFields.Plane(point, obj.Position, obj.Size.X),
+                ObjectType.Torus => DistanceFields.Torus(point - obj.Position, obj.Size.X, obj.Size.Y),
+                ObjectType.Cylinder => DistanceFields.Cylinder(point - obj.Position, obj.Size.X, obj.Size.Y),
+                ObjectType.Capsule => DistanceFields.Capsule(
+                    point,
+                    obj.Position + new Vector3(0, -obj.Size.Y, 0),
+                    obj.Position + new Vector3(0, obj.Size.Y, 0),
+                    obj.Size.X),
+                _ => 1e6f
+            };
+        }
+
+        public Vector3 GetNormalForObject(Vector3 point, int objIdx)
+        {
+            const float eps = 0.001f;
+            float d = GetDistanceToObject(point, objIdx);
+
+            return Vector3.Normalize(new Vector3(
+                GetDistanceToObject(point + new Vector3(eps, 0, 0), objIdx) - d,
+                GetDistanceToObject(point + new Vector3(0, eps, 0), objIdx) - d,
+                GetDistanceToObject(point + new Vector3(0, 0, eps), objIdx) - d
+            ));
+        }
+
+        public (float dist, int objIndex) GetDistanceAndObject(Vector3 point)
+        {
+            if (_objects.Count == 0) return (1e6f, -1);
+
+            float minDist = 1e6f;
+            int minIdx = -1;
+
+            var span = CollectionsMarshal.AsSpan(_objects);
+            for (int i = 0; i < span.Length; i++)
+            {
+                ref readonly SceneObject obj = ref span[i];
+
+                float dist = obj.Type switch
+                {
+                    ObjectType.Sphere => DistanceFields.Sphere(point - obj.Position, obj.Size.X),
+                    ObjectType.Box => DistanceFields.Box(point - obj.Position, obj.Size),
+                    ObjectType.Plane => DistanceFields.Plane(point, obj.Position, obj.Size.X),
+                    ObjectType.Torus => DistanceFields.Torus(point - obj.Position, obj.Size.X, obj.Size.Y),
+                    ObjectType.Cylinder => DistanceFields.Cylinder(point - obj.Position, obj.Size.X, obj.Size.Y),
+                    ObjectType.Capsule => DistanceFields.Capsule(
+                        point,
+                        obj.Position + new Vector3(0, -obj.Size.Y, 0),
+                        obj.Position + new Vector3(0, obj.Size.Y, 0),
+                        obj.Size.X),
+                    _ => 1e6f
+                };
+
+                if (dist < minDist)
+                {
+                    minDist = dist;
+                    minIdx = i;
+                }
+            }
+
+            return (minDist, minIdx);
+        }
+
+        // Only for debugging/utilities/EnsureOutside/camera checks
+        public float GetDistance(Vector3 point)
+        {
+            return GetDistanceAndObject(point).dist;
+        }
+
+        public Vector3 GetNormal(Vector3 point)
+        {
+            const float eps = 0.001f;
+            float d = GetDistance(point);
+
+            return Vector3.Normalize(new Vector3(
+                GetDistance(point + new Vector3(eps, 0, 0)) - d,
+                GetDistance(point + new Vector3(0, eps, 0)) - d,
+                GetDistance(point + new Vector3(0, 0, eps)) - d
+            ));
+        }
+
+        // Legacy helper; not needed with hitObj flow, but harmless
+        public Vector3 GetColorAt(Vector3 point)
+        {
+            var (_, idx) = GetDistanceAndObject(point);
+            return GetColorByIndex(idx);
+        }
+
+
+
+        // ============================ < SCENE PRESETS > ============================
+        public void CreateZenScene()
+        {
+            Clear();
+
+            // Sand floor
+            AddPlane(Vector3.UnitY, 2f, new Vector3(0.35f, 0.32f, 0.28f));
+
+            // Rocks (spheres partially in ground)
+            AddSphere(new Vector3(-3, -1.3f, 2), 1f, new Vector3(0.4f, 0.4f, 0.4f));
+            AddSphere(new Vector3(-2.5f, -1.5f, 3), 0.8f, new Vector3(0.45f, 0.45f, 0.45f));
+            AddSphere(new Vector3(3, -1.4f, 4), 1.1f, new Vector3(0.38f, 0.38f, 0.38f));
+
+            // Balanced stones (stacked spheres, smaller on top)
+            AddSphere(new Vector3(0, -0.8f, 3), 1.2f, new Vector3(0.5f, 0.5f, 0.52f));
+            AddSphere(new Vector3(0, 0.6f, 3), 0.8f, new Vector3(0.48f, 0.48f, 0.5f));
+            AddSphere(new Vector3(0, 1.6f, 3), 0.5f, new Vector3(0.46f, 0.46f, 0.48f));
+
+            // Torii gate (traditional Japanese gate)
+            // Top beam
+            AddBox(new Vector3(0, 3.3f, 6), new Vector3(3f, 0.3f, 0.4f), new Vector3(0.6f, 0.2f, 0.2f));
+            // Upper beam
+            AddBox(new Vector3(0, 2.8f, 6), new Vector3(2.5f, 0.25f, 0.35f), new Vector3(0.6f, 0.2f, 0.2f));
+
+            // Decorative torus (abstract art piece)
+            AddTorus(new Vector3(-4, 0.5f, 5), 0.8f, 0.25f, new Vector3(0.3f, 0.5f, 0.3f));
+        }
+
+        public void CreateRingsScene()
+        {
+            Clear();
+
+            // Ground plane
+            AddPlane(Vector3.UnitY, 2f, new Vector3(0.3f, 0.3f, 0.35f));
+
+            // Top sphere
+            AddSphere(new Vector3(0, 8, 0), 1.2f, new Vector3(1f, 0.5f, 0.3f));
+
+            // Orbital rings (tori at different heights)
+            AddTorus(new Vector3(0, 3, 0), 4f, 0.4f, new Vector3(0.3f, 1f, 1f));
+            AddTorus(new Vector3(0, 5, 0), 3.5f, 0.35f, new Vector3(1f, 0.3f, 1f));
+            AddTorus(new Vector3(0, 7, 0), 3f, 0.3f, new Vector3(1f, 1f, 0.3f));
+
+            // Support pillars (boxes at cardinal directions)
+            AddBox(new Vector3(5, 0, 0), new Vector3(0.5f, 3f, 0.5f), new Vector3(0.5f, 0.5f, 0.5f));
+            AddBox(new Vector3(-5, 0, 0), new Vector3(0.5f, 3f, 0.5f), new Vector3(0.5f, 0.5f, 0.5f));
+            AddBox(new Vector3(0, 0, 5), new Vector3(0.5f, 3f, 0.5f), new Vector3(0.5f, 0.5f, 0.5f));
+            AddBox(new Vector3(0, 0, -5), new Vector3(0.5f, 3f, 0.5f), new Vector3(0.5f, 0.5f, 0.5f));
+        }
+
+        public void CreatePlaygroundScene()
+        {
+            Clear();
+
+            // Ground
+            AddPlane(Vector3.UnitY, 2f, new Vector3(0.3f, 0.5f, 0.3f)); // Grass-ish
+
+            // Jungle gym (interconnected boxes)
+            AddBox(new Vector3(-2, 0, 3), new Vector3(0.2f, 2f, 0.2f), new Vector3(1f, 0.3f, 0.3f));
+            AddBox(new Vector3(2, 0, 3), new Vector3(0.2f, 2f, 0.2f), new Vector3(1f, 0.3f, 0.3f));
+            AddBox(new Vector3(0, 1.8f, 3), new Vector3(2.2f, 0.2f, 0.2f), new Vector3(1f, 0.3f, 0.3f));
+
+            // Slide (angled box - won't look perfect but interesting)
+            AddBox(new Vector3(4, 0.5f, 2), new Vector3(1.5f, 0.1f, 0.8f), new Vector3(0.3f, 0.3f, 1f));
+
+            // Balls (multicolored spheres)
+            AddSphere(new Vector3(-3, -0.5f, 1), 0.8f, new Vector3(1f, 0.2f, 0.2f));
+            AddSphere(new Vector3(-1, -0.5f, 0), 0.8f, new Vector3(0.2f, 1f, 0.2f));
+            AddSphere(new Vector3(1, -0.5f, 1), 0.8f, new Vector3(0.2f, 0.2f, 1f));
+            AddSphere(new Vector3(3, -0.5f, 0), 0.8f, new Vector3(1f, 1f, 0.2f));
+
+            // Rings (tori as hoops)
+            AddTorus(new Vector3(0, 1, 6), 1.2f, 0.2f, new Vector3(1f, 0.5f, 0.2f));
+            AddTorus(new Vector3(-3, 1.5f, 5), 0.9f, 0.18f, new Vector3(0.2f, 1f, 0.5f));
+            AddTorus(new Vector3(3, 1.5f, 5), 0.9f, 0.18f, new Vector3(0.5f, 0.2f, 1f));
+        }
+
+        public void CreateDefaultScene()
+        {
+            Clear();
+
+            // Ground plane
+            AddPlane(Vector3.UnitY, 2f, new Vector3(0.3f, 0.3f, 0.35f));
+
+            // Center sphere
+            AddSphere(new Vector3(0, 0, 0), 1f, new Vector3(1f, 0.3f, 0.3f));
+
+            // Side boxes
+            AddBox(new Vector3(-3, 0, 0), new Vector3(0.8f, 0.8f, 0.8f), new Vector3(0.3f, 1f, 0.3f));
+            AddBox(new Vector3(3, 0, 0), new Vector3(0.8f, 0.8f, 0.8f), new Vector3(0.3f, 0.3f, 1f));
+
+            // Torus behind
+            AddTorus(new Vector3(0, 0, 5), 1.5f, 0.4f, new Vector3(1f, 1f, 0.3f));
+        }
+
+        // This one doesn't play very nicely with the fog...
+        public (Vector3 position, float yaw, float pitch) CreateCorridorScene()
+        {
+            Clear();
+
+            // Floor at y = -2
+            AddPlane(Vector3.UnitY, 2f, new Vector3(0.2f, 0.2f, 0.22f));
+
+            // Ceiling at y = 8  (FIX: +8, not -8)
+            AddPlane(-Vector3.UnitY, 8f, new Vector3(0.18f, 0.18f, 0.2f));
+
+            // Walls at x = -5 and x = 5
+            AddPlane(Vector3.UnitX, 5f, new Vector3(0.25f, 0.22f, 0.2f));
+            AddPlane(-Vector3.UnitX, 5f, new Vector3(0.25f, 0.22f, 0.2f));
+
+            // Pillars along corridor
+            for (int i = 0; i < 8; i++)
+            {
+                float z = i * 5f + 2f;
+                float x = (i % 2 == 0) ? -4f : 4f;
+
+                AddCylinder(new Vector3(x, 0, z), 0.5f, 6f, new Vector3(0.4f, 0.35f, 0.3f));
+                AddSphere(new Vector3(x, 6.3f, z), 0.6f, new Vector3(1f, 0.8f, 0.3f));
+            }
+
+            AddTorus(new Vector3(0, 3, 15), 2f, 0.5f, new Vector3(0.3f, 0.8f, 1f));
+            AddSphere(new Vector3(0, 3, 35), 2.5f, new Vector3(1f, 0.3f, 0.3f));
+
+            // Make sure starting position is outside geometry lol
+            return (new Vector3(0, 1.5f, -10f), 0f, -0.05f);
+        }
+
+        public void CreateShowcaseScene()
+        {
+            Clear();
+
+            // Ground
+            AddPlane(Vector3.UnitY, 2f, new Vector3(0.3f, 0.3f, 0.35f));
+
+            // Basic shapes
+            AddSphere(new Vector3(-6, 0, 2), 0.8f, new Vector3(1f, 0.3f, 0.3f));
+            AddBox(new Vector3(-4, 0, 2), new Vector3(0.8f), new Vector3(0.3f, 1f, 0.3f));
+            AddCylinder(new Vector3(-2, 0, 2), 0.6f, 1.5f, new Vector3(0.3f, 0.3f, 1f));
+
+            // Advanced shapes
+            AddCapsule(new Vector3(0, 0.5f, 2), 0.4f, 1f, new Vector3(1f, 1f, 0.3f));
+            AddTorus(new Vector3(2, 1, 2), 0.8f, 0.3f, new Vector3(1f, 0.3f, 1f));
+
+            // Labels (using small spheres)
+            AddSphere(new Vector3(-6, -1.5f, 1.5f), 0.1f, new Vector3(1f, 1f, 1f));
+        }
+    }
+}
+```
+
+### Render/Shading.cs
+```
+﻿using static csRaymarching.Console.ConsoleInteraction;
+using csRaymarching.Core;
+
+using System.Numerics;
+
+namespace csRaymarching.Render
+{
+    public static class Shading
+    {
+        private static readonly Vector3 LightDirection = Vector3.Normalize(new Vector3(0.5f, 1f, -0.3f));
+
+        public static string ComputeShading(
+            Vector3 hitPoint,
+            Vector3 normal,
+            Vector3 materialColor,
+            float distance,
+            Settings settings,
+            ConsoleTheme theme)
+        {
+            // Lambertian diffuse
+            float diffuse = MathF.Max(0, Vector3.Dot(normal, LightDirection));
+
+            const float ambient = 0.25f; // Ambient light intesnity
+
+            float lighting = ambient + diffuse * (1f - ambient);
+
+            if (settings.EnableFog)
+            {
+                float fogFactor = 1f - MathF.Exp(-distance * settings.FogDensity);
+                lighting *= (1f - fogFactor);
+            }
+
+            // Apply material color influence
+            float colorIntensity = (materialColor.X + materialColor.Y + materialColor.Z) / 3f;
+            lighting *= (0.7f + colorIntensity * 0.3f);
+
+            // Map to console colors
+            if (!settings.MapColorsWithGamma)
+            {
+                return MapToColor(lighting, materialColor, theme);
+            }
+            else
+            {
+                return MapToColorWithGamma(lighting, materialColor, theme);
+            }
+        }
+        
+        private static string MapToColor(float intensity, Vector3 materialColor, ConsoleTheme theme)
+        {
+            // Apply lighting intensity to material color
+            Vector3 finalColor = materialColor * intensity;
+
+            // Clamp and convert to 0-255 range
+            int r = (int)MathF.Round(System.Math.Clamp(finalColor.X, 0f, 1f) * 255);
+            int g = (int)MathF.Round(System.Math.Clamp(finalColor.Y, 0f, 1f) * 255);
+            int b = (int)MathF.Round(System.Math.Clamp(finalColor.Z, 0f, 1f) * 255);
+
+            // True color ANSI escape sequence
+            return $"\u001b[38;2;{r};{g};{b}m";
+        }
+
+        private static string MapToColorWithGamma(float intensity, Vector3 materialColor, ConsoleTheme theme)
+        {
+            Vector3 finalColor = materialColor * intensity;
+
+            // Apply gamma correction (sRGB approximation)
+            const float gamma = 0.8f;
+            float r = MathF.Pow(System.Math.Clamp(finalColor.X, 0f, 1f), 1f / gamma);
+            float g = MathF.Pow(System.Math.Clamp(finalColor.Y, 0f, 1f), 1f / gamma);
+            float b = MathF.Pow(System.Math.Clamp(finalColor.Z, 0f, 1f), 1f / gamma);
+
+            return $"\u001b[38;2;{(int)(r * 255)};{(int)(g * 255)};{(int)(b * 255)}m";
+        }
+
+        public static string GetBackgroundColor(ConsoleTheme theme)
+        {
+            return theme switch
+            {
+                ConsoleTheme.Light => AnsiConsoleVT.LightWhite,
+                _ => AnsiConsoleVT.Black
+            };
+        }
+    }
+}
+```

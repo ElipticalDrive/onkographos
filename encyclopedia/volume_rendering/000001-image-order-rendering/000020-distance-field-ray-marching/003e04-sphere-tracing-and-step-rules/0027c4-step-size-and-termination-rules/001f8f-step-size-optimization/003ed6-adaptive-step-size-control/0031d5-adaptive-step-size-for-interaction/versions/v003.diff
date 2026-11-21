@@ -1,0 +1,184 @@
+--- v002.md
++++ v003.md
+@@ -4,109 +4,100 @@
+ 
+ ## Overview
+-Adaptive Step Size for Interaction is a performance optimization technique that temporarily increases the ray marching step size during user interaction (e.g., viewpoint changes) to maintain frame rate, followed by a high-quality render with standard parameters [S1, unofficial]. It differs from static step size reduction by being context-aware, triggering only during active manipulation, and from variance-based adaptation by relying on interaction state rather than local data density [S1, S3, unofficial].
++Adaptive Step Size for Interaction is a performance optimization technique that dynamically increases the ray marching step size during user interaction (e.g., viewpoint changes) to maintain frame rate, then restores smaller step sizes for high-quality final image generation [S1, unofficial]. It differs from continuous adaptive methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by decoupling the step size from local geometric features during the interaction phase, relying instead on a global state switch to trade visual fidelity for speed [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Current ray position $t$, interaction state flag $I$ (boolean, true during manipulation), base step size $\Delta t_{base}$, interaction step size multiplier $M_{int} > 1$.
+-*   **Output:** Next ray position $t_{new}$, updated step size $\Delta t_{new}$.
++*   **Input:** Ray origin $\mathbf{o}$, normalized direction $\mathbf{d}$, scene function $f(\mathbf{p})$ (SDF or volume texture), maximum distance $t_{max}$, maximum iterations $N_{max}$, interaction flag $\phi \in \{0, 1\}$, base step size $\Delta t_{base}$, interaction step size $\Delta t_{int}$, minimum step size $\Delta t_{min}$, maximum step size $\Delta t_{max}$.
++*   **Output:** Intersection status, final distance $t$, accumulated color/opacity.
+ 
+ **Data Structures:**
+-No specific complex data structures are required beyond the standard ray marching state. The method relies on a simple boolean flag and scalar multipliers.
+-
+-**Steps:**
+-1.  **Check Interaction State:** Determine if the user is currently interacting with the viewport (e.g., rotating, panning, zooming). Let this be $I$.
+-2.  **Select Step Size:**
+-    *   If $I$ is true, set $\Delta t_{new} = \Delta t_{base} \times M_{int}$.
+-    *   If $I$ is false, set $\Delta t_{new} = \Delta t_{base}$.
+-3.  **Clamp:** Ensure $\Delta t_{new}$ is within global bounds $[\Delta t_{min}, \Delta t_{max}]$ [S1, unofficial].
+-4.  **Advance Ray:** $t_{new} = t_{old} + \Delta t_{new}$.
+-5.  **Final Render:** Upon completion of interaction, reset $M_{int}$ to 1 (or a value close to 1) for the final high-quality image generation [S1, unofficial].
++*   `scene_func(p)`: Evaluates the density or SDF at position $\mathbf{p}$.
++*   `is_hit(val, epsilon)`: Returns true if surface is intersected.
++*   `is_early_exit(val, t)`: Returns true if accumulated opacity is sufficient.
+ 
+ **Parameters:**
+-*   $\Delta t_{base}$: The standard step size used for final rendering. Typical value: Not given in the sources.
+-*   $M_{int}$: The multiplier applied during interaction. Typical value: Not given in the sources, but must be $>1$.
+-*   $\Delta t_{min}, \Delta t_{max}$: Global bounds. Typical values: $10^{-6}, 10$ [S1, unofficial].
++*   $\Delta t_{base}$: Standard step size for high-quality rendering. Typical value depends on volume resolution (e.g., 1-2 voxels).
++*   $\Delta t_{int}$: Step size during interaction. Typically $2\times$ to $4\times$ $\Delta t_{base}$ [S1, unofficial].
++*   $\phi$: Boolean flag. True during mouse drag/view rotation; False during idle/render.
+ 
+-**Pitfalls:**
+-*   **Feature Skipping:** If the step size becomes too large, significant features (e.g., "big mountains" in heightmap contexts) may be completely skipped, leading to visual artifacts [S3, unofficial].
+-*   **Transparency/Shadow Loss:** While increasing step size speeds up rendering, it can cause volumes to appear more transparent and lose shadow detail if not managed correctly, especially when compared to increasing pixel samples [S2].
+-*   **Accuracy Trade-off:** Reducing the step rate (increasing step size) speeds up rendering but reproduces volumes less accurately [S2].
++**Numbered Steps:**
++1.  Initialize $t = 0.0$, accumulated opacity $\alpha_{acc} = 0.0$, and color $C_{acc} = (0,0,0,0)$.
++2.  Loop for $i$ from $0$ to $N_{max}-1$:
++    a. Check termination: If $t > t_{max}$, return miss.
++    b. Compute position: $\mathbf{p} = \mathbf{o} + t\mathbf{d}$.
++    c. Evaluate scene: $val = f(\mathbf{p})$.
++    d. Check hit: If `is_hit(val, epsilon)`, return hit at $t$.
++    e. Check early exit: If `is_early_exit(val, t)`, return accumulated color.
++    f. Compute step size $\Delta t$:
++       i. If $\phi$ is true (interaction mode), set $\Delta t = \Delta t_{int}$.
++       ii. If $\phi$ is false (render mode), set $\Delta t = \Delta t_{base}$.
++    g. Clamp step size: $\Delta t = \max(\Delta t, \Delta t_{min})$.
++    h. Advance ray: $t \leftarrow t + \Delta t$.
++    i. Accumulate contribution (if volume rendering): Update $\alpha_{acc}$ and $C_{acc}$ using front-to-back compositing with the sample at $\mathbf{p}$ and step $\Delta t$.
++3.  Return miss.
+ 
+ **Pseudocode:**
+ ```python
+-def ray_march_with_interaction(ray_origin, ray_direction, volume_data, is_interacting, base_step_size, interaction_multiplier):
+-    """
+-    Performs ray marching with adaptive step size based on interaction state.
++def adaptive_interaction_march(ray_origin, ray_direction, scene_func, 
++                               max_dist, max_steps, epsilon, 
++                               is_interacting, base_step, interact_step, 
++                               min_step, max_step):
++    t = 0.0
++    alpha_acc = 0.0
++    color_acc = (0.0, 0.0, 0.0, 0.0)
+     
+-    Args:
+-        ray_origin: vec3
+-        ray_direction: vec3
+-        volume_data: Volume structure providing sample() method
+-        is_interacting: bool, True if user is currently manipulating the view
+-        base_step_size: float, standard step size for final render
+-        interaction_multiplier: float, factor > 1 to increase step size during interaction
++    # Determine step size based on interaction state
++    if is_interacting:
++        step_size = interact_step
++    else:
++        step_size = base_step
+         
+-    Returns:
+-        color: vec3, the accumulated color
+-    """
+-    t = 0.0
+-    accumulated_color = vec3(0.0)
+-    accumulated_opacity = 0.0
+-    
+-    # Global bounds for step size
+-    dt_min = 1e-6
+-    dt_max = 10.0
+-    
+-    # Determine current step size based on interaction state
+-    if is_interacting:
+-        dt = base_step_size * interaction_multiplier
+-    else:
+-        dt = base_step_size
++    # Clamp step size to prevent skipping features or infinite loops
++    step_size = max(step_size, min_step)
++    step_size = min(step_size, max_step)
++
++    for i in range(max_steps):
++        if t > max_dist:
++            return False, t, color_acc
+         
+-    # Clamp step size
+-    dt = max(dt_min, min(dt_max, dt))
+-    
+-    while t < 1.0 and accumulated_opacity < 0.99: # 1.0 is max distance, 0.99 is opacity threshold
+-        # Sample volume at current position
+-        density = volume_data.sample(ray_origin + ray_direction * t)
++        p = ray_origin + ray_direction * t
++        val = scene_func(p)
+         
+-        # Standard front-to-back compositing
+-        color = volume_data.get_color(density)
+-        alpha = volume_data.get_alpha(density)
++        # Termination: Hit
++        if is_hit(val, epsilon):
++            return True, t, color_acc
+         
+-        # Contribution
+-        contribution = alpha * (1.0 - accumulated_opacity)
+-        accumulated_color += color * contribution
+-        accumulated_opacity += contribution
++        # Termination: Early Exit (Volume specific)
++        if is_early_exit(val, t, alpha_acc):
++            return False, t, color_acc
++            
++        # Volume Accumulation (if applicable)
++        density, color = evaluate_volume_sample(val, p)
++        alpha = 1.0 - exp(-density * step_size)
++        color_acc = color_acc + color * alpha * (1.0 - alpha_acc)
++        alpha_acc = alpha_acc + alpha * (1.0 - alpha_acc)
+         
+-        # Advance ray
+-        t += dt
++        # Advance
++        t += step_size
+         
+-    return accumulated_color
++    return False, t, color_acc
+ ```
+ 
+-## Subtopics
+-
+-### Adaptive Step Size Ray Marching
+-Uses local data metrics (like density gradients) to adjust step size continuously, rather than relying on interaction state. Choose when fine detail preservation is needed regardless of user input. [Link](2312-adaptive-step-size-ray-marching.md)
+-
+-### Dynamic Sampling Step Adjustment
+-Adjusts step size based on dynamic scene changes or temporal coherence. Choose for animated scenes where interaction state is not the primary driver of performance needs. [Link](2442-dynamic-sampling-step-adjustment.md)
+-
+-### Variance-based Step Size Adaptation
+-Uses statistical variance of the volume data to determine step size. Choose when the volume has high-frequency noise or complex structures that require denser sampling in specific regions. [Link](13161-variance-based-step-size-adaptation.md)
++**Edge Cases and Pitfalls:**
++*   **Skipping Features:** If $\Delta t_{int}$ is too large, significant geometric features (e.g., "big mountains" in heightmaps) may be completely skipped, leading to holes or artifacts [S3, unofficial].
++*   **Shadow Detail Loss:** In volume rendering, increasing step size (or "Volume step rate") can cause loss of shadow detail and make volumes appear more transparent compared to increasing pixel samples [S2].
++*   **State Synchronization:** The transition between interaction and render modes must be handled carefully to avoid visual popping. The renderer should switch back to $\Delta t_{base}$ immediately after interaction ends [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of samples per ray by a factor of $M_{int}$ during interaction, leading to a proportional decrease in rendering time.
+-*   **Memory Complexity:** No additional memory overhead compared to standard ray marching.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales linearly with the interaction multiplier. Higher multipliers yield faster interaction but lower quality.
+-*   **Strengths:** Provides fluent interaction without requiring complex data structures or pre-computation. Simple to implement.
+-*   **Limitations:** Can introduce artifacts (skipped features, transparency loss) if the multiplier is too high. Not suitable for final quality rendering.
+-*   **When to Use:** During real-time viewport manipulation (rotation, zoom, pan).
+-*   **When Not to Use:** For final image generation or when high fidelity is required during interaction.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of steps. During interaction, $N$ is reduced by a factor of $\frac{\Delta t_{base}}{\Delta t_{int}}$.
++*   **Memory Complexity:** $O(1)$ auxiliary memory (excluding the volume texture/SDF storage).
++*   **Performance:** Significantly improves frame rate during viewport navigation by reducing sample count per ray [S1, unofficial].
++*   **Strengths:** Simple to implement; requires no additional data structures; effective for maintaining interactivity in real-time applications [S1, unofficial].
++*   **Limitations:** Visual quality degrades during interaction; large steps can cause aliasing or missed geometry [S3, unofficial]; not suitable for final image production [S1, unofficial].
++*   **When to use:** Real-time volume rendering where user interaction (rotation, zoom) is frequent.
++*   **When not to use:** Final offline rendering or when high geometric accuracy is required at all times.
+ 
+ ## Background
+-The method was described by Hadwiger and Rezk Salama in 2004 [S1, unofficial]. It is a common trick in volume rendering to balance interactivity and quality, where increasing step size or reducing slices reduces computational effort at the cost of potential artifacts [S1, unofficial]. It is often used in conjunction with early ray termination and empty space skipping to further optimize performance [S1, unofficial].
++The technique was described by Hadwiger and Rezk Salama in 2004 [S1, unofficial]. It is a common trick in direct volume rendering to balance the trade-off between computational effort and visual artifacts during interactive exploration [S1, unofficial]. The concept of discarding information as distance increases or taking bigger steps to reduce computation is also discussed in the context of realtime voxel landscape engines [S3, unofficial].
+ 
+ ## Sources

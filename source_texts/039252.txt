@@ -1,0 +1,3062 @@
+Occupancy-Based Dual Contouring
+arXiv:2409.13418v1 [cs.CV] 20 Sep 2024
+JISUNG HWANG, KAIST, South Korea
+MINHYUK SUNG, KAIST, South Korea
+Fig. 1. Comparisons among our Occupancy-based Dual Contouring (ODC) and various prior mesh extraction methods, including Marching Cubes
+(MC) [Lewiner et al. 2003], Intersection-free Contouring (IC) [Ju and Udeshi 2006], Manifold Dual Contouring (MDC) [Schaefer et al. 2007], Lempitsky’s
+smoothing method (LMC) [Lempitsky 2010], Neural Dual Contouring (NDC) [Chen et al. 2022], Contouring DIF (CDIF) [Manson et al. 2011], and Multiresolution
+IsoSurface Extraction (MISE) [Mescheder et al. 2019]. The meshes are extracted from the output of SALAD [Koo et al. 2023], 3DShape2VecSet [Zhang et al.
+2023b], and Fast winding number [Barill et al. 2018] on Myles et al.’s dataset [Myles et al. 2014] for each row, respectively. Notably, as shown in the first row,
+we have perceived the output of SALAD as an aliased shape (leftmost), as provided by the authors. However, its genuine shape, as revealed by our method,
+ODC, looks like the rightmost one.
+We introduce a dual contouring method that provides state-of-the-art performance for occupancy functions while achieving computation times of a few
+seconds. Our method is learning-free and carefully designed to maximize
+the use of GPU parallelization. The recent surge of implicit neural representations has led to significant attention to occupancy fields, resulting in
+a wide range of 3D reconstruction and generation methods based on them.
+However, the outputs of such methods have been underestimated due to
+the bottleneck in converting the resulting occupancy function to a mesh.
+Marching Cubes tends to produce staircase-like artifacts, and most subsequent works focusing on exploiting signed distance functions as input also
+yield suboptimal results for occupancy functions. Based on Manifold Dual
+Contouring (MDC), we propose Occupancy-Based Dual Contouring (ODC),
+which mainly modifies the computation of grid edge points (1D points) and
+grid cell points (3D points) to not use any distance information. We introduce
+auxiliary 2D points that are used to compute local surface normals along
+with the 1D points, helping identify 3D points via the quadric error function.
+To search the 1D, 2D, and 3D points, we develop fast algorithms that are
+parallelizable across all grid edges, faces, and cells. Our experiments with
+several 3D neural generative models and a 3D mesh dataset demonstrate
+that our method achieves the best fidelity compared to prior works. The
+code is available at https://github.com/KAIST-Visual-AI-Group/ODC.
+CCS Concepts: • Computing methodologies → Mesh models; Mesh
+geometry models.
+Additional Key Words and Phrases: Marching Cubes, Dual Contouring, Mesh,
+Implicit Function, Isosurface
+Authors’ Contact Information: Jisung Hwang, KAIST, Daejeon, South Korea, 4011hjs@
+kaist.ac.kr; Minhyuk Sung, KAIST, Daejeon, South Korea, mhsung@kaist.ac.kr.
+1
+INTRODUCTION
+Meshes are undoubtedly the most fundamental and common form
+of 3D content representation in computer graphics. Amid the recent
+surge of neural techniques for 3D reconstruction and generation
+using implicit representations, converting an implicit function to a
+3D mesh has become increasingly important, enabling the use of
+outputs in a wide range of applications: editing and manipulation,
+texturing, applying material properties, physical simulation, 3D
+printing, and more.
+In the realm of neural implicit representations, occupancy functions have particularly risen in prominence, as evidenced by the
+vast array of previous works [Boulch and Marlet 2022; Chen and
+Zhang 2019; Erkoç et al. 2023; Feng et al. 2022; Genova et al. 2020;
+Hertz et al. 2022; Ibing et al. 2021; Jia and Kyan 2020; Koo et al. 2023;
+Lamb et al. 2022; Lin et al. 2022; Lionar et al. 2021; Liu et al. 2023;
+Mescheder et al. 2019; Peng et al. 2020; Poursaeed et al. 2020; Shue
+et al. 2023; Tang et al. 2021; Tian et al. 2024; Wang et al. 2024; Zhang
+et al. 2022, 2023b; Zhao et al. 2024]. The attention to occupancy functions has also simultaneously highlighted the challenges associated
+with converting these functions into a mesh. For example, when
+applying Marching Cubes [Lorensen and Cline 1987], the most fundamental yet standard technique for implicit-to-mesh conversion,
+to an occupancy function that outputs binary inside/outside labels,
+it inevitably produces staircase-like artifacts, as shown in the first
+column of Figure 1, since the mesh vertex on the surface-crossing
+grid edge is always chosen as the midpoint. This is also generally
+2 •
+Jisung Hwang and Minhyuk Sung
+observed even when the occupancy is represented as a continuous
+value as the quantity still does not represent distance.
+The lack of fidelity in the outputs from Marching Cubes is a
+recognized issue not only for occupancy functions but also for
+signed distance functions. This has prompted extensive research
+over decades, although most studies have focused on the case when
+the given function is a signed distance function. Notably, Fuhrmann et
+al. [2015] proposed to replace the linear interpolation when finding
+the surface-intersecting point on a grid edge, referred to as 1D points,
+with a cubic interpolation using the distance information. Extended
+Marching Cubes [Kobbelt et al. 2001], Dual Contouring [Ju et al.
+2002], and Manifold Dual Contouring [Schaefer et al. 2007] are also
+milestone works proposing to leverage the gradient of the signed
+distance function as a surface normal and identifying sharp corner
+points within a grid cell, termed 3D point, through the Quadric Error
+Function (QEF) with an assumption of local flatness. Manson and
+Schaefer [2010] and Bhattacharya and Wenger [2013] have further
+extended this approach by incorporating distance values into the
+QEF to improve vertex placement. While these advancements have
+been successful in replacing the original Marching Cubes and improving fidelity, they produce suboptimal results with occupancy
+functions even when they output continuous values in the [0, 1]
+range since the gradient, which is orthogonal to an infinitesimal
+region, may not properly represent the local surface area.
+To generate high-fidelity 3D meshes from occupancy functions,
+we propose a novel method called Occupancy-Based Dual Contouring (ODC). We particularly focus on (but are not limited to)
+cases where the occupancy function is provided as a neural network
+and aim to reveal the true shape encoded in the network-based
+function. Even when a neural occupancy function encodes the fine
+details of the geometry in continuous 3D space, previous mesh conversion methods have failed to precisely render these details into a
+mesh, resulting in the user perceiving the artifact-laden mesh as the
+final output (as shown in 1st-7th columns in Figure 1). Our novel
+technique reveals the true outputs of such methods, as shown in
+the last column of Figure 1, demonstrating its significant impact on
+research in 3D neural implicit representations.
+Building upon the Manifold Dual Contouring [Schaefer et al.
+2007], which captures sharp features using the QEF and surface
+normal information (without directly using distance), our main goal
+is to replace the following components with iterative searches: 1)
+linear interpolation in the 1D point search and 2) the use of the
+gradient of the signed distance as a surface normal in 3D point
+identification. Specifically, to compute the surface normal without
+using the gradient of the signed distance, we first define 2D points
+on grid faces that are assumed to be on the same local flat surface
+as neighboring 1D points, and then compute the surface normal at
+a 1D point using two adjacent 2D points which are assumed to be
+on the same plane. Both the 1D and 2D points are identified with
+binary or a combination of linear and binary searches, thus fully
+exploiting the occupancy information in continuous space, not only
+at the grid points.
+Our technical contributions can be summarized as follows:
+(1) We propose a novel 2D point search algorithm (Section 5.2)
+that guarantees finding points on the same local plane as the
+neighboring 1D points under the local flatness assumption.
+(2) We designed the 1D, 2D, and 3D point calculations (Section 5)
+to fully exploit GPU parallelism, enabling parallel processing
+for all grid edges, faces, and cells simultaneously. This allows
+computation times to remain within five seconds for resolutions
+as high as 1283 .
+(3) We additionally modify the final polygonization step (Section 5.4)
+to significantly reduce self-intersecting mesh faces in the outputs
+by incorporating the quad splitting technique of Intersectionfree Contouring [Ju and Udeshi 2006].
+While most prior methods can only use samples of an implicit
+function available on a grid [Chen et al. 2022; Chen and Zhang
+2021; Lempitsky 2010; Lewiner et al. 2003; Lorensen and Cline 1987;
+Manson et al. 2011; Nielson 2004] or grid samples augmented with
+additional data [Ju et al. 2002; Ju and Udeshi 2006; Kobbelt et al.
+2001; Schaefer et al. 2007], our method can fully exploit the underlying implicit function defined in continuous 3D space, resulting in high-fidelity meshes. Although Multiresolution Isosurface
+Extraction (MISE) [Mescheder et al. 2019] is a notable exception,
+its gradient-descent-based vertex pulling approach often fails to
+faithfully capture the entire surface, frequently breaking manifoldness and resulting in numerous mesh face intersections. Our ODC
+produces significantly higher-fidelity outputs while guaranteeing
+manifoldness and greatly reducing intersecting faces.
+In our experiments, we present results with neural implicit representations generated from SALAD [Koo et al. 2023], 3DShape2VecSet
+[Zhang et al. 2023b], Michelangelo [Zhao et al. 2024], and IMNET [Chen and Zhang 2019]. To assess the quality of the output
+meshes, we additionally use 3D meshes from Myles’ dataset, determining the occupancy using winding number computation [Barill
+et al. 2018]. We compare our method with occupancy function polygonization methods [Lempitsky 2010; Manson et al. 2011; Mescheder
+et al. 2019], recent learning-based methods [Chen et al. 2022; Maruani et al. 2024], as well as the base methods of ours [Ju and Udeshi
+2006; Lewiner et al. 2003; Schaefer et al. 2007], and demonstrate the
+superior performance of our method.
+2
+RELATED WORK
+Mesh construction from implicit functions has been researched
+for over three decades. De Arjuo et al. [2015] have summarized
+previous work in their survey, categorizing the methodologies into
+three classes: spatial decomposition, surface tracking [Akkouche
+and Galin 2001; Hilton et al. 1997, 1996; Karkanis and Stewart 2001;
+McCormick and Fisher 2002], and inflation and shrinkwrap [Bottino
+et al. 1996; Hormann et al. 2002; Kobbelt et al. 1999; Sellán et al. 2023;
+Stander and Hart 1995; Van Overveld and Wyvill 2004]. Among
+these, the spatial decomposition approach, represented by Marching
+Cubes [Lorensen and Cline 1987], has been predominant due to
+its simplicity, robustness, parameter-free nature, and compatibility
+with parallel GPU computation. Since its introduction, numerous
+improvements have addressed the limitations of Marching Cubes,
+such as resolving topology ambiguities [Chernyaev 1995; Custodio
+et al. 2013; Lewiner et al. 2003; Lopes and Brodlie 2003; Natarajan
+1994; Nielson 2003; Nielson and Hamann 1991], enabling adaptive
+resolution [Bloomenthal 1988; Hormann et al. 2002; Müller and Stark
+1993; Shekhar et al. 1996; Westermann et al. 1999], and supporting
+Occupancy-Based Dual Contouring
+2.1
+Fig. 2. Sharp feature preservation of occupancy-based models (from left
+to right): Smoothing method (LMC) [Lempitsky 2010], Contouring DIF
+(CDIF) [Manson et al. 2011], MISE [Mescheder et al. 2019], and ODC (ours).
+ODC effectively captures sharp features.
+the use of tetrahedral instead of cubic grids [Doi and Koide 1991;
+Muller and Wehle 1997; Nielson 2008; Zhou et al. 1997].
+A key challenge of Marching Cubes has been its limited fidelity,
+which has spurred extensive research. Fuhrmann et al. [2015] suggested replacing linear interpolation for surface point detection with
+cubic interpolation. Extended Marching Cubes [Kobbelt et al. 2001]
+and Dual Contouring [Ju et al. 2002] were pivotal works that first
+proposed placing mesh vertices on sharp corners using a quadric
+error function, leveraging the gradient of the signed distance function as the surface normal. Cubical Marching Squares [Ho et al.
+2005] resolved topology ambiguity problem with sharp features.
+Manifold Dual Contouring [Schaefer et al. 2007] further refined
+Dual Contouring, ensuring manifoldness while placing multiple
+mesh vertices in each cell based on the idea of Dual Marching
+Cubes [Nielson 2004]. Intersection-free Contouring [Ju and Udeshi
+2006] is another direction that ensures the output mesh is free of
+intersections by modifying the final polygonization step. Manson
+and Schaefer [2010] and Bhattacharya and Wenger [2013] went even
+further by adapting the quadric error function to include distance
+information. The aforementioned methods assume that the implicit
+function is provided as a signed distance function, making their
+application to occupancy functions either infeasible or non-trivial.
+Building on Manifold Dual Contouring, which uses the gradient as
+the surface normal without directly employing distance information,
+we propose a novel method that produces high-fidelity meshes with
+sharp features, eliminating the need for gradients.
+Recent work has also explored mesh construction with sharp
+features from point clouds [Dey et al. 2012; Salman et al. 2010; Wang
+et al. 2013] or unsigned distance functions as inputs [Guillard et al.
+2022; Hou et al. 2023; Zhang et al. 2023a; Zhou et al. 2022]. However,
+our objective differs as we focus on using an occupancy function,
+a prevalent format in neural implicit representations [Boulch and
+Marlet 2022; Chen and Zhang 2019; Erkoç et al. 2023; Feng et al.
+2022; Genova et al. 2020; Hertz et al. 2022; Ibing et al. 2021; Jia and
+Kyan 2020; Koo et al. 2023; Lamb et al. 2022; Lin et al. 2022; Lionar
+et al. 2021; Liu et al. 2023; Mescheder et al. 2019; Peng et al. 2020;
+Poursaeed et al. 2020; Shue et al. 2023; Tang et al. 2021; Tian et al.
+2024; Wang et al. 2024; Zhang et al. 2022, 2023b; Zhao et al. 2024].
+Among the vast array of literature, in the following, we specifically focus on surveying prior works that take an occupancy function as an input for mesh construction. Additionally, we review
+recent advancements in neural-network-based approaches.
+• 3
+Occupancy Function Polygonization
+While it is feasible to apply Marching Cubes to an occupancy function, despite the lack of linearity due to discretization, the typical
+limitation is the production of staircase-like outputs, as illustrated
+in Figure 8. A straightforward solution to these visual artifacts is
+to smooth the occupancy values [Chica et al. 2008; Desbrun et al.
+1999; Gibson 1998; Lempitsky 2010; Ohtake et al. 2001; Taubin 1995],
+converting them into continuous quantities. However, this approach
+results in deviating from the original function and thus losing fidelity. Discrete Indicator Function (DIF) and Contouring DIF [Evrard
+et al. 2018; Incahuanaco and Paiva 2023; Manson et al. 2011] represent another attempt to relax the discretized occupancy by depicting
+it as the fraction of the cell contained by the object. However, these
+quantities are not distance values and thus cannot properly provide
+surface-intersecting points and surface normals through linear interpolation and gradients. Furthermore, the methods are limited to
+using the quantities in discrete samples in the 3D space (the grid
+points). Multiresolution Isosurface Extraction (MISE) [Mescheder
+et al. 2019] is a notable technique that fully utilizes the given occupancy function throughout the continuous space while refining
+initial mesh vertices toward the surface via gradient descent. However, it often fails to capture all sharp features, as shown in Figure 2.
+We introduce a novel method that also fully exploits the given occupancy information in the continuous space but more effectively
+captures sharp features through a spatial decomposition approach.
+2.2
+Neural Mesh Construction
+Recent research has explored mesh construction using neural approaches. MeshSDF [Remelli et al. 2020], DMTet [Shen et al. 2021],
+and FlexiCubes [Shen et al. 2023] introduce differentiable methods that optimize an implicit function to achieve the best mesh
+with respect to a given objective function. However, without optimization, their mesh construction methods are identical to existing
+techniques: Marching Cubes [Lorensen and Cline 1987], Marching
+Tetrahedra [Doi and Koide 1991], and Dual Marching Cubes [Nielson 2004]. Our goal is to improve the mesh construction itself given
+an occupancy function. VoroMesh [Maruani et al. 2023] and PoNQ
+[Maruani et al. 2024] also propose novel methods leveraging inside/outside regions for mesh construction, either by optimizing
+auxiliary points or by learning them using a neural network. However, these methods are based on signed distance functions and
+perform poorly when applied to an occupancy function, as illustrated in Figure 6. Neural Marching Cubes [Chen and Zhang 2021]
+and Neural Dual Contouring [Chen et al. 2022] are notable for
+applying Marching Cubes [Lorensen and Cline 1987] and Dual Contouring [Ju et al. 2002] with additional information predicted by a
+neural network, although they also demonstrate limited generalizability to unseen data. We propose a neural-network-free method
+for polygonizing occupancy functions that can be directly applied
+to any occupancy function without the need for training.
+3
+PROBLEM DEFINITION AND NOTATIONS
+Given an implicit occupancy function 𝜙 : R3 → {0, 1} representing a
+shape S as the boundary of the two discrete labels (0 for outside and
+1 for inside), we aim to extract a mesh describing the surface using
+4
+•
+Jisung Hwang and Minhyuk Sung
+a 3D grid uniformly dividing a 3D space P ⊂ R3 . Let C denote the
+set of grid cells and V and E indicate the sets of grid vertices and
+edges, respectively. For each cell 𝑐 ∈ C, V𝑐 ⊂ V and E𝑐 ⊂ E denote
+the sets of associated 8 grid vertices and 12 grid edges, respectively.
+p𝑣 ∈ P denotes the 3D coordinates of a grid vertex 𝑣 ∈ V.
+The 3D space P is partitioned into two regions: inside P in and
+outside P out . P in includes points p where 𝜙 (p) = 1, and P out
+consists of points p where 𝜙 (p) = 0. The sets of grid edges and cells
+passing through the surface S are denoted as E S = {𝑒 = (𝑣 in 𝑣 out ) ∈
+E : p𝑣 in ∈ P in, p𝑣 out ∈ P out } and C S = {𝑐 ∈ C : E𝑐 ∩ E S ≠ ∅},
+respectively.
+4
+BACKGROUND: MANIFOLD DUAL CONTOURING
+Manifold Dual Contouring (MDC) [Schaefer et al. 2007] is a seminal advancement over Marching Cubes [Lorensen and Cline 1987],
+specifically designed to capture sharp features while ensuring manifoldness. However, MDC is not suitable for binary occupancy functions, as it requires the implicit function to be a signed distance
+function and utilizes its gradient as surface normal. Our goal is to
+develop a novel method that adapts Manifold Dual Contouring to
+work with occupancy function inputs, while fully leveraging the
+advantages of a neural implicit function that enables the parallel
+evaluation of thousands of points in several milliseconds.
+To provide background, we briefly describe the three main steps of
+MDC below: 1) Sampling surface points along grid edges, referred
+to as 1D points in this paper; 2) Identifying sharp corner points
+within each cell, termed 3D points; and 3) Connecting these sharp
+corner points to form the final mesh. Here, we assume that the input
+implicit function, 𝜓 : R3 → R, is a signed distance function, with
+𝜓 (p) < 0 indicating inside and 𝜓 (p) > 0 denoting outside. The
+surface S is thus represented as the zero-level set.
+1D Point Identification. A 1D point p𝑒 , representing a point on
+the surface S along a zero-crossing grid edge 𝑒 = (𝑣 in 𝑣 out ) ∈ E S ,
+is determined exactly as in the original Marching Cubes [Lorensen
+and Cline 1987], while assuming the linearity of the given signed
+distance function 𝜓 along the edge 𝑒:
+p𝑒 =
+𝜓 (p𝑣 in ) p𝑣 out − 𝜓 (p𝑣 out ) p𝑣 in
+.
+𝜓 (p𝑣 in ) − 𝜓 (p𝑣 out )
+(1)
+3D Point Identification. Unlike Marching Cubes, Manifold Dual
+Contouring uses 1D points not as vertices of the final mesh, but as
+auxiliary points to identify sharp corners within cells, referred to as
+3D points. These 3D points then serve as the vertices of the final
+mesh.
+To detect the 3D points {p𝑐,𝑖 }𝑖 within a zero-crossing cell 𝑐, the
+1D points belonging to the cell are first partitioned based on their
+adjacency, following a grouping pattern used in Dual Marching
+Cubes [Nielson 2004] to form faces (see Figure A1 in the appendix).
+A 3D point is then defined for each partition using the Quadric Error
+S denote the zero-crossing edges correspondFunction (QEF). Let E𝑐,𝑖
+ing to the 1D points in the 𝑖-th partition of the grid cell 𝑐. Assuming
+local flatness of the surface S, the 3D point for the 𝑖-th partition,
+representing a sharp corner point, is determined as the intersection
+Fig. 3. 2D illustration comparing local planes derived from gradients and
+2D points. The QEF identifies a point where local flat planes (thick dashed
+lines) passing through the 1D points (gray dots with green boundaries) meet.
+On the left, gradients are used as normals for the local flat planes. Although
+these planes fit the surface of infinitesimal regions, they do not represent
+larger surface areas within voxels, causing their intersections to fall outside
+the actual surface. In contrast, the right side shows local planes formed
+using 2D points (green dots with black boundaries). Since 2D points are
+determined by searching within a grid face, the resulting local planes align
+more closely with the actual surface inside the voxel, leading to improved
+QEF results. Refer to Section 5.2 for more details on the 2D point search.
+of flat planes defined at each 1D point in the partition:
+∑︁
+p𝑐,𝑖 = argmin
+[∇𝜓 (p𝑒 ) · (p − p𝑒 )] 2 .
+p
+(2)
+𝑆
+𝑒 ∈ E𝑐,𝑖
+Note that the gradient of the signed distance function, ∇𝜓 (p𝑒 ), is
+used as the surface normal.
+Polygonization. The 3D points are finally connected to each other
+to form the output mesh. Consider a zero-crossing grid edge 𝑒 ∈ E S
+and its four adjacent grid cells {𝑐𝑘 }𝑘=1,...,4 . When identifying the
+3D point p𝑐𝑘 ,𝑖𝑘 for each cell 𝑐𝑘 such that 𝑒 ∈ E𝑐S ,𝑖 , the output mesh
+𝑘 𝑘
+is formed by splitting a quadrangle, defined by the set of {p𝑐𝑘 ,𝑖𝑘 }𝑘 ,
+into two triangles.
+Challenges of MDC on Occupancy Fields. Manifold Dual Contouring (MDC) is not applicable to an occupancy field due to its assumptions of linearity and the use of gradients as surface normals, which
+are incompatible with an occupancy function that outputs discrete
+values. Even when the occupancy field is modeled as a continuous
+function outputting values in the range of [0, 1], typical for neural
+implicit functions, MDC still produces suboptimal results as illustrated on the first and second rows in Figure 1. This is because the
+linearity of the occupancy function cannot be assumed, and the QEF
+output from the planes, which are represented by the gradient of the
+function, can be misaligned with the surface, as shown in Figure 3.
+5
+OCCUPANCY-BASED DUAL CONTOURING
+Based on the Manifold Dual Contouring framework outlined above,
+we introduce our novel method for extracting a boundary surface S
+from an occupancy function 𝜙 : R3 → {0, 1}. The core idea of our
+method is to locate 1D and 3D points without assuming linearity in
+the function or relying on gradients as surface normals. Instead, we
+fully leverage the capabilities of neural implicit functions, enabling
+GPU parallelization to evaluate the function at thousands of query
+points within several milliseconds.
+Below, we first describe how we modify the 1D point search
+(Section 5.1) using a binary search. For the 3D point identification,
+which involves defining a local flat plane at each 1D point, we
+identify additional auxiliary points, termed 2D points, assumed to be
+on the same local plane. We begin by introducing our novel approach
+Occupancy-Based Dual Contouring
+• 5
+Fig. 4. Overview of Occupancy-Based Dual Contouring (ODC). Dots with blue, red, and green boundaries represent grid vertices that are outside, inside, and
+1D points, respectively. Dots with black boundaries, colored green and orange, represent 2D points and 3D points, respectively. Refer to Section 5 for details.
+to the 2D point search (Section 5.2), followed by an explanation
+of how the 3D points are determined based on these 2D points
+(Section 5.3). Additionally, we explain how we improve the final
+polygonization to ensure the resulting mesh is intersection-free in
+practice (Section 5.4).
+5.1
+1D Point Search
+Without the linearity assumption, we locate 1D points using a binary
+search. This root-finding approach, previously used by Manson and
+Schaefer [2010] to improve triangulation in their method, is adapted
+here to identify 1D points. For a grid edge 𝑒 = (𝑣 in 𝑣 out ) intersecting
+the surface S, with p𝑣 in ∈ P in and p𝑣 out ∈ P out , starting with the
+entire edge as the search space, we iteratively halve the search space,
+ensuring at each step that endpoints retain distinct inside/outside
+labels. This process continues until the search space is reduced
+below a set threshold. In our experiments at a resolution of 1283 ,
+the number of iterations is set to 15.
+Note that with the aid of a GPU, the binary search can be performed simultaneously across all surface-intersecting edges at the
+same time. For example, in our experiments with a resolution of
+1283 (Section 6.3), the number of surface-intersecting edges is approximately 16𝑘, which can be processed in parallel using a 12GB
+VRAM GPU. A single parallel evaluation of the occupancy function
+takes just 0.013 seconds. Therefore, the 1D point search, conducted
+over 15 iterations, takes roughly 0.2 seconds to complete.
+5.2
+2D Point Search
+The Quadric Error Function (Equation 2) assumes local flatness,
+meaning it presumes that local flat planes continue within a grid
+cell, thereby determining the 3D point at the intersection of these
+planes. For this to work correctly, the normals of the planes should
+properly approximate the local geometry within the grid cell. However, Manifold Dual Contouring (MDC) uses the gradient of the
+implicit function as the normal for the flat plane, which fits the infinitesimal region but may not represent the surface within the grid
+cell. This may result in incorrect identification of 3D points, as illustrated in Figure 3. Therefore, we search auxiliary points, termed 2D
+points, to better approximate the local surface normal by capturing
+the actual local geometry within each grid face, thereby providing
+suitable local flat planes that approximate the local geometries of
+different grid cells.
+Consider a pair of 1D points p𝑒1 and p𝑒2 on the same grid face
+𝑓 . Assuming that the surface S is locally flat at these points, the
+Fig. 5. Illustration of the 2D point search. The orange line denotes the
+ground truth isocurve in 2D, and the dots with blue, red and green boundary
+denotes grid vertices outside, inside and 1D points, respectively. Please refer
+to the explanation on Section 5.2.
+2D point p 𝑓 is defined at the intersection of the plane extending
+the grid face 𝑓 with the flat planes at p𝑒1 and p𝑒2 . We identify the
+intersection point as follows (see Figure 5 for an illustration):
+(1) Let 𝑙 = ←
+p𝑒−1−p−→
+𝑒 2 and m denote the line connecting the two 1D
+points and their middle point, respectively. Define 𝑟 as a ray
+originating from m with the direction orthogonal to 𝑙; the direction is chosen towards the side where a grid vertex has a
+different inside/outside label compared to m’s label. Detect the
+closest surface-crossing point q along 𝑟 . If q coincides with m,
+then p 𝑓 is set to be m.
+(2) Starting at point q, shoot two rays, 𝑟 1 and 𝑟 2 , in opposite directions and parallel to line 𝑙. Ray 𝑟 1 is directed towards p𝑒1
+from m, and ray 𝑟 2 is directed towards p𝑒2 from m. Find the closest intersection point of each ray with the surface S, denoting
+these as q1 and q2 , respectively. (Note that, under the flat plane
+assumption, either q1 or q2 coincides with q.)
+(3) Determine p 𝑓 as the intersection of two lines: 𝑙 1 = ←
+p𝑒−1−→
+q1 and
+←
+−
+−
+→
+𝑙 2 = p𝑒2 q2 .
+The procedure produces the desired 2D point p 𝑓 under the local
+flatness assumption, as outlined in the following lemma:
+Lemma 5.1. Let 𝑙 1 and 𝑙 2 be lines that pass distinct 1D points p𝑒1
+and p𝑒2 , respectively. 𝑙 1 and 𝑙 2 are identical or meet at a unique point
+u which is neither p𝑒1 nor p𝑒2 . Then, the 2D point p 𝑓 is chosen as
+either the middle point m on the former case or the intersection u on
+the latter case.
+Proof. See the appendix (Section A.1.2).
+■
+Note that steps 1 and 2 involve detecting the closest intersection
+point with the surface S along a ray. This task cannot be achieved
+with a binary search as done in 1D point search, since we need to
+find the closest point from the ray’s origin. Thus, we incorporate a
+combination of line search and binary search, termed line-binary
+6 •
+Jisung Hwang and Minhyuk Sung
+Fig. 6. Qualitative results with SALAD. (a) Reach for the Spheres [Sellán et al.
+2023]: inflation and shrinkwrap method, (b) PoNQ [Maruani et al. 2024]:
+learning-based method, and (c) ODC (ours). Recent SDF-based methods fail
+to construct meshes with occupancy functions.
+search. This method first samples points along the ray at uniform
+intervals to locate the initial interval where the endpoints have
+different inside/outside labels. Once such an interval is identified, a
+binary search is conducted within it to precisely refine the position
+of the intersection point. More details are provided in the appendix
+(Section A.1.3).
+Like the 1D point search, the 2D point search can also be executed
+simultaneously for all surface-crossing faces using GPU parallelization. For example, in our experiments with a resolution of 1283 (Section 6.3), the number of surface-intersecting faces is roughly 33𝑘,
+all of which can be processed in parallel using a 12GB VRAM GPU.
+The 2D point search algorithm includes three line-binary searches
+for rays 𝑟 , 𝑟 1 , and 𝑟 2 . We take 4 samples for the line search and
+perform 11 iterations of the binary search, totaling (4 + 11) × 3 = 45
+evaluations of the occupancy function. Since a single evaluation
+takes about 0.03 seconds, the 2D point search for the entire grid can
+be completed within 1.3 seconds.
+5.3
+3D Point Identification
+Each 1D point along a grid edge derives two 2D points from the
+adjacent grid faces. Since the two 2D points lie on the same flat plane
+as the 1D point, which locally represents the surface S, the plane’s
+normal can now be calculated from these three points. This replaces
+the gradient of the input implicit function in Equation 2. The 3D
+points within each cell are then determined as done in Manifold
+Dual Contouring (Section 4).
+5.4
+Polygonization
+While our main goal is to adapt Manifold Dual Contouring (MDC)
+to perform with an occupancy function by replacing the 1D point
+search and 3D point identification, we additionally improve the
+MDC algorithm to overcome its limitation, often resulting in selfintersections in the output mesh. We incorporate the quad splitting
+technique from Intersection-Free Contouring (IC) [Ju and Udeshi
+2006] to resolve this issue. IC was originally designed to handle
+a unique 3D point within each cell; we extend this idea to accommodate multiple 3D points per cell. We describe the details in the
+appendix (Section A.1.5) due to space constraints.
+6
+RESULTS
+In this section, we present experimental results for our method,
+ODC. For all the following experiments, we fixed the resolution at
+1283 . Refer to the appendix (Section A.3.1) for results with other
+resolutions. We compare our results with several baselines that take
+occupancy functions as input: Lempitsky’s binary volume smoothing method (LMC) [Lempitsky 2010], Neural Dual Contouring with
+binary voxel input (NDC, specifically, NDCx) [Chen et al. 2022],
+Contouring DIF (CDIF) [Manson et al. 2011], and Multiresolution
+IsoSurface Extraction (MISE) [Mescheder et al. 2019]. We also compare our method with the base methods of our framework: Marching
+Cubes (MC, specifically, the topology-preserved version [Lewiner
+et al. 2003]), Intersection-free Contouring (IC) [Ju and Udeshi 2006],
+and Manifold Dual Contouring (MDC) [Schaefer et al. 2007]. For
+Neural Dual Contouring (NDC), we use the official pretrained models provided by the authors, trained on the ABC dataset [Koch et al.
+2019]. For Neural Dual Contouring, the improved version with the
+Neural Marching Cubes [Chen and Zhang 2021] backbone is used.
+Note that MISE produces much fewer triangles than the other methods due to the mesh simplification step involved. For results of MISE
+without the mesh simplification step, refer to Section A.3.2 in the
+appendix.
+We additionally tested Reach for the Spheres [Sellán et al. 2023],
+the most recent inflation and shrinkwrap method, and PoNQ [Maruani et al. 2024], a learning-based method whose model is trained
+with signed distance values. However, these methods were unstable
+for occupancy functions and produced poor results, as shown in
+Figure 6. Therefore, we omitted them from our comparison.
+6.1
+Neural Implicit Functions and Datasets
+We conduct our experiments with occupancy functions generated
+by the following 3D generative models and a 3D mesh dataset.
+(1) SALAD [Koo et al. 2023]: A 3D generative model was trained
+with each of three classes of ShapeNet: Airplane, Chair, and
+Table. We use 500 generated MLP-based occupancy functions
+per class, for a total of 1,500.
+(2) 3DShape2VecSet [Zhang et al. 2023b]: Another 3D generative
+model was trained with 55 categories of ShapeNet. We use a
+total of 1,650 generated occupancy functions, comprising 30
+shapes for each category.
+(3) Michelangelo [Zhao et al. 2024]: A conditional 3D generative
+model that accepts either text, images, or both as inputs. We use
+the official pretrained model along with the provided 32 images
+and 29 texts as inputs.
+(4) Myles’ dataset [Myles et al. 2014]: A 3D mesh dataset including
+79 meshes, excluding some skinny shapes (excluded by previous
+work [Chen et al. 2022; Chen and Zhang 2021]). Occupancy
+functions are derived by computing winding numbers [Barill
+et al. 2018] from the meshes. This dataset is specifically used to
+measure similarity not only to the input occupancy function but
+also to the original 3D mesh.
+While MLP-based occupancy functions output the probability of
+occupancy within the range [0, 1], other models (3DShape2VecSet
+and Michelangelo) do not constrain their output ranges, although
+they still encode a shape at the isolevel of 0.5. In our experiments,
+occupancy-based methods (LMC, NDC, CDIF, and ours) take binary
+occupancy values, either 0 or 1. In contrast, models designed for
+SDF (MC, IC, and MDC) or continuous functions (MISE) use the
+Occupancy-Based Dual Contouring
+MC [2003]
+IC [2006]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+Qualitative results with SALAD.
+CDIF [2011]
+MISE [2019]
+• 7
+ODC (ours)
+Qualitative results with 3DShape2VecSet.
+Fig. 7. Qualitative results with SALAD and 3DShape2VecSet. ODC effectively captures the fine details, avoiding the aliasing effects seen in existing methods.
+Notably, since ODC focuses on precisely converting the functions rather than visual plausibility, it shows the true shapes that the generative models yield.
+8 •
+Jisung Hwang and Minhyuk Sung
+Table 1. Quantitative results with unconditional generation of SALAD [Koo
+et al. 2023] and 3DShape2VecSet [Zhang et al. 2023b]. The values are the
+average of all categories.
+Table 2. Quantitative results with Myles’ dataset [Myles et al. 2014]. The
+input is given by occupancy. † Baselines that require gradient of SDF for
+running.
+SALAD
+3DShape2VecSet
+Uncond.
+SI ↓ Man. ↑ Time
+SI ↓ Man. ↑ Time
+|𝜙 − 0.5| ↓
+|𝜙 − 0.5| ↓
+Gen.
+(%) (%)
+(s)
+(%) (%)
+(s)
+Myles’
+Occ.
+MD2 ↓
+(×106 )
+NIC ↓
+HDD ↓
+(×102 )
+SI ↓
+(%)
+Man. ↑
+(%)
+#V
+#T
+MC
+† IC
+† MDC
+LMC
+NDC
+CDIF
+† MISE
+ODC
+2.261
+2.808
+1.857
+32.06
+1.493
+0.562
+2.124
+0.113
+0.366
+0.583
+1.042
+0.146
+0.163
+0.121
+0.168
+0.072
+0.894
+0.959
+2.309
+2.091
+1.521
+1.043
+1.212
+0.632
+0.00
+0.00
+100.
+0.00
+36.7
+0.00
+10.1
+0.00
+100.
+11.4
+100.
+59.5
+13.9
+100.
+35.4
+100.
+38963
+40095
+38961
+34213
+38555
+38423
+2496
+39070
+77944
+80267
+77926
+68429
+77156
+76855
+5000
+78142
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+0.324
+0.329
+0.305
+0.484
+0.324
+0.234
+0.237
+0.037
+0.00
+0.00
+100.
+0.00
+33.8
+0.00
+23.1
+0.00
+100.
+21.8
+100.
+56.8
+37.1
+100.
+74.2
+100.
+1.9
+1.9
+2.0
+4.4
+0.6
+4.4
+1.2
+3.5
+2.330
+2.292
+2.245
+8.824
+3.552
+1.961
+1.733
+0.112
+0.00
+0.00
+100.
+0.00
+21.2
+0.00
+22.3
+0.06
+100.
+53.2
+100.
+72.8
+53.2
+100.
+82.0
+100.
+0.4
+0.5
+0.5
+9.8
+1.0
+1.4
+1.8
+1.7
+raw values directly from the network. To accommodate all cases,
+we define 𝜙 using the raw values of the MLP in this section.
+In the appendix, we present additional results with Michelangelo [Zhao et al. 2024], IM-NET [Chen and Zhang 2019], and DeepSDF
+[Park et al. 2019] in Section A.3.3, A.3.4, and A.3.5, respectively. More
+quantitative and qualitative results are also included in Section A.4.
+6.2
+Evaluation Metrics
+When extracting a mesh from a neural occupancy function without
+the ground truth 3D mesh, we measure the following metrics:
+• |𝜙 − 0.5|, measuring the alignment with the surface of the given
+occupancy function.
+• Self-Intersection (SI), the ratio of self-intersecting meshes.
+• Manifoldness (Man.), the ratio of manifold meshes.
+In the experiments with Myles’ dataset, where we obtain the
+occupancy function from a ground truth 3D mesh, we additionally
+measure the following metrics to compare the output mesh with
+the ground truth mesh:
+• Mesh Distance (MD2), the squared mesh distance from a point
+cloud sampled from another mesh in both directions.
+• Normal InConsistency (NIC), the radian angle difference of normals between the the ground truth and the output.
+• HausDorff Distance (HDD) between the ground truth and the
+output.
+In all experiments, we sample 2𝑀 points per shape for metrics
+that require point samples. Note that SI and Man. are not per-shape
+quantities but rather ratios of output meshes. As for the other metrics, we report the average of per-shape quantities. We also report
+the number of vertices (#V) and triangles (#T) of the output mesh
+along with the runtime. All the runtimes including the occupancy
+function inference time were measured with a single NVIDIA A6000
+GPU, 48-core Intel CPUs, and 504GB RAM.
+6.3
+Results with SALAD and 3DShape2VecSet
+The qualitative results of the experiment on unconditional generation using SALAD [Koo et al. 2023] and 3DShape2VecSet [Zhang
+et al. 2023b] are presented in Figure 7. The output from MC [Lewiner
+et al. 2003], IC [Ju and Udeshi 2006] and CDIF [Manson et al. 2011]
+produces artifacts with staircase-like local patterns, while MDC [Schaefer et al. 2007] produces self-intersections of mesh faces, indicated
+by darker triangles in the figure, especially in the fourth and ninth
+rows. LMC [Lempitsky 2010] generates overly smoothed shapes, as
+seen in the second row. Additionally, NDC [Chen et al. 2022], trained
+on occupancy functions from the ABC dataset [Koch et al. 2019],
+demonstrates limited generalizability to ShapeNet-based models
+generated by SALAD and 3DShape2VecSet, evident from the angular patterns on slightly inclined geometry in the third and eighth
+rows. MISE [Mescheder et al. 2019] displays cracked surfaces and
+non-crooked edges in the first and fifth row. In contrast, our ODC
+consistently produces meshes with much more plausible shapes.
+The quantitative results are presented in Table 1. Regarding the
+fidelity of the output mesh to the given implicit function, our ODC
+achieves more than 6 times and 15 times smaller fitting errors |𝜙−0.5|
+on average for the same resolution (1283 ). Additionally, all 1,500
+ODC output meshes in the SALAD experiment are free of selfintersections and have manifold properties. In the 3DShape2VecSet
+experiment, all 1,650 ODC output meshes are manifold, with only
+one exhibiting self-intersection, a significant improvement over our
+backbone MDC, which has 100% of meshes with self-intersections.
+The runtime of ODC is roughly 1.8 times slower than MC in the
+SALAD experiment, and in the 3DShape2VecSet experiment, ODC
+is four times slower than MC but still under 2 seconds.
+6.4
+Results with Myles’ Dataset
+Figure 8 presents qualitative comparisons with the 79 meshes collected by Myles et al. [Myles et al. 2014], testing the methods with
+pure occupancy functions. MC [Lewiner et al. 2003] tends to produce excessive staircase-like artifacts. IC [Ju and Udeshi 2006] and
+MDC [Schaefer et al. 2007] present broken surfaces and the other
+methods smooth out fine details. In contrast, our ODC shows a
+significant advantage in accurately capturing fine details, including
+sharp features, as shown in the second row.
+The quantitative comparisons shown in Table 2 also demonstrate
+the superior performance of our method, providing the best results
+in all evaluation metrics, with comparable number of vertices and
+triangles with the other methods.
+6.5
+Ablation Study with SALAD
+Figure 9 illustrates how the mesh extraction of a wheel of an airplane
+improves with each step of our method. When the linearity assumption is applied to 1D point identification, it often leads to inaccurate
+1D points, resulting in a cracked surface (1st column). Although
+the 1D point search mitigates this issue to some extent, the use of
+Occupancy-Based Dual Contouring
+MC [2003]
+† IC [2006]
+† MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011] † MISE [2019]
+ODC (ours)
+• 9
+GT
+Fig. 8. Qualitative results with Myles’ [Myles et al. 2014] dataset. Input is an occupancy function derived from the winding number computation. † The
+baselines also require the gradient of the SDF due to their specifications. ODC outperforms other methods in capturing fine details, including sharp features.
+MDC [2007]
++ 1D Search
++ 2D Search
++IC (=ODC)
+Table 3. Ablation study with SALAD [Koo et al. 2023]. IC indicates quad
+splitting technique of IC [Ju and Udeshi 2006].
+Ablation
+SALAD
+Fig. 9. Ablation study with SALAD [Koo et al. 2023]. Linearity denotes
+that 1D points are calculated by Equation 1. IC indicates the quad splitting
+technique of IC [Ju and Udeshi 2006]. Darker triangles represent flipped
+triangles identicating self-intersection.
+gradients still results in a cracked surface (2nd column). In contrast,
+the 2D point search captures finer details and produces a more accurate output (3rd column). Self-intersections, indicated by the darker
+triangles, are further mitigated by the IC-based polygonization, as
+demonstrated in our full method (4th column).
+The quantitative results of our ablation study with SALAD [Koo
+et al. 2023] are presented in Table 3, demonstrating the effectiveness
+of our 1D and 2D point search and polygonization methods. When
+the 1D point search is applied, the fitting error |𝜙 −0.5| is reduced by
+a factor of three. Employing the 2D point search further reduces the
+error by an additional factor of approximately three. This indicates
+that while accurately locating 1D points enhances extraction fidelity,
+the local surface normal calculated from 2D points also contributes
+to better mesh extraction compared to using gradients as local surface normals. Finally, our full method, which incorporates the quad
+splitting technique, completely eliminates self-intersections.
+7
+CONCLUSION
+We have introduced Occupancy-Based Dual Contouring (ODC), a
+dual contouring method specialized for neural occupancy functions.
+MDC
++ 1D Search
++ 2D Search
++ IC (=ODC)
+|𝜙 − 0.5| ↓ SI (%) ↓ Man. (%) ↑
+0.305
+0.109
+0.038
+0.037
+100.
+100.
+100.
+0.00
+100.
+100.
+100.
+100.
+#V
+#T
+Time (s)
+16286
+16286
+16286
+16310
+32570
+32570
+32570
+32619
+2.0
+2.2
+3.5
+3.5
+Our core idea was the design of 1D and 2D point search algorithms,
+all of which fully leverage GPU acceleration while parallelizing
+computation across all grid edges, faces, and cells. 3D points were
+particularly identified by calculating surface normals in the quadric
+error function with newly introduced auxiliary 2D points defined
+on the grid faces. The 2D point search algorithm was developed
+to guarantee finding the points on the same plane as the 1D point
+under the local flatness assumption, simply using three ray searches.
+Experimental results with several 3D generative models producing
+3D shapes as occupancy functions, as well as with a 3D mesh dataset
+converted to occupancy functions, demonstrated the state-of-the-art
+fidelity of our method with a few-second computation time. For
+future work, we plan to further improve our method to apply to
+adaptive resolutions and resolve topology ambiguity.
+ACKNOWLEDGEMENTS
+This work was supported by the NRF grant (RS-2023-00209723), IITP
+grants (RS-2022-II220594, RS-2023-00227592, RS-2024-00399817),
+and KEIT grant (RS-2024-00423625), all funded by the Korean government (MSIT and MOTIE), as well as grants from the DRB-KAIST
+SketchTheFuture Research Center, NAVER-Intel, Hyundai NGV, KT,
+and Samsung Electronics.
+10
+•
+Jisung Hwang and Minhyuk Sung
+REFERENCES
+Samir Akkouche and Eric Galin. 2001. Adaptive implicit surface polygonization using
+marching triangles. In Computer Graphics Forum.
+Gavin Barill, Neil G Dickson, Ryan Schmidt, David IW Levin, and Alec Jacobson. 2018.
+Fast winding numbers for soups and clouds. ACM Transactions on Graphics (TOG)
+37, 4 (2018), 1–12.
+Arindam Bhattacharya and Rephael Wenger. 2013. Constructing isosurfaces with sharp
+edges and corners using cube merging. In Computer Graphics Forum, Vol. 32. Wiley
+Online Library, 11–20.
+Jules Bloomenthal. 1988. Polygonization of implicit surfaces. Computer Aided Geometric
+Design 5, 4 (1988), 341–355.
+Andrea Bottino, Wim Nuij, and Kees Van Overveld. 1996. How to shrinkwrap through
+a critical point: an algorithm for the adaptive triangulation of iso-surfaces with
+arbitrary topology. In Proc. Implicit Surfaces, Vol. 96. 53–72.
+Alexandre Boulch and Renaud Marlet. 2022. Poco: Point convolution for surface
+reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition. 6302–6314.
+Angel X Chang, Thomas Funkhouser, Leonidas Guibas, Pat Hanrahan, Qixing Huang,
+Zimo Li, Silvio Savarese, Manolis Savva, Shuran Song, Hao Su, et al. 2015. Shapenet:
+An information-rich 3d model repository. arXiv preprint arXiv:1512.03012 (2015).
+Zhiqin Chen, Andrea Tagliasacchi, Thomas Funkhouser, and Hao Zhang. 2022. Neural
+dual contouring. ACM Transactions on Graphics (2022).
+Zhiqin Chen and Hao Zhang. 2019. Learning Implicit Fields for Generative Shape
+Modeling. In CVPR.
+Zhiqin Chen and Hao Zhang. 2021. Neural marching cubes. ACM Transactions on
+Graphics (2021).
+Evgeni Chernyaev. 1995. Marching cubes 33: Construction of topologically correct isosurfaces. Technical Report.
+Antoni Chica, Jason Williams, Carlos Andújar, Pere Brunet, Isabel Navazo, Jarek
+Rossignac, and Àlvar Vinacua. 2008. Pressing: Smooth isosurfaces with flats from
+binary grids. In Computer Graphics Forum, Vol. 27. Wiley Online Library, 36–46.
+Lis Custodio, Tiago Etiene, Sinesio Pesco, and Claudio Silva. 2013. Practical considerations on marching cubes 33 topological correctness. Computers & graphics (2013).
+Bruno Rodrigues De Araújo, Daniel S Lopes, Pauline Jepp, Joaquim A Jorge, and Brian
+Wyvill. 2015. A survey on implicit surface polygonization. Comput. Surveys (2015).
+Mathieu Desbrun, Mark Meyer, Peter Schröder, and Alan H Barr. 1999. Implicit fairing
+of irregular meshes using diffusion and curvature flow. In Proceedings of the 26th
+annual conference on Computer graphics and interactive techniques. 317–324.
+Tamal Krishna Dey, Xiaoyin Ge, Qichao Que, Issam Safa, Lei Wang, and Yusu Wang.
+2012. Feature-preserving reconstruction of singular surfaces. In Computer Graphics
+Forum, Vol. 31. Wiley Online Library, 1787–1796.
+Akio Doi and Akio Koide. 1991. An efficient method of triangulating equi-valued
+surfaces by using tetrahedral cells. IEICE Transactions on Information and Systems
+(1991).
+Ziya Erkoç, Fangchang Ma, Qi Shan, Matthias Nießner, and Angela Dai. 2023. Hyperdiffusion: Generating implicit neural fields with weight-space diffusion. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision. 14300–14310.
+Fabien Evrard, Fabian Denner, and Berend Van Wachem. 2018. Surface reconstruction
+from discrete indicator functions. IEEE Transactions on Visualization and Computer
+Graphics 25, 3 (2018), 1629–1635.
+Qiao Feng, Yebin Liu, Yu-Kun Lai, Jingyu Yang, and Kun Li. 2022. Fof: Learning fourier
+occupancy field for monocular real-time human reconstruction. Advances in Neural
+Information Processing Systems 35 (2022), 7397–7409.
+Simon Fuhrmann, Michael Kazhdan, and Michael Goesele. 2015. Accurate isosurface
+interpolation with hermite data. In 2015 International Conference on 3D Vision. IEEE,
+256–263.
+Kyle Genova, Forrester Cole, Avneesh Sud, Aaron Sarna, and Thomas Funkhouser. 2020.
+Local deep implicit functions for 3d shape. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition. 4857–4866.
+Sarah FF Gibson. 1998. Constrained elastic surface nets: Generating smooth surfaces
+from binary segmented data. In International Conference on Medical Image Computing
+and Computer-Assisted Intervention. Springer, 888–898.
+Benoit Guillard, Federico Stella, and Pascal Fua. 2022. Meshudf: Fast and differentiable
+meshing of unsigned distance field networks. In European conference on computer
+vision. Springer, 576–592.
+Amir Hertz, Or Perel, Raja Giryes, Olga Sorkine-Hornung, and Daniel Cohen-Or. 2022.
+Spaghetti: Editing implicit shapes through part aware generation. ACM Transactions
+on Graphics (TOG) 41, 4 (2022), 1–20.
+Adrian Hilton, John Illingworth, et al. 1997. Marching triangles: Delaunay implicit
+surface triangulation. University of Surrey (1997).
+Adrian Hilton, Andrew J Stoddart, John Illingworth, and Terry Windeatt. 1996. Marching
+triangles: range image fusion for complex object modelling. In IEEE International
+Conference on Image Processing.
+Chien-Chang Ho, Fu-Che Wu, Bing-Yu Chen, Yung-Yu Chuang, Ming Ouhyoung, et al.
+2005. Cubical marching squares: Adaptive feature preserving surface extraction
+from volume data. In Computer graphics forum, Vol. 24. Amsterdam: North Holland,
+1982-, 537–546.
+Kai Hormann, Ulf Labsik, Martin Meister, and Gunther Greiner. 2002. Hierarchical
+extraction of iso-surfaces with semi-regular meshes. In Proceedings of the seventh
+ACM symposium on Solid modeling and applications. 53–58.
+Fei Hou, Xuhui Chen, Wencheng Wang, Hong Qin, and Ying He. 2023. Robust Zero
+Level-Set Extraction from Unsigned Distance Fields Based on Double Covering.
+ACM Transactions on Graphics (TOG) 42, 6 (2023), 1–15.
+Moritz Ibing, Isaak Lim, and Leif Kobbelt. 2021. 3d shape generation with grid-based
+implicit functions. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. 13559–13568.
+Filomen Incahuanaco and Afonso Paiva. 2023. Surface reconstruction method for
+particle-based fluids using discrete indicator functions. Computers & Graphics 114
+(2023), 26–35.
+Meng Jia and Matthew Kyan. 2020. Learning occupancy function from point clouds for
+surface reconstruction. arXiv preprint arXiv:2010.11378 (2020).
+Tao Ju, Frank Losasso, Scott Schaefer, and Joe Warren. 2002. Dual contouring of hermite
+data. In SIGGRAPH.
+Tao Ju and Tushar Udeshi. 2006. Intersection-free contouring on an octree grid. In
+Proceedings of Pacific graphics, Vol. 2006. Citeseer.
+Tasso Karkanis and A James Stewart. 2001. Curvature-dependent triangulation of
+implicit surfaces. IEEE Computer Graphics and Applications (2001).
+Leif P Kobbelt, Mario Botsch, Ulrich Schwanecke, and Hans-Peter Seidel. 2001. Feature
+sensitive surface extraction from volume data. In Proceedings of the 28th annual
+conference on Computer graphics and interactive techniques. 57–66.
+Leif P Kobbelt, Jens Vorsatz, Ulf Labsik, and Hans-Peter Seidel. 1999. A shrink wrapping
+approach to remeshing polygonal surfaces. In Computer Graphics Forum, Vol. 18.
+Wiley Online Library, 119–130.
+Sebastian Koch, Albert Matveev, Zhongshi Jiang, Francis Williams, Alexey Artemov,
+Evgeny Burnaev, Marc Alexa, Denis Zorin, and Daniele Panozzo. 2019. Abc: A big
+cad model dataset for geometric deep learning. In CVPR.
+Juil Koo, Seungwoo Yoo, Minh Hieu Nguyen, and Minhyuk Sung. 2023. Salad: Part-level
+latent diffusion for 3d shape generation and manipulation. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision.
+Nikolas Lamb, Sean Banerjee, and Natasha Kholgade Banerjee. 2022. Deepmend:
+Learning occupancy functions to represent shape for repair. In European Conference
+on Computer Vision. Springer, 433–450.
+Victor Lempitsky. 2010. Surface extraction from binary volumes with higher-order
+smoothness. In 2010 IEEE Computer Society Conference on Computer Vision and
+Pattern Recognition.
+Thomas Lewiner, Hélio Lopes, Antônio Wilson Vieira, and Geovan Tavares. 2003.
+Efficient implementation of marching cubes’ cases with topological guarantees.
+Journal of graphics tools (2003).
+Connor Lin, Niloy Mitra, Gordon Wetzstein, Leonidas J Guibas, and Paul Guerrero.
+2022. Neuform: Adaptive overfitting for neural shape editing. Advances in Neural
+Information Processing Systems 35 (2022), 15217–15229.
+Stefan Lionar, Daniil Emtsev, Dusan Svilarkovic, and Songyou Peng. 2021. Dynamic
+plane convolutional occupancy networks. In Proceedings of the IEEE/CVF Winter
+Conference on Applications of Computer Vision. 1829–1838.
+Zhengzhe Liu, Jingyu Hu, Ka-Hei Hui, Xiaojuan Qi, Daniel Cohen-Or, and Chi-Wing Fu.
+2023. EXIM: A Hybrid Explicit-Implicit Representation for Text-Guided 3D Shape
+Generation. ACM Transactions on Graphics (TOG) 42, 6 (2023), 1–12.
+Adriano Lopes and Ken Brodlie. 2003. Improving the robustness and accuracy of the
+marching cubes algorithm for isosurfacing. ACM Transactions on Graphics (2003).
+William E. Lorensen and Harvey E. Cline. 1987. Marching cubes: A high resolution 3D
+surface construction algorithm. SIGGRAPH (1987).
+Josiah Manson and Scott Schaefer. 2010. Isosurfaces over simplicial partitions of
+multiresolution grids. In Computer Graphics Forum, Vol. 29. Wiley Online Library,
+377–385.
+Josiah Manson, Jason Smith, and Scott Schaefer. 2011. Contouring discrete indicator
+functions. In Computer Graphics Forum, Vol. 30. Wiley Online Library, 385–393.
+Nissim Maruani, Roman Klokov, Maks Ovsjanikov, Pierre Alliez, and Mathieu Desbrun.
+2023. VoroMesh: Learning Watertight Surface Meshes with Voronoi Diagrams. In
+ICCV.
+Nissim Maruani, Maks Ovsjanikov, Pierre Alliez, and Mathieu Desbrun. 2024. PoNQ: a
+Neural QEM-based Mesh Representation. arXiv preprint arXiv:2403.12870 (2024).
+Neil H McCormick and Robert B Fisher. 2002. Edge-constrained marching triangles. In
+Proceedings. First International Symposium on 3D Data Processing Visualization and
+Transmission.
+Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas
+Geiger. 2019. Occupancy networks: Learning 3d reconstruction in function space.
+In CVPR.
+Heinrich Müller and Michael Stark. 1993. Adaptive generation of surfaces in volume
+data. The Visual Computer 9 (1993), 182–199.
+Heinrich Muller and Michael Wehle. 1997. Visualization of implicit surfaces using
+adaptive tetrahedrizations. In Scientific Visualization Conference. IEEE, 243–243.
+Occupancy-Based Dual Contouring
+Ashish Myles, Nico Pietroni, and Denis Zorin. 2014. Robust field-aligned global
+parametrization. ACM Transactions on Graphics (2014).
+Balas K Natarajan. 1994. On generating topologically consistent isosurfaces from
+uniform samples. The Visual Computer 11 (1994), 52–62.
+Gregory M. Nielson. 2003. On marching cubes. IEEE Transactions on Visualization and
+Computer Graphics (2003).
+Gregory M Nielson. 2004. Dual marching cubes. In IEEE Visualization.
+Gregory M Nielson. 2008. Dual marching tetrahedra: Contouring in the tetrahedronal
+environment. In International Symposium on Visual Computing. Springer, 183–194.
+Gregory M Nielson and Bernd Hamann. 1991. The asymptotic decider: resolving the
+ambiguity in marching cubes.. In IEEE visualization.
+Yutaka Ohtake, Alexander Belyaev, and Ilia Bogaevski. 2001. Mesh regularization and
+adaptive smoothing. Computer-Aided Design 33, 11 (2001), 789–800.
+Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. 2019. Deepsdf: Learning continuous signed distance functions for shape
+representation. In CVPR.
+Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc Pollefeys, and Andreas Geiger.
+2020. Convolutional occupancy networks. In Computer Vision–ECCV 2020: 16th European Conference, Glasgow, UK, August 23–28, 2020, Proceedings, Part III 16. Springer,
+523–540.
+Omid Poursaeed, Matthew Fisher, Noam Aigerman, and Vladimir G Kim. 2020. Coupling
+explicit and implicit surface representations for generative 3d modeling. In Computer
+Vision–ECCV 2020: 16th European Conference, Glasgow, UK, August 23–28, 2020,
+Proceedings, Part X 16. Springer, 667–683.
+Edoardo Remelli, Artem Lukoianov, Stephan Richter, Benoit Guillard, Timur Bagautdinov, Pierre Baque, and Pascal Fua. 2020. Meshsdf: Differentiable iso-surface
+extraction. NeurIPS (2020).
+Nader Salman, Mariette Yvinec, and Quentin Mérigot. 2010. Feature preserving mesh
+generation from 3d point clouds. In Computer graphics forum, Vol. 29. Wiley Online
+Library, 1623–1632.
+Scott Schaefer, Tao Ju, and Joe Warren. 2007. Manifold dual contouring. IEEE Transactions on Visualization and Computer Graphics (2007).
+Silvia Sellán, Christopher Batty, and Oded Stein. 2023. Reach For the Spheres: Tangencyaware surface reconstruction of SDFs. In SIGGRAPH Asia 2023 Conference Papers.
+1–11.
+Raj Shekhar, Elias Fayyad, Roni Yagel, and J Fredrick Cornhill. 1996. Octree-based
+decimation of marching cubes surfaces. In Proceedings of Seventh Annual IEEE
+Visualization’96. IEEE, 335–342.
+Tianchang Shen, Jun Gao, Kangxue Yin, Ming-Yu Liu, and Sanja Fidler. 2021. Deep
+marching tetrahedra: a hybrid representation for high-resolution 3d shape synthesis.
+NeurIPS (2021).
+Tianchang Shen, Jacob Munkberg, Jon Hasselgren, Kangxue Yin, Zian Wang, Wenzheng
+Chen, Zan Gojcic, Sanja Fidler, Nicholas Sharp, and Jun Gao. 2023. Flexible isosurface
+extraction for gradient-based mesh optimization. ACM Transactions on Graphics
+(2023).
+J Ryan Shue, Eric Ryan Chan, Ryan Po, Zachary Ankner, Jiajun Wu, and Gordon
+Wetzstein. 2023. 3d neural field generation using triplane diffusion. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 20875–20886.
+Barton T Stander and John C Hart. 1995. Interactive re-polygonization of blobby implicit
+curves. In Proceedings of the Western Computer Graphics Symposium.
+Jiapeng Tang, Jiabao Lei, Dan Xu, Feiying Ma, Kui Jia, and Lei Zhang. 2021. Sa-convonet:
+Sign-agnostic optimization of convolutional occupancy networks. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision. 6504–6513.
+Gabriel Taubin. 1995. A signal processing approach to fair surface design. In Proceedings
+of the 22nd annual conference on Computer graphics and interactive techniques. 351–
+358.
+Xiaoyu Tian, Tao Jiang, Longfei Yun, Yucheng Mao, Huitong Yang, Yue Wang, Yilun
+Wang, and Hang Zhao. 2024. Occ3d: A large-scale 3d occupancy prediction benchmark for autonomous driving. Advances in Neural Information Processing Systems
+36 (2024).
+Kees Van Overveld and Brian Wyvill. 2004. Shrinkwrap: An efficient adaptive algorithm
+for triangulating an iso-surface. The Visual Computer (2004).
+Charlie CL Wang. 2009. Intersection-free dual contouring on uniform grids: an approach based on convex/concave analysis. Technical Report. Technical Report, 2009,
+http://www2. mae. cuhk. edu. hk/˜ cwang/pubs . . . .
+Jun Wang, Z Yu, W Zhu, and J Cao. 2013. Feature-preserving surface reconstruction
+from unoriented, noisy point data. In Computer Graphics Forum, Vol. 32. Wiley
+Online Library, 164–176.
+Tao Wang, Jing Wu, Ze Ji, and Yu-Kun Lai. 2024. Sparse Convolutional Networks for
+Surface Reconstruction from Noisy Point Clouds. In Proceedings of the IEEE/CVF
+Winter Conference on Applications of Computer Vision. 3212–3221.
+Rephael Wenger. 2013. Isosurfaces: geometry, topology, and algorithms. CRC Press.
+Rüdiger Westermann, Leif Kobbelt, and Thomas Ertl. 1999. Real-time exploration of
+regular volume data by adaptive reconstruction of isosurfaces. The Visual Computer
+15, 2 (1999), 100–111.
+•
+11
+Biao Zhang, Matthias Nießner, and Peter Wonka. 2022. 3dilg: Irregular latent grids
+for 3d generative modeling. Advances in Neural Information Processing Systems 35
+(2022), 21871–21885.
+Biao Zhang, Jiapeng Tang, Matthias Niessner, and Peter Wonka. 2023b. 3dshape2vecset:
+A 3d shape representation for neural fields and generative diffusion models. ACM
+Transactions on Graphics (TOG) 42, 4 (2023), 1–16.
+Congyi Zhang, Guying Lin, Lei Yang, Xin Li, Taku Komura, Scott Schaefer, John Keyser,
+and Wenping Wang. 2023a. Surface Extraction from Neural Unsigned Distance
+Fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision.
+22531–22540.
+Zibo Zhao, Wen Liu, Xin Chen, Xianfang Zeng, Rui Wang, Pei Cheng, Bin Fu, Tao
+Chen, Gang Yu, and Shenghua Gao. 2024. Michelangelo: Conditional 3d shape
+generation based on shape-image-text aligned latent representation. Advances in
+Neural Information Processing Systems 36 (2024).
+Junsheng Zhou, Baorui Ma, Yu-Shen Liu, Yi Fang, and Zhizhong Han. 2022. Learning
+consistency-aware unsigned distance functions progressively from raw point clouds.
+Advances in neural information processing systems 35 (2022), 16481–16494.
+Yong Zhou, Baoquan Chen, and Arie Kaufman. 1997. Multiresolution tetrahedral
+framework for visualizing regular volume data. In Proceedings. Visualization’97.
+IEEE, 135–142.
+12
+•
+Jisung Hwang and Minhyuk Sung
+Appendix
+We detail our method, ODC, in Section A.1, and outline the experimental settings in Section A.2. Mesh simplification of MISE [Mescheder
+et al. 2019], results across various resolutions, and additional results
+with IM-NET [Chen and Zhang 2019], Michelangelo [Zhao et al.
+2024] and DeepSDF [Park et al. 2019] are discussed in Section A.3.
+Section A.4 offers more detailed qualitative and quantitative results
+of the experiments in the main paper.
+A.1
+DETAILS ON OCCUPANCY-BASED DUAL
+CONTOURING (ODC)
+A.1.1 Configurations for ODC
+Following the uniform grid setup of Manifold Dual Contouring [Schaefer et al. 2007], we adopted the same configuration as Dual Marching
+Cubes [Nielson 2004]. Refer to Figure A1, which illustrates 22 configurations out of a total of 256 possible configurations, accounting for
+rotation and mirroring. It demonstrates how the surface-crossing
+S , ... E S , each
+grid edges in a grid cell 𝑐 are partitioned into E𝑐,1
+𝑐,4
+colored differently. Since the polygons of this primal face form a
+cycle and 1D points and 2D points are alternative, each 1D point is
+adjacent to two 2D points, and each 2D point is also adjacent to two
+1D points. Consequently, the normal of a local flat plane of a 1D
+point can be calculated along with the two adjacent 2D points, and
+2D point search also can be done with the two adjacent 1D points.
+Although it generates manifold meshes for almost every cases,
+as mentioned on the Dual Marching Cubes paper, it may produce
+non-manifold edges when the ambiguity of C12 and C18 coincide.
+To address the this problem, we followed the solution described
+in [Wenger 2013], and the output of Occupancy-based Dual Contouring (ODC) is guaranteed to be manifold.
+A.1.2
+Proof of Lemma 1
+Lemma A.1.1. Let 𝑙 1 and 𝑙 2 be lines that pass distinct 1D points
+p𝑒1 and p𝑒2 , respectively. 𝑙 1 and 𝑙 2 are identical or meet at a unique
+point u which is neither p𝑒1 nor p𝑒2 . Then, the 2D point p 𝑓 is chosen
+as either the middle point m on the former case or the intersection u
+on the latter case.
+Proof. When 𝑙 1 and 𝑙 2 are identical, the isocurve between p𝑒1
+and p𝑒2 is a straight line segment connecting p𝑒1 and p𝑒2 , and step
+(1) finds q as m. Therefore, p 𝑓 is set to be m.
+Consider the case that 𝑙 1 and 𝑙 2 meet at the unique point u. From
+step (1), we assume that q is on 𝑙 1 without loss of generality. (q and
+m are distinct.) If u is closer to 𝑙 than q, then since q is outside the
+triangle p𝑒1 up𝑒2 , r must have detected a point q′ on 𝑙 1 or 𝑙 2 before
+meeting u, which is contradiction to the step (1). If q is u, then
+trivially q2 is set to be q as it cannot be found on step (2), and p 𝑓 is
+set to be u on step (3). Else, if q is not u, we have two distinct points q1
+and q2 on step (2). Since both points are located in the same distance
+from 𝑙 with q. Therefore, ←
+p𝑒−2−→
+q2 and ←
+p𝑒−1−→
+q1 should intersect at further
+location than q, and which is satisfied by the directions specified on
+step (2) to detect q1 and q2 . Hence, the line ←
+p𝑒−1−→
+q1 denotes 𝑙 1 and the
+←
+−
+−
+→
+line p𝑒2 q2 denotes 𝑙 2 , and thus the intersection p 𝑓 is determined to
+be u.
+■
+Fig. A1. Configurations of primal faces from MC’03 [Nielson 2003]. Red
+and blue dots indicate grid vertices in P in and P out , respectively. Dots
+outlined in green and black represent the 1D and 2D points, respectively.
+The polygons, distinguished by different colors, represent primal faces. Grid
+edges containing 1D points associated with the green, yellow, blue, and pink
+S , ..., E S , respectively. Note that there are two
+primal faces constitute E𝑐,1
+𝑐,4
+adjacent 2D points in the primal face for each 1D point, and there are two
+adjacent 1D points in the primal face for each 2D point. In Dual Marching
+Cubes [Nielson 2004] and Manifold Dual Contouring [Schaefer et al. 2007],
+a 3D point is defined for each primal face, and the final mesh is created by
+connecting these 3D points.
+A.1.3
+Line-Binary Search
+We introduce line-binary search, an essential technique for 2D point
+search. Line-binary search identifies a point along a ray that differentiates between inside and outside regions. Unlike general binary
+search, it operates under the condition that it does not have two
+endpoints with different inside/outside labels. Given a ray 𝑟 with
+starting point 𝑝 ∈ R3 and a direction 𝑑 ∈ R3 , the procedure begins
+with a sparse linear search to define the search space, followed by a
+binary search to ensure precision. (We assume that the occupancy
+of p is already known because practical 2D search always know it.)
+It firstly calculates the occupancy of the points {p𝑖 = p+ 𝑅𝑖
+𝑁 𝑑 }𝑖=1,...,𝑁 ,
+where 𝑅 ∈ R and 𝑁 ∈ N>0 are parameters representing the maximum range and the number of samples, respectively. And then,
+it identifies the smallest 𝑖 for which p𝑖 have a different occupancy
+than p. (p0 := p) The interval [p𝑖 −1, p𝑖 ) then becomes the search
+space for the binary search. However, sometimes such 𝑖 does not
+exist because a sharp feature is farther than 𝑅, the method positions
+the output as far from 𝑅 as possible. Therefore, 𝑖 is chosen to be 𝑁 ,
+giving the farthest search space.
+During the binary search, the occupancy of the middle point
+is compared to the endpoint closer to p, and the search space is
+adjusted accordingly. After the iterations, the output is selected as
+the endpoint closer to p that has the same occupancy as p. Therefore,
+Occupancy-Based Dual Contouring
+all line-binary searches during 2D point search find points with same
+occupancy as m. This consistency is crucial to avoid divergence. If
+q has a different occupancy from m in step (1), then p1 or p2 is not
+detected correctly, resulting in an incorrect p 𝑓 .
+A.1.4
+Practical Implementation of 2D Point Search
+Assuming the boundary consists of two lines passing through distinct 1D points, q does not need to lie on the isocurve but must be
+inside the triangle p𝑒1 up𝑒2 . If step (2) correctly detects two points q1
+and q2 , then the lines 𝑙 1 and 𝑙 2 are accurately determined, setting p 𝑓
+to u. Therefore, the practical goal of step (1) is to place q inside the
+triangle p𝑒1 up𝑒2 or confirm that 𝑙 1 and 𝑙 2 are identical. Nevertheless,
+by locating q as far from 𝑙 as possible, we enhance accuracy by
+avoiding floating-point operations with similar numbers. Thus, we
+set the maximum range of the line-binary search on step (1) to 0.8
+(with the side length of a grid cell being 1), ensuring sufficient range
+for accurate the floating-points operations. Additionally, line-binary
+search in step (1) consists of 4 and 11 iterations for linear and binary
+search, respectively.
+Also, under the assumption that the boundary is composed of
+two lines, the maximum width (parallel to 𝑙) of the triangle p𝑒1 up𝑒2 ,
+is equal to the distance√between p𝑒1 and p𝑒2 . Considering that this
+distance can be up to 2, we√ set the maximal distance of the linebinary search on step (2) to 22 . Additionally, line-binary search on
+step (2) consists of 3 and 12 iterations for linear and binary search,
+respectively.
+A.1.5
+Polygonization
+We employ the same quad splitting technique of Intersection-free
+Contouring [Ju and Udeshi 2006]. Intersection-free Contouring [Ju
+and Udeshi 2006] introduces a method for splitting a quad into two
+or four triangles. However, it does not explicitly address the necessity of splitting into four triangles on uniform grids, a requirement
+demonstrated by [Wang 2009]. This study offers a robust and efficient implementation for determining quad splitting of [Ju and
+Udeshi 2006].
+Let p𝑐 1 p𝑐 2 p𝑐 3 p𝑐 4 be a quad composed of 3D points of adjacent
+cells to a grid edge 𝑒 = (𝑣 in 𝑣 out ) ∈ E 𝑆 with 1D point p𝑒 . (The
+normal of the oriented triangle composed of center points of grid
+cell 𝑐 1 , 𝑐 2 , and 𝑐 3 in order is identical to the direction from p𝑣 in to
+p𝑣 out .) Then, dual contouring can make the output triangles in two
+ways: (p𝑐 1 p𝑐 2 p𝑐 3 and p𝑐 1 p𝑐 3 p𝑐 4 ) (case 1) or (p𝑐 1 p𝑐 2 p𝑐 4 and p𝑐 2 p𝑐 3 p𝑐 4 )
+(case 2). Here, [Ju and Udeshi 2006] has proven that the output mesh
+becomes intersection-free if the triangles are enclosed by an envelope p𝑣 in p𝑣 out − p𝑐 1 p𝑐 2 p𝑐 3 p𝑐 4 , a shape that merges four tetrahedrons
+p𝑣 in p𝑣 out p𝑐 1 p𝑐 2 , p𝑣 in p𝑣 out p𝑐 2 p𝑐 3 , p𝑣 in p𝑣 out p𝑐 3 p𝑐 4 , and p𝑣 in p𝑣 out p𝑐 4 p𝑐 1 .
+To satisfy this condition, for some cases, the quad should be divided
+into four triangles: p𝑒 p𝑐 1 p𝑐 2 , p𝑒 p𝑐 2 p𝑐 3 , p𝑒 p𝑐 3 p𝑐 4 , and p𝑒 p𝑐 4 p𝑐 1 (case
+3).
+On case 1 and case 2, the edges p𝑐 1 p𝑐 2 , p𝑐 2 p𝑐 3 , p𝑐 3 p𝑐 4 , and p𝑐 4 p𝑐 1
+made by the two triangles are the parts of the envelope. Therefore,
+if a diagonal edge is contained by the envelope, then the two triangles are enclosed also. For example, on case 1, the diagonal edge is
+p𝑐 1 p𝑐 3 and this edge should intersect the quad p𝑐 2 p𝑣 in p𝑐 4 p𝑣 out for
+•
+13
+being enclosed. [Wang 2009] presents a robust and efficient method,
+convex/concave analysis, to determine this intersection.
+Let us define the term ‘concave’. The edge p𝑐 2 p𝑣 out is concave if
+and only if p𝑐 2 is below the oriented triangle p𝑐 1 p𝑐 3 p𝑣 out (3) and edge
+p𝑐 2 p𝑣 in is concave if and only if p𝑐 2 is above the oriented triangle
+p𝑐 1 p𝑐 3 p𝑣 in (4).
+(p𝑐 2 − p𝑣 out ) · [(p𝑐 1 − p𝑣 out ) × (p𝑐 3 − p𝑣 out )] < 0.
+(3)
+(p𝑐 2 − p𝑣 in ) · [(p𝑐 1 − p𝑣 in ) × (p𝑐 3 − p𝑣 in )] > 0.
+(4)
+Also, a vertex p𝑐 2 is concave if and only if p𝑐 2 p𝑣 out or p𝑐 2 p𝑣 in is
+concave.
+[Wang 2009] has demonstrated that case 1 is not enclosed by the
+envelope if either p𝑐 2 or p𝑐 4 is concave, while case 2 is not enclosed
+if either p𝑐 1 or p𝑐 3 is concave. If both are not enclosed, then case 3
+is selected, as it is guaranteed to be enclosed by the envelope, albeit
+at the cost of increased triangle count compared to dual contouring.
+The intersection-free property of this technique is proven for
+cases where maximally one 3D point exists per grid cell. However, Manifold Dual Contouring can locate multiple 3D points inside a grid cell, meaning this technique does not guarantee selfintersection-free results for our method. Nonetheless, quantitative
+experiment results demonstrate that self-intersections are significantly reduced compared to Manifold Dual Contouring.
+A.2 EXPERIMENT SETUP
+A.2.1 Baselines
+We evaluated topology-preserving Marching Cubes [Lewiner et al.
+2003] using the scikit-image library1 , while Lempitsky’s smoothing method [Lempitsky 2010] was tested with PyMCubes library2 .
+The code for Manifold Dual Contouring was obtained from FlexiCubes3 [Shen et al. 2023]. Neural Dual Contouring [Chen et al.
+2022] was tested using NDCx, provided by the authors, and Multiresolution IsoSurface Extraction (MISE) [Mescheder et al. 2019]
+was evaluated using the original implementation by the authors
+without changing the parameters.
+A.2.2
+Binary Representation of Neural Implicit Functions
+Given an continuous-valued occupancy function 𝜙 : R3 → R, we
+define 𝜙 ′ : R3 → {0 (out), 1 (in)} by distinguishing from the isolevel.
+Occupancy-based models use 𝜙 ′ as input. For each grid cell, LMC
+and NDC assign a binary voxel value of 1 if any of its vertices have
+a 𝜙 ′ value of 1. CDIF calculates the DIF value as the average of 𝜙 ′
+values at 63 (=216) points inside each grid cell. Our model, ODC,
+utilizes 𝜙 ′ at arbitrary positions without discretizing the space.
+A.2.3
+Runtime Measurement
+The runtime includes not only the mesh construction time but also
+the inference time of the occupancy function for query points. This
+is because mesh construction and occupancy function inference are
+not separable in our method. Also, since our method queries more
+points than Marching Cubes, the additional inference time should
+be considered in practical applications. Therefore, we report the
+1 https://github.com/scikit-image/scikit-image
+2 https://github.com/pmneila/PyMCubes
+3 https://github.com/nv-tlabs/FlexiCubes
+14
+•
+Jisung Hwang and Minhyuk Sung
+Table A1. Results with various resolutions with SALAD [Koo et al. 2023].
+The table presents results for three resolutions: 1283 , 2563 , and 5123 .
+Various
+Resolutions
+1283
+MC
+ODC
+0.324
+0.037
+|𝜙 − 0.5| ↓
+2563
+5123
+0.211
+0.011
+1283
+0.114
+0.003
+1.9
+3.5
+Time (s)
+2563
+5123
+14.7
+20.7
+117.4
+139.9
+runtime inclusive of inference time to ensure a fair comparison. (In
+the SALAD [Koo et al. 2023] experiment with a resolution of 1283 ,
+occupancy function inference accounts for 98% of total runtime in
+the case of Marching Cubes.)
+A.3
+ADDITIONAL EXPERIMENTS
+This section presents five additional experiments designed to provide a comprehensive evaluation of our method. These experiments
+include:
+(1) MISE [Mescheder et al. 2019] without mesh simplification, ensuring its output to have similar number of vertices and triangles
+as ODC.
+(2) Various resolutions, assessing the scalability of our method in
+comparison to Marching Cubes.
+(3) Michelangelo [Zhao et al. 2024]: A conditional 3D generative
+model that accepts either text, images, or both as inputs. We use
+the official pretrained model along with the provided 32 images
+and 29 texts as inputs.
+(4) IM-NET [Chen and Zhang 2019] is an autoencoder that takes
+a 3D shape as voxels and decodes it using an MLP-based occupancy function. We use the official models trained for 13
+categories of ShapeNet, sampling 100 random shapes for each
+category, resulting in 1,300 shapes in total.
+(5) DeepSDF [Park et al. 2019] is an autoencoder that encodes 3D
+shapes and decodes them using MLP-based signed distance
+function. We trained DeepSDF using 100 shapes from the ABC
+dataset [Koch et al. 2019].
+A.3.1
+Results with Various Resolutions
+We report the mesh reconstruction accuracy and runtime of MC and
+ODC for high resolutions of 1283 , 2563 , and 5123 in the SALAD [Koo
+et al. 2023] experiments.
+According to the quantitative results in Table A1, even for the
+highest resolution of 5123 , our ODC increases computation time
+by only 20% compared to MC, while producing a mesh with significantly better fidelity, achieving just 2.6% of the error compared to
+the error of MC.
+A.3.2
+Evaluating MISE Without Mesh Simplification
+MISE incorporates a mesh simplification process. To ensure unbiased evaluation, we utilized the official MISE code provided by the
+authors of Occupancy Networks [Mescheder et al. 2019] without any
+modifications, including parameter settings. The simplification step
+reduces the mesh to 5,000 triangles, resulting in MISE generating
+fewer vertices and triangles compared to MC and ODC. To address
+the concern about fair comparison in terms of triangle count, we
+also present quantitative results in the SALAD [Koo et al. 2023]
+Table A2. Removal of mesh simplification step from MISE on the
+SALAD [Koo et al. 2023] experiment. MISE w/o simpl. denotes MISE without
+the mesh simplification step.
+|𝜙 − 0.5| ↓ SI (%) ↓ Man. (%) ↑
+MISE
+MISE w/o simpl.
+ODC
+0.237
+0.211
+0.037
+23.1
+46.9
+0.00
+74.3
+100.
+100.
+#V
+#T
+2500 5000
+16261 32524
+16310 32619
+Time (s)
+1.2
+3.4
+3.5
+experiment with MISE while excluding the mesh simplification step
+in Table A2.
+Note that without the mesh simplification, MISE now produces
+meshes with a similar number of vertices and triangles as our ODC
+output meshes, while not significantly reducing the fitting error,
+which is still 5.7 times higher than that of ODC. This is because
+MISE is not designed to capture sharp features. Additionally, MISE
+produces many self-intersecting meshes, while our ODC prevents
+self-intersections almost perfectly.
+A.3.3
+Results with Michelangelo
+The qualitative results of the experiments on text-conditioned and
+image-conditioned mesh generation using Michelangelo [Zhao et al.
+2024] are illustrated in Figure A2 and Figure A3. The outputs from
+MC [Lewiner et al. 2003], IC [Ju and Udeshi 2006] (text-conditioned),
+and CDIF [Manson et al. 2011] reveal aliased artifacts, while MDC [Schaefer et al. 2007] shows self-intersections of mesh faces, indicated
+by darker triangles in the figure. LMC [Lempitsky 2010] produces
+overly smoothed and coarse shapes. Additionally, NDC [Chen et al.
+2022] exhibits limited adaptability to ShapeNet-based models, as
+can be seen from the angular patterns on slightly inclined geometry. MISE [Mescheder et al. 2019] presents surfaces with cracked
+textures. In contrast, our ODC consistently creates meshes with
+significantly more realistic shapes.
+The quantitative results can be found in Table A3. Our ODC
+method demonstrates over a two-fold reduction in fitting errors
+|𝜙 −0.5| on average, indicating higher fidelity to the implicit function
+compared to other methods. Out of the 61 ODC output meshes, all
+are manifold, with only one showing self-intersections. The number
+of triangles is similar across all baselines, except for MISE, which
+uses mesh simplification techniques to maintain a specific triangle
+count. The runtime for ODC is about 2.5 times slower than MC.
+A.3.4
+Results with IM-NET
+The qualitative results of the experiment using the conventional
+MLP-based occupancy function, IM-NET [Chen and Zhang 2019],
+are depicted in Figure A4. The outputs from MC [Lewiner et al.
+2003], IC [Ju and Udeshi 2006], and CDIF [Manson et al. 2011]
+exhibit staircase-like artifacts, while MDC [Schaefer et al. 2007]
+displays self-intersections of mesh faces, marked by darker triangles
+in the figure. LMC [Lempitsky 2010] produces overly-smoothed
+and coarse shapes. Additionally, NDC [Chen et al. 2022] shows
+limited adaptability to ShapeNet-based models, evident from angular
+patterns observed on slightly inclined geometry. MISE [Mescheder
+et al. 2019] presents surfaces with cracked textures. In contrast, our
+ODC consistently generates meshes with significantly more realistic
+shapes.
+Occupancy-Based Dual Contouring
+Table A3. Quantitative results with Michelangelo [Zhao et al. 2024] on textconditioned generation and image-conditioned generation tasks. The textconditioned generation is evaluated with 29 inputs, and image-conditioned
+generation is evaluated with 32 samples.
+Text-Cond.
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+|𝜙 − 0.5| ↓ SI (%) ↓ Man. (%) ↑
+1.633
+1.510
+1.525
+7.998
+2.523
+1.499
+1.269
+0.592
+0.00
+0.00
+100.
+0.00
+44.8
+0.00
+27.5
+3.45
+100.
+27.5
+100.
+44.8
+31.0
+100.
+48.2
+100.
+Image-Cond. |𝜙 − 0.5| ↓ SI (%) ↓ Man. (%) ↑
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+1.599
+1.439
+1.404
+9.447
+3.074
+1.602
+1.254
+0.604
+0.00
+0.00
+100.
+0.00
+34.3
+0.00
+21.8
+0.00
+100.
+28.1
+100.
+65.6
+34.3
+100.
+71.8
+100.
+#V
+#T
+27913 55840
+27946 56069
+27906 55802
+24760 49507
+27505 55174
+27284 54575
+2497 5000
+27951 55891
+#V
+#T
+25277 50548
+25329 50683
+25282 50553
+22659 45317
+25031 50088
+24784 49559
+2499 5000
+25300 50589
+15
+Table A4. Quantitative results with DeepSDF [Koo et al. 2023] using 100
+shapes from the ABC dataset [Koch et al. 2019]. ∗ LMC [Lempitsky 2010]
+failed to reconstruct for one shape.
+DeepSDF |𝜓 | (×104 ) ↓ SI (%) ↓ Man. (%) ↑
+#V
+#T
+Time (s)
+31610
+31621
+31610
+28194
+31604
+31079
+2499
+119466
+31614
+63223
+63254
+63221
+56389
+63221
+62159
+5000
+238945
+63230
+0.9
+0.9
+0.9
+6.2
+0.8
+3.2
+1.1
+50.
+2.2
+Time (s)
+1.9
+2.1
+2.2
+7.0
+0.8
+6.2
+1.2
+4.8
+MC
+IC
+MDC
+∗ LMC
+NDC
+CDIF
+MISE
+PoNQ
+ODC
+1.261
+0.707
+0.892
+42.01
+0.700
+7.017
+2.795
+1.349
+0.211
+0.00
+0.00
+100.
+0.00
+83.0
+0.00
+8.00
+0.00
+0.00
+100.
+72.0
+100.
+87.9
+72.0
+100.
+98.0
+40.0
+100.
+Time (s)
+2.1
+2.3
+2.5
+6.2
+0.8
+6.3
+1.2
+5.1
+|𝜓 | values compared to any baseline, demonstrating the effectiveness
+of our 1D and 2D point searches. Additionally, our method produces
+fully manifold meshes with no self-intersections, highlighting the
+strength of the IC-based polygonization. The number of triangles is
+comparable to other baselines, except for MISE and PoNQ. Although
+the runtime for ODC is slower than MC, it still completes within 3
+seconds.
+A.4
+The quantitative results are also presented in Table A5. In terms of
+fidelity to the given implicit function, our ODC exhibits more than
+a 10-fold reduction in fitting errors |𝜙 − 0.5| on average compared
+to other methods, except for MISE, which demonstrates a 2.5-fold
+larger fitting error than ODC. Among the 1,300 ODC output meshes,
+all are manifold, with only 4 displaying self-intersections. The number of triangles remains comparable across all baselines, except for
+MISE, which employs mesh simplification techniques to achieve a
+specific triangle count. The runtime of ODC is approximately twice
+as slow as MC but still under 2 seconds on average.
+A.3.5
+•
+Results with DeepSDF
+To demonstrate that our method also outperforms with neural
+signed distance functions, we present results with DeepSDF [Park
+et al. 2019]. The occupancy is 1 (in) if and only if the signed distance is negative. The qualitative results are shown in Figure A5.
+The outputs from MC [Lewiner et al. 2003] fail to capture sharp
+features, and methods designed specifically for occupancy functions—such as LMC [Lempitsky 2010], CDIF [Manson et al. 2011]
+and MISE [Mescheder et al. 2019]—also do not effectively capture
+sharp details. Although IC [Ju and Udeshi 2006] and MDC [Schaefer
+et al. 2007] succeed in capturing edge sharpness, they still fail to
+represent the edges clearly. The supervised methods, NDC [Chen
+et al. 2022] and PoNQ [Maruani et al. 2024], exhibit artifacts resulting from unclear edge representations and waviness in flat regions,
+respectively. In contrast, our method, ODC, effectively captures
+sharp edges and accurately reconstructs flat regions, demonstrating
+its adaptability to MLP-based signed distance functions.
+The quantitative results are presented in Table A4. We report |𝜓 |
+values since the input signed distance function 𝜓 encodes shapes
+along the 0-level, unlike occupancy functions that encode along the
+0.5-level. Our method achieves more than a threefold reduction in
+FULL QUALITATIVE AND QUANTITATIVE RESULTS
+We provide more qualitative results and detailed quantitative results
+of the experiments of the main paper.
+A.4.1
+Results with SALAD and 3DShape2VecSet
+More qualitative results of SALAD [Koo et al. 2023] are presented
+in Figure A6 and A7. Also, those of 3DShape2VecSet [Zhang et al.
+2023b] are presented in Figure A8.
+The quantitative results of the three categories and mean across
+all categories are presented in Table A6.
+A.4.2
+Results with Myles’ Dataset
+More qualitative results of occupancy input from Myles’ dataset [Myles
+et al. 2014] are presented in Figure A9.
+A.4.3
+Ablation Study with SALAD and Myles’ Dataset
+More qualitative results of ablation study with SALAD [Koo et al.
+2023] and Myles’ dataset [Myles et al. 2014] are presented in Figure A10 and A11, respectively.
+More quantitative results of SALAD ablation study with SALAD
+and Myles’ dataset are presented in Table A7 and A8, respectively.
+16
+•
+Jisung Hwang and Minhyuk Sung
+Table A5. Quantitative results with IM-NET [Chen and Zhang 2019] pretrained on ShapeNet [Chang et al. 2015].
+|𝜙 − 0.5| ↓
+Airplane
+Bench
+Cabinet
+Car
+Chair
+Display
+Lamp
+Loudspeaker
+Rifle
+Sofa
+Table
+Telephone
+Watercraft
+Mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+0.143
+0.153
+0.130
+0.418
+0.165
+0.101
+0.034
+0.017
+0.138
+0.141
+0.127
+0.407
+0.194
+0.105
+0.025
+0.012
+0.175
+0.171
+0.167
+0.400
+0.257
+0.130
+0.022
+0.007
+0.130
+0.143
+0.118
+0.421
+0.164
+0.087
+0.034
+0.009
+0.109
+0.108
+0.098
+0.393
+0.169
+0.090
+0.026
+0.009
+0.160
+0.159
+0.151
+0.410
+0.231
+0.122
+0.021
+0.007
+0.055
+0.058
+0.049
+0.335
+0.095
+0.052
+0.019
+0.009
+0.128
+0.127
+0.120
+0.383
+0.196
+0.100
+0.024
+0.006
+0.096
+0.094
+0.086
+0.370
+0.146
+0.076
+0.018
+0.011
+0.151
+0.149
+0.142
+0.399
+0.224
+0.116
+0.021
+0.007
+0.166
+0.161
+0.156
+0.401
+0.238
+0.134
+0.022
+0.009
+0.239
+0.238
+0.229
+0.423
+0.300
+0.194
+0.021
+0.007
+0.080
+0.083
+0.072
+0.356
+0.119
+0.062
+0.021
+0.010
+0.136
+0.137
+0.126
+0.394
+0.192
+0.105
+0.024
+0.009
+SI (%) ↓
+Airplane
+Bench
+Cabinet
+Car
+Chair
+Display
+Lamp
+Loudspeaker
+Rifle
+Sofa
+Table
+Telephone
+Watercraft
+Mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+0.00
+0.00
+100.
+0.00
+29.0
+0.00
+14.0
+0.00
+0.00
+0.00
+100.
+0.00
+21.0
+0.00
+26.0
+0.00
+0.00
+0.00
+100.
+0.00
+18.0
+0.00
+20.0
+0.00
+0.00
+0.00
+100.
+0.00
+19.0
+0.00
+14.0
+1.00
+0.00
+0.00
+100.
+0.00
+17.0
+0.00
+18.0
+0.00
+0.00
+0.00
+100.
+0.00
+12.0
+0.00
+18.0
+0.00
+0.00
+0.00
+100.
+0.00
+30.0
+0.00
+29.0
+0.00
+0.00
+0.00
+100.
+0.00
+21.0
+0.00
+19.0
+1.00
+0.00
+0.00
+100.
+0.00
+48.0
+0.00
+16.0
+0.00
+0.00
+0.00
+100.
+0.00
+16.0
+0.00
+10.0
+0.00
+0.00
+0.00
+100.
+0.00
+21.0
+0.00
+30.0
+0.00
+0.00
+0.00
+100.
+0.00
+4.00
+0.00
+10.0
+0.00
+0.00
+0.00
+100.
+0.00
+36.0
+0.00
+30.0
+2.00
+0.00
+0.00
+100.
+0.00
+22.5
+0.00
+19.5
+0.30
+Man. (%) ↑
+Airplane
+Bench
+Cabinet
+Car
+Chair
+Display
+Lamp
+Loudspeaker
+Rifle
+Sofa
+Table
+Telephone
+Watercraft
+Mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+100.
+16.0
+100.
+57.0
+27.0
+100.
+81.0
+100.
+100.
+32.0
+100.
+66.0
+44.0
+100.
+69.0
+100.
+100.
+43.0
+100.
+69.0
+65.0
+100.
+72.0
+100.
+100.
+19.0
+100.
+72.0
+43.0
+100.
+78.0
+100.
+100.
+22.0
+100.
+73.0
+41.0
+100.
+69.0
+100.
+100.
+44.0
+100.
+73.0
+68.0
+100.
+83.0
+100.
+100.
+20.0
+100.
+59.0
+28.0
+100.
+67.0
+100.
+100.
+12.0
+100.
+30.0
+33.0
+100.
+57.0
+100.
+100.
+59.0
+100.
+85.0
+65.0
+100.
+91.0
+100.
+100.
+40.0
+100.
+76.0
+71.0
+100.
+86.0
+100.
+100.
+34.0
+100.
+75.0
+52.0
+100.
+74.0
+100.
+100.
+60.0
+100.
+91.0
+78.0
+100.
+95.0
+100.
+100.
+24.0
+100.
+54.0
+42.0
+100.
+70.0
+100.
+100.
+32.6
+100.
+67.6
+50.5
+100.
+76.3
+100.
+#T
+Airplane
+Bench
+Cabinet
+Car
+Chair
+Display
+Lamp
+Loudspeaker
+Rifle
+Sofa
+Table
+Telephone
+Watercraft
+Mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+17302
+17520
+17308
+15900
+17228
+16701
+5000
+17365
+37799
+37990
+37790
+34649
+37583
+36921
+5000
+37848
+56874
+57021
+56874
+52965
+56476
+56124
+5000
+56919
+42170
+42515
+42173
+38191
+41867
+41702
+5000
+41699
+45559
+45805
+45559
+42327
+45307
+44539
+5000
+45626
+44132
+44290
+44136
+41266
+43894
+43514
+5000
+44178
+27463
+27721
+27459
+25000
+27263
+26871
+4985
+27529
+64849
+65187
+64856
+58042
+63858
+63853
+5000
+64969
+13665
+13749
+13645
+12777
+13627
+13275
+5000
+13671
+47479
+47633
+47483
+44281
+47219
+46717
+5000
+47527
+48413
+48597
+48411
+45418
+48116
+47383
+5000
+48471
+35767
+35859
+35769
+33911
+35641
+34925
+5000
+35793
+24658
+24895
+24651
+21832
+24438
+23984
+5000
+24725
+38933
+39137
+38932
+35889
+38655
+38193
+4999
+38948
+Time (s)
+Airplane
+Bench
+Cabinet
+Car
+Chair
+Display
+Lamp
+Loudspeaker
+Rifle
+Sofa
+Table
+Telephone
+Watercraft
+Mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+0.933
+1.120
+1.834
+2.959
+0.790
+1.464
+0.932
+1.339
+0.916
+1.109
+1.863
+5.193
+0.807
+2.145
+0.982
+1.741
+0.906
+1.154
+1.856
+6.913
+0.778
+2.941
+1.084
+2.113
+0.889
+1.179
+1.907
+6.026
+0.798
+2.420
+1.028
+1.838
+0.913
+1.148
+1.881
+6.464
+0.759
+2.449
+1.014
+1.918
+0.862
+1.129
+1.846
+6.401
+0.754
+2.451
+0.998
+1.853
+0.915
+1.074
+1.886
+4.019
+0.786
+1.909
+0.951
+1.531
+0.943
+1.180
+1.996
+7.773
+0.774
+3.187
+1.154
+2.363
+0.900
+1.052
+1.926
+2.753
+0.778
+1.329
+0.861
+1.187
+0.885
+1.148
+1.938
+6.643
+0.762
+2.636
+1.017
+1.997
+0.909
+1.214
+1.984
+6.266
+0.771
+2.643
+1.056
+1.990
+0.893
+1.126
+1.881
+5.422
+0.778
+2.126
+0.944
+1.717
+0.890
+1.103
+1.968
+3.790
+0.792
+1.727
+0.926
+1.390
+0.904
+1.133
+1.905
+5.432
+0.779
+2.264
+0.996
+1.767
+Occupancy-Based Dual Contouring
+Table A6. Quantitative results with SALAD [Koo et al. 2023] and
+3DShape2VecSet [Zhang et al. 2023b].
+|𝜙 − 0.5| ↓
+SALAD
+3DShape2VecSet
+airplane chair table mean airplane chair table mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+0.315
+0.322
+0.294
+0.478
+0.299
+0.214
+0.207
+0.047
+SI (%) ↓
+SALAD
+3DShape2VecSet
+airplane chair table mean airplane chair table mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+0.00
+0.00
+100.
+0.00
+49.6
+0.00
+30.0
+0.00
+0.268 0.390 0.324
+0.275 0.388 0.329
+0.248 0.374 0.305
+0.485 0.490 0.484
+0.275 0.398 0.324
+0.175 0.315 0.234
+0.170 0.335 0.237
+0.024 0.041 0.037
+0.00
+0.00
+100.
+0.00
+25.8
+0.00
+13.0
+0.00
+0.00
+0.00
+100.
+0.00
+26.2
+0.00
+26.4
+0.00
+0.00
+0.00
+100.
+0.00
+33.9
+0.00
+23.1
+0.00
+1.515
+1.597
+1.401
+9.256
+2.872
+1.639
+0.873
+0.237
+0.00
+0.00
+100.
+0.00
+26.7
+0.00
+13.3
+0.00
+1.422
+1.316
+1.314
+7.361
+2.384
+1.115
+1.013
+0.102
+0.00
+0.00
+100.
+0.00
+20.0
+0.00
+20.0
+0.00
+3.368 2.330
+3.244 2.292
+3.235 2.245
+9.932 8.824
+5.367 3.552
+3.017 1.961
+2.287 1.733
+0.135 0.112
+0.00
+0.00
+100.
+0.00
+30.0
+0.00
+20.0
+0.00
+0.00
+0.00
+100.
+0.00
+21.2
+0.00
+22.3
+0.06
+SALAD
+3DShape2VecSet
+Man. (%) ↑
+airplane chair table mean airplane chair table mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+100.
+6.00
+100.
+30.6
+10.8
+100.
+77.2
+100.
+100.
+31.0
+100.
+73.6
+50.6
+100.
+79.0
+100.
+100.
+28.4
+100.
+66.4
+50.0
+100.
+66.6
+100.
+100.
+21.8
+100.
+56.9
+37.1
+100.
+74.3
+100.
+100.
+33.3
+100.
+56.7
+40.0
+100.
+83.3
+100.
+100.
+33.3
+100.
+70.0
+46.7
+100.
+66.7
+100.
+100.
+60.0
+100.
+90.0
+60.0
+100.
+86.7
+100.
+100.
+53.2
+100.
+72.8
+53.3
+100.
+82.0
+100.
+#T
+SALAD
+3DShape2VecSet
+airplane chair table mean airplane chair table mean
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+18760
+19073
+18767
+16983
+18547
+17908
+5000
+18825
+Time (s)
+SALAD
+3DShape2VecSet
+airplane chair table mean airplane chair table mean
+37833 41118 32570
+38112 41360 32848
+37828 41116 32570
+35177 38007 30056
+37589 40404 32180
+36924 40016 31616
+5000 5000 5000
+37860 41173 32619
+20626
+20725
+20639
+18944
+20590
+19848
+5000
+20668
+67374
+67484
+67362
+61606
+66698
+66005
+5000
+67389
+65767 61445
+65845 61549
+65763 61442
+61701 56043
+65487 60993
+64692 60661
+5000 5000
+65782 61467
+1.917
+1.885
+1.964
+3.115
+0.629
+3.351
+1.157
+3.004
+1.854
+1.920
+1.961
+5.118
+0.630
+4.778
+1.229
+3.658
+1.899
+1.886
+2.008
+4.976
+0.639
+5.101
+1.280
+3.898
+1.890
+1.897
+1.978
+4.403
+0.620
+4.410
+1.222
+3.520
+0.443
+0.473
+0.522
+4.529
+0.989
+0.761
+1.835
+1.411
+0.441
+0.481
+0.527
+11.633
+0.988
+1.521
+1.849
+1.778
+0.437
+0.468
+0.525
+9.033
+0.991
+1.487
+1.562
+1.823
+0.442
+0.474
+0.529
+9.750
+0.986
+1.408
+1.814
+1.700
+17
+Table A7. Ablation study with SALAD [Koo et al. 2023].
+SALAD
+Ablation
+|𝜙 − 0.5| ↓
+SI (%) ↓
+airplane chair table mean airplane chair table mean
+MC
++ 1D search
+0.315
+0.075
+0.268 0.390 0.324
+0.039 0.059 0.058
+0.00
+0.00
+0.00
+0.00
+0.00
+0.00
+0.00
+0.00
+IC
+0.322
+0.275 0.388 0.329
+0.00
+0.00
+0.00
+0.00
+MDC
++ 1D search
++ 2D search
++ IC (=ODC)
+0.294
+0.146
+0.048
+0.047
+0.248 0.374 0.305
+0.075 0.106 0.109
+0.024 0.042 0.038
+0.024 0.041 0.037
+100.
+100.
+100.
+0.00
+100.
+100.
+100.
+0.00
+100.
+100.
+100.
+0.00
+100.
+100.
+100.
+0.00
+SALAD
+Ablation
+Man. (%) ↑
+Time (s)
+airplane chair table mean airplane chair table mean
+MC
++ 1D search
+100.
+100.
+IC
+MDC
++ 1D search
++ 2D search
++ IC (=ODC)
+SALAD
+Ablation
+100.
+100.
+100.
+100.
+100.
+100.
+1.9
+1.9
+1.9
+2.0
+1.9
+2.0
+1.9
+2.0
+6.00
+31.0
+28.4
+21.8
+1.9
+1.9
+1.9
+1.9
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+100.
+2.0
+2.1
+2.8
+3.0
+2.0
+2.3
+3.8
+3.7
+2.0
+2.3
+3.8
+3.9
+2.0
+2.2
+3.5
+3.5
+#V
+#T
+airplane chair table mean airplane chair table mean
+MC
++ 1D search
+9384
+9384
+18915 20558 16286
+18914 20558 16285
+18760
+18758
+37833 41118 32570
+37833 41118 32570
+IC
+9531
+19049 20674 16418
+19073
+38112 41360 32848
+MDC
++ 1D search
++ 2D search
++ IC (=ODC)
+9388
+9388
+9388
+9417
+18913 20557 16286
+18913 20557 16286
+18913 20557 16286
+18929 20586 16310
+18767
+18767
+18767
+18825
+37828 41116 32570
+37829 41115 32570
+37829 41115 32570
+37860 41173 32619
+Table A8. Ablation study with Myles’s dataset [Myles et al. 2014]. The input
+is given by an occupancy function. † The method also requires the gradient
+of the SDF due to its specifications.
+Myles’
+Ablation
+MD2 ↓
+(×106 )
+NIC ↓
+HDD ↓
+(×102 )
+#T
+SI ↓
+(%)
+Man. ↑
+(%)
+MC
++ 1D search
+2.261
+0.208
+0.366
+0.093
+0.894
+0.792
+77944
+77934
+0.00
+0.00
+100.
+100.
+IC
+2.808
+0.583
+0.959
+80267
+0.00
+11.4
+1.857
+0.545
+0.114
+0.113
+1.042
+0.307
+0.098
+0.072
+2.309
+2.166
+1.079
+0.632
+77926
+77926
+77926
+78142
+100.
+100.
+98.7
+0.00
+100.
+100.
+100.
+100.
+† MDC
+MC
+IC
+MDC
+LMC
+NDC
+CDIF
+MISE
+ODC
+•
+† + 1D search
++ 2D search
++ IC (=ODC)
+18
+•
+Jisung Hwang and Minhyuk Sung
+MC [2003]
+IC [2006]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011]
+MISE [2019]
+A 3D model of chair; Banqueta.
+A 3D model of flying monster; Cute monster in the form of flying birds, with 2 feet.
+A 3D model of standing monster; Cute four-legged monster, with 4 feet.
+A 3D model of suitcase; Leather Suitcase.
+A 3D model of sandshrew monster; Cute monster in the form of mountain armor, with 2 feet and 2 hands.
+A 3D model of trash barrel; Thomas Steele Litter CRTR-32.
+A 3D model of psi monster; The standing humanoid shape of the monster, with 2 feet and 2 hands.
+A 3d model of the monster; Cute monster in the form of a bear, with 2 feet and 2 hands.
+Fig. A2. Qualitative results with text-conditioned generation of Michelangelo [Zhao et al. 2024].
+ODC (ours)
+Occupancy-Based Dual Contouring
+Input
+MC [2003]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011]
+MISE [2019]
+Fig. A3. Qualitative results with image-conditioned generation of Michelangelo [Zhao et al. 2024].
+•
+ODC (ours)
+19
+20 •
+Jisung Hwang and Minhyuk Sung
+MC [2003]
+IC [2006]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011]
+MISE [2019]
+Fig. A4. Qualitative results with IM-NET [Chen and Zhang 2019] pretrained on ShapeNet [Chang et al. 2015].
+ODC (ours)
+Occupancy-Based Dual Contouring
+MC [2003]
+IC [2006]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011]
+MISE [2019] PoNQ [2024]
+•
+ODC (ours)
+Fig. A5. Qualitative results with DeepSDF [Park et al. 2019] encoding shapes from ABC dataset [Koch et al. 2019].
+MC [2003]
+IC [2006]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011]
+MISE [2019]
+Fig. A6. Qualitative results with unconditional generation of SALAD [Koo et al. 2023].
+ODC (ours)
+21
+22 •
+Jisung Hwang and Minhyuk Sung
+MC [2003]
+IC [2006]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011]
+MISE [2019]
+Fig. A7. Qualitative results with unconditional generation of SALAD [Koo et al. 2023].
+ODC (ours)
+Occupancy-Based Dual Contouring
+MC [2003]
+IC [2006]
+MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011]
+MISE [2019]
+Fig. A8. Qualitative results with generation of 3DShape2VecSet [Zhang et al. 2023b].
+•
+ODC (ours)
+23
+24 •
+Jisung Hwang and Minhyuk Sung
+MC [2003]
+† IC [2006]
+† MDC [2007]
+LMC [2010]
+NDC [2022]
+CDIF [2011] † MISE [2019]
+ODC (ours)
+GT
+Fig. A9. Qualitative results with Myles’ dataset [Myles et al. 2014]. The input is provided by an occupancy function. † The method also requires the gradient of
+the SDF due to its specifications.
+Occupancy-Based Dual Contouring
+MC [2003]
++ 1D Search
+IC [2006]
+MDC [2007]
++ 1D Search
++ 2D Search
+•
+25
++ IC (=ODC)
+Fig. A10. Ablation studies with unconditional generation of SALAD [Koo et al. 2023]. The second column from the left represents MC with 1D point search,
+while the rightmost three columns correspond to MDC with 1D point search and gradient as a normal, MDC with 1D and 2D point search, and ODC,
+respectively.
+MC [2003]
++ 1D Search
+† IC [2006]
+† MDC [2007]
+† + 1D Search
++ 2D Search
++ IC (=ODC)
+GT
+Fig. A11. Ablation studies with Myles’ [Myles et al. 2014] dataset. The input is provided by an occupancy function. † The method also requires the gradient of
+the SDF due to its specifications. The second column from the left represents MC with 1D point search, while the rightmost four columns correspond to MDC
+with 1D point search and gradient as local surface normal, MDC with 1D and 2D point search, ODC, and the ground truth shape, respectively.

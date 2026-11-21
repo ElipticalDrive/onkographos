@@ -1,0 +1,763 @@
+# LaFortuna-SDF-Ray-marching
+Experiment using signed distance functions to draw... very slowly...
+  Experiment using signed distance functions to draw... very slowly... 
+  Author: JPK - james@jamespking.com 
+  
+  Licence: This work is licensed under the Creative Commons Attribution License. 
+            View this license at http://creativecommons.org/about/licenses/ 
+  
+  
+  
+  Acknowledgements: 
+  
+  Inspired by the brilliant computer graphics artist Inigo Quilez (https://www.iquilezles.org/).  
+  
+  Ray marching algo adapted from http://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/ 
+  
+  Primitive SDFs from https://iquilezles.org/www/articles/distfunctions/distfunctions.htm 
+  
+  LCD code by Steve Gunn 
+  
+  Build/Makefile by Klaus-Peter Zauner 
+  
+  # Motivation 
+  I found Inigo Quilez's Youtube channel earlier on in the year thanks to Tristan Hume's blog (https://thume.ca). Since then, I've been 
+  interested in taking a look at the techniques he uses and SDFs are a major part of that. I've kept this very basic, it just renders 
+  SDFs using a colour which is dependent distance a ray traveled (no lighting effects, until you add them). It's slow, but it was fun 
+  to implement. 
+  
+  # What you'll need 
+  Your La Fortuna (board with a AT90USB1286 microcontroller) and the toolchain configured. 
+  
+  Fork the repo, clone, and then just make. 
+  
+  # Signed Distance Functions 
+  The name gives it away. These functions return the shortest distance to the surface of a shape from a given point in space. 
+  When the point is inside the shape, they are negative. We can combine SDFs for different shapes to make a more complex scene SDF. 
+  
+  # Drawing with SDFs 
+  To get an image we need to render the SDF. To do this we consider the grid of pixels which make the display and put a camera in front. 
+  The camera iteratively considers rays going through these pixels, and the ray marching algorithm is used to decide if the ray collides 
+  with an object and if so what the depth is. 
+  
+  # Ray marching algorithm 
+  The goal of ray marching is to decide if a ray collides with an object in the scene and if so what the depth is. 
+  Each ray is described by a direction vector. Since the SDF returns the shortest distance to the surface of an object, we can safely move 
+  that far along the direction vector. This happens iteratively until either the SDF returns (about) 0 (indicating that we are at the surface), 
+  the number of iterations reaches a limit, or the total distance moved exceeds the draw distance.
+
+### main.c
+```
+/**
+ * Experiment using signed distance functions to draw... very slowly...
+ * Author: JPK - james@jamespking.com
+ *
+ * Licence: This work is licensed under the Creative Commons Attribution License.
+ *           View this license at http://creativecommons.org/about/licenses/
+ *
+ *
+ *
+ * Acknowledgements:
+ *
+ * Inspired by the brilliant computer graphics artist Inigo Quilez (https://www.iquilezles.org/). 
+ *
+ * Ray marching algo adapted from http://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/
+ *
+ * Primitive SDFs from https://iquilezles.org/www/articles/distfunctions/distfunctions.htm
+ *
+ * LCD code by Steve Gunn
+ *
+ * Build/Makefile by Klaus-Peter Zauner
+ *
+ * # Motivation
+ * I found Inigo Quilez's Youtube channel earlier on in the year thanks to Tristan Hume's blog (https://thume.ca). Since then, I've been
+ * interested in taking a look at the techniques he uses and SDFs are a major part of that. I've kept this very basic, it just renders
+ * SDFs using a colour which is dependent distance a ray traveled (no lighting effects, until you add them). It's slow, but it was fun
+ * to implement.
+ *
+ * # What you'll need
+ * Your La Fortuna (board with a AT90USB1286 microcontroller) and the toolchain configured.
+ *
+ * Fork the repo, clone, and then just make.
+ *
+ * # Signed Distance Functions
+ * The name gives it away. These functions return the shortest distance to the surface of a shape from a given point in space.
+ * When the point is inside the shape, they are negative. We can combine SDFs for different shapes to make a more complex scene SDF.
+ *
+ * # Drawing with SDFs
+ * To get an image we need to render the SDF. To do this we consider the grid of pixels which make the display and put a camera in front.
+ * The camera iteratively considers rays going through these pixels, and the ray marching algorithm is used to decide if the ray collides
+ * with an object and if so what the depth is.
+ *
+ * # Ray marching algorithm
+ * The goal of ray marching is to decide if a ray collides with an object in the scene and if so what the depth is.
+ * Each ray is described by a direction vector. Since the SDF returns the shortest distance to the surface of an object, we can safely move
+ * that far along the direction vector. This happens iteratively until either the SDF returns (about) 0 (indicating that we are at the surface),
+ * the number of iterations reaches a limit, or the total distance moved exceeds the draw distance.
+ *
+ */
+
+#include <avr/io.h>
+#include "lcd/lcd.h"
+#include "math.h"
+
+
+const int camera_x = 159;
+const int camera_y = 119;
+const int camera_z = -100;
+const int ep = 2;
+const int MAX_MARCH = 50;
+const double MAX_DEPTH = 180;
+
+void init(void);
+double raymarch(int x, int y, int t);
+double sdf(double x, double y, double z, int t);
+double unionSDF(double a, double b);
+double differenceSDF(double a, double b);
+double sphereSDF(double p_x, double p_y, double p_z, double radius);
+double torusSDF(double x, double y, double z, double r, double t);
+
+
+void main(void) {
+	uint16_t color;
+	init();
+
+	// Add a background
+	rectangle bg = {0,319,0,239};
+	fill_rectangle(bg, BLACK);
+
+
+	// time ticks
+	for (int t = 0; t <= 1000; t += 1) {
+		// loop through x and y axis, uses bigger step size to speed up rendering
+		for (int x = 0; x < 320; x += 10) {
+			for (int y = 0; y < 240; y += 10) {
+				double distance = raymarch(x, y, t);
+				// 'pixel' being drawn, bigger so it looks better with the big step size
+				rectangle pix = {x, x+2,y,y+2};
+
+				if (distance < MAX_DEPTH) {
+					// jank colour choice, based on distance. From white to black depending on distance.
+					if (distance < 0) {
+						color = WHITE;
+					} else if (distance < 100) {
+						color = ((31 - (uint16_t) fabs(distance * 0.31)) << 11) // red
+							+ ((63 - (uint16_t) fabs(distance * 0.63)) << 5) // green 
+							+ (31 - (uint16_t) fabs(distance * 0.2)); // blue
+					} else if (distance < 300) {
+						color = BLACK;
+					}
+
+					fill_rectangle(pix, color);
+				} else {
+					// no collision, colour changes so you can see backdrop being drawn 
+					fill_rectangle(pix, 0x0005 + 5*t);
+				}
+
+			} 
+		}
+	}
+}
+
+// Decide if a ray, going through pixel (x, y) at time t collides with an object in the scene and if so what the depth is
+double raymarch(int x, int y, int t) {
+	// Normalise the vector pointing from the camera to the pixel at (x, y, 0), so we have a direction
+	double dir_magnitude = sqrt((x - camera_x)*(x - camera_x) + (y - camera_y)*(y - camera_y) + camera_z*camera_z);
+	double dir_x = (x - camera_x) / dir_magnitude;
+	double dir_y = (y - camera_y) / dir_magnitude;
+	double dir_z = (0 - camera_z) / dir_magnitude;
+
+	double depth = 0;
+
+	// Step along the ray
+	for (int i = 0; i < MAX_MARCH; i++) {
+		// Distance to nearest scene surface from the point which is distance depth in previously calculated direction
+		double distanceSDF = sdf(camera_x + depth * dir_x, camera_y + depth * dir_y, camera_z + depth * dir_z, t); 
+
+		// If distance is small we are done
+		if (distanceSDF < ep) {
+			return depth;
+		}
+
+		depth += distanceSDF;
+
+		if (depth >= MAX_DEPTH) {
+			return MAX_DEPTH;
+		}
+	}
+
+	return MAX_DEPTH;
+}
+
+
+// Returns the distance of the closest surface to the point (x, y, z) at time t
+// This is where we set up the sample scene (rotating donuts)
+double sdf(double x, double y, double z, int t) {
+	// Set the center for each object we put in the scene
+	// In this case, I set all the objects to be centered in the screen
+	double p_x = x - camera_x;
+	double p_y = y - camera_y;
+	double p_z = z - camera_z - 60; // and 60px behind the screen
+	double theta = 10 * t * 0.017; // angle for rotations, moves in steps of 10 deg, translated to radians
+	double bob = sin(t * 0.017 * 10) * 15; // for periodic motion
+	double c = cos(theta); // for rotations
+	double s = sin(theta);
+
+	// The scene is build from the union of two torus primitives and a sphere
+	// Each torus is rotated, the first about the x axis and the other about y
+	// 	These are calculated by multiplying out the elemental rotation matrices with 
+	// 	the origin of the object
+	// The sphere bobs up and down by changing its y position
+	return unionSDF(torusSDF(p_x, c * p_y - s * p_z, s * p_y + c * p_z, 30, 5),
+			unionSDF(sphereSDF(p_x, p_y + bob, p_z, 10),
+				torusSDF(c * p_x + s * p_z, p_y, -s * p_x + c * p_z, 45, 5)));
+}
+
+
+// Primitive SDFs and combinations
+double unionSDF(double a, double b) {
+	return fmin(a, b);
+}
+
+double differenceSDF(double a, double b) {
+	return fmax(a, -b);
+}
+
+double sphereSDF(double p_x, double p_y, double p_z, double radius) {
+	return sqrt(p_x*p_x + p_y*p_y + p_z*p_z) - radius;
+}
+
+// Donut shape.
+// y, z switched since we look from point on x axis, so rotates to stand up
+double torusSDF(double x, double z, double y, double r, double t) {
+	double q_x = sqrt(x*x + z*z) - r;
+	double q_y = y;
+	return sqrt(q_x*q_x + q_y*q_y) - t;
+}
+
+
+void init(void) {    
+	/* 8MHz clock, no prescaling (DS, p. 48) */
+	/* How do I overclock this thing? ;) */
+	CLKPR = (1 << CLKPCE);
+	CLKPR = 0;
+
+	init_lcd();
+}
+```
+
+### lcd/font.h
+```
+/*  Author: Steve Gunn
+ * Licence: This work is licensed under the Creative Commons Attribution License.
+ *           View this license at http://creativecommons.org/about/licenses/
+ */
+
+#include <avr/pgmspace.h>
+
+const char font5x7[] PROGMEM = {
+	0x00, 0x00, 0x00, 0x00, 0x00, // SPACE
+	0x00, 0x00, 0x5F, 0x00, 0x00, // !
+	0x00, 0x03, 0x00, 0x03, 0x00, // "
+	0x14, 0x3E, 0x14, 0x3E, 0x14, // #
+	0x24, 0x2A, 0x7F, 0x2A, 0x12, // $
+	0x43, 0x33, 0x08, 0x66, 0x61, // %
+	0x36, 0x49, 0x55, 0x22, 0x50, // &
+	0x00, 0x05, 0x03, 0x00, 0x00, // '
+	0x00, 0x1C, 0x22, 0x41, 0x00, // (
+	0x00, 0x41, 0x22, 0x1C, 0x00, // )
+	0x14, 0x08, 0x3E, 0x08, 0x14, // *
+	0x08, 0x08, 0x3E, 0x08, 0x08, // +
+	0x00, 0x50, 0x30, 0x00, 0x00, // ,
+	0x08, 0x08, 0x08, 0x08, 0x08, // -
+	0x00, 0x60, 0x60, 0x00, 0x00, // .
+	0x20, 0x10, 0x08, 0x04, 0x02, // /
+	0x3E, 0x51, 0x49, 0x45, 0x3E, // 0
+	0x00, 0x04, 0x02, 0x7F, 0x00, // 1
+	0x42, 0x61, 0x51, 0x49, 0x46, // 2
+	0x22, 0x41, 0x49, 0x49, 0x36, // 3
+	0x18, 0x14, 0x12, 0x7F, 0x10, // 4
+	0x27, 0x45, 0x45, 0x45, 0x39, // 5
+	0x3E, 0x49, 0x49, 0x49, 0x32, // 6
+	0x01, 0x01, 0x71, 0x09, 0x07, // 7
+	0x36, 0x49, 0x49, 0x49, 0x36, // 8
+	0x26, 0x49, 0x49, 0x49, 0x3E, // 9
+	0x00, 0x36, 0x36, 0x00, 0x00, // :
+	0x00, 0x56, 0x36, 0x00, 0x00, // ;
+	0x08, 0x14, 0x22, 0x41, 0x00, // <
+	0x14, 0x14, 0x14, 0x14, 0x14, // =
+	0x00, 0x41, 0x22, 0x14, 0x08, // >
+	0x02, 0x01, 0x51, 0x09, 0x06, // ?
+	0x3E, 0x41, 0x59, 0x55, 0x5E, // @
+	0x7E, 0x09, 0x09, 0x09, 0x7E, // A
+	0x7F, 0x49, 0x49, 0x49, 0x36, // B
+	0x3E, 0x41, 0x41, 0x41, 0x22, // C
+	0x7F, 0x41, 0x41, 0x41, 0x3E, // D
+	0x7F, 0x49, 0x49, 0x49, 0x41, // E
+	0x7F, 0x09, 0x09, 0x09, 0x01, // F
+	0x3E, 0x41, 0x41, 0x49, 0x3A, // G
+	0x7F, 0x08, 0x08, 0x08, 0x7F, // H
+	0x00, 0x41, 0x7F, 0x41, 0x00, // I
+	0x30, 0x40, 0x40, 0x40, 0x3F, // J
+	0x7F, 0x08, 0x14, 0x22, 0x41, // K
+	0x7F, 0x40, 0x40, 0x40, 0x40, // L
+	0x7F, 0x02, 0x0C, 0x02, 0x7F, // M
+	0x7F, 0x02, 0x04, 0x08, 0x7F, // N
+	0x3E, 0x41, 0x41, 0x41, 0x3E, // O
+	0x7F, 0x09, 0x09, 0x09, 0x06, // P
+	0x1E, 0x21, 0x21, 0x21, 0x5E, // Q
+	0x7F, 0x09, 0x09, 0x09, 0x76, // R
+	0x26, 0x49, 0x49, 0x49, 0x32, // S
+	0x01, 0x01, 0x7F, 0x01, 0x01, // T
+	0x3F, 0x40, 0x40, 0x40, 0x3F, // U
+	0x1F, 0x20, 0x40, 0x20, 0x1F, // V
+	0x7F, 0x20, 0x10, 0x20, 0x7F, // W
+	0x41, 0x22, 0x1C, 0x22, 0x41, // X
+	0x07, 0x08, 0x70, 0x08, 0x07, // Y
+	0x61, 0x51, 0x49, 0x45, 0x43, // Z
+	0x00, 0x7F, 0x41, 0x00, 0x00, // [
+	0x02, 0x04, 0x08, 0x10, 0x20, // slash 
+	0x00, 0x00, 0x41, 0x7F, 0x00, // ]
+	0x04, 0x02, 0x01, 0x02, 0x04, // ^
+	0x40, 0x40, 0x40, 0x40, 0x40, // _
+	0x00, 0x01, 0x02, 0x04, 0x00, // `
+	0x20, 0x54, 0x54, 0x54, 0x78, // a
+	0x7F, 0x44, 0x44, 0x44, 0x38, // b
+	0x38, 0x44, 0x44, 0x44, 0x44, // c
+	0x38, 0x44, 0x44, 0x44, 0x7F, // d
+	0x38, 0x54, 0x54, 0x54, 0x18, // e
+	0x04, 0x04, 0x7E, 0x05, 0x05, // f
+	0x08, 0x54, 0x54, 0x54, 0x3C, // g
+	0x7F, 0x08, 0x04, 0x04, 0x78, // h
+	0x00, 0x44, 0x7D, 0x40, 0x00, // i
+	0x20, 0x40, 0x44, 0x3D, 0x00, // j
+	0x7F, 0x10, 0x28, 0x44, 0x00, // k
+	0x00, 0x41, 0x7F, 0x40, 0x00, // l
+	0x7C, 0x04, 0x78, 0x04, 0x78, // m
+	0x7C, 0x08, 0x04, 0x04, 0x78, // n
+	0x38, 0x44, 0x44, 0x44, 0x38, // o
+	0x7C, 0x14, 0x14, 0x14, 0x08, // p
+	0x08, 0x14, 0x14, 0x14, 0x7C, // q
+	0x00, 0x7C, 0x08, 0x04, 0x04, // r
+	0x48, 0x54, 0x54, 0x54, 0x20, // s
+	0x04, 0x04, 0x3F, 0x44, 0x44, // t
+	0x3C, 0x40, 0x40, 0x20, 0x7C, // u
+	0x1C, 0x20, 0x40, 0x20, 0x1C, // v
+	0x3C, 0x40, 0x30, 0x40, 0x3C, // w
+	0x44, 0x28, 0x10, 0x28, 0x44, // x
+	0x0C, 0x50, 0x50, 0x50, 0x3C, // y
+	0x44, 0x64, 0x54, 0x4C, 0x44, // z
+	0x00, 0x08, 0x36, 0x41, 0x41, // {
+	0x00, 0x00, 0x7F, 0x00, 0x00, // |
+	0x41, 0x41, 0x36, 0x08, 0x00, // }
+	0x02, 0x01, 0x02, 0x04, 0x02};// ~
+```
+
+### lcd/ili934x.h
+```
+/*  Author: Steve Gunn
+ * Licence: This work is licensed under the Creative Commons Attribution License.
+ *           View this license at http://creativecommons.org/about/licenses/
+ */
+
+#define BLC			4
+#define RESET		7
+
+#define CMD_ADDR  0x4000
+#define DATA_ADDR 0x4100
+
+#define write_cmd(cmd)				asm volatile("sts %0,%1" :: "i" (CMD_ADDR), "r" (cmd) : "memory");
+#define write_data(data)			asm volatile("sts %0,%1" :: "i" (DATA_ADDR), "r" (data) : "memory");
+#define write_data16(data)			asm volatile("sts %0,%B1 \n\t sts %0,%A1" :: "i" (DATA_ADDR), "r" (data)  : "memory");
+#define write_cmd_data(cmd, data)	asm volatile("sts %0,%1 \n\t sts %2,%3" :: "i" (CMD_ADDR), "r" (cmd), "i" (DATA_ADDR), "r" (data)  : "memory");
+  
+/* Basic Commands */
+#define NO_OPERATION								0x00
+#define SOFTWARE_RESET								0x01
+#define READ_DISPLAY_IDENTIFICATION_INFORMATION		0x04
+#define READ_DISPLAY_STATUS							0x09
+#define READ_DISPLAY_POWER_MODE						0x0A
+#define READ_DISPLAY_MADCTL							0x0B
+#define READ_DISPLAY_PIXEL_FORMAT					0x0C
+#define READ_DISPLAY_IMAGE_FORMAT					0x0D
+#define READ_DISPLAY_SIGNAL_MODE					0x0E
+#define READ_DISPLAY_SELF_DIAGNOSTIC_RESULT			0x0F
+#define ENTER_SLEEP_MODE							0x10
+#define SLEEP_OUT									0x11	
+#define PARTIAL_MODE_ON								0x12
+#define NORMAL_DISPLAY_MODE_ON						0x13
+#define DISPLAY_INVERSION_OFF						0x20
+#define DISPLAY_INVERSION_ON						0x21
+#define GAMMA_SET									0x26
+#define DISPLAY_OFF									0x28
+#define DISPLAY_ON									0x29
+#define COLUMN_ADDRESS_SET							0x2A
+#define PAGE_ADDRESS_SET							0x2B
+#define MEMORY_WRITE								0x2C
+#define COLOR_SET									0x2D
+#define MEMORY_READ									0x2E
+#define PARTIAL_AREA								0x30
+#define VERTICAL_SCROLLING_DEFINITION				0x33
+#define TEARING_EFFECT_LINE_OFF						0x34
+#define TEARING_EFFECT_LINE_ON						0x35
+#define MEMORY_ACCESS_CONTROL						0x36	
+#define VERTICAL_SCROLLING_START_ADDRESS			0x37
+#define IDLE_MODE_OFF								0x38
+#define IDLE_MODE_ON								0x39
+#define PIXEL_FORMAT_SET							0x3A
+#define WRITE_MEMORY_CONTINUE						0x3C
+#define READ_MEMORY_CONTINUE						0x3E
+#define SET_TEAR_SCANLINE							0x44
+#define GET_SCANLINE								0x45
+#define WRITE_DISPLAY_BRIGHTNESS					0x51
+#define READ_DISPLAY_BRIGHTNESS						0x52
+#define WRITE_CTRL_DISPLAY							0x53
+#define READ_CTRL_DISPLAY							0x54
+#define WRITE_CONTENT_ADAPTIVE_BRIGHTNESS_CONTROL	0x55
+#define READ_CONTENT_ADAPTIVE_BRIGHTNESS_CONTROL	0x56
+#define WRITE_CABC_MINIMUM_BRIGHTNESS				0x5E
+#define READ_CABC_MINIMUM_BRIGHTNESS				0x5F
+#define READ_ID1									0xDA
+#define READ_ID2									0xDB
+#define READ_ID3									0xDC
+
+/* Extended Commands */
+#define RGB_INTERFACE_SIGNAL_CONTROL				0xB0
+#define FRAME_CONTROL_IN_NORMAL_MODE				0xB1
+#define FRAME_CONTROL_IN_IDLE_MODE					0xB2
+#define FRAME_CONTROL_IN_PARTIAL_MODE				0xB3
+#define DISPLAY_INVERSION_CONTROL					0xB4
+#define BLANKING_PORCH_CONTROL						0xB5
+#define DISPLAY_FUNCTION_CONTROL					0xB6
+#define ENTRY_MODE_SET								0xB7
+#define BACKLIGHT_CONTROL_1							0xB8
+#define BACKLIGHT_CONTROL_2							0xB9
+#define BACKLIGHT_CONTROL_3							0xBA
+#define BACKLIGHT_CONTROL_4							0xBB
+#define BACKLIGHT_CONTROL_5							0xBC
+#define BACKLIGHT_CONTROL_7							0xBE
+#define BACKLIGHT_CONTROL_8							0xBF
+#define POWER_CONTROL_1								0xC0
+#define POWER_CONTROL_2								0xC1
+#define POWER_CONTROL3_(FOR_NORMAL_MODE)			0xC2
+#define POWER_CONTROL4_(FOR_IDLE_MODE)				0xC3
+#define POWER_CONTROL5_(FOR_PARTIAL_MODE)			0xC4
+#define VCOM_CONTROL_1								0xC5
+#define VCOM_CONTROL_2								0xC7
+#define NV_MEMORY_WRITE								0xD0
+#define NV_MEMORY_PROTECTION_KEY					0xD1
+#define NV_MEMORY_STATUS_READ						0xD2
+#define READ_ID4									0xD3
+#define POSITIVE_GAMM_CORRECTION					0xE0
+#define NEGATIVE_GAMMA_CORRECTION					0xE1
+#define DIGITAL_GAMMA_CONTROL						0xE2
+#define DIGITAL_GAMMA_CONTROL2						0xE3
+#define INTERFACE_CONTROL							0xF6
+
+/* Undocumented commands */
+#define INTERNAL_IC_SETTING							0xCB
+#define GAMMA_DISABLE								0xF2
+```
+
+### lcd/lcd.c
+```
+/*  Author: Steve Gunn
+ * Licence: This work is licensed under the Creative Commons Attribution License.
+ *           View this license at http://creativecommons.org/about/licenses/
+ *
+ *  
+ *  - Jan 2015  Modified for LaFortuna (Rev A, black edition) [KPZ]
+ */
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include "font.h"
+#include "ili934x.h"
+#include "lcd.h"
+#include "math.h"
+
+lcd display;
+
+void init_lcd()
+{
+    /* Enable extended memory interface with 10 bit addressing */
+    XMCRB = _BV(XMM2) | _BV(XMM1);
+    XMCRA = _BV(SRE);
+    DDRC |= _BV(RESET);
+    DDRB |= _BV(BLC);
+    _delay_ms(1);
+    PORTC &= ~_BV(RESET);
+    _delay_ms(20);
+    PORTC |= _BV(RESET);
+    _delay_ms(120);
+    write_cmd(DISPLAY_OFF);
+    write_cmd(SLEEP_OUT);
+    _delay_ms(60);
+    write_cmd_data(INTERNAL_IC_SETTING,          0x01);
+    write_cmd(POWER_CONTROL_1);
+        write_data16(0x2608);
+    write_cmd_data(POWER_CONTROL_2,              0x10);
+    write_cmd(VCOM_CONTROL_1);
+        write_data16(0x353E);
+    write_cmd_data(VCOM_CONTROL_2, 0xB5);
+    write_cmd_data(INTERFACE_CONTROL, 0x01);
+        write_data16(0x0000);
+    write_cmd_data(PIXEL_FORMAT_SET, 0x55);     /* 16bit/pixel */
+    set_orientation(West);
+    clear_screen();
+    display.x = 0;
+    display.y = 0;
+    display.background = BLACK;
+    display.foreground = WHITE;
+    write_cmd(DISPLAY_ON);
+    _delay_ms(50);
+    write_cmd_data(TEARING_EFFECT_LINE_ON, 0x00);
+    EICRB |= _BV(ISC61);
+    PORTB |= _BV(BLC);
+}
+
+void lcd_brightness(uint8_t i)
+{
+    /* Configure Timer 2 Fast PWM Mode 3 */
+    TCCR2A = _BV(COM2A1) | _BV(WGM21) | _BV(WGM20);
+    TCCR2B = _BV(CS20);
+    OCR2A = i;
+}
+
+void set_orientation(orientation o)
+{
+    display.orient = o;
+    write_cmd(MEMORY_ACCESS_CONTROL);
+    if (o==North) { 
+        display.width = LCDWIDTH;
+        display.height = LCDHEIGHT;
+        write_data(0x48);
+    }
+    else if (o==West) {
+        display.width = LCDHEIGHT;
+        display.height = LCDWIDTH;
+        write_data(0xE8);
+    }
+    else if (o==South) {
+        display.width = LCDWIDTH;
+        display.height = LCDHEIGHT;
+        write_data(0x88);
+    }
+    else if (o==East) {
+        display.width = LCDHEIGHT;
+        display.height = LCDWIDTH;
+        write_data(0x28);
+    }
+    write_cmd(COLUMN_ADDRESS_SET);
+    write_data16(0);
+    write_data16(display.width-1);
+    write_cmd(PAGE_ADDRESS_SET);
+    write_data16(0);
+    write_data16(display.height-1);
+}
+
+
+
+void set_frame_rate_hz(uint8_t f)
+{
+    uint8_t diva, rtna, period;
+    if (f>118)
+        f = 118;
+    if (f<8)
+        f = 8;
+    if (f>60) {
+        diva = 0x00;
+    } else if (f>30) {
+        diva = 0x01;
+    } else if (f>15) {
+        diva = 0x02;
+    } else {
+        diva = 0x03;
+    }
+    /*   !!! FIXME !!!  [KPZ-30.01.2015] */
+    /*   Check whether this works for diva > 0  */
+    /*   See ILI9341 datasheet, page 155  */
+    period = 1920.0/f;
+    rtna = period >> diva;
+    write_cmd(FRAME_CONTROL_IN_NORMAL_MODE);
+    write_data(diva);
+    write_data(rtna);
+}
+
+void fill_rectangle(rectangle r, uint16_t col)
+{
+    write_cmd(COLUMN_ADDRESS_SET);
+    write_data16(r.left);
+    write_data16(r.right);
+    write_cmd(PAGE_ADDRESS_SET);
+    write_data16(r.top);
+    write_data16(r.bottom);
+    write_cmd(MEMORY_WRITE);
+/*  uint16_t x, y;
+    for(x=r.left; x<=r.right; x++)
+        for(y=r.top; y<=r.bottom; y++)
+            write_data16(col);
+*/
+    uint16_t wpixels = r.right - r.left + 1;
+    uint16_t hpixels = r.bottom - r.top + 1;
+    uint8_t mod8, div8;
+    uint16_t odm8, odd8;
+    if (hpixels > wpixels) {
+        mod8 = hpixels & 0x07;
+        div8 = hpixels >> 3;
+        odm8 = wpixels*mod8;
+        odd8 = wpixels*div8;
+    } else {
+        mod8 = wpixels & 0x07;
+        div8 = wpixels >> 3;
+        odm8 = hpixels*mod8;
+        odd8 = hpixels*div8;
+    }
+    uint8_t pix1 = odm8 & 0x07;
+    while(pix1--)
+        write_data16(col);
+
+    uint16_t pix8 = odd8 + (odm8 >> 3);
+    while(pix8--) {
+        write_data16(col);
+        write_data16(col);
+        write_data16(col);
+        write_data16(col);
+        write_data16(col);
+        write_data16(col);
+        write_data16(col);
+        write_data16(col);
+    }
+}
+
+void fill_rectangle_indexed(rectangle r, uint16_t* col)
+{
+    uint16_t x, y;
+    write_cmd(COLUMN_ADDRESS_SET);
+    write_data16(r.left);
+    write_data16(r.right);
+    write_cmd(PAGE_ADDRESS_SET);
+    write_data16(r.top);
+    write_data16(r.bottom);
+    write_cmd(MEMORY_WRITE);
+    for(x=r.left; x<=r.right; x++)
+        for(y=r.top; y<=r.bottom; y++)
+            write_data16(*col++);
+}
+
+void clear_screen()
+{
+    display.x = 0;
+    display.y = 0;
+    rectangle r = {0, display.width-1, 0, display.height-1};
+    fill_rectangle(r, display.background);
+}
+
+void display_char(char c)
+{
+    uint16_t x, y;
+    PGM_P fdata; 
+    uint8_t bits, mask;
+    
+    if (display.x + 6 >= display.width ) { display.x=0; display.y+=8; }
+    if (display.y + 8 >= display.height ) {display.x=0; display.y=0; clear_screen();}
+
+    uint16_t sc=display.x, ec=display.x + 4, sp=display.y, ep=display.y + 7;
+    
+    if (c == 10) { display.x=0; display.y+=8; }
+    
+    if (c < 32 || c > 126) return;
+    fdata = (c - ' ')*5 + font5x7;
+    write_cmd(PAGE_ADDRESS_SET);
+    write_data16(sp);
+    write_data16(ep);
+    for(x=sc; x<=ec; x++) {
+        write_cmd(COLUMN_ADDRESS_SET);
+        write_data16(x);
+        write_data16(x);
+        write_cmd(MEMORY_WRITE);
+        bits = pgm_read_byte(fdata++);
+        for(y=sp, mask=0x01; y<=ep; y++, mask<<=1)
+            write_data16((bits & mask) ? display.foreground : display.background);
+    }
+    write_cmd(COLUMN_ADDRESS_SET);
+    write_data16(x);
+    write_data16(x);
+    write_cmd(MEMORY_WRITE);
+    for(y=sp; y<=ep; y++)
+        write_data16(display.background);
+
+    display.x += 6;
+    
+
+}
+
+void display_string(char *str)
+{
+    uint8_t i;
+    for(i=0; str[i]; i++) 
+        display_char(str[i]);
+}
+
+void display_string_xy(char *str, uint16_t x, uint16_t y)
+{
+    uint8_t i;
+    display.x = x;
+    display.y = y;
+    for(i=0; str[i]; i++)
+        display_char(str[i]);
+}
+```
+
+### lcd/lcd.h
+```
+/*  Author: Steve Gunn
+ * Licence: This work is licensed under the Creative Commons Attribution License.
+ *           View this license at http://creativecommons.org/about/licenses/
+ */
+ 
+#include <avr/io.h>
+#include <stdint.h>
+
+
+#define LCDWIDTH	240
+#define LCDHEIGHT	320
+
+/* Colour definitions RGB565 */
+#define WHITE       0xFFFF
+#define BLACK       0x0000
+#define BLUE        0x001F      
+#define GREEN       0x07E0      
+#define CYAN        0x07FF      
+#define RED         0xF800      
+#define MAGENTA     0xF81F      
+#define YELLOW      0xFFE0      
+
+typedef enum {North, West, South, East} orientation;
+
+typedef struct {
+	uint16_t width, height;
+	orientation orient;
+	uint16_t x, y;
+	uint16_t foreground, background;
+} lcd;
+
+extern lcd display;
+
+typedef struct {
+	uint16_t left, right;
+	uint16_t top, bottom;
+} rectangle;	
+
+void init_lcd();
+void lcd_brightness(uint8_t i);
+void set_orientation(orientation o);
+void set_frame_rate_hz(uint8_t f);
+void clear_screen();
+void fill_rectangle(rectangle r, uint16_t col);
+void fill_rectangle_indexed(rectangle r, uint16_t* col);
+void display_char(char c);
+void display_string(char *str);
+void display_string_xy(char *str, uint16_t x, uint16_t y);
+```

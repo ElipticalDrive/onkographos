@@ -1,0 +1,195 @@
+# Gaussian Pulling to Zero-Level Set
+
+Also called: Gaussian Pulling, Pulling Gaussians to Zero-Level Set & Query Points to Gaussian Disks, Query Point Pulling
+
+## Overview
+Gaussian Pulling to Zero-Level Set is a training optimization technique for 3D Gaussian Splatting (3DGS) that enforces geometric consistency by aligning Gaussian primitives with a neural Signed Distance Function (SDF) field. It solves the problem of "floating ellipsoids" and inaccurate surface estimation in standard 3DGS by pulling Gaussian centers onto the zero-level set of the SDF and pulling query points onto Gaussian disks rather than centers. This approach bridges the gap between continuous SDF representations and sparse Gaussian distributions, providing a denser, more continuous surface representation than single-point ray intersection [S1, S2].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A neural SDF field $f(\mathbf{x})$ and its gradient $\nabla f(\mathbf{x})$.
+*   3D anchor points $\mathbf{q}$ derived from back-projected geometry cues (monocular predictions or sensor data) [S1].
+*   Current 3D Gaussian parameters (centers, covariances) [S2].
+*   Camera poses and image observations [S1].
+
+**Outputs:**
+*   Optimized Gaussian centers located on the zero-level set of the SDF.
+*   Optimized Gaussian orientations aligned with the SDF gradient.
+*   Refined SDF field parameters [S2].
+
+### Data Structures
+*   **SDF Field:** A neural network mapping $\mathbb{R}^3 \to \mathbb{R}$, outputting signed distance $d$ and gradient $\nabla d$.
+*   **Gaussian Primitives:** Defined by center $\mathbf{c}$, covariance matrix $\Sigma$ (or scale/rotation), opacity $\alpha$, and spherical harmonics coefficients for color.
+*   **Surface Patch:** A set of $J$ points $\mathcal{S} = \{\mathbf{p}'_j \mid j \in [1, J]\}$ sampled from an isotropic Gaussian distribution around an anchor $\mathbf{q}$ [S1].
+
+### Parameters
+*   $J$: Number of points sampled per surface patch. Typical value: 9. Other tested values: 1, 16, 25 [S1].
+*   $\tau^2$: Variance of the isotropic Gaussian distribution $\mathcal{N}(\mathbf{q}, \tau^2)$ controlling patch size. Baseline: distance between two adjacent pixels in the 3D world coordinate. Tested candidates: $\{0.5\tau^2, \tau^2, 2\tau^2, 3\tau^2\}$ [S1].
+*   Loss weights: $\lambda_1=0.1, \lambda_2=0.05, \lambda_3=0.05, \lambda_4=0.5, \lambda_6=0.5$. $\lambda_5$ (inverse weight annealing for LN CC) starts at 0 for the first 100 epochs and increases to 0.1 [S1].
+
+### Steps
+
+1.  **Anchor Generation:** For each posed view, sample rays (e.g., 1024 rays per batch). Back-project geometry cues (predicted monocular depth or dataset sensor depth) to 3D to obtain anchor points $\mathbf{q}$ [S1].
+2.  **Patch Sampling:** For each anchor $\mathbf{q}$, define an isotropic Gaussian distribution $\mathcal{N}(\mathbf{q}, \tau^2)$. Sample $J$ points $\mathbf{p}'_j$ from this distribution to form a surface patch $\mathcal{S}$ [S1].
+3.  **Gaussian Center Pulling:** Pull the centers of Gaussians near the surface onto the zero-level set of the SDF. This prevents floating ellipsoids and ensures Gaussians lie on the object surface [S2].
+4.  **Query Point Pulling:** Pull neighboring space/query points onto the Gaussian disks (the plane defined by the Gaussian's orientation and scale) rather than just the centers. This differs from NeuralPull, which pulls to centers, and better bridges continuous SDF fields with sparse Gaussian distributions [S2].
+5.  **Gradient Constraint:** Use the **normalized** SDF gradient for the pulling operation. Do not apply an additional Eikonal loss (constraint on gradient length), as it degenerates performance by making optimization too complex when combined with the pulling mechanism [S2].
+6.  **Orientation Alignment:** Apply tangent and thin losses to align the orientation of Gaussian disks with the gradient of the neural SDF on the zero-level sets [S2].
+7.  **Regularization:** Apply orthogonal loss to learn a more regularized SDF field [S2].
+
+### Formulas
+
+**Pulling Operation:**
+The position of a point $\mathbf{x}$ is updated towards the zero-level set using the normalized gradient:
+$$ \mathbf{x}_{new} = \mathbf{x} - \alpha \cdot f(\mathbf{x}) \cdot \frac{\nabla f(\mathbf{x})}{\|\nabla f(\mathbf{x})\|} $$
+where $\alpha$ is the learning rate or step size, $f(\mathbf{x})$ is the SDF value, and $\frac{\nabla f(\mathbf{x})}{\|\nabla f(\mathbf{x})\|}$ is the normalized gradient [S1, S2].
+
+**Patch Sampling:**
+$$ \mathbf{p}'_j \sim \mathcal{N}(\mathbf{q}, \tau^2 \mathbf{I}) $$
+where $\mathbf{I}$ is the identity matrix [S1].
+
+**Loss Terms (Summary):**
+*   **Gaussian Pulling Loss:** Encourages Gaussian centers to satisfy $f(\mathbf{c}) \approx 0$ [S2].
+*   **Query Point to Disk Loss:** Encourages query points to lie on the Gaussian disk plane [S2].
+*   **Tangent/Thin Loss:** Aligns Gaussian orientation with $\nabla f(\mathbf{x})$ [S2].
+*   **Orthogonal Loss:** Regularizes SDF gradient orthogonality [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_pull_to_zero_level_set(sdf_network, gaussians, anchors, tau_sq, J, learning_rate):
+    """
+    Optimizes Gaussian centers and orientations using SDF zero-level set pulling.
+    
+    Args:
+        sdf_network: Neural network returning (sdf_value, gradient) for 3D points.
+        gaussians: List of Gaussian primitives with centers, covariances, etc.
+        anchors: List of 3D anchor points q back-projected from geometry cues.
+        tau_sq: Variance of the isotropic Gaussian distribution for patch sampling.
+        J: Number of points to sample per patch.
+        learning_rate: Step size for the pulling operation.
+        
+    Returns:
+        Updated gaussians and sdf_network parameters.
+    """
+    # 1. Sample surface patches around anchors
+    patches = []
+    for q in anchors:
+        # Sample J points from N(q, tau_sq * I)
+        patch_points = sample_isotropic_gaussian(q, tau_sq, J)
+        patches.append(patch_points)
+        
+    # 2. Compute SDF values and gradients for all relevant points
+    # Relevant points include Gaussian centers and patch points
+    all_points = get_all_gaussian_centers(gaussians) + flatten(patches)
+    sdf_values, gradients = sdf_network.forward(all_points)
+    
+    # 3. Normalize gradients
+    # Note: Do NOT apply Eikonal loss separately; rely on normalized gradient for pulling
+    normalized_gradients = gradients / (norm(gradients, axis=-1, keepdims=True) + epsilon)
+    
+    # 4. Pull Gaussian centers to zero-level set
+    for i, gaussian in enumerate(gaussians):
+        center = gaussian.center
+        # Find corresponding SDF value and gradient for this center
+        # (In practice, use nearest neighbor or ray-marching lookup)
+        sdf_val = get_sdf_for_point(center, sdf_values, all_points)
+        grad = get_gradient_for_point(center, normalized_gradients, all_points)
+        
+        # Update center: move along negative gradient scaled by distance to zero-level set
+        # x_new = x - alpha * f(x) * grad_normalized
+        delta = -learning_rate * sdf_val * grad
+        gaussian.center = center + delta
+        
+    # 5. Pull query points (from patches) to Gaussian disks
+    # This aligns the Gaussian orientation with the SDF gradient
+    for patch in patches:
+        for p_prime in patch:
+            # Get SDF gradient at p_prime
+            grad = get_gradient_for_point(p_prime, normalized_gradients, all_points)
+            
+            # Find nearest Gaussian to this patch point
+            nearest_gaussian = find_nearest_gaussian(p_prime, gaussians)
+            
+            # Align Gaussian orientation (normal) with SDF gradient
+            # This is achieved via Tangent/Thin loss optimization in the training loop
+            # Pseudocode for the loss calculation:
+            # loss_tangent = dot(nearest_gaussian.normal, grad)
+            # loss_thin = distance(p_prime, plane_defined_by(nearest_gaussian))
+            
+    # 6. Apply Orthogonal Loss for SDF regularization
+    # loss_orthogonal = ... (regularizes gradient field)
+    
+    # 7. Update SDF network parameters using all losses
+    # Losses include: Gaussian pulling, query-to-disk, tangent, thin, orthogonal,
+    # and photo consistency (patch-level)
+    update_sdf_network(sdf_network, all_losses)
+    
+    return gaussians, sdf_network
+
+def sample_isotropic_gaussian(mean, variance, num_samples):
+    """
+    Samples points from an isotropic Gaussian distribution.
+    """
+    # Generate random noise from standard normal distribution
+    noise = random_normal(size=(num_samples, 3))
+    # Scale by sqrt(variance) since variance is scalar for isotropic case
+    scaled_noise = noise * sqrt(variance)
+    return mean + scaled_noise
+```
+
+### Edge Cases and Pitfalls
+*   **Variance $\tau^2$ Selection:** If $\tau^2$ is too small, the patch does not cover a large enough area, degrading inference performance. If $\tau^2$ is too large, points may be ruled out by masks, decreasing efficiency and performance [S1].
+*   **Eikonal Loss:** Adding an explicit Eikonal loss (constraint on gradient length) significantly degenerates results because the pulling method already depends on predicted SDF values and gradient directions. The optimization becomes too complex [S2].
+*   **Single Point vs. Patch:** Using $J=1$ (single point) is less geometry-aware than patch-level sampling. Patch-level photo consistency outperforms pixel-level consistency [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** Increases with the number of sampled points $J$ per patch. Larger $J$ improves performance but increases time complexity [S1].
+*   **Memory:** Requires storing SDF field parameters and Gaussian primitives. The patch sampling adds minimal overhead compared to the SDF evaluation [S1].
+
+### Measured Performance
+*   Evaluated on ScanNet dataset [S1].
+*   Patch-level photo consistency achieves better performance than pixel-level [S1].
+*   Pulling Gaussians to the zero-level set prevents floating ellipsoids and achieves accurate geometry estimation compared to standard 3DGS [S2].
+*   Pulling query points to Gaussian disks outperforms pulling to centers (NeuralPull baseline) [S2].
+
+### Strengths and Limitations
+*   **Strengths:** Produces denser, more continuous surface representations; prevents floating ellipsoids; bridges continuous SDF and sparse Gaussian representations; accurate geometry estimation [S1, S2].
+*   **Limitations:** Requires a neural SDF field; sensitive to $\tau^2$ parameter; cannot use Eikonal loss [S1, S2].
+
+### When to Use
+*   Use when accurate surface geometry is required and standard 3DGS produces floating artifacts.
+*   Use when integrating 3DGS with neural implicit representations (SDFs) for hybrid modeling [S2].
+
+### When Not to Use
+*   Avoid if computational resources are extremely limited and $J$ must be small (though $J=1$ is possible, it degrades performance) [S1].
+*   Avoid if you intend to use an Eikonal loss for SDF regularization, as it conflicts with the pulling mechanism [S2].
+
+## Background
+
+### Origin
+The method originates from two key papers:
+1.  **Sensing Surface Patches in Volume Rendering for Inferring Signed Distance Functions** (2025) [S1]: Introduced the concept of sensing surface patches by pulling randomly sampled queries to create a denser surface representation than single-point intersection.
+2.  **Neural Signed Distance Function Inference through Splatting 3D Gaussians Pulled on Zero-Level Set** (2024) [S2]: Extended the concept to explicitly pull Gaussian centers to the zero-level set of an SDF to prevent floating ellipsoids and pull query points to Gaussian disks to bridge the gap between continuous and sparse representations.
+
+### History and Development
+*   Standard 3DGS often suffers from "floating ellipsoids" near surfaces due to overfitting training views [S2].
+*   NeuralPull [45] pulled query points to Gaussian centers [S2].
+*   Gaussian Pulling to Zero-Level Set improves upon NeuralPull by pulling to disks and explicitly pulling Gaussian centers to the zero-level set [S2].
+*   It leverages the properties of SDFs, where the gradient and signed distance can move any point onto the zero level set [S1].
+
+### Applications
+*   Multi-view surface reconstruction [S2].
+*   Integrating 3D Gaussian Splatting with neural implicit representations [S2].
+*   Improving coarse shape reconstruction in volume rendering [S1].
+
+## Sources
+
+[S1] Sensing Surface Patches in Volume Rendering for Inferring Signed Distance Functions, https://doi.org/10.1609/aaai.v39i4.32426, fetched 2026-10-26
+[S2] Neural Signed Distance Function Inference through Splatting 3D Gaussians Pulled on Zero-Level Set, https://doi.org/10.48550/arXiv.2410.14189, fetched 2026-10-29

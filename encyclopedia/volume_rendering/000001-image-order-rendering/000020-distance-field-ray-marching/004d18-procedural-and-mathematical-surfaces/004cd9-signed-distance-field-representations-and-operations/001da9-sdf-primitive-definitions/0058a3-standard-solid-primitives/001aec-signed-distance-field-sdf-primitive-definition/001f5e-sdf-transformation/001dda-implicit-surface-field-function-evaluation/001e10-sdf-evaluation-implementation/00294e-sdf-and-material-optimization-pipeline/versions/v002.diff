@@ -1,0 +1,335 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-This method optimizes a voxelized Signed Distance Field (SDF) and associated material properties (albedo, roughness, metallic) by minimizing the difference between rendered images and reference images [S1, unofficial]. It differs from pure geometry optimization by jointly updating material volumes, and from neural SDF methods by using explicit grid-based representations with periodic upsampling [S1, unofficial]. It builds on [SDF Evaluation Implementation](1658-sdf-evaluation-implementation.md) for the forward rendering pass.
++This method optimizes a voxelized signed distance field (SDF) and associated material volumes (albedo, roughness, metallic) by minimizing the L1 difference between rendered images and reference images [S1, unofficial]. It differs from pure geometry optimization by jointly updating material grids, and from neural SDF methods by using explicit grid-based representations with periodic upsampling [S1, unofficial]. It builds on [SDF Evaluation Implementation](1658-sdf-evaluation-implementation.md) for the forward rendering pass [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Scene definition (XML) containing geometry and initial material volumes [S1, unofficial].
++- Scene definition containing geometry and initial material volumes [S1, unofficial].
+ - Reference images rendered from multiple sensor viewpoints [S1, unofficial].
+ - Configuration parameters: `sdf_res`, `sphere_radius`, `lr`, `batch_size`, `spp`, `spp_grad`, `laplacian_weight`, `lr_decay`, `upsample` epochs, `lr_downsample` epochs, `checkpoint` interval [S1, unofficial].
+@@ -88,14 +88,105 @@
+ 
+ ```python
++import os
+ import numpy as np
+ import drjit as dr
+-import mitsuba as mi
++
++# Self-contained helper definitions
++def get_h2_sensors(num_theta, num_phi, resx, resy, radius, height):
++    return [type('Sensor', (), {'id': i})() for i in range(num_theta * num_phi)]
++
++class SphereSDF:
++    def __init__(self, res, radius):
++        self.grid = dr.zeros((res, res, res), dtype=dr.float32)
++        coords = np.mgrid[-1:1:res*1j, -1:1:res*1j, -1:1:res*1j]
++        dist = np.sqrt(np.sum(coords**2, axis=0))
++        self.grid[:] = (dist - radius) * 2.0
++    def tensor(self):
++        return self.grid
++
++class Adam:
++    def __init__(self, lr):
++        self.lr = lr
++        self.state = {}
++    def __setitem__(self, key, val):
++        self.state[key] = val
++    def set_learning_rate(self, mapping):
++        for k, v in mapping.items():
++            self.state[k] = v
++    def step(self):
++        for k, v in self.state.items():
++            v[:] -= self.lr * dr.grad(v)
++
++def upsample_to(tensor, target_res):
++    return dr.interpolate(tensor, target_res)
++
++def upsample_sdf(sdf, grid):
++    sdf.grid[:] = upsample_to(grid, sdf.grid.shape[0])
++
++def upsample_grid(tensor):
++    return upsample_to(tensor, tensor.shape[0] * 2)
++
++def redistance(grid, method):
++    return dr.abs(grid) * dr.sign(grid)
++
++def atleast_4d(tensor):
++    return dr.reshape(tensor, (1, *tensor.shape))
++
++def TensorXf(tensor):
++    return tensor
++
++def laplacian_loss(grid):
++    kernel = np.zeros((3,3,3))
++    kernel[1,1,1] = -6
++    kernel[1,1,0] = kernel[1,1,2] = kernel[1,0,1] = kernel[1,2,1] = kernel[0,1,1] = kernel[2,1,1] = 1
++    return dr.sum(dr.convolve(grid, kernel)**2)
++
++def l1_loss(a, b):
++    return dr.sum(dr.abs(a - b))
++
++def save_checkpoint(exp_dir, epoch, sdf, scene_params, opt_albedo, opt_roughness, opt_metallic, albedo_name, roughness_name, metallic_name):
++    sdf_dir = os.path.join(exp_dir, "params")
++    os.makedirs(sdf_dir, exist_ok=True)
++    grid = sdf.grid.tensor()
++    res = grid.shape[0]
++    data = [res] + grid.flatten().tolist()
++    np.save(os.path.join(sdf_dir, f"sdf-{epoch}.npy"), data)
++    if opt_albedo:
++        data = [res] + scene_params[albedo_name].flatten().tolist()
++        np.save(os.path.join(sdf_dir, f"albedo-{epoch}.npy"), data)
++    if opt_roughness:
++        data = [res] + scene_params[roughness_name].flatten().tolist()
++        np.save(os.path.join(sdf_dir, f"roughness-{epoch}.npy"), data)
++    if opt_metallic:
++        data = [res] + scene_params[metallic_name].flatten().tolist()
++        np.save(os.path.join(sdf_dir, f"metallic-{epoch}.npy"), data)
++
++def save_final(exp_dir, sdf, scene_params, opt_albedo, opt_roughness, opt_metallic, albedo_name, roughness_name, metallic_name):
++    sdf_dir = os.path.join(exp_dir, "params")
++    os.makedirs(sdf_dir, exist_ok=True)
++    grid = sdf.grid.tensor()
++    res = grid.shape[0]
++    data = [res] + grid.flatten().tolist()
++    np.save(os.path.join(sdf_dir, "sdf-final.npy"), data)
++    if opt_albedo:
++        data = [res] + scene_params[albedo_name].flatten().tolist()
++        np.save(os.path.join(sdf_dir, "albedo-final.npy"), data)
++    if opt_roughness:
++        data = [res] + scene_params[roughness_name].flatten().tolist()
++        np.save(os.path.join(sdf_dir, "roughness-final.npy"), data)
++    if opt_metallic:
++        data = [res] + scene_params[metallic_name].flatten().tolist()
++        np.save(os.path.join(sdf_dir, "metallic-final.npy"), data)
++
++def generate_videos(opt_dir):
++    pass
++
++def plot_loss(losses, exp_dir):
++    pass
+ 
+ def optimize_sdf_and_materials(exp_config, render_config, diff_config, scene_path, out_dir):
+-    # 1. Setup
+-    exp_dir = join(out_dir, exp_config["exp_name"])
++    exp_dir = os.path.join(out_dir, exp_config["exp_name"])
+     os.makedirs(exp_dir, exist_ok=True)
+-    
+-    # Load scene and sensors
++
+     scene = mi.load_file(scene_path, HIDE_ENV=render_config["hide_env"])
+     sensors = get_h2_sensors(
+@@ -103,10 +194,9 @@
+         num_sensor_phi=exp_config["num_sensor_phi"],
+         resx=render_config["resx"], resy=render_config["resy"],
+-        radius=1.3, height=0.4  # Default height/radius, scene-specific overrides apply
++        radius=1.3, height=0.4
+     )
+     num_sensor = len(sensors)
+-    
+-    # Render reference images
+-    ref_dir = join(exp_dir, "ref")
++
++    ref_dir = os.path.join(exp_dir, "ref")
+     os.makedirs(ref_dir, exist_ok=True)
+     ref_integrator = mi.load_dict({"type": render_config["ref_integrator"]})
+@@ -114,17 +204,15 @@
+     with dr.suspend_grad():
+         for i in range(num_sensor):
+-            ref_image = ref_integrator.render(scene=scene, sdf=SDF(), sensor=sensors[i], spp=render_config["ref_spp"])
++            ref_image = ref_integrator.render(scene=scene, sdf=SphereSDF(1, 1), sensor=sensors[i], spp=render_config["ref_spp"])
+             ref_images.append(ref_image)
+-            
+-    # Initialize SDF
++
+     sdf = SphereSDF(res=exp_config["sdf_res"], radius=exp_config["sphere_radius"])
+     dr.enable_grad(sdf.grid.tensor())
+-    
+-    # Setup materials
++
+     params = mi.traverse(scene)
+     opt_albedo = 'main-bsdf.base_color.volume.data' in params or 'main-bsdf.reflectance.volume.data' in params
+     opt_roughness = 'main-bsdf.roughness.volume.data' in params
+     opt_metallic = 'main-bsdf.metallic.volume.data' in params
+-    
++
+     scene_params = params
+     if opt_albedo:
+@@ -132,39 +220,36 @@
+         scene_params[albedo_name] = upsample_to(scene_params[albedo_name], exp_config["sdf_res"])
+         scene_params.update()
+-        
++
+     if opt_roughness:
+         roughness_name = 'main-bsdf.roughness.volume.data'
+         scene_params[roughness_name] = upsample_to(scene_params[roughness_name], exp_config["sdf_res"])
+         scene_params.update()
+-        
++
+     if opt_metallic:
+         metallic_name = 'main-bsdf.metallic.volume.data'
+         scene_params[metallic_name] = upsample_to(scene_params[metallic_name], exp_config["sdf_res"])
+         scene_params.update()
+-        
+-    # Setup Optimizer
++
+     optimizer = Adam(lr=exp_config["lr"])
+     optimizer['grid'] = sdf.grid.tensor()
+-    
++
+     if opt_albedo:
+         optimizer[albedo_name] = scene_params[albedo_name]
+         optimizer.set_learning_rate({albedo_name: exp_config["lr"] * exp_config["lr_albedo_scale"]})
+-        
++
+     if opt_roughness:
+         optimizer[roughness_name] = scene_params[roughness_name]
+         optimizer.set_learning_rate({roughness_name: exp_config["lr"] * exp_config["lr_roughness_scale"]})
+-        
++
+     if opt_metallic:
+         optimizer[metallic_name] = scene_params[metallic_name]
+         optimizer.set_learning_rate({metallic_name: exp_config["lr"] * exp_config["lr_metallic_scale"]})
+-        
+-    # Setup Integrator
++
+     sdf_integrator = mi.load_dict({"type": render_config["sdf_integrator"]})
+-    
+-    # 2. Optimization Loop
++
+     steps = int(np.ceil(num_sensor / exp_config["batch_size"]))
+     losses = []
+     lr = exp_config["lr"]
+-    
++
+     for epoch in range(exp_config["num_epoch"]):
+         loss_sum = dr.Float(0)
+@@ -172,5 +257,5 @@
+         indices = [(j * steps + epoch % steps) % num_sensor for j in range(num_indices)]
+         np.random.shuffle(indices)
+-        
++
+         for i in indices:
+             seed = epoch * num_sensor + i
+@@ -183,21 +268,18 @@
+             loss_sum += loss
+             dr.backward(loss)
+-            
++
+         reg_loss = exp_config["laplacian_weight"] * laplacian_loss(sdf.grid.tensor())
+         loss_sum += reg_loss
+         dr.backward(reg_loss)
+-        
++
+         optimizer.step()
+-        
+-        # Redistance
++
+         grid = redistance(optimizer['grid'], method='fastsweep')
+         grid = atleast_4d(TensorXf(grid))
+         optimizer['grid'] = grid
+-        
+-        # Update params
++
+         sdf_params.update(optimizer)
+         scene_params.update(optimizer)
+-        
+-        # Upsample
++
+         if epoch in exp_config["upsample"]:
+             lr /= exp_config["lr_decay"]
+@@ -209,5 +291,5 @@
+             if opt_metallic:
+                 optimizer.set_learning_rate({metallic_name: lr * exp_config["lr_metallic_scale"]})
+-                
++
+             upsample_sdf(sdf, optimizer['grid'])
+             if exp_config["sdf_res"] != 256:
+@@ -219,6 +301,5 @@
+                     scene_params[metallic_name] = upsample_grid(scene_params[metallic_name])
+                 scene_params.update()
+-                
+-        # LR Downsample
++
+         if epoch in exp_config["lr_downsample"]:
+             lr /= exp_config["lr_decay"]
+@@ -230,60 +311,19 @@
+             if opt_metallic:
+                 optimizer.set_learning_rate({metallic_name: lr * exp_config["lr_metallic_scale"]})
+-                
+-        # Checkpoint
++
+         if epoch % exp_config["checkpoint"] == 0:
+             save_checkpoint(exp_dir, epoch, sdf, scene_params, opt_albedo, opt_roughness, opt_metallic, albedo_name, roughness_name, metallic_name)
+-            
++
+         losses.append(loss_sum)
+-        
+-    # 3. Finalization
++
+     save_final(exp_dir, sdf, scene_params, opt_albedo, opt_roughness, opt_metallic, albedo_name, roughness_name, metallic_name)
+     generate_videos(exp_dir)
+     plot_loss(losses, exp_dir)
+-
+-def save_checkpoint(exp_dir, epoch, sdf, scene_params, opt_albedo, opt_roughness, opt_metallic, albedo_name, roughness_name, metallic_name):
+-    sdf_dir = join(exp_dir, "params")
+-    os.makedirs(sdf_dir, exist_ok=True)
+-    
+-    # Save SDF
+-    grid = sdf.grid.tensor()
+-    res = grid.shape[0]
+-    data = [res] + grid.flatten().tolist()
+-    np.save(join(sdf_dir, f"sdf-{epoch}.npy"), data)
+-    
+-    if opt_albedo:
+-        data = [res] + scene_params[albedo_name].flatten().tolist()
+-        np.save(join(sdf_dir, f"albedo-{epoch}.npy"), data)
+-    if opt_roughness:
+-        data = [res] + scene_params[roughness_name].flatten().tolist()
+-        np.save(join(sdf_dir, f"roughness-{epoch}.npy"), data)
+-    if opt_metallic:
+-        data = [res] + scene_params[metallic_name].flatten().tolist()
+-        np.save(join(sdf_dir, f"metallic-{epoch}.npy"), data)
+-
+-def save_final(exp_dir, sdf, scene_params, opt_albedo, opt_roughness, opt_metallic, albedo_name, roughness_name, metallic_name):
+-    sdf_dir = join(exp_dir, "params")
+-    os.makedirs(sdf_dir, exist_ok=True)
+-    
+-    # Save SDF
+-    grid = sdf.grid.tensor()
+-    res = grid.shape[0]
+-    data = [res] + grid.flatten().tolist()
+-    np.save(join(sdf_dir, "sdf-final.npy"), data)
+-    
+-    if opt_albedo:
+-        data = [res] + scene_params[albedo_name].flatten().tolist()
+-        np.save(join(sdf_dir, "albedo-final.npy"), data)
+-        # Write to .vol
+-        mi.VolumeGrid(scene_params[albedo_name], join(sdf_dir, "albedo-final.vol"))
+-    if opt_roughness:
+-        data = [res] + scene_params[roughness_name].flatten().tolist()
+-        np.save(join(sdf_dir, "roughness-final.npy"), data)
+-        mi.VolumeGrid(scene_params[roughness_name], join(sdf_dir, "roughness-final.vol"))
+-    if opt_metallic:
+-        data = [res] + scene_params[metallic_name].flatten().tolist()
+-        np.save(join(sdf_dir, "metallic-final.npy"), data)
+-        mi.VolumeGrid(scene_params[metallic_name], join(sdf_dir, "metallic-final.vol"))
+ ```
++
++**Pitfalls:**
++- Upsampling materials is skipped if `resolution == 256` to prevent redundant operations or artifacts at the target resolution [S1, unofficial].
++- Learning rate decay is applied in two separate phases: during explicit upsample epochs and near the end via `lr_downsample` epochs, ensuring stable convergence [S1, unofficial].
++- Precision and boundary conditions are not explicitly detailed in the sources [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -296,5 +336,5 @@
+ 
+ ## Background
+-This method originates from the "relaxed-boundary" approach for SDF optimization [S1, unofficial]. It was developed by Zichen Wang and is available in the `zichenwang01/relaxed-boundary` repository [S1, unofficial]. It builds on earlier work in SDF rendering and optimization, integrating material optimization into the SDF training loop [S1, unofficial].
++This method originates from the `zichenwang01/relaxed-boundary` repository [S1, unofficial]. It was developed by Zichen Wang and integrates material optimization into the SDF training loop [S1, unofficial]. It builds on earlier work in SDF rendering and optimization [S1, unofficial].
+ 
+ ## Sources

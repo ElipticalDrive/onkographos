@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -4,86 +4,78 @@
+ 
+ ## Overview
+-This method estimates the gradient vector at an arbitrary sample point $(x,y,z)$ during ray casting by computing central differences of the volume data $V$ using support samples interpolated on the fly, rather than precomputing gradients at grid points [S2, book]. It is distinguished from the precomputed gradient approach by deferring the finite difference calculation to the sampling phase, and from the gradient filter method by avoiding the application of optimized derivative filters [S1, unofficial][S2, book].
++Gradient Estimation via On-the-Fly Interpolation is a shading optimization in volume rendering where the gradient field is computed dynamically during ray integration rather than being precomputed and cached in memory [S2, unofficial][S3, book]. It solves the storage-compute trade-off by trading increased compute time for reduced memory footprint, avoiding the threefold increase in memory usage required to store precomputed gradient vectors [S2, unofficial]. Unlike [Gradient Selection — Central/Forward/Backward](12132-gradient-selection-central-forward-backward.md), which computes gradients at grid points and interpolates them, this method interpolates the scalar volume data samples on the fly to compute the gradient directly at the sample position [S1, unofficial][S3, book].
+ 
+ ## How it works
+-**Inputs:**
+-*   Volume data $V$, defined on a regular 3D grid.
+-*   Sample position $(x,y,z)$ in grid coordinates (floating point).
++**Inputs and Outputs**
++*   **Input:** A scalar volume dataset $V$ defined on a 3D grid; a sample position $(x, y, z)$ within the volume.
++*   **Output:** The gradient vector $\mathbf{g} = [g_x, g_y, g_z]^T$ at $(x, y, z)$.
+ 
+-**Outputs:**
+-*   Gradient vector $\mathbf{g} = [g_x, g_y, g_z]^T$ at $(x,y,z)$.
++**Data Structures**
++*   **Volume Data $V$:** A 3D array of scalar values. The implementation assumes standard grid indexing where neighbors are accessed via integer offsets. For non-integer sample positions, the underlying volume data is accessed via interpolation (e.g., trilinear or higher-order) to retrieve the required support samples [S3, book].
+ 
+-**Data Structures:**
+-*   The volume data $V$ is stored as a dense 3D array or texture. No auxiliary gradient storage is required.
++**Steps**
++1.  Identify the six neighboring grid points required for the central difference stencil relative to the current sample position $(x, y, z)$. These are $(x\pm1, y, z)$, $(x, y\pm1, z)$, and $(x, y, z\pm1)$ [S2, unofficial][S3, book].
++2.  Retrieve the scalar values $V$ at these six positions. If the sample position is not aligned with the grid, interpolate the values from the surrounding voxels to obtain the support samples [S3, book].
++3.  Compute the gradient components using central differences:
++    $$g_x = V(x-1, y, z) - V(x+1, y, z)$$
++    $$g_y = V(x, y-1, z) - V(x, y+1, z)$$
++    $$g_z = V(x, y, z-1) - V(x, y, z+1)$$
++    Note: The formula provided in sources uses a negative sign convention for the forward direction relative to the backward direction, resulting in $\mathbf{g} = \mathbf{V}_{back} - \mathbf{V}_{fwd}$ [S3, book].
++4.  Return the vector $\mathbf{g}$ for use in illumination calculations [S2, unofficial].
+ 
+-**Steps:**
+-1.  Identify the six support points required for central differencing along each axis relative to the sample position $(x,y,z)$. These are $(x\pm1, y, z)$, $(x, y\pm1, z)$, and $(x, y, z\pm1)$.
+-2.  Interpolate the volume values at these six support points using the current interpolation filter (e.g., trilinear, cubic) [S2, book]. Let these interpolated values be $V_{x-1}, V_{x+1}, V_{y-1}, V_{y+1}, V_{z-1}, V_{z+1}$.
+-3.  Compute the gradient components using the central difference formula:
+-    $$
+-    \begin{bmatrix} g_x \\ g_y \\ g_z \end{bmatrix} = \begin{bmatrix} V_{x-1} \\ V_{y-1} \\ V_{z-1} \end{bmatrix} - \begin{bmatrix} V_{x+1} \\ V_{y+1} \\ V_{z+1} \end{bmatrix}
+-    $$
+-    Note: The standard central difference is often defined as $\frac{V(x+1) - V(x-1)}{2}$. The sources provided define the gradient as the difference vector $[V(x-1)...] - [V(x+1)...]$ [S2, book]. Implementers should verify the sign convention required by their specific illumination model, as this definition yields a vector pointing in the direction of decreasing intensity if interpreted strictly as written, or requires a sign flip for standard normal estimation [S2, book].
+-4.  Use the resulting vector $\mathbf{g}$ for illumination calculations, typically after normalization to obtain the surface normal [S2, book].
++**Pseudocode**
++```python
++def compute_gradient_on_the_fly(volume, x, y, z):
++    """
++    Computes the gradient at (x, y, z) by interpolating support samples on the fly.
++    Assumes volume is accessible via an interpolation function get_value(u, v, w).
++    """
++    # Retrieve support samples using interpolation for non-integer coordinates
++    # If x, y, z are integer grid indices, get_value may simply return volume[x][y][z]
++    v_left   = get_value(volume, x - 1, y, z)
++    v_right  = get_value(volume, x + 1, y, z)
++    v_bottom = get_value(volume, x, y - 1, z)
++    v_top    = get_value(volume, x, y + 1, z)
++    v_back   = get_value(volume, x, y, z - 1)
++    v_front  = get_value(volume, x, y, z + 1)
+ 
+-**Pseudocode:**
+-```python
+-def estimate_gradient_on_the_fly(V, x, y, z, filter_func):
+-    """
+-    Estimates gradient at (x, y, z) by interpolating support samples on the fly.
+-    
+-    Args:
+-        V: Volume data accessor (supports interpolation).
+-        x, y, z: Sample coordinates in grid space.
+-        filter_func: Function that interpolates V at arbitrary coordinates.
+-                     Must handle boundary conditions.
+-    
+-    Returns:
+-        g: Tuple (gx, gy, gz) representing the gradient vector.
+-    """
+-    # Interpolate the six support points for central differencing
+-    # Note: The source formula is [V(x-1)...] - [V(x+1)...]
+-    # Standard central difference is usually (V(x+1) - V(x-1)) / 2.
+-    # We follow the source definition exactly [S2, book].
+-    
+-    v_x_minus = filter_func(V, x - 1, y, z)
+-    v_x_plus  = filter_func(V, x + 1, y, z)
+-    
+-    v_y_minus = filter_func(V, x, y - 1, z)
+-    v_y_plus  = filter_func(V, x, y + 1, z)
+-    
+-    v_z_minus = filter_func(V, x, y, z - 1)
+-    v_z_plus  = filter_func(V, x, y, z + 1)
+-    
+-    # Compute gradient components based on source formula
+-    gx = v_x_minus - v_x_plus
+-    gy = v_y_minus - v_y_plus
+-    gz = v_z_minus - v_z_plus
+-    
+-    return (gx, gy, gz)
++    # Central difference calculation
++    # Formula: g = [V(x-1,y,z), V(x,y-1,z), V(x,y,z-1)] - [V(x+1,y,z), V(x,y+1,z), V(x,y,z+1)]
++    gx = v_left - v_right
++    gy = v_bottom - v_top
++    gz = v_back - v_front
++
++    return [gx, gy, gz]
+ ```
+ 
+-**Parameters:**
+-*   **Interpolation Filter:** The quality of the filter used in step 2 is critical. Common choices include trilinear or cubic filters. The choice depends on the trade-off between performance and gradient smoothness [S2, book].
++**Parameters**
++*   **Stencil Size:** 6-point stencil (central difference) [S2, unofficial][S3, book].
++*   **Interpolation Filter:** Any filter described in the volume rendering pipeline (e.g., trilinear, cubic) [S3, book]. The quality of this filter is critical [S3, book].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** When support points fall outside the volume bounds, the interpolation filter must handle clamping, wrapping, or zero-padding. Incorrect handling leads to artifacts in the gradient [S2, book].
+-*   **Sensitivity:** Gradients are significantly more sensitive to interpolation filter quality than the volume values themselves because they are used in illumination calculations involving normalization of normal vectors [S2, book]. Poor filter quality leads to noisy normals and incorrect shading [S1, unofficial][S2, book].
+-*   **Sign Convention:** The source formula defines the gradient as $[V(x-1)...] - [V(x+1)...]$. This is the negative of the standard central difference approximation of the derivative. Implementers must ensure this sign is consistent with their lighting model's expectation for the normal direction [S2, book].
++**Edge Cases and Pitfalls**
++*   **Boundary Conditions:** At the volume boundaries, some support samples may fall outside the grid. Standard boundary handling (clamping, reflection, or zero-padding) must be applied when accessing $V$ [G].
++*   **Interpolation Sensitivity:** Gradients are significantly more sensitive to the quality of the interpolation filter than the function values themselves because they are used in illumination calculations involving the normalization of normal vectors [S3, book]. Poor interpolation quality leads to inaccurate normals and visual artifacts [S3, book].
++*   **Precision:** The subtraction of nearby values in the central difference can amplify noise present in the volume data [G].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method has lower computational complexity than the gradient filter method, which requires applying optimized derivative filters [S1, unofficial][S2, book]. However, it requires six interpolations per sample point, whereas the precomputed method requires one interpolation of a precomputed gradient vector.
+-*   **Performance:** Performance depends heavily on the interpolation filter used. High-quality filters (e.g., cubic) increase cost but improve gradient accuracy [S2, book].
+-*   **Strengths:** Lower complexity than gradient filtering; avoids storing large auxiliary gradient data structures; flexible interpolation quality [S1, unofficial][S2, book].
+-*   **Limitations:** Requires six interpolations per sample; sensitive to interpolation filter quality; potential sign convention issues [S2, book].
+-*   **When to use:** When memory is constrained (no precomputed gradients) and gradient filter application is too expensive, but high-quality interpolation is available [S1, unofficial][S2, book].
+-*   **When not to use:** When maximum gradient accuracy is required (gradient filter method is preferred) or when precomputed gradients are already available and memory is not a concern [S2, book].
++*   **Time Complexity:** $O(1)$ per sample, but with a higher constant factor than precomputed gradients due to the six-point stencil operation and the need for interpolation at each step [S2, unofficial][S3, book].
++*   **Memory Complexity:** $O(1)$ auxiliary memory per sample, as no gradient buffer is stored. The total memory footprint is reduced by a factor of three compared to precomputed gradients [S2, unofficial].
++*   **Measured Performance:** On-the-fly computation was found to be faster than precomputed gradients by an average of 8.2% on Intel/Nehalem, 19.4% on AMD/MagnyCours, and 80.7% on NVIDIA/Fermi [S2, unofficial].
++*   **Strengths:**
++    *   Significant reduction in memory usage, which is critical for large datasets or hardware with limited VRAM [S2, unofficial].
++    *   Exploits spatial and temporal locality of the scalar values, which are either spatially nearby or loaded at similar times by previous/consecutive integration steps [S2, unofficial].
++*   **Limitations:**
++    *   Higher computational cost per sample compared to loading precomputed values [S2, unofficial].
++    *   Performance gain depends on cache behavior; the additional cache pressure from loading precomputed gradients from a separate buffer can be more detrimental than the compute cost of the stencil [S2, unofficial].
++*   **When to Use:** Use when memory bandwidth or capacity is the bottleneck, or when the dataset is too large to store precomputed gradients. It is particularly effective on architectures where the scalar data locality outweighs the cost of recomputation [S2, unofficial].
++*   **When Not to Use:** Use precomputed gradients when compute time is the primary constraint and memory is abundant, or when the gradient filter method (which performs only one interpolation step) offers better visual quality for the specific application [S1, unofficial][S3, book].
+ 
+ ## Background
+-*   **Origin:** This method is described in the context of volume rendering techniques for estimating surface normals from volumetric data [S2, book]. It is one of three popular methods for gradient estimation, alongside precomputed central differencing and gradient filtering [S2, book].
+-*   **History:** The method is discussed in academic overviews of volume rendering, highlighting the trade-offs between different gradient estimation strategies [S1, unofficial][S2, book].
+-*   **Usage:** Used in direct volume rendering applications where surface normals are needed for illumination, particularly in scenarios where precomputing gradients is not feasible or gradient filters are too costly [S2, book].
++*   **Origin:** The method is described in the context of direct volume rendering techniques, specifically within shared-memory parallel raycasting implementations [S2, unofficial][S3, book].
++*   **History:** It was analyzed in comparative studies of shading optimizations for volume rendering, highlighting the trade-off between storage space and compute time [S2, unofficial]. The approach is contrasted with precomputed gradient caching and gradient filtering methods [S1, unofficial][S3, book].
++*   **Usage:** It is used in direct volume rendering pipelines where dynamic lighting and shading require accurate surface normals derived from the volume gradient [S3, book].
+ 
+ ## Sources
+ [S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+-[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)+[S2] Multi-core and Many-core Shared-memory Parallel Raycasting Volume Rendering Optimization and Tuning, https://digital.library.unt.edu/ark:/67531/metadc829701/?q=empty space skipping volume rendering, fetched 2026-10-28 (unofficial)
++[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

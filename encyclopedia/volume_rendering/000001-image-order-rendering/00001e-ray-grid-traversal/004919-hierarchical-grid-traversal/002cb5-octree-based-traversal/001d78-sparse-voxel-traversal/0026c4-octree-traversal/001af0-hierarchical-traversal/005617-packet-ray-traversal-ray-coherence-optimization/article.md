@@ -1,0 +1,121 @@
+# Packet Ray Traversal / Ray Coherence Optimization
+Also called: 2D Grid Block Mapping
+
+## Overview
+Packet Ray Traversal is a GPU optimization technique for hierarchical volume rendering that groups spatially coherent rays into "packets" (warps or thread blocks) to improve cache utilization during octree traversal. It addresses the problem of poor memory access patterns and cache misses inherent in independent ray traversal by ensuring neighboring threads execute similar code paths. It differs from sibling methods like [Leaf Collection](899-leaf-collection.md) by focusing on thread-block-level coherence rather than leaf-node aggregation, and from [Point Plane Test Traversal](982-point-plane-test-traversal.md) by relying on hardware thread scheduling rather than explicit geometric culling.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 2D image resolution $(W, H)$, an octree data structure representing the volume, and a ray generation function.
+- Output: A rendered image buffer.
+
+**Data Structures:**
+- **CUDA Grid/Block Configuration:** The execution configuration is explicitly set to 2D.
+  - Grid dimensions: $(G_x, G_y)$, typically mapping to image tiles or the full image.
+  - Block dimensions: $(B_x, B_y)$, defining the packet size (e.g., $8 \times 8$ or $16 \times 16$ threads).
+- **Octree Nodes:** Stored in global or constant memory. Children of a node are assumed to be 8 consecutive memory positions [S1, unofficial].
+
+**Numbered Steps:**
+1. **Configure Execution:** Set the CUDA grid and block dimensions to 2D. Map threads such that neighboring threads (rays) are spatially coherent, meaning they have similar directions and origins [S1, unofficial].
+2. **Ray Generation:** Each thread generates a single ray corresponding to its pixel coordinate.
+3. **Traversal:** Each thread traverses the octree independently but concurrently. Due to the 2D block mapping and coherent ray directions, neighboring threads traverse similar paths through the octree [S1, unofficial].
+4. **Memory Access:** Use texture fetches for octree node data to leverage the GPU's hardware cache, which benefits from the spatial coherence of the traversal paths [S1, unofficial].
+5. **Shading/Integration:** For each voxel visited, perform density integration or shading calculations.
+
+**Formulas:**
+- Thread Index: $idx = blockIdx.x \cdot blockDim.x + threadIdx.x$
+- Pixel Coordinate: $x = blockIdx.x \cdot blockDim.x + threadIdx.x$
+- Ray Origin: $\mathbf{o}_p$ for pixel $p$
+- Ray Direction: $\mathbf{d}_p$ for pixel $p$
+- Coherence Condition: $\forall p, q \in \text{Block}, \|\mathbf{d}_p - \mathbf{d}_q\| \approx 0$ [S1, unofficial]
+
+**Parameters:**
+- Block Dimensions: Not given in the sources. Typical values are powers of 2 (e.g., $8 \times 8$) to align with warp sizes.
+- Memory Type: Constant memory is suggested for octree nodes if children are consecutive, but texture memory is preferred for cache benefits [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Thread Divergence:** In deep octree subdivisions, neighboring rays may diverge significantly in their traversal paths, causing SIMD stalls. This is a known limitation of GPU architecture for high-quality volume rendering [S1, unofficial].
+- **Memory Waste:** Rigid block sizes may waste memory if the octree structure does not align with the packet size [S1, unofficial].
+- **Shared Memory Limits:** Fitting temporal structures in shared memory is tricky and may not be feasible for all packet sizes [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Kernel launch configuration
+# gridDim = (W / BLOCK_X, H / BLOCK_Y, 1)
+# blockDim = (BLOCK_X, BLOCK_Y, 1)
+
+__global__ void packet_ray_traversal_kernel(float* image, OctreeNode* octree) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    // Generate ray for pixel (x, y)
+    Ray ray = generate_ray(x, y);
+    
+    // Traverse octree
+    // Neighboring threads in the block traverse similar paths
+    Node* node = octree.root;
+    while (node != NULL) {
+        // Check intersection with current node
+        if (intersect(node, ray)) {
+            // Fetch node data using texture cache for coherence
+            NodeData data = fetch_texture(node->id);
+            
+            // If leaf, integrate density
+            if (is_leaf(node)) {
+                integrate_density(image, ray, data);
+                break;
+            }
+            
+            // Move to child
+            // Children are 8 consecutive positions
+            node = get_child(node, ray);
+        } else {
+            break;
+        }
+    }
+}
+```
+
+## Subtopics
+
+### Leaf Collection
+Aggregates rays at leaf nodes to reduce traversal overhead. Choose when leaf nodes are large and rays are dense. [Leaf Collection](899-leaf-collection.md)
+
+### Point Plane Test Traversal
+Uses explicit geometric tests to cull nodes. Choose when precise culling is needed over cache optimization. [Point Plane Test Traversal](982-point-plane-test-traversal.md)
+
+### Multi-Resolution Rendering with K-D Tree
+Uses K-D trees for multi-resolution. Choose when K-D trees are preferred over octrees. [Multi-Resolution Rendering with K-D Tree](1942-multi-resolution-rendering-with-k-d-tree.md)
+
+### Coarse Mesh Traversal
+Uses a coarse mesh for initial culling. Choose when a coarse mesh is available. [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md)
+
+### Node Omission in Ray-Tree Traversal
+Omits empty nodes. Choose when the volume has large empty regions. [Node Omission in Ray-Tree Traversal](3305-node-omission-in-ray-tree-traversal.md)
+
+### Two-Pass Hierarchy Traversal
+Uses two passes for traversal and shading. Choose when shading is expensive. [Two-Pass Hierarchy Traversal](3339-two-pass-hierarchy-traversal.md)
+
+### Adaptive Out-of-Core Single-Pass GPU Raycasting
+Handles out-of-core data. Choose when memory is limited. [Adaptive Out-of-Core Single-Pass GPU Raycasting](3440-adaptive-out-of-core-single-pass-gpu-raycasting.md)
+
+### Bounding Volume Hierarchy (BVH) Traversal
+Uses BVH instead of octree. Choose when BVH is more suitable. [Bounding Volume Hierarchy (BVH) Traversal](18487-bounding-volume-hierarchy-bvh-traversal.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot D)$ where $N$ is the number of rays and $D$ is the average depth of the octree. Coherence reduces the constant factor via cache hits.
+- **Memory Complexity:** $O(V)$ for the octree storage, where $V$ is the number of voxels.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales well with image resolution due to parallelism, but limited by thread divergence in deep octrees.
+- **Strengths:** Improved cache hit rates, reduced memory bandwidth usage.
+- **Limitations:** Thread divergence in deep octrees, SIMD stalls, memory waste if block sizes are not optimal.
+- **When to Use:** High-quality volume rendering on GPUs where cache efficiency is critical.
+- **When Not to Use:** When thread divergence is high or when memory is extremely constrained.
+
+## Background
+The concept was discussed in the context of CUDA programming for octree traversal on the NVIDIA Developer Forums in 2009. It was proposed as a way to improve cache hits by mapping threads to 2D blocks, ensuring neighboring rays traverse the octree similarly. The term "packet ray traversal" was used to describe this approach. The discussion highlighted the challenges of thread divergence and memory management in GPU-based volume rendering.
+
+## Sources
+[S1] Best way of traversing an octree in CUDA? - CUDA Programming and Performance - NVIDIA Developer Forums, https://forums.developer.nvidia.com/t/best-way-of-traversing-an-octree-in-cuda/9179, fetched 2026-10-24 (unofficial)

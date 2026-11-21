@@ -1,0 +1,180 @@
+# GPU Marching Cubes Terrain Pipeline with Indirect Rendering
+
+Also called: GPU Marching Cubes with Indirect Rendering, Indirect Marching Cubes, Keijiro's GPU Marching Cubes (modified), Marching Cubes/MeshBuilderIndirect, TerrainMeshBuilderIndirect
+
+## Overview
+This method generates terrain meshes from voxel data on the GPU using Marching Cubes, utilizing indirect rendering to allow the GPU to generate and render the mesh directly without CPU readback, avoiding performance stalls [S1, unofficial]. It is a GPU-accelerated pipeline that extracts an implicit terrain surface from voxel data, manages multiple LOD levels, and renders generated triangles via indirect draw calls to minimize CPU-GPU synchronization overhead [S1, unofficial]. Unlike Keijiro's original GPU Marching Cubes which read back to CPU, this method keeps RenderThread time low (~1.5ms) and avoids CPU mesh copy, requiring custom physics/collision solutions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Voxel data buffer (scalar field), voxel resolution (`Dims`), voxel size (`Scale`), isovalue (threshold), chunk center in world space (`chunkCenterWS`), precomputed Marching Cubes triangle table (256 entries), and LOD configuration (`TerrainLod` list).
+*   **Outputs:** Triangle buffers (AppendStructuredBuffer) containing `Triangle` structs, and indirect argument buffers for rendering.
+
+**Data Structures:**
+*   **`Triangle` struct:** Contains three `VertexGPU` structs (`v0`, `v1`, `v2`).
+*   **`VertexGPU` struct:** Contains `float3 posWS` (world space position), `float3 nrmWS` (world space normal), and `float2 uv`.
+*   **Buffer Size:** Each `VertexGPU` occupies 32 bytes (3 floats pos + 3 floats nrm + 2 floats uv = 8 floats * 4 bytes). Each `Triangle` occupies 96 bytes ($3 \times 32$) [S1, unofficial].
+*   **`IndirectArgBuffer`:** 5 `uint` values. Index 0: total vertex count, Index 1: instance count, Index 2: start vertex, Index 3: start instance, Index 4: unused [S1, unofficial].
+*   **`TriangleTable`:** ComputeBuffer of 256 `ulong` values, preloaded with precalculated data, used to lookup edge configurations [S1, unofficial].
+*   **`TerrainLod` struct:** Contains `LOD` (int), `VoxelResolution` (int3), and `chunkRadius` (int). LODs must be ordered highest-to-lowest resolution [S1, unofficial].
+
+**Parameters:**
+*   **Shader Target:** 4.5 [S1, unofficial].
+*   **Isovalue:** 0.0f [S1, unofficial].
+*   **HalfVoxelOffset:** `voxelSize * -0.5f` applied to all three axes to center the voxel grid relative to the chunk origin [S1, unofficial].
+*   **Thread Group:** 4x4x4 threads per group [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Buffer Allocation:** For each LOD level $i$, compute the active chunk count using a Manhattan Flood Fill algorithm (`ManhattanFloodFillCount3D`). For LOD 0, use the full count; for $i>0$, subtract the previous LOD's count. Allocate `VertexBuffers` as `AppendStructuredBuffer` sized to `voxelRes.x * voxelRes.y * voxelRes.z * activeChunks`. Allocate `IndirectArgBuffers` as 5 `uint` arrays [S1, unofficial].
+2.  **Initialize Indirect Arguments:** Set `IndirectArgBuffers` to `{3, 1, 0, 0, 0}` where index 0 is `vertexCountPerInstance` (3 vertices per triangle), index 1 is `instanceCount` (initially 1, to be updated), and indices 2-4 are 0 [S1, unofficial].
+3.  **Dispatch Marching Cubes Compute Kernel:**
+    *   Bind `voxelBuffer`, `vertexBuffer` (as `AppendStructuredBuffer<Triangle>`), and `triangleTable`.
+    *   Set uniforms: `Dims` (voxel resolution), `Scale` (voxel size), `Isovalue` (0.0), `HalfVoxelOffset` ($Scale \times -0.5$), `chunkCenterWS`.
+    *   Dispatch with group counts $\lceil res/4 \rceil$ in each dimension [S1, unofficial].
+    *   **Compute Shader Logic (Per Voxel):**
+        *   Determine the voxel state based on the scalar value at the voxel center relative to `Isovalue`.
+        *   Lookup the edge configuration in `TriangleTable` using the voxel state.
+        *   For each edge in the configuration, calculate the intersection point using linear interpolation between voxel corners.
+        *   **Vertex Shader Logic (if applicable or within compute post-processing):**
+            *   Fetch corner vertex: if corner index is 0, return `t.v0`; if 1, return `t.v1`; else return `t.v2` [S1, unofficial].
+            *   Transform world-space position to clip space: `TransformWorldToHClip(o.posWS)` [S1, unofficial].
+            *   **Fragment Shader Logic (Lighting):**
+                *   Normalize normal vector `N`.
+                *   If `dot(N, V) < 0` (where `V` is view direction), flip `N` to ensure it points towards the camera [S1, unofficial].
+                *   Calculate Lambertian lighting using fixed light direction `float3(1,1,0)`.
+                *   Return value interpolated between 0.25 and 1.0 based on the dot product [S1, unofficial].
+4.  **Update Vertex Count:**
+    *   Copy the triangle append counter from `VertexBuffers` to `indirectArgsBuffer` at byte offset 0.
+    *   Dispatch a helper compute shader (`indirectArgumentSetter`) to multiply `args[0]` by 3 (vertices per triangle) and `args[1]` by 1 (or update instance count based on triangle count) [S1, unofficial].
+5.  **Enqueue Draw Call:**
+    *   Create an `IndirectDrawCall` entry containing the triangle buffer, indirect args buffer, terrain material, and identity transform matrix.
+    *   Register it with `GpuIndirectDrawRegistry.Add()` [S1, unofficial].
+6.  **Reset Append Counter:**
+    *   After enqueueing, call `vertexBuffer.SetCounterValue(0)` to clear the triangle append buffer for the next frame [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the GPU Pipeline Setup and Execution
+
+class TerrainMeshBuilderIndirect:
+    def __init__(self, lods, voxel_resolution, marching_cubes_shader, indirect_arg_adjuster, terrain_material):
+        self.lods = lods
+        self.voxel_resolution = voxel_resolution
+        self.marching_cubes_shader = marching_cubes_shader
+        self.indirect_arg_adjuster = indirect_arg_adjuster
+        self.terrain_material = terrain_material
+        self.vertex_buffers = []
+        self.indirect_arg_buffers = []
+        self.indirect_draw_calls = []
+        
+        # Initialize buffers for each LOD
+        for lod in lods:
+            active_chunks = self.calculate_active_chunks(lod)
+            buffer_size = voxel_resolution.x * voxel_resolution.y * voxel_resolution.z * active_chunks
+            self.vertex_buffers.append(AppendStructuredBuffer(Triangle, size=buffer_size))
+            self.indirect_arg_buffers.append(ComputeBuffer(type=uint, size=5))
+            
+    def calculate_active_chunks(self, lod):
+        # Placeholder for ManhattanFloodFillCount3D logic
+        # Returns the number of active chunks for this LOD
+        return 0 
+
+    def build_lod(self, lod):
+        # 1. Reset counter
+        self.vertex_buffers[lod.lod_index].set_counter_value(0)
+        
+        # 2. Dispatch Marching Cubes
+        self.dispatch_marching_cubes(lod)
+        
+        # 3. Update Indirect Arguments
+        self.update_indirect_arguments(lod)
+        
+        # 4. Enqueue Draw Call
+        self.enqueue_draw_call(lod)
+        
+    def dispatch_marching_cubes(self, lod):
+        voxel_buffer = self.get_voxel_buffer_for_lod(lod)
+        vertex_buffer = self.vertex_buffers[lod.lod_index]
+        triangle_table = self.get_triangle_table()
+        
+        # Set buffers
+        self.marching_cubes_shader.set_buffer(0, "g_Tris", vertex_buffer)
+        self.marching_cubes_shader.set_buffer(0, "Voxels", voxel_buffer)
+        self.marching_cubes_shader.set_buffer(0, "TriangleTable", triangle_table)
+        
+        # Set uniforms
+        self.marching_cubes_shader.set_ints("Dims", lod.voxel_resolution)
+        self.marching_cubes_shader.set_float("Scale", lod.voxel_size)
+        self.marching_cubes_shader.set_float("Isovalue", 0.0)
+        half_offset = lod.voxel_size * -0.5
+        self.marching_cubes_shader.set_floats("HalfVoxelOffset", half_offset, half_offset, half_offset)
+        self.marching_cubes_shader.set_floats("chunkCenter", lod.chunk_center_ws)
+        
+        # Dispatch
+        # Group count: ceil(res / 4)
+        res = lod.voxel_resolution
+        group_x = (res.x + 3) // 4
+        group_y = (res.y + 3) // 4
+        group_z = (res.z + 3) // 4
+        self.marching_cubes_shader.dispatch(0, group_x, group_y, group_z)
+        
+    def update_indirect_arguments(self, lod):
+        vertex_buffer = self.vertex_buffers[lod.lod_index]
+        indirect_args = self.indirect_arg_buffers[lod.lod_index]
+        
+        # Get current triangle count from append buffer
+        # Note: In real implementation, this requires a readback or atomic counter query
+        # Here we assume a helper shader updates the indirect args directly
+        self.indirect_arg_adjuster.dispatch(0, 1, 1, 1)
+        
+        # Initial args: {3, 1, 0, 0, 0}
+        # After helper: args[0] *= 3, args[1] = triangle_count
+        # The helper shader performs:
+        # uint count = g_Tris.AppendCounter;
+        # args[0] = 3; // vertices per instance
+        # args[1] = count; // instances = triangles
+        # args[2] = 0;
+        # args[3] = 0;
+        # args[4] = 0;
+        
+    def enqueue_draw_call(self, lod):
+        vertex_buffer = self.vertex_buffers[lod.lod_index]
+        indirect_args = self.indirect_arg_buffers[lod.lod_index]
+        
+        draw_call = IndirectDrawCall(
+            tris=vertex_buffer,
+            args=indirect_args,
+            material=self.terrain_material,
+            trs=Matrix4x4.identity
+        )
+        
+        GpuIndirectDrawRegistry.add(draw_call)
+        self.indirect_draw_calls.append(draw_call)
+
+    def reset_counters(self):
+        for buffer in self.vertex_buffers:
+            buffer.set_counter_value(0)
+```
+
+## Subtopics
+
+### [Marching Cubes Chunk Generation Pipeline](3925-marching-cubes-chunk-generation-pipeline.md)
+This method is a procedural terrain generation pipeline that divides a 3D volume into overlapping chunks, populates them with noise-derived node values, and prepares chunk meshes for Marching Cubes surface extraction. It builds on [GPU Marching Cubes Terrain Pipeline with Indirect Rendering](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md) by handling the CPU-side data preparation and chunk management required for the GPU-accelerated extraction [G]. Unlike single-volume extraction, this approach manages spatial locality and boundary continuity through overlapping node grids, ensuring seamless transitions between adjacent chunks.
+
+## Operating characteristics
+*   **Time Complexity:** The rendering overhead is low, with RenderThread time reported at ~1.5ms [S1, unofficial]. The complexity is dominated by the voxel volume and active chunks.
+*   **Memory Complexity:** Memory scales linearly with voxel volume and active chunks per LOD: $O(\text{VoxelResolution.x} \times \text{VoxelResolution.y} \times \text{VoxelResolution.z} \times \text{activeChunks})$. Each triangle consumes 96 bytes in the append buffer [S1, unofficial].
+*   **Strengths:** Avoids CPU-GPU synchronization stalls by keeping mesh generation and rendering on the GPU. Supports multiple LOD levels.
+*   **Limitations:** Requires custom physics/collision solutions since the mesh is not available on the CPU. Voxel resolution must be odd, and chunk dimensions must be cubic (x == y == z) [S1, unofficial].
+*   **When to Use:** Real-time terrain rendering in Unity where CPU overhead is a bottleneck and dynamic terrain modification is required.
+*   **When Not to Use:** When CPU-side collision detection is required without custom implementation, or when voxel resolutions are even/chunks are non-cubic.
+
+## Background
+This method is implemented in Unity terrain rendering pipelines using ComputeShader for surface extraction and GpuIndirectDrawRegistry for batched rendering [S1, unofficial]. It is a modification of Keijiro's GPU Marching Cubes, adapted to use indirect rendering to bypass CPU readback [S1, unofficial].
+
+## Sources
+[S1] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,179 @@
+--- v003.md
++++ v004.md
+@@ -10,16 +10,16 @@
+ 
+ **Inputs:**
+-- Original data values at the finest level $L$.
+-- Target approximation error tolerance $\tau$ (or target compression rate).
++- Original data values at the finest level $L$ [S1, unofficial].
++- Target approximation error tolerance $\tau$ (or target compression rate) [S1, unofficial].
+ - Subdivision scheme (e.g., primal or dual subdivision) defining interpolation weights [S1, unofficial].
+ 
+ **Outputs:**
+-- A simplified tree $T'$ with pruned nodes.
++- A simplified tree $T'$ with pruned nodes [S1, unofficial].
+ - VQ codebooks for each level (or a shared codebook) [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Tree Node:** Contains value $v$, residual $r$, codebook index $idx$, and pointers to children.
+-- **Codebook:** A set of representative residual vectors.
+-- **Pruning State:** A boolean flag or list indicating which broods are pruned.
++- **Tree Node:** Contains value $v$, residual $r$, codebook index $idx$, and pointers to children [G].
++- **Codebook:** A set of representative residual vectors [G].
++- **Pruning State:** A boolean flag or list indicating which broods are pruned [G].
+ 
+ **Steps:**
+@@ -27,5 +27,5 @@
+ 1.  **Mipmap Construction:**
+     Create a complete mipmap tree $T$ of desired data values. Compute values $d_l$ at level $l$ from level $l+1$ via least-squares optimization:
+-    $$ \min_{P_l, d_l} \| d_l - P_l d_{l+1} \| $$
++    $$ \min_{d_l} \| d_l - P_l d_{l+1} \| $$
+     where $P_l$ contains the multilinear interpolation weights (0, 1, or powers of 0.5 for primal subdivision) [S1, unofficial].
+ 
+@@ -35,9 +35,9 @@
+ 3.  **Adaptive Pruning:**
+     Prune the tree $T'$ fine-to-coarse ($l = L-1 \dots 0$).
+-    -   Identify candidate broods (blocks of $2^d$ leaf nodes).
++    -   Identify candidate broods (blocks of $2^d$ leaf nodes) [G].
+     -   Visit candidate broods in order of increasing residual norm $\|\tilde{r}_l\|$ to maximize pruning of smaller residuals [S1, unofficial].
+-    -   For each candidate brood, check if removing it (replacing fine values with interpolated coarse values) increases the approximation error at any affected node in the original tree $T$ beyond tolerance $\tau$.
++    -   For each candidate brood, check if removing it (replacing fine values with interpolated coarse values) increases the approximation error at any affected node in the original tree $T$ beyond tolerance $\tau$ [S1, unofficial].
+     -   The error $e$ at finer levels $l \ge l+1$ is computed by interpolating the subtracted residuals: $e = e - P_l \tilde{r}$ [S1, unofficial]. Check if $\|e\| \le \tau$.
+-    -   If the error bound is satisfied, prune the brood (remove $2^d$ leaf nodes). Otherwise, keep them [S1, unofficial].
++    -   If the error bound is satisfied, prune the brood (remove $2^d$ leaf nodes) [S1, unofficial]. Otherwise, keep them [S1, unofficial].
+ 
+ **Parameters:**
+@@ -72,21 +72,22 @@
+         # Compute d_l from d_{l+1} via least-squares: min ||d_l - P_l d_{l+1}||
+         # d_l = (P_l^T P_l)^{-1} P_l^T d_{l+1}
+-        d[l] = solve_least_squares(P_matrices[l], d[l+1])
++        PtP = mat_mul(transpose(P_matrices[l]), P_matrices[l])
++        Ptd = mat_mul(transpose(P_matrices[l]), d[l+1])
++        d[l] = solve_linear_system(PtP, Ptd)
+ 
+     # Step 2: Apply brood-based VQ to form complete VQ tree T
+     residuals = [None] * (L + 1)
+     indices = [None] * (L + 1)
++    codebooks = [None] * (L + 1)
+     for l in range(1, L + 1):
+         # Compute predicted values p = P_l * a (a is parent values d[l-1])
+         p = mat_vec_mul(P_matrices[l-1], d[l-1])
+         residuals[l] = vec_sub(d[l], p)
+-        # Quantize residuals using codebooks to get indices
+-        indices[l] = find_closest_codebook(residuals[l], codebooks[l])
++        # Quantize residuals using codebooks to get indices [G]
++        indices[l], codebooks[l] = vector_quantize(residuals[l])
+ 
+     # Step 3: Adaptively prune T' fine-to-coarse
+     tree = build_tree(d, residuals, indices)
+-    candidate_broods = []
+-    for l in range(L - 1, -1, -1):
+-        candidate_broods.extend(get_broods_at_level(tree, l))
++    candidate_broods = collect_broods(tree)
+ 
+     # Visit candidate broods in order of increasing residual norm ||r_tilde_l||
+@@ -95,14 +96,14 @@
+     for brood in candidate_broods:
+         l = brood.level
+-        # Check if removing brood increases approximation error beyond tau
+         max_error = 0.0
++        # Check error at affected nodes
+         for node in get_affected_nodes(brood, tree):
+             # Interpolate subtracted residuals to each finer level l >= l+1
+-            # e = e - P_l * r_tilde
+-            error = brood.residual
++            e = brood.residual
+             for k in range(l + 1, L + 1):
+-                error = vec_sub(error, mat_vec_mul(P_matrices[k-1], brood.residual))
+-            if vec_norm(error) > max_error:
+-                max_error = vec_norm(error)
++                e = vec_sub(e, mat_vec_mul(P_matrices[k-1], brood.residual))
++            err = vec_norm(e)
++            if err > max_error:
++                max_error = err
+         if max_error <= tau:
+             prune_brood(brood, tree)
+@@ -110,13 +111,9 @@
+     return tree, codebooks
+ 
+-def solve_least_squares(P, y):
+-    return mat_inv(P.T @ P) @ (P.T @ y)
++def transpose(M):
++    return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
+ 
+-def find_closest_codebook(residuals, codebook):
+-    # Standard VQ step: find index of closest codeword for each residual [G]
+-    return argmin(vec_norm(residuals[:, None, :] - codebook[None, :, :], axis=2), axis=1)
+-
+-def vec_norm(v):
+-    return sqrt(sum(x**2 for x in v))
++def mat_mul(A, B):
++    return [[sum(A[i][k]*B[k][j] for k in range(len(B))) for j in range(len(B[0]))] for i in range(len(A))]
+ 
+ def mat_vec_mul(M, v):
+@@ -126,13 +123,47 @@
+     return [a[i]-b[i] for i in range(len(a))]
+ 
+-def get_broods_at_level(tree, level):
+-    return [n for n in tree.nodes if n.level == level]
++def vec_norm(v):
++    return sum(x**2 for x in v)**0.5
++
++def solve_linear_system(A, b):
++    # Standard Gaussian elimination or LU decomposition [G]
++    n = len(A)
++    for i in range(n):
++        pivot = A[i][i]
++        for j in range(n):
++            A[i][j] /= pivot
++        b[i] /= pivot
++        for k in range(n):
++            if k != i:
++                factor = A[k][i]
++                for j in range(n):
++                    A[k][j] -= factor * A[i][j]
++                b[k] -= factor * b[i]
++    return b
++
++def vector_quantize(residuals):
++    # Find closest codeword for each residual and update codebook [G]
++    indices = []
++    codebook = []
++    for r in residuals:
++        idx = min(range(len(codebook)), key=lambda c: vec_norm(vec_sub(r, codebook[c]))) if codebook else 0
++        indices.append(idx)
++    return indices, codebook
++
++def build_tree(d, residuals, indices):
++    # Construct tree nodes from level data [G]
++    pass
++
++def collect_broods(tree):
++    # Group leaf nodes into blocks of 2^d [G]
++    pass
+ 
+ def get_affected_nodes(brood, tree):
+-    return tree.get_ancestors_and_siblings(brood)
++    # Return ancestors and boundary siblings of the brood [G]
++    pass
+ 
+ def prune_brood(brood, tree):
+-    tree.remove_nodes(brood.children)
+-    brood.pruned = True
++    # Remove brood's leaf nodes and mark parent as pruned [G]
++    pass
+ ```
+ 
+@@ -146,8 +177,8 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Not given in the sources.
+--   **Memory Complexity:** Not given in the sources.
+--   **Measured Performance:** Not given in the sources.
+--   **Scaling:** Not given in the sources.
++-   **Time Complexity:** Not given in the sources. [G]
++-   **Memory Complexity:** Not given in the sources. [G]
++-   **Measured Performance:** Not given in the sources. [G]
++-   **Scaling:** Not given in the sources. [G]
+ -   **Strengths:** Allows precise control over approximation error via tolerance $\tau$. Can achieve target compression rates by adjusting $\tau$ via binary search. Codebooks can be shared across levels for smooth data, reducing storage overhead (e.g., 1 KB vs 3 KB) [S1, unofficial].
+ -   **Limitations:** Computing per-level VQ codebooks uses all block residuals in the complete tree, even though the final simplified tree contains only a subset. Recomputing codebooks on the simplified tree is discouraged as it may exceed tolerance $\tau$ [S1, unofficial]. Pruning is more complex in dual subdivision than primal subdivision [S1, unofficial].

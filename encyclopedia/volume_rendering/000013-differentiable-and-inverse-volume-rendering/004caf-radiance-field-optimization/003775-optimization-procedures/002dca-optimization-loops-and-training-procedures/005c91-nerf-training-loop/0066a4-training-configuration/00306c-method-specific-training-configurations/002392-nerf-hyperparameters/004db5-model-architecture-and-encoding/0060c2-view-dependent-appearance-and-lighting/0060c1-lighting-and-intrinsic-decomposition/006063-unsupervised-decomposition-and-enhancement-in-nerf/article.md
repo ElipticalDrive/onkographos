@@ -1,0 +1,228 @@
+# Unsupervised Decomposition and Enhancement in NeRF
+
+Also called: LLNeRF, Lighting up NeRF
+
+## Overview
+This method decomposes the view-dependent color of a neural radiance field into a view-dependent lighting component $v$ and a view-independent reciprocal color basis $r$, then enhances $v$ using a neural network to produce an enhanced image without ground truth supervision [S1]. It sets itself apart from 2D Retinex-based methods by leveraging 3D geometry and multi-view consistency to constrain the ill-posed decomposition, avoiding the need for paired low-light/high-light training data [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of uncalibrated, low-light RGB images (or RAW images) of a scene.
+*   **Outputs:** A trained radiance field model capable of rendering novel views, and an enhanced version of those views $I_e$.
+
+**Data Structures:**
+The model consists of three main neural network components:
+1.  **Radiance Field Model:**
+    *   **Density MLP ($F_{density}$):** Input: spatial coordinate $\tau$. Output: scalar density $\sigma$.
+    *   **Direction MLP:** Input: view direction $d$. Output: feature vector.
+    *   **Feature MLP:** Concatenates density and direction features. Output: view-dependent color $c$ (3 channels).
+    *   *Note:* The standard NeRF architecture is modified to output $v$ and $r$ separately instead of $c$ directly.
+2.  **Decomposition Networks:**
+    *   **$F_1$ (Lighting MLP):** Input: spatial coordinate $\tau$, view direction $d$. Output: scalar lighting component $v$.
+    *   **$F_2$ (Color Basis MLP):** Input: spatial coordinate $\tau$. Output: 3-channel reciprocal color basis $r$.
+3.  **Enhancement Model $\phi$:**
+    *   **Feature MLP 1:** Input: $v$. Output: 8x256 feature vector.
+    *   **Feature MLP 2:** Input: Feature from MLP 1. Output: 1x256 feature vector.
+    *   **Coeff MLP:** Input: Feature from MLP 2. Output: Coefficients $\alpha$ (scalar) and $\gamma$ (3D vector).
+    *   **Color MLP:** Input: Feature from MLP 2. Output: 3-channel color correction (used in some variants, but primary enhancement uses $\alpha, \gamma$).
+
+**Numbered Steps:**
+
+1.  **Ray Sampling:** For each pixel in a training image, cast a ray $\mathbf{r}$ through the scene. Sample $N$ points along the ray at spatial coordinates $\tau_i$ and view directions $d_i$.
+2.  **Decomposition:** For each sample $i$, compute the lighting component $v_i$ and color basis $r_i$:
+    $$ v_i = F_1(\tau_i, d_i; \Theta_{F1}) $$
+    $$ r_i = F_2(\tau_i; \Theta_{F2}) $$
+    The unenhanced color is $c_i = v_i \circ r_i$, where $\circ$ is pixel-wise multiplication.
+3.  **Enhancement:** Apply the enhancement function $\phi$ to $v_i$ to get $\hat{v}_i$:
+    $$ \hat{v}_i = \phi(v_i) = \left( \frac{v_i}{\gamma_0} \right)^{\alpha} \circ \gamma $$
+    *   $\alpha$ is a scalar output by the Coeff MLP, adjusting global lighting gain.
+    *   $\gamma$ is a 3D vector output by the Coeff MLP, correcting color distortion.
+    *   $\gamma_0$ is a fixed initialization value for the non-linear transform.
+    *   The enhanced color sample is $\hat{c}_i = \hat{v}_i \circ r_i$.
+4.  **Volume Rendering:** Render the enhanced image $I_e$ and the standard image $I$ using alpha-composition.
+    *   Compute weights $w_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) (1 - \exp(-\sigma_i \delta_i))$.
+    *   Enhanced pixel color: $\hat{c}_r = \sum_{i=1}^{N} w_i \hat{c}_i = \sum_{i=1}^{N} w_i \phi(v_i) \circ r_i$.
+    *   Standard pixel color: $c_r = \sum_{i=1}^{N} w_i c_i$.
+5.  **Loss Computation:** Calculate the total loss $\mathcal{L} = \mathcal{L}_c + \mathcal{L}_s + \mathcal{L}_d$.
+    *   **Gray-world Prior Loss ($\mathcal{L}_c$):** Constrains the enhanced color to have natural statistics.
+        $$ \mathcal{L}_c = \mathbb{E}[(\hat{c}_r - e)^2] + \lambda_1 \mathbb{E}\left[\frac{\text{var}_c(\hat{c}_r)}{\beta_1 + \text{var}_c(r_r)}\right] + \lambda_2 \|\gamma\|^2 $$
+        *   $e = 0.55$: Target brightness for the gray-world prior.
+        *   $\text{var}_c(\cdot)$: Channel-wise variance.
+        *   $\beta_1, \lambda_1, \lambda_2$: Hyper-parameters.
+        *   The term $\frac{\text{var}_c(\hat{c}_r)}{\beta_1 + \text{var}_c(r_r)}$ relaxes the gray-world constraint for highly saturated colors (high variance in $r_r$).
+    *   **Smoothness Loss ($\mathcal{L}_s$):** Constrains the gradients of the enhancement coefficients with respect to the integrated lighting component to preserve local structure.
+        $$ \mathcal{L}_s = \mathcal{L}_{s\alpha} + \mathcal{L}_{s\gamma} $$
+        $$ \mathcal{L}_{s\alpha} = \frac{1}{2} \left[ \frac{(\alpha_r - \alpha_{rh})^2}{(v_r - v_{rh})^2 + \epsilon_1} + \frac{(\alpha_r - \alpha_{rv})^2}{(v_r - v_{rv})^2 + \epsilon_1} \right] $$
+        *   $\alpha_r, v_r$: Integrated $\alpha$ and $v$ for the current ray.
+        *   $\alpha_{rh}, v_{rh}$: Integrated values for the horizontally neighboring ray.
+        *   $\alpha_{rv}, v_{rv}$: Integrated values for the vertically neighboring ray.
+        *   $\epsilon_1$: Small constant to prevent division by zero.
+        *   $\mathcal{L}_{s\gamma}$ is computed similarly for $\gamma$.
+    *   **Data Loss ($\mathcal{L}_d$):** Supervises the radiance field geometry using the observed RAW pixel values $\tilde{c}_r$.
+        $$ \mathcal{L}_d = \mathbb{E}[\eta(\tilde{c}_r) - \eta(c_r)] $$
+        *   $\eta(y) = \log(y + \epsilon_2)$: Tone mapping function to amplify errors in dark regions.
+        *   $\epsilon_2$: Small constant.
+6.  **Optimization:** Update parameters $\Theta_{F1}, \Theta_{F2}, \Theta_{\phi}$ (for $\mathcal{L}_c, \mathcal{L}_s$) and $\Theta_{density}$ (for $\mathcal{L}_d$) via gradient descent.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class EnhancementModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Feature MLP 1: 1 -> 256 -> 256 (8x256 output in paper implies 8 layers or features, 
+        # but standard implementation uses sequential layers. 
+        # Based on "Feature MLP 1 has 8x256 channels", this likely refers to depth/width.
+        # We implement a standard MLP structure as described in Fig 3c.
+        self.feature_mlp_1 = nn.Sequential(
+            nn.Linear(1, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256) # Output 256
+        )
+        self.feature_mlp_2 = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU() # Output 256
+        )
+        self.coeff_mlp = nn.Sequential(
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, 4) # Output: alpha (1), gamma (3)
+        )
+        self.color_mlp = nn.Sequential(
+            nn.Linear(256, 128), nn.ReLU(),
+            nn.Linear(128, 3) # Output: 3 channels
+        )
+
+    def forward(self, v):
+        # v shape: (batch, 1)
+        feat1 = self.feature_mlp_1(v)
+        feat2 = self.feature_mlp_2(feat1)
+        coeffs = self.coeff_mlp(feat2)
+        alpha = coeffs[:, 0:1] # (batch, 1)
+        gamma = coeffs[:, 1:4] # (batch, 3)
+        color_corr = self.color_mlp(feat2)
+        return alpha, gamma, color_corr
+
+def enhance_v(v, alpha, gamma, gamma_0=1.0):
+    """
+    Apply dynamic gamma correction.
+    v: (batch, 1)
+    alpha: (batch, 1)
+    gamma: (batch, 3)
+    """
+    # v_hat = (v / gamma_0) ^ alpha * gamma
+    # Note: Element-wise power and multiplication. 
+    # gamma is a 3D vector, v is scalar per channel? 
+    # In the paper, v is 1-channel (intensity). gamma is 3-channel.
+    # The operation implies broadcasting or channel expansion.
+    # Assuming v is expanded to 3 channels for multiplication with gamma.
+    v_exp = v.repeat(1, 3) # (batch, 3)
+    v_hat = (v_exp / gamma_0) ** alpha.repeat(1, 3) * gamma
+    return v_hat
+
+def render_ray(samples, density_mlp, f1_mlp, f2_mlp, enhancement_model, gamma_0):
+    """
+    samples: (N, 3) spatial coords, (N, 3) view dirs
+    Returns: enhanced_color, standard_color, alpha_vals, gamma_vals, v_vals
+    """
+    # 1. Decomposition
+    v = f1_mlp(samples.spatial, samples.view_dir) # (N, 1)
+    r = f2_mlp(samples.spatial) # (N, 3)
+    
+    # 2. Enhancement
+    alpha, gamma, _ = enhancement_model(v)
+    v_hat = enhance_v(v, alpha, gamma, gamma_0)
+    
+    c = v * r # (N, 3)
+    c_hat = v_hat * r # (N, 3)
+    
+    # 3. Volume Rendering (Standard Alpha Compositing)
+    # Assuming density_mlp outputs sigma
+    sigma = density_mlp(samples.spatial)
+    delta = samples.distances # (N-1,) or similar
+    alpha_weights = torch.exp(-torch.cumsum(sigma * delta, dim=0)) * (1 - torch.exp(-sigma * delta))
+    
+    standard_color = torch.sum(alpha_weights.unsqueeze(-1) * c, dim=0)
+    enhanced_color = torch.sum(alpha_weights.unsqueeze(-1) * c_hat, dim=0)
+    
+    return enhanced_color, standard_color, alpha, gamma, v
+
+def compute_losses(enhanced_color, standard_color, observed_raw, alpha, gamma, v, neighbors):
+    """
+    neighbors: dict containing alpha_h, alpha_v, v_h, v_v for current ray
+    """
+    # Data Loss
+    epsilon_2 = 1e-6
+    eta = lambda y: torch.log(y + epsilon_2)
+    loss_d = torch.mean(eta(observed_raw) - eta(standard_color))
+    
+    # Gray-world Prior Loss
+    e = 0.55
+    beta_1 = 1e-3
+    lambda_1 = 1.0
+    lambda_2 = 1e-4
+    
+    var_c_enh = torch.var(enhanced_color, dim=0, unbiased=False) # Channel-wise var
+    var_c_r = torch.var(standard_color / (enhanced_color / v_hat + 1e-6), dim=0, unbiased=False) # Approx var of r
+    
+    # Note: r_r is the integrated r. r_r = c_r / v_r (if v_r != 0). 
+    # In implementation, we might track integrated r directly or approximate.
+    # Using the formula from paper: var_c(r_r).
+    
+    loss_c = torch.mean((enhanced_color - e)**2) + \
+             lambda_1 * torch.mean(var_c_enh / (beta_1 + var_c_r)) + \
+             lambda_2 * torch.mean(gamma**2)
+             
+    # Smoothness Loss
+    epsilon_1 = 1e-6
+    alpha_h = neighbors['alpha_h']
+    alpha_v = neighbors['alpha_v']
+    v_h = neighbors['v_h']
+    v_v = neighbors['v_v']
+    
+    loss_sa = 0.5 * ( (alpha - alpha_h)**2 / ((v - v_h)**2 + epsilon_1) + 
+                      (alpha - alpha_v)**2 / ((v - v_v)**2 + epsilon_1) )
+    # Similar for gamma (L_sg)
+    gamma_h = neighbors['gamma_h']
+    gamma_v = neighbors['gamma_v']
+    loss_sg = 0.5 * ( (gamma - gamma_h)**2 / ((v - v_h)**2 + epsilon_1) + 
+                      (gamma - gamma_v)**2 / ((v - v_v)**2 + epsilon_1) )
+    loss_s = torch.mean(loss_sa) + torch.mean(loss_sg)
+    
+    return loss_d, loss_c, loss_s
+```
+
+**Parameters:**
+*   $\alpha$: Scalar output by $\phi$, global lighting gain.
+*   $\gamma$: 3D vector output by $\phi$, color distortion correction.
+*   $\gamma_0$: Fixed initialization value for the non-linear transform.
+*   $e$: Hyper-parameter for gray-world prior, set to 0.55.
+*   $\lambda_1, \lambda_2, \beta_1$: Hyper-parameters for $\mathcal{L}_c$.
+*   $\epsilon_1$: Small constant in $\mathcal{L}_s$ denominator.
+*   $\epsilon_2$: Small constant in tone mapping $\eta$.
+
+**Pitfalls:**
+*   **RAW Image Noise Bias:** In RAW images, non-linear ISP processes change the noise distribution. If not accounted for, the predicted color $c_r$ converges to a biased value $\bar{c} + b$ instead of the true color $\bar{c}$, leading to color distortions [S1]. The method assumes zero-mean noise in RAW images, but ISP non-linearity violates this, necessitating the gray-world prior and smoothness constraints [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of samples per ray and the depth of the MLPs. The enhancement network adds a small overhead to the standard NeRF rendering step.
+*   **Memory Complexity:** Requires storing parameters for $F_1, F_2$, and $\phi$. No additional large data structures.
+*   **Strengths:** Unsupervised; works with low-light images without paired ground truth; leverages 3D geometry for robust decomposition; handles color distortion via $\gamma$.
+*   **Limitations:** Sensitive to noise in RAW images; requires careful tuning of hyper-parameters ($\lambda_1, \lambda_2, e$); decomposition is still ill-posed and relies on priors.
+
+## Background
+*   **Origin:** Proposed in "Lighting up NeRF via Unsupervised Decomposition and Enhancement" (ICCV 2023) [S1].
+*   **History:** Builds on the NeRF framework [22] and RawNeRF [21] for RAW image processing. It addresses the limitations of 2D Retinex methods [28, 9, 31, 38] which require ground truth and lack 3D consistency.
+*   **Usage:** Used for low-light novel view synthesis and enhancement in indoor and outdoor scenes.
+
+## Sources
+[S1] Lighting up NeRF via Unsupervised Decomposition and Enhancement, https://doi.org/10.1109/iccv51070.2023.01161, fetched 2026-10-29

@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -21,15 +21,15 @@
+ 
+ ### Steps
+-1. **Positional Encoding**: Apply Fourier positional encoding to the input 3D points. This maps each coordinate $x \in \mathbb{R}^3$ to a higher-dimensional vector using sine and cosine functions at multiple frequencies [S1, unofficial][S2]. The number of frequencies is determined by `num_octaves` [S1, unofficial].
++1. **Positional Encoding**: Apply Fourier positional encoding to the input 3D points [S1, unofficial]. This maps each coordinate $x \in \mathbb{R}^3$ to a higher-dimensional vector using sine and cosine functions at multiple frequencies [S1, unofficial][S2]. The number of frequencies is determined by `num_octaves` [S1, unofficial].
+ 2. **MLP Forward Pass**: Pass the encoded points through the MLP [S1, unofficial].
+-3. **Skip Connections**: For each hidden layer $i$, if $i == \text{skip\_layer}$, concatenate the current layer's input (the original encoded position) with the layer's output along the feature dimension [S1, unofficial].
++3. **Skip Connections**: For each hidden layer $i$, if $i == \text{skip\_layer}$, concatenate the current layer's output with the original encoded position along the last dimension [S1, unofficial].
+ 4. **Activation**: Apply ReLU activation to the output of every linear layer except the final heads [S1, unofficial].
+-5. **Density Head**: Pass the final hidden representation through a linear layer mapping `hidden_features` to 1. Apply the softplus activation function to ensure non-negative density [S1, unofficial][S2].
+-6. **Color Head**: Pass the final hidden representation through a linear layer mapping `hidden_features` to 3. Apply the sigmoid activation function to constrain color values to the range $[0, 1]$ [S1, unofficial][S2].
++5. **Density Head**: Pass the final hidden representation through a linear layer mapping `hidden_features` to 1 [S1, unofficial]. Apply the softplus activation function to ensure non-negative density [S1, unofficial]. Source [S2] specifies ReLU instead, but both activations enforce non-negativity [S1, unofficial][S2].
++6. **Color Head**: Pass the final hidden representation through a linear layer mapping `hidden_features` to 3 [S1, unofficial]. Apply the sigmoid activation function to constrain color values to the range $[0, 1]$ [S1, unofficial][S2].
+ 
+ ### Formulas
+ Let $x$ be the input 3D point.
+-Let $\gamma(x)$ be the Fourier positional encoding of $x$.
+-Let $f_\theta$ be the MLP function.
++Let $\gamma(x)$ be the Fourier positional encoding of $x$ [S1, unofficial].
++Let $f_\theta$ be the MLP function [S1, unofficial].
+ 
+ The density $\sigma$ and color $c$ are computed as:
+@@ -47,7 +47,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-- **Non-negative Density**: Density must be non-negative for volume rendering. This is handled by using the softplus activation on the density head output [S1, unofficial][S2].
+-- **Color Range**: Color values must be in $[0, 1]$. This is handled by using the sigmoid activation on the color head output [S1, unofficial][S2].
+-- **View Dependence**: The model does not handle view dependence. If the scene has strong specular highlights or view-dependent materials, this model will produce blurred or inaccurate results [S1, unofficial].
++- **Non-negative Density**: Density must be non-negative for volume rendering [S1, unofficial]. This is handled by using the softplus activation on the density head output [S1, unofficial][S2].
++- **Color Range**: Color values must be in $[0, 1]$ [S1, unofficial]. This is handled by using the sigmoid activation on the color head output [S1, unofficial][S2].
++- **View Dependence**: The model does not handle view dependence [S1, unofficial]. If the scene has strong specular highlights or view-dependent materials, this model will produce blurred or inaccurate results [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -64,23 +64,20 @@
+         self.hidden_layers = hidden_layers
+         self.skip_layer = skip_layer
+-        
+-        # Calculate input dimension after positional encoding
+-        # Each of the 3 coordinates is encoded with 2*num_octaves frequencies (sin/cos)
+         self.input_dim = 3 * 2 * num_octaves
+-        
+-        # Build hidden layers
+-        layers = []
++
++        # Build layers dynamically to handle the dimension jump after the skip connection
++        self.layers = nn.ModuleList()
+         for i in range(hidden_layers):
+             in_dim = self.input_dim if i == 0 else hidden_features
+-            out_dim = hidden_features
+-            layers.append(nn.Linear(in_dim, out_dim))
+-            if i < hidden_layers - 1: # ReLU for hidden layers, not the last one before heads
+-                layers.append(nn.ReLU())
+-        self.hidden_net = nn.Sequential(*layers)
+-        
+-        # Heads
++            # The layer immediately following the skip layer must accept the concatenated dimension
++            if i == skip_layer + 1:
++                in_dim = hidden_features + self.input_dim
++            self.layers.append(nn.Linear(in_dim, hidden_features))
++            if i < hidden_layers - 1:
++                self.layers.append(nn.ReLU())
++
+         self.density_head = nn.Linear(hidden_features, 1)
+         self.color_head = nn.Linear(hidden_features, 3)
+-        
++
+     def forward(self, points_xyz):
+         """
+@@ -90,70 +87,53 @@
+         # 1. Positional Encoding
+         encoded = self._positional_encoding(points_xyz)
+-        
+-        # 2. MLP Forward with Skip Connections
+         x = encoded
+-        for i, layer in enumerate(self.hidden_net.modules()):
++        for i, layer in enumerate(self.layers):
+             if isinstance(layer, nn.Linear):
+                 x = layer(x)
+-                # Apply ReLU if not the last linear layer of the hidden block
+-                # Note: The structure above puts ReLU after each linear except the last one
+-                # But we need to handle the skip connection at skip_layer
++                # 3. Skip Connections: concatenate at skip_layer index
+                 if i == self.skip_layer:
+-                    # Concatenate original encoded position
+                     x = torch.cat([x, encoded], dim=-1)
+-                # ReLU is applied by the Sequential module if it's not the last layer
+-                # However, the logic above is slightly flawed for strict layer-by-layer control
+-                # Let's rewrite the forward pass to be explicit about the skip connection logic
+-                pass
+-        
+-        # Rewritten explicit forward pass for clarity and correctness
+-        x = encoded
+-        for i in range(self.hidden_layers):
+-            linear_layer = self.hidden_net[i * 2] # Linear layer
+-            relu_layer = self.hidden_net[i * 2 + 1] if i < self.hidden_layers - 1 else None
+-            
+-            x = linear_layer(x)
+-            
+-            if i == self.skip_layer:
+-                x = torch.cat([x, encoded], dim=-1)
+-            
+-            if relu_layer is not None:
+-                x = relu_layer(x)
+-                
+-        # 3. Heads
++            else: # ReLU
++                x = layer(x)
++        # 5 & 6. Heads
+         density = torch.softplus(self.density_head(x))
+         color = torch.sigmoid(self.color_head(x))
+-        
+         return density, color
+ 
+     def _positional_encoding(self, x):
+         """
+-        Standard Fourier feature mapping.
++        Standard Fourier feature mapping [G].
+         x: [B, 3]
+         returns: [B, 3 * 2 * num_octaves]
+         """
+         B, D = x.shape
+-        # Frequencies
+         freq_bands = 2 ** torch.linspace(0, self.num_octaves - 1, self.num_octaves).to(x.device)
+-        # Scale factors for each octave
+-        # Typically, freq_bands are multiplied by 2^i for i in 0..num_octaves-1
+-        # And then multiplied by 2*pi
+-        # The input x is scaled by these frequencies
+-        
+-        # Reshape for broadcasting: [1, 1, num_octaves]
+         freq_bands = freq_bands.view(1, 1, -1)
+-        
+-        # Expand x to [B, 3, num_octaves]
+         x_expanded = x.unsqueeze(-1).expand(-1, -1, self.num_octaves)
+-        
+-        # Multiply by frequency bands
+         x_scaled = x_expanded * freq_bands * 2 * math.pi
+-        
+-        # Flatten the last two dimensions
+         x_scaled = x_scaled.reshape(B, -1)
+-        
+-        # Apply sin and cos
+-        encoded = torch.cat([torch.sin(x_scaled), torch.cos(x_scaled)], dim=-1)
+-        return encoded
++        return torch.cat([torch.sin(x_scaled), torch.cos(x_scaled)], dim=-1)
++
++
++def volume_render(field, ray_origins, ray_directions, t_near, t_far, step_size):
++    """
++    Flat ray-batch volume rendering using the compositing integral [S1, unofficial].
++    ray_origins: [B, 3], ray_directions: [B, 3]
++    Returns: color [B, 3], alpha_accum [B]
++    """
++    t = t_near
++    alpha_accum = torch.zeros(ray_origins.shape[0], device=ray_origins.device)
++    color_accum = torch.zeros(ray_origins.shape[0], 3, device=ray_origins.device)
++    
++    # Handle zero-direction components by clamping or skipping, but standard marching works
++    while t < t_far:
++        pos = ray_origins + t * ray_directions
++        sigma, c = field(pos)
++        alpha = 1.0 - torch.exp(-sigma * step_size)
++        weight = alpha * (1.0 - alpha_accum)
++        color_accum += weight * c
++        alpha_accum += weight
++        t += step_size
++    return color_accum, alpha_accum
+ ```
+ 
+@@ -182,5 +162,5 @@
+ 
+ ## Background
+-The position-only NeRF field is a simplified variant of the Neural Radiance Field (NeRF) introduced by Mildenhall et al. in 2020 [S1, unofficial]. It builds on the concept of implicit neural representations, specifically coordinate MLPs with skip connections, as explored by Sitzmann et al. in 2020 (SIREN) [S1, unofficial]. The position-only variant was used in early implementations to demonstrate the core volume rendering pipeline with reduced complexity [S1, unofficial].
++The position-only NeRF field is a simplified variant of the Neural Radiance Field (NeRF) introduced by Mildenhall et al. in 2020 [S1, unofficial]. The position-only variant was used in early implementations to demonstrate the core volume rendering pipeline with reduced complexity [S1, unofficial].
+ 
+ ## Sources

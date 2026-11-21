@@ -1,0 +1,284 @@
+# Mip-Splatting Rasterization Pipeline
+
+Also called: Gaussian Splatting CUDA Rasterizer, Mip-Splatting Forward/Backward Pass
+
+## Overview
+The Mip-Splatting Rasterization Pipeline is a differentiable GPU-based rendering method for 3D Gaussian Splatting that integrates view-dependent scaling (mip-splatting) to handle aliasing and resolution changes. It extends the tiled rasterization approach by using a `kernel_size` parameter to adjust the Gaussian projection scale, ensuring consistent visual quality across different camera distances and resolutions [S1, unofficial]. It builds on [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by adding specific preprocessing for mip-levels and a robust binning/sorting mechanism for tile-based rendering.
+
+## How it works
+The pipeline consists of a forward pass (rendering) and a backward pass (gradient computation). It relies on three main state structures: `GeometryState`, `ImageState`, and `BinningState`.
+
+### Inputs and Outputs
+**Inputs:**
+- `means3D`: 3D Gaussian centers, shape $(P, 3)$.
+- `scales`: Gaussian scales, shape $(P, 3)$.
+- `scale_modifier`: Scalar multiplier for scales.
+- `rotations`: Gaussian rotations (quaternions), shape $(P, 4)$.
+- `opacities`: Gaussian opacities, shape $(P)$.
+- `shs`: Spherical Harmonics coefficients, shape $(P, K, 3)$ or precomputed colors.
+- `colors_precomp`: Precomputed RGB colors, shape $(P, 3)$. If null, SHs are used.
+- `viewmatrix`: $4 \times 4$ view transformation matrix.
+- `projmatrix`: $4 \times 4$ projection matrix.
+- `cam_pos`: Camera position, shape $(3)$.
+- `width`, `height`: Image dimensions.
+- `focal_x`, `focal_y`: Focal lengths in pixels.
+- `tan_fovx`, `tan_fovy`: Tangents of horizontal and vertical field of view.
+- `kernel_size`: Float controlling the effective Gaussian kernel size for mip-splatting [S1, unofficial].
+- `prefiltered`: Boolean flag indicating if SH coefficients are prefiltered [S1, unofficial].
+- `subpixel_offset`: Float array of size 2 for subpixel camera offsets [S1, unofficial].
+- `background`: Background color, shape $(3)$.
+
+**Outputs:**
+- `out_color`: Rendered image, shape $(H, W, 3)$.
+- `num_rendered`: Number of Gaussian instances rendered.
+- Gradients for backward pass: `dL_dmean3D`, `dL_dcolor`, `dL_dcov3D`, `dL_dsh`, `dL_dscale`, `dL_drot`, `dL_dopacity`, `dL_dmean2D`, `dL_dconic`.
+
+### Data Structures
+
+**GeometryState** (allocated for $P$ Gaussians):
+- `depths`: `float`, size $P$.
+- `clamped`: `float`, size $P \times 3$.
+- `internal_radii`: `float`, size $P$.
+- `means2D`: `float`, size $P \times 2$ (implied by usage).
+- `cov3D`: `float`, size $P \times 6$.
+- `conic_opacity`: `float`, size $P$.
+- `rgb`: `float`, size $P \times 3$.
+- `tiles_touched`: `uint32_t`, size $P$.
+- `scanning_space`: `void*`, size varies.
+- `point_offsets`: `uint32_t`, size $P$.
+
+**ImageState** (allocated for $N = \text{width} \times \text{height}$ pixels):
+- `accum_alpha`: `float`, size $N$.
+- `n_contrib`: `uint32_t`, size $N$.
+- `ranges`: `uint2`, size $N$ (stores start/end indices for each tile in the sorted list).
+
+**BinningState** (allocated for $P$ Gaussians):
+- `point_list`: `uint32_t`, size $P$.
+- `point_list_unsorted`: `uint32_t`, size $P$.
+- `point_list_keys`: `uint64_t`, size $P$.
+- `point_list_keys_unsorted`: `uint64_t`, size $P$.
+- `list_sorting_space`: `void*`, size varies.
+- `sorting_size`: `size_t`.
+
+### Forward Pass Steps
+
+1.  **Calculate Focal Lengths:**
+    If not provided, compute:
+    $$ \text{focal\_y} = \frac{\text{height}}{2.0 \times \tan(\text{fov\_y})} $$
+    $$ \text{focal\_x} = \frac{\text{width}}{2.0 \times \tan(\text{fov\_x})} $$
+
+2.  **Initialize GeometryState:**
+    Allocate `GeometryState` buffer of size `required<GeometryState>(P)` and initialize it. If `radii` is null, set the radii pointer to `geomState.internal_radii`.
+
+3.  **Calculate Tile Grid:**
+    $$ \text{tile\_grid}.x = \lceil \frac{\text{width}}{\text{BLOCK\_X}} \rceil $$
+    $$ \text{tile\_grid}.y = \lceil \frac{\text{height}}{\text{BLOCK\_Y}} \rceil $$
+    $$ \text{tile\_grid}.z = 1 $$
+    $$ \text{block}.x = \text{BLOCK\_X}, \quad \text{block}.y = \text{BLOCK\_Y}, \quad \text{block}.z = 1 $$
+    Typical values for BLOCK_X and BLOCK_Y are 32.
+
+4.  **Initialize ImageState:**
+    Allocate `ImageState` buffer of size `required<ImageState>(width * height)` and initialize it.
+    *Pitfall:* If `NUM_CHANNELS != 3` and `colors_precomp` is null, throw a runtime error.
+
+5.  **Preprocess (Projection and Mip-Splatting):**
+    Launch `FORWARD::preprocess` kernel with $P$ threads.
+    Inputs: `means3D`, `scales`, `scale_modifier`, `rotations`, `opacities`, `shs`, `clamped`, `cov3D_precomp`, `colors_precomp`, `viewmatrix`, `projmatrix`, `cam_pos`, `width`, `height`, `focal_x`, `focal_y`, `tan_fovx`, `tan_fovy`, `kernel_size`, `radii`, `means2D`, `depths`, `cov3D`, `rgb`, `conic_opacity`, `tile_grid`, `tiles_touched`, `prefiltered`.
+    *Note:* This kernel computes 2D means, covariances, and radii, applying the `kernel_size` for mip-splatting adjustments.
+
+6.  **Compute Point Offsets:**
+    Compute inclusive prefix sum over `tiles_touched` to get `point_offsets`.
+    $$ \text{point\_offsets}[i] = \sum_{j=0}^{i} \text{tiles\_touched}[j] $$
+    Use `cub::DeviceScan::InclusiveSum`.
+
+7.  **Get Total Rendered Count:**
+    Copy the last element of `point_offsets` to host variable `num_rendered`.
+
+8.  **Initialize BinningState:**
+    Allocate `BinningState` buffer of size `required<BinningState>(num_rendered)` and initialize it.
+
+9.  **Duplicate with Keys (Tile Binning):**
+    Launch `duplicateWithKeys` kernel with $(P + 255) / 256$ blocks of 256 threads.
+    For each Gaussian, if its bounding box overlaps a tile, emit a key/value pair.
+    Key construction:
+    $$ \text{key} = (\text{tile\_y} \times \text{tile\_grid}.x + \text{tile\_x}) \ll 32 \mid \text{depth} $$
+    Value: Gaussian index `idx`.
+    Inputs: `means2D`, `depths`, `point_offsets`, `point_list_keys_unsorted`, `point_list_unsorted`, `radii`, `tile_grid`.
+
+10. **Radix Sort:**
+    Calculate bit depth for radix sort:
+    $$ \text{bit} = \text{getHigherMsb}(\text{tile\_grid}.x \times \text{tile\_grid}.y) $$
+    Sort `point_list_keys_unsorted` and `point_list_unsorted` using `cub::DeviceRadixSort::SortPairs`.
+    Inputs: `list_sorting_space`, `sorting_size`, `keys_unsorted`, `keys_sorted`, `values_unsorted`, `values_sorted`, `num_rendered`, `0`, `32 + bit`.
+    Result: `point_list_keys` (sorted keys) and `point_list` (sorted Gaussian indices).
+
+11. **Identify Tile Ranges:**
+    Zero out `imgState.ranges` buffer of size `tile_grid.x * tile_grid.y * sizeof(uint2)`.
+    If `num_rendered > 0`, launch `identifyTileRanges` kernel with $(\text{num\_rendered} + 255) / 256$ blocks of 256 threads.
+    Logic:
+    - If `idx == 0`, `ranges[currtile].x = 0`.
+    - Else, get `prevtile = point_list_keys[idx - 1] >> 32`.
+    - If `currtile != prevtile`, set `ranges[prevtile].y = idx` and `ranges[currtile].x = idx`.
+    - If `idx == L - 1`, set `ranges[currtile].y = L`.
+    Inputs: `num_rendered`, `point_list_keys`, `imgState.ranges`.
+
+12. **Determine Feature Pointer:**
+    If `colors_precomp` is not null, use it; otherwise use `geomState.rgb`.
+
+13. **Render:**
+    Launch `FORWARD::render` kernel.
+    Inputs: `tile_grid`, `block`, `imgState.ranges`, `point_list`, `width`, `height`, `subpixel_offset`, `means2D`, `feature_ptr`, `conic_opacity`, `accum_alpha`, `n_contrib`, `background`, `out_color`.
+
+14. **Return:**
+    Return `num_rendered`.
+
+### Backward Pass Steps
+
+1.  **Initialize States:**
+    Initialize `GeometryState`, `BinningState`, and `ImageState` from provided buffers. If `radii` is null, set radii pointer to `geomState.internal_radii`.
+
+2.  **Calculate Focal Lengths and Tile Grid:**
+    Same as forward pass.
+
+3.  **Determine Color Pointer:**
+    If `colors_precomp` is not null, use it; otherwise use `geomState.rgb`.
+
+4.  **Render Backward:**
+    Launch `BACKWARD::render` kernel.
+    Inputs: `tile_grid`, `block`, `imgState.ranges`, `point_list`, `width`, `height`, `subpixel_offset`, `background`, `means2D`, `conic_opacity`, `color_ptr`, `accum_alpha`, `n_contrib`, `dL_dpix`, `dL_dmean2D`, `dL_dconic`, `dL_dopacity`, `dL_dcolor`.
+
+5.  **Determine Cov3D Pointer:**
+    If `cov3D_precomp` is not null, use it; otherwise use `geomState.cov3D`.
+
+6.  **Preprocess Backward:**
+    Launch `BACKWARD::preprocess` kernel with $P$ threads.
+    Inputs: `P`, `D`, `M`, `means3D`, `radii`, `shs`, `clamped`, `scales`, `rotations`, `scale_modifier`, `cov3D_ptr`, `viewmatrix`, `projmatrix`, `focal_x`, `focal_y`, `tan_fovx`, `tan_fovy`, `kernel_size`, `campos`, `dL_dmean2D`, `dL_dconic`, `dL_dmean3D`, `dL_dcolor`, `dL_dcov3D`, `dL_dsh`, `dL_dscale`, `dL_drot`, `conic_opacity`, `dL_dopacity`.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+import cupy # Assuming CuPy for CUDA kernel launch simulation or similar
+
+def mip_splatting_forward(means3D, scales, scale_modifier, rotations, opacities, shs, 
+                          colors_precomp, viewmatrix, projmatrix, cam_pos, width, height,
+                          tan_fovx, tan_fovy, kernel_size, prefiltered, subpixel_offset, background):
+    """
+    Forward pass for Mip-Splatting Rasterization Pipeline.
+    """
+    P = means3D.shape[0]
+    
+    # 1. Calculate Focal Lengths
+    focal_y = height / (2.0 * math.tan(tan_fovx)) # Note: tan_fovx is usually fov_x, but formula uses tan(fov)
+    # Correction: The source says focal_y = height / (2.0f * tan_fovy). 
+    # Assuming tan_fovx and tan_fovy are precomputed tangents.
+    focal_y = height / (2.0 * tan_fovy)
+    focal_x = width / (2.0 * tan_fovx)
+    
+    # 2. Initialize GeometryState
+    geom_state = allocate_geometry_state(P)
+    radii = geom_state.internal_radii
+    
+    # 3. Calculate Tile Grid
+    BLOCK_X = 32
+    BLOCK_Y = 32
+    tile_grid_x = math.ceil(width / BLOCK_X)
+    tile_grid_y = math.ceil(height / BLOCK_Y)
+    tile_grid = (tile_grid_x, tile_grid_y, 1)
+    block = (BLOCK_X, BLOCK_Y, 1)
+    
+    # 4. Initialize ImageState
+    N = width * height
+    img_state = allocate_image_state(N)
+    
+    if colors_precomp is None:
+        if NUM_CHANNELS != 3:
+            raise RuntimeError("NUM_CHANNELS must be 3 if colors_precomp is null")
+            
+    # 5. Preprocess Kernel
+    # Launch FORWARD::preprocess with P threads
+    # Inputs: means3D, scales, scale_modifier, rotations, opacities, shs, clamped, 
+    #         cov3D_precomp, colors_precomp, viewmatrix, projmatrix, cam_pos, 
+    #         width, height, focal_x, focal_y, tan_fovx, tan_fovy, kernel_size, 
+    #         radii, means2D, depths, cov3D, rgb, conic_opacity, tile_grid, 
+    #         tiles_touched, prefiltered
+    launch_preprocess_kernel(
+        P, means3D, scales, scale_modifier, rotations, opacities, shs, 
+        geom_state.clamped, None, colors_precomp, viewmatrix, projmatrix, cam_pos, 
+        width, height, focal_x, focal_y, tan_fovx, tan_fovy, kernel_size, 
+        radii, geom_state.means2D, geom_state.depths, geom_state.cov3D, 
+        geom_state.rgb, geom_state.conic_opacity, tile_grid, 
+        geom_state.tiles_touched, prefiltered
+    )
+    
+    # 6. Compute Point Offsets
+    # cub::DeviceScan::InclusiveSum
+    geom_state.point_offsets = cupy.cumsum(geom_state.tiles_touched, dtype=cupy.uint32)
+    
+    # 7. Get Total Rendered Count
+    num_rendered = geom_state.point_offsets[-1]
+    
+    # 8. Initialize BinningState
+    binning_state = allocate_binning_state(num_rendered)
+    
+    # 9. Duplicate with Keys
+    # Launch duplicateWithKeys kernel
+    launch_duplicate_with_keys_kernel(
+        (P + 255) // 256, 256,
+        geom_state.means2D, geom_state.depths, geom_state.point_offsets,
+        binning_state.point_list_keys_unsorted, binning_state.point_list_unsorted,
+        radii, tile_grid
+    )
+    
+    # 10. Radix Sort
+    bit = get_higher_msb(tile_grid_x * tile_grid_y)
+    # cub::DeviceRadixSort::SortPairs
+    binning_state.point_list_keys, binning_state.point_list = cupy.radix_sort_pairs(
+        binning_state.point_list_keys_unsorted, binning_state.point_list_unsorted,
+        num_rendered, 0, 32 + bit
+    )
+    
+    # 11. Identify Tile Ranges
+    img_state.ranges = cupy.zeros((tile_grid_x * tile_grid_y, 2), dtype=cupy.uint32)
+    if num_rendered > 0:
+        launch_identify_tile_ranges_kernel(
+            (num_rendered + 255) // 256, 256,
+            num_rendered, binning_state.point_list_keys, img_state.ranges
+        )
+        
+    # 12. Determine Feature Pointer
+    feature_ptr = colors_precomp if colors_precomp is not None else geom_state.rgb
+    
+    # 13. Render Kernel
+    out_color = cupy.zeros((height, width, 3), dtype=cupy.float32)
+    launch_render_kernel(
+        tile_grid, block, img_state.ranges, binning_state.point_list,
+        width, height, subpixel_offset, geom_state.means2D, feature_ptr,
+        geom_state.conic_opacity, img_state.accum_alpha, img_state.n_contrib,
+        background, out_color
+    )
+    
+    return num_rendered, out_color
+
+def get_higher_msb(n):
+    """Returns the position of the highest set bit."""
+    if n == 0:
+        return 0
+    return n.bit_length() - 1
+```
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the preprocessing projection ($O(P)$), the binning and sorting ($O(P \log P)$ or $O(P)$ with radix sort), and the tile-based rendering ($O(N + P)$). The radix sort is typically efficient on GPU.
+- **Memory Complexity:** $O(P)$ for geometry and binning states, $O(N)$ for image state.
+- **Performance:** Highly optimized for GPU execution using CUDA. The tile-based approach reduces memory contention and allows for efficient culling. Mip-splatting adds a small overhead for kernel size adjustment but significantly improves visual quality at varying resolutions.
+- **Strengths:** Differentiable, handles aliasing via mip-splatting, efficient tile-based rendering, supports SH for view-dependent colors.
+- **Limitations:** Requires significant GPU memory for large $P$. Sorting can be a bottleneck if not optimized.
+
+## Background
+The Mip-Splatting Rasterization Pipeline is part of the Mip-Splatting project, which extends 3D Gaussian Splatting by introducing mip-splatting to handle view-dependent scaling. It was developed by the Autonomous Vision group at ETH Zurich. The method is described in the GitHub repository [S1, unofficial].
+
+## Sources
+[S1] autonomousvision/mip-splatting, https://github.com/autonomousvision/mip-splatting, fetched 2026-10-26 (unofficial)

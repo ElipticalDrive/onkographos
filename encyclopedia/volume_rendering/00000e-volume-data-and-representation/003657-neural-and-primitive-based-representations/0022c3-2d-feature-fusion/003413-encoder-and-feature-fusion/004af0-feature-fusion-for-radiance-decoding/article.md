@@ -1,0 +1,112 @@
+# Feature Fusion for Radiance Decoding
+
+Also called: Lidar-Hash Feature Fusion MLP
+
+## Overview
+Feature Fusion for Radiance Decoding is a method that predicts volumetric density and view-dependent color by combining sparse LiDAR-derived features with dense hash-encoded spatial features [S1]. It addresses the limitation of relying solely on point features by integrating multi-modal inputs, enabling robust reconstruction in street scenes where LiDAR data is sparse [S1]. Unlike sibling methods such as the [Feature Extraction Network](8151-feature-extraction-network.md) which focuses on generic CNN extraction, or the [Attention-based Multi-View Density Prediction](10674-attention-based-multi-view-density-prediction.md) which models view correlations, this method explicitly fuses geometric priors from LiDAR with appearance priors from hash grids within a single MLP pipeline [S1].
+
+## How it works
+**Inputs:**
+1.  Sample location $x \in \mathbb{R}^3$.
+2.  Viewing direction $d \in \mathbb{R}^3$ (normalized).
+3.  LiDAR point cloud data (used to compute $\phi_L(x)$).
+4.  Hash grid structure (used to compute $\phi_h(x)$).
+
+**Outputs:**
+1.  Per-sample density $\alpha \in \mathbb{R}$.
+2.  Density embedding $h \in \mathbb{R}^k$ (dimension $k$ depends on MLP architecture).
+3.  View-dependent color $c \in \mathbb{R}^3$.
+
+**Data Structures:**
+*   **Hash Grid:** A set of $L$ levels, where level $l$ has resolution $T_l$ and $F$ feature dimensions per entry. The encoding $\phi_h(x)$ is computed by trilinear interpolation of the $2^3=8$ corner entries in the hash table corresponding to $x$ at the finest level, or as specified by the underlying hash encoding implementation [S1].
+*   **LiDAR Feature $\phi_L(x)$:** Computed from $K$ nearest LiDAR points $p_i$ to $x$.
+    *   Distance weight: $w_i = \frac{1}{\|p_i - x\|}$ [S1].
+    *   Aggregation: If the set of neighbors $S_{x,K}$ is not empty, $\phi_L(x) = \frac{\sum_{i \in S_{x,K}} w_i f_{i,x}}{\sum_{i \in S_{x,K}} w_i}$ [S1]. If $S_{x,K}$ is empty, $\phi_L(x) = 0$ [S1]. Here $f_{i,x}$ represents the feature vector associated with point $p_i$ at location $x$ (typically identity or position offset).
+*   **Spherical Harmonics (SH):** The direction $d$ is encoded into a vector $SH(d)$ using spherical harmonics basis functions up to a specified degree $B$ [S1].
+
+**Steps:**
+1.  **Compute LiDAR Encoding:** Identify the $K$ nearest neighbors of $x$ in the LiDAR point cloud. Calculate weights $w_i$ and aggregate features to produce $\phi_L(x)$.
+2.  **Compute Hash Encoding:** Query the hash grid at location $x$ to produce the feature vector $\phi_h(x)$.
+3.  **Concatenate Features:** Form the input vector $v_{feat} = [\phi_L(x), \phi_h(x)]$ by concatenating the LiDAR and hash feature vectors along the feature dimension [S1].
+4.  **Predict Density and Embedding:** Pass $v_{feat}$ through the density MLP $F_\alpha$ to obtain density $\alpha$ and density embedding $h$:
+    $$ \alpha, h = F_\alpha([\phi_L(x), \phi_h(x)]) \quad (6) $$
+    [S1]
+5.  **Encode Viewing Direction:** Compute the spherical harmonics encoding $SH(d)$ for the viewing direction $d$ [S1].
+6.  **Predict Color:** Concatenate the density embedding $h$ with the directional encoding $SH(d)$ to form $v_{color} = [h, SH(d)]$. Pass $v_{color}$ through the color MLP $F_c$ to predict the color $c$:
+    $$ c = F_c([h, SH(d)]) \quad (7) $$
+    [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def feature_fusion_decode(x, d, lidar_points, hash_grid, K=10, sh_degree=3):
+    # 1. Compute LiDAR encoding phi_L(x)
+    # Find K nearest neighbors in lidar_points
+    neighbors = get_k_nearest_neighbors(x, lidar_points, K)
+    
+    if len(neighbors) == 0:
+        phi_L = zeros(feature_dim_L) # [G] Assuming zero vector if no neighbors
+    else:
+        weights = []
+        aggregated_features = zeros(feature_dim_L)
+        for p in neighbors:
+            dist = norm(p.position - x)
+            w = 1.0 / dist
+            weights.append(w)
+            # [G] Assuming p.features is the feature vector f_i,x
+            aggregated_features += w * p.features
+        
+        sum_weights = sum(weights)
+        phi_L = aggregated_features / sum_weights
+
+    # 2. Compute Hash encoding phi_h(x)
+    phi_h = hash_grid.query(x) # Returns feature vector from hash grid
+
+    # 3. Concatenate
+    v_feat = concatenate([phi_L, phi_h])
+
+    # 4. Predict density alpha and embedding h
+    # F_alpha is an MLP: Linear -> Activation -> Linear -> ...
+    alpha, h = F_alpha(v_feat)
+
+    # 5. Encode viewing direction
+    sh_d = spherical_harmonics_encode(d, sh_degree)
+
+    # 6. Predict color
+    v_color = concatenate([h, sh_d])
+    c = F_c(v_color)
+
+    return alpha, c
+```
+
+**Parameters:**
+*   $K$: Number of LiDAR neighbors. Not given in the sources.
+*   $B$: Degree of spherical harmonics. Not given in the sources.
+*   $F_\alpha, F_c$: MLP architectures. Not given in the sources.
+
+**Edge Cases:**
+*   If no LiDAR points are within the search radius for $x$, $\phi_L(x)$ is zero [S1].
+*   Precision issues in distance calculation for $w_i$ if $x$ is very close to $p_i$ [G].
+
+## Subtopics
+
+### [Context-aware Radiance Field Decoder](13817-context-aware-radiance-field-decoder.md)
+A decoder that factorizes 3D convolutions into 2D and 1D operations to reduce memory usage while predicting volumetric fields from low-resolution feature volumes. Choose this when memory efficiency is critical and the input is a volumetric feature tensor rather than point/hash features.
+
+### [(2+1)D CNN Radiance Decoder](13823-2-1-d-cnn-radiance-decoder.md)
+A factorized CNN that applies 2D spatial convolutions followed by 1D depth convolutions to synthesize novel views from a target view frustum volume. Choose this when leveraging spatial context in 2D planes is preferred over point-wise MLP decoding.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the nearest neighbor search for LiDAR points ($O(N \log N)$ or $O(N)$ with spatial indexing) and the hash grid queries ($O(1)$ average). The MLP inference is linear in the number of samples.
+*   **Memory Complexity:** Depends on the size of the hash grid and the storage of LiDAR points. The hash grid size is configurable.
+*   **Strengths:** Robustness in low-texture regions due to LiDAR geometric priors; efficient representation via hash encoding.
+*   **Limitations:** Performance depends on the density and accuracy of the LiDAR point cloud. Sparse LiDAR may require accumulation of adjacent frames for sufficient supervision [S1].
+*   **When to use:** Street scene reconstruction where LiDAR data is available.
+*   **When not to use:** Scenes without LiDAR data or where real-time performance is constrained by nearest neighbor search overhead.
+
+## Background
+The method was introduced in "LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes" (2024) [S1]. It builds upon the idea that point features alone are insufficient for high-quality reconstruction in street scenes, particularly in low-texture areas like road surfaces [S1]. By fusing LiDAR-derived features with hash-encoded features, it aims to improve reconstruction quality and robustness.
+
+## Sources
+[S1] LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes, https://doi.org/10.1109/cvpr52733.2024.01850, fetched 2026-10-26

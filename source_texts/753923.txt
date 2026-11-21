@@ -1,0 +1,130 @@
+Labels: enhancement, 3d, terrain, camera Effort: Medium-High (four separable pieces; A and B are config-level, C is the camera work, D is a preset plus a doc fix. A real page built on 0.4.3 is the acceptance test — see "Proof of coverage...
+
+Underwater 3D terrain — bathymetry preset, multi-resolution terrain, terrain-following camera with a ground clamp, sea surface · Issue #50 · NikaGeospatial/onlymap-js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Underwater 3D terrain — bathymetry preset, multi-resolution terrain, terrain-following camera with a ground clamp, sea surface #50
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Underwater 3D terrain — bathymetry preset, multi-resolution terrain, terrain-following camera with a ground clamp, sea surface#50
+Copy link
+Labels
+new-featurea new implementationa new implementation
+Description
+Adam-Chan-Nika
+opened on Oct 19, 2026
+Issue body actions
+Labels: enhancement, 3d, terrain, camera
+Effort: Medium-High (four separable pieces; A and B are config-level, C is the camera work, D is a preset plus a doc fix. A real page built on 0.4.3 is the acceptance test — see "Proof of coverage".)
+Basis: OnlyMapJS 0.13.1 (src/terrain.ts presets and decoders, src/runtime-core.ts standalone MapView, max-pitch on <om-map>), measured in a browser against the AWS Terrarium tiles over Monterey Bay, plus a complete seafloor-dive page a colleague built on 0.4.3 with a list of every workaround it needed. Related: #26 (subsurface — its sub-problem A is this feature's basemap blocker; its sub-problem C, the camera below the surface, is what this ticket takes on for the one case where it is tractable: there is no basemap under water). External refs are plain text, deliberately not hyperlinked.
+What
+A 3D map of the seafloor: the water removed, the camera free to descend below sea level until it meets the ground, true depths on a readout, a sharp survey DEM over a coarse regional one, and a seabed that reads as sand on the flats and rock on the walls.
+Most of this already renders. What is missing is the part a page author cannot reach without the library's internals.
+Corrected baseline — measured on 0.13.1
+Negative elevations draw. The Terrarium decoder passes negative heights through (offset: -32768, src/terrain.ts), and terrain="terrarium" over Monterey Bay draws the canyon basin at z < 0 (3× exaggeration, no deck errors). A height-field read at the canyon's deep point returns −1,812 m.
+The free DEM has no seabed above zoom 10. The AWS Terrarium tiles carry ETOPO1 bathymetry (~1.8 km cells) only at z ≤ 10; at z ≥ 11 the ocean is encoded as 0 m. Read the same point at two zooms: −629 m at z10, 0 m at z12. Zooming into a bay with the default preset therefore produces a flat seafloor, silently. Nothing in the docs or the preset says so.
+The camera can already go under. The standalone MapView has carried farZMultiplier: 10 since 0.6.2 (the volume-tool fix). Pushing the view's position z down over the canyon took the camera to −1,545 m below sea level with the frame fully drawn — no far-plane cull. The colleague's page, on 0.4.3, had to lift the whole scene by +8,000 m to survive this; that workaround is obsolete.
+max-pitch exists (0.8.1), on the controller. The 0.4.3 page set maxPitch: 85 by reaching into mapEl.core.deck; obsolete too.
+A MapLibre basemap pins the camera at or above 0 m and draws an opaque surface at sea level. Under water there is no basemap to show, so basemap="none" is the right answer here — but nothing then draws a sea surface, and the terrain's terrain-texture is the only colour source.
+terrain= takes one DEM. A survey-resolution mosaic (NOAA NCEI, ~10 m multibeam) over a regional grid (~150 m) is two TerrainLayers today, and where they overlap they z-fight. The 0.4.3 page solved it by baking a 200 m push into the non-authoritative tiles and shading the textures from the un-pushed heights so the step never shows.
+The camera's target has no notion of the ground. deck's MapView orbits a point at z = 0 (or the view-state position), so zooming in enlarges the map rather than descending, and nothing stops the eye passing through the seabed. The 0.4.3 page sampled its own tiles every frame, wrote core.viewState + deck.setProps({viewState}) with the ground height under the screen centre, and refused zoom-in below 15 m clearance by snapping back to the last safe zoom.
+Design
+A — Bathymetry preset + an honest Terrarium note
+A keyless bathymetric preset in src/terrain.ts (GEBCO 2024 or EMODnet terrain-RGB, whichever serves keyless Terrarium/Mapbox-RGB tiles with a stable URL; a requiresKey MapTiler ocean source as the fallback shape, like the land presets). The Terrarium preset's docs and html-data description state the z ≤ 10 bathymetry limit, and terrain-max-zoom="10" is the documented way to keep the seabed when zooming further in on the free tiles.
+B — Multi-resolution terrain: terrain accepts an ordered list
+```
+<om-map terrain="survey, context" terrain-exaggeration="2">
+  <om-terrain id="survey"  src="tiles/detail/{z}/{x}/{y}.png"  decoder="terrarium" extent="[-122.25, 36.53, -121.78, 36.90]" min-zoom="8" max-zoom="14"></om-terrain>
+  <om-terrain id="context" src="tiles/context/{z}/{x}/{y}.png" decoder="terrarium" extent="[-123.40, 35.90, -120.90, 37.60]" max-zoom="11"></om-terrain>
+</om-map>
+```
+First in the list wins where extents overlap: the runtime masks the lower-priority mesh inside the higher one's extent (a per-tile extent test, or the existing seam/clip machinery), so exactly one surface is on top everywhere and no tile data is doctored. The height field the measure and volume tools sample follows the same priority. Exact element/attribute names are an open question below; the shape is "one terrain, several sources".
+C — Terrain-following camera with a ground clamp
+```
+<om-map basemap="none" terrain="survey, context" camera-target="terrain" camera-clearance="15" max-pitch="85">
+```
+camera-target="terrain" — the orbit point's height is the ground under the screen centre (eased, same tiles the terrain draws), so zooming in descends toward the seabed. Internally this is the view-state position z the 0.4.3 page set by hand.
+camera-clearance="15" — the eye never gets closer than 15 m (true metres, exaggeration-aware) to the ground; a zoom that would is refused on the controller, never clamped back after the fact (the same rule max-pitch follows).
+The readout: map.getCamera() (or the existing camera event payload) reports the camera's true height relative to sea level and its clearance above ground, so a depth gauge is a few lines of page code reading the map, not re-sampling tiles.
+D — Sea surface and seabed shading (small, optional in v1)
+sea-surface="rgba(…)" on <om-map> (standalone only): a translucent plane at z = 0 — the visual datum Subsurface rendering + cross-section cutaway — negative-Z visibility, arbitrary clip plane #26's sub-problem A also wants.
+A slope tint option for the terrain texture (sediment on the flat, rock past a slope threshold), computed from the un-exaggerated DEM. The 0.4.3 page bakes this into its JPEG textures; a library option makes it work with any DEM.
+Proof of coverage — the goal this ticket is judged by
+Rebuild the colleague's Monterey Canyon seafloor dive on the new version with zero workarounds, and ship it as the example page for this feature (dev/examples/features/terrain-3d/dive-the-seafloor.html, with the public mirror's copy). The 0.4.3 page is the checklist; every line below is something it had to do by hand and must now be attribute or API:
+0.4.3 workaround
+Replaced by
+basemap="none" so the camera may go below 0 m
+still the right setting; documented as such
+Lift the scene +8,000 m in the decoder; convert readouts back with (z − 8000) / 2
+nothing — farZMultiplier: 10 (0.6.2); readouts are true metres from getCamera()
+Aim the camera at the seafloor under the screen centre every frame via core.viewState + deck.setProps
+camera-target="terrain"
+Refuse zoom-in under 15 m clearance by snapping to the last safe zoom
+camera-clearance="15"
+maxPitch: 85 through mapEl.core.deck
+max-pitch="85" (0.8.1)
+Switch off the AWS tiles because the ocean is flat above z10
+documented limit; bathymetry preset (A) for the regional layer, the NOAA survey tiles for the detail
+Two TerrainLayers with a 200 m push baked into the tiles so the overlap does not flicker, textures shaded from un-pushed heights to hide the join
+terrain="survey, context" (B); untouched tiles
+Sand vs rock by slope painted into the texture tiles
+slope tint (D) — or keep the authored textures; either must work
+A hand-written tile sampler for the depth gauge
+getCamera() / the height field the library already keeps
+Never write <om-map> attributes per frame; mind id collisions with page elements
+authoring guidance, unchanged
+The example must contain no reference to mapEl.core, deck, or any _-prefixed name, and a validate run must be clean. If any row still needs page code, the ticket is not done.
+Implementation plan
+A — preset + decoder docs + html-data note; terrain-max-zoom guidance in docs/ and the skill.
+B — multi-source terrain: parse the list, priority mask on the lower source's tiles, height field follows priority; validation errors for overlapping sources without extents.
+C — camera-target, camera-clearance, getCamera(); clearance on the controller; e2e: descend over the canyon, assert the eye stops at clearance and the frame stays drawn at −1,500 m.
+D — sea-surface plane; slope tint (can follow).
+The example — the dive page, rebuilt; dev/build-public.ts allowlist; npm run test:public.
+Doc-sync — README 3D row, docs/terrain section, skill + llms.txt, html-data.ts + gen, architecture traceability + changelog.
+Non-goals
+A camera under a MapLibre basemap (land/sea with a basemap drawn) — that is Subsurface rendering + cross-section cutaway — negative-Z visibility, arbitrary clip plane #26 sub-problem C and stays deferred; this ticket is the no-basemap case.
+Volumetric water (light attenuation, caustics, turbidity) — a sea-surface plane is the whole of the "water" here.
+Serving bathymetry — the library adds a keyless preset and takes tiles; it does not build them (build_tiles.py-style rasterio tooling stays with the page).
+Acceptance criteria
+Terrarium preset docs state the z ≤ 10 bathymetry limit; a keyless bathymetry preset exists and is credited like the land presets.
+terrain accepts several sources; overlapping extents draw exactly one surface with no z-fighting and no visible step; measure/volume sample the priority source.
+camera-target="terrain" descends on zoom-in; camera-clearance is enforced on the controller; getCamera() reports true height vs sea level and clearance.
+e2e on Metal and SwiftShader: the frame stays fully drawn with the eye at −1,500 m over the canyon at 3× exaggeration (today's measurement is the baseline).
+The rebuilt dive example ships with zero workarounds per the table above, validate clean, no core/deck access.
+All doc-sync surfaces updated.
+Open design questions (max 3)
+Multi-source grammar: <om-terrain> children (shown above) vs a JSON terrain-sources attribute vs letting <om-layer type="TerrainLayer"> carry a terrain-priority? Proposed: <om-terrain> children — it reads like <om-layer> and gives each source its own extent/zoom/decoder.
+Clearance semantics with exaggeration: clamp in true metres (the DEM's) or scene metres (exaggerated)? Proposed: true metres, since every readout is true metres and exaggeration is a drawing choice.
+Default camera-target once terrain is on: keep sea-level (today's behaviour, no surprise for land maps) or switch to terrain whenever a terrain is active? Proposed: keep sea-level by default; land pages orbiting a point under a mountain top would otherwise change feel on upgrade.
+Activity
+Adam-Chan-Nika
+added
+new-featurea new implementationa new implementation
+on Oct 19, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+new-featurea new implementationa new implementation
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

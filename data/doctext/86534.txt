@@ -1,0 +1,1074 @@
+# LPVTest: Light Propagation Volumes
+
+A simple Unity implementation of Light Propagation Volumes.  Gives a real-time approximation
+of indirect lights.  My goal is to improve the rendering of dynamic scenes that tend to be
+quite geometric, i.e. made out of a combination of large flat polygons, but that can also be
+locally very complex, e.g. with high-poly prefabricated parts in them.  It should be fast
+enough to render these overall very complex scenes in VR if we don't recompute the indirect
+lights every frame.
+
+Example (trivial scene):
+
+![sshot1](Screenshots/sshot1.jpg?raw=true "sshot1")
+
+Note the green blob on the ceiling, and how the gray wall receives some red from the floor.
+The same scene with the standard shader looks more boring:
+
+![sshot0](Screenshots/sshot0.jpg?raw=true "sshot0")
+
+The walls have no depth; the direct shadow bleeds through it in both cases (as computed by
+Unity's built-in algorithms).  The purpose of this is only to improve on indirect lights.
+
+
+## Next steps
+
+* Add cascades, to support a wide range of scales
+
+* Optionally, don't recompute the indirect lights every frame, but only on demand
+
+
+## See also
+
+https://github.com/arigo/unity-custom-shadow-experiments, which is a replacement for
+Unity's built-in direct shadows, supporting only a single directional light but giving
+nicer results for mobile VR.  (The current repo is aiming for PC VR.)
+
+### Assets/LPV/DepthShader.shader
+```
+﻿Shader "Hidden/LPVTest/Depth" {
+    /*
+       Reflective Shadow Map shader
+       ============================
+
+       Build a shadow map.  Used as shader replacement from the "RSM shadow cam" object.
+       RSM = Reflective Shadow Map, which means that we produce not just a depth buffer
+       but also two extra sets of RGBA values:
+
+         COLOR0 (precision fp16): geometrical information:
+                                    R, G, B = fragment world normal
+                                    A = depth again (within -0.5 and 0.5 if in range, see below)
+         COLOR1 (byte precision): fragment color
+    */
+
+    Properties
+    {
+    }
+
+    SubShader {
+        Tags { "RenderType"="Opaque" }
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma target 5.0
+            #include "UnityCG.cginc"
+            #pragma vertex vert
+            #pragma fragment frag
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float3 normal : NORMAL;
+                float2 texcoord : TEXCOORD0;
+            };
+
+            struct v2f
+            {
+                float4 vertex : SV_POSITION;
+                float3 world_normal : TEXCOORD0;
+                float2 uv_MainTex : TEXCOORD1;
+            };
+
+            struct f2a
+            {
+                float4 geometry : COLOR0;
+                float4 color : COLOR1;
+            };
+
+            /* these come from the properties of the replaced shader */
+            float4 _Color;
+            sampler2D _MainTex;
+            float4 _MainTex_ST;
+
+            v2f vert(appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.world_normal = UnityObjectToWorldNormal(v.normal);
+                o.uv_MainTex = TRANSFORM_TEX(v.texcoord, _MainTex);
+                return o;
+            }
+
+            f2a frag(v2f i)
+            {
+                float depth = i.vertex.z;
+                /* if !UNITY_REVERSED_Z: 0 = near clip plane (at -127 * half_size)
+                                         1 = far clip plane (at half_size)
+                   Must turn it into -0.5 at -half_size, 0.5 at half_size. */
+#if !defined(UNITY_REVERSED_Z)
+                depth = depth * 64 - 63.5;
+#else
+                /* same, but starts with 1 at -127 * half_size and 0 at half_size */
+                depth = 0.5 - depth * 64;
+#endif
+                f2a OUT;
+                OUT.geometry = float4(i.world_normal, depth);
+                OUT.color = tex2D(_MainTex, i.uv_MainTex) * _Color;
+                return OUT;
+            }
+            ENDCG
+        }
+    }
+
+    Fallback "VertexLit"
+}
+```
+
+### Assets/LPV/GVCompute.compute
+```
+﻿#pragma kernel ClearKernel
+#pragma kernel PackKernel
+
+#include "SHCommon.cginc"
+
+/**********************************************************************************/
+
+
+RWStructuredBuffer<int> RSM_gv;
+RWTexture3D<float4> LPV_gv;
+int GridResolution;
+
+
+[numthreads(64, 1, 1)]
+void ClearKernel(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    index *= 4; RSM_gv[index] = 0;
+    index += 1; RSM_gv[index] = 0;
+    index += 1; RSM_gv[index] = 0;
+    index += 1; RSM_gv[index] = 0;
+}
+
+[numthreads(4, 4, 4)]
+void PackKernel(uint3 id : SV_DispatchThreadID)
+{
+    uint src_index = (id.z * GridResolution + id.y) * GridResolution + id.x;
+    int4 sh_int;
+    src_index *= 4; sh_int.x = RSM_gv[src_index];
+    src_index += 1; sh_int.y = RSM_gv[src_index];
+    src_index += 1; sh_int.z = RSM_gv[src_index];
+    src_index += 1; sh_int.w = RSM_gv[src_index];
+    LPV_gv[id] = packSH(float4(sh_int) * SH_I2F);    /* clamp values within 0 - 1 */
+}
+```
+
+### Assets/LPV/GVShader.shader
+```
+﻿Shader "Hidden/LPVTest/GVShader" {
+    /*
+       Geometry Volume shader
+       ======================
+
+
+     */
+    Properties
+    {
+    }
+
+    SubShader {
+        Tags { "RenderType"="Opaque" }
+
+        Pass
+        {
+            ZTest off
+            ZWrite off
+            Cull off
+            ColorMask 0
+
+            CGPROGRAM
+            #pragma target 5.0
+            #include "UnityCG.cginc"
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma multi_compile   _ ORIENTATION_2 ORIENTATION_3
+
+            #include "SHCommon.cginc"
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float3 normal : NORMAL;
+            };
+
+            struct v2f
+            {
+                float4 vertex : SV_POSITION;
+                float3 world_normal : TEXCOORD0;
+            };
+
+            RWStructuredBuffer<int> _RSM_gv : register(u1);
+            uint _LPV_GridResolution;
+            float4x4 _LPV_WorldToLightLocalMatrix;
+
+
+            v2f vert(appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.world_normal = UnityObjectToWorldNormal(v.normal);
+                return o;
+            }
+
+            fixed4 frag(v2f i) : SV_Target
+            {
+                float3 xyz = i.vertex.xyz;
+#if defined(UNITY_REVERSED_Z)
+                xyz.z = 1 - xyz.z;
+#endif
+                xyz.z *= _LPV_GridResolution * 0.99999;   /* makes sure 0 <= pos.z < GridResolution */
+
+                int3 pos = int3(xyz);
+
+                float3 normal = i.world_normal;
+                normal = normalize(mul((float3x3)_LPV_WorldToLightLocalMatrix, normal));
+                float reduce = normal.z;
+
+                /* Handle the case of two-faced geometry: this produces SH that are nice cosine
+                   lobes pointing in the normal direction on one side---namely, the side facing
+                   away from the sun. */
+                normal *= sign(reduce);
+
+#ifdef ORIENTATION_2
+                pos = pos.yzx;
+                reduce = normal.y;
+#endif
+#ifdef ORIENTATION_3
+                pos = pos.zxy;
+                reduce = normal.x;
+#endif
+                int4 shNormalScaled = int4(dirToCosineLobe(normal) * SH_F2I * (reduce * reduce));
+
+                int index = pos.x + _LPV_GridResolution * (pos.y + _LPV_GridResolution * pos.z);
+                index *= 4; InterlockedAdd(_RSM_gv[index], shNormalScaled.x);
+                index += 1; InterlockedAdd(_RSM_gv[index], shNormalScaled.y);
+                index += 1; InterlockedAdd(_RSM_gv[index], shNormalScaled.z);
+                index += 1; InterlockedAdd(_RSM_gv[index], shNormalScaled.w);
+
+                /* dummy result, ignored */
+                return fixed4(0, 0, 0, 0);
+            }
+            ENDCG
+        }
+    }
+
+    Fallback "VertexLit"
+}
+```
+
+### Assets/LPV/LPVCompute.compute
+```
+﻿#pragma kernel ClearKernel
+#pragma kernel BorderKernel
+#pragma kernel ClearBorderKernel
+#pragma kernel InjectKernel
+#pragma kernel PropagateStepKernel
+#pragma kernel DebugKernel
+
+#include "SHCommon.cginc"
+
+/**********************************************************************************/
+
+#define SH_GLOBAL_FACTOR   0.3
+
+
+RWTexture3D<float4> LPV_r, LPV_g, LPV_b;
+RWTexture3D<float4> LPV_accum;
+Texture3D<float4> LPV_r_prev, LPV_g_prev, LPV_b_prev;
+RWTexture3D<float4> LPV_gv;
+
+Texture2D<float4> ShadowTexture;
+Texture2D<float4> ShadowTextureColor;
+uint GridResolution, PropagationStep, ExtractMode;
+float4x4 WorldToLightLocalMatrix;
+
+RWStructuredBuffer<float4> ExtractTexture;
+Texture3D<float4> ExtractSource;
+
+float4 LPV_sh_r, LPV_sh_g, LPV_sh_b;
+
+
+[numthreads(4, 4, 4)]
+void ClearKernel(uint3 id : SV_DispatchThreadID)
+{
+    LPV_r[id] = float4(0, 0, 0, 0);
+    LPV_g[id] = float4(0, 0, 0, 0);
+    LPV_b[id] = float4(0, 0, 0, 0);
+    LPV_accum[id] = float4(0, 0, 0, 0);
+}
+
+void InitializeColorFromBorder(uint3 id)
+{
+    LPV_r[id] = LPV_sh_r;
+    LPV_g[id] = LPV_sh_g;
+    LPV_b[id] = LPV_sh_b;
+}
+
+void ClearColorFromBorder(uint3 id)
+{
+    LPV_accum[id] = float4(0, 0, 0, 0);
+}
+
+void DampColorFromBorder(uint3 id)
+{
+    LPV_accum[id] *= 0.65;
+}
+
+[numthreads(8, 8, 1)]
+void BorderKernel(uint3 id : SV_DispatchThreadID)
+{
+    InitializeColorFromBorder(uint3(id.x, id.y, 0));
+    InitializeColorFromBorder(uint3(id.x, id.y, GridResolution - 1));
+    InitializeColorFromBorder(uint3(id.x, 0, id.y));
+    InitializeColorFromBorder(uint3(id.x, GridResolution - 1, id.y));
+    InitializeColorFromBorder(uint3(0, id.x, id.y));
+    InitializeColorFromBorder(uint3(GridResolution - 1, id.x, id.y));
+}
+
+[numthreads(8, 8, 1)]
+void ClearBorderKernel(uint3 id : SV_DispatchThreadID)
+{
+    ClearColorFromBorder(uint3(id.x, id.y, 0));
+    ClearColorFromBorder(uint3(id.x, id.y, GridResolution - 1));
+    ClearColorFromBorder(uint3(id.x, 0, id.y));
+    ClearColorFromBorder(uint3(id.x, GridResolution - 1, id.y));
+    ClearColorFromBorder(uint3(0, id.x, id.y));
+    ClearColorFromBorder(uint3(GridResolution - 1, id.x, id.y));
+
+    AllMemoryBarrierWithGroupSync();
+    DampColorFromBorder(uint3(id.x, id.y, 1));
+    DampColorFromBorder(uint3(id.x, id.y, GridResolution - 2));
+    AllMemoryBarrierWithGroupSync();
+    DampColorFromBorder(uint3(id.x, 1, id.y));
+    DampColorFromBorder(uint3(id.x, GridResolution - 2, id.y));
+    AllMemoryBarrierWithGroupSync();
+    DampColorFromBorder(uint3(1, id.x, id.y));
+    DampColorFromBorder(uint3(GridResolution - 2, id.x, id.y));
+}
+
+[numthreads(8, 8, 1)]
+void InjectKernel(uint3 id : SV_DispatchThreadID)
+{
+    uint2 xy = id.xy;
+    float4 normal_depth = ShadowTexture[xy];
+    float depth = normal_depth.a;   /* between -0.5 (near) and 0.5 (far from light source) */
+    if (abs(depth) > 0.5)
+        return;   /* ignore, no sample here */
+
+    float3 color = (float3)ShadowTextureColor[xy];
+
+    float3 normal = normal_depth.xyz;
+    normal = normalize(mul((float3x3)WorldToLightLocalMatrix, normal));
+    float light = -normal.z;
+    if (light <= 0)
+        return;   /* ignore, reversed normal */
+    color *= light;
+
+    depth += 0.5;
+    uint idepth = (uint)(depth * GridResolution);
+
+    float4 shNormal = dirToCosineLobe(normal);
+
+    LPV_r[uint3(xy, idepth)] += shNormal * color.r;
+    LPV_g[uint3(xy, idepth)] += shNormal * color.g;
+    LPV_b[uint3(xy, idepth)] += shNormal * color.b;
+}
+
+/*****************************************************************************/
+
+
+float4 GetGVMask(uint3 id, float3 delta)
+{
+    delta *= 0.5;
+    float3 pos = id - delta;
+    float4 r;
+    r =  LPV_gv[int3(pos + delta.yzx + delta.zxy)];
+    r += LPV_gv[int3(pos + delta.yzx - delta.zxy)];
+    r += LPV_gv[int3(pos - delta.yzx + delta.zxy)];
+    r += LPV_gv[int3(pos - delta.yzx - delta.zxy)];
+    return unpackSH(r * 0.25);
+}
+
+float GetGVFactor(float4 sh_gvmask, float4 sh_eval_direction)
+{
+    return 1.0 - clamp(sh_gvmask.x * sh_eval_direction.x + abs(dot(sh_gvmask.yzw, sh_eval_direction.yzw)), 0.0, 1.0);
+}
+
+
+struct ShRGB
+{
+    float4 sh_r, sh_g, sh_b;
+};
+
+
+#define SIDE_smallComponent   0.4472135 // 1 / sqrt(5)
+#define SIDE_bigComponent     0.894427  // 2 / sqrt(5)
+
+void GatherSideFaceContribution(inout ShRGB cell, inout ShRGB cell_gv, float4 sh_gvmask,
+                                ShRGB neighbor, float3 delta, float3 face_direction)
+{
+    const float sideFaceSubtendedSolidAngle = 0.12732;
+    float4 sh_faceDirectionCosineLobe = dirToCosineLobe(face_direction);
+    float3 eval_direction = SIDE_bigComponent * delta + SIDE_smallComponent * face_direction;
+    float4 sh_eval_direction = dirToSH(eval_direction);
+
+    float4 sh_r = sideFaceSubtendedSolidAngle * max(0, dot(neighbor.sh_r, sh_eval_direction)) * sh_faceDirectionCosineLobe;
+    float4 sh_g = sideFaceSubtendedSolidAngle * max(0, dot(neighbor.sh_g, sh_eval_direction)) * sh_faceDirectionCosineLobe;
+    float4 sh_b = sideFaceSubtendedSolidAngle * max(0, dot(neighbor.sh_b, sh_eval_direction)) * sh_faceDirectionCosineLobe;
+
+    cell.sh_r += sh_r;
+    cell.sh_g += sh_g;
+    cell.sh_b += sh_b;
+
+    float factor = GetGVFactor(sh_gvmask, sh_eval_direction);
+    cell_gv.sh_r += sh_r * factor;
+    cell_gv.sh_g += sh_g * factor;
+    cell_gv.sh_b += sh_b * factor;
+}
+
+void GatherNeighborContribution(inout ShRGB cell, inout ShRGB cell_gv, uint3 id, int3 idelta)
+{
+    ShRGB neighbor;
+    neighbor.sh_r = LPV_r_prev[id - idelta];
+    neighbor.sh_g = LPV_g_prev[id - idelta];
+    neighbor.sh_b = LPV_b_prev[id - idelta];
+    float3 delta = idelta;
+    float4 sh_gvmask = PropagationStep < 1 ? float4(0, 0, 0, 0) : GetGVMask(id, delta);
+
+    GatherSideFaceContribution(cell, cell_gv, sh_gvmask, neighbor, delta, delta.yzx);
+    GatherSideFaceContribution(cell, cell_gv, sh_gvmask, neighbor, delta, -delta.yzx);
+    GatherSideFaceContribution(cell, cell_gv, sh_gvmask, neighbor, delta, delta.zxy);
+    GatherSideFaceContribution(cell, cell_gv, sh_gvmask, neighbor, delta, -delta.zxy);
+
+    const float directFaceSubtendedSolidAngle = 0.13477;
+    float4 sh_curCosLobe = dirToCosineLobe(delta);
+    float4 sh_delta = dirToSH(delta);
+
+    float4 sh_r = directFaceSubtendedSolidAngle * max(0, dot(neighbor.sh_r, sh_delta)) * sh_curCosLobe;
+    float4 sh_g = directFaceSubtendedSolidAngle * max(0, dot(neighbor.sh_g, sh_delta)) * sh_curCosLobe;
+    float4 sh_b = directFaceSubtendedSolidAngle * max(0, dot(neighbor.sh_b, sh_delta)) * sh_curCosLobe;
+
+    cell.sh_r += sh_r;
+    cell.sh_g += sh_g;
+    cell.sh_b += sh_b;
+
+    float factor = GetGVFactor(sh_gvmask, sh_delta);
+    cell_gv.sh_r += sh_r * factor;
+    cell_gv.sh_g += sh_g * factor;
+    cell_gv.sh_b += sh_b * factor;
+}
+
+[numthreads(4, 4, 4)]
+void PropagateStepKernel(uint3 id : SV_DispatchThreadID)
+{
+    ShRGB cell, cell_gv;
+    cell.sh_r = cell.sh_g = cell.sh_b = float4(0, 0, 0, 0);
+    cell_gv.sh_r = cell_gv.sh_g = cell_gv.sh_b = float4(0, 0, 0, 0);
+
+    GatherNeighborContribution(cell, cell_gv, id, int3(1, 0, 0));
+    GatherNeighborContribution(cell, cell_gv, id, int3(0, 1, 0));
+    GatherNeighborContribution(cell, cell_gv, id, int3(0, 0, 1));
+    GatherNeighborContribution(cell, cell_gv, id, int3(-1, 0, 0));
+    GatherNeighborContribution(cell, cell_gv, id, int3(0, -1, 0));
+    GatherNeighborContribution(cell, cell_gv, id, int3(0, 0, -1));
+    LPV_r[id] = cell_gv.sh_r;
+    LPV_g[id] = cell_gv.sh_g;
+    LPV_b[id] = cell_gv.sh_b;
+    LPV_accum[id] += float4(cell.sh_r.x, cell.sh_g.x, cell.sh_b.x, 0) * SH_GLOBAL_FACTOR;
+}
+
+[numthreads(4, 4, 4)]
+void DebugKernel(uint3 id : SV_DispatchThreadID)
+{
+    uint index = (id.z * GridResolution + id.y) * GridResolution + id.x;
+    float4 sh = ExtractSource[id];
+    if (ExtractMode == 1)
+        sh = unpackSH(sh);
+    ExtractTexture[index] = sh;
+}
+```
+
+### Assets/LPV/LPVTest.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+
+[ExecuteInEditMode]
+public class LPVTest : MonoBehaviour
+{
+    public int lpvGridResolution;
+    public float lpvGridCellSize;
+    public ComputeShader lpvCompute;
+#if false
+    public Color skyColor;
+#endif
+
+    public int propagateSteps;
+    public bool drawGizmos, drawGizmosGV;
+
+
+    struct ShRGB
+    {
+        internal RenderTexture r, g, b;
+        internal void Create() { r.Create(); g.Create(); b.Create(); }
+        internal void Release() { r.Release(); g.Release(); b.Release(); }
+    }
+    ShRGB _lpvTex3D, _lpvTex3D_prev;
+    RenderTexture _tex3d_accum, _tex3d_gv;
+
+
+    static void Swap<T>(ref T a, ref T b)
+    {
+        T tmp = a;
+        a = b;
+        b = tmp;
+    }
+
+    void DestroyTarget(ref RenderTexture tex)
+    {
+        if (tex)
+            DestroyImmediate(tex);
+        tex = null;
+    }
+
+    void DestroyTarget(ref ShRGB sh)
+    {
+        DestroyTarget(ref sh.r);
+        DestroyTarget(ref sh.g);
+        DestroyTarget(ref sh.b);
+    }
+
+    void DestroyTargets()
+    {
+        DestroyTarget(ref _lpvTex3D);
+        DestroyTarget(ref _lpvTex3D_prev);
+        DestroyTarget(ref _tex3d_accum);
+        DestroyTarget(ref _tex3d_gv);
+    }
+
+    RenderTexture CreateTarget()
+    {
+        /* depth, and four components as described in FetchShadowCamera() */
+        var desc = new RenderTextureDescriptor(lpvGridResolution, lpvGridResolution, RenderTextureFormat.ARGBFloat);
+        desc.dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
+        desc.volumeDepth = lpvGridResolution;
+        desc.enableRandomWrite = true;
+        desc.useMipMap = false;
+        desc.autoGenerateMips = false;
+
+        RenderTexture tg = new RenderTexture(desc);
+        tg.wrapMode = TextureWrapMode.Clamp;
+        tg.filterMode = FilterMode.Bilinear;
+        tg.Create();
+        return tg;
+    }
+
+    RenderTexture CreateTex3dGV()
+    {
+        var desc = new RenderTextureDescriptor(lpvGridResolution, lpvGridResolution, RenderTextureFormat.ARGB32);
+        desc.dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
+        desc.volumeDepth = lpvGridResolution;
+        desc.enableRandomWrite = true;
+        desc.useMipMap = false;
+        desc.autoGenerateMips = false;
+
+        RenderTexture tg = new RenderTexture(desc);
+        tg.wrapMode = TextureWrapMode.Clamp;
+        tg.filterMode = FilterMode.Point;
+        tg.Create();
+        return tg;
+    }
+
+    ShRGB CreateShRGB()
+    {
+        return new ShRGB
+        {
+            r = CreateTarget(),
+            g = CreateTarget(),
+            b = CreateTarget(),
+        };
+    }
+
+    void SetShRGBTextures(int kernel, string suffix, ShRGB sh)
+    {
+        lpvCompute.SetTexture(kernel, "LPV_r" + suffix, sh.r);
+        lpvCompute.SetTexture(kernel, "LPV_g" + suffix, sh.g);
+        lpvCompute.SetTexture(kernel, "LPV_b" + suffix, sh.b);
+    }
+
+    private void Update()
+    {
+        if (_lpvTex3D.r != null && _lpvTex3D.r.width != lpvGridResolution)
+            DestroyTargets();
+
+        if (_lpvTex3D.r == null)
+        {
+            if (lpvGridResolution == 0)
+                return;
+            _tex3d_accum = CreateTarget();
+            _tex3d_gv = CreateTex3dGV();
+            _lpvTex3D_prev = CreateShRGB();
+            _lpvTex3D = CreateShRGB();
+        }
+        _tex3d_gv.Create();
+
+        if (!GetComponent<RSMTest>().UpdateShadowsFull(out RenderTexture shadow_texture,
+                                               out RenderTexture shadow_texture_color,
+                                               out Matrix4x4 world_to_light_local_matrix,
+                                               _tex3d_gv))
+            return;
+
+        _lpvTex3D.Create();
+        _tex3d_accum.Create();
+
+        lpvCompute.SetInt("GridResolution", lpvGridResolution);
+        lpvCompute.SetMatrix("WorldToLightLocalMatrix", world_to_light_local_matrix);
+
+        int clear_kernel = lpvCompute.FindKernel("ClearKernel");
+        SetShRGBTextures(clear_kernel, "", _lpvTex3D);
+        lpvCompute.SetTexture(clear_kernel, "LPV_accum", _tex3d_accum);
+        int thread_groups = (lpvGridResolution + 3) / 4;
+        lpvCompute.Dispatch(clear_kernel, thread_groups, thread_groups, thread_groups);
+
+#if false
+        GetInitialBorderColor(out var border_sh_r, out var border_sh_g, out var border_sh_b);
+        int border_kernel = lpvCompute.FindKernel("BorderKernel");
+        SetShRGBTextures(border_kernel, "", _lpvTex3D);
+        //SetShRGBTextures(border_kernel, "_accum", _lpvTex3D_accum);
+        lpvCompute.SetVector("LPV_sh_r", border_sh_r);
+        lpvCompute.SetVector("LPV_sh_g", border_sh_g);
+        lpvCompute.SetVector("LPV_sh_b", border_sh_b);
+        thread_groups = (lpvGridResolution + 7) / 8;
+        lpvCompute.Dispatch(border_kernel, thread_groups, thread_groups, 1);
+#endif
+
+        int inject_kernel = lpvCompute.FindKernel("InjectKernel");
+        SetShRGBTextures(inject_kernel, "", _lpvTex3D);
+        lpvCompute.SetTexture(inject_kernel, "ShadowTexture", shadow_texture);
+        lpvCompute.SetTexture(inject_kernel, "ShadowTextureColor", shadow_texture_color);
+        thread_groups = (lpvGridResolution + 7) / 8;
+        lpvCompute.Dispatch(inject_kernel, thread_groups, thread_groups, 1);
+
+        shadow_texture.Release();
+        shadow_texture_color.Release();
+
+        int propagate_step_kernel = lpvCompute.FindKernel("PropagateStepKernel");
+        lpvCompute.SetTexture(propagate_step_kernel, "LPV_accum", _tex3d_accum);
+        lpvCompute.SetTexture(propagate_step_kernel, "LPV_gv", _tex3d_gv);
+        thread_groups = (lpvGridResolution + 3) / 4;
+        _lpvTex3D_prev.Create();
+        for (int i = 0; i < propagateSteps; i++)
+        {
+            Swap(ref _lpvTex3D_prev, ref _lpvTex3D);
+            SetShRGBTextures(propagate_step_kernel, "_prev", _lpvTex3D_prev);
+            SetShRGBTextures(propagate_step_kernel, "", _lpvTex3D);
+            lpvCompute.SetInt("PropagationStep", i);
+            lpvCompute.Dispatch(propagate_step_kernel, thread_groups, thread_groups, thread_groups);
+        }
+        _lpvTex3D_prev.Release();
+        _lpvTex3D.Release();
+
+        int clear_border_kernel = lpvCompute.FindKernel("ClearBorderKernel");
+        lpvCompute.SetTexture(clear_border_kernel, "LPV_accum", _tex3d_accum);
+        thread_groups = (lpvGridResolution + 7) / 8;
+        lpvCompute.Dispatch(clear_border_kernel, thread_groups, thread_groups, thread_groups);
+
+        Shader.SetGlobalTexture("_LPV_accum", _tex3d_accum);
+        Shader.SetGlobalFloat("_LPV_GridCellSize", lpvGridCellSize);
+
+        if (!drawGizmosGV)
+            _tex3d_gv.Release();
+    }
+
+#if false
+    /* Disabled, because it doesn't really work if the resolution of the grid is increased */
+    void GetInitialBorderColor(out Vector4 sh_r, out Vector4 sh_g, out Vector4 sh_b)
+    {
+        Vector3 dir = GetComponent<RSMTest>().directionalLight.transform.InverseTransformDirection(Vector3.down);
+        const float SH_cosLobe_C0 = 0.886226925f;
+        const float SH_cosLobe_C1 = 1.02332671f;
+        Vector4 cosineLobe = new Vector4(SH_cosLobe_C0, -SH_cosLobe_C1 * dir.y, SH_cosLobe_C1 * dir.z, -SH_cosLobe_C1 * dir.x);
+
+        sh_r = cosineLobe * skyColor.r;
+        sh_g = cosineLobe * skyColor.g;
+        sh_b = cosineLobe * skyColor.b;
+    }
+#endif
+
+
+#if UNITY_EDITOR
+    void OnDrawGizmos()
+    {
+        Vector4[] array = null;
+        if (drawGizmos) DrawGizmosAccum(ref array, _tex3d_accum);
+        if (drawGizmosGV) DrawGizmosGV(ref array, _tex3d_gv);
+    }
+
+    void DrawGizmosExtract(ref Vector4[] array, RenderTexture rt, int mode)
+    {
+        int debug_kernel = lpvCompute.FindKernel("DebugKernel");
+        lpvCompute.SetTexture(debug_kernel, "ExtractSource", rt);
+
+        var buffer = new ComputeBuffer(lpvGridResolution * lpvGridResolution * lpvGridResolution, 4 * 4, ComputeBufferType.Default);
+        lpvCompute.SetBuffer(debug_kernel, "ExtractTexture", buffer);
+        lpvCompute.SetInt("GridResolution", lpvGridResolution);
+        lpvCompute.SetInt("ExtractMode", mode);
+        int thread_groups = (lpvGridResolution + 3) / 4;
+        lpvCompute.Dispatch(debug_kernel, thread_groups, thread_groups, thread_groups);
+
+        if (array == null)
+            array = new Vector4[lpvGridResolution * lpvGridResolution * lpvGridResolution];
+        buffer.GetData(array);
+        buffer.Release();
+    }
+
+    void DrawGizmosAccum(ref Vector4[] array, RenderTexture rt)
+    {
+        if (rt == null)
+            return;
+        DrawGizmosExtract(ref array, rt, 0);
+
+        var rsm = GetComponent<RSMTest>();
+        var tr = rsm.directionalLight.transform;
+        float half_size = 0.5f * rsm.gridResolution * rsm.gridPixelSize;
+        float pixel_size = rsm.gridPixelSize;
+        Vector3 org = tr.position - half_size * (tr.right + tr.up + tr.forward);
+        Vector3 pix_x = tr.right * pixel_size;
+        Vector3 pix_y = tr.up * pixel_size;
+        Vector3 pix_z = tr.forward * pixel_size;
+
+        Gizmos.color = Color.white;
+        Gizmos.DrawLine(org, org + pix_x * lpvGridResolution);
+        Gizmos.DrawLine(org, org + pix_y * lpvGridResolution);
+        Gizmos.DrawLine(org, org + pix_z * lpvGridResolution);
+
+        float dd = 0.5f;
+
+        int index = 0;
+        for (int z = 0; z < lpvGridResolution; z++)
+            for (int y = 0; y < lpvGridResolution; y++)
+                for (int x = 0; x < lpvGridResolution; x++)
+                {
+                    Vector4 entry = array[index++];
+                    if (entry != Vector4.zero)
+                    {
+                        Vector3 center = org + pix_x * (x + dd) + pix_y * (y + dd) + pix_z * (z + dd);
+                        Gizmos.color = new Color(entry.x * 5, entry.y * 5, entry.z * 5);
+                        Gizmos.DrawSphere(center, pixel_size * 0.125f);
+                    }
+                }
+    }
+
+    void DrawGizmosGV(ref Vector4[] array, RenderTexture rt)
+    {
+        if (rt == null)
+            return;
+        DrawGizmosExtract(ref array, rt, 1);
+
+        var rsm = GetComponent<RSMTest>();
+        var tr = rsm.directionalLight.transform;
+        float half_size = 0.5f * rsm.gridResolution * rsm.gridPixelSize;
+        float pixel_size = rsm.gridPixelSize;
+        Vector3 org = tr.position - half_size * (tr.right + tr.up + tr.forward);
+        Vector3 pix_x = tr.right * pixel_size;
+        Vector3 pix_y = tr.up * pixel_size;
+        Vector3 pix_z = tr.forward * pixel_size;
+
+        Gizmos.color = Color.white;
+        Gizmos.DrawLine(org, org + pix_x * lpvGridResolution);
+        Gizmos.DrawLine(org, org + pix_y * lpvGridResolution);
+        Gizmos.DrawLine(org, org + pix_z * lpvGridResolution);
+
+        Color base_color = Color.black;
+        float dd = 0;
+
+        int index = 0;
+        for (int z = 0; z < lpvGridResolution; z++)
+            for (int y = 0; y < lpvGridResolution; y++)
+                for (int x = 0; x < lpvGridResolution; x++)
+                {
+                    Vector4 entry = array[index++];
+                    if (entry != Vector4.zero)
+                    {
+                        Vector3 center = org + pix_x * (x + dd) + pix_y * (y + dd) + pix_z * (z + dd);
+                        Vector4 shBase = new Vector4(0.2821f, -0.4886f, 0.4886f, -0.4886f);
+                        for (int k = 0; k < 30; k++)
+                        {
+                            Vector3 dir = Random.onUnitSphere;
+
+                            Vector4 shNormal = shBase;
+                            shNormal.y *= dir.y;
+                            shNormal.z *= dir.z;
+                            shNormal.w *= dir.x;
+                            float len = Vector4.Dot(entry, shNormal);
+                            Gizmos.color = len >= 0 ? base_color : (new Color(0.5f, 0.5f, 0.5f) - base_color);
+                            Vector3 dir1 = pix_x * dir.x + pix_y * dir.y + pix_z * dir.z;
+                            Gizmos.DrawLine(center, center + len * dir1);
+                        }
+                    }
+                }
+    }
+#endif
+}
+```
+
+### Assets/LPV/RSMTest.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+
+[ExecuteInEditMode]
+public class RSMTest : MonoBehaviour
+{
+    public Light directionalLight;
+    public int gridResolution;     /* TODO: allow a larger value than in LPVTest */
+    public float gridPixelSize;
+    public LayerMask cullingMask = -1;
+    public Shader depthShader, gvShader;
+    public ComputeShader gvCompute;
+
+
+    RenderTexture _target, _target2;
+    Camera _shadowCam;
+
+    private void Start()
+    {
+        DestroyTargets();
+    }
+
+    private void OnDestroy()
+    {
+        DestroyTargets();
+    }
+
+    void DestroyTargets()
+    {
+        if (_target)
+            DestroyImmediate(_target);
+        _target = null;
+        if (_target2)
+            DestroyImmediate(_target2);
+        _target2 = null;
+    }
+
+    RenderTexture CreateTarget()
+    {
+        /* depth, and four components as described in FetchShadowCamera() */
+        RenderTexture tg = new RenderTexture(gridResolution, gridResolution, 24,
+                                             RenderTextureFormat.ARGBHalf);
+        tg.wrapMode = TextureWrapMode.Clamp;
+        return tg;
+    }
+
+    RenderTexture CreateTarget2()
+    {
+        RenderTexture tg = new RenderTexture(gridResolution, gridResolution, 0,
+                                             RenderTextureFormat.ARGB32);
+        tg.wrapMode = TextureWrapMode.Clamp;
+        return tg;
+    }
+
+    void UpdateRenderTexture()
+    {
+        if (_target != null && _target.width != gridResolution)
+            DestroyTargets();
+
+        if (_target == null)
+        {
+            _target2 = CreateTarget2();
+            _target = CreateTarget();
+        }
+    }
+
+    public bool UpdateShadowsFull(out RenderTexture target, out RenderTexture target_color,
+                                  out Matrix4x4 world_to_light_local_matrix,
+                                  RenderTexture tex3d_gv)
+    {
+        if (gridResolution <= 0)
+        {
+            target = null;
+            target_color = null;
+            world_to_light_local_matrix = Matrix4x4.identity;
+            return false;
+        }
+        UpdateRenderTexture();
+
+        var cam = FetchShadowCamera();
+        var trackTransform = directionalLight.transform;
+        cam.transform.SetPositionAndRotation(trackTransform.position, trackTransform.rotation);
+
+        float half_size = 0.5f * gridResolution * gridPixelSize;
+        var mat = Matrix4x4.Scale(Vector3.one / (2f * half_size)) *
+                  Matrix4x4.Translate(Vector3.one * half_size) *
+                  cam.transform.worldToLocalMatrix;
+        world_to_light_local_matrix = mat;
+
+        /* First step: render into the GV (geometry volume).  Here, there is no depth map
+         * and the fragment shader writes into the ComputeBuffer cb_gv.  At the end we
+         * copy (and pack) the information into the more compact tex3d_gv.
+         */
+        var cb_gv = new ComputeBuffer(4 * gridResolution * gridResolution * gridResolution, 4);
+        int clear_kernel = gvCompute.FindKernel("ClearKernel");
+        gvCompute.SetInt("GridResolution", gridResolution);
+        gvCompute.SetBuffer(clear_kernel, "RSM_gv", cb_gv);
+        int thread_groups = (gridResolution * gridResolution * gridResolution + 63) / 64;
+        gvCompute.Dispatch(clear_kernel, thread_groups, 1, 1);
+
+        Shader.SetGlobalInt("_LPV_GridResolution", gridResolution);
+        Shader.SetGlobalMatrix("_LPV_WorldToLightLocalMatrix", mat);
+
+        cam.orthographicSize = half_size;
+        cam.nearClipPlane = -half_size;
+        cam.farClipPlane = half_size;
+        cam.targetTexture = _target2;
+        cam.clearFlags = CameraClearFlags.Nothing;
+        Graphics.SetRandomWriteTarget(1, cb_gv);
+
+        var orig_position = cam.transform.position;
+        var orig_rotation = cam.transform.rotation;
+        var axis_x = cam.transform.right;
+        var axis_y = cam.transform.up;
+        var axis_z = cam.transform.forward;
+        cam.transform.position -= 0.5f * gridPixelSize * (axis_x + axis_y);
+        cam.RenderWithShader(gvShader, "RenderType");
+        cam.transform.SetPositionAndRotation(orig_position, orig_rotation);
+
+        cam.transform.Rotate(axis_y, -90, Space.World);
+        cam.transform.Rotate(axis_z, -90, Space.World);
+        cam.transform.position -= 0.5f * gridPixelSize * (axis_z + axis_x);
+        Shader.EnableKeyword("ORIENTATION_2");
+        cam.RenderWithShader(gvShader, "RenderType");
+        Shader.DisableKeyword("ORIENTATION_2");
+        cam.transform.SetPositionAndRotation(orig_position, orig_rotation);
+
+        cam.transform.Rotate(axis_z, 90, Space.World);
+        cam.transform.Rotate(axis_y, 90, Space.World);
+        cam.transform.position -= 0.5f * gridPixelSize * (axis_y + axis_z);
+        Shader.EnableKeyword("ORIENTATION_3");
+        cam.RenderWithShader(gvShader, "RenderType");
+        Shader.DisableKeyword("ORIENTATION_3");
+        cam.transform.SetPositionAndRotation(orig_position, orig_rotation);
+
+        int pack_kernel = gvCompute.FindKernel("PackKernel");
+        gvCompute.SetBuffer(pack_kernel, "RSM_gv", cb_gv);
+        gvCompute.SetTexture(pack_kernel, "LPV_gv", tex3d_gv);
+        thread_groups = (gridResolution + 3) / 4;
+        gvCompute.Dispatch(pack_kernel, thread_groups, thread_groups, thread_groups);
+        cb_gv.Release();
+
+        /* Second step: render into the RSM (reflective shadow map).  This is a regular
+         * vertex+fragment shader combination with a depth map, which renders into two
+         * 2D textures, _target and _target2.
+         */
+        cam.clearFlags = CameraClearFlags.SolidColor;
+        cam.SetTargetBuffers(new RenderBuffer[] { _target.colorBuffer, _target2.colorBuffer },
+                             _target.depthBuffer);
+        cam.nearClipPlane = -127f * half_size;
+        cam.RenderWithShader(depthShader, "RenderType");
+
+        target = _target;
+        target_color = _target2;
+
+        return true;
+    }
+
+    Camera FetchShadowCamera()
+    {
+        if (_shadowCam == null)
+        {
+            // Create the shadow rendering camera
+            GameObject go = new GameObject("RSM shadow cam (not saved)");
+            //go.hideFlags = HideFlags.HideAndDontSave;
+            go.hideFlags = HideFlags.DontSave;
+
+            _shadowCam = go.AddComponent<Camera>();
+            _shadowCam.orthographic = true;
+            _shadowCam.enabled = false;
+            /* the shadow camera renders to four components:
+             *    r, g, b: surface normal vector
+             *    a: depth, in [-0.5, 0.5] with 0.0 being at the camera position
+             *              and larger values being farther from the light source
+             */
+            _shadowCam.backgroundColor = new Color(0, 0, 0, 1);
+            _shadowCam.aspect = 1;
+            /* Obscure: if the main camera is stereo, then this one will be confused in
+             * the SetTargetBuffers() mode unless we force it to not be stereo */
+            _shadowCam.stereoTargetEye = StereoTargetEyeMask.None;
+        }
+        _shadowCam.cullingMask = cullingMask;
+        return _shadowCam;
+    }
+}
+```
+
+### Assets/LPV/StandardOpaque.shader
+```
+﻿Shader "LPVTest/StandardOpaque"
+{
+    Properties
+    {
+        _Color ("Color", Color) = (1,1,1,1)
+        _MainTex ("Albedo (RGB)", 2D) = "white" {}
+        _Glossiness ("Smoothness", Range(0,1)) = 0.5
+        _Metallic ("Metallic", Range(0,1)) = 0.0
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" }
+        LOD 200
+
+        CGPROGRAM
+        // Physically based Standard lighting model.
+        #pragma surface surf Standard
+        #pragma target 5.0
+        #include "LPV.cginc"
+
+        sampler2D _MainTex;
+
+        struct Input
+        {
+            float2 uv_MainTex;
+            float3 worldPos;
+        };
+
+        half _Glossiness;
+        half _Metallic;
+        fixed4 _Color;
+
+        // Add instancing support for this shader. You need to check 'Enable Instancing' on materials that use the shader.
+        // See https://docs.unity3d.com/Manual/GPUInstancing.html for more information about instancing.
+        // #pragma instancing_options assumeuniformscaling
+        UNITY_INSTANCING_BUFFER_START(Props)
+            // put more per-instance properties here
+        UNITY_INSTANCING_BUFFER_END(Props)
+
+        void surf (Input IN, inout SurfaceOutputStandard o)
+        {
+            // Albedo comes from a texture tinted by color
+            fixed4 c = tex2D (_MainTex, IN.uv_MainTex) * _Color;
+            o.Albedo = c.rgb;
+            // Metallic and smoothness come from slider variables
+            o.Metallic = _Metallic;
+            o.Smoothness = _Glossiness;
+            o.Alpha = c.a;
+            o.Emission = SampleLPVIndirectLight(IN.worldPos, o.Normal);
+            o.Occlusion = LPVOcclusion;
+        }
+        ENDCG
+    }
+    FallBack "Diffuse"
+}
+```

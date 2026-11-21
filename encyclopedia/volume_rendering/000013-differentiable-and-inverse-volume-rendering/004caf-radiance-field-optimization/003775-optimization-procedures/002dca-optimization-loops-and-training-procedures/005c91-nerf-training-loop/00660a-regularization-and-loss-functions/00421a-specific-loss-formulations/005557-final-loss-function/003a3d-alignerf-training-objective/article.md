@@ -1,0 +1,69 @@
+# AligNeRF Training Objective
+
+Also called: Alignment-Aware Patch Matching Loss + High-Frequency Aware Loss
+
+## Overview
+AligNeRF replaces the standard per-pixel Mean Squared Error (MSE) loss with a composite objective combining patch-based MSE and a shallow VGG feature-space loss [S1]. This approach addresses the degradation of high-frequency details caused by misalignment between rendered images and ground truth in dynamic or unbounded scenes [S1]. Unlike standard losses that penalize pixel-wise deviations regardless of spatial shift, this method accounts for local misalignment and preserves real textures [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Rendered image $I_{render}$, ground truth image $I_{gt}$, and a weight hyperparameter $w$.
+*   **Outputs:** Scalar loss value $L_{total}$.
+
+**Data Structures:**
+*   Images are represented as tensors of shape $(C, H, W)$, where $C$ is channels, $H$ is height, and $W$ is width.
+*   VGG features are extracted from the first block of a pre-trained VGG-19 model, resulting in feature maps of shape $(4096, H', W')$ where dimensions are reduced relative to input [S1].
+
+**Steps:**
+1.  **Compute Patch-Based MSE ($L_{PM}$):** Calculate the MSE loss using local patches rather than individual pixels. This accounts for misalignment by comparing local neighborhoods [S1]. The specific patch size and stride are not defined in the sources [G].
+2.  **Compute High-Frequency Loss ($L_{HF}$):** Extract shallow features from the rendered and ground truth images using the first block of a pre-trained VGG-19 model. Compute the MSE loss between these feature maps [S1]. Let $F(I)$ denote the VGG feature extraction function.
+    $$ L_{HF} = \| F(I_{render}) - F(I_{gt}) \|^2 $$
+    where $C, W, H$ are the dimensions of the extracted feature maps [S1].
+3.  **Combine Losses:** Compute the total loss using the weighted sum:
+    $$ L_{total} = L_{PM} + w \cdot L_{HF} $$
+    where $w$ is the weight for the high-frequency loss [S1].
+
+**Parameters:**
+*   $w$: Weight for the high-frequency loss. Typical value: 0.05 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def alignerf_loss(rendered_image, ground_truth_image, w=0.05):
+    # L_PM: Patch-based MSE loss
+    # Note: Specific patch size/stride implementation details are not provided in sources [G]
+    # Assuming a function patch_mse exists that computes MSE over local patches
+    l_pm = patch_mse(rendered_image, ground_truth_image)
+    
+    # L_HF: High-frequency loss using shallow VGG features
+    # Extract features from the first block of pre-trained VGG-19
+    features_rendered = vgg_first_block(rendered_image)
+    features_gt = vgg_first_block(ground_truth_image)
+    
+    # Compute MSE between feature maps
+    l_hf = mse_loss(features_rendered, features_gt)
+    
+    # Total loss
+    l_total = l_pm + w * l_hf
+    
+    return l_total
+```
+
+**Edge Cases and Pitfalls:**
+*   **Misalignment:** Standard per-pixel MSE fails to recover high-frequency detail when rendered and ground truth images are misaligned [S1]. The patch-based approach mitigates this [S1].
+*   **VGG Feature Dimensions:** The VGG feature maps have 4096 channels in the first block [S1]. Ensure tensor shapes match before computing MSE.
+
+## Subtopics
+
+## Operating characteristics
+*   **Performance:** AligNeRF allows the recovery of much more high-frequency detail compared to standard mip-NeRF 360, even when scaling up the MLP channels [S1].
+*   **Complexity:** Adds the computational cost of VGG feature extraction and patch-based MSE calculation to the standard NeRF training loop [S1].
+*   **Strengths:** Improves high-frequency details while preserving real textures [S1]. It acts as a simple plug-and-play modification [S1].
+*   **Limitations:** Requires a pre-trained VGG-19 model [S1]. Effectiveness depends on the alignment strategy (e.g., warping) used to align training data [S1].
+
+## Background
+AligNeRF was introduced in the paper "AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training" [S1]. It builds on mip-NeRF 360 [S1], replacing its standard per-pixel MSE loss to address challenges in unbounded real-world scenes with complex texture details and subtle scene motion [S1]. The method was tested on outdoor scenes from the mip-NeRF 360 dataset, including "bicycle", "flowers", "treehill", "garden", and "stump" [S1].
+
+## Sources
+[S1] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26

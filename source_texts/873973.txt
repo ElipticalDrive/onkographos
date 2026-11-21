@@ -1,0 +1,818 @@
+Beyond Trial Averaging: Anchoring Neural and Visual Representations for
+Few-Repetition Brain-to-Image Retrieval
+Zhenyao Cui, Siyuan Kan, Dingkun Liu, Dongrui Wu
+arXiv:2608.19128v1 [cs.LG] 19 Aug 2026
+School of Artificial Intelligence and Automation, Huazhong University of Science and Technology, Wuhan, China
+zycui@hust.edu.cn
+Abstract
+Decoding visual information from brain signals probes neural
+representations and enables neuro-rehabilitation and dream
+decoding. Recent brain-to-image retrieval approaches have
+achieved promising performance, typically by averaging many
+(up to 80) neural trials per image, requiring repeated stimulus presentation that increases latency, cost, and user burden.
+When only one or a few repetitions are available, the retrieval
+accuracy drops sharply. This drop is commonly attributed to
+query noise because averaging suppresses noise and increases
+signal stability. However, we find a non-transitive alignment
+pattern: the low-repetition query signal and the image representation each align with the high-repetition center, but not
+directly with each other. This pattern shows that query noise
+is only part of the problem and that gallery placement also
+affects retrieval. We therefore propose a neural-anchor-based
+retrieval (NEAR) framework that treats the high-repetition
+center as an anchor and approaches it from both sides: a denoiser pulls the noisy query toward the true anchor, and a
+small network predicts each candidate’s pseudo anchor from
+its image and pulls the image toward it. Across four datasets
+spanning EEG, MEG and fMRI, NEAR consistently improved
+retrieval in the few-repetition regime. On THINGS-EEG2, it
+improved 200-way Top-1 accuracy by 5.7 and 9.3 percentage points respectively, when averaging one and four repetitions. By anchoring neural and visual representations, NEAR
+reduces reliance on repeated acquisition and brings neural
+retrieval closer to real-world deployment.
+1
+Introduction
+Brain-to-image retrieval identifies the image a person is viewing from the corresponding neural response. It can probe
+visual representations and support neural rehabilitation and
+dream decoding (Kay et al. 2008; Chaudhary, Birbaumer,
+and Ramos-Murguialday 2016; Horikawa et al. 2013). Modern systems map EEG, MEG, or fMRI signals and candidate
+images to a shared space, then retrieve the image most similar to the neural query. Advances in neural encoders, training
+objectives, and visual targets have produced strong benchmark results (Song et al. 2024; Li et al. 2024; Chen and Wei
+2024; Wang et al. 2025; Tang et al. 2026).
+These systems, however, often average repeated neural
+measurements of the same image to suppress trial-specific
+noise and stabilize the query across EEG, MEG, and fMRI
+(Giesbrecht and Garrett 2024; Hebart et al. 2023; Allen et al.
+Figure 1: Non-transitive few-repetition retrieval. (a) Averaging repeated measurements produces a stable neural representation that retrieves the viewed image. (b) The fewrepetition query and image each align with this representation, but not reliably with each other.
+2022). THINGS-EEG2, for example, presents each test image
+80 times before evaluation (Gifford et al. 2022; Song et al.
+2024). This improves reliability but also increases latency,
+acquisition cost, and participant burden (Banville et al. 2025).
+This dependence becomes problematic when only a few
+repetitions are available (Banville et al. 2025). On THINGSEEG2, the same retriever’s 200-way Top-1 accuracy falls
+from 83.4% with 80 repetitions to 14.0% with one. The standard explanation is that a query from one or a few repetitions
+contains substantial trial-specific noise, whereas averaging
+reveals the stable image-evoked response (Blankertz et al.
+2011; Rivet et al. 2009; Smith and Kutas 2015; Nørskov
+et al. 2025).
+However, we find that the query is only part of this problem. We design a controlled target-swap experiment and
+compare three paths for the same concepts: from a fewrepetition query to the stable representation estimated from
+many repetitions of the same image, from this stable representation to the image, and directly from the query to the
+image. The experiment reveals the non-transitive pattern in
+Figure 1: the few-repetition query and image representation
+each align with the stable representation, but align less well
+with each other. This pattern suggests improving retrieval
+across repetition counts by using the stable neural representation as an anchor and moving both the query and image
+toward it.
+Therefore, we propose neural-anchor-based retrieval
+(NEAR), which uses the stable neural representation as a
+common anchor through two branches. Query Anchoring
+denoises the few-repetition query toward its neural anchor.
+Gallery Anchoring predicts a pseudo anchor for each candidate image and combines it with the original visual representation during scoring.
+Across four datasets spanning EEG, MEG, and fMRI,
+NEAR improves each base retriever despite differences in
+signal type, candidate-set size, and neural encoder. On
+THINGS-EEG2, it raises 200-way Top-1 accuracy by 5.7
+and 9.3 percentage points with one and four repetitions, respectively, and improves all ten participants at both budgets.
+These results show that neural anchoring transfers across
+modalities and improves few-repetition retrieval.
+Contributions.
+• We reveal a non-transitive pattern that identifies the stable
+neural representation as an intermediate anchor between
+a few-repetition query and its image.
+• We propose NEAR, which uses this anchor on both sides
+of retrieval through Query Anchoring and Gallery Anchoring. Query Anchoring denoises the few-repetition
+query, while Gallery Anchoring predicts a pseudo anchor
+for each candidate image.
+• Across four datasets spanning EEG, MEG, and fMRI,
+NEAR improves few-repetition retrieval. Further analyses
+show that Gallery Anchoring improves gallery placement
+and complements different query estimators.
+2
+Related Work
+Brain-to-image retrieval with repeated measurements.
+Most brain-to-image retrieval methods align image representations with neural features averaged over repeated measurements. EEG systems encode the resulting stimulus-locked
+response in a pretrained visual space and rank held-out images by cross-modal similarity. THINGS-EEG2 averages up
+to 80 test responses per image, while Alljoined evaluates the
+same setting under lower-SNR EEG (Gifford et al. 2022; Xu
+et al. 2025). NICE, ATM-S, MUSE, NeuroCLIP, HCF, and
+UBP improve the neural encoder, training objective, or visual
+target within this setting (Song et al. 2024; Li et al. 2024;
+Chen and Wei 2024; Wang et al. 2025; Tang et al. 2026; Wu
+et al. 2025). Related fMRI systems also use repeated presentations or averaged response estimates to stabilize the query
+(Scotti et al. 2023, 2024; Efird et al. 2025; Bok et al. 2026).
+Banville et al. systematically vary the number of averaged
+responses across EEG, MEG, and fMRI datasets and show
+consistent but diminishing gains (Banville et al. 2025). The
+retrieval studies above demonstrate the gains from repeated
+averaging, while Banville et al. quantify their diminishing returns. Our work likewise studies few-repetition retrieval, but
+further investigates why its accuracy degrades and proposes
+a method to improve it.
+Few-repetition neural-signal estimation and denoising.
+Across EEG, MEG, and fMRI, repeated averaging aims to recover a stable stimulus-linked response from noisy measurements. EEG and MEG average time-locked trials to suppress
+ongoing activity and sensor noise, while fMRI combines
+responses from repeated presentations to stabilize voxelresponse estimates (Blankertz et al. 2011; Hebart et al. 2023;
+Allen et al. 2022). When only a few repetitions are available, denoising methods pursue the same goal without extensive averaging. Spatial filters reweight channels to emphasize
+event-related components. Regression-based estimators and
+robust averaging recover the shared response while limiting
+nuisance variation. Learned denoisers predict the common
+signal from independently noisy recordings (Makeig et al.
+1996; Rivet et al. 2009; Smith and Kutas 2015; Nørskov
+et al. 2025; Lehtinen et al. 2018). These methods motivate
+NEAR’s query branch. Unlike these denoising methods, we
+identify a broader pattern in brain-to-image retrieval: fewrepetition accuracy depends jointly on the query and gallery.
+Gallery-side correction is therefore needed alongside query
+denoising.
+Stimulus-to-brain encoding models. Stimulus-to-brain
+encoding models provide the closest precedent for predicting neural references from stimuli. Kay et al. predict candidate voxel patterns for fMRI identification, Gifford et al.
+map image features to channel-by-time EEG responses, and
+Concept2Brain synthesizes multi-channel EEG through an
+electrophysiological latent space (Kay et al. 2008; Gifford
+et al. 2022; Santos-Mayo et al. 2026). These studies show
+that moving stimuli toward neural space can improve decoding, although they primarily predict responses in the original
+measurement space. NEAR focuses on retrieval with fewer
+repetitions. Guided by the non-transitive analysis above, it
+moves both the query and gallery toward the same stable
+neural anchor in the learned retrieval space.
+3
+Neural-Anchor-Based Retrieval
+Problem setup. For concept c, let xc,i denote the neural
+measurement at repetition i, let nc denote the number of
+repetitions of that concept available for training, and let vc
+denote its frozen visual feature. We define the measurement
+averaged over exactly k repetitions and the resulting noisy
+query as
+k
+x(k)
+c =
+1X
+xc,i ,
+k i=1
+
+
+qc(k) = fθ x(k)
+.
+c
+(1)
+We reserve q̄c for a stable neural anchor estimated from the
+larger reference set available in the current split. The targetswap analysis uses repetitions disjoint from the k query repetitions, while Gallery Anchoring uses all available training repetitions. All neural, visual, and pseudo-anchor embeddings are ℓ2 -normalized before scoring. The standard
+
+⊤
+(k)
+retriever ranks candidates by qc
+vj and returns the
+highest-scoring image. Throughout, j indexes candidates in
+Figure 2: Accuracy and acquisition return across repetitions.
+(a) Accuracy rises quickly and then approaches a plateau. (b)
+Stimulus-time-normalized ITR peaks at k = 2 because later
+gains no longer offset added stimulus time.
+the gallery; when a competitor is meant we write j ̸= c.
+Existing systems stabilize this query through extensive averaging. We study the same task with few repetitions.
+Few-repetition accuracy and acquisition return. We first
+fix the retriever, preprocessing, and gallery and vary only k to
+observe how Top-1 accuracy changes. Figure 2a shows that
+accuracy rises quickly and then approaches a plateau. Each
+repetition, however, requires another stimulus presentation,
+so accuracy alone cannot capture the practical trade-off between retrieval performance and acquisition cost. We also use
+the standard Wolpaw information-transfer rate (ITR), which
+combines Top-1 accuracy among N candidates with total
+stimulus time to report information transferred per minute
+(Wolpaw et al. 2002; McFarland, Sarnacki, and Wolpaw
+2003). Figure 2b shows that acquisition efficiency peaks at
+k = 2 and then declines because later gains no longer offset
+the added stimulus time. Thus, although accuracy remains
+low with few repetitions, this regime offers the highest return per unit acquisition time and is the most relevant range
+for practical improvement.
+3.1
+Analyzing the Retrieval Gap
+Controlled target swap. Test-time averaging improves
+signal-to-noise ratio and decoding performance, with diminishing returns as more repetitions are added (Banville et al.
+2025). This naturally suggests an unstable query as the main
+source of the low-repetition decline. However, the repetition
+curve alone does not show how much stable stimulus information a few-repetition query already contains. We therefore
+(k)
+construct a few-repetition query qc and a stable neural representation q̄c from disjoint repetitions of the same image.
+Most prior work effectively evaluates q̄c →vc : it averages
+many repetitions to obtain a stable query and retrieves the
+corresponding image from the visual gallery. We retain this
+(k)
+(k)
+conventional path, introduce qc →q̄c , and evaluate qc →vc
+as the direct few-repetition path. All three comparisons use
+the same candidate concepts and gallery size. Only the query
+or target representation changes.
+Figure 3: Target swap exposes non-transitive retrieval. With
+(k)
+(k)
+qc and q̄c estimated from disjoint repetitions, qc retrieves
+q̄c more accurately than its image vc (top). Direct retrieval
+can still fail when q (k) →q̄ and q̄→v both succeed (bottom).
+Stable neural information emerges early. Figure 3 shows
+how the accuracies of the three target-swap paths change with
+k. The q (k) →q̄ path rises from 25.8% at k = 1 to 76.5% at
+k = 4 and 93.6% at k = 8, showing that a few-repetition
+query already contains stable stimulus information. At k = 4,
+q̄→v and q (k) →q̄ reach 80.7% and 76.5%, while direct
+q (k) →v reaches only 43.5%. This gap also appears within
+the same cases: when both paths through q̄ succeed, direct retrieval still fails in 42.4% of them. We call this phenomenon
+a non-transitive pattern: a few-repetition query can retrieve
+its stable neural representation, and that representation can
+retrieve the image, while direct query-to-image retrieval remains unreliable. To exclude an advantage from comparing
+two neural representations, we keep the anchor gallery fixed
+and permute the concept–anchor correspondence. Accuracy
+drops to 0.1%, confirming that this path relies on the correct concept-specific anchor. This intermediate connection
+suggests using q̄c as a common anchor for the few-repetition
+query and candidate image.
+3.2
+A Two-Term Retrieval Condition
+Let c be the correct concept and j ̸= c a competitor,
+with normalized visual features vc and vj . Because cosine similarity is their dot product, c ranks above j when
+
+⊤
+(k)
+(k)
+(k)
+qc
+(vc − vj ) > 0. Let ϵc = qc − q̄c denote the
+query error after averaging k repetitions. Substitution separates the score advantage into two terms:
+
+⊤
+
+⊤
+qc(k) (vc − vj ) = q̄c⊤ (vc − vj ) + ϵ(k)
+(vc − vj ). (2)
+c
+We call the first term γcj = q̄c⊤ (vc − vj ) the stable gallery
+margin: the correct image’s advantage over j when the query
+is exactly at its stable anchor. The second term is the amount
+by which the remaining query error raises or lowers this
+advantage. Thus, retrieval depends on both the gallery margin
+and the query error.
+To determine how much query error the gallery can tolerate, we consider the most harmful error direction. The
+Cauchy–Schwarz inequality (Boyd and Vandenberghe 2004)
+bounds the magnitude of the second term:
+⊤
+
+∥vc − vj ∥2 ,
+(vc − vj ) ≤ ϵ(k)
+ϵ(k)
+c
+c
+2
+
+qc(k)
+⊤
+(vc − vj ) ≥ γcj − ϵ(k)
+c
+2
+∥vc − vj ∥2 .
+Therefore, a sufficient condition for the correct image to
+remain above every competitor is
+γcj
+ϵ(k)
+< ρc ,
+ρc = min
+.
+(3)
+c
+j̸=c ∥vc − vj ∥
+2
+2
+For each competitor, this ratio is the distance from q̄c to
+the decision boundary where j overtakes c. Their minimum,
+ρc , is the gallery tolerance. Any query error smaller than a
+positive ρc is guaranteed to preserve every ranking, although
+larger errors may still succeed because the bound uses the
+worst direction. A non-positive ρc means that moving the
+query to its stable anchor alone cannot guarantee correction.
+This condition also explains how the two terms interact
+across repetition counts. At very low k, large query error
+dominates the ranking. As averaging stabilizes the query,
+more cases approach the decision boundary, where a larger
+gallery tolerance can move them to the correct side. At high k,
+the query is already precise, but Gallery Anchoring can still
+recover concepts with small or non-positive stable margins.
+The two terms directly motivate NEAR. Query Anchoring
+(k)
+(k)
+replaces qc with the denoised query q̃c to reduce its error
+from q̄c . Gallery Anchoring predicts a pseudo anchor hj
+for each candidate and uses it to increase the stable gallery
+margin. The two branches therefore target the query error
+and gallery tolerance ρc . Figure 4 summarizes their training
+and inference.
+3.3
+Query Anchoring
+Query Anchoring denoises the measured signals before neural encoding. We use Noise2Noise as the denoising module
+(Lehtinen et al. 2018). Consider two repetitions of the same
+training image, xc,a = uc + na and xc,b = uc + nb , where
+uc is their shared stimulus-linked response and the two zeromean noise terms are independent. We train the denoiser aϕ
+to predict one repetition from the other:
+2
+LN2N = ∥aϕ (xc,a ) − xc,b ∥2 .
+(4)
+Because the target noise nb is independent of the input, it cannot be predicted consistently and averages out across training
+pairs. The expected squared loss therefore retains the shared
+response uc without requiring a clean target (Lehtinen et al.
+2018).
+After this initialization, we train aϕ and the neural encoder
+fθ on averages with different repetition counts using a standard symmetric contrastive retrieval loss Lcon (Radford et al.
+2021). Its two directions bring matching neural and image
+embeddings closer while separating mismatched pairs. At
+inference, we average the k repetitions, apply aϕ , and encode
+(k)
+the denoised signal with fθ to obtain q̃c .
+For datasets whose training SNR is too low to train
+Noise2Noise reliably, we instead use fixed wavelet thresholding. We apply the fixed operator w to each repetition,
+average the filtered signals, and encode them with fθ . This
+pathway uses the same contrastive loss while keeping w fixed.
+Both pathways accept any repetition count because averaging preserves the signal shape. Without Query Anchoring,
+(k)
+(k)
+q̃c = qc . After training either query pathway, we freeze
+it before training Gallery Anchoring.
+3.4
+Gallery Anchoring and Retrieval
+We encode the average of the nc training repetitions as q̄c =
+(n )
+q̃c c , the most stable neural target available for concept c.
+(k)
+(k)
+When Query Anchoring is absent, q̃c = qc .
+Then, we freeze the neural and visual encoders and train
+an image-to-neural predictor gψ on these targets:
+hc = gψ (vc ),
+LG = 1 − cos(hc , q̄c ) .
+(5)
+Cosine regression directly fits each candidate reference to the
+stable neural target identified by the analysis. For an unseen
+candidate j, hj = gψ (vj ) predicts its unavailable q̄j from the
+image alone. We call hj a pseudo anchor.
+However, a pseudo anchor can contain prediction error,
+while the original visual feature retains useful semantic information. We therefore score each candidate with both references:
+
+
+
+
+
+
+sβ q̃c(k) , j = (1 − β) cos q̃c(k) , vj + β cos q̃c(k) , hj .
+(6)
+Here β ∈ [0, 1] balances the two similarities. Setting β = 0
+gives standard visual-gallery scoring, while β = 1 uses only
+pseudo anchors. At the stable anchor, (6) changes the gallery
+term in (2) from γcj to (1 − β)γcj + β q̄c⊤ (hc − hj ). Training
+hc toward q̄c makes the new term favor the correct candidate, increasing the gallery tolerance ρc . Query Anchoring
+instead reduces the query error. The signed-margin analysis
+in Section 4.3 tests this effect directly.
+4
+4.1
+Experiments
+Experimental Setup
+Our primary evaluation uses two 200-way within-subject
+EEG benchmarks. THINGS-EEG2 has 10 participants and
+multiple training and test repetitions, while Alljoined-1.6M
+has 20 participants and lower-SNR EEG (Gifford et al. 2022;
+Xu et al. 2025). Because both provide multiple training repetitions, we evaluate Query and Gallery Anchoring together
+across repetition counts. For these EEG datasets, repetitions
+of the training images provide stable targets for the gallery
+predictor, which receives only candidate image representations at inference.
+Besides these EEG benchmarks, we use THINGS-MEG
+and NSD. THINGS-MEG has multiple test repetitions but
+one training repetition per stimulus, so we keep its query
+pathway fixed and evaluate Gallery Anchoring alone (Hebart
+et al. 2023). The published NSD decoder already provides
+Figure 4: Training and inference in NEAR. Query Anchoring is learned from k-repetition averages and then frozen; Gallery
+Anchoring is learned from image–anchor pairs, using all nc training repetitions of concept c to form the anchor q̄c . At inference
+the two branches give a denoised query and a pseudo anchor per candidate, and ⊗ combines the two cosine similarities, not the
+two representations, as in (6). The right panels illustrate both effects.
+a usable query from individual 7T fMRI repetitions, so we
+also keep this pathway fixed and use NSD to isolate Gallery
+Anchoring. For each participant, we use 8,018 non-test images to fit the query decoder and gallery predictor, with 1,000
+additional non-test images used to select the query decoder.
+The 982 images shared across participants and all their fMRI
+repetitions are reserved for retrieval evaluation (Allen et al.
+2022; Efird et al. 2025; Bok et al. 2026).
+For both EEG benchmarks, we follow HCF’s preprocessing, neural encoder, visual head, and within-subject protocol
+(Tang et al. 2026). THINGS-EEG2 uses the Noise2Noiseinitialized, repetition-count-aware query pathway. Alljoined
+has lower training SNR, and matched comparisons favor fixed
+wavelet thresholding in this regime. We apply it to each repetition before averaging.
+THINGS-MEG follows its published preprocessing and
+within-subject retriever (Hebart et al. 2023). For NSD, we
+follow the global-vector setting of Efird et al. and evaluate
+the CLIP and robust FARE targets used by Bok et al. (Efird
+et al. 2025; Bok et al. 2026). By default, gψ is an MLP with
+2,048 units in each hidden layer. Each comparison changes
+only the tested component, and we fix β = 0.75 across all
+datasets and repetition counts. Tables and figures use Base to
+denote the corresponding unanchored retriever. Unless stated
+otherwise, results average three fixed seeds, and standard
+deviations are reported where available. We report Top-1
+accuracy throughout.
+4.2
+Main Results on EEG
+Table 1 compares the unanchored retriever, each anchoring
+branch, and complete NEAR under the same HCF setting.
+Complete NEAR exceeds the unanchored retriever at every reported repetition count on both EEG benchmarks. On
+THINGS-EEG2, it adds 9.3 Top-1 points at k = 4, and all
+ten participants improve at every reported repetition count.
+On lower-SNR Alljoined, at least 18 of 20 participants improve at every reported count, including all 20 at k = 4.
+Figure 5 illustrates how the two branches improve individual
+retrievals at k = 4: Query Anchoring raises the target rank,
+and complete NEAR places every shown target within the
+top three.
+The trends match the two-term condition in Section 3.2.
+Query Anchoring contributes more at the lowest repetition
+counts, when query error is largest. As averaging stabilizes
+the query, Gallery Anchoring contributes more by improving
+the stable gallery margin and still helps high-k concepts with
+limited margins. Lower SNR keeps Query Anchoring useful across Alljoined. Their combination therefore improves
+retrieval throughout the repetition axis.
+Besides, we test whether Gallery Anchoring depends on
+the query denoiser by combining it with xDAWN, DSS,
+Noise2Noise, and wavelet thresholding while keeping HCF
+fixed. Gallery Anchoring improves every repetition count on
+both EEG datasets for all four estimators. Thus, the galleryside error persists across denoisers, and Gallery Anchoring
+corrects it without relying on one estimator.
+Dataset
+Method
+k=1
+4
+8
+16
+32
+64
+80
+THINGS-EEG2
+Base
++Q
++G
+NEAR
+14.0±0.00
+18.4±0.10
+14.9±0.10
+19.8±0.10
+43.2±0.10
+47.5±0.40
+47.0±0.10
+52.5±0.20
+60.4±0.30
+62.1±0.40
+65.6±0.20
+68.5±0.20
+72.5±0.30
+71.7±0.30
+77.9±0.30
+79.0±0.20
+78.8±0.30
+77.2±0.40
+84.1±0.20
+84.4±0.20
+82.1±0.10
+79.9±0.50
+87.5±0.30
+87.1±0.50
+83.4±0.30
+80.5±0.30
+88.0±0.10
+87.6±0.40
+Alljoined
+Base
++Q
++G
+NEAR
+1.41±0.01
+1.79±0.00
+1.51±0.01
+1.98±0.01
+2.85±0.07
+3.73±0.04
+3.17±0.08
+4.29±0.05
+4.41±0.10
+5.65±0.05
+4.92±0.07
+6.64±0.04
+6.81±0.10
+8.42±0.04
+7.52±0.14
+9.79±0.10
+9.57±0.30
+11.68±0.15
+10.60±0.29
+13.60±0.23
+12.93±0.47
+15.56±0.21
+14.18±0.16
+17.72±0.29
+14.30±0.57
+16.72±0.06
+15.69±0.52
+18.84±0.25
+Table 1: Top-1 accuracy (%) on THINGS-EEG2 (10 participants) and Alljoined (20 participants). Bold marks the best result at
+each repetition count.
+Figure 5: Representative THINGS-EEG2 retrievals at k = 4. Colored borders mark the target among the top five under Base,
++Q, and NEAR.
+Dataset
+Query estimator
+k=1
+2
+4
+8
+16
+32
+64
+80
+THINGS-EEG2
+xDAWN
+DSS
+N2N
+Wavelet
+16.8/17.9
+17.9/18.9
+18.4/19.8
+9.9/10.5
+28.7/31.4
+30.6/33.0
+31.3/34.3
+17.0/18.5
+43.7/48.5
+46.6/50.9
+47.5/52.5
+26.6/29.7
+57.6/64.6
+61.2/67.3
+62.1/68.5
+36.6/41.8
+67.1/75.7
+70.6/78.0
+71.7/79.0
+44.4/51.8
+72.8/81.5
+75.9/83.3
+77.2/84.4
+49.7/58.2
+75.1/84.3
+78.8/85.6
+79.9/87.1
+53.1/62.3
+75.9/84.7
+79.7/86.2
+80.5/87.6
+54.0/63.5
+Alljoined
+xDAWN
+DSS
+N2N
+Wavelet
+1.46/1.59
+1.41/1.53
+1.60/1.85
+1.79/1.98
+1.99/2.22
+1.91/2.15
+2.26/2.67
+2.50/2.82
+2.96/3.36
+2.80/3.21
+3.22/3.96
+3.73/4.29
+4.62/5.34
+4.35/5.04
+4.84/6.13
+5.65/6.64
+6.83/7.89
+6.63/7.68
+7.01/9.01
+8.42/9.79
+9.46/11.08
+9.35/10.37
+9.61/12.18
+11.68/13.60
+12.82/14.34
+11.78/13.34
+12.40/15.22
+15.56/17.72
+13.69/15.15
+12.83/14.18
+13.43/16.14
+16.72/18.84
+Table 2: Gallery Anchoring complements four query estimators. Each cell reports fixed-query / +G Top-1 accuracy (%), averaged
+over three seeds.
+4.3
+Gallery Anchoring Across Modalities
+Table 3 keeps each query pathway fixed and isolates Gallery
+Anchoring. Gallery Anchoring improves every MEG and
+fMRI comparison, including both NSD visual targets. All
+four participants in each dataset improve at every reported
+repetition count. Thus, the gallery-side error found in EEG
+also appears in other brain-imaging modalities, where the
+same operation improves retrieval.
+The NSD gain lets us test the gallery-side mechanism directly. We average held-out repetitions to estimate each test
+anchor, which enters neither predictor fitting nor +G retrieval. Using it as the query, we compute the signed gallery
+tolerance ρc under unanchored and anchored scores. Positive
+values indicate correct rankings and negative values indicate errors. Figure 6 shows that Gallery Anchoring increases
+ρc for 78.2% of evaluations and corrects 51.0% of nega-
+THINGS-MEG (200-way)
+Split
+Method
+k=1
+Within-subject
+Base
++G
+7.5±0.40
+8.4±0.10
+k=4
+k=12
+19.8±0.10 30.9±0.30
+21.9±0.40 32.7±1.10
+NSD 7T fMRI (982-way)
+Visual target
+CLIP ViT-L/14
+FARE-4 (robust)
+Method
+k=1
+k=2
+k=3
+Base
++G
+Base
++G
+27.5±0.20
+39.4±0.20
+39.6±0.10
+54.6±0.20
+37.8±0.10
+52.1±0.20
+51.6±0.10
+68.6±0.10
+43.9±0.40
+57.5±0.20
+56.8±0.20
+74.3±0.20
+Table 3: Gallery Anchoring improves MEG and fMRI Top-1
+accuracy (%) with each query pathway fixed.
+tive unanchored values. The mean rises from 0.008 to 0.050,
+increasing in all 12 participant–seed runs. Thus, pseudo anchors improve the stable gallery margin and often correct
+rankings that remain wrong at the stable neural anchor.
+Candidate reference
+k=1
+4
+16
+80
+Base (visual)
+Single-repetition target
+Stable target, InfoNCE
+Stable target, ridge
+Stable target, MLP (+G)
+14.05
+15.78
+14.51
+14.85
+14.91
+43.23
+45.57
+45.43
+46.73
+46.99
+72.46
+72.41
+76.25
+77.59
+77.93
+83.35
+81.98
+86.90
+87.67
+87.97
+Table 4: Gallery controls on THINGS-EEG2. Three-seed
+mean Top-1 accuracy (%) with all components except the
+candidate reference fixed.
+5
+Conclusion
+We studied why brain-to-image retrieval degrades with few
+repetitions. Target swap shows that a few-repetition query and
+its image can each align with a stable neural representation
+even when their direct alignment is weak. NEAR uses this
+shared anchor to denoise the query and predict a pseudo
+neural anchor for each gallery image.
+Across EEG, MEG, and fMRI, NEAR improves retrieval
+with different query denoisers. Its gains follow the stable neural target across predictor classes and objectives, while signed
+margins confirm better gallery ordering. Thus, repeated averaging reveals a neural coordinate that can organize both
+sides of retrieval.
+However, NEAR requires paired brain–image training
+data, and its participant-specific pseudo anchors must be
+adapted across participants and sessions. Few-repetition accuracy also remains below the high-repetition endpoint.
+Participant-aware prediction and stronger query estimation
+may further reduce the repetitions needed for reliable retrieval.
+References
+Figure 6: Gallery Anchoring improves NSD gallery placement. Each point is one held-out image for one participant
+and seed; the upper-left region marks corrected errors.
+4.4
+Stable Targets Drive Gallery Anchoring
+To identify what drives Gallery Anchoring, we design
+matched controls in Table 4. We fix the retriever, query
+pathway, candidate set, and β, then replace the MLP with
+ridge regression, replace cosine regression with symmetric
+InfoNCE, or replace the stable anchor with a single-repetition
+neural target. Ridge uses 1.0M rather than 8.4M parameters,
+yet stays within 0.34 points of the MLP across all four budgets. Symmetric InfoNCE retains 59–77% of the MLP gain
+from k = 4 onward, so the gain does not depend on a large
+nonlinear predictor or one regression loss. The target gives
+the clearest separation: a single-repetition target helps most
+at k = 1 but falls below the unanchored retriever at k = 80,
+whereas every stable-target predictor improves as the query
+approaches its stable reference. This reversal supports Section 3.2: Gallery Anchoring works by placing candidates near
+the stable reference approached by averaged queries.
+Allen, E. J.; St-Yves, G.; Wu, Y.; Breedlove, J. L.; Prince,
+J. S.; Dowdle, L. T.; Nau, M.; Caron, B.; Pestilli, F.; Charest,
+I.; Hutchinson, J. B.; Naselaris, T.; and Kay, K. N. 2022. A
+Massive 7T fMRI Dataset to Bridge Cognitive Neuroscience
+and Artificial Intelligence. Nature Neuroscience, 25: 116–
+126.
+Banville, H.; Benchetrit, Y.; d’Ascoli, S.; Rapin, J.; and King,
+J.-R. 2025. Scaling laws for decoding images from brain
+activity. arXiv preprint arXiv:2501.15322.
+Blankertz, B.; Lemm, S.; Treder, M.; Haufe, S.; and Müller,
+K.-R. 2011. Single-trial analysis and classification of ERP
+components—a tutorial. NeuroImage, 56(2): 814–825.
+Bok, B.; Waseda, F.; Liu, J.; and Echizen, I. 2026. Rethinking Brain Decoding with CLIP: The Role of Adversarial
+Robustness. arXiv preprint arXiv:2607.03165.
+Boyd, S.; and Vandenberghe, L. 2004. Convex Optimization.
+Cambridge University Press.
+Chaudhary, U.; Birbaumer, N.; and Ramos-Murguialday, A.
+2016. Brain–Computer Interfaces for Communication and
+Rehabilitation. Nature Reviews Neurology, 12: 513–525.
+Chen, C.-S.; and Wei, C.-S. 2024. Mind’s Eye: Image Recognition by EEG via Multimodal Similarity-Keeping Contrastive Learning. arXiv preprint arXiv:2406.16910.
+Efird, C. D.; Murphy, A.; Zylberberg, J.; and Fyshe, A. 2025.
+Finding Shared Decodable Concepts and their Negations in
+the Brain. In International Conference on Learning Representations (ICLR).
+Giesbrecht, B.; and Garrett, J. 2024. Electroencephalography. In Reference Module in Neuroscience and Biobehavioral
+Psychology. Elsevier.
+Gifford, A. T.; Dwivedi, K.; Roig, G.; and Cichy, R. M.
+2022. A large and rich EEG dataset for modeling human
+visual object recognition. NeuroImage, 264: 119754.
+Hebart, M. N.; Contier, O.; Teichmann, L.; Rockter, A. H.;
+Zheng, C. Y.; Kidder, A.; Corriveau, A.; Vaziri-Pashkam, M.;
+and Baker, C. I. 2023. THINGS-data, a multimodal collection
+of large-scale datasets for investigating object representations
+in human brain and behavior. eLife, 12: e82580.
+Horikawa, T.; Tamaki, M.; Miyawaki, Y.; and Kamitani, Y.
+2013. Neural Decoding of Visual Imagery During Sleep.
+Science, 340(6132): 639–642.
+Kay, K. N.; Naselaris, T.; Prenger, R. J.; and Gallant, J. L.
+2008. Identifying natural images from human brain activity.
+Nature, 452(7185): 352–355.
+Lehtinen, J.; Munkberg, J.; Hasselgren, J.; Laine, S.; Karras,
+T.; Aittala, M.; and Aila, T. 2018. Noise2Noise: Learning
+Image Restoration without Clean Data. In International Conference on Machine Learning (ICML).
+Li, D.; Wei, C.; Li, S.; Zou, J.; and Liu, Q. 2024. Visual
+Decoding and Reconstruction via EEG Embeddings with
+Guided Diffusion. In Advances in Neural Information Processing Systems (NeurIPS).
+Makeig, S.; Bell, A. J.; Jung, T.-P.; and Sejnowski, T. J.
+1996. Independent Component Analysis of Electroencephalographic Data. In Advances in Neural Information
+Processing Systems (NeurIPS).
+McFarland, D. J.; Sarnacki, W. A.; and Wolpaw, J. R. 2003.
+Brain–computer interface (BCI) operation: optimizing information transfer rates. Biological Psychology, 63(3): 237–
+251.
+Nørskov, A. V.; Jørgensen, K.; Zahid, A. N.; and Mørup, M.
+2025. Estimating the Event-Related Potential from Few EEG
+Trials. Transactions on Machine Learning Research.
+Radford, A.; Kim, J. W.; Hallacy, C.; Ramesh, A.; Goh, G.;
+Agarwal, S.; Sastry, G.; Askell, A.; Mishkin, P.; Clark, J.;
+Krueger, G.; and Sutskever, I. 2021. Learning Transferable
+Visual Models From Natural Language Supervision. In International Conference on Machine Learning (ICML).
+Rivet, B.; Souloumiac, A.; Attina, V.; and Gibert, G. 2009.
+xDAWN algorithm to enhance evoked potentials: application
+to brain–computer interface. IEEE Transactions on Biomedical Engineering, 56(8): 2035–2043.
+Santos-Mayo, A.; Gilbert, F.; Mirifar, A.; Tebbe, A.-L.; Fang,
+R.; Ding, M.; and Keil, A. 2026. Concept2Brain: an AI
+model for predicting neurophysiological responses to text
+and pictures. Nature Communications.
+Scotti, P. S.; Banerjee, A.; Goode, J.; Shabalin, S.; Nguyen,
+A.; Cohen, E.; Dempster, A. J.; Verlinde, N.; Yundler, E.;
+Weisberg, D.; Norman, K. A.; and Abraham, T. M. 2023.
+Reconstructing the Mind’s Eye: fMRI-to-Image with Contrastive Learning and a Diffusion Prior. In Advances in Neural Information Processing Systems (NeurIPS).
+Scotti, P. S.; Tripathy, M.; Villanueva, C. K. T.; Kneeland, R.;
+Chen, T.; Narang, A.; Santhirasegaran, C.; Xu, J.; Naselaris,
+T.; Norman, K. A.; and Abraham, T. M. 2024. MindEye2:
+Shared-Subject Models Enable fMRI-To-Image With 1 Hour
+of Data. In International Conference on Machine Learning
+(ICML).
+Smith, N. J.; and Kutas, M. 2015. Regression-based estimation of ERP waveforms: I. The rERP framework. Psychophysiology, 52(2): 157–168.
+Song, Y.; Liu, B.; Li, X.; Shi, N.; Wang, Y.; and Gao, X. 2024.
+Decoding Natural Images from EEG for Object Recognition.
+In International Conference on Learning Representations
+(ICLR).
+Tang, J.; Jiang, S.; Su, F.; and Zhao, Z. 2026. Aligning What
+EEG Can See: Structural Representations for Brain-Vision
+Matching. arXiv preprint arXiv:2603.07077.
+Wang, J.; Zhang, L.; Lin, H.; Liu, Q.; Huang, G.; Li, Z.;
+Liang, Z.; and Wu, X. 2025. NeuroCLIP: Brain-Inspired
+Prompt Tuning for EEG-to-Image Multimodal Contrastive
+Learning. arXiv preprint arXiv:2511.09250.
+Wolpaw, J. R.; Birbaumer, N.; McFarland, D. J.;
+Pfurtscheller, G.; and Vaughan, T. M. 2002. Brain–computer
+interfaces for communication and control. Clinical Neurophysiology, 113(6): 767–791.
+Wu, H.; Li, Q.; Zhang, C.; He, Z.; and Ying, X. 2025. Bridging the Vision-Brain Gap with an Uncertainty-Aware Blur
+Prior. arXiv preprint arXiv:2503.04207.
+Xu, J.; Nunes, U. B.; Jiang, W.; Ryther, S.; Pringle, J.; Scotti,
+P. S.; Delorme, A.; and Kneeland, R. 2025. Alljoined1.6M: A Million-Trial EEG-Image Dataset for Evaluating Affordable Brain-Computer Interfaces. arXiv preprint
+arXiv:2508.18571.

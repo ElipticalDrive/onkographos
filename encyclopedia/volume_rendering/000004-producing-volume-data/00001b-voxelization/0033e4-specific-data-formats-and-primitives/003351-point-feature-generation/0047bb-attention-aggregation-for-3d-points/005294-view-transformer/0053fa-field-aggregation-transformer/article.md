@@ -1,0 +1,190 @@
+# Field-Aggregation Transformer
+
+
+## Overview
+The Field-Aggregation Transformer (FAT) is a shared attention mechanism that co-aggregates radiance and semantic-embedding fields by combining features from multiple reference views for a 3D point [S1]. It builds on [View Transformer](14756-view-transformer.md) by explicitly handling two distinct feature types (RGB and semantic) within a single aggregation step, ensuring that the aggregation weights derived from low-level visual features are consistently applied to high-level semantic features [S1]. Unlike standard view transformers that may treat views independently or sequentially, FAT enforces joint optimization of geometry (via RGB) and semantics (via semantic embeddings) through a unified attention structure [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $X^0$: Coordinate-aligned features, shape $(N_{rays}, N_{pts}, D_{rgb})$ [S1].
+    *   $X^{rgb}$: Epipolar view RGB features, shape $(N_{rays}, N_{pts}, N_{views}, D_{rgb})$ [S1].
+    *   $X^{sem}$: Epipolar view Semantic features, shape $(N_{rays}, N_{pts}, N_{views}, D_{sem})$ [S1].
+    *   $\Delta d$: Relative directions, shape $(N_{rays}, N_{pts}, N_{views}, 3)$ [S1].
+*   **Outputs:**
+    *   $S^{3D}_{rgb}$: Aggregated 3D RGB feature field [S1].
+    *   $S^{3D}_{sem}$: Aggregated 3D Semantic feature field [S1].
+
+**Data Structures:**
+The method operates on tensors with dimensions corresponding to rays, points, views, and feature channels. No specific bit-packing is defined; standard dense floating-point tensors are implied by the use of bilinear interpolation and MLPs [S1].
+
+**Steps:**
+1.  **Projection:** For a position $\boldsymbol{x}$ in the novel view, project $\boldsymbol{x}$ to every reference image plane using extrinsic matrices to get projected positions $\Pi_i(\boldsymbol{x})$ [S1]. The features at these positions are obtained via bilinear interpolation on the feature grids of the reference views [S1].
+2.  **Query/Key/Value Generation:**
+    *   Compute Query $Q$ from $X^0$: $Q = f_Q(X^0)$ [S1].
+    *   Compute Key $K$ and Value $V$ from $X^{rgb}$: $K = f_K(X^{rgb})$, $V = f_V(X^{rgb})$ [S1].
+    *   Here, $f_Q, f_K, f_V$ are MLP layers [S1].
+3.  **Positional Bias:** Compute positional bias $P_{field}$ from relative directions $\Delta d$: $P_{field} = f_P(\Delta d)$ [S1]. $f_P$ is an MLP layer [S1].
+4.  **Attention Logits:** Compute attention logits $A_{field}$ by combining $Q$ and $P_{field}$:
+    $$ A_{field} = K - Q[:, \text{None}, :] + P_{field} $$
+    Note: The subtraction $K - Q$ suggests a specific distance-based or difference-based attention formulation rather than the standard dot-product $QK^T$ [S1]. The term $Q[:, \text{None}, :]$ broadcasts $Q$ to match the view dimension of $K$ and $P_{field}$ [S1].
+5.  **Softmax:** Apply softmax to $A_{field}$ along dimension 2 ($N_{views}$) to get normalized attention weights $A_{field}$ [S1].
+6.  **Feature Aggregation (RGB):**
+    *   Compute aggregated RGB feature $S^{3D}_{rgb}$ by adding $V$ and $P_{field}$, multiplying by $A_{field}$, and summing over dimension 2:
+        $$ S^{3D}_{rgb} = ((V + P_{field}) \cdot A_{field}).\text{sum}(\text{dim}=2) $$
+    *   Apply MLP $f_{rgb}$ to $S^{3D}_{rgb}$ to get the final output:
+        $$ S^{3D}_{rgb} = f_{rgb}(S^{3D}_{rgb}) $$
+    [S1].
+7.  **Feature Aggregation (Semantic):**
+    *   The semantic aggregation uses the same attention weights $A_{FAT}$ (derived from the RGB path) but applies them to semantic features [S1].
+    *   Compute aggregated Semantic feature $S^{3D}_{sem}$:
+        $$ S^{3D}_{sem} = \text{Mean} \circ (A_{FAT} \cdot [F^{sem}_1(\Pi_1(\boldsymbol{x}), \boldsymbol{\theta}), \dots, F^{sem}_N(\Pi_N(\boldsymbol{x}), \boldsymbol{\theta})]^T) $$
+        [S1].
+    *   *Note on Implementation:* The source algorithm (Algorithm 1) lists steps 5-6 involving `repeat_interleave(4)` for $A_{field}$ and $P_{field}$ before computing $S^{3D}_{sem}$ in step 9. However, the formal equation (5) and the description of "shared attention" imply that the semantic field uses the *same* aggregation weights $A_{FAT}$ computed in step 5. The `repeat_interleave` steps in Algorithm 1 appear to be specific implementation details for tensor reshaping or channel expansion not fully explained in the text, but the core principle is that $A_{FAT}$ is shared [S1]. The formal equation (5) uses `Mean` over the weighted sum, which is equivalent to the weighted sum if $A_{FAT}$ is normalized (softmax output) and the features are not scaled differently. The algorithm step 9 uses `sum(dim=2)` on $(X^{sem} + P'_{field}) \cdot A'_{field}$. Given the ambiguity between the formal equation (Mean of weighted sum) and the algorithm (weighted sum of shifted features), the formal equation is prioritized for the definition, while the algorithm provides the computational graph including the positional bias application [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def field_aggregation_transformer(X0, X_rgb, X_sem, Delta_d, fQ, fK, fV, fP, f_rgb):
+    """
+    Field-Aggregation Transformer (FAT)
+    
+    Args:
+        X0: Coordinate aligned features, shape (Nrays, Npts, D_rgb)
+        X_rgb: Epipolar view Ray feats, shape (Nrays, Npts, Nviews, D_rgb)
+        X_sem: Epipolar view Sem feats, shape (Nrays, Npts, Nviews, D_sem)
+        Delta_d: Relative directions, shape (Nrays, Npts, Nviews, 3)
+        fQ, fK, fV, fP, f_rgb: MLP layers
+        
+    Returns:
+        S_3D_rgb: Aggregated 3D RGB feature, shape (Nrays, Npts, D_rgb)
+        S_3D_sem: Aggregated 3D Semantic feature, shape (Nrays, Npts, D_sem)
+    """
+    # 1. Compute Q, K, V
+    Q = fQ(X0)          # (Nrays, Npts, D_rgb)
+    K = fK(X_rgb)       # (Nrays, Npts, Nviews, D_rgb)
+    V = fV(X_rgb)       # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 2. Compute Positional Bias
+    P_field = fP(Delta_d) # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 3. Compute Attention Logits
+    # Q is broadcasted to (Nrays, Npts, 1, D_rgb) to subtract from K
+    A_field = K - Q[:, :, None, :] + P_field # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 4. Softmax over views (dim=2)
+    # Note: The source uses dim=-2 which is the view dimension in the shape (..., Nviews, ...)
+    A_field = F.softmax(A_field, dim=-2) # (Nrays, Npts, Nviews, D_rgb)
+    
+    # 5. Aggregate RGB Features
+    # S_3D_rgb = ((V + P_field) * A_field).sum(dim=2)
+    # Then apply f_rgb
+    S_3D_rgb_raw = ((V + P_field) * A_field).sum(dim=2) # (Nrays, Npts, D_rgb)
+    S_3D_rgb = f_rgb(S_3D_rgb_raw) # (Nrays, Npts, D_rgb)
+    
+    # 6. Aggregate Semantic Features
+    # The source equation (5) uses Mean of weighted sum.
+    # The source Algorithm 1 uses a more complex path with repeat_interleave.
+    # However, the core definition is "shared attention".
+    # We implement the formal equation (5) which is consistent with "shared weights".
+    # A_FAT is the attention weights A_field.
+    # F_sem_i are the features in X_sem.
+    
+    # Reshape X_sem to (Nrays, Npts, Nviews, D_sem)
+    # A_field needs to be broadcasted or expanded to match D_sem if dimensions differ.
+    # Assuming A_field is scalar weights per view, we expand it.
+    
+    # If D_rgb != D_sem, A_field (which is D_rgb dim) cannot directly multiply X_sem (D_sem dim).
+    # The source implies A_FAT is the aggregation weight, likely a scalar per view per point.
+    # In the logit calculation, A_field has shape (..., Nviews, D_rgb).
+    # Softmax is over dim 2. The resulting A_field still has D_rgb dimension.
+    # This suggests the attention mechanism might be channel-wise or the D_rgb dimension 
+    # is used to compute weights that are then applied to semantic features.
+    # Given the ambiguity, we assume A_field is reduced to scalar weights per view 
+    # or the D_rgb dimension is shared/compatible. 
+    # However, looking at Eq 4, A_FAT is defined as the output of FAT.
+    # Eq 5 uses A_FAT * [F_sem...]. T.
+    # If A_FAT is (Nrays, Npts, Nviews, D_rgb) and F_sem is (Nrays, Npts, Nviews, D_sem),
+    # direct multiplication is invalid unless D_rgb == D_sem or A_FAT is reduced.
+    # The algorithm step 5-6 mentions repeat_interleave(4), suggesting channel expansion.
+    # Without explicit details on how A_FAT is reduced to scalar weights, 
+    # we follow the formal equation structure: Mean(A_FAT * Features).
+    # We assume A_FAT is broadcastable or reduced to (Nrays, Npts, Nviews, 1).
+    
+    # Implementation of Eq 5:
+    # A_FAT is the attention weights. Let's assume it's reduced to scalar weights per view.
+    # If A_field is (Nrays, Npts, Nviews, D_rgb), we might need to average over D_rgb 
+    # or the D_rgb dimension is actually the attention dimension.
+    # Given the source text "A_FAT in R^{Npts x N}", it seems A_FAT is scalar per point/view.
+    # The logit calculation A_field = K - Q + P_field results in D_rgb dimension.
+    # Softmax over dim 2 (views) keeps D_rgb.
+    # This implies the attention weights are per-channel.
+    # For semantic aggregation, we apply these per-channel weights? 
+    # Or are they shared across channels?
+    # The source says "shared attention".
+    # We will implement the weighted sum using the computed A_field, 
+    # assuming D_sem == D_rgb or that A_field is broadcastable.
+    # If D_sem != D_rgb, this step requires clarification [G].
+    # Assuming D_sem == D_rgb for direct application:
+    
+    # Expand A_field to match X_sem if necessary, or assume compatibility.
+    # The formal equation uses Mean.
+    # S_3D_sem = Mean(A_FAT * [F_sem_1, ..., F_sem_N]^T)
+    # This is equivalent to sum(A_FAT * X_sem, dim=2) / N_views if A_FAT is normalized?
+    # No, Mean usually implies averaging over the view dimension.
+    
+    # Let's follow Algorithm 1 step 9 for consistency with the provided code structure,
+    # despite the formal equation difference, as Algorithm 1 is more specific.
+    # Step 9: S_sem = ((X_sem + P'_field) * A'_field).sum(dim=2)
+    # But P'_field and A'_field involve repeat_interleave.
+    # Since repeat_interleave details are not fully explained, we stick to the 
+    # high-level definition: Shared weights A_FAT applied to Semantic features.
+    
+    # Simplified implementation of Eq 5:
+    # A_FAT is the attention weights. We assume it is reduced to (Nrays, Npts, Nviews, 1)
+    # by averaging over the D_rgb dimension if necessary, or it is broadcastable.
+    # For the purpose of this article, we define the output as the weighted mean.
+    
+    # If A_field is (Nrays, Npts, Nviews, D_rgb), and we want scalar weights:
+    A_FAT_scalar = A_field.mean(dim=-1) # (Nrays, Npts, Nviews) [G: Assumption to match Eq 5 structure]
+    
+    # Apply to Semantic features
+    # X_sem: (Nrays, Npts, Nviews, D_sem)
+    # A_FAT_scalar: (Nrays, Npts, Nviews, 1)
+    weighted_sem = A_FAT_scalar * X_sem # (Nrays, Npts, Nviews, D_sem)
+    S_3D_sem = weighted_sem.mean(dim=2) # (Nrays, Npts, D_sem)
+    
+    return S_3D_rgb, S_3D_sem
+```
+
+**Parameters:**
+*   $f_Q, f_K, f_V, f_P, f_{rgb}$: MLP layers [S1].
+*   Typical values for dimensions ($D_{rgb}, D_{sem}$) are not given in the sources [S1].
+*   $N_{views}$: Number of reference views [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The subtraction $K - Q$ in the attention logits may be sensitive to the scale of features [S1].
+*   **Boundaries:** Bilinear interpolation for feature extraction at projected positions $\Pi_i(\boldsymbol{x})$ requires handling out-of-bounds pixels in reference images [S1].
+*   **Degenerate Input:** If $N_{views} = 0$, the aggregation is undefined [S1].
+
+## Subtopics
+
+### [Ray-Aggregation Transformer](15113-ray-aggregation-transformer.md)
+A transformer block that aggregates features across the point dimension ($N_{pts}$) along rays to produce 2D semantic-embedding fields ($S_{2D\_rgb}, S_{2D\_sem}$) for rendering. It follows FAT in the pipeline, taking the 3D fields produced by FAT and aggregating them along the ray to generate final view features.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the attention computation $O(N_{rays} \cdot N_{pts} \cdot N_{views} \cdot D)$, where $D$ is the feature dimension [S1].
+*   **Memory Complexity:** Requires storing $K, V, Q, P_{field}, A_{field}$, scaling with $N_{rays} \cdot N_{pts} \cdot N_{views} \cdot D$ [S1].
+*   **Performance:** The method surpasses SOTA methods like DM-NeRF in SSIM and LPIPS metrics in instance settings, demonstrating that contextual information from semantic features enhances geometry reconstruction [S1].
+*   **Strengths:** Joint optimization of radiance and semantic fields improves both rendering quality and semantic segmentation accuracy [S1].
+*   **Limitations:** Requires epipolar geometry constraints and bilinear interpolation, which can be computationally expensive for high-resolution features [S1].
+
+## Background
+The Field-Aggregation Transformer was introduced in the GP-NeRF paper (Generalized Perception NeRF for Context-Aware 3D Scene Understanding) [S1]. It is part of a framework that uses multi-scale feature extractors to obtain low-level (RGB) and high-level (semantic) features, which are then co-aggregated using FAT and subsequently rendered using a Ray-Aggregation Transformer [S1]. The method leverages epipolar geometry constraints to project novel view points to reference views [S1].
+
+## Sources
+[S1] GP-NeRF: Generalized Perception NeRF for Context-Aware 3D Scene Understanding, https://doi.org/10.1109/cvpr52733.2024.02051, fetched 2026-10-26

@@ -1,0 +1,189 @@
+--- v002.md
++++ v003.md
+@@ -70,31 +70,32 @@
+ GROUP_SIZE_M = 64
+ 
+-# Data Structures
+-# surfel_index_buffer: List[int] of size 2^N_BITS_SURFEL, containing 0..2^N_BITS_SURFEL-1
+-# boolean_flags: List[bool] of size ceil(2^N_BITS_SURFEL / GROUP_SIZE_M)
+-# index_buffers: Dict[int, List[int]] mapping object_id -> list of visible surfel indices
+-
+-def deferred_splatting_frame(frame_i, previous_visible_surfaces_B_prev, current_high_level_selection):
++def deferred_splatting(frame_i, B_prev, high_level_selection, transforms):
+     """
+     Renders frame i using deferred splatting with temporal coherency.
++    B_prev: set of (object_id, surfel_index) visible in frame i-1
++    high_level_selection: list of (object_id, surfel_index) from frustum/occlusion culling
++    transforms: dict mapping object_id -> transformation matrix at frame i
+     """
+     # Pass 1: Visibility Splatting with B_{i-1}
+-    # Render surfels from previous frame to build initial depth buffer
+-    # Uses transformation matrices from current frame i for dynamic scenes
+-    render_visibility_splatting(previous_visible_surfaces_B_prev, frame_i)
++    # Render surfels from B_prev to build initial depth buffer.
++    # Uses transforms[frame_i] for dynamic scenes.
++    # [G] GPU pass: draw points with per-fragment depth/shape correction.
++    for oid, si in B_prev:
++        draw_point_with_depth_correction(oid, si, transforms[oid])
+     
+     # Pass 2: Render Surfel Indices
+-    # Render all high-level selected surfels as 1-pixel points, storing identifier in color buffer
+-    render_indices(current_high_level_selection, frame_i)
+-    
+-    # Read color buffer to extract visible surfels
+-    color_buffer = read_color_buffer()
+-    
+-    # Extract B_i (visible surfels in current frame) and sort by object
++    # Render high-level selected surfels as 1-pixel points.
++    # Store 32-bit identifier in color buffer. Depth test discards hidden points.
++    # [G] GPU pass: vertex program computes identifier = (oid << N_BITS_SURFEL) | si
++    for oid, si in high_level_selection:
++        identifier = (oid << N_BITS_SURFEL) | si
++        draw_1px_point_with_identifier(identifier)
++        
++    # Read color buffer and decode identifiers to build B_i and index buffers.
++    color_buffer = read_color_buffer_from_gpu()
+     B_curr = []
+     index_buffers = {}
+-    
+-    # Initialize boolean flags for approximating B_i - B_{i-1}
+-    boolean_flags = [False] * ((1 << N_BITS_SURFEL) + GROUP_SIZE_M - 1) // GROUP_SIZE_M
++    num_groups = (1 << N_BITS_SURFEL + GROUP_SIZE_M - 1) // GROUP_SIZE_M
++    boolean_flags = [False] * num_groups
+     
+     for pixel in color_buffer:
+@@ -102,110 +103,40 @@
+         if identifier == CLEAR_IDENTIFIER:
+             continue
+-            
+-        # Decode identifier
+         object_id = identifier >> N_BITS_SURFEL
+         surfel_index = identifier & ((1 << N_BITS_SURFEL) - 1)
+         
+         B_curr.append((object_id, surfel_index))
+-        
+         if object_id not in index_buffers:
+             index_buffers[object_id] = []
+         index_buffers[object_id].append(surfel_index)
+         
+-        # Update boolean flags based on presence in B_{i-1}
+-        group_idx = surfel_index // GROUP_SIZE_M
+-        if surfel_index in previous_visible_surfaces_B_prev:
+-            boolean_flags[group_idx] = True
++        # Update boolean flags: mark group if surfel was in B_prev
++        if surfel_index in B_prev:
++            boolean_flags[surfel_index // GROUP_SIZE_M] = True
+ 
+     # Pass 3: Visibility Splatting with B_i - B_{i-1}
+-    # Identify surfels in B_curr that are NOT in B_prev using boolean flags
++    # Identify surfels in B_curr not covered by B_prev flags.
+     B_diff = []
+     for object_id, surfel_index in B_curr:
+-        group_idx = surfel_index // GROUP_SIZE_M
+-        if not boolean_flags[group_idx]:
++        if not boolean_flags[surfel_index // GROUP_SIZE_M]:
+             B_diff.append((object_id, surfel_index))
+             
+-    render_visibility_splatting(B_diff, frame_i)
++    # [G] GPU pass: draw points with depth correction for newly visible geometry
++    for oid, si in B_diff:
++        draw_point_with_depth_correction(oid, si, transforms[oid])
+     
+     # Pass 4: EWA Splatting with B_i
+-    # Render only visible surfels with EWA filtering
+-    render_ewa_splatting(index_buffers, frame_i)
++    # Render visible surfels with additive blending and EWA filtering.
++    # [G] GPU pass: fragment program computes Gaussian weight, interpolates surfel mipmaps
++    for oid, surfel_indices in index_buffers.items():
++        for si in surfel_indices:
++            draw_ewa_splat(oid, si, transforms[oid])
+     
+     # Pass 5: Normalization
+-    # Divide RGB by Alpha
+-    normalized_color_buffer = normalize_color_buffer()
++    # Divide RGB by Alpha (sum of weights).
++    # [G] GPU pass: full-screen quad with fragment program dividing RGB by A
++    normalized_buffer = normalize_color_buffer()
+     
+-    return normalized_color_buffer, B_curr
+-
+-def render_visibility_splatting(surfel_set, frame_i):
+-    """
+-    Renders surfels as points with depth correction to update the depth buffer.
+-    Uses transformation matrices from frame_i.
+-    """
+-    for object_id, surfel_index in surfel_set:
+-        surfel = get_surfel(object_id, surfel_index)
+-        transform = get_transform_matrix(object_id, frame_i)
+-        projected_pos = project(surfel.position, transform)
+-        # Hardware point primitive with per-fragment depth and shape correction
+-        draw_point(projected_pos, depth_correction=True)
+-
+-def render_indices(surfel_set, frame_i):
+-    """
+-    Renders surfels as 1-pixel points, storing 32-bit identifier in color buffer.
+-    """
+-    for object_id, surfel_index in surfel_set:
+-        # Compute identifier: (object_index << n) | surfel_index
+-        identifier = (object_id << N_BITS_SURFEL) | surfel_index
+-        # Vertex program computes this in 1 instruction
+-        # Fragment program writes identifier to color buffer
+-        draw_point_1px(identifier)
+-
+-def read_color_buffer():
+-    """Reads the GPU color buffer into a list of pixel structures."""
+-    return []
+-
+-def get_surfel(object_id, surfel_index):
+-    """Returns surfel data (position, texture) from video memory buffer."""
+-    return {"position": (0,0,0), "texture": None}
+-
+-def get_transform_matrix(object_id, frame_i):
+-    """Returns transformation matrix for object at current frame."""
+-    return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+-
+-def project(position, transform):
+-    """Projects 3D position to screen space using transform."""
+-    return (0, 0)
+-
+-def draw_point(pos, depth_correction):
+-    """Renders a hardware point primitive with depth correction."""
+-    pass
+-
+-def draw_point_1px(identifier):
+-    """Renders a 1-pixel point with identifier in color buffer."""
+-    pass
+-
+-def compute_jacobian(surfel, transform):
+-    """Computes Jacobian matrix from transform and surfel."""
+-    return [[1,0],[0,1]]
+-
+-def compute_mipmap_level(jacobian):
+-    """Determines mipmap level from Jacobian."""
+-    return 0
+-
+-def interpolate_mipmaps(texture, level):
+-    """Linearly interpolates between two closest mipmap levels."""
+-    return (1.0, 1.0, 1.0)
+-
+-def compute_gaussian_weight(surfel, transform):
+-    """Computes Gaussian weight based on screen space position."""
+-    return 1.0
+-
+-def draw_ewa_splat(color, weight):
+-    """Renders EWA splat with additive blending."""
+-    pass
+-
+-def normalize_color_buffer():
+-    """Divides RGB components by Alpha component."""
+-    return []
++    return normalized_buffer, B_curr
+ ```
+ 
+@@ -256,5 +187,5 @@
+ 
+ ### History and Development
+-The algorithm was developed to address the performance bottleneck of high-quality point-based rendering, where expensive EWA filtering is applied to hidden points. By deferring the expensive splatting to only visible points, similar to deferred shading in rasterization, the method achieves significant performance gains [S1, unofficial].
++The algorithm was developed to address the performance bottleneck of high-quality point-based rendering, where expensive EWA filtering is applied to hidden points [S1, unofficial]. By deferring the expensive splatting to only visible points, similar to deferred shading in rasterization, the method achieves significant performance gains [S1, unofficial].
+ 
+ ### Usage

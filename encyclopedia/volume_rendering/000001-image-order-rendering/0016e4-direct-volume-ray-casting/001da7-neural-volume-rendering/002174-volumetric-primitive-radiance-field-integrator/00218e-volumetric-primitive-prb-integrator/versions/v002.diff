@@ -1,0 +1,191 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Volumetric Primitive PRB Integrator
+ 
+-Also called: Volumetric Primitives Path Tracing, VolumetricPrimitivesPRBIntegrator
++Also called: Volumetric Primitives Path Tracing, VolumetricPrimitivesPRBIntegrator, volprim_prb [S1, unofficial]
+ 
+ ## Overview
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scene containing a list of volumetric primitives (each defined by a kernel type, center, scale, orientation, extinction coefficient $\sigma_t$, and albedo), a camera ray, and a sampler.
+-*   **Output:** The radiance contribution along the ray.
++*   **Input:** A scene containing a list of volumetric primitives (each defined by a kernel type, center, scale, orientation, extinction coefficient $\sigma_t$, and albedo), a camera ray, and a sampler [S1, unofficial].
++*   **Output:** The radiance contribution along the ray [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Primitive Attributes:** Each primitive stores kernel parameters (e.g., mean, covariance for Gaussians), $\sigma_t$, and albedo.
++*   **Primitive Attributes:** Each primitive stores kernel parameters (e.g., mean, covariance for Gaussians), $\sigma_t$, and albedo [S1, unofficial].
+ *   **Interaction Stack:** A stack for primitive IDs with size `max_overlaps` (default 32) to store overlapping primitives during traversal [S1, unofficial].
+ *   **State:** Ray, active mask, depth, previous event PDF, throughput $\beta$ [S1, unofficial].
+@@ -69,10 +69,30 @@
+ 
+ ```python
+-def sample_segment(self, scene, sampler, ray, primitives, depth, active, max_depth_primitive, rr_depth_primitive):
+-    """
+-    Samples a medium interaction distance and retrieves overlapping primitives.
+-    """
+-    # Initialize state
+-    t_s = ray.t_min
++import math
++
++def evaluate_kernel_pdf(p, ellipsoid):
++    """Standard Gaussian/Epanechnikov PDF evaluation at point p."""
++    # Implementation depends on kernel_type; returns scalar density
++    return math.exp(-0.5 * (p - ellipsoid.center).dot(ellipsoid.inv_cov @ (p - ellipsoid.center)))
++
++def kernel_density_integral(ray, ellipsoid, t0, t1):
++    """Analytical or numerical integral of kernel density along ray segment [t0, t1]."""
++    # Placeholder for kernel-specific integral; returns scalar
++    return evaluate_kernel_pdf(ray(t0), ellipsoid) * (t1 - t0)
++
++def safe_rcp(x):
++    """Safe reciprocal, returns 0.0 if x is zero."""
++    return 1.0 / x if x != 0.0 else 0.0
++
++def replace_grad(val, grad_val):
++    """Autodiff helper: returns val, but propagates grad_val."""
++    return val
++
++def detach(val):
++    """Autodiff helper: returns val, stops gradient propagation."""
++    return val
++
++def sample_segment(scene, sampler, ray, primitives, depth, active, max_depth_primitive, rr_depth_primitive, solver_type, solver_max_iterations):
++    """Samples a medium interaction distance and retrieves overlapping primitives."""
+     seg_t0 = ray.t_min
+     seg_t1 = ray.t_max
+@@ -89,23 +109,23 @@
+     seg_tau = 0.0
+     for ellipsoid, sigmat in zip(ellipsoids, sigmats):
+-        density = kernel.density_integral(ray, ellipsoid, seg_t0, seg_t1)
++        density = kernel_density_integral(ray, ellipsoid, seg_t0, seg_t1)
+         seg_tau += density * sigmat
+-    seg_tr = exp(-seg_tau)
++    seg_tr = math.exp(-seg_tau)
+     
+     # Test sampling condition
+-    chi_i = self.throughput * seg_tr
++    chi_i = scene.throughput * seg_tr
+     sample = sampler.next_1d()
+-    success = active & (chi_i < sample) & (~primitives.is_empty())
+-    
+-    if not dr.any(success):
+-        return 0.0, [] # No interaction
++    success = active and (chi_i < sample) and (len(ellipsoids) > 0)
++    
++    if not success:
++        return 0.0, []
+         
+     # Sample interaction distance
+-    if self.solver_type == 'disabled':
++    if solver_type == 'disabled':
+         t_s = (seg_t0 + seg_t1) / 2.0
+     else:
+-        # Newton or Bisection solver
+         t_s = seg_t0
+-        for it in range(self.solver_max_iterations):
++        converged = False
++        for it in range(solver_max_iterations):
+             tau = 0.0
+             cdf = 0.0
+@@ -113,17 +133,17 @@
+             
+             for ellipsoid, sigmat in zip(ellipsoids, sigmats):
+-                density = kernel.density_integral(ray, ellipsoid, seg_t0, t_s)
++                density = kernel_density_integral(ray, ellipsoid, seg_t0, t_s)
+                 tau += density * sigmat
+                 cdf += density * sigmat
+                 
+-                if self.solver_type == 'newton':
+-                    pdf += kernel.pdf(ray(t_s), ellipsoid) * sigmat
+-            
+-            chi = self.throughput * exp(-tau)
+-            
+-            if self.solver_type == 'newton':
+-                step = (exp(-chi) - exp(-cdf)) / pdf
++                if solver_type == 'newton':
++                    pdf += evaluate_kernel_pdf(ray(t_s), ellipsoid) * sigmat
++            
++            chi = scene.throughput * math.exp(-tau)
++            
++            if solver_type == 'newton':
++                step = (math.exp(-chi) - math.exp(-cdf)) / pdf if pdf != 0 else 0.0
+                 t_s -= step
+-            elif self.solver_type == 'bisection':
++            elif solver_type == 'bisection':
+                 step = (seg_t1 - seg_t0) / (2 ** (it + 2))
+                 if tau < chi:
+@@ -135,6 +155,5 @@
+             t_s = max(seg_t0, min(seg_t1, t_s))
+             
+-            # Check convergence or divergence
+-            if it == self.solver_max_iterations - 1:
++            if it == solver_max_iterations - 1:
+                 if not converged:
+                     t_s = 0.5 * (seg_t0 + seg_t1)
+@@ -142,8 +161,6 @@
+     return t_s, ellipsoids
+ 
+-def eval_albedo(self, scene, p, primitives, L, dL, mode, active_medium):
+-    """
+-    Evaluates albedo at point p for active medium interactions.
+-    """
++def eval_albedo(scene, p, primitives, L, dL, mode, active_medium):
++    """Evaluates albedo at point p for active medium interactions."""
+     accum_albedo = 0.0
+     accum_pdf = 0.0
+@@ -155,5 +172,5 @@
+             albedo_val = prim.albedo
+             
+-            pdf = kernel.pdf(p, ellipsoid) * sigmat
++            pdf = evaluate_kernel_pdf(p, ellipsoid) * sigmat
+             accum_albedo += albedo_val * pdf
+             accum_pdf += pdf
+@@ -161,13 +178,13 @@
+             # Derivative computation for gradient mode
+             if mode == 'backward':
+-                d_albedo_pdf = dr.replace_grad(1.0, albedo_val * pdf)
+-                dL += d_albedo_pdf * dr.detach(dr.safe_rcp(accum_pdf) * L)
+-                
+-                d_pdf = dr.replace_grad(1.0, pdf)
+-                dL += -d_pdf * dr.detach(accum_albedo * dr.safe_rcp(accum_pdf * accum_pdf) * L)
+-                
+-                dL += d_pdf * dr.detach(L * dr.safe_rcp(accum_pdf))
+-                
+-    final_albedo = accum_albedo * dr.safe_rcp(accum_pdf)
++                d_albedo_pdf = replace_grad(1.0, albedo_val * pdf)
++                dL += d_albedo_pdf * detach(safe_rcp(accum_pdf) * L)
++                
++                d_pdf = replace_grad(1.0, pdf)
++                dL += -d_pdf * detach(accum_albedo * safe_rcp(accum_pdf * accum_pdf) * L)
++                
++                dL += d_pdf * detach(L * safe_rcp(accum_pdf))
++                
++    final_albedo = accum_albedo * safe_rcp(accum_pdf)
+     return final_albedo
+ ```
+@@ -176,16 +193,16 @@
+ 
+ ### Volumetric Primitive Tomography Integrator
+-Integrates density of overlapping volumetric primitives along the ray with no scattering. Use when rendering absorbing media only. [Link](2542-volumetric-primitive-tomography-integrator.md)
++Integrates density of overlapping volumetric primitives along the ray with no scattering [S1, unofficial]. Use when rendering absorbing media only [S1, unofficial]. [Link](2542-volumetric-primitive-tomography-integrator.md)
+ 
+ ### Volumetric Primitive Radiance Field Integrator
+-The parent method providing the general framework for volumetric primitive rendering. Use as the base for implementing specific integrators like PRB or Tomography. [Link](2536-volumetric-primitive-radiance-field-integrator.md)
++The parent method providing the general framework for volumetric primitive rendering [S1, unofficial]. Use as the base for implementing specific integrators like PRB or Tomography [S1, unofficial]. [Link](2536-volumetric-primitive-radiance-field-integrator.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of overlapping primitives per ray and the solver iterations. Each primitive evaluation involves kernel density integral and PDF calculation.
++*   **Time Complexity:** Depends on the number of overlapping primitives per ray and the solver iterations. Each primitive evaluation involves kernel density integral and PDF calculation [S1, unofficial].
+ *   **Memory Complexity:** Linear in the number of primitives for storage. The stack size is bounded by `max_overlaps` (default 32) [S1, unofficial].
+ *   **Performance:** The Newton solver converges faster than Bisection by using derivative information (PDF), while Bisection uses fixed step halving [S1, unofficial].
+-*   **Strengths:** Supports scattering and emissive media, differentiable rendering via Dr.Jit, efficient representation using kernel primitives.
++*   **Strengths:** Supports scattering and emissive media, differentiable rendering via Dr.Jit, efficient representation using kernel primitives [S1, unofficial].
+ *   **Limitations:** Requires an environment emitter; multiple emitters trigger a warning. Divergence in the solver can lead to NaNs if not clipped [S1, unofficial].
+-*   **When to use:** When rendering scattering media represented by volumetric primitives (e.g., 3D Gaussians) with differentiable requirements.
++*   **When to use:** When rendering scattering media represented by volumetric primitives (e.g., 3D Gaussians) with differentiable requirements [S1, unofficial].
+ *   **When not to use:** When only absorbing media is needed (use Tomography Integrator) or when no environment emitter is available [S1, unofficial].
+ 

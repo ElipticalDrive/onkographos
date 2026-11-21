@@ -1,0 +1,385 @@
+--- v001.md
++++ v002.md
+@@ -4,192 +4,208 @@
+ 
+ ## Overview
+-GASP is a pipeline that integrates Gaussian Splatting with physics-based simulations by converting flat Gaussians into triangle faces using the GaMeS reparametrization, simulating the vertices using a standard Material Point Method (MPM) engine, and reassembling the deformed triangles back into Gaussians [S1, unofficial]. It solves the problem of applying physics to Gaussian representations without the artifacts caused by direct vertex processing or the incompatibility of 2DGS with triangle-based simulation [S1, unofficial]. Unlike [PhysGaussian](6002-physgaussian.md), which uses MPM directly over Gaussians, GASP explicitly converts Gaussians to a mesh, simulates the mesh, and converts back, ensuring stable simulations for flat Gaussian components [S1, unofficial].
++GASP is a pipeline that integrates 3D Gaussian Splatting with black-box physics engines by converting flat Gaussian components into triangle faces, simulating the vertices using the Material Point Method (MPM), and reconstructing Gaussians from the deformed triangles [S1, unofficial]. It solves the problem of simulating deformable objects in Gaussian representations without requiring modifications to the physics engine or complex mesh extraction strategies like marching cubes [S1, unofficial]. Unlike PhysGaussian, which approximates deformation via first-order linear transformations, GASP operates directly on the geometry of flat Gaussians using the GaMeS parameterization, ensuring stable simulations and avoiding artifacts associated with treating points as discrete entities [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A collection of Gaussians $G = \{(N(m_i, R_i, S_i), \sigma_i, c_i)\}_{i=1}^p$, where $m_i$ is the mean, $R_i$ is the rotation matrix, $S_i$ is the scaling matrix, $\sigma_i$ is the opacity, and $c_i$ is the color [S1, unofficial].
+-*   **Output:** A deformed collection of Gaussians $G_t = \{(N(T^{-1}(\phi(V_i, t))), \sigma_i, c_i)\}_{i=1}^p$ at time $t$ [S1, unofficial].
+-
+-**Data Structures**
+-*   **Gaussian:** Defined by mean $m$, rotation $R$, scaling $S$, opacity $\sigma$, and color $c$ [S1, unofficial].
+-*   **Mesh (Triangle Soup):** Defined by a set of vertices $V$ and edges $E$ derived from the GaMeS transformation [S1, unofficial].
+-*   **CoreGaussian/SubGaussian:** Hierarchical structure where CoreGaussians are simulated and SubGaussians inherit movement patterns [S1, unofficial].
+-
+-**Steps**
+-1.  **Extract Parameters:** From the input Gaussian collection $G$, extract means $m_i$, scaling matrices $S_i$, and rotation matrices $R_i$ for each Gaussian $i$ [S1, unofficial].
+-2.  **Convert to Mesh (GaMeS):** Transform the Gaussian parameters into a mesh (triangle soup) using the GaMeS reparametrization. The vertices $V$ are obtained by:
+-    $$V = \{V_i = T(m_i, R_i, S_i)\}_{i=1}^p$$
+-    where $T$ is the GaMeS transformation function [S1, unofficial]. Each flat Gaussian is represented by a triangle face with vertices $V = [v_1, v_2, v_3]$, where $v_1 = m_i$ (center), and $v_2, v_3$ lie on the main components of the ellipsoid [S1, unofficial].
+-3.  **Simulate Vertices:** Apply the physics-based simulation engine (e.g., MPM) to the vertices $V$ individually to obtain deformed vertices $V_t$. The deformation is modeled by a map $\phi(X, t)$:
+-    $$V_t = \{\phi(V_i, t) : V_i \in V\}$$
+-    The simulation engine operates as a black box on the point cloud [S1, unofficial].
+-4.  **Reassemble Triangle Soup:** Combine the deformed vertices $V_t$ with the original edges $E$ to form the deformed triangle soup $(V_t, E_t)$ [S1, unofficial].
+-5.  **Correction Algorithm:** Mitigate artifacts caused by independent vertex processing. For each Gaussian face with vertices $V = [v_1, v_2, v_3]$:
+-    *   Check if the distance between transformed nodes exceeds a threshold relative to original nodes:
+-        $$\|\phi(v_1, t) - \phi(v_i, t)\| > \alpha \|v_1 - v_i\| \quad \text{for } i = 2, 3$$
+-        where $\alpha$ is a hyperparameter [S1, unofficial].
+-    *   If the condition is met, correct the scaling parameter $s_i$ (specifically the components corresponding to $v_2, v_3$) to be the original value multiplied by $\alpha$ [S1, unofficial].
+-6.  **Convert Back to Gaussians:** Use the inverse GaMeS transformation $T^{-1}$ to convert the deformed triangle soup back to Gaussians:
+-    $$G_t = \{(N(T^{-1}(\phi(V_i, t))), \sigma_i, c_i)\}_{i=1}^p$$
+-    The opacity $\sigma_i$ and color $c_i$ remain unchanged [S1, unofficial].
+-7.  **Hierarchical Simulation (Optional):** To accelerate simulation for large scenes:
+-    *   Use BIRCH clustering to create CoreGaussians [S1, unofficial].
+-    *   Simulate only the CoreGaussians [S1, unofficial].
+-    *   Transfer the movement pattern from CoreGaussians to SubGaussians [S1, unofficial].
+-
+-**Pseudocode**
++**Inputs and Outputs:**
++*   **Input:** A collection of flat Gaussians $G = \{(N(m_i, R_i, S_i), \sigma_i, c_i)\}_{i=1}^p$, where $m_i$ is the mean, $R_i$ is the rotation matrix, $S_i = \text{diag}(s_{i1}, s_{i2}, s_{i3})$ is the scaling matrix with $s_{i1} = \epsilon$ (making the Gaussian effectively 2D), $\sigma_i$ is opacity, and $c_i$ is color [S1, unofficial].
++*   **Output:** A time-evolved collection of Gaussians $G_t = \{(N(m'_i, R'_i, S'_i), \sigma_i, c_i)\}_{i=1}^p$ reflecting the physics simulation [S1, unofficial].
++
++**Data Structures:**
++*   **Gaussian:** Defined by mean $m \in \mathbb{R}^3$, rotation $R \in \mathbb{R}^{3 \times 3}$, scaling $S \in \mathbb{R}^{3 \times 3}$ (diagonal), opacity $\sigma \in \mathbb{R}$, and color $c \in \mathbb{R}^3$ [S1, unofficial].
++*   **Triangle Face (GaMeS):** A triplet of vertices $V = [v_1, v_2, v_3]$ representing a flat Gaussian [S1, unofficial].
++*   **Triangle Soup:** A collection of vertices $V$ and edges $E$ derived from the Gaussians [S1, unofficial].
++
++**Parameters:**
++*   $\epsilon$: A small constant such that $s_1 = \epsilon$ [S1, unofficial].
++*   $\alpha$: A hyperparameter for the correction algorithm, controlling the threshold for scaling correction [S1, unofficial].
++
++**Steps:**
++
++1.  **Initialization (GaMeS Conversion):**
++    Convert each flat Gaussian $N(m, R, S)$ into a triangle face $V = [v_1, v_2, v_3]$ using the mapping $T(\cdot)$ [S1, unofficial]:
++    $$v_1 = m$$
++    $$v_2 = m + s_2 r_2$$
++    $$v_3 = m + s_3 r_3$$
++    where $r_2$ and $r_3$ are the second and third columns of the rotation matrix $R$ [S1, unofficial]. This creates a triangle soup $(V, E)$ [S1, unofficial].
++
++2.  **Physics Simulation:**
++    Apply the physics engine (e.g., MPM) to the vertices $V$ individually to obtain deformed vertices $V_t$ [S1, unofficial]:
++    $$V_t = \{\phi(v, t) : v \in V\}$$
++    where $\phi(\cdot, t)$ is the deformation map provided by the black-box physics engine (such as Genesis, Blender, or Taichi Elements) [S1, unofficial]. The edges $E$ are preserved to maintain the triangle structure [S1, unofficial].
++
++3.  **Reconstruction (Inverse GaMeS):**
++    Recover the Gaussian parameters from the deformed triangle vertices $V_t = [v'_1, v'_2, v'_3]$ using the inverse mapping $T^{-1}(\cdot)$ [S1, unofficial]:
++    *   **Mean:** $\hat{m} = v'_1$ [S1, unofficial].
++    *   **Rotation Axis 1:** $\hat{r}_1 = \frac{(v'_2 - v'_1) \times (v'_3 - v'_1)}{\|(v'_2 - v'_1) \times (v'_3 - v'_1)\|}$ (normalized face normal) [S1, unofficial].
++    *   **Rotation Axis 2:** $\hat{r}_2 = \frac{v'_2 - v'_1}{\|v'_2 - v'_1\|}$ (normalized edge vector) [S1, unofficial].
++    *   **Rotation Axis 3:** $\hat{r}_3 = \text{orth}(v'_3 - v'_1; \hat{r}_1, \hat{r}_2)$ (Gram-Schmidt orthogonalization) [S1, unofficial].
++    *   **Scaling:**
++        $$\hat{s}_1 = \epsilon$$
++        $$\hat{s}_2 = \|v'_2 - v'_1\|$$
++        $$\hat{s}_3 = \langle v'_3 - v'_1, \hat{r}_3 \rangle$$
++    The new rotation matrix is $\hat{R} = [\hat{r}_1, \hat{r}_2, \hat{r}_3]$ and scaling is $\hat{S} = \text{diag}(\hat{s}_1, \hat{s}_2, \hat{s}_3)$ [S1, unofficial].
++
++4.  **Correction Algorithm:**
++    To mitigate artifacts from independent vertex processing, check if the distance between transformed nodes exceeds a threshold relative to original nodes [S1, unofficial]. For each Gaussian face with original vertices $V = [v_1, v_2, v_3]$ and deformed vertices $V_t = [v'_1, v'_2, v'_3]$:
++    If $\|v'_1 - v'_i\| > \alpha \|v_1 - v_i\|$ for $i \in \{2, 3\}$, then correct the scaling parameter $\hat{s}_i$ to $\alpha \cdot s_i$ (where $s_i$ is the original scaling parameter before simulation) [S1, unofficial]. Note: The source states "si should be identical to that of the original value times α" [S1, unofficial].
++
++5.  **Hierarchical Simulation (Optional):**
++    *   Use BIRCH clustering to group Gaussians into CoreGaussians and SubGaussians [S1, unofficial].
++    *   Simulate only the CoreGaussians using the steps above.
++    *   Transfer the movement pattern (deformation) from CoreGaussians to their associated SubGaussians [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-def GASP_pipeline(Gaussians, physics_engine, alpha):
++import numpy as np
++
++def gasp_pipeline(gaussians, physics_engine, alpha=1.5):
+     """
+-    GASP: Gaussian Splatting for Physics-Based Simulations.
+-    
+-    Args:
+-        Gaussians: List of Gaussian objects with attributes m, R, S, sigma, c.
+-        physics_engine: A function or object that applies deformation phi(V, t) to vertices.
+-        alpha: Hyperparameter for correction algorithm.
+-        
+-    Returns:
+-        Deformed_Gaussians: List of deformed Gaussian objects.
++    gaussians: List of dicts with keys 'm', 'R', 'S', 'sigma', 'c'
++    physics_engine: Object with method 'simulate(points)' returning deformed points
++    alpha: Hyperparameter for correction
+     """
+-    Deformed_Gaussians = []
+-    
+-    # Step 1 & 2: Convert Gaussians to Mesh (Triangle Soup)
+-    # GaMeS transformation T converts Gaussian parameters to triangle vertices
+-    # Each Gaussian i becomes a triangle with vertices [v1, v2, v3]
+-    # v1 = m_i
+-    # v2 = m_i + s2 * r2 (where s2, r2 are from S_i, R_i)
+-    # v3 = m_i + s3 * r3
+-    Mesh_Faces = []
+-    for g in Gaussians:
+-        v1 = g.m
+-        # Extract main components from scaling matrix S and rotation matrix R
+-        # Assuming S is diagonal with elements s1, s2, s3 and R has columns r1, r2, r3
+-        s2 = g.S[1, 1]
+-        s3 = g.S[2, 2]
+-        r2 = g.R[:, 1]
+-        r3 = g.R[:, 2]
+-        
+-        v2 = g.m + s2 * r2
+-        v3 = g.m + s3 * r3
+-        
+-        Mesh_Faces.append({
+-            'original_vertices': [v1, v2, v3],
+-            'gaussian': g
++    # Step 1: Convert Gaussians to Triangle Soup
++    triangles = []
++    for g in gaussians:
++        m = g['m']
++        R = g['R']
++        S = g['S']
++        s2 = S[1, 1]
++        s3 = S[2, 2]
++        r2 = R[:, 1]
++        r3 = R[:, 2]
++        
++        v1 = m
++        v2 = m + s2 * r2
++        v3 = m + s3 * r3
++        
++        triangles.append({
++            'v1': v1, 'v2': v2, 'v3': v3,
++            'original_s2': s2, 'original_s3': s3,
++            'sigma': g['sigma'], 'c': g['c']
+         })
+-        
+-    # Step 3: Simulate Vertices
+-    # Extract all unique vertices from the mesh faces
+-    All_Vertices = set()
+-    for face in Mesh_Faces:
+-        All_Vertices.update(face['original_vertices'])
+-        
+-    # Apply physics engine to each vertex
+-    # phi(V, t) is the deformation map
+-    Deformed_Vertices = {}
+-    for v in All_Vertices:
+-        Deformed_Vertices[v] = physics_engine.phi(v, t=1) # Assuming t=1 for simplicity
+-        
+-    # Step 4 & 5: Reassemble and Correct
+-    for face in Mesh_Faces:
+-        v1_orig, v2_orig, v3_orig = face['original_vertices']
+-        g = face['gaussian']
+-        
+-        v1_def = Deformed_Vertices[v1_orig]
+-        v2_def = Deformed_Vertices[v2_orig]
+-        v3_def = Deformed_Vertices[v3_orig]
++    
++    # Extract all unique vertices for physics engine
++    # Note: In a real implementation, vertices shared by multiple triangles 
++    # must be handled carefully (e.g., by merging indices). 
++    # The source describes treating points individually, implying a point cloud approach.
++    # We assume physics_engine takes a list of points and returns deformed points.
++    # To preserve topology, we might need to pass the full set of vertices.
++    
++    all_vertices = []
++    for t in triangles:
++        all_vertices.append(t['v1'])
++        all_vertices.append(t['v2'])
++        all_vertices.append(t['v3'])
++        
++    # Physics simulation
++    deformed_vertices = physics_engine.simulate(all_vertices)
++    
++    # Step 2 & 3 & 4: Reconstruct Gaussians
++    new_gaussians = []
++    tri_idx = 0
++    vert_idx = 0
++    
++    # Re-associate deformed vertices to triangles
++    # Assuming the order of deformed_vertices matches the order of all_vertices
++    for t in triangles:
++        v1 = deformed_vertices[vert_idx]
++        v2 = deformed_vertices[vert_idx + 1]
++        v3 = deformed_vertices[vert_idx + 2]
++        vert_idx += 3
++        
++        # Inverse GaMeS
++        m_hat = v1
++        
++        # Rotation axes
++        edge1 = v2 - v1
++        edge2 = v3 - v1
++        
++        r1_hat = np.cross(edge1, edge2)
++        norm_r1 = np.linalg.norm(r1_hat)
++        if norm_r1 < 1e-8:
++            # Degenerate triangle, fallback or skip [G]
++            r1_hat = np.array([0, 0, 1])
++        else:
++            r1_hat = r1_hat / norm_r1
++            
++        r2_hat = edge1 / np.linalg.norm(edge1)
++        
++        # Gram-Schmidt for r3
++        r3_hat = edge2 - np.dot(edge2, r1_hat) * r1_hat - np.dot(edge2, r2_hat) * r2_hat
++        norm_r3 = np.linalg.norm(r3_hat)
++        if norm_r3 < 1e-8:
++            r3_hat = np.cross(r1_hat, r2_hat) # Fallback [G]
++        else:
++            r3_hat = r3_hat / norm_r3
++            
++        R_hat = np.column_stack((r1_hat, r2_hat, r3_hat))
++        
++        # Scaling
++        s2_hat = np.linalg.norm(edge1)
++        s3_hat = np.dot(edge2, r3_hat)
+         
+         # Correction Algorithm
+-        # Check distance between transformed center and other vertices
+-        # against original distance scaled by alpha
+-        dist_12_orig = norm(v1_orig - v2_orig)
+-        dist_12_def = norm(v1_def - v2_def)
+-        
+-        dist_13_orig = norm(v1_orig - v3_orig)
+-        dist_13_def = norm(v1_def - v3_def)
+-        
+-        # Correct scaling if threshold exceeded
+-        # The correction applies to the scaling parameters s2 and s3
+-        new_s2 = g.S[1, 1]
+-        new_s3 = g.S[2, 2]
+-        
+-        if dist_12_def > alpha * dist_12_orig:
+-            new_s2 = g.S[1, 1] * alpha
+-            
+-        if dist_13_def > alpha * dist_13_orig:
+-            new_s3 = g.S[2, 2] * alpha
+-            
+-        # Step 6: Convert Back to Gaussians
+-        # Inverse GaMeS transformation T^-1
+-        # The new mean is the deformed center v1_def
+-        # The new scaling is adjusted (new_s2, new_s3)
+-        # The rotation and other parameters are adjusted accordingly to match the deformed triangle
+-        # Note: The exact inverse transformation T^-1 is defined by the GaMeS paper [S1, unofficial]
+-        # Here we assume a function inverse_gaMES that reconstructs Gaussian params from deformed vertices
+-        Deformed_G = inverse_gaMES([v1_def, v2_def, v3_def], g.sigma, g.c, new_s2, new_s3)
+-        
+-        Deformed_Gaussians.append(Deformed_G)
+-        
+-    return Deformed_Gaussians
+-
+-def inverse_gaMES(vertices, sigma, color, new_s2, new_s3):
+-    """
+-    Reconstructs a Gaussian from deformed triangle vertices.
+-    This is a placeholder for the specific inverse GaMeS formula.
+-    The mean is the first vertex. The orientation and scale are derived from the triangle geometry.
+-    """
+-    v1, v2, v3 = vertices
+-    
+-    # New mean is the deformed center
+-    new_m = v1
+-    
+-    # Reconstruct rotation and scaling from the deformed triangle edges
+-    # Edge 1: v2 - v1, Edge 2: v3 - v1
+-    e1 = v2 - v1
+-    e2 = v3 - v1
+-    
+-    # Normalize to get directions
+-    r2_new = e1 / norm(e1)
+-    r3_new = e2 / norm(e2)
+-    
+-    # Orthogonalize r3_new against r2_new (Gram-Schmidt)
+-    r3_new = r3_new - dot(r3_new, r2_new) * r2_new
+-    r3_new = r3_new / norm(r3_new)
+-    
+-    # Compute r1_new as cross product
+-    r1_new = cross(r2_new, r3_new)
+-    
+-    # Construct rotation matrix
+-    new_R = matrix([r1_new, r2_new, r3_new]).T
+-    
+-    # Construct scaling matrix
+-    # The lengths of e1 and e2 correspond to the scaled components
+-    s2_new = norm(e1)
+-    s3_new = norm(e2)
+-    
+-    # Ensure diagonal scaling matrix
+-    new_S = matrix([[s2_new, 0, 0],
+-                    [0, s3_new, 0],
+-                    [0, 0, 0]]) # Assuming flat Gaussian, third dimension is 0 or negligible
+-    
+-    return Gaussian(m=new_m, R=new_R, S=new_S, sigma=sigma, c=color)
++        # Compare deformed distances to original distances
++        orig_v1 = t['v1']
++        orig_v2 = t['v2']
++        orig_v3 = t['v3']
++        orig_s2 = t['original_s2']
++        orig_s3 = t['original_s3']
++        
++        dist_v1_v2_orig = np.linalg.norm(orig_v1 - orig_v2)
++        dist_v1_v3_orig = np.linalg.norm(orig_v1 - orig_v3)
++        
++        dist_v1_v2_deform = np.linalg.norm(v1 - v2)
++        dist_v1_v3_deform = np.linalg.norm(v1 - v3)
++        
++        # Correction logic based on source: if deformed dist > alpha * original dist
++        # Then scale parameter is corrected to original value * alpha
++        # Note: The source says "si should be identical to that of the original value times alpha"
++        # This implies capping the growth.
++        
++        if dist_v1_v2_deform > alpha * dist_v1_v2_orig:
++            s2_hat = alpha * orig_s2
++            
++        if dist_v1_v3_deform > alpha * dist_v1_v3_orig:
++            s3_hat = alpha * orig_s3
++            
++        # s1 is always epsilon
++        s1_hat = 1e-6 # epsilon
++        
++        new_gaussians.append({
++            'm': m_hat,
++            'R': R_hat,
++            'S': np.diag([s1_hat, s2_hat, s3_hat]),
++            'sigma': t['sigma'],
++            'c': t['c']
++        })
++        
++    return new_gaussians
+ ```
+ 
+-**Parameters**
+-*   $\alpha$: A hyperparameter used in the correction algorithm to scale the Gaussian size $s_i$ when vertex distances exceed the threshold [S1, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-*   **Independent Vertex Processing:** Processing each vertex of the triangle soup individually can produce noticeable artifacts if the deformation is large or non-rigid [S1, unofficial]. The correction algorithm mitigates this.
+-*   **Flat Gaussians:** GASP relies on the GaMeS representation, which is designed for flat Gaussians. It is not naturally compatible with 2DGS or other representations that do not fit the triangle-based simulation setting [S1, unofficial].
++## Subtopics
++
++### GaMeS (Gaussian Meshes)
++A parameterization of flat Gaussians as triangle faces. It sets one scaling axis to $\epsilon$, allowing Gaussians to be represented as 2D triangles in 3D space. It is chosen when stable, triangle-based physics simulation is required for Gaussian splats. [Link](6003-games.md)
++
++### Material Point Method (MPM)
++A particle-based physics simulation method used in GASP to compute vertex trajectories. It is chosen for its ability to handle large deformations and complex material behaviors (cloth, sand, etc.) as a black-box engine. [Link](../../volume-rendering/differentiable-and-inverse-volume-rendering/radiance-field-optimization/3d-gaussian-splatting/mpm.md)
++
++### PhysGaussian
++A method that adapts Newtonian dynamics to 3D Gaussians using first-order approximation of deformation maps. GASP differs by using GaMeS triangles and black-box physics, avoiding the need for engine modifications or linear approximations. [Link](6002-physgaussian.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The simulation step operates on the vertices of the triangle soup. Using hierarchical simulation with BIRCH clustering (CoreGaussians) significantly accelerates the process by reducing the number of points simulated [S1, unofficial].
+-*   **Memory Complexity:** Depends on the number of Gaussians and the mesh representation. The conversion to mesh and back adds overhead but is generally efficient [S1, unofficial].
+-*   **Strengths:** Stable simulations for flat Gaussians; avoids pointed artifacts and holes; compatible with standard physics engines (Blender, Taichi, Genesis); fast rendering [S1, unofficial].
+-*   **Limitations:** Requires GaMeS representation (flat Gaussians); correction algorithm adds computational step; hierarchical simulation requires clustering [S1, unofficial].
+-*   **When to use:** When simulating physics for scenes represented by flat Gaussians and compatibility with standard MPM engines is desired [S1, unofficial].
+-*   **When not to use:** When the scene contains non-flat Gaussians or when 2DGS is the primary representation [S1, unofficial].
++*   **Time Complexity:** The conversion to triangles and back is linear with respect to the number of Gaussians $p$. The physics simulation cost depends on the engine (e.g., MPM complexity). Hierarchical simulation reduces the number of points simulated, accelerating computation [S1, unofficial].
++*   **Memory Complexity:** Linear in the number of Gaussians, storing vertices and edges for the triangle soup [S1, unofficial].
++*   **Performance:** The pipeline is described as "notably rapid" and does not increase rendering costs compared to standard GS [S1, unofficial].
++*   **Strengths:** Compatible with any black-box physics engine (Genesis, Blender, Taichi); avoids artifacts from discrete point processing; avoids complex mesh extraction (marching cubes) [S1, unofficial].
++*   **Limitations:** Relies on the quality of the black-box physics engine; artifacts can still occur if the correction threshold $\alpha$ is not tuned; hierarchical simulation requires clustering overhead [S1, unofficial].
++*   **When to use:** When simulating deformable objects (cloth, jelly, sand) with Gaussian Splatting and you want to leverage existing physics engines without modifying them.
++*   **When not to use:** When high-fidelity continuous deformation fields are required beyond the triangle approximation, or when the physics engine cannot handle point clouds efficiently.
+ 
+ ## Background
+-GASP was introduced in the paper "GASP: Gaussian Splatting for Physic-Based Simulations" [S1, unofficial]. It builds on the GaMeS reparametrization of Gaussian Splatting, which represents flat Gaussians as triangle faces. The method integrates this representation with point-based physics engines, specifically the Material Point Method (MPM) [S1, unofficial]. It addresses the limitations of direct physics application to Gaussians, which often results in artifacts, and the incompatibility of 2DGS with triangle-based simulation [S1, unofficial].
++GASP was introduced in the paper "GASP: Gaussian Splatting for Physic-Based Simulations" by Waczja et al. (2024) [S1, unofficial]. It builds upon the GaMeS parameterization of flat Gaussians [S1, unofficial]. The method was demonstrated using the Genesis engine, Blender software, and the Taichi Elements library [S1, unofficial]. It addresses limitations in previous methods like PhysGaussian (which requires engine modifications) and mesh-based approaches (which suffer from extraction artifacts) [S1, unofficial].
+ 
+ ## Sources

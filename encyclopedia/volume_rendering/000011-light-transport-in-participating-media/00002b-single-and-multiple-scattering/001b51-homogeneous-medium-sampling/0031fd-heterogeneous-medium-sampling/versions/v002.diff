@@ -1,0 +1,141 @@
+--- v001.md
++++ v002.md
+@@ -1,77 +1,55 @@
+ # Heterogeneous Medium Sampling
+-
+-
+ ## Overview
+-Heterogeneous Medium Sampling determines the distance to the next interaction in a participating medium where optical properties vary spatially, such as in a `GridDensityMedium` [S1]. It generalizes homogeneous sampling by integrating the spatially varying extinction coefficient $\sigma_t$ along the ray to compute transmittance and sample an interaction distance [S1]. Unlike regular tracking, which applies homogeneous techniques voxel-by-voxel and is costly with many voxels, this method handles continuous spatial variation and linear interpolation directly [S1].
+-
++Heterogeneous Medium Sampling determines the distance to the next interaction in a participating medium where optical properties vary spatially, such as in a `GridDensityMedium` [S1]. It generalizes the homogeneous sampling PDF to account for a spatially varying attenuation coefficient $\sigma_t$ [S1]. Unlike regular tracking, which applies homogeneous techniques voxel-by-voxel and becomes costly with many voxels or incompatible with linear interpolation, this method handles continuous spatial variation directly [S1].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Ray origin $o$, direction $d$, medium density grid (providing $\sigma_t(x)$), random number $u \in [0, 1]$.
+-- Output: Interaction distance $t$ and transmittance $T(o, o+td)$.
++- Input: Ray origin $o$, direction $d$, medium density grid providing $\sigma_t(x)$, random number $u \in [0, 1]$.
++- Output: Interaction distance $t$ along the ray and transmittance $T(o, o+td)$.
+ 
+ **Data Structures:**
+-- The medium is represented by a density grid where each voxel stores extinction coefficients. Linear interpolation is used to evaluate $\sigma_t(x)$ at arbitrary points [S1].
++- The medium is represented by a density grid where $\sigma_t(x)$ is evaluated at arbitrary points using linear interpolation [S1].
+ 
+ **Steps:**
+-1. **Define the PDF:** The probability density function for the interaction distance $t$ is defined as [S1]:
++1. **Define the PDF:** The probability density function for the interaction distance $t$ generalizes the homogeneous case to spatially varying attenuation [S1]:
+    $$ p_t(t) = \sigma_t(t) e^{-\int_0^t \sigma_t(t') dt'} $$
+    where $\sigma_t(t)$ is the extinction coefficient at distance $t$ along the ray [S1].
+ 
+-2. **Invert the CDF:** To sample $t$ given $u$, we solve for $t$ in the cumulative distribution function (CDF):
++2. **Invert the CDF:** To sample $t$ given $u$, we solve for $t$ in the cumulative distribution function:
+    $$ u = \int_0^t p_t(t') dt' = 1 - e^{-\int_0^t \sigma_t(t') dt'} $$
+-   Rearranging gives:
+-   $$ \int_0^t \sigma_t(t') dt' = -\ln(1 - u) $$
+-   Let $\tau(t) = \int_0^t \sigma_t(t') dt'$ be the optical depth. We need to find $t$ such that $\tau(t) = -\ln(1 - u)$ [S1].
++   Rearranging gives the target optical depth condition:
++   $$ \tau(t) = \int_0^t \sigma_t(t') dt' = -\ln(1 - u) $$
++   where $\tau(t)$ is the optical depth [G].
+ 
+-3. **Numerical Integration:** Since $\sigma_t(t)$ varies spatially, the integral $\tau(t)$ must be computed numerically. The ray is traversed through the density grid. For each segment of the ray within a voxel, $\sigma_t(t')$ is interpolated. The optical depth is accumulated until the target optical depth $\tau_{target} = -\ln(1 - u)$ is reached [S1].
++3. **Numerical Integration:** Since $\sigma_t(t)$ varies spatially, the integral $\tau(t)$ must be computed numerically by traversing the ray through the density grid [G]. For each segment along the ray, $\sigma_t(t')$ is interpolated from the grid, and the optical depth is accumulated until $\tau(t)$ reaches the target value [G].
+ 
+ 4. **Transmittance Calculation:** The transmittance from the ray origin to the interaction point is:
+    $$ T(o, o+td) = e^{-\tau(t)} = 1 - u $$
+-   If no interaction occurs within the medium bounds, the transmittance is computed over the full path through the medium [S1].
++   [G].
+ 
+ **Pseudocode:**
+ ```python
+-def sample_heterogeneous_medium(ray, medium, u):
+-    # Target optical depth
++def sample_heterogeneous_medium(ray_origin, ray_direction, density_grid, u):
+     tau_target = -math.log(1.0 - u)
++    tau_current = 0.0
++    t = 0.0
++    dt = 0.01  # Integration step size [G]
+     
+-    # Current optical depth
+-    tau_current = 0.0
++    while tau_current < tau_target:
++        pos = ray_origin + ray_direction * t
++        sigma_t = density_grid.sample(pos)
++        
++        t += dt
++        pos_next = ray_origin + ray_direction * t
++        sigma_t_next = density_grid.sample(pos_next)
++        
++        sigma_t_avg = (sigma_t + sigma_t_next) / 2.0
++        tau_current += sigma_t_avg * dt
++        
++    # Refine t within the last segment using linear approximation [G]
++    t -= dt
++    pos = ray_origin + ray_direction * t
++    sigma_t = density_grid.sample(pos)
++    t += (tau_target - tau_current) / sigma_t
+     
+-    # Traverse ray through medium
+-    t_enter, t_exit = ray.intersect_medium(medium)
+-    if t_enter is None:
+-        return None, 1.0
+-        
+-    t = t_enter
+-    while t < t_exit:
+-        # Get position and direction
+-        pos = ray.origin + ray.direction * t
+-        # Interpolate sigma_t at pos from grid
+-        sigma_t = medium.get_sigma_t(pos)
+-        
+-        # Step size to next voxel boundary or until tau_target is reached
+-        dt = medium.step_size(pos, ray.direction)
+-        
+-        # Approximate integral over this segment
+-        # Using midpoint or trapezoidal rule for better accuracy with linear interpolation
+-        sigma_t_next = medium.get_sigma_t(pos + ray.direction * dt)
+-        sigma_t_avg = (sigma_t + sigma_t_next) / 2.0
+-        
+-        tau_segment = sigma_t_avg * dt
+-        tau_current += tau_segment
+-        
+-        if tau_current >= tau_target:
+-            # Interaction occurs in this segment
+-            # Refine t using bisection or linear approximation
+-            # Linear approximation:
+-            t += (tau_target - (tau_current - tau_segment)) / sigma_t_avg
+-            break
+-            
+-        t += dt
+-        
+-    if t >= t_exit:
+-        return None, math.exp(-tau_current)
+-        
+     transmittance = math.exp(-tau_current)
+     return t, transmittance
+@@ -79,9 +57,9 @@
+ 
+ **Parameters:**
+-- `u`: Uniform random number in $[0, 1]$ [S1].
++- `u`: Uniform random number in $[0, 1]$ [G].
+ 
+ **Edge Cases:**
+-- If the ray does not intersect the medium, return no interaction [S1].
+-- Precision issues may arise if $\sigma_t$ is very small or very large; adaptive step sizes may be needed [G].
++- If the ray does not intersect the medium bounds, return no interaction [G].
++- Precision issues may arise if $\sigma_t$ is very small or very large; adaptive step sizes or root-finding refinement may be needed [G].
+ 
+ ## Subtopics
+@@ -91,11 +69,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of voxels intersected and the cost of numerical integration. For dense grids, it can be costly compared to homogeneous sampling [S1].
+-- **Memory Complexity:** Requires storage of the density grid [S1].
+-- **Strengths:** Handles continuous spatial variation and linear interpolation, which regular tracking cannot [S1].
+-- **Limitations:** Numerical integration can be slow and inaccurate if not handled carefully [S1].
++- **Time Complexity:** Computational cost depends on the number of grid cells intersected and the cost of numerical integration. Handling continuous spatial variation with linear interpolation is more expensive than piecewise constant voxel tracking [S1].
++- **Memory Complexity:** Requires storage of the spatial density grid [G].
++- **Strengths:** Handles continuous spatial variation and linear interpolation directly, avoiding the overhead of regular tracking across many voxels [S1].
++- **Limitations:** Numerical integration along the ray can be slow if the grid resolution is high or $\sigma_t$ varies rapidly [G].
+ 
+ ## Background
+-Regular tracking was previously used for piecewise constant media but is inefficient for many voxels [S1]. The heterogeneous sampling method generalizes the homogeneous PDF to spatially varying $\sigma_t$ [S1].
++The method generalizes the homogeneous medium sampling PDF to spatially varying attenuation coefficients for media like `GridDensityMedium` [S1]. Regular tracking, which applies homogeneous techniques to individual voxels, was previously used but becomes costly with many voxels and cannot utilize linear interpolation [S1].
+ 
+ ## Sources

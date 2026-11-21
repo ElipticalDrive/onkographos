@@ -1,0 +1,479 @@
+JAX-based 3D FDTD electromagnetic simulator. Contribute to bk-squared/rfx development by creating an account on GitHub.
+
+add_refinement was ignored without a word everywhere except run() on a uniform mesh; refuse it (#1240) by rfx-agent[bot] · Pull Request #1282 · bk-squared/rfx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rfx-agent
+Bot
+commented
+Sep 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+add_refinement(z_range, ratio) asks for cells ratio times finer inside a z slab (a subgrid). Only run() on a uniform mesh has a subgridded lane. Every other path solved the unrefined grid and said nothing. On the issue's 12 mm PEC box (1 mm cells, Ez current source, Ez probe, 60 steps), a non-uniform (graded) mesh gave a probe bit-identical to the same box without the refinement (peak 1.079170e6 in both), and preflight passed. On a uniform mesh, forward() also gave a bit-identical probe (1.079171e6 in both). Only run() on the uniform mesh changed the result, moving the peak to 6.611695e4. Every path without a subgrid now refuses the refinement with a message saying why and what to do instead. On a graded mesh, preflight() also reports it as an error before any run. Results from run() on a uniform mesh, and from any model without a refinement, do not change. vmap_material_sweep()'s sequential path calls run() and keeps solving a refinement. With n_steps left to num_periods, it used to hand run() the coarse step count, which the subgridded lane reads as fine steps, so a ratio-2 sweep covered half the requested time (105 steps against run()'s 210). It now covers the full time. Unrefined sweeps on the sequential path keep main's step count, so the traces of an auto-meshed sweep still stack.
+Per path. "main" is the merge base, 213a6f6. On main, rows marked measured were compared bit for bit with and without the refinement (probe scripts on 7b2fc25 and cb1c058). Rows marked "test red on main" ran without raising. Dispositions: fixed = ignored the refinement silently on main and refuses it now; already refused = raised on main; not reachable = another refusal stops the model first.
+path
+mesh
+main
+this PR
+run()
+graded
+silent drop, bit-identical (measured)
+fixed: preflight error nonuniform_refinement → ValueError; with skip_preflight=True, NotImplementedError from _dispatch_plan
+run() (control)
+uniform
+runs the subgrid: peak 1.079172e6 → 6.611695e4 (measured)
+unchanged; a test checks the peak still moves by more than half
+forward()
+graded
+silent drop, bit-identical (measured)
+fixed: preflight error, then _dispatch_plan
+forward()
+uniform
+silent drop, bit-identical (measured)
+fixed: NotImplementedError at the uniform forward lane, _forward_from_materials ("no subgridded lane behind forward()/optimize()/topology_optimize() … takes effect in run(), on a uniform mesh")
+forward(distributed=True)
+graded
+silent drop, bit-identical (measured)
+fixed: _dispatch_plan
+forward(distributed=True)
+uniform
+not reachable: refused as graded-only
+unchanged
+optimize()
+uniform / graded
+ran without raising (test red on main); goes through forward()
+fixed through forward()
+gradient_check
+uniform / graded
+goes through forward() (read)
+inherits the forward() refusal (read)
+topology_optimize()
+uniform
+silent drop, loss history bit-identical, 6.048040e15 (measured)
+fixed: same check as forward(); both enter _forward_from_materials
+topology_optimize()
+graded
+not reachable: _require_uniform_mesh
+unchanged
+compute_waveguide_s_matrix
+graded
+ran without raising (test red on main); calls run_nonuniform_path without _dispatch_plan or preflight
+fixed: NotImplementedError at the run_nonuniform_path entry
+compute_waveguide_s_matrix
+uniform
+silent drop, S bit-identical, max|S| 0.8346813 (measured)
+fixed: refused at the start of the uniform branch
+vmap_material_sweep()
+uniform, batched kernel
+silent drop, time series bit-identical, peak 9.596248e5 (measured)
+fixed: refused inside the batched branch only
+vmap_material_sweep()
+uniform, sequential path (lumped ports, TFSF, dispersion, …)
+solves the refinement through run(): each trace bit-identical to a direct refined run() (review, measured). With n_steps=None, covered 1/ratio of the requested time: 105 steps against run()'s 210 at ratio 2 (measured)
+unchanged, not refused; a refined model now runs the full requested time (fine count = base count × ratio, as run() resolves it). Unrefined models keep main's count, so an auto-meshed sweep (each value its own cell: εr 2 → 1.000 mm, 105 steps; εr 3 → 0.750 mm, 140 steps) still stacks as (2, 105, 1), and a dx=1e-3 sweep is bit-identical to main (measured). Tests pin all three
+vmap_material_sweep()
+graded
+falls back to run() (read)
+fixed through run()
+parametric_sweep()
+either
+calls run() (read)
+fixed through run()
+differentiable_material_fit()
+uniform
+ran without raising (test red on main); builds its own uniform scan (read)
+fixed
+compute_lumped_wire_s_matrix_via_scan()
+uniform
+silent drop, |S11| bit-identical (review, measured)
+fixed: calls _forward_from_materials directly, so the forward-lane check covers it
+compute_waveguide_s_matrix(port_reference_sims=[…]), a refined reference model
+uniform
+silent drop: each reference is built with _build_grid() (read)
+fixed: refused in the reference loop
+rfx.runners.run_uniform(), direct call
+uniform
+silent drop (read); run() never sends it a refined model
+fixed: refused at its entry
+run(until_decay=), run(compute_s_params=True) with a wire port, auto-meshed graded mesh
+graded
+test red on main
+fixed
+run(devices=[2])
+graded
+already refused by #1241
+refused first with the graded-mesh message
+ADI, solver="adi" (control)
+uniform
+already refused: ValueError at rfx/api/_preflight.py:2172 (_validate_adi_configuration), for run() and forward(), also with preflight skipped (measured)
+unchanged; the forward check sits after the ADI branch, so ADI keeps its own refusal; a test locks it
+ADI
+graded
+not reachable: _require_uniform_mesh("solver='adi'")
+unchanged
+compute_msl_s_matrix, compute_mixed_s_matrix, coaxial lanes, run(ringdown=)
+either
+already refused (read)
+unchanged
+Where the uniform-mesh check lives. forward(), topology_optimize() and compute_lumped_wire_s_matrix_via_scan() all enter the uniform forward lane, _forward_from_materials, so one check there, after its ADI branch, covers all three, and optimize()/gradient_check through forward(). Its one other caller, compute_mixed_s_matrix, refuses a refinement before it calls the lane. The scan driver is also called by run_uniform, which a refined model reaches only by a direct call, and that is refused at its entry.
+The vmap batched kernel, the uniform waveguide scan and its per-port reference models, the material fit and run_uniform build their own scans, so each has its own call site.
+All uniform-mesh sites call one helper with one message (_require_no_refinement_without_a_subgrid, rfx/api/_mesh.py). The graded-mesh sites call its sibling, _nonuniform_refinement_refusal. That check is keyed on _uses_nonuniform_mesh, the property _dispatch_plan uses to pick the lane, so a profile produced by auto-meshing counts too. It serves the preflight finding, _dispatch_plan and the run_nonuniform_path entry. Preflight cannot tell run() from forward(), so the uniform-mesh refusal has no preflight finding.
+Existing tests and examples that put a refinement on a model: none of them calls forward(), optimize(), topology_optimize(), a sweep, compute_waveguide_s_matrix() or differentiable_material_fit() on it, so nothing relied on the silent drop and no existing test changed. The ones checked:
+run(): tests/contracts/test_pec_lane_parity_numeric.py:327, tests/unit/materials/test_sheet_impedance.py:889, tests/unit/grid/test_precision_lane_guard.py:104, tests/unit/api/test_api.py:75, tests/locks/test_runner_split_bit_identity.py:610, tests/unit/farfield/test_ntff_second_order_oracle.py:864, tests/contracts/boundary_cases.py:22, tests/unit/runners/test_distributed_admission_refusals.py:72.
+validate_subgrid(): tests/contracts/test_lattice_ownership_contract.py:1388.
+preflight(): tests/unit/preflight/test_preflight_guards.py:855.
+The coaxial calculators: tests/unit/preflight/test_removed_coaxial_s_matrix_lane.py:202.
+The design document: tests/interop/test_interop_design_document.py:254.
+The slice viewer: tests/unit/api/test_rasterized_slice_viewer.py:482.
+No file in examples/ calls add_refinement.
+Code: rfx/ 122 insertions, 1 deletion, 8 files.
+Tests: tests/unit/nonuniform/test_refinement_refused_on_graded_mesh.py has 27 cases. There is one per refused path, plus the uniform run() control, the ADI lock, "preflight quiet on a uniform mesh", and three for the vmap sequential path: it still solves the refinement, it covers the same time as a direct run() (both compare traces with assert_allclose(rtol=1e-6)), and an unrefined auto-meshed sweep over εr 2 and 3 returns main's shape. Against main's rfx/: 22 red, 5 green (the control, the ADI lock, the quiet preflight, and the two sequential-path cases main already got right). Refusal messages are checked only for the words that name the refusal; no report text is compared and nothing is printed. The preflight emission contract moves 120 → 121 sites and 76 → 77 literal codes, with a dated note.
+Mutations: each edit was applied on the branch, the test file was run, and the edit was reverted.
+mutation
+red
+(a) both checks switched off
+21 (the 5 green tests are the ones that check a result, not a refusal)
+graded-mesh check switched off
+12
+uniform-mesh helper switched off
+9
+(b) uniform forward-lane refusal alone removed (_forward_from_materials)
+4: forward(), optimize(), topology_optimize(), the scan driver
+(c) graded check keyed on "a profile was declared" instead of _uses_nonuniform_mesh
+1: auto-meshed graded mesh
+_dispatch_plan graded call removed
+2: distributed forward, distributed run
+run_nonuniform_path call removed
+1: graded waveguide S-matrix
+preflight finding not emitted
+6
+ADI refinement refusal removed from _validate_adi_configuration
+1: ADI lock
+vmap_material_sweep batched-branch refusal removed
+1
+F1 revived: the refusal moved back before the batched/sequential choice
+2: both sequential-path tests
+F1 duration fix reverted (a refined model's fallback gets the coarse count)
+1: 105 steps against 210
+N1 revived (vmap_sweep.py as at a353b79: every copy gets n_steps=None)
+1: the auto-meshed sweep (numpy "all input arrays must have the same shape")
+port_reference_sims refusal removed
+1
+run_uniform refusal removed
+1
+uniform compute_waveguide_s_matrix refusal removed
+1
+differentiable_material_fit refusal removed
+1
+Mutations ran on cc7a4de, except (b), which ran on 4a53cbe after the scan driver's own check was dropped, and the vmap rows (batched refusal, F1 revived, F1 duration, N1), which ran on b9c9746. That was a second copy of the forward-lane refusal: with it removed, the driver test stays green until the forward-lane check is removed too.
+Local runs, one pytest at a time on CPU:
+Before the review: the new file, the emission contract, the preflight locks and guards, the dispatch / precision / distributed / auto-mesh / 2-D-mode contracts, the sheet-impedance fences, the topology, forward-settling and S-parameter-driver tests, the vmap sweep tests, the material fit, and the waveguide tests. All passed.
+After the review fixes:
+The vmap sweep tests, the scan-driver, passive-drive and dump-parity tests, port_reference_sims, the reference-plane port-wave lock, test_api, port aperture and waveguide geometry, the sheet-impedance fences and the emission contract: all passed. One XLA compile segfault hit an unrelated test the first time (test_two_d_f0_patch_shadows_like_pec_end_to_end); rerun, those files gave 64 passed, 2 skipped.
+On the merged head: the new file (26 passed), the emission contract, the preflight snapshot lock and the distributed admission refusals, 149 passed in total.
+scripts/ci/local.sh on the merged head a353b79: ruff, docs hygiene, the changelog fragment and the workflow YAML passed (pr-body skipped). The contract step stopped at its first failure, 1034 passed. That failure was a 180 s subprocess timeout (test_gate_policy_is_shared.py::…[build_waveguide_wr90_nu_flux_broad_e4_comparison.py]) at a pod load average of about 53; alone it passed in 2.4 s.
+The contract files from that one on were then run: 1097 passed, 8 skipped, 316 xfailed, and one more 180 s subprocess timeout (test_tutorial_examples.py::test_materials_and_dispersion_tutorial_runs). Alone it passed in 12.6 s. That tutorial uses none of the changed paths.
+After the re-check (N1): the new file plus the three vmap test files, 93 passed; ruff and both changelog checks passed. local.sh was not rerun, since only rfx/vmap_sweep.py and its tests changed.
+Conclusions (leader, from the review record bk-workspace/rfx-nu/notes/20260924_pr1282_review.md, three rounds, and the tables above)
+A refinement asks for a z slab of finer cells. Only run() on a uniform mesh has a solver that builds one. On main, every other entry point solved the coarse grid and returned it as if the slab had been refined: run(), forward() and forward(distributed=True) on a graded or auto-meshed graded mesh, and forward(), optimize(), topology_optimize(), the batched material sweep, the uniform waveguide S-matrix, the lumped/wire scan driver, flux reference models and the material fit on a uniform mesh. The probe traces were bit-identical with and without the refinement, and nothing warned. All of those paths now refuse it and say where the refinement does act, and that a dz_profile fine over the slab is the graded-mesh way to get the same resolution. On a graded mesh, preflight() reports it as an error before any run.
+Nothing that honoured a refinement stops working. Uniform run() still moves the probe peak from 1.079e6 to 6.61e4. The sequential material sweep still solves the refinement, and now over the full requested time: at ratio 2 it covered 105 steps where run() covers 210. A sweep without a refinement returns main's result bit for bit. The reviewer found no legitimate model wrongly refused: 111 existing tests pass, including the flux reference-model and vmap tests. Every refusal site turns its own test red when removed.
+Review history: the first round found two P1s. The sweep refusal blocked the sequential path, which had worked; and the scan driver still dropped the refinement. The second round found one P2 that the duration fix introduced: an auto-meshed sweep crashed on unequal step counts. All three are closed, each reproduced and each pinned by a test that goes red when the defect is revived. Left as P3: on a graded mesh the subgrid S-parameter message fires before the graded refusal; the scan driver's refusal names forward() rather than the driver; tests pin some advice words; the graded waveguide branch builds its port modes before refusing.
+After review the leader moved one refusal (1e5bebe): topology_optimize now refuses a refinement above its optax import, beside the #677 sheet fence, because CI's default image has no optax and the forward-lane refusal it relied on sits after the import (fast-suite shard 4 failed on the ImportError). With optax hidden the test passes; with the line removed it fails.
+Found on the way and filed, not fixed here: #1293 (an auto-meshed material sweep runs every value for the same step count at its own dt, so εr 10 covers 80 ps where εr 2 covers 200 ps).
+Closes #1240.
+Lane: lane:nu-mesh
+Review: opus (separate instance) — ACCEPT
+🤖 Generated with Claude Code
+github-actions
+Bot
+added
+the
+lane:nu-mesh
+non-uniform mesh program
+label
+Sep 24, 2026
+rfx-agent
+Bot
+force-pushed
+the
+nu/1240-refuse-refinement-on-graded
+branch
+from
+1ab6f34 to
+2a7e82d
+Compare
+September 24, 2026 17:17
+rfx-agent
+Bot
+changed the title
+A refinement on a non-uniform mesh was dropped without a word; refuse it (#1240)
+add_refinement was ignored without a word everywhere except run() on a uniform mesh; refuse it (#1240)
+Sep 24, 2026
+github-actions
+Bot
+added
+the
+lane:waveguide-port
+rectangular waveguide ports and their S-parameter lane
+label
+Sep 24, 2026
+bk-squared
+and others
+added 6 commits
+September 24, 2026 17:59
+A refinement on a non-uniform mesh was dropped without a word; refuse…
+…
+539d271
+```
+… it (#1240)
+
+add_refinement asks for a finer mesh in a z slab. The non-uniform lane has no
+subgrid and never read the refinement, so a refined model on a graded mesh ran
+the unrefined mesh: the issue's 12 mm PEC box gave a probe bit-identical to the
+unrefined box, with no warning and a preflight that passed. The same held for
+forward(), forward(distributed=True) and a mesh that auto-meshing made
+non-uniform.
+
+The refusal is decided on the resolved mesh, the property that picks the lane.
+preflight() reports it as an error (code nonuniform_refinement), so run() and
+forward() stop on it by default. _dispatch_plan refuses it for every
+non-uniform lane when preflight is skipped, and run_nonuniform_path refuses it
+for the graded branch of compute_waveguide_s_matrix, which reaches the lane
+without _dispatch_plan. The message names the two ways out: a uniform base mesh
+with add_refinement, or a dz_profile that is fine in that slab.
+
+The ADI lane already refused a refinement (_validate_adi_configuration); a test
+locks it.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Changelog fragment for the refusal of a refinement on a non-uniform m…
+…
+07c762b
+```
+…esh (#1240)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+forward(), optimize() and topology_optimize() dropped a refinement on…
+…
+3e89da3
+```
+… a uniform mesh too; refuse it (#1240)
+
+Only run() has a subgridded lane. forward() on a uniform mesh runs the forward
+lane, which never reads add_refinement: the refined box came back bit-identical
+to the unrefined one (probe peak 1.079171e6 both), with no warning. optimize()
+reaches that lane through forward(); topology_optimize() calls it directly, and
+its loss history was bit-identical too. _dispatch_plan now refuses the
+refinement on the uniform forward lane, and topology_optimize() refuses it next
+to its uniform-mesh check. The message says add_refinement takes effect in run()
+on a uniform mesh.
+
+The changelog fragment is cut to what changed for the user.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+The vmap batched kernel, the uniform waveguide S-matrix and the mater…
+…
+b9fae02
+```
+…ial fit dropped a refinement too; refuse it (#1240)
+
+On a uniform mesh, vmap_material_sweep's batched kernel returned a time series
+bit-identical to the unrefined model (peak 9.596248e5), and the uniform branch
+of compute_waveguide_s_matrix returned a bit-identical S (max |S| 0.8346813).
+differentiable_material_fit builds its own uniform scan from the factory's
+model, which never reads add_refinement either (read, not measured). Each now
+refuses the refinement with the same message: only run() on a uniform mesh has a
+subgridded lane.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Changelog: name every entry point that now refuses a refinement (#1240)
+…
+2413746
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Refuse the forward-lane refinement once, where forward() and topology…
+…
+0c9c513
+```
+…_optimize() both enter (#1240)
+
+forward() on a uniform mesh and topology_optimize() both run the uniform forward
+lane, _forward_from_materials. One check there, after its ADI branch, replaces
+the two checks in _dispatch_plan and topology_optimize. Its other callers never
+carry a refinement: run() sends a refined model to the subgridded lane, and
+compute_mixed_s_matrix refuses a refinement before it gets there. ADI keeps its
+own refusal.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+rfx-agent
+Bot
+force-pushed
+the
+nu/1240-refuse-refinement-on-graded
+branch
+from
+2a7e82d to
+0c9c513
+Compare
+September 24, 2026 18:32
+bk-squared
+and others
+added 3 commits
+September 24, 2026 18:50
+vmap_material_sweep's sequential path solves a refinement again, for …
+…
+cc7a4de
+```
+…the full requested time; the lumped/wire scan driver refuses one (#1240)
+
+Review of #1282. vmap_material_sweep refused a refined uniform model before it
+chose between the batched kernel and the sequential path. The sequential path
+calls run(), which solves the refinement: on main each swept trace was
+bit-identical to a direct refined run(). The refusal now sits in the batched
+branch only. With n_steps left to num_periods, that path passed run() the coarse
+step count, which run() reads as fine steps on the subgridded lane, so a ratio-2
+sweep covered half the requested time (105 steps against run()'s 210). It now
+lets run() resolve the count.
+
+compute_lumped_wire_s_matrix_via_scan calls the uniform forward lane directly
+and gave |S11| bit-identical with and without a refinement; it refuses one now.
+So do a refined per-port reference model of compute_waveguide_s_matrix and a
+direct call to rfx.runners.run_uniform. The uniform-mesh message also names the
+graded dz_profile alternative for the entry points that take a graded mesh.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+The lumped/wire scan driver is refused by the forward lane it calls; …
+…
+4a53cbe
+```
+…drop its own check (#1240)
+
+compute_lumped_wire_s_matrix_via_scan calls _forward_from_materials, which has
+refused a refinement since the check moved there. With the driver's own check
+removed its test still goes red only when the forward-lane check is removed, so
+the extra call was a second copy of the same refusal.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into nu/1240-refuse-refine…
+…
+a353b79
+```
+…ment-on-graded
+```
+rfx-agent
+Bot
+mentioned this pull request
+Sep 24, 2026
+vmap_material_sweep on an auto mesh runs every swept value for the same step count at its own dt: εr 10 covers 80 ps where εr 2 covers 200 ps, stacked on one time axis
+#1293
+Open
+bk-squared
+and others
+added 2 commits
+September 24, 2026 21:55
+Merge remote-tracking branch 'origin/main' into nu/1240-refuse-refine…
+…
+3dee380
+```
+…ment-on-graded
+```
+vmap_material_sweep's sequential path gives every swept copy the same…
+…
+b9c9746
+```
+… step count again; only a refined model gets the fine count (#1240)
+
+Re-check of #1282. The duration fix handed n_steps=None to every swept copy's
+run(). Without dx=, auto-meshing reads the swept permittivity, so each copy
+resolved its own cell and step count (eps_r 2 -> 1.000 mm, 105 steps; eps_r 3 ->
+0.750 mm, 140 steps at 2 periods) and the traces no longer stacked: an unrefined
+auto-meshed sweep that main returned as (2, 105, 1) raised numpy's "all input
+arrays must have the same shape". Every copy now gets the base model's count as
+on main; a refined model gets that count times the ratio, which is what run()
+resolves on the subgridded lane. The sequential helper is back to main's
+signature.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+rfx-agent
+Bot
+marked this pull request as ready for review
+September 24, 2026 22:08
+topology_optimize refuses a refinement above the optax import, so the…
+…
+1e5bebe
+```
+… refusal is checked where optax is not installed (#1240)
+
+CI's fast suite has no [optimization] extra. The forward-lane refusal that
+topology_optimize reached sits after its optax import, so on the default
+image the call stopped at ImportError and test_topology_optimize_refuses
+failed. The #677 sheet fence in the same function is hoisted above the import
+for this reason; the refinement refusal now sits beside it. With optax hidden
+the test passes; with the line removed it fails on the ImportError.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+rfx-agent
+Bot
+merged commit be85d07
+into
+main
+Sep 24, 2026
+15 of 16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Sep 24, 2026
+Public documentation lags the code: collect doc mismatches here and fix them in one pass before the 2.1 release
+#1171
+Open
+Every Simulation input has a recorded disposition on every time-stepping lane, and its physics and observer cells run (tests only)
+#1338
+Merged
+rfx-agent
+Bot
+mentioned this pull request
+Oct 3, 2026
+A subgridded run is refused by default: an empty PEC cavity's resonance came out 8 % high and its field grew; validation="research" still runs it with a warning
+#1468
+Merged
+rfx-agent
+Bot
+deleted the
+nu/1240-refuse-refinement-on-graded
+branch
+October 26, 2026 16:55
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+lane:nu-mesh
+non-uniform mesh program
+lane:waveguide-port
+rectangular waveguide ports and their S-parameter lane
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

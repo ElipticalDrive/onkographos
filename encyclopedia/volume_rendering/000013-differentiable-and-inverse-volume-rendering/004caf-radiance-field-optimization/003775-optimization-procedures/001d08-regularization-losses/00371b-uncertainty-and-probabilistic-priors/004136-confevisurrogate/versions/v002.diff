@@ -1,0 +1,226 @@
+--- v001.md
++++ v002.md
+@@ -4,152 +4,101 @@
+ 
+ ## Overview
+-ConfEviSurrogate is a CNN-based surrogate model for scientific simulations that provides calibrated uncertainty bounds for its predictions [S1, unofficial]. It addresses the lack of calibrated uncertainty in standard CNN surrogates by replacing the standard output layer with a four-parameter Normal Inverse-Gamma head and applying conformal prediction calibration [S1, unofficial]. Unlike [Beta Distribution Prior on Exit Opacity](2274-beta-distribution-prior-on-exit-opacity.md) which focuses on probabilistic priors for exit opacity in volume rendering, or [Uncertainty Prediction Loss](2961-uncertainty-prediction-loss.md) which uses uncertainty to weight data fidelity, ConfEviSurrogate focuses on generating prediction intervals with finite-sample coverage guarantees for full-volume predictions [S1, unofficial].
++ConfEviSurrogate is a CNN-based surrogate model for scientific simulations that provides statistically calibrated uncertainty bounds, addressing the lack of valid confidence intervals in standard deep learning surrogates [S1, unofficial]. It distinguishes itself from sibling methods like [Uncertainty Prediction Loss](2961-uncertainty-prediction-loss.md) by combining a Normal Inverse-Gamma (NIG) head for uncertainty decomposition with conformal prediction for finite-sample coverage guarantees, ensuring that predicted uncertainty correlates with actual reconstruction error [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A spatial feature or simulation parameter set defining the state of the system.
+-*   **Output:** A full-volume prediction of the simulation output (e.g., density, temperature) along with voxel-level uncertainty estimates (aleatoric and epistemic) [S1, unofficial].
++*   **Input:** A spatial feature or input parameter vector defining the simulation state.
++*   **Output:** A full-volume prediction of the simulation field and a four-parameter uncertainty estimate (mean, variance, aleatoric, and epistemic components) for every voxel [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **CNN Architecture:** A convolutional neural network that generates full-volume predictions rather than point queries [S1, unofficial].
+-*   **Normal Inverse-Gamma Head:** A four-parameter output layer that separates aleatoric and epistemic uncertainty [S1, unofficial]. The parameters typically estimate the mean, precision, and shape/scale of the underlying distribution for each voxel [S1, unofficial].
+-*   **Calibration Set:** A held-out dataset used for conformal prediction calibration [S1, unofficial].
++The model replaces the standard single-value output layer of a CNN with a four-parameter head. The parameters correspond to the Normal Inverse-Gamma distribution $\mathcal{NIG}(\mu, \lambda, \alpha, \beta)$:
++1.  $\mu$: The predicted mean of the field value.
++2.  $\lambda$: The precision scaling factor (related to the number of observations).
++3.  $\alpha$: The shape parameter of the inverse-gamma distribution (related to aleatoric uncertainty/noise).
++4.  $\beta$: The scale parameter of the inverse-gamma distribution (related to epistemic uncertainty/model confidence) [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Training:** Train the CNN surrogate on simulation data. The final layer is modified to output the four parameters of the Normal Inverse-Gamma distribution for each voxel, rather than a single deterministic value [S1, unofficial].
+-2.  **Forward Pass:** For a given input, the network produces the full-volume prediction and the uncertainty parameters in a single forward pass [S1, unofficial].
+-3.  **Conformal Calibration:** Apply conformal prediction techniques using a held-out calibration set to adjust the prediction intervals [S1, unofficial]. This step ensures that the prediction intervals have finite-sample coverage guarantees, meaning the true value falls within the interval with a specified probability [S1, unofficial].
+-
+-**Formulas:**
+-The Normal Inverse-Gamma distribution is defined by four parameters: $\mu$ (mean), $\lambda$ (precision scaling), $\alpha$ (shape), and $\beta$ (scale) [S1, unofficial]. The probability density function for a voxel value $x$ is:
+-$$
+-p(x | \mu, \lambda, \alpha, \beta) = \int_0^\infty \mathcal{N}(x | \mu, \lambda \sigma^2) \text{Inv-Gamma}(\sigma^2 | \alpha, \beta) d\sigma^2
+-$$
+-where $\mathcal{N}$ is the Normal distribution and $\text{Inv-Gamma}$ is the Inverse-Gamma distribution [S1, unofficial].
+-
+-**Parameters:**
+-*   **CNN Hyperparameters:** Not specified in the sources.
+-*   **Conformal Coverage Level:** Not specified, but typically set to a desired confidence level (e.g., 95%) [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Data Scarcity:** Conformal calibration requires a held-out calibration set, which may be unavailable for data-scarce simulations [S1, unofficial].
+-*   **Full-Volume Prediction:** The CNN architecture generates full-volume predictions, which may be computationally expensive for very large volumes [S1, unofficial].
+-*   **Uncertainty Calibration:** If the calibration set is not representative of the test data, the coverage guarantees may not hold [S1, unofficial].
++**Algorithm Steps:**
++1.  **Forward Pass:** The CNN encoder processes the input to generate feature maps. The decoder produces the full-volume prediction. The final layer outputs the four NIG parameters $(\mu, \lambda, \alpha, \beta)$ for each voxel simultaneously [S1, unofficial].
++2.  **Uncertainty Decomposition:** The model separates uncertainty into aleatoric (data noise) and epistemic (model ignorance) components using the NIG parameters. The predictive variance for a voxel is derived from the NIG distribution properties [S1, unofficial].
++3.  **Conformal Calibration:** To ensure finite-sample coverage, a conformal prediction step is applied. This requires a held-out calibration set. Non-conformity scores (e.g., absolute residuals) are computed on this set. The prediction interval for a new input is constructed by taking the predicted mean $\pm$ the $(1-\alpha)(1+1/N)$-th quantile of the calibration scores, where $N$ is the size of the calibration set [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def confevi_surrogate_forward(input_data, model, calibration_set):
++def confevi_surrogate_forward(input_data, model_weights):
+     """
+-    Performs a forward pass through the ConfEviSurrogate model and applies conformal calibration.
++    Performs a forward pass of the ConfEviSurrogate model.
++    Returns full-volume predictions and NIG parameters.
++    """
++    # 1. Feature Extraction and Decoding
++    features = encoder(input_data, model_weights)
+     
+-    Args:
+-        input_data: The input spatial feature or simulation parameters.
+-        model: The trained CNN surrogate with a Normal Inverse-Gamma head.
+-        calibration_set: A held-out set of input-output pairs for conformal calibration.
+-        
+-    Returns:
+-        prediction: The full-volume prediction.
+-        uncertainty_params: The four parameters of the Normal Inverse-Gamma distribution.
+-        calibrated_intervals: The calibrated prediction intervals.
++    # 2. Output Layer: Four-parameter NIG Head
++    # Instead of a single scalar output, we output 4 channels
++    mu = decoder_mean(features)      # Predicted mean field
++    lambda_param = decoder_lambda(features) # Precision scaling
++    alpha = decoder_alpha(features)  # Shape parameter (aleatoric)
++    beta = decoder_beta(features)    # Scale parameter (epistemic)
++    
++    return mu, lambda_param, alpha, beta
++
++def conformal_calibrate(calibration_set, model_weights):
+     """
+-    # Step 1: Forward pass through the CNN surrogate
+-    # The model outputs the four parameters of the Normal Inverse-Gamma distribution
+-    # for each voxel in the volume.
+-    uncertainty_params = model(input_data)
++    Computes the quantile offset for conformal prediction intervals.
++    calibration_set: List of (input, true_value) pairs.
++    """
++    residuals = []
++    for x, y_true in calibration_set:
++        mu_pred, _, _, _ = confevi_surrogate_forward(x, model_weights)
++        # Non-conformity score: absolute difference
++        score = abs(y_true - mu_pred)
++        residuals.append(score)
+     
+-    # Extract the mean prediction from the uncertainty parameters
+-    # Assuming the first parameter is the mean (mu)
+-    prediction = uncertainty_params[:, 0]
++    residuals.sort()
++    n = len(residuals)
++    # Quantile level for (1-alpha) coverage
++    # Note: alpha here is the significance level, not the NIG parameter
++    quantile_index = int(math.ceil((1 - significance_level) * (n + 1))) - 1
++    quantile_offset = residuals[quantile_index]
+     
+-    # Step 2: Conformal Calibration
+-    # Calculate non-conformity scores on the calibration set
+-    # This involves computing the discrepancy between the predicted distribution
+-    # and the true values for the calibration set.
+-    # Let's assume a simple squared error metric for non-conformity
+-    calibration_scores = []
+-    for input_cal, true_output in calibration_set:
+-        cal_params = model(input_cal)
+-        cal_mean = cal_params[:, 0]
+-        # Calculate non-conformity score (e.g., squared error)
+-        score = mean_squared_error(cal_mean, true_output)
+-        calibration_scores.append(score)
+-    
+-    # Determine the quantile of the non-conformity scores corresponding to the desired coverage level
+-    # For example, for 95% coverage, we might use the 95th percentile of the scores
+-    coverage_level = 0.95
+-    quantile_score = np.percentile(calibration_scores, coverage_level * 100)
+-    
+-    # Apply the quantile score to adjust the prediction intervals
+-    # The exact method of adjustment depends on the specific conformal prediction algorithm used
+-    # For simplicity, we assume the intervals are expanded by the quantile score
+-    calibrated_intervals = expand_intervals(prediction, uncertainty_params, quantile_score)
+-    
+-    return prediction, uncertainty_params, calibrated_intervals
++    return quantile_offset
+ 
+-def expand_intervals(prediction, uncertainty_params, quantile_score):
++def get_prediction_interval(mu_pred, quantile_offset, confidence_level=0.95):
+     """
+-    Expands the prediction intervals based on the quantile score from conformal calibration.
+-    
+-    Args:
+-        prediction: The mean prediction from the model.
+-        uncertainty_params: The four parameters of the Normal Inverse-Gamma distribution.
+-        quantile_score: The quantile score from the calibration set.
+-        
+-    Returns:
+-        calibrated_intervals: The expanded prediction intervals.
++    Constructs the prediction interval using conformal calibration.
+     """
+-    # Extract the variance parameters from the uncertainty_params
+-    # Assuming the remaining three parameters relate to the variance/precision
+-    # The exact mapping depends on the specific implementation of the Normal Inverse-Gamma head
+-    variance_params = uncertainty_params[:, 1:]
+-    
+-    # Calculate the standard deviation from the variance parameters
+-    # This is a placeholder for the actual calculation based on the Normal Inverse-Gamma distribution
+-    std_dev = calculate_std_dev(variance_params)
+-    
+-    # Expand the intervals by adding/subtracting the quantile score scaled by the standard deviation
+-    # This is a simplified approach; the actual method may vary
+-    lower_bound = prediction - quantile_score * std_dev
+-    upper_bound = prediction + quantile_score * std_dev
+-    
+-    calibrated_intervals = np.stack((lower_bound, upper_bound), axis=-1)
+-    return calibrated_intervals
++    lower_bound = mu_pred - quantile_offset
++    upper_bound = mu_pred + quantile_offset
++    return lower_bound, upper_bound
++```
+ 
+-def calculate_std_dev(variance_params):
+-    """
+-    Calculates the standard deviation from the variance parameters of the Normal Inverse-Gamma distribution.
+-    
+-    Args:
+-        variance_params: The parameters related to the variance/precision.
+-        
+-    Returns:
+-        std_dev: The calculated standard deviation.
+-    """
+-    # This is a placeholder function. The actual calculation depends on the specific parameterization
+-    # of the Normal Inverse-Gamma distribution used in the model.
+-    # For example, if the parameters are lambda, alpha, beta, the variance might be calculated as:
+-    # var = beta / (alpha * lambda - 1) for alpha > 1
+-    # std_dev = sqrt(var)
+-    
+-    # Placeholder implementation
+-    return np.ones_like(variance_params) # Placeholder
+-```
++**Parameters:**
++*   **Significance Level ($\alpha$):** Typically 0.05 or 0.1 for 95% or 90% coverage.
++*   **Calibration Set Size:** Must be sufficiently large to estimate quantiles reliably. Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++*   **Data Scarcity:** Conformal calibration requires a held-out calibration set. If the simulation is expensive and data is scarce, obtaining a valid calibration set may be impossible [S1, unofficial].
++*   **Full-Volume vs. Point Queries:** The CNN architecture generates predictions for the entire volume at once. This differs from point-query methods and may lead to higher memory usage and different error propagation characteristics [S1, unofficial].
++*   **Precision:** The separation of aleatoric and epistemic uncertainty relies on the stability of the NIG parameter estimation. Degenerate inputs (e.g., constant fields) may cause numerical issues in the inverse-gamma parameterization [G].
+ 
+ ## Subtopics
+ 
+ ### Bayesian Inference Surrogate Framework
+-This variant trains a surrogate and then applies Bayesian inference to obtain the posterior distribution over parameters conditioned on a user-specified spatial feature [S1, unofficial]. It uses a Fisher Information Matrix prior to accelerate prior probability computation by three orders of magnitude compared to deep ensembles [S1, unofficial]. Posterior characterization requires approximately 1 s of burn-in plus 100–200 sampling steps [S1, unofficial]. It has been validated only on 2D time-varying fields (up to $1024 \times 256 \times 200$) with at most 4 parameters; extension to volumetric data and higher-dimensional parameter spaces remains an open challenge [S1, unofficial].
++This variant shifts the goal from predicting outputs to characterizing which input parameters produce a given output feature. It trains a surrogate and then applies Bayesian inference to obtain the posterior distribution over parameters conditioned on a user-specified spatial feature [S1, unofficial]. It uses a Fisher Information Matrix prior to accelerate prior probability computation by three orders of magnitude compared to deep ensembles. Posterior characterization requires approximately 1 second of burn-in plus 100–200 sampling steps. It has been validated only on 2D time-varying fields (up to $1024 \times 256 \times 200$) with at most 4 parameters; extension to volumetric data and higher-dimensional parameter spaces remains an open challenge [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Uncertainty estimation takes 0.03–0.36 s per prediction [S1, unofficial]. This is significantly faster than Monte Carlo Dropout (0.83–25.17 s) and deep ensembles (1.60–3.00 s) [S1, unofficial].
+-*   **Memory Complexity:** Not specified in the sources.
+-*   **Measured Performance:** On three datasets (MPAS-Ocean at $192 \times 96 \times 96$, Nyx at $256^3$, CloverLeaf3D at $64^3$), ConfEviSurrogate achieved the highest voxel-level correlation between predicted uncertainty and true error, outperforming both Monte Carlo Dropout and deep ensembles [S1, unofficial].
+-*   **Strengths:** Provides calibrated uncertainty bounds with finite-sample coverage guarantees; fast inference time; separates aleatoric and epistemic uncertainty [S1, unofficial].
+-*   **Limitations:** Requires a held-out calibration set, which may not be available for data-scarce simulations; generates full-volume predictions which may be memory-intensive for large volumes [S1, unofficial].
+-*   **When to Use:** When calibrated uncertainty bounds are critical for scientific simulations and computational efficiency is a concern.
+-*   **When Not to Use:** When data is scarce and a calibration set cannot be obtained, or when point-wise predictions are sufficient instead of full-volume predictions.
++**Time and Memory Complexity:**
++*   **Inference Time:** Uncertainty estimation takes 0.03–0.36 seconds per prediction. This is significantly faster than Monte Carlo Dropout (0.83–25.17 s) and deep ensembles (1.60–3.00 s) [S1, unofficial].
++*   **Memory:** The model outputs a full volume, requiring memory proportional to the grid resolution. The four-parameter head increases output channel count by 4x compared to a standard single-output CNN [S1, unofficial].
++
++**Measured Performance:**
++*   On three datasets (MPAS-Ocean at $192 \times 96 \times 96$, Nyx at $256^3$, CloverLeaf3D at $64^3$), ConfEviSurrogate achieved the highest voxel-level correlation between predicted uncertainty and true error, outperforming both Monte Carlo Dropout and deep ensembles [S1, unofficial].
++*   On a dataset with $512^3$ resolution, PSNR dropped to 30.93 dB, which is below the VDL-Surrogate’s 33.66 dB [S1, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Provides statistically valid confidence intervals (finite-sample coverage). Fast inference compared to ensemble-based uncertainty methods. Good correlation between predicted uncertainty and actual error.
++*   **Limitations:** Requires a held-out calibration set. Full-volume generation may be memory-intensive. Performance may degrade on very high-resolution grids compared to specialized surrogates like VDL-Surrogate [S1, unofficial].
+ 
+ ## Background
+-ConfEviSurrogate was introduced to address the lack of calibrated uncertainty bounds in CNN surrogates for scientific simulations [S1, unofficial]. It builds on the idea of using probabilistic heads (Normal Inverse-Gamma) to model uncertainty and combines it with conformal prediction to provide rigorous coverage guarantees [S1, unofficial]. The method was validated on several large-scale scientific simulation datasets, demonstrating its effectiveness in providing accurate and calibrated uncertainty estimates [S1, unofficial].
++ConfEviSurrogate was introduced to address the lack of calibrated uncertainty bounds in CNN surrogates for scientific simulations [S1, unofficial]. It builds on the principles of [Uncertainty and Probabilistic Priors](7917-uncertainty-and-probabilistic-priors.md) by integrating conformal prediction with a probabilistic output head. The method is part of the broader effort to make deep learning surrogates reliable for scientific discovery, where understanding model confidence is as important as prediction accuracy [S1, unofficial].
+ 
+ ## Sources

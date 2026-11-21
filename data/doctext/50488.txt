@@ -1,0 +1,2614 @@
+A sample Dual Contouring implementation. For more info see http://ngildea.blogspot.co.uk/2014/11/implementing-dual-contouring.html
+
+The octree code is based on the original reference code by Tao Ju. The QEF implementation was written by /u/unzret (on reddit.com).
+All other code is written by Nicholas Gildea and free for any purpose, assuming that does not conflict with another license.
+
+The sample depends on SDL2, GLM and GLEW. I don't think the particular version matters (beyond the paths in the .vcxproj file). 
+
+Only build materials for VS2013 are provided but it should be easy to move to another environment.
+
+The controls are:
+	- hold left mouse and drag to rotate the view
+	- use the mouse wheel to zoom in/out
+	- press F1 to render a wireframe
+	- press F2 to regenerate the octree using a new error threshold (and generate a new mesh)
+
+Send any questions to nick.gildea@gmail.com or @ngildea85 on Twitter
+
+### DualContouringSample/density.cpp
+```
+#include "density.h"
+
+#include <glm/ext.hpp>
+using namespace glm;
+
+// ----------------------------------------------------------------------------
+
+float Sphere(const vec3& worldPosition, const vec3& origin, float radius)
+{
+	return length(worldPosition - origin) - radius;
+}
+
+// ----------------------------------------------------------------------------
+
+float Cuboid(const vec3& worldPosition, const vec3& origin, const vec3& halfDimensions)
+{
+	const vec3& local_pos = worldPosition - origin;
+	const vec3& pos = local_pos;
+
+	const vec3& d = glm::abs(pos) - halfDimensions;
+	const float m = max(d.x, max(d.y, d.z));
+	return min(m, length(max(d, vec3(0.f))));
+}
+
+// ----------------------------------------------------------------------------
+
+float FractalNoise(
+	const int octaves,
+	const float frequency,
+	const float lacunarity,
+	const float persistence,
+	const vec2& position)
+{
+	const float SCALE = 1.f / 128.f;
+	vec2 p = position * SCALE;
+	float noise = 0.f;
+
+	float amplitude = 1.f;
+	p *= frequency;
+
+	for (int i = 0; i < octaves; i++)
+	{
+		noise += simplex(p) * amplitude;
+		p *= lacunarity;	
+		amplitude *= persistence;	
+	}
+
+	// move into [0, 1] range
+	return 0.5f + (0.5f * noise);
+}
+
+// ----------------------------------------------------------------------------
+
+float Density_Func(const vec3& worldPosition)
+{
+	const float MAX_HEIGHT = 20.f;
+	const float noise = FractalNoise(4, 0.5343f, 2.2324f, 0.68324f, vec2(worldPosition.x, worldPosition.z));
+	const float terrain = worldPosition.y - (MAX_HEIGHT * noise);
+
+	const float cube = Cuboid(worldPosition, vec3(-4., 10.f, -4.f), vec3(12.f));
+	const float sphere = Sphere(worldPosition, vec3(15.f, 2.5f, 1.f), 16.f);
+
+	return max(-cube, min(sphere, terrain));
+}
+```
+
+### DualContouringSample/density.h
+```
+#ifndef		HAS_DENSITY_H_BEEN_INCLUDED
+#define		HAS_DENSITY_H_BEEN_INCLUDED
+
+#include <glm\glm.hpp>
+
+float Density_Func(const glm::vec3& worldPosition);
+
+#endif	//	HAS_DENSITY_H_BEEN_INCLUDED
+```
+
+### DualContouringSample/glsl_program.cpp
+```
+#include "glsl_program.h"
+#include <fstream>
+#include <sstream>
+
+// ----------------------------------------------------------------------------
+
+GLSLProgram::GLSLProgram()
+	: program_(0)
+{
+}
+
+// ----------------------------------------------------------------------------
+
+GLSLProgram::~GLSLProgram()
+{
+	if (program_ > 0)
+	{
+		glDeleteProgram(program_);
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::initialise()
+{
+	program_ = glCreateProgram();
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+void GLSLProgram::printShaderInfo(GLuint shader) const
+{
+	int maxLength = 0;
+	glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &maxLength);
+
+	static char buffer[2048];
+	int length = 0;
+	glGetShaderInfoLog(shader, maxLength, &length, buffer);
+
+	printf("%s\n", buffer);
+}
+
+// ----------------------------------------------------------------------------
+
+void GLSLProgram::printProgramInfo(GLuint program) const
+{
+	int maxLength = 0;
+	glGetProgramiv(program, GL_INFO_LOG_LENGTH, &maxLength);
+
+	static char buffer[2048];
+	int length = 0;
+	glGetProgramInfoLog(program, maxLength, &length, buffer);
+
+	printf("%s\n", buffer);
+}
+
+// ----------------------------------------------------------------------------
+
+void GLSLProgram::prependLine(const std::string& line)
+{
+	header_ += line;
+	header_ += "\n";
+}
+
+// ----------------------------------------------------------------------------
+
+bool loadFile(const std::string& path, std::string& data)
+{
+	std::ifstream file(path.c_str());
+	std::stringstream fileData;
+	fileData << file.rdbuf();
+	file.close();
+
+	data = fileData.str();
+
+	return true; 
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::compileShader(GLSLShaderTypes type, const std::string& filePath)
+{
+	std::string data;
+	if (!loadFile(filePath.c_str(), data))
+	{
+		printf("Error: could not load file %s\n", filePath.c_str());
+		return false;
+	}
+
+	const GLchar* inputCode[] = { header_.c_str(), data.c_str() };
+
+	const GLenum glShaderType = type == ShaderType_Vertex ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
+	const GLuint shader = glCreateShader(glShaderType);
+	glShaderSource(shader, 2, inputCode, NULL);
+	glCompileShader(shader);
+
+	GLint status = 0;
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
+	if (status == GL_FALSE)
+	{
+		printShaderInfo(shader);
+		return false;
+	}
+
+	glAttachShader(program_, shader);
+	shaders_.push_back(shader);
+
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::link()
+{
+	if (shaders_.empty())
+	{
+		return true;
+	}
+
+	glLinkProgram(program_);
+	printProgramInfo(program_);
+
+	if (GLenum err = glGetError() != GL_NO_ERROR)
+	{
+		printf("GLSLProgram: err=%d\n");
+		return false;
+	}
+
+	GLint status = 0;
+	glGetProgramiv(program_, GL_LINK_STATUS, &status);
+	if (status == GL_FALSE)
+	{
+		return false;
+	}
+
+	for (size_t i = 0; i < shaders_.size(); i++)
+	{
+		glDetachShader(program_, shaders_[i]);
+		glDeleteShader(shaders_[i]);
+	}
+
+	shaders_.clear();
+
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+GLuint GLSLProgram::getId() const
+{
+	return program_;
+}
+
+// ----------------------------------------------------------------------------
+
+const GLint GLSLProgram::getUniformLocation(const std::string& name)
+{
+	const auto iter = uniformLocations_.find(name);	
+	if (iter == end(uniformLocations_))
+	{
+		const GLint location = glGetUniformLocation(program_, name.c_str());
+		uniformLocations_[name] = location;
+	}
+
+	return uniformLocations_[name];
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::getSubroutineIndex(const std::string& name, GLuint& uniform)
+{
+	// TODO hardcoded to fragment shaders
+	uniform = glGetSubroutineIndex(program_, GL_FRAGMENT_SHADER, name.c_str());
+	return uniform != GL_INVALID_INDEX;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::mat4& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::mat3& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniformMatrix3fv(location, 1, GL_FALSE, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::vec4& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform4fv(location, 1, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniform(const std::string& name, const glm::vec3& uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform3fv(location, 1, glm::value_ptr(uniform));
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniformFloat(const std::string& name, const float uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform1f(location, uniform);
+	return true;
+}
+
+// ----------------------------------------------------------------------------
+
+bool GLSLProgram::setUniformInt(const std::string& name, const GLuint uniform)
+{
+	const GLint location = getUniformLocation(name);
+	if (location == -1)
+	{
+		return false;
+	}
+
+	glUniform1i(location, uniform);
+	return true;
+}
+```
+
+### DualContouringSample/glsl_program.h
+```
+#ifndef		HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+#define		HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+
+#include <GL/glew.h>
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/ext.hpp>
+#include <hash_map>
+
+enum GLSLShaderTypes
+{
+	ShaderType_Vertex,
+	ShaderType_Fragment
+};
+
+class GLSLProgram
+{
+public:
+
+	GLSLProgram();
+	virtual ~GLSLProgram();
+
+	virtual bool initialise();
+	void prependLine(const std::string& line);
+
+	bool compileShader(GLSLShaderTypes type, const std::string& filePath);
+	bool link();
+
+	GLuint getId() const;
+	bool getUniform(const std::string& name, glm::mat4& uniform);
+	bool getSubroutineIndex(const std::string& name, GLuint& uniform);
+
+	bool setUniform(const std::string& name, const glm::mat4& uniform);
+	bool setUniform(const std::string& name, const glm::mat3& uniform);
+	bool setUniform(const std::string& name, const glm::vec4& uniform);
+	bool setUniform(const std::string& name, const glm::vec3& uniform);
+
+	// NB: overloading deliberately avoided here to prevent problems with literals
+	// being converted, e.g. with an integer setUniform func setUniform("bob", 1.f)
+	// will call the variant, which can be very confusing (although it does generate a warning)
+	bool setUniformFloat(const std::string& name, const float uniform);
+	bool setUniformInt(const std::string& name, const GLuint uniform);
+
+private:
+
+	void printShaderInfo(GLuint shader) const;
+	void printProgramInfo(GLuint program) const;
+
+	GLuint					program_;
+	std::vector<GLuint>		shaders_;
+	std::string				header_;
+
+	// Hash the locations of the uniforms to prevent glGet calls during frames
+	typedef std::hash_map<std::string, GLint> UniformLocations;
+	UniformLocations		uniformLocations_;
+
+	const GLint getUniformLocation(const std::string& name);
+};
+
+#endif	//	HAS_GLSL_PROGRAM_H_BEEN_INCLUDED
+```
+
+### DualContouringSample/main.cpp
+```
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <GL\glew.h>
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <glm\glm.hpp>
+
+#include "glsl_program.h"
+#include "mesh.h"
+#include "octree.h"
+
+// ----------------------------------------------------------------------------
+
+void HandleMouseMove(const SDL_MouseMotionEvent& e, float& rotateXAxis, float& rotateYAxis)
+{
+	if (e.state & SDL_BUTTON_LMASK)
+	{
+		rotateXAxis += (float)e.yrel * 0.5f;
+		rotateYAxis += (float)e.xrel * 0.5f;
+
+		rotateXAxis = glm::min(80.f, rotateXAxis);
+		rotateXAxis = glm::max(-80.f, rotateXAxis);
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+void HandleMouseWheel(const SDL_MouseWheelEvent& e, float& distance)
+{
+	distance += -e.y * 10.f;
+}
+
+// ----------------------------------------------------------------------------
+
+void HandleKeyPress(const SDL_KeyboardEvent& e, bool& drawWireframe, bool& refreshMesh)
+{
+	if (e.type != SDL_KEYUP)
+	{
+		return;
+	}
+
+	switch (e.keysym.sym)
+	{
+	case SDLK_F1:
+		drawWireframe = !drawWireframe;
+		break;
+
+	case SDLK_F2:
+		refreshMesh = true;
+		break;
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+void DrawFrame(GLSLProgram& program, Mesh& mesh, const glm::vec3& pos, const glm::vec3& fwd, bool drawWireframe)
+{
+	glClearColor(0.f, 0.f, 0.f, 0.f);
+	glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+
+	glm::mat4 projection = glm::perspective(60.f, 16.f/9.f, 0.1f, 500.f);
+	glm::mat4 modelview = glm::lookAt(pos + fwd, glm::vec3(0.f), glm::vec3(0.f, 1.f, 0.f));
+
+	glUseProgram(program.getId());
+	program.setUniform("MVP", projection * modelview);
+	program.setUniformInt("useUniformColour", 0);
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+	glBindVertexArray(mesh.vertexArrayObj_);
+	glDrawElements(GL_TRIANGLES, mesh.numIndices_, GL_UNSIGNED_INT, (void*)0);
+
+	if (drawWireframe)
+	{
+		glm::mat4 wireframe = glm::translate(glm::mat4(1), 0.02f * -fwd);
+
+		program.setUniform("MVP", projection * modelview * wireframe);
+		program.setUniformInt("useUniformColour", 1);
+		program.setUniform("colour", glm::vec4(1));
+		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		glDrawElements(GL_TRIANGLES, mesh.numIndices_, GL_UNSIGNED_INT, (void*)0);
+	}
+
+	glUseProgram(0);
+}
+
+// ----------------------------------------------------------------------------
+
+int main(int argc, char** argv)
+{
+	if (SDL_Init(SDL_INIT_EVERYTHING) < 0)
+	{
+		printf("Error: SDL_Init failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
+
+	SDL_Window* window = SDL_CreateWindow("DualContourStarter", 100, 100, 1280, 720, SDL_WINDOW_OPENGL);
+	if (!window)
+	{
+		printf("Error: SDL_CreateWindow failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
+
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+	SDL_GLContext context = SDL_GL_CreateContext(window);
+	if (!context)
+	{
+		printf("Error: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+		return EXIT_FAILURE;
+	}
+
+	SDL_GL_MakeCurrent(window, context);
+
+	glewExperimental = true;
+	if (glewInit() != GLEW_OK)
+	{
+		printf("Error: glewInit failed\n");
+		return EXIT_FAILURE;
+	}
+
+	glViewport(0, 0, 1280, 720);
+
+	// getting an (suprious?) error from glew here, just ignore
+	glGetError();
+
+	printf("----------------------------------------------------------------\n");
+	printf("The controls are:\n");
+	printf("	- hold left mouse and drag to rotate the view\n");
+	printf("	- use the mouse wheel to zoom in/out\n");
+	printf("	- press F1 to render a wireframe\n");
+	printf("	- press F2 to regenerate the octree using a new error threshold (and generate a new mesh)\n");
+	printf("----------------------------------------------------------------\n");
+	printf("\n\n");
+
+	printf("OpenGL version: %s\n", glGetString(GL_VERSION));
+	printf("OpenGL shading version: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+
+	GLSLProgram program;
+	if (!program.initialise() ||
+		!program.compileShader(ShaderType_Vertex, "shader.vert") ||
+		!program.compileShader(ShaderType_Fragment, "shader.frag") ||
+		!program.link())
+	{
+		printf("Error: failed to create GLSL program\n");
+		return EXIT_FAILURE;
+	}
+
+	const int MAX_THRESHOLDS = 5;
+	const float THRESHOLDS[MAX_THRESHOLDS] = { -1.f, 0.1f, 1.f, 10.f, 50.f };
+	int thresholdIndex = -1;
+
+	Mesh mesh;
+	mesh.initialise();
+
+	OctreeNode* root = nullptr;
+	Uint32 lastFrameTime = 0;
+
+	// octreeSize must be a power of two!
+	const int octreeSize = 64;
+
+	float rotateX = -60.f, rotateY = 0.f;
+	float distance = 100.f;
+	bool drawWireframe = false;
+	bool refreshMesh = true;
+
+	bool quit = false;
+	while (!quit)
+	{
+		SDL_Event event;
+		while (SDL_PollEvent(&event))
+		{
+			switch (event.type)
+			{
+			case SDL_QUIT:
+				quit = true;
+				break;
+
+			case SDL_MOUSEMOTION:
+				HandleMouseMove(event.motion, rotateX, rotateY);
+				break;
+
+			case SDL_MOUSEWHEEL:
+				HandleMouseWheel(event.wheel, distance);
+				break;
+
+			case SDL_KEYUP:
+				HandleKeyPress(event.key, drawWireframe, refreshMesh);
+				break;
+			}
+		}
+
+		if (refreshMesh)
+		{
+			refreshMesh = false;
+			thresholdIndex = (thresholdIndex + 1) % MAX_THRESHOLDS;
+			printf("Generating mesh with error threshold=%.1f...\n", THRESHOLDS[thresholdIndex]);
+			auto startTime = SDL_GetTicks();
+
+			VertexBuffer vertices;
+			IndexBuffer indices;
+
+			root = BuildOctree(glm::ivec3(-octreeSize / 2), octreeSize, THRESHOLDS[thresholdIndex]);
+			GenerateMeshFromOctree(root, vertices, indices);
+			mesh.uploadData(vertices, indices);
+			printf("Generated mesh (%.1fs)\n\n", (float)(SDL_GetTicks() - startTime) / 1000.f);
+		}
+
+		if ((SDL_GetTicks() - lastFrameTime) < 33)
+		{
+			continue;
+		}
+
+		lastFrameTime = SDL_GetTicks();
+
+		// calculate the forward vector and then use that find the camera position
+		glm::vec3 dir(0.f, 0.f, 1.f);
+		dir = glm::rotateX(dir, rotateX);
+		dir = glm::rotateY(dir, rotateY);
+
+		glm::vec3 position = dir * distance;
+
+		DrawFrame(program, mesh, position, -dir, drawWireframe);
+
+		SDL_GL_SwapWindow(window);
+	}
+
+	DestroyOctree(root);
+	mesh.destroy();
+
+	SDL_GL_DeleteContext(context);
+	SDL_Quit();
+
+	return EXIT_SUCCESS;
+}
+
+// ----------------------------------------------------------------------------
+```
+
+### DualContouringSample/mesh.cpp
+```
+#include "mesh.h"
+
+#include <stdio.h>
+
+// ----------------------------------------------------------------------------
+
+void Mesh::initialise()
+{
+	glGenVertexArrays(1, &vertexArrayObj_);
+	glGenBuffers(1, &vertexBuffer_);
+	glGenBuffers(1, &indexBuffer_);
+
+	glBindVertexArray(vertexArrayObj_);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer_);
+
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), 0);
+	
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex), (void*)(sizeof(glm::vec3) * 1));
+
+	glBindVertexArray(0);
+}
+
+// ----------------------------------------------------------------------------
+
+void Mesh::uploadData(const VertexBuffer& vertices, const IndexBuffer& indices)
+{
+	if (vertices.empty() || indices.empty())
+	{
+		return;
+	}
+
+	glBindVertexArray(vertexArrayObj_);
+
+	glBindBuffer(GL_ARRAY_BUFFER, vertexBuffer_);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(MeshVertex) * vertices.size(), &vertices[0], GL_STATIC_DRAW);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexBuffer_);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(int) * indices.size(), &indices[0], GL_STATIC_DRAW);
+	numIndices_ = indices.size();
+
+	printf("Mesh: %d vertices %d triangles\n", vertices.size(), indices.size() / 3);
+
+	glBindVertexArray(0);
+}
+
+// ----------------------------------------------------------------------------
+
+void Mesh::destroy()
+{
+	glDeleteBuffers(1, &indexBuffer_);
+	glDeleteBuffers(1, &vertexBuffer_);
+	glDeleteVertexArrays(1, &vertexArrayObj_);
+}
+```
+
+### DualContouringSample/mesh.h
+```
+#ifndef		HAS_MESH_H_BEEN_INCLUDED
+#define		HAS_MESH_H_BEEN_INCLUDED
+
+#include <vector>
+
+#include <GL\glew.h>
+#include <SDL_opengl.h>
+#include <glm\glm.hpp>
+
+// ----------------------------------------------------------------------------
+
+struct MeshVertex
+{
+	MeshVertex(const glm::vec3& _xyz, const glm::vec3& _normal)
+		: xyz(_xyz)
+		, normal(_normal)
+	{
+	}
+
+	glm::vec3		xyz, normal;
+};
+
+typedef std::vector<MeshVertex> VertexBuffer;
+typedef std::vector<int> IndexBuffer;
+
+// ----------------------------------------------------------------------------
+
+class Mesh
+{
+public:
+
+	Mesh()
+		: vertexArrayObj_(0)
+		, vertexBuffer_(0)
+		, indexBuffer_(0)
+		, numIndices_(0)
+	{
+	}
+
+	void initialise();
+	void uploadData(const VertexBuffer& vertices, const IndexBuffer& indices);
+	void destroy();
+
+	GLuint			vertexArrayObj_, vertexBuffer_, indexBuffer_;
+	int				numIndices_;
+};
+
+// ----------------------------------------------------------------------------
+
+#endif	//	HAS_MESH_H_BEEN_INCLUDED
+```
+
+### DualContouringSample/octree.cpp
+```
+/*
+
+Implementations of Octree member functions.
+
+Copyright (C) 2011  Tao Ju
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public License
+(LGPL) as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
+#include	"octree.h"
+#include	"density.h"
+
+// ----------------------------------------------------------------------------
+
+const int MATERIAL_AIR = 0;
+const int MATERIAL_SOLID = 1;
+
+const float QEF_ERROR = 1e-6f;
+const int QEF_SWEEPS = 4;
+
+// ----------------------------------------------------------------------------
+
+const ivec3 CHILD_MIN_OFFSETS[] =
+{
+	// needs to match the vertMap from Dual Contouring impl
+	ivec3( 0, 0, 0 ),
+	ivec3( 0, 0, 1 ),
+	ivec3( 0, 1, 0 ),
+	ivec3( 0, 1, 1 ),
+	ivec3( 1, 0, 0 ),
+	ivec3( 1, 0, 1 ),
+	ivec3( 1, 1, 0 ),
+	ivec3( 1, 1, 1 ),
+};
+
+// ----------------------------------------------------------------------------
+// data from the original DC impl, drives the contouring process
+
+const int edgevmap[12][2] = 
+{
+	{0,4},{1,5},{2,6},{3,7},	// x-axis 
+	{0,2},{1,3},{4,6},{5,7},	// y-axis
+	{0,1},{2,3},{4,5},{6,7}		// z-axis
+};
+
+const int edgemask[3] = { 5, 3, 6 } ;
+
+const int vertMap[8][3] = 
+{
+	{0,0,0},
+	{0,0,1},
+	{0,1,0},
+	{0,1,1},
+	{1,0,0},
+	{1,0,1},
+	{1,1,0},
+	{1,1,1}
+};
+
+const int faceMap[6][4] = {{4, 8, 5, 9}, {6, 10, 7, 11},{0, 8, 1, 10},{2, 9, 3, 11},{0, 4, 2, 6},{1, 5, 3, 7}} ;
+const int cellProcFaceMask[12][3] = {{0,4,0},{1,5,0},{2,6,0},{3,7,0},{0,2,1},{4,6,1},{1,3,1},{5,7,1},{0,1,2},{2,3,2},{4,5,2},{6,7,2}} ;
+const int cellProcEdgeMask[6][5] = {{0,1,2,3,0},{4,5,6,7,0},{0,4,1,5,1},{2,6,3,7,1},{0,2,4,6,2},{1,3,5,7,2}} ;
+
+const int faceProcFaceMask[3][4][3] = {
+	{{4,0,0},{5,1,0},{6,2,0},{7,3,0}},
+	{{2,0,1},{6,4,1},{3,1,1},{7,5,1}},
+	{{1,0,2},{3,2,2},{5,4,2},{7,6,2}}
+} ;
+
+const int faceProcEdgeMask[3][4][6] = {
+	{{1,4,0,5,1,1},{1,6,2,7,3,1},{0,4,6,0,2,2},{0,5,7,1,3,2}},
+	{{0,2,3,0,1,0},{0,6,7,4,5,0},{1,2,0,6,4,2},{1,3,1,7,5,2}},
+	{{1,1,0,3,2,0},{1,5,4,7,6,0},{0,1,5,0,4,1},{0,3,7,2,6,1}}
+};
+
+const int edgeProcEdgeMask[3][2][5] = {
+	{{3,2,1,0,0},{7,6,5,4,0}},
+	{{5,1,4,0,1},{7,3,6,2,1}},
+	{{6,4,2,0,2},{7,5,3,1,2}},
+};
+
+const int processEdgeMask[3][4] = {{3,2,1,0},{7,5,6,4},{11,10,9,8}} ;
+
+// -------------------------------------------------------------------------------
+
+OctreeNode* SimplifyOctree(OctreeNode* node, float threshold)
+{
+	if (!node)
+	{
+		return NULL;
+	}
+
+	if (node->type != Node_Internal)
+	{
+		// can't simplify!
+		return node;
+	}
+
+	svd::QefSolver qef;
+	int signs[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+	int midsign = -1;
+	int edgeCount = 0;
+	bool isCollapsible = true;
+
+	for (int i = 0; i < 8; i++)
+	{
+		node->children[i] = SimplifyOctree(node->children[i], threshold);
+		if (node->children[i])
+		{
+			OctreeNode* child = node->children[i];
+			if (child->type == Node_Internal)
+			{
+				isCollapsible = false;
+			}
+			else
+			{
+				qef.add(child->drawInfo->qef);
+
+				midsign = (child->drawInfo->corners >> (7 - i)) & 1; 
+				signs[i] = (child->drawInfo->corners >> i) & 1; 
+
+				edgeCount++;
+			}
+		}
+	}
+
+	if (!isCollapsible)
+	{
+		// at least one child is an internal node, can't collapse
+		return node;
+	}
+
+	svd::Vec3 qefPosition;
+	qef.solve(qefPosition, QEF_ERROR, QEF_SWEEPS, QEF_ERROR);
+	float error = qef.getError();
+
+	// convert to glm vec3 for ease of use
+	vec3 position(qefPosition.x, qefPosition.y, qefPosition.z);
+
+	// at this point the masspoint will actually be a sum, so divide to make it the average
+	if (error > threshold)
+	{
+		// this collapse breaches the threshold
+		return node;
+	}
+
+	if (position.x < node->min.x || position.x > (node->min.x + node->size) ||
+		position.y < node->min.y || position.y > (node->min.y + node->size) ||
+		position.z < node->min.z || position.z > (node->min.z + node->size))
+	{
+		const auto& mp = qef.getMassPoint();
+		position = vec3(mp.x, mp.y, mp.z);
+	}
+
+	// change the node from an internal node to a 'psuedo leaf' node
+	OctreeDrawInfo* drawInfo = new OctreeDrawInfo;
+
+	for (int i = 0; i < 8; i++)
+	{
+		if (signs[i] == -1)
+		{
+			// Undetermined, use centre sign instead
+			drawInfo->corners |= (midsign << i);
+		}
+		else 
+		{
+			drawInfo->corners |= (signs[i] << i);
+		}
+	}
+
+	drawInfo->averageNormal = vec3(0.f);
+	for (int i = 0; i < 8; i++)
+	{
+		if (node->children[i])
+		{
+			OctreeNode* child = node->children[i];
+			if (child->type == Node_Psuedo || 
+				child->type == Node_Leaf)
+			{
+				drawInfo->averageNormal += child->drawInfo->averageNormal;
+			}
+		}
+	}
+
+	drawInfo->averageNormal = glm::normalize(drawInfo->averageNormal);
+	drawInfo->position = position;
+	drawInfo->qef = qef.getData();
+
+	for (int i = 0; i < 8; i++)
+	{
+		DestroyOctree(node->children[i]);
+		node->children[i] = nullptr;
+	}
+
+	node->type = Node_Psuedo;
+	node->drawInfo = drawInfo;
+
+	return node;
+}
+
+// ----------------------------------------------------------------------------
+
+void GenerateVertexIndices(OctreeNode* node, VertexBuffer& vertexBuffer)
+{
+	if (!node)
+	{
+		return;
+	}
+
+	if (node->type != Node_Leaf)
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			GenerateVertexIndices(node->children[i], vertexBuffer);
+		}
+	}
+
+	if (node->type != Node_Internal)
+	{
+		OctreeDrawInfo* d = node->drawInfo;
+		if (!d)
+		{
+			printf("Error! Could not add vertex!\n");
+			exit(EXIT_FAILURE);
+		}
+
+		d->index = vertexBuffer.size();
+		vertexBuffer.push_back(MeshVertex(d->position, d->averageNormal));
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+void ContourProcessEdge(OctreeNode* node[4], int dir, IndexBuffer& indexBuffer)
+{
+	int minSize = 1000000;		// arbitrary big number
+	int minIndex = 0;
+	int indices[4] = { -1, -1, -1, -1 };
+	bool flip = false;
+	bool signChange[4] = { false, false, false, false };
+
+	for (int i = 0; i < 4; i++)
+	{
+		const int edge = processEdgeMask[dir][i];
+		const int c1 = edgevmap[edge][0];
+		const int c2 = edgevmap[edge][1];
+
+		const int m1 = (node[i]->drawInfo->corners >> c1) & 1;
+		const int m2 = (node[i]->drawInfo->corners >> c2) & 1;
+
+		if (node[i]->size < minSize)
+		{
+			minSize = node[i]->size;
+			minIndex = i;
+			flip = m1 != MATERIAL_AIR; 
+		}
+
+		indices[i] = node[i]->drawInfo->index;
+
+		signChange[i] = 
+			(m1 == MATERIAL_AIR && m2 != MATERIAL_AIR) ||
+			(m1 != MATERIAL_AIR && m2 == MATERIAL_AIR);
+	}
+
+	if (signChange[minIndex])
+	{
+		if (!flip)
+		{
+			indexBuffer.push_back(indices[0]);
+			indexBuffer.push_back(indices[1]);
+			indexBuffer.push_back(indices[3]);
+
+			indexBuffer.push_back(indices[0]);
+			indexBuffer.push_back(indices[3]);
+			indexBuffer.push_back(indices[2]);
+		}
+		else
+		{
+			indexBuffer.push_back(indices[0]);
+			indexBuffer.push_back(indices[3]);
+			indexBuffer.push_back(indices[1]);
+
+			indexBuffer.push_back(indices[0]);
+			indexBuffer.push_back(indices[2]);
+			indexBuffer.push_back(indices[3]);
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+void ContourEdgeProc(OctreeNode* node[4], int dir, IndexBuffer& indexBuffer)
+{
+	if (!node[0] || !node[1] || !node[2] || !node[3])
+	{
+		return;
+	}
+
+	if (node[0]->type != Node_Internal &&
+		node[1]->type != Node_Internal &&
+		node[2]->type != Node_Internal &&
+		node[3]->type != Node_Internal)
+	{
+		ContourProcessEdge(node, dir, indexBuffer);
+	}
+	else
+	{
+		for (int i = 0; i < 2; i++)
+		{
+			OctreeNode* edgeNodes[4];
+			const int c[4] = 
+			{
+				edgeProcEdgeMask[dir][i][0],
+				edgeProcEdgeMask[dir][i][1],
+				edgeProcEdgeMask[dir][i][2],
+				edgeProcEdgeMask[dir][i][3],
+			};
+
+			for (int j = 0; j < 4; j++)
+			{
+				if (node[j]->type == Node_Leaf || node[j]->type == Node_Psuedo)
+				{
+					edgeNodes[j] = node[j];
+				}
+				else
+				{
+					edgeNodes[j] = node[j]->children[c[j]];
+				}
+			}
+
+			ContourEdgeProc(edgeNodes, edgeProcEdgeMask[dir][i][4], indexBuffer);
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+void ContourFaceProc(OctreeNode* node[2], int dir, IndexBuffer& indexBuffer)
+{
+	if (!node[0] || !node[1])
+	{
+		return;
+	}
+
+	if (node[0]->type == Node_Internal || 
+		node[1]->type == Node_Internal)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			OctreeNode* faceNodes[2];
+			const int c[2] = 
+			{
+				faceProcFaceMask[dir][i][0], 
+				faceProcFaceMask[dir][i][1], 
+			};
+
+			for (int j = 0; j < 2; j++)
+			{
+				if (node[j]->type != Node_Internal)
+				{
+					faceNodes[j] = node[j];
+				}
+				else
+				{
+					faceNodes[j] = node[j]->children[c[j]];
+				}
+			}
+
+			ContourFaceProc(faceNodes, faceProcFaceMask[dir][i][2], indexBuffer);
+		}
+		
+		const int orders[2][4] =
+		{
+			{ 0, 0, 1, 1 },
+			{ 0, 1, 0, 1 },
+		};
+		for (int i = 0; i < 4; i++)
+		{
+			OctreeNode* edgeNodes[4];
+			const int c[4] =
+			{
+				faceProcEdgeMask[dir][i][1],
+				faceProcEdgeMask[dir][i][2],
+				faceProcEdgeMask[dir][i][3],
+				faceProcEdgeMask[dir][i][4],
+			};
+
+			const int* order = orders[faceProcEdgeMask[dir][i][0]];
+			for (int j = 0; j < 4; j++)
+			{
+				if (node[order[j]]->type == Node_Leaf ||
+					node[order[j]]->type == Node_Psuedo)
+				{
+					edgeNodes[j] = node[order[j]];
+				}
+				else
+				{
+					edgeNodes[j] = node[order[j]]->children[c[j]];
+				}
+			}
+
+			ContourEdgeProc(edgeNodes, faceProcEdgeMask[dir][i][5], indexBuffer);
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+void ContourCellProc(OctreeNode* node, IndexBuffer& indexBuffer)
+{
+	if (node == NULL)
+	{
+		return;
+	}
+
+	if (node->type == Node_Internal)
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			ContourCellProc(node->children[i], indexBuffer);
+		}
+
+		for (int i = 0; i < 12; i++)
+		{
+			OctreeNode* faceNodes[2];
+			const int c[2] = { cellProcFaceMask[i][0], cellProcFaceMask[i][1] };
+			
+			faceNodes[0] = node->children[c[0]];
+			faceNodes[1] = node->children[c[1]];
+
+			ContourFaceProc(faceNodes, cellProcFaceMask[i][2], indexBuffer);
+		}
+
+		for (int i = 0; i < 6; i++)
+		{
+			OctreeNode* edgeNodes[4];
+			const int c[4] = 
+			{
+				cellProcEdgeMask[i][0],
+				cellProcEdgeMask[i][1],
+				cellProcEdgeMask[i][2],
+				cellProcEdgeMask[i][3],
+			};
+
+			for (int j = 0; j < 4; j++)
+			{
+				edgeNodes[j] = node->children[c[j]];
+			}
+
+			ContourEdgeProc(edgeNodes, cellProcEdgeMask[i][4], indexBuffer);
+		}
+	}
+}
+
+// ----------------------------------------------------------------------------
+
+vec3 ApproximateZeroCrossingPosition(const vec3& p0, const vec3& p1)
+{
+	// approximate the zero crossing by finding the min value along the edge
+	float minValue = 100000.f;
+	float t = 0.f;
+	float currentT = 0.f;
+	const int steps = 8;
+	const float increment = 1.f / (float)steps;
+	while (currentT <= 1.f)
+	{
+		const vec3 p = p0 + ((p1 - p0) * currentT);
+		const float density = glm::abs(Density_Func(p));
+		if (density < minValue)
+		{
+			minValue = density;
+			t = currentT;
+		}
+
+		currentT += increment;
+	}
+
+	return p0 + ((p1 - p0) * t);
+}
+
+// ----------------------------------------------------------------------------
+
+vec3 CalculateSurfaceNormal(const vec3& p)
+{
+	const float H = 0.001f;
+	const float dx = Density_Func(p + vec3(H, 0.f, 0.f)) - Density_Func(p - vec3(H, 0.f, 0.f));
+	const float dy = Density_Func(p + vec3(0.f, H, 0.f)) - Density_Func(p - vec3(0.f, H, 0.f));
+	const float dz = Density_Func(p + vec3(0.f, 0.f, H)) - Density_Func(p - vec3(0.f, 0.f, H));
+
+	return glm::normalize(vec3(dx, dy, dz));
+}
+
+// ----------------------------------------------------------------------------
+
+OctreeNode* ConstructLeaf(OctreeNode* leaf)
+{
+	if (!leaf || leaf->size != 1)
+	{
+		return nullptr;
+	}
+
+	int corners = 0;
+	for (int i = 0; i < 8; i++)
+	{
+		const ivec3 cornerPos = leaf->min + CHILD_MIN_OFFSETS[i];
+		const float density = Density_Func(vec3(cornerPos));
+		const int material = density < 0.f ? MATERIAL_SOLID : MATERIAL_AIR;
+		corners |= (material << i);
+	}
+
+	if (corners == 0 || corners == 255)
+	{
+		// voxel is full inside or outside the volume
+		delete leaf;
+		return nullptr;
+	}
+
+	// otherwise the voxel contains the surface, so find the edge intersections
+	const int MAX_CROSSINGS = 6;
+	int edgeCount = 0;
+	vec3 averageNormal(0.f);
+	svd::QefSolver qef;
+
+	for (int i = 0; i < 12 && edgeCount < MAX_CROSSINGS; i++)
+	{
+		const int c1 = edgevmap[i][0];
+		const int c2 = edgevmap[i][1];
+
+		const int m1 = (corners >> c1) & 1;
+		const int m2 = (corners >> c2) & 1;
+
+		if ((m1 == MATERIAL_AIR && m2 == MATERIAL_AIR) ||
+			(m1 == MATERIAL_SOLID && m2 == MATERIAL_SOLID))
+		{
+			// no zero crossing on this edge
+			continue;
+		}
+
+		const vec3 p1 = vec3(leaf->min + CHILD_MIN_OFFSETS[c1]);
+		const vec3 p2 = vec3(leaf->min + CHILD_MIN_OFFSETS[c2]);
+		const vec3 p = ApproximateZeroCrossingPosition(p1, p2);
+		const vec3 n = CalculateSurfaceNormal(p);
+		qef.add(p.x, p.y, p.z, n.x, n.y, n.z);
+
+		averageNormal += n;
+
+		edgeCount++;
+	}
+
+	svd::Vec3 qefPosition;
+	qef.solve(qefPosition, QEF_ERROR, QEF_SWEEPS, QEF_ERROR);
+
+	OctreeDrawInfo* drawInfo = new OctreeDrawInfo;
+	drawInfo->position = vec3(qefPosition.x, qefPosition.y, qefPosition.z);
+	drawInfo->qef = qef.getData();
+
+	const vec3 min = vec3(leaf->min);
+	const vec3 max = vec3(leaf->min + ivec3(leaf->size));
+	if (drawInfo->position.x < min.x || drawInfo->position.x > max.x ||
+		drawInfo->position.y < min.y || drawInfo->position.y > max.y ||
+		drawInfo->position.z < min.z || drawInfo->position.z > max.z)
+	{
+		const auto& mp = qef.getMassPoint();
+		drawInfo->position = vec3(mp.x, mp.y, mp.z);
+	}
+
+	drawInfo->averageNormal = glm::normalize(averageNormal / (float)edgeCount);
+	drawInfo->corners = corners;
+
+	leaf->type = Node_Leaf;
+	leaf->drawInfo = drawInfo;
+
+	return leaf;
+}
+
+// -------------------------------------------------------------------------------
+
+OctreeNode* ConstructOctreeNodes(OctreeNode* node)
+{
+	if (!node)
+	{
+		return nullptr;
+	}
+
+	if (node->size == 1)
+	{
+		return ConstructLeaf(node);
+	}
+	
+	const int childSize = node->size / 2;
+	bool hasChildren = false;
+
+	for (int i = 0; i < 8; i++)
+	{
+		OctreeNode* child = new OctreeNode;
+		child->size = childSize;
+		child->min = node->min + (CHILD_MIN_OFFSETS[i] * childSize);
+		child->type = Node_Internal;
+
+		node->children[i] = ConstructOctreeNodes(child);
+		hasChildren |= (node->children[i] != nullptr);
+	}
+
+	if (!hasChildren)
+	{
+		delete node;
+		return nullptr;
+	}
+
+	return node;
+}
+
+// -------------------------------------------------------------------------------
+
+OctreeNode* BuildOctree(const ivec3& min, const int size, const float threshold)
+{
+	OctreeNode* root = new OctreeNode;
+	root->min = min;
+	root->size = size;
+	root->type = Node_Internal;
+
+	ConstructOctreeNodes(root);
+	root = SimplifyOctree(root, threshold);
+
+	return root;
+}
+
+// ----------------------------------------------------------------------------
+
+void GenerateMeshFromOctree(OctreeNode* node, VertexBuffer& vertexBuffer, IndexBuffer& indexBuffer)
+{
+	if (!node)
+	{
+		return;
+	}
+
+	vertexBuffer.clear();
+	indexBuffer.clear();
+
+	GenerateVertexIndices(node, vertexBuffer);
+	ContourCellProc(node, indexBuffer);
+}
+
+// -------------------------------------------------------------------------------
+
+void DestroyOctree(OctreeNode* node)
+{
+	if (!node)
+	{
+		return;
+	}
+
+	for (int i = 0; i < 8; i++)
+	{
+		DestroyOctree(node->children[i]);
+	}
+
+	if (node->drawInfo)
+	{
+		delete node->drawInfo;
+	}
+
+	delete node;
+}
+
+// -------------------------------------------------------------------------------
+```
+
+### DualContouringSample/octree.h
+```
+/*
+
+Implementations of Octree member functions.
+
+Copyright (C) 2011  Tao Ju
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public License
+(LGPL) as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
+
+#ifndef		HAS_OCTREE_H_BEEN_INCLUDED
+#define		HAS_OCTREE_H_BEEN_INCLUDED
+
+#include "qef.h"
+#include "mesh.h"
+
+#include <glm/glm.hpp>
+using glm::vec3;
+using glm::ivec3;
+
+// ----------------------------------------------------------------------------
+
+enum OctreeNodeType
+{
+	Node_None,
+	Node_Internal,
+	Node_Psuedo,
+	Node_Leaf,
+};
+
+// ----------------------------------------------------------------------------
+
+struct OctreeDrawInfo 
+{
+	OctreeDrawInfo()
+		: index(-1)
+		, corners(0)
+	{
+	}
+
+	int				index;
+	int				corners;
+	vec3			position;
+	vec3			averageNormal;
+	svd::QefData	qef;
+};
+
+// ----------------------------------------------------------------------------
+
+class OctreeNode
+{
+public:
+
+	OctreeNode()
+		: type(Node_None)
+		, min(0, 0, 0)
+		, size(0)
+		, drawInfo(nullptr)
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			children[i] = nullptr;
+		}
+	}
+
+	OctreeNode(const OctreeNodeType _type)
+		: type(_type)
+		, min(0, 0, 0)
+		, size(0)
+		, drawInfo(nullptr)
+	{
+		for (int i = 0; i < 8; i++)
+		{
+			children[i] = nullptr;
+		}
+	}
+
+	OctreeNodeType	type;
+	ivec3			min;
+	int				size;
+	OctreeNode*		children[8];
+	OctreeDrawInfo*	drawInfo;
+};
+
+// ----------------------------------------------------------------------------
+
+OctreeNode* BuildOctree(const ivec3& min, const int size, const float threshold);
+void DestroyOctree(OctreeNode* node);
+void GenerateMeshFromOctree(OctreeNode* node, VertexBuffer& vertexBuffer, IndexBuffer& indexBuffer);
+
+// ----------------------------------------------------------------------------
+
+#endif	// HAS_OCTREE_H_BEEN_INCLUDED
+```
+
+### DualContouringSample/qef.cpp
+```
+/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+#include "qef.h"
+#include <stdexcept>
+namespace svd
+{
+
+    QefData::QefData()
+    {
+        this->clear();
+    }
+
+    QefData::QefData(const float ata_00, const float ata_01,
+                     const float ata_02, const float ata_11, const float ata_12,
+                     const float ata_22, const float atb_x, const float atb_y,
+                     const float atb_z, const float btb, const float massPoint_x,
+                     const float massPoint_y, const float massPoint_z,
+                     const int numPoints)
+    {
+        this->set(ata_00, ata_01, ata_02, ata_11, ata_12, ata_22, atb_x, atb_y,
+                  atb_z, btb, massPoint_x, massPoint_y, massPoint_z, numPoints);
+    }
+
+    QefData::QefData(const QefData &rhs)
+    {
+        this->set(rhs);
+    }
+
+	QefData& QefData::operator=(const QefData& rhs)
+	{
+		this->set(rhs);
+		return *this;
+	}
+
+    void QefData::add(const QefData &rhs)
+    {
+        this->ata_00 += rhs.ata_00;
+        this->ata_01 += rhs.ata_01;
+        this->ata_02 += rhs.ata_02;
+        this->ata_11 += rhs.ata_11;
+        this->ata_12 += rhs.ata_12;
+        this->ata_22 += rhs.ata_22;
+        this->atb_x += rhs.atb_x;
+        this->atb_y += rhs.atb_y;
+        this->atb_z += rhs.atb_z;
+        this->btb += rhs.btb;
+        this->massPoint_x += rhs.massPoint_x;
+        this->massPoint_y += rhs.massPoint_y;
+        this->massPoint_z += rhs.massPoint_z;
+        this->numPoints += rhs.numPoints;
+    }
+
+    void QefData::clear()
+    {
+        this->set(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    void QefData::set(const float ata_00, const float ata_01,
+                      const float ata_02, const float ata_11, const float ata_12,
+                      const float ata_22, const float atb_x, const float atb_y,
+                      const float atb_z, const float btb, const float massPoint_x,
+                      const float massPoint_y, const float massPoint_z,
+                      const int numPoints)
+    {
+        this->ata_00 = ata_00;
+        this->ata_01 = ata_01;
+        this->ata_02 = ata_02;
+        this->ata_11 = ata_11;
+        this->ata_12 = ata_12;
+        this->ata_22 = ata_22;
+        this->atb_x = atb_x;
+        this->atb_y = atb_y;
+        this->atb_z = atb_z;
+        this->btb = btb;
+        this->massPoint_x = massPoint_x;
+        this->massPoint_y = massPoint_y;
+        this->massPoint_z = massPoint_z;
+        this->numPoints = numPoints;
+    }
+
+    void QefData::set(const QefData &rhs)
+    {
+        this->set(rhs.ata_00, rhs.ata_01, rhs.ata_02, rhs.ata_11, rhs.ata_12,
+                  rhs.ata_22, rhs.atb_x, rhs.atb_y, rhs.atb_z, rhs.btb,
+                  rhs.massPoint_x, rhs.massPoint_y, rhs.massPoint_z,
+                  rhs.numPoints);
+    }
+
+#ifndef NO_OSTREAM
+    std::ostream &operator<<(std::ostream &os, const QefData &qef)
+    {
+        SMat3 ata;
+        Vec3 atb, mp;
+        ata.setSymmetric(qef.ata_00, qef.ata_01, qef.ata_02, qef.ata_11,
+                         qef.ata_12, qef.ata_22);
+        atb.set(qef.atb_x, qef.atb_y, qef.atb_z);
+        mp.set(qef.massPoint_x, qef.massPoint_y, qef.massPoint_z);
+
+        if (qef.numPoints > 0) {
+            VecUtils::scale(mp, 1.0f / qef.numPoints);
+        }
+
+        os << "QefData [ " << std::endl
+           << " ata =" << std::endl <<  ata << "," << std::endl
+           << " atb = " << atb << "," << std::endl
+           << " btb = " << qef.btb << "," << std::endl
+           << " massPoint = " << mp << "," << std::endl
+           << " numPoints = " << qef.numPoints << "]";
+        return os;
+    }
+#endif
+
+    QefSolver::QefSolver() : data(), ata(), atb(), massPoint(), x(),
+        hasSolution(false) {}
+
+    static void normalize(float &nx, float &ny, float &nz)
+    {
+        Vec3 tmpv(nx, ny, nz);
+        VecUtils::normalize(tmpv);
+        nx = tmpv.x;
+        ny = tmpv.y;
+        nz = tmpv.z;
+    }
+
+    void QefSolver::add(const float px, const float py, const float pz,
+                        float nx, float ny, float nz)
+    {
+        this->hasSolution = false;
+        normalize(nx, ny, nz);
+        this->data.ata_00 += nx * nx;
+        this->data.ata_01 += nx * ny;
+        this->data.ata_02 += nx * nz;
+        this->data.ata_11 += ny * ny;
+        this->data.ata_12 += ny * nz;
+        this->data.ata_22 += nz * nz;
+        const float dot = nx * px + ny * py + nz * pz;
+        this->data.atb_x += dot * nx;
+        this->data.atb_y += dot * ny;
+        this->data.atb_z += dot * nz;
+        this->data.btb += dot * dot;
+        this->data.massPoint_x += px;
+        this->data.massPoint_y += py;
+        this->data.massPoint_z += pz;
+        ++this->data.numPoints;
+    }
+
+    void QefSolver::add(const Vec3 &p, const Vec3 &n)
+    {
+        this->add(p.x, p.y, p.z, n.x, n.y, n.z);
+    }
+
+    void QefSolver::add(const QefData &rhs)
+    {
+        this->hasSolution = false;
+        this->data.add(rhs);
+    }
+
+	QefData QefSolver::getData()
+	{
+		return data;
+	}
+
+    float QefSolver::getError()
+    {
+        if (!this->hasSolution) {
+            throw std::runtime_error("illegal state");
+        }
+
+        return this->getError(this->x);
+    }
+
+    float QefSolver::getError(const Vec3 &pos)
+    {
+        if (!this->hasSolution) {
+            this->setAta();
+            this->setAtb();
+        }
+
+        Vec3 atax;
+        MatUtils::vmul_symmetric(atax, this->ata, pos);
+        return VecUtils::dot(pos, atax) - 2 * VecUtils::dot(pos, this->atb)
+               + this->data.btb;
+    }
+
+    void QefSolver::reset()
+    {
+        this->hasSolution = false;
+        this->data.clear();
+    }
+
+    void QefSolver::setAta()
+    {
+        this->ata.setSymmetric(this->data.ata_00, this->data.ata_01,
+                               this->data.ata_02, this->data.ata_11, this->data.ata_12,
+                               this->data.ata_22);
+    }
+
+    void QefSolver::setAtb()
+    {
+        this->atb.set(this->data.atb_x, this->data.atb_y, this->data.atb_z);
+    }
+
+    float QefSolver::solve(Vec3 &outx, const float svd_tol,
+                            const int svd_sweeps, const float pinv_tol)
+    {
+        if (this->data.numPoints == 0) {
+            throw std::invalid_argument("...");
+        }
+
+        this->massPoint.set(this->data.massPoint_x, this->data.massPoint_y,
+                            this->data.massPoint_z);
+        VecUtils::scale(this->massPoint, 1.0f / this->data.numPoints);
+        this->setAta();
+        this->setAtb();
+        Vec3 tmpv;
+        MatUtils::vmul_symmetric(tmpv, this->ata, this->massPoint);
+        VecUtils::sub(this->atb, this->atb, tmpv);
+        this->x.clear();
+        const float result = Svd::solveSymmetric(this->ata, this->atb,
+                              this->x, svd_tol, svd_sweeps, pinv_tol);
+        VecUtils::addScaled(this->x, 1, this->massPoint);
+        this->setAtb();
+        outx.set(x);
+        this->hasSolution = true;
+        return result;
+    }
+}
+```
+
+### DualContouringSample/qef.h
+```
+/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+#ifndef QEF_H
+#define QEF_H
+#ifndef NO_OSTREAM
+#include <iostream>
+#endif
+
+#include "svd.h"
+namespace svd
+{
+    class QefData
+    {
+    public:
+        float ata_00, ata_01, ata_02, ata_11, ata_12, ata_22;
+        float atb_x, atb_y, atb_z;
+        float btb;
+        float massPoint_x, massPoint_y, massPoint_z;
+        int numPoints;
+
+        QefData();
+
+        QefData(const float ata_00, const float ata_01,
+                const float ata_02, const float ata_11, const float ata_12,
+                const float ata_22, const float atb_x, const float atb_y,
+                const float atb_z, const float btb, const float massPoint_x,
+                const float massPoint_y, const float massPoint_z,
+                const int numPoints) ;
+
+        void add(const QefData &rhs) ;
+
+        void clear() ;
+
+        void set(const float ata_00, const float ata_01,
+                 const float ata_02, const float ata_11, const float ata_12,
+                 const float ata_22, const float atb_x, const float atb_y,
+                 const float atb_z, const float btb, const float massPoint_x,
+                 const float massPoint_y, const float massPoint_z,
+                 const int numPoints) ;
+
+        void set(const QefData &rhs);
+
+        QefData(const QefData &rhs);
+        QefData &operator= (const QefData &rhs);
+    };
+#ifndef NO_OSTREAM
+    std::ostream &operator<<(std::ostream &os, const QefData &d) ;
+#endif
+    class QefSolver
+    {
+    private:
+        QefData data;
+        SMat3 ata;
+        Vec3 atb, massPoint, x;
+        bool hasSolution;
+    public:
+        QefSolver() ;
+    public:
+
+		const Vec3& getMassPoint() const { return massPoint; }
+
+        void add(const float px, const float py, const float pz,
+                 float nx, float ny, float nz) ;
+        void add(const Vec3 &p, const Vec3 &n);
+        void add(const QefData &rhs) ;
+		QefData getData() ;
+        float getError();
+        float getError(const Vec3 &pos);
+        void reset();
+        float solve(Vec3 &outx, const float svd_tol,
+                     const int svd_sweeps, const float pinv_tol) ;
+    private:
+        QefSolver(const QefSolver &rhs);
+        QefSolver &operator=(const QefSolver &rhs);
+        void setAta();
+        void setAtb() ;
+    };
+};
+#endif
+```
+
+### DualContouringSample/shader.frag
+```
+#version 330
+
+smooth in vec3 vertexColour;
+smooth in vec3 vertexNormal;
+
+uniform int useUniformColour;
+uniform vec4 colour;
+
+void main()
+{
+	if (useUniformColour > 0)
+	{
+		gl_FragColor = colour;
+	}
+	else
+	{	
+		vec3 lightDir = -normalize(vec3(1, 5, -5));
+		float d = dot(vertexNormal, -lightDir);
+		d = max(0.2, d);
+		gl_FragColor = vec4(vertexColour, 1) * d;
+	}
+}
+```
+
+### DualContouringSample/shader.vert
+```
+#version 330
+
+layout(location=0) in vec3 position;
+layout(location=1) in vec3 normal;
+
+uniform mat4 MVP;
+smooth out vec3 vertexColour;
+smooth out vec3 vertexNormal;
+
+void main()
+{
+	vertexColour = vec3(0.7f, 0.f, 0.f);
+	vertexNormal = normal;
+
+	gl_Position = MVP * vec4(position, 1);
+}
+```
+
+### DualContouringSample/svd.cpp
+```
+/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+#include "svd.h"
+#include <math.h>
+
+namespace svd
+{
+
+    Mat3::Mat3()
+    {
+        this->clear();
+    }
+
+    Mat3::Mat3(const float m00, const float m01, const float m02,
+               const float m10, const float m11, const float m12,
+               const float m20, const float m21, const float m22)
+    {
+        this->set(m00, m01, m02, m10, m11, m12, m20, m21, m22);
+    }
+
+    Mat3::Mat3(const Mat3 &rhs)
+    {
+        this->set(rhs);
+    }
+
+    void Mat3::clear()
+    {
+        this->set(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    void Mat3::set(const float m00, const float m01, const float m02,
+                   const float m10, const float m11, const float m12,
+                   const float m20, const float m21, const float m22)
+    {
+        this->m00 = m00;
+        this->m01 = m01;
+        this->m02 = m02;
+        this->m10 = m10;
+        this->m11 = m11;
+        this->m12 = m12;
+        this->m20 = m20;
+        this->m21 = m21;
+        this->m22 = m22;
+    }
+
+    void Mat3::set(const Mat3 &rhs)
+    {
+        this->set(rhs.m00, rhs.m01, rhs.m02, rhs.m10, rhs.m11, rhs.m12, rhs.m20,
+                  rhs.m21, rhs.m22);
+    }
+
+    void Mat3::setSymmetric(const SMat3 &rhs)
+    {
+        this->setSymmetric(rhs.m00, rhs.m01, rhs.m02, rhs.m11, rhs.m12, rhs.m22);
+    }
+
+    void Mat3::setSymmetric(const float a00, const float a01, const float a02,
+                            const float a11, const float a12, const float a22)
+    {
+        this->set(a00, a01, a02, a01, a11, a12, a02, a12, a22);
+    }
+
+    SMat3::SMat3()
+    {
+        this->clear();
+    }
+
+    SMat3::SMat3(const float m00, const float m01, const float m02,
+                 const float m11, const float m12, const float m22)
+    {
+        this->setSymmetric(m00, m01, m02, m11, m12, m22);
+    }
+
+    SMat3::SMat3(const SMat3 &rhs)
+    {
+        this->setSymmetric(rhs);
+    }
+
+    void SMat3::clear()
+    {
+        this->setSymmetric(0, 0, 0, 0, 0, 0);
+    }
+
+    void SMat3::setSymmetric(const SMat3 &rhs)
+    {
+        this->setSymmetric(rhs.m00, rhs.m01, rhs.m02, rhs.m11, rhs.m12, rhs.m22);
+    }
+
+    void SMat3::setSymmetric(const float a00, const float a01, const float a02,
+                             const float a11, const float a12, const float a22)
+    {
+        this->m00 = a00;
+        this->m01 = a01;
+        this->m02 = a02;
+        this->m11 = a11;
+        this->m12 = a12;
+        this->m22 = a22;
+    }
+
+    Vec3::Vec3() : x(0), y(0), z(0) { }
+
+    Vec3::Vec3(const Vec3 &rhs)// : Vec3()
+    {
+        this->set(rhs);
+    }
+
+    Vec3::Vec3(const float x, const float y, const float z)// : Vec3()
+    {
+        this->set(x, y, z);
+    }
+
+    void Vec3::clear()
+    {
+        this->set(0, 0, 0);
+    }
+
+    void Vec3::set(const float x, const float y, const float z)
+    {
+        this->x = x;
+        this->y = y;
+        this->z = z;
+    }
+
+    void Vec3::set(const Vec3 &rhs)
+    {
+        this->set(rhs.x, rhs.y, rhs.z);
+    }
+
+#ifndef NO_OSTREAM
+    std::ostream &operator<<(std::ostream &os, const Mat3 &m)
+    {
+        os << "[[" << m.m00 << ", " << m.m01 << ", " << m.m02 << "]" <<
+           std::endl;
+        os << " [" << m.m10 << ", " << m.m11 << ", " << m.m12 << "]" <<
+           std::endl;
+        os << " [" << m.m20 << ", " << m.m21 << ", " << m.m22 << "]]";
+        return os;
+    }
+
+    std::ostream &operator<<(std::ostream &os, const SMat3 &m)
+    {
+        os << "[[" << m.m00 << ", " << m.m01 << ", " << m.m02 << "]" <<
+           std::endl;
+        os << " [" << m.m01 << ", " << m.m11 << ", " << m.m12 << "]" <<
+           std::endl;
+        os << " [" << m.m02 << ", " << m.m12 << ", " << m.m22 << "]]";
+        return os;
+    }
+
+    std::ostream &operator<<(std::ostream &os, const Vec3 &v)
+    {
+        os << "[" << v.x << ", " << v.y << ", " << v.z << "]";
+        return os;
+    }
+#endif
+
+    float MatUtils::fnorm(const Mat3 &a)
+    {
+        return sqrt((a.m00 * a.m00) + (a.m01 * a.m01) + (a.m02 * a.m02)
+                    + (a.m10 * a.m10) + (a.m11 * a.m11) + (a.m12 * a.m12)
+                    + (a.m20 * a.m20) + (a.m21 * a.m21) + (a.m22 * a.m22));
+    }
+
+    float MatUtils::fnorm(const SMat3 &a)
+    {
+        return sqrt((a.m00 * a.m00) + (a.m01 * a.m01) + (a.m02 * a.m02)
+                    + (a.m01 * a.m01) + (a.m11 * a.m11) + (a.m12 * a.m12)
+                    + (a.m02 * a.m02) + (a.m12 * a.m12) + (a.m22 * a.m22));
+    }
+
+    float MatUtils::off(const Mat3 &a)
+    {
+        return sqrt((a.m01 * a.m01) + (a.m02 * a.m02) + (a.m10 * a.m10)
+                    + (a.m12 * a.m12) + (a.m20 * a.m20) + (a.m21 * a.m21));
+    }
+
+    float MatUtils::off(const SMat3 &a)
+    {
+        return sqrt(2 * ((a.m01 * a.m01) + (a.m02 * a.m02) + (a.m12 * a.m12)));
+    }
+
+    void MatUtils::mmul(Mat3 &out, const Mat3 &a, const Mat3 &b)
+    {
+        out.set(a.m00 * b.m00 + a.m01 * b.m10 + a.m02 * b.m20,
+                a.m00 * b.m01 + a.m01 * b.m11 + a.m02 * b.m21,
+                a.m00 * b.m02 + a.m01 * b.m12 + a.m02 * b.m22,
+                a.m10 * b.m00 + a.m11 * b.m10 + a.m12 * b.m20,
+                a.m10 * b.m01 + a.m11 * b.m11 + a.m12 * b.m21,
+                a.m10 * b.m02 + a.m11 * b.m12 + a.m12 * b.m22,
+                a.m20 * b.m00 + a.m21 * b.m10 + a.m22 * b.m20,
+                a.m20 * b.m01 + a.m21 * b.m11 + a.m22 * b.m21,
+                a.m20 * b.m02 + a.m21 * b.m12 + a.m22 * b.m22);
+    }
+
+    void MatUtils::mmul_ata(SMat3 &out, const Mat3 &a)
+    {
+        out.setSymmetric(a.m00 * a.m00 + a.m10 * a.m10 + a.m20 * a.m20,
+                         a.m00 * a.m01 + a.m10 * a.m11 + a.m20 * a.m21,
+                         a.m00 * a.m02 + a.m10 * a.m12 + a.m20 * a.m22,
+                         a.m01 * a.m01 + a.m11 * a.m11 + a.m21 * a.m21,
+                         a.m01 * a.m02 + a.m11 * a.m12 + a.m21 * a.m22,
+                         a.m02 * a.m02 + a.m12 * a.m12 + a.m22 * a.m22);
+    }
+
+    void MatUtils::transpose(Mat3 &out, const Mat3 &a)
+    {
+        out.set(a.m00, a.m10, a.m20, a.m01, a.m11, a.m21, a.m02, a.m12, a.m22);
+    }
+
+    void MatUtils::vmul(Vec3 &out, const Mat3 &a, const Vec3 &v)
+    {
+        out.x = (a.m00 * v.x) + (a.m01 * v.y) + (a.m02 * v.z);
+        out.y = (a.m10 * v.x) + (a.m11 * v.y) + (a.m12 * v.z);
+        out.z = (a.m20 * v.x) + (a.m21 * v.y) + (a.m22 * v.z);
+    }
+
+    void MatUtils::vmul_symmetric(Vec3 &out, const SMat3 &a, const Vec3 &v)
+    {
+        out.x = (a.m00 * v.x) + (a.m01 * v.y) + (a.m02 * v.z);
+        out.y = (a.m01 * v.x) + (a.m11 * v.y) + (a.m12 * v.z);
+        out.z = (a.m02 * v.x) + (a.m12 * v.y) + (a.m22 * v.z);
+    }
+
+    void VecUtils::addScaled(Vec3 &v, const float s, const Vec3 &rhs)
+    {
+        v.x += s * rhs.x;
+        v.y += s * rhs.y;
+        v.z += s * rhs.z;
+    }
+
+    float VecUtils::dot(const Vec3 &a, const Vec3 &b)
+    {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    }
+
+    void VecUtils::normalize(Vec3 &v)
+    {
+        const float len2 = VecUtils::dot(v, v);
+
+        if (fabs(len2) < 1e-12) {
+            v.clear();
+        } else {
+            VecUtils::scale(v, 1 / sqrt(len2));
+        }
+    }
+
+    void VecUtils::scale(Vec3 &v, const float s)
+    {
+        v.x *= s;
+        v.y *= s;
+        v.z *= s;
+    }
+
+    void VecUtils::sub(Vec3 &c, const Vec3 &a, const Vec3 &b)
+    {
+        const float v0 = a.x - b.x;
+        const float v1 = a.y - b.y;
+        const float v2 = a.z - b.z;
+        c.x = v0;
+        c.y = v1;
+        c.z = v2;
+    }
+
+    void Givens::rot01_post(Mat3 &m, const float c, const float s)
+    {
+        const float m00 = m.m00, m01 = m.m01, m10 = m.m10, m11 = m.m11, m20 = m.m20,
+                     m21 = m.m21;
+        m.set(c * m00 - s * m01, s * m00 + c * m01, m.m02, c * m10 - s * m11,
+              s * m10 + c * m11, m.m12, c * m20 - s * m21, s * m20 + c * m21, m.m22);
+    }
+
+    void Givens::rot02_post(Mat3 &m, const float c, const float s)
+    {
+        const float m00  = m.m00, m02  = m.m02, m10  = m.m10, m12  = m.m12,
+                     m20 = m.m20, m22  = m.m22 ;
+        m.set(c * m00 - s * m02, m.m01, s * m00 + c * m02, c * m10 - s * m12, m.m11,
+              s * m10 + c * m12, c * m20 - s * m22, m.m21, s * m20 + c * m22);
+    }
+
+    void Givens::rot12_post(Mat3 &m, const float c, const float s)
+    {
+        const float m01  = m.m01, m02  = m.m02, m11  = m.m11, m12  = m.m12,
+                     m21  = m.m21, m22  = m.m22;
+        m.set(m.m00, c * m01 - s * m02, s * m01 + c * m02, m.m10, c * m11 - s * m12,
+              s * m11 + c * m12, m.m20, c * m21 - s * m22, s * m21 + c * m22);
+    }
+
+    static void calcSymmetricGivensCoefficients(const float a_pp,
+            const float a_pq, const float a_qq, float &c, float &s)
+    {
+        if (a_pq == 0) {
+            c = 1;
+            s = 0;
+            return;
+        }
+
+        const float tau = (a_qq - a_pp) / (2 * a_pq);
+        const float stt = sqrt(1.0f + tau * tau);
+        const float tan = 1.0f / ((tau >= 0) ? (tau + stt) : (tau - stt));
+        c = 1.0f / sqrt(1.f + tan * tan);
+        s = tan * c;
+    }
+
+    void Schur2::rot01(SMat3 &m, float &c, float &s)
+    {
+        svd::calcSymmetricGivensCoefficients(m.m00, m.m01, m.m11, c, s);
+        const float cc = c * c;
+        const float ss = s * s;
+        const float mix = 2 * c * s * m.m01;
+        m.setSymmetric(cc * m.m00 - mix + ss * m.m11, 0, c * m.m02 - s * m.m12,
+                       ss * m.m00 + mix + cc * m.m11, s * m.m02 + c * m.m12, m.m22);
+    }
+
+    void Schur2::rot02(SMat3 &m, float &c, float &s)
+    {
+        svd::calcSymmetricGivensCoefficients(m.m00, m.m02, m.m22, c, s);
+        const float cc = c * c;
+        const float ss = s * s;
+        const float mix = 2 * c * s * m.m02;
+        m.setSymmetric(cc * m.m00 - mix + ss * m.m22, c * m.m01 - s * m.m12, 0,
+                       m.m11, s * m.m01 + c * m.m12, ss * m.m00 + mix + cc * m.m22);
+    }
+
+    void Schur2::rot12(SMat3 &m, float &c, float &s)
+    {
+        svd::calcSymmetricGivensCoefficients(m.m11, m.m12, m.m22, c, s);
+        const float cc = c * c;
+        const float ss = s * s;
+        const float mix = 2 * c * s * m.m12;
+        m.setSymmetric(m.m00, c * m.m01 - s * m.m02, s * m.m01 + c * m.m02,
+                       cc * m.m11 - mix + ss * m.m22, 0, ss * m.m11 + mix + cc * m.m22);
+    }
+
+    static void rotate01(SMat3 &vtav, Mat3 &v)
+    {
+        if (vtav.m01 == 0) {
+            return;
+        }
+
+        float c, s;
+        Schur2::rot01(vtav, c, s);
+        Givens::rot01_post(v, c, s);
+    }
+
+    static void rotate02(SMat3 &vtav, Mat3 &v)
+    {
+        if (vtav.m02 == 0) {
+            return;
+        }
+
+        float c, s;
+        Schur2::rot02(vtav, c, s);
+        Givens::rot02_post(v, c, s);
+    }
+
+    static void rotate12(SMat3 &vtav, Mat3 &v)
+    {
+        if (vtav.m12 == 0) {
+            return;
+        }
+
+        float c, s;
+        Schur2::rot12(vtav, c, s);
+        Givens::rot12_post(v, c, s);
+    }
+
+    void Svd::getSymmetricSvd(const SMat3 &a, SMat3 &vtav, Mat3 &v,
+                              const float tol,
+                              const int max_sweeps)
+    {
+        vtav.setSymmetric(a);
+        v.set(1, 0, 0, 0, 1, 0, 0, 0, 1);
+        const float delta = tol * MatUtils::fnorm(vtav);
+
+        for (int i = 0; i < max_sweeps
+                && MatUtils::off(vtav) > delta; ++i) {
+            rotate01(vtav, v);
+            rotate02(vtav, v);
+            rotate12(vtav, v);
+        }
+    }
+
+    static float calcError(const Mat3 &A, const Vec3 &x,
+                            const Vec3 &b)
+    {
+        Vec3 vtmp;
+        MatUtils::vmul(vtmp, A, x);
+        VecUtils::sub(vtmp, b, vtmp);
+        return VecUtils::dot(vtmp, vtmp);
+    }
+
+    static float calcError(const SMat3 &origA, const Vec3 &x,
+                            const Vec3 &b)
+    {
+        Mat3 A;
+        Vec3 vtmp;
+        A.setSymmetric(origA);
+        MatUtils::vmul(vtmp, A, x);
+        VecUtils::sub(vtmp, b, vtmp);
+        return VecUtils::dot(vtmp, vtmp);
+    }
+
+    static float pinv(const float x, const float tol)
+    {
+        return (fabs(x) < tol || fabs(1 / x) < tol) ? 0 : (1 / x);
+    }
+
+    void Svd::pseudoinverse(Mat3 &out, const SMat3 &d, const Mat3 &v,
+                            const float tol)
+    {
+        const float d0 = pinv(d.m00, tol), d1 = pinv(d.m11, tol), d2 = pinv(d.m22,
+                          tol);
+        out.set(v.m00 * d0 * v.m00 + v.m01 * d1 * v.m01 + v.m02 * d2 * v.m02,
+                v.m00 * d0 * v.m10 + v.m01 * d1 * v.m11 + v.m02 * d2 * v.m12,
+                v.m00 * d0 * v.m20 + v.m01 * d1 * v.m21 + v.m02 * d2 * v.m22,
+                v.m10 * d0 * v.m00 + v.m11 * d1 * v.m01 + v.m12 * d2 * v.m02,
+                v.m10 * d0 * v.m10 + v.m11 * d1 * v.m11 + v.m12 * d2 * v.m12,
+                v.m10 * d0 * v.m20 + v.m11 * d1 * v.m21 + v.m12 * d2 * v.m22,
+                v.m20 * d0 * v.m00 + v.m21 * d1 * v.m01 + v.m22 * d2 * v.m02,
+                v.m20 * d0 * v.m10 + v.m21 * d1 * v.m11 + v.m22 * d2 * v.m12,
+                v.m20 * d0 * v.m20 + v.m21 * d1 * v.m21 + v.m22 * d2 * v.m22);
+    }
+
+    float Svd::solveSymmetric(const SMat3 &A, const Vec3 &b, Vec3 &x,
+                               const float svd_tol, const int svd_sweeps, const float pinv_tol)
+    {
+        Mat3 mtmp, pinv, V;
+        SMat3 VTAV;
+        Svd::getSymmetricSvd(A, VTAV, V, svd_tol, svd_sweeps);
+        Svd::pseudoinverse(pinv, VTAV, V, pinv_tol);
+        MatUtils::vmul(x, pinv, b);
+        return svd::calcError(A, x, b);
+    }
+
+    float
+    LeastSquares::solveLeastSquares(const Mat3 &a, const Vec3 &b, Vec3 &x,
+                                    const float svd_tol, const int svd_sweeps, const float pinv_tol)
+    {
+        Mat3 at;
+        SMat3 ata;
+        Vec3 atb;
+        MatUtils::transpose(at, a);
+        MatUtils::mmul_ata(ata, a);
+        MatUtils::vmul(atb, at, b);
+        return Svd::solveSymmetric(ata, atb, x, svd_tol, svd_sweeps, pinv_tol);
+    }
+
+}
+```
+
+### DualContouringSample/svd.h
+```
+/*
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * For more information, please refer to <http://unlicense.org/>
+ */
+#ifndef SVD_H
+#define SVD_H
+#ifndef NO_OSTREAM
+#include <iostream>
+#endif
+
+namespace svd
+{
+    class SMat3
+    {
+    public:
+        float m00, m01, m02, m11, m12, m22;
+    public:
+        SMat3();
+        SMat3(const float m00, const float m01, const float m02,
+              const float m11, const float m12, const float m22);
+        void clear() ;
+        void setSymmetric(const float m00, const float m01, const float m02,
+                          const float m11,
+                          const float m12, const float m22) ;
+        void setSymmetric(const SMat3 &rhs) ;
+    private:
+        SMat3(const SMat3 &rhs);
+        SMat3 &operator=(const SMat3 &rhs);
+    };
+    class Mat3
+    {
+    public:
+        float m00, m01, m02, m10, m11, m12, m20, m21, m22;
+    public:
+        Mat3();
+        Mat3(const float m00, const float m01, const float m02,
+             const float m10, const float m11, const float m12,
+             const float m20, const float m21, const float m22);
+        void clear() ;
+        void set(const float m00, const float m01, const float m02,
+                 const float m10, const float m11, const float m12,
+                 const float m20, const float m21, const float m22) ;
+        void set(const Mat3 &rhs) ;
+        void setSymmetric(const float a00, const float a01, const float a02,
+                          const float a11, const float a12, const float a22) ;
+        void setSymmetric(const SMat3 &rhs);
+    private:
+        Mat3(const Mat3 &rhs);
+        Mat3 &operator=(const Mat3 &rhs);
+    };
+    class Vec3
+    {
+    public:
+        float x, y, z;
+    public:
+        Vec3();
+        Vec3(const float x, const float y, const float z);
+        void clear();
+        void set(const float x, const float y, const float z);
+        void set(const Vec3 &rhs);
+    private:
+        Vec3(const Vec3 &rhs);
+        Vec3 &operator=(const Vec3 &rhs);
+    };
+#ifndef NO_OSTREAM
+    std::ostream &operator<<(std::ostream &os, const Mat3 &m) ;
+    std::ostream &operator<<(std::ostream &os, const SMat3 &m) ;
+    std::ostream &operator<<(std::ostream &os, const Vec3 &v) ;
+#endif
+    class MatUtils
+    {
+    public:
+        static float fnorm(const Mat3 &a) ;
+        static float fnorm(const SMat3 &a) ;
+        static float off(const Mat3 &a) ;
+        static float off(const SMat3 &a) ;
+
+    public:
+        static void mmul(Mat3 &out, const Mat3 &a, const Mat3 &b) ;
+        static void mmul_ata(SMat3 &out, const Mat3 &a) ;
+        static void transpose(Mat3 &out, const Mat3 &a);
+        static void vmul(Vec3 &out, const Mat3 &a, const Vec3 &v) ;
+        static void vmul_symmetric(Vec3 &out, const SMat3 &a, const Vec3 &v) ;
+    };
+    class VecUtils
+    {
+    public:
+        static void addScaled(Vec3 &v, const float s, const Vec3 &rhs) ;
+        static float dot(const Vec3 &a, const Vec3 &b) ;
+        static void normalize(Vec3 &v) ;
+        static void scale(Vec3 &v, const float s) ;
+        static void sub(Vec3 &c, const Vec3 &a, const Vec3 &b) ;
+    };
+    class Givens
+    {
+    public:
+        static void rot01_post(Mat3 &m, const float c, const float s);
+        static void rot02_post(Mat3 &m, const float c, const float s);
+        static void rot12_post(Mat3 &m, const float c, const float s);
+    };
+    class Schur2
+    {
+    public:
+        static void rot01(SMat3 &out, float &c, float &s) ;
+        static void rot02(SMat3 &out, float &c, float &s) ;
+        static void rot12(SMat3 &out, float &c, float &s) ;
+    };
+    class Svd
+    {
+    public:
+        static void getSymmetricSvd(const SMat3 &a, SMat3 &vtav, Mat3 &v,
+                                    const float tol, const int max_sweeps);
+        static void pseudoinverse(Mat3 &out, const SMat3 &d, const Mat3 &v,
+                                  const float tol);
+        static float solveSymmetric(const SMat3 &A, const Vec3 &b, Vec3 &x,
+                                     const float svd_tol, const int svd_sweeps, const float pinv_tol);
+    };
+    class LeastSquares
+    {
+    public:
+        static float solveLeastSquares(const Mat3 &a, const Vec3 &b, Vec3 &x,
+                                        const float svd_tol, const int svd_sweeps, const float pinv_tol) ;
+    };
+};
+#endif
+```

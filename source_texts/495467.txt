@@ -1,0 +1,480 @@
+Beyond Reconstruction: A Physics Based Neural
+Deferred Shader for Photo-realistic Rendering⋆
+arXiv:2504.12273v2 [cs.CV] 24 Jun 2025
+Zhuo He1 , Paul Henderson1[0000−0002−5198−7445] , and Nicolas
+Pugeault1[0000−0002−3455−6280]
+School of Computing Science, University of Glasgow,
+Glasgow G12 8RZ, United Kingdom
+Abstract. Deep learning based rendering has achieved major improvements in photo-realistic image synthesis, with potential applications including visual effects in movies and photo-realistic scene building in video
+games. However, a significant limitation is the difficulty of decomposing
+the illumination and material parameters, which limits such methods to
+reconstructing an input scene, without any possibility to control these
+parameters. This paper introduces a novel physics based neural deferred
+shading pipeline to decompose the data-driven rendering process, learn
+a generalizable shading function to produce photo-realistic results for
+shading and relighting tasks; we also propose a shadow estimator to
+efficiently mimic shadowing effects. Our model achieves improved performance compared to classical models and a state-of-art neural shading
+model, and enables generalizable photo-realistic shading from arbitrary
+illumination input.
+Keywords: Neural rendering · Photo-realistic rendering · Re-lighting.
+1
+Introduction
+Photo-realism is a key goal of computer graphics [17], and is essential for creating
+immersive multimedia experiences and imagery indistinguishable from the real
+world. Significant advancements have been achieved in illumination representation, material appearance description, and high-precision geometric modeling [3,
+4, 6, 22]. These techniques can be defined as forward approaches, that study and
+model physical interactions between light and surfaces in the real world. However, they require approximations of complex real-world physics and calculations
+that can reduce the rendering fidelity; there still remain perceptible differences
+between synthesized and real-world images.
+In contrast, neural network-based approaches allow learning aspects of the
+rendering process from real-world data; these can be seen as inverse approaches
+or data-driven approaches, which reconstruct 3D information from 2D images.
+For example, Neural Radiance Fields [16] regress a scene radiance distribution
+⋆
+This paper is accepted for the 34th International Conference on Artificial Neural
+Networks (ICANN), in Kaunas (Lithuania), September 2025.
+2
+Zhuo He, Paul Henderson, and Nicolas Pugeault
+with a neural network by estimating color and density of sample points, then
+using volume rendering to construct images from novel viewpoints. Gaussian
+Splatting [12] uses lightweight 3D Gaussians as the primitive representation,
+with a fast approximate rasterization method to render these to pixels efficiently.
+Although these approaches can produce highly realistic images, they fit models
+that are specific to the content of individual scenes. They must be retrained from
+scratch for new scenes, and do not learn information that transfers or generalizes
+across scenes.
+Fig. 1: Example of rendering results from our physics based neural deferred shader.
+Another approach to photorealistic rendering is to use an auxiliary enhancement network to learn a mapping between the domain of traditionally rendered
+images and that of photorealistic images [13, 18]. As the initial rendering result
+lacks complete 3D scene information such as spatial distribution of illumination and 3D object positions, it is difficult for such post-hoc methods to learn a
+mapping to photorealistic images. In this work, we combine a deferred shading
+framework with a neural shading network, trained to directly regress pixel color
+from physically-based rendering (PBR) textures and light input, to achieve high
+fidelity rendering results. Our contributions are as follows:
+1. We propose a physics-based neural deferred shading pipeline that renders
+scenes with PBR textures (albedo, roughness, specular) and illumination
+(HDRI light map) to photo-realistic images (Fig. 1).
+2. We develop a neural shadow estimator to efficiently approximate realistic
+shadows, improving the final rendering result.
+3. We propose a new FFHQ256-PBR dataset which contains RGB images, material textures (albedo, roughness, specular), depth, screen space ambient
+occlusion and HDRI environment map.
+4. We conduct comprehensive experiments to compare our approach with existing shading models on multiple datasets, demonstrating its superior performance.
+Physics Based Neural Deferred Shader
+2
+3
+Related Work
+Photo-realistic Novel View Synthesis. Novel view synthesis is an application of the 3D reconstruction task, and recent learning-based techniques allow to
+reconstruct photo-realistic 3D scenes from posed images, and to synthesize high
+quality novel views from learned 3D information. Specifically, a series of works on
+Neural Radiance Field [7, 16, 19, 26] represent a single 3D scene using an implicit
+radiance field function, it samples points along camera rays, regressing color and
+density to reconstruct the view image. Other works on Gaussian splatting [12,
+19, 25, 27], on the other hand, draw inspiration from point-based rendering to use
+a splatting procedure to render pixel colors. They use lightweight 3D Gaussians
+as the primitive representation and achieve real-time novel view synthesis without sacrificing quality. Both of those approaches require overfitting to specific
+scenes and are difficult to generalize since they compose geometry, material and
+illumination together. In contrast, our work is based on the standard deferred
+rendering pipeline which learns the shading process that can render the arbitrary
+scene and producing photorealistic results.
+Photorealism Enhancement. Other works reduce the photo-realism gap between the traditional rendering output and real-world imagery by designing an
+enhancement model. Richter et al. [18] capture all shader inputs of the video
+game Grand Theft Auto 5 (GTA5) and design an adversarial learning process to
+improve the vividness of shading result by discriminating it with the real-world
+photo in a similar scene, enhancing the photorealism of render outcome. Kim
+et al. [13] use a neural network to improve the effect of the rendering outcome
+from a physically-based Cook-Torrance model, it does not use adversarial learning as it has the paired input and targets. However training a model to improve
+forward approaches (see Sec. 1) requires either unstable adversarial learning or
+is restricted by the limited input, as the initial rendering result has discarded
+much information, like the illumination angle, which would be valuable for the
+enhancement process. In contrast, we propose a more general process of shading, where a neural network regressor provides an atomic model of the shading
+process, calculating the RGB color of each rasterized shading point from highly
+informative PBR texture and illumination input, achieving better performance
+and explainability.
+Neural Deferred Rendering. In classical rendering, there are two ways to
+render a spatial point: forward shading and deferred shading. Forward shading
+directly renders each object in turn, and lights it according to all light sources
+in the scene. Deferred shading instead delays intensive rendering tasks, such as
+shading, to a later stage, only processing them for the visible points on camera screen, reducing the calculation complexity [3]. Neural rendering is typically
+based forward shading, albeit learning to represent a scene from sample imagery [2, 8, 20, 24, 28], however the deferred pipeline can also be used in neural
+rendering, which is advantageous as it avoids the non-differentiable rasterization
+process in classical rendering, and allows replacing classical shading formulae
+with a neural model learnt from data. Neural deferred rendering was first proposed in Thies et al. [21], which integrates the conventional real-time rendering
+4
+Zhuo He, Paul Henderson, and Nicolas Pugeault
+Fig. 2: The overall pipeline of our physics-based neural deferred shading. In data preprocessing (a), the input image is estimated for PBR textures (A: albedo, N: Normal,
+S: specular, R: roughness, D: depth, AO: Ambient Occlusion), IBL lightmap, field of
+view via pre-trained models. Then the estimated data are used to train the physics
+based neural shader (b). Subsequently a shadowing estimator (c) estimates the shadow
+map applied to the final shading result.
+pipeline with a learnable neural texture and a deferred neural renderer. Worchel
+et al. [23] extend the deferred neural renderer to tackle 3D reconstruction, using
+a differentiable rasterizer in the classical deferred rendering pipeline to reconstruct a triangle mesh from multi-view input. However, existing works on neural
+deferred shading do not consider the light-surface interaction during shading,
+and are not physics-based—thus unable to generalize to new illumination conditions. Our work redesigns the coordinate-based neural deferred shader [23] by
+incorporating the inbound light and bidirectional angle, regressing the shading
+result based on physically-meaningful information.
+3
+Method
+Image rendering aims to model how light interacts with surfaces [13], as described
+by the rendering equation:
+Z
+Lo (v) =
+F (v, l)Li (l)⟨n · l⟩dl
+(1)
+Ω
+where Lo (v) is the outbound radiance leaving in direction v; it is the integral of
+the incident light Li (l) from every possible direction l across the hemisphere Ω,
+centered around the surface normal n. F (v, l) is the Bidirectional Reflectance
+Distribution Function (BRDF) describing how the surface reflects light.
+In practice, approximations of this equation are used, limiting the photorealism of the rendering. We introduce physics-based neural deferred shading in this
+work, a novel framework for photorealistic rendering applied to human portraits.
+We use a neural network to regress the rendering equation with geometry, material and light inputs instead of using hand-coded approximations. An overview of
+our pipeline is presented in Fig. 2. We introduce the main approach in Sec. 3.1,
+then describe the loss functions in Sec. 3.2, and provide implementation details
+in Sec. 3.3.
+Physics Based Neural Deferred Shader
+5
+Fig. 3: Shading process of each point. Each spatial point would be acquired all PBR
+texture values to form the G-Buffer and sampling inbound light from HRDI map to
+get the high dimensional feature as the input of neural network.
+3.1
+Physics Based Neural Deferred Shading
+To approximate the rendering equation more precisely, our work redesigns previous neural deferred shaders [23] to incorporate PBR inputs (PBR materials,
+normal map, depth map, HDRI light map). Due to the lack of paired samples
+for PBR inputs and real-world images, we first create a new dataset for training
+and evaluation; then train our neural deferred shader and shadow estimator by
+minimizing the difference between rendered and ground truth images. During
+inference, our model is capable of rendering an arbitrary G-buffer containing
+physically-based material and geometry information, under a given HDRI lightmap, producing a photo-realistic image result.
+Dataset creation. We use the recent material and light predictor [13] to create
+our dataset from images. This includes physically-based rendering (PBR) material textures, normal map, depth map, screen-space ambient occlusion (SSAO)
+map and image-based lighting (IBL) environment map, where the PBR textures
+are 2D texture maps consisting of albedo, specular, roughness, combined with
+normal map and depth maps to form the G-Buffer (see Sec. 2). The light model
+is an equirectangular projection of a hemispherical HDR image that surrounds
+the object to provide the lighting. Moreover, calculating the outbound direction
+of each pixel requires the field-of-view (FOV) of the input image. We use a 3D
+Morphable Model (3DMM) to register input images and locate 3D landmarks on
+faces [5], which combined with projected 2D landmarks and acquired depth map,
+allows to estimate the FOV. Using this process, we extend the human face dataset
+FFHQ [11] into a new dataset called FFHQ256-PBR, consisting of 69,990 facial
+images with estimated PBR material textures, HDRI illumination and camera
+field-of-view. We manually remove failure cases (e.g. where background removal
+affects the head itself). Our main experiments focus on human faces due to their
+importance in many applications; however other object types are also supported
+in our rendering pipeline. We therefore collect a second dataset based on a subset
+6
+Zhuo He, Paul Henderson, and Nicolas Pugeault
+Fig. 4: Localized shadowing model: The light rays denoted by black arrows come from
+the lower hemisphere and would be filtered by the cosine term in the rendering equation, whereas the light rays denoted by colorful arrows are occluded by local geometry
+resulting in localized shadowing.
+(1,000 scenes) of the synthetic BlenderVault dataset [15]. For this, we estimate
+the relevant parameters using the inverse rendering approach proposed in [15].
+Shading process. We train the neural deferred shader to estimate the RGB
+color for each pixel, after which it can shade an arbitrary surface point during
+inference phase. Specifically, the shader processes each pixel of the G-Buffer
+separately (Fig. 3). Texture and normal information is represented in screen
+space and taken from the corresponding pixel, while illumination information is
+sampled from rays on the hemisphere around the 3D point found by casting a
+ray from the pixel into the scene.
+The neural shader’s input is inspired by the classical rendering equation
+(eq. 1), and consists of three material features corresponding to F term: albedo
+a ∈ [0, 1]3 , specular s ∈ [0, 1]1 and roughness r ∈ [0, 1]1 ; three geometric terms
+(as unit vectors): normal n ∈ [−1, 1]3 , inbound light direction l ∈ R3 and outbound light direction v ∈ R3 ; a single light feature: inbound light intensity Li ∈
+(R+ )3 . The per-pixel values of a, n, s, r form a geometry buffer (G-Buffer) that
+is concatenated with the n sampled inbound light rays {Li (l1 ), Li (l2 ), ..., Li (ln )}
+to form the input of a trainable neural shader with parameter θ. Accordingly,
+the neural shading function is:
+Z
+fθ (a, n, s, r, v, Li (l)⟨n · l⟩)dl ∈ [0, 1]3 , l ∈ Ω
+(2)
+Ω
+where Li (l)⟨n · l⟩ is the inbound light from upper hemisphere Ω + similar to
+Eqn. 1. Thus the neural shader first regresses outbound light due to each inbound
+light direction for each pixel, then calculates the mean of these over the sampled
+inbound rays to get the final result. Thus neural shader learns to approximate
+the integral of the shading calculation from the reconstruction loss.
+Shadowing process. The architecture proposed above does not account for
+how inbound light rays may be affected by self-occlusions—for example, the top
+of the head may shelter light rays incident to a point below the eye, casting a
+shadow. Fig. 4 illustrates this effect: light rays coming from the top side of the
+Physics Based Neural Deferred Shader
+7
+environment map are occluded by the top of the head. In practice, shadowing
+varies with differences in environment lighting: if the environment light map is
+even and smooth, screen space ambient occlusion (SSAO) can approximate the
+shadow effect well; conversely, if the environment light is highly anisotropic then
+the resulting hard shadows must be calculated by costly tracing of individual
+light paths. To calculate the shadow effect with a unified approach suitable for
+diverse light maps, we design a neural shadow estimator that learns to improve
+the shadowing result from our neural deferred shader. Specifically, a UNet-like
+neural network fη is designed to estimate the shadow map from the input of an
+unshadowed image Iˆunshadow and corresponding geometry information (normal
+map Inormal and SSAO map Issao ). The final shading result is the element-wise
+(Hadamard) product of the neural shader’s output and the estimated shadow
+map. The shadowing process is thus described by
+Iˆshadow = fη (Iˆunshadow , Inormal , Issao )
+Iˆrgb = Iˆunshadow ⊙ Iˆshadow
+(3)
+where Iˆshadow is the pixel-wise shadow map, η is parameters of the neural shadow
+estimator, Iˆrgb is the shadowed image.
+3.2
+Loss Function
+The proposed model is trained by solving the following minimisation for the
+neural network parameters θ:
+argmin Lappearance (a, n, s, r, v, Li )
+(4)
+θ
+where Lappearance compares the rendered pixel to the ground truth pixel at the
+corresponding position. a, n, s, r, v, Li are albedo, normal, specular, roughness,
+outbound direction, inbound light respectively.
+More specifically, we train our model in two stages, with Lappearance defined
+differently in each phase. In phase one, the model does not consider shadowing,
+(1)
+thus Lappearance is the shading loss defined by Eq. 5, which is an L1 loss calculating the average distance between prediction and ground truth for all foreground
+pixels, NS is the number of sampled pixels, and C is the RGB value of pixel.
+L(1)
+appearance =
+NS
+1 X
+∥Ci − Ĉi ∥1
+NS i=1
+ˆ
+L(2)
+appearance = ∥Irgb − Irgb ∥1
+(5)
+(6)
+In phase two, the neural deferred shader is frozen to produce an unshadowed image, which is fed to the shadow estimator through concatenating with
+the normal map (see Sec. 3.1), yielding the shadowed image Iˆrgb . An L1 loss
+(2)
+Lappearance (Eq. 6) calculates the residual between the shadowed image Iˆrgb and
+ground truth image Irgb for all pixels.
+8
+3.3
+Zhuo He, Paul Henderson, and Nicolas Pugeault
+Implementation Details
+We train each stage for 40 epochs, which balances efficiency and performance.
+We use the Adam optimizer [14], with parameters β1 = 0.9, β2 = 0.999, and a
+learning rate of 5 × 10−5 . We randomly sample 8,192 foreground pixels of each
+image to form each training batch; this provides enough diversity to avoid overfitting as the neural deferred shading works on a per-pixel basis and is agnostic to
+the overall scene structure. We uniformly sample 128 inbound light rays from the
+HDRI light map as input to the shader in each training step. Training converges
+within one day on a single NVIDIA GeForce RTX 3090 GPU. During inference,
+the physically based neural deferred shader can render an image in 1 second per
+frame.
+4
+Experiments
+We conducted comprehensive experiments to evaluate the performance of our
+neural deferred shading approach, comparing qualitatively and quantitatively
+against three baselines. The baseline models include classical shading models
+(the empirical Blinn-Phong model and the physics-based GGX model) as well
+as a recent learning-based model, neural deferred shader [23].
+Fig. 5: Quality comparison between different shading models. Blinn-Phong: BlinnPhong shading model; GGX: Trowbridge-Reitz GGX model; NDS: Neural deferred
+shader; PBNDS: Physics based neural deferred shader; GT: Ground truth image.
+Our model can reconstruct the ground truth scene with generalization and keep the
+photo-realism maximally through capturing the correct light-surface interaction.
+4.1
+Qualitative Evaluation
+We visually compare shading results produced by different shading models from
+similar inputs. We evaluate examples from two different datasets, a separate
+test set drawn from the FFHQ256-PBR for facial data and a subset of BlenderVault [15] for other object types. Figure 5 illustrates the results for both datasets,
+comparing our neural shader with the classical Blinn-Phong [1] and GGX [22]
+models. Our physical based neural deferred shader (PBNDS) reconstructs the
+image photo-realistically from the estimated materials and illumination, and the
+Physics Based Neural Deferred Shader
+9
+overall hue and light reflection are more realistic than classical models. In contrast, the Blinn-Phong model is an empirical model where the light reflection
+cannot produce a photorealistic result. The GGX model is based on micro-facet
+theory which requires the additional alignment for the incident light intensity to
+actualize the energy conservation, and is not suited for the estimated illumination application. We also compare our model to the state-of-art neural deferred
+shading (NDS) [23], and show that our approach can achieve similar quality
+to it. This is notable since ours is a generalized (scene-agnostic) model where
+NDS overfits a neural network separately to each scene, since it takes the scenedependent point coordinates as an input.
+Fig. 6: Rendering results with different HDRI maps. The first row shows HDRI maps
+used to relight the original head; the other rows show the resulting rendered images
+after relighting from different shading methods. The results show our neural shader
+allows the environment map to realistically influence the shading of the head.
+We next show how our model enables relighting images, by using recorded
+HDRI maps to render the image with different illumination. Specifically, we
+use our model trained from the previous section for both types of data but
+replace the HDRI map during rendering. All the new HDRI maps are captured
+in real-world scenes. We compare the relighting rendering results to classical
+rendering methods (Blinn-Phong, GGX) in Fig. 6. Our model correctly recovers
+the light-surface interaction within the scene with high fidelity, whereas the
+classical models do not work well in this inverse setting. Compared to rendering
+the scene with estimated illumination, the relighting test requires our model to
+adapt to real-world illumination inputs, which may lie outside the distribution
+of estimated illumination seen during training.
+4.2
+Quantitative Evaluation
+We also compare the rendered images to the ground-truth quantitatively. We
+conduct 500 tests in each experiment to measure the performance of each shading model, using data from the test set of FFHQ256-PBR and BlenderVault [15].
+To measure the realism of the shading result, we use Learned Perceptual Image
+Patch Similarity (LPIPS) [29] and Fréchet inception distance (FID) [9] as metrics; lower LPIPS and FID scores indicate better realism comparing ground truth
+10
+Zhuo He, Paul Henderson, and Nicolas Pugeault
+Table 1: Quantitative evaluation for shading/relighting experiments
+MSE ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+FP
+FP
+FP
+FP
+BV
+BV
+BV
+BV
+FID ↓
+FP
+BV
+Blinn-Phong
+0.078 0.044 11.90 14.94 0.623 0.784 0.181 0.080 0.244 0.239
+GGX
+0.127 0.055 9.11 13.35 0.489 0.753 0.273 0.114 0.368 0.227
+SD
+NDS (Overfitted) 0.005 0.001 29.68 38.53 0.885 0.988 0.062 0.027 0.179 0.037
+PBNDS (Ours) 0.007 0.002 24.61 29.47 0.919 0.936 0.032 0.025 0.056 0.113
+Blinn-Phong
+0.331 0.163
+RE GGX
+0.556 0.162
+PBNDS (Ours)
+- 0.090 0.117
+SD: Shading experiment; RE: Relighting experiment; FP: FFHQPBR dataset; BV: BlenderVault dataset
+Table 2: Comparison of training with different Table 3: Comparison of different
+model components
+training batch size
+PSNR ↑ GPU Mem. FLOPs(G)
+MSE ↓ PSNR ↑ SSIM ↑ LPIPS ↓ FID ↓
+Default Config.
+0.0046 24.4107 0.9167 0.0337 0.0607
++ Perc. Loss
+0.0052 24.0763 0.9298 0.0273 0.0441
++ SDO (w/o AO) 0.0041 24.6948 0.9194 0.0319 0.0559
++ SDO (AO)
+0.0039 25.0053 0.9247 0.0262 0.0240
+2048
+4096
+8192
+Full Res.
+21.74
+22.81
+24.83
+25.81
+2.98
+5.96
+11.91
+23.82
+0.64
+1.28
+2.56
+5.12
+and real world data. We also measure the Peak signal-to-noise ratio (PSNR) and
+Structural similarity index measure (SSIM), where higher PSNR or SSIM score
+indicates better reconstruction performance. As there is no paired ground-truth
+data for the relighting experiment, we only use FID score for evaluation.
+As shown in Tab. 1, our model exceeds classical shading models significantly
+in all metrics for both shading and relighting experiments, as the training process can adapt our model for the input with different data domain, especially for
+rendering the real world scene whose materials and illumination are estimated
+and not calibrated for classical models. Our model also outperforms the overfitted neural deferred shader model [23] in SSIM, LPIPS and FID for FFHQPBR
+dataset, and achieves competitive results in the less perceptually-relevant MSE
+and PSNR metrics for all datasets. We suggest this is caused by pixel-wise overfitting causing high-frequency noise especially for real-world images, that can be
+alleviated by the global shadowing process.
+4.3
+Ablation study
+We conducted an ablation study to evaluate the importance of the different
+components of our neural shading pipeline, following the same approach as in
+Sec. 3.1. We test our shading model with different configurations, each test follows a design similar to Sec. 4.2. The default configuration of our neural deferred shader lacks a shadow estimator, and uses a single reconstruction loss
+(as in Sec.3.2), ReLU activation function, positional encoding [16]; other tests
+add specific components to this default setting. We add a perceptual loss [10]
+in the second test and our shadowing process in the third. We see in Tab. 2
+Physics Based Neural Deferred Shader
+11
+that the perceptual loss improves results of perceptual metrics (SSIM, LPIPS,
+FID) but downgrades the reconstructive metrics (MSE, PSNR); the shadowing
+process without ambient occlusion (AO) can balance on both aspects, with AO
+the performance can be further improved to achieve the best result on most
+metrics with only slight degradation on SSIM metric, thus we use the default
+setting with shadowing process (AO) as the final design. We also compare the
+training result of different batch size and find 8,192 is the best choice to balance
+the model performance and training efficiency (see Tab. 3).
+5
+Conclusion
+We have presented a new method for photo-realistic rendering by using physicsbased neural deferred shading, demonstrating improved performance compared
+to existing methods. We showed our method can be used for effective relighting
+and rendering. We also proposed a novel human facial dataset with PBR material
+textures, FFHQ256-PBR, which can be used for future research on real-world
+rendering.
+Our method does not explicitly model the domain shift between synthetic,
+estimated and real-world data; although the relighting experiment proves it can
+handle real-world HDRI input, manually created 3D models still might be unsuitable for our shading model due to the, which could be addressed in future
+work by incorporating a domain adaptation process.
+References
+1. Blinn, J.F.: Models of light reflection for computer synthesized pictures. In: Proceedings of the 4th annual conference on Computer graphics and interactive techniques. pp. 192–198. SIGGRAPH ’77 (Jul 1977)
+2. Boss, M., et al.: Neural-PIL: Neural pre-integrated lighting for reflectance decomposition. In: Beygelzimer, A., et al. (eds.) Advances in Neural Information Processing
+Systems (2021)
+3. Deering, M., et al.: The triangle processor and normal vector shader: a VLSI system
+for high performance graphics. SIGGRAPH Comput. Graph. pp. 21–30 (Aug 1988)
+4. Dick, C., Schneider, J., Westermann, R.: Efficient geometry compression for gpubased decoding in realtime terrain rendering. In: Computer Graphics Forum.
+vol. 28, pp. 67–83. Wiley Online Library (2009)
+5. Feng, Y., et al.: Learning an animatable detailed 3D face model from in-the-wild
+images. ACM Trans. Graph. pp. 1–13 (Aug 2021)
+6. Guarini, G., Rossi, M., et al.: Pbr material: a comparison between rendering for
+accurate material color reproduction. a case study. Color and Colorimetry Multidisciplinary Contributions p. 38 (2024)
+7. Guo, Y.C., et al.: NeRFReN: Neural Radiance Fields with Reflections. In: 2022
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+pp. 18388–18397 (Jun 2022)
+8. Hadadan, S., et al.: Neural radiosity. ACM Trans. Graph. pp. 1–11 (Dec 2021)
+12
+Zhuo He, Paul Henderson, and Nicolas Pugeault
+9. Heusel, M., et al.: GANs Trained by a Two Time-Scale Update Rule Converge to a
+Local Nash Equilibrium. In: Advances in Neural Information Processing Systems.
+p. 6629–6640 (2017)
+10. Johnson, J., et al.: Perceptual Losses for Real-Time Style Transfer and SuperResolution. In: Leibe, B., et al. (eds.) Computer Vision – ECCV 2016, pp. 694–711.
+Springer International Publishing (2016)
+11. Karras, T., et al.: A Style-Based Generator Architecture for Generative Adversarial
+Networks. Conference on Computer Vision and Pattern Recognition (2019)
+12. Kerbl, B., et al.: 3D Gaussian Splatting for Real-Time Radiance Field Rendering.
+ACM Trans. Graph. pp. 1–14 (Aug 2023)
+13. Kim, H., et al.: SwitchLight: Co-Design of Physics-Driven Architecture and Pretraining Framework for Human Portrait Relighting. In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 25096–25106.
+IEEE (Jun 2024)
+14. Kingma, D.P., Ba, J.: Adam: A Method for Stochastic Optimization. In: ICLR
+(2015)
+15. Litman, Y., Patashnik, O., Deng, K., Agrawal, A., Zawar, R., la Torre, F.D., Tulsiani, S.: Materialfusion: Enhancing inverse rendering with material diffusion priors. In: 3DV (2025)
+16. Mildenhall, B., et al.: NeRF: Representing Scenes as Neural Radiance Fields for
+View Synthesis. In: Computer Vision – ECCV 2020: 16th European Conference,
+Glasgow, UK, August 23–28, 2020, Proceedings, Part I. pp. 405–421. Berlin, Heidelberg (Aug 2020)
+17. Newell, M.E., Blinn, J.F.: The progression of realism in computer generated images.
+In: Proceedings of the 1977 annual conference on - ACM ’77. pp. 444–448 (1977)
+18. Richter, S.R., et al.: Enhancing Photorealism Enhancement. IEEE Trans. Pattern
+Anal. Mach. Intell. pp. 1700–1715 (Feb 2023)
+19. Szymanowicz, S., et al.: Splatter Image: Ultra-Fast Single-View 3D Reconstruction.
+In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). pp. 10208–10217 (2024)
+20. Tewari, A., et al.: Advances in Neural Rendering. Computer Graphics Forum pp.
+703–735 (2022)
+21. Thies, J., et al.: Deferred neural rendering: image synthesis using neural textures.
+ACM Trans. Graph. (Jul 2019)
+22. Walter, B., et al.: Microfacet models for refraction through rough surfaces. In: Proceedings of the 18th Eurographics conference on Rendering Techniques. EGSR’07
+(Jun 2007)
+23. Worchel, M., et al.: Multi-View Mesh Reconstruction with Neural Deferred Shading. In: 2022 IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). pp. 6177–6187 (Jun 2022)
+24. Yao, Y., et al.: Neilf: Neural incident light field for physically-based material estimation. In: Computer Vision – ECCV 2022: 17th European Conference, Tel Aviv,
+Israel, October 23–27, 2022, Proceedings, Part XXXI. p. 700–716 (2022)
+25. Ye, K., et al.: 3D Gaussian Splatting with Deferred Reflection. In: Special Interest
+Group on Computer Graphics and Interactive Techniques Conference Conference
+Papers ’24. pp. 1–10 (Jul 2024)
+26. Yu, A., et al.: pixelNeRF: Neural Radiance Fields From One or Few Images.
+In: 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). pp. 4578–4587 (2021)
+Physics Based Neural Deferred Shader
+13
+27. Yu, Z., et al.: Mip-Splatting: Alias-free 3D Gaussian Splatting. In: 2024 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). pp. 19447–
+19456 (2024)
+28. Zeltner*, T., et al.: Real-time Neural Appearance Models. ACM Trans. Graph. pp.
+33:1–33:17 (Jun 2024)
+29. Zhang, R., et al.: The Unreasonable Effectiveness of Deep Features as a Perceptual Metric. In: 2018 IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 586–595. Salt Lake City, UT (Jun 2018)

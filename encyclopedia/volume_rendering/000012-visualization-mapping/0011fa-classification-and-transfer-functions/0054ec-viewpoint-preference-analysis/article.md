@@ -1,0 +1,114 @@
+# Viewpoint Preference Analysis
+
+Also called: Viewpoint Estimation for Volume Visualization, Viewing Map Generation
+
+## Overview
+Viewpoint Preference Analysis is a method for quantifying expert aesthetic and informational preferences in volume rendering by analyzing a database of existing rendered images. It recovers the camera viewpoints from these images using category-specific Convolutional Neural Networks (CNNs) and accumulates the resulting probability distributions to generate a "viewing map" [S1]. Unlike methods that optimize transfer functions or lighting parameters, this approach operates on the geometric configuration of the camera, identifying regions of high expert consensus (e.g., side views for fish, front views for vessels) to guide future visualization tasks [S1].
+
+## How it works
+**Inputs:**
+*   A database of rendered volume images collected from visualization journals and conferences, categorized by object type (e.g., fish, vessel, tooth, engine, head) [S1].
+*   Pre-trained category-specific CNNs capable of estimating camera parameters from 2D images [S1].
+
+**Outputs:**
+*   A viewing map: a 2D probability distribution over the sphere of possible viewpoints for a given volume category [S1].
+*   Estimated viewpoint parameters ($v_\mu, v_\sigma$) for each input image [S1].
+
+**Data Structures:**
+*   **Viewpoint Distribution:** Modeled as a bivariate Gaussian distribution $N(v_\mu, v_\sigma^2)$, where $v_\mu$ is the mean viewpoint (azimuth/elevation or quaternion) and $v_\sigma$ is the standard deviation representing uncertainty [S1].
+*   **Viewing Map:** A grid or continuous function representing the accumulated probability density of viewpoints for a specific category [S1].
+
+**Steps:**
+1.  **Database Collection:** Gather rendered images of volumes from expert sources (journals, conferences) and assign them to semantic categories [S1].
+2.  **Viewpoint Recovery:** For each image in the database, pass it through the trained category-specific CNN to estimate the camera viewpoint [S1].
+3.  **Verification:** Visually compare the rendered image generated from the recovered viewpoint against the original collected image to verify classification correctness [S1].
+4.  **Distribution Modeling:** Model the estimated viewpoint for each image as a bivariate Gaussian $N(v_\mu, v_\sigma^2)$ [S1].
+    *   If the visual comparison indicates a correct classification, the distribution is considered reliable.
+    *   If the image is misclassified (e.g., due to different projection types or non-uniform background colors), the standard deviation $v_\sigma$ will be very high, indicating low confidence in the mean $v_\mu$ [S1].
+5.  **Accumulation:** Accumulate the Gaussian distributions of all images within a category to generate the final viewing map [S1]. The resulting map resembles a Gaussian mixture model [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def viewpoint_preference_analysis(image_database, cnn_models):
+    """
+    Analyzes viewpoint preferences for a category of volume renderings.
+    
+    Args:
+        image_database: List of tuples (image, category, ground_truth_viewpoint_if_available)
+        cnn_models: Dictionary mapping category to trained CNN model
+        
+    Returns:
+        viewing_map: Accumulated probability distribution over viewpoints
+    """
+    accumulated_distributions = []
+    
+    for image, category in image_database:
+        # Step 2: Recover viewpoint using category-specific CNN
+        # The CNN outputs mean (v_mu) and standard deviation (v_sigma)
+        v_mu, v_sigma = cnn_models[category].estimate_viewpoint(image)
+        
+        # Step 3 & 4: Verification and Distribution Modeling
+        # In practice, visual verification is done by humans.
+        # For implementation, we assume a confidence score or error metric
+        # is available from the CNN or a validation step.
+        # If misclassified, v_sigma is high.
+        
+        # Create the bivariate Gaussian distribution N(v_mu, v_sigma^2)
+        # Note: v_mu is typically in spherical coordinates (theta, phi)
+        distribution = BivariateGaussian(mean=v_mu, std=v_sigma)
+        
+        accumulated_distributions.append(distribution)
+        
+    # Step 5: Accumulate distributions to generate viewing map
+    # The viewing map is the sum of all individual probability densities
+    viewing_map = sum(accumulated_distributions)
+    
+    return viewing_map
+
+class BivariateGaussian:
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+        
+    def probability_density(self, viewpoint):
+        """
+        Calculate the probability density at a given viewpoint.
+        Simplified Euclidean distance metric for spherical coordinates.
+        """
+        # Distance between viewpoints
+        dist_sq = distance_squared(self.mean, viewpoint)
+        # Gaussian PDF (unnormalized for accumulation)
+        return exp(-dist_sq / (2 * self.std**2))
+
+def distance_squared(v1, v2):
+    """
+    Calculate squared Euclidean distance between two viewpoints.
+    Assumes viewpoints are normalized vectors or in a local tangent plane.
+    """
+    return sum((a - b)**2 for a, b in zip(v1, v2))
+```
+
+**Parameters:**
+*   **CNN Architecture:** Category-specific models trained on volume rendering datasets [S1].
+*   **Gaussian Model:** Bivariate Gaussian is used to model viewpoint uncertainty [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Misclassification:** Images may be misclassified due to different projection types (e.g., perspective vs. orthographic) or non-uniform background colors [S1].
+*   **High Uncertainty:** Misclassified images exhibit very high $v_\sigma$, which naturally limits their influence on the final viewing map due to the low probability density of the Gaussian tail [S1].
+*   **Unknown Ground Truth:** Ground-truth viewpoints for collected images are often unknown, requiring visual verification rather than automated metrics [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the inference time of the CNNs for each image in the database. Accumulation is linear with respect to the number of images.
+*   **Memory Complexity:** Linear with respect to the number of images, storing the Gaussian parameters for each.
+*   **Strengths:** Provides a data-driven, expert-informed guide for camera placement. It automatically handles uncertainty via the Gaussian model, where misclassified or ambiguous images have low impact.
+*   **Limitations:** Requires a curated database of expert-rendered images. Performance depends on the accuracy of the CNNs. It does not account for dynamic scene changes or interactive lighting adjustments.
+*   **When to use:** When analyzing historical visualization data to understand expert preferences for specific volume categories (e.g., medical, scientific).
+*   **When not to use:** For real-time interactive visualization where viewpoint selection is user-driven, or when no prior database of expert renderings exists.
+
+## Background
+The method was introduced in the paper "CNNs Based Viewpoint Estimation for Volume Visualization" [S1]. It addresses the problem of how experts select viewpoints to maximize information or highlight features in volume renderings. By treating viewpoint selection as a classification problem, the authors leveraged deep learning to recover camera parameters from 2D images. The approach was validated on categories such as fish, vessel, tooth, engine, and head, revealing specific preferences (e.g., side views for fish to avoid occlusion, front views for vessels to highlight aneurysms) [S1].
+
+## Sources
+[S1] CNNs Based Viewpoint Estimation for Volume Visualization, https://doi.org/10.1145/3309993, fetched 2026-10-29

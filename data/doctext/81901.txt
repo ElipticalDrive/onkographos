@@ -1,0 +1,453 @@
+# OctaNeRF
+OPTIMIZED AND ADAPTIVE NEURAL RADIANCE FIELDS FOR REAL-TIME AND DATA-EFFICIENT SCENE RECONSTRUCTION
+
+### main.cpp
+```
+#include <Python.h>
+#include <opencv2/opencv.hpp>
+#include <iostream>
+
+// Assume float3 definition and CUDA kernel interface from our CUDA code:
+struct float3 {
+    float x, y, z;
+};
+
+extern "C" void launchRayTraversalKernel(const float* d_octree_data,
+                                           const float3* d_rays_origin,
+                                           const float3* d_rays_direction,
+                                           float3* d_output_colors,
+                                           int num_rays, float earlyThreshold);
+
+// Dummy implementations for GPU memory management functions:
+float* loadOctreeData() {
+    // Load or allocate octree data on the GPU
+    // For demonstration, return a dummy pointer.
+    return nullptr;
+}
+float3* allocateRaysOrigin(int n) {
+    return nullptr;
+}
+float3* allocateRaysDirection(int n) {
+    return nullptr;
+}
+float3* allocateOutputColors(int n) {
+    return nullptr;
+}
+void freeGPUMemory(void* ptr) {
+    // Implement GPU memory free function
+}
+
+int main(int argc, char** argv) {
+    // Initialize Python interpreter for JAX and Taichi modules
+    Py_Initialize();
+    
+    // Run Python script to load training data, run JAX teacher training,
+    // distillation to KiloNeRF, and Taichi octree construction.
+    const char* pyScript =
+        "import sys\n"
+        "sys.path.append('./jax_models')\n"
+        "import teacher_model\n"
+        "import distill_kilonerf\n"
+        "from taichi_octree import octree_builder\n"
+        "teacher = teacher_model.train_teacher_model('data/images', 'data/cam_params.npy')\n"
+        "student = distill_kilonerf.train_kilonerf(teacher, None, {'grid_resolution':(16,16,16), 'mlp_architecture': 'tiny', 'num_distill_iterations': 1000, 'num_samples':384, 'learning_rate':1e-3, 'bmin': [0,0,0], 'bmax': [1,1,1]})\n"
+        "octree_builder.evaluate_dense_grid()\n"
+        "print('Octree construction complete.')\n";
+    PyRun_SimpleString(pyScript);
+    
+    // Assume octree data is now available on the GPU (via Taichi)
+    float* d_octree_data = loadOctreeData();
+    
+    // Allocate GPU memory for ray origins, directions, and output colors
+    const int num_rays = 1024;
+    float3* d_rays_origin = allocateRaysOrigin(num_rays);
+    float3* d_rays_direction = allocateRaysDirection(num_rays);
+    float3* d_output_colors = allocateOutputColors(num_rays);
+    
+    float earlyThreshold = 0.01f;
+    launchRayTraversalKernel(d_octree_data, d_rays_origin, d_rays_direction, d_output_colors, num_rays, earlyThreshold);
+    
+    // Retrieve rendered frame (dummy host pointer) and write video using OpenCV.
+    float3* h_output_colors = new float3[num_rays];
+    // (Implement GPU-to-host copy here.)
+    
+    cv::VideoWriter video("output_video.avi", cv::VideoWriter::fourcc('M','J','P','G'), 30, cv::Size(800, 800));
+    
+    // For demonstration, loop over frames
+    for (int frame = 0; frame < 300; frame++) {
+        launchRayTraversalKernel(d_octree_data, d_rays_origin, d_rays_direction, d_output_colors, num_rays, earlyThreshold);
+        // Copy output from GPU to host in h_output_colors (implementation specific)
+        
+        // Convert dummy h_output_colors to cv::Mat (this is placeholder code)
+        cv::Mat frame_img(800, 800, CV_32FC3, cv::Scalar(0,0,0));
+        // Fill frame_img with values from h_output_colors (needs proper mapping)
+        frame_img.convertTo(frame_img, CV_8UC3, 255.0);
+        video.write(frame_img);
+    }
+    video.release();
+    
+    // Free allocated GPU memory and host memory
+    freeGPUMemory(d_octree_data);
+    freeGPUMemory(d_rays_origin);
+    freeGPUMemory(d_rays_direction);
+    freeGPUMemory(d_output_colors);
+    delete[] h_output_colors;
+    
+    Py_Finalize();
+    std::cout << "Rendering and video export complete." << std::endl;
+    return 0;
+}
+```
+
+### cuda_kernels/ray_transversal.cu
+```
+// ray_traversal.cu
+#include <cuda_runtime.h>
+#include <math.h>
+#include <stdio.h>
+
+// Define a simple float3 structure
+struct float3 {
+    float x, y, z;
+};
+
+// Example of an optimized CUDA kernel for ray traversal
+__global__ void optimizedRayTraversalKernel(const float* __restrict__ octree_data,
+                                              const float3* __restrict__ rays_origin,
+                                              const float3* __restrict__ rays_direction,
+                                              float3* __restrict__ output_colors,
+                                              int num_rays,
+                                              float earlyThreshold) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_rays) return;
+
+    // Allocate shared memory for a segment of octree data
+    __shared__ float sharedData[256];
+    int tid = threadIdx.x;
+    if (tid < 256) {
+        sharedData[tid] = octree_data[tid]; // Pre-load a block of octree data (example)
+    }
+    __syncthreads();
+
+    // Load ray origin and direction (ensure coalesced access)
+    float3 origin = rays_origin[idx];
+    float3 direction = rays_direction[idx];
+    float3 color = {0.0f, 0.0f, 0.0f};
+    float T = 1.0f;
+    
+    // Example: traverse a fixed number of samples for demonstration.
+    int num_samples = 100;
+    for (int i = 0; i < num_samples; i++) {
+        // For demonstration, use shared memory for density lookup
+        float sigma = sharedData[i % 256];  // Replace with actual octree query using proper indexing
+        float delta = 0.01f;  // Dummy segment length
+        float alpha = 1.0f - expf(-sigma * delta);
+
+        // Dummy view-dependent color computed via spherical harmonics (this is a placeholder)
+        float3 sample_color = {0.5f, 0.5f, 0.5f}; 
+
+        // Accumulate color using the standard volumetric integration:
+        color.x += T * alpha * sample_color.x;
+        color.y += T * alpha * sample_color.y;
+        color.z += T * alpha * sample_color.z;
+
+        T *= (1.0f - alpha);
+
+        // Warp-level primitives could be used here for reductions if needed.
+        if (T < earlyThreshold) break;
+    }
+    
+    output_colors[idx] = color;
+}
+
+extern "C" void launchRayTraversalKernel(const float* d_octree_data,
+                                           const float3* d_rays_origin,
+                                           const float3* d_rays_direction,
+                                           float3* d_output_colors,
+                                           int num_rays, float earlyThreshold) {
+    int threadsPerBlock = 256;
+    int blocks = (num_rays + threadsPerBlock - 1) / threadsPerBlock;
+    optimizedRayTraversalKernel<<<blocks, threadsPerBlock>>>(d_octree_data, d_rays_origin, d_rays_direction, d_output_colors, num_rays, earlyThreshold);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+}
+```
+
+### cuda_kernels/tester.cpp
+```
+// This is where extensions for test codes are run
+```
+
+### jax_models/Jax_tester.py
+```
+# This is the jax tester area
+```
+
+### jax_models/distill_kilonerf.py
+```
+# This file would follow a similar structure to teacher_model.py.
+# It would partition the scene and create a grid of tiny MLPs to mimic the teacher.
+# The code below is pseudocode representing the approach.
+
+def initialize_grid(grid_resolution, mlp_architecture):
+    # Create a dictionary mapping grid cell indices to tiny MLP instances
+    grid = {}
+    for i in range(grid_resolution[0]):
+        for j in range(grid_resolution[1]):
+            for k in range(grid_resolution[2]):
+                grid[(i,j,k)] = TinyMLP(mlp_architecture)
+    return grid
+
+def compute_grid_index(position, bmin, bmax, grid_resolution):
+    # Compute the grid cell index from a position vector
+    norm_pos = (position - bmin) / (bmax - bmin)
+    index = (norm_pos * jnp.array(grid_resolution)).astype(jnp.int32)
+    return tuple(index.tolist())
+
+def train_kilonerf(teacher_model, training_data, params):
+    grid_resolution = params["grid_resolution"]
+    grid_of_mlps = initialize_grid(grid_resolution, params["mlp_architecture"])
+    
+    # Distillation phase
+    for iter in range(params["num_distill_iterations"]):
+        ray = sample_random_ray(training_data)
+        samples = stratified_sample(ray, params["num_samples"])
+        loss_distill = 0.0
+        for sample in samples:
+            teacher_out = teacher_model.evaluate(sample.position, ray.direction)
+            grid_index = compute_grid_index(sample.position, params["bmin"], params["bmax"], grid_resolution)
+            student_out = grid_of_mlps[grid_index].evaluate(sample.position, ray.direction)
+            loss_distill += l2_loss(student_out, teacher_out)
+        update_grid_mlps(grid_of_mlps, loss_distill, params["learning_rate"])
+    
+    # Fine-tuning phase omitted for brevity
+    return grid_of_mlps
+
+# Note: The TinyMLP class and auxiliary functions (sample_random_ray, stratified_sample, update_grid_mlps, etc.)
+# need to be implemented. This pseudocode is intended to illustrate the overall distillation process.
+```
+
+### jax_models/teacher_model.py
+```
+import jax
+import jax.numpy as jnp
+from jax import random, jit
+import optax
+import numpy as np
+from utils import load_images_from_folder, load_camera_parameters, positional_encoding
+
+class NeRFModel:
+    def __init__(self, rng_key, input_dim, hidden_dim, num_layers, output_dim):
+        self.params = self.init_params(rng_key, input_dim, hidden_dim, num_layers, output_dim)
+        
+    def init_params(self, key, in_dim, hid_dim, layers, out_dim):
+        params = []
+        keys = random.split(key, layers+1)
+        params.append({'W': random.normal(keys[0], (in_dim, hid_dim)) * 0.1,
+                       'b': jnp.zeros((hid_dim,))})
+        for i in range(1, layers-1):
+            params.append({'W': random.normal(keys[i], (hid_dim, hid_dim)) * 0.1,
+                           'b': jnp.zeros((hid_dim,))})
+        params.append({'W': random.normal(keys[-1], (hid_dim, out_dim)) * 0.1,
+                       'b': jnp.zeros((out_dim,))})
+        return params
+
+    def __call__(self, params, x):
+        h = x
+        for layer in params[:-1]:
+            h = jnp.dot(h, layer['W']) + layer['b']
+            h = jax.nn.relu(h)
+        out = jnp.dot(h, params[-1]['W']) + params[-1]['b']
+        return out
+
+@jit
+def loss_fn(params, model, batch):
+    inputs, targets = batch
+    preds = model(params, inputs)
+    return jnp.mean((preds - targets) ** 2)
+
+def train_teacher_model(image_folder, camera_file, num_epochs=1000, lr=1e-3):
+    images = load_images_from_folder(image_folder)
+    cam_params = load_camera_parameters(camera_file)
+    # For demonstration, we assume dummy flattened inputs and targets.
+    rng = random.PRNGKey(0)
+    model = NeRFModel(rng, input_dim=63, hidden_dim=256, num_layers=10, output_dim=4*16)  # density+SH coefficients
+    optimizer = optax.adam(lr)
+    opt_state = optimizer.init(model.params)
+
+    @jit
+    def update(params, opt_state, batch):
+        loss, grads = jax.value_and_grad(loss_fn)(params, model, batch)
+        updates, opt_state = optimizer.update(grads, opt_state)
+        return optax.apply_updates(params, updates), opt_state, loss
+
+    for epoch in range(num_epochs):
+        # Create a dummy batch (replace with actual data loader)
+        inputs = random.normal(rng, (32, 63))
+        targets = random.normal(rng, (32, 4*16))
+        batch = (inputs, targets)
+        model.params, opt_state, loss = update(model.params, opt_state, batch)
+        if epoch % 100 == 0:
+            print(f"Epoch {epoch}, Loss: {loss}")
+    return model
+
+if __name__ == '__main__':
+    teacher = train_teacher_model("data/images", "data/cam_params.npy")
+```
+
+### jax_models/utils.py
+```
+import cv2
+import numpy as np
+import os
+
+def load_images_from_folder(folder_path, target_size=(800,800)):
+    images = []
+    file_names = sorted(os.listdir(folder_path))
+    for filename in file_names:
+        img_path = os.path.join(folder_path, filename)
+        img = cv2.imread(img_path)
+        if img is not None:
+            img = cv2.resize(img, target_size)
+            images.append(np.array(img, dtype=np.float32) / 255.0)
+    return np.array(images)
+
+def load_camera_parameters(file_path):
+    # For example, load camera poses from a .npy file
+    return np.load(file_path)
+
+def positional_encoding(x, L=10):
+    # x is assumed to be a numpy array of shape (..., dim)
+    enc = [x]
+    for i in range(L):
+        enc.append(np.sin(2.0**i * x))
+        enc.append(np.cos(2.0**i * x))
+    return np.concatenate(enc, axis=-1)
+```
+
+### taichi_octree/Taichi_Tester.py
+```
+# This is the Taichi tester code
+```
+
+### taichi_octree/file_io.py
+```
+# taichi_octree/file_io.py
+
+import cv2
+import numpy as np
+import os
+
+def load_images(folder_path, target_size=(800, 800)):
+    """
+    Loads all images from the specified folder, resizes them to the target size,
+    and normalizes pixel values to the range [0, 1].
+
+    Args:
+        folder_path (str): Path to the folder containing image files.
+        target_size (tuple): Desired image dimensions (width, height).
+
+    Returns:
+        np.ndarray: An array of images with shape (N, height, width, channels).
+    """
+    images = []
+    file_names = sorted(os.listdir(folder_path))
+    for filename in file_names:
+        img_path = os.path.join(folder_path, filename)
+        img = cv2.imread(img_path)
+        if img is not None:
+            img = cv2.resize(img, target_size)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert to RGB if needed
+            images.append(img.astype(np.float32) / 255.0)
+    return np.array(images)
+
+def load_camera_parameters(file_path):
+    """
+    Loads camera parameters from a file. This function assumes that the parameters
+    are stored in a NumPy file (.npy) or can be modified to support other formats.
+
+    Args:
+        file_path (str): Path to the file containing camera parameters.
+
+    Returns:
+        np.ndarray: Array of camera parameters.
+    """
+    try:
+        cam_params = np.load(file_path)
+        return cam_params
+    except Exception as e:
+        print(f"Error loading camera parameters from {file_path}: {e}")
+        return None
+
+if __name__ == '__main__':
+    # Example usage:
+    images = load_images("data/images", target_size=(800, 800))
+    print(f"Loaded {len(images)} images with shape: {images.shape}")
+
+    cam_params = load_camera_parameters("data/cam_params.npy")
+    if cam_params is not None:
+        print(f"Loaded camera parameters with shape: {cam_params.shape}")
+```
+
+### taichi_octree/octree_builder.py
+```
+import taichi as ti
+ti.init(arch=ti.gpu)
+
+# Resolution for the dense grid
+res = (256, 256, 256)
+density = ti.field(dtype=ti.f32, shape=res)
+# Assume 16 SH components per grid cell
+sh_coeffs = ti.Vector.field(16, dtype=ti.f32, shape=res)
+
+@ti.kernel
+def evaluate_dense_grid():
+    # In a full implementation, this kernel would invoke the trained KiloNeRF tiny MLPs.
+    # Here, we use optimized memory accesses and avoid redundant computations.
+    for I in ti.grouped(density):
+        # For demonstration, we use a dummy function that mimics evaluation.
+        density[I] = 0.1  # Replace with actual evaluation
+        for i in ti.static(range(16)):
+            sh_coeffs[I][i] = 0.0  # Replace with actual SH coefficient output
+
+@ti.kernel
+def build_occupancy_grid(threshold: ti.f32, occ: ti.template()):
+    # Ensure memory coalescing by iterating over groups
+    for I in ti.grouped(density):
+        occ[I] = 1 if density[I] >= threshold else 0
+
+def build_octree_from_grid(occ_grid):
+    # Placeholder: Use an efficient hierarchical algorithm to build an octree.
+    octree = {}  # Implement an octree data structure here.
+    return octree
+
+if __name__ == '__main__':
+    evaluate_dense_grid()
+    occ_grid = ti.field(dtype=ti.i32, shape=res)
+    build_occupancy_grid(0.05, occ_grid)
+    octree = build_octree_from_grid(occ_grid)
+    print("Octree constructed (placeholder implementation).")
+```
+
+### taichi_octree/ray_sampling.py
+```
+import taichi as ti
+ti.init(arch=ti.gpu)
+
+num_samples = 384
+
+@ti.func
+def stratified_sample_ray(ray_origin, ray_direction, t_min, t_max):
+    dt = (t_max - t_min) / num_samples
+    samples = ti.Vector.field(3, dtype=ti.f32, shape=(num_samples))
+    for i in range(num_samples):
+        # Using ti.random() to add stratification noise; ensure efficient memory access.
+        t = t_min + dt * (i + ti.random())
+        samples[i] = ray_origin + ray_direction * t
+    return samples
+
+# The above function can be called inside a kernel to populate a field with ray sample positions.
+```

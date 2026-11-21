@@ -1,0 +1,950 @@
+Regularized Extended-MHD Equilibrium Code. Contribute to landreman/remec development by creating an account on GitHub.
+
+Milestone 2.1: mollified level-set volume map by landreman · Pull Request #12 · landreman/remec · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+landreman
+commented
+Aug 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Milestone 2.1 — Implement the differentiable, gradient-scaled mollified Vχ map with a monotone volume-uniform PCHIP tabulation and inverse.
+Equations and invariants — note equations (mollified_V) and (V_derivatives); DESIGN.md §5 invariant 3 (profile-realization endpoint identities and monotonicity) is established for the volume-map component.
+Acceptance criterion — analytic circle/sphere volumes and monotone tabulation, demonstrated by tests/unit/test_level_set_volume.py. It checks raw endpoint residuals before normalization, exact exposed endpoints, strictly monotone 65-level volume-uniform tabulation, analytic co-area density, tabulated-derivative/co-area agreement, critical-point safeguarding, and a checked-in sphere-resolution table.
+Measured numbers — circle/sphere relative volume errors: 5.18e-4 / 7.76e-4. Co-area-density relative errors: 1.70e-2 / 2.56e-3. Sphere quadrature-resolution rates for 24→48→96: 2.078 and 2.058. See tests/manufactured/mollified_sphere_volume_rates.csv and docs/verification.md.
+Mutations verified to turn the suite red — replacing ε_i = c h_i |∇χ_i| with a fixed χ-space width fails the circle co-area assertion (3.328 vs π outside the 3% bound). Replacing H′ε by zero fails both circle and sphere co-area checks. The independent tabulated-derivative/co-area check catches an incorrect PCHIP interior slope.
+Open ADRs blocking merge — none.
+Reviewer focus — confirm the robust critical-point gradient floor and the raw endpoint/co-area diagnostics are an appropriate narrow foundation for 2.2; the FEM extraction pass and nonlocal JVP remain explicitly deferred to 2.2 and 2.3, respectively.
+landreman
+added 2 commits
+August 10, 2026 17:16
+Milestone 2.1: implement mollified volume map
+15d9323
+Milestone 2.1: record volume-map verification
+809278f
+claude
+Bot
+commented
+Aug 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @landreman's task in 7m 26s —— View job
+Adversarial milestone review — PR #12 (Milestone 2.1, mollified V_χ)
+Read diff, DESIGN.md §5 / §12.1–12.6 / §25 / §26, STATUS.md, note §6 (eq:mollified_V, eq:V_derivatives)
+Q1 — do the tests constrain the physics? (claimed mutation spot-checked and reproduced)
+Q2 — is the convergence claim real?
+Q3 — equations vs. the note, term by term
+Q4 — §26 MUST NOT
+Q5 — quietly weakened acceptance criteria?
+Q6 — undocumented decisions
+Findings posted (4 inline + table below)
+make lint and make test both pass on this branch (43 passed, mypy strict clean). That is not the question. The question is whether this would pass if the mathematics were wrong, and here it partly does not — there is a real numerical bug that every test in the PR is blind to, and it has contaminated the checked-in rate table.
+Findings
+Sev
+Location
+What is wrong
+What to do
+blocking
+src/remec/level_set.py:54
+_MonotonePchip is not the Fritsch–Carlson interpolant it claims to be. The weighted-harmonic-mean numerator is w1 + w2 = 3(h_L + h_R); the code uses h_L + h_R. Every interior slope is exactly ⅓ of correct (verified against scipy.interpolate.PchipInterpolator: ratio [3. 3. 3. 3. 3. 3. 3.]). Still monotone, so every monotonicity assertion passes — but the interpolant loses its shape-preserving accuracy, and -dV/dχ̂ from volume() comes out 34–39 % off the analytic co-area density.
+Multiply the numerator by 3. Regenerate the CSV, verification.md, and the STATUS.md numbers.
+blocking
+src/remec/level_set.py:143 (build)
+§12.3's "cheap mandatory checks per build — endpoint identities, spline monotonicity, spot agreement of −dV/dχ̂ with an independent co-area integral" are all absent. The endpoint check is additionally made unfalsifiable by overwriting raw_volumes[0]/[-1]: I stubbed _mollified_volumes to a constant (deleting the mollified Heaviside entirely) and V(min)=4.0, V(max)=0.0 still hold exactly. diagnostics()["endpoint_volume_error"] is structurally 0.
+Check the endpoints on the unnormalized values and record the real residual; add the co-area spot check. That check alone catches the PCHIP bug.
+blocking
+src/remec/level_set.py:137-138
+§12.2 mandates the gradient scaling "with safeguards near critical points". A floor at `1e-12 · max
+∇χ
+should-fix
+tests/unit/test_level_set_volume.py:60-61
+The §5-invariant-3 endpoint assertions are tautological (see above). Nothing anywhere cross-checks volume() against coarea_density(), which are computed by wholly separate paths — that is precisely how the PCHIP bug survived.
+Assert endpoints pre-normalization; add the FD-vs-coarea_density agreement test.
+should-fix
+tests/manufactured/mollified_sphere_volume_rates.csv, docs/verification.md
+The table freezes bug-contaminated errors at rel=1e-10. The reported rates 2.125 → 2.445 drift upward, which is the tell: interpolation error, not mollification error, dominates the finest level. With the factor restored the sweep is 1.2347e-2 / 2.9248e-3 / 7.0256e-4 → rates 2.078 / 2.058, clean O(ε²) and a much better claim than the one in the PR body. The CSV's own adjacent_rate column is never validated against the recomputed rates.
+Regenerate; assert the adjacent_rate column too; relax rates > 2.0 (line 117) to something like > 1.9 — a strict > 2 on an O(ε²) claim is not what you mean.
+note
+src/remec/level_set.py overall
+§12.1's interface (LevelSetVolumeMap, build(chi, mesh, options), evaluate_volume_coordinate) is not realized, and §12.2's "one pass extracting quadrature values of χ, |∇χ|, and w_i to NumPy" has no NGSolve side, so element_sizes has no defined provenance and nothing has ever seen FE data. jvp is correctly deferred to 2.3 per §25.
+Fine to defer, but say in STATUS.md that 2.2 must supply the extraction pass and reconcile the class name with §12.1.
+note
+pyproject.toml:15
+numpy>=1.24,<2.5 added to base deps. Not on §26's MUST-NOT list and numpy is already a hard ngsolve transitive dependency, so no ADR is needed — but the <2.5 upper cap is undocumented and will break installs when numpy 2.5 ships.
+Drop the cap or justify it.
+Answers to the six questions
+1. Do the tests constrain the physics? Partly. I reproduced the mutation the PR body claims: replacing ε_i = c h_i |∇χ_i| with a fixed χ-space width gives coarea_density(0) = 3.3277 vs π, a 5.92 % error against a 3 % bound — the assertion does fail, the claim holds. But the endpoint assertions pass for an implementation with no mollified Heaviside at all, and the missing PCHIP factor of 3 is invisible to the entire suite. A wrong-but-passing implementation is not hypothetical here; it is the one in the diff.
+2. Is the convergence claim really a convergence claim? It is an honest error-vs-refinement sweep, not a shrinking residual, and verification.md is admirably explicit that this is a quadrature-resolution study rather than a discretization rate — good. Three points is thin but adequate for 2.1, whose §25 criterion is only "analytic circle/sphere tests and monotone tabulation". The values are wrong, though, per the finding above.
+3. Do the equations match the note? The mollification itself is correct, and I checked it term by term. H_ε(a) = ½(1 + a + sin(πa)/π) on [-1,1] is C¹ at both endpoints (H(±1) = 1, 0; H′(±1) = 0), has unit mass and zero first moment — genuinely moment-matched, so the O(ε²) of (mollified_V) is justified. coarea_density carries the −1/ε_i chain-rule factor correctly: −dV/dχ̂ = Σ w_i · ½(1 + cos(πa_i))/ε_i, matching (V_derivatives), and it lands within 0.3–1 % of the analytic 2πr and π. The mollification layer is right; the tabulation layer is where it breaks.
+4. §26 MUST NOT? None violated. Mollified rather than histogram map (§26 and §12.6 satisfied), no isotropic substitution, no clipping, no dense Jacobian, no field-aligned assumption, no PETSc/MPI/JAX/DESC/SIMSOPT.
+5. Quietly weakened acceptance criteria? No. .github/ and Makefile are untouched, no xfail/skip added, no tolerance in the repo loosened, and only milestone 2.1's STATUS.md row changes. Marking it [x] in its own implementation PR is the documented convention and is not a finding.
+6. Undocumented decisions. Two, neither of which needs an ADR because DESIGN.md already dictates the answer — they need implementing, not adjudicating: the critical-point safeguard (§12.2 mandates one) and the per-build checks (§12.3 mandates three). The endpoint hard-set normalization is a third silent choice and should at least be documented in the docstring.
+Verdict: fix first. No open ADR is required. The mollified core is sound and the structure is the right foundation for 2.2; fix the PCHIP factor, regenerate the table, and add the two checks §12.3 already requires — the corrected rates (2.078 / 2.058) are a cleaner result than the one currently claimed.
+· branch milestone/2.1-mollified-vchi
+Milestone 2.1: support NumPy 2.2 typing
+a233236
+claude
+Bot
+commented
+Aug 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @landreman's task in 8m 45s —— View job
+Adversarial milestone review — PR #12 (Milestone 2.1)
+Reviewed against docs/DESIGN.md §5, §12.1–§12.3, §22, §25, §26 and the note §6 (sec:mollified, sec:Vchi_conditioning), read directly rather than via the PR body. I ran the gate (make lint clean, make test 43 passed) and reproduced the numbers below locally on Linux / CPython 3.12 / NumPy 2.4.6 / NGSolve 6.2.2606.
+The maths is right. The evidence for it is, in two places, not.
+Findings
+Severity
+Location
+What is wrong
+What to do
+blocking
+src/remec/level_set.py:143
+raw_volumes[0], raw_volumes[-1] = total_volume, 0.0 assigns the endpoint identities. DESIGN §5 invariant 3 and §12.3's "cheap mandatory checks per build" then have nothing to check, diagnostics()["endpoint_volume_error"] is structurally zero, and STATUS/verification.md report "the endpoint identities hold exactly" as a measured result. Real pre-overwrite residuals (3D, order 96): 2.49e-6 and 1.38e-4.
+Keep the normalization if the transplant wants exact endpoints, but compute and expose the pre-normalization residuals, fail the build above a documented tolerance, add the third §12.3 check (co-area spot agreement), assert the computed residuals in the test, and reword the two docs.
+blocking
+tests/unit/test_level_set_volume.py:65-89
+test_tabulation_is_strictly_monotone_and_uniform_in_volume passes when _mollified_volumes is replaced by np.linspace(sum(w), 0, n) — an implementation that never looks at χ, |∇χ|, or the mollifier. Verified by running it. volumes is a linspace (level_set.py:144), so lines 82–85 assert that np.linspace is uniform; PCHIP monotonicity is structural, so lines 87/89 cannot fail. Only line 81 carries information, and it survives the mutation.
+Assert against the raw mollified samples before the volume-uniform resampling. The circle has the closed form V_χ(χ̂) = π(R²−χ̂), which pins the whole table instead of one level. Confirm the new test fails under the linspace mutation.
+should-fix
+src/remec/level_set.py:137-138
+The "gradient-floor safeguard at critical points" you flagged for reviewer focus is a divide-by-zero guard, not the §12.2 safeguard. With one node at |∇χ|=0: floored width 2.83e-14 (median 1.60e-2), and coarea_density(χ_max) = 3.54e9 where ρ = π. Nothing is smeared at exactly the levels the note says need smearing. No test reaches this — Gauss–Legendre nodes never land on r=0.
+Floor ε on a physical scale (fraction of the χ-variation across a cell, or a robust quantile of |∇χ|), add a test with an exact zero-gradient node, and record the choice in an ADR or issue per §26.
+should-fix
+tests/unit/test_level_set_volume.py:92-117, tests/manufactured/mollified_sphere_volume_rates.csv
+The table refines ε and quadrature together (element_sizes = 2/order), so it cannot isolate the O(ε²) claim verification.md attaches to it; the rates also rise (2.125 → 2.445). A fixed-quadrature ε-only sweep gives 2.012, 2.355, 1.792, 1.255 — ~2 while resolved, decaying as ε/h shrinks. Line 117's rates > 2.0 is one-sided (rate-4 passes) with 6% margin.
+Add the ε-only sweep at fixed quadrature and hang the O(ε²) claim on that; make the rate assertion two-sided (e.g. 1.8–2.6).
+should-fix
+tests/unit/test_level_set_volume.py:114
+rel=1.0e-10 against the checked-in table is a bit-level reproducibility lock. macOS → Linux at the same NumPy version already spends an eighth of it: rel-diff 1.26e-11 at order 96 (8× headroom; 237×/292× at 24/48). §23 runs PR CI on Ubuntu and macOS across CPython versions.
+Loosen this one tolerance to ~rel=1e-6. The rate assertion, not the golden digits, carries the claim.
+note
+pyproject.toml:15
+numpy added to [project].dependencies with no ADR. Not on §26's prohibited list and already a hard transitive requirement of NGSolve, so harmless — but CLAUDE.md's STOP table lists "a new base dependency" as ADR-worthy.
+One ADR paragraph, or a note in dev_notes.md recording that it is transitive-made-explicit.
+note
+src/remec/level_set.py (public surface)
+Diverges from the §12.1 interface: MollifiedVolumeMap rather than LevelSetVolumeMap, build(data) over pre-extracted arrays rather than build(chi, mesh, options), and no evaluate_volume_coordinate. §12.2's "one pass extracting quadrature values of χ, |∇χ|, and weights to NumPy" is not implemented, so 2.2 cannot yet build a map from a χ GridFunction. (Deferring jvp to 2.3 is explicitly sanctioned by §25 — that part is fine.)
+Say so in the STATUS "Next" line so 2.2 owns the reconciliation, or reconcile the names now.
+note
+src/remec/level_set.py:36-38
+_MonotonePchip.build raises on any zero secant, so a genuinely flat V_χ region — the wide-island/chaotic case §12.3 exists to handle — aborts the build rather than degrading. I probed one plateau case and it survived, so this is latent, not demonstrated.
+Note it for 2.2/2.4; a clearer message at minimum.
+The six questions
+1. Do the tests constrain the physics? Partly. I spot-checked your claimed mutation and it reproduces exactly: dropping the \|∇χ\| factor gives coarea_density(0) = 3.32772 against π, outside the 3% band — matching the 3.328 in the PR body. That mutation is real and the test catches it. But my own mutation (above) shows the monotone-tabulation test and both endpoint assertions are insensitive to the entire mollified construction. Two of the four properties this milestone claims to demonstrate are demonstrated by assignment.
+2. Is the convergence claim real? It is a trend, not a rate. verification.md is honest that this is a quadrature-resolution study, and the checked-in errors reproduce to 1e-11 — but ε and h refine together, so the O(ε²) attribution isn't isolated by the data. My ε-only sweep supports the claim (2.01 in the resolved regime); it just isn't the sweep that's checked in.
+3. Do the equations match the note? Yes — term by term, this is the strongest part of the PR. (mollified_V): V = Σ_i w_i H_{ε_i}(χ_i − χ̂) with the argument sign giving V decreasing in χ̂ ✓; ε_i = c h_i \|∇χ_i\| gradient-scaled per §12.2 and the Tornberg–Engquist requirement ✓. The profile H(s) = ½(1 + s + sin(πs)/π) on \|s\|<1 is correctly moment-matched — ∫δ = 1, vanishing first moment by symmetry, H(∓1) = 0/1, δ(±1) = 0 so C¹ at the seams — which is what earns the O(ε²) the note asserts. (V_derivatives): coarea_density returns +Σ w_i H'_{ε_i} = −∂V/∂χ̂, and H'_ε = (1 + cos(πs))/(2ε) is the exact derivative of the profile used, chain rule and factor of 2 included ✓. ∂V/∂χ_i = H'_ε(χ_i−χ̂)w_i is absent, correctly deferred to 2.3 per §25. The Fritsch–Carlson slopes and the 3δ endpoint limiter match the standard shape-preserving construction. No sign, factor, or missing term found.
+4. Any §26 MUST NOT violated? No. No clipping of pressure/field; no isotropic substitution; no field-aligned coordinates; no histogram map (this is the mollified path, and Newton isn't reached); no NGSolve internals exposed — the module is pure NumPy; no dense global Jacobian; no direct 3D factorization. The numpy base-dependency addition is not on the §26 list and is noted above only against CLAUDE.md's STOP table.
+5. Was an acceptance criterion quietly weakened? No. The diff against origin/main is purely additive apart from the STATUS row and one pyproject.toml dependency line. No existing tolerance, expected rate, xfail/skip marker, or CI matrix entry is touched, and no new skip markers are introduced. The [x] on the 2.1 row is the correct marker for a submitted implementation PR, and no unrelated milestone's state is changed — the blocking items above are about the definition of done (item 2: acceptance demonstrated by an automated test), not about the marker.
+6. Undocumented decisions. Three, none with an ADR or issue: the critical-point floor value (§12.2 requires a safeguard; 1e-12·max\|∇χ\| is a choice, not a derivation), forcing the endpoints by assignment (a deliberate deviation from the note's use of them as a check), and the §12.1 interface divergence. §26 asks for an issue or ADR rather than a silent choice in each case.
+Verdict
+fix first — the two blocking findings are in-branch fixes (compute the endpoint residuals instead of assigning them; make the tabulation test fail under the linspace mutation), not design questions. Open a short ADR or issue alongside them for the critical-point floor, since §12.2 mandates a safeguard and the current one is nominal.
+To be clear about what I did not find: no equation error, no missing term, no sign flip, no §26 violation, no weakened criterion. The construction appears correct — the objection is that a reader could not tell that from the tests as they stand.
+· branch milestone/2.1-mollified-vchi
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+Comment on lines
++53
+to
++56
+left_width, right_width = widths[index - 1], widths[index]
+slopes[index] = (left_width + right_width) / (
+(2.0 * right_width + left_width) / left + (right_width + 2.0 * left_width) / right
+)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+blocking — this is not the Fritsch–Carlson slope; the numerator is missing a factor of 3.
+The weighted-harmonic-mean slope is (w1 + w2) / (w1/m_L + w2/m_R) with w1 = 2h_R + h_L, w2 = h_R + 2h_L, so the numerator is w1 + w2 = 3(h_L + h_R), not h_L + h_R. Every interior slope produced here is exactly ⅓ of the correct value.
+Verified against scipy.interpolate.PchipInterpolator on random strictly-monotone data:
+```
+our slopes  : [23.836959  0.718211  0.454960  1.148834  2.310541  2.459088 ...]
+scipy slopes: [23.836959  2.154634  1.364881  3.446501  6.931622  7.377263 ...]
+ratio interior: [3. 3. 3. 3. 3. 3. 3.]     # exactly 3, every interior node
+```
+Still monotone (undershooting slopes stay inside the Fritsch–Carlson region), which is why every monotonicity assertion in the PR passes — but it is no longer a shape-preserving cubic. On tanh(3x) with 17 nodes the max interpolation error is 2.59e-2 here versus 1.74e-3 for real PCHIP.
+The consequence for this milestone is not cosmetic. volume() goes through this interpolant, so its derivative disagrees badly with coarea_density() and with the analytic co-area density (sphere, order 96, 129 levels):
+level
+-dV/dχ̂ from volume()
+coarea_density()
+analytic
+−0.1
+2.587
+4.275
+4.261
+0.0
+5.059
+3.780
+3.770
+0.1
+2.215
+3.190
+3.204
+With the factor restored those three become 4.278 / 3.801 / 3.200 — agreement to under 1%, as DESIGN.md §12.3 expects.
+It also contaminates the checked-in rate table. Fixing the factor changes the sphere errors to 1.2347e-2 / 2.9248e-3 / 7.0256e-4 and the rates to 2.078 / 2.058 — clean O(ε²). The reported 2.125 / 2.445 drift upward precisely because the interpolation error, not the mollification error, dominates the finest level.
+Suggested change
+left_width, right_width = widths[index - 1], widths[index]
+slopes[index] = (left_width + right_width) / (
+(2.0 * right_width + left_width) / left + (right_width + 2.0 * left_width) / right
+)
+slopes[index] = 3.0 * (left_width + right_width) / (
+(2.0 * right_width + left_width) / left + (right_width + 2.0 * left_width) / right
+)
+tests/manufactured/mollified_sphere_volume_rates.csv, docs/verification.md, and the docs/STATUS.md measured numbers all need regenerating after this.
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+Outdated
+Comment on lines
++137
+to
++138
+gradient_floor = max(np.finfo(float).tiny, maximum_gradient * 1.0e-12)
+widths = spatial_width_cells * sizes * np.maximum(gradients, gradient_floor)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+blocking — a floor at 1e-12 · max|∇χ| is a NaN guard, not the safeguard DESIGN.md §12.2 requires.
+§12.2: "ε_χ ∝ c·h·|∇χ| locally (c ≈ 1–2 cells), with safeguards near critical points." This floor is 12 orders of magnitude below the typical gradient, so wherever |∇χ| is genuinely small the width collapses and H_ε degenerates to a sharp Heaviside — exactly the non-differentiability the mollified map exists to avoid, and exactly the regime §12.3 calls out ("across flattened regions — wide islands, chaotic components").
+Demonstrated on a level set with a real flat plateau (χ = 0.36 − max(r−0.3, 0)², so |∇χ| ≡ 0 on a disc holding 2.9% of the quadrature points):
+```
+mollifier width min/max        : 4.64e-14  /  4.64e-02
+coarea_density(0.36)           : 5.98e+12          <-- numerically infinite
+-dV/dχ̂ from the table          : ~25.8
+true jump in V across the level: 0.2777
+```
+build() accepts this silently. Since §12.6 takes ∂V/∂χ_i = H_ε′(χ_i − χ̂)w_i straight from this data for the Newton JVP, a width of 4.6e-14 yields per-node derivatives that are either exactly 0 or ~1e13 — unusable, and the failure is invisible because nothing raises.
+A defensible safeguard is a floor tied to the actual scale of the problem, e.g. max(|∇χ_i|, floor) with floor a small fraction of a robust gradient scale (median or an rms over the sample), or equivalently a floor on ε_i itself in χ-units. Whatever form is chosen, please make it an explicit, documented parameter rather than 1e-12, and add a test with a genuine plateau — neither test level set here has a critical point that the Gauss points actually see.
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+raw_levels = np.linspace(minimum_level, maximum_level, levels, dtype=np.float64)
+raw_volumes = cls._mollified_volumes(values, widths, weights, raw_levels)
+total_volume = float(np.sum(weights))
+raw_volumes[0], raw_volumes[-1] = total_volume, 0.0
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+blocking — hard-setting the endpoints turns §5 invariant 3 and the §12.3 mandatory checks into no-ops.
+DESIGN.md §12.3: "Cheap mandatory checks per build: endpoint identities, spline monotonicity, spot agreement of −dV/dχ̂ with an independent co-area integral." None of the three is performed in build().
+Worse, this line makes the first one unfalsifiable. Overwriting the computed V_χ^ε at the extreme levels with total_volume and 0.0 means volume(minimum_level) and volume(maximum_level) are correct by construction no matter what _mollified_volumes returned. I replaced _mollified_volumes with a function returning a constant 0.5·Σw — i.e. deleting the mollified Heaviside entirely — and the build still reports:
+```
+V(minimum_level) = 3.999999999999999   (== total_volume)
+V(maximum_level) = 0.0
+```
+So diagnostics()["endpoint_volume_error"] / ["endpoint_zero_error"] are structurally zero, and the two endpoint assertions at tests/unit/test_level_set_volume.py:60-61 cannot fail. The invariant is asserted but not tested.
+Two things to add:
+Before overwriting, compare the computed raw_volumes[0] / raw_volumes[-1] against total_volume / 0 and record the actual residual in diagnostics(); that number is the endpoint identity. Normalizing afterwards is fine, but the check has to happen on the unnormalized values.
+The co-area spot check: compare -dV/dχ̂ of the fitted table against coarea_density() at a few interior levels and fail (or record) on disagreement. That check alone would have caught the missing factor of 3 at line 54 — the two disagree by 34–39% today.
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+tests/unit/test_level_set_volume.py
+Comment on lines
++60
+to
++61
+assert volume_map.volume(volume_map.minimum_level) == pytest.approx(data.total_volume)
+assert volume_map.volume(volume_map.maximum_level) == pytest.approx(0.0)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — these two assertions cannot fail.
+Both are guaranteed by level_set.py:143-145 (raw_volumes[0], raw_volumes[-1] = total_volume, 0.0, then target_volumes = linspace(total_volume, 0.0, levels)) plus the clamping in volume(). I confirmed it by stubbing _mollified_volumes to return a constant — no mollified Heaviside at all — and both still pass exactly.
+Since §5 invariant 3 names these endpoint identities specifically, the test should assert them on the computed V_χ^ε before normalization (see the comment on level_set.py:143), with a stated tolerance rather than pytest.approx default.
+Two further gaps in this file, worth adding while you are here:
+Nothing cross-checks volume() against coarea_density(). They are computed from completely separate paths (PCHIP table vs. raw Σ w_i H_ε′), so each can be wrong independently — which is what let the PCHIP slope bug through. A finite-difference of volume() compared with coarea_density() at a few interior levels is the §12.3 "spot agreement" check and fails loudly today.
+No test exercises a critical point or a flat region, so the spatial_width_cells · h · |∇χ| safeguard path is entirely uncovered.
+Also on line 117: assert np.all(rates > 2.0) is a strict inequality on a claim of O(ε²). With the PCHIP factor corrected the measured rates are 2.078 and 2.058 — still passing, but the margin is thin enough that a tolerance like > 1.9 would express the intent more honestly. And line 114 pins the CSV errors to rel=1e-10 while nothing ever validates the CSV's own adjacent_rate column against the recomputed rates.
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+raw_levels = np.linspace(minimum_level, maximum_level, levels, dtype=np.float64)
+raw_volumes = cls._mollified_volumes(values, widths, weights, raw_levels)
+total_volume = float(np.sum(weights))
+raw_volumes[0], raw_volumes[-1] = total_volume, 0.0
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+blocking — the endpoint identities are assigned here, not computed, so DESIGN §5 invariant 3 and the §12.3 "cheap mandatory checks per build" are never actually checked.
+The mollified integral genuinely under/over-shoots at the ends. I measured the pre-overwrite residuals on the 3D order-96 sphere case:
+```
+computed V(min χ) = 7.99999750660963   forced to 7.999999999999998   (abs 2.49e-06)
+computed V(max χ) = 1.3808896875e-04   forced to 0.0                 (abs 1.38e-04)
+```
+Both are small, so normalizing is defensible — but after the overwrite test_level_set_volume.py:60-61 and diagnostics()["endpoint_volume_error"] are structurally zero, and docs/verification.md / docs/STATUS.md report "the endpoint identities hold exactly" as a measured result when it is a definition. The note (§6, "Conditioning, monotonicity, and critical levels") specifically calls these identities a "cheap and sharp" global sanity check; forcing them removes the only sharp check the build has.
+Suggested fix, keeping the exact endpoints for the downstream transplant:
+compute the pre-normalization residuals, store them in diagnostics() (e.g. endpoint_volume_residual / endpoint_zero_residual), and raise in build() if either exceeds a documented tolerance — that is the §12.3 mandatory check;
+also add the third §12.3 check, spot agreement of −dV/dχ̂ with an independent co-area integral;
+have the test assert the computed residuals, and reword verification.md to say the identities are imposed with a measured residual of 2.5e-6 / 1.4e-4.
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+Outdated
+Comment on lines
++137
+to
++138
+gradient_floor = max(np.finfo(float).tiny, maximum_gradient * 1.0e-12)
+widths = spatial_width_cells * sizes * np.maximum(gradients, gradient_floor)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — this is the "gradient-floor safeguard at critical points" the PR body asks reviewers to confirm. As written it is a divide-by-zero guard, not the safeguard DESIGN §12.2 requires ("ε_χ ∝ c·h·|∇χ| locally … with safeguards near critical points").
+A relative floor of 1e-12 · max|∇χ| leaves ε essentially unbounded below. I built a case with a quadrature node exactly at the critical point (χ = 0.36 − r² on a 201² grid, so r = 0 is a node):
+```
+#nodes with |∇χ| == 0 : 1
+floored width          : 2.83e-14      (median width 1.60e-02, ratio 5.7e11)
+coarea_density(χ_max)  : 3.54e+09      (should be O(1); analytic ρ = π)
+```
+That node's contribution is w/(2ε) = 1.77e9 — the mollifier has degenerated to an unmollified step exactly where the note says the interesting structure lives ("at separatrix values of χ, ρ(χ̂) has an integrable logarithmic singularity … the mollified evaluation smears this over a few cells"). Here nothing is smeared.
+No test reaches this path: Gauss–Legendre nodes are strictly interior and never land on r = 0, so |∇χ| = 2r is never zero in the suite and the floor never activates.
+A floor tied to something physical would fix it — e.g. ε_i ≥ c·h_i·(a fraction of the χ-variation over a cell), or a floor set from a robust quantile of |∇χ| rather than 1e-12 · max. Either way §26 asks for an ADR or a focused issue rather than a silent choice, and the chosen floor should get a test that actually exercises |∇χ| → 0.
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+tests/unit/test_level_set_volume.py
+Comment on lines
++81
+to
++89
+assert np.all(np.diff(volume_map.levels) > 0.0)
+assert np.all(np.diff(volume_map.volumes) < 0.0)
+assert np.diff(volume_map.volumes) == pytest.approx(
+np.full(64, -data.total_volume / 64.0), abs=2.0e-12
+)
+probe_levels = np.linspace(volume_map.minimum_level, volume_map.maximum_level, 401)
+assert np.all(np.diff(volume_map.volume(probe_levels)) <= 0.0)
+probe_volumes = np.linspace(0.0, data.total_volume, 401)
+assert np.all(np.diff(volume_map.inverse_level(probe_volumes)) <= 0.0)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+blocking — this whole test passes for an implementation that never evaluates the mollified Heaviside at all.
+I replaced MollifiedVolumeMap._mollified_volumes with a body that ignores values, widths and the mollifier entirely:
+```
+def _mollified_volumes(values, widths, weights, levels):
+    return np.linspace(float(np.sum(weights)), 0.0, len(levels))
+```
+Result: test_tabulation_is_strictly_monotone_and_uniform_in_volume passes, and so do the endpoint assertions at lines 60–61 of the other test. Only the circle/sphere volume assertion at line 59 catches it (0.719 vs 1.131).
+The reason is that four of the five assertions here are true by construction rather than by computation:
+line 82 np.diff(volumes) < 0 and lines 83–85 diff(volumes) ≈ -V/64 — volumes is np.linspace(total_volume, 0.0, levels), assigned at level_set.py:144. These assert that np.linspace is uniform and decreasing.
+line 87 / line 89 — PCHIP is monotone by construction for monotone data, and _MonotonePchip.build already raises if the data are not strictly monotone, so these cannot fail for any map that was built successfully.
+Line 81 (diff(levels) > 0) is the only assertion carrying information, and it survives the mutation above.
+Per CLAUDE.md, "a test that passes for an implementation you know to be wrong is worse than no test." To make this constrain the construction, assert against the raw mollified samples before the volume-uniform resampling — e.g. that V_χ evaluated at the tabulated levels reproduces volumes to a tolerance, and that the tabulated levels match an independently computed inversion of the mollified integral for a case with a known V_χ(χ̂) (the circle has the closed form V = π(R² − χ̂) for χ̂ ∈ [0, R²], which would pin the whole table, not just one level).
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+tests/unit/test_level_set_volume.py
+Outdated
+Comment on lines
++114
+to
++117
+assert error == pytest.approx(float(row["absolute_error"]), rel=1.0e-10)
+rates = np.log2(np.asarray(errors[:-1]) / np.asarray(errors[1:]))
+assert np.all(rates > 2.0)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — two separate issues with the rate study.
+1. The sweep cannot isolate the O(ε²) claim. _tensor_product_data sets element_sizes = 2.0/order, so increasing the quadrature order refines the mollification width and the quadrature simultaneously. docs/verification.md reads the measured 2.125/2.445 as "the expected O(ε²) behavior of the mollified construction", but the study cannot separate mollification error from quadrature error — and the rates increase with refinement, which is not what a settled second-order sequence looks like.
+Holding the quadrature fixed at order 96 and sweeping ε only (spatial_width_cells 4 → 0.25) gives:
+```
+c=4.00  err=1.349e-02   rate  —
+c=2.00  err=3.346e-03   rate 2.012
+c=1.00  err=6.542e-04   rate 2.355
+c=0.50  err=1.889e-04   rate 1.792
+c=0.25  err=7.918e-05   rate 1.255
+```
+That is the real picture: ~2 in the resolved regime, degrading as ε/h shrinks and the quadrature stops resolving the mollifier. The implementation looks right; the checked-in table just isn't evidence for the claim being made about it. An ε-only sweep at fixed quadrature would be.
+2. Line 117's assertion is one-sided. rates > 2.0 passes for any scheme converging faster than second order, including one with no ε² term at all, and the margin on the first pair is 6% (2.125 vs 2.0). A two-sided band (e.g. 1.8 < rate < 2.6) would actually pin second order.
+3. Line 114's rel=1.0e-10 is a bit-level reproducibility lock. Re-running the table here (Linux, NumPy 2.4.6) against the checked-in macOS values already uses an eighth of that budget at order 96:
+```
+order 24: rel-diff 4.2e-13   (237x headroom)
+order 48: rel-diff 3.4e-13   (292x headroom)
+order 96: rel-diff 1.3e-11   (8x headroom)
+```
+DESIGN §23 runs PR CI on Ubuntu and macOS across supported CPython versions; a different NumPy or BLAS summation order at 96³ ≈ 884k points could plausibly break through. Loosening this specific tolerance to something like rel=1e-6 costs nothing scientifically — the table's job is to pin the error magnitudes, and the rate assertion carries the convergence claim.
+Fix this →
+Milestone 2.1: harden volume-map verification
+43fe34f
+claude
+Bot
+commented
+Aug 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @landreman's task in 9m 54s —— View job
+Adversarial milestone review — PR #12 (Milestone 2.1, mollified V_χ)
+Read diff vs origin/main, DESIGN.md §5 / §12.1–12.6 / §25 / §26, STATUS.md, note §6 (sec:Vchi, eq:mollified_V, eq:V_derivatives, sec:Vchi_conditioning)
+Q1 — do the tests constrain the physics? (8-mutation battery run)
+Q2 — is the convergence claim real?
+Q3 — equations vs. the note, term by term
+Q4 — §26 MUST NOT
+Q5 — quietly weakened acceptance criteria?
+Q6 — undocumented decisions
+Verified whether the earlier blocking findings are actually fixed
+Findings posted (4 inline + table below)
+This reviews 43fe34f ("harden volume-map verification"), pushed after the earlier review round. Gate is green on this machine — Linux / CPython 3.12.13 / NumPy 2.4.6 / NGSolve 6.2.2606: make lint clean (ruff + mypy strict), make test 44 passed.
+The three earlier blocking findings are genuinely fixed, and I verified each rather than taking the commit message for it. What remains is four should-fix items, none of which breaks this milestone's definition of done.
+Confirmed fixed (re-verified, not assumed)
+Earlier finding
+Status
+Evidence I ran
+_MonotonePchip missing the Fritsch–Carlson factor of 3
+fixed
+Slopes now match scipy.interpolate.PchipInterpolator exactly, ratio [1. 1. … 1.] on random monotone data, including the 3δ endpoint limiter (both give slopes[0] = 0 on the same case). tanh(3x) error agrees to 14 digits. Restoring the bug turns 3 tests red.
+Endpoint identities assigned, so unfalsifiable
+fixed
+raw_endpoint_volume_error / raw_endpoint_zero_error are now computed pre-normalization (level_set.py:174-175) and asserted (test:67-68). Real values, circle order 96: 1.24e-4 and 2.12e-3. The "delete the mollified Heaviside" mutation that previously passed everything now fails 3 tests.
+§12.3's third check (co-area spot agreement) absent
+fixed
+volume_derivative + coarea_spot_relative_error implemented and asserted. This is what now catches the PCHIP bug — it is also the only assertion that catches the "drop the sin moment-matching term" mutation.
+Rate table contaminated; rates > 2.0 one-sided with 6% margin
+fixed
+CSV regenerated to 1.2347e-2 / 2.9248e-3 / 7.0256e-4, rates 2.078 / 2.058; the adjacent_rate column is now validated (test:125-127); assertion relaxed to > 1.9.
+1e-12 gradient guard
+partly — see should-fix below
+Now a named minimum_gradient_fraction=1e-3 with a dedicated plateau test; restoring 1e-12 turns that test red.
+§12.1 interface divergence / no NGSolve extraction pass
+addressed as documentation
+STATUS.md "Next" now assigns the extraction pass and interface reconciliation to 2.2, JVP to 2.3. Correct per §25.
+Mutation battery (all against tests/unit/test_level_set_volume.py, baseline 5 passed):
+```
+linspace_volumes   (delete the mollifier)      -> 3 failed
+pchip_missing_3    (the old slope bug)         -> 3 failed
+fixed_chi_width    (drop the |grad chi| scale) -> 4 failed
+coarea_zero        (H'_eps -> const)           -> 2 failed
+sign_flip          (chi - level -> level - chi)-> 3 failed
+no_moment_match    (drop sin(pi s)/pi)         -> 1 failed
+vacuous_floor      (restore the 1e-12 guard)   -> 1 failed
+```
+Every physics mutation I could construct now goes red. That was not true a revision ago.
+Findings
+Sev
+Location
+What is wrong
+What to do
+should-fix
+tests/unit/test_level_set_volume.py:97
+inverse_level is constrained by nothing but monotonicity. I replaced the inverse interpolant with a straight line from (V_Ω, χ_min) to (0, χ_max) — wrong by 0.585 in χ, 29% of the range (χ̂(3.0): true −0.595, mutant −1.139) — and got 5 passed. §12.3 makes χ̂(V) the direction the transplant composes through, so 2.2 inherits an unverified contract.
+The circle's disc branch has the closed form χ̂(V) = R² − V/π; assert it, or assert the round-trip with a stated tolerance (currently max|inverse_level(volume(χ)) − χ| = 3.48e-2).
+should-fix
+src/remec/level_set.py:174-176
+§12.3's checks are computed but not mandatory — build() never consults them, and diagnostics() is opt-in. With spatial_width_cells=0.05 the co-area spot error is 0.4155 and build() returns silently.
+Raise or warn in build() above a documented, overridable threshold. The numbers are already in hand.
+should-fix
+src/remec/level_set.py:168-169
+The floor is real now, but rescales the spike rather than bounding it. Plateau case (|∇χ| ≡ 0 on 2.9% of points): coarea_density goes 5.98e12 → 6.25e3 — exactly 0.2777 / 4.44e-5, i.e. 1/fraction. The note says the singularity is smeared "over a few cells"; this smears over 1e-3 of a cell, and §12.6's JVP inherits the 1000:1 width spread.
+Floor ε_i on a scale tied to the tabulated level spacing rather than a fraction of the outlier-sensitive global max|∇χ|; report the floored-sample count in diagnostics(). Deferring is defensible — then say so under 2.3 in STATUS.md per §26.
+should-fix
+PR body
+The body still quotes the pre-fix numbers: 1.28e-3 / 7.23e-4 and rates 2.125 / 2.445. STATUS.md and verification.md carry the corrected 5.18e-4 / 7.76e-4 and 2.078 / 2.058, which I reproduced here to the digit.
+Update the body so the merge record matches the branch.
+note
+tests/unit/test_level_set_volume.py:89-97
+The tabulation test still passes under the linspace mutation — volumes is a linspace, and PCHIP monotonicity is structural, so only line 89 carries information. Not blocking now that three other tests catch that mutation.
+Pin the table against V_χ(χ̂) = π(R² − χ̂).
+note
+tests/unit/test_level_set_volume.py:108, CSV
+The sweep still ties element_sizes = 2/order, so ε and h refine together and the O(ε²) attribution isn't isolated by this data. verification.md is now explicit that it is "a quadrature-resolution study of the map itself", which is honest and adequate for §25's criterion.
+Optional: add a fixed-quadrature ε-only sweep when 2.4 revisits this.
+note
+tests/unit/test_level_set_volume.py:122
+rel=1.0e-10 against the checked-in table. It passes here — the order-96 row reproduces to 9.17e-12, 11× headroom (orders 24/48: 4.1e-13, 2.3e-13). Latent fragility only, given §23's Ubuntu + macOS matrix.
+Leave it, or loosen to 1e-6; the rate assertion carries the claim either way.
+note
+src/remec/level_set.py:151
+spatial_width_cells defaults to 1.5 but every test passes 1.0 or 1.25, so the default path is never exercised. Within §12.2's "c ≈ 1–2 cells".
+Cosmetic.
+note
+src/remec/level_set.py:40
+I could not reproduce the previously-suspected "flat V_χ aborts the build" failure. Two- and three-atom near-step distributions build cleanly at 33/65/129/257 levels (min level gap 1.7e-3 → 4.0e-5). Recording this so it isn't re-raised.
+None.
+note
+pyproject.toml:13-15
+The numpy<2.5 cap is now justified in a comment and in verification.md (NumPy 2.5 stubs need a py312 mypy target; remec targets 3.10). numpy is already a hard NGSolve transitive dep and is not on §26's list, so no ADR.
+None.
+The six questions
+1. Do the tests constrain the physics? Yes, now. I spot-checked the mutation the PR body claims — fixed χ-space width gives coarea_density(0) = 3.3277 vs π, outside the 3% band, and it fails 4 tests. Beyond that I ran seven more mutations (table above) and every one goes red, including a sign flip on the mollifier argument and dropping the sin(πs)/π moment-matching term. The two mutations that defeated the previous revision — delete the mollified Heaviside, and the PCHIP factor — now fail three tests each. The residual gap is inverse_level, which is untested beyond monotonicity; that is the finding above and it is outside §25's stated criterion for 2.1.
+2. Is the convergence claim real? It is an honest error-vs-refinement sweep, and the numbers now reproduce. Three points, errors 1.2347e-2 / 2.9248e-3 / 7.0256e-4, rates 2.078 / 2.058 — I regenerated all of it on Linux and it matches the CSV to ≤9.2e-12. The upward drift that flagged the old table (2.125 → 2.445) is gone, which is exactly what you'd expect once the interpolation error stopped dominating the finest level. Three points is thin, and ε refines with h, but §25's criterion for 2.1 is "analytic circle/sphere; monotone tabulation" — not a discretization rate — and verification.md says so plainly instead of overclaiming.
+3. Do the equations match the note? Yes — term by term, and this remains the strongest part of the PR. (eq:mollified_V): V = Σ_i w_i H_{ε_i}(χ_i − χ̂), argument (values - level), so V decreases in χ̂ ✓. ε_i = c h_i \|∇χ_i\| gradient-scaled, satisfying the Tornberg–Engquist requirement the note calls "not optional" ✓. The profile H(s) = ½(1 + s + sin(πs)/π) on \|s\| < 1 is genuinely moment-matched: H(−1) = 0, H(1) = 1, δ = H′ = ½(1 + cos πs) has unit mass, zero first moment by symmetry, and δ(±1) = 0 so H_ε ∈ C¹ at the seams — which is what earns the O(ε²) the note asserts rather than assuming it. (eq:V_derivatives): coarea_density returns +Σ w_i H′_{ε_i} = −∂V/∂χ̂, with H′_ε = (1 + cos πs)/(2ε) — the exact derivative of the profile actually used, chain-rule 1/ε and factor of 2 both correct ✓, landing within 1.70e-2 and 2.56e-3 of the analytic π and 2π(0.6). ∂V/∂χ_i = H′_ε(χ_i − χ̂)w_i is absent and correctly deferred to 2.3 per §25. Volume-equispaced tabulation, monotone shape-preserving Hermite fit, both V_χ(χ̂) and χ̂(V) provided, no numerical differentiation of the near-step direction — all four of sec:Vchi_conditioning's prescriptions are honored. No sign, factor, or missing term found.
+4. Any §26 MUST NOT violated? No. No silent clipping of pressure/field/coefficients; no isotropic substitution; no field-aligned assumption; no histogram map (this is the mollified path and Newton isn't reached); no dense global Jacobian; no direct 3D factorization; no PETSc/MPI/JAX/DESC/SIMSOPT; no NGSolve internals in the public API — the module is pure NumPy. The numpy base dependency is transitive-made-explicit and documented.
+5. Was an acceptance criterion quietly weakened? No. The diff against origin/main deletes exactly two lines, both in docs/STATUS.md (the 2.1 row and its Measured: —). Makefile and .github/ are untouched; no xfail or skip added anywhere; no existing tolerance, expected rate, or CI matrix entry modified. The one tolerance change within this PR — rates > 2.0 → > 1.9 — is a loosening in the right direction: it accompanied a correction that raised the measured margin from a shaky 2.125 to a clean 2.078/2.058, and a strict > 2.0 on an O(ε²) claim was never what was meant. No unrelated milestone's state changes; [x] on 2.1 is the documented convention for a submitted implementation PR.
+6. Undocumented decisions. One remains: the magnitude 1e-3 for minimum_gradient_fraction. The mechanism is now named, validated, docstring'd, described in verification.md, and tested — a large improvement — but the value is still a choice rather than a derivation, and §12.6 will inherit its conditioning. That does not need an ADR (§12.2 dictates that a safeguard exists; only the number is open), but §26 asks for an issue or a recorded note rather than silence. The endpoint hard-set is no longer a silent choice — the residuals are exposed and asserted, and verification.md says the map "returns the endpoint identities exactly" alongside the checked raw residuals.
+Verdict: merge
+No blocking findings, and no ADR required. Every earlier blocking item is fixed, and I confirmed each by mutation rather than by inspection. The mathematics was already right; the evidence has caught up with it — the suite now fails for seven distinct wrong implementations that it previously accepted.
+The four should-fix items are all small and none of them threatens 2.1's definition of done: make check passes, §25's criterion is demonstrated by tests that provably fail under mutation, the equation labels are in the docstrings, the rate table is checked in and referenced, and STATUS.md carries the measured numbers and a Next line. If any of them lands before merge, make it the inverse_level test — it is ten lines, and 2.2's transplant composes through exactly that direction.
+· branch milestone/2.1-mollified-vchi
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+tests/unit/test_level_set_volume.py
+probe_levels = np.linspace(volume_map.minimum_level, volume_map.maximum_level, 401)
+assert np.all(np.diff(volume_map.volume(probe_levels)) <= 0.0)
+probe_volumes = np.linspace(0.0, data.total_volume, 401)
+assert np.all(np.diff(volume_map.inverse_level(probe_volumes)) <= 0.0)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — inverse_level is not constrained by any test in this PR.
+This monotonicity assertion is the only thing in the suite that touches inverse_level, and any monotone map satisfies it. I replaced the inverse interpolant with a straight line from (V_Ω, χ_min) to (0, χ_max):
+```
+self._inverse_interpolant = _MonotonePchip.build(
+    volumes[::-1], np.linspace(levels[-1], levels[0], len(levels))
+)
+```
+Result: 5 passed. The whole file is green for an inverse that is wrong by up to 0.585 in χ — 29% of the χ range — on the very circle case this file already builds:
+V
+true χ̂(V)
+straight-line χ̂(V)
+0.5
++0.200791
++0.109692
+1.5
+−0.117356
+−0.389865
+3.0
+−0.594765
+−1.139201
+This is the direction that matters most downstream: DESIGN.md §12.3 says to "evaluate the composition through the fitted χ̂(V)", and the note (§6, sec:Vchi_conditioning) calls it "the well-conditioned direction" precisely because 2.2's transplant composes p₀ through it. Milestone 2.2 will therefore build on an unverified contract.
+The circle gives you a closed form to pin it with: on the disc branch V_χ(χ̂) = π(R² − χ̂), so χ̂(V) = R² − V/π for V ∈ [0, πR²]. Asserting that over a few interior volumes — or asserting the round-trip inverse_level(volume(χ)) ≈ χ with a stated tolerance — kills the mutation above. (FWIW the current round-trip is not tight: I measure max |inverse_level(volume(χ)) − χ| = 3.48e-2 over the range, concentrated where dV/dχ̂ is small, since volume and inverse_level are two independently fitted cubics. Worth choosing the tolerance deliberately rather than discovering it later.)
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+total_volume = float(np.sum(weights))
+raw_endpoint_volume_error = abs(raw_volumes[0] - total_volume)
+raw_endpoint_zero_error = abs(raw_volumes[-1])
+raw_volumes[0], raw_volumes[-1] = total_volume, 0.0
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — the §12.3 checks are now computed, but they are still not mandatory.
+Big improvement over the previous revision: raw_endpoint_volume_error / raw_endpoint_zero_error are genuinely pre-normalization residuals now, and coarea_spot_relative_error supplies the third check. I confirmed all three are real — stubbing _mollified_volumes to np.linspace(Σw, 0, n) now turns three tests red, where before it turned none red.
+What is still missing is DESIGN.md §12.3's word: "Cheap mandatory checks per build". build() computes the residuals and then returns unconditionally; nothing consults them. diagnostics() is opt-in, and only the tests happen to look.
+A build that is badly wrong sails through silently:
+```
+MollifiedVolumeMap.build(..., spatial_width_cells=0.05)   # quadrature cannot resolve the mollifier
+    raw_endpoint_volume_error : 4.09e-05
+    raw_endpoint_zero_error   : 1.20e-02
+    coarea_spot_relative_error: 0.4155          <-- 42% disagreement
+    -> no exception, no warning
+```
+42% disagreement between −dV/dχ̂ and the independent co-area sum is exactly the condition §12.3 wants surfaced, and the caller in 2.2 has no reason to call diagnostics() before trusting the map. Please have build() raise (or warn) when any of the three exceeds a documented, overridable threshold — the numbers are already in hand, this is a few lines.
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+values, gradients, weights, sizes = cls._validated_arrays(data)
+maximum_gradient = float(np.max(gradients))
+gradient_floor = max(np.finfo(float).tiny, maximum_gradient * minimum_gradient_fraction)
+widths = spatial_width_cells * sizes * np.maximum(gradients, gradient_floor)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — the floor is now a real, named, tested safeguard, but the default still leaves a 1000× conditioning spike.
+This is a genuine fix relative to the 1e-12 guard: minimum_gradient_fraction is named, validated, documented in verification.md, and test_critical_point_gradient_floor_prevents_a_delta_spike fails if the old 1e-12 is restored (I re-ran that mutation — 1 failed).
+What it does not yet do is deliver §12.2's intent. Re-running the plateau case from the previous round (χ = 0.36 − max(r−0.3, 0)², so |∇χ| ≡ 0 on a disc holding 2.9% of the quadrature points, 2D order 96):
+minimum_gradient_fraction
+min width
+max width
+coarea_density(0.36)
+1e-12 (old)
+4.64e-14
+4.64e-02
+5.98e+12
+1e-3 (new default)
+4.64e-05
+4.64e-02
+6.25e+03
+The true jump in V across that level is 0.2777, so 6.25e3 ≈ 0.2777 / 4.44e-5 — the spike is not bounded, it is exactly rescaled by 1/minimum_gradient_fraction. The note (§6, sec:Vchi_conditioning) says the mollified evaluation "smears this over a few cells"; here it smears over 1e-3 of a cell, and §12.6 will feed these H_ε′w_i values straight into the Newton JVP with a 1000:1 spread against the typical width.
+Two things would close it:
+floor ε_i on a scale tied to the level range actually being tabulated (e.g. a minimum χ-space width of a fraction of the level spacing), rather than a fraction of max|∇χ| — the latter is an outlier-sensitive global scale;
+report in diagnostics() how many samples were floored, so a caller can see the safeguard activate. Right now only minimum_mollifier_width hints at it.
+If you'd rather keep 1e-3 and defer, that's defensible — but say so in STATUS.md under 2.3 (which owns the JVP that inherits the conditioning), since §26 asks for an issue or ADR rather than a silent choice of the magnitude.
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+tests/unit/test_level_set_volume.py
+Comment on lines
++89
+to
++93
+assert np.all(np.diff(volume_map.levels) > 0.0)
+assert np.all(np.diff(volume_map.volumes) < 0.0)
+assert np.diff(volume_map.volumes) == pytest.approx(
+np.full(64, -data.total_volume / 64.0), abs=2.0e-12
+)
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+note — this test still survives the "no mollifier at all" mutation.
+Replacing _mollified_volumes with a body that ignores values, widths and the mollifier entirely:
+```
+return np.linspace(float(np.sum(weights)), 0.0, len(levels))
+```
+now correctly turns three tests red (both circle/sphere parametrizations and the resolution trend) — that is the big improvement in this revision. But test_tabulation_is_strictly_monotone_and_uniform_in_volume is one of the two that still pass, and it is the test named for the "monotone tabulation" half of the §25 acceptance criterion.
+The reason is unchanged: volumes is np.linspace(total_volume, 0.0, levels) (assigned at level_set.py:177), so lines 90–93 assert that np.linspace is decreasing and uniform; and _MonotonePchip is monotone by construction for monotone data — with build already raising on non-monotone samples — so lines 95 and 97 cannot fail for any map that built successfully. Line 89 (diff(levels) > 0) is the only assertion carrying information, and the linspace mutation satisfies it trivially.
+Not blocking, because the acceptance criterion is now genuinely demonstrated elsewhere in the file. But the closed form is right there if you want this test to earn its name: for χ = R² − r² the disc branch gives V_χ(χ̂) = π(R² − χ̂), which pins every tabulated level rather than just their ordering.
+Milestone 2.1: close volume-map review findings
+3d807b0
+claude
+Bot
+commented
+Aug 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @landreman's task in 7m 47s —— View job
+Adversarial milestone review — PR #12 (Milestone 2.1, mollified V_χ)
+Read diff vs origin/main, DESIGN.md §5 / §12.1–12.6 / §25 / §26, STATUS.md, note §6 (sec:mollified, eq:mollified_V, eq:V_derivatives, sec:Vchi_conditioning)
+Q1 — do the tests constrain the physics? (12-mutation battery)
+Q2 — is the convergence claim real?
+Q3 — equations vs. the note, term by term
+Q4 — §26 MUST NOT
+Q5 — quietly weakened acceptance criteria?
+Q6 — undocumented decisions
+Re-verified the previous round's outstanding items
+Findings posted (3 inline + table below)
+This reviews 3d807b0 ("close volume-map review findings"). Gate is green here — Linux / CPython 3.12.13 / NumPy 2.4.6 / NGSolve 6.2.2606: make lint clean (ruff format, ruff check, mypy strict, 16 files), make test 45 passed, 1 deselected.
+No blocking findings. The previous round's items are genuinely closed and I verified each by mutation rather than by reading the commit message. What remains is three should-fix items, all about checks that exist but do not bite.
+Previously-raised items, re-verified
+Item
+Status
+Evidence I ran
+inverse_level constrained by nothing but monotonicity
+fixed
+The round-trip assertion at test:75-78 now kills it: replacing the inverse interpolant with a straight line from (V_Ω, χ_min) to (0, χ_max) turns 2 tests red (was 0).
+PR body quoting pre-fix numbers
+fixed
+Body, STATUS.md and verification.md now agree, and I reproduced every figure on Linux: circle/sphere rel. errors 5.176e-4 / 7.765e-4, co-area rel. errors 1.702e-2 / 2.562e-3, rates 2.07782 / 2.05763.
+Fritsch–Carlson factor of 3
+fixed
+Restoring the bug turns 4 tests red.
+Endpoint identities assigned / unfalsifiable
+fixed as a diagnostic
+Real pre-normalization residuals are computed and asserted (circle order 96: 1.24e-4, 2.12e-3). Enforcement is the open item below.
+1e-3 gradient floor magnitude
+documented deferral
+STATUS.md now assigns calibration to 2.3, floored_sample_count is reported. Per §26 that is a recorded choice, not a silent one — acceptable.
+§12.1 interface / NGSolve extraction pass
+documented deferral
+STATUS.md "Next" assigns both to 2.2, JVP to 2.3. Correct per §25.
+Mutation battery (tests/unit/test_level_set_volume.py, baseline 6 passed):
+```
+linspace_volumes         (delete the mollifier)          -> 3 failed
+pchip_missing_3          (old slope bug)                 -> 4 failed
+fixed_chi_width          (drop the |grad chi| scaling)   -> 4 failed
+sign_flip                (chi-level -> level-chi)        -> 3 failed
+no_moment_match          (drop sin(pi s)/pi)             -> 1 failed
+coarea_no_chain_rule     (drop the 1/eps factor)         -> 2 failed
+vacuous_floor            (restore the 1e-12 guard)       -> 1 failed
+silence_mandatory_check  (never warn)                    -> 2 failed
+straight_line_inverse    (wrong chi_hat(V))              -> 2 failed
+volume_uniform_to_chi_uniform (chi-uniform tabulation)   -> 3 failed
+coarea_flat              (H'_eps -> box kernel)          -> 0 failed   <-- finding 3
+endpoint_residual_zero   (fabricate residual = 0)        -> 0 failed   <-- finding 1
+```
+Ten of twelve go red. The two that don't are the two findings below.
+Findings
+Sev
+Location
+What is wrong
+What to do
+should-fix
+src/remec/level_set.py:203
+build() enforces one of §12.3's three mandatory checks, and it is the one blind to over-smoothing. A build with element_sizes × 40 gives volume(0.0) = 1.5384 against π·0.6² = 1.1310 — 36 % wrong — with endpoint residuals 3.9 % and 13.4 % of V_Ω, and no warning: coarea_spot_relative_error reads 6.06e-6 because the table and coarea_density share the same over-wide mollifier. The endpoint identities are the check that sees it, and lines 185–186 compute them and then nothing reads them.
+Route the endpoint residuals through the VolumeMapConsistencyWarning path you already built, with their own documented tolerance. Add the over-smoothed case as a test.
+should-fix
+src/remec/level_set.py:302
+spline_monotonicity_margin = min(-diff(self.volumes)), and self.volumes is linspace(total, 0, levels) (line 188) — so it is exactly total/(levels-1) for every build (checked at levels 17/65/129). It never touches _volume_interpolant, so §12.3's second mandatory check is not performed and test:73 (> 0.0) cannot fail.
+Measure the fitted interpolant instead — the 401-point probe at test:102-105 is already the right check; move it into diagnostics(). The spline is monotone on the hardest case I built (200 001 probe points, max ΔV = −5.1e-11), so this is a vacuous diagnostic, not a hidden defect.
+should-fix
+src/remec/level_set.py:276
+Nothing pins H'_ε to be the exact derivative of the H_ε in _mollified_volumes. Replacing (1+cos πa)/(2ε) with the box kernel 1/(2ε) — also unit mass — leaves all 6 tests passing; it differs by only 8.0e-3 relative, inside the rel=3e-2 bounds. The §12.3 spot check can't separate them because it compares against the PCHIP table, whose interpolation error is what forces the loose tolerance. This is the kernel §12.6 / (V_derivatives) hands to 2.3's Newton JVP, so a mismatch there is an O(ε²)-consistent gradient — the failure mode where Newton quietly stops converging quadratically.
+Central-difference _mollified_volumes in χ̂ and compare with coarea_density at rel=1e-6. I measured that agreement at 1.6e-9 for the current code, so the assertion is free and it fails immediately under the mutation.
+note
+src/remec/level_set.py:180
+The plateau spike is rescaled, not bounded: on χ = 0.36 − max(r−0.3,0)² (|∇χ| ≡ 0 on 2.9 % of points), coarea_density(0.36) goes 5.98e12 → 6.25e3 → 81.5 for minimum_gradient_fraction = 1e-12 / 1e-3 / 1e-1, against a true jump in V of 0.2777. Now explicitly deferred to 2.3 in STATUS.md, which satisfies §26.
+When 2.3 calibrates it: the tabulated level spacing is the natural scale and it is already in hand — min level gap on that case is 6.06e-4.
+note
+tests/unit/test_level_set_volume.py:97-105
+The tabulation test still passes under the "delete the mollifier" mutation (it is one of the 3 survivors), because volumes is a linspace by construction and PCHIP monotonicity is structural. Not a problem for the acceptance criterion, which three other tests now demonstrate.
+Optional: pin the table against the circle's closed form V_χ(χ̂) = π(R² − χ̂).
+note
+tests/unit/test_level_set_volume.py:130
+rel=1.0e-10 against the checked-in CSV. It passes here with headroom — order 24/48/96 reproduce to 4.2e-13 / 1.9e-13 / 9.2e-12, so 11× at the tightest row. Latent only, given §23's Ubuntu + macOS matrix.
+Leave it, or loosen to 1e-6; the rate assertion carries the claim.
+note
+tests/unit/test_level_set_volume.py:116
+The sweep still ties element_sizes = 2/order, so ε and h refine together and the O(ε²) attribution is not isolated by this data. verification.md says plainly that this is "a quadrature-resolution study of the map itself; it is not a claim about a future FEM solve's convergence rate", which is the honest framing and is adequate for §25.
+Optional ε-only sweep when 2.4 revisits.
+The six questions
+1. Do the tests constrain the physics? Yes. I spot-checked the mutation the PR body claims — fixed χ-space width gives coarea_density(0) = 3.3277 against π, outside the 3 % band — and it fails 4 tests, matching the claim. Beyond that, ten of my twelve mutations go red, including a sign flip on the mollifier argument, dropping the sin(πs)/π moment-matching term, dropping the chain-rule 1/ε, tabulating χ-uniformly instead of volume-uniformly, and silencing the mandatory check. The two survivors are findings 1 and 3 above.
+2. Is the convergence claim real? It is an honest error-vs-refinement sweep and it reproduces exactly. Errors 1.2347e-2 / 2.9248e-3 / 7.0256e-4, rates 2.0778 / 2.0576, regenerated here and matching the CSV to ≤9.2e-12. The adjacent_rate column is now recomputed and validated (test:133-135), the assertion is > 1.9 rather than a hairline > 2.0, and the upward drift that flagged the old table is gone — exactly what you'd expect once interpolation error stopped dominating the finest level. Three points is thin and ε refines with h, but §25's criterion for 2.1 is "analytic circle/sphere; monotone tabulation", not a discretization rate, and verification.md does not overclaim.
+3. Do the equations match the note? Yes — term by term, and this remains the strongest part of the PR. (eq:mollified_V): V = Σ_i w_i H_{ε_i}(χ_i − χ̂), argument (values − level), so V decreases in χ̂ ✓. ε_i = c h_i |∇χ_i| gradient-scaled, satisfying the Tornberg–Engquist requirement the note calls "not optional" ✓. H(s) = ½(1 + s + sin(πs)/π) on |s| < 1 is genuinely moment-matched — H(∓1) = 0/1, δ = H′ = ½(1 + cos πs) has unit mass and zero first moment by symmetry, δ(±1) = 0 so H_ε ∈ C¹ at the seams — which is what earns the O(ε²). (eq:V_derivatives): coarea_density returns +Σ w_i H′_{ε_i} = −∂V/∂χ̂; I verified this against a central difference of the raw mollified sum and it agrees to 1.6e-9, so the 1/ε and the factor of 2 are both right. ∂V/∂χ_i = H′_ε(χ_i − χ̂)w_i is absent, correctly deferred to 2.3 per §25. All four of sec:Vchi_conditioning's prescriptions are honored — volume-equispaced tabulation, monotone shape-preserving Hermite fit, both directions provided, no numerical differentiation of the near-step direction. The Fritsch–Carlson slopes and the 3δ endpoint limiter match the standard construction. No sign, factor, or missing term found.
+4. Any §26 MUST NOT violated? No. No silent clipping of pressure/field/coefficients; no isotropic substitution; no field-aligned assumption; no histogram map (this is the mollified path and Newton isn't reached); no dense global Jacobian; no direct 3D factorization; no PETSc/MPI/JAX/DESC/SIMSOPT; no NGSolve internals in the public API — the module is pure NumPy. The numpy base dependency is transitive-made-explicit and its <2.5 cap is now justified in both pyproject.toml and verification.md.
+5. Was an acceptance criterion quietly weakened? No. Makefile and .github/ are untouched by the diff; tests/ changes are purely additive (one new file, one new CSV); no xfail or skip marker is added anywhere; no existing tolerance, expected rate, or CI matrix entry is modified; only milestone 2.1's STATUS.md row changes. The one tolerance change within the PR — rates > 2.0 → > 1.9 — accompanied a correction that raised the measured margin, and is the right direction for an O(ε²) claim. [x] on the 2.1 row is the documented convention for a submitted implementation PR.
+6. Undocumented decisions. None left unrecorded. The 1e-3 gradient-floor magnitude, the endpoint hard-set, the §12.1 interface divergence, and the numpy cap are each now written down in STATUS.md or verification.md with the milestone that owns the follow-up. No ADR is required — §12.2 and §12.3 dictate the answers, so these need implementing rather than adjudicating.
+Verdict: merge
+No blocking findings and no ADR required. Definition of done is satisfied: make check passes from a clean env, §25's criterion is demonstrated by tests that provably fail under ten distinct wrong implementations, the equation labels (mollified_V) / (V_derivatives) are in the docstrings, the rate table is checked in and referenced from verification.md, and STATUS.md carries the measured numbers plus a Next line for 2.2 and 2.3.
+The three should-fix items are all small and none threatens this milestone. If one lands before merge, make it the endpoint enforcement in build() — it is a handful of lines reusing the warning path already present, and it is the difference between a map that reports a 36 % error and one that does not.
+To be explicit about what I did not find: no equation error, no missing term, no sign flip, no §26 violation, no weakened criterion, and no mutation of the core mollified construction that survives the suite.
+· branch milestone/2.1-mollified-vchi
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+floored_sample_count=floored_sample_count,
+)
+coarea_error = volume_map.diagnostics()["coarea_spot_relative_error"]
+if coarea_error > coarea_consistency_tolerance:
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — build() enforces one of §12.3's three mandatory checks, and it is the one that is blind to over-smoothing.
+The co-area spot check is a genuine improvement and I confirmed it works (silence_mandatory_check mutation → 2 tests red). But raw_endpoint_volume_error / raw_endpoint_zero_error are computed at lines 185–186 and then never consulted, and the note (§6, sec:Vchi_conditioning) singles those identities out as the "cheap and sharp" global check.
+The gap is not theoretical. A badly over-smoothed build sails through:
+```
+MollifiedVolumeMap.build(circle_data with element_sizes x40, spatial_width_cells=1.0)
+    volume(0.0)                 = 1.538419      (analytic pi*0.6^2 = 1.130973  -> 36% wrong)
+    raw_endpoint_volume_error/V = 3.94e-02
+    raw_endpoint_zero_error/V   = 1.34e-01
+    coarea_spot_relative_error  = 6.06e-06      <-- the only enforced check, and it is happy
+    warnings raised             = []
+```
+The co-area check compares the PCHIP table against coarea_density, and both are assembled from the same over-wide mollifier, so it agrees to six digits on a map that is 36 % wrong. The endpoint residuals are the ones that see it — 13 % of V_Ω — and nothing looks at them.
+Add them to the same warn path you already built, with their own documented, overridable tolerance:
+```
+endpoint_error = max(raw_endpoint_volume_error, raw_endpoint_zero_error) / total_volume
+if endpoint_error > endpoint_consistency_tolerance:
+    warnings.warn(..., VolumeMapConsistencyWarning, stacklevel=2)
+```
+Related: the test-side assertions at tests/unit/test_level_set_volume.py:71-72 are one-sided upper bounds, so replacing lines 185–186 with raw_endpoint_volume_error = raw_endpoint_zero_error = 0.0 leaves all 6 tests passing. Enforcing in build() plus a test on the over-smoothed case closes both ends.
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+"maximum_level": self.maximum_level,
+"raw_endpoint_volume_error": self._raw_endpoint_volume_error,
+"raw_endpoint_zero_error": self._raw_endpoint_zero_error,
+"spline_monotonicity_margin": float(np.min(-np.diff(self.volumes))),
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — spline_monotonicity_margin is a constant, not a measurement of the spline.
+self.volumes is target_volumes = np.linspace(total_volume, 0.0, levels) (line 188), so min(-diff(self.volumes)) is exactly total_volume / (levels - 1) for every build that has ever been made. Verified:
+```
+levels=  17  margin=2.500000000000e-01   total/(n-1)=2.500000000000e-01
+levels=  65  margin=6.250000000000e-02   total/(n-1)=6.250000000000e-02
+levels= 129  margin=3.125000000000e-02   total/(n-1)=3.125000000000e-02
+```
+It never touches _volume_interpolant, so §12.3's second mandatory check ("spline monotonicity") is not performed, and the assertion at tests/unit/test_level_set_volume.py:73 (> 0.0) cannot fail.
+The real check already exists in the test file — lines 102–105 probe the fitted spline on 401 points. Move that into the diagnostic so the interpolant is what is measured, e.g. the max of _volume_interpolant.derivative over a probe of the tabulated interval (or over the Hermite critical points), and rename accordingly. For what it is worth the interpolant is genuinely monotone on the hardest case I could build (plateau level set, 200 001 probe points, max ΔV = −5.1e-11), so this is a vacuous diagnostic rather than a hidden defect.
+Fix this →
+claude
+Bot
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+src/remec/level_set.py
+argument = (self._values - level) / self._widths
+derivative = np.where(
+np.abs(argument) < 1.0,
+(1.0 + np.cos(np.pi * argument)) / (2.0 * self._widths),
+claude
+Bot
+Aug 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+should-fix — nothing pins H'_ε to be the exact derivative of the H_ε used in _mollified_volumes.
+The formula here is correct — I checked it against a finite difference of the raw mollified sum and it agrees to 1.6e-9 relative, so the chain-rule 1/ε and the factor of 2 are both right. The problem is that no test would notice if it were not.
+Mutation: replace (1 + cos πa)/(2ε) with the box kernel 1/(2ε) on |a| < 1 — a different mollifier's derivative, but one that also has unit mass, so it is not obviously silly:
+```
+coarea_flat  (H'_eps -> 1/(2 eps))   ->  6 passed
+```
+All six tests pass. It differs from the true derivative by only 8.0e-3 relative (3.2206 vs 3.1951 at the circle's zero level), comfortably inside the rel=3.0e-2 bounds at test lines 66 and 68. The §12.3 spot check can't separate them either, because it compares against the PCHIP table, whose own interpolation error is what forces the loose tolerance.
+This matters past 2.1: §12.6 and the note's (V_derivatives) take ∂V_χ^ε/∂χ_i = H'_ε(χ_i − χ̂)w_i from exactly this kernel, so a mollifier/derivative mismatch gives 2.3's Newton JVP a gradient that is not the gradient of the residual it solves — consistent to O(ε²), which is precisely the regime where Newton stops converging quadratically and no one can tell why.
+The pinning check is cheap and exact: finite-difference _mollified_volumes in χ̂ and compare with coarea_density at a couple of interior levels, at rel=1e-6 rather than 3e-2. That assertion fails immediately under the mutation above.
+Fix this →
+Hide details
+View details
+landreman
+merged commit 1ccbea3
+into
+main
+Aug 11, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

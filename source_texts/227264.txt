@@ -1,0 +1,382 @@
+🦀 Low-level 3D Computer Vision library in Rust. Contribute to kornia/kornia-rs development by creating an account on GitHub.
+
+feat(3d): add a sparse voxel grid and host voxel downsampling by edgarriba · Pull Request #1242 · kornia/kornia-rs · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+edgarriba
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+What does this pull request do?
+Adds kornia_3d::voxel on the host. Until now kornia-3d has had no voxel structure (#185).
+VoxelLayout holds the voxel size and origin. Keys are exact: floor((p − o) / s) per axis, computed in f64 and stored as i32, negative keys included and range-checked. A reciprocal estimate falls back to the division near voxel boundaries, so the key is always floor(fl((v − o) / s)).
+VoxelKey, VoxelConnectivity (6/18/26 offsets), VoxelError (thiserror), MAX_VOXEL_POINTS.
+VoxelGrid<T> is a sparse std::collections::HashMap keyed by VoxelKey. It has insert / get / remove / iteration, sorted_keys, and neighbour iteration that skips keys outside i32.
+VoxelView<'a> is a cloud grouped by voxel, borrowing the cloud: packed 128-bit (key, index) words are sorted, and the run starts give each voxel's point indices (a CSR of indices, ascending within a voxel). No point data is copied. API: len, is_empty, cloud, layout, key(v), keys(), centre(v), voxel(v) (iterator over the voxel's point indices), and the reductions:
+first() / nearest() → PointCloudView<'a>: one input point per voxel (lowest index / nearest to the voxel centre, ties to the lowest index), zero copy;
+centroids() → owned PointCloud (averaged points; colors rounded half up; normals renormalized), reduced in parallel over the voxels, each voxel in ascending index, so deterministic.
+Built by VoxelView::new(cloud, &layout) (owns its buffers) or VoxelDownsampler::view(&mut self, cloud, &layout) (borrows the reusable scratch, so repeated calls do not reallocate the sort buffers).
+voxel_downsample(cloud, &layout, mode) stays as the one-call wrapper: VoxelView::new plus the reduction named by DownsampleMode (Centroid, First, NearestToCentre), copied into an owned PointCloud, in ascending key order. VoxelDownsampler::downsample_into keeps writing the points (and chosen indices) into caller-owned buffers; it is the allocation-free slice form and the host twin of feat(3d): add the CUDA voxel filter #1243's device op.
+voxel_neighbour_counts counts occupied neighbour voxels per point; remove_sparse_voxels filters on them and returns the kept points as a PointCloudView of the input.
+kornia_3d::pointcloud::PointCloudView<'a>: a borrowed index subset of a PointCloud. PointCloud::select(indices) checks the indices and the attribute lengths once (FilterError::IndexOutOfRange, FilterError::AttributeLengthMismatch); a Vec<u32> is moved in, a &[u32] borrowed (Cow<'a, [u32]>). Accessors point(i) / color(i) / normal(i) (Option), allocation-free iterators points() / colors() / normals(), indices(), cloud(), into_indices(), and to_point_cloud() for the owned copy.
+bench_voxel times downsample_into (3 modes), voxel_downsample with colors and normals (3 modes), the zero-copy view paths (view_first_cpu, view_nearest_cpu, view_centroids_attrs_cpu, view_first_to_point_cloud_cpu, voxel_view_new_cpu), remove_sparse_voxels returning its view and with the copy, and the 26-neighbour counts, on 100k / 1M points.
+Review follow-up (@edgarriba's three threads):
+select_points → PointCloud::select returning PointCloudView (the free fn is removed; it was new in this PR).
+downsampling now returns a VoxelView of the original cloud; first() / nearest() are views, centroids() is owned because the averages are new points.
+rustc-hash dropped from kornia-3d: VoxelGrid was its only user and no op in this stack uses VoxelGrid (downsampling, neighbour counts and feat(3d): add radius and statistical point cloud outlier filters #1244's search are sort based). rustc-hash stays a workspace dependency for kornia-apriltag; Cargo.lock was updated by cargo.
+Every public function has # Arguments, # Returns and # Errors (infallible ones say "This method is infallible.").
+Changelog fragment: changelog.d/1242.added.md. Not exposed in the Python or C++ bindings (kornia-py/src/pointcloud.rs only uses PointCloud::new, which is unchanged).
+This is one of three PRs that replace #1224. They are based on main and need none of the depth PRs:
+this PR: host voxel grid, voxel view / downsampling and neighbour counts;
+feat(3d): add the CUDA voxel filter #1243: CudaVoxelFilter, stacked on this PR;
+feat(3d): add radius and statistical point cloud outlier filters #1244: radius / statistical outlier filters, stacked on this PR.
+Departures from #1220:
+voxel_downsample(cloud, &layout, mode) takes a VoxelLayout (voxel size and origin) instead of a bare voxel_size, so results can sit on a fixed grid. Open3D's grid is reproduced with origin = min_bound − voxel_size / 2; PCL's VoxelGrid uses [0.0; 3]. Both are stated in the rustdoc.
+PCL was not available as a baseline. Open3D and NumPy were.
+References: Open3D geometry.VoxelGrid and PointCloud.voxel_down_sample (0.20; checked-in parity fixture), PCL VoxelGrid.
+Size: 3393 added lines (git diff --shortstat origin/main...HEAD → 16 files changed, 3393 insertions(+)):
+2200 library: voxel/downsample.rs 1088, voxel/grid.rs 369, voxel/mod.rs 333, pointcloud/view.rs 293, pointcloud.rs 58, pointcloud/filter.rs 56, lib.rs 3. Most of the growth of the review follow-up is rustdoc (# Arguments / # Returns / # Errors / # Example on every VoxelView / PointCloudView method).
+901 tests.
+282 bench and baseline script.
+one 36 KB fixture.
+It is a single concern: host voxel indexing and the ops built on it. VoxelGrid, the voxel view / downsampler and the neighbour counts all share VoxelLayout / VoxelKey / VoxelConnectivity; PointCloudView is the return type the review asked for. CUDA and the outlier filters are already split out.
+Related issue
+Refs #1220 (part of it; the issue closes with #1244, the last PR of the series).
+What did you check?
+At a45c2f1c (git rev-parse HEAD → a45c2f1c436343489e1b99cd7ae01a6475f1d0ae), x86_64 Linux, stable toolchain, 4 cores shared with another agent's builds. pixi is not installed here, so these are the exact commands pixi run pr-check runs, in a target dir private to this agent (CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 for disk):
+```
+$ python3 scripts/check_skills.py
+skills OK
+== exit 0
+$ cargo fmt --all -- --check
+== exit 0
+$ cargo clippy --workspace --no-deps --all-targets --features ci -- -D warnings
+    Finished `dev` profile [unoptimized] target(s) in 11m 50s
+== exit 0
+$ cargo check --workspace --all-targets --features ci
+    Finished `dev` profile [unoptimized] target(s) in 22.83s
+== exit 0
+$ cargo test --features ci
+    Finished `test` profile [unoptimized] target(s) in 3m 38s
+     Running unittests src/lib.rs (/tmp/claude-0/vx/tgt/debug/deps/kornia_3d-17863b52e23addbd)
+test result: ok. 353 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 16.44s
+   Doc-tests kornia_3d
+test result: ok. 35 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 40.87s
+(all 28 test binaries / doctest sets: 1693 passed; 0 failed; 14 ignored)
+== exit 0
+$ cargo clippy -p kornia-3d --all-targets --features cuda -- -D warnings
+    Finished `dev` profile [unoptimized] target(s) in 15.46s
+== exit 0
+```
+New tests at this head (focused run cargo test -p kornia-3d --lib voxel → test result: ok. 21 passed; -- view select sparse and the doctests):
+voxel::tests::voxel_view_matches_reference_and_downsample: on 0, 1, 5 000 and 60 000 random points, the view's keys, per-voxel index lists and centres equal a brute-force BTreeMap grouping; first() / nearest() indices equal downsample_into's chosen indices; centroids(), first().to_point_cloud(), nearest().to_point_cloud() and voxel_downsample equal downsample_into's points bit for bit, through both VoxelView::new and a reused VoxelDownsampler::view; out-of-range key / centre / voxel give None.
+voxel::tests::voxel_view_rejects_bad_clouds: attribute length mismatch and a NaN point, through both constructors.
+pointcloud::view::tests::* (3): borrowed vs owned indices (Cow::Borrowed / Cow::Owned), accessors, out-of-range None, repeats, the copy, clouds without attributes, empty selection, both select errors.
+remove_sparse_voxels_keeps_order_and_attributes now checks the returned view's indices and its copy; the existing Open3D parity fixture and centroid-attribute tests run through the new voxel_downsample wrapper.
+rustc-hash removed: Cargo.lock loses "rustc-hash 2.1.3" from kornia-3d's list (written by cargo); rg -n "rustc.hash" crates/*/Cargo.toml → only crates/kornia-apriltag/Cargo.toml:33.
+Bench, before → after the review follow-up (bench_voxel, RAYON_NUM_THREADS=1, criterion --warm-up-time 1 --measurement-time 2, 4 interleaved rounds per arm, min / median of the per-round criterion means, ms):
+before: d5fc9bf8 (old head) in its own worktree, built into its own target dir, bench binary sha256 01ba12b42acbaca99b75dc5de25277679dd63b6849330d4078bb85e50edd32c5; its bench file was the new one minus the view-only cases (same case names, same inputs).
+after: a45c2f1c, own worktree and target dir, bench binary sha256 f7fb6c4bd38186d70df3822c5e0c7b22c31422f9b2714ddc814222b411a7c372.
+load average 0.5 at the start, 10.6 at the end (another agent's builds); the arms alternate, so both saw the same load.
+```
+case                                                       before ms (min/med)     after ms (min/med) min ratio
+Voxel/downsample_first_cpu/100k                                    7.91 / 9.09            8.68 / 9.43     1.098
+Voxel/voxel_downsample_centroid_attrs_cpu/100k                   13.37 / 14.51          14.25 / 15.95     1.066
+Voxel/voxel_downsample_first_attrs_cpu/100k                      11.42 / 11.76          11.10 / 11.38     0.971
+Voxel/voxel_downsample_nearest_attrs_cpu/100k                    11.16 / 11.99          11.97 / 12.49     1.073
+Voxel/remove_sparse_voxels26_attrs_cpu/100k                      21.34 / 28.19          21.83 / 23.38     1.023
+Voxel/downsample_first_cpu/1000k                                78.14 / 109.92          70.77 / 87.62     0.906
+Voxel/voxel_downsample_centroid_attrs_cpu/1000k                104.90 / 129.18        104.71 / 129.37     0.998
+Voxel/voxel_downsample_first_attrs_cpu/1000k                    78.72 / 125.26         78.10 / 115.08     0.992
+Voxel/voxel_downsample_nearest_attrs_cpu/1000k                 100.80 / 110.96         95.35 / 131.06     0.946
+Voxel/remove_sparse_voxels26_attrs_cpu/1000k                   132.89 / 166.73        130.40 / 157.34     0.981
+```
+Zero-copy view paths (after only, first run of 3 interleaved rounds, ms min / median):
+```
+Voxel/view_first_cpu/1000k                         80.14 / 83.17
+Voxel/view_first_to_point_cloud_cpu/1000k          78.95 / 84.39
+Voxel/view_nearest_cpu/1000k                       96.03 / 101.58
+Voxel/view_centroids_attrs_cpu/1000k              106.23 / 112.95
+Voxel/voxel_view_new_cpu/1000k                     84.00 / 89.56
+Voxel/remove_sparse_voxels26_view_cpu/1000k        93.25 / 94.17   (vs 128.89 / 145.50 with to_point_cloud())
+Voxel/view_first_cpu/100k                           7.95 / 9.36
+Voxel/remove_sparse_voxels26_view_cpu/100k         15.72 / 17.81   (vs 23.68 / 23.91 with to_point_cloud())
+```
+Every shared case is within ±10 % (min ratio 0.91–1.10) with no consistent sign, which is the noise level of this shared box; the code under downsample_into / the sort is unchanged and the wrapper does the same work in a different order (parallel reduction, then a gather of m ≈ 64 000 voxels). The sort dominates every downsampling case, so the zero-copy first() / nearest() save only the gather; remove_sparse_voxels saves the copy of the ~1M kept points (≈ 35 ms at 1M). The 4-thread run was skipped: the other agent's builds kept the load above 8.
+Not run, and why:
+pixi run pr-check itself: pixi is not installed here; the commands above are its pieces.
+MSRV 1.89 was not built (impl Into<Cow<'a, [u32]>> with &[u32; N] needs Rust 1.77, below the MSRV).
+The Orin baseline table of the earlier body was not re-measured; the timed code behind it (sort and reductions) did not change.
+Python bindings: not built; kornia-py does not wrap any voxel or filter API (rg -n "kornia_3d::(voxel|pointcloud::(filter|PointCloudView))|select_points" kornia-py/src kornia-cpp → no hits).
+Self-review (required)
+```
+Verdict: comment
+
+PR body — minor — 3393 added lines (> 400): 2200 library (mostly rustdoc sections on the new view methods), 901 tests, 282 bench/script; reason stated (one concern: host voxel indexing and the ops sharing its key types, plus the view return types the review asked for; CUDA and the outlier filters are already split into #1243 / #1244) — none beyond the stated split — [measured]
+crates/kornia-3d/src/voxel/downsample.rs:563 — minor — VoxelView::new and voxel_downsample allocate the sort buffers per call — documented convenience forms; VoxelDownsampler::view borrows a reused scratch (no reallocation) and downsample_into writes into caller buffers — keep — [inferred]
+crates/kornia-3d/src/voxel/downsample.rs:738 — nit — first()/nearest() allocate one u32 per voxel for the view's indices — needed: the scratch holds u128 sort words, not u32 indices; the view owns them (Cow::Owned) and into_indices() hands the buffer back — [inferred]
+§0 — no finding — #1220 (gh api repos/kornia/kornia-rs/issues/1220) plus the three review threads on this PR: every hunk of the follow-up maps to one thread (PointCloudView / PointCloud::select ← filter.rs:83, VoxelView ← downsample.rs, std HashMap / rustc-hash removal ← grid.rs:1); the rest of the diff is unchanged from the reviewed head — [measured]
+§0b — no finding — no point cloud view, index-subset type or voxel grouping exists elsewhere; kornia-tensor's TensorView is a strided tensor view (no index gather), ContoursView / OrbFeaturesView are imgproc result views; see Reuse searches — [measured]
+§1 — no finding — the views borrow the cloud and copy no point data; PointCloud::select moves a Vec in or borrows a slice (Cow), checked once; VoxelDownsampler::view borrows the scratch; only centroids() and to_point_cloud() allocate output, by definition — [inferred]
+§2 — no finding — reductions are rayon par_iter over voxels with with_min_len(MIN_ITEMS_PER_TASK = 4096), each voxel sequential in ascending index; no nested par_iter, no locks — [inferred]
+§3 — no finding — bench_voxel gains voxel_downsample_{first,nearest}_attrs_cpu, view_{first,nearest,centroids_attrs,first_to_point_cloud}_cpu, voxel_view_new_cpu, remove_sparse_voxels26_{view,attrs}_cpu; before/after quoted above with rev-parse and binary sha256 of both arms (separate worktrees and target dirs; interleaved rounds); all shared cases within noise ("voxel_downsample_centroid_attrs_cpu/1000k 104.90 / 129.18 → 104.71 / 129.37") — [measured]
+§4 — no finding — voxel_view_matches_reference_and_downsample pins the view against a brute-force grouping and downsample_into bit for bit (4 sizes incl. 0 and 1, both constructors); "test result: ok. 353 passed; 0 failed; 1 ignored" for kornia_3d, doctests "35 passed"; accessors return Option, no panics on bad positions; not exposed in bindings (kornia-bindings; kornia-py only uses PointCloud::new) — [measured]
+§5 — no finding — grep -nE "unwrap\(\)|expect\(|panic!|unsafe" pointcloud/view.rs pointcloud.rs voxel/{mod,grid,downsample}.rs → no hits; every new pub fn has # Arguments / # Returns / # Errors (+ # Example on the non-trivial ones, all run as doctests); FilterError reused for select — [measured]
+§6 — no finding — changelog.d/1242.added.md rewritten for the views and the std HashMap; README line updated; Cargo.lock change written by cargo; AI disclosure filled — [measured]
+
+Reuse searches:
+- PointCloudView / VoxelView (borrowed views over a cloud)
+  $ rg -n "pub struct \w*View\b|pub struct \w*View<" crates/
+  crates/kornia-tensor/src/view.rs:58:pub struct TensorView<'a, T, const N: usize> {
+  crates/kornia-imgproc/src/contours.rs:82:pub struct ContoursView<'a> {
+  crates/kornia-imgproc/src/features/match.rs:702:pub struct OrbFeaturesView<'a, const N: usize> {
+  crates/kornia-3d/src/pointcloud/view.rs:40:pub struct PointCloudView<'a> {
+  crates/kornia-3d/src/voxel/downsample.rs:523:pub struct VoxelView<'a> {
+  (TensorView is strided, not an index gather; the other two are imgproc result types)
+- PointCloud::select / gather (subset a cloud by index)
+  $ rg -n "fn (select|subset|gather|take_indices)\w*" crates/ --glob "!**/tests.rs"
+  crates/kornia-imgproc/src/cuda/sift/plan.rs:319:    fn select_best_keypoints(
+  crates/kornia-3d/src/pointcloud/view.rs:285:fn gather<'i, 'v: 'i, T>(
+  crates/kornia-3d/src/pointcloud.rs:98:    pub fn select<'a>(
+  crates/kornia-3d/src/pnp/epnp.rs:306:fn select_control_points(points_world: &[Vec3AF32]) -> [Vec3AF32; 4] {
+  crates/kornia-calib/src/sfm.rs:1364:fn select_bootstrap_pair(
+  (none on PointCloud besides this PR's own)
+  $ rg -n "impl\w* PointCloud\b|fn \w+\(&self[^)]*\) -> \w*PointCloud" crates/
+  crates/kornia-3d/src/pointcloud/view.rs:275:    pub fn to_point_cloud(&self) -> PointCloud {
+  crates/kornia-3d/src/voxel/downsample.rs:779:    pub fn first(&self) -> PointCloudView<'a> {
+  crates/kornia-3d/src/pointcloud.rs:22:impl PointCloud {
+  (this PR's own items only)
+- VoxelGrid map (sparse voxel map)
+  $ rg -n "HashMap<\[i32; 3\]|HashMap<VoxelKey" crates/
+  crates/kornia-3d/src/voxel/grid.rs:30:    cells: HashMap<VoxelKey, T>,
+  $ rg -n "rustc.hash" crates/*/Cargo.toml
+  crates/kornia-apriltag/Cargo.toml:33:rustc-hash = { workspace = true }
+- voxel ops outside this PR
+  $ rg -n "[Vv]oxel" crates/ --glob "!crates/kornia-3d/src/voxel/**" --glob "!crates/kornia-3d/benches/**" -l
+  crates/kornia-3d/README.md
+  crates/kornia-3d/Cargo.toml
+  crates/kornia-3d/src/pointcloud/view.rs
+  crates/kornia-3d/src/lib.rs
+  (this PR's own lines only)
+
+Skill gaps:
+- kornia-code-review §3 A/A trap: a fresh CARGO_TARGET_DIR per arm is not enough when one dir is reused for a second worktree: cargo's dep-info then tracks the first worktree's source paths and reports the stale binary as fresh (hit here while benching #1244); propose: "one target dir per worktree per arm, never re-pointed at another checkout; check the bench binary's mtime and a string only the arm's bench file contains".
+- kornia-api-flavor has no rule for ops whose result is a subset of the input; propose: "an op whose output is a subset of its input returns a borrowed view (PointCloudView) with to_*() for the owned copy; new points (averages) are returned owned".
+```
+AI usage disclosure
+Agent + version: Claude Code 2.1.312
+Model: Anthropic Claude (see the session link)
+Effort level: high
+Skills applied: kornia-arch, kornia-workflow, kornia-coding-style, kornia-api-flavor, kornia-code-review, kornia-curation, kornia-bindings
+Human vs AI part: @edgarriba scoped the issue, reviewed the PR and chose the view design; the agent wrote the code, tests, benches and this description.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+feat(3d): add a sparse voxel grid and host voxel downsampling
+…
+dd999d4
+```
+Add `kornia_3d::voxel`: `VoxelLayout` (voxel size and origin, exact
+`floor((p - o) / s)` keys in `i32`), `VoxelKey`, `VoxelConnectivity`
+(6/18/26 neighbours), `VoxelError`, the FxHash `VoxelGrid<T>`, and the
+sort-by-key host reductions `voxel_downsample` / `VoxelDownsampler`
+(centroid, first, nearest to centre; deterministic ascending key order),
+`voxel_neighbour_counts` and `remove_sparse_voxels`.
+
+`kornia_3d::pointcloud::filter` gets `select_points` and the
+`FilterError` variants it reports, shared with the voxel ops.
+
+Tests cover keys at the i32 limits and on voxel boundaries, brute-force
+parity, attributes, determinism and an Open3D `voxel_down_sample` parity
+fixture; `bench_voxel` times the CPU downsampling and neighbour counts.
+
+Part of #1220.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+coderabbitai
+Bot
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Contributor
+Important
+Draft PR not reviewed
+Draft PRs are not automatically reviewed by default.
+Trigger a manual review
+To automatically review draft PRs, update your CodeRabbit configuration:
+```
+reviews:
+  auto_review:
+    drafts: true
+```
+Autofix · Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+docs(changelog): name the voxel-grid fragment after #1242
+…
+f36d19e
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+This was referenced Oct 29, 2026
+feat(3d): add the CUDA voxel filter
+#1243
+Draft
+feat(3d): add radius and statistical point cloud outlier filters
+#1244
+Draft
+feat(3d): add voxel grid, voxel downsampling and outlier filters
+#1224
+Closed
+claude
+added 2 commits
+October 29, 2026 15:12
+docs(3d): add the missing Arguments / Returns / Errors sections to th…
+…
+d8bff74
+```
+…e voxel API
+
+Every public voxel function now carries the three rustdoc sections that
+AGENTS.md requires; infallible ones say so ("This method is infallible.",
+as in ransac/config.rs). Reword the sorted_words test-helper doc to name
+its only user, the host sort-word ordering test.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+test(3d): bench voxel_downsample with colors and normals
+…
+45ab9b4
+```
+The Centroid attribute reduction that voxel_downsample runs in parallel
+was not timed by any bench case; add voxel_downsample_centroid_attrs_cpu
+at 100k and 1M points.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+edgarriba
+pushed a commit
+that referenced
+this pull request
+Oct 29, 2026
+Merge branch 'feat/3d-voxel-grid' into feat/3d-voxel-cuda
+…
+4614631
+```
+Brings in #1242's rustdoc sections and the voxel_downsample attribute
+bench; resolves the bench_voxel.rs module-doc / import conflict.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+edgarriba
+pushed a commit
+that referenced
+this pull request
+Oct 29, 2026
+Merge branch 'feat/3d-voxel-grid' into feat/3d-pointcloud-outlier-fil…
+…
+f2ddc38
+```
+…ters
+
+Brings in #1242's rustdoc sections and the voxel_downsample attribute
+bench; resolves the bench_voxel.rs module-doc / import conflict.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+Merge main into feat/3d-voxel-grid
+d5fc9bf
+edgarriba
+commented
+Oct 30, 2026
+View reviewed changes
+Comment thread
+crates/kornia-3d/src/pointcloud/filter.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/kornia-3d/src/voxel/downsample.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/kornia-3d/src/voxel/grid.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+claude
+added 2 commits
+October 30, 2026 13:32
+refactor(3d): back VoxelGrid with std HashMap and drop rustc-hash
+…
+6ab0acc
+```
+VoxelGrid was the only FxHashMap user in kornia-3d and no op in the
+voxel stack uses it (downsampling and the density filter are sort
+based), so the extra dependency is not justified. rustc-hash stays a
+workspace dependency for kornia-apriltag.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+feat(3d): return borrowed PointCloudView and VoxelView from the voxel…
+…
+a45c2f1
+```
+… ops
+
+PointCloud::select(indices) returns a PointCloudView: the cloud,
+borrowed, and the indices (moved in from a Vec or borrowed from a
+slice), checked once; accessors and iterators read through without
+copying and to_point_cloud() makes the owned copy. It replaces the free
+select_points.
+
+VoxelView exposes the voxel grouping VoxelDownsampler already builds
+(sorted key/index words plus run starts): keys, per-voxel point
+indices, centres, and the reductions first()/nearest() (a
+PointCloudView of the input, zero copy) and centroids() (an owned
+cloud, same arithmetic as before). VoxelView::new owns its buffers;
+VoxelDownsampler::view borrows the scratch so reuse does not
+reallocate. voxel_downsample stays as the one-call owned wrapper and
+remove_sparse_voxels returns its kept points as a PointCloudView.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MATcJhKoVKpE7VA2yvwnTg
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

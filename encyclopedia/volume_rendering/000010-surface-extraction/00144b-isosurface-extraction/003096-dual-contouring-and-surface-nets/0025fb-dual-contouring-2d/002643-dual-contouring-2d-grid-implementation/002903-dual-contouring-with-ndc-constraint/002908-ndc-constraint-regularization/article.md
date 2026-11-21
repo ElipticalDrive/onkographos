@@ -1,0 +1,102 @@
+# NDC Constraint Regularization
+
+
+## Overview
+NDC Constraint Regularization is a regularization procedure applied during least-squares solving to ensure vertex coordinates $x$ remain within the $[0, 1]$ range (NDC space) [S1, unofficial]. It adjusts a regularization scale and position if bounds are violated [S1, unofficial].
+
+## How it works
+**Inputs:** $x$ (vertex position vector), $A$ (constraint matrix), $b$ (constraint vector), $reference\_V\_len$ (row index offset for the regularization block), $reg\_scale$ (initial regularization strength), $reg\_pos$ (initial regularization target position) [S1, unofficial].
+**Outputs:** Updated $x$, $A$, $b$, $reg\_scale$, $reg\_pos$ [S1, unofficial].
+**Data Structures:** The regularization modifies a $3 \times 3$ block in $A$ and a 3-element block in $b$ starting at index $reference\_V\_len$ [S1, unofficial]. Rows $reference\_V\_len$ to $reference\_V\_len + 2$ of $A$ form a diagonal matrix with $reg\_scale$ on the diagonal and $0$ elsewhere [S1, unofficial]. Elements $reference\_V\_len$ to $reference\_V\_len + 2$ of $b$ are set to $reg\_pos \times reg\_scale$ [S1, unofficial].
+**Numbered Steps:**
+1. If $\min(x) < 0$ or $\max(x) > 1$, initialize $tmp\_scale = 1$ [S1, unofficial]. While $\min(x) < 0$ or $\max(x) > 1$: If $reg\_scale > 1000$, break [S1, unofficial]. Increment $reg\_scale \leftarrow reg\_scale + tmp\_scale$ [S1, unofficial]. Set $A[reference\_V\_len+0, :] = [reg\_scale, 0, 0]$, $A[reference\_V\_len+1, :] = [0, reg\_scale, 0]$, $A[reference\_V\_len+2, :] = [0, 0, reg\_scale]$ [S1, unofficial]. Set $b[reference\_V\_len : reference\_V\_len+3] = reg\_pos \times reg\_scale$ [S1, unofficial]. Solve $x = \text{lstsq}(A, b)[0]$ [S1, unofficial].
+2. If $reg\_scale > 1000$ after the loop, reset $reg\_scale \leftarrow 10^{-6}$, $reg\_pos \leftarrow [0.5, 0.5, 0.5]$ [S1, unofficial]. Set $A$ and $b$ rows as above [S1, unofficial]. Solve $x = \text{lstsq}(A, b)[0]$ [S1, unofficial].
+3. If $x$ is still out of bounds after reset, initialize $tmp\_scale = 1$ [S1, unofficial]. While $\min(x) < 0$ or $\max(x) > 1$: Increment $reg\_scale \leftarrow reg\_scale + tmp\_scale$ [S1, unofficial]. Set $A$ and $b$ rows as above [S1, unofficial]. Solve $x = \text{lstsq}(A, b)[0]$ [S1, unofficial].
+4. Iterate $c$ from $0$ to $9$: Divide $tmp\_scale \leftarrow tmp\_scale / 2$ [S1, unofficial]. Decrement $reg\_scale \leftarrow reg\_scale - tmp\_scale$ [S1, unofficial]. Set $A$ and $b$ rows as above [S1, unofficial]. Solve $x = \text{lstsq}(A, b)[0]$ [S1, unofficial]. If $\min(x) < 0$ or $\max(x) > 1$, increment $reg\_scale \leftarrow reg\_scale + tmp\_scale$ [S1, unofficial].
+5. If $x$ is still out of bounds after the binary search, set $A$ and $b$ rows as above [S1, unofficial]. Solve $x = \text{lstsq}(A, b)[0]$ [S1, unofficial].
+**Formulas:** The regularization augments the least-squares system with three rows:
+$$A_{reg} = \begin{bmatrix} reg\_scale & 0 & 0 \\ 0 & reg\_scale & 0 \\ 0 & 0 & reg\_scale \end{bmatrix}, \quad b_{reg} = reg\_scale \cdot reg\_pos$$
+The solver computes $x = \text{argmin}_x \|Ax - b\|^2$ using the updated $A$ and $b$ [S1, unofficial].
+**Parameters:** $reg\_scale$ (regularization strength, incremented by $tmp\_scale$, resets if $>1000$) [S1, unofficial]. $reg\_pos$ (target position, resets to $[0.5, 0.5, 0.5]$ if $reg\_scale > 1000$) [S1, unofficial]. $tmp\_scale$ (step size, starts at $1$, halves during binary search) [S1, unofficial].
+**Edge Cases and Pitfalls:** The method handles degenerate cases where $reg\_scale$ exceeds $1000$ by resetting to $10^{-6}$ and centering at $[0.5, 0.5, 0.5]$ [S1, unofficial]. Precision issues near boundaries are mitigated by the binary search phase [S1, unofficial]. Not given in the sources for other pitfalls.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def ndc_constraint_regularization(A, b, x, reference_V_len, reg_scale, reg_pos):
+    """
+    Enforces NDC bounds [0, 1] on vertex position x by adjusting regularization.
+    
+    Args:
+        A: Constraint matrix (m x 3)
+        b: Constraint vector (m)
+        x: Current vertex position (3,)
+        reference_V_len: Number of existing constraints
+        reg_scale: Current regularization strength
+        reg_pos: Current regularization target position (3,)
+        
+    Returns:
+        A: Updated matrix
+        b: Updated vector
+        x: Updated position
+        reg_scale: Updated scale
+        reg_pos: Updated position
+    """
+    
+    # Helper to apply regularization rows and solve least squares
+    def apply_and_solve(A, b, ref_len, rs, rp):
+        A[ref_len, 0] = rs; A[ref_len, 1] = 0.0; A[ref_len, 2] = 0.0
+        A[ref_len + 1, 0] = 0.0; A[ref_len + 1, 1] = rs; A[ref_len + 1, 2] = 0.0
+        A[ref_len + 2, 0] = 0.0; A[ref_len + 2, 1] = 0.0; A[ref_len + 2, 2] = rs
+        b[ref_len] = rp[0] * rs
+        b[ref_len + 1] = rp[1] * rs
+        b[ref_len + 2] = rp[2] * rs
+        return np.linalg.lstsq(A, b, rcond=None)[0]
+
+    # Step 1: Initial increase loop
+    if np.min(x) < 0 or np.max(x) > 1:
+        tmp_scale = 1.0
+        while np.min(x) < 0 or np.max(x) > 1:
+            if reg_scale > 1000:
+                break
+            reg_scale += tmp_scale
+            x = apply_and_solve(A, b, reference_V_len, reg_scale, reg_pos)
+
+        # Step 2: Reset if scale exceeded limit
+        if reg_scale > 1000:
+            reg_scale = 1e-6
+            reg_pos = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+            x = apply_and_solve(A, b, reference_V_len, reg_scale, reg_pos)
+
+            # Step 3: Second increase loop if still out of bounds
+            if np.min(x) < 0 or np.max(x) > 1:
+                tmp_scale = 1.0
+                while np.min(x) < 0 or np.max(x) > 1:
+                    reg_scale += tmp_scale
+                    x = apply_and_solve(A, b, reference_V_len, reg_scale, reg_pos)
+
+                # Step 4: Binary search phase
+                for c in range(10):
+                    tmp_scale /= 2.0
+                    reg_scale -= tmp_scale
+                    x = apply_and_solve(A, b, reference_V_len, reg_scale, reg_pos)
+                    if np.min(x) < 0 or np.max(x) > 1:
+                        reg_scale += tmp_scale
+
+                # Step 5: Final fallback solve
+                if np.min(x) < 0 or np.max(x) > 1:
+                    x = apply_and_solve(A, b, reference_V_len, reg_scale, reg_pos)
+
+    return A, b, x, reg_scale, reg_pos
+```
+
+## Operating characteristics
+Time and memory complexity are Not given in the sources. Measured performance, scaling, strengths, limitations, and usage conditions are Not given in the sources.
+
+## Background
+NDC Constraint Regularization is defined in the repository `czq142857/NDC` [S1, unofficial]. It addresses vertex coordinates falling outside the $[0, 1]$ range during least-squares solving by iteratively adjusting regularization strength and target position [S1, unofficial].
+
+## Sources
+[S1] czq142857/NDC, https://github.com/czq142857/NDC, fetched 2026-10-26 (unofficial)

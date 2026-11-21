@@ -1,0 +1,166 @@
+# Adaptive-resolution Octree TSDF Integration
+
+Also called: Adaptive-resolution octree-based volumetric SLAM, KinectFusion supereight adaptation
+
+## Overview
+A volumetric SLAM pipeline that integrates and renders depth images at an adaptive level of detail to address aliasing, reconstruction quality, and efficiency simultaneously [S1]. It differs from fixed-resolution grids by dynamically selecting the integration scale based on the effective sensor resolution relative to the distance from the scene, and from other octree methods by using a specific mipmapped block structure that balances multi-scale representation with spatial locality [S1]. It builds on [TSDF Volume Integration with Uncertainty Weighting](15425-tsdf-volume-integration-with-uncertainty-weighting.md) by replacing uniform or uncertainty-weighted fusion with adaptive-resolution fusion.
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Current depth map $D_k$ from the sensor, previous synthetic view $D_{k-1}$, camera intrinsics, and the current TSDF octree volume.
+- **Outputs:** Updated TSDF octree volume, camera pose estimate, and rendered depth map for visualization/tracking.
+
+**Data Structures:**
+The volume is represented as an octree. The implementation uses a specific block structure to optimize memory and access patterns [S1]:
+- **Block Storage:** An unordered set of voxel blocks stored in a contiguous, dynamically grown array. The array is indexed via a pointer-based tree structure. Blocks are allocated at the deepest level (leaves) of the tree, which corresponds to the maximum resolution [S1].
+- **Voxel Block Internal Structure:** Each block contains a mipmapped representation with aggregation factors. The finest level consists of $8^3$ voxels. This is followed by contiguous blocks of $4^3$ and $2^3$ voxels [S1]. This structure is equivalent to a full 3-level octree per block without pointer overhead, ensuring spatial locality [S1].
+- **Memory Overhead:** Compared to single-resolution blocks, this mipmapped structure implies only a 14% increase in memory footprint [S1].
+
+**Numbered Steps:**
+The pipeline operates in a closed loop with three stages [S1]:
+
+1.  **Tracking:** Estimate camera egomotion by aligning the most recent depth map $D_k$ against a synthetic view $D_{k-1}$ obtained at the previous time step. This is achieved using a variant of Iterative Closest Point (ICP) with point-to-plane distance and projective data-association [S1].
+2.  **Integration:** Fuse sensor data into the volume. Crucially, the system dynamically selects the level of detail (LOD) at which data is fused based on the effective sensor resolution relative to the distance from the scene. After fusion, the hierarchy of voxels is maintained consistent across octree levels [S1].
+3.  **Rendering:** Ray-cast the volume from the most recent camera position. Surface points are extracted at the zero-crossing of the TSDF function. The appropriate interpolation scale is selected depending on the distance from the camera to exploit multi-resolution information [S1].
+
+**Formulas and Parameters:**
+- **Effective Sensor Resolution:** The integration scale is selected based on the effective sensor resolution given the distance from the observed scene [S1]. The specific formula for calculating this resolution is not provided in the sources, but the selection logic aims to prevent aliasing artifacts arising from resolution mismatch [S1].
+- **TSDF Representation:** The world is discretized in a grid where each voxel holds the distance from the closest surface [S1].
+- **Aggregation Factors:** The block structure uses aggregation factors corresponding to $8^3$, $4^3$, and $2^3$ voxels [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_resolution_octree_tsdf_integration(depth_map, camera_pose, intrinsics, tsdf_octree):
+    """
+    Main loop for adaptive-resolution octree TSDF integration.
+    
+    Args:
+        depth_map: Current depth map D_k from sensor.
+        camera_pose: Current camera pose estimate.
+        intrinsics: Camera intrinsic parameters.
+        tsdf_octree: Current TSDF octree volume.
+        
+    Returns:
+        updated_tsdf_octree: Updated TSDF octree.
+        new_camera_pose: Updated camera pose.
+        rendered_depth: Synthetic view D_{k-1} for next iteration.
+    """
+    
+    # Step 1: Tracking
+    # Estimate camera egomotion by aligning current depth map against previous synthetic view.
+    # Uses ICP with point-to-plane distance and projective data-association.
+    # Note: The specific ICP implementation details are not provided in the source.
+    # We assume a function 'align_depth_to_model' exists that performs this alignment.
+    previous_synthetic_view = render_tsdf(tsdf_octree, previous_camera_pose)
+    new_camera_pose = align_depth_to_model(depth_map, previous_synthetic_view)
+    
+    # Step 2: Integration
+    # Fuse sensor data into the volume at dynamically selected LOD.
+    # The LOD is selected based on effective sensor resolution relative to distance.
+    # The hierarchy of voxels is maintained consistent across octree levels.
+    updated_tsdf_octree = integrate_depth_map(
+        depth_map=depth_map,
+        camera_pose=new_camera_pose,
+        intrinsics=intrinsics,
+        tsdf_octree=tsdf_octree,
+        adaptive_lod=True
+    )
+    
+    # Step 3: Rendering
+    # Ray-cast the volume from the most recent camera position.
+    # Extract surface points at zero-crossing of TSDF.
+    # Select appropriate interpolation scale depending on distance from camera.
+    rendered_depth = render_tsdf(updated_tsdf_octree, new_camera_pose)
+    
+    return updated_tsdf_octree, new_camera_pose, rendered_depth
+
+def integrate_depth_map(depth_map, camera_pose, intrinsics, tsdf_octree, adaptive_lod):
+    """
+    Integrates a depth map into the TSDF octree.
+    
+    Args:
+        depth_map: Current depth map.
+        camera_pose: Camera pose.
+        intrinsics: Camera intrinsics.
+        tsdf_octree: Current TSDF octree.
+        adaptive_lod: Boolean flag to enable adaptive LOD selection.
+        
+    Returns:
+        updated_tsdf_octree: Updated TSDF octree.
+    """
+    # Project depth map points into world coordinates
+    world_points = project_depth_to_world(depth_map, camera_pose, intrinsics)
+    
+    # For each point, determine the appropriate LOD
+    # The source states LOD is selected based on effective sensor resolution relative to distance.
+    # Specific formula for LOD selection is not provided.
+    # [G] Assuming a function 'select_lod' exists that returns the scale level (e.g., 0 for finest, 1 for 4^3, 2 for 2^3)
+    # based on the distance of the point from the camera.
+    
+    for point in world_points:
+        distance = compute_distance(point, camera_pose.position)
+        lod_level = select_lod(distance, intrinsics) # Placeholder for missing logic
+        
+        # Insert point into TSDF octree at selected LOD
+        # The source mentions maintaining hierarchy consistency.
+        # [G] Assuming 'insert_point' handles the TSDF update and hierarchy maintenance
+        insert_point_into_octree(tsdf_octree, point, lod_level)
+        
+    return tsdf_octree
+
+def render_tsdf(tsdf_octree, camera_pose):
+    """
+    Ray-casts the TSDF octree to produce a synthetic depth map.
+    
+    Args:
+        tsdf_octree: TSDF octree volume.
+        camera_pose: Camera pose.
+        
+    Returns:
+        rendered_depth: Synthetic depth map.
+    """
+    # Initialize rendered depth map
+    rendered_depth = initialize_depth_map()
+    
+    # For each pixel in the image plane
+    for u, v in image_pixels():
+        # Construct ray from camera center through pixel
+        ray = construct_ray(u, v, camera_pose, intrinsics)
+        
+        # Ray-cast through the octree
+        # Select appropriate interpolation scale depending on distance
+        # [G] Assuming 'ray_cast_octree' handles multi-resolution interpolation
+        depth = ray_cast_octree(tsdf_octree, ray)
+        
+        # Extract surface point at zero-crossing of TSDF
+        # [G] Assuming 'extract_zero_crossing' finds the surface
+        surface_point = extract_zero_crossing(tsdf_octree, ray)
+        
+        if surface_point is not None:
+            rendered_depth[u, v] = compute_depth_from_point(surface_point, camera_pose)
+            
+    return rendered_depth
+```
+
+**Edge Cases and Pitfalls:**
+- **Aliasing Artifacts:** Fusing data at a uniform scale can cause aliasing artifacts due to resolution mismatch between the map and sensor data, degrading map quality and losing fine details from close-up views when observed from greater distances [S1].
+- **Loss of Multi-scale Representation:** Aggregating bottom levels of the tree into contiguous blocks (a common solution) causes the multi-scale representation of the bottom levels to be lost [S1]. This method mitigates this by storing mipmapped representations contiguously within blocks [S1].
+
+## Operating characteristics
+- **Time Complexity:** The method achieves up to six-fold execution time speed-ups compared to single resolution grids [S1].
+- **Memory Complexity:** The mipmapped block structure implies only a 14% increase in memory footprint compared to single resolution blocks [S1].
+- **Strengths:** Significantly improved reconstruction quality, preservation of fine details (e.g., mug handles, keyboard keys), and improved runtime [S1]. It addresses aliasing issues and efficiency simultaneously [S1].
+- **Limitations:** The specific limits are not detailed beyond the comparison to other methods. The method is designed for real-time settings such as augmented/virtual reality or mobile robotics [S1].
+- **When to use:** When real-time dense reconstruction is required, and there is a need to handle varying distances to the scene without aliasing artifacts. It is suitable for environments where fine details are important and the camera moves at varying distances from the scene [S1].
+- **When not to use:** If memory is extremely constrained and the 14% overhead is unacceptable, or if the scene is static and offline processing is allowed, other methods might be more appropriate. The method is specifically designed for volumetric SLAM pipelines [S1].
+
+## Background
+- **Origin:** The method was introduced by Emanuele Vespa, Nils Funk, Stefan Leutenegger, and Paul H. J. Kelly from Imperial College London [S1].
+- **Paper:** "Adaptive-resolution octree-based volumetric SLAM" [S1].
+- **History:** It is an extension of the hierarchical representation of [21] (supereight) to support queries at any level of detail [S1]. It was released as an open-source extension to supereight [S1].
+- **Usage:** Used as an open-source extension to supereight [21] [S1]. It is applicable to dense Simultaneous Localisation and Mapping (SLAM) systems, particularly in real-time settings like augmented/virtual reality or mobile robotics [S1].
+
+## Sources
+[S1] Adaptive-resolution octree-based volumetric SLAM, https://www.doc.ic.ac.uk/~sleutene/publications/Vespa_3DV19.pdf, fetched 2026-10-29

@@ -1,0 +1,172 @@
+# Catmull-Rom Interpolation
+Also called: Cardinal Spline, Cardinal Spline / Catmull-Rom Filter, Catmull-Rom spline, Cubic filter (specifically Catmull-Rom), Cubic-spline interpolation function, Second-order interpolation filter
+
+## Overview
+Catmull-Rom interpolation is a specific interpolating cubic-spline scheme used in volume rendering to reconstruct continuous scalar fields from discrete voxel data. It solves the problem of banding artifacts inherent in linear interpolation by providing a continuous first derivative, while uniquely satisfying the condition for accurate straight-line reconstruction among all interpolating cubic splines [S1, S2, unofficial]. It is distinguished from its sibling [General Cubic Spline Interpolation](15870-general-cubic-spline-interpolation.md) by its fixed parameter values ($B=0, C=1/2$ or $a=-0.5$), which minimize third-order error for discrete functions [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A 3D volume grid of scalar values $V_{i,j,k}$ and a query point $(x, y, z)$ in continuous space.
+- Output: The interpolated scalar value $f(x, y, z)$.
+
+**Data Structures**
+- The volume is stored as a 3D array.
+- The filter kernel is defined by a 1D piecewise polynomial function $h(u)$ with support width 2 (spanning two grid intervals).
+
+**Formula**
+The 1D filter function $h(u)$ depends on the distance $u$ from the sample location to the nearest grid point. It is defined piecewise as [S1, S2, unofficial]:
+
+$$
+h(u) = \begin{cases} 
+h(-u) & u < 0 \\
+\frac{5}{2}u^3 - \frac{5}{2}u^2 + 1 & 0 \le u < 1 \\
+-\frac{1}{2}u^3 + \frac{5}{2}u^2 - 4u + 2 & 1 \le u < 2 \\
+0 & \text{otherwise}
+\end{cases}
+$$
+
+This specific form corresponds to the general cubic spline family with parameters $B=0$ and $C=1/2$ [S1, unofficial], or the parameterized form with $a = -0.5$ [S2, unofficial]. The parameter $a=-0.5$ yields the Catmull-Rom spline, which interpolates a discrete function with the lowest third-order error [S2, unofficial].
+
+**Steps**
+1.  **Coordinate Transformation**: For the query point $(x, y, z)$, determine the integer grid indices $(i, j, k)$ such that $i \le x < i+1$, $j \le y < j+1$, and $k \le z < k+1$.
+2.  **Fractional Offsets**: Compute the fractional distances $u = x - i$, $v = y - j$, and $w = z - k$. Note that $u, v, w \in [0, 1)$.
+3.  **Kernel Evaluation**: Evaluate the 1D filter function $h(u)$, $h(v)$, and $h(w)$ using the piecewise formula above. Note that $h(u)$ requires values from grid points at indices $i-1, i, i+1, i+2$ to compute the contribution for the interval $[i, i+1]$. Specifically, the value at $x$ is a weighted sum of $V_{i-1}, V_i, V_{i+1}, V_{i+2}$ using the kernel weights derived from $h(1-u), h(u), h(1+u), h(2+u)$ respectively (or equivalent symmetric formulation).
+4.  **Separable 3D Interpolation**: Since the 3D filter is separable, $h(u, v, w) = h(u)h(v)h(w)$, the interpolation can be computed as a 3-stage nested loop [S2, unofficial].
+    - First, interpolate along the x-axis for each $(j, k)$ plane to get intermediate values.
+    - Second, interpolate along the y-axis for each $k$ line.
+    - Third, interpolate along the z-axis to get the final scalar value.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def catmull_rom_1d(u):
+    """
+    Computes the 1D Catmull-Rom kernel value for distance u >= 0.
+    Returns h(u). For u < 0, returns h(-u).
+    """
+    if u < 0:
+        u = -u
+    
+    if u < 1:
+        # 5/2 u^3 - 5/2 u^2 + 1
+        return 2.5 * u**3 - 2.5 * u**2 + 1.0
+    elif u < 2:
+        # -1/2 u^3 + 5/2 u^2 - 4u + 2
+        return -0.5 * u**3 + 2.5 * u**2 - 4.0 * u + 2.0
+    else:
+        return 0.0
+
+def interpolate_volume(volume, x, y, z):
+    """
+    Interpolates a value from a 3D volume grid using Catmull-Rom interpolation.
+    volume: 3D array (depth, height, width)
+    x, y, z: continuous coordinates
+    """
+    # Determine integer indices
+    ix = int(x)
+    iy = int(y)
+    iz = int(z)
+    
+    # Fractional offsets
+    u = x - ix
+    v = y - iy
+    w = z - iz
+    
+    # Precompute 1D kernel weights for each dimension
+    # The kernel spans 2 units. For interval [ix, ix+1], we need points ix-1, ix, ix+1, ix+2.
+    # The weights correspond to the contribution of each neighbor.
+    # Standard Catmull-Rom formulation for point x in [0,1] relative to grid 0:
+    # Weight for grid[-1]: h(1+u)
+    # Weight for grid[0]:  h(u)
+    # Weight for grid[1]:  h(1-u)
+    # Weight for grid[2]:  h(2-u)
+    
+    # However, the piecewise function h(u) defined above is for distance from the *sample* to the *grid point*.
+    # If we are at x = ix + u, the distance to grid point ix is u.
+    # The distance to grid point ix-1 is 1+u.
+    # The distance to grid point ix+1 is 1-u.
+    # The distance to grid point ix+2 is 2-u.
+    
+    w_x_minus_1 = catmull_rom_1d(1.0 + u)
+    w_x_0       = catmull_rom_1d(u)
+    w_x_1       = catmull_rom_1d(1.0 - u)
+    w_x_2       = catmull_rom_1d(2.0 - u)
+    
+    w_y_minus_1 = catmull_rom_1d(1.0 + v)
+    w_y_0       = catmull_rom_1d(v)
+    w_y_1       = catmull_rom_1d(1.0 - v)
+    w_y_2       = catmull_rom_1d(2.0 - v)
+    
+    w_z_minus_1 = catmull_rom_1d(1.0 + w)
+    w_z_0       = catmull_rom_1d(w)
+    w_z_1       = catmull_rom_1d(1.0 - w)
+    w_z_2       = catmull_rom_1d(2.0 - w)
+    
+    # Perform 3D interpolation using separability
+    # Sum over all 8 corners of the 2x2x2 cell extended by 1 voxel in each negative direction
+    # Actually, Catmull-Rom uses 4 points per axis, so 4x4x4 = 64 points? 
+    # No, the separable approach sums the product of weights.
+    # f(x,y,z) = sum_i sum_j sum_k ( w_x_i * w_y_j * w_z_k * V[ix+i-1, iy+j-1, iz+k-1] )
+    # where i,j,k range from 0 to 3 corresponding to offsets -1, 0, 1, 2.
+    
+    result = 0.0
+    for i in range(4): # offsets -1, 0, 1, 2
+        for j in range(4):
+            for k in range(4):
+                # Get weight for this offset
+                if i == 0: wx = w_x_minus_1
+                elif i == 1: wx = w_x_0
+                elif i == 2: wx = w_x_1
+                else: wx = w_x_2
+                
+                if j == 0: wy = w_y_minus_1
+                elif j == 1: wy = w_y_0
+                elif j == 2: wy = w_y_1
+                else: wy = w_y_2
+                
+                if k == 0: wz = w_z_minus_1
+                elif k == 1: wz = w_z_0
+                elif k == 2: wz = w_z_1
+                else: wz = w_z_2
+                
+                # Get grid coordinate
+                gx = ix + i - 1
+                gy = iy + j - 1
+                gz = iz + k - 1
+                
+                # Boundary check [G]
+                if 0 <= gx < volume.width and 0 <= gy < volume.height and 0 <= gz < volume.depth:
+                    result += wx * wy * wz * volume[gz, gy, gx]
+                else:
+                    # Handle boundary conditions, e.g., clamp or zero [G]
+                    pass
+                    
+    return result
+```
+
+**Edge Cases and Pitfalls**
+- The second-order derivative is not continuous, which may cause subtle visual artifacts in curvature-sensitive applications [S1, unofficial].
+- Boundary conditions are not defined by the kernel itself; implementation must handle grid edges (e.g., clamping, mirroring, or extrapolation) [G].
+- The support width is 2 grid intervals, requiring 4 samples per axis (64 total samples for full 3D convolution), which is computationally more expensive than linear interpolation [S2, unofficial].
+
+## Subtopics
+
+### [General Cubic Spline Interpolation](15870-general-cubic-spline-interpolation.md)
+A broader family of cubic interpolators with tunable parameters $B$ and $C$. Choose this when you need to balance between sharpness and blurring or when specific frequency response characteristics are required. Catmull-Rom is the specific case where $B=0, C=1/2$.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per sample, but with a high constant factor due to the 64-sample support (4x4x4 grid points) and cubic polynomial evaluations.
+- **Memory Complexity**: $O(1)$ auxiliary memory per sample.
+- **Performance**: Higher filter quality than linear interpolation, but at the price of wider spatial extent and larger computational effort [S2, unofficial].
+- **Strengths**: Continuous first derivative reduces banding artifacts compared to linear filters; accurately reconstructs straight lines; minimizes third-order error for discrete functions [S1, S2, unofficial].
+- **Limitations**: Discontinuous second derivative; computationally expensive due to large support; potential for ringing if not windowed (though less severe than sinc) [S2, unofficial].
+- **When to use**: When smooth gradients are required and straight-line fidelity is important, and computational resources allow for cubic filtering.
+- **When not to use**: For real-time applications with strict performance constraints where linear interpolation suffices, or when ringing artifacts are unacceptable without additional windowing.
+
+## Background
+The Catmull-Rom spline was introduced by Edwin Catmull and Raphael Rom in 1974 [S1, unofficial]. It is a subset of the cubic B-spline family and is specifically the only interpolating cubic-spline function able to reconstruct a straight line [S1, unofficial]. In volume rendering, it is cited as a standard second-order interpolation filter that yields a function with a continuous first derivative, reducing banding artifacts [S2, unofficial]. It is often used as a baseline for comparing other cubic filters like Mitchell-Netravali [S2, unofficial].
+
+## Sources
+[S1] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)
+[S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

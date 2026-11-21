@@ -1,0 +1,111 @@
+# FastNeRF Cache Size Estimation
+
+Also called: FastNeRF memory estimation, FastNeRF cache size formula
+
+## Overview
+FastNeRF Cache Size Estimation provides analytical formulas to calculate the memory footprint of the position-dependent and direction-dependent caches in the FastNeRF architecture [S1, unofficial]. It solves the problem of determining whether a specific configuration of cache dimensions and data types fits within available hardware memory, addressing the impracticality of standard NeRF caches which can exceed 60TB even for sparse volumes [S1, unofficial]. It differs from standard NeRF cache estimation by accounting for the factorized representation (low-rank decomposition) of the direction-dependent cache, resulting in significantly smaller memory requirements [S1, unofficial].
+
+## How it works
+The method calculates the total memory size $M$ in bits for the two distinct cache structures used in FastNeRF: the position-dependent cache and the direction-dependent cache.
+
+**Inputs:**
+*   $\alpha \in [0, 1)$: Inverse volume sparsity. $\alpha = 1$ indicates a dense volume; lower values indicate sparser occupancy [S1, unofficial].
+*   $k$: Number of bins per dimension in the position-dependent cache [S1, unofficial].
+*   $l$: Number of bins per dimension in the direction-dependent cache [S1, unofficial].
+*   $D$: Number of components or factors in the direction cache decomposition [S1, unofficial].
+*   $s_\sigma$: Size in bits of the stored transparency (density) value [S1, unofficial].
+*   $s_{rgb}$: Size in bits of the stored RGB color value [S1, unofficial].
+*   $s_{uvw}$: Size in bits of the stored $(u_i, v_i, w_i)$ coordinate values [S1, unofficial].
+*   $s_{\beta}$: Size in bits of the stored weights $\beta_i$ [S1, unofficial].
+
+**Outputs:**
+*   $M_{NeRF}$: Estimated memory size for a standard NeRF cache [S1, unofficial].
+*   $M_{FastNeRF}$: Estimated memory size for the FastNeRF cache [S1, unofficial].
+
+**Formulas:**
+
+1.  **Standard NeRF Cache Size:**
+    $$M_{NeRF} = \alpha(s_\sigma + s_{rgb})k^3l^2$$
+    This formula assumes a dense lookup table for direction-dependent colors, requiring storage of full RGB vectors for every direction bin [S1, unofficial].
+
+2.  **FastNeRF Cache Size:**
+    $$M_{FastNeRF} = \alpha \left( (D \cdot s_{uvw} + s_{\sigma})k^3 \right) + D \cdot s_{\beta}l^2$$
+    This formula accounts for the factorized representation. The position cache stores $D$ coordinate factors and transparency. The direction cache stores $D$ weight factors [S1, unofficial].
+
+**Parameters and Typical Values:**
+*   Standard implementation uses $k = l = 1024$ [S1, unofficial].
+*   Number of factors $D = 8$ [S1, unofficial].
+*   Color channels $(r, g, b)$ stored as individual bytes ($s_{rgb} = 24$ bits per color, or $8$ bits per channel) [S1, unofficial].
+*   Coordinate and weight values stored as half-precision floats ($s_{uvw} = 16$ bits, $s_{\beta} = 16$ bits) [S1, unofficial].
+*   Transparency $s_\sigma$ size is not explicitly defined in bits in the provided notes, but is included in the formula [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **High Memory Usage:** Even for highly sparse volumes with $\alpha = 0.01$, the standard NeRF cache size is nearly 60TB, which exceeds the memory capacity of consumer-grade hardware [S1, unofficial].
+*   **Dense Volume:** If $\alpha = 1$, the memory requirements are maximized.
+*   **Data Type Sensitivity:** The choice of storage size ($s_{uvw}, s_{\beta}, s_{rgb}$) significantly impacts the total memory. Using half-precision floats instead of single-precision reduces size by half.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_neRF_cache_size(alpha, s_sigma, s_rgb, k, l):
+    """
+    Calculate memory size for standard NeRF cache.
+    
+    Args:
+        alpha (float): Inverse volume sparsity [0, 1).
+        s_sigma (int): Size in bits of transparency value.
+        s_rgb (int): Size in bits of RGB color value.
+        k (int): Number of bins per dimension in position cache.
+        l (int): Number of bins per dimension in direction cache.
+        
+    Returns:
+        int: Total memory size in bits.
+    """
+    return alpha * (s_sigma + s_rgb) * (k ** 3) * (l ** 2)
+
+def calculate_fastNeRF_cache_size(alpha, D, s_uvw, s_sigma, s_beta, k, l):
+    """
+    Calculate memory size for FastNeRF cache.
+    
+    Args:
+        alpha (float): Inverse volume sparsity [0, 1).
+        D (int): Number of components/factors.
+        s_uvw (int): Size in bits of stored (u, v, w) values.
+        s_sigma (int): Size in bits of stored transparency.
+        s_beta (int): Size in bits of stored weights beta_i.
+        k (int): Number of bins per dimension in position cache.
+        l (int): Number of bins per dimension in direction cache.
+        
+    Returns:
+        int: Total memory size in bits.
+    """
+    position_cache_size = alpha * ((D * s_uvw) + s_sigma) * (k ** 3)
+    direction_cache_size = D * s_beta * (l ** 2)
+    return position_cache_size + direction_cache_size
+
+# Example calculation based on source values
+# k = l = 1024, D = 8
+# s_rgb = 24 (3 bytes), s_uvw = 16 (half-float), s_beta = 16 (half-float)
+# s_sigma is not explicitly given in bits in the notes, assumed to be consistent with s_uvw or s_beta if not specified.
+# Note: The source provides a specific numerical result for FastNeRF: alpha * 53,687,091,200 + 16,777,216
+# This implies specific values for s_sigma and s_uvw/s_beta were used.
+```
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** The calculation is $O(1)$ as it involves basic arithmetic operations with constant number of inputs.
+*   **Memory Complexity:** The estimated memory scales linearly with $\alpha$, $k^3$, and $l^2$ for standard NeRF, and linearly with $\alpha$, $k^3$, and $l^2$ for FastNeRF, but with a much smaller coefficient due to factorization [S1, unofficial].
+*   **Measured Performance:** For $k=l=1024$, $D=8$, with $(r,g,b)$ as bytes and other values as half-precision floats, the NeRF cache size is approximately $\alpha \cdot 5.6$ PB. For FastNeRF, it is approximately $\alpha \cdot 54$ GB (specifically $\alpha \cdot 53,687,091,200 + 16,777,216$) [S1, unofficial].
+*   **Strengths:** Provides a quick, analytical way to estimate memory requirements without training or running the network. Highlights the significant memory savings of FastNeRF over standard NeRF.
+*   **Limitations:** Does not account for overhead from the sparse spatial structure (e.g., voxel grid vertices, hash tables) or the MLP parameters themselves. Assumes uniform sparsity $\alpha$ across the entire volume.
+*   **When to Use:** During the configuration search phase to filter out infeasible cache sizes before training.
+*   **When Not to Use:** When precise memory usage including system overhead or non-uniform sparsity is required.
+
+## Background
+The FastNeRF Cache Size Estimation method originates from the FastNeRF paper by Garbin et al. [S1, unofficial]. It was developed to address the high memory requirements of standard NeRF architectures, which store full RGB vectors for every direction bin. The factorized representation in FastNeRF reduces this footprint, making it feasible for consumer-grade hardware. The formulas are derived from the structure of the position-dependent and direction-dependent caches in the FastNeRF architecture [S1, unofficial].
+
+## Sources
+[S1] FastNeRF by Garbin et al., https://arxiv.org/abs/2103.10380, fetched 2026-10-26 (unofficial)

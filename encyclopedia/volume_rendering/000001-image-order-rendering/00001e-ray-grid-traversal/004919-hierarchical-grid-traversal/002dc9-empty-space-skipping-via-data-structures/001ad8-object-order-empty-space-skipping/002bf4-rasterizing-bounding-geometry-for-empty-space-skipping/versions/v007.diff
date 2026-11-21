@@ -1,0 +1,266 @@
+--- v006.md
++++ v007.md
+@@ -4,103 +4,163 @@
+ 
+ ## Overview
+-Rasterizing Bounding Geometry for Empty Space Skipping is a volume rendering optimization that replaces hierarchical tree traversal on the GPU with hardware-accelerated rasterization to determine ray marching intervals [S2, unofficial]. It solves the problem of high overhead associated with traversing empty-space skipping data structures (such as octrees) during rendering by generating a coarse bounding geometry and using fragment depth values to clip empty space [S1, unofficial][S2, unofficial]. It sets itself apart from [Min-Max Block Culling](8368-min-max-block-culling.md) by using explicit geometric primitives (quads/boxes) and depth testing rather than scalar min-max values, and from [Early Shader Termination](969-early-shader-termination.md) by performing culling in a dedicated rasterization pass rather than within the ray-casting shader logic.
++Rasterizing Bounding Geometry for Empty Space Skipping is a volume rendering optimization technique that uses hardware-accelerated rasterization to determine the start and end positions for ray marching, thereby skipping empty space [S1, unofficial][S2, unofficial]. It solves the problem of expensive tree traversal on the GPU by replacing hierarchical data structure lookups with fragment shader depth testing [S2, unofficial]. It sets itself apart from [Min-Max Block Culling](8368-min-max-block-culling.md) by using explicit geometric primitives (quads/boxes) and depth buffers rather than scalar min-max values, and from [Early Shader Termination](969-early-shader-termination.md) by performing culling in a dedicated geometry pass rather than within the ray-marching loop [S2, unofficial].
+ 
+ ## How it works
+-The method operates in two main phases: geometry generation and a two-pass rendering pipeline.
++**Inputs and Outputs:**
++*   **Input:** A volume texture containing iso values (or occupancy data), a threshold iso value, and a coarse grid definition (e.g., grid cells spanning $N^3$ voxels) [S1, unofficial].
++*   **Output:** A rendered image where rays are marched only through active regions, with start and end positions derived from rasterized depth values [S1, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Input:** A volume texture `gridTex` containing maximum iso values per coarse grid cell, and a threshold iso value defining visibility.
+-*   **Output:** A rendered image where rays are marched only between computed start and end depths, skipping empty regions.
++**Data Structures:**
++1.  **`gridTex`**: A 3D texture where each voxel stores the maximum iso value of the corresponding coarse grid cell [S1, unofficial].
++2.  **Bounding Geometry**: A set of quads (or bounding boxes) representing the boundaries between active and inactive regions in `gridTex` [S1, unofficial].
++3.  **Offscreen Buffer**: A depth buffer (and optionally a color buffer) used to store minimum and maximum depth values for each fragment during the first pass [S1, unofficial].
+ 
+-### Data Structures
+-*   **`gridTex`**: A 3D texture where each voxel stores the maximum iso value of the underlying fine-grained volume data. The dimensions are derived from the fine volume dimensions divided by the coarse grid cell size.
+-    *   Example: For a $256 \times 256 \times 200$ volume with $8^3$ voxel cells, `gridTex` dimensions are $32 \times 32 \times 25$ [S1, unofficial].
+-*   **Bounding Geometry**: A triangle mesh (composed of quads) representing the boundaries between active and inactive coarse grid cells.
+-*   **Offscreen Buffer**: Stores minimum and maximum depth values for each fragment.
+-*   **Main Buffer**: Stores the final color output.
++**Algorithm Steps:**
+ 
+-### Steps
+-1.  **Initialization**: Generate `gridTex` by sampling the fine volume texture. Each voxel in `gridTex` contains the maximum iso value found within its corresponding coarse grid cell [S1, unofficial].
+-2.  **Geometry Generation**:
+-    *   Define an active voxel as one where the maximum iso value exceeds the threshold iso value [S1, unofficial].
+-    *   Iterate through all pairs of neighboring voxels in `gridTex`.
+-    *   If one voxel is active and its neighbor is inactive, generate a quad at the boundary between them [S1, unofficial].
+-    *   This process is repeated whenever the threshold iso value changes [S1, unofficial].
++1.  **Initialization**:
++    *   Construct `gridTex` by sampling the volume texture. Each voxel in `gridTex` contains the maximum iso value within its corresponding coarse grid cell [S1, unofficial].
++    *   Define the coarse grid dimensions. For a volume of size $V_x \times V_y \times V_z$ and a cell size of $C^3$ voxels, the grid dimensions are $\lceil V_x/C \rceil \times \lceil V_y/C \rceil \times \lceil V_z/C \rceil$ [S1, unofficial].
++
++2.  **Generate Bounding Geometry**:
++    *   For each pair of neighboring voxels in `gridTex`, determine if a boundary exists.
++    *   A grid voxel is considered **active** if its maximum iso value is above the threshold iso value [S1, unofficial].
++    *   Generate a quad (or bounding box face) if one voxel in the neighbor pair is active and the other is inactive [S1, unofficial].
++    *   This process identifies the surface of the active volume data [S1, unofficial].
++
+ 3.  **First Pass (Depth Computation)**:
+     *   Render the generated bounding geometry to an offscreen buffer.
+-    *   For each fragment, store the minimum depth ($z_{min}$) and maximum depth ($z_{max}$) of the bounding geometry intersected by the view ray [S1, unofficial][S2, unofficial].
+-4.  **Second Pass (Rendering)**:
+-    *   Render the front faces of the bounding geometry to the main buffer.
+-    *   Discard fragments that are not at the minimum depth value ($z_{min}$) [S1, unofficial]. This ensures only the front-most bounding surface is processed.
+-    *   Compute the start and end positions for the ray marching using the stored $z_{min}$ and $z_{max}$ values [S1, unofficial].
+-    *   March the ray through the volume texture using these computed bounds [S1, unofficial].
++    *   For each fragment, store the **minimum depth** (front face) and **maximum depth** (back face) of the bounding geometry [S1, unofficial].
++    *   This pass effectively projects the 3D active regions onto the 2D screen, capturing the depth extent of the volume along each ray [S2, unofficial].
+ 
+-### Pseudocode
++4.  **Second Pass (Ray Marching)**:
++    *   Render the front faces of the bounding geometry again to the main buffer.
++    *   In the fragment shader, discard the fragment if it is **not** at the minimum depth value recorded in the first pass [S1, unofficial]. This ensures that only the front-most active region is processed, preventing double-counting or processing of occluded empty space [S1, unofficial].
++    *   Compute the **start position** of the ray using the minimum depth value and the **end position** using the maximum depth value from the first pass [S1, unofficial].
++    *   March the ray between these start and end positions using standard volume rendering techniques (e.g., ray casting) [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-# Initialization
+-# gridTex dimensions: (W, H, D)
+-# volume dimensions: (W*cell_size, H*cell_size, D*cell_size)
+-gridTex = create_3d_texture(W, H, D)
+-for z in range(D):
+-    for y in range(H):
+-        for x in range(W):
+-            # Compute max iso value in the coarse cell
+-            max_val = 0.0
+-            for dz in range(cell_size):
+-                for dy in range(cell_size):
+-                    for dx in range(cell_size):
+-                        val = sample_volume(x*cell_size + dx, y*cell_size + dy, z*cell_size + dz)
+-                        if val > max_val:
+-                            max_val = val
+-            gridTex[x, y, z] = max_val
++# Pseudocode for Rasterizing Bounding Geometry for Empty Space Skipping
+ 
+-# Geometry Generation
+-bounding_geometry = []
+-for z in range(D):
+-    for y in range(H):
+-        for x in range(W):
+-            if gridTex[x, y, z] <= threshold:
+-                continue
+-            # Check neighbors to find boundaries
+-            neighbors = [
+-                (x+1, y, z), (x-1, y, z),
+-                (x, y+1, z), (x, y-1, z),
+-                (x, y, z+1), (x, y, z-1)
+-            ]
+-            for nx, ny, nz in neighbors:
+-                if is_out_of_bounds(nx, ny, nz) or gridTex[nx, ny, nz] > threshold:
+-                    continue
+-                # Generate quad at boundary between (x,y,z) and (nx,ny,nz)
+-                quad = generate_quad_at_boundary((x,y,z), (nx,ny,nz))
+-                bounding_geometry.append(quad)
++def initialize_grid(volume_texture, cell_size):
++    """
++    Create a coarse grid texture storing max iso values.
++    """
++    grid_dims = (
++        ceil(volume_texture.width / cell_size),
++        ceil(volume_texture.height / cell_size),
++        ceil(volume_texture.depth / cell_size)
++    )
++    grid_tex = create_3d_texture(grid_dims)
++    
++    for z in range(grid_dims[2]):
++        for y in range(grid_dims[1]):
++            for x in range(grid_dims[0]):
++                # Sample the volume texture for this coarse cell
++                max_val = -infinity
++                for dz in range(cell_size):
++                    for dy in range(cell_size):
++                        for dx in range(cell_size):
++                            vx = x * cell_size + dx
++                            vy = y * cell_size + dy
++                            vz = z * cell_size + dz
++                            val = volume_texture.sample(vx, vy, vz)
++                            if val > max_val:
++                                max_val = val
++                grid_tex.set(x, y, z, max_val)
++    return grid_tex
+ 
+-# First Pass: Compute Depth Bounds
+-offscreen_buffer = create_depth_buffer()
+-render(bounding_geometry, target=offscreen_buffer)
+-# Store min and max depth for each pixel in offscreen_buffer
++def generate_bounding_geometry(grid_tex, threshold, cell_size, volume_dims):
++    """
++    Generate quads for boundaries between active and inactive regions.
++    """
++    quads = []
++    grid_dims = grid_tex.dimensions
++    
++    for z in range(grid_dims[2]):
++        for y in range(grid_dims[1]):
++            for x in range(grid_dims[0]):
++                is_active = grid_tex.get(x, y, z) > threshold
++                
++                # Check neighbors in +x, +y, +z directions
++                neighbors = [
++                    (x + 1, y, z),
++                    (x, y + 1, z),
++                    (x, y, z + 1)
++                ]
++                
++                for nx, ny, nz in neighbors:
++                    if nx < grid_dims[0] and ny < grid_dims[1] and nz < grid_dims[2]:
++                        neighbor_active = grid_tex.get(nx, ny, nz) > threshold
++                        if is_active != neighbor_active:
++                            # Generate a quad at the boundary
++                            quad = create_quad_at_boundary(x, y, z, nx, ny, nz, cell_size, volume_dims)
++                            quads.append(quad)
++    return quads
+ 
+-# Second Pass: Render Volume
+-main_buffer = create_color_buffer()
+-for each pixel (u, v):
+-    z_min = offscreen_buffer.min_depth[u, v]
+-    z_max = offscreen_buffer.max_depth[u, v]
++def create_quad_at_boundary(x, y, z, nx, ny, nz, cell_size, volume_dims):
++    """
++    Create a quad representing the boundary between two grid cells.
++    """
++    # Calculate world coordinates of the boundary plane
++    # This is a simplified representation; actual implementation depends on coordinate system
++    boundary_pos = get_boundary_position(x, y, z, nx, ny, nz, cell_size)
++    return Quad(position=boundary_pos, normal=get_normal(nx, ny, nz))
++
++def render_first_pass(quads, offscreen_buffer):
++    """
++    Render bounding geometry to compute min/max depth.
++    """
++    # Clear depth buffer
++    offscreen_buffer.clear_depth()
+     
+-    # Discard if not at minimum depth (front-most face)
+-    if current_depth != z_min:
++    # Render all quads
++    for quad in quads:
++        # Render front and back faces to capture depth range
++        # Store min and max depth for each fragment
++        offscreen_buffer.render(quad, store_min_max_depth=True)
++    return offscreen_buffer
++
++def render_second_pass(quads, offscreen_buffer, main_buffer):
++    """
++    Render front faces and perform ray marching.
++    """
++    # Render front faces only
++    for quad in quads:
++        # In fragment shader:
++        # 1. Check if current fragment depth == min_depth from first pass
++        # 2. If not, discard
++        # 3. If yes, compute ray start/end from min/max depth
++        # 4. March ray and color pixel
++        
++        main_buffer.render(quad, fragment_shader=ray_marching_shader, 
++                           depth_buffer=offscreen_buffer)
++
++def ray_marching_shader(fragment_depth, min_depth, max_depth):
++    """
++    Fragment shader for ray marching.
++    """
++    # Discard if not at minimum depth
++    if fragment_depth != min_depth:
+         discard()
+     
+-    # Compute ray start and end
+-    ray_start = depth_to_world(z_min)
+-    ray_end = depth_to_world(z_max)
++    # Compute ray start and end positions from depth values
++    ray_start = depth_to_world(min_depth)
++    ray_end = depth_to_world(max_depth)
+     
+     # March ray
+     color = march_ray(ray_start, ray_end)
+-    main_buffer[u, v] = color
++    return color
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Threshold Iso Value**: Determines which coarse cells are active. Changing this requires regenerating the bounding geometry [S1, unofficial].
+-*   **Coarse Grid Cell Size**: Affects the resolution of the empty space skipping. Larger cells reduce geometry complexity but may skip less empty space or include more empty space in the marching interval [S1, unofficial].
+-*   **Edge Cases**: If a ray does not intersect any bounding geometry, it implies the entire ray path is empty (or outside the volume bounds), and no marching is performed [G]. Precision issues in depth buffer comparisons may cause incorrect discarding if $z_{min}$ and $z_{max}$ are not stored with sufficient precision [G].
++**Parameters:**
++*   **Threshold Iso Value**: The iso value above which a grid cell is considered active. Typical values depend on the data distribution [S1, unofficial].
++*   **Cell Size**: The number of voxels per coarse grid cell. A common example is $8^3$ voxels per cell [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Iso Value Changes**: The bounding geometry must be regenerated whenever the threshold iso value changes, as active regions may shift [S1, unofficial].
++*   **Precision**: Depth buffer precision must be sufficient to distinguish between front and back faces, especially for thin structures [S1, unofficial].
++*   **Occlusion**: The method relies on depth testing to handle occlusion. If the depth buffer is not properly cleared or updated, incorrect start/end positions may be computed [S1, unofficial].
+ 
+ ## Subtopics
+@@ -113,12 +173,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The geometry generation step is $O(N)$ where $N$ is the number of coarse grid cells. The rendering passes are dominated by rasterization, which is generally efficient on modern GPUs. The ray marching step is reduced to only active regions.
+-*   **Memory Complexity**: Requires storage for `gridTex`, the bounding geometry mesh, and the offscreen depth buffer. The bounding geometry size depends on the surface area of the active regions [S1, unofficial].
+-*   **Performance**: Can lead to fewer look-ups into the empty-space skipping data structure during rendering when compared to octree structures [S2, unofficial]. Hardware-accelerated rasterization is exploited to skip over empty space [S2, unofficial].
+-*   **Strengths**: Avoids complex tree traversal logic on the GPU; leverages standard graphics pipeline hardware; effective for dynamic threshold changes if geometry regeneration is fast enough.
+-*   **Limitations**: Requires regenerating geometry when the threshold changes; may generate many small primitives if the active region is complex; depth buffer precision may affect accuracy.
++*   **Time Complexity**: The complexity depends on the number of active grid cells and the cost of rasterization. Generating the bounding geometry is $O(N)$ where $N$ is the number of grid cells [S1, unofficial]. Rasterization is generally efficient on modern GPUs [S2, unofficial].
++*   **Memory Complexity**: Requires storage for `gridTex`, the bounding geometry, and the offscreen buffer [S1, unofficial].
++*   **Measured Performance**: Can lead to fewer look-ups into the empty-space skipping data structure during rendering when compared to octree structures [S2, unofficial].
++*   **Strengths**: Avoids expensive tree traversal on the GPU; leverages hardware-accelerated rasterization [S2, unofficial].
++*   **Limitations**: Requires regeneration of bounding geometry when iso values change [S1, unofficial]. May have overhead for generating the geometry if the volume is dense [S1, unofficial].
++*   **When to Use**: Suitable for scenarios where tree traversal is a bottleneck and the volume data can be approximated by coarse grid cells [S2, unofficial].
++*   **When Not to Use**: Not suitable for highly dynamic volumes where the active regions change frequently, as the geometry regeneration cost may outweigh the benefits [S1, unofficial].
+ 
+ ## Background
+-The technique was proposed by Liu et al. [LCDP13] and Hadwiger et al. [HAAB+ 18] as an alternative to GPU-based tree traversal for empty space skipping [S2, unofficial]. It is part of the broader family of object-order empty space skipping methods.
++The technique was proposed by Liu et al. [LCDP13] and Hadwiger et al. [HAAB+ 18] as a way to avoid hierarchy traversal on the GPU by using rasterization hardware [S2, unofficial]. It is part of the broader field of object-order empty space skipping [S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,159 @@
+Neural radiance fields (NeRF) store a 3D scene in a neural network trained on posed photos and render new views by volume rendering along camera rays.
+
+Neural Radiance Fields (NeRF): 3D From Photos | Ultralytics
+Ultralytics YOLO27: Join the waitlist. Coming soon. Join the waitlist.
+Back to Ultralytics Glossary
+Neural Radiance Fields (NeRF)
+Neural radiance fields (NeRF) store a 3D scene in a neural network trained on posed photos and render new views by volume rendering along camera rays.
+A neural radiance field (NeRF) represents a 3D scene as a neural network that maps any 3D position and viewing direction to a density and a color, learned from a set of ordinary photos with known camera positions. Rendering a view casts a ray through each pixel, queries the network at points along the ray, and blends the results with volume rendering, so a trained NeRF shows the scene from viewpoints no camera captured. Ben Mildenhall, Pratul Srinivasan, Matthew Tancik, and colleagues at UC Berkeley, Google Research, and UC San Diego introduced the method in NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis at ECCV 2020. NeRFs reproduce reflections, thin structures, and semi-transparent materials that mesh-based photogrammetry handles poorly, and they set off the wave of neural rendering research that led to Gaussian splatting.
+How Neural Radiance Fields Work#
+The original NeRF is a multilayer perceptron with no convolutions. It processes an encoded 3D position with 8 fully connected layers of 256 channels and outputs a volume density and a 256-value feature vector. The feature vector, combined with the encoded viewing direction, passes through one more 128-channel layer that outputs an RGB color. Density depends only on position, which keeps the geometry consistent across views, while color also depends on direction, which captures specular highlights and reflections that shift as the camera moves:
+To render a pixel, NeRF samples 64 points along its camera ray with a coarse network, then 128 more where the coarse pass found density, and evaluates a fine network at all of them. Each sample contributes its color in proportion to its opacity and to the transmittance, the fraction of light that survives the samples in front of it, and the weighted sum is the pixel color. Training minimizes the squared difference between rendered and photographed pixel colors over batches of 4,096 rays. Camera poses usually come from Structure from Motion software such as COLMAP, and one scene took 100,000 to 300,000 iterations, about one to two days, on an NVIDIA V100 GPU.
+A plain MLP fed raw coordinates learns smooth functions and blurs fine detail, so NeRF first maps each coordinate to sines and cosines at doubling frequencies, 10 for position and 4 for direction. This PyTorch code fits the same network to a striped 1D signal with and without that positional encoding:
+```
+import torch
+from torch import nn
+
+torch.manual_seed(0)
+# Color along one line through a scene, with fine detail such as a striped texture
+x = torch.linspace(-1, 1, 512).unsqueeze(1)
+target = torch.sin(12 * torch.pi * x) * torch.cos(3 * torch.pi * x)
+
+# NeRF's positional encoding: sines and cosines of the coordinate at 10 doubling frequencies
+freqs = 2.0 ** torch.arange(10) * torch.pi
+encoded = torch.cat([torch.sin(x * freqs), torch.cos(x * freqs)], dim=1)
+
+for name, inputs in (("raw coordinate", x), ("positional encoding", encoded)):
+    mlp = nn.Sequential(nn.Linear(inputs.shape[1], 256), nn.ReLU(), nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 1))
+    optimizer = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+    for step in range(1000):
+        loss = ((mlp(inputs) - target) ** 2).mean()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    print(f"{name}: mean squared error {loss.item():.4f}")
+```
+It prints raw coordinate: mean squared error 0.0870 and positional encoding: mean squared error 0.0000. The signal's mean power is 0.25, so the network on raw coordinates misses about a third of it, the fine stripes, while the encoded network reproduces it.
+Faster and More Robust NeRFs#
+Anti-aliasing and unbounded scenes: Mip-NeRF renders cones instead of infinitely thin rays to remove aliasing, and Mip-NeRF 360 extends it to unbounded 360° captures.
+Speed: NVIDIA's Instant NGP replaces most of the network with a multiresolution hash table of learned features, cutting training from days to seconds or minutes and rendering to tens of milliseconds at 1920×1080.
+Photos taken in the wild: NeRF in the Wild adds per-photo appearance embeddings and a separate transient component, so internet photo collections with changing lighting and passing tourists still reconstruct cleanly.
+Text-to-3D: DreamFusion optimizes a NeRF until its renders from every angle look plausible to a 2D text-to-image diffusion model, creating 3D objects from prompts without 3D training data.
+NeRF vs. Related Concepts#
+Gaussian splatting: Stores a scene explicitly as millions of 3D Gaussians and rasterizes them, which renders in real time with no network evaluation per pixel. It matched the quality of Mip-NeRF 360 in 2023 and has replaced NeRF in many capture tools, at the cost of more memory.
+Photogrammetry: Builds an explicit mesh by matching features across photos. Meshes are compact and editable in standard 3D software but struggle with shiny, transparent, and very thin surfaces.
+Depth estimation: A NeRF yields a depth map as a by-product, the expected distance at which each ray stops, but only after optimizing on many posed photos of one scene. Monocular depth models predict depth from a single image in one forward pass.
+Implicit neural representations: NeRF is an implicit neural representation specialized for radiance and density, alongside networks that store images, shapes, or audio as continuous functions.
+Capture Requirements#
+A NeRF assumes a static scene under constant lighting, photographed from many overlapping viewpoints with accurate camera poses. The original paper trained each synthetic object on 100 rendered views and each real forward-facing scene on 20 to 62 photos. Anything that moves during capture, such as a passerby or a car, appears in some photos and not in others, and the optimization explains it with semi-transparent "floaters." Ultralytics YOLO26 instance segmentation models mask people and vehicles in every photo, so rays through those pixels can be left out of training.
+Real-World Applications#
+Film and virtual production: Captured locations are reconstructed and rendered from new camera paths as photorealistic backgrounds and set references.
+Robotics and driving simulation: Recorded environments are reconstructed so autonomous vehicle and robotics teams can render sensor views from positions the original drive never took.
+Product visualization: A few dozen photos of an item become an interactive view that shoppers rotate freely.
+Maps: For Immersive View in Google Maps, Google reconstructed restaurant and cafe interiors with NeRF from DSLR photos captured in about an hour per venue, building on Mip-NeRF 360 with NeRF in the Wild's appearance embeddings and Block-NeRF's exposure conditioning, and delivered them as interactive 360° videos along curated flight paths.
+Explore solutions
+Computer vision in sports
+Discover how Ultralytics YOLO powers sports vision with player and ball tracking, performance analytics, coaching insights, and athlete rehabilitation.
+Learn more
+Computer vision for aerial imagery
+Transform drone and aerial imagery into real-time insights for agriculture, aquaculture, environmental monitoring, conservation, and geospatial analysis with Ultralytics YOLO.
+Learn more
+Computer vision in aerospace
+Bring vision AI to aerial monitoring with Ultralytics YOLO models. Power drones, aerospace workflows, environmental conservation & geospatial industries with computer vision solutions.
+Learn more
+Computer vision in security
+Protect every site with Ultralytics YOLO models. Vision AI powers perimeter monitoring, threat detection, license-plate recognition, and workplace safety.
+Learn more
+Computer vision in robotics
+Power smarter machines with Ultralytics YOLO models. Vision AI in robotics drives autonomous navigation, perception, object tracking, and real-time control.
+Learn more
+Computer vision in logistics
+Streamline logistics with Ultralytics YOLO models. Vision AI enables package inspection, sorting, vehicle tracking, and real-time warehouse safety monitoring.
+Learn more
+Computer vision in retail
+Reimagine retail with Ultralytics YOLO models. Vision AI powers inventory tracking, shelf monitoring, queue management, and smarter customer insights.
+Learn more
+Computer vision in healthcare
+Build healthcare solutions with Ultralytics YOLO models. Vision AI in healthcare powers faster medical imaging, smarter diagnostics, and patient monitoring.
+Learn more
+Computer vision in manufacturing
+Optimize manufacturing with Ultralytics YOLO models. Vision AI drives quality control, defect detection, PPE compliance, and assembly line automation.
+Learn more
+Computer vision in automotive
+Apply computer vision in automotive with Ultralytics YOLO models. Vision AI elevates road safety, driver assistance, and vehicle automation for smarter roads.
+Learn more
+Computer vision in agriculture
+Bring vision AI to smart agriculture with Ultralytics YOLO models. Power crop monitoring, livestock tracking, and precision farming for higher, smarter yields.
+Learn more
+Computer vision in sports
+Discover how Ultralytics YOLO powers sports vision with player and ball tracking, performance analytics, coaching insights, and athlete rehabilitation.
+Learn more
+Computer vision for aerial imagery
+Transform drone and aerial imagery into real-time insights for agriculture, aquaculture, environmental monitoring, conservation, and geospatial analysis with Ultralytics YOLO.
+Learn more
+Computer vision in aerospace
+Bring vision AI to aerial monitoring with Ultralytics YOLO models. Power drones, aerospace workflows, environmental conservation & geospatial industries with computer vision solutions.
+Learn more
+Computer vision in security
+Protect every site with Ultralytics YOLO models. Vision AI powers perimeter monitoring, threat detection, license-plate recognition, and workplace safety.
+Learn more
+Computer vision in robotics
+Power smarter machines with Ultralytics YOLO models. Vision AI in robotics drives autonomous navigation, perception, object tracking, and real-time control.
+Learn more
+Computer vision in logistics
+Streamline logistics with Ultralytics YOLO models. Vision AI enables package inspection, sorting, vehicle tracking, and real-time warehouse safety monitoring.
+Learn more
+Computer vision in retail
+Reimagine retail with Ultralytics YOLO models. Vision AI powers inventory tracking, shelf monitoring, queue management, and smarter customer insights.
+Learn more
+Computer vision in healthcare
+Build healthcare solutions with Ultralytics YOLO models. Vision AI in healthcare powers faster medical imaging, smarter diagnostics, and patient monitoring.
+Learn more
+Computer vision in manufacturing
+Optimize manufacturing with Ultralytics YOLO models. Vision AI drives quality control, defect detection, PPE compliance, and assembly line automation.
+Learn more
+Computer vision in automotive
+Apply computer vision in automotive with Ultralytics YOLO models. Vision AI elevates road safety, driver assistance, and vehicle automation for smarter roads.
+Learn more
+Computer vision in agriculture
+Bring vision AI to smart agriculture with Ultralytics YOLO models. Power crop monitoring, livestock tracking, and precision farming for higher, smarter yields.
+Learn more
+Computer vision in sports
+Discover how Ultralytics YOLO powers sports vision with player and ball tracking, performance analytics, coaching insights, and athlete rehabilitation.
+Learn more
+Computer vision for aerial imagery
+Transform drone and aerial imagery into real-time insights for agriculture, aquaculture, environmental monitoring, conservation, and geospatial analysis with Ultralytics YOLO.
+Learn more
+Computer vision in aerospace
+Bring vision AI to aerial monitoring with Ultralytics YOLO models. Power drones, aerospace workflows, environmental conservation & geospatial industries with computer vision solutions.
+Learn more
+Computer vision in security
+Protect every site with Ultralytics YOLO models. Vision AI powers perimeter monitoring, threat detection, license-plate recognition, and workplace safety.
+Learn more
+Computer vision in robotics
+Power smarter machines with Ultralytics YOLO models. Vision AI in robotics drives autonomous navigation, perception, object tracking, and real-time control.
+Learn more
+Computer vision in logistics
+Streamline logistics with Ultralytics YOLO models. Vision AI enables package inspection, sorting, vehicle tracking, and real-time warehouse safety monitoring.
+Learn more
+Computer vision in retail
+Reimagine retail with Ultralytics YOLO models. Vision AI powers inventory tracking, shelf monitoring, queue management, and smarter customer insights.
+Learn more
+Computer vision in healthcare
+Build healthcare solutions with Ultralytics YOLO models. Vision AI in healthcare powers faster medical imaging, smarter diagnostics, and patient monitoring.
+Learn more
+Computer vision in manufacturing
+Optimize manufacturing with Ultralytics YOLO models. Vision AI drives quality control, defect detection, PPE compliance, and assembly line automation.
+Learn more
+Computer vision in automotive
+Apply computer vision in automotive with Ultralytics YOLO models. Vision AI elevates road safety, driver assistance, and vehicle automation for smarter roads.
+Learn more
+Computer vision in agriculture
+Bring vision AI to smart agriculture with Ultralytics YOLO models. Power crop monitoring, livestock tracking, and precision farming for higher, smarter yields.
+Learn more
+Let's build the future of AI together!
+Begin your journey with the future of machine learning
+License YOLOGet started
+Ask AIUltralytics
+Cookies help us see which docs, models, and features you find useful, so we can keep improving them. Choose what you share in Cookie settings, or read our Privacy Policy.
+RejectAccept

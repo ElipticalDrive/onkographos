@@ -1,0 +1,223 @@
+--- v002.md
++++ v003.md
+@@ -1,86 +1,164 @@
+ # Simple Reflections
+ 
++Also called: Iterative Specular Reflections
+ 
+ ## Overview
+-Simple Reflections is a local illumination technique that calculates a reflected ray direction off a surface normal and raymarches along it, blending the result with the surface color [S1, unofficial].
++Simple Reflections is a local illumination technique that approximates specular highlights by raymarching along the geometric reflection vector at a surface hit point and blending the resulting color with the base surface color [S1, S2, unofficial]. It solves the problem of rendering mirror-like surfaces in raymarched scenes without requiring complex recursive ray tracing or environment maps [S1, unofficial]. Unlike [Specular Reflections via Polynomial Expansion](1172-specular-reflections-via-polynomial-expansion.md), which uses polynomial expansion of the Phong term for analytical evaluation, Simple Reflections relies on iterative numerical raymarching [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Surface position $\mathbf{p}$ [G]
+-*   Surface normal $\mathbf{n}$ (normalized) [G]
+-*   View direction $\mathbf{v}$ (normalized, pointing from surface to camera) [G]
+-*   Distance field function $SDF(\mathbf{x})$ [G]
+-*   Reflection blend factor $\alpha \in [0, 1]$ [G]
++*   `color`: The base surface color (RGB) at the hit point.
++*   `point`: The 3D coordinates of the surface hit point.
++*   `direction`: The incoming view direction vector (normalized).
++*   `scene`: The signed distance field (SDF) or scene representation.
++*   `light`: The light source definition (position, intensity).
++*   `reflection-count`: Integer, maximum number of bounces (default 3) [S2, unofficial].
++*   `DRAW-DISTANCE`: Float, maximum raymarch distance for a valid hit [S2, unofficial].
+ 
+ **Outputs:**
+-*   Reflected color $C_{refl}$ [G]
++*   `final_color`: The blended RGB color including reflections.
+ 
+ **Data Structures:**
+-*   Ray structure: $\{ \mathbf{origin}: \mathbb{R}^3, \mathbf{direction}: \mathbb{R}^3, \mathbf{color}: \mathbb{R}^3, \mathbf{t}: \mathbb{R} \}$ [G]
++*   Vectors are 3-component floats ($\mathbf{v} = [x, y, z]$).
++*   Colors are 3-component floats in range $[0, 1]$.
+ 
+ **Steps:**
+-1.  **Calculate Reflected Direction:** Compute the direction of the reflected ray $\mathbf{r}$ using the surface normal $\mathbf{n}$ and the view direction $\mathbf{v}$: $\mathbf{r} = 2(\mathbf{n} \cdot \mathbf{v})\mathbf{n} - \mathbf{v}$ [S1, unofficial].
+-2.  **Raymarch:** Cast a ray starting at $\mathbf{p}$ with direction $\mathbf{r}$ into the scene [S1, unofficial]. Initialize ray origin $\mathbf{o} = \mathbf{p} + \epsilon \mathbf{r}$ [G]. Iterate to find the closest surface intersection distance $d = SDF(\mathbf{o})$ [G]. Advance the ray: $\mathbf{o} \leftarrow \mathbf{o} + d \mathbf{r}$ [G]. Repeat until $d$ is below a threshold (hit) or a maximum distance is exceeded (miss) [G]. If a hit occurs, sample the color $C_{env}$ at the hit point [G]. If no hit, use a background color $C_{bg}$ [G].
+-3.  **Blend:** Combine the reflected color $C_{env}$ with the original surface color $C_{surf}$ using the blend factor $\alpha$: $C_{refl} = \alpha C_{env} + (1 - \alpha) C_{surf}$ [S1, unofficial].
+-
+-**Parameters:**
+-*   $\alpha$: Reflection blend factor [G].
+-*   $\epsilon$: Offset for self-intersection prevention [G].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Self-Intersection:** Without the offset $\epsilon$, the reflected ray may immediately intersect the surface it originated from, causing artifacts [G].
+-*   **Precision:** Floating-point precision errors in raymarching can cause jittering in reflections, especially at grazing angles [G].
++1.  Initialize state variables:
++    *   $p \leftarrow \text{point}$
++    *   $d \leftarrow \text{direction}$
++    *   $n \leftarrow \text{get-normal}(p, \text{scene})$
++    *   $i \leftarrow 0$
++    *   $\text{not-done?} \leftarrow \text{true}$
++    *   $C_{\text{out}} \leftarrow \text{color}$
++2.  Loop while $i < \text{reflection-count}$ AND $\text{not-done?}$:
++    1.  Compute the reflection vector $\mathbf{r}$ using the surface normal $\mathbf{n}$ and incoming direction $\mathbf{d}$:
++        $$ \mathbf{r} = \mathbf{d} - 2(\mathbf{d} \cdot \mathbf{n})\mathbf{n} $$
++        [S1, S2, unofficial]
++    2.  Raymarch from a point slightly above the surface to avoid self-intersection. Start position $p_{\text{start}} = p + \mathbf{n} \cdot \epsilon$ (where $\epsilon$ is a small offset, implemented as `above-surface-point` in source) [S2, unofficial].
++    3.  March ray in direction $\mathbf{r}$ through the scene. Let the hit distance be $dist$ and the hit color be $C_{\text{hit}}$ [S2, unofficial].
++    4.  If $dist < \text{DRAW-DISTANCE}$:
++        1.  Update position: $p \leftarrow p + \mathbf{r} \cdot dist$ [S2, unofficial].
++        2.  Update normal: $n \leftarrow \text{get-normal}(p, \text{scene})$ [S2, unofficial].
++        3.  Update direction: $d \leftarrow \mathbf{r}$ [S2, unofficial].
++        4.  Compute lightness $L_{\text{hit}}$ at the new point $p$ [S2, unofficial].
++        5.  Attenuate lightness by factor 0.5: $l \leftarrow L_{\text{hit}} / 2$ [S2, unofficial].
++        6.  Blend colors. For each channel $c \in \{R, G, B\}$:
++            $$ c_{\text{new}} = (c_{\text{old}} + c_{\text{hit}} \cdot l) \cdot 0.66 $$
++            [S2, unofficial]
++            Update $C_{\text{out}}$ with these new channel values.
++        7.  Increment bounce counter: $i \leftarrow i + 1$ [S2, unofficial].
++    5.  Else (ray did not hit within distance):
++        1.  Set $\text{not-done?} \leftarrow \text{false}$ [S2, unofficial].
++3.  Return $C_{\text{out}}$ [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def simple_reflections(p, n, v, sdf, alpha, C_surf, max_steps=10, max_dist=100.0, epsilon=1e-4):
+-    # 1. Calculate reflected direction based on surface normal [S1, unofficial]
+-    r = 2.0 * dot(n, v) * n - v
+-    r = normalize(r)
++def simple_reflections(color, point, direction, scene, light, reflection_count=3, draw_distance=100.0):
++    """
++    Computes simple iterative specular reflections.
++    
++    Args:
++        color: tuple (r, g, b) base surface color.
++        point: vec3 hit point.
++        direction: vec3 incoming view direction.
++        scene: object with get_normal(p) and march_ray(p, d) methods.
++        light: object with point_lightness(p, scene) method.
++        reflection_count: int max bounces.
++        draw_distance: float max raymarch distance.
++        
++    Returns:
++        tuple (r, g, b) final color.
++    """
++    # Initialize state
++    p = point
++    d = direction
++    n = scene.get_normal(p)
++    i = 0
++    not_done = True
++    out_color = list(color)  # mutable list for channels
++    
++    while i < reflection_count and not_done:
++        # 1. Compute reflection vector r = d - 2(d . n)n
++        dot_dn = sum(d[j] * n[j] for j in range(3))
++        r = [d[j] - 2 * dot_dn * n[j] for j in range(3)]
++        
++        # 2. Raymarch from above surface point
++        # Small epsilon to avoid self-intersection. 
++        # Source uses 'above-surface-point(p, n)' which implies p + n * small_offset.
++        # We assume a standard small epsilon like 1e-4.
++        epsilon = 1e-4
++        start_point = [p[j] + n[j] * epsilon for j in range(3)]
++        
++        # 3. March ray
++        # march_ray returns (distance, hit_color)
++        # If no hit, distance might be infinity or draw_distance.
++        distance, hit_color = scene.march_ray(start_point, r)
++        
++        if distance < draw_distance:
++            # 4. Hit found
++            # Update position
++            p = [p[j] + r[j] * distance for j in range(3)]
++            
++            # Update normal
++            n = scene.get_normal(p)
++            
++            # Update direction
++            d = r
++            
++            # Compute lightness and attenuate
++            # point_lightness returns a scalar float
++            lightness = light.point_lightness(p, scene)
++            l = lightness / 2.0
++            
++            # Blend colors
++            # Source: c_new = (c_old + c_hit * l) * 0.66
++            # Apply to each channel
++            new_color = []
++            for j in range(3):
++                c_old = out_color[j]
++                c_hit = hit_color[j]
++                c_new = (c_old + c_hit * l) * 0.66
++                new_color.append(c_new)
++            out_color = new_color
++            
++            # Increment counter
++            i += 1
++        else:
++            # No hit within distance
++            not_done = False
++            
++    return tuple(out_color)
++```
+ 
+-    # 2. Raymarch along the reflected direction [S1, unofficial]
+-    ray_origin = p + epsilon * r
+-    ray_color = vec3(0.0)
+-    hit = False
++**Parameters:**
++*   `reflection-count`: Maximum number of reflection bounces. Default is 3 [S2, unofficial].
++*   `0.66`: Color blending factor applied after adding hit color to prevent overflow and maintain brightness across bounces [S2, unofficial].
++*   `0.5`: Light attenuation factor applied to reflection bounces to make them appear darker [S2, unofficial].
+ 
+-    for _ in range(max_steps):
+-        dist = sdf(ray_origin)
+-        if dist < 1e-4:
+-            hit = True
+-            # Sample color at hit point [G] step not given in sources
+-            ray_color = vec3(1.0, 1.0, 1.0)
+-            break
+-        if dist > max_dist:
+-            ray_color = vec3(0.0, 0.0, 0.0)
+-            break
+-        ray_origin += dist * r
+-
+-    if not hit:
+-        ray_color = vec3(0.0, 0.0, 0.0)
+-
+-    # 3. Blend the resulting color with the original surface color [S1, unofficial]
+-    return alpha * ray_color + (1.0 - alpha) * C_surf
+-```
++**Edge Cases and Pitfalls:**
++*   **Infinite Recursion:** Prevented by checking `i < reflection-count` and `not-done?` [S2, unofficial].
++*   **Self-Intersection:** The raymarch starts from `above-surface-point` (offset by normal) to prevent the ray from immediately hitting the surface it just reflected off [S2, unofficial].
++*   **Language Limitations:** In languages without a `break` statement (e.g., Fennel), the loop counter must be incremented manually at the end of each iteration, and `not-done?` must be used to exit early [S2, unofficial].
++*   **Color Overflow:** The multiplication by 0.66 ensures that the sum of base and reflected colors does not exceed 1.0, preventing clipping artifacts [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Cube Map Mapping
+-A variant that replaces raymarching with a cube map lookup for reflections [S2, unofficial]. It maps the reflected direction to cube map texture coordinates following OpenGL specifications [S2, unofficial].
+-**Steps:**
+-1.  Compute reflected directions: `reflected_directions = 2 * surface_normals * torch.sum(view_directions * surface_normals, dim=-1, keepdim=True) - view_directions` [S2, unofficial].
+-2.  Find the max absolute component index and value: `max_indices = torch.argmax(torch.abs(reflected_directions), dim=-1, keepdim=True)`; `max_values = torch.gather(reflected_directions, -1, max_indices)` [S2, unofficial].
+-3.  Compute texture coordinates: `texcoords_x, texcoords_y, texcoords_z = torch.unbind(reflected_directions / torch.abs(max_values), dim=-1)` [S2, unofficial].
+-4.  Map coordinates to cube faces using linear mapping for the third coordinate: `linear_mapping(inputs, in_min, in_max, out_min, out_max) = (inputs - in_min) / (in_max - in_min) * (out_max - out_min) + out_min` [S2, unofficial].
+-5.  Construct grid coordinates for each face based on `max_indices` and `max_values` sign, stacking `(u, v, face_index)` where `face_index` is mapped from 0-5 to -1 to 1 [S2, unofficial].
+-6.  Sample cube map: `images = nn.functional.grid_sample(images, grids.unsqueeze(-4)).squeeze(-3)` [S2, unofficial].
+-7.  Permute output: `images = images.permute(0, 2, 3, 1)` [S2, unofficial].
++Maps reflected directions to cube map texture coordinates following OpenGL specifications [S3, unofficial]. It computes reflected directions using `reflected_directions = 2 * surface_normals * sum(view_directions * surface_normals, dim=-1, keepdim=True) - view_directions` [S3, unofficial]. It finds the max absolute component index and value to determine the cube face, then computes texture coordinates by dividing the reflected direction by the max absolute value [S3, unofficial]. Linear mapping is used for the third coordinate, and grid coordinates are constructed for each face based on the max index and sign, stacking (u, v, face_index) where face_index is mapped from 0-5 to -1 to 1 [S3, unofficial]. The cube map is sampled using `nn.functional.grid_sample` and the output is permuted [S3, unofficial]. This variant is chosen when environment mapping is preferred over iterative raymarching for reflections [S3, unofficial].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Time Complexity:** $O(k \cdot m)$, where $k$ is the number of reflection bounces (default 3) and $m$ is the number of steps per raymarch [S2, unofficial].
++*   **Memory Complexity:** $O(1)$ per pixel, as it only stores current state variables [S2, unofficial].
++*   **Performance:** Fast for low bounce counts. Performance degrades linearly with increased `reflection-count` [S2, unofficial].
++*   **Strengths:** Simple to implement, no need for environment maps or complex recursion [S1, S2, unofficial].
++*   **Limitations:** Approximate, can be noisy if raymarch steps are few, limited by `DRAW-DISTANCE` [S2, unofficial]. Not suitable for complex inter-reflections beyond the fixed bounce count [S2, unofficial].
++*   **When to use:** Real-time raymarched scenes with mirror-like surfaces [S2, unofficial].
++*   **When not to use:** High-fidelity rendering requiring accurate global illumination or infinite bounces [S2, unofficial].
+ 
+ ## Background
+-The technique appears in tutorials on raymarching distance fields, where it is used alongside ambient occlusion and domain distortion [S1, unofficial].
++Originated in the context of raymarching signed distance fields (SDFs) for real-time graphics [S1, S2, unofficial]. The technique was popularized in blog posts and tutorials demonstrating SDF rendering with simple lighting models [S1, S2, unofficial]. It is a foundational technique for adding specular highlights to raymarched scenes without resorting to recursive ray tracing [S1, S2, unofficial].
+ 
+ ## Sources
+ [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
+-[S2] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)+[S2] Raymarching with Fennel and LÖVE · Andrey Listopadov, https://andreyor.st/posts/2020-10-15-raymarching-with-fennel-and-love/, fetched 2026-10-30 (unofficial)
++[S3] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

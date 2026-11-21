@@ -1,0 +1,410 @@
+--- v001.md
++++ v002.md
+@@ -4,225 +4,215 @@
+ 
+ ## Overview
+-The Basic Cut-Border Machine (CBM) is a region-growing compression scheme that encodes the connectivity of a tetrahedral mesh by growing a region bounded by a cut-border [S1]. It solves the problem of efficiently storing and transmitting tetrahedral mesh topology by generating a stream of opcodes that describe the position of new vertices relative to the current boundary [S1]. Unlike sibling methods that may rely on global indexing or explicit adjacency lists, CBM determines connectivity locally during traversal, ensuring unique identification of vertices across multi-resolution segments through shared vertex indices [S1].
++Tetrahedral Mesh Connectivity Encoding, commonly known as the Cut-Border Machine (CBM), is a region-growing compression scheme that encodes the connectivity of a tetrahedral mesh by traversing it and generating a stream of opcodes [S1]. It solves the problem of efficiently storing and transmitting mesh topology by describing each new tetrahedron relative to a growing boundary (the cut-border) rather than storing explicit adjacency lists [S1]. Unlike sibling methods that may rely on global indexing or explicit neighbor pointers, CBM uses a local, deterministic traversal order (FIFO) and a fixed set of 11 opcodes to reconstruct the mesh structure sequentially [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A tetrahedral mesh (or a patch/segment thereof).
+-*   **Output:** A binary stream consisting of 4-bit opcodes and vertex indices, followed by geometry and attribute data [S1].
++*   **Input:** A tetrahedral mesh (potentially multi-resolution with segments/patches).
++*   **Output:** A binary stream containing vertex indices for the initial tetrahedron, followed by a sequence of 4-bit opcodes and associated parameters (vertex indices), and geometry/attribute data [S1].
+ 
+ **Data Structures:**
+-1.  **Cut-Border:** A triangle mesh representing the boundary between encoded (inner) and unencoded (outer) tetrahedra [S1].
+-2.  **Gate:** A specific triangle face on the cut-border where the next tetrahedron is added [S1].
+-3.  **Hash Maps:** Two hash maps store face incidencies for reconstruction:
+-    *   *In-patch map:* Stores pairs of triangles representing face incidencies within a single patch/segment [S1].
+-    *   *Cross-patch map:* Stores pairs of triangles representing face incidencies between different patches or segments [S1].
+-    *   *Edge Map:* A hash map storing all incident triangles for every edge of the cut-border to detect non-manifold edges. An edge is uniquely defined by the indices of its two end vertices [S1].
+-4.  **FIFO Buffer:** Stores vertices in the order they are encountered to determine traversal order [S1].
+-5.  **Geometry Table:** Stores geometry and attribute values in a single table per segment [S1].
+-
+-**Opcodes:**
+-There are 11 primary opcodes (plus a Skip symbol for edge cases) that fully determine the position of the free vertex relative to the gate [S1]:
+-*   **B (Border):** The gate is a border of the whole tetrahedral mesh. No free vertex exists.
+-*   **N (New Vertex):** The free vertex is not on a border between segments or patches. Parameter: 16-bit index of the new vertex [S1].
+-*   **S (New Shared Vertex):** The free vertex lies on a border between patches or segments. Parameters: 16-bit local index and 32-bit global unique index [S1].
+-*   **F*i* (Flip*i*):** The free vertex is incident to exactly one adjacent triangle of the gate. *i* (0-2) identifies which triangle. No index parameter needed [S1].
+-*   **T*i* (Top*i*):** The free vertex is incident to exactly two adjacent triangles of the gate. *i* (0-2) identifies the triangle *not* incident to the free vertex. No index parameter needed [S1].
+-*   **C (Close):** The free vertex is incident to all three adjacent triangles of the gate. No index parameter needed [S1].
+-*   **J (Join):** The free vertex is incident to none of the adjacent triangles of the gate. Parameter: 16-bit index of the new vertex [S1].
+-*   **Skip:** Used for non-manifold edges incident to more than four triangles. Discards current gate, proceeds to next [S1].
+-
+-**Algorithm Steps:**
+-1.  **Initialization:** Select an arbitrary tetrahedron. Initialize the cut-border with its faces. Initialize the FIFO buffer with the four vertices of this first tetrahedron. Initialize hash maps as empty.
+-2.  **Traversal Loop:** While the outer part of the mesh is not empty:
+-    a.  **Vertex Fixation:** Fix the first vertex $v$ in the FIFO buffer.
+-    b.  **Gate Selection:** Identify the current gate (a triangle on the cut-border incident to $v$).
+-    c.  **Case Determination:** Determine the position of the free vertex $v_{free}$ relative to the gate:
+-        i.  If the gate is a mesh border, output **B**.
+-        ii. If $v_{free}$ is already on the cut-border, determine sub-case:
+-            *   If $v_{free}$ is incident to 1 adjacent triangle of the gate, output **F*i***.
+-            *   If $v_{free}$ is incident to 2 adjacent triangles of the gate, output **T*i***.
+-            *   If $v_{free}$ is incident to all 3 adjacent triangles, output **C**.
+-            *   If $v_{free}$ is incident to 0 adjacent triangles, output **J** (and encode its index).
+-        iii. If $v_{free}$ is not on the cut-border, it is a new vertex. Determine if it is shared:
+-            *   If it lies on a segment/patch border, output **S** (encode local and global indices).
+-            *   Otherwise, output **N** (encode local index).
+-    d.  **Non-Manifold Check:** Before adding the tetrahedron, check if the new edge formed is non-manifold.
+-        i.  Use the Edge Map to find incident triangles for the new edge.
+-        ii. If incident triangles > 4, output **Skip**, discard the gate, and return to step 2b.
+-        iii. If incident triangles == 4, adjacency is defined by vertex order; proceed without geometry tests [S1].
+-    e.  **Update:** Add the tetrahedron to the inner part. Update the cut-border (remove the gate, add new faces). Relocate the gate.
+-    f.  **Vertex Queue:** If the new tetrahedron introduces a new vertex not in the FIFO, append it to the FIFO.
+-    g.  **FIFO Progression:** If all tetrahedra incident to the fixed vertex $v$ are processed, remove $v$ from the FIFO and fix the next vertex.
+-3.  **Finalization:** Output geometry and attribute data in the order of vertex appearance (FIFO order) [S1].
++*   **Cut-Border:** A triangle mesh representing the boundary between encoded (inner) and unencoded (outer) tetrahedra [S1].
++*   **Gate:** A specific triangle face on the cut-border where the next tetrahedron is added [S1].
++*   **FIFO Buffer:** Stores vertices in the order they are first encountered to determine the traversal order [S1].
++*   **Hash Maps:** Two hash maps are used during decoding to reconstruct face incidencies:
++    1.  `In-Patch Hash Map`: Stores pairs of triangles for faces shared within a single patch/segment [S1].
++    2.  `Cross-Patch Hash Map`: Stores pairs of triangles for faces shared between different patches or segments [S1].
++    *   Keys in hash maps are defined by the unique indices of the triangle vertices [S1].
++*   **Non-Manifold Detection:** A hash map storing all incident triangles for every edge on the cut-border, keyed by the edge's two end-vertex indices [S1].
++
++**Numbered Steps:**
++
++1.  **Initialization:**
++    *   Select an arbitrary starting tetrahedron $T_0$ with vertices $\{V_0, V_1, V_2, V_3\}$ [S1].
++    *   Output the indices of these four vertices [S1].
++    *   Initialize the cut-border with the four faces of $T_0$ [S1].
++    *   Initialize the FIFO buffer with $\{V_0, V_1, V_2, V_3\}$ [S1].
++    *   Initialize the two hash maps as empty [S1].
++
++2.  **Traversal Loop:**
++    *   While the outer part of the mesh is not empty:
++        *   Dequeue the first vertex $V_{curr}$ from the FIFO buffer [S1].
++        *   Fix $V_{curr}$ as the current vertex.
++        *   Traverse all tetrahedra incident to $V_{curr}$ that are not yet encoded. For each such tetrahedron:
++            *   Identify the **gate**: the face of the current tetrahedron that lies on the cut-border and does not contain $V_{curr}$ (or is the boundary) [S1].
++            *   Identify the **free vertex** $V_{free}$: the vertex of the tetrahedron not part of the gate [S1].
++            *   Determine the **Opcode** based on the position of $V_{free}$ relative to the gate and the cut-border [S1]:
++                *   **Case 1: Border (B)**. The gate is a boundary of the entire mesh (no tetrahedron exists on the other side). No free vertex. Output Opcode `B` [S1].
++                *   **Case 2: Free vertex is new (not on cut-border)**.
++                    *   Check if $V_{free}$ lies on a segment/patch boundary.
++                    *   If yes: Output Opcode `S` (New Shared Vertex) followed by the 16-bit local index of $V_{free}$ and the 32-bit global unique index [S1].
++                    *   If no: Output Opcode `N` (New Vertex) followed by the 16-bit local index of $V_{free}$ [S1].
++                    *   Add $V_{free}$ to the end of the FIFO buffer [S1].
++                *   **Case 3: Free vertex is already on the cut-border**.
++                    *   Determine the relationship between $V_{free}$ and the three triangles adjacent to the gate on the cut-border [S1].
++                    *   **Flip $i$ ($F_i$)**: $V_{free}$ is incident to exactly one adjacent triangle. $i \in \{0, 1, 2\}$ identifies which triangle [S1]. Output Opcode `F` + $i$ [S1].
++                    *   **Top $i$ ($T_i$)**: $V_{free}$ is incident to exactly two adjacent triangles. $i \in \{0, 1, 2\}$ identifies the triangle *not* incident to $V_{free}$ [S1]. Output Opcode `T` + $i$ [S1].
++                    *   **Close ($C$)**: $V_{free}$ is incident to all three adjacent triangles [S1]. Output Opcode `C` [S1].
++                    *   **Join ($J$)**: $V_{free}$ is incident to none of the adjacent triangles [S1]. Output Opcode `J` [S1].
++            *   **Update Cut-Border:**
++                *   Remove the gate from the cut-border.
++                *   Add the three new faces formed by $V_{free}$ and the edges of the gate to the cut-border [S1].
++                *   **Handle Non-Manifold Edges:**
++                    *   For each new edge on the cut-border, check if it is non-manifold using the edge-incident-triangle hash map [S1].
++                    *   If an edge is incident to more than 4 triangles: Output Opcode `Skip` (12th symbol), discard the current gate, and proceed to the next gate without updating the cut-border for this tetrahedron [S1].
++                    *   If an edge is incident to exactly 4 triangles: The adjacency is defined by vertex order; no geometry tests needed [S1].
++                    *   Update the hash map with the new incident triangles for the affected edges [S1].
++            *   **Relocate Gate:** Select a new face from the updated cut-border to be the next gate [S1].
++
++3.  **Termination:**
++    *   The process stops when the FIFO buffer is empty and no unencoded tetrahedra remain [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def encode_tet_mesh(tetrahedra, vertices):
++def encode_tetrahedral_mesh(mesh):
+     # 1. Initialization
+-    cut_border = set() # Set of triangle faces (tuples of 3 vertex indices)
+-    fifo = [] # Queue of vertex indices
+-    edge_map = {} # Hash map: edge_tuple -> list of triangle_indices
+-    in_patch_map = {} # Hash map: triangle_tuple -> triangle_index
+-    cross_patch_map = {} # Hash map: triangle_tuple -> list of triangle_indices
+-    encoded_tets = set()
+-    output_stream = []
+-    
+-    # Start with arbitrary tetrahedron (index 0)
+-    start_tet = tetrahedra[0]
+-    encoded_tets.add(0)
+-    
+-    # Add faces of start tet to cut border
+-    for face in get_faces(start_tet):
+-        cut_border.add(face)
++    start_tet = mesh.get_arbitrary_tetrahedron()
++    vertices = start_tet.vertices # [V0, V1, V2, V3]
++    
++    # Output initial vertices
++    output_stream.write(vertices)
++    
++    # Initialize cut-border with faces of start_tet
++    cut_border_faces = start_tet.faces
++    gate = cut_border_faces[0] # Arbitrary initial gate
++    
++    # FIFO buffer for traversal order
++    fifo = Queue()
++    for v in vertices:
++        fifo.enqueue(v)
+         
+-    # Add vertices to FIFO
+-    for v in start_tet.vertices:
+-        if v not in fifo:
+-            fifo.append(v)
+-            
++    # Hash maps for decoding support (stored implicitly or explicitly)
++    # edge_incidents: Map<Edge, List<Triangle>>
++    edge_incidents = {}
++    
+     # 2. Traversal
+-    while fifo:
+-        # Fix first vertex in FIFO
+-        current_v = fifo[0]
++    while not fifo.is_empty():
++        v_curr = fifo.dequeue()
+         
+-        # Find a gate (face on cut border incident to current_v)
+-        gate = None
+-        for face in cut_border:
+-            if current_v in face:
+-                gate = face
+-                break
++        # Get all unencoded tetrahedra incident to v_curr
++        incident_tets = mesh.get_unencoded_incident_tetrahedra(v_curr)
+         
+-        if gate is None:
+-            # No gate found for this vertex, remove from FIFO
+-            fifo.pop(0)
+-            continue
+-            
+-        # Determine case for free vertex
+-        # The gate defines 3 vertices. The 4th vertex of the new tet is 'free'
+-        # We need to find the tetrahedron adjacent to 'gate' that is not yet encoded
+-        # In a real implementation, we would look up neighbors. 
+-        # Here we assume we can identify the free vertex v_free from the mesh structure
+-        # relative to the gate and the unencoded state.
+-        
+-        # Note: The source describes determining the case based on v_free's location.
+-        # For implementation, one must iterate unencoded neighbors of the gate.
+-        
+-        v_free = get_free_vertex_for_gate(gate, encoded_tets, tetrahedra)
+-        
+-        if v_free is None:
+-            # Gate is a border (B)
+-            output_stream.append('B')
+-            cut_border.remove(gate)
+-            # Add new faces to cut border
+-            for new_face in get_new_faces(gate, tetrahedra):
+-                cut_border.add(new_face)
+-            fifo.pop(0) # Gate processed, move to next vertex if no more tets for current_v
+-            continue
+-            
+-        # Check non-manifold edges for the new tetrahedron
+-        new_edges = get_edges_of_new_tet(gate, v_free)
+-        is_skip = False
+-        for edge in new_edges:
+-            if edge not in edge_map:
+-                edge_map[edge] = []
+-            # Check incident triangles count
+-            # This is a simplified check; real implementation updates edge_map dynamically
+-            if len(edge_map[edge]) > 4:
+-                is_skip = True
+-                break
+-        
+-        if is_skip:
+-            output_stream.append('Skip')
+-            cut_border.remove(gate)
+-            # Discard gate, proceed to next gate for current_v or next vertex
+-            continue
+-            
+-        # Determine Opcode
+-        opcode = determine_opcode(gate, v_free, cut_border, edge_map)
+-        output_stream.append(opcode)
+-        
+-        # Add tetrahedron to encoded
+-        new_tet_idx = find_tet_index(gate, v_free, tetrahedra)
+-        encoded_tets.add(new_tet_idx)
+-        
+-        # Update Cut Border
+-        cut_border.remove(gate)
+-        for new_face in get_new_faces(gate, tetrahedra):
+-            cut_border.add(new_face)
+-            
+-        # Update Edge Map
+-        for edge in new_edges:
+-            edge_map[edge].append(new_tet_idx)
+-            
+-        # Update FIFO
+-        if v_free not in fifo:
+-            fifo.append(v_free)
+-            
+-        # Check if current_v has more incident tets to process
+-        # If not, pop from FIFO
+-        if not has_unencoded_incident_tets(current_v, encoded_tets, tetrahedra):
+-            fifo.pop(0)
+-            
++        for tet in incident_tets:
++            # Identify gate: face on cut_border not containing v_curr
++            # Note: In implementation, gate is maintained from previous step
++            # or selected from cut_border_faces. 
++            # Here we assume 'gate' is the current face being processed.
++            
++            # Identify free vertex: vertex in tet not in gate
++            gate_vertices = set(gate.vertices)
++            free_vertex = [v for v in tet.vertices if v not in gate_vertices][0]
++            
++            opcode = None
++            param = None
++            
++            # Determine Case
++            if gate.is_boundary():
++                opcode = 'B' # Border
++            elif free_vertex not in cut_border_faces:
++                # New Vertex
++                if free_vertex.is_on_segment_boundary():
++                    opcode = 'S'
++                    param = (free_vertex.local_index, free_vertex.global_index)
++                else:
++                    opcode = 'N'
++                    param = free_vertex.local_index
++                fifo.enqueue(free_vertex)
++            else:
++                # Free vertex is on cut-border
++                # Find adjacent triangles to gate on cut-border
++                adj_triangles = get_adjacent_triangles_on_cut_border(gate)
++                
++                # Count incidences of free_vertex in adj_triangles
++                incident_count = 0
++                incident_indices = []
++                for idx, tri in enumerate(adj_triangles):
++                    if free_vertex in tri.vertices:
++                        incident_count += 1
++                        incident_indices.append(idx)
++                        
++                if incident_count == 1:
++                    opcode = 'F'
++                    param = incident_indices[0] # i
++                elif incident_count == 2:
++                    # i is the index of the triangle NOT incident
++                    missing_idx = [i for i in range(3) if i not in incident_indices][0]
++                    opcode = 'T'
++                    param = missing_idx
++                elif incident_count == 3:
++                    opcode = 'C'
++                elif incident_count == 0:
++                    opcode = 'J'
++                else:
++                    # Should not happen for valid manifold/non-manifold logic
++                    pass
++
++            # Handle Skip for >4 incident triangles
++            # Check new edges created by adding tet
++            new_edges = get_new_edges_on_cut_border(gate, free_vertex)
++            skip_needed = False
++            for edge in new_edges:
++                if len(edge_incidents.get(edge, [])) > 4:
++                    skip_needed = True
++                    break
++            
++            if skip_needed:
++                output_stream.write('Skip')
++                # Discard gate, do not update cut-border for this tet
++                continue
++            else:
++                output_stream.write(opcode)
++                if param is not None:
++                    output_stream.write(param)
++                
++                # Update Cut-Border
++                cut_border_faces.remove(gate)
++                new_faces = get_new_faces_from_gate_and_free_vertex(gate, free_vertex)
++                cut_border_faces.extend(new_faces)
++                
++                # Update Edge Incidents
++                for edge in new_edges:
++                    if edge not in edge_incidents:
++                        edge_incidents[edge] = []
++                    edge_incidents[edge].append(tet)
++                    
++                # Relocate Gate
++                if cut_border_faces:
++                    gate = cut_border_faces[0] # Simple selection; real impl may optimize
++                else:
++                    break # Mesh fully encoded
++
+     return output_stream
+-
+-def determine_opcode(gate, v_free, cut_border, edge_map):
+-    # Check if v_free is on cut border
+-    is_on_border = False
+-    for face in cut_border:
+-        if v_free in face:
+-            is_on_border = True
+-            break
+-            
+-    if not is_on_border:
+-        # New Vertex
+-        # Check if shared (cross-segment/patch)
+-        if is_shared_vertex(v_free):
+-            return 'S'
+-        else:
+-            return 'N'
+-            
+-    # v_free is on border
+-    # Count incident triangles of gate
+-    incident_count = count_incident_triangles(gate, v_free, edge_map)
+-    
+-    if incident_count == 1:
+-        return 'F' # Index i determined by which triangle
+-    elif incident_count == 2:
+-        return 'T' # Index i determined by which triangle is NOT incident
+-    elif incident_count == 3:
+-        return 'C'
+-    elif incident_count == 0:
+-        return 'J'
+-        
+-    return 'Unknown'
+ ```
+ 
+ **Parameters:**
+ *   **Opcode Size:** 4 bits per opcode [S1].
+-*   **Vertex Index (N, S, J):** 16 bits. Theoretically $\log_2(n)$ where $n$ is the number of vertices in the segment [S1].
+-*   **Shared Vertex Global Index (S):** 32 bits. Theoretically $\log_2(m)$ where $m$ is the number of vertices in the whole multi-resolution mesh [S1].
+-*   **Arithmetic Coding:** Not implemented in the basic version; relies on fixed 4-bit words [S1].
++*   **Vertex Index (N, S, J):** 16 bits per index [S1]. Theoretically $\lceil \log_2(n) \rceil$ bits where $n$ is the number of vertices in the segment [S1].
++*   **Shared Vertex Global Index (S):** 32 bits [S1]. Theoretically $\lceil \log_2(m) \rceil$ bits where $m$ is the total number of vertices in the multi-resolution mesh [S1].
++*   **Total Opcodes:** 11 (B, N, S, F0, F1, F2, T0, T1, T2, C, J) [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Non-manifold edges (>4 triangles):** Handled by outputting a **Skip** symbol. The current gate is discarded, and the encoder proceeds to the next gate without adding a tetrahedron [S1].
+-*   **Non-manifold edges (==4 triangles):** Allowed. Adjacency is defined by vertex order in triangles, avoiding geometry tests but potentially decreasing compression ratio [S1].
++*   **Non-Manifold Edges (>4 triangles):** The algorithm outputs a `Skip` opcode, discards the current gate, and proceeds to the next gate without adding the tetrahedron to the inner part or updating the cut-border for that specific step [S1]. This increases the total symbol count to 12 [S1].
++*   **Non-Manifold Edges (4 triangles):** Allowed. Adjacency is determined by vertex ordering in the triangles, avoiding geometric tests [S1].
+ *   **Precision:** Not specified in sources.
++*   **Boundaries:** The `Border` (B) opcode handles mesh boundaries explicitly [S1].
+ 
+ ## Subtopics
+ 
+ ### Extended Cut-Border Machine (CBM) for Multi-Resolution
+-A compression scheme extending the CBM to support cross-segment incidencies and respect pre-computed mesh layouts [S1]. It stores segments sequentially in a binary file. Vertices are enumerated segment-wise, and vertices on segment boundaries are copied into each segment they belong to. An additional unique global index is stored for every border vertex to identify it uniquely across segments [S1]. It uses the same 11 opcodes but distinguishes in-patch vertices (N) from shared vertices (S) to reconstruct face incidencies using two hash maps (in-patch and cross-patch) [S1].
++A variant of CBM designed for multi-resolution meshes consisting of segments and patches [S1]. It supports cross-segment incidencies and respects pre-computed mesh layouts [S1]. Vertices on segment boundaries are copied into each segment they belong to, and an additional unique global index is stored for every border vertex to ensure unique identification across segments [S1]. The encoding process enumerates vertices segment-wise and stores segments sequentially in a binary file [S1]. It uses the same 11 opcodes but distinguishes between in-patch and cross-patch faces using two separate hash maps during decoding [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of tetrahedra and vertices, assuming efficient hash map lookups [S1]. The traversal order (FIFO) is crucial for efficiency [S1].
+-*   **Memory Complexity:** Requires storage for the cut-border, FIFO buffer, and two hash maps for face incidencies plus one for edge incidencies [S1].
+-*   **Compression Ratio:** The basic version uses 4-bit opcodes and fixed-width indices, which provides sufficient file size reduction without arithmetic coding. Arithmetic coding could further improve ratios [S1].
+-*   **Strengths:** Efficient region-growing traversal; handles non-manifold edges (up to 4 triangles) explicitly; supports multi-resolution meshes with cross-segment references [S1].
+-*   **Limitations:** Does not support non-manifold edges with >4 triangles (skips them); fixed 16-bit indices may be inefficient for very large segments; no arithmetic coding in basic version [S1].
+-*   **When to use:** When compact storage of tetrahedral mesh connectivity is required, especially for multi-resolution meshes where segment boundaries must be preserved [S1].
+-*   **When not to use:** When non-manifold topology with >4 triangles per edge is common and must be preserved; when maximum compression ratio is critical and arithmetic coding is acceptable [S1].
++*   **Time Complexity:** Linear with respect to the number of tetrahedra and vertices, assuming efficient hash map operations for edge and face lookups [S1]. The traversal order (FIFO) ensures each vertex and tetrahedron is processed a constant number of times [S1].
++*   **Memory Complexity:** Proportional to the size of the mesh for storing the cut-border, FIFO buffer, and hash maps during encoding/decoding [S1]. The hash maps store edge and face incidencies, which can be significant for non-manifold meshes [S1].
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Scales well with mesh size due to local operations [S1]. Multi-resolution support allows efficient handling of large datasets by processing segments independently [S1].
++*   **Strengths:** High compression ratio for connectivity; deterministic reconstruction; supports non-manifold edges (up to 4 triangles) without complex geometry tests; supports multi-resolution and cross-segment incidencies [S1].
++*   **Limitations:** Does not use arithmetic coding for opcodes in the basic implementation, potentially leaving compression gains on the table [S1]. Non-manifold edges with >4 triangles are skipped, potentially losing topological information for those specific edges [S1]. Relies on a specific traversal order for efficiency [S1].
++*   **When to use:** When compact storage of tetrahedral mesh connectivity is required, especially for multi-resolution or segment-based meshes where cross-segment consistency is needed [S1].
++*   **When not:** When arithmetic coding is critical for maximum compression [S1]. When meshes contain complex non-manifold structures (>4 triangles per edge) that must be fully preserved [S1].
+ 
+ ## Background
+-The Cut-Border Machine was originally proposed by Gumhold et al. [S1]. The basic version was extended to support multi-resolution meshes and cross-segment incidencies in the work cited as [S1] (Segment-based tetrahedral meshing and rendering, 2005). The method is used in visualization systems supporting interactive direct volume rendering, isosurface extraction, and vector field visualization [S1].
++The Cut-Border Machine was originally proposed by [Gumhold et al. 1999] for triangle meshes [S1]. It was extended to tetrahedral meshes and multi-resolution segment-based meshes in the work cited as [S1] (Segment-based tetrahedral meshing and rendering, 2005/2006). The extension aimed to preserve pre-computed mesh layouts for better rendering performance, addressing the issue that standard CBM destroys existing vertex indexing [S1]. It is used in visualization systems supporting interactive direct volume rendering, isosurface extraction, and vector field visualization [S1].
+ 
+ ## Sources

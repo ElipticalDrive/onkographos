@@ -1,0 +1,1036 @@
+arXiv:2404.12547v3 [cs.CV] 23 May 2024
+Evaluating Alternatives to SFM Point Cloud
+Initialization for Gaussian Splatting
+Yalda Foroutan1
+Daniel Rebain2
+Kwang Moo Yi2
+Andrea Tagliasacchi1,3,4
+1
+2
+3
+Simon Fraser University, University of British Columbia, University of Toronto,
+4
+Google DeepMind
+Abstract
+3D Gaussian Splatting has recently been embraced as a versatile and effective
+method for scene reconstruction and novel view synthesis, owing to its high-quality
+results and compatibility with hardware rasterization. Despite its advantages,
+Gaussian Splatting’s reliance on high-quality point cloud initialization by Structurefrom-Motion (SFM) algorithms is a significant limitation to be overcome. To
+this end, we investigate various initialization strategies for Gaussian Splatting and
+delve into how volumetric reconstructions from Neural Radiance Fields (NeRF)
+can be utilized to bypass the dependency on SFM data. Our findings demonstrate
+that random initialization can perform much better if carefully designed and that
+by employing a combination of improved initialization strategies and structure
+distillation from low-cost NeRF models, it is possible to achieve equivalent results,
+or at times even superior, to those obtained from SFM initialization. Source code
+is available at https://theialab.github.io/nerf-3dgs
+1
+Introduction
+In the years since their introduction, Neural Radiance Fields (NeRF) [22] have emerged as a leading
+technique for 3D reconstruction from images and novel view synthesis, capturing the interest of
+researchers and practitioners alike. Despite its success, the application of NeRF in practical scenarios
+has been limited by its high computational demands. Due in part to this limitation, 3D Gaussian
+Splatting [12] has gained traction as a more efficient alternative, as it achieves real-time inference
+speeds by leveraging rasterization.
+However, the adoption of Gaussian Splatting is not without challenges. A significant hurdle is its dependence on careful initialization from point clouds, such as those from Structure-from-Motion (SfM).
+The reliance on slow and computationally expensive SFM implementations such as COLMAP [31, 32],
+and comparatively poor performance of random initialization is a critical limitation that impedes the
+application of Gaussian Splatting in domains where a full SFM solution would be too expensive.
+This includes situations like SLAM sequences where camera poses are available alongside point
+clouds too sparse to be useful for initialization, such as ORB-SLAM [24], or autonomous vehicle
+applications where navigation and localization are performed with other sensors, e.g., aircraft.
+Such applications could benefit significantly from a computationally efficient alternative to SFM
+for Gaussian Splatting initialization. With this motivation, our purpose in this work is to perform a
+deeper analysis of the initialization phase of Gaussian Splatting, and identify how existing methods
+could be leveraged to improve the situation.
+We hypothesize that the limitations of Gaussian Splatting stem from its discrete and localized pruning
+and growing operations, which struggle to capture the coarse structure of scenes effectively. In
+particular, regions of missing geometry in the SFM solution, such as those shown in Figure 1, which
+can be caused by lack of texture, dynamic scene content, or strong view-dependent effects, can leave
+Preprint. Under review.
+Figure 1: COLMAP [31, 32] (Left) vs. NeRF-based (Right) initialization point clouds for Gaussian
+Splatting. The NeRF-based initialization provides a much more complete model of the scene structure,
+while also being faster to construct with posed images.
+the optimization near pathological minima which the local optimization fails to escape. In contrast,
+NeRF optimization handles such non-idealities more gracefully, tending to produce over-smoothed
+reconstructions rather than missing geometry.
+Given the proficiency of NeRF and similar neural field-based volume-rendering methods in reconstructing scene geometry at a coarse level, our analysis centers on integrating these techniques into
+the Gaussian Splatting training pipeline. Specifically, we investigate both point cloud initialization
+and depth supervision derived from a NeRF model trained for a short amount of time on the same
+data.
+Contributions. Through extensive experiments, we find that a combination of better random
+initialization and structure guidance from NeRF are sufficient to match or exceed the quality reached
+from a COLMAP initialization, even on very large-scale, challenging scenes. We apply this scheme
+to scenes with cameras estimated using a state-of-the-art SLAM method [2], and show that the results
+are competitive with those derived from COLMAP initialization while taking far less time overall to
+go from images to the final model.
+2
+Related Work
+Differentiable rendering architectures. Since the introduction of neural fields [5, 21, 28], a variety
+of neural rendering methods have been proposed which use gradient descent optimization of image
+reconstruction objectives to construct scene representations for novel view synthesis. Perhaps most
+notable is Neural Radiance Fields (NeRF) [22], which has become the basis of an ever-expanding
+family of volumetric scene models. While NeRF originally used a purely neural model, further works
+explored methods based partially [18] or entirely [8] on classical grids as a way of exploring the
+trade-off between compactness and efficiency.
+Accelerated volumetric rendering. As it became clear that much higher efficiency could be achieved
+through application of grid structures, works like Instant Neural Graphics Primitives (INGP) [23]
+and Tensorial Radiance Fields (TensoRF) [4] appeared which leveraged not only grid structures but
+additional strategies of hashing and tensor factorization to compress the grid representation itself,
+leading to significant gains in both training and inference speed.
+Gaussian Splatting. While significant advances have been made in improving the efficiency of
+models based on volume rendering, it is still a challenge to reach truly interactive inference speeds
+with them, due largely to the Monte Carlo integration required for each ray. An alternative approach
+to differentiable rendering that avoids this is rasterization, in which individual primitives are projected
+into image space and written to a buffer in order of depth. One such method is Pulsar [16], which
+uses partially transparent spheres as a representation and demonstrates the expressive power of such
+primitive-based models. More recently, Gaussians were proposed as a primitive [12], and were
+shown to achieve both very high-quality image reconstruction and better than real-time inference
+speeds. This result sparked a significant number of follow-up works, ranging from modelling dynamic
+content [41, 39, 36, 15], to generative modelling [44, 3, 35]. There were also improvements made
+2
+Figure 2: COLMAP (Left) vs. NeRF-based (Right) initialization point clouds for Gaussian Splatting.
+In this scene from OMMO [19] (Top), the surface of the water is dominated by dynamic content
+(waves), and view-dependent effects (reflections), which causes the SFM point cloud to be nearly
+empty in these areas. In contrast, the NeRF initialization is able to place points near this surface
+despite the lack of view-consistent detail. Even for more static and Lambertian scenes, such as the
+garden from Mip-NeRF 360 [1] (Bottom), the NeRF point cloud is still significantly more complete.
+to the handling of primitive scale in rendering to avoid aliasing [38, 40]. A concurrent work further
+views the training process of Gaussian Splatting as a sampling process [13], and attempts to remove
+initialization dependence, similarly to ours.
+Gaussian Splatting SLAM. There have also been a number of methods proposed for using Gaussian
+Splatting as an internal representation for Simultaneous Localization And Mapping (SLAM) [37, 42],
+which enables solving camera estimation and the construction of a representation for novel view
+synthesis at the same time given a stream of RGB and depth data. One such recent work [20] also
+supports performing SLAM on RGB-only video – we compare the results of this method with the
+strategies we present for COLMAP-free training. Another similar work [9] supports RGB-only
+training, but has not yet made code available for comparison.
+Depth guidance and regularization. Other differentiable rendering works have also recognized
+the potential of depth regularization and supervision in improving novel view synthesis results.
+Works such as RegNeRF [26], LOLNeRF [29], and Mip-NeRF 360 [1] all proposed some form of
+regularization of the density sampled along a ray in order to improve the recovered 3D structure. Other
+works [25, 30, 6] have explored directly supervising depth to improve the final rendered results. One
+concurrent work to ours [27] also explores initialization and supervision of Gaussian Splatting from
+NeRF models, with similar findings regarding the benefits of the improved initialization. Another
+concurrent work [7] also explores replacing COLMAP initialization, specifically with pre-trained
+camera pose and scene structure estimation networks.
+3
+Method
+Gaussian Splatting [12] represents scenes as collections of 3D Gaussian primitives, each associated
+with a mean µ, covariance matrix Σ, opacity α and RGB spherical harmonics coefficients h. These
+primitives can be used to render the scene by sequentially projecting the Gaussians in depth order
+3
+into image space and rasterizing them with alpha blending to obtain a final color for each ray r:
+CGS (r) =
+N
+X
+c(r; hi ) αi G(r; Σi , µi )
+i=1
+i−1
+Y
+(1 − αj G(r; Σj , µj )),
+(1)
+j=1
+where c(r; h) denotes querying the spherical color function in the direction of r, and G(r; Σ, µ) is
+the projection of the 3D Gaussian PDF into image space. Such a model is differentiable with respect
+to all parameters, and can therefore be trained by image reconstruction objectives. This, in theory,
+should allow continuous optimization starting from a random initialization, similar to NeRF.
+However, unlike NeRF, because Gaussians are bounded locally in practice despite their theoretically
+infinite support, Gaussian Splatting models are less likely to converge from a random initialization far
+from the final distribution of primitives. For this reason, the original Gaussian Splatting method employed discrete splitting, cloning, and pruning heuristics, which interrupt the continuous optimization
+to take larger steps toward an optimal configuration, as defined by tuned thresholds. This approach is
+at least partially effective in closing the gap between Gaussian Splatting and NeRF in terms of scene
+structure recovery, but for large-scale, complex scenes, the original publication [12] still reported
+significant gains when initializing from an SFM point cloud versus a uniform random distribution.
+In the remainder of this section, we will describe the potential strategies for closing this gap which
+we empirically explore.
+3.1
+Strategies for random initialization
+The first and most obvious approach to avoiding the use of SFM initialization is to simply search for
+better random initializations which do not require knowledge of the scene structure. The experiments
+with random initialization performed in the original paper are described as using a uniform distribution
+of Gaussian centers within a scaled version of the camera bounding box. In our experiments, we
+attempt to reproduce the results of this bounding box strategy, as well as using an even simpler
+strategy of a very large uniform initialization sufficient to cover the entire scene. We report the results
+of these experiments in Section 4.2, as well as comparison to the results reported in the original paper.
+3.2
+Initialization from a volumetric model
+Beyond seeking an “improved” random initialization, we also look for ways that the superior structure
+recovery of volumetric NeRF models can be leveraged to bootstrap the training of Gaussian Splatting.
+We approach this by using a probabilistic interpretation of NeRF density in volume rendering which
+sees volume rendering weights as a distribution of “surface” locations, i.e. where a ray is likely to
+terminate [10]. This differential1 “surfaceness” value at a depth t along some ray r is defined as:
+ Z t
+
+S(t; r) = σ(r(t)) · exp −
+σ(r(s))ds ,
+(2)
+tmin
+where σ(r(t)) denotes the NeRF density at depth t along r. This termination probability can then be
+used to derive a cumulative distribution function along each ray:
+Z t
+W (t; r) =
+S(t; r)ds.
+(3)
+tmin
+Under this interpretation, the importance samples used in NeRF volume rendering can be repurposed
+as samples drawn from regions where the NeRF model “expects” the surface to be. We draw a set of
+such samples from a trained NeRF model, and use the spatial positions of these samples, along with
+the predicted NeRF radiance, to initialize a Gaussian Splatting model:
+µ = r(W −1 (u; r)),
+c = cNeRF (µ; r),
+u ∼ U[0, 1],
+(4)
+where W −1 (u; r) is the inverse CDF which maps the random parameter u to a depth along the ray
+r, and cNeRF (µ; r) is the color value queried from the radiance field at the sample location µ in the
+1
+To define a continuous PDF, we use an unbounded differential value rather than integrating over a local interval
+as in [10].
+4
+direction of r. Given the large number of rays in each scene, we uniformly sample a subset of all
+training rays and draw a single sample from each ray.
+Implementation. To keep our analysis as general as possible, we choose an efficient, off-the-shelf
+NeRF implementation, specifically NerfAcc [17], to base our experiments on. We use the proposal
+network-based INGP [23] model in NerfAcc, which supports large scale 360 degree scenes by
+implementing the scene contraction and proposal components of Mip-NeRF 360 [1]. We found this
+model to provide an excellent balance of flexibility and efficiency.
+3.3
+Volumetric structure distillation
+In addition to simply initializing from the NeRF, we also investigated using depth prediction from
+the NeRF to guide training of the Gaussian Splatting model with an additional loss term. To do
+this, the rendering process for Gaussian Splatting must be modified to also predict depth values in a
+differentiable way. We use a similar formulation to the alpha compositing model for color rendering:
+DGS (r) =
+N
+X
+di αi G(r; Σi , µi )
+i=1
+i−1
+Y
+(1 − αj G(r; Σj , µj )),
+(5)
+j
+where di is the mean of the 1D Gaussian conditional distribution formed by the intersection of r with
+the 3D Gaussian (see the Supplementary Material for derivation). Depth estimates can similarly be
+extracted from the NeRF model by accumulating sample depth:
+ Z t
+
+Z tmax
+DNeRF (r) =
+tσ(r(t))exp −
+σ(r(s))ds dt.
+(6)
+tmin
+tmin
+We precompute depth estimates from the NeRF model for all training rays, and incorporate them into
+the Gaussian Splatting term using the following loss:
+LGS+Depth = LGS + λLDepth ,
+LDepth = Er [|DNeRF (r) − DGS (r)|] ,
+(7)
+where LGS is the original Gaussian Splatting loss function, and λ is a weight which we schedule over
+training to control the strength of the structure guidance; see the Supplementary Material.
+3.4
+Hyper-parameters
+The original Gaussian Splatting implementation depends on a number of parameters which are tuned
+based on the original photometric loss formulation. As such, it is necessary to take care in setting
+parameters when changing the loss formulation. We found through experimentation that including a
+depth term in the loss function alters the training dynamics of pruning, splitting and cloning, which
+can lead to an excessive number of Gaussians being instantiated if the wrong parameters are used.
+For all real data scenes, we use an exponential decay schedule for the depth loss weight λ with an
+initial value of 0.9, and a decay rate of 0.9 every 100 iterations.
+4
+Experiments
+4.1
+Datasets
+To best evaluate how the strategies under consideration perform in real-world scenarios, we focus
+our experiments on large scale, outdoor datasets. The first dataset we employ is the Mip-NeRF 360
+dataset [1], which includes several challenging indoor and outdoor scenes, and is a common benchmark for inverse rendering methods. We also evaluate on the OMMO dataset [19], which contains
+extremely large-scale scenes captured by drone videos. This is representative of an application area
+where eliminating reliance on SFM initialization would be advantageous, as autonomous vehicles
+often have accurate navigation systems that could be used as an alternative to purely visual tracking.
+These scenes also contain dynamic objects and strong view-dependence which degrade SFM point
+cloud coverage, as shown in Figure 2.
+For these initial experiments, we continue to use camera parameters estimated by COLMAP to avoid
+the confounding effect of different camera parameters on our analysis. To further demonstrate how
+5
+Ground truth
+COLMAP
+NerfAcc
+NerfAcc + depth
+Random
+Random + depth
+Figure 3: Qualitative results on a scene from the OMMO dataset [19]. We find that the COLMAP and
+random initializations allocate fewer points to the surface of the water, which leads to over-smoothed
+reconstruction compared to the NeRF-based initialization and models with depth supervision. Please
+zoom in to see details. Please also refer to the interactive comparison in the supplementary material.
+our findings translate when SfM solutions are not available, we also test a fully COLMAP-free
+pipeline on two SLAM datasets: Replica [33] and TUM [34]. For these datasets, we apply the
+volumetric pre-training and guidance strategies using cameras estimated by ORB-SLAM3 [2], and
+compare the results to those using COLMAP cameras/initializations, as well as the results of a recent
+Gaussian Splatting SLAM method [20].
+4.2
+Analysis of random initialization
+We start our analysis by taking a deeper look at the conclusions drawn about random initialization in
+the original Gaussian Splatting publication. Specifically, we try to reproduce the reported results for
+the original proposed method for uniform random initialization.
+According to the original text, the authors “uniformly sample a cube with a size equal to three times
+the extent of the input camera’s bounding box” [12]. As shown in Table 1, we find this strategy to give
+higher PSNR values than originally reported, with the original values more closely matching those of
+a bounding box with 1.5× the extent of the cameras. However, we find an even simpler strategy of
+using a very large box centered at the origin without dependence on the camera distribution, covering
+a 50 × 50 × 50 extent in COLMAP coordinates (effectively covering the entire space) to give even
+better results in average, so we use this as our baseline random initialization going forward.
+6
+Table 1: Random initializations. We compare test PSNR values for the Mip-NeRF 360 dataset [1]
+resulting from different random initialization schemes to the PSNR values obtained with COLMAP
+initialization. We both retrieve metrics from the original paper (From [12]), and re-run the official code
+release (re-run). We find that using a large constant 50 × 50 × 50 bounding box as the initialization
+gives the best results. All models are trained to the maximum 30k iterations used in the original
+paper, and all random initializations start with 50k Gaussians, which we found to perform well across
+scenes and random distributions.
+Initialization
+Scene
+Garden Bicycle Stump Counter Kitchen Bonsai Room Average
+COLMAP (From [12])
+COLMAP (Re-run)
+27.41
+27.29
+25.25
+25.16
+26.55
+26.82
+28.70
+29.19
+30.32
+31.50
+31.98
+32.25
+30.63
+31.43
+28.69
+29.09
+3× BBox (From [12])
+3× BBox (Re-run)
+1.5× BBox
+503 BBox
+22.19
+26.51
+22.03
+26.31
+21.05
+23.60
+21.28
+24.12
+23.00
+20.71
+24.63
+27.48
+25.04
+28.04
+30.33
+26.15
+30.54
+29.91
+17.15
+30.74
+30.16
+29.69
+29.90
+27.28
+23.15
+27.75
+Table 2: Volumetric initialization (Mip-NeRF 360). We evaluate test PSNR on the Mip-NeRF 360
+dataset [1] when initializing the Gaussian Splatting model from INGP models trained for different
+amounts of time.
+Initialization
+Scene
+Garden Bicycle Stump Counter Kitchen Bonsai Room Average
+COLMAP (From [12])
+COLMAP (Re-run)
+27.41
+27.29
+25.25
+25.16
+26.55
+26.82
+28.70
+29.19
+30.32
+31.50
+31.98
+32.25
+30.63
+31.43
+28.69
+29.09
+503 Random
+26.31
+24.12
+24.63
+28.04
+30.54
+30.74
+29.90
+27.75
+NerfAcc @ 5k
+NerfAcc @ 10k
+NerfAcc @ 30k
+27.21
+27.29
+27.28
+23.90
+24.14
+24.11
+27.35
+27.37
+27.38
+28.47
+28.77
+28.50
+31.82
+31.97
+31.71
+31.88
+32.27
+31.78
+32.11
+32.01
+31.93
+28.96
+29.12
+28.96
+As also shown in Table 1, we also find that re-running the experiments with COLMAP initialization
+on the current official public code release results in slightly better results than originally reported.
+For all relevant experiments we provide both the original reported values as well as what we obtained
+re-running the code.
+4.3
+Volumetric vs. SFM initialization
+With our baseline for random initialization selected, we move on to testing initialization based on a
+trained NeRF model. As described in Section 3.3, for each scene, we sample point cloud initializations
+consisting of 500,000 points in total from a NerfAcc-based INGP model trained to 5000, 10000, and
+30000 iterations. These initializations are loaded in exactly the same way as COLMAP point clouds,
+and training proceeds with the same standard settings.
+As reported in Tables 2 and 3, we find that these initializations near-universally outperform purely
+random initialization, and for some scenes outperform COLMAP initialization, even when using
+NeRF models trained for only 5000 iterations (about 30 seconds on our RTX A6000 GPU).
+Based on these results, which show inconsistent improvement from training the initial NeRF model
+longer, we choose to proceed to the final round of experiments with the NeRF initializations from the
+5000-iteration model weights, as this minimizes the additional compute added to the pipeline from
+NeRF pre-training.
+7
+Table 3: Volumetric initialization (OMMO). We evaluate test PSNR on the OMMO dataset [19]
+when initializing the Gaussian Splatting model from INGP models trained for different lengths.
+Scene
+Initialization
+03
+05
+06
+10
+13
+14
+15
+Average
+COLMAP
+26.07
+28.36
+26.76
+29.72
+32.55
+31.11
+30.46
+29.29
+50 Random
+25.41
+28.06
+27.12
+29.49
+31.08
+30.26
+29.25
+28.67
+NerfAcc @ 5k
+NerfAcc @ 10k
+NerfAcc @ 30k
+25.57
+25.20
+25.52
+28.36
+28.37
+28.22
+27.70
+27.73
+27.51
+29.36
+29.21
+29.23
+32.24
+32.21
+31.83
+30.83
+30.91
+30.96
+30.45
+30.52
+30.58
+29.22
+29.16
+29.12
+3
+Table 4: Structure distillation (Mip-NeRF 360). We evaluate test PSNR on the Mip-NeRF 360
+dataset [1] when applying our depth loss for structure distillation from INGP models trained for 5k
+iterations.
+Initialization
+Scene
+Garden Bicycle Stump Counter Kitchen Bonsai Room Average
+COLMAP (From [12])
+COLMAP (Re-run)
+27.41
+27.29
+25.25
+25.16
+26.55
+26.82
+28.70
+29.19
+30.32
+31.50
+31.98
+32.25
+30.63
+31.43
+28.69
+29.09
+NerfAcc @ 5k
+27.21
+23.90
+27.35
+28.47
+31.82
+31.88
+32.11
+28.96
+26.75
+27.37
+24.05
+25.22
+25.63
+27.21
+28.56
+28.85
+31.60
+31.87
+31.29
+31.54
+31.19
+31.63
+28.44
+29.10
+3
+50 Random + Depth Loss
+NerfAcc @ 5k + Depth Loss
+4.4
+Depth distillation from NeRF
+Next, we experiment with integrating direct depth guidance from the NeRF model into the Gaussian
+Splatting training pipeline (see Figure 6 for examples). Using the loss formulation in (7), we directly
+supervise predicted depth values from Gaussian Splatting with the pre-trained NeRF model, which
+enables more fine-grained transfer of structure. It also helps avoid erroneous pruning of geometry as
+shown in Figure 5.
+We report the results of these experiments in Tables 4 and 5, which show that the best final results are
+achieved with a combination of NeRF-based initialization and NeRF depth supervision.
+4.5
+COLMAP-free training
+Finally, we combine the best-performing strategies from the previous experiments with cameras
+estimated by a monocular SLAM method (ORB-SLAM3 [2]) which is much faster than COLMAP.
+We also compare to a recent method that combines monocular SLAM and Gaussian Splatting
+(MonoGS) to estimate cameras during training [20]. As shown in Tables 6 and 7, we find that the
+approaches we tested result in higher PSNR on average than MonoGS, and run significantly faster
+than the COLMAP-based pipeline, albeit with a somewhat lower PSNR, likely due to less accurate
+pose estimation. We include video renders of sample sequences in the Supplementary Material for
+comparison. The run times for the ORB-SLAM3 experiments include the SLAM tracking times
+themselves, about 40ms per frame, as well as the NerfAcc training and rendering time, about 300ms
+per frame if including depth supervision, or about 45ms per frame if only sampling a point cloud.
+To be as fair as possible, we run COLMAP for these scenes with sequential matching, which only
+works for video input but results in much faster camera estimation. Despite this, we found COLMAP
+to still be extremely slow (20× on average on TUM compared to the NerfAcc init pipeline and up to
+45× slower) for long sequences. We also reduce the size of the NerfAcc-generated point cloud to
+50,000 points to more closely match the SFM point cloud, which is much smaller for these indoor
+non-360 scenes. All timed experiments are run on the same machine with an RTX A6000 GPU.
+8
+Table 5: Structure distillation (OMMO). We evaluate test PSNR on the OMMO dataset [19] when
+applying our depth loss for structure distillation from INGP models trained for 5k iterations.
+Scene
+Initialization
+03
+05
+06
+10
+13
+14
+15
+COLMAP
+26.07
+28.36
+26.76
+NerfAcc @ 5k
+25.57
+28.36
+27.70
+503 Random + Depth Loss
+NerfAcc @ 5k + Depth Loss
+26.78
+26.48
+28.31
+28.50
+28.42
+28.89
+30.67
+30.54
+Average
+29.72
+32.55
+31.11
+30.46
+29.29
+29.36
+32.24
+30.83
+30.45
+29.22
+32.50
+32.74
+30.54
+31.07
+30.29
+30.76
+29.64
+29.85
+Table 6: SLAM camera estimates (TUM). We compare the performance of NerfAcc initialization
+and depth loss, using cameras estimated by ORB-SLAM3 [2], to that of standard Gaussian Splatting
+with COLMAP cameras and a recent Gaussian Splatting SLAM method on the TUM dataset [34].
+Along with test PSNR, we report the total run-time of each pipeline from images to the trained model.
+Model
+Scene
+XYZ
+Desk
+Long
+Average
+COLMAP
+27.51 | 0:15:58 30.04 | 7:38:42 28.19 | 1:14:06 28.58 | 3:02:55
+MonoGS [20]
+20.90 | 0:06:46 22.38 | 0:19:58 22.41 | 0:16:01 21.90 | 0:14:15
+NerfAcc @ 5k
+24.91 | 0:07:05 27.01 | 0:09:47 28.15 | 0:07:36 26.69 | 0:08:09
+NerfAcc @ 5k + Depth Loss 25.01 | 0:08:22 27.24 | 0:18:30 28.27 | 0:12:10 26.84 | 0:13:01
+Table 7: SLAM camera estimates (Replica). We compare the performance of NerfAcc initialization
+and depth loss, using cameras estimated by ORB-SLAM3 [2], to that of standard Gaussian Splatting
+with COLMAP cameras and a recent Gaussian Splatting SLAM method on the Replica dataset [33].
+Along with test PSNR, we report the total run-time of each pipeline from images to the trained model.
+Scene
+Model
+Office0
+Office1
+Office2
+Office3
+Office4
+Room0
+Room1
+Room2
+Average
+COLMAP
+44.65 | 0:38:33 44.20 | 0:38:51 40.54 | 1:01:20 40.61 | 0:52:18 38.46 | 0:35:05 39.40 | 1:13:51 32.59 | 2:55:00 41.66 | 0:49:44 40.26 | 1:05:35
+MonoGS [20]
+34.42 | 0:22:11 35.14 | 0:21:51 28.11 | 0:24:30 29.45 | 0:24:14 27.49 | 0:23:38 28.07 | 0:26:19 26.58 | 0:24:10 28.11 | 0:24:13 29.67 | 0:23:53
+NerfAcc @ 5k
+42.94 | 0:09:47 32.75 | 0:07:47 35.70 | 0:13:52 35.87 | 0:11:52 35.09 | 0:10:50 34.86 | 0:18:00 36.54 | 0:14:52 38.33 | 0:12:56 36.51 | 0:12:29
+NerfAcc @ 5k + Depth Loss 43.03 | 0:19:00 33.17 | 0:17:51 35.76 | 0:22:52 35.80 | 0:21:51 35.06 | 0:20:52 34.88 | 0:25:58 36.49 | 0:22:55 38.32 | 0:21:49 36.56 | 0:21:38
+5
+Conclusion
+We performed an analysis of several approaches for avoiding SFM initialization in training of
+Gaussian Splatting. Through our experiments, we found that random initialization can perform better
+than expected based on the results of the original Gaussian Splatting paper. We also found that use of
+a small amount of time spent pre-training a NeRF model can enable results on par with or better than
+those achieved by COLMAP initialization by providing both a dense initial point cloud and depth
+supervision throughout training. We also tested these strategies with SLAM-estimated cameras and
+found that they can result in significant time savings across the entire pipeline.
+Limitations. The most immediate limitation in applying the strategies we have described to avoid
+requiring SFM solutions for Gaussian Splatting is that, as our SLAM experiments show, SFM is still
+the most reliable way of obtaining the camera estimates necessary to train for many use cases. As
+such, careful consideration of the target application is needed to determine whether alternatives to
+SFM are available which can provide sufficiently accurate camera poses.
+Another potential complication to including these strategies in a robust pipeline is the NeRF training.
+While we found un-modified NerfAcc to perform well on Mip-NeRF 360 and OMMO, the default
+settings were not able to reconstruct the Tanks and Temples [14] scenes well enough to be useful
+for supervision. This suggests that more work might be needed to automate the NeRF configuration
+process to avoid adding to the tuning workload of the entire pipeline.
+9
+6
+Acknowledgements
+This work was supported in part by the Natural Sciences and Engineering Research Council of
+Canada (NSERC) Discovery Grant [2023-05617], NSERC Collaborative Research and Development
+Grant, the SFU Visual Computing Research Chair, Google, Digital Research Alliance of Canada, and
+Advanced Research Computing at the University of British Columbia.
+References
+[1] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf 360:
+Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 5470–5479, 2022.
+[2] Carlos Campos, Richard Elvira, Juan J Gómez Rodríguez, José MM Montiel, and Juan D Tardós. ORBSLAM3: An accurate open-source library for visual, visual-inertial and multi-map SLAM. IEEE Transactions on Robotics, 37(6):1874–1890, 2021.
+[3] David Charatan, Sizhe Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelsplat: 3d gaussian splats from
+image pairs for scalable generalizable 3d reconstruction. arXiv preprint arXiv:2312.12337, 2023.
+[4] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In
+European Conference on Computer Vision, pages 333–350. Springer, 2022.
+[5] Zhiqin Chen and Hao Zhang. Learning implicit fields for generative shape modeling. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5939–5948, 2019.
+[6] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and
+faster training for free. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 12882–12891, 2022.
+[7] Zhiwen Fan, Wenyan Cong, Kairun Wen, Kevin Wang, Jian Zhang, Xinghao Ding, Danfei Xu, Boris
+Ivanovic, Marco Pavone, Georgios Pavlakos, Zhangyang Wang, and Yue Wang. Instantsplat: Unbounded
+sparse-view pose-free gaussian splatting in 40 seconds, 2024.
+[8] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa.
+Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 5501–5510, 2022.
+[9] Yang Fu, Sifei Liu, Amey Kulkarni, Jan Kautz, Alexei A. Efros, and Xiaolong Wang. Colmap-free 3d
+gaussian splatting. 2024.
+[10] Lily Goli, Daniel Rebain, Sara Sabour, Animesh Garg, and Andrea Tagliasacchi. nerf2nerf: Pairwise
+registration of neural radiance fields. In International Conference on Robotics and Automation (ICRA).
+IEEE, 2023.
+[11] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep
+blending for free-viewpoint image-based rendering. ACM Transactions on Graphics (ToG), 37(6):1–15,
+2018.
+[12] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics, 42(4), 2023.
+[13] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Jeff Tseng, Hossam Isack, Abhishek
+Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as markov chain monte carlo. arXiv
+preprint arXiv:2404.09591, 2024.
+[14] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. TOG, 2017.
+[15] Muhammed Kocabas, Jen-Hao Rick Chang, James Gabriel, Oncel Tuzel, and Anurag Ranjan. Hugs:
+Human gaussian splats. arXiv preprint arXiv:2311.17910, 2023.
+[16] Christoph Lassner and Michael Zollhofer. Pulsar: Efficient sphere-based neural rendering. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 1440–1449, 2021.
+[17] Ruilong Li, Hang Gao, Matthew Tancik, and Angjoo Kanazawa. Nerfacc: Efficient sampling accelerates
+nerfs. arXiv preprint arXiv:2305.04966, 2023.
+10
+[18] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields.
+Advances in Neural Information Processing Systems, 33:15651–15663, 2020.
+[19] Chongshan Lu, Fukun Yin, Xin Chen, Tao Chen, Gang Yu, and Jiayuan Fan. A large-scale outdoor
+multi-modal dataset and benchmark for novel view synthesis and implicit scene reconstruction. arXiv
+preprint arXiv:2301.06782, 2023.
+[20] Hidenobu Matsuki, Riku Murai, Paul H. J. Kelly, and Andrew J. Davison. Gaussian Splatting SLAM.
+2024.
+[21] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy
+networks: Learning 3d reconstruction in function space. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pages 4460–4470, 2019.
+[22] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng.
+Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65
+(1):99–106, 2021.
+[23] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives
+with a multiresolution hash encoding. ACM Trans. Graph., 41(4):102:1–102:15, 2022.
+[24] Raul Mur-Artal, Jose Maria Martinez Montiel, and Juan D Tardos. Orb-slam: a versatile and accurate
+monocular slam system. IEEE transactions on robotics, 31(5):1147–1163, 2015.
+[25] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas Kurz, Joerg H. Mueller, Chakravarty R. Alla
+Chaitanya, Anton S. Kaplanyan, and Markus Steinberger. DONeRF: Towards Real-Time Rendering of
+Compact Neural Radiance Fields using Depth Oracle Networks. Computer Graphics Forum, 2021.
+[26] Michael Niemeyer, Jonathan T. Barron, Ben Mildenhall, Mehdi S. M. Sajjadi, Andreas Geiger, and Noha
+Radwan. Regnerf: Regularizing neural radiance fields for view synthesis from sparse inputs. In Proc.
+IEEE Conf. on Computer Vision and Pattern Recognition (CVPR), 2022.
+[27] Michael Niemeyer, Fabian Manhardt, Marie-Julie Rakotosaona, Michael Oechsle, Daniel Duckworth,
+Rama Gosula, Keisuke Tateno, John Bates, Dominik Kaeser, and Federico Tombari. Radsplat: Radiance
+field-informed gaussian splatting for robust real-time rendering with 900+ fps. arXiv.org, 2024.
+[28] Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. Deepsdf:
+Learning continuous signed distance functions for shape representation. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 165–174, 2019.
+[29] Daniel Rebain, Mark Matthews, Kwang Moo Yi, Dmitry Lagun, and Andrea Tagliasacchi. Lolnerf: Learn
+from one look. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+pages 1558–1567, 2022.
+[30] Barbara Roessle, Jonathan T Barron, Ben Mildenhall, Pratul P Srinivasan, and Matthias Nießner. Dense
+depth priors for neural radiance fields from sparse input views. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 12892–12901, 2022.
+[31] Johannes Lutz Schönberger and Jan-Michael Frahm. Structure-from-motion revisited. In Conference on
+Computer Vision and Pattern Recognition (CVPR), 2016.
+[32] Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys, and Jan-Michael Frahm. Pixelwise view
+selection for unstructured multi-view stereo. In European Conference on Computer Vision (ECCV), 2016.
+[33] Julian Straub, Thomas Whelan, Lingni Ma, Yufan Chen, Erik Wijmans, Simon Green, Jakob J. Engel, Raul
+Mur-Artal, Carl Ren, Shobhit Verma, Anton Clarkson, Mingfei Yan, Brian Budge, Yajie Yan, Xiaqing Pan,
+June Yon, Yuyang Zou, Kimberly Leon, Nigel Carter, Jesus Briales, Tyler Gillingham, Elias Mueggler,
+Luis Pesqueira, Manolis Savva, Dhruv Batra, Hauke M. Strasdat, Renzo De Nardi, Michael Goesele,
+Steven Lovegrove, and Richard Newcombe. The Replica dataset: A digital replica of indoor spaces. arXiv
+preprint arXiv:1906.05797, 2019.
+[34] J. Sturm, N. Engelhard, F. Endres, W. Burgard, and D. Cremers. A benchmark for the evaluation of rgb-d
+slam systems. In Proc. of the International Conference on Intelligent Robot Systems (IROS), 2012.
+[35] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang Zeng. Dreamgaussian: Generative gaussian
+splatting for efficient 3d content creation. arXiv preprint arXiv:2309.16653, 2023.
+[36] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu, Qi Tian,
+and Xinggang Wang. 4d gaussian splatting for real-time dynamic scene rendering. arXiv preprint
+arXiv:2310.08528, 2023.
+11
+[37] Chi Yan, Delin Qu, Dong Wang, Dan Xu, Zhigang Wang, Bin Zhao, and Xuelong Li. Gs-slam: Dense
+visual slam with 3d gaussian splatting. arXiv preprint arXiv:2311.11700, 2023.
+[38] Zhiwen Yan, Weng Fei Low, Yu Chen, and Gim Hee Lee. Multi-scale 3d gaussian splatting for anti-aliased
+rendering. arXiv preprint arXiv:2311.17089, 2023.
+[39] Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing Zhang, and Xiaogang Jin. Deformable 3d
+gaussians for high-fidelity monocular dynamic scene reconstruction. arXiv preprint arXiv:2309.13101,
+2023.
+[40] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free 3d
+gaussian splatting. arXiv preprint arXiv:2311.16493, 2023.
+[41] Ye Yuan, Xueting Li, Yangyi Huang, Shalini De Mello, Koki Nagano, Jan Kautz, and Umar Iqbal. Gavatar:
+Animatable 3d gaussian avatars with implicit mesh learning. arXiv preprint arXiv:2312.11461, 2023.
+[42] Vladimir Yugay, Yue Li, Theo Gevers, and Martin R. Oswald. Gaussian-slam: Photo-realistic dense slam
+with gaussian splatting. arXiv preprint arXiv:2312.1007, 2023.
+[43] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable
+effectiveness of deep features as a perceptual metric. In CVPR, 2018.
+[44] Zi-Xin Zou, Zhipeng Yu, Yuan-Chen Guo, Yangguang Li, Ding Liang, Yan-Pei Cao, and Song-Hai Zhang.
+Triplane meets gaussian splatting: Fast and generalizable single-view 3d reconstruction with transformers.
+arXiv preprint arXiv:2312.09147, 2023.
+12
+A
+Appendix
+A.1
+Results on additional data
+We repeat our experiments with NeRF-based initialization and depth distillation on two scenes from
+the Deep Blending dataset [11] which were used in the original Gaussian Splatting paper. These
+results are shown in Table 8, and also show that better initialization and depth distillation improve
+over the results from COLMAP initialization.
+We also attempted to train Gaussian Splatting models for the “truck” and “train” scenes from the
+Tanks and Temples dataset [14], but were unable to find an unbounded INGP model which trained
+well enough for them to provide structure guidance. We did however observe that a better random
+initialization also outperformed the originally reported Gaussian Splatting results for these scenes, as
+we found with other datasets.
+A.2
+Additional metrics
+We additionally report the perceptual quality metrics SSIM and LPIPS [43] for the Mip-NeRF 360 [1]
+and OMMO [19] datasets. These results can be found in Tables 9, 10, 11, and 12.
+A.3
+Depth rendering with Gaussians
+To determine the depth of a Gaussian along a ray, we begin with the 3D Gaussian equation:
+
+G(x) = exp − 12 xT Σ−1 x ,
+(8)
+where, without loss of generality, we neglect the mean µ by assuming our coordinate system to be
+centered at µ. We also ignore any normalization or weighting of the Gaussian, which will not impact
+its depth.
+We begin the derivation by substituting o + td for x, where o and d are the origin and direction of the
+ray, and t is the depth:
+
+G(x) = exp − 12 (o + td)T Σ−1 (o + td) .
+(9)
+By expanding the polynomial, we can rewrite this as:
+
+G(x) = exp − 21 (oT Σ−1 o + 2tdT Σ−1 o + t2 dT Σ−1 d) .
+(10)
+To find the depth with the maximum Gaussian value along the ray, we can factor out the scale of the
+polynomial solve the argmin:
+oT Σ−1 o
+dT Σ−1 o
+d = arg min T −1 + 2t T −1 + t2 ,
+d Σ d
+d Σ d
+t
+dT Σ−1 o
+d = − T −1 .
+d Σ d
+A.4
+(11)
+(12)
+Scheduling of depth loss weight
+We use the following schedule for the loss weight λ:
+i
+λ(i) = λinit × d S ,
+(13)
+where λinit denotes initial weight, d and S represent decay rate and step, respectively and i stands
+for iteration.
+A.5
+Broader impact
+We do not propose any new methods or technologies that would pose any novel risks to society
+which require mitigation. However, our analysis focuses on the lowest-cost ways to train novel view
+synthesis models, and the results of this analysis could be relevant in determining the risks posed by
+such technologies in cases where low barrier to entry could increase the likelihood of misuse as part
+of synthetic or deceptive media.
+13
+COLMAP
+Ours
+COLMAP - Error Map
+Ours - Error Map
+Figure 4: Additional qualitative results from the OMMO dataset [19] and Mip-NeRF 360 [1]. Here
+we visualize only the result of training with COLMAP and our best performing model with NeRF
+initialization + depth supervision, to highlight the total contribution of the strategies we evaluated.
+Please zoom in to see details.
+14
+Table 8: Results on the Deep Blending dataset [11]. We report metrics (PSNR / SSIM / LPIPS) on
+the two Deep Blending scenes reported in Gaussian Splatting.
+Scene
+Initialization
+DrJohnson
+Playroom
+Average
+COLMAP (From [12])
+COLMAP (Re-run)
+28.77 / 0.8990 / 0.2440 30.04 / 0.9060 / 0.2410 29.41 / 0.9025 / 0.2425
+29.03 / 0.8900 / 0.1763 30.10 / 0.9000 / 0.1587 29.56 / 0.8950 / 0.1675
+NerfAcc @ 5k
+29.53 / 0.8952 / 0.1684 30.66 / 0.9027 / 0.1524 30.09 / 0.8990 / 0.1604
+3
+50 Random + Depth Loss
+29.38 / 0.8904 / 0.1816 30.06 / 0.8937 / 0.1615 29.72 / 0.8921 / 0.1716
+NerfAcc @ 5k + Depth Loss 29.65 / 0.8965 / 0.1691 30.33 / 0.8946 / 0.1569 29.99 / 0.8956 / 0.1630
+Table 9: SSIM on the Mip-NeRF 360 dataset [1]. We report SSIM metric on the Mip-NeRF 360
+scenes reported in Gaussian Splatting.
+Initialization
+Scene
+Garden Bicycle Stump Counter Kitchen Bonsai Room Average
+COLMAP (From [12])
+COLMAP (Re-run)
+0.8680
+0.8598
+0.7710 0.7750
+0.7517 0.7669
+0.9050
+0.9085
+0.9220
+0.9312
+0.9380 0.9140
+0.9423 0.9227
+0.8704
+0.8690
+NerfAcc @ 5k
+0.8598
+0.7723 0.7927
+0.9042
+0.9325
+0.9436 0.9253
+0.8758
+50 Random + Depth Loss
+0.8433
+NerfAcc @ 5k + Depth Loss 0.8622
+0.7010 0.7348
+0.7656 0.7927
+0.8863
+0.9026
+0.9262
+0.9334
+0.9385 0.9075
+0.9415 0.9220
+0.8482
+0.8743
+3
+Table 10: SSIM on the OMMO dataset [19]. We report SSIM metric on the OMMO dataset
+containing large-scale scenes.
+Initialization
+03
+05
+06
+10
+Scene
+13
+14
+15
+Average
+COLMAP
+0.8642 0.8635 0.9018 0.8845 0.9446 0.9393 0.9304
+0.9040
+NerfAcc @ 5k
+0.8657 0.8627 0.9083 0.8646 0.9262 0.9381 0.9320
+0.8997
+503 Random + Depth Loss
+0.8755 0.8615 0.9137 0.8858 0.9292 0.9358 0.9262
+NerfAcc @ 5k + Depth Loss 0.8849 0.8642 0.9220 0.8810 0.9344 0.9408 0.9362
+0.9040
+0.9091
+Table 11: LPIPS on the Mip-NeRF 360 dataset [1]. We report LPIPS metric on the Mip-NeRF 360
+scenes reported in Gaussian Splatting.
+Initialization
+Scene
+Garden Bicycle Stump Counter Kitchen Bonsai Room Average
+COLMAP (From [12])
+COLMAP (Re-run)
+0.1030
+0.0865
+0.2050 0.2100
+0.1957 0.1718
+0.2040
+0.1439
+0.1290
+0.0878
+0.2050 0.2200
+0.1175 0.1533
+0.1823
+0.1366
+NerfAcc @ 5k
+0.0869
+0.1722 0.1466
+0.1458
+0.0845
+0.1131 0.1473
+0.1281
+50 Random + Depth Loss
+0.1057
+NerfAcc @ 5k + Depth Loss 0.0868
+0.2087 0.1796
+0.1809 0.1466
+0.1764
+0.1446
+0.0955
+0.0839
+0.1203 0.1852
+0.1110 0.1536
+0.1531
+0.1296
+3
+Table 12: LPIPS on the OMMO dataset [19]. We report LPIPS metric on the OMMO dataset
+containing large-scale scenes.
+Initialization
+03
+05
+06
+10
+Scene
+13
+14
+15
+Average
+COLMAP
+0.1681 0.1930 0.1586 0.1678 0.0982 0.0755 0.0807
+0.1346
+NerfAcc @ 5k
+0.1667 0.1682 0.1535 0.2015 0.1331 0.0783 0.0784
+0.1399
+50 Random + Depth Loss
+0.1530 0.1528 0.1348 0.1465 0.1324 0.0830 0.0873
+NerfAcc @ 5k + Depth Loss 0.1390 0.1368 0.1181 0.1601 0.1207 0.0742 0.0709
+0.1271
+0.1171
+3
+15
+Ground truth
+COLMAP
+NerfAcc
+NerfAcc + depth
+Random
+Random + depth
+Figure 5: Qualitative results on a scene from the Mip-NeRF 360 dataset [19]. We observe that the
+denser initialization from NeRF, and the structure guidance both lead to decreased loss of detail and
+thin geometry. Please zoom in to see details. Please also refer to the interactive comparison in the
+supplementary material.
+A.6
+Dataset licenses
+We use the following datasets:
+• Mip-NeRF 360 [1]: no license terms provided. Available at https://jonbarron.
+info/mipnerf360/.
+• OMMO [19]: no license terms provided. Available at https://ommo.luchongshan.
+com/.
+• Deep Blending [11]: no license terms provided. Available at http://visual.cs.ucl.
+ac.uk/pubs/deepblending/.
+16
+NerfAcc
+Gaussian Splatting
+Figure 6: Here we visualize the depth supervision from a NerfAcc model trained for 5000 iterations
+with the final depth rendered from the trained Gaussian Splatting model. The coarse structure of the
+NeRF depth is well-aligned with the final result, and allows Gaussian Splatting to more quickly refine
+the fine structures.
+• TUM RGB-D [34]: made available under the CC BY 4.0 license https://
+creativecommons.org/licenses/by/4.0/. Fetched using script provided by
+code release of MonoGS [20].
+• Replica [33]: made available under the following terms: https://github.com/
+facebookresearch/Replica-Dataset/blob/main/LICENSE. Fetched using
+script provided by code release of MonoGS [20].
+17

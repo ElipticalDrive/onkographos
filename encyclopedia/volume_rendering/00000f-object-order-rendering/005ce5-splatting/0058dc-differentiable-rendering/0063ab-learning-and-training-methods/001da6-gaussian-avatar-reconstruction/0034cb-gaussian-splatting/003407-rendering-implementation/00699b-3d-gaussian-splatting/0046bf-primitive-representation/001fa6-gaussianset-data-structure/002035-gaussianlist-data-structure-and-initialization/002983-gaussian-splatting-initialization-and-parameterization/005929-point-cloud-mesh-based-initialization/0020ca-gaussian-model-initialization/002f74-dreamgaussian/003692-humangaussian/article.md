@@ -1,0 +1,122 @@
+# HumanGaussian
+
+
+## Overview
+HumanGaussian is a text-to-3D method specifically designed for generating textured human avatars using 3D Gaussian Splatting [Gaussian Splatting](5996-gaussian-splatting.md). It addresses the oversaturation issue common in diffusion-based 3D generation by employing negative prompt guidance. Unlike general object generators, it leverages a parametric human body model (SMPL-X) to ensure anatomical plausibility during initialization.
+
+## How it works
+**Inputs:** A text prompt describing the desired human appearance.
+**Outputs:** A set of 3D Gaussians representing the human avatar, which can be rendered as RGB and depth images.
+
+**Data Structures:**
+*   **3D Gaussians:** Initialized as a point cloud where each point $i$ has position $\mathbf{t}_i$, covariance matrix $\mathbf{\Sigma}_i$ (parameterized as rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$), opacity $\alpha_i$, and spherical harmonic coefficients for color.
+*   **SMPL-X Template:** A parametric human mesh model used as the geometric prior.
+
+**Steps:**
+1.  **Initialization:** Randomly sample points on the surface of the SMPL-X template [S1][S2, unofficial]. These points serve as the initial centers $\mathbf{t}_i$ for the 3D Gaussians. The initial covariance and opacity are set based on the local surface geometry [S1][S2, unofficial].
+2.  **Extended Diffusion Model:** Extend Stable Diffusion [140] to generate both RGB and depth maps simultaneously from the text prompt [S1][S2, unofficial].
+3.  **Dual-Branch SDS Construction:** Construct a dual-branch Score Distillation Sampling (SDS) loss to guide the optimization [S1][S2, unofficial]. This involves rendering the current Gaussian set to obtain predicted RGB and depth, and comparing them against the diffusion model's predictions.
+4.  **Negative Prompt Guidance:** To address oversaturation, combine the classifier score from the null text prompt with the negative score from the negative prompt [S1][S2, unofficial]. This combined guidance helps prevent the generated colors from becoming overly saturated or unrealistic [S1][S2, unofficial].
+5.  **Optimization:** Optimize the Gaussian parameters (position, scale, rotation, opacity, color) using the combined SDS loss and negative prompt guidance [S1][S2, unofficial].
+6.  **Geometry Refinement (Optional):** Convert the Gaussian opacity to a signed distance field (SDF) using a NeuS-like method [170, 171] to extract detailed textured meshes and provide additional geometry constraints [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# HumanGaussian Optimization Loop
+# Inputs: text_prompt, negative_prompt
+# Outputs: Gaussian parameters (t, R, S, alpha, SH)
+
+def human_gaussian_optimization(text_prompt, negative_prompt):
+    # Step 1: Initialize Gaussians from SMPL-X
+    smpl_mesh = get_smpl_x_template()
+    points = random_sample_surface_points(smpl_mesh)
+    gaussians = initialize_gaussians_from_points(points)
+    
+    # Step 2: Setup Extended Stable Diffusion
+    # The model outputs both RGB and Depth predictions
+    diffusion_model = extend_stable_diffusion_for_rgb_depth()
+    
+    # Step 3: Optimization Loop
+    for step in range(num_steps):
+        # Render current Gaussians
+        rendered_rgb, rendered_depth = render_gaussians(gaussians)
+        
+        # Get diffusion predictions
+        # Note: The exact mechanism for simultaneous RGB/Depth generation
+        # is described as an extension of Stable Diffusion [S1][S2, unofficial]
+        pred_rgb, pred_depth = diffusion_model.sample(
+            text_prompt=text_prompt,
+            negative_prompt=negative_prompt,
+            rendered_rgb=rendered_rgb,
+            rendered_depth=rendered_depth
+        )
+        
+        # Step 4: Compute Dual-Branch SDS Loss
+        # Combines RGB and Depth guidance
+        sds_loss = compute_dual_branch_sds_loss(
+            rendered_rgb, rendered_depth,
+            pred_rgb, pred_depth,
+            text_prompt, negative_prompt
+        )
+        
+        # Step 5: Compute Negative Prompt Guidance
+        # Combines null text classifier score and negative prompt score
+        # to address oversaturation [S1][S2, unofficial]
+        null_score = diffusion_model.get_classifier_score(
+            rendered_rgb, null_text_prompt=""
+        )
+        negative_score = diffusion_model.get_negative_score(
+            rendered_rgb, negative_prompt
+        )
+        guidance_loss = combine_scores(null_score, negative_score)
+        
+        # Total Loss
+        loss = sds_loss + lambda_neg * guidance_loss
+        
+        # Update Gaussians
+        gaussians = optimize_gaussians(gaussians, loss)
+        
+    return gaussians
+
+def compute_dual_branch_sds_loss(rendered_rgb, rendered_depth, pred_rgb, pred_depth, text, neg_text):
+    # Placeholder for the specific dual-branch formulation
+    # Sources [S1][S2, unofficial] state it constructs a dual-branch SDS but do not provide the exact mathematical formula
+    # for the combination of RGB and Depth branches.
+    # [G] Typically, this involves computing separate SDS gradients for RGB and Depth and summing them.
+    rgb_grad = compute_sds_gradient(rendered_rgb, pred_rgb, text, neg_text)
+    depth_grad = compute_sds_gradient(rendered_depth, pred_depth, text, neg_text)
+    return rgb_grad + depth_grad
+
+def combine_scores(null_score, negative_score):
+    # Combines classifier score from null text and negative score from negative prompt
+    # [S1][S2, unofficial]
+    # [G] The exact weighting or combination function (e.g., addition, weighted sum) is not specified in the sources.
+    return null_score + negative_score
+```
+
+**Parameters:**
+*   **SMPL-X Template:** Used for initialization [S1][S2, unofficial].
+*   **Negative Prompt:** Used to mitigate oversaturation [S1][S2, unofficial].
+*   **NeuS-like Method:** Used for geometry refinement and mesh extraction [S1][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Oversaturation:** A known issue in diffusion-based 3D generation that HumanGaussian specifically addresses via negative prompt guidance [S1][S2, unofficial].
+*   **Geometry Accuracy:** Relies on the SMPL-X template; deviations from the template may require significant optimization or may result in artifacts if not handled by the NeuS-like refinement [S1][S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Generates a textured human avatar from a text prompt. Specific performance metrics (FPS, memory usage) are not provided in the sources.
+*   **Strengths:** Anatomically plausible initialization via SMPL-X; addresses oversaturation via negative prompt guidance; simultaneous RGB and depth generation.
+*   **Limitations:** Relies on the SMPL-X template, which may limit the diversity of human shapes; specific implementation details of the dual-branch SDS and negative prompt combination are not fully detailed in the provided sources.
+*   **When to use:** When generating text-to-3D human avatars with 3D Gaussian Splatting.
+*   **When not to use:** For general object generation or scene generation, where other methods like LucidDreamer or CG3D might be more appropriate [S1].
+
+## Background
+HumanGaussian [263] is part of the recent advances in 3D Gaussian Splatting for text-to-3D generation. It builds on the foundation of 3D Gaussian Splatting [Gaussian Splatting](5996-gaussian-splatting.md) and extends it to the domain of human avatar generation. It addresses limitations in previous methods by incorporating a parametric human model and advanced guidance techniques from diffusion models.
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian Splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

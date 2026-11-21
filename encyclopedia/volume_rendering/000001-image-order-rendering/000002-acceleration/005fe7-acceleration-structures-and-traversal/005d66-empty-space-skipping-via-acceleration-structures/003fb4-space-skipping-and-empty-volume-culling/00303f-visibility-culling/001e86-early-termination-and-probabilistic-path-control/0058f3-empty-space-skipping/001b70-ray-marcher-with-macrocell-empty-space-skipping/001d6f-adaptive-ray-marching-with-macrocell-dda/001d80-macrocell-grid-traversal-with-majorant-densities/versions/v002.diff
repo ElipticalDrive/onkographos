@@ -1,0 +1,234 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-This method accelerates volumetric path tracing by combining a coarse spatial partition (macrocells) with Delta Tracking (Woodcock tracking) to skip empty or low-opacity regions more efficiently than fixed-step marching. It sets itself apart from its parent [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by explicitly using the alpha component of the transfer function as a majorant extinction coefficient to determine probabilistic free-flight distances, allowing larger steps in homogeneous cells while maintaining unbiased Monte Carlo estimation.
++This method accelerates volumetric path tracing by combining a coarse spatial partition (macrocells) with Delta Tracking (Woodcock tracking) to skip empty or low-opacity regions more efficiently than fixed-step marching [S1]. It sets itself apart from its parent [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by explicitly using the alpha component of the transfer function as a majorant extinction coefficient to determine probabilistic free-flight distances, allowing larger steps in homogeneous cells while maintaining unbiased Monte Carlo estimation [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ in world space; a transfer function $TF$ mapping density to RGBA; a macrocell grid storing min/max density ranges for each cell.
+-*   **Output:** Accumulated radiance contribution from the volume along the ray, or a termination signal if the ray exits the volume or is canceled.
++*   **Input:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ in world space; a transfer function $TF$ mapping density to RGBA; a macrocell grid storing min/max density ranges for each cell [S1].
++*   **Output:** Accumulated radiance contribution from the volume along the ray, or a termination signal if the ray exits the volume or is canceled [S1].
+ 
+ **Data Structures:**
+@@ -22,31 +22,17 @@
+ **Algorithm Steps:**
+ 
+-1.  **Initialization:**
+-    Transform the ray origin and direction into macrocell space using the reciprocal scaling factor:
+-    $$ \mathbf{m\_org} = \mathbf{o} \cdot \mathbf{spac\_rcp} $$
+-    $$ \mathbf{m\_dir} = \mathbf{d} \cdot \mathbf{spac\_rcp} $$
+-    Initialize the 3D-DDA iterator with $\mathbf{m\_org}$, $\mathbf{m\_dir}$, and the ray's near/far bounds $[t_{near}, t_{far}]$ in macrocell space [S2, unofficial].
+-
+-2.  **Majorant Computation:**
+-    For each macrocell, retrieve the stored min/max density range $[d_{min}, d_{max}]$. Look up these values in the transfer function $TF$ to obtain the alpha components $\alpha_{min} = TF(d_{min}).a$ and $\alpha_{max} = TF(d_{max}).a$. The majorant extinction coefficient $\sigma_t$ for the cell is derived from these values. In the reference implementation, fixed constants are used for demonstration: $\sigma_t = 1.0$ and density scale $= 1.0$ [S2, unofficial]. Majorants must be recomputed whenever the transfer function changes [S1].
+-
+-3.  **Traversal Loop:**
+-    While the ray has not exited the grid ($t < t_{far}$):
+-    a. **Cell Access:** Determine the current macrocell index $idx$ from the DDA iterator's current cell coordinates $(x, y, z)$:
+-       $$ idx = x + y \cdot dims.x + z \cdot dims.x \cdot dims.y $$
+-       Retrieve the majorant $\sigma_t = majorants[idx]$ [S2, unofficial].
+-    b. **Empty Cell Skip:** If the cell is empty (e.g., $d_{max} = 0$ or $\sigma_t = 0$), advance the DDA iterator to the next intersected cell and continue to step 3a.
+-    c. **Woodcock Tracking:** If the cell is non-empty, perform Delta Tracking within the current cell:
++1.  **Initialization:** Transform the ray origin and direction into macrocell space using the reciprocal scaling factor: $\mathbf{m\_org} = \mathbf{o} \cdot \mathbf{spac\_rcp}$ and $\mathbf{m\_dir} = \mathbf{d} \cdot \mathbf{spac\_rcp}$ [S2, unofficial]. Initialize the 3D-DDA iterator with $\mathbf{m\_org}$, $\mathbf{m\_dir}$, and the ray's near/far bounds $[t_{near}, t_{far}]$ in macrocell space [S2, unofficial].
++2.  **Majorant Computation:** For each macrocell, retrieve the stored min/max density range $[d_{min}, d_{max}]$ [S1]. Look up these values in the transfer function $TF$ to obtain the alpha components $\alpha_{min} = TF(d_{min}).a$ and $\alpha_{max} = TF(d_{max}).a$ [S1]. The majorant extinction coefficient $\sigma_t$ for the cell is derived from these values [S1]. In the reference implementation, fixed constants are used for demonstration: $\sigma_t = 1.0$ and density scale $= 1.0$ [S2, unofficial]. Majorants must be recomputed whenever the transfer function changes [S1].
++3.  **Traversal Loop:** While the ray has not exited the grid ($t < t_{far}$):
++    a. **Cell Access:** Determine the current macrocell index $idx$ from the DDA iterator's current cell coordinates $(x, y, z)$: $idx = x + y \cdot dims.x + z \cdot dims.x \cdot dims.y$ [S2, unofficial]. Retrieve the majorant $\sigma_t = majorants[idx]$ [S2, unofficial].
++    b. **Empty Cell Skip:** If the cell is empty (e.g., $d_{max} = 0$ or $\sigma_t = 0$), advance the DDA iterator to the next intersected cell and continue to step 3a [S1].
++    c. **Woodcock Tracking:** If the cell is non-empty, perform Delta Tracking within the current cell [S1]:
+        i. Compute the distance to the next cell boundary $t_{cell\_end}$ using the DDA state.
+-       ii. Sample a free-flight distance $t_{ff}$ from the exponential distribution with rate $\sigma_t$:
+-           $$ t_{ff} = -\frac{\ln(1 - \xi)}{\sigma_t} $$
+-           where $\xi$ is a uniform random number in $[0, 1)$.
+-       iii. Determine the step size $t_{step} = \min(t_{ff}, t_{cell\_end} - t_{current})$.
+-       iv. Advance the ray position: $\mathbf{p} = \mathbf{o} + (t_{current} + t_{step}) \mathbf{d}$.
+-       v. **Interaction Check:** If $t_{step} == t_{ff}$, an interaction occurred. Sample the scattering event (absorption/scattering) based on the actual density at $\mathbf{p}$ and the majorant $\sigma_t$. If scattering occurs, contribute radiance and potentially spawn a new ray. If absorbed, terminate the path. If the interaction is virtual (density < majorant), continue tracking.
+-       vi. If $t_{step} == t_{cell\_end}$, the ray reached the cell boundary. Update $t_{current}$ and advance the DDA iterator to the next cell.
+-
+-4.  **Termination:**
+-    If the ray exits the grid ($t \ge t_{far}$) or is canceled by Russian Roulette during scattering, return the accumulated radiance [S1].
++       ii. Sample a free-flight distance $t_{ff}$ from the exponential distribution with rate $\sigma_t$: $t_{ff} = -\frac{\ln(1 - \xi)}{\sigma_t}$, where $\xi$ is a uniform random number in $[0, 1)$ [G].
++       iii. Determine the step size $t_{step} = \min(t_{ff}, t_{cell\_end} - t_{current})$ [G].
++       iv. Advance the ray position: $\mathbf{p} = \mathbf{o} + (t_{current} + t_{step}) \mathbf{d}$ [G].
++       v. **Interaction Check:** If $t_{step} == t_{ff}$, an interaction occurred. Sample the scattering event (absorption/scattering) based on the actual density at $\mathbf{p}$ and the majorant $\sigma_t$ [G]. If scattering occurs, contribute radiance and potentially spawn a new ray. If absorbed, terminate the path. If the interaction is virtual (density < majorant), continue tracking [G].
++       vi. If $t_{step} == t_{cell\_end}$, the ray reached the cell boundary. Update $t_{current}$ and advance the DDA iterator to the next cell [S1].
++4.  **Termination:** If the ray exits the grid ($t \ge t_{far}$) or is canceled by Russian Roulette during scattering, return the accumulated radiance [S1].
+ 
+ **Pseudocode:**
+@@ -55,44 +41,67 @@
+ def macrocell_traversal_with_majorants(ray_o, ray_d, tnear, tfar, macrocell_grid, transfer_function):
+     """
+-    ray_o: vec3f, ray origin in world space
+-    ray_d: vec3f, ray direction in world space
++    ray_o: list of 3 floats, ray origin in world space
++    ray_d: list of 3 floats, ray direction in world space
+     tnear: float, near bound in world space
+     tfar: float, far bound in world space
+-    macrocell_grid: struct containing dims, spac_rcp, majorants, value_ranges
+-    transfer_function: function mapping density to RGBA
++    macrocell_grid: dict with keys 'dims', 'spac_rcp', 'majorants'
++    transfer_function: callable mapping density to RGBA tuple
+     
+-    Returns: accumulated radiance
++    Returns: accumulated radiance (list of 3 floats)
+     """
++    import math
++    import random
++
+     # 1. Transform to macrocell space
+-    m_org = ray_o * macrocell_grid.spac_rcp
+-    m_dir = ray_d * macrocell_grid.spac_rcp
++    m_org = [ray_o[i] * macrocell_grid['spac_rcp'][i] for i in range(3)]
++    m_dir = [ray_d[i] * macrocell_grid['spac_rcp'][i] for i in range(3)]
+     
+-    # Initialize 3D-DDA
+-    dda = DDAIterator(m_org, m_dir, tnear, tfar, macrocell_grid.dims)
++    # Initialize 3D-DDA state
++    dims = macrocell_grid['dims']
++    dda_x, dda_y, dda_z = int(m_org[0]), int(m_org[1]), int(m_org[2])
++    dda_dx = 1 if m_dir[0] > 0 else -1
++    dda_dy = 1 if m_dir[1] > 0 else -1
++    dda_dz = 1 if m_dir[2] > 0 else -1
++    t_max_x = (dda_x + (1.0 if dda_dx > 0 else 0.0) - m_org[0]) / m_dir[0] if m_dir[0] != 0 else float('inf')
++    t_max_y = (dda_y + (1.0 if dda_dy > 0 else 0.0) - m_org[1]) / m_dir[1] if m_dir[1] != 0 else float('inf')
++    t_max_z = (dda_z + (1.0 if dda_dz > 0 else 0.0) - m_org[2]) / m_dir[2] if m_dir[2] != 0 else float('inf')
++    t_delta_x = dda_dx / m_dir[0] if m_dir[0] != 0 else float('inf')
++    t_delta_y = dda_dy / m_dir[1] if m_dir[1] != 0 else float('inf')
++    t_delta_z = dda_dz / m_dir[2] if m_dir[2] != 0 else float('inf')
+     
+-    accumulated_radiance = vec3f(0.0)
+-    throughput = vec3f(1.0)
++    accumulated_radiance = [0.0, 0.0, 0.0]
+     t_current = tnear
+     
+     while t_current < tfar:
+         # 2. Get current cell info
+-        cell = dda.current_cell()
+-        idx = cell.x + cell.y * macrocell_grid.dims.x + cell.z * macrocell_grid.dims.x * macrocell_grid.dims.y
+-        
+-        # Retrieve majorant for the cell
+-        sigma_t = macrocell_grid.majorants[idx]
++        idx = dda_x + dda_y * dims[0] + dda_z * dims[0] * dims[1]
++        sigma_t = macrocell_grid['majorants'][idx]
+         
+         # Skip empty cells
+         if sigma_t == 0.0:
+-            dda.advance()
++            # Advance DDA to next cell
++            if t_max_x < t_max_y:
++                if t_max_x < t_max_z:
++                    dda_x += dda_dx
++                    t_max_x += t_delta_x
++                else:
++                    dda_z += dda_dz
++                    t_max_z += t_delta_z
++            else:
++                if t_max_y < t_max_z:
++                    dda_y += dda_dy
++                    t_max_y += t_delta_y
++                else:
++                    dda_z += dda_dz
++                    t_max_z += t_delta_z
+             continue
+             
+         # 3. Woodcock Tracking within the cell
+         # Get distance to next cell boundary in macrocell space
+-        t_cell_end = dda.next_boundary_t()
++        t_cell_end = min(t_max_x, t_max_y, t_max_z)
+         
+         # Sample free-flight distance
+-        xi = random_float()
+-        t_ff = -log(1.0 - xi) / sigma_t
++        xi = random.random()
++        t_ff = -math.log(1.0 - xi) / sigma_t
+         
+         # Determine step size
+@@ -101,8 +110,8 @@
+         # Advance ray
+         t_current += t_step
+-        p_world = ray_o + t_current * ray_d
++        p_world = [ray_o[i] + t_current * ray_d[i] for i in range(3)]
+         
+         # Check if interaction occurred (virtual or real)
+-        if t_step == t_ff:
++        if abs(t_step - t_ff) < 1e-6:
+             # Interaction happened
+             # Sample actual density at p_world (requires random access sampling)
+@@ -110,14 +119,12 @@
+             
+             # Compute actual extinction coefficient from transfer function
+-            alpha_actual = transfer_function(density).a
++            alpha_actual = transfer_function(density)[3] # RGBA index 3 is alpha
+             sigma_a = alpha_actual # Simplified: assuming alpha represents extinction
+             
+             # Russian Roulette for scattering vs absorption
+             # Probability of scattering is sigma_a / sigma_t
+-            if random_float() < sigma_a / sigma_t:
++            if random.random() < sigma_a / sigma_t:
+                 # Scattering event
+                 # Contribute radiance (simplified)
+-                # In a full path tracer, this would involve sampling a new direction
+-                # and continuing the path with updated throughput
+                 pass 
+             else:
+@@ -126,7 +133,25 @@
+         else:
+             # Reached cell boundary, no interaction
+-            dda.advance()
++            # Advance DDA
++            if t_max_x < t_max_y:
++                if t_max_x < t_max_z:
++                    dda_x += dda_dx
++                    t_max_x += t_delta_x
++                else:
++                    dda_z += dda_dz
++                    t_max_z += t_delta_z
++            else:
++                if t_max_y < t_max_z:
++                    dda_y += dda_dy
++                    t_max_y += t_delta_y
++                else:
++                    dda_z += dda_dz
++                    t_max_z += t_delta_z
+             
+     return accumulated_radiance
++
++def sample_density(p_world, macrocell_grid):
++    # Not given in the sources. In practice, this queries the underlying VDB or texture.
++    return 0.0
+ ```
+ 
+@@ -138,5 +163,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Transfer Function Changes:** Majorants must be recomputed whenever the transfer function changes, as they depend on the min/max density ranges [S1].
+-*   **Homogeneity Assumption:** Woodcock tracking is most efficient in homogeneous cells where the majorant closely approximates the actual density. In highly heterogeneous cells, many virtual interactions may occur, reducing efficiency [S1].
++*   **Homogeneity Assumption:** Woodcock tracking is most efficient in homogeneous cells where the majorant closely approximates the actual density [S1].
+ *   **Hierarchical Diminishing Returns:** Experiments with hierarchical space skipping showed diminishing returns compared to uniform grids when using RGBA transfer functions, likely due to the overhead of managing multiple levels of majorants [S1].
+ 
+@@ -144,5 +169,5 @@
+ 
+ ### [Delta Tracking with DDA Iteration (Macrocell-based)](1534-delta-tracking-with-dda-iteration-macrocell-based.md)
+-A ray-marching technique for volume rendering that combines a Discrete Differential Analyzer (DDA) for traversing a coarse spatial partition (macrocells) with Delta Tracking (Russian Roulette) for sampling absorption and scattering events within those cells. It sets itself apart from standard DDA by replacing uniform step sizes with probabilistic free-flight distances derived from the majorant, allowing it to skip non-interacting regions within a macrocell more efficiently than fixed-step marching, while avoiding the overhead of full per-voxel traversal. It is chosen when the volume is sparse or heterogeneous, and the transfer function allows for effective majorant estimation. See [Delta Tracking with DDA Iteration (Macrocell-based)](1534-delta-tracking-with-dda-iteration-macrocell-based.md).
++A ray-marching technique for volume rendering that combines a Discrete Differential Analyzer (DDA) for traversing a coarse spatial partition (macrocells) with Delta Tracking (Russian Roulette) for sampling absorption and scattering events within those cells. It sets itself apart from standard DDA by replacing uniform step sizes with probabilistic free-flight distances derived from the majorant, allowing it to skip non-interacting regions within a macrocell more efficiently than fixed-step marching, while avoiding the overhead of full per-voxel traversal [G]. It is chosen when the volume is sparse or heterogeneous, and the transfer function allows for effective majorant estimation. See [Delta Tracking with DDA Iteration (Macrocell-based)](1534-delta-tracking-with-dda-iteration-macrocell-based.md).
+ 
+ ### ANARI Renderer Integration
+@@ -150,11 +175,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_{cells} + N_{interactions})$, where $N_{cells}$ is the number of macrocells traversed and $N_{interactions}$ is the number of scattering events. The DDA traversal is linear in the number of cells, and Woodcock tracking is efficient in sparse regions.
+-*   **Memory Complexity:** $O(N_{macrocells})$ for storing the majorant grid and min/max ranges. This is significantly smaller than a full voxel grid for sparse volumes.
++*   **Time Complexity:** $O(N_{cells} + N_{interactions})$, where $N_{cells}$ is the number of macrocells traversed and $N_{interactions}$ is the number of scattering events. The DDA traversal is linear in the number of cells, and Woodcock tracking is efficient in sparse regions [G].
++*   **Memory Complexity:** $O(N_{macrocells})$ for storing the majorant grid and min/max ranges. This is significantly smaller than a full voxel grid for sparse volumes [G].
+ *   **Measured Performance:** In the reference implementation (Barney renderer), this method reduces sample count in homogeneous regions by allowing larger steps via Woodcock tracking [S1]. Performance gains are most significant in sparse volumes where empty cells can be skipped entirely [S1].
+ *   **Strengths:** Efficiently skips empty regions; adapts step size to local homogeneity; unbiased Monte Carlo estimation; simple uniform grid structure avoids hierarchical overhead [S1].
+-*   **Limitations:** Efficiency degrades in highly heterogeneous cells due to virtual interactions; requires recomputation of majorants if transfer function changes [S1].
+-*   **When to Use:** Sparse or heterogeneous volumes with well-defined transfer functions; when unbiased path tracing is required.
+-*   **When Not to Use:** Dense, homogeneous volumes where simple DDA might be faster; when hierarchical structures are preferred for very large volumes (though diminishing returns were observed) [S1].
++*   **Limitations:** Requires recomputation of majorants if transfer function changes [S1].
++*   **When to Use:** Sparse or heterogeneous volumes with well-defined transfer functions; when unbiased path tracing is required [G].
++*   **When Not to Use:** Dense volumes where the overhead of macrocell traversal outweighs benefits; when hierarchical structures are preferred (though diminishing returns were observed) [S1].
+ 
+ ## Background

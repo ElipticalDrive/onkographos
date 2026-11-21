@@ -1,0 +1,306 @@
+# Frequency-Modulated Position Encoding
+
+Also called: FM-NeRF Encoding, Frequency-Modulated Point Cloud Rendering with Easy Editing
+
+## Overview
+Frequency-Modulated Position Encoding is a positional encoding scheme used in point-based radiance field optimization to map 3D spatial coordinates and view directions into a high-dimensional feature space. It distinguishes itself from standard NeRF encoding by using a geometric progression of frequencies with a base of $2^{0.5}$ rather than $2^1$, providing finer-grained basis function support for frequency modulation [S1]. This method is specifically designed for point cloud representations where points are rasterized into disks, requiring careful handling of sparsity and edge artifacts [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A scalar coordinate or direction value $p \in \mathbb{R}$ (representing a component of position $\mathbf{x}$ or view direction $\mathbf{d}$).
+*   **Output:** A vector of sinusoidal features $\gamma(p) \in \mathbb{R}^{2L}$.
+
+**Data Structures**
+The encoding is applied independently to each component of the input vector. For a 3D position $\mathbf{x}$ and 3D direction $\mathbf{d}$, the total input dimension to the subsequent MLP is $6L$ (3 components $\times$ 2 frequencies per band $\times$ $L$ bands).
+
+**Parameters**
+*   $L$: Number of frequency bands.
+    *   For spatial coordinates: $L = 10$ [S1].
+    *   For view directions: $L = 2$ [S1].
+*   Base frequency multiplier: $2^{0.5}$ (square root of 2) [S1].
+
+**Algorithm**
+The encoding function $\gamma(p)$ generates $2L$ values by alternating sine and cosine functions at exponentially increasing frequencies. The frequency for the $k$-th band (where $k$ ranges from $0$ to $L-1$) is $2^{k/2} \pi$.
+
+The formula for a single scalar input $p$ is:
+$$ \gamma(p) = \left( \sin(2^0 \pi p), \cos(2^0 \pi p), \sin(2^{0.5} \pi p), \cos(2^{0.5} \pi p), \dots, \sin(2^{L-1} \pi p), \cos(2^{L-1} \pi p) \right) $$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def frequency_modulated_encoding(p, L):
+    """
+    Computes the frequency-modulated positional encoding for a scalar input p.
+    
+    Args:
+        p (float): The scalar input coordinate or direction component.
+        L (int): The number of frequency bands.
+        
+    Returns:
+        list: A list of 2*L float values representing the encoded features.
+    """
+    encoded_features = []
+    for k in range(L):
+        # Frequency multiplier is 2^(k/2)
+        freq = math.pow(2, k / 2.0)
+        angle = freq * math.pi * p
+        
+        # Append sine and cosine
+        encoded_features.append(math.sin(angle))
+        encoded_features.append(math.cos(angle))
+        
+    return encoded_features
+
+def encode_vector(v, L):
+    """
+    Encodes a vector (position or direction) by applying frequency modulation
+    to each component independently.
+    
+    Args:
+        v (list): A list of 3 floats representing x, y, z components.
+        L (int): The number of frequency bands.
+        
+    Returns:
+        list: The concatenated encoded features for all components.
+    """
+    result = []
+    for component in v:
+        result.extend(frequency_modulated_encoding(component, L))
+    return result
+```
+
+**Edge Cases and Pitfalls**
+*   **Precision:** The exponential growth of frequencies can lead to high-frequency oscillations. The choice of base $2^{0.5}$ mitigates the rapid frequency increase compared to standard NeRF ($2^1$), offering finer granularity [S1].
+*   **Rasterization Radius:** While not part of the encoding formula itself, the encoding is used in a context where points are rasterized into disks. If the rasterization radius is too small, "bleeding" occurs where occluded surfaces or background are visible through the front surface [S1]. If the radius is too large, depth estimation becomes inaccurate and object edges expand [S1]. The radius should be selected to cover gaps between points while remaining as small as possible [S1].
+*   **Low Opacity Points:** During training, points with low opacity should be removed once training converges to refine the representation [S1].
+
+## Subtopics
+
+### Depth-Guided NeRF Training Configuration
+*   **What it is:** A training configuration that incorporates depth information to guide the optimization of the radiance field.
+*   **Difference:** Uses explicit depth priors rather than relying solely on color and sparse regularization losses.
+*   **When to choose:** When depth accuracy is critical or when the scene has large unobserved regions.
+*   **Link:** [Depth-Guided NeRF Training Configuration](11916-depth-guided-nerf-training-configuration.md)
+
+### CLIPNeRF Training Configuration
+*   **What it is:** A configuration that integrates CLIP embeddings to enable text-guided editing and segmentation of radiance fields.
+*   **Difference:** Adds semantic understanding via CLIP, whereas FM-NeRF focuses on geometric and appearance fidelity via point clouds.
+*   **When to choose:** When semantic editing or text-based queries are required.
+*   **Link:** [CLIPNeRF Training Configuration](12073-clipnerf-training-configuration.md)
+
+### Binary Radiance Fields
+*   **What it is:** A representation that uses binary occupancy values instead of continuous density.
+*   **Difference:** Discretizes the space, potentially offering faster rendering but less smooth surfaces compared to the continuous density predicted by FM-NeRF's MLP.
+*   **When to choose:** When memory efficiency or binary segmentation is prioritized over smooth shading.
+*   **Link:** [Binary Radiance Fields](13622-binary-radiance-fields.md)
+
+### Mip-NeRF 360 MLP Architecture
+*   **What it is:** An MLP architecture designed for Mip-NeRF 360, incorporating cone tracing and positional encoding for anti-aliased rendering.
+*   **Difference:** Focuses on anti-aliasing and multi-scale rendering, while FM-NeRF focuses on point cloud rasterization and frequency modulation.
+*   **When to choose:** For high-quality novel view synthesis with anti-aliasing requirements.
+*   **Link:** [Mip-NeRF 360 MLP Architecture](14098-mip-nerf-360-mlp-architecture.md)
+
+### SUDS
+*   **What it is:** A method for unbounded scene decomposition and rendering.
+*   **Difference:** Handles unbounded scenes explicitly, whereas FM-NeRF typically operates on bounded point clouds.
+*   **When to choose:** For scenes with infinite backgrounds or large outdoor environments.
+*   **Link:** [SUDS](14964-suds.md)
+
+### Rip-NeRF
+*   **What it is:** A method for rendering NeRFs at arbitrary resolutions using a rippling strategy.
+*   **Difference:** Focuses on resolution scalability, while FM-NeRF focuses on the encoding scheme for point clouds.
+*   **When to choose:** When variable resolution rendering is needed.
+*   **Link:** [Rip-NeRF](15532-rip-nerf.md)
+
+### UE4-NeRF
+*   **What it is:** Integration of NeRF into Unreal Engine 4 for real-time rendering.
+*   **Difference:** Focuses on engine integration and real-time performance, not the underlying encoding.
+*   **When to choose:** For real-time applications in game engines.
+*   **Link:** [UE4-NeRF](15539-ue4-nerf.md)
+
+### Panoptic Radiance Field
+*   **What it is:** A representation that jointly predicts geometry, appearance, and semantic labels.
+*   **Difference:** Adds semantic segmentation to the radiance field.
+*   **When to choose:** For panoptic understanding of scenes.
+*   **Link:** [Panoptic Radiance Field](15849-panoptic-radiance-field.md)
+
+### Multi-view Aggregation with Skeletal Features
+*   **What it is:** Uses skeletal features to aggregate multi-view information.
+*   **Difference:** Relies on skeletal priors, whereas FM-NeRF uses point cloud priors.
+*   **When to choose:** For articulated objects or scenes with strong skeletal structure.
+*   **Link:** [Multi-view Aggregation with Skeletal Features](16433-multi-view-aggregation-with-skeletal-features.md)
+
+### Neural Light Fields with Ray-Space Embedding
+*   **What it is:** Represents light fields using ray-space embeddings.
+*   **Difference:** Uses ray-space rather than point-space encoding.
+*   **When to choose:** For light field rendering applications.
+*   **Link:** [Neural Light Fields with Ray-Space Embedding](17616-neural-light-fields-with-ray-space-embedding.md)
+
+### Neural Scene Graphs
+*   **What it is:** Represents scenes as graphs of objects and relationships.
+*   **Difference:** Structured scene representation vs. continuous field.
+*   **When to choose:** For structured scene understanding and editing.
+*   **Link:** [Neural Scene Graphs](17706-neural-scene-graphs.md)
+
+### Lightning-NeRF Model Configuration
+*   **What it is:** Optimized NeRF configuration for faster training using Lightning framework.
+*   **Difference:** Focuses on training infrastructure and speed.
+*   **When to choose:** When training speed is a primary concern.
+*   **Link:** [Lightning-NeRF Model Configuration](18065-lightning-nerf-model-configuration.md)
+
+### Vox-Surf
+*   **What it is:** Combines voxels and surfaces for efficient rendering.
+*   **Difference:** Hybrid voxel-surface representation.
+*   **When to choose:** For efficient large-scale scene rendering.
+*   **Link:** [Vox-Surf](18110-vox-surf.md)
+
+### Residual-NeRF
+*   **What it is:** Uses residual connections in the NeRF MLP.
+*   **Difference:** Architectural modification for better gradient flow.
+*   **When to choose:** For deeper networks or difficult optimization landscapes.
+*   **Link:** [Residual-NeRF](18113-residual-nerf.md)
+
+### MZEN (Multi-zoom Enhanced NeRF)
+*   **What it is:** Enhances NeRF with multi-zoom capabilities for detailed local rendering.
+*   **Difference:** Focuses on local detail enhancement.
+*   **When to choose:** For applications requiring high detail in specific regions.
+*   **Link:** [MZEN (Multi-zoom Enhanced NeRF)](18116-mzen-multi-zoom-enhanced-nerf.md)
+
+### Ray-Space Embedding Network with Local Affine Transformation
+*   **What it is:** Uses local affine transformations in ray-space embedding.
+*   **Difference:** Local geometric transformations in ray space.
+*   **When to choose:** For scenes with complex local geometry.
+*   **Link:** [Ray-Space Embedding Network with Local Affine Transformation](18128-ray-space-embedding-network-with-local-affine-transformation.md)
+
+### SpS-NeRF
+*   **What it is:** Sparse scene representation for NeRF.
+*   **Difference:** Focuses on sparsity in scene representation.
+*   **When to choose:** For memory-constrained environments.
+*   **Link:** [SpS-NeRF](18130-sps-nerf.md)
+
+### Mip-NeRF Network Architecture
+*   **What it is:** The core MLP architecture for Mip-NeRF.
+*   **Difference:** Standard Mip-NeRF architecture without the specific frequency modulation of FM-NeRF.
+*   **When to choose:** For standard anti-aliased NeRF rendering.
+*   **Link:** [Mip-NeRF Network Architecture](18138-mip-nerf-network-architecture.md)
+
+### Pixel-aligned Volumetric Avatars (PVA)
+*   **What it is:** Volumetric avatar representation aligned with pixels.
+*   **Difference:** Specialized for human avatars.
+*   **When to choose:** For human avatar rendering.
+*   **Link:** [Pixel-aligned Volumetric Avatars (PVA)](18139-pixel-aligned-volumetric-avatars-pva.md)
+
+### Neural Deformable Anchor (NeuDA)
+*   **What it is:** Uses deformable anchors for dynamic scene modeling.
+*   **Difference:** Handles dynamic scenes with deformable anchors.
+*   **When to choose:** For dynamic scene reconstruction.
+*   **Link:** [Neural Deformable Anchor (NeuDA)](18140-neural-deformable-anchor-neuda.md)
+
+### Neural Duplex Radiance Fields (NDRF)
+*   **What it is:** Duplex radiance field for bidirectional rendering.
+*   **Difference:** Supports bidirectional light transport.
+*   **When to choose:** For realistic lighting and reflections.
+*   **Link:** [Neural Duplex Radiance Fields (NDRF)](18147-neural-duplex-radiance-fields-ndrf.md)
+
+### Skeleton-Relative Encoding
+*   **What it is:** Encoding relative to a skeleton structure.
+*   **Difference:** Uses skeletal priors for encoding.
+*   **When to choose:** For articulated objects.
+*   **Link:** [Skeleton-Relative Encoding](18148-skeleton-relative-encoding.md)
+
+### UV Volumes
+*   **What it is:** Volume representation using UV coordinates.
+*   **Difference:** Uses UV mapping for volume encoding.
+*   **When to choose:** For textured volumes.
+*   **Link:** [UV Volumes](18151-uv-volumes.md)
+
+### Low-Light NeRF (LLNeRF)
+*   **What it is:** NeRF optimized for low-light conditions.
+*   **Difference:** Handles low-light noise and dynamic range.
+*   **When to choose:** For low-light scene reconstruction.
+*   **Link:** [Low-Light NeRF (LLNeRF)](18162-low-light-nerf-llnerf.md)
+
+### Image-Conditional Triplanar Representation
+*   **What it is:** Triplanar mapping conditioned on images.
+*   **Difference:** Uses triplanar mapping for texture.
+*   **When to choose:** For texture synthesis and mapping.
+*   **Link:** [Image-Conditional Triplanar Representation](18169-image-conditional-triplanar-representation.md)
+
+### I2-SDF
+*   **What it is:** Implicit to SDF conversion.
+*   **Difference:** Converts implicit fields to SDFs.
+*   **When to choose:** For precise surface extraction.
+*   **Link:** [I2-SDF](18170-i2-sdf.md)
+
+### SDF-based Volume Rendering with Laplacian CDF
+*   **What it is:** Volume rendering using SDFs and Laplacian CDF.
+*   **Difference:** Uses SDF-based rendering with specific statistical properties.
+*   **When to choose:** For smooth surface rendering.
+*   **Link:** [SDF-based Volume Rendering with Laplacian CDF](18174-sdf-based-volume-rendering-with-laplacian-cdf.md)
+
+### Compression and Model Efficiency
+*   **What it is:** Techniques for compressing NeRF models.
+*   **Difference:** Focuses on model size and inference speed.
+*   **When to choose:** For deployment on resource-constrained devices.
+*   **Link:** [Compression and Model Efficiency](18217-compression-and-model-efficiency.md)
+
+### Voxel and Grid Representations
+*   **What it is:** Uses voxels or grids for scene representation.
+*   **Difference:** Discrete representation vs. continuous field.
+*   **When to choose:** For efficient spatial querying.
+*   **Link:** [Voxel and Grid Representations](18218-voxel-and-grid-representations.md)
+
+### Dynamic and Articulated Scene Modeling
+*   **What it is:** Models dynamic and articulated scenes.
+*   **Difference:** Handles time-varying geometry.
+*   **When to choose:** For dynamic scene reconstruction.
+*   **Link:** [Dynamic and Articulated Scene Modeling](18219-dynamic-and-articulated-scene-modeling.md)
+
+### Lighting and Intrinsic Decomposition
+*   **What it is:** Decomposes scene into lighting and material properties.
+*   **Difference:** Separates intrinsic scene properties.
+*   **When to choose:** For lighting estimation and material editing.
+*   **Link:** [Lighting and Intrinsic Decomposition](18220-lighting-and-intrinsic-decomposition.md)
+
+### View-Dependent Appearance and Lighting
+*   **What it is:** Models view-dependent appearance.
+*   **Difference:** Captures complex view-dependent effects.
+*   **When to choose:** For realistic appearance rendering.
+*   **Link:** [View-Dependent Appearance and Lighting](18221-view-dependent-appearance-and-lighting.md)
+
+### Generative and GAN-Based Methods
+*   **What it is:** Uses GANs for NeRF generation.
+*   **Difference:** Generative approach to NeRF.
+*   **When to choose:** For novel view synthesis from limited data.
+*   **Link:** [Generative and GAN-Based Methods](18360-generative-and-gan-based-methods.md)
+
+## Operating characteristics
+**Time and Memory Complexity**
+*   **Training Time:** The method requires approximately 10 minutes for realistic rendering and about 10 hours to almost converge on the NeRF-Synthetic dataset [S1]. One epoch consumes approximately 12.8 seconds on NeRF-Synthetic [S1].
+*   **Memory:** The MLP (AFNet) has 5 layers with input dimension 120 and hidden dimensions 256, 256, 256, 128, outputting 11 values (3 for RGB, 8 for feature map) [S1]. The memory footprint is determined by the point cloud size and the MLP parameters.
+
+**Measured Performance**
+*   The method achieves higher PSNR and SSIM on NeRF-Synthetic and Tanks and Temples datasets compared to NeRF, CCNeRF, NPBG, NPBG++, and Huang et al. [S1].
+*   Results are comparable or better on ScanNet and DTU datasets [S1].
+
+**Scaling**
+*   The method scales with the number of points in the cloud and the complexity of the MLP. Data augmentation (random scaling and cropping) is used during training, with random scaling being critical for U-Net training [S1].
+
+**Strengths and Limitations**
+*   **Strengths:** Fast convergence (10 mins for realistic results), high quality on synthetic and real datasets, easy editing capabilities via point cloud masking [S1].
+*   **Limitations:** Requires initial point cloud generation (e.g., from MVSNet) [S1]. Rasterization radius selection is heuristic and affects quality (bleeding vs. edge expansion) [S1].
+
+**When to Use**
+*   Use when fast training and high-quality rendering from point clouds are required, and when editing capabilities are needed [S1].
+
+**When Not to Use**
+*   Avoid when high precision in depth estimation is critical without careful radius tuning, or when the scene has significant background that cannot be masked out [S1].
+
+## Background
+Frequency-Modulated Position Encoding was introduced in the paper "Frequency-Modulated Point Cloud Rendering with Easy Editing" [S1]. The method builds on the positional encoding form of NeRF [S1] but narrows the encoding interval to provide more fine-grained basis function support for frequency modulation. It is designed for point cloud-based radiance field optimization, addressing issues of sparsity and editing ease. The method was evaluated on NeRF-Synthetic, Tanks and Temples, ScanNet, and DTU datasets [S1].
+
+## Sources
+[S1] Frequency-Modulated Point Cloud Rendering with Easy Editing, https://doi.org/10.1109/cvpr52729.2023.00020, fetched 2026-10-29

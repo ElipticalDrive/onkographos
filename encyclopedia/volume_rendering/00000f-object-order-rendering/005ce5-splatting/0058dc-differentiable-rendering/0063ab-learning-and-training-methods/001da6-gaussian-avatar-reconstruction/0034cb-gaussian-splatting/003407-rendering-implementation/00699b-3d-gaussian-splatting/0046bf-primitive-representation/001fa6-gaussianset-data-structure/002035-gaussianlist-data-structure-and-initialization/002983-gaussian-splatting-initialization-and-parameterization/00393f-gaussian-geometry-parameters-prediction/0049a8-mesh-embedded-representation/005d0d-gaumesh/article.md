@@ -1,0 +1,57 @@
+# GauMesh
+
+Also called: GauMesh [S1, unofficial]
+
+## Overview
+GauMesh is a hybrid representation for dynamic human head avatars that combines tracked textured meshes with canonical 3D Gaussians and a learnable deformation field [S1, unofficial]. It solves the problem of synthesizing high-quality, dynamic avatars from few input views by maintaining geometric fidelity through the mesh while capturing complex appearance details via Gaussians [S1, unofficial]. It differs from pure Gaussian splatting by leveraging the structural stability of a mesh for deformation, and from static mesh-embedded methods by introducing a learnable deformation field rather than relying solely on rigid or skeletal mesh transforms [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of multi-view images of a dynamic human head; a template mesh $\mathcal{M}$ with vertices $V$, normals $n$, and faces $F$.
+*   **Outputs:** A set of 3D Gaussians parameterized in canonical space, a tracked textured mesh, and a learnable deformation field that maps canonical positions to posed positions.
+
+**Data Structures:**
+The method maintains two parallel representations:
+1.  **Tracked Textured Mesh:** A standard triangle mesh with UV coordinates and texture maps, updated via tracking algorithms to follow the dynamic head.
+2.  **Canonical 3D Gaussians:** Each Gaussian $i$ is defined by an embedding tuple $E_i = \{k, u, v, d\}$ relative to the canonical mesh, where $k$ is the triangle index, $(u, v)$ are barycentric coordinates, and $d$ is the normal displacement [S1, unofficial].
+
+**Method Steps:**
+1.  **Initialization:** Initialize Gaussians on the template mesh using the embedding definition from [Mesh-embedded representation](12559-mesh-embedded-representation.md).
+2.  **Deformation Field Learning:** Train a learnable deformation field $\mathcal{D}(\cdot)$ that predicts the displacement of points from the canonical mesh to the posed mesh. This field is optimized jointly with the Gaussian attributes (opacity, color, scale, rotation) and the mesh tracking parameters [S1, unofficial].
+3.  **Posed State Computation:** For each frame, compute the posed position $\mu_{pose}$ of each Gaussian by applying the deformation field to the displaced canonical position:
+    $$
+    \mu_{pose} = \mathcal{D}(\mu_{cano} + d \cdot n_{cano})
+    $$
+    where $\mu_{cano}$ and $n_{cano}$ are computed via Phong interpolation on the canonical mesh [Parent].
+4.  **Rendering:** Render the posed Gaussians using standard differentiable splatting [S1, unofficial].
+5.  **Optimization:** Minimize a loss function comprising rendering loss (photometric error) and splat-to-mesh distance loss to ensure geometric consistency between the Gaussians and the tracked mesh [S1, unofficial].
+
+**Parameters:**
+*   Learning rate for deformation field: Not given in the sources.
+*   Learning rate for Gaussian attributes: Not given in the sources.
+*   Splat-to-mesh distance loss weight: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Crossing:** If optimization moves an embedding point across a triangle boundary ($u < 0$, $v < 0$, or $u+v > 1$), the embedding must be re-expressed in the neighboring triangle to maintain differentiability [Parent]. Failure to handle this causes Gaussians to stick to boundaries and pile up [Parent].
+*   **Few Views:** The method is designed for few input views, which may lead to ambiguities in depth and appearance if not regularized by the mesh prior [S1, unofficial].
+
+## Subtopics
+
+### Graph Embedded Deformation
+A variant where deformation is driven by a precomputed graph of control points rather than a dense deformation field. During precomputation, a graph is constructed, and k-nearest control points are determined for Gaussian endpoints and sampled points [S2]. The same graph deformation (e.g., As-Rigid-As-Possible) is applied to both the Gaussian radiance field and the original mesh vertices [S2]. This approach reduces the number of parameters and ensures rigid-body-like motion between control points. Precomputation overhead (graph construction, sampling, k-nearest determination) typically requires 1 to 3 seconds for most datasets [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** High-fidelity dynamic head avatar synthesis from few views; combines the structural stability of meshes with the appearance flexibility of Gaussians [S1, unofficial].
+*   **Limitations:** Requires a template mesh; joint optimization of mesh, Gaussians, and deformation field may be complex to tune [S1, unofficial].
+*   **When to use:** Dynamic human head reconstruction from limited multi-view inputs.
+*   **When not to use:** Static scenes or scenes without a clear mesh structure.
+
+## Background
+GauMesh was introduced in the context of recent advances in 3D Gaussian splatting for avatar learning [S1, unofficial]. It builds on the principles of mesh-embedded Gaussian representations [Parent] and extends them to dynamic scenarios by incorporating a learnable deformation field. The method is cited alongside other works like SplatFace and 3DPSHR for head and hand reconstruction [S1, unofficial].
+
+## Sources
+[S1] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S2] As-Rigid-As-Possible Deformation of Gaussian Radiance Fields, https://doi.org/10.1109/TVCG.2025.3555404, fetched 2026-10-30

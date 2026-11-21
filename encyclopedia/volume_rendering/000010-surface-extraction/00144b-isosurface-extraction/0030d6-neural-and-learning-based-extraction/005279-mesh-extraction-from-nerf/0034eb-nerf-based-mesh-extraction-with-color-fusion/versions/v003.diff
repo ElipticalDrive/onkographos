@@ -1,0 +1,63 @@
+--- v002.md
++++ v003.md
+@@ -58,7 +58,7 @@
+         - Project to pixel coordinates: $v_{img} = (K \cdot v_{cam})^T$. Divide by depth $z + \epsilon$ [S1, unofficial].
+         - Clip $x, y$ to $[0, W-1]$ and $[0, H-1]$ [S1, unofficial].
+-        - Sample colors from the image at projected coordinates using bilinear interpolation (e.g., `cv2.remap`). Split into chunks of 30,000 pixels if necessary [S1, unofficial].
++        - Sample colors from the image at projected coordinates using bilinear interpolation (e.g., `cv2.remap`). Split into chunks of 30,000 pixels due to OpenCV size limits [S1, unofficial].
+         - Predict occlusion: Construct rays from camera origin to vertices. Set near bound to dataset bounds min and far bound to vertex depth. Query NeRF fine model for accumulated opacity [S1, unofficial].
+-        - Calculate non-occluded weight: $w = 1 - \text{accumulated\_opacity}$. If $w > occ\_threshold$, the pixel is considered valid [S1, unofficial].
++        - Calculate non-occluded weight: $w = 1 - \text{accumulated\_opacity}$ [S1, unofficial].
+         - Update sums:
+           $$ v\_color\_sum += \text{color} \times w $$
+@@ -191,7 +191,10 @@
+     origins_t = torch.FloatTensor(origins).cuda()
+     dirs_t = torch.FloatTensor(directions).cuda()
+-    t_vals = np.linspace(0.0, 1.0, args.N_samples + args.N_importance)
+-    z_vals = np.sort(np.concatenate([t_vals[:-1], t_vals[1:]]), axis=-1)
+-    points = origins_t[:, np.newaxis, :] + dirs_t[:, np.newaxis, :] * torch.FloatTensor(z_vals).cuda()
++    # Set near to dataset.bounds.min() and far to vertex depth as per evidence
++    near = torch.tensor(dataset.bounds.min()).cuda()
++    far = torch.norm(dirs_t, dim=0).cuda() 
++    t_vals = torch.linspace(near, far, args.N_samples + args.N_importance)
++    z_vals = torch.sort(torch.cat([t_vals[:-1], t_vals[1:]]), dim=-1)[0]
++    points = origins_t[:, np.newaxis, :] + dirs_t[:, np.newaxis, :] * z_vals.cuda()
+     with torch.no_grad():
+         chunk = args.chunk
+@@ -230,11 +233,11 @@
+ 
+ **Parameters:**
+-- `N_samples`: Number of coarse samples. Default: 64 [S1, unofficial].
+-- `N_importance`: Number of fine samples. Default: 64 [S1, unofficial].
+-- `chunk`: Chunk size for inference. Default: 32*1024 [S1, unofficial].
+-- `N_grid`: Grid resolution. Default: 256 [S1, unofficial].
+-- `sigma_threshold`: Marching Cubes threshold. Default: 20.0 [S1, unofficial].
+-- `occ_threshold`: Occlusion threshold. Default: 0.2 [S1, unofficial].
+-- `near_t`: Near bound factor for vertex normals. Default: 1.0 [S1, unofficial].
++- `N_samples`: Number of coarse samples to infer accumulated opacity. Default: 64 [S1, unofficial].
++- `N_importance`: Number of fine samples to infer accumulated opacity. Default: 64 [S1, unofficial].
++- `chunk`: Chunk size to split input rays to avoid Out Of Memory (OOM). Default: 32*1024 [S1, unofficial].
++- `N_grid`: Size of the 3D grid on one side for querying sigma. Larger values yield higher resolution. Default: 256 [S1, unofficial].
++- `sigma_threshold`: Threshold value for Marching Cubes to consider a location occupied. Default: 20.0 [S1, unofficial].
++- `occ_threshold`: Threshold to consider a vertex occluded. Values larger than this result in fewer occluded pixels. Default: 0.2 [S1, unofficial].
++- `near_t`: Near bound factor to start the ray when using vertex normals. Default: 1.0 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -250,14 +253,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the NeRF queries. Density query is $O(N^3 \cdot C)$ where $C$ is chunk size. Color fusion is $O(V \cdot M)$ where $M$ is the number of training views [S1, unofficial].
++- **Time Complexity:** Dominated by the NeRF queries. Density query is $O(N^3)$ [G]. Color fusion is $O(V \cdot M)$ where $M$ is the number of training views [S1, unofficial].
+ - **Memory Complexity:** $O(N^3)$ for the density grid and $O(V \cdot M)$ for intermediate color accumulation buffers [S1, unofficial].
+ - **Performance:** High resolution requires large $N_{grid}$, increasing memory usage quadratically/cubically. Color fusion is slower than vertex normal shading due to multiple view projections and occlusion queries [S1, unofficial].
+ - **Strengths:** Produces textured meshes with consistent colors across views. Handles complex geometry well via Marching Cubes [S1, unofficial].
+-- **Limitations:** Sensitive to $\sigma_{threshold}$. Color artifacts if occlusion is poorly estimated. Not suitable for real-time extraction without optimization [S1, unofficial].
++- **Limitations:** Sensitive to $\sigma_{threshold}$. Color artifacts if occlusion is poorly estimated [S1, unofficial]. Not suitable for real-time extraction without optimization [S1, unofficial].
+ - **When to use:** When a textured mesh is required from a NeRF and single-view shading is insufficient [S1, unofficial].
+ - **When not to use:** When real-time extraction is needed or when the NeRF density field is noisy/unreliable [S1, unofficial].
+ 
+ ## Background
+-Originating from the `nerf_pl` repository [S1, unofficial], this method extends the basic NeRF mesh extraction pipeline by adding a robust color assignment strategy. It addresses the limitation of basic extraction which often results in untextured or poorly colored meshes. The color fusion approach aggregates multi-view information to ensure color consistency. The TSDF variant [S3] further refines geometry by using NeRF occupancy to supervise a signed distance field, improving mesh quality.
++Originating from the `nerf_pl` repository [S1, unofficial], this method extends the basic NeRF mesh extraction pipeline by adding a robust color assignment strategy. It addresses the limitation of basic extraction which often results in untextured or poorly colored meshes [S1, unofficial]. The color fusion approach aggregates multi-view information to ensure color consistency [S1, unofficial]. The TSDF variant [S3] further refines geometry by using NeRF occupancy to supervise a signed distance field, improving mesh quality.
+ 
+ ## Sources

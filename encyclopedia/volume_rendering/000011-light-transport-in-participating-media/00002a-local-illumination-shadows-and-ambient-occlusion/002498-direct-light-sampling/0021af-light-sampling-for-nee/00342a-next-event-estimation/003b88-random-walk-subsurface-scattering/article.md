@@ -1,0 +1,56 @@
+# Random-Walk Subsurface Scattering
+
+Also called: Chiang 2016 SSS, Disney Subsurface Approximation, Subsurface Scattering (Random Walk)
+
+## Overview
+Random-walk subsurface scattering is a Monte Carlo technique for rendering translucent materials like skin, wax, or marble by simulating light transport within a mesh volume [S1][S2, unofficial]. It differs from standard volume rendering by restricting the random walk to the interior of the geometry and terminating at a surface vertex, making it more efficient and easier to control for thin or bounded translucent objects [S1]. Unlike [Importance-Sampled Next Event Estimation](7684-importance-sampled-next-event-estimation.md), which samples the light directly, this method samples the scattering path within the material to handle multiple scattering events that single-bounce approximations miss [S2, unofficial].
+
+## How it works
+The method approximates the diffusion of light inside a mesh by treating the interior as a homogeneous participating medium where photons undergo a random walk [S2, unofficial].
+
+**Inputs and Outputs**
+*   **Input:** Surface intersection point, material subsurface parameters (weight, radius, scale, anisotropy), and the scene geometry [S2, unofficial].
+*   **Output:** Radiance contribution from the subsurface lobe, computed by exiting the walk at a surface vertex and applying direct illumination [S2, unofficial].
+
+**Data Structures**
+The implementation relies on the `SurfaceInteraction` structure, which carries the path wavelength and material properties [S2, unofficial]. Specifically, the material must expose subsurface coefficients via `subsurfaceCoeffs` [S2, unofficial]. The Disney Principled BSDF parameters include:
+*   `subsurface_weight`: Controls the intensity of the subsurface effect.
+*   `radius`: Defines the scattering distance distribution (typically a color vector representing attenuation at different wavelengths) [S2, unofficial].
+*   `scale`: Scales the radius for thin-surface approximations [S2, unofficial].
+*   `anisotropy`: The Henyey-Greenstein mean cosine for scattering direction [S2, unofficial].
+
+**Algorithm Steps**
+1.  **Entry:** When a ray hits a surface with a subsurface lobe, the ray is refracted or offset to enter the mesh interior at the hit point [S2, unofficial]. [G] The entry point is typically offset slightly along the normal to avoid self-intersection artifacts.
+2.  **Walk:** The photon performs a random walk inside the mesh volume. The step length is sampled from an exponential distribution based on the scattering coefficient derived from the `radius` parameter. At each step, the direction is updated using the Henyey-Greenstein phase function with the specified `anisotropy` [S2, unofficial].
+3.  **Termination:** The walk terminates when the photon hits a surface vertex from the inside. The sources specify that the walk terminates at a "white Lambertian vertex" [S2, unofficial]. [G] In practice, this means the exit point is treated as a diffuse surface for the purpose of lighting calculation.
+4.  **Exit and Lighting:** Full Next Event Estimation (NEE) is applied at the exit vertex to calculate direct illumination from lights [S2, unofficial]. The contribution is weighted by the subsurface weight and the probability of the walk path.
+
+**Formulas**
+The scattering coefficient $\sigma_s$ is derived from the radius $R$. For a homogeneous medium, the mean free path is related to the radius. The probability of a step of length $l$ is:
+$$ p(l) = \sigma_t e^{-\sigma_t l} $$
+where $\sigma_t = \sigma_s + \sigma_a$ is the extinction coefficient [S2, unofficial]. The Henyey-Greenstein phase function $p(\cos \theta)$ is:
+$$ p(\cos \theta) = \frac{1 - g^2}{4\pi (1 + g^2 - 2g \cos \theta)^{3/2}} $$
+where $g$ is the anisotropy parameter [S2, unofficial].
+
+**Pitfalls**
+*   The random walk is not a geometric bounce; it is a distinct scattering event within the material volume [S2, unofficial]. Confusing it with surface reflection leads to incorrect path tracing logic.
+*   Precision issues may arise if the mesh has very thin regions where the walk exits immediately without scattering.
+
+## Subtopics
+
+### Gaussian Approximation for Subsurface Scattering
+A technique that approximates the subsurface diffusion function as a sum of several Gaussian functions to calculate light scattering and absorption efficiently [S3]. Instead of simulating individual random walks, it computes the contribution between surface pairs analytically using these Gaussians [S3]. This method is used in Jrender to improve realism for 3D virtual humans, particularly affecting areas around the nose and ears [S3]. It is chosen when performance is critical and the material can be well-approximated by a linear sum of Gaussians, whereas the random-walk method is preferred for accurate multiple scattering in complex geometries [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of scattering bounces. The random walk can terminate quickly in thin surfaces or require many steps in thick volumes [S1].
+*   **Memory Complexity:** Low, as it does not require storing a global volume grid like traditional volume rendering [S1].
+*   **Strengths:** Efficient for materials with well-defined surfaces (skin, milk) where multiple scattering is needed but global volume integration is overkill [S1]. Easier to control than volume rendering parameters [S1].
+*   **Limitations:** Not suitable for media without a well-defined surface, such as clouds or smoke, which require full volume rendering [S1]. Accuracy depends on the mesh quality and the validity of the homogeneous medium assumption.
+
+## Background
+The method is associated with Chiang (2016) and is implemented in the Cycles renderer as the "random-walk subsurface scattering" model [S2, unofficial]. It is also known as the Disney Subsurface Approximation due to its integration with the Disney Principled BSDF parameters [S2, unofficial]. The approach was developed to provide a more efficient alternative to volume rendering for translucent materials that require multiple scattering events [S1].
+
+## Sources
+[S1] Volumes — Blender Manual, https://www.blender.org/manual/nb/3.6/render/materials/components/volume.html, fetched 2026-10-26
+[S2] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)
+[S3] Jrender: An efficient differentiable rendering library based on Jittor, https://doi.org/10.1016/j.gmod.2023.101202, fetched 2026-10-27

@@ -1,0 +1,164 @@
+--- v006.md
++++ v007.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Face-based volume rendering with edge highlights renders volumetric data by treating individual cells (faces) as the primary sampling unit, applying a scalar-based colormap for the body, and superimposing anti-aliased edge highlights to enhance structural clarity [S1, unofficial]. It differs from silhouette-based methods by detecting edges locally within each cell based on vertex attribute discontinuities or importance factors, rather than relying on global view-dependent depth discontinuities [S1, unofficial]. This approach provides consistent edge visibility regardless of camera orientation, making it suitable for interactive exploration where structural boundaries must remain distinct from the volume interior [S1, unofficial].
++Face-based volume rendering with edge highlights renders volumetric data by treating individual cells (faces) as the primary sampling unit, applying a scalar-based colormap for the body, and superimposing anti-aliased edge highlights to enhance structural clarity [S1, unofficial]. It differs from silhouette-based methods by detecting edges locally within each cell based on vertex attribute discontinuities or importance factors, rather than relying on global view-dependent depth discontinuities [S1, unofficial].
+ 
+ ## How it works
+-The method operates in a fragment shader context where each fragment corresponds to a specific location within a volumetric cell (typically a quad or tetrahedron face). The algorithm blends the volume color with edge highlights using a back-to-front alpha compositing model.
++The method operates in a fragment shader context where each fragment corresponds to a specific location within a volumetric cell (typically a quad or tetrahedron face) [S1, unofficial]. The algorithm blends the volume color with edge highlights using a back-to-front alpha compositing model [S1, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -14,12 +14,13 @@
+ *   `vVertexPositions[4]`: World-space positions of the four vertices of the current cell [S1, unofficial].
+ *   `vVertexAttributes[4]`: Scalar values at the four vertices (e.g., density, temperature) [S1, unofficial].
+-*   `vLineAttributes[4]`: Importance or weight factors for the four edges of the cell [S1, unofficial].
++*   `vLineAttributes[4]`: Float array used to determine edge importance; an edge is considered important if `vLineAttributes[i] >= 1.0 - uImportantLineBoostFactor` [S1, unofficial].
+ *   `vEdgeLodValues[4]`: Pre-computed Level of Detail (LOD) values for the four edges [S1, unofficial].
+ *   `uCellScalarTex`: Texture containing scalar values for the cell (1 texel per face) [S1, unofficial].
+ *   Uniforms: Camera parameters (`uCameraPosition`, `uLookingDirection`), focus context (`uSphereCenter`, `uSphereRadius`), rendering parameters (`uLineWidth`, `uMaxLodValue`, `uSelectedLodValueFocus`, `uSelectedLodValueContext`, `uImportantLineBoostFactor`), colors (`uBackgroundColor`, `uForegroundColor`, `uEdgeColor`), and scalar range (`uScalarMin`, `uScalarMax`) [S1, unofficial].
++*   `contextFactor`, `focusFactor`, `fragmentDistance`: Depth cue and focus modulation factors [S1, unofficial].
+ 
+ **Outputs:**
+ *   Blended fragment color and alpha [S1, unofficial].
+-*   Custom depth value for subsequent processing [S1, unofficial].
++*   Custom depth value for subsequent processing via `gatherFragmentCustomDepth` [S1, unofficial].
+ 
+ ### Data Structures
+@@ -33,5 +34,5 @@
+     *   Compute the effective line width: $eWidthPrime = uLineWidth \times (-distanceToFocusPointNormalized \times 0.3 + 1.0)$ [S1, unofficial].
+     *   Compute the line radius: $lineRadius = eWidthPrime / 2.0$ [S1, unofficial].
+-    *   *Note:* `distanceToFocusPointNormalized` is a normalized distance from the fragment to the focus sphere center [S1, unofficial].
++    *   *Note:* `distanceToFocusPointNormalized` is the normalized distance from the fragment to the focus sphere center [G].
+ 
+ 2.  **Compute Volume Color:**
+@@ -91,16 +92,16 @@
+ ### Pseudocode
+ ```python
+-def face_based_edge_highlight(vFragmentPositionWorld, vVertexPositions, vVertexAttributes, vLineAttributes, vEdgeLodValues, uCellScalarTex, uLineWidth, uMaxLodValue, uSelectedLodValueFocus, uSelectedLodValueContext, uImportantLineBoostFactor, uEdgeColor, uBackgroundColor, uForegroundColor, uScalarMin, uScalarMax, contextFactor, focusFactor, fragmentDistance, uFovY, uViewportSize):
++def face_based_edge_highlight(vFragmentPositionWorld, vVertexPositions, vVertexAttributes, vLineAttributes, vEdgeLodValues, uCellScalarTex, uLineWidth, uMaxLodValue, uSelectedLodValueFocus, uSelectedLodValueContext, uImportantLineBoostFactor, uEdgeColor, uBackgroundColor, uForegroundColor, uScalarMin, uScalarMax, contextFactor, focusFactor, fragmentDistance, uFovY, uViewportSize, uSphereCenter, uSphereRadius):
+     # 1. Line Geometry
+-    # distanceToFocusPointNormalized is assumed to be available from context
++    distanceToFocusPointNormalized = length(vFragmentPositionWorld - uSphereCenter) / uSphereRadius
+     eWidthPrime = uLineWidth * (-distanceToFocusPointNormalized * 0.3 + 1.0)
+     lineRadius = eWidthPrime / 2.0
+     
+     # 2. Volume Color
+-    cellScalar = 0.25 * sum(vVertexAttributes)
++    cellScalar = 0.25 * (vVertexAttributes[0] + vVertexAttributes[1] + vVertexAttributes[2] + vVertexAttributes[3])
+     t = (cellScalar - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6)
+     baseColor = colormap(clamp(t, 0.0, 1.0))
+-    volumeColor = vec4(baseColor, 1.0)
+-    volumeColor.a *= contextFactor
++    volumeColor = [baseColor[0], baseColor[1], baseColor[2], 1.0]
++    volumeColor[3] *= contextFactor
+     
+     # 3. Init LOD and Distances
+@@ -143,5 +144,5 @@
+             
+     # 5. Edge Highlight
+-    lineColor = vec4(0.0, 0.0, 0.0, 0.0)
++    lineColor = [0.0, 0.0, 0.0, 0.0]
+     
+     if isLineNear and minDistance <= lineRadius:
+@@ -166,33 +167,66 @@
+         coverage = 1.0 - smoothstep(1.0 - 2.0 * EPSILON, 1.0, lineCoordinates)
+         
+-        lineColor = vec4(lineBaseColor, coverage * lodLevelOpacityFactor)
++        lineColor = [lineBaseColor[0], lineBaseColor[1], lineBaseColor[2], coverage * lodLevelOpacityFactor]
+         
+     # 6. Composite
+-    blendedColor_a = lineColor.a + volumeColor.a * (1.0 - lineColor.a)
+-    blendedColor_rgb = lineColor.rgb * lineColor.a + volumeColor.rgb * volumeColor.a * (1.0 - lineColor.a)
++    blendedColor_a = lineColor[3] + volumeColor[3] * (1.0 - lineColor[3])
++    blendedColor_rgb = [
++        lineColor[0] * lineColor[3] + volumeColor[0] * volumeColor[3] * (1.0 - lineColor[3]),
++        lineColor[1] * lineColor[3] + volumeColor[1] * volumeColor[3] * (1.0 - lineColor[3]),
++        lineColor[2] * lineColor[3] + volumeColor[2] * volumeColor[3] * (1.0 - lineColor[3])
++    ]
+     
+     if blendedColor_a > 1e-4:
+-        blendedColor_rgb /= blendedColor_a
+-        
+-    return vec4(blendedColor_rgb, blendedColor_a)
+-
+-def get_distance_to_line_segment(point, p1, p2):
+-    # Standard point-to-line-segment distance in 3D
+-    # Returns Euclidean distance
+-    pass
++        blendedColor_rgb = [c / blendedColor_a for c in blendedColor_rgb]
++        
++    return blendedColor_rgb + [blendedColor_a]
++
++def get_distance_to_line_segment(p, a, b):
++    ab = [b[j] - a[j] for j in range(3)]
++    ap = [p[j] - a[j] for j in range(3)]
++    ab_dot_ab = sum(x*x for x in ab)
++    if ab_dot_ab == 0.0:
++        return length([p[j] - a[j] for j in range(3)])
++    t = sum(ap[j]*ab[j] for j in range(3)) / ab_dot_ab
++    t = max(0.0, min(1.0, t))
++    closest = [a[j] + ab[j]*t for j in range(3)]
++    return length([p[j] - closest[j] for j in range(3)])
+ 
+ def get_antialiasing_factor(distance, fovY, viewportSize):
+-    return distance / viewportSize.y * fovY
++    return distance / viewportSize[1] * fovY
+ 
+ def colormap(t):
+-    # Viridis 5-stop colormap implementation
+-    pass
++    # Viridis 5-stop colormap [G]
++    stops = [(0.267004, 0.004874, 0.329415), (0.282634, 0.408305, 0.663236), (0.369214, 0.724701, 0.550856), (0.832055, 0.897605, 0.293494), (0.993248, 0.906157, 0.143936)]
++    idx = t * 4.0
++    i = int(idx)
++    f = idx - i
++    if i >= 4: i = 4
++    c0 = stops[i]
++    c1 = stops[min(i+1, 4)]
++    return [c0[j] + (c1[j] - c0[j]) * f for j in range(3)]
++
++def mix(a, b, t):
++    return a + (b - a) * t
++
++def smoothstep(edge0, edge1, x):
++    t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
++    return t * t * (3.0 - 2.0 * t)
++
++def clamp(x, a, b):
++    return max(a, min(b, x))
++
++def dot(a, b):
++    return sum(a[j]*b[j] for j in range(len(a)))
++
++def length(v):
++    return sum(x*x for x in v) ** 0.5
+ ```
+ 
+ ### Parameters and Typical Values
+-*   `uLineWidth`: Base width of the edge highlight. Typical values depend on viewport resolution.
+-*   `uMaxLodValue`: Scaling factor for LOD values.
+-*   `uSelectedLodValueFocus` / `uSelectedLodValueContext`: Thresholds for focus and context LOD levels.
+-*   `uImportantLineBoostFactor`: Threshold to distinguish important lines.
++*   `uLineWidth`: Base width of the edge highlight. Not given in the sources.
++*   `uMaxLodValue`: Scaling factor for LOD values. Not given in the sources.
++*   `uSelectedLodValueFocus` / `uSelectedLodValueContext`: Thresholds for focus and context LOD levels [S1, unofficial].
++*   `uImportantLineBoostFactor`: Threshold to distinguish important lines. Not given in the sources.
+ *   `LOD_EPSILON`: Small constant (0.001) to prevent division by zero or invalid LOD states [S1, unofficial].
+ 
+@@ -205,11 +239,9 @@
+ *   **Time Complexity:** $O(1)$ per fragment, as it iterates over a fixed number of vertices (4) per cell [S1, unofficial].
+ *   **Memory Complexity:** $O(W \times H)$ for the PPLL buffers (Start Offset and Fragment Buffer) if used for fragment management, plus texture storage for cell scalars [S1, unofficial].
+-*   **Strengths:** Provides consistent edge visibility independent of view angle; integrates seamlessly with volume rendering pipelines; allows for LOD-based detail control [S1, unofficial].
++*   **Strengths:** Integrates seamlessly with volume rendering pipelines; allows for LOD-based detail control [S1, unofficial].
+ *   **Limitations:** Edge detection is local to the cell, which may miss global structural boundaries; performance depends on the cost of distance-to-line-segment calculations [S1, unofficial].
+-*   **When to Use:** Interactive volume visualization where structural edges are critical and view-independent highlighting is desired [S1, unofficial].
+-*   **When Not to Use:** When global silhouettes or view-dependent contours are required, or when computational resources are extremely limited and PPLL overhead is prohibitive [S1, unofficial].
+ 
+ ## Background
+-The method is derived from the "ClearView" rendering technique, specifically the "HexMeshUnified" fragment shader implementation, which integrates volume coloring with edge highlighting [S1, unofficial]. It is part of a broader effort to enhance perceptual clarity in volumetric data visualization through non-photorealistic rendering techniques [S1, unofficial]. The implementation uses a Parallel Prefix List List (PPLL) structure for efficient fragment management, a technique common in high-performance graphics applications [S1, unofficial].
++The method is derived from the "ClearView" rendering technique, specifically the "HexMeshUnified" fragment shader implementation, which integrates volume coloring with edge highlighting [S1, unofficial]. The implementation uses a Parallel Prefix List List (PPLL) structure for efficient fragment management, a technique common in high-performance graphics applications [S1, unofficial].
+ 
+ ## Sources

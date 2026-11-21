@@ -1,0 +1,132 @@
+# Overall Training Pipeline
+
+Also called: UP-NeRF training, coarse-to-fine with scheduling
+
+## Overview
+This article describes the complete training loop for Unconstrained Pose-Prior-Free Neural Radiance Fields (UP-NeRF), which jointly optimizes camera poses, scene geometry, and appearance from unordered, unposed image collections [S1, unofficial]. It integrates a coarse-to-fine hierarchical sampling strategy with a dynamic loss weighting scheme that transitions from feature/depth supervision to RGB reconstruction as training progresses [S1, unofficial]. Unlike standard NeRF pipelines, this method explicitly handles transient artifacts and mirror-symmetry ambiguities through detached network heads and specific scheduling parameters [S1, unofficial].
+
+## How it works
+**Inputs:** A set of unordered images $I$, initial camera poses (typically identity), and pre-extracted deep features (e.g., DINO) and monocular depth estimates (e.g., DPT) [S1, unofficial].
+**Outputs:** Optimized camera poses $p$, neural radiance field parameters (coarse and fine MLPs), and transient network parameters [S1, unofficial].
+
+**Data Structures:**
+*   **Coarse Model:** MLP predicting density $\sigma$ and color $C$. Uses detached transient outputs $\hat{\alpha}(\tau)$ and $\hat{C}_i(\tau)$ for rendering [S1, unofficial].
+*   **Fine Model:** MLP predicting density $\sigma$ and color $C$. Uses candidate density $\sigma_i$ for sampling [S1, unofficial].
+*   **Transient Network ($T$):** Predicts transient confidence weight $W_{depth}$ and transient color/density components [S1, unofficial].
+*   **Pose Parameters:** Optimizable camera poses $p$ and depth factors $s_i, t_i$ [S1, unofficial].
+
+**Parameters:**
+*   Total iterations: 600,000 [S1, unofficial].
+*   Rays per step: 2,048 randomly sampled pixel rays [S1, unofficial].
+*   Sampling points per ray: 128 for both coarse and fine models [S1, unofficial].
+*   Learning rate (NeRF & TransientNet): $5 \times 10^{-4}$ decaying to $5 \times 10^{-5}$ [S1, unofficial].
+*   Learning rate (Pose & Depth factors): $2 \times 10^{-3}$ decaying to $1 \times 10^{-3}$ [S1, unofficial].
+*   Scheduling parameters $u, v$: 0.1, 0.5 [S1, unofficial].
+*   Depth loss weight $\lambda_d$: 0.001 [S1, unofficial].
+*   Optimizer: Adam [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Set initial camera poses to identity transformation. Extract deep features and monocular depth offline [S1, unofficial].
+2.  **Sampling:**
+    *   For the **coarse model**, sample points using density $\sigma$. Render using detached transient outputs $\hat{\alpha}(\tau)$ and $\hat{C}_i(\tau)$ [S1, unofficial].
+    *   For the **fine model**, compose the sample set using both shared density $\sigma$ and candidate density $\sigma_i$. The usage of $\sigma_i$ is governed by the scheduling factor $w_{u,v}$ [S1, unofficial].
+3.  **Loss Computation:**
+    *   Compute RGB loss for the coarse model:
+        $$ L_{coarse\_rgb} = \frac{1}{2} \| \hat{C}_i(r) - C_i(r) \|_2^2 $$
+        where $\hat{C}_i(r)$ is the rendered color using detached transient outputs and no uncertainty [S1, unofficial].
+    *   Compute the total loss for the fine model:
+        $$ L = w_{u,v} L_{rgb} + (1 - w_{u,v}) (L_{feat} + \lambda_d L_{depth}) $$
+        where $L_{rgb}$ is the RGB reconstruction loss, $L_{feat}$ is the feature matching loss, and $L_{depth}$ is the depth consistency loss [S1, unofficial].
+    *   The scheduling factor $w_{u,v}$ controls the transition. At the start ($w_{u,v} \approx 0$), the model relies on features and depth. As training progresses ($w_{u,v} \to 1$), it relies on RGB reconstruction [S1, unofficial].
+4.  **Transient Handling:** The transient confidence weight $W_{depth}$ is manually detached (gradient stop) to prevent its parameters from affecting the NeRF backbone directly [S1, unofficial]. The TransientNet is optimized using the fine model alone [S1, unofficial].
+5.  **Optimization:** Update all parameters using Adam. The coarse-to-fine strategy is active from training progress 0.1 to 0.5 [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+poses = IdentityTransformations(num_images)
+nerf_coarse = InitMLP()
+nerf_fine = InitMLP()
+transient_net = InitMLP()
+optimizer_nerf = Adam(nerf_coarse.parameters() + nerf_fine.parameters(), lr=5e-4)
+optimizer_transient = Adam(transient_net.parameters(), lr=5e-4)
+optimizer_pose = Adam(poses.parameters() + depth_factors.parameters(), lr=2e-3)
+
+# Scheduling parameters
+u, v = 0.1, 0.5
+lambda_d = 0.001
+
+for iteration in range(600000):
+    # 1. Sample rays
+    rays = SampleRandomPixels(num_rays=2048)
+    
+    # 2. Compute scheduling factor w_u,v based on iteration progress
+    # Note: Exact formula for w_u,v is not provided in sources, 
+    # but it transitions from 0 to 1 between progress u and v [S1, unofficial]
+    progress = iteration / 600000
+    w_u_v = ComputeSchedulingFactor(progress, u, v)
+    
+    # 3. Coarse Model Forward Pass
+    # Sample points using coarse density sigma
+    points_coarse = SamplePoints(rays, nerf_coarse.density, num_samples=128)
+    
+    # Render with detached transient outputs
+    # Detach transient parameters to prevent gradient flow to NeRF
+    alpha_detached = transient_net.alpha(points_coarse).detach()
+    C_transient_detached = transient_net.color(points_coarse).detach()
+    
+    C_coarse_rendered = VolumetricRender(points_coarse, nerf_coarse.color, alpha_detached)
+    C_gt = rays.gt_color
+    
+    L_coarse_rgb = 0.5 * SquaredL2Norm(C_coarse_rendered - C_gt)
+    
+    # 4. Fine Model Forward Pass
+    # Sample points using both sigma and candidate sigma_i
+    # The mix depends on w_u,v [S1, unofficial]
+    points_fine = SamplePointsMixed(rays, nerf_coarse.density, nerf_fine.candidate_density, w_u_v, num_samples=128)
+    
+    # Render fine model
+    C_fine_rendered = VolumetricRender(points_fine, nerf_fine.color, transient_net.alpha(points_fine))
+    
+    L_rgb = SquaredL2Norm(C_fine_rendered - C_gt)
+    
+    # Compute feature and depth losses
+    L_feat = FeatureLoss(rays.features, ExtractFeatures(C_fine_rendered))
+    L_depth = DepthLoss(rays.depth, ExtractDepth(C_fine_rendered))
+    
+    # 5. Total Loss
+    L_total = w_u_v * L_rgb + (1 - w_u_v) * (L_feat + lambda_d * L_depth)
+    
+    # 6. Backpropagation
+    optimizer_nerf.zero_grad()
+    optimizer_transient.zero_grad()
+    optimizer_pose.zero_grad()
+    
+    L_total.backward()
+    
+    optimizer_nerf.step()
+    optimizer_transient.step()
+    optimizer_pose.step()
+```
+
+## Subtopics
+
+### [LU-NeRF Architecture and Training](17167-lu-nerf-architecture-and-training.md)
+LU-NeRF (Local Unposed NeRF) is a method for estimating camera poses and reconstructing neural scene representations from unordered, unposed image collections, specifically designed for few-shot scenarios. It differs from prior unposed NeRF approaches by operating in the general SE(3) pose setting without restrictive pose priors, utilizing a local-to-global pipeline that first learns local mini-scene representations and then synchronizes them into a global frame. Unlike methods that rely on coarse-to-fine frequency scheduling like BARF, LU-NeRF employs a compact MLP without positional encoding and resolves mirror-symmetry ambiguities through a dedicated secondary training stage.
+
+## Operating characteristics
+*   **Time Complexity:** High due to 600K iterations and dual coarse/fine model evaluations per step [S1, unofficial].
+*   **Memory Complexity:** Increased by storing coarse and fine MLPs, transient network, and pre-extracted features/depth [S1, unofficial].
+*   **Performance:** Achieves comparable quality to reference NeRF with perfect poses on the PhotoTourism dataset (e.g., Brandenburg Gate PSNR 26.50 vs NeRF 26.29) [S1, unofficial].
+*   **Strengths:** Robust pose estimation in unconstrained settings; handles transient artifacts effectively via detached heads [S1, unofficial].
+*   **Limitations:** Relies on pseudo-labels from monocular depth networks, which can degrade rendering quality if overused (hence the scheduling) [S1, unofficial].
+*   **When to use:** Unordered, unposed image collections where initial pose estimates are poor or unavailable [S1, unofficial].
+*   **When not to use:** When ground-truth poses are available or when computational resources are severely limited [S1, unofficial].
+
+## Background
+UP-NeRF was introduced in 2023 by the authors of "UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields" [S1, unofficial]. It builds upon the BARF (Blending Artificial Reality Features) coarse-to-fine strategy [S1, unofficial]. The method addresses the limitations of prior unposed NeRF approaches that relied on restrictive pose priors or failed to converge when combined with other techniques like BARF [S1, unofficial]. It is used for novel view synthesis and camera pose estimation on datasets like PhotoTourism [S1, unofficial].
+
+## Sources
+[S1] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)

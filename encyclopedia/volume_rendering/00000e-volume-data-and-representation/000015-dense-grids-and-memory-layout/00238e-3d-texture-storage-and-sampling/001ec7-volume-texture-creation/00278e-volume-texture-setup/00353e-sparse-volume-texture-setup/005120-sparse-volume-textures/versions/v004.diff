@@ -1,0 +1,110 @@
+--- v003.md
++++ v004.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-Sparse Volume Textures (SVT) is a volume rendering technique in Unreal Engine 5 that renders large, sparse volumetric datasets (up to ~6 gigavoxels) by sampling data stored in sparse tiles within a large volume texture [S1, S2, unofficial][S3]. It solves the problem of integrating sparse, potentially animated 3D data into the rendering pipeline using standard material nodes, circumventing the DirectX 11 API limit of contiguous memory allocation for large textures [S2, unofficial][S3]. Unlike debug viewers or fog-specific renderers, it supports full lighting, emission, and color, making it suitable for scientific data visualization [S1, unofficial]. It builds on [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md) by defining the material and actor workflow required to visualize the data.
++Sparse Volume Textures (SVT) is a volume rendering technique in Unreal Engine 5 that renders large, sparse volumetric datasets (up to ~6 gigavoxels) by sampling data stored in sparse tiles within a large volume texture [S1, S2, unofficial][S3]. It solves the problem of integrating sparse, potentially animated 3D data into the rendering pipeline using standard material nodes, circumventing the DirectX 11 API limit of contiguous memory allocation for large textures [S2, unofficial][S3]. Unlike debug viewers or fog-specific renderers, it supports full lighting, emission, and color, making it suitable for scientific data visualization [S1, unofficial]. It builds on [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md) by defining the material and actor workflow required to visualize the data [S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A Sparse Volume Texture asset (typically imported from an OpenVDB/VDB file) [S3, S4].
+-*   **Input:** A Volume-domain material instance [S4].
++*   **Input:** A Volume-domain material instance [S3, S4].
+ *   **Input:** A Heterogeneous Volume Actor in the scene [S4].
+ *   **Output:** Rendered volumetric image with lighting, shadows, and emission [S1, unofficial][S4].
+@@ -17,12 +17,10 @@
+ *   **Attributes A and B:** Output pins from the SVT Sample node, both returning `float4` vectors [S3]. Attribute A typically contains density in its first channel [S3].
+ *   **Lighting Cache:** A dense internal volume cache used for lighting calculations [S4]. It does not allocate a volume resolution greater than $1024 \times 1024 \times 512$ voxels [S4].
+-*   **Voxel Grids:** Two grids are used for voxelization (emission, extinction, albedo):
+-    *   World-space (Ortho) Grid [S4].
+-    *   Frustum-aligned Grid [S4].
++*   **Voxel Grids:** Two grids are used for voxelization (emission, extinction, albedo): World-space (Ortho) Grid [S4] and Frustum-aligned Grid [S4].
+ 
+ **Numbered Steps:**
+ 1.  **Import Data:** Import a VDB file into the Content Browser (drag-and-drop or Import button) to create a Sparse Volume Texture asset [S4].
+ 2.  **Create Material:** Create a Volume-domain material. Set the Material Domain to `Volume` and the Blend Mode to `Additive` [S3].
+-3.  **Sample SVT:** Add a `Sparse Volume Texture Sample` node to the material graph. Connect the SVT asset to this node [S3, S4].
++3.  **Sample SVT:** Add a `Sparse Volume Texture Sample` node to the material graph. Assign the SVT asset to a material parameter (e.g., `SparseVolumeTexture`) that feeds into this node [S4].
+ 4.  **Compute UVs:** Provide three-dimensional UV coordinates to the sample node. These can be computed from world space position (optional; if unassigned, the engine computes them automatically using the same logic) [S3]. The UV space extends from 0 to 1 in all three dimensions (XYZ) [S3].
+ 5.  **Extract Data:** Retrieve data from the `Attributes A` and `Attributes B` output pins (both `float4`) [S3]. Use the first channel of Attribute A for density in the simplest setup [S3].
+@@ -34,30 +32,58 @@
+ **Formulas and Parameters:**
+ *   **UV Coordinates:** $UV \in [0, 1]^3$. The UV space spans the union of bounding boxes of individual frames [S3].
+-*   **Lighting Step Size:** $Step = Factor \times Resolution$ [S4]. Increasing `Lighting Step Factor` takes longer steps, sacrificing quality for performance [S4].
+-*   **Shadow Step Size:** $Step = Factor \times Resolution$ [S4]. Increasing `Shadow Step Factor` takes longer steps, sacrificing quality for performance [S4].
+-*   **Lighting Cache Resolution:** $Resolution_{cache} = Resolution_{SVT} / LightingDownsampleFactor$ [S4]. The cache is dense [S4].
+-*   **Streaming Mip Bias:** Controls the texture level. Lower values = higher density/quality; higher values = lower density/quality [S4].
++*   **Lighting Step Size:** $Step = Factor \times Resolution$. Increasing `Lighting Step Factor` takes longer steps, sacrificing quality for performance [S4].
++*   **Shadow Step Size:** $Step = Factor \times Resolution$. Increasing `Shadow Step Factor` takes longer steps, sacrificing quality for performance [S4].
++*   **Shadow Bias:** Adjusts the initial voxel bias applied when calculating shadows. Increasing it reduces self-shadowing but may introduce light leaking [S4].
++*   **Lighting Cache Resolution:** $Resolution_{cache} = Resolution_{SVT} / LightingDownsampleFactor$. The cache is dense and does not allocate a volume resolution greater than $1024 \times 1024 \times 512$ voxels [S4].
++*   **Streaming Mip Bias:** Controls the texture level. Lower values equate to higher density and quality; higher values have less density and quality [S4].
++*   **Console Variables:** `r.PathTracing.HeterogeneousVolumes` enables path tracing (default 0) [S4]. `r.HeterogeneousVolumes.MaxStepCount` sets the maximum ray-marching step count (default 512) [S4]. `r.HeterogeneousVolumes.Shadows.Resolution` sets the volumetric shadow map resolution (default 512) [S4]. `r.HeterogeneousVolumes.OrthoGrid.MaxBottomLevelMemoryInMegabytes` and `r.HeterogeneousVolumes.FrustumGrid.MaxBottomLevelMemoryInMegabytes` set memory limits for voxel grids (default 128 MB, recommended 512 MB) [S4].
+ 
+ **Pseudocode (Material Graph Logic):**
+ ```python
+-# Simplified representation of the material graph logic
+-def render_svt_material(svt_asset, world_position):
++import math
++
++def evaluate_svt_material(svt_asset, volume_origin, volume_size, world_position, ray_direction, max_steps, step_factor, downsample_factor):
+     # 1. Compute 3D UV coordinates from world position
+-    # If UVs are not provided, engine auto-computes:
+-    # uv = (world_position - volume_origin) / volume_size
+-    uv = compute_3d_uv_from_world(world_position)
+-    
++    # UV space is [0, 1]^3 spanning the volume resolution [S3]
++    uv = [(world_position[i] - volume_origin[i]) / volume_size[i] for i in range(3)]
++    uv = [max(0.0, min(1.0, u)) for u in uv]  # Clamp to [0, 1] [G]
++
+     # 2. Sample the Sparse Volume Texture
+-    # Returns two float4 vectors: Attribute A and Attribute B
+-    attribute_a, attribute_b = svt_asset.sample(uv)
+-    
+-    # 3. Extract density (typically first channel of Attribute A)
+-    density = attribute_a.x
+-    
+-    # 4. Apply lighting and shading based on density
+-    # This involves ray marching through the volume
+-    color = apply_lighting(density, attribute_a, attribute_b)
+-    
+-    return color
++    # Returns two float4 vectors: Attribute A and Attribute B [S3]
++    attr_a, attr_b = svt_asset.sample(uv)
++
++    # 3. Extract density (first channel of Attribute A) [S3]
++    density = attr_a[0]
++
++    # 4. Raymarching setup based on volume resolution and parameters [S4]
++    base_step = 1.0 / max(volume_size)  # Normalized step per voxel [G]
++    step_size = base_step * step_factor  # Lighting Step Factor [S4]
++    max_march_dist = max_steps * step_size  # r.HeterogeneousVolumes.MaxStepCount [S4]
++
++    # 5. Raymarching loop
++    t = 0.0
++    accumulated_transmittance = 1.0
++    accumulated_color = [0.0, 0.0, 0.0]
++
++    while t < max_march_dist and accumulated_transmittance > 0.01:
++        sample_pos = [world_position[i] + ray_direction[i] * t for i in range(3)]
++        sample_uv = [(sample_pos[i] - volume_origin[i]) / volume_size[i] for i in range(3)]
++        sample_uv = [max(0.0, min(1.0, u)) for u in sample_uv]  # Clamp to [0, 1] [G]
++
++        # Sample SVT at current ray position
++        s_attr_a, s_attr_b = svt_asset.sample(sample_uv)
++        s_density = s_attr_a[0]
++
++        # Accumulate color and transmittance (simplified Beer-Lambert) [G]
++        extinction = max(s_density, 0.001)
++        color = s_attr_b[0:3]  # Assume B holds color/emission
++        alpha = 1.0 - math.exp(-extinction * step_size)
++
++        accumulated_color = [accumulated_color[i] + accumulated_transmittance * color[i] * alpha for i in range(3)]
++        accumulated_transmittance *= (1.0 - alpha)
++
++        t += step_size
++
++    return accumulated_color
+ ```
+ 

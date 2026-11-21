@@ -1,0 +1,147 @@
+# CHAPTER 44
+
+# PATH TRACING RBF PARTICLE VOLUMES
+
+Aaron Knoll, Gregory P. Johnson, and Johannes Meng Intel Corporation
+
+## ABSTRACT
+
+Particle volume data are common in scientific computing applications such as cosmology and molecular dynamics, and increasingly in smoke and fluid animations. Path tracing particle data directly has historically proven challenging; most existing approaches rely on conversion to structured volumes, proxy geometry such as slicing or splatting, or special techniques optimized for ray casting but not path tracing. However, it remains desirable to render particles without simplification and with full control over the volume reconstruction filter, in a manner consistent with increasingly ubiquitous ray tracing APIs. In this chapter, we detail a method for quickly traversing, sampling, and path tracing particle volumes using a radial basis function (RBF) model, implemented using the Intel® Open Volume Kernel Library (VKL) and OSPRay rendering framework but suited for general ray tracing hardware and software APIs.
+
+
+
+Figure 44-1. Five million particle HACC [4] cosmology particle data set, path traced with Intel Open VKL at 1.8 FPS on an Intel Xeon 8180M, 28 cores, 2.5 GHz.
+
+## 44.1 INTRODUCTION
+
+Particle rendering has diverse origins, applications, and needs. For effects in games, the most popular approach remains to resample onto axis-aligned texture slices (e.g., [3]). In film, it is typical to compute and render the boundary mesh from large particle fluid simulations using marching cubes [12] or more sophisticated techniques. In scientific visualization, different techniques may be appropriate depending on the goal. For example, computational fluid dynamics data are most frequently converted to structured volumes, then isosurfaced or direct volume rendered. Large molecular data are frequently represented as explicit spherical glyphs or isosurfaces and either ray traced or rasterized. Volume splatting [18] projects particles into 2D billboards with an elliptical footprint. It scales as well as the underlying rendering technique—traditionally rasterization.
+
+In many cases, it is desirable to render particle data as actual particles, or to model them as a volume composed of overlapping radial basis functions (RBFs). Modern gravitational N-body cosmology simulations employ millions to trillions of particles, and large molecular dynamics simulations consist of millions to billions of atoms. It is helpful to visually resolve these simulations down to their individual computational elements, without simplification. In the previous Ray Tracing Gems book, Knoll et al. [10] showed how to leverage a ray tracing framework to more effectively render large, sparse particle volume data using splatting. This allowed for hundreds of millions of individual particles to be splatted interactively at 4000 resolution, with no simplification, proxy geometry, or filtering of the original data. This approach could be limiting; closely spaced "overlapping" particles resulted in both visual clutter and pathological performance with bounding volume hierarchy (BVH)–based ray tracing methods. Grouping and sorting a subset of particles by depth dramatically improved performance but limited the rendering to primary ray casting as opposed to path tracing.
+
+Volume rendering with a radial basis function model solves the overlap issue by treating the whole volume as one scalar field composed of additive weighted kernels. This method is frequently referred to as a smoothed particle hydrodynamics (SPH) approach due to its use in visualizing SPH fluid dynamics codes. With RBF volume rendering, in contrast to splatting, one can adjust the radius and weight of the kernels to achieve a smoothing or sharpening filter over particles as desired. Previous implementations (e.g., [14, 11]) employed optimizations that restricted them to ray casting. In this chapter, we show how to efficiently path-trace RBF volumes. Our renderer is similar to the Woodcock-tracking volume path tracer of Raab [16], except we implement RBF reconstruction within a volume sampling kernel API (Intel® Open Volume Kernel Library [7]), leverage interval iterators for space skipping, and allow for abstraction of the rendering method (ray casting, ray casting with ambient occlusion, and path tracing) in the Intel® OSPRay [17, 8] rendering framework. However, our method would be applicable to other ray tracing software architectures, including NVIDIA OptiX [13].
+
+## 44.2 OVERVIEW
+
+#### 44.2.1 RBF AND SPH FIELDS
+
+A radial basis function is a continuous, real-valued function ϕ of distance from a center of a particle. A RBF scalar field Φ is defined by summing the kernels for all particles i contributing to a point x in space:
+
+$$d_i(\mathbf{x}) = \|\mathbf{x} - \mathbf{x}_i\|, \quad \Phi(\mathbf{x}) = \sum_i \phi_i(d_i(\mathbf{x})). \quad (44.1)$$
+
+Smoothed particle hydrodynamics are an extension of RBFs that apply a partition of unity rule.
+
+In choosing ϕ, one can opt for kernels with either infinite support or compact support such as a polynomial. In our implementation, we use Gaussians:
+
+$$\phi_f(\mathbf{x}) = w_f e^{-\frac{1}{2}(\mathbf{d}_f(\mathbf{x})/\mathbf{r}_f)^2}, \quad (44.2)$$
+
+where wi is the weight and ri is the radius of the Gaussian. In practice, we truncate at a support radius of σri (defaulting to σ = 3); this behavior can change based on the chosen transfer function and performance needs of the user.
+
+#### 44.2.2 VOLUME RENDERING AND DELTA TRACKING
+
+The Radiative Transfer Equation (RTE) [1, 9] describes how emission, extinction, and in-scattering change radiance along a ray x(t) = o – t · ω inside a participating medium.
+
+It relies on three coefficients to model these effects: the scattering coefficient σs(t), the absorption coefficient σa(t), and the emission coefficient σe(t). Because extinction can be due to both absorption and out-scattering, the combined extinction coefficient σt (t) = σa(t) + σs(t) is often used. The phase function is a
+
+probability density function φ(ωi → ω) that models which part of the incident radiance from direction ωi is scattered into the ray.
+
+With transmittance T(0, t) = exp(– R t 0 σt (s)d*s*), the solution to the RTE can be derived as the recursive formulation:
+
+$$L(0, \omega) = \int_0^\infty T(0, t) \cdot \left[ \sigma_e(t) L^e(t, \omega) + \sigma_s \int_{4\pi} \varphi(\omega_i \rightarrow \omega) L(t, \omega_j) d\omega_j \right] dt. \quad (44.3)$$
+
+In scientific visualization, the RTE is often simplified by assuming that the medium does not scatter (σs = 0), instead relying purely on emission and absorption.
+
+Equation 44.3 simplifies accordingly:
+
+$$L(0, \omega) = \int_0^\infty T(0, t) \cdot \sigma_e(t) L^e(t, \omega) dt. \quad (44.4)$$
+
+Additionally, a transfer function is often used to modify L e and T based on the underlying scalar field Φ, a color color map C, and an opacity map α:
+
+$$L^{\varepsilon}(t, -\omega) = L^{\varepsilon} \left( \mathbf{C}(\Phi(t)), -\omega \right), \quad T(t, -\omega) = T \left( \alpha(\Phi(t)), -\omega \right). \quad (44.5)$$
+
+Numerical integration of Equation 44.3 involves a choice of where and how frequently to sample this medium. The most straightforward approach picks a fixed distance between samples and approximates the value of the integral using quadrature. This approach is appropriate for deterministic volume rendering (i.e., ray marching), though it can lead to undersampling artifacts.
+
+In Monte Carlo rendering (i.e., path tracing), uniform sampling invariably introduces bias. Instead, random distances to volume events are generated, usually by sampling the transmittance function. In homogeneous participating media, this can be done analytically.
+
+A popular solution in the presence of spatially varying participating media is to use the method of Woodcock et al. [19]. The key insight of the method is that one may fill the medium with "virtual" particles such that it is essentially homogeneous, and apply the usual analytic sampling method using the new effective extinction coefficient σt,max:
+
+$$t = -\frac{\ln(1-\xi)}{\sigma_{t,\max}}, \quad (44.6)$$
+
+where ξ ∈ [0, 1) is a uniformly distributed random number. Upon sampling an event, one must then reject interactions with "virtual" particles with
+
+probability
+
+$$P[\text{virtual}] = 1 - \frac{\sigma_t}{\sigma_{t,\max}}. \quad (44.7)$$
+
+This results in a path tracing algorithm that is both adaptive and unbiased. For a more comprehensive comparison of delta tracking, we refer readers to [15].
+
+## 44.3 IMPLEMENTATION
+
+Our implementation in Intel OSPRay [8] and Open Volume Kernel Library (VKL) [7] allows for use in a wide range of rendering applications: ray casting, ray tracing with ambient occlusion rays, implicit isosurface rendering, distributed rendering with a Message Passing Interface (MPI), and path tracing. We use ISPC [6] as our kernel language; semantically, it is similar to CUDA or HLSL except that uniform variables are assumed to be constant across SIMD lanes or compute threads. All code is open source under the Apache 2.0 license and maintained in OSPRay and Open VKL.
+
+#### 44.3.1 PREPROCESS AND MAXIMUM VALUE ESTIMATION
+
+The preprocess pipeline for a particle volume consists of building a bounding volume hierarchy around individual particles. A radiusSupportFactor parameter is given by the user as a multiple of the base particle radius (defaulting to 3). This determines the BVH bounds' tightness; smaller values improve performance at the cost of potential artifacts due to RBF truncation. We then build the BVH using Embree [5] builders.
+
+For delta tracking, it is crucial to know an accurate maximum density value to determine σt,max in Equation 44.6. Moreover, by knowing local value ranges of the RBF field over the BVH nodes a priori, we can determine base sampling rates when stepping through the volume, using either ray casting or delta tracking. By mapping these values into a transfer function, we also know whether to skip whole regions of a volume. Estimating this value over the entire RBF field is a global optimization problem. To find these minima and maxima, we have implemented a heuristic that estimates the value ranges for all BVH leaf nodes. Our algorithm iterates over the set of leaf nodes of the BVH; currently, each leaf is built over one particle. Within each leaf node, we evaluate the RBF field Φ over a small grid (e.g., 103 points) and determine the local minimum and maximum value of those samples. Samples are computed using the same kernel used in rendering, given in the pseudocode in Listing 44-1. We then update the value ranges of interior nodes and store the global minimum and maximum values.
+
+#### Listing 44-1. Intersect and sample.
+
+ bool intersectAndSampleParticle(VKLParticleVolume \*uniform self, uniform uint64 id, float &result, vec3f samplePos) { float value = 0.f; uniform vec3f particleCenter = get\_vec3f(self->positions , id); uniform float radius = get\_float(self->radii, id); uniform float w = get\_float(self->weights , id); delta = samplePos - particleCenter; if (length(delta) < radius \* self->radiusSupportFactor) { value = w \* expf(-0.5f \* dot(delta, delta) / (radius \* radius)); } result += value; if (self->clampMaxCumulativeValue > 0.f) { result = min(result, self->clampMaxCumulativeValue); // Early termination of RBF evaluation return all(result == self->clampMaxCumulativeValue); } return false; } inline float VKLParticleVolume\_sample(const Sampler \*uniform sampler , const vec3f &samplePos) { const VKLParticleVolume \*uniform self = (const VKLParticleVolume \*uniform)sampler ->volume; float sampleResult = 0.f; traverseBVH(bvhRoot , sampler ->volume, intersectAndSampleParticle , sampleResult , samplePos); return sampleResult; }
+
+Value estimation has a worst-case complexity of O(N ) and can be costly. It is sensible for small data sets with unpredictable behavior, i.e., if there is significant overlap of differently weighted particles, or if the user cannot accurately guess a cumulative maximum value. In many other cases, for example, the large cosmology data sets, it suffices for the user to manually specify clampMaxCumulativeValue and opt to avoid this preprocess step.
+
+## 44.3.2 RBF VOLUME SAMPLING IN OPEN VKL
+
+The core of our implementation in Open VKL is traversal of a BVH built around the particle data, with a custom intersection routine in which we evaluate a RBF at the sample position samplePos and accumulate the result value. To
+
+do this, we call traverseBVH() (the equivalent of rtTrace() in OptiX). Currently, we use a software implementation of BVH traversal in Open VKL, but in principle this could equally leverage hardware traversal. Pseudocode is given in Listing 44-1.
+
+Two optimizations are worth noting. The radiusSupportFactor is used within the kernel to explicitly clamp the value to zero outside of that chosen support radius. A smaller support radius leads to better performance but can introduce artifacts. The other parameter, clampMaxCumulativeValue, allows us to end evaluation of the RBF field when the accumulated result has already exceeded the value. This is particularly helpful in regions of significant overlap, where the user cares more about the contours of the volume data than the dynamic range.
+
+A final advantage of Gaussian radial basis functions is that their derivatives can be computed analytically and used in shading (e.g., with a Lambertian model). This is implemented and exposed through the Open VKL API; we refer interested readers directly to that source code [7].
+
+### 44.3.3 RENDERING IN OSPRAY
+
+Given this mechanism for sampling a RBF volume, we can pair it with any volume rendering technique. For this, we use the volume rendering code abstracted to any VKL volume type, implemented in OSPRay [8] and also written in ISPC. The pseudocode in Listing 44-2 illustrates delta tracking as used to step through the volume.
+
+Interval iterators are a standard feature of Open VKL and an optimization of note. Each node of the BVH contains a value range that can be queried at traversal time; if the data range falls outside the range of interest specified by the transfer function, we do not need to compute samples at all within that interval. The effectiveness of space-skipping in Open VKL depends on the sparsity of the particle data and the accuracy of the maximum value estimation described in Section 44.3.1.
+
+We refer interested readers to the OSPRay source code [8] for volume ray casting and implicit isosurface renderers.
+
+## 44.4 RESULTS AND CONCLUSION
+
+Evaluating RBF path tracing performance is challenging because of the lack of reference points, particularly for our CPU-only implementation. For the
+
+#### Listing 44-2. Delta tracking.
+
+ float delta\_tracking(VolumetricModel \*uniform vModel, range1f rInterval , vec3f &o, vec3f &w, float &sigma\_t , // Extinction coefficient vec3f &albedo) { VKLIntervalIterator intervalIterator = vklInitIntervalIteratorV( vModel, o, w, rInterval , intervalIteratorBuffer); float t = 0.f; VKLInterval interval; while (vklIterateIntervalV(intervalIterator , &interval)) { t = interval.tRange.lower; const float maxOpacity = vModel->transferFunction ->getMaxOpacity(interval.valueRange)); // Estimate sigma\_max based on the interval value. const float sigma\_max = vModel->densityScale \* maxOpacity; if (sigma\_max <= 0.f) continue; while (true) { // Delta tracking float xi = RandomSampler\_getFloat(randomSampler); const float dt = -log(1.f - xi) / sigma\_max; t += dt; if (t > interval.tRange.upper) break; xi = RandomSampler\_getFloat(randomSampler); const vec3f p = o + t \* w; const float sample = vklComputeSampleV( vModel->volume->vklSampler , (const varying vkl\_vec3f \*uniform) & p); if (isnan(sample)) continue; const vec4f color = vModel->transferFunction ->get(vModel->transferFunction , sample); sigma\_t = vModel->densityScale \* color.w; // Rejection sampling if (xi < sigma\_t / sigma\_max) { albedo = make\_vec3f(color); return t; } } } return inf; }
+
+| Modality |         |        | Particle Volume Structured | Volume | Sphere Glyphs |
+|----------|---------|--------|----------------------------|--------|---------------|
+| Path     | tracing | (MR/s) | 1.44                       | 2.85   | 5.0           |
+| Ray      | casting | (MR/s) | 6.0                        | 11.4   | 16.0          |
+| Memory   | usage   | (GB)   | 9.6                        | 10.6   | 5.6           |
+
+Table 44-1. Performance in megarays per second (MR/s) for reference data sets (reference images shown with ray cast rendering).
+
+purposes of this chapter, we compared performance of ray casting and path tracing particle volumes to structured volumes, as well as rendering opaque spherical glyphs, shown in Table 44-1. The data set in question is a 51 million particle N-body cosmology code (HACC [4]).
+
+We used a 20483 structured volume for comparison. Both particle and structured volume renderings required a high sampling rate of eight samples per particle radius (equivalent to four samples per voxel at 20483 ) to resolve features. Even then, striation artifacts from undersampling are clearly visible upon zooming into structured volumes. For context, we compared with opaque sphere rendering performance in Embree. We used a 2048 × 2048 framebuffer and one sample per particle in all cases, and reported numbers in megarays per second, running on 28 cores of an Intel Xeon 8180M at 2.5 GHz. In all, performance with both path tracing and ray casting is interactive, though not in real time.
+
+Some room for improvement remains. GPU implementations, including ones that leverage GPU ray tracing hardware, would be of interest and should be a straightforward extension. Improving memory efficiency is also important. We currently build the BVH around individual particles as opposed to clustering, resulting in a roughly 5*×* overhead relative to original (float) particle data. To handle larger particle visualizations, we could pursue compression or clustering methods as explored in [2].
+
+In conclusion, the advantage of RBF volumes lies in quality: we can inspect individual particle elements from the simulation if needed and know that nothing is omitted or simplified. Delta tracking, used in conjunction with
+
+interval iteration based on local value ranges, allows for efficient and unbiased path tracing. Although specialized ray casting approaches (e.g., [10]) would likely deliver superior performance, the versatility of being able to path-trace and operate within an abstracted volume sampling interface (Open VKL) is useful.
+
+## REFERENCES
+
+[1] Chandrasekhar, S. Radiative Transfer. Oxford, 1960. [2] Gralka, P., Wald, I., Geringer, S., Reina, G., and Ertl, T. Spatial partitioning strategies for memory-efficient ray tracing of particles. In 2020 IEEE 10th Symposium on Large Data Analysis and Visualization (LDAV), pages 42–52, 2020. [3] Green, S. Volumetric particle shadows. NVIDIA Developer Downloads, [https://developer.download.nvidia.com/assets/cuda/files/smokeParticles.pdf,](https://developer.download.nvidia.com/assets/cuda/files/smokeParticles.pdf) 2008. [4] Habib, S., Pope, A., Finkel, H., Frontiere, N., Heitmann, K., Daniel, D., Fasel, P., Morozov, V., Zagaris, G., Peterka, T., et al. HACC: Simulating sky surveys on state-of-the-art supercomputing architectures. New Astronomy, 42:49–65, 2016. [5] Intel. Intel Embree: High preformance ray tracing kernels. , 2020. [6] Intel. Intel implicit SPMD program compiler. [https://ispc.github.io.](https://ispc.github.io) [7] Intel. Intel Open Volume Kernel Library. , 2021. [8] Intel. Intel OSPRay: The open, scalable, and portable ray tracing engine. , 2021. [9] Kajiya, J. T. The rendering equation. In Proceedings of the 13th Annual Conference on Computer Graphics and Interactive Techniques, pages 143–150, 1986. [10] Knoll, A., Morley, R. K., Wald, I., Leaf, N., and Messmer, P. Efficient particle volume splatting in a ray tracer. In E. Haines and T. Akenine-Möller, editors, Ray Tracing Gems, pages 533–541. Apress, 2019. [11] Knoll, A., Wald, I., Navratil, P., Bowen, A., Reda, K., Papka, M. E., and Gaither, K. RBF volume ray casting on multicore and manycore CPUs. Computer Graphics Forum, 33(3):71–80, 2014. [12] Lorensen, W. E. and Cline, H. E. Marching cubes: A high resolution 3D surface construction algorithm. In Proceedings of the 14th Annual Conference on Computer Graphics and Interactive Techniques, pages 163–169, 1987. [13] NVIDIA. NVIDIA OptiX ray tracing engine. [https://developer.nvidia.com/optix,](https://developer.nvidia.com/optix) 2021. [14] Orthmann, J., Keller, M., and Kolb, A. Topology-caching for dynamic particle volume raycasting. In Vision, Modeling, and Visualization 2010, pages 147–154, 2010. [15] Pharr, M., Jakob, W., and Humphreys, G. Physically Based Rendering: From Theory to Implementation. Morgan Kaufmann, 3rd edition, 2016.
+
+[16] Raab, M. Ray tracing inhomogeneous volumes. In E. Haines and T. Akenine-Möller, editors, Ray Tracing Gems, pages 521–531. Apress, 2019. [17] Wald, I., Johnson, G. P., Amstutz, J., Brownlee, C., Knoll, A., Jeffers, J., Günther, J., and Navrátil, P. OSPRay—A CPU ray tracing framework for scientific visualization. IEEE Transactions on Visualization and Computer Graphics, 23(1):931–940, 2016. [18] Westover, L. Footprint evaluation for volume rendering. In Proceedings of the 17th Annual Conference on Computer Graphics and Interactive Techniques, pages 367–376, 1990. [19] Woodcock, E, Murphy, T, Hemmings, P, and Longworth, S. Techniques used in the GEM code for Monte Carlo neutronics calculations in reactors and other systems of complex geometry. In Proceedings Conference Applications of Computing Methods to Reactor Problems, page 557, 1965.
+
+Open Access This chapter is licensed under the terms of the Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License ([http://creativecommons.org/licenses/by-nc-nd/4.0/\)](http://creativecommons.org/licenses/by-nc-nd/4.0/), which permits any noncommercial use, sharing, distribution and reproduction in any medium or format, as long as you give appropriate credit to the original author(s) and the source, provide a link to the Creative Commons license and indicate if you modified the licensed material. You do not have permission under this license to share adapted material derived from this chapter or parts of it.
+
+
+
+The images or other third party material in this chapter are included in the chapter's Creative Commons license, unless indicated otherwise in a credit line to the material. If material is not included in the chapter's Creative Commons license and your intended use is not permitted by statutory regulation or exceeds the permitted use, you will need to obtain permission directly from the copyright holder.

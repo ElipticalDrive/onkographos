@@ -1,0 +1,217 @@
+--- v003.md
++++ v004.md
+@@ -1,48 +1,31 @@
+ # Piecewise-Linear Classification
+-Also called: Piecewise Linear Channelwise Transfer Function, RGBA classification functions
++
++Also called: Local Classification, Piecewise Linear Channelwise Transfer Function, RGBA classification functions, Ramps, Syntactic Control
+ 
+ ## Overview
+-Piecewise-Linear Classification converts volume intensity levels into RGBA format for 3D texture display by applying independent piecewise-linear functions to each color channel [S1, unofficial]. It differs from [Binary Classification](931-binary-classification.md) by allowing continuous opacity and color gradients rather than hard thresholds, and from [Multiple Material Classification](6343-multiple-material-classification.md) by operating on scalar intensity values per channel rather than multi-dimensional feature vectors [S1, unofficial][S2, unofficial].
++Piecewise-Linear Classification is a local classification technique that maps voxel intensity and derived features (such as gradient magnitude) to RGBA optical properties using piecewise-linear functions, commonly called ramps [S2, unofficial][S3, unofficial]. It solves the problem of emphasizing specific data features by allowing users to define smooth transitions between material classes, distinguishing it from the hard thresholds of [Binary Classification](931-binary-classification.md) and enabling multi-channel control unlike basic single-channel methods [S1, unofficial]. It is a specific instance of [Binary and Soft Classification](6229-binary-and-soft-classification.md) that relies on linear interpolation between user-defined keypoints.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A tensor $x$ of shape $(B, C, H, W)$ or $(B, C, D, H, W)$, where $B$ is batch size, $C$ is the number of channels (typically 4 for RGBA), and spatial dimensions are $H, W$ or $D, H, W$ [S2, unofficial].
+-- Keypoints: Two tensors $x_p$ and $y_p$, both of shape $(C, K)$, containing sorted x-coordinates and corresponding y-values for $K$ keypoints per channel [S2, unofficial].
+-- Output: A tensor of the same shape as $x$, where each value is mapped through its respective channel's piecewise-linear function [S2, unofficial].
++*   **Input:** A scalar value $v$ representing voxel intensity, and optionally a derived feature $g$ such as gradient magnitude $\|\nabla f(\mathbf{x})\|$ [S2, unofficial]. The input domain is typically 1D per channel [S3, unofficial].
++*   **Output:** A set of optical properties: Opacity $\alpha \in [0, 1]$ and Color $C = (r, g, b)$ [S2, unofficial].
+ 
+ **Data Structures:**
+-- $x_p$: Sorted array of domain breakpoints.
+-- $y_p$: Array of range values at breakpoints.
+-- $K$: Number of keypoints. Must be $\ge 2$.
++The transfer function is defined by keypoints. For each output channel (Red, Green, Blue, Alpha), a pair of sorted 1D arrays is stored:
++*   $x_p$: Tensor of shape $(K,)$ containing sorted x-coordinates (input values) of the keypoints.
++*   $y_p$: Tensor of shape $(K,)$ containing y-coordinates (output values) at those keypoints.
++*   $K$: The number of keypoints. The system supports any number of segments, though UIs may limit this (e.g., to three segments) [S2, unofficial].
+ 
+-**Steps:**
+-1. Reshape input $x$ to $(B, C, N)$ where $N$ is the product of spatial dimensions [S2, unofficial].
+-2. Expand $x_p$ and $y_p$ to $(B, C, K)$ to match batch dimensions [S2, unofficial].
+-3. Reshape the flattened input $x_{flat}$ to $(B, C, N, 1)$ [S2, unofficial].
+-4. Construct left and right boundaries for each segment:
+-   - $x_{p\_left}$ of shape $(B, C, 1, K-1)$ from $x_p[:, :, :-1]$ [S2, unofficial].
+-   - $x_{p\_right}$ of shape $(B, C, 1, K-1)$ from $x_p[:, :, 1:]$ [S2, unofficial].
+-5. Create a mask identifying which segment each input value falls into:
+-   $$ \text{mask} = (x_{unsq} \ge x_{p\_left}) \land (x_{unsq} < x_{p\_right}) $$
+-   where $x_{unsq}$ is the reshaped input [S2, unofficial].
+-6. Handle edge cases where no segment is selected (i.e., $x \ge x_p[-1]$):
+-   - Identify `none_selected` where `mask.any(dim=-1)` is false [S2, unofficial].
+-   - Set segment index `idx` to $K-2$ for these cases, assigning them to the last interval [S2, unofficial].
+-7. Gather the left boundary $x_{p\_l}$ for the selected segment using `idx` [S2, unofficial].
+-8. Compute the slope $m$ and intercept $b$ for the selected segment:
+-   $$ m = \frac{y_{p\_right} - y_{p\_left}}{x_{p\_right} - x_{p\_left}} $$
+-   $$ b = y_{p\_left} - m \cdot x_{p\_l} $$
+-   where $y_{p\_left}$ and $y_{p\_right}$ are gathered from $y_p$ using `idx` [S2, unofficial].
+-9. Calculate output:
+-   $$ y = m \cdot x_{unsq} + b $$
+-10. Reshape $y$ back to original spatial dimensions [S2, unofficial].
++**Numbered Steps:**
++1.  **Define Keypoints:** The user specifies keypoints $(x_{p,i}, y_{p,i})$ for $i=0 \dots K-1$. By default, these are linear ramps representing 1:1 mappings, where high intensity maps to high opacity and white color [S1, unofficial].
++2.  **Compute Opacity:** Opacity is computed by passing the intensity $v$ through an intensity ramp and the gradient magnitude $g$ through a gradient ramp, then multiplying the results [S2, unofficial].
++    $$ \alpha = \text{Ramp}_{\alpha}(v) \times \text{Ramp}_{\alpha}(g) $$
++3.  **Compute Color:** Color components are computed by passing the intensity $v$ through separate red, green, and blue ramp functions [S2, unofficial].
++    $$ r = \text{Ramp}_{r}(v), \quad g = \text{Ramp}_{g}(v), \quad b = \text{Ramp}_{b}(v) $$
++4.  **Evaluate Ramp Function:** For a given input $x$ and keypoints $x_p, y_p$, the output $y$ is determined by finding the segment containing $x$ and linearly interpolating [S3, unofficial].
++    *   Extrapolation beyond the first and last keypoints is handled by extending the first and last segments, respectively [S3, unofficial].
+ 
+-**Parameters:**
+-- Default classification: Linear ramps representing 1:1 mappings ($y=x$), where high intensity objects appear white and nearly opaque [S1, unofficial].
+-- $K$: Number of keypoints. Not given in the sources.
+-
+-**Pitfalls:**
+-- If $x_p$ and $y_p$ do not have shape $(C, K)$, a ValueError is raised [S2, unofficial].
+-- Extrapolation beyond keypoints is handled by extending the first/last segment [S2, unofficial].
++**Pseudocode:**
++The following Python-like pseudocode implements the evaluation of a piecewise-linear channelwise transfer function for a batch of inputs [S3, unofficial].
+ 
+ ```python
+@@ -51,5 +34,5 @@
+ def piecewise_linear_channelwise(x: torch.Tensor, xp: torch.Tensor, yp: torch.Tensor) -> torch.Tensor:
+     """
+-    Apply per-channel piecewise linear function to input tensor x.
++    Evaluate piecewise linear transfer functions channel-wise.
+     
+     Args:
+@@ -59,53 +42,67 @@
+         
+     Returns:
+-        Output tensor of same shape as x.
++        Output tensor of shape (B, C, H, W) or (B, C, D, H, W).
+     """
++    # 1. Reshape input to (B, C, N) where N is the product of spatial dimensions
+     B, C, *spatial_dims = x.shape
+-    N = 1
+-    for dim in spatial_dims:
+-        N *= dim
+-        
+-    # Reshape x to (B, C, N)
+-    x_flat = x.view(B, C, N)
++    x_flat = x.view(B, C, -1)  # Shape: (B, C, N)
+     
+-    # Expand xp and yp to (B, C, K)
++    # 2. Expand keypoints to match batch and spatial dimensions for broadcasting
++    # xp, yp shape: (C, K) -> (B, C, K)
+     xp = xp.unsqueeze(0).expand(B, -1, -1)
+     yp = yp.unsqueeze(0).expand(B, -1, -1)
+     
+-    # Reshape x_flat to (B, C, N, 1)
++    # 3. Prepare x for segment comparison
++    # x_unsq shape: (B, C, N, 1)
+     x_unsq = x_flat.unsqueeze(-1)
+     
+-    # Create xp_left and xp_right
+-    xp_left = xp.unsqueeze(2)[:, :, :, :-1]  # (B, C, 1, K-1)
+-    xp_right = xp.unsqueeze(2)[:, :, :, 1:]  # (B, C, 1, K-1)
++    # 4. Create segment boundaries
++    # xp_left shape: (B, C, 1, K-1)
++    xp_left = xp.unsqueeze(2)[:, :, :, :-1]
++    # xp_right shape: (B, C, 1, K-1)
++    xp_right = xp.unsqueeze(2)[:, :, :, 1:]
+     
+-    # Create mask
+-    mask = (x_unsq >= xp_left) & (x_unsq < xp_right)  # (B, C, N, K-1)
++    # 5. Create mask for segments where x_left <= x < x_right
++    # mask shape: (B, C, N, K-1)
++    mask = (x_unsq >= xp_left) & (x_unsq < xp_right)
+     
+-    # Identify cases where no segment is selected
+-    none_selected = ~mask.any(dim=-1)  # (B, C, N)
++    # 6. Handle cases where no segment is selected (x >= last keypoint)
++    # none_selected shape: (B, C, N)
++    none_selected = ~mask.any(dim=-1)
+     
+-    # Find segment index
+-    idx = mask.float().argmax(dim=-1)  # (B, C, N)
+-    idx[none_selected] = xp.shape[1] - 2  # Assign to last interval
++    # 7. Find segment index
++    # idx shape: (B, C, N)
++    idx = mask.float().argmax(dim=-1)
+     
+-    # Gather xp_l
++    # 8. Assign last segment index to unselected points
++    if none_selected.any():
++        idx[none_selected] = xp.shape[-1] - 2  # K - 2
++        
++    # 9. Gather left and right x and y values for interpolation
++    # gather_idx shape: (B, C, N, 1)
+     gather_idx = idx.unsqueeze(-1)
+-    xp_l = torch.gather(xp, 2, gather_idx)  # (B, C, N, 1)
+     
+-    # Gather yp_l and yp_r
+-    yp_l = torch.gather(yp, 2, gather_idx)  # (B, C, N, 1)
+-    yp_r = torch.gather(yp, 2, gather_idx + 1)  # (B, C, N, 1)
++    # xp_l, xp_r shape: (B, C, N, 1)
++    xp_l = torch.gather(xp, 2, gather_idx)
++    xp_r = torch.gather(xp_right, 2, gather_idx) # Note: xp_right is already shifted, but gather needs correct indexing relative to xp
++    # Correction: xp_right in step 4 was sliced. We need to gather from the original xp array using idx+1 for right side
++    xp_r = torch.gather(xp, 2, gather_idx + 1)
+     
+-    # Compute slope and intercept
+-    denom = xp_right.squeeze(-1) - xp_left.squeeze(-1)
+-    # Handle division by zero if needed, though sorted keypoints should prevent this
+-    slope = (yp_r - yp_l) / denom
+-    intercept = yp_l - slope * xp_l
++    # yp_l, yp_r shape: (B, C, N, 1)
++    yp_l = torch.gather(yp, 2, gather_idx)
++    yp_r = torch.gather(yp, 2, gather_idx + 1)
+     
+-    # Calculate output
+-    y = slope * x_unsq + intercept
++    # 10. Linear interpolation
++    # Avoid division by zero if xp_l == xp_r
++    denom = xp_r - xp_l
++    denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+     
+-    # Reshape back to original shape
++    # t is the normalized position within the segment
++    t = (x_unsq.squeeze(-1) - xp_l.squeeze(-1)) / denom
++    
++    # 11. Compute output
++    y = yp_l.squeeze(-1) + t * (yp_r.squeeze(-1) - yp_l.squeeze(-1))
++    
++    # 12. Reshape back to original spatial dimensions
+     y = y.view(B, C, *spatial_dims)
+     
+@@ -113,24 +110,26 @@
+ ```
+ 
+-## Subtopics
++**Parameters:**
++*   **Keypoints ($x_p, y_p$):** User-defined. The UI typically allows interactive control over the center, width, and height of each ramp segment [S2, unofficial].
++*   **Default Classification:** Linear ramps representing 1:1 mappings. High intensity objects appear white and nearly opaque [S1, unofficial].
+ 
+-### [Binary Classification](931-binary-classification.md)
+-Hard thresholding; use when discrete segmentation is required.
+-
+-### [Multiple Material Classification](6343-multiple-material-classification.md)
+-Multi-dimensional feature mapping; use when classifying based on multiple data attributes.
++**Edge Cases and Pitfalls:**
++*   **Shape Validation:** If $x_p$ and $y_p$ do not have shape $(C, K)$, a `ValueError` is raised [S3, unofficial].
++*   **Local Ambiguity:** Local classification fails when the region of interest has similar intensity and gradient to its background. For example, in MRI data, anatomically distinct regions of the same organ may be indistinguishable using only local classification [S2, unofficial].
++*   **Extrapolation:** Values outside the range of $x_p$ are extrapolated using the first or last segment [S3, unofficial].
+ 
+ ## Operating characteristics
+-- Time complexity: $O(N \cdot C \cdot K)$, where $N$ is the number of voxels/pixels, $C$ is channels, and $K$ is keypoints [S2, unofficial].
+-- Memory complexity: $O(N \cdot C)$ for input/output, plus $O(B \cdot C \cdot K)$ for intermediate tensors [S2, unofficial].
+-- Strengths: Intuitive for segmentation; uniform intensity objects are easily perceived with default 1:1 mappings [S1, unofficial].
+-- Limitations: Requires manual tuning of keypoints for complex datasets; linear segments may not capture complex transfer function shapes [S1, unofficial].
+-- When to use: Real-time volume slicing via 3D textures where interactivity is critical [S1, unofficial].
+-- When not to use: When non-linear or multi-dimensional classification is needed [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot C \cdot K)$ per voxel, where $N$ is the number of samples, $C$ is the number of channels, and $K$ is the number of keypoints. In practice, $K$ is small, making it $O(N \cdot C)$.
++*   **Memory Complexity:** $O(C \cdot K)$ to store the keypoints.
++*   **Strengths:** Intuitive user interface; allows rapid switching between classifiers with a single keystroke to compare views [S2, unofficial]; computationally efficient for GPU implementation via texture lookup or simple interpolation [S1, unofficial].
++*   **Limitations:** Cannot distinguish regions with similar local features (intensity/gradient) but different global context [S2, unofficial].
++*   **When to use:** When the user needs to quickly visualize specific intensity ranges or gradients and the data has distinct local feature distributions.
++*   **When not to use:** When the data contains regions with ambiguous local features that require global context or multi-dimensional classification beyond intensity and gradient [S2, unofficial].
+ 
+ ## Background
+-Originated in early volume visualization systems using 3D texture mapping on consumer-grade graphics accelerators [S1, unofficial]. The method allows users to modify four piecewise-linear functions associated with RGBA display channels, providing flexibility in segmentation applications [S1, unofficial]. It generalizes binary classification by allowing continuous interest regions [S1, unofficial].
++Piecewise-linear classification was introduced as a standard method for volume visualization to allow users to define transfer functions interactively. It is often associated with early volume rendering systems that utilized 3D texture mapping for hardware acceleration [S1, unofficial]. The technique was formalized in systems like the one described in *Achieving Direct Volume Visualization with Interactive Semantic Region Selection* (1990), which highlighted the use of ramps for opacity and color mapping [S2, unofficial]. It remains a foundational technique in volume rendering, often implemented as a default or starting point for more complex classification methods.
+ 
+ ## Sources
+ [S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+-[S2] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)+[S2] DTIC ADA236718: Achieving Direct Volume Visualization with Interactive Semantic Region Selection, https://archive.org/details/DTIC_ADA236718, fetched 2026-10-26 (unofficial)
++[S3] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)

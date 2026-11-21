@@ -1,0 +1,137 @@
+# NeRF Ensemble with Conjoint Pruning
+
+Also called: CPE, Ens-FT, IPM
+
+## Overview
+NeRF Ensemble with Conjoint Pruning (CPE) is a method that improves novel view synthesis quality by combining two Neural Radiance Field (NeRF) models of different grid resolutions, specifically using the Direct Voxel Grid Optimization (DVGO) architecture [S1]. It addresses the high computational requirements and parameter inefficiency of single large NeRF models by demonstrating that ensembling multiple models at different scales requires fewer parameters to achieve the same image quality constraint compared to training and compressing one large model directly [S1]. Unlike vanilla ensembling, which may yield suboptimal results, CPE employs a specific fine-tuning and compression strategy to maintain a similar memory footprint and parameter count to a single model while outperforming it [S1].
+
+## How it works
+The method operates in three distinct stages: independent training, ensemble fine-tuning, and conjoint pruning. It relies on the DVGO architecture, where the scene is represented by explicit voxel grids optimized directly, avoiding the implicit MLP bottleneck of standard NeRFs [S1].
+
+### Inputs and Outputs
+*   **Inputs:** Training dataset $D_{train}$ (set of images with camera poses), validation dataset $D_{val}$, and the target ensemble size (fixed at 2 models in the source [S1]).
+*   **Outputs:** An ensemble of two compressed NeRF models (DVGO variants) that can be rendered jointly.
+
+### Data Structures
+The ensemble consists of two separate NeRF models, denoted as $n=1$ and $n=2$ [S1].
+*   Each model $n$ maintains its own set of parameters $w_n$ and a voxel grid [S1].
+*   The models are trained with different grid resolutions [S1]. The source does not specify the exact resolution values or the ratio between them, only that they are "different" [S1].
+*   The parameters $w_n$ include the voxel values (density and color) for the respective grid [S1].
+
+### Numbered Steps
+
+**Stage 1: Independent Training**
+1.  Initialize two NeRF models (DVGO) with different grid resolutions.
+2.  Train each model independently on the training set $D_{train}$ for a fixed number of iterations.
+3.  Minimize the standard NeRF loss function for each model $n$:
+    $$ L(w_n) = \frac{1}{M} \sum_{m=1}^{M} \| C_m - C(w_n, x_m, \omega_m) \|^2 $$
+    Where:
+    *   $w_n$: Model parameters for the $n$-th NeRF.
+    *   $M$: Total number of training samples.
+    *   $C_m$: Ground truth color of the $m$-th pixel.
+    *   $C(w_n, x_m, \omega_m)$: Predicted color by the $n$-th NeRF for the 3D point $x_m$ and viewing direction $\omega_m$ [S1].
+
+**Stage 2: Ensemble Fine-Tuning (Ens-FT)**
+1.  Construct the ensemble by averaging the outputs of the two trained models.
+2.  Optimize the ensemble parameters by minimizing the difference between the ground truth and the averaged ensemble output.
+3.  The ensemble output $C_{avg}$ for a sample $m$ is:
+    $$ C_{avg, m} = \frac{1}{2} \sum_{n=1}^{2} C(w_n, x_m, \omega_m) $$
+    *(Note: The source defines $n=1,2$ and uses a simple average [S1]).*
+4.  The loss function for this stage is:
+    $$ L_{Ens-FT} = \frac{1}{M} \sum_{m=1}^{M} \| C_m - C_{avg, m} \|^2 $$
+5.  Continue fine-tuning until performance on the validation set begins to drop [S1].
+
+**Stage 3: Conjoint Pruning (CPE)**
+1.  Compress the ensemble using the validation set $D_{val}$ [S1].
+2.  Apply "conjoint pruning" to remove redundant parameters from the ensemble. The source states this is a formulation to prevent performance degradation during pruning but does not provide the specific pruning algorithm, thresholding logic, or selection criteria [S1].
+3.  Return the final pruned ensemble [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_nerf_ensemble(D_train, D_val, num_iterations):
+    """
+    Implements the NeRF Ensemble with Conjoint Pruning (CPE) method.
+    Based on DVGO architecture.
+    """
+    # Stage 1: Independent Training
+    # Initialize two models with different grid resolutions
+    # Resolution details are not specified in sources [S1]
+    model_1 = DVGO_Model(resolution="high")
+    model_2 = DVGO_Model(resolution="low")
+    
+    # Train independently
+    for iteration in range(num_iterations):
+        # Sample batch from D_train
+        batch = sample_batch(D_train)
+        
+        # Update model 1
+        loss_1 = compute_loss(model_1, batch)
+        model_1.update(loss_1)
+        
+        # Update model 2
+        loss_2 = compute_loss(model_2, batch)
+        model_2.update(loss_2)
+
+    # Stage 2: Ensemble Fine-Tuning (Ens-FT)
+    # Optimize ensemble until performance drops
+    while performance_on_validation(D_val, model_1, model_2) > threshold:
+        batch = sample_batch(D_train)
+        
+        # Compute ensemble output
+        # C_avg_m = (C(w1, x, w) + C(w2, x, w)) / 2
+        pred_1 = model_1.render(batch)
+        pred_2 = model_2.render(batch)
+        pred_avg = (pred_1 + pred_2) / 2.0
+        
+        # Compute loss
+        # L = mean(||C_m - C_avg_m||^2)
+        loss_ensemble = mean_squared_error(batch.colors, pred_avg)
+        
+        # Update both models jointly
+        model_1.update(loss_ensemble)
+        model_2.update(loss_ensemble)
+
+    # Stage 3: Conjoint Pruning (CPE)
+    # Compress ensemble using D_val
+    # Specific pruning algorithm is not detailed in sources [S1]
+    pruned_model_1, pruned_model_2 = conjoint_pruning(model_1, model_2, D_val)
+    
+    return pruned_model_1, pruned_model_2
+
+def compute_loss(model, batch):
+    """
+    Standard NeRF loss: L(w) = (1/M) * sum(||C_m - C(w, x_m, w_m)||^2)
+    """
+    predictions = model.render(batch)
+    # M is total samples in batch for this calculation
+    loss = mean_squared_error(batch.colors, predictions)
+    return loss
+```
+
+### Parameters and Typical Values
+*   **Ensemble Size:** 2 NeRF models [S1].
+*   **Grid Resolution:** Two different resolutions are used. The specific values are not given in the sources [S1].
+*   **Training Iterations:** Fixed number for Stage 1. Not specified [S1].
+
+### Edge Cases and Pitfalls
+*   **Vanilla Ensembling:** Simply averaging two independently trained models without fine-tuning and pruning yields suboptimal results [S1].
+*   **Pruning Degradation:** Without the proposed conjoint pruning formulation, compression may lead to significant performance degradation [S1].
+*   **Precision:** The source does not specify numerical precision requirements (e.g., FP16 vs FP32) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Requires training two models independently, then fine-tuning the ensemble. This is computationally more expensive than training a single model, but the source claims it achieves better quality under the same parameter count constraint [S1].
+*   **Memory Footprint:** The method aims to maintain a similar memory footprint and parameter count to a single model by compressing the ensemble [S1].
+*   **Performance:** Beats vanilla approaches under the same parameter's cardinality constraint [S1].
+*   **Strengths:** Improves novel view synthesis performance; requires fewer parameters than training and compressing one large model directly for the same quality [S1].
+*   **Limitations:** Higher training complexity due to multi-stage process; specific pruning details are not provided, making implementation of Stage 3 ambiguous [S1].
+
+## Background
+*   **Origin:** Proposed by Francesco Di Sario, Riccardo Renzulli, Enzo Tartaglione, and Marco Grangetto in 2023 for ICIAP 2023 [S1].
+*   **Context:** Addresses the high computational requirements and limited scene diversity of standard NeRFs [S1]. It builds on Direct Voxel Grid Optimization (DVGO) [S1].
+*   **History:** It is described as the first work proposing a joint ensembling and compression scheme for NeRF models [S1].
+
+## Sources
+[S1] Two is Better than One: Achieving High-Quality 3D Scene Modeling with a NeRF Ensemble, https://doi.org/10.1007/978-3-031-43153-1_27, fetched 2026-10-26

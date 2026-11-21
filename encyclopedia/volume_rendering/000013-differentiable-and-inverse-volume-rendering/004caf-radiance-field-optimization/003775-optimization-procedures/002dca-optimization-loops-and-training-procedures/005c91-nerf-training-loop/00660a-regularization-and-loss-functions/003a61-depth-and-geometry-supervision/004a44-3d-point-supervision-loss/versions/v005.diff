@@ -1,0 +1,191 @@
+--- v004.md
++++ v005.md
+@@ -1,116 +1,95 @@
+ # 3D Point Supervision Loss
++Also called: 3D Point Supervision, Point-based Pose Registration Loss
++## Overview
++A geometric regularization term that minimizes the distance between 3D points backprojected from rendered depth and ground-truth 3D points, enabling robust pose registration in sparse-view regimes where direct depth matching fails [S1]. Unlike [Depth-Supervised NeRF](8687-depth-supervised-nerf.md), which applies L1 loss on rendered vs. ground-truth depth and struggles to refine poses due to local geometric ambiguities, this method enforces a global geometric connection between training images and scene geometry [S1].
++## How it works
++**Inputs:**
++- NeRF parameters $\theta$ (defining $\sigma, c$).
++- Camera poses $P_k$ (view $k$).
++- Ground-truth 3D points $\mathbf{X}_{gt}$ corresponding to the scene.
++- Rendered depth $\hat{D}(\mathbf{r})$ for rays $\mathbf{r}$ originating from training views.
+ 
+-Also called: 3D Point Supervision, Point-based Pose Registration Loss
+-
+-## Overview
+-3D Point Supervision Loss minimizes the Euclidean distance between 3D points backprojected from rendered depth and ground-truth 3D points, enabling robust camera pose registration in sparse-view regimes where photometric or depth-only losses fail [S1]. Unlike sibling methods that compare scalar depth values or enforce local structural consistency, this loss enforces a global geometric connection between training images and scene geometry by operating in the world coordinate frame [S1].
+-
+-## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:**
+-    *   Camera poses $P_k$ (rotation $R_k$, translation $t_k$) for each training view $k$.
+-    *   Ground-truth 3D points $\mathbf{X}_{gt}$ corresponding to visible surface locations in the training views.
+-    *   Neural Radiance Field (NeRF) parameters $\Theta$ (density $\sigma$ and color $c$).
+-    *   Ray origins $\mathbf{o}$ and directions $\mathbf{d}$ for each pixel in the training views.
+-*   **Outputs:**
+-    *   Scalar loss value $\mathcal{L}_{3D}$ to be minimized.
++**Outputs:**
++- Scalar loss $\mathcal{L}_{3D}$.
+ 
+ **Data Structures:**
+-*   **Rendered Depth Map:** A 2D array $\hat{D} \in \mathbb{R}^{H \times W}$ where each element $\hat{D}(u,v)$ is the expected depth along the ray for pixel $(u,v)$. Computed as $\hat{D}(\mathbf{r}) = \sum_{i=1}^N w_i t_i$ [S1].
+-*   **Rendering Weights:** $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$, where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, $\sigma_i$ is the density, and $\delta_i$ is the distance between samples [S1].
+-*   **Backprojected 3D Points:** A set of 3D coordinates $\mathbf{X}_{pred}$ in the world frame.
++- $\mathbf{X}_{gt}$: Set of $M$ 3D points $\{\mathbf{x}_1, \dots, \mathbf{x}_M\}$ in world coordinates.
++- $\hat{\mathbf{X}}$: Set of $N$ backprojected 3D points derived from rendered depth.
+ 
+ **Steps:**
+-1.  **Render Depth:** For each training view $k$, render the expected depth map $\hat{D}_k$ using the current NeRF parameters $\Theta$ and camera pose $P_k$ [S1].
+-2.  **Backproject to World Frame:** For each pixel $(u,v)$ in view $k$ where depth is valid:
+-    *   Construct the ray direction $\mathbf{d}_{uv}$ in the camera frame.
+-    *   Transform $\mathbf{d}_{uv}$ to the world frame: $\mathbf{d}_{world} = R_k \mathbf{d}_{uv}$.
+-    *   Transform the ray origin $\mathbf{o}_{uv}$ (typically $(0,0,0)$ in camera frame) to the world frame: $\mathbf{o}_{world} = R_k \mathbf{0} + t_k = t_k$.
+-    *   Compute the 3D point $\mathbf{X}_{pred}$ using the rendered depth $\hat{D}_k(u,v)$:
+-        $$ \mathbf{X}_{pred} = \mathbf{o}_{world} + \hat{D}_k(u,v) \cdot \mathbf{d}_{world} $$
+-    *   [G] Mask out pixels with invalid depth (e.g., near the near/far clipping planes or where transmittance is too high) to avoid noise.
+-3.  **Compute Distance:** For each backprojected point $\mathbf{X}_{pred}$, find the corresponding ground-truth 3D point $\mathbf{X}_{gt}$ (provided as input or matched via nearest neighbor if not explicitly paired per pixel). Compute the L1 or L2 distance:
+-    $$ \mathcal{L}_{3D} = \frac{1}{M} \sum_{m=1}^M \| \mathbf{X}_{pred}^{(m)} - \mathbf{X}_{gt}^{(m)} \| $$
+-    where $M$ is the number of valid point correspondences [S1].
+-4.  **Minimize:** Backpropagate gradients through the backprojection and rendering steps to update $\Theta$ and potentially the camera poses $P_k$ [S1].
++1. **Render Depth:** For each training view $k$, render the expected depth $\hat{D}(\mathbf{r})$ for all rays $\mathbf{r}$ passing through the image plane. The expected depth is computed as:
++   $$ \hat{D}(\mathbf{r}) = \sum_{i=1}^N w_i t_i $$
++   where $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ are the rendering weights, $t_i$ is the sample distance, and $T_i$ is the accumulated transmittance [S1, 8687-depth-supervised-nerf.md].
++
++2. **Backproject to 3D:** For each ray $\mathbf{r}_j$ with pixel center $\mathbf{p}_j$ and camera pose $P_k$, compute the backprojected 3D point $\hat{\mathbf{x}}_j$ in the world frame:
++   $$ \hat{\mathbf{x}}_j = P_k^{-1} \cdot \text{Unproject}(\mathbf{p}_j, \hat{D}(\mathbf{r}_j)) $$
++   where $\text{Unproject}$ maps pixel coordinates and depth to camera coordinates, and $P_k^{-1}$ transforms to world coordinates [S1].
++
++3. **Compute Distance:** Calculate the distance between the set of learned 3D points $\{\hat{\mathbf{x}}_j\}$ and the ground-truth 3D points $\{\mathbf{x}_m\}$. The loss is the mean distance (L1 norm) between corresponding points. If exact correspondence is not available, the loss is typically the sum of minimum distances from each learned point to the nearest ground-truth point, or vice versa, depending on implementation specifics not fully detailed in the source [S1]. The source specifies minimizing the distance between learned 3D points and ground-truth 3D points [S1].
++
++4. **Minimize:** Backpropagate gradients through the volume rendering process to update $\theta$ and potentially camera poses [S1].
++
++**Parameters:**
++- Weight $\lambda_{3D}$ for the 3D point loss term in the total loss $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{photo}} + \lambda_{\text{geom}} \mathcal{L}_{\text{geom}}$ [S1, 8582-regnerf.md].
++
++**Edge Cases:**
++- Sparse views: This method is specifically designed for sparse-view regimes (e.g., 3 views) where photometric loss alone leads to overfitting or degenerate geometry [S1].
++- Noisy poses: It successfully registers poses even when initial poses are perturbed with noise (e.g., 15% additive Gaussian noise) [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_3d_point_loss(nerf_model, poses, gt_3d_points, rays, depth_map_gt=None):
++def compute_3d_point_loss(nerf_model, poses, gt_points, rays):
+     """
+-    nerf_model: Neural Radiance Field function (returns sigma, color)
+-    poses: List of camera poses (R, t) for each view
+-    gt_3d_points: List of 3D points in world frame corresponding to valid pixels
+-    rays: List of ray origins and directions for each view
+-    depth_map_gt: Optional ground truth depth maps (not strictly required if gt_3d_points are provided)
++    nerf_model: Function returning sigma and color for given points.
++    poses: List of camera pose matrices.
++    gt_points: Array of shape (M, 3) containing ground-truth 3D points.
++    rays: List of ray objects, each with camera index, pixel coordinates, and direction.
+     """
+-    total_loss = 0.0
+-    count = 0
++    # Step 1: Render depth for each ray
++    rendered_depths = []
++    for ray in rays:
++        # Render expected depth along the ray using the NeRF
++        depth = render_expected_depth(nerf_model, ray)
++        rendered_depths.append(depth)
+     
+-    for view_idx, (R, t) in enumerate(poses):
+-        # 1. Render depth
+-        # Assume render_depth returns expected depth for all rays in this view
+-        rendered_depths = render_depth(nerf_model, rays[view_idx])
+-        
+-        # 2. Backproject to world frame
+-        # rays[view_idx] contains (o, d)
+-        o_cam = rays[view_idx].origin
+-        d_cam = rays[view_idx].direction
+-        
++    # Step 2: Backproject to 3D world coordinates
++    learned_points = []
++    for ray, depth in zip(rays, rendered_depths):
++        # Get camera pose for this ray
++        pose = poses[ray.camera_index]
++        # Unproject pixel coordinates and depth to camera frame
++        cam_point = unproject_pixel_to_camera(ray.pixel_coords, depth, ray.intrinsic_matrix)
+         # Transform to world frame
+-        o_world = t # R @ 0 + t
+-        d_world = R @ d_cam.T # Shape: (3, num_pixels)
+-        
+-        # Compute 3D points: X = o + depth * d
+-        # rendered_depths shape: (num_pixels,)
+-        # d_world shape: (3, num_pixels)
+-        pred_3d_points = o_world[:, None] + rendered_depths[None, :] * d_world
+-        
+-        # 3. Match with ground truth
+-        # Assuming gt_3d_points[view_idx] contains the valid GT points for this view
+-        # In practice, this requires matching pixels or points. 
+-        # The source implies a direct correspondence is established or available.
+-        current_gt_points = gt_3d_points[view_idx]
+-        
+-        # Calculate distance
+-        # Note: The source uses L1 loss on 3D points.
+-        # We assume pred_3d_points and current_gt_points are aligned or matched.
+-        # If they are lists of points corresponding to the same pixels:
+-        diff = pred_3d_points - current_gt_points
+-        loss = torch.mean(torch.abs(diff))
+-        
+-        total_loss += loss
+-        count += 1
+-        
+-    return total_loss / count
++        world_point = pose.inverse() @ cam_point
++        learned_points.append(world_point)
++    
++    learned_points = np.array(learned_points) # Shape (N, 3)
++    
++    # Step 3: Compute distance to ground-truth points
++    # Calculate pairwise distances between learned points and GT points
++    # Use efficient nearest neighbor search if N, M are large
++    distances = compute_min_distances(learned_points, gt_points)
++    
++    # Step 4: Return mean L1 loss
++    loss = np.mean(distances)
++    return loss
+ ```
+-
+-**Parameters:**
+-*   **Loss Weight ($\lambda_{3D}$):** Not specified in the primary source for the ablation study, but typically balanced with photometric loss [S1].
+-*   **Depth Sampling:** Standard NeRF sampling strategy (uniform + importance) is used to compute rendered depth [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Sparse Views:** In sparse-view regimes, photometric loss alone leads to degenerate geometry and overfitting [S1]. 3D point supervision is crucial here.
+-*   **Noisy Poses:** The method is designed to handle noisy initial poses (e.g., 15% additive Gaussian noise) by jointly optimizing poses and NeRF parameters [S1].
+-*   **Depth Ambiguity:** Rendered depth is an expected value. If the scene has transparency or multiple surfaces, the backprojected point may not lie on the true surface. The source notes that this loss "implicitly encourages" depth to be close to the true surface [S1].
+-*   **Point Correspondence:** The source assumes ground-truth 3D points are available. In practice, these might come from Structure-from-Motion (SfM) or stereo matching, which can be noisy or sparse.
++[G] `render_expected_depth` implements the differentiable volume rendering equation for depth. `unproject_pixel_to_camera` uses the camera intrinsic matrix. `compute_min_distances` finds the minimum Euclidean distance from each learned point to any GT point.
+ 
+ ## Subtopics
+ 
+ ### [Multi-view correspondence loss](12696-multi-view-correspondence-loss.md)
+-Enforces geometric consistency across multiple views by minimizing re-projection error. Unlike 3D Point Supervision which uses explicit 3D points, MV-Corr uses ray correspondences. Choose MV-Corr when explicit 3D points are unavailable but multi-view consistency can be enforced via reprojection.
++Enforces geometric consistency across multiple views by minimizing re-projection error of corresponding rays, acting on both pose and field to prevent overfitting in sparse regimes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the NeRF forward pass for depth rendering and the backprojection step. Backprojection is $O(N)$ where $N$ is the number of pixels.
+-*   **Memory Complexity:** Requires storing rendered depth maps and backprojected 3D points. Similar to depth-supervised methods.
+-*   **Measured Performance:** On DTU with 3 views and noisy poses, Photo + L1 GT 3D points yields PSNR 18.8 (20.3 masked), SSIM 0.75 (0.84 masked), LPIPS 0.21 (0.11 masked), DE 0.07 [S1]. This outperforms Photo + L1 GT depth (PSNR 13.8, SSIM 0.54, LPIPS 0.46, DE 0.17) [S1].
+-*   **Strengths:** Successfully registers poses in sparse-view regimes where depth loss fails. Enforces global geometric connection.
+-*   **Limitations:** Requires ground-truth 3D points, which may not always be available. Sensitive to the accuracy of these points.
+-*   **When to Use:** Sparse-view reconstruction with noisy poses where explicit 3D geometry is available or can be reliably estimated.
+-*   **When Not to Use:** Dense-view regimes where photometric loss is sufficient, or when 3D points are unavailable and cannot be estimated.
+-
++- **Time Complexity:** Depends on the number of rays $N$ and ground-truth points $M$. Backprojection is $O(N)$. Distance computation is $O(N \cdot M)$ or $O(N \log M)$ with spatial indexing [S1].
++- **Memory Complexity:** Stores rendered depths and backprojected points, $O(N)$ [S1].
++- **Performance:** On DTU with 3 views and noisy poses, Photo + L1 GT 3D points yields PSNR 18.8 (20.3 masked), SSIM 0.75 (0.84 masked), LPIPS 0.21 (0.11 masked), DE 0.07, outperforming Photo + L1 GT depth (PSNR 13.8, SSIM 0.54, LPIPS 0.46, DE 0.17) [S1].
++- **Strengths:** Successfully registers poses in sparse-view regimes; enforces global geometric connection; drastically improves novel-view rendering quality compared to direct depth loss [S1].
++- **Limitations:** Requires ground-truth 3D points; struggles with direct depth loss in sparse regimes due to local geometric ambiguities [S1].
++- **When to use:** Sparse-view reconstruction with noisy or unknown poses where photometric loss alone is insufficient [S1].
++- **When not to use:** Dense-view regimes where photometric loss is sufficient; scenes without available ground-truth 3D points [S1].
+ ## Background
+-Originated in SPARF (Neural Radiance Fields from Sparse and Noisy Poses) [S1]. The method was developed to address the failure of standard NeRF training in sparse-view settings, where high-frequency positional encodings lead to degenerate geometry. The key insight is that minimizing the distance between backprojected rendered depth and ground-truth 3D points provides stronger geometric supervision than depth-only losses, enabling pose refinement.
+-
++Originated in SPARF: Neural Radiance Fields from Sparse and Noisy Poses (CVPR 2023) [S1]. The method addresses the issue of overfitting and degenerate geometry in sparse-view NeRF training by introducing a geometric constraint that explicitly connects training images to scene geometry via 3D points [S1].
+ ## Sources
+ [S1] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26

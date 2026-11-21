@@ -1,0 +1,228 @@
+Dask-powered tools for processing and analyzing terabyte-scale 3D segmentations: connected components, contact sites, skeletonization, measurements and more. - Multiscale pyramids, worldarray I/O, and voxel-index grids by davidackerman · Pull Request #96 · janelia-cellmap/cellmap-analyze
+
+Multiscale pyramids, worldarray I/O, and voxel-index grids by davidackerman · Pull Request #96 · janelia-cellmap/cellmap-analyze · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+davidackerman
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Includes #90 and #95, so it lands all three together.
+Multiscale (#90)
+Commands that write a volume (connected components, clean CC, contact sites, MWS, fill holes, filter ids, label with mask, morphological operations, split narrow bridges) pyramid their output, and their _filled copy, when they finish. multiscale: false in the run-config skips this; compute-edt builds one only with multiscale: true. A standalone multiscale command does the same for any zarr v2/v3 dataset.
+Levels are computed blockwise with tensorstore's downsample: mode for integer data, mean for floats. Factors follow wa.level_factors, so anisotropic axes wait for the finer ones. Each level's OME translation is the centre of its voxel 0, so every level covers s0's box. A level is listed in the group only once its data is complete.
+Writes through worldarray (#95)
+Outputs are created with wa.create in the container's zarr version (OME 0.5 for v3 groups, 0.4 in a v2 container) and carry only OME metadata, no funlib voxel_size/offset.
+zarr_io.py, cellmap_array.py, precomputed_io.py, the driver detection, the URL/kvstore helpers and get_multiscales are deleted.
+Voxel-index grids; ImageDataInterface removed
+Every operation works in the voxel indices of one grid (a wa.Grid). Blocks are worldarray Blocks on it, every input is read onto it with read_onto (resampled when a voxel size or corner differs), and every output is created on it. This replaces the integer-scaled frame: funlib Coordinate/Roi in nm × a scale factor, rescale_to_factor, the LCM alignment between datasets, and the shape-guessing trims that rounding made necessary.
+ImageDataInterface is deleted; datasets are plain wa.WorldArrays. zarr_util.open_dataset() applies cellmap's read defaults (padding, method, retries, capped concurrency, first level or voxel_size level), and create_multiscale_dataset(path, dtype, grid) returns the new level opened for writing. Workers write with write_index. util/grid_util.py makes, crops and intersects grids, and rescale_concurrency reopens handles per worker. voxel_size_utils and the funlib.geometry dependency are removed. Requires worldarray 0.4.
+A run-config roi is in nm (README). Blocks, block counts and the output now all cover the voxels whose centres lie in it; before, several commands counted blocks over the roi but walked them over the whole input.
+Fixed along the way:
+mask erosion/dilation and label-with-mask surface padding are whole voxels on every axis;
+the skeletonize and split-narrow-bridges memory estimates paired x with z's voxel size;
+assign-to-organelles no longer doubles its search box forever when no organelle exists;
+consensus inputs and per-channel affinities may sit on different grids;
+a precomputed EDT with the wrong voxel size is rejected up front.
+Outputs are unchanged. I ran a pipeline on anisotropic, non-integer voxels (3.54 × 4 × 4.5 nm, and 2× that for the second dataset) with offset corners: connected components with hole filling, contact sites across the two voxel sizes, measure, erosion, EDT, a roi run and the pyramids. Every array and its placement, plus the CSVs, match the code before this PR.
+davidackerman
+added 8 commits
+October 21, 2026 16:07
+multiscale: add downsampled levels to an existing segmentation
+…
+3f63445
+```
+A new `multiscale` command adds s1, s2, ... beside an existing zarr v2 or
+v3 level, until a level fits in one chunk or `num_levels` are written.
+Each level is computed blockwise from the one below with tensorstore's
+downsample driver, by mode by default so label ids are kept. Per-axis
+factors follow mesh-n-bone's rule: an axis is halved while its voxel size
+is within 1.5x of the finest, so anisotropic data moves toward isotropic.
+
+Each level's OME translation is its voxel 0's centre, the centre of the
+finer voxels it summarises: translation_0 + voxel_size_0 * (F - 1) / 2 for
+a total factor F, so every level covers the same physical box as s0. A
+level is listed in the group's multiscales only once its data is written.
+Existing levels are rebuilt only with overwrite=True.
+```
+Merge remote-tracking branch 'origin/main' into multiscale
+ffbe861
+multiscale: pyramid each command's output, read through worldarray
+…
+06097ea
+```
+Commands that write a volume now add a pyramid to their output when they
+finish, and to its _filled copy when fill_holes made one. `multiscale:
+false` in the run-config skips it, and compute-edt adds one only with
+`multiscale: true`. Levels already beside the output are rebuilt, since
+the output was just rewritten.
+
+Multiscale now takes its base's voxel size and translation from
+worldarray (the helpers it used were removed with #92), and reads each
+block with WorldArray.read_index, downsampled in memory. The method
+defaults to mode for integer data and mean for floats. All levels run in
+one dask cluster.
+```
+Merge remote-tracking branch 'origin/main' into multiscale
+43246c7
+multiscale: plan, place, block and list levels with worldarray 0.3
+…
+c7dcf0c
+```
+Level factors, shapes and placements come from wa.level_factors,
+level_shape and level_placement; blocks from wa.blocks; group entries
+from wa.ensure_group_entry, still added only once a level is complete.
+New levels carry only the OME metadata.
+```
+Write datasets through worldarray; delete the zarr-python I/O
+…
+e69574d
+```
+ImageDataInterface.write(roi, data) replaces the zarr-python .ds handle,
+and outputs are created with wa.create, carrying only the group's OME
+metadata. zarr_io, cellmap_array, precomputed_io, the driver detection
+and tensorstore opener, io_util's URL and kvstore helpers and
+get_multiscales go, since worldarray covers them.
+```
+Merge remote-tracking branch 'origin/multiscale' into voxel-index-frame
+7e422a2
+Work in voxel indices on worldarray grids; drop the integer frame
+…
+0aeae9e
+```
+Every operation picks one grid, cuts it into worldarray blocks, reads its
+inputs onto it (resampled when their voxel size or corner differs) and
+writes its outputs on it. The integer-scaled frame (funlib Coordinate/Roi,
+scale factors, rescale_to_factor) and the shape-guessing trims it needed
+are gone, with voxel_size_utils and the funlib.geometry dependency. A
+run-config roi is in nm.
+```
+codecov
+Bot
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 93.98058% with 31 lines in your changes missing coverage. Please review.
+✅ Project coverage is 86.45%. Comparing base (db5ecab) to head (971d37e).
+⚠️ Report is 12 commits behind head on main.
+Files with missing lines
+Patch %
+Lines
+src/cellmap_analyze/process/multiscale.py
+93.10%
+6 Missing ⚠️
+...rc/cellmap_analyze/process/connected_components.py
+93.65%
+4 Missing ⚠️
+src/cellmap_analyze/process/mutex_watershed.py
+77.77%
+4 Missing ⚠️
+src/cellmap_analyze/util/dask_util.py
+90.00%
+4 Missing ⚠️
+...rc/cellmap_analyze/analyze/assign_to_organelles.py
+92.68%
+3 Missing ⚠️
+src/cellmap_analyze/process/compute_edt.py
+83.33%
+3 Missing ⚠️
+...ellmap_analyze/process/morphological_operations.py
+80.00%
+2 Missing ⚠️
+src/cellmap_analyze/util/io_util.py
+60.00%
+2 Missing ⚠️
+src/cellmap_analyze/process/contact_sites.py
+95.23%
+1 Missing ⚠️
+...rc/cellmap_analyze/process/split_narrow_bridges.py
+97.87%
+1 Missing ⚠️
+... and 1 more
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##             main      #96      +/-   ##
+==========================================
++ Coverage   82.00%   86.45%   +4.45%     
+==========================================
+  Files          30       27       -3     
+  Lines        4706     4054     -652     
+==========================================
+- Hits         3859     3505     -354     
++ Misses        847      549     -298     
+```
+☔ View full report in Codecov by Harness.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+Call worldarray directly; delete ImageDataInterface
+…
+1bf4d66
+```
+Datasets are wa.WorldArrays: open_dataset() applies cellmap's read
+defaults, workers read with read_onto(grid, ...) on the operation's grid
+and write with write_index. Needs worldarray 0.4.
+```
+davidackerman
+changed the title
+Work in voxel indices on worldarray grids; drop the integer frame
+Work in voxel indices on worldarray grids; drop the integer frame and ImageDataInterface
+Oct 23, 2026
+grid_util: build on wa.corner_to_centre and Box.intersect
+52c7c59
+davidackerman
+changed the title
+Work in voxel indices on worldarray grids; drop the integer frame and ImageDataInterface
+Multiscale pyramids, worldarray I/O, and voxel-index grids
+Oct 23, 2026
+davidackerman
+marked this pull request as ready for review
+October 23, 2026 02:22
+Bump version to 0.6.0
+971d37e
+Hide details
+View details
+davidackerman
+merged commit aaa33bc
+into
+main
+Oct 23, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+davidackerman
+deleted the
+voxel-index-frame
+branch
+October 23, 2026 02:34
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

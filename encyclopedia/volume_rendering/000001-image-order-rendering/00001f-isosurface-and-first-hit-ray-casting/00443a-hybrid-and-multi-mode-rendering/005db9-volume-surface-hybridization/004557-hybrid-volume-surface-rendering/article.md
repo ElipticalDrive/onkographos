@@ -1,0 +1,106 @@
+# Hybrid Volume-Surface Rendering
+
+Also called: Tri-MipRF Hybrid Rendering
+
+## Overview
+Hybrid Volume-Surface Rendering is a strategy that combines volume rendering with rasterized proxy meshes to enable real-time performance on consumer hardware [S1]. It solves the latency bottleneck of pure volume ray marching by using surface geometry to define integration bounds, significantly reducing the number of volume samples required [S1]. Unlike [Multi-Mode Rendering with Iso-surfaces and Meshes](2165-multi-mode-rendering-with-iso-surfaces-and-meshes.md) which may switch between distinct representations, this method integrates surface rasterization directly into the volume sampling loop to limit the marching interval [S1].
+
+## How it works
+**Inputs:**
+*   Camera parameters (position, orientation, intrinsics).
+*   Reconstructed radiance field (e.g., Tri-MipRF) providing density and color.
+*   Proxy mesh: A decimated mesh generated from the density field via Marching Cubes [S1].
+
+**Outputs:**
+*   Final pixel color and opacity.
+
+**Data Structures:**
+*   **Proxy Mesh:** A triangle mesh stored in standard graphics memory. Vertices are 3D coordinates; faces are indices into the vertex array [S1].
+*   **Sampling Interval:** Defined by a distance parameter $\Delta t$ [S1].
+
+**Steps:**
+1.  **Proxy Mesh Generation:** Apply Marching Cubes to the reconstructed density field to generate a surface mesh, followed by mesh decimation to reduce polygon count while maintaining high-fidelity quality [S1].
+2.  **Cone Casting:** For each pixel, emit a cone representing the pixel's footprint in 3D space [S1].
+3.  **Surface Hit Detection:** Rasterize the proxy mesh to find the intersection point with the central axis of the cone. Let this distance from the camera be $t_{hit}$ [S1].
+4.  **Volume Sampling Region Definition:** Define the volume sampling interval as $[t_{hit} - \Delta t, t_{hit} + \Delta t]$. This yields a total sampling interval width of $2\Delta t$ [S1].
+5.  **Sphere Sampling:** Uniformly sample spheres within this interval along the central axis of the cone [S1].
+6.  **Compositing:** Accumulate color and opacity from the sampled spheres using standard volume rendering integration (e.g., front-to-back alpha blending) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_pixel_hybrid(camera, proxy_mesh, radiance_field, delta_t):
+    # 1. Cast cone for the current pixel
+    cone_axis = get_pixel_ray_direction(camera)
+    cone_origin = camera.position
+    
+    # 2. Rasterize proxy mesh to find hit point on central axis
+    # Returns distance t_hit from camera origin to the nearest surface intersection
+    t_hit = rasterize_proxy_mesh_hit(proxy_mesh, cone_origin, cone_axis)
+    
+    # If no hit, render background or handle far plane
+    if t_hit is None:
+        return background_color
+
+    # 3. Define sampling interval [t_min, t_max]
+    t_min = t_hit - delta_t
+    t_max = t_hit + delta_t
+    
+    # 4. Sample spheres within the interval
+    # Number of samples N is determined by desired resolution within 2*delta_t
+    num_samples = calculate_sample_count(t_max - t_min)
+    
+    color = vec3(0.0)
+    alpha = 0.0
+    
+    for i in range(num_samples):
+        # Uniformly sample t within [t_min, t_max]
+        t = t_min + (i + 0.5) * (t_max - t_min) / num_samples
+        
+        # Get 3D position on the cone's central axis
+        pos = cone_origin + t * cone_axis
+        
+        # Query radiance field for density and color at pos
+        density, color_sample = radiance_field.query(pos)
+        
+        # Compute transmittance and contribution
+        # [G] Standard front-to-back volume rendering compositing
+        transmittance = exp(-density * step_size)
+        contribution = color_sample * (1.0 - transmittance)
+        
+        color += contribution * (1.0 - alpha)
+        alpha += (1.0 - alpha) * (1.0 - transmittance)
+        
+        # Early termination if fully opaque
+        if alpha > 0.99:
+            break
+            
+    return color
+```
+
+**Parameters:**
+*   $\Delta t$: The distance margin from the surface hit point. Typical values are not explicitly given, but it determines the width of the $2\Delta t$ sampling interval [S1].
+*   Mesh Decimation Factor: Controls the trade-off between proxy mesh fidelity and rasterization speed [S1].
+
+**Edge Cases:**
+*   **No Surface Hit:** If the ray misses the proxy mesh, the volume sampling interval is undefined. The method must fall back to a default far-plane distance or skip volume rendering for that pixel [S1].
+*   **Precision:** Rasterization of the proxy mesh must be accurate enough to provide a reliable $t_{hit}$; otherwise, the sampling interval may miss the actual volume structure [S1].
+
+## Subtopics
+
+### Hybrid Rendering Framework
+A rendering framework that integrates volume and surface models into a unified 3D space with correctly sorted depth information for occlusion calculation, using an intelligent switch mechanism to apply appropriate rendering strategies at runtime [S2, unofficial]. It introduces new scene graph node types: volume LOD, Segmental Replacer, Multi-Volume, and Clipping node [S2, unofficial]. The switch mechanism checks indicative parameter values and sets up thresholds to select between surface and volume rendering strategies based on application requirements (e.g., showing a workpiece in volume style for simulation while showing a robot in surface style) [S2, unofficial].
+
+## Operating characteristics
+*   **Performance:** Enables real-time rendering at >60 FPS on consumer-level GPUs (e.g., Nvidia RTX 3060) [S1].
+*   **Complexity:** Time complexity is dominated by rasterization of the proxy mesh and the reduced number of volume samples ($2\Delta t$ interval) compared to full-volume marching [S1].
+*   **Strengths:** Significantly reduces the number of volume samples, enabling real-time interactive rendering [S1]. Maintains high-fidelity quality with the proxy mesh [S1].
+*   **Limitations:** Relies on the quality of the proxy mesh; if the mesh is inaccurate, the sampling interval may be misaligned with the true volume [S1].
+
+## Background
+Originated in the Tri-MipRF paper (2023) as a strategy to enable real-time rendering on consumer hardware by combining volume rendering with rasterized proxy meshes [S1]. The concept of hybrid frameworks for manipulating volume and surface models has earlier roots in virtual environment applications, such as flexible manufacturing cells, where different objects require different visualization styles [S2, unofficial].
+
+## Sources
+[S1] Tri-MipRF: Tri-Mip Representation for Efficient Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01811, fetched 2026-10-26
+[S2] A Hybrid Rendering Framework for the Real-time Manipulation of Volume and Surface Models, https://core.ac.uk/download/55863.pdf, fetched 2026-11-03 (unofficial)

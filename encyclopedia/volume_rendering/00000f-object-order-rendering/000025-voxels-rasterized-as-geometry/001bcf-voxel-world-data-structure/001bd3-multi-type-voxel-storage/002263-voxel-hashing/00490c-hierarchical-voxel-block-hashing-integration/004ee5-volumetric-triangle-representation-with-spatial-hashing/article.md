@@ -1,0 +1,178 @@
+# Volumetric Triangle Representation with Spatial Hashing
+
+Also called: Cube-based mesh representation, Spatial-hashed cube field
+
+## Overview
+Volumetric Triangle Representation with Spatial Hashing is a compact data structure that embeds mesh vertices directly into a volumetric grid using spatial hashing, eliminating vertex redundancies by binding continuous vertex positions to discrete voxel edges [S1]. It solves the problem of memory inefficiency and topological inconsistency in real-time dense reconstruction by maintaining both TSDF values and triangle connectivity at the fine cube scale, rather than managing triangles coarsely at the block level [S1]. Unlike standard Marching Cubes implementations that may allocate duplicate vertices, this method enforces a one-to-one correspondence between voxel edges and mesh vertices, enabling $O(1)$ vertex access and preventing memory leaks during parallel execution [S1].
+
+## How it works
+**Inputs:** Depth images from a sensor with known poses; initial empty spatial hash structure [S1].
+**Outputs:** Triangular mesh reformatted for traditional rendering [S1].
+
+**Data Structures:**
+The structure uses a 2-level spatial management system [S1]:
+1.  **Block Level:** Space is divided into large blocks allocated only around object surfaces [S1]. These blocks are managed by a hash table [S1]. This constrains the hash table size and reduces collision probability [S1].
+2.  **Cube Level:** Each block is divided into an array of small cubes (typically $8 \times 8 \times 8$) [S1].
+    *   **Cube Layout:** To handle overlap between adjacent cubes, each cube stores only:
+        *   1 corner vertex $c = (x_0, y_0, z_0)$ [S1].
+        *   3 edge vectors starting from $c$: $e_x = (l, 0, 0)$, $e_y = (0, l, 0)$, $e_z = (0, 0, l)$, where $l$ is the cube side length [S1].
+        *   TSDF value $d(c)$ stored at corner $c$ [S1].
+        *   Up to 5 triangles connecting vertices on the edges [S1].
+        *   Cube type (from Marching Cubes lookup table) indicating the number and shape of triangles [S1].
+    *   **Vertex Storage:** Vertices $v_x, v_y, v_z$ are stored on the respective edges $e_x, e_y, e_z$ [S1]. The position is continuous but bound to the discrete edge coordinate [S1].
+    *   **Memory Layout:** Edges and triangles are stored in pointer arrays of size 3 and 5, respectively [S1]. The pointed data (vertex coordinates, triangle indices) are managed on the memory heap [S1].
+
+**Algorithm Steps:**
+1.  **Data Fusion:** For each incoming depth image, fuse the data into the volumetric cube field by changing TSDF distributions at the corner of each affected cube [S1].
+2.  **Mesh Generation/Update:** Perform local mesh generation or update based on the updated TSDF values using Marching Cubes (MC) [S1].
+    *   Determine the cube type based on the sign of $d(c)$ at the corner and neighbors [S1].
+    *   Calculate vertex positions on edges $e_x, e_y, e_z$ where the TSDF crosses zero [S1].
+    *   Generate triangles connecting these vertices according to the MC configuration [S1].
+3.  **Vertex Binding:** Bind the calculated continuous vertex positions to the discrete edges [S1]. Since each edge is shared by adjacent cubes, the vertex is stored once and referenced by all cubes sharing that edge [S1].
+4.  **Rendering:** Reformat the mesh data into a standard triangle buffer for traditional rendering [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Data Structures
+class Cube:
+    corner: tuple          # c = (x0, y0, z0)
+    tsdf: float            # d(c)
+    edges: list            # Size 3, pointers to Edge objects
+    triangles: list        # Size up to 5, pointers to Triangle objects
+    cube_type: int         # MC configuration index
+
+class Edge:
+    start: tuple           # Vertex position on the edge
+    direction: tuple       # e_x, e_y, or e_z
+    length: float          # l
+
+class Triangle:
+    vertices: list         # 3 vertex positions
+
+# Standard MC edge table (256 cases, 12 edges each)
+MC_EDGE_TABLE = [...]  # Standard 256-entry lookup table
+MC_VERTEX_TABLE = [...] # Standard 256-entry lookup table (vertices per triangle)
+
+# Spatial Hash Table
+hash_table: dict  # Maps block_key -> list[Cube]
+
+def get_block_key(pos, block_size):
+    return (pos[0] // block_size, pos[1] // block_size, pos[2] // block_size)
+
+def get_cube_in_block(block_key, pos, block_size):
+    block = hash_table.get(block_key)
+    if not block:
+        return None
+    local_idx = ((pos[0] % block_size) // 1, (pos[1] % block_size) // 1, (pos[2] % block_size) // 1)
+    return block[local_idx]
+
+def fuse_depth_image(depth_image, pose, block_size):
+    """Update TSDF values in affected cubes."""
+    for depth_pos, depth_val in depth_image:
+        world_pos = transform(depth_pos, pose)
+        block_key = get_block_key(world_pos, block_size)
+        cube = get_cube_in_block(block_key, world_pos, block_size)
+        if cube:
+            cube.tsdf = update_tsdf(cube.tsdf, depth_val)
+
+def get_neighbor_tsdf(cube, neighbor_offset):
+    """Fetch TSDF from an adjacent cube coordinate."""
+    neighbor_pos = (cube.corner[0] + neighbor_offset[0], 
+                    cube.corner[1] + neighbor_offset[1], 
+                    cube.corner[2] + neighbor_offset[2])
+    block_key = get_block_key(neighbor_pos, 1) # Assuming unit grid for neighbor lookup
+    neighbor_cube = get_cube_in_block(block_key, neighbor_pos, 1)
+    return neighbor_cube.tsdf if neighbor_cube else 0.0
+
+def interpolate_vertex_on_edge(edge, tsdf_start, tsdf_end):
+    """Linear interpolation where TSDF crosses zero."""
+    if tsdf_start * tsdf_end >= 0:
+        return None
+    t = -tsdf_start / (tsdf_end - tsdf_start)
+    return (edge.start[0] + t * edge.direction[0],
+            edge.start[1] + t * edge.direction[1],
+            edge.start[2] + t * edge.direction[2])
+
+def update_mesh(cube: Cube, block_size):
+    """Generate or update triangles for a cube based on TSDF."""
+    # Fetch TSDF at 8 corners of the cube
+    d = [cube.tsdf]
+    for dx in [0, 1]:
+        for dy in [0, 1]:
+            for dz in [0, 1]:
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                d.append(get_neighbor_tsdf(cube, (dx, dy, dz)))
+    
+    # Compute MC case index from signs
+    case_index = 0
+    for i in range(1, 8):
+        if d[i] < 0:
+            case_index |= (1 << i)
+    
+    # Clear old triangles if type changed
+    if cube.cube_type != case_index:
+        cube.triangles.clear()
+        cube.cube_type = case_index
+    
+    if case_index == 0:
+        return
+
+    # Calculate vertex positions on edges
+    vx = interpolate_vertex_on_edge(cube.edges[0], d[0], d[1])
+    vy = interpolate_vertex_on_edge(cube.edges[1], d[0], d[2])
+    vz = interpolate_vertex_on_edge(cube.edges[2], d[0], d[4])
+    
+    # Generate triangles based on cube_type
+    edge_indices = MC_EDGE_TABLE[case_index]
+    for i in range(0, len(edge_indices), 3):
+        if edge_indices[i] == -1:
+            break
+        v1 = get_vertex_for_edge(edge_indices[i], vx, vy, vz, d)
+        v2 = get_vertex_for_edge(edge_indices[i+1], vx, vy, vz, d)
+        v3 = get_vertex_for_edge(edge_indices[i+2], vx, vy, vz, d)
+        cube.triangles.append(Triangle([v1, v2, v3]))
+
+def get_vertex_for_edge(edge_idx, vx, vy, vz, d):
+    """Map MC edge index to interpolated vertex."""
+    # Simplified mapping for the 3 stored edges + implicit neighbors
+    # In practice, uses standard MC edge-to-vertex mapping
+    if edge_idx == 0: return vx
+    if edge_idx == 1: return vy
+    if edge_idx == 2: return vz
+    # Fallback for other edges in full implementation
+    return (0.0, 0.0, 0.0)
+
+def garbage_collect():
+    """Remove unreferenced vertices and triangles."""
+    # Implementation depends on reference counting mechanism
+    pass
+```
+
+**Parameters:**
+*   **Cube Resolution:** 8mm (used in experiments for scene 'burghers') [S1].
+*   **Block Subdivision:** Blocks are divided into cubes, typically $8 \times 8 \times 8$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Redundancy:** Loose mesh storage strategies prone to duplicate vertex allocation. This method forbids this by using one-to-one correspondence between voxel edges and mesh vertices [S1].
+*   **Topological Irregularities:** Limited resolution can cause topological issues [S1].
+*   **Parallel Execution:** Lock-based vertex sharing mechanism is required to prevent memory leaks during parallel execution [S1].
+
+## Subtopics
+
+### [Volumetric Mesh Generation with Spatial Hashing](14155-volumetric-mesh-generation-with-spatial-hashing.md)
+This method generates a watertight triangular mesh from a Truncated Signed Distance Function (TSDF) volume by integrating Marching Cubes (MC) with a spatially hashed block structure, enabling real-time incremental reconstruction on GPUs. It distinguishes itself from standard MC implementations by introducing temporal consistency checks to minimize triangle allocation, a lock-based vertex sharing mechanism to prevent memory leaks during parallel execution, and a disturbance detection algorithm to correct topological irregularities caused by limited resolution. Unlike the parent [Volumetric Triangle Representation with Spatial Hashing](13835-volumetric-triangle-representation-with-spatial-hashing.md) which focuses on compact vertex binding, this method explicitly manages the lifecycle of mesh primitives via reference counting and garbage collection to maintain memory efficiency in dynamic scenes.
+
+## Operating characteristics
+*   **Time Complexity:** Vertex accessing is $O(1)$ via hash table visiting plus local indexing [S1].
+*   **Memory Complexity:** Compact due to one-to-one vertex-edge correspondence and heap-managed primitives [S1].
+*   **Performance:** Used in real-time dense reconstruction for robotics, specifically for online mesh storage and manipulation [S1].
+*   **Strengths:** Eliminates vertex redundancies, enables $O(1)$ vertex access, supports parallel execution with lock-based mechanisms, and maintains mesh quality via local shape regularization [S1].
+
+## Background
+The method was proposed by Wei Dong, Jieqi Shi, Weijie Tang, Xin Wang, and Hongbin Zha in 2018 [S1]. It addresses the lack of an efficient incremental framework specifically designed for online mesh storage and manipulation in real-time dense reconstruction [S1]. The research was supported by the Natural Science Foundation of China (No. 61632003) [S1].
+
+## Sources
+[S1] An Efficient Volumetric Mesh Representation for Real-Time Scene Reconstruction Using Spatial Hashing, https://doi.org/10.1109/icra.2018.8463157, fetched 2026-10-26

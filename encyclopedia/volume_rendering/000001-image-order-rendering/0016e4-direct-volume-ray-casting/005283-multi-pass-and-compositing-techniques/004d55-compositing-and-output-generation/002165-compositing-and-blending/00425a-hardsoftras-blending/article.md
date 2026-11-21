@@ -1,0 +1,165 @@
+# HardSoftRas Blending
+
+Also called: HardSoftRas Shading and Blending
+
+## Overview
+HardSoftRas Blending is a pixel-wise compositing strategy for differentiable rendering that distinguishes between edge pixels (silhouettes and vertical surfaces) and non-edge pixels to balance anti-aliasing with texture sharpness [S1]. Unlike SoftRas, which blends all faces in non-edge regions, HardSoftRas retains the most frontal color for non-edges while applying weighted averaging for edges, thereby maintaining sharp textures inside silhouettes and generating far-range gradients around boundaries [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of $K$ rasterized buffers. Each buffer $k$ contains a shaded color $C_k$ and a signed distance $dist_k$ from the pixel $p_i$ to the face in that buffer. A stencil mask $SH$ indicating the most frontal face in the frontal buffer. Parameters: temperature $\sigma > 0$, edge mask width $\delta$ (typically $\delta = r$, where $r$ is the pixel radius or a scaling factor), and number of buffers $K$.
+- **Outputs:** Final color $I_c$ and silhouette intensity $I_s$ for each pixel.
+
+**Data Structures:**
+- $C_k$: RGB color of the $k$-th buffer.
+- $dist_k$: Signed distance from pixel $p_i$ to the $k$-th face. Note: The source explicitly removes the square of the distance used in SoftRas to avoid numerical instability in sigmoid computation [S1].
+- $SH$: Binary mask (1 if face $k$ is most frontal, 0 otherwise).
+- $E$: Binary edge mask derived from $SH$.
+
+**Steps:**
+
+1.  **Compute Edge Mask $E$:**
+    Apply edge detection and dilation to the stencil mask $SH$ of hard faces in the frontal buffer. The resulting mask $E$ has a width $\delta$ (typically $\delta = r$) [S1].
+    $$ E(p_i) = \text{Dilate}(\text{EdgeDetect}(SH), \delta) $$
+
+2.  **Compute Face Probabilities $D_k$:**
+    Calculate the probability $D_k$ for each buffer $k$ using a sigmoid function on the signed distance. This replaces the squared distance term found in SoftRas [S1].
+    $$ D_k = \text{sigmoid}\left(\frac{dist_k}{\sigma}\right) $$
+    where $\sigma$ is the temperature parameter (typically $\sigma = r/7$) [S1].
+
+3.  **Compute Edge Color $I_{ce}$:**
+    For pixels identified as edges ($E=1$), compute the blended color using weighted averaging of all buffers based on $D_k$. This provides transparency and far-range gradients [S1].
+    $$ I_{ce} = \frac{\sum_{k=1}^{K} D_k C_k}{\sum_{k=1}^{K} D_k} $$
+
+4.  **Compute Non-Edge Color $I_{cne}$:**
+    For pixels identified as non-edges ($E=0$), retain the color of the most frontal face. This maintains sharp textures [S1].
+    $$ I_{cne} = SH \cdot C_1 $$
+    where $C_1$ is the color of the most frontal face (indicated by $SH$). Note: The source notation $I_c = SH C_1$ implies selecting the frontal color where $SH$ is active [S1].
+
+5.  **Compute Silhouette Edge Intensity $I_{se}$:**
+    For silhouette rendering, compute the binary occupancy blending for edges. This represents the probability that at least one face is present [S1].
+    $$ I_{se} = 1 - \prod_{k=1}^{K} (1 - D_k) $$
+
+6.  **Compute Non-Edge Silhouette Intensity $I_{sne}$:**
+    For non-edges, use flat intensity (binary occupancy of the frontal face) [S1].
+    $$ I_{sne} = SH $$
+
+7.  **Final Composition:**
+    Combine edge and non-edge results using the binary mask $E$ [S1].
+    $$ I_c = E \cdot I_{ce} + (1 - E) \cdot I_{cne} $$
+    $$ I_s = E \cdot I_{se} + (1 - E) \cdot I_{sne} $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hardsoft_ras_blend(buffers, SH, sigma, delta):
+    """
+    HardSoftRas Blending for differentiable rendering.
+    
+    Args:
+        buffers: List of K buffers. Each buffer is a dict with 'color' (K, H, W, 3) 
+                 and 'dist' (K, H, W).
+        SH: Stencil mask of hard faces in the frontal buffer (K, H, W). 
+            1.0 for the most frontal face, 0.0 otherwise.
+        sigma: Temperature parameter for sigmoid.
+        delta: Width of the edge mask dilation.
+        
+    Returns:
+        final_color: (H, W, 3)
+        final_silhouette: (H, W)
+    """
+    K = len(buffers)
+    
+    # 1. Compute Edge Mask E
+    # Edge detection and dilation on SH. 
+    # Implementation detail: This is an image processing step.
+    # E is binary (0 or 1). Width is delta.
+    E = compute_edge_mask(SH, delta) 
+    
+    # 2. Compute Probabilities D_k
+    # D_k = sigmoid(dist_k / sigma)
+    # Note: Use raw dist_k, not squared, for numerical stability [S1].
+    D = []
+    for k in range(K):
+        dist_k = buffers[k]['dist']
+        D_k = sigmoid(dist_k / sigma)
+        D.append(D_k)
+    
+    # Stack D for vectorized operations: (K, H, W)
+    D_stack = torch.stack(D, dim=0)
+    
+    # 3. Compute Edge Color I_ce
+    # Weighted average: sum(D_k * C_k) / sum(D_k)
+    # C_k shape: (K, H, W, 3)
+    C_stack = torch.stack([buffers[k]['color'] for k in range(K)], dim=0)
+    
+    numerator = torch.sum(D_stack.unsqueeze(-1) * C_stack, dim=0) # (H, W, 3)
+    denominator = torch.sum(D_stack, dim=0) # (H, W)
+    
+    # Avoid division by zero
+    denominator = torch.clamp(denominator, min=1e-8)
+    I_ce = numerator / denominator.unsqueeze(-1)
+    
+    # 4. Compute Non-Edge Color I_cne
+    # Keep most frontal color: SH * C_1
+    # SH indicates which face is frontal. 
+    # C_1 is the color of the frontal face.
+    # We can compute this by masking C_stack with SH and summing, 
+    # or simply taking the color where SH is 1.
+    # Assuming SH is one-hot or binary mask for the single frontal face:
+    frontal_color = torch.sum(SH.unsqueeze(-1) * C_stack, dim=0) # (H, W, 3)
+    I_cne = frontal_color
+    
+    # 5. Final Color Composition
+    # I_c = E * I_ce + (1 - E) * I_cne
+    final_color = E.unsqueeze(-1) * I_ce + (1 - E).unsqueeze(-1) * I_cne
+    
+    # 6. Compute Silhouette Edge Intensity I_se
+    # I_se = 1 - product(1 - D_k)
+    # product over k
+    prob_none = torch.prod(1 - D_stack, dim=0) # (H, W)
+    I_se = 1 - prob_none
+    
+    # 7. Compute Non-Edge Silhouette Intensity I_sne
+    # I_sne = SH
+    I_sne = SH
+    
+    # 8. Final Silhouette Composition
+    # I_s = E * I_se + (1 - E) * I_sne
+    final_silhouette = E * I_se + (1 - E) * I_sne
+    
+    return final_color, final_silhouette
+
+def sigmoid(x):
+    return 1.0 / (1.0 + torch.exp(-x))
+
+def compute_edge_mask(SH, delta):
+    """
+    Placeholder for image processing step: Edge detection and dilation on SH.
+    Returns binary mask E with width delta.
+    """
+    # In a real implementation, this would use convolutional kernels 
+    # for edge detection and morphological dilation.
+    # For the purpose of this article, we assume this function exists 
+    # as an image processing primitive.
+    pass
+```
+
+**Parameters and Edge Cases:**
+- $\sigma$: Temperature parameter. Default $\sigma = r/7$ [S1]. Smaller $\sigma$ makes the transition sharper.
+- $\delta$: Edge mask width. Default $\delta = r$ [S1]. Controls the region around silhouettes that is blended.
+- Numerical Instability: The source explicitly states that the square of the distance is removed from the sigmoid argument compared to SoftRas to prevent numerical instability [S1].
+- Pseudo-occlusions: Settings without `Enlarge()` or `Shift()` (concepts from the source's broader context) can suffer from pseudo-occlusions [S1]. The default setting uses `Enlarge()` and `Shift()` to produce smoother soft faces.
+
+## Operating characteristics
+- **Strengths:** Maintains sharp textures inside silhouettes (unlike SoftRas) while providing anti-aliasing and far-range gradients around edges (unlike hard rasterization or Nvdiffrast's geometric edge blending) [S1].
+- **Limitations:** Requires image processing steps (edge detection, dilation) which may be less differentiable or harder to integrate into pure GPU pipelines compared to purely geometric methods [S1].
+- **Comparison:** Unlike Nvdiffrast, which geometrically detects edges and blends only pixels closer than one pixel to the edge, HardSoftRas blurs all edge pixels defined by the mask $E$ and uses image processing for silhouette edges [S1]. Unlike SoftRas, it does not blend non-edge regions, preserving sharpness [S1].
+
+## Background
+HardSoftRas Blending was introduced in the "Dressi" renderer, a hardware-agnostic differentiable renderer with reactive shader packing and soft rasterization [S1]. It generalizes and bridges anti-aliasing and SoftRas techniques [S1].
+
+## Sources
+[S1] Dressi: A Hardware‐Agnostic Differentiable Renderer with Reactive Shader Packing and Soft Rasterization, https://doi.org/10.1111/cgf.14455, fetched 2026-10-29

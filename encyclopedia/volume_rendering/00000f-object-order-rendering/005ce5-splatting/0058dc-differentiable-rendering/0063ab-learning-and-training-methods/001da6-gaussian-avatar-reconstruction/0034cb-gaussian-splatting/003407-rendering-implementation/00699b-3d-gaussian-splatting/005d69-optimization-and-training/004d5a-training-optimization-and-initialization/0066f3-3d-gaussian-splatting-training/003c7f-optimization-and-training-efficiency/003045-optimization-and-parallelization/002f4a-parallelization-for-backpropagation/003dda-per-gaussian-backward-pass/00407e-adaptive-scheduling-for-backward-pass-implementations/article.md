@@ -1,0 +1,204 @@
+# Adaptive Scheduling for Backward Pass Implementations
+Also called: Rasterization backward with adaptive scheduling, Thompson sampling scheduler for backward pass
+
+## Overview
+This method minimizes atomic contention and maximizes thread utilization during the 3D Gaussian Splatting backward pass by dynamically switching between two distinct rasterization implementations [S1, unofficial]. It sets itself apart from static backward strategies by using a Thompson sampling scheduler to select the fastest implementation based on measured latency, addressing the performance variance across different scenes and hardware configurations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A set of projected Gaussians binned to tiles, training configuration (scene, hardware), and current latency beliefs.
+*   Output: Accumulated gradients for Gaussian parameters.
+
+**Data Structures:**
+*   **Latency Beliefs:** Two probability distributions (e.g., Beta distributions) storing the estimated latency performance for Implementation 1 and Implementation 2 [S1, unofficial].
+*   **Shared Memory:** Used in Implementation 2 to store pre-computed transmittance and derivatives [S1, unofficial].
+
+**Parameters:**
+*   **Batch Size ($S$):** Chosen by rounding up $\sqrt{NP}$ to a multiple of subgroup size, capped at 128, where $N$ is the number of Gaussians and $P$ is the number of pixels in the tile [S1, unofficial].
+*   **Gaussian Parameterization:** Follows [LDC* 25] to simplify opacity computation into matrix multiplication [S1, unofficial].
+
+**Steps:**
+1.  **Initialize Latency Beliefs:** Initialize probability distributions for the latency of Implementation 1 and Implementation 2 [S1, unofficial].
+2.  **Select Implementation:** Use Thompson sampling to randomly select an implementation based on the current latency beliefs, favoring implementations with higher probabilities of being faster [S1, unofficial].
+3.  **Execute Selected Implementation:**
+    *   **If Implementation 1 is selected:**
+        1.  Launch one thread block per tile [S1, unofficial].
+        2.  Calculate dynamic Gaussian batch size $S = \min(128, \text{round\_up}(\sqrt{NP}, \text{subgroup\_size}))$ [S1, unofficial].
+        3.  Process Gaussians in batches of size $S$ for each tile [S1, unofficial].
+    *   **If Implementation 2 is selected:**
+        1.  For a Gaussian batch, run a forward pass parallelized over pixels [S1, unofficial].
+        2.  Compute transmittance and its derivative with respect to Gaussian parameters for each Gaussian-pixel pair [S1, unofficial].
+        3.  Store these values in shared memory [S1, unofficial].
+        4.  Run a backward pass parallelized over Gaussians [S1, unofficial].
+        5.  Fetch pre-computed transmittance and derivatives from shared memory [S1, unofficial].
+        6.  Compute accumulated gradients [S1, unofficial].
+4.  **Update Latency Beliefs:** Measure the actual latency of the selected implementation [S1, unofficial]. Update the corresponding probability distribution based on the measured latency [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+# Assume these are defined elsewhere or initialized
+# latency_beliefs: List of [alpha, beta] for Beta distribution for each implementation
+# subgroup_size: Integer, e.g., 32
+# max_batch_size: Integer, 128
+
+def select_implementation(latency_beliefs):
+    """
+    Select implementation using Thompson sampling.
+    latency_beliefs: List of [alpha, beta] for each implementation.
+    Returns: Index of selected implementation (0 or 1).
+    """
+    samples = []
+    for alpha, beta in latency_beliefs:
+        # Sample from Beta distribution
+        sample = random.betavariate(alpha, beta)
+        samples.append(sample)
+    
+    # Select implementation with highest sample
+    return samples.index(max(samples))
+
+def update_belief(latency_beliefs, selected_impl, latency):
+    """
+    Update latency belief based on measured latency.
+    latency_beliefs: List of [alpha, beta] for each implementation.
+    selected_impl: Index of selected implementation.
+    latency: Measured latency (lower is better, so we might invert or use as reward).
+    """
+    # Note: The source says "updates belief based on measured latency".
+    # Standard Thompson sampling for minimization often uses inverse latency or 
+    # treats latency as a cost. Here we assume a simple update where lower latency
+    # increases the "success" parameter (alpha) or decreases "failure" (beta).
+    # A common approach for minimization is to treat 1/latency as reward.
+    # However, without specific update rule, we mark as [G] for implementation detail.
+    
+    # Placeholder for specific update rule not detailed in source.
+    # Typically: alpha += 1 / latency or similar.
+    # We will assume a simple exponential moving average or Bayesian update 
+    # is handled by the scheduler library, but here we note the action.
+    
+    # For the sake of self-contained pseudocode, we assume a simple update:
+    # If latency is low, increase alpha (confidence in speed).
+    # This is a [G] implementation detail as the exact update function is not specified.
+    alpha, beta = latency_beliefs[selected_impl]
+    # Example update: increase alpha inversely proportional to latency
+    # This is a guess [G] as the source does not specify the exact Bayesian update.
+    new_alpha = alpha + 1.0 / latency 
+    latency_beliefs[selected_impl] = [new_alpha, beta]
+
+def implementation_1(tile_gaussians, P, subgroup_size, max_batch_size):
+    """
+    Implementation 1: One thread block per tile, dynamic batch size.
+    tile_gaussians: List of Gaussians in the tile.
+    P: Number of pixels in the tile.
+    """
+    N = len(tile_gaussians)
+    if N == 0:
+        return
+    
+    # Calculate batch size S
+    sqrt_np = math.sqrt(N * P)
+    # Round up to multiple of subgroup_size
+    S = math.ceil(sqrt_np / subgroup_size) * subgroup_size
+    # Cap to max_batch_size
+    S = min(S, max_batch_size)
+    
+    # Process in batches
+    for i in range(0, N, S):
+        batch = tile_gaussians[i:i+S]
+        # Process batch (details of gradient accumulation omitted as per source focus on scheduling)
+        pass
+
+def implementation_2(tile_gaussians, P, subgroup_size, max_batch_size):
+    """
+    Implementation 2: Forward pass over pixels, backward pass over Gaussians, shared memory.
+    tile_gaussians: List of Gaussians in the tile.
+    P: Number of pixels in the tile.
+    """
+    N = len(tile_gaussians)
+    if N == 0:
+        return
+    
+    # Calculate batch size S (same logic as Impl 1 for consistency, though source doesn't explicitly link S to Impl 2)
+    sqrt_np = math.sqrt(N * P)
+    S = math.ceil(sqrt_np / subgroup_size) * subgroup_size
+    S = min(S, max_batch_size)
+    
+    # Forward pass parallelized over pixels
+    # Compute transmittance and derivatives for each Gaussian-pixel pair
+    # Store in shared memory
+    shared_memory_data = []
+    for i in range(0, N, S):
+        batch = tile_gaussians[i:i+S]
+        # For each pixel in tile, compute contribution from batch
+        # This part is complex and depends on specific rasterization logic
+        # Source says: "compute transmittance and its derivative... store in shared memory"
+        # We assume a function exists for this
+        compute_forward_and_store(batch, P, shared_memory_data)
+        
+    # Backward pass parallelized over Gaussians
+    # Fetch from shared memory and compute accumulated gradient
+    compute_backward_from_shared(shared_memory_data, tile_gaussians)
+
+def compute_forward_and_store(batch, P, shared_memory_data):
+    """
+    [G] Placeholder for forward pass logic.
+    Computes transmittance and derivatives for Gaussian-pixel pairs.
+    """
+    pass
+
+def compute_backward_from_shared(shared_memory_data, tile_gaussians):
+    """
+    [G] Placeholder for backward pass logic.
+    Fetches from shared memory and computes gradients.
+    """
+    pass
+
+def run_adaptive_backward(tile_gaussians, P, subgroup_size, max_batch_size, latency_beliefs):
+    """
+    Main function to run adaptive backward pass.
+    """
+    selected_impl = select_implementation(latency_beliefs)
+    
+    start_time = time.time()
+    
+    if selected_impl == 0:
+        implementation_1(tile_gaussians, P, subgroup_size, max_batch_size)
+    else:
+        implementation_2(tile_gaussians, P, subgroup_size, max_batch_size)
+        
+    end_time = time.time()
+    latency = end_time - start_time
+    
+    update_belief(latency_beliefs, selected_impl, latency)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** The source mentions handling tile boundaries efficiently using branchless functions for ellipse range, but this is part of the projection step, not the backward scheduling [S1, unofficial].
+*   **Degenerate Input:** If a tile has no Gaussians, both implementations should handle this gracefully (e.g., return immediately).
+
+## Subtopics
+
+### [Adaptive View and Pixel Sampling Scheduling](15689-adaptive-view-and-pixel-sampling-scheduling.md)
+A scheduling mechanism that jointly adjusts the tile-wise pixel sampling rate ($r_{tile}$) and the number of sampled views ($K$) over training iterations to allocate more computation during difficult stages and reduce it as optimization converges. It sets itself apart from static sampling strategies by dynamically scaling the view budget and pixel density based on reconstruction error and training progress, achieving a trade-off between training speed and reconstruction quality.
+
+## Operating characteristics
+*   **Time Complexity:** The latency of Implementation 1 is approximately proportional to the product of the number of batches $(P+S)/P$ and the number of Gaussians traversed per batch $(N+S)/S$ [S1, unofficial]. Implementation 2's complexity is not explicitly given, but it aims to improve thread utilization and minimize divergence [S1, unofficial].
+*   **Memory Complexity:** Implementation 2 uses shared memory to store transmittance and derivatives, which may limit the batch size or tile size based on available shared memory [S1, unofficial].
+*   **Measured Performance:** On NVIDIA RTX 3090, Implementation 2 is 20%-30% faster than Implementation 1 on the Mip-NeRF 360 bicycle scene, but Implementation 1 is faster on the garden scene [S1, unofficial].
+*   **Scaling:** The method adapts to different scenes and hardware configurations automatically via the Thompson sampling scheduler [S1, unofficial].
+*   **Strengths:** Reduces atomic contention, maximizes thread utilization, and automatically selects the fastest implementation for a given context [S1, unofficial].
+*   **Limitations:** The overhead of Thompson sampling is minimal but non-zero [S1, unofficial]. The performance gain depends on the availability of a faster implementation for the specific scene [S1, unofficial].
+*   **When to Use:** When training 3D Gaussian Splatting models and performance varies significantly across scenes or hardware [S1, unofficial].
+*   **When Not to Use:** When a single implementation is consistently faster across all scenarios, or when the overhead of scheduling is not justified by the performance gain [S1, unofficial].
+
+## Background
+This method was introduced in "VkSplat: High-Performance 3DGS Training in Vulkan Compute" [S1, unofficial]. It addresses the high atomic contention and subgroup reduction issues present in existing 3DGS training implementations [S1, unofficial]. The approach is inspired by [MGK* 24] for the first implementation and aims to improve upon [KKLD23] and [YLK* 25] by dynamically selecting the best backward pass strategy [S1, unofficial].
+
+## Sources
+[S1] VkSplat: High-Performance 3DGS Training in Vulkan Compute, https://doi.org/10.2312/egs.20261024, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,887 @@
+## A Deconvolutional Neural Network for Plasma Tomography
+
+This repository contains a neural network that produces tomographic reconstructions similar to those available at JET.
+
+### Requirements
+
+- Python 3, TensorFlow 2.1, CUDA 10.1, cuDNN 7.6
+
+### Instructions
+
+1. Run `python3 tomo_data.py` to get all the available tomographic reconstructions and the corresponding bolometer signals.
+
+    - This script will only run on a JET computing cluster (e.g. Freia).
+    
+    - An output file `tomo_data.h5` will be created.
+
+2. Run `python3 split_data.py` to split the data into training set and validation set.
+
+    - This will create two datasets: (`X_train.npy`, `Y_train.npy`) and (`X_valid.npy`, `Y_valid.npy`).
+
+3. Run `python3 batch_size.py` to determine the batch size that should be used during training.
+
+    - Adjust `n_gpus` to reflect the number of GPUs to be used during training.
+
+4. Run `python3 model_train.py` to train the model.
+
+    - Adjust `batch_size` according to the result of the previous script.
+
+    - Training will finish automatically once the validation loss no longer improves.
+    
+    - The model will be saved in `model.h5`.
+
+5. After (or during) training, run `python3 plot_train.py` to plot the loss and validation loss across epochs.
+
+    - The script will also indicate the epoch where the minimum validation loss was achieved.
+    
+6. After training, run `python3 model_valid.py` to test the model on the validation set.
+
+    - Check that the reported `loss` for the validation set is the same as indicated by `plot_train.py`.
+
+7. Run `python3 bolo_data.py` to collect the bolometer signals for a set or range of test pulses.
+
+    - This script will only run on a JET computing cluster (e.g. Freia).
+    
+    - An output file `bolo_data.h5` will be created.
+
+8. Run `python3 model_predict.py` to compute the full-pulse reconstructions for all test pulses.
+
+    - The results will be appended to `bolo_data.h5`.
+
+9. Run `python3 plot_frames.py 92213 48.0 54.0 0.01 1.0` to plot the reconstructions for a test pulse.
+
+    - The command-line arguments specify the pulse, start time (`t0`), end time (`t1`), time step (`dt`) and dynamic range (`vmax` in MW/m3) for the plots.
+
+10. Run `python3 plot_movie.py 92213 48.0 54.0 0.01 1.0` to produce a movie of the reconstructions for a test pulse.
+
+    - The command-line arguments specify the pulse, start time (`t0`), end time (`t1`), time step (`dt`) and dynamic range (`vmax` in MW/m3) for the movie.
+
+    - If needed, adjust `fps` to change the frame rate.
+
+### References
+
+- D.R. Ferreira, P.J. Carvalho, H. Fernandes, [Deep Learning for Plasma Tomography and Disruption Prediction from Bolometer Data](https://arxiv.org/pdf/1910.13257.pdf), IEEE Transactions on Plasma Science, 2019 ([to appear](https://ieeexplore.ieee.org/document/8882311))
+
+- D.R. Ferreira, P.J. Carvalho, H. Fernandes, [Full-Pulse Tomographic Reconstruction with Deep Neural Networks](https://arxiv.org/pdf/1802.02242.pdf), Fusion Science and Technology, vol. 74, no. 1-2, pp. 47-56, 2018 [[BibTeX](https://www.tandfonline.com/action/downloadCitation?doi=10.1080/15361055.2017.1390386&format=bibtex)]
+
+- F.A. Matos, D.R. Ferreira, P.J. Carvalho, [Deep learning for plasma tomography using the bolometer system at JET](https://arxiv.org/pdf/1701.00322.pdf), Fusion Engineering and Design, vol. 114, pp. 18-25, Jan. 2017 [[BibTeX](https://www.sciencedirect.com/sdfe/arp/cite?pii=S0920379616306883&format=text%2Fx-bibtex&withabstract=false)]
+
+### batch_size.py
+```
+import h5py
+import numpy as np
+
+# ----------------------------------------------------------------------
+
+def load(fname):
+    print('Reading:', fname)
+    return np.load(fname)
+    
+X_train = load('X_train.npy')
+X_valid = load('X_valid.npy')
+
+print('X_train:', X_train.shape, X_train.dtype)
+print('X_valid:', X_valid.shape, X_valid.dtype)
+
+# ----------------------------------------------------------------------
+
+n_gpus = 8
+
+print('%20s %20s %20s' % ('batch_size', 'train_ratio', 'valid_ratio'))
+for batch_size in range(1, X_train.shape[0]+1):
+    if batch_size % n_gpus != 0:
+        continue
+    train_ratio = X_train.shape[0] / batch_size
+    valid_ratio = X_valid.shape[0] / batch_size
+    train_ratio_round = int(round(train_ratio))
+    valid_ratio_round = int(round(valid_ratio))
+    if train_ratio_round < train_ratio:
+        continue
+    if train_ratio_round - train_ratio > 1e-2:
+        continue
+    print('%20d %20.6f %20.6f' % (batch_size, train_ratio, valid_ratio))
+```
+
+### bolo_data.py
+```
+import sys
+import h5py
+import jetdata
+import numpy as np
+
+# ------------------------------------------------------------------------------
+
+if len(sys.argv) < 2:
+    print('Usage: %s pulse pulse ... (for individual pulses)' % sys.argv[0])
+    print('Usage: %s pulse-pulse ... (for a range of pulses)' % sys.argv[0])
+    exit()
+
+pulses = []
+for arg in sys.argv[1:]:
+    if '-' in arg:
+        parts = sorted(arg.split('-'))
+        pulse0 = int(parts[0])
+        pulse1 = int(parts[-1])
+        for pulse in range(pulse0, pulse1+1):
+            pulses.append(pulse)
+    else:
+        pulses.append(int(arg))
+
+pulses = sorted(set(pulses))
+
+# ------------------------------------------------------------------------------
+
+fname = 'bolo_data.h5'
+print('Writing:', fname)
+f = h5py.File(fname, 'w')
+
+for pulse in pulses:
+    
+    bolo, bolo_t = jetdata.get_bolo(pulse)
+    if len(bolo) == 0:
+        continue
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo', bolo.shape, bolo.dtype))
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo_t', bolo_t.shape, bolo_t.dtype))    
+
+    g = f.create_group(str(pulse))
+    g.create_dataset('bolo', data=bolo)
+    g.create_dataset('bolo_t', data=bolo_t)
+    print('-'*50)
+
+f.close()
+```
+
+### cmap.py
+```
+import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
+
+def get_cmap():
+    colors = [(0, 0, 255),
+              (51, 0, 255),
+              (76, 0, 255),
+              (102, 0, 255),
+              (127, 0, 255),
+              (153, 0, 255),
+              (179, 0, 255),
+              (204, 0, 255),
+              (229, 0, 255),
+              (255, 0, 255),
+              (255, 0, 0),
+              (255, 51, 0),
+              (255, 76, 0),
+              (255, 102, 0),
+              (255, 127, 0),
+              (255, 153, 0),
+              (255, 179, 0),
+              (255, 204, 0),
+              (255, 229, 0),
+              (255, 255, 0),
+              (255, 255, 51),
+              (255, 255, 102),
+              (255, 255, 153),
+              (255, 255, 204),
+              (255, 255, 255)]
+    colors = np.array(colors, dtype=np.float64)/255.
+    cmap = LinearSegmentedColormap.from_list('jet', colors, N=2048)
+    return cmap
+```
+
+### jetdata.py
+```
+import ppf
+import numpy as np
+
+ppf.ppfssr([0,1,2,3,4])
+
+def get_bolo(pulse):
+    ppf.ppfgo(pulse)
+    ppf.ppfuid('jetppf', 'r')
+    ihdata, iwdata, kb5h, x, kb5h_t, ier = ppf.ppfget(pulse, 'bolo', 'kb5h', reshape=1)
+    ihdata, iwdata, kb5v, x, kb5v_t, ier = ppf.ppfget(pulse, 'bolo', 'kb5v', reshape=1)
+    bolo = np.hstack((kb5h, kb5v))
+    assert np.all(kb5h_t == kb5v_t)
+    bolo_t = kb5h_t
+    return bolo, bolo_t
+
+def get_tomo(pulse):
+    ppf.ppfgo(pulse)
+    tomo = []
+    tomo_t = []
+    for uid in ['jetppf', 'bolom']:
+        ppf.ppfuid(uid, 'r')
+        for i in range(1, 100):
+            pr = 'pr%02d' % i
+            ihdata, iwdata, data, x, t, ier = ppf.ppfget(pulse, 'bolt', pr, reshape=1)
+            if ier != 0:
+                break
+            t = np.float32(ihdata.strip().split()[-1][2:-1])
+            data = np.flipud(np.transpose(data))
+            tomo.append(data)
+            tomo_t.append(t)
+    if len(tomo) > 0:
+        tomo = np.array(tomo)
+        tomo_t = np.array(tomo_t)
+        ix = np.argsort(tomo_t)
+        tomo = tomo[ix]
+        tomo_t = tomo_t[ix]
+    return tomo, tomo_t
+```
+
+### model_test.py
+```
+import h5py
+import numpy as np
+import tensorflow as tf
+
+# ----------------------------------------------------------------------
+
+fname = 'model.h5'
+print('Reading:', fname)
+model = tf.keras.models.load_model(fname)
+
+model.summary()
+
+# ----------------------------------------------------------------------
+
+fname = 'bolo_data.h5'
+print('Reading:', fname)
+f = h5py.File(fname, 'r+')
+
+# ----------------------------------------------------------------------
+
+for pulse in f:
+
+    g = f[pulse]
+    bolo = np.clip(g['bolo'][:], 0., None)/1e6
+    bolo_t = g['bolo_t'][:]
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo', bolo.shape, bolo.dtype))
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo_t', bolo_t.shape, bolo_t.dtype))    
+    
+    tomo = model.predict(bolo, batch_size=1000, verbose=1)*1e6
+    tomo_t = bolo_t
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo', tomo.shape, tomo.dtype))
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo_t', tomo_t.shape, tomo_t.dtype))    
+
+    if 'tomo' in g:
+        del g['tomo']
+    if 'tomo_t' in g:
+        del g['tomo_t']
+
+    g.create_dataset('tomo', data=tomo)
+    g.create_dataset('tomo_t', data=tomo_t)
+
+# ----------------------------------------------------------------------
+
+f.close()
+```
+
+### model_train.py
+```
+import time
+import numpy as np
+np.random.seed(0)
+
+import tensorflow as tf
+from tensorflow.keras.models import *
+from tensorflow.keras.layers import *
+from tensorflow.keras.callbacks import *
+from tensorflow.keras.optimizers import *
+
+# ----------------------------------------------------------------------
+
+def load(fname):
+    print('Reading:', fname)
+    return np.load(fname)
+    
+X_train = load('X_train.npy')
+Y_train = load('Y_train.npy')
+
+X_valid = load('X_valid.npy')
+Y_valid = load('Y_valid.npy')
+
+print('X_train:', X_train.shape, X_train.dtype)
+print('Y_train:', Y_train.shape, Y_train.dtype)
+
+print('X_valid:', X_valid.shape, X_valid.dtype)
+print('Y_valid:', Y_valid.shape, Y_valid.dtype)
+
+# ----------------------------------------------------------------------
+
+strategy = tf.distribute.MirroredStrategy()
+
+with strategy.scope():
+
+    model = Sequential()
+    
+    model.add(Dense(25*15*20, input_shape=(56,)))
+    model.add(Activation('relu'))
+
+    model.add(Dense(25*15*20))
+    model.add(Activation('relu'))
+
+    model.add(Reshape((25,15,20)))
+
+    model.add(Conv2DTranspose(20, kernel_size=(3,3), strides=(2,2), padding='same'))
+    model.add(Activation('relu'))
+
+    model.add(Conv2DTranspose(20, kernel_size=(3,3), strides=(2,2), padding='same'))
+    model.add(Activation('relu'))
+
+    model.add(Conv2DTranspose(20, kernel_size=(3,3), strides=(2,2), padding='same'))
+    model.add(Activation('relu'))
+
+    model.add(Conv2D(1, kernel_size=(3,3), strides=(1,1), padding='same'))
+    model.add(Activation('relu'))
+
+    model.add(Lambda(lambda t: t[:,2:-2,2:-3,0]))
+
+    model.summary()
+
+    # ----------------------------------------------------------------------
+
+    opt = Adam(lr=1e-4)
+
+    model.compile(optimizer=opt, loss='mae')
+
+# ----------------------------------------------------------------------
+
+class MyCallback(Callback):
+    
+    def on_train_begin(self, logs=None):
+        self.min_val_loss = None
+        self.min_val_epoch = None
+        self.min_val_weights = None
+        fname = 'model_train.log'
+        print('Writing:', fname)
+        self.log = open(fname, 'w')
+        print('%-10s %10s %10s %10s' % ('time', 'epoch', 'loss', 'val_loss'))
+        self.log.write('time,epoch,loss,val_loss\n')
+        self.log.flush()
+        
+    def on_epoch_end(self, epoch, logs=None):
+        t = time.strftime('%H:%M:%S')
+        loss = logs['loss']
+        val_loss = logs['val_loss']
+        if (self.min_val_loss == None) or (val_loss < self.min_val_loss):
+            self.min_val_loss = val_loss
+            self.min_val_epoch = epoch
+            self.min_val_weights = self.model.get_weights()
+            print('%-10s %10d %10.6f %10.6f *' % (t, epoch, loss, val_loss))
+        else:
+            print('%-10s %10d %10.6f %10.6f' % (t, epoch, loss, val_loss))
+        self.log.write('%s,%d,%f,%f\n' % (t, epoch, loss, val_loss))
+        self.log.flush()
+        if epoch > 2*self.min_val_epoch:
+            print('Stop training.')
+            self.model.stop_training = True
+
+    def on_train_end(self, logs=None):
+        self.log.close()
+
+    def get_weights(self):
+        return self.min_val_weights        
+
+# ----------------------------------------------------------------------
+
+batch_size = 2632
+print('batch_size:', batch_size)
+
+train_ratio = float(X_train.shape[0]) / float(batch_size)
+valid_ratio = float(X_valid.shape[0]) / float(batch_size)
+
+print('train_ratio: %20.6f' % train_ratio)
+print('valid_ratio: %20.6f' % valid_ratio)
+
+epochs = 10000
+
+mc = MyCallback()
+
+model.fit(X_train, Y_train,
+          batch_size=batch_size,
+          epochs=epochs,
+          verbose=0,
+          callbacks=[mc],
+          validation_data=(X_valid, Y_valid))
+
+print('Loading weights.')
+model.set_weights(mc.get_weights())
+
+# ----------------------------------------------------------------------
+
+fname = 'model.h5'
+print('Writing:', fname)
+model.save(fname)
+```
+
+### model_valid.py
+```
+import numpy as np
+import tensorflow as tf
+
+# ----------------------------------------------------------------------
+
+def load(fname):
+    print('Reading:', fname)
+    return np.load(fname)
+    
+X_valid = load('X_valid.npy')
+Y_valid = load('Y_valid.npy')
+
+print('X_valid:', X_valid.shape, X_valid.dtype)
+print('Y_valid:', Y_valid.shape, Y_valid.dtype)
+
+# ----------------------------------------------------------------------
+
+fname = 'model.h5'
+print('Reading:', fname)
+model = tf.keras.models.load_model(fname)
+
+model.summary()
+
+# ----------------------------------------------------------------------
+
+Y_pred = model.predict(X_valid, batch_size=1000, verbose=1)
+
+print('Y_pred:', Y_pred.shape)
+
+# ----------------------------------------------------------------------
+
+loss = np.mean(np.abs(Y_valid-Y_pred))
+
+print('loss: %.6f' % loss)
+```
+
+### plot_frames.py
+```
+import os
+import sys
+import h5py
+import numpy as np
+import matplotlib.pyplot as plt
+from cmap import *
+from tensorflow.keras.models import load_model
+
+# ----------------------------------------------------------------------
+
+if len(sys.argv) < 6:
+    print('Usage: %s pulse t0 t1 dt vmax' % sys.argv[0])
+    print('Example: %s 92213 48.0 54.0 0.01 1.0' % sys.argv[0])
+    exit()
+
+# ----------------------------------------------------------------------
+
+pulse = int(sys.argv[1])
+print('pulse:', pulse)
+
+t0 = float(sys.argv[2])
+print('t0:', t0)
+
+t1 = float(sys.argv[3])
+print('t1:', t1)
+
+dt = float(sys.argv[4])
+print('dt:', dt)
+
+digits = len(str(dt).split('.')[-1])
+
+vmax = float(sys.argv[5])
+print('vmax:', vmax)
+
+# ----------------------------------------------------------------------
+
+fname = 'bolo_data.h5'
+print('Reading:', fname)
+f = h5py.File(fname, 'r')
+
+g = f[str(pulse)]
+tomo = np.clip(g['tomo'][:], 0., None)/1e6
+tomo_t = g['tomo_t'][:]
+
+print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo', tomo.shape, tomo.dtype))
+print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo_t', tomo_t.shape, tomo_t.dtype))    
+
+f.close()
+
+# ----------------------------------------------------------------------
+
+if t0 < tomo_t[0]:
+    t0 = tomo_t[0]
+    print('t0:', t0, '(overwrite)')
+
+if t1 > tomo_t[-1]:
+    t1 = tomo_t[-1]
+    print('t1:', t1, '(overwrite)')
+
+# ----------------------------------------------------------------------
+
+frames = []
+frames_t = []
+
+for t in np.arange(t0, t1, dt):
+    i = np.argmin(np.fabs(tomo_t - t))
+    frames.append(tomo[i])
+    frames_t.append(tomo_t[i])
+
+frames = np.array(frames)
+frames_t = np.array(frames_t)    
+
+print('%-10s %-10s %-20s %-10s' % (pulse, 'frames', frames.shape, frames.dtype))
+print('%-10s %-10s %-20s %-10s' % (pulse, 'frames_t', frames_t.shape, frames_t.dtype))    
+
+# ----------------------------------------------------------------------
+
+path = 'frames'
+if not os.path.exists(path):
+    os.makedirs(path)
+
+# ----------------------------------------------------------------------
+
+w = 17
+h = 8
+
+nrows = 4
+ncols = 15
+
+k = 0
+
+while k < frames.shape[0]:
+    k0 = k
+    fig, ax = plt.subplots(nrows=nrows, ncols=ncols)
+    for i in range(nrows):
+        for j in range(ncols):
+            if k < frames.shape[0]:
+                im = ax[i,j].imshow(frames[k], cmap=get_cmap(),
+                                    vmin=0., vmax=vmax,
+                                    interpolation='bilinear')
+                title = 't=%.*fs' % (digits, frames_t[k])
+                ax[i,j].set_title(title, fontsize='small')
+                ax[i,j].set_axis_off()
+                k1 = k
+                k += 1
+            else:
+                ax[i,j].set_axis_off()
+    fig.set_size_inches(w, h)
+    plt.subplots_adjust(left=0.001, right=1.-0.001, bottom=0.001, top=1.-0.028, wspace=0.01, hspace=0.14)
+    fname = '%s/%s_%.*f_%.*f_%.*f.png' % (path, pulse, digits, frames_t[k0], digits, frames_t[k1], digits, dt)
+    print('Writing:', fname, '(%d frames)' % (k-k0), '[total: %*d]' % (len(str(frames.shape[0])), k))
+    plt.savefig(fname)
+    plt.cla()
+    plt.clf()
+    plt.close()
+```
+
+### plot_movie.py
+```
+import os
+import sys
+import h5py
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as ani
+from cmap import *
+from tensorflow.keras.models import load_model
+
+# ----------------------------------------------------------------------
+
+if len(sys.argv) < 6:
+    print('Usage: %s pulse t0 t1 dt vmax' % sys.argv[0])
+    print('Example: %s 92213 48.0 54.0 0.01 1.0' % sys.argv[0])
+    exit()
+
+# ----------------------------------------------------------------------
+
+pulse = int(sys.argv[1])
+print('pulse:', pulse)
+
+t0 = float(sys.argv[2])
+print('t0:', t0)
+
+t1 = float(sys.argv[3])
+print('t1:', t1)
+
+dt = float(sys.argv[4])
+print('dt:', dt)
+
+digits = len(str(dt).split('.')[-1])
+
+vmax = float(sys.argv[5])
+print('vmax:', vmax)
+
+fps = 15
+
+# ----------------------------------------------------------------------
+
+fname = 'bolo_data.h5'
+print('Reading:', fname)
+f = h5py.File(fname, 'r')
+
+g = f[str(pulse)]
+tomo = np.clip(g['tomo'][:], 0., None)/1e6
+tomo_t = g['tomo_t'][:]
+
+print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo', tomo.shape, tomo.dtype))
+print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo_t', tomo_t.shape, tomo_t.dtype))    
+
+f.close()
+
+# ----------------------------------------------------------------------
+
+if t0 < tomo_t[0]:
+    t0 = tomo_t[0]
+    print('t0:', t0, '(overwrite)')
+
+if t1 > tomo_t[-1]:
+    t1 = tomo_t[-1]
+    print('t1:', t1, '(overwrite)')
+
+# ----------------------------------------------------------------------
+
+frames = []
+frames_t = []
+
+for t in np.arange(t0, t1, dt):
+    i = np.argmin(np.fabs(tomo_t - t))
+    frames.append(tomo[i])
+    frames_t.append(tomo_t[i])
+
+frames = np.array(frames)
+frames_t = np.array(frames_t)    
+
+print('%-10s %-10s %-20s %-10s' % (pulse, 'frames', frames.shape, frames.dtype))
+print('%-10s %-10s %-20s %-10s' % (pulse, 'frames_t', frames_t.shape, frames_t.dtype))    
+
+# ----------------------------------------------------------------------
+
+path = 'movies'
+if not os.path.exists(path):
+    os.makedirs(path)
+
+# ----------------------------------------------------------------------
+
+fontsize = 'small'
+
+R0 = 1.708 - 2*0.02
+R1 = 3.988 + 3*0.02
+Z0 = -1.77 - 2*0.02
+Z1 = +2.13 + 2*0.02
+
+im = plt.imshow(frames[0], cmap=get_cmap(),
+                vmin=0., vmax=vmax,
+                extent=[R0, R1, Z0, Z1],
+                interpolation='bilinear',
+                animated=True)
+
+ticks = np.linspace(0., vmax, num=5)
+labels = ['%.2f' % t for t in ticks]
+labels[-1] = r'$\geq$' + labels[-1]
+cb = plt.colorbar(im, fraction=0.26, ticks=ticks)
+cb.ax.set_yticklabels(labels, fontsize=fontsize)
+cb.ax.set_ylabel('MW/m3', fontsize=fontsize)
+
+fig = plt.gcf()
+ax = plt.gca()
+
+title = 'Pulse %s t=%.*fs' % (pulse, digits, frames_t[0])
+ax.set_title(title, fontsize=fontsize)
+ax.tick_params(labelsize=fontsize)
+ax.set_xlabel('R (m)', fontsize=fontsize)
+ax.set_ylabel('Z (m)', fontsize=fontsize)
+ax.set_xlim([R0, R1])
+ax.set_ylim([Z0, Z1])
+
+plt.setp(ax.spines.values(), linewidth=0.1)
+plt.tight_layout()
+
+def animate(k):
+    title = 'Pulse %s t=%.*fs' % (pulse, digits, frames_t[k])
+    ax.set_title(title, fontsize=fontsize)
+    im.set_data(frames[k])
+
+animation = ani.FuncAnimation(fig, animate, frames=range(frames.shape[0]))
+
+fname = '%s/%s_%.*f_%.*f.mp4' % (path, pulse, digits, frames_t[0], digits, frames_t[-1])
+print('Writing:', fname)
+animation.save(fname, fps=fps, extra_args=['-vcodec', 'libx264'])
+```
+
+### plot_train.py
+```
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+fname = 'model_train.log'
+print('Reading:', fname)
+df = pd.read_csv(fname)
+
+epoch = df['epoch'].values + 1
+loss = df['loss'].values
+val_loss = df['val_loss'].values
+
+print('epochs:   %8d ... %d' % (np.min(epoch), np.max(epoch)))
+print('loss:     %.6f ... %.6f' % (np.min(loss), np.max(loss)))
+print('val_loss: %.6f ... %.6f' % (np.min(val_loss), np.max(val_loss)))
+
+plt.plot(epoch, loss, label='train loss')
+plt.plot(epoch, val_loss, label='validation loss')
+
+plt.xlabel('epoch')
+plt.ylabel('mean absolute error (MW m$^{-3}$)')
+
+plt.legend()
+plt.grid()
+
+i = np.argmin(val_loss)
+min_val_loss = val_loss[i]
+min_val_epoch = epoch[i]
+
+print('min_val_loss: %.6f' % min_val_loss)
+print('min_val_epoch:', min_val_epoch)
+
+(x_min, x_max) = plt.xlim()
+(y_min, y_max) = plt.ylim()
+
+plt.plot([x_min, min_val_epoch], [min_val_loss, min_val_loss], 'k--')
+plt.plot([min_val_epoch, min_val_epoch], [0., min_val_loss], 'k--')
+
+plt.xlim(0, x_max)
+plt.ylim(0., y_max)
+
+plt.tight_layout()
+
+fname = 'plot_train.png'
+print('Writing:', fname)
+plt.savefig(fname)
+```
+
+### split_data.py
+```
+import h5py
+import tqdm
+import numpy as np
+
+# ----------------------------------------------------------------------
+
+fname = 'tomo_data.h5'
+print('Reading:', fname)
+f = h5py.File(fname, 'r')
+
+pulses = np.array(sorted(f.keys()))
+print('pulses:', len(pulses))    
+
+# ----------------------------------------------------------------------
+
+N = 10
+
+r = np.arange(len(pulses))
+
+i_train = r[(r % N) != N-1]
+i_valid = r[(r % N) == N-1]
+
+train_pulses = pulses[i_train]
+valid_pulses = pulses[i_valid]
+
+print('train_pulses:', len(train_pulses))    
+print('valid_pulses:', len(valid_pulses))    
+    
+# ----------------------------------------------------------------------
+
+def get_XY(pulses):
+    X = []
+    Y = []
+    for pulse in tqdm.tqdm(pulses):
+        g = f[pulse]
+        bolo = np.clip(g['bolo'][:], 0., None) / 1e6
+        tomo = np.clip(g['tomo'][:], 0., None) / 1e6
+        X.append(bolo)
+        Y.append(tomo)
+    X = np.concatenate(X, axis=0)
+    Y = np.concatenate(Y, axis=0)
+    return X, Y
+
+# ----------------------------------------------------------------------
+
+X_train, Y_train = get_XY(train_pulses)
+
+print('X_train:', X_train.shape, X_train.dtype)
+print('Y_train:', Y_train.shape, Y_train.dtype)
+
+# ----------------------------------------------------------------------
+
+X_valid, Y_valid = get_XY(valid_pulses)
+
+print('X_valid:', X_valid.shape, X_valid.dtype)
+print('Y_valid:', Y_valid.shape, Y_valid.dtype)
+
+# ----------------------------------------------------------------------
+
+def save(fname, array):
+    print('Writing:', fname)
+    np.save(fname, array)
+
+save('X_train.npy', X_train)
+save('Y_train.npy', Y_train)
+
+save('X_valid.npy', X_valid)
+save('Y_valid.npy', Y_valid)
+
+# ----------------------------------------------------------------------
+
+f.close()
+```
+
+### tomo_data.py
+```
+import h5py
+import jetdata
+import numpy as np
+
+# ------------------------------------------------------------------------------
+
+def resample(bolo, bolo_t, new_t):
+    dt = 0.005
+    new = []
+    for t in new_t:
+        i0 = np.argmin(np.fabs(bolo_t - t))
+        i1 = np.argmin(np.fabs(bolo_t - (t + dt)))
+        new.append(np.mean(bolo[i0:i1+1], axis=0))
+    new = np.array(new)
+    return new, new_t
+
+# ------------------------------------------------------------------------------
+
+pulse0 = 80128
+pulse1 = 96563
+
+fname = 'tomo_data.h5'
+print('Writing:', fname)
+f = h5py.File(fname, 'w')
+
+for pulse in range(pulse0, pulse1+1):
+    
+    tomo, tomo_t = jetdata.get_tomo(pulse)
+    if len(tomo) == 0:
+        continue
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo', tomo.shape, tomo.dtype))
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'tomo_t', tomo_t.shape, tomo_t.dtype))    
+    
+    bolo, bolo_t = jetdata.get_bolo(pulse)
+    if len(bolo) == 0:
+        continue
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo', bolo.shape, bolo.dtype))
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo_t', bolo_t.shape, bolo_t.dtype))    
+
+    bolo, bolo_t = resample(bolo, bolo_t, tomo_t)
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo', bolo.shape, bolo.dtype))
+    print('%-10s %-10s %-20s %-10s' % (pulse, 'bolo_t', bolo_t.shape, bolo_t.dtype))    
+
+    g = f.create_group(str(pulse))
+    g.create_dataset('tomo', data=tomo)
+    g.create_dataset('tomo_t', data=tomo_t)
+    g.create_dataset('bolo', data=bolo)
+    g.create_dataset('bolo_t', data=bolo_t)
+    print('-'*50)
+
+f.close()
+```

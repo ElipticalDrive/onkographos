@@ -1,0 +1,90 @@
+# Forward Linear Inclusion Function
+Also called: Linear Bounding Function, Linear Inclusion Function
+
+## Overview
+The Forward Linear Inclusion Function is a method for computing valid, conservative bounds on a scalar field function $f(t)$ along a ray, used to determine safe step sizes in sphere tracing [S1]. It sets itself apart from its siblings by relying solely on a global Lipschitz constant $\lambda$ to construct linear bounding lines, offering a black-box compatible approach that requires no gradient or symbolic information [S1, 1410-interval-arithmetic-inclusion-strategies.md].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: The scalar field function $f$, the current ray position $t_0$, the function value $f(t_0)$, and the global Lipschitz constant $\lambda$ [S1].
+- **Output**: A step size $s$ representing the maximum safe distance to advance along the ray without missing a zero-crossing [S1].
+
+**Data Structures**
+No complex data structures are required. The method operates on scalar values and linear coefficients.
+
+**Method Steps**
+1.  **Evaluate Field**: Compute the signed distance or scalar value at the current ray position $t_0$, denoted as $f(t_0)$ [S1].
+2.  **Construct Bounds**: Define the upper bound $f_+(t)$ and lower bound $f_-(t)$ as linear functions starting at $f(t_0)$ with slopes determined by $\lambda$ [S1]:
+    $$
+    f_+(t) = f(t_0) + \lambda(t - t_0)
+    $$
+    $$
+    f_-(t) = f(t_0) - \lambda(t - t_0)
+    $$
+    These bounds satisfy the inclusion property: $\forall t > t_0, f_-(t) \leq f(t) \leq f_+(t)$ [S1]. The function is exact at $t_0$, meaning $f(t_0) = f_-(t_0) = f_+(t_0)$ [S1].
+3.  **Determine Step Size**: Solve for the intersection of the bounding lines with the zero threshold (or a specific threshold $v$, typically 0 for SDFs) [S1].
+    - If $f(t_0) > 0$, the zero-crossing is bounded by the lower line $f_-(t)$. Set $f_-(t_0 + s) = 0$:
+      $$
+      f(t_0) - \lambda s = 0 \implies s = \frac{f(t_0)}{\lambda}
+      $$
+    - If $f(t_0) < 0$, the zero-crossing is bounded by the upper line $f_+(t)$. Set $f_+(t_0 + s) = 0$:
+      $$
+      f(t_0) + \lambda s = 0 \implies s = -\frac{f(t_0)}{\lambda}
+      $$
+    - Combining these, the step size is:
+      $$
+      s = \frac{|f(t_0)|}{\lambda}
+      $$
+    [S1].
+
+**Parameters**
+- $\lambda$: The global Lipschitz constant of $f$. This value must be known or estimated beforehand [S1, 1572-lipschitz-constant-estimation.md].
+
+**Edge Cases and Pitfalls**
+- **Lipschitz Constant Accuracy**: If $\lambda$ is not a true upper bound on the gradient magnitude ($\|\nabla f\|$), the inclusion property is violated, leading to missed intersections and visual artifacts [S1].
+- **Tightness**: Linear bounds are generally looser than quadratic or analytic bounds, potentially resulting in smaller step sizes and slower convergence compared to more sophisticated methods [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def forward_linear_inclusion_step(f, t0, lambda_val):
+    """
+    Compute the safe step size for sphere tracing using a forward linear inclusion function.
+    
+    Args:
+        f: A callable that evaluates the scalar field f(x).
+        t0: The current position on the ray (scalar or vector).
+        lambda_val: The global Lipschitz constant of f.
+        
+    Returns:
+        s: The step size to advance along the ray.
+    """
+    # Evaluate the scalar field at the current position
+    f_t0 = f(t0)
+    
+    # Calculate step size based on the linear bound intersection with zero
+    # s = |f(t0)| / lambda
+    if lambda_val == 0:
+        # Guard against division by zero; implies constant function
+        return 0.0
+        
+    s = abs(f_t0) / lambda_val
+    
+    return s
+```
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per step, involving only one function evaluation and basic arithmetic [S1].
+- **Memory Complexity**: $O(1)$, requiring no additional storage beyond the current ray state [S1].
+- **Performance**: Performance is directly dependent on the tightness of $\lambda$. A loose $\lambda$ results in small step sizes and increased sampling density [S1].
+- **Strengths**: Simple to implement, requires no gradient computation or symbolic expression tree, and is robust for black-box functions [S1, 1410-interval-arithmetic-inclusion-strategies.md].
+- **Limitations**: Less efficient than gradient-based or analytic methods due to looser bounds [S1].
+
+## Background
+The forward linear inclusion function formalizes the step size calculation in sphere tracing by treating the bounding lines as a "bounding cone" starting at $f(t_0)$ [S1]. It provides a rigorous mathematical framework for deriving the classic sphere tracing step equation $s = f(t_0)/\lambda$ from first principles of interval inclusion [S1].
+
+## Sources
+[S1] Fast sphere tracing of procedural volumetric noise for very large and detailed scenes, https://doi.org/10.1111/cgf.70072, fetched 2026-10-26

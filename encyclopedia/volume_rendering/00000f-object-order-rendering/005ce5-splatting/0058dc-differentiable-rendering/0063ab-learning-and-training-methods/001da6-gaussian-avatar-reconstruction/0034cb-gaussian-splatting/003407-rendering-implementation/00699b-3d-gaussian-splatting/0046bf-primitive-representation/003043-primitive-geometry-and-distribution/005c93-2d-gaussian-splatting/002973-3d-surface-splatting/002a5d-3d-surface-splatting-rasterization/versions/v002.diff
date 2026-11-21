@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of surfels $\mathcal{S}$, sorted by depth-interval start $z_{\text{start}}$. Each surfel $i$ has center $z^{(i)}$, half-thickness $\varepsilon_z^{(i)}$, pre-shaded radiance $\mathbf{c}_i$, and MIP-filtered covariance information.
+-*   **Output:** A composited HDR image, where each pixel contains a stack of surface layers, each with accumulated color and opacity.
++*   **Input:** A list of surfels $\mathcal{S}$, sorted by depth-interval start $z_{\text{start}}$ [S1, unofficial]. Each surfel $i$ has center $z^{(i)}$, half-thickness $\varepsilon_z^{(i)}$, pre-shaded radiance $\mathbf{c}_i$, and MIP-filtered covariance information [S1, unofficial].
++*   **Output:** A composited HDR image, where each pixel contains a stack of surface layers, each with accumulated color and opacity [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -16,6 +16,7 @@
+ 
+ **Parameters:**
+-*   $r_{\text{cut}}$: Kernel cutoff radius. Typical values are not explicitly given, but $\rho_{\text{mip}}^2 \geq r_{\text{cut}}^2$ triggers skipping [S1, unofficial].
++*   $r_{\text{cut}}$: Kernel cutoff radius. The condition $\rho_{\text{mip}}^2 \geq r_{\text{cut}}^2$ triggers skipping [S1, unofficial].
+ *   $n_f$: Front-facing normal factor (scalar) [S1, unofficial].
++*   $\varepsilon_z^{(i)}$: Half-thickness of surfel $i$'s depth interval, used to define $z_{\text{start}}$ and $z_{\text{end}}$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -27,5 +28,5 @@
+     d.  Calculate the weight $w = n_f \cdot \exp(-\frac{1}{2} \rho_{\text{mip}}^2)$ [S1, unofficial].
+     e.  Define the depth interval $[z_{\text{start}}^{(i)}, z_{\text{end}}^{(i)}]$ where $z_{\text{start}}^{(i)} = z^{(i)} - \varepsilon_z^{(i)}$ and $z_{\text{end}}^{(i)} = z^{(i)} + \varepsilon_z^{(i)}$ [S1, unofficial].
+-    f.  **Gap Detection:** If $W_g > 0$ AND $z_{\text{start}}^{(i)} > z_{\text{end}}^{\max}$, a gap is detected between the current surfel and the active group. Finalize the current layer by calling `FLUSHLAYER` (which applies Shepard normalization and stores the layer), then reset $\mathbf{C}_g \leftarrow \mathbf{0}$, $W_g \leftarrow 0$, and $z_{\text{end}}^{\max} \leftarrow 0$ [S1, unofficial].
++    f.  **Gap Detection:** If $W_g > 0$ AND $z_{\text{start}}^{(i)} > z_{\text{end}}^{\max}$, a gap is detected between the current surfel and the active group [S1, unofficial]. Finalize the current layer via `FLUSHLAYER` (which applies Shepard normalization and stores the layer), then reset $\mathbf{C}_g \leftarrow \mathbf{0}$, $W_g \leftarrow 0$, and $z_{\text{end}}^{\max} \leftarrow 0$ [S1, unofficial].
+     g.  Update the group's farthest extent: $z_{\text{end}}^{\max} \leftarrow \max(z_{\text{end}}^{\max}, z_{\text{end}}^{(i)})$ [S1, unofficial].
+     h.  Accumulate the surfel's contribution: $\mathbf{C}_g \leftarrow \mathbf{C}_g + w \cdot \mathbf{c}_i$ and $W_g \leftarrow W_g + w$ [S1, unofficial].
+@@ -37,22 +38,19 @@
+ def rasterize_pixel(surfels_sorted, r_cut_sq):
+     # Initialize accumulators for the current surface group
+-    C_g = Vector3(0, 0, 0)
++    C_g = [0.0, 0.0, 0.0]
+     W_g = 0.0
+     z_end_max = 0.0
+-    
+-    # List to store finalized layers for this pixel
+     layers = []
+ 
+     for surfel in surfels_sorted:
+         # 1. Ray-surfel intersection to get local coordinates (u, v)
+-        # [G] Implementation detail: Solve quadratic for ray-surfel intersection
+-        # to determine if the ray hits the surfel and get (u, v).
+-        # If no hit, continue.
+-        if not ray_surfel_intersection(surfel):
++        # [G] Standard ray-surfel intersection solving for local (u, v) coordinates.
++        uv = compute_intersection(surfel)
++        if uv is None:
+             continue
+ 
+-        # 2. Evaluate MIP-filtered weight
+-        # rho_mip_sq is computed via precomputed Sigma_mip_inv
+-        rho_mip_sq = evaluate_mip_weight(surfel)
++        # 2. Evaluate MIP-filtered weight rho_mip^2 via precomputed Sigma_mip^{-1}
++        # [G] Standard Mahalanobis distance computation using inverse covariance.
++        rho_mip_sq = compute_mip_weight(surfel)
+ 
+         # 3. Cutoff check
+@@ -61,6 +59,6 @@
+ 
+         # 4. Calculate weight w
+-        n_f = surfel.n_f # Front-facing normal factor
+-        w = n_f * exp(-0.5 * rho_mip_sq)
++        n_f = surfel.n_f
++        w = n_f * math.exp(-0.5 * rho_mip_sq)
+ 
+         # 5. Define depth interval
+@@ -70,10 +68,8 @@
+         # 6. Gap detection and layer finalization
+         if W_g > 0 and z_start_i > z_end_max:
+-            # Finalize current group
++            # Finalize current group via FLUSHLAYER (applies Shepard normalization)
+             layer = flush_layer(C_g, W_g)
+             layers.append(layer)
+-            
+-            # Reset accumulators
+-            C_g = Vector3(0, 0, 0)
++            C_g = [0.0, 0.0, 0.0]
+             W_g = 0.0
+             z_end_max = 0.0
+@@ -83,6 +79,6 @@
+ 
+         # 8. Accumulate contribution
+-        C_g = C_g + w * surfel.c_i
+-        W_g = W_g + w
++        C_g = [C_g[j] + w * surfel.c_i[j] for j in range(3)]
++        W_g += w
+ 
+     # Finalize the last group if it has content
+@@ -91,25 +87,32 @@
+         layers.append(layer)
+ 
+-    # 9. Composite layers front-to-back
+-    # [G] Standard front-to-back alpha blending using coverage-based opacity
+-    # derived from W_g for each layer.
++    # 9. Composite layers front-to-back using coverage-based opacity
+     return composite_layers(layers)
+ 
++def compute_intersection(surfel):
++    # [G] Standard ray-surfel intersection math.
++    return None
++
++def compute_mip_weight(surfel):
++    # [G] Standard covariance-based MIP weight math.
++    return 0.0
++
+ def flush_layer(C_g, W_g):
+-    # Apply Shepard normalization to C_g using W_g
+-    # [G] Specific normalization formula from Eq. 9 of [S1, unofficial] is not fully detailed
+-    # in the provided text, but it maps accumulated weight to coverage opacity.
+-    # This function returns a layer object with normalized color and opacity.
++    # [G] Applies Shepard normalization to accumulated color C_g using weight W_g.
+     return Layer(normalize(C_g, W_g))
++
++def composite_layers(layers):
++    # [G] Standard front-to-back alpha blending using coverage-based opacity derived from W_g.
++    return [0.0, 0.0, 0.0]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Self-occlusion:** Without depth-interval grouping, single-layer approaches produce self-occlusion errors at high-curvature concavities (e.g., inside ears, under chins) where distinct surface sheets project onto the same pixel [S1, unofficial].
+-*   **Silhouette Artifacts:** Single-layer methods can produce "crusty" shells or aliased contours at silhouettes. This method avoids this by applying smooth coverage falloff independently on each layer [S1, unofficial].
+-*   **Precision:** The gap detection relies on comparing $z_{\text{start}}^{(i)}$ with $z_{\text{end}}^{\max}$. Precision issues in depth values could lead to incorrect gap detection or merging of distinct layers [G].
++*   **Silhouette Artifacts:** Single-layer methods can produce "crusty" shells or aliased contours at silhouettes [S1, unofficial]. This method avoids this by applying smooth coverage falloff independently on each layer [S1, unofficial].
++*   **Precision:** The gap detection relies on comparing $z_{\text{start}}^{(i)}$ with $z_{\text{end}}^{\max}$ [S1, unofficial]. Precision issues in depth values could lead to incorrect gap detection or merging of distinct layers [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of surfels per pixel, $O(N)$, where $N$ is the number of surfels sorted into the pixel's tile. Sorting is done globally or per-tile via radix sort [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the number of surface layers per pixel. In the worst case (highly concave geometry), this could be large, but typically remains small [S1, unofficial].
++*   **Time Complexity:** Not given in the sources. Sorting is done per-tile via radix sort [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources. Proportional to the number of surface layers per pixel [S1, unofficial].
+ *   **Strengths:** Resolves self-occlusion at concavities; produces anti-aliased silhouettes without post-process edge detection; differentiable for inverse rendering [S1, unofficial].
+ *   **Limitations:** Requires sorting and per-pixel state management; more complex than single-layer rasterization [S1, unofficial].

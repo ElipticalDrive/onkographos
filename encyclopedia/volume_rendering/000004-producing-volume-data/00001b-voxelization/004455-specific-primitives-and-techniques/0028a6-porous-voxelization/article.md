@@ -1,0 +1,115 @@
+# Porous Voxelization
+
+Also called: Random Voxel Dropping
+
+## Overview
+Porous Voxelization is a technique that generates porous or sponge-like voxel meshes by randomly discarding voxels during the voxelization process based on a spatial hash of their coordinates [S1, unofficial]. It differs from standard voxelization, which retains all computed voxels, by selectively removing voxels to create a distributed porosity without requiring global connectivity analysis [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A mesh or geometric primitive to be voxelized, and an optional porosity parameter $p \in [0.0, 1.0]$.
+- Output: A set of voxel indices representing the object, with a subset removed based on the porosity threshold.
+
+**Data Structures:**
+- Voxel coordinates $(x, y, z)$, typically integers representing grid indices.
+- Porosity parameter $p$: An optional floating-point value. If `None`, no voxels are dropped. If `Some(p)`, $p$ defines the retention threshold.
+
+**Steps:**
+1. For each voxel $(x, y, z)$ that would normally be included in the solid or surface voxelization result:
+2. Compute a hash value $h$ using a deterministic pseudo-random function based on the voxel coordinates. The specific implementation uses a fractional sine-based spatial hash:
+   $$ h = | \text{fract}( (\mathbf{d} \cdot \mathbf{v}) \times 43758.5453 ) | $$
+   where:
+   - $\mathbf{d}$ is a vector derived from the voxel coordinates $(x, y, z)$. The source notes mention `dot.sin()`, implying a dot product is computed first. Let $\mathbf{v}$ be a vector used in the dot product (e.g., a constant vector or the coordinate vector itself). The exact vector $\mathbf{v}$ is not explicitly defined in the provided notes, but the formula structure is $(\text{dot} \times 43758.5453).\text{fract}().\text{abs}()$.
+   - $\text{fract}(x) = x - \lfloor x \rfloor$ returns the fractional part of $x$.
+   - The constant $43758.5453$ is a standard multiplier for hash functions to distribute values.
+3. If porosity is `Some(p)`:
+   - If $h \ge p$, keep the voxel.
+   - If $h < p$, discard the voxel.
+4. If porosity is `None`, keep the voxel.
+
+**Parameters:**
+- `porosity`: `Option<f64>`. Valid values are in the range $[0.0, 1.0]$.
+  - $0.0$: All voxels are kept (since $h \ge 0.0$ is always true for absolute fractional parts).
+  - $1.0$: No voxels are kept (since $h < 1.0$ is always true, so $h \ge 1.0$ is never true).
+  - Typical values: $0.5$ results in approximately 50% of voxels being dropped.
+
+**Edge Cases and Pitfalls:**
+- Invalid porosity values (outside $[0.0, 1.0]$ or `NaN`) passed directly to the library API are not validated in the core logic, leading to misleading results [S1, unofficial].
+  - $p > 1.0$ (e.g., $1.5$): Since $h < 1.0$ always, the condition $h \ge p$ is never met, effectively dropping all voxels.
+  - $p < 0.0$ (e.g., $-0.5$) or `NaN`: The condition $h \ge p$ may behave unpredictably or effectively disable dropping depending on implementation details (e.g., `NaN` comparisons return false).
+- The hash function must be deterministic for the same voxel coordinates to ensure consistent results across runs.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def porous_voxelization(mesh, porosity=None):
+    """
+    Voxelize a mesh with optional porosity.
+    
+    Args:
+        mesh: The geometric primitive or mesh to voxelize.
+        porosity: Optional float in [0.0, 1.0]. If None, no voxels are dropped.
+        
+    Returns:
+        A list of voxel indices (x, y, z) that are kept.
+    """
+    # Step 1: Perform standard voxelization to get initial set of voxels
+    # This depends on the specific voxelization algorithm (e.g., ray casting, solid filling)
+    # For the purpose of this method, we assume we have a list of candidate voxels
+    candidate_voxels = standard_voxelization(mesh)
+    
+    kept_voxels = []
+    
+    for voxel in candidate_voxels:
+        x, y, z = voxel
+        
+        # Step 2: Compute hash
+        # Note: The exact vector 'dot' is not fully specified in the source.
+        # Assuming a simple dot product with a constant vector or the coordinate vector itself.
+        # A common approach is to use a fixed vector for hashing.
+        # Let's assume a vector v = (1.0, 2.0, 3.0) for demonstration, 
+        # but the source implies 'dot' is derived from coordinates.
+        # The source says: dot.sin() * 43758.5453. This suggests dot is a scalar.
+        # Let's assume dot = x * a + y * b + z * c for some constants a, b, c.
+        # Without explicit constants, we can't be precise. However, the source code 
+        # likely uses a specific vector. Let's assume a standard hash vector.
+        # For the sake of completeness, we'll use a placeholder vector [G].
+        # In practice, this might be (1.0, 1.0, 1.0) or similar.
+        dot_product = x * 1.0 + y * 1.0 + z * 1.0  # [G] Placeholder for actual vector used in hash
+        
+        hash_value = abs((dot_product * 43758.5453) % 1.0)
+        
+        # Step 3: Check porosity
+        final_keep = True  # Assume voxel is kept by standard voxelization
+        
+        if final_keep:
+            if porosity is not None:
+                if hash_value >= porosity:
+                    kept_voxels.append(voxel)
+                # else: discard
+            else:
+                kept_voxels.append(voxel)
+                
+    return kept_voxels
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of voxels generated by the standard voxelization process. The hash computation is $O(1)$ per voxel.
+- **Memory Complexity:** $O(K)$, where $K$ is the number of voxels kept after porosity filtering.
+- **Strengths:**
+  - Creates a visually porous structure without complex connectivity analysis.
+  - Deterministic results for the same input and porosity value.
+  - Simple to implement as a post-processing step or integrated into the voxelization loop.
+- **Limitations:**
+  - May create disconnected components or holes that are not physically meaningful.
+  - Invalid porosity values can lead to unexpected results if not validated.
+  - The distribution of pores is pseudo-random and may not match specific material properties.
+- **When to use:** When a sponge-like or porous appearance is desired for visual effects or simplified simulation, and exact physical porosity is not critical.
+- **When not to use:** When physical accuracy of pore structure is required, or when connectivity of the voxel set is critical.
+
+## Background
+Porous Voxelization was implemented in the `voxelizer-rs` project (lhemerly/voxelizer-rs) as part of Pull Request #179, added to the `MeshProcessor::voxelize` method and CLI interface [S1, unofficial]. It was introduced to allow for random voxel dropping during voxelization, resulting in porous/sponge-like generated meshes [S1, unofficial].
+
+## Sources
+[S1] ✨ Add `--porosity` flag for porous voxelization, https://github.com/lhemerly/voxelizer-rs/pull/179, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,286 @@
+--- v001.md
++++ v002.md
+@@ -4,156 +4,123 @@
+ 
+ ## Overview
+-A path tracing method that uses spatial hashing to accumulate radiance, allowing for denoising via spatial filtering [S1, unofficial]. It differs from standard path tracing by decoupling the accumulation buffer from the pixel grid, enabling spatial averaging of radiance estimates before final display [S1, unofficial].
++A path tracing method that uses spatial hashing to accumulate radiance estimates before final display [S1, unofficial]. It differs from standard path tracing by decoupling the accumulation buffer from the pixel grid, enabling spatial averaging of radiance estimates across hash buckets [S1, unofficial].
+ 
+ ## How it works
+-The method consists of four distinct phases: Generate, Extend, Accumulate, and Display. It relies on Multiple Importance Sampling (MIS) to combine light source and BRDF samples [S1, unofficial].
++The method consists of four distinct phases: Generate, Extend, Accumulate, and Display [S1, unofficial]. It relies on Multiple Importance Sampling (MIS) to combine light source and BRDF samples [S1, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** G-buffer raster (containing position, normal, albedo), voxel grid (sparse representation of participating media/surfaces), sun disk direction, camera parameters.
+-*   **Outputs:** Final image with surface details retained.
++*   **Inputs:** G-buffer raster (containing pixel position, normal, and albedo), voxel grid (sparse representation of participating media or surfaces), sun disk direction, and camera parameters [S1, unofficial][G].
++*   **Outputs:** Final image with surface details retained [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Ray Queue:** A dynamic list of rays to be processed in the Extend phase.
+-*   **Spatial Hash Map:** A hash table mapping 3D spatial coordinates (bucket indices) to accumulated radiance values. The hash function maps a 3D position to a bucket index. The size of the hash buckets determines the spatial resolution of the denoising.
++*   **Ray Queue:** A dynamic list of rays to be processed in the Extend phase [S1, unofficial].
++*   **Spatial Hash Map:** A hash table mapping 3D spatial coordinates (bucket indices) to accumulated albedo-demodulated radiance values [S1, unofficial].
++*   **Hash Function:** Maps a 3D position to a bucket index by integer division of coordinates by the cell size [G].
+ 
+ **MIS Weight Formula:**
+ The importance sampling weight $F$ for a direction sample $X$ is calculated as [S1, unofficial]:
+-
+ $$
+ F = \frac{f(X)}{(1/2)p_1(X) + (1/2)p_2(X)}
+ $$
+-
+ Where:
+-*   $F$ is the MIS weight.
+-*   $f(X)$ is the PDF of the combined distribution.
+-*   $p_1(X)$ is the probability density of sampling from the cosine-weighted normal distribution.
+-*   $p_2(X)$ is the probability density of sampling from the sun disk distribution.
+-*   Both distributions are sampled with equal probability $1/2$.
++*   $F$ is the MIS weight [S1, unofficial].
++*   $f(X)$ is the PDF of the combined distribution [S1, unofficial].
++*   $p_1(X)$ is the probability of sampling from the cosine-weighted normal distribution [S1, unofficial].
++*   $p_2(X)$ is the probability of sampling from the sun disk distribution [S1, unofficial].
++*   Both distributions are sampled with equal probability $1/2$ [S1, unofficial].
+ 
+ **Steps:**
+-
+-1.  **Generate:**
+-    For each pixel in the G-buffer raster:
+-    a. Generate a primary ray based on the pixel's position and the camera's projection.
+-    b. Scatter rays using MIS. The direction sample $X$ is chosen from either the cosine-weighted normal distribution or the sun disk distribution with probability $1/2$ each [S1, unofficial].
+-    c. Calculate the MIS weight $F$ for the chosen direction.
+-    d. Place the generated ray into the ray queue.
+-
+-2.  **Extend:**
+-    Process each ray in the ray queue:
+-    a. Intersect the ray with the voxel grid using sparse ray marching.
+-    b. At each intersection, shade the point by updating the path's throughput. The throughput is multiplied by the albedo and the MIS weight $F$ of the scattering event.
+-    c. If a scattering event occurs (e.g., at a surface intersection or within participating media), generate a new scattered ray direction using MIS.
+-    d. Place the scattered ray into the output ray queue for the next iteration or frame.
+-
+-3.  **Accumulate:**
+-    For each completed path (or after a fixed number of bounces):
+-    a. Calculate the radiance $L$ of the path.
+-    b. Demodulate the radiance by dividing by the path's albedo (or the albedo at the final intersection point) to isolate the shading component. This is referred to as "albedo-demodulated radiance" [S1, unofficial].
+-    c. Map the path's final position to a spatial hash bucket.
+-    d. Accumulate the albedo-demodulated radiance into the spatial hash bucket. This step averages radiance estimates across nearby pixels, providing denoising.
+-
+-4.  **Display:**
+-    a. For each pixel, retrieve the accumulated albedo-demodulated radiance from the corresponding spatial hash bucket.
+-    b. Multiply this value by the pixel's albedo to remodulate the radiance. This step retains surface details (such as color and texture) that were lost during the spatial averaging in the hash buckets [S1, unofficial].
+-    c. Output the final image.
++1.  **Generate:** For each pixel in a gbuffer raster, generate a path and scatter rays using MIS. Place the rays into a ray queue [S1, unofficial].
++2.  **Extend:** Intersect each ray with the voxel grid using sparse ray marching. Shade each intersection by updating the path’s throughput. If scattering occurs, place the scattered ray into the output ray queue [S1, unofficial].
++3.  **Accumulate:** For each path, output the albedo-demodulated radiance into the spatial hash using the path’s radiance [S1, unofficial].
++4.  **Display:** Multiply the shading from the spatial hash by the albedo again to retain surface details lost during spatial averaging in the hash buckets [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++import math
++from collections import namedtuple
+ 
+-```python
+-def wavefront_path_tracer_with_spatial_hashing(gbuffer, voxel_grid, sun_direction, num_samples):
+-    # Initialize spatial hash map
+-    # Key: (bucket_x, bucket_y, bucket_z)
+-    # Value: (accumulated_radiance, count)
+-    spatial_hash = {}
++Ray = namedtuple('Ray', ['origin', 'direction', 'throughput'])
+ 
+-    # Initialize ray queue
++def wavefront_path_tracer(gbuffer, voxel_grid, sun_direction, cell_size, num_samples):
++    # Data structures
+     ray_queue = []
++    spatial_hash = {}  # key: (bx, by, bz), value: [sum_demodulated_radiance, count]
++
++    # Helper: hash bucket index
++    def get_bucket(pos):
++        return (int(pos.x / cell_size), int(pos.y / cell_size), int(pos.z / cell_size))
++
++    # Helper: cosine-weighted hemisphere sampling [G]
++    def sample_cosine_weighted(normal):
++        u1, u2 = random(), random()
++        z = 1.0 - u1
++        r = math.sqrt(max(0.0, 1.0 - z * z))
++        phi = 2.0 * math.pi * u2
++        # Construct local basis from normal [G]
++        tangent = math.cross(normal, (1.0, 0.0, 0.0))
++        if math.dot(tangent, tangent) < 1e-6:
++            tangent = math.cross(normal, (0.0, 1.0, 0.0))
++        tangent = math.normalize(tangent)
++        bitangent = math.cross(normal, tangent)
++        return math.normalize(tangent * (r * math.cos(phi)) + bitangent * (r * math.sin(phi)) + normal * z)
++
++    def pdf_cosine(direction, normal):
++        return max(0.0, math.dot(direction, normal) / math.pi)
++
++    # Helper: sun disk sampling [G]
++    def sample_sun_disk(sun_dir):
++        return sun_dir  # Simplified uniform direction near sun [G]
++
++    def pdf_sun(direction, sun_dir):
++        return 1.0 / (4.0 * math.pi)  # Simplified uniform sphere PDF [G]
++
++    # Helper: sparse ray marching [G]
++    def sparse_ray_march(ray, grid):
++        # March through grid cells until hit or miss [G]
++        return None  # Placeholder for grid traversal logic
+ 
+     # Generate Phase
+     for pixel in gbuffer:
+         for _ in range(num_samples):
+-            # Generate primary ray from pixel
+-            ray = generate_ray_from_pixel(pixel)
++            if random() < 0.5:
++                ray_direction = sample_cosine_weighted(pixel.normal)
++                p1 = pdf_cosine(ray_direction, pixel.normal)
++                p2 = pdf_sun(ray_direction, sun_direction)
++            else:
++                ray_direction = sample_sun_disk(sun_direction)
++                p1 = pdf_cosine(ray_direction, pixel.normal)
++                p2 = pdf_sun(ray_direction, sun_direction)
+             
+-            # Scatter using MIS
+-            # Choose distribution with probability 0.5
+-            if random() < 0.5:
+-                direction = sample_cosine_weighted_normal(pixel.normal)
+-                pdf = cosine_weighted_pdf(direction, pixel.normal)
+-            else:
+-                direction = sample_sun_disk(sun_direction)
+-                pdf = sun_disk_pdf(direction, sun_direction)
+-            
+-            # Calculate MIS weight
+-            # f(X) is the PDF of the chosen distribution
+-            # p1(X) is cosine-weighted PDF, p2(X) is sun disk PDF
+-            f_x = pdf
+-            p1_x = cosine_weighted_pdf(direction, pixel.normal)
+-            p2_x = sun_disk_pdf(direction, sun_direction)
+-            
+-            mis_weight = f_x / (0.5 * p1_x + 0.5 * p2_x)
+-            
+-            # Create ray with throughput
+-            new_ray = Ray(ray.origin, direction, throughput=pixel.albedo * mis_weight)
+-            ray_queue.append(new_ray)
++            f_x = p1 if random() < 0.5 else p2  # PDF of chosen distribution
++            mis_weight = f_x / (0.5 * p1 + 0.5 * p2)
++            throughput = pixel.albedo * mis_weight
++            ray_queue.append(Ray(pixel.position, ray_direction, throughput))
+ 
+     # Extend Phase
+     while ray_queue:
+-        current_ray = ray_queue.pop(0)
+-        
+-        # Sparse ray marching through voxel grid
+-        intersection = sparse_ray_march(current_ray, voxel_grid)
+-        
+-        if intersection:
+-            # Shade intersection
+-            albedo = intersection.albedo
+-            normal = intersection.normal
++        ray = ray_queue.pop(0)
++        hit = sparse_ray_march(ray, voxel_grid)
++        if hit:
++            ray.throughput *= hit.albedo
++            if random() < 0.5:
++                new_dir = sample_cosine_weighted(hit.normal)
++                p1 = pdf_cosine(new_dir, hit.normal)
++                p2 = pdf_sun(new_dir, sun_direction)
++            else:
++                new_dir = sample_sun_disk(sun_direction)
++                p1 = pdf_cosine(new_dir, hit.normal)
++                p2 = pdf_sun(new_dir, sun_direction)
+             
+-            # Update throughput
+-            current_ray.throughput *= albedo
++            f_x = p1 if random() < 0.5 else p2
++            mis_weight = f_x / (0.5 * p1 + 0.5 * p2)
++            ray_queue.append(Ray(hit.point, new_dir, ray.throughput * mis_weight))
+             
+-            # Scatter if needed (e.g., for participating media or surface scattering)
+-            # For simplicity, assume surface scattering generates new rays
+-            # Re-sample direction using MIS
+-            if random() < 0.5:
+-                new_direction = sample_cosine_weighted_normal(normal)
+-                pdf = cosine_weighted_pdf(new_direction, normal)
+-            else:
+-                new_direction = sample_sun_disk(sun_direction)
+-                pdf = sun_disk_pdf(new_direction, sun_direction)
+-            
+-            f_x = pdf
+-            p1_x = cosine_weighted_pdf(new_direction, normal)
+-            p2_x = sun_disk_pdf(new_direction, sun_direction)
+-            
+-            mis_weight = f_x / (0.5 * p1_x + 0.5 * p2_x)
+-            
+-            # Create new scattered ray
+-            scattered_ray = Ray(intersection.point, new_direction, throughput=current_ray.throughput * mis_weight)
+-            ray_queue.append(scattered_ray)
+-            
+-            # Accumulate radiance for the path ending here (or after fixed bounces)
+-            # For this example, we assume accumulation happens at the end of a path
+-            # In a real implementation, this might be done after a fixed number of bounces
+-            # or when throughput drops below a threshold.
+-            # Here, we accumulate the current radiance estimate
+-            radiance = current_ray.throughput * intersection.emission # Assuming emission is 0 for surfaces
+-            
+-            # Demodulate radiance
+-            # Avoid division by zero
+-            if albedo > 1e-6:
+-                demodulated_radiance = radiance / albedo
+-            else:
+-                demodulated_radiance = 0.0
+-            
+-            # Map to spatial hash
+-            bucket = get_spatial_hash_bucket(intersection.point)
+-            
+-            # Accumulate into hash
++            radiance = ray.throughput
++            demodulated = radiance / hit.albedo if hit.albedo > 1e-6 else 0.0
++            bucket = get_bucket(hit.point)
+             if bucket not in spatial_hash:
+                 spatial_hash[bucket] = [0.0, 0]
+-            
+-            spatial_hash[bucket][0] += demodulated_radiance
++            spatial_hash[bucket][0] += demodulated
+             spatial_hash[bucket][1] += 1
+ 
+@@ -161,14 +128,10 @@
+     final_image = {}
+     for pixel in gbuffer:
+-        bucket = get_spatial_hash_bucket(pixel.position)
++        bucket = get_bucket(pixel.position)
+         if bucket in spatial_hash:
+-            avg_demodulated_radiance = spatial_hash[bucket][0] / spatial_hash[bucket][1]
+-            # Remodulate by albedo
+-            final_radiance = avg_demodulated_radiance * pixel.albedo
++            avg_demod = spatial_hash[bucket][0] / spatial_hash[bucket][1]
++            final_image[pixel.id] = avg_demod * pixel.albedo
+         else:
+-            final_radiance = 0.0
+-        
+-        final_image[pixel.id] = final_radiance
+-    
++            final_image[pixel.id] = 0.0
+     return final_image
+ ```
+@@ -181,13 +144,13 @@
+ *   **Large Cell Sizes:** Using large cell sizes in the spatial hash results in a blocky appearance [S1, unofficial].
+ *   **No Spatial Filtering:** The implementation does not perform spatial filtering on the hash map itself, which may lead to artifacts if the hash buckets are too large or too small [S1, unofficial].
+-*   **Division by Zero:** When demodulating radiance, ensure albedo is not zero to avoid division by zero errors.
++*   **Division by Zero:** When demodulating radiance, ensure albedo is not zero to avoid division by zero errors [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of rays, the depth of the voxel grid, and the number of bounces. The spatial hash lookup is $O(1)$ on average.
+-*   **Memory Complexity:** Proportional to the number of spatial hash buckets and the number of rays in the queue.
+-*   **Strengths:** Allows for denoising via spatial averaging. Retains surface details by remodulating with albedo.
+-*   **Limitations:** Large cell sizes cause blocky artifacts. No spatial filtering is applied to the hash map.
+-*   **When to use:** When denoising is desired and surface details need to be preserved. Suitable for scenes with sparse voxels.
+-*   **When not to use:** When high-frequency spatial details are critical and cannot be approximated by spatial averaging.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Allows for spatial averaging of radiance estimates. Retains surface details by remodulating with albedo [S1, unofficial].
++*   **Limitations:** Large cell sizes cause blocky artifacts. No spatial filtering is applied to the hash map [S1, unofficial].
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background

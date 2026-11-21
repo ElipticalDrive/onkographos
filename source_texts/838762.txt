@@ -1,0 +1,141 @@
+The code is supposed to create bump at different angle on torus 3d shape. I can see the torus but not the bump when visualize using  open3d . Expected outcome and what I got is like the following figure. 
+ 
+ The code is as following: 
+ import os, sys
+
+from math import ceil
+
+import numpy as np
+import ipywidgets
+from skimage import measure
+from scipy.ndimage import zoom
+from scipy.interpolate import interpn
+from IPython.display import display
+from einops import rearrange
+import igl
+from tqdm import tqdm
+from sklearn.preprocessing import MinMaxScaler
+from scipy import stats
+import matplotlib.pyplot as plt
+import pandas
+import open3d as o3d
+
+#signed distance function for torus
+def sdf_torus(x, radius, thickness):
+    
+    q = np.stack([np.linalg.norm(x[[0, 1]], axis=0) - radius, x[2]])
+    return np.linalg.norm(q, axis=0) - thickness
+
+# Crop an n-dimensional image with a centered cropping region
+def center_crop(img, shape):
+    start = [a // 2 - da // 2 for a, da in zip(img.shape, shape)]
+    end = [a + b for a, b in zip(start, shape)]
+    slices = tuple([slice(a, b) for a, b in zip(start, end)])
+    return img[slices]
+
+# Add noise to coordinates
+def gradient_noise(x, scale, strength, seed=None):
+    shape = [ceil(s / scale) for s in x.shape[1:]]
+    if seed:
+        np.random.seed(seed)
+    scalar_noise = np.random.randn(*shape)
+    scalar_noise = zoom(scalar_noise, zoom=scale)
+    scalar_noise = center_crop(scalar_noise, shape=x.shape[1:])
+    vector_noise = np.stack(np.gradient(scalar_noise))
+    return vector_noise * strength
+
+# Generating and saving the shapes
+radius=0.25 
+thickness=0.10
+noise_scale=20
+noise_strength=15
+seed=50
+bump_width=5
+bump_height=30
+
+for idx, bump_angle in tqdm(enumerate(np.linspace(-1, 1, 2))):
+    coords = np.linspace(-1, 1, 100)
+    x = np.stack(np.meshgrid(coords, coords, coords))
+    sdf = sdf_torus(x, radius, thickness)
+    verts, faces, normals, values = measure.marching_cubes(sdf, level=0)    
+    print(np.min(verts), np.max(verts))
+    #add noise
+    x_warp = gradient_noise(x, noise_scale, noise_strength, seed)
+    #print(np.min(x_warp), np.max(x_warp))
+    #bump angle
+    angle = np.pi * bump_angle
+    gaussian_center = np.array([np.sin(angle), 0., np.cos(angle)]) * radius
+    x_dist = np.linalg.norm((x - gaussian_center[:, None, None, None]), axis=0)
+    x_bump = bump_height * np.e ** -(1. / bump_width * x_dist ** 2)
+    print(np.min(x_bump), np.max(x_bump))
+    x_warp += -np.stack(np.gradient(x_bump))
+    #print(np.min(x_warp), np.max(x_warp))
+    x_warp = rearrange(x_warp, 'v h w d -> h w d v')
+    vertex_noise = interpn([np.arange(100) for _ in range(3)], x_warp, verts)
+    verts += vertex_noise
+    print(np.min(verts), np.max(verts))
+    igl.write_triangle_mesh(f"torus_bump_500/torus_bump_{idx}.ply", verts, faces)
+ 
+ For visualizing I use the following code: 
+ pcd.compute_vertex_normals()
+pcd.paint_uniform_color([0.8, 0.8, 0.8])
+pcd = o3d.io.read_triangle_mesh('torus_bump_500/torus_bump_1.ply')
+o3d.visualization.draw_geometries([pcd])
+ 
+ I tried using different width and height of the bump but it is not showing up. It seems like the  x_bump  is not adding any effect. 
+ Important Note: I need torus shapes with bumps at different angles (one bump per torus). The shapes should have the same number of vertices and faces. I could have implemented different libraries to get the desired shapes using union but I need the desired shape only by distorting some vertices from the torus. 
+ I can visualize using  meshplot library  but interactive change is not working. I could not find the reason. If it would have been worked I could have seen the effects of the change of various parameters. The code using  meshplot  is like following: 
+ # I have used jupyter notebook to run the code.
+import meshplot as mp
+
+# Meshplot left an annoying print statement in their code. Using this context manager to supress it...
+class HiddenPrints:
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout.close()
+        sys.stdout = self._original_stdout
+
+plot=None
+@mp.interact(
+    radius=(0, 0.5, 0.01), 
+    thickness=(0.01, 0.25, 0.01), 
+    noise_scale=(0.0, 20, 1),
+    noise_strength=(0.0, 5, 1),
+    seed=(1, 100),
+    bump_angle=(-1., 1., 0.01),
+    bump_width=(0.01, 0.02, 0.001),
+    bump_height=(0.01, 50.),
+)
+def show(radius, thickness, noise_scale, noise_strength, seed, bump_angle, bump_width, bump_height):
+    global plot
+    coords = np.linspace(-1, 1, 100)
+    x = np.stack(np.meshgrid(coords, coords, coords))
+    sdf = sdf_torus(x, radius, thickness)
+    verts, faces, normals, values = measure.marching_cubes(sdf, level=0)
+    
+    x_warp = gradient_noise(x, noise_scale, noise_strength, seed)
+    print(x_warp.shape)
+    
+    angle = np.pi * bump_angle
+    gaussian_center = np.array([np.sin(angle), 0., np.cos(angle)]) * radius
+    print(gaussian_center.shape)
+    x_dist = np.linalg.norm((x - gaussian_center[:, None, None, None]), axis=0)
+    print(x_dist.shape)
+    x_bump = bump_height * np.e ** -(1. / bump_width * x_dist ** 2)
+    print(x_bump.shape)
+    x_warp += -np.stack(np.gradient(x_bump))
+    
+    x_warp = rearrange(x_warp, 'v h w d -> h w d v')
+    vertex_noise = interpn([np.arange(100) for _ in range(3)], x_warp, verts)
+    verts += vertex_noise
+    
+    if plot is None:
+        plot = mp.plot(verts, faces, return_plot=True)
+    else:
+        with HiddenPrints():
+            plot.update_object(vertices=verts, faces=faces)
+        display(plot._renderer)
+ 

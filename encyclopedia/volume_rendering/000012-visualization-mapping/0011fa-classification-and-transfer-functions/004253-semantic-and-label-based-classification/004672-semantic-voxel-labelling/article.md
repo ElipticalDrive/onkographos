@@ -1,0 +1,85 @@
+# Semantic Voxel Labelling
+Also called: Voxel semantic labeling
+## Overview
+Semantic Voxel Labelling assigns a discrete integer class label to every voxel in a 3D grid, mapping spatial data to semantic categories [S1]. Unlike continuous transfer functions, it produces deterministic integer identifiers rather than optical properties, serving as the foundational step for label-based rendering and downstream tasks like 3D object detection [S1]. It differs from [Semantic Label Colormap Generation](4667-semantic-label-colormap-generation.md) by outputting raw IDs rather than colors, and from [Semantic Transfer Function Design](9493-semantic-transfer-function-design.md) by focusing on the prediction of the label field itself rather than the mapping of that field to opacity.
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D grid $G$ of dimensions $W \times H \times D \times 4$ (typically containing features or raw data) [S1].
+- Output: A label grid where each voxel $(i, j, k)$ is assigned an integer $S_{i,j,k} \in \{1, 2, \dots, n\}$, where $n$ is the total number of semantic categories [S1].
+
+**Data Structures:**
+- The output is a dense 3D array of integers. Each element corresponds to a voxel coordinate.
+- No interpolation is performed on the labels during classification to prevent "color bleeding" between distinct semantic regions [G]. Nearest-neighbor interpolation is required during ray casting to maintain label integrity [G].
+
+**Algorithm:**
+1. **Feature Extraction:** Process the input grid $G$ using a neural network encoder-decoder architecture (e.g., U-Net style) to produce feature representations for each voxel [S1].
+2. **Label Prediction:** For each voxel at coordinates $(i, j, k)$, predict the class label $S_{i,j,k}$ [S1].
+3. **Constraint:** Ensure $S_{i,j,k}$ is an integer such that $1 \le S_{i,j,k} \le n$ [S1].
+
+**Formula:**
+The label assignment is defined as:
+$$ S_{i,j,k} \in \{1, 2, \dots, n\}, \quad \text{for } 1 \le i \le W, 1 \le j \le H, 1 \le k \le D $$
+where $n$ is the number of semantic categories [S1].
+
+**Parameters:**
+- $n$: The number of semantic categories. Typical values depend on the dataset (e.g., ScanNet, Front3D) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def semantic_voxel_labelling(input_grid: Tensor, num_classes: int) -> Tensor:
+    """
+    Assigns a semantic class label to each voxel in the input grid.
+    
+    Args:
+        input_grid: Tensor of shape (W, H, D, 4) containing input features.
+        num_classes: Integer n, the total number of semantic categories.
+        
+    Returns:
+        Tensor of shape (W, H, D) containing integer labels in range [1, n].
+    """
+    # Step 1: Encode and decode features using a U-Net style network [S1]
+    # Note: The specific architecture details (layers, skip connections) are not provided in the source [G]
+    features = encoder_decoder_network(input_grid)
+    
+    # Step 2: Predict class probabilities or logits for each voxel
+    # The source does not specify the final layer activation (e.g., softmax) [G]
+    logits = classification_head(features)
+    
+    # Step 3: Argmax to get integer labels
+    # Labels are 1-indexed in the source definition [S1]
+    labels = torch.argmax(logits, dim=-1) + 1
+    
+    # Ensure labels are within valid range [1, n]
+    # In practice, clamp or validate against num_classes [G]
+    labels = torch.clamp(labels, 1, num_classes)
+    
+    return labels
+```
+
+**Edge Cases and Pitfalls:**
+- **Generalization:** Due to the diversity of objects in scenes, strong priors are required for the model to generalize across different environments [S1].
+- **Upsampling:** Direct querying of implicit MLPs for higher resolution is slow; grid-based upsampling (e.g., via $g(V_{input}, \text{resolution})$) is preferred for efficiency [S1].
+
+## Subtopics
+
+### Semantic Loss
+A training objective used to enforce consistency between rendered semantic labels and provided ground truth labels. It is computed as a multi-class cross-entropy loss [S2].
+- **Formula:**
+  $$ L_{sem}(I) = - \sum_{r \in R} \sum_{l=1}^{L} p_l(r) \log \hat{p}_l(r) $$
+  where $R$ is the set of all rays emitted from the query image $I$, $L$ is the number of classes ($1 \le l \le L$), $p_l(r)$ is the ground truth probability, and $\hat{p}_l(r)$ is the predicted probability [S2].
+- **Context:** Used in conjunction with Semantic-aware Weight Networks to rescore the significance of source views and construct final semantic rays [S2].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the neural network inference time for the encoder-decoder network [S1]. Grid-based upsampling is faster than querying implicit MLPs for higher resolutions [S1].
+- **Memory Complexity:** Requires storing the full 3D label grid $W \times H \times D$ [S1].
+- **Strengths:** Provides discrete, interpretable semantic information suitable for downstream tasks like 3D object detection [S1].
+- **Limitations:** Requires strong priors for generalization across diverse scenes [S1].
+
+## Background
+Semantic Voxel Labelling is a technique used in 3D representation learning, particularly within Neural Radiance Fields (NeRFs). It was highlighted in the context of self-supervised learning using Masked AutoEncoders (NeRF-MAE) to improve downstream 3D object detection performance on datasets like Front3D and ScanNet [S1]. The method addresses the need for fast grid upsampling compared to implicit MLP queries [S1].
+
+## Sources
+[S1] NeRF-MAE: Masked AutoEncoders for Self-Supervised 3D Representation Learning for Neural Radiance Fields, https://arxiv.org/abs/2404.01300v3, fetched 2026-10-26
+[S2] Semantic Ray: Learning a Generalizable Semantic Field with Cross-Reprojection Attention, https://doi.org/10.1109/cvpr52729.2023.01668, fetched 2026-10-29

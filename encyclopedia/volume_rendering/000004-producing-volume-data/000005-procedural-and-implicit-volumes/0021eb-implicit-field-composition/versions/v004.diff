@@ -1,0 +1,239 @@
+--- v003.md
++++ v004.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-Implicit Field Composition constructs a single signed distance field (SDF) by combining multiple geometric primitives and procedural noise functions using Boolean set operations [S1, S2, unofficial]. It solves the problem of generating complex, hybrid scenes (e.g., terrain intersecting with rigid structures) from analytic components without requiring explicit mesh generation or voxelization during the definition phase [S1, S2, unofficial]. It differs from [Procedural and implicit volumes](13-procedural-and-implicit-volumes.md) by explicitly targeting signed distance metrics for dual contouring or ray marching, rather than scalar density values for volume rendering, and from [Implicit Surface Primitives](1800-implicit-surface-primitives.md) by supporting non-geometric noise-based fields in the composition [S1, S2, unofficial].
++Implicit Field Composition constructs complex volumetric or surface geometries by combining primitive scalar fields (such as terrain, cuboids, and spheres) using set-theoretic operations like union and intersection [S1, S2, unofficial]. It differs from single-primitive methods by enabling the procedural generation of hybrid scenes, specifically serving as the signed distance field (SDF) generator for dual contouring mesh extraction [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input**: A 3D position vector $\mathbf{p}$ (world space).
+-*   **Output**: A scalar signed distance value $d(\mathbf{p})$.
++**Inputs and Outputs:**
++*   **Input:** A query point $\mathbf{x} \in \mathbb{R}^3$ (typically `worldPosition`).
++*   **Output:** A scalar value $f(\mathbf{x})$ representing the combined implicit field. For SDFs, the sign indicates inside (negative) or outside (positive) [S2, unofficial].
+ 
+-**Data Structures**
+-No persistent data structures are required for the evaluation itself. The method is stateless and procedural [S1, S2, unofficial].
++**Data Structures:**
++No persistent data structures are required for the evaluation itself. The method relies on local variables for intermediate field values.
+ 
+-**Parameters**
+-*   **Fractal Noise**:
++**Parameters:**
++*   **Fractal Noise:**
+     *   `octaves`: 4 [S1, S2, unofficial]
+     *   `frequency`: 0.5343 [S1, S2, unofficial]
+@@ -21,56 +21,55 @@
+     *   `persistence`: 0.68324 [S1, S2, unofficial]
+     *   `scale`: $1/128$ [S1, S2, unofficial]
+-*   **Cuboid**:
++*   **Cuboid:**
+     *   `origin`: $(-4, 10, -4)$ [S1, S2, unofficial]
+-    *   `halfDimensions`: $(12, 12, 12)$ [S1, S2, unofficial]
+-*   **Sphere**:
++    *   `halfDimensions`: $(12, 12, 12)$ [S2, unofficial] (Note: [S1, unofficial] uses `vec3(-4., 10.f, -4.f)` as origin and `vec3(12.f)` likely as half-dimensions or size, but [S2, unofficial] explicitly defines `halfDimensions` as $(12,12,12)$) [S1, S2, unofficial].
++*   **Sphere:**
+     *   `origin`: $(15, 2.5, 1)$ [S1, S2, unofficial]
+-    *   `radius`: $16$ [S1, S2, unofficial]
++    *   `radius`: 16 [S1, S2, unofficial]
+ 
+-**Steps**
+-1.  **Evaluate Terrain Noise**: Compute a fractal noise value based on the horizontal components of $\mathbf{p}$.
+-2.  **Compute Terrain SDF**: Subtract the scaled noise from the vertical component $y$ to create a height-field-like distance field.
+-3.  **Compute Primitive SDFs**: Evaluate the signed distance for the cuboid and the sphere at $\mathbf{p}$.
+-4.  **Combine Fields**: Apply Boolean operations to merge the fields into a single SDF.
++**Steps:**
++1.  **Evaluate Terrain Field:**
++    *   Compute fractal noise $N(\mathbf{x})$ using Perlin noise.
++    *   Calculate terrain height: $h(\mathbf{x}) = \mathbf{x}_y - 20 \cdot N(\mathbf{x})$.
++    *   The terrain field value is $f_{terrain}(\mathbf{x}) = \mathbf{x}_y - h(\mathbf{x}) = 20 \cdot N(\mathbf{x})$. *Correction*: The sources define the terrain *surface* as $y = 20 \cdot noise$. The implicit field for a surface $y = g(x,z)$ is typically $f(x,y,z) = y - g(x,z)$.
++        *   [S1, unofficial] states: `terrain = worldPosition.y - (20.f * noise)`.
++        *   [S2, unofficial] states: `terrain = y - (20.0 * noise)`.
++        *   Thus, $f_{terrain}(\mathbf{x}) = \mathbf{x}_y - 20 \cdot N(\mathbf{x})$.
++2.  **Evaluate Cuboid Field:**
++    *   Compute local position: $\mathbf{p}_{local} = \mathbf{x} - \mathbf{o}_{cuboid}$.
++    *   Compute distance to box surface $f_{cuboid}(\mathbf{x})$ using the standard SDF formula:
++        $$ \mathbf{d} = |\mathbf{p}_{local}| - \mathbf{h} $$
++        $$ f_{cuboid}(\mathbf{x}) = \min(\max(\mathbf{d}_x, \mathbf{d}_y, \mathbf{d}_z), \text{length}(\max(\mathbf{d}, \mathbf{0}))) $$
++        where $\mathbf{h}$ is the half-dimensions vector [S2, unofficial].
++3.  **Evaluate Sphere Field:**
++    *   Compute distance to sphere surface $f_{sphere}(\mathbf{x})$:
++        $$ f_{sphere}(\mathbf{x}) = \|\mathbf{x} - \mathbf{o}_{sphere}\| - r_{sphere} $$
++        [S1, S2, unofficial].
++4.  **Combine Fields:**
++    *   The final field is computed as:
++        $$ f_{final}(\mathbf{x}) = \max(-f_{cuboid}(\mathbf{x}), \min(f_{sphere}(\mathbf{x}), f_{terrain}(\mathbf{x}))) $$
++        [S1, S2, unofficial].
++    *   *Note on Logic:* The term $-f_{cuboid}$ inverts the cuboid's SDF (making inside positive, outside negative) before taking the max with the min of the sphere and terrain. This effectively performs a boolean difference or union depending on the sign convention of the underlying SDFs. Since $f_{cuboid}$ is negative inside, $-f_{cuboid}$ is positive inside. The `max` with the other terms suggests the cuboid acts as a "hole" or exclusion zone if the other fields are negative, or a union if positive. Given the standard SDF convention (negative inside), `max(-S, T)` usually implies $S$ is subtracted from $T$ if $S$ is positive (inside S). However, since $S$ is negative inside, $-S$ is positive inside. This specific composition creates a shape where the cuboid volume is treated differently than the sphere/terrain union.
+ 
+-**Formulas**
+-*   **Fractal Noise**:
+-    $$ N(\mathbf{p}) = 0.5 + 0.5 \sum_{i=0}^{octaves-1} \text{Perlin}(\mathbf{p}_{scaled} \cdot f^i) \cdot a^i $$
+-    Where $\mathbf{p}_{scaled} = \mathbf{p}_{xy} \cdot \text{scale}$, $f$ is frequency, and $a$ is persistence [S1, S2, unofficial].
+-*   **Terrain SDF**:
+-    $$ d_{terrain}(\mathbf{p}) = p_y - 20 \cdot N(\mathbf{p}) $$
+-    [S1, S2, unofficial]
+-*   **Cuboid SDF**:
+-    $$ \mathbf{l} = \mathbf{p} - \mathbf{o}_{cube} $$
+-    $$ \mathbf{d} = (|\mathbf{l}| - \mathbf{h}) $$
+-    $$ m = \max(d_x, d_y, d_z) $$
+-    $$ d_{cube}(\mathbf{p}) = \min(m, \|\mathbf{d}_{pos}\|) $$
+-    Where $\mathbf{d}_{pos}$ is $\mathbf{d}$ with negative components clamped to 0 [S1, S2, unofficial].
+-*   **Sphere SDF**:
+-    $$ d_{sphere}(\mathbf{p}) = \|\mathbf{p} - \mathbf{o}_{sphere}\| - r $$
+-    [S1, S2, unofficial]
+-*   **Composition**:
+-    $$ d_{final}(\mathbf{p}) = \max(-d_{cube}(\mathbf{p}), \min(d_{sphere}(\mathbf{p}), d_{terrain}(\mathbf{p}))) $$
+-    [S1, S2, unofficial]
++**Pseudocode:**
+ 
+-**Pseudocode**
+ ```python
+-import math
+-
+-def perlin_2d(x, y):
+-    """Placeholder for a standard 2D Perlin noise function.
+-    Returns a value typically in [-1, 1]."""
+-    # Implementation details depend on the specific Perlin variant used.
+-    # Sources assume a standard implementation returning [-1, 1].
+-    pass
+-
+-def fractal_noise(position_xy, octaves=4, frequency=0.5343, lacunarity=2.2324, persistence=0.68324, scale=1.0/128.0):
+-    p = position_xy * scale
++def fractal_noise(position_2d, octaves=4, frequency=0.5343, lacunarity=2.2324, persistence=0.68324):
++    """
++    Computes fractal noise based on Perlin noise.
++    Returns value in [0, 1] range typically, but source uses 0.5 + 0.5*noise.
++    """
++    scale = 1.0 / 128.0
++    p = position_2d * scale
+     noise_val = 0.0
+     amplitude = 1.0
+     p *= frequency
+     
+-    for _ in range(octaves):
+-        noise_val += perlin_2d(p.x, p.y) * amplitude
++    for i in range(octaves):
++        # Perlin noise returns value in [-1, 1] or [0, 1] depending on implementation.
++        # Source [S2, unofficial] implies standard Perlin. 
++        # Formula [S1, unofficial] says: N = 0.5 + 0.5 * sum(...). 
++        # The loop accumulates sum.
++        noise_val += perlin_noise(p.x, p.y) * amplitude
+         p *= lacunarity
+         amplitude *= persistence
+@@ -78,71 +77,55 @@
+     return 0.5 + 0.5 * noise_val
+ 
+-def cuboid_sdf(position, origin, half_dimensions):
+-    local_pos = position - origin
+-    abs_local = [abs(x) for x in local_pos]
+-    d = [abs_local[i] - half_dimensions[i] for i in range(3)]
++def sphere_sdf(world_position, origin, radius):
++    return length(world_position - origin) - radius
++
++def cuboid_sdf(world_position, origin, half_dimensions):
++    local_pos = world_position - origin
++    # d is the distance from the box boundaries along each axis
++    d = abs(local_pos) - half_dimensions
++    # m is the maximum distance to the closest face (outside distance)
++    m = max(d.x, max(d.y, d.z))
++    # If outside, return m. If inside, return the negative distance to the closest face.
++    # The source uses: min(m, length(d>0?d:0))
++    # This is the standard SDF for an AABB.
++    outside_dist = length(max(d, 0.0))
++    return min(m, outside_dist)
++
++def terrain_sdf(world_position, noise_value):
++    # Terrain surface is y = 20 * noise
++    # Implicit field f(x,y,z) = y - surface_y
++    return world_position.y - (20.0 * noise_value)
++
++def implicit_field_composition(world_position):
++    # 1. Compute Terrain
++    # Noise depends on x and z
++    noise_val = fractal_noise(vec2(world_position.x, world_position.z))
++    f_terrain = terrain_sdf(world_position, noise_val)
+     
+-    m = max(d)
++    # 2. Compute Cuboid
++    cuboid_origin = vec3(-4.0, 10.0, -4.0)
++    cuboid_half_dims = vec3(12.0, 12.0, 12.0)
++    f_cuboid = cuboid_sdf(world_position, cuboid_origin, cuboid_half_dims)
+     
+-    # d_pos is d with negative values clamped to 0
+-    d_pos = [max(0, x) for x in d]
+-    dist_pos = math.sqrt(sum(x*x for x in d_pos))
++    # 3. Compute Sphere
++    sphere_origin = vec3(15.0, 2.5, 1.0)
++    sphere_radius = 16.0
++    f_sphere = sphere_sdf(world_position, sphere_origin, sphere_radius)
+     
+-    return min(m, dist_pos)
+-
+-def sphere_sdf(position, origin, radius):
+-    return math.sqrt(sum((position[i] - origin[i])**2 for i in range(3))) - radius
+-
+-def terrain_sdf(position, octaves=4, frequency=0.5343, lacunarity=2.2324, persistence=0.68324):
+-    noise = fractal_noise((position.x, position.z), octaves, frequency, lacunarity, persistence)
+-    return position.y - 20.0 * noise
+-
+-def implicit_field_composition(position):
+-    # Parameters from sources [S1, S2, unofficial]
+-    cube_origin = (-4.0, 10.0, -4.0)
+-    cube_half_dims = (12.0, 12.0, 12.0)
+-    
+-    sphere_origin = (15.0, 2.5, 1.0)
+-    sphere_radius = 16.0
+-    
+-    d_cube = cuboid_sdf(position, cube_origin, cube_half_dims)
+-    d_sphere = sphere_sdf(position, sphere_origin, sphere_radius)
+-    d_terrain = terrain_sdf(position)
+-    
+-    # Composition: max(-cube, min(sphere, terrain))
+-    # Note: -cube is used to invert the cuboid for union/intersection logic 
+-    # consistent with the source code's max(-cuboid, ...) pattern.
+-    return max(-d_cube, min(d_sphere, d_terrain))
++    # 4. Combine
++    # max(-cuboid, min(sphere, terrain))
++    return max(-f_cuboid, min(f_sphere, f_terrain))
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Precision**: The cuboid SDF calculation involves `max` and `min` of potentially small differences. Standard float precision is sufficient for the given parameter scales [S1, S2, unofficial].
+-*   **Boundary Continuity**: The composition uses `max` and `min` (Boolean union/intersection). The resulting field is $C^0$ continuous but not $C^1$ at the boundaries where primitives intersect, which is standard for SDF composition [S1, S2, unofficial].
+-*   **Noise Domain**: The noise is evaluated only on $x$ and $z$, treating $y$ as the height axis. Using 3D noise would require a different function signature [S1, S2, unofficial].
+-
+-## Subtopics
+-
+-### Fractal Noise Generation
+-Generates the procedural terrain component. It differs from simple noise by summing octaves with lacunarity and persistence. Choose when organic, height-based geometry is needed. See [Procedural Noise Functions](1799-procedural-noise-functions.md).
+-
+-### Primitive SDFs
+-Provides the rigid geometric components (cube, sphere). They differ from noise by being exact analytic distances. Choose when precise, hard-edged geometry is required. See [Implicit Surface Primitives](1800-implicit-surface-primitives.md).
+-
+-### Boolean SDF Operations
+-The method of combining fields using `max` (union) and `min` (intersection). It differs from mesh boolean operations by being differentiable almost everywhere. Choose when creating hybrid scenes from analytic shapes. See [Signed Distance Function (SDF) Generation and Processing](5342-signed-distance-function-sdf-generation-and-processing.md).
+-
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per evaluation point. The cost is dominated by the noise evaluation, which is $O(\text{octaves})$. With 4 octaves, this is constant and very fast [S1, S2, unofficial].
+-*   **Memory Complexity**: $O(1)$. No grid or mesh data is stored during evaluation [S1, S2, unofficial].
+-*   **Performance**: Extremely fast for ray marching or dual contouring as it avoids grid traversal or mesh lookups. Performance is limited by the cost of the Perlin noise function [S1, S2, unofficial].
+-*   **Strengths**: Infinite resolution, no storage overhead, easy to modify parameters for artistic control [S1, S2, unofficial].
+-*   **Limitations**: The resulting field is only $C^0$ continuous at intersections, which may cause artifacts in gradient-based rendering if not handled by the renderer. The noise is 2D-based for terrain, limiting vertical complexity [S1, S2, unofficial].
+-*   **When to use**: When generating scenes for dual contouring or ray marching where memory is constrained or infinite detail is desired.
+-*   **When not to use**: When $C^1$ continuity is strictly required across all boundaries, or when the scene geometry is too complex for analytic primitives.
++*   **Time Complexity:** $O(1)$ per query point, proportional to the number of octaves in the noise function.
++*   **Memory Complexity:** $O(1)$ auxiliary space.
++*   **Strengths:** Allows for complex, organic shapes (terrain) combined with hard primitives (cuboids, spheres) in a single analytic field. Suitable for real-time ray marching or dual contouring.
++*   **Limitations:** The resulting field is not a true SDF everywhere if the blending operations (max/min) do not preserve the distance property strictly (though the components are SDFs, the combination `max(-S, min(T1, T2))` may not yield a true Euclidean distance field everywhere, potentially affecting marching cubes/dual contouring quality if not handled with QEFs or specific extraction algorithms). The specific combination logic creates non-smooth derivatives at the boundaries of the primitives.
+ 
+ ## Background
+-The method is demonstrated in open-source dual contouring implementations, specifically `DualContouringSample` by Nick Gildrea and `DualContouringCSharp` by Tuckbone [S1, S2, unofficial]. These projects use the composition to create a test scene combining a procedural terrain with a cuboid and a sphere to validate the dual contouring mesh extraction algorithm [S1, S2, unofficial]. The technique leverages standard SDF Boolean operations and fractal noise, common in procedural generation literature [S1, S2, unofficial].
++This method is derived from implementations of Dual Contouring for implicit surfaces, specifically combining procedural noise for terrain with geometric primitives for scene composition [S1, S2, unofficial]. It is used in educational and open-source graphics projects to demonstrate how to generate input data for mesh extraction algorithms like Dual Contouring [S1, S2, unofficial].
+ 
+ ## Sources
+-[S1] DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
+-[S2] DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)+[S1] nickgildea/DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
++[S2] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

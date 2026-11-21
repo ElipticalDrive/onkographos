@@ -1,0 +1,416 @@
+--- v006.md
++++ v007.md
+@@ -2,322 +2,99 @@
+ 
+ ## Overview
+-V4D is a voxel-based architecture for 4D novel view synthesis in dynamic scenes that models the 4D neural radiance field directly without requiring a canonical space [S1]. It distinguishes itself from continuous neural radiance fields and other voxel-based methods by using separate 3D voxel grids for density and texture, combined with a conditional positional encoding (CPE) module and a look-up table (LUT) refinement module to mitigate the over-smoothing effects of total variation regularization [S1]. Unlike its sibling [TiNeuVox](12633-tineuvox.md) which uses a canonical space and position offsets, V4D relies on temporal concatenation and total variation loss to enforce temporal consistency, resulting in longer training times but faster inference [S1].
++V4D is a voxel-based architecture for 4D novel view synthesis in dynamic scenes that models the 4D neural radiance field directly without requiring a canonical space [S1]. It addresses the limitations of MLP-only representations by using separate 3D voxel grids for density and texture, combined with a conditional positional encoding module and a look-up table (LUT) refinement module to preserve high-frequency details and prevent over-smoothing [S1]. Unlike continuous neural radiance fields that require per-pixel optimization, V4D pre-computes a shared volumetric representation, offering competitive reconstruction quality with faster inference times than MLP-based dynamic baselines [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A sequence of single-view videos (or multi-view if adapted, but primarily designed for single-view dynamic scenes) providing ground truth RGB images and camera poses over time.
+-*   **Outputs:** Rendered RGB images for novel viewpoints and time steps.
++*   **Input:** A single-view video sequence (providing spatial coordinates $\mathbf{x}=(x,y,z)$, time index $t$, and view direction $(\theta, \phi)$) and ground-truth RGB images for supervision.
++*   **Output:** Rendered RGB images $\hat{C}(\mathbf{r})$ for novel viewpoints and time steps.
+ 
+ **Data Structures:**
+-1.  **Density Volume:** A 3D voxel grid with dimensions $160 \times 160 \times 160 \times 12$. The last dimension (12) likely represents feature channels or is a fixed size for the feature vector $F_{den}$ [S1]. The grid is initialized to zero [S1].
+-2.  **Texture Volume:** A 3D voxel grid with dimensions $160 \times 160 \times 160 \times 12$, storing feature vector $F_{tex}$ [S1].
+-3.  **Basic LUTs:** $M=5$ learnable 3D look-up tables, each of resolution $33 \times 33 \times 33$, used for pixel-level refinement [S1]. One LUT is initialized as the identity mapping, and the remaining $M-1$ are initialized to zero [S1].
++1.  **Density Volume:** A 3D voxel grid initialized with dimensions $160 \times 160 \times 160 \times 12$. It stores features $F_{den}$ [S1].
++2.  **Texture Volume:** A 3D voxel grid initialized with dimensions $160 \times 160 \times 160 \times 12$. It stores features $F_{tex}$ [S1].
++3.  **Basic LUTs:** $M=5$ learnable 3D look-up tables, each with resolution $33 \times 33 \times 33$. One is initialized as the identity LUT, and the remaining $M-1$ are initialized to zero [S1].
++4.  **MLPs:**
++    *   Density MLP: 5 layers [S1].
++    *   Texture MLP: 5 layers [S1].
++    *   Weight Prediction MLP: 10 layers [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Ray Sampling:** For a target camera pose and time $t$, generate $N$ sample points $\mathbf{x}_i = (x, y, z)$ along each ray. The time index $t$ is normalized or discretized to match the input video sequence.
++1.  **Voxel Sampling:** For a ray $\mathbf{r}$ sampled at $N$ points along its path, retrieve the feature vectors $F_{den}$ and $F_{tex}$ from the density and texture volumes at the 3D spatial location $(x, y, z)$ using trilinear interpolation.
+ 
+-2.  **Feature Sampling:**
+-    *   Sample the feature vector $F_{den}$ from the Density Volume at $\mathbf{x}_i$ using trilinear interpolation.
+-    *   Sample the feature vector $F_{tex}$ from the Texture Volume at $\mathbf{x}_i$ using trilinear interpolation.
+-    *   *Note:* The source specifies dimensions $160 \times 160 \times 160 \times 12$, implying the feature vector size is 12 [S1].
++2.  **Conditional Positional Encoding (CPE):** Apply CPE to the sampled texture features $F_{tex}$ to recover high-frequency details lost by regularization. The encoding is defined as:
++    $$
++    \gamma(p_v) = \left( \sin\left(2^\pi p_v + \frac{2\pi}{L-1}t\right), \cos\left(2^\pi p_v + \frac{2\pi}{L-1}t\right) \right)
++    $$
++    where $p_v$ is the sampled feature vector, $L=5$ is the frequency order, and $t$ is the time index [S1].
++    *   **Pitfall:** CPE is **not** applied to the density features $F_{den}$. The density volume must be initialized to zero for correct initial volume rendering; applying CPE to density features breaks this initialization and causes learning collapse [S1].
++    *   Let the encoded texture feature be $\hat{F}_{tex}$. The density feature remains $F_{den}$.
+ 
+-3.  **Conditional Positional Encoding (CPE):**
+-    *   Apply CPE only to the texture feature $F_{tex}$ to recover high-frequency details. Do **not** apply CPE to $F_{den}$ to preserve the zero-initialization rule required for stable volume rendering convergence [S1].
+-    *   Compute the encoded texture feature $\hat{F}_{tex}$:
+-        $$
+-        \gamma(p_v) = \left( \sin\left(2^\pi p_v + \frac{2\pi}{L-1}t\right), \cos\left(2^\pi p_v + \frac{2\pi}{L-1}t\right) \right)
+-        $$
+-        where $p_v$ is the sampled feature vector (here $F_{tex}$), $L=5$ is the frequency order, and $t$ is the time index [S1].
+-    *   The density feature remains $\hat{F}_{den} = F_{den}$.
++3.  **Feature Concatenation:** Concatenate the time index $t$, the 3D location $(x, y, z)$, the view direction $(\theta, \phi)$, and the features ($F_{den}$ for density, $\hat{F}_{tex}$ for texture) into a single vector [S1].
+ 
+-4.  **Concatenation:**
+-    *   Concatenate the time index $t$, the 3D spatial location $(x, y, z)$, the view direction $(\theta, \phi)$, and the encoded features $\hat{F}_{den}$ and $\hat{F}_{tex}$ into a single vector for each sample point [S1].
++4.  **Field Estimation:**
++    *   Feed the concatenated vector into the 5-layer Density MLP to predict volume density $\sigma$ [S1].
++    *   Feed the concatenated vector into the 5-layer Texture MLP to predict RGB color $\mathbf{c}$ [S1].
+ 
+-5.  **MLP Decoding:**
+-    *   Feed the concatenated vector into a 5-layer Multi-Layer Perceptron (MLP) to predict the volume density $\sigma_i$ [S1].
+-    *   Feed the concatenated vector into a separate 5-layer MLP to predict the RGB color $\mathbf{c}_i$ [S1].
++5.  **Volume Rendering:** Compute the coarse RGB color $\hat{C}(\mathbf{r})$ for the ray using the standard emission-absorption model:
++    $$
++    \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
++    $$
++    where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance, $\delta_i = t_{i+1} - t_i$ is the step size, and $N$ is the number of sampled points [S1].
+ 
+-6.  **Volume Rendering:**
+-    *   Compute the coarse RGB color $\hat{C}(\mathbf{r})$ for the ray using the standard volume rendering equation:
+-        $$
+-        \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+-        $$
+-        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, and $\delta_i = t_{i+1} - t_i$ is the distance between samples [S1].
++6.  **Pseudo-Surface Depth Estimation:** Compute the expected depth $\hat{d}$ for the ray to guide the refinement module:
++    $$
++    \hat{d} = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) t_i
++    $$
++    where $t_i$ represents the depth coordinate of the $i$-th sample point [S1].
+ 
+-7.  **Pseudo-Surface Depth Estimation:**
+-    *   Compute the expected depth $\hat{d}$ for the ray to guide the LUT refinement weights:
+-        $$
+-        \hat{d} = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) t_i
+-        $$
+-        where $t_i$ represents the depth coordinate of the $i$-th sample point along the ray [S1].
++7.  **LUT Refinement (Pixel-Level):**
++    *   Treat the coarse RGB value $\hat{C}(\mathbf{r})$ as a spatial coordinate in the RGB space.
++    *   Perform trilinear interpolation on each of the $M=5$ basic LUTs using this coordinate to obtain interpolated RGB values $\mathbf{r}_m$ for $m=1 \dots M$ [S1].
++    *   Use the pseudo-surface depth $\hat{d}$ (and potentially spatial coordinates) as input to the 10-layer Weight Prediction MLP to predict spatial-aware weights $w_m$ for each basic LUT [S1].
++    *   Combine the interpolated values using the predicted weights to produce the refined RGB color. This process is repeated for $Z=3$ recurrent iterations [S1].
+ 
+-8.  **LUT Refinement (Pixel-Level):**
+-    *   Treat the coarse RGB value $\hat{C}(\mathbf{r})$ as a spatial coordinate in the RGB color space.
+-    *   Perform trilinear interpolation on each of the $M=5$ basic LUTs using this coordinate to obtain interpolated RGB values $\mathbf{r}_m$ for $m=1 \dots M$ [S1].
+-    *   Predict spatial-aware weights $w_m$ using a 10-layer MLP. The input to this MLP is the pseudo-surface depth $\hat{d}$ (and potentially other spatial cues, though the source emphasizes depth for 3D spatial awareness) [S1].
+-    *   Combine the interpolated RGB values using the predicted weights to produce the refined RGB color $\tilde{C}(\mathbf{r})$. This process is repeated for $Z=3$ recurrent iterations [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class V4D:
+-    def __init__(self, grid_res=160, feature_dim=12, lut_res=33, num_luts=5, lut_iter=3):
+-        """
+-        Initialize V4D model.
+-        """
+-        self.grid_res = grid_res
+-        self.feature_dim = feature_dim
+-        self.lut_res = lut_res
+-        self.num_luts = num_luts
+-        self.lut_iter = lut_iter
+-        
+-        # 1. Voxel Grids
+-        # Density Volume: [160, 160, 160, 12]
+-        self.density_grid = nn.Parameter(torch.zeros(1, grid_res, grid_res, grid_res, feature_dim))
+-        # Texture Volume: [160, 160, 160, 12]
+-        self.texture_grid = nn.Parameter(torch.zeros(1, grid_res, grid_res, grid_res, feature_dim))
+-        
+-        # 2. LUTs
+-        # M basic LUTs: [M, 33, 33, 33, 3] (RGB output)
+-        self.luts = nn.Parameter(torch.zeros(1, num_luts, lut_res, lut_res, lut_res, 3))
+-        # Initialize first LUT as identity, others as zero
+-        # Identity mapping in RGB space is complex to initialize directly as a grid, 
+-        # but source says "one basic LUT is initialized as the identity LUT".
+-        # For implementation, we assume the grid values are set such that 
+-        # trilinear interpolation at (r,g,b) returns (r,g,b). 
+-        # This typically requires a specific initialization strategy not fully detailed, 
+-        # but we note it here [G].
+-        self.luts[0, 0, :, :, :, :] = self._init_identity_lut(lut_res)
+-        
+-        # 3. MLPs
+-        # Density MLP: 5 layers
+-        self.density_mlp = nn.Sequential(
+-            nn.Linear(3 + 2 + feature_dim + 1, 256), # x,y,z + theta,phi + F_den + t
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 1) # Output sigma
+-        )
+-        
+-        # Texture MLP: 5 layers
+-        self.texture_mlp = nn.Sequential(
+-            nn.Linear(3 + 2 + feature_dim + 1, 256), # x,y,z + theta,phi + F_tex_enc + t
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 3) # Output RGB
+-        )
+-        
+-        # LUT Weight Prediction MLP: 10 layers, input is depth (scalar) or spatial coords
+-        # Source says "use pseudo-surface depth... and use 10-layer MLPs to predict the weight"
+-        self.lut_weight_mlp = nn.Sequential(
+-            nn.Linear(1, 256), # Input: depth
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, num_luts) # Output weights for M LUTs
+-        )
+-
+-    def _init_identity_lut(self, res):
+-        """
+-        Helper to initialize a 3D LUT as an identity mapping for RGB.
+-        This is a placeholder for the specific initialization logic [G].
+-        """
+-        # Create a grid where value at (r,g,b) is (r,g,b)
+-        # This is complex to implement efficiently in pure PyTorch without 
+-        # specific indexing, but conceptually:
+-        # grid[r, g, b] = [r, g, b] normalized to [-1, 1] or [0, 1]
+-        pass 
+-
+-    def cpe(self, feature, time_idx, freq_order=5):
+-        """
+-        Conditional Positional Encoding.
+-        Only applied to texture features.
+-        """
+-        # gamma(p_v) = (sin(2^pi * p_v + 2pi/(L-1) * t), cos(2^pi * p_v + 2pi/(L-1) * t))
+-        # Note: The source formula uses 2^pi which is likely a typo for 2^i or similar 
+-        # in standard positional encoding, but we follow the source text literally [S1].
+-        # However, standard PE is sin(2^i * x). The source says "2^\pi p_v". 
+-        # Given "L=5 is the frequency order", it likely implies multiple frequencies.
+-        # The source formula: sin(2^\pi p_v + ...) cos(2^\pi p_v + ...)
+-        # This looks like a single frequency component or a specific notation.
+-        # We implement exactly as written in source [S1].
+-        
+-        phase_shift = (2 * torch.pi / (freq_order - 1)) * time_idx
+-        term = (2 ** torch.pi) * feature + phase_shift
+-        enc = torch.cat([torch.sin(term), torch.cos(term)], dim=-1)
+-        return enc
+-
+-    def forward(self, rays, time_idx):
+-        """
+-        rays: [N_rays, N_samples, 5] (x, y, z, theta, phi)
+-        time_idx: [N_rays] or scalar time index
+-        """
+-        N_rays, N_samples, _ = rays.shape
+-        
+-        # 1. Sample Features
+-        # rays[:, :, :3] are (x,y,z)
+-        # We need to normalize coordinates to [-1, 1] or [0, 1] for grid sampling
+-        # Assuming grid coordinates are normalized.
+-        coords = rays[:, :, :3] # [N_rays, N_samples, 3]
+-        
+-        # Trilinear interpolation for Density
+-        # grid_sample expects normalized coordinates [-1, 1]
+-        # Assuming coords are already in the correct range for the grid
+-        F_den = F.grid_sample(self.density_grid, coords.unsqueeze(1), mode='bilinear', align_corners=True).squeeze(1)
+-        # Note: grid_sample is 2D. For 3D, use F.grid_sample with 3D coords or custom 3D interpolation.
+-        # PyTorch F.grid_sample supports 3D (N, C, D, H, W) input and (N, H_out, W_out, D_out, 3) coords.
+-        # Reshaping for 3D grid sampling:
+-        # Density Grid: [1, 12, 160, 160, 160]
+-        # Coords: [N_rays * N_samples, 1, 1, 1, 3]
+-        # This requires careful reshaping. For brevity in pseudocode, we assume a helper `sample_3d` exists.
+-        F_den = sample_3d(self.density_grid, coords) # [N_rays, N_samples, 12]
+-        F_tex = sample_3d(self.texture_grid, coords) # [N_rays, N_samples, 12]
+-        
+-        # 2. CPE
+-        # Apply CPE only to Texture
+-        F_tex_enc = self.cpe(F_tex, time_idx)
+-        
+-        # 3. Concatenation
+-        # theta, phi are rays[:, :, 3], rays[:, :, 4]
+-        # time_idx needs to be broadcasted to [N_rays, N_samples, 1]
+-        t_expanded = time_idx.unsqueeze(1).unsqueeze(1).expand(-1, N_samples, -1)
+-        
+-        # Density Input: x,y,z + theta,phi + F_den + t
+-        input_den = torch.cat([coords, rays[:, :, 3:5], F_den, t_expanded], dim=-1)
+-        # Texture Input: x,y,z + theta,phi + F_tex_enc + t
+-        input_tex = torch.cat([coords, rays[:, :, 3:5], F_tex_enc, t_expanded], dim=-1)
+-        
+-        # 4. MLP Decoding
+-        sigma = self.density_mlp(input_den).squeeze(-1) # [N_rays, N_samples]
+-        color = self.texture_mlp(input_tex) # [N_rays, N_samples, 3]
+-        
+-        # 5. Volume Rendering
+-        # Assume delta is constant or provided
+-        # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-        # Standard volume rendering implementation
+-        alpha = 1.0 - torch.exp(-torch.relu(sigma) * 0.1) # 0.1 is a placeholder for delta, source doesn't specify fixed delta value, assumes sampling strategy [G]
+-        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
+-        weights = alpha * transmittance / (1.0 - alpha + 1e-10) # Approximation for stability
+-        # Correct formula:
+-        # T_0 = 1
+-        # T_i = T_{i-1} * (1 - alpha_i)
+-        # Contribution = T_{i-1} * alpha_i * c_i
+-        T = torch.ones_like(alpha)
+-        T[:, 0] = 1.0
+-        for i in range(1, N_samples):
+-            T[:, i] = T[:, i-1] * (1.0 - alpha[:, i])
+-        
+-        coarse_rgb = torch.sum(weights.unsqueeze(-1) * color, dim=1) # [N_rays, 3]
+-        
+-        # 6. Depth Estimation
+-        # d_hat = sum(T_i * (1 - exp(-sigma_i * delta_i)) * t_i)
+-        # Here t_i is the depth coordinate of the sample point
+-        depths = rays[:, :, 0] # Placeholder for depth along ray, source uses t_i in formula (3)
+-        # Actually, source says t_i in formula (3) is the depth coordinate.
+-        # In standard NeRF, t_i is the distance along the ray.
+-        # We assume `depths` variable holds the z-coordinate or distance.
+-        depth_map = torch.sum(weights * depths, dim=1) # [N_rays]
+-        
+-        # 7. LUT Refinement
+-        refined_rgb = coarse_rgb
+-        for _ in range(self.lut_iter):
+-            # Interpolate on LUTs
+-            # Treat refined_rgb as coordinate in RGB space
+-            # Need to normalize to grid coordinates
+-            lerp_outputs = []
+-            for m in range(self.num_luts):
+-                # Trilinear interpolation on LUT m
+-                val = sample_3d(self.luts[:, m:m+1, :, :, :, :], refined_rgb.unsqueeze(1))
+-                lerp_outputs.append(val.squeeze(1))
+-            
+-            # Predict weights from depth
+-            # Depth is per-ray, LUT weights are per-ray
+-            weights_pred = self.lut_weight_mlp(depth_map.unsqueeze(-1)) # [N_rays, M]
+-            weights_pred = F.softmax(weights_pred, dim=1)
+-            
+-            # Combine
+-            lerp_outputs = torch.stack(lerp_outputs, dim=1) # [N_rays, M, 3]
+-            refined_rgb = torch.sum(lerp_outputs * weights_pred.unsqueeze(-1), dim=1)
+-            
+-        return refined_rgb, coarse_rgb, depth_map
+-
+-    def compute_loss(self, pred_rgb, gt_rgb, depth_map, density_grid, texture_grid):
+-        """
+-        Compute total loss.
+-        """
+-        # L_rgb
+-        l_rgb = torch.mean((pred_rgb - gt_rgb) ** 2)
+-        
+-        # L_pt_rgb (Point-wise RGB Loss)
+-        # Source: sum_i (T_i * a_i * C_hat(r) - C(r))^2
+-        # a_i is probability of termination. In standard NeRF, a_i = alpha_i.
+-        # This loss is applied during training, likely requiring access to intermediate rendering values.
+-        # For simplicity, we assume a helper `compute_pt_rgb_loss` exists [G].
+-        l_pt_rgb = compute_pt_rgb_loss(...) 
+-        
+-        # L_bg
+-        # T_{K+1} is the transmittance after the last sample
+-        T_last = 1.0 - torch.sum(torch.relu(alpha) * torch.cumprod(1.0 - torch.relu(alpha) + 1e-10, dim=1), dim=1)
+-        # L_bg = -T log(T) - (1-T) log(1-T)
+-        l_bg = -T_last * torch.log(T_last + 1e-10) - (1 - T_last) * torch.log(1 - T_last + 1e-10)
+-        l_bg = torch.mean(l_bg)
+-        
+-        # L_TV (Total Variation)
+-        # Applied to density and texture grids
+-        l_tv = compute_total_variation(density_grid) + compute_total_variation(texture_grid)
+-        
+-        # Weights
+-        w1, w2, w3, w4 = 1.0, 0.01, 0.001, 0.1
+-        # Exponential decay for w4 is mentioned, but not the formula. We use constant w4 for now [G].
+-        
+-        loss = w1 * l_rgb + w2 * l_pt_rgb + w3 * l_bg + w4 * l_tv
+-        return loss
+-```
++**Loss Function:**
++The total loss is a weighted sum of four components:
++$$
++Loss = w_1 L_{rgb} + w_2 L_{pt\_rgb} + w_3 L_{bg} + w_4 L_{TV}
++$$
++*   **RGB Loss ($L_{rgb}$):** Mean squared error between rendered and ground truth colors.
++    $$
++    L_{rgb} = \frac{1}{R} \sum_{r \in R} |\hat{C}(r) - C(r)|^2
++    $$
++    where $R$ is the set of training rays [S1].
++*   **Point-wise RGB Loss ($L_{pt\_rgb}$):** Encourages consistency at sampled points.
++    $$
++    L_{pt\_rgb} = \frac{1}{R} \sum_{r \in R} \sum_{i=1}^{K} (T_i a_i \hat{C}(r) - C(r))^2
++    $$
++    where $K$ is the number of queried points in the texture volume, $T_i$ is accumulated transmittance, and $a_i$ is the probability of termination at point $i$ [S1].
++*   **Background Loss ($L_{bg}$):** Encourages foreground/background separation by penalizing intermediate transmittance values.
++    $$
++    L_{bg} = -T_{K+1} \log(T_{K+1}) - (1 - T_{K+1}) \log(1 - T_{K+1})
++    $$
++    where $T_{K+1}$ is the transmittance after the last sample [S1].
++*   **Total Variation Loss ($L_{TV}$):** Applied directly to the voxel grids of the density and texture volumes to prevent over-fitting and maintain geometry. It is **not** applied to the LUTs [S1].
+ 
+ **Parameters:**
+-*   **Voxel Grid Resolution:** $160 \times 160 \times 160$ [S1].
++*   **Voxel Resolution:** $160 \times 160 \times 160$ [S1].
+ *   **Feature Dimension:** 12 [S1].
+-*   **MLP Depth:** 5 layers for density and texture fields [S1].
++*   **MLP Layers:** 5 for density/texture fields, 10 for weight prediction [S1].
+ *   **CPE Frequency Order ($L$):** 5 [S1].
++*   **Basic LUTs ($M$):** 5 [S1].
+ *   **LUT Resolution:** $33 \times 33 \times 33$ [S1].
+-*   **Number of Basic LUTs ($M$):** 5 [S1].
+-*   **LUT Refinement Iterations ($Z$):** 3 [S1].
+-*   **LUT Weight MLP Depth:** 10 layers [S1].
+-*   **Learning Rates:** Voxel grids (density/texture) = 0.1; Density/Texture MLPs = $10^{-3}$; LUT MLPs and Voxel (in LUT module) = $10^{-4}$ [S1].
++*   **Recurrent Iterations ($Z$):** 3 [S1].
++*   **Learning Rates:**
++    *   Voxel grids (density/texture): 0.1 [S1].
++    *   Density/Texture MLPs: $1 \times 10^{-3}$ [S1].
++    *   LUTs refinement MLPs and voxels: $1 \times 10^{-4}$ [S1].
+ *   **Optimizer:** Adam [S1].
+ *   **Batch Size:** 8,196 rays (first stage), 4,196 rays (second stage) [S1].
+-*   **Loss Weights:** $w_1=1.0$ ($L_{rgb}$), $w_2=0.01$ ($L_{pt\_rgb}$), $w_3=0.001$ ($L_{bg}$), $w_4=0.1$ ($L_{TV}$) [S1].
+-*   **TV Loss Decay:** Exponential weight decay factor of 0.005 for $L_{TV}$ [S1].
++*   **Loss Weights:** $w_1=1.0, w_2=0.01, w_3=0.001, w_4=0.1$ [S1].
++*   **TV Loss Decay:** Exponential decay factor of 0.005 applied to $w_4$ during training to alleviate over-smoothing [S1].
+ *   **Training Iterations:** 250k for synthetic datasets, 100k for real scene datasets [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Over-smoothing:** Total variation loss causes blurring and loss of high-frequency details. This is mitigated by CPE and LUT refinement [S1].
+-*   **Learning Collapse:** Applying CPE to the density field features breaks the zero-initialization rule, causing learning collapse. CPE must only be applied to texture features [S1].
++**Pitfalls and Edge Cases:**
++*   **Over-smoothing:** Total variation loss causes blurring and loss of high-frequency details. This is mitigated by the CPE module and the LUT refinement module [S1].
++*   **Initialization Collapse:** Applying CPE to density features breaks the zero-initialization rule required for stable volume rendering at the start of training. CPE must only be applied to texture features [S1].
+ *   **Spatial Awareness:** Using low-resolution images to predict LUT weights loses 3D spatial awareness. Using pseudo-surface depth via an MLP preserves this awareness [S1].
+ 
+@@ -331,12 +108,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is longer than methods using canonical spaces (e.g., TiNeuVox) because it relies on total variation loss to enforce temporal consistency across frames without explicit deformation fields [S1]. Inference time is shorter than TiNeuVox because it does not use an MLP-based sub-network to predict position offsets for each moment [S1].
+-*   **Memory Complexity:** Uses two $160^3$ voxel grids plus LUTs. The memory footprint is fixed based on grid resolution.
+-*   **Performance:** Outperforms D-NeRF, NDVG, and TiNeuVox in PSNR/SSIM on synthetic dynamic scenes [S1]. Competitive performance on real scene datasets [S1].
+-*   **Strengths:** Simple architecture, no canonical space required, plug-and-play LUT refinement module, high accuracy [S1].
+-*   **Limitations:** Longer training time due to lack of canonical space adaptation [S1].
++*   **Performance:** V4D achieves state-of-the-art performance on synthetic dynamic scenes (e.g., PSNR 33.72, SSIM 0.98 on [23] datasets) and competitive performance on real dynamic scenes [S1]. It outperforms D-NeRF, NDVG, and TiNeuVox in PSNR/SSIM [S1].
++*   **Training Time:** Training requires 250k iterations for synthetic data and 100k for real data. It has a longer training time than canonical-space methods (like D-NeRF) because it lacks canonical space adaptation and relies on TV loss to propagate temporal information, requiring more iterations [S1].
++*   **Inference Time:** V4D has shorter inference time than TiNeuVox (0.48s vs 1.42s on A100) because it does not use an MLP-based sub-network to predict position offsets for each moment [S1].
++*   **Memory:** Uses two $160^3 \times 12$ voxel grids and five $33^3$ LUTs. This is more memory-intensive than compact MLP representations but allows for faster inference compared to methods requiring per-frame offset prediction [S1].
++*   **Strengths:** No canonical space required; plug-and-play LUT refinement; high-quality dynamic novel view synthesis from single-view video [S1].
++*   **Limitations:** Longer training time compared to canonical-space methods; potential for over-smoothing if TV loss is not balanced with CPE/LUT refinement [S1].
+ 
+ ## Background
+-V4D was proposed in the paper "V4D: Voxel for 4D Novel View Synthesis" [S1]. It addresses the limitations of MLP-based NeRF representations, which have limited capacity and high computational costs, especially in dynamic scenes without multi-view constraints. By using a 3D voxel-based architecture, V4D aims to provide a more efficient and accurate representation for 4D novel view synthesis. The method was evaluated on synthetic and real dynamic scene datasets [S1].
++V4D was proposed to address the limitations of MLP-based neural radiance fields in dynamic scenes, specifically the lack of multi-view constraints and the computational burden of global MLP optimization [S1]. It builds on the principles of differentiable volume rendering [44-radiance-field-optimization.md] and extends 3D voxel-based representations to 4D by modeling density and texture fields separately [S1]. The method was evaluated on 8 synthetic dynamic scene datasets and 4 real scene datasets, demonstrating superiority over existing single-view dynamic novel view synthesis methods [S1].
+ 
+ ## Sources

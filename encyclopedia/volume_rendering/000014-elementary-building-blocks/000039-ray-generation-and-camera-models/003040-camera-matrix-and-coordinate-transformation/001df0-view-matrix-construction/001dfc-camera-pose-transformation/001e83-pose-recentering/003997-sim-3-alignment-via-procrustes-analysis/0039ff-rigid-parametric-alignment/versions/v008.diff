@@ -1,0 +1,216 @@
+--- v007.md
++++ v008.md
+@@ -1,90 +1,119 @@
+ # Rigid Parametric Alignment
+ 
+-Also called: Closed-form Rigid Alignment, Rigid Alignment via SVD
++Also called: Closed-form Rigid Alignment, Horn's Method, Horn's Method for Trajectory Alignment, Rigid Alignment via SVD
+ 
+ ## Overview
+-Rigid Parametric Alignment is a differentiable solver that estimates a 3D rigid transformation $T \in SE(3)$ from point correspondences by minimizing the reprojection error in a closed form using Singular Value Decomposition (SVD) [S1]. It differs from its parent, [Sim(3) Alignment via Procrustes Analysis](8526-sim-3-alignment-via-procrustes-analysis.md), by restricting the transformation to the Special Euclidean group $SE(3)$, thereby excluding uniform scaling [S1]. Unlike [Test-time Optimization with Sim(3) Initialization](8565-test-time-optimization-with-sim-3-initialization.md), which relies on iterative gradient descent, this method provides an analytical solution [S1].
++Rigid Parametric Alignment computes the optimal 3D rigid transformation (rotation and translation) that aligns a set of model points to a set of data points by minimizing the sum of squared Euclidean distances between corresponding points [S1, unofficial][S2]. It solves the absolute orientation problem in a single closed-form step using Singular Value Decomposition (SVD) [S1, unofficial][S2]. Unlike [Iterative Closest Point (ICP)](10563-iterative-closest-point-icp.md), which iteratively refines correspondences and transformation estimates, this method assumes pre-established point-to-point correspondences and yields a direct solution [G]. It differs from [Test-time Optimization with Sim(3) Initialization](8565-test-time-optimization-with-sim-3-initialization.md) by providing an analytical solution rather than relying on gradient-based optimization [G].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A set of $N$ corresponding point pairs in 3D space, denoted as $\{x^j\}_{j=1}^N$ (source) and $\{T^* x^j\}_{j=1}^N$ (target/ground truth), where $T^*$ is the unknown optimal transformation [S1].
+-*   **Output:** The optimal rigid transformation matrix $T = [R|t] \in SE(3)$, where $R \in SO(3)$ is the rotation matrix and $t \in \mathbb{R}^3$ is the translation vector [S1].
++**Inputs:**
++- `model`: A $3 \times N$ matrix representing $N$ 3D points in the model coordinate system.
++- `data`: A $3 \times N$ matrix representing $N$ corresponding 3D points in the data (target) coordinate system.
++
++**Outputs:**
++- `R`: A $3 \times 3$ rotation matrix.
++- `t`: A $3 \times 1$ translation vector.
++- The transformation $T = [R|t] \in SE(3)$ [S2].
+ 
+ **Data Structures:**
+-*   **Correspondences:** Two sets of 3D vectors. The source points $x^j$ and the target points are implicitly defined by the ground truth transformation $T^*$ applied to $x^j$ [S1].
+-*   **Covariance Matrix:** A $3 \times 3$ matrix $H$ computed from the centered points [S1].
++- Points are stored as column vectors in matrices.
++- Covariance matrix $H$ is $3 \times 3$.
++- SVD components $U, S, V^T$ are $3 \times 3$ matrices.
+ 
+ **Steps:**
+-1.  **Compute Centroids:** Calculate the mean of the source points $\bar{x}$ and the target points $\bar{y}$ (where $y^j = T^* x^j$) [S1].
+-    $$ \bar{x} = \frac{1}{N} \sum_{j=1}^N x^j $$
+-    $$ \bar{y} = \frac{1}{N} \sum_{j=1}^N y^j $$
+-2.  **Compute Covariance Matrix:** Construct the $3 \times 3$ covariance matrix $H$ using the centered points [S1]:
+-    $$ H = \sum_{j=1}^N (x^j - \bar{x})(y^j - \bar{y})^T $$
+-    *(Note: The source text denotes the target as $T^j x^j$ in Eq. 12, but standard Procrustes formulation uses centered coordinates. The formula provided in the source is $H = \sum (x^j - \bar{x})(T^j x^j - T\bar{x})^T$ which simplifies to the standard cross-covariance when $T$ is the identity or when aligning centered sets. We follow the standard interpretation of Eq. 12-14 where $H$ is the cross-covariance of the two point sets)* [S1].
+-3.  **Singular Value Decomposition:** Perform SVD on $H$ [S1]:
++
++1.  **Center the Data:**
++    Compute the centroid of the model points $\bar{x}$ and the data points $\bar{y}$ (denoted as $T\bar{x}$ in [S2] for the target mean, but logically $\bar{y}$). Subtract the centroids from the respective point sets to obtain zero-centered coordinates.
++    $$ \bar{x} = \frac{1}{N} \sum_{j=1}^{N} x_j $$
++    $$ \bar{y} = \frac{1}{N} \sum_{j=1}^{N} y_j $$
++    $$ x'_j = x_j - \bar{x} $$
++    $$ y'_j = y_j - \bar{y} $$
++    [S1, unofficial][S2]
++
++2.  **Compute Covariance Matrix:**
++    Calculate the $3 \times 3$ covariance matrix $H$ (denoted as $W$ in [S1, unofficial] and $H$ in [S2]) by summing the outer products of the centered corresponding points.
++    $$ H = \sum_{j=1}^{N} x'_j (y'_j)^T $$
++    [S1, unofficial][S2]
++
++3.  **Singular Value Decomposition (SVD):**
++    Perform SVD on the covariance matrix $H$.
+     $$ H = U S V^T $$
+-    where $U$ and $V$ are orthogonal matrices and $S$ is a diagonal matrix of singular values [S1].
+-4.  **Compute Rotation:** Calculate the optimal rotation matrix $R$ [S1]:
++    [S1, unofficial][S2]
++    Note: [S1, unofficial] computes SVD on $W^T$ and defines $R = U S V^T$, which is mathematically equivalent to the standard formulation $R = V U^T$ when applied to $H$ directly, provided the SVD definition is consistent. We follow the standard derivation in [S2] for clarity: $R = V U^T$.
++
++4.  **Handle Reflection:**
++    Compute the rotation matrix $R$. To ensure a proper rotation (determinant +1) and avoid reflection (determinant -1), check the determinant of $U V^T$.
+     $$ R = V U^T $$
+-    *(Note: If $\det(R) = -1$, a correction is typically required to ensure $R \in SO(3)$, though the source does not explicitly detail the reflection handling. [G])*
+-5.  **Compute Translation:** Calculate the optimal translation vector $t$ [S1]:
+-    $$ t = -R\bar{x} + \bar{y} $$
+-    *(Note: The source formula is $t = -R\bar{x} + T\bar{x}$. Since $T\bar{x}$ represents the transformed centroid of the source, which corresponds to $\bar{y}$ in the target frame, this is equivalent to $t = \bar{y} - R\bar{x}$)* [S1].
+-6.  **Construct Transformation:** Assemble the final rigid transformation matrix $T$ [S1]:
+-    $$ T = [R|t] \in SE(3) $$
++    If $\det(R) < 0$, a reflection is present. Correct this by flipping the sign of the last column of $V$ (or the last row of $U^T$) before recomputing $R$. Specifically, let $S = \text{diag}(1, 1, \det(V U^T))$. Then $R = V S U^T$.
++    [S1, unofficial][S2]
++    [S1, unofficial] implements this by initializing a diagonal matrix $S$ with identity and setting $S_{2,2} = -1$ if $\det(U)\det(V^T) < 0$.
+ 
+-**Parameters:**
+-*   In the context of the L2G-NeRF implementation, the warp neural field $f_W$ uses a ReLU MLP with six 256-dimensional hidden units for the rigid alignment experiment [S1].
++5.  **Compute Translation:**
++    Calculate the translation vector $t$ using the centroids and the computed rotation.
++    $$ t = \bar{y} - R \bar{x} $$
++    [S1, unofficial][S2]
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Degenerate Input:** If the point correspondences are collinear or coplanar, the covariance matrix $H$ may be rank-deficient, leading to ambiguous rotation solutions [G].
+-*   **Reflection:** If $\det(V U^T) = -1$, the resulting matrix is a rotation-reflection, not a pure rotation. Standard Procrustes analysis requires checking the determinant and adjusting the smallest singular value's sign in $V$ or $U$ to enforce $\det(R)=1$ [G].
++6.  **Apply Transformation:**
++    The aligned model points are given by:
++    $$ x_{aligned} = R x + t $$
++    [S1, unofficial]
+ 
+ **Pseudocode:**
++
+ ```python
+ import numpy as np
+ 
+-def rigid_parametric_alignment(points_src, points_tgt):
++def rigid_parametric_alignment(model, data):
+     """
+-    Computes the rigid transformation T = [R|t] that aligns points_src to points_tgt.
++    Computes the optimal rigid transformation (R, t) aligning model to data.
+     
+     Args:
+-        points_src: numpy array of shape (N, 3), source 3D points.
+-        points_tgt: numpy array of shape (N, 3), target 3D points.
++        model: numpy array of shape (3, N), model points.
++        data: numpy array of shape (3, N), corresponding data points.
+         
+     Returns:
+         R: numpy array of shape (3, 3), rotation matrix.
+-        t: numpy array of shape (3,), translation vector.
++        t: numpy array of shape (3, 1), translation vector.
+     """
+-    # Step 1: Compute centroids
+-    centroid_src = np.mean(points_src, axis=0)
+-    centroid_tgt = np.mean(points_tgt, axis=0)
++    # Step 1: Center the data
++    model_mean = np.mean(model, axis=1, keepdims=True)
++    data_mean = np.mean(data, axis=1, keepdims=True)
+     
+-    # Step 2: Center the points
+-    src_centered = points_src - centroid_src
+-    tgt_centered = points_tgt - centroid_tgt
++    model_centered = model - model_mean
++    data_centered = data - data_mean
+     
+-    # Step 3: Compute covariance matrix H
+-    # H = sum (x_i - mean_x) (y_i - mean_y)^T
+-    H = src_centered.T @ tgt_centered
++    # Step 2: Compute covariance matrix H
++    # H = sum(x' * y'^T)
++    H = model_centered @ data_centered.T
+     
+-    # Step 4: SVD of H
+-    U, S, Vt = np.linalg.svd(H)
++    # Step 3: SVD of H
++    U, S_vals, Vt = np.linalg.svd(H)
++    
++    # Step 4: Compute Rotation R
++    # Standard formula: R = V * U^T
++    # Note: np.linalg.svd returns Vt, so V = Vt.T
+     V = Vt.T
+-    
+-    # Step 5: Compute Rotation
+     R = V @ U.T
+     
+-    # Handle reflection case (determinant -1)
++    # Check for reflection (det(R) == -1)
+     if np.linalg.det(R) < 0:
+-        # Correct the last column of V
++        # Flip the sign of the last column of V
+         V[:, -1] *= -1
+         R = V @ U.T
+         
+-    # Step 6: Compute Translation
+-    t = centroid_tgt - R @ centroid_src
++    # Step 5: Compute Translation t
++    # t = y_mean - R * x_mean
++    t = data_mean - R @ model_mean
+     
+     return R, t
+ ```
++
++**Parameters:**
++- Not given in the sources. The method is purely geometric and does not require tunable hyperparameters like learning rates or regularization weights.
++
++**Edge Cases and Pitfalls:**
++- **Reflection:** If the point sets are mirrored, the SVD solution may yield a rotation with determinant -1. The correction step (flipping the sign of the smallest singular value's corresponding vector) is required to ensure a proper rigid body transformation [S1, unofficial][S2].
++- **Degenerate Input:** If all points are collinear or coplanar, the covariance matrix $H$ may be rank-deficient, leading to ambiguous rotation solutions. The SVD will still produce a result, but it may not be unique or physically meaningful.
++- **Precision:** Using double-precision floating-point arithmetic is recommended for the SVD computation to maintain numerical stability, especially when point coordinates vary significantly in magnitude.
+ 
+ ## Subtopics
+@@ -97,32 +126,22 @@
+ 
+ ### Homography Parametric Alignment
+-Homography Parametric Alignment is a differentiable solver that estimates a 2D homography transformation $T \in SL(3)$ from point correspondences by solving a homogeneous linear least squares problem via SVD [S1]. The homography constraint in homogeneous coordinates is:
++A differentiable solver that estimates a 2D homography transformation $T \in SL(3)$ from point correspondences by solving a homogeneous linear least squares problem via SVD [S2]. The homography constraint in homogeneous coordinates is:
+ $$ \begin{bmatrix} 0 & x^j_1 & x^j_2 & 1 \end{bmatrix} = T \begin{bmatrix} x^j_1 \\ x^j_2 \\ 1 \end{bmatrix} $$
+-which is rearranged into the linear system $A_j h = 0$ [S1].
++which is rearranged into the linear system $A_j h = 0$ [S2].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-The complexity is dominated by the SVD of a $3 \times 3$ matrix, which is $O(1)$ constant time and memory for a fixed number of points, or $O(N)$ to compute the covariance matrix from $N$ points [S1].
+-
+-**Measured Performance:**
+-Specific performance metrics (PSNR, SSIM) are not provided for the alignment step itself in the sources, but the method is used within the L2G-NeRF framework [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Provides a closed-form, deterministic solution without requiring iterative optimization or gradient descent [S1].
+-*   **Limitations:** Requires known point correspondences. It does not account for scaling (unlike Sim(3)) [S1].
+-
+-**When to Use:**
+-Use when point correspondences are available and a strict rigid transformation (no scaling) is required [S1].
++- **Time Complexity:** $O(N)$ to compute centroids and covariance matrix, where $N$ is the number of points. The SVD of a $3 \times 3$ matrix is $O(1)$ (constant time relative to $N$, though dependent on dimension). Thus, the overall complexity is linear in the number of points $O(N)$.
++- **Memory Complexity:** $O(N)$ to store the point sets. The auxiliary matrices ($H, U, S, V$) are fixed size ($3 \times 3$).
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Scales linearly with the number of correspondences. Suitable for real-time applications given the small fixed size of the linear algebra operations.
++- **Strengths:** Closed-form solution ensures deterministic results and fast computation. No initialization required.
++- **Limitations:** Requires known point-to-point correspondences. Sensitive to outliers in correspondences. Cannot handle partial overlaps or missing data without robust estimation techniques (e.g., RANSAC) [G].
++- **When to use:** When accurate 3D point correspondences are available and a fast, exact alignment is needed.
++- **When not to use:** When correspondences are unknown, noisy, or partial, or when the transformation is not rigid (e.g., affine or projective).
+ 
+ ## Background
+-**Origin:**
+-The method is described in "Local-to-Global Registration for Bundle-Adjusting Neural Radiance Fields" [S1].
+-
+-**History and Development:**
+-The approach leverages standard Procrustes analysis techniques adapted for differentiable rendering pipelines, specifically within the L2G-NeRF architecture [S1].
+-
+-**Usage:**
+-It is used for local-to-global registration in neural radiance fields, allowing the discovery of correct registration with initially flexible pixel-wise alignment that shifts to constrained parametric alignment [S1].
++Rigid Parametric Alignment, often referred to as Horn's Method, originates from the work of Berthold K.P. Horn in 1987, "Closed-form solution of absolute orientation using unit quaternions" [S2, implied by name]. It is a fundamental algorithm in computer vision and robotics for pose estimation and registration. It is widely used in [Sim(3) Alignment via Procrustes Analysis](8526-sim-3-alignment-via-procrustes-analysis.md) as a sub-step for computing the rotational component of the similarity transformation. Recent applications include differentiable rendering pipelines such as L2G-NeRF, where it is used for local-to-global registration of neural radiance fields [S2].
+ 
+ ## Sources
+-[S1] Local-to-Global Registration for Bundle-Adjusting Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00799, fetched 2026-10-29+[S1] spla-tam/SplaTAM, https://github.com/spla-tam/SplaTAM, fetched 2026-10-27 (unofficial)
++[S2] Local-to-Global Registration for Bundle-Adjusting Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00799, fetched 2026-10-29

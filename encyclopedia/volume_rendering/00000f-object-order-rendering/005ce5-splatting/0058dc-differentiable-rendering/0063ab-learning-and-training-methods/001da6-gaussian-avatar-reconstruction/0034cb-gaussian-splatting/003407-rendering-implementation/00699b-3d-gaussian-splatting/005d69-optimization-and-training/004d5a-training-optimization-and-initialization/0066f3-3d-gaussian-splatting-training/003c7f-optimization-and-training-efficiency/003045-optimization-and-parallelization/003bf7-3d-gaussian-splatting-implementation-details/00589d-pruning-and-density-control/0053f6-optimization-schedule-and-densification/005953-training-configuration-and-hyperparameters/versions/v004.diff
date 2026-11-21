@@ -1,0 +1,204 @@
+--- v003.md
++++ v004.md
+@@ -4,86 +4,141 @@
+ 
+ ## Overview
+-This article defines the specific hyperparameters, optimization schedules, and data sampling strategies required to train 3D Gaussian Splatting decoders, particularly in the context of 3D-aware generative models and downstream 3D classification tasks. It addresses the problem of configuring the Adam optimizer, learning rates, and camera sampling distributions to achieve convergence in explicit 3D space rendering. It differs from its parent, [Optimization Schedule and Densification](15107-optimization-schedule-and-densification.md), by focusing on the global training loop parameters (iterations, LR, batch size) rather than the dynamic primitive management (splitting, cloning, pruning) that occurs within the loop.
++This article defines the specific hyperparameters, optimization schedules, and sampling strategies required to train 3D Gaussian Splatting decoders, particularly in the context of 3D-aware generative models and downstream classification tasks. It addresses the problem of configuring the Adam optimizer, learning rates, and camera sampling distributions to achieve convergence in differentiable rendering pipelines. It differs from its parent, [Optimization Schedule and Densification](15107-optimization-schedule-and-densification.md), by focusing on the static configuration of the optimizer and data pipeline rather than the dynamic modification of the Gaussian primitive count. It differs from siblings like [Error-Driven 2D Gaussian Training](13985-error-driven-2d-gaussian-training.md) by providing the baseline configuration for standard 3D Gaussian splatting rather than a specialized 2D projection variant.
+ 
+ ## How it works
++The training process involves optimizing the parameters of a Gaussian Splatting decoder using gradient-based optimization. The specific configuration depends on the target application (e.g., generative modeling vs. point cloud classification).
++
+ ### Inputs and Outputs
+-**Inputs:**
+-- Pre-trained GAN encoder weights (e.g., EG3D, PanoHead) [S1].
+-- Dataset (e.g., FFHQ, LPFF, FFHQ-H) [S1].
+-- Target task (Novel View Synthesis, Classification, Part Segmentation) [S1][S2, unofficial].
+-
+-**Outputs:**
+-- Optimized Gaussian parameters (position $\mathbf{p}$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$) [S1].
+-- Trained decoder weights [S1].
++*   **Inputs**: Pre-trained GAN weights (for generative tasks) or point cloud data (for classification tasks); camera poses and images; hyperparameters (learning rate, batch size, epochs/iterations).
++*   **Outputs**: Optimized Gaussian parameters (position $\mathbf{p}_i$, scale $\mathbf{s}_i$, rotation $\mathbf{q}_i$, opacity $\alpha_i$, color coefficients $\mathbf{c}_i$) and potentially a trained classifier head.
+ 
+ ### Data Structures
+-The training state maintains the standard 3DGS Gaussian attributes. For downstream protocols, Gaussians are grouped for processing:
+-- **Grouping:** Gaussians are organized into groups of fixed size (e.g., 32) [S2, unofficial].
+-- **Attributes:** All 14 attributes (position, rotation, scale, opacity, SH coefficients) are updated during full fine-tuning [S2, unofficial].
++The Gaussian primitives are stored in a structure containing:
++*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
++*   $\mathbf{s}_i \in \mathbb{R}^3$: Scale.
++*   $\mathbf{q}_i \in \mathbb{R}^4$: Rotation (quaternion).
++*   $\alpha_i \in [0, 1]$: Opacity.
++*   $\mathbf{c}_i$: Spherical Harmonics coefficients.
+ 
+-### Steps
+-1. **Initialization:** Initialize Gaussians from the pre-trained GAN's latent space or point cloud [S1][S2, unofficial].
+-2. **Camera Sampling:**
+-   - For full 360° scenes (e.g., PanoHead): Sample random cameras uniformly around the head [S1].
+-   - For frontal-focused scenes (e.g., EG3D): Sample mainly frontal views with small vertical and horizontal rotations [S1].
+-3. **Rendering:** Render the scene using the current Gaussian set [S1].
+-4. **Loss Computation:** Compute loss using weights $\lambda = (0.2, 0.5, 1.0, 1.0, 0.2)$ for the respective loss terms (e.g., LPIPS, MSE, ID similarity) [S1].
+-5. **Optimization Step:** Update Gaussian parameters and decoder weights using the Adam optimizer [S1][S2, unofficial].
+-6. **Iteration:** Repeat for the specified number of iterations or epochs [S1][S2, unofficial].
++For classification tasks, Gaussians are grouped into sets (e.g., 32 Gaussians per group) to facilitate processing by neural network layers [S2, unofficial].
+ 
+-### Formulas
+-The loss function for decoder training is a weighted sum:
+-$$
+-\mathcal{L} = \lambda_1 \mathcal{L}_1 + \lambda_2 \mathcal{L}_2 + \lambda_3 \mathcal{L}_3 + \lambda_4 \mathcal{L}_4 + \lambda_5 \mathcal{L}_5
+-$$
+-Where $\lambda = (0.2, 0.5, 1.0, 1.0, 0.2)$ [S1].
++### Steps and Parameters
+ 
+-For downstream classification/segmentation, the optimization uses standard cross-entropy or segmentation loss with the classifier head [S2, unofficial].
++#### 1. Generative Decoder Training (e.g., EG3D, PanoHead)
++This configuration is used to train a Gaussian Splatting decoder to replace or augment the volume rendering in 3D-aware GANs [S1].
+ 
+-### Parameters
+-**Decoder Training (Generative):**
+-- **Iterations:** 500,000 [S1].
+-- **Optimizer:** Adam [S1].
+-- **Learning Rate:** 0.0009 [S1].
+-- **Loss Weights:** $\lambda = (0.2, 0.5, 1.0, 1.0, 0.2)$ [S1].
++1.  **Initialize** the Gaussian parameters from the pre-trained GAN's latent space or volume representation.
++2.  **Sample Cameras**:
++    *   For **PanoHead** (FFHQ-H dataset): Sample random cameras uniformly distributed around the head (360°) [S1].
++    *   For **EG3D** (FFHQ/LPFF datasets): Sample mainly frontal views with small vertical and horizontal rotations [S1].
++3.  **Optimize** using the Adam optimizer for 500,000 iterations [S1].
++4.  **Set Learning Rate**: Use a fixed learning rate of $0.0009$ [S1].
++5.  **Compute Loss**: Apply weighted loss terms $\lambda_1, \lambda_2, \lambda_3, \lambda_4, \lambda_5$. Default weights are $(0.2, 0.5, 1.0, 1.0, 0.2)$ [S1].
++6.  **Update** Gaussian parameters using the computed gradients.
+ 
+-**Standard Downstream Protocols (Classification/Segmentation):**
+-- **Optimizer:** AdamW [S2, unofficial].
+-- **ModelNet10/40:**
+-  - **Gaussians:** 1,024 [S2, unofficial].
+-  - **Groups:** 64 groups of 32 Gaussians [S2, unofficial].
+-  - **Attributes:** All 14 [S2, unofficial].
+-  - **Epochs:** 300 [S2, unofficial].
+-  - **Learning Rate:** $10^{-3}$ [S2, unofficial].
+-  - **Weight Decay:** 0.05 [S2, unofficial].
+-  - **Warm-up:** 5 epochs [S2, unofficial].
+-  - **Batch Size:** 256 [S2, unofficial].
+-- **ShapeNet-Part:**
+-  - **Gaussians:** 2,048 [S2, unofficial].
+-  - **Groups:** 128 groups of 32 Gaussians [S2, unofficial].
+-  - **Epochs:** 300 [S2, unofficial].
+-  - **Learning Rate:** $10^{-4}$ [S2, unofficial].
+-  - **Batch Size:** 16 [S2, unofficial].
++#### 2. Standard Downstream Protocols (Classification/Segmentation)
++This configuration is used for transferring pre-trained Gaussian representations to downstream tasks like ModelNet and ShapeNet-Part [S2, unofficial].
++
++1.  **Initialize** Gaussians from the pre-trained encoder (e.g., Gaussian-MAE).
++2.  **Configure Grouping**:
++    *   **ModelNet10/40**: Use 1,024 Gaussians, organized into 64 groups of 32 Gaussians each. Use all 14 attributes [S2, unofficial].
++    *   **ShapeNet-Part**: Use 2,048 Gaussians, organized into 128 groups of 32 Gaussians each [S2, unofficial].
++3.  **Select Probing Method**:
++    *   **Full Fine-tuning**: Update all parameters.
++    *   **Linear Probing**: Freeze the encoder/Gaussian parameters; update only the classifier.
++    *   **MLP Probing**: Freeze the encoder/Gaussian parameters; update a three-layer MLP classifier.
++4.  **Optimize**:
++    *   **ModelNet**: Run for 300 epochs. Use AdamW optimizer with learning rate $10^{-3}$, weight decay $0.05$, 5 warm-up epochs, and total batch size 256 [S2, unofficial].
++    *   **ShapeNet-Part**: Run for 300 epochs. Use AdamW optimizer with learning rate $10^{-4}$ and batch size 16 [S2, unofficial].
++
++### Pseudocode
++
++```python
++# Generative Decoder Training (S1)
++def train_generative_decoder(gan_model, dataset, iterations=500000, lr=0.0009):
++    optimizer = Adam(gan_model.gaussians.parameters(), lr=lr)
++    loss_weights = (0.2, 0.5, 1.0, 1.0, 0.2)
++    
++    for i in range(iterations):
++        # Camera sampling depends on the target model
++        if dataset.name == "PanoHead":
++            cameras = sample_random_360_cameras()
++        elif dataset.name == "EG3D":
++            cameras = sample_frontal_cameras()
++            
++        images = render_gaussians(gan_model.gaussians, cameras)
++        target_images = dataset.get_images(cameras)
++        
++        loss = compute_weighted_loss(images, target_images, loss_weights)
++        optimizer.zero_grad()
++        loss.backward()
++        optimizer.step()
++
++# Standard Downstream Protocol (S2)
++def train_downstream_task(gaussians, dataset, task="ModelNet", epochs=300):
++    if task == "ModelNet":
++        num_gaussians = 1024
++        groups = 64
++        group_size = 32
++        lr = 1e-3
++        weight_decay = 0.05
++        batch_size = 256
++        warmup_epochs = 5
++    elif task == "ShapeNet-Part":
++        num_gaussians = 2048
++        groups = 128
++        group_size = 32
++        lr = 1e-4
++        weight_decay = 0.0
++        batch_size = 16
++        warmup_epochs = 0
++        
++    # Grouping logic
++    gaussian_groups = group_gaussians(gaussians, groups, group_size)
++    
++    # Classifier initialization
++    classifier = MLP(num_groups=groups, num_classes=dataset.num_classes)
++    
++    # Determine which parameters to freeze
++    if task in ["Linear Probing", "MLP Probing"]:
++        freeze_parameters(gaussians)
++        optimizer = AdamW(classifier.parameters(), lr=lr, weight_decay=weight_decay)
++    else:
++        optimizer = AdamW(gaussians.parameters() + classifier.parameters(), lr=lr, weight_decay=weight_decay)
++        
++    scheduler = WarmupScheduler(optimizer, warmup_epochs)
++    
++    for epoch in range(epochs):
++        for batch in dataset:
++            features = extract_gaussian_features(gaussian_groups, batch)
++            predictions = classifier(features)
++            loss = compute_loss(predictions, batch.labels)
++            
++            optimizer.zero_grad()
++            loss.backward()
++            optimizer.step()
++        scheduler.step()
++```
+ 
+ ### Edge Cases and Pitfalls
+-- **Run-to-run Variance:** ModelNet fine-tuning exhibits appreciable run-to-run variation, particularly on ModelNet40 [S2, unofficial]. Results should be interpreted with caution regarding small cross-environment differences [S2, unofficial].
+-- **Protocol Matching:** Ensure that pre-training and transfer protocols match (e.g., 1K-to-4K protocol) to avoid unfair comparisons [S2, unofficial].
++*   **ModelNet Variance**: Fine-tuning on ModelNet can exhibit appreciable run-to-run variation. Results should be interpreted with caution, and small cross-environment differences should not be treated as method gains [S2, unofficial].
++*   **Camera Mismatch**: Using frontal-only sampling for a task requiring full 360° coverage (like PanoHead) will lead to poor reconstruction of the back of the object [S1].
+ 
+ ## Subtopics
+ 
+ ### Standard Downstream Protocols
+-A standardized training and evaluation pipeline for classification and part segmentation tasks using Gaussian inputs [S2, unofficial]. It differs from generative decoder training by using fixed Gaussian counts (1K/2K) and epoch-based training rather than iteration-based training. It is chosen when evaluating the geometric fidelity of Gaussians for downstream 3D vision tasks [S2, unofficial].
++A standardized training and evaluation pipeline for classification and part segmentation tasks using Gaussian inputs [S2, unofficial]. It differs from generative training by focusing on transferring pre-trained features to fixed downstream heads rather than optimizing the Gaussians themselves for novel view synthesis. It is chosen when evaluating the semantic quality of pre-trained Gaussian representations. Key parameters include grouping Gaussians into sets (e.g., 64 groups of 32) and using AdamW with specific learning rates for ModelNet ($10^{-3}$) and ShapeNet-Part ($10^{-4}$) [S2, unofficial].
+ 
+ ### StopThePop Framework Integration
+-A framework that integrates occlusion-aware densification with StopThePop's per-pixel depth ordering to remove popping artifacts and keep occlusion boundaries intact [S3, unofficial]. It differs from standard training by modifying the densification statistics accumulation to be occlusion-aware [S3, unofficial]. It is chosen for large-scale scenes with heavy occlusion where standard view-count normalizers diverge [S3, unofficial].
++A framework that integrates occlusion-aware densification with StopThePop's per-pixel depth ordering to remove popping artifacts and keep occlusion boundaries intact [S3, unofficial]. It differs from standard training by modifying the densification statistics accumulation to be occlusion-aware. It is chosen for large-scale scenes with heavy occlusion where standard view-count normalizers fail. The integration requires using StopThePop's hybrid transparency or per-pixel sorting to determine Gaussian order and computing transmittance $T_{i,p}$. Gradients and statistics are accumulated only for non-zero weights $w_{i,p}$, applying a contribution-based normalization for densification decisions [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Training for 500,000 iterations is computationally expensive [S1]. Downstream protocols use fewer epochs (300) but may require careful tuning due to variance [S2, unofficial].
+-- **Memory Complexity:** Depends on the number of Gaussians (1K-2K for downstream, variable for generative) [S1][S2, unofficial].
+-- **Strengths:** High-quality 3D reconstruction for generative models [S1]; standardized evaluation for 3D classification [S2, unofficial].
+-- **Limitations:** High variance in ModelNet results [S2, unofficial]; requires careful camera sampling strategy for generative models [S1].
++*   **Time Complexity**: Training generative decoders requires 500,000 iterations [S1], which is computationally expensive. Downstream probing tasks run for 300 epochs [S2, unofficial].
++*   **Memory Complexity**: Depends on the number of Gaussians. Generative models may use variable counts, while downstream tasks fix counts (1,024 or 2,048) [S2, unofficial].
++*   **Strengths**: The generative configuration is optimized for high-fidelity 3D space rendering, especially with 360° sampling [S1]. The downstream protocol provides a reproducible benchmark for Gaussian-based 3D understanding [S2, unofficial].
++*   **Limitations**: Generative training is sensitive to camera sampling distribution [S1]. Downstream training on ModelNet shows high variance [S2, unofficial].
+ 
+ ## Background
+-Originated from the application of 3D Gaussian Splatting to 3D-aware generative adversarial networks (GANs) [S1] and subsequent adaptations for 3D point cloud classification and segmentation [S2, unofficial]. The StopThePop integration addresses occlusion issues in large-scale scenes [S3, unofficial].
++The training configurations described here originate from the application of 3D Gaussian Splatting to 3D-aware generative models (EG3D, PanoHead) [S1] and 3D point cloud understanding tasks (ModelNet, ShapeNet) [S2, unofficial]. The generative setup was developed to replace implicit volume decoders with explicit Gaussian splats, enabling real-time rendering and better 3D consistency [S1]. The downstream protocols were established to benchmark the transferability of self-supervised Gaussian representations [S2, unofficial]. The StopThePop integration addresses artifacts in large-scale scenes [S3, unofficial].
+ 
+ ## Sources

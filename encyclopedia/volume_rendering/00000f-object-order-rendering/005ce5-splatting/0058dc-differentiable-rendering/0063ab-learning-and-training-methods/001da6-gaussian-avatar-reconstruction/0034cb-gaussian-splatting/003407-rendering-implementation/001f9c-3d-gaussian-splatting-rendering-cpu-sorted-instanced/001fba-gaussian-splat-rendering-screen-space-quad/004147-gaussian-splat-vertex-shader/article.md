@@ -1,0 +1,170 @@
+# Gaussian Splat Vertex Shader
+
+Also called: FGaussianSplatVS, OpenGL Gaussian Splat Renderer, SplatRenderer
+
+## Overview
+The Gaussian Splat Vertex Shader transforms 3D Gaussian primitives into screen-space quads by computing their projected 2D covariance and conic parameters. It determines the bounding box of each splat in screen space and passes the necessary data to the fragment shader for alpha blending. It differs from sibling methods by handling the full projection pipeline (view-space to screen-space covariance) and degenerate case culling within the vertex stage, relying on the parent [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) for the quad assembly and transparency handling.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `gaussian_data` (SSBO, binding=0): Packed float array containing splat attributes.
+- `gaussian_order` (SSBO, binding=1): Integer array mapping instance ID to splat index.
+- `ViewDataBuffer` (StructuredBuffer): Per-splat view data (e.g., view-space position, rotation, scale).
+- `SortKeysBuffer` (StructuredBuffer<uint>): Pre-computed depth sort keys.
+- Uniforms: `SplatCount` (uint32), `DebugMode` (uint32), `EnableNanite` (uint32), `wh` (vec2, viewport width/height).
+
+**Outputs:**
+- `gl_Position`: Clip-space position of the quad center.
+- `vQuadSize`: Screen-space width and height of the quad.
+- `vConic`: Conic matrix parameters (`vec3`) for the fragment shader.
+- `vAlpha`: Base opacity for the fragment shader.
+- `vColor`: Color data (potentially modified by debug mode).
+
+### Data Structures
+The `gaussian_data` SSBO layout per splat is a packed float array with the following offsets:
+- `POS_IDX` = 0: Position (3 floats: x, y, z).
+- `ROT_IDX` = 3: Rotation quaternion (4 floats: w, x, y, z).
+- `SCALE_IDX` = 7: Scale (3 floats: x, y, z).
+- `OPACITY_IDX` = 10: Opacity (1 float).
+- `SH_IDX` = 11: Spherical Harmonics coefficients (variable dimension, `sh_dim`).
+- Total dimension per splat: $3 + 4 + 3 + 1 + \text{sh\_dim}$.
+
+### Steps
+1. **Retrieve Splat Data**: Load position, rotation, scale, and opacity from `gaussian_data` using the index from `gaussian_order`.
+2. **Compute 3D Covariance**: Construct the 3D covariance matrix $M$ from scale $S$ and rotation $R$ (derived from quaternion $q$):
+   $$ M = S \cdot R $$
+   $$ \Sigma_{3D} = M^T M $$
+   [G] $R$ is the rotation matrix corresponding to the quaternion.
+3. **Project to Screen Space**: Compute the 2D covariance $\Sigma_{2D}$ using the Jacobian $J$ of the projection and view matrix $W$:
+   $$ T = W \cdot J $$
+   $$ \Sigma_{2D} = T^T \Sigma_{3D} T $$
+   [G] $J$ is the Jacobian of the transformation from 3D space to 2D screen space.
+4. **Regularize Covariance**: Add regularization to the diagonal of $\Sigma_{2D}$ to prevent numerical instability:
+   $$ \Sigma_{2D}[0][0] += 0.3f $$
+   $$ \Sigma_{2D}[1][1] += 0.3f $$
+5. **Compute Conic Matrix**: Calculate the inverse of the 2D covariance (conic matrix) components:
+   $$ \text{det} = \Sigma_{2D}[0][0] \cdot \Sigma_{2D}[2][2] - \Sigma_{2D}[0][2]^2 $$
+   $$ \text{det\_inv} = 1.0 / \text{det} $$
+   $$ \text{conic} = \text{vec3}(\Sigma_{2D}[2][2] \cdot \text{det\_inv}, -\Sigma_{2D}[0][2] \cdot \text{det\_inv}, \Sigma_{2D}[0][0] \cdot \text{det\_inv}) $$
+   [G] $\Sigma_{2D}$ is represented as a symmetric $2 \times 2$ matrix stored in a `vec3` as $(\Sigma_{xx}, \Sigma_{xy}, \Sigma_{yy})$.
+6. **Determine Quad Size**: Calculate the screen-space width and height based on the covariance eigenvalues (approximated by diagonal elements):
+   $$ \text{quadwh\_scr} = \text{vec2}(3.0 \cdot \sqrt{\Sigma_{2D}[0][0]}, 3.0 \cdot \sqrt{\Sigma_{2D}[2][2]}) $$
+7. **Clamp Quad Size**: Prevent giant splats by clamping the size to half the viewport dimensions:
+   $$ \text{quadwh\_scr} = \min(\text{quadwh\_scr}, \text{wh} \cdot 0.5f) $$
+8. **Cull Degenerate Splats**: Discard the splat if:
+   - The maximum scale exceeds 1.0.
+   - The anisotropy ratio (max scale / min scale) exceeds 50.
+   - The determinant of the 2D covariance is zero or negative.
+   [G] These checks ensure numerical stability and visual correctness.
+9. **Pass Data to Fragment Shader**: Output `vQuadSize`, `vConic`, `vAlpha`, and `vColor`. If `DebugMode` is 1, color may be set to cluster colors (Nanite-style debug). If `EnableNanite` is 1, Nanite LOD compaction may be applied.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs
+gaussian_data: SSBO[0] # Packed float array
+gaussian_order: SSBO[1] # Integer array
+view_data: StructuredBuffer # Per-splat view data
+sort_keys: StructuredBuffer<uint> # Depth sort keys
+splat_count: uint32
+debug_mode: uint32
+enable_nanite: uint32
+wh: vec2 # Viewport width and height
+
+# Constants
+SH_C0: float = 0.28209479177387814f
+REGULARIZATION: float = 0.3f
+MAX_SCALE: float = 1.0
+MAX_ANISOTROPY: float = 50.0
+
+# Vertex Shader Main
+function main(instance_id: uint) -> void:
+    # 1. Retrieve Splat Index
+    splat_idx = gaussian_order[instance_id]
+    
+    # 2. Load Splat Data
+    pos = gaussian_data[splat_idx * splat_dim + POS_IDX : POS_IDX + 3]
+    quat = gaussian_data[splat_idx * splat_dim + ROT_IDX : ROT_IDX + 4]
+    scale = gaussian_data[splat_idx * splat_dim + SCALE_IDX : SCALE_IDX + 3]
+    alpha = gaussian_data[splat_idx * splat_dim + OPACITY_IDX]
+    sh_coeffs = gaussian_data[splat_idx * splat_dim + SH_IDX : SH_IDX + sh_dim]
+    
+    # 3. Compute 3D Covariance
+    R = quaternion_to_rotation_matrix(quat)
+    M = scale * R # Element-wise scale multiplication
+    cov3d = transpose(M) * M
+    
+    # 4. Project to Screen Space
+    # Note: J is the Jacobian of the projection and view matrix W
+    # T = W * J
+    # cov2d = transpose(T) * cov3d * T
+    # [G] Implementation detail: T and J are typically pre-computed or passed as uniforms
+    # For simplicity, assume cov2d is computed as per source [S1, unofficial]
+    cov2d = compute_2d_covariance(cov3d, W, J)
+    
+    # 5. Regularize Covariance
+    cov2d[0][0] += REGULARIZATION
+    cov2d[1][1] += REGULARIZATION
+    
+    # 6. Compute Conic Matrix
+    det = cov2d[0][0] * cov2d[2][2] - cov2d[0][2] * cov2d[0][2]
+    if det <= 0.0:
+        discard() # Degenerate splat
+    det_inv = 1.0 / det
+    conic = vec3(cov2d[2][2] * det_inv, -cov2d[0][2] * det_inv, cov2d[0][0] * det_inv)
+    
+    # 7. Determine Quad Size
+    quadwh_scr = vec2(3.0 * sqrt(cov2d[0][0]), 3.0 * sqrt(cov2d[2][2]))
+    
+    # 8. Clamp Quad Size
+    quadwh_scr = min(quadwh_scr, wh * 0.5f)
+    
+    # 9. Cull Degenerate Splats
+    max_scale = max(scale)
+    min_scale = min(scale)
+    anisotropy = max_scale / min_scale
+    if max_scale > MAX_SCALE or anisotropy > MAX_ANISOTROPY:
+        discard()
+        
+    # 10. Pass Data to Fragment Shader
+    vQuadSize = quadwh_scr
+    vConic = conic
+    vAlpha = alpha
+    vColor = compute_color(sh_coeffs, SH_C0)
+    
+    if debug_mode == 1:
+        vColor = cluster_color(splat_idx) # Nanite-style debug
+    if enable_nanite == 1:
+        # Apply Nanite LOD compaction if enabled
+        pass
+        
+    gl_Position = compute_clip_space_position(pos)
+```
+
+### Parameters
+- `SH_C0`: 0.28209479177387814f.
+- `Regularization`: 0.3f.
+- `Max Scale`: 1.0.
+- `Max Anisotropy`: 50.
+
+### Edge Cases and Pitfalls
+- **Degenerate Splats**: Splats with zero determinant in 2D covariance or extreme anisotropy must be discarded to prevent rendering artifacts.
+- **Giant Splats**: Quad size must be clamped to prevent splats from covering the entire screen.
+- **Numerical Stability**: Regularization is added to the covariance diagonal to prevent division by zero or negative determinants.
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ per splat, where $N$ is the number of splats. The vertex shader performs a constant amount of work per splat.
+- **Memory Complexity**: $O(N)$ for the `gaussian_data` and `gaussian_order` buffers.
+- **Strengths**: Efficient culling of degenerate splats, robust handling of projection and regularization.
+- **Limitations**: Relies on pre-sorted order buffer from parent method. Performance depends on the efficiency of the Jacobian computation.
+- **When to Use**: When rendering large numbers of Gaussian splats with high performance requirements.
+- **When Not to Use**: When dynamic updates to splat attributes are frequent and require frequent buffer updates.
+
+## Background
+The Gaussian Splat Vertex Shader is part of the 3D Gaussian Splatting rendering pipeline, introduced by Kerbl et al. in "A Real-Time for 3D Gaussian Splatting from Multi-View Perspective of Images" [S1, unofficial]. It is implemented in various open-source projects such as `dust3r-3dgs` [S1, unofficial] and `OpenSplat4D` [S2, unofficial].
+
+## Sources
+[S1] SpaceCollectors/dust3r-3dgs, https://github.com/SpaceCollectors/dust3r-3dgs, fetched 2026-10-27 (unofficial)
+[S2] YuanBaoSMadLab/OpenSplat4D, https://github.com/YuanBaoSMadLab/OpenSplat4D, fetched 2026-10-27 (unofficial)

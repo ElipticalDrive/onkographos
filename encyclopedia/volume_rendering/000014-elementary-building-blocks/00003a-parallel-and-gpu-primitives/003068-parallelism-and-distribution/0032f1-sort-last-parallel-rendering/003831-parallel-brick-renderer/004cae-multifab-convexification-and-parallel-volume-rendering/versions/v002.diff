@@ -1,0 +1,209 @@
+--- v001.md
++++ v002.md
+@@ -4,41 +4,41 @@
+ 
+ ## Overview
+-A parallel volume rendering strategy for Adaptive Mesh Refinement (AMR) meshes where MultiFABs are processed independently by a GPU renderer and results are combined via MPI reduction. It differs from standard brick renderers by explicitly handling the topological dependencies and non-convexities inherent in AMR grids through a "convexification" preprocessing step, ensuring correct alpha blending for color and emissivity cases [S1, unofficial].
++A parallel volume rendering strategy for Adaptive Mesh Refinement (AMR) meshes where MultiFABs are processed independently by a GPU renderer and results are combined via MPI reduction [S1, unofficial]. It differs from standard brick renderers by explicitly handling the topological dependencies and non-convexities inherent in AMR grids through a "convexification" preprocessing step, ensuring correct alpha blending for color and emissivity cases [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A MultiFAB dataset representing an AMR mesh, consisting of a hierarchy of boxes (grids) at various refinement levels.
+-- Optical properties: absorption coefficient $\kappa$, emission coefficient $j$, and/or color/opacity data associated with the cells.
+-- Camera parameters: viewing direction and projection type (assumed orthogonal for tie-breaking logic).
++- A MultiFAB dataset representing an AMR mesh, consisting of a hierarchy of boxes (grids) at various refinement levels [S1, unofficial].
++- Optical properties: absorption coefficient, emission coefficient, and/or color/opacity data associated with the cells [G].
++- Camera parameters: viewing direction and projection type (assumed orthogonal for tie-breaking logic) [G].
+ 
+ **Outputs:**
+-- A final composite image (e.g., PNG) representing the volume rendering.
++- A final composite image (e.g., PNG) representing the volume rendering [S1, unofficial].
+ 
+ **Data Structures:**
+-- **MultiFAB:** A collection of `Box` objects. Each `Box` defines a contiguous chunk of 3D grid data.
+-- **Image Buffer:** A 2D array of pixels, typically RGBA, initialized to zero (or background color) for accumulation.
++- **MultiFAB:** A collection of `Box` objects. Each `Box` defines a contiguous chunk of 3D grid data [G].
++- **Image Buffer:** A 2D array of pixels, typically RGBA, initialized to zero (or background color) for accumulation [G].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Convexify the MultiFABs:**
+-    The raw AMR boxes may overlap or be non-convex due to the hierarchy. To enable independent processing and correct merging:
+-    -   **Remove Covered Parts:** For any box, identify regions covered by coarser parent cells. These regions are excluded from the current box's data to prevent double-counting.
+-    -   **Split Disconnected Pieces:** If removing covered parts leaves a box topologically disconnected, split it into multiple separate boxes.
++    The raw AMR boxes may overlap or be non-convex due to the hierarchy [G]. To enable independent processing and correct merging:
++    -   **Remove Covered Parts:** For any box, identify regions covered by coarser parent cells. These regions are excluded from the current box's data to prevent double-counting [S1, unofficial].
++    -   **Split Disconnected Pieces:** If removing covered parts leaves a box topologically disconnected, split it into multiple separate boxes [S1, unofficial].
+     -   **Break Dependency Loops:** In 3D AMR meshes, dependency loops can form where grid A depends on B, B on C, and C on A. Break these loops by splitting grids using cutting planes perpendicular to the z-axis. This reduces the layout to 2D layers where no loops are possible [S1, unofficial].
+     -   **Split Size-Mismatched Boxes:** If boxes of different sizes prevent a valid topological ordering, split the problematic boxes along a Cartesian axis. The preferred axis is the one most nearly orthogonal to the viewing plane. For BoxLib grids, the z-axis is preferred because it leaves two contiguous chunks of data, which is more efficient for underlying numerical routines [S1, unofficial].
+ 
+ 2.  **Render Each FAB Independently:**
+-    -   Call the GPU volume renderer (e.g., Viskores) separately for each resulting FAB (Family of Arrays).
+-    -   Each renderer produces a partial image containing the accumulated color and opacity for the rays passing through that FAB's boxes.
++    -   Call the GPU volume renderer (e.g., Viskores) separately for each resulting FAB (Family of Arrays) [S1, unofficial].
++    -   Each renderer produces a partial image containing the accumulated color and opacity for the rays passing through that FAB's boxes [G].
+ 
+ 3.  **Merge Partial Images (Local):**
+-    -   **Attenuation Only:** If the volume only has absorption (no color/emissivity), simply add the images from all local FABs together.
+-    -   **Color/Emissivity:** If color or emissivity is present, simple addition is insufficient. The boxes must be topologically sorted and merged in back-to-front order using alpha blending.
+-        -   Use a binary tree merge structure since the merge operator is associative.
++    -   **Attenuation Only:** If the volume only has absorption (no color/emissivity), simply add the images from all local FABs together [S1, unofficial].
++    -   **Color/Emissivity:** If color or emissivity is present, simple addition is insufficient. The boxes must be topologically sorted and merged in back-to-front order using alpha blending [S1, unofficial].
++        -   Use a binary tree merge structure since the merge operator is associative [S1, unofficial].
+         -   **Topological Sort:** Sort boxes based on their depth relative to the viewer.
+         -   **Tie-Breaking:** For geometrically degenerate cases where boxes are at the same depth, sort by maximum distance from the viewer (assuming orthogonal projection). Boxes with the same maximum distance are tied; one is picked arbitrarily to go first. For tied boxes A and C, the order can be either $(A \text{ merge } C) \text{ merge } B$ or $(C \text{ merge } A) \text{ merge } B$ [S1, unofficial].
+ 
+ 4.  **MPI Reduction:**
+-    -   Perform an MPI reduction operation to sum all images from all MPI ranks. This combines the contributions from different nodes in the distributed system.
++    -   Perform an MPI reduction operation to sum all images from all MPI ranks. This combines the contributions from different nodes in the distributed system [S1, unofficial].
+ 
+ 5.  **Output:**
+@@ -48,95 +48,75 @@
+ 
+ ```python
+-def multi_fab_convexify_render(multifab, camera, renderer):
+-    """
+-    Render a MultiFAB using convexification and parallel reduction.
+-    """
++def multi_fab_convexify_render(multifab, camera, renderer, mpi_comm, rank, has_color_or_emissivity):
+     # Step 1: Convexify
+-    # Remove parts covered by coarse cells and split disconnected/loop-causing boxes
+-    convexified_boxes = convexify(multifab)
+-    
+-    # Step 2: Render each FAB independently
++    # Remove covered parts, split disconnected pieces, break dependency loops (z-axis),
++    # split size-mismatched boxes (axis most orthogonal to view).
++    convexified_fabs = convexify(multifab) # [G] Standard AMR box decomposition
++
++    # Step 2: Render each FAB
+     local_images = []
+-    for fab in convexified_boxes:
+-        # Render the specific FAB using the GPU renderer
+-        img = renderer.render(fab, camera)
++    for fab in convexified_fabs:
++        img = renderer.render(fab, camera) # [G] GPU volume rendering
+         local_images.append((fab, img))
+-        
+-    # Step 3: Merge locally if color/emissivity is present
+-    # If only attenuation, simple addition is sufficient (handled in reduction)
+-    if has_color_or_emissivity():
+-        # Sort boxes topologically for correct alpha blending
+-        sorted_boxes = topological_sort(local_images, camera)
+-        
++
++    # Step 3: Merge locally
++    if has_color_or_emissivity:
++        # Sort by max distance from viewer (orthogonal projection)
++        sorted_fabs = sorted(local_images, key=lambda x: -x[0].max_distance_from(camera))
+         # Merge in back-to-front order using a binary tree
+-        merged_image = merge_binary_tree(sorted_boxes)
++        merged_image = merge_binary_tree(sorted_fabs)
+     else:
+-        # Sum images for attenuation-only case
++        # Attenuation only: simple addition
+         merged_image = sum_images([img for _, img in local_images])
+-        
+-    # Step 4: MPI Reduction
++
++    # Step 4: MPI reduction
+     # Sum all images from all ranks
+-    global_image = mpi_reduce_sum(merged_image)
+-    
++    global_image = mpi_comm.Allreduce(merged_image, op=mpi_comm.SUM) # [G] Standard MPI reduction
++
+     # Step 5: Output
+     if rank == 0:
+-        write_png(global_image, "output.png")
+-        
++        # Write PNG file
++        with open("output.png", "wb") as f:
++            f.write(png_encode(global_image)) # [G] Standard image encoding
++
+     return global_image
+ 
+ def convexify(multifab):
+-    """
+-    Remove covered parts and split boxes to ensure convexity and no dependency loops.
+-    """
+-    boxes = []
+-    for box in multifab.boxes:
+-        # Remove regions covered by coarser parents
+-        clean_box = remove_covered_regions(box, multifab)
+-        
+-        # Split if topologically disconnected
+-        pieces = split_disconnected(clean_box)
+-        
+-        # Break dependency loops by cutting along z-axis if necessary
+-        # This reduces 3D layout to 2D layers
+-        final_pieces = break_dependency_loops(pieces, axis='z')
+-        
+-        boxes.extend(final_pieces)
+-    return boxes
++    # [G] Standard AMR convexification: clip boxes by coarser parents,
++    # split disconnected components, cut along z-axis to break 3D dependency loops,
++    # and split size-mismatched boxes along the axis most orthogonal to the view.
++    return [] # [G] Implementation details not provided in sources
+ 
+-def topological_sort(boxes, camera):
+-    """
+-    Sort boxes in back-to-front order.
+-    Tie-break by max distance from viewer (orthogonal projection).
+-    """
+-    def sort_key(box):
+-        # Calculate max distance from viewer for the box
+-        max_dist = box.max_distance_from(camera.origin, camera.direction)
+-        return -max_dist  # Negative for back-to-front (far to near)
+-    
+-    sorted_boxes = sorted(boxes, key=sort_key)
+-    return sorted_boxes
++def merge_binary_tree(sorted_fabs):
++    # [G] Standard associative binary tree reduction for alpha blending
++    if not sorted_fabs:
++        return empty_image()
++    if len(sorted_fabs) == 1:
++        return sorted_fabs[0].image
++    mid = len(sorted_fabs) // 2
++    left = merge_binary_tree(sorted_fabs[:mid])
++    right = merge_binary_tree(sorted_fabs[mid:])
++    return alpha_blend(left, right)
+ 
+-def merge_binary_tree(sorted_boxes):
+-    """
+-    Merge images in back-to-front order using a binary tree.
+-    """
+-    if not sorted_boxes:
+-        return empty_image()
+-    
+-    # Simple linear merge for demonstration, binary tree is more efficient
+-    result = sorted_boxes[0].image
+-    for i in range(1, len(sorted_boxes)):
+-        # Alpha blend current result with next box's image
+-        result = alpha_blend(result, sorted_boxes[i].image)
++def sum_images(images):
++    # Element-wise addition of pixel values
++    result = empty_image()
++    for img in images:
++        result += img
+     return result
++
++def empty_image():
++    # Returns a zero-initialized RGBA buffer
++    return [[0, 0, 0, 0] for _ in range(width * height)] # [G] Standard initialization
+ ```
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Dominated by the GPU rendering of each FAB and the MPI reduction. The convexification step adds CPU overhead proportional to the number of boxes and their complexity.
+--   **Memory Complexity:** Requires storing the MultiFAB data and intermediate images. The convexification step may increase the number of boxes, potentially increasing memory overhead slightly.
+--   **Strengths:** Handles complex AMR topologies correctly, including dependency loops and non-convex shapes. Efficient for large-scale parallel rendering using MPI and GPUs.
+--   **Limitations:** The convexification step can be complex to implement correctly. Splitting boxes may lead to a large number of small boxes, potentially reducing rendering efficiency if not managed well. Dependency loop breaking requires careful handling of cutting planes.
+--   **When to Use:** Suitable for AMR meshes where topological correctness is crucial, especially for color and emissivity rendering. Not ideal for simple, uniform grids where standard brick rendering suffices.
+--   **When Not to Use:** For octree meshes, which do not have the dependency loop problem, simpler methods may be preferred. If a physically-accurate solution is not required, alternative tie-breaking or pixel-independent merging might be considered, though this increases MPI communication [S1, unofficial].
++-   **Time and Memory Complexity:** Not given in the sources.
++-   **Measured Performance:** Not given in the sources.
++-   **Scaling:** Not given in the sources.
++-   **Strengths:** Handles complex AMR topologies correctly, including dependency loops and non-convex shapes [S1, unofficial]. Efficient for large-scale parallel rendering using MPI and GPUs [S1, unofficial].
++-   **Limitations:** The convexification step adds CPU overhead. Splitting boxes may increase the number of boxes. Dependency loop breaking requires cutting planes [S1, unofficial].
++-   **When to Use:** Suitable for AMR meshes where topological correctness is crucial, especially for color and emissivity rendering [S1, unofficial].
++-   **When Not to Use:** For octree meshes, which do not have the dependency loop problem [S1, unofficial]. If a physically-accurate solution is not required, alternative tie-breaking or pixel-independent merging might be considered, though this increases MPI communication [S1, unofficial].
+ 
+ ## Background

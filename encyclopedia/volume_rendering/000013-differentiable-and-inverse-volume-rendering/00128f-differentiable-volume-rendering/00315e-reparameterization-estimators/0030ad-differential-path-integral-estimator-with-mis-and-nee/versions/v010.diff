@@ -1,0 +1,169 @@
+--- v009.md
++++ v010.md
+@@ -76,85 +76,92 @@
+     gradient_sum = 0.0
+     for _ in range(M):
+-        # 1. Generate standard path x of depth N using BRDF sampling
++        # 1. Generate standard path x of depth N using BRDF sampling [G]
+         x = generate_path_brdf(scene, N)
+         
++        # Compute base BRDF probability: p(x) = prod_{k=1}^{N-1} p_f(x_k)
++        p_brdf_x = 1.0
++        for k in range(1, N):
++            p_brdf_x *= x[k].bsdf_pdf
++        
+         # 2. Compute mixture probability p_mix(x) via Eq (41)
+-        p_standard = 1.0
+-        for k in range(1, N):
+-            p_standard *= x[k].bsdf_pdf
+         sum_diff_standard = 0.0
+         for i in range(1, N):
+-            term = p_standard * (x[i].diff_pdf / x[i].bsdf_pdf) * ((1 - q) ** (i - 1)) * q
++            # p(x, i) = p(x) * (p_diff(x_i) / p_f(x_i)) * (1-q)^(i-1) * q
++            term = p_brdf_x * (x[i].diff_pdf / x[i].bsdf_pdf) * ((1 - q) ** (i - 1)) * q
+             sum_diff_standard += term
+-        p_nee_end = p_standard * ((1 - q) ** (N - 1))
+-        p_mix_x = p_standard + sum_diff_standard + p_nee_end
++        p_nee_end = p_brdf_x * ((1 - q) ** (N - 1))
++        p_mix_x = p_brdf_x + sum_diff_standard + p_nee_end
+         
+         # 3. Accumulate standard path contributions
+         for i in range(N + 1):
+-            g = compute_differential_contribution_standard(x, i, theta)
++            # g(x, i; theta) = [prod_{k=1}^{i-1} f_k] * (df_i/dtheta) * [prod_{k=i+1}^{N} f_k]
++            prod_before = 1.0
++            for k in range(1, i):
++                prod_before *= x[k].bsdf
++            df_di = x[i].bsdf_derivative(theta)
++            prod_after = 1.0
++            for k in range(i + 1, N + 1):
++                prod_after *= x[k].bsdf
++            g = prod_before * df_di * prod_after
+             gradient_sum += g / p_mix_x
+             
+         # 4. Generate NEE paths and accumulate
+         for j in range(1, N):
+-            # Sample emitter point x_e_j from x_j
++            # Sample emitter point x_e_j from x_j [G]
+             x_e_j = sample_emitter(scene, x[j].position, x[j].normal)
+             
+-            # 5. Compute mixture probability p_mix(x, x_j x_e_j) via Eq (42)
+-            p_standard = 1.0
+-            for k in range(1, N):
+-                p_standard *= x[k].bsdf_pdf
+-            p_nee_base = p_standard * ((1 - q) ** (j - 1))
+-            
+-            p_brdf_to_nee = p_standard * ((1 - q) ** (j - 1))
++            # Compute prod_{k=0}^{j-1} p_f(x_k). Assume p_f(x_0)=1.
++            prod_p_f_j = 1.0
++            for k in range(1, j):
++                prod_p_f_j *= x[k].bsdf_pdf
++            
++            # p_nee(x, x_j x_{e,j}) via Eq (38)
++            p_nee_direct = prod_p_f_j * x[j].emitter_pdf * ((1 - q) ** (j - 1))
++            
++            # p(x, x_j x_{e,j}) is the BRDF-to-NEE switch probability
++            p_brdf_to_nee = prod_p_f_j * ((1 - q) ** (j - 1))
++            
++            # Compute sums for Eq (42)
+             sum_diff_interior = 0.0
++            sum_nee_diff = 0.0
+             for i in range(1, j + 1):
+-                density_ratio = 1.0 
+-                term = p_nee_base * density_ratio * ((1 - q) ** (i - 1)) * q
+-                sum_diff_interior += term
++                # p_nee(x, x_j x_{e,j}, i) via Eq (37)
++                p_nee_i = (prod_p_f_j / x[i].bsdf_pdf) * x[i].diff_pdf * ((1 - q) ** (i - 1)) * q
+                 
+-            p_nee_direct = p_standard * ((1 - q) ** (j - 1))
+-            sum_nee_diff = 0.0
+-            for i in range(1, j):
+-                density_ratio = 1.0
+-                term = p_nee_base * density_ratio * ((1 - q) ** (i - 1)) * q
+-                sum_nee_diff += term
++                # p(x, x_j x_{e,j}, i) via Eq (39)
++                if i < j:
++                    p_x_i = p_nee_i * (x[j-1].bsdf_pdf / x[j].emitter_pdf)
++                else: # i == j
++                    p_x_i = p_nee_i * (x[j-1].diff_pdf / x[j].emitter_pdf)
+                 
++                if i < j:
++                    sum_nee_diff += p_nee_i
++                sum_diff_interior += p_x_i
++            
+             p_mix_nee = p_brdf_to_nee + sum_diff_interior + p_nee_direct + sum_nee_diff
+             
+             # 6. Accumulate NEE path contributions
+             for i in range(j + 1):
+-                g_nee = compute_differential_contribution_nee(x, j, x_e_j, i, theta)
++                # g(x, x_j x_{e,j}, i; theta) via Eq (43)
++                prod_bsdf = 1.0
++                for k in range(1, j):
++                    prod_bsdf *= x[k].bsdf
++                G = compute_geometry_term(x[j], x_e_j)
++                rho_s = compute_specular_term(x[j - 1], x[j], x_e_j)
++                if i < j:
++                    prod_before = 1.0
++                    for k in range(1, i):
++                        prod_before *= x[k].bsdf
++                    df_di = x[i].bsdf_derivative(theta)
++                    prod_after = 1.0
++                    for k in range(i + 1, j):
++                        prod_after *= x[k].bsdf
++                    term = prod_before * df_di * prod_after
++                else: # i == j
++                    term = 1.0
++                g_nee = prod_bsdf * G * rho_s * term * x_e_j.emitter_radiance
+                 gradient_sum += g_nee / p_mix_nee
+-                
++            
+     return gradient_sum / M
+-
+-def compute_differential_contribution_standard(x, i, theta):
+-    prod_bsdf = 1.0
+-    for k in range(1, i):
+-        prod_bsdf *= x[k].bsdf
+-    df_di = x[i].bsdf_derivative(theta)
+-    rest = 1.0
+-    for k in range(i + 1, len(x)):
+-        rest *= x[k].bsdf
+-    return prod_bsdf * df_di * rest
+-
+-def compute_differential_contribution_nee(x, j, x_e_j, i, theta):
+-    prod_bsdf = 1.0
+-    for k in range(1, j):
+-        prod_bsdf *= x[k].bsdf
+-    G = compute_geometry_term(x[j], x_e_j)
+-    rho_s = compute_specular_term(x[j - 1], x[j], x_e_j)
+-    if i < j:
+-        df_di = x[i].bsdf_derivative(theta)
+-        prod_bsdf_i = 1.0
+-        for k in range(1, i):
+-            prod_bsdf_i *= x[k].bsdf
+-        rest = 1.0
+-        for k in range(i + 1, j):
+-            rest *= x[k].bsdf
+-        term = prod_bsdf_i * df_di * rest
+-    else:
+-        term = 1.0
+-    return prod_bsdf * G * rho_s * term * x_e_j.emitter_radiance
+ 
+ def generate_path_brdf(scene, N):
+@@ -178,5 +185,5 @@
+ - **Precision**: Division by small mixture probabilities $p_{\text{mix}}$ can lead to numerical instability. Guard against zero probabilities [S1].
+ - **Boundaries**: The differential vertex $i$ can be at the start ($i=0$) or end ($i=N$) of the path. Ensure formulas handle these boundaries correctly [S1].
+-- **Degenerate Input**: If a BSDF is zero, the ratio $\frac{\partial_\theta f_i(x)}{f_i(x)}$ may be undefined. Handle cases where $f_i(x) \approx 0$ [S1].
++- **Degenerate Input**: If a BSDF is zero, the ratio $\frac{\partial_\theta f_i(x)}{f_i(x)}$ may be undefined [S1].
+ 
+ ## Subtopics
+@@ -189,8 +196,8 @@
+ 
+ ### Vectorized Total Derivative Estimation
+-This approach effectively shares all paths traced by Algorithm 1 to calculate derivatives with respect to all scene parameters simultaneously [S2, unofficial]. Execute Algorithm 1 once in a vectorized fashion to estimate the total scene derivative $d_\pi L$. Replace all partial derivatives with their vector-valued total derivative counterparts and perform component-wise calculations between all total-derivative-related quantities [S2, unofficial].
++This approach effectively shares all paths traced by Algorithm 1 to calculate derivatives with respect to all scene parameters simultaneously [S2, unofficial]. Execute Algorithm 1 once in a vectorized fashion to estimate the total scene derivative $d_\pi L$ [S2, unofficial]. Replace all partial derivatives with their vector-valued total derivative counterparts and perform component-wise calculations between all total-derivative-related quantities [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: The estimator has a theoretical convergence rate of $O(1/\sqrt{N})$ with $N$ being the number of main sample paths. However, due to the additional side paths needed for NEE, the time complexity is $O(K^2)$ for each sample path of length $K$, which is significantly more expensive than conventional VPT ($O(K)$) [S2, unofficial].
++- **Time Complexity**: The estimator has a theoretical convergence rate of $O(1/\sqrt{N})$ with $N$ being the number of main sample paths [S2, unofficial]. However, due to the additional side paths needed for NEE, the time complexity is $O(K^2)$ for each sample path of length $K$, which is significantly more expensive than conventional VPT ($O(K)$) [S2, unofficial].
+ - **Memory Complexity**: Not given in the sources.
+ - **Strengths**: Reduces variance for gradient estimation in scenes with varying roughnesses and microfacet materials by combining BRDF and emitter sampling [S1].

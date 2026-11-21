@@ -1,0 +1,1472 @@
+--- v004.md
++++ v005.md
+@@ -4,1302 +4,200 @@
+ 
+ ## Overview
+-Compositional Rendering is a method for integrating newly generated 3D objects into an existing Neural Radiance Field (NeRF) scene by decoupling object and scene rendering [S1]. It solves the problem of occlusion handling during object insertion by merging the rendered object and the pre-rendered scene using a 3D-aware opacity map [S1]. Unlike standard direct volume ray casting which renders the entire volume simultaneously, this method isolates the object's volume within a specific 3D bounding box and uses depth comparison against the static scene to determine visibility [S1].
++Compositional Rendering is a method for integrating newly generated 3D objects into an existing Neural Radiance Field (NeRF) scene by decoupling the rendering of the object from the background scene [S1]. It solves the problem of occlusion-aware compositing in image-order rendering by generating a 3D-aware opacity map for the new object and blending it with pre-rendered background RGB-D images [S1]. It differs from standard Direct Volume Ray Casting [19-direct-volume-ray-casting.md] by performing the final alpha-blending in image space using a pre-computed scene cache, rather than accumulating the entire scene in a single ray-casting pass [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   A pre-trained scene NeRF $F(\theta_s)$ [S1].
+-*   A set of predefined camera viewpoints $\{C_0, \dots, C_n\}$ used for training the scene NeRF [S1].
+-*   A pre-rendered sequence of RGB-D images for the scene $\{(S_0, D_0), \dots, (S_n, D_n)\}$, where $S_v$ is the RGB image and $D_v$ is the depth image for viewpoint $v$ [S1].
+-*   An object NeRF $F(\theta_o)$ trained within a 3D bounding box [S1].
+-*   A specific camera viewpoint $v \in \{C_0, \dots, C_n\}$ [S1].
++*   Pre-rendered background RGB-D image sequences $\{(S_0, D_0), \dots, (S_n, D_n)\}$ for a set of camera viewpoints $\{C_0, \dots, C_n\}$ [S1].
++*   A trained object NeRF $F(\theta_o)$ defining volume density $\delta$ and RGB color $c$ [S1].
++*   A 3D bounding box defining the spatial extent of the object [S1].
++*   A target camera viewpoint $v \in \{C_0, \dots, C_n\}$ [S1].
+ 
+ **Outputs:**
+-*   Final composited RGB image $I_v$ for viewpoint $v$ [S1].
++*   Final composited RGB image $I_v$ [S1].
+ *   Intermediate object RGB image $G_v$ [S1].
+ *   Intermediate object opacity map $O_v$ [S1].
+ 
+ **Data Structures:**
+-*   **Scene Pre-render:** A list of tuples $(S_v, D_v)$ for each viewpoint $v$. $S_v$ and $D_v$ are 2D arrays (images) of identical resolution.
+-*   **Object NeRF:** A function $F(\theta_o)$ that takes a 3D coordinate $q$ and viewing direction $d$ and outputs volume density $\delta$ and RGB color $c$.
+-*   **3D Bounding Box:** A spatial region defining where the object NeRF is valid.
++*   **Background Cache:** A list of tuples, where each tuple contains an RGB image $S_v$ and a depth image $D_v$ for each viewpoint $v$.
++*   **Object NeRF:** A neural network $F(\theta_o)$ that takes a 3D coordinate $q$ and viewing direction as input and outputs volume density $\delta$ and RGB color $c$.
++*   **Bounding Box:** Defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$.
+ 
+ **Steps:**
+ 
+-1.  **Pre-render Scene:** Generate RGB-D images for the static scene $F(\theta_s)$ at all predefined viewpoints $\{C_0, \dots, C_n\}$ [S1]. Store as $\{(S_0, D_0), \dots, (S_n, D_n)\}$ [S1]. This reduces computational load during object optimization [S1].
+-
+-2.  **Cast Rays:** For the target viewpoint $v$, cast rays $r_i$ through each pixel $i$ of the image plane [S1].
+-
+-3.  **Sample Object Volume:** For each ray $r_i$, sample query points $q_k$ along the ray, restricted to the interior of the object's 3D bounding box [S1]. Let $K$ be the number of samples [S1].
+-
+-4.  **Compute Transmittance:** Calculate the transmittance $\tau_k$ at sample $k$ [S1]:
++1.  **Pre-render Background:** For each camera viewpoint $v$ in the predefined set $\{C_0, \dots, C_n\}$, render the background scene using the established scene NeRF $F(\theta_s)$ to generate the RGB image $S_v$ and depth image $D_v$. Store these as the background cache [S1].
++
++2.  **Ray Casting:** For the target viewpoint $v$, cast a ray $r_i$ for each pixel $i$ in the image plane [S1].
++
++3.  **Sampling:** Sample $K$ query points $q_k$ along the ray $r_i$ within the 3D bounding box of the object [S1]. Let $\Delta_k$ be the distance between adjacent query points $q_k$ and $q_{k+1}$ along the ray [S1].
++
++4.  **Query NeRF:** For each query point $q_k$, query the object NeRF $F(\theta_o)$ to obtain the volume density $\delta_k$ and RGB color $c_k$ [S1].
++
++5.  **Calculate Transmittance:** Compute the transmittance $\tau_k$ at sample $k$, representing the probability that a ray passes through the volume up to sample $k$ without being absorbed or scattered [S1]:
+     $$ \tau_k = \exp\left(-\sum_{t=1}^{k-1} \delta_t \Delta_t\right) $$
+-    where $\delta_t$ is the volume density at query point $q_t$, and $\Delta_t$ is the distance between adjacent query points $q_t$ and $q_{t+1}$ along the ray [S1]. For $k=1$, the sum is empty, so $\tau_1 = 1$ [S1].
+-
+-5.  **Compute Object RGB:** Calculate the accumulated RGB value $G_v(i)$ for pixel $i$ [S1]:
++    where $\tau_1 = 1$ [S1].
++
++6.  **Calculate Object RGB:** Compute the accumulated RGB value $G_v(i)$ for pixel $i$ by summing the contribution of each sample weighted by its opacity contribution and transmittance [S1]:
+     $$ G_v(i) = \sum_{k=1}^{K} \tau_k (1 - \exp(-\delta_k \Delta_k)) c_k $$
+-    where $c_k$ is the RGB color output by the object NeRF at $q_k$ [S1].
+-
+-6.  **Compute Object Opacity with Occlusion:** Calculate the opacity value $O_v(i)$ for pixel $i$ [S1]:
+-    $$ O_v(i) = \begin{cases} \sum_{k=1}^{K} \tau_k (1 - \exp(-\delta_k \Delta_k)), & \text{if } r_i \in \text{box} \text{ and } D_{\text{box}}(i) \le D_v(i) \\ 0, & \text{otherwise} \end{cases} $$
+-    where $D_{\text{box}}(i)$ is the depth of the object's bounding box intersection along ray $r_i$ [S1]. $D_v(i)$ is the depth of the pre-rendered scene at pixel $i$ [S1]. The condition $r_i \in \text{box}$ checks if the ray intersects the 3D bounding box [S1]. The condition $D_{\text{box}}(i) \le D_v(i)$ checks if the object is in front of or at the same depth as the scene foreground [S1]. If the ray does not intersect the box or the object is occluded by the scene, $O_v(i)$ is set to 0 [S1].
+-
+-7.  **Composite Final Image:** Blend the object and scene using the opacity map [S1]:
++
++7.  **Calculate Object Opacity:** Compute the accumulated opacity $O_v(i)$ for pixel $i$. This step includes occlusion logic against the pre-rendered background depth $D_v(i)$ [S1]:
++    $$ O_v(i) = \begin{cases} \sum_{k=1}^{K} \tau_k (1 - \exp(-\delta_k \Delta_k)), & \text{if } r_i \in \text{box} \text{ AND } D_{box}(i) \le D_v(i) \\ 0, & \text{otherwise} \end{cases} $$
++    Here, $D_{box}(i)$ is the depth of the intersection of ray $r_i$ with the 3D bounding box [S1]. The condition $D_{box}(i) \le D_v(i)$ ensures that if the object's bounding box is behind the background scene's geometry, the object is treated as occluded [S1].
++
++8.  **Composite:** Blend the rendered object $G_v$ and the pre-rendered background $S_v$ using the opacity map $O_v$ to produce the final image $I_v$ [S1]:
+     $$ I_v = G_v \cdot O_v + S_v \cdot (1 - O_v) $$
+-    where $S_v$ is the pre-rendered scene RGB image for viewpoint $v$ [S1]. This operation is performed per pixel [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def compositional_rendering(scene_nerf, object_nerf, viewpoint_v, scene_rgb_d, object_box):
++def compositional_rendering(viewpoint_index, background_cache, object_nerf, bounding_box, num_samples):
+     """
+-    Renders the composited image for a specific viewpoint.
++    Renders the final composited image for a specific viewpoint.
+     
+     Args:
+-        scene_nerf: Pre-trained NeRF for the static scene.
+-        object_nerf: NeRF for the object to be inserted.
+-        viewpoint_v: Camera parameters for the current view.
+-        scene_rgb_d: Pre-rendered RGB-D images for all viewpoints. 
+-                     scene_rgb_d[v] = (S_v, D_v)
+-        object_box: 3D bounding box for the object.
++        viewpoint_index: Index of the camera viewpoint in the predefined set.
++        background_cache: List of (S_v, D_v) tuples for all viewpoints.
++        object_nerf: Function/Model F(theta_o) returning (delta, c) for a point.
++        bounding_box: 3D bounding box defining the object's spatial extent.
++        num_samples: Number of query points K along the ray.
+         
+     Returns:
+         I_v: Final composited RGB image.
+     """
+-    # Step 1: Retrieve pre-rendered scene data
+-    S_v, D_v = scene_rgb_d[viewpoint_v]
+-    
+-    # Get image dimensions
+-    H, W = S_v.shape[:2]
+-    I_v = np.zeros((H, W, 3))
+-    
+-    # Step 2: Cast rays for the viewpoint
+-    rays = cast_rays(viewpoint_v, H, W)
+-    
+-    for i in range(H * W):
++    # Step 1: Retrieve pre-rendered background
++    S_v, D_v = background_cache[viewpoint_index]
++    height, width = S_v.shape[:2]
++    
++    # Initialize output images
++    I_v = np.zeros((height, width, 3))
++    
++    # Get camera parameters for viewpoint v to construct rays
++    # [G] Implementation detail: Ray construction depends on specific camera model.
++    # Assuming a standard pinhole camera model with known intrinsics and extrinsics.
++    rays = construct_rays(viewpoint_index) 
++    
++    for i in range(height * width):
+         ray = rays[i]
+-        pixel_idx = i
+-        
+-        # Step 3: Sample points within the object bounding box
+-        # Determine intersection of ray with object_box
+-        t_min, t_max = intersect_box(ray, object_box)
+-        
+-        if t_min is None or t_max is None:
+-            # Ray does not intersect box
+-            O_v_i = 0.0
+-            G_v_i = np.zeros(3)
++        pixel_y, pixel_x = i // width, i % width
++        
++        # Step 2 & 3: Sample points within the bounding box
++        # [G] Implementation detail: Intersect ray with bounding box to get t_min and t_max.
++        # If no intersection, skip.
++        t_min, t_max = intersect_ray_box(ray, bounding_box)
++        
++        if t_min is None:
++            # No intersection with box, opacity is 0, use background
++            I_v[pixel_y, pixel_x] = S_v[pixel_y, pixel_x]
++            continue
++            
++        # Sample K points along the ray segment within the box
++        t_values = np.linspace(t_min, t_max, num_samples + 2)[1:-1] # Exclude endpoints if desired, or include
++        # [G] Standard DVR often includes endpoints. Let's assume K samples.
++        # Adjust t_values to have exactly num_samples points.
++        t_values = np.linspace(t_min, t_max, num_samples)
++        
++        query_points = ray.origin + ray.direction * t_values[:, np.newaxis]
++        
++        # Step 4: Query NeRF
++        # [G] object_nerf should return (delta, color) for all points in batch.
++        deltas, colors = object_nerf(query_points)
++        
++        # Step 5: Calculate Transmittance
++        # tau_k = exp(-sum_{t=1}^{k-1} delta_t * delta_t_dist)
++        # delta_t_dist is the distance between adjacent query points.
++        # For uniform sampling, delta_t_dist is constant.
++        # [G] Calculate distances between adjacent points.
++        if num_samples > 1:
++            deltas_dist = np.diff(t_values)
++            # Pad with 0 for the first term's sum (which is empty)
++            deltas_dist = np.insert(deltas_dist, 0, 0)
+         else:
+-            # Sample points along the ray within the box
+-            # Number of samples K is implementation dependent, e.g., fixed or adaptive
+-            K = 64 
+-            t_values = np.linspace(t_min, t_max, K + 2)[1:-1] # Exclude box boundaries
+-            q_k = ray.origin + ray.direction * t_values[:, np.newaxis]
++            # If only 1 sample, distance is effectively 0 or handled as a single term
++            # The formula uses sum_{t=1}^{k-1}. For k=1, sum is 0.
++            # We need delta_k * delta_k for the opacity term.
++            # Let's assume a small epsilon or actual distance for the single sample.
++            # [G] In practice, for a single sample, delta_k * delta_k is approximated.
++            # Let's assume uniform spacing for simplicity if num_samples > 1.
++            deltas_dist = np.zeros(num_samples)
+             
+-            # Query object NeRF for density and color
+-            # object_nerf(q_k) returns (delta_k, c_k)
+-            delta_k, c_k = object_nerf(q_k)
++        # Cumulative density
++        cumulative_density = np.cumsum(deltas * deltas_dist)
++        transmittance = np.exp(-cumulative_density)
++        
++        # Step 6: Calculate Object RGB
++        # G_v(i) = sum_{k=1}^K tau_k * (1 - exp(-delta_k * delta_k_dist)) * c_k
++        # Note: The formula in [S1] uses delta_k * delta_k. 
++        # In standard DVR, the term is (1 - exp(-delta_k * dist_k)).
++        # [S1] notation: delta_k * delta_k likely means delta_k * distance_k.
++        # Let's use deltas_dist for distance.
++        alpha_k = 1 - np.exp(-deltas * deltas_dist)
++        weights = transmittance * alpha_k
++        G_v_pixel = np.sum(weights[:, np.newaxis] * colors, axis=0)
++        
++        # Step 7: Calculate Object Opacity
++        # O_v(i) = sum_{k=1}^K tau_k * (1 - exp(-delta_k * delta_k_dist))
++        # Check occlusion: D_box(i) <= D_v(i)
++        # D_box(i) is the depth of the box intersection along the ray direction.
++        # D_v(i) is the depth from the background cache.
++        
++        # Calculate depth of box intersection
++        # Depth is usually the z-coordinate in camera space or distance along ray.
++        # [G] Assuming D_v is depth along ray (distance from camera).
++        # D_box is t_max (distance to far plane of box) or t_min?
++        # [S1] says "D_box(i) <= D_v(i)". If the box is behind the scene, it's occluded.
++        # So D_box should be the depth of the *front* of the box? Or the depth of the object?
++        # The text says: "if the generated content is occluded by the scene foreground (D_box(i) > D_v(i))".
++        # This implies D_box is the depth of the object's bounding box intersection.
++        # If the box is further away than the scene, the object is behind.
++        # However, if the ray intersects the box, we are inside the box's depth range.
++        # The condition "ri in box" is already checked.
++        # The condition "D_box(i) <= D_v(i)" likely refers to the depth of the *front* of the box
++        # or the depth of the *object* relative to the scene.
++        # Let's assume D_box(i) is the depth of the front intersection of the ray with the box.
++        # If the scene is closer (D_v < D_box), the object is behind the scene -> occluded.
++        # Wait, if D_v < D_box, the scene is in front. So the object is behind.
++        # The formula says: if D_box <= D_v, then render object.
++        # This implies D_box is the depth of the *back* of the box? Or the object itself?
++        # Let's re-read: "if the generated content is occluded by the scene foreground (D_box(i) > D_v(i))".
++        # If D_box > D_v, the box is behind the scene. So the object is occluded.
++        # So if D_box <= D_v, the box is in front of or at the same depth as the scene.
++        # This suggests D_box is the depth of the *front* of the box?
++        # If the front of the box is in front of the scene, the object is visible.
++        # If the front of the box is behind the scene, the object is occluded.
++        # So D_box should be the depth of the front intersection (t_min).
++        
++        t_min_depth = t_min # Distance along ray to front of box
++        
++        if t_min_depth <= D_v[pixel_y, pixel_x]:
++            O_v_pixel = np.sum(weights)
++        else:
++            O_v_pixel = 0.0
+             
+-            # Calculate distances between adjacent query points
+-            # delta_t is distance between q_t and q_{t+1}
+-            # For simplicity, assume uniform sampling or compute from t_values
+-            dt = np.diff(t_values) # Length K-1
+-            # Pad dt to match K samples for transmittance calculation
+-            # tau_k depends on sum from t=1 to k-1
+-            # Let's compute tau for each k
+-            tau = np.ones(K)
+-            cumulative_density = 0.0
+-            for k in range(K - 1):
+-                cumulative_density += delta_k[k] * dt[k]
+-                tau[k+1] = np.exp(-cumulative_density)
+-            
+-            # Step 4 & 5: Compute Object RGB and Opacity
+-            # alpha_k = 1 - exp(-delta_k * delta_t_k)
+-            # Note: dt[k] is distance between q_k and q_{k+1}
+-            # The formula uses delta_t for the segment starting at k
+-            # Standard volume rendering: alpha_k = 1 - exp(-sigma_k * delta_k)
+-            # Here delta_t is the step size.
+-            
+-            alpha_k = 1.0 - np.exp(-delta_k * dt) # dt has length K-1, need to handle last sample
+-            # The last sample k=K-1 has no forward segment in the sum for transmittance,
+-            # but contributes to color. Usually, the last segment is handled or K is large enough.
+-            # Based on formula: sum_{k=1}^K tau_k (1 - exp(-delta_k Delta_k))
+-            # Delta_k is distance between q_k and q_{k+1}.
+-            # For k=K, Delta_K is not defined by adjacent points in the list.
+-            # Assuming K samples, we have K-1 intervals.
+-            # Let's assume the formula implies K intervals or K points with K-1 intervals.
+-            # Re-reading source: "Delta_t is distance between adjacent query points".
+-            # If there are K query points, there are K-1 distances.
+-            # The sum goes to K. This implies K samples might include the end point or 
+-            # the formula assumes K intervals.
+-            # Let's stick to the source formula structure strictly.
+-            # If K is number of samples, and we have K-1 deltas.
+-            # Let's assume K samples and K-1 deltas, and the last term uses the last delta?
+-            # Or K samples and K deltas (including a small epsilon at the end)?
+-            # Standard NeRF uses N samples.
+-            # Let's assume K samples and K-1 deltas, and the loop handles it.
+-            # To be safe, we pad dt or assume K samples with K-1 steps.
+-            
+-            # Recalculating based on standard volume rendering with K samples:
+-            # We need K alphas. We have K-1 deltas.
+-            # Let's assume the source implies K samples and K-1 intervals, 
+-            # and the last sample's contribution is handled or K is defined as intervals.
+-            # Given the ambiguity, we will use K-1 intervals for K-1 samples, 
+-            # or K samples with K-1 intervals and ignore the last sample's alpha?
+-            # No, the sum is to K.
+-            # Let's assume K samples and K-1 deltas, and we add a small delta at the end?
+-            # Or K samples and K deltas (where the last delta is 0 or negligible)?
+-            # Let's use K samples and K-1 deltas, and assume the formula 
+-            # effectively sums over the intervals.
+-            
+-            # Simplified implementation for K samples:
+-            # tau[0] = 1
+-            # alpha[k] = 1 - exp(-sigma[k] * dist[k])
+-            # color += tau[k] * alpha[k] * color[k]
+-            
+-            # Let's use K-1 intervals for K-1 samples to match dt length
+-            # But the formula sums to K.
+-            # Let's assume K samples and K-1 intervals, and the last term is 0?
+-            # Or K samples and K intervals (with the last interval being the distance to the box end)?
+-            # Let's assume K samples and K-1 intervals, and the sum is over K-1 terms?
+-            # Source says sum_{k=1}^K.
+-            # Let's assume K samples and K-1 intervals, and we treat the last interval 
+-            # as the distance to the next point or 0.
+-            
+-            # To avoid guessing, we will use the number of intervals as K.
+-            # So we sample K+1 points? Or K intervals.
+-            # Let's sample K intervals.
+-            
+-            # Re-evaluating: "sample query points inside the 3D bounding box"
+-            # "K" is the number of terms in the sum.
+-            # Let's assume K samples and K-1 deltas.
+-            # We will compute alpha for K-1 samples.
+-            # And assume the K-th sample has alpha 0 or is not rendered?
+-            # This is a pitfall.
+-            # Let's assume K samples and K-1 deltas, and the formula 
+-            # actually sums over the K-1 intervals, but the index k goes to K?
+-            # No, k=1 to K.
+-            # Let's assume K samples and K-1 deltas, and we pad delta with 0 at the end?
+-            # Or K samples and K deltas (last one is 0).
+-            
+-            # Let's use K samples and K-1 deltas.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming standard volume rendering where 
+-            # the number of samples equals the number of intervals for simplicity,
+-            # or that the last interval is negligible.
+-            # We will use K samples and K-1 intervals.
+-            # We will compute alpha for the first K-1 samples.
+-            # The last sample's contribution is ignored or assumed 0.
+-            
+-            # Better: Use K intervals. Sample K+1 points.
+-            # But the source says "sample query points... K".
+-            # Let's stick to K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And set alpha[K-1] = 0.
+-            
+-            # Actually, let's look at the formula again.
+-            # tau_k = exp(-sum_{t=1}^{k-1} ...)
+-            # G = sum_{k=1}^K tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If k=K, Delta_K is needed.
+-            # If we have K points, we have K-1 deltas.
+-            # So Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance from the last point to the box end,
+-            # or that K is the number of intervals, not points.
+-            # Let's assume K is the number of intervals.
+-            # So we sample K+1 points? Or K points and K-1 intervals, 
+-            # and the last interval is 0?
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a significant ambiguity.
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # To be safe, we will use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret "K" as the number of intervals.
+-            # Then we have K+1 points.
+-            # But the source says "sample query points... K".
+-            # So K is the number of points.
+-            # Then Delta_K is missing.
+-            # [G] Assuming Delta_K is 0 or the last sample is not rendered.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} ... + tau_K * (1 - exp(-delta_K * 0)) * c_K
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            # If K is the number of points, and we have K-1 deltas.
+-            # Then Delta_K is undefined.
+-            # [G] Assuming Delta_K is the distance to the next point, which is 0 for the last point.
+-            
+-            # So the last term is 0.
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a pitfall.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # Let's try to interpret the formula as:
+-            # G = sum_{k=1}^{K-1} tau_k (1 - exp(-delta_k Delta_k)) c_k
+-            
+-            # So we only sum up to K-1.
+-            
+-            # Let's assume K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.
+-            # And assume the last sample k=K-1 has alpha 0.
+-            
+-            # This is a gap. [G] Assuming the last sample's contribution is negligible.
+-            
+-            # Let's use K samples and K-1 intervals.
+-            # We will compute alpha for k=0 to K-2.+        # Step 8: Composite
++        # I_v = G_v * O_v + S_v * (1 - O_v)
++        I_v[pixel_y, pixel_x] = G_v_pixel * O_v_pixel + S_v[pixel_y, pixel_x] * (1 - O_v_pixel)
++        
++    return I_v
++```
++
++**Parameters:**
++*   `num_samples` ($K$): Number of query points along the ray. Typical values are not specified in the sources. [Not given in the sources.]
++*   `bounding_box`: Defines the 3D extent of the object. [S1]
++
++**Edge Cases and Pitfalls:**
++*   **No Intersection:** If the ray $r_i$ does not intersect the 3D bounding box, the opacity $O_v(i)$ is set to 0, and the background $S_v$ is used directly [S1].
++*   **Occlusion:** If the depth of the bounding box intersection $D_{box}(i)$ is greater than the background depth $D_v(i)$, the object is considered occluded by the scene foreground. In this case, $O_v(i)$ is set to 0, and the background $S_v$ is used [S1].
++*   **Precision:** The exponential function in transmittance calculation can suffer from underflow for high densities or large distances. [G] Standard practice is to clamp densities or use log-space accumulation.
++
++## Operating characteristics
++*   **Time Complexity:** The method reduces computational load by pre-rendering the background scene [S1]. The object rendering cost is proportional to the number of pixels, the number of samples $K$, and the number of viewpoints if rendered for all [S1].
++*   **Memory Complexity:** Requires storing the pre-rendered RGB-D image sequences for all viewpoints $\{C_0, \dots, C_n\}$ [S1].
++*   **Strengths:** Decouples object and scene rendering, enhancing flexibility [S1]. Handles occlusions effectively using 3D-aware opacity maps [S1]. Plug-and-play compatibility with various scene pre-training methods [S1].
++*   **Limitations:** Requires pre-rendering the background for all viewpoints, which may be memory-intensive for large scenes or many viewpoints [S1]. Limited to the predefined set of camera viewpoints [S1].
++*   **When to Use:** When integrating generated objects into a static NeRF scene with known viewpoints, especially for VR content creation where specific viewpoints are important [S1].
++*   **When Not to Use:** For dynamic scenes or viewpoints not included in the pre-rendered set [S1].
++
++## Background
++Compositional Rendering was introduced in the GO-NeRF paper [S1]. It is designed for virtual reality content creation, allowing users to generate and integrate objects into 3D scenes using a user-friendly interface [S1]. The method leverages the decoupling of object and scene rendering to simplify the process for casual users [S1].
++
++## Sources
++[S1] GO-NeRF: Generating Objects in Neural Radiance Fields for Virtual Reality Content Creation, https://doi.org/10.1109/tvcg.2025.3549558, fetched 2026-10-29

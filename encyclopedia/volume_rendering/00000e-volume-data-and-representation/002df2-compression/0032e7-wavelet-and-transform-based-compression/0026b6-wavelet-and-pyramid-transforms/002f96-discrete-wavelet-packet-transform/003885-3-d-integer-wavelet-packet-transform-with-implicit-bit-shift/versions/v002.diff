@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -9,8 +9,8 @@
+ **Inputs and Outputs:**
+ - **Input:** A 3-D volumetric data array.
+-- **Output:** A set of wavelet coefficients in a wavelet packet decomposition structure, scaled such that the transform is approximately unitary.
++- **Output:** A set of wavelet coefficients in a wavelet packet decomposition structure, scaled such that the transform is approximately unitary [S1].
+ 
+ **Data Structures:**
+-The method utilizes a wavelet packet tree structure rather than a standard dyadic tree for the third dimension.
++The method utilizes a wavelet packet tree structure rather than a standard dyadic tree for the third dimension [S1].
+ - **1-D Structure:** A two-level full subband tree (basic wavelet packet tree) [S1]. This structure ensures that all scaling factors for the subbands are powers of two [S1].
+ - **3-D Structure:**
+@@ -31,5 +31,5 @@
+ 
+ **Formulas:**
+-In the 1-D two-channel case, to make the transform unitary, the low-pass/high-pass band needs to be scaled up/down by $\sqrt{2}$ after every two-band wavelet decomposition [S1]. However, since integer transforms cannot represent $\sqrt{2}$ exactly, bit shifting is used. The scaling factors $S_{LP}$ and $S_{HP}$ are defined as:
++In the 1-D two-channel case, to make the transform unitary, the low-pass/high-pass band needs to be scaled up/down by $\sqrt{2}$ after every two-band wavelet decomposition [S1]. However, since integer transforms cannot represent $\sqrt{2}$ exactly, bit shifting is used [S1]. The scaling factors $S_{LP}$ and $S_{HP}$ are defined as:
+ $$ S_{LP} = 2^p $$
+ $$ S_{HP} = 2^{-p} $$
+@@ -41,94 +41,66 @@
+     """
+     Applies 3-D integer wavelet packet transform with implicit bit shifting.
+-    
+     Args:
+-        volume: 3-D numpy array of volumetric data.
++        volume: 3-D array of volumetric data (H, W, D).
+         p: Integer parameter for bit shift scaling.
+-        
+     Returns:
+         Scaled wavelet coefficients.
+     """
+-    # Step 1: Apply 2-D dyadic integer wavelet transform to each slice
+-    # Note: The specific integer wavelet transform (e.g., 9/7, SP) 
+-    # is assumed to be implemented in apply_2d_integer_wavelet.
+-    # The decomposition levels along slices must be even [S1].
+-    slice_transformed = []
+-    for z in range(volume.shape[2]):
++    H, W, D = volume.shape
++    # Step 1: Apply 2-D dyadic integer wavelet transform to each slice [S1]
++    # Decomposition levels along slices must be even [S1].
++    coeffs_2d = []
++    for z in range(D):
+         slice_data = volume[:, :, z]
+-        # Apply 2-D integer wavelet transform
+-        coeffs_2d = apply_2d_integer_wavelet(slice_data)
+-        slice_transformed.append(coeffs_2d)
++        # Standard 2-D dyadic integer wavelet transform applied to each slice [S1]
++        slice_coeffs = apply_2d_integer_wavelet(slice_data)
++        coeffs_2d.append(slice_coeffs)
+     
+-    # Stack the transformed slices to form a 3D array of coefficients
+-    # Shape: (Height, Width, Depth, Coeffs)
+-    # Assuming coeffs_2d returns a structure that can be stacked.
+-    # For simplicity, assume coeffs_2d is a 3D array (H, W, Subbands)
+-    # or we process subbands separately. 
+-    # The source applies the transform to each slice [S1].
++    # Stack into (H, W, D, num_subbands_2d)
++    coeffs_3d = np.stack(coeffs_2d, axis=2)
++    num_subbands_2d = coeffs_3d.shape[3]
+     
+-    # Step 2: Apply 1-D wavelet packet transform along the third dimension
+-    # The source specifies using a two-level full subband tree (wavelet packet tree) [S1].
+-    # This is applied to the coefficients from Step 1.
++    # Step 2: Apply 1-D wavelet packet transform along the third dimension [S1]
++    # Structure: two-level full subband tree
++    packet_subbands = []
++    for x in range(H):
++        for y in range(W):
++            for b in range(num_subbands_2d):
++                signal_1d = coeffs_3d[x, y, :, b]
++                # Two-level full subband tree (wavelet packet tree) decomposition [S1]
++                subbands = apply_1d_wavelet_packet(signal_1d)
++                packet_subbands.append((x, y, b, subbands))
+     
+-    # We need to process each spatial position (x, y) across the depth (z)
+-    # using the wavelet packet structure.
+-    
+-    # Initialize output array
+-    # The wavelet packet transform decomposes the depth dimension.
+-    # Let's assume the input to this step is the array of 2D coefficients.
+-    
+-    # For each (x, y) position:
+-    for x in range(volume.shape[0]):
+-        for y in range(volume.shape[1]):
+-            # Extract the 1-D signal along the depth for this (x, y)
+-            signal_1d = slice_transformed[:, :, :] # This is conceptually wrong for indexing
++    # Step 3: Implicit Bit Shifting (Scaling) [S1]
++    scaled_results = []
++    for x, y, b, subbands in packet_subbands:
++        for i, subband in enumerate(subbands):
++            # Determine if subband is low-pass or high-pass in the packet tree [S1]
++            is_lp = is_low_pass_subband(b, i)
++            if is_lp:
++                # Scale up by 2^p (left shift)
++                scaled_subband = subband << p
++            else:
++                # Scale down by 2^-p (right shift)
++                scaled_subband = subband >> p
++            scaled_results.append((x, y, b, i, scaled_subband))
+             
+-            # Correct indexing:
+-            # slice_transformed is a list of 2D coeffs. 
+-            # Let's assume we have a 3D array `coeffs_3d` of shape (H, W, D)
+-            # where each element is the coefficient at that location.
+-            # However, wavelet transforms produce multiple subbands.
+-            # The source says "apply the same 2-D dyadic integer wavelet transform 
+-            # to each slice... In the third dimension, we use an appropriate wavelet packet transform" [S1].
+-            
+-            # This implies the 1-D transform is applied to the coefficients 
+-            # generated by the 2-D transform.
+-            
+-            # Let's assume `coeffs_3d` is the result of the 2-D transform on all slices.
+-            # It has shape (H, W, D, NumSubbands_2D).
+-            
+-            # For each subband from the 2-D transform:
+-            for subband_idx in range(num_subbands_2d):
+-                # Extract 1D signal along depth for this subband
+-                signal_1d = coeffs_3d[:, :, :, subband_idx] # Shape (H, W, D)
+-                
+-                # Apply 1-D wavelet packet transform along the last dimension (D)
+-                # The structure is a two-level full subband tree [S1].
+-                # This decomposes the D dimension into multiple subbands.
+-                # Let's assume `apply_1d_wavelet_packet` returns a list of subbands.
+-                packet_subbands = apply_1d_wavelet_packet(signal_1d)
+-                
+-                # Step 3: Implicit Bit Shifting
+-                # Scale each subband coefficient by powers of two [S1].
+-                # The scaling factors depend on the subband type (LP or HP) 
+-                # and the specific transform [S1].
+-                
+-                for i, subband in enumerate(packet_subbands):
+-                    # Determine if this subband is Low-Pass or High-Pass
+-                    # In a two-level tree, some are LP, some are HP.
+-                    # The source states LP scaling is 2^p and HP is 2^-p [S1].
+-                    
+-                    if is_low_pass_subband(subband_idx, i):
+-                        # Scale up by 2^p (Left shift)
+-                        scaled_subband = subband << p
+-                    else:
+-                        # Scale down by 2^p (Right shift)
+-                        scaled_subband = subband >> p
+-                    
+-                    # Store the scaled subband
+-                    # The output structure depends on the packet tree layout.
+-                    pass
++    return scaled_results
+ 
+-    return scaled_coefficients
++def apply_2d_integer_wavelet(slice_data):
++    # Standard 2-D dyadic integer wavelet transform applied to each slice [S1]
++    # Implementation uses separable 1-D integer wavelet filters along rows and columns.
++    # Returns array of shape (H, W, num_subbands)
++    pass # Standard separable integer wavelet transform
++
++def apply_1d_wavelet_packet(signal_1d):
++    # Two-level full subband tree decomposition [S1]
++    # Decomposes the 1-D signal into approximation and detail coefficients recursively.
++    # Returns a list of subband arrays matching the packet tree structure.
++    pass # Standard two-level wavelet packet decomposition
++
++def is_low_pass_subband(subband_idx_2d, subband_idx_1d):
++    # Returns True if the subband corresponds to a low-pass path in the packet tree [S1]
++    pass # Tree traversal logic based on decomposition levels
+ ```
+ 

@@ -1,0 +1,294 @@
+--- v005.md
++++ v006.md
+@@ -4,69 +4,41 @@
+ 
+ ## Overview
+-This method extends volumetric path tracing to handle subsurface scattering by integrating BSSRDF (Bidirectional Surface Scattering Reflectance Distribution Function) probes directly into the path traversal loop, allowing light to enter a material, scatter internally, and exit at a different surface point before continuing as a standard surface interaction [S1]. It solves the problem of rendering translucent materials (like skin, wax, or marble) within complex participating media environments where standard surface-only BSSRDF sampling fails to account for attenuation by the surrounding medium or internal volume effects [S1]. Unlike pure volume integrators that treat the subsurface layer as a homogeneous volume [S2, unofficial], this method bridges surface geometry and participating media by treating the subsurface exit as a surface scattering event, distinct from [Multiple Scattering Volume Path Tracing with Phase Function Sampling](1043-multiple-scattering-volume-path-tracing-with-phase-function-.md) which focuses on homogeneous volume multiple scattering without explicit surface BSSRDF probes.
++This method extends volumetric path tracing to handle subsurface scattering by integrating BSSRDF (Bidirectional Surface Scattering Reflectance Distribution Function) probes directly into the path traversal loop, allowing light to enter a material, scatter internally, and exit at a different surface point before continuing as a standard surface interaction [S1]. It bridges surface geometry and participating media by treating the subsurface exit as a surface scattering event with direct and indirect illumination, distinct from [Multiple Scattering Volume Path Tracing with Phase Function Sampling](1043-multiple-scattering-volume-path-tracing-with-phase-function-.md) which focuses on homogeneous volume multiple scattering without explicit surface BSSRDF probes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Current path state (`beta`, `r_u`, `ray`, `depth`), surface intersection `isect` with an attached `BSSRDF`, scene geometry for intersection tests, sampler for random numbers, and `MediumProperties` for the current volume.
+-*   **Output:** Updated path contribution `L`, updated path state (`beta`, `r_u`, `ray`), and termination flags.
++*   **Input:** Current path state (`beta`, `r_u`, `ray`, `depth`), surface intersection `isect` with an attached `BSSRDF`, scene geometry for intersection tests, sampler for random numbers, and `MediumProperties` for the current volume [S1].
++*   **Output:** Updated path contribution `L`, updated path state (`beta`, `r_u`, `ray`), and termination flags [S1].
+ 
+ **Data Structures:**
+-*   `BSSRDFProbeSegment`: Contains entry point `p0` and exit point `p1` on the surface.
+-*   `WeightedReservoirSampler<T>`: A reservoir sampling structure to select a random intersection from a stream of candidates with equal weight.
+-*   `BSSRDFSample`: Contains the exit point interaction `ssi`, the scattering probability `Sp`, the PDF `pdf`, the outgoing direction `wo`, and the BSDF `Sw` at the exit point.
+-*   `MediumInteraction`: Contains position `p`, incoming direction, time, medium reference, and phase function.
++*   `BSSRDFProbeSegment`: Contains entry point `p0` and exit point `p1` on the surface [S1].
++*   `WeightedReservoirSampler<T>`: A reservoir sampling structure to select a random intersection from a stream of candidates with equal weight [S1].
++*   `BSSRDFSample`: Contains the exit point interaction `ssi`, the scattering probability `Sp`, the PDF `pdf`, the outgoing direction `wo`, and the BSDF `Sw` at the exit point [S1].
++*   `MediumInteraction`: Contains position `p`, incoming direction, time, medium reference, and phase function [S1].
+ 
+ **Parameters:**
+-*   `maxDepth`: Maximum path depth (typical value: 10-20).
+-*   `regularize`: Boolean flag to regularize specular BSDFs to prevent infinite throughput spikes (typical: true).
+-*   `lambda`: Wavelength or spectral sample index.
++*   `maxDepth`: Maximum path depth [S1].
++*   `regularize`: Boolean flag to regularize specular BSDFs to prevent infinite throughput spikes [S1].
++*   `lambda`: Wavelength or spectral sample index [S1].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Retrieve BSSRDF:** Get the BSSRDF from the current intersection `isect`. If no BSSRDF exists or it is not a transmission type, skip subsurface scattering.
+-2.  **Sample Probe Segment:** Generate random numbers `uc` (1D) and `up` (2D). Call `bssrdf.SampleSp(uc, up)` to get a `BSSRDFProbeSegment` from entry `p0` to exit `p1`. If no segment is returned, break the subsurface loop.
+-3.  **Reservoir Sampling for Exit Point:**
+-    *   Initialize a `WeightedReservoirSampler<SubsurfaceInteraction>` with a seed derived from `MixBits(FloatToBits(sampler.Get1D()))`.
+-    *   Create a base interaction at `probeSeg->p0`.
+-    *   Loop: Spawn a ray from `base` to `probeSeg->p1`. Intersect against scene geometry.
+-    *   If an intersection `si` is found and `si->intr.material == isect.material`, add `SubsurfaceInteraction(si->intr)` to the reservoir with weight 1.0. Update `base` to `si->intr`.
+-    *   If no intersection is found, break the loop.
+-    *   If the reservoir has no samples, break the subsurface loop.
+-4.  **Convert to BSSRDFSample:** Get the sampled `SubsurfaceInteraction` (`ssi`) from the reservoir. Call `bssrdf.ProbeIntersectionToSample(ssi, scratchBuffer)` to get `bssrdfSample`. If `bssrdfSample.Sp` or `bssrdfSample.pdf` is invalid, break.
+-5.  **Update Path State:**
+-    *   Calculate PDF: `pdf = interactionSampler.SampleProbability() * bssrdfSample.pdf[0]`.
+-    *   Update throughput: `beta *= bssrdfSample.Sp / pdf`.
+-    *   Update rescaled probability: `r_u *= bssrdfSample.pdf / bssrdfSample.pdf[0]`.
+-    *   Set surface interaction `pi = ssi`. Set outgoing direction `pi.wo = bssrdfSample.wo`.
+-    *   Set `prevIntrContext = LightSampleContext(pi)`.
+-6.  **Regularize BSDF (Optional):** If `regularize` is true, call `Sw.Regularize()` on the BSDF from `bssrdfSample`. Set `anyNonSpecularBounces = true`.
+-7.  **Sample Direct Illumination:** Call `SampleLd(pi, &Sw, lambda, sampler, beta, r_u)` to add attenuated direct illumination to `L`.
+-8.  **Sample Indirect Subsurface Scattering:**
+-    *   Generate `u` (1D) and `v` (2D).
+-    *   Call `Sw.Sample_f(pi.wo, u, v)` to get `bs`. If no sample, break.
+-    *   Update throughput: `beta *= bs->f * AbsDot(bs->wi, pi.shading.n) / bs->pdf`.
+-    *   Update rescaled probability: `r_l = r_u / bs->pdf`.
+-    *   Set `specularBounce = bs->IsSpecular()`.
+-    *   Spawn new ray: `ray = RayDifferential(pi.SpawnRay(bs->wi))`.
+-9.  **Russian Roulette:** If `depth > 1`, calculate `rrBeta = beta * etaScale / r_u.Average()`. If `rrBeta.MaxComponentValue() < 1`, generate `uRR`. If `uRR < 1 - rrBeta.MaxComponentValue()`, terminate. Else, `beta /= 1 - q`.
+-10. **Sample Participating Medium:**
+-    *   Determine `tMax` from the next surface intersection or infinity.
+-    *   Initialize RNG with two 1D samples.
+-    *   Call `SampleT_maj` with a lambda function that handles medium events.
+-    *   Inside the lambda:
+-        *   Compute probabilities: `pAbsorb = sigma_a / sigma_maj`, `pScatter = sigma_s / sigma_maj`, `pNull = 1 - pAbsorb - pScatter`.
+-        *   Sample mode `m` using `um`.
+-        *   **Mode 0 (Absorption):** Set `terminated = true`, return false.
+-        *   **Mode 1 (Scattering):**
+-            *   If `depth >= maxDepth`, set `terminated = true`, return false.
+-            *   Update `beta` and `r_u` with transmittance and scattering PDF.
+-            *   If valid, add emission: `L += betap * sigma_a * Le / r_e.Average()` where `betap = beta * T_maj / pdf` and `r_e = r_u * sigma_maj * T_maj / pdf`. Note: Do not cancel `T_maj` factors before MIS weighting [S1].
+-            *   Sample direct lighting: `L += SampleLd(intr, nullptr, lambda, sampler, beta, r_u)`.
+-            *   Sample phase function: `ps = intr.phase.Sample_p(-ray.d, u)`. If valid, update `beta`, `r_l`, `ray`, and set `scattered = true`.
+-        *   **Mode 2 (Null Scattering):**
+-            *   Compute `sigma_n = ClampZero(sigma_maj - sigma_a - sigma_s)`.
+-            *   Update `beta` and `r_u` with null scattering PDF. If `pdf == 0`, set `beta = 0`.
+-            *   Return `beta && r_u`.
+-    *   After lambda: If `terminated` or invalid `beta`/`r_u`, return `L`. If `scattered`, continue to next path vertex. Else, update `beta`, `r_u`, `r_l` by `T_maj / T_maj[0]`.
++1.  **Retrieve BSSRDF:** Get the BSSRDF from the current intersection `isect`. If BSSRDF exists and is transmission, sample a probe segment: `Float uc = sampler.Get1D(); Point2f up = sampler.Get2D(); pstd::optional<BSSRDFProbeSegment> probeSeg = bssrdf.SampleSp(uc, up);` If no probe segment, break [S1].
++2.  **Reservoir Sampling for Exit Point:** Initialize `WeightedReservoirSampler<SubsurfaceInteraction>` with seed `MixBits(FloatToBits(sampler.Get1D()))`. Create base interaction at `probeSeg->p0`. Loop: spawn ray from `base` to `probeSeg->p1`, intersect against scene geometry. If intersection `si` exists and `si->intr.material == isect.material`, add `SubsurfaceInteraction(si->intr)` to reservoir with weight 1.0. Update `base = si->intr`. If no intersection, break. If reservoir has no samples, break [S1].
++3.  **Convert to BSSRDFSample:** Get sampled `SubsurfaceInteraction` (`ssi`) from reservoir. Call `bssrdf.ProbeIntersectionToSample(ssi, scratchBuffer)` to get `bssrdfSample`. If `!bssrdfSample.Sp` or `!bssrdfSample.pdf`, break [S1].
++4.  **Update Path State:** Calculate PDF: `pdf = interactionSampler.SampleProbability() * bssrdfSample.pdf[0]`. Update throughput: `beta *= bssrdfSample.Sp / pdf`. Update rescaled probability: `r_u *= bssrdfSample.pdf / bssrdfSample.pdf[0]`. Set surface interaction `pi = ssi`. Set outgoing direction `pi.wo = bssrdfSample.wo`. Set `prevIntrContext = LightSampleContext(pi)` [S1].
++5.  **Regularize BSDF (Optional):** If `regularize` is true, call `Sw.Regularize()` on BSDF from `bssrdfSample`. Set `anyNonSpecularBounces = true` [S1].
++6.  **Sample Direct Illumination:** Call `SampleLd(pi, &Sw, lambda, sampler, beta, r_u)` to add attenuated direct illumination to `L` [S1].
++7.  **Sample Indirect Subsurface Scattering:** Generate `u` (1D) and `v` (2D). Call `Sw.Sample_f(pi.wo, u, v)` to get `bs`. If no sample, break. Update throughput: `beta *= bs->f * AbsDot(bs->wi, pi.shading.n) / bs->pdf`. Update rescaled probability: `r_l = r_u / bs->pdf`. Set `specularBounce = bs->IsSpecular()`. Spawn new ray: `ray = RayDifferential(pi.SpawnRay(bs->wi))` [S1].
++8.  **Russian Roulette:** If `depth > 1`, calculate `rrBeta = beta * etaScale / r_u.Average()`. If `rrBeta.MaxComponentValue() < 1`, generate `uRR`. If `uRR < 1 - rrBeta.MaxComponentValue()`, terminate. Else, `beta /= 1 - q` [S1].
++9.  **Sample Participating Medium:** Determine `tMax` from next surface intersection or infinity. Initialize RNG with two 1D samples. Call `SampleT_maj` with lambda function [S1].
++10. **Compute Medium Event Probabilities:** `Float pAbsorb = mp.sigma_a[0] / sigma_maj[0]; Float pScatter = mp.sigma_s[0] / sigma_maj[0]; Float pNull = std::max<Float>(0, 1 - pAbsorb - pScatter);` Sample mode `m` using `um` [S1].
++11. **Handle Absorption (Mode 0):** Set `terminated = true`, return false [S1].
++12. **Handle Scattering (Mode 1):** If `depth >= maxDepth`, set `terminated = true`, return false. Update `beta` and `r_u` with transmittance and scattering PDF. If valid, add emission: `L += betap * sigma_a * Le / r_e.Average()` where `betap = beta * T_maj / pdf` and `r_e = r_u * sigma_maj * T_maj / pdf`. Note: Do not cancel `T_maj` factors before MIS weighting [S1]. Sample direct lighting: `L += SampleLd(intr, nullptr, lambda, sampler, beta, r_u)` [S1].
++13. **Sample Phase Function:** `ps = intr.phase.Sample_p(-ray.d, u)`. If valid, update `beta`, `r_l`, `ray`, and set `scattered = true` [S1].
++14. **Handle Null Scattering (Mode 2):** Compute `sigma_n = ClampZero(sigma_maj - sigma_a - sigma_s)`. Update `beta` and `r_u` with null scattering PDF. If `pdf == 0`, set `beta = 0`. Return `beta && r_u` [S1].
++15. **Handle Terminated/Scattered/Unscattered Rays:** If `terminated` or invalid `beta`/`r_u`, return `L`. If `scattered`, continue to next path vertex. Else, update `beta`, `r_u`, `r_l` by `T_maj / T_maj[0]` [S1].
++
++**Pitfalls:** Do not cancel out $T_{maj}$ factors between betap and re before MIS weighting, because the final estimator divides by the average of rescaled probabilities, not component-wise. Cancelling leads to incorrect results [S1].
+ 
+ **Pseudocode:**
+@@ -74,23 +46,19 @@
+ ```python
+ def volumetric_path_tracing_with_bssrdf(isect, beta, r_u, ray, depth, max_depth, sampler, scene, lambda_idx):
+-    L = SampledSpectrum(0.0)
++    L = Spectrum(0.0)
+     specular_bounce = False
+     any_non_specular_bounces = False
+     eta_scale = 1.0
+     
+-    # ... [BSDF Sampling for Volumetric Paths logic to get bs and update ray] ...
+-    
+-    # Account for attenuated subsurface scattering
++    # Retrieve BSSRDF
+     bssrdf = isect.get_bssrdf(ray, lambda_idx)
+     if bssrdf and bs.is_transmission():
+-        # Sample BSSRDF probe segment
+         uc = sampler.get_1d()
+         up = sampler.get_2d()
+         probe_seg = bssrdf.sample_sp(uc, up)
+         if not probe_seg:
+-            return L, beta, r_u, ray, terminated
+-        
+-        # Reservoir sampling for exit point
+-        seed = mix_bits(float_to_bits(sampler.get_1d()))
++            return L, beta, r_u, ray, False, False
++            
++        seed = hash(sampler.get_1d())
+         interaction_sampler = WeightedReservoirSampler[SubsurfaceInteraction](seed)
+         base = Interaction(probe_seg.p0, ray.time, Medium())
+@@ -106,13 +74,11 @@
+         
+         if not interaction_sampler.has_sample():
+-            return L, beta, r_u, ray, terminated
+-            
+-        # Convert to BSSRDFSample
++            return L, beta, r_u, ray, False, False
++            
+         ssi = interaction_sampler.get_sample()
+         bssrdf_sample = bssrdf.probe_intersection_to_sample(ssi, scratch_buffer)
+         if not bssrdf_sample.Sp or not bssrdf_sample.pdf:
+-            return L, beta, r_u, ray, terminated
+-            
+-        # Update path state
++            return L, beta, r_u, ray, False, False
++            
+         pdf = interaction_sampler.sample_probability() * bssrdf_sample.pdf[0]
+         beta *= bssrdf_sample.Sp / pdf
+@@ -123,5 +89,4 @@
+         prev_intr_context = LightSampleContext(pi)
+         
+-        # Regularize BSDF
+         Sw = bssrdf_sample.Sw
+         any_non_specular_bounces = True
+@@ -129,12 +94,10 @@
+             Sw.regularize()
+             
+-        # Direct illumination
+         L += sample_ld(pi, Sw, lambda_idx, sampler, beta, r_u)
+         
+-        # Indirect subsurface scattering
+         u = sampler.get_1d()
+         bs = Sw.sample_f(pi.wo, u, sampler.get_2d())
+         if not bs:
+-            return L, beta, r_u, ray, terminated
++            return L, beta, r_u, ray, False, False
+             
+         beta *= bs.f * abs_dot(bs.wi, pi.shading.n) / bs.pdf
+@@ -143,5 +106,4 @@
+         ray = RayDifferential(pi.spawn_ray(bs.wi))
+         
+-    # Russian Roulette
+     rr_beta = beta * eta_scale / r_u.average()
+     u_rr = sampler.get_1d()
+@@ -149,9 +111,8 @@
+         q = max(0.0, 1.0 - rr_beta.max_component_value())
+         if u_rr < q:
+-            return L, beta, r_u, ray, True
++            return L, beta, r_u, ray, True, False
+         beta /= 1.0 - q
+         
+-    # Sample Participating Medium
+-    t_max = si.t_hit if si else Infinity
++    t_max = scene.intersect(ray, 1.0).t_hit if scene.intersect(ray, 1.0) else float('inf')
+     hash0 = hash(sampler.get_1d())
+     hash1 = hash(sampler.get_1d())
+@@ -159,18 +120,17 @@
+     scattered = False
+     terminated = False
++    T_maj = Spectrum(1.0)
+     
+-    def medium_lambda(p, mp, sigma_maj, T_maj):
+-        nonlocal scattered, terminated, beta, r_u, r_l, L
+-        
+-        # Emission
++    def medium_lambda(p, mp, sigma_maj, T_maj_val):
++        nonlocal scattered, terminated, beta, r_u, r_l, L, T_maj
++        T_maj = T_maj_val
++        
+         if depth < max_depth and mp.Le:
+-            pdf_em = sigma_maj[0] * T_maj[0]
+-            betap = beta * T_maj / pdf_em
+-            r_e = r_u * sigma_maj * T_maj / pdf_em
++            pdf_em = sigma_maj[0] * T_maj_val[0]
++            betap = beta * T_maj_val / pdf_em
++            r_e = r_u * sigma_maj * T_maj_val / pdf_em
+             if r_e:
+-                # MIS weight denominator is average of r_e
+                 L += betap * mp.sigma_a * mp.Le / r_e.average()
+                 
+-        # Sample mode
+         p_absorb = mp.sigma_a[0] / sigma_maj[0]
+         p_scatter = mp.sigma_s[0] / sigma_maj[0]
+@@ -179,14 +139,14 @@
+         mode = sample_discrete([p_absorb, p_scatter, p_null], um)
+         
+-        if mode == 0: # Absorption
++        if mode == 0:
+             terminated = True
+             return False
+-        elif mode == 1: # Scattering
++        elif mode == 1:
+             if depth >= max_depth:
+                 terminated = True
+                 return False
+-            pdf_sc = T_maj[0] * mp.sigma_s[0]
+-            beta *= T_maj * mp.sigma_s / pdf_sc
+-            r_u *= T_maj * mp.sigma_s / pdf_sc
++            pdf_sc = T_maj_val[0] * mp.sigma_s[0]
++            beta *= T_maj_val * mp.sigma_s / pdf_sc
++            r_u *= T_maj_val * mp.sigma_s / pdf_sc
+             
+             if beta and r_u:
+@@ -208,12 +168,12 @@
+                     any_non_specular_bounces = True
+             return False
+-        else: # Null Scattering
++        else:
+             sigma_n = clamp_zero(sigma_maj - mp.sigma_a - mp.sigma_s)
+-            pdf_null = T_maj[0] * sigma_n[0]
+-            beta *= T_maj * sigma_n / pdf_null
++            pdf_null = T_maj_val[0] * sigma_n[0]
++            beta *= T_maj_val * sigma_n / pdf_null
+             if pdf_null == 0:
+-                beta = SampledSpectrum(0.0)
+-            r_u *= T_maj * sigma_n / pdf_null
+-            r_l *= T_maj * sigma_maj / pdf_null
++                beta = Spectrum(0.0)
++            r_u *= T_maj_val * sigma_n / pdf_null
++            r_l *= T_maj_val * sigma_maj / pdf_null
+             return beta and r_u
+             
+@@ -221,12 +181,12 @@
+     
+     if terminated or not beta or not r_u:
+-        return L, beta, r_u, ray, terminated
++        return L, beta, r_u, ray, terminated, False
+     if scattered:
+-        return L, beta, r_u, ray, False # Continue path
++        return L, beta, r_u, ray, False, False
+     else:
+         beta *= T_maj / T_maj[0]
+         r_u *= T_maj / T_maj[0]
+         r_l *= T_maj / T_maj[0]
+-        return L, beta, r_u, ray, False
++        return L, beta, r_u, ray, False, False
+ ```
+ 
+@@ -240,5 +200,5 @@
+ 
+ ### [Monte Carlo estimation of in-scattered radiance](10983-monte-carlo-estimation-of-in-scattered-radiance.md)
+-This method estimates the in-scattered radiance $L_{\text{ins}}(x, \boldsymbol{\omega})$ at a specific point $x$ and direction $\boldsymbol{\omega}$, accounting for light scattered into $\boldsymbol{\omega}$ from all other directions. It solves the integral term of the Radiative Transfer Equation (RTE) by sampling directions according to the phase function. It differs from direct transmission estimation by focusing on the volumetric scattering contribution, and from reference path tracing by providing a specific estimator for the in-scattering term rather than a full path weight.
++This method estimates the in-scattered radiance $L_{\text{ins}}(x, \boldsymbol{\omega})$ for interior points $x \in \Omega \setminus \partial \Omega$ and boundary points $x \in \partial \Omega$. It computes the angular integral of the source function by sampling directions according to the phase function.
+ 
+ ### Chromatic Effects with MIS
+@@ -246,13 +206,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per path vertex, where $N$ is the number of intersections along the BSSRDF probe segment. The reservoir sampling requires intersecting the probe segment against all geometry it passes through.
+-*   **Memory Complexity:** $O(1)$ additional memory for the reservoir sampler state, assuming the scene intersection structure is pre-built.
+-*   **Strengths:** Accurately handles subsurface scattering in complex scenes with participating media. Integrates seamlessly with existing path tracing infrastructure. Handles chromatic effects via MIS [S2, unofficial].
+-*   **Limitations:** Performance depends heavily on the density of geometry along the BSSRDF probe segment. Reservoir sampling can be inefficient if few valid intersections are found. Requires careful handling of MIS weights to avoid bias [S1].
+-*   **When to use:** When rendering translucent materials (skin, wax, marble) in scenes with fog, smoke, or other participating media.
+-*   **When not to use:** For purely opaque materials or purely volumetric effects without surface subsurface scattering.
++*   **Time Complexity:** $O(N)$ per path vertex, where $N$ is the number of intersections along the BSSRDF probe segment [S1].
++*   **Memory Complexity:** $O(1)$ additional memory for the reservoir sampler state, assuming the scene intersection structure is pre-built [S1].
++*   **Strengths:** Accurately handles subsurface scattering in complex scenes with participating media [S1]. Integrates seamlessly with existing path tracing infrastructure [S1]. Handles chromatic effects via MIS [S2, unofficial].
++*   **Limitations:** Performance depends heavily on the density of geometry along the BSSRDF probe segment [S1]. Reservoir sampling can be inefficient if few valid intersections are found [S1].
++*   **When to use:** When rendering translucent materials (skin, wax, marble) in scenes with fog, smoke, or other participating media [S1].
++*   **When not to use:** For purely opaque materials or purely volumetric effects without surface subsurface scattering [S1].
+ 
+ ## Background
+-This method is described in "14.2 Volume Scattering Integrators" from the PBRT book [S1]. It builds upon the SimpleVolPathIntegrator and extends it to handle BSSRDFs. The chromatic MIS variant is described in "Path Traced Subsurface Scattering Model" from Pixar [S2, unofficial].
++This method is described in "14.2 Volume Scattering Integrators" from the PBRT book [S1]. It builds upon the SimpleVolPathIntegrator and extends it to handle BSSRDFs [S1]. The chromatic MIS variant is described in "Path Traced Subsurface Scattering Model" from Pixar [S2, unofficial].
+ 
+ ## Sources

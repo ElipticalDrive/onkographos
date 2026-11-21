@@ -1,0 +1,58 @@
+# Monte Carlo Sampling and Estimation
+
+
+## Overview
+Monte Carlo methods solve the transport equation by means of random sampling, using random paths along interaction points [S1]. They are distinguished from deterministic approaches by their reliance on stochastic path generation rather than spatial discretization [G]. Unlike [Delta tracking](985-delta-tracking.md), which focuses on free-path sampling in heterogeneous media, the Path Integral Framework provides the rigorous mathematical measure and contribution function definition that these samplers estimate [873-path-integral-framework.md].
+
+## Shared principles
+All methods in this family rely on the statistical estimation of the integral form of the radiative transfer equation. The core mechanism involves generating random paths through the medium and estimating the contribution of each path to the final image.
+
+**1. Path Generation**
+Paths are constructed by sampling interaction points (scattering or absorption events) along rays. The distance to the next interaction is sampled from a probability density function (PDF) defined by the extinction coefficient $\sigma_t$ [G]. For heterogeneous media, techniques like Delta Tracking sample the continuous distribution exactly without grid constraints [985-delta-tracking.md].
+
+**2. Estimator Formulation**
+The radiance $L$ is estimated as an average of $N$ independent samples $X_i$:
+$$ L \approx \frac{1}{N} \sum_{i=1}^{N} \frac{f(X_i)}{p(X_i)} $$
+where $f(X_i)$ is the path contribution (including emission, scattering, and transmittance) and $p(X_i)$ is the probability of generating that path [G]. Unbiased estimators require that $E[L] = L_{\text{true}}$ [G].
+
+**3. Variance Reduction**
+To improve convergence, methods employ variance reduction techniques:
+*   **Importance Sampling:** Sampling interaction points or directions according to a distribution that approximates the integrand's shape, such as sampling near light sources or boundaries [S1].
+*   **Multiple Importance Sampling (MIS):** Combining multiple sampling strategies (e.g., light sampling vs. path sampling) to reduce variance in difficult lighting scenarios [1167-multiple-importance-sampling-for-volumetric-path-tracing.md].
+*   **Biased Sampling:** Deliberately biasing the random walk to exit the medium faster (e.g., Dwivedi Sampling) to reduce the number of "lost" paths, accepting a small bias for significant variance reduction [5537-dwivedi-sampling.md].
+
+## Subtopics
+
+### [Path Integral Framework](873-path-integral-framework.md)
+The Path Integral Framework expresses light transport as a non-recursive integral over the space of all possible light transport paths $\mathcal{P}$, unrolling the infinite series of scattering events into a single high-dimensional integral. It sets itself apart from recursive formulations by enabling the application of general Monte Carlo integration techniques and MIS. Choose it when a rigorous mathematical measure is required for variance reduction methods. See [Path Integral Framework](873-path-integral-framework.md).
+
+### [Delta tracking](985-delta-tracking.md)
+Delta tracking is a Monte Carlo free-path sampling method that finds the first real collision point in a heterogeneous participating medium by sampling tentative collisions from a fictitious homogeneous medium with a constant maximum extinction coefficient (majorant). It sets itself apart from ray marching by providing an unbiased estimator through probabilistic acceptance/rejection. Choose it for efficiently sampling interaction distances in spatially varying media without structured grids. See [Delta tracking](985-delta-tracking.md).
+
+### [Multiple Importance Sampling for Volumetric Path Tracing](1167-multiple-importance-sampling-for-volumetric-path-tracing.md)
+Multiple Importance Sampling (MIS) for volumetric path tracing reduces variance by combining contributions from unidirectional path sampling (phase function sampling) and light sampling (Next Event Estimation). It sets itself apart from standard path tracing by balancing strategies using the power heuristic, requiring careful PDF caching across index-matching surfaces. Choose it when paths frequently terminate near light sources or when light sources are small. See [Multiple Importance Sampling for Volumetric Path Tracing](1167-multiple-importance-sampling-for-volumetric-path-tracing.md).
+
+### [Unified Points, Beams, and Paths (UPBP)](1402-unified-points-beams-and-paths-upbp.md)
+Unified Points, Beams, and Paths (UPBP) is a combined rendering algorithm that fuses volumetric density estimation estimators (Point-Point, Point-Beam, Beam-Beam) with unbiased bidirectional path tracing using MIS. It sets itself apart by automatically selecting the most suitable representation—points for high-order scattering, beams for low-order scattering, and paths for volume effects with specular surfaces. Choose it for efficiently simulating light transport in diverse participating media. See [Unified Points, Beams, and Paths (UPBP)](1402-unified-points-beams-and-paths-upbp.md).
+
+### [Dwivedi Sampling](5537-dwivedi-sampling.md)
+Dwivedi Sampling is a variance reduction technique that biases the random walk to exit the medium as quickly as possible. It sets itself apart from standard distance sampling by approximating the local geometry as a slab to analytically estimate the light field, thereby reducing "lost" paths. Choose it for high-scattering scenarios where paths tend to terminate deep inside opaque objects. See [Dwivedi Sampling](5537-dwivedi-sampling.md).
+
+### [Optimized Monte Carlo Integrator](9013-optimized-monte-carlo-integrator.md)
+The Optimized Monte Carlo Integrator computes radiance scattered inside a homogeneous, box-shaped participating medium from a collimated light source. It sets itself apart from standard ray marching by pre-computing a cumulative distribution histogram of trapezoidal segments to select interaction points directly, and from Delta Tracking by exploiting convex box geometry for analytic integration. Choose it for real-time single-scattering estimation in box-shaped volumes. See [Optimized Monte Carlo Integrator](9013-optimized-monte-carlo-integrator.md).
+
+### Photon Mapping
+- [S1] A stochastic method sampling interaction points from a function of κt.
+
+### Importance Sampling of Multiple Scattering Directions
+- [S2, unofficial] A technique used to address the computational challenge of rendering fire smoke, specifically handling multiple scattering directions.
+
+### Metropolis-Hastings Sampling for Multiple Scattering
+- [S2, unofficial] A multiple scattering scheme based on Metropolis-Hasting sampling, analyzed in the thesis.
+
+## Background
+The survey by [S1] categorizes stochastic methods by how they set interaction points, distinguishing between those using a constant step distance and those sampling a function of optical depth $\kappa t$. Methods sampling a function of $\kappa t$ include light tracing, bidirectional path-tracing, photon maps, and Metropolis Light Transport [S1].
+
+## Sources
+[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] Visualization of Smoke and Fire Data Based on the Fire Dynamics Simulation Model, https://doi.org/10.13016/m2bm1b, fetched 2026-10-26 (unofficial)

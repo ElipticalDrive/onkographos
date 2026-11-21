@@ -1,0 +1,232 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,3 @@
+ # EndoGaussian Optimization
+-
+-Also called: EndoGaussian optimization framework, spatiotemporal TV regularized Gaussian splatting optimization
+ 
+ ## Overview
+@@ -12,11 +10,5 @@
+ 
+ **Data Structures**
+-The method operates on a set of 3D Gaussians. Each Gaussian $i$ is defined by:
+-*   Position $\mathbf{p}_i \in \mathbb{R}^3$ [G]
+-*   Rotation $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion) [G]
+-*   Scale $\mathbf{s}_i \in \mathbb{R}^3$ [G]
+-*   Opacity $\alpha_i \in [0, 1]$ [G]
+-*   Spherical Harmonic coefficients for color $\mathbf{c}_i$ [G]
+-The source explicitly notes that deformation of SH coefficients is not modeled, as position, rotation, scaling, and opacity are sufficient to capture tissue movement and shape variations [S1, unofficial].
++The method operates on a set of 3D Gaussians [S1, unofficial]. Each Gaussian $i$ is defined by position $\mathbf{p}_i \in \mathbb{R}^3$, rotation $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion), scale $\mathbf{s}_i \in \mathbb{R}^3$, opacity $\alpha_i \in [0, 1]$, and spherical harmonic coefficients for color $\mathbf{c}_i$ [G]. The source explicitly notes that deformation of SH coefficients is not modeled, as position, rotation, scaling, and opacity are sufficient to capture tissue movement and shape variations [S1, unofficial].
+ 
+ **Numbered Steps**
+@@ -45,5 +37,5 @@
+     \mathcal{L}_{depth}^M = 1 - \frac{Cov(\mathbf{M} \odot \hat{\mathbf{D}}, \mathbf{M} \odot \mathbf{D})}{\sqrt{Var(\mathbf{M} \odot \hat{\mathbf{D}})Var(\mathbf{M} \odot \mathbf{D})}}
+     $$
+-*   **Depth Term in Total Loss:** The source notation $\mathcal{L}_{depth}^{-1} / \mathcal{L}_{depth}^{-1}$ appears to be a typographical error in the source text for a combined depth loss term (likely $\mathcal{L}_{depth}^B + \mathcal{L}_{depth}^M$ or similar). Given the context of "binocular/monocular input image sequence," the implementation should combine the binocular and monocular depth losses [S1, unofficial].
++*   **Depth Term in Total Loss:** The source notation $\mathcal{L}_{depth}^{-1} / \mathcal{L}_{depth}^{-1}$ appears to be a typographical error in the source text for a combined depth loss term (likely $\mathcal{L}_{depth}^B + \mathcal{L}_{depth}^M$ or similar) [S1, unofficial]. Given the context of "binocular/monocular input image sequence," the implementation should combine the binocular and monocular depth losses [S1, unofficial].
+ 
+ **Regularization Constraints:**
+@@ -64,30 +56,22 @@
+ ```python
+ import math
++import random
+ 
+-def endo_gaussian_optimization(initial_points, images, masks, poses, binocular_depths, monocular_depths, num_warmup=1000, num_main=3000, lr=1.6e-3, lam1=1.0, lam2=1.0, lam3=1.0, lam4=1.0):
+-    """
+-    Optimizes EndoGaussian parameters.
+-    Args:
+-        initial_points: Initial 3D point cloud array.
+-        images: Sequence of RGB images.
+-        masks: Sequence of binary tool masks.
+-        poses: Camera poses for each image.
+-        binocular_depths: Sequence of binocular depth maps.
+-        monocular_depths: Sequence of monocular depth maps.
+-        num_warmup: Number of warmup iterations.
+-        num_main: Number of main optimization iterations.
+-        lr: Initial learning rate.
+-        lam1, lam2, lam3, lam4: Balancing weights for loss terms.
+-    Returns:
+-        Optimized Gaussian parameters.
+-    """
++def endo_gaussian_optimization(initial_points, images, masks, poses, binocular_depths, monocular_depths, 
++                               num_warmup=1000, num_main=3000, lr=1.6e-3, lam1=1.0, lam2=1.0, lam3=1.0, lam4=1.0):
+     # Step 1: Initialization
+     # Randomly sample 0.1% of points to reduce redundancy
+-    sampled_points = initial_points[::1000]
++    sample_count = max(1, int(len(initial_points) * 0.001))
++    sampled_points = random.sample(initial_points, sample_count)
+     gaussians = initialize_gaussians(sampled_points)
+-
++    
++    # Sources do not provide the Gaussian rasterization or initialization routines; 
++    # these follow standard 3D Gaussian Splatting implementations [G].
++    
++    optimizer = AdamOptimizer(gaussians.parameters(), lr=lr)
++    prev_rendered_depth_inv = None
++    
+     # Step 2: Warmup
+     # Optimize Canonical Gaussians for 1k iterations
+-    optimizer = Optimizer(gaussians.parameters(), lr=lr)
+     for _ in range(num_warmup):
+         optimizer.zero_grad()
+@@ -96,23 +80,22 @@
+         loss.backward()
+         optimizer.step()
+-
++        
+     # Step 3: Main Optimization
+     # Optimize the whole framework for 3k iterations
+-    prev_rendered_depth_inv = None
+     for _ in range(num_main):
+         optimizer.zero_grad()
+         total_loss = 0.0
+-
++        
+         for img, mask, pose, b_depth, m_depth in zip(images, masks, poses, binocular_depths, monocular_depths):
+             # Render current frame with deformation
+             rendered_color, rendered_depth, rendered_depth_inv = render_deformable(gaussians, pose)
+-
++            
+             # Rendering Constraints
+             # Color Loss
+             l_color = sum_l1_norm(mask * (rendered_color - img))
+-
++            
+             # Binocular Depth Loss (using reciprocal depth)
+             l_depth_b = sum_l1_norm(mask * (rendered_depth_inv - b_depth))
+-
++            
+             # Monocular Depth Loss (using correlation)
+             masked_pred = mask * rendered_depth
+@@ -122,12 +105,12 @@
+             var_real = variance(masked_real)
+             l_depth_m = 1.0 - cov / math.sqrt(var_pred * var_real)
+-
+-            # Combine depth losses
++            
++            # Combine depth losses (correcting source notation typo)
+             l_depth = l_depth_b + l_depth_m
+-
++            
+             # Regularization Constraints
+             # Spatial TV Loss
+             l_spatial = total_variation(rendered_color) + total_variation(rendered_depth_inv)
+-
++            
+             # Temporal TV Loss
+             if prev_rendered_depth_inv is not None:
+@@ -135,20 +118,23 @@
+             else:
+                 l_temporal = 0.0
+-
++                
+             # Total Loss for this frame
+             frame_loss = (lam1 * l_color + lam2 * l_depth + lam3 * l_spatial + lam4 * l_temporal)
+             total_loss += frame_loss
+-
++            
+         total_loss.backward()
+         optimizer.step()
+         prev_rendered_depth_inv = rendered_depth_inv
+-
++        
+     return gaussians
+ 
+-class Optimizer:
+-    def __init__(self, params, lr):
++class AdamOptimizer:
++    def __init__(self, params, lr, beta1=0.9, beta2=0.999, eps=1e-8):
+         self.params = params
+         self.lr = lr
+-        self.momentum = {}
++        self.beta1 = beta1
++        self.beta2 = beta2
++        self.eps = eps
++        self.state = {}
+     def zero_grad(self):
+         for p in self.params:
+@@ -158,44 +144,31 @@
+     def step(self):
+         for p in self.params:
+-            if p.grad is not None:
+-                g = p.grad
+-                if p not in self.momentum:
+-                    self.momentum[p] = [0.0] * len(p)
+-                for i in range(len(p)):
+-                    self.momentum[p][i] = 0.9 * self.momentum[p][i] + g[i]
+-                for i in range(len(p)):
+-                    p[i] -= self.lr * self.momentum[p][i]
++            if p.grad is None: continue
++            g = p.grad
++            if p not in self.state:
++                self.state[p] = {'m': [0.0]*len(p), 'v': [0.0]*len(p), 't': 0}
++            state = self.state[p]
++            state['t'] += 1
++            for i in range(len(p)):
++                state['m'][i] = self.beta1 * state['m'][i] + (1 - self.beta1) * g[i]
++                state['v'][i] = self.beta2 * state['v'][i] + (1 - self.beta2) * g[i]**2
++                m_hat = state['m'][i] / (1 - self.beta1**state['t'])
++                v_hat = state['v'][i] / (1 - self.beta2**state['t'])
++                p[i] -= self.lr * m_hat / (math.sqrt(v_hat) + self.eps)
+ 
+-def initialize_gaussians(points):
+-    # Returns a list of Gaussian objects with position, rotation, scale, opacity, SH
+-    pass
+-
+-def render_canonical(gaussians, poses):
+-    # Renders static canonical Gaussians
+-    pass
+-
+-def render_deformable(gaussians, pose):
+-    # Renders deformable Gaussians with current pose
+-    pass
+-
+-def compute_color_loss(rendered, targets, masks):
+-    return sum_l1_norm(masks * (rendered - targets))
+-
+-def sum_l1_norm(tensor):
+-    return sum(abs(x) for x in tensor)
+-
++def initialize_gaussians(points): pass
++def render_canonical(gaussians, poses): pass
++def render_deformable(gaussians, pose): pass
++def compute_color_loss(rendered, targets, masks): return sum_l1_norm(masks * (rendered - targets))
++def sum_l1_norm(tensor): return sum(abs(x) for x in tensor)
+ def covariance(a, b):
+     mean_a = sum(a) / len(a)
+     mean_b = sum(b) / len(b)
+     return sum((a[i] - mean_a) * (b[i] - mean_b) for i in range(len(a))) / len(a)
+-
+ def variance(tensor):
+     mean = sum(tensor) / len(tensor)
+     return sum((x - mean) ** 2 for x in tensor) / len(tensor)
+-
+ def total_variation(tensor):
+-    # Simplified 1D TV for demonstration; 2D/3D TV sums absolute differences along all axes
+     return sum(abs(tensor[i+1] - tensor[i]) for i in range(len(tensor)-1))
+-
+ def total_variation_temporal(curr, prev):
+     return sum(abs(curr[i] - prev[i]) for i in range(len(curr)))
+@@ -203,15 +176,15 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Tool Occlusion:** The binary tool mask $\mathbf{M}$ is critical. Failure to correctly mask tool regions leads to artifacts in color and depth, as the model tries to fit non-existent tissue behind the tool [S1, unofficial].
+-*   **Depth Scale Ambiguity:** Monocular depth loss uses correlation, which is invariant to scale and shift. This is necessary because absolute depth from monocular cues is inconsistent. However, this means the method cannot recover absolute metric depth from monocular data alone [S1, unofficial].
+-*   **Reciprocal Depth Stability:** Binocular depth loss uses reciprocal depth ($\mathbf{D}^{-1}$) for stability. Implementers must ensure numerical stability when computing reciprocals for near-zero depth values [S1, unofficial].
+-*   **Deformation Modeling:** The method does not model deformation of SH coefficients, assuming position, rotation, scale, and opacity are sufficient for tissue movement. This simplification may limit high-frequency appearance changes [S1, unofficial].
++*   **Tool Occlusion:** The binary tool mask $\mathbf{M}$ is critical [S1, unofficial]. Failure to correctly mask tool regions leads to artifacts in color and depth, as the model tries to fit non-existent tissue behind the tool [S1, unofficial].
++*   **Depth Scale Ambiguity:** Monocular depth loss uses correlation, which is invariant to scale and shift [S1, unofficial]. This is necessary because absolute depth from monocular cues is inconsistent [S1, unofficial]. However, this means the method cannot recover absolute metric depth from monocular data alone [S1, unofficial].
++*   **Reciprocal Depth Stability:** Binocular depth loss uses reciprocal depth ($\mathbf{D}^{-1}$) for stability [S1, unofficial]. Implementers must ensure numerical stability when computing reciprocals for near-zero depth values [S1, unofficial].
++*   **Deformation Modeling:** The method does not model deformation of SH coefficients, assuming position, rotation, scale, and opacity are sufficient for tissue movement [S1, unofficial]. This simplification may limit high-frequency appearance changes [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is optimized for real-time performance. Training takes approximately 4,000 iterations (1k warmup + 3k main) [S1, unofficial].
++*   **Time Complexity:** The method is optimized for real-time performance [S1, unofficial]. Training takes approximately 4,000 iterations (1k warmup + 3k main) [S1, unofficial].
+ *   **Memory Complexity:** Uses a single RTX 4090 GPU for training [S1, unofficial].
+ *   **Performance:** Achieves real-time inference speeds (FPS) comparable to or better than previous SOTA methods like EndoNeRF and EndoSurf, which require hours for optimization [S1, unofficial].
+-*   **Strengths:** Handles non-rigid deformation and tool occlusion effectively. Real-time capability.
+-*   **Limitations:** Relies on accurate tool masks. Monocular depth is relative. [S1, unofficial].
++*   **Strengths:** Handles non-rigid deformation and tool occlusion effectively [S1, unofficial]. Real-time capability [S1, unofficial].
++*   **Limitations:** Relies on accurate tool masks [S1, unofficial]. Monocular depth is relative [S1, unofficial].
+ 
+ ## Background

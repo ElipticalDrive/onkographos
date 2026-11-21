@@ -1,0 +1,82 @@
+# SplatFace
+
+
+## Overview
+SplatFace is a Gaussian model initialization and optimization strategy designed for high-fidelity head avatar reconstruction from few input views [S1, unofficial]. It addresses the challenge of initializing 3D Gaussians on complex, non-rigid surfaces by placing them on a template mesh and jointly optimizing the Gaussian parameters and the mesh geometry using a splat-to-mesh distance loss [S1, unofficial]. It differs from generic point-cloud initialization by leveraging explicit geometric surface data and from mesh-only methods by maintaining the differentiable rendering benefits of Gaussian Splatting [S1, unofficial].
+
+## How it works
+**Inputs:** A template mesh (typically a canonical head mesh), a set of input images (few-view), and camera poses.
+**Outputs:** A set of 3D Gaussians (position, covariance, opacity, color) and an optimized mesh geometry.
+
+**Data Structures:**
+1.  **Template Mesh:** Defined by vertices $V$ and faces $F$.
+2.  **Gaussian Set:** A list of $N$ Gaussians, each with position $\mathbf{p}$, covariance matrix $\mathbf{\Sigma}$, opacity $\alpha$, and spherical harmonic coefficients for color.
+
+**Steps:**
+1.  **Initialization:** Initialize 3D Gaussians on the surface of the template mesh. This is typically done by sampling points on the mesh triangles [S1, unofficial].
+2.  **Rendering:** Render the scene using standard 3D Gaussian Splatting rasterization to produce an image.
+3.  **Loss Calculation:** Compute a loss function comprising:
+    *   **Image Loss:** Difference between rendered and input images (e.g., L1, SSIM).
+    *   **Splat-to-Mesh Distance Loss:** A regularization term that penalizes the distance between the splatted Gaussians and the current mesh surface [S1, unofficial]. This ensures the Gaussians remain aligned with the geometric structure.
+4.  **Joint Optimization:** Update both the Gaussian parameters (position, covariance, opacity, color) and the mesh vertices using gradient descent [S1, unofficial].
+
+**Formulas:**
+The total loss $L$ is:
+$$ L = L_{image} + \lambda L_{splat-mesh} $$
+where $L_{splat-mesh}$ measures the distance between the Gaussian splats and the mesh surface [S1, unofficial].
+
+**Parameters:**
+*   $\lambda$: Weight for the splat-to-mesh distance loss. Value not given in the sources.
+
+**Edge Cases:**
+*   **Degenerate Mesh:** If the template mesh has poor topology, initialization may be inaccurate.
+*   **Precision:** Joint optimization requires careful balancing of learning rates for Gaussians and mesh vertices.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialize Gaussians on template mesh
+gaussians = initialize_gaussians_on_mesh(template_mesh)
+
+# Joint optimization loop
+for step in range(num_steps):
+    # Render image from current Gaussians and mesh
+    rendered_image = render(gaussians, camera_poses)
+    
+    # Compute image loss
+    loss_image = compute_image_loss(rendered_image, input_image)
+    
+    # Compute splat-to-mesh distance loss
+    loss_splat_mesh = compute_splat_to_mesh_distance(gaussians, template_mesh)
+    
+    # Total loss
+    total_loss = loss_image + lambda_weight * loss_splat_mesh
+    
+    # Backpropagate and update Gaussians and mesh
+    total_loss.backward()
+    optimizer.step()
+    
+    # Clear gradients
+    optimizer.zero_grad()
+```
+
+## Subtopics
+
+### [MeshInitializer](19073-meshinitializer.md)
+MeshInitializer initializes 3D Gaussian splats by placing them on the surface of a triangle mesh using barycentric coordinates to determine position, normal interpolation, and color interpolation. It differs from VoxelInitializer by adhering strictly to the mesh topology rather than a grid, and from generic point-cloud initialization by leveraging explicit geometric surface data. It is a variant of Gaussian Splatting Initialization and builds on [SplatFace](17294-splatface.md).
+
+## Operating characteristics
+**Time and Memory Complexity:** Not given in the sources.
+**Measured Performance:** SplatFace enables rendering speed up to 300 FPS [S1, unofficial].
+**Scaling:** Not given in the sources.
+**Strengths:** High-fidelity head avatar learning from few views; joint optimization ensures geometric consistency.
+**Limitations:** Relies on a good template mesh; joint optimization may be computationally intensive.
+**When to use:** When reconstructing dynamic or static head avatars from limited input views with high geometric fidelity.
+**When not:** When no template mesh is available or when real-time performance is critical and few-view reconstruction is not required.
+
+## Background
+SplatFace was introduced in reference [232] as part of the recent advances in 3D Gaussian Splatting for avatar reconstruction [S1, unofficial]. It is cited in the context of synthesizing high-quality avatars from few input views, preceding works like GauMesh [233] and others in the field [S1, unofficial].
+
+## Sources
+[S1] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

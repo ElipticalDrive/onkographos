@@ -1,0 +1,133 @@
+# Volume Cloud Self-Shadowing via Ray Marching
+
+Also called: Self-Shadowing via Ray Marching, Transmittance-based Self-Shadowing
+
+## Overview
+This method computes volumetric self-shadowing by performing an additional ray march towards the light source at each sample point along the primary view ray to calculate transmittance [S1, unofficial]. It is distinct from shadow mapping techniques (like Beer's Shadow Map or Transmittance Function Mapping) because it avoids precision limits associated with texture resolution, offering richer detail at the cost of higher computational overhead [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Primary ray sample point position $P$ in the volume.
+- Volume density/opacity function $\sigma(x)$ or discrete opacity $\alpha$.
+- Light direction $L$.
+- Number of shadow ray steps $N_s$.
+
+**Outputs:**
+- Transmittance $T$ from $P$ to the light, representing the self-shadow factor.
+
+**Data Structures:**
+- No complex structures required. Standard scalar variables for position, step size, and accumulated transmittance.
+
+**Steps:**
+1. Initialize accumulated transmittance $T = 1.0$.
+2. Determine step size $\Delta d$. The total distance to the light is often approximated or bounded. For cloud rendering, a fixed small number of steps is typical.
+3. Loop $i$ from $0$ to $N_s - 1$:
+   a. Calculate current position: $P_i = P + i \cdot \Delta d \cdot L$.
+   b. Sample the volume density $\sigma(P_i)$ or opacity $\alpha_i$ at $P_i$.
+   c. Update transmittance: $T = T \cdot (1 - \alpha_i)$ or $T = T \cdot e^{-\sigma(P_i) \Delta d}$.
+4. Return $T$ as the shadow factor.
+
+**Parameters:**
+- $N_s$: Number of shadow ray march steps. Typical value is ~6 steps on PC/Console [S1, unofficial].
+
+**Pitfalls:**
+- Insufficient steps cause noise [S1, unofficial].
+- Too short steps cause brightness artifacts (under-shading) [S1, unofficial].
+- Too long steps cause noise (aliasing) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_self_shadow(pos, light_dir, density_func, num_steps):
+    """
+    Computes self-shadow transmittance via ray marching.
+    
+    Args:
+        pos: Current 3D position in the volume.
+        light_dir: Normalized direction vector to the light source.
+        density_func: Function returning density/opacity at a 3D position.
+        num_steps: Integer number of steps to take towards the light.
+        
+    Returns:
+        float: Transmittance value between 0 and 1.
+    """
+    # Estimate step size. 
+    # Note: The exact distance to the light is not always needed if 
+    # we assume the volume is bounded or the light is at infinity.
+    # A common approach is to march a fixed distance or use the 
+    # remaining distance to the volume boundary. 
+    # For simplicity, assuming a fixed step size or normalized march.
+    
+    # If light is directional (infinity), we march a fixed distance D.
+    # If point light, D is distance to light. 
+    # Here we assume a normalized march over a conceptual distance D.
+    # Let's assume D is passed or derived from context. 
+    # If not given, we assume the loop covers the relevant local neighborhood.
+    
+    # [G] Guard against zero steps
+    if num_steps <= 0:
+        return 1.0
+
+    # [G] Determine step size. 
+    # In many cloud shaders, the "distance" is abstracted. 
+    # We assume a uniform step size `step_size` is defined by the caller 
+    # or derived from the primary ray's step size.
+    # For this generic implementation, we assume a normalized step size of 1.0 
+    # per step for the sake of the formula, scaled by a global `march_distance`.
+    # However, standard practice [S1, unofficial] implies a fixed count. 
+    # Let's assume `step_size` is provided or calculated as `total_dist / num_steps`.
+    # Since `total_dist` is not in inputs, we assume the caller handles the 
+    # spatial scaling, and this function just accumulates opacity.
+    
+    # Alternative interpretation: The ray marches a fixed physical distance.
+    # Let's assume `step_size` is an input or global constant.
+    # To be self-contained, we will assume a unit step size for the loop,
+    # and the caller is responsible for the physical distance scaling.
+    
+    transmittance = 1.0
+    step_size = 1.0 # Placeholder for physical distance per step
+    
+    for i in range(num_steps):
+        # Current sample position
+        sample_pos = pos + light_dir * (i * step_size)
+        
+        # Sample density/opacity
+        # density_func returns either density (sigma) or opacity (alpha)
+        # We assume it returns opacity alpha for direct multiplication
+        alpha = density_func(sample_pos)
+        
+        # Accumulate transmittance
+        # T = T * (1 - alpha)
+        transmittance *= (1.0 - alpha)
+        
+        # Early exit if fully shadowed
+        if transmittance <= 0.0:
+            return 0.0
+            
+    return transmittance
+```
+
+## Subtopics
+
+### Differentiable Self-Shadowing via Ray Marching
+This variant computes self-shadow visibility by sampling points along the direction from a surface point to the light to make the process differentiable for joint optimization of geometry and light [S2]. It calculates visibility $f_v(w_i; x)$ using the formula $f_v(w_i; x) = 1 - \sum_{j=1}^{N} \alpha_j \prod_{k=1}^{j-1} (1 - \alpha_k)$, where $\alpha_j$ is the discrete opacity at sample $j$ [S2]. This allows online computation for optimizing object geometry and light position simultaneously [S2].
+
+### [Limited Secondary Ray Sampling](6984-limited-secondary-ray-sampling.md)
+Limited Secondary Ray Sampling is an optimization strategy for computing volumetric self-shadowing in distance-field ray marching. It reduces the computational cost of secondary ray traces by limiting their maximum travel distance and adaptively reducing the number of samples based on primary ray depth and local density. Unlike global shadowing methods, it restricts self-shadowing to a local neighborhood, trading long-range accuracy for performance.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of shadow steps $N_s$. Since a secondary ray is marched for every primary sample, the cost is $O(N_p \cdot N_s)$, where $N_p$ is the number of primary samples.
+- **Memory Complexity:** $O(1)$ auxiliary memory per sample.
+- **Performance:** Significantly more expensive than shadow mapping or Transmittance Function Mapping (TFM). TFM with 7 Fourier coefficients is roughly equivalent to Ray Marching with 1-2 steps in efficiency [S1, unofficial].
+- **Strengths:** High detail, no shadow map aliasing, accurate volumetric attenuation [S1, unofficial].
+- **Limitations:** High computational cost, sensitive to step count (noise vs. brightness artifacts) [S1, unofficial].
+- **When to use:** When visual fidelity of self-shadowing is critical and hardware budget allows, or when shadow map precision is insufficient [S1, unofficial].
+- **When not to use:** When performance is paramount or for projecting shadows onto other objects (shadow mapping is preferred) [S1, unofficial].
+
+## Background
+The method originates from real-time volumetric cloud rendering techniques, notably discussed in industry implementations such as those in Unreal Engine 4 and other high-fidelity cloud systems [S1, unofficial]. It is often contrasted with Beer's Shadow Map and Transmittance Function Mapping (TFM) in technical articles detailing cloud rendering pipelines [S1, unofficial].
+
+## Sources
+[S1] 体积云效果的实现，游戏世界的云合雾集, https://leihuo.163.com/institution/news/20230719/38423_1099592.html, fetched 2026-10-30 (unofficial)
+[S2] PIR: Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization, https://doi.org/10.1109/3dv66043.2025.00055, fetched 2026-10-26

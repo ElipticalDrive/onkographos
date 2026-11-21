@@ -1,0 +1,273 @@
+# Monte Carlo Method for Multiple Scattering
+
+Also called: Monte Carlo Method for Directional Scattering, Monte Carlo ray tracing, Two-pass Monte Carlo
+
+## Overview
+The Monte Carlo method for multiple scattering solves the integral equation for directional scattering intensity $I(X, \omega)$ by stochastically tracing rays through a participating medium [S1, unofficial][S2]. It addresses the problem of computing light transport in volumes where photons undergo random absorption or scattering events governed by the extinction coefficient $\tau$, albedo $a$, and phase function $p$ [S1, unofficial][S2]. Unlike deterministic solvers such as the [P-N Method (Spherical Harmonics)](1395-p-n-method-spherical-harmonics.md) or the [Diffusion Approximation](2372-diffusion-approximation.md), which approximate the angular dependence of radiance, this method provides an unbiased estimate of the radiative transfer equation by sampling the stochastic path of light [S1, unofficial][S2]. Its primary trade-off is high variance; because rays that successfully connect the eye to a light source via multiple scattering events are rare, the method produces noisy images and requires significant computational time to converge [S1, unofficial][S2].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Volume geometry defined by voxels or spatial regions.
+*   Optical properties per voxel: extinction coefficient $\tau$, albedo $a$, and phase function $p(\omega_i, \omega_o)$.
+*   Light source definitions (position, intensity, directionality).
+*   Camera parameters (eye position, pixel grid).
+
+**Outputs:**
+*   Pixel intensity values representing the radiance reaching the eye.
+
+### Data Structures
+*   **Voxel Grid:** Stores $\tau$, $a$, and $p$ for each spatial cell.
+*   **Caustic Texture Map (Optional):** A 2D or 3D texture used in two-pass variants to store intermediate radiance values propagated from light sources. It may store isotropic scattering intensity or directional scattered texture $I(X_i, \omega)$ [S1, unofficial][S2].
+*   **Ray State:** Position $X$, direction $\omega$, current weight/throughput.
+
+### Algorithm Steps
+
+The method can be implemented as a direct eye-tracing approach or a hybrid two-pass approach to mitigate the low probability of eye-to-light connectivity.
+
+#### 1. Direct Eye Tracing (Basic)
+1.  For each pixel, cast a primary ray from the eye into the volume.
+2.  Sample the distance to the next interaction event using the extinction coefficient $\tau$.
+3.  At the interaction point $X_i$:
+    *   Determine if the photon is absorbed or scattered. The probability of scattering is given by the albedo $a$ [S1, unofficial][S2].
+    *   If absorbed, terminate the path.
+    *   If scattered, sample a new direction $\omega_{new}$ from the phase function $p(\omega_{old}, \omega_{new})$ [S1, unofficial][S2].
+4.  Update the ray's throughput weight by multiplying by $a$ and the phase function value.
+5.  Repeat steps 2-4 until the ray exits the volume or hits a light source/emitter.
+6.  If the ray hits a light source, add the source's radiance (weighted by the current throughput) to the pixel's accumulated color.
+
+#### 2. Two-Pass Hybrid Approach (Caustic Texture)
+To address the inefficiency of direct tracing where few rays reach light sources, a two-pass method can be used [S1, unofficial][S2].
+
+**Pass 1: Light Propagation**
+1.  Cast rays from light sources into the volume.
+2.  Trace these rays through the medium, simulating scattering events using $\tau$, $a$, and $p$ [S1, unofficial][S2].
+3.  At each scattering voxel $X_i$, record the scattered radiance.
+4.  Store this radiance in a **Caustic Texture Map**.
+    *   *Note:* Blasi et al. stored only an isotropic scattering texture, but the method generalizes to storing directional scattered texture $I(X_i, \omega)$ [S1, unofficial][S2].
+
+**Pass 2: Eye Tracing with Pre-computed Data**
+1.  Cast rays from the eye through the pixel.
+2.  For each interaction or exit from the volume, query the Caustic Texture Map to retrieve the radiance arriving from the light side.
+3.  Combine the eye-side path throughput with the pre-computed light-side radiance to determine the final pixel contribution [S1, unofficial][S2].
+
+#### 3. Volumetric Backprojection Variant
+A specific implementation for high-albedo scattering involves volumetric backprojection [S3, unofficial]:
+1.  Cast a large set of rays from energy sources into the volume.
+2.  At each voxel, roll a "dice" (sample a random number) to determine energy absorption and scattering direction [S3, unofficial].
+3.  Iterate this process for many steps to simulate energy transport among voxels.
+4.  Perform a final scattering pass from the computed radiosity volume towards the eye point [S3, unofficial].
+
+### Formulas
+*   **Scattering Probability:** $P_{scatter} = a$ [S1, unofficial][S2].
+*   **Absorption Probability:** $P_{absorb} = 1 - a$ [S1, unofficial][S2].
+*   **Phase Function Sampling:** Direction $\omega_{new}$ is sampled from $p(\omega_{old}, \omega_{new})$ [S1, unofficial][S2].
+*   **Weight Update:** $W_{new} = W_{old} \cdot a \cdot p(\omega_{old}, \omega_{new})$ [S1, unofficial][S2].
+
+### Parameters
+*   **Extinction Coefficient ($\tau$):** Controls the mean free path. Not given in the sources.
+*   **Albedo ($a$):** Ratio of scattering coefficient to extinction coefficient. Not given in the sources.
+*   **Phase Function ($p$):** Describes angular distribution of scattering. Not given in the sources.
+*   **Number of Samples:** High sample counts are required to decrease variance. Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Noise:** The method produces noisy images because contributing rays (those connecting eye to light via multiple scattering) are a small fraction of all considered rays [S1, unofficial][S2].
+*   **Performance:** Computation time is long due to the need for many samples to achieve acceptable variance [S1, unofficial][S2].
+*   **Connectivity:** In direct tracing, rays from the eye rarely end up at a light source, and rays from a light source rarely end up at the eye [S1, unofficial][S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def monte_carlo_multiple_scattering(volume, camera, lights, use_two_pass=False):
+    """
+    Solves multiple scattering using Monte Carlo ray tracing.
+    
+    Args:
+        volume: Object containing voxel data (tau, albedo, phase_function).
+        camera: Object containing eye position and pixel grid.
+        lights: List of light sources.
+        use_two_pass: Boolean flag to enable the two-pass caustic texture approach.
+        
+    Returns:
+        Image buffer with pixel intensities.
+    """
+    image = initialize_image_buffer(camera)
+    
+    if use_two_pass:
+        caustic_map = compute_light_propagation(volume, lights)
+        render_eye_pass(camera, volume, caustic_map, image)
+    else:
+        for pixel in camera.pixels:
+            pixel_color = trace_eye_ray(pixel, volume, lights)
+            image[pixel] = pixel_color
+            
+    return image
+
+def compute_light_propagation(volume, lights):
+    """
+    Pass 1: Propagate light from sources to build a caustic texture map.
+    """
+    caustic_map = initialize_texture_map(volume.resolution)
+    
+    for light in lights:
+        # Cast rays from light source
+        rays = generate_rays_from_light(light, volume)
+        for ray in rays:
+            current_throughput = 1.0
+            current_pos = ray.origin
+            current_dir = ray.direction
+            
+            while not ray_exited_volume(current_pos, volume):
+                # Sample distance to next interaction
+                distance = sample_free_path(current_pos, current_dir, volume.extinction)
+                next_pos = current_pos + current_dir * distance
+                
+                # Check for interaction
+                if is_inside_volume(next_pos):
+                    # Determine scattering vs absorption
+                    if random() < volume.albedo[next_pos]: # Albedo 'a'
+                        # Scattering event
+                        phase_val = volume.phase_function(current_dir, sample_scattering_direction())
+                        current_throughput *= volume.albedo[next_pos] * phase_val
+                        
+                        # Store scattered radiance in caustic map
+                        # Note: Blasi et al. stored isotropic; generalized to directional I(Xi, omega)
+                        caustic_map.add_radiance(next_pos, current_throughput)
+                        
+                        # Update direction
+                        current_dir = sample_scattering_direction()
+                        current_pos = next_pos
+                    else:
+                        # Absorption event
+                        break
+                else:
+                    break
+                    
+    return caustic_map
+
+def trace_eye_ray(pixel, volume, lights):
+    """
+    Pass 2 (or direct): Trace ray from eye.
+    """
+    ray = generate_ray_from_eye(pixel, volume)
+    throughput = 1.0
+    color = 0.0
+    
+    current_pos = ray.origin
+    current_dir = ray.direction
+    
+    while not ray_exited_volume(current_pos, volume):
+        distance = sample_free_path(current_pos, current_dir, volume.extinction)
+        next_pos = current_pos + current_dir * distance
+        
+        if is_inside_volume(next_pos):
+            if random() < volume.albedo[next_pos]:
+                # Scattering
+                phase_val = volume.phase_function(current_dir, sample_scattering_direction())
+                throughput *= volume.albedo[next_pos] * phase_val
+                current_dir = sample_scattering_direction()
+                current_pos = next_pos
+            else:
+                # Absorption
+                break
+        else:
+            # Ray exited volume without hitting light or being absorbed
+            break
+            
+    # If ray hit a light source directly (in direct tracing)
+    if ray_hit_light(current_pos, current_dir, lights):
+        color = throughput * light_radiance(current_pos, current_dir, lights)
+        
+    return color
+
+def render_eye_pass(camera, volume, caustic_map, image):
+    """
+    Final rendering pass using pre-computed caustic map.
+    """
+    for pixel in camera.pixels:
+        ray = generate_ray_from_eye(pixel, volume)
+        throughput = 1.0
+        color = 0.0
+        
+        current_pos = ray.origin
+        current_dir = ray.direction
+        
+        while not ray_exited_volume(current_pos, volume):
+            distance = sample_free_path(current_pos, current_dir, volume.extinction)
+            next_pos = current_pos + current_dir * distance
+            
+            if is_inside_volume(next_pos):
+                if random() < volume.albedo[next_pos]:
+                    # Scattering
+                    phase_val = volume.phase_function(current_dir, sample_scattering_direction())
+                    throughput *= volume.albedo[next_pos] * phase_val
+                    
+                    # Query caustic map for light contribution
+                    # This approximates the contribution from light sources
+                    light_contrib = caustic_map.query(next_pos, current_dir)
+                    color += throughput * light_contrib
+                    
+                    current_dir = sample_scattering_direction()
+                    current_pos = next_pos
+                else:
+                    break
+            else:
+                break
+                
+        # Direct light contribution if applicable
+        if ray_hit_light(current_pos, current_dir, lights):
+            color += throughput * light_radiance(current_pos, current_dir, lights)
+            
+        image[pixel] = color
+
+def sample_free_path(pos, dir, extinction):
+    """
+    Sample distance to next interaction based on extinction coefficient.
+    """
+    # Exponential distribution sampling
+    # Not given in the sources for exact implementation, standard physics formula:
+    # distance = -ln(random()) / extinction
+    return -math.log(random()) / extinction
+
+def sample_scattering_direction():
+    """
+    Sample a new direction based on the phase function.
+    """
+    # Implementation depends on specific phase function (e.g., Henyey-Greenstein)
+    # Not given in the sources for exact implementation.
+    return random_unit_vector()
+```
+
+## Subtopics
+
+### [Multiple Scattering Albedo Estimation](6357-multiple-scattering-albedo-estimation.md)
+This method estimates the multiple scattering albedo $\alpha_{ms}$ (RGB) for a low-resolution voxel such that its effective albedo $\alpha_e$ matches the effective albedo $\alpha_e^{\text{input}}$ of the corresponding high-resolution input block [Child 1]. It solves the problem of preserving the color and density of light scattered at least twice at the microscopic scale during volume downsampling [Child 1]. Unlike [Light Tracing for Participating Media](12255-light-tracing-for-participating-media.md), which simulates light transport from the light source, this method operates as a pre-computation step to derive parameters for a standard Monte Carlo renderer, ensuring the low-res voxel reproduces the multi-scattering behavior of the original high-res data without iterative optimization [Child 1].
+
+### [Light Tracing for Participating Media](12255-light-tracing-for-participating-media.md)
+Light tracing for participating media is a Monte Carlo method that solves the radiative transfer equation by tracing bundles of light from the source through the volume to find interaction points. It differs from eye-tracing (path tracing) by generating paths from the light source, making it particularly effective for scenes with complex lighting or when the camera view is not the primary constraint. Unlike constant distance sampling methods, this approach is unbiased because it samples the distance to the next interaction continuously rather than restricting it to multiples of a discrete step size.
+
+### Volumetric Backprojection (Monte-Carlo)
+A method for computing high-albedo scattering illumination using Monte-Carlo simulations to solve the integral equation of light transport [S3, unofficial]. It casts a large set of rays from energy sources into the volume, where at each voxel a "dice is rolled" to determine energy absorption and scattering direction [S3, unofficial]. After many iterations, the simulation is stopped, and a final scattering of the radiosity volume is performed towards an arbitrarily positioned eye point [S3, unofficial]. Backprojection is usually performed on a voxel-by-voxel basis [S3, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity:** High. The method requires many samples to decrease variance because contributing rays are a small fraction of all considered rays [S1, unofficial][S2].
+*   **Memory Complexity:** Depends on implementation. Direct tracing uses minimal memory. Two-pass approaches require storage for the caustic texture map [S1, unofficial][S2].
+*   **Measured Performance:** Images tend to appear noisy and take a very long time to compute [S1, unofficial][S2].
+*   **Strengths:** Unbiased solution to the radiative transfer equation; handles complex geometries and anisotropic scattering naturally.
+*   **Limitations:** High variance (noise); slow convergence; inefficient for eye-to-light connectivity in highly scattering media.
+*   **When to use:** When unbiased results are required and computational time is not a primary constraint, or when used in hybrid approaches (e.g., two-pass) to capture specific interreflection effects.
+*   **When not to use:** When real-time performance is required or when the volume is highly scattering and direct eye tracing is too noisy.
+
+## Background
+
+The Monte Carlo method for volume rendering was originally developed by physicists for neutron transport and applied to rendering surface interreflection by Cook et al. and Kajiya [S1, unofficial][S2]. It was applied to volume applications by Rushmeier [S1, unofficial][S2]. The method traces sample rays from the eye through a pixel, undergoing random absorption or scattering based on the extinction coefficient $\tau$, albedo $a$, and phase function $p$ [S1, unofficial][S2]. To address the inefficiency of direct tracing, Rushmeier suggested calculating $g(X, \omega)$ by the zonal method and performing a final rendering pass using Monte Carlo for one extra directional bounce toward the viewpoint [S1, unofficial][S2]. Shirley and Chen et al. used such a final Monte Carlo bounce in rendering images of interreflecting surfaces [S1, unofficial][S2]. Heckbert proposed "caustic texture maps" to capture directional interreflection propagated by Monte Carlo means from light sources [S1, unofficial][S2]. For volume rendering, Blasi et al. used a similar two-pass approach, propagating light from sources and storing scattering in a texture map for a final eye-tracing pass [S1, unofficial][S2].
+
+## Sources
+
+[S1] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
+[S2] Optical models for direct volume rendering (PDF) - Academia.edu, https://www.academia.edu/49467168/Optical_models_for_direct_volume_rendering, fetched 2026-10-27
+[S3] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)

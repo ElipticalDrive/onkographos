@@ -1,0 +1,247 @@
+--- v005.md
++++ v006.md
+@@ -3,111 +3,124 @@
+ 
+ ## Overview
+-Cropping is an interaction technique that restricts volume rendering to a specific region of interest (ROI) by defining axis-aligned cut-planes along the volume's spatial dimensions [S1][S3, S4, unofficial]. It solves the problem of visual clutter and computational waste by allowing users to "slice away" outer layers of a volume to reveal internal structures or focus on specific features [S1][S3, unofficial]. Unlike [Clipping plane for volume suppression](887-clipping-plane-for-volume-suppression.md), which uses arbitrarily oriented planes, cropping is strictly axis-aligned relative to the volume's object coordinates [S3, S4, unofficial]. It differs from [Clipping](1444-clipping.md) in that it defines a rectilinear slab (or union/intersection of slabs) rather than just a near/far camera boundary, and from [Dynamic Clipping in Volume Rendering](7498-dynamic-clipping-in-volume-rendering.md), which supports arbitrary plane orientations [S3, S4, unofficial].
++Cropping is an interaction technique that restricts volume rendering to a specific region of interest (ROI) by defining axis-aligned cut-planes along each spatial dimension [S1][S3, S4, unofficial]. It solves the problem of visual clutter and performance overhead by rendering only the voxels within a defined rectilinear slab, thereby revealing internal structures without altering the underlying data [S1][S3, unofficial]. Unlike [Clipping plane for volume suppression](887-clipping-plane-for-volume-suppression.md), which uses arbitrarily oriented planes to cut away portions of the volume, cropping is strictly axis-aligned relative to the volume's object coordinates [S3, S4, unofficial]. It differs from [Clipping](1444-clipping.md) in that it defines a sub-volume for rendering rather than just a near/far boundary for projection correctness, and from [Dynamic Clipping in Volume Rendering](7498-dynamic-clipping-in-volume-rendering.md) by being a static geometric constraint that can be updated interactively but is fundamentally defined by the intersection of axis-aligned slabs [S2, S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The volume dataset $D$ with dimensions $(N_x, N_y, N_z)$, and six scalar parameters defining the cropping region: $(x_{min}, x_{max}, y_{min}, y_{max}, z_{min}, z_{max})$ [S3, S4, unofficial].
+-*   **Output:** A rendered image where voxels outside the defined region are excluded from the rendering pipeline (opacity set to 0 or skipped) [S3, S4, unofficial].
++*   **Input:** The volume dataset $D$ with dimensions $(N_x, N_y, N_z)$ and origin $O$. User-defined cropping parameters: six coordinates $(x_{min}, x_{max}, y_{min}, y_{max}, z_{min}, z_{max})$ defining the region of visibility [S2, S3, S4, unofficial].
++*   **Output:** A rendered image containing only the voxels satisfying the cropping constraints.
+ 
+ **Data Structures:**
+-The cropping region is typically stored as six floating-point or integer values representing the bounds in the volume's local coordinate system [S3, S4, unofficial]. In implementations like VTK, this is managed via a `vtkVolume` mapper with a specific flag [S2, unofficial]:
+-*   `CroppingEnabled`: Boolean flag (e.g., `mapper->SetCropping(1)`) [S2, unofficial].
+-*   `CroppingRegionPlanes`: Array of 6 floats `[xmin, xmax, ymin, ymax, zmin, zmax]` [S2, unofficial].
+-*   `CroppingMode`: Enum specifying the logic, e.g., `VTK_CROP_SUBVOLUME` to restrict rendering to the defined region [S2, unofficial].
++The cropping region is typically stored as six floating-point or integer values representing the bounds in the volume's local coordinate system (object space) [S3, S4, unofficial]. In implementations like VTK, this is managed via a `vtkVolume` mapper with a cropping flag and a set of plane coordinates [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Define Region:** The user or application sets the six plane coordinates. These coordinates are relative to the volume's object coordinates [S4, unofficial].
+-2.  **Validate/Clamp:** Ensure the planes are within the volume bounds. If a plane falls outside, it may be clamped or ignored depending on implementation [S3, S4, unofficial]. Note: [Clipped Cropping Region Planes](2931-clipped-cropping-region-planes.md) is a preprocessing step that enforces this validity [S3, S4, unofficial].
+-3.  **Ray Casting / Slicing:** For each pixel, cast a ray through the volume.
+-4.  **Visibility Check:** A sample at position $(x, y, z)$ is visible if and only if it falls within the defined region of visibility [S3, unofficial].
+-    *   The region is typically the intersection of three slabs:
+-        $$ S_x = \{ (x,y,z) \mid x_{min} \le x \le x_{max} \} $$
+-        $$ S_y = \{ (x,y,z) \mid y_{min} \le y \le y_{max} \} $$
+-        $$ S_z = \{ (x,y,z) \mid z_{min} \le z \le z_{max} \} $$
+-    *   The visible region $V$ is usually $S_x \cap S_y \cap S_z$ [S3, unofficial].
+-    *   Alternatively, unions or inverses can be used to define more complex visibility masks (e.g., showing only the outer shell) [S3, unofficial].
+-5.  **Rendering:** Render only the samples that pass the visibility check. If using pre-integration, handle boundary artifacts using [Pre-integrated Clipping Boundary Handling](7867-pre-integrated-clipping-boundary-handling.md) [S3, S4, unofficial].
+-6.  **Depth Management:** If using depth-based techniques (like DVR prepass), ensure the depth texture maintains correct order when cutting planes are active [S1].
++1.  **Define Cropping Region:** The user or application sets the six bounding coordinates. These define three slabs:
++    *   $S_x = \{ (x, y, z) \mid x_{min} \le x \le x_{max} \}$
++    *   $S_y = \{ (x, y, z) \mid y_{min} \le y \le y_{max} \}$
++    *   $S_z = \{ (x, y, z) \mid z_{min} \le z \le z_{max} \}$
++    [S3, unofficial]
++2.  **Combine Slabs:** The region of visibility $R$ is defined by the intersection of these slabs (standard cropping):
++    $$ R = S_x \cap S_y \cap S_z $$
++    Alternatively, unions or inverses can be used to create complex visibility masks, but the standard ROI is the intersection [S3, unofficial].
++3.  **Transform to World/Texture Space:** If the volume is transformed, the cropping planes must be transformed from object coordinates to the rendering space (e.g., texture space or world space) [S4, unofficial]. For a subvolume with index $(i, j, k)$ and dimensions $(N_x, N_y, N_z)$ with overlap, the subvolume origin $Origin_{Sub}$ is calculated as:
++    $$ Origin_{Sub} = (i(N_x - overlap), j(N_y - overlap), k(N_z - overlap)) $$
++    The distance vector $D_{subj}$ from the subvolume origin to the cut-plane position $D$ with normal $N$ is:
++    $$ D_{subj} = (D - Origin_{Sub}) \cdot N $$
++    [S4, unofficial]
++4.  **Enable Cropping:** The rendering pipeline enables the cropping mode. In VTK, this is done by setting the cropping flag and the region planes:
++    ```python
++    mapper.SetCropping(1)
++    mapper.SetCroppingRegionPlanes(xmin, xmax, ymin, ymax, zmin, zmax)
++    mapper.SetCroppingMode(VTK_CROP_SUBVOLUME)
++    ```
++    [S2, unofficial]
++5.  **Ray Casting with Clipping:** During ray casting, for each sample point $P$ along the ray:
++    *   Check if $P$ lies within $R$.
++    *   If $P \in R$, compute color and opacity as usual.
++    *   If $P \notin R$, set opacity to 0 (or skip sampling entirely if the renderer supports early exit) [S3, S4, unofficial].
++    *   Note: Cropping planes may fall at arbitrary voxel positions, not just integer grid indices [S3, unofficial].
++6.  **Depth Handling:** When using cutting planes, the depth texture from the DVR prepass is used to maintain correct depth order, ensuring that the cut surfaces are rendered correctly relative to the remaining volume [S1].
++
++**Parameters:**
++*   **Cropping Bounds:** $(x_{min}, x_{max}, y_{min}, y_{max}, z_{min}, z_{max})$. Typical values depend on the dataset size and the desired ROI.
++*   **Cropping Mode:** Binary flag or enum (e.g., `VTK_CROP_SUBVOLUME`) to enable/disable [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Depth Order:** When cutting planes are active, standard depth buffering may fail if the entry/exit points are not correctly tracked. A front-face depth texture is often required to maintain correct depth order [S1].
++*   **Arbitrary Positions:** Cropping planes can be placed at non-integer coordinates. The renderer must handle fractional voxel sampling correctly [S3, unofficial].
++*   **Invalid Regions:** If $x_{min} > x_{max}$, the region is empty. Implementations should clamp or ignore such regions [S4, unofficial].
++*   **Boundary Artifacts:** At the cropping boundaries, discontinuities may occur. Pre-integrated clipping boundary handling can be used to map an opaque texture onto the clip geometry to reduce artifacts [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_cropped_volume(volume_data, camera, planes):
++def render_cropped_volume(volume_data, camera, crop_bounds):
+     """
+-    volume_data: 3D array of shape (Nx, Ny, Nz)
+-    camera: object with get_ray(origin, screen_coord) method
+-    planes: tuple (xmin, xmax, ymin, ymax, zmin, zmax)
++    Render a volume with axis-aligned cropping.
++    
++    Args:
++        volume_data: 3D array of voxel values.
++        camera: Camera object with view and projection matrices.
++        crop_bounds: Tuple (xmin, xmax, ymin, ymax, zmin, zmax) in object coordinates.
++    
++    Returns:
++        Image buffer.
+     """
+-    xmin, xmax, ymin, ymax, zmin, zmax = planes
++    # 1. Transform crop bounds to world/texture space if necessary
++    # This step depends on the volume's transformation matrix T
++    # For simplicity, assume volume is in world space or crop_bounds are already transformed
++    xmin, xmax, ymin, ymax, zmin, zmax = crop_bounds
+     
+-    # Initialize output image
+-    image = empty_image(camera.width, camera.height)
++    # 2. Initialize image buffer
++    image = create_empty_image(camera.resolution)
+     
+-    for y in range(camera.height):
+-        for x in range(camera.width):
+-            ray_origin, ray_direction = camera.get_ray((x, y))
++    # 3. For each pixel in the image
++    for y in range(camera.resolution.height):
++        for x in range(camera.resolution.width):
++            # 4. Generate ray from camera through pixel
++            ray_origin, ray_direction = camera.generate_ray(x, y)
+             
+-            # Calculate intersection of ray with the cropping box
+-            # This is a standard AABB intersection test
+-            t_min, t_max = intersect_aabb(ray_origin, ray_direction, 
+-                                          (xmin, ymin, zmin), 
+-                                          (xmax, ymax, zmax))
++            # 5. Intersect ray with volume bounding box to get entry/exit points
++            t_entry, t_exit = intersect_ray_with_bbox(ray_origin, ray_direction, volume.bbox)
+             
+-            if t_max < 0 or t_min > t_max:
+-                # Ray does not intersect the cropped region
+-                image[x, y] = background_color
++            # 6. If no intersection, skip
++            if t_entry is None or t_exit is None:
+                 continue
+             
+-            # Determine start and end points in volume coordinates
+-            # Note: Ray parameters must be mapped to volume indices
+-            t_start = max(t_min, 0)
+-            t_end = t_max
++            # 7. Ray casting loop
++            t = t_entry
++            accumulated_color = (0, 0, 0, 0)
+             
+-            # Perform ray marching only within [t_start, t_end]
+-            color = accumulate_color(ray_origin, ray_direction, t_start, t_end, volume_data)
+-            image[x, y] = color
++            while t < t_exit:
++                # 8. Sample position in world space
++                pos = ray_origin + t * ray_direction
++                
++                # 9. Transform pos to volume object/texture space if needed
++                # pos_obj = inverse(volume.transform) * pos
++                
++                # 10. Check if pos is within crop bounds
++                if (xmin <= pos.x <= xmax and 
++                    ymin <= pos.y <= ymax and 
++                    zmin <= pos.z <= zmax):
++                    
++                    # 11. Sample volume data
++                    value = sample_volume(volume_data, pos)
++                    
++                    # 12. Apply transfer function
++                    color, opacity = transfer_function(value)
++                    
++                    # 13. Composite
++                    accumulated_color = composite(accumulated_color, color, opacity)
++                    
++                    # 14. Early termination if fully opaque
++                    if accumulated_color.a >= 1.0:
++                        break
++                
++                # 15. Advance along ray
++                t += step_size
++                
++            # 16. Write to image
++            image[y, x] = accumulated_color
+             
+     return image
+-
+-def accumulate_color(origin, direction, t_start, t_end, volume_data):
+-    """
+-    Standard ray marching loop restricted to t_start and t_end.
+-    """
+-    total_color = (0, 0, 0, 0)
+-    t = t_start
+-    step_size = 1.0 / max(volume_data.Nx, volume_data.Ny, volume_data.Nz) # Example step
+-    
+-    while t < t_end:
+-        # Convert ray position to volume index
+-        pos = origin + direction * t
+-        idx = pos_to_volume_index(pos, volume_data.origin, volume_data.spacing)
+-        
+-        # Check bounds (should be guaranteed by AABB intersection, but good for safety)
+-        if is_inside_volume(idx, volume_data):
+-            sample = volume_data[idx]
+-            alpha, color = transfer_function(sample)
+-            
+-            # Front-to-back compositing
+-            total_color = composite(total_color, color, alpha)
+-            
+-            if total_color.a >= 1.0: # Early termination
+-                break
+-        
+-        t += step_size
+-        
+-    return total_color
+ ```
+-
+-**Parameters:**
+-*   **Plane Coordinates:** Arbitrary voxel positions are allowed [S3, unofficial].
+-*   **Logic:** Intersection (default), Union, or Inverse [S3, unofficial].
+-*   **Overlap:** In partitioned volume rendering, subvolume indices $(i, j, k)$ and dimensions $(N_x, N_y, N_z)$ with overlap are used to transform the slab location [S4, unofficial]:
+-    $$ D_{subj} = (D - Origin_{Sub}) \cdot N $$
+-    $$ Origin_{Sub} = (i(N_x - overlap), j(N_y - overlap), k(N_z - overlap)) $$
+-    [S4, unofficial]
+-
+-**Edge Cases and Pitfalls:**
+-*   **Depth Order:** When using depth textures (e.g., in DVR prepass), ensure the depth texture correctly maintains order when cutting planes are active [S1].
+-*   **Boundary Artifacts:** Low sampling rates can cause visual artifacts at clip boundaries. Use [Pre-integrated Clipping Boundary Handling](7867-pre-integrated-clipping-boundary-handling.md) to mitigate this [S3, S4, unofficial].
+-*   **Invalid Regions:** If $x_{min} > x_{max}$, the region is empty. Implementations should handle or clamp these cases [S3, S4, unofficial].
+ 
+ ## Subtopics
+@@ -126,23 +139,23 @@
+ 
+ ### [Dynamic Clipping in Volume Rendering](7498-dynamic-clipping-in-volume-rendering.md)
+-Dynamic clipping restricts volume rendering to a specific region of interest (ROI) using six user-defined clipping planes, typically derived from an interactive cropping widget. Unlike static cropping masks that cut along axes parallel to the volume faces, this method constructs a dynamic, convex polyhedral volume (up to 6 planes) that can be combined via intersection logic, functioning as a simple Constructive Solid Geometry (CSG) expression. It is distinct from simple view-frustum culling as it allows arbitrary plane orientations and offsets independent of the camera, and from surface-level clipping as it operates on the volumetric data itself.
++Dynamic Clipping in Volume Rendering restricts the visualization to a specific region of interest (ROI) by applying six axis-aligned clipping planes (X min/max, Y min/max, Z min/max) that are updated in response to user interaction. Unlike static cropping masks which are pre-defined, this method allows the clipping boundaries to be adjusted interactively via a widget, converting index-space constraints into world-space planes for the renderer. It sets itself apart from sibling methods like [Clipping plane for volume suppression](887-clipping-plane-for-volume-suppression.md) by explicitly managing the geometric transformation of clipping boundaries relative to the volume's coordinate system, and from [Variance Clipping](1970-variance-clipping.md) by operating on spatial extent rather than statistical data properties.
+ 
+ ### [Pre-integrated Clipping Boundary Handling](7867-pre-integrated-clipping-boundary-handling.md)
+-Pre-integrated Clipping Boundary Handling is a technique to eliminate visual artifacts at clip boundaries in pre-integrated volume rendering, particularly when using low sampling rates. It differs from surface-shading alternatives by mapping an opaque texture onto the clip geometry to hide artifacts, while specifically addressing the need to show relationships between internal features (e.g., distances between isosurfaces) that opaque textures might otherwise obscure.
++A method to handle artifacts at clip boundaries when using pre-integrated volume rendering with low sampling rates, by mapping an opaque texture onto the clip geometry. It sets apart from [Clipping](1444-clipping.md) and [Clipped Cropping Region Planes](2931-clipped-cropping-region-planes.md) by explicitly computing the optical contribution of the gap between the clipping surface and the first volume slice, rather than relying solely on depth buffering or simple suppression.
+ 
+ ### Clipping Geometry Illumination
+-Clipping geometry makes parts of the volume transparent. At the boundary of this geometry, the surface normal of the clipping geometry is used for illumination instead of the volume's gradient [S5, unofficial]. This technique, described in Weiskopf et al., TVCG 2003, enhances the visual clarity of cutaway views by providing consistent lighting cues at the artificial boundaries created by cropping or clipping [S5, unofficial].
++Clipping geometry makes parts of the volume transparent. At the boundary of this geometry, the surface normal of the clipping geometry is used for illumination instead of the volume's gradient [S5, unofficial]. This technique, described in Weiskopf et al., TVCG 2003, enhances the visual clarity of cutaway views by providing consistent lighting cues at the newly exposed surfaces [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, but the constant factor is reduced by the fraction of the volume rendered. If the cropped region is small, the number of samples per ray decreases significantly.
+-*   **Memory Complexity:** $O(1)$ additional memory for the plane parameters. No significant storage overhead compared to the base volume data.
+-*   **Performance:** Significantly improves rendering speed when the ROI is small compared to the full volume. However, if the ROI is large, the overhead of plane checks is negligible.
+-*   **Strengths:** Simple to implement, intuitive for users (sliders), effective for isolating internal structures.
+-*   **Limitations:** Cannot handle non-axis-aligned features efficiently. May introduce artifacts at boundaries if not handled properly (e.g., [Pre-integrated Clipping Boundary Handling](7867-pre-integrated-clipping-boundary-handling.md)).
+-*   **When to Use:** When the user needs to inspect internal structures or focus on a specific part of the volume.
+-*   **When Not to Use:** When the ROI is arbitrary or non-axis-aligned; use [Clipping plane for volume suppression](887-clipping-plane-for-volume-suppression.md) or [Dynamic Clipping in Volume Rendering](7498-dynamic-clipping-in-volume-rendering.md) instead.
++*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the cropped region. Cropping reduces the effective $N$ by excluding voxels outside the ROI, thus improving performance proportionally to the volume of the ROI relative to the full volume.
++*   **Memory Complexity:** $O(1)$ additional memory for storing the six plane coordinates. However, if depth textures are used for correct depth ordering with cutting planes, an additional $O(W \times H)$ texture memory is required [S1].
++*   **Measured Performance:** In VolumePro, cropping is described as an "easy way of specifying a rectilinear region of interest for rendering" [S3, unofficial]. In VTK, enabling `VTK_CROP_SUBVOLUME` allows the mapper to skip sampling outside the region, significantly speeding up rendering for large datasets with small ROIs [S2, unofficial].
++*   **Strengths:** Simple to implement; effective for focusing on specific features; reduces computational load; axis-aligned nature allows for efficient spatial partitioning and culling.
++*   **Limitations:** Cannot handle arbitrarily oriented cuts (use [Clipping plane for volume suppression](887-clipping-plane-for-volume-suppression.md) for that); may introduce artifacts at boundaries if not handled carefully (e.g., [Pre-integrated Clipping Boundary Handling](7867-pre-integrated-clipping-boundary-handling.md)); requires depth texture management for correct ordering when planes cut through the volume [S1].
++*   **When to use:** When the user needs to inspect internal structures by removing outer layers; when performance is critical and the ROI is small; when the ROI is naturally axis-aligned (e.g., a specific organ in a medical scan aligned with the scanner axes).
++*   **When not to use:** When the ROI is oriented at an arbitrary angle; when the user needs to see the relationship between the cropped region and the rest of the volume in a single view without deformation (use [Focus+Context Visualization via Deformation](3001-focus-context-visualization-via-deformation.md) instead).
+ 
+ ## Background
+-Cropping is a fundamental interaction technique in volume visualization, widely supported in libraries like VTK (via `SetCroppingRegionPlanes`) and systems like VolumePro [S2, S3, unofficial]. It originated as a method to provide "slices" or "slabs" of data for interactive exploration [S3, unofficial]. The technique is often synchronized with other visualization panels (e.g., DVR and IR panels) to maintain consistency [S1]. It is a key component of the feedback loop in volume visualization interaction, where user input (sliders) modifies the rendering parameters [G].
++Cropping originated as a fundamental interaction technique in volume visualization to allow users to "see inside" volumetric datasets. The VolumePro real-time ray-casting system popularized the concept of defining cropping regions using six registers for axis-aligned slabs, allowing for complex visibility masks through set operations (intersection, union, inverse) [S3, unofficial]. The technique is widely implemented in visualization libraries such as VTK (via `SetCroppingRegionPlanes` and `VTK_CROP_SUBVOLUME`) [S2, unofficial] and is a core feature in educational tools like VolumeVisual, where it is synchronized with transfer function editing to help users understand volume rendering concepts [S1]. The patent US 6,407,737 B1 describes a method for rendering shear-warped partitioned volumes where cropping is specified by object coordinates and characterized by "slab" thickness [S4, unofficial]. Clipping geometry illumination, a related technique for improving the visual quality of cropped views, was introduced by Weiskopf et al. in TVCG 2003 [S5, unofficial].
+ 
+ ## Sources

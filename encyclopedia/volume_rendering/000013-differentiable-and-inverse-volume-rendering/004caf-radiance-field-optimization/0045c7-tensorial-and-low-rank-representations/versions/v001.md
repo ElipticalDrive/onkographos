@@ -1,0 +1,32 @@
+# Tensorial and Low-Rank Representations
+
+Also called: Tensor Factorization, Tensor Decomposition Radiance Fields
+
+## Overview
+Tensorial and Low-Rank Representations address the high memory consumption and overfitting issues inherent in dense voxel-based radiance fields by modeling the scene as a factorized 4D tensor [3026-tensorf.md]. Unlike [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md), which stores independent features per voxel, this family exploits the low-rank structure of geometry and appearance to correlate the entire field, reducing space complexity from $O(n^3)$ to $O(n)$ or $O(n^2)$ [3026-tensorf.md]. It sets itself apart from [NeRF](4972-neural-radiance-fields.md) by replacing multi-layer perceptrons (MLPs) with compact vector and matrix factors, enabling significantly faster reconstruction and smaller model sizes [3026-tensorf.md].
+
+## Shared principles
+All methods in this family represent the radiance field as a low-rank tensor decomposition, typically using Canonical Polyadic (CP) or Vector-Matrix (VM) formats. The core mechanism replaces the implicit function of an MLP or the dense grid of a voxel field with a set of global mode vectors and matrices.
+
+For a 4D radiance field $\mathcal{F}(x, y, z, \theta)$, where $(x,y,z)$ are spatial coordinates and $\theta$ represents view-dependent parameters, the field is approximated by a sum of rank-1 components. In the Vector-Matrix (VM) decomposition, the density $\sigma$ and appearance features $\mathbf{c}$ are computed by interpolating mode vectors and matrices. For a component $r$, the density contribution is a sum of terms like $\mathbf{v}_X(x) \cdot \mathbf{M}_{YZ}(y,z)$, where $\mathbf{v}$ is a vector and $\mathbf{M}$ is a matrix [3026-tensorf.md]. This structure allows for efficient trilinear interpolation and differentiable rendering.
+
+The training process typically employs a coarse-to-fine strategy. Optimization begins at a low resolution $N_0^3$ (e.g., $128^3$) and upsamples the tensor factors at specific iteration steps (e.g., 2000, 3000, 4000) using linear interpolation for vectors and bilinear interpolation for matrices [3026-tensorf.md][3453-tensorf-reconstruction-optimization.md]. Regularization is critical to prevent overfitting; L1 norm loss on factors encourages sparsity, while Total Variation (TV) loss promotes smoothness, particularly for datasets with few views or imperfect capture [3026-tensorf.md][3453-tensorf-reconstruction-optimization.md].
+
+## Subtopics
+
+### [TensoRF](3026-tensorf.md)
+Models the radiance field using CP or VM decomposition of geometry and appearance grids. It uses a global appearance dictionary matrix to map low-rank features to view-dependent colors via SH or MLP. Choose this for fast reconstruction and compact storage compared to dense voxels or MLPs.
+
+### [TensoRF Reconstruction Optimization](3453-tensorf-reconstruction-optimization.md)
+The specific training procedure for TensoRF, emphasizing coarse-to-fine upsampling of factors and regularization (L1/TV) to stabilize optimization. Choose this when implementing the standard TensoRF training loop.
+
+### [Joint Optimization of Camera Pose and Decomposed Low-Rank Tensorial Radiance Fields](11498-joint-optimization-of-camera-pose-and-decomposed-low-rank-te.md)
+Extends TensoRF to jointly optimize camera poses and scene geometry. It uses convolutional Gaussian filters for coarse-to-fine scheduling and edge-guided loss masks to avoid local optima common in naive voxel-based joint optimization. Choose this when camera poses are unknown or inaccurate.
+
+## Background
+The concept of tensor decomposition for radiance fields was introduced by [TensoRF](3026-tensorf.md), which demonstrated that radiance fields exhibit low-rank structures in both geometry and appearance. Prior methods like [NeRF](4972-neural-radiance-fields.md) relied on MLPs, which are memory-efficient but slow to train, while voxel-based methods like [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md) were fast but memory-intensive. TensoRF bridges this gap by using tensor factorization to achieve both speed and compactness. The joint optimization variant addresses the instability of optimizing poses with voxel-based representations by leveraging the spectral bias and smoothness properties of the tensor factors [11498-joint-optimization-of-camera-pose-and-decomposed-low-rank-te.md].
+
+## Sources
+[S1] TensoRF: Tensorial Radiance Fields, https://arxiv.org/abs/2203.09517, 2022-03-18
+[S3] TensoRF: Tensorial Radiance Fields (GitHub), https://github.com/apchenstu/TensoRF, 2022-03-18
+[S5] TensoRF: Tensorial Radiance Fields (Unofficial Implementation Notes), https://github.com/ashawkey/TensoRF, 2022-04-01

@@ -1,0 +1,105 @@
+The compositor holds one canvas-sized RGBA image, and each layer composites into it in order. Print canvases (e.g. 7,000 × 10,000 at 300 dpi) cost hundreds of MB per canvas copy. Snapshot copies multiply that. The region renderer now exi...
+
+Tiled compositing for large canvases (bounded memory, parallel tiles) · Issue #588 · jxburros/Vixl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Tiled compositing for large canvases (bounded memory, parallel tiles) #588
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Tiled compositing for large canvases (bounded memory, parallel tiles)#588
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+jxburros
+opened on Oct 9, 2026
+Issue body actions
+The compositor holds one canvas-sized RGBA image, and each layer composites into it in order. Print canvases (e.g. 7,000 × 10,000 at 300 dpi) cost hundreds of MB per canvas copy. Snapshot copies multiply that.
+The region renderer now exists (render.render_region, _render_layers(..., limit=...)): it draws an exact crop and skips layers that miss the region. That is the building block for tiling.
+Proposal:
+Split the canvas into tiles (e.g. 512² or 1024²) and render each tile with the region path. Paste the tiles into the output, or stream them straight into the PNG/TIFF/PDF encoders.
+Render tiles in a thread pool. Most heavy work (resvg, resize, blur, alpha_composite) runs in C and releases the GIL.
+Documents that read the whole canvas (render.region_renders_alone is false: lighting, adjustment layers, canvas-edge blur, selection-masked effects) keep the single-canvas path.
+Done when:
+Tiled output equals the full render, pixel for pixel.
+Peak memory for a large canvas drops measurably.
+A perf budget covers a large print canvas.
+Activity
+jxburros
+added
+enhancementNew feature or requestNew feature or request
+on Oct 9, 2026
+jxburros
+added a parent issue on Oct 9, 2026
+Epic: faster rendering, follow-ups #583
+jxburros commented on Oct 16, 2026
+jxburros
+on Oct 16, 2026 – with ChatGPT Codex Connector
+OwnerAuthor
+More actions
+Measured app-level scaling evidence from the October 16, 2026 audit (finding F08):
+Tested October 16, 2026 against the published vixl_engine-0.27.0-py3-none-any.whl, installed in a fresh Python 3.12.14 environment on Linux x86-64, with server and pdf extras. Runtime reported 0.27.0. Wheel SHA-256 matched the release checksum: 54f1bdc753d3f1ebc9f8f880d989ebf3677ff5f84a926a451fc103a80c8c77c7. These are app-level observations, not source-review conclusions.
+An isolated process created a full-canvas rectangle, an 8-unit blur effect, and a text layer. Each worker had a 1,500 MiB address-space cap and a 45-second external timeout. Both completed:
+Canvas
+Apply
+Render
+Peak process RSS
+2048×2048
+0.188 s
+0.284 s
+218,452 KiB (~213 MiB)
+4096×4096
+0.189 s
+1.128 s
+627,060 KiB (~612 MiB)
+Core workload (run each size in a fresh process):
+```
+import resource, time
+from vixl import Project
+n = 4096
+resource.setrlimit(resource.RLIMIT_AS, (1500*1024*1024, 1500*1024*1024))
+p = Project(n, n, background="#ffffff")
+p.apply([
+ {"type":"shape","shape":"rectangle","name":"panel","x":0,"y":0,
+  "width":n,"height":n,"fill":"#235cdb"},
+ {"type":"effect","target":"panel","name":"blur","amount":8},
+ {"type":"text","name":"title","text":"Large canvas render",
+  "size":n//20,"x":40,"y":40,"color":"#ffffff"}
+])
+t = time.monotonic()
+p.render()
+print(time.monotonic() - t, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+```
+Five logical CPUs; single measurements, uncontrolled font/cache effects, not a repeated benchmark. RSS covers the entire worker, not just an isolated compositor allocation. No crash/OOM was observed and no claim is made that this whole-canvas blur workload can simply use the existing independent-region path.
+A separate 1024×1024 simple-rectangle run accepted 4,096 layers (full render ~0.321 s) and cleanly rejected layer 4,097 without increasing the layer count. A 10,000-operation batch completed (~2.317 s); 10,001 was rejected with a clear resource_limit. Layer count alone is therefore a poor capacity proxy for large effects.
+Related operational limits: #623. The timeout-detachment behavior was read in documentation, not stress-verified in this audit.
+jxburros
+added a commit that references this issue on Oct 21, 2026
+Render long timeline exports in worker processes; record the render p…
+...
+f4564e3
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

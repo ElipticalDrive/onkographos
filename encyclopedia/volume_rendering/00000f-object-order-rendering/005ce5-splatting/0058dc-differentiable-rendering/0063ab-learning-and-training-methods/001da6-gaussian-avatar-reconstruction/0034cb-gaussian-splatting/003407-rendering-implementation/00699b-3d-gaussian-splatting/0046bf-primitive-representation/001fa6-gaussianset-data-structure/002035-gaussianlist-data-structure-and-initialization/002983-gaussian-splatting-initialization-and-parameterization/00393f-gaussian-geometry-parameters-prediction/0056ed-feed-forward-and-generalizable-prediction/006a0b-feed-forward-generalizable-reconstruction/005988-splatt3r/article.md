@@ -1,0 +1,269 @@
+# Splatt3R
+
+Also called: Splatt3R: Zero-Shot Gaussian Splatting from Uncalibrated Image Pairs
+
+## Overview
+Splatt3R is a feed-forward model that predicts 3D Gaussian Splat parameters directly from a pair of uncalibrated RGB images, without requiring camera intrinsics, extrinsics, or depth maps [S1, unofficial]. It solves the problem of generalizable novel view synthesis by extending the MASt3R foundation model with a parallel "Gaussian head" to predict geometry offsets, covariances, opacities, and colors [S1, unofficial]. Unlike sibling methods that restrict supervision to viewpoints interpolated between input stereo views, Splatt3R employs a loss masking strategy to enable robust extrapolation to viewpoints outside the input frustums [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:** Two uncalibrated RGB images $I_1, I_2 \in \mathbb{R}^{H \times W \times 3}$, where $H=W=512$ [S1, unofficial]. No camera parameters or depth are provided [S1, unofficial].
+*   **Outputs:** A set of 3D Gaussian primitives $\mathcal{G}$, defined by mean position $\mu$, covariance $\Sigma$, opacity $\alpha$, and color $c$ (or spherical harmonics coefficients $S$) [S1, unofficial].
+
+### Data Structures
+The method predicts per-pixel Gaussian parameters. For each pixel in the input images, the following attributes are predicted:
+*   **Offset ($\Delta$):** $\mathbb{R}^3$, representing the displacement from the predicted 3D point [S1, unofficial].
+*   **Rotation ($q$):** $\mathbb{R}^4$, a quaternion representing orientation [S1, unofficial].
+*   **Scale ($s$):** $\mathbb{R}^3$, representing the anisotropic scaling of the Gaussian [S1, unofficial].
+*   **Opacity ($\alpha$):** $\mathbb{R}$, scalar transparency [S1, unofficial].
+*   **Color ($S$):** $\mathbb{R}^3$ (constant view-independent color) or spherical harmonics coefficients for view-dependent color [S1, unofficial].
+
+### Background
+Splatt3R builds on [Feed-forward Generalizable Reconstruction](16746-feed-forward-generalizable-reconstruction.md) by utilizing a pre-trained "foundation" model for 3D geometry. It is based on MASt3R, a method for stereo reconstruction that predicts 3D point clouds and confidence maps from uncalibrated image pairs [S1, unofficial].
+
+### Steps
+
+1.  **Feature Encoding:** Encode the two input images $I_1, I_2$ using a shared Vision Transformer (ViT) encoder and cross-attention transformers. These components are frozen during training [S1, unofficial].
+2.  **Point Cloud Prediction:** Use the frozen MASt3R backbone to predict 3D point locations $\hat{X}_1, \hat{X}_2$ and confidence maps $C_1, C_2$ in the coordinate frame of the first image [S1, unofficial].
+3.  **Gaussian Parameter Prediction:** Run a parallel "Gaussian head" (using DPT architecture) to predict offsets $\Delta$, rotations $q$, scales $s$, opacities $\alpha$, and spherical harmonics $S$ for each pixel [S1, unofficial].
+4.  **Mean Position Calculation:** Calculate the mean position $\mu$ of each Gaussian by adding the predicted offset to the predicted 3D point:
+    $$ \mu = \hat{x} + \Delta $$
+    where $\hat{x}$ is the 3D point predicted by MASt3R [S1, unofficial].
+5.  **Covariance Reparameterization:** Construct the covariance matrix $\Sigma$ from the rotation quaternion $q$ and scale $s$ to ensure positive semi-definiteness:
+    $$ \Sigma = R(q) S(s) S(s)^T R(q)^T $$
+    where $R(q)$ is the rotation matrix derived from $q$, and $S(s)$ is a diagonal matrix with $s$ on the diagonal [S1, unofficial].
+6.  **Primitive Construction:** Construct the final set of Gaussian primitives as the union of primitives predicted from both input images $I_1$ and $I_2$ [S1, unofficial].
+7.  **Rendering:** Render the Gaussian set into target views using differentiable rasterization [S1, unofficial].
+
+### Parameters
+*   **Activation Functions:** Normalization for quaternions, exponential for scales and offsets, and sigmoid for opacities [S1, unofficial].
+*   **Color Parameterization:** The experiments primarily use constant, view-independent color $S \in \mathbb{R}^3$, with ablations for view-dependent spherical harmonics [S1, unofficial].
+*   **Overlap Thresholds:** Hyperparameters $\phi$ and $\psi$ control the selection of context and target images during training.
+    *   Close: $\phi=0.9, \psi=0.9$
+    *   Medium: $\phi=0.7, \psi=0.7$
+    *   Wide: $\phi=0.5, \psi=0.5$
+    *   Very Wide: $\phi=0.3, \psi=0.3$ [S1, unofficial]
+
+### Training Procedure
+1.  **Dataset Selection:** Select context images such that at least $\phi\%$ of pixels in the second image have correspondences in the first, and target images such that at least $\psi\%$ of pixels are present in at least one context image [S1, unofficial].
+2.  **Loss Masking:** Calculate a loss mask $M$ to prevent supervising pixels that are not feasibly reconstructed.
+    *   Unproject target image points and reproject them onto context images.
+    *   Check if the rendered depth matches the ground truth depth.
+    *   Check if the pixel is inside the frustum of at least one context view.
+    *   Pixels satisfying these conditions are marked as valid in $M$ [S1, unofficial].
+3.  **Loss Calculation:** Compute the total loss $L$ as a weighted sum of masked Mean Squared Error (MSE) and LPIPS losses:
+    $$ L = \lambda_{MSE} L_{MSE}(M \odot \hat{I}, M \odot I) + \lambda_{LPIPS} L_{LPIPS}(M \odot \hat{I}, M \odot I) $$
+    where $\hat{I}$ is the rendered image, $I$ is the ground truth target image, and $\odot$ denotes element-wise multiplication [S1, unofficial].
+4.  **Optimization:** Train the Gaussian head using the calculated loss. The MASt3R backbone remains frozen [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def splatt3r_forward(I1, I2, mast3r_backbone, gaussian_head):
+    """
+    Forward pass of Splatt3R.
+    I1, I2: Input images [B, 3, H, W]
+    Returns: Gaussian parameters for novel view synthesis
+    """
+    # 1. Feature Encoding (Frozen MASt3R Backbone)
+    # The backbone returns 3D points and confidences in the frame of I1
+    points_1, conf_1 = mast3r_backbone(I1, I2) # points_1: [B, 3, H, W]
+    
+    # Note: MASt3R also predicts points for I2, but Splatt3R primarily 
+    # constructs primitives in I1's frame and unions them. 
+    # For simplicity, we assume the Gaussian head processes features 
+    # derived from the cross-attention output.
+    
+    # 2. Gaussian Parameter Prediction
+    # Gaussian head predicts offsets, rotations, scales, opacities, colors
+    offsets = gaussian_head.predict_offsets(points_1) # [B, 3, H, W]
+    rotations = gaussian_head.predict_rotations(points_1) # [B, 4, H, W]
+    scales = gaussian_head.predict_scales(points_1) # [B, 3, H, W]
+    opacities = gaussian_head.predict_opacities(points_1) # [B, 1, H, W]
+    colors = gaussian_head.predict_colors(points_1) # [B, 3, H, W] or SH coeffs
+    
+    # 3. Apply Activations [G]
+    # Normalization for quaternions
+    rotations = F.normalize(rotations, dim=1)
+    # Exponential for scales and offsets
+    scales = torch.exp(scales)
+    offsets = torch.exp(offsets) # Or tanh + scale, depending on implementation details not fully specified. 
+                                 # Source says "exponential for scales and offsets".
+    # Sigmoid for opacities
+    opacities = torch.sigmoid(opacities)
+    
+    # 4. Calculate Mean Position
+    # mu = x + delta
+    means = points_1 + offsets
+    
+    # 5. Construct Covariance
+    # Sigma = R(q) S(s) S(s)^T R(q)^T
+    # R(q) is rotation matrix from quaternion
+    # S(s) is diagonal scale matrix
+    covariances = quaternion_to_covariance(rotations, scales)
+    
+    # 6. Return Gaussian Set
+    # The set is the union of primitives from both images.
+    # In this simplified forward pass, we return parameters for I1's frame.
+    # A full implementation would repeat this for I2 and union the sets.
+    return {
+        'means': means,
+        'covariances': covariances,
+        'opacities': opacities,
+        'colors': colors
+    }
+
+def quaternion_to_covariance(quaternions, scales):
+    """
+    Converts quaternions and scales to covariance matrices.
+    quaternions: [B, 4, H, W]
+    scales: [B, 3, H, W]
+    Returns: [B, 3, 3, H, W]
+    """
+    # Convert quaternion to rotation matrix
+    # R(q) shape: [B, 3, 3, H, W]
+    R = quaternion_to_rotation_matrix(quaternions)
+    
+    # Scale matrix S(s)
+    # S(s) is diagonal with scales on diagonal
+    # We need to compute R * S * S^T * R^T
+    # Let D = S * S^T (diagonal matrix of squared scales)
+    squared_scales = scales ** 2 # [B, 3, H, W]
+    
+    # Construct D as a batch of diagonal matrices
+    # D[i,j,k] = squared_scales[i,j,k] if i==j else 0
+    # Efficiently: R @ D @ R^T
+    # R is [B, 3, 3, H, W]
+    # D is [B, 3, H, W] -> reshape to [B, 3, 1, H, W] for broadcasting? 
+    # Actually, standard matrix mult:
+    # Cov = R @ diag(s^2) @ R^T
+    
+    # Reshape for batch matrix multiplication
+    # R: [B*H*W, 3, 3]
+    # s2: [B*H*W, 3]
+    B, C, H, W = quaternions.shape
+    R_flat = R.permute(0, 2, 3, 1).reshape(-1, 3, 3) # [BHW, 3, 3]
+    s2_flat = scales.permute(0, 2, 3, 1).reshape(-1, 3) # [BHW, 3]
+    
+    # D = diag(s^2)
+    D = torch.diag_embed(s2_flat) # [BHW, 3, 3]
+    
+    # Cov = R @ D @ R^T
+    Cov_flat = torch.bmm(torch.bmm(R_flat, D), R_flat.transpose(1, 2)) # [BHW, 3, 3]
+    
+    # Reshape back
+    Cov = Cov_flat.reshape(B, H, W, 3, 3).permute(0, 3, 4, 1, 2) # [B, 3, 3, H, W]
+    
+    return Cov
+
+def quaternion_to_rotation_matrix(quaternions):
+    """
+    Converts quaternions [B, 4, H, W] to rotation matrices [B, 3, 3, H, W].
+    """
+    # Standard quaternion to rotation matrix conversion
+    # q = [w, x, y, z]
+    w, x, y, z = torch.unbind(quaternions, dim=1)
+    
+    # Precompute products
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    wx, wy, wz = w*x, w*y, w*z
+    
+    # Construct rotation matrix
+    # Row 1
+    r11 = 1 - 2*(yy + zz)
+    r12 = 2*(xy - wz)
+    r13 = 2*(xz + wy)
+    # Row 2
+    r21 = 2*(xy + wz)
+    r22 = 1 - 2*(xx + zz)
+    r23 = 2*(yz - wx)
+    # Row 3
+    r31 = 2*(xz - wy)
+    r32 = 2*(yz + wx)
+    r33 = 1 - 2*(xx + yy)
+    
+    R = torch.stack([
+        torch.stack([r11, r12, r13], dim=1),
+        torch.stack([r21, r22, r23], dim=1),
+        torch.stack([r31, r32, r33], dim=1)
+    ], dim=1) # [B, 3, 3, H, W]
+    
+    return R
+
+def calculate_loss_mask(target_points, context_points, context_depths, frustums):
+    """
+    Calculates the loss mask M.
+    target_points: [B, 3, H, W] in world space
+    context_points: [B, 3, H, W] in world space (from context views)
+    context_depths: [B, 1, H, W] depth maps of context views
+    frustums: Boolean masks indicating if target points are in context frustums
+    
+    Returns: M [B, 1, H, W]
+    """
+    # 1. Frustum Culling
+    # Check if target points are inside the frustum of at least one context view
+    in_frustum = frustums # [B, 1, H, W]
+    
+    # 2. Covisibility / Depth Matching
+    # Unproject target points to world, reproject to context, compare depth
+    # This requires camera intrinsics and extrinsics which are known during training
+    # but not available at inference.
+    
+    # For each context view:
+    # reprojected_depth = project(target_world_points, context_cam)
+    # gt_depth = context_depths
+    # depth_match = |reprojected_depth - gt_depth| < threshold
+    
+    # Combine with frustum check
+    # M = in_frustum AND depth_match
+    
+    # Placeholder for complex reprojection logic
+    M = in_frustum # Simplified for pseudocode completeness
+    
+    return M
+```
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** Splatt3R runs at 4 FPS for 512x512 resolution [S1, unofficial]. This is significantly faster than iterative per-scene optimization methods like standard 3D Gaussian Splatting [S1, unofficial].
+*   **Memory:** Memory usage is dominated by the ViT encoder and the Gaussian head. The method predicts per-pixel Gaussians, resulting in $H \times W$ primitives per image [S1, unofficial].
+
+### Measured Performance
+On the ScanNet++ test scenes with Close view overlap ($\phi=0.9, \psi=0.9$):
+*   PSNR: 19.66 dB
+*   SSIM: 0.757
+*   LPIPS: 0.234 [S1, unofficial]
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Pose-free: Does not require camera intrinsics or extrinsics [S1, unofficial].
+    *   Generalizable: Trained on ScanNet++, it generalizes to uncalibrated, in-the-wild images [S1, unofficial].
+    *   Extrapolation: Can synthesize views beyond the stereo baseline, unlike many siblings [S1, unofficial].
+*   **Limitations:**
+    *   Performance degrades with wider baselines (lower $\phi, \psi$) [S1, unofficial].
+    *   Relies on the quality of the MASt3R point cloud prediction; errors in geometry propagate to Gaussian parameters [S1, unofficial].
+    *   Constant color parameterization may limit appearance quality compared to view-dependent SH [S1, unofficial].
+
+### When to Use
+*   Use Splatt3R when you have a pair of uncalibrated images and need fast, generalizable novel view synthesis without camera calibration [S1, unofficial].
+*   Use when extrapolation to viewpoints outside the input stereo pair is required [S1, unofficial].
+
+### When Not to Use
+*   Do not use if high-precision camera poses are available and iterative optimization is acceptable, as standard 3D-GS will likely yield higher quality [S1, unofficial].
+*   Do not use if view-dependent appearance is critical and the constant color ablation is insufficient [S1, unofficial].
+
+## Background
+Splatt3R was introduced in 2024 by Brandon, Zheng, Iro, and Victor from the University of Oxford [S1, unofficial]. It is based on the MASt3R architecture, which is a foundation model for 3D geometry reconstruction from uncalibrated stereo pairs [S1, unofficial]. The method was trained on the ScanNet++ dataset [S1, unofficial]. It addresses the limitation of existing generalizable 3D-GS methods that only supervise interpolated viewpoints, by introducing a loss masking strategy to enable extrapolation [S1, unofficial].
+
+## Sources
+
+[S1] Splatt3R: Zero-Shot Gaussian Splatting from Uncalibrated Image Pairs, https://splatt3r.active.vision/, fetched 2026-10-30 (unofficial)

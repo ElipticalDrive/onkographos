@@ -1,0 +1,200 @@
+--- v004.md
++++ v005.md
+@@ -3,129 +3,105 @@
+ 
+ ## Overview
+-Distribution over Levels is a hierarchical filtering technique for sparse voxel octrees that propagates radiance data from leaf nodes to interior nodes to create a multi-resolution MIP-map hierarchy. It solves the problem of aliasing and high-frequency noise in indirect illumination by smoothing voxel values across levels, enabling efficient cone tracing at coarser resolutions. It differs from regular grid MIP-mapping by explicitly handling the boundary sharing of 3x3x3 voxel bricks in an octree structure, requiring weighted averaging to account for overlapping voxels [S1][S2]. Unlike [Sparse Octree Filtering with Node Map](2337-sparse-octree-filtering-with-node-map.md), which uses a 2D node map to reduce thread launch overhead, this method focuses on the computational balance of the filtering passes themselves to ensure uniform thread cost.
++Distribution over Levels (MIP-mapping) filters radiance values from the lowest level of a sparse voxel octree and stores the results in higher levels to form a MIP-map hierarchy [S1]. It differs from regular grid MIP-mapping by explicitly handling the boundary sharing of 3x3x3 voxel bricks in an octree structure, requiring weighted averaging to account for overlapping voxels [S1][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Radiance values (energy and direction) stored in the leaf nodes of a sparse voxel octree. These values are typically injected via photon splatting from light sources.
+-*   **Output:** Filtered radiance values stored in the interior nodes (higher levels) of the octree, forming a MIP-map hierarchy.
++*   **Input:** Radiance values (energy and direction) injected into the leaf nodes of the sparse voxel octree via photon splatting from light sources [S1].
++*   **Output:** Filtered radiance values stored in the interior nodes (higher levels) of the octree, forming a MIP-map hierarchy [S1].
+ 
+ **Data Structures:**
+-*   **Octree Node:** Contains a 3x3x3 brick of voxels. Each voxel stores a compact representation of incoming light.
+-*   **Gaussian-Lobes Representation:** A compact structure used to store the filtered distribution of incoming light directions, allowing for view-dependent treatment of the Normal Distribution Function (NDF) and Bidirectional Reflectance Distribution Function (BRDF) [S1].
++*   **Octree Node:** Contains a 3x3x3 brick of voxels [S1].
++*   **Voxel Representation:** Each voxel stores a compact Gaussian-Lobes representation of incoming light directions, enabling view-dependent treatment of the Normal Distribution Function (NDF) and Bidirectional Reflectance Distribution Function (BRDF) [S1].
+ 
+ **Algorithm Steps:**
+-The method avoids the inefficiency of launching one thread per higher-level voxel (which causes redundant computation for shared voxels and unbalanced scheduling) by using three separate passes with roughly equal thread costs [S1][S2].
+-
+-1.  **Pass 1: Center Voxel.** Compute the filtered value for the center voxel of the 3x3x3 brick. This requires fetching and combining 27 voxel values from the lower level (the entire 3x3x3 neighborhood) [S1][S2].
+-2.  **Pass 2: Face Centers.** Compute half of the filtered response for the voxels situated in the center of the node's faces. Because only half the value is computed, this pass involves only 18 voxel values from the lower level [S1][S2].
+-3.  **Pass 3: Corners.** Launch threads for the corner voxels. These compute a partial filtering of voxels from a single octant [S1][S2].
+-4.  **Finalization (Value Transfer).** After the three passes, the higher-level voxels contain partial results, similar to the state of leaf nodes after initial photon splatting. The previously defined "Value Transfer to Neighboring Bricks" step is applied to sum values across bricks, finalizing the filtering result [S1][S2].
++The method avoids the inefficiency of launching one thread per higher-level voxel, which causes shared voxels to be computed up to eight times and leads to unbalanced scheduling due to varying computation costs [S1][S2]. Instead, it uses three separate passes with roughly equal thread costs [S1][S2].
++1.  **Pass 1: Center Voxel.** Compute the filtered value for the center voxel of the 3x3x3 brick using 27 voxel values from the lower level [S1][S2].
++2.  **Pass 2: Face Centers.** Compute half of the filtered response for the voxels situated in the center of the node's faces, involving 18 voxel values from the lower level [S1][S2].
++3.  **Pass 3: Corners.** Launch threads for the corner voxels, which compute a partial filtering of voxels from a single octant [S1][S2].
++4.  **Finalization (Value Transfer).** After the three passes, the higher-level voxels contain partial results similar to leaf nodes after initial photon splatting [S1][S2]. The previously defined "Value Transfer to Neighboring Bricks" step is applied to sum values across bricks and finalize the filtering result [S1][S2].
+ 
+ **Pseudocode:**
+-The following pseudocode illustrates the three-pass structure. It assumes a function `FilterBrick` that performs the weighted averaging of lower-level voxels.
+-
+ ```python
+ def distribute_radiance_over_levels(octree, level_index):
+-    """
+-    Filters radiance from level_index to level_index + 1.
+-    Assumes octree nodes are 3x3x3 bricks.
+-    """
+     # Identify all bricks at level_index + 1 that need filtering
+-    bricks_to_filter = get_bricks_at_level(octree, level_index + 1)
+-    
++    bricks_to_filter = [brick for brick in octree[level_index + 1].bricks if brick.is_active()]
++
+     # Pass 1: Center Voxel
+-    # Computes full filter using 27 lower-level voxels
+     for brick in bricks_to_filter:
+         center_voxel = brick.voxels[1, 1, 1]
+-        # Fetch 27 voxels from lower level (3x3x3 neighborhood)
+-        lower_voxels = fetch_3x3x3_neighbors(octree, brick, level_index)
+-        center_voxel.value = filter_27_voxels(lower_voxels)
+-        
++        lower_voxels = gather_3x3x3_neighbors(octree, brick, level_index)
++        # Sources do not specify the exact weighting formula [G]
++        center_voxel.value = sum(v.value for v in lower_voxels) / len(lower_voxels)
++
+     # Pass 2: Face Centers
+-    # Computes half response using 18 lower-level voxels
+-    # Faces are at indices: (1,0,1), (1,2,1), (0,1,1), (2,1,1), (1,1,0), (1,1,2)
+-    face_indices = [
+-        (1, 0, 1), (1, 2, 1),
+-        (0, 1, 1), (2, 1, 1),
+-        (1, 1, 0), (1, 1, 2)
+-    ]
++    face_indices = [(1, 0, 1), (1, 2, 1), (0, 1, 1), (2, 1, 1), (1, 1, 0), (1, 1, 2)]
+     for brick in bricks_to_filter:
+         for idx in face_indices:
+             face_voxel = brick.voxels[idx]
+-            # Fetch 18 voxels from lower level (half-neighborhood)
+-            lower_voxels = fetch_half_neighbor_voxels(octree, brick, level_index, idx)
+-            face_voxel.value = 0.5 * filter_18_voxels(lower_voxels)
+-            
++            lower_voxels = gather_half_neighbors(octree, brick, level_index, idx)
++            face_voxel.value = 0.5 * sum(v.value for v in lower_voxels) / len(lower_voxels)
++
+     # Pass 3: Corners
+-    # Computes partial filtering from a single octant
+-    # Corners are at indices: (0,0,0), (0,0,2), (0,2,0), (0,2,2), (2,0,0), (2,0,2), (2,2,0), (2,2,2)
+-    corner_indices = [
+-        (0, 0, 0), (0, 0, 2), (0, 2, 0), (0, 2, 2),
+-        (2, 0, 0), (2, 0, 2), (2, 2, 0), (2, 2, 2)
+-    ]
++    corner_indices = [(0, 0, 0), (0, 0, 2), (0, 2, 0), (0, 2, 2), (2, 0, 0), (2, 0, 2), (2, 2, 0), (2, 2, 2)]
+     for brick in bricks_to_filter:
+         for idx in corner_indices:
+             corner_voxel = brick.voxels[idx]
+-            # Fetch voxels from single octant
+-            lower_voxels = fetch_octant_voxels(octree, brick, level_index, idx)
+-            corner_voxel.value = partial_filter_octant(lower_voxels)
+-            
++            lower_voxels = gather_octant_neighbors(octree, brick, level_index, idx)
++            corner_voxel.value = sum(v.value for v in lower_voxels) / len(lower_voxels)
++
+     # Finalization: Apply Value Transfer to Neighboring Bricks
+-    # This step sums partial results across adjacent bricks to get the final value
+-    apply_value_transfer(octree, level_index + 1)
++    for brick in octree[level_index + 1].bricks:
++        brick.finalize()
+ 
+-def fetch_3x3x3_neighbors(octree, brick, level):
+-    # Implementation detail: Gather 3x3x3 voxels from the lower level
+-    # surrounding the current brick's position.
+-    # Returns a list of 27 voxel values.
+-    pass
++def gather_3x3x3_neighbors(octree, brick, level):
++    # Gather 3x3x3 voxels from the lower level surrounding the current brick
++    neighbors = []
++    for dx in [-1, 0, 1]:
++        for dy in [-1, 0, 1]:
++            for dz in [-1, 0, 1]:
++                neighbors.append(octree[level].get_voxel_at(brick.global_pos + (dx, dy, dz)))
++    return neighbors
+ 
+-def fetch_half_neighbor_voxels(octree, brick, level, face_idx):
+-    # Implementation detail: Gather 18 voxels from the lower level
+-    # corresponding to the half-filtering requirement for face centers.
+-    pass
++def gather_half_neighbors(octree, brick, level, face_idx):
++    # Gather 18 voxels from the lower level corresponding to the half-filtering requirement
++    neighbors = []
++    for dx in [-1, 0, 1]:
++        for dy in [-1, 0, 1]:
++            for dz in [-1, 0, 1]:
++                # Exclude the 9 voxels on the opposite face and center line to get 18
++                if not ((dx == 0 and dy == 0) or (dx == 0 and dz == 0) or (dy == 0 and dz == 0)):
++                    neighbors.append(octree[level].get_voxel_at(brick.global_pos + (dx, dy, dz)))
++    return neighbors
+ 
+-def fetch_octant_voxels(octree, brick, level, corner_idx):
+-    # Implementation detail: Gather voxels from the single octant
+-    # corresponding to the corner's position.
+-    pass
+-
+-def filter_27_voxels(voxels):
+-    # Weighted average of 27 voxels
+-    pass
+-
+-def filter_18_voxels(voxels):
+-    # Weighted average of 18 voxels
+-    pass
+-
+-def partial_filter_octant(voxels):
+-    # Partial filtering from a single octant
+-    pass
+-
+-def apply_value_transfer(octree, level):
+-    # Sum values across neighboring bricks to finalize the MIP-map level
+-    pass
++def gather_octant_neighbors(octree, brick, level, corner_idx):
++    # Gather voxels from the single octant corresponding to the corner's position
++    neighbors = []
++    offset_x = -1 if corner_idx[0] == 0 else 1
++    offset_y = -1 if corner_idx[1] == 0 else 1
++    offset_z = -1 if corner_idx[2] == 0 else 1
++    neighbors.append(octree[level].get_voxel_at(brick.global_pos + (offset_x, offset_y, offset_z)))
++    return neighbors
+ ```
+ 
+ **Parameters and Typical Values:**
+-*   **Octree Depth:** Determined by the scene's detail and memory constraints.
+-*   **Gaussian-Lobes:** The number of lobes determines the accuracy of the directional light distribution. Not given in the sources.
++*   **Octree Depth:** Not given in the sources.
++*   **Gaussian-Lobes Count:** Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sparse Octrees:** The method assumes a complete octree in its basic form. In sparse octrees, launching threads for all nodes (including empty ones) consumes resources. Filtering zero values in empty nodes is inefficient. A solution is to launch a thread per light-view-map pixel to find the relevant node and execute filtering only where photons exist [S2].
+-*   **Shared Voxels:** A naive approach of launching one thread per higher-level voxel causes shared voxels to be computed up to eight times, leading to redundant work and unbalanced scheduling due to varying computation costs [S1][S2]. The three-pass method mitigates this by splitting the computation.
++*   **Sparse Octrees:** The basic method assumes a complete octree, but sparse octrees waste resources filtering zero values in empty nodes [S2]. Launching a thread per light-view-map pixel to find the relevant node avoids filtering empty nodes [S2].
++*   **Shared Voxels:** A naive approach of launching one thread per higher-level voxel causes shared voxels to be computed up to eight times, leading to redundant work and unbalanced scheduling [S1][S2]. The three-pass method mitigates this by splitting the computation [S1][S2].
+ 
+ ## Subtopics
+ 
+ ### [Octree MIP-mapping](4127-octree-mip-mapping.md)
+-Octree MIP-mapping is the process of propagating and filtering voxel data from the leaf nodes of a sparse voxel octree up to the interior nodes, creating a multi-resolution hierarchy for efficient ray-grid traversal. It solves the problem of representing high-frequency surface details at fine levels while providing smooth, low-frequency approximations at coarse levels, preventing aliasing during rendering. It differs from regular grid MIP-mapping by explicitly handling the boundary sharing of 3x3x3 voxel bricks in an octree structure, requiring weighted averaging to account for overlapping voxels.
++Octree MIP-mapping propagates and filters voxel data from leaf nodes to interior nodes, creating a multi-resolution hierarchy for efficient ray-grid traversal. It differs from regular grid MIP-mapping by explicitly handling the boundary sharing of 3x3x3 voxel bricks in an octree structure, requiring weighted averaging to account for overlapping voxels.
+ 
+ ### Gaussian-Lobes Representation for Radiance Filtering
+-A compact representation used to store the filtered distribution of incoming light directions in the octree mipmap levels, allowing for view-dependent treatment of NDF and BRDF. It is filtered into higher octree levels (mipmap) using a screen-space quad-tree analysis for parallel efficiency [S1].
++A compact representation used to store the filtered distribution of incoming light directions in the octree mipmap levels, allowing for view-dependent treatment of NDF and BRDF [S1]. It is filtered into higher octree levels (mipmap) using a screen-space quad-tree analysis for parallel efficiency [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The three-pass approach ensures that all threads have roughly the same cost, leading to balanced scheduling on GPU hardware. However, the exact complexity depends on the number of non-empty bricks. In sparse octrees, avoiding filtering of zero values is crucial for performance [S2].
+-*   **Memory Complexity:** Requires storing radiance values (energy and direction) in all levels of the octree, including the MIP-map levels. The Gaussian-Lobes representation adds overhead per voxel but allows for efficient storage of directional information [S1].
+-*   **Strengths:** Efficient parallel filtering with balanced thread costs. Handles sparse data effectively when combined with light-view-map based thread launching. Prevents aliasing by smoothing high-frequency details.
++*   **Time Complexity:** The three-pass approach ensures that all threads have roughly the same cost, leading to balanced scheduling [S1][S2]. Performance depends on the number of non-empty bricks, and avoiding filtering of zero values is crucial for sparse octrees [S2].
++*   **Memory Complexity:** Requires storing radiance values (energy and direction) in all levels of the octree, including the MIP-map levels [S1]. The Gaussian-Lobes representation adds overhead per voxel but allows for efficient storage of directional information [S1].
++*   **Strengths:** Efficient parallel filtering with balanced thread costs. Handles sparse data effectively when combined with light-view-map based thread launching.
+ *   **Limitations:** Computationally intensive if the octree is dense. Requires careful handling of boundary conditions and shared voxels. The "Value Transfer" step adds an additional pass over the data.
+ *   **When to use:** When rendering indirect illumination with cone tracing on sparse voxel octrees, especially when view-dependent lighting effects are desired.
+@@ -133,5 +109,5 @@
+ 
+ ## Background
+-Originating from the work on Interactive Indirect Illumination Using Voxel Cone Tracing, this method was introduced to efficiently handle indirect lighting in dynamic scenes. It builds on the concept of sparse voxel octrees and cone tracing [S1]. The method was developed to address the inefficiencies of naive MIP-map generation in sparse structures, such as redundant computation and unbalanced scheduling. It is used in real-time rendering engines that support global illumination effects, particularly those involving dynamic lights and complex geometry.
++Originating from the work on Interactive Indirect Illumination Using Voxel Cone Tracing, this method was introduced to efficiently handle indirect lighting in dynamic scenes [S1]. It builds on the concept of sparse voxel octrees and cone tracing [S1]. The method was developed to address the inefficiencies of naive MIP-map generation in sparse structures, such as redundant computation and unbalanced scheduling [S1]. It is used in real-time rendering engines that support global illumination effects, particularly those involving dynamic lights and complex geometry [S1].
+ 
+ ## Sources

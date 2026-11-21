@@ -1,0 +1,243 @@
+# Truncated Gradient Updates for 3D Gaussian Splatting
+
+Also called: TruncGradGS, Truncated Gradient Method
+
+## Overview
+Truncated Gradient Updates is a training optimization technique for 3D Gaussian Splatting that addresses vanishing gradients in "dead" Gaussians (those with low opacity) to enable long-range movement and convergence [S1]. It solves the problem where poorly initialized or distant Gaussians fail to receive gradient signals because they are filtered out by the rasterizer's alpha-blending cutoff, preventing them from moving to their correct positions [S1]. Unlike standard backpropagation which only updates Gaussians contributing to the final pixel color, this method computes a surrogate gradient for non-contributing Gaussians based on their Mahalanobis distance, allowing them to "pull" toward visible pixels [S1]. It is distinct from sibling methods like [Bézier-boundary gradient approximation](13137-b-zier-boundary-gradient-approximation.md) by using a linear surrogate model for the truncated gradient rather than boundary approximations, and from [Sparse SH Order Increment](18689-sparse-sh-order-increment.md) by focusing on spatial movement rather than frequency domain updates.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** The current set of 3D Gaussians (means $\mu$, covariances, opacities $\sigma$, colors, SH coefficients), camera parameters, ground-truth image $I_{gt}$, and rendered image $\hat{I}$.
+*   **Outputs:** Updated Gaussian parameters after the optimization step.
+
+**Data Structures:**
+The method operates on the standard 3DGS Gaussian primitive structure. Key fields involved are:
+*   $\mu \in \mathbb{R}^3$: 3D mean position.
+*   $\sigma \in \mathbb{R}$: Opacity scalar.
+*   $\alpha \in \mathbb{R}$: Alpha value after density scaling (often $\alpha = \sigma \cdot \alpha_{density}$, but the source uses $\sigma \alpha$ to denote the effective contribution threshold).
+*   $p \in \mathbb{R}^2$: 2D pixel center coordinate.
+*   $a, b, c$: Coefficients derived from the Gaussian covariance matrix for Mahalanobis distance calculation (from Eq. 8 of [S1]).
+
+**Parameters:**
+*   $\tau_{pruning}$: The opacity threshold below which a Gaussian is considered "dead" and eligible for truncated gradients.
+*   $m$: Slope parameter influencing the range of action of the truncated gradient. Lower $m$ yields a near-constant long-range gradient; higher $m$ yields sharp decay [S1].
+*   $\tau$: The cut-off threshold for the squared Mahalanobis distance.
+*   $\lambda$: Loss weight for SSIM (typically 0.2, inherited from parent [S1]).
+
+**Numbered Steps:**
+
+1.  **Render and Compute Loss:**
+    Render the image $\hat{I}$ using the differentiable rasterizer. Compute the photometric loss $\mathcal{L}$ using the standard weighted sum:
+    $$ \mathcal{L}_{img} = (1 - \lambda) \mathcal{L}_{L1} + \lambda \mathcal{L}_{D-SSIM} $$
+    where $\mathcal{L}_{L1}$ is L1 loss and $\mathcal{L}_{D-SSIM}$ is differentiable SSIM [S1].
+
+2.  **Identify Dead Gaussians:**
+    For each Gaussian $i$, check if its opacity $\sigma_i$ is below the pruning threshold $\tau_{pruning}$. Only Gaussians satisfying $\sigma_i < \tau_{pruning}$ are candidates for truncated gradient updates [S1].
+
+3.  **Compute Mahalanobis Distance:**
+    For each pixel $p$ and candidate Gaussian $i$ with mean $\mu_i$, calculate the squared Mahalanobis distance $r_s$:
+    $$ r_s = \|\mu_i - p\|_2^2 $$
+    The threshold condition involves the quadratic form:
+    $$ K = a(\mu_{ix} - p_x)^2 + 2b(\mu_{ix} - p_x)(\mu_{iy} - p_y) + c(\mu_{iy} - p_y)^2 $$
+    where $a, b, c$ are coefficients from the Gaussian's covariance matrix [S1].
+
+4.  **Determine Gradient Path:**
+    For each pixel-Gaussian pair, determine the update path based on the effective contribution $\sigma_i \alpha_i$ and the Mahalanobis distance relative to the threshold $\tau$:
+
+    *   **Normal Path:** If $\sigma_i \alpha_i \ge 1/255$, the Gaussian contributes to the pixel. Use standard backpropagation gradients $\nabla \mathcal{L}$ [S1].
+    *   **Truncated Path:** If $\sigma_i \alpha_i < 1/255$ (low density or low opacity) AND the Mahalanobis distance is above the threshold (specifically, the distance $d(p) > \tau$), apply the truncated gradient [S1].
+        *   Condition Check: Only apply if $\frac{\partial \mathcal{L}}{\partial \alpha_i} < 0$. If positive, the gradient would cause repulsion [S1].
+        *   Calculation: Compute the truncated gradient surrogate. The cut-off gradient is defined as $G'(x)$, where $x$ is the solution to $G(x) = \tau$. The solution for the displacement is:
+            $$ r_s = \|\mu - p\|_2^2 \left( 1 \pm \sqrt{\frac{-2 \log \tau}{K}} \right) $$
+            (Note: The source provides the solution for $r_s$ in the context of the cut-off point. The gradient direction is towards the pixel $p$) [S1].
+        *   Special Case: If the low contribution is due to low opacity $\sigma$ (but distance is high), compute the gradient only for opacity $\sigma$ [S1].
+    *   **Skip Path:** If $\sigma_i \alpha_i < 1/255$ AND the Mahalanobis distance is below the threshold, the Gaussian receives no gradients [S1].
+
+5.  **Expand Tile Coverage (Implementation Detail):**
+    For dead Gaussians whose radius is below a threshold, expand their tile-coverage radius in the rasterizer. This ensures they are not culled during the tile-based rasterization pass, allowing them to receive the truncated gradient contributions from distant pixels [S1].
+
+6.  **Interleaved Optimization:**
+    Alternate between:
+    *   Optimization steps using truncated gradients for dead Gaussians.
+    *   Normal optimization steps with Adaptive Density Control (ADC) turned on.
+    This prevents perturbations from accumulated truncated gradients from interfering with ADC decisions [S1].
+
+7.  **Delay Pruning:**
+    Do not prune Gaussians during the main training loop. Delay pruning until the end of training to allow dead Gaussians to converge to distant pixels via truncated gradients before removal [S1].
+
+8.  **Dynamic Scene Handling (Optional):**
+    For dynamic scenes, create viewpoint-dependent motion masks via frame-difference and image processing. Ignore contributions of static pixels to reduce computation [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_truncated_gradients(gaussians, pixels, loss, params):
+    """
+    Computes gradients for 3D Gaussian Splatting using truncated gradient updates.
+    
+    Args:
+        gaussians: List of Gaussian primitives with attributes:
+                   - mu: (3,) mean position
+                   - sigma: scalar opacity
+                   - alpha: scalar alpha (density scaled)
+                   - cov: covariance matrix (for a, b, c)
+        pixels: List of pixel centers p (2,) and ground truth colors
+        loss: Scalar loss value L
+        params: Configuration parameters
+              - tau_pruning: Opacity threshold for dead Gaussians
+              - m: Slope parameter for truncated gradient decay
+              - tau: Mahalanobis distance threshold
+              - lambda: SSIM weight (0.2)
+    
+    Returns:
+        gradients: Dictionary of gradients for each Gaussian parameter
+    """
+    gradients = {g.id: {'mu': np.zeros(3), 'sigma': 0.0, 'alpha': 0.0} for g in gaussians}
+    
+    # Standard backpropagation for contributing Gaussians
+    standard_grads = compute_standard_gradients(gaussians, pixels, loss, params)
+    
+    for g in gaussians:
+        # Step 2: Identify Dead Gaussians
+        if g.sigma >= params.tau_pruning:
+            # Use standard gradients only
+            gradients[g.id]['mu'] = standard_grads[g.id]['mu']
+            gradients[g.id]['sigma'] = standard_grads[g.id]['sigma']
+            continue
+            
+        # Step 3 & 4: Process Dead Gaussians
+        # Check alpha gradient sign to prevent repulsion
+        dL_d_alpha = standard_grads[g.id]['alpha']
+        
+        # If alpha gradient is positive, do not apply truncated gradient
+        # to avoid long-range push/repulsion [S1]
+        if dL_d_alpha >= 0:
+            gradients[g.id]['mu'] = standard_grads[g.id]['mu']
+            gradients[g.id]['sigma'] = standard_grads[g.id]['sigma']
+            continue
+            
+        # Calculate Mahalanobis distance components
+        # a, b, c from covariance matrix (Eq. 8 in [S1])
+        a, b, c = get_mahalanobis_coeffs(g.cov)
+        
+        truncated_mu_grad = np.zeros(3)
+        truncated_sigma_grad = 0.0
+        
+        for p in pixels:
+            # Compute squared Mahalanobis distance metric K
+            dx = g.mu[0] - p.x
+            dy = g.mu[1] - p.y
+            K = a * dx**2 + 2 * b * dx * dy + c * dy**2
+            
+            # Check if distance is above threshold
+            # The source defines the cut-off condition via the solution to G(x) = tau
+            # We approximate the condition d(p) > tau using the derived r_s formula
+            # If K is very small, avoid division by zero [G]
+            if K < 1e-8:
+                continue
+                
+            # Determine if truncated gradient should be applied
+            # Condition: sigma * alpha < 1/255 AND distance > threshold
+            if g.sigma * g.alpha < 1.0/255.0:
+                # Check if distance is sufficiently large to warrant truncated gradient
+                # The source implies a threshold on the Mahalanobis distance
+                # We use the cut-off point logic: if the Gaussian is "far" enough
+                # that it doesn't contribute, but is within the "pull" range.
+                
+                # Calculate the cut-off distance parameter
+                # r_s solution from source: r_s = ||mu - p||^2 (1 +/- sqrt(-2 log tau / K))
+                # This defines the boundary. If the actual distance is beyond the 
+                # contribution threshold but within the truncated gradient range, apply it.
+                
+                # Simplified logic based on source: Apply if distance > tau
+                # Since exact tau mapping to pixel space depends on projection,
+                # we use the Mahalanobis distance metric directly.
+                
+                # Note: The source states "d(p) > tau" for truncated gradient.
+                # We assume tau is pre-computed or derived from the rasterizer's cutoff.
+                if is_distance_above_threshold(g.mu, p, K, params.tau):
+                    # Compute truncated gradient direction
+                    # Direction is towards the pixel p
+                    direction = p - g.mu[:2] # 2D projection difference
+                    norm = np.linalg.norm(direction)
+                    if norm > 0:
+                        direction = direction / norm
+                    
+                    # Magnitude depends on slope m and distance
+                    # Lower m -> near-constant gradient; Higher m -> sharp decay [S1]
+                    # The source defines cut-off gradient as G'(x) where G(x)=tau
+                    # We approximate the magnitude as a function of distance decay
+                    dist_sq = dx**2 + dy**2
+                    # Linear surrogate approximation for truncated gradient
+                    # The exact formula for G'(x) is in supplementary material [S1]
+                    # We use a simplified decay model consistent with the description
+                    gradient_magnitude = compute_truncated_magnitude(dist_sq, K, params.m, params.tau)
+                    
+                    truncated_mu_grad += direction * gradient_magnitude
+                    
+                    # If low opacity is the cause, also compute gradient for sigma
+                    if g.alpha > 0.5: # Heuristic: if alpha is high, low sigma is the cause
+                        truncated_sigma_grad += gradient_magnitude * g.alpha # Simplified chain rule [S1]
+        
+        # Accumulate gradients
+        # Note: Standard gradients for dead Gaussians are typically zero or negligible
+        # because they don't contribute to the pixel color.
+        gradients[g.id]['mu'] = standard_grads[g.id]['mu'] + truncated_mu_grad
+        gradients[g.id]['sigma'] = standard_grads[g.id]['sigma'] + truncated_sigma_grad
+        
+    return gradients
+
+def is_distance_above_threshold(mu, p, K, tau):
+    """
+    Checks if the Mahalanobis distance is above the threshold tau.
+    The source uses a threshold on the squared Mahalanobis distance.
+    """
+    # The source defines the cut-off via the solution to G(x) = tau.
+    # We approximate this by checking if the distance metric exceeds a scaled tau.
+    # Exact implementation depends on the specific rasterizer's cutoff definition.
+    # For the purpose of this article, we assume a pre-computed threshold.
+    return K > tau
+
+def compute_truncated_magnitude(dist_sq, K, m, tau):
+    """
+    Computes the magnitude of the truncated gradient.
+    Lower m -> near-constant; Higher m -> sharp decay [S1].
+    """
+    # Simplified model: G'(x) decays with distance.
+    # The source mentions a linear surrogate function.
+    # We use a simple exponential decay controlled by m.
+    # This is a placeholder for the exact supplementary formula [G]
+    if K == 0:
+        return 0.0
+    # Normalize distance by K to get a dimensionless metric
+    normalized_dist = dist_sq / K
+    # Decay function
+    magnitude = np.exp(-m * normalized_dist)
+    return magnitude
+```
+
+**Edge Cases and Pitfalls:**
+*   **Model Divergence:** Accumulated truncated gradients can surpass true gradients, causing divergence for "very bad fits" (no normal gradients) or "good fits" (true gradient near zero) [S1]. Mitigated by applying truncated gradients ONLY to dead Gaussians ($\sigma_i < \tau_{pruning}$) [S1].
+*   **Repulsion:** Applying truncated gradients when $\frac{\partial \mathcal{L}}{\partial \alpha_i} > 0$ causes Gaussians to repel each other [S1]. Always check the sign of the alpha gradient.
+*   **Tile Culling:** Dead Gaussians may be culled by the rasterizer's tile-based culling, preventing them from receiving gradients. Mitigated by expanding their tile-coverage radius if below a threshold [S1].
+*   **Performance Overhead:** The method can be 1–10× slower to train than the baseline due to additional gradient computations. Mitigated by restricting computations to dead Gaussians and using motion masks for dynamic scenes [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is 1–10× slower than the baseline 3DGS, depending on the scene and primitive count [S1]. Inference speed is unaffected [S1].
+*   **Memory Complexity:** No significant additional memory overhead compared to standard 3DGS, as it modifies the optimization loop rather than the data structure [S1].
+*   **Measured Performance:**
+    *   **Static Scenes (Mip-NeRF360, Random Init):** PSNR 25.16 (vs 24.74), SSIM 0.8511 (vs 0.8351), LPIPS 0.1974 (vs 0.2106), #GS 0.799M (vs 1.126M) [S1].
+    *   **Dynamic Scenes (Neural 3D Video):** PSNR 31.70 (vs 30.22), SSIM 0.9493 (vs 0.9443), LPIPS 0.1339 (vs 0.1360), #GS 1.733M (vs 2.806M) [S1].
+*   **Scaling:** The method scales with the number of Gaussians and pixels. Performance overhead is mitigated by only processing dead Gaussians and using motion masks for dynamic scenes [S1].
+*   **Strengths:** Improves reconstruction quality for poorly initialized scenes and dynamic scenes with large spatio-temporal divergence. Reduces the number of Gaussians needed for high-quality reconstruction [S1].
+*   **Limitations:** Slower training time. Requires careful tuning of the slope parameter $m$ and pruning threshold $\tau_{pruning}$ [S1].
+*   **When to Use:** Use for static or dynamic scene reconstruction where initialization is poor or there is significant motion. It is a plug-and-play module for 3DGS, 2DGS, 4DGS, CEM-4DGS, and 4DScaffold [S1].
+*   **When Not to Use:** Avoid if training time is a critical constraint and the scene is well-initialized. Do not apply to all Gaussians, as it degrades performance [S1].
+
+## Background
+The method was introduced by T. Morales, N.-Q. Le-Pham, R. Atkins & B.-S. Hua in the paper "TruncGradGS: Improved 3D Gaussian Splatting via Truncated Gradient Updates" [S1]. It addresses the limitations of standard 3D Gaussian Splatting in handling "dead" Gaussians that fail to converge due to vanishing gradients. The method is designed to be a generalizable improvement for both static and dynamic scene reconstruction [S1].
+
+## Sources
+[S1] TruncGradGS: Improved 3D Gaussian Splatting via Truncated Gradient Updates, https://arxiv.org/abs/2609.03534v1, fetched 2026-10-26

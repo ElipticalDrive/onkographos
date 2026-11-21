@@ -1,0 +1,141 @@
+The ultimate guide for the ray marching optimization algorithm
+
+Cone Marching in Three JS | Medium
+Sitemap
+Open in app
+Sign up
+Sign in
+Medium Logo
+Get app
+Write
+Search
+Sign up
+Sign in
+Press enter or click to view image in full size
+Cone Marching in 2D
+Cone Marching in Three.js
+The ultimate guide for the ray marching optimization algorithm
+Nabil Mansour
+10 min read
+·
+May 23, 2024
+--
+1
+Listen
+Share
+Though ray marching is powerful in terms of rendering various SDFs, it always falls short in its performance as the algorithm is very heavy and computationally expensive. Therefore, it is important to try and optimize it as best as possible, which is where cone marching comes along.
+Since pixels are always very close to each other, bundles of them end up marching the same distance so to speak, but since we are calculating the distance equation for each pixel independently, we end up with many repeated calculations that give very similar results. Bundling a group of rays, however, can mathematically give us a cone, and marching this cone instead of all these rays independently will allow us to skip a lot of those extra calculations.
+In this article, we’ll build upon the basic ray marching setup discussed in my previous article. It is, therefore, recommended that you check out that article before continuing.
+Below is an example of the FPS gain we can get with this algorithm:
+FPS gain
+However, if you are interested in the code only, click here. This will take you to a CodePen example of our final cone marching result.
+Our scene
+Before we start with the algorithm, we will use a different scene SDF to see the optimization in action. Our scene will be defined as follows:
+```
+float sphereFold(vec4 z, float minR, float maxR, float bloatFactor) { // bloat = 1 will not change size.    float r2 = dot(z.xyz, z.xyz);    return max(maxR / max(minR, r2), bloatFactor);}void boxFold(inout vec4 z, vec3 r) {    z.xyz = clamp(z.xyz, -r, r) * 2.0 - z.xyz;}float de_box(vec4 p, vec3 s) {    vec3 a = abs(p.xyz) - s;    return (min(max(max(a.x, a.y), a.z), 0.0) + length(max(a, 0.0))) / p.w;}float mandleBox(vec3 pos) {    vec4 p = vec4(pos, 1);    p *= 4.;    vec4 o = p;    for (int i = 0; i < u_sdfLOD; ++i) {        boxFold(p, vec3(1., 1., 1.0));        p *= sphereFold(p, 0., 1., 1.0) * 2.;        p += o;    }    return de_box(p, vec3(10, 10, 10));}float scene(vec3 p) {    return mandleBox(p);}
+```
+And our scene colour is a simple orange colour:
+```
+vec3 sceneCol(vec3 p) {    return vec3(1.0, 0.5, 0.5);}
+```
+This will give us the following SDF:
+Press enter or click to view image in full size
+Mandlebox fractal
+If you are curious about this SDF, it’s a fractal called mandlebox. The implementation is based on the third level of Fractal Glide: a game I made using cone-marching.
+The Algorithm
+Mathematically, cone marching is very similar to ray marching with the exception being the break condition that we have in our marching loop where instead of checking if the ray has hit anything, we check if the cone has hit anything.
+Press enter or click to view image in full size
+Comparing SDF calculations between ray marching and cone marching
+For a live 2D demo, you can check out this CodePen example:
+2D example of cone marching
+There are many ways to use this algorithm and it depends on the 3D graphics library that you are using and how complex you want your code to be. Here I will explain various methods but I will implement the simplest three.js way of using this algorithm in our renderer.
+Before we jump into the implementation though, let us first discuss how we can know if the cone has hit the scene:
+The math behind the algorithm
+To make things short, a cone intersects with an SDF if the distance calculated from the SDF is less than the radius of the cone.
+And so, as we march, we need to constantly keep track of the radius of our cone.
+Press enter or click to view image in full size
+Hit vs no hit when cone marching
+We will discuss how the radius is calculated mathematically, but let’s first start with the different approaches for cone marching.
+Multi-pass approach
+This approach is discussed in this PDF where the idea is to run multiple passes on the GPU decreasing the size of the cone we are marching every step of the way. Theoretically, this is an ideal approach where you can technically continue decreasing the size of the cone until it is less than or equal to the size of your pixel. However, you will potentially only need 3 to 4 passes (according to the PDF).
+Press enter or click to view image in full size
+Multi-pass cone marching (from PDF link above)
+In my experience, this approach is complicated in terms of implementation and the FPS gain isn’t worth the complexity it has compared to the simple approach we will discuss soon. However, if you are interested in seeing this in action, you can take a look at my Unity Fractal renderer FractiX where I implemented this approach using compute shaders.
+Simple Three.js approach
+This is a more straightforward implementation that aligns nicely with our previous ray marching implementation where we simply need to extend our shaders to account for cone marching.
+More specifically, we will cone-march in our vertex shader and then give our result to our fragment shader where we will ray-march again but with a starting distance and steps.
+So, the changes to our renderer will be as follows:
+1. Adding more vertices
+When creating our ray marching plane (which we’ll now call marching plane), we need to account for how many vertices we will use.
+If we have too many vertices (or segments in our plane), then the FPS increase wouldn’t be that much as the number of cones we are marching is closer to the number of pixels on the screen.
+If we don’t have a lot of vertices, then we will also not see an FPS increase since after we pass our cone marching distance to the fragment shader, we will still need to ray-march for a longer distance (making the optimization obsolete and not useful for our purposes).
+So a balance needs to be met, and I have found that for most scenes, 32 segment subdivisions seem enough. So in our three.js code, we create the plane geometry as follows:
+```
+let marchingPlaneGeo = new THREE.PlaneGeometry(1, 1, Math.trunc(camera.aspect*32), 32)
+```
+Moreover, the reason why we are multiplying by the aspect ratio of our camera is to keep our vertices evenly spaced (or square). This will avoid some artifacts that might occur if the screen is not 1 by 1.
+Using rectangular screen vertices: causes artifacts
+Using evenly spaced vertices: no artifacts
+2. Sending more data through uniforms
+There is some more information that we will need to send with our uniforms from the CPU to the GPU.
+First is the tan of the camera field of view divided by two. This is needed as it is what we will need to use to find the radius of our cone as we are marching.
+Press enter or click to view image in full size
+Finding the radius of a cone
+Second is the number of subdivisions we have for our screen. In our case, that is 32 but you can try and test other subdivision values.
+```
+const uniforms = {  u_eps: { value: 0.001 },  u_maxDis: { value: 20 },  u_maxSteps: { value: 100 },  u_clearColor: { value: backgroundColor },  u_camPos: { value: camera.position },  u_camToWorldMat: { value: camera.matrixWorld },  u_camInvProjMat: { value: camera.projectionMatrixInverse },  //-------New uniforms-------//  u_camTanFov: { value: Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) },  u_camPlaneSubdivisions: { value: 32 },  //--------------------------//  u_lightDir: { value: light.position },  u_lightColor: { value: light.color },  u_diffIntensity: { value: 0.5 },  u_specIntensity: { value: 3 },  u_shininess: { value: 16 },  u_ambientIntensity: { value: 0.15 },};
+```
+3. The marching functions
+Now that we have everything needed to cone-march, we just have to update our shaders to account for that. Let’s first define our cone marching function:
+```
+struct March {    float dis;    int steps;};March coneMarch(vec3 cro, vec3 crd){    float d = 0.; // total distance travelled    float cd; // current scene distance    float ccr; // current cone radius    vec3 p; // current position of ray    int i = 0; // steps iter    for (;i < u_maxSteps; ++i) { // main loop        p = cro + d * crd; // calculate new position        cd = scene(p); // get scene distance        ccr = (d * u_camTanFov)*2. / u_camPlaneSubdivisions; // calculate cone radius                // if current distance is less than cone radius with some padding or our distance is too big, break loop        if (cd < ccr*1.25 || d >= u_maxDis) break;        // otherwise, add new scene distance to total distance        d += cd;    }    return March(d, i); // finally, return scene distance}
+```
+You can first notice that we have added a unique struct. This is because we will need to pass our distance and steps taken to our fragment shader. In order to keep our code readable, I am using a struct, though it is not needed.
+Moreover, you can see that the cone marching function is almost the same as a ray marching one. But, we need to keep track of the current radius of the cone. We are also dividing the radius by how many subdivisions we are making. This is so that each cone we are marching is occupying only the vertex it's on.
+Lastly, our break condition checks if the current distance is less than our current radius with some padding (unlike ray marching which checks if it is less than the epsilon value). This is the mathematical approach of finding an intersection between the cone and the scene (as mentioned above) and the padding is there to avoid some artifacts that usually occur at the edges of the SDF. Feel free to experiment here and use different padding values (according to your specific SDF).
+With this, we can also change our ray marching function to account for the use of a starting distance and steps already taken.
+```
+float rayMarch(float startDis, int stepsTaken, vec3 ro, vec3 rd){    float d = startDis; // total distance travelled    float cd; // current scene distance    vec3 p; // current position of ray    for (int i = stepsTaken; i < u_maxSteps; ++i) { // main loop        p = ro + d * rd; // calculate new position        cd = scene(p); // get scene distance                // if we have hit anything or our distance is too big, break loop        if (cd < u_eps || d >= u_maxDis) break;        // otherwise, add new scene distance to total distance        d += cd;    }    return d; // finally, return scene distance}
+```
+Now, we can update our fragment and vertex shaders to use these new functions.
+4. Vertex shader
+Our vertex shader will now cone-march and send that data to our fragment shader:
+```
+// to send to fragment shaderout vec2 vUv;out float vDisTravelled;flat out int vSteps; // ints require "flat" qualifiervoid main() {    // Compute view direction in world space    vec4 worldPos = modelViewMatrix * vec4(position, 1.0);    vec3 viewDir = normalize(-worldPos.xyz);    // Output vertex position    gl_Position = projectionMatrix * worldPos;    // Output UV    vUv = uv;    // Cone marching    vec3 cro = u_camPos; // cone ray origin    vec3 crd = (u_camInvProjMat * vec4(uv*2.-1., 0, 1)).xyz; // cone ray direction    crd = (u_camToWorldMat * vec4(crd, 0)).xyz;    crd = normalize(crd);    March result = coneMarch(cro, crd); // cone march    vDisTravelled = result.dis; // update distance travelled    vSteps = result.steps; // update steps taken}
+```
+5. Fragment shader
+After we cone march, we send this information to our fragment shader which will run per pixel ray marching.
+```
+// From vertex shaderin vec2 vUv;in float vDisTravelled;flat in int vSteps;void main() {    if (vDisTravelled >= u_maxDis) { // early exit        gl_FragColor = vec4(u_clearColor,1);        return;    }    // Get UV from vertex shader    vec2 uv = vUv.xy;    // Get ray origin and direction from camera uniforms    vec3 ro = u_camPos;    vec3 rd = (u_camInvProjMat * vec4(uv*2.-1., 0, 1)).xyz;    rd = (u_camToWorldMat * vec4(rd, 0)).xyz;    rd = normalize(rd);        //----------Using cone marching data----------//    float disTravelled = rayMarch(vDisTravelled, vSteps, ro, rd); // use normalized ray    //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^//    // Find the hit position    vec3 hp = ro + disTravelled * rd;        // Get normal of hit point    vec3 n = normal(hp);    if (disTravelled >= u_maxDis) { // if ray doesn't hit anything        gl_FragColor = vec4(u_clearColor,1);    } else { // if ray hits something        // Calculate Diffuse model        float dotNL = dot(n, u_lightDir);        float diff = max(dotNL, 0.0) * u_diffIntensity;        float spec = pow(diff, u_shininess) * u_specIntensity;        float ambient = u_ambientIntensity;                vec3 color = u_lightColor * (sceneCol(hp) * (spec + ambient + diff));        gl_FragColor = vec4(color,1); // color output    }}
+```
+With our new ray marching function, we simply will need to pass our distance and steps taken from the vertex shader and essentially march less which makes us end up with fewer computations of SDFs.
+And that is pretty much it! You now have a cone marching scene in three.js
+If you are interested in the code only, you can check out the following CodePen:
+Cone marching in three js code pen
+Conclusion
+Though ray marching is unique in its ability to render fractals and other complex objects, it falls short in terms of efficiency since we always end up marching many similar rays: leading to repeated calculations.
+However, with cone marching, we can bundle these rays together, march them as a cone, and then use our resultant value to march the rays independently. This results in quite an increase in FPS which can even reach +50FPS in some cases.
+I hope you found this article useful,
+And if you have any questions, you can contact me on my website or by leaving a comment on this article.
+Cheers!
+Optimization
+Threejs
+Cone Marching
+Glsl
+JavaScript
+Written by Nabil Mansour
+4 followers
+·0 following
+A Graphics enthusiast, I will occasionally share some stuff I learn here!
+Responses (1)
+See all responses
+Help
+Status
+About
+Careers
+Press
+Blog
+Privacy
+Rules
+Terms
+Text to speech

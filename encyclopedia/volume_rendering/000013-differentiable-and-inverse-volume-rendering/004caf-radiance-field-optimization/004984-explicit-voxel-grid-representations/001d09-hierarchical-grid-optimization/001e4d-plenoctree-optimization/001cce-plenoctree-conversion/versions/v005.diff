@@ -1,0 +1,104 @@
+--- v004.md
++++ v005.md
+@@ -15,11 +15,10 @@
+ *   **Leaf Nodes:**
+     *   `density`: Float value $\sigma$ (volume density).
+-    *   `sh_coeffs`: Array of spherical harmonic coefficients for RGB channels. The number of coefficients depends on the SH degree used during NeRF-SH training. Exact degree is not given in the sources.
++    *   `sh_coeffs`: Array of spherical harmonic coefficients for RGB channels. The number of coefficients depends on the SH degree used during NeRF-SH training [S1, unofficial]. Exact degree is not given in the sources [G].
+ 
+ **Steps:**
+ 1.  **Evaluation:** Evaluate the NeRF-SH model to obtain $\sigma$ values on a uniformly spaced 3D grid. The grid is automatically scaled to tightly fit the scene content [S1, unofficial].
+     *   *Implementation Note:* The grid resolution is determined by pre-evaluating $\sigma$ on a larger grid and finding the bounding box of all points with $\sigma \ge \tau_a$ (where $\tau_a$ is a small alpha threshold) [S1, unofficial].
+-2.  **Filtering:** Render alpha maps for all training views using the voxel grid derived from the evaluation step. Track the maximum ray weight $1 - \exp(-\sigma_i \delta_i)$ at each voxel, where $\delta_i$ is the segment length within the voxel [S1, unofficial].
+-    *   Eliminate voxels whose maximum ray weights are lower than a threshold $\tau_w$ [S1, unofficial]. This filtering by maximum ray weight eliminates non-visible voxels, which is superior to naively thresholding by $\sigma$ at each point [S1, unofficial].
++2.  **Filtering:** Render alpha maps for all training views using the voxel grid derived from the evaluation step. Track the maximum ray weight $1 - \exp(-\sigma_i \delta_i)$ at each voxel, where $\delta_i$ is the segment length within the voxel [S1, unofficial]. Eliminate voxels whose maximum ray weights are lower than a threshold $\tau_w$ [S1, unofficial]. This filtering by maximum ray weight eliminates non-visible voxels, which is superior to naively thresholding by $\sigma$ at each point [S1, unofficial].
+ 3.  **Octree Construction:** Construct the octree containing the remaining voxels [S1, unofficial].
+ 4.  **Sampling (Baking):** For each remaining voxel (leaf candidate), sample $N=256$ random points within the voxel volume [S1, unofficial].
+@@ -32,7 +31,9 @@
+ **Pseudocode:**
+ ```python
++import math
++import random
++
+ def convert_nerf_sh_to_plenoctree(nerf_sh_model, training_views, tau_w):
+     # Step 1: Evaluation
+-    # Evaluate on a coarse grid to find scene bounds
+     coarse_res = 128
+     coarse_points = generate_uniform_grid([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], coarse_res)
+@@ -53,5 +54,5 @@
+         rays = generate_rays_from_view(view, grid_res)
+         for ray in rays:
+-            segments = traverse_voxel_grid(ray, grid_points, voxel_size)
++            segments = traverse_voxel_grid(ray, bounds_min, bounds_max, voxel_size)
+             for seg in segments:
+                 idx = seg.voxel_index
+@@ -102,7 +103,47 @@
+     return [Ray(origin=view.origin, direction=compute_direction(view, u, v)) for u in range(res) for v in range(res)]
+ 
+-def traverse_voxel_grid(ray, grid_points, voxel_size):
+-    # [G] Standard DDA voxel traversal algorithm
+-    return [Segment(voxel_index=i, length=voxel_size) for i in range(len(grid_points))]
++def traverse_voxel_grid(ray, bounds_min, bounds_max, voxel_size):
++    # [G] Standard DDA voxel traversal
++    segments = []
++    origin = ray.origin
++    direction = ray.direction
++    inv_dir = [1.0/d if d != 0 else float('inf') for d in direction]
++    
++    # Initial voxel coordinates
++    t_min = [(bounds_min[d] - origin[d]) * inv_dir[d] for d in range(3)]
++    t_max = [(bounds_max[d] - origin[d]) * inv_dir[d] for d in range(3)]
++    
++    # Step sizes
++    step = [1 if d > 0 else -1 for d in direction]
++    t_delta = [voxel_size * abs(inv_dir[d]) for d in range(3)]
++    
++    # Initial tMax
++    t_max_arr = [t_min[d] + t_delta[d] if step[d] > 0 else t_max[d] + t_delta[d] for d in range(3)]
++    
++    # Initial voxel index
++    idx = [int((origin[d] - bounds_min[d]) / voxel_size) for d in range(3)]
++    
++    t = min(t_min)
++    max_steps = 1000
++    for _ in range(max_steps):
++        if t > max(t_max):
++            break
++        # Record segment
++        seg_len = t - (segments[-1].t_end if segments else 0)
++        segments.append(Segment(voxel_index=idx[0] + idx[1]*256 + idx[2]*256*256, length=seg_len, t_end=t))
++        
++        # Advance
++        if t_max_arr[0] < t_max_arr[1] and t_max_arr[0] < t_max_arr[2]:
++            t_max_arr[0] += t_delta[0]
++            idx[0] += step[0]
++        elif t_max_arr[1] < t_max_arr[2]:
++            t_max_arr[1] += t_delta[1]
++            idx[1] += step[1]
++        else:
++            t_max_arr[2] += t_delta[2]
++            idx[2] += step[2]
++        t = min(t_max_arr)
++        
++    return segments
+ 
+ class Octree:
+@@ -114,5 +155,5 @@
+ 
+ class Segment:
+-    def __init__(self, voxel_index, length): self.voxel_index = voxel_index; self.length = length
++    def __init__(self, voxel_index, length, t_end=0): self.voxel_index = voxel_index; self.length = length; self.t_end = t_end
+ 
+ def compute_direction(view, u, v):
+@@ -136,9 +177,9 @@
+ 
+ ### PlenOctrees Visibility Pruning
+-Application of visibility-based pruning to PlenOctrees, replacing density-threshold pruning with visibility masks, followed by fine-tuning and compression [S3]. Convert PlenOctree child nodes $p_{oct}$ to voxelized point cloud positions $p_{pc}$ in a voxel grid of depth $R$: $p_{pc} = p_{oct} \times 2^R - 0.5$. Convert local voxel coordinates to world positions and compute the visibility mask $O$ using the general visibility algorithm. Prune voxels based on the visibility mask $O$ and MVE parameter $\nu$. Convert the pruned point cloud $M$ back to a PlenOctree $\hat{G}$. Fine-tune the octree using stochastic gradient descent on training images with NeRF rendering loss: $L_{RGB} = \sum_{r \in R} ||C(r) - \hat{C}(r)||^2$ [S3]. Grid resolution is a parameter: lower resolution increases voxel size to fill holes caused by pruning but reduces detail [S3]. Fixed voxel splats can cause holes if voxel size is too small relative to pruning aggressiveness, or appear blocky if voxel size is too large [S3].
++Application of visibility-based pruning to PlenOctrees, replacing density-threshold pruning with visibility masks, followed by fine-tuning and compression [S3]. Convert PlenOctree child nodes $p_{oct}$ to voxelized point cloud positions $p_{pc}$ in a voxel grid of depth $R$: $p_{pc} = p_{oct} \times 2^R - 0.5$ [S3]. Convert local voxel coordinates to world positions and compute the visibility mask $O$ using the general visibility algorithm [S3]. Prune voxels based on the visibility mask $O$ and MVE parameter $\nu$ [S3]. Convert the pruned point cloud $M$ back to a PlenOctree $\hat{G}$ [S3]. Fine-tune the octree using stochastic gradient descent on training images with NeRF rendering loss: $L_{RGB} = \sum_{r \in R} ||C(r) - \hat{C}(r)||^2$ [S3]. Grid resolution is a parameter: lower resolution increases voxel size to fill holes caused by pruning but reduces detail [S3]. Fixed voxel splats can cause holes if voxel size is too small relative to pruning aggressiveness, or appear blocky if voxel size is too large [S3].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** The full extraction process (evaluation, filtering, sampling) takes about 15 minutes for the Synthetic NeRF dataset [S1, unofficial].
+-*   **Memory Complexity:** Depends on the sparsity of the scene and the threshold $\tau_w$. The octree structure allows for significant memory savings compared to dense grids by only storing leaves for visible/occupied regions [S1, unofficial].
++*   **Memory Complexity:** Depends on the sparsity of the scene and the threshold $\tau_w$ [S1, unofficial]. The octree structure allows for significant memory savings compared to dense grids by only storing leaves for visible/occupied regions [S1, unofficial].
+ *   **Performance:** Enables real-time rendering of NeRFs by replacing neural network queries with direct lookups [S1, unofficial].
+ *   **Strengths:** Eliminates the need for network inference during rendering; handles view-dependent effects via SH coefficients; skips large empty voxels [S1, unofficial].

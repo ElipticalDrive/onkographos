@@ -1,0 +1,525 @@
+--- v002.md
++++ v003.md
+@@ -4,275 +4,283 @@
+ 
+ ## Overview
+-TermiNeRF is a method for efficient neural rendering that jointly trains a lightweight sampling network alongside a color network to predict the distribution of ideal sampling locations along a viewing ray [S1]. By concentrating samples in regions of high opacity and skipping free space, it significantly reduces the number of color network evaluations required per pixel, achieving rendering times of ≤ 1 second for high-resolution images [S1]. It distinguishes itself from sibling methods like [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) by predicting a continuous probability distribution of weights directly from ray parameters, rather than relying on a discrete coarse-to-fine hierarchy or spatial subdivision of the image plane [S1, S2].
++TermiNeRF is a method for efficient neural rendering that jointly trains a lightweight sampling network alongside a color (shading) network to predict the distribution of ideal sampling locations along a viewing ray [S1]. By concentrating samples where opacity is high and skipping free space, it significantly reduces the number of color network evaluations required per pixel [S1]. Unlike sibling methods that rely on depth maps or spatial data structures (like quadtrees or occupancy grids) to guide sampling, TermiNeRF predicts sample weights directly from ray parameters using a single network evaluation per ray, making it robust in geometrically ambiguous regions [S2]. It builds on [Adaptive Ray Sampling](8870-adaptive-ray-sampling.md) by learning the probability distribution $P(t)$ explicitly rather than deriving it from a coarse pass or heuristic.
+ 
+ ## How it works
+-TermiNeRF splits the standard NeRF architecture into two components: a **Sampling Network** that predicts sample importance weights with a single forward pass per ray, and a **Shading (Color) Network** that evaluates only the most significant samples [S1, S2]. The method uses a specific ray parameterization to ensure a bijection between rays and input vectors, avoiding ambiguity in depth prediction [S1].
+-
+ ### Inputs and Outputs
+-*   **Input**: A viewing ray defined by origin $O$ and direction $d$. The ray is parameterized into a fixed-length segment $[A, B]$ with length $\ell = 4.0$ [S1].
+-*   **Output**: A set of $N$ normalized weights $\hat{w}_i$ representing the probability density for sampling locations along the ray, and the final rendered color $C$ [S1].
+-
+-### Data Structures and Layout
+-**Sampling Network Architecture**:
+-*   8 hidden layers with 256 units each.
+-*   Skip connection from the input to the fifth hidden layer [S1].
+-*   Input: Ray parameters (derived from $O$ and $d$).
+-*   Output: $N$ raw weights corresponding to $N$ bins along the ray [S1].
+-
+-**Ray Parameterization**:
+-To avoid the network solving for arbitrary ray origins, TermiNeRF enforces a constant segment length $\ell = 4.0$ [S1].
+-*   Segment endpoints $A$ and $B$ are defined such that $|B - A| = \ell$.
+-*   The direction is $d = B - A$.
+-*   The midpoint of the segment is the closest point on the line to the scene origin: $O_{mid} = \frac{A+B}{2} = \text{proj}_{AB}(0)$ [S1].
+-*   Additional samples are placed using **centered-logarithmic sampling** between $A$ and $B$. The sample positions $s_i$ are formed by concatenating two sequences $l$ and $u$:
+-    $$ l_i = 1 - 2^{\frac{1-i}{N/2-1}}, \quad i \in \{1, ..., N/2 - 1\} $$
+-    $$ u_j = 2^{\frac{j-N/2}{N/2-1}}, \quad j \in \{1, ..., N/2\} $$
+-    The sample points are: $\{A, A + s_2 \cdot d, \dots, A + s_{N-1} \cdot d, B\}$ [S1].
++*   **Inputs:** Camera ray defined by origin $\mathbf{O}$ and direction $\mathbf{d}$; pre-trained color network $F_{color}(\mathbf{x}, \mathbf{d}) \to (\mathbf{c}, \sigma)$; sampling network $F_{sample}(\mathbf{O}, \mathbf{d}) \to \{\hat{w}_i\}_{i=1}^N$.
++*   **Outputs:** Rendered pixel color $\mathbf{C}$; optimized sampling network weights.
++
++### Data Structures
++**Ray Parameterization:**
++To avoid ambiguity in ray representation, TermiNeRF enforces a constant-length line segment $[A, B]$ with length $\ell = 4.0$ [S1].
++*   The segment midpoint is the closest point on the line to the scene origin: $\mathbf{O}_{mid} = \frac{\mathbf{A} + \mathbf{B}}{2} = \text{proj}_{\mathbf{AB}}(\mathbf{0})$ [S1].
++*   The direction is $\mathbf{d} = \mathbf{B} - \mathbf{A}$ [S1].
++*   Points $A$ and $B$ must lie outside the rendered object [S1].
++
++**Sample Locations (Bins):**
++The ray is discretized into $N$ bins using "centered-logarithmic sampling" [S1]. The sample points are:
++$$ \{ \mathbf{A}, \mathbf{A} + s_2 \cdot \mathbf{d}, \dots, \mathbf{A} + s_{N-1} \cdot \mathbf{d}, \mathbf{B} \} $$
++where the scalar coefficients $s_i$ are formed by concatenating two sequences $l$ and $u$:
++$$ l_i = 1 - 2^{\frac{1-i}{N/2-1}}, \quad i \in \{1, \dots, N/2 - 1\} $$
++$$ u_j = 2^{\frac{j-N/2}{N/2-1}}, \quad j \in \{1, \dots, N/2\} $$
++The last bin extends from the last boundary point to infinity [S1].
++
++**Network Architecture:**
++*   **Sampling Network:** 8 hidden layers with 256 units each, with a skip connection to the fifth layer [S1].
++*   **Color Network:** Standard NeRF architecture (pre-trained) [S1].
+ 
+ ### Training Procedure
+ The training occurs in three phases to ensure stable convergence [S1]:
+ 
+-1.  **Pre-training**: The color network is trained independently using standard NeRF rendering (e.g., 64 coarse + 128 fine samples) until convergence [S1].
+-2.  **Sampling Network Training**: The sampling network is trained to predict weights that match the distribution generated by the pre-trained color network.
+-3.  **Joint Fine-tuning**: Both networks are fine-tuned together, alternating updates [S1].
+-
+-### Ground Truth Generation and Distribution Matching
+-To train the sampling network, ground truth weights $w_i$ are derived from the fine NeRF network [S1]. For each ray, the fine network is evaluated at $z_i$ (distance from origin), producing 196 tuples $(z_i, w_i)$ for 64+128 samples [S1]. The weight for sample $i$ is:
++1.  **Pre-training:** Train the color network $F_{color}$ on the dataset until convergence [S1].
++2.  **Sampling Network Training:** Train $F_{sample}$ to predict weights that match the importance distribution derived from the fine color network [S1].
++3.  **Joint Fine-tuning:** Alternately update both networks to adapt to scene modifications or refine geometry [S1].
++
++#### Step 1: Ground Truth Weight Generation
++For each ray, evaluate the fine color network at $64 + 128 = 196$ equidistant points to obtain tuples $(z_i, \sigma_i)$, where $z_i$ is the distance from the ray origin [S1]. Compute the ground truth rendering weights $w_i$ for each sample $i$ using the standard volume rendering opacity formula [S1]:
+ $$ w_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) (1 - \exp(-\sigma_i \delta_i)) $$
+ where $\delta_i = z_{i+1} - z_i$ [S1].
+ 
+-Since the sampling network outputs weights for fixed bins defined by the centered-logarithmic points, and the NeRF weights are at arbitrary $z_i$, a **Distribution Matching** pipeline is required before computing the loss [S1]:
+-
+-1.  **Max-Resampling**: To preserve peaks and handle uneven bin sizes, weights are assigned to new bins $\hat{b}_j$ delimited by $\hat{z}_j$. The weight $\hat{w}_j$ for bin $j$ is:
+-    $$ \hat{w}_j = \max \{ w_i \mid \hat{z}_j \le z_i \le \hat{z}_{j+1} \} \cup \{ w'_j, w'_{j+1} \} $$
++#### Step 2: Ground Truth Processing (Blurring and Distribution Matching)
++The raw weights $w_i$ are noisy and defined on a fixed grid, not the adaptive bins predicted by the sampling network. They must be processed to create supervision targets $\hat{w}_j$ [S1].
++
++1.  **Distribution Matching (Max-Resampling):**
++    Because the sampling network predicts weights for specific bin boundaries $\hat{z}_j$, we must map the old weights $w_i$ (at $z_i$) to the new bins $b_j$ (delimited by $[\hat{z}_j, \hat{z}_{j+1}]$). To preserve peaks and handle varying local density, use max-resampling [S1]:
++    $$ \hat{w}_j = \max \left( \{ w_i \mid \hat{z}_j \le z_i \le \hat{z}_{j+1} \} \cup \{ w'_j, w'_{j+1} \} \right) $$
+     where $w'_j$ is the linear interpolation of weights from the old distribution at $\hat{z}_j$ [S1].
+-2.  **Gaussian Blurring**: To reduce noise in the supervision signal, a Gaussian blur is applied to the resampled weights. The blur window size $K$ covers a Euclidean distance $d$:
+-    $$ d = \frac{K}{N_{samples}} \cdot \ell $$
+-    Typical parameters: $K=9$, $\sigma=3.0$ [S1].
+-3.  **Normalization**: The final ground truth weights are normalized:
+-    $$ \hat{w}_i = \frac{w_i}{\sum_{j=0}^{N} w_j} $$
++    *Note:* If the number of elements in the blur window varies due to local density, this step ensures samples are placed evenly before blurring [S1].
++
++2.  **Gaussian Blurring:**
++    Apply a Gaussian blur to the resampled weights to smooth noise. The blur window size $K$ and standard deviation $\sigma_{blur}$ are fixed hyperparameters [S1].
++    *   Typical values: $K=9$, $\sigma_{blur}=3.0$ [S1].
++    *   The Euclidean distance covered by the window is $d = \frac{K}{N_{samples}} \cdot \ell$. For the Lego dataset with $N_{samples}=128$ and $\ell=4.0$, $d \approx 0.28$ [S1].
++
++3.  **Normalization:**
++    Normalize the resulting weights so they sum to 1:
++    $$ \hat{w}_i = \frac{\hat{w}_i}{\sum_{j=0}^{N} \hat{w}_j} $$
+     [S1].
+ 
+-### Rendering Pipeline
+-1.  **Ray Discretization**: The viewing ray is parameterized into the fixed segment $[A, B]$ with centered-logarithmic points [S1].
+-2.  **Sampling Network Evaluation**: The sampling network is evaluated once per ray to predict $N$ weights [S1].
+-3.  **Stochastic Sampling**: $N_{render}$ points are drawn stochastically from the predicted distribution [S1].
+-    *   During **joint fine-tuning**, to prevent the sampling network from never seeing unsampled regions, 128 points are drawn from the predicted distribution, and 64 additional equidistant points are sampled along the whole ray between near and far z-values [S1].
+-4.  **Color Network Evaluation**: The shading network evaluates the color and density $\sigma$ only at the selected points [S1].
+-5.  **Volumetric Rendering**: The final color is aggregated using standard volume rendering equations [S1].
++#### Step 3: Sampling Network Update
++The sampling network takes the ray parameters $(\mathbf{O}, \mathbf{d})$ as input and outputs $N$ raw scores. These are normalized to probabilities $p_i$ and compared against the processed ground truth $\hat{w}_i$ using Mean Squared Error (MSE) loss [S1]:
++$$ \mathcal{L}_{sample} = \sum_{i=1}^N (p_i - \hat{w}_i)^2 $$
++Optimize using Adam with learning rate $5 \cdot 10^{-4}$ [S1].
++
++#### Step 4: Joint Fine-tuning
++During joint training, alternate updates of the color and sampling networks [S1].
++*   **Sampling:** Draw 128 points stochastically from the distribution predicted by the sampling network [S1].
++*   **Regularization:** Add 64 equidistantly sampled points along the whole ray between near and far $z$-values to ensure density values are acquired for unsampled regions (preventing the sampling network from ignoring areas it previously deemed low-weight) [S1].
++*   **Optimization:** Use Adam with learning rate $5 \cdot 10^{-5}$ for the color network and $5 \cdot 10^{-4}$ for the sampling network [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import math
+-import torch
+-import torch.nn as nn
+-import torch.optim as optim
+-
+-class SamplingNetwork(nn.Module):
+-    """
+-    8 hidden layers, 256 units, skip connection to 5th layer.
+-    """
+-    def __init__(self, input_dim, output_dim):
+-        super().__init__()
+-        self.layers = nn.ModuleList([nn.Linear(input_dim, 256) for _ in range(8)])
+-        self.skip_layer = nn.Linear(input_dim, 256) # Skip to 5th layer (index 4)
+-        self.output_layer = nn.Linear(256, output_dim)
+-        self.relu = nn.ReLU()
+-
+-    def forward(self, x):
+-        h = x
+-        for i, layer in enumerate(self.layers):
+-            if i == 4: # 5th layer (0-indexed)
+-                h = h + self.skip_layer(x)
+-            h = self.relu(layer(h))
+-        return self.output_layer(h)
+-
+-def get_centered_logarithmic_points(A, B, N):
+-    """
+-    Generates N sample points between A and B using centered-logarithmic sampling.
+-    Returns tensor of shape (N, 3) assuming 3D coordinates.
++import numpy as np
++
++def generate_centered_logarithmic_samples(N, A, B):
++    """
++    Generates N-2 internal sample points between A and B using centered-logarithmic spacing.
++    Returns array of points including A and B.
+     """
+     d = B - A
++    # Calculate coefficients l and u
++    # l_i for i in 1..N/2-1
++    # u_j for j in 1..N/2
++    # Note: The formula uses 1-based indexing for description, 
++    # we map to 0-based array indices for implementation.
++    
+     half_N = N // 2
+     
+-    # Generate l and u sequences
+-    # l_i = 1 - 2^((1-i)/(N/2-1)) for i in 1..N/2-1
+-    # u_j = 2^((j-N/2)/(N/2-1)) for j in 1..N/2
+-    
+-    indices_l = torch.arange(1, half_N)
+-    indices_u = torch.arange(1, half_N + 1)
+-    
+-    l = 1 - 2**((1 - indices_l) / (half_N - 1))
+-    u = 2**((indices_u - half_N) / (half_N - 1))
+-    
+-    # Concatenate l and u. Note: The paper defines s as concatenation.
+-    # The points are A + s_k * d.
+-    # s_1 is usually A (0 offset), s_N is B (1 offset).
+-    # The formula gives intermediate points.
+-    # Let's construct the full set of offsets.
+-    # The paper says: {A, A + s_2*d, ..., A + s_{N-1}*d, B}
+-    # So we need N-2 intermediate points from l and u? 
+-    # Actually, l has N/2-1 elements, u has N/2 elements. Total N-1 elements.
+-    # Plus A and B makes N+1? 
+-    # Re-reading: "s is formed by concatenation of l and u". 
+-    # "points are: A, A+s2*d ... A+s_{N-1}*d, B".
+-    # This implies s has N-2 elements? 
+-    # Let's assume N samples are generated. 
+-    # Standard implementation usually maps the N weights to N bins defined by N+1 boundaries or N points.
+-    # The paper says "N weights corresponding to N bins".
+-    # Let's stick to the formula for s.
+-    
+-    s_intermediate = torch.cat([l, u])
+-    
+-    # Construct points. 
+-    # If we have N weights, we typically have N bins.
+-    # The boundaries are defined by the points.
+-    # Let's return the offsets s for the intermediate points.
+-    return s_intermediate, d
+-
+-def compute_ground_truth_weights(fine_nerf, ray_origins, ray_directions, num_samples=196):
+-    """
+-    Evaluates the fine NeRF to get ground truth weights for training the sampling network.
+-    """
+-    # 1. Sample points along the ray (standard NeRF sampling)
+-    # This part depends on the specific NeRF implementation's sampling strategy (e.g., stratified)
+-    # For simplicity, assume we get z_i and sigma_i
+-    z_vals = ... # Get z values from fine NeRF sampling
+-    points = ray_origins.unsqueeze(1) + z_vals.unsqueeze(2) * ray_directions.unsqueeze(1)
+-    
+-    # 2. Evaluate Fine NeRF
+-    # sigma_i = fine_nerf(points, directions)
+-    # This is a placeholder for the actual NeRF forward pass
+-    sigma = ... 
+-    
+-    # 3. Compute weights
+-    # w_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j) * (1 - exp(-sigma_i * delta_i))
+-    deltas = z_vals[:, 1:] - z_vals[:, :-1]
+-    # Add a large delta for the last bin to infinity? Or just use the last interval.
+-    # The formula sums up to i-1.
+-    
+-    # Compute alpha and weights
+-    # alpha_i = 1 - exp(-sigma_i * delta_i)
+-    # w_i = alpha_i * prod_{j=1}^{i-1} (1 - alpha_j)
+-    
+-    # Implementation detail:
+-    # This returns raw weights.
+-    return raw_weights, z_vals
+-
+-def max_resample_and_blur(raw_weights, z_vals, new_z_vals, K=9, sigma_blur=3.0):
+-    """
+-    Performs distribution matching: Max-resampling and Gaussian blurring.
+-    """
+-    # 1. Max-Resampling
+-    # Assign weight of new bin j to max of old weights falling in that bin
+-    new_weights = torch.zeros_like(new_z_vals)
+-    for j in range(len(new_z_vals) - 1):
+-        z_min = new_z_vals[j]
+-        z_max = new_z_vals[j+1]
+-        
+-        # Find indices in old z_vals within [z_min, z_max]
+-        mask = (z_vals >= z_min) & (z_vals <= z_max)
+-        
+-        if torch.any(mask):
+-            max_w = torch.max(raw_weights[mask])
+-        else:
+-            # Linear interpolation if no points fall in bin
+-            # w'_j is linear interpolation of weights from old distribution for z_min
+-            # This requires a helper to interpolate weights at specific z
+-            max_w = interpolate_weight(raw_weights, z_vals, z_min)
+-            
+-        new_weights[j] = max_w
+-        
+-    # 2. Gaussian Blur
+-    # Calculate Euclidean distance d covered by window
+-    # d = (K / N_samples) * l
+-    # This is used to determine the sigma in spatial domain if needed, 
+-    # but usually applied as a 1D kernel on the weight array if z is uniform.
+-    # If z is non-uniform, spatial blur is complex. 
+-    # The paper suggests blur on the ray. 
+-    # Assuming we apply a 1D Gaussian filter to the new_weights array.
+-    kernel = torch.exp(-torch.arange(-K//2, K//2 + 1)**2 / (2 * sigma_blur**2))
+-    kernel = kernel / kernel.sum()
+-    
+-    blurred_weights = torch.conv1d(new_weights.unsqueeze(0).unsqueeze(0), kernel.unsqueeze(0).unsqueeze(0)).squeeze()
+-    
+-    # 3. Normalize
+-    normalized_weights = blurred_weights / blurred_weights.sum()
+-    
+-    return normalized_weights
+-
+-def train_step(sampling_net, color_net, ray_origins, ray_directions, optimizer_s, optimizer_c):
+-    """
+-    One step of joint training.
+-    """
+-    # 1. Get Ground Truth from Color Net (detached)
+-    with torch.no_grad():
+-        gt_weights, z_vals = compute_ground_truth_weights(color_net, ray_origins, ray_directions)
+-        
+-    # 2. Define Ray Bins for Sampling Net
+-    # Use centered-logarithmic points
+-    A = ... # Derived from ray origin and direction
+-    B = ...
+-    N = 32 # Example number of samples
+-    s_intermediate, d = get_centered_logarithmic_points(A, B, N)
+-    # Construct full z_vals for bins based on A + s*d
+-    new_z_vals = A + s_intermediate.unsqueeze(1) * d.unsqueeze(0) # Shape adjustment needed
++    # l sequence: i from 1 to half_N - 1
++    l_indices = np.arange(1, half_N)
++    l_coeffs = 1 - 2**((1 - l_indices) / (half_N - 1))
++    
++    # u sequence: j from 1 to half_N
++    u_indices = np.arange(1, half_N + 1)
++    u_coeffs = 2**((u_indices - half_N) / (half_N - 1))
++    
++    # Concatenate l and u
++    s_coeffs = np.concatenate([l_coeffs, u_coeffs])
++    
++    # Generate points: A + s_k * d
++    # The full set is A, A+s_2*d, ..., A+s_{N-1}*d, B
++    # s_coeffs corresponds to s_2 ... s_{N-1}
++    internal_points = A + s_coeffs.reshape(-1, 1) * d
++    
++    # Combine with boundaries
++    samples = np.vstack([A.reshape(1, -1), internal_points, B.reshape(1, -1)])
++    return samples
++
++def compute_ground_truth_weights(z_values, sigma_values):
++    """
++    Computes rendering weights w_i from optical depth sigma and distances z.
++    """
++    # delta_i = z_{i+1} - z_i
++    deltas = np.diff(z_values)
++    
++    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    # We compute cumulative sum of sigma * delta
++    sigma_delta = sigma_values[:-1] * deltas # sigma_i * delta_i for i=1..N-1
++    # Note: The formula sums j=1 to i-1. 
++    # For i=1, sum is empty -> T=1.
++    # For i=2, sum is sigma_1 * delta_1.
++    
++    # Cumulative sum of sigma * delta
++    cum_sum = np.cumsum(sigma_delta)
++    # Prepend 0 for the first term (empty sum)
++    cum_sum = np.concatenate([[0], cum_sum])
++    
++    transmittance = np.exp(-cum_sum)
++    
++    # Weight w_i = T_i * (1 - exp(-sigma_i * delta_i))
++    # sigma_i * delta_i for i=1..N-1. Last point has no delta in this context 
++    # or delta is effectively 0/infinity depending on boundary. 
++    # NeRF usually evaluates N points. The last weight is often handled 
++    # by the boundary condition or assumed to be 0 contribution if outside.
++    # Based on formula: w_i = exp(...) * (1 - exp(-sigma_i * delta_i))
++    
++    # sigma_i * delta_i for i=0..N-2 (0-indexed)
++    sigma_delta_i = sigma_values[:-1] * deltas
++    
++    weights = transmittance[:-1] * (1 - np.exp(-sigma_delta_i))
++    
++    # The last point (index N-1) usually doesn't have a delta in the standard 
++    # discrete integration unless defined. In TermiNeRF context, 
++    # we have 196 tuples. The formula applies to the bins.
++    # We return weights for the bins defined by the samples.
++    return weights
++
++def max_resampling(old_z, old_w, new_z_boundaries):
++    """
++    Maps old weights to new bins using max-resampling.
++    new_z_boundaries: array of size N+1 defining N bins [z_j, z_{j+1}]
++    """
++    N_bins = len(new_z_boundaries) - 1
++    new_w = np.zeros(N_bins)
++    
++    for j in range(N_bins):
++        z_low = new_z_boundaries[j]
++        z_high = new_z_boundaries[j+1]
++        
++        # Find old weights within the bin
++        mask = (old_z >= z_low) & (old_z <= z_high)
++        candidates = old_w[mask]
++        
++        # Linear interpolation of weights at boundaries
++        # w'_j is interpolation at z_low
++        # w'_{j+1} is interpolation at z_high
++        # Assuming old_z is sorted
++        w_prime_low = np.interp(z_low, old_z, old_w)
++        w_prime_high = np.interp(z_high, old_z, old_w)
++        
++        # Max of candidates and interpolated boundaries
++        all_candidates = np.concatenate([candidates, [w_prime_low, w_prime_high]])
++        new_w[j] = np.max(all_candidates)
++        
++    return new_w
++
++def train_sampling_network(color_net, sample_net, ray_o, ray_d, N_samples=128):
++    """
++    Single step of training the sampling network.
++    """
++    # 1. Get Ground Truth from Color Net
++    # Evaluate fine color net at 196 equidistant points
++    z_gt = np.linspace(ray_o, ray_o + 4.0 * ray_d, 196) # Assuming length 4.0
++    # Get sigma from color_net
++    sigma_gt = color_net(z_gt, ray_d) 
++    
++    # Compute raw weights
++    w_gt = compute_ground_truth_weights(z_gt, sigma_gt)
++    
++    # 2. Define Target Bins using Centered-Logarithmic Sampling
++    # A and B are boundaries. For a ray of length 4.0 centered at origin projection:
++    # This requires solving for A and B such that |B-A|=4.0 and midpoint is proj.
++    # Simplified: Assume A and B are known from ray parameterization logic.
++    A = ... # Derived from ray O, d and scene bounds
++    B = ... 
++    
++    sample_points = generate_centered_logarithmic_samples(N_samples, A, B)
++    new_z_boundaries = sample_points # These define the bins
+     
+     # 3. Process Ground Truth
+-    target_weights = max_resample_and_blur(gt_weights, z_vals, new_z_vals)
+-    
+-    # 4. Forward Sampling Net
+-    # Input to sampling net is ray parameters
+-    ray_params = ... # Encode O and d into the format expected by SamplingNet
+-    pred_weights = sampling_net(ray_params)
+-    
+-    # 5. Loss
+-    loss = nn.MSELoss()(pred_weights, target_weights)
+-    
+-    # 6. Update Sampling Net
+-    optimizer_s.zero_grad()
+-    loss.backward()
+-    optimizer_s.step()
+-    
+-    # 7. Forward Color Net with sampled points
+-    # Sample points from pred_weights
+-    sampled_indices = torch.multinomial(pred_weights, num_samples=128, replacement=True)
+-    # Add 64 equidistant points for joint training stability
+-    equidistant_points = ...
+-    
+-    # Evaluate Color Net
+-    # This part is for the color network update if alternating, 
+-    # or if updating both. The paper says "alternate updates".
+-    # If updating color net:
+-    # loss_color = ... (standard NeRF loss)
+-    # optimizer_c.step()
++    # Max-resampling
++    w_resampled = max_resampling(z_gt, w_gt, new_z_boundaries)
++    
++    # Gaussian Blur (Simplified: convolution with Gaussian kernel)
++    # K=9, sigma=3.0
++    kernel = np.exp(-np.arange(-4, 5)**2 / (2 * 3.0**2))
++    kernel /= kernel.sum()
++    w_blurred = np.convolve(w_resampled, kernel, mode='same')
++    
++    # Normalize
++    w_target = w_blurred / w_blurred.sum()
++    
++    # 4. Sample Network Forward Pass
++    # Input: Ray parameters (O, d) encoded appropriately
++    raw_output = sample_net(ray_o, ray_d)
++    
++    # Normalize output to probability distribution
++    p_pred = raw_output / raw_output.sum()
++    
++    # 5. Loss and Update
++    loss = np.mean((p_pred - w_target)**2)
++    # Backpropagate loss to sample_net
++    sample_net.update(loss)
+     
+     return loss
++
++def render_with_terminerf(color_net, sample_net, ray_o, ray_d, N_samples=128):
++    """
++    Rendering step.
++    """
++    # 1. Predict distribution
++    raw_weights = sample_net(ray_o, ray_d)
++    probs = raw_weights / raw_weights.sum()
++    
++    # 2. Stochastic Sampling
++    # Draw N_samples points from the predicted distribution
++    # In practice, this might involve inverse transform sampling or 
++    # simply selecting indices based on cumulative probs.
++    # TermiNeRF draws points stochastically according to the distribution.
++    indices = np.random.choice(N_samples, size=N_samples, p=probs)
++    
++    # 3. Evaluate Color Net at sampled locations
++    # Locations are determined by the bin boundaries associated with the indices
++    # Or more precisely, the samples are drawn from the distribution defined by the bins.
++    # The pseudocode above defines bins. We sample points *within* or *at* these bins?
++    # "Ray points drawn stochastically according to this distribution are then 
++    # separately evaluated by the color network."
++    # Usually, this means evaluating the color net at the sample points 
++    # corresponding to the high-weight bins.
++    
++    # Simplified: Evaluate at the bin centers or boundaries of the selected bins
++    sample_points = generate_centered_logarithmic_samples(N_samples, A, B)
++    selected_points = sample_points[indices]
++    
++    colors = color_net(selected_points, ray_d)
++    
++    # 4. Volumetric Rendering
++    # Aggregate colors using the weights (probs)
++    # C = sum(w_i * c_i)
++    final_color = np.sum(probs * colors)
++    
++    return final_color
+ ```
+ 
+-### Parameters
+-*   **Gaussian Blur**: Window size $K=9$, $\sigma=3.0$ [S1].
+-*   **Segment Length**: $\ell = 4.0$ [S1].
+-*   **Optimizer**: Adam.
+-    *   Sampling Network Learning Rate: $5 \cdot 10^{-4}$ [S1].
+-    *   Color Network Learning Rate: $5 \cdot 10^{-5}$ [S1].
+-*   **Sample Counts**: 
+-    *   Ground Truth Generation: 64 coarse + 128 fine samples (196 total) [S1].
+-    *   Joint Fine-tuning: 128 samples from predicted distribution + 64 equidistant samples [S1].
+-
+ ### Edge Cases and Pitfalls
+-*   **Uneven Segment Lengths**: Using sphere intersection representations creates uneven segment lengths, increasing computational pressure on the network. This is mitigated by enforcing a constant length segment $\ell$ [S1].
+-*   **Arbitrary Training Signals**: Training both networks jointly from the start is inefficient because the sampling network receives arbitrary signals from an untrained color network. A pre-trained color network is required for initialization [S1, S2].
+-*   **Unsampled Regions**: If the sampling network predicts low weights for a region, the color network never sees it, leading to a feedback loop where geometry is never learned. This is handled by adding equidistant samples during joint fine-tuning [S1].
++*   **Uneven Segment Lengths:** Using a sphere intersection representation creates uneven segment lengths, creating computational pressure on the network. TermiNeRF handles this by enforcing a constant length segment $\ell=4.0$ [S1].
++*   **Arbitrary Training Signals:** Training both networks jointly from the beginning is inefficient because the sampling network receives arbitrary signals from an untrained color network. Pre-training the color network first is required [S1].
++*   **Unsampled Regions:** If the sampling network predicts low weights for a region, those regions are never sampled, and the color network never learns the geometry there. To prevent this, 64 equidistant points are added during joint fine-tuning to ensure density acquisition in unsampled regions [S1].
++*   **False Positives:** A false-positive sampling network misprediction (predicting high weight in free space) poses no issue for the color network's correctness, but wastes computation [S1].
+ 
+ ## Operating characteristics
+-*   **Speed**: TermiNeRF achieves a 14x speedup relative to standard NeRF [S1]. Rendering time is reduced to ≤ 1 second for high-resolution images [S1]. It achieves a 7.32x speedup compared to NeRF with 8+16 samples (32 total forward passes) while maintaining similar PSNR/LPIPS [S1].
+-*   **Memory**: The sampling network has the same architecture size as a NeRF network (8 hidden layers, 256 units), but the color network is evaluated far fewer times, reducing memory bandwidth pressure during rendering [S1].
+-*   **Quality**: Achieves similar or higher PSNR/LPIPS than standard NeRF with significantly fewer forward passes [S1].
+-*   **Fine-tuning**: Scenes can be fine-tuned up to the penultimate step in only three minutes on a GTX 1080 [S1].
++*   **Speed:** Rendering time is reduced to $\le 1$ second for an image, compared to $\sim 30$ seconds for standard NeRF on an 800x800 image [S1].
++*   **Speedup:** TermiNeRF achieves a 14x speedup relative to standard NeRF [S1]. This is slower than KiloNeRF (600x) or PlenOctrees (3000x) but is end-to-end trainable and does not require depth maps or spatial data structures [S1].
++*   **Quality:** Achieves similar or higher PSNR/LPIPS than NeRF with significantly fewer forward passes (e.g., 7.32x speedup for TermiNeRF 32 vs NeRF 8+16) [S1].
++*   **Fine-tuning:** Scenes can be fine-tuned up to the penultimate step in only three minutes on a GTX1080 [S1].
++*   **Memory:** The sampling network has the same architecture size as a NeRF network (8 hidden layers, 256 units), adding minimal memory overhead [S1].
++*   **Limitations:** Requires a pre-trained NeRF to initialize the color network for best results [S2].
+ 
+ ## Background
+-TermiNeRF was introduced by Martin Piala and Ronald Clark from Imperial College London in 2021 [S1]. It addresses the slow rendering times of neural radiance fields by learning a direct mapping from camera rays to locations along the ray that are most likely to influence the pixel's final appearance [S1]. It is cited as a method that splits the NeRF network into a sampling network and a shading network, conditioned on the density of a pretrained NeRF [S2].
++TermiNeRF was introduced by Martin Piala and Ronald Clark from Imperial College London in 2021 [S1]. It addresses the slow rendering times of neural radiance fields by learning a direct mapping from camera rays to locations along the ray that are most likely to influence the pixel's final appearance [S1]. The method splits the NeRF network into a sampling network and a shading network, trained jointly [S2].
+ 
+ ## Sources

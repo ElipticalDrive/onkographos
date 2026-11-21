@@ -1,0 +1,125 @@
+# WebGL Volume Ray Casting (Slice Tiling)
+
+Also called: 2D slice tiling volume rendering, Volume Ray Casting in WebGL
+
+## Overview
+WebGL Volume Ray Casting (Slice Tiling) is a direct volume rendering method adapted for web browsers that replaces native 3D volume textures with a 2D tiling map of volume slices to simulate 3D data while preserving tri-linear interpolation [S1, book]. It solves the problem of rendering volumetric data in environments lacking hardware support for 3D textures, such as early WebGL implementations [S1, book]. Unlike server-side rendering approaches that offload computation to a backend, this method runs entirely on the client side, leveraging the GPU's accelerated graphics pipeline while avoiding server-side rendering overhead [S1, book].
+
+## How it works
+The method builds on [Direct volume ray casting](19-direct-volume-ray-casting.md) but modifies the data structure and sampling mechanism to accommodate WebGL's texture limitations.
+
+**Inputs and Outputs**
+*   **Input**: A 3D scalar volume dataset $V$ of dimensions $W \times H \times D$. A 2D tiling map texture $T_{tile}$ constructed from the slices of $V$. Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$). Transfer function $T(V) \rightarrow (\mathbf{c}, \alpha)$.
+*   **Output**: A 2D image buffer containing the composited color $\mathbf{C}_{out}$ and opacity $\alpha_{out}$ for each pixel.
+
+**Data Structures**
+1.  **2D Tiling Map ($T_{tile}$)**: A 2D texture where the volume slices are arranged in a grid. If the volume has $D$ slices of size $W \times H$, the tiling map dimensions are typically $W \times (H \times D)$ or $(W \times D) \times H$, depending on the packing strategy. The source notes do not specify the exact packing layout (e.g., row-major vs. column-major), but it must allow tri-linear interpolation across slice boundaries [S1, book].
+2.  **Ray Parameters**: For each pixel, the entry $t_{near}$ and exit $t_{far}$ parameters of the ray intersecting the volume bounding box [G].
+
+**Numbered Steps**
+1.  **Construct Tiling Map**: Flatten the 3D volume dataset into a 2D texture by arranging all slices sequentially. This creates a single 2D texture object that represents the entire volume [S1, book].
+2.  **Ray Definition**: For each pixel $(x, y)$, compute the ray $r(t) = \mathbf{o} + t\mathbf{d}$ and determine the intersection interval $[t_{near}, t_{far}]$ with the volume bounding box [G].
+3.  **Discretization**: Divide the interval $[t_{near}, t_{far}]$ into $S$ steps, where $S$ is the number of steps of the ray that traverses the volume [S1, book]. The step size is $\Delta t = (t_{far} - t_{near}) / S$.
+4.  **Sampling via Tiling Map**: For each sample position $\mathbf{p}_i = r(t_{near} + i \cdot \Delta t)$, map the 3D coordinate to the 2D tiling map texture coordinates. Perform tri-linear interpolation on the 2D texture to retrieve the scalar value $V(\mathbf{p}_i)$, simulating the 3D texture lookup [S1, book].
+5.  **Classification**: Map the sampled value $V(\mathbf{p}_i)$ to color $\mathbf{c}_i$ and opacity $\alpha_i$ using the transfer function [S1, book].
+6.  **Compositing**: Accumulate the color and opacity using the front-to-back volume rendering equation [S1, book].
+
+**Formulas**
+The complexity of the algorithm is defined as:
+$$
+O(M \times S)
+$$
+where $M$ is the number of pixels to be drawn (resolution width $\times$ height) and $S$ is the number of steps of the ray that traverses the volume [S1, book].
+
+The sampling position $\mathbf{p}_i$ is calculated as:
+$$
+\mathbf{p}_i = \mathbf{o} + (t_{near} + i \cdot \Delta t) \cdot \mathbf{d}, \quad i \in [0, S-1]
+$$
+
+The tri-linear interpolation on the 2D tiling map $T_{tile}$ approximates the 3D texture lookup $V(\mathbf{p}_i)$ [S1, book].
+
+**Parameters**
+*   $M$: Number of pixels to be drawn. Typical resolutions tested: 512px, 1024px, 2048px, 4096px [S1, book].
+*   $S$: Number of ray steps. Typical values tested: 30, 80, 140, 200 [S1, book].
+
+**Pitfalls and Edge Cases**
+*   **Shader Compilation Limits**: Browser shader compilers may fail to compile larger shader programs due to inadequate or restricted shader language implementations [S1, book].
+*   **Interpolation Overhead**: The use of 2D slice tiling introduces a slight interpolation overhead compared to native 3D textures, though it is minimal and imperceptible in browser environments [S1, book].
+*   **Performance Bottlenecks**: Performance is heavily dependent on browser layers, including shader compilers, hardware architecture, and graphic drivers [S1, book].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# WebGL Volume Ray Casting with 2D Slice Tiling
+# Assumes T_tile is a 2D texture containing the volume slices
+# Assumes get_slice_coords(p) maps 3D point p to 2D texture coordinates (u, v) on T_tile
+
+def render_webgl_volume(ray_origin, ray_direction, volume_bounds, t_tile, transfer_function, num_steps):
+    # Determine ray intersection with volume bounding box
+    t_near, t_far = intersect_ray_box(ray_origin, ray_direction, volume_bounds)
+    
+    if t_near > t_far:
+        return background_color
+    
+    step_size = (t_far - t_near) / num_steps
+    
+    acc_color = (0.0, 0.0, 0.0)
+    acc_alpha = 0.0
+    
+    for i in range(num_steps):
+        t = t_near + i * step_size
+        p = ray_origin + ray_direction * t
+        
+        # Map 3D point to 2D tiling map coordinates
+        u, v = get_slice_coords(p)
+        
+        # Sample 2D texture with tri-linear interpolation
+        # This simulates 3D texture lookup
+        scalar_value = sample_2d_texture_trilinear(t_tile, u, v)
+        
+        # Classification
+        color, alpha = transfer_function(scalar_value)
+        
+        # Correct opacity for step size (Beer-Lambert)
+        # alpha = 1 - exp(-sigma * step_size)
+        # Assuming transfer function returns alpha already corrected or sigma derived
+        # For simplicity, using provided alpha directly as per source notes
+        # [G] Standard correction: alpha = 1.0 - exp(-alpha * step_size) if alpha is extinction coeff
+        
+        # Front-to-back compositing
+        weight = alpha * (1.0 - acc_alpha)
+        acc_color = acc_color + weight * color
+        acc_alpha = acc_alpha + weight
+        
+        if acc_alpha > 0.99:
+            break
+            
+    return acc_color
+```
+
+## Subtopics
+
+### 2D Visualization from 3D Grid (Slow)
+A slower, non-WebGL approach that may iterate through slices in software. Choose WebGL Slice Tiling for GPU-accelerated, real-time performance in browsers [1507-2d-visualization-from-3d-grid-slow.md].
+
+### GPU Multi-Volume Ray Casting Mapper
+Handles multiple volumes. WebGL Slice Tiling is limited to single volume simulation via tiling [2461-gpu-multi-volume-ray-casting-mapper.md].
+
+### Volume Ray-Casting on Graphics Hardware
+The general hardware-accelerated approach. WebGL Slice Tiling is a specific adaptation for web constraints [7443-volume-ray-casting-on-graphics-hardware.md].
+
+## Operating characteristics
+*   **Time Complexity**: $O(M \times S)$, where $M$ is the number of pixels and $S$ is the number of ray steps [S1, book].
+*   **Memory Complexity**: Proportional to the size of the 2D tiling map, which is $O(W \times H \times D)$ pixels, stored in 2D texture memory [S1, book].
+*   **Measured Performance**: Achieved approximately 2 to 3 frames per second on Samsung Galaxy Tab and Galaxy S smartphones using the Fennec mobile browser with a half-resolution Aorta dataset [S1, book].
+*   **Strengths**: Runs entirely in the client browser, avoiding server-side rendering overhead and allowing more simultaneous clients. Uses the same accelerated graphic pipeline as native applications [S1, book].
+*   **Limitations**: Requires more powerful client hardware. Browser shader compilers may fail to compile larger shader programs. Performance is sensitive to browser implementation details [S1, book].
+*   **When to Use**: Web-based volume rendering systems for medical (e.g., Aorta) and radar datasets where server-side rendering is not feasible or desirable [S1, book].
+*   **When Not to Use**: When high frame rates are required on low-end devices, or when native 3D texture support is available (use standard GPU ray casting instead).
+
+## Background
+The method was introduced in a book chapter titled "Volume Ray Casting in WebGL" by John Edgar Congote et al., published in 2012 [S1, book]. It was implemented in a web-based volume rendering system for medical (Aorta) and radar datasets, tested on the Mozilla Firefox/Fennec mobile browser [S1, book]. The work demonstrated the possibility of rendering volume datasets on handheld devices using web standard technology, re-igniting interest in visualization functions previously reserved for high-end desktop applications [S1, book].
+
+## Sources
+[S1] Volume Ray Casting in WebGL, https://www.vicomtech.org/upload/download/publicaciones/20120330_JohnEdgarCongote_ComputerG_inbook_14.pdf, fetched 2026-10-29 (book)

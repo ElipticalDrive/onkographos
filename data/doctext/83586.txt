@@ -1,0 +1,2199 @@
+# block-mesh
+
+[![Crates.io](https://img.shields.io/crates/v/block-mesh.svg)](https://crates.io/crates/block-mesh)
+[![Docs.rs](https://docs.rs/block-mesh/badge.svg)](https://docs.rs/block-mesh)
+
+Fast algorithms for generating voxel block meshes.
+
+![Mesh Examples](https://raw.githubusercontent.com/bonsairobo/block-mesh-rs/main/examples-crate/render/mesh_examples.png)
+
+Two algorithms are included:
+- [`visible_block_faces`](crate::visible_block_faces): very fast but suboptimal meshes
+- [`greedy_quads`](crate::greedy_quads): not quite as fast, but far fewer triangles are generated
+
+Benchmarks show that [`visible_block_faces`](crate::visible_block_faces) generates about 40 million quads per second on a
+single core of a 2.5 GHz Intel Core i7. Assuming spherical input data, [`greedy_quads`](crate::greedy_quads) can generate a
+more optimal version of the same mesh with 1/3 of the quads, but it takes about 3 times longer. To run the benchmarks
+yourself, `cd bench/ && cargo bench`.
+
+## Example Code
+
+```rust
+use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use block_mesh::{greedy_quads, GreedyQuadsBuffer, MergeVoxel, Voxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG};
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct BoolVoxel(bool);
+
+const EMPTY: BoolVoxel = BoolVoxel(false);
+const FULL: BoolVoxel = BoolVoxel(true);
+
+impl Voxel for BoolVoxel {
+    fn get_visibility(&self) -> VoxelVisibility {
+        if *self == EMPTY {
+            VoxelVisibility::Empty
+        } else {
+            VoxelVisibility::Opaque
+        }
+    }
+}
+
+impl MergeVoxel for BoolVoxel {
+    type MergeValue = Self;
+    type MergeValueFacingNeighbour = Self;
+
+    fn merge_value(&self) -> Self::MergeValue {
+        *self
+    }
+
+    fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour {
+        *self
+    }
+}
+
+// A 16^3 chunk with 1-voxel boundary padding.
+type ChunkShape = ConstShape3u32<18, 18, 18>;
+
+// This chunk will cover just a single octant of a sphere SDF (radius 15).
+let mut voxels = [EMPTY; ChunkShape::SIZE as usize];
+for i in 0..ChunkShape::SIZE {
+    let [x, y, z] = ChunkShape::delinearize(i);
+    voxels[i as usize] = if ((x * x + y * y + z * z) as f32).sqrt() < 15.0 {
+        FULL
+    } else {
+        EMPTY
+    };
+}
+
+let mut buffer = GreedyQuadsBuffer::new(voxels.len());
+greedy_quads(
+    &voxels,
+    &ChunkShape {},
+    [0; 3],
+    [17; 3],
+    &RIGHT_HANDED_Y_UP_CONFIG.faces,
+    &mut buffer
+);
+
+// Some quads were generated.
+assert!(buffer.quads.num_quads() > 0);
+```
+
+License: MIT OR Apache-2.0
+
+### src/bounds.rs
+```
+use ilattice::glam::UVec3;
+use ilattice::prelude::Extent;
+use ndshape::Shape;
+
+pub fn assert_in_bounds<T, S>(voxels: &[T], voxels_shape: &S, min: [u32; 3], max: [u32; 3])
+where
+    S: Shape<3, Coord = u32>,
+{
+    assert!(
+        voxels_shape.size() as usize <= voxels.len(),
+        "voxel buffer size {:?} is less than the shape size {:?}; would cause access out of bounds",
+        voxels.len(),
+        voxels_shape.size()
+    );
+    let shape = voxels_shape.as_array();
+    let local_extent = Extent::from_min_and_shape(UVec3::ZERO, UVec3::from(shape));
+    local_extent
+        .check_positive_shape()
+        .unwrap_or_else(|| panic!("Invalid shape={shape:?}"));
+    let query_extent = Extent::from_min_and_max(UVec3::from(min), UVec3::from(max));
+    query_extent.check_positive_shape().unwrap_or_else(|| {
+        panic!("Invalid extent min={min:?} max={max:?}; has non-positive shape")
+    });
+    assert!(
+        query_extent.is_subset_of(&local_extent),
+        "min={min:?} max={max:?} would access out of bounds"
+    );
+}
+```
+
+### src/buffer.rs
+```
+use crate::{UnorientedQuad, UnorientedUnitQuad};
+
+#[derive(Default)]
+pub struct QuadBuffer {
+    /// A group of quads for each block face. We rely on [`OrientedBlockFace`]
+    /// metadata to interpret them.
+    pub groups: [Vec<UnorientedQuad>; 6],
+}
+
+impl QuadBuffer {
+    pub fn new() -> Self {
+        const EMPTY: Vec<UnorientedQuad> = Vec::new();
+        Self { groups: [EMPTY; 6] }
+    }
+
+    pub fn reset(&mut self) {
+        for group in self.groups.iter_mut() {
+            group.clear();
+        }
+    }
+
+    /// Returns the total count of quads across all groups.
+    pub fn num_quads(&self) -> usize {
+        let mut sum = 0;
+        for group in self.groups.iter() {
+            sum += group.len();
+        }
+        sum
+    }
+}
+
+#[derive(Default)]
+pub struct UnitQuadBuffer {
+    /// A group of quads for each block face. We rely on [`OrientedBlockFace`]
+    /// metadata to interpret them.
+    ///
+    /// When using these values for materials and lighting, you can access them
+    /// using either the quad's minimum voxel coordinates or the vertex
+    /// coordinates given by [`OrientedBlockFace::quad_corners`].
+    pub groups: [Vec<UnorientedUnitQuad>; 6],
+}
+
+impl UnitQuadBuffer {
+    pub fn new() -> Self {
+        const EMPTY: Vec<UnorientedUnitQuad> = Vec::new();
+        Self { groups: [EMPTY; 6] }
+    }
+
+    /// Clears the buffer.
+    pub fn reset(&mut self) {
+        for group in self.groups.iter_mut() {
+            group.clear();
+        }
+    }
+
+    /// Returns the total count of quads across all groups.
+    pub fn num_quads(&self) -> usize {
+        let mut sum = 0;
+        for group in self.groups.iter() {
+            sum += group.len();
+        }
+        sum
+    }
+}
+```
+
+### src/geometry.rs
+```
+//! Voxel geometry and coordinate systems.
+//!
+//! `block-mesh` is designed to work for any 3-dimensional coordinate system.
+//! Doing this requires a somewhat complicated interplay between the types in
+//! this module. This documentation attempts to clarify what's going on.
+//!
+//! # Quads and Faces
+//!
+//! As most will know, a cube is composed of six **faces**.
+//!
+//! ```text
+//!     O--------O
+//!   / |      / |
+//! O--------O   |
+//! |   |    |   |
+//! |   O----|---O
+//! | /      | /
+//! O--------O
+//!
+//! Fig 1: Cube
+//! ```
+//!
+//! When rendering a cube to the screen, this will involve rendering six
+//! **quads**. A quad has four **vertices**, each with a unique **UV** texture
+//! coordinate and the same **normal** vector. The quad is rendered as two
+//! triangles, typically as four vertices and six **indices**.
+//!
+//! ```text
+//!            (U, V)                                         3    
+//!              3                    3------> N            / ^     
+//!            / |                  / |                   /   |     
+//!  (U, V)  /   |                /   |                 2     |     
+//!        2     |              2------> N                \   |     
+//!        | \   |              | \   |                 2   \ |     
+//!        |   \ |              |   \ |                 | \   1     
+//!        |     1              |     1------> N        |   \       
+//!        |   /   (U, V)       |   /                   |     1     
+//!        | /                  | /                     |   /       
+//!        0                    0------> N              V /         
+//!     (U, V)                                          0           
+//!
+//! Fig 2: Quad with vertices [A, B, C, D].
+//! - (left) UVs.
+//! - (middle) Normals.
+//! - (right) Two triangles rendered using indices [0, 1, 2, 3, 2, 1].
+//! ```
+//!
+//! # Coordinate System
+//!
+//! Different domains (e.g., your game engine or 3D modeling application) use
+//! different coordinate systems. Generating correct vertex positions, normals,
+//! and UV coordinates requires knowing the specifics of the coordinate system.
+//!
+//! ```text
+//!       +Y                 +Y                 -Y      
+//!       | +Z               | -Z               | -Z    
+//! -X____|/____+X     -X____|/____+X     +X____|/____-X
+//!      /|                 /|                 /|       
+//!    -Z |               +Z |               +Z |       
+//!       -Y                 -Y                 +Y      
+//!
+//! Fig 3: Various coordinate systems.
+//! - (left) Left-handed coordinate system with Y up.
+//! - (middle) Right-handed coordinate system with Y up.
+//! - (right) Right-handed coordinate system with Y down.
+//! ```
+//!
+//! ## Handedness
+//!
+//! **Handedness** (also called chirality) is this weird property of 3D things.
+//! If two 3D things have different handedness, then it is impossible to rotate
+//! or translate one to look like the other; it's only possible if you mirror
+//! it.
+//!
+//! Most often, in games and 3D modeling, this corresponds to which way the Z
+//! axis grows. Often, +X is right, +Y is up, and the handedness determines
+//! whether +Z is into or out of the screen.
+//!
+//! See wikipedia for more information on handedness:
+//! - <https://en.wikipedia.org/wiki/Right-hand_rule>
+//! - <https://en.wikipedia.org/wiki/Orientation_(vector_space)>
+//!
+//! ## Orientation
+//!
+//! The **orientation** of the coordinate system determines which way textures
+//! are displayed on cube faces. Most often, the orientation is "Y up", meaning
+//! that textures are displayed with the top of the image toward the +Y axis.
+//!
+//! # `{N, U, V}` Space
+//!
+//! "`{N, U, V}` space" is basically the **face-local coordinate space**
+//! (**N**ormal, **U**, **V**).
+//!
+//! The notion of an `{N, U, V}` space is convenient because we can return
+//! vertices, UVs, and indices in a consistent order regardless of the face. See
+//! [`OrientedBlockFace::quad_corners`].
+//!
+//! # Putting It All Together
+//!
+//! The output of the `block-mesh` algorithms are [`UnorientedQuad`]s. These
+//! simply specify the size and minimum `{X, Y, Z}` coordinate of the cube they
+//! are a part of.
+//!
+//! In order to get vertex positions, UV coordinates, normals, and mesh indices
+//! for an [`UnorientedQuad`], it must be paired with an [`OrientedBlockFace`],
+//! which specifies the `{N, U, V}` --> `{X, Y, Z}` mapping and the sign of the
+//! normal vector.
+//!
+//! Six [`OrientedBlockFace`] definitions combine to form a
+//! [`QuadCoordinateConfig`], which also implicitly defines the coordinate
+//! system.
+
+mod axis;
+mod face;
+mod quad;
+
+pub use axis::*;
+pub use face::*;
+pub use quad::*;
+
+/// A configuration of XYZ --> NUV axis mappings and orientations of the cube
+/// faces for a given coordinate system.
+///
+/// See the [`geometry` module documentation][crate::geometry] for more
+/// information on `{N, U, V}` space.
+#[derive(Clone)]
+pub struct QuadCoordinateConfig {
+    pub faces: [OrientedBlockFace; 6],
+
+    /// For a given coordinate system, one of the two axes that isn't UP must be
+    /// flipped in the U texel coordinate direction to avoid incorrect texture
+    /// mirroring. For example, in a right-handed coordinate system with +Y
+    /// pointing up, you should set `u_flip_face` to [`Axis::X`], because those
+    /// faces need their U coordinates to be flipped relative to the other
+    /// faces:
+    ///
+    /// ```text
+    ///                         +X face  O           
+    ///         +Z face                / |           
+    ///     ^  O--------O          ^ O   |           
+    ///     |  |        |          | |   |           
+    ///  +V |  |        |       +V | |   O  ^        
+    ///     |  |        |          | | /  /          
+    ///     |  O--------O          | O  /                 
+    ///      ------------ >        |  /  +U
+    ///           +U                
+    ///
+    ///                    +Y      
+    ///                    | -Z    
+    ///              -X____|/____+X
+    ///                   /|       
+    ///                 +Z |       
+    ///                    -Y      
+    /// ```
+    ///
+    /// As you can see, for the +Z face, +U is toward positive X. But for the +X
+    /// face, +U is towards **negative** Z.
+    pub u_flip_face: Axis,
+}
+
+/// Coordinate configuration for a right-handed coordinate system with Y up.
+///
+/// ```text
+///       +Y      
+///       | -Z    
+/// -X____|/____+X
+///      /|       
+///    +Z |       
+///       -Y      
+/// ```
+pub const RIGHT_HANDED_Y_UP_CONFIG: QuadCoordinateConfig = QuadCoordinateConfig {
+    // Y is always in the V direction when it's not the normal. When Y is the
+    // normal, right-handedness determines that we must use Yzx permutations.
+    faces: [
+        OrientedBlockFace::new(-1, AxisPermutation::Xzy),
+        OrientedBlockFace::new(-1, AxisPermutation::Yzx),
+        OrientedBlockFace::new(-1, AxisPermutation::Zxy),
+        OrientedBlockFace::new(1, AxisPermutation::Xzy),
+        OrientedBlockFace::new(1, AxisPermutation::Yzx),
+        OrientedBlockFace::new(1, AxisPermutation::Zxy),
+    ],
+    u_flip_face: Axis::X,
+};
+```
+
+### src/greedy.rs
+```
+mod merge_strategy;
+
+pub use merge_strategy::*;
+
+use crate::{bounds::assert_in_bounds, OrientedBlockFace, QuadBuffer, UnorientedQuad, Voxel, VoxelVisibility};
+
+use ilattice::glam::UVec3;
+use ilattice::prelude::Extent;
+use ndcopy::fill3;
+use ndshape::Shape;
+
+pub trait MergeVoxel: Voxel {
+    type MergeValue: Eq;
+    type MergeValueFacingNeighbour: Eq;
+
+    /// The value used to determine if this voxel can join a given quad in the mesh. This value will be constant for all voxels
+    /// in the same quad. Often this is some material identifier so that the same texture can be used for a full quad.
+    fn merge_value(&self) -> Self::MergeValue;
+
+    fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour;
+}
+
+/// Contains the output from the [`greedy_quads`] algorithm. The quads can be used to generate a mesh. See the methods on
+/// [`OrientedBlockFace`] and [`UnorientedQuad`] for details.
+///
+/// This buffer can be reused between multiple calls of [`greedy_quads`] in order to avoid reallocations.
+pub struct GreedyQuadsBuffer {
+    pub quads: QuadBuffer,
+
+    // A single array is used for the visited mask because it allows us to index by the same strides as the voxels array. It
+    // also only requires a single allocation.
+    visited: Vec<bool>,
+}
+
+impl GreedyQuadsBuffer {
+    pub fn new(size: usize) -> Self {
+        Self {
+            quads: QuadBuffer::new(),
+            visited: vec![false; size],
+        }
+    }
+
+    pub fn reset(&mut self, size: usize) {
+        self.quads.reset();
+
+        if size != self.visited.len() {
+            self.visited = vec![false; size];
+        }
+    }
+}
+
+/// The "Greedy Meshing" algorithm described by Mikola Lysenko in the [0fps
+/// article](https://0fps.net/2012/06/30/meshing-in-a-minecraft-game/).
+///
+/// All visible faces of voxels on the interior of `[min, max]` will be part of some [`UnorientedQuad`] returned via the
+/// `output` buffer. A 3x3x3 kernel will be applied to each point on the interior, hence the extra padding required on the
+/// boundary. `voxels` only needs to contain the set of points in `[min, max]`.
+///
+/// All quads created will have the same "merge value" as defined by the [`MergeVoxel`] trait. The quads can be post-processed
+/// into meshes as the user sees fit.
+pub fn greedy_quads<T, S>(
+    voxels: &[T],
+    voxels_shape: &S,
+    min: [u32; 3],
+    max: [u32; 3],
+    faces: &[OrientedBlockFace; 6],
+    output: &mut GreedyQuadsBuffer,
+) where
+    T: MergeVoxel,
+    S: Shape<3, Coord = u32>,
+{
+    greedy_quads_with_merge_strategy::<_, _, VoxelMerger<T>>(
+        voxels,
+        voxels_shape,
+        min,
+        max,
+        faces,
+        output,
+    )
+}
+
+/// Run the greedy meshing algorithm with a custom quad merging strategy using the [`MergeStrategy`] trait.
+pub fn greedy_quads_with_merge_strategy<T, S, Merger>(
+    voxels: &[T],
+    voxels_shape: &S,
+    min: [u32; 3],
+    max: [u32; 3],
+    faces: &[OrientedBlockFace; 6],
+    output: &mut GreedyQuadsBuffer,
+) where
+    T: Voxel,
+    S: Shape<3, Coord = u32>,
+    Merger: MergeStrategy<Voxel = T>,
+{
+    assert_in_bounds(voxels, voxels_shape, min, max);
+
+    let min = UVec3::from(min).as_ivec3();
+    let max = UVec3::from(max).as_ivec3();
+    let extent = Extent::from_min_and_max(min, max);
+
+    output.reset(voxels.len());
+    let GreedyQuadsBuffer {
+        visited,
+        quads: QuadBuffer { groups },
+    } = output;
+
+    let interior = extent.padded(-1); // Avoid accessing out of bounds with a 3x3x3 kernel.
+    let interior =
+        Extent::from_min_and_shape(interior.minimum.as_uvec3(), interior.shape.as_uvec3());
+
+    for (group, face) in groups.iter_mut().zip(faces.iter()) {
+        greedy_quads_for_face::<_, _, Merger>(voxels, voxels_shape, interior, face, visited, group);
+    }
+}
+
+fn greedy_quads_for_face<T, S, Merger>(
+    voxels: &[T],
+    voxels_shape: &S,
+    interior: Extent<UVec3>,
+    face: &OrientedBlockFace,
+    visited: &mut [bool],
+    quads: &mut Vec<UnorientedQuad>,
+) where
+    T: Voxel,
+    S: Shape<3, Coord = u32>,
+    Merger: MergeStrategy<Voxel = T>,
+{
+    visited.fill(false);
+
+    let OrientedBlockFace {
+        n_sign,
+        permutation,
+        n,
+        u,
+        v,
+        ..
+    } = face;
+
+    let [n_axis, u_axis, v_axis] = permutation.axes();
+    let i_n = n_axis.index();
+    let i_u = u_axis.index();
+    let i_v = v_axis.index();
+
+    let interior_shape = interior.shape.to_array();
+    let num_slices = interior_shape[i_n];
+    let mut slice_shape = [0; 3];
+    slice_shape[i_n] = 1;
+    slice_shape[i_u] = interior_shape[i_u];
+    slice_shape[i_v] = interior_shape[i_v];
+    let mut slice_extent = Extent::from_min_and_shape(interior.minimum, UVec3::from(slice_shape));
+
+    let n_stride = voxels_shape.linearize(n.to_array());
+    let u_stride = voxels_shape.linearize(u.to_array());
+    let v_stride = voxels_shape.linearize(v.to_array());
+    let face_strides = FaceStrides {
+        n_stride,
+        u_stride,
+        v_stride,
+        // The offset to the voxel sharing this cube face.
+        visibility_offset: if *n_sign > 0 {
+            n_stride
+        } else {
+            0u32.wrapping_sub(n_stride)
+        },
+    };
+
+    for _ in 0..num_slices {
+        let slice_ub = slice_extent.least_upper_bound().to_array();
+        let u_ub = slice_ub[i_u];
+        let v_ub = slice_ub[i_v];
+
+        for quad_min in slice_extent.iter3() {
+            let quad_min_array = quad_min.to_array();
+            let quad_min_index = voxels_shape.linearize(quad_min_array);
+            let quad_min_voxel = unsafe { voxels.get_unchecked(quad_min_index as usize) };
+            if unsafe {
+                !face_needs_mesh(
+                    quad_min_voxel,
+                    quad_min_index,
+                    face_strides.visibility_offset,
+                    voxels,
+                    visited,
+                )
+            } {
+                continue;
+            }
+            // We have at least one face that needs a mesh. We'll try to expand that face into the biggest quad we can find.
+
+            // These are the boundaries on quad width and height so it is contained in the slice.
+            let max_width = u_ub - quad_min_array[i_u];
+            let max_height = v_ub - quad_min_array[i_v];
+
+            let (quad_width, quad_height) = unsafe {
+                Merger::find_quad(
+                    quad_min_index,
+                    max_width,
+                    max_height,
+                    &face_strides,
+                    voxels,
+                    visited,
+                )
+            };
+            debug_assert!(quad_width >= 1);
+            debug_assert!(quad_width <= max_width);
+            debug_assert!(quad_height >= 1);
+            debug_assert!(quad_height <= max_height);
+
+            // Mark the quad as visited.
+            let mut quad_shape = [0; 3];
+            quad_shape[i_n] = 1;
+            quad_shape[i_u] = quad_width;
+            quad_shape[i_v] = quad_height;
+            fill3(quad_shape, true, visited, voxels_shape, quad_min_array);
+
+            quads.push(UnorientedQuad {
+                minimum: quad_min.to_array(),
+                width: quad_width,
+                height: quad_height,
+            });
+        }
+
+        // Move to the next slice.
+        slice_extent = slice_extent + *n;
+    }
+}
+
+/// Returns true iff the given `voxel` face needs to be meshed. This means that we haven't already meshed it, it is non-empty,
+/// and it's visible (not completely occluded by an adjacent voxel).
+pub(crate) unsafe fn face_needs_mesh<T>(
+    voxel: &T,
+    voxel_stride: u32,
+    visibility_offset: u32,
+    voxels: &[T],
+    visited: &[bool],
+) -> bool
+where
+    T: Voxel,
+{
+    if voxel.get_visibility() == VoxelVisibility::Empty || visited[voxel_stride as usize] {
+        return false;
+    }
+
+    let adjacent_voxel =
+        voxels.get_unchecked(voxel_stride.wrapping_add(visibility_offset) as usize);
+
+    // TODO: If the face lies between two transparent voxels, we choose not to mesh it. We might need to extend the IsOpaque
+    // trait with different levels of transparency to support this.
+    match adjacent_voxel.get_visibility() {
+        VoxelVisibility::Empty => true,
+        VoxelVisibility::Translucent => voxel.get_visibility() == VoxelVisibility::Opaque,
+        VoxelVisibility::Opaque => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RIGHT_HANDED_Y_UP_CONFIG;
+    use ndshape::{ConstShape, ConstShape3u32};
+
+    #[test]
+    #[should_panic]
+    fn panics_with_max_out_of_bounds_access() {
+        let samples = [EMPTY; SampleShape::SIZE as usize];
+        let mut buffer = GreedyQuadsBuffer::new(samples.len());
+        greedy_quads(
+            &samples,
+            &SampleShape {},
+            [0; 3],
+            [34, 33, 33],
+            &RIGHT_HANDED_Y_UP_CONFIG.faces,
+            &mut buffer,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn panics_with_min_out_of_bounds_access() {
+        let samples = [EMPTY; SampleShape::SIZE as usize];
+        let mut buffer = GreedyQuadsBuffer::new(samples.len());
+        greedy_quads(
+            &samples,
+            &SampleShape {},
+            [0, 34, 0],
+            [33; 3],
+            &RIGHT_HANDED_Y_UP_CONFIG.faces,
+            &mut buffer,
+        );
+    }
+
+    type SampleShape = ConstShape3u32<34, 34, 34>;
+
+    /// Basic voxel type with one byte of texture layers
+    #[derive(Default, Clone, Copy, Eq, PartialEq)]
+    struct BoolVoxel(bool);
+
+    const EMPTY: BoolVoxel = BoolVoxel(false);
+
+    impl Voxel for BoolVoxel {
+        fn get_visibility(&self) -> VoxelVisibility {
+            if *self == EMPTY {
+                VoxelVisibility::Empty
+            } else {
+                VoxelVisibility::Opaque
+            }
+        }
+    }
+
+    impl MergeVoxel for BoolVoxel {
+        type MergeValue = Self;
+        type MergeValueFacingNeighbour = bool;
+
+        fn merge_value(&self) -> Self::MergeValue {
+            *self
+        }
+
+        fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour {
+            true
+        }
+    }
+}
+```
+
+### src/lib.rs
+```
+//! [![Crates.io](https://img.shields.io/crates/v/block-mesh.svg)](https://crates.io/crates/block-mesh)
+//! [![Docs.rs](https://docs.rs/block-mesh/badge.svg)](https://docs.rs/block-mesh)
+//!
+//! Fast algorithms for generating voxel block meshes.
+//!
+//! ![Mesh Examples](https://raw.githubusercontent.com/bonsairobo/block-mesh-rs/main/examples-crate/render/mesh_examples.png)
+//!
+//! Two algorithms are included:
+//! - [`visible_block_faces`](crate::visible_block_faces): very fast but suboptimal meshes
+//! - [`greedy_quads`](crate::greedy_quads): not quite as fast, but far fewer triangles are generated
+//!
+//! Benchmarks show that [`visible_block_faces`](crate::visible_block_faces) generates about 40 million quads per second on a
+//! single core of a 2.5 GHz Intel Core i7. Assuming spherical input data, [`greedy_quads`](crate::greedy_quads) can generate a
+//! more optimal version of the same mesh with 1/3 of the quads, but it takes about 3 times longer. To run the benchmarks
+//! yourself, `cd bench/ && cargo bench`.
+//!
+//! # Example Code
+//!
+//! ```
+//! use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+//! use block_mesh::{greedy_quads, GreedyQuadsBuffer, MergeVoxel, Voxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG};
+//!
+//! #[derive(Clone, Copy, Eq, PartialEq)]
+//! struct BoolVoxel(bool);
+//!
+//! const EMPTY: BoolVoxel = BoolVoxel(false);
+//! const FULL: BoolVoxel = BoolVoxel(true);
+//!
+//! impl Voxel for BoolVoxel {
+//!     fn get_visibility(&self) -> VoxelVisibility {
+//!         if *self == EMPTY {
+//!             VoxelVisibility::Empty
+//!         } else {
+//!             VoxelVisibility::Opaque
+//!         }
+//!     }
+//! }
+//!
+//! impl MergeVoxel for BoolVoxel {
+//!     type MergeValue = Self;
+//!     type MergeValueFacingNeighbour = Self;
+//!
+//!     fn merge_value(&self) -> Self::MergeValue {
+//!         *self
+//!     }
+//!
+//!     fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour {
+//!         *self
+//!     }
+//! }
+//!
+//! // A 16^3 chunk with 1-voxel boundary padding.
+//! type ChunkShape = ConstShape3u32<18, 18, 18>;
+//!
+//! // This chunk will cover just a single octant of a sphere SDF (radius 15).
+//! let mut voxels = [EMPTY; ChunkShape::SIZE as usize];
+//! for i in 0..ChunkShape::SIZE {
+//!     let [x, y, z] = ChunkShape::delinearize(i);
+//!     voxels[i as usize] = if ((x * x + y * y + z * z) as f32).sqrt() < 15.0 {
+//!         FULL
+//!     } else {
+//!         EMPTY
+//!     };
+//! }
+//!
+//! let mut buffer = GreedyQuadsBuffer::new(voxels.len());
+//! greedy_quads(
+//!     &voxels,
+//!     &ChunkShape {},
+//!     [0; 3],
+//!     [17; 3],
+//!     &RIGHT_HANDED_Y_UP_CONFIG.faces,
+//!     &mut buffer
+//! );
+//!
+//! // Some quads were generated.
+//! assert!(buffer.quads.num_quads() > 0);
+//! ```
+
+mod bounds;
+mod buffer;
+pub mod geometry;
+mod greedy;
+mod simple;
+
+pub use buffer::*;
+#[doc(inline)]
+pub use geometry::*;
+pub use greedy::*;
+pub use simple::*;
+
+pub use ilattice;
+pub use ndshape;
+
+/// Describes how this voxel influences mesh generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoxelVisibility {
+    /// This voxel should not produce any geometry.
+    Empty,
+    /// Should produce geometry, and also light can pass through.
+    Translucent,
+    /// Light cannot pass through this voxel.
+    Opaque,
+}
+
+/// Implement on your voxel types to inform the library
+/// how to generate geometry for this voxel.
+pub trait Voxel {
+    fn get_visibility(&self) -> VoxelVisibility;
+}
+
+/// Used as a dummy for functions that must wrap a voxel
+/// but don't want to change the original's properties.
+struct IdentityVoxel<'a, T: Voxel>(&'a T);
+
+impl<'a, T: Voxel> Voxel for IdentityVoxel<'a, T> {
+    #[inline]
+    fn get_visibility(&self) -> VoxelVisibility {
+        self.0.get_visibility()
+    }
+}
+
+impl<'a, T: Voxel> From<&'a T> for IdentityVoxel<'a, T> {
+    fn from(voxel: &'a T) -> Self {
+        Self(voxel)
+    }
+}
+```
+
+### src/simple.rs
+```
+use crate::{
+    bounds::assert_in_bounds, IdentityVoxel, OrientedBlockFace, UnitQuadBuffer, UnorientedUnitQuad, Voxel, VoxelVisibility,
+};
+
+use ilattice::glam::UVec3;
+use ilattice::prelude::Extent;
+use ndshape::Shape;
+
+
+/// A fast and simple meshing algorithm that produces a single quad for every visible face of a block.
+///
+/// This is faster than [`greedy_quads`](crate::greedy_quads) but it produces many more quads.
+pub fn visible_block_faces<T, S>(
+    voxels: &[T],
+    voxels_shape: &S,
+    min: [u32; 3],
+    max: [u32; 3],
+    faces: &[OrientedBlockFace; 6],
+    output: &mut UnitQuadBuffer,
+) where
+    T: Voxel,
+    S: Shape<3, Coord = u32>,
+{
+    visible_block_faces_with_voxel_view::<_, IdentityVoxel<T>, _>(
+        voxels,
+        voxels_shape,
+        min,
+        max,
+        faces,
+        output,
+    )
+}
+
+/// Same as [`visible_block_faces`](visible_block_faces),
+/// with the additional ability to interpret the array as some other type.
+/// Use this if you want to mesh the same array multiple times
+/// with different sets of voxels being visible.
+pub fn visible_block_faces_with_voxel_view<'a, T, V, S>(
+    voxels: &'a [T],
+    voxels_shape: &S,
+    min: [u32; 3],
+    max: [u32; 3],
+    faces: &[OrientedBlockFace; 6],
+    output: &mut UnitQuadBuffer,
+) where
+    V: Voxel + From<&'a T>,
+    S: Shape<3, Coord = u32>,
+{
+    assert_in_bounds(voxels, voxels_shape, min, max);
+
+    let min = UVec3::from(min).as_ivec3();
+    let max = UVec3::from(max).as_ivec3();
+    let extent = Extent::from_min_and_max(min, max);
+    let interior = extent.padded(-1); // Avoid accessing out of bounds with a 3x3x3 kernel.
+    let interior =
+        Extent::from_min_and_shape(interior.minimum.as_uvec3(), interior.shape.as_uvec3());
+
+    let kernel_strides =
+        faces.map(|face| voxels_shape.linearize(face.signed_normal().as_uvec3().to_array()));
+
+    for p in interior.iter3() {
+        let p_array = p.to_array();
+        let p_index = voxels_shape.linearize(p_array);
+        let p_voxel = V::from(unsafe { voxels.get_unchecked(p_index as usize) });
+
+        if let VoxelVisibility::Empty = p_voxel.get_visibility() {
+            continue;
+        }
+
+        for (face_index, face_stride) in kernel_strides.into_iter().enumerate() {
+            let neighbor_index = p_index.wrapping_add(face_stride);
+            let neighbor_voxel = V::from(unsafe { voxels.get_unchecked(neighbor_index as usize) });
+
+            // TODO: If the face lies between two transparent voxels, we choose not to mesh it. We might need to extend the
+            // IsOpaque trait with different levels of transparency to support this.
+            let face_needs_mesh = match neighbor_voxel.get_visibility() {
+                VoxelVisibility::Empty => true,
+                VoxelVisibility::Translucent => p_voxel.get_visibility() == VoxelVisibility::Opaque,
+                VoxelVisibility::Opaque => false,
+            };
+
+            if face_needs_mesh {
+                output.groups[face_index].push(UnorientedUnitQuad { minimum: p_array });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RIGHT_HANDED_Y_UP_CONFIG;
+    use ndshape::{ConstShape, ConstShape3u32};
+
+    #[test]
+    #[should_panic]
+    fn panics_with_max_out_of_bounds_access() {
+        let samples = [EMPTY; SampleShape::SIZE as usize];
+        let mut buffer = UnitQuadBuffer::new();
+        visible_block_faces(
+            &samples,
+            &SampleShape {},
+            [0; 3],
+            [34, 33, 33],
+            &RIGHT_HANDED_Y_UP_CONFIG.faces,
+            &mut buffer,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn panics_with_min_out_of_bounds_access() {
+        let samples = [EMPTY; SampleShape::SIZE as usize];
+        let mut buffer = UnitQuadBuffer::new();
+        visible_block_faces(
+            &samples,
+            &SampleShape {},
+            [0, 34, 0],
+            [33; 3],
+            &RIGHT_HANDED_Y_UP_CONFIG.faces,
+            &mut buffer,
+        );
+    }
+
+    type SampleShape = ConstShape3u32<34, 34, 34>;
+
+    /// Basic voxel type with one byte of texture layers
+    #[derive(Default, Clone, Copy, Eq, PartialEq)]
+    struct BoolVoxel(bool);
+
+    const EMPTY: BoolVoxel = BoolVoxel(false);
+
+    impl Voxel for BoolVoxel {
+        fn get_visibility(&self) -> VoxelVisibility {
+            if *self == EMPTY {
+                VoxelVisibility::Empty
+            } else {
+                VoxelVisibility::Opaque
+            }
+        }
+    }
+
+}
+```
+
+### bench/src/bench.rs
+```
+use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use block_mesh::{
+    greedy_quads, visible_block_faces, GreedyQuadsBuffer, MergeVoxel, UnitQuadBuffer, Voxel,
+    VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
+};
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+
+type SampleShape = ConstShape3u32<18, 18, 18>;
+
+fn bench_empty_space_greedy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_empty_space_greedy");
+    let samples = [EMPTY; SampleShape::SIZE as usize];
+
+    // Do a single run first to allocate the buffer to the right size.
+    let mut buffer = GreedyQuadsBuffer::new(samples.len());
+    greedy_quads(
+        &samples,
+        &SampleShape {},
+        [0; 3],
+        [17; 3],
+        &RIGHT_HANDED_Y_UP_CONFIG.faces,
+        &mut buffer,
+    );
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(format!("quads={}", buffer.quads.num_quads())),
+        &(),
+        |b, _| {
+            b.iter(|| {
+                greedy_quads(
+                    &samples,
+                    &SampleShape {},
+                    [0; 3],
+                    [17; 3],
+                    &RIGHT_HANDED_Y_UP_CONFIG.faces,
+                    &mut buffer,
+                )
+            });
+        },
+    );
+    group.finish();
+}
+
+fn bench_sphere_greedy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_sphere_greedy");
+    let mut samples = [EMPTY; SampleShape::SIZE as usize];
+    for i in 0u32..(SampleShape::SIZE) {
+        let p = into_domain(16, SampleShape::delinearize(i));
+        samples[i as usize] = sphere_voxel(p);
+    }
+
+    // Do a single run first to allocate the buffer to the right size.
+    let mut buffer = GreedyQuadsBuffer::new(samples.len());
+    greedy_quads(
+        &samples,
+        &SampleShape {},
+        [0; 3],
+        [17; 3],
+        &RIGHT_HANDED_Y_UP_CONFIG.faces,
+        &mut buffer,
+    );
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(format!("quads={}", buffer.quads.num_quads())),
+        &(),
+        |b, _| {
+            b.iter(|| {
+                greedy_quads(
+                    &samples,
+                    &SampleShape {},
+                    [0; 3],
+                    [17; 3],
+                    &RIGHT_HANDED_Y_UP_CONFIG.faces,
+                    &mut buffer,
+                )
+            });
+        },
+    );
+    group.finish();
+}
+
+fn bench_empty_space_simple(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_empty_space_simple");
+    let samples = [EMPTY; SampleShape::SIZE as usize];
+
+    let mut buffer = UnitQuadBuffer::new();
+    visible_block_faces(
+        &samples,
+        &SampleShape {},
+        [0; 3],
+        [17; 3],
+        &RIGHT_HANDED_Y_UP_CONFIG.faces,
+        &mut buffer,
+    );
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(format!("quads={}", buffer.num_quads())),
+        &(),
+        |b, _| {
+            b.iter(|| {
+                visible_block_faces(
+                    &samples,
+                    &SampleShape {},
+                    [0; 3],
+                    [17; 3],
+                    &RIGHT_HANDED_Y_UP_CONFIG.faces,
+                    &mut buffer,
+                )
+            });
+        },
+    );
+    group.finish();
+}
+
+fn bench_sphere_simple(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bench_sphere_simple");
+    let mut samples = [EMPTY; SampleShape::SIZE as usize];
+    for i in 0u32..(SampleShape::SIZE) {
+        let p = into_domain(16, SampleShape::delinearize(i));
+        samples[i as usize] = sphere_voxel(p);
+    }
+
+    let mut buffer = UnitQuadBuffer::new();
+    visible_block_faces(
+        &samples,
+        &SampleShape {},
+        [0; 3],
+        [17; 3],
+        &RIGHT_HANDED_Y_UP_CONFIG.faces,
+        &mut buffer,
+    );
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(format!("quads={}", buffer.num_quads())),
+        &(),
+        |b, _| {
+            b.iter(|| {
+                visible_block_faces(
+                    &samples,
+                    &SampleShape {},
+                    [0; 3],
+                    [17; 3],
+                    &RIGHT_HANDED_Y_UP_CONFIG.faces,
+                    &mut buffer,
+                )
+            });
+        },
+    );
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_sphere_simple,
+    bench_sphere_greedy,
+    bench_empty_space_simple,
+    bench_empty_space_greedy
+);
+criterion_main!(benches);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct BoolVoxel(bool);
+
+const EMPTY: BoolVoxel = BoolVoxel(false);
+const FULL: BoolVoxel = BoolVoxel(true);
+
+impl Voxel for BoolVoxel {
+    fn get_visibility(&self) -> VoxelVisibility {
+        if *self == EMPTY {
+            VoxelVisibility::Empty
+        } else {
+            VoxelVisibility::Opaque
+        }
+    }
+}
+
+impl MergeVoxel for BoolVoxel {
+    type MergeValue = Self;
+
+    fn merge_value(&self) -> Self::MergeValue {
+        *self
+    }
+}
+
+fn sphere_voxel([x, y, z]: [f32; 3]) -> BoolVoxel {
+    let d = x * x + y * y + z * z;
+
+    if d > 0.9 {
+        EMPTY
+    } else {
+        FULL
+    }
+}
+
+fn into_domain(array_dim: u32, [x, y, z]: [u32; 3]) -> [f32; 3] {
+    [
+        (2.0 * x as f32 / array_dim as f32) - 1.0,
+        (2.0 * y as f32 / array_dim as f32) - 1.0,
+        (2.0 * z as f32 / array_dim as f32) - 1.0,
+    ]
+}
+```
+
+### examples-crate/render/main.rs
+```
+use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
+use bevy::render::mesh::{Indices, VertexAttributeValues};
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::PrimitiveTopology;
+use bevy::render::settings::RenderCreation;
+use block_mesh::ilattice::glam::Vec3A;
+use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use block_mesh::{
+    greedy_quads, visible_block_faces, GreedyQuadsBuffer, MergeVoxel, UnitQuadBuffer, Voxel,
+    VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
+};
+
+use bevy::{
+    prelude::*,
+    render::{
+        settings::{WgpuFeatures, WgpuSettings},
+        RenderPlugin,
+    },
+};
+
+fn main() {
+    App::new()
+        .init_resource::<WireframeConfig>()
+        .insert_resource(Msaa::Sample4)
+        .add_plugins((
+            DefaultPlugins.set(RenderPlugin {
+                render_creation: RenderCreation::Automatic(WgpuSettings {
+                    features: WgpuFeatures::POLYGON_MODE_LINE,
+                    ..Default::default()
+                }),
+                ..default()
+            }),
+            WireframePlugin,
+        ))
+        .add_systems(Startup, setup)
+        .run();
+}
+
+fn setup(
+    mut commands: Commands,
+    mut wireframe_config: ResMut<WireframeConfig>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    wireframe_config.global = true;
+
+    commands.spawn(PointLightBundle {
+        transform: Transform::from_translation(Vec3::new(25.0, 25.0, 25.0)),
+        point_light: PointLight {
+            range: 200.0,
+            //intensity: 8000.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    commands.spawn(Camera3dBundle {
+        transform: Transform::from_translation(Vec3::new(50.0, 15.0, 50.0))
+            .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        ..Default::default()
+    });
+
+    let simple_sphere_mesh = generate_simple_mesh(&mut meshes, |p| sphere(0.9, p));
+    let greedy_sphere_mesh = generate_greedy_mesh(&mut meshes, |p| sphere(0.9, p));
+
+    spawn_pbr(
+        &mut commands,
+        &mut materials,
+        simple_sphere_mesh,
+        Transform::from_translation(Vec3::new(8.0, -16.0, -16.0)),
+    );
+    spawn_pbr(
+        &mut commands,
+        &mut materials,
+        greedy_sphere_mesh,
+        Transform::from_translation(Vec3::new(-16.0, -16.0, 8.0)),
+    );
+
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: light_consts::lux::OVERCAST_DAY,
+    });
+}
+
+fn generate_simple_mesh(
+    meshes: &mut Assets<Mesh>,
+    sdf: impl Fn(Vec3A) -> BoolVoxel,
+) -> Handle<Mesh> {
+    type SampleShape = ConstShape3u32<34, 34, 34>;
+
+    let mut samples = [EMPTY; SampleShape::SIZE as usize];
+    for i in 0u32..(SampleShape::SIZE) {
+        let p = into_domain(32, SampleShape::delinearize(i));
+        samples[i as usize] = sdf(p);
+    }
+
+    let faces = RIGHT_HANDED_Y_UP_CONFIG.faces;
+
+    let mut buffer = UnitQuadBuffer::new();
+    visible_block_faces(
+        &samples,
+        &SampleShape {},
+        [0; 3],
+        [33; 3],
+        &faces,
+        &mut buffer,
+    );
+    let num_indices = buffer.num_quads() * 6;
+    let num_vertices = buffer.num_quads() * 4;
+    let mut indices = Vec::with_capacity(num_indices);
+    let mut positions = Vec::with_capacity(num_vertices);
+    let mut normals = Vec::with_capacity(num_vertices);
+    for (group, face) in buffer.groups.into_iter().zip(faces.into_iter()) {
+        for quad in group.into_iter() {
+            indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
+            positions.extend_from_slice(&face.quad_mesh_positions(&quad.into(), 1.0));
+            normals.extend_from_slice(&face.quad_mesh_normals());
+        }
+    }
+
+    let mut render_mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        VertexAttributeValues::Float32x3(positions),
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        VertexAttributeValues::Float32x3(normals),
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        VertexAttributeValues::Float32x2(vec![[0.0; 2]; num_vertices]),
+    );
+    render_mesh.insert_indices(Indices::U32(indices.clone()));
+
+    meshes.add(render_mesh)
+}
+
+fn generate_greedy_mesh(
+    meshes: &mut Assets<Mesh>,
+    sdf: impl Fn(Vec3A) -> BoolVoxel,
+) -> Handle<Mesh> {
+    type SampleShape = ConstShape3u32<34, 34, 34>;
+
+    let mut samples = [EMPTY; SampleShape::SIZE as usize];
+    for i in 0u32..(SampleShape::SIZE) {
+        let p = into_domain(32, SampleShape::delinearize(i));
+        samples[i as usize] = sdf(p);
+    }
+
+    let faces = RIGHT_HANDED_Y_UP_CONFIG.faces;
+
+    let mut buffer = GreedyQuadsBuffer::new(samples.len());
+    greedy_quads(
+        &samples,
+        &SampleShape {},
+        [0; 3],
+        [33; 3],
+        &faces,
+        &mut buffer,
+    );
+    let num_indices = buffer.quads.num_quads() * 6;
+    let num_vertices = buffer.quads.num_quads() * 4;
+    let mut indices = Vec::with_capacity(num_indices);
+    let mut positions = Vec::with_capacity(num_vertices);
+    let mut normals = Vec::with_capacity(num_vertices);
+    for (group, face) in buffer.quads.groups.into_iter().zip(faces.into_iter()) {
+        for quad in group.into_iter() {
+            indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
+            positions.extend_from_slice(&face.quad_mesh_positions(&quad, 1.0));
+            normals.extend_from_slice(&face.quad_mesh_normals());
+        }
+    }
+
+    let mut render_mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        VertexAttributeValues::Float32x3(positions),
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        VertexAttributeValues::Float32x3(normals),
+    );
+    render_mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        VertexAttributeValues::Float32x2(vec![[0.0; 2]; num_vertices]),
+    );
+    render_mesh.insert_indices(Indices::U32(indices.clone()));
+
+    meshes.add(render_mesh)
+}
+
+fn spawn_pbr(
+    commands: &mut Commands,
+    materials: &mut Assets<StandardMaterial>,
+    mesh: Handle<Mesh>,
+    transform: Transform,
+) {
+    let mut material = StandardMaterial::from(Color::BLACK);
+    material.perceptual_roughness = 0.9;
+    let material = materials.add(material);
+
+    commands.spawn(PbrBundle {
+        mesh,
+        material,
+        transform,
+        ..Default::default()
+    });
+}
+
+fn into_domain(array_dim: u32, [x, y, z]: [u32; 3]) -> Vec3A {
+    (2.0 / array_dim as f32) * Vec3A::new(x as f32, y as f32, z as f32) - 1.0
+}
+
+fn sphere(radius: f32, p: Vec3A) -> BoolVoxel {
+    BoolVoxel(p.length() < radius)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct BoolVoxel(bool);
+
+const EMPTY: BoolVoxel = BoolVoxel(false);
+
+impl Voxel for BoolVoxel {
+    fn get_visibility(&self) -> VoxelVisibility {
+        if *self == EMPTY {
+            VoxelVisibility::Empty
+        } else {
+            VoxelVisibility::Opaque
+        }
+    }
+}
+
+impl MergeVoxel for BoolVoxel {
+    type MergeValue = Self;
+    type MergeValueFacingNeighbour = Self;
+
+    fn merge_value(&self) -> Self::MergeValue {
+        *self
+    }
+
+    fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour {
+        *self
+    }
+}
+```
+
+### examples-crate/uv_mapping/main.rs
+```
+use bevy::asset::LoadState;
+use bevy::prelude::*;
+use bevy::render::mesh::Indices;
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::PrimitiveTopology;
+use bevy::render::texture::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use block_mesh::ndshape::{ConstShape, ConstShape3u32};
+use block_mesh::{
+    greedy_quads, GreedyQuadsBuffer, MergeVoxel, Voxel, VoxelVisibility, RIGHT_HANDED_Y_UP_CONFIG,
+};
+
+#[derive(Default, Clone, Copy, Debug, Eq, Hash, PartialEq, States)]
+enum AppState {
+    #[default]
+    Loading,
+    Run,
+}
+
+const UV_SCALE: f32 = 1.0 / 16.0;
+
+#[derive(Resource)]
+struct Loading(Handle<Image>);
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .init_state::<AppState>()
+        .add_systems(OnEnter(AppState::Loading), load_assets)
+        .add_systems(Update, check_loaded.run_if(in_state(AppState::Loading)))
+        .add_systems(OnEnter(AppState::Run), setup)
+        .add_systems(Update, rotation_system)
+        .run();
+}
+
+fn load_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    debug!("load");
+    let handle = asset_server.load("uv_checker.png");
+    commands.insert_resource(Loading(handle));
+}
+
+/// Make sure that our texture is loaded so we can change some settings on it later
+fn check_loaded(
+    mut next_state: ResMut<NextState<AppState>>,
+    handle: Res<Loading>,
+    asset_server: Res<AssetServer>,
+) {
+    debug!("check loaded");
+    if let Some(LoadState::Loaded) = asset_server.get_load_state(&handle.0) {
+        debug!("uv_checker.png loaded!");
+        next_state.set(AppState::Run);
+    }
+}
+
+/// Basic voxel type with one byte of texture layers
+#[derive(Default, Clone, Copy)]
+struct BoolVoxel(bool);
+
+impl MergeVoxel for BoolVoxel {
+    type MergeValue = bool;
+    type MergeValueFacingNeighbour = bool;
+
+    fn merge_value(&self) -> Self::MergeValue {
+        self.0
+    }
+
+    fn merge_value_facing_neighbour(&self) -> Self::MergeValueFacingNeighbour {
+        self.0
+    }
+}
+
+impl Voxel for BoolVoxel {
+    fn get_visibility(&self) -> VoxelVisibility {
+        if self.0 {
+            VoxelVisibility::Opaque
+        } else {
+            VoxelVisibility::Empty
+        }
+    }
+}
+
+fn setup(
+    mut commands: Commands,
+    texture_handle: Res<Loading>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut textures: ResMut<Assets<Image>>,
+) {
+    debug!("setup");
+    let texture = textures.get_mut(&texture_handle.0).unwrap();
+
+    // Set the texture to tile over the entire quad
+    texture.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        ..Default::default()
+    });
+
+    type SampleShape = ConstShape3u32<22, 22, 22>;
+
+    // Just a solid cube of voxels. We only fill the interior since we need some empty voxels to form a boundary for the mesh.
+    let mut voxels = [BoolVoxel(false); SampleShape::SIZE as usize];
+    for z in 1..21 {
+        for y in 1..21 {
+            for x in 1..21 {
+                let i = SampleShape::linearize([x, y, z]);
+                voxels[i as usize] = BoolVoxel(true);
+            }
+        }
+    }
+
+    let faces = RIGHT_HANDED_Y_UP_CONFIG.faces;
+
+    let mut buffer = GreedyQuadsBuffer::new(voxels.len());
+    greedy_quads(
+        &voxels,
+        &SampleShape {},
+        [0; 3],
+        [21; 3],
+        &faces,
+        &mut buffer,
+    );
+    let num_indices = buffer.quads.num_quads() * 6;
+    let num_vertices = buffer.quads.num_quads() * 4;
+    let mut indices = Vec::with_capacity(num_indices);
+    let mut positions = Vec::with_capacity(num_vertices);
+    let mut normals = Vec::with_capacity(num_vertices);
+    let mut tex_coords = Vec::with_capacity(num_vertices);
+    for (group, face) in buffer.quads.groups.into_iter().zip(faces.into_iter()) {
+        for quad in group.into_iter() {
+            indices.extend_from_slice(&face.quad_mesh_indices(positions.len() as u32));
+            positions.extend_from_slice(&face.quad_mesh_positions(&quad, 1.0));
+            normals.extend_from_slice(&face.quad_mesh_normals());
+            tex_coords.extend_from_slice(&face.tex_coords(
+                RIGHT_HANDED_Y_UP_CONFIG.u_flip_face,
+                true,
+                &quad,
+            ));
+        }
+    }
+    // Center the mesh.
+    for p in &mut positions {
+        *p = (Vec3::from(*p) - Vec3::splat(10.0)).into();
+    }
+
+    let mut render_mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+
+    for uv in tex_coords.iter_mut() {
+        for c in uv.iter_mut() {
+            *c *= UV_SCALE;
+        }
+    }
+
+    render_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    render_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    render_mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, tex_coords);
+    render_mesh.insert_indices(Indices::U32(indices));
+
+    commands.spawn((
+        PbrBundle {
+            mesh: meshes.add(render_mesh),
+            material: materials.add(texture_handle.0.clone()),
+            ..Default::default()
+        },
+        Rotate,
+    ));
+
+    commands.insert_resource(AmbientLight {
+        color: Color::WHITE,
+        brightness: 1_000.0,
+    });
+
+    commands.spawn(Camera3dBundle {
+        transform: Transform::from_translation(Vec3::new(50.0, 15.0, 50.0))
+            .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
+        ..Default::default()
+    });
+}
+
+#[derive(Component)]
+struct Rotate;
+
+fn rotation_system(time: Res<Time>, mut transforms: Query<&mut Transform, With<Rotate>>) {
+    let t = 0.3 * time.elapsed_seconds();
+
+    for mut transform in &mut transforms {
+        transform.rotation =
+            Quat::from_axis_angle(Vec3::X, t) * Quat::from_axis_angle(Vec3::Y, t + 1.0);
+    }
+}
+```
+
+### src/geometry/axis.rs
+```
+use ilattice::glam::{IVec3, UVec3};
+
+/// Either the X, Y, or Z axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Axis {
+    X = 0,
+    Y = 1,
+    Z = 2,
+}
+
+impl Axis {
+    /// The index for a point's component on this axis.
+    #[inline]
+    pub fn index(&self) -> usize {
+        *self as usize
+    }
+
+    #[inline]
+    pub const fn get_unit_vector(&self) -> UVec3 {
+        match self {
+            Axis::X => UVec3::X,
+            Axis::Y => UVec3::Y,
+            Axis::Z => UVec3::Z,
+        }
+    }
+}
+
+/// One of the six possible `{N, U, V}` --> `{X, Y, Z}` mappings.
+///
+/// This can be combined with a `-1` or `+1` sign for the **N**ormal axis to
+/// make an [`OrientedBlockFace`][crate::OrientedBlockFace].
+///
+/// See the [`geometry` module documentation][crate::geometry] for more
+/// information on `{N, U, V}` space.
+///
+/// # Even and Odd
+///
+/// Even permutations:
+/// - [AxisPermutation::Xyz]
+/// - [AxisPermutation::Zxy]
+/// - [AxisPermutation::Yzx]
+///
+/// Odd permutations:
+/// - [AxisPermutation::Zyx]
+/// - [AxisPermutation::Xzy]
+/// - [AxisPermutation::Yxz]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AxisPermutation {
+    // Even permutations
+    Xyz,
+    Zxy,
+    Yzx,
+    // Odd permutations
+    Zyx,
+    Xzy,
+    Yxz,
+}
+
+impl AxisPermutation {
+    #[inline]
+    pub const fn even_with_normal_axis(axis: Axis) -> Self {
+        match axis {
+            Axis::X => AxisPermutation::Xyz,
+            Axis::Y => AxisPermutation::Yzx,
+            Axis::Z => AxisPermutation::Zxy,
+        }
+    }
+
+    #[inline]
+    pub const fn odd_with_normal_axis(axis: Axis) -> Self {
+        match axis {
+            Axis::X => AxisPermutation::Xzy,
+            Axis::Y => AxisPermutation::Yxz,
+            Axis::Z => AxisPermutation::Zyx,
+        }
+    }
+
+    #[inline]
+    pub const fn sign(&self) -> i32 {
+        match self {
+            AxisPermutation::Xyz => 1,
+            AxisPermutation::Zxy => 1,
+            AxisPermutation::Yzx => 1,
+            AxisPermutation::Zyx => -1,
+            AxisPermutation::Xzy => -1,
+            AxisPermutation::Yxz => -1,
+        }
+    }
+
+    /// Returns the [`Axes`] in the order specified by the permutation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use block_mesh::*;
+    /// let xyz = AxisPermutation::Xyz;
+    /// assert_eq!(xyz.axes(), [Axis::X, Axis::Y, Axis::Z]);
+    /// ```
+    ///
+    /// [`Axes`]: Axis
+    #[inline]
+    pub const fn axes(&self) -> [Axis; 3] {
+        match self {
+            AxisPermutation::Xyz => [Axis::X, Axis::Y, Axis::Z],
+            AxisPermutation::Zxy => [Axis::Z, Axis::X, Axis::Y],
+            AxisPermutation::Yzx => [Axis::Y, Axis::Z, Axis::X],
+            AxisPermutation::Zyx => [Axis::Z, Axis::Y, Axis::X],
+            AxisPermutation::Xzy => [Axis::X, Axis::Z, Axis::Y],
+            AxisPermutation::Yxz => [Axis::Y, Axis::X, Axis::Z],
+        }
+    }
+}
+
+/// Either the -X, +X, -Y, +Y, -Z, or +Z axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SignedAxis {
+    NegX = 0,
+    PosX = 1,
+    NegY = 2,
+    PosY = 3,
+    NegZ = 4,
+    PosZ = 5,
+}
+
+impl SignedAxis {
+    #[inline]
+    pub fn new(sign: i32, axis: Axis) -> Self {
+        assert!(sign != 0);
+
+        match (sign > 0, axis) {
+            (false, Axis::X) => Self::NegX,
+            (false, Axis::Y) => Self::NegY,
+            (false, Axis::Z) => Self::NegZ,
+            (true, Axis::X) => Self::PosX,
+            (true, Axis::Y) => Self::PosY,
+            (true, Axis::Z) => Self::PosZ,
+        }
+    }
+
+    #[inline]
+    pub fn unsigned_axis(&self) -> Axis {
+        match self {
+            Self::NegX => Axis::X,
+            Self::NegY => Axis::Y,
+            Self::NegZ => Axis::Z,
+            Self::PosX => Axis::X,
+            Self::PosY => Axis::Y,
+            Self::PosZ => Axis::Z,
+        }
+    }
+
+    #[inline]
+    pub fn signum(&self) -> i32 {
+        match self {
+            Self::NegX => -1,
+            Self::NegY => -1,
+            Self::NegZ => -1,
+            Self::PosX => 1,
+            Self::PosY => 1,
+            Self::PosZ => 1,
+        }
+    }
+
+    #[inline]
+    pub fn get_unit_vector(&self) -> IVec3 {
+        match self {
+            Self::NegX => -IVec3::X,
+            Self::NegY => -IVec3::Y,
+            Self::NegZ => -IVec3::Z,
+            Self::PosX => IVec3::X,
+            Self::PosY => IVec3::Y,
+            Self::PosZ => IVec3::Z,
+        }
+    }
+
+    #[inline]
+    pub fn from_vector(v: IVec3) -> Option<Self> {
+        match v.to_array() {
+            [x, 0, 0] => Some(SignedAxis::new(x, Axis::X)),
+            [0, y, 0] => Some(SignedAxis::new(y, Axis::Y)),
+            [0, 0, z] => Some(SignedAxis::new(z, Axis::Z)),
+            _ => None,
+        }
+    }
+}
+```
+
+### src/geometry/face.rs
+```
+use crate::{Axis, AxisPermutation, SignedAxis, UnorientedQuad};
+
+use ilattice::glam::{IVec3, UVec3};
+
+/// Metadata that's used to aid in the geometric calculations for one of the 6 possible cube faces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrientedBlockFace {
+    /// Determines the orientation of the plane.
+    pub(crate) n_sign: i32,
+
+    /// Determines the {N, U, V} <--> {X, Y, Z} relation.
+    pub(crate) permutation: AxisPermutation,
+
+    /// First in the `permutation` of +X, +Y, and +Z.
+    pub(crate) n: UVec3,
+    /// Second in the `permutation` of +X, +Y, and +Z.
+    pub(crate) u: UVec3,
+    /// Third in the `permutation` of +X, +Y, and +Z.
+    pub(crate) v: UVec3,
+}
+
+impl OrientedBlockFace {
+    pub const fn new(n_sign: i32, permutation: AxisPermutation) -> Self {
+        let [n_axis, u_axis, v_axis] = permutation.axes();
+
+        Self {
+            n_sign,
+            permutation,
+            n: n_axis.get_unit_vector(),
+            u: u_axis.get_unit_vector(),
+            v: v_axis.get_unit_vector(),
+        }
+    }
+
+    /// A cube face, using axes with an even permutation.
+    pub fn canonical(normal: SignedAxis) -> Self {
+        Self::new(
+            normal.signum(),
+            AxisPermutation::even_with_normal_axis(normal.unsigned_axis()),
+        )
+    }
+    
+    #[inline]
+    pub fn n_sign(&self) -> i32 {
+        self.n_sign
+    }
+    
+    #[inline]
+    pub fn permutation(&self) -> AxisPermutation {
+        self.permutation
+    }
+
+    #[inline]
+    pub fn signed_normal(&self) -> IVec3 {
+        self.n.as_ivec3() * self.n_sign
+    }
+
+    /// Returns the 4 corners of the quad in this order:
+    ///
+    /// ```text
+    ///         2 ----> 3
+    ///           ^
+    ///     ^       \
+    ///     |         \
+    ///  +V |   0 ----> 1
+    ///     |
+    ///      -------->
+    ///        +U
+    ///
+    /// (+N pointing out of the screen)
+    /// ```
+    ///
+    /// Note that this is natural when UV coordinates have (0,0) at the bottom
+    /// left, but when (0,0) is at the top left, V must be flipped.
+    #[inline]
+    pub fn quad_corners(&self, quad: &UnorientedQuad) -> [UVec3; 4] {
+        let w_vec = self.u * quad.width;
+        let h_vec = self.v * quad.height;
+
+        let minu_minv = if self.n_sign > 0 {
+            UVec3::from(quad.minimum) + self.n
+        } else {
+            UVec3::from(quad.minimum)
+        };
+        let maxu_minv = minu_minv + w_vec;
+        let minu_maxv = minu_minv + h_vec;
+        let maxu_maxv = minu_minv + w_vec + h_vec;
+
+        [minu_minv, maxu_minv, minu_maxv, maxu_maxv]
+    }
+
+    #[inline]
+    pub fn quad_mesh_positions(&self, quad: &UnorientedQuad, voxel_size: f32) -> [[f32; 3]; 4] {
+        self.quad_corners(quad)
+            .map(|c| (voxel_size * c.as_vec3()).to_array())
+    }
+
+    #[inline]
+    pub fn quad_mesh_normals(&self) -> [[f32; 3]; 4] {
+        [self.signed_normal().as_vec3().to_array(); 4]
+    }
+
+    /// Returns the 6 vertex indices for the quad in order to make two triangles
+    /// in a mesh. Winding order depends on both the sign of the surface normal
+    /// and the permutation of the UVs.
+    ///
+    /// Front faces will be wound counterclockwise, and back faces clockwise, as
+    /// per convention.
+    #[inline]
+    pub fn quad_mesh_indices(&self, start: u32) -> [u32; 6] {
+        quad_indices(start, self.n_sign * self.permutation.sign() > 0)
+    }
+
+    /// Returns the UV coordinates of the 4 corners of the quad. Returns
+    /// vertices in the same order as [`OrientedBlockFace::quad_corners`].
+    ///
+    /// `u_flip_face` should correspond to the field on
+    /// [`QuadCoordinateConfig`](crate::QuadCoordinateConfig). See the docs
+    /// there for more info.
+    ///
+    /// This is just one way of assigning UVs to voxel quads. It assumes that
+    /// each material has a single tile texture with wrapping coordinates, and
+    /// each voxel face should show the entire texture. It also assumes a
+    /// particular orientation for the texture. This should be sufficient for
+    /// minecraft-style meshing.
+    ///
+    /// If you need to use a texture atlas, you must calculate your own
+    /// coordinates from the `Quad`.
+    #[inline]
+    pub fn tex_coords(
+        &self,
+        u_flip_face: Axis,
+        flip_v: bool,
+        quad: &UnorientedQuad,
+    ) -> [[f32; 2]; 4] {
+        let face_normal_axis = self.permutation.axes()[0];
+        let flip_u = if self.n_sign < 0 {
+            u_flip_face != face_normal_axis
+        } else {
+            u_flip_face == face_normal_axis
+        };
+
+        match (flip_u, flip_v) {
+            (false, false) => [
+                [0.0, 0.0],
+                [quad.width as f32, 0.0],
+                [0.0, quad.height as f32],
+                [quad.width as f32, quad.height as f32],
+            ],
+            (true, false) => [
+                [quad.width as f32, 0.0],
+                [0.0, 0.0],
+                [quad.width as f32, quad.height as f32],
+                [0.0, quad.height as f32],
+            ],
+            (false, true) => [
+                [0.0, quad.height as f32],
+                [quad.width as f32, quad.height as f32],
+                [0.0, 0.0],
+                [quad.width as f32, 0.0],
+            ],
+            (true, true) => [
+                [quad.width as f32, quad.height as f32],
+                [0.0, quad.height as f32],
+                [quad.width as f32, 0.0],
+                [0.0, 0.0],
+            ],
+        }
+    }
+}
+
+/// Returns the vertex indices for a single quad (two triangles). The triangles
+/// may have either clockwise or counter-clockwise winding. `start` is the first
+/// index.
+fn quad_indices(start: u32, counter_clockwise: bool) -> [u32; 6] {
+    if counter_clockwise {
+        [start, start + 1, start + 2, start + 1, start + 3, start + 2]
+    } else {
+        [start, start + 2, start + 1, start + 1, start + 2, start + 3]
+    }
+}
+```
+
+### src/geometry/quad.rs
+```
+/// The minimum voxel and size of a quad, without an orientation. To get the
+/// actual corners of the quad, combine with an [`OrientedBlockFace`].
+///
+/// When using these values for materials and lighting, you can access them
+/// using either the quad's minimum voxel coordinates or the vertex coordinates
+/// given by `OrientedBlockFace::quad_corners`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnorientedQuad {
+    /// The minimum voxel in the quad.
+    pub minimum: [u32; 3],
+    /// Width of the quad.
+    pub width: u32,
+    /// Height of the quad.
+    pub height: u32,
+}
+
+impl From<UnorientedUnitQuad> for UnorientedQuad {
+    #[inline]
+    fn from(unit: UnorientedUnitQuad) -> Self {
+        Self {
+            minimum: unit.minimum,
+            width: 1,
+            height: 1,
+        }
+    }
+}
+
+/// A quad covering a single voxel (just a single block face), without an
+/// orientation. To get the actual corners of the quad, combine with an
+/// [`OrientedBlockFace`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnorientedUnitQuad {
+    /// The minimum voxel in the quad.
+    pub minimum: [u32; 3],
+}
+```
+
+### src/greedy/merge_strategy.rs
+```
+use crate::greedy::face_needs_mesh;
+use crate::Voxel;
+
+use super::MergeVoxel;
+
+// TODO: implement a MergeStrategy for voxels with an ambient occlusion value at each vertex
+
+/// A strategy for merging cube faces into quads.
+pub trait MergeStrategy {
+    type Voxel;
+
+    /// Return the width and height of the quad that should be constructed.
+    ///
+    /// `min_index`: The linear index for the minimum voxel in this quad.
+    ///
+    /// `max_width`: The maximum possible width for the quad to be constructed.
+    ///
+    /// `max_height`: The maximum possible height for the quad to be constructed.
+    ///
+    /// `face_strides`: Strides to help with indexing in the necessary directions for this cube face.
+    ///
+    /// `voxels`: The entire array of voxel data.
+    ///
+    /// `visited`: The bitmask of which voxels have already been meshed. A quad's extent will be marked as visited (`true`)
+    ///            after `find_quad` returns.
+    ///
+    /// # Safety
+    ///
+    /// Some implementations may use unchecked indexing of `voxels` for performance. If this trait is not invoked with correct
+    /// arguments, access out of bounds may cause undefined behavior.
+    unsafe fn find_quad(
+        min_index: u32,
+        max_width: u32,
+        max_height: u32,
+        face_strides: &FaceStrides,
+        voxels: &[Self::Voxel],
+        visited: &[bool],
+    ) -> (u32, u32)
+    where
+        Self::Voxel: Voxel;
+}
+
+pub struct FaceStrides {
+    pub n_stride: u32,
+    pub u_stride: u32,
+    pub v_stride: u32,
+    pub visibility_offset: u32,
+}
+
+pub struct VoxelMerger<T> {
+    marker: std::marker::PhantomData<T>,
+}
+
+impl<T> MergeStrategy for VoxelMerger<T>
+where
+    T: MergeVoxel,
+{
+    type Voxel = T;
+
+    unsafe fn find_quad(
+        min_index: u32,
+        max_width: u32,
+        max_height: u32,
+        face_strides: &FaceStrides,
+        voxels: &[T],
+        visited: &[bool],
+    ) -> (u32, u32) {
+        // Greedily search for the biggest visible quad where all merge values are the same.
+        let quad_value = voxels.get_unchecked(min_index as usize).merge_value();
+        let quad_neighbour_value = voxels
+            .get_unchecked(min_index.wrapping_add(face_strides.visibility_offset) as usize)
+            .merge_value_facing_neighbour();
+
+        // Start by finding the widest quad in the U direction.
+        let mut row_start_stride = min_index;
+        let quad_width = Self::get_row_width(
+            voxels,
+            visited,
+            &quad_value,
+            &quad_neighbour_value,
+            face_strides.visibility_offset,
+            row_start_stride,
+            face_strides.u_stride,
+            max_width,
+        );
+
+        // Now see how tall we can make the quad in the V direction without changing the width.
+        row_start_stride += face_strides.v_stride;
+        let mut quad_height = 1;
+        while quad_height < max_height {
+            let row_width = Self::get_row_width(
+                voxels,
+                visited,
+                &quad_value,
+                &quad_neighbour_value,
+                face_strides.visibility_offset,
+                row_start_stride,
+                face_strides.u_stride,
+                quad_width,
+            );
+            if row_width < quad_width {
+                break;
+            }
+            quad_height += 1;
+            row_start_stride = row_start_stride.wrapping_add(face_strides.v_stride);
+        }
+
+        (quad_width, quad_height)
+    }
+}
+
+impl<T> VoxelMerger<T> {
+    unsafe fn get_row_width(
+        voxels: &[T],
+        visited: &[bool],
+        quad_merge_voxel_value: &T::MergeValue,
+        quad_merge_voxel_value_facing_neighbour: &T::MergeValueFacingNeighbour,
+        visibility_offset: u32,
+        start_stride: u32,
+        delta_stride: u32,
+        max_width: u32,
+    ) -> u32
+    where
+        T: MergeVoxel,
+    {
+        let mut quad_width = 0;
+        let mut row_stride = start_stride;
+        while quad_width < max_width {
+            let voxel = voxels.get_unchecked(row_stride as usize);
+            let neighbour =
+                voxels.get_unchecked(row_stride.wrapping_add(visibility_offset) as usize);
+
+            if !face_needs_mesh(voxel, row_stride, visibility_offset, voxels, visited) {
+                break;
+            }
+
+            if !voxel.merge_value().eq(quad_merge_voxel_value)
+                || !neighbour
+                    .merge_value_facing_neighbour()
+                    .eq(quad_merge_voxel_value_facing_neighbour)
+            {
+                // Voxel needs to be non-empty and match the quad merge value.
+                break;
+            }
+
+            quad_width += 1;
+            row_stride += delta_stride;
+        }
+
+        quad_width
+    }
+}
+```

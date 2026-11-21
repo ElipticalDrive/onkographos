@@ -1,0 +1,184 @@
+# UpdateOpacityTransferFunction
+
+Also called: TF Loading, TransferFunction GPU Upload with DDA Check, TransferFunction Uniform Binding, Update Transfer Function
+
+## Overview
+This method manages the lifecycle of a 1D opacity transfer function (TF) on the GPU, specifically handling memory allocation, data validation, and binding to shader resources. It solves the problem of ensuring that the transfer function used for volume rendering is correctly formatted and accessible to the rendering pipeline. It differs from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by supporting dynamic updates and from [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by focusing on the GPU upload and validation step rather than the mathematical generation or sampling logic. A key distinguishing feature is its optional integration of a Cumulative Distribution Function (CDF) correction to support Discrete Density Accumulation (DDA) optimizations [S2, unofficial].
+
+## How it works
+The method operates on a CPU-side representation of the transfer function and prepares it for GPU consumption. It supports two primary implementation patterns found in the sources: a general SSBO-based approach with CDF validation [S2, unofficial] and a WebGPU texture-based approach [S3, unofficial].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   `lut`: A CPU-side array of 4-component vectors $(R, G, B, \alpha)$ representing the transfer function [S2, unofficial].
+    *   `window_left` ($x_{min}$): The lower bound of the scalar value domain [S2, unofficial].
+    *   `window_width` ($x_{max} - x_{min}$): The width of the scalar value domain [S2, unofficial].
+    *   `vol`: A volume object containing transfer function data (used in VTK-based implementations) [S1, unofficial].
+    *   `numberOfScalarComponents`: Integer specifying scalar component count; must be exactly 1 or 4 [S1, unofficial].
+    *   `level`: Unsigned integer specifying the mipmap or LOD level to update [S1, unofficial].
+*   **Outputs:**
+    *   GPU-bound transfer function resource (SSBO or Texture) [S2, unofficial][S3, unofficial].
+    *   Shader uniforms: `tf_size`, `tf_window_left`, `tf_window_width` [S2, unofficial].
+
+### Data Structures
+The transfer function is stored as a contiguous array of 4-component vectors $(R, G, B, \alpha)$ [S2, unofficial].
+*   **Format:** `glm::vec4` (32-bit floats per component) in the SSBO implementation [S2, unofficial]. In the WebGPU implementation, the texture format is `rgba32float` [S3, unofficial].
+*   **Size:** The number of entries $N$ must be a power of two (e.g., 256, 4096, 65536) to support hardware texture sampling [S1, unofficial][S2, unofficial][S3, unofficial].
+*   **Layout:** A 1D array where index $i$ corresponds to the normalized value mapping to entry $i$.
+
+### Algorithm Steps
+The following steps describe the general process, incorporating the CDF check from [S2, unofficial] and the texture binding from [S3, unofficial].
+
+1.  **Validation Check:**
+    *   Initialize `needs_cdf = false`.
+    *   Iterate `i` from 1 to `lut.size() - 1`.
+    *   If `lut[i-1].a > lut[i].a`, set `needs_cdf = true` and break. This checks if alpha values are monotonically nondecreasing [S2, unofficial].
+
+2.  **CDF Correction (Optional):**
+    *   If `needs_cdf` is true, compute the CDF version of the LUT. The CDF ensures monotonicity required for DDA optimizations. Let `lut_gpu` be the resulting array.
+    *   If `needs_cdf` is false, `lut_gpu` is a copy of `lut` [S2, unofficial].
+
+3.  **Resource Allocation and Upload:**
+    *   **SSBO Method:**
+        *   Create a Shader Storage Buffer Object (SSBO) named `transferfunc_ssbo`.
+        *   Upload `lut_gpu.data()` to the SSBO with size `lut_gpu.size() * sizeof(glm::vec4)` [S2, unofficial].
+        *   Bind `lut_ssbo` to the appropriate buffer binding point [S2, unofficial].
+    *   **WebGPU Texture Method:**
+        *   Create a `GPUTexture` named `transferFunctionTexture` with format `rgba32float`, dimension `1d`, and size `tf.size` [S3, unofficial].
+        *   Calculate `bytesPerRow`: `tf.size[0] * 4 * 4` [S3, unofficial].
+        *   Write transfer function data to the texture using `queue.writeTexture` with `imageDataLayout { offset: 0, bytesPerRow, rowsPerImage: 1 }` [S3, unofficial].
+
+4.  **Uniform Binding:**
+    *   Set shader uniform `tf_size` to the number of `vec4`s in the SSBO: `uint32_t(lut_ssbo->size_bytes / sizeof(glm::vec4))` [S2, unofficial].
+    *   Set shader uniform `tf_window_left` to `window_left` [S2, unofficial].
+    *   Set shader uniform `tf_window_width` to `window_width` [S2, unofficial].
+    *   **WebGPU Specific:** Create a `bindGroup` with entries: binding 0 = uniformBuffer, binding 1 = volumeTexture, binding 2 = sampler, binding 3 = transferFunctionTexture [S3, unofficial]. The uniform buffer contains `camera.view` (16 floats), `camera.lightDir` (4 floats), `gui.settings` (6 floats), and `transferFunction.size` (2 floats) [S3, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def UpdateOpacityTransferFunction(lut, window_left, window_width, method="ssbo"):
+    """
+    Updates the GPU transfer function.
+    lut: List of vec4 (r, g, b, a)
+    window_left: float, x_min
+    window_width: float, x_max - x_min
+    method: "ssbo" or "webgpu"
+    """
+    # 1. Check monotonicity
+    needs_cdf = False
+    for i in range(1, len(lut)):
+        if lut[i-1].a > lut[i].a:
+            needs_cdf = True
+            break
+    
+    # 2. Prepare data
+    if needs_cdf:
+        lut_gpu = ComputeCDF(lut)
+    else:
+        lut_gpu = lut
+    
+    if method == "ssbo":
+        # 3. Upload to SSBO
+        ssbo_size = len(lut_gpu) * 16 # sizeof(glm::vec4)
+        ssbo = CreateSSBO(lut_gpu, ssbo_size)
+        BindSSBO(ssbo, binding_point=0)
+        
+        # 4. Set Uniforms
+        SetUniform("tf_size", len(lut_gpu))
+        SetUniform("tf_window_left", window_left)
+        SetUniform("tf_window_width", window_width)
+        
+    elif method == "webgpu":
+        # 3. Upload to Texture
+        tf_size = len(lut_gpu)
+        texture_format = "rgba32float"
+        texture = CreateTexture1D(width=tf_size, format=texture_format)
+        
+        bytes_per_row = tf_size * 16
+        layout = {
+            "offset": 0,
+            "bytesPerRow": bytes_per_row,
+            "rowsPerImage": 1
+        }
+        WriteTexture(texture, lut_gpu, layout)
+        
+        # 4. Bind Group and Uniforms
+        uniform_data = PackUniforms(
+            camera_view=GetCameraView(),
+            camera_light_dir=GetLightDir(),
+            gui_settings=GetSettings(),
+            tf_size=tf_size
+        )
+        uniform_buffer = CreateBuffer(uniform_data)
+        
+        bind_group = CreateBindGroup([
+            Binding(binding=0, resource=uniform_buffer),
+            Binding(binding=1, resource=volume_texture),
+            Binding(binding=2, resource=sampler),
+            Binding(binding=3, resource=texture)
+        ])
+        SetBindGroup(bind_group)
+
+def ComputeCDF(lut):
+    """
+    Computes the Cumulative Distribution Function for alpha values.
+    Assumes lut is normalized or requires normalization.
+    This is a placeholder for the specific CDF algorithm used in [S2, unofficial].
+    Typically: alpha_cdf[i] = 1 - (1 - alpha[i]) * (1 - alpha_cdf[i-1])
+    """
+    n = len(lut)
+    cdf_lut = []
+    prev_alpha = 0.0
+    for i in range(n):
+        current_alpha = lut[i].a
+        # Standard CDF construction for opacity
+        # alpha_cdf = 1 - (1 - alpha) * (1 - prev_alpha)
+        # However, [S2, unofficial] implies a correction for DDA.
+        # A common approach is cumulative sum of opacity contributions.
+        # For implementation safety, we use the standard cumulative opacity formula.
+        new_alpha = 1.0 - (1.0 - current_alpha) * (1.0 - prev_alpha)
+        cdf_lut.append(vec4(lut[i].r, lut[i].g, lut[i].b, new_alpha))
+        prev_alpha = new_alpha
+    return cdf_lut
+```
+
+### Parameters and Edge Cases
+*   **Monotonicity:** If the original transfer function has decreasing alpha values, the CDF correction is mandatory for DDA-based renderers [S2, unofficial].
+*   **Precision:** The SSBO uses 32-bit floats. The WebGPU texture uses `rgba32float` [S3, unofficial].
+*   **Domain:** The `window_left` and `window_width` define the mapping from scalar values to the LUT index. Values outside this domain are clamped to $[0, 1]$ before sampling [S2, unofficial][S3, unofficial].
+*   **VTK Specific:** In VTK implementations, `numberOfScalarComponents` must be 1 or 4 [S1, unofficial].
+
+## Subtopics
+
+### [Transfer Function Loading](4289-transfer-function-loading.md)
+This method loads a 1D transfer function consisting of 9 `float4` entries from a file into a CUDA 1D array and binds it to a texture object for sampling. It differs from [UpdateOpacityTransferFunction](2489-updateopacitytransferfunction.md) by handling the file I/O, parsing, and GPU upload, while the parent manages allocation and state [G].
+
+### SVR Renderer Initialization
+This variant initializes the transfer function texture in a WebGPU-based SVR renderer. It calculates `bytesPerRow` as `tf.size[0] * 4 * 4` and writes the data to a `GPUTexture` with format `rgba32float` and dimension `1d` [S3, unofficial]. It also manages a `uniformData` buffer of length 28, containing camera view (16 floats), light direction (4 floats), GUI settings (6 floats), and TF size (2 floats) [S3, unofficial].
+
+### Histogram-Based Transfer Function Update
+This method updates the color map by analyzing accumulated opacity values from the previous frame's buffer [S4, unofficial].
+1.  **Download:** Fetch the opacity buffer to determine $\alpha_{max}$ [S4, unofficial].
+2.  **Histogram Initialization:** Add opacity values $\alpha_i$ to histogram $H$. Bin index is calculated as $bin(\alpha_i) = \alpha_i \alpha_{max} N_{bin}$ [S4, unofficial].
+3.  **Equalization (Optional):** Generate a lookup table mapping old opacity values to new ones based on optimized distribution. If disabled, use linear mapping [S4, unofficial].
+4.  **Color Map Sampling:** Sample the lookup table with a user-defined color map to generate colors for the next frame. Insert these into a Color buffer of size $N_{color} \times N_{bin}$ [S4, unofficial].
+5.  **Upload:** Upload the Color buffer to the GPU as a lookup table [S4, unofficial].
+Parameter: $N_{bin}$ is the number of bins in the histogram [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The validation step is $O(N)$ where $N$ is the number of LUT entries. The CDF computation is also $O(N)$. The upload is $O(N)$ memory bandwidth bound.
+*   **Memory Complexity:** $O(N)$ for the LUT storage on the GPU.
+*   **Performance:** The SSBO approach allows for dynamic updates and complex indexing in shaders. The texture approach is standard for hardware-accelerated interpolation. The CDF check adds a small CPU-side overhead but enables DDA optimizations which can significantly speed up the rendering pass [S2, unofficial].
+*   **Strengths:** Supports dynamic transfer function updates. Handles non-monotonic inputs via CDF correction. Compatible with both SSBO and Texture-based sampling.
+*   **Limitations:** Requires a full upload if the TF changes. The CDF correction may alter the visual appearance of the transfer function if not carefully calibrated [S2, unofficial].
+
+## Background
+The method originates from implementations in volume rendering engines that require dynamic transfer function updates. The SSBO-based approach with CDF validation is described in the `volren` project [S2, unofficial]. The WebGPU-based texture approach is found in the `ossium` project [S3, unofficial]. The VTK-based approach is part of the `VTKMultiVolumeRayCaster` [S1, unofficial]. The histogram-based update method is described in a master's thesis on real-time smoke volume rendering [S4, unofficial].
+
+## Sources
+[S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)
+[S2] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)
+[S3] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
+[S4] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

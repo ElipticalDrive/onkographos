@@ -1,0 +1,211 @@
+# 3D Skew-Normal Splatting
+
+Also called: Skew-Normal Splatting
+
+## Overview
+3D Skew-Normal Splatting (SNS) is a volume rendering method that replaces the standard symmetric 3D Gaussian kernel with the Azzalini Skew-Normal distribution to model asymmetric structures, such as sharp boundaries and one-sided surfaces, while preserving analytical tractability under affine transformations [S1, unofficial]. It sets apart from its siblings, such as [Oriented Gaussian Splatting](9621-oriented-gaussian-splatting.md) and [Barycentric Splat Parameterization](15283-barycentric-splat-parameterization.md), by introducing a continuous, learnable skewness parameter that allows primitives to interpolate between symmetric Gaussians and half-ellipsoids, enabling the representation of directional asymmetry that symmetric or constrained primitives cannot capture [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ 3D Skew-Normal primitives, each defined by location $\mu_i$, scale matrix $\Omega_i$, and skew parameter $k_i$; camera parameters (view/projection matrices); and scene geometry.
+*   **Output:** A rendered 2D image where each pixel color $C(u)$ is computed via alpha blending of projected 2D Skew-Normal kernels [S1, unofficial].
+
+**Data Structures:**
+Each primitive $i$ stores:
+*   $\mu_i \in \mathbb{R}^3$: Location parameter.
+*   $R_i \in SO(3)$: Rotation matrix.
+*   $S_i \in \mathbb{R}^3$: Scaling vector (diagonal of scaling matrix).
+*   $\Omega_i = R_i S_i S_i^\top R_i^\top \in \mathbb{R}^{3 \times 3}$: Scale matrix.
+*   $k_i \in \mathbb{R}^3$: Latent skewness variable, factorized into magnitude $m_{k,i} \in \mathbb{R}_+$ and direction $d_{k,i} \in \mathbb{R}^3$ ($\|d_{k,i}\|_2 = 1$) [S1, unofficial].
+*   $c_i$: Color (typically represented by Spherical Harmonics coefficients).
+*   $o_i \in [-1, 1]$: Signed opacity [S1, unofficial].
+
+**Parameters:**
+*   Skew magnitude parameterization: $m_k = \frac{8}{1 + \exp(-\frac{x}{6})}$, where $x \in \mathbb{R}$ is a learnable scalar [S1, unofficial].
+*   Skew direction: $d_k = \frac{v}{\|v\|_2 + \epsilon}$, where $v \in \mathbb{R}^3$ is a learnable vector [S1, unofficial].
+*   Skew vector: $k = m_k d_k$ [S1, unofficial].
+
+**Formulas:**
+The 3D Skew-Normal kernel is defined as [S1, unofficial]:
+$$ SN(x; \mu, \Omega, k) = G_3(x - \mu; \Omega) \Phi \left( \alpha^\top \omega^{-1}(x - \mu) \right) $$
+where:
+*   $G_3(x - \mu; \Omega) = \exp \left( -\frac{1}{2}(x - \mu)^\top \Omega^{-1} (x - \mu) \right)$ is the unnormalized Gaussian PDF.
+*   $\Phi(\cdot)$ is the standard normal CDF.
+*   $\omega = (\Omega \odot I_3)^{1/2}$ is the diagonal matrix of standard deviations derived from $\Omega$ using the Hadamard product $\odot$.
+*   $\alpha = \omega R S^{-1} k$ is the slant parameter, decoupled from rotation and scale [S1, unofficial].
+
+The spatial mean of the distribution is shifted from the location parameter $\mu$:
+$$ \mathbb{E}[X] = \mu + \sqrt{\frac{2}{\pi}} \cdot \frac{R S k}{\sqrt{1+k^\top k}} $$
+This offset is used to compute the bounding box center $\mu_{bbox}$ for rasterization [S1, unofficial]:
+$$ \mu_{bbox} = \mu^{2D} + \sqrt{\frac{2}{\pi}} \cdot \frac{A R S k}{\sqrt{1+k^\top k}} $$
+where $\mu^{2D} = A\mu$ is the projected location [S1, unofficial].
+
+**Projection to 2D:**
+The 3D primitive is projected onto the image plane using the affine transformation matrix $A = JW \in \mathbb{R}^{2 \times 3}$ (Jacobian $J$ and world-to-camera $W$) [S1, unofficial]. The resulting 2D Skew-Normal kernel is:
+$$ SN^{2D}(u; \mu^{2D}, \Omega^{2D}, m^{2D}) = G_2(u - \mu^{2D}; \Omega^{2D}) \Phi \left( (m^{2D})^\top (u - \mu^{2D}) \right) $$
+with parameters [S1, unofficial]:
+$$ \mu^{2D} = A\mu, \quad \Omega^{2D} = A\Omega A^\top $$
+$$ m^{2D} = \frac{(\Omega^{2D})^{-1} A R S k}{\sqrt{1 + k^\top k} - (A R S k)^\top (\Omega^{2D})^{-1} A R S k} $$
+
+**Rendering:**
+Color aggregation uses signed opacity splatting to allow subtractive volumetric density [S1, unofficial]:
+$$ C(u) = \sum_{i \in \mathcal{N}} c_i o_i SN_i^{2D}(u) \prod_{j=1}^{i-1} (1 - o_j SN_j^{2D}(u)) $$
+where $\mathcal{N}$ is the set of depth-sorted intersecting kernels [S1, unofficial].
+
+**Optimization Steps:**
+1.  **Initialization:** Initialize primitives with standard 3DGS parameters.
+2.  **Phase 1 (Global Structure):** Jointly optimize all parameters ($R, S, m_k, d_k$) using the Adam optimizer to establish a global scene structure [S1, unofficial].
+3.  **Phase 2 (Block Coordinate Descent):** Use a cyclic alternating schedule to reduce parameter interference [S1, unofficial]:
+    *   **Part 1:** Update ellipsoidal base parameters ($R, S$) while freezing skew parameters ($m_k, d_k$).
+    *   **Part 2:** Refine skew parameters ($m_k, d_k$) while holding ($R, S$) constant.
+4.  **Positional Update:** Update positional parameters $\mu$ using Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) to escape local minima [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def compute_skew_vector(k_latent):
+    """
+    Factorizes latent k into magnitude and direction.
+    k_latent: [2] tensor [x, v] where x is scalar, v is 3-vector.
+    """
+    x = k_latent[0]
+    v = k_latent[1:4]
+    # Magnitude parameterization
+    m_k = 8.0 / (1.0 + torch.exp(-x / 6.0))
+    # Direction parameterization
+    d_k = v / (torch.norm(v) + 1e-6)
+    return m_k, d_k
+
+def compute_slant(R, S, k):
+    """
+    Computes decoupled slant parameter alpha.
+    R: [3, 3] rotation matrix
+    S: [3] scaling vector (diagonal elements)
+    k: [3] skew vector (m_k * d_k)
+    """
+    # Omega = R S S^T R^T
+    # Omega_diag = diag(Omega)
+    # omega = sqrt(diag(Omega))
+    # Note: omega is diagonal matrix with entries sqrt(Omega_ii)
+    Omega = R @ torch.diag(S**2) @ R.T
+    omega_diag = torch.sqrt(torch.diag(Omega))
+    omega = torch.diag(omega_diag)
+    
+    # alpha = omega R S^{-1} k
+    # S_inv is diagonal with 1/S_i
+    S_inv = torch.diag(1.0 / S)
+    alpha = omega @ R @ S_inv @ k
+    return alpha, omega
+
+def project_3d_to_2d_skew(mu_3d, Omega_3d, R, S, k, A):
+    """
+    Projects 3D Skew-Normal to 2D.
+    mu_3d: [3]
+    Omega_3d: [3, 3]
+    R: [3, 3]
+    S: [3]
+    k: [3]
+    A: [2, 3] affine transform matrix (Jacobian * WorldToCamera)
+    Returns: mu_2d, Omega_2d, m_2d
+    """
+    # Project location and covariance
+    mu_2d = A @ mu_3d
+    Omega_2d = A @ Omega_3d @ A.T
+    
+    # Compute m_2d
+    # Numerator: Omega_2d^{-1} A R S k
+    # Denominator: sqrt(1 + k^T k) - (A R S k)^T Omega_2d^{-1} (A R S k)
+    
+    ARSk = A @ R @ torch.diag(S) @ k
+    
+    Omega_2d_inv = torch.inverse(Omega_2d)
+    
+    numerator = Omega_2d_inv @ ARSk
+    
+    term2 = ARSk.T @ Omega_2d_inv @ ARSk
+    denominator = torch.sqrt(1.0 + torch.dot(k, k)) - term2
+    
+    m_2d = numerator / denominator
+    
+    return mu_2d, Omega_2d, m_2d
+
+def render_pixel(u, primitives, A_matrix):
+    """
+    Renders a single pixel u [2] given a list of primitives.
+    primitives: list of dicts with keys: mu_3d, Omega_3d, R, S, k, c, o
+    A_matrix: [2, 3] for this pixel's camera view
+    """
+    # Sort primitives by depth (z) relative to camera
+    # (Assuming depth sorting is handled by the rasterizer pipeline)
+    sorted_primitives = sort_primitives_by_depth(primitives, A_matrix)
+    
+    accumulated_alpha = 0.0
+    color = torch.zeros(3)
+    
+    for prim in sorted_primitives:
+        mu_2d, Omega_2d, m_2d = project_3d_to_2d_skew(
+            prim['mu_3d'], prim['Omega_3d'], 
+            prim['R'], prim['S'], prim['k'], A_matrix
+        )
+        
+        # Compute 2D Skew-Normal value
+        diff = u - mu_2d
+        # Gaussian part
+        gauss_val = torch.exp(-0.5 * diff.T @ torch.inverse(Omega_2d) @ diff)
+        # Skew part (CDF)
+        skew_arg = m_2d.T @ diff
+        skew_val = torch.sigmoid(skew_arg) # Approximation of Phi if not using special function
+        
+        # Note: Standard Phi is not sigmoid. Implement Phi using erf or library.
+        # Phi(x) = 0.5 * (1 + erf(x / sqrt(2)))
+        skew_val = 0.5 * (1.0 + torch.erf(skew_arg / torch.sqrt(2.0)))
+        
+        sn_2d = gauss_val * skew_val
+        
+        o = prim['o']
+        c = prim['c']
+        
+        # Signed opacity blending
+        contribution = c * o * sn_2d
+        weight = o * sn_2d * (1.0 - accumulated_alpha)
+        
+        color += contribution
+        accumulated_alpha += weight
+        
+        if accumulated_alpha > 0.99:
+            break
+            
+    return color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Unbounded Tails:** Without bounded skewness, asymmetric tails cause primitives to intersect excessive tiles, degrading tile-based rasterization performance and violating local affine approximation assumptions [S1, unofficial]. The parameterization $m_k \in \mathbb{R}_+$ and bounded Mardia's skewness measure prevent this [S1, unofficial].
+*   **Parameter Coupling:** Strong coupling between scale, rotation, and skewness causes optimization instability. The decoupled parameterization $\alpha = \omega R S^{-1} k$ and factorization of $k$ into $m_k, d_k$ resolve this [S1, unofficial].
+*   **Mean vs Location:** The location parameter $\mu$ does not coincide with the spatial mean. Using $\mu$ for bounding box localization leads to inaccurate coverage. The corrected center $\mu_{bbox}$ must be used [S1, unofficial].
+
+## Subtopics
+
+### [2D Skew-Normal Parameter Projection](10052-2d-skew-normal-parameter-projection.md)
+Computes the parameters of a 2D Skew-Normal distribution (SN2D) resulting from the linear projection of a 3D Skew-Normal kernel (SN3) onto the image plane. It sets apart from standard Gaussian splatting by preserving the asymmetry (skewness) of the 3D primitive during projection, allowing the 2D kernel to model one-sided surfaces and sharp boundaries that symmetric Gaussians cannot.
+
+### Skew-Normal Mean Correction
+Addresses the discrepancy between the location parameter $\mu$ and the spatial mean $\mathbb{E}[X]$ of the Skew-Normal distribution. It derives a deterministic spatial offset $\sqrt{\frac{2}{\pi}} \cdot \frac{RSk}{\sqrt{1+k^\top k}}$ to shift the bounding box center to the true spatial mean, ensuring accurate tile culling and rasterization [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Comparable to standard 3DGS and SSS, with overhead from computing the skew term (CDF evaluation) and additional parameter updates [S1, unofficial].
+*   **Memory Complexity:** Slightly higher than 3DGS due to the storage of skew parameters ($k$ or $m_k, d_k$) and the need for more complex gradient computations [S1, unofficial].
+*   **Measured Performance:** On the Mip-NeRF360 dataset, SNS achieves 30.17 PSNR, 0.895 SSIM, and 0.144 LPIPS, outperforming SSS (29.90 PSNR) and 3DGS (28.69 PSNR) [S1, unofficial]. On the drjohnson scene, SNS completes 30,000 iterations in 38m 4s (29.89 dB PSNR), comparable to SSS (38m 7s, 29.66 dB PSNR) [S1, unofficial].
+*   **Strengths:** Continuous interpolation between symmetric and asymmetric shapes; analytical tractability under affine transformations; ability to model sharp boundaries and one-sided surfaces with fewer primitives [S1, unofficial].
+*   **Limitations:** Optimization instability due to parameter coupling requires complex decoupling strategies and block-wise updates; signed opacity requires careful handling to avoid artifacts [S1, unofficial].
+*   **When to use:** Scenes with sharp edges, flat surfaces, or one-sided structures where symmetric Gaussians require excessive overlap or fail to capture asymmetry [S1, unofficial].
+*   **When not to use:** Scenes with purely symmetric, smooth geometry where the added complexity of skewness provides negligible benefit and may hinder convergence [S1, unofficial].
+
+## Background
+3D Skew-Normal Splatting was proposed to address the limitations of symmetric Gaussian kernels in representing asymmetric structures. It builds on the Azzalini Skew-Normal distribution, which provides directional asymmetry through a slant parameter [S1, unofficial]. The method was introduced to enable continuous shape interpolation between symmetric Gaussians and half-ellipsoids, allowing for flexible modeling of sharp boundaries and interior regions while maintaining the efficiency of splat-based rendering [S1, unofficial]. It is implemented in PyTorch, extending the 3DGS rasterization engine, and tested on NVIDIA RTX A6000 GPUs [S1, unofficial].
+
+## Sources
+[S1] 3D Skew-Normal Splatting, https://doi.org/10.48550/arxiv.2605.15010, fetched 2026-10-26 (unofficial)

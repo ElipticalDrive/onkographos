@@ -1,0 +1,422 @@
+--- v002.md
++++ v003.md
+@@ -4,59 +4,100 @@
+ 
+ ## Overview
+-The VTK.js Transfer Function Interface is a JavaScript-based user interface component that allows users to interactively define and edit volume rendering transfer functions (TFs) by manipulating control points on a histogram overlay [S1, unofficial][S2, unofficial]. It solves the problem of mapping scalar volume data to optical properties (opacity and color) by providing a visual editor that generates a 1D texture sent to the GPU for rendering [S1, unofficial][S2, unofficial]. It differs from [2D Transfer Function Widget](5735-2d-transfer-function-widget.md) by specifically integrating with the VTK.js rendering pipeline and using a histogram-based layout for data-aware editing, and from [Sketch-based Transfer Function Editing](5943-sketch-based-transfer-function-editing.md) by relying on explicit control point manipulation rather than freehand drawing.
++The VTK.js Transfer Function Interface is a JavaScript-based user interface component that allows users to interactively define and edit volume rendering transfer functions (TFs) by manipulating control points on a histogram overlay [S1, unofficial][S2, unofficial]. It solves the problem of mapping scalar volume data to optical properties (opacity and color) by providing a visual editor that generates a 1D texture sent to the GPU for rendering [S1, unofficial][S2, unofficial]. It differs from its siblings by being a specific implementation within the VTK.js ecosystem that combines histogram visualization with direct control-point manipulation for both opacity and color channels, whereas methods like [2D Transfer Function Widget](5735-2d-transfer-function-widget.md) may focus on generic widget abstractions or [Sketch-based Transfer Function Editing](5943-sketch-based-transfer-function-editing.md) relies on freehand drawing rather than structured control points.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar volume dataset (accessed via VTK.js `vtkVolume` actor), the data range `[min, max]`, and optional initial control point configurations.
+-*   **Output:** A 1D RGBA texture (180x1 pixels) uploaded to the GPU, and an updated VTK.js volume property reflecting the new transfer function.
++*   **Input:** A scalar volume dataset (to compute histogram), configuration parameters (dimensions, data range, initial control points), and user mouse/keyboard interactions.
++*   **Output:** A `Uint8Array` representing a 1D RGBA texture (180x1 pixels) uploaded to the GPU, and updated control point arrays stored in the UI state.
+ 
+ **Data Structures:**
+-The interface maintains two arrays of control points, sorted by scalar value:
+-1.  **Opacity Control Points:** `opaCtrlPoint` is an array of `[scalarValue, opacity]` tuples. `scalarValue` is in `[min, max]`, `opacity` is in `[0, 1]`.
+-2.  **Color Control Points:** `colorCtrlPoint` is an array of `[scalarValue, R, G, B]` tuples. `scalarValue` is in `[min, max]`, RGB values are in `[0, 1]`.
++1.  **Opacity Control Points:** Array of arrays `[[scalarValue, opacity], ...]`.
++    *   `scalarValue`: Float within `[minMax[0], minMax[1]]`.
++    *   `opacity`: Float in `[0, 1]`.
++    *   Sorted ascending by `scalarValue`.
++2.  **Color Control Points:** Array of arrays `[[scalarValue, R, G, B], ...]`.
++    *   `scalarValue`: Float within `[minMax[0], minMax[1]]`.
++    *   `R, G, B`: Floats in `[0, 1]`.
++    *   Sorted ascending by `scalarValue`.
++3.  **Histogram:** Array of integers representing bin counts.
+ 
+ **Parameters:**
+ *   `bins`: Number of histogram bins. Typically 200 [S1, unofficial].
+-*   `numControlPoints`: Default number of initial control points. Typically 5 [S1, unofficial].
+-*   `_opacityViewPercentage`: Height ratio of the opacity view area relative to total height. Range `[0, 1]`. Typical value 0.8 [S2, unofficial].
+-*   `_initNumColorCtrlPoint`: Number of initial color control points. If -1, `_initColorCtrlPoint` is treated as a d3 color map function [S2, unofficial].
++*   `_parentElementID`: HTML container ID (e.g., `'#TFInterface'`) [S2, unofficial].
++*   `_visWidth`, `_visHeight`: SVG dimensions in pixels [S2, unofficial].
++*   `_opacityViewPercentage`: Height ratio of the opacity view area (range [0, 1], e.g., 0.8) [S2, unofficial].
+ *   `_minMax`: Array `[min, max]` of the scalar data range [S2, unofficial].
+-
+-**Step-by-Step Method:**
++*   `_initOpaCtrolPoint`: Initial opacity control points. If `null`, defaults to `[[min, 0], [max, 1]]` [S2, unofficial].
++*   `_initNumColorCtrlPoint`: Number of initial color control points. If `-1`, `_initColorCtrlPoint` is treated as a d3 color map function. Otherwise, must be $\ge 2$ [S2, unofficial].
++*   `_initColorCtrlPoint`: Initial color control points `[[dataValue, R, G, B], ...]` or a d3 interpolation function [S2, unofficial].
++*   `_updateRenderFunc`: Callback to trigger VTK.js volume re-rendering [S2, unofficial].
++*   `_getVolumeActorPropertyFunc`: Callback returning the VTK volume actor's property object [S2, unofficial].
++
++**Numbered Steps:**
+ 
+ 1.  **Initialize Histogram:**
+-    *   Determine bin count based on data type: 200 bins for '8bit' (256 levels), 200 bins for '16bit' (65536 levels), or 200 bins for 'float' (1 level) [S1, unofficial].
+-    *   Compute the histogram `hist` from the volume data.
+-    *   Compute the log-scale histogram for display: `histLog[i] = log(hist[i] + 1)` for all bins `i` [S1, unofficial].
+-
+-2.  **Initialize Control Points:**
+-    *   **Opacity:** If `_initOpaCtrolPoint` is null, initialize with `[[min, 0], [max, 1]]` [S2, unofficial]. Otherwise, use the provided array.
+-    *   **Color:** If `_initNumColorCtrlPoint` is -1, use `_initColorCtrlPoint` as a d3 interpolation function to generate colors. Otherwise, generate `_initNumColorCtrlPoint` points.
+-        *   Calculate `step = 1 / (_initNumColorCtrlPoint - 1)`.
+-        *   For `i` from 0 to `_initNumColorCtrlPoint - 1`:
+-            *   `colorMapValue = i * step`.
+-            *   Get RGB string from `_initColorCtrlPoint(colorMapValue)`.
+-            *   Parse RGB components and normalize to `[0, 1]` by dividing by 255.0.
+-            *   Map `colorMapValue` to data range: `dataValue = colorMapValue * (max - min) + min`.
+-            *   Push `[dataValue, R, G, B]` to `colorCtrlPoint` [S2, unofficial].
+-
+-3.  **Render UI (SVG/Two.js):**
+-    *   **Histogram:** Draw the log-scale histogram using anchors. Calculate `xStep = (width - borders) / bins` and `yStep = height / max(histLog)`. Place anchors at `border.left + i * xStep` and `height - histLog[i] * yStep` [S1, unofficial].
+-    *   **Transfer Function Polygon:** Sort control points by x-coordinate. Create a path starting at the bottom of the first point, passing through all control points, and ending at the bottom of the last point.
+-    *   **Gradient:** Generate a linear gradient for the polygon. For each control point `i`, calculate normalized position `p = (x_i - x_0) / polyWidth`. Create a gradient stop at `p` with the point's color and opacity 0.75 [S1, unofficial].
+-
+-4.  **User Interaction (Adding/Editing Points):**
+-    *   **Add Opacity Point:** On click, get mouse position `(mousePosX, mousePosY)`. Invert scales: `newDataValue = xScale.invert(mousePosX)`, `newOpacity = yScale.invert(mousePosY) / opacityFactor`. Find insertion index `idx` where `opaCtrlPoint[idx][0] > newDataValue`. Insert `[newDataValue, newOpacity]` at `idx` [S2, unofficial].
+-    *   **Add Color Point:** On click, get `mousePosX`. Invert: `newDataValue = xScale.invert(mousePosX)`. Find `idx`. Get neighbors `prev = colorCtrlPoint[idx-1]`, `next = colorCtrlPoint[idx]`.
+-        *   **Pitfall:** If `prev[0] == next[0]`, division by zero occurs in interpolation factor calculation [S2, unofficial].
+-        *   Calculate interpolation factor `a = (newDataValue - prev[0]) / (next[0] - prev[0])`.
+-        *   Interpolate RGB: `newColor = [(1-a)*prev[1] + a*next[1], (1-a)*prev[2] + a*next[2], (1-a)*prev[3] + a*next[3]]`.
+-        *   Insert `[newDataValue, ...newColor]` at `idx` [S2, unofficial].
+-    *   **Drag/Delete:** Dragging moves points (clamped to bounds). Right-click opens color picker. Delete key + click removes point [S1, unofficial].
+-
+-5.  **Generate and Upload Texture:**
+-    *   Iterate `i` from 0.5 to 180 with step `div.offsetWidth / 180`.
+-    *   For each `i`, calculate `alpha = getAlpha(i * step, opaCtrlPoint, height)` and `color = getColor(i * step, colorCtrlPoint)`.
+-    *   Concatenate RGB and Alpha into a `Uint8Array` (scaled by 255).
++    *   Determine bin count based on data type: '8bit' uses 200 bins/256 levels; '16bit' uses 200 bins/65536 levels; 'float' uses 200 bins/1 level [S1, unofficial].
++    *   Compute log-scale histogram for display:
++        $$ \text{histLog}[i] = \log(\text{hist}[i] + 1) $$
++        where `hist` is the raw bin count array [S1, unofficial].
++
++2.  **Initialize Color Control Points (if not provided as function):**
++    *   Calculate step: $\text{step} = 1 / (\text{_initNumColorCtrlPoint} - 1)$.
++    *   Initialize `colorMapValue = 0`.
++    *   Loop `i` from 0 to `_initNumColorCtrlPoint - 1`:
++        *   Get color string from `_initColorCtrlPoint(colorMapValue)`.
++        *   Parse RGB components and normalize to $[0, 1]$ by dividing by 255.0.
++        *   Map `colorMapValue` to data range: $\text{dataValue} = \text{colorMapValue} \times (\text{minMax}[1] - \text{minMax}[0]) + \text{minMax}[0]$.
++        *   Push `[dataValue, r, g, b]` to `this.colorCtrlPoint`.
++        *   Increment `colorMapValue += step` [S2, unofficial].
++
++3.  **Setup Visual Interface:**
++    *   Create SVG container with margins: `top: 20`, `right: 20`, `bottom: 25`, `left: 50` [S2, unofficial].
++    *   Define opacity view area height: $\text{tfHeight} = \text{tfSvgHeight} \times \text{_opacityViewPercentage} - \text{top} - \text{bottom}$ [S2, unofficial].
++    *   Define color view area below opacity view [S2, unofficial].
++    *   Create linear gradient definition for fills [S2, unofficial].
++
++4.  **Draw Histogram:**
++    *   Calculate x-step: $\text{xStep} = (\text{w} - (\text{border.left} + \text{border.right})) / \text{bins}$ [S1, unofficial].
++    *   Calculate y-step: $\text{yStep} = (\text{h} - \text{border.top}) / \max(\text{histLog})$ [S1, unofficial].
++    *   Add anchors (visual bars) at `border.left + i * xStep` and `h - histLog[i] * yStep` [S1, unofficial].
++
++5.  **Draw Transfer Function Controls:**
++    *   **Opacity:**
++        *   Create x-scale mapping data range to width, y-scale mapping opacity $[1, 0]$ to height (inverted) [S2, unofficial].
++        *   Draw area path using `d3.area` generator connecting control points [S2, unofficial].
++        *   Draw circles at control point locations [S2, unofficial].
++    *   **Color:**
++        *   Draw area path for color channel [S2, unofficial].
++        *   Draw circles at control point locations (centered vertically in color area) [S2, unofficial].
++
++6.  **Handle User Interactions:**
++    *   **Add Opacity Control Point:**
++        *   On click, get mouse position `(mousePosX, mousePosY)`.
++        *   Invert scales: $\text{newDataValue} = \text{xScale.invert(mousePosX)}$, $\text{newOpacity} = \text{yScale.invert(mousePosY)} / \text{opacityFactor}$ [S2, unofficial].
++        *   Find insertion index: $\text{idx} = \text{opaCtrlPoint.findIndex}(d \Rightarrow d[0] > \text{newDataValue})$ [S1, unofficial].
++        *   Insert: `opaCtrlPoint.splice(idx, 0, [newDataValue, newOpacity])` [S1, unofficial].
++    *   **Add Color Control Point:**
++        *   On click, get `mousePosX`.
++        *   Invert: $\text{newDataValue} = \text{xScale.invert(mousePosX)}$ [S2, unofficial].
++        *   Find insertion index: $\text{idx} = \text{colorCtrlPoint.findIndex}(d \Rightarrow d[0] > \text{newDataValue})$ [S2, unofficial].
++        *   Get neighbors: $\text{prev} = \text{colorCtrlPoint}[\text{idx}-1]$, $\text{next} = \text{colorCtrlPoint}[\text{idx}]$ [S2, unofficial].
++        *   Compute interpolation factor: $a = (\text{newDataValue} - \text{prev}[0]) / (\text{next}[0] - \text{prev}[0])$ [S2, unofficial].
++        *   Interpolate RGB: $\text{newColor} = [(1-a)\text{prev}[1] + a\text{next}[1], (1-a)\text{prev}[2] + a\text{next}[2], (1-a)\text{prev}[3] + a\text{next}[3]]$ [S2, unofficial].
++        *   Insert: `colorCtrlPoint.splice(idx, 0, [newDataValue, ...newColor])` [S2, unofficial].
++    *   **Drag/Delete:**
++        *   Dragging moves points (clamped to bounds) [S1, unofficial].
++        *   Double-click adds point with interpolated color [S1, unofficial].
++        *   Right-click opens color picker [S1, unofficial].
++        *   Delete key + click removes point [S1, unofficial].
++
++7.  **Generate and Upload Texture:**
++    *   Sort control points by x-coordinate [S1, unofficial].
++    *   Create linear gradient for visual polygon [S1, unofficial].
++    *   Iterate `i` from 0.5 to 180 with step `div.offsetWidth / 180` [S1, unofficial].
++    *   For each `i`:
++        *   Get alpha: $\alpha = \text{getAlpha}(i \times \text{step}, \text{controlPoints}, \text{div.offsetHeight})$ [S1, unofficial].
++        *   Get color: $C = \text{getColor}(i \times \text{step}, \text{controlPoints})$ [S1, unofficial].
++        *   Concatenate RGB and Alpha into `Uint8Array` (scaled by 255) [S1, unofficial].
+     *   Send to GPU using `gl.texSubImage2D` on `gl.TEXTURE1` with dimensions 180x1, format `RGBA`, type `UNSIGNED_BYTE` [S1, unofficial].
+ 
+@@ -65,8 +106,5 @@
+ ```python
+ class VTKjsTransferFunctionInterface:
+-    def __init__(self, parent_element_id, vis_width, vis_height, opacity_view_percentage, 
+-                 update_render_func, get_volume_actor_property_func, min_max, 
+-                 init_opa_ctrl_point=None, init_num_color_ctrl_point=5, 
+-                 init_color_ctrl_point=None):
++    def __init__(self, parent_element_id, vis_width, vis_height, opacity_view_percentage, update_render_func, get_volume_actor_property_func, min_max, init_opa_ctrl_point=None, init_num_color_ctrl_point=5, init_color_ctrl_point=None):
+         self.parent_element_id = parent_element_id
+         self.vis_width = vis_width
+@@ -77,108 +115,100 @@
+         self.min_max = min_max
+         self.bins = 200
+-        self.opacity_factor = 1.0
+         
+         # Initialize Opacity Control Points
+-        if init_opa_ctrl_point is None:
++        if init_opa_ctrl_point is not None:
++            self.opa_ctrl_point = sorted(init_opa_ctrl_point, key=lambda x: x[0])
++        else:
+             self.opa_ctrl_point = [[min_max[0], 0.0], [min_max[1], 1.0]]
+-        else:
+-            self.opa_ctrl_point = init_opa_ctrl_point
+             
+         # Initialize Color Control Points
+         self.color_ctrl_point = []
+         if init_num_color_ctrl_point == -1:
+-            # Use d3 color map function
+-            step = 1.0 / (5 - 1) # Default fallback if not specified, but logic implies using init_num_color_ctrl_point if not -1
+-            # Assuming default 5 points if not specified when -1 is used as flag for function
+-            num_points = 5 
++            # Assume init_color_ctrl_point is a d3 interpolation function
++            # This part depends on external library 'd3', simplified here
++            step = 1.0 / (5 - 1) # Default fallback if logic not fully specified in sources for -1 case
++            for i in range(5):
++                val = i * step
++                # Placeholder for d3 color map call
++                color_str = init_color_ctrl_point(val) 
++                r, g, b = parse_rgb(color_str) # Helper to parse d3 color string
++                data_val = val * (min_max[1] - min_max[0]) + min_max[0]
++                self.color_ctrl_point.append([data_val, r/255.0, g/255.0, b/255.0])
+         else:
+-            num_points = init_num_color_ctrl_point
+-            
+-        step = 1.0 / (num_points - 1)
+-        for i in range(num_points):
+-            color_map_value = i * step
+-            # Get RGB from d3 function or default
+-            rgb_str = init_color_ctrl_point(color_map_value) if callable(init_color_ctrl_point) else "rgb(255,255,255)"
+-            r, g, b = parse_rgb(rgb_str)
+-            r, g, b = r/255.0, g/255.0, b/255.0
+-            data_value = color_map_value * (min_max[1] - min_max[0]) + min_max[0]
+-            self.color_ctrl_point.append([data_value, r, g, b])
+-
+-    def init_histogram(self, volume_data):
+-        # Bin data into histogram
+-        hist = [0] * self.bins
+-        for val in volume_data:
+-            idx = int((val - self.min_max[0]) / (self.min_max[1] - self.min_max[0]) * self.bins)
+-            if 0 <= idx < self.bins:
+-                hist[idx] += 1
+-        
+-        # Log scale for display
+-        self.hist_log = [math.log(x + 1) for x in hist]
+-        return self.hist_log
+-
+-    def add_opacity_point(self, mouse_pos_x, mouse_pos_y):
+-        # Invert scales
+-        new_data_value = self.x_scale.invert(mouse_pos_x)
+-        new_opacity = self.y_scale.invert(mouse_pos_y) / self.opacity_factor
+-        
+-        # Find insertion index
+-        idx = -1
+-        for i, pt in enumerate(self.opa_ctrl_point):
+-            if pt[0] > new_data_value:
+-                idx = i
+-                break
+-        if idx == -1:
+-            idx = len(self.opa_ctrl_point)
+-            
+-        self.opa_ctrl_point.insert(idx, [new_data_value, new_opacity])
+-        self.update_tf_interface()
+-
+-    def add_color_point(self, mouse_pos_x):
+-        new_data_value = self.x_scale.invert(mouse_pos_x)
+-        idx = -1
+-        for i, pt in enumerate(self.color_ctrl_point):
+-            if pt[0] > new_data_value:
+-                idx = i
+-                break
+-        if idx == -1:
+-            idx = len(self.color_ctrl_point)
+-            
+-        # Handle boundary cases
+-        if idx == 0:
+-            prev = self.color_ctrl_point[0]
+-            next_pt = self.color_ctrl_point[1] if len(self.color_ctrl_point) > 1 else prev
+-        elif idx == len(self.color_ctrl_point):
+-            prev = self.color_ctrl_point[-1]
+-            next_pt = self.color_ctrl_point[-1]
+-        else:
+-            prev = self.color_ctrl_point[idx-1]
+-            next_pt = self.color_ctrl_point[idx]
+-            
+-        # Pitfall: Division by zero if prev[0] == next[0]
+-        if next_pt[0] == prev[0]:
+-            a = 0.0
+-        else:
+-            a = (new_data_value - prev[0]) / (next_pt[0] - prev[0])
+-            
+-        new_r = (1 - a) * prev[1] + a * next_pt[1]
+-        new_g = (1 - a) * prev[2] + a * next_pt[2]
+-        new_b = (1 - a) * prev[3] + a * next_pt[3]
+-        
+-        self.color_ctrl_point.insert(idx, [new_data_value, new_r, new_g, new_b])
+-        self.update_tf_interface()
++            # Use init_color_ctrl_point as array
++            self.color_ctrl_point = sorted(init_color_ctrl_point, key=lambda x: x[0])
++
++        self.opacity_factor = 1.0
++        self.init_vis()
++
++    def init_vis(self):
++        # Setup SVG, scales, and draw histogram
++        # 1. Compute Histogram
++        hist = compute_histogram(self.volume_data, self.bins) # Implementation of binning not detailed in sources
++        hist_log = [math.log(x + 1) for x in hist]
++        
++        # 2. Draw Histogram Bars
++        # Calculate steps and draw anchors using Two.js or SVG paths
++        # (Specific drawing commands omitted as they are library-specific)
++        
++        # 3. Draw TF Controls
++        # Setup d3 scales
++        x_scale = d3.scale_linear().domain(self.min_max).range([0, self.vis_width])
++        y_scale = d3.scale_linear().domain([1, 0]).range([0, self.vis_height * self.opacity_view_percentage])
++        
++        # Draw Opacity Area and Circles
++        # Draw Color Area and Circles
++        
++        # Bind Events
++        self.bind_events()
++
++    def bind_events(self):
++        # Mouse down/move/up for dragging
++        # Click for adding points
++        # Double click for adding points
++        # Right click for color picker
++        # Keydown for delete
++        
++        # Example: Add Opacity Point on Click
++        self.svg.on("click", (event) => {
++            mouse_pos = d3.mouse(this.svg.node())
++            new_data_val = x_scale.invert(mouse_pos[0])
++            new_opacity = y_scale.invert(mouse_pos[1]) / self.opacity_factor
++            
++            # Find insertion index
++            idx = -1
++            for i, pt in enumerate(self.opa_ctrl_point):
++                if pt[0] > new_data_val:
++                    idx = i
++                    break
++            
++            if idx == -1:
++                idx = len(self.opa_ctrl_point)
++            
++            # Pitfall: findIndex returns -1 if not found, splice(-1) removes last element
++            # Correct logic:
++            if idx == len(self.opa_ctrl_point):
++                 self.opa_ctrl_point.append([new_data_val, new_opacity])
++            else:
++                 self.opa_ctrl_point.insert(idx, [new_data_val, new_opacity])
++            
++            self.update_tf_interface()
++        })
+ 
+     def update_tf_interface(self):
+-        # Sort points
+-        self.opa_ctrl_point.sort(key=lambda x: x[0])
+-        self.color_ctrl_point.sort(key=lambda x: x[0])
+-        
+-        # Generate Texture
+-        texture_data = Uint8Array(180 * 4)
+-        step = 180.0 / self.div_offset_width
++        # Redraw SVG elements based on current control points
++        # ...
++        self.upload_texture()
++        self.update_render_func()
++
++    def upload_texture(self):
++        # Generate 1D Texture
++        texture_data = Uint8Array(180 * 4) # RGBA
++        step = self.vis_width / 180.0
+         
+         for i in range(180):
+-            val = (i + 0.5) * step
+-            alpha = self.get_alpha(val, self.opa_ctrl_point, self.div_offset_height)
+-            color = self.get_color(val, self.color_ctrl_point)
++            x_pos = (i + 0.5) * step
++            alpha = self.get_alpha(x_pos, self.opa_ctrl_point, self.vis_height)
++            color = self.get_color(x_pos, self.color_ctrl_point)
+             
+             idx = i * 4
+@@ -189,34 +219,27 @@
+             
+         # Upload to GPU
+-        gl.texSubImage2D(gl.TEXTURE1, 0, 0, 0, 180, 1, gl.RGBA, gl.UNSIGNED_BYTE, texture_data)
+-        
+-        # Update VTK.js Volume
+-        volume_property = self.get_volume_actor_property_func()
+-        volume_property.set_transfer_function_1d(self.create_vtk_color_opacity_function(texture_data))
+-        
+-        # Trigger Render
+-        self.update_render_func()
+-
+-    def get_alpha(self, val, ctrl_points, height):
++        # gl.texSubImage2D(gl.TEXTURE1, 0, 0, 0, 180, 1, gl.RGBA, gl.UNSIGNED_BYTE, texture_data)
++        pass
++
++    def get_alpha(self, x, ctrl_points, height):
+         # Linear interpolation between control points
+-        if not ctrl_points: return 0.0
+-        if val <= ctrl_points[0][0]: return ctrl_points[0][1]
+-        if val >= ctrl_points[-1][0]: return ctrl_points[-1][1]
++        # Handle boundaries
++        if x <= ctrl_points[0][0]: return ctrl_points[0][1]
++        if x >= ctrl_points[-1][0]: return ctrl_points[-1][1]
+         
+         for i in range(len(ctrl_points) - 1):
+-            if ctrl_points[i][0] <= val <= ctrl_points[i+1][0]:
+-                t = (val - ctrl_points[i][0]) / (ctrl_points[i+1][0] - ctrl_points[i][0])
++            if ctrl_points[i][0] <= x <= ctrl_points[i+1][0]:
++                t = (x - ctrl_points[i][0]) / (ctrl_points[i+1][0] - ctrl_points[i][0])
+                 return ctrl_points[i][1] + t * (ctrl_points[i+1][1] - ctrl_points[i][1])
+-        return 0.0
+-
+-    def get_color(self, val, ctrl_points):
++        return 0
++
++    def get_color(self, x, ctrl_points):
+         # Linear interpolation between control points
+-        if not ctrl_points: return [0, 0, 0]
+-        if val <= ctrl_points[0][0]: return ctrl_points[0][1:]
+-        if val >= ctrl_points[-1][0]: return ctrl_points[-1][1:]
++        if x <= ctrl_points[0][0]: return ctrl_points[0][1:]
++        if x >= ctrl_points[-1][0]: return ctrl_points[-1][1:]
+         
+         for i in range(len(ctrl_points) - 1):
+-            if ctrl_points[i][0] <= val <= ctrl_points[i+1][0]:
+-                t = (val - ctrl_points[i][0]) / (ctrl_points[i+1][0] - ctrl_points[i][0])
++            if ctrl_points[i][0] <= x <= ctrl_points[i+1][0]:
++                t = (x - ctrl_points[i][0]) / (ctrl_points[i+1][0] - ctrl_points[i][0])
+                 r = ctrl_points[i][1] + t * (ctrl_points[i+1][1] - ctrl_points[i][1])
+                 g = ctrl_points[i][2] + t * (ctrl_points[i+1][2] - ctrl_points[i][2])
+@@ -227,13 +250,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Histogram computation is $O(N)$ where $N$ is the number of voxels. Texture generation is $O(1)$ (fixed 180 steps). Interaction updates are $O(M)$ where $M$ is the number of control points.
+-*   **Memory Complexity:** $O(B)$ for histogram bins ($B=200$) and $O(M)$ for control points. The GPU texture is fixed at 180x1 RGBA.
+-*   **Strengths:** Intuitive visual feedback via histogram overlay; direct integration with VTK.js; lightweight client-side implementation.
+-*   **Limitations:** Relies on JavaScript performance for large datasets; histogram binning may lose precision for very large 16-bit or float data if not handled carefully; prone to edge cases in interpolation (division by zero, index errors) if not guarded [S2, unofficial].
+-*   **When to use:** When developing web-based volume visualization using VTK.js and requiring interactive TF editing.
+-*   **When not to use:** For high-performance desktop applications where GPU-based TF editors are preferred; for automated classification tasks.
++*   **Time Complexity:** Histogram computation is $O(N)$ where $N$ is the number of voxels. Texture generation is $O(M)$ where $M$ is the texture width (180). Interaction updates are $O(K)$ where $K$ is the number of control points.
++*   **Memory Complexity:** $O(B)$ for histogram bins (typically 200) and $O(K)$ for control points. The GPU texture is fixed at 180x1 RGBA (720 bytes).
++*   **Strengths:** Provides immediate visual feedback via histogram overlay; integrates directly with VTK.js rendering pipeline; supports both opacity and color editing.
++*   **Limitations:** Relies on JavaScript/DOM performance for UI responsiveness; fixed texture resolution (180) may limit precision for very fine TF details; requires manual handling of edge cases like division by zero in interpolation [S2, unofficial].
++*   **When to use:** When using VTK.js for volume rendering and a built-in, interactive TF editor is required without external heavy libraries.
++*   **When not to use:** For high-performance applications requiring GPU-side TF editing or when the volume data is too large for efficient client-side histogram computation.
+ 
+ ## Background
+-The VTK.js Transfer Function Interface was developed as part of the VTK.js ecosystem to provide a web-native solution for volume rendering classification. It was implemented in the repository `caseywang777/VTKjsVolumeRendering` [S2, unofficial] and documented in `johanna-b/VisWeb` [S1, unofficial]. It leverages D3.js for SVG manipulation and Two.js for vector graphics, integrating with WebGL via VTK.js's rendering pipeline.
++The VTK.js Transfer Function Interface originated as part of the VTK.js ecosystem, a JavaScript port of the Visualization Toolkit (VTK). It was developed to provide web-based volume rendering capabilities with interactive classification tools. The specific implementation described in the sources is found in community repositories such as `caseywang777/VTKjsVolumeRendering` and `johanna-b/VisWeb` [S1, unofficial][S2, unofficial]. It leverages D3.js for the visual interface and Two.js for vector graphics rendering within the SVG context.
+ 
+ ## Sources

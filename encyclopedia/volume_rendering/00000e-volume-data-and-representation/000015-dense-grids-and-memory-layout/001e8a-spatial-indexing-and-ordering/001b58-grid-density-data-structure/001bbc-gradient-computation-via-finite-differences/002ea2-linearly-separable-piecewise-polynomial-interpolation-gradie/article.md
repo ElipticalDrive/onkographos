@@ -1,0 +1,126 @@
+# Linearly Separable Piecewise Polynomial Interpolation Gradient
+
+Also called: Gradient Estimation via Gradient Filters, Linearly separable filter
+
+## Overview
+This method estimates the 3D gradient vector at each voxel in a scalar volume by applying optimized linearly separable filters along each axis [S2]. It is distinguished from sibling methods by performing only one interpolation step per gradient component, which yields higher quality results for illumination calculations where gradients are normalized to compute surface normals [S1, unofficial][S3, book]. Unlike [Analytic Gradient Computation](2167-analytic-gradient-computation.md) which requires analytic derivatives of the transfer function, or [Gradient Estimation from Samples](2180-gradient-estimation-from-samples.md) which uses regression over a local neighborhood, this approach relies on fixed coefficients derived from piecewise polynomial interpolation theory [S2].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D scalar volume $V$ with dimensions $D_x \times D_y \times D_z$, where $V(x,y,z)$ is the scalar value at voxel coordinates $(x,y,z)$ [S2].
+- Output: A 3D vector field $G$ with dimensions $D_x \times D_y \times D_z$, where $G(x,y,z) = [g_x, g_y, g_z]$ is the estimated gradient [G].
+
+**Data Structures:**
+- The volume $V$ is stored as a contiguous 3D array or grid [G].
+- The gradient field $G$ is stored as a separate 3D array of 3-component floating-point vectors [G].
+
+**Formulas:**
+The gradient at sample point $(x_i, y_i, z_i)$ is computed as a vector where each component depends only on voxel values along that axis [S2]. Using 3EF constraints, the filter applies weights to offsets $-2, -1, +1, +2$:
+$$g_x = -\frac{1}{12}V(x-2, y, z) + \frac{2}{3}V(x-1, y, z) - \frac{2}{3}V(x+1, y, z) + \frac{1}{12}V(x+2, y, z)$$
+$$g_y = -\frac{1}{12}V(x, y-2, z) + \frac{2}{3}V(x, y-1, z) - \frac{2}{3}V(x, y+1, z) + \frac{1}{12}V(x, y+2, z)$$
+$$g_z = -\frac{1}{12}V(x, y, z-2) + \frac{2}{3}V(x, y, z-1) - \frac{2}{3}V(x, y, z+1) + \frac{1}{12}V(x, y, z+2)$$
+where $V$ is the scalar volume, $(x,y,z)$ are integer voxel coordinates, and coefficients are $-1/12, 2/3, -2/3, 1/12$ [S2].
+
+**Numbered Steps:**
+1. Initialize the gradient field $G$ to zeros [G].
+2. Iterate over every voxel $(x, y, z)$ in the volume [G].
+3. Compute the x-component $g_x$ using the linearly separable filter along the x-axis [S2].
+4. Compute the y-component $g_y$ using the linearly separable filter along the y-axis [S2].
+5. Compute the z-component $g_z$ using the linearly separable filter along the z-axis [S2].
+6. Store $G(x,y,z) = [g_x, g_y, g_z]$ [G].
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** The filter requires samples at offsets $\pm 2$. Voxels near the volume boundaries (within 2 voxels of any face) do not have sufficient support. The sources do not specify how to handle these [S2]. Implementers must choose a strategy, such as clamping, mirroring, or zero-padding [G].
+- **Precision:** The coefficients involve fractions ($1/12, 2/3$). Using single-precision floats may introduce small errors, but this is generally acceptable for visualization [G].
+- **Softness:** The method produces slightly softer edges in regions of rapid change compared to central differences [S2]. This is a characteristic, not a bug, but may be undesirable if sharp edges are required [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_linearly_separable_gradient(volume, dims):
+    Dx, Dy, Dz = dims
+    # Allocate output array [G]
+    gradient_field = [[[None for _ in range(Dz)] for _ in range(Dy)] for _ in range(Dx)]
+    
+    for x in range(Dx):
+        for y in range(Dy):
+            for z in range(Dz):
+                # Clamp coordinates to volume bounds [G]
+                cx = 0 if x < 0 else (Dx - 1 if x >= Dx else x)
+                cy = 0 if y < 0 else (Dy - 1 if y >= Dy else y)
+                cz = 0 if z < 0 else (Dz - 1 if z >= Dz else z)
+                
+                # x-component
+                gx = (-1/12 * volume[0 if x-2 < 0 else (Dx-1 if x-2 >= Dx else x-2), cy, cz] + 
+                      2/3 * volume[0 if x-1 < 0 else (Dx-1 if x-1 >= Dx else x-1), cy, cz] - 
+                      2/3 * volume[0 if x+1 < 0 else (Dx-1 if x+1 >= Dx else x+1), cy, cz] + 
+                      1/12 * volume[0 if x+2 < 0 else (Dx-1 if x+2 >= Dx else x+2), cy, cz])
+                
+                # y-component
+                gy = (-1/12 * volume[cx, 0 if y-2 < 0 else (Dy-1 if y-2 >= Dy else y-2), cz] + 
+                      2/3 * volume[cx, 0 if y-1 < 0 else (Dy-1 if y-1 >= Dy else y-1), cz] - 
+                      2/3 * volume[cx, 0 if y+1 < 0 else (Dy-1 if y+1 >= Dy else y+1), cz] + 
+                      1/12 * volume[cx, 0 if y+2 < 0 else (Dy-1 if y+2 >= Dy else y+2), cz])
+                
+                # z-component
+                gz = (-1/12 * volume[cx, cy, 0 if z-2 < 0 else (Dz-1 if z-2 >= Dz else z-2)] + 
+                      2/3 * volume[cx, cy, 0 if z-1 < 0 else (Dz-1 if z-1 >= Dz else z-1)] - 
+                      2/3 * volume[cx, cy, 0 if z+1 < 0 else (Dz-1 if z+1 >= Dz else z+1)] + 
+                      1/12 * volume[cx, cy, 0 if z+2 < 0 else (Dz-1 if z+2 >= Dz else z+2)])
+                
+                gradient_field[x][y][z] = (gx, gy, gz)
+    return gradient_field
+```
+
+## Subtopics
+
+### [Gradient Map Generation](1204-gradient-map-generation.md)
+Generates a lookup table for gradient magnitudes. This method provides the underlying gradient vectors used to populate such maps. Choose when magnitude-based transfer functions are needed.
+
+### [Analytic Gradient Computation](2167-analytic-gradient-computation.md)
+Uses derivatives of the transfer function. This method is data-driven and does not require analytic forms. Choose when transfer functions lack closed-form derivatives.
+
+### [Gradient Estimation from Samples](2180-gradient-estimation-from-samples.md)
+Uses linear regression over a neighborhood. This method is faster and uses fixed filters, whereas regression is more computationally expensive. Choose when computational budget is limited.
+
+### [Precomputed Gradient Volume](2425-precomputed-gradient-volume.md)
+Stores precomputed gradients. This method is a technique for computing those gradients. Choose when gradients are needed repeatedly across multiple rendering passes.
+
+### [Gradient-based Surface Projection](2668-gradient-based-surface-projection.md)
+Uses gradients for surface projection. This method provides the gradient field used in such projections. Choose when surface extraction relies on gradient direction.
+
+### [Per-Region Gradient Averaging](2715-per-region-gradient-averaging.md)
+Averages gradients in regions. This method computes per-voxel gradients without averaging. Choose when high-frequency gradient detail is required.
+
+### [Gradient Magnitude Computation](3184-gradient-magnitude-computation.md)
+Computes the magnitude of the gradient. This method computes the vector components. Choose when magnitude is derived from these components.
+
+### [Scanline Gradient Computation](3582-scanline-gradient-computation.md)
+Computes gradients along scanlines. This method is voxel-wise and separable. Choose when memory bandwidth is optimized for linear traversal.
+
+### [Finite Difference Stencils (Central/Forward/Backward)](3858-finite-difference-stencils-central-forward-backward.md)
+Standard finite difference methods. This method uses optimized filters instead of simple central differences. Choose when higher accuracy and continuity are prioritized over stencil simplicity.
+
+### [Second Derivative Computation](6353-second-derivative-computation.md)
+Computes Hessian or second derivatives. This method computes first derivatives. Choose when curvature or acceleration information is not required.
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of voxels, as each voxel requires a constant number of operations (12 reads and 12 multiplications/additions per voxel) [G].
+- **Memory Complexity**: $O(N)$ for storing the gradient field [G].
+- **Performance**: The method is efficient because it is linearly separable, allowing the 3D gradient to be computed as three 1D passes [G]. Non-separable filters are noted as computationally expensive [S2].
+- **Strengths**: Provides high-quality gradients suitable for illumination calculations. It performs only one interpolation step, which is more direct than methods that interpolate gradients after computing them at sample points [S1, unofficial][S3, book].
+- **Limitations**: Produces softer edges than central differences [S2]. Requires handling of boundary conditions which are not specified in the source [S2].
+- **When to use**: When high-quality gradient estimation is needed for volume rendering, particularly for illumination and normal calculation [S1, unofficial][S3, book].
+- **When not to use**: When sharp edges are critical and the softening effect is undesirable, or when memory is extremely constrained and storing a separate gradient field is not feasible [G].
+
+## Background
+The method was proposed by Möller et al. as a methodology for designing linearly separable derivative filters with specific accuracy and continuity characteristics using optimized piecewise polynomial interpolation filters [S2]. The approach is based on the analysis of linearly separable gradient filters by researchers such as those cited in [13] and [26] of the source [S2]. It is presented as an alternative to central differences and regression-based methods in volume rendering contexts [S1, unofficial][S2].
+
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
+[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

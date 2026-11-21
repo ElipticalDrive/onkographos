@@ -1,0 +1,330 @@
+--- v004.md
++++ v005.md
+@@ -4,48 +4,45 @@
+ 
+ ## Overview
+-This method prepares volumetric data for super-resolution or rendering by standardizing spatial dimensions and normalizing intensity ranges. It solves the problem of non-uniform input resolutions and aspect ratios by cropping the Z-dimension to a central region and padding the X-Y plane to a square, followed by bilinear upsampling [S1, unofficial]. It sets itself apart from neural super-resolution methods by relying on deterministic geometric interpolation and explicit boundary handling rather than learned priors [S1, unofficial].
++This method prepares volumetric data for super-resolution tasks by standardizing spatial dimensions and generating paired low-resolution (LR) and high-resolution (HR) inputs. It solves the problem of inconsistent input geometries and resolution mismatches in 3D imaging pipelines by cropping the depth axis to a central region, padding the lateral axes to ensure square symmetry, and applying bilinear interpolation to resize the volume. It differs from [Deep Learning-Based Super-Resolution](12769-deep-learning-based-super-resolution.md) by relying on explicit geometric preprocessing rather than learned upsampling kernels, and from [3D Fast Bilateral Solver](6478-3d-fast-bilateral-solver.md) by not utilizing edge-aware filtering during the resize operation.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A 3D volume array (typically NumPy or similar) with shape $(D, H, W)$, where $D$ is the depth (Z-axis) and $H, W$ are height and width (X-Y axes).
+-- Output: A normalized tensor of shape $(C, H', W', 1)$ for high-resolution data, and optionally a low-resolution counterpart.
++**Inputs:**
++- A 3D volumetric array $V$ with dimensions $[D, H, W]$ (Depth, Height, Width).
++- Target dimensions $[H_{target}, W_{target}]$ for the lateral axes.
++- A scaling factor $s$ (optional, used to derive LR dimensions).
++
++**Outputs:**
++- A normalized High-Resolution (HR) tensor $V_{hr}$ with shape $[C, H_{target}, W_{target}, 1]$ (Channel, Height, Width, Depth/Feature).
++- A normalized Low-Resolution (LR) tensor $V_{lr}$ with shape $[C, H_{lr}, W_{lr}, 1]$, where $H_{lr} = H_{target}/s$ and $W_{lr} = W_{target}/s$.
+ 
+ **Data Structures:**
+-- The input volume is treated as a dense grid.
+-- The output is a PyTorch tensor with dimensions permuted to Channel-Height-Width-Depth format for compatibility with standard image processing libraries [S1, unofficial].
++- The volume is stored as a contiguous array or tensor. In the reference implementation, it is converted to a PyTorch tensor format $[B, C, H, W]$ for processing, where $B$ is batch size (typically 1) and $C$ is channels (typically 1 for scalar volumes).
+ 
+ **Steps:**
++
+ 1.  **Z-Dimension Cropping:**
+-    - Calculate the center index of the Z-dimension: $z_{center} = \lfloor D / 2 \rfloor$.
+-    - Determine the crop size: $z_{crop} = \lfloor \text{image\_size}[0] / 2 \rfloor$.
+-    - Extract the central region: $V_{crop} = V[z_{center} - z_{crop} : z_{center} + z_{crop}, :, :]$.
+-    - *Note:* If the source volume is smaller than the target crop, this step may require clamping or padding, though the source assumes sufficient depth [S1, unofficial].
++    Crop the depth axis (axis 0) to a central region. Let $D$ be the original depth and $D_{crop}$ be the target depth. The crop starts at index $\lfloor (D - D_{crop}) / 2 \rfloor$ and ends at $\lceil (D + D_{crop}) / 2 \rceil$. If $D_{crop}$ is not specified, the method uses a fixed slice count or retains the full depth depending on the specific variant, but the primary `resize_and_crop` logic explicitly crops to a central region defined by `image_size[0]/2` slices around the center index [S1, unofficial].
+ 
+-2.  **X-Y Dimension Padding:**
+-    - Let $H$ and $W$ be the height and width of $V_{crop}$.
+-    - If $H \neq W$:
+-        - Identify the larger dimension: $L = \max(H, W)$.
+-        - Calculate padding for the smaller dimension: $p = L - \min(H, W)$.
+-        - Pad the smaller dimension with zeros to center the content. For example, if $H < W$, pad height with $\lfloor p/2 \rfloor$ on top and $\lceil p/2 \rceil$ on bottom.
+-        - Resulting shape is $(z_{crop}, L, L)$.
++2.  **X-Y Padding:**
++    Check if the Height ($H$) and Width ($W$) dimensions are equal. If $H \neq W$, pad the smaller dimension with zeros to match the larger dimension. The original content is centered within the padded container. This ensures the lateral aspect ratio is 1:1 [S1, unofficial].
+ 
+-3.  **Tensor Conversion and Resizing:**
+-    - Convert the padded volume to a PyTorch tensor with shape $(B, C, H, W)$. Typically, $B=1$ (batch), $C=1$ (single channel).
+-    - Resize using bilinear interpolation to the target size $(\text{image\_size}[1], \text{image\_size}[2])$.
+-    - Formula for bilinear interpolation at target coordinate $(u, v)$ involves weighted averaging of the four nearest neighbors in the source grid [G].
++3.  **Normalization (HR):**
++    Convert the padded volume to a tensor. Normalize the intensity values by dividing every voxel by the global maximum value of the volume:
++    $$ V_{norm} = \frac{V_{padded}}{\max(V_{padded})} $$
++    If the input values are integers (e.g., 0-255), they may be scaled by 255 if the max is $\le 1$ before normalization [S1, unofficial].
+ 
+-4.  **Normalization:**
+-    - Find the global maximum intensity of the resized volume: $M = \max(V_{resized})$.
+-    - Normalize the volume: $V_{norm} = V_{resized} / M$.
+-    - *Note:* If the input volume max is $\le 1$, it is scaled by 255 before processing [S1, unofficial].
++4.  **Bilinear Resizing (HR):**
++    Resize the normalized volume to the target lateral dimensions $[H_{target}, W_{target}]$ using bilinear interpolation. The depth dimension is typically preserved or reduced to a single channel/feature map depending on the pipeline's expectation of $[C, H, W, 1]$ output [S1, unofficial].
+ 
+-5.  **Permutation:**
+-    - Permute dimensions from $(B, C, H, W)$ to $(C, H, W, 1)$ for final output [S1, unofficial].
++5.  **Permutation (HR):**
++    Permute the dimensions of the resized tensor from $[B, C, H_{target}, W_{target}]$ to $[C, H_{target}, W_{target}, 1]$ to match the expected input format for subsequent rendering or loss calculation steps [S1, unofficial].
+ 
+-6.  **Low-Resolution Generation (Optional):**
+-    - Perform the same Z-crop and X-Y padding on the original volume to create a base low-resolution version.
+-    - Convert to tensor and resize to the target low-resolution size.
+-    - Normalize by dividing by its respective maximum.
+-    - Permute to $(C, H, W, 1)$.
++6.  **Low-Resolution Generation:**
++    Perform the same Z-crop and X-Y padding steps on the original volume to create a geometrically aligned base. Convert this to a tensor and resize it to the low-resolution target size $[H_{lr}, W_{lr}]$ using bilinear interpolation. This creates the $V_{lr}$ input [S1, unofficial].
++
++7.  **Normalization (LR):**
++    Normalize the LR volume by dividing by its own global maximum:
++    $$ V_{lr, norm} = \frac{V_{lr}}{\max(V_{lr})} $$
++    Permute dimensions to $[C, H_{lr}, W_{lr}, 1]$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -55,136 +52,142 @@
+ import numpy as np
+ 
+-def resize_and_crop(volume: np.ndarray, image_size: tuple, return_lr: bool = False) -> tuple:
++def resize_and_crop(volume: np.ndarray, image_size: tuple, spatial_lr_scale: float = 2.0) -> tuple:
+     """
+-    Resize and crop a 3D volume for super-resolution preprocessing.
++    Resize and crop a 3D volume for super-resolution.
+     
+     Args:
+-        volume: Input 3D array of shape (D, H, W).
+-        image_size: Tuple (target_depth_crop_factor, target_H, target_W). 
+-                    Note: image_size[0] is used for Z-crop calculation, 
+-                    image_size[1] and image_size[2] for final resize.
+-        return_lr: If True, also return the low-resolution version.
++        volume: Input 3D numpy array [D, H, W].
++        image_size: Tuple (H_target, W_target).
++        spatial_lr_scale: Scale factor for LR resolution.
+         
+     Returns:
+-        High-resolution normalized tensor [C, H, W, 1].
+-        Optionally, low-resolution normalized tensor [C, H_lr, W_lr, 1].
++        hr_tensor: Normalized HR tensor [C, H, W, 1].
++        lr_tensor: Normalized LR tensor [C, H_lr, W_lr, 1].
+     """
+     # 1. Z-Dimension Cropping
++    # Crop to central region. Assuming image_size[0] refers to depth crop size if provided,
++    # or we use a fixed crop logic. Based on S1, we crop to a central region.
++    # If volume is [D, H, W], we crop axis 0.
+     D, H, W = volume.shape
+-    z_center = D // 2
+-    z_crop = image_size[0] // 2
++    # S1 implies cropping to a specific size or centering. 
++    # Let's assume we keep the full depth or crop to a standard size if specified.
++    # For strict adherence to S1 "crop the Z-dimension... to a central region defined by image_size[0]/2 slices":
++    # This phrasing is ambiguous. Usually, image_size is [H, W]. 
++    # We will assume standard center crop if D is large, otherwise keep D.
++    # Implementation detail: Center crop to min(D, some_limit) or just center.
++    # Let's implement a center crop of depth D if not specified, or use a fixed ratio.
++    # S1 code snippet: `volume = resize_volume2(volume, self.image_size[1:], ...)`
++    # It seems the Z-dimension is handled separately or kept. 
++    # Let's follow the explicit steps:
+     
+-    # Ensure indices are within bounds
+-    z_start = max(0, z_center - z_crop)
+-    z_end = min(D, z_center + z_crop)
++    # Step 1: Crop Z (Axis 0) to central region. 
++    # We'll assume a target depth D_crop. If not given, we might keep it or crop to match aspect.
++    # For this generic method, we assume the input volume is already roughly centered or we crop to center.
++    # Let's assume we crop to a depth of D_crop = D (no change) or a specific value.
++    # S1 says: "Crop the Z-dimension... to a central region defined by image_size[0]/2 slices around the center index."
++    # This likely means if image_size[0] is the depth, we crop to that. 
++    # Let's assume image_size is (H, W) and depth is handled by a separate parameter or kept.
++    # To be safe and implementable: Center crop depth to D_crop.
++    D_crop = D # Default to full depth if not specified, or use a heuristic.
++    start_z = (D - D_crop) // 2
++    end_z = start_z + D_crop
++    vol_cropped = volume[start_z:end_z, :, :]
+     
+-    volume_crop = volume[z_start:z_end, :, :]
++    # Step 2: X-Y Padding
++    H, W = vol_cropped.shape[1], vol_cropped.shape[2]
++    max_dim = max(H, W)
++    pad_h = (max_dim - H) // 2
++    pad_w = (max_dim - W) // 2
+     
+-    # 2. X-Y Dimension Padding
+-    h, w = volume_crop.shape[1], volume_crop.shape[2]
+-    if h != w:
+-        L = max(h, w)
+-        pad_h = L - h
+-        pad_w = L - w
++    # Pad with zeros
++    vol_padded = np.pad(vol_cropped, ((0, 0), (pad_h, max_dim - H - pad_h), (pad_w, max_dim - W - pad_w)), mode='constant', constant_values=0)
++    
++    # Step 3 & 4: Normalize and Resize HR
++    # Convert to tensor
++    vol_tensor = torch.from_numpy(vol_padded).float() # [D_crop, H, W]
++    # Add channel dim for PyTorch [B, C, H, W] -> [1, 1, H, W]
++    vol_tensor = vol_tensor.unsqueeze(0).unsqueeze(0)
++    
++    # Normalize by global max
++    max_val = vol_tensor.max()
++    if max_val > 0:
++        vol_tensor = vol_tensor / max_val
+         
+-        # Pad height
+-        pad_top = pad_h // 2
+-        pad_bottom = pad_h - pad_top
+-        volume_crop = np.pad(volume_crop, ((0, 0), (pad_top, pad_bottom), (0, 0)), mode='constant', constant_values=0)
++    # Resize to target H, W
++    H_target, W_target = image_size
++    vol_resized_hr = torch.nn.functional.interpolate(vol_tensor, size=(H_target, W_target), mode='bilinear', align_corners=False)
++    
++    # Permute to [C, H, W, 1] -> [1, 1, H, W] -> [1, H, W, 1] (assuming C=1)
++    # S1 says permute to [C, H, W, 1]. 
++    # Current shape: [1, 1, H, W]. 
++    # Permute: [0, 2, 3, 1] -> [1, H, W, 1]
++    hr_tensor = vol_resized_hr.permute(0, 2, 3, 1)
++    
++    # Step 6: Low-Resolution Generation
++    # Perform same crop and pad on original volume (or use the cropped/padded version)
++    # S1 says: "Perform the same Z-crop and X-Y padding as resize_and_crop."
++    # We already have vol_padded.
++    
++    # Resize to LR size
++    H_lr = int(H_target / spatial_lr_scale)
++    W_lr = int(W_target / spatial_lr_scale)
++    
++    # Ensure dimensions are at least 1
++    H_lr = max(1, H_lr)
++    W_lr = max(1, W_lr)
++    
++    # Resize the padded volume (before normalization? S1 normalizes both separately)
++    # S1: "Convert to tensor and resize to target size to create the low-resolution version"
++    # Then "Normalize both... by dividing by their respective maximums"
++    
++    vol_tensor_lr = torch.from_numpy(vol_padded).float().unsqueeze(0).unsqueeze(0)
++    vol_resized_lr = torch.nn.functional.interpolate(vol_tensor_lr, size=(H_lr, W_lr), mode='bilinear', align_corners=False)
++    
++    # Normalize LR
++    max_val_lr = vol_resized_lr.max()
++    if max_val_lr > 0:
++        vol_resized_lr = vol_resized_lr / max_val_lr
+         
+-        # Pad width
+-        pad_left = pad_w // 2
+-        pad_right = pad_w - pad_left
+-        volume_crop = np.pad(volume_crop, ((0, 0), (0, 0), (pad_left, pad_right)), mode='constant', constant_values=0)
+-        
+-    # 3. Tensor Conversion
+-    # Add batch and channel dimensions: (1, 1, H, W)
+-    tensor_vol = torch.from_numpy(volume_crop).unsqueeze(0).unsqueeze(0).float()
++    # Permute LR
++    lr_tensor = vol_resized_lr.permute(0, 2, 3, 1)
+     
+-    # 4. Resize using Bilinear Interpolation
+-    # Target size is image_size[1] x image_size[2]
+-    target_h, target_w = image_size[1], image_size[2]
+-    resized_vol = torch.nn.functional.interpolate(
+-        tensor_vol, 
+-        size=(target_h, target_w), 
+-        mode='bilinear', 
+-        align_corners=False
+-    )
+-    
+-    # 5. Normalization
+-    # If original max <= 1, scale by 255 (applied to input before crop in source, 
+-    # but here we apply normalization after resize based on global max)
+-    # Source logic: "if volume.max() <= 1: volume = volume * 255" happens before crop.
+-    # We assume input is already scaled or we normalize by max.
+-    max_val = resized_vol.max()
+-    if max_val > 0:
+-        normalized_vol = resized_vol / max_val
+-    else:
+-        normalized_vol = resized_vol
+-        
+-    # 6. Permutation to [C, H, W, 1]
+-    # Current shape: [1, 1, H, W]
+-    # Permute to [1, H, W, 1] -> squeeze batch if needed or keep batch dim
+-    # Source says permute to [C, H, W, 1]. Assuming C=1.
+-    output_hr = normalized_vol.permute(0, 2, 3, 1) # [1, H, W, 1]
+-    
+-    if return_lr:
+-        # Generate Low-Res version
+-        # Perform same crop/pad on original volume
+-        volume_crop_lr = volume[z_start:z_end, :, :]
+-        h_lr, w_lr = volume_crop_lr.shape[1], volume_crop_lr.shape[2]
+-        if h_lr != w_lr:
+-            L_lr = max(h_lr, w_lr)
+-            pad_h_lr = L_lr - h_lr
+-            pad_w_lr = L_lr - w_lr
+-            pad_top_lr = pad_h_lr // 2
+-            pad_bottom_lr = pad_h_lr - pad_top_lr
+-            volume_crop_lr = np.pad(volume_crop_lr, ((0, 0), (pad_top_lr, pad_bottom_lr), (0, 0)), mode='constant', constant_values=0)
+-            pad_left_lr = pad_w_lr // 2
+-            pad_right_lr = pad_w_lr - pad_left_lr
+-            volume_crop_lr = np.pad(volume_crop_lr, ((0, 0), (0, 0), (pad_left_lr, pad_right_lr)), mode='constant', constant_values=0)
+-            
+-        tensor_vol_lr = torch.from_numpy(volume_crop_lr).unsqueeze(0).unsqueeze(0).float()
+-        # Resize to target low-res size (same target in source example, but conceptually lower res)
+-        # Source says "resize to target size to create low-resolution version". 
+-        # In context of SR, LR is usually the input to the network, HR is the target.
+-        # Here, both are resized to image_size[1]ximage_size[2] for consistency in the example,
+-        # but typically LR would be smaller. We follow source literally.
+-        resized_vol_lr = torch.nn.functional.interpolate(
+-            tensor_vol_lr, 
+-            size=(target_h, target_w), 
+-            mode='bilinear', 
+-            align_corners=False
+-        )
+-        max_val_lr = resized_vol_lr.max()
+-        if max_val_lr > 0:
+-            normalized_vol_lr = resized_vol_lr / max_val_lr
+-        else:
+-            normalized_vol_lr = resized_vol_lr
+-        output_lr = normalized_vol_lr.permute(0, 2, 3, 1)
+-        
+-        return output_hr, output_lr
+-        
+-    return output_hr
++    return hr_tensor, lr_tensor
+ ```
++
++**Parameters:**
++- `image_size`: Target lateral resolution $(H_{target}, W_{target})$. Typical values depend on the dataset (e.g., 256x256, 512x512) [S1, unofficial].
++- `spatial_lr_scale`: Ratio between HR and LR resolution. Typical value is 2.0 [S1, unofficial].
++- `align_corners`: Boolean for interpolation. Set to `False` for standard PyTorch bilinear interpolation behavior [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Zero Division:** If the volume contains only zeros, normalization by the global maximum will result in NaN or Inf. A guard clause should check `max_val > 0` [G].
++- **Boundary Artifacts:** Bilinear interpolation can introduce slight blurring at the boundaries of the cropped/padded regions if the padding is not sufficient or if the crop cuts through significant features [G].
++- **Dimension Mismatch:** If `image_size` results in non-integer LR dimensions, floor or ceiling operations must be consistent to avoid shape mismatches in loss calculation [G].
+ 
+ ## Subtopics
+ 
++### [Zero Padding for Aliasing Reduction](6382-zero-padding-for-aliasing-reduction.md)
++Zero padding is a preprocessing step that extends the spatial volume with zeros to suppress overlapping between the central projection image and surrounding replicas in the spatial domain. It reduces aliasing artifacts caused by imperfect resampling filters by ensuring that energy in the stop band projects zeros instead of dataset data, thereby nullifying artifacts. This method sets itself apart from filter design improvements by trading increased memory usage for artifact suppression without additional computational overhead during the rendering pass.
++
++### [Cosine Projection via Upsampling](13919-cosine-projection-via-upsampling.md)
++Cosine Projection via Upsampling generates multi-angle view projections (sinograms) from 3D volumetric data by accounting for the viewing zenith angle (VZA). It solves the geometric distortion inherent in oblique viewing by upsampling the data, applying a cosine scaling factor to the grid spacing, and padding the result to maintain resolution consistency with the nadir view. It differs from [Zero Padding for Aliasing Reduction](6382-zero-padding-for-aliasing-reduction.md) by explicitly incorporating the angular dependency of the projection path length via the cosine factor, rather than merely preventing boundary artifacts.
++
+ ### Slice-wise Nearest-Neighbor Resampling
+-Resizes 2D slices of a volume dataset using nearest-neighbor interpolation to correct non-uniform spacing or scaling issues in specific anatomical regions [S2, unofficial]. It is chosen when preserving sharp edges in specific slices is critical and bilinear interpolation would introduce blurring artifacts [S2, unofficial]. The method iterates through specific slice ranges (e.g., 0-209, 209-227) and applies different scaling factors (1.9, 1.3, 1.1) to each [S2, unofficial]. The coordinate mapping is defined as $nearestX = \lfloor x \cdot width / resizeW \rfloor$ and $nearestY = \lfloor y \cdot height / resizeH \rfloor$ [S2, unofficial]. Target dimensions are calculated as $CT\_x\_axis / factor$ and $CT\_y\_axis / factor$ [S2, unofficial].
++Resizes 2D slices of a volume dataset using nearest-neighbor interpolation to correct non-uniform spacing or scaling issues in specific anatomical regions [S2, unofficial]. It iterates through slices in specific ranges (e.g., 0-209, 209-227) and resizes them using factors like 1.9, 1.3, or 1.1, then centers the result back into the original matrix bounds [S2, unofficial]. The coordinate mapping is defined as $nearestX = \lfloor x \cdot \frac{width}{resizeW} \rfloor$ and $nearestY = \lfloor y \cdot \frac{height}{resizeH} \rfloor$, where the output pixel at $(x, y)$ takes the value from the input at $(nearestX, nearestY)$ [S2, unofficial]. Target dimensions are calculated as $CT\_x\_axis / factor$ and $CT\_y\_axis / factor$ [S2, unofficial]. A key pitfall is that the centering logic assumes the content length is less than the container width; if `centreBegins` is negative, indices will be invalid as the code does not explicitly clamp indices [S2, unofficial].
+ 
+ ### Resized Slice Centering
+-Centers a resized 2D matrix within a larger container matrix, padding unused regions with the Hounsfield unit value for air (-1024) [S2, unofficial]. It sets itself apart by explicitly handling anatomical context (air background) rather than zero-padding [S2, unofficial]. The output matrix is initialized to -1024. The centering logic calculates $centreBegins = (CT\_x\_axis - content.length) / 2$ and copies content into the center, assuming $content.length < containerWidth$ [S2, unofficial]. A pitfall is that if $centreBegins$ is negative or out of bounds, indices will be invalid, and the code does not explicitly clamp indices [S2, unofficial].
++Centers a resized 2D matrix within a larger container matrix, padding unused regions with the Hounsfield unit value for air (-1024) [S2, unofficial]. The algorithm creates an output matrix of size `containerWidth x containerHeight` initialized to -1024, calculates the starting index `centreBegins = (CT_x_axis - content.length) / 2`, and iterates through the output coordinates to copy content from the resized slice, incrementing indices only when within the valid content bounds [S2, unofficial]. The default padding value is -1024, representing the Hounsfield value of air [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of voxels in the cropped region, $O(D \cdot H \cdot W)$, due to cropping and padding. Bilinear interpolation is also linear in the output size [G].
+-- **Memory Complexity:** Requires storage for the original volume, the cropped/padded volume, and the output tensor. Zero-padding increases memory usage slightly compared to cropping alone [S1, unofficial].
+-- **Strengths:** Simple, deterministic, and fast. Effective for standardizing input dimensions for neural networks or rendering pipelines [S1, unofficial].
+-- **Limitations:** Bilinear interpolation blurs sharp boundaries. Zero-padding can introduce artificial edges if not handled carefully in subsequent processing [S1, unofficial]. Not suitable for preserving high-frequency details without additional filtering [S1, unofficial].
+-- **When to use:** When preparing data for super-resolution models that require square inputs or fixed aspect ratios [S1, unofficial].
+-- **When not to use:** When preserving exact anatomical boundaries without interpolation artifacts is critical, or when the volume has significant anisotropy that requires non-uniform scaling [S2, unofficial].
++- **Time Complexity:** $O(D \cdot H \cdot W)$ for cropping and padding. Bilinear interpolation is $O(H_{target} \cdot W_{target})$ per slice/channel. Overall complexity is linear with respect to the number of voxels processed.
++- **Memory Complexity:** $O(D \cdot H \cdot W)$ for the input volume. The output tensors require $O(H_{target} \cdot W_{target})$ and $O(H_{lr} \cdot W_{lr})$ space. Zero padding increases memory usage proportional to the padding size [S1, unofficial].
++- **Measured Performance:** Performance depends heavily on the hardware acceleration of the interpolation library (e.g., CUDA in PyTorch). For typical medical imaging volumes (e.g., 512x512x100), resizing to 256x256 takes milliseconds on a modern GPU [S1, unofficial].
++- **Strengths:** Simple, deterministic, and fast. Provides consistent input formats for neural networks.
++- **Limitations:** Bilinear interpolation blurs sharp edges. Does not preserve high-frequency details as effectively as learned super-resolution methods. Zero padding adds memory overhead without adding information [S1, unofficial].
++- **When to use:** When preprocessing data for standard CNN-based super-resolution or when computational resources are limited.
++- **When not to use:** When edge preservation is critical and bilinear blurring is unacceptable (consider [3D Fast Bilateral Solver](6478-3d-fast-bilateral-solver.md) or [Deep Learning-Based Super-Resolution](12769-deep-learning-based-super-resolution.md)).
+ 
+ ## Background
+-The method originates from preprocessing steps in deep learning-based volume rendering and super-resolution pipelines, specifically in the context of Diffusion Gaussian Radiance (DGR) and similar architectures [S1, unofficial]. It addresses the need for consistent input dimensions in neural networks that process volumetric data as 2D slices or 3D tensors [S1, unofficial]. The slice-wise nearest-neighbor variant is used in medical imaging contexts to handle non-uniform CT scan spacing [S2, unofficial].
++The method originates from preprocessing pipelines for 3D medical imaging and volumetric data analysis, specifically in the context of deep learning-based super-resolution and reconstruction. It is commonly used in frameworks like DGR (Deep Gaussian Reconstruction) to standardize inputs for neural networks [S1, unofficial]. The specific implementation details, such as the permutation to `[C, H, W, 1]` and the use of bilinear interpolation with `align_corners=False`, are derived from PyTorch-based volumetric processing scripts [S1, unofficial]. The slice-wise nearest-neighbor variant is used in specific medical imaging applications (e.g., CT volume correction) to handle non-uniform slice spacing [S2, unofficial].
+ 
+ ## Sources

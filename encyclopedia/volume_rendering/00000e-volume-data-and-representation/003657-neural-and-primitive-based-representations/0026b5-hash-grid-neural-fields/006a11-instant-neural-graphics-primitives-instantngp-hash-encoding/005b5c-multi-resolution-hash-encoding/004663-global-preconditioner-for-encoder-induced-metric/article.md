@@ -1,0 +1,106 @@
+# Global Preconditioner for Encoder-Induced Metric
+
+Also called: A* preconditioner, Isotropic preconditioner
+
+## Overview
+The Global Preconditioner for Encoder-Induced Metric is a fixed linear transformation applied to the input space of a HashGrid encoding to isotropize the average metric induced by the encoder [S1]. It solves the problem of anisotropic feature scaling caused by the discrete, multi-resolution grid structure, ensuring that all spatial directions are treated equally on average without globally rescaling the volume [S1]. Unlike adaptive preconditioners, it uses a closed-form solution derived from the symmetrized average metric of the canonical cell, setting apart from siblings by providing a static, volume-preserving correction that reduces the condition number of the encoder-induced metric to 1 for the average case [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** The symmetrized average encoder-induced metric $\mathbf{M}_{\text{sym}}$ computed over the canonical unit cube (or representative tetrahedral subdivision) [S1].
+*   **Output:** A $3 \times 3$ preconditioning matrix $\mathbf{A}^*$ [S1].
+
+**Data Structures**
+*   $\mathbf{A}^*$: A $3 \times 3$ dense floating-point matrix.
+*   $\mathbf{M}_{\text{sym}}$: A $3 \times 3$ symmetric positive-definite matrix representing the average metric [S1].
+
+**Method Steps**
+1.  Compute the symmetrized average metric $\mathbf{M}_{\text{sym}}$ from the encoder's geometry [S1].
+2.  Calculate the scalar constant $c$ using the determinant of $\mathbf{M}_{\text{sym}}$:
+    $$c = \det(\mathbf{M}_{\text{sym}})^{1/3}$$
+    For the specific tetrahedral subdivision used in the source, $c = 7^{2/3}/3$ [S1].
+3.  Compute the preconditioner $\mathbf{A}^*$ using the closed-form symmetric positive-definite solution:
+    $$\mathbf{A}^* = \sqrt{c} \mathbf{M}_{\text{sym}}^{-1/2}$$
+    This satisfies the isotropy condition $\mathbf{A}^{*\top} \mathbf{M}_{\text{sym}} \mathbf{A}^* = c\mathbf{I}$ and the volume preservation constraint $\det(\mathbf{A}^*) = 1$ [S1].
+4.  Apply $\mathbf{A}^*$ to input coordinates $\mathbf{x}$ before encoding: $\mathbf{x}' = \mathbf{A}^* \mathbf{x}$ [S1].
+
+**Formulas**
+The closed-form solution for the specific case where $\det(\mathbf{M}_{\text{sym}})^{1/3} = 7^{2/3}/3$ is:
+
+$$
+\mathbf{A}^* = \frac{7^{1/3}}{3} \begin{bmatrix} 1 + \frac{2}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} \\ 1 - \frac{1}{\sqrt{7}} & 1 + \frac{2}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} \\ 1 - \frac{1}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} & 1 + \frac{2}{\sqrt{7}} \end{bmatrix}
+$$
+
+Where:
+*   $\mathbf{A}^*$ is the preconditioning matrix [S1].
+*   $\mathbf{I}$ is the identity matrix [S1].
+*   $c$ is the scalar constant ensuring volume preservation [S1].
+
+**Parameters**
+The numerical values for $\mathbf{A}^*$ are:
+$$
+\mathbf{A}^* \approx \begin{bmatrix} 1.11965708 & 0.39663705 & 0.39663705 \\ 0.39663705 & 1.11965708 & 0.39663705 \\ 0.39663705 & 0.39663705 & 1.11965708 \end{bmatrix}
+$$
+[S1]
+
+**Edge Cases and Pitfalls**
+*   **Precision:** The matrix elements are derived from irrational numbers ($\sqrt{7}$). Use double precision for the derivation if implementing dynamically, though the provided float32 values are sufficient for standard rendering pipelines [S1].
+*   **Volume Preservation:** The constraint $\det(\mathbf{A}^*) = 1$ is critical to avoid global rescaling of the scene [S1].
+*   **Metric Symmetrization:** $\mathbf{M}_{\text{sym}}$ must be the symmetrized average metric. Using a non-symmetrized metric may yield a non-optimal isotropic preconditioner [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def get_global_preconditioner():
+    """
+    Returns the closed-form global preconditioner matrix A* for the 
+    specific tetrahedral subdivision metric described in [S1].
+    """
+    sqrt7 = np.sqrt(7.0)
+    factor = (7.0 ** (1.0/3.0)) / 3.0
+    
+    a = 1.0 + 2.0 / sqrt7
+    b = 1.0 - 1.0 / sqrt7
+    
+    A_star = np.array([
+        [a, b, b],
+        [b, a, b],
+        [b, b, a]
+    ]) * factor
+    
+    return A_star
+
+def apply_preconditioner(x, A_star):
+    """
+    Applies the preconditioner to input coordinates x.
+    x: (N, 3) array of input coordinates
+    A_star: (3, 3) preconditioning matrix
+    """
+    return x @ A_star.T
+```
+
+## Subtopics
+
+### Adaptive Preconditioning
+Dynamically computes the preconditioner based on local scene statistics. Choose when the scene geometry varies significantly across the domain, unlike the global method which assumes stationarity [S1].
+
+### No Preconditioning
+Uses the raw encoder metric. Choose for simplicity or when the anisotropy is negligible, accepting higher condition numbers (e.g., $\kappa=700$) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for application, as $\mathbf{A}^*$ is a fixed matrix.
+*   **Memory Complexity:** $O(1)$, storing a single $3 \times 3$ matrix.
+*   **Measured Performance:** Reduces the condition number of the average symmetrized metric $\kappa(\mathbf{M}_{\text{sym}})$ from 700 to 1 [S1]. For individual tetrahedra $S_0$ to $S_5$, the condition number reduces from 1639 to 505 [S1].
+*   **Strengths:** Eliminates directional bias in the average case; volume-preserving; computationally cheap.
+*   **Limitations:** Does not fully isotropize individual local cells (condition number remains 505 for some tetrahedra); assumes a specific canonical grid structure [S1].
+*   **When to use:** When training HashGrid-based neural fields where average isotropy is desired and the grid structure is fixed [S1].
+*   **When not to use:** If the input domain is heavily distorted or non-uniform, a local or adaptive preconditioner may be more appropriate [S1].
+
+## Background
+The Global Preconditioner for Encoder-Induced Metric was introduced in the context of TetraSDF, a method for analytic isosurface extraction with multi-resolution tetrahedral grids [S1]. It addresses the anisotropy inherent in hash grid encodings by analytically deriving a transformation that isotropizes the average metric over the canonical cell [S1].
+
+## Sources
+[S1] TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid, https://arxiv.org/abs/2511.16273v4, fetched 2026-10-26

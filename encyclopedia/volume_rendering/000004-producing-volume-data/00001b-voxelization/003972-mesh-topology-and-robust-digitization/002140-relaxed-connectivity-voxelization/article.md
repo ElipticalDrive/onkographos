@@ -1,0 +1,136 @@
+# Relaxed Connectivity Voxelization
+
+Also called: 26-connected voxelization of 1D input
+
+## Overview
+Relaxed Connectivity Voxelization is a method for voxelizing effectively one-dimensional input (1D, 2D, or 3D primitives) in 3D space that ensures the resulting voxels form a connected path, preventing gaps in flow simulation or fill operations [S1, unofficial]. It produces a 26-connected path, allowing for fewer voxels than 6-connected methods while still maintaining connectivity [S1, unofficial]. Unlike existing algorithms restricted to 1D primitives (e.g., line segments), this method works for input composed of 2D or 3D primitives that are effectively 1D [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A continuous geometric object composed of 1D, 2D, or 3D primitives that is "effectively one-dimensional" (cannot produce separation in 3D space) [S1, unofficial].
+*   **Output:** A set of voxels in a uniform grid that are 26-connected [S1, unofficial].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D grid where each cell represents a voxel [G].
+*   **Intersection Target:** A geometric construct defined within each voxel to determine if the input intersects the voxel. For 26-connected voxelization, the target consists of three quadrilaterals that bisect the voxel along all three axes, subdividing space into cubes centered at voxel corners [S1, unofficial].
+
+**Steps:**
+1.  **Define Intersection Target:** For each voxel $V$, define the intersection target as three quadrilaterals that bisect the voxel along the x, y, and z axes [S1, unofficial].
+2.  **Intersect Input with Target:** For each voxel $V$, check if the input geometry intersects the defined intersection target [S1, unofficial].
+3.  **Mark Voxels:** If the input intersects the target in voxel $V$, mark $V$ as part of the voxelization [S1, unofficial].
+4.  **Verify Connectivity (Implicit):** The connectivity is guaranteed by the geometry of the target. If the input intersects the target in voxel $V$, parts of the intersection targets of the 26-neighbors of $V$ form a closed box with side length twice that of a single voxel [S1, unofficial].
+5.  **Ensure Path Continuity:** Any continuous path from $V$ to voxels outside immediate neighbors must intersect this enclosing box, and therefore intersect the target in $N_{26}(V)$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def relaxed_connectivity_voxelization(input_segments, grid_bounds, voxel_size):
+    """
+    Voxelizes effectively 1D input with 26-connectivity.
+    
+    Args:
+        input_segments: List of line segments, each defined as ((x0,y0,z0), (x1,y1,z1)).
+        grid_bounds: Bounding box of the grid (min_x, min_y, min_z, max_x, max_y, max_z).
+        voxel_size: Size of each voxel (assumed cubic).
+        
+    Returns:
+        A set of voxel coordinates (x, y, z) that are 26-connected.
+    """
+    # Calculate grid dimensions
+    grid_size = [
+        int((grid_bounds[3] - grid_bounds[0]) / voxel_size),
+        int((grid_bounds[4] - grid_bounds[1]) / voxel_size),
+        int((grid_bounds[5] - grid_bounds[2]) / voxel_size)
+    ]
+    
+    voxelized_voxels = set()
+    
+    # Iterate over all voxels in the grid
+    for x in range(grid_size[0]):
+        for y in range(grid_size[1]):
+            for z in range(grid_size[2]):
+                # Define the voxel's intersection target
+                # The target consists of three quadrilaterals bisecting the voxel
+                # along x, y, and z axes.
+                # Center of the voxel
+                cx = grid_bounds[0] + (x + 0.5) * voxel_size
+                cy = grid_bounds[1] + (y + 0.5) * voxel_size
+                cz = grid_bounds[2] + (z + 0.5) * voxel_size
+                
+                # Define the three bisecting planes
+                planes = [
+                    Plane((1, 0, 0), (cx, cy, cz)),
+                    Plane((0, 1, 0), (cx, cy, cz)),
+                    Plane((0, 0, 1), (cx, cy, cz))
+                ]
+                
+                # Voxel bounds
+                vmin = (x * voxel_size, y * voxel_size, z * voxel_size)
+                vmax = ((x + 1) * voxel_size, (y + 1) * voxel_size, (z + 1) * voxel_size)
+                
+                intersects = False
+                for plane in planes:
+                    if intersects_plane_segment(plane, vmin, vmax):
+                        intersects = True
+                        break
+                        
+                if intersects:
+                    voxelized_voxels.add((x, y, z))
+                    
+    return voxelized_voxels
+
+def intersects_plane_segment(plane, vmin, vmax):
+    """
+    Standard geometric intersection test for a line segment against a plane [G].
+    Assumes input_segments is accessible or passed as an argument.
+    """
+    # For a line segment defined by endpoints p0, p1:
+    p0, p1 = input_segments # Simplified for demonstration; in practice, iterate over segments
+    d0 = plane.distance(p0)
+    d1 = plane.distance(p1)
+    if (d0 > 0 and d1 < 0) or (d0 < 0 and d1 > 0):
+        t = d0 / (d0 - d1)
+        ix = p0[0] + t * (p1[0] - p0[0])
+        iy = p0[1] + t * (p1[1] - p0[1])
+        iz = p0[2] + t * (p1[2] - p0[2])
+        if vmin[0] <= ix <= vmax[0] and vmin[1] <= iy <= vmax[1] and vmin[2] <= iz <= vmax[2]:
+            return True
+    return False
+
+class Plane:
+    def __init__(self, normal, point):
+        self.normal = normal
+        self.point = point
+        # Plane equation: normal . (p - point) = 0
+        # d = -normal . point
+        self.d = -sum(n * p for n, p in zip(normal, point))
+    
+    def distance(self, point):
+        return sum(n * p for n, p in zip(self.normal, point)) + self.d
+```
+
+**Parameters:**
+*   **Voxel Size:** Determines the resolution of the output grid. Not given in the sources. [G]
+*   **Grid Bounds:** Defines the spatial extent of the voxelization. Not given in the sources. [G]
+
+**Edge Cases and Pitfalls:**
+*   The resulting voxelization may contain almost as many voxels as a cover produced by intersecting the input against the entire 3D voxel, making it potentially inefficient [S1, unofficial].
+*   The result is not thin in the same sense as the 2D crosshairs target; stepping along a curve in the dominant direction may produce fewer voxels [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
+*   **Measured Performance:** Not given in the sources. [G]
+*   **Strengths:** Works for input composed of 2D or 3D primitives that are effectively 1D, unlike existing algorithms restricted to 1D primitives [S1, unofficial]. Produces a 26-connected path, allowing for fewer voxels than 6-connected methods [S1, unofficial].
+*   **Limitations:** The resulting voxelization may contain almost as many voxels as a cover produced by intersecting the input against the entire 3D voxel, making it potentially inefficient [S1, unofficial].
+*   **When to Use:** When 26-connectivity is sufficient and the input is effectively 1D but composed of 2D or 3D primitives [S1, unofficial].
+*   **When Not to Use:** When 6-connectivity is strictly required for flow simulation, or when a thinner representation is needed (stepping along a curve in the dominant direction may yield fewer voxels) [S1, unofficial].
+
+## Background
+*   **Origin:** The method is described in "A Topological Approach to Voxelization" by Laine et al. [S1, unofficial].
+*   **History and Development:** The method is part of a broader topological approach to voxelization, which includes 6-connected voxelization and 26-separating voxelization [S1, unofficial].
+*   **Usage:** Used in applications requiring connected voxelizations of effectively 1D structures, such as flow simulation or fill operations [S1, unofficial].
+
+## Sources
+[S1] A Topological Approach to Voxelization, https://research.nvidia.com/sites/default/files/pubs/2013-06_A-Topological-Approach/laine2013egsr_paper.pdf, fetched 2026-10-29 (unofficial)

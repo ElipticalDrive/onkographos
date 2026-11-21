@@ -1,0 +1,188 @@
+--- v004.md
++++ v005.md
+@@ -4,24 +4,25 @@
+ 
+ ## Overview
+-Global quantization is a compression strategy for neural volume representations that maintains a single shared parameter table across multiple independent small Multi-Layer Perceptrons (MLPs) within a single spatial scale, rather than quantizing each network individually [S1]. It solves the redundancy problem where distinct volumetric blocks contain similar content, allowing different MLPs to map to the same set of floating-point parameters [S1]. Unlike local quantization which treats each MLP as an isolated entity, global quantization leverages cross-MLP similarity to achieve higher compression ratios with minimal performance degradation [S1].
++Global Quantization is a weight compression strategy for neural volume representations that maintains a single shared parameter table across multiple independent small Multi-Layer Perceptrons (MLPs) within a single spatial scale, rather than quantizing each network individually [S1]. It solves the problem of redundant parameter storage in block-based neural volume encodings by leveraging the observation that different spatial blocks often contain similar content that can be represented by the same set of floating-point values [S1]. Unlike local quantization methods that assign unique codebooks to each MLP, this approach groups weights globally to maximize parameter sharing and compression ratio [S1].
+ 
+ ## How it works
+-**Inputs:** A set of $N$ independent small MLPs encoding disjoint volumetric blocks at a specific scale; a target weight quantization precision $\beta$ (in bits).
+-**Outputs:** A single global shared parameter table (codebook) of size $2^\beta$ floating-point values; $\beta$-bit indices for each weight and bias in all MLPs.
++**Inputs and Outputs**
++- **Input:** A set of $N$ independent MLPs $\{M_1, ..., M_N\}$ representing disjoint volumetric blocks at a specific scale, where each MLP contains unpruned weights and biases.
++- **Output:** A single global shared parameter table (codebook) and a set of $\beta$-bit indices mapping each MLP's weights and biases to entries in this table.
+ 
+-**Data Structures:**
+-1.  **Global Shared Parameter Table:** A 1D array of $2^\beta$ floating-point numbers. This table stores the representative values for all quantized weights and biases across all MLPs in the scale.
+-2.  **Index Maps:** For each MLP $i$ and each layer $l$, a mapping from the original weight/bias positions to indices in the global table. Since the table is shared, the index $q \in [0, 2^\beta - 1]$ refers to the same physical value for all MLPs.
++**Data Structures**
++- **Global Shared Parameter Table:** A list of floating-point values. The size of this table is determined by the quantization precision $\beta$. Specifically, for a layer with $2^\beta$ clusters, the table contains $2^\beta$ floating-point numbers.
++- **Index Map:** For each MLP and each layer, a tensor of $\beta$-bit integers. Each integer is an index into the Global Shared Parameter Table.
+ 
+-**Parameters:**
+-*   $\beta$: The number of bits used for local quantization precision. Typical value: 7 [S1]. This determines the size of the shared codebook as $2^\beta$ [S1].
++**Parameters**
++- $\beta$: The number of bits used for local quantization precision. This determines the number of clusters $K = 2^\beta$. Typical value: 7 [S1].
+ 
+-**Steps:**
+-1.  **Global Clustering:** For each layer across all MLPs in the scale, collect all unpruned weights (and biases, if included). Apply standard k-means clustering to group these weights into $2^\beta$ clusters [S1]. The centroid of each cluster becomes a value in the global shared parameter table [S1].
+-2.  **Index Assignment:** Replace every weight and bias in every MLP with a $\beta$-bit integer index pointing to the corresponding centroid in the global shared parameter table [S1].
+-3.  **Fine-Tuning:** Fix the $\beta$-bit indices (the assignment of weights to clusters) and fine-tune only the values in the global shared parameter table via backpropagation to minimize reconstruction error [S1]. This step mitigates performance degradation caused by quantization [S1].
+-4.  **Entropy Encoding (Optional Post-Processing):** Apply Huffman coding to the resulting model file (specifically the indices and the shared table) to achieve additional lossless compression, empirically reducing model size by ~10% [S1].
++**Steps**
++1. **Global Clustering:** For a specific layer across all MLPs in the scale, collect all unpruned weights (and biases, if included). Apply standard k-means clustering with $K = 2^\beta$ clusters to group these weights into $K$ clusters [S1].
++2. **Parameter Assignment:** Assign each weight (and bias) to the centroid of its nearest cluster. The centroids form the Global Shared Parameter Table for that layer [S1].
++3. **Index Mapping:** Replace the original floating-point weights and biases in each MLP with $\beta$-bit indices pointing to the corresponding centroid in the Global Shared Parameter Table [S1].
++4. **Fine-tuning:** Fix the parameter indices (do not change cluster assignments). Fine-tune the values in the Global Shared Parameter Table using backpropagation to minimize reconstruction error (e.g., PSNR loss) while maintaining the fixed index structure [S1].
+ 
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+ def global_quantization(mlps, beta):
+@@ -30,90 +31,73 @@
+     beta: Quantization precision in bits.
+     """
+-    num_clusters = 1 << beta  # 2^beta
+-    
+-    # Step 1: Collect all weights and biases from all MLPs in the scale
+-    all_params = []
+-    param_metadata = [] # Store (mlp_id, layer_id, param_type, original_value)
+-    
+-    for mlp_id, mlp in enumerate(mlps):
+-        for layer_id, layer in enumerate(mlp.layers):
+-            # Flatten weights and biases
+-            weights = layer.weights.flatten()
+-            biases = layer.biases.flatten()
++    num_clusters = 2 ** beta
++    # Dictionary to store global shared parameters for each layer index across all MLPs
++    # Structure: { layer_idx: { 'weights': [float] * num_clusters, 'biases': [float] * num_clusters } }
++    global_table = {}
++
++    # Step 1: Collect all weights and biases for a specific layer across all MLPs
++    # Assuming all MLPs have the same architecture for simplicity in this global scope
++    for layer_idx in range(num_layers):
++        all_weights = []
++        all_biases = []
++        
++        for mlp in mlps:
++            layer = mlp.layers[layer_idx]
++            # Flatten weights and biases for clustering
++            all_weights.extend(layer.weights.flatten())
++            all_biases.extend(layer.biases.flatten())
+             
+-            # Combine for clustering
+-            current_params = np.concatenate([weights, biases])
++        # Step 2: Apply k-means clustering to weights
++        # centroids_w is a list of num_clusters centroids
++        centroids_w = kmeans(all_weights, num_clusters)
++        
++        # Step 2: Apply k-means clustering to biases
++        centroids_b = kmeans(all_biases, num_clusters)
++        
++        # Store in global table
++        global_table[layer_idx] = {
++            'weights': centroids_w,
++            'biases': centroids_b
++        }
++
++    # Step 3: Map weights and biases to indices
++    for mlp in mlps:
++        for layer_idx in range(num_layers):
++            layer = mlp.layers[layer_idx]
+             
+-            # Store metadata to reconstruct later
+-            for val in current_params:
+-                all_params.append(val)
+-                param_metadata.append((mlp_id, layer_id, 'weight' if val in weights else 'bias'))
+-                
+-    all_params = np.array(all_params)
+-    
+-    # Step 2: K-means clustering to find global centroids
+-    # k-means returns cluster centers (centroids) and labels (indices)
+-    centroids, labels = kmeans(all_params, n_clusters=num_clusters)
+-    
+-    # Step 3: Create the global shared parameter table
+-    global_table = centroids.astype(float)
+-    
+-    # Step 4: Assign indices to each MLP's layers
+-    # We need to map the flat list of labels back to the structure of each MLP
+-    label_idx = 0
+-    for mlp_id, mlp in enumerate(mlps):
+-        for layer_id, layer in enumerate(mlp.layers):
+-            num_weights = layer.weights.size
+-            num_biases = layer.biases.size
++            # Find indices for weights
++            indices_w = find_cluster_indices(layer.weights.flatten(), global_table[layer_idx]['weights'])
++            # Reshape indices to match original weight shape
++            layer.weight_indices = indices_w.reshape(layer.weights.shape)
+             
+-            # Extract labels for this layer's weights and biases
+-            layer_labels = labels[label_idx : label_idx + num_weights + num_biases]
+-            label_idx += num_weights + num_biases
+-            
+-            # Reshape and assign
+-            layer.quantized_weights = layer_labels[:num_weights].reshape(layer.weights.shape)
+-            layer.quantized_biases = layer_labels[num_weights:].reshape(layer.biases.shape)
+-            
+-            # Store reference to global table
+-            layer.global_table_ref = global_table
++            # Find indices for biases
++            indices_b = find_cluster_indices(layer.biases.flatten(), global_table[layer_idx]['biases'])
++            layer.bias_indices = indices_b.reshape(layer.biases.shape)
+ 
+-    # Step 5: Fine-tune global table values
+-    # Fix indices, optimize global_table values via backprop
+-    # This requires a differentiable rendering or reconstruction loss
+-    # L = Loss(Reconstruct(mlps, global_table, indices), GroundTruth)
+-    # Optimize global_table using gradient descent
+-    
+-    optimizer = Adam(global_table.parameters(), lr=1e-4)
+-    for epoch in range(num_fine_tuning_epochs):
+-        optimizer.zero_grad()
++    # Step 4: Fine-tune global parameters
++    # Fix indices, optimize global_table values
++    optimizer = Optimizer(global_table.values())
++    for epoch in range(num_epochs):
+         loss = compute_reconstruction_loss(mlps, global_table)
+         loss.backward()
+         optimizer.step()
+         
+-    return global_table, mlps
++    return global_table
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** The choice of $\beta$ is critical. Too low a $\beta$ leads to high quantization error; too high reduces compression benefits. $\beta=7$ is a typical baseline for small MLPs [S1].
+-*   **Boundary Artifacts:** While global quantization compresses parameters, it does not inherently solve boundary artifacts between disjoint volumetric blocks. This requires separate mitigation strategies (e.g., boundary artifact mitigation techniques) [S1].
+-*   **Clustering Stability:** K-means initialization can affect results. Standard k-means++ initialization is recommended to ensure stable centroids [S1].
+-
+-## Subtopics
+-
+-### Local Quantization
+-Quantizes each MLP independently. Simpler to implement but less efficient for volumes with redundant content across blocks. Choose when blocks are highly distinct. [Link](907-vector-quantization.md)
+-
+-### Vector Quantization
+-Groups multi-dimensional vectors (e.g., entire weight vectors) into clusters. Global quantization typically operates on scalar weights/biases individually but shares the codebook globally. [Link](5726-scalar-quantization.md)
++**Edge Cases and Pitfalls**
++- **Precision:** The choice of $\beta$ directly impacts the codebook size and reconstruction accuracy. A small $\beta$ may lead to high quantization error if the weight distribution is complex [S1].
++- **Memory:** While global quantization reduces storage for indices, the global table itself must be stored. However, since it is shared, the total size is significantly smaller than storing separate codebooks for each MLP [S1].
++- **Initialization:** K-means initialization can affect convergence. Standard k-means++ initialization is recommended to avoid poor local minima [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Clustering is $O(N \cdot D \cdot I)$ where $N$ is total number of weights/biases, $D$ is dimensionality (1 for scalars), and $I$ is k-means iterations. Fine-tuning adds standard backpropagation cost per MLP.
+-*   **Memory Complexity:** The shared parameter table size is $2^\beta \times \text{bytes\_per\_float}$. The index storage is $\beta$ bits per weight/bias. This is significantly smaller than storing full precision weights for each MLP.
+-*   **Performance:** ECNR (with global quantization) achieves a model size of 0.49 MB vs 0.93 MB for local quantization (ECNR*) on the asteroids dataset at similar PSNR (40.59 vs 40.24 dB) [S1]. On supernova-1, it achieves 48.55 dB PSNR vs 44.86 dB for local quantization at the same model size (1.5 MB) [S1].
+-*   **Strengths:** High compression ratio for volumes with spatially similar features; effective for multiple small MLPs.
+-*   **Limitations:** Requires fine-tuning which adds training time; less effective if volumetric blocks are highly heterogeneous.
++- **Time Complexity:** The clustering step is $O(N \cdot L \cdot W \cdot \beta)$, where $N$ is the number of MLPs, $L$ is the number of layers, and $W$ is the number of weights per layer. Fine-tuning adds the cost of backpropagation over the shared parameters.
++- **Memory Complexity:** The storage is dominated by the global shared parameter tables ($2^\beta$ floats per layer) and the index maps ($\beta$ bits per weight/bias). This is significantly more compact than local quantization, which requires $N \cdot 2^\beta$ floats [S1].
++- **Performance:** ECNR with global quantization achieves better reconstruction accuracy than standard pruning and local quantization (ECNR*) under the same model size. For example, on the asteroids dataset, ECNR achieves 40.59 dB PSNR with 0.49 MB, while ECNR* achieves 40.24 dB PSNR with 0.93 MB [S1].
++- **Strengths:** High compression ratio, effective for volumes with similar content across blocks.
++- **Limitations:** Requires all MLPs to be quantized together; not suitable for highly heterogeneous blocks where shared parameters would introduce significant error.
+ 
+ ## Background
+-Global quantization was introduced in the context of Efficient Compressive Neural Representation (ECNR) for time-varying volumetric datasets [S1]. Prior quantization approaches focused on single neural networks [S1]. ECNR extended this by applying quantization across multiple independent small MLPs, recognizing that different blocks often contain similar content [S1]. The method builds on standard k-means clustering and entropy encoding (Huffman coding) [S1].
++Global Quantization was introduced in the context of ECNR (Efficient Compressive Neural Representation) for time-varying volumetric datasets [S1]. It builds on the observation that prior quantization approaches focused on single neural networks, whereas neural volume representations often use multiple independent small MLPs [S1]. By applying quantization globally across these MLPs, the method leverages the redundancy in volumetric data to achieve higher compression ratios without sacrificing reconstruction fidelity [S1].
+ 
+ ## Sources

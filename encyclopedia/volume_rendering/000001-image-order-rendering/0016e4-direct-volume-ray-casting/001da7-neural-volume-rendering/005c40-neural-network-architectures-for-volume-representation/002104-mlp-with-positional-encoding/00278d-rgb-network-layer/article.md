@@ -1,0 +1,124 @@
+# RGB Network Layer
+
+Also called: Compositing RGB Rendering, Unified RGB prediction network
+
+## Overview
+The RGB Network Layer is the final prediction stage in neural volume rendering pipelines that maps concatenated geometric and semantic features to final pixel colors [S1]. It solves the problem of compositing raw neural outputs into physically meaningful RGB values by applying a sigmoid activation to ensure values remain within the valid $[0, 1]$ range [S1][S3, unofficial]. It differs from its sibling [Sigma Network Layer](6256-sigma-network-layer.md), which focuses specifically on density/opacity prediction, by handling the direct semantic unpacking of the MLP's final layer for color [S1][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The layer takes a concatenated feature vector as input and produces an RGB color vector as output.
+*   **Input Vector:** The specific composition depends on the implementation. In the unified approach [S1], the input dimension is $R^{3+3+n_p+256}$, consisting of:
+    *   Canonical point coordinates (3D)
+    *   Normals calculated from SDFs (3D)
+    *   Posed skeleton joints ($n_p$)
+    *   Geometric features (256D)
+*   **Output Vector:** RGB color values in $R^3$ [S1].
+
+**Data Structures:**
+The implementation relies on the weight matrices and bias vectors of the final MLP layers.
+*   **Weight Tensor:** Shape $[n_{subnetworks}, d_{out}, d_{in}]$ [S3, unofficial].
+*   **Bias Vector:** Shape $[n_{subnetworks}, d_{out}]$ [S3, unofficial].
+*   **Parameters:** `self.rgb_depth` (network depth), `self.rgb_n_input` (input dimension), `self.rgb_n_output` (output dimension), `self.rgb_layer1_base`, `self.rgb_layer2_base` [S2, unofficial].
+
+**Steps:**
+1.  **Feature Concatenation:** Concatenate the canonical point, normal, posed skeleton, and geometric features into a single input vector $x$ [S1].
+2.  **Reparameterization (Optional/Depth Subdivision):** If the network supports depth subdivision or progressive connection, reparameterize the weight matrices to maintain unchanged input ray colors after subdivision [S3, unofficial].
+    *   Rearrange the original weight tensor of shape $[n_{subnetworks}, d_{out}, d_{in}]$ into $[n_{subnetworks}, d_{out}, d_{in}/2, 2]$ by splitting the input dimension $d_{in}$ into two channels $c=2$ [S3, unofficial].
+    *   Concatenate the rearranged weight along the channel dimension (dim=3) with itself, then multiply by 0.5 to average the duplicated weights [S3, unofficial].
+    *   Rearrange the resulting tensor back to the original input dimension structure $[n_{subnetworks}, d_{out}, d_{in}]$ [S3, unofficial].
+    *   Return the modified weight and the original bias unchanged [S3, unofficial].
+3.  **Hidden Layer Computation:**
+    *   Compute the first hidden layer $hid_1$ via the dot product of the input vector and the weights [S2, unofficial].
+    *   If `self.rgb_depth == 2`:
+        *   Compute the second hidden layer $hid_2$ using ReLU on $hid_1$ [S2, unofficial].
+        *   Compute the output buffer $hid_1$ (reused) using ReLU on $hid_2$ [S2, unofficial].
+    *   If `self.rgb_depth != 2`:
+        *   Compute the output directly from $hid_1$ into $hid_2$ [S2, unofficial].
+4.  **Activation:** Apply sigmoid activation to the final output buffer to produce the RGB values:
+    $$
+    C = \frac{1}{1 + e^{-hid}}
+    $$
+    Specifically:
+    $$
+    self.out\_3[self.temp\_hit[sn], i] = data\_type\left(\frac{1}{1 + e^{-hid1[i, tid]}}\right) \quad \text{if depth is 2}
+    $$
+    $$
+    self.out\_3[self.temp\_hit[sn], i] = data\_type\left(\frac{1}{1 + e^{-hid2[i, tid]}}\right) \quad \text{if depth is not 2}
+    $$
+    [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rgb_network_layer_forward(input_vector, weights, biases, rgb_depth):
+    """
+    input_vector: Tensor of shape [batch, d_in]
+    weights: List of Tensors [d_out, d_in] for each layer
+    biases: List of Tensors [d_out] for each layer
+    rgb_depth: Integer, number of layers in the RGB network
+    """
+    x = input_vector
+    
+    # Layer 1
+    hid1 = torch.matmul(x, weights[0].T) + biases[0]
+    
+    if rgb_depth == 2:
+        # Layer 2
+        hid2 = torch.relu(hid1)
+        hid2 = torch.matmul(hid2, weights[1].T) + biases[1]
+        # Output
+        rgb = torch.sigmoid(hid2)
+    else:
+        # Direct output from hid1 if depth is not 2 (implies single layer or different structure)
+        # Note: Source [S2, unofficial] implies direct computation into hid2 buffer then sigmoid
+        rgb = torch.sigmoid(hid1)
+        
+    return rgb
+
+def reparameterize_weights(org_weight, org_bias):
+    """
+    Reparameterizes weights for depth subdivision to keep ray colors unchanged.
+    org_weight: Tensor [n_subnetworks, d_out, d_in]
+    org_bias: Tensor [n_subnetworks, d_out]
+    """
+    bias = org_bias
+    # Rearrange: [n, o, d_in] -> [n, o, d_in/2, 2]
+    weight = org_weight.reshape(org_weight.shape[0], org_weight.shape[1], org_weight.shape[2] // 2, 2)
+    # Concatenate with itself along dim 3 and average
+    weight = torch.cat([weight, weight], dim=3) * 0.5
+    # Rearrange back: [n, o, d_in/2, 2] -> [n, o, d_in]
+    weight = weight.reshape(org_weight.shape[0], org_weight.shape[1], org_weight.shape[2])
+    return weight, bias
+```
+
+**Edge Cases and Pitfalls:**
+*   **Depth Subdivision Consistency:** The reparameterization technique ensures that hidden features remain unaffected after depth subdivision, validating that the color of each input ray is kept unchanged [S3, unofficial]. Failure to apply this reparameterization when subdividing depth planes will alter the rendered colors [S3, unofficial].
+*   **Activation Range:** The sigmoid activation ensures RGB values are bounded within $[0, 1]$, which is critical for correct compositing in volume rendering [S1][S2, unofficial].
+
+## Subtopics
+
+### [Field Output Prediction](4830-field-output-prediction.md)
+Field Output Prediction is the final stage of the neural volume rendering pipeline that transforms raw neural network logits into physically meaningful or semantically useful values for a specific reconstruction target. It solves the problem of mapping unconstrained model outputs to the required data format, such as plasma parameters or standard rendering attributes. It differs from its sibling [Sigma Network Layer](6256-sigma-network-layer.md), which focuses specifically on density/opacity, and [CNN Post-Processing Network](7179-cnn-post-processing-network.md), which applies spatial filters, by handling the direct semantic unpacking of the MLP's final layer.
+
+### [Sigma Network Layer](6256-sigma-network-layer.md)
+The Sigma Network Layer is a reparameterization technique used in neural volume rendering to subdivide the output channels of color and density samples by modifying the last layer of each subnetwork, ensuring that the final rendered colors remain unaffected by the subdivision. It builds on the [RGB Network Layer](4051-rgb-network-layer.md) by extending the reparameterization strategy to the density prediction branch, allowing for increased model capacity or parallelism without altering the underlying radiance field representation.
+
+### [CNN Post-Processing Network](7179-cnn-post-processing-network.md)
+A post-processing convolutional neural network applied to MLP-decoded results to reduce boundary artifacts. It sets itself apart from its siblings by focusing on spatial consistency of the final image rather than field prediction or sigma estimation, using neighboring regions to improve texture detail without causing multiview inconsistency.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of input features and the depth of the network. The reparameterization step adds a constant overhead during weight initialization or subdivision but does not affect inference time complexity.
+*   **Memory Complexity:** Proportional to the number of parameters in the final MLP layers. The reparameterization does not increase memory usage as it modifies existing weights in place or via equivalent reshaping.
+*   **Strengths:** Provides a unified framework for combining diverse geometric features (SDF normals, skeletons) into a single color prediction [S1]. The reparameterization technique allows for progressive refinement of depth samples without visual artifacts [S3, unofficial].
+*   **Limitations:** The unified input dimension can be large ($R^{3+3+n_p+256}$), requiring careful management of feature concatenation [S1]. The sigmoid activation limits the dynamic range of the output compared to linear layers, though this is standard for RGB prediction.
+*   **When to use:** Use when the rendering pipeline requires a single network to handle color prediction conditioned on complex geometric and semantic features, especially in dynamic scene reconstruction [S1]. Use the reparameterization variant when progressive depth subdivision is employed to improve rendering quality [S3, unofficial].
+
+## Background
+The RGB Network Layer originates from neural volume rendering techniques that use MLPs to predict radiance fields. The unified RGB prediction network approach was introduced in TFS-NeRF for template-free NeRF semantic 3D reconstruction of dynamic scenes, where it composites canonical points, normals, geometric features, and posed skeletons [S1]. The reparameterization technique for depth subdivision was introduced in Progressively-connected Light Field Network for efficient view synthesis, ensuring that subdivision of depth planes does not alter the rendered colors [S3, unofficial]. The Taichi-based implementation details provide a practical guide for efficient GPU execution of these layers [S2, unofficial].
+
+## Sources
+[S1] TFS-NeRF: Template-Free NeRF for Semantic 3D Reconstruction of Dynamic Scene, https://arxiv.org/abs/2409.17459v4, fetched 2026-10-26
+[S2] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
+[S3] Progressively-connected Light Field Network for Efficient View Synthesis, https://doi.org/10.48550/arxiv.2207.04465, fetched 2026-10-27 (unofficial)

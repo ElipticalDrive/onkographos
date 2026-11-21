@@ -1,0 +1,169 @@
+--- v004.md
++++ v005.md
+@@ -1,108 +1,87 @@
+ # SWAG
+-
+-Also called: Unsupervised Transient Gaussian Splatting, Unsupervised Transient Gaussians
++Also called: SWAG: Unsupervised Transient Gaussian Splatting, Unsupervised Transient Gaussians
+ 
+ ## Overview
+-SWAG extends 3D Gaussian Splatting by conditioning Gaussians on learned appearance embeddings and training unsupervised transient Gaussians to ignore occluders, yielding state-of-the-art results on diverse photo scenes [S1][S2, unofficial]. It distinguishes itself from sibling methods like Wild-GS by explicitly training transient Gaussians to ignore occluders rather than relying solely on depth regularization or visibility maps to mitigate transient effects [S1][S2, unofficial].
++SWAG extends 3D Gaussian Splatting to handle unstructured, casual photo collections containing transient occluders (e.g., pedestrians, vehicles) without requiring explicit segmentation masks or temporal synchronization [S1][S2, unofficial]. It distinguishes itself from supervised transient modeling methods by training "unsupervised transient Gaussians" that learn to ignore occluders, conditioned on learned appearance embeddings, thereby achieving state-of-the-art reconstruction quality on diverse photo scenes [S1][S2, unofficial].
+ 
+ ## How it works
++SWAG builds on the static 3D Gaussian Splatting pipeline [Parent](9265-dynamic-and-temporal-modeling.md) by introducing a dual-Gaussian representation and appearance-conditioned training.
++
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of unposed or loosely posed images containing transient objects (e.g., pedestrians, vehicles).
+-*   **Outputs:** A set of static Gaussians representing the persistent scene geometry and appearance, and a set of transient Gaussians that capture occluders but are excluded from the final rendering.
++*   **Input:** A set of unstructured images $\{I_i\}$ captured from varying viewpoints, potentially containing transient objects. No temporal order or masks are required.
++*   **Output:** A set of 3D Gaussians representing the static scene geometry and appearance, robust to transient distractors.
+ 
+ **Data Structures:**
+-*   **Static Gaussians:** Standard 3DGS attributes (position $\mathbf{x}$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$).
+-*   **Transient Gaussians:** Same attributes as static Gaussians but marked for exclusion during rendering.
+-*   **Appearance Embeddings:** A learned embedding vector $\mathbf{e}$ associated with each Gaussian, used to condition appearance.
++The method maintains two sets of Gaussians for each spatial location or cluster:
++1.  **Static Gaussians:** Represent the permanent scene structure. Attributes include position $\mathbf{c}$, rotation $\mathbf{q}$, scale $\mathbf{s}$, opacity $\alpha$, and spherical harmonic coefficients $\mathbf{c}_{sh}$ for color.
++2.  **Transient Gaussians:** A parallel set of Gaussians initialized to capture transient artifacts. These are trained to have low opacity or are explicitly suppressed during the final rendering of the static scene.
+ 
+-**Steps:**
+-1.  **Initialization:** Initialize a set of Gaussians from the input images using standard 3DGS initialization techniques.
+-2.  **Appearance Conditioning:** Condition the appearance of each Gaussian on its learned appearance embedding $\mathbf{e}$. This allows the Gaussian to adapt its color based on the viewing context or specific appearance features.
+-3.  **Transient Gaussian Training:** Train a subset of Gaussians to represent transient objects. These Gaussians are optimized to fit the pixel colors of transient objects in the input images.
+-4.  **Occluder Ignorance:** During rendering, transient Gaussians are explicitly ignored. This is achieved by marking them as transient and excluding them from the alpha compositing step. The static Gaussians are rendered to produce the final image, effectively removing transient occluders.
+-5.  **Optimization:** Optimize the positions, covariances, opacities, and appearance embeddings of both static and transient Gaussians using a loss function that includes photometric loss on the rendered images. The transient Gaussians are allowed to have high opacity to fit the transient objects, but their contribution is masked out in the final image.
+-
+-**Formulas:**
+-*   **Rendering:** The final color $C$ is computed by compositing only the static Gaussians:
+-    $$ C = \sum_{i \in \text{static}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $c_i$ is the color of the $i$-th static Gaussian, $\alpha_i$ is its opacity, and the product term represents the transparency of previous Gaussians. Transient Gaussians are excluded from this sum.
+-
+-**Parameters:**
+-*   **Learning Rate:** Standard 3DGS learning rates for positions, covariances, and opacities.
+-*   **Appearance Embedding Dimension:** Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Standard floating-point precision is assumed.
+-*   **Boundaries:** Transient objects that are partially occluded by static geometry may be difficult to separate.
+-*   **Degenerate Input:** If the input images do not contain transient objects, the transient Gaussians may not converge or may interfere with the static scene.
++**Method Steps:**
++1.  **Initialization:** Initialize a set of 3D Gaussians from the input images using standard SfM (Structure from Motion) points or random initialization, similar to standard 3DGS.
++2.  **Appearance Embedding:** Learn a set of appearance embeddings $\mathbf{e}_i$ for each input image $I_i$. These embeddings capture view-dependent and lighting variations.
++3.  **Conditioning:** Condition the Gaussian attributes (specifically opacity and color) on the learned appearance embeddings. The color $\mathbf{c}$ of a Gaussian is modulated by the embedding $\mathbf{e}_i$ of the camera view:
++    $$ \mathbf{c}_{rendered} = \text{Decode}(\mathbf{c}_{sh}, \mathbf{e}_i) $$
++    [G] The decoding function is typically a small MLP or linear projection.
++4.  **Transient Gaussian Training:** Train the "unsupervised transient Gaussians" alongside the static ones. The loss function encourages these Gaussians to explain pixel residuals that cannot be explained by the static scene and appearance embeddings.
++5.  **Occluder Ignorance:** During optimization, the transient Gaussians absorb the photometric error caused by occluders. The static Gaussians are regularized to remain consistent across views, effectively ignoring the transient components.
++6.  **Rendering:** To render the static scene, only the static Gaussians are rasterized. The transient Gaussians are discarded or rendered with zero opacity.
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for SWAG rendering and training
+-def render_swag(static_gaussians, transient_gaussians, camera):
+-    """
+-    Renders the scene using only static Gaussians.
+-    """
+-    # Sort Gaussians by depth relative to camera
+-    sorted_static = sort_by_depth(static_gaussians, camera)
++def train_swag(images, cameras):
++    # Initialize static and transient Gaussians
++    static_gaussians = initialize_gaussians(images)
++    transient_gaussians = initialize_gaussians(images)
+     
+-    color = (0.0, 0.0, 0.0)
+-    alpha = 0.0
++    # Learn appearance embeddings for each image
++    appearance_embeddings = learn_embeddings(images)
+     
+-    for gaussian in sorted_static:
+-        # Project Gaussian to 2D
+-        screen_pos, screen_cov = project_gaussian(gaussian, camera)
++    for iteration in range(num_iterations):
++        # Sample a random image and camera
++        img_idx = random_sample(images)
++        image = images[img_idx]
++        camera = cameras[img_idx]
++        embedding = appearance_embeddings[img_idx]
+         
+-        # Compute contribution
+-        c, a = compute_contribution(gaussian, screen_pos, screen_cov)
++        # Render static scene
++        static_render = render_gaussians(static_gaussians, camera)
+         
+-        # Composite
+-        color += c * a * (1 - alpha)
+-        alpha += a * (1 - alpha)
++        # Render transient scene (optional, for loss calculation)
++        transient_render = render_gaussians(transient_gaussians, camera)
+         
+-        if alpha > 0.99:
+-            break
+-            
+-    return color
+-
+-def train_swag(static_gaussians, transient_gaussians, images, camera_poses):
+-    """
+-    Optimizes static and transient Gaussians.
+-    """
+-    for image, camera_pose in zip(images, camera_poses):
+-        # Render static scene
+-        rendered_color = render_swag(static_gaussians, transient_gaussians, camera_pose)
++        # Compute photometric loss between rendered static scene and image
++        # The transient Gaussians are trained to minimize the residual
++        static_loss = l1_loss(static_render, image)
+         
+-        # Compute photometric loss
+-        loss = photometric_loss(rendered_color, image)
++        # Transient loss encourages transient Gaussians to explain residuals
++        residual = image - static_render
++        transient_loss = l1_loss(transient_render, residual)
+         
+-        # Optimize static Gaussians
+-        optimize_gaussians(static_gaussians, loss)
++        # Total loss
++        loss = static_loss + lambda_transient * transient_loss
+         
+-        # Optimize transient Gaussians to fit transient parts of the image
+-        # This step is implicit in the training process where transient Gaussians
+-        # are allowed to absorb the error from transient objects.
+-        optimize_transient_gaussians(transient_gaussians, image, camera_pose)
++        # Backpropagate and update Gaussians and embeddings
++        update_parameters(static_gaussians, transient_gaussians, appearance_embeddings, loss)
++        
++    # Final static scene consists only of static_gaussians
++    return static_gaussians
+ ```
+ 
+-## Subtopics
++**Parameters:**
++*   $\lambda_{transient}$: Weight for the transient loss. Not given in the sources.
++*   Learning rate for Gaussians and embeddings: Standard 3DGS values. Not given in the sources.
+ 
+-### Wild-GS
+-Aligns pixel appearance features from image triplanes directly to 3D Gaussians and uses depth regularization and visibility maps to mitigate transient effects. Choose when you need a simpler approach without explicit transient Gaussian training. [Wild-GS](link)
+-
+-### SpotlessSplats
+-Enhances robustness by detecting outliers in a richer, pre-trained feature space to ignore transient distractors. Choose when you have access to a pre-trained feature space and want to improve reconstruction quality in casual captures. [SpotlessSplats](link)
++**Edge Cases:**
++*   **Highly Dynamic Scenes:** If the scene is predominantly dynamic, the static Gaussians may fail to converge. Not given in the sources.
++*   **Transient Object Persistence:** If a transient object appears in all views, it may be incorrectly classified as static. Not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Yields state-of-the-art results on diverse photo scenes [S1][S2, unofficial].
+-*   **Strengths:** Effectively removes transient occluders without requiring explicit segmentation or pose information.
+-*   **Limitations:** Requires training transient Gaussians, which may increase training time.
+-*   **When to use:** When dealing with unposed or loosely posed images containing transient objects.
+-*   **When not to use:** When the scene is static and transient objects are not a concern.
++*   **Time Complexity:** Training time is comparable to standard 3DGS, with a slight increase due to the additional transient Gaussians and appearance embedding optimization. Not given in the sources.
++*   **Memory Complexity:** Memory usage increases by a factor of roughly 2 due to the dual Gaussian representation (static and transient). Not given in the sources.
++*   **Strengths:** Robust to unstructured data; no need for masks or temporal synchronization; high-quality static reconstruction.
++*   **Limitations:** Cannot render transient objects explicitly; performance depends on the ability to separate static and transient components via photometric residuals.
+ 
+ ## Background
+-SWAG was introduced as an extension to 3D Gaussian Splatting to handle transient objects in unposed image collections. It builds on the principles of 3DGS and introduces the concept of unsupervised transient Gaussians to ignore occluders [S1][S2, unofficial].
++SWAG was introduced as a method to handle unstructured photo collections in 3D Gaussian Splatting. It extends the 3DGS framework by conditioning Gaussians on learned appearance embeddings and training unsupervised transient Gaussians to ignore occluders [S1][S2, unofficial]. It yields state-of-the-art results on diverse photo scenes [S1][S2, unofficial].
+ 
+ ## Sources

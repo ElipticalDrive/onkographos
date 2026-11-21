@@ -1,0 +1,73 @@
+# Linear Interpolation
+## Overview
+Linear interpolation approximates a continuous scalar field $V(\mathbf{p})$ from discrete samples by computing a weighted average of neighboring values based on their spatial proximity [G]. It differs from higher-order methods like Cubic Hermite by its computational simplicity and lower cost, albeit with discontinuous derivatives [S1, unofficial].
+
+## Shared principles
+All methods in this family operate on the principle that a continuous function $V(\mathbf{p})$ must be approximated from a discrete set of samples $V_i$ located at grid positions $\mathbf{p}_i$ [G]. The core mechanism involves:
+
+1. **Query Positioning**: Determining the 3D coordinate $\mathbf{p}$ along the ray $r(t) = \mathbf{o} + t\mathbf{d}$ where a value is needed [G]. This may involve converting depth parameters to physical distances or warping coordinates for neural encodings [G].
+2. **Kernel/Weight Application**: Computing weights $w_i(\mathbf{p})$ based on the distance between $\mathbf{p}$ and the sample centers $\mathbf{p}_i$ [G]. The interpolated value is:
+   $$V(\mathbf{p}) = \sum_{i} w_i(\mathbf{p}) V_i$$
+   For standard linear interpolation, weights are derived from fractional offsets within the enclosing voxel cell.
+3. **Coordinate Transformation**: Mapping world-space or camera-space coordinates to the local coordinate system of the volume data (e.g., normalized $[-1, 1]$ or $[0, 1]$ ranges) before interpolation [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lerp(a, b, t):
+    """Linear interpolation between values a and b at parameter t in [0, 1]."""
+    return a * (1.0 - t) + b * t
+
+def trilinear_interpolate(v, grid, dims):
+    """Trilinear interpolation for a 3D grid at point v.
+    Clamps indices to valid bounds [0, dims-1] to prevent out-of-bounds access [G]."""
+    x, y, z = int(v[0]), int(v[1]), int(v[2])
+    fx, fy, fz = v[0] - x, v[1] - y, v[2] - z
+    x0, x1 = max(0, min(x, dims[0]-1)), max(0, min(x+1, dims[0]-1))
+    y0, y1 = max(0, min(y, dims[1]-1)), max(0, min(y+1, dims[1]-1))
+    z0, z1 = max(0, min(z, dims[2]-1)), max(0, min(z+1, dims[2]-1))
+    c000 = grid[x0, y0, z0]; c100 = grid[x1, y0, z0]
+    c010 = grid[x0, y1, z0]; c110 = grid[x1, y1, z0]
+    c001 = grid[x0, y0, z1]; c101 = grid[x1, y0, z1]
+    c011 = grid[x0, y1, z1]; c111 = grid[x1, y1, z1]
+    i00 = lerp(c000, c100, fx); i10 = lerp(c010, c110, fx)
+    i01 = lerp(c001, c101, fx); i11 = lerp(c011, c111, fx)
+    i0 = lerp(i00, i10, fy); i1 = lerp(i01, i11, fy)
+    return lerp(i0, i1, fz)
+```
+
+## Subtopics
+
+### [Volumetric Ray Casting with Trilinear Interpolation](13406-volumetric-ray-casting-with-trilinear-interpolation.md)
+Volumetric Ray Casting with Trilinear Interpolation is a direct volume rendering technique that visualizes scalar data stored in a voxel grid by casting rays through the volume and interpolating values at sample points. It differs from nearest-neighbor sampling by using the eight corners of the enclosing voxel cell to produce smoother gradients, and from higher-order methods by its simplicity and low computational cost. Choose it when computational efficiency is prioritized over high-order smoothness.
+
+### Joseph's Method
+Joseph's Method is a forward projection method for 2D easily extended to 3D, using bi-linear interpolation on intersection points and a compensation factor for rays deviating from the principal direction [S2, unofficial]. It performs similarly to Köhler's method in accuracy, despite using a skewed interpolation kernel compared to Köhler's tri-linear kernel [S2, unofficial].
+
+**Steps:**
+1. Determine the principal direction of the ray by comparing the absolute differences $|x_1-x_2|$, $|y_1-y_2|$, and $|z_1-z_2|$ [S2, unofficial].
+2. For the case where the principal direction is the x-axis ($|x_1-x_2|$ is largest), perform bi-linear interpolation on the intersection points of each $(y, z)$-plane of the sampling grid [S2, unofficial].
+3. Weight the sum of interpolations with the factor $\frac{\sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2 + (z_1 - z_2)^2}}{|x_1 - x_2|}$ to compensate for longer traversal of rays deviating from the principal direction [S2, unofficial].
+
+### Linear Interpolation Kernel
+A method to define the contribution of a projection to a pixel that is not directly traversed by a projection line, by interpolating between adjacent projection lines [S3, unofficial]. It is effective in standard sampling when $d_\rho > \Delta_p$ and optimal when $d_\rho < \Delta_p$ (oversampling) [S3, unofficial].
+
+**Formula:**
+$$Contrib_{\theta \to (i,j)} = \frac{\rho(i,j) - \rho_r}{d_\rho} R_\theta(\rho_r) + \frac{\rho_{r+1} - \rho(i,j)}{d_\rho} R_\theta(\rho_{r+1})$$
+where $\rho(i,j) = (i - \frac{H}{2})\cos\theta - (j - \frac{W}{2})\sin\theta$, $\rho_r \le \rho(i,j) \le \rho_{r+1}$, and $d_\rho$ is the radial sampling step [S3, unofficial].
+
+**Parameters:**
+* $d_\rho$: The radial sampling step (distance between successive projection lines) [S3, unofficial].
+* $\rho(i,j)$: The radial coordinate of the center of pixel $(i, j)$ for angle $\theta$. Calculated as $(i - H/2)\cos\theta - (j - W/2)\sin\theta$ [S3, unofficial].
+
+**Pitfalls:**
+* In oversampling ($d_\rho < \Delta_p$), using all available data is inefficient; only the two closest projection lines to the pixel center should be used [S3, unofficial].
+* If a pixel is not traversed by any line (possible when $d_\rho > \Delta_p$), standard backprojection kernels return 0; linear interpolation fills these gaps [S3, unofficial].
+
+## Background
+Linear interpolation is a fundamental technique in computer graphics and scientific visualization [G]. In the context of noise generation and procedural textures, it is noted that linear interpolation requires the least amount of calculation but results in inferior appearance due to discontinuities in derivatives (C0 continuity) [S1, unofficial]. In tomographic reconstruction, it serves as the interpolation basis for forward projection methods like Joseph's method [S2, unofficial] and backprojection kernels [S3, unofficial].
+
+## Sources
+[S1] PDF Real-Time Volumetric Rendering of Fire in a Production System ..., https://clas.iusb.edu/math-compsci/_prior-thesis/YVanzine_thesis.pdf, fetched 2026-10-27 (unofficial)
+[S2] 5 Forward Projection through Voxel Volumes, https://www.cvl.isy.liu.se/education/undergraduate/tsbb31/download/TurbellPhDCh5.pdf, fetched 2026-10-25 (unofficial)
+[S3] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)

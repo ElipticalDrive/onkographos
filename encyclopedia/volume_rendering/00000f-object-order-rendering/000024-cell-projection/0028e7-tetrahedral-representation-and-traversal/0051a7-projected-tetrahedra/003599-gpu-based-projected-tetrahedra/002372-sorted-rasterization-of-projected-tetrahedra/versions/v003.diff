@@ -1,0 +1,118 @@
+--- v002.md
++++ v003.md
+@@ -9,5 +9,5 @@
+ **Inputs and Outputs:**
+ *   **Input:** A tetrahedral mesh where each tetrahedron $k$ has constant density $\sigma_k$ and color fields $\mathbf{c}_k(\mathbf{r})$ defined at any point $\mathbf{r}$ within it [S1, unofficial]. The camera position (origin) is required for sorting [S1, unofficial].
+-*   **Output:** A 2D image where each pixel contains the accumulated color $C$ and opacity $\alpha$ based on front-to-back blending [S1, unofficial].
++*   **Output:** A 2D image where each pixel contains the accumulated color $C$ and opacity $\alpha$ based on the compositing order [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -15,11 +15,11 @@
+     *   Vertices: 4 vertices defining the geometry.
+     *   Density: Scalar $\sigma_k$.
+-    *   Color Fields: Functions or values defining $\mathbf{c}_k^{\text{in}}$ and $\mathbf{c}_k^{\text{out}}$ at entry and exit points.
+-    *   Circumsphere Power: A scalar value used for sorting relative to the camera origin.
++    *   Color Fields: Functions or values defining $\mathbf{c}_k^{\text{in}}$ and $\mathbf{c}_k^{\text{out}}$ at entry and exit points [S1, unofficial].
++    *   Circumsphere Power: A scalar value used for sorting relative to the camera origin [S1, unofficial].
+ *   **Sorted List:** Tetrahedra sorted by their circumsphere power relative to the camera, loaded from back to front [S1, unofficial].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Sorting:** Sort all tetrahedra based on the power of their circumspheres relative to the camera origin to approximate a back-to-front order [S1, unofficial].
++1.  **Sorting:** Sort all tetrahedra based on the power of their circumspheres relative to the camera origin to establish a back-to-front order [S1, unofficial].
+ 2.  **Rendering Setup:**
+     *   **Without Mesh Shaders:** Use instanced shaders. Draw an instance of a triangle strip for each tetrahedron. The vertex shader uses the instance index to load tetrahedron attributes and plane equations. Each tetrahedron is loaded 4 times, once per vertex [S1, unofficial].
+@@ -28,5 +28,5 @@
+ 4.  **Fragment Shader Execution:**
+     *   For each pixel hit by a tetrahedron, read back the whole tetrahedron data attached to the triangle hit to reconstruct the back intersection [S1, unofficial].
+-    *   Compute the entry point $t_k^{\text{in}}$ and exit point $t_k^{\text{out}}$ along the ray $\mathbf{r}$ for the tetrahedron.
++    *   Compute the entry point $t_k^{\text{in}}$ and exit point $t_k^{\text{out}}$ along the ray $\mathbf{r}$ for the tetrahedron [S1, unofficial].
+     *   Calculate the optical depth $d_k$ and opacity $\alpha_k$:
+         $$d_k = (t_k^{\text{out}} - t_k^{\text{in}}) \sigma_k$$
+@@ -39,43 +39,32 @@
+ 5.  **Compositing:** Blend the pre-sorted tetrahedra along the ray. The final pixel color is:
+     $$C = \sum_k w_k \Delta C_k$$
+-    where the weight $w_k = \prod_{l=1}^{k-1} (1 - \alpha_\ell)$ is efficiently computed using hardware blending operations [S1, unofficial]. The compositor composites the fragment according to the load order [S1, unofficial].
++    where the weight $w_k = \prod_{l=1}^{k-1} (1 - \alpha_\ell)$ is efficiently computed using hardware blending operations [S1, unofficial]. The compositor composites the fragment according to the back-to-front load order [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import math
+ import numpy as np
+ 
+-def intersect_ray_tet(ray_origin, ray_dir, tet_vertices):
+-    """Standard ray-tetrahedron intersection [G]. Returns (t_in, t_out) or (None, None)."""
+-    t_min, t_max = float('inf'), float('-inf')
+-    for i in range(4):
+-        v0, v1, v2 = tet_vertices[i], tet_vertices[(i+1)%4], tet_vertices[(i+2)%4]
+-        edge1 = v1 - v0
+-        edge2 = v2 - v0
+-        normal = np.cross(edge1, edge2)
+-        denom = np.dot(ray_dir, normal)
+-        if abs(denom) > 1e-8:
+-            t = np.dot(v0 - ray_origin, normal) / denom
+-            if t > 1e-6:
+-                p = ray_origin + t * ray_dir
+-                v3 = tet_vertices[(i+3)%4]
+-                edge3 = v3 - v0
+-                if np.dot(np.cross(edge1, p - v0), normal) >= 0 and \
+-                   np.dot(np.cross(edge2, p - v1), normal) >= 0 and \
+-                   np.dot(np.cross(edge3, p - v2), normal) >= 0:
+-                    t_min = min(t_min, t)
+-                    t_max = max(t_max, t)
+-    if t_min < t_max:
+-        return t_min, t_max
+-    return None, None
++def compute_delta_C(alpha_k, d_k, c_in, c_out):
++    """Computes the color change for a tetrahedron [S1, unofficial]."""
++    if d_k < 1e-6:
++        # Limit as d_k -> 0 yields delta_C -> 0 [G]
++        return np.zeros_like(c_in)
++    alpha_over_d = alpha_k / d_k
++    return (1.0 - alpha_over_d) * c_in + (alpha_over_d - math.exp(-d_k)) * c_out
+ 
+-def render_pixel(ray_origin, ray_dir, sorted_tets):
++def sorted_rasterization_pipeline(sorted_tets, ray_origin, ray_dir):
++    """
++    Algorithmic representation of the GPU rasterization and compositing steps.
++    Hardware rasterization handles triangle setup and interpolation.
++    Hardware blending computes the weight product w_k [S1, unofficial].
++    """
+     accumulated_color = np.array([0.0, 0.0, 0.0])
+     accumulated_opacity = 0.0
++    weight = 1.0  # w_k = product of (1 - alpha) for previous tets
+     
+     for tet in sorted_tets:
+-        t_in, t_out = intersect_ray_tet(ray_origin, ray_dir, tet.vertices)
+-        
++        # Hardware rasterization finds intersection interval [t_in, t_out]
++        t_in, t_out = tet.ray_intersect(ray_origin, ray_dir)
+         if t_in is None:
+             continue
+@@ -91,13 +80,10 @@
+         c_out = tet.color_field(ray_origin + ray_dir * t_out)
+         
+-        # Limit for d_k -> 0 using L'Hôpital's rule [G]
+-        if d_k < 1e-6:
+-            delta_C = np.array([0.0, 0.0, 0.0])
+-        else:
+-            alpha_over_d = alpha_k / d_k
+-            delta_C = (1.0 - alpha_over_d) * c_in + (alpha_over_d - math.exp(-d_k)) * c_out
+-            
+-        weight = 1.0 - accumulated_opacity
++        delta_C = compute_delta_C(alpha_k, d_k, c_in, c_out)
++        
++        # Hardware blending computes: accumulated_color += weight * delta_C
++        # and updates weight *= (1 - alpha_k)
+         accumulated_color += weight * delta_C
++        weight *= (1.0 - alpha_k)
+         accumulated_opacity += weight * alpha_k
+         
+@@ -135,5 +121,5 @@
+ *   **Strengths:** Leverages hardware rasterization and blending, avoiding explicit ray casting per pixel. Efficient for unstructured data.
+ *   **Limitations:** Requires sorting of tetrahedra.
+-*   **When to Use:** Interactive volume rendering of unstructured tetrahedral data on modern GPUs.
++*   **When to Use:** Interactive volume rendering of unstructured tetrahedral data on modern GPUs [S2, unofficial].
+ *   **When Not to Use:** Not given in the sources.
+ 

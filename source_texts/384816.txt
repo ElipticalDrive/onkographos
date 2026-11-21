@@ -1,0 +1,1741 @@
+Automatic Differentiation in PCF
+Damiano Mazza, Michele Pagani
+To cite this version:
+Damiano Mazza, Michele Pagani. Automatic Differentiation in PCF. Proceedings of the ACM on Programming
+Languages, 2021, 5, pp.1 - 27. ⟨10.1145/3434309⟩. ⟨hal-03379031⟩
+HAL Id: hal-03379031
+https://hal.science/hal-03379031v1
+Submitted on 14 Oct 2021
+HAL is a multi-disciplinary open access archive
+for the deposit and dissemination of scientific research documents, whether they are published or not.
+The documents may come from teaching and research
+institutions in France or abroad, or from public or private research centers.
+L’archive ouverte pluridisciplinaire HAL, est destinée au dépôt et à la diffusion de documents scientifiques de niveau recherche, publiés ou non, émanant
+des établissements d’enseignement et de recherche
+français ou étrangers, des laboratoires publics ou
+privés.
+HAL Authorization
+Automatic Differentiation in PCF
+DAMIANO MAZZA, CNRS, France
+MICHELE PAGANI, Université de Paris, France
+We study the correctness of automatic differentiation (AD) in the context of a higher-order, Turing-complete
+language (PCF with real numbers), both in forward and reverse mode. Our main result is that, under mild
+hypotheses on the primitive functions included in the language, AD is almost everywhere correct, that is, it
+computes the derivative or gradient of the program under consideration except for a set of Lebesgue measure
+zero. Stated otherwise, there are inputs on which AD is incorrect, but the probability of randomly choosing
+one such input is zero. Our result is in fact more precise, in that the set of failure points admits a more explicit
+description: for example, in case the primitive functions are just constants, addition and multiplication, the set
+of points where AD fails is contained in a countable union of zero sets of polynomials.
+CCS Concepts: · Theory of computation → Program semantics; Theory and algorithms for application
+domains.
+Additional Key Words and Phrases: Differentiable Programming, Lambda-Calculus, Linear Logic
+ACM Reference Format:
+Damiano Mazza and Michele Pagani. 2021. Automatic Differentiation in PCF. Proc. ACM Program. Lang. 5,
+POPL, Article 28 (January 2021), 27 pages. https://doi.org/10.1145/3434309
+28
+1 INTRODUCTION
+Automatic differentiation (AD) provides efficient methods for computing the derivative (or, more
+generally, the gradient or Jacobian) of a function specified by a computer program. Since computing
+derivatives is a key ingredient in the resolution of all sorts of optimization problems, it is not
+surprising that AD grew into a large field with applications to a host of scientific domains, most
+notably machine learning [Baydin et al. 2018].
+Traditionally, AD focused on first-order imperative programs and, although its techniques allow
+the presence of flow control instructions and loops [Beck and Fischer 1994; Joss 1976; Speelpenning 1980], its scope was often limited to straight-line programs (also know as computational
+graphs [Goodfellow et al. 2016]), which were enough for most practical purposes, such as expressing neural networks. After the advances in deep learning of the last years, this is no longer the case:
+neural network architectures are now łdynamicž, in the sense that the input may influence the
+shape of the net, and expressing such architectures requires resorting a priori to the full power of a
+modern programming language, yielding what some have called differentiable programming [LeCun
+2018]. This evolution of deep learning spurred the rapid development of differentiable programming
+frameworks [Abadi et al. 2016; Paszke et al. 2017] and, at the same time, received much attention
+in programming languages (PL) research for establishing its theoretical foundations [Abadi and
+Plotkin 2020; Brunel et al. 2020; Elliott 2018; Huot et al. 2020; Shaikhha et al. 2019; Wang et al. 2019].
+Authors’ addresses: Damiano Mazza, CNRS, UMR 7030, LIPN, Université Sorbonne Paris Nord, France, Damiano.Mazza@
+lipn.univ-paris13.fr; Michele Pagani, IRIF UMR CNRS 8243, Université de Paris, France, pagani@irif.fr.
+Permission to make digital or hard copies of part or all of this work for personal or classroom use is granted without fee
+provided that copies are not made or distributed for profit or commercial advantage and that copies bear this notice and
+the full citation on the first page. Copyrights for third-party components of this work must be honored. For all other uses,
+This
+work
+under a Creative Commons Attribution 4.0 International License.
+contact
+theis licensed
+owner/author(s).
+© 2021 Copyright held by the owner/author(s).
+2475-1421/2021/1-ART28
+https://doi.org/10.1145/3434309
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:2
+Damiano Mazza and Michele Pagani
+From the viewpoint of PL theory, AD methods boil down to program transformations: writing R
+and R for the set and type of real numbers, respectively, we receive as input a program 𝑀 : R𝑛 → R
+computing a (possibly partial) function J𝑀K : R𝑛 ⇀ R whose gradient ∇J𝑀K exists in a set
+d(𝑀) ⊆ R𝑛 (called the domain of differentiability), and we must output another program 𝑔𝑟𝑎𝑑 (𝑀)
+computing ∇J𝑀K. The crucial features that one typically asks of such transformations are:
+(i) efficiency: asymptotically, evaluating 𝑔𝑟𝑎𝑑 (𝑀) is not more costly than evaluating 𝑀;
+(ii) soundness: 𝑔𝑟𝑎𝑑 (𝑀)(r) evaluates to ∇J𝑀K(r) for all r ∈ d(𝑀).
+Notice that there is a tension between efficiency and soundness: implementing the definition of
+derivative as a limit gives a trivially sound (to an arbitrary degree of precision) but unacceptably
+inefficient method. Conversely, more efficient transformations tend to be more complex (e.g., reverse
+mode is more complex than forward mode, see below) and their soundness more difficult to prove.
+Also observe that we are only interested in the correctness of the result when ∇J𝑀K is defined; in
+case r ∉ d(𝑀), the evaluation of 𝑔𝑟𝑎𝑑 (𝑀)(r) may give anything, including (but not necessarily!)
+divergence.
+Another highly desirable feature of 𝑔𝑟𝑎𝑑 is modularity: if 𝑃 is a subprogram of 𝑀 then 𝑔𝑟𝑎𝑑 (𝑃)
+is a subprogram of 𝑔𝑟𝑎𝑑 (𝑀) or, if this is not literally the case, the computation of the former
+may be reused in computing the latter. Indeed, it has been known from the early days of AD that
+modularity offers a path to attaining both efficiency and soundness: the program 𝑀 is decomposed
+into elementary blocks whose gradients are immediately computable, and 𝑔𝑟𝑎𝑑 (𝑀) is obtained by
+assembling these transformed blocks following the structure of 𝑀. In this way, the execution of
+𝑔𝑟𝑎𝑑 (𝑀) mimics that of 𝑀, yielding efficiency, and soundness relies on the so-called chain rule
+of calculus, which assures us that the derivative of a compound function may be expressed in
+terms of the derivative of its components. Furthermore, one sees that there are two łdualž ways of
+assembling the transformed blocks to form 𝑔𝑟𝑎𝑑 (𝑀): a covariant way, yielding forward mode AD,
+and a contravariant way, yielding reverse mode AD (this will be explained in Sect. 2.2).
+The theory of AD transformations has by now been developed to considerable depth by several
+authors: Pearlmutter and Siskind first pointed out that reverse mode AD, commonly known as
+backpropagation, may be naturally expressed in terms of higher-order programs, and used this
+idea to develop a differentiable variant of Scheme [Pearlmutter and Siskind 2008]; more recently,
+Elliott emphasized functoriality as a systematic way of understanding the modular nature of AD
+transformations [Elliott 2018]; the work [Wang et al. 2019] introduced Lantern, a fully general
+differentiable programming framework in which the notion of delimited continuation is used
+to correctly handle memory updates during backpropagation; finally, Brunel, Mazza and Pagani
+showed that the continuation-passing machinery at work in [Wang et al. 2019] (and, implicitly,
+in [Pearlmutter and Siskind 2008]) may be understood in terms of linear negation (in the sense
+of Girard’s linear logic), giving a purely functional transformation for reverse mode AD and a
+conceptually clean analysis of its efficiency in terms of a łlinear factoringž evaluation rule [Brunel
+et al. 2020]. On the semantics side, Abadi and Plotkin studied denotational semantics for a first
+order differentiable language [Abadi and Plotkin 2020] and Huot, Staton and Vákár gave a uniform
+approach to proving soundness of AD (forward and reverse) for simply-typed programs based on a
+diffeology semantics [Huot et al. 2020].
+Nevertheless, an analysis of soundness of AD transformations for a fully general programming
+language is currently missing: the above-mentioned work is either fully general but lacks soundness
+proofs [Pearlmutter and Siskind 2008; Wang et al. 2019] or proves soundness in a restricted setting
+(first order [Abadi and Plotkin 2020] or simply-typed 𝜆-calculi [Barthe et al. 2020; Brunel et al. 2020;
+Huot et al. 2020]). Filling this gap is precisely the contribution of the present paper: we study the
+soundness of AD transformations in the setting of the (idealized) functional programming language
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:3
+PCFR , a variant with real numbers of Plotkin’s famous Turing-complete language [Plotkin 1977].
+For forward mode, we use the standard transformation described for instance in [Wang et al. 2019].
+For reverse mode, since PCFR is purely functional, we consider an extension of the transformation
+introduced in [Brunel et al. 2020], albeit simplified in that we leave linearity aside, since that is
+only needed for efficiency and here we are merely interested in soundness. The extension, which is
+a contribution of this paper in its own right, concerns conditional statements and fixpoints, which
+are not dealt with in loc. cit.
+The first relevant observation is that, in presence of conditionals, soundness in the sense of
+statement (ii) above actually fails. Consider the program
+SillyId
+:=
+𝜆𝑥 R .if 𝑥 = 0 then 0 else 𝑥 .
+We clearly have that SillyId : R → R and that JSillyIdK is the identity function. We therefore
+expect 𝑔𝑟𝑎𝑑 (SillyId) to compute the constant function 1. And yet, by modularity/functoriality, AD
+transformations will give something like
+𝑔𝑟𝑎𝑑 (SillyId)
+=
+𝜆𝑥 R .if 𝑥 = 0 then 0 else 1,
+which obviously gives the wrong result for 𝑥 = 0. This phenomenon, which is well known in the
+AD community [Beck and Fischer 1994], is due to functoriality turning a syntactic discontinuity
+into a semantic one. Notice that, although the above example is indeed quite silly, similar situations
+may happen in a non-trivial neural network with rectified linear unit activation: if
+ReLU
+:=
+𝜆𝑥 R .if 𝑥 ≤ 0 then 0 else 𝑥,
+then ReLU(𝑥) − ReLU(−𝑥) behaves exactly as SillyId(𝑥). Also, using recursive definitions, it is easy
+to obtain programs on which AD fails on infinitely many inputs, even uncountably many in case of
+programs of type R𝑛 → R with 𝑛 > 1 (simply consider 𝜆𝑥 R .𝜆𝑦 R .if 𝑥 · 𝑦 = 0 then 0 else 𝑥 · 𝑦).
+So, to each given PCFR program 𝑀 : R𝑛 → R, we may assign a set Fail(𝑀) ⊆ d (𝑀) of points on
+which AD is unsound. Notice once again that we disregard what lies outside of d (𝑀), where
+𝑔𝑟𝑎𝑑 (𝑀) is free to behave arbitrarily. For instance, 𝑔𝑟𝑎𝑑 (ReLU) is something like 𝜆𝑥 R .if 𝑥 ≤
+0 then 0 else 1, which evaluates to 0 when 𝑥 = 0, even though JReLUK is not differentiable in
+0. Morally, we cannot say that AD is łwrongž when there is no łrightž value to compare it to.
+After toying with more examples, one is led to conjecture that Fail(𝑀) is always of measure
+zero (in the sense of the standard Lebesgue measure on R𝑛 ), so one may hope to establish an
+łalmost-everywherež relaxation of (ii):
+(ii’) ae-soundness: 𝑔𝑟𝑎𝑑 (𝑀)(r) evaluates to ∇J𝑀K(r) for all r ∈ d (𝑀) except on a set of measure
+zero.
+This is exactly the main result of our paper. Let us stress that, considering that łfullž soundness is
+impossible, such a result is quite meaningful in practice because of the link between the Lebesgue
+measure and the standard understanding of randomness on R𝑛 . In typical deep learning applications,
+weights are initialized łat randomž and later updated via gradient descent in order to minimize a
+loss function. Technically, this means that the weights evolve following some standard probability
+distribution, which always arises from integrating a probability density function with respect to the
+Lebesgue measure. So, an informal way of stating (ii’) is that AD almost never fails, in the sense that,
+according to the standard definition of probability, the likelihood of computing wrong derivatives
+during gradient descent is zero.
+The main result itself is articulated in Theorem 33 and Theorem 42. The first result takes care of
+soundness proper: we define, for any given PCFR program 𝑀 : R𝑛 → R whose domain (i.e., the
+inputs on which it converges) is ⇓𝑀, a set S(𝑀) ⊆ ⇓𝑀 of stable points, and Theorem 33 affirms
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:4
+Damiano Mazza and Michele Pagani
+that statement (ii) holds on d (𝑀) ∩ S(𝑀). Then, we establish in Theorem 42 that the set ⇓𝑀 \ S(𝑀)
+of unstable points of 𝑀 is of measure zero. Since d(𝑀) ⊆ ⇓𝑀, this proves statement (ii’).
+The intuition behind stable points is the following. Take 𝑀 : R𝑛 → R, r ∈ R𝑛 and trace the
+execution of 𝑀 (r). This means, in particular, unfolding the recursive definitions in 𝑀 and choosing,
+for each instance of a conditional statement of 𝑀, the łthenž or łelsež branch. One obtains thus a
+program with no conditionals and no fixpoints, i.e., a simply-typed 𝜆-term, which is said to trace
+𝑀 (r). Such a program depends of course on r. If, however, there exists a simply-typed 𝜆-term 𝑡 and
+an open neighborhood 𝑈 ⊆ R𝑛 of r (in the standard topology) such that 𝑡 (r′) traces 𝑀 (r′) for all
+r′ ∈ 𝑈 , then r is stable (Definition 26). For instance, any 𝑟 ≠ 0 is stable for the ReLU program given
+above: there always exists an open interval 𝐼 around 𝑟 such that either Zero := 𝜆𝑥 R .0 or Id := 𝜆𝑥 R .𝑥
+traces ReLU on 𝐼 , depending on whether 𝑟 < 0 or 𝑟 > 0, respectively. On the other hand, 0 is an
+unstable point of ReLU: any open interval around 0 must contain negative points, on which ReLU
+is traced by Zero, and positive points, on which ReLU is traced by Id, and of course Zero ≠ Id.
+The proof of Theorem 33 uses stability to reduce the soundness of AD on PCFR to the soundness
+of AD on simply-typed 𝜆-terms, which may be established in various ways [Brunel et al. 2020;
+Huot et al. 2020]. The idea is simple: if r ∈ S(𝑀), then 𝑀 łbehaves likež a simply-typed 𝜆-term 𝑡 in
+an open neighborhood of r, and we know that AD works for 𝑡 everywhere, so it łmustž work for
+𝑀 on r. Although intuitively clear, the actual argument is surprisingly subtle. First, the definition
+of trace (Definition 25) is not obvious, due to non-uniformity issues introduced by higher types:
+two copies of the same higher-order subterm may be traced in different ways, as explained in the
+example given at the beginning of Sect. 3.1. Second, knowledge of the correctness of 𝑔𝑟𝑎𝑑 (𝑡)(r)
+does not immediately imply the correctness of 𝑔𝑟𝑎𝑑 (𝑀)(r) and some non-trivial work is needed to
+show that they behave similarly.
+The measure-zero bound on unstable points (Theorem 42), albeit obtained via a standard logical
+predicate argument, also requires non-trivial elements, most notably the notion of complete quasicontinuity, which is needed to account for the behavior of unstable points under composition, and
+the related notion of quasivariety. Although the exact meaning of these notions depends on the
+choice of primitives of PCFR (i.e., the basic real functions included in the language), under mild
+assumptions a quasivariety is always of measure zero, and Theorem 42 states precisely that Fail(𝑀)
+is a quasivariety. For example, when the primitives are just constants, addition and multiplication,
+quasivarieties are arbitrary subsets of countable unions of zero sets of polynomials. Furthermore,
+our Lemma 41 implies properties of PCFR -definable functions which, as far as we can tell, were
+previously unknown. For example, if 𝑓 : R𝑛 ⇀ R is definable in PCFR , and if 𝑈 ⊆ R is open, then
+in general the border of 𝑓 −1 (𝑈 ) (i.e., 𝑓 −1 (𝑈 ) minus its interior) is not empty because conditionals
+introduce discontinuities, but it is always a quasivariety. Similarly, the set of zeros of 𝑓 is always the
+disjoint union of an open set and a quasivariety.
+Related work. We already mentioned some of the relevant previous work at the interface between
+AD and PL theory and stressed that our contribution here is to study the soundness of AD in a fully
+general setting (higher-order, Turing-complete language), something which, as far as we know,
+was lacking.
+We also mentioned that the unsoundness of AD in presence of conditional statements is well
+known [Beck and Fischer 1994]. Surprisingly, though, recent PL work on the subject acknowledges
+this problem only sporadically, e.g. [Abadi and Plotkin 2020]. The solution proposed therein is
+restricting to continuous Boolean conditions, meaning that the inverse images of the two Boolean
+values along such conditions are open. For example, testing for zero or for non-positivity are not
+continuous, because the inverse image of true is the singleton {0} or ] −∞, 0], respectively, which
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:5
+are not open. With this limitation, the authors prove statement (ii) for a Turing-complete firstorder language. The benefit of Abadi and Plotkin’s approach is allowing a denotational semantics
+modeling the 𝑔𝑟𝑎𝑑 operator, but it has the drawback of representing standard total functions with
+programs diverging on singularities (for example, ReLU yields a program diverging in 0), which is
+somewhat unexpected. We discuss this further at the end of Sect. 2.2 and in Sect. 5.
+Our approach, in the wake of a large part of the AD literature, is to stick to the standard semantics
+and provide a bound on the unsoundness of AD, as precise as possible. This approach dates back
+to the Seventies, as far as we know to Joss’s Ph.D. thesis [Joss 1976], who proved statement (ii’)
+for forward mode AD in the context of an imperative language with variable assignments, basic
+arithmetic functions (sum, multiplication, division), conditional statements and gotos. So our result
+may be seen as an extension Joss’s theorem in several directions: to a higher-order language; to a
+wider set of primitive functions (as long as they form an admissible clone, Definition 11); and to
+reverse mode AD. Additionally, Theorem 42 is more precise than (ii’), because it characterizes the
+set of failure points Fail(𝑀) as a quasivariety, which is a rather special example of negligible set.
+Some discussion about this point is given in Sect. 5, in particular the proof of Theorem 42 hints to
+methods for automatically computing at least some overapproximation of Fail(𝑀) statically from
+the structure of 𝑀.
+From a broader perspective, variants of PCF with real numbers similar to the one studied here
+have been considered in the literature, e.g. [Escardó 1996] and [Di Gianantonio and Edalat 2013].
+The latter actually also considers AD, but it is not about correctness and is quite different in spirit,
+being more focused on denotational semantics. There is also a recent line of work whose goal
+is to understand the non-differentiable points of program-defined functions, such as [Mak et al.
+2020; Zhou et al. 2019], including in the context of AD [Lee et al. 2020], where it is a natural and
+important question [Griewank and Walther 2008]. Non-differentiability and unsoundness of AD
+have an important point in common: they are both introduced by conditionals. This explains why
+some notions used in our paper also crop up in the study of non-differentiability, such as zero sets of
+analytic functions [Zhou et al. 2019]. However, let us underline that the two issues are orthogonal:
+from our perspective, PCF-definable functions might as well have been differentiable everywhere
+(as in the SillyId example), what matters is that AD still makes mistakes and we wish to understand
+them. Whether our techniques also yield tools for describing the set of non-differentiable points of
+PCF-definable functions and, in that case, exactly how they relate to the above-mentioned work is
+an interesting question which we leave for the future.
+Finally, let us mention that our notion of stable point (Definition 26), which is new as far as we
+know, is based on a concept of trace (Definition 25) belonging to the same circle of ideas as Ehrhard
+and Regnier’s Taylor expansion [Ehrhard and Regnier 2006, 2008] and the modern understanding of
+intersection types in the spirit of Mazza, Pellissier and Vial’s work [Mazza 2017; Mazza et al. 2018].
+This extremely general perspective allows the definition of finitary approximations of programs at
+the level of the operational semantics, rather than denotational, as was the case traditionally. Our
+proof techniques are therefore not ad hoc for our current purposes and may be expected to have
+applications beyond the present paper.
+Contents of the paper. Sect. 2 introduces the language PCFR with its rewriting relation (Fig. 1)
+and the AD transformations (Fig. 2 and Equations (9), (10)). Our results are quite general and do
+not depend on a specific operational semantics but apply to a wide family of them (Proposition 10),
+including the standard ones (call-by-value, call-by-name, etc.). We also introduce admissibility
+of primitives (Definition 11) and the associated topological notions, among which quasivarieties
+(Definition 13). Sect. 3 and Sect. 4 are the heart of the paper, containing the proofs of Theorem 33
+and Theorem 42, respectively, as described above. Sect. 5 concludes the paper, discussing the results.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:6
+Damiano Mazza and Michele Pagani
+Notations. We write 𝑓 : 𝐴 ⇀ 𝐵 to say that 𝑓 is a partial function from a set 𝐴 to a set 𝐵. In that
+case, ⇓𝑓 will denote the subset of 𝐴 on which 𝑓 is defined. Given two partial functions 𝑓 , 𝑔 : 𝐴 ⇀ 𝐵
+and 𝑎 ∈ 𝐴, the equality 𝑓 (𝑎) = 𝑔(𝑎) means that either both 𝑓 (𝑎) and 𝑔(𝑎) are defined and equal, or
+that both 𝑓 (𝑎) and 𝑔(𝑎) are undefined. The notation 𝑓 (𝑎) ≠ 𝑔(𝑎) of course is understood as the
+logical negation of that. Given a subset 𝐴 ′ ⊆ 𝐴, we write 𝑓 |𝐴′ for the restriction of 𝑓 to 𝐴 ′. If 𝐴 is
+endowed with a complete measure 𝜆 (typically 𝐴 is R and 𝜆 is the Lebesgue measure), then we say
+that 𝑓 and 𝑔 are almost everywhere equal, and we write 𝑓 ∼ 𝑔, if 𝜆({𝑎 ∈ 𝐴 | 𝑓 (𝑎) ≠ 𝑓 (𝑏)}) = 0. This
+is equivalent to the existence of two subsets 𝐴 ′, 𝑍 of 𝐴 such that ⇓ 𝑓 ∪ ⇓𝑔 ⊆ 𝐴 ′ ∪ 𝑍 , 𝜆(𝑍 ) = 0 and
+𝑓 |𝐴′ = 𝑔|𝐴′ , a fact which is implicitly used in the proof of Proposition 10.1
+We write 𝐵𝜀 (r) for the open ball of R𝑛 of radius 𝜀 centered at r ∈ R𝑛 . Given 𝑓 : R𝑛 ⇀ R𝑚 , we
+denote by d(𝑓 ) the domain of differentiability of 𝑓 , defined to be the set of all r ∈ R𝑛 where 𝑓
+is differentiable in the sense that the total derivative of 𝑓 at r exists, i.e., 𝑓 admits a best linear
+approximation at r. We denote by J 𝑓 the Jacobian of 𝑓 . We recall that, if 𝜕𝑖 𝑓 𝑗 denotes the partial
+derivative of the 𝑗-th component of 𝑓 with respect to its 𝑖-th parameter, then within d(𝑓 ) the
+Jacobian is equal to the 𝑚 × 𝑛 matrix (𝜕𝑖 𝑓 𝑗 ). If 𝑚 = 1, the Jacobian is called gradient and denoted
+by ∇𝑓 . As a special case of the above, within d (𝑓 ) we have ∇𝑓 = (𝜕1 𝑓 , . . . , 𝜕𝑛 𝑓 ). Although it may
+happen in general that all partial derivatives exist without the Jacobian/gradient being defined, it
+will never be the case in what follows because we will always work within d(𝑓 ).
+2 PCF WITH REAL NUMBERS
+2.1 Terms and Semantics
+The programming language we use, called PCFR , is introduced in Fig. 1. There is only one base
+type, R, for real numbers. We use 𝑛-ary products for convenience. If one prefers, these may be seen
+as syntactic sugar defined from nullary and binary products. Throughout the paper, we stipulate
+that unary products are just identities: ⟨𝑀⟩ and 𝜋11 𝑀 both stand for 𝑀. We often omit the index 𝑛
+in a projection 𝜋𝑖𝑛 , when inessential. The empty product type is denoted by 1. Given a type 𝐴, we
+write 𝐴𝑛 for the 𝑛-fold product 𝐴 × · · · × 𝐴.
+The metavariables 𝜙, 𝜒,𝜓 range over a set of function symbols, each coming with a type of the
+form R𝑘 → R, where 𝑘 is the arity of the symbol. We suppose that the set of function symbols
+contains at least all real numbers 𝑟 ∈ R as nullary symbols, called numerals, as well as binary
+addition and multiplication, for which we use infix notation, i.e., 𝑀 + 𝑁 and 𝑀 · 𝑁 stand for +(𝑀, 𝑁 )
+and ·(𝑀, 𝑁 ), respectively. We also write 𝑛-ary sums as syntactic sugar. Each function symbol
+𝜙 : R𝑘 → R comes with a function J𝜙K : R𝑘 ⇀ R and we assume that J𝑟 K, J+K and J·K are the
+corresponding numbers and operations on real numbers. The functions J𝜙K for 𝜙 ranging over
+function symbols will be referred to as the primitive functions of PCFR .
+The notation if (𝑃, 𝑀, 𝑁 ) is just a compact form of if 𝑃 ≤ 0 then 𝑀 else 𝑁 . We call 𝑃 the guard of
+the conditional.
+The primitive functions one considers are usually very regular, typically analytic (e.g. exponential,
+logarithm, trigonometric functions, sigmoid maps. . . ). Sect. 2.3 details the precise conditions that
+primitives must enjoy in order for our results to hold. The expressive power of PCFR considerably
+enlarges the set of definable functions, in particular introducing singularities. The following
+1 Proof of the equivalence: let 𝐷 := {𝑎 ∈ 𝐴 | 𝑓 (𝑎) ≠ 𝑓 (𝑏) }. If 𝜆 (𝐷) = 0, then we may take 𝐴′ := (⇓ 𝑓 ∪ ⇓𝑔) \ 𝐷 and 𝑍 := 𝐷.
+Conversely, given 𝐴′ and 𝑍 with the required properties, notice that 𝐷 ⊆ ⇓ 𝑓 ∪ ⇓𝑔, hence 𝐷 ⊆ 𝐴′ ∪ 𝑍 . But observe that
+𝐷 ∩ 𝐴′ = ∅, so 𝐷 ⊆ 𝑍 , which gives us 𝜆 (𝐷) = 0.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:7
+𝐴, 𝐵 ::= R | 𝐴 → 𝐵 | 𝐴1 × · · · × 𝐴𝑛
+(a) Types.
+𝜙 : R𝑘 → R, Γ ⊢ 𝑀1 : R, . . . , Γ ⊢ 𝑀𝑘 : R
+Γ ⊢ 𝜙 (𝑀1, . . . , 𝑀𝑘 ) : R
+Γ, 𝑥 𝐴 ⊢ 𝑥 : 𝐴
+Γ, 𝑥 𝐴 ⊢ 𝑀 : 𝐵
+Γ ⊢ 𝜆𝑥 𝐴 .𝑀 : 𝐴 → 𝐵
+Γ ⊢ 𝑀 : 𝐴 → 𝐵, Γ ⊢ 𝑁 : 𝐴
+Γ ⊢ 𝑀𝑁 : 𝐵
+Γ ⊢ 𝑀 : 𝐴1 × · · · × 𝐴𝑘
+Γ ⊢ 𝜋𝑖𝑘 𝑀 : 𝐴𝑖
+Γ ⊢ 𝑀1 : 𝐴1, . . . , Γ ⊢ 𝑀𝑘 : 𝐴𝑘
+Γ ⊢ ⟨𝑀1, . . . , 𝑀𝑘 ⟩ : 𝐴1 × · · · × 𝐴𝑘
+Γ, 𝑓 : 𝐴 → 𝐵 ⊢ 𝑀 : 𝐴 → 𝐵
+Γ⊢𝑃 :R Γ⊢𝑀 :𝐴 Γ⊢𝑁 :𝐴
+Γ ⊢ if (𝑃, 𝑀, 𝑁 ) : 𝐴
+Γ ⊢ fix 𝑓 𝐴→𝐵 .𝑀 : 𝐴 → 𝐵
+(b) Terms and typing rules.
+(𝜆𝑥 .𝑀)𝑁 −
+→ 𝑀 {𝑁 /𝑥 }
+(
+if(𝑟, 𝑀, 𝑁 ) −
+→
+𝜋𝑖𝑘 ⟨𝑀1, . . . , 𝑀𝑘 ⟩ −
+→ 𝑀𝑖
+𝑀
+𝑁
+if 𝑟 ≤ 0
+if 𝑟 > 0
+𝜙 (𝑟 1, . . . , 𝑟𝑘 ) −
+→ J𝜙K(𝑟 1, . . . , 𝑟𝑘 )
+fix𝑓 .𝑀 −
+→ 𝑀 {𝜆𝑥 .(fix 𝑓 .𝑀)𝑥/𝑓 }
+(c) Rewriting steps.
+Fig. 1. The language PCFR over the ground type R of real numbers.
+examples will be useful in the sequel:
+ReLU := 𝜆𝑥 R .if (𝑥, 0, 𝑥)
+Int := 𝜆𝑥 R .𝜆𝑦 R .if (𝑦 − 𝑥, if (𝑦 − 𝑥 + 1, 1, 0), 1)
+
+SillyId := 𝜆𝑥 R .if (𝑥, if (−𝑥, 0, 𝑥), 𝑥) Floor := 𝜆𝑥 R . fix 𝑓 .𝜆𝑛 R .if (Int 𝑥 𝑛, 𝑛, 𝑓 (if (𝑥, 𝑛 − 1, 𝑛 + 1))) 0
+(1)
+ReLU and SillyId are the PCFR terms corresponding to the namesake examples discussed in the
+Introduction. ReLU is a typical example of a continuous non-differentiable function, having a corner
+in 0. We know that AD fails on SillyId; Sect. 2.2 will elaborate on this point. The program Int takes
+two inputs 𝑥 and 𝑦 and gives 0 if 𝑥 ∈ [𝑦, 𝑦 + 1[, or 1 otherwise. It is auxiliary to the definition of the
+Floor function, mapping a real number to the greatest integer less than or equal to it. Floor is an
+example of how recursive definitions may yield maps with an infinite number of non-differentiable
+points, being discontinuous on the integers.
+We denote by 𝑀 {𝑁 /𝑥 } the capture-free substitution of a term 𝑁 to the free occurrences of the
+variable 𝑥 in 𝑀.
+Note that the presence of the additive structure on R turns the product R𝑛 into a biproduct.
+Indeed, the injection 𝜄𝑖𝑛 , for 𝑖 such that 1 ≤ 𝑖 ≤ 𝑛, may be defined as
+𝜄𝑖𝑛 := 𝜆𝑥 R . ⟨0, . . . , 0, 𝑥, 0, . . . , 0⟩ ,
+(2)
+where the variable 𝑥 is in the 𝑖-th position of the 𝑛-tuple. We omit the index 𝑛 when inessential or
+clear from the context.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:8
+Damiano Mazza and Michele Pagani
+For every type 𝐴 → 𝐵, we set Ω𝐴→𝐵 := fix 𝑓 𝐴→𝐵 .𝑓 . We write just Ω when the type is irrelevant.
+Given a term Γ, 𝑓 : 𝐴 → 𝐵 ⊢ 𝑀 : 𝐴 → 𝐵 and 𝑛 ∈ N ∪ {∞}, we define fix𝑛 𝑓 .𝑀 of type 𝐴 → 𝐵 as
+follows:
+fix0 𝑓 .𝑀 := Ω,
+fix𝑛+1 𝑓 .𝑀 := (𝜆𝑓 .𝑀)(𝜆𝑥 .(fix𝑛 𝑓 .𝑀)𝑥),
+fix∞ 𝑓 .𝑀 := fix 𝑓 .𝑀.
+(3)
+Throughout the paper, we use boldface metavariables to denote sequences of metavariables, i.e.,
+x = 𝑥 1, . . . , 𝑥𝑛 is a sequence of variables, M = 𝑀1, . . . , 𝑀𝑛 is a sequence of terms, etc. The length of
+the sequence is specified only when necessary.
+Let us introduce two particularly important classes of terms:
+Definition 1 (program, simple term). A typing environment Γ is ground whenever all of its
+variables have type R. A PCFR term 𝑀 is called a program of arity 𝑛 and coarity 𝑚 whenever
+𝑥 1R, . . . , 𝑥𝑛R ⊢ 𝑀 : R𝑚 .
+A term is called simple if it does not contain conditionals or fixpoints. Small Latin letters 𝑡, 𝑢, 𝑣
+range over simple terms. Note that the subset of the simple terms of PCFR corresponds to the simply
+typed 𝜆-calculus on the ground type R enriched with function symbols.
+A context is a term with a single occurrence of a special variable {·}, called the hole. We use
+metavariables C, D to range over contexts. Given a context C and a term 𝑀, we write C{𝑀 } for the
+term obtained by replacing the hole {·} of C with 𝑀, allowing the capture of the free variables in
+𝑀 by the binders of C.
+The reduction relation −
+→ is defined by context closure of the rewriting rules in Fig. 1c:
+Definition 2 (reduction). Fig. 1c defines the set of rewriting rules of PCFR , which are pairs
+𝑅−
+→ 𝑃 of terms, with 𝑅 called the redex and 𝑃 the contractum of the rule.
+A reduction step 𝜎 is a triple (C, 𝑅, 𝑃) such that C is a context, and 𝑅 −
+→ 𝑃 is a valid reduction
+→ C{𝑃 } or, when the context C is irrelevant, simply 𝜎 : 𝑀 −
+→ 𝑁 , for
+rule. We also write 𝜎 : C{𝑅} −
+𝑀 = C{𝑅} and 𝑁 = C{𝑃 }, and say that 𝜎 fires the redex 𝑅 in 𝑀. A term 𝑀 without redexes, i.e. such
+that 𝑀 ≠ C{𝑅} for any C and any redex 𝑅, is said to be normal, or a normal form.
+Given another context D, we denote by D{𝜎 } the step (D{C}, 𝑅, 𝑃). Similarly we write 𝜎 {𝑁 /𝑥 } for
+the triple (C{𝑁 /𝑥 }, 𝑅{𝑁 /𝑥 }, 𝑃 {𝑁 /𝑥 }), which is still a valid reduction step.
+A reduction sequence 𝜌 from a term 𝑀 to a term 𝑁 , in symbols 𝜌 : 𝑀 −
+→∗ 𝑁 , is either empty, in
+which case 𝑁 = 𝑀, or a sequence of reduction steps (C𝑖 , 𝑅𝑖 , 𝑃𝑖 )1≤𝑖 ≤𝑛 with 𝑛 ≥ 1 such that 𝑀 = C1 {𝑅1 },
+𝑁 = C𝑛 {𝑃𝑛 } and for all 𝑖 < 𝑛, C𝑖 {𝑃𝑖 } = C𝑖+1 {𝑅𝑖+1 }. We call 𝑀 the source of 𝜌, 𝑁 its target and 𝑛
+the length of 𝜌. We often identify a single reduction step and the corresponding reduction sequence of
+length 1. The notations D{𝜌 } and 𝜌 {𝑁 /𝑥 } are extended to reduction sequences in the obvious way.
+Two reductions sequences 𝜌 : 𝑀 −
+→∗ 𝑀 ′ and 𝜌 ′ : 𝑀 ′ −
+→∗ 𝑀 ′′ compose in the obvious way to yield a
+′
+∗
+′′
+reduction sequence 𝜌𝜌 : 𝑀 −
+→ 𝑀 . Empty reduction sequences are the identities of such an operation.
+A sequence 𝜌 is normalizing if there is no reduction step 𝜎 such that 𝜌𝜎 is a valid reduction sequence,
+or, equivalently, if the target of 𝜌 is a normal form. A term 𝑀 is called normalizing if there exists a
+normalizing reduction from 𝑀. Otherwise 𝑀 is said to be diverging.
+PCFR is Turing-complete: usual PCF [Plotkin 1977] is essentially the fragment obtained by
+restricting to integer (including negative) numerals and sum. We recall some results about reduction
+which are completely standard (see e.g. [Amadio and Curien 1998]).
+Proposition 3 (confluence). Whenever 𝑀 −
+→∗ 𝑁 1 and 𝑀 −
+→∗ 𝑁 2 , there exist 𝑁 such that
+∗
+∗
+𝑁1 −
+→ 𝑁 and 𝑁 2 −
+→ 𝑁 . In particular, if 𝑁 1 and 𝑁 2 are normal forms, then 𝑁 1 = 𝑁 2 .
+Proposition 4 (subject reduction). If Γ ⊢ 𝑀 : 𝐴 and 𝑀 −
+→ 𝑀 ′, then Γ ⊢ 𝑀 ′ : 𝐴.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:9
+Proposition 5 (strong normalization for simple terms). For every simple term 𝑡 there exists
+𝑛 ∈ N such that the length of every reduction sequence starting from 𝑡 is bounded by 𝑛.
+A reduction strategy S is a relation between terms 𝑀 of PCFR and occurrences of redexes in 𝑀.
+S
+→ the reduction
+A strategy is called deterministic whenever it is a partial function. We denote by −
+relation defined by reducing only the redexes fired by S and we write S-nf for a normal form of
+S
+−
+→. We write 𝛽 for the maximal strategy, giving the reduction relation −
+→. Of course this strategy is
+not deterministic, however Proposition 3 assures that the normal form associated with a term is
+unique if it exists.
+Reduction strategies are often defined by fixing a subset of redexes in Fig. 1c and a set of evaluation
+contexts. An example which will be useful in the sequel is head reduction, which is defined by taking
+all reduction rules but restricting their application to head contexts, generated by the following
+grammar:
+H ::= {·} | 𝜙 (𝑀1, . . . , H, . . . , 𝑀𝑘 ) | H𝑁 | ⟨H, 𝑁 ⟩ | ⟨𝑀, H⟩ | 𝜋𝑖 H | if (H, 𝑀, 𝑁 ).
+A head reduction step is of the form H{𝑅} → H{𝑃 } with 𝑅 → 𝑃 a rewriting step of Fig. 1c and H a
+head context. A head reduction sequence is a reduction whose steps are all head reduction steps.
+Observe that head reduction is not deterministic. Apart from the freedom in the order of the
+evaluation of the arguments of a function symbol, we allow to reduce within a pair as well as to
+project it: for instance, the term 𝜋 1 ⟨(𝜆𝑥 .𝑥)𝑦, 𝑀⟩ may be decomposed either as H{𝜋 1 ⟨(𝜆𝑥 .𝑥)𝑦, 𝑀⟩}
+with the empty head context H = {·}, or as H′ {(𝜆𝑥 .𝑥)𝑦} with the head context H′ = 𝜋 1 ⟨{·}, 𝑀⟩,
+and the two decompositions fire different redexes.
+A classic result [Amadio and Curien 1998; Barendregt 1985] is that head reduction is a łwinning
+strategyž for finding the 𝛽-normal form of a closed program:
+Proposition 6. Let 𝑀 be a normalizing closed program (i.e., of type R𝑛 ) whose 𝛽-normal form is
+𝑁 . Then, there is a head reduction sequence 𝑀 −
+→∗ 𝑁 .
+Let S be a reduction strategy, let Γ = 𝑥 1R, . . . , 𝑥𝑛R and let Γ ⊢ 𝑀 : R𝑚 . We define the partial function
+J𝑀KΓS : R𝑛 ⇀ R𝑚 as follows:
+(
+S
+⟨𝑞 1, . . . , 𝑞𝑚 ⟩ if 𝑀 {𝑟 1 /𝑥 1 } . . . {𝑟𝑛 /𝑥𝑛 } −
+→∗ ⟨𝑞 1, . . . , 𝑞𝑚 ⟩ ,
+S
+J𝑀KΓ (𝑟 1, . . . , 𝑟𝑛 ) =
+⊥
+otherwise,
+where ⊥ means undefined. By Proposition 3, J𝑀KΓS is a well-defined partial function, even in case S
+S
+S
+is not deterministic, in fact if 𝑀 {𝑟 1 /𝑥 1 } . . . {𝑟𝑛 /𝑥𝑛 } −
+→∗ ⟨𝑞 1, . . . , 𝑞𝑚 ⟩ and 𝑀 {𝑟 1 /𝑥 1 } . . . {𝑟𝑛 /𝑥𝑛 } −
+→∗
+S
+′ we have that 𝑞 = 𝑞 ′ for each 𝑖, as −
+𝑞 1′ , . . . , 𝑞𝑚
+→⊆−
+→ and this latter is confluent.
+𝑖
+𝑖
+S
+S
+S
+S
+We write ⇓ 𝑀 for ⇓J𝑀KΓ and d (𝑀) for d (J𝑀KΓ ). In case S = 𝛽, we omit the indices from the
+above notations and write simply J𝑀KΓ , ⇓𝑀 and d (𝑀). The first of the next two statements follows
+immediately from Proposition 6, the second from the definitions and the confluence property.
+Proposition 7. Let 𝑀, 𝑁 and 𝑃 be programs (𝑃 of coarity 1), then the following relations hold:
+J𝜙 (𝑀1, . . . , 𝑀𝑘 )KΓ = J𝜙KΓ ◦ J𝑀1 KΓ , . . . , J𝑀𝑘 KΓ ,
+J⟨𝑀1, . . . , 𝑀𝑘 ⟩KΓ = J𝑀1 KΓ , . . . , J𝑀𝑘 KΓ ,
+
+
+J𝑀KΓ (r)
+
+
+
+Jif (𝑃, 𝑀, 𝑁 )KΓ = r ↦→ J𝑁 KΓ (r)
+
+
+⊥
+
+if J𝑃KΓ (r) ≤ 0,
+if J𝑃KΓ (r) > 0,
+if J𝑃KΓ (r) = ⊥.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:10
+Damiano Mazza and Michele Pagani
+→
+−
+D 𝑛 (R) := R × R𝑛
+←
+−
+D 𝑛 (R) := R × R⊥𝑛
+D𝑛 (𝐴 → 𝐵) := D𝑛 (𝐴) → D𝑛 (𝐵)
+D𝑛 (𝐴1 × · · · × 𝐴𝑘 ) := D𝑛 (𝐴1 ) × · · · × D𝑛 (𝐴𝑘 )
+(a) The action over types
+*
+Õ
+Õ
+𝑛
+→
+−
+𝜕𝑖 𝜙 (𝜋1 z) · 𝜋𝑛+1𝑧𝑖
+𝜕𝑖 𝜙 (𝜋1 z) · 𝜋2𝑧𝑖 , . . . ,
+D 𝑛 (𝜙 (M)) := 𝜆zR×R . 𝜙 (𝜋 1 z) ,
+𝑘
+𝑘
+*
+𝑖=1
+⊥𝑛
+←
+−
+D 𝑛 (𝜙 (M)) := 𝜆zR×R . 𝜙 (𝜋 1 z) , 𝜆𝑎 R .
+𝑘
+Õ
+𝑖=1
+𝜋 2𝑧𝑖 (𝜕𝑖 𝜙 (𝜋1 z) · 𝑎)
+𝑖=1
++!
++!
+→
+−
+D 𝑛 (M)
+←
+−
+D 𝑛 (M)
+(b) The action over a function symbol 𝜙 of arity 𝑘. We suppose that, for every 1 ≤ 𝑖 ≤ 𝑘, there is an associated
+function symbol 𝜕𝑖 𝜙 of arity 𝑘 such that 𝜕𝑖 J𝜙K (r) = J𝜕𝑖 𝜙K (r) for every r ∈ R𝑘 on which 𝜕𝑖 J𝜙K is defined.
+The writing 𝜙 (M) is a shortcut for 𝜙 (𝑀1, . . . , 𝑀𝑘 ), and, similarly, 𝜆z stands for the sequence of abstractions
+𝜆𝑧 1 . . . 𝜆𝑧𝑘 and D𝑛 (M) for the sequence of applications to D𝑛 (𝑀1 ) . . . D𝑛 (𝑀𝑘 ). These sequences are supposed
+empty if 𝑘 = 0.
+D𝑛 (𝑥 𝐴 ) := 𝑥 D𝑛 (𝐴)
+D𝑛 (𝜆𝑥 𝐴 .𝑀) := 𝜆𝑥 D𝑛 (𝐴) .D𝑛 (𝑀)
+D𝑛 (⟨𝑀1, . . . , 𝑀𝑘 ⟩) := ⟨D𝑛 (𝑀1 ), . . . , D𝑛 (𝑀𝑘 )⟩
+D𝑛 (if (𝑃, 𝑀, 𝑁 )) := if (𝜋1 D𝑛 (𝑃), D𝑛 (𝑀), D𝑛 (𝑁 ))
+D𝑛 (𝑀𝑁 ) := D𝑛 (𝑀)D𝑛 (𝑁 )
+D𝑛 (𝜋𝑖 𝑀) := 𝜋𝑖 D𝑛 (𝑀)
+D𝑛 (fix 𝑓 𝐴 .𝑀) := fix 𝑓 D𝑛 (𝐴) .D𝑛 (𝑀)
+(c) The action over the other programming primitives.
+Fig. 2. The forward and reverse AD transformations. The symbol D denotes either one of them. The index 𝑛
+refers to the gradient dimension and acts only over ground type annotations. We will omit the index when
+inessential or clear from the context.
+Proposition 8. For every program 𝑀 and strategy S, we have, for all r ∈ ⇓ S 𝑀, J𝑀KΓS (r) =
+J𝑀KΓ (r). So, in particular, ⇓ S 𝑀 ⊆ ⇓𝑀, d S (𝑀) ⊆ d(𝑀) and, for every r ∈ d S (𝑀), J J𝑀KΓS (r) =
+J J𝑀KΓ (r).
+2.2
+Automatic Differentiation
+As mentioned in the Introduction, the two modes of AD are performed by means of the program
+→
+−
+←
+−
+transformations D (forward) and D (reverse), outlined in full detail in Fig. 2. The cornerstone of
+these transformations is the chain rule, which describes the derivative of a composition of functions:
+(𝑓 ◦ 𝑔) ′ (𝑥) = 𝑓 ′ (𝑔(𝑥)) · 𝑔 ′ (𝑥).
+(4)
+This says in particular that (−) ′ is not functorial (i.e., modular/compositional): the right-hand side
+of Equation (4) does not use only 𝑔 ′ (𝑥) but also 𝑔(𝑥). Functoriality may be achieved by transforming
+→
+−
+a map 𝑓 : R → R into a map D (𝑓 ) : R2 → R2 acting as follows:
+→
+−
+D (𝑓 ) : ⟨𝑧, ¤𝑧⟩ ↦→ ⟨𝑓 (𝑧), 𝑓 ′ (𝑧) · ¤𝑧⟩ .
+(5)
+Referring to Equation (4), the input 𝑧, which is often called primal in the AD literature, corresponds
+to the output of 𝑔, whereas ¤𝑧, called tangent, corresponds to the output of 𝑔 ′. The reader may easily
+→
+−
+→
+−
+→
+−
+check functoriality: D (𝑓 ◦ 𝑔) = D (𝑓 ) ◦ D (𝑔). This generalizes to 𝑛-ary maps in the definition of
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:11
+→
+−
+D 𝑛 in Fig. 2b2 and is the essential part of forward mode AD. The attribute forward refers to the
+fact that the computation of both the primal and the tangent follows the input-to-output flow, in
+particular the derivative 𝑓 ′ (𝑧) is computed after having accumulated in 𝑧¤ the derivative of its input
+function.
+→
+−
+→
+−
+Notice that, if we denote by |𝑀 | the size of a term 𝑀, we have that | D 𝑛 (𝜙 (𝑀))| = 𝑂 (𝑛) + | D 𝑛 (𝑀)|.
+→
+−
+So, supposing that 𝐹 consists only of function symbols and variables, evaluating both 𝐹 and D 𝑛 (𝐹 )
+→
+−
+on a given input requires a number of operations roughly equal to their size. But | D 𝑛 (𝐹 )| = 𝑂 (𝑛|𝐹 |),
+→
+−
+therefore the evaluation of D 𝑛 (𝐹 ) is blown up by a factor of 𝑛 with respect to the evaluation of 𝐹 .
+In applications to deep learning, 𝐹 is a loss function and 𝑛 is the number of learning parameters,
+which may be huge (hundreds of millions).
+Luckily, AD offers a more efficient method for applying the chain rule in these cases, called
+reverse mode AD, or backpropagation, because the idea is to accumulate the tangents in the reverse
+order with respect to the primals. More precisely, by taking the notation of (4), the backpropagation
+←
+−
+D (𝑓 ) of 𝑓 first computes 𝑓 ′ (𝑔(𝑥)) and then waits for the derivative 𝑔 ′ (𝑥) in order to perform
+the multiplication. As first observed by [Pearlmutter and Siskind 2008], this mode may be naturally expressed in a functional programming language by replacing the tangent variables 𝑧¤ with
+backpropagators 𝑧 ∗ representing functions (in fact, special forms of continuations):
+←
+−
+D (𝑓 ) : ⟨𝑧, 𝑧 ∗ ⟩ ↦→ 𝑓 (𝑧), 𝜆𝑎 R .𝑧 ∗ (𝑓 ′ (𝑧) · 𝑎)
+(6)
+A backpropagator is a map R → R𝑛 waiting for a real number (the derivative of the next function)
+in order to achieve the computation of the gradient of the whole function. In (6), the second
+component of the returned pair is the backpropagator associated with 𝑓 , the variable 𝑧 ∗ being the
+awaited backpropagator associated with the input function of 𝑓 (called 𝑔 in (4)). This transformation
+←
+−
+generalizes to the definition of D 𝑛 in Fig. 2b for 𝑛-ary maps.
+←
+−
+←
+−
+We encourage the reader to check that | D 𝑛 (𝜙 (𝑀))| = 𝑂 (1) + | D 𝑛 (𝑀)|, so if 𝐹 consists only
+←
+−
+of function symbols and variables, the evaluation of D 𝑛 (𝐹 ) is asymptotically as costly as the
+evaluation of 𝐹 . However, in more complex cases, the sole transformation (6) is not enough to
+guarantee efficiency: if 𝐹 contains sharing, e.g. a subroutine 𝑔 called several times, the evaluation
+←
+−
+of D (𝐹 ) may duplicate uselessly the computation associated with the backpropagator of 𝑔, and
+this may result in an exponential blowup. This highlights a key difference between forward and
+reverse mode: if 𝐹 is a first order program (i.e., every abstraction 𝜆𝑥 𝐴 in 𝐹 is such that 𝐴 has no
+→
+−
+←
+−
+arrows), then D (𝐹 ) is also a first order program, whereas D (𝐹 ) is a higher order term. When
+backpropagation is expressed in an imperative language, as is usually the case, duplication is not
+a problem because efficiency is automatically achieved by accumulating the tangents (in reverse
+order) in memory. But for functional languages, subtle techniques have been introduced to avoid
+this problem, e.g. closure conversions [Pearlmutter and Siskind 2008] or memory references and
+delimited continuations [Wang et al. 2019].
+In this paper we follow the approach of [Brunel et al. 2020], giving a purely functional solution
+based on linear logic types: backpropagators have type R⊥𝑛 , which corresponds to the set of linear
+maps from R to R𝑛 . The efficiency of the transformation is then guaranteed by a factoring rule
+added to the operational semantics, which allows sharing the evaluation of different occurrences of
+a backpropagator 𝑧 ∗ in an expression:
+𝑧∗𝑀 + 𝑧∗ 𝑁
+→
+−
+𝑧 ∗ (𝑀 + 𝑁 ).
+(7)
+2 Modulo some syntactic bureaucracy, i.e., the pair ⟨𝑧, 𝑧¤ ⟩ of (5) corresponds in Fig. 2b to a single variable 𝑧 of type R × R𝑛 ,
+whose components are obtained by using the projections 𝜋𝑖
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:12
+Damiano Mazza and Michele Pagani
+This rewriting rule is sound because backpropagators are linear maps, so they commute with sums.
+In particular, the normal form of a term obtained using (7) is the same one would have obtained,
+perhaps in more steps, without using it. As mentioned in the Introduction, in our present setting
+we are concerned only with soundness, not efficiency. For this reason, we adopt the definition
+R⊥𝑛 := R → R𝑛
+and do not consider the linear factoring rule (7). In fact, by the above remark, rule (7) only speeds
+up computation without introducing any error, so our almost-everywhere soundness result is
+transparent to its use, and enforcing linearity would only lead to unnecessary complications
+induced by a more sophisticated type system. We do retain the notation (−) ⊥ as a reminder that
+this is supposed to be a linear arrow (i.e., R⊥𝑛 should really be R ⊸ R𝑛 ), but the transformation of
+[Brunel et al. 2020] remains well typed with the above łnon-linearž definition of negation. Indeed,
+apart from the addition of conditional and fixpoints, the transformation of Fig. 2 is exactly that of
+loc. cit. and it is efficient as long as it is executed according to the operational semantics enriched
+with (7), so nothing is lost with respect to our previous work.
+So far we have explained AD transformations only in regard to primitive functions, which
+are the łelementary blocksž of straight-line programs mentioned in the Introduction. It is an
+observation first formalized in [Wang et al. 2019] that the transformations may be extended to
+→
+−
+←
+−
+arbitrary programs simply by applying the functoriality principle: D and D are defined to commute
+with the programming constructs of the language, resulting in Fig. 2c. As a result, the abstract
+syntax tree of an expression is basically preserved by the two transformations,3 only the types
+of the variables are lifted so as to accommodate primals and tangents or backpropagators at the
+ground level. This behavior is often described by saying that AD is implemented via łoperator
+overloadingž. We prefer the term łfunctorialityž because we find it technically more appropriate.
+Notice that, in the definition of D(if (𝑃, 𝑀, 𝑁 )), the transformation is applied also to the guard 𝑃
+in order to preserve typability, because 𝑃 may share free variables with 𝑀 and 𝑁 . However, the
+computation of the gradient of 𝑃 is useless and therefore D(𝑃) is projected to the first component.
+A possible optimization would be to define D (if (𝑃, 𝑀, 𝑁 )) := if (D′ (𝑃), D(𝑀), D (𝑁 )) where D′ is
+an auxiliary transformation such that D′ (𝑥 𝐴 ) = 𝜋1𝑥 D (𝐴) and which behaves homomorphically on
+every other term. We avoid introducing D′ because it is not crucial for our results and because
+such an optimization is not so relevant at our level of abstraction (indeed, the evaluation of D (𝑃) is
+linear in the evaluation of 𝑃, as proved in [Brunel et al. 2020], so asymptotically there is no gain).
+Some examples of the two modes of D are given in Fig. 3. In the case of subtraction (Fig. 3b),
+→
+−
+notice how the size of the term resulting from the forward transformation D 𝑛 increases with the
+←
+−
+gradient dimension 𝑛, while it is constant in D 𝑛 , as expected from the above discussion.
+Given a term Γ ⊢ 𝑀 : 𝐴 with Γ = 𝑥 1𝐴1 , . . . , 𝑥𝑛𝐴𝑛 , one can check that D(Γ) ⊢ D (𝑀) : D(𝐴), where
+D (Γ) = 𝑥 1D (𝐴1 ) , . . . , 𝑥𝑛D (𝐴𝑛 ) . In particular, if 𝑀 is a program, then
+𝑛
+𝑛
+→
+−
+𝑥 1R×R , . . . , 𝑥𝑛R×R ⊢ D 𝑛 (𝑀) : R × R𝑛
+⊥𝑛
+𝑥 1R×R , . . . , 𝑥𝑛R×R
+⊥𝑛
+←
+−
+⊢ D 𝑛 (𝑀) : R × R⊥𝑛
+(8)
+→
+−
+←
+−
+If, furthermore, 𝑀 is simple, then the computational behavior of the transformations D and D is
+given by the following result, which was proved in [Barthe et al. 2020; Brunel et al. 2020; Huot et al.
+2020],4 and in which 𝜄𝑖𝑛 are the injections of R into R𝑛 as defined in Equation (2).
+3 This is the case for all constructs except the conditional, where a projection is added to the transformation of the guard.
+This minor technicality is due to the fact that we consider only the ground type of real numbers and not that of Booleans.
+4 In a personal communication, Mitchell Wand showed us that soundness of reverse mode AD may also be proved by means
+of łopenž logical relations of the kind discussed in [Barthe et al. 2020] and used here for the unsoundness bound (Sect. 4).
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+→
+−
+D 1 (ReLU) = 𝜆𝑥 R×R .if (𝜋 1𝑥, ⟨0, 0⟩ , 𝑥)
+28:13
+⊥
+←
+−
+D 1 (ReLU) = 𝜆𝑥 R×R .if (𝜋 1𝑥, ⟨0, 𝜆𝑎.0⟩ , 𝑥)
+(a) D1 of the rectified linear unit ReLU, defined in (1).
+
+
+→ R
+−
+D 1 (𝑥 − 𝑦 R ) = 𝜆𝑧 1R×R𝑧 2R×R . 𝜋 12 (𝑧 1 ) − 𝜋12 (𝑧 2 ), 𝜋22 (𝑧 1 ) − 𝜋22 (𝑧 2 ) 𝑥 R×R𝑦 R×R
+
+
+2
+2
+2
+2
+→ R
+−
+D 2 (𝑥 − 𝑦 R ) = 𝜆𝑧 1R×R 𝑧 2R×R . 𝜋 13 (𝑧 1 ) − 𝜋13 (𝑧 2 ), 𝜋23 (𝑧 1 ) − 𝜋 23 (𝑧 2 ), 𝜋33 (𝑧 1 ) − 𝜋 33 (𝑧 2 ) 𝑥 R×R 𝑦 R×R
+
+
+⊥𝑛
+⊥𝑛
+⊥𝑛
+⊥𝑛
+←
+−
+D 𝑛 (𝑥 R − 𝑦 R ) = 𝜆𝑧 1R×R 𝑧 2R×R . 𝜋12 (𝑧 1 ) −𝜋12 (𝑧 2 ), 𝜆𝑎 R.(𝜋 22 (𝑧 1 )1·𝑎 + 𝜋 22 (𝑧 2 )(−1) ·𝑎) 𝑥 R×R 𝑦 R×R
+(b) D𝑛 of the subtraction 𝑥 − 𝑦, with 𝑛 = 1, 2, where we suppose 𝜕1 (𝑥 − 𝑦) := 1 and 𝜕2 (𝑥 − 𝑦) := −1.
+Fig. 3. Some examples of the D transformations. Notice that we take the liberty of using the same name for
+the ground variables 𝑥 R and 𝑦 R and their images 𝑥 D (R) and 𝑦 D (R) under D.
+Proposition 9 (soundness of AD for simple terms). Let Γ = 𝑥 1R, . . . , 𝑥𝑛R and let Γ ⊢ 𝑡 : R be a
+simple program. Then, for all r = (𝑟 1, . . . , 𝑟𝑛 ) ∈ d(𝑡), we have
+→
+−
+D 𝑛 (𝑡){ 𝑟 1, 𝜄𝑛1 1 /𝑥 1 } . . . { 𝑟𝑛 , 𝜄𝑛𝑛 1 /𝑥𝑛 } −
+→∗ J𝑡KΓ (r), ∇J𝑡KΓ (r)
+ ∗
+←
+−
+→ J𝑡KΓ (r), 𝑢
+D 𝑛 (𝑡){ 𝑟 1, 𝜄𝑛1 /𝑥 1 } . . . { 𝑟𝑛 , 𝜄𝑛𝑛 /𝑥𝑛 } −
+such that 𝑢1 −
+→∗ ∇J𝑡KΓ (r).
+Looking at Proposition 9, if 𝑀 is an arbitrary program of arity 𝑛 and coarity 1, it is reasonable
+to believe that the following programs compute ∇J𝑀KΓ in r = (𝑟 1, . . . , 𝑟𝑛 ) ∈ R𝑛 whenever this is
+defined:
+−−−→
+→
+−
+𝑔𝑟𝑎𝑑 𝑛 (𝑀)(r) := 𝜋 22 D 𝑛 (𝑀){ 𝑟 1, 𝜄𝑛1 1 /𝑥 1 } . . . { 𝑟𝑛 , 𝜄𝑛𝑛 1 /𝑥𝑛 },
+(9)
+
+←−−−
+←
+−
+(10)
+𝑔𝑟𝑎𝑑 𝑛 (𝑀)(r) := 𝜋22 D 𝑛 (𝑀){ 𝑟 1, 𝜄𝑛1 /𝑥 1 } . . . { 𝑟𝑛 , 𝜄𝑛𝑛 /𝑥𝑛 } 1.
+In the sequel, we will omit the index 𝑛 when inessential or clear from the context. We will also
+write 𝑔𝑟𝑎𝑑 (𝑀) for either one the above terms.5
+Referring to Fig. 3, it is immediate to check that, regardless of the mode, 𝑔𝑟𝑎𝑑 1 (ReLU 𝑧 R )(𝑟 ) −
+→∗ 1
+R
+∗
+if 𝑟 > 0 and 𝑔𝑟𝑎𝑑 1 (ReLU 𝑧 )(𝑟 ) −
+→ 0 if 𝑟 ≤ 0. This is the expected result except for 𝑟 = 0, where
+the map JReLU 𝑧K𝑧 R is not differentiable. As discussed in the Introduction, our soundness result
+concerns only the domain of differentiability d(𝑀) of a map J𝑀K represented by a program and
+nothing is stated about the value of 𝑔𝑟𝑎𝑑 (𝑀) outside d (𝑀). This situation is quite common in AD
+frameworks, where it may even be desirable to control the behavior of the łnon-existent derivativež
+on singularities. For example, the following term cReLU implements the rectified linear unit (i.e.,
+JcReLU 𝑧K𝑧 R = JReLU 𝑧K𝑧 R ) so that 𝑔𝑟𝑎𝑑 returns some arbitrarily chosen 𝑞 ∈ R on 0:
+R
+cReLU𝑞 := 𝜆𝑥 .if (𝑥, if (−𝑥, 𝑞 · 𝑥, 0), 𝑥),
+
+
+1
+
+
+
+𝑔𝑟𝑎𝑑 1 (cReLU𝑞 𝑧 )(𝑟 ) −
+→ 𝑞
+
+
+0
+
+R
+∗
+if 𝑟 > 0,
+if 𝑟 = 0,
+if 𝑟 < 0.
+(11)
+We do not consider these computations as errors because ∇JReLU 𝑧K𝑧 R is undefined at 0.
+5 Notice that the above definition of 𝑔𝑟𝑎𝑑 is slightly different from the informal one used in the Introduction: it applies to
+terms with free ground variables, whereas in the Introduction we abusively applied 𝑔𝑟𝑎𝑑 to closed terms.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:14
+Damiano Mazza and Michele Pagani
+We already discussed SillyId (see (1)) as a first example of a mismatch between AD and the
+gradient in the domain of differentiability of a map. Let us consider here a refined example:
+EqProj := 𝜆𝑥 R .𝜆𝑦 R .if (𝑥 − 𝑦, if (𝑦 − 𝑥, 𝑥, 𝑦), 𝑦).
+(12)
+This term is extensionally equivalent to the binary projection 𝜆𝑥 R .𝜆𝑦 R .𝑦 and therefore its gradient
+should be ⟨0, 1⟩ on the whole domain R2 . By contrast, the reader may check that:
+−
+
+−−−→
+→
+𝑔𝑟𝑎𝑑 2 (EqProj 𝑥 1R𝑥 2R )(𝑟 1, 𝑟 2 ) = 𝜋22 D 2 (EqProj) 𝑟 1, 𝜄 12 1 𝑟 2, 𝜄 22 1
+→∗ 𝜋22 (if (𝑟 1 − 𝑟 2, if (𝑟 2 − 𝑟 1, ⟨𝑟 1, ⟨1, 0⟩⟩ , ⟨𝑟 2, ⟨0, 1⟩⟩), ⟨𝑟 2, ⟨0, 1⟩⟩))
+−
+(
+∗ ⟨0, 1⟩ if 𝑟 1 ≠ 𝑟 2,
+→
+−
+⟨1, 0⟩ if 𝑟 1 = 𝑟 2 .
+The diagonal of R2 gives an uncountable set of errors (a similar computation yields the same
+result also for the reverse mode). However, this set is negligible, i.e., of Lebesgue measure zero, in
+accordance with the claim (ii’) stated in the Introduction.
+Let us add a last comment on example (12). Consider the unary program EqProj 𝑥 1R𝑥 1R , which is
+−−−→
+extensionally equivalent to the identity. One can check that 𝑔𝑟𝑎𝑑 1 (EqProj 𝑥 1𝑥 1 )(𝑟 ) −
+→∗ 1 for every
+𝑟 ∈ R, so there is no error at all in this case. This is in sharp contrast with approaches based on
+partial conditionals, such as [Abadi and Plotkin 2020], in which conditionals diverge when the
+guard evaluates to 0: under such semantics, EqProj 𝑥 1𝑥 1 diverges everywhere.
+Different reduction strategies change the convergence and differentiability domain of a program,
+so a priori the soundness of AD depends on the strategy. In the above examples, we considered the
+maximal reduction strategy 𝛽. If we wish to specialize to a more restrictive reduction strategy S,
+we should prove that 𝑔𝑟𝑎𝑑 (𝑀) evaluates, in accordance with S, to the gradient of J𝑀KΓS at almost
+every point where this is defined. In fact, if we succeed in proving this with respect to 𝛽, then it
+follows also for any other łreasonablež strategy S:
+Proposition 10. Let Γ ⊢ 𝑀 : R be a program. If J𝑔𝑟𝑎𝑑 (𝑀)KΓ | d (𝑀) ∼ ∇(J𝑀KΓ ), then for any
+reduction strategy S such that d S (𝑀) ⊆ ⇓ S(𝑔𝑟𝑎𝑑 (𝑀)) we also have J𝑔𝑟𝑎𝑑 (𝑀)KΓS | dS (𝑀) ∼ ∇(J𝑀KΓS ).
+Proof. By hypothesis we have that d (𝑀) = 𝐴 ∪ 𝑍 with 𝑍 of measure zero and J𝑔𝑟𝑎𝑑 (𝑀)KΓ |𝐴 =
+∇(J𝑀KΓ )|𝐴 . Let S be a reduction strategy satisfying the hypothesis and let 𝐵 := 𝐴 ∩ d S (𝑀). We
+need to prove that J𝑔𝑟𝑎𝑑 (𝑀)KΓS | 𝐵 = ∇(J𝑀KΓS )| 𝐵 and that d S (𝑀) \ 𝐵 is negligible.
+Let us start with this latter point. Notice that, by Proposition 8, d S (𝑀)\𝐵 = d S (𝑀)\(𝐴∩d S (𝑀)) =
+S
+d (𝑀) \ 𝐴 ⊆ d (𝑀) \ 𝐴, and the latter set is of measure zero by hypothesis.
+Let us now take r ∈ 𝐵. We have:
+J𝑔𝑟𝑎𝑑 (𝑀)KΓS (r) = J𝑔𝑟𝑎𝑑 (𝑀)KΓ (r)
+by 𝐵 ⊆ d S (𝑀) ⊆ ⇓ S(𝑔𝑟𝑎𝑑 (𝑀)) and Proposition 8
+= ∇(J𝑀KΓ )(r)
+because 𝐵 ⊆ 𝐴
+= ∇(J𝑀KΓS )(r)
+by 𝐵 ⊆ d S (𝑀) and Proposition 8.
+□
+The condition d S (𝑀) ⊆ ⇓ S(𝑔𝑟𝑎𝑑 (𝑀)) is reasonable, since d S (𝑀) ⊆ ⇓ S 𝑀 by definition and it is
+very likely that ⇓ S 𝑀 ⊆ ⇓ S 𝑔𝑟𝑎𝑑 (𝑀), because the convergence of 𝑔𝑟𝑎𝑑 (𝑀) coincides with that of
+D (𝑀) and the latter essentially behaves like 𝑀, as we will prove in Sect. 3.2. Notice that, when
+𝑡 is simple, ⇓ S 𝑡 = ⇓ S 𝑔𝑟𝑎𝑑 (𝑡) is trivially true because of strong normalization (Proposition 5), so
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:15
+Proposition 9 in fact holds for any reduction strategy. Common strategies such as call-by-value, callby-name and call-by-need are easily seen to enjoy the condition of Proposition 10. See Remark 30
+below for a proof sketch in the case of call-by-value.
+2.3
+Primitive Functions and Complete Quasicontinuity
+The only assumption we made so far about the function symbols of PCFR is that for every 𝜙 of
+arity 𝑘 and every 1 ≤ 𝑖 ≤ 𝑘, there is another 𝑘-ary function symbol 𝜕𝑖 𝜙 corresponding to the
+partial derivative of J𝜙K with respect to its 𝑖-th argument (Fig. 2b). In order to prove one of our
+main results (Theorem 42), we will need to make some further topological and measure-theoretic
+assumptions, which we proceed to spell out.
+In what follows, we always consider R𝑛 with its standard topology and the Lebesgue measure.
+We denote by int(𝑋 ) the interior of a set 𝑋 (the largest open set contained in 𝑋 ) and by bor(𝑋 ) its
+border, defined as bor(𝑋 ) := 𝑋 \ int(𝑋 ). Equivalently, bor(𝑋 ) = 𝜕𝑋 ∩ 𝑋 where 𝜕𝑋 is the boundary
+of 𝑋 (the closure of 𝑋 minus int(𝑋 )). In case 𝑋 is closed, bor(𝑋 ) = 𝜕𝑋 .
+We recall that a clone [Szendrei 1986] on a set 𝐴 is a collection P of functions 𝐴𝑛 ⇀ 𝐴 (for varying
+𝑛) which is closed under composition6 and contains all projections (in particular, the identity on 𝐴).
+Notice that clones are stable under arbitrary intersections, hence every set F of functions 𝐴𝑛 ⇀ 𝐴
+(for possibly varying 𝑛) generates a clone ⟨F⟩, the smallest clone containing F.
+Definition 11 (admissible primitive functions). We say that a clone P on R is admissible if
+𝑓 ∈ P implies:
+(1) 𝑓 is continuous on its domain;
+(2) if 𝑓 : R𝑛 ⇀ R is not identically zero, then 𝑓 −1 (0) is of Lebesgue measure zero in R𝑛 .
+Fix a set F of function symbols together with their semantics. We abusively denote by F also the set
+of all J𝜙K with 𝜙 ranging over the chosen function symbols. We say that F forms an admissible set of
+primitive functions if ⟨F⟩ is admissible.
+It is well known [Mityagin 2015] that an example of admissible clone is provided by the collection
+of all real functions which are defined and analytic on some open set 𝑈 ⊆ R𝑛 , for varying 𝑈 and 𝑛.
+Notice that a subclone of an admissible clone is admissible. Therefore, a simple way of ensuring
+that the primitive functions of PCFR are admissible is to ask that they are all analytic where they
+are defined. This is of course true of our łmandatoryž primitive functions (constants, addition and
+multiplication), as well as all functions usually taken as primitive, such as division, square root,
+exponential, logarithm, the trigonometric functions and their inverses, Gaussian functions, many
+sigmoid functions (e.g. the error function), etc. Other desirable functions which are not analytic
+(the step function, the floor function, the rectified linear unit. . . ) are usually programmable in PCFR
+from these primitive functions.
+The definitions that follow are parametric in a choice of admissible clone B, so we should speak
+of B-quasiopen set, B-quasicontinuity, etc. However, for simplicity, we will omit the parameter B,
+implicitly fixing once and for all an admissible set F of primitive functions and letting B := ⟨F⟩.
+Functions in B will be called basic.
+Definition 12 (qasiopen set). We define the class of quasiopen sets of R𝑛 to be the smallest
+class of subsets of R𝑛 which:
+(1) contains every open set;
+(2) contains the zero set of every basic function R𝑛 ⇀ R;
+(3) is closed under countable unions and binary intersections.
+6 We mean that if 𝑓 : 𝐴𝑘 ⇀ 𝐴 and 𝑔 , . . . , 𝑔 : 𝐴𝑛 ⇀ 𝐴 are in P, then so is the function a ↦→ 𝑓 (𝑔 (a), . . . , 𝑔 (a)).
+1
+1
+𝑘
+𝑘
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:16
+Damiano Mazza and Michele Pagani
+Inductively, the quasiopen sets of R𝑛 may be defined as follows:
+Ø
+𝑄𝑖 | 𝑄 ∩ 𝑄 ′,
+𝑄, 𝑄 ′ ::= 𝑈 | ℎ −1 (0) |
+𝑖 ∈𝐼
+where 𝑈 ranges over the open sets of R𝑛 , ℎ : R𝑛 ⇀ R ranges over basic functions (which may further
+be supposed to be not identically zero) and 𝐼 is countable.
+Definition 13 (qasivariety). A set 𝑍 ⊆ R𝑛 is called a quasivariety Ð
+if there exists a family
+{ℎ𝑖 }𝑖 ∈𝐼 of basic functions ℎ𝑖 : R𝑛 → R with 𝐼 countable and such that 𝑍 ⊆ 𝑖 ∈𝐼 ℎ −1 ({0}). In other
+words, a quasivariety is an arbitrary subset of a countable union of zero sets of basic functions.
+The following result, which says that quasivarieties form a class of łnegligible setsž, will be
+frequently used in the sequel, without explicit mention:
+Lemma 14. Quasivarieties enjoy the following properties:
+(1) measure zero: if 𝑍 ⊆ R𝑛 is a quasivariety, then it a has Lebesgue measure zero in R𝑛 ;
+(2) Ð
+stability under countable unions: if {𝑍𝑖 }𝑖 ∈𝐼 is a countable family of quasivarieties, then
+𝑖 ∈𝐼 𝑍𝑖 is a quasivariety;
+(3) stability under subsets: if 𝑍 is a quasivariety and 𝑍 ′ ⊆ 𝑍 , then 𝑍 ′ is a quasivariety.
+Proof. Immediate from the definition.
+□
+Lemma 15. Let 𝑄 ⊆ R𝑛 be quasiopen. Then:
+(1) there exists an open set 𝑈 and a quasivariety 𝑍 such that 𝑄 = 𝑈 ∪ 𝑍 ;
+(2) bor(𝑄) is a quasivariety. Hence, in the above one may always take 𝑈 = int(𝑄) and 𝑍 = bor(𝑄).
+The set of non-positive numbers R ≤0 is an example of quasiopen subset of R: to see why, simply
+notice that R ≤0 = R<0 ∪ {0}, the first being open and the second being the zero set of the identity,
+which is always a basic function. In a sense, the key property of the class of quasiopen sets is that
+it includes both R ≤0 and R>0 , a fact which will be used crucially in Lemma 38.
+On the other hand, thick Cantor sets provide examples of non-quasiopen subsets of R: such a set
+𝐾 is closed, of positive measure and has empty interior, so 𝐾 = bor(𝐾), which would contradict
+Lemma 15.2 if 𝐾 were quasiopen.
+In what follows, if 𝑓 : 𝐴 ⇀ 𝐵 and 𝑔 : 𝐶 ⇀ 𝐷 are partial functions between sets, we write 𝑓 × 𝑔
+for the function of type 𝐴 × 𝐶 ⇀ 𝐵 × 𝐷 such that (𝑓 × 𝑔)(𝑎, 𝑐) = (𝑓 (𝑎), 𝑔(𝑐)) whenever 𝑓 (𝑎) and
+𝑔(𝑐) are defined, and is undefined otherwise.
+Definition 16 ((complete) qasicontinuity). A function 𝑓 : R𝑛 ⇀ R𝑚 is quasicontinuous7 if,
+for every quasiopen set 𝑄 ⊆ R𝑚 , 𝑓 −1 (𝑄) is quasiopen. We say that 𝑓 is completely quasicontinuous
+(cqc) if idR𝑘 × 𝑓 is quasicontinuous, for all 𝑘 ∈ N.
+Complete quasicontinuity is needed in order to have Lemma 17.4 below. It is worth pointing out,
+however, that we have not been able to find an example of a quasicontinuous function which is
+not completely quasicontinuous. So, while we conjecture that complete quasicontinuity is strictly
+stronger than quasicontinuity, the two notions might coincide in reality.
+Lemma 17. We have the following properties:
+(1) a function 𝑓 : R𝑛 → R𝑚 is quasicontinuous iff for every 𝑄 which is either open or the zero set of
+a basic function, 𝑓 −1 (𝑄) is quasiopen.
+7 The terminology łquasicontinuousž already has a standard meaning, unrelated to the one defined here. On the other hand,
+łquasiopenž and łcompletely quasicontinuousž, which are the fundamental notions used in this work, do not seem to have
+been used in the literature.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:17
+𝐴′ ⊏ 𝐴 𝐵 ′ ⊏ 𝐵
+R ⊏ R 𝐴′ → 𝐵 ′ ⊏ 𝐴 → 𝐵
+𝐴𝑖′ ⊏ 𝐴𝑖 , ∀ 1 ≤ 𝑖 ≤ 𝑘
+′
+𝐴1 × · · · × 𝐴𝑘′ ⊏ 𝐴1 × · · · × 𝐴𝑘
+𝐴𝑖 ⊏ 𝐴, ∀ 1 ≤ 𝑖 ≤ 𝑛
+𝐴1 × · · · × 𝐴𝑛 ⊏ 𝐴
+(a) The pre-trace relation on types.
+Ξ ⊢ {·} ⊏ {·}
+𝐴1 × · · · × 𝐴𝑛 ⊏ 𝐴
+𝐴
+1
+Ξ, 𝑝 ×···×𝐴𝑛 ⊏ 𝑥 𝐴 ⊢ 𝜋𝑖𝑛 𝑝 ⊏ 𝑥
+𝑖 ∈ {1, . . . , 𝑛}
+′
+Ξ, 𝑝 𝐴 ⊏ 𝑥 𝐴 ⊢ 𝑡 ⊏ 𝑀
+′
+Ξ ⊢ 𝜆𝑝 𝐴 .𝑡 ⊏ 𝜆𝑥 .𝑀
+Ξ ⊢ 𝑡 1 ⊏ 𝑀1, . . . , Ξ ⊢ 𝑡𝑘 ⊏ 𝑀𝑘
+Ξ ⊢ ⟨𝑡 1, . . . , 𝑡𝑘 ⟩ ⊏ ⟨𝑀1, . . . , 𝑀𝑘 ⟩
+Ξ ⊢ 𝑡 ⊏ 𝑀, Ξ ⊢ 𝑢 1 ⊏ 𝑁 . . . Ξ ⊢ 𝑢𝑛 ⊏ 𝑁
+Ξ ⊢ 𝑡 ⟨𝑢 1, . . . , 𝑢𝑛 ⟩ ⊏ 𝑀𝑁
+Ξ⊢𝑡 ⊏𝑀
+Ξ ⊢ 𝜋𝑖𝑘 𝑡 ⊏ 𝜋𝑖𝑘 𝑀
+Ξ ⊢ 𝑡𝑖 ⊏ 𝑀𝑖
+𝑖 ∈ {1, 2}
+Ξ ⊢ 𝜋𝑖 ⟨𝑡𝑖 , 𝑡𝑖 ⟩ ⊏ if(𝑃, 𝑀1, 𝑀2 )
+Ξ ⊢ 𝑡 1 ⊏ 𝑀1 . . . Ξ ⊢ 𝑡𝑘 ⊏ 𝑀𝑘
+Ξ ⊢ 𝜙 (𝑡 1, . . . , 𝑡𝑘 ) ⊏ 𝜙 (𝑀1, . . . , 𝑀𝑘 )
+Ξ ⊢ 𝑡 ⊏ fix𝑛 𝑓 .𝑀
+𝑛>0
+Ξ ⊢ 𝑡 ⊏ fix 𝑓 .𝑀
+(b) The pre-trace relation on terms. In the variable rule, if 𝑛 = 1, then 𝜋𝑖 is omitted. Recall the definition of
+fix𝑛 𝑓 .𝑀 in (3).
+Fig. 4. The pre-trace relation between simple and arbitrary PCFR terms.
+(2) Identities are cqc and cqc functions are stable under composition.
+(3) Basic functions are cqc. In particular, projections are cqc.
+(4) If 𝑓 : R𝑘 ⇀ R𝑚 and 𝑔 : R𝑘 ⇀ R𝑛 are cqc, then the function ⟨𝑓 , 𝑔⟩ : R𝑘 → R𝑚+𝑛 defined by
+⟨𝑓 , 𝑔⟩(𝑧) := (𝑓 (𝑧), 𝑔(𝑧)) if 𝑧 ∈ ⇓𝑓 ∩ ⇓𝑔 and undefined otherwise, is also cqc.
+Contrarily to what the name might suggest, a continuous function is not in general quasicontinuous. In fact, it is well known that any closed subset of R may be the zero set of a map which is
+smooth everywhere (in particular, continuous). So let 𝜙 : R → R be a smooth function whose zero
+set is a thick Cantor set 𝐾, which, as observed above, is not quasiopen. The set {0} is quasiopen (it is
+the zero set of the identity, which is a basic map), and yet 𝜙 −1 ({0}) = 𝐾, so 𝜙 is not quasicontinuous.
+3 SOUNDNESS OF AD
+We want to prove that 𝑔𝑟𝑎𝑑 (𝑀) computes the gradient of a program 𝑀 almost everywhere in d (𝑀)
+(Theorem 42). The proof splits in two parts: Theorem 33 states that 𝑔𝑟𝑎𝑑 (𝑀) is sound for the set
+S(𝑀) of stable points of d (𝑀) (Definition 26) and Sect. 4 shows that S(𝑀) is actually almost all of
+d(𝑀) ⊆ ⇓𝑀, in the sense that ⇓𝑀 \ S(𝑀) is of measure zero.
+Intuitively, a point r ∈ ⇓𝑀 is stable whenever there exists a simple term 𝑡 that łtracesž the
+evaluation of 𝑀 over an open ball 𝐵𝜀 (r) of r. Such a 𝑡 allows us to lift the soundness theorem
+for simple terms (Proposition 9) to 𝑔𝑟𝑎𝑑 (𝑀). This reasoning is based on the extrusion lemma
+(Lemma 31), which needs a notion of łtracež not only at level of terms (Definition 25), but also at
+the level of the reduction sequences (Definition 24).
+3.1 Traces
+The pre-trace relation is defined in Fig. 4. The judgments used in the definition are of the form
+Ξ ⊢ 𝑡 ⊏ 𝑀, where 𝑡 is a simple term or simple context, 𝑀 is an arbitrary term or context of type,
+′
+say, Γ ⊢ 𝑀 : 𝐴 and Ξ is a function mapping any variable 𝑥 𝐴 of Γ to a fresh variable 𝑝 𝐴 with 𝐴 ′ ⊏ 𝐴.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:18
+Damiano Mazza and Michele Pagani
+𝐴′
+𝐴′
+We usually denote this map as a list 𝑝 1 1 ⊏ 𝑥 1𝐴1 , . . . , 𝑝𝑛 𝑛 ⊏ 𝑥𝑛𝐴𝑛 , supposing the 𝑝𝑖 ’s and 𝑥𝑖 ’s to be
+pairwise different.
+For brevity, we omit to specify the types of the terms in the subjects of the judgments in Fig. 4b,
+but we encourage the reader to verify that if 𝑝 1 ⊏ 𝑥 1, . . . , 𝑝𝑛 ⊏ 𝑥𝑛 ⊢ 𝑡 ⊏ 𝑀 and 𝑥 1𝐶1 , . . . , 𝑥𝑛𝐶𝑛 ⊢ 𝑀 : 𝐴,
+𝐶′
+𝐶′
+then 𝑝 1 1 , . . . 𝑝𝑛 𝑛 ⊢ 𝑡 : 𝐴 ′ with 𝐴 ′ ⊏ 𝐴 and, for all 1 ≤ 𝑖 ≤ 𝑛, 𝐶𝑖′ ⊏ 𝐶𝑖 . In particular, 𝑡 is a simply-typed
+𝜆-term or context. We write 𝑡 ⊏ 𝑀 when the typing environment Ξ is irrelevant.
+Conditionals and fixpoints are the only additional features of PCFR with respect to the simplytyped 𝜆-calculus, and the purpose of ⊏ is to łtracež them with simply-typed terms themselves. The
+last two rules of Fig. 4b łslice outž a conditional with the traces of its two branches and unfold a
+fixpoint into its finite approximations. In fact, the conditional rule is a bit more convoluted as it
+uses a dummy projection in order to encode the index of the chosen branch, a crucial information
+for the extrusion property (Lemma 31). For example, 𝑢 1 := 𝜆𝑥 R .𝜋 1 ⟨0, 0⟩ and 𝑢 2 := 𝜆𝑥 R .𝜋 2 ⟨𝑥, 𝑥⟩ are
+traces corresponding to the łthenž and łelsež branch, respectively, of ReLU defined in (1).
+The variable rule of Fig. 4 also deserves an explanation. Its non-trivial shape, which is due to
+higher order types, may be understood as follows. Let 𝑇 := 𝜆𝑓 R→R .𝑓 (𝑓 0 + 1) be a term using its
+(higher order) argument twice and consider the program 𝑇 ReLU. Recall that ReLU contains a
+conditional controlled by its argument, and has two different traces 𝑢 1 and 𝑢 2 discussed above.
+However, the execution of 𝑇 ReLU, as sketched in Fig. 5, explores both branches of ReLU, so we
+allow to trace 𝑇 with 𝑡 := 𝜆𝑝.𝜋 2 𝑝 ((𝜋 1 𝑝)0 + 1) and 𝑇 ReLU with 𝑡 ⟨𝑢 1, 𝑢 2 ⟩. That is, we allow different
+instances of the same variable 𝑓 to be traced by different components of a tuple variable 𝑝, because,
+even if in the original program all occurrences of 𝑓 are replaced by copies of the same term ReLU,
+different copies of ReLU might be traced by different simple terms, so the occurrences of 𝑓 must be
+łseparatedž accordingly.
+Lemma 18. Let 𝑀 and 𝑡 be normal forms of type D𝑛 (R) whose free variables have type belonging
+to {D𝑛 (R), R, R𝑛 , R⊥𝑛 }. If 𝑡 ⊏ 𝑀 then 𝑡 = 𝑀.
+Lemma 19. If Ξ ⊢ 𝑡 ⊏ 𝑀, then:
+′
+′
+(1) D(Ξ) ⊢ D(𝑡) ⊏ D(𝑀), where D turns any assignment 𝑝 𝐴 ⊏ 𝑥 𝐴 of Ξ into 𝑝 D (𝐴 ) ⊏ 𝑥 D (𝐴) .
+′
+𝐴
+𝐴
+′
+(2) Let Ξ = Ξ , 𝑥 ⊏ 𝑥 . For every closed simple term 𝑢 of type 𝐴, we have Ξ ⊢ 𝑡 {𝑢/𝑥 } ⊏ 𝑀 {𝑢/𝑥 }.
+Lemma 20. We have that Ξ ⊢ 𝑤 ⊏ 𝑀 {𝑁 /𝑥 } is equivalent to
+• 𝑤 = 𝑡 {𝑢 1 /𝑥 1 } . . . {𝑢𝑛 /𝑥𝑛 }, for some 𝑛 ∈ N and terms 𝑡, 𝑢 1, . . . , 𝑢𝑛 ,
+• such that Ξ, 𝑝 𝐴1 ×···×𝐴𝑛 ⊏ 𝑥 𝐴 ⊢ 𝑡 {𝜋1 𝑝/𝑥 1 } . . . {𝜋𝑛 𝑝/𝑥𝑛 } ⊏ 𝑀, 𝑝 not free in 𝑡,
+• and Ξ ⊢ 𝑢𝑖 ⊏ 𝑁 for all 1 ≤ 𝑖 ≤ 𝑛.
+In particular, Ξ, 𝑝 𝐴1 ×···×𝐴𝑛 ⊏ 𝑥 𝐴 ⊢ 𝑤 ⊏ 𝑀 implies 𝑤 = 𝑡 {𝜋 1𝑝/𝑥 1 } . . . {𝜋𝑛 𝑝/𝑥𝑛 } for some 𝑡 not
+containing 𝑝 free.
+Definition 21 (Tracing rewriting steps). Let 𝜎 : 𝑅 −
+→ 𝑃 be a rewriting step of Fig. 1c, and 𝜐 be
+a reduction sequence between simple terms. We define 𝜐 ⊏ 𝜎 depending on 𝑅.
+• If 𝑅 = (𝜆𝑥 .𝑀)𝑁 : we ask that 𝜐 is any reduction of the form
+(𝜆𝑝.𝑡 {𝝅𝑝/x})⟨u⟩ −
+→ 𝑡 {𝝅 ⟨u⟩/x} −
+→∗ 𝑡 {u/x}
+where 𝑝 ⊏ 𝑥 ⊢ 𝑡 {𝝅𝑝/x} ⊏ 𝑀, with {𝝅𝑝/x} denoting the substitutions {𝜋1 𝑝/𝑥 1 } . . . {𝜋𝑛 𝑝/𝑥𝑛 }
+for some 𝑛 ∈ N, and where u is a sequence 𝑢 1, . . . , 𝑢𝑛 of simple terms such that 𝑢𝑖 ⊏ 𝑁 for all 𝑖,
+and in which the redexes 𝜋𝑖 ⟨u⟩ −
+→ 𝑢𝑖 are reduced in any order.
+• If 𝑅 = 𝜋𝑖 ⟨𝑀1, . . . , 𝑀𝑘 ⟩: we ask that 𝜐 is any reduction of the form 𝜋𝑖 ⟨𝑡 1, . . . , 𝑡𝑘 ⟩ −
+→ 𝑡𝑖 for
+𝑡 1 ⊏ 𝑀1 ,. . . , 𝑡𝑘 ⊏ 𝑀𝑘 .
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:19
+ReLU(ReLU 0 + 1)
+0+1
+1
+⊏
+if (0, 0, 0) + 1
+⊏
+ReLU 0 + 1
+⊏
+if(1, 0, ReLU 0 + 1)
+⊏
+=
+𝜋 2 ⟨𝑢 1 0 + 1, 𝑢 1 0 + 1⟩
+⊏
+𝜋 2 ⟨𝑢 1 0 + 1, 𝑢 1 0 + 1⟩
+𝑢 2 (𝑢 1 0 + 1)
+∗
+∗
+⊏
+if (ReLU 0 + 1, 0, ReLU 0 + 1)
+⊏
+𝜋2 ⟨𝑢 1, 𝑢 2 ⟩ (𝜋1 ⟨𝑢 1, 𝑢 2 ⟩ 0 + 1)
+𝑡 ⟨𝑢 1, 𝑢 2 ⟩
+if (ReLU 0 + 1, 0, ReLU 0 + 1)
+⊏
+⊏
+𝑇 ReLU
+𝜋2 ⟨𝑢 1 0 + 1, 𝑢 1 0 + 1⟩
+𝑢1 0 + 1
+𝜋 1 ⟨0, 0⟩ + 1
+0+1
+1
+Fig. 5. Tracing the head reduction 𝑇 ReLU −
+→∗ 1. The term 𝑇 is 𝜆𝑓 .𝑓 (𝑓 0 + 1), of which 𝑡 := 𝜆𝑝.𝜋 2 𝑝 ((𝜋1 𝑝)0 + 1)
+is a trace; ReLU is given in (1), with traces 𝑢 1 := 𝜆𝑥 .𝜋 1 ⟨0, 0⟩, 𝑢 2 := 𝜆𝑥 .𝜋2 ⟨𝑥, 𝑥⟩.
+• If 𝑅 = 𝜙 (r): we ask that 𝜐 = 𝜎.
+• If 𝑅 = if (𝑟, 𝑀1, 𝑀2 ): we ask that 𝜐 is any reduction of the form 𝜋𝑖 ⟨𝑡, 𝑡⟩ −
+→ 𝑡 with 𝑡 ⊏ 𝑀𝑖 and
+𝑖 = 1 if 𝑟 ≤ 0, otherwise 𝑖 = 2.
+• If 𝑅 = fix 𝑓 .𝑁 : we ask that 𝜐 ⊏ 𝜎 ′ where 𝜎 ′ is any reduction of the form
+(𝜆𝑓 .𝑀)(𝜆𝑥 .(fix𝑛 𝑓 .𝑀)𝑥) −
+→ 𝑀 {𝜆𝑥 .(fix𝑛 𝑓 .𝑀)𝑥/𝑓 }
+for some 𝑛 ∈ N, as defined in the first case.
+Lemma 22 (pullback). Let 𝜎 : 𝑅 −
+→ 𝑃 be a rewriting step. For any 𝑤 ⊏ 𝑃, there exist 𝑡 ⊏ 𝑅 and
+𝜉 :𝑡 −
+→∗ 𝑤 such that 𝜉 ⊏ 𝜎.
+We now extend Definition 21 to one-step head reductions (as defined in Sect. 2.1).
+Definition 23 (Tracing head reduction steps). Let 𝜎 = (H, 𝑅, 𝑃) be a reduction step with H
+a head context, and let 𝜎0 denote the rewriting step 𝑅 → 𝑃. If 𝜉 : 𝑡 −
+→∗ 𝑢 is a reduction sequence on
+simple terms, we write 𝜉 ⊏ 𝜎 whenever one of the following holds:
+• there exists a simple context h ⊏ H such that 𝜉 = h{𝜐} with 𝜐 ⊏ 𝜎0 in the sense of Definition 21;
+• the hole of H is in the guard of a conditional, 𝜉 is the empty sequence and 𝑡 = 𝑢 ⊏ H{𝑅}.
+Finally, we extend the relation ⊏ to reduction sequences by reflexive-transitive closure.
+Definition 24 (Tracing head reduction seqences). Let 𝜌 be a head reduction sequence
+starting from a term 𝑀 and let 𝜉 be a reduction sequence starting from a simple term 𝑡. We write 𝜉 ⊏ 𝜌
+if either 𝜌 and 𝜉 are empty and 𝑡 ⊏ 𝑀, or if 𝜌 = 𝜎1 · · · 𝜎𝑛 is of length 𝑛 > 0 and 𝜉 = 𝜉 1 · · · 𝜉𝑛 such that
+𝜉𝑖 ⊏ 𝜎𝑖 for every 1 ≤ 𝑖 ≤ 𝑛, according to Definition 23.
+Fig. 5 gives an example of tracing the head reduction of the term 𝑇 ReLU discussed above. Notice
+that the reduct of 𝑡 ⟨𝑢 1, 𝑢 2 ⟩ is an intermediate term not corresponding to any trace. Notice also that
+all the reductions in the guard of a conditional (such as the first steps in the third line of Fig. 5)
+share the same traces. In general, 𝜉 ⊏ 𝜌 implies that 𝜌 is a head reduction but not necessary 𝜉,
+because the first case of Definition 21 requires 𝜉 to reduce projection redexes not in the łhead
+positionž of a simple term. In fact, the reduction of 𝑡 ⟨𝑢 1, 𝑢 2 ⟩ in Fig. 5 is not head.
+Definition 25 (trace relation). Let 𝑀 be a term and 𝑡 a simple term. We say that 𝑡 traces 𝑀,
+⊏ 𝑀, whenever there exists a normalizing reduction 𝜉 starting from 𝑡 and a normalizing
+in symbols 𝑡 ∼
+head reduction 𝜌 starting from 𝑀 such that 𝜉 ⊏ 𝜌.
+As an example, let us consider the term SillyId of (1). Let us define the simple terms:
+𝑡 1 := 𝜆𝑥 .𝜋 1 ⟨𝜋1 ⟨0, 0⟩ , 𝜋1 ⟨0, 0⟩⟩ ,
+𝑡 2 := 𝜆𝑥 .𝜋1 ⟨𝜋2 ⟨𝑥, 𝑥⟩ , 𝜋2 ⟨𝑥, 𝑥⟩⟩ ,
+𝑡 3 := 𝜆𝑥 .𝜋2 ⟨𝑥, 𝑥⟩ .
+(13)
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:20
+Damiano Mazza and Michele Pagani
+{·} ◁ {·}
+𝑥 𝐴 ◁ 𝑥 D (𝐴)
+𝑀1 ◁ 𝑀1′
+. . . , 𝑀𝑘 ◁ 𝑀𝑘′
+⟨𝑀1, . . . , 𝑀𝑘 ⟩ ◁
+𝑀 ◁ 𝑀′
+𝜆𝑥 .𝑀 ◁ 𝜆𝑥 .𝑀 ′
+𝑀1′, . . . , 𝑀𝑘′
+𝑀 ◁ 𝑀′ 𝑁 ◁ 𝑁 ′
+𝑀𝑁 ◁ 𝑀 ′ 𝑁 ′
+𝑃 ◁ 𝑃′ 𝑀 ◁ 𝑀′ 𝑁 ◁ 𝑁 ′
+if(𝑃, 𝑀, 𝑁 ) ◁ if (𝜋1 𝑃 ′, 𝑀 ′, 𝑁 ′)
+𝑧 1D (R) . . . 𝑧𝑘D (R) ⊢ 𝑡 : R (⊥𝑛 ) simple normal form, 𝑀1 ◁ 𝑀1′,
+𝑀 ◁ 𝑀′
+𝜋𝑖𝑘 𝑀 ◁ 𝜋𝑖𝑘 𝑀 ′
+𝑀 ◁ 𝑀′
+fix𝑓 .𝑀 ◁ fix 𝑓 .𝑀 ′
+. . . , 𝑀𝑘 ◁ 𝑀𝑘′
+𝜙 (𝑀1, . . . , 𝑀𝑘 ) ◁ (𝜆𝑧 1D (R) . . . 𝜆𝑧𝑘D (R) . ⟨𝜙 (𝜋1𝑧 1, . . . , 𝜋 1𝑧𝑘 ), 𝑡⟩)𝑀1′ · · · 𝑀𝑘′
+Fig. 6. The expansion relation. In the rule on the third line, if 𝑘 = 0 then the right-hand term in the conclusion
+is just ⟨𝜙, 𝑡⟩.
+Notice that, for any 𝑖 ∈ {1, 2, 3}, we have 𝑡𝑖 ⊏ SillyId (see Fig. 4), therefore also 𝑡𝑖 𝑟 ⊏ SillyId 𝑟 for
+⊏ SillyId 𝑟 iff 𝑟 = 0, 𝑡 2𝑟 ⊏ SillyId 𝑟 iff 𝑟 < 0 and,
+any real number 𝑟 . By contrast, we have that 𝑡 1𝑟 ∼
+∼
+⊏ SillyId 𝑟 iff 𝑟 > 0. This highlights a sharp difference between the relations ⊏
+symmetrically, 𝑡 3𝑟 ∼
+⊏: the former is static whereas the latter traces the execution of a term. Indeed, the projections
+and ∼
+of the 𝑡𝑖 ’s reflect the different choices in the conditionals of SillyId.
+3.2
+AD Is Sound on Stable Points
+Consider a PCFR program 𝑥 1R, . . . , 𝑥𝑛R ⊢ 𝑀 : R. One can easily check that for every r ∈ R𝑛 , 𝑀 {r/x}
+is normalizing if and only if there exists a simple term 𝑡 tracing 𝑀 {r/x}. However, this term 𝑡
+usually depends on the chosen r. In the following definition of stable points, we consider a situation
+where 𝑡 can be łuniformlyž chosen in an open ball around r.
+Definition 26. We define the set of stable points of a program 𝑥 1R, . . . , 𝑥𝑛R ⊢ 𝑀 : R as follows:
+
+
+r ∈ R𝑛 | ∃ 𝜀 > 0, ∃ 𝑥 1R, . . . , 𝑥𝑛R ⊢ 𝑡 : R s.t. 𝑡 ⊏ 𝑀 and
+S(𝑀) :=
+.
+⊏ 𝑀 {r ′/x}
+∀ r′ ∈ 𝐵𝜀 (r) 𝑡 {r′/x} ∼
+Notice that we have restricted the tracing of 𝑀 to terms 𝑡 of the same type as 𝑀, in particular 𝑡
+does not split different occurrences of a free variable 𝑥𝑖 of 𝑀. In fact, these variables are supposed
+to be replaced with numerals, which are not split by ⊏. Also observe that, by definition, we have
+⊏ 𝑀 {r/x} implies that 𝑀 {r/x} has a normal form. Moreover, S(𝑀) is open:
+S(𝑀) ⊆ ⇓𝑀, as 𝑡 {r/x} ∼
+Ð
+it is easy to check that S(𝑀) = r∈S(𝑀) 𝐵𝜀r (r), where 𝜀 r is the positive real whose existence is given
+by the very definition of stability of r.
+We already argued in the Introduction that S(ReLU 𝑥 R ) = R \ {0}. By recalling the above
+discussion about the simple terms 𝑡 1 , 𝑡 2 and 𝑡 3 in (13), we may infer that also S(SillyId 𝑥 R ) = R \ {0},
+in fact 0 is the border where one has to swap between 𝑡 1𝑟 and either 𝑡 2𝑟 or 𝑡 3𝑟 in tracing SillyId 𝑟 .
+Similarly, but with more involved simple terms, one can check that S(Floor 𝑥 R ) = R \ Z with Floor
+given in (1). As a last example, let us consider the term EqProj defined in (12) and the simple terms
+𝑡 1 := 𝜆𝑥 .𝜆𝑦.𝜋 1 ⟨𝜋 1 ⟨𝑥, 𝑥⟩ , 𝜋1 ⟨𝑥, 𝑥⟩⟩ , 𝑡 2 := 𝜆𝑥 .𝜆𝑦.𝜋 1 ⟨𝜋2 ⟨𝑦, 𝑦⟩ , 𝜋2 ⟨𝑦, 𝑦⟩⟩ , 𝑡 3 := 𝜆𝑥 .𝜆𝑦.𝜋 2 ⟨𝑦, 𝑦⟩ .
+⊏ EqProj 𝑟𝑞 iff 𝑟 = 𝑞, 𝑡 2𝑟𝑞 ⊏ EqProj 𝑟𝑞 iff 𝑟 < 𝑞
+These are all such that 𝑡𝑖 ⊏ EqProj. However, 𝑡 1𝑟𝑞 ∼
+∼
+⊏
+and 𝑡 3𝑟𝑞 ∼ EqProj 𝑟𝑞 iff 𝑟 > 𝑞. So the diagonal splits the plane R2 in two open sets where either 𝑡 2
+or 𝑡 3 uniformly traces the execution of EqProj, whereas the execution on the diagonal is traced by
+𝑡 1 . But the diagonal contains no open set, therefore S(EqProj 𝑥 R𝑦 R ) = R2 \ {(𝑟, 𝑟 ) ; 𝑟 ∈ R}. Notice,
+finally, that EqProj 𝑥 R𝑥 R may be traced everywhere by 𝑡 1𝑥 R𝑥 R , hence S(EqProj 𝑥 R𝑥 R ) = R.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:21
+⊏ is defined over programs. However, in order to prove soundness (TheoThe tracing relation ∼
+rem 33), we must move from a program 𝑀 to its transformation D(𝑀), this latter having a more
+⊏𝑀
+complex type than 𝑀. The difficulty behind the proof of Theorem 33 is then to deduce from 𝑡 ∼
+a link between D(𝑡) and D (𝑀). In order to do that, we define a further relation ◁ (Fig. 6) catching
+an invariant between 𝑀 and D (𝑀) (as well as between 𝑡 and D(𝑡)) stable under the evaluation of
+the two terms. Then the extrusion lemma (Lemma 31 and its iterated version Lemma 32) will use ◁
+⊏ 𝑀.
+for deducing the needed link between D(𝑡) and D(𝑀) from the hypothesis 𝑡 ∼
+Definition 27 (expansion). The relation ◁ on terms and contexts of PCFR is defined in Fig. 6.
+As mentioned above, expansion is used to establish that 𝑀 and D (𝑀) łbehave similarlyž. Such
+a link emerges from two of the main properties of ◁, namely that 𝑀 ◁ D (𝑀) holds for every 𝑀
+(Lemma 28), and that it is a simulation (if 𝑀 ◁𝑀 ′, then 𝑀 ′ simulates 𝑀, Lemma 29). These justify the
+definition in the case 𝑀 = 𝜙 (𝑀1, . . . , 𝑀𝑘 ): it mimics the definition of D(𝑀) in the first component
+of the product, whereas the second component is chosen as an arbitrary closed simple normal
+form. The first gives us stability under reduction, in particular in the case of a conditional redex,
+while the second component cannot be asked to be linked with the partial derivatives of 𝜙, because
+𝜙 (𝑀1, . . . , 𝑀𝑘 ) eventually reduces to a numeral, which has zero derivative.
+Lemma 28. For every program 𝑥 1R, . . . , 𝑥𝑛R ⊢ 𝑀 : R, r ∈ R𝑛 and sequence u = 𝑢 1, . . . , 𝑢𝑛 of simple
+closed normal forms of suitable type, we have 𝑀 {r/x} ◁ D(𝑀){⟨r, u⟩/x}, where by {⟨r, u⟩/x} we
+mean {⟨𝑟 1, 𝑢 1 ⟩ /𝑥 1 } · · · {⟨𝑟𝑛 , 𝑢𝑛 ⟩ /𝑥𝑛 }.
+Lemma 29. Let 𝑀 ◁ 𝑀 ′ and 𝑀 −
+→ 𝑁 , then there exists 𝑁 ′ such that 𝑀 ′ −
+→∗ 𝑁 ′ and 𝑁 ◁ 𝑁 ′.
+→ 𝑁 . The proof is an induction on C. The
+Proof Sketch. Let (C, 𝑅, 𝑃) be the reduction step 𝑀 −
+only non-trivial part is the base of the induction, i.e. C = {·}, in which the reasoning splits following
+Fig. 1c: the case of a 𝛽-reduction is a consequence of a substitution lemma on ◁. If 𝑅 = 𝜙 (r), then
+𝑀′ −
+→∗ ⟨𝜙 (𝜋1 L′), 𝑡 {L′/z}⟩ for some L′ of the same length as r such that 𝑟𝑖 ◁ 𝐿𝑖′ for all 𝑖. Notice that
+→ 𝑟𝑖 as well as 𝐿𝑖′ is a simple closed normal form, so in particular 𝑡 {L′/z}
+𝑟𝑖 ◁ 𝐿𝑖′ implies that 𝜋 1 𝐿𝑖′ −
+→∗ J𝜙K(r), 𝑡 ′ with 𝑡 ′ a
+is normalizable by Proposition 5. We therefore have: ⟨𝜙 (𝜋 1 L′), 𝑡 {L′/z}⟩ −
+′
+′
+simple closed normal form, and we conclude by taking 𝑁 := J𝜙K(r), 𝑡 .
+The cases of the other redexes (conditional, products and fixpoints) are immediate.
+□
+Remark 30. A variant of Lemma 29 can be used to prove that ⇓ S 𝑀 ⊆ ⇓ S 𝑔𝑟𝑎𝑑 (𝑀), for some
+reduction strategy S (see discussion after Proposition 10). For example, if S is the call-by-value strategy,
+S
+S
+then one can prove the statement of Lemma 29 by replacing −
+→ and −
+→∗ with −
+→ and −
+→∗ (in the
+′
+case of a 𝑅 = 𝜙 (r) redex, one should notice that the terms L are all values, and one should replace
+łnormalizablež with łS-normalizablež and łsimple closed normal form with łsimple closed S-nfž).
+S
+Then, consider a program 𝑀 of arity 1 and suppose r ∈ ⇓ S 𝑀, i.e. 𝑀 {r/x} −
+→∗ 𝑞, for 𝑞 a numeral.
+S
+→∗ 𝑁 with 𝑞 ◁ 𝑁 and
+We have by Lemma 28 and this variant of Lemma 29 that D(𝑀){⟨r, u⟩/x} −
+→ ←
+−
+−
+𝑛
+𝑛
+each 𝑢𝑖 either the normal form of 𝜄𝑖 1 or 𝜄𝑖 , depending whether D is D or D (recall Equations (9)
+and (10)). By inspecting Fig. 6, we can deduce 𝑁 = ⟨𝑞, 𝑡⟩ for some closed simple S-nf 𝑡. This means
+←−−−
+S
+S
+→ 𝑡1, this latter evaluating to a normal form because it is a simple term
+𝑔𝑟𝑎𝑑 (𝑀) −
+→∗ (𝜋2 ⟨𝑞, 𝑡⟩)1 −
+←−−−
+−−−→
+(Proposition 5). We conclude r ∈ ⇓ S 𝑔𝑟𝑎𝑑 (𝑀). The case of 𝑔𝑟𝑎𝑑 (𝑀) is simpler.
+Lemma 31 (extrusion). Let 𝑀 ◁ 𝑀 ′, 𝑡 ◁ 𝑡 ′, 𝑡 ′ ⊏ 𝑀 ′. Let 𝜎 : 𝑀 −
+→ 𝑀1 be a head reduction step and
+moreover let 𝜉 : 𝑡 −
+→∗ 𝑡 1 be such that 𝜉 ⊏ 𝜎 (so in particular 𝑡 ⊏ 𝑀 and 𝑡 1 ⊏ 𝑀1 ). Then there exist
+𝑀1′, 𝑡 1′ such that the following relations hold:
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:22
+Damiano Mazza and Michele Pagani
+∗
+𝑀′
+◁
+𝑀
+◁
+⊏
+𝑡′
+𝜎
+𝜉
+⊏
+∗ ′
+𝑡
+1
+⊏
+◁
+𝑡
+𝑀1
+𝑀1′
+∗
+◁
+𝑡1
+Proof Sketch. By Definition 23, 𝜎 = H{𝜎0 } for some head context H and reduction step
+𝜎0 : 𝑅 −
+→ 𝑃. The proof is by induction on H.
+The case H = {·} splits following Fig. 1c. For example, let 𝜎 be 𝑀 = (𝜆𝑥 .𝐿)𝑁 −
+→ 𝐿{𝑁 /𝑥 } = 𝑀1 , so
+that 𝜉 is the reduction 𝑡 = (𝜆𝑝.𝑤 {𝝅𝑝/x}) ⟨u⟩ −
+→∗ 𝑤 {u/x} = 𝑡 1 . Then 𝑀 ′ = (𝜆𝑥 .𝐿 ′)𝑁 ′ with 𝐿 ◁ 𝐿 ′
+and 𝑁 ◁ 𝑁 ′, and 𝑡 ′ = (𝜆𝑝.𝑤 ′) ⟨u′⟩ with 𝑤 {𝝅𝑝/x} ◁ 𝑤 ′ and ⟨u⟩ ◁ ⟨u′⟩. Moreover, since 𝑡 ′ ⊏ 𝑀 ′, by
+Lemma 20, we have 𝑤 ′ = 𝑤 ′ {𝝅𝑝/x}, with 𝑤 ′ {𝝅𝑝/x} ⊏ 𝐿 ′, 𝑝 not free in 𝑤 ′, and 𝑢𝑖′ ⊏ 𝑁 ′. Moreover,
+by induction on 𝑤, one can infer from 𝑤 {𝝅𝑝/x} ◁ 𝑤 ′ that actually 𝑤 ◁ 𝑤 ′.
+Of the induction cases, the only subtle one is H = if (H, 𝑁 1, 𝑁 2 ). Under this hypothesis, the
+reduction 𝜉 is empty and 𝑡 1 = 𝑡 = 𝜋𝑖 ⟨𝑢, 𝑢⟩ with 𝑢 ⊏ 𝑁𝑖 for some 𝑖 ∈ {1, 2}, as well as 𝑀 ′ =
+′
+′
+if (𝜋 1 𝑀 , 𝑁 1′, 𝑁 2′) with H{𝑅} ◁ 𝑀 , 𝑁 1 ◁ 𝑁 1′, 𝑁 2 ◁ 𝑁 2′ and 𝑡 ′ = 𝜋𝑖 ⟨𝑢 ′, 𝑢 ′⟩ with 𝑢 ◁ 𝑢 ′ and 𝑢 ′ ⊏ 𝑁𝑖′
+(notice that the index 𝑖 of the projection is the same in 𝑡 and 𝑡 ′ because 𝑡 ◁ 𝑡 ′). By Lemma 29,
+′
+𝑀 −
+→∗ 𝐿 such that H{𝑃 } ◁ 𝐿. We can then conclude by setting 𝑀1′ = if (𝜋 1 𝐿, 𝑁 1′, 𝑁 2′) and 𝑡 1′ = 𝑡 ′.
+All of the remaining cases follow the same pattern.
+□
+⊏ 𝑀 and 𝑡 ′ ⊏ 𝑀 ′, for 𝑡 and 𝑀
+Lemma 32 (extrusion to normal form). Let 𝑀 ◁ 𝑀 ′, 𝑡 ◁ 𝑡 ′, 𝑡 ∼
+′
+∗
+′′
+′
+𝑛
+closed terms both of type R , for some 𝑛 ≥ 0. Then, 𝑡 −
+→ 𝑡 and 𝑀 −
+→∗ 𝑀 ′′ with 𝑡 ′′ and 𝑀 ′′ normal
+′′
+′′
+such that 𝑡 ⊏ 𝑀 .
+Proof Sketch. By Definition 25, there exist a normalizing reduction 𝜉 starting from 𝑡 and a
+normalizing reduction 𝜌 starting from 𝑀, such that 𝜉 ⊏ 𝜌. The proof is by induction on 𝜌.
+□
+Theorem 33 (Soundness). For every program Γ ⊢ 𝑀 : R and every r ∈ S(𝑀) ∩ d (𝑀), we have:
+𝑔𝑟𝑎𝑑 (𝑀)(r) −
+→∗ ∇(J𝑀KΓ )(r).
+Proof. The assumption r ∈ d(𝑀) tells us that there is an open ball 𝐵𝜀0 (r) where ∇J𝑀KΓ exists.
+By Definition 26, r ∈ S(𝑀) means that there is a simple program 𝑡 ⊏ 𝑀 uniformly tracing 𝑀 in an
+⊏ 𝑀 {r ′/x}, and of
+open ball of r, i.e., there exists 𝜀 > 0 such that for all r′ ∈ 𝐵𝜀 (r) we have 𝑡 {r′/x} ∼
+course we may take 𝜀 ≤ 𝜀 0 . This implies in particular that J𝑡KΓ and J𝑀KΓ coincide on 𝐵𝜀 (r) and,
+therefore, we have r ∈ d(𝑡) as well.
+By Lemma 28, 𝑡 {r/x} ◁ D(𝑡){⟨r, u⟩/x} and 𝑀 {r/x} ◁ D(𝑀){⟨r, u⟩/x}, where 𝑢𝑖 is either the
+→ ←
+−
+−
+normal form of 𝜄𝑖𝑛 1 or 𝜄𝑖𝑛 , depending whether D is D or D (recall Equations (9) and (10)). Moreover,
+by Lemma 19 we have that 𝑡 ⊏ 𝑀 gives D (𝑡){⟨r, u⟩/x} ⊏ D (𝑀){⟨r, u⟩/x}. We are then in position of applying Lemma 32 to 𝑀 {r/x}, 𝑡 {r/x} (closed terms of ground type) and D(𝑡){⟨r, u⟩/x},
+D (𝑀){⟨r, u⟩/x}. This gives us a normal form 𝑡 ′ of D(𝑡){⟨r, u⟩/x} and 𝑀 ′ of D (𝑀){⟨r, u⟩/x} such
+that 𝑡 ′ ⊏ 𝑀 ′. By subject reduction (Proposition 4), 𝑡 ′, 𝑀 ′ are closed normal forms of type D (R), so
+Lemma 18 gives us 𝑡 ′ = 𝑀 ′. Since r ∈ d(𝑡), we conclude by Proposition 9.
+□
+4 UNSOUNDNESS OF AD
+Definition 34 (unstable point). The set of unstable points of a program 𝑀, denoted by U(𝑀),
+is the complement of S(𝑀) (Definition 26) in ⇓𝑀, i.e., U(𝑀) := ⇓𝑀 \ S(𝑀).
+We know from the remark after Definition 26 that U(𝑀) is closed in ⇓𝑀 (with respect to to
+the subspace topology). The goal of this section is to prove that it is a quasivariety, hence of
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:23
+PΓ (R) := {Γ ⊢ 𝑀 : R | J𝑀KΓ is cqc and U(𝑀) is a quasivariety}
+PΓ (𝐴 → 𝐵) := {Γ ⊢ 𝑀 : 𝐴 → 𝐵 | ∀𝑁 ∈ PΓ (𝐴), 𝑀𝑁 ∈ PΓ (𝐵)}
+PΓ (𝐴1 × · · · × 𝐴𝑘 ) := {Γ ⊢ 𝑀 : 𝐴1 × · · · × 𝐴𝑘 | 𝜋𝑖 𝑀 ∈ PΓ (𝐴𝑖 ), ∀𝑖 ≤ 𝑘 }
+Fig. 7. The definition of the logical predicate PΓ (𝐴), with Γ a ground context.
+measure zero. The main tool is the logical predicate defined in Fig. 7 and its adequacy (Lemma 41).
+The structure of the proof is standard, but some new notions are needed. First, our programs are
+first-order functions, i.e., terms with some free variables of ground type, so the logical predicate
+is indexed by a typing environment. Second, Lemma 35 states some properties of the notion of
+stability necessary to achieve the standard auxiliary lemmas of a logical predicate, such as closure
+under expansion (Lemma 37) or (a syntactic variant of) Scott-continuity (Lemma 39 and Lemma 40).
+Third, and more important, the standard lemma of logical predicates for the conditional (Lemma 38)
+is particularly subtle. This should not come as a surprise: as discussed above, the possibility of
+unsoundness of AD is due to conditionals. In particular, let us underline that Lemma 38 uses the
+notion of completely quasicontinuous map introduced in Sect. 2.3.
+The logical predicate on which the proof is based is defined in Fig. 7. In the rest of the section,
+unless otherwise stated, Γ := 𝑥 1R, . . . , 𝑥𝑛R is a ground context. Moreover, if 𝑀 : 𝐴1 → · · · → 𝐴𝑝 → 𝐵
+and L = 𝐿1, . . . , 𝐿𝑝 such that 𝐿𝑖 : 𝐴𝑖 for all 1 ≤ 𝑖 ≤ 𝑝, then the notation 𝑀L stands for 𝑀𝐿1 · · · 𝐿𝑝 ,
+which is of course a term of type 𝐵.
+Lemma 35. We have the following inclusions, where the terms appearing in the statements are
+supposed to be typed under a ground context Γ.
+Ñ
+(1) Let 𝜙 be a function symbol of arity 𝑘 and let 𝑀1, . . . , 𝑀𝑘 be programs, then 𝑖 S(𝑀𝑖 ) ⊆
+S(𝜙 (𝑀1, . . . , 𝑀𝑘 )).
+(2) Let 𝑅 −
+→ 𝑃 be one of the rewriting rules in Fig. 1c, with 𝑅, 𝑃 of type 𝐵 1 → · · · → 𝐵𝑝 → R𝑚 . For
+all 1 ≤ 𝑖 ≤ 𝑝, let Γ ⊢ 𝐿𝑖 : 𝐵𝑖 . Then, for all 1 ≤ 𝑗 ≤ 𝑚, S(𝜋 𝑗 (𝑃L)) ⊆ S(𝜋 𝑗 (𝑅L)).
+(3) Let 𝑃 : R and 𝑀1, 𝑀2 be of type 𝐵 1 → · · · → 𝐵𝑝 → R𝑚 . For all 1 ≤ 𝑖 ≤ 𝑝, let Γ ⊢ 𝐿𝑖 : 𝐵𝑖 . Let
+−1
+𝑋 1 := J𝑃K−1
+Γ (R ≤0 ) and 𝑋 2 := J𝑃KΓ (R>0 ). Then, for all 1 ≤ 𝑗 ≤ 𝑚 and all 𝑙 ∈ {1, 2}, we have
+that S(𝜋 𝑗 (𝑀𝑙 L)) ∩ int(𝑋𝑙 ) ⊆ S(𝜋 𝑗 (if (𝑃, 𝑀1, 𝑀2 )L)).
+(4) Let 𝐵 = 𝐵 1 → · · · → 𝐵𝑝 → R𝑚 , let Γ ⊢ 𝐿0 : 𝐴 and Γ ⊢ 𝐿𝑖 : 𝐵𝑖 for all 1 ≤ 𝑖 ≤ 𝑝. For all 𝑘 ∈ N
+and 1 ≤ 𝑗 ≤ 𝑚, S(𝜋 𝑗 ((fix𝑘 𝑓 𝐴→𝐵 .𝑀)L)) ⊆ S(𝜋 𝑗 ((fix 𝑓 𝐴→𝐵 .𝑀)L)), where L := 𝐿0, 𝐿1, . . . , 𝐿𝑝 .
+Proof Sketch. We only detail the proof of the branching case, the other cases are easy variants.
+By taking the notations of point (3), let 𝑙 ∈ {1, 2} and let r ∈ S(𝜋 𝑗 (𝑀𝑙 L)) ∩ int(𝑋𝑙 ). By definition,
+⊏ 𝜋 𝑗 (𝑀𝑙 L){r ′/x} and
+there exist 𝜀 > 0, 𝑢 ⊏ 𝜋 𝑗 (𝑀𝑙 L) such that, for all r′ ∈ 𝐵𝜀 (r), 𝑢{r′/x} ∼
+′
+′
+′′
+′
+′′
+′′
+r ∈ int(𝑋𝑙 ). Notice that 𝑢 = 𝜋 𝑗 (𝑢 u ), with 𝑢 ⊏ 𝑀𝑙 and u = u1 · · · u𝑝 such that, for every
+′′ of u ′′ , we have 𝑢 ′′ ⊏ 𝐿 . Let 𝑡 := 𝜋 ((𝜋 ⟨𝑢 ′, 𝑢 ′ ⟩)u ′′ ) and notice
+1 ≤ 𝑖 ≤ 𝑝 and every element 𝑢𝑖,ℎ
+𝑖
+𝑗
+ℓ
+𝑖
+𝑖,ℎ
+⊏ 𝜋 𝑗 (if (𝑃, 𝑀1, 𝑀2 )L){r ′/x}.
+that 𝑡 ⊏ 𝜋 𝑗 (if(𝑃, 𝑀1, 𝑀2 )L). Let us prove that 𝑡 {r′/x} ∼
+Since r′ ∈ int(𝑋𝑙 ) ⊆ ⇓𝑃, we have that 𝑃 {r′/x} is normalizing. Since 𝑃 is ground, by Proposition 6
+there is a head reduction sequence 𝜌 : 𝑃 {r′/x} −
+→∗ 𝑞 such that 𝑞 is a numeral. Let now H =
+′′
+′
+𝜋 𝑗 (if ({·}, 𝑀1, 𝑀2 )u ){r /x}. Notice that 𝜈 ⊏ H{𝜌 } for 𝜈 the empty reduction sequence of 𝑡 {r′/x}.
+Moreover, by hypothesis we have normalizing reduction sequences 𝜈 ′ ⊏ 𝜌 ′ from 𝑢{r′/x} =
+𝜋 𝑗 (𝑢 ′u′′){r′/x} and 𝜋 𝑗 (𝑀𝑙 L){r′/x}, respectively. Furthermore, we have the head reduction steps:
+𝜈 0 :𝜋 𝑗 (𝜋ℓ ⟨𝑢 ′, 𝑢 ′⟩ u′′){r′/x} −
+→ 𝜋 𝑗 (𝑢 ′u′′){r′/x},
+𝜌 0 :𝜋 𝑗 (if (𝑞, 𝑀1, 𝑀2 )L){r′/x} −
+→ 𝜋 𝑗 (𝑀𝑙 L){r′/x}
+such that 𝜈 0 ⊏ 𝜌 0 . We then have 𝜈𝜈 0𝜈 ′ ⊏ H{𝜌 }𝜌 0 𝜌 ′, which allows us to conclude.
+□
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:24
+Damiano Mazza and Michele Pagani
+Lemma 36 (function symbols). Let 𝜙 be a function symbol of arity 𝑘 and, for each 1 ≤ 𝑖 ≤ 𝑘,
+𝑀𝑖 ∈ PΓ (R). If J𝜙K is cqc, then 𝜙 (𝑀1, . . . , 𝑀𝑘 ) ∈ PΓ (R).
+Lemma 37 (closure under expansion). Let 𝑅 −
+→ 𝑃 be one of the rewriting rules in Figure 1c. If
+𝑃 ∈ PΓ (𝐴), then 𝑅 ∈ PΓ (𝐴).
+Lemma 38 (conditional). If 𝑃 ∈ PΓ (R) and 𝑀1, 𝑀2 ∈ PΓ (𝐴), then if(𝑃, 𝑀1, 𝑀2 ) ∈ PΓ (𝐴).
+Proof. Let 𝐴 = 𝐴1 → · · · → 𝐴𝑝 → R𝑚 . It is enough to prove that, given L = 𝐿1, . . . , 𝐿𝑝 such
+that 𝐿𝑖 ∈ PΓ (𝐴𝑖 ) for every 1 ≤ 𝑖 ≤ 𝑝, we have 𝜋 𝑗 (if (𝑃, 𝑀1, 𝑀2 )L) ∈ PΓ (R) for every 1 ≤ 𝑗 ≤ 𝑚.
+−1
+Let 𝑁 := 𝜋 𝑗 (if (𝑃, 𝑀1, 𝑀2 )L), 𝑄 1 := J𝑃K−1
+Γ (R ≤0 ) and 𝑄 2 := J𝑃KΓ (R>0 ). Observe that both 𝑄 1 and
+𝑄 2 are quasiopen, because R ≤0 and R>0 are quasiopen and J𝑃KΓ is cqc by hypothesis. Furthermore,
+R𝑙 × 𝑄𝑖 is quasiopen for every 𝑙 ≥ 0 and 𝑖 ∈ {1, 2}, because it is the inverse image of 𝑄𝑖 via a
+projection R𝑙 × R𝑝 → R𝑝 , and these are cqc (Lemma 17.3).
+To prove that J𝑁 KΓ is cqc we need to show that, for every 𝑙 ≥ 0 and every quasiopen set 𝑄 ⊆ R𝑙+1 ,
+the set (idR𝑙 × J𝑁 KΓ ) −1 (𝑄) is quasiopen. But Proposition 7 tells us that (idR𝑙 × J𝑁 KΓ ) −1 (𝑄) is
+
+
+equal to (R𝑙 × 𝑄 1 ) ∩ (idR𝑙 × J𝜋 𝑗 (𝑀1 L)KΓ ) −1 (𝑄) ∪ (R𝑙 × 𝑄 2 ) ∩ (idR𝑙 × J𝜋 𝑗 (𝑀2 L)KΓ ) −1 (𝑄) , which
+is quasiopen because J𝜋 𝑗 (𝑀1 L)KΓ and J𝜋 𝑗 (𝑀1 L)KΓ are cqc by hypothesis.
+For what concerns the unstable points, we first observe that, by Proposition 7, ⇓𝑁 = ⇓𝑃 ∩ ((𝑄 1 ∩
+⇓𝑀1 ) ∪ (𝑄 2 ∩ ⇓𝑀2 )) = (𝑄 1 ∩ ⇓𝑀1 ) ∪ (𝑄 2 ∩ ⇓𝑀2 ), the second equality holding because 𝑄 1, 𝑄 2 ⊆ ⇓𝑃.
+We may therefore write
+Ø
+Ø
+© Ø
+ª
+U(𝑁 ) = ­
+𝑄𝑖 ∩ ⇓𝑀𝑖 ® \ S(𝑁 ) =
+(𝑄𝑖 ∩ ⇓𝑀𝑖 ) \ S(𝑁 ) ⊆
+(𝑄𝑖 ∩ ⇓𝑀𝑖 ) \ (int(𝑄𝑖 ) ∩ S(𝑀𝑖 ))
+𝑖 ∈ {1,2}
+𝑖 ∈ {1,2}
+«𝑖 ∈ {1,2}
+¬
+where the inclusion is by Lemma 35.3. Now, for all 𝑖 ∈ {1, 2}, let us write 𝐴𝑖 := (𝑄𝑖 ∩ ⇓𝑀𝑖 ) \
+(int(𝑄𝑖 ) ∩ S(𝑀𝑖 )). Notice that, by Lemma 15, 𝑄𝑖 = int(𝑄𝑖 ) ∪ 𝑍𝑖 with 𝑍𝑖 a quasivariety, hence
+𝐴𝑖 = ((𝑄𝑖 ∩ ⇓𝑀𝑖 ) \ int(𝑄𝑖 )) ∪ ((𝑄𝑖 ∩ ⇓𝑀𝑖 ) \ S(𝑀𝑖 )) ⊆ (𝑄𝑖 \ int(𝑄𝑖 )) ∪ (⇓𝑀𝑖 \ S(𝑀𝑖 )) = 𝑍𝑖 ∪ U(𝑀𝑖 ),
+so 𝐴𝑖 is a quasivariety, because 𝑍𝑖 and U(𝑀𝑖 ) are. Since U(𝑁 ) ⊆ 𝐴1 ∪ 𝐴2 , we are done.
+□
+Lemma 39 (divergence). For every type 𝐴 → 𝐵, Ω𝐴→𝐵 ∈ PΓ (𝐴 → 𝐵).
+Lemma 40 (fixpoints). If ∀𝑘 ∈ N, fix𝑘 𝑓 .𝑀 ∈ PΓ (𝐴 → 𝐵), then fix 𝑓 .𝑀 ∈ PΓ (𝐴 → 𝐵).
+Lemma 41 (adeqacy). Suppose that the primitive functions of PCFR are admissible. Let Γ :=
+𝐴𝑚
+, let Γ, Δ ⊢ 𝑀 : 𝐴 and let Γ ⊢ 𝑁𝑖 ∈ PΓ (𝐴𝑖 ) for all 1 ≤ 𝑖 ≤ 𝑚. Then,
+𝑥 1R, . . . , 𝑥𝑛R , Δ := 𝑦1𝐴1 , . . . , 𝑦𝑚
+𝑀 {𝑁 1 /𝑦1 } · · · {𝑁𝑚 /𝑦𝑚 } ∈ PΓ (𝐴).
+Theorem 42. Assuming that the primitive functions of PCFR are admissible, for every program
+Γ ⊢ 𝑀 : R the set
+Fail(𝑀) := {r ∈ d(𝑀) ; 𝑔𝑟𝑎𝑑 (𝑀)(r) ̸−
+→∗ ∇(J𝑀KΓ )(r)}
+is a quasivariety, hence of measure zero.
+Proof. By Theorem 33, we know that Fail(𝑀) ⊆ U(𝑀), which is a quasivariety because 𝑀 ∈
+□
+PΓ (R) by Lemma 41.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:25
+5 DISCUSSION AND PERSPECTIVES
+On the significance of the measure zero bound. Since the set of real numbers representable on an
+actual computer is of measure zero in R (it is finite!), one may feel skeptical about the significance of
+Theorem 42. This issue was already raised by Speelpenning [Speelpenning 1980] while commenting
+on Joss’s theorem [Joss 1976]. He defines a program similar to the following:
+
+
+SlowId := 𝜆𝑥 R . fix 𝑓 R→R .𝜆𝑦 R .if (𝑥 − 𝑦, if (𝑦 − 𝑥, 𝑦, 𝑓 Next), 𝑓 Next) 0,
+where ⊢ Next : R is a primitive which cycles through machine-representable real numbers, based
+on some internal state (Speelpenning uses a random number generator in his example). So, given
+𝑟 ∈ R, SlowId(𝑟 ) will eventually output 𝑟 if this is machine-representable, and diverge otherwise.
+When executed on an actual computer, every 𝑟 is necessarily representable and SlowId behaves like
+the identity. And yet, 𝑔𝑟𝑎𝑑 (SlowId 𝑥)(𝑟 ) −
+→∗ 0 for every machine-representable 𝑟 , because Next
+is treated as a constant by AD transformations (there is no sensible alternative). Speelpenning
+concludes that, although SlowId is not a counterexample to Joss’s theorem (or to ours), from the
+practical viewpoint AD fails everywhere on it.
+We believe that Speelpenning’s example is misleading. The reason why SlowId is not a counterexample to Theorem 42 is not that the set where AD fails on SlowId is of measure zero because
+it coincides with the set of machine-representable reals; it is because JSlowId(𝑥)K𝑥 R is nowhere
+differentiable! That is, in the notations of Theorem 42, we actually have Fail(SlowId(𝑥)) = ∅
+because d(SlowId(𝑥)) = ∅, and this is because JSlowId(𝑥)K𝑥 R is defined only on a discrete set.
+Anyway, if the set 𝑅 := {𝑟 1, . . . , 𝑟𝑐 } of machine-representable reals is finite, there are impractically
+large but straightforward programs achieving the intended behavior of Speelpenning’s example.
+For instance, with some syntactic sugar, define
+SlowId′
+:=
+𝜆𝑥 R .if 𝑥 = 𝑟 1 then 𝑟 1 else (. . . if 𝑥 = 𝑟𝑐 then 𝑟𝑐 else 𝑥 . . .).
+We have that JSlowId′ (𝑥)K𝑥 R is actually the identity function, so Fail(SlowId′ (𝑥)) = 𝑅 and we
+may legitimately say that AD is wrong łeverywherež. But this is just a giant-sized version of the
+program SillyId of the Introduction, and speaks more of the contrivance of toying with PCFR as a
+machine-executable language (which it is not) than of the value of our result. In general, questioning
+the significance of Theorem 42 on the grounds that computers are finite is like questioning Turing
+machines because of their infinite tape, or objecting to the whole idea of studying the asymptotic
+complexity of programs because in practice we only implement finite functions, whose asymptotic
+complexity is 𝑂 (1). In our opinion, there is little point in discussing this standpoint further.
+More constructively, we may argue that the significance of Theorem 42 lies in the fact that it
+gives a finer bound than just measure zero. Let us call PCFR with only the łmandatoryž primitive
+functions (constants, addition, multiplication) minimal PCFR . This is already enough to express
+all differentiable programming architectures based on neural networks with rectified linear unit
+activation. Moreover, by using Taylor series, minimal PCFR may also approximate every analytic
+function with arbitrary precision, so it has a wide range of potential applications. Theorem 42 tells
+us that, if 𝑓 : R𝑛 ⇀ R is a function definable in minimal PCFR , then the set of points on which ∇𝑓
+exists but AD methods fail to compute it is contained in a countable union of algebraic varieties
+(i.e., zeros of polynomials). In particular, when 𝑛 = 1, this set is countable.
+Zero sets of polynomial equations have been studied for literally millennia as part of the vast
+field known as algebraic geometry. Albeit extremely complex in general, many results exist on
+their structure, which may be described or approximated very accurately in several cases. It is not
+excluded that, in the future, these results may be leveraged to develop static analysis techniques
+(e.g. type systems) for establishing the absence of errors in differentiable programs.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+28:26
+Damiano Mazza and Michele Pagani
+From Gradients to Jacobians. We limited our attention to programs implementing functions
+R𝑛 ⇀ R𝑚 with 𝑚 = 1. The case 𝑚 > 1, in which one would speak of Jacobians rather than
+gradients, is conceptually identical. First of all, observe that a function 𝑓 : R𝑛 ⇀ R𝑚 may always
+be decomposed into 𝑚 functions 𝑓𝑖 := 𝜋𝑖 𝑓 : R𝑛 ⇀ R, so restricting primitives to one output causes
+no loss of generality and Fig. 2 needs no modification. When Γ ⊢ 𝑀 : R𝑚 with Γ containing 𝑛
+variables and 𝑚 > 1, what needs to be modified are the Equations (9) and (10), which must yield an
+𝑚 × 𝑛 matrix whose lines are built out of 𝑚 expressions of the form 𝑔𝑟𝑎𝑑 (𝜋𝑖 𝑀). Theorem 33 and
+Theorem 42 lift to this setting because the Jacobian is just the collection of the 𝑚 gradients.
+Internalizing AD. The transformations of Fig. 2, and thus the definition of 𝑔𝑟𝑎𝑑 (𝑀) for a program
+𝑀 (Equations (9) and (10)) are external to PCFR : a programmer may apply them for instance via a
+compiler, but the transformations are not accessible from within the program itself. For practical
+−−−→
+←−−−
+purposes, it would be interesting to have a programming language in which 𝑔𝑟𝑎𝑑 and 𝑔𝑟𝑎𝑑 are
+syntactic constructs, typed 𝑥 1R, . . . , 𝑥𝑛R ⊢ 𝑔𝑟𝑎𝑑 (𝑀) : R𝑛 whenever 𝑥 1R, . . . , 𝑥𝑛R ⊢ 𝑀 : R, and with
+𝑔𝑟𝑎𝑑 (𝑀) being executed in such a way as to reflect the application of AD to 𝑀. A naive way of
+achieving this would be to turn the definition of Fig. 2 into rewriting rules; a more sophisticated
+approach was provided by Pearlmutter and Siskind for Stalin∇ [Pearlmutter and Siskind 2008].
+The errors introduced by AD have the important consequence that such an internalization is
+impossible without breaking the expected extensional semantics of programs. This is because, as
+any denotational semantics, the standard semantics defined in Sect. 2.1 is contextual, in the sense
+that J𝑀K = J𝑁 K implies JC{𝑀 }K = JC{𝑁 }K for any context C. Now, referring to (1), we have
+JSillyId(𝑥)K𝑥 R = J𝑥K𝑥 R and yet we know that J𝑔𝑟𝑎𝑑 (SillyId(𝑥))K𝑥 R ≠ J𝑔𝑟𝑎𝑑 (𝑥)K𝑥 R , because the
+latter two functions differ at 0. So any denotational semantics of PCFR with łinternal ADž needs
+to interpret SillyId and Id := 𝜆𝑥 R .𝑥 differently. łResource-sensitivež semantics coming from linear
+logic do distinguish them, but it is easy to find other examples on which these semantics too fail.
+An example of denotational semantics which consistently works is the one introduced by Abadi
+and Plotkin [Abadi and Plotkin 2020], whose first order language does have internal AD. In that
+semantics, Id is the identity whereas SillyId is a łpartial identityž, undefined at 0. It is not clear
+whether this extends to higher order (and thus to PCFR , similarly to [Di Gianantonio and Edalat
+2013]), but assuming it does, the meaning it gives to programs is somewhat unusual: for example,
+using the definition given in (1), Floor(𝑟 ) would diverge whenever 𝑟 is an integer. This is a further
+drawback of partial conditional semantics, in addition to the one pointed out in Sect. 2.2 (concerning
+example (12)).
+Another loosely related remark worth making at this point is that, seen as a functional on the
+Scott domain R⊥ → R⊥ , where R⊥ is the łflatž Scott domain typically used for interpreting R as a
+ground type with total conditionals, the derivative operator 𝜕 is not Scott continuous.8 Although
+the technical consequences of this observation are not entirely clear, from an intuitive point of view
+it means that in the naive flat semantics the derivative operator is łnot computablež, and therefore
+no recursive procedure (like those given by AD transformations) will be error-free.
+ACKNOWLEDGMENTS
+We would like to thank A. Brunel, T. Ehrhard and B.A. Pearlmutter for useful comments and
+discussions. This work was partially supported by ANR PRC project PPS (ANR-19-CE48-0014).
+8 Given 𝐴 ⊆ R, say that 𝜒 is the indicator function of 𝐴 if 𝜒 (𝑥) = 0 when 𝑥 ∈ 𝐴 and 𝜒 (𝑥) = ⊥ otherwise. For 𝑛 > 0, let
+𝐼𝑛 := ] − ∞, 0] ∪ ] 𝑛1 , +∞[ and let 𝜑𝑛 be the indicator function of 𝐼𝑛 . Notice that each 𝜑𝑛 is differentiable on 𝐽𝑛 := 𝐼𝑛 \ {0}
+and 𝜕𝜑𝑛 is the indicator function of 𝐽𝑛 . As elements of the Scott domain R⊥ → R⊥ , the functions (𝜑𝑛 )𝑛>0 and (𝜕𝜑𝑛 )𝑛>0
+form two directed chains whose
+suprema are the identically zero function and the indicator function of R \ {0}, respectively.
+
+In particular, 𝜕 sup𝑛>0 𝜑𝑛 ≠ sup𝑛>0 𝜕𝜑𝑛 , so 𝜕 is not Scott continuous.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.
+Automatic Differentiation in PCF
+28:27
+REFERENCES
+Martín Abadi, Paul Barham, Jianmin Chen, Zhifeng Chen, Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghemawat,
+Geoffrey Irving, Michael Isard, Manjunath Kudlur, Josh Levenberg, Rajat Monga, Sherry Moore, Derek Gordon Murray,
+Benoit Steiner, Paul A. Tucker, Vijay Vasudevan, Pete Warden, Martin Wicke, Yuan Yu, and Xiaoqiang Zheng. 2016.
+TensorFlow: A System for Large-Scale Machine Learning. In Proceedings of OSDI. USENIX Association, 265ś283.
+Martín Abadi and Gordon D. Plotkin. 2020. A simple differentiable programming language. Proc. ACM Program. Lang. 4,
+POPL (2020), 38:1ś38:28.
+Roberto Amadio and Pierre-Louis Curien. 1998. Domains and Lambda-Calculi. Vol. 46. Cambridge University Press.
+Henk P. Barendregt. 1985. The Lambda Calculus, Its Syntax and Semantics. North Holland.
+Gilles Barthe, Raphaëlle Crubillé, Ugo Dal Lago, and Francesco Gavazzo. 2020. On the Versatility of Open Logical Relations Continuity, Automatic Differentiation, and a Containment Theorem. In Proceedings of ESOP. 56ś83.
+Atilim Baydin, Barak Pearlmutter, Alexey Radul, and Jeffrey Siskind. 2018. Automatic differentiation in machine learning: A
+survey. Journal of Machine Learning Research 18 (2018), 1ś43.
+Thomas Beck and Herbert Fischer. 1994. The if-problem in automatic differentiation. J. Comput. Appl. Math. 50, 1 (1994),
+119ś131.
+Aloïs Brunel, Damiano Mazza, and Michele Pagani. 2020. Backpropagation in the simply typed lambda-calculus with linear
+negation. PACMPL 4, POPL (2020), 64:1ś64:27.
+Pietro Di Gianantonio and Abbas Edalat. 2013. A Language for Differentiable Functions. In Proceedings of FOSSACS. 337ś352.
+Thomas Ehrhard and Laurent Regnier. 2006. Böhm Trees, Krivine’s Machine and the Taylor Expansion of Lambda-Terms. In
+Proceedings of CiE. 186ś197.
+Thomas Ehrhard and Laurent Regnier. 2008. Uniformity and the Taylor expansion of ordinary lambda-terms. Theor. Comput.
+Sci. 403, 2-3 (2008), 347ś372.
+Conal Elliott. 2018. The simple essence of automatic differentiation. PACMPL 2, ICFP (2018), 70:1ś70:29.
+Martín Hötzel Escardó. 1996. PCF Extended with Real Numbers. Theor. Comput. Sci. 162, 1 (1996), 79ś115.
+Ian Goodfellow, Yoshua Bengio, and Aaron Courville. 2016. Deep Learning. MIT Press. http://www.deeplearningbook.org
+Andreas Griewank and Andrea Walther. 2008. Evaluating derivatives - principles and techniques of algorithmic differentiation,
+Second Edition. SIAM.
+Mathieu Huot, Sam Staton, and Matthijs Vákár. 2020. Correctness of Automatic Differentiation via Diffeologies and
+Categorical Gluing. In Proceedings of FOSSACS. 319ś338.
+Johan Joss. 1976. Algorthmisches Differenzieren. Ph.D. Dissertation. ETH Zurich.
+Yann LeCun. 2018. Deep Learning est mort. Vive Differentiable Programming! (2018). https://www.facebook.com/yann.
+lecun/posts/10155003011462143
+Wonyeol Lee, Hangyeol Yu, Xavier Rival, and Hongseok Yang. 2020. On Correctness of Automatic Differentiation for
+Non-Differentiable Functions. CoRR abs/2006.06903 (2020).
+Carol Mak, C.-H. Luke Ong, Hugo Paquet, and Dominik Wagner. 2020. Densities of almost-surely terminating probabilistic
+programs are differentiable almost everywhere. CoRR abs/2004.03924 (2020).
+Damiano Mazza. 2017. Polyadic Approximations in Logic and Computation. Habilitation thesis. Université Paris 13.
+Damiano Mazza, Luc Pellissier, and Pierre Vial. 2018. Polyadic approximations, fibrations and intersection types. Proc. ACM
+Program. Lang. 2, POPL (2018), 6:1ś6:28.
+Boris Mityagin. 2015. The Zero Set of a Real Analytic Function. arXiv:1512.07276 [math.CA] (2015).
+Adam Paszke, Sam Gross, Soumith Chintala, Gregory Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Alban Desmaison,
+Luca Antiga, and Adam Lerer. 2017. Automatic differentiation in PyTorch. (2017).
+Barak A. Pearlmutter and Jeffrey Mark Siskind. 2008. Reverse-mode AD in a Functional Framework: Lambda the Ultimate
+Backpropagator. ACM Trans. Program. Lang. Syst. 30, 2 (2008), 7:1ś7:36.
+Gordon Plotkin. 1977. LCF Considered as a Programming Language. Theoretical Computer Science 5, 3 (1977), 223ś255.
+Amir Shaikhha, Andrew Fitzgibbon, Dimitrios Vytiniotis, and Simon Peyton Jones. 2019. Efficient differentiable programming
+in a functional array-processing language. PACMPL 3, ICFP (2019), 97:1ś97:30.
+Bert Speelpenning. 1980. Compiling Fast Partial Derivatives of Functions Given by Algorithms. Ph.D. Dissertation. University
+of Illinois at Urbana-Champaign.
+Ágnes Szendrei. 1986. Clones in Universal Algebra. Presses de l’Université de Montréal.
+Fei Wang, Daniel Zheng, James M. Decker, Xilun Wu, Grégory M. Essertel, and Tiark Rompf. 2019. Demystifying differentiable
+programming: shift/reset the penultimate backpropagator. PACMPL 3, ICFP (2019), 96:1ś96:31.
+Yuan Zhou, Bradley J. Gram-Hansen, Tobias Kohn, Tom Rainforth, Hongseok Yang, and Frank Wood. 2019. LF-PPL: A
+Low-Level First Order Probabilistic Programming Language for Non-Differentiable Models. In Proceedings of AISTATS.
+148ś157.
+Proc. ACM Program. Lang., Vol. 5, No. POPL, Article 28. Publication date: January 2021.

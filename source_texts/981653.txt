@@ -1,0 +1,293 @@
+Neural frame reconstruction from sparse samples. Contribute to kvark/ommatidia development by creating an account on GitHub.
+
+Shared reconstruction core: multiscale denoising and posed-RGB radiance fields by kvark · Pull Request #18 · kvark/ommatidia · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kvark
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Implemented
+Two variants share the local image pyramid in ommatidia/src/neural.rs, with separate observation adapters and task heads:
+Realtime transport: multiscale diffuse/specular reconstruction, linear recurrent state, moments/confidence and short differentiable unrolls.
+Experimental field: posed linear RGB and declared acquisition bounds → image-aligned 3D features → density, emission, view-dependent radiance and constant environment. No G-buffer, velocity, true lights, target depth or scene-ID embedding enters inference. No blade-volume integration.
+The field default is wider (64 core channels / 128 hidden units versus the realtime path's 8 channels). Equal-width core shapes are compatible. Shared implementation is not evidence of successful weight transfer or a learned universal transport model.
+Source and incident-radiance supervision
+Static synthetic captures export exact emitter meshes/radiance, cameras, environment and source/non-source surface probes. Independent lighting seeds change source colour/intensity without moving geometry or cameras.
+--incident-probes 24 --incident-batches 8 adds training-only angular incident-radiance labels using the same canonical Blade path tracer as image capture. Manifest v2 stores actual offset world-space origins, unit directions, direct/indirect RGB means, variance of each mean, paired total variance, path depth, batch budget, offsets and radiance ceiling. V1 without incident labels remains supported. Labels are finite-depth, clamped Monte Carlo estimates—not exact infinite-bounce truth. Sampling variance cannot measure truncation bias or unobserved rare paths.
+Direct means first-visible source emission or sky; indirect means at least one scattering event beyond the receiving probe. Targets are radiance, not receiver-shaded colour or irradiance: no receiver albedo, cosine, inverse-square multiplier or PDF weighting is baked in. Emitter-aimed and hemisphere proposals are regression strata, not angular quadrature.
+field --incident-rays 4 --incident-weight 0.1 couples these targets to the existing field, without adding a separate incoming-light head or new neural parameters:
+```
+direct   = sum(T * alpha * emission) + T_end * environment
+indirect = sum(T * alpha * scattered_radiance)
+incident = direct + indirect
+```
+Image and incident rays constrain the same density/visibility, emission, appearance and image encoder. The auxiliary direct/indirect log-radiance loss uses bounded uncertainty weights. Weight zero preserves graph, rays, initialization and random sampling; only loss masks differ. Missing labels are rejected when incident training is requested. Runtime observations/context exports contain no supervision metadata.
+The incident loss remains opt-in for the field experiment. Realtime training is unchanged; no joint-training or realtime-quality gain is claimed. Existing field parameter shapes/checkpoints remain compatible. The appearance branch still models captured illumination, not a relightable BRDF/transport operator.
+Architecture, contracts and commands.
+Validation — final CI green
+All five jobs in final normal CI 34142496046, head 16a575b2c59680a83f1588edaf0fd20baca415f4, passed:
+Linux/Vulkan, Windows/Vulkan and macOS/Metal workspace checks.
+Formatting, Clippy with warnings denied, workspace tests and release C ABI example.
+All 16 LavaPipe GPU tests: nine legacy/runtime, two multiscale transport, four field, and the physical incident-capture test.
+Moving/jittered capture and the original complete field capture → train → save/reload → held-scene-render smoke.
+The new physical test checks visible emission, unobstructed sky, opaque occlusion, reflected light and distance-invariant radiance. Field tests check direct + indirect = total, CPU/GPU visibility integration, gradients into the existing core/density/emission/appearance parameters, label isolation and reload. No tolerance was relaxed.
+The complete matched incident-supervision ablation ran successfully in 34141837198; its tested implementation was committed as c28a219f90fd8c1e90a836f7e8030578c3c14cb6.
+Quality ablation — mixed, not promoted
+bash benchmarks/incident-lavapipe.sh: two fitting geometries under two light seeds, two fitting-disjoint evaluation geometries under a third light seed, six 16×16 cameras each, 24 incident probes, and 128 updates. Repeat with optimization seeds 7/11. Both arms use the same tiny 4-channel/16-hidden model, query counts and initialization; only incident weight 0/0.1 differs. Checkpoints are reloaded before held scoring; no held metric selects a checkpoint or tunes a parameter.
+Equal-weight means over two scenes × two optimization seeds:
+Metric
+Incident weight 0
+Weight 0.1
+Change
+Image PSNR in x/(1+x)
+17.8735 dB
+17.7436 dB
+−0.1299 dB
+Total incident log1p MSE
+0.553613
+0.546458
+−1.29%
+Direct incident log1p MSE
+0.622452
+0.614315
+−1.31%
+Indirect incident log1p MSE
+0.047722
+0.049431
++3.58%
+Total incident log-error improves in three of four paired rows; indirect error worsens in three. Image quality improves slightly with one optimization seed and regresses with the other. Both inspected arms remain very blurry, without useful recovered boundaries/emitters. The larger default is not tested here. This does not justify increasing the default loss weight or promoting a checkpoint.
+Full protocol and per-case results. The successful ablation run's incident-validation artifact retains captures, labels, checkpoints, images, scores, hashes and logs. The earlier field-only result remains recorded separately.
+Dependencies and cleanup
+Meganeura d903bba0a478277216133719e1eaa31b56d0be10; published Blade graphics 0.9 / render 0.6 / asset 0.2.2 and Naga 30. Lockfile regenerated; root patch overrides removed. Blade's checkout supplies capture shader assets only.
+The PR removes obsolete trainers/oracles/curriculum tooling and consolidates the active design. All temporary apply workflows, repair scripts and encoded payloads are absent from the final diff. Persistent workflows have read-only repository permissions. Main and production checkpoint assets are unchanged.
+Research boundary: the implementation supplies a tested physical supervision route, not reliable geometry recovery, arbitrary relighting, cross-task transfer, a new realtime checkpoint or DLSS parity. Next controls must diagnose source localization, surface support and capacity using construction-only data before a larger independent evaluation; do not tune on these held rows.
+kvark
+and others
+added 15 commits
+September 6, 2026 20:45
+ci: expose temporary source snapshot for reconstruction audit
+d8727e9
+chore: stage audited source transfer 1/4 [skip ci]
+e31964f
+chore: stage audited source transfer 2/4 [skip ci]
+0b75f8c
+chore: stage audited source transfer 3/4 [skip ci]
+287d039
+chore: stage audited source transfer 4/4 [skip ci]
+4282135
+ci: apply and validate the reconstruction review patch
+4007805
+docs: record reconstruction audit and evidence-driven architecture plan
+127d6dd
+test: correct explicit history-storage replay and retain fractional c…
+…
+c53028d
+```
+…ontrols
+```
+ci: validate corrected native history replay before completing the re…
+…
+8245009
+```
+…view
+```
+feat: physical candidate-aware fusion, local backbone, and matched tr…
+…
+6c093b1
+```
+…ansport
+```
+chore: remove temporary review transfer workflow
+3f0f0a8
+chore: finish review bootstrap cleanup and run normal CI
+39c67e6
+test: supply valid enum examples to the documented-flag test
+1d1e22d
+test: exercise candidate fusion and local backbone CLI values
+db19ef5
+chore: remove the completed CLI test repair workflow
+36f0b0e
+kvark
+marked this pull request as ready for review
+September 7, 2026 04:29
+kvark
+and others
+added 14 commits
+September 6, 2026 23:01
+build: verify current Blade and Meganeura before reconstruction integ…
+…
+0b1e08d
+```
+…ration
+```
+chore: stage verified reconstruction implementation 1/4 [skip ci]
+a708ae9
+chore: stage verified reconstruction implementation 2/4 [skip ci]
+73d06f1
+chore: stage verified reconstruction implementation 3/4 [skip ci]
+f9d2d5d
+chore: stage verified reconstruction implementation 4/4 [skip ci]
+7062f7b
+build: validate multiscale recurrent transport on LavaPipe
+2c819f8
+build: complete reconstruction workspace dependencies
+e752152
+build: type observed radiance accessors explicitly
+7c515fd
+fix: honor graph tensor shapes and retire the superseded trainer
+0e5783f
+feat: lobe-separated multiscale reconstruction with short BPTT
+31d9de2
+test: add reproducible rendered-sequence LavaPipe quality experiment
+c42445c
+refactor: name evaluation history and remove unused training dependen…
+…
+5c0e002
+```
+…cies
+```
+test: run held-out rendered-sequence quality training on LavaPipe
+f1b4f76
+refactor: finish active reconstruction trainer cleanup
+7715353
+kvark
+and others
+added 17 commits
+September 6, 2026 23:55
+test: clean the moving-transport fixture
+7c5038c
+test: execute the rendered LavaPipe quality experiment
+dfbd941
+ci: apply and validate the multiscale reconstruction implementation
+12a0105
+build: use published Blade 0.9 and Naga 30 with current Meganeura
+20e3a13
+build: validate published dependencies and capture current experiment…
+…
+5a0eaaf
+```
+… source
+```
+chore: stage field experiment source 1/3 [skip ci]
+7bf7823
+chore: stage field experiment source 2/3 [skip ci]
+d87cd9c
+chore: stage field experiment source 3/3 [skip ci]
+cefff9e
+test: validate shared-core field reconstruction and LavaPipe quality …
+…
+b28459f
+```
+…end to end
+```
+ci: propagate compiler and test failures through logged commands
+94422b2
+fix: preserve matrix shapes across field autograd channel operations
+1a9d494
+ci: use published dependencies and validate both reconstruction variants
+d2b20f5
+ci: update optional transport quality run to published Blade and merg…
+…
+652d556
+```
+…ed Meganeura
+```
+ci: commit tested source separately from authorized workflow updates
+11b97dc
+feat: image-conditioned field variant, shared encoder, and source-lig…
+…
+1d09337
+```
+…ht supervision
+```
+chore: remove completed field implementation workflow
+0ed9917
+docs: record held-scene field quality and its limitations
+e1001d5
+kvark
+changed the title
+Reconstruction audit: candidate-aware, linear-radiance fusion
+Shared reconstruction core: multiscale denoising and posed-RGB radiance fields
+Sep 7, 2026
+kvark
+and others
+added 10 commits
+September 7, 2026 08:58
+chore: stage incident supervision patch 1/3 [skip ci]
+169a8f4
+chore: stage incident supervision patch 2/3 [skip ci]
+5acd1f9
+chore: stage incident supervision patch 3/3 [skip ci]
+f4b20db
+test: validate incident capture, visibility gradients, and matched La…
+…
+dfb9781
+```
+…vaPipe ablation
+```
+test: reuse the existing serializer for field manifest compatibility …
+…
+52c4194
+```
+…checks
+```
+test: correct serializer borrowing and simplify reference integration…
+…
+e97e774
+```
+… loops
+```
+feat: supervise incident transport with paired radiance probes and sh…
+…
+c28a219
+```
+…ared field visibility
+```
+ci: require physical incident-radiance capture tests on LavaPipe
+cb7ed99
+chore: remove completed incident-supervision implementation workflow
+99090c3
+docs: record the mixed incident-supervision ablation without promotin…
+…
+16a575b
+```
+…g it
+```
+Hide details
+View details
+kvark
+merged commit 7aebc2c
+into
+main
+Sep 7, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+kvark
+deleted the
+reconstruction/candidate-aware-fusion
+branch
+September 7, 2026 16:33
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

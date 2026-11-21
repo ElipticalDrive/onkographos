@@ -1,0 +1,126 @@
+# Voxel Texture Atlas
+
+Also called: Runtime Voxel Texture Atlas, OpenTESArena Voxel Atlas
+
+## Overview
+A technique to combine multiple discrete voxel textures into a single large 2D texture (atlas) at runtime to reduce CPU-bound performance overhead caused by frequent material binding calls during rendering [S1, unofficial]. It addresses the inefficiency of legacy systems where voxel data is organized as multiple separate textures per entity (e.g., 3–4 textures per building in .SET files) by sub-allocating them within one unified texture object [S1, unofficial]. Unlike sibling methods that may focus on static packing or 3D volume atlases, this method specifically targets runtime dynamic allocation for voxel-based geometry to optimize draw call batching in CPU-limited scenarios [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A collection of voxel texture definitions (e.g., from `.SET` files), each with fixed dimensions (typically $64 \times 64$ pixels) [S1, unofficial].
+- Output: A single 2D texture object (identified by `ObjectTextureID`) containing all voxel textures, and a mapping from logical texture IDs to their physical coordinates within the atlas [S1, unofficial].
+
+**Data Structures:**
+1.  **`RenderTextureAtlasManager`**:
+    -   `static constexpr int WIDTH`: Atlas width (e.g., 2048) [S1, unofficial].
+    -   `static constexpr int HEIGHT`: Atlas height (e.g., 2048) [S1, unofficial].
+    -   `ObjectTextureID atlasTextureID`: Handle to the underlying GPU texture [S1, unofficial].
+    -   `2D Heap`: A data structure tracking free rectangular regions within the atlas for sub-allocation [S1, unofficial].
+2.  **`RenderVoxelLoadedTexture`**: Holds the initialized texture data and references the atlas entry [S1, unofficial].
+3.  **`Rect`**: Represents the allocated sub-region $(x, y, width, height)$ within the atlas [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Initialization**: Create the atlas texture using the renderer's `createObjectTexture` function with dimensions $WIDTH \times HEIGHT \times 1$ (no mipmaps) [S1, unofficial]. Store the resulting `ObjectTextureID` [S1, unofficial].
+2.  **Heap Setup**: Initialize the 2D heap to represent the entire atlas area as a single free rectangle [S1, unofficial].
+3.  **Texture Loading**: For each voxel texture definition:
+    a. Load the texture file into RAM [S1, unofficial].
+    b. Create a `ScopedObjectTextureRef` and initialize a `RenderVoxelLoadedTexture` object [S1, unofficial].
+4.  **Atlas Allocation**:
+    a. Call `textureAtlasManager.add(textureBuilder)` [S1, unofficial].
+    b. The manager searches the 2D heap for a free rectangle fitting the texture dimensions ($64 \times 64$) [S1, unofficial].
+    c. If found, lock the atlas texture (`renderer.lockObjectTexture()`), write the texels from the `TextureBuilder` into the allocated rectangle, and unlock the texture (`renderer.unlockObjectTexture()`) [S1, unofficial].
+    d. If no free rectangle is found, log an error: "Couldn't find a free $W \times H$ rect in atlas" [S1, unofficial].
+5.  **Batching Update**: Modify the `RenderVoxelChunkManager` to compare `RenderTextureAtlasEntryID` (the atlas index) with adjacent faces instead of the original `ObjectTextureID` [S1, unofficial].
+6.  **Shader Update**: Update fragment shaders to use UV coordinates mapped to the specific sub-region of the atlas rather than the default $[0, 1]$ range [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+struct RenderTextureAtlasManager:
+    WIDTH: int = 2048
+    HEIGHT: int = 2048
+    atlasTextureID: ObjectTextureID
+    freeRects: List[Rect] # 2D heap
+
+    def init(renderer: Renderer) -> bool:
+        self.atlasTextureID = renderer.createObjectTexture(self.WIDTH, self.HEIGHT, 1)
+        if self.atlasTextureID < 0:
+            return False
+        # Initialize heap with one large free rect covering the atlas
+        self.freeRects.append(Rect(0, 0, self.WIDTH, self.HEIGHT))
+        return True
+
+    def add(textureBuilder: TextureBuilder) -> Rect:
+        targetWidth = textureBuilder.width
+        targetHeight = textureBuilder.height
+        
+        # Find a free rectangle in the 2D heap
+        rect = self._findFreeRect(targetWidth, targetHeight)
+        
+        if rect.isEmpty():
+            DebugLogErrorFormat("Couldn't find a free %dx%d rect in atlas.", targetWidth, targetHeight)
+            return Rect()
+        
+        # Allocate the rect (remove from free list, split remaining space)
+        self._allocateRect(rect, targetWidth, targetHeight)
+        
+        # Write texels to VRAM
+        renderer.lockObjectTexture(self.atlasTextureID)
+        renderer.populateObjectTexture(self.atlasTextureID, textureBuilder.texels, rect.x, rect.y)
+        renderer.unlockObjectTexture(self.atlasTextureID)
+        
+        return rect
+
+    def _findFreeRect(width: int, height: int) -> Rect:
+        # Search freeRects for a rect with width >= targetWidth and height >= targetHeight
+        # Return the first suitable rect or empty Rect if none found
+        for rect in self.freeRects:
+            if rect.width >= width and rect.height >= height:
+                return rect
+        return Rect()
+
+    def _allocateRect(rect: Rect, width: int, height: int):
+        # Remove rect from freeRects
+        self.freeRects.remove(rect)
+        
+        # Split the remaining space into two new free rectangles (Right and Bottom)
+        # Right: (rect.x + width, rect.y, rect.width - width, height)
+        # Bottom: (rect.x, rect.y + height, width, rect.height - height)
+        # Add new rects to freeRects if they have positive dimensions
+        if rect.width > width:
+            self.freeRects.append(Rect(rect.x + width, rect.y, rect.width - width, height))
+        if rect.height > height:
+            self.freeRects.append(Rect(rect.x, rect.y + height, width, rect.height - height))
+
+class RenderVoxelChunkManager:
+    def batchFaces(self):
+        # Compare RenderTextureAtlasEntryID instead of ObjectTextureID
+        for face in adjacentFaces:
+            if face.atlasEntryID == currentFace.atlasEntryID:
+                # Add to same draw call
+                pass
+```
+
+**Parameters:**
+-   **Atlas Dimensions**: `WIDTH` and `HEIGHT` are static constexpr integers. Typical value is 2048, but 1024 or 4096 are also supported [S1, unofficial].
+-   **Voxel Texture Dimensions**: Assumed to be $64 \times 64$ pixels to simplify 2D heap packing logic [S1, unofficial].
+-   **Mipmapping**: Not used in this engine [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **UV Mapping**: Fragment shaders must be revised to map UVs to the specific sub-region of the atlas; default $[0, 1]$ UVs will sample the wrong texture [S1, unofficial].
+-   **Batching Logic**: The `RenderVoxelChunkManager` must compare `RenderTextureAtlasEntryID` with adjacent faces, not the original `ObjectTextureID`, to correctly batch textures from the same atlas [S1, unofficial].
+-   **Allocation Failure**: If the heap cannot find a free rectangle, an error is logged, and the texture is not added [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity**: Allocation depends on the 2D heap search strategy. A simple linear search is $O(N)$ where $N$ is the number of free rectangles. Splitting rects adds overhead but maintains $O(1)$ average allocation for fixed-size textures if the heap is well-managed [S1, unofficial].
+-   **Memory Complexity**: The atlas consumes $WIDTH \times HEIGHT \times \text{channels}$ bytes in VRAM. For $2048 \times 2048$ with 4 channels, this is 16 MB. The heap overhead is minimal [S1, unofficial].
+-   **Performance**: Reduces CPU-bound performance issues in dense scenes (e.g., cities) by minimizing material bind calls [S1, unofficial].
+-   **Strengths**: Simple implementation, effective for fixed-size textures, reduces state changes [S1, unofficial].
+-   **Limitations**: No mipmapping support, static atlas size requires runtime reallocation or resizing if full, fixed texture dimensions simplify packing but reduce flexibility [S1, unofficial].
+
+## Background
+The method was proposed by afritz1 in GitHub Issue #341 on September 7, 2026, for the OpenTESArena project [S1, unofficial]. It was introduced to address CPU-bound rendering bottlenecks in city scenes, even when using Vulkan, by replacing the legacy approach of 3–4 separate textures per building in `.SET` files with a single sub-allocated texture [S1, unofficial].
+
+## Sources
+[S1] Add voxel texture atlas to reduce draw calls, https://github.com/afritz1/OpenTESArena/issues/341, fetched 2026-10-27 (unofficial)

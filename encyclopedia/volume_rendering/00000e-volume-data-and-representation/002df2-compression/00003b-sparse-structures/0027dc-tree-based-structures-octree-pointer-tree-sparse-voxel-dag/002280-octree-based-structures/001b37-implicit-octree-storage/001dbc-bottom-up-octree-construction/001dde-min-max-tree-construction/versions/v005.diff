@@ -1,0 +1,118 @@
+--- v004.md
++++ v005.md
+@@ -7,20 +7,20 @@
+ 
+ ## How it works
+-**Inputs:** A scalar 3D volume array and an octree structure built via bottom-up consolidation (see [Bottom-up Octree Construction](1590-bottom-up-octree-construction.md)).
+-**Outputs:** An octree where interior nodes store min/max scalar pairs, enabling ray traversal or marching cubes to prune subtrees.
++**Inputs:** A scalar 3D volume array and an octree structure built via bottom-up consolidation (see [Bottom-up Octree Construction](1590-bottom-up-octree-construction.md)) [S3, unofficial].
++**Outputs:** An octree where interior nodes store min/max scalar pairs, enabling ray traversal or marching cubes to prune subtrees [S1].
+ 
+ **Data Structures:**
+-The octree nodes are extended to store a `min` and `max` scalar value.
+-- **Leaf Nodes (Cap Nodes):** Nodes at the maximum depth $d_{max}-1$ that contain 8 scalar voxels. They do *not* store a precomputed min/max pair in the node header to save space; instead, the extrema are computed on-the-fly or derived from their children if they were stored (see Pitfalls).
+-- **Interior Nodes:** Nodes above $d_{max}-1$. Each stores a `min` and `max` pair representing the bounding range of all scalar values in its subtree.
++The octree nodes are extended to store a `min` and `max` scalar value [S3, unofficial].
++- **Leaf Nodes (Cap Nodes):** Nodes at the maximum depth $d_{max}-1$ that contain 8 scalar voxels [S3, unofficial]. They do *not* store a precomputed min/max pair in the node header to save space; instead, the extrema are computed on-the-fly or derived from their children if they were stored (see Pitfalls) [S3, unofficial].
++- **Interior Nodes:** Nodes above $d_{max}-1$ [S3, unofficial]. Each stores a `min` and `max` pair representing the bounding range of all scalar values in its subtree [S3, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Identify Cap Nodes:** Locate all nodes at depth $d_{max}-1$. These are the parents of the finest-level scalar voxels [S3, unofficial].
++1. **Identify Cap Nodes:** Locate all nodes at depth $d_{max}-1$ [S3, unofficial].
+ 2. **Compute Leaf Extrema (Cap Nodes):** For each cap node, compute the minimum and maximum of the 27 voxels that constitute the cell boundaries. This includes the 8 voxels belonging to the node and their forward neighbors in the positive X, Y, and Z dimensions [S3, S6, unofficial].
+    - *Note:* In multiresolution octrees, neighbors may exist at different depths (coarser resolutions). The computation must account for forward neighbors at each depth of the octree to handle cells of any power-of-two width [S3, unofficial].
+ 3. **Propagate Upwards:** For each interior node at depth $d < d_{max}-1$, compute its min/max pair by taking the minimum of its 8 children's `min` values and the maximum of its 8 children's `max` values [S3, unofficial].
+-   - Formula:
+-     $$ \text{node.min} = \min_{i=0..7} (\text{child}_i.\text{min}) $$
+-     $$ \text{node.max} = \max_{i=0..7} (\text{child}_i.\text{max}) $$
++   Formula:
++   $$ \text{node.min} = \min_{i=0..7} (\text{child}_i.\text{min}) $$
++   $$ \text{node.max} = \max_{i=0..7} (\text{child}_i.\text{max}) $$
+ 4. **Recursive Consolidation:** As child voxels consolidate into a parent during the bottom-up build, remove the child nodes and replace them with the computed parent node containing the aggregated min/max pair [S3, unofficial].
+ 5. **Storage:** Store the min/max pairs in the interior nodes. The leaf nodes (cap nodes) do not store these pairs in the node structure itself to avoid excessive memory overhead [S3, unofficial].
+@@ -28,41 +28,28 @@
+ **Pseudocode:**
+ ```python
+-def compute_min_max_tree(octree, max_depth):
++def compute_min_max_tree(node):
+     """
+-    Computes min/max pairs for all interior nodes of an octree.
+-    Assumes octree nodes have fields: .min, .max, .children (list of 8 nodes or None).
++    Recursively computes min/max pairs for interior nodes of an octree.
++    Assumes node has fields: .min, .max, .children (list of 8 nodes or None).
+     """
+-    # Start from the level just above the finest voxels (cap nodes)
+-    # Cap nodes are at depth max_depth - 1
+-    # We process bottom-up, so we start at max_depth - 1 and go up to 0
+-    
+-    for depth in range(max_depth - 1, -1, -1):
+-        nodes_at_depth = get_nodes_at_depth(octree, depth)
+-        
+-        for node in nodes_at_depth:
+-            if node.is_leaf():
+-                # Cap nodes: compute extrema from the 27 voxels (8 own + forward neighbors)
+-                # This is done on-the-fly during traversal or precomputed if needed,
+-                # but NOT stored in the node's min/max fields to save space.
+-                # [G] Implementation note: If precomputing for cap nodes is desired,
+-                # fetch the 8 scalar values and their forward neighbors from the 
+-                # original volume data or neighbor-finding structure.
+-                pass 
+-            else:
+-                # Interior node: aggregate from children
+-                if node.children is None or len(node.children) == 0:
+-                    node.min = float('inf')
+-                    node.max = float('-inf')
+-                else:
+-                    child_mins = [child.min for child in node.children if child is not None]
+-                    child_maxs = [child.max for child in node.children if child is not None]
+-                    
+-                    if child_mins:
+-                        node.min = min(child_mins)
+-                        node.max = max(child_maxs)
+-                    else:
+-                        # Empty node
+-                        node.min = float('inf')
+-                        node.max = float('-inf')
++    if node.children is not None:
++        for child in node.children:
++            compute_min_max_tree(child)
++            
++    if node.is_leaf():
++        # Cap nodes at depth d_max - 1 do not store min/max in the node header.
++        # Extrema are computed on-the-fly from 27 voxels (8 own + forward neighbors)
++        # during traversal or neighbor lookup. [S3, unofficial]
++        pass
++    else:
++        # Interior node: aggregate from children
++        child_mins = [child.min for child in node.children if child is not None]
++        child_maxs = [child.max for child in node.children if child is not None]
++        if child_mins:
++            node.min = min(child_mins)
++            node.max = max(child_maxs)
++        else:
++            node.min = float('inf')
++            node.max = float('-inf')
+ ```
+ 
+@@ -84,11 +71,11 @@
+ 
+ ### Min-Max Grid Preprocessing
+-Preprocessing step to compute minimum and maximum data values for each block, stored as a 2-channel volume texture. Allows occupancy determination with a single texture lookup. Referenced during the occlusion culling pass where the proxy geometry for occupied regions of the volume is determined. Could be recomputed for smaller volumes on the fly, e.g. when streaming time-varying data sets [S4].
++Preprocessing step to compute minimum and maximum data values for each block, stored as a 2-channel volume texture [S4]. Allows occupancy determination with a single texture lookup [S4]. Referenced during the occlusion culling pass where the proxy geometry for occupied regions of the volume is determined [S4]. Could be recomputed for smaller volumes on fly, e.g. when streaming time-varying data sets [S4].
+ 
+ ### Min/Max Octree Acceleration
+-An acceleration structure for volume rendering encoding intensity values with non-zero transparency contributions, effectively encoding a single level of a min/max octree. Differs from standard min/max octree implementations by encoding only a single level. Alternatively, the structure can be an octree of binary values encoding node occupancy, as employed by Levoy [S5, abstract only, unofficial].
++An acceleration structure for volume rendering encoding intensity values with non-zero transparency contributions, effectively encoding a single level of a min/max octree [S5, abstract only, unofficial]. Differs from standard min/max octree implementations by encoding only a single level [S5, abstract only, unofficial]. Alternatively, the structure can be an octree of binary values encoding node occupancy, as employed by Levoy [S5, abstract only, unofficial].
+ 
+ ### Multiresolution Min/Max Tree Computation
+-A method to compute bounding min/max pairs for multiresolution voxels, accounting for neighbors at different depths and coarser resolutions to create a looser but accurate acceleration structure. For static-resolution data, compute min/max pairs for the immediate parents of finest voxels (cap nodes), reflecting the min/max of 8 scalar vertices constituting the cell. For multiresolution leaf nodes, compute the minimum and maximum of its cell, accounting for values of neighbors in the positive X and Y dimensions. Include forward-neighbors at each depth of the octree in the min/max computation to handle cells of any power-of-two width [S3, unofficial].
++A method to compute bounding min/max pairs for multiresolution voxels, accounting for neighbors at different depths and coarser resolutions to create a looser but accurate acceleration structure [S3, unofficial]. For static-resolution data, compute min/max pairs for the immediate parents of finest voxels (cap nodes), reflecting the min/max of 8 scalar vertices constituting the cell [S3, unofficial]. For multiresolution leaf nodes, compute the minimum and maximum of its cell, accounting for values of neighbors in the positive X and Y dimensions [S3, unofficial]. Include forward-neighbors at each depth of the octree in the min/max computation to handle cells of any power-of-two width [S3, unofficial].
+ 
+ ### View-Dependent Frustum Culling with Shearing Transformation
+@@ -96,5 +83,5 @@
+ 
+ ### Min/Max Tree Acceleration
+-A technique using an octree built from min/max values of voxel groups to accelerate isosurface extraction by pruning nodes where the isovalue does not fall within the range. Traverse the octree from top-down as a min/max tree. Examine octree nodes only when the desired isovalue falls between the minimum and maximum values stored in the node. Voxels are grouped into eights at the maximum depth level. The min/max tree is built by examining 27 voxels: the original voxels and their neighbors constituting the far boundaries of the cells [S6, unofficial].
++A technique using an octree built from min/max values of voxel groups to accelerate isosurface extraction by pruning nodes where the isovalue does not fall within the range [S6, unofficial]. Traverse the octree from top-down as a min/max tree [S6, unofficial]. Examine octree nodes only when the desired isovalue falls between the minimum and maximum values stored in the node [S6, unofficial]. Voxels are grouped into eights at the maximum depth level [S6, unofficial]. The min/max tree is built by examining 27 voxels: the original voxels and their neighbors constituting the far boundaries of the cells [S6, unofficial].
+ 
+ ## Operating characteristics

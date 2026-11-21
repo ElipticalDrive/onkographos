@@ -1,0 +1,33 @@
+# Multi-view projection
+
+Also called: 3-Pass Voxelization, Orthographic Multi-View Voxelization
+
+## Overview
+Multi-view projection voxelization generates a robust 3D voxel representation of a triangle mesh by rasterizing the geometry from multiple orthogonal viewpoints, typically along the three principal axes. Unlike single-view methods that suffer from depth ambiguity and occlusion artifacts, this family resolves 3D occupancy by synthesizing data from distinct projection directions, ensuring complete coverage of complex geometry. It is distinguished from sibling methods like [3D Grid Rasterization](903-3d-grid-rasterization.md) by its reliance on 2D rasterization passes combined with multi-directional synthesis rather than direct 3D volume rasterization.
+
+## Shared principles
+All methods in this family share the core mechanism of decomposing 3D occupancy determination into a series of 2D projection problems. The general workflow involves:
+1.  **Orthographic Projection:** Setting up orthographic cameras aligned with the scene's bounding box axes (X, Y, Z).
+2.  **Rasterization:** Rasterizing the input triangle mesh into intermediate 2D buffers (sheet buffers) or directly into a 3D texture using multiple render passes.
+3.  **Synthesis:** Combining the results from the different views to resolve ambiguities. This often involves determining the dominant axis of projection for each triangle to avoid degenerate cases, or simply accumulating occupancy from all views to fill cracks.
+4.  **Coordinate Mapping:** Transforming 2D rasterized coordinates into 3D voxel indices using scale and offset uniforms derived from the scene bounding box and target resolution.
+
+## Subtopics
+
+### [Single 2D Projection Voxelization](3482-single-2d-projection-voxelization.md)
+Produces a 6-separating voxelization of a planar triangle using a single 2D projection along the dominant axis of the triangle's normal. It leverages the "thinness" of the voxelization to avoid multiple projections. Edge cases are resolved by testing crosshair segments perpendicular to the projection axis. Choose this for simple planar primitives where 6-separation is required and computational cost must be minimized per triangle.
+
+### [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md)
+Rasterizes scene geometry into a 3D texture using three orthographic cameras aligned with the scene's bounding box axes. It synthesizes three intermediate 2D "sheet buffers" into a final 2D "worksheet" texture to encode the 3D volume, avoiding direct 3D texture rasterization which was historically unsupported on consumer hardware. Choose this for complex scenes requiring robust coverage and when hardware supports efficient 2D texture synthesis.
+
+### 3-Pass Voxelization
+**Definition:** A voxelization approach that fixes cracks and missing data in the voxel grid by voxelizing the scene from each of the 3 major axes, requiring 3 render passes [S1, unofficial].
+**Steps:** For each of the 3 major axes, multiply the clip-space projection matrix by a rotation matrix corresponding to that axis to generate fragments from that view-axis. Use the voxel-space projection matrix without multiplying it by the rotation matrix, as it already maps all values properly [S1, unofficial].
+**Pitfalls:** Requires 3 render calls per rendered object, which becomes expensive as models become more complex. If optimizing by separating dynamic and static objects, the voxel grid of dynamic objects must be cleared every frame, requiring separate voxel grids for dynamic and static objects [S1, unofficial].
+
+## Background
+The concept of multi-view voxelization originated as a solution to the "cracks" and missing data inherent in single-direction voxelization techniques. Early real-time ray-traced voxel global illumination systems identified that a single projection direction could not reliably capture all surface orientations, leading to gaps in the voxel grid [S1, unofficial]. The 3-pass approach was proposed as a simple fix by rendering from the three principal axes. Later developments, such as Orthographic Multi-View Voxelization, refined this by introducing sheet buffers and worksheet synthesis to handle hardware limitations regarding direct 3D texture writes, allowing for efficient packing of voxel data into 2D textures [S2, unofficial]. This family is primarily used in real-time global illumination and volume rendering pipelines where a voxelized representation of triangle meshes is required for ray marching or cone tracing.
+
+## Sources
+[S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
+[S2] Orthographic Multi-View Voxelization Implementation Notes, https://github.com/... (unofficial)

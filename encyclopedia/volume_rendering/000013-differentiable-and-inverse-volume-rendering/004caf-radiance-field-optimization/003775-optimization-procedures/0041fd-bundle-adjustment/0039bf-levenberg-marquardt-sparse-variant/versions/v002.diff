@@ -1,0 +1,185 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-The Levenberg-Marquardt Sparse Variant is a non-linear least-squares optimization technique used to minimize reprojection error between observed and predicted image points, jointly optimizing 3D structure and camera parameters (pose and calibration) [S1, unofficial]. It sets itself apart from dense bundle adjustment by exploiting the sparsity of the Jacobian matrix to reduce computational complexity from inverting a $3n \times 3n$ matrix to a $7m \times 7m$ matrix, where $n$ is the number of 3D points and $m$ is the number of cameras [S1, unofficial]. This makes it suitable for scenarios where the number of features significantly exceeds the number of images ($n \gg m$) [S1, unofficial].
++The Levenberg-Marquardt Sparse Variant is a non-linear least-squares optimization technique used to minimize reprojection error between observed and predicted image points, jointly optimizing 3D structure and camera parameters (pose and calibration) [S1, unofficial]. It sets itself apart from dense bundle adjustment by exploiting the sparsity of the Jacobian matrix to avoid inverting a $3n \times 3n$ matrix, instead solving a system involving a $7m \times 7m$ matrix, which is more efficient when the number of features significantly exceeds the number of images ($n \gg m$) [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Measured image points $x_{i,j}$ for $m$ cameras and $n$ 3D points.
+-- Initial estimates for camera parameters $a_i$ and 3D point coordinates $b_j$.
++- Measured image points $x_{i,j}$ for $m$ cameras and $n$ 3D points [S1, unofficial].
++- Initial estimates for camera parameters $a_i$ and 3D point coordinates $b_j$ [G].
+ 
+ **Outputs:**
+-- Optimized camera parameters $a_i$ and 3D point coordinates $b_j$.
++- Optimized camera parameters $a_i$ and 3D point coordinates $b_j$ [G].
+ 
+ **Data Structures and Layout:**
+@@ -53,49 +53,100 @@
+ 5.  **Update Parameters:** Apply the shift $\Delta P = (\delta_a^T, \delta_b^T)^T$ to $P$.
+ 6.  **Check Error:** If the error decreases, accept the new parameters and set $\lambda \leftarrow \lambda / 10$. If the error increases, reject the step, set $\lambda \leftarrow \lambda \times 10$, and repeat from Step 3 [S1, unofficial].
+-7.  **Convergence:** Repeat until convergence criteria are met.
++7.  **Convergence:** Repeat until convergence criteria are met [G].
+ 
+ **Pseudocode:**
+ ```python
+-def levenberg_marquardt_sparse(x_measured, P_initial, max_iter=100):
++def levenberg_marquardt_sparse(x_measured, P_initial, m, n, max_iter=100):
+     """
+     x_measured: List of lists, x_measured[i][j] is the measured point for camera i and point j.
+     P_initial: Global parameter vector P.
++    m: Number of cameras.
++    n: Number of 3D points.
+     """
+-    m = number_of_cameras(P_initial)
+-    n = number_of_3d_points(P_initial)
+-    P = P_initial
++    P = list(P_initial)
+     lambda_damp = 1e-3
+     
+     for iteration in range(max_iter):
+         # 1. Compute residuals and Jacobian blocks
+-        # Calculate predicted points and residuals for all i, j
+-        # Compute Jacobian blocks: U_k, V_i, W_ki, E_a_k, E_b_i
+-        # Note: U and V are block-diagonal, W is dense block matrix
+-        U_star, V_star, W, E_a, E_b = compute_sparse_blocks(P, x_measured)
+-        
+-        # 2. Form the Schur complement matrix for camera updates
+-        # Invert V_star (block-diagonal, efficient)
+-        V_star_inv = invert_block_diagonal(V_star)
+-        
++        # Initialize blocks
++        U_star = [0.0] * (7 * m)  # Block diagonal 7x7 blocks
++        V_star = [0.0] * (3 * n)  # Block diagonal 3x3 blocks
++        W = [[0.0] * (3 * n) for _ in range(7 * m)]
++        E_a = [0.0] * (7 * m)
++        E_b = [0.0] * (3 * n)
++        
++        for i in range(m):
++            for j in range(n):
++                # Extract camera and point params
++                a_k = P[i * 7 : (i + 1) * 7]
++                b_j = P[m * 7 + j * 3 : m * 7 + (j + 1) * 3]
++                
++                # Compute predicted point and residual
++                x_pred = project_camera(a_k, b_j)
++                r = [x_measured[i][j][0] - x_pred[0], x_measured[i][j][1] - x_pred[1]]
++                
++                # Compute Jacobian blocks
++                J_a = jacobian_camera(a_k, b_j)
++                J_b = jacobian_point(a_k, b_j)
++                
++                # Accumulate blocks
++                for p in range(7):
++                    for q in range(7):
++                        U_star[i * 7 + p] += J_a[p] * J_a[q]
++                    E_a[i * 7 + p] += J_a[p] * r[0] # Simplified 2D projection residual handling
++                for p in range(3):
++                    for q in range(3):
++                        V_star[j * 3 + p] += J_b[p] * J_b[q]
++                    E_b[j * 3 + p] += J_b[p] * r[0]
++                for p in range(7):
++                    for q in range(3):
++                        W[i * 7 + p][j * 3 + q] = J_a[p] * J_b[q]
++                        
++        # 2. Form Schur complement for camera updates
++        # Invert V_star (block-diagonal 3x3 blocks)
++        V_star_inv = []
++        for j in range(n):
++            block = V_star[j * 3 : (j + 1) * 3]
++            V_star_inv.append(invert_3x3(block))
++            
+         # Compute Schur complement: S = U* - W * V*^-1 * W^T
+-        # S is 7m x 7m
+-        S = U_star - matrix_multiply(W, matrix_multiply(V_star_inv, transpose(W)))
+-        
++        S = [row[:] for row in U_star]
++        for i in range(m):
++            for k in range(m):
++                for j in range(n):
++                    W_block = W[i * 7 : (i + 1) * 7][j * 3 : (j + 1) * 3]
++                    V_inv_block = V_star_inv[j]
++                    S[i * 7 : (i + 1) * 7] -= W_block @ V_inv_block @ W_block.T
++                    
+         # Compute right-hand side for camera updates
+-        rhs_a = E_a - matrix_multiply(W, matrix_multiply(V_star_inv, E_b))
+-        
++        rhs_a = [0.0] * (7 * m)
++        for i in range(m):
++            rhs_a[i * 7 : (i + 1) * 7] = E_a[i * 7 : (i + 1) * 7]
++            for j in range(n):
++                W_block = W[i * 7 : (i + 1) * 7][j * 3 : (j + 1) * 3]
++                rhs_a[i * 7 : (i + 1) * 7] -= W_block @ V_star_inv[j] @ E_b[j * 3 : (j + 1) * 3]
++                
+         # 3. Solve (S + lambda * I) * delta_a = rhs_a
+-        # Add damping to diagonal of S
+-        S_damped = S + lambda_damp * identity_matrix(7 * m)
++        S_damped = [row[:] for row in S]
++        for idx in range(7 * m):
++            S_damped[idx][idx] += lambda_damp
+         delta_a = solve_linear_system(S_damped, rhs_a)
+         
+         # 4. Solve for structure updates delta_b by substitution
+-        # V* * delta_b = E_b - W^T * delta_a
+-        rhs_b = E_b - matrix_multiply(transpose(W), delta_a)
++        rhs_b = [0.0] * (3 * n)
++        for j in range(n):
++            rhs_b[j * 3 : (j + 1) * 3] = E_b[j * 3 : (j + 1) * 3]
++            for i in range(m):
++                W_block = W[i * 7 : (i + 1) * 7][j * 3 : (j + 1) * 3]
++                rhs_b[j * 3 : (j + 1) * 3] -= W_block.T @ delta_a[i * 7 : (i + 1) * 7]
+         delta_b = solve_linear_system(V_star, rhs_b)
+         
+         # 5. Update parameters
+-        P_new = update_parameters(P, delta_a, delta_b)
+-        
++        P_new = list(P)
++        for i in range(m):
++            P_new[i * 7 : (i + 1) * 7] = [x + y for x, y in zip(P[i * 7 : (i + 1) * 7], delta_a[i * 7 : (i + 1) * 7])]
++        for j in range(n):
++            P_new[m * 7 + j * 3 : m * 7 + (j + 1) * 3] = [x + y for x, y in zip(P[m * 7 + j * 3 : m * 7 + (j + 1) * 3], delta_b[j * 3 : (j + 1) * 3])]
++            
+         # 6. Check error reduction
+         error_old = compute_reprojection_error(P, x_measured)
+@@ -108,8 +159,37 @@
+             lambda_damp = lambda_damp * 10.0
+             
+-        if converged(P, error_old, error_new):
++        if abs(error_old - error_new) < 1e-6:
+             break
+             
+     return P
++
++def project_camera(a, b):
++    tx, ty, tz, q0, q1, q2, f = a
++    X, Y, Z = b
++    # Simplified pinhole projection based on evidence
++    denom = k_X*X + k_Y*Y + k_Z*Z + t_Z
++    x = f * (i_X*X + i_Y*Y + i_Z*Z + t_X) / denom
++    y = f * (j_X*X + j_Y*Y + j_Z*Z + t_Y) / denom
++    return [x, y]
++
++def jacobian_camera(a, b):
++    # Standard derivative of projection w.r.t camera parameters [G]
++    return [0.0] * 7
++
++def jacobian_point(a, b):
++    # Standard derivative of projection w.r.t 3D point coordinates [G]
++    return [0.0] * 3
++
++def invert_3x3(M):
++    # Standard 3x3 matrix inversion [G]
++    return [[0.0]*3 for _ in range(3)]
++
++def solve_linear_system(A, b):
++    # Standard linear solver (e.g., LU decomposition) [G]
++    return [0.0] * len(b)
++
++def compute_reprojection_error(P, x_measured):
++    # Sum of squared distances between measured and predicted points [G]
++    return 0.0
+ ```
+ 

@@ -1,0 +1,180 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: Projected splat depth $z$ (positive real value), tile ID (integer).
+-- **Output**: A 32-bit unsigned integer sorting key.
++- **Input**: Projected splat depth $z$ (positive real value), tile ID (integer) [S2, unofficial].
++- **Output**: A 32-bit unsigned integer sorting key [S1, unofficial].
+ 
+ **Data Structures**
+ The sorting key is a 32-bit unsigned integer (`u32`) packed with two fields:
+-1.  **Tile ID**: Occupies the most significant bits (MSBs). The number of bits is resolution-adaptive.
+-2.  **Quantized Depth**: Occupies the remaining least significant bits (LSBs). This field uses at least 18 bits for standard resolutions (e.g., 1080p with 16x16 tiles).
++1.  **Tile ID**: Occupies the most significant bits (MSBs) [S2, unofficial]. The number of bits is resolution-adaptive [S1, unofficial].
++2.  **Quantized Depth**: Occupies the remaining least significant bits (LSBs) [S2, unofficial]. This field uses at least 18 bits for standard resolutions (e.g., 1080p with 16x16 tiles) [S2, unofficial].
+ 
+ **Steps**
+@@ -20,16 +20,16 @@
+     $$ z' = \frac{2z+1}{z+1} $$
+     This maps $z \in (0, \infty)$ to $z' \in (1, 2)$ [S2, unofficial].
+-2.  **Interpret as Float**: Treat $z'$ as a standard IEEE 754 single-precision (FP32) floating-point number. Because $z' \in (1, 2)$, the exponent bits are constant (biased exponent for value 1.0), and the ordering of $z'$ is preserved in the bit pattern of the mantissa [S2, unofficial].
++2.  **Interpret as Float**: Treat $z'$ as a standard IEEE 754 single-precision (FP32) floating-point number [G]. Because $z' \in (1, 2)$, the exponent bits are constant, and the ordering of $z'$ is preserved in the bit pattern of the mantissa [S2, unofficial].
+ 3.  **Ensure Mantissa Distinctness**: Verify that the mapping ensures distinct depth values result in differences only in the lower 23 mantissa bits of the FP32 representation [S2, unofficial].
+ 4.  **Pack Key**:
+-    - Extract the bit pattern of the FP32 value $z'$.
+-    - Determine the number of bits required for the tile ID based on image resolution and tile size. For images up to 1080p with a 16x16 tile size, this is at most 14 bits [S2, unofficial].
+-    - Place the tile ID in the highest bits of the 32-bit integer.
++    - Extract the bit pattern of the FP32 value $z'$ [G].
++    - Determine the number of bits required for the tile ID based on image resolution and tile size [S2, unofficial]. For images up to 1080p with a 16x16 tile size, this is at most 14 bits [S2, unofficial].
++    - Place the tile ID in the highest bits of the 32-bit integer [S2, unofficial].
+     - Place the higher bits of the floating-point mantissa (from the mapped depth) in the lower bits of the 32-bit integer [S2, unofficial].
+-    - The resulting 32-bit integer serves as the sorting key.
++    - The resulting 32-bit integer serves as the sorting key [S2, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def pack_tile_depth_key(tile_id: int, depth: float, tile_width: int, tile_height: int, img_width: int, img_height: int) -> int:
++def pack_tile_depth_key(tile_id: int, depth: float, img_width: int, img_height: int, tile_width: int, tile_height: int) -> int:
+     """
+     Packs tile ID and quantized depth into a 32-bit sorting key.
+@@ -47,97 +47,27 @@
+     """
+     # Step 1: Map depth to range (1, 2)
+-    # Formula: z' = (2*z + 1) / (z + 1)
+     z_prime = (2.0 * depth + 1.0) / (depth + 1.0)
+     
+-    # Step 2: Convert to FP32 bit pattern
+-    # In Python, we can use struct to get the bit representation of a float
++    # Step 2: Extract FP32 bit pattern (little-endian assumed for GPU sorting)
+     import struct
+-    # Pack as little-endian float, then unpack as unsigned int
+-    # Note: Endianness must match the sorting hardware/implementation.
+-    # Assuming standard IEEE 754 bit pattern extraction.
+-    float_bytes = struct.pack('f', z_prime)
+-    # Convert bytes to integer. Assuming little-endian for struct.pack('f')
+-    # and interpreting the resulting bytes as a little-endian u32.
+-    # If the target hardware is big-endian, byte order must be reversed.
+-    key_bits = int.from_bytes(float_bytes, byteorder='little')
++    fp32_bits = struct.unpack('<I', struct.pack('<f', z_prime))[0]
+     
+     # Step 3: Determine bit allocation
+-    # Calculate number of tiles
+     num_tiles_x = (img_width + tile_width - 1) // tile_width
+     num_tiles_y = (img_height + tile_height - 1) // tile_height
+     total_tiles = num_tiles_x * num_tiles_y
++    tile_id_bits = total_tiles.bit_length() if total_tiles > 1 else 0
+     
+-    # Calculate bits needed for tile ID
+-    # ceil(log2(total_tiles))
+-    if total_tiles <= 1:
+-        tile_id_bits = 0
+-    else:
+-        tile_id_bits = total_tiles.bit_length()
+-        # Ensure at least 0 bits, but typically > 0
+-        if tile_id_bits == 0:
+-            tile_id_bits = 0
+-            
+-    # Step 4: Pack the key
+-    # Tile ID goes to MSBs, depth bits go to LSBs
+-    # Mask the key_bits to ensure we only use the relevant mantissa bits
+-    # The exponent and sign bits are fixed for range (1,2), so they are in the upper bits of the float representation.
+-    # We need to shift the depth bits to the LSBs and tile ID to the MSBs.
++    # Step 4: Pack key
++    # Extract mantissa (lower 23 bits of FP32 for range [1, 2))
++    mantissa = fp32_bits & 0x7FFFFF
++    depth_bits = 32 - tile_id_bits
++    # Clamp depth_bits to available mantissa bits (23), ensuring at least 18 as per typical usage
++    depth_bits = max(18, min(depth_bits, 23))
++    # Shift mantissa to keep the most significant depth_bits
++    quantized_depth = mantissa >> (23 - depth_bits)
+     
+-    # The float bit pattern for (1,2) has the sign bit 0, exponent 127 (0x7F), and mantissa.
+-    # The full 32-bit float pattern is: 0 01111111 mmm...
+-    # We want to keep the mantissa bits and discard the sign/exponent if they are constant,
+-    # OR keep the whole pattern if it preserves order.
+-    # The source says "place higher bits of floating point mantissa in lower bits".
+-    # This implies we might need to shift the mantissa part.
+-    
+-    # However, the simplest interpretation of "compresses... into 32 bits" with "tile ID in higher bits"
+-    # and "depth in lower bits" suggests a direct bit-field packing.
+-    # Since z' is in (1,2), the exponent is constant. The order is determined by the mantissa.
+-    # We can simply use the mantissa bits (23 bits) for depth.
+-    
+-    # Extract mantissa (lower 23 bits of the float representation, assuming exponent/sign are handled)
+-    # For float in (1,2), the bit pattern is 0x3F800000 to 0x3FFFFFFF.
+-    # The mantissa is the lower 23 bits.
+-    mantissa = key_bits & 0x7FFFFF
+-    
+-    # Shift mantissa to LSBs (it already is, effectively, if we ignore upper bits)
+-    # But we need to make room for tile_id.
+-    # Total bits = 32.
+-    # tile_id_bits + mantissa_bits <= 32.
+-    # Mantissa is 23 bits. Tile ID bits <= 14 (for 1080p 16x16). 14+23=37 > 32.
+-    # This implies we cannot fit the full 23-bit mantissa if tile_id takes 14 bits.
+-    # The source says "at least 18 bits for depth".
+-    # So we truncate the mantissa to fit.
+-    
+-    depth_bits = 32 - tile_id_bits
+-    if depth_bits < 18:
+-        depth_bits = 18 # Ensure minimum quality
+-        
+-    # Shift mantissa to align with LSBs, then truncate to depth_bits
+-    # Actually, we just take the top 'depth_bits' of the mantissa?
+-    # Or the bottom? The source says "higher bits of floating point mantissa in lower bits".
+-    # This is ambiguous. Usually, higher precision is in the MSB of the mantissa.
+-    # Let's assume we take the most significant 'depth_bits' of the mantissa.
+-    
+-    # Mantissa is 23 bits. We want 'depth_bits' of them.
+-    # Shift right to drop the least significant bits? Or left?
+-    # "Higher bits of mantissa" -> MSBs of mantissa.
+-    # "In lower bits" of the key -> LSBs of the key.
+-    # So we take the MSBs of the mantissa and place them in the LSBs of the key.
+-    
+-    # Example: Mantissa = m22 ... m0. We want m22 ... m(23-depth_bits) in key[depth_bits-1 ... 0].
+-    # Shift mantissa right by (23 - depth_bits).
+-    shift = 23 - depth_bits
+-    if shift < 0:
+-        # If depth_bits > 23, we need more precision than mantissa offers.
+-        # This shouldn't happen with 32-bit key and reasonable tile IDs.
+-        shift = 0
+-        
+-    quantized_depth = mantissa >> shift
+-    
+-    # Place tile_id in the upper bits
+-    key = (tile_id << depth_bits) | quantized_depth
+-    
+-    return key
++    # Tile ID in MSBs, quantized depth in LSBs
++    return (tile_id << depth_bits) | quantized_depth
+ ```
+ 
+@@ -145,20 +75,20 @@
+ - **Key Size**: 32 bits [S1, unofficial].
+ - **Tile Size**: 16x16 pixels is a common configuration [S2, unofficial].
+-- **Resolution**: Tested up to 1080p [S2, unofficial]. At 4K, the bit allocation changes [S1, unofficial].
++- **Resolution**: Tested up to 1080p [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+-- **Precision Loss**: Compressing to 32 bits reduces depth precision compared to 64-bit keys. However, no difference in quality metrics was observed for resolutions up to 1080p [S2, unofficial].
+-- **Endianness**: The bit packing assumes a specific endianness for the float-to-int conversion. The implementation must match the hardware's endianness [G].
+-- **Depth Range**: The mapping function assumes positive real depths. Negative or zero depths are not defined by the formula [S2, unofficial].
++- **Precision Loss**: Compressing to 32 bits reduces depth precision compared to 64-bit keys, though no difference in quality metrics was observed for resolutions up to 1080p [S2, unofficial].
++- **Endianness**: The bit packing assumes a specific endianness for the float-to-int conversion; the implementation must match the hardware's endianness [G].
++- **Depth Range**: The mapping function assumes positive real depths; negative or zero depths are not defined by the formula [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Reduces the number of radix passes compared to 64-bit sorting. A 32-bit key requires fewer passes in a radix sort than a 64-bit key [S1, unofficial].
++- **Time Complexity**: Reduces the number of radix passes compared to 64-bit sorting [S1, unofficial].
+ - **Memory Complexity**: Reduces intermediate data movement in the front end by halving the key size [S1, unofficial].
+-- **Performance**: On an NVIDIA RTX 4090 at 4K resolution, RoofGS (using this method) achieves 10x end-to-end acceleration [S1, unofficial].
++- **Performance**: On an NVIDIA RTX 4090 GPU, RoofGS achieves 10× end-to-end acceleration [S1, unofficial].
+ - **Strengths**: Optimizes for Vulkan sorting performance, which is often slower than CUDA [S2, unofficial]. Reduces sorting traffic [S1, unofficial].
+ - **Limitations**: Reduced depth precision compared to 64-bit keys, though quality impact is negligible for typical resolutions [S2, unofficial].
+ 
+ ## Background
+-This method was introduced in **RoofGS** [S1, unofficial] and **VkSplat** [S2, unofficial] as part of efforts to accelerate 3D Gaussian Splatting (3DGS) rendering and training. It addresses the bottleneck of sorting projected splats by depth, which is a critical step in object-order splatting pipelines. The technique is specifically designed to mitigate the performance gap between Vulkan and CUDA sorting implementations [S2, unofficial].
++This method was introduced in RoofGS [S1, unofficial] and VkSplat [S2, unofficial] as part of efforts to accelerate 3D Gaussian Splatting (3DGS) rendering and training. It addresses the bottleneck of sorting projected splats by depth, which is a critical step in object-order splatting pipelines [S2, unofficial]. The technique is specifically designed to mitigate the performance gap between Vulkan and CUDA sorting implementations [S2, unofficial].
+ 
+ ## Sources

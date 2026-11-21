@@ -1,0 +1,110 @@
+# Wall Height Projection
+
+Also called: 1D Texture Mapping, Vertical Strip Rendering, screen height calculation
+
+## Overview
+Wall Height Projection calculates the vertical pixel extent of a wall segment on the screen based on the wall's real-world height, the projection plane distance, and the corrected perpendicular distance to the wall [S1, unofficial]. It renders the scene as vertical strips per pixel column, drawing the wall strip and filling the remaining screen space with ceiling and floor colors [S2, unofficial]. This method solves the problem of rendering flat walls with correct perspective scaling after fisheye distortion has been corrected, ensuring that the wall appears straight and properly sized relative to the viewer's position [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**:
+  - `wallHeight`: The real-world height of the wall segment (e.g., 5 units) [S2, unofficial].
+  - `distance`: The corrected perpendicular distance from the camera to the wall [S1, unofficial].
+  - `screenHeight`: The total height of the screen in pixels [S2, unofficial].
+  - `screenWidth`: The total width of the screen in pixels [S1, unofficial].
+  - `fov`: The field of view angle in radians [S1, unofficial].
+- **Outputs**:
+  - For each column `i`, the vertical screen coordinates for the wall, floor, and ceiling strips [S2, unofficial].
+
+**Data Structures**
+- No complex data structures are required. The method operates on scalar values per column.
+
+**Steps**
+1. **Calculate Projection Plane Distance**: Compute the distance from the camera to the projection plane using the screen width and field of view [S1, unofficial].
+   $$ \text{projPlaneDist} = \frac{\text{screenWidth} / 2}{\tan(\text{fov} / 2)} $$
+2. **Calculate Screen-Space Wall Height**: Compute the height of the wall in pixels using the real-world wall height, the projection plane distance, and the corrected perpendicular distance [S1, unofficial].
+   $$ \text{lineHeight} = \frac{\text{wallHeight} \cdot \text{projPlaneDist}}{\text{distance}} $$
+   *Note: Source [S2, unofficial] uses a simplified hardcoded formula `wallHeight = ((1 * 5) / distance) * 177`, where 5 is the wall height and 177 is a screen scaling factor [S2, unofficial]. The general formula above is preferred for correctness [S1, unofficial].*
+3. **Draw Vertical Strips**: For each column `i` from 0 to `screenWidth - 1`:
+   - **Wall**: Draw a rectangle at column `i`, centered vertically.
+     $$ \text{y}_{\text{start}} = \frac{\text{screenHeight}}{2} - \frac{\text{lineHeight}}{2} $$
+     $$ \text{y}_{\text{end}} = \frac{\text{screenHeight}}{2} + \frac{\text{lineHeight}}{2} $$
+     Draw a 1-pixel wide strip from `y_start` to `y_end` [S2, unofficial].
+   - **Floor**: Draw a rectangle below the wall.
+     $$ \text{y}_{\text{start}} = \frac{\text{screenHeight}}{2} + \frac{\text{lineHeight}}{2} $$
+     $$ \text{y}_{\text{end}} = \text{screenHeight} $$
+     Draw a 1-pixel wide strip from `y_start` to `y_end` [S2, unofficial].
+   - **Ceiling**: Draw a rectangle above the wall.
+     $$ \text{y}_{\text{start}} = 0 $$
+     $$ \text{y}_{\text{end}} = \frac{\text{screenHeight}}{2} - \frac{\text{lineHeight}}{2} $$
+     Draw a 1-pixel wide strip from `y_start` to `y_end` [S2, unofficial].
+4. **Shading**: Apply shading based on wall orientation. Vertical hits (side=0 or 1) use a darker color than horizontal hits to simulate lighting [S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def wall_height_projection(screen_width, screen_height, fov, wall_height_real, corrected_distance):
+    # Step 1: Calculate projection plane distance
+    proj_plane_dist = (screen_width / 2) / tan(fov / 2)
+    
+    # Step 2: Calculate screen-space wall height
+    # Using the general formula from [S1, unofficial]
+    line_height = (wall_height_real * proj_plane_dist) / corrected_distance
+    
+    # Step 3: Draw vertical strips
+    center_y = screen_height / 2
+    half_wall = line_height / 2
+    
+    wall_top = center_y - half_wall
+    wall_bottom = center_y + half_wall
+    
+    floor_top = wall_bottom
+    floor_bottom = screen_height
+    
+    ceiling_top = 0
+    ceiling_bottom = wall_top
+    
+    # For each column, draw the strips
+    for i in range(screen_width):
+        # Draw wall strip
+        draw_rect(i, wall_top, 1, line_height, get_wall_color(i))
+        
+        # Draw floor strip
+        draw_rect(i, floor_top, 1, floor_bottom - floor_top, get_floor_color(i))
+        
+        # Draw ceiling strip
+        draw_rect(i, ceiling_top, 1, ceiling_bottom - ceiling_top, get_ceiling_color(i))
+
+def get_wall_color(column_index):
+    # Simplified shading based on source [S2, unofficial]
+    # In a full implementation, this would use the side hit from DDA
+    return 'dark_color' # Placeholder for shading logic
+```
+
+**Parameters**
+- `projPlaneDist`: The distance from the camera to the projection plane [S1, unofficial].
+- `wallHeight`: Real-world height of the wall [S1, unofficial].
+- `distance`: Corrected perpendicular distance [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Precision**: Ensure `distance` is not zero to avoid division by zero [S1, unofficial].
+- **Boundaries**: Ensure `line_height` does not exceed `screen_height` [S2, unofficial].
+- **Shading**: Correctly identifying wall orientation (vertical vs. horizontal hits) is necessary for proper shading [S2, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the screen width, as each column is processed independently [S2, unofficial].
+- **Memory Complexity**: $O(1)$ per column, as only scalar values are needed [S2, unofficial].
+- **Strengths**: Simple to implement, computationally efficient, corrects fisheye distortion for flat walls [S1, unofficial].
+- **Limitations**: Only suitable for flat walls, requires pre-computed corrected distances [S1, unofficial].
+- **When to Use**: When rendering flat walls with correct perspective after fisheye correction [S1, unofficial].
+- **When Not to Use**: For non-flat surfaces or complex 3D scenes without additional processing [S1, unofficial].
+
+## Background
+Wall Height Projection is a technique used in raycasting engines to render flat walls with correct perspective scaling [S1, unofficial]. It is often used in conjunction with fisheye distortion correction to ensure that walls appear straight and properly sized [S1, unofficial]. The method is derived from the principles of perspective projection and is commonly used in early 3D games and educational raycasting demos [S1, S2, unofficial].
+
+## Sources
+[S1] mithraskuipers/InteractiveLearning-Raycasting, https://github.com/mithraskuipers/InteractiveLearning-Raycasting, fetched 2026-10-24 (unofficial)
+[S2] Raycasting Prototype with DDA - GitHub, https://github.com/GPMLAD/raycasting, fetched 2026-10-25 (unofficial)

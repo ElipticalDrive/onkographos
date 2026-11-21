@@ -1,0 +1,95 @@
+Problem The streamed WebGPU renderer applies section planes to visible geometry, but its GPU picking pass does not. After cutting away a roof or upper floor, an ordinary viewer click still selects that invisible surface. Tools that use t...
+
+WebGPU streamed picking ignores section planes and hits cut-away geometry (fragments-beta 3.5.11) · Issue #75 · ThatOpen/platform_services · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+WebGPU streamed picking ignores section planes and hits cut-away geometry (fragments-beta 3.5.11) #75
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+WebGPU streamed picking ignores section planes and hits cut-away geometry (fragments-beta 3.5.11)#75
+Copy link
+Description
+rihokirss
+opened on Oct 11, 2026
+Issue body actions
+Problem
+The streamed WebGPU renderer applies section planes to visible geometry, but its GPU picking pass does not. After cutting away a roof or upper floor, an ordinary viewer click still selects that invisible surface. Tools that use the picked point for catalog placement or route drawing consequently create elements above the cut; the new elements only become visible when the clipping plane is removed.
+The stable WebGL viewer works correctly in the same application.
+Environment
+@thatopen-platform/fragments-beta 3.5.11
+@thatopen-platform/components-beta 3.5.19
+@thatopen-platform/components-front-beta 3.5.17
+three 0.185.0
+Chromium on Linux, genuine hardware WebGPU backend
+Confirmed with a model loaded through the streamed/vpool path
+Reproduction
+Load a streamed building model and look down at it from above.
+Pick a roof/upper-floor surface and record its world-space point.
+Add a horizontal section plane below that surface, retaining geometry below the plane: normal (0, -1, 0), constant equal to the desired cut elevation.
+Wait for the visible cut to render, then pick at the same screen position with model.raycast(), model.raycastAll(), or the viewer Raycaster/FastModelPicker.
+The nearest hit still belongs to the cut-away surface. Use that hit for placement: the new element is created in the invisible region.
+Remove the plane: the element appears at the old roof/upper-floor surface.
+Expected: picking should reach the nearest remaining visible surface. All-hit and NDC picking should obey the same section planes. Moving/removing a plane should invalidate the pick result immediately, including a pick requested before the next rendering tick.
+Source observations
+In the installed unminified vpool chunk, the streamed model's raycast comment explicitly says that section planes are not applied to picking. The WebGPU pick material writes ID/world position/normal to its MRT without the sectionCut() discard logic used by rendered materials.
+Related paths:
+GPU pick materials created in the pulled-geometry path;
+shared pickAt() used by raycast, raycastAll and pickAtNdc;
+overlayHits() for edited streamed geometry;
+the short-lived shared pick cache: its key includes cursor/camera, but not plane equations.
+Local workaround and validation
+We tested a version-pinned application-side patch to the installed vpool ESM/CJS chunks:
+Apply sectionCut(pickWorld) in the GPU pick material, using the existing world-space section uniforms.
+Refresh plane uniforms before picking and include the plane equations in the shared pick cache key.
+Filter edited overlay triangle hits against the active section planes.
+Compile the section branch with the initial material, guarded by the uniform active-plane count. This avoids the explicit material invalidation/recompilation triggered by the first cut.
+At one fixed test pointer, the unpatched hit was y=14.78 m even though the cut retained only y<=13.78 m. With the patch, the same pointer hit the remaining surface at y=13.01 m.
+A hardware WebGPU browser regression passed for ordinary viewer picking, nearest/all model hits, immediate picking after moving the plane, and restoring the original hit after deleting it. Shader half-space checks cover horizontal/vertical planes, multiple planes and removal. The application WebGPU build and lint also pass.
+The first-cut material invalidation is a related performance observation, not a quantified speedup claim: the first clipping group can still require new three.js shader variants for other scene objects. We have not established a general first-cut latency improvement.
+Could the section-aware pick pass and cache invalidation be included in the next beta release so applications can remove this workaround?
+Activity
+rihokirss commented on Oct 22, 2026
+rihokirss
+on Oct 22, 2026
+Author
+More actions
+Thanks! Retested on fragments-beta 3.5.26 (components-beta 3.5.21, components-front-beta 3.5.22, three 0.185.0, hardware WebGPU in Chromium on Linux/Vulkan, streamed model loaded through vpool). The GPU pick is now cut by the section planes: model.raycast(), model.raycastAll() and the viewer Raycasters/FastModelPicker path all return the surface below a horizontal cut, and moving the plane takes effect on the next pick.
+Two remaining points:
+Unsaved edits are still picked through the cut (from reading the code, not reproduced yet). overlayHits in vpool-system.mjs raycasts the edit overlay (overlayMesh) with a plain THREE.Raycaster, which ignores clipping planes. An element moved or created in the current editing session, and not yet saved, can therefore still be hit above the cut. Filtering those hits by the same planes the pool feeds itself would cover it, e.g.:
+```
+const planes = (typeof host.clippingPlanes === "function" ? host.clippingPlanes() : host.clippingPlanes)
+  ?? host.owner?.clippingPlanes ?? renderer.clippingPlanes ?? [];
+for (const hit of overlayCaster.intersectObject(overlayMesh, false)) {
+  if (planes.some((plane) => plane.distanceToPoint(hit.point) < -1e-6)) continue;
+  // ...
+}
+```
+Minor timing note. Right after a plane is deleted, picks at the same pixel keep returning the surface below the former cut for about 0.1 s (measured 80–115 ms): the cut-away pieces come back with the pool's next selection, and the held pick answer is reused for up to 100 ms meanwhile. Not a problem in practice, just mentioning it in case it is unintended.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

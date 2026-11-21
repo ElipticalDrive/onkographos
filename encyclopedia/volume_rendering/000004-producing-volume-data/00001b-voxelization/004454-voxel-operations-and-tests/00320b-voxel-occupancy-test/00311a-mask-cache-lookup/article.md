@@ -1,0 +1,105 @@
+# Mask Cache Lookup
+## Overview
+Mask Cache Lookup determines the occupancy status of a set of 3D points by querying a pre-computed 3D boolean grid. It converts continuous world coordinates into discrete grid indices and performs a direct memory lookup to return a boolean array indicating whether each point lies within an occupied voxel. This method serves as a fast, coarse-grained occupancy test, distinguishing itself from sibling methods like [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) by relying on a global spatial hash/grid rather than explicit geometric primitives, and from [Voxel Filled Check](1705-voxel-filled-check.md) by operating on a dense boolean representation rather than potentially sparse or chunked structures. It is primarily used to cull rays or points that are guaranteed to be in empty space before expensive density or color computations.
+
+## How it works
+**Inputs:**
+- `world`: A 3D boolean array of shape `(sz_i, sz_j, sz_k)` representing the occupancy grid.
+- `xyz`: An `(n_pts, 3)` array of world coordinates for the points to test.
+- `xyz2ijk_scale`: A 3-element array defining the scaling factor from world units to grid units.
+- `xyz2ijk_shift`: A 3-element array defining the offset from world origin to grid origin.
+
+**Outputs:**
+- `out`: An `(n_pts,)` boolean array where `out[i]` is `True` if the $i$-th point is inside an occupied voxel, `False` otherwise.
+
+**Data Structures:**
+- The `world` grid is stored in row-major order. The index for a voxel at $(i, j, k)$ is calculated as $i \cdot sz_j \cdot sz_k + j \cdot sz_k + k$.
+
+**Steps:**
+1. For each point $p$ with world coordinates $(x, y, z)$ in `xyz`:
+   a. Convert world coordinates to grid indices $(i, j, k)$ using the scale and shift parameters:
+      $$ i = \text{round}(x \cdot \text{xyz2ijk\_scale}[0] + \text{xyz2ijk\_shift}[0]) $$
+      $$ j = \text{round}(y \cdot \text{xyz2ijk\_scale}[1] + \text{xyz2ijk\_shift}[1]) $$
+      $$ k = \text{round}(z \cdot \text{xyz2ijk\_scale}[2] + \text{xyz2ijk\_shift}[2]) $$
+   b. Check if the indices are within the valid bounds of the grid:
+      $$ 0 \le i < sz_i \quad \text{and} \quad 0 \le j < sz_j \quad \text{and} \quad 0 \le k < sz_k $$
+   c. If the point is within bounds, lookup the occupancy value in the `world` grid using row-major indexing:
+      $$ \text{index} = i \cdot sz_j \cdot sz_k + j \cdot sz_k + k $$
+      $$ \text{out}[p] = \text{world}[\text{index}] $$
+   d. If the point is out of bounds, set $\text{out}[p] = \text{False}$ (or handle as empty/unoccupied, depending on pipeline requirements).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mask_cache_lookup(world, xyz, xyz2ijk_scale, xyz2ijk_shift, sz_i, sz_j, sz_k):
+    """
+    Lookup occupancy in a 3D boolean grid.
+    
+    Args:
+        world: 3D boolean array (sz_i, sz_j, sz_k)
+        xyz: (n_pts, 3) array of world coordinates
+        xyz2ijk_scale: (3,) array of scale factors
+        xyz2ijk_shift: (3,) array of shift offsets
+        sz_i, sz_j, sz_k: Dimensions of the world grid
+        
+    Returns:
+        out: (n_pts,) boolean array
+    """
+    n_pts = xyz.shape[0]
+    out = [False] * n_pts
+    
+    # Precompute grid dimensions product for indexing
+    sz_jk = sz_j * sz_k
+    sz_k = sz_k
+    
+    for p in range(n_pts):
+        x, y, z = xyz[p]
+        
+        # Convert world coordinates to grid indices
+        i = round(x * xyz2ijk_scale[0] + xyz2ijk_shift[0])
+        j = round(y * xyz2ijk_scale[1] + xyz2ijk_shift[1])
+        k = round(z * xyz2ijk_scale[2] + xyz2ijk_shift[2])
+        
+        # Check bounds
+        if 0 <= i < sz_i and 0 <= j < sz_j and 0 <= k < sz_k:
+            # Row-major indexing
+            index = i * sz_jk + j * sz_k + k
+            out[p] = world[index]
+        else:
+            out[p] = False
+            
+    return out
+```
+
+**Parameters:**
+- `sz_i`, `sz_j`, `sz_k`: The dimensions of the 3D boolean world grid. Typical values depend on the scene resolution and required precision.
+
+**Edge Cases and Pitfalls:**
+- **Out-of-bounds points:** Points outside the grid bounds must be handled explicitly. Setting them to `False` assumes empty space outside the defined volume.
+- **Precision:** The use of `round` for coordinate conversion can lead to aliasing artifacts if the grid resolution is low relative to the scene detail. Floating-point precision errors in coordinate transformation should be considered.
+- **Grid Resolution:** If the grid is too coarse, multiple distinct points may map to the same voxel, leading to false positives for occupancy.
+
+## Subtopics
+
+### [Mask Cache Lookup with Ray Bounding Box Check](8140-mask-cache-lookup-with-ray-bounding-box-check.md)
+This variant determines which rays intersect with the currently solved coarse geometry mask by combining bounding box containment checks with a 3D boolean grid lookup. It serves as a pre-filtering step in volume rendering pipelines, identifying valid sampling points before expensive density or color computations. Unlike the parent [Mask Cache Lookup](6434-mask-cache-lookup.md) which handles general occupancy queries, this variant explicitly manages ray geometry and bounding box boundaries to optimize the lookup process for unbounded scenes. It is chosen when rays may originate from or pass through regions outside the primary grid volume, requiring an initial bounding box test to avoid unnecessary grid lookups or out-of-bounds errors.
+
+### CPU-side 3D Boolean Grid
+This variant involves iterating over a 3D occupancy grid stored as `vector<vector<vector<bool>>> Grid` on the CPU to transfer occupancy data to a chunk structure. The process iterates `i` from 0 to `dim`, `j` from 0 to `dim`, and `k` from 0 to `dim`, assigning `c.filled[i][j][k] = Grid[i][j][k]`. The parameter `dim` sets the grid resolution, with typical values being 32, 64, 128, 256, or 512. Higher values increase computation time linearly with the number of voxels. This method is used when preparing data for GPU transfer or when performing occupancy checks on the CPU before offloading to the GPU. It is chosen for its simplicity and direct mapping to the underlying data structure, though it may be slower than optimized GPU-based lookups for large grids.
+
+## Operating characteristics
+- **Time Complexity:** $O(n)$ for $n$ points, as each point requires a constant number of arithmetic operations and a single memory lookup.
+- **Memory Complexity:** $O(sz_i \cdot sz_j \cdot sz_k)$ to store the boolean grid.
+- **Performance:** The method is extremely fast for dense point clouds due to the simplicity of the lookup. Performance is limited by memory bandwidth when accessing the `world` grid, especially if the grid is large and does not fit in cache.
+- **Strengths:** Simple implementation, low computational overhead per point, effective for coarse culling.
+- **Limitations:** Resolution-dependent; low resolution leads to inaccurate occupancy tests. Does not handle partial voxel occupancy or smooth boundaries.
+- **When to use:** When a fast, approximate occupancy test is needed to cull empty space. Suitable for initial ray marching steps or point cloud filtering.
+- **When not to use:** When high precision is required, or when dealing with complex, non-axis-aligned geometry that cannot be well-represented by a voxel grid.
+
+## Background
+Mask Cache Lookup is a fundamental technique in voxel-based rendering and spatial data structures. It originates from the need to efficiently query occupancy in 3D space, a common requirement in volume rendering, collision detection, and spatial partitioning. The method is widely used in modern neural rendering pipelines, such as DirectVoxGO [S1, unofficial], where it serves as a fast occupancy check to optimize ray marching. The CPU-side variant [S2, unofficial] is often used in traditional voxelization pipelines for transferring data between CPU and GPU or for CPU-based processing.
+
+## Sources
+[S1] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
+[S2] 3D-Mesh-Voxelizer - GitHub, https://github.com/Talkative-Banana/3D-Mesh-Voxelizer, fetched 2026-10-26 (unofficial)

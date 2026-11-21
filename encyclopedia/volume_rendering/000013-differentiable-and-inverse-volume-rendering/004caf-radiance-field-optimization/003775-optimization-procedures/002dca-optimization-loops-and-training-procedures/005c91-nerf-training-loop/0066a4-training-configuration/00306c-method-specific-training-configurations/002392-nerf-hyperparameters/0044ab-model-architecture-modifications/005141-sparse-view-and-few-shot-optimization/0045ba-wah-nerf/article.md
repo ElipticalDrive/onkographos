@@ -1,0 +1,317 @@
+# WaH-NeRF
+
+Also called: Where and How NeRF, Where and How: Mitigating Confusion in Neural Radiance Fields from Sparse Inputs
+
+## Overview
+WaH-NeRF is a training framework for Neural Radiance Fields from sparse inputs (NeRF-S) that mitigates rendering confusion by addressing two root causes: sample-position confusion ('WHERE to Sample?') and prediction confusion ('HOW to Predict?') [S1]. It differs from sibling methods like [Simple-NeRF](7371-simple-nerf.md) and [FlipNeRF](12967-flipnerf.md) by analyzing the sample-render process and mitigating confusion before volume rendering, rather than relying on regularization for rendered color and depth images after volume rendering [S1]. It builds on [Sparse View and Few-Shot Optimization](14428-sparse-view-and-few-shot-optimization.md) by combining a Deformable Sampling strategy for seen viewpoints with a Semi-Supervised NeRF paradigm based on pose perturbation for unseen viewpoints [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sparse set of $N$ seen viewpoints with known camera poses and images, and a set of unseen viewpoints (or perturbed rays) for consistency regularization. The baseline architecture is mip-NeRF [S1].
+*   **Outputs:** Optimized network parameters $\Theta$ (specifically the MLPs $f_\theta$ and $f_\psi$) and rendered images for novel viewpoints [S1].
+
+**Data Structures:**
+*   **Network:** Follows the mip-NeRF architecture [S1].
+    *   $f_\psi$: Maps positional encoding of position $\mathbf{x}$ to intermediate features $F_\psi(\mathbf{x}) \in \mathbb{R}^{M \times d}$, where $M$ is the number of sampling points and $d$ is the feature dimension [S1].
+    *   $f_\theta$: Maps $(F_\psi(\mathbf{x}), \kappa(\mathbf{d}))$ to volume density $\sigma$ and view-dependent color $\mathbf{c}$ [S1].
+*   **Sampling:** Conical frustums are used for sampling along rays/cones [S1].
+*   **Offset MLP:** A lightweight layer predicting offsets $O_{offset} \in \mathbb{R}^{M \times 1}$ from $F_\psi(\mathbf{x})$ [S1].
+
+**Numbered Steps:**
+
+1.  **Baseline Rendering:** For each ray/cone $r$, sample points using conical frustums. Compute $\sigma_i$ and $\mathbf{c}_i$ using the network. Render pixel color $\hat{C}(r)$ using quadrature [S1]:
+    $$ \hat{C}(r) = \sum_{i=1}^{M} \left( \sum_{j=1}^{i-1} \sigma_j \delta_j \right) (1 - e^{-\sigma_i \delta_i}) \mathbf{c}_i $$
+    where $\delta_i$ is the distance between the $i$-th point and its adjacent point [S1].
+
+2.  **Deformable Sampling (Seen Viewpoints):**
+    *   Compute intermediate features $F_\psi(\mathbf{x})$ [S1].
+    *   Predict an adaptive offset $O_{offset}$ for each conical frustum using an MLP layer with weights $w_0$ and bias $b_0$ initialized to $10^{-7}$ [S1]:
+        $$ O_{offset} = w_0 \times F_\psi(\mathbf{x}) + b_0 $$
+    *   Shift the original sampled conical frustums by $O_{offset}$ along the cone for adaptive sampling [S1].
+    *   *Note:* This strategy is **not** applied to unseen perspectives to ensure training stability [S1].
+
+3.  **Weight Calculation:**
+    *   Compute the weight $w_i$ for each sample point, which approximates the probability of the surface [S1]:
+        $$ w_i = \left( \sum_{j=1}^{i-1} \sigma_j \delta_j \right) (1 - e^{-\sigma_i \delta_i}) $$
+
+4.  **Weight-based Mutual Information Loss (Seen Viewpoints):**
+    *   Calculate the mutual information between the offset and the inverse weight to maintain rendering stability [S1]:
+        $$ I\left(\frac{1}{w+\epsilon}; O_{offset} | \text{mask}\right) = H(O_{offset}) - H\left(O_{offset} \middle| \frac{1}{w+\epsilon}\right) $$
+    *   where $\epsilon = 5 \times 10^{-4}$ and $\text{mask}$ removes positions where $w$ is close to zero [S1].
+    *   Compute $Loss_{MI}$ by summing over rays $r \in R$ [S1]:
+        $$ Loss_{MI} = - \sum_{r \in R} I\left(\frac{1}{w+\epsilon}; O_{offset} | \text{mask}\right) $$
+
+5.  **Offset Loss (Seen Viewpoints):**
+    *   Combine $Loss_{MI}$ with the distortion loss $Loss_{dist}$ :
+        $$ Loss_{Offset} = \lambda Loss_{MI} + Loss_{dist} $$
+    *   where $\lambda = 5 \times 10^{-3}$ [S1].
+
+6.  **Semi-Supervised NeRF Paradigm (Unseen Viewpoints):**
+    *   Perturb the camera pose (radius, azimuth, polar angle) of unseen viewpoints to generate unseen-perturbed rays [S1].
+    *   Render images for these perturbed rays [S1].
+
+7.  **Pixel-Patch Correspondence Loss (Unseen Viewpoints):**
+    *   Compute the loss between the unseen ray $\hat{C}_{unseen}(r)$ and the average of rays in the corresponding perturbed patch of size $PS \times PS$ [S1]:
+        $$ Loss_{PPC} = \sum_{p=0}^{P} \sum_{r \in R} \sum_{i=0}^{PS \times PS} \frac{1}{PS \times PS} \left( \hat{C}_{unseen}(r) - \hat{C}_{perturbation(i)}(r) \right)^2 $$
+    *   where $\hat{C}_{perturbation(i)}(r)$ is the $i$-th pixel (ray) in the perturbed patch [S1].
+    *   The total $Loss_{PPC}$ includes both RGB and depth losses [S1].
+
+8.  **Total Loss Optimization:**
+    *   Optimize parameters $\theta$ iteratively using the combined loss [S1]:
+        $$ Loss = Loss_{MSE} + \mu Loss_{Offset} + \nu Loss_{PPC} + Loss_{smooth} $$
+    *   where $\mu = 0.5$, $\nu = 0.5$, and $Loss_{smooth}$ improves depth smoothness [S1].
+    *   The coefficient for the coarse-sampling loss is set to 0.1 [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def wa_h_nerf_training_step(
+    rays_seen, rays_unseen, gt_colors_seen, gt_depths_seen,
+    network, offset_mlp, optimizer,
+    eps=5e-4, lambda_mi=5e-3, mu=0.5, nu=0.5,
+    patch_size=8, num_perturbations=1,
+    coarse_coeff=0.1
+):
+    """
+    One training step for WaH-NeRF.
+    
+    Args:
+        rays_seen: Tensor of shape [B, 3] (origin) and [B, 3] (direction) for seen rays.
+        rays_unseen: Tensor of perturbed rays for unseen viewpoints.
+        gt_colors_seen: Ground truth colors for seen rays.
+        gt_depths_seen: Ground truth depths for seen rays.
+        network: The mip-NeRF network (f_theta, f_psi).
+        offset_mlp: The MLP predicting O_offset.
+        optimizer: Adam optimizer.
+        eps: Epsilon for MI loss.
+        lambda_mi: Weight for MI loss in Offset loss.
+        mu: Weight for Offset loss in total loss.
+        nu: Weight for PPC loss in total loss.
+        patch_size: Size PS of the patch for PPC.
+        num_perturbations: Number of perturbations P.
+        coarse_coeff: Coefficient for coarse-sampling loss.
+    """
+    optimizer.zero_grad()
+    
+    # 1. Render Seen Viewpoints
+    # Assume network returns sigma, color, and depth for coarse and fine stages
+    # For simplicity, we assume a unified rendering function that handles conical frustums
+    # and returns rendered color, depth, and intermediate features F_psi
+    
+    # Render seen rays
+    rendered_seen = render_mipnerf(rays_seen, network)
+    sigma_seen, color_seen, depth_seen, F_psi_seen = rendered_seen['sigma'], rendered_seen['color'], rendered_seen['depth'], rendered_seen['F_psi']
+    
+    # 2. Deformable Sampling for Seen Viewpoints
+    # Predict offset from intermediate features
+    # F_psi_seen shape: [B, M, d]
+    # offset_mlp should output [B, M, 1]
+    O_offset = offset_mlp(F_psi_seen)
+    
+    # Shift sampling positions by O_offset (implementation detail: modify ray origins or sample points)
+    # This is handled internally by the rendering function if it accepts offsets, 
+    # or we re-sample. For this pseudocode, we assume the rendering function 
+    # uses the offset to adjust the conical frustums.
+    # Note: The paper states O_offset shifts the conical frustums.
+    # We compute the loss based on the weights and offsets.
+    
+    # 3. Compute Weights for MI Loss
+    # w_i approximates surface probability
+    # delta_i is distance between i-th and adjacent point. 
+    # In mip-NeRF, this is handled by the conical frustum integration.
+    # We need to extract delta_i or compute w_i from the rendered outputs.
+    # Assuming rendered_seen contains necessary intermediate values for w_i calculation.
+    # w_i = (sum_{j=1}^{i-1} sigma_j delta_j) * (1 - exp(-sigma_i delta_i))
+    # This requires access to per-sample deltas. 
+    # For the sake of the pseudocode, we assume a helper function computes w from sigma and deltas.
+    deltas = get_deltas_from_render(rendered_seen) # [B, M]
+    w = compute_surface_probability(sigma_seen, deltas) # [B, M]
+    
+    # 4. Weight-based Mutual Information Loss
+    # Mask out positions where w is close to zero
+    mask = (w > 1e-5).float() # [B, M]
+    
+    # Compute MI between 1/(w+eps) and O_offset
+    # MI(X; Y) = H(Y) - H(Y|X)
+    # We approximate this using the formula provided:
+    # Loss_MI = - sum_{r in R} I(1/(w+eps); O_offset | mask)
+    # The paper defines I(1/(w+eps); O_offset) = H(O_offset) - H(O_offset | 1/(w+eps))
+    # This is complex to implement directly without density estimation.
+    # However, the paper cites [39] for the implementation. 
+    # A common approximation in such contexts is using the correlation or a simplified MI estimator.
+    # Given the constraint to be implementable, we note the formula:
+    # Loss_MI = - sum_{r in R} [ H(O_offset) - H(O_offset | 1/(w+eps)) ]
+    # We will use a placeholder for the MI calculation as it relies on external library [39] logic not fully detailed.
+    # [G] Assuming a function `compute_mi` exists that calculates the mutual information 
+    # between the offset and the inverse weight, masked appropriately.
+    loss_mi = compute_mi(O_offset, 1.0 / (w + eps), mask)
+    
+    # 5. Offset Loss
+    # Loss_Offset = lambda * Loss_MI + Loss_dist
+    loss_dist = compute_distortion_loss(sigma_seen, deltas) # Standard distortion loss
+    loss_offset = lambda_mi * loss_mi + loss_dist
+    
+    # 6. MSE Loss for Seen Viewpoints
+    loss_mse_seen = F.mse_loss(color_seen, gt_colors_seen)
+    loss_depth_seen = F.mse_loss(depth_seen, gt_depths_seen)
+    
+    # 7. Semi-Supervised NeRF for Unseen Viewpoints
+    # Render unseen rays (perturbed)
+    rendered_unseen = render_mipnerf(rays_unseen, network)
+    color_unseen = rendered_unseen['color']
+    depth_unseen = rendered_unseen['depth']
+    
+    # 8. Pixel-Patch Correspondence Loss
+    # Loss_PPC = sum_{p=0}^{P} sum_{r in R} sum_{i=0}^{PS*PS} (1/(PS*PS)) * (C_hat_unseen(r) - C_hat_perturbation(i)(r))^2
+    # This implies comparing the unseen ray to a patch of perturbed rays.
+    # rays_unseen should contain the perturbed rays.
+    # We need to group rays into patches.
+    # Assuming rays_unseen are structured such that we can extract patches.
+    # For simplicity, we assume a function `compute_ppc_loss` handles the patch averaging.
+    loss_ppc_rgb = compute_ppc_loss(color_unseen, patch_size)
+    loss_ppc_depth = compute_ppc_loss(depth_unseen, patch_size)
+    loss_ppc = loss_ppc_rgb + loss_ppc_depth
+    
+    # 9. Total Loss
+    # Loss = Loss_MSE + mu * Loss_Offset + nu * Loss_PPC + Loss_smooth
+    # Loss_smooth is for depth smoothness of unseen viewpoints.
+    loss_smooth = compute_smoothness_loss(depth_unseen)
+    
+    # Combine coarse and fine losses if applicable (mip-NeRF has two stages)
+    # The paper mentions coarse-sampling loss coefficient is 0.1.
+    # Assuming the rendered outputs include coarse and fine stages.
+    # For this pseudocode, we assume the main loss is on the fine stage, 
+    # and coarse loss is added if available.
+    if 'coarse_color' in rendered_seen:
+        loss_mse_coarse = F.mse_loss(rendered_seen['coarse_color'], gt_colors_seen)
+        loss_mse = coarse_coeff * loss_mse_coarse + loss_mse_seen
+    else:
+        loss_mse = loss_mse_seen
+        
+    total_loss = loss_mse + mu * loss_offset + nu * loss_ppc + loss_smooth
+    
+    total_loss.backward()
+    optimizer.step()
+    
+    return total_loss.item()
+
+def compute_surface_probability(sigma, deltas):
+    """
+    Computes w_i = (sum_{j=1}^{i-1} sigma_j delta_j) * (1 - exp(-sigma_i delta_i))
+    """
+    # Cumulative sum of sigma * delta
+    # alpha = exp(-sum_{j=1}^{i-1} sigma_j delta_j)
+    # w_i = alpha_i * (1 - exp(-sigma_i delta_i))
+    
+    # Compute transmittance
+    # T_i = exp(-sum_{j=1}^{i-1} sigma_j delta_j)
+    # We need to compute this for each sample i.
+    
+    # sigma: [B, M], deltas: [B, M]
+    sigma_delta = sigma * deltas
+    # Cumulative sum along M dimension
+    cum_sum = torch.cumsum(sigma_delta, dim=1)
+    # Shift cum_sum to get sum_{j=1}^{i-1}
+    # For i=0, sum is 0.
+    cum_sum_shifted = F.pad(cum_sum[:, :-1], (1, 0), value=0)
+    
+    # Transmittance T_i
+    T = torch.exp(-cum_sum_shifted)
+    
+    # Absorption A_i = 1 - exp(-sigma_i delta_i)
+    A = 1 - torch.exp(-sigma_delta)
+    
+    w = T * A
+    return w
+
+def compute_mi(offset, inv_weight, mask):
+    """
+    Computes the Weight-based Mutual Information Loss.
+    Note: This is a placeholder for the complex MI calculation described in [S1].
+    In practice, this would use the method from [39].
+    """
+    # [G] Placeholder for MI calculation. 
+    # The paper states: Loss_MI = - sum_{r in R} I(1/(w+eps); O_offset | mask)
+    # We return a dummy loss for the sake of valid Python.
+    return torch.tensor(0.0, requires_grad=True)
+
+def compute_distortion_loss(sigma, deltas):
+    """
+    Computes the distortion loss.
+    """
+    # Standard distortion loss implementation
+    # [G] Placeholder for standard distortion loss.
+    return torch.tensor(0.0, requires_grad=True)
+
+def compute_ppc_loss(colors, patch_size):
+    """
+    Computes the Pixel-Patch Correspondence Loss.
+    """
+    # [G] Placeholder for PPC loss.
+    # The paper states: Loss_PPC = sum_{p=0}^{P} sum_{r in R} sum_{i=0}^{PS*PS} (1/(PS*PS)) * (C_hat_unseen(r) - C_hat_perturbation(i)(r))^2
+    return torch.tensor(0.0, requires_grad=True)
+
+def compute_smoothness_loss(depth):
+    """
+    Computes the smoothness loss for depth.
+    """
+    # [G] Placeholder for smoothness loss.
+    return torch.tensor(0.0, requires_grad=True)
+
+def get_deltas_from_render(rendered):
+    """
+    Extracts deltas from the rendering output.
+    """
+    # [G] Placeholder.
+    return rendered['deltas']
+
+def render_mipnerf(rays, network):
+    """
+    Renders rays using the mip-NeRF network.
+    """
+    # [G] Placeholder for mip-NeRF rendering.
+    # Returns sigma, color, depth, F_psi, deltas, etc.
+    return {}
+```
+
+**Parameters:**
+*   **Baseline:** mip-NeRF [S1].
+*   **$\epsilon$:** $5 \times 10^{-4}$ [S1].
+*   **$\lambda$:** $5 \times 10^{-3}$ [S1].
+*   **$w_0, b_0$:** Initialized to $10^{-7}$ [S1].
+*   **$\mu, \nu$:** $0.5$ [S1].
+*   **Coarse-sampling loss coefficient:** $0.1$ [S1].
+*   **Patch size (PS):** $8 \times 8$ [S1].
+*   **Batch size:** 16 (1024 input rays) [S1].
+*   **Learning rate:** Decays exponentially from $10^{-3}$ to $5 \times 10^{-5}$ by a factor of 10 every 2500 iterations [S1].
+*   **Iterations:** 20,000 for Realistic Synthetic 360° [S1].
+
+**Edge Cases and Pitfalls:**
+*   Training $w_0$ and $b_0$ from scratch is sub-optimal because low-weight sample conical frustums struggle to offset towards the surface; addressed by Weight-based Mutual Information Loss [S1].
+*   Vanilla MSE loss struggles with pixel-wise correspondence due to mismatches from minor camera pose perturbations; addressed by Pixel-Patch Correspondence Loss [S1].
+*   The Deformable Sampling strategy is not applied to unseen perspectives to ensure training stability [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:**
+    *   On Realistic Synthetic 360° dataset with 3 inputs: Mean PSNR 17.90, SSIM 0.776, LPIPS 0.230 [S1].
+    *   On LLFF dataset with 3 inputs: Mean PSNR 19.23, SSIM 0.457, LPIPS 0.312 [S1].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Surpasses previous state-of-the-art (RegNeRF) by 0.87 PSNR, 0.046 SSIM, and 0.048 LPIPS on Realistic Synthetic 360° under three inputs [S1]. Achieves substantial improvement over baseline (mip-NeRF with patch-based training) of 1.18 PSNR, 0.065 SSIM, and 0.060 LPIPS [S1].
+*   **Limitations:** Relies on pose perturbation which may not capture all view variations; requires careful tuning of hyperparameters like $\lambda$ and patch size [S1].
+*   **When to use:** When training NeRF from sparse inputs (e.g., N=3) and aiming to mitigate confusion in sampling and prediction [S1].
+*   **When not:** When dense inputs are available, as the overhead may not be justified [S1].
+
+## Background
+*   **Origin:** Proposed by Yanqi Bao et al. in 2023 [S1].
+*   **History:** The method addresses the "CONFUSION" phenomenon in NeRF-S, where performance declines with sparse inputs due to uncertainty in sampling positions and predictions [S1]. It builds on mip-NeRF and InfoNeRF settings [S1].
+*   **Usage:** Implemented on top of Pytorch mip-NeRF, optimized using Adam optimizer [S1]. Evaluated on Realistic Synthetic 360° and LLFF datasets [S1].
+
+## Sources
+[S1] Where and How: Mitigating Confusion in Neural Radiance Fields from Sparse Inputs, https://doi.org/10.1145/3581783.3613769, fetched 2026-10-29

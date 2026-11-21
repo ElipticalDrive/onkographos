@@ -1,0 +1,121 @@
+# Selective Gaussian Densification
+
+Also called: Non-steady state densification
+
+## Overview
+Selective Gaussian Densification is a training optimization method for 3D Gaussian Splatting that replaces the standard view-space position gradient threshold with a sum-of-norms metric to distinguish between converged and unconverged Gaussians [S1]. It solves the problem of redundant Gaussian proliferation and under-densification inherent in vanilla 3DGS by only splitting or cloning Gaussians that exhibit high internal conflict while preserving steady-state Gaussians [S1]. Unlike vanilla 3DGS, which relies on the magnitude of the sum of gradients, this method uses the sum of individual gradient norms to accurately identify non-steady states, thereby reducing Gaussian count, lowering memory overhead, and accelerating both training and rendering [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The current set of 3D Gaussians $\{G_i\}$, their associated view-space position gradients $\nabla_p I$ for each covered pixel $p$, and the steady-state threshold $\tau_s$.
+*   **Output:** A modified set of Gaussians where non-steady-state Gaussians with high internal conflict are split or cloned, while steady-state Gaussians are preserved.
+
+**Data Structures:**
+*   **Gaussian $G_i$:** Contains position, covariance (scale/orientation), opacity, and SH coefficients.
+*   **Gradient Accumulator:** For each Gaussian $G_i$, a scalar value $S_g$ representing the sum of gradient norms.
+
+**Parameters:**
+*   $\tau_s$: Threshold to divide steady and non-steady states. Typical value: $0.0007$ [S1].
+
+**Algorithm Steps:**
+1.  **Gradient Norm Summation:** For each Gaussian $G_i$, iterate over all pixels $p$ in the set $M$ covered by the Gaussian. Calculate the Euclidean norm of the view-space position gradient $\|\nabla_p I\|$ for each pixel. Sum these norms to compute the internal conflict metric $S_g$:
+    $$ S_g = \sum_{p \in M} \|\nabla_p I\| $$
+    This metric represents the total magnitude of gradients across all pixels covered by the Gaussian, regardless of their vector direction [S1].
+
+2.  **State Classification:** Compare $S_g$ against the threshold $\tau_s$.
+    *   If $S_g > \tau_s$, classify $G_i$ as **non-steady-state**.
+    *   If $S_g \le \tau_s$, classify $G_i$ as **steady-state**.
+    Steady-state Gaussians are considered converged and are excluded from densification [S1].
+
+3.  **Conflict Evaluation:** For each non-steady-state Gaussian, evaluate the magnitude of $S_g$. Only Gaussians with $S_g > \tau_s$ are candidates for densification [S1].
+
+4.  **Densification Decision:** For each candidate Gaussian $G_i$:
+    *   Determine whether to **clone** or **split** based on the Gaussian's scale, identical to the vanilla 3DGS strategy [S1].
+    *   If splitting: Generate new Gaussians by sampling positions from a scaled random Gaussian distribution centered at $G_i$'s position, inheriting properties with perturbations [S1].
+    *   If cloning: Create a copy of $G_i$ with a slightly perturbed position [S1].
+
+5.  **Preservation:** Gaussians classified as steady-state are not modified during this step, preventing the creation of redundant Gaussians in already converged regions [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def selective_densification(gaussians, gradients, tau_s=0.0007):
+    """
+    Perform selective densification on a list of Gaussians.
+    
+    Args:
+        gaussians: List of Gaussian objects, each having:
+            - covered_pixels: List of pixel indices p covered by this Gaussian.
+            - scale: Scale factor used to determine split vs clone.
+            - position, opacity, sh_coeffs, etc.
+        gradients: Dictionary or array mapping (gaussian_index, pixel_index) to 
+                   the view-space position gradient vector (3D vector).
+        tau_s: Threshold for steady-state classification.
+        
+    Returns:
+        new_gaussians: List of Gaussian objects after densification.
+    """
+    new_gaussians = []
+    gaussians_to_add = []
+    
+    for i, g in enumerate(gaussians):
+        # Step 1: Calculate sum of gradient norms (internal conflict)
+        sum_norms = 0.0
+        for p in g.covered_pixels:
+            # Get gradient vector for this pixel and this Gaussian
+            grad_vec = gradients[(i, p)]
+            # Calculate Euclidean norm
+            norm = sqrt(sum(v*v for v in grad_vec))
+            sum_norms += norm
+            
+        # Step 2: Classify state
+        is_steady = sum_norms <= tau_s
+        
+        if is_steady:
+            # Step 5: Preserve steady-state Gaussians
+            new_gaussians.append(g)
+        else:
+            # Step 3 & 4: Non-steady-state, evaluate for densification
+            # The condition sum_norms > tau_s is already met by being here.
+            # Decide split or clone based on scale (vanilla 3DGS logic)
+            if g.scale < threshold_for_split: # Placeholder for vanilla 3DGS scale threshold
+                # Split: Create new Gaussians
+                # Sample new positions from scaled random Gaussian distribution
+                # Inherit properties with perturbations
+                new_gaussians.extend(split_gaussian(g))
+            else:
+                # Clone: Create a copy
+                new_gaussians.append(clone_gaussian(g))
+                
+    return new_gaussians
+
+def split_gaussian(g):
+    # Implementation details for splitting based on vanilla 3DGS
+    # Sample positions, adjust scales, etc.
+    # Not given in the sources for the specific implementation of split_gaussian,
+    # but described as "sampled according to the scaled random Gaussian distribution" [S1].
+    pass
+
+def clone_gaussian(g):
+    # Implementation details for cloning
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Vanilla 3DGS Failure Mode:** Vanilla 3DGS uses the magnitude of the *sum* of view-space position gradients ($\|\sum \nabla_p I\|$). This fails because gradients from different pixels may cancel each other out (vector sum near zero) even if individual pixel gradients are large (non-steady state), leading to under-densification [S1]. Conversely, a low threshold may over-densify steady Gaussians if the sum norm is small but non-zero [S1].
+*   **Threshold Selection:** A too-high $\tau_s$ leads to decreased rendering quality because non-steady Gaussians fail to be densified [S1]. A too-low $\tau_s$ results in excessive densification of steady Gaussians, creating redundancy and straining rendering/training [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces training time by avoiding unnecessary densification operations on converged Gaussians. In ablation studies, training time decreased from 25m57s (baseline) to 19m41s with selective densification and other optimizations [S1].
+*   **Memory Complexity:** Reduces peak GPU memory overhead. In ablation studies, peak GPU memory decreased from 12.8GB to 8.8GB with the full EfficientGS method including selective densification [S1].
+*   **Storage:** Reduces storage requirements due to fewer Gaussians. Storage decreased from 742MB to 98MB in the full ablation study [S1].
+*   **Performance:** Improves rendering speed (FPS increased from 125 to 218 in the full ablation study) and rendering quality (SSIM improved from 0.812 to 0.821, PSNR from 27.48 to 27.53) [S1].
+*   **Strengths:** Prevents redundant Gaussian generation, accelerates training and rendering, lowers memory footprint, and maintains or improves rendering quality [S1].
+*   **Limitations:** Requires calculation of gradient norms for all covered pixels, adding a small computational overhead per step, but this is outweighed by the reduction in total Gaussian count [S1].
+
+## Background
+Selective Gaussian Densification was proposed in the EfficientGS paper as part of a broader effort to streamline Gaussian Splatting for large-scale, high-resolution scene representation [S1]. It addresses limitations in the original 3DGS densification strategy, which relied on view-space position gradient magnitude [S1]. The method was introduced to handle the inefficiencies of vanilla 3DGS when dealing with large numbers of images and Gaussians, where redundant densification becomes a significant bottleneck [S1].
+
+## Sources
+[S1] EfficientGS: Streamlining Gaussian Splatting for Large-Scale High-Resolution Scene Representation, https://doi.org/10.1109/mmul.2025.3543224, fetched 2026-10-30

@@ -1,0 +1,138 @@
+--- v002.md
++++ v003.md
+@@ -15,5 +15,5 @@
+ ### Data Structures
+ *   **Volume Data:** Stored on each node as three separate Run-Length Encoded (RLE) datasets, one sorted along each principal axis (x, y, z) [S1]. This axis-sorted structure prevents volume data distribution on distributed memory machines, requiring every node to hold a full copy of the volume [S1].
+-*   **Intermediate Image:** A 2D RGBA image. Edge lengths are constrained to powers of two to satisfy 2D texturing hardware requirements for the warp step [S1]. Typical size is $1024 \times 1024$ pixels (4 MB) for large datasets [S1].
++*   **Intermediate Image:** A 2D RGBA image [S1]. Edge lengths are constrained to powers of two to satisfy 2D texturing hardware requirements for the warp step [S1]. Typical size is $1024 \times 1024$ pixels (4 MB) for large datasets [S1].
+ *   **Memory Management:** The intermediate image data is stored only once in memory per node; a pointer to it is passed among functions to avoid unnecessary copying [S1]. Memory is not reallocated if the image size remains the same or shrinks; reallocation occurs only if the new image is larger than the allocated space [S1].
+ 
+@@ -32,5 +32,5 @@
+     *   Render its own assigned scanline section of the intermediate image via compositing in sheared object space [S1].
+     *   Receive the rendered intermediate image sections from all other nodes using `MPI_Recv()` with the correct destination memory address to avoid copying [S1].
+-    *   RLE encode the assembled intermediate image. Two encoding strategies are implemented: encoding the entire image or encoding only the rectangular window actually touched by compositing. The window encoding is typically faster [S1].
++    *   RLE encode the assembled intermediate image [S1]. Two encoding strategies are implemented: encoding the entire image or encoding only the rectangular window actually touched by compositing. The window encoding is typically faster [S1].
+     *   Transfer the RLE-encoded intermediate image and the respective warp matrix to the local rendering plug-in [S1].
+ 
+@@ -54,5 +54,5 @@
+ 
+ ### Pseudocode
+-The following pseudocode represents the control flow on the remote MPI cluster. It is self-contained and valid Python.
++The following pseudocode represents the control flow on the remote MPI cluster [S1]. It is self-contained and valid Python.
+ 
+ ```python
+@@ -71,15 +71,17 @@
+     for node_id in range(1, num_nodes):
+         MPI_Send(partitions[node_id], dest=node_id)
+-    # 3. Root renders its own section
++    # 3. Pre-allocate full intermediate image
++    full_image = zeros((image_dims.height, image_dims.width))
++    # 4. Root renders its own section into the full image
+     root_section = partitions[0]
+-    root_image = composite_sheared_volume(rle_volumes, view_matrix, root_section, image_dims)
+-    # 4. Receive sections from other nodes
++    M_warp = composite_sheared_volume_into(rle_volumes, view_matrix, root_section, full_image)
++    # 5. Receive sections from other nodes
+     for node_id in range(1, num_nodes):
+         recv_buf = allocate_buffer(partitions[node_id].size)
+         MPI_Recv(recv_buf, source=node_id, dest_addr=recv_buf)
+-        assemble_intermediate_image(root_image, recv_buf, partitions[node_id])
+-    # 5. Encode and transfer
+-    encoded_image, warp_matrix = rle_encode_window(root_image, view_matrix)
+-    send_to_display(encoded_image, warp_matrix)
++        assemble_intermediate_image(full_image, recv_buf, partitions[node_id])
++    # 6. Encode and transfer
++    encoded_image = rle_encode_window(full_image)
++    send_to_display(encoded_image, M_warp)
+ 
+ # Other Nodes Logic
+@@ -91,9 +93,6 @@
+ # Core Compositing Step (Shear-Warp)
+ def composite_sheared_volume(rle_volumes, view_matrix, partition, image_dims):
+-    # Factorize view matrix into shear and warp components [Parent]
+     M_shear, M_warp = factorize_view_matrix(view_matrix)
+-    # Initialize intermediate image buffer for the partition
+-    image = zeros(partition.size)
+-    # For perspective projection, slices scale down as they go back.
++    image = zeros((partition.size, image_dims.width))
+     for slice_idx in range(rle_volumes.depth):
+         sheared_slice = shear_slice(rle_volumes[slice_idx], M_shear)
+@@ -101,7 +100,16 @@
+             for x in range(image_dims.width):
+                 val, alpha = resample_and_classify(sheared_slice, x, y)
+-                # Front-to-back compositing
+-                accumulate(image, x, y, val, alpha)
++                accumulate(image, y - partition.start_y, x, val, alpha)
+     return image
++
++def composite_sheared_volume_into(rle_volumes, view_matrix, partition, global_image):
++    M_shear, M_warp = factorize_view_matrix(view_matrix)
++    for slice_idx in range(rle_volumes.depth):
++        sheared_slice = shear_slice(rle_volumes[slice_idx], M_shear)
++        for y in range(partition.start_y, partition.end_y):
++            for x in range(image_dims.width):
++                val, alpha = resample_and_classify(sheared_slice, x, y)
++                accumulate(global_image, y, x, val, alpha)
++    return M_warp
+ 
+ # Helper Definitions
+@@ -118,10 +126,14 @@
+     start = 0
+     for i in range(num_nodes):
+-        size = base_size + (1 if i < remainder else 0)
+-        # Root (i=0) gets fewer lines if remainder < num_nodes
+-        if i == 0 and remainder < num_nodes:
+-            size = base_size - 1
++        if i == 0:
++            size = base_size - 1 if remainder > 0 else base_size
++        else:
++            size = base_size + (1 if i - 1 < remainder else 0)
+         partitions.append({'start_y': start, 'end_y': start + size, 'size': size})
+         start += size
++    # Ensure total matches height exactly
++    if start != height:
++        partitions[-1]['size'] += height - start
++        partitions[-1]['end_y'] = start
+     return partitions
+ 
+@@ -139,5 +151,5 @@
+     return sample_voxel(sheared_slice, x, y)
+ 
+-def accumulate(image, x, y, val, alpha):
++def accumulate(image, y, x, val, alpha):
+     # Updates front-to-back compositing: C += c * alpha * (1 - alpha_old)
+     old_alpha = image[y, x].alpha
+@@ -145,9 +157,13 @@
+     image[y, x].alpha += alpha * (1.0 - old_alpha)
+ 
+-def rle_encode_window(image, view_matrix):
++def assemble_intermediate_image(global_image, local_buf, partition):
++    # Places local_buf into global_image at partition coordinates
++    for i in range(partition.size):
++        global_image[partition.start_y + i] = local_buf[i]
++
++def rle_encode_window(image):
+     # Encodes only the rectangular window actually touched in compositing
+     window = get_touched_window(image)
+-    encoded = run_length_encode(window)
+-    return encoded, view_matrix.warp_matrix
++    return run_length_encode(window)
+ 
+ def send_to_display(encoded_image, warp_matrix):
+@@ -170,9 +186,4 @@
+ def allocate_buffer(size):
+     return [None] * size
+-
+-def assemble_intermediate_image(global_image, local_buf, partition):
+-    # Places local_buf into global_image at partition coordinates
+-    for i in range(partition.size):
+-        global_image[partition.start_y + i] = local_buf[i]
+ ```
+ 
+@@ -188,5 +199,5 @@
+ *   **Perspective Cost:** Perspective compositing is significantly more expensive than parallel projection; a single intermediate image pixel may require accumulating voxels from an entire voxel slice at the back of the volume, unlike parallel projection which maps voxels 1:1 [S1].
+ *   **Load Balancing:** Compositing time can vary based on view direction and opacity distribution; on SGI Onyx2, the load balancing factor was 2.08, meaning perfect load balancing would improve speed by this factor [S1]. The optimal process count may not be the maximum available (e.g., 14 processes was fastest on a 16-processor Onyx2) [S1].
+-*   **Network Bottlenecks:** On fast processors (e.g., PC Cluster), image transfer and idle time can dominate rendering time, whereas on slower processors (e.g., SUN Fire), compositing dominates [S1].
++*   **Network Bottlenecks:** On fast processors (e.g., PC Cluster), image transfer and idle time dominate due to fast CPUs, whereas on slower processors (e.g., SUN Fire), compositing dominates [S1].
+ 
+ ## Operating characteristics

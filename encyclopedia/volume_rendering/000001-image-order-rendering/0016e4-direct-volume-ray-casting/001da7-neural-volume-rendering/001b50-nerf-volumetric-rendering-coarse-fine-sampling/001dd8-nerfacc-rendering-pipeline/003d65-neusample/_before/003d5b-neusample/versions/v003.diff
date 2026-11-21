@@ -1,0 +1,460 @@
+--- v002.md
++++ v003.md
+@@ -4,61 +4,36 @@
+ 
+ ## Overview
+-NeuSample is a method for efficient novel view synthesis that replaces the hierarchical coarse-to-fine sampling procedure of NeRF with a single-shot inference pipeline [S1, unofficial]. It introduces a lightweight "neural sample field" that maps a ray directly into a distribution of sample points, eliminating the computational overhead of the coarse pass while maintaining or improving rendering quality [S1, unofficial]. Unlike NeRF, which requires two-stage inference to determine sample locations based on opacity weights, NeuSample learns the optimal sampling distribution end-to-end, reducing inference time by approximately 25% on standard benchmarks [S1, unofficial].
++NeuSample is a method for efficient novel view synthesis that replaces the coarse-to-fine hierarchical sampling stage of Neural Radiance Fields (NeRF) with a lightweight neural network called the Neural Sample Field [S1, unofficial]. It solves the problem of high computational overhead during inference by mapping a ray directly to a set of sample positions, enabling single-shot inference without a separate coarse pass [S1, unofficial]. Unlike NeRF, which requires two-stage inference to estimate opacity and then refine samples, NeuSample learns the sampling distribution end-to-end, achieving better rendering quality with approximately 25% less inference time on standard benchmarks [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A ray $r$ defined by its origin $o = (x_o, y_o, z_o)$ and normalized direction $d = (\theta, \phi)$.
+-*   **Output:** A set of $N$ 3D coordinates $\{x_1, ..., x_N\}$ along the ray, which are fed into the radiance field to produce density $\sigma$ and color $c$. The final output is the accumulated pixel color $C(r)$.
+-
+-**Data Structures**
+-*   **Neural Sample Field ($S_\Theta$):** A Multi-Layer Perceptron (MLP) with fully connected layers.
+-    *   **Input Dimension:** 6 (3 for origin, 3 for direction) before position encoding.
+-    *   **Position Encoding:** 10-frequency sine/cosine encoding applied to both origin and direction, expanding the input dimension to $6 \times (2 \times 10 + 1) = 126$ [S1, unofficial].
+-    *   **Hidden Layers:** 8 fully connected layers with ReLU activations.
+-    *   **Hidden Dimension:** 256 features per layer [S1, unofficial].
+-    *   **Skip Connection:** The original encoded input is concatenated with the output of the 4th hidden layer [S1, unofficial].
+-    *   **Output Layer:** A final fully connected layer maps the 256-dimensional features to an $N$-dimensional vector, followed by a Sigmoid activation [S1, unofficial].
+-*   **Radiance Field ($R_\Theta$):** The standard NeRF MLP architecture [S1, unofficial].
+-
+-**Numbered Steps**
+-1.  **Ray Construction:** For a given pixel, compute the camera pose and transform it into a ray origin $o$ and direction $d$.
+-2.  **Position Encoding:** Apply 10-frequency positional encoding to $o$ and $d$. Concatenate the encoded origin and direction vectors.
+-3.  **Sample Field Inference:** Pass the concatenated encoded input through the Neural Sample Field $S_\Theta$.
+-    *   The network processes the input through 8 FC layers with ReLU.
+-    *   A skip connection concatenates the initial input with the output of the 4th layer.
+-    *   The result passes through a final FC layer to produce an $N$-dimensional vector.
+-    *   Apply Sigmoid activation to obtain relative sample positions $\hat{t}_1, ..., \hat{t}_N \in [0, 1]$.
+-4.  **Coordinate Transformation:** Map the relative positions $\hat{t}_i$ to absolute distances $t_i$ along the ray segment $[t_{near}, t_{far}]$:
+-    $$ t_i = (1 - \hat{t}_i)t_{near} + \hat{t}_i t_{far} $$
+-    Compute the 3D sample coordinates:
++**Inputs and Outputs:**
++*   **Input:** A ray defined by origin $o = (x_o, y_o, z_o)$ and normalized direction $d = (\theta, \phi)$.
++*   **Output:** A set of $N$ 3D coordinates $\{x_1, ..., x_N\}$ along the ray, which are fed into the radiance field to compute density $\sigma$ and color $c$.
++
++**Data Structures:**
++The Neural Sample Field $S_\Theta$ is a Multi-Layer Perceptron (MLP).
++*   **Input Layer:** Concatenation of position-encoded ray origin and direction.
++*   **Hidden Layers:** 8 Fully Connected (FC) layers with ReLU activations.
++*   **Skip Connection:** The input is concatenated with the output of the 4th hidden layer.
++*   **Hidden Dimension:** 256 features per layer.
++*   **Output Layer:** 1 FC layer mapping 256 features to $N$ scalars, followed by a Sigmoid activation.
++
++**Parameters:**
++*   $N$: The number of samples output by the field. In the source experiments, $N=192$ [S1, unofficial]. This replaces the sum of coarse ($N_c$) and fine ($N_f$) samples used in standard NeRF.
++*   Position Encoding: 10-frequency sine/cosine encoding applied to both origin and direction [S1, unofficial].
++
++**Algorithm:**
++1.  **Ray Computation:** Compute ray origin $o$ and direction $d$ for the target pixel based on camera pose.
++2.  **Encoding:** Apply 10-frequency position encoding $\tilde{\tau}$ to $o$ and $d$. Concatenate the encoded vectors.
++3.  **Sample Field Inference:** Pass the concatenated encoded input through $S_\Theta$ to obtain $N$ scalars $\hat{t}_1, ..., \hat{t}_N$.
++4.  **Normalization:** The output of $S_\Theta$ is passed through a Sigmoid activation to constrain values to $[0, 1]$. These are the relative sample positions $\hat{t}_i$.
++5.  **Coordinate Transformation:** Map relative positions $\hat{t}_i$ to absolute distances $t_i$ using near ($t_n$) and far ($t_f$) bounds:
++    $$ t_i = (1 - \hat{t}_i)t_n + \hat{t}_i t_f $$
++    Compute 3D coordinates:
+     $$ x_i = o + t_i d $$
+-5.  **Radiance Field Evaluation:** Feed the coordinates $x_i$ and direction $d$ into the radiance field $R_\Theta$ to obtain density $\sigma_i$ and color $c_i$ for each sample point.
+-6.  **Volume Rendering:** Accumulate the final pixel color $C(r)$ using standard volume rendering integration:
+-    $$ C(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+-    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, and $\delta_i$ is the distance between adjacent samples ($\delta_i = t_{i+1} - t_i$) [S1, unofficial].
+-
+-**Formulas**
+-*   **Sample Field Output:**
+-    $$ \hat{t}_1, ..., \hat{t}_N = S_\Theta(x_o, y_o, z_o, \theta, \phi) $$
+-    where $\hat{t}_i \in [0, 1]$ represents the relative position [S1, unofficial].
+-*   **Absolute Distance:**
+-    $$ t_i = (1 - \hat{t}_i)t_{near} + \hat{t}_i t_{far} $$
+-*   **Sample Coordinate:**
+-    $$ x_i = o + t_i d $$
+-*   **Rendering Loss:**
+-    $$ L = \| \hat{C}(r) - C(r) \|_2^2 $$
+-    where $\hat{C}(r)$ is the rendered color and $C(r)$ is the ground truth [S1, unofficial].
+-
+-**Parameters**
+-*   **$N$ (Number of Samples):** The total number of samples output by the neural sample field. In the source experiments, $N$ is set to 192 [S1, unofficial]. This value replaces the sum of coarse ($N_c$) and fine ($N_f$) samples used in hierarchical NeRF.
+-*   **Position Encoding Frequency:** 10 frequencies [S1, unofficial].
+-*   **Hidden Dimension:** 256 [S1, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-*   **Precision:** The relative positions $\hat{t}_i$ are bounded by the Sigmoid function to $[0, 1]$. If $t_{near}$ and $t_{far}$ are poorly chosen, samples may fall outside the region of interest, leading to wasted computation or artifacts.
+-*   **Ordering:** The source does not explicitly enforce sorting of $\hat{t}_i$. However, volume rendering assumes ordered samples along the ray. In implementation, the output $\hat{t}_i$ should be sorted in ascending order before computing $t_i$ and $\delta_i$ to ensure correct transmittance calculation [G].
+-*   **Degenerate Input:** If the ray direction $d$ is zero or undefined, the coordinate calculation fails. Standard ray construction from camera poses should prevent this.
+-
+-**Pseudocode**
++6.  **Radiance Field Evaluation:** Feed $x_i$ into the radiance field network $R_\Theta$ to obtain density $\sigma_i$ and color $c_i$.
++7.  **Volume Rendering:** Accumulate the final pixel color $C(r)$ using standard volume rendering integration over the samples [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+@@ -67,171 +42,223 @@
+ import math
+ 
+-def positional_encoding(x, num_frequencies=10):
+-    """
+-    Applies 10-frequency positional encoding to input x.
+-    x shape: (..., 3) for origin or direction.
+-    Returns shape: (..., 3 * (2 * num_frequencies + 1))
+-    """
+-    # Standard NeRF positional encoding
+-    # x is scaled by powers of 2 up to 2^(num_frequencies-1)
+-    # Then sin and cos are applied
+-    # Concatenate original x with sin/cos components
+-    freq_bands = 2.0 ** torch.linspace(0, num_frequencies - 1, num_frequencies).to(x.device)
+-    x = x.unsqueeze(-1) * freq_bands
+-    x = torch.cat([x.sin(), x.cos()], dim=-1)
+-    x = torch.cat([x, x], dim=-1) # sin, cos, sin, cos...
+-    # Actually, standard PE is sin(2^k x), cos(2^k x)
+-    # Let's implement strictly:
+-    # x shape (..., 3) -> (..., 3, num_frequencies)
+-    # freq_bands shape (num_frequencies,)
+-    # x_pe = torch.sin(torch.cat([x[..., None] * freq_bands, x[..., None] * freq_bands + math.pi/2], dim=-1))
+-    # Simplified standard implementation:
+-    x = x.unsqueeze(-1) * freq_bands
+-    x = torch.cat([x.sin(), x.cos()], dim=-1)
+-    # x is now (..., 3, 2*num_frequencies)
+-    # Flatten last two dims
+-    x = x.reshape(*x.shape[:-2], -1)
+-    # Concatenate original x
+-    x = torch.cat([x, x], dim=-1) # Wait, standard is just sin/cos of scaled x?
+-    # NeRF PE: sin(2^k x), cos(2^k x) for k=0..L-1
+-    # Result dim: 3 * 2 * L
+-    # Let's stick to the description: "10-frequency position encoding"
+-    # Usually implies the standard NeRF PE.
+-    return x
++class PositionalEncoding(nn.Module):
++    """10-frequency positional encoding for NeRF-style inputs."""
++    def __init__(self, num_frequencies=10):
++        super().__init__()
++        self.num_frequencies = num_frequencies
++
++    def forward(self, x):
++        # x shape: (..., 3)
++        # NeRF encoding: sin(2^i * pi * x) for i in 0..num_frequencies-1
++        # Output shape: (..., 3 * 2 * num_frequencies)
++        freq_bands = 2.0 ** torch.arange(self.num_frequencies, device=x.device).float() * math.pi
++        # Expand x to (..., 1, 3) and freq_bands to (1, num_frequencies, 1)
++        # Result: (..., num_frequencies, 3)
++        scaled_x = x.unsqueeze(-2) * freq_bands.unsqueeze(-1)
++        encoded = torch.sin(scaled_x)
++        return encoded.view(*x.shape[:-1], -1)
+ 
+ class NeuralSampleField(nn.Module):
+-    def __init__(self, N=192):
++    """
++    NeuSample Neural Sample Field S_Theta.
++    Maps ray (origin, direction) to N relative sample positions in [0, 1].
++    """
++    def __init__(self, num_samples=192, hidden_dim=256, num_fc_layers=8, pos_freq=10):
+         super().__init__()
+-        self.N = N
+-        # Input dim after PE: 6 * (2*10 + 1) = 126? 
+-        # NeRF PE usually maps 3D to 6*L. So 6D -> 12*L = 120.
+-        # Let's assume standard NeRF PE: 3 coords * 2 freqs * 10 = 60 per vector.
+-        # Total input = 120.
+-        self.input_dim = 120 
++        self.num_samples = num_samples
++        self.pos_encoder = PositionalEncoding(num_frequencies=pos_freq)
++        
++        # Input dimension: 3 (origin) + 3 (direction) = 6 raw dims
++        # Encoded dimension: 6 * 2 * 10 = 120
++        input_dim = 6 * 2 * pos_freq
+         
+         # 8 FC layers with ReLU
+-        self.layers = nn.ModuleList([
+-            nn.Linear(self.input_dim, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU()
+-        ])
+-        
+-        # Skip connection from 4th layer (index 3 in layers list, which is output of 4th FC)
+-        # The description says: "concatenate the original input with the output of the 4th layer"
+-        # So we need to store the 4th layer output.
+-        
+-        # Final FC layer mapping 256 + 120 = 376 to N
+-        self.output_layer = nn.Linear(256 + self.input_dim, N)
++        layers = []
++        prev_dim = input_dim
++        for i in range(num_fc_layers):
++            layers.append(nn.Linear(prev_dim, hidden_dim))
++            layers.append(nn.ReLU())
++            prev_dim = hidden_dim
++            
++        # Skip connection: Concatenate input with output of 4th layer (index 3 in 0-based list of layers before activation? 
++        # Note: Source says "concatenate the original input with the output of the 4th layer". 
++        # In a sequential list of Linear+ReLU, the 4th layer's output is after the 4th ReLU.
++        # We will implement this via a custom forward pass or explicit structure.
++        # To keep it clean, we define the first 4 layers, then the rest.
++        
++        self.first_half = nn.Sequential(
++            nn.Linear(input_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU()
++        )
++        
++        self.second_half = nn.Sequential(
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU()
++        )
++        
++        # Final mapping to N samples
++        self.output_layer = nn.Linear(hidden_dim, num_samples)
+         self.sigmoid = nn.Sigmoid()
+ 
+     def forward(self, origin, direction):
+-        # origin: (..., 3), direction: (..., 3)
+-        # Apply PE
+-        pe_origin = positional_encoding(origin)
+-        pe_direction = positional_encoding(direction)
+-        x = torch.cat([pe_origin, pe_direction], dim=-1)
+-        
+-        # Pass through layers
+-        h = x
+-        for i, layer in enumerate(self.layers):
+-            h = layer(h)
+-            if i == 3: # After 4th layer (indices 0,1,2,3)
+-                skip_connection = h
+-        
+-        # Concatenate original input with 4th layer output
+-        h = torch.cat([x, skip_connection], dim=-1)
+-        
+-        # Final layer
+-        out = self.output_layer(h)
+-        return self.sigmoid(out)
+-
+-def render_neusample(ray_origins, ray_directions, t_near, t_far, sample_field, radiance_field, N=192):
+-    """
+-    ray_origins: (B, 3)
+-    ray_directions: (B, 3)
+-    t_near: scalar
+-    t_far: scalar
++        """
++        origin: (..., 3)
++        direction: (..., 3)
++        Returns: (..., N) relative positions in [0, 1]
++        """
++        # Encode
++        enc_origin = self.pos_encoder(origin)
++        enc_direction = self.pos_encoder(direction)
++        x = torch.cat([enc_origin, enc_direction], dim=-1)
++        
++        # First half
++        h = self.first_half(x)
++        
++        # Skip connection: concatenate original input (encoded) with h
++        # Source: "Concatenate the original input with the output of the 4th layer"
++        # The input to the network is the encoded vector.
++        x_with_skip = torch.cat([x, h], dim=-1)
++        
++        # Second half
++        h = self.second_half(x_with_skip)
++        
++        # Output
++        logits = self.output_layer(h)
++        relative_positions = self.sigmoid(logits)
++        
++        return relative_positions
++
++def render_neusample(ray_origins, ray_directions, near_bound, far_bound, sample_field, radiance_field):
++    """
++    Single-shot rendering using NeuSample.
++    
++    ray_origins: (H, W, 3)
++    ray_directions: (H, W, 3)
++    near_bound: float
++    far_bound: float
+     sample_field: NeuralSampleField instance
+     radiance_field: RadianceField instance (standard NeRF MLP)
+     """
+-    # 1. Get relative positions from sample field
+-    # sample_field expects encoded inputs, handles PE internally or externally?
+-    # Based on pseudocode above, sample_field handles PE.
+-    relative_positions = sample_field(ray_origins, ray_directions) # (B, N)
++    # 1. Get relative positions from Neural Sample Field
++    # sample_field outputs (H, W, N)
++    relative_t = sample_field(ray_origins, ray_directions)
+     
+     # 2. Map to absolute distances
+-    # t_i = (1 - t_hat_i) * t_near + t_hat_i * t_far
+-    t_abs = (1 - relative_positions) * t_near + relative_positions * t_far # (B, N)
+-    
+-    # 3. Sort samples to ensure correct ordering for volume rendering
+-    t_abs, _ = torch.sort(t_abs, dim=-1)
+-    
+-    # 4. Compute 3D coordinates
++    # t_i = (1 - t_hat_i) * t_n + t_hat_i * t_f
++    absolute_t = (1 - relative_t) * near_bound + relative_t * far_bound
++    
++    # 3. Compute 3D coordinates
+     # x_i = o + t_i * d
+-    # t_abs is (B, N), ray_directions is (B, 3)
+-    # Expand directions to (B, 1, 3)
+-    samples = ray_origins.unsqueeze(1) + t_abs.unsqueeze(2) * ray_directions.unsqueeze(1) # (B, N, 3)
+-    
+-    # 5. Evaluate Radiance Field
+-    # Standard NeRF forward pass
+-    # radiance_field takes (x, d)
+-    # samples: (B, N, 3), ray_directions: (B, 3) -> expand to (B, N, 3)
+-    d_expanded = ray_directions.unsqueeze(1).expand_as(samples)
+-    sigma, color = radiance_field(samples, d_expanded)
+-    
+-    # 6. Volume Rendering
+-    # Compute delta
++    # absolute_t shape: (H, W, N)
++    # ray_origins shape: (H, W, 3)
++    # ray_directions shape: (H, W, 3)
++    # Expand for broadcasting
++    coords = ray_origins.unsqueeze(-2) + absolute_t.unsqueeze(-1) * ray_directions.unsqueeze(-2)
++    # coords shape: (H, W, N, 3)
++    
++    # 4. Evaluate Radiance Field
++    # Reshape to (H*W*N, 3) for batched evaluation if the radiance field expects it,
++    # or iterate. Assuming radiance_field can handle (..., 3) input.
++    # radiance_field returns sigma and color
++    # sigma: (H, W, N, 1)
++    # color: (H, W, N, 3)
++    sigma, color = radiance_field(coords)
++    
++    # 5. Volume Rendering
++    # Standard NeRF integration
+     # delta_i = t_{i+1} - t_i
+-    # Add a small epsilon to avoid division by zero or issues at boundaries
+-    # Last delta is t_far - t_N
+-    deltas = t_abs[:, 1:] - t_abs[:, :-1] # (B, N-1)
+-    # Append last delta
+-    last_delta = t_far - t_abs[:, -1]
+-    deltas = torch.cat([deltas, last_delta.unsqueeze(1)], dim=1) # (B, N)
++    # Add a small epsilon to avoid division by zero or log(0) issues if needed, 
++    # though standard alpha calculation handles it.
++    # Sort samples? NeuSample output is not guaranteed sorted. 
++    # Source does not explicitly mention sorting. However, volume rendering 
++    # formulas typically assume ordered samples. 
++    # Note: The source formula for rendering uses delta_i = t_{i+1} - t_i.
++    # If samples are not sorted, delta_i can be negative.
++    # Standard practice in such learned sampling is to sort the samples 
++    # before rendering to ensure correct depth ordering. 
++    # The source text says "transformed into point coordinates... fed into radiance field... 
++    # perform volume rendering". It does not explicitly state sorting.
++    # However, Eq 2 in source implies standard integration. 
++    # If the network outputs unsorted t_hat, the rendering will be incorrect.
++    # We assume the network learns to output sorted samples or the implementation sorts them.
++    # Given "relative sample position between the near and far bound", 
++    # and the goal of modeling geometry, sorted output is implied for valid integration.
++    # We will add a sort step as a necessary implementation detail for correctness [G].
++    
++    # Sort samples by absolute_t
++    sorted_t, sort_indices = torch.sort(absolute_t, dim=-1)
++    
++    # Apply sort to coords, sigma, color
++    # Using advanced indexing or gather
++    # coords: (H, W, N, 3) -> (H, W, N, 3)
++    # sigma: (H, W, N, 1) -> (H, W, N, 1)
++    # color: (H, W, N, 3) -> (H, W, N, 3)
++    
++    # Reshape for gathering
++    H, W, N, _ = coords.shape
++    flat_indices = sort_indices.unsqueeze(-1).expand(-1, -1, -1, 3).long()
++    flat_sigma_indices = sort_indices.unsqueeze(-1).expand(-1, -1, -1, 1).long()
++    flat_color_indices = sort_indices.unsqueeze(-1).expand(-1, -1, -1, 3).long()
++    
++    sorted_coords = torch.gather(coords, -2, flat_indices)
++    sorted_sigma = torch.gather(sigma, -2, flat_sigma_indices)
++    sorted_color = torch.gather(color, -2, flat_color_indices)
++    
++    # Calculate deltas
++    # delta_i = t_{i+1} - t_i
++    # Add far_bound at the end to get delta for the last segment
++    t_expanded = torch.cat([sorted_t, torch.full_like(sorted_t[..., :1], far_bound)], dim=-1)
++    deltas = t_expanded[..., 1:] - t_expanded[..., :-1]
++    
++    # Alpha calculation
++    # alpha_i = 1 - exp(-sigma_i * delta_i)
++    alpha = 1.0 - torch.exp(-sorted_sigma * deltas)
+     
+     # Transmittance
+-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-    # alpha_i = 1 - exp(-sigma_i * delta_i)
+-    alpha = 1.0 - torch.exp(-sigma * deltas) # (B, N)
+-    
+-    # Cumulative product of transmittance
++    # T_i = product(1 - alpha_j) for j < i
+     # T_1 = 1
+     # T_i = T_{i-1} * (1 - alpha_{i-1})
+-    # Using cumulative sum of log(1-alpha)
+-    log_alpha = torch.log(torch.clamp(alpha, min=1e-10))
+-    log_T = torch.cat([torch.zeros_like(log_alpha[:, :1]), torch.cumsum(log_alpha[:, :-1], dim=1)], dim=1)
+-    T = torch.exp(log_T) # (B, N)
+-    
+-    # Weighted sum
+-    weights = T * alpha # (B, N)
+-    color_out = torch.sum(weights.unsqueeze(-1) * color, dim=1) # (B, 3)
+-    
+-    return color_out
++    # Using cumprod
++    # (1 - alpha) shape: (H, W, N)
++    # Shifted for T
++    transmittance_prev = torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha[..., :-1]], dim=-1)
++    transmittance = torch.cumprod(transmittance_prev, dim=-1)
++    
++    # Weight w_i = alpha_i * T_i
++    weights = alpha * transmittance
++    
++    # Final color
++    # C = sum(w_i * c_i)
++    final_color = torch.sum(weights.unsqueeze(-1) * sorted_color, dim=-2)
++    
++    return final_color
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Sample Ordering:** The volume rendering formula assumes samples are ordered along the ray. The Neural Sample Field outputs relative positions in $[0,1]$. If the network outputs unsorted positions, the computed deltas $\delta_i$ will be incorrect, leading to rendering artifacts. The implementation must sort the samples by $t_i$ before rendering [G].
++*   **Precision:** The use of Sigmoid constrains outputs to $[0,1]$. If the scene geometry extends significantly beyond $[t_n, t_f]$, samples will be clipped, potentially missing geometry.
++*   **Initialization:** The source mentions a "sample field extraction method" and "depth boost" for real-world scenes, implying that initialization from a coarse NeRF or depth predictor can help convergence [S1, unofficial].
++
++## Subtopics
++
++### Sample Field Extraction
++A compression technique that extracts a smaller, faster sample field from the trained NeuSample model to further reduce inference time (e.g., to 25% of original) while maintaining quality [S1, unofficial].
++
++### Depth Boost Initialization
++A training strategy for real-world scenes where the output mean of the extracted sample field is forced to fit depth predicted by a learned regular field, aiding convergence on complex geometry [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The method performs a single forward pass through the sample field and a single forward pass through the radiance field for $N$ samples. This is significantly faster than NeRF's hierarchical approach, which requires two passes (coarse and fine) with potentially more total samples.
+-*   **Memory Complexity:** Memory usage is dominated by the storage of the sample field and radiance field parameters. The sample field is lightweight (8 FC layers, 256 hidden units), adding minimal overhead compared to the radiance field.
+-*   **Measured Performance:** On Realistic Synthetic 360° and Real ForwardFacing benchmarks, NeuSample saves approximately 25% of inference time compared to standard NeRF while achieving comparable or better PSNR (e.g., +0.59 PSNR on Ficus, +0.63 on Lego) [S1, unofficial].
+-*   **Strengths:** Eliminates the need for a separate coarse network and hierarchical sampling logic. Simplifies the inference pipeline to a single shot.
+-*   **Limitations:** The sample field must be trained end-to-end with the radiance field. It may struggle with scenes having highly complex or unknown geometry distributions if not properly regularized or initialized (e.g., using depth boost for real-world scenes) [S1, unofficial].
+-*   **When to use:** When inference speed is critical and the scene geometry is relatively well-behaved or can be learned by the sample field.
+-*   **When not to use:** If the scene has extreme depth variations or complex occlusions that the sample field fails to capture without significant training data or regularization.
++*   **Time Complexity:** Single-shot inference. Avoids the two-stage (coarse + fine) evaluation of NeRF. Saves approximately 25% of inference time compared to standard NeRF [S1, unofficial].
++*   **Memory Complexity:** Requires storing the Neural Sample Field network (8 FC layers, 256 hidden dim) in addition to the Radiance Field. The memory overhead is small compared to the savings in compute.
++*   **Performance:** On Realistic Synthetic 360° and Real ForwardFacing benchmarks, NeuSample achieves better or comparable PSNR to NeRF while being faster [S1, unofficial].
++*   **Strengths:** Eliminates the need for hierarchical sampling logic; end-to-end differentiable training; simpler pipeline.
++*   **Limitations:** Requires training a separate network for sampling; performance may depend on the quality of the learned sampling distribution, especially in complex real-world scenes (addressed via extraction/initialization techniques).
+ 
+ ## Background
+-NeuSample was introduced in the paper "NeuSample: Neural Sample Field for Efficient View Synthesis" [S1, unofficial]. It addresses the computational bottleneck of NeRF's hierarchical sampling, which requires two-stage inference. The authors propose replacing the coarse stage with a neural sample field that directly predicts sample locations. The method was evaluated on standard synthetic benchmarks (Realistic Synthetic 360°, Real ForwardFacing) and demonstrated improved efficiency and quality. The work also explores a "sample field extraction" method to further compress the model and reduce inference time by up to 75% with competitive quality [S1, unofficial].
++NeuSample was introduced in the paper "NeuSample: Neural Sample Field for Efficient View Synthesis" [S1, unofficial]. It addresses the computational bottleneck of NeRF's coarse-to-fine sampling. The method was developed to enable faster inference for novel view synthesis, particularly for applications like virtual reality and 3D previews where real-time or near-real-time performance is critical. It builds on the principles of neural radiance fields but modifies the sampling strategy to be learned rather than heuristic.
+ 
+ ## Sources

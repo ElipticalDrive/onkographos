@@ -1,0 +1,159 @@
+# Probe-based Global Illumination (DDGI-like)
+
+Also called: DDGI, DDGI implementation, Probe Grid, Probe-based Methods (DDGI Baseline)
+
+## Overview
+A probe-based global illumination technique that approximates indirect lighting by storing directional irradiance in a 3D grid of spherical harmonics coefficients, serving as a baseline for comparison against neural implicit representations. It differs from its parent [Dynamic Diffuse Global Illumination (DDGI)](8142-dynamic-diffuse-global-illumination-ddgi.md) by replacing depth-texture-based visibility with ray-traced visibility to eliminate aliasing and reduce memory overhead, while retaining the core structure of low-resolution cubemaps or spherical harmonics probes.
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: Scene geometry (for ray tracing), camera position, shading point position, and shading normal.
+- **Outputs**: Approximated indirect irradiance at the shading point.
+
+### Data Structures
+- **Probe Grid**: A regular 3D grid of probes. Each probe stores directional indirect irradiance represented by second-order spherical harmonics (SH).
+- **Probe Storage Layout**:
+  - **Coefficients**: 9 SH coefficients (second-order).
+  - **Precision**: Half-precision floating point (16-bit).
+  - **Size**: 54 bytes per probe ($9 \times 2 \text{ bytes} \times 2 \text{ (for real/imag or just 9 coeffs? Note: 9 coeffs * 2 bytes = 18 bytes. The source says 54 bytes. This implies 3 components per coefficient? No, SH for irradiance is usually 9 coefficients total. 54 bytes / 9 coeffs = 6 bytes/coeff. This suggests 3 floats per coefficient? Or perhaps the source implies RGB irradiance per coefficient? Standard SH irradiance is 9 coefficients for the whole hemisphere. If it's 54 bytes, it might be 9 coefficients * 3 (RGB) * 2 bytes = 54 bytes. This is the standard interpretation for RGB irradiance in SH).
+  - **Note**: The source explicitly states "54 bytes per probe" for half-precision second-order SH. This implies $9 \text{ coefficients} \times 3 \text{ (RGB)} \times 2 \text{ bytes} = 54 \text{ bytes}$.
+- **Visibility**: Computed via ray tracing from the shading point to the probe locations.
+
+### Steps
+1. **Ray Traced Visibility**: For a given shading point, cast rays to the surrounding probes to determine visibility. This replaces the depth-texture approach used in standard DDGI [MGNM19, MMNL17].
+2. **Cosine Fall-off**: Apply a cosine fall-off heuristic [Hoo16] to the interpolation weights. Probes located behind the sampled normal (dot product of probe direction and surface normal < 0) are excluded or weighted to zero to prevent light leaks from the back side.
+3. **Weight Clamping**: Clamp the interpolation weights to a small minimum value ($10^{-6}$) to ensure that no shading point is left without any contributing probes, avoiding division by zero or undefined behavior during normalization.
+4. **Re-normalization**: Re-normalize the interpolation weights after applying the cosine fall-off and clamping heuristics so that they sum to 1.
+5. **Trilinear Interpolation**: Perform trilinear interpolation of the SH coefficients from the surrounding probes in the grid based on the normalized weights.
+6. **SH Evaluation**: Evaluate the interpolated SH coefficients to compute the indirect irradiance at the shading point.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_probe_illumination(shading_point, shading_normal, probe_grid):
+    """
+    Computes indirect irradiance using a probe grid with ray-traced visibility.
+    
+    Args:
+        shading_point: Vector3, position of the shading point.
+        shading_normal: Vector3, normalized surface normal at the shading point.
+        probe_grid: Grid of Probes, where each Probe has SH coefficients (9 coeffs, RGB, half-precision).
+        
+    Returns:
+        Vector3, the computed indirect irradiance.
+    """
+    
+    # 1. Find surrounding probes in the grid
+    # Determine the grid coordinates of the shading point
+    grid_coords = world_to_grid(shading_point, probe_grid.resolution, probe_grid.origin, probe_grid.spacing)
+    
+    # Get the 8 surrounding probes for trilinear interpolation
+    # Note: Handle boundary conditions (clamp to grid edges)
+    probes = get_surrounding_probes(grid_coords, probe_grid)
+    
+    # 2. Compute visibility and weights
+    weights = []
+    visible_probes = []
+    
+    for i, probe in enumerate(probes):
+        # Direction from shading point to probe center
+        probe_pos = grid_to_world(probe.grid_coords, probe_grid.origin, probe_grid.spacing)
+        direction = normalize(probe_pos - shading_point)
+        
+        # Ray trace visibility
+        # Cast a ray from shading_point in 'direction' towards the probe
+        # If the ray hits geometry before reaching the probe, the probe is occluded
+        is_visible = ray_trace(shading_point, direction, max_distance=probe_grid.spacing)
+        
+        if is_visible:
+            # 3. Cosine fall-off
+            # Probes behind the normal do not contribute
+            cos_theta = dot(shading_normal, direction)
+            if cos_theta > 0:
+                weights.append(cos_theta)
+                visible_probes.append(probe)
+            else:
+                weights.append(0.0)
+                visible_probes.append(probe)
+        else:
+            weights.append(0.0)
+            visible_probes.append(probe)
+            
+    # 4. Clamping
+    # Clamp weights to a small number to avoid no probes contributing
+    min_weight = 1e-6
+    weights = [max(w, min_weight) for w in weights]
+    
+    # 5. Re-normalization
+    weight_sum = sum(weights)
+    normalized_weights = [w / weight_sum for w in weights]
+    
+    # 6. Trilinear Interpolation of SH Coefficients
+    # Interpolate the 9 SH coefficients (RGB) from the 8 surrounding probes
+    # The 'visible_probes' list contains the probes, but we use the original 'probes' list 
+    # for trilinear interpolation indices, but the weights are associated with them.
+    # Note: The pseudocode above mixes 'visible_probes' and 'probes'. 
+    # Let's assume 'probes' is the list of 8 neighbors in spatial order.
+    
+    interpolated_sh_coeffs = trilinear_interpolate(probes, normalized_weights, 'sh_coeffs')
+    
+    # 7. Evaluate SH
+    # Evaluate the SH function at the shading normal to get irradiance
+    irradiance = evaluate_sh(interpolated_sh_coeffs, shading_normal)
+    
+    return irradiance
+
+def ray_trace(origin, direction, max_distance):
+    """
+    Simple ray trace to check visibility.
+    Returns True if the path is clear, False if occluded.
+    """
+    # Implementation depends on the specific ray tracing acceleration structure
+    # For this baseline, we assume a simple intersection test with scene geometry
+    hit = intersect_scene_geometry(origin, direction, max_distance)
+    return hit is None
+
+def trilinear_interpolate(probes, weights, field_name):
+    """
+    Performs trilinear interpolation of a field across 8 probes.
+    """
+    result = [0.0, 0.0, 0.0] # Assuming RGB
+    for i, probe in enumerate(probes):
+        coeff = probe.sh_coeffs[field_name] # Access the specific field (e.g., sh_coeffs)
+        # Trilinear interpolation logic
+        # This is a simplified representation; actual trilinear interpolation 
+        # involves interpolating along x, y, z axes sequentially.
+        # Here, we assume 'weights' are already the final trilinear weights.
+        result += coeff * weights[i]
+    return result
+```
+
+### Parameters
+- **Spherical Harmonics Order**: Second-order (9 coefficients) [RH01].
+- **Quantization**: Half-precision (16-bit) for SH coefficients. Further quantization to 28 bytes per probe is possible but has little influence on results [RSS∗ 24].
+- **Clamping Threshold**: $10^{-6}$ for interpolation weights.
+- **Grid Size**: Example: $22^3$ probe grid for the Sponza scene, consuming 35.5 MB in standard DDGI [NVI25].
+
+### Edge Cases and Pitfalls
+- **Light Leaks**: Occur if ray-traced visibility is not employed and cosine fall-off is insufficient or incorrectly applied.
+- **Contact Shadows**: Probe-based methods fail to capture contact shadows entirely due to the low resolution of the irradiance volume [S1].
+- **Probe Placement Errors**: Erroneous probe placement (e.g., inside geometry) combined with runtime updates can produce artifacts like dark smudges on surfaces [S1].
+- **Memory Overhead**: Standard DDGI uses 1168 bytes per probe, with 1024 bytes dedicated to depth buffers. Using ray-traced visibility reduces this to 54 bytes per probe for SH data [S1].
+
+## Operating characteristics
+- **Time Complexity**: Query time is dominated by simple trilinear interpolation of SH coefficients, which is highly competitive. However, ray-traced visibility adds significant runtime cost compared to depth-texture lookups.
+- **Memory Complexity**: Scales cubically with spatial discretization. For a $22^3$ grid, it consumes 35.5 MB (standard DDGI) or significantly less if depth buffers are removed (54 bytes/probe).
+- **Performance**: Simple probe-based methods have a performance edge over neural implicit methods (like NIV) if optimized, due to the simplicity of trilinear interpolation. NIV requires input encoding evaluation and matrix multiplications, incurring a cost of around 1 ms on an RTX 4090 [S1].
+- **Strengths**: Simple implementation, predictable memory usage, fast query times if visibility is cheap.
+- **Limitations**: Poor representation of high-frequency details (contact shadows), light leaks without careful visibility handling, cubic memory scaling.
+- **When to Use**: When memory budget is fixed and scene geometry is static or slowly changing, and high-frequency shadow details are not critical.
+- **When Not to Use**: When contact shadows are essential, or when adaptive resolution is needed to handle complex lighting details efficiently.
+
+## Background
+- **Origin**: Based on the Dynamic Diffuse Global Illumination (DDGI) method [MGNM19].
+- **Development**: Implemented as a baseline for comparison with Neural Irradiance Volumes (NIV) [S1]. The specific variant described uses ray-traced visibility instead of depth textures to improve quality and reduce memory overhead.
+- **Usage**: Used in real-time rendering systems for global illumination approximation, particularly in games and interactive applications where path tracing is too expensive.
+
+## Sources
+[S1] Real-time Rendering with a Neural Irradiance Volume, https://doi.org/10.48550/arxiv.2602.12949, fetched 2026-10-26

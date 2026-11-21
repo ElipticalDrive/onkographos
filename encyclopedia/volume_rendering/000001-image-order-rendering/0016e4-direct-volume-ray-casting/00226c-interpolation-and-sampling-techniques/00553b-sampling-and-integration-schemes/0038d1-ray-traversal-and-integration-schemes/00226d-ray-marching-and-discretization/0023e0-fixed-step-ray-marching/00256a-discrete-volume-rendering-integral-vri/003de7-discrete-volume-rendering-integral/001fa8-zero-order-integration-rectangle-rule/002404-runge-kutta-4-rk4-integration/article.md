@@ -1,0 +1,114 @@
+# Runge-Kutta 4 (RK4) Integration
+
+Also called: Fourth-order Runge-Kutta, RK4 Integrator, Runge-Kutta 4 Integrator, Runge-Kutta 4th order
+
+## Overview
+Runge-Kutta 4 (RK4) is a fourth-order numerical integration method used to solve initial value problems for ordinary differential equations (ODEs) in volume rendering, specifically for computing particle trajectories in vector fields [S1, unofficial][S2, unofficial]. It improves upon the first-order [Zero Order Integration (Rectangle Rule)](2082-zero-order-integration-rectangle-rule.md) and [Euler Integration](3836-euler-integration.md) by sampling the vector field at four distinct positions within a step to compute a weighted average slope, significantly reducing integration error [S1, unofficial]. While it requires four times the computational cost of Euler integration, it achieves an order-of-magnitude reduction in error, allowing for larger step sizes without sacrificing accuracy [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Current position $x_n$ (or $x_i$), step size $\delta$ (or $dt$), and optionally a time parameter $t_{\text{func}}$ for unsteady fields.
+*   **Output:** Next position $x_{n+1}$ (or $x_{i+1}$).
+
+**Data Structures:**
+*   Position: 3D vector (e.g., `double3` or `float3`).
+*   Vector Field Sample: 3D vector (the value of the field $v(x)$). In some implementations, a 4th component may be used for padding or additional data, but the integration logic operates on the spatial components [S1, unofficial].
+
+**Parameters:**
+*   $\delta$ (or $dt$): The integration step size. In real-time applications, this is often dynamic to maintain frame rate [S2, unofficial].
+*   $t_{\text{func}}$: The current time for unsteady vector fields. For steady fields, this is ignored or fixed [S2, unofficial].
+
+**Steps:**
+1.  Calculate half-step: $dt_{half} = \delta / 2$.
+2.  Sample the vector field at the current position to get $k_1$ (or $v_0$):
+    $$k_1 = \delta \cdot v(x_n, t_{\text{func}})$$
+3.  Sample the vector field at the midpoint using $k_1$ to estimate the position:
+    $$k_2 = \delta \cdot v(x_n + k_1/2, t_{\text{func}})$$
+4.  Sample the vector field at the midpoint using $k_2$:
+    $$k_3 = \delta \cdot v(x_n + k_2/2, t_{\text{func}})$$
+5.  Sample the vector field at the end of the step using $k_3$:
+    $$k_4 = \delta \cdot v(x_n + k_3, t_{\text{func}})$$
+6.  Compute the weighted sum of the slopes to determine the displacement:
+    $$x_{n+1} = x_n + \frac{1}{6}(k_1 + 2k_2 + 2k_3 + k_4)$$
+    *Note: Some sources define $v_i$ as the raw field value and apply $\delta$ in the final sum [S2, unofficial]. The formula above incorporates $\delta$ into the $k$ terms for consistency with standard ODE notation [S1, unofficial]. Both yield the same result.*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rk4_integrate(pos: Vector3, dt: float, vector_field_func, t_func: float = 0.0) -> Vector3:
+    """
+    Performs one step of Runge-Kutta 4 integration.
+    
+    Args:
+        pos: Current position (x, y, z).
+        dt: Step size (delta).
+        vector_field_func: Function v(x, t) returning the vector at position x and time t.
+        t_func: Current time for unsteady fields. Set to 0.0 or ignored for steady fields.
+        
+    Returns:
+        The next position after one step.
+    """
+    dt_half = dt * 0.5
+    
+    # k1: Slope at the beginning of the interval
+    k1 = dt * vector_field_func(pos, t_func)
+    
+    # k2: Slope at the midpoint, using k1 to estimate position
+    pos_mid1 = pos + (k1 * dt_half) # Note: k1 already includes dt scaling in this definition variant
+    # Correction: If k1 = dt * v, then pos + k1/2 is correct.
+    # Let's stick to the standard definition where k represents the *change* in position.
+    # k1 = dt * v(x)
+    # Next pos estimate = x + k1/2
+    
+    k2 = dt * vector_field_func(pos + k1 * 0.5, t_func)
+    
+    # k3: Slope at the midpoint, using k2 to estimate position
+    k3 = dt * vector_field_func(pos + k2 * 0.5, t_func)
+    
+    # k4: Slope at the end of the interval, using k3 to estimate position
+    k4 = dt * vector_field_func(pos + k3, t_func)
+    
+    # Weighted average of slopes
+    # x_{n+1} = x_n + (k1 + 2*k2 + 2*k3 + k4) / 6
+    weighted_sum = k1 + (2.0 * k2) + (2.0 * k3) + k4
+    next_pos = pos + (weighted_sum / 6.0)
+    
+    return next_pos
+```
+
+**Edge Cases and Pitfalls:**
+*   **Steady vs. Unsteady Fields:** For steady vector fields, the time argument $t_{\text{func}}$ must be ignored or set to a constant value to avoid unnecessary computation or errors [S2, unofficial].
+*   **Precision:** The method is sensitive to the step size $\delta$. While RK4 is more robust than Euler, extremely large step sizes can still lead to instability or divergence from the true trajectory, particularly in complex flow structures like vortices [S1, unofficial].
+*   **Vortex Behavior:** RK4 tends to stay within vortices better than Euler integration, which may escape them. However, RK4 can sometimes converge to the center of vortices instead of following the streamline correctly [S1, unofficial].
+
+## Subtopics
+
+### [Euler Integration](3836-euler-integration.md)
+First-order method, single sample per step, lower accuracy ($O(dt)$ global error) but faster.
+
+### [Runge-Kutta 2/3 ODE Solver](3839-runge-kutta-2-3-ode-solver.md)
+Lower-order RK variant with adaptive step size, fewer evaluations than RK4.
+
+### [Tensorline Integration](9613-tensorline-integration.md)
+Uses RK4 for integrating streamlines in tensor fields, combining geometric integration with volume rendering compositing.
+
+### [Dormand-Prince 5(4) Step](13933-dormand-prince-5-4-step.md)
+Fifth-order method with embedded error estimation for adaptive step control, more accurate but more expensive than RK4.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per step, but requires 4 vector field evaluations per step. It is approximately 4 times slower than Euler integration [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per step (storing $k_1, k_2, k_3, k_4$).
+*   **Accuracy:** Global error is $O(dt^4)$, local truncation error is $O(dt^5)$ [S1, unofficial]. This is significantly more accurate than Euler's $O(dt)$ global error.
+*   **Performance:** The error is smaller by an order of magnitude compared to Euler. RK4 with a larger step size (e.g., $dt=1$) can have less error than Euler with a smaller step size (e.g., $dt=0.5$) [S1, unofficial].
+*   **Strengths:** High accuracy for smooth vector fields; better stability in vortices compared to Euler.
+*   **Limitations:** Higher computational cost; potential for converging to vortex centers incorrectly in some complex flows [S1, unofficial].
+*   **When to use:** When higher accuracy is required than Euler can provide, and computational resources allow for 4x the cost. Useful for real-time visualization where step size can be adjusted dynamically [S2, unofficial].
+*   **When not to use:** When extreme performance is critical and lower accuracy is acceptable (use Euler); when adaptive step size is needed for varying field complexity (use Dormand-Prince).
+
+## Background
+RK4 was developed as part of the Runge-Kutta family of methods for solving ordinary differential equations. In the context of volume rendering and vector field visualization, it has been adopted to improve the accuracy of streamline and pathline integration compared to simpler methods like Euler integration [S1, unofficial][S2, unofficial]. It is widely used in real-time visualization systems where a balance between accuracy and performance is necessary [S2, unofficial].
+
+## Sources
+[S1] Realtime visualization of 3D vector fields using CUDA, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
+[S2] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

@@ -1,0 +1,32 @@
+# Appearance and Lighting Decomposition
+
+
+## Overview
+Appearance and Lighting Decomposition methods extend the standard radiance field function $f_\theta(\mathbf{x}, \mathbf{d})$ by explicitly separating scene geometry, material properties, and lighting conditions. This separation enables advanced capabilities such as relighting, appearance editing, and accurate rendering of glossy specular reflections, which standard NeRF architectures struggle with due to the entanglement of view-dependent appearance with geometry [S1]. Unlike sibling methods that modify the MLP structure for efficiency or anisotropy without explicit physical decomposition, these methods structure the output to predict physical parameters (e.g., normals, roughness, diffuse/specular components) rather than raw color values [S1].
+
+## Shared principles
+All methods in this family compute a radiance field function $f_\theta(\mathbf{x}, \mathbf{d})$ that outputs volume density $\sigma$ and color $\mathbf{c}$ (or latent features) for a query point $\mathbf{x}$ and direction $\mathbf{d}$. The final pixel color $\mathbf{C}(\mathbf{r})$ for a ray $\mathbf{r}$ is computed via the standard volume rendering integral:
+$$
+\mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i \mathbf{c}_i
+$$
+where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$. The architectural variations lie in how $\sigma_i$ and $\mathbf{c}_i$ are generated from the input coordinates, how the network is structured (depth, width, connectivity), and what auxiliary inputs (embeddings, priors, features) are fused into the computation.
+
+## Subtopics
+
+### [Anisotropic Neural Representation Learning](9475-anisotropic-neural-representation-learning.md)
+[Anisotropic Neural Representation Learning](9475-anisotropic-neural-representation-learning.md) models volumetric density and latent features as view-dependent functions using spherical harmonics (SH) to eliminate directional ambiguity. It differs from anti-aliasing approaches like Mip-NeRF by modifying the MLP to predict view-dependent SH coefficients directly, avoiding shape-based sampling parameterization.
+
+### [Ref-NeRF](10843-ref-nerf.md)
+[Ref-NeRF](10843-ref-nerf.md) addresses the inability of standard NeRF to reproduce glossy specular reflections by replacing direct parameterization of outgoing radiance with a representation of reflected radiance. It reparameterizes the directional MLP to accept the reflection of the viewing vector about the local normal, enabling smoother interpolation of view-dependent appearance across materials.
+
+### DE-NeRF
+DE-NeRF decomposes lighting, geometry, and appearance to allow relighting of high-frequency environments and appearance editing [S1]. It trains a signed distance field (SDF) function using 2D images to reconstruct a display grid as the input scene for the MLP. The scene is decomposed into geometric features and appearance features (diffuse reflection, roughness, specular tint). Geometric features, appearance features, and distance $h$ (from sampling point to grid) are input into four corresponding MLPs to predict diffuse albedo, roughness value, and specular tint. Diffuse reflectance is integrated with the environment map to get diffuse color $c_d$. A specular lighting MLP $F_s$ is trained to get specular lighting $c_l$, which is multiplied with specular hue to get specular color $c_s$. The final color is $c = c_s + c_d$. On NeRF Synthetic and Shiny Blender datasets, PSNR is 2 points higher than latest papers [S1].
+
+### NeRFLight
+NeRFLight extends grid-based methods by dividing the scene into eight different regions to split NeRF into separate density and color fields, using a shared feature grid. This avoids increasing the number of features for seamless reconstruction while reducing stored feature values. The scene is divided into eight regions, each corresponding to an MLP that outputs density and color. A shared feature grid is used, with features symmetrically placed at the center of the scene [S1].
+
+## Background
+The concept of decomposing radiance fields into geometric and appearance components originated from the need to handle complex lighting and material interactions that standard NeRF could not resolve. DE-NeRF [25] was proposed to separate appearance materials and lighting for better relighting of high-frequency environments [S1]. NeRFLight [27] and RelightingNeRF [28] further evolved this by changing the underlying model architecture, with NeRFLight extending grid-based methods and RelightingNeRF introducing a new approach for free-viewpoint reconstruction from unstructured photographs by inputting sampling point positions, lighting positions, and viewing directions into MLPs to produce final color [S1].
+
+## Sources
+[S1] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30

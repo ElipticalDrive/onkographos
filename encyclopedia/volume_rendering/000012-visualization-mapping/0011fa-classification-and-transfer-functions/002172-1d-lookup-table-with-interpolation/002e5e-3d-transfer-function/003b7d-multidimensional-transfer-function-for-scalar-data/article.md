@@ -1,0 +1,152 @@
+# Multidimensional Transfer Function for Scalar Data
+
+Also called: 2D transfer functions, 2D/3D Transfer Function for Scalar Volumes, 3D transfer functions, FT multidimensional, FTAD, Gradient-based Transfer Function, Multi-Dimensional Transfer Functions
+
+## Overview
+Multidimensional transfer functions (MTFs) classify volume rendering samples based on a combination of scalar attributes rather than a single scalar value, allowing the unique isolation of features that overlap in 1D histograms [S2][S3, unofficial][S4, unofficial][S1, unofficial]. By increasing the degrees of freedom in the transfer function domain, MTFs resolve boundary ambiguities where different materials share similar data values but differ in spatial derivatives or local neighborhood properties [S3, unofficial][S5, unofficial]. Unlike 1D transfer functions, which assign opacity based solely on data value, MTFs use gradient magnitude and second directional derivatives to discriminate between homogeneous regions and complex material boundaries [S2][S3, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A scalar volume dataset $f(x,y,z)$ and a multidimensional transfer function mapping $T: \mathbb{R}^n \to \mathbb{R}^4$ (where $n \ge 2$) that maps attribute vectors to color $(r,g,b)$ and opacity $\alpha$ [S3, unofficial].
+*   **Output:** A compositing result of accumulated color and opacity along each ray [G].
+
+**Data Structures**
+To support efficient hardware lookup, pre-computed gradient information is often stored in a texture [S4, unofficial]. A common layout uses a 2D or 3D texture where RGB channels store the gradient vector components $(\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$ and the alpha channel stores the scalar data value (density) $f$ [S4, unofficial]. Alternatively, separate textures may store the gradient magnitude and second derivatives [G].
+
+**Algorithm Steps**
+1.  Pre-compute the gradient vector $\nabla f$ and the Hessian matrix $\mathbf{H}$ for the scalar field $f$ [S2][S3, unofficial]. Store these in textures to avoid expensive on-the-fly calculations [S4, unofficial].
+2.  For each pixel, cast a ray through the volume [G].
+3.  At each sample point along the ray, retrieve or compute the scalar data value $v = f(x,y,z)$, the gradient magnitude $g = \|\nabla f\|$ [S2][S4, unofficial], and the second directional derivative $d_2$ along the gradient direction [S2][S3, unofficial].
+4.  Compute $d_2$ using the Hessian matrix $\mathbf{H}$ and the gradient $\nabla f$: $d_2 = \frac{1}{\|\nabla f\|^2} (\nabla f)^T \mathbf{H} \nabla f$ [S2][S3, unofficial]. The Hessian $\mathbf{H}$ contains the second partial derivatives $\begin{bmatrix} f_{xx} & f_{xy} & f_{xz} \\ f_{yx} & f_{yy} & f_{yz} \\ f_{zx} & f_{zy} & f_{zz} \end{bmatrix}$ [S2][S3, unofficial].
+5.  Use the tuple $(v, g, d_2)$ as coordinates to query the transfer function texture [G]. For a 2D TF, use $(v, g)$; for a 3D TF, use $(v, g, d_2)$ [S2][S3, unofficial].
+6.  Accumulate color and opacity using standard front-to-back compositing equations [G].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def clamp(val, min_val, max_val):
+    return max(min_val, min(max_val, val))
+
+def normalize_to_01(value, data_min, data_max):
+    return clamp((value - data_min) / (data_max - data_min), 0.0, 1.0)
+
+def ray_box_intersection(origin, direction, bounds_min, bounds_max):
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < bounds_min[i] or origin[i] > bounds_max[i]:
+                return None, None
+        else:
+            t1 = (bounds_min[i] - origin[i]) / direction[i]
+            t2 = (bounds_max[i] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+    if t_max < t_min:
+        return None, None
+    return t_min, t_max
+
+def get_hessian_at(pos):
+    # Computes the 3x3 Hessian matrix of second partial derivatives at pos
+    # The exact computation method is not given in the sources. [G]
+    return [[f_xx, f_xy, f_xz], [f_yx, f_yy, f_yz], [f_zx, f_zy, f_zz]]
+
+def render_multidimensional_volume(ray_origin, ray_direction, volume_bounds, data_tex, grad_tex, tf_tex, use_3d_tf, data_min, data_max, grad_min, grad_max, d2_min, d2_max):
+    t_near, t_far = ray_box_intersection(ray_origin, ray_direction, volume_bounds[0], volume_bounds[1])
+    if t_near is None:
+        return (0.0, 0.0, 0.0, 0.0)
+    
+    step_size = 0.01  # Not given in the sources. [G]
+    color = (0.0, 0.0, 0.0, 0.0)
+    t = t_near
+    
+    while t < t_far:
+        pos = ray_origin + ray_direction * t
+        
+        # 1. Retrieve scalar value
+        v = data_tex.sample(pos).a
+        
+        # 2. Retrieve gradient vector
+        grad_vec = grad_tex.sample(pos).rgb
+        
+        # 3. Compute gradient magnitude
+        g = length(grad_vec)
+        
+        # 4. Compute second directional derivative
+        H = get_hessian_at(pos)
+        numerator = dot(grad_vec, dot(H, grad_vec))
+        denominator = g * g
+        if denominator > 1e-6:
+            d2 = numerator / denominator
+        else:
+            d2 = 0.0  # Handle zero gradient case [G]
+            
+        # 5. Lookup Transfer Function
+        v_norm = normalize_to_01(v, data_min, data_max)
+        g_norm = normalize_to_01(g, grad_min, grad_max)
+        d2_norm = normalize_to_01(d2, d2_min, d2_max)
+        
+        if use_3d_tf:
+            tf_color = tf_tex.sample(v_norm, g_norm, d2_norm)
+        else:
+            tf_color = tf_tex.sample(v_norm, g_norm, 0.0)
+            
+        # 6. Composite (front-to-back)
+        alpha = tf_color.a
+        if alpha > 0.0:
+            c = tf_color.rgb
+            color = (color[0] + c[0] * alpha * (1.0 - color[3]),
+                     color[1] + c[1] * alpha * (1.0 - color[3]),
+                     color[2] + c[2] * alpha * (1.0 - color[3]),
+                     color[3] + alpha * (1.0 - color[3]))
+            
+        t += step_size
+        
+    return color
+```
+
+**Parameters**
+*   **Axis 1:** Data value (scalar field value) [S3, unofficial].
+*   **Axis 2:** Gradient magnitude. Defined as $\|\nabla f\|$. Used to differentiate structure with varying opacity/color according to the magnitude of change [S3, unofficial].
+*   **Axis 3:** Second directional derivative along the gradient direction. Computed using the Hessian matrix. Used to disambiguate complex boundary configurations where boundaries overlap in data value and gradient magnitude [S3, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Boundary Overlap:** Material boundaries may share the same ranges of data value and gradient magnitude, causing overlap in the 2D transfer function histogram and erroneous coloring of other boundaries [S2]. This is resolved by adding the second directional derivative [S2][S3, unofficial].
+*   **Subtle Value Differences:** In datasets with subtle value differences (e.g., air cavities inside a blade having slightly higher values than outside air), internal boundaries have lesser edge strength (lower gradient magnitude) than external boundaries [S3, unofficial]. A 1D transfer function renders both; a 2D transfer function can selectively render internal structures by assigning opacity only to low gradient magnitudes [S3, unofficial].
+*   **Zero Gradient:** If $\|\nabla f\| \approx 0$, the second directional derivative formula involves division by zero [S2]. A small epsilon should be added to the denominator to prevent numerical instability [G].
+
+## Subtopics
+
+### [Separable Transfer Function](9014-separable-transfer-function.md)
+A Separable Transfer Function is a technique for composing multidimensional transfer functions as a combination of a 2D transfer function and a 1D transfer function. It solves the problem of managing the high memory cost and interaction complexity of true 3D transfer functions while retaining sufficient expressivity for specific feature types, such as material boundaries. It differs from general 3D transfer functions by decomposing the classification domain, thereby reducing total storage size, but at the cost of being unable to specify classification based on the unique combination of all three data values simultaneously.
+
+### [General Multidimensional Transfer Function Peak Finding](14527-general-multidimensional-transfer-function-peak-finding.md)
+General Multidimensional Transfer Function Peak Finding is a direct volume rendering technique that samples directly at local maxima along the image of the ray in multidimensional transfer function space, rather than at the maxima of the transfer function itself. It solves for the spatial location of isosurfaces corresponding to these peaks to accurately render high-frequency features and noisy data at lower sampling rates. Unlike 1D peak finding, which finds maxima of the transfer function, this method finds local maxima along the approximated image of the ray, which usually do not coincide with the maxima of the N-dimensional function. It sets itself apart from its siblings by using ray marching to reduce the search in transfer space to 1D regardless of the dimension of classification, allowing accurate rendering of noisy data and precise transfer functions at lower sampling costs.
+
+### Occlusion-based Transfer Function
+A method to classify features of similar scalar value but different local neighborhoods by using the occlusion of a voxel as an additional dimension of the transfer function domain [S5, unofficial]. Correa and Ma use the occlusion of a voxel as an additional dimension of the transfer function domain to classify features of similar scalar value, but different local neighborhoods [S5, unofficial].
+
+### 3D Local Structure Filter Classification
+A tissue classification method that employs a multidimensional opacity function, which is a function of 3D derivative features calculated from a scalar volume as well as the volume intensity, to overcome limitations of conventional 1D opacity functions [S6, abstract only]. It calculates 3D derivative features from the scalar volume using 3D local structure filters formulated using the gradient vector and Hessian matrix of the volume intensity function combined with isotropic Gaussian blurring [S6, abstract only]. It defines a multidimensional feature space using the 3D local structure filter responses and the original intensity, then designs multichannel tissue classification strategies within that space based on explicitly defined classification rules [S6, abstract only]. The 3D local structure filters highlight local structures such as edge, sheet, line, and blob, which correspond to tissue boundaries, cortices, vessels, and nodules respectively [S6, abstract only].
+
+## Operating characteristics
+*   **Time Complexity:** Computing the Hessian matrix and second directional derivative is computationally expensive compared to 1D or 2D TFs, as it requires second-order partial derivatives [S2][S3, unofficial]. Pre-computation is recommended to maintain interactive frame rates [S3, unofficial][S4, unofficial].
+*   **Memory Complexity:** Storing pre-computed gradients and Hessian components increases memory usage [S4, unofficial]. Storing gradients in the data texture's RGB channels and data value in Alpha is a trade-off between memory and on-the-fly calculation cost [S4, unofficial].
+*   **Strengths:** Can uniquely isolate complex material boundaries that overlap in 1D or 2D spaces [S2][S3, unofficial]. Can reveal hidden boundaries (e.g., dentin-enamel) by applying lower opacity for non-zero second derivatives [S3, unofficial]. Can selectively render internal structures by assigning opacity only to low gradient magnitudes [S3, unofficial].
+*   **Limitations:** Adding dimensions increases the degrees of freedom, making transfer function specification difficult and prone to trial-and-error [S2][S3, unofficial]. High-dimensional transfer functions (FTAD) are even more complex to specify [S1, unofficial].
+*   **When to use:** When 1D and 2D transfer functions fail to disambiguate material boundaries due to overlapping data values and gradient magnitudes [S2][S3, unofficial]. When subtle surface properties or internal structures need to be highlighted [S3, unofficial].
+*   **When not to use:** When computational resources are severely limited and pre-computation is not feasible [S4, unofficial]. When the dataset does not have complex boundary overlaps that require higher-dimensional discrimination [S3, unofficial].
+
+## Background
+*   **Origin:** 2D transfer functions using gradient magnitude were introduced by Levoy in 1988 [S3, unofficial].
+*   **Development:** The concept was extended to 3D transfer functions using data value, gradient magnitude, and second directional derivative to resolve boundary ambiguities [S3, unofficial]. The term "High-Dimensional Transfer Functions" (FTAD) is used when more than three attributes are combined [S1, unofficial].
+*   **Usage:** Used in medical imaging (e.g., human tooth CT scans, MR brain scans) to isolate specific material boundaries like dentin-enamel or gray matter [S2][S3, unofficial][S5, unofficial]. Also used in industrial and meteorological applications [S3, unofficial].
+
+## Sources
+[S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)
+[S2] Multidimensional Transfer Functions for Interactive Volume ..., https://www.academia.edu/5403340/Multidimensional_Transfer_Functions_for_Interactive_Volume_Rendering, fetched 2026-11-01
+[S3] https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, fetched 2026-11-01 (unofficial)
+[S4] Volume Rendering in Unity3D - Speaker Deck, https://speakerdeck.com/mlavik1/volume-rendering-in-unity3d, fetched 2026-10-30 (unofficial)
+[S5] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)
+[S6] Tissue classification based on 3D local intensity structures for volume rendering, https://doi.org/10.1109/2945.856997, fetched 2026-10-26 (abstract only)

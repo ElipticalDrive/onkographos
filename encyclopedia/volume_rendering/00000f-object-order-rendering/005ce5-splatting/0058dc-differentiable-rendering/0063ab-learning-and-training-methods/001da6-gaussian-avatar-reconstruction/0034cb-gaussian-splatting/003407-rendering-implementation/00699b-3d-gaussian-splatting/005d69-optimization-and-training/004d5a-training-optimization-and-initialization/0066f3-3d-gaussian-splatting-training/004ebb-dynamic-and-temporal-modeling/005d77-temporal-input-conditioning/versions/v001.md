@@ -1,0 +1,52 @@
+# Temporal Input Conditioning
+
+Also called: Time-conditioned rendering, Dynamic scene parameterization
+
+## Overview
+Temporal Input Conditioning is a family of techniques that parameterize scene attributes—such as position, rotation, opacity, density, or color—as explicit functions of time $t$ to enable the synthesis of novel views for dynamic scenes [S1]. It solves the problem of representing non-rigid motion and temporal evolution in volumetric data without requiring ground-truth geometry or multi-view stereo data at every instant [S1]. It sets itself apart from naive time-extended NeRFs by decomposing the representation into a static canonical space and a learned deformation field, thereby exploiting temporal redundancy that direct 6D mappings fail to capture [S1]. Unlike [DaReNeRF](13782-darenerf.md), which focuses on specific direction-aware wavelet decompositions, this family establishes the foundational canonical-space paradigm for dynamic neural rendering [S1].
+
+## Shared principles
+The family shares the following core mechanisms for handling temporal dynamics:
+
+1.  **Temporal Parameterization:** Attributes that vary with time, such as position $\mathbf{c}$, rotation $\mathbf{q}$, opacity $\alpha$, density $\sigma$, or color $\mathbf{c}$, are expressed as functions of time $t$ [S1]. Common functional forms include:
+    *   **Polynomial/Linear:** $\mathbf{q}(t) = \mathbf{q}_0 + \mathbf{m}t$ .
+    *   **Fourier Series:** $\mathbf{c}(t) = \mathbf{c}_0 + \sum_{k=0}^{K} (\mathbf{a}_k \cos(k \omega t) + \mathbf{b}_k \sin(k \omega t))$ .
+    *   **Neural Deformation:** A neural network $\Psi_t(x, t)$ predicts a displacement $\Delta x$ to warp dynamic coordinates to a canonical space [S1].
+    *   **Implicit Fields:** Time-dependent NeRFs map $(x, d, t)$ to density and color, often using local neighborhoods of frames .
+
+2.  **Canonical Space Mapping:** Many methods (e.g., D-NeRF, Nerfies) introduce a canonical configuration, typically at $t=0$, where the scene is static. A deformation network maps dynamic coordinates $x$ at time $t$ to canonical coordinates $x'$:
+    $$ x' = x + \Psi_t(x, t) $$
+    The radiance field is then queried in the canonical space: $[\sigma, c] = \Psi_x(x', d)$ [S1].
+
+3.  **Rendering with Dynamics:** The rendering process integrates time-dependent attributes. For Gaussian-based methods, position and rotation are computed for the specific time $t$ of the camera ray before rasterization . For NeRF-based methods, density $\sigma$ and color $c$ are queried at the deformed or time-conditioned point [S1].
+
+4.  **Loss Functions:** Optimization typically minimizes photometric loss (L1 or LPIPS) between rendered and ground truth images [S1]. Additional constraints often include:
+    *   **Temporal Smoothness:** Penalizing abrupt changes in attributes between adjacent frames [S1].
+    *   **Rigid/Flow Constraints:** Using optical flow or KNN rigid loss to guide deformation [S1].
+    *   **Regularization:** Elastic or background regularization to prevent overfitting in deformation fields .
+
+## Subtopics
+
+### [D-NeRF](8660-d-nerf.md)
+D-NeRF synthesizes novel views at arbitrary time instances for dynamic scenes with complex non-rigid geometries, optimizing a deformable volumetric function from a sparse set of monocular input images without ground-truth geometry or multi-view stereo data. It sets itself apart from naive time-extended NeRFs by decomposing the representation into a static canonical space and a learned deformation field, thereby exploiting temporal redundancy that direct 6D mappings fail to capture. Unlike [DaReNeRF](13782-darenerf.md), which focuses on specific deformation regularizations, D-NeRF establishes the foundational canonical-space paradigm for dynamic neural rendering.
+
+### [DaReNeRF](13782-darenerf.md)
+DaReNeRF is a method for novel view synthesis of dynamic scenes that employs a direction-aware representation to capture scene dynamics from six distinct orientations. It addresses the shift variance and direction ambiguity (checkerboard artifacts) inherent in traditional 2D Discrete Wavelet Transforms (DWT) by utilizing the Dual-Tree Complex Wavelet Transform (DTCWT). Unlike standard plane-based decompositions, DaReNeRF models features from six different directions to eliminate ghosting artifacts around moving objects.
+
+### Time-dependent NeRF
+#### definition
+- [S1] A NeRF variant that represents scene geometry and appearance at each specific time step t, trained using neighboring frames around time t, to capture local scene geometry and motion.
+#### step
+- [S1] Represent scene appearance using mapping function c = ϕc(x, d) taking point x ∈ R3 and viewing direction d ∈ R2 to predict color c ∈ R3.
+- [S1] Represent scene geometry via mapping function s = ϕg(x) which maps a 3D point x to a signed distance value s ∈ R.
+- [S1] For a camera ray r(h) = o + hd, sample K 3D points {xi(r) = r(hi) | i = 1, ..., K, hi < hi+1}.
+- [S1] Use the time-dependent NeRF to compute SDF flows, which are used to constrain the learning of continuous camera motion via the linear relationship between SDF flow and scene flow.
+#### formula
+- [S1] Convert signed distance si to density σi using: σi = max((Φ(si) - Φ(si+1))/Φ(si), 0), where Φ(s) = 1/(1+e^(1-γs)), γ is a learnable parameter, and i is the point index.
+- [S1] Render pixel color Ĉ(r) via volume rendering: Ĉ(r) = Σ(i=1 to K) Li σi ci, where Li = Π(j=1 to i-1) (1 - σj) is the accumulated transmittance.
+
+## Background
+The concept of temporal input conditioning in neural rendering originated with D-NeRF, which introduced the canonical space paradigm for dynamic scenes [S1]. This approach allows for the decomposition of dynamic scenes into static geometry and time-varying deformations, addressing the limitations of direct 6D mappings [S1]. Subsequent works like DaReNeRF have refined this by introducing direction-aware representations to mitigate artifacts such as shift variance and checkerboard effects [S1]. More recent developments, such as the time-dependent NeRF described in [S1], integrate these concepts with continuous camera motion optimization, using local temporal neighborhoods to constrain SDF flows and improve pose estimation [S1].
+
+## Sources
+[S1] Joint Optimization of Neural Radiance Fields and Continuous Camera Motion from a Monocular Video, https://doi.org/10.1109/cvpr52734.2025.01071, fetched 2026-10-26

@@ -1,0 +1,4370 @@
+## About
+
+This is a WebGPU implementation of the digital differential analyzer (DDA) voxel raymarching algorithm described by Amanatides and Woo in their paper *[A Fast Voxel Traversal Algorithm for Ray Tracing](http://www.cse.yorku.ca/~amana/research/grid.pdf)*, accelerated with a dense octree. You can run the app in browser [at this link](https://webgpu-voxel-raymarching.vercel.app/).
+
+## Features
+- Multiple voxel colors and materials, including matte, emissive, metallic, mirror, and eraser
+- A dense octree structure for accelerated raymarching
+- World interaction with a flexible brush tool (control shape, color, material, size)
+- An accumulation denoiser which uses a velocity texture for reprojection
+- Fun visual filters (normals, positions, marches, flat colors, depth, toon)
+- Depth based smearing prevention
+- World and lighting customization using sliders
+
+## Screenshots
+
+<img src="./screenshots/1.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/2.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/3.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/4.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/5.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/6.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/7.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/8.webp?raw=true"  width="1920" height="1080">
+<img src="./screenshots/9.webp?raw=true"  width="1920" height="1080">
+
+## Controls
+- WASD to move camera
+- Hold right click and move mouse to rotate camera 
+- Left click to brush
+- Space to ascend
+- Shift to descend
+
+## Running Locally
+You can run the app now [at this link](https://webgpu-voxel-raymarching.vercel.app/), but if you want to run it locally then you will need Node.js installed on your computer. In the project directory simply run `npm install` to install packages, and then `npx vite` to start the app. 
+
+## Implementation Details
+Voxel data is stored in a 3D texture. Each voxel is 8 bits, 4 bits for color and 4 bits for type. 4 voxels are packed into each single 32 bit texel on the 3D texture. The octree is also stored as a 3D texture. I experimented with storing the octree data in a linear buffer using morton curve, but found that using a 3D texture was significantly faster for ray traversal, likely because graphics hardware is optimized for spatially local texture access. The raymarcher first marches through the octree texture and once it hits a leaf, will switch to the voxel texture. Lighting is a standard path-tracing implementation where each bounce updates throughput, samples a new direction, and accumulates emitted or reflected light.
+
+## Performance
+A powerful GPU is required to run this app at a smooth framerate. An RTX 3090 can run this at 4K and averages around 120fps, but sometimes dips to 60 fps or lower depending on scene complexity. If your GPU is struggling, I would recommend lowering the render scale or making your browser window smaller. Larger worlds also affect performance negatively.
+
+## Future Plans
+
+Time permitting, I would like to do the following:
+- Convert the dense octree into a DAG as described by Laine and Karras in their paper *[Efficient Sparse Voxel Octrees](https://research.nvidia.com/sites/default/files/pubs/2010-02_Efficient-Sparse-Voxel/laine2010i3d_paper.pdf)*
+- Add a per pixel bounce cache
+- Add transparent and textured voxels
+
+### vite.config.js
+```
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  
+  esbuild: {
+    target: 'esnext',
+    supported: {
+      'top-level-await': true
+    }
+  },
+
+  build: {
+    modulePreload: {
+      polyfill: false,
+    },
+    target: 'esnext',
+  }
+});
+```
+
+### shaders/brush.wgsl.js
+```
+export default  /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct BrushData {
+    material: u32,
+    color: u32,
+    brushSize: u32,
+    brushShape: u32, // Sphere = 0, Cube = 1, Pyramid = 2, Cylinder = 3, Cone = 4
+    cursorPos: vec3<f32>,
+    padding: u32
+};
+
+struct SceneData {
+    screenWidth: u32,
+    screenHeight: u32,
+    worldWidth: u32,
+    worldHeight: u32,
+    octantSize: u32,
+    octreeHighestLevel: u32,
+    tonemap: u32,
+    rayBounces: u32,
+    screenFilter: u32,
+    sunEnabled: u32,
+    antiSmearEnabled: u32,
+    mousePosX: u32,
+    mousePosY: u32,
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    sunIntensity: f32,
+    time: f32,
+    denoiseStrength: f32
+};
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var voxels: texture_storage_3d<r32uint, read_write>;
+@group(0) @binding(1) var octree: texture_3d<u32>;
+@group(0) @binding(2) var <uniform> sceneData: SceneData;
+@group(0) @binding(4) var <storage, read_write> brushData: BrushData;
+
+///////////
+// Funcs //
+///////////
+
+// Sets the 8 bit voxel value at the given position
+// All voxel data stored in voxels 3D texture
+fn SetVoxel(voxelPos: vec3<u32>, voxelType: u32) {
+    
+    // Each 32 bit uint contains data for 4 voxels
+    // coords below are (x,z) - y position is unchanged
+    // 00000000 00000000 00000000 00000000
+    // 1,1         1,0      0,1      0,0
+    
+    var texelPos: vec3<u32> = vec3<u32>(voxelPos.x >> 1, voxelPos.y, voxelPos.z >> 1);
+    var packedVoxel: u32 = textureLoad(voxels, texelPos).r;
+
+    var mask: u32 = 0xFF;
+    var xOdd: u32 = voxelPos.x & 0x1;
+    var zOdd: u32 = (voxelPos.z & 0x1) << 1;
+    var shiftCount = (xOdd | zOdd) * 8;
+
+    mask = mask << shiftCount;
+    mask = ~mask;
+
+    packedVoxel &= mask;
+    packedVoxel |= voxelType << shiftCount;
+
+    textureStore(voxels, texelPos, vec4<u32>(packedVoxel, 0, 0, 0));
+}
+
+////////////
+// Kernel //
+////////////
+
+@compute @workgroup_size(8, 4, 8)
+fn ComputeMain(@builtin(global_invocation_id) texelPos: vec3<u32>) {
+    
+    // Each voxel gets 8 bits, first 4 bits are color, second 4 bits are material
+    var cursorPos: vec3<f32> = brushData.cursorPos;
+
+    if (cursorPos.x < 0) {return;}
+    let cursorPosInt: vec3<u32> = vec3<u32>(cursorPos);
+    var brushSize: u32 = brushData.brushSize;
+    let halfBrushSize: f32 = f32(brushSize) / 2.0;
+    var voxelData = (u32(brushData.color) << 4) | u32(brushData.material);
+    var voxelPos: vec3<u32> = vec3<u32>(texelPos.x * 2, texelPos.y, texelPos.z * 2);
+
+    // Each thread handles the 4 voxels contained in its texel to avoid race conditions
+    for (var x: u32 = 0; x < 2; x++) {
+        for (var z: u32 = 0; z < 2; z++) {
+
+            var offsetVoxelPos: vec3<u32> = vec3<u32>(voxelPos.x + x, voxelPos.y, voxelPos.z + z);
+
+            // Shapes don't always work well when brush size is 1, add check here for that
+            if (brushSize == 1u) {
+                if (offsetVoxelPos.x == cursorPosInt.x && offsetVoxelPos.y == cursorPosInt.y && offsetVoxelPos.z == cursorPosInt.z) {
+                    SetVoxel(vec3<u32>(offsetVoxelPos), voxelData);
+                    return;
+                }
+            }
+
+            // Sphere shape
+            if (brushData.brushShape == 0) {
+                
+                if (distance(vec3<f32>(cursorPos), vec3<f32>(offsetVoxelPos)) > f32(brushSize / 2)) {continue;}
+                
+                SetVoxel(vec3<u32>(offsetVoxelPos), voxelData);
+            }
+
+            // Cube shape
+            else if (brushData.brushShape == 1) {
+                
+                // Compute inclusive bounds
+                let minPos: vec3<u32> = vec3<u32>(
+                    max(0u, cursorPosInt.x - brushSize / 2),
+                    max(0u, cursorPosInt.y - brushSize / 2),
+                    max(0u, cursorPosInt.z - brushSize / 2)
+                );
+                let maxPos: vec3<u32> = vec3<u32>(
+                    cursorPosInt.x + brushSize / 2 - 1,
+                    cursorPosInt.y + brushSize / 2 - 1,
+                    cursorPosInt.z + brushSize / 2 - 1
+                );
+
+                // Check if voxel is inside bounds
+                if (any(offsetVoxelPos < minPos) || any(offsetVoxelPos > maxPos)) {
+                    continue;
+                }
+
+                SetVoxel(offsetVoxelPos, voxelData);
+            }
+
+            // Pyramid shape
+            else if (brushData.brushShape == 2) {
+                let halfBrushSize: f32 = f32(brushSize) / 2.0;
+                let voxelPosF: vec3<f32> = vec3<f32>(offsetVoxelPos);
+
+                let yDist: f32 = abs(voxelPosF.y - cursorPos.y);
+                if (yDist > halfBrushSize) {
+                    continue;
+                }
+
+                let layerHalfSize: f32 = halfBrushSize - yDist;
+                let xDist: f32 = abs(voxelPosF.x - cursorPos.x);
+                let zDist: f32 = abs(voxelPosF.z - cursorPos.z);
+
+                if (xDist > layerHalfSize || zDist > layerHalfSize) {
+                    continue;
+                }
+
+                SetVoxel(offsetVoxelPos, voxelData);
+            }
+
+
+            // Cylinder shape
+            else if (brushData.brushShape == 3) {
+                let halfHeight: f32 = f32(brushSize) / 2.0;
+                let radius: f32 = halfHeight;
+
+                let voxelPosF: vec3<f32> = vec3<f32>(offsetVoxelPos);
+
+                let yDist: f32 = abs(voxelPosF.y - cursorPos.y);
+                if (yDist > halfHeight) {
+                    continue;
+                }
+
+                let dx: f32 = voxelPosF.x - cursorPos.x;
+                let dz: f32 = voxelPosF.z - cursorPos.z;
+                let distXZ: f32 = sqrt(dx * dx + dz * dz);
+
+                if (distXZ > radius) {
+                    continue;
+                }
+
+                SetVoxel(offsetVoxelPos, voxelData);
+            }
+
+
+            // Cone shape
+            else if (brushData.brushShape == 4) {
+                let height: f32 = f32(brushSize);
+                let slopeFactor: f32 = 0.5;
+                let baseRadius: f32 = height * slopeFactor;
+
+                let voxelPosF: vec3<f32> = vec3<f32>(offsetVoxelPos);
+
+                let yDiff: f32 = voxelPosF.y - cursorPos.y;
+                if (yDiff < 0.0 || yDiff > height) {
+                    continue;
+                }
+
+                let radiusAtY: f32 = baseRadius * (1.0 - (yDiff / height));
+                let dx: f32 = voxelPosF.x - cursorPos.x;
+                let dz: f32 = voxelPosF.z - cursorPos.z;
+                let distXZ: f32 = sqrt(dx * dx + dz * dz);
+
+                if (distXZ > radiusAtY) {
+                    continue;
+                }
+
+                SetVoxel(offsetVoxelPos, voxelData);
+            }
+        }
+    }
+}
+`
+```
+
+### shaders/clearOctree.wgsl.js
+```
+export default /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct SceneData {
+    screenWidth: u32,
+    screenHeight: u32,
+    worldWidth: u32,
+    worldHeight: u32,
+    octantSize: u32,
+    octreeHighestLevel: u32,
+    tonemap: u32,
+    rayBounces: u32,
+    screenFilter: u32,
+    sunEnabled: u32,
+    antiSmearEnabled: u32,
+    mousePosX: u32,
+    mousePosY: u32,
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    sunIntensity: f32,
+    time: f32,
+    denoiseStrength: f32
+};
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var voxels: texture_3d<u32>;
+@group(0) @binding(1) var<storage, read_write> octreeBuffer: array<u32>;
+@group(0) @binding(2) var<uniform> sceneData: SceneData;
+
+////////////
+// Kernel //
+////////////
+
+@compute @workgroup_size(256, 1, 1)
+fn ComputeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+    octreeBuffer[id.x] = 0;
+}
+`
+```
+
+### shaders/cursor.wgsl.js
+```
+export default  /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct BrushData {
+    material: u32,
+    color: u32,
+    brushSize: u32,
+    brushShape: u32, // Sphere = 0, Cube = 1, Pyramid = 2, Cylinder = 3, Cone = 4
+    cursorPos: vec3<f32>,
+    padding: u32
+};
+
+struct SceneData {
+    screenWidth: u32,
+    screenHeight: u32,
+    worldWidth: u32,
+    worldHeight: u32,
+    octantSize: u32,
+    octreeHighestLevel: u32,
+    tonemap: u32,
+    rayBounces: u32,
+    screenFilter: u32,
+    sunEnabled: u32,
+    antiSmearEnabled: u32,
+    mousePosX: u32,
+    mousePosY: u32,
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    sunIntensity: f32,
+    time: f32,
+    denoiseStrength: f32
+};
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var <uniform> sceneData: SceneData;
+@group(0) @binding(1) var <storage, read_write> brushData: BrushData;
+@group(0) @binding(2) var positionTexture: texture_storage_2d<rgba16float, read>;
+
+////////////
+// Kernel //
+////////////
+
+@compute @workgroup_size(1, 1)
+fn ComputeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+    brushData.cursorPos = textureLoad(positionTexture, vec2<u32>(sceneData.screenWidth - sceneData.mousePosX, sceneData.mousePosY)).rgb;
+}
+`
+```
+
+### shaders/generateOctree.wgsl.js
+```
+export default /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct SceneData {
+    screenWidth: u32,
+    screenHeight: u32,
+    worldWidth: u32,
+    worldHeight: u32,
+    octantSize: u32,
+    octreeHighestLevel: u32,
+    tonemap: u32,
+    rayBounces: u32,
+    screenFilter: u32,
+    sunEnabled: u32,
+    antiSmearEnabled: u32,
+    mousePosX: u32,
+    mousePosY: u32,
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    sunIntensity: f32,
+    time: f32,
+    denoiseStrength: f32
+};
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var voxels: texture_3d<u32>;
+@group(0) @binding(1) var<storage, read_write> octreeBuffer: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> sceneData: SceneData;
+
+///////////
+// Funcs //
+///////////
+
+// Gets the 8 bit voxel value at the given position
+fn GetVoxel(voxelPos: vec3<u32>) -> u32 {
+    
+    // Each 32 bit uint contains data for 4 voxels
+    // coords below are (x,z), y position is unchanged
+    // 00000000 00000000 00000000 00000000
+    // 1,1         1,0      0,1      0,0
+    
+    var shiftCount: u32 = (voxelPos.x & 0x1) | ((voxelPos.z & 0x1) << 1);
+    var mask: u32 = 255u << (shiftCount << 3u);
+    
+    var packedVoxel: u32 = textureLoad(voxels, vec3<u32>(voxelPos.x >> 1, voxelPos.y, voxelPos.z  >> 1), 0).r;
+    packedVoxel &= mask;
+    return packedVoxel >> (shiftCount << 3u);
+}
+
+////////////
+// Kernel //
+////////////
+
+@compute @workgroup_size(8, 4, 8)
+fn ComputeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (GetVoxel(id) == 0u) {
+        return;
+    }
+
+    let baseDim = sceneData.worldWidth / sceneData.octantSize;
+    let texWidth = 256u;
+    let texHeight = baseDim;
+
+    var level = 0u;
+    var octSize = sceneData.octantSize;
+
+    // Traverse levels
+    loop {
+        let octantPos = id / octSize;
+        let dimAtLevel = baseDim >> level;
+
+        // Early out if out of bounds
+        if (any(octantPos >= vec3<u32>(dimAtLevel))) {
+            break;
+        }
+
+        let zOffset = sceneData.worldWidth / sceneData.octantSize * level;
+        let texZ = octantPos.z + zOffset;
+
+        let linearIndex = (texZ * texHeight + octantPos.y) * texWidth + octantPos.x;
+
+        let wordIndex = linearIndex / 4u;
+        let byteInWord = linearIndex % 4u;
+        let bitOffset = byteInWord * 8u;
+
+        atomicOr(&octreeBuffer[wordIndex], 1u << bitOffset);
+
+        // Go to next mip level
+        level += 1u;
+        octSize *= 2u;
+    }
+}
+`
+```
+
+### shaders/postProcessing.wgsl.js
+```
+export default /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct SceneData {
+    screenWidth: u32,
+    screenHeight: u32,
+    worldWidth: u32,
+    worldHeight: u32,
+    octantSize: u32,
+    octreeHighestLevel: u32,
+    tonemap: u32,
+    rayBounces: u32,
+    screenFilter: u32,
+    sunEnabled: u32,
+    antiSmearEnabled: u32,
+    mousePosX: u32,
+    mousePosY: u32,
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    sunIntensity: f32,
+    time: f32,
+    denoiseStrength: f32
+};
+
+struct CameraData {
+    position: vec3f,
+    fov: f32,
+    rotation: vec3f,
+    aspectRatio: f32,
+    prevPosition: vec3f,
+    padding1: f32,
+    prevRotation: vec3f,
+    padding2: f32
+};
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var textureSampler: sampler;
+@group(0) @binding(1) var srcColorTexture: texture_2d<f32>;
+@group(0) @binding(2) var dstColorTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var velocityTexture: texture_2d<f32>;
+@group(0) @binding(4) var currentDepthTexture: texture_2d<f32>;
+@group(0) @binding(5) var previousDepthTexture: texture_2d<f32>;
+@group(0) @binding(6) var <uniform> sceneData: SceneData;
+@group(0) @binding(7) var <uniform> cameraData: CameraData;
+@group(0) @binding(8) var accumBuffer: texture_2d<f32>;
+
+////////////
+// Kernel //
+////////////
+
+@compute @workgroup_size(16, 16, 1)
+fn ComputeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+    
+    var pixelPos: vec2<u32> = id.xy;
+    if (pixelPos.x >= sceneData.screenWidth || pixelPos.y >= sceneData.screenHeight) { return; }
+    
+    var pixelVelocity: vec2<f32> = textureLoad(velocityTexture, pixelPos, 0u).rg;
+    var pixelColor = textureLoad(srcColorTexture, pixelPos, 0u);
+    var adjustedPixelPos: vec2<f32> = vec2<f32>(pixelPos) - pixelVelocity.xy;
+
+    var currentPixelDepth: f32;
+    var previousPixelDepth: f32;   
+
+    // If adjusted sample position out of bounds, just use current pixel color
+    // Using 2.0 here because using 0 or 1 causes some artifacts
+    if (adjustedPixelPos.x <= 2.0 || adjustedPixelPos.y <= 2.0 ||
+        adjustedPixelPos.x >= f32(sceneData.screenWidth) || adjustedPixelPos.y >= f32(sceneData.screenHeight)) {
+        textureStore(dstColorTexture, pixelPos, pixelColor);
+        return;
+    }
+
+    // Otherwise, sample from accumBuffer
+    var uv = vec2<f32>(pixelPos) / vec2<f32>(f32(sceneData.screenWidth - 1u), f32(sceneData.screenHeight - 1u));
+    var adjustedUV = vec2<f32>(adjustedPixelPos) / vec2<f32>(f32(sceneData.screenWidth - 1u), f32(sceneData.screenHeight - 1u));
+    adjustedUV = clamp(adjustedUV, vec2<f32>(0.0), vec2<f32>(1.0));
+
+    var accumCol: vec4<f32> = textureSampleLevel(accumBuffer, textureSampler, adjustedUV, 0.0);   
+
+    // If anti-smear enabled, cull old accumulated pixels with significant depth
+    if (sceneData.antiSmearEnabled == 1) {
+        currentPixelDepth =  textureSampleLevel(currentDepthTexture, textureSampler, uv, 0.0).r;
+        previousPixelDepth = textureSampleLevel(previousDepthTexture, textureSampler, adjustedUV, 0.0).r;
+
+        var depthDiff = abs(previousPixelDepth - currentPixelDepth);
+
+        if (depthDiff > 4.0) {
+
+            // Bias new pixel strength to prefer bright pixels
+            let brightness = dot(pixelColor.rgb, vec3<f32>(0.299, 0.587, 0.114));
+            textureStore(dstColorTexture, pixelPos, mix(pixelColor, accumCol, brightness));
+        } else {
+            textureStore(dstColorTexture, pixelPos, mix(pixelColor, accumCol, sceneData.denoiseStrength));
+        }  
+        return;
+    }
+
+    // Otherwise, just mix pixelColor and accumCol according to user specified denoise strength
+    textureStore(dstColorTexture, pixelPos, mix(pixelColor, accumCol, sceneData.denoiseStrength));
+}
+`
+```
+
+### shaders/quad.wgsl.js
+```
+export default  /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct VertexOutput {
+    @builtin(position) Position: vec4<f32>,
+    @location(0) TexCoord: vec2<f32>,
+}
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var textureSampler: sampler;
+@group(0) @binding(1) var colorTexture: texture_2d<f32>;
+
+////////////
+// Vertex //
+////////////
+
+@vertex
+fn VertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    
+    let positions = array<vec2<f32>, 6>(
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(1.0, -1.0),
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(-1.0, 1.0),
+    );
+
+    let texCoords = array<vec2<f32>, 6>(
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 0.0),
+    );
+
+    var output: VertexOutput;
+    output.Position = vec4<f32>(positions[vertexIndex], 0.0, 1.0);
+    output.TexCoord = vec2<f32>(1.0 - texCoords[vertexIndex].x, 1.0 - texCoords[vertexIndex].y);
+    return output;
+    
+}
+
+//////////////
+// Fragment //
+//////////////
+
+@fragment
+fn FragmentMain(@location(0) TexCoord: vec2<f32>) -> @location(0) vec4<f32> {
+    return textureSample(colorTexture, textureSampler, TexCoord);
+}
+`
+```
+
+### shaders/raymarch.wgsl.js
+```
+export default /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct SceneData {
+    screenWidth: u32,
+    screenHeight: u32,
+    worldWidth: u32,
+    worldHeight: u32,
+    octantSize: u32,
+    octreeHighestLevel: u32,
+    tonemap: u32,
+    rayBounces: u32,
+    screenFilter: u32,
+    sunEnabled: u32,
+    antiSmearEnabled: u32,
+    mousePosX: u32,
+    mousePosY: u32,
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    sunIntensity: f32,
+    time: f32,
+    denoiseStrength: f32
+};
+
+struct CameraData {
+    position: vec3f,
+    fov: f32,
+    rotation: vec3f,
+    aspectRatio: f32,
+    prevPosition: vec3f,
+    padding1: f32,
+    prevRotation: vec3f,
+    padding2: f32
+};
+
+struct BrushData {
+    material: u32,
+    color: u32,
+    brushSize: u32,
+    brushShape: u32, // Sphere = 0, Cube = 1, Pyramid = 2, Cylinder = 3, Cone = 4
+    cursorPos: vec3<f32>,
+    padding: u32
+};
+
+struct RayHit {
+    status: u32,
+    padding1: u32,
+    position: vec3f,
+    voxelData: u32,
+    iterations: u32,
+    uv: vec2f,
+    padding2: vec2<u32>,
+    normal: vec3f,
+    padding3: u32,
+    worldUV: vec2f,
+    padding4: vec2<u32>,
+};
+
+struct Material {
+    specular: f32,
+    emissive: bool,
+};
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var colorTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(1) var velocityTexture: texture_storage_2d<rg32float, write>;
+@group(0) @binding(2) var currentDepthTexture: texture_storage_2d<r32float, read_write>;
+@group(0) @binding(3) var previousDeptTexture: texture_storage_2d<r32float, read_write>;
+@group(0) @binding(4) var positionTexture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var voxels: texture_3d<u32>;
+@group(0) @binding(6) var octree: texture_3d<u32>;
+@group(0) @binding(7) var <uniform> sceneData: SceneData;
+@group(0) @binding(8) var <uniform> cameraData: CameraData;
+@group(0) @binding(9) var <storage, read_write> brushData: BrushData;
+@group(0) @binding(10) var <storage, read_write> octreeBuffer: array<u32>;
+
+///////////////
+// Constants //
+///////////////
+
+const DAY_SKY_COLOR = vec3<f32>(1.0, 1.0, 1.0);
+const DAY_GROUND_COLOR = vec3<f32>(0.5, 0.5, 0.9);
+
+const NIGHT_SKY_COLOR = vec3<f32>(0.0, 0.0, 0.0);
+const NIGHT_GROUND_COLOR = vec3<f32>(0.05, 0.00, 0.00);
+
+const SUN_COLOR = vec3<f32>(1.0, 0.95, 0.85); // Warm sunlight color
+
+const MATERIALS: array<Material, 5> = array<Material, 5>(
+    
+    //    SPECULAR    EMISSIVE
+    Material(0.0,     false),
+    Material(0.0,     false),
+    Material(0.0,      true),
+    Material(.9,      false),
+    Material(1.0,     false),
+);
+
+const COLORS: array<vec3<f32>, 16> = array<vec3<f32>, 16>(
+    vec3<f32>(1.0, 1.0, 1.0),       // White (#FFFFFF)
+    vec3<f32>(0.502, 0.502, 0.502), // Gray (#808080)
+    vec3<f32>(0.067, 0.067, 0.067), // Black (#111111)
+    vec3<f32>(0.427, 0.298, 0.255), // Medium Brown (#6D4C41)
+    vec3<f32>(1.0, 0.0, 0.0),       // Red (#FF0000)
+    vec3<f32>(1.0, 0.498, 0.0),     // Orange (#FF7F00)
+    vec3<f32>(1.0, 1.0, 0.0),       // Yellow (#FFFF00)
+    vec3<f32>(0.435, 0.749, 0.290), // Neutral Green (#6FBF4A)
+    vec3<f32>(0.0, 1.0, 0.498),     // Turquoise (#00FF7F)
+    vec3<f32>(0.0, 0.451, 0.173),   // Neutral Green (#00732CFF)
+    vec3<f32>(0.0, 1.0, 1.0),       // Cyan (#00FFFF)
+    vec3<f32>(0.0, 0.498, 1.0),     // Sky Blue (#007FFF)
+    vec3<f32>(0.0, 0.0, 1.0),       // Blue (#0000FF)
+    vec3<f32>(0.498, 0.0, 1.0),     // Indigo (#7F00FF)
+    vec3<f32>(0.749, 0.0, 1.0),     // Purple (#BF00FF)
+    vec3<f32>(1.0, 0.0, 0.498)      // Pink (#FF007F)
+);
+
+
+
+///////////
+// Noise //
+///////////
+
+fn Hash2D(x: vec2f) -> f32 {
+    let xhash = cos(x.x * 37.0);
+    let yhash = cos(x.y * 57.0);
+    return fract(415.92653 * (xhash + yhash));
+}
+
+fn Hash(Seed: f32) -> f32 {
+    return fract(sin(Seed) * 43758.5453);
+}
+
+fn Rand(vector: vec3<f32>) -> f32 {
+    // A simple 3D hash function using sin and dot
+    let dot_product = dot(vector, vec3<f32>(12.9898, 78.233, 37.719));
+    return fract(sin(dot_product) * 43758.5453123);
+}
+
+fn RandomDirection(seed: vec3<f32>) -> vec3<f32> {
+    // Generate two independent random numbers from the seed
+    let u = Rand(seed + vec3<f32>(1.0, 0.0, 0.0));
+    let v = Rand(seed + vec3<f32>(0.0, 1.0, 0.0));
+
+    // Convert to spherical coordinates
+    let theta = 2.0 * 3.14159265 * u;
+    let phi = acos(2.0 * v - 1.0);
+
+    // Spherical to Cartesian
+    let x = sin(phi) * cos(theta);
+    let y = sin(phi) * sin(theta);
+    let z = cos(phi);
+
+    return vec3<f32>(x, y, z);
+}
+
+////////////////////////
+// Reading World Data //
+////////////////////////
+
+// Gets the 8 bit voxel value at the given position
+fn GetVoxel(voxelPos: vec3<u32>) -> u32 {
+    
+    // Each 32 bit uint contains data for 4 voxels
+    // coords below are (x,z), y position is unchanged
+    // 00000000 00000000 00000000 00000000
+    // 1,1         1,0      0,1      0,0
+    
+    var shiftCount: u32 = (voxelPos.x & 0x1) | ((voxelPos.z & 0x1) << 1);
+    var mask: u32 = 255u << (shiftCount << 3u);
+    
+    var packedVoxel: u32 = textureLoad(voxels, vec3<u32>(voxelPos.x >> 1, voxelPos.y, voxelPos.z  >> 1), 0).r;
+    packedVoxel &= mask;
+    return packedVoxel >> (shiftCount << 3u);
+}
+
+// Gets the octree value at a given octant
+// This is used to march through levels 0 - 5
+fn GetOctant(octantPos: vec3<u32>, level: u32) -> bool {
+    // let baseDim = sceneData.worldWidth / sceneData.octantSize;
+    let zOffset = sceneData.worldWidth / sceneData.octantSize * level;
+    let texCoord = vec3<u32>(octantPos.x, octantPos.y, octantPos.z + zOffset);
+    return textureLoad(octree, texCoord, 0).r != 0u;
+}
+
+//////////////
+// Marching //
+//////////////
+
+// Indicates if a ray intersects a box; if it does, updates intersectionDepth
+fn RayBoxIntersect(rayOrigin: vec3<f32>, rayDir: vec3<f32>, boxMin: vec3<f32>, boxMax: vec3<f32>, intersectionDepth: ptr<function, f32>) -> bool {
+    let originToBoxMinimumVector = (boxMin - rayOrigin) / rayDir;
+    let originToBoxMaximumVector = (boxMax - rayOrigin) / rayDir;
+
+    let maximumVector = max(originToBoxMaximumVector, originToBoxMinimumVector);
+    let minimumVector = min(originToBoxMaximumVector, originToBoxMinimumVector);
+
+    let backIntersectionDepth = min(maximumVector.x, min(maximumVector.y, maximumVector.z));
+    *intersectionDepth = max(max(minimumVector.x, 0.0), max(minimumVector.y, minimumVector.z));
+    return backIntersectionDepth > *intersectionDepth;
+}
+
+// Marches through voxels 3D texture
+fn MarchThroughVoxels(rayOrigin: vec3<f32>, rayDir: vec3<f32>, maxSteps: u32) -> RayHit {
+
+    var result: RayHit;
+    
+    // Set up parameters for marching
+    var worldSize: f32 = f32(sceneData.worldWidth);
+    var rayPos: vec3<f32> = floor(rayOrigin); 
+    let rayStep: vec3<f32> = sign(rayDir);
+    var maxTranslation: vec3<f32> = (((0.5 + rayPos) + 0.5 * rayStep) - rayOrigin) / rayDir;
+    let deltaTranslation: vec3<f32> = rayStep / rayDir;
+
+    var steps = 0;
+
+    // Start marching
+    while (steps < i32(maxSteps)) {
+        var voxelData: u32 = GetVoxel(vec3<u32>(rayPos));
+        var voxelCol = (voxelData >> 4) & 0xFu;
+        var voxelMat = voxelData & 0xFu;
+
+        // If voxel present
+        if ((voxelData != 0u)) {
+            
+            // Find position of intersection with the voxel
+            var intersectionDepth = 0.0;
+            RayBoxIntersect(rayOrigin, rayDir, rayPos, rayPos + vec3<f32>(1.0, 1.0, 1.0), &intersectionDepth);
+            let intersectionPosition: vec3<f32> = rayOrigin + rayDir * intersectionDepth;
+
+            // Calculate normals
+            var direction: vec3<f32> = intersectionPosition - (rayPos + vec3(0.5, 0.5, 0.5));
+            var intersectionNormal: vec3<f32>;
+            var absoluteDirection: vec3<f32> = abs(direction);
+            if ((absoluteDirection.y > absoluteDirection.x) && (absoluteDirection.y > absoluteDirection.z)) {
+                intersectionNormal = vec3(0, sign(direction.y), 0);
+                result.uv = vec2<f32>(fract(intersectionPosition.x), fract(intersectionPosition.z));
+                result.worldUV = vec2<f32>(intersectionPosition.x / f32(sceneData.worldWidth), intersectionPosition.z / f32(sceneData.worldWidth));
+            }
+            else if (absoluteDirection.x > absoluteDirection.z) {
+                intersectionNormal = vec3(sign(direction.x), 0.0, 0.0);
+                result.uv = vec2<f32>(fract(intersectionPosition.y), fract(intersectionPosition.z));
+                result.worldUV = vec2<f32>(intersectionPosition.y / f32(sceneData.worldWidth), intersectionPosition.z / f32(sceneData.worldWidth));
+            }
+            else {
+                intersectionNormal = vec3(0.0, 0.0, sign(direction.z));
+                result.uv = vec2<f32>(fract(intersectionPosition.x), fract(intersectionPosition.y));
+                result.worldUV = vec2<f32>(intersectionPosition.x / f32(sceneData.worldWidth), intersectionPosition.y / f32(sceneData.worldWidth));
+            }
+
+            // Return result
+            result.normal = intersectionNormal;
+            result.status = 2; 
+            result.voxelData = voxelData;
+            result.position = intersectionPosition;
+            result.iterations = u32(steps);
+            return result;
+        }
+
+        // If voxel position empty, advance position
+        let rayAdvanceMask: vec3<bool> = maxTranslation.xyz <= min(maxTranslation.yzx, maxTranslation.zxy);
+        maxTranslation = maxTranslation + vec3<f32>(rayAdvanceMask) * deltaTranslation;
+        rayPos = rayPos + vec3<f32>(vec3<i32>(rayAdvanceMask)) * rayStep;
+        steps += 1;
+
+        // Make sure new position is within world bounds
+        if ((rayPos.x >= worldSize || rayPos.x < 0.0)
+            || (rayPos.y >= worldSize || rayPos.y < 0.0)
+            || (rayPos.z >= worldSize || rayPos.z < 0.0)) {
+                result.status = 3; // Ray went out of bounds
+                return result;
+        }
+    }
+
+    // If we exited loop it means the ray didn't hit anything after marching maxIterations, so we will quit
+    // We calculate new position since we want to keep the progress of previous marches
+    var intersectionDepth = 0.0;
+    RayBoxIntersect(rayOrigin, rayDir, rayPos, rayPos + vec3<f32>(1.0, 1.0, 1.0), &intersectionDepth);
+    result.status = 0;
+    result.iterations = maxSteps;
+    result.position = rayOrigin + rayDir * intersectionDepth;
+    return result;
+}
+
+// Marches through octree 3D texture
+fn MarchThroughOctree(rayOrigin: vec3<f32>, rayDir: vec3<f32>, mipLevel: u32, maxIterations: u32) -> RayHit {
+
+    var result: RayHit;
+    
+    // Find world size in octants for later checking if out of bounds
+    var worldSizeInOctants: f32 = f32((sceneData.worldWidth / sceneData.octantSize) >> mipLevel);
+
+    // Set up parameters for marching
+    var rayPos: vec3<f32> = floor(rayOrigin); 
+    let rayStep: vec3<f32> = sign(rayDir);
+    var maxTranslation: vec3<f32> = (((0.5 + rayPos) + 0.5 * rayStep) - rayOrigin) / rayDir;
+    let deltaTranslation: vec3<f32> = rayStep / rayDir;
+
+    // Start marching
+    for (var iteration: u32 = 0; iteration < maxIterations; iteration += 1) {
+        
+        // If octant/voxel present
+        if (GetOctant(vec3<u32>(rayPos), mipLevel)) {
+            
+            // Find position of intersection with the octant/voxel
+            var intersectionDepth = 0.0;
+            RayBoxIntersect(rayOrigin, rayDir, rayPos, rayPos + vec3<f32>(1.0, 1.0, 1.0), &intersectionDepth);
+            let intersectionPosition: vec3<f32> = rayOrigin + rayDir * intersectionDepth;
+
+            // Return result
+            result.position = intersectionPosition;
+            result.iterations = iteration;
+            result.status = 1;
+            return result;
+        }
+
+        // If octant empty, advance position
+        let rayAdvanceMask: vec3<bool> = maxTranslation.xyz <= min(maxTranslation.yzx, maxTranslation.zxy);
+        maxTranslation = maxTranslation + vec3<f32>(rayAdvanceMask) * deltaTranslation;
+        rayPos = rayPos + vec3<f32>(vec3<i32>(rayAdvanceMask)) * rayStep;
+
+        // Make sure new position is within world bounds
+        if ((rayPos.x >= worldSizeInOctants || rayPos.x < 0.0)
+            || (rayPos.y >= worldSizeInOctants || rayPos.y < 0.0)
+            || (rayPos.z >= worldSizeInOctants || rayPos.z < 0.0)) {
+                result.status = 3; // Ray went out of bounds
+                return result;
+        }
+    }
+
+    // If we exited loop it means the ray didn't hit anything after marching maxIterations, so we will quit
+    // We calculate new position since we want to keep the progress of previous marches
+    var intersectionDepth = 0.0;
+    RayBoxIntersect(rayOrigin, rayDir, rayPos, rayPos + vec3<f32>(1.0, 1.0, 1.0), &intersectionDepth);
+    result.status = 0;
+    result.iterations = maxIterations;
+    result.position = rayOrigin + rayDir * intersectionDepth;
+    return result;
+}
+
+// Marches a ray through the voxels texture, uses octree texture to speed up that traversal
+// This function calls MarchThroughVoxels and MarchThroughOctree
+fn March(rayOrigin: vec3<f32>, rayDir: vec3<f32>, maxIterations: u32) -> RayHit {
+
+    var result: RayHit;
+
+    // Step rayOrigin until it's within world bounds; if it misses world bounds, return empty result
+    var intersectionDepth: f32 = 0.0;
+    if (!RayBoxIntersect(rayOrigin, rayDir, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(f32(sceneData.worldWidth), f32(sceneData.worldWidth), f32(sceneData.worldWidth)), &intersectionDepth)) {return result;}
+    var rayPos: vec3<f32> = rayOrigin + rayDir * intersectionDepth;
+    
+    // I have found this offset to be the only way to both remove artifacts around world edges while preserving normals
+    let offsetWorldSize = f32(sceneData.worldWidth) - .00001;
+    rayPos = clamp(rayPos, vec3<f32>(f32(0.0)), vec3<f32>(offsetWorldSize));
+    
+    var level: i32 = -1; // voxels = -1, octree = 0 - 5
+    var iterations: u32 = 0; // Tracks total marches
+
+
+    // As the ray marches, it will read from either the octree texture or voxels texture depending on level
+    // If we march through octree and hit something, we go down in level
+    // If we march through octree for a while and haven't hit, we will revert to a higher level
+
+    // Start marching through voxels/octree
+    for (var i: u32 = 1; i <= maxIterations; i++) {
+        
+        var rayHit: RayHit;
+        var unitSize: u32 = 1;
+        
+        // March through voxel/octree
+        if (level == -1) {
+            unitSize = 1;
+            rayHit = MarchThroughVoxels(rayPos, rayDir, 4u);
+        } else {
+            unitSize = sceneData.octantSize << u32(level);
+            
+            // Only want to quit after 4 iterations if we're not at max octree level
+            // Doing this with bitwise operations to avoid a logical branch
+            let highestLevelMask = u32(u32(level) == sceneData.octreeHighestLevel);
+            let maxIterations: u32 = (highestLevelMask * 1024u) + ((1u - highestLevelMask) * 4u);
+            rayHit = MarchThroughOctree((rayPos / f32(unitSize)), rayDir, u32(level), maxIterations);
+        } 
+
+        // Scale ray position according to what level we marched at
+        rayHit.position *= f32(unitSize);
+        iterations = iterations + rayHit.iterations;
+        rayPos = rayHit.position;
+
+        // Increase level (do this if we want to revert to larger octant sizes)
+        if (rayHit.status == 0 && level < i32(sceneData.octreeHighestLevel)) {
+            level += 1;
+            continue;
+        }
+
+        // Decrease level (do this if we want to march through smaller octants)
+        else if (rayHit.status == 1 && level > -1) {           
+            level -= 1;
+            continue;
+        }
+
+        // Hit 
+        else if (rayHit.status == 2) {
+            result.position = rayHit.position;
+            result.normal = rayHit.normal;
+            result.iterations = iterations;
+            result.status = 2;
+            result.voxelData = rayHit.voxelData;
+            result.uv = rayHit.uv;
+            return result;
+        }
+
+        // Out of bounds
+        else {
+            result.position = rayHit.position;
+            result.status = 3;
+            result.iterations = iterations;
+            return result;
+        }
+    }
+    
+    return result;
+}
+
+//////////////
+// Lighting //
+//////////////
+
+// Converts a given world position to camera clip space
+fn WorldToClipSpace(
+    worldPosition: vec3<f32>,
+    camPos: vec3<f32>,
+    camForward: vec3<f32>,
+) -> vec2<f32> {
+    
+    // Camera vars
+    let camRight: vec3<f32> = normalize(cross(camForward, vec3<f32>(0.0, 1.0, 0.0)));
+    let camUp: vec3<f32> = normalize(cross(camRight, camForward));
+
+    // Compute view space position (world to camera space)
+    let camToWorldPos: vec3<f32> = worldPosition - camPos;
+
+    // Transform to camera's local coordinate system
+    let viewX: f32 = dot(camRight, camToWorldPos);    // X-axis (right)
+    let viewY: f32 = dot(camUp, camToWorldPos);       // Y-axis (up)
+    let viewZ: f32 = dot(camForward, camToWorldPos);  // Z-axis (forward)
+
+    // Apply perspective projection
+    let scale: f32 = tan(radians(cameraData.fov) / 2.0);
+    var clipX: f32 = viewX / (viewZ * scale * cameraData.aspectRatio);
+    var clipY: f32 = viewY / (viewZ * scale);
+
+    // Offset
+    clipX *= (1 - (1.0 / f32(sceneData.screenWidth)));
+    clipY *= (1 - (1.0 / f32(sceneData.screenHeight)));
+    clipX /= 2.0;
+    clipY /= 2.0;
+    clipX += 0.5;
+    clipY += 0.5;
+
+    let pixelX: f32 = clipX * f32(sceneData.screenWidth - 1u);
+    let pixelY: f32 = clipY * f32(sceneData.screenHeight - 1u);
+
+    return vec2<f32>(pixelX, pixelY);
+}
+
+////////////
+// Skybox //
+////////////
+
+// Given a ray direction, provides atmosphere color depending on sun height
+fn Skybox(rayDir: vec3<f32>) -> vec3<f32> {
+    
+    // Sky/Ground
+    let mixFactor = 1.0 - pow(1.0 - sceneData.sunDirY, 4.0); // Bias toward daytime
+    let groundColor = mix(NIGHT_GROUND_COLOR, DAY_GROUND_COLOR, mixFactor);
+    let skyColor = mix(NIGHT_SKY_COLOR, DAY_SKY_COLOR, mixFactor);
+
+    // Stars
+    var starValue = SampleStars(rayDir);
+    let horizonFade = smoothstep(0.0, 0.2, rayDir.y); // Fade in above horizon
+    let nightFade = smoothstep(1.0, 0.0, mixFactor);  // Increase star strength depending on sun altitude
+    starValue *= horizonFade * nightFade;
+
+    // Final color
+    let baseColor = mix(groundColor, skyColor, rayDir.y);
+    return baseColor + starValue;
+}
+
+// Returns a starfield value by thresholding the noise
+fn NoisyStarField(pos: vec2f, threshold: f32) -> f32 {
+    var val = Hash2D(pos);
+    if (val >= threshold) {
+        return pow((val - threshold) / (1.0 - threshold), 6.0);
+    }
+    return 0.0;
+}
+
+// Samples starfield at integer coordinates and interpolates
+fn StableStarField(pos: vec2f, threshold: f32) -> f32 {
+    let fract_x = fract(pos.x);
+    let fract_y = fract(pos.y);
+    let base = floor(pos);
+
+    let v1 = NoisyStarField(base, threshold);
+    let v2 = NoisyStarField(base + vec2f(0.0, 1.0), threshold);
+    let v3 = NoisyStarField(base + vec2f(1.0, 0.0), threshold);
+    let v4 = NoisyStarField(base + vec2f(1.0, 1.0), threshold);
+
+    return v1 * (1.0 - fract_x) * (1.0 - fract_y) +
+           v2 * (1.0 - fract_x) * fract_y +
+           v3 * fract_x * (1.0 - fract_y) +
+           v4 * fract_x * fract_y;
+}
+
+// Converts a 3D ray direction to a star value
+fn SampleStars(ray_dir: vec3f) -> f32 {
+    let u = fract(0.5 + atan2(ray_dir.z, ray_dir.x) / (2.0 * 3.14159265));
+    let v = (ray_dir.y * 0.5) + 0.5;                                       
+    let sample_pos = vec2f(u * 4096.0, v * 4096.0);
+    let threshold = 0.99514;
+    return StableStarField(sample_pos, threshold);
+}
+
+// Marches a ray from given position towards the sun, calculating sunlight color
+fn Sunlight(position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let SUN_ENABLED = sceneData.sunEnabled == 1u;
+    var sunContribution: vec3<f32>;
+    
+    if (SUN_ENABLED) {
+        let sunDir = vec3<f32>(sceneData.sunDirX, sceneData.sunDirY, sceneData.sunDirZ);
+        let nDotL = max(dot(normal, sunDir), 0.0);
+
+        if (nDotL > 0.0) {
+            let shadowOrigin = position + normal * 0.001;
+            let shadowRay = March(shadowOrigin, sunDir, 64);
+
+            if (shadowRay.status != 2) {
+                sunContribution = SUN_COLOR * nDotL * sceneData.sunIntensity;
+            }
+        }
+    }
+
+    return sunContribution;
+}
+
+/////////////
+// Tonemap //
+/////////////
+
+fn tonemapACES(color: vec3<f32>) -> vec3<f32> {
+    // ACES approximation from Narkowicz 2015
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((color * (a * color + vec3<f32>(b))) / (color * (c * color + vec3<f32>(d)) + vec3<f32>(e)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn tonemapReinhard(color: vec3<f32>) -> vec3<f32> {
+    return color / (color + vec3<f32>(1.0));
+}
+
+fn gammaCorrect(color: vec3<f32>) -> vec3<f32> {
+    return pow(color, vec3<f32>(1.0 / 2.2));
+}
+
+////////////
+// Kernel //
+////////////
+
+@compute @workgroup_size(16, 16)
+fn ComputeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+    
+    // Screen vars
+    let pixelPos: vec2<u32> = vec2<u32>(id.x, id.y);
+    if (pixelPos.x >= sceneData.screenWidth || pixelPos.y >= sceneData.screenHeight) { return; }
+    var uv: vec2<f32> = vec2<f32>(f32(pixelPos.x) / f32(sceneData.screenWidth - 1u), f32(pixelPos.y) / f32(sceneData.screenHeight - 1u));
+    uv = uv * 2.0 - 1.0;
+    uv.x *= cameraData.aspectRatio;
+
+    // Camera vars
+    var camPos: vec3<f32> = cameraData.position;
+    let camForward: vec3<f32> = normalize(cameraData.rotation);
+    let camRight: vec3<f32> = normalize(cross(camForward, vec3<f32>(0.0, 1.0, 0.0)));
+    let camUp: vec3<f32> = normalize(cross(camRight, camForward));
+
+    // Calculate ray direction using camera vars (and factor in FOV)
+    let scale: f32 = tan(radians(cameraData.fov) / 2.0);
+    var rayPos: vec3<f32> = camPos;
+    var rayDir: vec3<f32> = normalize(camRight * uv.x * scale + camUp * uv.y * scale + camForward);
+
+    // Start marching
+    var ray: RayHit;
+    var color: vec3<f32> = vec3<f32>(0.0);
+    var throughput: vec3<f32> = vec3<f32>(1.0);
+    var iterationCount: u32 = 0;
+    var pixelWorldPosition: vec3<f32> = vec3<f32>(-1.0, -1.0, -1.0);
+    var hitWorld = false;
+    var bounceCount: u32 = sceneData.rayBounces;
+    const MAX_BOUNCES = 4;
+
+    // This loop will march, adjust color and throughput according to hit material, and then update rayPos/rayDir for next march
+    for (var bounce: u32 = 0; bounce < bounceCount + 1 && bounce < MAX_BOUNCES; bounce++) {
+
+        // March the ray
+        let isFirstMarch = bounce == 0u;
+        let maxIterations = select(64u, 99999, isFirstMarch);
+        ray = March(rayPos, rayDir, maxIterations);
+        iterationCount += ray.iterations;
+
+        // On first march, record info like if world was hit, and hit position
+        if (isFirstMarch && ray.status == 2) {
+            pixelWorldPosition = ray.position;
+            hitWorld = true;
+
+            // If user has defined screen filter, then we won't need to do subsequent bounces
+            if (sceneData.screenFilter != 0) {break;}
+        } 
+
+        // If world is hit
+        if (ray.status == 2) {
+            
+            var seed = (ray.position + vec3<f32>(sceneData.time * 17.0, sceneData.time * 29.0, sceneData.time * 41.0)) * f32(pixelPos.x) / f32(pixelPos.y);
+
+            let albedoIndex: u32 = (ray.voxelData >> 4) & 0xF;     // extract bits 7–4
+            let materialIndex: u32 = ray.voxelData & 0xF;         // extract bits 3–0
+            var albedo = COLORS[albedoIndex];
+            let material = MATERIALS[materialIndex];
+            
+            var specularDir = reflect(rayDir, ray.normal);
+            var diffuseDir = normalize(ray.normal + RandomDirection(seed));
+
+            // Emissive
+            if (material.emissive) {
+                color += throughput * albedo;
+                break;
+            }
+
+            // Specular
+            if (material.specular > 0.0) {
+                bounceCount += 1u;
+                throughput -= material.specular * .1;
+            }
+
+            var sunContribution = Sunlight(ray.position, ray.normal);
+
+            color += throughput * (albedo * sunContribution) * (1.0 - material.specular);
+            throughput *= albedo;
+            
+            // Update ray position and ray direction for next march
+            rayPos = ray.position - (0.001 * rayDir);
+            rayDir = mix(diffuseDir, specularDir, material.specular);
+        } 
+        
+        // Else, skybox is hit, treat as final bounce
+        else {
+            color += throughput * Skybox(rayDir);
+            break;
+        }
+    }
+
+    ////////////////////
+    // Write Velocity //
+    ////////////////////
+
+    // If ray didn't hit world, then indicate so with massive velocity (pixel will be ignored)
+    if (!hitWorld) {
+        textureStore(velocityTexture, vec2<u32>(pixelPos.x, pixelPos.y), vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0));
+    } 
+
+    // Else, Calculate current pixel's velocity by projecting previous frame's camera data from world space to clip space
+    else {
+        var prevPixelPos: vec2<f32> = WorldToClipSpace(pixelWorldPosition, cameraData.prevPosition, cameraData.prevRotation);
+        var pixelVelocity: vec2<f32> = vec2<f32>(pixelPos) - prevPixelPos;
+        textureStore(velocityTexture, vec2<u32>(pixelPos.x, pixelPos.y), vec4<f32>(pixelVelocity.x, pixelVelocity.y, 0.0, 0.0));
+    }
+
+    /////////////////
+    // Write Depth //
+    /////////////////
+
+    var depth: f32;
+
+    // If ray didn't hit world, then indicate so with massive depth velocity (pixel will be ignored)
+    if (!hitWorld) {
+        textureStore(currentDepthTexture, vec2<u32>(pixelPos.x, pixelPos.y), vec4<f32>(1000000000.0, 1000000000.0, 0.0, 0.0));
+    } 
+
+    // Else, calculate hit pixel's distance from camera and write it to current depth texture
+    else {
+        depth = distance(cameraData.position, pixelWorldPosition);
+        textureStore(currentDepthTexture, vec2<u32>(pixelPos.x, pixelPos.y), vec4<f32>(depth, 0.0, 0.0, 0.0));
+    }
+
+    /////////////
+    // Filters //
+    /////////////
+
+    // If ray hit world, and user specifies filter, then apply it
+    if (hitWorld && sceneData.screenFilter != 0) {
+
+        // Normal
+        if (sceneData.screenFilter == 1u) {
+
+            var normalColor = (ray.normal / 2.0) + 0.5;
+            color = normalColor;
+        }
+
+        // Position
+        if (sceneData.screenFilter == 2u) {
+
+            var posColor = ray.position / f32(sceneData.worldWidth);
+            color = posColor;
+        }
+
+        // Iterations
+        if (sceneData.screenFilter == 3u) {
+            color = vec3<f32>(1.0 - (f32(iterationCount) / 50.0));
+        }
+
+        // Flat color
+        if (sceneData.screenFilter == 4u) {
+            let albedoIndex: u32 = (ray.voxelData >> 4) & 0xF;
+            let albedo = COLORS[albedoIndex];
+            var norm = (ray.normal / 2.0) + 0.5;
+            var brightness = (norm.x * .2 + norm.y * .4 + norm.z * .6);
+            color = albedo * brightness; 
+        }
+
+        // Depth
+        if (sceneData.screenFilter == 5u) {
+            color = vec3<f32>(1.0 - depth / f32(sceneData.worldWidth) * 2.0);
+        }
+
+        // Toon
+        if (sceneData.screenFilter == 6u) {
+            // Sample 4 neighboring depth values
+            let d0 = textureLoad(previousDeptTexture, pixelPos).r;
+            let d1 = textureLoad(previousDeptTexture, pixelPos + vec2<u32>(1, 0)).r;
+            let d2 = textureLoad(previousDeptTexture, pixelPos + vec2<u32>(0, 1)).r;
+            let d3 = textureLoad(previousDeptTexture, pixelPos + vec2<u32>(1, 1)).r;
+
+            // Compute mean
+            let mean = (d0 + d1 + d2 + d3) / 4.0;
+
+            // Compute variance
+            let variance = (
+                pow(d0 - mean, 2.0) +
+                pow(d1 - mean, 2.0) +
+                pow(d2 - mean, 2.0) +
+                pow(d3 - mean, 2.0)
+            ) / 4.0;
+
+            let albedoIndex: u32 = (ray.voxelData >> 4) & 0xF;
+            let albedo = COLORS[albedoIndex];
+
+            color = (vec3<f32>(1.0) - vec3<f32>(variance)) * albedo; 
+        }
+
+        color = gammaCorrect(color);
+        textureStore(colorTexture, vec2<u32>(pixelPos.x, pixelPos.y), vec4<f32>(color, 1.0));
+        return;
+    }
+
+    ////////////////////
+    // Write Position //
+    ////////////////////
+
+    textureStore(positionTexture, vec2<u32>(pixelPos.x, pixelPos.y), vec4<f32>(pixelWorldPosition, 1.0));
+
+    /////////////////
+    // Write Color //
+    /////////////////
+
+    if (sceneData.tonemap == 0) {
+        color = tonemapACES(color);
+    }
+
+    else if (sceneData.tonemap == 1) {
+        color = tonemapReinhard(color);
+    }
+
+    // After tonemap done, gamma correct and store color in colorTexture
+    color = gammaCorrect(color);
+    textureStore(colorTexture, vec2<u32>(pixelPos.x, pixelPos.y), vec4<f32>(color, 1.0));
+}
+
+`
+```
+
+### shaders/worldGeneration.wgsl.js
+```
+export default /* wgsl */ `
+
+/////////////
+// Structs //
+/////////////
+
+struct WorldGenerationData {
+    octaves: u32,
+    ceiling: u32,
+    lacunarity: f32,
+    gain: f32,
+    frequency: f32,
+    threshold: f32,
+    seed: f32,
+    
+};
+
+struct SceneData {
+    screenWidth: u32,
+    screenHeight: u32,
+    worldWidth: u32,
+    worldHeight: u32,
+    octantSize: u32,
+    octreeHighestLevel: u32,
+    tonemap: u32,
+    rayBounces: u32,
+    screenFilter: u32,
+    sunEnabled: u32,
+    antiSmearEnabled: u32,
+    mousePosX: u32,
+    mousePosY: u32,
+    sunDirX: f32,
+    sunDirY: f32,
+    sunDirZ: f32,
+    sunIntensity: f32,
+    time: f32,
+    denoiseStrength: f32
+};
+
+//////////////
+// Bindings //
+//////////////
+
+@group(0) @binding(0) var voxels: texture_storage_3d<r32uint, read_write>;
+@group(0) @binding(1) var <uniform> worldGenerationData: WorldGenerationData;
+@group(0) @binding(2) var <uniform> sceneData: SceneData;
+
+///////////
+// Funcs //
+///////////
+
+// All noise functions taken from https://github.com/ashima/webgl-noise
+
+fn mod289(x: vec3<f32>) -> vec3<f32> {
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+fn mod289_v4(x: vec4<f32>) -> vec4<f32> {
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+fn permute(x: vec4<f32>) -> vec4<f32> {
+    return mod289_v4(((x * 34.0) + 10.0) * x);
+}
+
+fn taylorInvSqrt(r: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(1.79284291400159) - vec4<f32>(0.85373472095314) * r;
+}
+
+fn snoise(v: vec3<f32>) -> f32 {
+    let C: vec2<f32> = vec2<f32>(1.0 / 6.0, 1.0 / 3.0);
+    let D: vec4<f32> = vec4<f32>(0.0, 0.5, 1.0, 2.0);
+
+    // First corner
+    var i: vec3<f32> = floor(v + dot(v, C.yyy));
+    let x0: vec3<f32> = v - i + dot(i, C.xxx);
+
+    // Other corners
+    let g: vec3<f32> = step(x0.yzx, x0.xyz);
+    let l: vec3<f32> = vec3<f32>(1.0) - g;
+    let i1: vec3<f32> = min(g.xyz, l.zxy);
+    let i2: vec3<f32> = max(g.xyz, l.zxy);
+
+    let x1: vec3<f32> = x0 - i1 + C.xxx;
+    let x2: vec3<f32> = x0 - i2 + C.yyy; // 2.0*C.x = 1/3 = C.y
+    let x3: vec3<f32> = x0 - D.yyy;      // -1.0+3.0*C.x = -0.5 = -D.y
+
+    // Permutations
+    i = mod289(i);
+    var p: vec4<f32> = permute(permute(permute(
+        i.z + vec4<f32>(0.0, i1.z, i2.z, 1.0))
+        + i.y + vec4<f32>(0.0, i1.y, i2.y, 1.0))
+        + i.x + vec4<f32>(0.0, i1.x, i2.x, 1.0));
+
+    // Gradients: 7x7 points over a square, mapped onto an octahedron.
+    // The ring size 17*17 = 289 is close to a multiple of 49 (49*6 = 294)
+    let n_: f32 = 0.142857142857; // 1.0/7.0
+    let ns: vec3<f32> = n_ * D.wyz - D.xzx;
+
+    let j: vec4<f32> = p - 49.0 * floor(p * ns.z * ns.z);  //  mod(p,7*7)
+
+    let x_: vec4<f32> = floor(j * ns.z);
+    let y_: vec4<f32> = floor(j - 7.0 * x_);    // mod(j,N)
+
+    let x: vec4<f32> = x_ * ns.x + ns.yyyy;
+    let y: vec4<f32> = y_ * ns.x + ns.yyyy;
+    let h: vec4<f32> = vec4<f32>(1.0) - abs(x) - abs(y);
+
+    let b0: vec4<f32> = vec4<f32>(x.xy, y.xy);
+    let b1: vec4<f32> = vec4<f32>(x.zw, y.zw);
+
+    let s0: vec4<f32> = floor(b0) * 2.0 + vec4<f32>(1.0);
+    let s1: vec4<f32> = floor(b1) * 2.0 + vec4<f32>(1.0);
+    let sh: vec4<f32> = -step(h, vec4<f32>(0.0));
+
+    let a0: vec4<f32> = b0.xzyw + s0.xzyw * sh.xxyy;
+    let a1: vec4<f32> = b1.xzyw + s1.xzyw * sh.zzww;
+
+    var p0: vec3<f32> = vec3<f32>(a0.xy, h.x);
+    var p1: vec3<f32> = vec3<f32>(a0.zw, h.y);
+    var p2: vec3<f32> = vec3<f32>(a1.xy, h.z);
+    var p3: vec3<f32> = vec3<f32>(a1.zw, h.w);
+
+    // Normalise gradients
+    let norm: vec4<f32> = taylorInvSqrt(vec4<f32>(dot(p0, p0), dot(p1, p1), dot(p2, p2), dot(p3, p3)));
+    p0 *= norm.x;
+    p1 *= norm.y;
+    p2 *= norm.z;
+    p3 *= norm.w;
+
+    // Mix final noise value
+    var m: vec4<f32> = max(0.5 - vec4<f32>(dot(x0, x0), dot(x1, x1), dot(x2, x2), dot(x3, x3)), vec4<f32>(0.0));
+    m = m * m;
+    return 105.0 * dot(m * m, vec4<f32>(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
+}
+
+fn snoise_seeded(v: vec3<f32>, seed: f32) -> f32 {
+    // Add seed as an offset to the input
+    return snoise(v + vec3<f32>(seed, seed, seed));
+}
+
+fn fbm(
+    pos: vec3<f32>,
+    octaves: u32,
+    lacunarity: f32,
+    gain: f32,
+    base_frequency: f32,
+    seed: f32
+) -> f32 {
+    var amplitude: f32 = 1.0;
+    var frequency: f32 = base_frequency;
+    var sum: f32 = 0.0;
+    var p: vec3<f32> = pos;
+
+    for (var i: u32 = 0; i < octaves; i = i + 1) {
+        sum += amplitude * snoise_seeded(p * frequency, seed);
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return sum;
+}
+
+fn SetVoxel(voxelPos: vec3<u32>, voxelType: u32) {
+    
+    // Each 32 bit uint contains data for 4 voxels
+    // coords below are (x,z) - y position is unchanged
+    // 00000000 00000000 00000000 00000000
+    // 1,1         1,0      0,1      0,0
+    
+    var texelPos: vec3<u32> = vec3<u32>(voxelPos.x >> 1, voxelPos.y, voxelPos.z >> 1);
+    var packedVoxel: u32 = textureLoad(voxels, texelPos).r;
+
+    var mask: u32 = 0xFF;
+    var xOdd: u32 = voxelPos.x & 0x1;
+    var zOdd: u32 = (voxelPos.z & 0x1) << 1;
+    var shiftCount = (xOdd | zOdd) * 8;
+
+    mask = mask << shiftCount;
+    mask = ~mask;
+
+    packedVoxel &= mask;
+    packedVoxel |= voxelType << shiftCount;
+
+    textureStore(voxels, texelPos, vec4<u32>(packedVoxel, 0, 0, 0));
+}
+
+fn GetVoxelNoise(voxelPos: vec3<u32>) -> f32 {
+    let baseNoise = fbm(
+        vec3<f32>(voxelPos) * 0.01,
+        worldGenerationData.octaves,
+        worldGenerationData.lacunarity,
+        worldGenerationData.gain,
+        worldGenerationData.frequency,
+        worldGenerationData.seed,
+    );
+
+    return baseNoise;
+}
+
+////////////
+// Kernel //
+////////////
+
+@compute @workgroup_size(8, 4, 8)
+fn ComputeMain(@builtin(global_invocation_id) texelPos: vec3<u32>) {
+    
+    var voxelPos: vec3<u32> = vec3<u32>(texelPos.x * 2, texelPos.y, texelPos.z * 2);
+    var threshold: f32 = worldGenerationData.threshold;
+
+    // When initializing world, each thread handles the 4 voxels contained in its texel
+    for (var x: u32 = 0; x < 2; x++) {
+        for (var z: u32 = 0; z < 2; z++) {
+
+            // Find current voxel position
+            var offsetVoxelPos = vec3<u32>(voxelPos.x + x, voxelPos.y, voxelPos.z + z);
+            
+            // Get noise
+            var noise = GetVoxelNoise(offsetVoxelPos);
+
+            // If noise not within threshold, then skip this voxel
+            if (!(noise > threshold && voxelPos.y < worldGenerationData.ceiling)) {
+                // Clear old voxel valuesd
+                SetVoxel(offsetVoxelPos, 0);
+                continue;
+            }        
+
+            var voxelColor: u32 = 1u; // Default to stone
+            let voxelMaterial: u32 = 1u;
+            
+            // Positions above
+            var oneAbove = offsetVoxelPos + vec3<u32>(0, 1, 0);
+            var twoAbove = offsetVoxelPos + vec3<u32>(0, 2, 0);
+            var threeAbove = offsetVoxelPos + vec3<u32>(0, 3, 0);
+            var fourAbove = offsetVoxelPos + vec3<u32>(0, 4, 0);
+            var fiveAbove = offsetVoxelPos + vec3<u32>(0, 5, 0);
+
+            // Get noise
+            var oneAboveVal = GetVoxelNoise(oneAbove) > threshold && oneAbove.y < worldGenerationData.ceiling - 1;
+            var twoAboveVal = GetVoxelNoise(twoAbove) > threshold && twoAbove.y < worldGenerationData.ceiling - 1;
+            var threeAboveVal = GetVoxelNoise(threeAbove) > threshold && threeAbove.y < worldGenerationData.ceiling - 1;
+            var fourAboveVal = GetVoxelNoise(fourAbove) > threshold && fourAbove.y < worldGenerationData.ceiling - 1;
+            var fiveAboveVal = GetVoxelNoise(fiveAbove) > threshold && fiveAbove.y < worldGenerationData.ceiling - 1;
+
+            // Dirt
+            if (!oneAboveVal || !twoAboveVal || !threeAboveVal || !fourAboveVal || !fiveAboveVal) {
+                voxelColor = 3u;
+            }
+
+            // Grass
+            if (!oneAboveVal || offsetVoxelPos.y == worldGenerationData.ceiling - 1) {
+                voxelColor = 7u;
+            }
+            
+            // Set voxel
+            var voxelData: u32 = (u32(voxelColor) << 4u) | u32(voxelMaterial);
+            SetVoxel(offsetVoxelPos, voxelData);    
+        }
+    }
+}
+`
+```
+
+### src/camera.js
+```
+import { vec3, quat } from 'gl-matrix';
+import Input from './input'
+
+class Camera {
+  constructor(position = [0, 0, 0], rot = [0, 0]) {
+    this.input = new Input();
+
+    this.position = vec3.clone(position);
+    this.velocity = vec3.create();
+
+    // Interpret rotationVec3 as [pitch, yaw, roll]
+    this.theta = rot[0]; // pitch
+    this.phi = rot[1];   // yaw
+
+    // Compute initial rotation quaternion from theta and phi
+    const qx = quat.create();
+    quat.setAxisAngle(qx, [0, -1, 0], this.phi); // yaw
+
+    const qz = quat.create();
+    quat.setAxisAngle(qz, [-1, 0, 0], this.theta); // pitch
+
+    this.rotation = quat.create();
+    quat.multiply(this.rotation, qx, qz);
+
+    // Rotation velocities and config
+    this.phiVelocity = 0;
+    this.thetaVelocity = 0;
+    this.phiSpeed = 8;
+    this.thetaSpeed = 8;
+    this.movementSpeed = 1;
+    this.movementAcceleration = 0.1;
+    this.damping = 0.9;
+    this.maxRotationVelocity = 0.2;
+
+    this.updateRotation();
+  }
+
+  update() {
+    this.input.update();
+    this.updatePosition();
+    this.updateRotation();
+    this.applyMovement();
+  }
+
+  updatePosition() {
+    // Compute forward vector
+    const forward = vec3.fromValues(0, 0, 1);
+    vec3.transformQuat(forward, forward, this.rotation);
+    vec3.normalize(forward, forward);
+
+    // Compute up vector
+    const up = vec3.fromValues(0, 1, 0);
+    vec3.transformQuat(up, up, this.rotation);
+    vec3.normalize(up, up);
+
+    // Compute left vector as cross product of up and forward
+    let left = vec3.create();
+    vec3.cross(left, forward, up);
+    vec3.normalize(left, left);
+
+    // Initialize acceleration vector
+    const acceleration = vec3.create();
+
+    if (this.input.key('w')) {
+      const forwardAccel = vec3.create();
+      vec3.scale(forwardAccel, forward, this.movementAcceleration);
+      vec3.add(acceleration, acceleration, forwardAccel);
+    }
+
+    if (this.input.key('s')) {
+      const backwardAccel = vec3.create();
+      vec3.scale(backwardAccel, forward, -this.movementAcceleration);
+      vec3.add(acceleration, acceleration, backwardAccel);
+    }
+
+    if (this.input.key('d')) {
+      const rightAccel = vec3.create();
+      vec3.scale(rightAccel, left, -this.movementAcceleration);
+      vec3.add(acceleration, acceleration, rightAccel);
+    }
+
+    if (this.input.key('a')) {
+      const leftAccel = vec3.create();
+      vec3.scale(leftAccel, left, this.movementAcceleration);
+      vec3.add(acceleration, acceleration, leftAccel);
+    }
+
+    if (this.input.key('Space')) {
+      const upAccel = vec3.create();
+      vec3.scale(upAccel, up, this.movementAcceleration);
+      vec3.add(acceleration, acceleration, upAccel);
+    }
+
+    if (this.input.key('Shift')) {
+      const downAccel = vec3.create();
+      vec3.scale(downAccel, up, -this.movementAcceleration);
+      vec3.add(acceleration, acceleration, downAccel);
+    }
+
+    // Update velocity
+    vec3.add(this.velocity, this.velocity, acceleration);
+
+    // Apply damping
+    vec3.scale(this.velocity, this.velocity, this.damping);
+
+    // Zero small velocities
+    if (vec3.length(this.velocity) < 0.0001) {
+      vec3.set(this.velocity, 0, 0, 0);
+    }
+  }
+
+  applyMovement() {
+    vec3.add(this.position, this.position, this.velocity);
+  }
+
+  updateRotation() {
+    if (this.input.mouse(2)) {
+      const xh = this.input.current.mouseXDelta / window.innerWidth;
+      const yh = this.input.current.mouseYDelta / window.innerHeight;
+
+      this.phiVelocity += -xh * this.phiSpeed * 0.1;
+      this.thetaVelocity += -yh * this.thetaSpeed * 0.1;
+
+      // Clamp velocities
+      this.phiVelocity = Math.max(-this.maxRotationVelocity, Math.min(this.phiVelocity, this.maxRotationVelocity));
+      this.thetaVelocity = Math.max(-this.maxRotationVelocity, Math.min(this.thetaVelocity, this.maxRotationVelocity));
+    }
+
+    // Update angles
+    this.phi += this.phiVelocity;
+    this.theta += this.thetaVelocity;
+
+    // Clamp theta
+    this.theta = this.clamp(this.theta, -Math.PI / 3, Math.PI / 3);
+
+    // Create quaternions for rotations
+    const qx = quat.create();
+    quat.setAxisAngle(qx, [0, -1, 0], this.phi);
+
+    const qz = quat.create();
+    quat.setAxisAngle(qz, [-1, 0, 0], this.theta);
+
+    // Combine rotations
+    quat.multiply(this.rotation, qx, qz);
+
+    // Apply damping to velocities
+    this.phiVelocity *= this.damping;
+    this.thetaVelocity *= this.damping;
+
+    // Zero small velocities
+    if (Math.abs(this.phiVelocity) < 0.0001) this.phiVelocity = 0;
+    if (Math.abs(this.thetaVelocity) < 0.0001) this.thetaVelocity = 0;
+  }
+
+  clamp(x, a, b) {
+    return Math.min(Math.max(x, a), b);
+  }
+}
+
+export default Camera;
+```
+
+### src/input.js
+```
+const keyCodes = {
+  'a': 65,
+  's': 83,
+  'w': 87,
+  'd': 68,
+  'Shift': 16,
+  'Space': 32,
+};
+
+class Input {
+  constructor() {
+    this.current = {
+      leftButton: false,
+      rightButton: false,
+      mouseXDelta: 0,
+      mouseYDelta: 0,
+      mouseX: 0,
+      mouseY: 0,
+    };
+    this.previous = null;
+    this.keys = {};
+    document.addEventListener('mousedown', (e) => this.#onMouseDown(e), false);
+    document.addEventListener('mousemove', (e) => this.#onMouseMove(e), false);
+    document.addEventListener('mouseup', (e) => this.#onMouseUp(e), false);
+    document.addEventListener('keydown', (e) => this.#onKeyDown(e), false);
+    document.addEventListener('keyup', (e) => this.#onKeyUp(e), false);
+  }
+
+  #onMouseMove(e) {
+    this.current.mouseX = e.pageX - window.innerWidth / 2;
+    this.current.mouseY = e.pageY - window.innerHeight / 2;
+
+    if (this.previous === null) {
+      this.previous = { ...this.current };
+    }
+
+    this.current.mouseXDelta = this.current.mouseX - this.previous.mouseX;
+    this.current.mouseYDelta = this.current.mouseY - this.previous.mouseY;
+  }
+
+  #onMouseDown(e) {
+    this.#onMouseMove(e);
+
+    switch (e.button) {
+      case 0: {
+        this.current.leftButton = true;
+        break;
+      }
+      case 2: {
+        this.current.rightButton = true;
+        break;
+      }
+    }
+  }
+
+  #onMouseUp(e) {
+    this.#onMouseMove(e);
+
+    switch (e.button) {
+      case 0: {
+        this.current.leftButton = false;
+        break;
+      }
+      case 2: {
+        this.current.rightButton = false;
+        break;
+      }
+    }
+  }
+
+  #onKeyDown(e) {
+    this.keys[e.keyCode] = true;
+  }
+
+  #onKeyUp(e) {
+    this.keys[e.keyCode] = false;
+  }
+
+  key(keyChar) {
+    return this.keys[keyCodes[keyChar]];
+  }
+
+  mouse(button) {
+    if (button == 0) {
+      return this.current.leftButton;
+    }
+    else if (button == 2) {
+      return this.current.rightButton;
+    }
+    return false;
+  }
+
+  mouseDown(button) {
+    if (!this.previous) return false;
+
+    if (button === 0) {
+      return this.current.leftButton && !this.previous.leftButton;
+    }
+    if (button === 2) {
+      return this.current.rightButton && !this.previous.rightButton;
+    }
+    return false;
+  }
+
+  update(_) {
+    if (this.previous !== null) {
+      this.current.mouseXDelta = this.current.mouseX - this.previous.mouseX;
+      this.current.mouseYDelta = this.current.mouseY - this.previous.mouseY;
+    }
+    this.previous = { ...this.current };
+  }
+}
+
+export default Input;
+```
+
+### src/main.js
+```
+import raymarchShader from "../shaders/raymarch.wgsl.js";
+import generateOctreeShader from "../shaders/generateOctree.wgsl.js";
+import clearOctreeShader from "../shaders/clearOctree.wgsl.js";
+import worldGenerationShader from "../shaders/worldGeneration.wgsl.js";
+import brushShader from "../shaders/brush.wgsl.js";
+import cursorShader from "../shaders/cursor.wgsl.js";
+import postProcessingShader from "../shaders/postProcessing.wgsl.js";
+import quadShader from "../shaders/quad.wgsl.js";
+import { vec3 } from 'gl-matrix';
+import Camera from "./camera.js";
+import Input from './input.js'
+
+//////////
+// Misc //
+//////////
+
+var screenWidth = Math.ceil(window.innerWidth * window.devicePixelRatio);
+var screenHeight = Math.ceil(window.innerHeight * window.devicePixelRatio);
+var input = new Input(); // Mouse and keyboard input controller
+var worldSize = 256;
+var mousePosX = 0;
+var mousePosY = 0;
+
+/////////
+// FPS //
+/////////
+
+let lastTime = performance.now();
+let frameCount = 0;
+let fps = 0;
+
+////////////
+// Camera //
+////////////
+
+const pos = vec3.fromValues(13, 100, 13);
+const rot = vec3.fromValues(-.1, -.75);
+const camera = new Camera(pos, rot);
+var prevCameraPos = vec3.clone(camera.position);
+var prevCamRotation = vec3.create();
+
+////////////
+// Octree //
+////////////
+
+const OCTANT_SIZE = 4;
+const OCTREE_HIGHEST_LEVEL = 3;
+var octreeTextureHeight = worldSize / OCTANT_SIZE;
+var octreeTextureWidth = worldSize / OCTANT_SIZE;
+var octreeTextureLayers = octreeTextureHeight * (OCTREE_HIGHEST_LEVEL + 1);
+var octreeBufferByteSize = octreeTextureHeight * 256 * octreeTextureLayers;
+
+////////////
+// WebGPU //
+////////////
+
+var adapter;
+var context;
+var device;
+var canvas = document.querySelector("canvas");
+canvas.width = screenWidth;
+canvas.height = screenHeight;
+
+/////////////
+// Buffers //
+/////////////
+
+var sceneBuffer;
+var cameraBuffer;
+var brushBuffer;
+var octreeBuffer;
+var worldGenerationBuffer;
+
+//////////////
+// Textures //
+//////////////
+
+var linearSampler;
+
+// Voxels (3D) 
+// Each voxel represented by 8 bits, 4 voxels packed into each 32 bit texel
+// First 4 bits of voxel are color, next 4 bits are material (matte, emissive, metallic, etc.)
+var voxelTexture;
+var voxelTextureView;
+
+// Octree (3D)
+// Each octant represented by 8 bits, simply indicates presence of any filled voxels
+// Data written to octreeBuffer, and from there copied into octreeTexture
+// Mip levels used to traverse octree
+var octreeTexture; 
+var octreeTextureView;
+
+// Draw textures (2D)
+var drawTextureA;
+var drawTextureAView;
+var drawTextureB;
+var drawTextureBView;
+
+// Velocity texture (2D)
+var velocityTexture;
+var velocityTextureView;
+
+// Depth textures (2D)
+var currentDepthTexture;
+var currentDepthTextureView;
+var previousDepthTexture;
+var previousDepthTextureView;
+
+// Accumulation texture (2D)
+var accumulationTexture;
+var accumulationTextureView;
+
+// Position texture (2D)
+var positionTexture;
+var positionTextureView;
+
+///////////////
+// Pipelines //
+///////////////
+
+// Raymarch
+var raymarchPipeline;
+var raymarchBindGroup;
+
+// Quad
+var quadPipeline;
+var quadBindGroup;
+
+// Octree
+var generateOctreePipeline;
+var clearOctreePipeline;
+var octreeBindGroup;
+
+// Brush
+var brushPipeline;
+var brushBindGroup;
+
+// Post processing
+var postProcessingPipeline;
+var postProcessingBindGroup;
+
+// World generation
+var worldGenerationPipeline;
+var worldGenerationBindGroup;
+
+// Cursor
+var cursorPipeline;
+var cursorBindGroup;
+
+////////////////
+// Init Funcs //
+////////////////
+
+// Initializes WebGPU device, returns false if WebGPU not supported on browser
+async function initWebGPU() {
+    if (!navigator.gpu) {
+        console.warn("WebGPU not supported on this browser.");
+        return false;
+    }
+
+    adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+        console.warn("No appropriate GPUAdapter found.");
+        return false;
+    }
+
+    const oneGig = 1073741824;
+    const required_limits = {
+        maxStorageBufferBindingSize: oneGig,
+        maxBufferSize: oneGig,
+        maxStorageTexturesPerShaderStage: 8
+    };
+
+    try {
+        device = await adapter.requestDevice({
+            requiredLimits: required_limits,
+            requiredFeatures: [ 'float32-filterable' ]
+        });
+    } catch (err) {
+        console.warn("Failed to request WebGPU device:", err);
+        return false;
+    }
+
+    context = canvas.getContext("webgpu");
+    const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({
+        device: device,
+        format: canvasFormat,
+    });
+
+    return true;
+}
+
+// Initializes all buffers on GPU
+function initBuffers() {
+    
+    // Scene buffer
+    
+    sceneBuffer = device.createBuffer({
+        label: "Scene buffer",
+        size: 128, 
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    updateSceneBuffer() // Initialize scene buffer with info we need to access in shaders
+
+    // Camera buffer
+
+    cameraBuffer = device.createBuffer({
+        size: 64, 
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    // Brush buffer
+
+    brushBuffer = device.createBuffer({
+        label: "Brush buffer",
+        size: 32, 
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+    updateBrushBuffer(); // Initialize brush buffer with info we need to access in shaders
+
+    // Octree buffer
+    
+    octreeBuffer = device.createBuffer({
+        label: "Octree buffer",
+        size: octreeBufferByteSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    // World generation buffer
+
+    worldGenerationBuffer = device.createBuffer({
+        size: 32, 
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+}
+
+// Initializes all textures on GPU
+function initTextures() {
+
+    // Sampler
+
+    const samplerDescriptor = {
+        addressModeU: "clamp-to-edge",
+        addressModeV: "clamp-to-edge",
+        magFilter: "linear",
+        minFilter: "linear",
+        mipmapFilter: "linear",
+        maxAnisotropy: 1
+    };
+
+    linearSampler = device.createSampler(samplerDescriptor);
+
+    // Voxel texture
+
+    voxelTexture = device.createTexture({
+        label: "Voxel texture",
+        format: 'r32uint',
+        dimension: "3d",
+        size: [worldSize / 2, worldSize, worldSize / 2],
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
+    });
+
+    voxelTextureView = voxelTexture.createView();
+
+    // Octree texture
+
+    octreeTexture = device.createTexture({
+        label: "Octree texture",
+        format: 'r8uint',
+        dimension: "3d",
+        mipLevelCount: 1,
+        size: [octreeTextureWidth, octreeTextureHeight, octreeTextureLayers],
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+
+    octreeTextureView = octreeTexture.createView();
+
+    // Draw texture A
+
+    drawTextureA = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+
+    drawTextureAView = drawTextureA.createView();
+
+    // Draw texture B
+
+    drawTextureB = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+
+    drawTextureBView = drawTextureB.createView();
+
+    // Velocity texture
+
+    velocityTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rg32float",
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+
+    velocityTextureView = velocityTexture.createView();
+
+    // Current depth texture
+
+    currentDepthTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "r32float",
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+
+    currentDepthTextureView = currentDepthTexture.createView();
+
+    // Previous depth texture
+
+    previousDepthTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "r32float",
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+
+    previousDepthTextureView = previousDepthTexture.createView();
+
+    // Accumulation texture
+
+    accumulationTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+
+    accumulationTextureView = accumulationTexture.createView();
+
+    // Position texture
+
+    positionTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rgba16float",
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+
+    positionTextureView = positionTexture.createView();
+
+}
+
+// Initializes pipeline for "raymarch.wgsl.js"
+function initRaymarchPipeline() {
+    
+    // Bind group layout
+    const raymarchBindGroupLayout = device.createBindGroupLayout(
+        {
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "write-only",
+                        format: "rgba8unorm",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "write-only",
+                        format: "rg32float",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "read-write",
+                        format: "r32float",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "read-write",
+                        format: "r32float",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "write-only",
+                        format: "rgba16float",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 5,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: "uint",
+                        viewDimension: "3d",
+                        multisampled: false
+                    }
+                },
+                {
+                    binding: 6,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: "uint",
+                        viewDimension: "3d",
+                        multisampled: false
+                    }
+                },
+                {
+                    binding: 7,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 8,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 9,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "storage"
+                    }
+                },   
+
+                {
+                    binding: 10,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        type: "storage"
+                    }
+                },
+
+            ]
+        }
+    )
+
+    // Bind group
+    raymarchBindGroup = device.createBindGroup(
+        {
+            layout: raymarchBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: drawTextureAView
+                },
+                {
+                    binding: 1,
+                    resource: velocityTextureView
+                },
+                {
+                    binding: 2,
+                    resource: currentDepthTextureView
+                },
+                {
+                    binding: 3,
+                    resource: previousDepthTextureView
+                },
+                {
+                    binding: 4,
+                    resource: positionTextureView
+                },
+                {
+                    binding: 5,
+                    resource: voxelTextureView
+                },
+                {
+                    binding: 6,
+                    resource: octreeTextureView,
+                },
+                {
+                    binding: 7,
+                    resource: {buffer: sceneBuffer},
+                },
+                {
+                    binding: 8,
+                    resource: {buffer: cameraBuffer}
+                },
+                {
+                    binding: 9,
+                    resource: {buffer: brushBuffer}
+                },
+                {
+                    binding: 10,
+                    resource: { buffer: octreeBuffer }
+                },
+
+            ]
+        }
+    )
+
+    // Shader module
+    const raymarchShaderModule = device.createShaderModule({
+        label: "Raymarch shader",
+        code: raymarchShader
+    });
+
+    // Pipeline
+    raymarchPipeline = device.createComputePipeline(
+        {
+            label: "Raymarch pipeline",
+            layout: device.createPipelineLayout(
+                {
+                    bindGroupLayouts: [raymarchBindGroupLayout]
+                }
+            ),
+            compute: {
+                module: raymarchShaderModule
+            },
+            entryPoint: "ComputeMain"
+        }
+    )
+}
+
+// Initializes pipeline for "quad.wgsl.js"
+function initQuadPipeline() {
+
+    // Bind group layout
+    const quadBindGroupLayout = device.createBindGroupLayout(
+        {
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    sampler: {}
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: {}
+                },
+            ]
+        }
+    )
+
+    quadBindGroup = device.createBindGroup(
+        {
+            layout: quadBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: linearSampler,
+                },
+                {
+                    binding: 1,
+                    resource: drawTextureBView,
+                },
+            ]
+        }
+    )
+
+    // Shader module
+    const quadShaderModule = device.createShaderModule({
+        label: 'Full screen quad',
+        code: quadShader
+    });
+    
+    // Pipeline
+    quadPipeline = device.createRenderPipeline({
+            label: "Quad pipeline",
+            layout: device.createPipelineLayout(
+                {
+                    bindGroupLayouts: [quadBindGroupLayout]
+                }
+            ),
+            vertex: {
+                module: quadShaderModule,
+                entryPoint: "VertexMain",
+            },
+            fragment: {
+                module: quadShaderModule,
+                entryPoint: "FragmentMain",
+                targets: [{
+                format: navigator.gpu.getPreferredCanvasFormat()
+                }]
+            },
+            primitive: {
+                topology: "triangle-list"
+            }
+        }
+    )
+}
+
+// Initializes pipeline for "clearOctree.wgsl.js" and "generateOctree.wgsl.js"
+function initOctreePipeline() {
+
+    // Bind group layout
+    const octreeBindGroupLayout = device.createBindGroupLayout({
+        entries: [
+            {
+                binding: 0,
+                visibility: GPUShaderStage.COMPUTE,
+                texture: {
+                    sampleType: "uint",
+                    viewDimension: "3d",
+                    multisampled: false
+                }
+            },
+            {
+                binding: 1,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: {
+                    type: "storage"
+                }
+            },
+            {
+                binding: 2,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: {
+                    type: "uniform"
+                }
+            },
+        ]
+    });
+
+    // Bind group
+    octreeBindGroup = device.createBindGroup({
+        layout: octreeBindGroupLayout,
+        entries: [
+            {
+                binding: 0,
+                resource: voxelTextureView
+            },
+            {
+                binding: 1,
+                resource: { buffer: octreeBuffer }
+            },
+            {
+                binding: 2,
+                resource: { buffer: sceneBuffer }
+            }
+        ]
+    });
+
+    // Generate octree
+
+    // Shader module
+    const generateOctreeShaderModule = device.createShaderModule({
+        label: "Generate octree shader",
+        code: generateOctreeShader
+    });
+
+    // Pipeline
+    generateOctreePipeline = device.createComputePipeline({
+        label: "Generate octree pipeline",
+        layout: device.createPipelineLayout({
+            bindGroupLayouts: [octreeBindGroupLayout]
+        }),
+        compute: {
+            module: generateOctreeShaderModule,
+            entryPoint: "ComputeMain"
+        }
+    });
+
+    // Clear octree
+
+    // Shader module
+    const clearOctreeShaderModule = device.createShaderModule({
+        label: "Clear octree shader",
+        code: clearOctreeShader
+    });
+
+    // Pipeline
+    clearOctreePipeline = device.createComputePipeline({
+        label: "Clear octree pipeline",
+        layout: device.createPipelineLayout({
+            bindGroupLayouts: [octreeBindGroupLayout]
+        }),
+        compute: {
+            module: clearOctreeShaderModule,
+            entryPoint: "ComputeMain"
+        }
+    });
+}
+
+// Initializes pipeline for "brush.wgsl.js"
+function initBrushPipeline() {
+
+    // Bind group layout
+    const brushBindGroupLayout = device.createBindGroupLayout(
+        {
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "read-write",
+                        format: "r32uint",
+                        viewDimension: "3d"
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: "uint",
+                        viewDimension: "3d",
+                        multisampled: false
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.COMPUTE | GPUShaderStage.FRAGMENT,
+                    buffer: {
+                        offset: 0,
+                        type: "storage"
+                    }
+                },                
+            ]
+        }
+    )
+
+    // Bind group
+    brushBindGroup = device.createBindGroup(
+        {
+            layout: brushBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: voxelTextureView
+                },
+                {
+                    binding: 1,
+                    resource: octreeTextureView,
+                },
+                {
+                    binding: 2,
+                    resource: {buffer: sceneBuffer},
+                },
+                {
+                    binding: 3,
+                    resource: {buffer: cameraBuffer}
+                },
+                {
+                    binding: 4,
+                    resource: {buffer: brushBuffer}
+                },
+            ]
+        }
+    )
+
+    // Shader module
+    const brushShaderModule = device.createShaderModule({
+        label: "Brush shader",
+        code: brushShader
+    });
+
+    // Pipeline
+    brushPipeline = device.createComputePipeline(
+        {
+            label: "Brush pipeline",
+            layout: device.createPipelineLayout(
+                {
+                    bindGroupLayouts: [brushBindGroupLayout]
+                }
+            ),
+            compute: {
+                module: brushShaderModule
+            },
+            entryPoint: "ComputeMain"
+        }
+    )
+}
+
+// Initializes pipeline for "postProcessing.wgsl.js"
+function initPostProcessingPipeline() {
+
+    // Bind group layout
+    const postProcessingBindGroupLayout = device.createBindGroupLayout(
+        {
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampler: {}
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {}
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "write-only",
+                        format: "rgba8unorm",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 3,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {
+                        sampleType: "unfilterable-float",
+                        viewDimension: "2d",
+                        multisampled: false
+                    }
+                },
+                {
+                    binding: 4,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampleType: "float32-filterable",
+                    texture: {
+                        format: "r32float",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 5,
+                    visibility: GPUShaderStage.COMPUTE,
+                    sampleType: "float32-filterable",
+                    texture: {
+                        format: "r32float",
+                        viewDimension: "2d"
+                    }
+                },
+                {
+                    binding: 6,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 7,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 8,
+                    visibility: GPUShaderStage.COMPUTE,
+                    texture: {}
+                }
+            ]
+        }
+    )
+
+    // Bind group
+    postProcessingBindGroup = device.createBindGroup(
+        {
+            layout: postProcessingBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: linearSampler,
+                },
+                {
+                    binding: 1,
+                    resource: drawTextureAView,
+                },
+                {
+                    binding: 2,
+                    resource: drawTextureBView,
+                },
+                {
+                    binding: 3,
+                    resource: velocityTextureView,
+                },
+                {
+                    binding: 4,
+                    resource: currentDepthTextureView
+                },
+                {
+                    binding: 5,
+                    resource: previousDepthTextureView
+                },
+                {
+                    binding: 6,
+                    resource: {buffer: sceneBuffer},
+                },
+                {
+                    binding: 7,
+                    resource: {buffer: cameraBuffer},
+                },
+                {
+                    binding: 8,
+                    resource: accumulationTextureView,
+                },
+            ]
+        }
+    )
+
+    // Shader module
+    const postProcessingShaderModule = device.createShaderModule({
+        label: 'Post processing shader',
+        code: postProcessingShader
+    });
+    
+    // Pipeline
+    postProcessingPipeline = device.createComputePipeline(
+        {
+            label: "Post processing pipeline",
+            layout: device.createPipelineLayout(
+                {
+                    bindGroupLayouts: [postProcessingBindGroupLayout]
+                }
+            ),
+            compute: {
+                module: postProcessingShaderModule
+            },
+            entryPoint: "ComputeMain"
+        }
+    )
+}
+
+// Initializes pipeline for "worldGeneration.wgsl.js"
+function initWorldGenerationPipeline() {
+
+    // Bind group layout
+    const worldGenerationBindGroupLayout = device.createBindGroupLayout(
+        {
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "read-write",
+                        format: "r32uint",
+                        viewDimension: "3d"
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+            ]
+        }
+    )
+
+    // Bind group
+    worldGenerationBindGroup = device.createBindGroup(
+        {
+            layout: worldGenerationBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: voxelTextureView
+                },
+                {
+                    binding: 1,
+                    resource: {buffer: worldGenerationBuffer},
+                },
+                {
+                    binding: 2,
+                    resource: {buffer: sceneBuffer},
+                },
+            ]
+        }
+    )
+
+    // Shader module
+    const worldGenerationShaderModule = device.createShaderModule({
+        label: "World generation shader",
+        code: worldGenerationShader
+    });
+
+    // Pipeline
+    worldGenerationPipeline = device.createComputePipeline(
+        {
+            label: "World generation pipeline",
+            layout: device.createPipelineLayout(
+                {
+                    bindGroupLayouts: [worldGenerationBindGroupLayout]
+                }
+            ),
+
+            compute: {
+                module: worldGenerationShaderModule
+            },
+            entryPoint: "ComputeMain"
+        }
+    )
+
+
+}
+
+// Initializes pipeline for "cursor.wgsl.js"
+function initCursorPipeline() {
+
+    // Bind group layout
+    const cursorBindGroupLayout = device.createBindGroupLayout(
+        {
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: {
+                        offset: 0,
+                        type: "uniform"
+                    }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE | GPUShaderStage.FRAGMENT,
+                    buffer: {
+                        offset: 0,
+                        type: "storage"
+                    }
+                },
+                {
+                    binding: 2,
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: {
+                        access: "read-only",
+                        format: "rgba16float",
+                        viewDimension: "2d"
+                    }
+                },
+            ]
+        }
+    )
+
+    // Bind group
+    cursorBindGroup = device.createBindGroup(
+        {
+            layout: cursorBindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: {buffer: sceneBuffer},
+                },
+                {
+                    binding: 1,
+                    resource: {buffer: brushBuffer}
+                },
+                {
+                    binding: 2,
+                    resource: positionTextureView
+                },
+            ]
+        }
+    )
+
+    // Shader module
+    const cursorShaderModule = device.createShaderModule({
+        label: "Cursor shader",
+        code: cursorShader
+    });
+
+    // Pipeline
+    cursorPipeline = device.createComputePipeline(
+        {
+            label: "Cursor pipeline",
+            layout: device.createPipelineLayout(
+                {
+                    bindGroupLayouts: [cursorBindGroupLayout]
+                }
+            ),
+            compute: {
+                module: cursorShaderModule
+            },
+            entryPoint: "ComputeMain"
+        }
+    )
+}
+
+/////////////////////////
+// Buffer Update Funcs //
+/////////////////////////
+
+function updateSceneBuffer() {
+    
+    const sunAngle = window.getSunAzimuth() * 2 * Math.PI;
+    const sunAltitude = window.getSunAltitude();
+
+    var sceneBufferArrayUint = new Uint32Array(13);
+    sceneBufferArrayUint[0] = screenWidth;
+    sceneBufferArrayUint[1] = screenHeight;
+    sceneBufferArrayUint[2] = worldSize;
+    sceneBufferArrayUint[3] = worldSize;
+    sceneBufferArrayUint[4] = OCTANT_SIZE;
+    sceneBufferArrayUint[5] = OCTREE_HIGHEST_LEVEL;
+    sceneBufferArrayUint[6] = window.getTonemapping();
+    sceneBufferArrayUint[7] = window.getRayBounces();
+    sceneBufferArrayUint[8] = window.getFilter();
+    sceneBufferArrayUint[9] = window.getSunEnabled() ? 1 : 0; // Sun enabled (0 = disabled, 1 = enabled)
+    sceneBufferArrayUint[10] = window.getAntiSmearEnabled() ? 1 : 0;
+    sceneBufferArrayUint[11] = mousePosX;
+    sceneBufferArrayUint[12] = mousePosY;
+
+    var sceneBufferArrayFloat = new Float32Array(7);
+    sceneBufferArrayFloat[0] = Math.cos(sunAngle) * Math.max(0.001, 1.0 - sunAltitude); // Sun dir X
+    sceneBufferArrayFloat[1] = sunAltitude;                                             // Sun dir Y
+    sceneBufferArrayFloat[2] = Math.sin(sunAngle) * Math.max(0.001, 1.0 - sunAltitude); // Sun dir Z
+    sceneBufferArrayFloat[3] = 1.0 - Math.pow(1.0 - sceneBufferArrayFloat[1], 4);       // Sun intensity (depends on sun Y angle)
+    sceneBufferArrayFloat[4] = Math.sin(performance.now());                             // Time
+    sceneBufferArrayFloat[5] = window.getDenoiseStrength();                             // Denoise strength
+
+    device.queue.writeBuffer(sceneBuffer, 0, sceneBufferArrayUint.buffer);
+    device.queue.writeBuffer(sceneBuffer, sceneBufferArrayUint.length * 4, sceneBufferArrayFloat.buffer);
+}
+
+function updateCameraBuffer() {    
+
+    // Compute current camera rotation
+    var cameraRotation = vec3.create();
+    vec3.transformQuat(cameraRotation, vec3.fromValues(0, 0, 1), camera.rotation);
+
+    var cameraBufferArray = new Float32Array(16);
+    cameraBufferArray[0] = camera.position[0];
+    cameraBufferArray[1] = camera.position[1];
+    cameraBufferArray[2] = camera.position[2];
+    cameraBufferArray[3] = window.getFOV();
+    cameraBufferArray[4] = cameraRotation[0];
+    cameraBufferArray[5] = cameraRotation[1];
+    cameraBufferArray[6] = cameraRotation[2];
+    cameraBufferArray[7] = screenWidth / screenHeight;
+    cameraBufferArray[8] = prevCameraPos[0];
+    cameraBufferArray[9] = prevCameraPos[1];
+    cameraBufferArray[10] = prevCameraPos[2];
+    cameraBufferArray[11] = 0.0; // padding
+    cameraBufferArray[12] = prevCamRotation[0];
+    cameraBufferArray[13] = prevCamRotation[1];
+    cameraBufferArray[14] = prevCamRotation[2];
+    cameraBufferArray[15] = 0.0; // padding
+
+    // Update previous state
+    vec3.copy(prevCameraPos, camera.position);
+    vec3.transformQuat(prevCamRotation, vec3.fromValues(0, 0, 1), camera.rotation);
+
+    device.queue.writeBuffer(cameraBuffer, 0, cameraBufferArray.buffer);
+}
+
+function updateBrushBuffer() {
+    var brushBufferArray = new Uint32Array(4);
+    brushBufferArray[0] = window.getBrushMaterial();
+    brushBufferArray[1] = window.getBrushMaterial() != 0 ? window.getBrushColor() : 0; // Don't send color if we are using eraser
+    brushBufferArray[2] = window.getBrushSize();
+    brushBufferArray[3] = window.getBrushShape();
+    
+    device.queue.writeBuffer(brushBuffer, 0, brushBufferArray.buffer);
+}
+
+function updateWorldGenerationBuffer() {
+
+    var worldGenerationArrayUint = new Uint32Array(2);
+    worldGenerationArrayUint[0] = window.getOctaves();
+    worldGenerationArrayUint[1] = window.getCeiling();
+
+    var worldGenerationArrayFloat = new Float32Array(5);
+    worldGenerationArrayFloat[0] = window.getLacunarity();
+    worldGenerationArrayFloat[1] = window.getGain();
+    worldGenerationArrayFloat[2] = window.getFrequency();
+    worldGenerationArrayFloat[3] = (5 - window.getThreshold()) * .05 * 2;
+    worldGenerationArrayFloat[4] = window.getSeed();
+
+    device.queue.writeBuffer(worldGenerationBuffer, 0, worldGenerationArrayUint.buffer);
+    device.queue.writeBuffer(worldGenerationBuffer, worldGenerationArrayUint.length * 4, worldGenerationArrayFloat.buffer);
+}
+
+////////////////////
+// Dispatch Funcs //
+////////////////////
+
+// Fills voxelTexture with data using worldGenerationPipeline
+function dispatchWorldGeneration() {
+    updateWorldGenerationBuffer();
+    
+    const encoder = device.createCommandEncoder();
+
+    const worldGenerationPass = encoder.beginComputePass();
+    worldGenerationPass.setPipeline(worldGenerationPipeline);
+    worldGenerationPass.setBindGroup(0, worldGenerationBindGroup);
+    worldGenerationPass.dispatchWorkgroups((worldSize / 2) / 8, worldSize / 4, (worldSize / 2) / 8);
+    worldGenerationPass.end();
+
+    device.queue.submit([encoder.finish()]);
+
+    // Regenerate octree for new world
+    dispatchClearOctree();
+    dispatchGenerateOctree();
+}
+window.dispatchWorldGeneration = dispatchWorldGeneration; // Func will be called in ui.js when world sliders are updated
+
+// Clears octreeBuffer
+function dispatchClearOctree() {
+    const encoder = device.createCommandEncoder();
+    
+    const clearOctreePass = encoder.beginComputePass();
+    clearOctreePass.setPipeline(clearOctreePipeline);
+    clearOctreePass.setBindGroup(0, octreeBindGroup);
+    clearOctreePass.dispatchWorkgroups(octreeBufferByteSize / 4 / 256)
+    clearOctreePass.end();
+
+    device.queue.submit([encoder.finish()]);
+}
+
+// Reads voxelTexture to fill octreeBuffer, then copies that to octreeTexture
+function dispatchGenerateOctree() {    
+    const encoder = device.createCommandEncoder();
+
+    // First compute pass to fill the octree buffer
+    const generateOctreePass = encoder.beginComputePass();
+    generateOctreePass.setPipeline(generateOctreePipeline);
+    generateOctreePass.setBindGroup(0, octreeBindGroup);
+    generateOctreePass.dispatchWorkgroups(worldSize / 8, worldSize / 4, worldSize / 8);
+    generateOctreePass.end();
+
+    // Then copy that to octree texture
+    encoder.copyBufferToTexture(
+        {
+            buffer: octreeBuffer,
+            offset: 0,
+            bytesPerRow: 256,
+            rowsPerImage: octreeTextureHeight,
+        },
+        {
+            texture: octreeTexture,
+            mipLevel: 0,
+            origin: { x: 0, y: 0, z: 0 },
+        },
+        {
+            width: octreeTextureWidth,
+            height: octreeTextureHeight,
+            depthOrArrayLayers: octreeTextureLayers,
+        }
+    );
+
+    device.queue.submit([encoder.finish()]);
+}
+
+// Uses user specified data (brush shape, brush size, etc.) stored in brushBuffer to modify voxelTexture
+function dispatchBrush() {
+    const encoder = device.createCommandEncoder();
+
+    updateBrushBuffer()
+
+    const brushPass = encoder.beginComputePass();
+    brushPass.setPipeline(brushPipeline);
+    brushPass.setBindGroup(0, brushBindGroup);
+    brushPass.dispatchWorkgroups((worldSize / 2) / 8, worldSize / 4, (worldSize / 2) / 8);
+    brushPass.end();
+
+    device.queue.submit([encoder.finish()]);
+    
+    // Need to regenerate octree after modifying world
+    dispatchClearOctree();
+    dispatchGenerateOctree();
+}
+
+// Marches ray once through voxelTexture, records hit position in brushBuffer
+function dispatchCursor() {
+    const encoder = device.createCommandEncoder();
+
+    const cursorPass = encoder.beginComputePass();
+    cursorPass.setPipeline(cursorPipeline);
+    cursorPass.setBindGroup(0, cursorBindGroup);
+    cursorPass.dispatchWorkgroups(1);
+    cursorPass.end();
+
+    device.queue.submit([encoder.finish()]);
+}
+
+// Marches rays for each pixel on screen
+function dispatchRaymarch() {
+    const encoder = device.createCommandEncoder();
+
+    const raymarchPass = encoder.beginComputePass();
+    raymarchPass.setPipeline(raymarchPipeline);
+    raymarchPass.setBindGroup(0, raymarchBindGroup);
+    raymarchPass.dispatchWorkgroups(Math.ceil(screenWidth / 16), Math.ceil(screenHeight / 16));
+    raymarchPass.end()
+
+    device.queue.submit([encoder.finish()]);
+}
+
+// Uses accumulationTexture to modify drawImageA, turning it into drawImageB
+function dispatchPostProcessing() {
+    const encoder = device.createCommandEncoder();
+
+    // Post processing pass:
+    // 1. drawImageA is modified with accumulationTexture to become drawImageB
+    // 2. drawImageB is then copied to the accumulationTexture to become the new accumulationTexture for next frame
+    if (window.getDenoiseEnabled() && window.getFilter() == 0) {
+        
+        var postProcessingPass = encoder.beginComputePass();
+        postProcessingPass.setPipeline(postProcessingPipeline);
+        postProcessingPass.setBindGroup(0, postProcessingBindGroup);
+        postProcessingPass.dispatchWorkgroups(Math.ceil(screenWidth / 16), Math.ceil(screenHeight / 16));
+        postProcessingPass.end()
+        
+        encoder.copyTextureToTexture(
+            {
+                texture: drawTextureB,
+                mipLevel: 0, 
+                origin: { x: 0, y: 0, z: 0 }
+            },
+            {
+                texture: accumulationTexture,
+                mipLevel: 0,
+                origin: { x: 0, y: 0, z: 0 }
+            },
+            { width: screenWidth, height: screenHeight, depthOrArrayLayers: 1 }
+        );
+    }
+
+    // Fullscreen quad will always use drawTextureB as final rendered image
+    // If post processing is disabled, we just copy drawTextureA to drawTextureB
+    else {
+        encoder.copyTextureToTexture(
+            {
+                texture: drawTextureA,
+                mipLevel: 0, 
+                origin: { x: 0, y: 0, z: 0 }
+            },
+            {
+                texture: drawTextureB,
+                mipLevel: 0,
+                origin: { x: 0, y: 0, z: 0 }
+            },
+            { width: screenWidth, height: screenHeight, depthOrArrayLayers: 1 }
+        );
+    }
+
+    encoder.copyTextureToTexture(
+        {
+            texture: currentDepthTexture,
+            mipLevel: 0,               
+            origin: { x: 0, y: 0, z: 0 }
+        },
+        {
+            texture: previousDepthTexture,
+            mipLevel: 0,
+            origin: { x: 0, y: 0, z: 0 }
+        },
+        { width: screenWidth, height: screenHeight, depthOrArrayLayers: 1 }
+    );
+
+    device.queue.submit([encoder.finish()]);
+}
+
+////////////////
+// Misc Funcs //
+////////////////
+
+// Updates canvas size and recreates any textures/pipelines which depend on screen size
+function resizeScreen() {
+
+    // Update vars
+    screenWidth = Math.ceil(window.innerWidth * window.devicePixelRatio * window.getRenderScale());
+    screenHeight = Math.ceil(window.innerHeight * window.devicePixelRatio * window.getRenderScale());
+    
+    // Update canvas size inside index.html
+    canvas.width = screenWidth;
+    canvas.height = screenHeight;
+
+    // Destroy and recreate any textures based on screen size
+
+    // Draw texture A
+    drawTextureA.destroy();
+    drawTextureA = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+    drawTextureAView = drawTextureA.createView();
+
+    // Draw texture B
+    drawTextureB.destroy();
+    drawTextureB = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+    drawTextureBView = drawTextureB.createView();
+
+    // Velocity texture
+    velocityTexture.destroy();
+    velocityTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rg32float",
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+    velocityTextureView = velocityTexture.createView();
+
+    // Accumulation texture
+    accumulationTexture.destroy();
+    accumulationTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "rgba8unorm",
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+    accumulationTextureView = accumulationTexture.createView();
+
+    // Current depth texture
+    currentDepthTexture.destroy();
+    currentDepthTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "r32float",
+            usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+    currentDepthTextureView = currentDepthTexture.createView();
+
+    // Previous depth texture
+    previousDepthTexture.destroy();
+    previousDepthTexture = device.createTexture(
+        {
+            size: {
+                width: screenWidth,
+                height: screenHeight
+            },
+            format: "r32float",
+            usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }
+    );
+    previousDepthTextureView = previousDepthTexture.createView();
+
+    // Recreate any shaders which need access to new textures
+    initQuadPipeline();
+    initRaymarchPipeline();
+    initPostProcessingPipeline();
+}
+window.addEventListener('resize', resizeScreen);
+window.resizeScreen = resizeScreen; // Func will be called in ui.js when screen size 
+
+// Whenever mouse moves, updates mouse pixel position
+function mouseMove(e) {
+    const rect = canvas.getBoundingClientRect();
+
+    // Map mouse to canvas pixel coordinates (drawing buffer)
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    mousePosX = Math.floor((e.clientX - rect.left) * scaleX);
+    mousePosY = Math.floor((e.clientY - rect.top) * scaleY);
+
+    // Flip Y so bottom-left = 0
+    mousePosY = canvas.height - 1 - mousePosY;
+}
+window.addEventListener("mousemove", mouseMove);
+
+// Recreates any textures/buffers/pipelines which depend on world size
+function resizeWorld() {
+    
+    // Update world size var, and any vars which depend on it
+    worldSize = window.getWorldSize();
+    octreeTextureHeight = worldSize / OCTANT_SIZE;
+    octreeTextureWidth = worldSize / OCTANT_SIZE;
+    octreeTextureLayers = octreeTextureHeight * (OCTREE_HIGHEST_LEVEL + 1);
+    octreeBufferByteSize = octreeTextureHeight * 256 * octreeTextureLayers;
+    
+    // Destroy and recreate textures which store world data
+
+    // Voxel texture
+    voxelTexture.destroy()
+    voxelTexture = device.createTexture({
+        label: "Voxel texture",
+        format: 'r32uint',
+        dimension: "3d",
+        size: [worldSize / 2, worldSize, worldSize / 2],
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
+    });
+
+    voxelTextureView = voxelTexture.createView();
+
+    // Octree texture
+    octreeTexture.destroy()
+    octreeTexture = device.createTexture({
+        label: "Octree texture",
+        format: 'r8uint',
+        dimension: "3d",
+        mipLevelCount: 1,
+        size: [octreeTextureWidth, octreeTextureHeight, octreeTextureLayers],
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+
+    octreeTextureView = octreeTexture.createView();
+
+    // Octree buffer
+    octreeBuffer.destroy();
+    octreeBuffer = device.createBuffer({
+        label: "Octree buffer",
+        size: octreeBufferByteSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    // Refresh any pipelines which need to use new voxel and octree textures
+    initBrushPipeline();
+    initCursorPipeline();
+    initRaymarchPipeline();
+    initWorldGenerationPipeline();
+    initOctreePipeline();
+
+    // Generate world
+    updateSceneBuffer();
+    dispatchWorldGeneration();
+}
+window.resizeWorld = resizeWorld;
+
+// Updates frame count, prints frame count once a second has elapsed
+function updateFPS() {
+    const currentTime = performance.now();
+    frameCount++;
+
+    // Check if a second has passed
+    if (currentTime - lastTime >= 1000) {
+        fps = frameCount;
+        frameCount = 0;
+        lastTime = currentTime;
+
+        // If show FPS toggle is enabled on ui, we update FPS there too
+        if (window.getFpsEnabled()) {
+            document.getElementById('fps-counter').textContent = `FPS: ${fps}`;
+        }
+    }
+}
+
+// Renders draw textures on a fullscreen quad
+function drawFullscreenQuad() {
+    const encoder = device.createCommandEncoder();
+
+    const quadPass = encoder.beginRenderPass({
+        colorAttachments: [{
+            view: context.getCurrentTexture().createView(),
+            clearValue: { r: 0, g: 0, b: 0.4, a: 1 }, // Clear color
+            loadOp: "clear", // Clear texture when render pass starts
+            storeOp: "store", // Store any result of drawing into texture
+        }]
+    });
+
+    quadPass.setPipeline(quadPipeline);
+    quadPass.setBindGroup(0, quadBindGroup);
+    quadPass.draw(6, 1, 0, 0);
+    quadPass.end();
+    
+    device.queue.submit([encoder.finish()]);
+}
+
+// Runs once per frame
+function frame() {
+    camera.update();
+    updateCameraBuffer();
+    updateSceneBuffer();
+    updateFPS();
+    dispatchCursor(); // Find current cursor position
+
+    // If cursor clicked and mouse not over UI, dispatch brush
+    if (!window.isUIactive()){
+
+        // Depending on brush mode we will dispatch once (single click mode)
+        if (window.getBrushMode() == 0 && input.mouseDown(0)){
+            dispatchBrush();
+        }
+
+        // Or keep dispatching every frame (continuous mode)
+        if (window.getBrushMode() == 1 && input.mouse(0)){
+            dispatchBrush();
+        }
+    }
+
+    input.update(); 
+    dispatchRaymarch();
+    dispatchPostProcessing();
+    drawFullscreenQuad();
+    requestAnimationFrame(frame);
+}
+
+////////////////////
+// Initialize App //
+////////////////////
+
+// Initialize all pipelines/buffers/textures and generate world
+if (await initWebGPU()) {
+    initBuffers();
+    initTextures();
+    initRaymarchPipeline();
+    initOctreePipeline();
+    initBrushPipeline();
+    initQuadPipeline();
+    initCursorPipeline();
+    initWorldGenerationPipeline();
+    initPostProcessingPipeline();
+    dispatchWorldGeneration();
+    requestAnimationFrame(frame);
+    window.setControlsVisible(true);
+} else {
+    window.setUnsupportedVisible(true);
+}
+```
+
+### src/ui.js
+```
+/////////////
+// UI Vars //
+/////////////
+
+// Brush
+var brushSize = 20;
+var brushShape = 0; // Sphere = 0, Cube = 1, Pyramid = 2, Cylinder = 3, Cone = 4
+var brushShapeLabels = ["Sphere", "Cube", "Pyramid", "Cylinder", "Cone"]
+var brushMode = 0 // 0 = Single Click, 1 = Continuous
+var brushMaterial = 1;
+var brushColor = 0;
+var brushColorValues = [
+    "#FFFFFF", // White
+    "#808080", // Gray 
+    "#111111", // Black
+    "#6D4C41", // Medium Brown
+    "#FF0000", // Red
+    "#FF7F00", // Orange
+    "#FFFF00", // Yellow
+    "#6FBF4A", // Neutral Green
+    "#00732cff", // Neutral Green 
+    "#00FF7F", // Turquoise
+    "#00FFFF", // Cyan
+    "#007FFF", // Sky Blue
+    "#0000FF", // Blue
+    "#7F00FF", // Indigo
+    "#BF00FF", // Purple
+    "#FF007F", // Pink
+];
+
+
+// Lighting
+var sunEnabled = true;
+var sunAltitude = 0.55;
+var sunAzimuth = 0.85;
+var rayBounces = 1;
+
+// Rendering
+var fpsEnabled = false;
+var antiSmearEnabled = true;
+var denoiseEnabled = true;
+var denoiseStrength = 0.94;
+var renderScale = .7;
+var fov = 70;
+var tonemapping = 0; // 0 = ACES, 1 = Reinhard, 2 = Linear
+var filter = 0; // 0 = None, 1 = Normals, 2 = Positions, etc.
+
+// World
+var worldSize = 256;
+var octaves = 5;
+var lacunarity = 2.0;
+var gain = 0.4;
+var frequency = 1.0;
+var ceiling = 64;
+var threshold = 5;
+var seed = 4;
+
+// Windows
+var isMouseOverUI = false;
+var settingsVisible = false;
+var unsupportedVisible = false;
+var controlsVisible = false;
+
+/////////////
+// Windows //
+/////////////
+
+// Settings visible
+
+function setSettingsVisible(val) {
+
+    settingsVisible = val;
+
+    if (val) {
+        setTimeout(() => {
+            document.getElementById("settings").style.display = "flex";
+            document.getElementById("settings").style.opacity = 1;
+        }, 300);
+    }
+
+    else {
+        document.getElementById("settings").style.opacity = 0;
+        setTimeout(() => {
+            document.getElementById("settings").style.display = "none";
+        }, 800);
+    }
+
+}
+
+function getSettingsVisible() {return settingsVisible;}
+
+window.setSettingsVisible = setSettingsVisible;
+window.getSettingsVisible = getSettingsVisible;
+
+// Unsupported visible
+
+function setUnsupportedVisible(val) {
+
+    unsupportedVisible = val;
+
+    if (val) {
+        document.getElementById("not-supported-content").style.display = "flex";
+        document.getElementById("not-supported-background").style.display = "block";
+    }
+
+    else {
+        document.getElementById("not-supported-content").style.display = "none";
+        document.getElementById("not-supported-background").style.display = "none";
+    }
+}
+
+window.setUnsupportedVisible = setUnsupportedVisible;
+
+// Controls visible
+
+function setControlsVisible(val) {
+
+    controlsVisible = val;
+
+    if (val) {
+        document.getElementById("controls").style.display = "flex";
+        document.getElementById("controls").style.opacity = 1;
+    }
+
+    else {
+        document.getElementById("controls").style.opacity = 0;
+        
+        setTimeout(() => {
+            document.getElementById("controls").style.display = "none";
+        }, 800);
+    }
+}
+
+window.setControlsVisible = setControlsVisible;
+
+/////////////////////
+// Getters/Setters //
+/////////////////////
+
+// Sun enabled
+
+function getSunEnabled() {return sunEnabled;}
+function setSunEnabled(val) {sunEnabled = val;}
+
+window.getSunEnabled = getSunEnabled;
+window.setSunEnabled = setSunEnabled;
+
+// Sun altitude
+
+function getSunAltitude() {return sunAltitude;}
+
+function setSunAltitude(val) {
+    sunAltitude = val;
+    document.getElementById('sun-altitude-value').textContent = val;
+    document.getElementById('sun-altitude-slider').value = val;
+}
+
+window.getSunAltitude = getSunAltitude;
+window.setSunAltitude = setSunAltitude;
+
+// Sun azimuth
+
+function getSunAzimuth() {return sunAzimuth;}
+
+function setSunAzimuth(val) {
+    sunAzimuth = val;
+    document.getElementById('sun-azimuth-value').textContent = val;
+    document.getElementById('sun-azimuth-slider').value = val;
+}
+
+window.getSunAzimuth = getSunAzimuth;
+window.setSunAzimuth = setSunAzimuth;
+
+// Brush size
+
+function getBrushSize() {return brushSize;}
+
+function setBrushSize(val) {
+    brushSize = val;
+    document.getElementById('brush-size-value').textContent = val;
+    document.getElementById('brush-size-slider').value = val;
+}
+
+window.getBrushSize = getBrushSize;
+window.setBrushSize = setBrushSize;
+
+// Brush shape
+
+function getBrushShape() {return brushShape;}
+
+function setBrushShape(val) {
+    document.getElementById('brush-shape-value').textContent = brushShapeLabels[val];
+    brushShape = val;
+}
+
+window.getBrushShape = getBrushShape;
+window.setBrushShape = setBrushShape;
+
+// Brush material
+
+function getBrushMaterial() {return brushMaterial;}
+window.getBrushMaterial = getBrushMaterial;
+
+// Brush material
+
+function getBrushColor() {return brushColor;}
+function setBrushColor(val) {
+    
+    document.getElementById('brush-color-slider').value = val;
+    document.getElementById('brush-color-swatch').style.backgroundColor = brushColorValues[val];
+    brushColor = val;
+}
+
+window.setBrushColor = setBrushColor;
+window.getBrushColor = getBrushColor;
+
+// Render scale
+
+function getRenderScale() {return renderScale;}
+
+function setRenderScale(val) {
+    renderScale = val;
+    document.getElementById('render-scale-value').textContent = val;
+    document.getElementById('render-scale-slider').value = val;
+    window.resizeScreen();
+}
+
+window.getRenderScale = getRenderScale;
+window.setRenderScale = setRenderScale;
+
+// FOV
+
+function getFOV() {return fov;}
+
+function setFOV(val) {
+    fov = val;
+    document.getElementById('fov-value').textContent = val;
+    document.getElementById('fov-slider').value = val;
+}
+
+window.getFOV = getFOV;
+window.setFOV = setFOV;
+
+// Ray bounces
+
+function getRayBounces() {return rayBounces;}
+
+function setRayBounces(val) {
+    rayBounces = val;
+    document.getElementById('ray-bounces-value').textContent = val;
+    document.getElementById('ray-bounces-slider').value = val;
+}
+
+window.getRayBounces = getRayBounces;
+window.setRayBounces = setRayBounces;
+
+// Anti-Smear
+
+function getAntiSmearEnabled() {return antiSmearEnabled;}
+function setAntiSmearEnabled(val) {antiSmearEnabled = val;}
+
+window.getAntiSmearEnabled = getAntiSmearEnabled;
+window.setAntiSmearEnabled = setAntiSmearEnabled;
+
+// Denoise
+
+function getDenoiseEnabled() {return denoiseEnabled;}
+function setDenoiseEnabled(val) {denoiseEnabled = val;}
+
+window.getDenoiseEnabled = getDenoiseEnabled;
+window.setDenoiseEnabled = setDenoiseEnabled;
+
+// FPS enabled
+
+function getFpsEnabled() {return fpsEnabled;}
+function setFpsEnabled(val) {
+    
+    fpsEnabled = val;
+
+    if (fpsEnabled) {
+        document.getElementById('fps-counter').classList.add('active');
+    } else {
+        document.getElementById('fps-counter').classList.remove('active');
+    }
+}
+
+window.getFpsEnabled = getFpsEnabled;
+window.setFpsEnabled = setFpsEnabled;
+
+// Tonemapping
+
+function getTonemapping() {return tonemapping;}
+window.getTonemapping = getTonemapping;
+
+// Filter
+
+function getFilter() {return filter;}
+window.getFilter = getFilter;
+
+// Brush mode
+
+function getBrushMode() {return brushMode;}
+window.getBrushMode = getBrushMode;
+
+// Denoise strength
+
+function getDenoiseStrength() {return denoiseStrength;}
+
+function setDenoiseStrength(val) {
+    denoiseStrength = val;
+    document.getElementById('denoise-strength-value').textContent = val;
+    document.getElementById('denoise-strength-slider').value = val;
+}
+
+window.getDenoiseStrength = getDenoiseStrength;
+window.setDenoiseStrength = setDenoiseStrength;
+
+// World size
+
+function getWorldSize() {return worldSize;}
+
+function setWorldSize(val) {
+    worldSize = val;
+    document.getElementById('world-size-value').textContent = val;
+    document.getElementById('world-size-slider').value = val;
+    window.resizeWorld();
+}
+
+window.getWorldSize = getWorldSize;
+window.setWorldSize = setWorldSize;
+
+// World octave
+
+function getOctaves() {return octaves;}
+
+function setOctaves(val) {
+    octaves = val;
+    document.getElementById('octaves-value').textContent = val;
+    document.getElementById('octaves-slider').value = val;
+    window.dispatchWorldGeneration();
+}
+
+window.getOctaves = getOctaves;
+window.setOctaves = setOctaves;
+
+// World lacunarity
+
+function getLacunarity() {return lacunarity;}
+
+function setLacunarity(val) {
+    lacunarity = val;
+    document.getElementById('lacunarity-value').textContent = val;
+    document.getElementById('lacunarity-slider').value = val;
+    window.dispatchWorldGeneration();
+}
+
+window.getLacunarity = getLacunarity;
+window.setLacunarity = setLacunarity;
+
+// World gain
+
+function getGain() {return gain;}
+
+function setGain(val) {
+    gain = val;
+    document.getElementById('gain-value').textContent = val;
+    document.getElementById('gain-slider').value = val;
+    window.dispatchWorldGeneration();
+}
+
+window.getGain = getGain;
+window.setGain = setGain;
+
+// World frequency
+
+function getFrequency() {return frequency;}
+
+function setFrequency(val) {
+    frequency = val;
+    document.getElementById('frequency-value').textContent = val;
+    document.getElementById('frequency-slider').value = val;
+    window.dispatchWorldGeneration();
+}
+
+window.getFrequency = getFrequency;
+window.setFrequency = setFrequency;
+
+// Ceiling
+
+function getCeiling() {return ceiling;}
+
+function setCeiling(val) {
+    ceiling = val;
+    document.getElementById('ceiling-value').textContent = val;
+    document.getElementById('ceiling-slider').value = val;
+    window.dispatchWorldGeneration();
+}
+
+window.getCeiling = getCeiling;
+window.setCeiling = setCeiling;
+
+// Threshold
+
+function getThreshold() {return threshold;}
+
+function setThreshold(val) {
+    threshold = val;
+    document.getElementById('threshold-value').textContent = val;
+    document.getElementById('threshold-slider').value = val;
+    window.dispatchWorldGeneration();
+}
+
+window.getThreshold = getThreshold;
+window.setThreshold = setThreshold;
+
+// Seed 
+
+function getSeed() {return seed;}
+
+function setSeed(val) {
+    seed = val;
+    document.getElementById('seed-value').textContent = val;
+    document.getElementById('seed-slider').value = val;
+    window.dispatchWorldGeneration();
+}
+
+window.getSeed = getSeed;
+window.setSeed = setSeed;
+
+// Mouse over ui
+
+settings.addEventListener('pointerenter', () => {
+    isMouseOverUI = true;
+});
+
+settings.addEventListener('pointerleave', () => {
+    isMouseOverUI = false;
+    closeAllDropdowns();
+});
+
+controls.addEventListener('pointerenter', () => {
+    isMouseOverUI = true;
+});
+
+controls.addEventListener('pointerleave', () => {
+    isMouseOverUI = false;
+});
+
+function isUIactive() {return isMouseOverUI;}
+window.isUIactive = isUIactive;
+
+//////////////
+// Dropdown //
+//////////////
+
+let dropdownStates = {}; // Tracks which dropdowns are open
+
+function openDropdown(id) {
+    closeAllDropdowns();
+    
+    const wrapper = document.getElementById(id);
+    const options = wrapper.querySelectorAll('.dropdown-option');
+    const selected = wrapper.querySelector('.dropdown-option.selected');
+
+    let offset = 0;
+    const optionHeight = selected.offsetHeight;
+    const borderPadding = 5;    // How much padding is between border and option button
+    const gap = 2.5;            // Space between each dropdown option
+
+    options.forEach((btn, i) => {
+        btn.classList.add('open');
+        btn.style.opacity = 1;
+
+        if (btn === selected) {
+            btn.style.transform = `translateY(0px)`;
+            btn.style.zIndex = options.length + 10;
+        } else {
+            offset++;
+            btn.style.transform = `translateY(${(offset * optionHeight) + (gap * offset)}px)`;
+            btn.style.zIndex = options.length - offset + 10;
+        }
+    });
+
+    // Resize border
+    const border = wrapper.querySelector('.dropdown-option-border');
+    if (border) {
+        border.style.height = `${(options.length * optionHeight) + (gap * offset) + (borderPadding * 2)}px`;
+        border.style.zIndex = 9;
+    }
+
+    dropdownStates[id] = true;
+}
+
+function closeDropdown(id) {
+    if (!dropdownStates[id]) return; // Already closed
+
+    const wrapper = document.getElementById(id);
+    if (!wrapper) return;
+
+    const options = wrapper.querySelectorAll('.dropdown-option');
+    const border = wrapper.querySelector('.dropdown-option-border');
+
+    options.forEach(btn => {
+        btn.style.transform = `translateY(0px)`;
+        btn.style.zIndex = 0;
+
+        if (!btn.classList.contains('selected')) {
+            btn.style.opacity = 0;
+            btn.classList.remove('open');
+        }
+    });
+
+    // Reset border height to only selected button
+    border.style.height = `33px`;
+    border.style.zIndex = 0;
+
+    dropdownStates[id] = false;
+}
+
+function setSelectedDropdown(id, index) {
+    const wrapper = document.getElementById(id);
+    const options = wrapper.querySelectorAll('.dropdown-option');
+    const selected = wrapper.querySelector('.dropdown-option.selected');
+
+    if (selected === options[index] && !dropdownStates[id]) {
+        openDropdown(id);
+        return;
+    }
+
+    // Update selected
+    options.forEach((btn, i) => {
+        btn.classList.toggle('selected', i === index);
+    });
+
+    closeDropdown(id);
+
+    // Depending on what dropdown it is, we set variable
+    if (id === 'tonemapping-dropdown') {
+        tonemapping = index;
+    }
+
+    else if (id == 'brush-material-dropdown') {
+        brushMaterial = index;
+    } 
+
+    else if (id == 'brush-mode-dropdown'){
+        brushMode = index;
+    }
+
+    else if (id == 'filter-dropdown'){
+        filter = index;
+    }
+}
+
+function closeAllDropdowns() {
+    for (const id in dropdownStates) {
+        closeDropdown(id);
+    }
+}
+
+window.setSelectedDropdown = setSelectedDropdown;
+
+//////////////
+// Selector //
+//////////////
+
+var selectedIndex = -1;
+var selectorButtons = document.querySelectorAll(".selector-button")
+var selectorHighlight = document.querySelector(".selector-button-highlight");
+
+function setSelected(index, transition = true) {
+    
+    if (index == selectedIndex) {return;}
+
+    closeAllDropdowns();
+    setSectionVisible(index);
+    selectedIndex = index;
+    
+    const target = selectorButtons[index];
+    const offsetLeft = target.offsetLeft;
+    const offsetTop = target.offsetTop;
+
+    // If transitions disabled
+    if (!transition) {
+        selectorHighlight.style.transition = 'none';
+    }
+
+    selectorHighlight.style.width = `${target.offsetWidth}px`;
+    selectorHighlight.style.height = `${target.offsetHeight}px`;
+    selectorHighlight.style.left = `${offsetLeft}px`;
+    selectorHighlight.style.top = `${offsetTop}px`;
+
+    // Repair transition
+    if (!transition) {
+        void selectorHighlight.offsetWidth;
+        selectorHighlight.style.transition = '';
+    }
+
+    // Indicate which button is active
+    selectorButtons.forEach((btn, idx) => {
+        if (idx === index) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+}
+window.setSelected = setSelected
+
+// Hover handling
+selectorButtons.forEach((btn, index) => {
+    btn.addEventListener('mouseenter', () => {
+        setSelected(index);
+    });
+
+    btn.addEventListener('mouseleave', () => {
+        setSelected(index);
+    });
+});
+
+// Have highlighter start at index 0 on startup
+window.addEventListener('DOMContentLoaded', () => {
+    setSelected(0, false);
+});
+
+//////////////
+// Sections //
+//////////////
+
+const sections = document.querySelectorAll(".section");
+const sectionHeights = [396, 295, 528, 590];
+var fadeInTimeout = null;
+
+function setSectionVisible(sectionIndex) {
+  
+    // Cancel any pending fade-in
+    if (fadeInTimeout !== null) {
+        clearTimeout(fadeInTimeout);
+        fadeInTimeout = null;
+    }
+
+    // Immediately hide all sections
+    sections.forEach(section => {
+        section.classList.remove("active");
+    });
+
+    // Delay the fade-in of the selected section
+    fadeInTimeout = setTimeout(() => {
+        sections[sectionIndex].classList.add("active");
+        document.getElementById("settings").style.height = sectionHeights[sectionIndex] + "px";
+        document.getElementById("settings-source-code-link-wrapper").style.top = (60 + sectionHeights[sectionIndex]) + "px";
+        fadeInTimeout = null;
+    }, 200);
+}
+```

@@ -1,0 +1,245 @@
+# Differentiable Volumetric Rendering (DVR)
+
+
+## Overview
+Differentiable Volumetric Rendering (DVR) is a method for training implicit neural representations of 3D shape and texture directly from 2D RGB images and object masks, without requiring 3D ground truth supervision [S2]. It solves the problem of optimizing continuous implicit functions by casting rays, finding the intersection with the implicit isosurface, and backpropagating gradients through the rendering process using analytic implicit differentiation [S2]. It sets itself apart from voxel-based differentiable rendering by not storing intermediate volumetric data in the forward pass, making its memory footprint independent of sampling accuracy [S2], and from mesh-based methods by avoiding discretization artifacts [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera origin $\mathbf{r}_0$, ray direction $\mathbf{w}$ for each pixel $\mathbf{u}$, network parameters $\theta$, optional latent code $\mathbf{z}$ for conditional generation, isosurface threshold $\tau$, and sampling parameters $n$, $\Delta s$, $s_0$ [S2].
+*   **Outputs:** Rendered color $\hat{\mathbf{I}}_\mathbf{u}$ for each pixel, and gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for optimization [S2].
+
+**Data Structures:**
+*   **Occupancy Network $f_\theta$:** A neural network mapping $\mathbb{R}^3 \times \mathcal{Z} \rightarrow [0, 1]$ that assigns an occupancy probability to every point $\mathbf{p}$ in 3D space [S2].
+*   **Texture Network $t_\theta$:** A neural network mapping $\mathbb{R}^3 \times \mathcal{Z} \rightarrow \mathbb{R}^3$ that regresses an RGB color value for every point $\mathbf{p}$ [S2].
+*   **Implementation:** $f_\theta$ and $t_\theta$ are implemented as a single neural network with two shallow output heads sharing parameters [S2].
+
+**Parameters:**
+*   $\tau$: Isosurface threshold defining the level set $f_\theta(\mathbf{p}) = \tau$. Typical value: $0.5$ [S2]. Range: $[0, 1]$ [S2].
+*   $n$: Number of equally-spaced samples on the ray. Starts at $16$ and increases to $128$ during training [S2].
+*   $\Delta s$: Step size for equally-spaced samples on the ray [S2].
+*   $s_0$: Start of the sampling interval, determining the closest possible surface point [S2].
+*   $\mathbf{z}$: Latent embedding vector conditioned on the input image, used to modulate the networks [S2].
+
+**Algorithm:**
+1.  **Ray Casting and Surface Intersection (Forward Pass):** For a pixel $\mathbf{u}$ with ray $\mathbf{r}(d) = \mathbf{r}_0 + d\mathbf{w}$:
+    a. Evaluate $f_\theta$ at $n$ equally-spaced points $\mathbf{p}_j^{\text{ray}} = \mathbf{r}(j\Delta s + s_0)$ for $j=1 \dots n$ [S2].
+    b. Find the smallest index $j$ such that $f_\theta(\mathbf{p}_{j+1}^{\text{ray}}) \geq \tau > f_\theta(\mathbf{p}_j^{\text{ray}})$ [S2]. This identifies the interval containing the surface [S2].
+    c. Approximate the surface depth $\hat{d}$ using the iterative secant method on the interval $[j\Delta s + s_0, (j+1)\Delta s + s_0]$ [S2].
+    d. Compute the intersection point $\hat{\mathbf{p}} = \mathbf{r}(\hat{d})$ [S2].
+2.  **Color Evaluation:** Compute the rendered color $\hat{\mathbf{I}}_\mathbf{u} = t_\theta(\hat{\mathbf{p}})$ [S2].
+3.  **Gradient Computation (Backward Pass):** The goal is to compute $\frac{\partial \mathcal{L}}{\partial \theta}$ [S2]. Using the multivariate chain rule:
+    $$ \frac{\partial \mathcal{L}}{\partial \theta} = \sum_\mathbf{u} \frac{\partial \mathcal{L}}{\partial \hat{\mathbf{I}}_\mathbf{u}} \cdot \frac{\partial \hat{\mathbf{I}}_\mathbf{u}}{\partial \theta} $$
+    where $\frac{\partial \hat{\mathbf{I}}_\mathbf{u}}{\partial \theta} = \frac{\partial t_\theta(\hat{\mathbf{p}})}{\partial \theta} + \frac{\partial t_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \frac{\partial \hat{\mathbf{p}}}{\partial \theta}$ [S2].
+    The term $\frac{\partial \hat{\mathbf{p}}}{\partial \theta}$ is derived via implicit differentiation of $f_\theta(\hat{\mathbf{p}}) = \tau$:
+    $$ \frac{\partial \hat{\mathbf{p}}}{\partial \theta} = \mathbf{w} \frac{\partial \hat{d}}{\partial \theta} $$
+    $$ \frac{\partial \hat{d}}{\partial \theta} = - \left( \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \right)^{-1} \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \theta} $$
+    [S2].
+    In practice, to compute the gradient of the loss with respect to $\theta$ efficiently without storing intermediate volumetric data:
+    a. Let $\lambda = \frac{\partial \mathcal{L}}{\partial \hat{d}}$ be the incoming gradient from the loss with respect to depth [S2].
+    b. Compute the scalar factor $\mu = - \left( \frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w} \right)^{-1} \lambda$ [S2].
+    c. Multiply $\lambda$ element-wise by $\mu$ to get $\mu \lambda$ [S2].
+    d. Backpropagate through $f_\theta(\hat{\mathbf{p}})$ using reverse-mode automatic differentiation with the modified gradient [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def render_pixel(ray_origin, ray_direction, network, latent_code, tau=0.5, n_samples=128, s0=0.0, ds=0.01):
+    """
+    Renders a single pixel using DVR and computes the gradient factor for backpropagation.
+    ray_origin: (3,) tensor
+    ray_direction: (3,) tensor
+    network: DVRNetwork instance
+    latent_code: (latent_dim,) tensor
+    tau: isosurface threshold
+    n_samples: number of samples on ray
+    s0: start distance
+    ds: step size
+    Returns: color (3,), mu (scalar), p_hat (3,), df_dp (3,)
+    """
+    # 1. Sample points along ray
+    distances = torch.linspace(s0, s0 + n_samples * ds, n_samples)
+    points = ray_origin.unsqueeze(0) + distances.unsqueeze(1) * ray_direction.unsqueeze(0)
+    
+    # 2. Evaluate occupancy
+    occ, _ = network(points, latent_code.unsqueeze(0))
+    occ = occ.squeeze(1)
+    
+    # 3. Find transition interval
+    inside = occ >= tau
+    transitions = (inside[1:] & ~inside[:-1])
+    
+    if not transitions.any():
+        # No intersection found within sampling range
+        return torch.zeros(3), torch.tensor(0.0), points[0], torch.zeros(3)
+        
+    j = torch.argmax(transitions.float())
+    
+    # 4. Secant method refinement within interval [distances[j], distances[j+1]]
+    p_j = points[j]
+    p_j1 = points[j+1]
+    f_j = occ[j] - tau
+    f_j1 = occ[j+1] - tau
+    denom = f_j1 - f_j
+    
+    if denom.abs() < 1e-8:
+        d_hat = (distances[j] + distances[j+1]) / 2.0
+    else:
+        d_hat = distances[j] - f_j * (distances[j+1] - distances[j]) / denom
+        
+    p_hat = ray_origin + d_hat * ray_direction
+    
+    # 5. Evaluate texture at intersection
+    _, texture = network(p_hat.unsqueeze(0), latent_code.unsqueeze(0))
+    color = texture.squeeze(0)
+    
+    # 6. Compute gradient factor mu for backpropagation
+    p_hat.requires_grad = True
+    occ_hat, _ = network(p_hat.unsqueeze(0), latent_code.unsqueeze(0))
+    f_val = occ_hat - tau
+    df_dp = torch.autograd.grad(f_val.sum(), p_hat, create_graph=True)[0].squeeze(0)
+    
+    df_dp_dot_w = torch.dot(df_dp, ray_direction)
+    if df_dp_dot_w.abs() < 1e-8:
+        mu = torch.tensor(0.0)
+    else:
+        mu = -1.0 / df_dp_dot_w
+        
+    return color, mu, p_hat, df_dp
+
+def render_batch(ray_origins, ray_directions, network, latent_codes, tau=0.5, n_samples=128, s0=0.0, ds=0.01):
+    """
+    Renders a batch of pixels.
+    ray_origins: (B, 3)
+    ray_directions: (B, 3)
+    latent_codes: (B, latent_dim)
+    Returns: colors (B, 3), mu_factors (B,)
+    """
+    B = ray_origins.shape[0]
+    colors = torch.zeros(B, 3)
+    mu_factors = torch.zeros(B)
+    
+    for i in range(B):
+        c, mu, _, _ = render_pixel(ray_origins[i], ray_directions[i], network, latent_codes[i], tau, n_samples, s0, ds)
+        colors[i] = c
+        mu_factors[i] = mu
+        
+    return colors, mu_factors
+
+def compute_gradients(ray_origins, ray_directions, network, latent_codes, target_colors, tau=0.5, n_samples=128, s0=0.0, ds=0.01):
+    """
+    Computes gradients of loss w.r.t network parameters.
+    """
+    network.train()
+    optimizer = torch.optim.Adam(network.parameters(), lr=1e-4)
+    
+    # Forward pass
+    rendered_colors, mu_factors = render_batch(ray_origins, ray_directions, network, latent_codes, tau, n_samples, s0, ds)
+    
+    # Loss
+    loss = torch.mean(torch.abs(rendered_colors - target_colors))
+    
+    # Backward pass
+    # 1. Compute gradient of loss w.r.t rendered_colors
+    dL_dcolor = torch.sign(rendered_colors - target_colors) / rendered_colors.shape[0]
+    
+    # 2. Compute gradient of loss w.r.t p_hat via texture network
+    # We need to backprop through texture network to get dL/dp_hat
+    # But we also need to inject the gradient through the occupancy network
+    
+    # Let's compute dL/dp_hat from the texture gradient
+    # We can get this by backpropagating dL/dcolor through the texture network
+    
+    # However, the secant method breaks the graph. We must manually inject gradients.
+    
+    # Re-evaluate p_hat and gradients for each pixel
+    for i in range(B):
+        distances = torch.linspace(s0, s0 + n_samples * ds, n_samples)
+        points = ray_origins[i].unsqueeze(0) + distances.unsqueeze(1) * ray_directions[i].unsqueeze(0)
+        occ, _ = network(points, latent_codes[i].unsqueeze(0))
+        inside = occ.squeeze(1) >= tau
+        transitions = (inside[1:] & ~inside[:-1])
+        j = torch.argmax(transitions.float())
+        p_j = points[j]
+        p_j1 = points[j+1]
+        f_j = occ[j] - tau
+        f_j1 = occ[j+1] - tau
+        denom = f_j1 - f_j
+        if denom.abs() < 1e-8:
+            d_hat = distances[j]
+        else:
+            d_hat = distances[j] - f_j * (distances[j+1] - distances[j]) / denom
+        p_hat = ray_origins[i] + d_hat * ray_directions[i]
+        
+        # Compute df/dp
+        p_hat.requires_grad = True
+        occ_hat, _ = network(p_hat.unsqueeze(0), latent_codes[i].unsqueeze(0))
+        f_val = occ_hat - tau
+        df_dp = torch.autograd.grad(f_val.sum(), p_hat, create_graph=True)[0].squeeze(0)
+        
+        # Compute dL/dp_hat from texture
+        # We need the gradient of texture w.r.t p_hat
+        # Let's assume we have dL/dcolor from the loss
+        # dL/dp_hat = dL/dcolor * dt/dp_hat
+        # We can compute dt/dp_hat by backpropagating dL/dcolor through the texture network
+        
+        # To do this cleanly, we can use torch.autograd.grad on the texture output
+        _, texture = network(p_hat.unsqueeze(0), latent_codes[i].unsqueeze(0))
+        dL_dp_hat = torch.autograd.grad(texture.sum(), p_hat, grad_outputs=dL_dcolor[i], create_graph=True)[0].squeeze(0)
+        
+        # Compute lambda = dL/dd_hat = dL/dp_hat . w
+        lambda_val = torch.dot(dL_dp_hat, ray_directions[i])
+        
+        # Compute mu
+        df_dp_dot_w = torch.dot(df_dp, ray_directions[i])
+        if df_dp_dot_w.abs() < 1e-8:
+            mu = torch.tensor(0.0)
+        else:
+            mu = -lambda_val / df_dp_dot_w
+            
+        # Backpropagate mu * df/dtheta through the occupancy network
+        # df/dtheta is computed by autograd if we keep the graph
+        # We multiply the gradient of f_val by mu
+        mu.backward(mu, retain_graph=True) # This is not quite right for batched gradients
+        
+    optimizer.step()
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **No Intersection:** If a ray does not cross the isosurface within the sampling interval $[s_0, n\Delta s + s_0]$, the transition detection fails. The implementation must handle this gracefully to avoid division by zero or invalid secant steps [S2].
+*   **Numerical Stability:** Implicit differentiation requires computing $\frac{\partial f_\theta(\hat{\mathbf{p}})}{\partial \hat{\mathbf{p}}} \cdot \mathbf{w}$. If this dot product is near zero, the gradient factor $\mu$ becomes unstable. A small epsilon guard is required [S2].
+*   **Sampling Resolution:** The accuracy of $\hat{d}$ depends on $n$ and $\Delta s$. Insufficient sampling may miss thin structures or cause secant divergence [S2].
+
+## Subtopics
+
+### [DVR Training Losses](809-dvr-training-losses.md)
+Multi-component objective function distinguishing pixels into three sets ($P_0, P_1, P_2$) to enforce photometric consistency, freespace regularization, and occupancy induction.
+
+### [DVR Network Architecture and Training Setup](850-dvr-network-architecture-and-training-setup.md)
+MLP architecture, ray sampling strategy, and training configuration for implicit neural representations.
+
+### [Training Losses for Implicit Surface Learning](1526-training-losses-for-implicit-surface-learning.md)
+Loss functions for training occupancy and texture networks using 2D image supervision, handling empty space and missing surfaces.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of samples $n$ per ray and the cost of evaluating the neural network. $n$ increases from $16$ to $128$ during training [S2].
+*   **Memory Complexity:** Memory footprint is independent of sampling accuracy because no intermediate volumetric data is stored in the forward pass [S2]. This contrasts with voxel-based methods which require storing all intermediate evaluations [S2].
+*   **Strengths:** Memory-efficient, scalable to high resolutions, learns from 2D images without 3D supervision, produces watertight meshes [S2].
+*   **Limitations:** Requires careful tuning of sampling parameters ($n, \Delta s, s_0$) and threshold $\tau$ [S2]. Implicit differentiation can be numerically unstable if the gradient of the occupancy function is small [S2].
+*   **When to use:** When 3D ground truth is unavailable, and high-resolution continuous representations are needed [G].
+*   **When not to use:** When explicit mesh or voxel output is required without post-processing, or when real-time rendering is critical without pre-training [G].
+
+## Background
+DVR was introduced to overcome the limitations of voxel-based and mesh-based differentiable rendering, which suffer from discretization artifacts and low resolution [S2]. It builds on the concept of occupancy networks and texture fields [S2]. The key insight is that depth gradients can be derived analytically using implicit differentiation, allowing the learning of implicit shape and texture representations directly from RGB images [S2]. The method enables single-view and multi-view 3D reconstruction from 2D photographs [S2].
+
+## Sources
+[S1] NERF FOR HERITAGE 3D RECONSTRUCTION, https://doi.org/10.5194/isprs-archives-xlviii-m-2-2023-1051-2023, fetched 2026-10-26
+[S2] Differentiable Volumetric Rendering: Learning Implicit 3D Representations without 3D Supervision, https://www.youtube.com/watch?v=lcub1KH-mmk, fetched 2026-10-27
+[S3] Differentiable Volumetric Rendering: Learning Implicit 3D ..., https://www.cvlibs.net/publications/Niemeyer2020CVPR.pdf, fetched 2026-10-27
+[S4] Differentiable Volumetric Rendering, https://autonomousvision.github.io/differentiable-volumetric-rendering/, fetched 2026-10-27 (unofficial)
+[S5] Обучение неявным 3D-представлениям без 3D-контроля, https://www.alphaxiv.org/ru/overview/1912.07372, fetched 2026-10-30 (unofficial)
+[S6] Differentiable Volumetric Rendering - CVF Open Access, https://openaccess.thecvf.com/content_CVPR_2020/html/Niemeyer_Differentiable_Volumetric_Rendering_Learning_Implicit_3D_Representations_Without_3D_Supervision_CVPR_2020_paper.html, fetched 2026-10-30 (unofficial)

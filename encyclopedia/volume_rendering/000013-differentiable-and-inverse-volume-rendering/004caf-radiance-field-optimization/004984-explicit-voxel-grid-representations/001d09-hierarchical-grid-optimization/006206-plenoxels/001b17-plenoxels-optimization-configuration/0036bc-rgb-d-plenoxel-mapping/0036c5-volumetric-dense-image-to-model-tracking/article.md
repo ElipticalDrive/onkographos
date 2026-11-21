@@ -1,0 +1,105 @@
+# Volumetric Dense Image-to-Model Tracking
+
+Also called: Camera Tracking, Rendering-based optimization
+
+## Overview
+Volumetric Dense Image-to-Model Tracking is a pose optimization algorithm that tracks camera motion by aligning a query image to a pre-existing volumetric dense map using radiance field rendering equations [S1]. It serves as a fine-level localization method to correct odometry noises by minimizing the photometric difference between the observed image and the image rendered from the estimated pose [S2]. Unlike sparse tracking, which relies on a subset of feature points, this method utilizes all available image and model information, resulting in smoother and more accurate trajectories [S1].
+
+## How it works
+**Inputs:**
+1.  Current odometry estimate (initial camera pose $T_{init}$).
+2.  Query image $I_{obs}$ (RGB-D or RGB).
+3.  Volumetric dense map (e.g., RNR-Map or Plenoxel grid) containing latent codes or voxel attributes [S1, S2].
+
+**Outputs:**
+1.  Optimized camera pose $T_{opt}$ [S1, S2].
+
+**Data Structures:**
+The method operates on a voxel-based radiance field representation. The map stores latent codes at each grid location which are decoded into radiance properties (color, density) [S2]. The specific layout of the latent codes is defined by the parent mapping algorithm [7820-rgb-d-plenoxel-mapping.md].
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize the optimization variables with the current odometry estimate $T_{init}$ [S2].
+2.  **Rendering:** Render an image $I_{render}$ from the estimated pose using the radiance field rendering equations and the map's decoder [S1, S2]. This involves sampling the voxel grid along camera rays and aggregating color and density values [S1].
+3.  **Loss Calculation:** Compute the photometric loss $L$ between the rendered image $I_{render}$ and the observed image $I_{obs}$ [S1, S2]. For RGB-D data, the loss may incorporate depth consistency [S1].
+4.  **Gradient Derivation:** Derive the analytical derivatives of the rendering equations with respect to the camera pose parameters [S1]. This allows for efficient gradient-based optimization without numerical differentiation [S1].
+5.  **Optimization:** Update the camera pose $T$ to minimize the photometric loss $L$ using an iterative optimizer (e.g., Gauss-Newton or Levenberg-Marquardt) [S1, S2].
+6.  **Convergence:** Repeat steps 2-5 until convergence or a maximum number of iterations is reached. The final pose is $T_{opt}$ [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volumetric_dense_tracking(
+    map: RadianceFieldMap,
+    query_image: Image,
+    initial_pose: Pose,
+    max_iterations: int = 10,
+    learning_rate: float = 0.01
+) -> Pose:
+    """
+    Tracks camera pose by optimizing alignment between rendered and observed images.
+    
+    Args:
+        map: The volumetric dense map (e.g., RNR-Map or Plenoxel grid).
+        query_image: The observed RGB-D or RGB image.
+        initial_pose: The initial camera pose estimate from odometry.
+        max_iterations: Maximum number of optimization steps.
+        learning_rate: Step size for the optimizer.
+        
+    Returns:
+        Optimized camera pose.
+    """
+    current_pose = initial_pose
+    
+    for i in range(max_iterations):
+        # Render image from current pose using the map
+        # This involves ray marching through the voxel grid and decoding latent codes
+        rendered_image = render_image(map, current_pose)
+        
+        # Calculate photometric loss between rendered and observed image
+        # For RGB-D, this may include depth term; for RGB, color term only
+        loss = compute_photometric_loss(rendered_image, query_image)
+        
+        # Compute gradient of loss with respect to pose parameters
+        # Uses analytical derivatives derived from radiance field rendering equations [S1]
+        gradient = compute_pose_gradient(map, current_pose, query_image)
+        
+        # Update pose
+        current_pose = update_pose(current_pose, gradient, learning_rate)
+        
+        # Check for convergence (e.g., loss change < threshold)
+        if is_converged(loss, i):
+            break
+            
+    return current_pose
+```
+
+**Parameters:**
+*   **Tracking Frequency:** 5 Hz [S2].
+*   **Optimizer:** Gradient-based (specific algorithm not detailed, but analytical derivatives are used [S1]).
+
+**Edge Cases and Pitfalls:**
+*   **Gradient-less Regions:** Dense mapping/tracking requires assumptions for areas with no gradients, as photometric optimization may fail or drift [S1]. The parent RGB-D Plenoxel Mapping addresses this by incorporating depth data [7820-rgb-d-plenoxel-mapping.md].
+*   **Odometry Noise:** While designed to correct odometry, large initial errors may lead to local minima if the optimization landscape is non-convex [S2].
+*   **Computational Cost:** Rendering-based optimization is computationally heavy compared to direct latent code utilization, but is kept efficient by the speed of the underlying Plenoxel model [S1, S2].
+
+## Operating characteristics
+*   **Time Complexity:** The tracking operates at 5 Hz [S2]. The underlying Plenoxel model is more than two magnitudes faster than original NeRF algorithms, enabling real-time tracking [S1].
+*   **Memory Complexity:** Depends on the size of the volumetric dense map (RNR-Map or Plenoxel grid). The map stores latent codes for the entire scene [S2].
+*   **Strengths:**
+    *   High accuracy and smooth trajectories due to using all image/model information (dense) rather than sparse features [S1].
+    *   Real-time capable (5 Hz) [S2].
+    *   Robust to odometry noise [S2].
+*   **Limitations:**
+    *   Computationally more intensive than sparse tracking or direct latent code localization [S1, S2].
+    *   Requires a pre-existing dense map [S1].
+    *   Performance degrades in textureless or gradient-less regions without depth data [S1].
+*   **When to use:** When high-accuracy, smooth camera trajectory estimation is required in a known environment with a pre-built dense volumetric map, and computational resources allow for 5 Hz rendering-based optimization [S1, S2].
+*   **When not to use:** When real-time performance >5 Hz is critical and sparse tracking is sufficient, or when no dense map is available [S1, S2].
+
+## Background
+The method originates from research into efficient radiance field representations for practical applications like robotics and XR, which often struggle with the computational cost of original NeRF [S1]. It builds upon the Plenoxel model, which uses a voxel grid representation instead of neural networks for faster inference [S1]. The specific implementation of tracking via analytical derivatives in a voxel-based radiance field using RGB-D data was presented in [S1]. The application of this tracking to the RNR-Map (Renderable Neural Radiance Map) for visual navigation was detailed in [S2]. The approach contrasts with sparse tracking methods that use only a subset of points [S1].
+
+## Sources
+[S1] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26
+[S2] Renderable Neural Radiance Map for Visual Navigation, https://doi.org/10.1109/cvpr52729.2023.00878, fetched 2026-10-26

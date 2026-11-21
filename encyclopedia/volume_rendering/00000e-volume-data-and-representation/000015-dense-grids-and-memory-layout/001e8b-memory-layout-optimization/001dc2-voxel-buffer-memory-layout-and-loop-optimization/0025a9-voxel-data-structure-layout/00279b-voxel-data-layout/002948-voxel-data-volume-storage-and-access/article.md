@@ -1,0 +1,95 @@
+# Voxel Data Volume Storage and Access
+
+Also called: Memory Zone Orientation, Native Voxel Array, Voxel Storage Orientation, VoxelDataVolume
+
+## Overview
+This method defines the memory layout and access patterns for dense voxel volumes, storing data in a single contiguous 1D array mapped from 3D coordinates. It solves the problem of efficient spatial indexing and boundary validation in GPU or CPU-based volume rendering by replacing multi-dimensional array overhead with linear memory access. It differs from brick-based approaches [8114-voxel-renderer-with-top-level-grid-and-bricks.md] by using a flat grid, and from material packing [4907-voxel-material-packing.md] by focusing on raw data storage rather than attribute compression.
+
+## How it works
+**Inputs:**
+- `Width`, `Height`, `Depth`: Integer dimensions defining the volume bounds [S1, unofficial].
+- `T`: Generic data type for voxel content (e.g., `byte`, `float`) [S1, unofficial].
+
+**Outputs:**
+- A contiguous 1D array `_voxelData` of type `T` [S1, unofficial].
+- Safe access to voxel values via index or coordinate [S1, unofficial].
+
+**Data Structures:**
+- `_voxelData`: A 1D array of size `Width * Height * Depth`.
+- `Width`, `Height`, `Depth`: Fields storing the volume dimensions [S1, unofficial].
+
+**Index Calculation:**
+3D coordinates $(x, y, z)$ are mapped to a 1D index using row-major (C-order) layout, where $x$ varies fastest, then $y$, then $z$ [S2, unofficial]. The formula is:
+$$
+\text{index} = z \times (\text{Width} \times \text{Height}) + y \times \text{Width} + x
+$$
+This aligns with NumPy C-order contiguity, avoiding real-time 3D array transpositions [S2, unofficial].
+
+**Steps:**
+1. Initialize `_voxelData` with size `Width * Height * Depth`.
+2. To access a voxel at $(x, y, z)$:
+   a. Compute `index` using the formula above.
+   b. Validate bounds: $0 \le x < \text{Width}$, $0 \le y < \text{Height}$, $0 \le z < \text{Depth}$.
+   c. If valid, return `_voxelData[index]`.
+   d. If invalid, handle error or return default value.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class VoxelVolume:
+    def __init__(self, width: int, height: int, depth: int, data_type: type):
+        self.width = width
+        self.height = height
+        self.depth = depth
+        self._voxel_data = [data_type() for _ in range(width * height * depth)]
+
+    def _xyz_to_index(self, x: int, y: int, z: int) -> int:
+        """Map 3D coordinates to 1D index using C-order (Z, Y, X) layout."""
+        return z * (self.width * self.height) + y * self.width + x
+
+    def try_get_voxel_data(self, index: int) -> tuple:
+        """
+        Safe access to voxel data by 1D index.
+        Returns (True, value) if valid, (False, default) if out of bounds.
+        """
+        if 0 <= index < len(self._voxel_data):
+            return (True, self._voxel_data[index])
+        return (False, None)
+
+    def try_get_voxel_at(self, x: int, y: int, z: int) -> tuple:
+        """
+        Safe access to voxel data by 3D coordinates.
+        Returns (True, value) if valid, (False, default) if out of bounds.
+        """
+        if not (0 <= x < self.width and 0 <= y < self.height and 0 <= z < self.depth):
+            return (False, None)
+        index = self._xyz_to_index(x, y, z)
+        return self.try_get_voxel_data(index)
+```
+
+**Parameters:**
+- `Width`, `Height`, `Depth`: Must be positive integers [S1, unofficial].
+- `T`: Data type size affects memory usage; typical types are `byte` for density or `float` for scalar fields [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Direct access via computed index without bounds checking throws `IndexOutOfRangeException` [S1, unofficial].
+- Always use safe access methods (`TryGetVoxelData`) that check `index >= 0 && index < _voxelData.Length` [S1, unofficial].
+- On failure, safe access returns `false` and sets output to `default` (e.g., 0 for byte types) [S1, unofficial].
+- Coordinate order must match the layout assumption (C-order: X fastest, Z slowest) [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Index calculation is $O(1)$; access is $O(1)$ with bounds check [S1, unofficial].
+- **Memory Complexity:** $O(\text{Width} \times \text{Height} \times \text{Depth})$ for contiguous storage [S1, unofficial].
+- **Performance:** Contiguous layout enables cache-friendly access and efficient serialization [S2, unofficial].
+- **Strengths:** Simple indexing, no pointer indirection, optimal for dense volumes [S2, unofficial].
+- **Limitations:** Inefficient for sparse volumes due to fixed memory allocation [S1, unofficial].
+- **When to Use:** Dense voxel grids where memory locality is critical [S2, unofficial].
+- **When Not to Use:** Sparse volumes or dynamic topologies requiring frequent insertions/deletions [S1, unofficial].
+
+## Background
+Originated in voxel terrain generation systems, this layout aligns with standard C-order array conventions to simplify data transfer and processing [S1, S2, unofficial]. It is widely used in real-time voxel engines for its simplicity and performance [S2, unofficial].
+
+## Sources
+[S1] Eldemarkki/Marching-Cubes-Terrain, https://github.com/Eldemarkki/Marching-Cubes-Terrain, fetched 2026-10-26 (unofficial)
+[S2] herbal1st/pyvorengi-sdk-demo, https://github.com/herbal1st/pyvorengi-sdk-demo, fetched 2026-10-27 (unofficial)

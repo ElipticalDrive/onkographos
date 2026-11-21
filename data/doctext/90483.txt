@@ -1,0 +1,2097 @@
+## Segment Tracing Using Local Lipschitz Bounds
+
+<img src="https://aparis69.github.io/public_html/imgs/segment_representative.jpg"
+     alt="Segment Tracing - Representative Image"
+     style="float: left; margin: 5px;" />
+
+Source code for some of the results shown in the paper "Segment Tracing Using Local Lipschitz Bounds" published in CGF in 2020 
+and presented at Eurographics 2020. This is aimed at researchers, students or profesionnals who may want to reproduce **some** of the results described in the paper.
+
+[Project Page](https://aparis69.github.io/public_html/projects/galin2020_Segment.html)
+
+[Paper](https://hal.archives-ouvertes.fr/hal-02507361/document)
+
+This implementation has been labelled by the GRSI (Graphics Replicability Stamp Initiative), see [here](http://www.replicabilitystamp.org/) for more details.
+
+### Important notes
+* This code is **not** the one which produced the scenes seen in the paper. Hence, results as well as timings may differ from the ones in the paper.
+* This is **research** code provided without any warranty. However, if you have any problem you can still send me an email or create an issue.
+
+### Testing
+There is no dependency. Running the program will render two ppm file (render + cost) for the Segment tracing algorithm. Tests have been made on:
+* Visual Studio 2017: double click on the solution in ./VS2017/ and Ctrl + F5 to run
+* Visual Studio 2019: double click on the solution in ./VS2019/ and Ctrl + F5 to run
+* Visual Studio 2022: double click on the solution in ./VS2022/ and Ctrl + F5 to run
+* Ubuntu 16.04: cd G++/ && make && ./Out/SegmentTracing
+
+Results for comparing with other algorithms are also available in the Renders/ folder of the repository. You can also modify one line in the main.cpp file to test other methods, namely Sphere tracing and Enhanced sphere tracing.
+
+### Citation
+You can use this code in any way you want, however please credit the original article:
+```
+@article{Galin2020,
+  Title = {{Segment Tracing Using Local Lipschitz Bounds}},
+  Author = {Galin, Eric and Gu{\'e}rin, Eric and Paris, Axel and Peytavie, Adrien},
+  Journal = {{Computer Graphics Forum}},
+  Publisher = {{Wiley}},
+  Year = {2020},
+  Volume = {39},
+  Number = {2},
+  Pages = {545-554}
+}
+```
+
+### G++/premake4.lua
+```
+solution "SegmentTracing"
+	configurations { "release" }
+
+	platforms { "x64" }
+	
+	includedirs { ".", "../Code/Include", "/usr/include/" }
+
+	rootDir = path.getabsolute("../")
+
+	configuration "release"
+		targetdir "./Out/Release"
+		flags { "OptimizeSpeed" }
+
+	configuration "linux"
+		buildoptions { "-mtune=native -march=native" }
+		buildoptions { "-std=c++14" }
+		buildoptions { "-w" }
+		buildoptions { "-flto -g"}
+		linkoptions { "-fopenmp"}
+		linkoptions { "-flto"}
+		linkoptions { "-g"}
+
+fileList = { rootDir .. "/Code/Source/*.cpp", rootDir .. "/Code/Include/*.h" }
+
+project("SegmentTracing")
+	language "C++"
+	kind "ConsoleApp"
+	targetdir "Out"
+files ( fileList )
+```
+
+### Code/Include/blobtree.h
+```
+#pragma once
+
+#include "fundamentals.h"
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <omp.h>
+
+class BlobTreeNode
+{
+protected:
+	Box box;	//!< Bounding box
+	double k;	//!< Lipschitz constant
+
+public:
+	BlobTreeNode(const Box& b);
+
+	virtual double Intensity(const Vector& p) const = 0;
+	virtual Vector Gradient(const Vector& p) const;
+
+	virtual inline double K() const
+	{
+		return k;
+	}
+
+	virtual inline double K(const Segment&) const
+	{
+		return k;
+	}
+
+	inline Box GetBox() const
+	{
+		return box;
+	}
+
+	inline double CubicFalloff(double x, double r) const
+	{
+		return (x > r) ? 0.0 : (1.0 - x / r) * (1.0 - x / r) * (1.0 - x / r);
+	}
+
+	inline double CubicFalloffK(double e, double R) const
+	{
+		return 1.72 * abs(e) / R;
+	}
+
+	inline double CubicFalloffK(double a, double b, double R, double s) const
+	{
+		if (a > R * R)
+			return 0.0;
+		if (b < (R * R) / 5.0)
+		{
+			double t = (1.0 - b / (R * R));
+			return abs(s) * 6.0 * (sqrt(b) / (R * R)) * (t * t);
+		}
+		else if (a > (R * R) / 5.0)
+		{
+			double t = (1.0 - a / (R * R));
+			return abs(s) * 6.0 * (sqrt(a) / (R * R)) * (t * t);
+		}
+		else
+			return CubicFalloffK(s, R);
+	}
+};
+
+class BlobTreeBlend : public BlobTreeNode
+{
+protected:
+	BlobTreeNode* e[2]; //!< Child nodes.
+
+public:
+	BlobTreeBlend(BlobTreeNode* e1, BlobTreeNode* e2);
+
+	double Intensity(const Vector& p) const;
+	Vector Gradient(const Vector& p) const;
+	double K() const;
+	double K(const Segment& s) const;
+};
+
+class BlobTreePoint : public BlobTreeNode
+{
+private:
+	Vector c;	//!< Center
+	double r;	//!< Radius
+	double e;	//!< Energy
+
+public:
+	BlobTreePoint(const Vector& pp, double rr, double ee);
+
+	double Intensity(const Vector& p) const;
+	double K(const Segment& s) const;
+
+	static BlobTreeNode* BVHRecursive(std::vector<BlobTreeNode*>& pts, int begin, int end);
+	static BlobTreeNode* OptimizeHierarchy(std::vector<BlobTreeNode*>& pts, int begin, int end);
+	static BlobTreeNode* OptimizeHierarchy(const std::vector<Vector>& c, double r);
+};
+
+class BlobTree
+{
+private:
+	BlobTreeNode* root;
+
+public:
+	BlobTree();
+	BlobTree(BlobTreeNode* rr);
+	BlobTree(const char* path);
+
+	double Intensity(const Vector& p);
+	Vector Gradient(const Vector& p) const;
+	double K() const;
+	double K(const Segment& s) const;
+
+	Box GetBox() const;
+};
+```
+
+### Code/Include/evector.h
+```
+#ifdef min
+#undef min
+#endif
+
+#ifdef max
+#undef max
+#endif
+
+#ifndef __Vector__
+#define __Vector__
+
+// Mathematics fundamentals
+#include "mathematics.h"
+
+// Class
+class Vector
+{
+protected:
+	double c[3]; //!< Components.
+public:
+	//! Empty 
+	inline Vector() { c[0] = c[1] = c[2] = 0.0; }
+
+	explicit Vector(const double&);
+	explicit Vector(const double&, const double&, const double&);
+
+	// Access members
+	double& operator[] (int);
+	double operator[] (int) const;
+
+	// Unary operators
+	Vector operator+ () const;
+	Vector operator- () const;
+
+	// Assignment operators
+	Vector& operator+= (const Vector&);
+	Vector& operator-= (const Vector&);
+	Vector& operator*= (const Vector&);
+	Vector& operator/= (const Vector&);
+	Vector& operator*= (const double&);
+	Vector& operator/= (const double&);
+
+	// Binary operators
+	friend int operator> (const Vector&, const Vector&);
+	friend int operator< (const Vector&, const Vector&);
+
+	friend int operator>= (const Vector&, const Vector&);
+	friend int operator<= (const Vector&, const Vector&);
+
+	// Binary operators
+	friend Vector operator+ (const Vector&, const Vector&);
+	friend Vector operator- (const Vector&, const Vector&);
+
+	friend double operator* (const Vector&, const Vector&);
+
+	friend Vector operator* (const Vector&, double);
+	friend Vector operator* (const double&, const Vector&);
+	friend Vector operator/ (const Vector&, double);
+
+	friend Vector operator/ (const Vector&, const Vector&);
+
+	// Boolean functions
+	friend int operator==(const Vector&, const Vector&);
+	friend int operator!=(const Vector&, const Vector&);
+
+	// Norm
+	friend double Norm(const Vector&);
+	friend double SquaredNorm(const Vector&);
+
+	int MaxIndex() const;
+
+	friend void Normalize(Vector&);
+	friend Vector Normalized(const Vector&);
+
+	// Compare functions
+	static Vector Min(const Vector&, const Vector&);
+	static Vector Max(const Vector&, const Vector&);
+
+	// Abs
+	friend Vector Abs(const Vector&);
+
+	// Orthogonal and orthonormal vectors
+	Vector Orthogonal() const;
+	void Orthonormal(Vector&, Vector&) const;
+
+	friend void Swap(Vector&, Vector&);
+	friend Vector Clamp(const Vector&, const Vector&, const Vector&);
+	friend Vector Lerp(const Vector&, const Vector&, const double&);
+
+	// Scale
+	Vector Scale(const Vector&) const;
+	Vector Inverse() const;
+
+	static Vector Solve(const Vector&, const Vector&, const double&, const double&);
+
+public:
+	static const Vector Null; //!< Null vector.
+};
+
+/*!
+\brief Create a vector with the same coordinates.
+\param a Real.
+*/
+inline Vector::Vector(const double& a)
+{
+	c[0] = c[1] = c[2] = a;
+}
+
+/*!
+\brief Create a vector with argument coordinates.
+\param a,b,c Coordinates.
+*/
+inline Vector::Vector(const double& a, const double& b, const double& c)
+{
+	Vector::c[0] = a;
+	Vector::c[1] = b;
+	Vector::c[2] = c;
+}
+
+//! Gets the i-th coordinate of vector.
+inline double& Vector::operator[] (int i)
+{
+	return c[i];
+}
+
+//! Returns the i-th coordinate of vector.
+inline double Vector::operator[] (int i) const
+{
+	return c[i];
+}
+
+// Unary operators
+
+//! Overloaded.
+inline Vector Vector::operator+ () const
+{
+	return *this;
+}
+
+//! Overloaded.
+inline Vector Vector::operator- () const
+{
+	return Vector(-c[0], -c[1], -c[2]);
+}
+
+// Assignment unary operators
+
+//! Destructive addition.
+inline Vector& Vector::operator+= (const Vector& u)
+{
+	c[0] += u.c[0]; c[1] += u.c[1]; c[2] += u.c[2];
+	return *this;
+}
+
+//! Destructive subtraction.
+inline Vector& Vector::operator-= (const Vector& u)
+{
+	c[0] -= u.c[0]; c[1] -= u.c[1]; c[2] -= u.c[2];
+	return *this;
+}
+
+//! Destructive scalar multiply.
+inline Vector& Vector::operator*= (const double& a)
+{
+	c[0] *= a; c[1] *= a; c[2] *= a;
+	return *this;
+}
+
+/*!
+\brief Scale a vector.
+\param a Scaling vector.
+*/
+inline Vector Vector::Scale(const Vector& a) const
+{
+	return Vector(c[0] * a[0], c[1] * a[1], c[2] * a[2]);
+}
+
+/*!
+\brief Inverse of a vector.
+
+This function inverses the components of the vector. This is the same as:
+\code
+Vector v=Vector(1.0/u[0],1.0/u[1],1.0/u[2]);
+\endcode
+*/
+inline Vector Vector::Inverse() const
+{
+	return Vector(1.0 / c[0], 1.0 / c[1], 1.0 / c[2]);
+}
+
+//! Destructive division by a scalar.
+inline Vector& Vector::operator/= (const double& a)
+{
+	c[0] /= a; c[1] /= a; c[2] /= a;
+	return *this;
+}
+
+/*!
+\brief Destructively scale a vector by another vector.
+
+This is the same as Scale:
+\code
+Vector u(2.0,-1.0,1.0);
+u.Scale(Vector(3.0,1.0,2.0)); // u*=Vector(3.0,1.0,2.0);
+\endcode
+*/
+inline Vector& Vector::operator*= (const Vector& u)
+{
+	c[0] *= u.c[0]; c[1] *= u.c[1]; c[2] *= u.c[2];
+	return *this;
+}
+
+//! Destructively divide the components of a vector by another vector.
+inline Vector& Vector::operator/= (const Vector& u)
+{
+	c[0] /= u.c[0]; c[1] /= u.c[1]; c[2] /= u.c[2];
+	return *this;
+}
+
+//! Compare two vectors.
+inline int operator> (const Vector& u, const Vector& v)
+{
+	return ((u.c[0] > v.c[0]) && (u.c[1] > v.c[1]) && (u.c[2] > v.c[2]));
+}
+
+//! Compare two vectors.
+inline int operator< (const Vector& u, const Vector& v)
+{
+	return ((u.c[0] < v.c[0]) && (u.c[1] < v.c[1]) && (u.c[2] < v.c[2]));
+}
+
+//! Overloaded
+inline int operator>= (const Vector& u, const Vector& v)
+{
+	return ((u.c[0] >= v.c[0]) && (u.c[1] >= v.c[1]) && (u.c[2] >= v.c[2]));
+}
+
+//! Overloaded
+inline int operator<= (const Vector& u, const Vector& v)
+{
+	return ((u.c[0] <= v.c[0]) && (u.c[1] <= v.c[1]) && (u.c[2] <= v.c[2]));
+}
+
+//! Adds up two vectors.
+inline Vector operator+ (const Vector& u, const Vector& v)
+{
+	return Vector(u.c[0] + v.c[0], u.c[1] + v.c[1], u.c[2] + v.c[2]);
+}
+
+//! Difference between two vectors.
+inline Vector operator- (const Vector& u, const Vector& v)
+{
+	return Vector(u.c[0] - v.c[0], u.c[1] - v.c[1], u.c[2] - v.c[2]);
+}
+
+//! Scalar product.
+inline double operator* (const Vector& u, const Vector& v)
+{
+	return (u.c[0] * v.c[0] + u.c[1] * v.c[1] + u.c[2] * v.c[2]);
+}
+
+//! Right multiply by a scalar.
+inline Vector operator* (const Vector& u, double a)
+{
+	return Vector(u.c[0] * a, u.c[1] * a, u.c[2] * a);
+}
+
+//! Left multiply by a scalar.
+inline Vector operator* (const double& a, const Vector& v)
+{
+	return v * a;
+}
+
+//! Cross product.
+inline Vector operator/ (const Vector& u, const Vector& v)
+{
+	return Vector(u.c[1] * v.c[2] - u.c[2] * v.c[1], u.c[2] * v.c[0] - u.c[0] * v.c[2], u.c[0] * v.c[1] - u.c[1] * v.c[0]);
+}
+
+//! Left multiply by a scalar
+inline Vector operator/ (const Vector& u, double a)
+{
+	return Vector(u.c[0] / a, u.c[1] / a, u.c[2] / a);
+}
+
+// Boolean functions
+
+//! Strong equality test.
+inline int operator== (const Vector& u, const Vector& v)
+{
+	return ((u.c[0] == v.c[0]) && (u.c[1] == v.c[1]) && (u.c[2] == v.c[2]));
+}
+
+//! Strong difference test.
+inline int operator!= (const Vector& u, const Vector& v)
+{
+	return (!(u == v));
+}
+
+/*!
+\brief Compute the Euclidean norm of a vector.
+
+This function involves a square root computation, it is in general more efficient to rely on
+the squared norm of a vector instead.
+\param u %Vector.
+\sa SquaredNorm
+*/
+inline double Norm(const Vector& u)
+{
+	return sqrt(u.c[0] * u.c[0] + u.c[1] * u.c[1] + u.c[2] * u.c[2]);
+}
+
+/*!
+\brief Compute the squared Euclidean norm of a vector.
+\param u %Vector.
+\sa Norm
+*/
+inline double SquaredNorm(const Vector& u)
+{
+	return (u.c[0] * u.c[0] + u.c[1] * u.c[1] + u.c[2] * u.c[2]);
+}
+
+/*!
+\brief Return a normalized vector.
+
+Compute the inverse of its norm and scale the components.
+
+This function does not check if the vector is null.
+\param u %Vector.
+*/
+inline Vector Normalized(const Vector& u)
+{
+	return u * (1.0 / Norm(u));
+}
+
+/*!
+\brief Compute the index of the maximum component of a vector.
+
+
+\code
+Vector a(-1.0,-3.0,2.0);
+int i=MaxIndex(Abs(a)); // Should be 1
+\endcode
+
+This function can be used to find the most stretched axis of a bounding box,
+for instance to cut the box in the middle of this stretched axis:
+
+\code
+Box box;
+int axis = box.Diagonal().MaxIndex();
+\endcode
+
+\sa Max
+*/
+inline int Vector::MaxIndex() const
+{
+	if (c[0] >= c[1])
+	{
+		if (c[0] >= c[2])
+		{
+			return 0;
+		}
+		else
+		{
+			return 2;
+		}
+	}
+	else
+	{
+		if (c[1] >= c[2])
+		{
+			return 1;
+		}
+		else
+		{
+			return 2;
+		}
+	}
+}
+
+/*!
+\brief Computes the absolute value of a vector.
+\param u %Vector.
+*/
+inline Vector Abs(const Vector& u)
+{
+	return Vector(u[0] > 0.0 ? u[0] : -u[0], u[1] > 0.0 ? u[1] : -u[1], u[2] > 0.0 ? u[2] : -u[2]);
+}
+
+/*!
+\brief Return a vector with coordinates set to the minimum coordinates
+of the two argument vectors.
+*/
+inline Vector Vector::Min(const Vector& a, const Vector& b)
+{
+	return Vector(a[0] < b[0] ? a[0] : b[0], a[1] < b[1] ? a[1] : b[1], a[2] < b[2] ? a[2] : b[2]);
+}
+
+/*!
+\brief Return a vector with coordinates set to the maximum coordinates
+of the two argument vectors.
+*/
+inline Vector Vector::Max(const Vector& a, const Vector& b)
+{
+	return Vector(a[0] > b[0] ? a[0] : b[0], a[1] > b[1] ? a[1] : b[1], a[2] > b[2] ? a[2] : b[2]);
+}
+
+/*!
+\brief Clamp a vector between two bounds.
+\param x Input vector
+\param a, b %Vector bounds.
+*/
+inline Vector Clamp(const Vector& x, const Vector& a, const Vector& b)
+{
+	return Vector(Math::Clamp(x[0], a[0], b[0]), Math::Clamp(x[1], a[1], b[1]), Math::Clamp(x[2], a[2], b[2]));
+}
+
+/*!
+\brief Linear interpolation between two vectors.
+\param a,b Interpolated points.
+\param t Interpolant.
+*/
+inline Vector Lerp(const Vector& a, const Vector& b, const double& t)
+{
+	return a + t * (b - a);
+}
+
+/*!
+\brief Compute the point on a segment such that the linear function satisfies f(a)=va and f(b)=vb.
+
+This function can be used as a first approximation for computing the intersection between a segment and an implicit surface.
+\image html intersection.png
+
+\sa Linear::Solve(const double& a, const double& b, const Vector&, const Vector&);
+*/
+inline Vector Vector::Solve(const Vector& a, const Vector& b, const double& va, const double& vb)
+{
+	return (vb * a - va * b) / (vb - va);
+}
+
+#endif
+```
+
+### Code/Include/fundamentals.h
+```
+#pragma once
+#include "evector.h"
+
+// Annoying & useless MSVC warning
+#pragma warning(disable: 6387 26812)
+
+inline double Epsilon()
+{
+	return 1e-3;
+}
+
+class Ray
+{
+public:
+	Vector o;
+	Vector d;
+
+	Ray(const Vector& pp, const Vector& dd);
+	Vector operator()(double t) const;
+};
+
+class Box
+{
+private:
+	Vector a;
+	Vector b;
+
+public:
+	Box();
+	Box(const Vector& aa, const Vector& bb);
+	Box(const Box& b1, const Box& b2);
+
+	bool Inside(const Vector& p) const;
+	int Intersect(const Ray& ray, double& tmin, double& tmax, double epsilon = 1e-3) const;
+	bool Intersect(const Box& box) const;
+	Vector operator[](int i) const;
+	Vector Diagonal() const;
+	Vector Center() const;
+};
+
+class Segment
+{
+private:
+	Vector a;
+	Vector b;
+
+public:
+	Segment();
+	Segment(const Vector& aa, const Vector& bb);
+
+	Vector operator[](int i) const;
+	bool Intersect(const Box& box) const;
+	Box GetBox() const;
+};
+```
+
+### Code/Include/mathematics.h
+```
+// Fundamentals
+
+#ifndef __Mathematics__
+#define __Mathematics__
+
+#include <math.h>
+
+#ifdef min
+#undef min
+#endif
+
+#ifdef max
+#undef max
+#endif
+
+/*!
+\brief Minimum of two integers.
+*/
+inline int min(int a, int b)
+{
+	return (a < b ? a : b);
+}
+
+/*!
+\brief Minimum of two unsigned integers.
+*/
+inline unsigned int min(unsigned int a, unsigned int b)
+{
+	return (a < b ? a : b);
+}
+
+/*!
+\brief Maximum of two integers.
+*/
+inline int max(int a, int b)
+{
+	return (a > b ? a : b);
+}
+
+/*!
+\brief Minimum of two doubles.
+*/
+inline float min(const float& a, const float& b)
+{
+	return (a < b ? a : b);
+}
+
+/*!
+\brief Maximum of two doubles.
+*/
+inline float max(const float& a, const float& b)
+{
+	return (a > b ? a : b);
+}
+
+/*!
+\brief Minimum of two doubles.
+*/
+inline double min(const double& a, const double& b)
+{
+	return (a < b ? a : b);
+}
+
+/*!
+\brief Maximum of two doubles.
+*/
+inline double max(const double& a, const double& b)
+{
+	return (a > b ? a : b);
+}
+
+/*!
+\brief Minimum of three doubles.
+*/
+inline double min(const double& a, const double& b, const double& c)
+{
+	return min(min(a, b), c);
+}
+
+/*!
+\brief Maximum of three doubles.
+*/
+inline double max(const double& a, const double& b, const double& c)
+{
+	return max(max(a, b), c);
+}
+
+/*!
+\brief Minimum of four doubles.
+*/
+inline double min(const double& a, const double& b, const double& c, const double& d)
+{
+	return min(min(a, b), min(c, d));
+}
+
+/*!
+\brief Maximum of four doubles.
+*/
+inline double max(const double& a, const double& b, const double& c, const double& d)
+{
+	return max(max(a, b), max(c, d));
+}
+
+/*!
+\brief Minimum of four integers.
+*/
+inline int min(int a, int b, int c, int d)
+{
+	return min(min(a, b), min(c, d));
+}
+
+/*!
+\brief Minimum of four unsigned integers.
+*/
+inline unsigned int min(unsigned int a, unsigned int b, unsigned int c, unsigned int d)
+{
+	return min(min(a, b), min(c, d));
+}
+
+/*!
+\brief Maximum of four integers.
+*/
+inline int max(int a, int b, int c, int d)
+{
+	return max(max(a, b), max(c, d));
+}
+
+//! Clamps an integer value between two bounds.
+inline int Clamp(int x, int a, int b)
+{
+	return (x < a ? a : (x > b ? b : x));
+}
+
+//! Clamps a double value between two bounds.
+inline double Clamp(double x, double a, double b)
+{
+	return (x < a ? a : (x > b ? b : x));
+}
+
+//! Clamps a double value between two bounds.
+inline float Clamp(float x, float a, float b)
+{
+	return (x < a ? a : (x > b ? b : x));
+}
+
+// Math class for constants
+class Math
+{
+public:
+	static const double Pi; //!< Pi.
+	static const double HalfPi; //!< Half of pi.
+	static const double e; //!< Exponential.
+	static const double TwoPiOverThree; //!< 2/3 Pi.
+	static const double FourPiOverThree; //!< 4/3 Pi.
+	static const double Infinity; //! Infinity
+	static const double Sqrt5; //!< Constant &radic;5
+	static const double Sqrt3; //!< Constant &radic;3
+	static const double Sqrt2; //!< Constant &radic;2
+	static const double Golden; //!< Constant (&radic;5+1)/2
+public:
+	static double Clamp(const double&, const double& = 0.0, const double& = 1.0);
+	static int Clamp(int, int = 0, int = 255);
+
+	// Squares
+	static double Abs(const double&);
+
+	// Minimum and maximum
+	static double Min(const double&, const double&);
+	static double Max(const double&, const double&);
+	static double Min(const double&, const double&, const double&);
+	static double Max(const double&, const double&, const double&);
+	static double Min(const double&, const double&, const double&, const double&);
+	static double Max(const double&, const double&, const double&, const double&);
+
+	// Angles
+	static double DegreeToRadian(const double&);
+	static double RadianToDegree(const double&);
+};
+
+/*!
+\brief Convert degrees to randians.
+\param a Angle in degrees.
+*/
+inline double Math::DegreeToRadian(const double& a)
+{
+	return a * Math::Pi / 180.0;
+}
+
+/*!
+\brief Convert radian to degrees.
+\param a Angle in radian.
+*/
+inline double Math::RadianToDegree(const double& a)
+{
+	return a * 180.0 / Math::Pi;
+}
+
+/*!
+\brief Clamp a double value between two bounds.
+\param x Input value.
+\param a, b Lower and upper bounds.
+*/
+inline double Math::Clamp(const double& x, const double& a, const double& b)
+{
+	return (x < a ? a : (x > b ? b : x));
+}
+
+/*!
+\brief Clamp an integer value between two bounds.
+\param x Input value.
+\param a, b Lower and upper bounds.
+*/
+inline int Math::Clamp(int x, int a, int b)
+{
+	return (x < a ? a : (x > b ? b : x));
+}
+
+/*!
+\brief Minimum of two reals.
+\param a, b Real values.
+*/
+inline double Math::Min(const double& a, const double& b)
+{
+	return (a < b ? a : b);
+}
+
+/*!
+\brief Maximum of two reals.
+\param a, b Real values.
+*/
+inline double Math::Max(const double& a, const double& b)
+{
+	return (a > b ? a : b);
+}
+
+/*!
+\brief Maximum of three reals.
+\param a, b, c Real values.
+*/
+inline double Math::Max(const double& a, const double& b, const double& c)
+{
+	return Math::Max(Math::Max(a, b), c);
+}
+
+/*!
+\brief Minimum of three reals.
+\param a, b, c Real values.
+*/
+inline double Math::Min(const double& a, const double& b, const double& c)
+{
+	return Math::Min(Math::Min(a, b), c);
+}
+
+/*!
+\brief Maximum of four reals.
+\param a, b, c, d Real values.
+*/
+inline double Math::Max(const double& a, const double& b, const double& c, const double& d)
+{
+	return Math::Max(Math::Max(a, b), Math::Max(c, d));
+}
+
+/*!
+\brief Minimum of four reals.
+\param a, b, c, d Real values.
+*/
+inline double Math::Min(const double& a, const double& b, const double& c, const double& d)
+{
+	return Math::Min(Math::Min(a, b), Math::Min(c, d));
+}
+
+/*!
+\brief Absolute value.
+
+\param x Real.
+*/
+inline double Math::Abs(const double& x)
+{
+	return fabs(x);
+}
+
+#endif
+```
+
+### Code/Source/blobtree.cpp
+```
+#include "blobtree.h"
+#include <iostream>
+
+
+/*!
+\brief Constructor for a bounded node.
+\param b bounding box
+*/
+BlobTreeNode::BlobTreeNode(const Box& b)
+{
+	box = b;
+	k = 1.0f;
+}
+
+/*
+\brief Computes the gradient of the node at a given point in space.
+\param p point
+*/
+Vector BlobTreeNode::Gradient(const Vector& p) const
+{
+	double x = Intensity(Vector(p[0] + Epsilon(), p[1], p[2])) - Intensity(Vector(p[0] - Epsilon(), p[1], p[2]));
+	double y = Intensity(Vector(p[0], p[1] + Epsilon(), p[2])) - Intensity(Vector(p[0], p[1] - Epsilon(), p[2]));
+	double z = Intensity(Vector(p[0], p[1], p[2] + Epsilon())) - Intensity(Vector(p[0], p[1], p[2] - Epsilon()));
+	return Vector(x, y, z) / (2.0f * Epsilon());
+}
+
+
+/*!
+\brief Constructor for a binary blending node.
+\param e1 first child
+\param e2 second child
+*/
+BlobTreeBlend::BlobTreeBlend(BlobTreeNode* e1, BlobTreeNode* e2) : BlobTreeNode(Box(e1->GetBox(), e2->GetBox()))
+{
+	e[0] = e1;
+	e[1] = e2;
+}
+
+/*!
+\brief Computes the intensity of the tree at a given point.
+\param p point
+*/
+double BlobTreeBlend::Intensity(const Vector& p) const
+{
+	if (!box.Inside(p))
+		return 0.0;
+	return e[0]->Intensity(p) + e[1]->Intensity(p);
+}
+
+/*!
+\brief Computes the gradient of the tree at a given point.
+\param p point
+*/
+Vector BlobTreeBlend::Gradient(const Vector& p) const
+{
+	if (!box.Inside(p))
+		return Vector(0.0);
+	return e[0]->Gradient(p) + e[1]->Gradient(p);
+}
+
+/*!
+\brief Computes the global lipschitz constant as a recursive query.
+*/
+double BlobTreeBlend::K() const
+{
+	return e[0]->K() + e[1]->K();
+}
+
+/*!
+\brief Computes the local lipschitz constant over a segment.
+\param s segment
+*/
+double BlobTreeBlend::K(const Segment& s) const
+{
+	if (!box.Intersect(s.GetBox()))
+		return 0.0;
+	return e[0]->K(s) + e[1]->K(s);
+}
+
+
+/*!
+\brief Constructor for a point primitive.
+\param pp center
+\param rr radius
+\param ee intensity
+*/
+BlobTreePoint::BlobTreePoint(const Vector& pp, double rr, double ee) : BlobTreeNode(Box(pp - Vector(rr, rr, rr), pp + Vector(rr, rr, rr)))
+{
+	c = pp;
+	r = rr;
+	e = ee;
+	k = CubicFalloffK(e, r);
+}
+
+/*!
+\brief Computes the intensity of the tree at a given point.
+\param p point
+*/
+double BlobTreePoint::Intensity(const Vector& p) const
+{
+	if (!box.Inside(p))
+		return 0.0;
+	Vector delta = p - c;
+	return CubicFalloff(delta * delta, r * r);
+}
+
+/*!
+\brief Computes the local lipschitz constant over a segment.
+\param s segment
+*/
+double BlobTreePoint::K(const Segment& s) const
+{
+	Vector a = s[0];
+	Vector b = s[1];
+	if (!s.Intersect(box))
+		return 0.0f;
+	Vector axis = Normalized(b - a);
+	double l = (c - a) * axis;
+	double kk = 0.0;
+	if (l < 0.0)
+	{
+		kk = CubicFalloffK(SquaredNorm(c - a), SquaredNorm(c - b), r, e);
+	}
+	else if (Norm(b - a) < l)
+	{
+		kk = CubicFalloffK(SquaredNorm(c - b), SquaredNorm(c - a), r, e);
+	}
+	else
+	{
+		double dd = SquaredNorm(c - a) - (l * l);
+		Vector pc = a + axis * l;
+		kk = CubicFalloffK(dd, Math::Max(SquaredNorm(c - b), SquaredNorm(c - a)), r, e);
+	}
+	double grad = Math::Max(Math::Abs(axis * Normalized(c - a)), Math::Abs(axis * Normalized(c - b)));
+	return kk * grad;
+}
+
+/*!
+\brief Create a bounding box hierarchy.
+\param pts Set of nodes.
+\param begin, end Indexes of the nodes that should be organized into the hierarchy.
+*/
+BlobTreeNode* BlobTreePoint::BVHRecursive(std::vector<BlobTreeNode*>& pts, int begin, int end)
+{
+	/*
+	\brief BVH space partition predicate. Could also use a lambda function to avoid the structure.
+	*/
+	struct BVHPartitionPredicate
+	{
+		int axis;
+		double cut;
+
+		BVHPartitionPredicate(int a, double c) : axis(a), cut(c)
+		{
+		}
+
+		bool operator()(BlobTreeNode* p) const
+		{
+			return (p->GetBox().Center()[axis] < cut);
+		}
+	};
+
+	// If leaf, returns primitive
+	int nodeCount = end - begin;
+	if (nodeCount <= 1)
+		return pts[begin];
+
+	// Bounding box of primitive in [begin, end] range
+	Box bbox = pts[begin]->GetBox();
+	for (int i = begin + 1; i < end; i++)
+		bbox = Box(bbox, pts[i]->GetBox());
+
+	// Find the most stretched axis of the bounding box
+	// Cut the box in the middle of this stretched axis
+	int stretchedAxis = bbox.Diagonal().MaxIndex();
+	double axisMiddleCut = (bbox[0][stretchedAxis] + bbox[1][stretchedAxis]) / 2.0f;
+
+	// Partition our primitives in relation to the axisMiddleCut
+	auto pmid = std::partition(pts.begin() + begin, pts.begin() + end, BVHPartitionPredicate(stretchedAxis, axisMiddleCut));
+
+	// Ensure the partition is not degenerate : all primitives on the same side
+	int midIndex = int(std::distance(pts.begin(), pmid));
+	if (midIndex == begin || midIndex == end)
+		midIndex = (begin + end) / 2;
+
+	// Recursive construction of sub trees
+	BlobTreeNode* left = BVHRecursive(pts, begin, midIndex);
+	BlobTreeNode* right = BVHRecursive(pts, midIndex, end);
+
+	// Blend of the two child nodes
+	return new BlobTreeBlend(left, right);
+}
+
+/*!
+\brief Recursive BVH Tree construction from a vector<TNode*>.
+\param begin start index
+\param end end index
+*/
+BlobTreeNode* BlobTreePoint::OptimizeHierarchy(std::vector<BlobTreeNode*>& pts, int begin, int end)
+{
+	if (pts.empty())
+		return nullptr;
+	return BVHRecursive(pts, begin, end);
+}
+
+/*!
+\brief Entry point of the BVH construction.
+\param c vector of position in world space, for all sphere primitives
+\param r radius for all primitives.
+*/
+BlobTreeNode* BlobTreePoint::OptimizeHierarchy(const std::vector<Vector>& c, double r)
+{
+	std::vector<BlobTreeNode*> all(c.size());
+	for (int i = 0; i < c.size(); i++)
+		all[i] = new BlobTreePoint(c[i], r, 1.0f);
+	return OptimizeHierarchy(all, 0, int(all.size()));
+}
+
+
+/*!
+\brief Default constructor.
+*/
+BlobTree::BlobTree()
+{
+	root = nullptr;
+}
+
+/*!
+\brief Constructor from a node.
+\param rr root node
+*/
+BlobTree::BlobTree(BlobTreeNode* rr)
+{
+	root = rr;
+}
+
+/*!
+\brief Utility constructor for building the tree from a file containing sphere primitives.
+\param path file path
+*/
+BlobTree::BlobTree(const char* path)
+{
+	std::vector<Vector> centers;
+	std::ifstream inFile;
+	inFile.open(path);
+	if (!inFile)
+	{
+		std::cout << "Unable to open particle file - exiting." << std::endl;
+		root = nullptr;
+		return;
+	}
+	for (std::string line; std::getline(inFile, line); /* empty */)
+	{
+		std::istringstream in(line);
+		double x, y, z;
+		in >> x >> y >> z;
+		centers.push_back(Vector(x, y, z)); // Upscale all the vector field
+	}
+	root = BlobTreePoint::OptimizeHierarchy(centers, 2.25);	// Hardcoded radius for the file
+	std::cout << "Primitive count: " << centers.size() << std::endl << std::endl;
+}
+
+/*!
+\brief Computes the intensity of the tree at a given point.
+\param p point
+*/
+double BlobTree::Intensity(const Vector& p)
+{
+	return root->Intensity(p) - 0.5f;
+}
+
+/*!
+\brief Computes the gradient of the tree at a given point.
+\param p point
+*/
+Vector BlobTree::Gradient(const Vector& p) const
+{
+	return root->Gradient(p);
+}
+
+/*!
+\brief Computes the global lipschitz constant as a recursive query.
+*/
+double BlobTree::K() const
+{
+	return root->K();
+}
+
+/*!
+\brief Computes the local lipschitz constant over a segment.
+\param s segment
+*/
+double BlobTree::K(const Segment& s) const
+{
+	return root->K(s);
+}
+
+/*!
+\brief Computes and returns the bounding box of the construction tree, as a recursive query.
+*/
+Box BlobTree::GetBox() const
+{
+	return root->GetBox();
+}
+```
+
+### Code/Source/evector.cpp
+```
+#include "evector.h"
+
+/*!
+\class Vector evector.h
+\brief Vectors in three dimensions.
+*/
+
+const Vector Vector::Null = Vector(0.0, 0.0, 0.0);
+
+/*!
+\brief Normalize a vector, computing the inverse of its norm and scaling
+the components.
+
+This function does not check if the vector is null,
+which might resulting in errors.
+*/
+void Normalize(Vector& u)
+{
+	u *= 1.0 / Norm(u);
+}
+
+/*!
+\brief Swap two vectors.
+\param a, b Vectors.
+*/
+void Swap(Vector& a, Vector& b)
+{
+	Vector t = a;
+	a = b;
+	b = t;
+}
+
+/*!
+\brief Returns a vector orthogonal to the argument vector.
+
+The returned orthogonal vector is not computed randomly.
+First, we find the two coordinates of the argument vector with
+maximum absolute value. The orthogonal vector is defined by
+swapping those two coordinates and changing one sign, whereas
+the third coordinate is set to 0.
+
+The returned orthogonal vector lies in the plane orthogonal
+to the first vector.
+*/
+Vector Vector::Orthogonal() const
+{
+	Vector a = Abs(*this);
+	int i = 0;
+	int j = 1;
+	if (a[0] > a[1])
+	{
+		if (a[2] > a[1])
+		{
+			j = 2;
+		}
+	}
+	else
+	{
+		i = 1;
+		j = 2;
+		if (a[0] > a[2])
+		{
+			j = 0;
+		}
+	}
+	a = Vector(0.0);
+	a[i] = c[j];
+	a[j] = -c[i];
+	return a;
+}
+
+/*!
+\brief Given a vector, creates two vectors xand y that form an orthogonal basis.
+
+This algorithm pickes the minor axis in order to reduce numerical instability
+\param x, y Returned vectors such that (x,y,n) form an orthonormal basis (provided n is normalized).
+*/
+void Vector::Orthonormal(Vector& x, Vector& y) const
+{
+	x = Normalized(Orthogonal());
+	y = Normalized(*this / x);
+}
+```
+
+### Code/Source/fundamentals.cpp
+```
+#include "fundamentals.h"
+
+/*!
+\brief
+*/
+Ray::Ray(const Vector& pp, const Vector& dd)
+{
+	o = pp;
+	d = dd;
+}
+
+/*!
+\brief
+*/
+Vector Ray::operator()(double t) const
+{
+	return o + t * d;
+}
+
+
+/*!
+\brief
+*/
+Box::Box()
+{
+	a = b = Vector(0);
+}
+
+/*!
+\brief
+*/
+Box::Box(const Vector& aa, const Vector& bb)
+{
+	a = aa;
+	b = bb;
+}
+
+/*!
+\brief
+*/
+Box::Box(const Box& b1, const Box& b2)
+{
+	a = Vector::Min(b1.a, b2.a);
+	b = Vector::Max(b1.b, b2.b);
+}
+
+/*!
+\brief
+*/
+bool Box::Inside(const Vector& p) const
+{
+	return (p > a&& p < b);
+}
+
+/*!
+\brief
+*/
+int Box::Intersect(const Ray& ray, double& tmin, double& tmax, double epsilon) const
+{
+	tmin = -1e16;
+	tmax = 1e16;
+
+	Vector p = ray.o;
+	Vector d = ray.d;
+
+	double t;
+	// Ox
+	if (d[0] < -epsilon)
+	{
+		t = (a[0] - p[0]) / d[0];
+		if (t < tmin)
+			return 0;
+		if (t <= tmax)
+			tmax = t;
+		t = (b[0] - p[0]) / d[0];
+		if (t >= tmin)
+		{
+			if (t > tmax)
+				return 0;
+			tmin = t;
+		}
+	}
+	else if (d[0] > epsilon)
+	{
+		t = (b[0] - p[0]) / d[0];
+		if (t < tmin)
+			return 0;
+		if (t <= tmax)
+			tmax = t;
+		t = (a[0] - p[0]) / d[0];
+		if (t >= tmin)
+		{
+			if (t > tmax)
+				return 0;
+			tmin = t;
+		}
+	}
+	else if (p[0]<a[0] || p[0]>b[0])
+		return 0;
+
+	// Oy
+	if (d[1] < -epsilon)
+	{
+		t = (a[1] - p[1]) / d[1];
+		if (t < tmin)
+			return 0;
+		if (t <= tmax)
+			tmax = t;
+		t = (b[1] - p[1]) / d[1];
+		if (t >= tmin)
+		{
+			if (t > tmax)
+				return 0;
+			tmin = t;
+		}
+	}
+	else if (d[1] > epsilon)
+	{
+		t = (b[1] - p[1]) / d[1];
+		if (t < tmin)
+			return 0;
+		if (t <= tmax)
+			tmax = t;
+		t = (a[1] - p[1]) / d[1];
+		if (t >= tmin)
+		{
+			if (t > tmax)
+				return 0;
+			tmin = t;
+		}
+	}
+	else if (p[1]<a[1] || p[1]>b[1])
+		return 0;
+
+	// Oz
+	if (d[2] < -epsilon)
+	{
+		t = (a[2] - p[2]) / d[2];
+		if (t < tmin)
+			return 0;
+		if (t <= tmax)
+			tmax = t;
+		t = (b[2] - p[2]) / d[2];
+		if (t >= tmin)
+		{
+			if (t > tmax)
+				return 0;
+			tmin = t;
+		}
+	}
+	else if (d[2] > epsilon)
+	{
+		t = (b[2] - p[2]) / d[2];
+		if (t < tmin)
+			return 0;
+		if (t <= tmax)
+			tmax = t;
+		t = (a[2] - p[2]) / d[2];
+		if (t >= tmin)
+		{
+			if (t > tmax)
+				return 0;
+			tmin = t;
+		}
+	}
+	else if (p[2]<a[2] || p[2]>b[2])
+		return 0;
+
+	return 1;
+}
+
+/*!
+\brief
+*/
+bool Box::Intersect(const Box& box) const
+{
+	if (((a[0] >= box.b[0]) || (a[1] >= box.b[1]) || (a[2] >= box.b[2]) || (b[0] <= box.a[0]) || (b[1] <= box.a[1]) || (b[2] <= box.a[2])))
+		return false;
+	else
+		return true;
+}
+
+/*!
+\brief
+*/
+Vector Box::operator[](int i) const
+{
+	if (i == 0)
+		return a;
+	return b;
+}
+
+/*!
+\brief
+*/
+Vector Box::Diagonal() const
+{
+	return b - a;
+}
+
+/*!
+\brief
+*/
+Vector Box::Center() const
+{
+	return 0.5 * (a + b);
+}
+
+
+/*!
+\brief
+*/
+Segment::Segment()
+{
+	a = b = Vector(0);
+}
+
+/*!
+\brief
+*/
+Segment::Segment(const Vector& aa, const Vector& bb)
+{
+	a = aa;
+	b = bb;
+}
+
+/*!
+\brief
+*/
+Vector Segment::operator[](int i) const
+{
+	if (i == 0)
+		return a;
+	return b;
+}
+
+/*!
+\brief
+*/
+bool Segment::Intersect(const Box& box) const
+{
+	Vector ba = box.Diagonal();
+
+	Vector d = 0.5 * (b - a);
+	Vector c = 0.5 * (a + b);
+
+	double fd[3];
+	Vector cc = c - box.Center();
+
+	fd[0] = fabs(d[0]);
+	if (fabs(cc[0]) > ba[0] + fd[0])
+		return false;
+
+	fd[1] = fabs(d[1]);
+	if (fabs(cc[1]) > ba[1] + fd[1])
+		return false;
+
+	fd[2] = fabs(d[2]);
+	if (fabs(cc[2]) > ba[2] + fd[2])
+		return false;
+
+	if (fabs(d[1] * cc[2] - d[2] * cc[1]) > ba[1] * fd[2] + ba[2] * fd[1])
+		return false;
+
+	if (fabs(d[2] * cc[0] - d[0] * cc[2]) > ba[0] * fd[2] + ba[2] * fd[0])
+		return false;
+
+	if (fabs(d[0] * cc[1] - d[1] * cc[0]) > ba[0] * fd[1] + ba[1] * fd[0])
+		return false;
+
+	return true;
+}
+
+/*!
+\brief
+*/
+Box Segment::GetBox() const
+{
+	return Box(Vector::Min(a, b), Vector::Max(a, b));
+}
+```
+
+### Code/Source/main.cpp
+```
+#include <chrono>		// high resolution timer
+#include <iostream>		// std::cout
+#include "blobtree.h"	// Implicit construction tree
+
+// Render parameters as global file variable
+const int imgWidth = 500;
+const int imgHeight = 500;
+const Vector sunDir = Vector(0.0f, -1.0f, 0.0f);
+const Vector camera = Vector(0.0f, -80.0f, 0.0f);
+BlobTree* tree = new BlobTree("../Scenes/particles.txt");
+
+enum RayTraceMethod
+{
+	SphereTracing = 0,
+	EnhancedSphereTracing = 1,
+	SegmentTracing = 2,
+	COUNT = 3
+};
+
+/*!
+\brief Compute a ray from a pixel coordinates.
+\param px pixel coordinate
+\param py pixel coordinate
+\return the ray going through this pixel.
+*/
+Ray ComputeRayFromPixel(int px, int py)
+{
+	// Camera parameters
+	const double cah = 1.995;
+	const double cav = 1.5;
+	const double fl = 35.0;
+
+	// Get coordinates
+	Vector view = Normalized(-camera);
+	Vector horizontal = Normalized(view / Vector(0, 0, 1.0f));
+	Vector vertical = Normalized(horizontal / view);
+	const double length = 1.0f;
+
+	double avh = 2.0 * atan(cah * 25.4 * 0.5 / fl);
+	double avv = 2.0 * atan(tan(avh / 2.0) * double(imgHeight) / double(imgWidth));
+	double rad = avv; // Fov
+
+	double vLength = tan(rad / 2.0f) * length;
+	double hLength = vLength * (double(imgWidth) / double(imgHeight));
+	vertical *= vLength;
+	horizontal *= hLength;
+
+	// Translate mouse coordinates so that the origin lies in the center of the view port
+	double x = px - imgWidth / 2.0;
+	double y = imgHeight / 2.0 - py;
+
+	// Scale mouse coordinates so that half the view port width and height becomes 1.0
+	x /= imgWidth / 2.0;
+	y /= imgHeight / 2.0;
+
+	// Direction is a linear combination to compute intersection of picking ray with view port plane
+	return Ray(camera, Normalized(view * length + horizontal * x + vertical * y));
+}
+
+/*!
+\brief Sphere tracing for a ray
+\param ray the ray
+\param t returned intersection depth
+\param s returned step count
+\param k global lipschitz constant
+\return true of intersection occured, false otherwise.
+*/
+bool SphereTrace(const Ray& ray, double& t, int& s, double k)
+{
+	// First check intersection with bounding box
+	double a, b;
+	if (!tree->GetBox().Intersect(ray, a, b))
+		return false;
+
+	// Classic sphere tracing using global lipschitz constant
+	t = a;
+	s = 0;
+	while (t < b)
+	{
+		s++;
+		double I = tree->Intensity(ray(t));
+		if (I > 0.0)
+			return true;
+		double ts = Math::Max(fabs(I) / k, Epsilon());
+		t += ts;
+	}
+	return false;
+}
+
+/*!
+\brief Enhanced sphere tracing for a ray
+\param ray the ray
+\param t returned intersection depth
+\param s returned step count
+\param k global lipschitz constant
+\return true of intersection occured, false otherwise.
+*/
+bool EnhancedSphereTrace(const Ray& ray, double& t, int& s, double k)
+{
+	// First check intersection with bounding box
+	double a, b;
+	if (!tree->GetBox().Intersect(ray, a, b))
+		return false;
+
+	// Enhanced sphere tracing using overstepping factor and global lipschitz constant
+	t = a;
+	s = 0;
+	double e = 1.25; // Overstep factor in [1.0, 2.0]
+
+	// Marching distance used in the previous step 
+	double te = 0.0;
+	while (t < b)
+	{
+		s++;
+		double i = tree->Intensity(ray(t));
+
+		// Got inside
+		if (i > 0.0)
+			return true;
+
+		// Safe stepping distance
+		double tk = fabs(i) / k;
+
+		// We moved too far and the Lipschitz check fails: we need to move backward
+		if (tk < (e - 1.0) * te)
+		{
+			t -= (e - 1.0) * te;
+			te = 0.0;
+		}
+		// Over-estimated stepping distance is fine, so move on to the next position with over-estimated stepping distance
+		else
+		{
+			te = tk;
+			t += Math::Max(tk * e, Epsilon());
+		}
+	}
+	return false;
+}
+
+/*!
+\brief Segment tracing for a ray
+\param ray the ray
+\param t returned intersection depth
+\param s returned step count
+\return true of intersection occured, false otherwise.
+*/
+bool SegmentTrace(const Ray& ray, double& t, int& s)
+{
+	// First check intersection with bounding box
+	double a, b;
+	if (!tree->GetBox().Intersect(ray, a, b))
+		return false;
+
+	// Segment tracing using local lipschitz computation
+	t = a;
+	s = 0;
+	double e = 1.0;	// Overstep factor in [1.0, 2.0]
+	double c = 1.5;	// Acceleration factor defining the stepping distance increase factor
+
+	// Start with a huge step
+	double ts = (b - a);
+
+	// Marching distance used in the previous step 
+	double te = 0.0;
+	double ce = (e - 1.0);
+
+	while (t < b)
+	{
+		s++;
+		double i = tree->Intensity(ray(t));
+
+		// Got inside
+		if (i > 0.0)
+			return true;
+
+		Vector pt = ray(t);
+		Vector pts = ray(t + ts);
+		double k = tree->K(Segment(pt, pts));
+
+		// Safe stepping distance
+		double tk = fabs(i) / k;
+		tk = Math::Min(tk, ts);
+		ts = tk;
+
+		// We moved too far and the Lipschitz check fails: move backward
+		if (tk < ce * te)
+		{
+			t -= ce * te;
+			te = 0.0;
+		}
+		// Over-estimated stepping distance is fine, so move on to the next position with over-estimated stepping distance
+		else
+		{
+			te = Math::Max(tk * e, Epsilon());
+			t += te;
+		}
+		// Try to increase step bound
+		ts = tk * c;
+	}
+	return false;
+}
+
+/*!
+\brief Compute a pixel color.
+\param i pixel coordinate
+\param j pixel coordinate
+\param k global lipschitz constant used for sphere tracing and enhanced sphere tracing
+\param method raytracing method
+\param color returned color for the pixel
+\param cost returned cost (as a RGBA color) for the pixel
+*/
+void PixelColor(int i, int j, double k, RayTraceMethod method, Vector& color, Vector& cost)
+{
+	color = cost = Vector(0);
+
+	// Compute ray
+	Ray ray = ComputeRayFromPixel(i, j);
+
+	// Compute intersection
+	double t	= 0.0;
+	int s		= 0;
+	bool hit	= false;
+	switch (method)
+	{
+	case SphereTracing:
+		hit = SphereTrace(ray, t, s, k);
+		break;
+	case EnhancedSphereTracing:
+		hit = EnhancedSphereTrace(ray, t, s, k);
+		break;
+	case SegmentTracing:
+		hit = SegmentTrace(ray, t, s);
+		break;
+	default:
+		hit = false;
+		break;
+	};
+
+	// Compute pixel color
+	if (hit)
+	{
+		// Hit position and normal
+		Vector hitPosition = ray(t);
+		Vector hitNormal = -Normalized(tree->Gradient(hitPosition));
+
+		// Diffuse lighting
+		double NDotL = Math::Max(hitNormal * sunDir, 0.1);
+		color = Vector(255 * NDotL, 0, 0);
+	}
+
+	// Compute cost
+	// Unfair comparison (for us), but we can't see anything on the cost image using state of the art methods
+	double div = (method == RayTraceMethod::SegmentTracing) ? 512 : 16384;
+	double c = 0.0;
+	c = Math::Min(double(s) / div, 1.0);
+	cost = Vector(0, c * 255.0, 0);
+}
+
+/*!
+\brief Export an array of pixels in a ppm file.
+\param path file path
+\param pixels array of RGBA pixels.
+\return true of function terminated properly, false otherwise.
+*/
+bool WriteToFile(const char* path, Vector** pixels)
+{
+	FILE* fp = NULL;
+	fp = fopen(path, "wb");
+	if (fp == NULL)
+	{
+		std::cout << "Couldn't write to file - exiting" << std::endl;
+		return false;
+	}
+	fprintf(fp, "P6\n%d %d\n255\n", imgWidth, imgHeight);
+	for (int i = 0; i < imgHeight; i++)
+	{
+		for (int j = 0; j < imgWidth; j++)
+		{
+			static unsigned char color[3];
+			Vector c = pixels[j][i];
+			color[0] = ((int)c[0]) % 256;
+			color[1] = ((int)c[1]) % 256;
+			color[2] = ((int)c[2]) % 256;
+			(void)fwrite(color, 1, 3, fp);
+		}
+	}
+	fclose(fp);
+	return true;
+}
+
+int main()
+{
+	// Init pixels
+	Vector** pixels = new Vector * [imgWidth];
+	Vector** pixelsCost = new Vector * [imgWidth];
+	for (int i = 0; i < imgWidth; i++)
+	{
+		pixels[i] = new Vector[imgHeight];
+		pixelsCost[i] = new Vector[imgHeight];
+	}
+
+	// Global Lipschitz constant foe sphere tracing and enhanced sphere tracing
+	const double k = tree->K();
+
+	int l = 0;  // Put this line if Raytrace all methods: sphere tracing, enhanced sphere tracing and segment tracing
+	//int l = RayTraceMethod::SegmentTracing;	// With this line, the program will only use segment tracing.
+	for (/* empty */; l < RayTraceMethod::COUNT; l++)
+	{
+		RayTraceMethod method = (RayTraceMethod)l;
+
+		// Compute pixels
+		std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+#pragma omp parallel for schedule(dynamic, 16)
+		for (int i = 0; i < imgWidth; i++)
+		{
+			for (int j = 0; j < imgHeight; j++)
+			{
+				Vector col = Vector(0);
+				Vector cost = Vector(0);
+				PixelColor(i, j, k, method, col, cost);
+				pixels[i][j] = col;
+				pixelsCost[i][j] = cost;
+			}
+		}
+		std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+
+		// Print stats
+		std::cout << ((l == 0) ? "SphereTracing" : (l == 1) ? "Enhanced Sphere Tracing" : "Segment Tracing") << std::endl;
+		long long milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count();
+		int seconds = int(double(milliseconds) / 1000.0);
+		std::cout << "Time: " << seconds << "s" << milliseconds % 1000 << "ms" << std::endl;
+
+		// Output to ppm files
+		char path[40];
+		char pathCost[40];
+		sprintf(path, "./render%d.ppm", l);
+		sprintf(pathCost, "./render%d_cost.ppm", l);
+		if (!WriteToFile(path, pixels))
+			std::cout << "WriteToFile Error - failed to write file 1 to disk" << std::endl;
+		if (!WriteToFile(pathCost, pixelsCost))
+			std::cout << "WriteToFile Error - failed to write file 2 to disk" << std::endl;
+	}
+
+	// Free memory
+	for (int i = 0; i < imgHeight; i++)
+	{
+		delete[] pixels[i];
+		delete[] pixelsCost[i];
+	}
+	delete[] pixels;
+	delete[] pixelsCost;
+
+	return 0;
+}
+```
+
+### Code/Source/mathematics.cpp
+```
+#include <float.h>
+
+#include "mathematics.h"
+
+/*!
+\defgroup Math Core math classes.
+
+\brief Core math classes include several classes such as Vector, Quadric, Cubic and higher order
+polynomials and many others that are useful in many graphic applications.
+
+\changed 12.12.23
+*/
+
+/*!
+\class Math mathematics.h
+\brief Core class implementing some useful functions and constants.
+
+<P><I>How can I use the constant Pi?</I>
+<BR>Simply use the static constant Math::Pi as follows:
+\code
+double v=4.0*Math::Pi*r*r*r/3.0; // Volume of a sphere.
+\endcode
+Note that in this case, you could also have used:
+\code
+double v=Sphere::Volume(r);
+\endcode
+
+<P><I>How many min/max functions have been implemented?</I>
+<BR>Up to four arguments are supported; for a larger number of
+arguments, a specific routine operating on an array should be written.
+
+<P><I>Is there a function to compute the square of a real sumber?</I>
+<BR>Use the following:
+\code
+double s=Math::Sqr((1.0-sqrt(5.0))/2.0); // Square of golden ratio
+\endcode
+For a Vector, use SquaredNorm(const Vector&);
+
+<P><I>Are there predefined square roots constants?</I>
+<BR>The sqrt function used not te be constexpr, so square roots of reals are not computed at compilation time.
+Some constants are provided, such as the following one:
+\code
+double s=Math::Sqrt3; // Square root of 3
+\endcode
+
+\ingroup Math
+\changed 13.01.24
+
+<P><I>How are implemented the step and smooth-step functions that are often used in procedural modeling?</I>
+Different smoothing kernels, such as Cubic::Smooth(), are implented in odd-degree polynomials Cubic, Quintic and Septic.
+The corresponding step functions, such as Cubic::SmoothStep(), are also implemented.
+\sa Linear::Step, Cubic::Smooth, Quintic::Smooth, Cubic::SmoothStep, Quintic::SmoothStep, Septic::SmoothStep.
+
+*/
+
+const double Math::Pi = 3.14159265358979323846;
+
+const double Math::HalfPi = Math::Pi / 2.0;
+
+const double Math::e = 2.7182818284590452354;
+
+const double Math::TwoPiOverThree = 2.0943951023931954923084;
+
+const double Math::FourPiOverThree = 4.1887902047863909846168;
+
+const double Math::Infinity = DBL_MAX;
+
+const double Math::Sqrt5 = sqrt(5.0);
+
+const double Math::Sqrt3 = sqrt(3.0);
+
+const double Math::Sqrt2 = sqrt(2.0);
+
+const double Math::Golden = (sqrt(5.0) + 1.0) / 2.0;
+```

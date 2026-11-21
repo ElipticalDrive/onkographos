@@ -1,0 +1,100 @@
+# Depth Prepass with Equal-Depth Shading
+
+Also called: Equal-Depth Shading, Depth Prepass Culling
+
+## Overview
+Optimizes the rendering of overlapping opaque primitives (specifically spheres) by ensuring shading and ray tracing execute only for the nearest primitive per pixel, bypassing the loss of GPU hidden-surface removal caused by discard-based impostors [S1, unofficial]. It sets itself apart from standard depth testing by using a dedicated prepass to establish depth, followed by a shading pass that uses `depth_compare: Equal` to select the closest hit, rather than relying on the GPU's default depth test which fails when fragments are discarded [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of overlapping opaque primitives (e.g., spheres) defined by position and radius.
+*   **Output:** A rendered image where only the nearest primitive contributes to the final color per pixel.
+
+**Data Structures:**
+*   **Depth Buffer:** A standard depth attachment (e.g., 24-bit or 32-bit float) used in the prepass.
+*   **Primitive Data:** Position $(x, y, z)$ and radius $r$. In the cited implementation, the radius share is stored in the $w$ component of the position vector [S1, unofficial].
+
+**Steps:**
+1.  **Depth Prepass:** Render the primitives to a depth buffer to record the depth of the nearest surface for each pixel.
+    *   Use a dedicated shader (e.g., `room_spheres_depth.wgsl`) [S1, unofficial].
+    *   Enable depth writes.
+    *   Use standard depth testing (e.g., `Less` or `LessEqual`) to ensure the minimum depth is stored.
+2.  **Shading Pass:** Render the primitives again to compute shading and ray tracing.
+    *   Use a dedicated shader (e.g., `room_spheres_shade.wgsl`) [S1, unofficial].
+    *   Set depth comparison function to `Equal`.
+    *   Disable depth writes (`depth_write: false`) [S1, unofficial].
+    *   This ensures the fragment shader runs only if the current primitive's depth matches the depth stored in the buffer from the prepass, effectively selecting the nearest primitive.
+3.  **Depth Consistency:** Apply the `@invariant` qualifier to the clip-space position input in the shaders [S1, unofficial].
+    *   This ensures consistent depth rounding across the two separate rendering passes, preventing visual artifacts at primitive boundaries due to floating-point precision differences between passes or GPUs [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Prepass Shader (room_spheres_depth.wgsl)
+# Vertex Shader
+@vertex
+fn vs_prepass(pos: vec3<f32>, radius: f32) -> @builtin(position) vec4<f32> {
+    # Compute clip-space position
+    let clip_pos = u_projection * u_view * vec4<f32>(pos, 1.0);
+    return clip_pos;
+}
+
+# Fragment Shader
+@fragment
+fn fs_prepass() -> @location(0) vec4<f32> {
+    # Output depth value
+    return vec4<f32>(gl_FragCoord.z, 0.0, 0.0, 1.0);
+}
+
+# Shading Pass Shader (room_spheres_shade.wgsl)
+# Vertex Shader
+@vertex
+@invariant # Ensures consistent depth rounding across passes
+fn vs_shade(pos: vec3<f32>, radius: f32) -> @builtin(position) vec4<f32> {
+    # Compute clip-space position
+    let clip_pos = u_projection * u_view * vec4<f32>(pos, 1.0);
+    return clip_pos;
+}
+
+# Fragment Shader
+@fragment
+fn fs_shade() -> @location(0) vec4<f32> {
+    # Depth test is set to 'Equal' in the render pipeline state
+    # This fragment only executes if depth matches the prepass depth
+    # Perform shading and ray tracing here
+    let color = compute_shading_and_ray_tracing();
+    return color;
+}
+```
+
+**Parameters:**
+*   `depth_compare`: `Equal` [S1, unofficial].
+*   `depth_write`: `false` in the shading pass [S1, unofficial].
+*   `@invariant`: Applied to position input [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Apple GPUs:** Built-in hidden-surface removal is disabled when impostors use `discard`, causing every overlapping primitive to run full shading and ray tracing. The depth prepass restores per-pixel culling [S1, unofficial].
+*   **Depth Consistency:** Without `@invariant`, the same comparison may drop to 46 pixels (0.004%) where two overlapping spheres meet at the same 24-bit depth. The old draw kept the first sphere drawn, and the equal-depth pass keeps the last. With the prepass also off, it drops to 3 pixels, by 1/255 [S1, unofficial].
+*   **Silhouette Artifacts:** The `@invariant` qualifier may cause minor silhouette boundary shifts (single pixels on sphere silhouettes) due to different rounding in development vs. release builds. This flips some rim pixels between the sphere and what is behind it. However, `@invariant` is retained to prevent holes on other GPUs where pipelines may round depth differently [S1, unofficial].
+*   **Ordering:** The equal-depth pass keeps the last primitive drawn that matches the depth. If multiple primitives share the exact same depth, the last one processed wins [S1, unofficial].
+
+## Subtopics
+
+### Depth Consistency Handling via @invariant
+Uses the `@invariant` qualifier on clip-space positions to ensure consistent depth rounding across separate rendering passes, preventing visual artifacts at sphere boundaries [S1, unofficial]. It accepts minor silhouette boundary shifts (single pixels on sphere silhouettes) to guarantee depth consistency across pipelines on different GPUs [S1, unofficial]. Without it, depth comparison drops to 46 pixels (0.004%) where two overlapping spheres meet at the same 24-bit depth, with the old draw keeping the first sphere and the equal-depth pass keeping the last [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The prepass adds an overhead, but the shading pass is reduced by approximately 27% of the main pass time for the spheres [S1, unofficial].
+*   **Memory Complexity:** Requires an additional depth buffer attachment.
+*   **Measured Performance:** In the cited implementation, the depth prepass for spheres followed by equal-depth shading reduced the main pass time by 27% [S1, unofficial].
+*   **Strengths:** Restores GPU hidden-surface removal on architectures (like Apple GPUs) where it is disabled by discard-based impostors. Ensures shading and ray tracing run only for the nearest primitive.
+*   **Limitations:** Requires two rendering passes. Potential for minor visual artifacts at silhouettes due to depth rounding differences.
+*   **When to Use:** When rendering overlapping opaque primitives that use discard-based impostors, especially on GPUs where hidden-surface removal is sensitive to discard.
+*   **When Not to Use:** When primitives are not overlapping or when standard depth testing is sufficient (e.g., opaque walls, which are already skipped by GPU hidden-surface removal without needing a prepass). Drawing walls after spheres was slower (4.7 ms vs 4.1 ms) because walls are opaque and the GPU's hidden-surface removal already skips them [S1, unofficial].
+
+## Background
+Originated in the context of optimizing ray-traced lightbox rendering with voxel GI, specifically for overlapping particle systems [S1, unofficial]. The technique was developed to address performance issues on Apple GPUs where discard-based impostors broke hidden-surface removal [S1, unofficial]. It is part of a broader effort to optimize voxel cone tracing and particle rendering in real-time applications [S1, unofficial].
+
+## Sources
+[S1] voxel-gi-particles: ray-traced lightbox about twice as fast, same image, https://github.com/Siroko/kansei/pull/114, fetched 2026-10-26 (unofficial)

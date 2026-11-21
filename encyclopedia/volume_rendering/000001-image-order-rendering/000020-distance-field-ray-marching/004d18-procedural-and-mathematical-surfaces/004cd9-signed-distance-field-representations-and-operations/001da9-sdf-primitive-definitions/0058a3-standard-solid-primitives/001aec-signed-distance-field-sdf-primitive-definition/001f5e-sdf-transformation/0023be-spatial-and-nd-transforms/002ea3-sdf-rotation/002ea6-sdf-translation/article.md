@@ -1,0 +1,53 @@
+# SDF Translation
+
+Also called: Moving SDFs, Positioning SDFs, SDF Move
+
+## Overview
+SDF Translation positions a signed distance field primitive at a specific coordinate by transforming the sampling point in the opposite direction of the desired object movement before querying the base primitive [S2, unofficial]. Unlike [SDF Rotation](5817-sdf-rotation.md), which applies an inverse rotation matrix to the query point, translation uses a simple vector subtraction [G]. This method allows for the static definition of primitive shapes while dynamically placing them within a scene without modifying the primitive's internal geometry [G].
+
+## How it works
+**Inputs:**
+- `p`: The query point in world space (vec3) [G].
+- `t`: The translation vector representing the desired position of the SDF object in world space (vec3) [S1, S2, unofficial].
+- `base_sdf`: The function evaluating the untransformed primitive (e.g., `sdSphere`, `sdBox`) [G].
+
+**Outputs:**
+- `d`: The signed distance from `p` to the translated primitive surface [G].
+
+**Data Structures:**
+The translation vector `t` is typically stored as a uniform variable or a field within a scene descriptor struct. In the reference implementation, it is part of a `Translation` struct, stored as the second field [S1, unofficial].
+
+**Steps:**
+1. Compute the inverse-transformed query point `p'` by subtracting the translation vector `t` from the world-space query point `p`:
+   $$ p' = p - t $$
+2. Evaluate the base SDF function at `p'`:
+   $$ d = \text{base\_sdf}(p') $$
+3. Return `d` [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def translate_sdf(p: Vec3, t: Vec3, base_sdf: Callable[[Vec3], float]) -> float:
+    # Inverse transform: move the sampling point opposite to the object's movement
+    p_transformed = p - t
+    # Evaluate base primitive at transformed point
+    distance = base_sdf(p_transformed)
+    return distance
+```
+
+**Parameters:**
+- `t` (Vec3): The 3D offset vector defining the object's position. Typical values depend on scene scale; for a unit sphere centered at $(0, 1, 0)$, $t = (0, 1, 0)$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+A common error is adding the translation vector to the query point ($p + t$) or modifying the primitive's internal coordinates directly. The correct approach is moving the sampling point in the *opposite* direction of the desired object movement [S2, unofficial]. If you move the object right, you must move the sampling point left to maintain the same relative distance [S2, unofficial]. Standard floating-point precision is sufficient for most scene scales. However, for very large translation vectors, precision loss in the subtraction $p - t$ may affect distance accuracy near the surface [G].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+It relies on the principle that transforming the query point inversely is equivalent to transforming the object in the forward direction [S2, unofficial]. This concept is introduced alongside rotation and scaling in introductory raymarching guides [S2, unofficial]. Implementation details, such as storing translation vectors in uniform buffers for GPU rendering, are demonstrated in open-source raymarcher projects [S1, unofficial].
+
+## Sources
+[S1] unfinishedprogram/ray-marcher, https://github.com/unfinishedprogram/ray-marcher, fetched 2026-10-26 (unofficial)
+[S2] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)

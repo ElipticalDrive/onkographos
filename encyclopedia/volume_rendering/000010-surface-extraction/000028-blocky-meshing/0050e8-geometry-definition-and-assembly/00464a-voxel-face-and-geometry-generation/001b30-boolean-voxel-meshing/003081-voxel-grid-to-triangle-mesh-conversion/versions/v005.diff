@@ -1,0 +1,457 @@
+--- v004.md
++++ v005.md
+@@ -4,211 +4,244 @@
+ 
+ ## Overview
+-This method converts a boolean voxel occupancy grid into a watertight triangular mesh that preserves the exact volume of the original grid by generating triangles for every exposed face of surface voxels [S1, unofficial]. It solves the problem of incorrect edge connectivity where edges might connect to 4 faces instead of exactly 2, which violates standard definitions of watertightness [S1, unofficial]. Unlike marching cubes or smooth surface extraction methods that interpolate boundaries, this approach explicitly generates cube faces per surface voxel, preserving the exact voxel geometry at the cost of a higher triangle count [S1, unofficial].
++Voxel Grid to Triangle Mesh Conversion extracts a watertight triangular mesh that represents the exact volume of a boolean voxel occupancy grid [S1, unofficial]. It solves the problem of preserving the discrete geometry of the voxel grid without the interpolation artifacts of marching cubes, ensuring that every edge in the resulting mesh connects to exactly two faces [S1, unofficial]. Unlike [Blocky Surface Extraction](6418-blocky-surface-extraction.md) which may produce non-watertight or simplified outputs, this method explicitly generates triangles for every exposed face of surface voxels, guaranteeing volume preservation at the cost of higher triangle counts [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A boolean voxel grid (encoding) with known spatial transform and pitch.
++**Inputs:** A boolean voxel occupancy grid (dense encoding) and its spatial transform.
+ **Outputs:** A `TriangleMesh` object containing vertices and faces representing the surface of the voxel grid.
+ 
+ **Data Structures:**
+-1.  **Voxel Grid Encoding:** A dense boolean array or sparse index list representing occupied voxels.
+-2.  **Surface Indices:** A list of 3D integer coordinates $(i, j, k)$ for voxels that are occupied but have at least one unoccupied neighbor.
+-3.  **Surface Centers:** A list of 3D floating-point coordinates corresponding to the center of each surface voxel.
+-4.  **Face Mask:** A 6-element boolean array `[Right, Left, Front, Back, Top, Bottom]` for each surface voxel.
+-5.  **Triangles:** A list of triplets of vertex coordinates.
++1.  **Voxel Grid:** A 3D boolean array `dense_encoding` of shape $(N_x, N_y, N_z)$, where `True` indicates a filled voxel.
++2.  **Surface Indices:** A list of 3D integer coordinates $(i, j, k)$ for all voxels where `dense_encoding[i, j, k]` is `True` and at least one neighbor is `False` or out of bounds.
++3.  **Surface Centers:** A list of 3D floating-point coordinates corresponding to the geometric center of each surface voxel.
++4.  **Face Mask:** A 6-element boolean array `[R, L, F, B, T, B]` for each surface voxel, indicating which of the six faces (Right, Left, Front, Back, Top, Bottom) are exposed.
++5.  **Triangles:** A list of triangle definitions, where each triangle is defined by 3 vertices.
+ 
+ **Parameters:**
+-*   `hpitch`: Half of the voxel grid pitch (spacing between voxel centers). Computed as `pitch[0] / 2` [S1, unofficial].
++*   `hpitch`: Half the spacing between voxel centers. Computed as `pitch[0] / 2`, where `pitch` is the uniform spacing of the voxel grid [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Extract Surface Voxels:** Identify surface voxels from the original grid. A surface voxel is an occupied voxel that has at least one neighbor that is either out of bounds or unoccupied. This can be done using a morphology operation to create a "hollow" voxel grid containing only surface voxels [S1, unofficial].
+-2.  **Compute Centers:** Calculate the 3D world coordinates of each surface voxel center from its sparse indices using the grid's transform and pitch [S1, unofficial].
+-3.  **Initialize Mesh:** Create an empty `TriangleMesh` object [S2, unofficial].
+-4.  **Detect Faces:** For each surface voxel:
+-    a. Initialize a 6-element boolean mask to `False`.
+-    b. Check each of the 6 neighboring voxel indices (Right: $+x$, Left: $-x$, Front: $+y$, Back: $-y$, Top: $+z$, Bottom: $-z$).
+-    c. A face is marked `True` if the neighbor index is out of bounds or if the neighbor voxel is not present in the original dense encoding [S1, unofficial].
+-5.  **Generate Triangles:** For each `True` entry in the face mask, generate two triangles by offsetting the voxel center by `hpitch` along the appropriate axes to form the four corners of the face, then triangulating into two triangles [S1, unofficial].
+-6.  **Add to Mesh:** Add the generated triangles to the `TriangleMesh` object [S2, unofficial].
++1.  **Extract Surface Voxels:** Identify all voxels that are part of the surface. A voxel is a surface voxel if it is filled (`True`) and has at least one neighbor that is empty (`False`) or out of bounds [S1, unofficial].
++2.  **Compute Centers:** Calculate the 3D world coordinates of the center of each surface voxel using the grid's transform and indices [S1, unofficial].
++3.  **Detect Exposed Faces:** For each surface voxel, initialize a 6-element boolean mask to `False`. Check each of the 6 neighboring voxel indices (Right: $+x$, Left: $-x$, Front: $+y$, Back: $-y$, Top: $+z$, Bottom: $-z$). A face is marked `True` if the neighbor index is out of the grid bounds or if the neighbor voxel is not filled (`False`) [S1, unofficial].
++4.  **Generate Triangles:** For each surface voxel and each `True` entry in its face mask, generate two triangles. The vertices are calculated by offsetting the voxel center by $\pm hpitch$ along the axes perpendicular to the face normal.
++    *   **Right Face ($+x$):** Vertices at $(x+hpitch, y\pm hpitch, z\pm hpitch)$.
++    *   **Left Face ($-x$):** Vertices at $(x-hpitch, y\pm hpitch, z\pm hpitch)$.
++    *   **Front Face ($+y$):** Vertices at $(x\pm hpitch, y+hpitch, z\pm hpitch)$.
++    *   **Back Face ($-y$):** Vertices at $(x\pm hpitch, y-hpitch, z\pm hpitch)$.
++    *   **Top Face ($+z$):** Vertices at $(x\pm hpitch, y\pm hpitch, z+hpitch)$.
++    *   **Bottom Face ($-z$):** Vertices at $(x\pm hpitch, y\pm hpitch, z-hpitch)$.
++    *   Each face is triangulated into two triangles. The specific vertex ordering for the Right face (as per source) is:
++        1.  $(x+hpitch, y+hpitch, z-hpitch)$
++        2.  $(x+hpitch, y+hpitch, z+hpitch)$
++        3.  $(x+hpitch, y-hpitch, z+hpitch)$
++        4.  $(x+hpitch, y-hpitch, z-hpitch)$
++        Triangles: $[(0,1,2), (0,2,3)]$ [S1, unofficial].
++5.  **Construct Mesh:** Create a `TriangleMesh` object. Add the generated vertices and faces. **Crucial:** Disable vertex merging/processing during mesh creation (e.g., `process=False`) to prevent the merging of distinct vertices that share the same coordinate but belong to different faces. Merging causes edges to connect to 4 faces, violating watertightness [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+ 
+-def voxel_grid_to_triangle_mesh(voxel_grid):
++def voxel_grid_to_triangle_mesh(dense_encoding, pitch, transform):
+     """
+-    Converts a voxel grid to a watertight triangle mesh.
++    Converts a boolean voxel grid to a watertight triangle mesh.
+     
+     Args:
+-        voxel_grid: An object containing:
+-            - encoding: A dense boolean numpy array (True for occupied).
+-            - pitch: A 3D vector (x, y, z) representing the spacing between voxel centers.
+-            - transform: A 4x4 transformation matrix for the grid.
++        dense_encoding: 3D numpy array of booleans (True=voxel present).
++        pitch: float, spacing between voxel centers.
++        transform: 4x4 numpy array, affine transform from grid indices to world space.
++        
++    Returns:
++        vertices: Nx3 numpy array of vertex positions.
++        faces: Mx3 numpy array of vertex indices.
++    """
++    hpitch = pitch / 2.0
++    
++    # Step 1: Identify surface voxels
++    # A voxel is on the surface if it is True and has at least one False/Out-of-Bounds neighbor
++    surface_indices = []
++    shape = dense_encoding.shape
++    
++    # Helper to check if index is in bounds
++    def in_bounds(idx):
++        return all(0 <= idx[d] < shape[d] for d in range(3))
++    
++    # Helper to check if a neighbor is empty or out of bounds
++    def is_exposed(idx):
++        if not in_bounds(idx):
++            return True
++        return not dense_encoding[idx[0], idx[1], idx[2]]
++
++    # Iterate over all voxels to find surface ones
++    # Optimization: Use numpy argwhere for dense arrays
++    filled_indices = np.argwhere(dense_encoding)
++    
++    # Directions for neighbors: Right, Left, Front, Back, Top, Bottom
++    # Right: +x, Left: -x, Front: +y, Back: -y, Top: +z, Bottom: -z
++    neighbors_offsets = [
++        np.array([1, 0, 0]), # Right
++        np.array([-1, 0, 0]), # Left
++        np.array([0, 1, 0]), # Front
++        np.array([0, -1, 0]), # Back
++        np.array([0, 0, 1]), # Top
++        np.array([0, 0, -1]) # Bottom
++    ]
++    
++    vertices_list = []
++    faces_list = []
++    
++    # Pre-calculate world centers for all filled voxels to avoid repeated transform calls
++    # Note: transform is applied to the center. 
++    # Center in grid space for index (i,j,k) is (i+0.5, j+0.5, k+0.5) * pitch? 
++    # Or is pitch the distance between centers? 
++    # Source says: surface_centers = hollow_vr.indices_to_points(hollow_vr.sparse_indices)
++    # And hpitch = pitch[0]/2. 
++    # Assuming indices are integer grid coordinates. 
++    # Let's assume the voxel center in world space is transform * (index * pitch + offset).
++    # For simplicity, if transform is identity and pitch is uniform:
++    # Center = index * pitch + hpitch (assuming 0-indexed grid starts at 0)
++    
++    # Let's stick to the source's logic:
++    # 1. Get surface indices (grid coordinates)
++    # 2. Convert to world centers
++    
++    # Find surface indices
++    surface_grid_indices = []
++    for idx in filled_indices:
++        i, j, k = idx
++        is_surface = False
++        for offset in neighbors_offsets:
++            neighbor_idx = idx + offset
++            if is_exposed(neighbor_idx):
++                is_surface = True
++                break
++        if is_surface:
++            surface_grid_indices.append(idx)
+             
+-    Returns:
+-        vertices: numpy array of shape (N, 3)
+-        faces: numpy array of shape (M, 3)
+-    """
+-    # 1. Extract surface voxels
+-    # Create a hollow voxel grid containing only surface voxels
+-    # This assumes a morphology.surface function exists that returns a boolean grid
+-    # of voxels that are occupied but have at least one empty neighbor.
+-    hollow_encoding = morphology_surface(voxel_grid.encoding)
+-    
+-    # Get indices of surface voxels
+-    surface_indices = np.argwhere(hollow_encoding)
+-    
+-    # 2. Compute centers
+-    # Convert sparse indices to world coordinates
+-    # Assuming indices_to_points handles the transform and pitch scaling
+-    surface_centers = indices_to_points(surface_indices, voxel_grid.transform, voxel_grid.pitch)
+-    
+-    # 3. Initialize data structures
+-    triangles = []
+-    hpitch = voxel_grid.pitch[0] / 2.0
+-    
+-    # Helper functions
+-    def index_in_bounds(index):
+-        """Check if index is within the bounds of the dense encoding."""
+-        return (np.all(index >= 0) and 
+-                np.all(index < voxel_grid.encoding.shape))
+-    
+-    def actual_face(index):
+-        """Check if a neighbor is out of bounds or unoccupied."""
+-        if not index_in_bounds(index):
+-            return True
+-        return not voxel_grid.encoding[tuple(index)]
+-    
+-    # 4. Detect faces and generate triangles
+-    for i in range(len(surface_indices)):
+-        base_index = surface_indices[i]
+-        base_center = surface_centers[i]
++    if not surface_grid_indices:
++        return np.empty((0, 3)), np.empty((0, 3))
++
++    surface_grid_indices = np.array(surface_grid_indices)
++    
++    # Compute world centers
++    # Assuming transform maps grid index (i,j,k) to world space.
++    # Usually, voxel center = transform * ( (i+0.5)*pitch, (j+0.5)*pitch, (k+0.5)*pitch )
++    # But source uses `indices_to_points`. Let's assume a generic function `index_to_point`
++    # that returns the world center of a voxel given its grid index.
++    
++    def index_to_point(grid_idx):
++        # Placeholder for specific library implementation (e.g., trimesh)
++        # Assuming standard axis-aligned grid with pitch
++        center_grid = grid_idx * pitch + np.array([hpitch, hpitch, hpitch])
++        # Apply transform
++        # Homogeneous coordinate
++        h_center = np.append(center_grid, 1.0)
++        world_center = transform @ h_center
++        return world_center[:3]
++
++    surface_centers = np.array([index_to_point(idx) for idx in surface_grid_indices])
++    
++    # Step 3 & 4: Generate faces and triangles
++    # Face order: Right, Left, Front, Back, Top, Bottom
++    # Offsets for vertices relative to center for each face
++    # Right (+x): x+hpitch, y in {+/- hpitch}, z in {+/- hpitch}
++    # Vertices for Right face (from source):
++    # v0: (hpitch, hpitch, -hpitch)
++    # v1: (hpitch, hpitch, hpitch)
++    # v2: (hpitch, -hpitch, hpitch)
++    # v3: (hpitch, -hpitch, -hpitch)
++    # Triangles: (0,1,2), (0,2,3)
++    
++    face_offsets = [
++        # Right (+x)
++        np.array([[ hpitch,  hpitch, -hpitch],
++                  [ hpitch,  hpitch,  hpitch],
++                  [ hpitch, -hpitch,  hpitch],
++                  [ hpitch, -hpitch, -hpitch]]),
++        # Left (-x)
++        np.array([[-hpitch,  hpitch, -hpitch],
++                  [-hpitch,  hpitch,  hpitch],
++                  [-hpitch, -hpitch,  hpitch],
++                  [-hpitch, -hpitch, -hpitch]]),
++        # Front (+y)
++        np.array([[ hpitch,  hpitch, -hpitch],
++                  [ hpitch,  hpitch,  hpitch],
++                  [-hpitch,  hpitch,  hpitch],
++                  [-hpitch,  hpitch, -hpitch]]),
++        # Back (-y)
++        np.array([[ hpitch, -hpitch, -hpitch],
++                  [ hpitch, -hpitch,  hpitch],
++                  [-hpitch, -hpitch,  hpitch],
++                  [-hpitch, -hpitch, -hpitch]]),
++        # Top (+z)
++        np.array([[ hpitch,  hpitch,  hpitch],
++                  [ hpitch, -hpitch,  hpitch],
++                  [-hpitch, -hpitch,  hpitch],
++                  [-hpitch,  hpitch,  hpitch]]),
++        # Bottom (-z)
++        np.array([[ hpitch,  hpitch, -hpitch],
++                  [ hpitch, -hpitch, -hpitch],
++                  [-hpitch, -hpitch, -hpitch],
++                  [-hpitch,  hpitch, -hpitch]])
++    ]
++    
++    # Triangle indices for each face (always 2 triangles per face)
++    # Source Right face: [0,1,2], [0,2,3]
++    face_triangles = [
++        [[0, 1, 2], [0, 2, 3]], # Right
++        [[0, 1, 2], [0, 2, 3]], # Left (same winding relative to local coords)
++        [[0, 1, 2], [0, 2, 3]], # Front
++        [[0, 1, 2], [0, 2, 3]], # Back
++        [[0, 1, 2], [0, 2, 3]], # Top
++        [[0, 1, 2], [0, 2, 3]]  # Bottom
++    ]
++    
++    current_vertex_count = 0
++    
++    for i, center in enumerate(surface_centers):
++        grid_idx = surface_grid_indices[i]
+         
+-        # Initialize face mask: [Right, Left, Front, Back, Top, Bottom]
++        # Check neighbors
+         face_mask = [False] * 6
++        for f_idx, offset in enumerate(neighbors_offsets):
++            neighbor_idx = grid_idx + offset
++            if is_exposed(neighbor_idx):
++                face_mask[f_idx] = True
+         
+-        # Right (+x)
+-        target_index = base_index + np.array([1, 0, 0])
+-        if actual_face(target_index):
+-            face_mask[0] = True
+-            
+-        # Left (-x)
+-        target_index = base_index + np.array([-1, 0, 0])
+-        if actual_face(target_index):
+-            face_mask[1] = True
+-            
+-        # Front (+y)
+-        target_index = base_index + np.array([0, 1, 0])
+-        if actual_face(target_index):
+-            face_mask[2] = True
+-            
+-        # Back (-y)
+-        target_index = base_index + np.array([0, -1, 0])
+-        if actual_face(target_index):
+-            face_mask[3] = True
+-            
+-        # Top (+z)
+-        target_index = base_index + np.array([0, 0, 1])
+-        if actual_face(target_index):
+-            face_mask[4] = True
+-            
+-        # Bottom (-z)
+-        target_index = base_index + np.array([0, 0, -1])
+-        if actual_face(target_index):
+-            face_mask[5] = True
+-            
+-        # 5. Generate triangles for exposed faces
+-        # Right face (x + hpitch)
+-        if face_mask[0]:
+-            v0 = base_center + np.array([hpitch, hpitch, -hpitch])
+-            v1 = base_center + np.array([hpitch, hpitch, hpitch])
+-            v2 = base_center + np.array([hpitch, -hpitch, hpitch])
+-            v3 = base_center + np.array([hpitch, -hpitch, -hpitch])
+-            triangles.append([v0, v1, v2])
+-            triangles.append([v0, v2, v3])
+-            
+-        # Left face (x - hpitch)
+-        if face_mask[1]:
+-            v0 = base_center + np.array([-hpitch, hpitch, hpitch])
+-            v1 = base_center + np.array([-hpitch, hpitch, -hpitch])
+-            v2 = base_center + np.array([-hpitch, -hpitch, -hpitch])
+-            v3 = base_center + np.array([-hpitch, -hpitch, hpitch])
+-            triangles.append([v0, v1, v2])
+-            triangles.append([v0, v2, v3])
+-            
+-        # Front face (y + hpitch)
+-        if face_mask[2]:
+-            v0 = base_center + np.array([-hpitch, hpitch, hpitch])
+-            v1 = base_center + np.array([hpitch, hpitch, hpitch])
+-            v2 = base_center + np.array([hpitch, hpitch, -hpitch])
+-            v3 = base_center + np.array([-hpitch, hpitch, -hpitch])
+-            triangles.append([v0, v1, v2])
+-            triangles.append([v0, v2, v3])
+-            
+-        # Back face (y - hpitch)
+-        if face_mask[3]:
+-            v0 = base_center + np.array([hpitch, -hpitch, -hpitch])
+-            v1 = base_center + np.array([-hpitch, -hpitch, -hpitch])
+-            v2 = base_center + np.array([-hpitch, -hpitch, hpitch])
+-            v3 = base_center + np.array([hpitch, -hpitch, hpitch])
+-            triangles.append([v0, v1, v2])
+-            triangles.append([v0, v2, v3])
+-            
+-        # Top face (z + hpitch)
+-        if face_mask[4]:
+-            v0 = base_center + np.array([-hpitch, hpitch, hpitch])
+-            v1 = base_center + np.array([hpitch, hpitch, hpitch])
+-            v2 = base_center + np.array([hpitch, -hpitch, hpitch])
+-            v3 = base_center + np.array([-hpitch, -hpitch, hpitch])
+-            triangles.append([v0, v1, v2])
+-            triangles.append([v0, v2, v3])
+-            
+-        # Bottom face (z - hpitch)
+-        if face_mask[5]:
+-            v0 = base_center + np.array([hpitch, -hpitch, -hpitch])
+-            v1 = base_center + np.array([-hpitch, -hpitch, -hpitch])
+-            v2 = base_center + np.array([-hpitch, hpitch, -hpitch])
+-            v3 = base_center + np.array([hpitch, hpitch, -hpitch])
+-            triangles.append([v0, v1, v2])
+-            triangles.append([v0, v2, v3])
+-            
+-    # Convert list of triangles to numpy arrays
+-    if len(triangles) == 0:
+-        return np.empty((0, 3)), np.empty((0, 3))
+-        
+-    vertices = np.vstack(triangles).reshape(-1, 3)
+-    # Create face indices
+-    num_verts = len(vertices)
+-    faces = np.arange(num_verts).reshape(-1, 3)
+-    
+-    return vertices, faces
+-
+-def morphology_surface(encoding):
+-    """
+-    [G] Placeholder for morphology operation.
+-    Returns a boolean grid where True indicates a surface voxel.
+-    A surface voxel is occupied and has at least one unoccupied neighbor.
+-    """
+-    # This is a standard morphological operation:
+-    # surface = occupied AND NOT (dilated(occupied) == occupied)
+-    # Or more directly: surface = occupied AND (occupied XOR dilated(occupied))
+-    # Implementation depends on the specific library (e.g., scipy.ndimage)
+-    # For the purpose of this article, we assume this function exists.
+-    pass
+-
+-def indices_to_points(indices, transform, pitch):
+-    """
+-    [G] Placeholder for coordinate conversion.
+-    Converts voxel indices to world coordinates.
+-    """
+-    # world_coords = indices * pitch + offset
+-    # Then apply transform
+-    pass
++        # Generate triangles for exposed faces
++        for f_idx, is_exposed_face in enumerate(face_mask):
++            if is_exposed_face:
++                # Get vertex offsets for this face
++                offsets = face_offsets[f_idx]
++                # Calculate world vertices
++                face_vertices = center + offsets
++                
++                # Add to global vertex list
++                v0_idx = current_vertex_count
++                v1_idx = current_vertex_count + 1
++                v2_idx = current_vertex_count + 2
++                v3_idx = current_vertex_count + 3
++                
++                vertices_list.append(face_vertices[0])
++                vertices_list.append(face_vertices[1])
++                vertices_list.append(face_vertices[2])
++                vertices_list.append(face_vertices[3])
++                
++                # Add triangles
++                t1 = face_triangles[f_idx][0]
++                t2 = face_triangles[f_idx][1]
++                
++                faces_list.append([v0_idx + t1[0], v0_idx + t1[1], v0_idx + t1[2]])
++                faces_list.append([v0_idx + t2[0], v0_idx + t2[1], v0_idx + t2[2]])
++                
++                current_vertex_count += 4
++                
++    return np.array(vertices_list), np.array(faces_list)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Watertightness Violation:** Vertex merging during mesh creation can cause edges to connect to 4 faces, violating watertightness (exactly 2 faces per edge) [S1, unofficial]. To prevent this, disable vertex merging/processing upon creation (e.g., `process=False` in Trimesh) [S1, unofficial]. Note that this may affect downstream boolean operations if processing is applied internally later [S1, unofficial].
+-*   **Empty Grid:** If the input voxel grid is empty, the output mesh should be empty.
+-*   **Fully Occupied Grid:** If the voxel grid is fully occupied (no surface voxels), the output mesh should be empty.
++*   **Watertightness Violation:** If vertex merging is enabled during mesh construction, distinct vertices at the same geometric location (belonging to adjacent faces of the same voxel or different voxels) may be merged. This causes edges to connect to 4 faces instead of 2, breaking the watertight property [S1, unofficial]. The solution is to disable vertex merging (`process=False`) [S1, unofficial].
++*   **Degenerate Input:** Empty voxel grids result in empty meshes.
++*   **Precision:** Floating-point precision in vertex calculation should be sufficient for standard graphics applications. Using `hpitch` ensures vertices align exactly with voxel boundaries.
+ 
+ ## Subtopics
+@@ -217,15 +250,18 @@
+ Range Grid Triangulation converts a 2D range grid, where each grid cell stores an index to a 3D vertex or an invalid marker, into a triangular mesh. It differs from standard marching cubes by operating on pre-projected 2D grid data rather than 3D scalar fields, and handles invalid vertices by constructing triangles only from valid corners.
+ 
++### [Naive Voxel Triangulation](14035-naive-voxel-triangulation.md)
++Naive Voxel Triangulation renders a voxel model by generating triangles for all six faces of every voxel cube, regardless of visibility. It solves the problem of converting a discrete voxel grid into a triangle mesh for immediate rendering. It is distinguished from its sibling [Range Grid Triangulation](7146-range-grid-triangulation.md) by its lack of visibility culling; it produces the maximum possible triangle count for the given voxel data, whereas Range Grid Triangulation optimizes for exposed surfaces.
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of surface voxels. Each surface voxel is processed once, and the number of neighbors checked is constant (6).
+-*   **Memory Complexity:** $O(N)$, where $N$ is the number of surface voxels. The output mesh size is proportional to the surface area of the voxel grid.
+-*   **Performance:** The method is efficient for dense voxel grids with large surface areas. However, the triangle count can be significantly higher than smoothed surface extraction methods like Marching Cubes, which may impact rendering performance for very large models [S1, unofficial].
+-*   **Strengths:** Preserves exact voxel volume and geometry; produces watertight meshes when vertex merging is disabled; simple to implement.
+-*   **Limitations:** High triangle count; does not smooth the surface; sensitive to vertex merging issues if not handled correctly [S1, unofficial].
+-*   **When to Use:** When exact volume preservation is required, or when working with boolean voxel meshes where smooth interpolation is not desired [S1, unofficial].
+-*   **When Not to Use:** When rendering performance is critical and the voxel grid is very large, or when a smooth surface is desired.
++*   **Time Complexity:** $O(N)$, where $N$ is the number of surface voxels. Each surface voxel is processed once, and a constant number of neighbors are checked.
++*   **Memory Complexity:** $O(N)$, storing vertices and faces for the surface mesh.
++*   **Performance:** The method is efficient for moderate-sized voxel grids. However, the triangle count is proportional to the surface area of the voxelized object, which can be significantly higher than smooth surface approximations like Marching Cubes [S1, unofficial].
++*   **Strengths:** Produces an exact representation of the voxel volume; guarantees watertightness if implemented correctly (no vertex merging); simple logic.
++*   **Limitations:** High triangle count for complex shapes; does not smooth or interpolate surfaces; requires disabling vertex merging to maintain watertightness, which may impact downstream boolean operations [S1, unofficial].
++*   **When to Use:** When exact volume preservation is required, or when working with boolean voxel grids where interpolation is undesirable.
++*   **When Not to Use:** When rendering performance is critical and the voxel resolution is high, or when a smooth surface is desired.
+ 
+ ## Background
+-This method is used in the `trimesh` library for the voxel module, specifically for rapid construction of unioned boxes from a `VoxelGrid` [S1, unofficial]. It addresses the specific issue of watertightness in voxel-to-mesh conversion, which is a common problem in 3D printing and geometric modeling where exact volume representation is crucial [S1, unofficial]. The approach is based on the principle of generating triangles for every exposed face of surface voxels, ensuring that the resulting mesh is a precise representation of the voxel grid's surface.
++The method is implemented in the `trimesh` library for the voxel module, specifically for rapid construction of unioned boxes from a `VoxelGrid` [S1, unofficial]. It addresses issues raised in community discussions regarding watertightness in voxel-to-mesh conversions [S1, unofficial].
+ 
+ ## Sources

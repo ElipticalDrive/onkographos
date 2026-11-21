@@ -1,0 +1,888 @@
+Voxelization — Open3D 0.12.0 documentation
+Docs »
+Geometry »
+Voxelization
+Voxelization¶
+Point clouds and triangle meshes are very flexible, but irregular, geometry types. The voxel grid is another geometry type in 3D that is defined on a regular 3D grid, whereas a voxel can be thought of as the 3D counterpart to the pixel in 2D. Open3D has the geometry type VoxelGrid that can be used to work with voxel grids.
+From triangle mesh¶
+Open3D provides the method create_from_triangle_mesh that creates a voxel grid from a triangle mesh. It returns a voxel grid where all voxels that are intersected by a triangle are set to 1, all others are set to 0. The argument voxel_size defines the resolution of the voxel grid.
+```
+[2]:
+```
+```
+print('input')
+mesh = o3dtut.get_bunny_mesh()
+# fit to unit cube
+mesh.scale(1 / np.max(mesh.get_max_bound() - mesh.get_min_bound()),
+           center=mesh.get_center())
+o3d.visualization.draw_geometries([mesh])
+
+print('voxelization')
+voxel_grid = o3d.geometry.VoxelGrid.create_from_triangle_mesh(mesh,
+                                                              voxel_size=0.05)
+o3d.visualization.draw_geometries([voxel_grid])
+```
+```
+input
+```
+```
+voxelization
+```
+From point cloud¶
+The voxel grid can also be created from a point cloud using the method create_from_point_cloud. A voxel is occupied if at least one point of the point cloud is within the voxel. The color of the voxel is the average of all the points within the voxel. The argument voxel_size defines the resolution of the voxel grid.
+```
+[3]:
+```
+```
+print('input')
+N = 2000
+pcd = o3dtut.get_armadillo_mesh().sample_points_poisson_disk(N)
+# fit to unit cube
+pcd.scale(1 / np.max(pcd.get_max_bound() - pcd.get_min_bound()),
+          center=pcd.get_center())
+pcd.colors = o3d.utility.Vector3dVector(np.random.uniform(0, 1, size=(N, 3)))
+o3d.visualization.draw_geometries([pcd])
+
+print('voxelization')
+voxel_grid = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd,
+                                                            voxel_size=0.05)
+o3d.visualization.draw_geometries([voxel_grid])
+```
+```
+input
+```
+```
+voxelization
+```
+Inclusion test¶
+The voxel grid can also be used to test if points are within an occupied voxel. The method check_if_included takes a (n,3) array as input and outputs a bool array.
+```
+[4]:
+```
+```
+queries = np.asarray(pcd.points)
+output = voxel_grid.check_if_included(o3d.utility.Vector3dVector(queries))
+print(output[:10])
+```
+```
+[True, True, True, True, True, True, True, True, True, True]
+```
+Voxel carving¶
+The methods create_from_point_cloud and create_from_triangle_mesh create occupied voxels only on the surface of the geometry. It is however possible to carve a voxel grid from a number of depth maps or silhouettes. Open3D provides the methods carve_depth_map and carve_silhouette for voxel carving.
+The code below demonstrates the usage by first rendering depthmaps from a geometry and using those depthmaps to carve a dense voxel grid. The result is a filled voxel grid of the given shape.
+```
+[5]:
+```
+```
+def xyz_spherical(xyz):
+    x = xyz[0]
+    y = xyz[1]
+    z = xyz[2]
+    r = np.sqrt(x * x + y * y + z * z)
+    r_x = np.arccos(y / r)
+    r_y = np.arctan2(z, x)
+    return [r, r_x, r_y]
+
+
+def get_rotation_matrix(r_x, r_y):
+    rot_x = np.asarray([[1, 0, 0], [0, np.cos(r_x), -np.sin(r_x)],
+                        [0, np.sin(r_x), np.cos(r_x)]])
+    rot_y = np.asarray([[np.cos(r_y), 0, np.sin(r_y)], [0, 1, 0],
+                        [-np.sin(r_y), 0, np.cos(r_y)]])
+    return rot_y.dot(rot_x)
+
+
+def get_extrinsic(xyz):
+    rvec = xyz_spherical(xyz)
+    r = get_rotation_matrix(rvec[1], rvec[2])
+    t = np.asarray([0, 0, 2]).transpose()
+    trans = np.eye(4)
+    trans[:3, :3] = r
+    trans[:3, 3] = t
+    return trans
+
+
+def preprocess(model):
+    min_bound = model.get_min_bound()
+    max_bound = model.get_max_bound()
+    center = min_bound + (max_bound - min_bound) / 2.0
+    scale = np.linalg.norm(max_bound - min_bound) / 2.0
+    vertices = np.asarray(model.vertices)
+    vertices -= center
+    model.vertices = o3d.utility.Vector3dVector(vertices / scale)
+    return model
+
+
+def voxel_carving(mesh,
+                  output_filename,
+                  camera_path,
+                  cubic_size,
+                  voxel_resolution,
+                  w=300,
+                  h=300,
+                  use_depth=True,
+                  surface_method='pointcloud'):
+    mesh.compute_vertex_normals()
+    camera_sphere = o3d.io.read_triangle_mesh(camera_path)
+
+    # setup dense voxel grid
+    voxel_carving = o3d.geometry.VoxelGrid.create_dense(
+        width=cubic_size,
+        height=cubic_size,
+        depth=cubic_size,
+        voxel_size=cubic_size / voxel_resolution,
+        origin=[-cubic_size / 2.0, -cubic_size / 2.0, -cubic_size / 2.0],
+        color=[1.0, 0.7, 0.0])
+
+    # rescale geometry
+    camera_sphere = preprocess(camera_sphere)
+    mesh = preprocess(mesh)
+
+    # setup visualizer to render depthmaps
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(width=w, height=h, visible=False)
+    vis.add_geometry(mesh)
+    vis.get_render_option().mesh_show_back_face = True
+    ctr = vis.get_view_control()
+    param = ctr.convert_to_pinhole_camera_parameters()
+
+    # carve voxel grid
+    pcd_agg = o3d.geometry.PointCloud()
+    centers_pts = np.zeros((len(camera_sphere.vertices), 3))
+    for cid, xyz in enumerate(camera_sphere.vertices):
+        # get new camera pose
+        trans = get_extrinsic(xyz)
+        param.extrinsic = trans
+        c = np.linalg.inv(trans).dot(np.asarray([0, 0, 0, 1]).transpose())
+        centers_pts[cid, :] = c[:3]
+        ctr.convert_from_pinhole_camera_parameters(param)
+
+        # capture depth image and make a point cloud
+        vis.poll_events()
+        vis.update_renderer()
+        depth = vis.capture_depth_float_buffer(False)
+        pcd_agg += o3d.geometry.PointCloud.create_from_depth_image(
+            o3d.geometry.Image(depth),
+            param.intrinsic,
+            param.extrinsic,
+            depth_scale=1)
+
+        # depth map carving method
+        if use_depth:
+            voxel_carving.carve_depth_map(o3d.geometry.Image(depth), param)
+        else:
+            voxel_carving.carve_silhouette(o3d.geometry.Image(depth), param)
+        print("Carve view %03d/%03d" % (cid + 1, len(camera_sphere.vertices)))
+    vis.destroy_window()
+
+    # add voxel grid survace
+    print('Surface voxel grid from %s' % surface_method)
+    if surface_method == 'pointcloud':
+        voxel_surface = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(
+            pcd_agg,
+            voxel_size=cubic_size / voxel_resolution,
+            min_bound=(-cubic_size / 2, -cubic_size / 2, -cubic_size / 2),
+            max_bound=(cubic_size / 2, cubic_size / 2, cubic_size / 2))
+    elif surface_method == 'mesh':
+        voxel_surface = o3d.geometry.VoxelGrid.create_from_triangle_mesh_within_bounds(
+            mesh,
+            voxel_size=cubic_size / voxel_resolution,
+            min_bound=(-cubic_size / 2, -cubic_size / 2, -cubic_size / 2),
+            max_bound=(cubic_size / 2, cubic_size / 2, cubic_size / 2))
+    else:
+        raise Exception('invalid surface method')
+    voxel_carving_surface = voxel_surface + voxel_carving
+
+    return voxel_carving_surface, voxel_carving, voxel_surface
+```
+```
+[6]:
+```
+```
+mesh = o3dtut.get_armadillo_mesh()
+
+output_filename = os.path.abspath("../../test_data/voxelized.ply")
+camera_path = os.path.abspath("../../test_data/sphere.ply")
+visualization = True
+cubic_size = 2.0
+voxel_resolution = 128.0
+
+voxel_grid, voxel_carving, voxel_surface = voxel_carving(
+    mesh, output_filename, camera_path, cubic_size, voxel_resolution)
+```
+```
+Carve view 001/642
+Carve view 002/642
+Carve view 003/642
+Carve view 004/642
+Carve view 005/642
+Carve view 006/642
+Carve view 007/642
+Carve view 008/642
+Carve view 009/642
+Carve view 010/642
+Carve view 011/642
+Carve view 012/642
+Carve view 013/642
+Carve view 014/642
+Carve view 015/642
+Carve view 016/642
+Carve view 017/642
+Carve view 018/642
+Carve view 019/642
+Carve view 020/642
+Carve view 021/642
+Carve view 022/642
+Carve view 023/642
+Carve view 024/642
+Carve view 025/642
+Carve view 026/642
+Carve view 027/642
+Carve view 028/642
+Carve view 029/642
+Carve view 030/642
+Carve view 031/642
+Carve view 032/642
+Carve view 033/642
+Carve view 034/642
+Carve view 035/642
+Carve view 036/642
+Carve view 037/642
+Carve view 038/642
+Carve view 039/642
+Carve view 040/642
+Carve view 041/642
+Carve view 042/642
+Carve view 043/642
+Carve view 044/642
+Carve view 045/642
+Carve view 046/642
+Carve view 047/642
+Carve view 048/642
+Carve view 049/642
+Carve view 050/642
+Carve view 051/642
+Carve view 052/642
+Carve view 053/642
+Carve view 054/642
+Carve view 055/642
+Carve view 056/642
+Carve view 057/642
+Carve view 058/642
+Carve view 059/642
+Carve view 060/642
+Carve view 061/642
+Carve view 062/642
+Carve view 063/642
+Carve view 064/642
+Carve view 065/642
+Carve view 066/642
+Carve view 067/642
+Carve view 068/642
+Carve view 069/642
+Carve view 070/642
+Carve view 071/642
+Carve view 072/642
+Carve view 073/642
+Carve view 074/642
+Carve view 075/642
+Carve view 076/642
+Carve view 077/642
+Carve view 078/642
+Carve view 079/642
+Carve view 080/642
+Carve view 081/642
+Carve view 082/642
+Carve view 083/642
+Carve view 084/642
+Carve view 085/642
+Carve view 086/642
+Carve view 087/642
+Carve view 088/642
+Carve view 089/642
+Carve view 090/642
+Carve view 091/642
+Carve view 092/642
+Carve view 093/642
+Carve view 094/642
+Carve view 095/642
+Carve view 096/642
+Carve view 097/642
+Carve view 098/642
+Carve view 099/642
+Carve view 100/642
+Carve view 101/642
+Carve view 102/642
+Carve view 103/642
+Carve view 104/642
+Carve view 105/642
+Carve view 106/642
+Carve view 107/642
+Carve view 108/642
+Carve view 109/642
+Carve view 110/642
+Carve view 111/642
+Carve view 112/642
+Carve view 113/642
+Carve view 114/642
+Carve view 115/642
+Carve view 116/642
+Carve view 117/642
+Carve view 118/642
+Carve view 119/642
+Carve view 120/642
+Carve view 121/642
+Carve view 122/642
+Carve view 123/642
+Carve view 124/642
+Carve view 125/642
+Carve view 126/642
+Carve view 127/642
+Carve view 128/642
+Carve view 129/642
+Carve view 130/642
+Carve view 131/642
+Carve view 132/642
+Carve view 133/642
+Carve view 134/642
+Carve view 135/642
+Carve view 136/642
+Carve view 137/642
+Carve view 138/642
+Carve view 139/642
+Carve view 140/642
+Carve view 141/642
+Carve view 142/642
+Carve view 143/642
+Carve view 144/642
+Carve view 145/642
+Carve view 146/642
+Carve view 147/642
+Carve view 148/642
+Carve view 149/642
+Carve view 150/642
+Carve view 151/642
+Carve view 152/642
+Carve view 153/642
+Carve view 154/642
+Carve view 155/642
+Carve view 156/642
+Carve view 157/642
+Carve view 158/642
+Carve view 159/642
+Carve view 160/642
+Carve view 161/642
+Carve view 162/642
+Carve view 163/642
+Carve view 164/642
+Carve view 165/642
+Carve view 166/642
+Carve view 167/642
+Carve view 168/642
+Carve view 169/642
+Carve view 170/642
+Carve view 171/642
+Carve view 172/642
+Carve view 173/642
+Carve view 174/642
+Carve view 175/642
+Carve view 176/642
+Carve view 177/642
+Carve view 178/642
+Carve view 179/642
+Carve view 180/642
+Carve view 181/642
+Carve view 182/642
+Carve view 183/642
+Carve view 184/642
+Carve view 185/642
+Carve view 186/642
+Carve view 187/642
+Carve view 188/642
+Carve view 189/642
+Carve view 190/642
+Carve view 191/642
+Carve view 192/642
+Carve view 193/642
+Carve view 194/642
+Carve view 195/642
+Carve view 196/642
+Carve view 197/642
+Carve view 198/642
+Carve view 199/642
+Carve view 200/642
+Carve view 201/642
+Carve view 202/642
+Carve view 203/642
+Carve view 204/642
+Carve view 205/642
+Carve view 206/642
+Carve view 207/642
+Carve view 208/642
+Carve view 209/642
+Carve view 210/642
+Carve view 211/642
+Carve view 212/642
+Carve view 213/642
+Carve view 214/642
+Carve view 215/642
+Carve view 216/642
+Carve view 217/642
+Carve view 218/642
+Carve view 219/642
+Carve view 220/642
+Carve view 221/642
+Carve view 222/642
+Carve view 223/642
+Carve view 224/642
+Carve view 225/642
+Carve view 226/642
+Carve view 227/642
+Carve view 228/642
+Carve view 229/642
+Carve view 230/642
+Carve view 231/642
+Carve view 232/642
+Carve view 233/642
+Carve view 234/642
+Carve view 235/642
+Carve view 236/642
+Carve view 237/642
+Carve view 238/642
+Carve view 239/642
+Carve view 240/642
+Carve view 241/642
+Carve view 242/642
+Carve view 243/642
+Carve view 244/642
+Carve view 245/642
+Carve view 246/642
+Carve view 247/642
+Carve view 248/642
+Carve view 249/642
+Carve view 250/642
+Carve view 251/642
+Carve view 252/642
+Carve view 253/642
+Carve view 254/642
+Carve view 255/642
+Carve view 256/642
+Carve view 257/642
+Carve view 258/642
+Carve view 259/642
+Carve view 260/642
+Carve view 261/642
+Carve view 262/642
+Carve view 263/642
+Carve view 264/642
+Carve view 265/642
+Carve view 266/642
+Carve view 267/642
+Carve view 268/642
+Carve view 269/642
+Carve view 270/642
+Carve view 271/642
+Carve view 272/642
+Carve view 273/642
+Carve view 274/642
+Carve view 275/642
+Carve view 276/642
+Carve view 277/642
+Carve view 278/642
+Carve view 279/642
+Carve view 280/642
+Carve view 281/642
+Carve view 282/642
+Carve view 283/642
+Carve view 284/642
+Carve view 285/642
+Carve view 286/642
+Carve view 287/642
+Carve view 288/642
+Carve view 289/642
+Carve view 290/642
+Carve view 291/642
+Carve view 292/642
+Carve view 293/642
+Carve view 294/642
+Carve view 295/642
+Carve view 296/642
+Carve view 297/642
+Carve view 298/642
+Carve view 299/642
+Carve view 300/642
+Carve view 301/642
+Carve view 302/642
+Carve view 303/642
+Carve view 304/642
+Carve view 305/642
+Carve view 306/642
+Carve view 307/642
+Carve view 308/642
+Carve view 309/642
+Carve view 310/642
+Carve view 311/642
+Carve view 312/642
+Carve view 313/642
+Carve view 314/642
+Carve view 315/642
+Carve view 316/642
+Carve view 317/642
+Carve view 318/642
+Carve view 319/642
+Carve view 320/642
+Carve view 321/642
+Carve view 322/642
+Carve view 323/642
+Carve view 324/642
+Carve view 325/642
+Carve view 326/642
+Carve view 327/642
+Carve view 328/642
+Carve view 329/642
+Carve view 330/642
+Carve view 331/642
+Carve view 332/642
+Carve view 333/642
+Carve view 334/642
+Carve view 335/642
+Carve view 336/642
+Carve view 337/642
+Carve view 338/642
+Carve view 339/642
+Carve view 340/642
+Carve view 341/642
+Carve view 342/642
+Carve view 343/642
+Carve view 344/642
+Carve view 345/642
+Carve view 346/642
+Carve view 347/642
+Carve view 348/642
+Carve view 349/642
+Carve view 350/642
+Carve view 351/642
+Carve view 352/642
+Carve view 353/642
+Carve view 354/642
+Carve view 355/642
+Carve view 356/642
+Carve view 357/642
+Carve view 358/642
+Carve view 359/642
+Carve view 360/642
+Carve view 361/642
+Carve view 362/642
+Carve view 363/642
+Carve view 364/642
+Carve view 365/642
+Carve view 366/642
+Carve view 367/642
+Carve view 368/642
+Carve view 369/642
+Carve view 370/642
+Carve view 371/642
+Carve view 372/642
+Carve view 373/642
+Carve view 374/642
+Carve view 375/642
+Carve view 376/642
+Carve view 377/642
+Carve view 378/642
+Carve view 379/642
+Carve view 380/642
+Carve view 381/642
+Carve view 382/642
+Carve view 383/642
+Carve view 384/642
+Carve view 385/642
+Carve view 386/642
+Carve view 387/642
+Carve view 388/642
+Carve view 389/642
+Carve view 390/642
+Carve view 391/642
+Carve view 392/642
+Carve view 393/642
+Carve view 394/642
+Carve view 395/642
+Carve view 396/642
+Carve view 397/642
+Carve view 398/642
+Carve view 399/642
+Carve view 400/642
+Carve view 401/642
+Carve view 402/642
+Carve view 403/642
+Carve view 404/642
+Carve view 405/642
+Carve view 406/642
+Carve view 407/642
+Carve view 408/642
+Carve view 409/642
+Carve view 410/642
+Carve view 411/642
+Carve view 412/642
+Carve view 413/642
+Carve view 414/642
+Carve view 415/642
+Carve view 416/642
+Carve view 417/642
+Carve view 418/642
+Carve view 419/642
+Carve view 420/642
+Carve view 421/642
+Carve view 422/642
+Carve view 423/642
+Carve view 424/642
+Carve view 425/642
+Carve view 426/642
+Carve view 427/642
+Carve view 428/642
+Carve view 429/642
+Carve view 430/642
+Carve view 431/642
+Carve view 432/642
+Carve view 433/642
+Carve view 434/642
+Carve view 435/642
+Carve view 436/642
+Carve view 437/642
+Carve view 438/642
+Carve view 439/642
+Carve view 440/642
+Carve view 441/642
+Carve view 442/642
+Carve view 443/642
+Carve view 444/642
+Carve view 445/642
+Carve view 446/642
+Carve view 447/642
+Carve view 448/642
+Carve view 449/642
+Carve view 450/642
+Carve view 451/642
+Carve view 452/642
+Carve view 453/642
+Carve view 454/642
+Carve view 455/642
+Carve view 456/642
+Carve view 457/642
+Carve view 458/642
+Carve view 459/642
+Carve view 460/642
+Carve view 461/642
+Carve view 462/642
+Carve view 463/642
+Carve view 464/642
+Carve view 465/642
+Carve view 466/642
+Carve view 467/642
+Carve view 468/642
+Carve view 469/642
+Carve view 470/642
+Carve view 471/642
+Carve view 472/642
+Carve view 473/642
+Carve view 474/642
+Carve view 475/642
+Carve view 476/642
+Carve view 477/642
+Carve view 478/642
+Carve view 479/642
+Carve view 480/642
+Carve view 481/642
+Carve view 482/642
+Carve view 483/642
+Carve view 484/642
+Carve view 485/642
+Carve view 486/642
+Carve view 487/642
+Carve view 488/642
+Carve view 489/642
+Carve view 490/642
+Carve view 491/642
+Carve view 492/642
+Carve view 493/642
+Carve view 494/642
+Carve view 495/642
+Carve view 496/642
+Carve view 497/642
+Carve view 498/642
+Carve view 499/642
+Carve view 500/642
+Carve view 501/642
+Carve view 502/642
+Carve view 503/642
+Carve view 504/642
+Carve view 505/642
+Carve view 506/642
+Carve view 507/642
+Carve view 508/642
+Carve view 509/642
+Carve view 510/642
+Carve view 511/642
+Carve view 512/642
+Carve view 513/642
+Carve view 514/642
+Carve view 515/642
+Carve view 516/642
+Carve view 517/642
+Carve view 518/642
+Carve view 519/642
+Carve view 520/642
+Carve view 521/642
+Carve view 522/642
+Carve view 523/642
+Carve view 524/642
+Carve view 525/642
+Carve view 526/642
+Carve view 527/642
+Carve view 528/642
+Carve view 529/642
+Carve view 530/642
+Carve view 531/642
+Carve view 532/642
+Carve view 533/642
+Carve view 534/642
+Carve view 535/642
+Carve view 536/642
+Carve view 537/642
+Carve view 538/642
+Carve view 539/642
+Carve view 540/642
+Carve view 541/642
+Carve view 542/642
+Carve view 543/642
+Carve view 544/642
+Carve view 545/642
+Carve view 546/642
+Carve view 547/642
+Carve view 548/642
+Carve view 549/642
+Carve view 550/642
+Carve view 551/642
+Carve view 552/642
+Carve view 553/642
+Carve view 554/642
+Carve view 555/642
+Carve view 556/642
+Carve view 557/642
+Carve view 558/642
+Carve view 559/642
+Carve view 560/642
+Carve view 561/642
+Carve view 562/642
+Carve view 563/642
+Carve view 564/642
+Carve view 565/642
+Carve view 566/642
+Carve view 567/642
+Carve view 568/642
+Carve view 569/642
+Carve view 570/642
+Carve view 571/642
+Carve view 572/642
+Carve view 573/642
+Carve view 574/642
+Carve view 575/642
+Carve view 576/642
+Carve view 577/642
+Carve view 578/642
+Carve view 579/642
+Carve view 580/642
+Carve view 581/642
+Carve view 582/642
+Carve view 583/642
+Carve view 584/642
+Carve view 585/642
+Carve view 586/642
+Carve view 587/642
+Carve view 588/642
+Carve view 589/642
+Carve view 590/642
+Carve view 591/642
+Carve view 592/642
+Carve view 593/642
+Carve view 594/642
+Carve view 595/642
+Carve view 596/642
+Carve view 597/642
+Carve view 598/642
+Carve view 599/642
+Carve view 600/642
+Carve view 601/642
+Carve view 602/642
+Carve view 603/642
+Carve view 604/642
+Carve view 605/642
+Carve view 606/642
+Carve view 607/642
+Carve view 608/642
+Carve view 609/642
+Carve view 610/642
+Carve view 611/642
+Carve view 612/642
+Carve view 613/642
+Carve view 614/642
+Carve view 615/642
+Carve view 616/642
+Carve view 617/642
+Carve view 618/642
+Carve view 619/642
+Carve view 620/642
+Carve view 621/642
+Carve view 622/642
+Carve view 623/642
+Carve view 624/642
+Carve view 625/642
+Carve view 626/642
+Carve view 627/642
+Carve view 628/642
+Carve view 629/642
+Carve view 630/642
+Carve view 631/642
+Carve view 632/642
+Carve view 633/642
+Carve view 634/642
+Carve view 635/642
+Carve view 636/642
+Carve view 637/642
+Carve view 638/642
+Carve view 639/642
+Carve view 640/642
+Carve view 641/642
+Carve view 642/642
+Surface voxel grid from pointcloud
+```
+```
+[7]:
+```
+```
+print("surface voxels")
+print(voxel_surface)
+o3d.visualization.draw_geometries([voxel_surface])
+
+print("carved voxels")
+print(voxel_carving)
+o3d.visualization.draw_geometries([voxel_carving])
+
+print("combined voxels (carved + surface)")
+print(voxel_grid)
+o3d.visualization.draw_geometries([voxel_grid])
+```
+```
+surface voxels
+VoxelGrid with 17219 voxels.
+```
+```
+carved voxels
+VoxelGrid with 48370 voxels.
+```
+```
+combined voxels (carved + surface)
+VoxelGrid with 50788 voxels.
+```
+Docs version
+0.12.0
+Versions

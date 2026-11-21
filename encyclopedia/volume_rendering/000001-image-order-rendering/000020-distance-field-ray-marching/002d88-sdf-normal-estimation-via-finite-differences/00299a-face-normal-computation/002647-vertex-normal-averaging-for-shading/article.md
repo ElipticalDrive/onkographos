@@ -1,0 +1,103 @@
+# Vertex Normal Averaging for Shading
+
+Also called: Face Normal Computation (shading-based), Shading Normal Computation, Surface Normal Averaging for Shading
+
+## Overview
+Vertex Normal Averaging for Shading computes smooth surface normals for a mesh by averaging the geometric normals of all adjacent triangles sharing a vertex, then normalizing the result. It solves the faceting artifact inherent in flat shading by providing interpolated normals for Gouraud or Phong shading. Unlike its sibling [Face Normal Computation](2042-face-normal-computation.md), which computes a single normal per face, this method produces per-vertex normals that vary across the surface, enabling smooth lighting transitions.
+
+## How it works
+**Inputs:** A list of triangles, where each triangle is defined by three vertex indices. Each triangle must have a precomputed geometric face normal.
+**Outputs:** A list of vertex normals, one for each unique vertex in the mesh.
+
+**Data Structures:**
+1.  **Vertex Accumulator:** A list or array of structures, one per vertex. Each structure contains:
+    *   `normal`: A 3D vector (`Vector3`) initialized to $(0, 0, 0)$.
+    *   `faceCount`: An integer initialized to $0$.
+2.  **Triangle List:** An array of triangles. Each triangle stores indices to its three vertices and its precomputed face normal vector.
+
+**Steps:**
+1.  **Initialization:** Create the vertex accumulator list with size equal to the number of unique vertices. Set all `normal` vectors to zero and all `faceCount` integers to zero [S2, unofficial].
+2.  **Accumulation:** Iterate through every triangle in the mesh. For each triangle with face normal $\mathbf{n}_f$ and vertex indices $i_0, i_1, i_2$:
+    *   Add $\mathbf{n}_f$ to `accumulator[i_0].normal`.
+    *   Add $\mathbf{n}_f$ to `accumulator[i_1].normal`.
+    *   Add $\mathbf{n}_f$ to `accumulator[i_2].normal`.
+    *   Increment `accumulator[i_0].faceCount` by 1.
+    *   Increment `accumulator[i_1].faceCount` by 1.
+    *   Increment `accumulator[i_2].faceCount` by 1 [S2, unofficial].
+3.  **Normalization:** Iterate through every vertex in the mesh. For each vertex $v$:
+    *   Let $\mathbf{S}$ be `accumulator[v].normal` and $C$ be `accumulator[v].faceCount`.
+    *   If $C > 0$, compute the averaged normal $\mathbf{n}_v = \frac{\mathbf{S}}{C}$.
+    *   Normalize $\mathbf{n}_v$ to unit length: $\mathbf{n}_v \leftarrow \frac{\mathbf{n}_v}{\|\mathbf{n}_v\|}$.
+    *   Store $\mathbf{n}_v$ as the final vertex normal [S1][S2, unofficial].
+4.  **Usage:** Pass the computed vertex normals to the rendering pipeline for shading calculations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_vertex_normals(triangles, num_vertices):
+    # Step 1: Initialization
+    # Each vertex has an accumulated normal vector and a count of adjacent faces
+    accumulators = []
+    for i in range(num_vertices):
+        accumulators.append({
+            'normal': Vector3(0.0, 0.0, 0.0),
+            'faceCount': 0
+        })
+
+    # Step 2: Accumulation
+    for triangle in triangles:
+        # triangle.normal is the precomputed geometric face normal
+        # triangle.v0, triangle.v1, triangle.v2 are vertex indices
+        n = triangle.normal
+        
+        accumulators[triangle.v0]['normal'] += n
+        accumulators[triangle.v0]['faceCount'] += 1
+        
+        accumulators[triangle.v1]['normal'] += n
+        accumulators[triangle.v1]['faceCount'] += 1
+        
+        accumulators[triangle.v2]['normal'] += n
+        accumulators[triangle.v2]['faceCount'] += 1
+
+    # Step 3: Normalization
+    vertex_normals = []
+    for i in range(num_vertices):
+        acc = accumulators[i]
+        if acc['faceCount'] > 0:
+            # Average the accumulated normals
+            avg_normal = acc['normal'] / acc['faceCount']
+            # Normalize to unit length
+            final_normal = normalize(avg_normal)
+        else:
+            # Fallback for isolated vertices or degenerate cases
+            final_normal = Vector3(0.0, 1.0, 0.0) # [G] Default up vector
+        vertex_normals.append(final_normal)
+
+    return vertex_normals
+```
+
+**Parameters:**
+*   **Weighting:** The basic method uses equal weighting for all adjacent faces. Sources do not specify area-weighted or angle-weighted variants [S2, unofficial].
+*   **Edge Cases:** If a vertex is not shared by any triangle (isolated), `faceCount` remains 0. The implementation must handle division by zero [S2, unofficial].
+
+**Pitfalls:**
+*   **Unindexed Meshes:** If the mesh is stored as an unindexed, unordered list of vertices ("big mash of vertexes"), determining adjacency requires iterating through all triangles for each vertex, which is $O(N \cdot M)$ where $N$ is vertices and $M$ is triangles. An index buffer or hash map is required for efficiency [S2, unofficial].
+*   **Performance:** Computing and storing vertex normals increases memory usage and pre-processing time compared to flat shading [S1].
+*   **Initialization:** Failure to reset accumulators to zero before a new computation leads to incorrect results [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(F + V)$, where $F$ is the number of faces and $V$ is the number of vertices. One pass over faces for accumulation, one pass over vertices for normalization.
+*   **Memory Complexity:** $O(V)$ for the accumulator structures.
+*   **Strengths:** Produces smooth shading on curved surfaces; simple to implement; standard technique for mesh rendering.
+*   **Limitations:** Does not account for surface curvature or area; sharp edges appear smooth unless hard edges are explicitly marked (not covered in sources); requires precomputed face normals.
+*   **When to use:** When smooth shading is desired for a mesh with known topology.
+*   **When not to use:** When memory is extremely constrained, or when flat shading is sufficient for the visual style [S1].
+
+## Background
+The technique is described in the context of R's `rgl` package for rendering isosurfaces, where it is used to reduce faceting artifacts by passing averaged normals to the underlying rendering function [S1]. It is also widely discussed in the context of Marching Cubes algorithms for generating meshes from voxel data, where it is essential for smooth visualization of the resulting surface [S2, unofficial]. The method is a standard practice in computer graphics for Gouraud shading.
+
+## Sources
+[S1] Computing and Displaying Isosurfaces in R, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27
+[S2] Marching Cubes Vertex Normals, https://gamedev.stackexchange.com/questions/97707/marching-cubes-vertex-normals, fetched 2026-10-26 (unofficial)
+[S3] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, https://github.com/prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, fetched 2026-10-26 (unofficial)

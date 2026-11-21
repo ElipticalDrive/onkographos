@@ -1,0 +1,164 @@
+Summary Add native support for lidar point clouds as a first-class geometry type in rtxpy, rendered via OptiX hardware-accelerated sphere primitives (BuildInputSphereArray). This would slot into the existing multi-GAS pipeline as SBT off...
+
+Add lidar point cloud support via OptiX sphere primitives · Issue #55 · makepath/rtxpy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add lidar point cloud support via OptiX sphere primitives #55
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#58
+Closed
+Add lidar point cloud support via OptiX sphere primitives#55
+#58
+Copy link
+Description
+brendancol
+opened on Feb 24, 2026
+Issue body actions
+Summary
+Add native support for lidar point clouds as a first-class geometry type in rtxpy, rendered via OptiX hardware-accelerated sphere primitives (BuildInputSphereArray). This would slot into the existing multi-GAS pipeline as SBT offset 3, following the same pattern used for curves (offset 1) and heightfields (offset 2).
+Motivation
+Lidar point clouds are a natural complement to DEM terrain — they provide high-resolution 3D structure (vegetation canopy, building facades, power lines) that DEMs flatten away. rtxpy already handles multiple geometry types; point clouds fill a gap between mesh-based placement (place_mesh, place_buildings) and raster terrain.
+Proposed API
+Accessor (user-facing)
+```
+dem.rtx.place_pointcloud(
+    source,                    # str (LAS/LAZ/COPC path), ndarray (N,3), or callable
+    geometry_id='pointcloud',
+
+    # Point appearance
+    point_size=1.0,            # sphere radius in world units, or 'auto' (density-adaptive)
+    color='elevation',         # 'elevation' | 'intensity' | 'classification' | 'rgb' | (r,g,b)
+
+    # Filtering
+    classification=None,       # int or list[int] — ASPRS codes (2=ground, 6=building, etc.)
+    returns=None,              # 'first' | 'last' | 'all' — filter by return number
+    bounds=None,               # (xmin, ymin, xmax, ymax) spatial crop
+
+    # Performance
+    subsample=1,               # keep every Nth point
+    max_points=None,           # hard cap (random sample if exceeded)
+
+    # Positioning
+    snap_to_terrain=False,     # replace Z with DEM elevation
+)
+```
+Low-level RTX method
+```
+rtx.add_sphere_geometry(
+    geometry_id,
+    centers,        # (N, 3) float32 — sphere centers
+    radii,          # (N,) float32 — per-point radius (or scalar for uniform)
+    colors=None,    # (N, 4) float32 RGBA — per-point color, or None
+    transform=None, # 12-float affine
+)
+```
+Remote data fetching
+```
+rtxpy.fetch_pointcloud(
+    bounds,                    # (west, south, east, north) in EPSG:4326
+    source='3dep',             # USGS 3DEP (COPC on AWS)
+    classification=None,
+    max_points=10_000_000,
+)
+```
+Color modes
+Mode
+Source
+Notes
+'elevation'
+Point Z values
+Same colormap LUT as terrain
+'intensity'
+LAS intensity field
+Grayscale ramp
+'classification'
+LAS classification
+ASPRS standard colors (ground=brown, veg=green, building=red, water=blue)
+'rgb'
+LAS RGB fields
+Direct per-point color (photogrammetric lidar)
+(r,g,b) tuple
+User-specified
+Uniform solid color
+Implementation plan
+1. CUDA kernel (cuda/kernel.cu, cuda/common.h)
+Add float4* point_colors to Params struct (per-point RGBA, indexed by primitive_id)
+New closest-hit program:
+```
+extern "C" __global__ void __closesthit__sphere()
+{
+    // Normal = normalize(hit_point - sphere_center)
+    // Color lookup: point_colors[primitive_id]
+}
+```
+2. Core engine (rtxpy/rtx.py)
+_build_gas_for_spheres(centers, radii) — builds BuildInputSphereArray GAS
+RTX.add_sphere_geometry() — registers with _GASEntry(is_sphere=True)
+_build_ias() — route is_sphere entries to sbtOffset=3
+_create_sbt() — add 4th hit group record for sphere closest-hit
+3. Data loading (new rtxpy/pointcloud.py)
+load_pointcloud(source, ...) — uses laspy for LAS/LAZ/COPC
+Returns (centers_N3, attributes_dict) with intensity, classification, rgb, return_number
+Coordinate reprojection to DEM CRS via pyproj
+Filtering by classification, return number, spatial bounds
+Subsampling and max_points capping
+4. Accessor (rtxpy/accessor.py)
+place_pointcloud() — loads data, builds color buffer from selected mode, calls add_sphere_geometry()
+Geo→pixel coordinate conversion (same pattern as place_geojson)
+Optional Z snap to terrain surface via bilinear interpolation
+5. Rendering (rtxpy/analysis/render.py)
+Shade kernel: detect sphere hits via per-point color buffer, bypass elevation colormap
+Per-point color passed through payload or separate GPU buffer indexed by primitive_id
+6. Remote data (rtxpy/remote_data.py)
+fetch_pointcloud() — query USGS 3DEP COPC archives on AWS
+Performance estimates
+Scale
+GPU Memory
+Notes
+10M points
+~320 MB
+Fits easily on consumer GPUs
+100M points
+~3.2 GB
+Feasible on workstation GPUs, warn user
+1B+ points
+~32 GB
+Needs LOD/octree streaming — out of scope for v1
+Prerequisites to verify
+pyoptix bindings expose BuildInputSphereArray (may need to add to otk-pyoptix build)
+laspy as new dependency (lightweight, pure Python, LAS 1.0–1.4 + LAZ via lazrs)
+explore() viewer works with sphere geometry without special handling (should work via IAS tracing)
+Dependencies
+laspy (+ lazrs for LAZ compression)
+pyproj (already used for coordinate transforms)
+Activity
+brendancol
+closed this as completedin #58on Feb 25, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

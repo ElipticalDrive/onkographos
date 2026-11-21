@@ -1,0 +1,446 @@
+--- v002.md
++++ v003.md
+@@ -1,162 +1,312 @@
+ # Ray Segment Projection to Image
+-Also called: Ray Bounding Box Computation in Image Space, Ray-Image Frame Intersection with Near/Far Clipping
++
++Also called: Ray Bounding Box Computation in Image Space, Ray Segment Projection, Ray-Image Frame Intersection with Near/Far Clipping
+ 
+ ## Overview
+-This method computes the bounding box of a ray segment within the normalized image plane $[0, 1] \times [0, 1]$ for backward projection [S1, unofficial]. It determines the valid range of ray parameters ($t_{min}, t_{max}$) and the corresponding 2D image coordinates ($xy_{min}, xy_{max}$) where the ray intersects the image frame [S1, unofficial]. It sets itself apart from sibling methods by explicitly handling near/far clipping boundaries and validity masking to ensure only rays overlapping the image frame contribute to the projection, avoiding unnecessary computation for rays missing the frame entirely [S1, unofficial].
++Ray Segment Projection to Image computes the bounding segment of a ray (defined by origin and direction) that overlaps with a 2D image frame, returning the parameter range $[t_{min}, t_{max}]$ and the 2D coordinates at the entry and exit points [S2, unofficial]. It solves the problem of determining which parts of a ray contribute to a specific image plane, which is a prerequisite for backward projection in volume rendering [S2, unofficial]. It differs from [GPU Backprojection](5843-gpu-backprojection.md) by explicitly computing the geometric intersection bounds rather than relying on hardware rasterization or texture sampling, and from [Cone Beam Forward Projection with Trilinear Interpolation](8247-cone-beam-forward-projection-with-trilinear-interpolation.md) by operating in image space to define clipping bounds rather than projecting volume data onto the image [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Ray origins $O$ and directions $D$ in world space [S1, unofficial].
+-- Inverse extrinsics matrix $M_{inv}$ to transform world space to camera space [S1, unofficial].
+-- Optional near clipping distance $t_{near}$ and far clipping distance $t_{far}$ [S1, unofficial]. If `None`, defaults to $t=0$ (origin) and $t=\infty$ respectively [S1, unofficial].
++- Ray origins: Tensor of shape `(*batch, 3)`.
++- Ray directions: Tensor of shape `(*batch, 3)`.
++- Near distance: Scalar or tensor `(*batch,)` or `None`. If `None`, defaults to $t=0$.
++- Far distance: Scalar or tensor `(*batch,)` or `None`. If `None`, defaults to $t=\infty$.
++- Image frame boundaries: Typically $x \in [0, 1], y \in [0, 1]$ in normalized device coordinates or camera space.
+ 
+ **Outputs:**
+-- `RaySegmentProjection` data structure containing:
+-  - `t_min`: Minimum ray parameter.
+-  - `t_max`: Maximum ray parameter.
+-  - `xy_min`: Minimum 2D image coordinates $(x, y)$.
+-  - `xy_max`: Maximum 2D image coordinates $(x, y)$.
+-  - `overlaps_image`: Boolean flag indicating if the ray segment intersects the image frame.
++- `RaySegmentProjection`: A TypedDict containing:
++  - `t_min`: Float tensor `(*batch,)`.
++  - `t_max`: Float tensor `(*batch,)`.
++  - `xy_min`: Float tensor `(*batch, 2)`.
++  - `xy_max`: Float tensor `(*batch, 2)`.
++  - `overlaps_image`: Bool tensor `(*batch,)`.
+ 
+ **Data Structures:**
+-The output is a typed dictionary (or equivalent struct) with fields:
+-- `t_min`: Float tensor of shape `[*batch]` [S1, unofficial].
+-- `t_max`: Float tensor of shape `[*batch]` [S1, unofficial].
+-- `xy_min`: Float tensor of shape `[*batch, 2]` [S1, unofficial].
+-- `xy_max`: Float tensor of shape `[*batch, 2]` [S1, unofficial].
+-- `overlaps_image`: Bool tensor of shape `[*batch]` [S1, unofficial].
++The output is a dictionary-like structure (TypedDict) where each field is a tensor matching the batch dimensions. `xy_min` and `xy_max` store the 2D coordinates $(x, y)$ at the entry and exit points of the ray segment within the image frame.
+ 
+ **Steps:**
+-1. **Transform to Camera Space:** Transform ray origins $O$ and directions $D$ from world space to camera space using the inverse extrinsics matrix $M_{inv}$ [S1, unofficial]. Directions are transformed as vectors (rotation only, no translation) [G].
+-2. **Compute Frame Intersections:** For each ray, compute intersections with the four image frame boundaries: $x=0, x=1, y=0, y=1$ [S1, unofficial]. This is done using a helper function `_intersect_image_coordinate` which solves for $t$ such that the ray's projected coordinate equals the boundary value [S1, unofficial]. Let $t_{x0}, t_{x1}, t_{y0}, t_{y1}$ be the $t$ values for these intersections.
+-3. **Determine Near/Far Projections:** If $t_{near}$ is `None`, set $t_{near} = 0$ [S1, unofficial]. If the origin depth is near zero, use the direction vector to determine validity [S1, unofficial]. Mark as invalid if depth is near zero but not at the camera [S1, unofficial]. If $t_{far}$ is `None`, set $t_{far} = \infty$ [S1, unofficial]. Compute projection at $t=\infty$ using the direction vector directly [S1, unofficial].
+-4. **Find Min/Max $t$ Values:** Use a reduction operation with `_compare_projections` to find the minimum and maximum $t$ values among the four frame intersections ($t_{x0}, t_{x1}, t_{y0}, t_{y1}$) [S1, unofficial]. This handles validity masking by ignoring invalid intersections [S1, unofficial].
+-5. **Combine Bounds:** Combine the frame intersections with the near/far projections to determine the final bounding box [S1, unofficial]. Iterate through all 4 combinations of validity for near and far projections to assign the correct bounds [S1, unofficial].
+-6. **Compute Image Coordinates:** Calculate the 2D image coordinates at $t_{min}$ and $t_{max}$ using the ray equation in camera space [G].
+-7. **Determine Overlap:** The ray overlaps the image if $t_{min} < t_{max}$ and the resulting $xy$ coordinates are within $[0, 1]$ [G]. Set `overlaps_image` to `True` if valid, `False` otherwise [G].
++
++1. **Transform to Camera Space:**
++   Transform ray origins $\mathbf{o}$ and directions $\mathbf{d}$ from world space to camera space using the inverse extrinsics matrix $M_{ext}^{-1}$ [S1, unofficial].
++   $$
++   \mathbf{o}_{cam} = M_{ext}^{-1} \cdot [\mathbf{o}, 1]^T \quad (\text{perspective divide if needed})
++   $$
++   $$
++   \mathbf{d}_{cam} = M_{ext}^{-1} \cdot [\mathbf{d}, 0]^T \quad (\text{direction, no translation})
++   $$
++   [G] Ensure directions are normalized after transformation if the extrinsics include non-uniform scaling, though standard rigid-body extrinsics preserve length.
++
++2. **Compute Frame Intersections:**
++   Compute the intersection parameters $t$ for the ray with the four image frame boundaries: $x=0, x=1, y=0, y=1$ [S1, unofficial][S2, unofficial].
++   For a boundary defined by coordinate $c \in \{0, 1\}$ and axis $a \in \{x, y\}$:
++   $$
++   t = \frac{c - \mathbf{o}_{cam}[a]}{\mathbf{d}_{cam}[a]}
++   $$
++   Handle division by zero: if $\mathbf{d}_{cam}[a] \approx 0$, the ray is parallel to the boundary; if $\mathbf{o}_{cam}[a]$ is within $[0, 1]$, it is inside; otherwise, it is outside.
++   Store these four $t$ values. Use a helper `_compare_projections` to find the minimum and maximum valid $t$ values among these four intersections, handling validity masks [S1, unofficial][S2, unofficial].
++
++3. **Compute Near/Far Projections:**
++   - If `near` is provided, compute projection at $t_{near}$:
++     $$
++     \mathbf{p}_{near} = \mathbf{o}_{cam} + t_{near} \cdot \mathbf{d}_{cam}
++     $$
++     If `near` is `None`, set $t_{near} = 0$. If the origin depth $z$ is near zero (epsilon), check if the origin is at the camera position (norm $< \epsilon$). If so, use the direction for projection; otherwise, mark as invalid [S2, unofficial].
++   - If `far` is provided, compute projection at $t_{far}$:
++     $$
++     \mathbf{p}_{far} = \mathbf{o}_{cam} + t_{far} \cdot \mathbf{d}_{cam}
++     $$
++     If `far` is `None`, set $t_{far} = \infty$. Project the direction vector directly with $t=\infty$ [S1, unofficial][S2, unofficial].
++
++4. **Determine Final Bounding Box:**
++   Combine the min/max frame intersections and the near/far projections to determine the final bounding box $(t_{min}, t_{max}, xy_{min}, xy_{max})$ [S1, unofficial][S2, unofficial].
++   Iterate through all 4 combinations of validity for near and far projections (valid/invalid for min, valid/invalid for max) [S2, unofficial]:
++   - For each combination, create a mask where the corresponding projection is valid.
++   - Assign the appropriate $t$ and $xy$ values to the result.
++   - $t_{min}$ is the minimum of valid near and frame-min $t$ values.
++   - $t_{max}$ is the maximum of valid far and frame-max $t$ values.
++   - $xy_{min}$ and $xy_{max}$ are the 2D coordinates at $t_{min}$ and $t_{max}$ respectively.
++
++5. **Set Overlap Status:**
++   Set `overlaps_image` to `True` only if both the min and max projections are valid (i.e., the ray segment intersects the image frame within the near/far bounds) [S2, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-from typing import NamedTuple, Optional, List, Tuple
+-
+-class RaySegmentProjection(NamedTuple):
+-    t_min: float
+-    t_max: float
+-    xy_min: Tuple[float, float]
+-    xy_max: Tuple[float, float]
+-    overlaps_image: bool
++import torch
++import math
+ 
+ def ray_segment_projection_to_image(
+-    origins: List[Tuple[float, float, float]],
+-    directions: List[Tuple[float, float, float]],
+-    inv_extrinsics: List[List[float]],
+-    t_near: Optional[float] = None,
+-    t_far: Optional[float] = None
+-) -> List[RaySegmentProjection]:
+-    results = []
+-    for O, D in zip(origins, directions):
+-        # Step 1: Transform to camera space
+-        # O_c = M_inv * O, D_c = M_inv * D (directions as vectors, ignore translation)
+-        O_c = (
+-            inv_extrinsics[0][0]*O[0] + inv_extrinsics[0][1]*O[1] + inv_extrinsics[0][2]*O[2] + inv_extrinsics[0][3],
+-            inv_extrinsics[1][0]*O[0] + inv_extrinsics[1][1]*O[1] + inv_extrinsics[1][2]*O[2] + inv_extrinsics[1][3],
+-            inv_extrinsics[2][0]*O[0] + inv_extrinsics[2][1]*O[1] + inv_extrinsics[2][2]*O[2] + inv_extrinsics[2][3]
+-        )
+-        D_c = (
+-            inv_extrinsics[0][0]*D[0] + inv_extrinsics[0][1]*D[1] + inv_extrinsics[0][2]*D[2],
+-            inv_extrinsics[1][0]*D[0] + inv_extrinsics[1][1]*D[1] + inv_extrinsics[1][2]*D[2],
+-            inv_extrinsics[2][0]*D[0] + inv_extrinsics[2][1]*D[1] + inv_extrinsics[2][2]*D[2]
+-        )
+-
+-        # Step 2: Compute frame intersections
+-        def intersect_image_coordinate(axis: int, value: float) -> Optional[float]:
+-            if abs(D_c[axis]) < 1e-9:
+-                return None
+-            return (value - O_c[axis]) / D_c[axis]
+-
+-        t_x0 = intersect_image_coordinate(0, 0.0)
+-        t_x1 = intersect_image_coordinate(0, 1.0)
+-        t_y0 = intersect_image_coordinate(1, 0.0)
+-        t_y1 = intersect_image_coordinate(1, 1.0)
+-
+-        # Step 3: Handle near/far defaults and validity
+-        near_valid = True
+-        far_valid = True
+-        t_near_val = t_near if t_near is not None else 0.0
+-        t_far_val = t_far if t_far is not None else float('inf')
+-
+-        if t_near is None:
+-            if abs(O_c[2]) < 1e-6:
+-                near_valid = D_c[2] > 0
+-                if not near_valid:
+-                    near_valid = False
+-            else:
+-                near_valid = True
+-
+-        if t_far is None:
+-            far_valid = True
+-
+-        # Step 4: Find min/max t among frame intersections
+-        frame_ts = [t for t in [t_x0, t_x1, t_y0, t_y1] if t is not None]
+-        if not frame_ts:
+-            t_frame_min = float('inf')
+-            t_frame_max = float('-inf')
+-        else:
+-            t_frame_min = min(frame_ts)
+-            t_frame_max = max(frame_ts)
+-
+-        # Step 5: Combine bounds (iterate 4 combinations of validity)
+-        # The notes specify iterating through 4 combinations of validity for near and far projections.
+-        # We compute candidate bounds for each validity state and select the valid intersection.
+-        candidates = []
+-        for n_valid in [near_valid]:
+-            for f_valid in [far_valid]:
+-                c_min = t_near_val if n_valid else float('-inf')
+-                c_max = t_far_val if f_valid else float('inf')
+-                candidates.append((max(c_min, t_frame_min), min(c_max, t_frame_max)))
+-
+-        # Select the first valid combination (standard fallback)
+-        t_min, t_max = candidates[0]
+-        if t_min >= t_max:
+-            # Fallback to frame bounds if near/far are invalid
+-            t_min = t_frame_min
+-            t_max = t_frame_max
+-
+-        # Step 6: Compute image coordinates
+-        xy_min = (O_c[0] + t_min * D_c[0], O_c[1] + t_min * D_c[1])
+-        xy_max = (O_c[0] + t_max * D_c[0], O_c[1] + t_max * D_c[1])
+-
+-        # Step 7: Determine overlap
+-        overlaps = (t_min < t_max) and (0 <= xy_min[0] <= 1) and (0 <= xy_min[1] <= 1) and \
+-                   (0 <= xy_max[0] <= 1) and (0 <= xy_max[1] <= 1)
+-
+-        results.append(RaySegmentProjection(t_min, t_max, xy_min, xy_max, overlaps))
+-    return results
++    origins: torch.Tensor,  # (*batch, 3)
++    directions: torch.Tensor,  # (*batch, 3)
++    near: torch.Tensor = None,  # (*batch,) or scalar or None
++    far: torch.Tensor = None,  # (*batch,) or scalar or None
++    inv_extrinsics: torch.Tensor = None,  # (4, 4) or None
++    epsilon: float = 1e-6
++) -> dict:
++    """
++    Computes the bounding segment of a ray that overlaps with the image frame.
++    """
++    # Step 1: Transform to camera space
++    if inv_extrinsics is not None:
++        # Homogeneous coordinates
++        o_h = torch.cat([origins, torch.ones_like(origins[..., :1])], dim=-1)  # (*batch, 4)
++        d_h = torch.cat([directions, torch.zeros_like(directions[..., :1])], dim=-1)  # (*batch, 4)
++        
++        # Matrix multiplication: (*batch, 4) @ (4, 4).T -> (*batch, 4)
++        o_cam_h = (o_h.unsqueeze(-2) @ inv_extrinsics.unsqueeze(0)).squeeze(-2)
++        d_cam_h = (d_h.unsqueeze(-2) @ inv_extrinsics.unsqueeze(0)).squeeze(-2)
++        
++        o_cam = o_cam_h[..., :3] / o_cam_h[..., 3:4].clamp(min=epsilon)
++        d_cam = d_cam_h[..., :3]
++    else:
++        o_cam = origins
++        d_cam = directions
++
++    # Step 2: Compute frame intersections
++    # Frame boundaries: x=0, x=1, y=0, y=1
++    # We compute t for each boundary
++    # t = (c - o[a]) / d[a]
++    
++    # Initialize t_frame with infinity
++    t_frame = torch.full_like(o_cam[..., 0], float('inf'))
++    
++    # Boundaries: (axis_index, coordinate_value)
++    boundaries = [(0, 0.0), (0, 1.0), (1, 0.0), (1, 1.0)]
++    
++    for axis_idx, coord_val in boundaries:
++        denom = d_cam[..., axis_idx]
++        numer = coord_val - o_cam[..., axis_idx]
++        # Avoid division by zero
++        valid = torch.abs(denom) > epsilon
++        t_boundary = torch.where(valid, numer / denom, float('inf'))
++        t_frame = torch.min(t_frame, t_boundary)
++        
++    # Find min and max t among the 4 frame intersections
++    # Note: The sources mention _compare_projections with reduction min/max
++    # We assume t_frame contains the 4 intersection t values.
++    # However, the note says "Compute intersections with the four image frame boundaries... Find the minimum and maximum t values among the four frame intersections".
++    # Let's re-read carefully: "Compute intersections with the four image frame boundaries... Find the minimum and maximum t values among the four frame intersections using _compare_projections with reduction 'min' and 'max' respectively."
++    # This implies we have 4 t values. Let's store them in a tensor of shape (*batch, 4).
++    
++    t_intersections = []
++    for axis_idx, coord_val in boundaries:
++        denom = d_cam[..., axis_idx]
++        numer = coord_val - o_cam[..., axis_idx]
++        valid = torch.abs(denom) > epsilon
++        t_boundary = torch.where(valid, numer / denom, float('inf'))
++        t_intersections.append(t_boundary)
++        
++    t_intersections = torch.stack(t_intersections, dim=-1)  # (*batch, 4)
++    
++    # Find min and max valid t among intersections
++    # We need to handle validity. If all are inf, min/max are inf.
++    t_frame_min = torch.min(t_intersections, dim=-1).values
++    t_frame_max = torch.max(t_intersections, dim=-1).values
++    
++    # Step 3: Compute Near/Far Projections
++    # Near
++    if near is None:
++        t_near_val = torch.zeros_like(o_cam[..., 0])
++    else:
++        t_near_val = near
++        
++    # Check if origin is at camera position
++    o_norm = torch.norm(o_cam, dim=-1)
++    at_camera = o_norm < epsilon
++    
++    # If near is None (t=0), and origin is at camera, use direction for projection?
++    # The note says: "If near is None, compute projection at zero depth. If origin z < epsilon, check if origin is at camera position (norm < epsilon). If so, use direction for projection; otherwise mark as invalid."
++    # This seems to apply to the validity of the near point.
++    
++    # Let's compute the near point coordinates
++    # If t_near_val is 0, p_near = o_cam
++    # If at_camera and t_near_val is 0, it's valid? Or invalid?
++    # "Mark as invalid if depth is near zero but not at camera."
++    
++    near_valid = torch.ones_like(o_cam[..., 0], dtype=torch.bool)
++    if near is None:
++        # t=0
++        # If origin is not at camera (norm > epsilon) and depth (z) is near zero, mark invalid
++        # Note: "If origin z < epsilon" -> likely means the z-coordinate in camera space
++        z_cam = o_cam[..., 2]
++        near_invalid_by_z = (torch.abs(z_cam) < epsilon) & (~at_camera)
++        near_valid = ~near_invalid_by_z
++        
++    p_near = o_cam + t_near_val.unsqueeze(-1) * d_cam
++    xy_near = p_near[..., :2]
++    
++    # Far
++    if far is None:
++        t_far_val = torch.full_like(o_cam[..., 0], float('inf'))
++    else:
++        t_far_val = far
++        
++    far_valid = torch.ones_like(o_cam[..., 0], dtype=torch.bool)
++    # If far is inf, is it valid? Yes, unless direction is zero?
++    # The note doesn't specify invalidity for far, just that it's projected at infinity.
++    
++    p_far = o_cam + t_far_val.unsqueeze(-1) * d_cam
++    # For infinity, xy is undefined or direction-based?
++    # "If far is None, compute projection at infinite depth by projecting the direction vector itself with t=inf."
++    # This likely means we just use the direction for the xy component if t is inf?
++    # Or we just keep the t as inf and xy as the limit?
++    # Let's assume for t=inf, xy is not used for bounds if t_max is inf, but we need xy_max.
++    # If t_max is inf, xy_max might be the direction vector normalized?
++    # The note says: "compute projection at infinite depth by projecting the direction vector itself with t=inf."
++    # This is ambiguous. Let's assume p_far is used for xy if t_far is finite.
++    # If t_far is inf, we might set xy_max to the direction's xy component?
++    # Let's stick to the formula: p_far = o + t*d. If t=inf, p_far is inf.
++    # We'll handle xy_max later.
++    
++    # Step 4: Determine Final Bounding Box
++    # Iterate through all 4 combinations of validity for near and far projections
++    # min_valid: near is valid?
++    # max_valid: far is valid?
++    
++    # We need to select t_min from {t_near, t_frame_min} if valid
++    # We need to select t_max from {t_far, t_frame_max} if valid
++    
++    # Initialize t_min and t_max with infinity
++    t_min = torch.full_like(o_cam[..., 0], float('inf'))
++    t_max = torch.full_like(o_cam[..., 0], float('-inf'))
++    
++    # Combinations:
++    # 1. near valid, far valid
++    # 2. near valid, far invalid
++    # 3. near invalid, far valid
++    # 4. near invalid, far invalid
++    
++    # Helper to select min/max
++    def select_min(t1, t2, valid1, valid2):
++        # If both valid, take min
++        # If only t1 valid, take t1
++        # If only t2 valid, take t2
++        # If neither, inf
++        mask1 = valid1 & valid2
++        mask2 = valid1 & ~valid2
++        mask3 = ~valid1 & valid2
++        mask4 = ~valid1 & ~valid2
++        
++        res = torch.full_like(t1, float('inf'))
++        res = torch.where(mask1, torch.min(t1, t2), res)
++        res = torch.where(mask2, t1, res)
++        res = torch.where(mask3, t2, res)
++        return res
++
++    def select_max(t1, t2, valid1, valid2):
++        mask1 = valid1 & valid2
++        mask2 = valid1 & ~valid2
++        mask3 = ~valid1 & valid2
++        mask4 = ~valid1 & ~valid2
++        
++        res = torch.full_like(t1, float('-inf'))
++        res = torch.where(mask1, torch.max(t1, t2), res)
++        res = torch.where(mask2, t1, res)
++        res = torch.where(mask3, t2, res)
++        return res
++
++    t_min = select_min(t_near_val, t_frame_min, near_valid, torch.ones_like(near_valid))
++    t_max = select_max(t_far_val, t_frame_max, far_valid, torch.ones_like(far_valid))
++    
++    # Compute xy_min and xy_max
++    # xy_min is at t_min
++    # xy_max is at t_max
++    
++    # If t_min is inf, xy_min is undefined?
++    # We'll compute p at t_min and t_max
++    
++    # Handle inf t
++    t_min_safe = torch.where(torch.isinf(t_min), 0, t_min)
++    t_max_safe = torch.where(torch.isinf(t_max), 0, t_max)
++    
++    p_min = o_cam + t_min_safe.unsqueeze(-1) * d_cam
++    p_max = o_cam + t_max_safe.unsqueeze(-1) * d_cam
++    
++    xy_min = p_min[..., :2]
++    xy_max = p_max[..., :2]
++    
++    # If t_min was inf, xy_min might be garbage. We should mask it out or set to 0.
++    # The output requires xy_min and xy_max.
++    # If overlaps_image is False, xy values don't matter.
++    
++    # Step 5: Set Overlap Status
++    overlaps_image = near_valid & far_valid & (t_min < t_max) & (t_min != float('inf')) & (t_max != float('-inf'))
++    
++    return {
++        "t_min": t_min,
++        "t_max": t_max,
++        "xy_min": xy_min,
++        "xy_max": xy_max,
++        "overlaps_image": overlaps_image
++    }
+ ```
+ 
+ **Parameters:**
+-- `t_near`: Default `0.0` [S1, unofficial].
+-- `t_far`: Default `inf` [S1, unofficial].
+-
+-**Edge Cases:**
+-- **Near Zero Depth:** If the origin depth is near zero, the ray direction is used to determine validity. If depth is near zero but not at the camera, mark as invalid [S1, unofficial].
+-- **Invalid Intersections:** Intersections with frame boundaries that are not valid (e.g., behind the camera) are handled by validity masking [S1, unofficial].
++- `epsilon`: Small value to avoid division by zero and check for camera position. Typical value: $10^{-6}$ [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Ray Parallel to Frame:** If $\mathbf{d}_{cam}[a] \approx 0$, the ray is parallel to the boundary. The intersection $t$ is infinity. This is handled by the validity mask [S1, unofficial][S2, unofficial].
++- **Origin at Camera:** If the origin is at the camera position (norm $< \epsilon$) and near is $t=0$, the ray is valid. If the origin is not at the camera but depth is near zero, it is marked invalid [S2, unofficial].
++- **Infinite Far:** If far is $t=\infty$, the projection is at infinity. The $xy$ coordinates are not well-defined, but the $t$ value is used for bounding [S1, unofficial][S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Pixel-Weighted Line Integration](8503-pixel-weighted-line-integration.md)
+-A forward projection technique that computes a sinogram by approximating line integrals over a 2D image using pixel weights, iterating over a set of angles and parallel rays.
++Pixel-Weighted Line Integration is a forward projection technique that computes a sinogram by approximating line integrals over a 2D image using pixel weights. It determines which pixels a line passes through and their intersection lengths using a Bresenham-like rasterization approach. It differs from matrix-based forward projection by computing the transformation manually to avoid constructing and inverting a large matrix.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of rays, as it involves constant-time operations per ray [G].
+-- **Memory Complexity:** $O(N)$ for storing the output bounding boxes [G].
+-- **Strengths:** Efficiently culls rays that do not intersect the image frame, reducing unnecessary computation in subsequent projection steps [S1, unofficial].
+-- **Limitations:** Requires accurate transformation to camera space and handling of edge cases like near-zero depth [S1, unofficial].
+-- **When to Use:** When performing backward projection in volume rendering where rays need to be clipped to the image frame [S1, unofficial].
+-- **When Not to Use:** When rays are guaranteed to intersect the image frame or when a simpler projection method suffices [G].
++- **Time Complexity:** $O(N)$ where $N$ is the number of rays, as it involves a constant number of arithmetic operations per ray [S1, unofficial][S2, unofficial].
++- **Memory Complexity:** $O(N)$ for storing the output tensors [S1, unofficial][S2, unofficial].
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Scales linearly with the number of rays. Suitable for GPU parallelization [S1, unofficial][S2, unofficial].
++- **Strengths:** Explicit geometric computation, no need for large matrices, handles near/far clipping explicitly [S1, unofficial][S2, unofficial].
++- **Limitations:** Requires valid ray origins and directions, sensitive to numerical precision at boundaries [S1, unofficial][S2, unofficial].
++- **When to Use:** When explicit ray-frame intersection bounds are needed for backward projection or volume rendering [S2, unofficial].
++- **When Not to Use:** When hardware rasterization is preferred or when the image frame is not axis-aligned in camera space [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-This method is part of the VolSplat library, which focuses on efficient volume rendering techniques [S1, unofficial]. It is used in the context of backward projection to ensure that only relevant rays contribute to the final image [S1, unofficial].
++The method is used in volume rendering pipelines, specifically in backward projection strategies [S2, unofficial]. It is part of the VolSplat and VoLoDSplat projects, which are unofficial implementations for 3D vision and visualization [S1, unofficial][S2, unofficial].
+ 
+ ## Sources
+-[S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)+[S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
++[S2] pulangk97/VoLoDSplat, https://github.com/pulangk97/VoLoDSplat, fetched 2026-10-27 (unofficial)

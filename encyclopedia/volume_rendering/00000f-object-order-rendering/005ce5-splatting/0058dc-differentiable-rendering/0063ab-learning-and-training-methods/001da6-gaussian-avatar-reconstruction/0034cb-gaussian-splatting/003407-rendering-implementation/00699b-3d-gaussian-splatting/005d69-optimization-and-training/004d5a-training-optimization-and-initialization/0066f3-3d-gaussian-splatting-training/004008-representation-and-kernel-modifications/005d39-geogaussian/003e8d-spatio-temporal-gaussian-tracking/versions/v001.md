@@ -1,0 +1,59 @@
+# Spatio-temporal Gaussian Tracking
+
+
+## Overview
+Spatio-temporal Gaussian Tracking (SGT) is a method for modeling surface dynamics in dynamic scenes by tracking the attribute shift of each Gaussian at time $t$ using a deformation field $D(\mu, t)$, allowing the rendering of deformed Gaussians $G_t$ [S1, unofficial]. It sets itself apart from static representations by explicitly parameterizing temporal deformation through a lightweight, decomposed encoding voxel and a set of small MLPs, prioritizing real-time inference speed over large neural network approximations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Static Gaussian attributes $G_0 = (\mu, R, S, o, SH)$, where $\mu$ is position, $R$ is rotation, $S$ is scaling, $o$ is opacity, and $SH$ are spherical harmonic coefficients; continuous 4D query coordinates $(x, y, z, t)$.
+*   **Outputs:** Deformed Gaussian attributes $G_t = (\mu_t, R_t, S_t, o_t, SH)$ for rendering at time $t$.
+
+**Data Structures**
+1.  **Decomposed Encoding Voxel ($E$):** Represented as a multi-resolution HexPlane structure [S1, unofficial]. It consists of six learned 2D feature planes $E^{AB} \in \mathbb{R}^{A \times B}$ corresponding to coordinate pairs (e.g., $XY, ZT$) and three feature vectors $v^i \in \mathbb{R}^D$ along the axes [S1, unofficial].
+2.  **Gaussian Deformation Decoder ($F$):** Composed of four independent tiny Multi-Layer Perceptrons (MLPs): $F_\mu, F_R, F_S, F_o$ [S1, unofficial].
+
+**Numbered Steps**
+1.  **Decompose Deformation Field:** The deformation field is split into two modules: $D = F \circ E$, where $E$ is the decomposed encoding voxel and $F$ is the Gaussian deformation decoder [S1, unofficial].
+2.  **Query Encoding Voxel:** For a given Gaussian center $\mu = (x, y, z)$ and time $t$:
+    *   Project the 4D continuous inputs $(x, y, z, t)$ onto the decomposed 2D planes (e.g., $XY, ZT$ planes) [S1, unofficial].
+    *   Use bilinear interpolation to compute features for each plane based on the projected coordinates [S1, unofficial].
+    *   Combine the plane features and axis vectors to obtain the latent feature $f$ using the outer product formulation (see Formula below) [S1, unofficial].
+3.  **Decode Deformations:** Pass the latent feature $f$ through the four MLPs to predict the deformation deltas:
+    *   $\Delta\mu = F_\mu(f)$
+    *   $\Delta R = F_R(f)$
+    *   $\Delta S = F_S(f)$
+    *   $\Delta o = F_o(f)$
+4.  **Compute Deformed Gaussians:** Apply the deltas to the static attributes to form $G_t$ (see Formula below) [S1, unofficial].
+
+**Formulas**
+The encoding voxel $E$ is computed as [S1, unofficial]:
+$$
+\mathbf{E} = \mathbf{E}^{\text{XY}} \otimes \mathbf{E}^{\text{ZT}} \otimes \mathbf{v}^1 + \mathbf{E}^{\text{XY}} \otimes \mathbf{E}^{\text{ZT}} \otimes \mathbf{v}^2 + \mathbf{E}^{\text{XY}} \otimes \mathbf{E}^{\text{ZT}} \otimes \mathbf{v}^3
+$$
+where $\otimes$ refers to the outer product, $\mathbf{E}^{AB} \in \mathbb{R}^{AB}$ is a learned plane of features, and $\mathbf{v}^i \in \mathbb{R}^D$ denotes the feature vector along the $i$-th axis [S1, unofficial].
+
+The deformed Gaussian $G_t$ is expressed as [S1, unofficial]:
+$$
+\mathbf{G}_t = \mathbf{G}_0 + \Delta \mathbf{G} = (\boldsymbol{\mu} + \Delta\boldsymbol{\mu}, \mathbf{R} + \Delta\mathbf{R}, \mathbf{S} + \Delta\mathbf{S}, o + \Delta o, SH)
+$$
+where $SH$ coefficients are not modeled for deformation [S1, unofficial].
+
+**Parameters**
+*   **Complexity Reduction:** The decomposition reduces the computational cost of the encoding voxel from $O(N^3)$ to $O(N^2)$ [S1, unofficial].
+
+**Pitfalls**
+*   **SH Deformation:** Spherical Harmonic (SH) coefficients are not modeled for deformation. This is a design choice because modeling position, rotation, scaling, and opacity is considered sufficient to capture tissue movement and shape variations in the target domain (surgical scenes) [S1, unofficial].
+*   **Network Size:** Using large neural networks to approximate $D(\mu, t)$ is avoided as it incurs slow inference speed and sub-optimal optimization [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The encoding voxel query complexity is reduced to $O(N^2)$ from $O(N^3)$ due to the plane decomposition [S1, unofficial].
+*   **Performance:** The method achieves real-time rendering speeds suitable for dynamic endoscopic scene reconstruction [S1, unofficial].
+*   **Strengths:** Lightweight design allows for fast training and rendering; effective for modeling surface dynamics in deformable tissues [S1, unofficial].
+*   **Limitations:** SH coefficients are static, which may limit color variation modeling under deformation [S1, unofficial].
+
+## Background
+SGT was introduced in the paper "EndoGaussian: Real-time Gaussian Splatting for Dynamic Endoscopic Scene Reconstruction" by Liu, Li, Yang, and Yuan [S1, unofficial]. It was developed to address the slow rendering speed of existing methods for reconstructing deformable tissues from endoscopic videos, aiming for real-time performance in surgical applications [S1, unofficial].
+
+## Sources
+[S1] EndoGaussian: Real-time Gaussian Splatting for Dynamic Endoscopic Scene Reconstruction, https://huggingface.co/papers/2401.12561, fetched 2026-10-30 (unofficial)

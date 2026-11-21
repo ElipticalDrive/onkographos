@@ -1,0 +1,403 @@
+# Occupancy Region Derivation & ϵ-Intersection Criterion
+
+Also called: Adaptive Threshold Intersection, Elliptic Occupancy Region
+
+## Overview
+This method defines a robust geometric intersection test for 3D Gaussian splats by deriving an elliptic occupancy region $\Omega_i$ from the Gaussian kernel $G_i$, replacing strict binary overlap checks with a tolerance-based $\epsilon$-intersection criterion. It solves the problem of robustly determining whether two splats $G_i$ and $G_j$ interact during rendering or optimization, avoiding numerical instability from strict boundary comparisons. It differs from standard alpha-testing by using a derived geometric region $\Omega_i$ defined by an adaptive threshold $T_i$ and a normal-wise offset metric $\delta_{ij}$, rather than simple distance-to-center checks.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+- Gaussian primitive $G_i$: mean $p_i \in \mathbb{R}^3$, rotation matrix $R_i = [r_1, r_2, r_3] \in \mathbb{R}^{3 \times 3}$, scale parameters $\sigma_1, \sigma_2$, opacity $\alpha_i$, unit normal $n_i \in \mathbb{S}^2$.
+- Second Gaussian primitive $G_j$: mean $p_j$, rotation $R_j$, scale $\sigma_{j,1}, \sigma_{j,2}$, opacity $\alpha_j$, normal $n_j$.
+- Adaptive threshold parameter $\bar{V}_{ip}$ (passed through a sigmoid).
+- Intersection tolerance $\epsilon > 0$.
+
+**Outputs:**
+- Boolean intersection status between $G_i$ and $G_j$.
+- Normal-wise offset $\delta_{ij}$ (used for sorting or further geometric queries).
+
+### Data Structures
+The method operates on the parameters of the Gaussian primitives. No additional complex data structures are required beyond the standard Gaussian attributes. The occupancy region $\Omega_i$ is defined parametrically but not stored as a mesh; it is evaluated on-the-fly.
+
+### Steps
+
+1.  **Compute Adaptive Threshold $T_i$**:
+    Calculate the threshold $T_i$ for Gaussian $G_i$ using the adaptive threshold $\bar{V}_{ip}$, opacity $\alpha_i$, and minimum rendering contribution $c = 1/255$ [S1]:
+    $$
+    T_i := \max \left( \bar{V}_{ip}, \ln \frac{c}{\alpha_i} \right)
+    $$
+    Note: $\bar{V}_{ip}$ is passed through a sigmoid function. Entries with $\alpha_i < c$ are discarded [S1]. Since $\bar{V}_{ip}$ is bounded and $\alpha_i \ge c$ for active primitives, $T_i$ is strictly positive, ensuring $\lambda_i > 0$ [S1].
+
+2.  **Compute Eigenvalue $\lambda_i$**:
+    $$
+    \lambda_i := -2 \ln(T_i)
+    $$
+
+3.  **Define Occupancy Region $\Omega_i$**:
+    The occupancy region $\Omega_i$ is the set of points $x$ satisfying the Gaussian kernel inequality $G_i(x) > T_i$. In the local coordinate system aligned with $G_i$, this forms an elliptic disk [S1]:
+    $$
+    \Omega_i = \left\{ p_i + \sqrt{\lambda_i} \rho (\sigma_1 \cos \theta \, r_1 + \sigma_2 \sin \theta \, r_2) \mid \rho \in [0, 1), \theta \in (0, 2\pi] \right\}
+    $$
+    where $r_1, r_2$ are the first two columns of $R_i$ (orthonormal in-plane directions) and $\sigma_1, \sigma_2$ are the semi-axis lengths [S1].
+    
+    Equivalently, in 3D space, $x \in \Omega_i$ if and only if:
+    $$
+    (x - p_i)^\top \Sigma_i^+ (x - p_i) < \lambda_i, \quad \xi_3 = 0
+    $$
+    where $\Sigma_i^+$ is the Moore–Penrose pseudoinverse of the rank-2 covariance matrix $\Sigma_i = R_i \text{diag}(\sigma_1^2, \sigma_2^2, 0) R_i^\top$, and $\xi = R_i^\top (x - p_i) = (\xi_1, \xi_2, 0)^\top$ [S1].
+
+4.  **Compute Normal-wise Offset $\delta_{ij}$**:
+    To determine intersection robustly, compute the minimum translation distance $t$ along the normal $n_i$ such that $\Omega_i$ and the translated $\Omega_j$ touch [S1]:
+    $$
+    \delta_{ij} := \inf_{t \in \mathbb{R}} |t| \quad \text{such that} \quad \Omega_i \cap (\Omega_j - t n_i) \neq \emptyset
+    $$
+    By definition, $\delta_{ij} = 0$ if the splats already intersect, and $\delta_{ij} = +\infty$ if no translation along $n_i$ produces contact [S1].
+
+5.  **Evaluate $\delta_{ij}$ Numerically**:
+    Work in a local coordinate system aligned with $\Omega_i$. Define scalar coordinate functions for any point $x$:
+    $$
+    X(x) = \frac{\langle x - p_i, r_1 \rangle}{a_i}, \quad Y(x) = \frac{\langle x - p_i, r_2 \rangle}{b_i}, \quad Z(x) = \langle x - p_i, n_i \rangle
+    $$
+    where $a_i, b_i$ are the semi-axis lengths (typically $\sigma_1, \sigma_2$ scaled by $\sqrt{\lambda_i}$) [S1].
+    
+    In these coordinates, $\Omega_i$ becomes the unit disk in the plane $Z=0$:
+    $$
+    \Omega'_i = \{ (X, Y, Z) \mid X^2 + Y^2 \le 1, Z = 0 \}
+    $$
+    $\Omega_j$ maps to an elliptic patch $\Omega'_j$. A translation of $\Omega_j$ by $t n_i$ corresponds to a shift of $\Omega'_j$ by $t$ along the Z-axis. Thus:
+    $$
+    \delta_{ij} = \inf_{x \in \Omega'_j} |Z(x)| \quad \text{subject to} \quad X(x)^2 + Y(x)^2 \le 1
+    $$
+    
+    **Numerical Approximation**:
+    Sample points on the boundary of the projected ellipse of $\Omega'_j$ in the $(X, Y)$-plane. For each sample point $(X_k, Y_k)$, determine if it lies within the unit disk ($X_k^2 + Y_k^2 \le 1$). If so, compute the corresponding $Z_k$ value by interpolating from nearby samples of $\Omega_j$ or evaluating the Gaussian kernel of $G_j$ at the corresponding 3D position [S1].
+    
+    Let $\{|Z_k|\}$ be the set of absolute Z-values for all valid samples. The estimate is:
+    $$
+    \hat{\delta}_{ij} = \min_k |Z_k|
+    $$
+    [S1].
+
+6.  **Apply $\epsilon$-Intersection Criterion**:
+    Declare that $G_i$ and $G_j$ intersect if:
+    $$
+    \hat{\delta}_{ij} \le \epsilon
+    $$
+    where $\epsilon > 0$ is a small tolerance parameter [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_occupancy_region_params(gaussian):
+    """
+    Computes the parameters for the elliptic occupancy region of a Gaussian.
+    Returns: lambda_i, r1, r2, sigma1, sigma2, p_i, n_i, T_i
+    """
+    # gaussian attributes: p, R (3x3), sigma (2,), alpha, n (3,)
+    p_i = gaussian.p
+    R_i = gaussian.R
+    sigma1, sigma2 = gaussian.sigma
+    alpha_i = gaussian.alpha
+    n_i = gaussian.n
+    
+    # Adaptive threshold V_bar_ip is assumed to be passed in or computed externally
+    # For this function, we assume V_bar_ip is provided or derived from context
+    # Here we assume V_bar_ip is a scalar passed to the intersection check
+    # If not available, this step cannot be completed without external context.
+    # [G] Assuming V_bar_ip is available from the training loop state.
+    
+    c = 1.0 / 255.0
+    
+    # T_i = max(V_bar_ip, ln(c / alpha_i))
+    # Note: V_bar_ip is passed through a sigmoid. We assume the input V_bar_ip 
+    # is the post-sigmoid value or the raw value to be sigmoided. 
+    # The source says "V_bar_ip is passed through a sigmoid function".
+    # Let's assume the input to this function is the raw V_bar_ip.
+    # However, the formula uses V_bar_ip directly in the max. 
+    # We will assume V_bar_ip is the value after sigmoid for the formula application.
+    # If V_bar_ip is raw, apply sigmoid: V_bar_ip = 1 / (1 + exp(-V_bar_ip))
+    
+    # For robustness, if alpha_i < c, the Gaussian is discarded.
+    if alpha_i < c:
+        return None
+        
+    # Compute T_i
+    # [G] Assuming V_bar_ip is the sigmoided adaptive threshold.
+    term1 = V_bar_ip
+    term2 = np.log(c / alpha_i)
+    T_i = max(term1, term2)
+    
+    # lambda_i = -2 * ln(T_i)
+    lambda_i = -2.0 * np.log(T_i)
+    
+    # r1, r2 are the first two columns of R_i
+    r1 = R_i[:, 0]
+    r2 = R_i[:, 1]
+    
+    return lambda_i, r1, r2, sigma1, sigma2, p_i, n_i
+
+def evaluate_z_at_xy(p_i, n_i, r1, r2, sigma1, sigma2, lambda_i, x_local_xy):
+    """
+    Given a point in the local XY plane of Gaussian i, 
+    find the corresponding Z value in the local coordinate system of Gaussian i
+    that lies on the surface of Gaussian j's occupancy region.
+    This requires knowing the position in 3D space.
+    
+    This helper is illustrative. The actual implementation requires 
+    sampling the boundary of Omega_j.
+    """
+    pass
+
+def check_intersection(gaussian_i, gaussian_j, V_bar_ip, epsilon):
+    """
+    Checks if Gaussian i and Gaussian j intersect using the epsilon-criterion.
+    """
+    # 1. Compute parameters for Gaussian i
+    params_i = compute_occupancy_region_params(gaussian_i)
+    if params_i is None:
+        return False, float('inf')
+        
+    lambda_i, r1, r2, sigma1, sigma2, p_i, n_i = params_i
+    
+    # 2. Define the local coordinate system for i
+    # Basis vectors: r1, r2, n_i
+    # Any point x in 3D can be mapped to local coords (X, Y, Z)
+    # X = <x - p_i, r1> / a_i
+    # Y = <x - p_i, r2> / b_i
+    # Z = <x - p_i, n_i>
+    # where a_i, b_i are the semi-axes of Omega_i.
+    # From Omega_i definition: x = p_i + sqrt(lambda_i) * rho * (sigma1 cos theta r1 + sigma2 sin theta r2)
+    # The boundary is at rho=1.
+    # The semi-axes of the ellipse Omega_i in the r1, r2 directions are:
+    a_i = np.sqrt(lambda_i) * sigma1
+    b_i = np.sqrt(lambda_i) * sigma2
+    
+    # 3. Sample the boundary of Omega_j projected onto the (r1, r2) plane of i
+    # Omega_j is an ellipse in its own plane. We need to find points on Omega_j
+    # that project into the unit disk of Omega_i in the (X,Y) plane.
+    
+    # [G] The source describes approximating the infimum by sampling the boundary 
+    # of the projection of Omega'_j.
+    # We sample points on the boundary of Omega_j.
+    # Omega_j boundary: p_j + sqrt(lambda_j) * (sigma_j1 cos phi r_j1 + sigma_j2 sin phi r_j2)
+    
+    params_j = compute_occupancy_region_params(gaussian_j)
+    if params_j is None:
+        return False, float('inf')
+        
+    lambda_j, r_j1, r_j2, sigma_j1, sigma_j2, p_j, n_j = params_j
+    
+    a_j = np.sqrt(lambda_j) * sigma_j1
+    b_j = np.sqrt(lambda_j) * sigma_j2
+    
+    # Sample N points on the boundary of Omega_j
+    N = 64
+    thetas = np.linspace(0, 2 * np.pi, N, endpoint=False)
+    
+    # Points on Omega_j boundary in 3D
+    # x_j(phi) = p_j + a_j cos(phi) r_j1 + b_j sin(phi) r_j2
+    # Note: The source uses rho in [0,1) for the interior, but for the boundary 
+    # of the projection, we consider the boundary of Omega_j itself.
+    
+    boundary_points_3d = []
+    for phi in thetas:
+        # Vector from p_j to boundary point
+        vec = a_j * np.cos(phi) * r_j1 + b_j * np.sin(phi) * r_j2
+        x_j = p_j + vec
+        boundary_points_3d.append(x_j)
+        
+    min_abs_z = float('inf')
+    
+    for x_j in boundary_points_3d:
+        # Map x_j to local coordinates of i
+        # v = x_j - p_i
+        v = x_j - p_i
+        
+        # Project onto r1, r2, n_i
+        X_val = np.dot(v, r1) / a_i
+        Y_val = np.dot(v, r2) / b_i
+        Z_val = np.dot(v, n_i)
+        
+        # Check if (X, Y) is inside the unit disk of Omega_i
+        if X_val**2 + Y_val**2 <= 1.0:
+            if abs(Z_val) < min_abs_z:
+                min_abs_z = abs(Z_val)
+                
+    # If no points were inside, the regions do not intersect (or are far apart)
+    if min_abs_z == float('inf'):
+        return False, float('inf')
+        
+    # 4. Apply epsilon criterion
+    intersects = min_abs_z <= epsilon
+    
+    return intersects, min_abs_z
+```
+
+### Parameters
+- $\epsilon > 0$: Intersection tolerance. Typical values are not specified in the sources, but it must be small enough to distinguish distinct splats while allowing for minor misalignments [S1].
+- $c = 1/255$: Minimum rendering contribution threshold [S1].
+- $\bar{V}_{ip}$: Adaptive threshold, passed through a sigmoid. Value depends on training context [S1].
+
+### Edge Cases and Pitfalls
+- **Discarded Gaussians**: Gaussians with $\alpha_i < c$ are discarded and do not participate in intersection checks [S1].
+- **Strict Positivity of $\lambda_i$**: Since $\bar{V}_{ip}$ is sigmoided and $\alpha_i \ge c$, $T_i$ is strictly positive, ensuring $\lambda_i$ is real and positive [S1].
+- **Numerical Approximation**: The infimum $\delta_{ij}$ is approximated by sampling. The accuracy depends on the number of samples $N$ and the interpolation method for $Z$ values [S1].
+- **Degenerate Input**: If $G_i$ or $G_j$ has zero opacity or is invalid, it should be filtered out before this method is called.
+
+## Subtopics
+
+### [DeSplat](12925-desplat.md)
+DeSplat focuses on differentiable splatting with explicit surface representation, differing from the occupancy region approach by using a differentiable rasterization pipeline that explicitly handles surface normals and depth, rather than geometric intersection tests for pruning or sorting. Choose DeSplat when explicit surface reconstruction is required.
+
+### [360 Gaussian Splatting](12929-360-gaussian-splatting.md)
+360 Gaussian Splatting extends Gaussian Splatting to spherical panoramas, handling the topology of the sphere. It differs from the occupancy region method by addressing coordinate system singularities and projection issues specific to equirectangular projections, rather than local geometric intersection. Choose it for 360-degree scene rendering.
+
+### [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md)
+This topic covers techniques to reduce the memory footprint of Gaussian primitives. It differs from the occupancy region method, which is a runtime geometric test, by focusing on data representation and quantization. Choose it when memory bandwidth or storage is a bottleneck.
+
+### [SOGS (Second-Order Anchor for Advanced 3D Gaussian Splatting)](13171-sogs-second-order-anchor-for-advanced-3d-gaussian-splatting.md)
+SOGS introduces second-order anchors to improve optimization stability. It differs from the occupancy region method by modifying the optimization landscape rather than the geometric intersection logic. Choose it for challenging optimization scenarios.
+
+### [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md)
+This area involves adding geometric priors (e.g., depth, normals) to the Gaussian representation. It differs from the occupancy region method by influencing the training loss and primitive initialization, rather than the rendering-time intersection test. Choose it for geometry-aware reconstruction.
+
+### [Perceptual Wrapper](15438-perceptual-wrapper.md)
+The Perceptual Wrapper applies perceptual losses to improve visual quality. It differs from the occupancy region method by operating in the loss space during training, not in the geometric intersection logic. Choose it for enhancing perceptual fidelity.
+
+### [Frequency Guided Resolution Scheduler](15751-frequency-guided-resolution-scheduler.md)
+This method adapts the rendering resolution based on frequency content. It differs from the occupancy region method by controlling the sampling rate rather than the primitive interaction logic. Choose it for adaptive rendering quality.
+
+### [Inverse and Internal Rendering](15764-inverse-and-internal-rendering.md)
+Inverse rendering estimates material properties and lighting. It differs from the occupancy region method by focusing on physical property estimation rather than geometric intersection. Choose it for material and lighting recovery.
+
+### [Gaussian Frosting](15863-gaussian-frosting.md)
+Gaussian Frosting adds a thin layer of Gaussians to improve surface detail. It differs from the occupancy region method by modifying the primitive set rather than the intersection test. Choose it for enhancing surface sharpness.
+
+### [Semantic and Language Integration](15930-semantic-and-language-integration.md)
+This integrates semantic labels and language queries into Gaussian Splatting. It differs from the occupancy region method by adding semantic attributes to primitives, not affecting geometric intersection. Choose it for semantic scene understanding.
+
+### [3D Difference-of-Gaussians (3D-DoG)](16198-3d-difference-of-gaussians-3d-dog.md)
+3D-DoG uses difference-of-Gaussians for feature extraction or edge detection. It differs from the occupancy region method by using Gaussian kernels for feature analysis rather than geometric region definition. Choose it for feature-based applications.
+
+### [Hardware and Computational Acceleration](16214-hardware-and-computational-acceleration.md)
+This covers GPU and CPU optimizations for Gaussian Splatting. It differs from the occupancy region method by focusing on implementation efficiency rather than the geometric algorithm itself. Choose it for performance tuning.
+
+### [Pruning and Density Control](16215-pruning-and-density-control.md)
+Pruning removes redundant Gaussians. It differs from the occupancy region method by using intersection tests (possibly including this one) as a criterion for removal, but the method itself is the pruning strategy. Choose it for managing primitive count.
+
+### [QuantumGS](16253-quantumgs.md)
+QuantumGS applies quantum computing concepts to Gaussian Splatting. It differs from the occupancy region method by using quantum algorithms for optimization or rendering. Choose it for experimental quantum-accelerated rendering.
+
+### [Dynamic and Spacetime Modeling](16342-dynamic-and-spacetime-modeling.md)
+This extends Gaussian Splatting to dynamic scenes. It differs from the occupancy region method by adding time as a dimension to the Gaussian parameters, not affecting the static intersection test. Choose it for video or dynamic scene reconstruction.
+
+### [Gaussian Mixture Tree Construction](16717-gaussian-mixture-tree-construction.md)
+This builds hierarchical structures for efficient querying. It differs from the occupancy region method by organizing primitives spatially, potentially speeding up the intersection test but not defining the test itself. Choose it for large-scale scene management.
+
+### [Closed-Form Triangle Splatting (CF-Splat)](16773-closed-form-triangle-splatting-cf-splat.md)
+CF-Splat uses triangle primitives instead of Gaussians. It differs from the occupancy region method by changing the primitive shape and intersection logic entirely. Choose it for mesh-like representations.
+
+### [Generalizable Semantic Gaussian Splatting](16774-generalizable-semantic-gaussian-splatting.md)
+This enables generalization across scenes with semantic labels. It differs from the occupancy region method by focusing on generalization and semantics, not geometric intersection. Choose it for few-shot semantic reconstruction.
+
+### [Softmax-GS](16854-softmax-gs.md)
+Softmax-GS modifies the blending function using softmax. It differs from the occupancy region method by changing the compositing logic, not the geometric intersection. Choose it for smoother blending.
+
+### [Student’s t-Primitive Representation](17072-student-s-t-primitive-representation.md)
+This uses Student’s t-distributions for primitives. It differs from the occupancy region method by changing the kernel shape and thus the occupancy region definition. Choose it for heavy-tailed distributions.
+
+### [Hierarchical, Graph-Based, and Adaptive Structures](17106-hierarchical-graph-based-and-adaptive-structures.md)
+This covers various data structures for managing Gaussians. It differs from the occupancy region method by focusing on data organization, not the geometric test. Choose it for scalable scene management.
+
+### [Variable Basis Mapping (VBM)](17312-variable-basis-mapping-vbm.md)
+VBM adapts the basis functions for Gaussian Splatting. It differs from the occupancy region method by changing the representation basis, not the intersection logic. Choose it for adaptive basis functions.
+
+### [Human Gaussian Splatting](17349-human-gaussian-splatting.md)
+This specializes Gaussian Splatting for human avatars. It differs from the occupancy region method by adding human-specific priors and constraints, not affecting the general intersection test. Choose it for human reconstruction.
+
+### [Uncertainty and Probabilistic Modeling](17380-uncertainty-and-probabilistic-modeling.md)
+This models uncertainty in Gaussian parameters. It differs from the occupancy region method by adding probabilistic attributes, not changing the geometric intersection. Choose it for uncertainty-aware rendering.
+
+### [SCION](17424-scion.md)
+SCION is a specific framework for Gaussian Splatting. It differs from the occupancy region method by being a broader system, possibly including this method as a component. Choose it for a complete SCION-based pipeline.
+
+### [Optimization Efficiency and Sampling](17461-optimization-efficiency-and-sampling.md)
+This focuses on efficient sampling during training. It differs from the occupancy region method by optimizing the training loop, not the rendering-time intersection. Choose it for faster training.
+
+### [On-the-Fly GS](17509-on-the-fly-gs.md)
+On-the-Fly GS generates Gaussians dynamically. It differs from the occupancy region method by changing the primitive generation process, not the intersection test. Choose it for dynamic scene generation.
+
+### [View-Dependent and Appearance Modeling](17617-view-dependent-and-appearance-modeling.md)
+This models view-dependent appearance. It differs from the occupancy region method by adding appearance attributes, not affecting geometric intersection. Choose it for realistic appearance.
+
+### [Optimization and Training Loop](17791-optimization-and-training-loop.md)
+This covers the general training loop. It differs from the occupancy region method by being the broader context in which the method is used. Choose it for understanding the training process.
+
+### [BAD-Gaussians](18036-bad-gaussians.md)
+BAD-Gaussians addresses artifacts in Gaussian Splatting. It differs from the occupancy region method by focusing on artifact reduction, not geometric intersection. Choose it for higher quality results.
+
+### [LiteTex-GS](18111-litetex-gs.md)
+LiteTex-GS optimizes for lightweight texture. It differs from the occupancy region method by focusing on texture compression, not geometric intersection. Choose it for texture optimization.
+
+### [Virtual Camera Optimization for Mirror Reflections](18121-virtual-camera-optimization-for-mirror-reflections.md)
+This handles mirror reflections using virtual cameras. It differs from the occupancy region method by addressing reflection geometry, not primitive intersection. Choose it for reflective scenes.
+
+### [Differentiable DOF Rendering](18289-differentiable-dof-rendering.md)
+This renders depth-of-field effects. It differs from the occupancy region method by adding DOF simulation, not affecting the base intersection test. Choose it for realistic camera effects.
+
+### [ParetoGS Continuous-Budget Decoding](18388-paretogs-continuous-budget-decoding.md)
+ParetoGS optimizes for continuous budget trade-offs. It differs from the occupancy region method by focusing on resource allocation, not geometric intersection. Choose it for budget-constrained rendering.
+
+### [SpotLessSplats (SLS)](18423-spotlesssplats-sls.md)
+SLS reduces splat count. It differs from the occupancy region method by being a pruning strategy, possibly using intersection tests. Choose it for reducing primitive count.
+
+### [TruncGradGS](18675-truncgradgs.md)
+TruncGradGS truncates gradients. It differs from the occupancy region method by modifying the optimization gradients, not the geometric intersection. Choose it for stable training.
+
+### [EfficientGS](18681-efficientgs.md)
+EfficientGS optimizes for speed. It differs from the occupancy region method by focusing on implementation efficiency, not the geometric algorithm. Choose it for fast rendering.
+
+### [Variational 3D Gaussians](18706-variational-3d-gaussians.md)
+This uses variational inference for Gaussians. It differs from the occupancy region method by changing the probabilistic model, not the geometric intersection. Choose it for probabilistic reconstruction.
+
+### [Gaussian Splatting Training with SDS Loss](18710-gaussian-splatting-training-with-sds-loss.md)
+This uses SDS loss for training. It differs from the occupancy region method by changing the loss function, not the geometric intersection. Choose it for text-guided reconstruction.
+
+### [EnvMap-GS](18915-envmap-gs.md)
+EnvMap-GS incorporates environment maps. It differs from the occupancy region method by adding lighting information, not affecting geometric intersection. Choose it for realistic lighting.
+
+### [Thermal-Physics-Informed 3D Gaussian Splatting](18935-thermal-physics-informed-3d-gaussian-splatting.md)
+This incorporates thermal physics. It differs from the occupancy region method by adding physical attributes, not affecting geometric intersection. Choose it for thermal scene reconstruction.
+
+### [Environment Map Generation from Gaussian Background](18942-environment-map-generation-from-gaussian-background.md)
+This generates environment maps from Gaussians. It differs from the occupancy region method by focusing on background extraction, not geometric intersection. Choose it for environment map generation.
+
+## Operating characteristics
+
+**Time Complexity**: The intersection test for a pair of Gaussians involves sampling the boundary of one Gaussian and checking against the other. With $N$ samples, the cost is $O(N)$. For all-pairs, this is $O(N^2)$, but the source notes that a fixed-radius search can reduce this to approximately linear complexity $O(N)$ for typical scenes [S1].
+
+**Memory Complexity**: The method requires storing the Gaussian parameters ($p, R, \sigma, \alpha, n$) and the adaptive threshold $\bar{V}_{ip}$. No additional large data structures are required. Memory usage is $O(N)$ for $N$ Gaussians [S1].
+
+**Measured Performance**: For a typical scene of $10^5$ primitives, preprocessing (including Laplacian construction) completes in a short time, allowing efficient multi-core CPU execution [S1].
+
+**Strengths**: Robust intersection detection via $\epsilon$-tolerance; adaptive thresholding handles varying opacities; efficient with fixed-radius search.
+
+**Limitations**: Numerical approximation of $\delta_{ij}$ may introduce errors; requires careful tuning of $\epsilon$; sampling-based approach may be slow for very high precision requirements.
+
+**When to Use**: When robust intersection detection is needed for Gaussian primitives, especially in dynamic or complex scenes where strict binary overlap fails.
+
+**When Not to Use**: When exact geometric intersection is required without tolerance; when computational resources are extremely limited and sampling is too expensive.
+
+## Background
+
+The method was introduced in "Proxy-Free Gaussian Splats Deformation with Splat-Based Surface Estimation" [S1]. It addresses the need for robust surface estimation and deformation in Gaussian Splatting by defining a clear geometric occupancy region for each Gaussian kernel. The derivation of the elliptic region and the $\epsilon$-intersection criterion provides a mathematically sound way to handle splat interactions, improving the stability of surface-preserving adaptations.
+
+## Sources
+
+[S1] Proxy-Free Gaussian Splats Deformation with Splat-Based Surface Estimation, https://doi.org/10.1109/3DV69130.2026.00155, fetched 2026-10-30

@@ -1,0 +1,2829 @@
+Drop-In Perceptual Optimization
+for 3D Gaussian Splatting
+Ezgi Özyılkan1,2∗ , Zhiqi Chen1∗ , Oren Rippel1 ,
+Jona Ballé2 , and Kedar Tatwawadi1†
+1
+Apple
+New York University Tandon School of Engineering
+{e_ozyilkan, zhiqichen, oren.rippel}@apple.com
+kedar.tatwawadi@gmail.com
+jona.balle@nyu.edu
+arXiv:2603.23297v2 [cs.CV] 30 Jun 2026
+2
+Fig. 1: Novel view rendering using 3DGS on the large-scale Barcelona scene from the
+BungeeNeRF dataset [40]. We compare the original 3DGS distortion loss L1+SSIM [22],
+Pixel-GS [45], and the state-of-the-art in splat-efficient perceptual quality PerceptualGS [46], to the best-performing perceptual losses from our studies—Wasserstein Distortion [2] (WD) and a variant weighted with the original 3DGS loss, which we denote
+as WD-Regularized (WD-R). #G denotes the splat count for each method, and green
+bars show the ratio of human raters preferring rendered image patches from the respective loss for this scene (e.g. for every rater preferring the original loss, there are
+2.4 and 3.2 raters preferring WD and WD-R, respectively).
+Abstract. Despite their output being ultimately consumed by human
+viewers, 3D Gaussian Splatting (3DGS) methods often rely on ad-hoc
+Equal contribution and corresponding authors.
+This work was done during E. Özyılkan’s internship at Apple.
+†
+Work done while at Apple.
+*
+2
+Özyılkan and Chen et al.
+combinations of pixel-level losses, resulting in blurry renderings. To address this, we systematically explore perceptual optimization strategies
+for 3DGS by searching over a diverse set of distortion losses. We conduct
+the first-of-its-kind large-scale human subjective study on 3DGS, involving 39,320 pairwise ratings across several datasets and 3DGS frameworks.
+A regularized version of Wasserstein Distortion, which we call WD-R,
+emerges as the clear winner, excelling at recovering fine textures without incurring a higher splat count. WD-R is preferred by raters more
+than 2.3× over the original 3DGS loss, and 1.5× over the current best
+method Perceptual-GS. WD-R also consistently achieves state-of-the-art
+LPIPS, DISTS, and FID scores across various datasets, and generalizes across recent frameworks, such as Mip-Splatting and Scaffold-GS,
+where replacing the original loss with WD-R consistently enhances perceptual quality within a similar resource budget (number of splats for
+Mip-Splatting, model size for Scaffold-GS), and leads to reconstructions
+being preferred by human raters 1.8× and 3.6×, respectively. We also
+find that this carries over to the task of 3DGS scene compression, with
+≈ 50% bitrate savings for comparable perceptual metric performance.
+Keywords: 3D Gaussian Splatting · Perceptual Optimization · Human
+preference study
+1
+Introduction
+3D Gaussian Splatting (3DGS) [22] has emerged as a powerful technique for
+novel view synthesis, offering real-time and fully differentiable rendering. While
+the rendered output is intended for human viewers, most 3DGS methods predominantly rely on ad-hoc combinations of pixel-level losses, such as the original
+L1 + SSIM introduced by [22], which often lead to overly smooth or blurry textures. It is also common to use more recent distortion metrics such as LPIPS [44]
+for evaluation, but their use for optimization has not been rigorously investigated. Importantly, the various perceptual optimization techniques have also
+not been validated through human preference studies. This lack of emphasis
+on human vision can lead to inefficient utilization of representational capacity,
+affecting rendering speed and real-time performance. This matters even more
+when a 3DGS representation must be compressed for storage or transmission,
+where every bit spent on imperceptible detail yields no perceptual benefit.
+Several prior works study this gap, but mainly through partial or indirect
+strategies; e.g. by enhancing edges [46], or by manipulating the strategy of pruning and splitting Gaussians during training [13, 45]. In this work, we take a
+principled approach: we make the perceptual optimization loss itself the central
+design choice. Decoupling the modeling of human vision in the distortion loss
+from the underlying 3DGS algorithms—such as initialization, densification, and
+pruning—also simplifies the overall system design and enables broader generalization.
+Building on this principle, in this work we take a systematic look at perceptual optimization for 3DGS, demonstrating that significant perceptual improve-
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+3
+ments can be achieved with improved loss formulation alone, without relying on
+any heuristics or changes to the underlying 3DGS algorithms themselves:
+1. We study three families of distortion losses with the goal of maximizing
+perceptual quality for 3DGS: (i) L1 + SSIM originally proposed in [22] and
+widely used across the literature, (ii) a composite loss L1 + L2 + MS-SSIM +
+LPIPS including common perceptual metrics [32, 33], and (iii) Wasserstein
+Distortion (WD) [2, 34], a recently proposed distortion metric comparing
+local statistics in a deep feature space, which has shown promise in the
+learned compression literature [2].
+2. To assess the perceptual quality achieved by these training objectives, we
+conduct a large-scale human subjective study comprising 39,320 pairwise
+ratings across 4 datasets and 3 distinct 3DGS frameworks—to our knowledge,
+the first-of-its-kind for 3DGS.
+3. Out of our analysis emerges a new loss as a top performer for 3DGS perceptual optimization. It is a regularized version of WD, which we refer to as
+WD-R, that consistently outperforms all other losses. WD-R is preferred by
+raters more than 2.3× over the original 3DGS loss and 1.5× over PerceptualGS, the current best perceptual 3DGS scheme. WD-R also achieves state-ofthe-art scores on common perceptual metrics such as FID [15], CMMD [20],
+DISTS [11], and LPIPS [44] across diverse datasets. We further show that
+WD-R generalizes to anti-aliasing and structured methods, as well as scene
+compression (i.e. fitting 3DGS representations with a constraint on storage size rather than splat count), where it yields ≈ 50% bitrate savings at
+comparable perceptual metric performance.
+Our contribution is realized through a simple yet effective modification—replacing
+the 2D distortion loss function used during optimization, without introducing
+any 3D-specific constraints or heuristics. As such, other extensions of the 3DGS
+framework (such as [28,42,43,45]) are largely orthogonal to and compatible with
+our work. Our project page can be found at https://apple.github.io/mlperceptual-3dgs.
+2
+Background
+2.1
+Related work
+Several approaches have sought to improve the visual quality of rendered 3DGS
+views. Mip-Splatting [42] and Analytic-Splatting [26] reduce aliasing artifacts
+with improved filtering. Other works focus on optimization and primitive allocation, using frequency regularization (FreGS [43]) or edge- or gradient-based
+heuristics to guide densification toward visually important regions (e.g. PixelGS [45], Perceptual-GS [46], and EGGS [13]). A third line of work explores more
+structured Gaussian representations for improved efficiency and compactness,
+such as anchor-based Scaffold-GS [28].
+Perceptual realism is commonly pursued through adversarial training [32,33],
+and GAN-based methods have been explored for 3DGS representations [5,6,23] in
+pact, faster real-time renderings.
+4
+CompGS by Liu et al. [18] and no
+thresholds for pruning, along with gradient signals from the
+and the resulting gradients are used to update
+Gaussian paand weallow
+refermore
+to growth
+it as the
+“original”
+loss. We
+to
+demonstrate
+how explo
+percep
+distortion loss [14]. Lower thresholds
+3. aiming
+Methodology
+2.3. 3DGS
+optimization
+procedure
+rameters. While, during evaluation,
+all our
+experiments
+plug into existing compression pipe
+and more complex texture reconstruction
+but loss
+increase runalternatives
+functions:
+more
+realistic
+renderings
+at
+lower
+sto
+time
+and
+memory
+cost,
+while
+higher
+thresholds
+favor
+com3.1. Alternatives for distortion
+evaluate a novel view synthesisThe
+task, i.e.
+compare
+recon-is illustrated in Figure 2.
+optimization
+procedure
+pact, faster real-time renderings.
+training,
+rendered
+views x̂ are compared against
+structed views with unseen testDuring
+views in
+Dtest
+.
+We
+conet al.
+[14] optimize the ren
+3.the
+Methodology
+The optimization procedure
+is illustrated inloss
+Figure Since
+2. Kerbl
+Composite
+introduction of SSI
+ground-truth images
+in the training
+D
+, using
+one of
+trainare
+sider two settings with different optimization
+objectives:
+(1)
+During
+training,
+rendered set,
+views
+x̂
+compared
+against combination of L1 and SSIM [27]
+3.1.
+Alternatives
+for distortion
+model
+of
+human
+contrast
+perception
+field
+our proposedground-truth
+losses in the
+Section
+3.1),one of the canonical loss [27],
+images
+trainingin
+set, D
+choice the
+for 3DG
+train , using
+evaluate the 3DGS representation
+alone, anddistortion
+(2) consider
+a(described
+Kerbl
+al.
+[14]
+optimize
+the
+rende
+our proposed
+distortion
+(described
+in
+Section
+and the resulting
+gradients are
+usedlosses
+to man
+update
+Gaussian
+pa- 3.1),
+perceptual
+modeling
+haset
+made
+significant
+ad
+and we
+refer
+to
+it as
+the
+“original
+scene compression.
+combination of L1 and SSIM [27];
+and theduring
+resultingevaluation,
+gradients areall
+usedour
+to update
+Gaussian parameters. While,
+experiments
+alternatives
+lossoriginal
+functions:loss, em
+We
+consider
+a generalization
+of the
+the canonical loss choice for 3DGS
+rameters.
+While,
+during
+evaluation,
+all
+our
+experiments
+evaluate a novel view synthesis task, i.e. compare recona task,
+weighted
+sum of
+several
+more
+recent
+and“original”
+popula
+and we
+refer to
+it as the
+evaluate a novel view synthesis
+i.e. compare
+reconstructed
+with
+unseen
+test views inviews
+Dtestin
+. D
+We . conRepresentation Representation
+is views
+primarily
+based
+alternativesloss
+loss Since
+functions:the intro
+structed
+views on
+with aunseen test
+We con- Composite
+test
+tion losses:
+sider
+two
+settings
+with
+different
+optimization
+objectives:
+(1)
+sider two settings with different optimization objectives: (1) model of human contrast percepti
+distortion
+Özyılkan andsingle
+Chen et
+al. loss:
+alone, and
+(2)and
+consider
+a a
+evaluaterepresentation
+the 3DGS representation
+alone,
+(2) consider
+Composite
+lossmodeling
+Since the
+introd
+! evaluate the 3DGS
+has
+ma
+Lcomposite = ϑ1 LL1 +man
+ϑ2model
+Lperceptual
+ϑ4 L
+scene compression.
+L2 +
+3 LMS-SSIM
+L
+compression.
+of ϑ
+human
+contrast +
+perception
+min
+ε scene
+D(x, x̂)
+(1)
+We consider a generalization of the
+man perceptual modeling has mad
+a We
+weighted
+sum
+of several of
+more
+re
+consider
+the L
+o
+where
+andon
+LaL2on a
+aretion
+per-pixel
+L1a generalization
+and L2 norms,
+Representation
+Representation
+is L
+primarily
+based
+Representation
+Representation is
+primarily
+based
+L1
+alosses:
+weighted sum of several more rec
+3D Gaussians
+single
+distortion
+where G is the collection of single
+Gaussian
+parameters
+andloss:
+D
+distortion
+loss:
+is the multi-scale structural
+similarity
+(MS-SSIM)
+[
+tion losses:
+Rate
+!Distortion
+Rendered
+Differentiable
+represents distortion computed
+on the rendered
+2D !
+image
+ϑ3
+LLPIPS
+[32] measures
+perceptual
+distance
+using
+feat
+composite = ϑ1 L
+L1 + ϑ2 L
+L2 +
+Initialization
+ε D(x,
+x̂) + ϑR(G)
+min min ε D(x,
+x̂)
+(1) (1) L
+G
+x→Dtrain
+Projection
+Image
+Rasterizer
+G
+composite = ϑ1 LL1 + ϑ2 LL2 + ϑ3 L
+G
+space. Through adaptive densification,
+the magnitude
+of the
+tracted from a pretrained Ldeep
+neural network, and
+x→D
+x→Dtrain
+where
+LL1 and LL2 are per-pixel L1
+loss also indirectly affects
+between number of
+SFM Points
+where LL1of
+and L
+per-pixel L1
+control
+the
+relative
+importance
+each
+Fora
+L2 areterm.
+Adaptive the trade-off
+where G is the
+collection
+Gaussian
+parameters
+and Dand D is the multi-scale
+where G
+is the of
+collection
+of Gaussian
+parameters
+similar
+is the multi-scalestructural
+structural similarity
+Operation
+flow
+Density Control
+splats
+and reconstruction
+quality.represents
+To ensure
+a fair comparitrain
+with
+LPIPS-AlexNet
+while
+evaluating
+with
+represents
+distortion on
+computed
+on
+the rendered
+2D image L
+Compressor
+distortion
+computed
+the we
+rendered
+2D image
+[32]
+measures
+perceptual
+di
+LPIPS
+LLPIPS [32] measures perceptual dist
+flow the magnitude of the
+Through
+adaptiveGradient
+densification,
+son with a comparable number ofspace.
+splats,
+wespace.
+allow
+the scalar
+Through
+adaptive
+densification,
+the
+magnitude
+of the
+VGG
+to
+avoid
+overfitting
+tofrom
+the
+training
+metric
+an
+tracted
+pretrained
+deepneur
+neu
+tracted
+froma a
+pretrained deep
+loss also indirectly
+affects
+the
+trade-off
+between
+number
+of
+Code
+Compression-specific
+additions
+indirectly
+affects the trade-off
+between
+number
+of
+control
+relative in
+importance
+ofofe
+ε to vary across scenes, but we loss
+holdalso
+other
+hyperparameters
+control
+thetherelative
+importance
+with
+common
+reporting
+methodology
+the 3DG
+splats and reconstruction quality.
+To ensure
+a fair compari011001…
+we train with LPIPS-AlexNet while
+splats and
+quality.
+To by
+ensure
+a
+fair
+compariInvestigated
+this
+work
+constant across experiments, ensuring
+thatreconstruction
+the
+lossa function
+son with
+comparable
+number
+of
+splats,
+we33,
+allow
+the scalar we train with LPIPS-AlexNet whil
+ture
+[14,
+34].
+VGG to avoid overfitting to the tra
+with a comparable
+number
+of splats,
+we allow
+the scalar
+ε to
+vary across
+scenes,
+but we hold
+other hyperparameters
+VGG
+to avoid overfitting to the t
+is the only factor influencing theson
+results.
+Training
+includes
+withof
+common
+reporting
+Tuning
+these weights
+ϑ –ϑ4
+is methodolog
+non-triv
+constant
+across
+ensuring
+that the loss function with common1 reporting
+ε to vary across
+scenes,
+butexperiments,
+we hold other
+hyperparameters
+methodol
+ture
+[14, 33, 34].
+Fig. 2: 3DGS representation
+andstage at
+compression
+frameworks
+optimized
+using
+(1)
+and
+(2),
+a fine-tuning
+the end without
+adaptive
+densification.
+engineering-intensive.
+We
+perform
+detailed ablation
+is
+the
+only
+factor
+influencing
+the
+results.
+Training
+includes
+constant across experiments, ensuring that the loss function
+ture [14,
+33, 34].
+Tuning
+these weights of ϑ1 –ϑ
+a in
+fine-tuning
+end without
+adaptive
+densification.
+respectively, incorporating the perceptual losses isdiscussed
+Sec. stage
+3.1.atthetheresults.
+ments
+to tune
+these parameters
+the best
+balance
+the only factor
+influencing
+Training
+includes
+engineering-intensive.
+We
+perform
+Tuning for
+these
+weights
+of
+ϑ1d
+to
+tune
+these We
+parameters
+fine-tuning
+endrenwithout adaptive
+densification.
+Compression In compression,a the
+focus stage
+shiftsat the
+from
+perceptual
+quality and ments
+efficiency
+while
+staying
+in tht
+engineering-intensive.
+perform
+Compression In compression, the focus shifts from ren- ments to
+quality
+wh
+tunerespect
+these and
+parameters
+for
+dering efficiency to storage efficiency. Inspired
+by the imparable splat count rangeperceptual
+with
+toefficiency
+the othe
+dering efficiency to storage efficiency. Inspired by the imparable splat count range with resp
+Compression
+In
+compression,
+the focus
+shiftsbalance
+from renperceptual
+quality 3
+and
+efficiency
+age compression literature [2, 25],
+we age
+balance
+distortion
+considering ods
+(seewe are
+Tables
+and(see
+4
+in
+Aw
+compression
+literature [2,ods
+25], we
+we are
+distortion
+considering
+Tables
+train
+Apple Confidential–Internal Use Only
+specialized domains such as faces or avatars. dering
+However,
+these
+approaches
+typically
+efficiency
+to storage
+efficiency. Inspired
+by the image compression literature
+[2, 25], we
+balance for
+distortion
+rely on domain-specific priors and lack the “plug-and-play”
+flexibility
+needed
+general-purpose 3DGS optimization. As a result, perceptual optimization for
+arbitrary scenes remains underexplored.
+The above-mentioned advances often apply modifications or constraints to
+the model, the optimization procedure, and the loss at the same time, in order
+to achieve better visual quality. In contrast, our approach cleanly separates perceptual modeling from algorithmic design, delegating it only to the distortion
+in the loss function. We additionally corroborate these gains using a large-scale
+human preference study, which, to the best of our knowledge, has never been
+conducted in any prior 3DGS work.
+2.2
+3DGS optimization procedure
+3DGS represents scenes as a collection of 3D Gaussian primitives that are differentiably rendered to produce 2D images. Each Gaussian primitive Gi is parameterized by Gi (µi , Σ i , ci , αi ) where µi is the center, Σ i is the covariance matrix,
+ci is color, and αi is opacity [22]. During rendering, 3D Gaussians are projected
+to two dimensions and alpha-blended in depth order to produce the final pixel
+values of the reconstructed 2D view. As all the rendering operations are differentiable, this allows gradient-based optimization of the Gaussian parameters using
+just a distortion loss imposed on the rendered views.
+The number of Gaussians is modulated dynamically during training via adaptive densification, which introduces new primitives based on gradient magnitudes
+and removes low-opacity ones through pruning. These decisions are driven by
+gradients from the distortion loss, meaning the optimization objective influences
+not only parameter updates but also the evolution of the representation itself.
+Lower thresholds allow increased growth and more complex detail and texture
+reconstruction at the cost of increased runtime and memory, while higher thresholds favor compact, faster real-time renderings.
+The overall optimization procedure is illustrated in Fig. 2. During training,
+rendered views x̂ are compared against ground-truth images using one of our
+proposed distortion losses (described in Sec. 3.1), and the resulting gradients
+parable splat count range with re
+ods we are considering (see Tabl
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+5
+guide the optimization of Gaussian parameters and densification. During evaluation, all experiments measure performance on the novel view synthesis task,
+where reconstructed images are compared against unseen test views.
+We consider two settings with different optimization objectives: (i) evaluate perceptual training objectives in the standard 3DGS representation framework [22], and (ii) examine whether the gains obtained by the best-performing
+perceptual strategy generalize to alternative 3DGS frameworks, including antialiasing rendering methods [42] and structured Gaussian representations [28], as
+well as to a scene compression framework [27].
+Representation For the representation task, training minimizes a distortion
+loss between the ground-truth image x and the rendered image x̂:
+\min _{\bmcG } \gamma \, D(\bx , \bhx ),\label {eq:2D_distortion}
+(1)
+where G is the collection of Gaussian parameters, D(·) denotes distortion computed on the rendered 2D image space, and γ is a scalar weighting factor. Because adaptive densification relies on gradient magnitude, the scale of the loss
+indirectly affects the trade-off between reconstruction quality and the number
+of Gaussians in the 3DGS representation. To ensure a fair comparison under
+similar representation budgets, we allow γ to vary across datasets while keeping
+all other hyperparameters fixed, in order to align the resulting Gaussian counts
+across methods without modifying the underlying framework.
+Variable-rate compression In the task of scene compression [27, 37], distortion and model size are balanced through a rate–distortion objective, as in
+learned image compression [1, 3, 35]:
+\label {eq:RD} \min _{\bmcG , \boldsymbol {\theta }} D_{\boldsymbol {\theta }}(\bx , \bhx ) + \lambda R_{\boldsymbol {\theta }}(\bmcG ),
+(2)
+where Rθ (G) estimates the storage cost of Gaussian parameters G, given the
+compression network parameters θ. Concretely, we use the common rate term
+used in neural compression Rθ (G) = E[− log2 pŷ (ŷ)], the Shannon cross-entropy
+between the quantized latent encoding ŷ of G and a learned parametric entropy
+model pŷ [1]. The trade-off between reconstruction quality and storage cost is
+controlled by λ. The storage size of a 3DGS scene is not determined solely by
+the number of Gaussians, but also depends on parameter redundancy and the
+probabilistic modeling used for entropy coding.
+3
+Methodology
+3.1
+Alternatives for the distortion loss D
+The original 3DGS formulation [22] optimizes a linear combination of L1 and
+SSIM [39]; this is the canonical choice for 3DGS loss [27,28,42,45,46], and we refer
+to it as the original loss. While computationally efficient, these pixel-level losses
+often poorly correlate with human perception [38]. To explore alternatives better
+aligned with perceptual quality, we evaluate three additional loss formulations.
+6
+Özyılkan and Chen et al.
+Composite loss Since the introduction of SSIM as a model of human contrast
+perception [39], the field of human perceptual modeling has made significant
+advances. As a stronger baseline, we therefore consider a generalization of the
+original loss, employing a weighted sum of several more recent and commonly
+used distortion metrics:
+\resizebox {.65\hsize }{!}{$\mathcal {L}_{\textrm {composite}} = \omega _{1}\mathcal {L}_{\textrm {L1}} + \omega _{2}\mathcal {L}_{\textrm {L2}} + \omega _{3}\mathcal {L}_{\textrm {MS-SSIM}} + \omega _{4}\mathcal {L}_{\textrm {LPIPS}}$}, \label {eq:composite_loss}
+(3)
+where LL1 and LL2 are per-pixel L1 and L2 norms, LMS-SSIM is the multi-scale
+structural similarity loss [38], LLPIPS [44] measures perceptual distance using
+features extracted from a pretrained deep neural network, and ω1 –ω4 control
+the relative importance of each term.
+For LPIPS, we train with LPIPS-AlexNet while evaluating with LPIPS-VGG
+to avoid overfitting to the training metric and remain consistent with common
+evaluation practices in the 3DGS literature [22, 45, 46]. The weights of the composite loss components are selected through ablation experiments (Sec. B), and
+the configuration ω1 = 0.05, ω2 = 0.30, ω3 = 0.60, ω4 = 0.10 is used for all
+the experiments for its favorable trade-off between reconstruction quality and
+representation efficiency.
+Wasserstein distortion (WD) LPIPS [44] was the first metric to demonstrate that deep feature representations can approximate aspects of human visual perception [41]. However, it is a pointwise metric, which does not account
+for the way humans perceive texture. Fig. 3 illustrates this limitation in 1D: two
+textures with a 180◦ phase shift exhibit large pointwise differences despite appearing visually similar. WD [34] is a feature-space agnostic distortion metric
+that compares spatially local estimates of statistics, allowing textures that differ
+substantially pointwise to be considered perceptually similar when their local
+statistics match. This formulation is motivated by models of the human visual
+system suggesting that peripheral vision encodes images using summary statistics over local pooling regions, rather than precise pointwise pixel values [12,36].
+In this work, we use a version of WD where the spatially local statistics are computed in the VGG feature space [2]. For each feature map and spatial location,
+WD computes the RMSE between the local mean µ and standard deviation ν:
+d_{\textrm {WD}} = \sqrt {(\mu - \hat {\mu })^2 + (\nu - \hat {\nu })^2}, \label {eq:WD}
+(4)
+where ˆ indicates the local statistics computed on the reconstructed image rather
+than the ground truth. These local differences are then aggregated over feature
+maps and pixel locations.
+The area over which the local statistics are computed is determined by a
+pooling kernel of size σ, which can vary across locations. Larger σ-values capture
+texture realism by aggregating information over broader regions, while σ → 0
+converges to a pointwise distance. This can be used to make the metric more
+permissive to texture resampling in certain regions such as ones that are less
+visually salient. In this work, we use a constant σ = 4, selected empirically
+(Sec. C.1) at the resolutions we benchmarked; we therefore interpret it as a
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+original texture 𝑥
+local statistics 𝜇, 𝜈
+pixel intensity
+<latexit sha1_base64="l8GAg9C6uJTAaCCAwZWy5k7OfNc=">AAAN2HicrVdtb9s2EHbWvXRes7Xbx33hlgwYCsWx4yTNsGlo6iZrgXXt0vQFjYKAks4ya4rUSCqxQwjYt2Ff93/2Q/ZvdrRlx1bqtkNnA/aJ99xzx+ORR4UZZ9o0m/8svXfl/Q8+/Ojqx/VPri1/+tn1G58/1TJXETyJJJfqeUg1cCbgiWGGw/NMAU1DDs/Cfsfpn52C0kyKQzPM4DiliWBdFlGDQyfX/w5i6KLtiMmOfk8Ghb13+ODnwjabt/Z2d4v6KzDaUKMnuHa7893+flGvB4omCcQcuqYeGBiYCq1ULGGCcuJ0uQKyOlgtSBBcBpf8XEaIdg+YChZpshqk+aqHfyJfLeon11eajeboQy4LrVJYqZWfRyc3rl0JYhnlKQgTcaq1pQp5Objgcw0Zjfo0gSMUBU1Be/o0GQnHdjAKrJIMGkXINMlDp9NsdjoVSIiUiZK5iCewvW33rcCSkOcwQWxu7Gztb1YRiQIQ05xv7u5stasQBRdedjfb7a0qYAicy7MJZv/OnU5zc37ulqY6pabn4b/ppcWczimMlFxXbLpSGJ1BNIc+cug1bYYc/PuPH3oklDy+eD62uWCRjGHN4Yr6NyTQYFLKhGM7uoPgfRR8e3PtHtDTYXFsd09BMHUBNT0HtYfwnPw0xHK6Cy/p05w8mOMrQftM0QvNXcDlV+Ced3nWoyEYGzgs1lthHz54XNgoDRWWYFpYgdNaFJqTMbJDhkVCfoEzciBTOjUofeN4R6ZZbkA9wAkr4fyuHUCSYxCVVBrWPx+n0UmchYqq4UwVaY9gjBH+9jAefOoy4xF0pdjAI5nUzO1sJhKP6B6N5ZkeCRk4Q6ainBndACz4wPGjF8sERrbeGC+MLWY0MjcLVdl02LFy8Eis6JlHTI9FfRcV537IMeyvWk2MjwmW5inR7Bz8jcYWYKxMCFAEZ+43YTDLjbaYqSm/gshQkfwnF+2qi9a8CyGm9EZhcs5ZniLxRCQjf/5O8/UuF9Ljoomo97YZqsT+huwYEFq+ZXbOesxANfuAM41lji2CRDIblmXi2/E/Gege65pxFOXQcDy05saK2VgYthN4p1Bm2X70Y+Y4sH4JVI5kmyXdjEtsCvVgIjqbCPcVNX6r0dqpaAD73pDQAdPrDZplIGJSxgkCt12CPTPFveBbGmq/nZnCSxSLPWdAXDvVvutjxUJW4saq1OMZp1T1xzNsNbYy4zk68lIy4Ydoz8d6mbmJon8tOYuLqiOOZxKf0LpTxA/wXOa8isP21SevAHelNEIacGFUbdxEJ+hRY5jW9KUoIJmZnVtVX0gBnsRlYWboN3a2vMv+vAjbjMssbgIkPwNtphatSzMdpxRpsUEMICaDctFKp4PRDClnifBdtwWFZSkVbgPygytJx+USfMZiPNzfwD2c5x7+n9zn89zn78K9jg/rIk9DPAO6UuHxvt5ydxp3HtjAK9zmmOlhDzNQ1GCDD4wq8EQrFmh1ghcI97NAHzOaFHb0uwDh9mcx2ukLEeO7zvhvURwsSSUWvZ0Ii3CyazKeYxueSq9E3rQB7mg8Wwq80CWB56TXAelgAkQJU4mrgAcJNu7YBnuFDWQJd3e/8b0gDMmeW6RZ5MEi5EEV+WIR8kUVeReR34+0KrVxVXuIWiOzymiExwguysRq/Dg/rZtBOtRG5eaodWyDU5Xj4T8qvGZmSA9Y0jNOiiEzvZUWrjJ3iZnzojVemHulm5AJux6kfbzLrG2n+fp8oIGhCZ6EGpMdx0ZGWApY/hZ+y0evHYVtFQ6Cc+nBdNAFjKXPQaCtDTKqmIhHt2uMrKjqdJ9lyAODSpsA3DTYaNLSAF8brDvGXRMljQZpOwN8bWhVXxIuC083Gq3txvavGyu3V8sXiKu1L2tf176ttWq3ardr92qPak9q0dLK0v2lg6XHyy+Wf1/+Y/nPMfS9pdLmi9rcZ/mvfwEnqBa4</latexit>
+<latexit sha1_base64="967DWh7jwH4BDTLhi9J691DyoP4=">AAAN7nicrVdbb9s2FHbaXbqs2drtcS/ckgFDoTh2nGQpNg1Nk2YdsKxdm17QKAgo6VhiTZEaSSV2CP2NvQ173f/Z0/7NDm3ZsZW67dDZgHRIfufKw3OoMOdMm1brn4UrV997/4MPr320+PH1pU8+vXHzs6daFiqCJ5HkUj0PqQbOBDwxzHB4niugWcjhWdjbdevPTkFpJsWhGeRwnNFEsC6LqMGpkxt/BzF0kXcoyQ6fJ/3S3j88+Lm0tzfW27fXy8VXYLShRo9x+3ud3f2dcnExUDRJIObQNYuBgb6piVUoQ2ijishATBygUEBWgpQa2y9XShIEl/kqVVxGlBM3wKiwSFdsQVaUK954IHBQntxYbjVbwx+5TLQrYrlR/R6e3Lx+NYhlVGQgTMSp1pYqVMHBuVRoyGnUowkcISloBtrTp8mQOLb9oY21ENEoQknj6Ozutlq7uzVIiCITJQsRj2H3tty/BktCXsAYsbG+vbm/UUckCkCMIZ2Nne3NTh2i4ELLzkans1kHDIBzeTbZzrt3d1sbs75bmumMmtTDt0mzcmbNLRgpua7xdKUwOodoBn3k0KvaDDj4Pz1+4JFQ8vhifGwLwSIZw6rDlYtfk0CDySgTTtrRXQTvI+HbW6v3gZ4OymO7cwqCqQuoSR3UHsJz8uMA82sPXtKnBTmYkVeB9pmiFyt7gNuvwI13eJ7SEFyC4QhTr7QPDh6XNspChdmYlVagW/NMczRadsgwScgvcEYeyYxOGCrdOL8rs7wwoA7QYSWc3tVHkBRoRC2UhvXOR2F0FGehomowlUXaI2hjhM8U7cFRlxmPoCrF+h7JpWbuvDOReESnNJZnekjk4BiZigpmdBMw4QMnH7VYJtCyteZoY2w5tSILM3cpn0w7qRw8Eit65hGTsqjnrOLcDzma/WW7hfYxwbIiI5qdg7/e3AS0lQkBiqDnfgv607KRFyM1kY+1xFCR/CcVnbqK9qwKISbijcLgnLMiQ8Fjkgz1+dut16ucKx43TUTp20aoZvsbomNAaPmW0TlLmYF69AE9jWWBjYNEMh9UaeLb0Zv0dcq6ZmRFNTUYTa26uXLaFoZNBt7JlGlpP/gxczIwfwnUSrLNk27OJfaHxWBMOp4IzxU1frvZ3q6tAHbDAaF9pteaNM9BxKSyEwQeuwQ7aYZnwbc01H4nN6WXKBZ7joG4Jqt9193KuVKJm6uLHnmcUdUbedhububGc+LIS8mEHyI/H63L3DmK+rXkLC7rijjWJD4W66qIH2Bd5ryOw/bVI68Ad6U0QhpwZtR5nKNj9LAxTHL6khWQTHnndtUXUoAncVuYGfjN7U3vsj4vwjbjIouHAIWfgTYTjvYlT0chRbHYIPp4W+hXm1Yp7Q89pJwlwnfdFhSmpVR4DMj3LiWdLBfgMxZjcX+D7MGs7MH/Kft8Vvb5u8hew8GaKLIQa0BXKizva213p3H1wAZe6Q7HVA97kIOiBht8YFSJFa2cs6oTvEC4x5z1mNGktMPnHIQ7n8PrnZmLGN11Rq95drAkk5j0dkzMw8muyXmBbXhCvRJ5ywZ4orG2lHihSwLPUa8D0v4YiBSGEncBCwk27tgG90obyAru7n6je0EYkntuk6aRj+YhH9WRL+YhX9SRe4j8briqMhvXVw9x1ci8Nju8apd2zDUazrp1K8gG7jpujtrHNjhVBRb/YeK1ckNSYElqHBVDbtLlNu4yd4GZ0aI1XpjTSk3IhF0Lsh7eZVa3smJt1tDA0AQrocZgx7GREaYCpr+F34rhx0hp26WDoC8pTCadwZj6HATy2iCniol4eLtGy8r6mu6xHOVAv9YmAA8NNpqsYsAvCOvKuGuipNkkHceAnw3t+kfCZeLperO91dz6dX35zkr1AXGt8UXjq8Y3jXbj28adxv3Gw8aTRrRwe+FkIV1gS/nS70t/LP05gl5ZqHg+b8z8lv76F9s+IWM=</latexit>
+reconstructed texture 𝑥̂
+local statistics 𝜇
+̂, 𝜈̂
+space
+7
+Fig. 3: 1D sketch of visual textures
+with large pointwise difference but
+small Wasserstein distortion (WD)
+(see Eq. (4)). Both original and reconstructed textures look the same
+at first glance, and share nearly the
+same local mean and standard deviation. However, they are very different in terms of pointwise differences. In contrast to all other metrics we compare here, WD evaluates
+differences in terms of local statistics (e.g. the first and second moments, µ and ν).
+strong setting for our evaluation setup rather than a universal optimum, since
+the optimal σ may depend on input image resolution and other parameters such
+as viewing distance.
+WD-regularized (WD-R) In practice, we found that including a small amount
+of pixel-level fidelity loss along with WD helps to avoid artifacts in regions where
+the number of splats is constrained, and the number of training views is small
+(see Sec. 4.1). We therefore introduce WD-Regularized (WD-R), which augments
+WD with a lightly weighted version of the original loss. In all the experiments,
+WD still remains the primary objective, and incorporating the original loss serves
+only as modest regularization. Concretely, we optimize LWD = γ dWD for the
+WD setting and LWD-R = γ (dWD + β Lorig ) for WD-R, where Lorig is the original 3DGS pixel-level loss [22], γ is a dataset-specific global scale (Eq. (1)) used
+to align Gaussian counts across methods, and β is chosen so that Lorig acts as a
+mild pixel fidelity regularizer while WD remains the dominant perceptual term.
+More details are discussed in Sec. A.2.
+3.2
+Training and evaluation setup
+Implementation details We follow the experimental setup of prior work [22]
+and train all models for 30k iterations, adopting the published configurations of
+the respective baselines to ensure faithful reproduction. For WD-based training,
+similar to the warm-up strategies used in perceptual and adversarial training [19,
+25], we first optimize the model using the standard 3DGS loss for 3k–5k iterations
+before introducing the perceptual objective.
+For the representation task, we compare against Pixel-GS [45] and PerceptualGS [46], two recent methods that improve perceptual quality by modifying gradient accumulation and densification strategies. These methods are particularly
+relevant baselines as they aim to improve perceptual sharpness while explicitly
+controlling Gaussian growth in order to maintain fewer splats—a constraint not
+8
+Özyılkan and Chen et al.
+always prioritized in the literature. To validate whether the perceptual improvements observed with WD-based losses generalize to other 3DGS frameworks, we
+additionally integrate WD losses into Mip-Splatting [42] and Scaffold-GS [28],
+as well as into the Comp-GS [27] compression scheme.
+For fair comparisons, we align the representation budget of WD/WD-R across
+all compared methods and ensure comparisons are made under similar or lower
+budgets (i.e. fewer splat counts or smaller model size). This is achieved by adjusting the global scale γ in Eq. (1) while keeping all other hyperparameters
+fixed. This procedure ensures that differences in performance arise from the optimization objective alone, rather than increased representation capacity.
+More details about the training schedules, hyperparameters, and runtime are
+discussed in Sec. A. The WD implementation we adopt [2] is unoptimized and incurs a ≈4.5× training overhead over original 3DGS; preliminary tuning (caching
+ground-truth VGG features and pruning zero-weight VGG pyramid levels) reduces the WD per-iteration time by ≈48% with bit-exact loss and gradients,
+bringing the relative training overhead down to ≈2.8×.
+Datasets Following the methodology of [46], we evaluate the effectiveness of our
+perceptual training across 21 scenes drawn from 4 widely used novel view synthesis datasets: Mip-NeRF 360 [4] (9 scenes), Deep Blending [14] (2 scenes), Tanks
+& Temples [24] (2 scenes), and BungeeNeRF [40] (8 scenes). For Mip-NeRF 360,
+we distinguish between indoor scenes (Counter, Room, Kitchen, Bonsai) and
+outdoor scenes (the remaining 5), as these categories involve significantly different numbers of splats and memory footprints. For the same reason, for both our
+human preference and compression studies, we also report results separately for
+indoor and outdoor datasets.
+Perceptual metrics We evaluate the rendering quality using several widely
+adopted perceptual metrics: LPIPS [44] and DISTS [11], Fréchet Inception Distance (FID) [15], and CLIP-based Maximum Mean Discrepancy (CMMD) [20].
+Additional implementation details of perceptual metrics are provided in Sec. A.4.
+For completeness, PSNR and SSIM [38, 39] are also reported in Sec. E.1.
+Human preference study In addition to providing quantitative perceptual
+metrics, we also conduct a large-scale user study to directly assess perceptual
+alignment with human preference. The study is carried out on Mabyduck [30],
+an independent platform for user preference studies. Following the methodology
+of the CLIC compression challenge [10], each trial presents participants with
+a blind A/B comparison of the same 704 × 704 random crop of two rendered
+images from different methods, compared against the ground-truth reference.
+Participants are asked to choose which rendered image appears closer to the
+reference. A total of 428 participants completed 39,320 pairwise trials across all
+the datasets and three frameworks. Responses are aggregated using Bayesian Elo
+rating based on the Bradley–Terry model [9,31], producing perceptual preference
+scores for all evaluated methods. More details can be found in Sec. D.
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+9
+Table 1: Perceptual metric results for origi- Table 2: Perceptual metric comparison for Mipnal 3DGS [22] variants on indoor and outdoor Splatting [42] and its WD-based variants. WDdatasets. Splat counts are indicated as # G.
+based objectives consistently improve the perceptual performance of Mip-Splatting while maintaining similar splat counts (# G).
+Dataset
+Method
+# G ↓ LPIPS ↓ DISTS ↓ FID ↓ CMMD ↓
+Original loss [22]
+2.81M
+Pixel-GS [45]
+4.64M
+Perceptual-GS [46] 2.86M
+0.243
+0.246
+0.230
+0.243
+0.248
+0.231
+106.93
+110.17
+93.27
+0.711
+0.759
+0.586
+Composite
+WD
+WD-R
+3.96M
+2.81M
+2.87M
+0.235
+0.201
+0.193
+0.240
+0.205
+0.194
+101.11
+88.56
+82.32
+0.765
+0.584
+0.606
+Original loss [22]
+1.42M
+2.49M
+Mip-NeRF Pixel-GS [45]
+Perceptual-GS
+[46]
+1.58M
+360
+(Indoors) Composite
+1.99M
+WD
+1.46M
+WD-R
+1.49M
+0.188
+0.177
+0.170
+0.158
+0.147
+0.142
+80.70
+73.36
+69.86
+0.465
+0.412
+0.398
+0.171
+0.152
+0.147
+0.143
+0.117
+0.114
+82.17
+65.59
+67.80
+0.519
+0.511
+0.496
+Original loss [22]
+4.52M
+7.40M
+Mip-NeRF Pixel-GS [45]
+Perceptual-GS [46] 3.55M
+360
+(Outdoors) Composite
+6.50M
+WD
+3.54M
+WD-R
+3.47M
+0.244
+0.206
+0.206
+0.218
+0.186
+0.188
+104.88
+65.49
+58.97
+0.610
+0.416
+0.391
+0.216
+0.228
+0.206
+0.199
+0.178
+0.168
+59.09
+65.69
+59.25
+0.472
+0.438
+0.438
+Original loss [22]
+Pixel-GS [45]
+Tanks
+& Temples Perceptual-GS [46]
+(Outdoors) Composite
+1.83M
+4.49M
+1.72M
+0.176
+0.150
+0.151
+0.149
+0.128
+0.132
+53.18
+40.61
+40.75
+1.171
+0.999
+0.978
+1.73M
+1.70M
+1.72M
+0.158
+0.138
+0.127
+0.137
+0.102
+0.096
+39.88
+29.69
+29.07
+0.966
+0.672
+0.737
+0.098
+0.106
+62.23
+OOM in Pompidou scene
+0.095
+0.103
+58.23
+0.207
+0.227
+0.197
+0.116
+0.092
+0.527
+0.199
+0.171
+Deep
+Blending
+(Indoors)
+WD
+WD-R
+Original loss [22]
+6.92M
+Pixel-GS [45]
+Perceptual-GS [46] 4.97M
+Bungee
+NeRF
+(Outdoors) Composite
+WD
+WD-R
+4
+11.30M
+4.67M
+4.89M
+0.200
+0.100
+0.087
+101.66
+50.68
+46.21
+Dataset
+Method
+#G↓ LPIPS↓ DISTS↓ FID↓ CMMD↓
+Mip-NeRF Mip-Splatting 1.81M 0.152
+360
+1.55M 0.134
+(Indoors) +WD
++WD-R
+1.69M 0.123
+0.138
+71.16
+0.329
+0.113
+0.106
+54.86
+53.22
+0.301
+0.273
+Mip-NeRF Mip-Splatting 5.71M 0.193
+360
+5.68M 0.202
+(Outdoors) +WD
++WD-R
+5.37M 0.181
+0.180
+62.54
+0.327
+0.161
+0.153
+49.78
+45.87
+0.316
+0.267
+Table 3: Perceptual metric comparison for
+Scaffold-GS [28] and its WD-based variants.
+Model size is reported in MB. WD-based objectives consistently improve perceptual metrics
+without increasing model sizes.
+Dataset
+Method
+Mip-NeRF Scaffold-GS
+360
+(Indoors) +WD
++WD-R
+Mip-NeRF Scaffold-GS
+360
+(Outdoors) +WD
++WD-R
+Model Size↓ LPIPS↓ DISTS↓ FID↓ CMMD↓
+99.5 MB
+0.166
+0.150
+75.08
+0.391
+98.4 MB
+93.9 MB
+0.143
+0.140
+0.117
+0.118
+64.41
+67.20
+0.402
+0.426
+220.7 MB
+0.273
+0.255
+133.33
+0.686
+215.8 MB
+223.5 MB
+0.245
+0.233
+0.202
+0.198
+67.32
+67.74
+0.536
+0.559
+Results
+To understand the effectiveness of different perceptual objectives under realistic efficiency constraints, we conduct a comprehensive study across multiple 3DGS rendering settings. We first compare the original loss, the composite loss, WD, and WD-R against recent perceptual 3DGS variants—including
+Pixel-GS [45] and the recent state-of-the-art splat-efficient perceptual method,
+Perceptual-GS [46]—on standard reconstruction benchmarks under controlled
+representation budgets. WD-based objectives consistently achieve the best perceptual performance. We then verify that these improvements align with human
+visual perception through a large-scale human preference study, and provide
+visualizations for how perceptual optimization affects the learned 3DGS representations. Finally, we demonstrate that WD-based optimization generalizes
+across methodologically different frameworks—including anti-aliased rendering
+(Mip-Splatting [42]), structured Gaussian representations (Scaffold-GS [28]), and
+entropy-constrained compression (Comp-GS [27]).
+4.1
+3DGS representation
+Quantitative results Tab. 1 provides a comprehensive evaluation of the studied perceptual loss families across indoor and outdoor datasets. We report both
+perceptual quality metrics and the average splat count per dataset (#G), allowing methods to be compared under similar representation budgets. We observe
+10
+Özyılkan and Chen et al.
+that the WD-based losses (WD and WD-R) consistently and substantially outperform the original loss, while also yielding more compact representations (e.g.
+reducing the Gaussian count on the BungeeNeRF dataset from 6.92M to 4.89M).
+Notably, they also outperform Perceptual-GS [46], the state-of-the-art in terms
+of perceptual metrics to date, across the vast majority of perceptual metrics and
+datasets that we evaluate.
+Human preference study To verify that improvements in perceptual metrics
+translate to perceived visual quality, we conduct a large-scale human preference
+study as described in Sec. 3.2. In this study, a total of 320 participants completed 30,720 pairwise trials across all the datasets. We evaluate WD, WD-R,
+Perceptual-GS [46], Pixel-GS [45], and the original 3DGS loss [22] across both
+indoor and outdoor scenes. The composite loss is excluded from the human preference study, as it incurs significantly higher Gaussian counts on several datasets,
+making direct comparison less meaningful.
+As shown in Fig. 4, WD-R achieves significantly better Elo scores across all
+scenes. The difference in Elo of more than 150 as compared with the original
+loss implies that the WD-R reconstructions were chosen by raters 2.3× as often.
+Compared with the state-of-the-art method, Perceptual-GS, both WD and WDR achieve better Elo scores (within the 95% error margin). Specifically, based on
+an Elo difference of 72, WD-R was preferred more than 1.5× over Perceptual-GS.
+Overall, the WD-R loss is consistently preferred by participants over all other
+methods. These results align with the metrics reported in Tab. 1, confirming that
+WD-based optimization produces the most perceptually appealing novel views
+for both indoor and outdoor scenes.
+Visual results Figs. 1 and 6 provide a visual comparison of different methods
+on challenging real-world scenes. The WD loss demonstrates a clear advantage in
+recovering fine-grained textures and structural details. In the Barcelona scene
+(Fig. 1), WD achieves sharper reconstructions of intricate details on the Sagrada
+Família cathedral, faithfully capturing the small circular patterns on the tower,
+whereas Perceptual-GS tends to overemphasize linear structures (likely due to
+its traditional edge detection mechanism derived from Sobel operator). We see
+similar observations across various datasets as shown in Fig. 6. Additional visual
+results are provided in Sec. F.1.
+Anisotropy under WD As a post-hoc analysis, we study how perceptual
+optimization affects the geometric properties of the learned Gaussian representations. In particular, we examine the anisotropy of the Gaussians. Following [17], we measure it using the effective rank (“erank”) of the covariance
+matrix of each Gaussian. For a Gaussian Gk with covariance Σ k , its erank
+is computed fromn the singular values
+s21 ≥ s22 ≥ s23 > 0 of Σ k as follows
+o
+P3
+s2
+erank(Gk ) = exp − i=1 qi log qi , where qi = P3 i s2 . Lower values (≈ 1)
+j=1
+j
+indicate more anisotropic, needle-like shapes, while higher values (≈ 3) correspond to isotropic Gaussians.
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+Indoor
+Outdoor
+Combined
+2000
+1975
+11
+Outdoor
+Combined
+2050
+2000
+1950
+1900
+1850
+Mip-Splatting
++ WD
++ WD-R
+(a)
+Mip-Splatting Combined
+Outdoor
+1950
+Indoor
+Elo score based on human ratings
+Elo score based on human ratings
+2025
+Elo score based on human ratings
+Indoor
+1925
+1900
+1875
+1850
+2100
+2000
+1900
+1800
+1700
+WD-R
+WD
+Perceptual-GS Pixel-GS
+Original
+loss
+Fig. 4: Bayesian Elo scores for 3DGS representation
+methods across indoor, outdoor, and all scenes combined.
+WD-R and WD achieve the highest scores in all settings
+(within the 95% confidence interval).
+Scaffold-GS
++ WD
++ WD-R
+(b) Scaffold-GS
+Fig. 5: Bayesian Elo scores
+for (a) Mip-Splatting and
+(b) Scaffold-GS variants on
+Mip-NeRF 360 [4].
+Fig. 9 shows the erank histograms for the Barcelona scene (more details
+on the other scenes in the BungeeNeRF dataset are in Sec. G). WD-based objectives (WD and WD-R) produce densities shifted towards lower erank values, indicating a stronger tendency to form anisotropic Gaussians compared to
+pixel-level losses. This allocation pattern reflects how perceptual optimization
+exploits directional primitives to represent local structures. Specifically, the increased anisotropy allows splats to better represent high-frequency details and
+fine textures, as their elongated shapes conform to local geometry and reduce
+rendering blur [16, 22]. Visual inspection (Fig. 6) and the user study (Fig. 4)
+confirm that such anisotropy indeed helps with representing texture and regular
+structure, for instance in the large-scale city scene example shown in Fig. 1. Beyond Gaussian shape, WD-R also shifts where capacity is allocated across the
+view: Fig. 10 compares splat density heatmaps of original 3DGS and WD-R on
+a representative view, showing that WD-R concentrates splats on texture-rich
+regions (a larger version and additional details are provided in Sec. H).
+However, we notice that this tendency can also lead to undesirable “web-like”
+artifacts in some scenarios as shown in Fig. 7, particularly in regions containing
+dense high-frequency detail but with a low budget of splats. In this situation, WD
+may allocate a few highly elongated Gaussians to match local statistics (mean
+and standard deviation in a deep feature space; see Eq. (4)). This leads to weblike structures that crudely (but economically!) imitate texture. Pixel-level losses
+avoid this behavior, but instead produce overly smoothed reconstructions.
+12
+Özyılkan and Chen et al.
+Truck
+Counter
+Treehill
+Ground truth
+Original loss [22] WD
+(#G: 1.89M)
+(#G: 2.58M)
+Pixel-GS [45]
+(#G: 5.18M)
+Perceptual-GS [46] WD-R
+(#G: 1.99M)
+(#G: 2.05M)
+Ground truth
+Original loss
+(#G: 1.17M)
+WD
+(#G: 1.10M)
+Pixel-GS
+(#G: 2.50M)
+Perceptual-GS
+(#G: 1.49M)
+WD-R
+(#G: 1.14M)
+Ground truth
+Original loss
+(#G: 3.62M)
+WD
+(#G: 3.72M)
+Pixel-GS
+(#G: 7.47M)
+Perceptual-GS
+(#G: 3.48M)
+WD-R
+(#G: 3.51M)
+Fig. 6: Visual comparison of the novel view synthesis results obtained by the original
+3DGS [22], Pixel-GS [45], Perceptual-GS [46], and the perceptual loss families discussed
+in Sec. 3.1. The left images show the full scenes, with detailed crops highlighting reconstruction differences across methods, where #G indicates the number of Gaussian
+splats for each method.
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+13
+Fig. 7: Artifacts on Bicycle. With
+fewer splats (4.5M), WD may produce web-like artifacts (indicated by
+the blue arrow) imitating texture
+statistics, while the original loss oversmooths textures. Adding a modest
+pixel-level term (WD-R) suppresses
+these without incurring more splats
+(4.4M). Increasing the global scaling factor (1.4×) of WD also mitigates artifacts with sharper local detail, but raises splat count (7.2M).
+These artifacts of the WD loss can be mitigated by increasing the splat count,
+e.g. by adjusting the global scaling factor (γ in Eq. (1)). We find that a more
+efficient remedy is to use the regularized variant WD-R, which combines WD
+with a modest pixel-level term. WD-R suppresses these artifacts without inflating
+the splat count and consistently yields better perceptual metrics (Tab. 1) and
+human preference ratings (Fig. 4).
+4.2
+Generalization across alternative 3DGS representations
+Beyond standard 3DGS, we further investigate whether WD-based optimization remains effective when integrated into architecturally different 3DGS frameworks, specifically Mip-Splatting [42] and Scaffold-GS [28]. For both methods,
+we keep the original framework unchanged and modify only the training objective (i.e. Eq. (1)), allowing us to isolate the effect of perceptual optimization
+within each framework.
+Mip-Splatting [42] introduces multi-scale filtering to address aliasing artifacts. Tab. 2 shows that incorporating WD-based objectives consistently improves perceptual metrics. These improvements are also reflected in the human
+preference study (Fig. 5a), where a total of 4,880 votes were gathered from 86
+participants. In particular, WD-R was preferred 1.8× over Mip-Splatting (as
+suggested by Elo difference of 105.7).
+Scaffold-GS [28] reduces correlation among Gaussians via structured parameterization, and reports compactness via model size rather than explicit splat
+counts. Tab. 3 shows similar improvements from WD-based objectives. The human preference study (Fig. 5b), which gathered 3,720 votes from 93 participants,
+shows that WD-R was preferred 3.6× over Scaffold-GS (Elo difference of 223.2).
+As illustrated in Fig. 11, WD-R-based losses consistently recover finer textures across both Mip-Splatting and Scaffold-GS variants, largely due to texture resampling, while maintaining comparable resource usage (#G for MipSplatting, model size for Scaffold-GS). Overall, these results suggest that WDbased perceptual optimization is complementary to architectural choices in 3DGS
+Rel. Frequency
+Original (median: 1.55) Composite (median: 1.36)
+Özyılkan and Chen et al.
+WD (median: 1.11)
+(a) Barcelona.
+Rel. Frequency
+Original (median: 1.55) Composite
+WD-R(median:
+(median:1.36)
+1.12)
+Rel. Frequency
+14
+WD-R (median: 1.12)
+Fig. 9: erank [17] statistics for
+Barcelona, comparing original
+3DGS [22] and WD-R. The black
+line refers to the median.
+Rel. Frequency
+(b) Orig. 3DGS
+(c) WD-R (ours).
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+WD (median:
+erank1.11)
+erank
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+Fig. 10: Splat density heatmaps for Barcelona.
+WD-R concentrates representation capacity on the
+texture-rich cathedral, while original 3DGS [22]
+spreads splats more uniformly across the view.
+Flowers
+Ground truth
+Mip-Splatting + WD
+[42] (#G: 4.40M) (#G: 4.22M)
++ WD-R
+(#G: 4.12M)
+Garden
+Ground truth
+Scaffold-GS [28] + WD
+(168.2 MB)
+(216.9 MB)
++ WD-R
+(175.8 MB)
+Fig. 11: Visual comparison of the Mip-Splatting [42], Scaffold-GS [28] and their WDbased variants. The left images show the full scenes, with detailed crops highlighting
+reconstruction differences across methods, where #G indicates the number of Gaussian
+splats and MB indicates the model size determined by the number of anchors.
+frameworks, and can provide immediate perceptual gains without any modification to the underlying framework. Additional comparisons are provided in Sec. E.2.
+4.3
+Generalization to variable-rate 3DGS compression
+Finally, we evaluate WD-based optimization in a compression setting, where
+training adds explicit entropy coding, yielding a rate–distortion (RD) tradeoff as in Eq. (2). Here optimization is constrained by the rate term, requiring
+perceptual gains without added bitrate. Fig. 12 shows RD curves for indoor
+and outdoor scenes, with fitted exponential curves; we sweep λ in Eq. (2) over
+[3−2 , 3−5 ]. Aligned with Secs. 4.1 and 4.2, WD-based approaches deliver the best
+perceptual scores (LPIPS, DISTS, FID) across the entire RD region, translating
+to ≈ 50% bitrate savings at comparable perceptual quality. Visual comparisons
+are in Sec. F.2.
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+Original loss
+Outdoors
+LPIPS
+Indoors
+WD-R
+0.3
+FID
+150
+0.25
+0.2
+0.20
+10
+15
+20
+100
+10
+15
+20
+0.25
+0.25
+0.20
+5
+WD
+DISTS
+10
+Filesize (MB)
+15
+20
+5
+10
+Filesize (MB)
+120
+0.20
+5
+10
+100
+5
+10
+Filesize (MB)
+15
+Fig. 12: Rate–
+distortion
+performance
+of the studied
+perceptual
+losses (Sec. 3.1)
+on popular perceptual
+metrics, using the
+Comp-GS [27]
+compression
+algorithm.
+Discussion
+Our results demonstrate that a perceptual loss function defined on 2D rendered
+images can serve as the main objective for reconstructing 3DGS representations
+from multi-view images. WD, a recently introduced distortion metric focusing on
+texture perception, and specifically our proposed WD-R variant, achieve stateof-the-art perceptual results in novel view synthesis, as confirmed by LPIPS,
+DISTS, FID, and CMMD scores, as well as our large-scale human preference
+study, which to our knowledge is the first-of-its-kind for 3DGS.
+It is interesting that WD alone is perfectly suitable as a distortion loss for 2D
+images within the context of learned image compression and causes no noticeable
+training instabilities [2], but this appears not to be entirely the case for 3D scene
+optimization. It can lead to artifacts such as those in Fig. 7, particularly (i) in
+regions of 3D space with few training samples, and (ii) when splat count is highly
+constrained. Regularizing WD with a modest amount of the original loss (WD-R)
+suppresses these artifacts and produces substantially better human ratings than
+all other methods we are aware of. Understanding and addressing the root cause
+remains an open question.
+We also explored spatially varying pooling kernel sizes (i.e. σ) for WD
+(Sec. C.2). While these adaptive variants can occasionally improve the reconstruction of structured textures (e.g. English text), they overall yield similar
+perceptual metrics to the σ = 4 case and introduce additional complexity. Future work may further investigate alternative spatially varying σ strategies—
+potentially offering a more targeted remedy for WD artifacts—as well as multiresolution evaluation with σ adapted accordingly.
+Additional promising directions include adversarial losses—though their computational complexity would exceed even that of computing classifier features
+for WD—as well as fully end-to-end optimized approaches to 3DGS where the
+splat count is explicitly incorporated into the optimization objective.
+16
+Özyılkan and Chen et al.
+References
+1. Ballé, J., Laparra, V., Simoncelli, E.P.: End-to-end optimized image compression. In: International Conference on Learning Representations (2017), https:
+//openreview.net/forum?id=rJxdQ3jeg
+2. Ballé, J., Versari, L., Dupont, E., Kim, H., Bauer, M.: Good, cheap, and fast:
+Overfitted image compression with wasserstein distortion. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+pp. 23259–23268 (June 2025)
+3. Ballé, J., Minnen, D., Singh, S., Hwang, S.J., Johnston, N.: Variational image
+compression with a scale hyperprior. In: International Conference on Learning
+Representations (2018), https://openreview.net/forum?id=rkcQFMZRb
+4. Barron, J.T., Mildenhall, B., Verbin, D., Srinivasan, P.P., Hedman, P.: Mip-nerf
+360: Unbounded anti-aliased neural radiance fields. CVPR (2022)
+5. Barthel, F., Beckmann, A., Morgenstern, W., Hilsmann, A., Eisert, P.: Gaussian
+splatting decoder for 3d-aware generative adversarial networks. In: Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp.
+7963–7972 (2024)
+6. Barthel, F., Morgenstern, W., Hinzer, P., Hilsmann, A., Eisert, P.: CGS-GAN: 3d
+consistent Gaussian splatting GANs for high resolution human head synthesis. In:
+The Thirty-ninth Annual Conference on Neural Information Processing Systems
+(2025), https://openreview.net/forum?id=JoBCAKbCpC
+7. Blau, Y., Michaeli, T.: The perception-distortion tradeoff. CVPR (2018)
+8. Bochkovskii, A., Delaunoy, A., Germain, H., Santos, M., Zhou, Y., Richter, S.R.,
+Koltun, V.: Depth pro: Sharp monocular metric depth in less than a second. In:
+International Conference on Learning Representations (2025), https://arxiv.
+org/abs/2410.02073
+9. Caron, F., Doucet, A.: Efficient bayesian inference for generalized bradley–terry
+models. Journal of Computational and Graphical Statistics 21(1), 174–196 (2012).
+https://doi.org/10.1080/10618600.2012.638220
+10. CLIC Challenge: CLIC 2025 image task (2025), https://clic2025.compression.
+cc/tasks/#image
+11. Ding, K., Ma, K., Wang, S., Simoncelli, E.P.: Image quality assessment: Unifying
+structure and texture similarity. IEEE Transactions on Pattern Analysis and Machine Intelligence p. 1–1 (2020). https://doi.org/10.1109/tpami.2020.3045810
+12. Freeman, J., Simoncelli, E.P.: Metamers of the ventral stream. Nature Neuroscience
+14(9), 1195–1201 (2011)
+13. Gong, Y.: EGGS: Edge guided gaussian splatting for radiance fields. In: Proceedings of the 29th International ACM Conference on 3D Web Technology. pp. 1–5
+(2024)
+14. Hedman, P., Philip, J., Price, T., Frahm, J.M., Drettakis, G., Brostow, G.: Deep
+blending for free-viewpoint image-based rendering 37(6), 257:1–257:15 (2018)
+15. Heusel, M., Ramsauer, H., Unterthiner, T., Nessler, B., Hochreiter, S.: GANs
+trained by a two time-scale update rule converge to a local nash equilibrium. In:
+Proceedings of the 31st International Conference on Neural Information Processing Systems. p. 6629–6640. NIPS’17, Curran Associates Inc., Red Hook, NY, USA
+(2017)
+16. Huang, B., Yu, Z., Chen, A., Geiger, A., Gao, S.: 2d gaussian splatting for geometrically accurate radiance fields. In: ACM SIGGRAPH 2024 Conference Papers
+(2024)
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+17
+17. Hyung, J., Hong, S., Hwang, S., Lee, J., Choo, J., Kim, J.H.: Effective rank analysis and regularization for enhanced 3d Gaussian splatting. Advances in Neural
+Information Processing Systems 37, 110412–110435 (2024)
+18. Ishihara, S.: Tests for color-blindness. Handaya, Tokyo, Hongo Harukicho (1917)
+19. Isola, P., Zhu, J.Y., Zhou, T., Efros, A.A.: Image-to-image translation with conditional adversarial networks. In: Proceedings of the IEEE conference on computer
+vision and pattern recognition. pp. 1125–1134 (2017)
+20. Jayasumana, S., Ramalingam, S., Veit, A., Glasner, D., Chakrabarti, A., Kumar, S.:
+Rethinking FID: Towards a better evaluation metric for image generation (2024),
+https://arxiv.org/abs/2401.09603
+21. Jia, S., Bruce, N.D.: Eml-net: An expandable multi-layer network for saliency
+prediction. Image and Vision Computing 95, 103887 (2020). https://doi.org/
+10.1016/j.imavis.2020.103887, http://www.sciencedirect.com/science/
+article/pii/S0262885620300196
+22. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics 42(4) (July
+2023), https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+23. Kirschstein, T., Giebenhain, S., Tang, J., Georgopoulos, M., Nießner, M.: Gghead:
+Fast and generalizable 3d Gaussian heads. In: SIGGRAPH Asia 2024 Conference
+Papers. pp. 1–11 (2024)
+24. Knapitsch, A., Park, J., Zhou, Q.Y., Koltun, V.: Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics 36(4) (2017)
+25. Ledig, C., Theis, L., Huszár, F., Caballero, J., Cunningham, A., Acosta, A., Aitken,
+A., Tejani, A., Totz, J., Wang, Z., et al.: Photo-realistic single image superresolution using a generative adversarial network. In: Proceedings of the IEEE
+conference on computer vision and pattern recognition. pp. 4681–4690 (2017)
+26. Liang, Z., Zhang, Q., Hu, W., Zhu, L., Feng, Y., Jia, K.: Analytic-splatting: Antialiased 3d Gaussian splatting via analytic integration. In: European conference on
+computer vision. pp. 281–297. Springer (2024)
+27. Liu, X., Wu, X., Zhang, P., Wang, S., Li, Z., Kwong, S.: Compgs: Efficient 3d
+scene representation via compressed Gaussian splatting. In: Proceedings of the
+32nd ACM International Conference on Multimedia. pp. 2936–2944 (2024)
+28. Lu, T., Yu, M., Xu, L., Xiangli, Y., Wang, L., Lin, D., Dai, B.: Scaffold-gs: Structured 3d Gaussians for view-adaptive rendering. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. pp. 20654–20664 (2024)
+29. Mabyduck: Experiment strategies. https://docs.mabyduck.com/experiments/
+strategies (2025)
+30. Mabyduck: Mabyduck. https://www.mabyduck.com (2025)
+31. Elo metric, https://docs.mabyduck.com/experiments/metrics/elo
+32. Mentzer, F., Toderici, G., Tschannen, M., Agustsson, E.: High-fidelity generative
+image compression (2020), https://arxiv.org/abs/2006.09965
+33. Muckley, M.J., El-Nouby, A., Ullrich, K., Jegou, H., Verbeek, J.: Improving statistical fidelity for neural image compression with implicit local likelihood models. In:
+Krause, A., Brunskill, E., Cho, K., Engelhardt, B., Sabato, S., Scarlett, J. (eds.)
+Proceedings of the 40th International Conference on Machine Learning. Proceedings of Machine Learning Research, vol. 202, pp. 25426–25443. PMLR (23–29 Jul
+2023), https://proceedings.mlr.press/v202/muckley23a.html
+34. Qiu, Y., Wagner, A.B., Ballé, J., Theis, L.: Wasserstein distortion: Unifying fidelity
+and realism. In: 2024 58th Annual Conference on Information Sciences and Systems
+(CISS). pp. 1–6 (2024). https://doi.org/10.1109/CISS59072.2024.10480168
+18
+Özyılkan and Chen et al.
+35. Rippel, O., Bourdev, L.: Real-time adaptive image compression. In: Precup, D.,
+Teh, Y.W. (eds.) Proceedings of the 34th International Conference on Machine
+Learning. Proceedings of Machine Learning Research, vol. 70, pp. 2922–2930.
+PMLR, International Convention Centre, Sydney, Australia (06–11 Aug 2017)
+36. Rosenholtz, R.: What your visual system sees where you are not looking. In: Human
+Vision and Electronic Imaging XVI. vol. 7865, pp. 343–356. SPIE (2011)
+37. Wang, Y., Li, Z., Guo, L., Yang, W., Kot, A., Wen, B.: ContextGS : Compact 3d gaussian splatting with anchor level context model. In: The Thirtyeighth Annual Conference on Neural Information Processing Systems (2024),
+https://openreview.net/forum?id=W2qGSMl2Uu
+38. Wang, Z., Simoncelli, E., Bovik, A.: Multiscale structural similarity for image quality assessment. In: The Thrity-Seventh Asilomar Conference on Signals, Systems &
+Computers, 2003. vol. 2, pp. 1398–1402 Vol.2 (2003). https://doi.org/10.1109/
+ACSSC.2003.1292216
+39. Wang, Z., Bovik, A., Sheikh, H., Simoncelli, E.: Image quality assessment: from
+error visibility to structural similarity. IEEE Transactions on Image Processing
+13(4), 600–612 (2004). https://doi.org/10.1109/TIP.2003.819861
+40. Xiangli, Y., Xu, L., Pan, X., Zhao, N., Rao, A., Theobalt, C., Dai, B., Lin, D.:
+Bungeenerf: Progressive neural radiance field for extreme multi-scale scene rendering. In: The European Conference on Computer Vision (ECCV) (2022)
+41. Yamins, D.L.K., DiCarlo, J.J.: Using goal-driven deep learning models to understand sensory cortex. Nature Neuroscience (2016)
+42. Yu, Z., Chen, A., Huang, B., Sattler, T., Geiger, A.: Mip-splatting: Alias-free 3d
+Gaussian splatting. In: Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition. pp. 19447–19456 (2024)
+43. Zhang, J., Zhan, F., Xu, M., Lu, S., Xing, E.: Fregs: 3d Gaussian splatting with
+progressive frequency regularization. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 21424–21433 (2024)
+44. Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O.: The unreasonable
+effectiveness of deep features as a perceptual metric. In: Proceedings of the IEEE
+conference on computer vision and pattern recognition. pp. 586–595 (2018)
+45. Zhang, Z., Hu, W., Lao, Y., He, T., Zhao, H.: Pixel-gs: Density control with pixelaware gradient for 3d Gaussian splatting. In: European Conference on Computer
+Vision. pp. 326–342. Springer (2024)
+46. Zhou, H., Ni, Z.: Perceptual-GS: Scene-adaptive perceptual densification for gaussian splatting. In: Forty-second International Conference on Machine Learning
+(2025), https://openreview.net/forum?id=ij0vj0BC72
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+19
+Appendix
+A
+Implementation details
+We follow the experimental setup of prior work [22, 46]. All experiments are
+conducted on a single NVIDIA A100 GPU with 80 GB of memory.
+A.1
+Runtime comparison of WD and original loss
+We analyze the computational overhead introduced by WD during training.
+At a rendered resolution of 1063 × 1600 and with the Gaussian count fixed at
+4.79M on the Bicycle scene from the Mip-NeRF 360 dataset [4], the forward
+and backward pass time per iteration is 61.1 ms for the original L1 + SSIM
+objective and 273.9 ms when using WD. In this work, we prioritize perceptual
+fidelity over raw training efficiency, trading additional training cost for improved
+visual quality. This 4.5× increase mainly stems from the additional feature extraction and statistical computation in the VGG space (see Eq. (4)), following
+the WD implementation in [2]. The reference WD implementation is unoptimized, but two simple changes already remove a substantial fraction of this
+overhead while preserving the loss value and its gradients bit-exactly relative to
+the reference implementation: (i) caching ground-truth VGG features and their
+pyramid statistics, since the ground-truth view does not change across training
+iterations; and (ii) pruning zero-weight VGG pyramid levels, since the per-level
+weight ReLU(1 − | log2 σ − i|) is zero for most levels under our constant σ = 4—in
+our setup only 20 of 96 pyramid levels across the VGG feature stack contribute
+to the loss. Together, these two changes reduce the WD per-iteration time by
+≈48%, bringing the relative training overhead down from ≈4.5× to ≈2.8× over
+original 3DGS. Further VGG-side optimizations (e.g. lower-resolution feature
+extraction, parallelization, or mixed-precision arithmetic) are likely to yield additional speedups and are left to future work. Moreover, WD-based optimization
+often converges to fewer splats at comparable perceptual quality, which can reduce rendering cost and partially offset the increased training time for the loss
+computation.
+A.2
+Hyperparameters for WD-based loss
+For all 3DGS representation experiments, we follow the default 3DGS training
+regime [22] but apply a dataset-specific global scaling factor γ (see (1)) to each
+WD-based loss (WD and WD-R, see Sec. 3.1). This is critical because the adaptive densification mechanism in the original 3DGS implementation [22] relies
+on the magnitude of positional gradients [22]; scaling the global loss magnitude
+directly scales these gradients, thereby modulating the number of generated
+Gaussian splats. We tune γ to ensure that the resulting Gaussian counts allow
+for a fair comparison to the baselines. Note that γ only affects the overall gradient scale without altering the internal composition of the objective. We use
+20
+Özyılkan and Chen et al.
+1
+β = 0.09
+for all scenes and choose the global scale γ according to the scene so
+that (i) splat counts remain comparable to the WD-only baseline, and (ii) the
+original loss component Lorig provides a regularizing influence without overwhelming the WD term. Although β may appear large, we empirically verify
+that the WD term still dominates the gradient signal: on the Bicycle scene
+∥∇dWD ∥
+, has a mean of ∼1.6× across trainfor example, the gradient ratio, ∥∇(βL
+orig )∥
+ing iterations (see Fig. 13), confirming that Lorig acts as a moderate regularizer
+rather than overwhelming the primary WD objective. The exact γ values are
+shown in Tab. 4.
+Ratio = 1.00
+Ratio = 1.63 (mean)
+12
+10
+(
+dWD
+orig )
+8
+6
+4
+2
+5000
+A.3
+10000
+15000
+20000
+Iteration
+25000
+30000
+Fig. 13: The gradient ratio of
+∥∇dWD ∥
+over training itera∥∇(βLorig )∥
+tions. Despite β appearing large,
+the WD gradient consistently exceeds the scaled original gradient
+(βLorig ) (i.e. ratio > 1), with a
+mean ratio of ∼1.6×, indicating
+that Lorig serves as a moderate
+regularizer within the WD-R objective.
+Warm-up strategy
+For the WD loss, we warm up the training with the original loss [22] for the first
+3k iterations before introducing the perceptual objective. This setting is used
+for all datasets except BungeeNeRF [40], where we use a 5k-iteration warmup. This is because BungeeNeRF is a large-scale cityscape dataset derived from
+Google Earth imagery, featuring large variations in viewing distance and viewpoint, as well as inconsistent appearance (e.g. lighting) and geometry, making
+the optimization relatively less stable. This warm-up stage provides a stable
+geometric initialization and mitigates instability caused by pruning and densiTable 4: Global scale γ for WD-based losses, i.e. WD-only and WD-R. The objectives
+are defined in Sec. 3.1. Coefficients γ are calibrated per dataset to maintain splat
+counts comparable to the respective baselines, with the original loss Lorig acting as a
+mild regularizer.
+Deep Blending Mip-NeRF 360 Mip-NeRF 360 Tanks & Temples BungeeNeRF
+(Indoors)
+(Indoors)
+(Outdoors)
+(Outdoors)
+(Outdoors)
+WD
+WD-R
+WD
+WD-R
+WD
+WD-R
+WD
+WD-R
+WD WD-R
+0.028
+0.025
+0.029
+0.025
+0.035
+0.028
+0.038
+0.032
+0.030 0.025
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+21
+fication heuristics, which we hypothesize is due to the WD loss lacking a direct pixel-level fidelity term. Note that such warm-up strategies are commonly
+used when training with perceptual or adversarial objectives in the literature
+(e.g. [19, 25]), where an initial pixel-level objective helps stabilize early training.
+A deeper investigation (e.g. eliminating warm-up or using smoother schedules)
+is a worthwhile direction for future work.
+A.4
+Perceptual metrics
+LPIPS [44] and DISTS [11] are computed per image and averaged across validation views. In contrast, FID [15] and CMMD [20] measure differences between
+feature distributions of rendered and ground-truth images. Specifically, FID uses
+Inception-v3 features, while CMMD is computed using CLIP-ViT-L/14-336 embeddings. As FID and CMMD require sufficiently large sample sets for stable
+estimation, we augment the evaluation data by extracting five spatial crops per
+view and also adding their horizontal flips. The metrics are then computed per
+scene and averaged across all scenes to ensure statistical stability while accounting for inter-scene variation.
+It is worth noting that FID and CMMD operate at the distribution level,
+quantifying the divergence between the reconstructed and ground-truth data.
+As such, they serve as indicators of realism rather than perceptual fidelity to
+a specific reference image. However, it is common practice in perceptual image
+processing and compression research to report these distributional metrics alongside per-image metrics like DISTS and LPIPS (see [32, 33]). Since each dataset
+we evaluate on only contains a small handful of individual scenes, and hence
+does not represent a larger ensemble of scenes well, we chose to compare distributions per scene (i.e. the FID or CMMD value is computed by comparing
+the distribution of original views from each scene to the distribution of novel
+rendered views from the model fitted to the same scene).
+B
+Ablation on composite loss hyperparameters
+The goal of these ablations is to empirically find a set of weights (ω1 –ω4 ) on the
+L1, L2, MS-SSIM [38] and LPIPS [44] losses in (3), respectively, that achieve a
+good balance of reconstruction quality as assessed by LPIPS, DISTS, FID, and
+CMMD, which are commonly used to evaluate image processing algorithms [32,
+33].
+First, we replace SSIM [39] with MS-SSIM, its multi-scale counterpart. Second, we introduce L2 and LPIPS, gradually increasing the LPIPS weight ω4 .
+While doing this, we track our measures of success across two datasets: the outdoor Tanks & Temples and the indoor Deep Blending (Tab. 5). We observe that
+ω4 = 0.1 represents a sweet spot: increasing the weight further yields diminishing
+metric improvements while the splat count remains low.
+We further test permutations of the resulting weights, with the result that
+none of the permutations improve upon the previously identified sweet spot. We
+22
+Özyılkan and Chen et al.
+Table 5: Ablation study on the hyperparameters of the composite loss in Eq. (3).
+ω2 ω3 ω4
+#G ↓ LPIPS ↓ DISTS ↓ FID ↓ CMMD ↓ PSNR ↑ SSIM ↑
+Dataset
+ω1
+Deep
+Blending
+(Indoors)
+0.2 – 0.8 –
+2.81M
+0.05 0.3 0.6 –
+2.80M
+0.05 0.3 0.6 0.05 3.31M
+0.05 0.3 0.6 0.10 3.96M
+0.05 0.3 0.6 0.20 5.75M
+0.05 0.3 0.6 0.40 11.05M
+0.05 0.3 0.6 0.80 14.95M
+0.05 0.6 0.3 0.1 2.50M
+0.05 0.1 0.3 0.6 14.35M
+0.2 – 0.8 –
+0.05 0.3 0.6 –
+0.05 0.3 0.6 0.05
+Tanks
+0.05 0.3 0.6 0.1
+& Temples
+0.05 0.3 0.6 0.2
+(Outdoors)
+0.05 0.3 0.6 0.4
+0.05 0.3 0.6 0.8
+0.05 0.6 0.3 0.1
+0.05 0.1 0.3 0.6
+1.83M
+1.29M
+1.48M
+1.73M
+2.37M
+4.09M
+7.39M
+1.12M
+9.55M
+0.243
+0.235
+0.233
+0.235
+0.242
+0.353
+0.566
+0.235
+0.670
+0.243
+0.237
+0.236
+0.240
+0.253
+0.379
+0.589
+0.238
+0.678
+106.93
+90.20
+100.90
+101.11
+106.66
+181.54
+335.53
+106.88
+408.34
+0.711
+0.602
+0.744
+0.765
+0.808
+1.393
+2.728
+0.785
+3.502
+29.60
+29.47
+29.30
+28.87
+27.62
+22.40
+14.13
+29.55
+11.11
+0.903
+0.901
+0.896
+0.836
+0.875
+0.764
+0.529
+0.893
+0.404
+0.176
+0.171
+0.162
+0.158
+0.154
+0.164
+0.272
+0.172
+0.419
+0.149
+0.150
+0.139
+0.137
+0.135
+0.149
+0.267
+0.149
+0.423
+53.18
+47.60
+42.13
+39.88
+36.38
+37.66
+93.44
+44.12
+176.41
+1.171
+1.084
+0.997
+0.966
+0.924
+0.963
+1.699
+1.054
+2.814
+23.63
+23.69
+23.51
+23.54
+23.36
+22.80
+18.60
+23.64
+13.49
+0.846
+0.847
+0.842
+0.840
+0.836
+0.813
+0.670
+0.829
+0.481
+stop our search here, and choose ω1 = 0.05, ω2 = 0.30, ω3 = 0.60, ω4 = 0.10 as
+the final weighting for the composite loss.
+C
+Ablation on σ choices for Wasserstein Distortion
+C.1
+Constant σ map
+As discussed in Sec. 3.1, σ controls the permissiveness to texture resampling,
+where lower values allow less resampling [2, 34]. The measurements in Tab. 6
+show that there is a trade-off: decreasing σ, at a constant loss weight γ, improves
+pointwise perceptual metrics, as σ = 0 corresponds to pointwise comparisons
+between feature maps (or pixels). At the same time, this comes at the cost
+of an increased splat count. For our main results, we selected σ = 4, which
+would appear to be a suboptimal choice according to the metrics listed here.
+However, the fact that we largely achieve better human ratings with WD/WD-R
+than optimizing for combinations of such pointwise metrics, as evidenced by the
+human preference study in Fig. 4, suggests that pointwise metrics simply are
+not accurately aligned with human texture perception. Although the original
+WD implementation paper [2] highlights a saliency-guided σ-map, we note that
+a fixed σ for the WD loss remains a strong baseline itself, as demonstrated
+in [2, Sec. 3, Fig. 5].
+C.2
+Adaptive σ map
+In addition to the fixed pooling kernel used in the main experiments, we also
+explored spatially adaptive variants where the WD pooling size (i.e. σ) varies
+across the image. The goal is to better match perceptual sensitivity by allowing
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+23
+Table 6: Perceptual metric comparison across σ-values for WD on Mip-NeRF 360 [4]
+dataset.
+Dataset
+σ # G ↓ LPIPS ↓ DISTS↓ FID ↓ CMMD ↓ PSNR ↑ SSIM ↑
+Mip-NeRF 360
+(Indoors)
+1
+2
+4
+8
+4.24M
+2.72M
+1.46M
+0.89M
+0.134
+0.136
+0.152
+0.184
+0.104
+0.106
+0.117
+0.143
+56.60
+58.88
+65.59
+83.40
+0.373
+0.435
+0.511
+0.625
+29.82
+29.74
+29.24
+28.14
+0.902
+0.891
+0.852
+0.822
+Mip-NeRF 360
+(Outdoors)
+1 12.40M
+2 7.56M
+4 3.54M
+8 1.86M
+0.191
+0.192
+0.228
+0.279
+0.164
+0.158
+0.178
+0.216
+58.81
+51.58
+65.69
+85.75
+0.352
+0.351
+0.438
+0.629
+24.45
+24.11
+22.90
+21.44
+0.720
+0.684
+0.577
+0.471
+Table 7: Perceptual comparison for saliency-based adaptive σ vs. constant σ=4 on
+the Mip-NeRF 360 dataset [4].
+Dataset Method # G ↓ LPIPS ↓ DISTS ↓ FID ↓ CMMD ↓ PSNR ↑ SSIM ↑
+Indoors
+σ=4
+1.46M
+adpt. σ 1.66M
+0.152
+0.155
+0.117
+0.118
+65.59
+70.78
+0.511
+0.522
+29.24
+29.34
+0.852
+0.857
+Outdoors
+σ=4
+3.54M
+adpt. σ 3.65M
+0.228
+0.222
+0.178
+0.173
+65.69
+67.81
+0.438
+0.443
+22.90
+23.16
+0.577
+0.603
+smaller pooling regions in visually important areas and larger regions elsewhere
+to permit more texture resampling while maintaining similar splat count.
+We investigated two strategies. First, we constructed saliency-guided σ maps
+using EML-NET [21], assigning smaller σ values to highly salient regions and
+larger values elsewhere. While this approach occasionally improved the reconstruction of fine, structured textures such as English text (see Fig. 14), it produced similar aggregate perceptual metrics to the fixed σ setting, as shown
+in Tab. 7.
+Second, we explored depth-guided σ maps, where the pooling size varies as
+a function of estimated depth to account for perspective-dependent perceptual
+sensitivity. We used the monocular depth estimator Depth-Pro [8] to obtain perview depth estimates. In practice, depth-based σ maps were more difficult to
+stabilize during training and did not consistently improve perceptual scores.
+Due to the additional complexity and limited quantitative gains, we retain
+the fixed pooling configuration in the main experiments.
+D
+Human rater study
+The subjective study is conducted in a blind pairwise comparison format. Fig. 15
+shows the interface seen by the human raters. The interface allows for blind
+A/B comparison of two reconstructions (on the right) with the reference image
+displayed on the left. As in the CLIC compression challenge [10], the Elo scoring
+model dynamically chooses which pair of reconstructions (each corresponding
+to a method) are compared against each other using the maximum information
+24
+Özyılkan and Chen et al.
+Counter
+Ground truth
++ WD (σ = 4)
+(#G: 1.10M)
++ adpt. σ
+(#G: 1.38M)
+Fig. 14: Visual comparison of constant σ vs. saliency-guided adaptive σ, where EMLNET [21] is used to extract saliency maps.
+gain strategy [29] to maximize comparisons which provide a useful signal. Finally,
+Bayesian Elo scores are computed based on all the pairwise comparisons.
+To minimize noisy voting, Mabyduck performs thorough sanity checking of
+the raters’ setup with a pre-screening in accordance with the Ishihara color
+test [18]. The pre-screening checks for color blindness, contrast sensitivity, and
+basic ability to detect compression artifacts. A sample pre-screening study is
+shown here: https://xp.mabyduck.com/en/latest/pre_screen_image/job/
+j6ne0x2/.
+Fig. 15: Screenshot of the subjective study interface as seen by the human raters on
+Mabyduck [30].
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+25
+E
+Additional quantitative reconstruction quality results
+E.1
+3DGS representation
+Tab. 8 reports additional metrics (PSNR and SSIM) for the 3DGS representation task discussed in Sec. 4.1. While WD-based losses outperform the original
+3DGS objective (L1+SSIM, i.e. original loss) [22], Pixel-GS [45], and PerceptualGS [46] on popular perceptual metrics (LPIPS, DISTS, FID) and human preference, they yield lower PSNR and SSIM scores. This is likely because baseline
+methods (original loss in [22], Pixel-GS [45], and Perceptual-GS [46]) explicitly
+include an SSIM term in their training objectives.
+Table 8: Perceptual metric results for original 3DGS [22] variants on indoor and
+outdoor datasets. Splat counts are indicated as # G.
+Dataset
+Method
+# G ↓ LPIPS ↓ DISTS ↓ FID ↓ CMMD ↓ PSNR ↑ SSIM ↑
+Original loss [22]
+2.81M
+Pixel-GS [45]
+4.64M
+Perceptual-GS [46] 2.86M
+0.243
+0.246
+0.230
+0.243
+0.248
+0.231
+106.93
+110.17
+93.27
+0.711
+0.759
+0.586
+29.60
+28.98
+29.94
+0.903
+0.896
+0.905
+Composite
+WD
+WD-R
+3.96M
+2.81M
+2.87M
+0.235
+0.201
+0.193
+0.240
+0.205
+0.194
+101.11
+88.56
+82.32
+0.765
+0.584
+0.606
+28.95
+28.98
+29.58
+0.837
+0.823
+0.839
+Original loss [22]
+1.42M
+2.49M
+Mip-NeRF Pixel-GS [45]
+Perceptual-GS [46] 1.58M
+360
+(Indoors) Composite
+1.99M
+0.188
+0.177
+0.170
+0.158
+0.147
+0.142
+80.70
+73.36
+69.86
+0.465
+0.412
+0.398
+30.95
+31.17
+31.39
+0.922
+0.926
+0.929
+0.171
+0.152
+0.147
+0.143
+0.117
+0.114
+82.17
+65.59
+67.80
+0.519
+0.511
+0.496
+30.52
+29.24
+30.44
+0.889
+0.852
+0.881
+0.244
+0.206
+0.206
+0.218
+0.186
+0.188
+104.88
+65.49
+58.97
+0.610
+0.416
+0.391
+24.27
+24.31
+24.38
+0.708
+0.720
+0.726
+3.54M
+3.47M
+0.216
+0.228
+0.206
+0.199
+0.178
+0.168
+59.09
+65.69
+59.25
+0.472
+0.438
+0.438
+24.28
+22.90
+24.09
+0.699
+0.577
+0.677
+Original loss [22]
+1.83M
+Pixel-GS [45]
+4.49M
+Perceptual-GS [46] 1.72M
+0.176
+0.150
+0.151
+0.149
+0.128
+0.132
+53.17
+40.61
+40.75
+1.171
+0.999
+0.978
+23.63
+23.73
+23.90
+0.846
+0.855
+0.856
+Composite
+WD
+WD-R
+1.73M
+1.70M
+1.72M
+0.158
+0.138
+0.127
+0.137
+0.102
+0.096
+39.88
+29.69
+29.07
+0.966
+0.672
+0.737
+23.54
+22.53
+23.47
+0.840
+0.742
+0.791
+Original loss [22]
+6.92M
+Pixel-GS [45]
+Perceptual-GS [46] 4.97M
+0.098
+27.67
+0.914
+0.095
+0.106
+62.23
+0.207
+OOM in Pompidou scene
+0.103
+58.23
+0.227
+27.86
+0.918
+Composite
+WD
+WD-R
+0.197
+0.116
+0.092
+0.200
+0.100
+0.087
+24.12
+25.52
+27.45
+0.785
+0.807
+0.881
+Deep
+Blending
+WD
+WD-R
+1.46M
+1.49M
+Original loss [22]
+4.52M
+7.40M
+Mip-NeRF Pixel-GS [45]
+Perceptual-GS [46] 3.55M
+360
+(Outdoors) Composite
+6.50M
+WD
+WD-R
+Tanks
+& Temples
+Bungee
+NeRF
+11.30M
+4.67M
+4.89M
+101.66
+50.68
+46.21
+0.527
+0.199
+0.171
+26
+Özyılkan and Chen et al.
+Table 9: Perceptual metric comparison for Mip-Splatting [42] and its WD-based variants across datasets.
+Dataset
+Method
+Deep Blending
+Mip-Splatting 3.5M
++WD
+1.9M
++WD-R
+2.4M
+0.239
+0.204
+0.194
+0.242
+0.208
+0.201
+102.01
+89.38
+82.96
+0.660
+0.567
+0.614
+29.35
+29.32
+29.46
+0.902
+0.874
+0.890
+Mip-NeRF 360
+(Indoors)
+Mip-Splatting 1.8M
++WD
+1.5M
++WD-R
+1.7M
+0.152
+0.134
+0.123
+0.138
+0.113
+0.106
+71.16
+54.86
+53.22
+0.329
+0.301
+0.273
+31.34
+29.10
+30.30
+0.935
+0.886
+0.915
+Mip-NeRF 360
+(Outdoors)
+Mip-Splatting 5.7M
++WD
+5.7M
++WD-R
+5.4M
+0.193
+0.202
+0.181
+0.180
+0.161
+0.153
+62.54
+49.78
+45.87
+0.327
+0.316
+0.267
+25.14
+23.72
+24.79
+0.760
+0.638
+0.729
+Mip-Splatting 2.4M
+Tanks & Temples +WD
+1.2M
++WD-R
+1.5M
+0.156
+0.148
+0.134
+0.136
+0.111
+0.103
+45.55
+34.84
+32.81
+1.045
+0.827
+0.825
+23.82
+22.40
+23.32
+0.860
+0.772
+0.825
+Mip-Splatting 8.8M
++WD
+6.3M
++WD-R
+7.5M
+0.113
+0.156
+0.121
+0.122
+0.131
+0.111
+74.89
+75.64
+64.64
+0.336
+0.456
+0.328
+27.37
+24.04
+26.08
+0.909
+0.768
+0.868
+BungeeNeRF
+E.2
+#G ↓ LPIPS ↓ DISTS ↓ FID ↓ CMMD ↓ PSNR ↑ SSIM ↑
+Generalization across alternative 3DGS representations
+Tabs. 9 and 10 report results when integrating WD and WD-R into the other
+two 3DGS frameworks studied, Mip-Splatting [42] and Scaffold-GS [28], across
+additional datasets beyond those in Sec. 4.2. For most datasets, WD-based objectives consistently improve perceptual metrics such as LPIPS, DISTS, FID,
+and CMMD relative to the original methods. In particular, WD-R provides the
+most stable improvements, achieving the best or near-best perceptual scores
+across the majority of datasets while maintaining comparable resource usage
+(Gaussian count for Mip-Splatting and model size for Scaffold-GS). As expected
+for perceptual optimization, these gains are sometimes accompanied by small
+decreases in PSNR and SSIM, reflecting the known trade-off between pixel-level
+fidelity and perceptual quality [7]. Overall, the results confirm that the benefits
+of WD-based training generalize across multiple datasets and extend beyond the
+original 3DGS algorithm [22] to alternative rendering pipelines.
+F
+Additional visual comparisons
+F.1
+3DGS representation
+For further visual comparisons, see Fig. 16. WD and WD-R generally lead to
+better reproduction of texture and fine visual detail, at a comparable or better
+splat count.
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+27
+Table 10: Perceptual metric comparison for Scaffold-GS [28] and its WD-based variants across datasets.
+Dataset
+Method
+Deep Blending
+Scaffold-GS
++WD
++WD-R
+54.0
+51.1
+47.2
+0.253
+0.244
+0.228
+0.256
+0.248
+0.231
+101.53
+119.34
+109.02
+0.612
+0.983
+0.915
+30.29
+28.92
+29.75
+0.909
+0.866
+0.887
+Mip-NeRF 360
+(Indoors)
+Scaffold-GS
++WD
++WD-R
+99.5
+98.4
+93.9
+0.166
+0.143
+0.140
+0.150
+0.117
+0.118
+75.08
+64.41
+67.20
+0.391
+0.402
+0.426
+31.58
+30.16
+30.90
+0.933
+0.899
+0.917
+Mip-NeRF 360
+(Outdoors)
+Scaffold-GS
++WD
++WD-R
+220.7
+215.8
+223.5
+0.273
+0.244
+0.233
+0.255
+0.202
+0.198
+133.33
+67.32
+67.74
+0.686
+0.536
+0.559
+24.70
+23.26
+24.09
+0.717
+0.615
+0.677
+Scaffold-GS
+Tanks & Temples +WD
++WD-R
+77.7
+63.8
+67.8
+0.173
+0.150
+0.136
+0.155
+0.117
+0.109
+48.01
+30.98
+29.60
+1.125
+0.868
+0.890
+24.05
+22.76
+23.56
+0.854
+0.782
+0.831
+Scaffold-GS
++WD
++WD-R
+174.0
+164.5
+169.2
+0.197
+0.218
+0.193
+0.219
+0.228
+0.207
+132.69
+118.53
+112.66
+0.952
+1.028
+0.902
+24.75
+24.02
+24.58
+0.840
+0.788
+0.829
+BungeeNeRF
+F.2
+Size (MB) ↓ LPIPS ↓ DISTS ↓ FID ↓ CMMD ↓ PSNR ↑ SSIM ↑
+3DGS scene compression
+Further visual comparisons are provided in Fig. 17, where WD and WD-R consistently reproduce textures and fine visual details more faithfully at comparable
+storage sizes.
+G
+Erank histograms per scene for BungeeNeRF dataset
+Additional effective rank (“erank”) statistics for each scene of the BungeeNeRF
+dataset [40] are given in Figs. 18 and 19. The data corroborates the results
+from Fig. 9 in the main text. The loss functions using WD generally lead to
+higher anisotropy of the fitted Gaussians.
+H
+Splat density heatmaps
+To complement the erank analysis (Sec. G), which characterizes how perceptual optimization shapes individual Gaussians, we also visualize how WD-R distributes splat capacity spatially across a rendered view.
+Computation. For a given trained model and target camera view, we project
+each Gaussian center µi onto the image plane using the camera’s intrinsic and
+extrinsic parameters; only Gaussians whose projected centers fall within the image are kept, and we refer to these as the visible splats for that view. For each
+remaining splat Gi , we add its opacity αi to the 2×2-pixel bin containing the
+projected center, yielding a 2D density map. Because the map is computed from
+splat centers—not from the alpha-blended renderer—it captures where representation capacity is allocated.
+28
+Özyılkan and Chen et al.
+Observations. Fig. 20 provides a larger version of Fig. 10 from the main text,
+showing splat density on one view of the Barcelona scene from the BungeeNeRF
+dataset [40], comparing original 3DGS [22] and our WD-R model trained at a
+comparable Gaussian budget. Original 3DGS spreads splats more uniformly—
+including over low-detail ground regions—while WD-R concentrates capacity
+on the texture-rich cathedral. Aggregated across views, WD-R uses fewer total
+splats than original 3DGS but exposes ∼10% more visible splats per view, suggesting more efficient view-relevant allocation. Note that, similar to the erank
+analysis in Sec. 4.1, this is a post-hoc observation rather than a causal explanation of the perceptual gains.
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+Flowers
+Playroom
+Train
+Ground truth
+Original loss [22]
+(#G: 3.38M)
+WD
+(#G: 2.80M)
+Pixel-GS [45]
+(#G: 7.08M)
+Perceptual-GS [46]
+(#G: 3.55M)
+WD-R
+(#G: 2.73M)
+Ground truth
+Original loss
+(#G: 2.33M)
+WD
+(#G: 2.35M)
+Pixel-GS
+(#G: 3.76M)
+Perceptual-GS
+(#G: 2.29M)
+WD-R
+(#G: 2.31M)
+Ground truth
+Original loss
+(#G: 1.08M)
+WD
+(#G: 1.50M)
+Pixel-GS
+(#G: 3.80M)
+Perceptual-GS
+(#G: 1.39M)
+WD-R
+(#G: 1.45M)
+29
+Fig. 16: Visual comparison of the novel view synthesis results obtained by the original
+3DGS [22], Pixel-GS [45], Perceptual-GS [46], and the perceptual loss families discussed
+in Sec. 3.1. The left images show the full scenes, with detailed crops highlighting reconstruction differences across methods, where #G indicates the number of Gaussian
+splats for each method.
+30
+Özyılkan and Chen et al.
+Bicycle
+Ground truth
+Original loss [22] (26.16 MB)
+Composite (25.01 MB)
+WD (24.79 MB)
+WD-R (24.68 MB)
+Counter
+Ground truth
+Original loss (11.11 MB)
+Composite (10.92 MB)
+WD (10.77 MB)
+WD-R (11.13 MB)
+Fig. 17: Visual comparison of the novel view synthesis results obtained by the CompGS [27] compression algorithm. The left images show the full scenes, with detailed
+crops highlighting reconstruction differences across methods, where MB indicates the
+storage size for each method.
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+Original (median: 1.55) Composite (median: 1.36)
+Rel. Frequency
+Rel. Frequency
+Original (median: 1.44) Composite (median: 1.20)
+31
+WD-R (median: 1.12)
+WD (median: 1.11)
+Rel. Frequency
+WD (median: 1.06)
+Rel. Frequency
+WD-R (median: 1.07)
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+Rel. Frequency
+(b) Barcelona
+Original (median: 1.32) Composite (median: 1.28)
+Rel. Frequency
+(a) Amsterdam
+Original (median: 1.36) Composite (median: 1.24)
+WD-R (median: 1.06)
+WD (median: 1.05)
+Rel. Frequency
+WD (median: 1.07)
+Rel. Frequency
+WD-R (median: 1.07)
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+(c) Bilbao
+(d) Chicago
+Fig. 18: Effective rank (erank) [17] statistics for the Amsterdam, Barcelona, Bilbao
+and Chicago scenes in the BungeeNeRF dataset [40]. The histograms show relative
+frequencies of the erank of all Gaussian covariance matrices in the scene, normalized to
+the maximum bin value. A diminished tail indicates that a larger fraction of the erank
+values is concentrated in the leftmost bin. This distribution shift is also reflected by
+the location of the median (black line).
+32
+Özyılkan and Chen et al.
+Original (median: 1.54) Composite (median: 1.44)
+Rel. Frequency
+Rel. Frequency
+Original (median: 1.50) Composite (median: 1.61)
+WD-R (median: 1.13)
+WD (median: 1.13)
+Rel. Frequency
+WD (median: 1.17)
+Rel. Frequency
+WD-R (median: 1.18)
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+Rel. Frequency
+(b) Pompidou
+Original (median: 1.51) Composite (median: 1.42)
+Rel. Frequency
+(a) Hollywood
+Original (median: 1.57) Composite (median: 1.43)
+WD-R (median: 1.13)
+WD (median: 1.13)
+Rel. Frequency
+WD (median: 1.13)
+Rel. Frequency
+WD-R (median: 1.16)
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+1.0 1.5 2.0 2.5 3.0 1.0 1.5 2.0 2.5 3.0
+erank
+erank
+(c) Quebec
+(d) Rome
+Fig. 19: Effective rank (erank) [17] statistics for the Hollywood, Pompidou, Quebec and
+Rome scenes in the BungeeNeRF dataset [40]. The histograms show relative frequencies
+of the erank of all Gaussian covariance matrices in the scene, normalized to the maximum bin value. A diminished tail indicates that a larger fraction of the erank values is
+concentrated in the leftmost bin. This distribution shift is also reflected by the location
+of the median (black line).
+Drop-In Perceptual Optimization for 3D Gaussian Splatting
+33
+(a) Barcelona view (ground truth).
+(b) Original 3DGS [22].
+(c) WD-R (ours).
+Fig. 20: Splat density heatmaps for one view of the Barcelona scene from BungeeNeRF [40]. Each heatmap (b, c) shows the cumulative opacity of projected splat centers per 2×2-pixel bin. WD-R concentrates representation capacity on the texture-rich
+cathedral, while original 3DGS [22] spreads splats more uniformly across the view. Aggregated across views, WD-R uses fewer total splats than original 3DGS but exposes
+∼10% more visible splats per view, suggesting more efficient view-relevant allocation.

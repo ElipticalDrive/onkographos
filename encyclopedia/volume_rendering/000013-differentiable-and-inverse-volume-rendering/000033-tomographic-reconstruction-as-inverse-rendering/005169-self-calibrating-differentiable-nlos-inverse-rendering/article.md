@@ -1,0 +1,121 @@
+# Self-Calibrating Differentiable NLOS Inverse Rendering
+
+Also called: Differentiable transient rendering with self-calibration, Phasor-field NLOS inverse rendering, Self-Calibrating, Fully Differentiable NLOS Inverse Rendering
+
+## Overview
+Self-Calibrating Differentiable NLOS Inverse Rendering is a fully-differentiable end-to-end pipeline for reconstructing hidden scenes from time-resolved non-line-of-sight (NLOS) measurements [S1]. It solves the problem of reconstruction artifacts and inversion ambiguities inherent in traditional NLOS imaging by automatically self-calibrating imaging parameters during the reconstruction process, eliminating the need for manual selection of filtering functions and parameters [S1]. Unlike volumetric back-projection methods or explicit polygonal mesh approaches, this method estimates an implicit geometric representation (surface points and normals) from volumetric intensities and refines the reconstruction by minimizing the error between simulated and measured illumination via gradient descent [S1].
+
+## How it works
+The method operates in two domains: time and frequency. It begins with a phasor-field diffraction reconstruction to generate an initial volumetric intensity, extracts an implicit geometry from this volume, and then uses differentiable transient rendering to simulate the measurement, optimizing parameters to match the input data [S1].
+
+### Inputs and Outputs
+*   **Input:** Measurement matrix $H(x_l, x_s, t)$, representing time-resolved illumination captured at points $x_s$ on a visible relay wall from a laser beam emitted at point $x_l$ [S1].
+*   **Output:** Volumetric intensity $I_{pf}$, implicit geometry $G$ (surface points and normals), and optimized imaging parameters $\Theta_{pf}, \Theta_G, \Theta_{ls}$ [S1].
+
+### Data Structures
+1.  **Measurement Matrix $H$:** A 3D array indexed by laser position $x_l$, sensor position $x_s$, and time $t$. In the frequency domain, this is transformed into phasors $H(x_l, x_s, \Omega)$ via Fourier transform [S1].
+2.  **Volumetric Intensity $I_{pf}$:** The output of the phasor-field reconstruction, representing the estimated density of hidden objects [S1].
+3.  **Implicit Geometry $G$:** A set of surface points and their associated normals, estimated from $I_{pf}$ without defining a polygonal mesh [S1].
+4.  **Parameters:**
+    *   $\Theta_{pf}$: Parameters for the phasor-field reconstruction.
+    *   $\Theta_G$: Parameters defining the implicit geometry.
+    *   $\Theta_{ls}$: Parameters for the differentiable transient rendering (light source and sensor models) [S1].
+
+### Steps
+1.  **Phasor-Field Reconstruction:**
+    *   Transform the time-resolved measurement matrix $H(x_l, x_s, t)$ into the frequency domain to obtain phasors $H(x_l, x_s, \Omega)$ [S1].
+    *   Apply a filtering function to the noisy phasor data [S1].
+    *   Perform NLOS imaging using a phasor-field diffraction method to compute the initial volumetric intensity $I_{pf} = R_{pf}(P(H; \Theta_{pf}))$ [S1]. Here, $P$ denotes the projection/processing and $R_{pf}$ the reconstruction operator.
+
+2.  **Implicit Geometry Estimation:**
+    *   Estimate the implicit geometry $G$ (surface points and normals) from the volumetric intensity $I_{pf}$ using a differentiable estimator $D$: $G = D(I_{pf})$ [S1]. This step avoids explicit surface mesh definition [S1].
+
+3.  **Differentiable Transient Rendering:**
+    *   Render the time-resolved illumination $H_R$ from the estimated geometry $G$ using differentiable path-space transient rendering: $H_R = R(G; \Theta_G, \Theta_{ls})$ [S1]. This simulates the light transport from the hidden scene back to the relay wall, accounting for the optimized parameters [S1].
+
+4.  **Optimization:**
+    *   Compute the loss $\mathcal{L}$ between the measured illumination $H$ and the rendered illumination $H_R$:
+        $$ \mathcal{L} = \sum \| H - H_R \|^2 + \Gamma $$
+        where $\Gamma$ represents regularization terms [S1].
+    *   Perform gradient descent to update the imaging parameters $\Theta_{pf}, \Theta_G, \Theta_{ls}$ by minimizing $\mathcal{L}$ [S1]. The geometry $G$ is computed during the forward pass, while parameters are updated during the backward pass [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def self_calibrating_nlos_inverse_rendering(H):
+    """
+    H: Measurement matrix H(x_l, x_s, t)
+    Returns: Optimized parameters and reconstructed geometry
+    """
+    # Step 1: Phasor-Field Reconstruction
+    # Transform time-domain measurements to frequency domain (phasors)
+    H_phasor = fourier_transform(H)
+    
+    # Apply filtering to phasors (details of filter not specified in source)
+    H_filtered = apply_filter(H_phasor)
+    
+    # Reconstruct initial volumetric intensity
+    # Theta_pf are initial parameters for phasor-field reconstruction
+    I_pf = phasor_field_reconstruction(H_filtered, theta_pf)
+    
+    # Step 2: Estimate Implicit Geometry
+    # Estimate surface points and normals from volumetric intensity
+    G = estimate_implicit_geometry(I_pf)
+    
+    # Step 3 & 4: Differentiable Rendering and Optimization
+    # Define loss function
+    def loss_function(theta_pf, theta_G, theta_ls):
+        # Re-render volumetric intensity with updated parameters
+        I_pf_new = phasor_field_reconstruction(H_filtered, theta_pf)
+        
+        # Re-estimate geometry with updated parameters
+        G_new = estimate_implicit_geometry(I_pf_new)
+        
+        # Render simulated time-resolved illumination from geometry
+        H_R = differentiable_transient_rendering(G_new, theta_G, theta_ls)
+        
+        # Compute loss
+        # Gamma is regularization term
+        L = sum_squared_error(H, H_R) + regularization_term(G_new)
+        return L
+
+    # Initialize parameters
+    theta_pf = initialize_parameters('pf')
+    theta_G = initialize_parameters('G')
+    theta_ls = initialize_parameters('ls')
+    
+    # Gradient descent optimization
+    while not converged:
+        L = loss_function(theta_pf, theta_G, theta_ls)
+        gradients = compute_gradients(L, theta_pf, theta_G, theta_ls)
+        
+        # Update parameters
+        theta_pf = update(theta_pf, gradients['theta_pf'])
+        theta_G = update(theta_G, gradients['theta_G'])
+        theta_ls = update(theta_ls, gradients['theta_ls'])
+        
+        # Check convergence
+        if check_convergence(L):
+            break
+            
+    return theta_pf, theta_G, theta_ls, estimate_implicit_geometry(phasor_field_reconstruction(H_filtered, theta_pf))
+```
+
+### Edge Cases and Pitfalls
+*   **Memory Limitations:** Computing derivatives of time-resolved radiometric data severely limits the number of unknown parameters that can be handled in differentiable methods [S1]. This method addresses this by coupling phasor-field reconstruction with differentiable rendering, but memory constraints remain a factor [S1].
+*   **Visibility Changes:** Handling visibility changes in a differentiable manner is difficult and can lead to non-differentiable discontinuities [S1].
+*   **Noise:** The method is designed to be robust in the presence of noise, providing consistent geometric estimations under varying capture conditions [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Limited by the need to compute derivatives of time-resolved radiometric data, which restricts the number of unknown parameters [S1].
+*   **Strengths:** Self-calibrates imaging parameters automatically via gradient descent, removing the need for manual parameter selection [S1]. Provides more geometric detail than previous surface-based methods and is robust to noise [S1].
+*   **Limitations:** Bounded by memory limitations inherent in differentiable transient rendering [S1].
+*   **When to use:** When high-quality reconstruction of hidden scenes is required without manual tuning of filtering parameters, and when implicit geometry representation is preferred over explicit meshes [S1].
+
+## Background
+The method was introduced by Kiseok Choi, Inchul Kim, Dongyoung Choi, Julio Marco, Diego Gutierrez, and Min H. Kim [S1]. It builds upon wave-based NLOS imaging methods that use diffractive phasor-based frameworks to formulate NLOS reconstruction as a virtual line-of-sight problem [S1]. It also integrates concepts from differentiable rendering pipelines in path space [S1]. The code is available at https://github.com/KAIST-VCLAB/nlos-inverse-rendering.git [S1].
+
+## Sources
+[S1] Self-Calibrating, Fully Differentiable NLOS Inverse Rendering, https://doi.org/10.1145/3610548.3618140, fetched 2026-10-27

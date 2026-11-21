@@ -1,0 +1,1531 @@
+Fast Monocular Scene Reconstruction with Global-Sparse Local-Dense Grids
+arXiv:submit/4909179 [cs.CV] 22 May 2023
+Wei Dong*
+Chris Choy†
+Charles Loop†
+Abstract
+Indoor scene reconstruction from monocular images has
+long been sought after by augmented reality and robotics
+developers. Recent advances in neural field representations and monocular priors have led to remarkable results in scene-level surface reconstructions. The reliance
+on Multilayer Perceptrons (MLP), however, significantly
+limits speed in training and rendering. In this work, we
+propose to directly use signed distance function (SDF) in
+sparse voxel block grids for fast and accurate scene reconstruction without MLPs. Our globally sparse and locally
+dense data structure exploits surfaces’ spatial sparsity, enables cache-friendly queries, and allows direct extensions
+to multi-modal data such as color and semantic labels. To
+apply this representation to monocular scene reconstruction, we develop a scale calibration algorithm for fast geometric initialization from monocular depth priors. We apply
+differentiable volume rendering from this initialization to
+refine details with fast convergence. We also introduce efficient high-dimensional Continuous Random Fields (CRFs)
+to further exploit the semantic-geometry consistency between scene objects. Experiments show that our approach
+is 10× faster in training and 100× faster in rendering while
+achieving comparable accuracy to state-of-the-art neural
+implicit methods.
+1. Introduction
+Reconstructing indoor spaces into 3D representations is
+a key requirement for many real-world applications, including robot navigation, immersive virtual/augmented reality
+experiences, and architectural design. Particularly useful is
+reconstruction from monocular cameras which are the most
+prevalent and accessible to causal users. While much research has been devoted to this task, several challenges remain.
+Conventional monocular reconstruction from multi-view
+RGB images uses patch matching [36], which takes hours
+to reconstruct even a relatively small scene. Several 3D re* CMU RI. Work done during the internship at NVIDIA.
+† NVIDIA.
+Or Litany†
+wall
+floor
+Yuke Zhu†
+cabinet
+chair
+Anima Anandkumar†
+sofa
+table
+door
+window
+picture
+curtain
+Figure 1. Color and semantic scene reconstruction from our system with monocular images and learned monocular priors.
+construction methods [40,48] have demonstrated fast reconstruction by applying 3D convolutional neural networks to
+feature volumes, but they have limited resolution and struggle to generalize to larger scenes.
+Recently, unified neural radiance fields [23] and neural
+implicit representations were developed for the purpose of
+accurate surface reconstruction from images [31, 45, 49].
+While this was successfully demonstrated on single objects,
+the weak photometric constraint leads to poor reconstruction and slow convergence for large-scale scenes. Guo et
+al. [14] and Yu et al. [51] improved the quality and convergence speed of neural field reconstruction on large-scale
+scenes by incorporating learned geometrical cues like depth
+and normal estimation [11, 33], however, training and evaluation remain inefficient. This is primarily because these
+approaches rely on MLPs and feature grids [24] that encode
+the entire scene rather than concentrating around surfaces.
+In contrast to MLPs, an explicit SDF voxel grid can be
+adaptively allocated around surfaces, and allows fast query
+and sampling. However, an efficient implementation of
+differentiable SDF voxel grids without MLPs is missing.
+Fridovich-Keil and Yu et al. [12] used an explicit density
+and color grid, but is limited to rendering small objects.
+Muller et al. [24] developed a feature grid with spatial hashing for fast neural rendering, but its backbone hash map is
+not collision-free, causing inevitable slow random access
+and inaccurate indexing at large scales. Dong et al. [10] pro-
+(a) COLMAP [36]
+(b) NeRF [23]
+(c) VolSDF [49]
+(d) NeuS [45]
+(e) ManhattanSDF [14]
+(f) MonoSDF-MLP [51]
+(g) MonoSDF-Grid [51]
+(h) Ours
+Figure 2. Qualitative reconstruction comparison on ScanNet [7]. While being 10× faster in training, we achieve similar reconstruction
+results to state-of-the-art MonoSDF [51], with fine details (see Fig. 9).
+posed a collision-free spatially hashed grid following Niessner et al. [30], but lacks support for differentiable rendering.
+Several practical challenges hinder the implementation of
+an efficient differentiable data structure: 1. a collision-free
+spatial hash map on GPU that supports one-to-one indexing
+from positions to voxels; 2. differentiable trilinear interpolations between spatially hashed voxels; 3. parallel ray
+marching and uniform sampling from a spatial hash map.
+Our approach: we address such challenges using a differentiable globally sparse and locally dense voxel grid. We
+transform a collision-free GPU hash map [37] to a differentiable tensor indexer [32]. This generates a one-to-one map
+between positions and globally sparse voxel blocks around
+approximate surfaces, and enables skipping empty space
+for efficient ray marching and uniform sampling. We further manage locally dense voxel arrays within sparse voxel
+blocks for GPU cache-friendly contiguous data query via
+trilinear interpolation. As a result, using explicit SDF grids
+leads to fast SDF gradient computation in a single forward
+pass, which can further accelerate differentiable rendering.
+This new data structure presents a new challenge —
+we can only optimize grid parameters if they are allocated
+around surfaces. To resolve this, we make use of off-theshelf monocular depth priors [11,33] and design a novel initialization scheme with global structure-from-motion (SfM)
+constraints to calibrate these unscaled predicted depths. It
+results in a consistent geometric initialization via volumetric fusion ready to be refined through differentiable volume
+rendering.
+We additionally incorporate semantic monocular priors [17] to provide cues for geometric refinement in 3D. For
+instance, we use colors and semantics to guide the sharpening of normals around object boundaries, which in turn
+improves the quality of colors and semantics. We enforce
+these intuitive notions through our novel continuous Conditional Random Field (CRF). We use Monte Carlo samples
+on the SDF zero-crossings to create continuous CRF nodes
+and define pairwise energy functions to enforce local consistency of colors, normals, and semantics. Importantly, we
+define similarity in a high dimensional space that consists of
+coordinates, colors, normals, and semantics, to reject spatially close samples with contrasting properties. To make
+inference tractable, we follow Krahenbuhl et al. [16] and
+use variational inference, leading to a series of convolutions
+in a high-dimensional space. We implement an efficient permutohedral lattice convolution [1] using the collision-free
+GPU hashmap to power the continuous CRF inference.
+The final output of our system is a scene reconstruction
+with geometry, colors, and semantic labels, as shown in
+Fig. 1. Experiments show that our method is 10× faster
+in training, 100× faster in inference, and has comparable
+accuracy measured by F-scores against state-of-the-art implicit reconstruction systems [14, 51]. In summary, we propose a fast scene reconstruction system for monocular images. Our contributions include:
+• A globally sparse locally dense differentiable volumetric
+data structure that exploits surface spatial sparsity without
+an MLP;
+• A scale calibration algorithm that produces consistent geometric initialization from unscaled monocular depths;
+• A fast monocular scene reconstruction system equipped
+with volume rendering and high dimensional continuous
+CRFs optimization.
+Sparse Voxel Blocks
+Dense Voxel Arrays
+2. Related Work
+Surface reconstruction from 3D data. Surface reconstruction has been well-studied from 3D scans. The general idea is to represent the space as an implicit signed distance function, and recover surfaces at zero-crossings with
+Marching Cubes [19]. Classical works [6,8,10,28,30] quantize the 3D space into voxels, and integrate frame-wise SDF
+observations into voxels. Instead of direct voxels, recent
+neural representations [38, 41, 54] use either a pure MLP or
+a feature grid to reconstruct smoother surfaces. These approaches are often fast and accurate, but heavily depends on
+high-quality depth input from sensors.
+Surface reconstruction from RGB. A variety of classical and learning-based methods [29, 40, 48, 52] have been
+developed to achieve high quality multi-view depth reconstruction from monocular images. These techniques usually construct a cost volume between a reference frame and
+its neighbor frames, and maximize the appearance consistency. A global volume can be optionally grown from the
+local volumes [26, 40, 52] for scene reconstruction. While
+these approaches succeed on various benchmarks, they rely
+on fine view point selection, and the performance may be
+significantly reduced when the view points and surfaces are
+sparse in space. Training on a large datasets is also required.
+Recent advances in neural rendering [3, 23, 44] and their
+predecessors have defined the surface geometry by a density
+function predicted by an MLP in 3D space. They seek to
+minimize ray consistency with the rendering loss using testtime optimization. While being able to achieve high rendering quality, due to the ambiguity in the underlying density representation, accurate surfaces are hard to recover. In
+view of this, implicit SDF representations [39,45,49,50] are
+used to replace density, where surfaces are better-defined
+at zero-crossings. To enable large-scale indoor scene reconstruction, ManhattanSDF [14] and MonoSDF [51] incorporate monocular geometric priors and achieve state-ofthe-art results. These approaches initialize the scene with a
+sphere [2], and gradually refine the details. As a result, the
+training time can be long, varying from hours to half a day.
+Monocular priors in surface reconstruction. Priors from
+monocular images have been used to enhance reconstruction and neural rendering from images, by providing reasonable initialization and better constrained sampling space. A
+light weight prior is the structure-from-motion (SfM) supervision [36], where poses and sparse point clouds are reconstructed to provide the geometry. Similarly, dense monocular priors including depths [18,33,34], normals [11], and se-
+Approximate Surface
+Viewing Ray
+Figure 3. Illustration of the sparse-dense data structure. The large
+voxel blocks (in blue) are allocated only around approximate surfaces, and indexed by a collision-free hash map. The voxel arrays
+(in red) further divide the space to provide high-resolution details.
+Ray marching skips empty space and only activates hit blocks (in
+bold blue). Trilinear interpolation of neighbor voxel properties allows sampling at continuous locations.
+mantic segmentations [17]. Existing approaches either use
+only SfM [9], or enhance dense priors by SfM via finetuning depth prediction networks [46] or depth completion networks [35] for density-based neural rendering. Similarly,
+monocular priors are used to enhance SDF-based neural reconstruction [14, 51] with remarkable performance. While
+emphasizing the guidance in sampling, these approaches
+usually stick to MLPs or dense voxel grids, without being
+able to fully exploit the sparsity of the surface distribution.
+Sparse spatial representations. Sparse spatial representations have been well-studied for 3D data, especially point
+clouds [4,10,30]. Often used data structures are hash maps,
+Octrees [22], or a combination [27]. These data structures
+have been adapted to neural 3D reconstructions and rendering to exploit spatial sparsity, but they either depend on
+high quality 3D input [41], or focus on object-centered reconstruction [5, 12, 24]. Their usage to scene reconstruction
+from monocular images is yet to be explored.
+3. Method
+3.1. Overview
+The input to our method is a sequence of monocular
+images {Ii }. Prior to reconstruction, similar to previous
+works [14, 51], we generate per-image monocular priors including unscaled depth {Di } and normal {Ni } predicted by
+Omnidata [11], and semantic logits {Si } from LSeg [17].
+Afterwards, the system runs in three major stages.
+• Sparse SfM reconstruction [36] and initial depth scale optimization;
+• Direct volumetric fusion for sparse voxel allocation and
+geometric initialization;
+• Differentiable volume rendering and dense CRF smoothing for detail refinement.
+Fig. 4 shows the pipeline of our framework. We will describe these stages in detail after introducing our core data
+structure.
+1. Sparse Reconstruction
+Color
+Globally sparse
+4. Volume Rendering
+Locally dense
+Normal
+Normal
+2. Depth Scale Estimation
+Semantics
+Color
+Depth
+Semantic
+Reprojection Loss
+Depth
+3. Volumetric Fusion
+3D loss
+: cameras
+: 3D points
+Monocular Image Priors
+Reconstructed 3D Cues
+Differentiable Voxel Blocks
+Input
+Monocular RGB images
+Normal
+2D loss
+Figure 4. Illustration of our pipeline. We first use structure-from-motion (SfM) to obtain sparse feature-based reconstruction. With the
+sparse point cloud and covisibility information from SfM, we optimize the scale of predicted monocular depth images (§3.3), and perform
+volumetric fusion to construct a globally sparse locally dense voxel grid (§3.4). After initialization, we perform differentiable volume
+rendering to refine the details (§3.5.1), and apply high dimensional continuous CRFs to finetune normals, colors, and labels (§3.5.3).
+3.2. Sparse-Dense Data Structure
+In order to facilitate multi-view sensor fusion, SDF are
+approximated by truncated SDF (TSDF) that maintain averaged signed distances to surface in a narrow band close
+to the surface [6, 28, 30]. We take advantage of this property and develop a globally sparse locally dense data structure. Global sparsity is attained through allocating voxels
+only around approximate surfaces, which we index using a
+collision-free hash map. Within these sparse voxels we allocate cache-friendly small dense arrays that allow fast indexing and neighbor search storing SDF, color, and optionally
+labels. The data structure is visualized in Fig. 3.
+While similar structures have been used for RGB-D data
+that focus on forward fusion [10, 30], our implementation
+supports both forward fusion via hierarchical indexing, and
+auto-differentiable backward optimization through trilinear
+interpolation, allowing refinement through volume rendering. In addition, SDF gradients can be explicitly computed
+along with SDF queries in the same pass, allowing efficient
+regularization during training.
+Our data structure is akin to any neural networks that
+maps a coordinate x ∈ R3 to a property [47], thus in the
+following sections, we refer to it as a function f . We use
+fθd , fθc , fθs to denote functions that query SDF, color, and
+semantic labels from the data structure, respectively, where
+θd , θc , and θs are properties directly stored at voxels.
+3.3. Depth Scale Optimization
+Our sparse-dense structure requires approximate surface
+initialization at the allocation stage, hence we resort to popular monocular geometry priors [11] also used in recent
+works [51]. Despite the considerable recent improvement of
+monocular depth prediction, there are still several known issues in applications: each image’s depth prediction is scaleambiguous, often with strong distortions. However, to construct an initial structure we require a consistent scale.
+To resolve this, we define a scale function φi per monocular depth image Di to optimize scales and correct distortions. φi is represented by a 2D grid, where each grid point
+stores a learnable scale. A pixel’s scale φi (p) can be obtained through bilinear interpolating its neighbor grid point
+scales. We optimize {φi } to achieve consistent depth across
+frames
+X
+X
+min
+h(φi , φj ) + λ
+g(φi ),
+(1)
+{φi }
+i,j∈Ω
+i
+where h and g impose mutual and binary constraints, and Ω
+is the set of covisible image pairs.
+Previous approaches [15] use fine-grained pixel-wise
+correspondences to construct h via pairwise dense optical
+flow, and introduce a regularizer g per frame. This setup
+is, however, computationally intensive and opposes our initial motivation of developing an efficient system. Instead,
+we resort to supervision from SfM’s [36] sparse reconstruction. It estimates camera poses {Ri , ti }, produces sparse
+reconstruction with 3D points {xk } and their associated 2D
+projections pxk →i at frame {Ii , Di }, and provides the covisible frame pair set Ω. With such, we can define the unary
+constraint g via a reprojection loss
+X
+g(φi ) =
+kdxk →i − Di (pxk →i )φi (pxk →i )k2 ,
+(2)
+xk
+
+dxk →i · pxk →i
+>
+
+1 , Π R>
+i (xk − ti ) ,
+(3)
+Figure 5. Sparse voxel grid (blue) allocation around 3D points
+from unprojection. The grids are adaptive to scenes with different
+overall surface shapes. Ground truth surface mesh are visualized
+for illustration.
+Figure 6. With scale calibration and volumetric fusion, room-scale
+geometry initialization can be achieved from monocular depth
+without any optimization of the voxel grid parameters. The remaining task would be refining noisy regions and prune outliers.
+where Π is the pinhole projection. Similarly, we define binary constraints by minimizing reprojection errors across
+covisible frames:
+X
+kdi→j − Dj (pi→j )φj (pi→j )k2
+h(φi , φj ) =
+3.4.2
+p∈Di
+
+di→j · pi→j
+1
++ kIi (p) − Ij (pi→j )k2 ,
+
+
+x = Π−1 p, Di (p)φi (p) ,
+(4)
+>
+(6)
+, Π(Ri,j x + ti,j ),
+Depth, Color, and Semantic Fusion
+Following classical volumetric fusion scheme [28, 30], we
+project voxels v back to the images to setup voxel-pixel
+associations, and directly optimize voxel-wise properties,
+namely SDF (θd ), color (θc ), and semantic label logits (θs ).
+(5)
+θd (v) = arg min
+d
+3.4. Direct Fusion on Sparse Grid
+3.4.1
+Allocation
+Similar to aforementioned works for online reconstruction [10, 30], the sparse blocks are allocated by the union
+of voxels containing the unprojected points,
+
+
+X = ∪i Xi , Xi = ∪p Dilate (Voxel(p)) , (7)
+
+
+Ri Π−1 (p, Di (p)φi (p)) + ti
+,
+(8)
+Voxel(p) =
+L
+θc (v) = arg min
+c
+θs (v) =
+− dv→i − Di (pv→i )φi (pv→i )
+X
+i
+kc − Ii (pv→i )k2 ,
+(10)
+X
+s∗
+, s∗ = arg min
+ks − Si (pv→i )k2 , (11)
+∗
+ks k
+s
+i
+where the projection v → i is given by Eq. 3. Note by
+definition, only associations with SDF smaller than a truncation bound will be considered, minimizing the effect of
+occlusion. It is worth mentioning that we use a simple L2
+loss for semantic logit instead of entropy losses, as it is considered one of the best practices in label fusion [21]. The
+closed-form solutions of aforementioned voxel-pixel association losses are simply averages. Therefore, with minimal processing time, we can already achieve reasonable
+initial surface reconstruction by classical volumetric SDF
+and color fusion, see Fig. 6.
+3.4.3
+where L is the sparse voxel block size, and the dilate operation grows a voxel block to include its neighbors to tolerate more uncertainty from depth prediction. A dynamic
+collision-free hash map [10] is used to efficiently aggregate
+the allocated voxel blocks. The dense voxel arrays are correspondingly allocated underlying the sparse voxel blocks.
+Fig. 5 shows the surface-adaptive allocation. In contrast
+to popular sparse grids in a fixed bounding box used by neural rendering [12, 24], this allocation strategy is more flexible to various shapes of rooms.
+i
+2
+(9)
+−1
+where Π unprojects a pixel p in frame i from deformed
+depth to a 3D point x, and {Ri,j , ti,j } are relative poses.
+This loss enforces local consistency between visually adjacent frames.
+We use a 24 × 32 2D grid per image, λ = 10−3 , and
+optimize {φi } via RMSprop with a learning rate of 10−2
+for 500 steps.
+X
+De-noising
+Direct fused properties, although being smoothed average
+of observations across frames per voxel, are spatially noisy
+and can result in ill-posed SDF distributions along rays.
+Therefore, we perform a Gaussian blurring for the voxels
+along all the properties. Thanks to the direct representation, with a customized forward sparse convolution followed by a property assignment, we could accomplish the
+filtering without backward optimizations. The effect of the
+de-noising operation can be observed in Fig. 7(a)-(b).
+,
+Similar to related works [49, 51], {x}s are samples combined with ray-based samples around surfaces, and uniform
+samples in the sparse grids. It is worth noting that in an
+explicit SDF voxel grid, fθd and ∇fθd can be jointly computed in the same pass:
+X
+fθd (x) =
+r(x, xi )θd (xi ),
+(17)
+xi ∈Nb(x)
+∇x fθd (x) =
+(a) Init fusion
+(b) De-noised
+(c) Refined
+Figure 7. Comparison between 3 stages of reconstruction: initialization, de-noising, and volume rendering refinement.
+X
+xi ∈Nb(x)
+∇x r(x, xi )θd (xi ),
+(18)
+where θd (xi ) are directly stored SDF values at voxel grid
+points xi , and r is the trilinear interpolation ratio function
+that is a polynomial with closed-form derivatives. This circumvents costly double backward pass for autodiff gradient
+estimation [49, 51], therefore speeds up training both by reducing computation burden and allowing larger batch size.
+3.5. Differentiable Geometry Refinement
+3.5.1
+3.5.3
+Volume Rendering
+We follow MonoSDF [51] to refine geometry using monocular priors. For a pixel p from frame i, we march a ray
+x(t) = ro + t · rd to the sparse voxel grid, sample a sequence of points {xk = x(tk )}, apply volume rendering,
+and minimize the color, depth, and normal losses respectively:
+Lc (θc , θd ) =
+X
+Ld (θd ) =
+X
+Ln (θd ) =
+X
+k
+w(xk )fθc (xk ) − Ii (p) ,
+(12)
+2
+k
+k
+w(xk )tk − (aDi (p) + b)
+,
+(13)
+w(xk )∇fθd (xk ) − Ni (p) ,
+(14)
+w(xk ) = exp −
+X
+j<k
+α(xj )δj
+
+
+1 − exp(−α(xk )δk ) ,
+(15)
+where δi = ti+1 − ti , depth scale a and shift b are estimated
+per minibatch in depth loss with least squares [33], and the
+density α(xk ) = l(fθd (xk )) is converted from SDF with a
+Laplacian density transform from VolSDF [49]. To accelerate, points are sampled in the sparse grid where valid voxel
+blocks have been allocated, and the empty space is directly
+skipped.
+3.5.2
+Regularization
+Eikonal regularization [2] forces SDF gradients to be close
+to 1,
+2
+LEik = (k∇fθd (x)k − 1) .
+(16)
+Differentiable Continuous Semantic CRF
+Through differentiable volume rendering, we have achieved
+fine geometry reconstructions. We want to further sharpen
+the details at the boundaries of objects (e.g., at the intersection of a cabinet and the floor). We resort to CRFs for
+finetuning all the properties, including colors, normals, and
+labels. Unlike conventional CRFs where energy functions
+are defined on discrete nodes, we propose to leverage our
+data structure and devise a continuous CRF to integrate energy over the surface
+Z
+Z Z
+E(S) = ψu (x)dx +
+ψp (xi , xj )dxi dxj , (19)
+S
+S
+S
+where x ∈ S denotes a point on the surface. ψu and ψp denote unary and pairwise Gibbs energy potentials. Following
+Krahenbuhl et al. [16], we adopt the Gaussian edge potential
+
+ψp (xi , xj ) = µprop (xi , xj ) exp −(fi − fj )T Λ(fi − fj ) ,
+(20)
+where µprop denotes a learnable compatibility function of a
+node property (e.g. normal), exp computes the consistency
+strength between nodes from feature distances with the precision matrix Λ. A feature fi concatenates 3D positions, colors, normals, and label logits queried at xi . We approximate
+the integration over the surface with Monte Carlo sampling
+by finding zero-crossings from random camera viewpoints.
+The variational inference of the Gibbs energy potential
+with the mean-field approximation results in a simple update equation
+
+
+X
+ψp (fi , fj )Q(xj ) . (21)
+Q(xi )+ ∝ exp −ψu (xi ) −
+j
+Note that the summation in Eq. 21 is over all the sample
+points and computationally prohibitive. Thus, we use a
+high-dimensional permutohedral lattice convolution [1] to
+accelerate the message passing, driven by our collision-free
+hash map at high dimensions.
+For each of the target properties prop
+∈
+{color,
+normal,
+label},
+we
+define
+a
+loss
+L
+=
+prop
+
+
+Table 1. Train and inference time (per image) analysis on the ScanNet scene 0084. Our approach both trains and evaluates faster.
+Df xprop kQ(xprop ) with f-diveregence, conditioned on
+the remaining properties plus the 3D positions. A joint loss
+is defined to optimize all the properties:
+Method
+Train (h)
+Inference (s)
+NeuS [45]
+VolSDF [49]
+ManhattanSDF [14]
+MonoSDF (MLP) [51]
+MonoSDF (Grid) [51]
+6.64
+8.33
+16.68
+9.89
+4.36
+28.32
+29.64
+28.49
+33.80
+19.13
+Ours
+0.47
+0.25
+normal
+label
+LCRF = λcolor Lcolor
+CRF + λnormal LCRF + λlabel LCRF .
+(22)
+100
+Optimization
+The overalls loss function at refinement stage is
+L = Lc + λd Ld + λn Ln + λEik LEik + LCRF .
+(23)
+We optimize the grid parameters {θd , θc , θs } with RMSProp starting with a learning rate 10−3 , and an exponential
+learning rate scheduler with γ = 0.1.
+4. Experiments
+4.1. Setup
+We follow Manhattan SDF [14] and evaluate on 4 scenes
+from ScanNet [7] and 4 scenes from 7-scenes [13] in evaluation. We use reconstruction’s F-score as the major metric, along with distance metrics (accuracy, completeness),
+precision, and recall. We compare against COLMAP [36],
+NeRF [23], UNISURF [31], NeuS [45], VolSDF [49], Manhattan SDF [14], and MonoSDF [51]. We train MonoSDF
+to obtain output mesh. For the rest of the compared approaches, we reuse reconstructions provided by the authors
+from Manhattan SDF [14], and evaluate them against highresolution ground truth via TSDF fusion. The evaluation
+metric and implementation details are in supplementary.
+For geometric priors, unlike MonoSDF [51] that generates monocular cues from 384 × 384 center crops, we follow DPT [33]’s resizing protocol and adapt Omnidata [11]
+to obtain 480 × 640 full resolution cues.
+In all the experiments, we use a 83 voxel block grid with
+a voxel size 1.5cm. At each step, we randomly sample 1024
+rays per image with a batch size of 64. Due to the reasonable geometric initialization, the loss usually drops drastically within 2 × 103 iterations, and converges at 104 iterations, therefore we terminate training at 104 steps for all
+scenes. Thanks to the efficient data structure, accelerated
+ray marching, and closed-form SDF gradient computation,
+it takes less than 30 mins to reconstruct a scene on a midend computer with an NVIDIA RTX 3060 GPU and an Intel
+i7-11700 CPU.
+Time (s)
+3.5.4
+Ours (query+grad)
+NGP (query)
+NGP (query+MLP)
+NGP (query+MLP+grad)
+101
+10−1
+10−2
+10−3
+10−4
+212
+215
+218
+221
+# Queries
+224
+227
+Figure 8. Query time comparison between ours and NGP-grid,
+lower is better. For end-to-end query, ours is two magnitudes
+faster, and maintains a high efficiency with a large number of point
+query. For the grid query operation itself, ours also have a better
+performance than multiresolution feature grids.
+4.2. Runtime Comparison
+We first profile the SDF query time given a collection
+of points on the aforementioned machine. Specifically, we
+sample k 3 , k ∈ {24 , · · · , 29 } grid points of 3D resolution
+k, query the SDF and their gradients, and compare the run
+time. This is frequently used for Marching Cubes [19] (requiring SDFs) and global Eikonal regularization [2] (requiring SDF gradients). We compare against MonoSDF’s
+NGP-grid backbone that uses the multi-resolution grid from
+Instant-NGP [24]. In this implementation, three steps are
+conducted to obtain required values: query from the feature
+grid; SDF inference from an MLP; SDF grad computation
+via autograd. In contrast, ours allows its explicit computation in one forward pass, see Eq. 18. Fig. 8 shows the
+breakdown time comparison.
+We also show the training and inference time comparison
+in Table 2. Due to the fine initialization and sparse data
+structure with accelerated ray sampling, our approach can
+complete training in less than half an hour, and allows fast
+rendering of color and depth at inference time.
+Table 2. Quantitative comparison of reconstruction quality. While being much faster, our approach is comparable to the state-of-the-art
+MonoSDF [51] on ScanNet [7] and better on 7-scenes [13].
+ScanNet
+Method
+7-Scenes
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+COLMAP [36]
+NeRF [23]
+UNISURF [31]
+NeuS [45]
+VolSDF [49]
+ManhattanSDF [14]
+MonoSDF (MLP) [51]
+MonoSDF (Grid) [51]
+0.074
+0.605
+0.497
+0.166
+0.378
+0.081
+0.031
+0.034
+0.239
+0.178
+0.167
+0.221
+0.139
+0.099
+0.057
+0.046
+0.602
+0.186
+0.224
+0.296
+0.284
+0.626
+0.783
+0.796
+0.363
+0.302
+0.327
+0.237
+0.330
+0.544
+0.652
+0.711
+0.442
+0.225
+0.265
+0.262
+0.301
+0.581
+0.710
+0.750
+0.069
+0.573
+0.407
+0.151
+0.285
+0.112
+0.097
+0.113
+0.417
+0.321
+0.136
+0.247
+0.140
+0.133
+0.192
+0.100
+0.536
+0.159
+0.195
+0.313
+0.220
+0.351
+0.441
+0.433
+0.202
+0.085
+0.301
+0.229
+0.285
+0.326
+0.311
+0.392
+0.289
+0.083
+0.231
+0.262
+0.246
+0.336
+) Edit  Share
+0.361
+0.411
+Ours (Scale Optim.)
+Ours (+ Volume Rendering)
+Ours (+ CRF)
+0.058
+0.045
+0.042
+0.064
+0.060
+0.056
+0.655
+0.774
+0.751
+0.605
+0.627
+0.714
+0.667
+0.678 Chris Choy
+0.710
+0.140
+0.136
+0.081
+0.079
+0.367
+0.417
+0.436
+0.462
+0.450
+0.475
+0.409
+0.433
+0.454
+0.080
+(22/11/09 0.151
+11:47:15)
+F-score ↑
+4.3. Reconstruction Comparison
+The comparison of reconstruction accuracy can be seen
+in Table 2. We can see that our approach achieves high
+accuracy at initialization that surpasses various baselines.
+With volume rendering and CRF refinement, it reaches
+comparable accuracy to the state-of-the-art MonoSDF [51]
+on ScanNet scenes, and achieves better results on 7-scenes.
+The last three rows serve as the ablation study, showing a
+major gain from volume rendering followed by a minor refinement gain from CRF.
+We also demonstrate qualitative scene-wise geometric
+Figure 10. Control experiments of the CRF modules’ impact to
+reconstruction in Fig. 2, and zoomed-in details in Fig. 9. e-4 final reconstruction quality on scene 0084, see Eq. 22.
+It is observable that while achieving similar global completeness, our method enhances details thanks to the adapCreated with on Weights & Biases.
+tion quality. Colors, on the other hand, have a lower impact
+tive voxel grid and direct SDF mapping from coordinates to
+https://wandb.ai/nvr-ai-algo/ash-recon/reports/-22-11-09-11-47-15---VmlldzoyOTQzODM4?
+mostly due to the prevalent appearance of motion blurs and
+voxels.
+accessToken=chl9zch5p00hn3y1ora6rvoghcfut9dx746iu20ln68dlj9iwy5wj77pf2lhu3yk
+exposure changes in the benchmark dataset. The same reason also affects feature-based SfM and monocular depth estimate and leads to reduced performance of our approach on
+certain sequences, see supplementary. We plan to incorporate more advanced semi-dense reconstruction [42, 43] for
+robust depth prior estimate.
+5. Conclusion
+(a) MonoSDF-MLP
+(b) MonoSDF-Grid
+(c) Ours
+Figure 9. Detail comparisons between our method and current
+state-of-the-art neural implicit method MonoSDF [51]. We preserve better geometry details while being faster.
+The control experiments of CRF’s incorporated properties are visualized in Fig. 10, where we see that semantic
+labels and normals have the highest impact on reconstruc-
+We propose an efficient monocular scene reconstruction
+system. Without an MLP, our model is built upon a differentiable globally sparse and locally dense data structure
+allocated around approximate surfaces. We develop a scale
+calibration algorithm to align monocular depth priors for
+fast geometric initialization, and apply direct refinement of
+voxel-level SDF and colors using differentiable rendering.
+We further regularize the voxel-wise properties with a highdimensional continuous CRF that jointly refines color, geometry, and semantics in 3D. Our method is 10× faster in
+training and 100× faster in inference, while achieving similar reconstruction accuracy to state-of-the-art.
+1/2
+References
+[1] Andrew Adams, Jongmin Baek, and Myers Abraham Davis.
+Fast high-dimensional filtering using the permutohedral lattice. In Computer graphics forum, volume 29, pages 753–
+762. Wiley Online Library, 2010. 2, 7
+[2] Matan Atzmon and Yaron Lipman. Sal: Sign agnostic learning of shapes from raw data. In CVPR, pages 2565–2574,
+2020. 3, 6, 7
+[3] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In ICCV, pages 5855–5864, 2021. 3
+[4] Christopher Choy, JunYoung Gwak, and Silvio Savarese. 4d
+spatio-temporal convnets: Minkowski convolutional neural
+networks. In CVPR, pages 3075–3084, 2019. 3
+[5] Ronald Clark. Volumetric bundle adjustment for online photorealistic scene capture. In CVPR, pages 6124–6132, 2022.
+3
+[6] Brian Curless and Marc Levoy. A volumetric method for
+building complex models from range images. In Proceedings
+of the 23rd annual conference on Computer graphics and
+interactive techniques, pages 303–312, 1996. 3, 4
+[7] Angela Dai, Angel X Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias Nießner. Scannet:
+Richly-annotated 3d reconstructions of indoor scenes. In
+CVPR, pages 5828–5839, 2017. 2, 7, 8, 13
+[8] Angela Dai, Matthias Nießner, Michael Zollhöfer, Shahram
+Izadi, and Christian Theobalt. Bundlefusion: Real-time
+globally consistent 3d reconstruction using on-the-fly surface
+reintegration. ACM TOG, 36(4):1, 2017. 3
+[9] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised NeRF: Fewer views and faster
+training for free. In CVPR, June 2022. 3
+[10] Wei Dong, Yixing Lao, Michael Kaess, and Vladlen Koltun.
+Ash: A modern framework for parallel spatial hashing in 3d
+perception. IEEE TPAMI, 2022. 1, 3, 4, 5
+[11] Ainaz Eftekhar, Alexander Sax, Jitendra Malik, and Amir
+Zamir. Omnidata: A scalable pipeline for making multitask mid-level vision datasets from 3d scans. In ICCV, pages
+10786–10796, 2021. 1, 2, 3, 4, 7, 11
+[12] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In CVPR, pages
+5501–5510, 2022. 1, 3, 5
+[13] Ben Glocker, Shahram Izadi, Jamie Shotton, and Antonio
+Criminisi. Real-time rgb-d camera relocalization. In International Symposium on Mixed and Augmented Reality (ISMAR). IEEE, October 2013. 7, 8, 14
+[14] Haoyu Guo, Sida Peng, Haotong Lin, Qianqian Wang,
+Guofeng Zhang, Hujun Bao, and Xiaowei Zhou. Neural 3d
+scene reconstruction with the manhattan-world assumption.
+In CVPR, pages 5511–5520, 2022. 1, 2, 3, 7, 8, 11, 12, 13
+[15] Johannes Kopf, Xuejian Rong, and Jia-Bin Huang. Robust consistent video depth estimation. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 1611–1621, 2021. 4
+[16] Philipp Krähenbühl and Vladlen Koltun. Efficient inference in fully connected crfs with gaussian edge potentials.
+NeurIPS, 24, 2011. 2, 6
+[17] Boyi Li, Kilian Q Weinberger, Serge Belongie, Vladlen
+Koltun, and Rene Ranftl. Language-driven semantic segmentation. In ICLR, 2022. 2, 3
+[18] Zhengqi Li, Tali Dekel, Forrester Cole, Richard Tucker,
+Noah Snavely, Ce Liu, and William T Freeman. Learning
+the depths of moving people by watching frozen people. In
+CVPR, pages 4521–4530, 2019. 3
+[19] William E Lorensen and Harvey E Cline. Marching cubes:
+A high resolution 3d surface construction algorithm. ACM
+siggraph computer graphics, 21(4):163–169, 1987. 3, 7, 11
+[20] David G Lowe. Distinctive image features from scaleinvariant keypoints. International journal of computer vision, 60(2):91–110, 2004. 11
+[21] John McCormac, Ronald Clark, Michael Bloesch, Andrew
+Davison, and Stefan Leutenegger. Fusion++: Volumetric
+object-level slam. In 2018 international conference on 3D
+vision (3DV), pages 32–41. IEEE, 2018. 5
+[22] Donald Meagher. Geometric modeling using octree encoding. Computer graphics and image processing, 19(2):129–
+147, 1982. 3
+[23] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 1,
+2, 3, 7, 8, 13
+[24] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989,
+2022. 1, 3, 5, 7
+[25] Raul Mur-Artal, Jose Maria Martinez Montiel, and Juan D
+Tardos. Orb-slam: a versatile and accurate monocular slam
+system. IEEE Trans. Robotics, 31(5):1147–1163, 2015. 11
+[26] Zak Murez, Tarrence van As, James Bartolozzi, Ayan Sinha,
+Vijay Badrinarayanan, and Andrew Rabinovich. Atlas: Endto-end 3d scene reconstruction from posed images. In ECCV,
+pages 414–431. Springer, 2020. 3
+[27] Ken Museth, Jeff Lait, John Johanson, Jeff Budsberg, Ron
+Henderson, Mihai Alden, Peter Cucka, David Hill, and Andrew Pearce. Openvdb: an open-source data structure and
+toolkit for high-resolution volumes. In Acm siggraph 2013
+courses, pages 1–1. 2013. 3
+[28] Richard A Newcombe, Shahram Izadi, Otmar Hilliges,
+David Molyneaux, David Kim, Andrew J Davison, Pushmeet
+Kohi, Jamie Shotton, Steve Hodges, and Andrew Fitzgibbon.
+Kinectfusion: Real-time dense surface mapping and tracking. In 2011 10th IEEE international symposium on mixed
+and augmented reality, pages 127–136. Ieee, 2011. 3, 4, 5,
+11
+[29] Richard A Newcombe, Steven J Lovegrove, and Andrew J
+Davison. Dtam: Dense tracking and mapping in real-time.
+In 2011 international conference on computer vision, page
+ICCV. IEEE, 2011. 3
+[30] Matthias Nießner, Michael Zollhöfer, Shahram Izadi, and
+Marc Stamminger. Real-time 3d reconstruction at scale us-
+ing voxel hashing. ACM TOG, 32(6):1–11, 2013. 2, 3, 4,
+5
+[31] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+fields for multi-view reconstruction. In ICCV, pages 5589–
+5599, 2021. 1, 7, 8, 13
+[32] Adam Paszke, Sam Gross, Soumith Chintala, Gregory
+Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Alban Desmaison, Luca Antiga, and Adam Lerer. Automatic
+differentiation in pytorch. In NIPS-W, 2017. 2
+[33] René Ranftl, Alexey Bochkovskiy, and Vladlen Koltun. Vision transformers for dense prediction. In ICCV, pages
+12179–12188, 2021. 1, 2, 3, 6, 7, 11
+[34] René Ranftl, Katrin Lasinger, David Hafner, Konrad
+Schindler, and Vladlen Koltun. Towards robust monocular
+depth estimation: Mixing datasets for zero-shot cross-dataset
+transfer. IEEE TPAMI, 2020. 3
+[35] Barbara Roessle, Jonathan T Barron, Ben Mildenhall,
+Pratul P Srinivasan, and Matthias Nießner. Dense depth priors for neural radiance fields from sparse input views. In
+CVPR, pages 12892–12901, 2022. 3
+[36] Johannes L Schonberger and Jan-Michael Frahm. Structurefrom-motion revisited. In CVPR, pages 4104–4113, 2016. 1,
+2, 3, 4, 7, 8, 11, 13
+[37] P. Stotko, S. Krumpen, M. B. Hullin, M. Weinmann, and R.
+Klein. SLAMCast: Large-Scale, Real-Time 3D Reconstruction and Streaming for Immersive Multi-Client Live Telepresence. IEEE Transactions on Visualization and Computer
+Graphics, 25(5):2102–2112, May 2019. 2
+[38] Edgar Sucar, Shikun Liu, Joseph Ortiz, and Andrew J Davison. imap: Implicit mapping and positioning in real-time. In
+ICCV, pages 6229–6238, 2021. 3
+[39] Jiaming Sun, Xi Chen, Qianqian Wang, Zhengqi Li, Hadar
+Averbuch-Elor, Xiaowei Zhou, and Noah Snavely. Neural
+3d reconstruction in the wild. In ACM SIGGRAPH 2022
+Conference Proceedings, pages 1–9, 2022. 3
+[40] Jiaming Sun, Yiming Xie, Linghao Chen, Xiaowei Zhou, and
+Hujun Bao. Neuralrecon: Real-time coherent 3d reconstruction from monocular video. In CVPR, pages 15598–15607,
+2021. 1, 3
+[41] Towaki Takikawa, Joey Litalien, Kangxue Yin, Karsten
+Kreis, Charles Loop, Derek Nowrouzezahrai, Alec Jacobson,
+Morgan McGuire, and Sanja Fidler. Neural geometric level
+of detail: Real-time rendering with implicit 3D shapes. 2021.
+3
+[42] Zachary Teed and Jia Deng. Droid-slam: Deep visual
+slam for monocular, stereo, and rgb-d cameras. NeurIPS,
+34:16558–16569, 2021. 8, 12
+[43] Zachary Teed, Lahav Lipson, and Jia Deng. Deep patch visual odometry. arXiv preprint arXiv:2208.04726, 2022. 8,
+12
+[44] Shubham Tulsiani, Tinghui Zhou, Alexei A Efros, and Jitendra Malik. Multi-view supervision for single-view reconstruction via differentiable ray consistency. In CVPR, pages
+2626–2634, 2017. 3
+[45] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+arXiv preprint arXiv:2106.10689, 2021. 1, 2, 3, 7, 8, 13
+[46] Yi Wei, Shaohui Liu, Yongming Rao, Wang Zhao, Jiwen Lu,
+and Jie Zhou. Nerfingmvs: Guided optimization of neural
+radiance fields for indoor multi-view stereo. In ICCV, pages
+5610–5619, 2021. 3
+[47] Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany,
+Shiqin Yan, Numair Khan, Federico Tombari, James Tompkin, Vincent Sitzmann, and Srinath Sridhar. Neural fields in
+visual computing and beyond. In Computer Graphics Forum,
+volume 41, pages 641–676. Wiley Online Library, 2022. 4
+[48] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan.
+Mvsnet: Depth inference for unstructured multi-view stereo.
+In ECCV, pages 767–783, 2018. 1, 3
+[49] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman.
+Volume rendering of neural implicit surfaces. NeurIPS,
+34:4805–4815, 2021. 1, 2, 3, 6, 7, 8, 13
+[50] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. NeurIPS, 33:2492–2502, 2020. 3
+[51] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction.
+2022. 1, 2, 3, 4, 6, 7, 8, 11, 12, 13, 14
+[52] Xiaoshuai Zhang, Sai Bi, Kalyan Sunkavalli, Hao Su, and
+Zexiang Xu. Nerfusion: Fusing radiance fields for largescale scene reconstruction. In CVPR, pages 5449–5458,
+2022. 3
+[53] Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3d:
+A modern library for 3d data processing. arXiv preprint
+arXiv:1801.09847, 2018. 11
+[54] Zihan Zhu, Songyou Peng, Viktor Larsson, Weiwei Xu, Hujun Bao, Zhaopeng Cui, Martin R Oswald, and Marc Pollefeys. Nice-slam: Neural implicit scalable encoding for slam.
+In CVPR, pages 12786–12796, 2022. 3
+Supplementary
+Depth Scaler Optimization
+Our system adopts monocular depth map predictions
+from off-the-shelf networks [11] using the DPT backbone [33]. However, these depth priors are not metric and
+the scale of each depth prediction is independent of others.
+Thus, we define the unary and binary (pairwise) constraints
+to estimate consistent metric scales.
+Unary Constraints
+the main paper. Formally, we define
+
+jxk
+DilateR (x) = xi | xi −
+L
+
+0
+≤R ,
+(27)
+where L is the voxel block size, xi are quantized grid points
+around, and R is the dilation radius. We use R = 2 (corresponding to two 83 voxel blocks) to account for the uncertainty around surfaces from the monocular depth prediction.
+Correspondingly, we use µ = L · R to truncate the SDF.
+The volumetric fusion runs at 50 Hz with RGB and SDF
+fusion, and at 30 Hz when additional semantic labels are
+also fused, hence serves as a fast initializer.
+Our pipeline relies on COLMAP’s [36] sparse reconstruction for unary constraints. COLMAP supports sparse reconstruction with or without poses. Both modes start with
+SIFT [20] feature extraction and matching. The with pose
+mode then runs triangulation, while the without pose mode
+runs bundle adjustment to also estimate poses. With pose
+mode usually runs within 1 min, while the without pose
+mode often finishes around 5 mins for a sequence with
+several hundred frames. While our system integrates both
+modes, for fair comparison on the benchmark datasets, we
+adopt the with pose mode in quantitative experiments where
+ground truth poses from RGB-D SLAM are given. Fig. 11
+shows the sparse reconstructions from the with pose mode.
+We followed [51]’s hyperparameter choices and used
+λd = 0.1, λn = 0.05 for the rendering loss.
+For regularizors, we obtained from hyper param sweeps
+from the 0084 scene of ScanNet that λeik = 0.1 for the
+Eikonal loss, and λcolor = 10−3 , λlabel = 0.1, λnormal = 1
+for the CRF loss.
+In Gaussian kernels, we fix σsdf = 1.0 and σcolor = 0.1.
+Binary Constraints
+We follow the evaluation protocols defined by ManhattanSDF [14], where the metrics between predicted point set
+P and ground truth point set P ∗ are
+Once we have camera poses and the sparse reconstruction,
+we can define which triangulated feature points are visible
+to which cameras (covisible). Thus, we can create pairwise
+reprojection constraints between frames, similar to loop closures in the monocular SLAM context [25]. We directly retrieve the feature matches obtained by COLMAP, and setup
+such frame-to-frame covsibility constraints. Fig. 11 shows
+the covisibility matrices, where entry (i, j) indicates the
+number of covisible features between frame i and j. They
+are used to establish binary constraints between frames for
+refining monocular depth scales.
+Hyper Parameters
+Evaluation
+Metrics
+D(p, p∗ ) = kp − p∗ k,
+∗
+(28)
+∗
+DAcc (P, P ) = mean min
+D(p, p ),
+∗
+∗
+p∈P
+p ∈P
+DComp (P, P ∗ ) = mean
+min D(p, p∗ ),
+p∗ ∈P ∗ p∈P
+
+
+
+Prec(P, P ∗ ) = mean
+min
+D(p, p∗ ) < T ,
+∗
+∗
+p∈P
+p ∈P
+
+
+∗
+∗ 
+Recall(P, P ) = mean
+min
+D(p,
+p
+)
+<
+T
+,
+∗
+∗
+p ∈P
+F-score(P, P ∗ ) =
+p∈P
+2 · Prec · Recall
+,
+Prec + Recall
+(29)
+(30)
+(31)
+(32)
+(33)
+where T = 5cm.
+Volumetric Fusion
+Eq. 9 in the main paper shows the least squares to initialize voxel-wise SDF. The more detailed implementation
+follows KinectFusion [28], where a truncation function ψ is
+used to reject associations.
+X
+
+θd (v) = arg min
+kd − ψ do , µ k2 ,
+(24)
+d
+i
+o
+d = dv→i − Di (pv→i )φi (pv→i ),
+ψ(x, µ) = min(x, µ),
+(25)
+(26)
+where µ is the truncation distance. µ is associated with the
+Dilate operation and voxel block resolution in Eq. 7-8 in
+Generation of P and P ∗
+We follow previous works [14, 51] that applied TSDF refusion to generate P for evaluation: use Marching Cubes [19]
+to generate a global mesh; render depth map from mesh at
+selected viewpoints to crop points out of viewports; apply
+TSDF fusion [53] to obtain the final mesh and point cloud
+P . For fairness, we render depth at the resolution 480 × 640
+for all approaches to be consistent with input (in contrast to
+MonoSDF that uses 968 × 1296 in their released evaluation
+code), and conduct refusion to a voxel grid at the resolution
+of 1cm.
+0050
+0084
+0580
+0616
+Figure 11. Sparse reconstruction and covisibility matrix of ScanNet scenes selected by ManhattanSDF [14].
+To ensure the same surface coverage, we generate
+ground truth P ∗ at the same viewpoints with the same image and voxel resolution, only replacing rendered depth
+with ground truth depth obtained by an RGB-D sensor.
+Additional Experimental Results
+Ablation of scale optimization
+To further illustrate the necessity of per-frame scale optimization, we show quantitative reconstruction results without scale optimization in Table 3. Here, volumetric fusion
+is conducted on an estimated single scale factor across all
+frames between monocular depth and SfM, resulting in poor
+initial reconstruction.
+Table 3. Initial reconstruction results without per-frame scale optimization (c. f. Ours (Init) in Table 4-5.)
+Acc ↓ Comp ↓ Prec ↑ Recall ↑ F-score ↑
+ScanNet
+0.42
+0.19
+0.13
+0.28
+0.17
+7-Scenes
+0.36
+0.12
+0.19
+0.43
+0.26
+Fusion and Refinement
+Please see video supplementary for the incremental fusion
+from scaled depth, and the refinement stage that converges
+to general shapes within several hundred steps.
+Scene-wise statistics on ScanNet
+We use reconstructed mesh provided by ManhattanSDF [14], and report scene-wise statistics in Table 4.
+Reconstructions and corresponding ground truths are
+shown in Fig. 12.
+It is observable that our reconstructions have low error at
+fine details with rich textures (e.g. 0050, furniture in 0580),
+but problems exist at texture-less regions (e.g. walls in 0580
+and 0616, floor in 0084) due to the inaccurate scale estimate from sparse reconstructions. We plan to improve
+these by learning-based sparse or semi-dense reconstruction, e.g. [42, 43].
+Scene-wise statistics on 7-scenes
+The reconstructed mesh and scene-wise statistics are not
+provided by ManhattanSDF [14] for COLMAP, NeRF,
+UNISURF, NeuS, VolSDF, and ManhattanSDF. Therefore,
+we reuse their reported averages as a reference in the main
+paper. Here we report scene-wise numbers in Table 5 for
+the state-of-the-art MonoSDF [51] and our method. Reconstructions and ground truths are in Fig. 13.
+7-scenes have challenging camera motion patterns and
+complex scenes, thus the overlaps between viewpoints are
+small, leading to reduced accuracy for all the approaches.
+Although our approach produces less accurate floor and
+walls with fewer features, it achieves fine reconstruction of
+desktop objects in general.
+Table 4. Scene-wise quantitative results on ScanNet.
+0050
+Method
+0084
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+COLMAP [36]
+NeRF [23]
+UNISURF [31]
+NeuS [45]
+VolSDF [49]
+ManhattanSDF [14]
+MonoSDF (MLP) [51]
+MonoSDF (Grid) [51]
+0.049
+0.704
+0.432
+0.091
+0.071
+0.032
+0.025
+0.027
+0.129
+0.081
+0.087
+0.103
+0.071
+0.050
+0.054
+0.045
+0.707
+0.215
+0.309
+0.528
+0.600
+0.849
+0.865
+0.854
+0.531
+0.517
+0.482
+0.455
+0.599
+0.755
+0.713
+0.764
+0.607
+0.304
+0.376
+0.489
+0.599
+0.800
+0.781
+0.807
+0.032
+0.733
+0.594
+0.231
+0.507
+0.029
+0.036
+0.035
+0.121
+0.248
+0.242
+0.365
+0.165
+0.041
+0.048
+0.043
+0.807
+0.157
+0.218
+0.159
+0.163
+0.822
+0.700
+0.796
+0.577
+0.213
+0.339
+0.090
+0.247
+0.784
+0.646
+0.774
+0.673
+0.181
+0.266
+0.115
+0.196
+0.802
+0.672
+0.785
+Ours (Init)
+Ours (+Rendering)
+Ours (+CRF)
+0.034
+0.026
+0.026
+0.051
+0.044
+0.044
+0.775
+0.875
+0.880
+0.684
+0.780
+0.788
+0.727
+0.825
+0.832
+0.047
+0.038
+0.043
+0.048
+0.046
+0.043
+0.705
+0.762
+0.750
+0.725
+0.748
+0.780
+0.715
+0.755
+0.765
+0580
+Method
+0616
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+COLMAP [36]
+NeRF [23]
+UNISURF [31]
+NeuS [45]
+VolSDF [49]
+ManhattanSDF [14]
+MonoSDF (MLP) [51]
+MonoSDF (Grid) [51]
+0.169
+0.402
+0.392
+0.206
+0.197
+0.205
+0.025
+0.039
+0.300
+0.186
+0.192
+0.275
+0.183
+0.240
+0.040
+0.048
+0.204
+0.125
+0.131
+0.167
+0.197
+0.149
+0.867
+0.718
+0.112
+0.216
+0.188
+0.114
+0.189
+0.124
+0.759
+0.661
+0.145
+0.159
+0.155
+0.135
+0.193
+0.135
+0.809
+0.688
+0.045
+0.582
+0.571
+0.137
+0.736
+0.058
+0.039
+0.033
+0.406
+0.196
+0.148
+0.140
+0.129
+0.066
+0.087
+0.048
+0.689
+0.249
+0.237
+0.330
+0.176
+0.684
+0.702
+0.815
+0.230
+0.263
+0.300
+0.289
+0.284
+0.513
+0.488
+0.646
+0.344
+0.256
+0.265
+0.308
+0.217
+0.586
+0.576
+0.721
+Ours (Init)
+Ours (+Rendering)
+Ours (+CRF)
+0.076
+0.070
+0.046
+0.059
+0.080
+0.050
+0.574
+0.760
+0.707
+0.582
+0.636
+0.682
+0.578
+0.692
+0.694
+0.076
+0.046
+0.057
+0.097
+0.070
+0.080
+0.566
+0.699
+0.659
+0.427
+0.504
+0.504
+0.487
+0.586
+0.571
+0050
+0084
+0580
+0616
+Figure 12. Error heatmap from our reconstruction (first row) to groundtruth (second row) for each scene in ScanNet [7]. Points are
+colorized by distance error ranging from 0 (blue) to 5cm (red) to its nearest neighbor in ground truth. Points with error larger than 5cm are
+regarded as outliers and colored in black.
+Table 5. Scene-wise quantitative results on 7-Scenes.
+chess
+Method
+heads
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+MonoSDF (MLP) [51]
+MonoSDF (Grid) [51]
+0.160
+0.113
+0.390
+0.143
+0.250
+0.324
+0.132
+0.267
+0.173
+0.293
+0.068
+0.133
+0.188
+0.099
+0.586
+0.305
+0.353
+0.327
+0.440
+0.315
+Ours (Init)
+Ours (+Rendering)
+Ours (+CRF)
+0.164
+0.147
+0.147
+0.108
+0.111
+0.107
+0.278
+0.367
+0.368
+0.350
+0.389
+0.391
+0.310
+0.378
+0.379
+0.186
+0.074
+0.071
+0.083
+0.062
+0.057
+0.288
+0.543
+0.559
+0.401
+0.568
+0.626
+0.335
+0.555
+0.591
+office
+Method
+fire
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+Acc ↓
+Comp ↓
+Prec ↑
+Recall ↑
+F-score ↑
+MonoSDF (MLP) [51]
+MonoSDF (Grid) [51]
+0.087
+0.147
+0.128
+0.077
+0.338
+0.539
+0.236
+0.471
+0.278
+0.503
+0.075
+0.061
+0.064
+0.081
+0.592
+0.564
+0.522
+0.504
+0.555
+0.533
+Ours (Init)
+Ours (+Rendering)
+Ours (+CRF)
+0.168
+0.180
+0.164
+0.068
+0.081
+0.080
+0.398
+0.330
+0.340
+0.483
+0.400
+0.400
+0.436
+0.362
+0.367
+0.087
+0.160
+0.162
+0.058
+0.072
+0.068
+0.503
+0.426
+0.474
+0.616
+0.445
+0.490
+0.554
+0.435
+0.482
+chess
+heads
+office
+fire
+Figure 13. Error heatmap from our reconstruction (first row) to groundtruth (second row) for each scene in 7-Scenes [13]. The colorization
+is the same as Fig. 12.

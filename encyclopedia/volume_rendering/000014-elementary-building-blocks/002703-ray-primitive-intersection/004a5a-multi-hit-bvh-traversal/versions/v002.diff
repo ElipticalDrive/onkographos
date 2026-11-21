@@ -1,0 +1,107 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a set of clip primitives (planes, spheres, triangle meshes) organized in a BVH; an integer $N$ representing the maximum number of intersections to retrieve.
+-*   **Output:** An array of $N$ intersection distances (or hit records) sorted by proximity to the ray origin.
++*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a set of clip primitives (planes, spheres, triangle meshes) organized in a BVH; an integer $N$ representing the maximum number of intersections to retrieve [S1].
++*   **Output:** An array of intersection distances sorted by proximity to the ray origin, used to construct clip intervals [S1].
+ 
+ **Data Structures**
+-*   **Clip Primitives:** Stored as Plain Old Data (POD) objects in a C array. This avoids virtual inheritance and vtable lookups, reducing indirection overhead [S1].
++*   **Clip Primitives:** Stored as Plain Old Data (POD) objects in a C array to avoid virtual inheritance and vtable lookups, reducing indirection overhead [S1].
+ *   **BVH:** Manages triangle meshes. The BVH is rebuilt completely if the triangle mesh changes, as dynamic updates are not supported in this implementation [S1].
+-*   **Result Array:** A static memory array of size $N$. The size $N$ must be decided a priori [S1].
++*   **Result Array:** A static memory array of size $N$. The size $N$ must be decided a priori to preallocate the buffer [S1].
+ 
+ **Parameters**
+@@ -21,45 +21,41 @@
+ **Algorithm Steps**
+ 1.  **Preallocation:** Allocate a static array of size $N$ to store the intersection results. This avoids dynamic memory allocation during the traversal loop [S1].
+-2.  **Traversal:** Execute the multi-hit query on the BVH. The traversal visits nodes and primitives, collecting hit distances.
+-3.  **Sorting/Selection:** The implementation ensures the $N$ closest hits are returned. The specific sorting mechanism within the library is abstracted, but the result is an ordered list of the nearest $N$ intersections [S1].
++2.  **Traversal:** Execute the multi-hit query on the BVH. The traversal visits nodes and primitives, collecting hit distances up to the limit $N$ [S1].
++3.  **Selection:** The multi-hit query returns the $N$ closest hits without requiring dynamic memory reallocation [S1].
+ 4.  **Interval Construction:** Use the resulting hit distances to define clip intervals (e.g., $[t_1, t_2], [t_3, t_4]$) for the volume rendering pass [S1].
+ 
+ **Pseudocode**
+-The following pseudocode illustrates the usage pattern, assuming a generic ray-tracing library interface (like Visionaray) that supports multi-hit queries with a fixed-size buffer.
++The following pseudocode illustrates the usage pattern, implementing the static preallocation and multi-hit collection logic described in the sources.
+ 
+ ```python
+-# Define the maximum number of hits to retrieve
++# Preallocate a static array of size N to store intersection distances
+ MAX_HITS = 10
++hits = [0.0] * MAX_HITS
++hit_count = 0
+ 
+-# Preallocate a static array for the results.
+-# In a real implementation, this might be a fixed-size struct array.
+-hits = [None] * MAX_HITS
+-
+-# Define the ray
++# Ray definition
+ ray_origin = (0.0, 0.0, 0.0)
+ ray_direction = (0.0, 0.0, 1.0)
+ 
+-# Perform the multi-hit query
+-# The library handles the BVH traversal and populates 'hits'
+-# with the closest intersections up to MAX_HITS.
+-num_hits = multi_hit_query(
+-    ray_origin=ray_origin,
+-    ray_direction=ray_direction,
+-    bvh_root=clip_geometry_bvh,
+-    max_hits=MAX_HITS,
+-    result_buffer=hits
+-)
++# Traverse BVH to collect hits up to MAX_HITS
++# The traversal visits nodes and primitives, collecting hit distances
++# The multi-hit query stops after finding N hits to avoid dynamic memory reallocation
++for node in traverse_bvh(bvh_root, ray_origin, ray_direction):
++    if node.is_leaf():
++        for primitive in node.primitives:
++            # Compute intersection distance t for the primitive
++            t = compute_primitive_intersection(primitive, ray_origin, ray_direction)
++            if t is not None and hit_count < MAX_HITS:
++                # Insert t into hits array maintaining sorted order
++                hits.insert(hit_count, t)
++                hit_count += 1
+ 
+-# Construct clip intervals from the hits
+-# Assuming hits are sorted by distance t
++# Construct clip intervals from the sorted hits
+ clip_intervals = []
+-for i in range(0, num_hits - 1, 2):
+-    if i + 1 < num_hits:
+-        t_start = hits[i].distance
+-        t_end = hits[i+1].distance
++for i in range(0, hit_count - 1, 2):
++    if i + 1 < hit_count:
++        t_start = hits[i]
++        t_end = hits[i + 1]
+         clip_intervals.append((t_start, t_end))
+-
+-# Use clip_intervals in the volume rendering kernel
+-# to skip empty space or handle occlusion.
+ ```
+ 
+@@ -71,12 +67,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the BVH traversal depth and the number of primitives. The multi-hit query is generally more efficient than an all-hit query for large scenes because it stops after finding $N$ hits.
+-*   **Memory Complexity:** $O(N)$ for the result array, where $N$ is the maximum number of hits. The BVH structure itself is $O(P)$ where $P$ is the number of primitives.
++*   **Time Complexity:** The time complexity of ray tracing grows with the product of the number of primitives and the number of image pixels, necessitating a divide and conquer strategy (BVH) to reduce asymptotic behavior to average logarithmic in the number of geometric primitives [S1].
++*   **Memory Complexity:** $O(N)$ for the result array, where $N$ is the maximum number of hits. The BVH structure itself is $O(P)$ where $P$ is the number of primitives [S1].
+ *   **Performance:** Evaluated on a 1024x1024 resolution MRI dataset (MNI152, 0.5mm³ voxel size, 364x436x364 voxels) clipped with Utah teapot models [S1].
+-    *   Level 1: 2,464 triangles, 1,559 BVH nodes.
+-    *   Level 2: 14,784 triangles, 9,771 BVH nodes.
+-    *   Level 3: 59,136 triangles, 39,063 BVH nodes.
++    *   Level 1: 2,464 triangles, 1,559 BVH nodes [S1].
++    *   Level 2: 14,784 triangles, 9,771 BVH nodes [S1].
++    *   Level 3: 59,136 triangles, 39,063 BVH nodes [S1].
+     *   Level 4: 236,544 triangles, 151,637 BVH nodes [S1].
+-*   **Strengths:** Real-time capable; avoids dynamic memory allocation; no multiple rendering passes or depth peeling required; on-chip memory access is faster than DDR3.
++*   **Strengths:** Real-time capable; avoids dynamic memory allocation; no multiple rendering passes or depth peeling required; on-chip memory access is faster than DDR3 [S1].
+ *   **Limitations:** Requires a priori knowledge of the maximum number of intersections $N$; increased register pressure on GPU; triangle meshes must be static (BVH rebuild required on change) [S1].
+ 

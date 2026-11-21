@@ -1,0 +1,36 @@
+# Sparse View and Initialization Methods
+
+Also called: Sparse-View NeRF, Initialization Priors
+
+## Overview
+This family addresses the instability, artifacts (floaters, blurring), and slow convergence inherent in Neural Radiance Field (NeRF) optimization when trained on sparse input views (typically fewer than 50–100 images) [S1, S2, unofficial]. It solves the problem of insufficient geometric constraints by introducing external priors—such as geometry scaffolds, visibility maps, or semantic masks—to regularize the implicit density and color fields. What sets these methods apart from standard NeRF training is the explicit injection of structural or visibility information before or during optimization, rather than relying solely on photometric consistency across views.
+
+## Shared principles
+All methods in this family share the goal of stabilizing the optimization of the implicit function $\sigma(\mathbf{x})$ and $\mathbf{c}(\mathbf{x}, \mathbf{d})$ under data scarcity. They achieve this by:
+1.  **External Priors:** Utilizing data outside the raw RGB images (e.g., point clouds, depth maps, semantic masks, or inter-view consistency) to constrain the solution space [S1, S2, unofficial].
+2.  **Regularization:** Adding loss terms or initialization biases that penalize physically implausible density distributions (e.g., floaters in empty space) or inconsistent geometry [S1, unofficial].
+3.  **Initialization:** Starting the NeRF parameters closer to a valid solution than random initialization, often by mapping geometric priors into the implicit space [S1, unofficial].
+
+## Subtopics
+
+### [NeRFVS](8667-nerfvs.md)
+A method for indoor scene free view synthesis that uses a geometry scaffold (pseudo depth maps) and view coverage information to guide optimization. It differs from siblings by specifically targeting the "free navigation" extrapolation problem in indoor scenes using a robust depth loss and dynamic view-coverage-based regularization, rather than static semantic weights. Choose this when robust 3D geometry is required for novel views in indoor environments with low-texture regions.
+
+### [ViP-NeRF](8690-vip-nerf.md)
+A training procedure that introduces visibility priors to supervise density estimation, computed directly from input images using planar scanned volumes without pre-training. It differs from siblings by estimating pixel visibility between main and secondary views to regularize density, avoiding the need for pre-trained geometric priors or diffusion models. Choose this when input views are sparse (<50–100) and you need to prevent artifacts caused by insufficient data without external geometric models.
+
+### [Sparse NeRF Reconstruction with Geometric and Semantic Initialization](8779-sparse-nerf-reconstruction-with-geometric-and-semantic-initi.md)
+A method that stabilizes implicit function learning by anchoring the scene structure with COLMAP-generated point clouds and refining optimization weights via Mask R-CNN semantic segmentation. It differs from siblings by mapping dense geometric priors into the implicit space and applying differentiated semantic weights to accelerate convergence and reduce initial MSE. Choose this for sparse view reconstruction (15–20 images) where semantic category information is available and high-fidelity detail preservation is critical.
+
+### SAX-NeRF
+A neural field method for sparse-view CBCT reconstruction, used as a baseline in DiffVox evaluations [S1, unofficial]. It is a traditional CBCT reconstruction algorithm, used as a baseline in DiffVox evaluations [S1, unofficial]. Runtime: 10.3 h for 60-view reconstruction on RTX A6000 [S1, unofficial]. SAX-NeRF achieves higher PSNR than DiffVox for 30-60 views but is prohibitively slow for real-world deployment compared to DiffVox [S1, unofficial].
+
+### VISAR-Guided Sparse Frame Selection
+A frame selection strategy that identifies maximally informative, non-redundant viewpoints from raw video footage to serve as input for NeRF training, addressing the challenge of sparse acquisition in field phenotyping [S2, unofficial]. Sharpness metric ($\psi_{sharp}$): Laplacian variance of the frame [S2, unofficial]. Motion metric ($\psi_{motion}$): Optical-flow magnitude [S2, unofficial]. Coverage metric ($\psi_{coverage}$): Penalizes geometric redundancy via inter-frame homography differences, calculated as the Frobenius norm of the difference matrix $\|\Delta H\|_F$ [S2, unofficial]. Score each frame $v_t$ using the weighted sum: $s(v_t) = 0.4 \times \text{sharpness} + 0.3 \times \text{motion} + 0.3 \times \text{coverage}$ [S2, unofficial]. Apply temporal non-maximum suppression with window size $\omega = 5$ to the scored frames [S2, unofficial].
+
+## Background
+The challenge of sparse-view NeRF reconstruction has been a significant focus in computer vision, as standard NeRF requires dense sampling to resolve the ambiguity between density and color. Early works like [NeRFVS](8667-nerfvs.md) and [ViP-NeRF](8690-vip-nerf.md) introduced geometric and visibility priors to mitigate floaters and blurring in indoor and general scenes. Concurrently, methods like [Sparse NeRF Reconstruction with Geometric and Semantic Initialization](8779-sparse-nerf-reconstruction-with-geometric-and-semantic-initi.md) leveraged traditional computer vision pipelines (COLMAP, Mask R-CNN) to bootstrap the implicit representation. In medical imaging, methods like [SAX-NeRF](#sax-nerf) have been evaluated for sparse-view CBCT reconstruction, highlighting the trade-off between reconstruction quality and computational cost [S1, unofficial]. In agricultural robotics, [VISAR-Guided Sparse Frame Selection](#visar-guided-sparse-frame-selection) addresses the practical constraint of limited data acquisition in field phenotyping [S2, unofficial].
+
+## Sources
+[S1] Differentiable Voxel-based X-ray Rendering Improves Sparse-View 3D CBCT Reconstruction, https://doi.org/10.48550/arxiv.2411.19224, fetched 2026-10-26 (unofficial)
+[S2] Uncertainty-Aware 3D Plant Reconstruction from Sparse Video Frames Using Neural Radiance Fields, https://doi.org/10.21203/rs.3.rs-9904108/v1, fetched 2026-10-26 (unofficial)

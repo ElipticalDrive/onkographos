@@ -1,0 +1,190 @@
+--- v001.md
++++ v002.md
+@@ -4,18 +4,16 @@
+ 
+ ## Overview
+-MLPRender_Fea_WeakView is a neural rendering module that predicts RGB color from input features, view directions, and positions using a Multi-Layer Perceptron (MLP) with positional encoding applied to features and view direction, but NOT position [S1, unofficial]. It sets itself apart from standard NeRF MLPs by decoupling the density prediction from the view-dependent color prediction, allowing the density to be derived from a specific feature channel while maintaining view-independence for the volumetric properties [S1, unofficial].
++MLPRender_Fea_WeakView is a neural rendering module that predicts RGB color from input features and view directions using a Multi-Layer Perceptron (MLP) with Gaussian positional encoding applied to features and view directions, but not positions [S1, unofficial]. It builds on the parent module [MLPRender_Fea](2414-mlprender-fea.md) by explicitly processing view directions alongside features through a dedicated encoding and concatenation step [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Inputs: `pts` (positions, unused in color prediction), `viewdirs` (view directions), `features` (input feature vectors).
+-- Outputs: `rgb` (predicted RGB color values).
++- Inputs: `pts` (positions, listed but unused in the forward pass), `viewdirs` (view directions), `features` (input feature vectors) [S1, unofficial].
++- Outputs: `rgb` (predicted RGB color values) [S1, unofficial].
+ 
+ **Data Structures and Layout:**
+-The module is implemented as a neural network with specific layer dimensions derived from input parameters [S1, unofficial]:
+-- Parameters: `inChanel` (input feature dimension), `viewpe=6` (view positional encoding degree), `feape=6` (feature positional encoding degree), `featureC=128` (internal feature channel count, though not explicitly used in the forward pass formula, it defines the context).
+-- Internal Channel Calculations:
+-  - `self.in_mlpC = (2 * feape + 1) * inChanel`
+-  - `self.mid_mlpC = (2 * viewpe) * 3`
+-- Layers: `layer1`, `layer2`, `layer3` (Linear layers), `gaussian` (Gaussian activation function).
++The module is implemented as a neural network with layer dimensions derived from input parameters [S1, unofficial]:
++- Parameters: `inChanel` (input feature dimension), `viewpe=6` (view positional encoding degree), `feape=6` (feature positional encoding degree), `featureC=128` (internal feature channel count, noted but not explicitly used in the forward pass formula) [S1, unofficial].
++- Internal Channel Calculations: `self.in_mlpC = (2 * feape + 1) * inChanel` and `self.mid_mlpC = (2 * viewpe) * 3` [S1, unofficial].
++- Layers: `layer1`, `layer2`, `layer3` (Linear layers), `gaussian` (Gaussian activation function) [S1, unofficial].
+ 
+ **Gaussian Activation Formula:**
+@@ -23,18 +21,18 @@
+ $$ out = \exp(-0.5 \cdot (x - \mu)^2 / \sigma^2) $$
+ Where:
+-- $\sigma = 0.1$ (fixed parameter `opt.arch.gaussian.sigma`).
+-- $\mu$ is the mean of the linearly transformed input along the last axis.
++- $\sigma = 0.1$ (fixed parameter `opt.arch.gaussian.sigma`) [S1, unofficial].
++- $\mu$ is the mean of the linearly transformed input along the last axis [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. Initialize `indata` by applying Gaussian positional encoding to `features`: `indata = fea_gaussian_init(features)`.
+-2. Initialize `middata` by applying Gaussian positional encoding to `viewdirs`: `middata = [view_gaussian_init(viewdirs)]`.
+-3. Pass `indata` through `layer1`: `x = layer1(indata)`.
+-4. Apply Gaussian activation to `x`: `x = gaussian(x)`.
+-5. Append `x` to `middata`.
+-6. Concatenate all tensors in `middata` along the last dimension: `x = cat(middata, dim=-1)`.
+-7. Pass `x` through `layer2`: `x = layer2(x)`.
+-8. Apply Gaussian activation to `x`: `x = gaussian(x)`.
+-9. Pass `x` through `layer3` to get raw RGB values: `x = layer3(x)`.
+-10. Apply sigmoid activation to `x` to bound RGB values: `rgb = sigmoid(x)`.
++1. Initialize `indata` by applying Gaussian positional encoding to `features`: `indata = fea_gaussian_init(features)` [S1, unofficial].
++2. Initialize `middata` by applying Gaussian positional encoding to `viewdirs`: `middata = [view_gaussian_init(viewdirs)]` [S1, unofficial].
++3. Pass `indata` through `layer1`: `x = self.layer1(indata)` [S1, unofficial].
++4. Apply Gaussian activation to `x`: `x = self.gaussian(x)` [S1, unofficial].
++5. Append `x` to `middata` [S1, unofficial].
++6. Concatenate all tensors in `middata` along the last dimension: `x = torch.cat(middata, dim=-1)` [S1, unofficial].
++7. Pass `x` through `layer2`: `x = self.layer2(x)` [S1, unofficial].
++8. Apply Gaussian activation to `x`: `x = self.gaussian(x)` [S1, unofficial].
++9. Pass `x` through `layer3` to get raw RGB values: `x = self.layer3(x)` [S1, unofficial].
++10. Apply sigmoid activation to `x` to bound RGB values: `rgb = torch.sigmoid(x)` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -42,5 +40,4 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+ class GaussianActivation(nn.Module):
+@@ -50,8 +47,24 @@
+ 
+     def forward(self, x):
+-        # Calculate mean along the last axis
+         mu = x.mean(dim=-1, keepdim=True)
+-        # Apply Gaussian formula: exp(-0.5 * (x - mu)^2 / sigma^2)
+         return torch.exp(-0.5 * ((x - mu) ** 2) / (self.sigma ** 2))
++
++def fea_gaussian_init(features, feape):
++    # [G] Standard positional encoding expansion to match (2*feape+1)*inChanel dimensions
++    out = [features]
++    for i in range(feape):
++        freq = 2 ** i
++        out.append(torch.sin(freq * features * 3.14159265))
++        out.append(torch.cos(freq * features * 3.14159265))
++    return torch.cat(out, dim=-1)
++
++def view_gaussian_init(viewdirs, viewpe):
++    # [G] Standard positional encoding expansion to match (2*viewpe)*3 dimensions
++    out = []
++    for i in range(viewpe):
++        freq = 2 ** i
++        out.append(torch.sin(freq * viewdirs * 3.14159265))
++        out.append(torch.cos(freq * viewdirs * 3.14159265))
++    return torch.cat(out, dim=-1)
+ 
+ class MLPRender_Fea_WeakView(nn.Module):
+@@ -60,13 +73,8 @@
+         self.in_mlpC = (2 * feape + 1) * inChanel
+         self.mid_mlpC = (2 * viewpe) * 3
+-        
+-        # Linear layers
+-        self.layer1 = nn.Linear(self.in_mlpC, 128) # [G] 128 is a typical hidden size, not explicitly given but required for layer2 input
+-        self.layer2 = nn.Linear(self.mid_mlpC, 128) # [G] 128 is a typical hidden size
+-        self.layer3 = nn.Linear(128, 3) # Output 3 channels for RGB
+-        
++        self.layer1 = nn.Linear(self.in_mlpC, 128)
++        self.layer2 = nn.Linear(self.mid_mlpC, 128)
++        self.layer3 = nn.Linear(128, 3)
+         self.gaussian = GaussianActivation(sigma=0.1)
+-        
+-        # Weight initialization range 0.1 [S1, unofficial]
+         for m in self.modules():
+             if isinstance(m, nn.Linear):
+@@ -76,59 +84,19 @@
+ 
+     def forward(self, features, viewdirs):
+-        # Step 1: Encode features
+-        indata = fea_gaussian_init(features)
+-        
+-        # Step 2: Encode view directions
+-        middata = [view_gaussian_init(viewdirs)]
+-        
+-        # Step 3: First MLP layer
++        indata = fea_gaussian_init(features, feape)
++        middata = [view_gaussian_init(viewdirs, viewpe)]
+         x = self.layer1(indata)
+-        
+-        # Step 4: Gaussian activation
+         x = self.gaussian(x)
+-        
+-        # Step 5: Append to middata
+         middata.append(x)
+-        
+-        # Step 6: Concatenate
+         x = torch.cat(middata, dim=-1)
+-        
+-        # Step 7: Second MLP layer
+         x = self.layer2(x)
+-        
+-        # Step 8: Gaussian activation
+         x = self.gaussian(x)
+-        
+-        # Step 9: Third MLP layer (RGB)
+         x = self.layer3(x)
+-        
+-        # Step 10: Sigmoid activation
+         rgb = torch.sigmoid(x)
+-        
+         return rgb
+-
+-def fea_gaussian_init(features):
+-    # [G] Standard positional encoding for features
+-    # Assuming features shape [B, N, inChanel]
+-    # Apply Gaussian PE as defined in context
+-    # This is a placeholder for the specific implementation of fea_gaussian_init
+-    # which likely involves mean subtraction and Gaussian scaling similar to the activation
+-    # or standard sinusoidal PE. Given the name, it likely uses the Gaussian activation logic.
+-    # For implementation completeness, we assume it returns a tensor of shape [B, N, in_mlpC]
+-    # The exact internal logic of fea_gaussian_init is not provided in the source notes.
+-    # [G] Assuming it expands features using Gaussian positional encoding
+-    return features # Placeholder, actual implementation required
+-
+-def view_gaussian_init(viewdirs):
+-    # [G] Standard positional encoding for view directions
+-    # Assuming viewdirs shape [B, N, 3]
+-    # Returns tensor of shape [B, N, 2*viewpe*3]
+-    # The exact internal logic of view_gaussian_init is not provided in the source notes.
+-    # [G] Assuming it expands viewdirs using Gaussian positional encoding
+-    return viewdirs # Placeholder, actual implementation required
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- The position `pts` is an input but is not used in the color prediction path [S1, unofficial].
++- The position `pts` is listed as an input parameter but is not used in the color prediction path per the source code logic [S1, unofficial].
+ - The Gaussian activation depends on the mean of the input, which can be sensitive to input scaling [S1, unofficial].
+ - Weight initialization range is small (0.1), which may require careful learning rate tuning [S1, unofficial].
+@@ -143,12 +111,12 @@
+ - Measured Performance: Not given in the sources.
+ - Scaling: Not given in the sources.
+-- Strengths and Limitations: Decouples density and color, allowing for view-independent volumetric properties [S1, unofficial].
+-- When to use: When view-independent density is desired [S1, unofficial].
+-- When not to use: When strong view-dependent density is required.
++- Strengths and Limitations: Not given in the sources.
++- When to use: Not given in the sources.
++- When not to use: Not given in the sources.
+ 
+ ## Background
+-- Origin: The method is part of the Joint-TensoRF project [S1, unofficial].
++- Origin: Not given in the sources.
+ - History: Not given in the sources.
+-- Usage: Used in neural rendering pipelines [S1, unofficial].
++- Usage: Not given in the sources.
+ 
+ ## Sources

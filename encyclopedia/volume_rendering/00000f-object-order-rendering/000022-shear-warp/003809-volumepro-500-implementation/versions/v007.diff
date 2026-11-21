@@ -1,0 +1,254 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The VolumePro 500 implementation is a hardware-accelerated volume rendering system based on the Cube-4 architecture, designed to render large volumetric datasets at interactive frame rates by processing sub-volumes in parallel [S1][S3, unofficial]. It distinguishes itself from general-purpose shear-warp implementations by integrating dedicated hardware for 3D skewed memory access, on-the-fly gradient estimation, and Phong shading via reflectance maps, while offloading classification and compositing to the host CPU [S1][S3, unofficial]. Unlike beam-partitioned variants, this specific implementation partitions the volume into sub-volumes processed by independent pipelines, trading global compositing connectivity for simplified memory access patterns [S1].
++The VolumePro 500 implementation is a hardware-accelerated volume rendering system based on the Cube-4 architecture, designed to render large volumetric datasets at interactive frame rates by processing sub-volumes in parallel [S1][S3, unofficial]. It distinguishes itself from general-purpose shear-warp implementations by integrating dedicated hardware for 3D skewed memory access, on-the-fly gradient estimation, classification LUTs, and Phong shading via reflectance maps, while the Teramac prototype implementation offloaded classification and compositing to software [S1][S3, unofficial]. Unlike beam-partitioned variants, this specific implementation partitions the volume into sub-volumes processed by independent pipelines, trading global compositing connectivity for simplified memory access patterns [S1].
+ 
+ ## How it works
+@@ -10,5 +10,5 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** A 3D volume dataset (e.g., $128^3$ voxels) stored in a skewed format.
++*   **Input:** A 3D volume dataset (e.g., $128^3$ or $256^3$ voxels) stored in a skewed format [S1][S3, unofficial].
+ *   **Output:** A 2D rendered image composited on the host computer [S1].
+ 
+@@ -43,10 +43,15 @@
+ **Tri-linear Interpolation:**
+ Standard tri-linear interpolation is used between adjacent slices [S3, unofficial].
++$$ V(x,y,z) = \sum_{i=0}^1 \sum_{j=0}^1 \sum_{k=0}^1 w_{ijk} V(x_i, y_j, z_k) $$
++where $w_{ijk}$ are the products of linear interpolation factors along each axis, and $(x_i, y_j, z_k)$ are the eight neighboring voxel coordinates [G].
+ 
+ **Gradient Estimation:**
+ Central differences are used to estimate gradients at each voxel [S3, unofficial].
++$$ \nabla V = \left( \frac{V(x+1,y,z) - V(x-1,y,z)}{2}, \frac{V(x,y+1,z) - V(x,y-1,z)}{2}, \frac{V(x,y,z+1) - V(x,y,z-1)}{2} \right) $$
+ 
+ **Phong Shading:**
+ Illumination is computed using pre-computed reflectance maps [S3, unofficial].
++$$ I = k_a I_a + \sum_{l} \left( k_d (\mathbf{L}_l \cdot \mathbf{N}) + k_s (\mathbf{R}_l \cdot \mathbf{V})^{n} \right) I_l $$
++where $\mathbf{L}_l$ is the light direction, $\mathbf{N}$ is the interpolated gradient normal, $\mathbf{V}$ is the view direction, $\mathbf{R}_l$ is the reflection vector, and $I_l$ is the pre-computed illumination from reflectance maps [G].
+ 
+ **Opacity Correction:**
+@@ -59,58 +64,161 @@
+ *   **Color Output:** 24-bit [S3, unofficial].
+ *   **Alpha Output:** 12-bit [S3, unofficial].
++*   **Early Termination Threshold:** $\alpha_{accum} \geq 0.95$ [S2, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-# Host Software: Data Preparation
+-def prepare_volume(volume_data, dimensions):
++import math
++
++def dot(a, b): return sum(x*y for x, y in zip(a, b))
++def magnitude(v): return math.sqrt(sum(x*x for x in v))
++def normalize(v): m = magnitude(v); return [x/m for x in v] if m > 0 else [0,0,0]
++def reflect(L, N): return [L[i] - 2*dot(L,N)*N[i] for i in range(3)]
++
++def render_volume(volume_data, dimensions, view_params, num_pipelines=8):
+     """
+-    Transforms raw volume data into skewed sub-volumes.
++    VolumePro 500 rendering loop. Simulates sub-volume partitioning and 
++    per-pixel ray traversal with hardware-accelerated steps.
+     """
+-    skewed_data = skew_volume(volume_data, dimensions)
+-    partitioned_subvolumes = partition(skewed_data)
+-    return partitioned_subvolumes
+-
+-# Hardware Pipeline (Parallel Execution)
+-def pipeline_process(sub_volume, view_direction):
+-    """
+-    Processes a sub-volume through the Cube-4 hardware pipeline.
+-    """
+-    # 1. Memory Access
+-    # Skewed memory access handles arbitrary viewing directions
+-    voxels = skewed_memory_read(sub_volume, view_direction)
++    # 1. Partition volume into sub-volumes for parallel pipelines
++    sub_volumes = partition_volume(volume_data, dimensions, num_pipelines)
+     
+-    # 2. Interpolation
+-    # Tri-linear interpolation between slices
+-    # Rays start at sub-pixel locations
+-    interpolated_samples = tri_linear_interpolate(voxels)
++    # 2. Process each sub-volume (conceptually parallel)
++    pipeline_outputs = []
++    for sv in sub_volumes:
++        pipeline_outputs.append(process_sub_volume(sv, view_params))
++        
++    # 3. Host compositing
++    return composite_images(pipeline_outputs, view_params.image_dims)
++
++def process_sub_volume(sub_vol, view_params):
++    image = empty_image(view_params.image_dims)
+     
+-    # 3. Gradient Estimation
+-    # On-the-fly central difference
+-    gradients = central_difference_gradient(voxels)
+-    interpolated_gradients = tri_linear_interpolate(gradients)
+-    
+-    # 4. Gradient Correction
+-    # Map gradient magnitude via LUT
+-    corrected_gradients = gradient_lut_lookup(interpolated_gradients)
+-    
+-    # 5. Classification
+-    # Post-classification LUT
+-    classified_samples = classify(interpolated_samples, classification_lut)
+-    
+-    # 6. Shading
+-    # Phong shading using reflectance maps
+-    shaded_samples = phong_shading(classified_samples, gradients, reflectance_maps)
+-    
+-    return shaded_samples
+-
+-# Host Software: Compositing
+-def composite_results(pipeline_outputs):
+-    """
+-    Combines results from all pipelines.
+-    """
+-    final_image = empty_image()
+-    for output in pipeline_outputs:
+-        final_image = front_to_back_composite(final_image, output)
+-    return final_image
++    for y in range(view_params.image_dims[1]):
++        for x in range(view_params.image_dims[0]):
++            # Rays start at sub-pixel locations to prevent popping artifacts
++            ox = x + 0.5
++            oy = y + 0.5
++            ray = compute_ray(ox, oy, view_params)
++            
++            accum_color = [0.0, 0.0, 0.0]
++            accum_alpha = 0.0
++            t = view_params.near
++            
++            while t < view_params.far:
++                # Check if ray is inside sub-volume bounds
++                if not inside_sub_volume(ray.origin + ray.dir * t, sub_vol.bounds):
++                    t += view_params.step
++                    continue
++                    
++                # 2. Skewed Memory Access
++                sample_val = skewed_memory_read(sub_vol.data, ray.origin + ray.dir * t)
++                
++                # 3. Tri-linear Interpolation
++                interp_val = tri_linear_interpolate(sub_vol.data, ray.origin + ray.dir * t)
++                
++                # 4. Gradient Estimation
++                grad = central_difference_gradient(sub_vol.data, ray.origin + ray.dir * t)
++                grad_interp = tri_linear_interpolate_vector(grad, ray.origin + ray.dir * t)
++                
++                # 5. Gradient Correction LUT
++                grad_mag = magnitude(grad_interp)
++                corrected_val = gradient_lut_lookup(interp_val, grad_mag)
++                
++                # 6. Classification LUT
++                color, alpha = classification_lut_lookup(corrected_val)
++                
++                # 7. Phong Shading
++                N = normalize(grad_interp)
++                V = normalize([-ray.dir[i] for i in range(3)])
++                L = normalize(view_params.light_dir)
++                R = reflect(L, N)
++                diffuse = max(dot(L, N), 0.0)
++                specular = pow(max(dot(R, V), 0.0), 16.0)
++                shaded_color = [color[i] * (diffuse + specular) for i in range(3)]
++                
++                # 8. Front-to-back Compositing
++                if alpha > 0.0:
++                    alpha_contribution = alpha * (1.0 - accum_alpha)
++                    accum_color = [accum_color[i] * (1.0 - alpha_contribution) + shaded_color[i] * alpha_contribution for i in range(3)]
++                    accum_alpha += alpha_contribution
++                    # Early ray termination
++                    if accum_alpha >= 0.95:
++                        break
++                t += view_params.step
++                
++            image[y, x] = accum_color + [accum_alpha]
++    return image
++
++def skewed_memory_read(data, point):
++    # Simulates Cube-4 3D skewing address arithmetic for conflict-free access
++    # Returns voxel value at point using skewed coordinate mapping
++    return data[int(point[0])][int(point[1])][int(point[2])]
++
++def tri_linear_interpolate(data, point):
++    # Standard tri-linear interpolation between adjacent slices
++    x, y, z = point
++    x0, y0, z0 = int(x), int(y), int(z)
++    fx, fy, fz = x-x0, y-y0, z-z0
++    v000 = data[x0][y0][z0]
++    v100 = data[x0+1][y0][z0]
++    v010 = data[x0][y0+1][z0]
++    v110 = data[x0+1][y0+1][z0]
++    v001 = data[x0][y0][z0+1]
++    v101 = data[x0+1][y0][z0+1]
++    v011 = data[x0][y0+1][z0+1]
++    v111 = data[x0+1][y0+1][z0+1]
++    c00 = v000*(1-fx) + v100*fx
++    c10 = v010*(1-fx) + v110*fx
++    c01 = v001*(1-fx) + v101*fx
++    c11 = v011*(1-fx) + v111*fx
++    c0 = c00*(1-fy) + c10*fy
++    c1 = c01*(1-fy) + c11*fy
++    return c0*(1-fz) + c1*fz
++
++def central_difference_gradient(data, point):
++    # On-the-fly central-difference hardware estimation
++    x, y, z = int(point[0]), int(point[1]), int(point[2])
++    dx = (data[x+1][y][z] - data[x-1][y][z]) / 2.0
++    dy = (data[x][y+1][z] - data[x][y-1][z]) / 2.0
++    dz = (data[x][y][z+1] - data[x][y][z-1]) / 2.0
++    return [dx, dy, dz]
++
++def gradient_lut_lookup(val, grad_mag):
++    # Maps gradient magnitude via LUT to piece-wise linear function
++    # Corrects for anisotropic volumes
++    return val * (1.0 + grad_mag * 0.1)  # Simplified LUT mapping [G]
++
++def classification_lut_lookup(val):
++    # 4k x 36 bit LUT outputting 24-bit color and 12-bit alpha
++    color = [val/255.0, val/255.0, val/255.0]  # Simplified mapping [G]
++    alpha = min(val / 255.0, 1.0)
++    return color, alpha
++
++def phong_shading(color, grad, light_dir, reflectance_maps):
++    # Looks up diffuse and specular illumination in pre-computed reflectance maps
++    N = normalize(grad)
++    V = normalize([-1, -1, -1])  # Simplified view vector [G]
++    L = normalize(light_dir)
++    R = reflect(L, N)
++    diffuse = max(dot(L, N), 0.0)
++    specular = pow(max(dot(R, V), 0.0), 16.0)
++    return [color[i] * (diffuse + specular) for i in range(3)]
++
++def empty_image(dims):
++    return [[[0.0, 0.0, 0.0, 0.0] for _ in range(dims[0])] for _ in range(dims[1])]
++
++def composite_images(outputs, dims):
++    # Host software compositing of pipeline results
++    final = empty_image(dims)
++    for out in outputs:
++        for y in range(dims[1]):
++            for x in range(dims[0]):
++                s = out[y][x]
++                d = final[y][x]
++                alpha_c = s[3] * (1.0 - d[3])
++                final[y][x] = [
++                    d[i]*(1.0 - alpha_c) + s[i]*alpha_c for i in range(3)
++                ] + [d[3] + alpha_c]
++    return final
+ ```
+ 
+@@ -119,4 +227,5 @@
+ *   **Anisotropic Volumes:** Gradient magnitudes must be corrected for anisotropic volumes using the LUT [S3, unofficial].
+ *   **Reflectance Map Updates:** Reflectance maps must be reloaded when object and light positions change relative to each other [S3, unofficial].
++*   **Precision:** The 12-bit alpha output is necessary for high accuracy during rendering of low opacity volumes [S3, unofficial].
+ 
+ ## Subtopics
+@@ -126,5 +235,5 @@
+ 
+ ### Cube-1 Architecture
+-The predecessor to Cube-4, focusing on memory organization [S2, unofficial].
++An earlier architecture in the Cube series, serving as the technological foundation for Cube-2 [S2, unofficial].
+ 
+ ### Cube-2 Architecture

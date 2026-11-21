@@ -1,0 +1,504 @@
+A physically-based path tracer in safe Rust, USD-native, capable of rendering production datasets like Moana and ALab. - Add Sampler trait and thread Owen-scrambled Sobol QMC end-to-end by doubleailes · Pull Request #100 · doubleailes/Crust
+
+Add Sampler trait and thread Owen-scrambled Sobol QMC end-to-end by doubleailes · Pull Request #100 · doubleailes/Crust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+doubleailes
+commented
+Jul 21, 2026
+Copy link
+Copy Markdown
+Owner
+Introduces crates/sampler, a new workspace crate providing a Sampler
+trait with two implementations:
+SobolSampler backed by sobol_burley (Burley 2020 Owen-scrambled
+Sobol), seeded per pixel via a PCG-style hash of (x, y, frame) so
+neighbouring pixels get decorrelated sequences.
+RngSampler fallback for tests.
+Every per-ray random draw now routes through this sampler:
+Material::scatter / scatter_importance take &mut dyn Sampler;
+every impl (lambert, metal, dielectric, cook_torrance, disney,
+emissive, blinn_phong, openpbr) rewired accordingly.
+brdf::sample_vndf_ggx / sample_vndf_ggx_aniso_local take explicit
+[f32; 2] uniforms instead of pulling their own random2().
+Camera::get_ray takes an explicit lens_uv; DOF now uses a
+concentric-disk warp instead of rejection sampling.
+LightList::sample takes the sampler for its uniform light pick.
+Volume free-flight and Henyey-Greenstein phase sampling in the tracer
+consume dimensions from the sampler.
+ray_color constructs a per-pixel Sobol sampler, calls
+advance_bounce at each recursion (no-op today, hook for future
+padded-Sobol reseeding), and threads it into every downstream call.
+Deletes the old crates/crust-core/src/sampler.rs (per-hit-reallocated
+4x4 CMJ grid — was reused across all NEE lights per bounce and thus
+correlated their samples).
+Adds explicit-sample warp helpers to utils::common
+(cosine_hemisphere, uniform_sphere, uniform_ball,
+concentric_disk) alongside the existing RNG-based variants, which
+remain in use for scene generation in world.rs.
+All 20 existing unit tests pass, plus 3 new tests covering Sobol
+determinism, per-pixel decorrelation, and sample-interval bounds.
+Co-Authored-By: Claude Opus 4.7 noreply@anthropic.com
+Claude-Session: https://claude.ai/code/session_01PNo1F6xLKMZZNMTWECFFsR
+Add Sampler trait and thread Owen-scrambled Sobol QMC end-to-end
+…
+a24797a
+```
+Introduces `crates/sampler`, a new workspace crate providing a `Sampler`
+trait with two implementations:
+
+- `SobolSampler` backed by `sobol_burley` (Burley 2020 Owen-scrambled
+  Sobol), seeded per pixel via a PCG-style hash of `(x, y, frame)` so
+  neighbouring pixels get decorrelated sequences.
+- `RngSampler` fallback for tests.
+
+Every per-ray random draw now routes through this sampler:
+
+- `Material::scatter` / `scatter_importance` take `&mut dyn Sampler`;
+  every impl (lambert, metal, dielectric, cook_torrance, disney,
+  emissive, blinn_phong, openpbr) rewired accordingly.
+- `brdf::sample_vndf_ggx` / `sample_vndf_ggx_aniso_local` take explicit
+  `[f32; 2]` uniforms instead of pulling their own `random2()`.
+- `Camera::get_ray` takes an explicit `lens_uv`; DOF now uses a
+  concentric-disk warp instead of rejection sampling.
+- `LightList::sample` takes the sampler for its uniform light pick.
+- Volume free-flight and Henyey-Greenstein phase sampling in the tracer
+  consume dimensions from the sampler.
+- `ray_color` constructs a per-pixel Sobol sampler, calls
+  `advance_bounce` at each recursion (no-op today, hook for future
+  padded-Sobol reseeding), and threads it into every downstream call.
+
+Deletes the old `crates/crust-core/src/sampler.rs` (per-hit-reallocated
+4x4 CMJ grid — was reused across all NEE lights per bounce and thus
+correlated their samples).
+
+Adds explicit-sample warp helpers to `utils::common`
+(`cosine_hemisphere`, `uniform_sphere`, `uniform_ball`,
+`concentric_disk`) alongside the existing RNG-based variants, which
+remain in use for scene generation in `world.rs`.
+
+All 20 existing unit tests pass, plus 3 new tests covering Sobol
+determinism, per-pixel decorrelation, and sample-interval bounds.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01PNo1F6xLKMZZNMTWECFFsR
+```
+qodo-code-review
+Bot
+commented
+Jul 21, 2026
+Copy link
+Copy Markdown
+Contributor
+PR Summary by Qodo
+Introduce Sampler trait and Sobol QMC sampling throughout the path tracer
+✨ Enhancement 🧪 Tests ⚙️ Configuration changes 🕐 40+ Minutes
+AI Description
+```
+• Add a new sampler crate with a Sampler trait and Sobol/RNG implementations.
+• Route all per-ray sampling (camera, lights, materials, volumes) through the sampler.
+• Replace ad-hoc RNG/rejection sampling with explicit warps and deterministic 2D uniforms.
+```
+Diagram
+```
+graph TD
+  R(["Renderer"]) --> S["SobolSampler"] --> T["ray_color"] --> M["Material scatter / importance"]
+  T --> C["Camera get_ray"] --> U["utils warps"]
+  T --> L["LightList / Light sampling"] --> M
+  M --> B["BRDF VNDF sampling"] --> U
+
+  subgraph Legend
+    direction LR
+    _entry(["Entry point"]) ~~~ _mod["Core module"] ~~~ _util["Sampling helpers"]
+  end
+```
+Loading
+High-Level Assessment
+The following are alternative approaches to this PR:
+1. Keep RNG for most dimensions; use Sobol only for pixel jitter
+➕ Much smaller API churn; fewer signature changes across materials/BRDFs
+➕ Less risk of exceeding Sobol dimension budget in complex paths
+➖ Leaves major variance sources (BRDF/phase/light sampling) on pure RNG
+➖ Harder to get consistent decorrelation guarantees end-to-end
+2. Sampler with typed dimension layout (e.g., per-bounce struct of named samples)
+➕ Makes dimension usage explicit and stable (e.g., jitter/lens/light/bsdf)
+➕ Easier to audit dimension count and avoid accidental reordering
+➖ More boilerplate and larger refactor than the current trait approach
+➖ Less flexible for materials that need variable numbers of dimensions
+3. Implement padded-Sobol / per-bounce reseeding now
+➕ Avoids the current dim % 256 wrap behavior in deep/complex paths
+➕ More predictable convergence when dimension usage grows
+➖ More complex sampling logic and more tuning needed
+➖ Harder to validate correctness quickly without additional rendering/regression tests
+Recommendation: The PR’s approach (a single Sampler trait threaded through all sampling sites) is the right architectural direction for consistent QMC and decorrelation. The main follow-up worth considering is moving from dim % 256 wrapping to a padded-Sobol or per-bounce reseeding scheme once real scenes approach the dimension limit; the existing advance_bounce() hook is a good forward-compatible seam.
+Files changed (20) +451 / -156
+Enhancement (5) +354 / -80
+camera.rsMake DOF sampling explicit and deterministic via concentric-disk warp +13/-21
+Make DOF sampling explicit and deterministic via concentric-disk warp
+```
+• Changes 'Camera::get_ray' to accept an explicit 'lens_uv' uniform sample and uses a concentric-disk warp instead of rejection sampling. This lets callers drive DOF sampling from the shared 'Sampler' to avoid correlated dimensions.
+```
+crates/crust-core/src/camera.rs
+openpbr.rsThread sampler through OpenPBR lobe selection and microfacet sampling +42/-17
+Thread sampler through OpenPBR lobe selection and microfacet sampling
+```
+• Replaces internal RNG usage for lobe selection, hero-channel selection, and GGX VNDF sampling with sampler-driven uniforms. Updates tests to use 'RngSampler' when calling 'scatter_importance'.
+```
+crates/crust-core/src/material/openpbr.rs
+tracer.rsCreate per-pixel Sobol samplers and thread them through the integrator +46/-35
+Create per-pixel Sobol samplers and thread them through the integrator
+```
+• Replaces CMJ jitter and global RNG usage with a per-pixel 'SobolSampler' and explicit 'start_pixel/start_sample' calls. Updates 'ray_color' to take a sampler, consume sampler dimensions for volume/phase sampling and light sampling, and adds an 'advance_bounce' hook per recursion.
+```
+crates/crust-core/src/tracer.rs
+lib.rsImplement 'Sampler', 'SobolSampler', and 'RngSampler' with tests +204/-0
+Implement 'Sampler', 'SobolSampler', and 'RngSampler' with tests
+```
+• Adds a 'Sampler' trait and a production 'SobolSampler' using Owen-scrambled Sobol (Burley) with per-pixel hashing for decorrelation. Provides an RNG fallback sampler for tests and includes unit tests for determinism, decorrelation, and '[0,1)' bounds.
+```
+crates/sampler/src/lib.rs
+common.rsAdd deterministic sampling warps from explicit uniforms +49/-7
+Add deterministic sampling warps from explicit uniforms
+```
+• Introduces explicit-parameter warps ('cosine_hemisphere', 'uniform_sphere', 'uniform_ball', 'concentric_disk') and rewrites the RNG-based 'random_cosine_direction' to delegate to the explicit cosine-hemisphere warp.
+```
+crates/utils/src/common.rs
+Bug fix (1) +5 / -6
+lambert.rsFix Lambertian scatter to use uniform sphere sampling from the sampler +5/-6
+Fix Lambertian scatter to use uniform sphere sampling from the sampler
+```
+• Replaces prior unit-vector sampling with 'uniform_sphere(sampler.next_2d())' and threads 'Sampler' into the scatter call, ensuring unbiased diffuse perturbation and deterministic sampling under Sobol.
+```
+crates/crust-core/src/material/lambert.rs
+Refactor (10) +77 / -67
+lib.rsRemove legacy CMJ sampler module exports +0/-2
+Remove legacy CMJ sampler module exports
+```
+• Drops the old 'sampler' module and stops re-exporting 'generate_cmj_2d', aligning the public API with the new 'sampler' crate.
+```
+crates/crust-core/src/lib.rs
+light.rsThread 'Sampler' into 'LightList::sample' +7/-3
+Thread 'Sampler' into 'LightList::sample'
+```
+• Updates light list sampling to use 'sampler.next_1d()' (with a bounds guard) rather than global RNG, enabling deterministic light selection under QMC.
+```
+crates/crust-core/src/light.rs
+blinn_phong.rsUpdate Blinn-Phong material to accept a 'Sampler' +2/-0
+Update Blinn-Phong material to accept a 'Sampler'
+```
+• Extends the 'Material::scatter' signature to take '&mut dyn Sampler' (currently unused by this material) to comply with the new sampling interface.
+```
+crates/crust-core/src/material/blinn_phong.rs
+brdf.rsMake VNDF GGX sampling consume explicit 2D uniforms +4/-6
+Make VNDF GGX sampling consume explicit 2D uniforms
+```
+• Refactors 'sample_vndf_ggx' and 'sample_vndf_ggx_aniso_local' to accept '[f32; 2]' instead of pulling random numbers internally, allowing the integrator/materials to control dimension allocation from the sampler.
+```
+crates/crust-core/src/material/brdf.rs
+cook_torrance.rsRoute Cook-Torrance sampling through the new 'Sampler' +12/-34
+Route Cook-Torrance sampling through the new 'Sampler'
+```
+• Threads '&mut dyn Sampler' into 'scatter' and 'scatter_importance', replacing direct RNG usage with 'next_1d/next_2d' and deterministic cosine-hemisphere warps for diffuse sampling.
+```
+crates/crust-core/src/material/cook_torrance.rs
+dielectric.rsUse sampler-driven Fresnel/refraction decisions and GGX uniforms +6/-3
+Use sampler-driven Fresnel/refraction decisions and GGX uniforms
+```
+• Updates dielectric materials to pull random decisions and VNDF GGX uniforms from the 'Sampler', ensuring deterministic, per-pixel decorrelated behavior under Sobol.
+```
+crates/crust-core/src/material/dielectric.rs
+disney.rsSwitch Disney importance sampling to explicit cosine-hemisphere warps +17/-4
+Switch Disney importance sampling to explicit cosine-hemisphere warps
+```
+• Updates Disney’s importance sampling to consume sampler-provided 2D uniforms via 'cosine_hemisphere', and updates the trait method signatures to accept '&mut dyn Sampler'.
+```
+crates/crust-core/src/material/disney.rs
+emissive.rsPlumb 'Sampler' through Emissive material APIs +8/-1
+Plumb 'Sampler' through Emissive material APIs
+```
+• Updates 'scatter' and 'scatter_importance' signatures to accept a sampler (unused), keeping the material trait consistent across implementations.
+```
+crates/crust-core/src/material/emissive.rs
+material.rsExtend 'Material' trait to require sampler-driven randomness +11/-9
+Extend 'Material' trait to require sampler-driven randomness
+```
+• Adds '&mut dyn Sampler' to 'scatter' and 'scatter_importance' so all randomness is sourced from the active sampler. Updates the default 'scatter_importance' implementation accordingly.
+```
+crates/crust-core/src/material/material.rs
+metal.rsDrive metal fuzz jitter from sampler dimensions +10/-5
+Drive metal fuzz jitter from sampler dimensions
+```
+• Replaces RNG-based unit-sphere jitter with 'uniform_ball' driven by sampler dimensions (2D + 1D), keeping fuzz sampling deterministic and decorrelated per pixel/sample.
+```
+crates/crust-core/src/material/metal.rs
+Other (4) +15 / -3
+Cargo.tomlAdd 'sobol_burley' workspace dependency +2/-1
+Add 'sobol_burley' workspace dependency
+```
+• Registers 'sobol_burley' as a workspace dependency alongside 'rand' so the new sampler crate can share versions via workspace resolution.
+```
+Cargo.toml
+Cargo.tomlDepend on the new 'sampler' crate +1/-0
+Depend on the new 'sampler' crate
+```
+• Adds a path dependency on 'crates/sampler' so crust-core can use the new 'Sampler' abstraction in camera, tracer, lights, and materials.
+```
+crates/crust-core/Cargo.toml
+Cargo.tomlAdd new 'sampler' crate manifest +9/-0
+Add new 'sampler' crate manifest
+```
+• Introduces a new workspace crate depending on 'sobol_burley' and 'rand' via workspace dependencies.
+```
+crates/sampler/Cargo.toml
+lib.rsRe-export new warp helpers +3/-2
+Re-export new warp helpers
+```
+• Exports the new explicit sampling warp helpers from the utils crate so crust-core can call them directly.
+```
+crates/utils/src/lib.rs
+qodo-code-review
+Bot
+commented
+Jul 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review by Qodo
+🐞 Bugs (2) 📘 Rule violations (0) 📜 Skill insights (0)
+1. ln(0) free-flight sample 🐞 Bug ≡ Correctness
+Description
+```
+ray_color computes medium free-flight distance as -(sampler.next_1d().ln())/sigma_t_max even
+though Sampler::next_1d() is specified to return values in [0, 1) (including 0.0). If 0.0
+occurs, ln(0) becomes -inf, yielding an infinite sampled distance and deterministically skipping
+a medium interaction for that sample.
+```
+Code
+crates/crust-core/src/tracer.rs[R203-207]
+```
+        if let Some(medium) = r.medium() {
+            if medium.is_scattering() {
+                let sigma_t_max = medium.sigma_t_max().max(1e-4);
+-                let t_scatter = -(utils::random().ln()) / sigma_t_max;
++                let t_scatter = -(sampler.next_1d().ln()) / sigma_t_max;
+                if t_scatter < rec.t {
+```
+Evidence
+```
+The sampler API explicitly permits 0.0 ([0,1)), and ray_color applies ln() directly to that
+value when sampling free-flight distance, which yields -inf at 0.0 and produces an infinite
+distance sample.
+```
+crates/sampler/src/lib.rs[27-32]
+crates/crust-core/src/tracer.rs[203-218]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+### Issue description
+`ray_color` samples the exponential free-flight distance using `-(sampler.next_1d().ln()) / sigma_t_max`, but the sampler contract allows returning `0.0` (range `[0,1)`). `ln(0.0)` produces `-inf`, which turns into an infinite travel distance and causes the code to incorrectly skip volume scattering for that sample.
+
+### Issue Context
+This is especially important for deterministic/QMC samplers where exact endpoint values (like 0.0) can occur reproducibly.
+
+### Fix Focus Areas
+- crates/crust-core/src/tracer.rs[203-218]
+
+### Suggested fix
+Use an open-interval uniform for the log/inversion step. For example:
+- Prefer `u = 1.0 - sampler.next_1d()` (so `u` is in `(0,1]` when the sampler is in `[0,1)`), then clamp away from 0:
+ - `let u = (1.0 - sampler.next_1d()).max(1e-7);`
+ - `let t_scatter = -u.ln() / sigma_t_max;`
+- Alternatively clamp the direct sample: `let u = sampler.next_1d().max(1e-7);` (but the `1-u` form maps the exact 0 endpoint to distance 0 instead of `inf`).
+
+Consider adding a small unit test that uses a dummy `Sampler` returning `0.0` for `next_1d()` and asserts the resulting `t_scatter` is finite.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+2. Sobol dimension aliasing 🐞 Bug ☼ Reliability
+Description
+```
+SobolSampler::next_1d silently wraps Sobol dimensions via d % 256, so after 256 1D draws within
+a single pixel/sample, it reuses low dimensions again. The tracer consumes sampler dimensions across
+recursive bounces and per-light sampling; with deep paths this can exceed 256 draws and reintroduce
+strong correlation/structured artifacts instead of switching to a true fallback when the dimension
+budget is exhausted.
+```
+Code
+crates/sampler/src/lib.rs[R99-108]
+```
++    fn next_1d(&mut self) -> f32 {
++        let d = self.dim;
++        self.dim = self.dim.wrapping_add(1);
++        // sobol_burley caps at `NUM_DIMENSIONS` (256). Wrap gracefully once
++        // we exceed that — very high dimensions get low-discrepancy-lite
++        // behaviour rather than a panic; callers should not exceed the
++        // budget in normal renders, but shallow-bounce heavy paths can.
++        let dim = d % sobol_burley::NUM_DIMENSIONS as u32;
++        sobol_burley::sample(self.sample_idx, dim, self.pixel_seed)
++    }
+```
+Evidence
+```
+The sampler explicitly aliases dimensions after 256 via modulo. The tracer consumes dimensions
+repeatedly across recursive bounces and also inside the per-light direct-lighting loop, and default
+settings allow deep recursion, making it possible to exceed 256 1D draws within one path.
+```
+crates/sampler/src/lib.rs[99-108]
+crates/crust-core/src/tracer.rs[181-195]
+crates/crust-core/src/tracer.rs[233-260]
+crates/crust-core/src/tracer.rs[282-287]
+crates/crust-core/src/material/material.rs[39-53]
+crates/crust-core/src/material/lambert.rs[18-38]
+crates/crust-core/src/world.rs[209-230]
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+### Issue description
+`SobolSampler::next_1d` wraps the Sobol dimension index modulo `sobol_burley::NUM_DIMENSIONS` (256). Once a path consumes more than 256 1D samples within a single pixel/sample, the sampler reuses earlier dimensions, which can reintroduce correlation and structured artifacts.
+
+### Issue Context
+The tracer consumes multiple sampler dimensions per bounce (per-light `next_2d()` and `scatter_importance(..., sampler)` inside the light loop, plus an additional `scatter_importance` for the indirect bounce). With sufficiently deep paths (e.g., the default max depth is 32), exceeding 256 1D draws is possible.
+
+### Fix Focus Areas
+- crates/sampler/src/lib.rs[99-117]
+- crates/crust-core/src/tracer.rs[181-195]
+- crates/crust-core/src/tracer.rs[233-260]
+
+### Suggested fix
+Implement a real “dimension overflow” policy instead of modulo aliasing:
+1. **Deterministic fallback RNG after 256 dims**:
+  - Keep the Sobol stream for `dim < NUM_DIMENSIONS`.
+  - For `dim >= NUM_DIMENSIONS`, generate a deterministic pseudorandom float from a hash of `(pixel_seed, sample_idx, dim)` (or embed a `SmallRng` seeded in `start_pixel/start_sample`) and return that.
+  - This preserves determinism and avoids repeating low Sobol dimensions.
+
+2. **Use `advance_bounce()` to partition dimensions**:
+  - Track bounce index and reseed/scramble per bounce (or implement padded-Sobol) so each bounce gets a fresh 0..256 window.
+
+Also consider reducing unnecessary sampler consumption in direct lighting: the current loop calls `scatter_importance` per light, which samples a new BRDF direction even though direct lighting needs BRDF evaluation/PDF for the *light direction* (this extra sampling burns dimensions and pushes you toward overflow sooner).
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+qodo-code-review
+Bot
+reviewed
+Jul 21, 2026
+View reviewed changes
+Comment thread
+crates/crust-core/src/tracer.rs
+@@ -195,18 +203,19 @@ pub fn ray_color(r: &Ray, world: &dyn Hittable, lights: &LightList, depth: i32)
+if let Some(medium) = r.medium() {
+qodo-code-review
+Bot
+Jul 21, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+1. Ln(0) free-flight sample 🐞 Bug ≡ Correctness
+```
+ray_color computes medium free-flight distance as -(sampler.next_1d().ln())/sigma_t_max even
+though Sampler::next_1d() is specified to return values in [0, 1) (including 0.0). If 0.0
+occurs, ln(0) becomes -inf, yielding an infinite sampled distance and deterministically skipping
+a medium interaction for that sample.
+```
+Agent Prompt
+```
+### Issue description
+`ray_color` samples the exponential free-flight distance using `-(sampler.next_1d().ln()) / sigma_t_max`, but the sampler contract allows returning `0.0` (range `[0,1)`). `ln(0.0)` produces `-inf`, which turns into an infinite travel distance and causes the code to incorrectly skip volume scattering for that sample.
+
+### Issue Context
+This is especially important for deterministic/QMC samplers where exact endpoint values (like 0.0) can occur reproducibly.
+
+### Fix Focus Areas
+- crates/crust-core/src/tracer.rs[203-218]
+
+### Suggested fix
+Use an open-interval uniform for the log/inversion step. For example:
+- Prefer `u = 1.0 - sampler.next_1d()` (so `u` is in `(0,1]` when the sampler is in `[0,1)`), then clamp away from 0:
+  - `let u = (1.0 - sampler.next_1d()).max(1e-7);`
+  - `let t_scatter = -u.ln() / sigma_t_max;`
+- Alternatively clamp the direct sample: `let u = sampler.next_1d().max(1e-7);` (but the `1-u` form maps the exact 0 endpoint to distance 0 instead of `inf`).
+
+Consider adding a small unit test that uses a dummy `Sampler` returning `0.0` for `next_1d()` and asserts the resulting `t_scatter` is finite.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Comment thread
+crates/sampler/src/lib.rs
+self.dim = 0;
+}
+fn next_1d(&mut self) -> f32 {
+qodo-code-review
+Bot
+Jul 21, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+2. Sobol dimension aliasing 🐞 Bug ☼ Reliability
+```
+SobolSampler::next_1d silently wraps Sobol dimensions via d % 256, so after 256 1D draws within
+a single pixel/sample, it reuses low dimensions again. The tracer consumes sampler dimensions across
+recursive bounces and per-light sampling; with deep paths this can exceed 256 draws and reintroduce
+strong correlation/structured artifacts instead of switching to a true fallback when the dimension
+budget is exhausted.
+```
+Agent Prompt
+```
+### Issue description
+`SobolSampler::next_1d` wraps the Sobol dimension index modulo `sobol_burley::NUM_DIMENSIONS` (256). Once a path consumes more than 256 1D samples within a single pixel/sample, the sampler reuses earlier dimensions, which can reintroduce correlation and structured artifacts.
+
+### Issue Context
+The tracer consumes multiple sampler dimensions per bounce (per-light `next_2d()` and `scatter_importance(..., sampler)` inside the light loop, plus an additional `scatter_importance` for the indirect bounce). With sufficiently deep paths (e.g., the default max depth is 32), exceeding 256 1D draws is possible.
+
+### Fix Focus Areas
+- crates/sampler/src/lib.rs[99-117]
+- crates/crust-core/src/tracer.rs[181-195]
+- crates/crust-core/src/tracer.rs[233-260]
+
+### Suggested fix
+Implement a real “dimension overflow” policy instead of modulo aliasing:
+1. **Deterministic fallback RNG after 256 dims**:
+   - Keep the Sobol stream for `dim < NUM_DIMENSIONS`.
+   - For `dim >= NUM_DIMENSIONS`, generate a deterministic pseudorandom float from a hash of `(pixel_seed, sample_idx, dim)` (or embed a `SmallRng` seeded in `start_pixel/start_sample`) and return that.
+   - This preserves determinism and avoids repeating low Sobol dimensions.
+
+2. **Use `advance_bounce()` to partition dimensions**:
+   - Track bounce index and reseed/scramble per bounce (or implement padded-Sobol) so each bounce gets a fresh 0..256 window.
+
+Also consider reducing unnecessary sampler consumption in direct lighting: the current loop calls `scatter_importance` per light, which samples a new BRDF direction even though direct lighting needs BRDF evaluation/PDF for the *light direction* (this extra sampling burns dimensions and pushes you toward overflow sooner).
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Hide details
+View details
+doubleailes
+merged commit f45d8bf
+into
+main
+Jul 21, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+doubleailes
+deleted the
+claude/openqmc-do-sampling-ux17dl
+branch
+July 21, 2026 15:06
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

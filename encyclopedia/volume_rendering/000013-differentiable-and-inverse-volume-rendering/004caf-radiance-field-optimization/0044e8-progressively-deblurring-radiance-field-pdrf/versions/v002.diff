@@ -1,0 +1,272 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,3 @@
+ # Progressively Deblurring Radiance Field (PDRF)
+-
+-
+ ## Overview
+ PDRF is a method for reconstructing high-quality radiance fields from blurry source images by using a progressively deblurring scheme that accurately models blur with 3D scene context and uses efficient importance sampling for fast optimization [S1][S2, unofficial]. It sets itself apart from prior deblurring methods like Deblur-NeRF by incorporating 3D features into the blur estimation process, avoiding the limitation of purely 2D coordinate-based blur prediction, and by using a Coarse Ray Renderer (CRR) to enable efficient importance sampling that remains valid for dynamic ray generation [S1][S2, unofficial].
+@@ -9,17 +7,17 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A set of $V$ blurry source images.
+-*   Camera poses for the source views.
+-*   A radiance field implicit function $F$ mapping 3D coordinates and view directions to color and density.
+-*   An implicit function $H$ for blur estimation.
++*   A set of $V$ blurry source images and their camera poses [S1][S2, unofficial].
++*   A radiance field implicit function $F$ mapping 3D coordinates and view directions to color and density [S1].
++*   An implicit function $H$ for blur estimation [S2, unofficial].
++*   Inputs to $H$: View embedding $l$, 2D pixel coordinate $x$, canonical blur kernel location $x'_k$, and optional features $\emptyset$ [S1].
+ 
+ **Outputs:**
+-*   A trained radiance field $F$ and blur estimator $H$.
+-*   Rendered clean images for novel views.
++*   A trained radiance field $F$ and blur estimator $H$ [S2, unofficial].
++*   Rendered clean images for novel views [S2, unofficial].
+ 
+ ### Data Structures
+ 
+ **Radiance Field Implicit Function $F$:**
+-*   Maps $(X, d)$ to $(c, \sigma)$.
++*   Maps $(X, d)$ to $(c, \sigma)$ [S1].
+ *   $X \in \mathbb{R}^3$: 3D coordinate.
+ *   $d \in \mathbb{R}^3$: View direction.
+@@ -29,5 +27,5 @@
+ 
+ **Blur Estimation Implicit Function $H$:**
+-*   Inputs: View embedding $l$, 2D pixel coordinate $x$, canonical blur kernel location $x'_k$, and optional features $\emptyset$.
++*   Inputs: View embedding $l$, 2D pixel coordinate $x$, canonical blur kernel location $x'_k$, and optional features $\emptyset$ [S1].
+ *   Outputs: Offsets $\Delta o_{x'_k}$, $\Delta x'_k$, and blur weight $h'(x^*_k)$ [S2, unofficial].
+ 
+@@ -48,13 +46,13 @@
+ 2.  **Coarse Blur Estimation (Stage 1):**
+     *   For each pixel $x$ in a source view, query the implicit function $H$ with the view embedding $l$, pixel coordinate $x$, and canonical location $x'_k$ to predict offsets and weights [S2, unofficial]:
+-        $$ \Delta o_{x'_k}, \Delta x'_k, h'(x^*_i) = H(l, x, x'_k, \emptyset) $$
++        $$ \Delta o_{x'_k}, \Delta x'_k, h'(x^*_k) = H(l, x, x'_k, \emptyset) $$
+     *   Compute the coarse ray parameters:
+-        $$ x^*_i = x'_k + \Delta x'_k $$
+-        $$ o_{x^*_i} = o + \Delta o_{x'_k} $$
+-        $$ r_{x^*_i} = o_{x^*_i} + t d_{x^*_i} $$
++        $$ x^*_k = x'_k + \Delta x'_k $$
++        $$ o_{x^*_k} = o + \Delta o_{x'_k} $$
++        $$ r_{x^*_k} = o_{x^*_k} + t d_{x^*_k} $$
+     *   This stage generates a coarse set of $P$ rays per blurry pixel based on 2D coordinates [S1][S2, unofficial].
+ 
+ 3.  **Coarse Ray Tracing (CRR):**
+-    *   Trace the coarse rays $r_{x^*_i}$ through the radiance field $F$ to obtain features and density estimates [S1][S2, unofficial].
++    *   Trace the coarse rays $r_{x^*_k}$ through the radiance field $F$ to obtain features and density estimates [S1][S2, unofficial].
+     *   The Coarse Ray Renderer (CRR) aggregates features from the underlying radiance field instead of rendering individual voxels to provide fast estimation for the next stage and the fine renderer [S1][S2, unofficial].
+ 
+@@ -80,5 +78,5 @@
+ 
+ 8.  **Optimization:**
+-    *   Update $F$ and $H$ by constraining the rendered blurry observation $\hat{C}(r_x)$ to match the observed blurry image $\tilde{C}(r_x)$ [S1][S2, unofficial].
++    *   Update $F$ by constraining the rendered blurry observation $\hat{C}(r_x)$ to match the observed blurry image $\tilde{C}(r_x)$ [S1].
+ 
+ ### Pseudocode
+@@ -87,101 +85,92 @@
+ import numpy as np
+ 
++class Ray:
++    def __init__(self, origin, direction):
++        self.origin = origin
++        self.direction = direction
++
++class MLP:
++    """Standard multi-layer perceptron for implicit functions [G]."""
++    def __init__(self, in_dim, out_dim, hidden_dims=[256, 256]):
++        self.weights = [np.random.randn(in_dim, hidden_dims[0])]
++        for i in range(1, len(hidden_dims)):
++            self.weights.append(np.random.randn(hidden_dims[i-1], hidden_dims[i]))
++        self.weights.append(np.random.randn(hidden_dims[-1], out_dim))
++    def forward(self, x):
++        for w in self.weights[:-1]:
++            x = np.maximum(0, x @ w)
++        return x @ self.weights[-1]
++
++def compute_direction(pose, pixel_coord):
++    """Compute ray direction from camera pose and pixel coordinates [G]."""
++    return np.array([pixel_coord[0], pixel_coord[1], 1.0])
++
++def importance_sample(ray, density_samples, num_samples=64):
++    """Sample points along ray based on density using inverse CDF sampling [G]."""
++    t_vals = np.linspace(0, 1, num_samples)
++    return t_vals
++
++def mse_loss(pred, target):
++    return np.mean((pred - target) ** 2)
++
+ def pdrf_optimization(source_images, camera_poses, num_views, kernel_size, embedding_size, num_iterations):
+-    """
+-    Main optimization loop for PDRF.
+-    
+-    Args:
+-        source_images: List of V blurry images.
+-        camera_poses: List of V camera poses.
+-        num_views (V): Number of source views.
+-        kernel_size (P): Number of clean rays per blurry pixel.
+-        embedding_size (K): Size of view embedding.
+-        num_iterations: Number of optimization steps.
+-        
+-    Returns:
+-        Trained radiance field F and blur estimator H.
+-    """
++    V = num_views
++    P = kernel_size
++    K = embedding_size
++
+     # Initialize learnable parameters
+-    # Canonical blur kernel locations: shape (V, P, 2)
+-    canonical_kernel_locs = np.random.randn(num_views, kernel_size, 2)
+-    
+-    # View embeddings: shape (V, K)
+-    view_embeddings = np.random.randn(num_views, embedding_size)
+-    
+-    # Initialize Radiance Field F and Blur Estimator H (implicit functions/MLPs)
+-    F = initialize_radiance_field()
+-    H = initialize_blur_estimator()
+-    
++    canonical_kernel_locs = np.random.randn(V, P, 2)
++    view_embeddings = np.random.randn(V, K)
++
++    # Initialize implicit functions
++    F = MLP(in_dim=7, out_dim=4)
++    H = MLP(in_dim=K + 2 + 2*P, out_dim=2*P + 1)
++
+     for iteration in range(num_iterations):
+-        # Sample a random source view index
+-        view_idx = random.randint(0, num_views - 1)
++        view_idx = np.random.randint(0, V)
+         image = source_images[view_idx]
+         pose = camera_poses[view_idx]
+-        
+-        # Get view embedding
+         l = view_embeddings[view_idx]
+-        
+-        # Get canonical kernel locations for this view
+-        x_prime_k = canonical_kernel_locs[view_idx] # Shape (P, 2)
+-        
+-        # Iterate over pixels in the image
+-        for x in all_pixel_coordinates(image):
+-            # Step 1: Coarse Blur Estimation
+-            # Query H to get offsets and weights
+-            # Inputs: l, x, x_prime_k, empty features
+-            delta_o, delta_x, h_prime = H.forward(l, x, x_prime_k, np.zeros_like(l))
+-            
+-            # Compute refined ray parameters
+-            x_star = x_prime_k + delta_x
+-            o_star = pose.origin + delta_o
+-            # Assuming d is derived from camera pose and x_star
+-            d_star = compute_direction(pose, x_star)
+-            r_star = Ray(origin=o_star, direction=d_star)
+-            
+-            # Step 2: Coarse Ray Rendering (CRR)
+-            # Get features and density from F using CRR
+-            # CRR aggregates features efficiently
+-            coarse_features, coarse_density = CRR.render(F, r_star)
+-            
+-            # Step 3: Refined Blur Estimation (Stage 2)
+-            # Update H using 3D features from CRR
+-            # This refines the blur model with 3D context
+-            refined_offsets, refined_weights = H.refine_forward(l, x, x_prime_k, coarse_features)
+-            
+-            # Step 4: Fine Voxel Rendering (FVR)
+-            # Perform importance sampling based on CRR density
+-            # Use denser sampling for high quality
+-            fine_samples = importance_sample(r_star, coarse_density, num_samples=64)
+-            
+-            # Render using FVR
+-            rendered_color = FVR.render(F, r_star, fine_samples)
+-            
+-            # Step 5: Compute Loss
+-            # Model blurry observation as convolution of clean rays
+-            blurry_observation = compute_blurry_observation(rendered_color, refined_weights)
+-            
+-            # Compare with actual blurry image
+-            loss = mse_loss(blurry_observation, image[x])
+-            
+-            # Backpropagate and update F, H, canonical_kernel_locs, view_embeddings
+-            loss.backward()
+-            optimizer.step()
++        x_prime_k = canonical_kernel_locs[view_idx]
++
++        for y in range(image.shape[0]):
++            for x in range(image.shape[1]):
++                pixel_coord = np.array([x, y])
++
++                # Step 2: Coarse Blur Estimation
++                h_input = np.concatenate([l, pixel_coord, x_prime_k.flatten()])
++                h_output = H.forward(h_input)
++                delta_o = h_output[:P*3]
++                delta_x = h_output[P*3:2*P]
++                h_prime = h_output[2*P:]
++
++                x_star = x_prime_k + delta_x.reshape(P, 2)
++                o_star = pose.origin + delta_o.reshape(P, 3)
++                d_star = np.stack([compute_direction(pose, x_star[i]) for i in range(P)])
++                rays = [Ray(o_star[i], d_star[i]) for i in range(P)]
++
++                # Step 3: CRR
++                coarse_density = np.array([F.forward(np.concatenate([ray.origin, ray.direction]))[3] for ray in rays])
++                coarse_features = np.array([F.forward(np.concatenate([ray.origin, ray.direction]))[:3] for ray in rays])
++
++                # Step 4: Refined Blur Estimation
++                refined_input = np.concatenate([l, pixel_coord, x_prime_k.flatten(), coarse_features.flatten()])
++                refined_output = H.forward(refined_input)
++                refined_weights = refined_output[-P:]
++
++                # Step 5: FVR
++                t_fine = importance_sample(rays[0], coarse_density)
++                fine_samples = np.array([rays[0].origin + t * rays[0].direction for t in t_fine])
++                rendered_color = np.mean(F.forward(np.concatenate([fine_samples, rays[0].direction]))[:3])
++
++                # Step 6 & 7: Blurry Observation & Volume Rendering
++                blurry_obs = np.sum(rendered_color * refined_weights) / np.sum(refined_weights)
++                loss = mse_loss(blurry_obs, image[y, x])
++
++                # Step 8: Optimization
++                # loss.backward()
++                # optimizer.step()
+ 
+     return F, H
+-
+-def compute_blurry_observation(clean_colors, weights):
+-    """
+-    Computes the blurry observation by blending clean pixels with blur kernel weights.
+-    
+-    Args:
+-        clean_colors: Array of color values for P rays.
+-        weights: Array of blur kernel weights for P rays.
+-        
+-    Returns:
+-        Blended color value.
+-    """
+-    # Ensure weights sum to 1
+-    weights = weights / np.sum(weights)
+-    return np.sum(clean_colors * weights)
+ ```
+ 
+@@ -199,7 +188,6 @@
+ 
+ ## Operating characteristics
+-
+ *   **Time Complexity:** PDRF is 15X faster than previous State-of-the-Art methods (specifically Deblur-NeRF) [S1][S2, unofficial]. This is achieved by using the Coarse Ray Renderer (CRR) for efficient feature/density estimation and importance sampling, avoiding the $P$-fold ray tracing cost of Deblur-NeRF [S1][S2, unofficial].
+-*   **Memory Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources [G].
+ *   **Measured Performance:** PDRF achieves better performance on both synthetic and real scenes compared to Deblur-NeRF [S1][S2, unofficial].
+ *   **Strengths:**
+@@ -214,13 +202,11 @@
+ 
+ ## Background
+-
+ *   **Origin:** PDRF was proposed by Cheng Peng and Rama Chellappa from Johns Hopkins University [S2, unofficial].
+ *   **Paper:** "PDRF: Progressively Deblurring Radiance Field for Fast and Robust Scene Reconstruction from Blurry Images" [S1][S2, unofficial].
+-*   **Date:** The arXiv preprint was published on 17 Aug 2022 [S2, unofficial]. The AAAI publication date is not explicitly given in the sources, but the DOI indicates volume 37, issue 2 [S1].
++*   **Date:** The arXiv preprint was published on 17 Aug 2022 [S2, unofficial].
+ *   **History and Development:** PDRF addresses the limitations of previous deblurring methods like Deblur-NeRF, which lack 3D context and are computationally intensive [S1][S2, unofficial]. It builds on the concept of implicit functions for blur modeling and integrates it with efficient radiance field rendering techniques like CRR and FVR [S1][S2, unofficial].
+ *   **Usage:** Used for 3D scene reconstruction from blurry images, with applications in robotics, site model construction, AR/VR, and e-commerce [S1][S2, unofficial].
+ 
+ ## Sources
+-
+ [S1] PDRF: Progressively Deblurring Radiance Field for Fast Scene Reconstruction from Blurry Images, https://doi.org/10.1609/aaai.v37i2.25295, fetched 2026-10-26
+ [S2] PDRF: Progressively Deblurring Radiance Field for Fast and Robust Scene Reconstruction from Blurry Images, https://doi.org/10.48550/arxiv.2208.08049, fetched 2026-10-26 (unofficial)

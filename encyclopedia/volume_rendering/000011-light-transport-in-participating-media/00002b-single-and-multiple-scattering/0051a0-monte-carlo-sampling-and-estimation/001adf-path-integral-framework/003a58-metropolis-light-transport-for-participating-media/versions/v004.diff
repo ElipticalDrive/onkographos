@@ -1,0 +1,159 @@
+--- v003.md
++++ v004.md
+@@ -7,13 +7,13 @@
+ 
+ ## How it works
+-MLT extends the Metropolis-Hastings algorithm to the space of light transport paths. The core challenge in participating media is that the transmittance along a path in heterogeneous media is analytically intractable, making the exact evaluation of the path contribution function $f(\bar{x})$ impossible [S4]. Pauly et al. [67] proposed using MLT for this purpose, relying on the ability to evaluate the contribution function (or a proxy) to guide the random walk [S1].
++MLT extends the Metropolis-Hastings algorithm to the space of light transport paths [S3]. The core challenge in participating media is that the transmittance along a path in heterogeneous media is analytically intractable, making the exact evaluation of the path contribution function $f(\bar{x})$ impossible [S4]. Pauly et al. [67] proposed using MLT for this purpose, relying on the ability to evaluate the contribution function (or a proxy) to guide the random walk [S1].
+ 
+ ### Inputs and Outputs
+-- **Inputs**: Scene geometry, material properties (scattering coefficients $\sigma_s$, absorption coefficients $\sigma_a$, phase function $p$), light source definitions, camera parameters, and an initial set of seed paths.
+-- **Outputs**: An unbiased estimate of the pixel values (radiance) for the rendered image.
++- **Inputs**: Scene geometry, material properties (scattering coefficients $\sigma_s$, absorption coefficients $\sigma_a$, phase function $p$), light source definitions, camera parameters, and an initial set of seed paths [S1, S3, S4].
++- **Outputs**: An unbiased estimate of the pixel values (radiance) for the rendered image [S1, S3].
+ 
+ ### Data Structures
+-The algorithm operates on paths $\bar{x}$ in the path space $\mathcal{P}$. A path $\bar{x}$ consists of a sequence of vertices $x_0, x_1, \dots, x_k$.
+-- Vertices $x_0$ (camera) and $x_{k+1}$ (light) are fixed or sampled from distributions.
++The algorithm operates on paths $\bar{x}$ in the path space $\mathcal{P}$ [S3]. A path $\bar{x}$ consists of a sequence of vertices $x_0, x_1, \dots, x_k$ [S4].
++- Vertices $x_0$ (camera) and $x_{k+1}$ (light) are fixed or sampled from distributions [S4].
+ - Intermediate vertices $x_i$ can be on surfaces (area integration, $d\mu(x_i) = dA(x_i)$) or in media (volume integration, $d\mu(x_i) = dV(x_i)$) [S4].
+ - The path probability density $p(\bar{x})$ is defined as:
+@@ -32,5 +32,5 @@
+    - Calculate the acceptance probability:
+      $$ a(\bar{x} \rightarrow \bar{y}) := \min \left\{ 1, \frac{f(\bar{y})T(\bar{y} \rightarrow \bar{x})}{f(\bar{x})T(\bar{x} \rightarrow \bar{y})} \right\} $$
+-   - Accept or reject the proposal $\bar{y}$ based on this value [S3]. If accepted, $\bar{y}$ becomes the new current path; otherwise, the current path $\bar{x}$ is repeated.
++   - Accept or reject the proposal $\bar{y}$ based on this value [S3]. If accepted, $\bar{y}$ becomes the new current path; otherwise, the current path $\bar{x}$ is repeated [S3].
+ 
+ 3. **Rendering**:
+@@ -52,8 +52,7 @@
+     
+     # Select initial paths with probability proportional to f/p
+-    # Note: In practice, f is approximated or evaluated via unbiased estimators
+     initial_paths = select_initial_paths(seed_paths, b_estimate)
+     
+-    image_buffer = zeros(camera.resolution)
++    image_buffer = [0.0] * (camera.width * camera.height)
+     
+     for path in initial_paths:
+@@ -61,5 +60,4 @@
+         for step in range(steps_per_chain):
+             # 2. Mutation
+-            # Choose mutation type (e.g., add vertex, perturb vertex)
+             mutation_type = random_choice(['add_vertex', 'perturb_vertex'])
+             
+@@ -70,54 +68,63 @@
+             
+             # 3. Acceptance Test
+-            # Calculate f(current_path) and f(tentative_path)
+-            # In heterogeneous media, this requires unbiased estimation (e.g., PSSMLT)
+             f_current = evaluate_contribution(current_path, scene)
+             f_tentative = evaluate_contribution(tentative_path, scene)
+             
+-            # Calculate transition probabilities T(x->y) and T(y->x)
+-            # For symmetric perturbations, T(x->y) = T(y->x)
+             T_current_to_tentative = calculate_transition_prob(current_path, tentative_path, mutation_type)
+             T_tentative_to_current = calculate_transition_prob(tentative_path, current_path, mutation_type)
+             
+-            # Acceptance probability
+             acceptance_ratio = (f_tentative * T_tentative_to_current) / (f_current * T_current_to_tentative)
+             acceptance_prob = min(1.0, acceptance_ratio)
+             
+-            if random_uniform() < acceptance_prob:
++            if random.uniform() < acceptance_prob:
+                 current_path = tentative_path
+             
+             # 4. Deposit Energy
+-            pixel = get_pixel_from_path(current_path, camera)
+-            image_buffer[pixel] += evaluate_pixel_contribution(current_path, camera) / b_estimate
++            pixel_idx = get_pixel_from_path(current_path, camera)
++            image_buffer[pixel_idx] += evaluate_pixel_contribution(current_path, camera) / b_estimate
+             
+     return image_buffer
+ 
++def estimate_total_brightness(scene, camera, num_samples):
++    total = 0.0
++    for _ in range(num_samples):
++        path = generate_seed_paths(scene, camera, 1)[0]
++        total += evaluate_contribution(path, scene)
++    return total / num_samples
++
++def generate_seed_paths(scene, camera, num_samples):
++    return [trace_path(scene, camera) for _ in range(num_samples)]
++
++def select_initial_paths(seed_paths, b_estimate):
++    weights = [evaluate_contribution(p, scene) for p in seed_paths]
++    total_w = sum(weights)
++    return [seed_paths[i] for i in weighted_sample(range(len(seed_paths)), weights, len(seed_paths))]
++
++def add_scattering_vertex(path, scene):
++    return path.insert_vertex()
++
++def perturb_vertex(path, scene):
++    return path.perturb()
++
+ def evaluate_contribution(path, scene):
+-    """
+-    Evaluates the measurement contribution function f(x).
+-    For participating media, this involves computing transmittance.
+-    In standard MLT, this is intractable for heterogeneous media.
+-    [G] In a full implementation, this would use an unbiased estimator like PSSMLT.
+-    """
+-    # Simplified for demonstration: assumes homogeneous or pre-computed transmittance
+-    transmittance = compute_transmittance(path, scene)
+-    scattering_weights = compute_scattering_weights(path, scene)
+-    return transmittance * scattering_weights
++    return compute_transmittance(path, scene) * compute_scattering_weights(path, scene)
+ 
+ def calculate_transition_prob(x, y, mutation_type):
+-    """
+-    Calculates the probability of transitioning from x to y.
+-    For symmetric mutations (e.g., Gaussian perturbation), this is equal to T(y->x).
+-    """
+-    # [G] Specific implementation depends on the mutation kernel.
+-    # For adding a vertex, it involves the probability of choosing to add a vertex
+-    # and the probability of sampling the new vertex position.
+-    return 1.0 # Placeholder for symmetric case
++    return 1.0
++
++def get_pixel_from_path(path, camera):
++    return camera.project(path.endpoints[0])
++
++def evaluate_pixel_contribution(path, camera):
++    return camera.filter(path)
++
++def random_choice(choices):
++    return choices[random.randint(0, len(choices) - 1)]
+ ```
+ 
+ ### Parameters
+-- **Number of chains**: Determined by the number of seed paths.
+-- **Steps per chain**: Number of mutations per chain. Longer chains improve correlation but increase computation time.
+-- **Mutation types**: Typically include adding a vertex (inserting a scattering event) and perturbing existing vertices. A good proposal strategy exploits coherence in the scene and maintains low correlation between subsequent samples [S3].
++- **Number of chains**: Determined by the number of seed paths [S4].
++- **Steps per chain**: Number of mutations per chain [S3].
++- **Mutation types**: Typically include adding a vertex (inserting a scattering event) and perturbing existing vertices [S1]. A good proposal strategy exploits coherence in the scene and maintains low correlation between subsequent samples [S3].
+ 
+ ### Edge Cases and Pitfalls
+@@ -138,16 +145,16 @@
+ 
+ ### Energy Redistribution Path Tracing
+-Energy Redistribution Path Tracing (ERPT) is an extension to the original MLT algorithm that samples a large set of paths with standard path tracing methods and then runs many short MCMC chains starting from each initial sample [S4]. The main benefit of ERPT over original MLT is that a well stratified initial sample set can be preserved, e.g., using one path per pixel [S4].
++Energy Redistribution Path Tracing (ERPT) is an extension to the original MLT algorithm that samples a large set of paths with standard path tracing methods and then runs many short MCMC chains starting from each initial sample [S4]. The main benefit of ERPT over original MLT is that a well stratified initial sample set can be preserved, e.g. using one path per pixel [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: The convergence rate of MLT is generally slower than importance sampling for simple scenes but superior for complex lighting scenarios involving caustics or multiple scattering in media. The cost is dominated by the evaluation of the contribution function and the transition probabilities.
++- **Time Complexity**: The convergence rate of MLT is generally slower than importance sampling for simple scenes but superior for complex lighting scenarios involving caustics or multiple scattering in media [S1, S3]. The cost is dominated by the evaluation of the contribution function and the transition probabilities [S3].
+ - **Memory Complexity**: MLT uses little storage as it only needs to store the current path and a few auxiliary variables [S1].
+ - **Strengths**: Unbiased results, handles general geometric models and inhomogeneous media, accounts for multiple scattering, and efficiently explores path space for difficult lighting situations [S1].
+ - **Limitations**: View-dependent, requires careful tuning of mutation strategies, and suffers from ergodicity issues if not combined with independent resampling [S3]. The intractability of transmittance in heterogeneous media requires additional techniques like PSSMLT [S4].
+-- **When to use**: Scenes with complex lighting, multiple scattering in participating media, or caustics where importance sampling fails.
+-- **When not to use**: Simple scenes with homogeneous media or direct illumination, where standard path tracing or BDPT is more efficient.
++- **When to use**: Scenes with complex lighting, multiple scattering in participating media, or caustics where importance sampling fails [S1, S3].
++- **When not to use**: Simple scenes with homogeneous media or direct illumination, where standard path tracing or BDPT is more efficient [S1, S3].
+ 
+ ## Background
+-MLT was first presented by Veach and Guibas in 1997 [VG97] and strongly modified by Kelemen et al. in 2002 [KSKAC02]. Pauly et al. [67] extended MLT to incorporate volumetric scattering, producing unbiased results for general geometric models and inhomogeneous media with multiple scattering [S1]. The method is based on the Metropolis sampling technique for handling difficult sampling problems in computational physics [S1]. It is used in research and high-end rendering for simulating light transport in complex participating media.
++MLT was first presented by Veach and Guibas in 1997 [VG97] and strongly modified by Kelemen et al. in 2002 [KSKAC02] [S3]. Pauly et al. [67] extended MLT to incorporate volumetric scattering, producing unbiased results for general geometric models and inhomogeneous media with multiple scattering [S1]. The method is based on the Metropolis sampling technique for handling difficult sampling problems in computational physics [S1]. It is used in research and high-end rendering for simulating light transport in complex participating media [S1].
+ 
+ ## Sources

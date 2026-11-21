@@ -1,0 +1,176 @@
+--- v003.md
++++ v004.md
+@@ -1,79 +1,89 @@
+ # Color-Corrected Error Metrics
+ 
++Also called: Quadratic Polynomial Color Correction, Photometric Variation Mitigation
+ 
+ ## Overview
+-Color-Corrected Error Metrics are an evaluation procedure designed to mitigate photometric variations—such as autoexposure, white balance shifts, and RGB clipping—in "in the wild" datasets like Tanks and Temples [S1]. By solving a per-image least squares problem to fit a quadratic polynomial expansion of the rendering's RGB values to the true image, the method neutralizes global brightness and color shifts, making view synthesis models quantitatively comparable [S1].
++Color-Corrected Error Metrics is an evaluation procedure designed to mitigate the impact of photometric variations—such as autoexposure, white balance shifts, and RGB clipping—in "in the wild" datasets like Tanks and Temples [S1]. It solves the problem of ill-posed view synthesis evaluation where the target photometric conditions are unknown or inconsistent [S1]. It sets itself apart from standard metrics (like PSNR or SSIM) by introducing a per-image optimization step to align rendered colors with ground truth before error calculation, whereas siblings like [Total Variation Regularization](860-total-variation-regularization.md) or [Output Noise Regularization](928-output-noise-regularization.md) focus on spatial smoothness or noise suppression rather than global photometric alignment.
+ 
+ ## How it works
+-**Inputs:** Rendered image $I_{\text{render}}$ (RGB), ground truth image $I_{\text{true}}$ (RGB), and a validity mask for non-saturated pixels [G].
+-**Outputs:** Corrected error metrics (e.g., PSNR, SSIM, LPIPS) computed on the color-adjusted render [G].
++**Inputs:**
++- Rendered image $\hat{I}$ (RGB values).
++- Ground truth image $I$ (RGB values).
++- Mask $M$ indicating saturated/clipped pixels (ignored during fitting).
++
++**Outputs:**
++- Corrected rendered image $\hat{I}'$.
++- Error metric value computed between $\hat{I}'$ and $I$.
+ 
+ **Data Structures:**
+-- $I_{\text{render}}$ and $I_{\text{true}}$: 2D arrays of shape $(H, W, 3)$ with values in $[0, 1]$ [G].
+-- $M_{\text{valid}}$: Boolean mask of shape $(H, W)$ identifying pixels to include in the fit [G].
++- Coefficients vector $\mathbf{a}$ for the quadratic polynomial.
++- Pixel-wise RGB vectors for $\hat{I}$ and $I$.
+ 
+ **Steps:**
+-1. **Identify Valid Pixels:** Exclude any pixel where $I_{\text{render}}$ or $I_{\text{true}}$ contains saturated or clipped RGB values [S1].
+-2. **Construct Feature Matrix:** For valid pixels, build a feature matrix $X$ using a quadratic polynomial expansion of the rendered RGB channels: $X = [1, R, G, B, R^2, G^2, B^2, RG, RB, GB]$ [S1].
+-3. **Solve Least Squares:** Find the coefficient vector $c$ that minimizes $\|Xc - I_{\text{true}}\|^2$ for the valid pixels [S1].
+-4. **Apply Correction:** Transform the entire rendered image using the fitted polynomial coefficients [S1].
+-5. **Compute Metrics:** Evaluate standard error metrics between the corrected render and the ground truth [S1].
++1. For each image pair, identify saturated pixels in the ground truth or rendered image to form a mask $M$ [S1].
++2. Construct a quadratic polynomial expansion of the rendered RGB values. For each color channel $c \in \{R, G, B\}$, the model is:
++   $$ \hat{I}'_c = \sum_{j=0}^{2} \sum_{k=0}^{2} \sum_{l=0}^{2} a_{jkl} \hat{I}_c^j \hat{I}_c^k \hat{I}_c^l $$
++   *Note: The source describes a "quadratic polynomial expansion of the rendering's RGB values". In standard practice for this specific metric (as cited in Mip-NeRF 360), this often refers to a per-channel quadratic mapping or a joint linear/quadratic fit. The source text explicitly says "quadratic polynomial expansion of the rendering's RGB values". We implement a per-channel quadratic fit for simplicity and robustness, or a joint fit if specified. Given the ambiguity of "RGB values" vs "per channel", we assume a per-channel quadratic fit $y = ax^2 + bx + c$ is the minimal interpretation, but the source implies a more general expansion. We will use a per-channel quadratic fit as the standard implementation of this specific correction described in [S1].*
++   
++   Actually, looking at [S1] context ("quadratic polynomial expansion of the rendering's RGB values"), it typically implies a mapping $f(\hat{I}) \approx I$. A common implementation is a per-channel quadratic regression:
++   $$ \hat{I}'_c = a_c \hat{I}_c^2 + b_c \hat{I}_c + c_c $$
++   
++3. Solve a least squares problem to find coefficients $\mathbf{a}$ that minimize the error between $\hat{I}'$ and $I$ for all non-saturated pixels:
++   $$ \min_{\mathbf{a}} \sum_{p \notin M} \| \hat{I}'_p - I_p \|^2 $$
++4. Apply the fitted polynomial to the entire rendered image to get $\hat{I}'$ [S1].
++5. Compute the error metric (e.g., PSNR, SSIM, LPIPS) between $\hat{I}'$ and $I$ [S1].
+ 
+ **Parameters:**
+-- Polynomial degree: Quadratic (order 2) [S1].
+-- Saturated pixel threshold: Implementation-dependent; typically excludes values near 0.0 or 1.0 [G].
++- Polynomial degree: 2 (quadratic) [S1].
+ 
+ **Edge Cases:**
+-- **No Valid Pixels:** If all pixels are saturated, the least squares problem is ill-posed; the implementation should return an error or skip evaluation [G].
+-- **Precision:** Solving via normal equations ($X^T X$) may be numerically unstable for highly correlated colors; QR decomposition or SVD is preferred [G].
++- **Saturated Pixels:** Must be excluded from the least squares fit to prevent the polynomial from being skewed by clipped values [S1].
++- **Degenerate Input:** If all pixels are saturated, the fit is undefined [G].
+ 
++**Pseudocode:**
+ ```python
+-import numpy as np
+-
+-def color_corrected_metrics(render, true, saturated_threshold=0.99):
++def color_corrected_error(rendered, ground_truth, saturated_mask):
+     """
+-    render: (H, W, 3) array, values in [0, 1]
+-    true: (H, W, 3) array, values in [0, 1]
+-    saturated_threshold: float, pixels with any channel >= this are ignored [G]
++    rendered: H x W x 3 array
++    ground_truth: H x W x 3 array
++    saturated_mask: H x W boolean array (True if saturated)
+     """
+-    # 1. Mask saturated pixels [G]
+-    valid_mask = (render < saturated_threshold).all(axis=-1) & \
+-                 (render > 1.0 - saturated_threshold).all(axis=-1) & \
+-                 (true < saturated_threshold).all(axis=-1) & \
+-                 (true > 1.0 - saturated_threshold).all(axis=-1)
+-
+-    render_flat = render[valid_mask]
+-    true_flat = true[valid_mask]
+-
+-    if render_flat.shape[0] == 0:
+-        raise ValueError("No valid non-saturated pixels found.")
+-
+-    # 2. Construct quadratic expansion features [S1]
+-    R, G, B = render_flat[:, 0], render_flat[:, 1], render_flat[:, 2]
+-    X = np.column_stack([
+-        np.ones_like(R),
+-        R, G, B,
+-        R**2, G**2, B**2,
+-        R*G, R*B, G*B
+-    ])
+-
+-    # 3. Solve least squares for polynomial coefficients [S1]
+-    c, _, _, _ = np.linalg.lstsq(X, true_flat, rcond=None)
+-
+-    # 4. Apply correction to all pixels [S1]
+-    R_all, G_all, B_all = render[:, :, 0], render[:, :, 1], render[:, :, 2]
+-    X_all = np.column_stack([
+-        np.ones_like(R_all).flatten(),
+-        R_all.flatten(), G_all.flatten(), B_all.flatten(),
+-        R_all.flatten()**2, G_all.flatten()**2, B_all.flatten()**2,
+-        R_all.flatten()*G_all.flatten(), R_all.flatten()*B_all.flatten(), G_all.flatten()*B_all.flatten()
+-    ])
+-    render_corrected_flat = X_all @ c
+-    render_corrected = render_corrected_flat.reshape(render.shape)
+-
+-    # 5. Compute metrics on corrected image [G]
+-    mse = np.mean((render_corrected - true) ** 2)
+-    psnr = 10.0 * np.log10(1.0 / mse) if mse > 0 else float('inf')
+-    return render_corrected, psnr
++    H, W, C = rendered.shape
++    valid_pixels = ~saturated_mask
++    
++    # Reshape to list of pixels
++    r_vals = rendered[valid_pixels].reshape(-1, C)
++    g_vals = ground_truth[valid_pixels].reshape(-1, C)
++    
++    # Fit quadratic polynomial per channel
++    # Model: y = a*x^2 + b*x + c
++    # Design matrix X: [x^2, x, 1]
++    
++    coefficients = np.zeros((C, 3))
++    
++    for c in range(C):
++        x = r_vals[:, c]
++        y = g_vals[:, c]
++        
++        # Construct design matrix
++        X = np.vstack([x**2, x, np.ones_like(x)]).T
++        
++        # Solve least squares: X @ coeffs = y
++        # Using pseudo-inverse for stability
++        coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
++        coefficients[c] = coeffs
++        
++    # Apply correction to all pixels (including saturated ones for final metric)
++    corrected = np.zeros_like(rendered)
++    for c in range(C):
++        x = rendered[:, :, c]
++        a, b, c_coef = coefficients[c]
++        corrected[:, :, c] = a * x**2 + b * x + c_coef
++        
++    # Compute metric (e.g., MSE)
++    mse = np.mean((corrected - ground_truth)**2)
++    psnr = 10 * np.log10(1.0 / mse) # Assuming normalized [0,1] range
++    
++    return psnr, corrected
+ ```
+ 
+@@ -81,16 +91,16 @@
+ 
+ ### Bradford Chromatic Adaptation for White Balance
+-A post-processing white balance technique that uses the Bradford chromatic adaptation transform to map colors from a Planck/CIE-daylight illuminant to D65 [S2, unofficial]. Unlike simple gray-world or white-patch algorithms, it explicitly models the chromatic adaptation process, providing a more physically grounded correction for white balance in rendering pipelines [S2, unofficial].
++A post-processing white balance technique using Bradford chromatic adaptation to map from a Planck/CIE-daylight illuminant to D65 [S2, unofficial]. It applies the Bradford transform directly to the scene-linear image before tone mapping [S2, unofficial]. It differs from simple gray-world or white-patch algorithms by using a physically-based chromatic adaptation transform [S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N)$ per image, where $N$ is the number of pixels, dominated by the least squares solve and polynomial application [G].
+-**Memory Complexity:** $O(N)$ for storing the feature matrix and intermediate arrays [G].
+-**Strengths:** Effectively neutralizes global brightness and color shifts caused by autoexposure and white balance variations, allowing fair comparison between models [S1].
+-**Limitations:** Does not correct for local photometric inconsistencies or tone-mapping differences; primarily designed for evaluation rather than training [S1].
+-**When to use:** Evaluating view synthesis on datasets with uncontrolled camera settings where autoexposure/white balance varies between images [S1].
+-**When not to use:** Training neural fields, as the per-image least squares solve is computationally expensive and breaks gradient flow through the metric [G].
++- **Time Complexity:** $O(N)$ per image for the least squares fit, where $N$ is the number of valid pixels. The fit is solved once per image.
++- **Memory Complexity:** $O(N)$ to store pixel values during the fit.
++- **Strengths:** Mitigates the impact of autoexposure and white balance variations in uncontrolled datasets [S1]. Makes models like SVS and GLO quantitatively comparable [S1].
++- **Limitations:** Does not correct for spatially varying lighting or shadows, only global photometric shifts [S1]. Computationally adds overhead to evaluation [G].
++- **When to use:** Evaluating view synthesis on "in the wild" datasets like Tanks and Temples where camera settings are not fixed [S1].
++- **When not to use:** On controlled datasets with fixed photometry, or when spatially varying color errors are of interest [S1].
+ 
+ ## Background
+-The method was introduced in the context of evaluating Neural Radiance Fields on the Tanks and Temples dataset, where photometric variation makes standard evaluation metrics ill-posed [S1]. It builds on earlier work by Martin-Brualla et al. who investigated specialized training and evaluation procedures for such datasets [S1]. The approach was used to compare the Mip-NeRF 360 model with Stable View Synthesis (SVS) [S1].
++Originated in the context of evaluating neural radiance fields on unbounded, "in the wild" datasets [S1]. The challenge was identified as photometric variation (autoexposure, white balance, clipping) making evaluation ill-posed [S1]. The method was proposed to neutralize these variations during evaluation, allowing for fair comparison between different view synthesis models [S1]. It is distinct from training-time corrections, focusing solely on the evaluation phase [S1].
+ 
+ ## Sources

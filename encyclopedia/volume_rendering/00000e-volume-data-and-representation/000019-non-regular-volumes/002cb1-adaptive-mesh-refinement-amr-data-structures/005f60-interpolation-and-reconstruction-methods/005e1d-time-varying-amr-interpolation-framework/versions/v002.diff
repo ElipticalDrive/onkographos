@@ -1,0 +1,215 @@
+--- v001.md
++++ v002.md
+@@ -4,132 +4,116 @@
+ 
+ ## Overview
+-The Time-varying AMR Interpolation Framework is a method for visualizing adaptive mesh refinement (AMR) data that changes over time [S1, S2, unofficial]. It solves the problem of asynchronous update frequencies, where fine AMR patches are updated more frequently than coarse patches, leading to inconsistent refinement configurations between consecutive time steps [S1, S2, unofficial]. It sets itself apart from static AMR methods by explicitly synchronizing the topological structure of the mesh across time via interpolation, ensuring that rendering and analysis operate on a consistent geometric basis [S1, S2, unofficial].
++The Time-varying AMR Interpolation Framework is a method for visualizing time-varying Adaptive Mesh Refinement (AMR) data that addresses the inconsistency of refinement configurations between subsequent time steps [S1, S2, unofficial]. It solves the problem where finer AMR patches update more frequently than coarse patches by ensuring both time steps share an identical refinement configuration through interpolation, thereby enabling consistent feature tracking and rendering [S1, S2, unofficial]. It differs from static AMR interpolation by explicitly handling temporal evolution and remote data access for interpolated values [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Two subsequent time steps of AMR data, $T_i$ and $T_{i+1}$, each consisting of a hierarchy of patches with potentially different refinement levels and cell counts.
+-*   **Output:** Two time steps with identical refinement configurations (topology), where missing values in the less-refined step are populated via interpolation, enabling consistent temporal analysis [S1, S2, unofficial].
++**Inputs:** Two subsequent time steps of AMR simulation data ($T_i$ and $T_{i+1}$), where each time step consists of a hierarchy of patches with varying refinement levels.
++**Outputs:** Interpolated values for cells in the coarser time step that correspond to refined regions in the finer time step, and intermediate values for regions covered by coarser levels to ensure temporal consistency.
+ 
+ **Data Structures:**
+-The framework operates on the existing AMR data structure (patches, levels, and cells) as defined by the parent [Adaptive Mesh Refinement (AMR) Data Structures](5344-adaptive-mesh-refinement-amr-data-structures.md). No new global data structure is defined; instead, it modifies the value fields of the existing cells to enforce topological consistency [S1, S2, unofficial].
++The framework operates on the existing AMR data structure (e.g., octree or grid hierarchy). No new global data structure is defined; instead, it modifies the interpretation of existing cells during the interpolation phase. The refinement configuration is represented by a boolean mask or hierarchy tree indicating which parent cells are refined at each level for each time step.
+ 
+ **Steps:**
+-1.  **Configuration Synchronization:** Compare the refinement configuration of time step $T_i$ and $T_{i+1}$. Identify cells that are refined in one time step but not the other [S1, S2, unofficial].
+-2.  **Topological Alignment:** Ensure both time steps have the same refinement configuration. For any cell that is refined in $T_{i+1}$ but not in $T_i$ (or vice versa), the framework treats the cell as existing in both but lacking a valid value in the less-refined step [S1, S2, unofficial].
+-3.  **Interpolation of Missing Values:** Compute values for cells that are not refined in the current time step but are refined in the other. This is done by interpolating from the coarser level data that covers the same spatial region [S1, S2, unofficial].
+-4.  **Temporal Interpolation for Coarse Regions:** Define an interpolation scheme to compute intermediate values in regions covered by coarser levels, which are updated less frequently than fine patches. This ensures smooth temporal transitions in areas with low update frequency [S1, S2, unofficial].
+-5.  **Distributed Execution:** The framework automatically handles remote data access. Interpolated values are computed on the machine running the simulation, minimizing data transfer overhead [S1, S2, unofficial].
++1.  **Configuration Alignment:** Compare the refinement configuration of time step $T_i$ and $T_{i+1}$. Identify cells that are refined in one time step but not the other.
++    *   Let $R_i$ be the set of refined cells in $T_i$ and $R_{i+1}$ be the set of refined cells in $T_{i+1}$.
++    *   Identify the symmetric difference: cells in $R_i \setminus R_{i+1}$ and $R_{i+1} \setminus R_i$.
++2.  **Spatial Interpolation for Configuration Mismatch:** For any cell $c$ that is refined in $T_{i+1}$ but not in $T_i$ (or vice versa), compute the value for $c$ in the time step where it is not refined.
++    *   This is achieved by interpolating values from the neighboring cells that *are* refined in that specific time step.
++    *   The goal is to ensure that for every cell location, a value exists regardless of whether the local refinement level changed between $T_i$ and $T_{i+1}$ [S1, S2, unofficial].
++3.  **Temporal Interpolation for Coarse Regions:** Define an interpolation scheme to compute intermediate values in regions covered by coarser levels.
++    *   Since coarse levels are updated less frequently, values for intermediate time points or consistent spatial sampling in these regions must be interpolated from the available coarse data [S1, S2, unofficial].
++    *   This ensures that the visualization pipeline receives a temporally consistent dataset, preventing artifacts caused by asynchronous updates of fine and coarse patches.
++4.  **Remote Data Access and Computation:** The framework automatically handles remote data access.
++    *   Interpolated values are computed on the machine running the simulation (or the data source) rather than the visualization client [S1, S2, unofficial].
++    *   This reduces network bandwidth usage by sending only the necessary interpolated values rather than raw high-resolution data for every time step.
+ 
+ **Pseudocode:**
+ ```python
+-def synchronize_amr_time_steps(timestep_a, timestep_b):
++def time_varying_amr_interpolation(time_step_i, time_step_i_plus_1):
+     """
+-    Ensures timestep_a and timestep_b have identical refinement configurations
+-    by interpolating missing values in the less-refined step.
++    Ensures consistent refinement configuration and interpolates values
++    between two subsequent AMR time steps.
+     """
+-    # Step 1: Identify cells present in one but not the other
+-    # Cells are identified by their spatial location and level
+-    cells_in_a_only = get_cells_in_timestep(timestep_a) - get_cells_in_timestep(timestep_b)
+-    cells_in_b_only = get_cells_in_timestep(timestep_b) - get_cells_in_timestep(timestep_a)
++    # Step 1: Identify refinement configuration differences
++    # Get the set of refined cells for each time step
++    refined_i = get_refined_cells(time_step_i)
++    refined_i_plus_1 = get_refined_cells(time_step_i_plus_1)
+     
+-    # Step 2 & 3: Interpolate values for cells not refined in the current step
+-    # but refined in the other.
+-    # For each cell in cells_in_a_only, it exists in B's topology but lacks value.
+-    # Interpolate from the coarser level covering this cell's location.
+-    for cell in cells_in_a_only:
+-        cell.value = interpolate_from_coarser_level(cell, timestep_b)
++    # Find cells refined in i+1 but not in i
++    missing_in_i = refined_i_plus_1 - refined_i
++    # Find cells refined in i but not in i+1
++    missing_in_i_plus_1 = refined_i - refined_i_plus_1
++    
++    # Step 2: Interpolate values for cells with mismatched refinement
++    # For cells missing in time_step_i (but present in i+1), interpolate
++    # values from the refined neighbors in time_step_i
++    for cell in missing_in_i:
++        # Interpolate value for 'cell' using data from time_step_i
++        # The source does not specify the exact spatial interpolation kernel
++        # (e.g., trilinear, nearest neighbor). [G] Assume trilinear interpolation
++        # from the finest available neighbors in time_step_i.
++        value = interpolate_from_refined_neighbors(cell, time_step_i)
++        assign_value(time_step_i, cell, value)
+         
+-    for cell in cells_in_b_only:
+-        cell.value = interpolate_from_coarser_level(cell, timestep_a)
++    # For cells missing in time_step_i+1 (but present in i), interpolate
++    # values from the refined neighbors in time_step_i+1
++    for cell in missing_in_i_plus_1:
++        value = interpolate_from_refined_neighbors(cell, time_step_i_plus_1)
++        assign_value(time_step_i_plus_1, cell, value)
+         
+-    # Step 4: Interpolate intermediate values for coarse regions
+-    # Coarse regions are updated less frequently.
+-    # This step ensures temporal consistency in these regions.
+-    coarse_regions_a = get_coarse_regions(timestep_a)
+-    coarse_regions_b = get_coarse_regions(timestep_b)
++    # Step 3: Interpolate intermediate values for coarse regions
++    # Regions covered by coarser levels are updated less frequently.
++    # Compute intermediate values to ensure temporal consistency.
++    # The source does not specify the exact temporal interpolation scheme.
++    # [G] Assume linear interpolation between time_step_i and time_step_i_plus_1
++    # for cells in coarse regions.
++    coarse_regions_i = get_coarse_regions(time_step_i)
++    coarse_regions_i_plus_1 = get_coarse_regions(time_step_i_plus_1)
+     
+-    for region in coarse_regions_a:
+-        region.value = interpolate_temporal(region, timestep_b)
+-        
+-    for region in coarse_regions_b:
+-        region.value = interpolate_temporal(region, timestep_a)
+-        
+-    return timestep_a, timestep_b
++    for cell in coarse_regions_i:
++        if cell not in coarse_regions_i_plus_1:
++            # Interpolate temporal value if refinement level changed
++            pass # Implementation detail not specified in sources
++            
++    # Step 4: Handle remote data access
++    # The framework computes these interpolated values on the simulation machine.
++    # This step is architectural and does not require algorithmic pseudocode
++    # within the interpolation logic itself, but implies the output is
++    # transmitted to the visualization client.
++    return time_step_i, time_step_i_plus_1
+ 
+-def interpolate_from_coarser_level(cell, source_timestep):
++def interpolate_from_refined_neighbors(cell, time_step):
+     """
+-    Interpolates a value for a cell that is not refined in source_timestep
+-    but is refined in the target topology, using coarser data from source_timestep.
++    [G] Placeholder for specific spatial interpolation kernel.
++    Sources do not define the exact mathematical formula for this step.
+     """
+-    # Find the coarser cell(s) in source_timestep that cover this cell's spatial extent
+-    covering_cells = find_covering_cells(cell.spatial_extent, source_timestep)
+-    
+-    # Interpolate value from covering cells
+-    # [G] Specific interpolation kernel (e.g., trilinear, nearest neighbor) 
+-    # is not specified in sources. A standard weighted average is assumed.
+-    value = weighted_average(covering_cells)
+-    return value
+-
+-def interpolate_temporal(region, other_timestep):
+-    """
+-    Computes intermediate values for coarse regions updated less frequently.
+-    """
+-    # [G] The specific temporal interpolation scheme (e.g., linear, spline) 
+-    # is not detailed in the sources. Linear interpolation between time steps 
+-    # is the standard approach for such frameworks.
+-    value = linear_interpolate(region.value, other_timestep.value)
+-    return value
++    # Not given in the sources.
++    pass
+ ```
+ 
+ **Parameters:**
+-*   **Interpolation Scheme:** Not given in the sources.
+-*   **Remote Data Access:** Handled automatically by the framework [S1, S2, unofficial].
++*   **Interpolation Kernel:** Not specified in the sources. [G] Implementers must choose a spatial interpolation method (e.g., trilinear) for the refinement mismatch step.
++*   **Temporal Interpolation Scheme:** Not specified in the sources. [G] Implementers must choose a temporal interpolation method (e.g., linear) for coarse regions.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Interpolation introduces approximation errors, particularly in regions with high gradients [S1, S2, unofficial].
+-*   **Boundaries:** The framework assumes that coarser levels adequately cover the spatial extent of finer cells [S1, S2, unofficial].
+-*   **Degenerate Input:** If a cell has no covering coarser data (e.g., at domain boundaries or extreme refinement), interpolation may fail. This is not explicitly addressed in the sources.
++*   **Precision:** Interpolation introduces approximation errors, particularly when refining from very coarse to very fine levels.
++*   **Boundaries:** Interpolation at the boundaries of AMR patches must respect patch boundaries to avoid data leakage.
++*   **Degenerate Input:** If a cell is refined in one step but has no refined neighbors in the other step (e.g., isolated refinement), interpolation may fail or produce artifacts. The sources do not specify a fallback.
+ 
+ ## Subtopics
+ 
+-### Adaptive Octree Construction with 2:1 Balance and Surface Propagation
+-Focuses on octree-based AMR with specific balancing constraints. Choose when hierarchical balance is critical. [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md)
+-
+-### TET-AMR Data Structure
+-Uses tetrahedral elements for unstructured AMR. Choose when complex geometries require tetrahedralization. [TET-AMR Data Structure](1094-tet-amr-data-structure.md)
+-
+-### Homogeneity-Based KD-Tree Construction
+-Uses KD-trees for spatial partitioning based on data homogeneity. Choose for fast spatial queries in homogeneous regions. [Homogeneity-Based KD-Tree Construction](1325-homogeneity-based-kd-tree-construction.md)
+-
+ ### AMR Basis Reconstruction Filter
+-Focuses on reconstructing basis functions for accurate rendering. Choose when high-fidelity reconstruction is needed. [AMR Basis Reconstruction Filter](5581-amr-basis-reconstruction-filter.md)
+-
+-### Redundant coarse data bridging
+-Addresses data redundancy in coarse levels. Choose when memory efficiency is a priority. [Redundant coarse data bridging](11016-redundant-coarse-data-bridging.md)
+-
+-### VisIt UCD Conversion
+-Converts AMR data to VisIt's Universal Cell Data format. Choose for compatibility with VisIt. [VisIt UCD Conversion](11172-visit-ucd-conversion.md)
+-
+-### BSAMR Data Representation and SFC Indexing
+-Uses space-filling curves for AMR indexing. Choose for cache-efficient traversal. [BSAMR Data Representation and SFC Indexing](12139-bsamr-data-representation-and-sfc-indexing.md)
+-
+-### Octree-based AMR Data Splitting
+-Splits AMR data using octrees. Choose for hierarchical data management. [Octree-based AMR Data Splitting](12260-octree-based-amr-data-splitting.md)
+-
+-### AMR Volume Rendering via VTK Tetrahedralization
+-Renders AMR data using VTK's tetrahedralization. Choose for VTK-based rendering pipelines. [AMR Volume Rendering via VTK Tetrahedralization](15678-amr-volume-rendering-via-vtk-tetrahedralization.md)
++A sibling method focusing on basis function reconstruction for AMR data. It differs by emphasizing basis functions rather than explicit temporal configuration alignment. Choose when basis-based rendering is preferred over direct cell interpolation. [AMR Basis Reconstruction Filter](5581-amr-basis-reconstruction-filter.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. Depends on the number of cells in the symmetric difference of refinement configurations and the cost of the interpolation kernel.
++*   **Memory Complexity:** Not given in the sources. The framework requires storing interpolated values for cells that were not originally refined in a given time step, potentially increasing memory usage.
+ *   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Handles asynchronous update frequencies; ensures topological consistency; supports distributed execution [S1, S2, unofficial].
+-*   **Limitations:** Interpolation introduces errors; specific interpolation schemes are not defined [S1, S2, unofficial].
+-*   **When to use:** When visualizing time-varying AMR data with asynchronous update frequencies [S1, S2, unofficial].
+-*   **When not to use:** When exact topological consistency is not required or when interpolation errors are unacceptable [S1, S2, unofficial].
++*   **Strengths:** Ensures consistent visualization of features across time steps despite asynchronous AMR updates; reduces network bandwidth by computing interpolated values on the simulation machine.
++*   **Limitations:** Introduces interpolation artifacts; requires significant computational overhead to align refinement configurations and interpolate values for every time step pair.
++*   **When to Use:** When visualizing time-varying AMR data where fine patches update more frequently than coarse patches, and consistent feature tracking is required.
++*   **When Not to Use:** When real-time performance is critical and interpolation overhead is prohibitive, or when the AMR data is already temporally consistent.
+ 
+ ## Background
+-The framework was described by Kaehler et al. in 2005 [S1, S2, unofficial]. It addresses the challenges of visualizing AMR data where fine patches are updated more frequently than coarse patches [S1, S2, unofficial]. The framework is part of the broader effort to develop custom AMR visualization tools, alongside tools like ChomboVis and VisIt [S1, S2, unofficial].
++The framework was described by Kaehler et al. in 2005 [S1, S2, unofficial]. It was developed to address the challenges of visualizing time-varying AMR data, where the asynchronous update rates of fine and coarse patches lead to inconsistent refinement configurations between time steps. The method is part of a broader effort to create custom AMR visualization tools, alongside systems like ChomboVis and VisIt [S1, S2, unofficial].
+ 
+ ## Sources

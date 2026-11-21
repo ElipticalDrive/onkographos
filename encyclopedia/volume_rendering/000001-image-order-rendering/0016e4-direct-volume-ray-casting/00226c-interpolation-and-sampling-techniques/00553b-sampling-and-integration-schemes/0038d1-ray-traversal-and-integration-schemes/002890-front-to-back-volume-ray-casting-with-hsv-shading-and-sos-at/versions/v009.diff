@@ -1,0 +1,302 @@
+--- v008.md
++++ v009.md
+@@ -4,205 +4,111 @@
+ 
+ ## Overview
+-This method performs direct volume rendering by casting rays from the camera through each pixel into a 3D volume, sampling voxel values along the ray path, and compositing them front-to-back to produce the final pixel color [S1, unofficial]. It distinguishes itself from standard ray casting by utilizing a multi-component volume value (Scalar Output Scalar, Attenuation, Reflection) to drive filtering and shading, converting these values to RGB via HSV color space, and applying specific attenuation-based opacity scaling [S1, unofficial]. Unlike adaptive step methods, it typically employs a fixed number of steps with early termination based on opacity saturation or volume boundaries [S1, unofficial].
++This method is a direct volume rendering technique that casts rays from the camera through each pixel into a 3D volume, samples voxel values along the ray, and composites them front-to-back to produce the final pixel color [S1, unofficial]. It distinguishes itself by filtering samples based on three specific physical properties—Scalar Output Scalar (SOS), Attenuation, and Reflection—and mapping the valid data to color via the HSV color space before compositing [S1, unofficial]. It builds on [Ray Traversal and Integration Schemes](8341-ray-traversal-and-integration-schemes.md) using the accumulation reduction scheme.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs**:
+-    *   Volume data: Stored in 2D texture arrays (`uSliceMaps`) representing slices of the 3D volume [S1, unofficial].
+-    *   Geometry: A quad covering the screen, with vertex attributes `VerPos` (position) and `VerClr` (color/coordinates) [S1, unofficial].
+-    *   Parameters: `uStepsI` (number of steps, e.g., 144), `uOpacityVal` (opacity scaling factor), `step_size` (distance between consecutive sampling points, adjustable 0 to 1024.0), `minSos`, `maxSos`, `minAtten`, `maxAtten`, `minRefl`, `maxRefl` (filtering thresholds) [S1, unofficial].
+-    *   Textures: `uBackCoord` (2D texture storing exit points) and `uSliceMaps` (volume slices) [S1, unofficial].
+-*   **Outputs**:
+-    *   Final pixel color (`gl_FragColor`) [S1, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:**
++    *   `frontColor`: Entry point coordinates and background color, passed as a `vec4` varying from the vertex shader. The RGB components represent the 3D entry position in normalized device coordinates (NDC) or texture space [S1, unofficial].
++    *   `uBackCoord`: A 2D texture (`sampler2D`) storing the exit point coordinates for each pixel [S1, unofficial].
++    *   `uSliceMaps`: An array of 2D textures (`sampler2D[]`) representing the 3D volume data sliced along the Z-axis [S1, unofficial].
++    *   `uStepsI`: Integer constant defining the number of steps per ray (typically 144) [S1, unofficial].
++    *   `uOpacityVal`: Float uniform controlling the global opacity scaling factor [S1, unofficial].
++    *   `uSlicesOverX`, `uSlicesOverY`: Float uniforms defining the grid layout of the volume slices in the texture atlas [S1, unofficial].
++    *   `uNumberOfSlices`: Float uniform defining the total number of Z-slices in the volume [S1, unofficial].
++    *   `minSos`, `maxSos`, `minAtten`, `maxAtten`, `minRefl`, `maxRefl`: Float uniforms defining the valid ranges for the three volume components [S1, unofficial].
++*   **Outputs:**
++    *   `gl_FragColor`: The final composited color and alpha for the pixel [S1, unofficial].
+ 
+-**Data Structures**
+-*   **Volume Representation**: The 3D volume is decomposed into 2D slices [S1, unofficial]. The Z-coordinate is mapped to a slice index [S1, unofficial]. Slices are packed into sprite sheets (e.g., `uSlicesOverX` × `uSlicesOverY` slices per sprite) to fit within texture unit limits [S1, unofficial].
+-*   **Ray State**:
+-    *   `vpos`: Current 3D position along the ray (`vec3` or `vec4`) [S1, unofficial].
+-    *   `accum`: Accumulated color and alpha (`vec4`) [S1, unofficial].
+-    *   `sample`: Current sample's color and alpha (`vec4`) [S1, unofficial].
+-    *   `Step`: Direction vector scaled by step size (`vec3`) [S1, unofficial].
++**Data Structures:**
++*   **Volume Representation:** The 3D volume is stored as a stack of 2D textures (`uSliceMaps`). Each texture contains a subset of Z-slices arranged in a 2D grid of size `uSlicesOverX` by `uSlicesOverY` [S1, unofficial].
++*   **Ray State:**
++    *   `vpos`: `vec3` current position along the ray [S1, unofficial].
++    *   `accum`: `vec4` accumulated color and alpha [S1, unofficial].
++    *   `sample`: `vec4` temporary storage for the current sample's color and alpha [S1, unofficial].
++    *   `colorValue`: `vec4` intermediate storage for the mapped RGB and alpha values before compositing [S1, unofficial].
+ 
+-**Numbered Steps**
++**Numbered Steps:**
++1.  **Coordinate Transformation:** Calculate normalized texture coordinates `texC` from the fragment position `pos` (which is `MVP * vertex_position`) [S1, unofficial]:
++    $$ \text{texC} = \frac{(\text{pos}.xy / \text{pos}.w) + 1.0}{2.0} $$
++2.  **Exit Point Retrieval:** Sample the exit point from the back coordinate texture:
++    $$ \text{backColor} = \text{texture2D}(uBackCoord, \text{texC}) $$
++3.  **Ray Direction:** Compute the ray direction vector by subtracting the entry point from the exit point:
++    $$ \text{dir} = \text{backColor}.rgb - \text{frontColor}.rgb $$
++4.  **Initialization:**
++    *   Set current position `vpos` to the entry point: `vpos = frontColor` [S1, unofficial].
++    *   Calculate the step vector: `Step = dir / uStepsI` [S1, unofficial].
++    *   Initialize accumulation buffer: `accum = vec4(0, 0, 0, 0)` [S1, unofficial].
++    *   Initialize sample buffer: `sample = vec4(0, 0, 0, 0)` [S1, unofficial].
++5.  **Ray Loop:** Iterate `i` from 0 to `uStepsI - 1`:
++    a.  **Volume Sampling:** Retrieve the volume value at `vpos.xyz` using `getVolumeValue(vpos.xyz)`. This function maps the 3D coordinate to the appropriate 2D slice texture and performs bilinear interpolation within the slice [S1, unofficial]. Let the result be `gray_val` (a `vec3` representing SOS, Attenuation, and Reflection) [S1, unofficial].
++    b.  **Filtering:** Check if `gray_val` components fall outside their respective thresholds:
++        *   If `gray_val.z < 0.05` OR `gray_val.x < minSos` OR `gray_val.x > maxSos` OR `gray_val.y < minAtten` OR `gray_val.y > maxAtten` OR `gray_val.z < minRefl` OR `gray_val.z > maxRefl`:
++            *   Set `colorValue = vec4(0.0)` and skip to step 5f [S1, unofficial].
++    c.  **HSV Mapping:** If the sample passes filtering, compute `colorValue`:
++        *   $H = \text{gray\_val}.x$ (SOS)
++        *   $S = 1.0 - \frac{\text{gray\_val}.y}{0.6}$ (Attenuation mapped to Saturation) [S1, unofficial]
++        *   $V = \text{gray\_val}.z$ (Reflection)
++        *   $A_{raw} = 0.1$ (Base Alpha)
++        *   `colorValue = vec4(H, S, V, A_raw)` [S1, unofficial]
++    d.  **Alpha Adjustment:** Compute the sample alpha `sample.a` based on the raw alpha, opacity factor, and step count:
++        $$ \text{sample}.a = \text{colorValue}.a \times \text{uOpacityVal} \times \left(\frac{1.0}{\text{uStepsI}}\right) $$
++        *Note: Some implementations use a power function for alpha adjustment: `sample.a = 1.0 - pow(1.0 - colorSample.a, StepSize * 200.0)` [S1, unofficial]. The linear version is used in the primary loop description.*
++    e.  **Color Conversion:** Convert the HSV color to RGB:
++        $$ \text{sample}.rgb = (1.0 - \text{accum}.a) \times \text{hsv2rgb}(\text{colorValue}.rgb) \times \text{sample}.a $$
++    f.  **Accumulation:** Add the sample to the accumulator:
++        $$ \text{accum}.rgb += \text{sample}.rgb $$
++        $$ \text{accum}.a += \text{sample}.a \times (1.0 - \text{accum}.a) $$
++        *Note: The source code snippet shows `accum += sample` for RGB, but the standard front-to-back blending for alpha is `accum.a += (1.0 - accum.a) * sample.a` [S1, unofficial]. The RGB accumulation in the source `colorAcum.rgb += (1.0 - colorAcum.a) * colorSample.rgb * colorSample.a` implies the standard blending equation.*
++    g.  **Termination Check:** If `accum.a >= 1.0`, break the loop [S1, unofficial].
++    h.  **Position Advance:** Update position: `vpos.xyz += Step` [S1, unofficial].
++    i.  **Boundary Check:** If `vpos.x`, `vpos.y`, or `vpos.z` is outside the range $[0.0, 1.0]$, break the loop [S1, unofficial].
++6.  **Output:** Write `accum` to `gl_FragColor` [S1, unofficial].
+ 
+-1.  **Ray Initialization**:
+-    *   Calculate normalized texture coordinates from the fragment position: $texC = \frac{(pos.xy / pos.w) + 1.0}{2.0}$ [S1, unofficial].
+-    *   Retrieve the exit point (back color) from the `uBackCoord` texture: $backColor = \text{texture2D}(uBackCoord, texC)$ [S1, unofficial].
+-    *   Retrieve the entry point (front color) from the vertex shader varying: $frontColor$ [S1, unofficial].
+-    *   If entry equals exit, discard the fragment [S1, unofficial].
+-    *   Compute ray direction: $\mathbf{dir} = backColor.rgb - frontColor.rgb$ [S1, unofficial].
+-    *   Initialize current position: $\mathbf{vpos} = frontColor$ [S1, unofficial].
+-    *   Compute step vector: $\mathbf{Step} = \frac{\mathbf{dir}}{uStepsF}$, where $uStepsF = \text{float}(uStepsI)$ [S1, unofficial].
+-    *   Initialize accumulation buffer: $accum = (0, 0, 0, 0)$ [S1, unofficial].
+-
+-2.  **Ray Marching Loop** (for $i$ from 0 to $uStepsI - 1$):
+-    *   **Sampling**: Retrieve the multi-component volume value at $\mathbf{vpos.xyz}$: $gray\_val = \text{getVolumeValue}(\mathbf{vpos.xyz})$ [S1, unofficial]. The value $gray\_val$ is a `vec3` representing (SOS, Attenuation, Reflection) [S1, unofficial].
+-    *   **Filtering**: If any component of $gray\_val$ is outside its defined range, set $colorValue = (0, 0, 0, 0)$ and skip shading [S1, unofficial]:
+-        *   $gray\_val.z < 0.05$ OR
+-        *   $gray\_val.x < minSos$ OR $gray\_val.x > maxSos$ OR
+-        *   $gray\_val.y < minAtten$ OR $gray\_val.y > maxAtten$ OR
+-        *   $gray\_val.z < minRefl$ OR $gray\_val.z > maxRefl$ [S1, unofficial].
+-    *   **Shading (HSV Conversion)**:
+-        *   Map volume components to HSV-like RGB values [S1, unofficial]:
+-            *   $colorValue.x = gray\_val.x$ (Hue/SOS)
+-            *   $colorValue.y = 1.0 - \frac{gray\_val.y}{0.6}$ (Saturation/Attenuation)
+-            *   $colorValue.z = gray\_val.z$ (Value/Reflection)
+-            *   $colorValue.w = 0.1$ (Base Alpha) [S1, unofficial].
+-        *   Convert $colorValue.rgb$ from HSV to RGB: $rgb_{sample} = \text{hsv2rgb}(colorValue.rgb)$ [S1, unofficial].
+-    *   **Opacity Calculation**:
+-        *   Compute sample alpha: $\alpha_{sample} = colorValue.w \times uOpacityVal \times \frac{1.0}{uStepsF}$ [S1, unofficial].
+-        *   Adjust alpha for step size (attenuation): $\alpha_{sample} = 1.0 - (1.0 - \alpha_{sample})^{\text{StepSize} \times 200.0}$ [S1, unofficial].
+-    *   **Compositing**:
+-        *   Compute sample color contribution: $sample.rgb = (1.0 - accum.a) \times rgb_{sample} \times \alpha_{sample}$ [S1, unofficial].
+-        *   Update accumulation:
+-            *   $accum.rgb += sample.rgb$
+-            *   $accum.a += (1.0 - accum.a) \times \alpha_{sample}$ [S1, unofficial].
+-    *   **Termination Checks**:
+-        *   If $accum.a \ge 1.0$, break the loop (early ray termination) [S1, unofficial].
+-        *   Advance position: $\mathbf{vpos.xyz} += \mathbf{Step}$ [S1, unofficial].
+-        *   If $\mathbf{vpos.x}, \mathbf{vpos.y},$ or $\mathbf{vpos.z}$ is outside $[0.0, 1.0]$, break the loop (boundary check) [S1, unofficial].
+-
+-3.  **Output**:
+-    *   Output $accum$ as `gl_FragColor` [S1, unofficial].
+-
+-**Pseudocode**
+-
++**HSV to RGB Conversion:**
++The `hsv2rgb` function converts HSV values to RGB. Standard implementation:
+ ```python
+-import math
+-
+-def hsv_to_rgb(h, s, v):
+-    """Standard HSV to RGB conversion [G]."""
+-    if s == 0.0:
+-        return (v, v, v)
+-    i = int(h * 6)
+-    f = h * 6 - i
+-    p = v * (1 - s)
+-    q = v * (1 - f * s)
+-    t = v * (1 - (1 - f) * s)
+-    i %= 6
+-    if i == 0: return (v, t, p)
+-    if i == 1: return (q, v, p)
+-    if i == 2: return (p, v, t)
+-    if i == 3: return (p, q, v)
+-    if i == 4: return (t, p, v)
+-    return (v, p, q)
+-
+-def get_volume_value(pos, u_slices_over_x, u_slices_over_y, u_number_of_slices):
+-    """Retrieves volume value using slice-sprite packing logic [S1, unofficial].
+-    Simulates texture2D(uSliceMaps[tex1_index], texpos).xyz lookup."""
+-    slices_per_sprite = u_slices_over_x * u_slices_over_y
+-    s1_original = int(math.floor(pos[2] * u_number_of_slices))
+-    tex1_index = s1_original // slices_per_sprite
+-    s1 = s1_original % slices_per_sprite
+-    
+-    dx1 = (s1 % u_slices_over_x) / u_slices_over_x
+-    dy1 = (s1 // u_slices_over_y) / u_slices_over_y
+-    
+-    texpos_x = dx1 + (pos[0] / u_slices_over_x)
+-    texpos_y = dy1 + (pos[1] / u_slices_over_y)
+-    
+-    # In practice, this performs a 2D texture lookup on the packed slice sprite.
+-    # Returns a dummy vec3 for self-contained execution.
+-    return (0.5, 0.3, 0.8)
+-
+-def front_to_back_hsv_ray_casting(front_color, back_coord_texture, 
+-                                  u_steps_i, u_opacity_val, step_size, 
+-                                  min_sos, max_sos, min_atten, max_atten, 
+-                                  min_refl, max_refl, 
+-                                  u_slices_over_x=16, u_slices_over_y=16, 
+-                                  u_number_of_slices=144):
+-    """
+-    Simulates the GLSL fragment shader logic for front-to-back volume ray casting.
+-    Coordinates are expected in normalized volume space [0, 1].
+-    """
+-    # 1. Ray Initialization
+-    entry_point = front_color[:3]
+-    exit_point = back_coord_texture[:3]
+-    
+-    ray_dir = (exit_point[0] - entry_point[0], 
+-               exit_point[1] - entry_point[1], 
+-               exit_point[2] - entry_point[2])
+-    step_vec = (ray_dir[0] / u_steps_i, 
+-                ray_dir[1] / u_steps_i, 
+-                ray_dir[2] / u_steps_i)
+-    
+-    vpos = list(entry_point)
+-    accum = [0.0, 0.0, 0.0, 0.0] # r, g, b, a
+-    
+-    # 2. Ray Marching Loop
+-    for i in range(u_steps_i):
+-        # Sampling
+-        gray_val = get_volume_value(vpos, u_slices_over_x, u_slices_over_y, u_number_of_slices)
+-        sos, atten, refl = gray_val
+-        
+-        # Filtering
+-        if (refl < 0.05 or 
+-            sos < min_sos or sos > max_sos or 
+-            atten < min_atten or atten > max_atten or 
+-            refl < min_refl or refl > max_refl):
+-            color_value_rgb = (0.0, 0.0, 0.0)
+-            color_value_a = 0.0
+-        else:
+-            # Shading (HSV to RGB)
+-            h = sos
+-            s = 1.0 - (atten / 0.6)
+-            v = refl
+-            s = max(0.0, min(1.0, s)) # Clamp saturation
+-            
+-            color_value_rgb = hsv_to_rgb(h, s, v)
+-            color_value_a = 0.1 # Base alpha from source
+-            
+-        # Opacity Calculation
+-        base_alpha = color_value_a * u_opacity_val * (1.0 / u_steps_i)
+-        alpha_sample = 1.0 - math.pow(1.0 - base_alpha, step_size * 200.0)
+-        
+-        # Compositing
+-        sample_rgb = [(1.0 - accum[3]) * c * alpha_sample for c in color_value_rgb]
+-        
+-        accum[0] += sample_rgb[0]
+-        accum[1] += sample_rgb[1]
+-        accum[2] += sample_rgb[2]
+-        accum[3] += (1.0 - accum[3]) * alpha_sample
+-        
+-        # Termination
+-        if accum[3] >= 1.0:
+-            break
+-            
+-        # Advance
+-        vpos[0] += step_vec[0]
+-        vpos[1] += step_vec[1]
+-        vpos[2] += step_vec[2]
+-        
+-        # Boundary Check
+-        if not (0.0 <= vpos[0] <= 1.0 and 0.0 <= vpos[1] <= 1.0 and 0.0 <= vpos[2] <= 1.0):
+-            break
+-            
+-    return accum
++def hsv2rgb(h, s, v):
++    # h, s, v in [0, 1]
++    c = v * s
++    x = c * (1.0 - abs((h / 60.0) % 2 - 1.0))
++    m = v - c
++    if h < 60:
++        r, g, b = c, x, 0
++    elif h < 120:
++        r, g, b = x, c, 0
++    elif h < 180:
++        r, g, b = 0, c, x
++    elif h < 240:
++        r, g, b = 0, x, c
++    elif h < 300:
++        r, g, b = x, 0, c
++    else:
++        r, g, b = c, 0, x
++    return (r + m, g + m, b + m)
+ ```
+ 
+-**Parameters**
+-*   `uStepsI`: Integer constant, typically 144 [S1, unofficial].
+-*   `uOpacityVal`: Float controlling opacity scaling, e.g., 40 [S1, unofficial].
+-*   `step_size`: Distance between consecutive sampling points, adjustable 0 to 1024.0 [S1, unofficial].
+-*   `minSos`, `maxSos`: Float thresholds for SOS component [S1, unofficial].
+-*   `minAtten`, `maxAtten`: Float thresholds for Attenuation component [S1, unofficial].
+-*   `minRefl`, `maxRefl`: Float thresholds for Reflection component [S1, unofficial].
+-*   `bgColor`: Background color, default `(1.0, 1.0, 1.0, 0.0)` [S1, unofficial].
++**Parameters:**
++*   `uStepsI`: 144 [S1, unofficial].
++*   `uOpacityVal`: 40.0 (typical value from source) [S1, unofficial].
++*   `minSos`, `maxSos`, `minAtten`, `maxAtten`, `minRefl`, `maxRefl`: Configurable thresholds [S1, unofficial].
++*   `StepSize`: Adjustable via UI, range 0 to 1024.0 [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Coordinate Space**: The method expects entry/exit points and volume coordinates in normalized `[0.0, 1.0]` space [S1, unofficial].
+-*   **Out-of-bounds Access**: The loop breaks if `vpos` components exceed `[0.0, 1.0]` [S1, unofficial].
+-*   **Alpha Clamping**: Accumulated alpha can exceed 1.0 due to precision; it is clamped to 1.0 and the loop breaks [S1, unofficial].
+-*   **Filtering**: Samples outside the SOS/Attenuation/Reflection ranges are treated as transparent (alpha 0) [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Opaque Rays:** The loop breaks when `accum.a >= 1.0` to prevent unnecessary computation [S1, unofficial].
++*   **Out-of-Bounds Access:** The loop breaks if `vpos` exceeds $[0.0, 1.0]$ to prevent memory errors [S1, unofficial].
++*   **Alpha Clamping:** Accumulated alpha can exceed 1.0 due to floating-point precision; it should be clamped to 1.0 [S1, unofficial].
++*   **Ray Length:** Termination must account for the exact ray length to avoid sampling outside the volume [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of steps per ray (fixed at 144 in the reference implementation) [S1, unofficial].
+-*   **Memory Complexity**: $O(V)$ for volume storage, where $V$ is the number of voxels, stored in 2D texture arrays [S1, unofficial].
+-*   **Performance**: The fixed step count and early termination (on opacity saturation or boundary exit) provide predictable performance [S1, unofficial].
+-*   **Strengths**: Simple implementation, efficient early termination, flexible shading via HSV mapping [S1, unofficial].
+-*   **Limitations**: Fixed step size may lead to aliasing or slow convergence in sparse regions; not adaptive [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of steps per ray (fixed at 144 in the reference implementation) [S1, unofficial].
++*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels, stored in 2D texture atlases [S1, unofficial].
++*   **Performance:** The fixed step count provides predictable performance but lacks the adaptivity of gradient-based methods [S1, unofficial].
++*   **Strengths:** Simple implementation, efficient early termination, clear mapping of physical properties to visual attributes via HSV [S1, unofficial].
++*   **Limitations:** Fixed step size may lead to aliasing or slow convergence in sparse regions; HSV mapping is a heuristic and may not represent physical light transport accurately [S1, unofficial].
++*   **When to Use:** Real-time visualization of volumetric data where specific physical properties (SOS, Attenuation, Reflection) need to be highlighted [S1, unofficial].
++*   **When Not to Use:** High-fidelity scientific visualization requiring accurate light transport or adaptive sampling for complex density variations [S1, unofficial].
+ 
+ ## Background
+-This method is derived from direct volume ray casting techniques, specifically implemented in GLSL for real-time rendering [S1, unofficial]. It extends standard front-to-back compositing by incorporating multi-component volume data (SOS, Attenuation, Reflection) and HSV-based shading [S1, unofficial]. The implementation is based on a specific GitHub repository [S1, unofficial].
++This method is derived from a specific implementation of front-to-back volume ray casting using OpenGL shaders [S1, unofficial]. It utilizes a texture-based volume representation and HSV color mapping to visualize three distinct volume components [S1, unofficial].
+ 
+ ## Sources

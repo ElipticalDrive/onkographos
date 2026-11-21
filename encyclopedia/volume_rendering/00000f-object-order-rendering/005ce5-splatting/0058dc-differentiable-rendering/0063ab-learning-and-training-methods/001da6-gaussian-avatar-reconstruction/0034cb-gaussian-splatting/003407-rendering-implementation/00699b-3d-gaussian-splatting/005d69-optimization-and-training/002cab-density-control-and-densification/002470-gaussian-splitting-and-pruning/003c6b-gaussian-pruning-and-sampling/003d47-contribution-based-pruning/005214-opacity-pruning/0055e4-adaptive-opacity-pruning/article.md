@@ -1,0 +1,99 @@
+# Adaptive Opacity Pruning
+
+Also called: Adaptive opacity threshold pruning, dual-constrained opacity threshold pruning
+
+## Overview
+Adaptive opacity pruning is a dynamic strategy for removing visually insignificant and redundant Gaussian primitives during the optimization of 3D Gaussian Splatting (3DGS) to accelerate training and reduce model size [S1, unofficial]. Unlike standard 3DGS which uses a fixed opacity threshold (typically 0.01) for pruning, this method employs a percentile-based adaptive threshold constrained by an upper limit, addressing the suboptimality of fixed thresholds in eliminating unnecessary Gaussians while preserving structurally important ones [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The current set of $N$ Gaussian primitives, each with an opacity value $\alpha_i$.
+*   **Output:** A subset of Gaussian primitives retained after pruning.
+
+**Data Structures:**
+*   $\alpha \in \mathbb{R}^N$: A vector containing the opacity values of all $N$ Gaussian primitives.
+
+**Parameters:**
+*   $p$: Pruning ratio, controlling the percentile of Gaussians to prune. Default value is $0.03$ [S1, unofficial].
+*   $\tau_u$: Upper limit for the adaptive threshold. Default value is $0.05$ [S1, unofficial].
+
+**Steps:**
+1.  Extract the opacity vector $\alpha$ from the current set of $N$ Gaussian primitives.
+2.  Sort $\alpha$ in ascending order to obtain $\alpha_{sorted}$ [S1, unofficial].
+3.  Calculate the index $k$ corresponding to the $p$-th percentile:
+    $$ k = \lfloor N \cdot p \rfloor $$
+4.  Determine the raw adaptive threshold $\tau_k$ as the opacity value at index $k$:
+    $$ \tau_k = \alpha_{sorted}[k] $$
+5.  Apply the upper limit constraint to determine the final pruning threshold $\tau$:
+    $$ \tau = \min(\tau_k, \tau_u) $$
+6.  Prune all Gaussian primitives $i$ where $\alpha_i < \tau$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_opacity_pruning(opacities, pruning_ratio=0.03, upper_limit=0.05):
+    """
+    Prunes Gaussian primitives based on an adaptive opacity threshold.
+    
+    Args:
+        opacities (list[float]): List of opacity values for N Gaussians.
+        pruning_ratio (float): Percentile of Gaussians to prune (p).
+        upper_limit (float): Maximum allowed threshold value (tau_u).
+        
+    Returns:
+        list[float]: Opacities of the retained Gaussians.
+    """
+    N = len(opacities)
+    if N == 0:
+        return []
+    
+    # Sort opacities in ascending order
+    sorted_opacities = sorted(opacities)
+    
+    # Calculate index k
+    k = int(N * pruning_ratio)
+    
+    # Ensure k is within bounds (though p < 1 and N > 0 usually ensures k < N)
+    # If k == N, it means we are trying to prune 100%, but p is typically small.
+    # Standard floor operation: k = floor(N * p)
+    if k >= N:
+        k = N - 1
+        
+    # Get the raw threshold from the sorted list
+    tau_k = sorted_opacities[k]
+    
+    # Apply upper limit
+    tau = min(tau_k, upper_limit)
+    
+    # Prune Gaussians with opacity below tau
+    retained_opacities = [alpha for alpha in opacities if alpha >= tau]
+    
+    return retained_opacities
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The calculation of $k$ uses the floor function. If $N \cdot p$ is very small, $k$ may be 0, potentially pruning a large portion of the distribution if the upper limit is not restrictive enough or if the distribution is skewed.
+*   **Boundaries:** If $N$ is small, the percentile-based approach may behave erratically. The method assumes a sufficiently large number of primitives for the percentile to be meaningful [S1, unofficial].
+*   **Degenerate Input:** If all opacities are identical, $\tau_k$ will equal that value, and the upper limit will determine the outcome. If all opacities are below $\tau_u$, the threshold is determined by the $p$-th percentile.
+
+## Subtopics
+
+### Active Pruning
+Active pruning maintains the pruning strategy throughout the optimization process to reduce primitive redundancy without negatively impacting rendering performance [S2]. It involves rendering using only high-opacity primitives (threshold > 0.01) to verify that performance remains comparable, achieving up to a 25% reduction in the number of splatted primitives [S2]. This approach is supported by the observation that decreasing the number of splatted Gaussians within a certain range does not influence rendering performance, and fewer primitives can even yield slightly better results in some cases [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The sorting step dominates the complexity at $O(N \log N)$, where $N$ is the number of Gaussian primitives. The pruning step is $O(N)$. This is performed periodically during training, not every iteration, so the per-iteration overhead is low.
+*   **Memory Complexity:** $O(N)$ to store the opacity vector and the sorted copy.
+*   **Performance:** The method achieves an approximately 2× acceleration in training speed compared to baseline 3DGS implementations, with fewer Gaussian primitives and comparable or superior reconstruction quality [S1, unofficial].
+*   **Strengths:** Dynamically adapts to the distribution of opacities, preventing the suboptimal pruning associated with fixed thresholds. It effectively removes redundant primitives while preserving structural details.
+*   **Limitations:** Requires periodic sorting of all opacities. The effectiveness depends on the choice of $p$ and $\tau_u$.
+*   **When to use:** When training time is a bottleneck and the scene contains many redundant or insignificant Gaussian primitives.
+*   **When not to use:** When the scene is very small (few primitives) or when the distribution of opacities is highly non-uniform in a way that percentile-based pruning might remove important details.
+
+## Background
+Adaptive opacity pruning was introduced in the context of accelerating 3D Gaussian Splatting training. It addresses the limitations of the standard 3DGS pruning strategy, which resets opacities > 0.01 to 0.01 and prunes those < 0.01 [S1, unofficial]. The method was proposed to improve the efficiency of the densification and pruning pipeline, which is critical for large-scale scene reconstruction [S1, unofficial]. It is part of a broader effort to decompose densification operations to achieve faster convergence [S1, unofficial].
+
+## Sources
+[S1] Decomposing Densification in Gaussian Splatting for Faster 3D Scene Reconstruction, https://doi.org/10.48550/arXiv.2507.20239, fetched 2026-10-30 (unofficial)
+[S2] Mipmap-GS: Let Gaussians Deform with Scale-Specific Mipmap for Anti-Aliasing Rendering, https://doi.org/10.1109/3dv66043.2025.00091, fetched 2026-10-27

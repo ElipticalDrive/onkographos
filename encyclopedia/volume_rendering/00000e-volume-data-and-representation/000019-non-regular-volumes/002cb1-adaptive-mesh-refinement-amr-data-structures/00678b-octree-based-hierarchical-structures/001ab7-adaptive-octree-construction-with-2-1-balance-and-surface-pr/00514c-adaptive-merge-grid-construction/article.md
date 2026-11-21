@@ -1,0 +1,142 @@
+# Adaptive Merge Grid Construction
+Also called: Merge Grid Construction
+
+## Overview
+Adaptive Merge Grid Construction is a divide-and-conquer strategy that subdivides a spatial domain using an adaptive octree to localize Constructive Solid Geometry (CSG) operations [S1]. It solves the problem of complex patch relationships in implicit surface representations by ensuring each grid cell contains the simplest possible patch interaction, thereby improving robustness over global approaches [S1]. It differs from sibling methods like [Octree Balance Subdivision](847-octree-balance-subdivision.md) by focusing on topological simplicity (clique graphs) rather than geometric balance or error metrics.
+
+## How it works
+**Inputs:**
+*   Surface shape $S$ (implicit function or patch set).
+*   Initial merge grid $G$ (typically a single root cell or coarse octree).
+*   Maximal depth $d_{max}$ (integer, ensures computational practicality) [S1].
+
+**Outputs:**
+*   Refined merge grid $G$ where leaf cells contain simplified patch relationships [S1].
+
+**Data Structures:**
+*   **Cell $C$**: Represents a node in the octree.
+    *   $C.d$: Current depth level.
+    *   $C.sub$: Boolean flag indicating if the cell is eligible for further subdivision.
+    *   $S_C$: The subset of surface patches $S$ contained within cell $C$.
+*   **Adjacency Graph $g$**: A graph where nodes are patches in $S_C$ and edges represent adjacency/intersection relationships between patches.
+
+**Algorithm Steps:**
+1.  Initialize $G$ as an octree grid [S1].
+2.  Iterate while there exists at least one leaf cell $C$ in $G$ such that $C.sub$ is True [S1].
+3.  For each cell $C$ in $G$:
+    a. If $C.sub$ is False, skip to the next cell [S1].
+    b. If $S_C$ is not empty AND $C.d < d_{max}$:
+        i. Identify all connected components (graphs $g$) within the adjacency graph of cell $C$ [S1].
+        ii. For each connected graph $g$:
+            *   Check if $g$ is a clique graph (complete subgraph where every pair of distinct vertices is connected by a unique edge) [S1].
+            *   If $g$ is **not** a clique:
+                *   Subdivide $C$ into its 8 children $M$ [S1].
+                *   Set $C'.sub \leftarrow \text{True}$ for all $C' \in M$ [S1].
+                *   Break the inner loop (proceed to next cell or restart outer loop depending on implementation; the source implies breaking the current cell's processing to allow subdivision) [S1].
+        iii. If all connected graphs in $C$ are cliques (or no subdivision occurred because $S_C$ was empty or $d_{max}$ reached):
+            *   Set $C.sub \leftarrow \text{False}$ [S1].
+    c. Else (if $S_C$ is empty OR $C.d \ge d_{max}$):
+        *   Set $C.sub \leftarrow \text{False}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_merge_grid(S, G, d_max):
+    """
+    S: List of surface patches or implicit function definition
+    G: List of Cell objects representing the octree
+    d_max: Integer, maximum allowed depth
+    """
+    # Helper to check if a graph is a clique
+    def is_clique(graph):
+        # A graph with <= 2 nodes is trivially a clique
+        if len(graph.nodes) <= 2:
+            return True
+        # Check if every pair of distinct nodes has an edge
+        nodes = list(graph.nodes)
+        for i in range(len(nodes)):
+            for j in range(i + 1, len(nodes)):
+                if not graph.has_edge(nodes[i], nodes[j]):
+                    return False
+        return True
+
+    # Helper to get connected components of a graph
+    def get_connected_components(graph):
+        # Returns a list of subgraphs, each representing a connected component
+        # Implementation depends on graph library; here assumed available
+        return graph.connected_components()
+
+    # Helper to subdivide a cell
+    def subdivide(cell):
+        # Creates 8 child cells, inherits spatial bounds, sets depth = cell.depth + 1
+        # Assigns relevant patches S_C to children based on spatial containment
+        children = []
+        for i in range(8):
+            child = Cell()
+            child.parent = cell
+            child.depth = cell.depth + 1
+            child.sub = True # Initially marked as subdivisible
+            # Spatial partitioning logic [G]
+            children.append(child)
+        return children
+
+    # Main loop
+    while True:
+        subdivisible_found = False
+        for C in G:
+            if not C.sub:
+                continue
+            
+            # Check if cell contains patches and is within depth limit
+            if len(C.patches) > 0 and C.depth < d_max:
+                # Get adjacency graph for patches in this cell
+                adj_graph = build_adjacency_graph(C.patches)
+                
+                # Get connected components
+                components = get_connected_components(adj_graph)
+                
+                subdivided = False
+                for g in components:
+                    if not is_clique(g):
+                        # Not a clique, needs subdivision
+                        children = subdivide(C)
+                        # Replace C in G with children
+                        G.remove(C)
+                        G.extend(children)
+                        subdivided = True
+                        break # Break inner loop, restart outer while to process new cells
+                
+                if not subdivided:
+                    # All components are cliques, or no components
+                    C.sub = False
+            else:
+                # Empty cell or max depth reached
+                C.sub = False
+        
+        # Check if any cell was subdivided in this pass
+        # If no cell was subdivided, the loop terminates
+        # Note: The source uses "#subdivisible leaf cells > 0" which implies
+        # we track if any C.sub was set to True for new children.
+        # A robust implementation tracks if G changed.
+        if not any(C.sub for C in G):
+            break
+            
+    return G
+```
+
+**Edge Cases and Pitfalls:**
+*   **Disjoint Patches / Self-Intersections:** A leaf cell may contain multiple disconnected components in its adjacency graph (e.g., disjoint patches in close proximity or self-intersecting shapes) [S1].
+*   **Handling Disconnected Components:** The algorithm creates $Q$ copies of the cell, where $Q$ is the number of connected components. Each copy represents one connected component. Merge loss computation is assigned to these duplicated cells based on their corresponding patch identity [S1].
+
+## Operating characteristics
+*   **Complexity:** The complexity depends on the number of patches and the depth of the octree. Subdivision reduces the complexity of the adjacency graph in each cell by isolating non-clique interactions [S1].
+*   **Strengths:** Improves robustness of CSG operations by localizing them to cells with simple (clique) patch relationships [S1].
+*   **Limitations:** At $d_{max}$, some cells may still contain non-clique graphs, though the complexity is significantly reduced compared to the global case [S1].
+*   **Performance:** Empirically shown to be efficient, though specific benchmarks are not detailed in the source [S1].
+
+## Background
+The method is introduced in the context of "Patch-Grid," an efficient and feature-preserving neural implicit surface representation [S1]. It addresses the challenge of handling sharp geometric features (edges, corners) in implicit surfaces by simplifying the local patch interactions [S1].
+
+## Sources
+[S1] Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation, https://doi.org/10.1145/3727142, fetched 2026-10-28

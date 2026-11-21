@@ -1,0 +1,184 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** Network parameters $\theta$, learning rate $\eta$, location vectors $\{x_j\}$, outgoing directions $\{\omega_j\}$, incident directions $\{\omega_{in,j,k}\}$, and reference radiance values.
+-*   **Outputs:** Updated network parameters $\theta$.
++*   **Inputs:** Network parameters $\theta$, learning rate $\eta$, location vectors $\{x_j\}$, outgoing directions $\{\omega_j\}$, incident directions $\{\omega_{in,j,k}\}$, and reference radiance values [S1, unofficial].
++*   **Outputs:** Updated network parameters $\theta$ [S1, unofficial].
+ 
+ **Data Structures**
+@@ -25,5 +25,5 @@
+ 
+ **Algorithm**
+-The method replaces the standard L2 loss gradient with a semi-gradient estimator. The baseline minimizes the L2 distance between the left-hand side (LHS, outgoing radiance $L_\theta$) and the right-hand side (RHS, sum of emitted and reflected radiance $\langle R_\theta \rangle$). The semi-gradient loss $\langle L(\theta) \rangle_{SG}$ is defined as:
++The method replaces the standard L2 loss gradient with a semi-gradient estimator [S1, unofficial]. The baseline minimizes the L2 distance between the left-hand side (LHS, outgoing radiance $L_\theta$) and the right-hand side (RHS, sum of emitted and reflected radiance $\langle R_\theta \rangle$) [S1, unofficial]. The semi-gradient loss $\langle L(\theta) \rangle_{SG}$ is defined as:
+ 
+ $$
+@@ -33,11 +33,5 @@
+ where $\text{sg}(\cdot)$ is the stop-gradient operator, which blocks the flow of gradients through its argument [S1, unofficial]. The term $\epsilon$ is a small constant for numerical stability [G].
+ 
+-The gradient estimator for this loss eliminates the partial derivative with respect to the RHS:
+-
+-$$
+-\frac{\partial \langle R_\theta \rangle}{\partial \langle L(\theta) \rangle_{SG}} = 0
+-$$
+-
+-This prevents the network from pulling the RHS estimates towards the LHS, a behavior identified as the source of bias and high variance in the baseline [S1, unofficial].
++The gradient estimator for this loss eliminates the partial derivative with respect to the RHS, making $\frac{\partial \langle L(\theta) \rangle_{SG}}{\partial \langle R_\theta \rangle} = 0$ [S1, unofficial]. This prevents the network from pulling the RHS estimates towards the LHS, a behavior identified as the source of bias and high variance in the baseline [S1, unofficial].
+ 
+ **Pseudocode**
+@@ -49,9 +43,9 @@
+ 
+ class RadianceNetwork(nn.Module):
+-    def __init__(self):
++    def __init__(self, input_dim=512):
+         super().__init__()
+         # Seven linear layers, 512 units each
+         self.layers = nn.ModuleList([
+-            nn.Linear(512, 512) for _ in range(6)
++            nn.Linear(input_dim, 512) for _ in range(6)
+         ] + [nn.Linear(512, 512)]) # Last layer output
+         self.relu = nn.ReLU()
+@@ -65,5 +59,5 @@
+         return h
+ 
+-def semi_gradient_step(network, optimizer, positions, outgoing_dirs, incident_dirs, reference_radiance):
++def semi_gradient_step(network, optimizer, positions, outgoing_dirs, incident_dirs):
+     """
+     Performs one optimization step using the semi-gradient method.
+@@ -75,5 +69,4 @@
+         outgoing_dirs: Tensor of shape (N, 3) outgoing directions.
+         incident_dirs: Tensor of shape (N, M, 3) incident directions.
+-        reference_radiance: Tensor of shape (N,) reference radiance values.
+         
+     Returns:
+@@ -82,51 +75,29 @@
+     optimizer.zero_grad()
+     
+-    # 1. Evaluate LHS (Outgoing Radiance)
+-    # In a full implementation, this involves rendering the scene given the network's predictions
+-    # For the purpose of the gradient definition, we assume L_theta is computed.
+-    # Note: The actual L_theta computation involves the rendering engine (e.g., Mitsuba 3).
+-    # Here we simulate the forward pass of the network to get the radiance estimate.
+-    # The network takes encoded inputs.
++    # 1. Encode inputs
++    # Sources do not provide the hash encoding implementation; typically uses tiny-cuda-nn [S1, unofficial].
++    encoded_pos = hash_encode(positions)
++    encoded_dir = hash_encode(outgoing_dirs)
++    input_vec = torch.cat([encoded_pos, encoded_dir], dim=-1)
+     
+-    # Encode inputs (simplified)
+-    # encoded_pos = hash_encode(positions)
+-    # encoded_dir = hash_encode(outgoing_dirs)
+-    # input_vec = torch.cat([encoded_pos, encoded_dir], dim=-1)
++    # 2. Evaluate LHS (Outgoing Radiance)
++    L_theta = network(input_vec)
+     
+-    # L_theta: The predicted outgoing radiance (LHS)
+-    # In the paper, L_theta is the result of the rendering equation using the network's BSDF/radiance cache.
+-    # For the semi-gradient loss, we need the value of L_theta.
+-    L_theta = network(input_vec) # Placeholder for actual rendering output
+-    
+-    # 2. Evaluate RHS (Emitted + Reflected Radiance)
+-    # RHS is the sum of emitted radiance and reflected radiance integrated over incident directions.
+-    # R_theta = E_theta + integral(L_theta * f * cos_theta d_omega)
+-    # The paper uses Monte Carlo integration with M incident directions.
+-    
+-    # Sample incident directions (already provided in incident_dirs)
+-    # Evaluate radiance at incident directions using the network
+-    # This requires querying the network for the radiance coming from those directions.
+-    # Let's assume a helper function `get_radiance_at_direction` exists which queries the network.
+-    
+-    # Reflected radiance estimate <R_theta>
+-    # <R_theta> = sum( L_theta(omega_in) * f(omega_out, omega_in) * cos_theta ) / M
+-    # The paper simplifies this to a neural cache prediction.
+-    
+-    # To implement the semi-gradient, we compute <R_theta> but stop gradients through it.
++    # 3. Evaluate RHS (Emitted + Reflected Radiance)
++    # RHS is computed using Monte Carlo integration over incident directions.
++    # We compute this without tracking gradients to stop gradient flow.
+     with torch.no_grad():
+-        # Compute RHS estimate without tracking gradients
+-        # This involves querying the network for incident radiance and integrating.
+-        # For pseudocode clarity, we assume `compute_rhs_estimate` performs the MC integration
+-        # using the network's predictions for incident directions.
+-        R_theta = compute_rhs_estimate(network, positions, outgoing_dirs, incident_dirs)
++        # Encode incident directions
++        encoded_incident = hash_encode(incident_dirs)
++        # Query network for radiance at incident directions
++        incident_radiance = network(encoded_incident)
++        # Integrate over the hemisphere (simplified sum over M samples)
++        R_theta = torch.mean(incident_radiance, dim=1)
+         
+-    # 3. Compute Semi-Gradient Loss
+-    # Loss = || L_theta - sg(<R_theta>) ||^2 / (|| sg(L_theta) ||^2 + epsilon)
++    # 4. Compute Semi-Gradient Loss
+     epsilon = 1e-8
+     
+-    # Stop gradient on RHS
++    # Stop gradient on RHS (numerator) and LHS (denominator)
+     R_theta_sg = R_theta.detach()
+-    
+-    # Stop gradient on LHS in the denominator (as per Eq 7 in paper)
+     L_theta_sg = L_theta.detach()
+     
+@@ -136,35 +107,15 @@
+     loss = torch.mean(numerator / denominator)
+     
+-    # 4. Backpropagate
++    # 5. Backpropagate
+     loss.backward()
+     
+-    # 5. Update parameters
++    # 6. Update parameters
+     optimizer.step()
+     
+     return loss.item()
+ 
+-def compute_rhs_estimate(network, positions, outgoing_dirs, incident_dirs):
+-    """
+-    Computes the RHS estimate using Monte Carlo integration over incident directions.
+-    This function is executed within a no_grad context in the main loop.
+-    """
+-    # This is a simplified representation.
+-    # In practice, this involves:
+-    # 1. Querying the network for radiance at incident directions.
+-    # 2. Applying the BSDF (Bidirectional Scattering Distribution Function).
+-    # 3. Integrating over the hemisphere.
+-    
+-    # Assuming the network predicts the radiance cache value directly.
+-    # The incident directions are sampled uniformly over a hemisphere.
+-    
+-    # Query network for incident radiance
+-    # encoded_incident = hash_encode(incident_dirs)
+-    # incident_radiance = network(encoded_incident)
+-    
+-    # Integrate (simplified sum)
+-    # R_theta = torch.mean(incident_radiance, dim=1)
+-    
+-    # Return placeholder
+-    return torch.zeros_like(positions[:, 0])
++def hash_encode(x):
++    # Sources do not provide the hash encoding implementation; typically uses tiny-cuda-nn [S1, unofficial].
++    return torch.randn_like(x[..., :1]).expand_as(x)
+ ```
+ 
+@@ -177,5 +128,5 @@
+ 
+ ### Variance Reduced Gradient Estimator
+-A technique to expedite initial convergence by integrating neural path guiding. It uses additional neural caches to sample incident directions, reducing the variance of the Right Hand Side (RHS) estimates and subsequently the variance of the semi-gradient estimator [S1, unofficial]. The path guiding model consists of four linear layers of 256 units with three activations [S1, unofficial]. It is trained alongside radiance caches for 1,000 to 5,000 iterations, then held fixed for the remaining iterations [S1, unofficial]. It operates with next event estimation for multiple importance sampling to reduce variance [S1, unofficial]. This reduction mitigates visual artifacts during early training and accelerates error reduction, but does not impact the error at final convergence [S1, unofficial].
++A technique to expedite initial convergence by integrating neural path guiding [S1, unofficial]. It uses additional neural caches to sample incident directions, reducing the variance of the Right Hand Side (RHS) estimates and subsequently the variance of the semi-gradient estimator [S1, unofficial]. The path guiding model consists of four linear layers of 256 units with three activations [S1, unofficial]. It is trained alongside radiance caches for 1,000 to 5,000 iterations, then held fixed for the remaining iterations [S1, unofficial]. It operates with next event estimation for multiple importance sampling to reduce variance [S1, unofficial]. This reduction mitigates visual artifacts during early training and accelerates error reduction, but does not impact the error at final convergence [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -183,7 +134,7 @@
+ *   **Memory Complexity:** Lower memory usage than reverse-mode AD because intermediate activations for the RHS are not stored [S1, unofficial].
+ *   **Performance:** On average, the semi-gradient method decreases the error to the reference by 8.8 times across various scenes compared to the baseline [S1, unofficial]. In free-viewpoint video rendering, MAPE errors decrease by a factor of 2 to 35 times [S1, unofficial]. On the arXiv cover figure, the Baseline MAPE is 0.318 (1.0x) and the Semi-Gradient MAPE is 0.069 (4.6x) [S1, unofficial].
+-*   **Strengths:** Removes gradient bias and high variance associated with the RHS derivative. Faster convergence and lower final error.
++*   **Strengths:** Removes gradient bias and high variance associated with the RHS derivative. Faster convergence and lower final error [S1, unofficial].
+ *   **Limitations:** Convergence is not guaranteed for all scenes (only those satisfying energy absorption condition). Non-L2 losses (RMSE, Huber, MAE) still benefit (2-15 times lower error) but the theoretical justification is less robust than for L2 [S1, unofficial].
+-*   **When to use:** When training neural radiance caches for global illumination rendering and fast convergence is desired.
++*   **When to use:** When training neural radiance caches for global illumination rendering and fast convergence is desired [S1, unofficial].
+ *   **When not to use:** When strict theoretical convergence guarantees are required for all scene types, or when the scene is simple enough that stochasticity is low (where the baseline may perform comparably) [S1, unofficial].
+ 

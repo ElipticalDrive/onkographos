@@ -1,0 +1,356 @@
+--- v002.md
++++ v003.md
+@@ -3,132 +3,244 @@
+ 
+ ## Overview
+-This article catalogs specific loss function formulations and training routines used in radiance-field optimization, serving as the concrete implementation layer for the [Total Loss Function](4177-total-loss-function.md). It details how abstract loss components (photometric, geometric, regularization) are combined into scalar objectives for distinct architectures. It sets itself apart from [Total Variation Loss](7047-total-variation-loss.md) or [Numerical Gradient Eikonal Loss](9954-numerical-gradient-eikonal-loss.md) by providing the complete, weighted summation formulas and hyperparameter values for specific methods, rather than defining the individual regularization primitives.
++This family comprises concrete loss function formulations and training routines used in specific radiance-field optimization methods. It details how abstract regularization concepts (like photometric consistency or geometric priors) are instantiated in distinct architectures, ranging from neural implicit fields to Gaussian splatting and sparse voxel representations. These implementations differ in their component terms (e.g., Eikonal, closed-form color, PBR parameters) and their optimization schedules (e.g., delayed updates, early stopping).
+ 
+ ## Shared principles
+-The total loss $\mathcal{L}$ for a specific method is typically a weighted sum of component losses:
+-$$ \mathcal{L} = \sum_i w_i \mathcal{L}_i $$
+-where $\mathcal{L}_i$ represents a specific term (e.g., photometric, geometric, regularization) and $w_i$ is its corresponding weight. The components generally fall into three categories:
+-1.  **Reconstruction/Photometric Losses:** Measure the difference between rendered images $\mathbf{C}$ and ground-truth images $\mathbf{C}_{\text{gt}}$ (e.g., $L_1$, DSSIM, MSE) [S3, unofficial][S4][S5, unofficial].
+-2.  **Geometric/Regularization Losses:** Enforce physical priors such as smoothness (Total Variation), sparsity, or Eikonal constraints on the density or feature fields [S1, S4][S5, unofficial].
+-3.  **Auxiliary Losses:** Include distillation losses, depth consistency, or discriminator losses [S3, unofficial][S6].
+-
+-The optimization procedure may involve simultaneous or alternating updates of different model parameters (e.g., feature grids vs. transformation matrices) based on which loss terms provide gradients to those parameters [S6].
++Not given in the sources.
+ 
+ ## Subtopics
+ 
++### [HybridNeRF Optimization Loss](6045-hybridnerf-optimization-loss.md)
++The HybridNeRF optimization loss is a composite objective function designed to train neural radiance fields that blend volumetric and surface-based representations. It solves the problem of balancing photometric accuracy with geometric regularity by combining a standard photometric term with an Eikonal regularization term and an interlevel proposal loss. It is distinguished from sibling methods like [CF Loss](10573-cf-loss.md) by its specific integration of the Eikonal constraint to enforce signed distance field (SDF) properties and its use of a proposal network for efficient sampling.
++
++The method optimizes a total loss $\mathcal{L}(\mathbf{r})$ for a ray $\mathbf{r}$, defined as:
++$$ \mathcal{L}(\mathbf{r}) = \mathcal{L}_{\text{photo}}(\mathbf{r}) + \lambda_{\text{Eik}} \mathcal{L}_{\text{Eik}}(\mathbf{r}) + \mathcal{L}_{\text{prop}}(\mathbf{r}) $$
++
++1.  **Photometric Loss ($\mathcal{L}_{\text{photo}}$):** Measures the difference between rendered and ground-truth images. Typically implemented as $L_1$ or MSE.
++2.  **Eikonal Loss ($\mathcal{L}_{\text{Eik}}$):** Enforces the Eikonal equation $|\nabla S(\mathbf{x})| = 1$ for points sampled in free space or near surfaces, ensuring the predicted field represents a valid SDF.
++3.  **Interlevel Proposal Loss ($\mathcal{L}_{\text{prop}}$):** Regularizes the proposal network to ensure consistency between coarse and fine sampling levels.
++
++**Parameters:**
++*   $\lambda_{\text{Eik}}$: Weight for the Eikonal loss. Typical value: $0.01$.
++
++**Pseudocode:**
++```python
++def compute_hybridnerf_loss(rendered_color, gt_color, sdf_grad_norm, proposal_outputs):
++    # 1. Photometric Loss
++    # Standard L1 or MSE between rendered and ground truth
++    l_photo = mean_squared_error(rendered_color, gt_color)
++    
++    # 2. Eikonal Loss
++    # Target norm is 1.0 for SDF gradients
++    # Only applied to points in free space or near surfaces as per HybridNeRF's adaptive surfaceness
++    target_norm = 1.0
++    l_eik = mean_squared_error(sdf_grad_norm, target_norm)
++    
++    # 3. Interlevel Proposal Loss
++    # Consistency loss between proposal levels
++    l_prop = compute_proposal_consistency_loss(proposal_outputs)
++    
++    # 4. Total Loss
++    lambda_eik = 0.01  #
++    total_loss = l_photo + (lambda_eik * l_eik) + l_prop
++    
++    return total_loss
++```
++
++**Edge Cases and Pitfalls:**
++*   **Surfaceness Threshold:** Uniformly increasing the "surfaceness" parameter $\beta$ degrades rendering quality near fine-grained and transparent structures. The method uses spatially adaptive $\beta(x)$ via a $512^3$ voxel grid to mitigate this.
++*   **Gradient Precision:** The Eikonal loss requires accurate gradient computation of the SDF field. Numerical instability can occur if the network does not converge to a valid SDF prior to full optimization.
++
+ ### [CF Loss](10573-cf-loss.md)
+-CF Loss is a regularization term used in radiance-field optimization to mitigate shape-radiance ambiguity by providing explicit geometric supervision [10573-cf-loss]. Unlike standard photometric losses which are insensitive to false geometry (e.g., thick surfaces or floating artifacts), CF Loss focuses significantly more on geometric errors by comparing rendered images against a closed-form color estimate derived from the density field [10573-cf-loss]. It sets itself apart from ray-based losses like distortion or per-point RGB loss by directly penalizing discrepancies that arise when the density field fails to represent the true scene boundary [10573-cf-loss].
+-
+-### HybridNeRF Optimization Loss
+-The HybridNeRF method combines photometric, Eikonal, and proposal losses to train its adaptive volumetric surfaces [S1].
+-
+-**Formula:**
+-The total loss for a ray $\mathbf{r}$ is defined as:
+-$$ \mathcal{L}(\mathbf{r}) := \mathcal{L}_{\text{photo}}(\mathbf{r}) + \lambda_{\text{Eik}} \mathcal{L}_{\text{Eik}}(\mathbf{r}) + \mathcal{L}_{\text{prop}}(\mathbf{r}) $$
+-where $\mathcal{L}_{\text{photo}}$ is the photometric loss, $\mathcal{L}_{\text{Eik}}$ is the Eikonal loss, and $\mathcal{L}_{\text{prop}}$ is the interlevel proposal loss [S1].
+-
+-**Parameters:**
+-*   $\lambda_{\text{Eik}} = 0.01$ is the weight for the Eikonal loss term [S1].
++CF Loss is a regularization term used in radiance-field optimization to mitigate shape-radiance ambiguity by enforcing geometric consistency through a closed-form estimation of color. Unlike standard photometric losses that measure pixel-wise color differences, CF Loss computes the error between the rendered image and a color field reconstructed directly from the density and albedo fields without ray marching, thereby providing strong supervision signals specifically for geometric errors. It sets itself apart from sibling losses (e.g., photometric, distortion) by being significantly more sensitive to false geometry, such as thick or floating surfaces, which other losses often ignore.
++
++**Inputs and Outputs:**
++*   **Inputs:**
++    *   $\mathcal{R}_{cf}$: A set of $|\mathcal{R}_{cf}|$ rays sampled per iteration.
++    *   $\sigma(\mathbf{x})$: The density field value at position $\mathbf{x}$.
++    *   $\mathbf{c}(\mathbf{x})$: The color (albedo) field value at position $\mathbf{x}$.
++    *   $\mathbf{C}_{\text{rendered}}$: The standard volume-rendered color for the rays.
++    *   $\mathbf{C}_{\text{gt}}$: The ground-truth image colors for the rays.
++*   **Outputs:**
++    *   $\mathcal{L}_{cf}$: The scalar loss value.
++
++**Data Structures:**
++*   Rays are represented as origin $\mathbf{o}$ and direction $\mathbf{d}$ pairs.
++*   The closed-form color field is not stored as a separate grid but computed analytically from the existing density and color fields.
++
++**Method Steps:**
++1.  **Sample Rays:** Select $|\mathcal{R}_{cf}|$ rays from the training view.
++2.  **Compute Closed-Form Color:** For each ray, compute the color $\mathbf{C}_{cf}$ using the closed-form integration of the density and color fields. The closed-form color $\mathbf{C}_{cf}$ along a ray is derived from the integral of the color field weighted by the transmittance and density, effectively solving the volume rendering equation analytically or via a simplified approximation that assumes constant properties or specific field structures. *Note: The source describes the result as "rendered by the closed-form color field" and contrasts it with standard rendering, implying $\mathbf{C}_{cf}$ is a direct estimate of color based on the accumulated density and local color, bypassing the standard opacity-weighted accumulation if the field allows, or serving as a reference target.* Specifically, the loss is the difference between the standard rendered color and this closed-form estimate, or the difference between the closed-form estimate and the ground truth. The source states: "The errors can be reflected by the image rendered by the closed-form color field... this loss can be used to improve the geometry." The loss term is typically defined as the photometric error of this closed-form color against the ground truth or the standard render. Based on the context of "Reducing Shape-Radiance Ambiguity," the CF Loss $\mathcal{L}_{cf}$ is often formulated as:
++    $$ \mathcal{L}_{cf} = \| \mathbf{C}_{cf} - \mathbf{C}_{\text{gt}} \|_1 $$
++    or
++    $$ \mathcal{L}_{cf} = \| \mathbf{C}_{cf} - \mathbf{C}_{\text{rendered}} \|_1 $$
++    The source notes that CF loss accounts for 28% of loss in false regions, indicating it targets geometric discrepancies. The standard implementation in Plenoxels uses the closed-form color as a proxy for the "true" color given the current density, penalizing deviations that indicate geometric inconsistency.
++3.  **Calculate Loss:** Compute the $L_1$ norm (or similar) between the closed-form color $\mathbf{C}_{cf}$ and the ground truth $\mathbf{C}_{\text{gt}}$ (or the standard render) for the sampled rays.
++4.  **Aggregate:** Average the loss over the $|\mathcal{R}_{cf}|$ rays.
++5.  **Weight:** Multiply by the weight factor $\lambda$.
++
++**Pseudocode:**
++```python
++def compute_cf_loss(rays, density_field, color_field, gt_colors, lambda_cf, num_cf_rays):
++    """
++    Computes the Closed-Form Color Loss.
++    
++    Args:
++        rays: List of ray origins and directions.
++        density_field: Function/Structure to query density sigma(x).
++        color_field: Function/Structure to query color c(x).
++        gt_colors: Ground truth colors for the rays.
++        lambda_cf: Weight factor for the loss.
++        num_cf_rays: Number of rays to sample for CF loss calculation.
++        
++    Returns:
++        loss: Scalar CF loss value.
++    """
++    # Sample a subset of rays for CF loss calculation
++    # In practice, these might be the same rays as the main training or a specific subset
++    cf_rays = sample_rays(rays, num_cf_rays)
++    
++    total_loss = 0.0
++    count = 0
++    
++    for ray in cf_rays:
++        # 1. Compute Closed-Form Color
++        # The closed-form color C_cf is computed by integrating the color field
++        # weighted by the density/transmittance along the ray.
++        # In Plenoxels, this is often an analytical solution or a specific
++        # approximation that serves as a geometric prior.
++        # C_cf = integral( c(x) * sigma(x) * T(x) dx ) along the ray
++        # However, the "Closed-Form" aspect often implies a direct mapping
++        # or a simplified integration that highlights geometric errors.
++        # We assume a standard volume rendering integral for C_cf here,
++        # as the distinction lies in its use as a geometric regularizer.
++        c_cf = render_ray_closed_form(ray, density_field, color_field)
++        
++        # 2. Compute Photometric Error
++        # Compare the closed-form color against the ground truth
++        # or the standard rendered color. The source implies it targets
++        # geometric consistency, so comparing against GT is common.
++        # Using L1 loss as is standard in these contexts.
++        error = abs(c_cf - ray.gt_color)
++        
++        total_loss += error
++        count += 1
++        
++    if count > 0:
++        avg_loss = total_loss / count
++        return lambda_cf * avg_loss
++    else:
++        return 0.0
++
++def render_ray_closed_form(ray, density_field, color_field):
++    """
++    Renders a ray using the closed-form color estimation.
++    This typically involves integrating the color field weighted by
++    the density and transmittance.
++    """
++    # Discretize the ray into steps
++    steps = 32 # Typical number of samples, not given in sources [G]
++    ray_length = 1.0 # Assume normalized or known bounds [G]
++    step_size = ray_length / steps
++    
++    accumulated_color = 0.0
++    accumulated_transmittance = 1.0
++    
++    for i in range(steps):
++        # Sample point along the ray
++        t = i * step_size
++        x = ray.origin + t * ray.direction
++        
++        # Query fields
++        sigma = density_field(x)
++        c = color_field(x)
++        
++        # Volume rendering equation step
++        # alpha = 1 - exp(-sigma * step_size)
++        # T_next = T * (1 - alpha)
++        # color += T * (1 - exp(-sigma * step_size)) * c
++        
++        # Simplified Euler integration for demonstration
++        alpha = 1.0 - exp(-sigma * step_size)
++        accumulated_color += accumulated_transmittance * alpha * c
++        accumulated_transmittance *= (1.0 - alpha)
++        
++    return accumulated_color
++```
++
++**Parameters:**
++*   $\lambda$ (Weight factor): Controls the influence of CF loss. Typical values: 1, 2, 5, 10. Optimal range is 1-10. Values $\ge 20$ degrade performance.
++*   $|\mathcal{R}_{cf}|$ (Number of rays): Number of rays used for CF loss per iteration. Typical values: 10, 25. Higher values improve geometry but increase cost.
++
++**Edge Cases and Pitfalls:**
++*   **High Weight:** If $\lambda$ is too large (e.g., 20), the CF loss dominates training, causing PSNR to decrease because the color field cannot be well optimized while only the density field receives strong geometric supervision.
++*   **Computational Cost:** Increasing $|\mathcal{R}_{cf}|$ significantly increases training time (e.g., from 17 mins to 43 mins on DTU for 25 rays).
+ 
+ ### RocNet Loss Function
+-RocNet uses a recursive octree structure with a loss function composed of node labeling and leaf reconstruction components [S2].
+-
+-**Formula:**
+-The total loss is:
+-$$ L = L_l + L_r $$
+-where $L_l$ is the node labeling loss and $L_r$ is the leaf reconstruction loss [S2].
+-
+-The node labeling loss uses cross-entropy for 4 node types:
+-$$ L_l = - \sum_{i=1}^{4} c_i \log(s_i) $$
+-where $c_i$ is the ground-truth label and $s_i$ is the node classifier score for type $i$. The loss of an octree is the sum of label losses of all nodes [S2].
++RocNet uses a recursive octree structure where the loss function consists of two separate parts: the node labeling loss and the leaf reconstruction loss [S1].
++
++**Formula:**
++*   Total loss $L = L_l + L_r$, where $L_l$ is node labeling loss and $L_r$ is leaf reconstruction loss [S1].
++*   Node labeling loss $L_l = - \frac{1}{4} \sum_{i=1}^{4} c_i \log(s_i)$, where $c_i$ is ground-truth and $s_i$ is node classifier score for 4 node types. The loss of an octree is the sum of label losses of all nodes [S1].
+ 
+ ### Mobile-GS Training Loss
+-Mobile-GS optimizes for real-time rendering on mobile devices, combining rendering, distillation, and depth losses [S3, unofficial].
+-
+-**Formula:**
+-The rendering loss $\mathcal{L}_{\text{rgb}}$ balances $L_1$ and DSSIM:
+-$$ \mathcal{L}_{\text{rgb}} = \lambda \mathcal{L}_1(\mathbf{C}, \mathbf{C}_{\text{gt}}) + (1 - \lambda) \mathcal{L}_{\text{DSSIM}}(\mathbf{C}, \mathbf{C}_{\text{gt}}) $$
+-The total loss is:
+-$$ \mathcal{L} = \mathcal{L}_{\text{rgb}} + \lambda_{\text{distill}} \mathcal{L}_{\text{distill}} + \lambda_{\text{depth}} \mathcal{L}_{\text{depth}} $$
+-where $\mathcal{L}_{\text{distill}}$ is the distillation loss and $\mathcal{L}_{\text{depth}}$ is the depth loss [S3, unofficial].
+-
+-**Parameters:**
+-*   $\lambda = 0.8$ balances L1 and DSSIM [S3, unofficial].
+-*   $\lambda_{\text{distill}} = 1$ [S3, unofficial].
+-*   $\lambda_{\text{depth}} = 0.1$ [S3, unofficial].
++Mobile-GS optimizes a model for real-time rendering on mobile devices using a combination of rendering, distillation, and depth losses [S2, unofficial].
++
++**Formula:**
++*   Rendering loss: $\mathcal{L}_{\text{rgb}} = \lambda \mathcal{L}_1(\mathbf{C}, \mathbf{C}_{\text{gt}}) + (1 - \lambda) \mathcal{L}_{\text{DSSIM}}(\mathbf{C}, \mathbf{C}_{\text{gt}})$, where $\lambda$ balances L1 and DSSIM losses [S2, unofficial].
++*   Total loss: $\mathcal{L} = \mathcal{L}_{\text{rgb}} + \lambda_{\text{distill}} \mathcal{L}_{\text{distill}} + \lambda_{\text{depth}} \mathcal{L}_{\text{depth}}$ [S2, unofficial].
++
++**Parameters:**
++*   $\lambda$: Weight for L1 vs DSSIM in rendering loss. Value: 0.8 [S2, unofficial].
++*   $\lambda_{\text{distill}}$: Weight for distillation loss. Value: 1 [S2, unofficial].
++*   $\lambda_{\text{depth}}$: Weight for depth loss. Value: 0.1 [S2, unofficial].
+ 
+ ### ExBluRF Loss Function
+-ExBluRF handles extreme motion blur by minimizing photoconsistency between observed blurry images and rendered blurry colors, regularized by Total Variation and sparsity priors [S4].
+-
+-**Steps:**
+-1.  Apply Total Variation (TV) loss to both the density grid $G_\sigma$ and the SH coefficient grid $G_{sh}$ [S4].
+-
+-**Formula:**
+-The color consistency loss is:
+-$$ \mathcal{L}_{color} = \sum_{\mathbf{x} \in \mathcal{N}} \| \mathbf{C}(\mathbf{x}) - \hat{\mathbf{C}}_B(\mathbf{x}) \|_2^2 $$
+-where $\mathcal{N}$ is the set of training view pixels in a batch, $\mathbf{C}(\mathbf{x})$ is the observed blurry color, and $\hat{\mathbf{C}}_B(\mathbf{x})$ is the rendered blurry color [S4].
+-
+-The Total Variation loss is:
+-$$ \mathcal{L}_{TV} = \sum_{i,k} \sqrt{\partial_x \mathcal{G}_\sigma(\mathbf{v}_{i,k})^2 + \partial_y \mathcal{G}_\sigma(\mathbf{v}_{i,k})^2 + \partial_z \mathcal{G}_\sigma(\mathbf{v}_{i,k})^2} $$
+-where $\{\mathbf{v}_{i,k}\}_{i=1}^8$ are the 8 voxels containing sample point $k$, and derivatives are spatial gradients of density [S4].
+-
+-The sparsity prior is:
+-$$ \mathcal{L}_{s} = \sum_{k} \log(1 + 2\sigma_k^2) $$
+-where $\sigma_k$ is the volume density at sample point $k$. This leads to a sharp density distribution [S4].
+-
+-The combined loss is:
+-$$ \mathcal{L} = \mathcal{L}_{color} + \lambda_{TV}\mathcal{L}_{TV} + \lambda_s\mathcal{L}_s $$
+-[S4].
+-
+-**Parameters:**
+-*   $\lambda_{TV} = 5 \times 10^{-4}$ [S4].
+-*   $\lambda_s = 1 \times 10^{-12}$ [S4].
++ExBluRF handles extreme motion blur by minimizing photoconsistency loss with total variation and sparsity priors on voxel grids [S3].
++
++**Step:**
++*   Apply Total Variation (TV) loss to both density grid $G_\sigma$ and SH coefficient grid $G_{sh}$ [S3].
++
++**Formula:**
++*   Color loss: $\mathcal{L}_{color} = \sum_{\mathbf{x} \in \mathcal{N}} \| \mathbf{C}(\mathbf{x}) - \hat{\mathbf{C}}_B(\mathbf{x}) \|_2^2$, where $\mathcal{N}$ is the set of training view pixels in a batch, $\mathbf{C}(\mathbf{x})$ is the observed blurry color, and $\hat{\mathbf{C}}_B(\mathbf{x})$ is the rendered blurry color [S3].
++*   TV loss: $\mathcal{L}_{TV} = \sum_{i,k} \sqrt{\partial_x \mathcal{G}_\sigma(\mathbf{v}_{i,k})^2 + \partial_y \mathcal{G}_\sigma(\mathbf{v}_{i,k})^2 + \partial_z \mathcal{G}_\sigma(\mathbf{v}_{i,k})^2}$, where $\{\mathbf{v}_{i,k}\}_{i=1}^8$ are the 8 voxels containing sample point $k$, and derivatives are spatial gradients of density [S3].
++*   Sparsity loss: $\mathcal{L}_{s} = \sum_{k} \log(1 + 2\sigma_k^2)$, where $\sigma_k$ is the volume density at sample point $k$. This sparsity prior leads to sharp density distribution [S3].
++*   Combined loss: $\mathcal{L} = \mathcal{L}_{color} + \lambda_{TV}\mathcal{L}_{TV} + \lambda_s\mathcal{L}_s$ [S3].
++
++**Parameters:**
++*   $\lambda_{TV}$: Weight for total variation loss. Value: $5 \times 10^{-4}$ [S3].
++*   $\lambda_s$: Weight for sparsity loss. Value: $1 \times 10^{-12}$ [S3].
+ 
+ ### Multi-task Loss for Phys3DGS
+-Phys3DGS trains physically-based parameters (albedo, metalness, roughness) using a multi-task loss that includes PBR photometric loss, smoothness, and geometric regularizations [S5, unofficial].
+-
+-**Steps:**
+-1.  Train PBR-related parameters (albedo/base color, metalness, roughness, indirect illumination SH coefficients) using the deferred rendering pipeline [S5, unofficial].
+-2.  Apply bilateral smoothness loss to all BRDF parameters [S5, unofficial].
+-3.  Clamp base color and metallic to $[0, 1]$ [S5, unofficial].
+-4.  Scale and shift roughness to lie between $0.09$ and $1$ to prevent exceedingly strong specular reflectance [S5, unofficial].
+-
+-**Formula:**
+-$$ L_{total} = L_{L1} + L_{PBR} + \lambda_{smooth} L_{smooth} + \lambda_{o} L_{o} + \lambda_{sc} L_{sc} + \lambda_{sr} L_{sr} $$
+-where $L_{L1}$ is the volume rendering loss, $L_{PBR}$ is the photometric loss of PBR, $L_{smooth}$ is the bilateral smoothness loss, $L_o$ is the masked opacity regularization, $L_{sc}$ is the Gaussian scale regularization, and $L_{sr}$ is the surface regularization loss [S5, unofficial].
+-
+-**Parameters:**
+-*   Roughness range: Scaled and shifted to lie between $0.09$ and $1$ [S5, unofficial].
++Phys3DGS trains physically-based parameters (albedo, metalness, roughness) using a multi-task loss that includes PBR photometric loss, smoothness, and regularization terms [S4, unofficial].
++
++**Step:**
++*   PBR Training: Train PBR-related parameters (albedo/base color, metalness, roughness, indirect illumination SH coefficients) using the deferred rendering pipeline. Apply bilateral smoothness loss to all BRDF parameters. Clamp base color and metallic to [0, 1]. Scale and shift roughness to lie between 0.09 and 1 [S4, unofficial].
++
++**Formula:**
++*   $L_{total} = L_{L1} + L_{PBR} + \lambda_{smooth} L_{smooth} + \lambda_{o} L_{o} + \lambda_{sc} L_{sc} + \lambda_{sr} L_{sr}$, where $L_{L1}$ is volume rendering loss, $L_{PBR}$ is photometric loss of PBR, $L_{smooth}$ is bilateral smoothness loss, $L_o$ is masked opacity regularization, $L_{sc}$ is Gaussian scale regularization, $L_{sr}$ is surface regularization loss, and $\lambda$ are hyperparameters [S4, unofficial].
++
++**Parameters:**
++*   Roughness range: Scaled and shifted to lie between 0.09 and 1 to prevent exceedingly strong specular reflectance [S4, unofficial].
+ 
+ ### APMGSRN Training Routine
+-APMGSRN (Adaptively Placed Multi-Grid Scene Representation Networks) uses a decoupled training routine to update feature grids and transformation matrices separately [S6].
+-
+-**Steps:**
+-1.  Each training step has two parts: (1) update feature grid and decoder parameters using reconstruction loss $L_{rec}$, (2) update transformation matrices using density loss $L_{density}$ [S6].
+-2.  $L_{density}$ is the only loss providing gradients to update transformation matrices $G$. $L_{rec}$ is the only loss providing gradients to update feature grid values $F$ and decoder weights [S6].
+-3.  Step (1) happens every iteration. Step (2) is delayed to minimize updates and avoid negatively impacting reconstruction quality [S6].
+-4.  **Delayed Start:** Freeze transformation matrices for the first 500 iterations. Update them according to $L_{density}$ after that, once the model has seen enough data to identify low- and high-error regions [S6].
+-5.  **Early Stopping for Transformation Matrices:** Track $L_{density}$ each iteration. Set an early stopping flag when the 1000-iteration moving average of $L_{density}$ has not reduced by 0.01%. Alternatively, stop updating transformation matrices if this criteria is not met after 80% of total training steps [S6].
+-
+-**Numbers:**
+-*   A single APMGSRN model takes at most 4 minutes to train for 50k iterations. Often, grids converge quickly, reducing training time to as short as 40 seconds [S6].
++APMGSRN uses a decoupled training routine to update feature grids and transformation matrices separately, employing delayed starts and early stopping for the latter [S5].
++
++**Step:**
++*   Each training step has two parts: (1) update feature grid and decoder parameters using reconstruction loss $L_{rec}$, (2) update transformation matrices using density loss $L_{density}$ [S5].
++*   $L_{density}$ is the only loss providing gradients to update transformation matrices G. $L_{rec}$ is the only loss providing gradients to update feature grid values F and decoder weights [S5].
++*   Step (1) happens every iteration. Step (2) is delayed to minimize updates and avoid negatively impacting reconstruction quality [S5].
++*   Delayed Start: Freeze transformation matrices for the first 500 iterations. Update them according to $L_{density}$ after that, once the model has seen enough data to identify low- and high-error regions [S5].
++*   Early Stopping for Transformation Matrices: Track $L_{density}$ each iteration. Set an early stopping flag when the 1000-iteration moving average of $L_{density}$ has not reduced by 0.01%. Alternatively, stop updating transformation matrices if this criteria is not met after 80% of total training steps [S5].
++
++**Number:**
++*   A single APMGSRN model takes at most 4 minutes to train for 50k iterations. Often, grids converge quickly, reducing training time to as short as 40 seconds [S5].
+ 
+ ## Background
+-The specific implementations of loss functions in volume rendering and radiance fields have evolved from simple photometric reconstruction to complex multi-task objectives incorporating geometric priors, physical plausibility, and architectural-specific constraints.
+-
+-*   **HybridNeRF** [S1] introduced adaptive surfaceness and combined photometric, Eikonal, and proposal losses to improve efficiency and geometry quality.
+-*   **RocNet** [S2] utilized a recursive octree structure with a specific node labeling loss to guide the decoding process.
+-*   **Mobile-GS** [S3, unofficial] adapted 3D Gaussian Splatting for mobile devices, introducing distillation and depth losses alongside standard rendering losses.
+-*   **ExBluRF** [S4] addressed motion blur by incorporating Total Variation and sparsity priors to regularize voxel grids.
+-*   **Phys3DGS** [S5, unofficial] extended Gaussian Splatting for inverse rendering, adding PBR-specific losses and smoothness constraints.
+-*   **APMGSRN** [S6] focused on large-scale data visualization, proposing a decoupled training routine to handle adaptive grid placement.
+-
+-These methods illustrate the diversity of loss design in modern radiance-field optimization, tailored to specific architectural choices (voxels, Gaussians, octrees) and application requirements (real-time, physical accuracy, blur handling).
++The specific implementations in this family originate from various papers addressing different aspects of radiance field optimization, including neural implicit surfaces (HybridNeRF), sparse voxel representations (Plenoxels/CF Loss), recursive octrees (RocNet), mobile Gaussian splatting (Mobile-GS), motion blur handling (ExBluRF), physically-based rendering (Phys3DGS), and adaptive grid networks (APMGSRN). These methods were developed to address specific challenges such as shape-radiance ambiguity, training efficiency on mobile devices, handling of motion blur, and the decoupling of geometric and appearance parameters.
+ 
+ ## Sources
+-[S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+-[S2] RocNet: Recursive Octree Network for Efficient 3D Deep Representation, https://doi.org/10.1109/3dv50981.2020.00051, fetched 2026-10-26
+-[S3] Mobile-GS: Real-time Gaussian Splatting for Mobile Devices, https://doi.org/10.48550/arXiv.2603.11531, fetched 2026-10-29 (unofficial)
+-[S4] ExBluRF: Efficient Radiance Fields for Extreme Motion Blurred Images, https://arxiv.org/abs/2309.08957v3, fetched 2026-10-27
+-[S5] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)
+-[S6] Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization, https://doi.org/10.1109/tvcg.2023.3327194, fetched 2026-10-26+[S1] RocNet: Recursive Octree Network for Efficient 3D Deep Representation, https://doi.org/10.1109/3dv50981.2020.00051, fetched 2026-10-26
++[S2] Mobile-GS: Real-time Gaussian Splatting for Mobile Devices, https://doi.org/10.48550/arXiv.2603.11531, fetched 2026-10-29 (unofficial)
++[S3] ExBluRF: Efficient Radiance Fields for Extreme Motion Blurred Images, https://arxiv.org/abs/2309.08957v3, fetched 2026-10-27
++[S4] Phys3DGS: Physically-based 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2409.10335, fetched 2026-10-26 (unofficial)
++[S5] Adaptively Placed Multi-Grid Scene Representation Networks for Large-Scale Data Visualization, https://doi.org/10.1109/tvcg.2023.3327194, fetched 2026-10-26

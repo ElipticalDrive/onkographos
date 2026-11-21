@@ -1,0 +1,88 @@
+# Color Packing (RGBA)
+## Overview
+Color Packing (RGBA) compresses a 4-component floating-point color vector into a 4-byte unsigned integer array with 8-bit precision per channel [S1, unofficial]. It serves as a basic quantization step for storing volumetric color data in formats compatible with standard 8-bit texture units or network transmission [S1, unofficial].
+## How it works
+**Inputs:** A 4-component floating-point vector $C = [c_0, c_1, c_2, c_3]$ representing Red, Green, Blue, and Alpha channels [S1, unofficial].
+**Outputs:** A 4-byte unsigned integer array $B = [b_0, b_1, b_2, b_3]$ where each byte corresponds to a quantized channel [S1, unofficial].
+
+**Data Structure:**
+The output is a contiguous block of 4 bytes [S1, unofficial].
+- $b_0$: Quantized Red channel.
+- $b_1$: Quantized Green channel.
+- $b_2$: Quantized Blue channel.
+- $b_3$: Quantized Alpha channel [S1, unofficial].
+
+**Steps:**
+1. For each component index $i \in \{0, 1, 2, 3\}$:
+   a. Compute the scaled value: $v_i = c_i \times 255.0$ [S1, unofficial].
+   b. Cast $v_i$ to an 8-bit unsigned integer ($u8$) [G].
+   c. Assign the result to $b_i$ [S1, unofficial].
+
+**Formulas:**
+$$ b_i = \text{cast\_to\_u8}(c_i \times 255.0) $$
+where $c_i$ is the floating-point value of the $i$-th channel [S1, unofficial]. This maps the input range $[0.0, 1.0]$ to $[0, 255]$ [G].
+
+**Parameters:**
+- Scaling factor: $255.0$ [S1, unofficial].
+- Output type: `uint8_t` (8-bit unsigned integer) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Input Range:** The method assumes input values are in the range $[0.0, 1.0]$ [G]. Values outside this range will overflow or underflow the 8-bit integer representation [G]. For example, $c_i > 1.0$ results in a value $> 255$, which wraps or saturates depending on the casting implementation. $c_i < 0.0$ results in negative values, which wrap to large positive integers in unsigned arithmetic [G].
+- **Precision Loss:** Quantization to 8 bits introduces discretization error [G]. The maximum error per channel is $1/255 \approx 0.0039$ [G].
+- **Alpha Channel:** The alpha channel is treated identically to color channels [S1, unofficial]. If the alpha channel represents opacity, values outside $[0.0, 1.0]$ may lead to incorrect blending behavior [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_color_rgba(c: list[float]) -> list[int]:
+    """Packs a 4-component float color vector into a 4-byte unsigned integer array."""
+    if len(c) != 4:
+        raise ValueError("Input must be a 4-component vector.")
+    b = [0] * 4
+    for i in range(4):
+        b[i] = int(c[i] * 255.0) & 0xFF
+    return b
+```
+## Subtopics
+
+### [packDCColor](10310-packdccolor.md)
+Packs the DC spherical harmonic coefficient (RGB) and alpha into a single 32-bit unsigned integer for GPU texture storage. It differs from the parent method [Color Packing (RGBA)](5142-color-packing-rgba.md) by explicitly applying the DC spherical harmonic basis function scaling to the color channels before quantization, whereas the parent assumes raw float4 input.
+
+### RGBE HDR Encoding
+A minor variant for storing High Dynamic Range (HDR) color data in 4 bytes [S2, unofficial]. It encodes the maximum channel value as an exponent and the other channels as mantissas scaled by that exponent [S2, unofficial].
+
+**Steps:**
+1. Compute $d = \max(c_x, c_y, c_z)$ [S2, unofficial].
+2. If $d \le 10^{-32}$, return `HDRPixel(0, 0, 0, 0)` [S2, unofficial].
+3. Extract exponent $e$ and mantissa $m$ from $d$ using `frexp(d, &e)`, such that $d = m \times 2^e$ [S2, unofficial].
+4. Compute scale factor $s = m \times 256.0 / d$ [S2, unofficial].
+5. Return `HDRPixel` with components:
+   - $r = \text{uint8\_t}(c_x \times s)$
+   - $g = \text{uint8\_t}(c_y \times s)$
+   - $b = \text{uint8\_t}(c_z \times s)$
+   - $e = \text{uint8\_t}(e + 128)$ [S2, unofficial].
+
+**Parameters:**
+- Threshold: $10^{-32}$ to avoid division by zero [S2, unofficial].
+- Exponent bias: $128$ to keep the exponent positive in 8-bit storage [S2, unofficial].
+
+**Layout:**
+`HDRPixel`: 4-byte struct with fields `uint8_t r, g, b, e` in that order [S2, unofficial].
+
+**Pitfalls:**
+- Channel values $c_x, c_y, c_z$ can exceed $1.0$ after scaling, causing overflow when cast to `uint8_t` [S2, unofficial]. The code does not clamp them, relying on the HDR format's ability to store values $>1$ via the exponent [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ per pixel [G].
+**Memory Complexity:** $O(1)$ per pixel, reducing 16 bytes (4 floats) to 4 bytes (4 uint8s), achieving a 4:1 compression ratio [G].
+**Measured Performance:** Not given in the sources [G].
+**Strengths:** Simple to implement, low computational overhead, compatible with standard 8-bit texture formats [G].
+**Limitations:** Low precision (8-bit), no dynamic range adaptation (unlike RGBE), sensitive to input range assumptions [G].
+**When to use:** When storage or bandwidth is limited and the color data is known to be in the $[0, 1]$ range with acceptable quantization error [G].
+**When not to use:** When high dynamic range is required (use RGBE or 16-bit float) or when color accuracy is critical [G].
+## Background
+
+## Sources
+[S1] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)
+[S2] RNG65536/CUDA-volpath, https://github.com/RNG65536/CUDA-volpath, fetched 2026-10-26 (unofficial)

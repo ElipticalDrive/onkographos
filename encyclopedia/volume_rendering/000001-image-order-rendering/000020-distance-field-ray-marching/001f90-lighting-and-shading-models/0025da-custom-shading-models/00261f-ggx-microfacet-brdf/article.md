@@ -1,0 +1,174 @@
+# GGX Microfacet BRDF
+
+Also called: GGX BRDF, GGX Microfacet BRDF Model, GGX Microfacet Model, GGX Microfacet Specular Model, GGX Shading, Walter et al. Specular
+
+## Overview
+The GGX Microfacet BRDF models specular reflection by assuming the surface consists of microscopic facets with normals distributed according to the Generalized Trowbridge-Reiss (GGX) distribution [S1, unofficial][S3]. It sets itself apart from simpler models like Blinn-Phong by providing physically plausible energy conservation and accurate long-tail specular highlights for rough surfaces [S1, unofficial][S3]. It builds on [Custom Shading Models](3660-custom-shading-models.md) by replacing the empirical specular term with a rigorous microfacet formulation.
+
+## How it works
+**Inputs:**
+*   Surface normal $\mathbf{n}$ (unit vector).
+*   View direction $\mathbf{v}$ (unit vector, from surface to camera).
+*   Light direction $\mathbf{l}$ (unit vector, from surface to light).
+*   Roughness $\rho$ (scalar, typically $[0, 1]$).
+*   Diffuse albedo $K_d$ (RGB vector).
+*   Specular albedo $K_s$ (RGB vector, often derived from F0 for metals).
+
+**Outputs:**
+*   Diffuse radiance contribution $L_d$.
+*   Specular radiance contribution $L_s$.
+*   Total reflected radiance $L = L_d + L_s$.
+
+**Data Structures:**
+No complex data structures are required. The computation relies on scalar and vector arithmetic.
+
+**Parameters:**
+*   $\rho$: Roughness. Typical values range from 0.0 (smooth) to 1.0 (rough). In some implementations, $\rho$ is squared to get $\alpha$ [S1, unofficial][S3].
+*   $K_d$: Diffuse albedo.
+*   $K_s$: Specular albedo at normal incidence ($F_0$ for dielectrics, measured for metals).
+
+**Steps:**
+
+1.  **Compute Half Vector:**
+    Calculate the half-vector $\mathbf{h}$ between $\mathbf{v}$ and $\mathbf{l}$.
+    $$ \mathbf{h} = \frac{\mathbf{v} + \mathbf{l}}{\|\mathbf{v} + \mathbf{l}\|} $$
+    [G] If $\mathbf{v} \approx -\mathbf{l}$, $\mathbf{h}$ is undefined; use $\mathbf{n}$ or a default reflection vector.
+
+2.  **Compute Dot Products:**
+    $$ \mu_v = \mathbf{n} \cdot \mathbf{v} = \max(\mathbf{n} \cdot \mathbf{v}, 0.0) $$
+    $$ \mu_l = \mathbf{n} \cdot \mathbf{l} = \max(\mathbf{n} \cdot \mathbf{l}, 0.0) $$
+    $$ \mu_h = \mathbf{n} \cdot \mathbf{h} = \max(\mathbf{n} \cdot \mathbf{h}, 0.0) $$
+    $$ \mu_{lh} = \mathbf{l} \cdot \mathbf{h} = \max(\mathbf{l} \cdot \mathbf{h}, 0.0) $$
+    [S1, unofficial][S3]
+
+3.  **Compute Alpha:**
+    $$ \alpha = \rho^2 $$
+    [S1, unofficial][S3]
+
+4.  **Compute Normal Distribution Function (D):**
+    The GGX distribution describes the probability density of microfacet normals.
+    $$ D(\alpha, \mathbf{n}, \mathbf{h}) = \frac{\alpha^2}{\pi \left( (\alpha^2 - 1)\mu_h^2 + 1 \right)^2} $$
+    [S2, unofficial][S3]
+    [G] Add a small epsilon (e.g., $10^{-6}$) to the denominator to prevent division by zero when $\mu_h=1$ and $\alpha=1$ [S1, S2, unofficial].
+
+5.  **Compute Geometry Function (G):**
+    Two common variants exist.
+    
+    *Variant A (Smith Geometry, Unreal/Filament style):*
+    $$ k = \frac{(\rho + 1)^2}{8} $$
+    [S2, unofficial]
+    $$ G_1(\mathbf{n}, \mathbf{v}, \alpha) = \frac{\mu_v}{\mu_v(1 - k) + k} $$
+    [S2, unofficial]
+    $$ G_2(\alpha, \mathbf{n}, \mathbf{v}, \mathbf{l}) = G_1(\mathbf{n}, \mathbf{v}, \alpha) \cdot G_1(\mathbf{n}, \mathbf{l}, \alpha) $$
+    [S2, unofficial]
+    
+    *Variant B (Unreal Engine / NRRF style):*
+    $$ S(\alpha, \mathbf{n}, \mathbf{v}, \mathbf{l}) = \mu_l \sqrt{\alpha^2 + \mu_v^2(1 - \alpha^2)} $$
+    [S3]
+    $$ G_2(\alpha, \mathbf{n}, \mathbf{v}, \mathbf{l}) = \frac{1}{2(S(\alpha, \mathbf{n}, \mathbf{v}, \mathbf{l}) + S(\alpha, \mathbf{n}, \mathbf{l}, \mathbf{v}))} $$
+    [S3]
+
+6.  **Compute Fresnel Function (F):**
+    The Schlick approximation is standard.
+    $$ F(K_s, \mathbf{n}, \mathbf{l}) = K_s + (F_{90}(K_s) - K_s)(1 - \mu_{lh})^5 $$
+    [S3]
+    Where $F_{90}(K_s)$ is the reflectance at grazing angles.
+    $$ F_{90}(K_s) = \min\left(\frac{\text{lum}(K_s)}{0.04}, 1.0\right) $$
+    [S3]
+    $$ \text{lum}(C) = 0.213 C_r + 0.715 C_g + 0.072 C_b $$
+    [S3]
+    
+    For simple dielectrics with constant $F_0$:
+    $$ F(F_0, \mu_{lh}) = F_0 + (1 - F_0)(1 - \mu_{lh})^5 $$
+    [S1, unofficial]
+
+7.  **Compute Specular BRDF:**
+    $$ f_s(\mathbf{v}, \mathbf{l}) = \frac{D(\alpha, \mathbf{n}, \mathbf{h}) G_2(\alpha, \mathbf{n}, \mathbf{v}, \mathbf{l}) F(K_s, \mathbf{n}, \mathbf{l})}{4 \mu_v \mu_l} $$
+    [S3]
+    [G] Add epsilon to $4 \mu_v \mu_l$ to prevent division by zero [S2, unofficial].
+
+8.  **Compute Diffuse BRDF:**
+    $$ f_d(K_d) = \frac{K_d}{\pi} $$
+    [S3]
+
+9.  **Combine:**
+    $$ f_r(\mathbf{v}, \mathbf{l}) = f_d(K_d) + f_s(\mathbf{v}, \mathbf{l}) $$
+    [S3]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ggx_microfacet_brdf(n, v, l, roughness, kd, ks):
+    # 1. Half vector
+    h = normalize(v + l)
+    
+    # 2. Dot products
+    nv = max(dot(n, v), 0.0)
+    nl = max(dot(n, l), 0.0)
+    nh = max(dot(n, h), 0.0)
+    lh = max(dot(l, h), 0.0)
+    
+    # 3. Alpha
+    alpha = roughness * roughness
+    alpha2 = alpha * alpha
+    
+    # 4. D (GGX)
+    denom = (alpha2 - 1.0) * (nh * nh) + 1.0
+    D = alpha2 / (PI * denom * denom + 1e-6)
+    
+    # 5. G (Smith Geometry - Variant A)
+    k = ((roughness + 1.0) ** 2) / 8.0
+    g1_v = nv / (nv * (1.0 - k) + k + 1e-6)
+    g1_l = nl / (nl * (1.0 - k) + k + 1e-6)
+    G = g1_v * g1_l
+    
+    # 5. G (Smith Geometry - Variant B, alternative)
+    # s_v = nl * sqrt(alpha2 + nv * nv * (1.0 - alpha2))
+    # s_l = nv * sqrt(alpha2 + nl * nl * (1.0 - alpha2))
+    # G = 1.0 / (2.0 * (s_v + s_l) + 1e-6)
+    
+    # 6. F (Schlick)
+    lum_ks = 0.213 * ks.r + 0.715 * ks.g + 0.072 * ks.b
+    f90 = min(lum_ks / 0.04, 1.0)
+    F = ks + (f90 - ks) * ((1.0 - lh) ** 5)
+    
+    # 7. Specular BRDF
+    specular = (D * G * F) / (4.0 * nv * nl + 1e-6)
+    
+    # 8. Diffuse BRDF
+    diffuse = kd / PI
+    
+    # 9. Total
+    return diffuse + specular
+```
+
+## Subtopics
+
+### [Microfacet BRDF with Simplified GGX and Schlick Fresnel](10259-microfacet-brdf-with-simplified-ggx-and-schlick-fresnel.md)
+This method defines a surface reflectance function $R(\mathbf{x}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ that combines a specular microfacet term with a diffuse Lambertian term, incorporating specific simplifications from the Filament and Unreal Engine renderers. It sets itself apart from the parent [GGX Microfacet BRDF](3715-ggx-microfacet-brdf.md) by using a specific analytical form for the geometry function $G$ and embedding the incoming cosine term $(\mathbf{n} \cdot \boldsymbol{\omega}_i)$ directly into the specular denominator structure to simplify integration in neural radiance field contexts.
+
+### Multi-Scattering Energy Compensation for Rough Metals
+A method to ensure energy conservation for rough metals by compensating for energy lost in single-scattering GGX specular lobes, using a precomputed directional albedo table [S4, unofficial]. It uses a precomputed 32x32 directional albedo table $E(\mu, \alpha)$, where $\mu$ is cosine and $\alpha$ is roughness [S4, unofficial]. This ensures white rough metal reflects ~100% at every roughness, correcting the energy loss inherent in single-scattering approximations [S4, unofficial].
+
+### Specular Reflection
+Models perfectly smooth surfaces where outgoing radiance is not scattered but mirrors the incident trajectory across the surface normal [S5, unofficial]. The BRDF is defined as $f_{r,m} = \frac{\delta(\cos \theta_i - \cos \theta_r)}{\cos \theta_i} \delta(\phi_i - (\phi_r \pm \pi))$ where $\delta$ is the Dirac delta function, $\theta_i, \theta_r$ are incident and reflected polar angles, and $\phi_i, \phi_r$ are azimuthal angles [S5, unofficial]. The pitfall is that the Dirac delta function yields zero for any non-zero parameter mismatch, meaning no light is reflected if the geometric reflection conditions are not perfectly satisfied [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per shading point. The computation involves a few trigonometric-like operations (dot products, powers) and is significantly more expensive than Blinn-Phong but cheaper than full path tracing.
+*   **Memory Complexity:** $O(1)$. No large tables are required for the base model, though multi-scattering variants may require a small lookup table (e.g., 32x32) [S4, unofficial].
+*   **Performance:** On modern GPUs, this is highly efficient. The Schlick Fresnel and GGX D/G functions are cheap to evaluate.
+*   **Strengths:** Physically plausible appearance, handles a wide range of roughnesses, energy conserving (with proper Fresnel), widely supported in rendering engines.
+*   **Limitations:** Single-scattering approximation loses energy for very rough metals (addressed by multi-scattering variants) [S4, unofficial]. Does not account for subsurface scattering or complex thin-film effects without extensions.
+*   **When to use:** General-purpose physically based rendering (PBR) for rough surfaces.
+*   **When not to use:** Perfect mirrors (use Specular Reflection [S5, unofficial]), subsurface scattering, or when computational budget is extremely tight and visual fidelity is secondary (use Blinn-Phong).
+
+## Background
+The GGX microfacet model was introduced by Walter et al. in "Microfacet Models for Refraction through Rough Surfaces" (2007) [S1, unofficial]. It replaced the Beckmann distribution with the GGX (Generalized Trowbridge-Reiss) distribution, which provides a better fit for the long tails of specular highlights observed in real-world materials. The model is widely used in modern real-time and offline renderers, including Unreal Engine and Filament [S1, unofficial][S3].
+
+## Sources
+[S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
+[S2] TeoGrajqevci/RayMarching_tool, https://github.com/TeoGrajqevci/RayMarching_tool, fetched 2026-10-26 (unofficial)
+[S3] I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01
+[S4] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)
+[S5] Real-Time Global Illumination Using OpenGL And Voxel Cone Tracing, https://doi.org/10.48550/arxiv.2104.00618, fetched 2026-10-26 (unofficial)

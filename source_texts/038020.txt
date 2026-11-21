@@ -1,0 +1,182 @@
+An optional client extender for Neverwinter Nights: Enhanced Edition - Volumetric fog: an opt-in fog that lights the air, and tile lights as local ambient by xtul9 · Pull Request #91 · nwncxee/cx
+
+Volumetric fog: an opt-in fog that lights the air, and tile lights as local ambient by xtul9 · Pull Request #91 · nwncxee/cx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xtul9
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+Adds a second fog mode, vfog.enabled (off by default), that replaces the fog ramp with a lit volume, and changes how a tile's own lights shade everything. That tile-light change is not opt-in: it applies to every area, fog or not. The maintainer has looked at the fog in game across three rounds of tuning; the last fix (fog over a background with no skybox) has not been confirmed in game on its own.
+The fog volume
+A froxel grid over the main view (FogVolume, two compute passes after AO):
+cx_vfog_cs lights each froxel, then blends it with last frame's result reprojected onto the same point. It is lit by:
+the area's fog colour, pulled toward the sky average by vfog.sky;
+the sun through its shadow cascades, with a two-lobe phase function;
+every clustered lamp, with its cube shadows.
+cx_vfogsum_cs marches each column from the eye and stores in-scattered light and transmittance at every slice.
+Every stage that fogs reads the result through CxFog, CxFogFactor, CxFogReveal and CxFogSky, which branch on uVFog.x. Pass order and the deferred lights' weights are unchanged. Captures and reflections keep the ramp.
+The fog is built from what the area already sends: fog colour, start, end, the day/night state, the sun and the lights.
+Density: the area fog is a wall from start to end, measured from the player. It leaves 1% transmittance at the fog end, so the far plane stays hidden as with the stock fog.
+Height: the wall thins away across a fog bank whose top is vfog.top (15 m) above the eye.
+Sky: the sky reads the same ray as the geometry in front of it, so a silhouette cannot come out foggier than the sky behind it, and lamp glow carries onto the sky. The resolve exposes and tonemaps the part of a sky pixel's light that the fog put there, matching the fogged geometry beside it. With no dome at all, the resolve covers the bare clear colour with the volume itself.
+Sun: it is a share of the fog colour, not light added on top, so far fog stays the builder's colour on average. The moon lights no air.
+Lamps: the surface curve sharpened toward an inverse square whose strength grows with the light's reach (vfog.reach, default 0.1). Without this, every lamp glowed with the same peak brightness.
+Texture unit 32 holds the volume: it is the lit stage's 32nd active sampler. Native stage images move to unit 33 and up.
+Tile lights light as a local ambient
+A tile model's own lights (main lights and night windows, SceneDb.LitTile set) are now the ambient class everywhere:
+no N.L, no shadow, no highlight;
+in the fog, they add their surface curve without a phase or shadow.
+This applies even though vanilla's SetTileLights marks the main lights shadow-casting. Torches, the flame objects that tiles place, and placed lamps stay real light sources.
+Because these lights are no longer static, they leave the lightmap bake. Many areas now have nothing to bake, so the load-screen bake gets shorter or disappears, and those lights run live in the lit pass instead. Each one is cheap, but it is worth watching frame time in tile-dense areas.
+Knobs
+vfog group under Graphics » World. Only the master switch is a User row, because the submenu is at its 14-row cap; every dial is Advanced. The whole group is server-holdable through ServerPolicy.AllowKnobs("vfog."), documented in docs/ui-policy-contract.md (new "Volumetric fog" section).
+quality ladders on the effects quality: 96x54x48 up to 240x135x128 froxels.
+haze (default 0) and lights (default 0.15).
+reach (default 0.1).
+top (default 15 m).
+sun, sky, aniso, height, floor, noise, noisesize, wind.
+Chat-only: temporal and lightshadows.
+/vfog prints the medium, the bank top, the opaque distance, the ambient and the sun share.
+Checks
+build.sh.
+run-demo.sh: all self-checks pass. New ones:
+FogVolume.SelfCheck: the opacity budget against a numerically integrated ramp, the colours, the quality ladder, the server hold and the SceneFog arms.
+A DbLights check that a tile light is admitted as ambient, with no shadow and no bake.
+tools/gates/run.sh.
+check-shaders.py: 204 programs, all linked on the NVIDIA driver.
+build-win.sh passed on the first commit. The later commits add no hook, offset or OS-specific code, and were not cross-built again.
+Known limit: very tall geometry that crosses the far plane above the fog bank shows its clip edge.
+xtul9
+added 5 commits
+October 19, 2026 13:33
+Volumetric fog: an opt-in fog mode that lights the air (vfog.enabled)
+…
+440189e
+```
+A second fog the player (or a server, by policy) can switch on in place of the
+fog group's ramp. Off by default, so the current fog stays the default look.
+
+It is a froxel volume over the main view, the technique current engines use
+for volumetric fog. Each frame cx_vfog_cs lights every froxel: the area's fog
+colour (pulled toward the dome's average by vfog.sky) as the light the medium
+scatters, a share of it arriving as the sun's beam through the shadow cascades
+with a dual-lobe Henyey-Greenstein phase, and every clustered lamp through
+cx_lightfrag's own curve with its cube shadow. Samples are jittered inside the
+froxel and blended with last frame's re-projected answer. cx_vfogsum_cs then
+marches each column from the eye and stores in-scattered light and
+transmittance per slice, plus one slice for the sky.
+
+The medium comes from what the area already sends. Its fog end becomes an
+opacity budget: 1% transmittance on a ray out from the player at the fog end,
+so the far plane stays hidden as the ramp hides it. vfog.haze of that budget
+hangs in the open air, thinning above the player's feet and broken into
+patches that drift on the area's wind; the rest is a wall rising from the fog
+start to the end. The sky's march drops the wall above vfog.band, so the dome
+stays visible overhead. By day the sun takes a share of the fog colour rather
+than adding to it, so fully fogged geometry stays the builder's colour on
+average while shafts and shade show inside it. The moon lights no air: the
+share eases to zero on the night palette. Indoors there is no sun.
+
+Every stage that fogs reads the volume through the functions it already calls
+(CxFog, CxFogFactor, CxFogReveal, and the new CxFogSky for the two sky stages),
+so pass order and the deferred lights' transfer weights are unchanged. The
+volume sits on texture unit 32, the lit stage's 32nd sampler; native stage
+images move up to 33. Probe faces and the planar mirror keep the ramp. The far
+plane, the fog cull and the sky band follow the volume's shape while it is on.
+
+The vfog group is server-holdable whole (ServerPolicy.AllowKnobs("vfog.")), so
+a server can hold vfog.enabled=1 and its look; docs/ui-policy-contract.md says
+how. vfog.quality ladders on the Effects area, one step below it. The panel
+gets one row (the switch); the dials sit under Advanced, since World was at its
+row cap. Self-checks cover the opacity budget against a numerically integrated
+ramp, the far distance it implies, both colour terms, the grid ladder, the
+server hold and SceneFog's arms with the mode on.
+
+Not live-verified: built, self-checks green, every program compiles and links
+on the NVIDIA driver (check-shaders.py), but no in-game run yet.
+```
+Volumetric fog review: water and the skyfade band follow the volume; …
+…
+9cc5227
+```
+…self-check asserts properties
+
+From the two-axis review of the volumetric fog commit.
+
+- Water's refraction fades with the surface's own transmittance while the volume
+  draws, as its colour already did; the ramp's view-depth fade stays for the
+  ramp. The reflected ray keeps the ramp's fade: the frame it samples is already
+  fogged.
+- The skyfade gob takes the volume's direction-averaged light (FogVolume.Horizon)
+  rather than the ramp's target, so the band matches the horizon it hides.
+- A frame whose camera does not invert drops the volume's history, like every
+  other frame that builds no volume.
+- The self-check no longer restates the grid table and ladder it declares: it
+  asserts that every detail level names a grid and that more effects quality
+  never means fewer froxels.
+- OpaqueDistance takes the haze share as an argument instead of reading the knob.
+- Docs: the day/night section no longer says every renderer knob is the player's;
+  SceneFog.Cull and TextureSlots.SkyMap state their contracts as they now are.
+```
+Volumetric fog: one air for sky and ground, lamps by reach, tile ligh…
+…
+6efbccb
+```
+…ts as local ambient
+
+- The sky reads the same integral as the geometry in front of it: the wall thins across a fog bank's top
+  (vfog.top, metres above the eye, replacing vfog.band), so a silhouette cannot part from the sky behind it and
+  lamp glow carries over the sky. The resolve grades the share of a sky pixel's light the fog put there like
+  the fogged geometry beside it.
+- A lamp lights the air as an inverse square whose intensity grows with its reach, equal to the surface curve
+  at half its reach: lamps of different strength no longer glow alike.
+- A tile model's own lights (main lights, night windows) are the ambient class everywhere: no direction, no
+  shadow, no highlight, and out of the lightmap bake. In the fog they add their surface curve, unphased.
+- Defaults: vfog.haze 0, vfog.lights 0.15.
+```
+Volumetric fog: lamp strength by reach is a dial (vfog.reach), and a …
+…
+29bea2d
+```
+…domeless sky takes the fog
+
+- vfog.reach (0..1, default 0.5) is the exponent on the lamps' reach boost: 0 lights every lamp alike, 1 is
+  the full inverse square by reach the last change shipped as the only behaviour (too strong live).
+- With no sky dome, the far pixels are the bare clear colour and no fogging stage ever ran over them, so a
+  lamp's glow stopped at the last silhouette. The resolve now covers them with the volume's whole ray.
+```
+Volumetric fog: vfog.reach defaults to 0.1
+7385850
+Hide details
+View details
+xtul9
+merged commit 2c65de8
+into
+main
+Oct 19, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+xtul9
+deleted the
+owners/xtul/volumetric-fog
+branch
+October 19, 2026 17:56
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

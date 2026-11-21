@@ -1,0 +1,193 @@
+# Differentiable uncalibrated imaging optimization
+
+Also called: Joint optimization of volume and measurement coordinates, Uncalibrated tomographic reconstruction via differentiable rendering
+
+## Overview
+This method jointly optimizes the volume reconstruction (radiance field) and the measurement coordinates (e.g., view angles, detector positions) by minimizing a differentiable objective function using automatic differentiation [S1, unofficial]. It addresses the problem of uncalibrated imaging where the geometric parameters of the acquisition system are unknown or uncertain. Unlike methods that assume fixed camera poses, this approach treats measurement coordinates as trainable parameters alongside the scene representation, allowing for simultaneous refinement of geometry and appearance [S1, unofficial]. It builds on [Staged and Alternating Optimization](12945-staged-and-alternating-optimization.md) by integrating coordinate optimization into the primary training loop rather than separating it into distinct phases.
+
+## How it works
+The method minimizes an objective function that combines a data fidelity term (reconstruction error) and a regularization term weighted by $\lambda$ [S1, unofficial]. The scene is represented either by an Implicit Neural Network (NN) or by Splines (specifically NURBS) [S1, unofficial]. The measurement coordinates are optimized as learnable parameters.
+
+**Inputs:**
+- Measured projection images.
+- Initial estimates of measurement coordinates (angles, detector positions).
+- Initial scene representation parameters (NN weights or spline coefficients).
+
+**Outputs:**
+- Optimized scene representation (volume/radiance field).
+- Optimized measurement coordinates.
+
+**Data Structures:**
+1. **Implicit Neural Network:** A multi-layer perceptron mapping input coordinates (e.g., spatial position, view angle) to density and color. The input coordinates for angular data are encoded as their cosine to handle circularity [S1, unofficial].
+2. **Spline Representation:** NURBS surfaces for 2D measurement coordinates, defined as tensor products of 1D NURBS curves [S1, unofficial].
+3. **Optimization State:** Adam optimizer state for both network parameters and measurement coordinates.
+
+**Numbered Steps:**
+1. **Initialize:** Set up the scene representation (NN or Spline) and measurement coordinates. Initialize the Adam optimizer with specific learning rates for network parameters and input coordinates [S1, unofficial].
+2. **Forward Pass:** Compute the rendered image $\hat{C}$ from the current scene representation and measurement coordinates using the volume rendering equation.
+3. **Compute Loss:** Calculate the loss $L$ as the sum of the reconstruction error and the regularization term $\lambda R$ [S1, unofficial].
+4. **Backward Pass:** Use automatic differentiation to compute gradients of $L$ with respect to both the scene parameters and the measurement coordinates [S1, unofficial].
+5. **Update:** Update both the scene parameters and the measurement coordinates using the Adam optimizer [S1, unofficial].
+6. **Check Termination:** If the absolute difference in loss between successive iterations is below the threshold, terminate. Otherwise, return to Step 2.
+
+**Formulas:**
+The objective function is:
+$$
+L = L_{data} + \lambda R
+$$
+where $L_{data}$ is the reconstruction error, $R$ is the regularization term, and $\lambda$ is the regularization weight [S1, unofficial].
+
+**Parameters:**
+- **Implicit NN:**
+  - Iterations: 8,000 to 20,000 [S1, unofficial].
+  - Termination threshold: $1 \times 10^{-10}$ for 2D CT, $1 \times 10^{-11}$ for 3D CT [S1, unofficial].
+  - Regularization $\lambda$: 0.1 for both 2D and 3D [S1, unofficial].
+  - Learning rates:
+    - 2D: NN params $5 \times 10^{-4}$, input coords $5 \times 10^{-4}$ [S1, unofficial].
+    - 3D: NN params $1 \times 10^{-3}$, input coords $1 \times 10^{-4}$ [S1, unofficial].
+- **Spline:**
+  - Iterations:
+    - With angle/tilt uncertainty: 2,000 to 5,000 [S1, unofficial].
+    - Detector-only uncertainty: 6,000 to 15,000 [S1, unofficial].
+  - Termination threshold: $1 \times 10^{-11}$ for all cases [S1, unofficial].
+  - Regularization $\lambda$:
+    - 2D angle-only: 0.025 [S1, unofficial].
+    - 2D detector-only: 0.25 [S1, unofficial].
+    - 3D: 0.6 [S1, unofficial].
+  - Learning rates:
+    - 2D: NN params $5 \times 10^{-2}$, input coords $2 \times 10^{-4}$ [S1, unofficial].
+    - 3D: NN params $5 \times 10^{-3}$, input coords $1 \times 10^{-4}$ [S1, unofficial].
+
+**Pitfalls:**
+- **Circularity of Angles:** Angular measurement coordinates are circular. Using raw angles causes discontinuities at $\pm\pi$. The implementation must encode circularity by passing the cosine of the view angle as the input coordinate to the implicit NN [S1, unofficial].
+- **Precision:** Termination thresholds are very small ($10^{-10}$ to $10^{-11}$), requiring high-precision arithmetic to avoid premature termination or oscillation [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def differentiable_uncalibrated_optimization(measurements, initial_coords, initial_scene_params, method='nn', modality='2d'):
+    """
+    Jointly optimize scene and measurement coordinates.
+    
+    Args:
+        measurements: List of measured projection images.
+        initial_coords: Initial measurement coordinates (angles, detector positions).
+        initial_scene_params: Initial scene representation parameters.
+        method: 'nn' for implicit neural network, 'spline' for NURBS.
+        modality: '2d' or '3d'.
+        
+    Returns:
+        Optimized scene parameters and measurement coordinates.
+    """
+    # Initialize scene representation
+    if method == 'nn':
+        scene = ImplicitNeuralNetwork(initial_scene_params)
+    elif method == 'spline':
+        scene = NURBSSurface(initial_scene_params)
+    else:
+        raise ValueError("Method must be 'nn' or 'spline'")
+
+    # Initialize measurement coordinates as trainable parameters
+    coords = torch.tensor(initial_coords, requires_grad=True)
+
+    # Set hyperparameters based on method and modality
+    if method == 'nn':
+        if modality == '2d':
+            lr_scene = 5e-4
+            lr_coords = 5e-4
+            lambda_reg = 0.1
+            max_iter = 20000
+            min_iter = 8000
+            threshold = 1e-10
+        else: # 3d
+            lr_scene = 1e-3
+            lr_coords = 1e-4
+            lambda_reg = 0.1
+            max_iter = 20000
+            min_iter = 8000
+            threshold = 1e-11
+    elif method == 'spline':
+        # Determine uncertainty type for lambda and iter range
+        # Assuming uncertainty_type is passed or inferred
+        # For simplicity, we use a placeholder for uncertainty_type
+        uncertainty_type = 'angle' # Placeholder: 'angle', 'detector', '3d'
+        
+        if uncertainty_type == 'angle':
+            lambda_reg = 0.025
+            max_iter = 5000
+            min_iter = 2000
+        elif uncertainty_type == 'detector':
+            lambda_reg = 0.25
+            max_iter = 15000
+            min_iter = 6000
+        else: # 3d
+            lambda_reg = 0.6
+            max_iter = 15000
+            min_iter = 6000
+            
+        if modality == '2d':
+            lr_scene = 5e-2
+            lr_coords = 2e-4
+        else: # 3d
+            lr_scene = 5e-3
+            lr_coords = 1e-4
+        threshold = 1e-11
+
+    # Initialize optimizer
+    optimizer = torch.optim.Adam([
+        {'params': scene.parameters(), 'lr': lr_scene},
+        {'params': [coords], 'lr': lr_coords}
+    ])
+
+    prev_loss = float('inf')
+    
+    for i in range(max_iter):
+        optimizer.zero_grad()
+        
+        # Encode angular coordinates if using NN
+        if method == 'nn' and 'angle' in coords:
+            # Replace raw angles with cosine to handle circularity
+            coords_encoded = coords.clone()
+            # Assuming angle is at a specific index or handled internally by scene
+            # This is a simplified representation
+            coords_encoded['angle'] = torch.cos(coords['angle'])
+        else:
+            coords_encoded = coords
+            
+        # Forward pass: render image
+        rendered_image = scene(coords_encoded)
+        
+        # Compute loss
+        loss_data = compute_reconstruction_error(rendered_image, measurements)
+        loss_reg = compute_regularization(scene)
+        loss = loss_data + lambda_reg * loss_reg
+        
+        # Backward pass
+        loss.backward()
+        
+        # Update
+        optimizer.step()
+        
+        # Check termination
+        if i >= min_iter and abs(prev_loss - loss.item()) < threshold:
+            break
+            
+        prev_loss = loss.item()
+        
+    return scene.parameters(), coords
+```
+
+## Operating characteristics
+- **Time Complexity:** The optimization loop runs for a fixed number of iterations (8,000–20,000 for NN, 2,000–15,000 for splines) [S1, unofficial]. Each iteration involves a forward and backward pass through the scene representation, which is $O(N)$ where $N$ is the number of samples per ray [44-radiance-field-optimization.md].
+- **Memory Complexity:** Using automatic differentiation, the memory usage is $O(kn)$ where $n$ is the number of pixels and $k$ is the number of samples, unless explicit gradients are used [44-radiance-field-optimization.md]. The sources do not specify if explicit gradients are used for this specific method, but the use of Adam and PyTorch suggests standard AD [S1, unofficial].
+- **Strengths:** Simultaneously refines geometry and appearance, handling uncalibrated setups without prior knowledge of exact poses [S1, unofficial].
+- **Limitations:** Computationally expensive due to the large number of iterations and the need to optimize both scene and coordinate parameters [S1, unofficial]. Sensitive to initialization and hyperparameters [S1, unofficial].
+- **When to use:** When camera poses or detector positions are unknown or uncertain, and high-precision reconstruction is required [S1, unofficial].
+- **When not to use:** When computational resources are limited or when accurate calibration is already available [S1, unofficial].
+
+## Background
+The method was introduced in "Differentiable Uncalibrated Imaging" [S1, unofficial]. It leverages differentiable rendering and automatic differentiation to solve the joint optimization problem of volume reconstruction and measurement coordinates. The implementation uses PyTorch for automatic differentiation and Adam optimizer [S1, unofficial]. NURBS surfaces are implemented by modifying the PyTorch source code from the NURBS-Diff module [S1, unofficial].
+
+## Sources
+[S1] Differentiable Uncalibrated Imaging, https://doi.org/10.48550/arXiv.2211.10525, fetched 2026-10-26 (unofficial)

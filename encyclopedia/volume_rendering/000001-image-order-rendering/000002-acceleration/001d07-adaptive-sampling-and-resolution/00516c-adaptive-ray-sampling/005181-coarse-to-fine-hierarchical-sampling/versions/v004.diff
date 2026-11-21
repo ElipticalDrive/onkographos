@@ -1,0 +1,64 @@
+--- v003.md
++++ v004.md
+@@ -1,41 +1,40 @@
+ # Coarse-to-Fine Hierarchical Sampling
+ 
+-Also called: Hierarchical Sampling, Two-Stage Sampling, Proposal Sampling
++Also called: Hierarchical Sampling, Two-Stage Sampling
+ 
+ ## Overview
+-Coarse-to-Fine Hierarchical Sampling is a strategy that uses a lightweight "coarse" network to estimate the opacity distribution along a ray, then uses that estimate to guide a denser, "fine" sampling pass. It solves the problem of inefficient uniform sampling by concentrating computational effort in regions of high opacity while skipping free space . It sets itself apart from uniform sampling by clustering additional samples near opaque regions identified by the coarse pass, and from single-network variants like [Mip-NeRF 360 Proposal Sampling](5408-mip-nerf-360-proposal-sampling.md) by maintaining two distinct MLPs with separate parameters .
++Coarse-to-Fine Hierarchical Sampling is a strategy that decouples the estimation of a scene's opacity distribution from the final color prediction to improve rendering quality and computational efficiency [S1]. It solves the problem of sparse uniform sampling missing high-frequency details by first querying a coarse network to identify opaque regions, then clustering a denser set of fine samples around those regions [S1]. Unlike standard uniform sampling, which distributes points evenly across the entire ray segment, this method concentrates computational effort where the scene geometry is present, allowing the fine network to learn detailed textures without the prohibitive cost of uniformly dense sampling [S1].
+ 
+ ## Shared principles
+-The family shares the mechanism of decoupling the estimation of the sampling distribution from the final color/density prediction.
++The core mechanism shared by all children is the deviation from a fixed, uniform sampling strategy [G]. Instead of casting a constant number of rays or samples per pixel/ray, the method computes a metric (such as gradient magnitude, rendering error, or temporal difference) and uses it to modulate the sampling rate or resolution [G].
+ 
+-1.  **Coarse Estimation:** A coarse network $\text{MLP}_{coarse}$ is queried at $N_C$ uniformly (or stratified) spaced depths $t_c$ along the ray $[\mathbf{o}, \mathbf{d}]$. It outputs raw densities $\sigma_c$ and colors $\mathbf{c}_c$.
+-2.  **Weight Computation:** Alpha compositing is applied to the coarse outputs to compute weights $w_c$:
+-    $$ \alpha_i = 1 - \exp(-\hat{\sigma}_i \delta_i) $$
+-    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \hat{\sigma}_j \delta_j\right) $$
+-    $$ w_i = \alpha_i T_i $$
+-    where $\delta_i$ is the segment length and $\hat{\sigma}$ may include noise .
+-3.  **Hierarchical Sampling:** $N_F$ new depths $t_f$ are sampled from the distribution defined by $w_c$. This is typically done via inverse transform sampling using the cumulative distribution function (CDF) of $w_c$ .
+-4.  **Gradient Cut:** The coarse samples $t_c$ and weights $w_c$ are detached from the computation graph before hierarchical sampling to prevent gradients from flowing back through the non-differentiable sampling step to the coarse network .
+-5.  **Fine Rendering:** The coarse and fine depths are concatenated, sorted, and queried by $\text{MLP}_{fine}$. The final color is rendered using alpha compositing on the fine samples .
++Mathematically, this often involves a control loop:
++1. **Metric Evaluation:** Compute a scalar value $M$ representing local complexity or error [G].
++2. **Adaptation:** Adjust a parameter $P$ (step size $\Delta t$, resolution $R$, or sampling probability $w$) based on $M$ [G].
++3. **Rendering/Training:** Execute the volume integral or loss computation with the adjusted parameter [G].
++
++Common adaptation laws include:
++* **Step Size Adaptation:** $\Delta t \propto \frac{1}{M}$ or $\Delta t = \min(\Delta t_{max}, \max(\Delta t_{min}, \frac{k}{M}))$ [G].
++* **Resolution Control:** $R_{new} = R_{old} + \alpha \cdot (t_{target} - t_{actual})$ or threshold-based switching [G].
++* **Probability Weighting:** $w_i \propto M_i$ for importance sampling [G].
++
++All methods in this family aim to maintain visual fidelity while reducing the total number of volume queries [S1].
+ 
+ ## Subtopics
+ 
+ ### [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md)
+-The canonical implementation using stratified uniform coarse sampling and inverse transform sampling for the fine pass. It uses a fixed heuristic for the PDF construction.
++Uses a coarse MLP to estimate weights for hierarchical sampling, generating fine samples via inverse transform sampling on the coarse CDF. Chosen when standard NeRF quality is needed with better detail capture than uniform sampling.
+ 
+ ### [TermiNeRF](8828-terminerf.md)
+-Replaces the heuristic coarse pass with a learned **Sampling Network** that predicts weights for bins along a parameterized ray segment. It uses centered-logarithmic sampling and max-resampling to align ground truth weights from a pre-trained color network.
++Uses a single lightweight sampling network evaluation per ray to predict a full weight distribution, enabling rendering speeds up to 14x faster than standard NeRF. Chosen when inference speed is critical and a dedicated sampling network can be trained.
+ 
+ ### [NeRF-ID](8867-nerf-id.md)
+-Replaces the heuristic coarse-to-fine sampling with a differentiable **Proposer** module (e.g., Transformer, Pool, or MLPMix) that takes coarse features and positions as input to directly output fine sample locations, enabling end-to-end training.
++Replaces heuristic coarse-to-fine sampling with a differentiable 'proposer' module, enabling end-to-end training of the entire system. Chosen when end-to-end differentiability of the sampling process is required to improve view synthesis quality.
+ 
+ ## Background
+-Originated in [NeRF](3406-coarse-to-fine-nerf.md) (Mildenhall et al., 2020) to improve detail learning without proportional computational cost . It established the standard two-MLP architecture for neural radiance fields. Subsequent works like [TermiNeRF](8828-terminerf.md) and [NeRF-ID](8867-nerf-id.md) refined the sampling distribution estimation from heuristic to learned.
++The concept of hierarchical sampling in neural rendering was popularized by [Mildenhall et al., 2020](https://arxiv.org/abs/2003.08934), who introduced the two-stage process to mitigate aliasing and improve detail in NeRF. Prior to this, uniform sampling was the standard, often requiring hundreds of samples per ray to achieve acceptable quality. The method allows for efficient allocation of computational resources to opaque regions.
++
++Recent developments have focused on making the sampling process more adaptive and generalizable. For instance, [What You See is What You GAN](https://doi.org/10.1109/cvpr52733.2024.02148) [S1] proposes a generalizable learned sampler conditioned on cheap low-resolution information to enable full-resolution rendering during training, replacing dense uniform sampling. This sampler is a scene-conditional proposal network that generalizes across scenes, inspired by density estimators, instead of being category-specific or optimized per-scene [S1]. Unlike acceleration structures like octrees which are limited to coarse or category-specific acceleration, this sampling-based method generalizes to every new scene [S1]. The sampler operates on a per-ray basis to adaptively accelerate rendering [S1] and allows the method to operate with just 20 samples per ray, compared to existing 3D GANs which must use at least 96 samples per ray [S1]. The approach uses up to 5 times fewer depth samples than dense sampling methods [S1].
+ 
+ ## Sources
+-[S1] TermiNeRF notes
+-[S2] TermiNeRF notes
+-[S3] Coarse-to-Fine NeRF notes
+-[S4] Coarse-to-Fine NeRF notes
+-[S5] Coarse-to-Fine NeRF notes
+-[S6] Coarse-to-Fine NeRF notes+[S1] What You See is What You GAN: Rendering Every Pixel for High-Fidelity Geometry in 3D GANs, https://doi.org/10.1109/cvpr52733.2024.02148, fetched 2026-10-26

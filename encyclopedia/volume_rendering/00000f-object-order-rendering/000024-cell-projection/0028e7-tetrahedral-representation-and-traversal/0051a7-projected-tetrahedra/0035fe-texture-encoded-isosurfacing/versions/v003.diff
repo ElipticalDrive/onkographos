@@ -1,0 +1,264 @@
+--- v002.md
++++ v003.md
+@@ -4,133 +4,165 @@
+ 
+ ## Overview
+-Texture-Encoded Isosurfacing is a GPU-based method for extracting isosurfaces from unstructured grids by leveraging 2D texturing hardware to compute intersection points [S1, S2, unofficial]. It builds on [Tetrahedral representation and traversal](4396-tetrahedral-representation-and-traversal.md) by decomposing cells into smaller tetrahedra and projecting their front and back faces to exploit geometric coincidence [S1, S2, unofficial]. Unlike standard projected tetrahedra methods that render triangles, this approach renders fewer faces per tetrahedron by using the tetrahedral decomposition directly, mapping the scalar field values to texture coordinates to determine isosurface intersections via texture sampling [S1, S2, unofficial].
++Texture-Encoded Isosurfacing is a GPU-based method for extracting isosurfaces from unstructured tetrahedral grids by leveraging 2D texturing hardware to compute intersection points [S1, unofficial][S2, unofficial]. It solves the problem of efficiently rasterizing implicit surfaces on unstructured data by replacing explicit geometric intersection calculations with texture lookups. It sets itself apart from sibling methods like [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) by avoiding the generation of explicit triangle primitives for the surface; instead, it projects tetrahedra faces and uses a checkerboard texture to encode the scalar field values, allowing the GPU's texture sampling hardware to determine the isosurface location [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: Unstructured grid data decomposed into tetrahedra, scalar field values at vertices, camera parameters, and an isovalue $v$.
+-- Output: Isosurface geometry or rasterized representation of the isosurface.
++**Inputs:**
++*   Unstructured tetrahedral grid.
++*   Scalar field values associated with vertices.
++*   Isosurface threshold value $T$.
++*   Model-View-Projection (MVP) matrix for transformation.
++
++**Outputs:**
++*   Rasterized image containing the isosurface.
+ 
+ **Data Structures:**
+-- **2D Texture:** A checkerboard pattern texture. For basic isosurfacing, it stores the geometric mapping. For smooth or multiple isosurfaces, it stores shading values and requires further partitioning of the texture domain [S1, S2, unofficial].
+-- **Stencil Buffer:** Used in a two-pass approach to handle visibility and depth testing [S1, S2, unofficial].
++*   **2D Checkerboard Texture:** A 2D texture map initialized with a checkerboard pattern. For simple isosurfacing, this pattern distinguishes between regions. For smooth shading or multiple isosurfaces, the texture domain is partitioned further to store shading values or multiple threshold levels [S1, unofficial][S2, unofficial].
++*   **Stencil Buffer:** Used to manage visibility and resolve overlaps between projected tetrahedra faces [S1, unofficial][S2, unofficial].
++
++**Parameters:**
++*   Isosurface threshold $T$.
++*   Texture resolution (not specified in sources) [S1, unofficial][S2, unofficial].
+ 
+ **Steps:**
+-1. **Decomposition:** Decompose the volumetric cells (e.g., hexahedra) into tetrahedra using the method from [Tetrahedral representation and traversal](4396-tetrahedral-representation-and-traversal.md) [S1, S2, unofficial].
+-2. **Projection:** For each tetrahedron, project the front and back faces onto the image plane. Due to the specific decomposition and projection, these projections result in either a degenerate triangle or the same triangle (coincidence) [S1, S2, unofficial].
+-3. **Texture Encoding:** Associate a checkerboard 2D texture with the projected tetrahedra. The texture coordinates are determined by the scalar values at the front and back face vertices [S1, S2, unofficial].
+-4. **Rendering Pass 1 (Stencil Setup):** Render the projected tetrahedra to set up the stencil buffer. This pass uses a XOR operation and the stencil buffer to manage visibility [S1, S2, unofficial].
+-5. **Rendering Pass 2 (Isosurface Extraction):** Sample the 2D texture using texture coordinates corresponding to the front and back face scalar values. The intersection with the isosurface is determined by the texture lookup [S1, S2, unofficial].
+-6. **Extensions:** For smooth and multiple isosurfaces, store shading values in the 2D texture and further partition the texture domain [S1, S2, unofficial].
++1.  **Decomposition:** Apply the decomposition step of the Projected Tetrahedra (PT) algorithm to divide the tetrahedra into smaller tetrahedra. This step is chosen to create smaller tetrahedra rather than triangles, reducing the number of faces rendered per original tetrahedron [S1, unofficial][S2, unofficial].
++2.  **Projection:** Project the front and back faces of each smaller tetrahedron onto the 2D screen space. Due to the geometry of the decomposition, the projection of these faces results in one of two simple cases: either a degenerate triangle (where the face projects to a line or point) or the same triangle (where the front and back faces project to the same area) [S1, unofficial][S2, unofficial].
++3.  **Texture Encoding:** Associate the checkerboard 2D texture with the projected triangles. The coincidence of the front and back face projections allows the intersection computation to be mapped to 2D texturing hardware [S1, unofficial][S2, unofficial].
++4.  **Sampling:** Extract the isosurface by sampling the 2D texture. The texture coordinates for the sampling are derived from the scalar values of the front and back faces of the tetrahedron. Specifically, the scalar values are used to determine the position within the checkerboard pattern or the partitioned texture domain [S1, unofficial][S2, unofficial].
++5.  **Compositing:** Use the stencil buffer and XOR operations to handle visibility and resolve overlaps between the projected tetrahedra. The algorithm typically runs in two passes, with the first pass setting the stencil buffer [S1, unofficial][S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for Texture-Encoded Isosurfacing
+-# Assumes tetrahedra are already decomposed and scalar values are available
+-
+-def texture_encoded_isosurfacing(tetrahedra, scalar_field, isovalue, camera, texture):
++def texture_encoded_isosurfacing(tetrahedra, scalar_field, threshold, mvp_matrix, checkerboard_texture):
+     """
+-    Extract isosurface using texture-encoded method.
++    Extracts isosurface from tetrahedral grid using texture encoding.
+     
+     Args:
+-        tetrahedra: List of tetrahedra, each with 4 vertices and scalar values.
+-        scalar_field: Scalar values at grid vertices.
+-        isovalue: The scalar value for the isosurface.
+-        camera: Camera parameters for projection.
+-        texture: 2D checkerboard texture object.
++        tetrahedra: List of tetrahedra, each defined by 4 vertex indices.
++        scalar_field: Array of scalar values for each vertex.
++        threshold: Isosurface threshold value T.
++        mvp_matrix: Model-View-Projection matrix.
++        checkerboard_texture: 2D texture with checkerboard pattern.
+         
+     Returns:
+-        Rasterized isosurface representation.
++        Rendered image buffer.
+     """
++    # Initialize stencil buffer and color buffer
++    stencil_buffer = initialize_stencil_buffer()
++    color_buffer = initialize_color_buffer()
+     
+-    # Pass 1: Stencil Buffer Setup
+-    # Render projected tetrahedra to set up stencil buffer
+-    # The projection of front and back faces results in degenerate or coincident triangles
++    # Pass 1: Set stencil buffer
+     for tet in tetrahedra:
+-        front_face = tet.get_front_face(camera)
+-        back_face = tet.get_back_face(camera)
++        # Decompose tetrahedron into smaller tetrahedra (PT decomposition step)
++        smaller_tets = decompose_tetrahedron(tet)
+         
+-        # Project faces to image plane
+-        projected_front = project(front_face, camera)
+-        projected_back = project(back_face, camera)
++        for small_tet in smaller_tets:
++            # Get vertices and scalar values
++            v0, v1, v2, v3 = small_tet.vertices
++            s0, s1, s2, s3 = scalar_field[v0], scalar_field[v1], scalar_field[v2], scalar_field[v3]
++            
++            # Project front and back faces
++            # Front face: e.g., v0, v1, v2
++            # Back face: e.g., v0, v2, v3
++            # Note: Specific face assignment depends on PT decomposition convention
++            front_face = [v0, v1, v2]
++            back_face = [v0, v2, v3]
++            
++            front_proj = project_to_screen(front_face, mvp_matrix)
++            back_proj = project_to_screen(back_face, mvp_matrix)
++            
++            # Determine projection case: degenerate or same triangle
++            # This logic is implicit in the rasterization of the projected triangles
++            # The key is that front and back projections coincide or degenerate
++            
++            # Render front and back faces with stencil test
++            # Use XOR operation for stencil buffer updates
++            render_triangle(front_proj, stencil_op='xor')
++            render_triangle(back_proj, stencil_op='xor')
++            
++    # Pass 2: Extract isosurface using texture sampling
++    for tet in tetrahedra:
++        smaller_tets = decompose_tetrahedron(tet)
+         
+-        # Due to decomposition, projected_front and projected_back are either
+-        # degenerate triangles or the same triangle
+-        render_stencil_setup(projected_front)
+-        render_stencil_setup(projected_back)
+-        
+-    # Pass 2: Isosurface Extraction via Texture Sampling
+-    # Sample 2D texture with texture coordinates from front and back face scalar values
+-    for tet in tetrahedra:
+-        front_scalar = tet.get_front_face_scalar(scalar_field)
+-        back_scalar = tet.get_back_face_scalar(scalar_field)
+-        
+-        # Texture coordinates are derived from scalar values
+-        tex_coord_front = scalar_to_tex_coord(front_scalar)
+-        tex_coord_back = scalar_to_tex_coord(back_scalar)
+-        
+-        # Sample texture to determine isosurface intersection
+-        # The checkerboard pattern and texture lookup encode the intersection logic
+-        intersection = texture_sample(texture, tex_coord_front, tex_coord_back)
+-        
+-        if intersection is not None:
+-            render_isosurface_point(intersection)
++        for small_tet in smaller_tets:
++            v0, v1, v2, v3 = small_tet.vertices
++            s0, s1, s2, s3 = scalar_field[v0], scalar_field[v1], scalar_field[v2], scalar_field[v3]
+             
+-    return rasterized_output
++            # Define texture coordinates based on scalar values
++            # The exact mapping of scalar values to texture coordinates is not detailed
++            # but involves using s0, s1, s2, s3 to index into the checkerboard texture
++            # For simple isosurface, the checkerboard pattern encodes the intersection
++            tex_coords = compute_tex_coords_from_scalars(s0, s1, s2, s3, threshold)
++            
++            # Sample the checkerboard texture
++            # The sample result indicates if the ray intersects the isosurface
++            sample_result = sample_texture(checkerboard_texture, tex_coords)
++            
++            # If sample indicates intersection, color the pixel
++            if sample_result == INTERSECTION:
++                color_buffer[pixel] = compute_color(s0, s1, s2, s3, threshold)
++                
++    return color_buffer
+ 
+-def scalar_to_tex_coord(scalar_value):
++def decompose_tetrahedron(tet):
+     """
+-    Map scalar value to texture coordinate.
+-    Not given in the sources. [G]
++    Decomposes a tetrahedron into smaller tetrahedra using PT decomposition.
++    Returns a list of smaller tetrahedra.
+     """
+-    # Assuming linear mapping to [0, 1] range
+-    return scalar_value / max_scalar_value
++    # Implementation details of PT decomposition are not provided in sources.
++    # This is a placeholder for the actual geometric decomposition.
++    pass
+ 
+-def project(face, camera):
++def project_to_screen(vertices, mvp_matrix):
+     """
+-    Project a face to the image plane.
+-    Not given in the sources. [G]
++    Projects vertices to screen space using MVP matrix.
++    Returns projected vertices.
+     """
+-    # Standard projection logic
+-    return projected_face
++    # Standard projection transformation
++    pass
++
++def compute_tex_coords_from_scalars(s0, s1, s2, s3, threshold):
++    """
++    Computes texture coordinates based on scalar values and threshold.
++    The exact formula is not provided in sources.
++    """
++    # Placeholder for the specific mapping logic
++    pass
++
++def sample_texture(texture, tex_coords):
++    """
++    Samples the 2D texture at given coordinates.
++    Returns the sampled value.
++    """
++    pass
++
++def render_triangle(proj_vertices, stencil_op):
++    """
++    Renders a triangle with specified stencil operation.
++    """
++    pass
++
++def compute_color(s0, s1, s2, s3, threshold):
++    """
++    Computes color for the isosurface point.
++    """
++    pass
+ ```
+ 
+-**Parameters:**
+-- **Isovalue:** The scalar value defining the isosurface. Typical values depend on the dataset.
+-- **Texture Resolution:** Determines the precision of the intersection computation. Not given in the sources. [G]
+-- **Stencil Buffer Operations:** XOR operation is used for visibility management [S1, S2, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-- **Degenerate Triangles:** Projections may result in degenerate triangles, which must be handled correctly in the rendering pipeline [S1, S2, unofficial].
+-- **Precision:** Texture sampling precision affects the accuracy of the isosurface extraction [S1, S2, unofficial].
+-- **Multiple Isosurfaces:** Requires further partitioning of the texture domain and storage of shading values [S1, S2, unofficial].
++*   **Degenerate Triangles:** The projection of front and back faces can result in degenerate triangles. The method relies on the GPU's rasterizer handling these correctly [S1, unofficial][S2, unofficial].
++*   **Precision:** The accuracy of the isosurface extraction depends on the resolution of the checkerboard texture and the precision of the texture sampling [S1, unofficial][S2, unofficial].
++*   **Multiple Isosurfaces:** Handling multiple isosurfaces requires further partitioning of the texture domain and storing additional shading values, which increases complexity [S1, unofficial][S2, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- The method renders on average 5 to 7 triangles per tetrahedron [S1, S2, unofficial].
+-- Memory usage depends on the texture size and the number of tetrahedra. Not given in the sources. [G]
+-
+-**Measured Performance:**
+-- Performance is hardware-dependent, leveraging 2D texturing capabilities of GPUs [S1, S2, unofficial].
+-- Specific performance metrics are not provided in the sources. [G]
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Efficient use of 2D texturing hardware; fewer faces rendered per tetrahedron compared to triangle-based methods [S1, S2, unofficial].
+-- **Limitations:** Limited to isosurfacing; extensions for smooth and multiple isosurfaces require additional texture management [S1, S2, unofficial].
+-
+-**When to Use:**
+-- Suitable for real-time isosurface extraction on GPUs with strong 2D texturing capabilities [S1, S2, unofficial].
+-- Not suitable for general volume rendering or methods requiring complex shading without extensions [S1, S2, unofficial].
++*   **Time Complexity:** Not given in the sources. The method involves projecting tetrahedra and sampling textures, which is generally efficient on GPUs [S1, unofficial][S2, unofficial].
++*   **Memory Complexity:** Depends on the size of the checkerboard texture and the number of tetrahedra. The texture size is not specified [S1, unofficial][S2, unofficial].
++*   **Performance:** The algorithm runs in two passes and renders an average of 5 to 7 triangles per tetrahedron [S1, unofficial][S2, unofficial].
++*   **Strengths:** Efficient use of 2D texturing hardware; fewer faces rendered per tetrahedron compared to explicit triangle generation [S1, unofficial][S2, unofficial].
++*   **Limitations:** Limited to isosurfacing; extensions for smooth shading and multiple isosurfaces require more complex texture setups [S1, unofficial][S2, unofficial].
++*   **When to use:** Suitable for real-time isosurface extraction on unstructured grids where GPU acceleration is available [S1, unofficial][S2, unofficial].
++*   **When not to use:** Not suitable for volume rendering with transparency or complex lighting without significant modifications [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-**Origin:**
+-- The method is a revised version of the HAVS (Hardware-Accelerated Volume Rendering) algorithm, adapted for isosurfacing [S1, S2, unofficial].
+-- It was proposed in [58] as an alternate solution to render fewer faces per tetrahedron [S1, S2, unofficial].
+-
+-**History and Development:**
+-- The framework shares underlying principles with other GPU-based volume rendering methods, such as those proposed by Wylie et al. [72] and revised by Pascucci [52] [S1, S2, unofficial].
+-- It represents one of the first solutions to map isosurface extraction computations onto programmable GPU hardware [S1, S2, unofficial].
+-
+-**Applications:**
+-- Used for visualizing isosurfaces from unstructured grid data, such as the SPX dataset [S1, S2, unofficial].
++Texture-Encoded Isosurfacing is a revised version of the HAVS (Hardware-Accelerated Volume Rendering) algorithm, adapted for isosurface extraction [S1, unofficial][S2, unofficial]. It was proposed in [58] as an alternate solution to render fewer faces per tetrahedron by using the decomposition step of the PT algorithm to create smaller tetrahedra instead of triangles [S1, unofficial][S2, unofficial]. The method is discussed in the survey "A Survey of GPU-Based Volume Rendering of Unstructured Grids" [S1, unofficial][S2, unofficial]. It represents one of the first solutions to map isosurface computation onto the GPU using programmable hardware, sharing the underlying framework with volume rendering methods [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

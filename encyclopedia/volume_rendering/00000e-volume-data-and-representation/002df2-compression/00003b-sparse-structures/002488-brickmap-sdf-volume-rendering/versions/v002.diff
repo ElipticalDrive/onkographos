@@ -1,0 +1,218 @@
+--- v001.md
++++ v002.md
+@@ -37,4 +37,12 @@
+ **Pseudocode:**
+ ```python
++# Data Structure Definition
++class Brickmap:
++    def __init__(self, brick_indices, distance_bricks, color_bricks, color_indices):
++        self.brick_indices = brick_indices  # 3D list of int indices
++        self.distance_bricks = distance_bricks  # List of 1D arrays (8^3 floats)
++        self.color_bricks = color_bricks  # List of 1D arrays (8^3 * 3 floats)
++        self.color_indices = color_indices  # List of int indices
++
+ # CPU Side: CSG Evaluation and Compression
+ 
+@@ -43,6 +51,6 @@
+     Evaluates the CSG tree on a dense 3D grid.
+     """
+-    # Initialize dense grid with default values (e.g., infinity)
+-    dense_grid = zeros(grid_resolution, grid_resolution, grid_resolution)
++    # Initialize dense grid with default values (e.g., FLT_MAX) [G]
++    dense_grid = [float('inf')] * (grid_resolution ** 3)
+     
+     # Define voxel size based on bounding box
+@@ -54,41 +62,48 @@
+             for z in range(grid_resolution):
+                 # Convert grid index to world coordinate
+-                world_pos = bounding_box.min + voxel_size * (x + 0.5, y + 0.5, z + 0.5)
+-                
+-                # Evaluate SDF at this position
++                world_pos = (
++                    bounding_box.min + voxel_size * (x + 0.5),
++                    bounding_box.min + voxel_size * (y + 0.5),
++                    bounding_box.min + voxel_size * (z + 0.5)
++                )
++                
++                # Evaluate SDF at this position [G]
+                 distance = evaluate_sdf_at(tree, world_pos)
+                 
+                 # Store distance in dense grid
+-                dense_grid[x, y, z] = distance
+-                
+-    return dense_grid
+-
+-def compress_to_brickmap(dense_grid, brick_size=8):
++                dense_grid[x * grid_resolution * grid_resolution + y * grid_resolution + z] = distance
++                
++    return dense_grid, voxel_size
++
++def compress_to_brickmap(dense_grid, grid_resolution, voxel_size, brick_size=8):
+     """
+     Compresses the dense grid into a Brickmap structure.
+     """
+-    brick_indices = {} # Maps (brick_x, brick_y, brick_z) to index in data arrays
++    # Brick Indices: 3D grid mapping logical brick positions to data array indices
++    brick_indices = [[[-1] * (grid_resolution // brick_size) for _ in range(grid_resolution // brick_size)] for _ in range(grid_resolution // brick_size)]
+     distance_bricks = []
+     color_bricks = []
+-    color_indices = [] # Maps distance brick index to color brick index
+-    
+-    grid_res = dense_grid.shape[0]
++    color_indices = []
+     
+     # Iterate over bricks
+-    for bx in range(0, grid_res, brick_size):
+-        for by in range(0, grid_res, brick_size):
+-            for bz in range(0, grid_res, brick_size):
++    for bx in range(0, grid_resolution, brick_size):
++        for by in range(0, grid_resolution, brick_size):
++            for bz in range(0, grid_resolution, brick_size):
+                 # Extract brick data
+-                brick_data = dense_grid[bx:bx+brick_size, by:by+brick_size, bz:bz+brick_size]
+-                
+-                # Check if brick is non-empty (simplified check: any value < infinity)
+-                if not is_empty_brick(brick_data):
++                brick_data = []
++                for dx in range(brick_size):
++                    for dy in range(brick_size):
++                        for dz in range(brick_size):
++                            idx = (bx + dx) * grid_resolution * grid_resolution + (by + dy) * grid_resolution + (bz + dz)
++                            brick_data.append(dense_grid[idx])
++                
++                # Check if brick is non-empty (simplified check: any value < FLT_MAX) [G]
++                if any(d < float('inf') for d in brick_data):
+                     # Store distance brick
+                     dist_brick_index = len(distance_bricks)
+                     distance_bricks.append(brick_data)
+                     
+-                    # Determine color for this brick (simplified: average or first non-background color)
+-                    # In practice, color is evaluated alongside distance or stored separately
+-                    color_brick = compute_color_for_brick(bx, by, bz, brick_data)
++                    # Determine color for this brick [G]
++                    color_brick = compute_color_for_brick(bx, by, bz, brick_data, grid_resolution, voxel_size)
+                     color_brick_index = len(color_bricks)
+                     color_bricks.append(color_brick)
+@@ -96,26 +111,18 @@
+                     
+                     # Store index in brick indices map
+-                    brick_indices[(bx, by, bz)] = dist_brick_index
++                    brick_indices[bx // brick_size][by // brick_size][bz // brick_size] = dist_brick_index
+                     
+     return Brickmap(brick_indices, distance_bricks, color_bricks, color_indices)
+ 
+-def is_empty_brick(brick_data):
+-    """
+-    Checks if a brick contains no surface data.
+-    """
+-    # Assuming background distance is infinity or a large value
+-    return all(d == float('inf') for d in brick_data.flatten())
+-
+-def compute_color_for_brick(bx, by, bz, brick_data):
++def compute_color_for_brick(bx, by, bz, brick_data, grid_resolution, voxel_size):
+     """
+     Computes color for a brick.
+     """
+-    # Simplified: return a default color or average color of surface voxels
+-    # This is a placeholder for actual color evaluation logic
+-    return zeros(brick_size, brick_size, brick_size, 3)
++    # Source does not specify exact color evaluation logic [G]
++    return [0.5, 0.5, 0.5] * (brick_size ** 3)
+ 
+ # GPU Side: Raymarching
+ 
+-def raymarch_brickmap(ray_origin, ray_direction, brickmap):
++def raymarch_brickmap(ray_origin, ray_direction, brickmap, grid_resolution, voxel_size, bounding_box):
+     """
+     Raymarches through the Brickmap to render the scene.
+@@ -123,34 +130,65 @@
+     t = 0.0
+     max_steps = 1000
+-    step_size = 0.01 # Adaptive step size based on SDF
++    brick_size = 8
+     
+     for _ in range(max_steps):
+         # Current ray position
+-        pos = ray_origin + t * ray_direction
+-        
++        pos = (
++            ray_origin[0] + t * ray_direction[0],
++            ray_origin[1] + t * ray_direction[1],
++            ray_origin[2] + t * ray_direction[2]
++        )
++        
++        # Check if ray is outside bounding box
++        if not (bounding_box.min <= pos[0] <= bounding_box.max and
++                bounding_box.min <= pos[1] <= bounding_box.max and
++                bounding_box.min <= pos[2] <= bounding_box.max):
++            break
++            
+         # Find brick index for current position
+-        brick_coords = world_to_brick_coords(pos, brickmap.brick_indices)
+-        
+-        if brick_coords not in brickmap.brick_indices:
+-            # Ray is in empty space, skip to next brick or exit
+-            t += step_size * 10 # Skip large empty regions
++        brick_coords = (
++            int((pos[0] - bounding_box.min) / (voxel_size * brick_size)),
++            int((pos[1] - bounding_box.min) / (voxel_size * brick_size)),
++            int((pos[2] - bounding_box.min) / (voxel_size * brick_size))
++        )
++        
++        # Check bounds and if brick exists
++        if not (0 <= brick_coords[0] < len(brickmap.brick_indices) and
++                0 <= brick_coords[1] < len(brickmap.brick_indices[0]) and
++                0 <= brick_coords[2] < len(brickmap.brick_indices[0][0])):
++            t += voxel_size * brick_size
+             continue
+             
+-        # Get distance brick index
+-        dist_brick_index = brickmap.brick_indices[brick_coords]
+-        
++        dist_brick_index = brickmap.brick_indices[brick_coords[0]][brick_coords[1]][brick_coords[2]]
++        
++        if dist_brick_index == -1:
++            # Empty brick, skip
++            t += voxel_size * brick_size
++            continue
++            
+         # Sample SDF from distance brick
+-        local_pos = world_to_local_brick_pos(pos, brick_coords)
+-        sdf_value = sample_distance_brick(brickmap.distance_bricks[dist_brick_index], local_pos)
++        local_pos = (
++            (pos[0] - (brick_coords[0] * brick_size * voxel_size + bounding_box.min)) / voxel_size,
++            (pos[1] - (brick_coords[1] * brick_size * voxel_size + bounding_box.min)) / voxel_size,
++            (pos[2] - (brick_coords[2] * brick_size * voxel_size + bounding_box.min)) / voxel_size
++        )
++        
++        # Interpolate or sample distance (nearest neighbor for simplicity) [G]
++        ix, iy, iz = int(local_pos[0]), int(local_pos[1]), int(local_pos[2])
++        ix = max(0, min(ix, brick_size - 1))
++        iy = max(0, min(iy, brick_size - 1))
++        iz = max(0, min(iz, brick_size - 1))
++        sdf_value = brickmap.distance_bricks[dist_brick_index][ix * brick_size * brick_size + iy * brick_size + iz]
+         
+         if sdf_value < 0.001:
+             # Hit surface
+-            color = sample_color_brick(brickmap.color_bricks[brickmap.color_indices[dist_brick_index]], local_pos)
++            color_idx = brickmap.color_indices[dist_brick_index]
++            color = brickmap.color_bricks[color_idx][ix * brick_size * brick_size + iy * brick_size + iz]
+             return color
+             
+-        # Advance ray
+-        t += sdf_value # Use SDF value for adaptive step size
+-        
+-    return background_color
++        # Advance ray using SDF value scaled by voxel size
++        t += sdf_value * voxel_size
++        
++    return [0.0, 0.0, 0.0] # Background color
+ ```
+ 
+@@ -165,5 +203,5 @@
+ 
+ ## Operating characteristics
+-*   **Memory Usage:** Significant reduction compared to dense arrays. For a $512^3$ grid, a dense array requires 640MB (256MB distance + 384MB RGB). The Brickmap reduces this to ~13.2MB (1.5MB indices + 7.6MB distances + 0.06MB color remapping + 4.0MB colors) [S1, unofficial].
++*   **Memory Usage:** Significant reduction compared to dense arrays. For a $512^3$ grid, a dense array requires 640MB (256MB distance + 384MB RGB) [S1, unofficial]. The Brickmap reduces this to ~13.2MB (1.5MB indices + 7.6MB distances + 0.06MB color remapping + 4.0MB colors) [S1, unofficial].
+ *   **Performance:** CPU generation time for the example scene (32 operations) was 19.3s unoptimized, reduced to 0.28s with optimizations (skipping empty regions and locally irrelevant SDF nodes) [S1, unofficial].
+ *   **Compression Ratio:** Typically achieves 10-100x compression [S1, unofficial].

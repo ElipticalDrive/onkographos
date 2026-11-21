@@ -1,0 +1,224 @@
+--- v004.md
++++ v005.md
+@@ -4,108 +4,149 @@
+ 
+ ## Overview
+-This protocol defines the training loop and optimization hyperparameters for decomposed Gaussian splatting methods, specifically targeting distractor-free rendering by separating static scene geometry from dynamic or erroneous "distractor" elements [S1]. It differs from standard Gaussian Splatting by explicitly optimizing distractor point parameters with distinct learning rates and regularization, and by employing specific decay schedulers for the Adam optimizer [S1]. It builds on [Framework and Baseline Implementations](16220-framework-and-baseline-implementations.md).
++This protocol defines the training loop, parameter initialization, and optimization hyperparameters for decomposed Gaussian splatting methods, specifically targeting distractor-free rendering. It builds on [Framework and Baseline Implementations](16220-framework-and-baseline-implementations.md) by detailing how static scene Gaussians and distractor points are jointly optimized. It distinguishes itself from standard Gaussian Splatting by explicitly modeling and optimizing distractor elements to improve background reconstruction and reduce artifacts, using specific learning rate schedules and regularization weights [S1].
+ 
+ ## How it works
+-**Inputs:** Training images, initial camera poses, initial static point cloud (from COLMAP), and distractor point initialization.
+-**Outputs:** Optimized Gaussian parameters (means, covariances/opacities, colors, SH coefficients) for both static and distractor points.
++### Inputs and Outputs
++**Inputs:**
++- Training images and corresponding camera poses.
++- Initial static point cloud (typically from COLMAP) [S1].
++- Hyperparameters for optimizer, scheduler, and regularization.
+ 
+-**Data Structures:**
+-*   **Static Points:** Initialized via COLMAP point cloud. Parameters optimized with Splatfacto defaults.
+-*   **Distractor Points:** 1000 points initialized per training image.
+-*   **Optimizer State:** Adam optimizer with Exponential decay scheduler.
++**Outputs:**
++- Optimized parameters for static Gaussians (means, opacities, scales, rotations, spherical harmonics).
++- Optimized parameters for distractor Gaussians (means, opacities, scales, rotations, RGB colors) [S1].
+ 
+-**Steps:**
++### Data Structures
++The method maintains two sets of Gaussian primitives:
++1.  **Static Gaussians:** Initialized from COLMAP point cloud. Parameters include mean $\mu$, opacity $\alpha$, scale $s$, rotation $q$ (quaternion), and spherical harmonic coefficients $c_{lm}$ [S1].
++2.  **Distractor Gaussians:** Initialized randomly or via specific sampling (1000 points per training image). Parameters include mean $\mu$, opacity $\alpha$, scale $s$, rotation $q$, and RGB color $\mathbf{c}$ [S1].
++
++### Steps
+ 1.  **Initialization:**
+-    *   Initialize static points using the standard COLMAP point cloud method [S1].
+-    *   Initialize 1000 distractor points per training image [S1].
+-    *   Initialize per-image embeddings $e_j \in \mathbb{R}^{d_e}$ with $d_e=32$ and per-Gaussian embeddings $z_i \in \mathbb{R}^{d_z}$ with $d_z=24$ using Fourier frequencies with 4 components (if using appearance modeling) [S1].
+-2.  **Optimization Loop:**
+-    *   Optimize all static and distractor point parameters using the Adam optimizer [S1].
+-    *   **Distractor Learning Rates:**
+-        *   Quaternions: 0.01 [S1].
+-        *   Scales: 0.05 [S1].
+-        *   RGB Colors: 0.025 [S1].
+-        *   Means and Opacities: Use Splatfacto defaults [S1].
+-    *   **Static Learning Rates:** Use Splatfacto defaults [S1].
+-    *   **Regularization:**
+-        *   Alpha head regularization weight: 0.002 [S1].
+-        *   SH orders: Head order learning rate 0.002; remaining SH orders learning rate 0.0001 [S1].
+-        *   Regularization weights: $\lambda_s = 0$, $\lambda_d = 0.01$, $\lambda_{bg} = 0.15$ [S1].
+-        *   Threshold $T_\epsilon$ for regularization: 0.003 [S1].
+-    *   **Scheduler:** Apply Exponential decay scheduler with decay rates of 0.0001, 0.0002, and 0.00001 separately [S1].
+-3.  **Densification Control:**
+-    *   Densification of distractor Gaussians stops after 15,000 iterations [S1].
+-4.  **Iteration Count:**
+-    *   Train for 30,000 iterations on RobustNeRF, On-the-go, and Mip-NeRF-360 datasets [S1].
+-    *   Train for 200,000 iterations on Photo Tourism datasets [S1].
++    - Initialize static Gaussians using the standard COLMAP point cloud method [S1].
++    - Initialize 1000 distractor points per training image [S1].
++    - Initialize appearance embeddings if using appearance modeling (e.g., WildGaussians style): per-image embedding $e_j \in \mathbb{R}^{32}$ and per-Gaussian embedding $z_i \in \mathbb{R}^{24}$ with Fourier frequencies [S1].
+ 
+-**Pseudocode:**
++2.  **Forward Pass:**
++    - Render images using the current set of static and distractor Gaussians.
++    - Compute photometric loss (e.g., MSE) and perceptual loss (e.g., LPIPS) against ground truth [S2].
++
++3.  **Loss Computation:**
++    - The total loss $L$ for a batch of $M$ novel views is:
++      $$
++      L = \sum_{m=1}^M \left( L_{MSE}(I_{render}^{(m)}, I_{gt}^{(m)}) + \lambda L_{LPIPS}(I_{render}^{(m)}, I_{gt}^{(m)}) \right)
++      $$
++      where $\lambda = 0.05$ [S2].
++    - Apply regularization terms for distractor Gaussians:
++      - Alpha regularization: $\lambda_\alpha = 0.002$ [S1].
++      - Scale regularization: $\lambda_s = 0$ [S1].
++      - Distance regularization: $\lambda_d = 0.01$ [S1].
++      - Background regularization: $\lambda_{bg} = 0.15$ [S1].
++      - Threshold for regularization $T_\epsilon = 0.003$ [S1].
++
++4.  **Backward Pass and Optimization:**
++    - Compute gradients with respect to all parameters.
++    - Update parameters using the Adam optimizer [S1].
++    - Apply Exponential decay scheduler with decay rates: 0.0001, 0.0002, and 0.00001 [S1].
++
++5.  **Distractor Densification:**
++    - Densify distractor Gaussians for the first 15,000 iterations [S1].
++    - Stop densification after 15,000 iterations [S1].
++
++6.  **Training Duration:**
++    - Train for 30,000 iterations on RobustNeRF, On-the-go, and Mip-NeRF-360 datasets [S1].
++    - Train for 200,000 iterations on Photo Tourism datasets [S1].
++
++### Pseudocode
+ ```python
+ # Initialization
+-static_points = initialize_from_colmap()
+-distractor_points = initialize_distractors(num_per_image=1000)
++static_gaussians = initialize_from_colmap()
++distractor_gaussians = initialize_distractors(num_points_per_image=1000)
+ 
+-# Optimizer Setup
++# Optimizer setup
+ optimizer = Adam(
+-    params=static_points + distractor_points,
+-    lr_defaults=splitfacto_defaults,
+-    distractor_lr_quat=0.01,
+-    distractor_lr_scale=0.05,
+-    distractor_lr_rgb=0.025
++    params=[static_gaussians.params, distractor_gaussians.params],
++    lr=defaults
+ )
+ scheduler = ExponentialDecay(decay_rates=[0.0001, 0.0002, 0.00001])
+ 
+-# Regularization Weights
+-lambda_s = 0.0
+-lambda_d = 0.01
+-lambda_bg = 0.15
+-T_epsilon = 0.003
++# Hyperparameters
++lambda_lpips = 0.05
++lambda_alpha_reg = 0.002
++lambda_d_reg = 0.01
++lambda_bg_reg = 0.15
++epsilon_threshold = 0.003
++max_densification_iter = 15000
++total_iterations = 30000 if dataset in ["RobustNeRF", "On-the-go", "Mip-NeRF-360"] else 200000
+ 
+-# Training Loop
+-max_iterations = 30000 if dataset in [RobustNeRF, OnTheGo, MipNeRF360] else 200000
+-densification_stop = 15000
+-
+-for iteration in range(max_iterations):
+-    # Forward pass and loss computation
+-    loss = compute_loss(
+-        rendered_images,
+-        ground_truth_images,
+-        lambda_s=lambda_s,
+-        lambda_d=lambda_d,
+-        lambda_bg=lambda_bg,
+-        T_epsilon=T_epsilon
+-    )
++for iteration in range(1, total_iterations + 1):
++    # Sample training images and cameras
++    images, cameras = sample_batch()
++    
++    # Forward pass
++    rendered_images = render(static_gaussians, distractor_gaussians, cameras)
++    
++    # Loss computation
++    loss_mse = compute_mse(rendered_images, images)
++    loss_lpips = compute_lpips(rendered_images, images)
++    loss_perceptual = lambda_lpips * loss_lpips
++    
++    # Regularization losses
++    reg_alpha = compute_alpha_regularization(distractor_gaussians, lambda_alpha_reg, epsilon_threshold)
++    reg_dist = compute_distance_regularization(distractor_gaussians, lambda_d_reg)
++    reg_bg = compute_background_regularization(distractor_gaussians, lambda_bg_reg)
++    
++    total_loss = loss_mse + loss_perceptual + reg_alpha + reg_dist + reg_bg
+     
+     # Backward pass
+     optimizer.zero_grad()
+-    loss.backward()
++    total_loss.backward()
+     
+-    # Step optimizer
++    # Update learning rates for distractor points
++    set_lr(distractor_gaussians.quaternions, 0.01)
++    set_lr(distractor_gaussians.scales, 0.05)
++    set_lr(distractor_gaussians.rgb, 0.025)
++    # Means and opacities use Splatfacto defaults [S1]
++    
++    # Optimization step
+     optimizer.step()
+     scheduler.step()
+     
+-    # Densification control
+-    if iteration < densification_stop:
+-        densify_distractor_gaussians(distractor_points)
+-    else:
+-        stop_densification(distractor_points)
++    # Densification
++    if iteration < max_densification_iter:
++        densify_distractor_gaussians(distractor_gaussians)
+ ```
++
++### Parameters
++- **Optimizer:** Adam [S1].
++- **Learning Rates (Distractors):** Quaternions=0.01, Scales=0.05, RGB=0.025 [S1]. Means and opacities use Splatfacto defaults [S1].
++- **Scheduler:** Exponential decay with rates 0.0001, 0.0002, 0.00001 [S1].
++- **Regularization Weights:** $\lambda_\alpha=0.002$, $\lambda_s=0$, $\lambda_d=0.01$, $\lambda_{bg}=0.15$ [S1].
++- **Threshold:** $T_\epsilon=0.003$ [S1].
++- **Perceptual Loss Weight:** $\lambda=0.05$ [S2].
++
++### Edge Cases and Pitfalls
++- **Distractor Densification:** Must stop after 15,000 iterations to prevent overfitting or instability [S1].
++- **Learning Rate Mismatch:** Distractor points require specific learning rates different from static points; using defaults for all may lead to poor convergence [S1].
++- **Regularization Threshold:** The threshold $T_\epsilon=0.003$ is critical for controlling the influence of regularization terms [S1].
+ 
+ ## Subtopics
+ 
+ ### Perceptual Loss Weighting
+-Uses a combined photometric and perceptual loss where the weight $\lambda$ for the LPIPS loss $L_{LPIPS}$ is set to 0.05 [S2]. The total loss for rendering $M$ novel views is $L = \sum_{m=1}^M (L_{MSE}(I^{(m)}_{render}, I^{(m)}_{gt}) + \lambda L_{LPIPS}(I^{(m)}_{render}, I^{(m)}_{gt}))$ [S2].
++Uses LPIPS loss with weight $\lambda=0.05$ to improve perceptual quality during optimization [S2].
+ 
+ ### Symmetric View Mirroring
+-A data augmentation technique for single-view reconstruction of roughly symmetric objects (e.g., shoes) by mirroring input images to simulate opposite viewpoints [S3, unofficial]. It trains the renderer on the combined original and mirrored dataset to reconstruct the full 3D mesh despite lacking back-side samples [S3, unofficial]. This is a highly ill-posed problem; reconstruction quality for unseen parts remains lower than multi-view training [S3, unofficial].
++A data augmentation technique for single-view reconstruction of roughly symmetric objects (e.g., shoes) by mirroring input images to simulate opposite viewpoints [S3, unofficial]. This allows training on combined original and mirrored datasets to reconstruct full 3D mesh despite lacking back-side samples [S3, unofficial]. Highly ill-posed problem; reconstruction quality for unseen parts remains lower compared to multi-view training [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training duration is dataset-dependent: 30k iterations for standard benchmarks (RobustNeRF, On-the-go, Mip-NeRF-360) and 200k iterations for Photo Tourism [S1].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Explicitly handles distractors, improving rendering fidelity in complex scenes [S1].
+-*   **Limitations:** Single-view symmetric reconstruction is ill-posed and yields lower quality for unseen parts [S3, unofficial].
++- **Time Complexity:** Depends on the number of Gaussians and samples per ray. Training duration is 30k iterations for standard datasets and 200k for Photo Tourism [S1].
++- **Memory Complexity:** Higher than standard Gaussian Splatting due to the addition of distractor Gaussians and appearance embeddings [S1].
++- **Strengths:** Reduces distractor artifacts, improves background reconstruction, handles single-view symmetric objects via mirroring [S1][S3, unofficial].
++- **Limitations:** Increased training time and memory usage due to distractor optimization and densification [S1]. Single-view reconstruction is ill-posed and less accurate than multi-view [S3, unofficial].
++- **When to Use:** When distractor artifacts are prominent or when working with symmetric objects from limited viewpoints [S1][S3, unofficial].
++- **When Not to Use:** When computational resources are limited or when high-quality multi-view data is available and distractor modeling is unnecessary [S1].
+ 
+ ## Background
+-Originated in the context of decomposed Gaussian splatting for distractor-free rendering [S1]. The protocol adapts the Splatfacto baseline [34] to include distractor optimization [S1].
++Originated from DeSplat: Decomposed Gaussian Splatting for Distractor-Free Rendering [S1]. The method extends standard Gaussian Splatting by explicitly modeling distractors. Symmetric View Mirroring was introduced in Pix2Vex for single-view reconstruction [S3, unofficial]. Perceptual loss weighting is adopted from VolSplat [S2].
+ 
+ ## Sources

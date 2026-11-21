@@ -1,0 +1,106 @@
+Lead issue: #1554 Part of the smooth-voxel-geometry effort (lead issue linked below). Do this first; it gates the rest. Goal A flag-gated spike proving the approach: after the primary ray hits a solid voxel, move the hit onto the smooth ...
+
+Smooth voxels 1/6: spike - refine primary hits onto the smooth iso-surface · Issue #1555 · Far-Beyond-Pulsar/Pulsar-Native · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Smooth voxels 1/6: spike - refine primary hits onto the smooth iso-surface #1555
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Smooth voxels 1/6: spike - refine primary hits onto the smooth iso-surface#1555
+Copy link
+Assignees
+Labels
+difficulty: hardLarge / involved / researchLarge / involved / researchenhancementNew feature or requestNew feature or requestexploratorySpike / research, scope TBDSpike / research, scope TBD
+Description
+tristanpoland
+opened on Oct 30, 2026
+Issue body actions
+Lead issue: #1554
+Part of the smooth-voxel-geometry effort (lead issue linked below). Do this first; it gates the rest.
+Goal
+A flag-gated spike proving the approach: after the primary ray hits a solid voxel, move the hit onto the smooth implicit surface and use it for depth, position and normal. Judge it by eye before investing in the harder phases.
+What to build
+Add a WGSL function smooth_hit(slot, key, cell, o, d, t_enter, t_exit, c) -> (t, hit) in shaders/chunk_draw.wgsl:
+Density rho(p) = sum over the 27 cells around the hit of occ * Bx(p.x-cx) * By(p.y-cy) * Bz(p.z-cz) using the existing spline_weights (value in .x). Work in cell space (local = i-rows * position + i.w, as hit_face does).
+March along the ray (in cell space) from where it enters the 3x3x3 neighbourhood of the hit cell to the first crossing of rho = 0.5; refine with a few bisection/secant steps. Bound the march to the cell's neighbourhood (about 3 cells) so cost is capped.
+Lookups use solid_near (handles chunk and face borders). Cache the 27 occupancy bits once per pixel; do not re-query per march step.
+Call it from trace_pixel (primary rays only) after walk() returns a hit, when materials.shape.x > 0. Keep the packed cell/axis/sign as the voxel's (other passes still read them); store the refined t in hit_distance.
+Gate it behind a pipeline override (like override STEP_HEAT: bool near the top of chunk_draw.wgsl) or a branch that is uniform across the dispatch, so smoothness == 0 costs nothing. Prefer an override if shader_sources in src/chunks/mod.rs can specialise cheaply.
+Make publish use the refined position (it derives position from hit_distance already).
+Known limitation of this phase (expected, do not try to fix here)
+Only rays that hit a solid voxel are refined. The smooth surface bulges into air cells next to convex edges, so grazing rays still miss and the silhouette still steps. That is the "Shell-cell tracing" sub-issue.
+Acceptance
+smoothness = 0: bit-identical output and no measurable cost change (use HELIO_VOXEL_CHUNKS_COUNT / CHUNKHOLD A/B).
+smoothness = 1: hit depth moves at most about 1 cell from the voxel hit; the surface is continuous across cell and chunk borders (no cracks at chunk or cube-face edges; test the face_edge view and a chunk-border view).
+chunk_shaders_validate passes; existing GPU tests pass with smoothing 0.
+New GPU test: with smoothing 1 on a dug bowl the refined hit_distance is within one voxel of the voxel hit, finite everywhere, and the hit cell is unchanged.
+Capture before/after images with voxel_flight (HELIO_VOXEL_CHUNKS_ENGINE=1, held views ground, cave, mountain_slope) and attach them to the PR. Stop and ask the maintainer to review visually before starting later phases.
+Record the measured primary-ray GPU time delta in the PR.
+Shared context (read this first if you are a fresh agent)
+Repo layout. This is Far-Beyond-Pulsar/Pulsar-Native. The renderer lives in the crates/renderer/helio git submodule (its own repo, Helio). Submodule changes merge dependency-first: merge the Helio PR into Helio main, re-pin the submodule here, then merge the Pulsar PR (see AGENTS.md and .agents/CRATES.md "Submodule pins"). .agents/ has subsystem docs; relevant: .agents/VOXEL_STREAMING.md, .agents/MEMORY.md.
+The voxel system. Voxel worlds (cube-sphere planets, finite planes, infinite planes, asteroids = small planets) are drawn by crates/renderer/helio/crates/passes/3d/helio-pass-voxel-planet. Read its README.md and docs/chunk-octree.md first. Key facts:
+Not meshed. 64³-cell chunks generated on the GPU, streamed as a cut of an octree per cube face, drawn by ray tracing: chunk boxes are rasterized, each pixel's ray walks the cut (walk() in shaders/chunk_draw.wgsl), inside a chunk through a 64-tree (trace_chunk), at coarse levels through exact grid cells (trace_exact, from exact_level, level 13 on an Earth).
+Invariant: CPU/GPU bit identity. The terrain field, noise and edit containment are integer maths mirrored on CPU (src/planet.rs, Planet::raycast, drawn_hit) and GPU. Gameplay, collision, ray casts, picks and sculpting use the CPU voxel world. Never introduce floats into the field. Any smoothing must be visual-only.
+Voxels are 0.1 to 1 m. Level L cells are 2^L base cells. Cell frames are affine maps (cell_frame, ChunkDraw with m0..m2 cell->world and i0..i2 inverse rows, .w offsets).
+Frame flow (see README "Chunk octree"): residency planner -> drawn cut -> trace_pixel (writes hit_visibility, hit_distance via store_hit) -> shadow_sample/shadow (hit_face computes the shading normal, written to hit_normals) -> sky/local-light samples -> temporal denoise -> publish (gbuffer; calls surface_look for albedo/AO) -> Helio deferred lighting.
+Component. VoxelTerrainComponent (crates/renderer/helio/crates/helio-component/src/components/voxel_component.rs, script methods in voxel_world.rs) -> VoxelSceneEntry (crates/core/engine_backend/src/scene/voxel_frame.rs) -> PlanetVoxelBackend::configure_appearance (crates/core/engine_backend/src/subsystems/render/helio_renderer/voxel_backend.rs) -> ChunkPass::set_smoothing / set_appearance (src/chunks/pass.rs) -> per-volume Materials uniform (ChunkMaterials in src/chunks/mod.rs, Materials in chunk_draw.wgsl, built by engine::material_table).
+What already exists (shading-only smoothing, done). Helio commit 3ea02d06 "Added smooth voxels" (verify it is on Helio main and pinned here) plus Pulsar-side plumbing added:
+Component property smoothness (0..1, "Surface smoothing", default 0 = unchanged look), script methods smoothness()/set_smoothness().
+TerrainAppearance::smoothing (#[serde(skip)], src/terrain.rs), uniform field Materials.shape.x.
+WGSL spline_weights + smooth_normal(slot, key, cell, local, c) in chunk_draw.wgsl: normal = minus the gradient of a separable quadratic B-spline density over the 3x3x3 solid cells around the hit (cell centres at cell + 0.5; kernel spans exactly 3 cells; partition of unity so flat faces keep their normal; C1 across cells). Used by hit_face for hits that are not natural heightfield steps (those keep the exact stored slope from leaf_ground). The sun-ray skip (Face.skip) scales with how far the smooth normal leans from the face. surface_look fades pigment mosaic (x(1-0.6s)) and edge darkening (x(1-s)).
+GPU test smooth_surfaces_are_lit_not_moved in crates/renderer/helio/crates/passes/3d/helio-pass-voxel-planet/tests/chunks.rs (hits identical, lighting differs).
+Limit that motivates this work: only shading changes. Silhouettes, hit positions, shadows' geometry and AO still follow voxel cells, so outlines step at voxel size.
+Goal of the whole effort: make the geometry the GPU draws smooth too (for AAA sculpted terrain, asteroids), by refining hits against the same implicit surface (B-spline density, iso-level 0.5), gated by smoothness, with zero cost at 0.
+How to build/test (Windows). From crates/renderer/helio/crates/passes/3d/helio-pass-voxel-planet: cargo test --release --test chunks -- --test-threads=1 <name> (GPU tests; they silently return if no GPU), cargo test --lib chunk_shaders_validate (naga validation of all shader variants: plane/sphere, counting). From the repo root: cargo check -p helio-pass-voxel-planet -p helio_component, cargo test -p engine_backend --test voxel_component_schema. Note -p helio-pass-voxel-planet tests only run from inside the Helio workspace. Cargo may rewrite Cargo.lock at the root; do not commit that. Measuring: cargo run -p helio-default-passes --release --example voxel_flight -- OUT [W H] with env vars in the pass README "Measuring" (HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|cave|..., HELIO_VOXEL_CHUNKS_ENGINE=1, HELIO_VOXEL_CHUNKS_COUNT=1). Compare interleaved A/B runs and minima (GPU clocks drop when idle).
+Working agreements. The maintainer tests renderer changes by running the app and looking; do not claim a visual result is good from tests alone. Report what you verified and what you could not. Tests prove consistency, not appearance. Match surrounding code style (dense // comments explaining invariants). Do not edit the vendored/other submodules.
+Activity
+tristanpoland
+added
+enhancementNew feature or requestNew feature or request
+difficulty: hardLarge / involved / researchLarge / involved / research
+exploratorySpike / research, scope TBDSpike / research, scope TBD
+on Oct 30, 2026
+tristanpoland
+added a parent issue on Oct 30, 2026
+Smooth voxel geometry: smooth silhouettes for sculpted terrain and asteroids #1554
+github-project-automation
+added this to Pulsar Trackeron Oct 31, 2026
+github-project-automation
+moved this to Todo in Pulsar Trackeron Oct 31, 2026
+tristanpoland
+assigned
+tristanpoland
+and
+Tuafo
+on Oct 31, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+Tuafo
+tristanpoland
+Labels
+difficulty: hardLarge / involved / researchLarge / involved / researchenhancementNew feature or requestNew feature or requestexploratorySpike / research, scope TBDSpike / research, scope TBD
+Type
+No type
+Projects
+Pulsar Tracker
+Status
+Todo
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

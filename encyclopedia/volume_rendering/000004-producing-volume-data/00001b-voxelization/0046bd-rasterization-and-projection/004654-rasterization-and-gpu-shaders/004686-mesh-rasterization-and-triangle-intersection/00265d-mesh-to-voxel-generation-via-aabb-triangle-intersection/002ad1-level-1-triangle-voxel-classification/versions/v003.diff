@@ -1,0 +1,246 @@
+--- v002.md
++++ v003.md
+@@ -4,30 +4,32 @@
+ 
+ ## Overview
+-Level 1 Triangle-Voxel Classification is a coarse-grained method for mapping mesh triangles to a 3D voxel grid by determining which voxels a triangle spans. It serves as the initial filtering stage in hierarchical voxelization, reducing the search space for subsequent fine-grained classification [S1, unofficial]. Unlike [Tessellation-based Voxelization](5430-tessellation-based-voxelization.md), which relies on GPU tessellation hardware, this method uses explicit geometric overlap tests on a CPU/GPU hybrid or pure GPU pipeline to assign triangles to coarse voxels [S1, unofficial].
++Level 1 Triangle-Voxel Classification is a coarse-grained method for mapping mesh triangles to a 3D voxel grid by determining which voxels overlap with each triangle's bounding volume. It serves as the initial stage in hierarchical voxelization, significantly reducing the search space for subsequent fine-grained classification steps [S1, unofficial]. Unlike brute-force approaches that test every voxel against every triangle, this method uses vertex mapping to identify candidate voxels, processing one triangle per thread for parallel efficiency [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** `trianglesCUDAData` (flat float array, stride 9 per triangle), `objBoxMin` and `objBoxMax` (scene bounding box, float3), `numDiv` (grid resolution, int3), `boxExtents` (voxel size, float3).
+-*   **Output:** `voxelTriIndexCUDAData` (list of triangle indices per voxel), `voxelTriCountCUDAData` (count per voxel).
++*   **Output:** `voxelTriIndexCUDAData` (list of triangle indices per voxel), `voxelTriCountCUDAData` (count of triangles per voxel).
+ 
+ **Data Structures:**
+-*   `trianglesCUDAData`: A flat array of floats where each triangle occupies 9 consecutive floats representing vertices $v_0, v_1, v_2$ in $(x, y, z)$ order.
+-*   `voxelTriIndexCUDAData`: A buffer storing triangle indices for each voxel. The maximum number of triangles allocated per voxel is defined by `triBufferLen` [S1, unofficial].
+-*   `voxelTriCountCUDAData`: An integer array tracking the number of triangles currently stored in each voxel's buffer.
++*   `trianglesCUDAData`: A flat array where each triangle is stored as 9 consecutive floats: `[v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z]`.
++*   `voxelTriIndexCUDAData`: A buffer storing triangle indices assigned to each voxel.
++*   `voxelTriCountCUDAData`: An integer array storing the number of triangles assigned to each voxel.
++*   `triBufferLen`: The maximum number of triangles allocated per voxel in the buffer [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Thread Assignment:** Each thread processes one triangle. The triangle vertices are extracted from `trianglesCUDAData` at offset $t \times 9$, where $t$ is the triangle index.
+-2.  **Vertex-to-Voxel Mapping:** For each vertex $v_i$ ($i \in \{0, 1, 2\}$), compute the initial voxel indices $(boxNumX_i, boxNumY_i, boxNumZ_i)$ using the formula:
++1.  **Thread Assignment:** Each GPU thread processes one triangle. The thread index `t` determines the offset in `trianglesCUDAData` as `t * 9`.
++2.  **Vertex Extraction:** Extract the three vertices $V_0, V_1, V_2$ from the triangle data.
++3.  **Vertex-to-Voxel Mapping:** For each vertex $V_i = (x_i, y_i, z_i)$, compute the initial voxel indices $(boxNumX_i, boxNumY_i, boxNumZ_i)$ using the formula:
+     $$
+-    boxNumX_i = \left\lfloor \frac{v_i.x - objBoxMin.x}{objBoxMax.x - objBoxMin.x} \times numDiv.x \right\rfloor
++    boxNumX_i = \left\lfloor \frac{x_i - objBoxMin.x}{objBoxMax.x - objBoxMin.x} \times numDiv.x \right\rfloor
+     $$
+-    Repeat for $Y$ and $Z$ axes.
+-3.  **Boundary Clamping:** If a vertex lies exactly on the maximum boundary, clamp the index to prevent out-of-bounds access:
++    (Analogous formulas apply for Y and Z axes).
++4.  **Boundary Clamping:** If a vertex lies exactly on the maximum boundary, clamp its index to prevent out-of-bounds access:
+     ```python
+-    if boxNumX_i == numDiv.x and v_i.x == objBoxMax.x:
++    if boxNumX_i == numDiv.x and vertex.x == objBoxMax.x:
+         boxNumX_i -= 1
+     ```
+-    Apply the same logic for $Y$ and $Z$ axes.
+-4.  **Spanning Box Calculation:** Determine the minimum and maximum voxel indices spanned by the triangle:
++    (Repeat for Y and Z).
++5.  **Bounding Box Calculation:** Determine the range of voxels spanned by the triangle by computing the minimum and maximum indices across all three vertices:
+     $$
+     minBoxX = \min(boxNumX_0, boxNumX_1, boxNumX_2)
+@@ -36,115 +38,111 @@
+     maxBoxX = \max(boxNumX_0, boxNumX_1, boxNumX_2)
+     $$
+-    Repeat for $Y$ and $Z$ axes.
+-5.  **Voxel Iteration and Overlap Test:** Iterate through all voxels $(p, q, r)$ in the range $[minBoxX, maxBoxX] \times [minBoxY, maxBoxY] \times [minBoxZ, maxBoxZ]$.
+-    *   Compute the center of the candidate voxel:
++    (Repeat for Y and Z).
++6.  **Voxel Iteration and Overlap Test:** Iterate through all voxels $(p, q, r)$ in the range $[minBoxX, maxBoxX] \times [minBoxY, maxBoxY] \times [minBoxZ, maxBoxZ]$.
++    *   Compute the center of the current voxel $(p, q, r)$:
+         $$
+         boxMidPoint.x = (p + 0.5) \times boxExtents.x \times 2 + objBoxMin.x
+         $$
+-        $$
+-        boxMidPoint.y = (q + 0.5) \times boxExtents.y \times 2 + objBoxMin.y
+-        $$
+-        $$
+-        boxMidPoint.z = (r + 0.5) \times boxExtents.z \times 2 + objBoxMin.z
+-        $$
+-    *   Perform an AABB-Triangle intersection test using `TriBoxOverlapCUDA(boxMidPoint, boxExtent, triVerts)`. Note that `boxExtent` is derived from `boxExtents` (typically half-extents or full extents depending on the specific implementation of `TriBoxOverlapCUDA`, but the source implies `boxExtents` is the size parameter used in the center calculation).
++        (Analogous for Y and Z).
++    *   Perform a triangle-box intersection test `TriBoxOverlapCUDA(boxMidPoint, boxExtent, triVerts)`.
+     *   If an overlap is detected, compute the linear voxel index:
+         $$
+         index = r \times numDiv.y \times numDiv.x + q \times numDiv.x + p
+         $$
+-    *   Add the triangle index $t$ to the voxel's list using `AddPointToVoxel`. This function handles atomic addition to `voxelTriCountCUDAData` and writes $t$ to `voxelTriIndexCUDAData`, respecting `triBufferLen` [S1, unofficial].
++    *   Add the triangle index `t` to the voxel's list using `AddPointToVoxel`, respecting `triBufferLen` to prevent overflow [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def classify_triangle(t, triangles, objBoxMin, objBoxMax, numDiv, boxExtents, voxelTriIndex, voxelTriCount, triBufferLen):
+-    # Extract vertices
+-    offset = t * 9
+-    v0 = (triangles[offset], triangles[offset+1], triangles[offset+2])
+-    v1 = (triangles[offset+3], triangles[offset+4], triangles[offset+5])
+-    v2 = (triangles[offset+6], triangles[offset+7], triangles[offset+8])
+-    
+-    vertices = [v0, v1, v2]
+-    
+-    # Map vertices to voxel indices
+-    box_nums = []
+-    for v in vertices:
+-        bx = int((v[0] - objBoxMin[0]) / (objBoxMax[0] - objBoxMin[0]) * numDiv[0])
+-        by = int((v[1] - objBoxMin[1]) / (objBoxMax[1] - objBoxMin[1]) * numDiv[1])
+-        bz = int((v[2] - objBoxMin[2]) / (objBoxMax[2] - objBoxMin[2]) * numDiv[2])
+-        
+-        # Boundary clamping
+-        if bx == numDiv[0] and v[0] == objBoxMax[0]:
+-            bx -= 1
+-        if by == numDiv[1] and v[1] == objBoxMax[1]:
+-            by -= 1
+-        if bz == numDiv[2] and v[2] == objBoxMax[2]:
+-            bz -= 1
+-            
+-        box_nums.append((bx, by, bz))
+-        
+-    # Determine span
+-    min_box = (min(b[0] for b in box_nums), min(b[1] for b in box_nums), min(b[2] for b in box_nums))
+-    max_box = (max(b[0] for b in box_nums), max(b[1] for b in box_nums), max(b[2] for b in box_nums))
+-    
+-    # Iterate and test
+-    for p in range(min_box[0], max_box[0] + 1):
+-        for q in range(min_box[1], max_box[1] + 1):
+-            for r in range(min_box[2], max_box[2] + 1):
+-                # Compute voxel center
+-                mid_x = (p + 0.5) * boxExtents[0] * 2 + objBoxMin[0]
+-                mid_y = (q + 0.5) * boxExtents[1] * 2 + objBoxMin[1]
+-                mid_z = (r + 0.5) * boxExtents[2] * 2 + objBoxMin[2]
+-                
+-                # Triangle vertices for overlap test
+-                tri_verts = [v0, v1, v2]
+-                
+-                # Overlap test (implementation of TriBoxOverlapCUDA assumed)
+-                if tri_box_overlap((mid_x, mid_y, mid_z), boxExtents, tri_verts):
+-                    # Linear index
+-                    index = r * numDiv[1] * numDiv[0] + q * numDiv[0] + p
+-                    
+-                    # Add to voxel list
+-                    add_point_to_voxel(index, t, voxelTriIndex, voxelTriCount, triBufferLen)
++def CUDAClassifyTessellationKernel(trianglesCUDAData, objBoxMin, objBoxMax, numDiv, boxExtents, triBufferLen):
++    # Initialize output buffers
++    voxelTriCount = [0] * (numDiv.x * numDiv.y * numDiv.z)
++    voxelTriIndex = [[] for _ in range(numDiv.x * numDiv.y * numDiv.z)]
+ 
+-def tri_box_overlap(center, extents, tri_verts):
+-    # Placeholder for the specific SAT or slab test implementation.
+-    # The source cites TriBoxOverlapCUDA but does not provide its internal logic.
+-    # A standard implementation would use the Separating Axis Theorem.
+-    # [G] This function must be implemented separately using standard AABB-Triangle intersection algorithms.
+-    pass
++    numTriangles = len(trianglesCUDAData) // 9
+ 
+-def add_point_to_voxel(index, tri_idx, voxel_tri_index, voxel_tri_count, buffer_len):
+-    # Atomic increment of count
+-    current_count = atomic_add(voxel_tri_count, index, 1)
+-    
+-    # Check buffer capacity
+-    if current_count < buffer_len:
+-        voxel_tri_index[index * buffer_len + current_count] = tri_idx
++    for t in range(numTriangles):
++        # 1. Extract vertices
++        offset = t * 9
++        v0 = [trianglesCUDAData[offset + i] for i in range(3)]
++        v1 = [trianglesCUDAData[offset + 3 + i] for i in range(3)]
++        v2 = [trianglesCUDAData[offset + 6 + i] for i in range(3)]
++        vertices = [v0, v1, v2]
++
++        # 2. Map vertices to voxel indices
++        boxNums = []
++        for vertex in vertices:
++            bx = int((vertex[0] - objBoxMin[0]) / (objBoxMax[0] - objBoxMin[0]) * numDiv[0])
++            by = int((vertex[1] - objBoxMin[1]) / (objBoxMax[1] - objBoxMin[1]) * numDiv[1])
++            bz = int((vertex[2] - objBoxMin[2]) / (objBoxMax[2] - objBoxMin[2]) * numDiv[2])
++
++            # 3. Boundary clamping
++            if bx == numDiv[0] and vertex[0] == objBoxMax[0]:
++                bx -= 1
++            if by == numDiv[1] and vertex[1] == objBoxMax[1]:
++                by -= 1
++            if bz == numDiv[2] and vertex[2] == objBoxMax[2]:
++                bz -= 1
++            boxNums.append((bx, by, bz))
++
++        # 4. Compute min/max box indices
++        minBoxX = min(b[0] for b in boxNums)
++        maxBoxX = max(b[0] for b in boxNums)
++        minBoxY = min(b[1] for b in boxNums)
++        maxBoxY = max(b[1] for b in boxNums)
++        minBoxZ = min(b[2] for b in boxNums)
++        maxBoxZ = max(b[2] for b in boxNums)
++
++        # 5. Iterate and test overlap
++        for p in range(minBoxX, maxBoxX + 1):
++            for q in range(minBoxY, maxBoxY + 1):
++                for r in range(minBoxZ, maxBoxZ + 1):
++                    # Compute voxel center
++                    midX = (p + 0.5) * boxExtents[0] * 2 + objBoxMin[0]
++                    midY = (q + 0.5) * boxExtents[1] * 2 + objBoxMin[1]
++                    midZ = (r + 0.5) * boxExtents[2] * 2 + objBoxMin[2]
++                    boxMidPoint = [midX, midY, midZ]
++
++                    # Triangle-box overlap test
++                    if TriBoxOverlapCUDA(boxMidPoint, boxExtents, vertices):
++                        # Compute linear index
++                        index = r * numDiv[1] * numDiv[0] + q * numDiv[0] + p
++                        
++                        # Add triangle to voxel list
++                        AddPointToVoxel(index, t, voxelTriIndex, voxelTriCount, triBufferLen)
++
++def AddPointToVoxel(index, triIndex, voxelTriIndex, voxelTriCount, triBufferLen):
++    if voxelTriCount[index] < triBufferLen:
++        voxelTriIndex[index].append(triIndex)
++        voxelTriCount[index] += 1
++    # Note: Overflow handling is implementation-specific; sources do not specify behavior beyond triBufferLen [S1, unofficial]
+ ```
+ 
+ **Parameters:**
+-*   `triBufferLen`: Maximum number of triangles allocated per voxel in the buffer [S1, unofficial]. Value not given in the sources.
++*   `triBufferLen`: Maximum number of triangles per voxel. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Precision:** Vertices exactly at `objBoxMax` must be clamped to `numDiv - 1` to avoid out-of-bounds array access [S1, unofficial].
+-*   **Degenerate Triangles:** Triangles with zero area may still be processed; the overlap test handles this, but performance may vary.
+-*   **Buffer Overflow:** If a voxel contains more triangles than `triBufferLen`, additional triangles are dropped. This is a limitation of the coarse classification [S1, unofficial].
++*   **Boundary Precision:** Vertices exactly at `objBoxMax` must be clamped to avoid index out-of-bounds errors [S1, unofficial].
++*   **Degenerate Triangles:** The method assumes valid triangles; degenerate cases may produce incorrect overlaps or empty ranges [G].
++*   **Buffer Overflow:** If a voxel exceeds `triBufferLen`, additional triangles are dropped or require a dynamic resizing strategy, which is not detailed in the source [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Level 2 Triangle-Voxel Classification](5512-level-2-triangle-voxel-classification.md)
+-Refines the coarse classification into a finer grid by re-evaluating overlaps within sub-voxels. It uses Level 1 results to limit the search space, processing each Level 2 box against only the triangles assigned to its parent Level 1 box. Choose this when high-precision topology resolution is required.
++Refines the coarse classification by re-evaluating overlaps within sub-voxels to determine precise inside/outside status. It uses Level 1 results to limit the search space, processing only triangles assigned to the parent Level 1 box. Choose this when high-precision topology resolution is required.
++
++### [Occupancy Grid Voxelization](6958-occupancy-grid-voxelization.md)
++A brute-force method that checks every voxel against every triangle. It prioritizes implementation simplicity and exact boundary definition over speed. Choose this for small meshes or when hierarchical overhead is unjustified.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \times K)$, where $N$ is the number of triangles and $K$ is the average number of voxels spanned by a triangle. In the worst case, $K$ can be large if triangles are large relative to voxels.
+-*   **Memory Complexity:** $O(V \times T_{max})$, where $V$ is the number of voxels and $T_{max}$ is `triBufferLen`.
+-*   **Performance:** The method is designed for GPU execution (CUDA), leveraging parallelism for triangle processing [S1, unofficial].
+-*   **Strengths:** Simple to implement, efficient for coarse culling, reduces the number of triangles to be processed in finer stages.
+-*   **Limitations:** Coarse resolution may lead to false positives (triangles assigned to voxels they don't actually intersect). Buffer overflow can lead to data loss if `triBufferLen` is too small.
+-*   **When to Use:** As a first pass in hierarchical voxelization pipelines.
+-*   **When Not to Use:** When high precision is required immediately, or when memory bandwidth is a bottleneck due to large `triBufferLen`.
++*   **Time Complexity:** $O(N \times V_{span})$, where $N$ is the number of triangles and $V_{span}$ is the average number of voxels spanned by a triangle. The overlap test is constant time per voxel.
++*   **Memory Complexity:** $O(V_{total} \times T_{max})$, where $V_{total}$ is the total number of voxels and $T_{max}$ is `triBufferLen`.
++*   **Performance:** Highly parallelizable on GPU, with one thread per triangle. Performance scales with the number of triangles and the spatial coherence of the mesh.
++*   **Strengths:** Efficient reduction of search space for subsequent steps; simple implementation; GPU-friendly.
++*   **Limitations:** Coarse classification may include false positives (voxels that overlap the triangle's bounding box but not the triangle itself); requires careful handling of boundary conditions.
++*   **When to Use:** As the first stage in hierarchical voxelization pipelines where fine-grained classification is computationally expensive.
++*   **When Not to Use:** For very small meshes where brute-force is faster; when exact boundary definition is required without further refinement.
+ 
+ ## Background
+-The method originates from the GPView project by idealab-isu, specifically the `CUDAClassifyTessellationKernel` function [S1, unofficial]. It is part of a broader effort to accelerate volume rendering by efficiently generating voxel data from mesh inputs. The approach builds on the Separating Axis Theorem (SAT) for AABB-Triangle intersection, a standard technique in computer graphics.
++The method originates from the GPView project by idealab-isu, implemented as a CUDA kernel named `CUDAClassifyTessellationKernel` [S1, unofficial]. It is part of a broader effort to accelerate mesh processing for real-time visualization and volume rendering applications.
+ 
+ ## Sources

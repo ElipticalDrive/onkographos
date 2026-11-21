@@ -1,0 +1,364 @@
+core rendering canvas and data loading services for Vol-E volume viewer - convert raymarch to use 3d texture instead of atlas. by toloudis · Pull Request #370 · AllenCell/vole-core
+
+convert raymarch to use 3d texture instead of atlas. by toloudis · Pull Request #370 · AllenCell/vole-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+toloudis
+commented
+Jan 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+what would it look like if the raymarch shader used the same 3d volume texture that the pathtrace mode uses?
+Limitation:
+no more than 4 channels
+can not "pre-fuse" with GPU anymore, because no writes to 3d textures
+webgl 2?
+Turning channels on/off requires rebuilding the 3d texture
+3d texture is still in 8bit precision
+Benefit:
+larger xyz volumes can be displayed! we can change the memory footprint heuristic
+only one in-memory representation for pathtrace, isosurface, and raymarch
+simpler to deal with than texture atlas, and less weird edge issues
+TODO:
+optimize for less than 4 channels by creating/reallocating a datatexture with a R, RG, or RGB format conditionally.
+updateVolumeData4 might be called too often
+share textures with pathtrace module
+colorize not implemented yet
+toloudis
+added 2 commits
+January 29, 2026 17:19
+convert raymarch to use 3d texture instead of atlas.
+9b10374
+Merge branch 'main' into feature/raymarch-3d-texture
+474a6eb
+toloudis
+requested a review
+from Copilot
+March 1, 2026 21:22
+Copilot started reviewing on behalf of
+toloudis
+March 1, 2026 21:23
+View session
+Copilot
+AI
+reviewed
+Mar 1, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR switches the raymarch rendering path from a 2D texture atlas to a shared-style 3D volume texture + per-channel LUT texture (similar to the pathtrace renderer), aiming to simplify representation and enable larger volumes.
+Changes:
+Removed atlas-specific uniforms and sampling logic; introduced sampler3D volumeTexture sampling in the raymarch fragment shader.
+Added a 3D Data3DTexture upload path and a combined 256×4 LUT DataTexture for up to 4 active channels in RayMarchedAtlasVolume.
+Updated active-channel selection to populate the 3D texture + LUTs instead of GPU-fusing an atlas each frame.
+Reviewed changes
+Copilot reviewed 3 out of 3 changed files in this pull request and generated 4 comments.
+File
+Description
+src/constants/volumeRayMarchShader.ts
+Replaces atlas-related uniforms with volumeTexture, gLutTexture, and gNChannels.
+src/constants/shaders/raymarch.frag
+Replaces atlas sampling with 3D texture sampling + LUT-based color reconstruction.
+src/RayMarchedAtlasVolume.ts
+Removes FusedChannelData atlas pipeline; adds 3D volume texture + LUT texture creation and CPU-side packing.
+Comments suppressed due to low confidence (1)
+src/constants/shaders/raymarch.frag:32
+maskAlpha and interpolationEnabled are still declared as uniforms but are no longer used anywhere in this shader after the move to sampler3D sampling. Consider removing them from the shader and from rayMarchingShaderUniforms() (and stop setting maskAlpha in RayMarchedAtlasVolume.updateSettings) to avoid confusion and make it clearer which controls are still shader-driven vs baked into the uploaded 3D texture.
+```
+uniform vec2 iResolution;
+uniform float GAMMA_MIN;
+uniform float GAMMA_MAX;
+uniform float GAMMA_SCALE;
+uniform float BRIGHTNESS;
+uniform float DENSITY;
+uniform float maskAlpha;
+uniform vec3 AABB_CLIP_MIN;
+uniform float CLIP_NEAR;
+uniform vec3 AABB_CLIP_MAX;
+uniform float CLIP_FAR;
+uniform sampler3D volumeTexture;
+uniform sampler2D gLutTexture;
+uniform int gNChannels;
+uniform sampler2D textureDepth;
+uniform int usingPositionTexture;
+uniform int BREAK_STEPS;
+uniform float isOrtho;
+uniform float orthoThickness;
+uniform float orthoScale;
+uniform int maxProject;
+uniform bool interpolationEnabled;
+uniform vec3 flipVolume;
+uniform vec3 volumeScale;
+```
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/RayMarchedAtlasVolume.ts
+Comment on lines
+332
+to
+346
+@@ -325,9 +344,6 @@ export default class RayMarchedAtlasVolume implements VolumeRenderImpl {
+this.setUniform("CLIP_NEAR", camera.near);
+this.setUniform("CLIP_FAR", camera.far);
+Copilot
+AI
+Mar 1, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Raymarch now relies on Data3DTexture/sampler3D, which requires WebGL2. This renderer currently doesn’t guard against running under the WebGL1 fallback path (see ThreeJsPanel’s non-WebGL2 branch), so in WebGL1 this will fail shader compilation / rendering. Please add an explicit WebGL2 capability check (e.g., renderer.capabilities.isWebGL2) and either (a) fall back to the old atlas path or (b) disable raymarch with a clear error message when WebGL2 is unavailable.
+Copilot uses AI. Check for mistakes.
+Comment thread
+src/RayMarchedAtlasVolume.ts
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/RayMarchedAtlasVolume.ts
+Outdated
+Comment on lines
++398
+to
++408
+if (this.settings.maskChannelIndex !== -1 && this.settings.maskAlpha < 1.0) {
+const maskChannel = this.volume.getChannel(this.settings.maskChannelIndex);
+let maskVal = 1.0;
+const maskAlpha = this.settings.maskAlpha;
+for (let iz = 0; iz < sz; ++iz) {
+for (let iy = 0; iy < sy; ++iy) {
+for (let ix = 0; ix < sx; ++ix) {
+// binary masking
+maskVal = maskChannel.getIntensity(ix, iy, iz) > 0 ? 1.0 : maskAlpha;
+data[i + ix * 4 + iy * 4 * sx + iz * 4 * sx * sy] *= maskVal;
+}
+Copilot
+AI
+Mar 1, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Masking is currently applied by scaling the per-voxel intensity before LUT lookup (data[...] *= maskVal). That changes rendering semantics vs masking the final premultiplied color (it will affect LUT-driven alpha and color, not just RGB), and it also applies the same mask volume up to 4 times (once per channel). If the intended behavior is to match the previous “mask RGB only” approach, consider keeping intensities unchanged and applying the mask factor after LUT evaluation (or uploading a separate mask 3D texture / reserving one channel for mask). Also, compute the mask once and reuse it across channels to avoid the repeated full-volume pass.
+Copilot uses AI. Check for mistakes.
+toloudis
+Mar 2, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+My first thought is that this is more of an efficiency than a correctness issue?
+Comment thread
+src/constants/shaders/raymarch.frag
+// special-casing the single slice to remove the random ray dither.
+// this removes a Moire pattern visible in single slice images, which we want to view as 2D images as best we can.
+float r = (SLICES == 1.0) ? 0.0 : rand(eye_d.xy);
+float r = rand(eye_d.xy);
+Copilot
+AI
+Mar 1, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The ray dither is now always enabled (float r = rand(eye_d.xy);). Previously there was a special-case to disable dithering for single-slice volumes to avoid Moiré artifacts. If single-slice datasets are still supported, consider restoring that behavior by checking the 3D texture depth (e.g., textureSize(volumeTexture, 0).z) and forcing r = 0.0 when depth is 1.
+Suggested change
+float r = rand(eye_d.xy);
+// Disable ray dithering for single-slice volumes to avoid Moiré artifacts.
+int volumeDepth = textureSize(volumeTexture, 0).z;
+float r = (volumeDepth == 1) ? 0.0 : rand(eye_d.xy);
+Copilot uses AI. Check for mistakes.
+toloudis
+added 2 commits
+March 1, 2026 13:46
+keep scratch buffer around
+720cddb
+dry refactor and fix time playback
+212f070
+toloudis
+requested a review
+from Copilot
+March 2, 2026 15:35
+Copilot started reviewing on behalf of
+toloudis
+March 2, 2026 15:36
+View session
+Copilot
+AI
+reviewed
+Mar 2, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 6 out of 6 changed files in this pull request and generated 5 comments.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/utils/VolumeDataUpdater.ts
+Comment on lines
++31
+to
++58
+for (let i = 0; i < 4; ++i) {
+const ch = viewChannels[i];
+if (ch === -1) {
+continue;
+}
+const volumeChannel = volume.getChannel(ch);
+for (let iz = 0; iz < sz; ++iz) {
+for (let iy = 0; iy < sy; ++iy) {
+for (let ix = 0; ix < sx; ++ix) {
+data[i + ix * 4 + iy * 4 * sx + iz * 4 * sx * sy] =
+255 * volumeChannel.normalizeRaw(volumeChannel.getIntensity(ix, iy, iz));
+}
+}
+}
+if (maskChannelIndex !== -1 && maskAlpha < 1.0) {
+const maskChannel = volume.getChannel(maskChannelIndex);
+let maskVal = 1.0;
+for (let iz = 0; iz < sz; ++iz) {
+for (let iy = 0; iy < sy; ++iy) {
+for (let ix = 0; ix < sx; ++ix) {
+// binary masking
+maskVal = maskChannel.getIntensity(ix, iy, iz) > 0 ? 1.0 : maskAlpha;
+data[i + ix * 4 + iy * 4 * sx + iz * 4 * sx * sy] *= maskVal;
+}
+}
+}
+}
+Copilot
+AI
+Mar 2, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+VolumeDataUpdater.update() traverses the full 3D volume twice per active channel when masking is enabled (once to write intensities, then again to apply the mask). For large volumes and multiple channels this is a significant CPU cost. Consider folding mask application into the intensity-write loop (or precomputing a single mask volume once and applying it across channels) to avoid the extra full-volume pass per channel.
+Copilot uses AI. Check for mistakes.
+Comment thread
+src/constants/shaders/raymarch.frag
+Comment on lines
+149
+to
+153
+float scaledSteps = float(BREAK_STEPS) * length((eye_d.xyz / volumeScale));
+float csteps = clamp(float(scaledSteps), 1.0, float(maxSteps));
+float invstep = (tfar - tnear) / csteps;
+// special-casing the single slice to remove the random ray dither.
+// this removes a Moire pattern visible in single slice images, which we want to view as 2D images as best we can.
+float r = (SLICES == 1.0) ? 0.0 : rand(eye_d.xy);
+float r = rand(eye_d.xy);
+// if ortho and clipped, make step size smaller so we still get same number of steps
+Copilot
+AI
+Mar 2, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The previous shader disabled random ray dithering for single-slice volumes to avoid a visible Moiré pattern; that special-case was removed with the atlas code. With a 3D texture, volumes can still have depth=1, so this will reintroduce that artifact. Consider reintroducing an equivalent condition (e.g., a volumeDepth/isSingleSlice uniform set from subregionSize.z) to force r = 0.0 when depth is 1.
+Copilot uses AI. Check for mistakes.
+Comment thread
+src/RayMarchedAtlasVolume.ts
+}
+if (dirtyFlags & SettingsFlags.MASK_ALPHA) {
+this.setUniform("maskAlpha", this.settings.maskChannelIndex < 0 ? 1.0 : this.settings.maskAlpha);
+Copilot
+AI
+Mar 2, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+maskAlpha is now applied on the CPU when building volumeTexture, but the shader uniform is still being set here. Since the fragment shader no longer uses maskAlpha, keeping this uniform update is misleading and can be removed (or, if runtime maskAlpha changes are expected without rebuilding the 3D texture, the shader should use the uniform again).
+Suggested change
+this.setUniform("maskAlpha", this.settings.maskChannelIndex < 0 ? 1.0 : this.settings.maskAlpha);
+Copilot uses AI. Check for mistakes.
+Comment thread
+src/RayMarchedAtlasVolume.ts
+Comment on lines
+212
+to
+218
+if (dirtyFlags & SettingsFlags.SAMPLING) {
+this.setUniform("interpolationEnabled", this.settings.useInterpolation);
+this.volumeTexture.minFilter = this.volumeTexture.magFilter = this.settings.useInterpolation
+? LinearFilter
+: NearestFilter;
+this.volumeTexture.needsUpdate = true;
+this.setUniform("iResolution", this.settings.resolution);
+}
+Copilot
+AI
+Mar 2, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Sampling interpolation is now controlled via volumeTexture.minFilter/magFilter, but the shader uniform interpolationEnabled is still declared and included in the uniforms object. Since it’s no longer used in raymarch.frag, consider removing the uniform from both the TS uniforms and GLSL to avoid dead/unreferenced state and reduce confusion.
+Copilot uses AI. Check for mistakes.
+Comment thread
+src/RayMarchedAtlasVolume.ts
+Comment on lines
++392
+to
++399
+private updateLuts(channelColors: FuseChannel[], channelData: Channel[]): void {
+for (let i = 0; i < this.uniforms.gNChannels.value; ++i) {
+const channel = this.viewChannels[i];
+const combinedLut = channelData[channel].combineLuts(channelColors[channel].rgbColor);
+this.lutTexture.image.data.set(combinedLut, i * LUT_ARRAY_LENGTH);
+}
+this.lutTexture.needsUpdate = true;
+Copilot
+AI
+Mar 2, 2026
+Copy link
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+updateLuts() calls Channel.combineLuts() without providing the optional out buffer, which allocates a new Uint8Array every time LUTs are updated. This can create noticeable GC churn when users adjust colors/LUTs frequently. Consider reusing a preallocated Uint8Array per active slot (and passing it as out) so LUT updates are in-place.
+Copilot uses AI. Check for mistakes.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

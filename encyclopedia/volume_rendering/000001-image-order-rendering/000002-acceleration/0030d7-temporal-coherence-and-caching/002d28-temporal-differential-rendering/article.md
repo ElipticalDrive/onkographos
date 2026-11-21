@@ -1,0 +1,187 @@
+# Temporal Differential Rendering
+
+Also called: Dirty-brick partial re-render, Dirty-row flush
+
+## Overview
+Temporal differential rendering reduces per-frame computational cost by skipping the rendering of screen regions that have not changed since the previous frame [S1, S2, unofficial]. It solves the problem of redundant ray-marching or shading work in dynamic scenes where only small portions of the volume or camera view update between iterations. Unlike [Reprojection with Temporal Accumulation](8337-reprojection-with-temporal-accumulation.md), which blends historical buffers to reduce noise, this method performs a binary check for change and completely bypasses the rendering pipeline for clean regions, offering higher fidelity at the cost of strict temporal consistency requirements [S1, S2, unofficial].
+
+## How it works
+The method operates by maintaining a representation of the previous frame's state and comparing it against the current frame to identify "dirty" regions. Two primary implementations exist: tile-based dirty-brick tracking for GPU-accelerated volume rendering and row-based hashing for CPU-based or console rendering.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Current frame data: Volume state, camera parameters, or canvas content.
+    *   Previous frame data: Rendered buffer, hash values, or dirty region masks.
+    *   Change indicators: Physics updates, user edits, or camera movement vectors.
+*   **Outputs:**
+    *   Rendered image for dirty regions only.
+    *   Updated previous frame buffer/hash state.
+
+### Data Structures
+1.  **Dirty Region Map:** A boolean or integer array mapping screen tiles (e.g., 8×8 pixels) or rows to their dirty status [S1, S2, unofficial].
+2.  **Previous Frame Buffer:** A texture or array storing the color/opacity values from the previous frame for comparison or fallback [S1, S2, unofficial].
+3.  **Hash Table (Row-based):** An array of hash values, one per row, used to detect changes in console/ASCII rendering [S2, unofficial].
+
+### Algorithm Steps
+
+#### Variant A: Dirty-Brick Tile Tracking (GPU Volume Rendering)
+This variant, described in [S1, unofficial], projects dirty bricks (from physics or edits) into screen tiles.
+
+1.  **Dirty Brick Projection:** On the CPU, identify bricks that have changed due to physics, edits, or camera movement. Project these bricks into 8×8 screen tiles to mark them as "dirty" [S1, unofficial].
+2.  **Tile Hashing/Check:** For each 8×8 tile, determine if it contains any dirty bricks. If a tile is clean, mark it as "unchanged" [S1, unofficial].
+3.  **Early-Out:** In the compute shader, check the tile status. If the tile is clean, skip the ray-marching and shading steps for all pixels in that tile [S1, unofficial].
+4.  **Rendering:** For dirty tiles, perform the standard rendering pass (e.g., distance LOD, DDA traversal) [S1, unofficial].
+5.  **Update State:** Update the dirty tile map for the next frame based on new changes [S1, unofficial].
+
+#### Variant B: Dirty-Row Flush with Hashing (CPU/Console Rendering)
+This variant, described in [S2, unofficial], uses per-row hashing to detect changes in a character canvas.
+
+1.  **Initialization:** Initialize the previous canvas buffer and row hash array. Set FNV offset constant $H_{offset} = 2166136261u$ and FNV prime constant $H_{prime} = 16777619u$ [S2, unofficial].
+2.  **Dimension Check:** If the current canvas dimensions differ from the previous buffer dimensions, reinitialize the previous buffers to match [S2, unofficial].
+3.  **Row Hashing:** For each row $y$ from $0$ to $H-1$:
+    *   Initialize hash $h = H_{offset}$.
+    *   For each column $x$ from $0$ to $W-1$:
+        *   Get character $ch = \text{canvas}[y, x]$.
+        *   Update hash: $h = (h \oplus \text{ushort}(ch)) \times H_{prime}$.
+        *   Get color string $col = \text{colors}[y, x]$.
+        *   Get color hash $colId = \text{col} \text{ is null } ? 0 : \text{RuntimeHelpers.GetHashCode}(col)$.
+        *   Update hash: $h = (h \oplus \text{uint}(colId)) \times H_{prime}$.
+    *   Store $h$ as $\text{rowHash}[y]$ [S2, unofficial].
+4.  **Change Detection:** Compare $\text{rowHash}[y]$ with $\text{prevRowHash}[y]$. If they are equal, the row is clean; skip rendering for this row [S2, unofficial].
+5.  **Flush Dirty Rows:** If the row is dirty:
+    *   Initialize a string builder for ANSI escape sequences.
+    *   Append cursor move sequence: `\x1b[{y+1};1H` [S2, unofficial].
+    *   For each column $x$ from $0$ to $W-1$:
+        *   Get color $col = \text{colors}[y, x]$.
+        *   If $col \neq \text{lastColor}$, append color code (or reset code if null) to builder. Set $\text{lastColor} = col$ [S2, unofficial].
+        *   Get character $ch = \text{canvas}[y, x]$.
+        *   Append $ch$ (or space if null) to builder [S2, unofficial].
+    *   Write the accumulated string to the console [S2, unofficial].
+6.  **Update State:** Copy current canvas and colors to previous buffers. Update $\text{prevRowHash}[y]$ with the new hash [S2, unofficial].
+
+### Pseudocode (Variant B: Dirty-Row Flush)
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+FNV_OFFSET = 2166136261
+FNV_PRIME = 16777619
+
+def compute_row_hash(canvas_row, colors_row):
+    """Compute FNV-1a hash for a single row."""
+    h = FNV_OFFSET
+    for x in range(len(canvas_row)):
+        ch = canvas_row[x]
+        # Convert char to ushort (assuming ASCII/UTF-16 compatible)
+        ch_val = ord(ch) if ch else 0
+        h ^= ch_val
+        h *= FNV_PRIME
+        
+        col = colors_row[x]
+        # Get hash of color string; 0 if null
+        col_id = hash(col) if col is not None else 0
+        h ^= col_id
+        h *= FNV_PRIME
+    return h
+
+def temporal_differential_render(canvas, colors, prev_canvas, prev_colors, prev_row_hashes, width, height):
+    """
+    Render only dirty rows using temporal differential rendering.
+    canvas: 2D array of characters [height][width]
+    colors: 2D array of color strings [height][width]
+    prev_canvas: 2D array of previous characters
+    prev_colors: 2D array of previous colors
+    prev_row_hashes: 1D array of previous row hashes
+    """
+    # Check dimensions
+    if len(canvas) != len(prev_canvas) or len(canvas[0]) != len(prev_canvas[0]):
+        prev_canvas = [[None for _ in range(width)] for _ in range(height)]
+        prev_colors = [[None for _ in range(width)] for _ in range(height)]
+        prev_row_hashes = [0] * height
+
+    output_lines = []
+    any_writes = False
+
+    for y in range(height):
+        # Compute current row hash
+        current_hash = compute_row_hash(canvas[y], colors[y])
+        
+        # Check if row changed
+        if current_hash == prev_row_hashes[y]:
+            # Row is clean, skip rendering
+            continue
+        
+        # Row is dirty, render it
+        any_writes = True
+        line_buffer = []
+        
+        # Move cursor to start of row (1-based indexing for ANSI)
+        line_buffer.append(f"\x1b[{y+1};1H")
+        
+        last_color = None
+        for x in range(width):
+            col = colors[y][x]
+            if col != last_color:
+                if col is None:
+                    line_buffer.append("\x1b[0m") # Reset
+                else:
+                    line_buffer.append(col) # Assume col is ANSI code
+                last_color = col
+            
+            ch = canvas[y][x]
+            if ch == '\0':
+                ch = ' '
+            line_buffer.append(ch)
+        
+        output_lines.append("".join(line_buffer))
+        
+        # Update previous state
+        prev_canvas[y] = canvas[y][:]
+        prev_colors[y] = colors[y][:]
+        prev_row_hashes[y] = current_hash
+
+    if any_writes:
+        print("".join(output_lines))
+    else:
+        # No changes, could skip entirely or just copy buffers
+        pass
+```
+
+### Parameters
+*   **Tile Size:** 8×8 pixels is used in [S1, unofficial].
+*   **Hash Constants:** FNV-1a offset $2166136261u$ and prime $16777619u$ are used in [S2, unofficial].
+*   **Safety Margin:** A 16-voxel safety margin is used in the distance LOD pass to prevent popping artifacts when fast-forwarding rays [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Precision:** Hash collisions are possible but rare with FNV-1a. In high-contrast scenes, false positives (rendering clean rows) are acceptable; false negatives (skipping dirty rows) cause visual artifacts [S2, unofficial].
+*   **Boundaries:** Dimension mismatches between frames require buffer reinitialization [S2, unofficial].
+*   **Degenerate Input:** Empty rows or null characters must be handled explicitly to avoid hash mismatches [S2, unofficial].
+
+## Subtopics
+
+### Partial Volume Rendering Update
+A variant where a partial volume rendering pass is performed between visibility detection passes to update occluding data with newly loaded bricks [S3, unofficial]. The frequency of total scene rendering must be chosen carefully as it is expensive [S3, unofficial]. Future work suggests storing ray state (position, direction, hierarchy position, DDA state) in image space buffers for progressive rendering resumption [S3, unofficial].
+
+### Anti-flicker via Freezing
+A heuristic to prevent flicker in static regions by freezing primitives whose bounding boxes do not intersect the inter-frame difference mask $D$ [S4, unofficial]. For each primitive $i$, if $B_i \cap \text{support}(D) = \emptyset$, set $\text{freeze}_i = 1$ [S4, unofficial]. Only primitives with $\text{freeze}_i = 0$ are updated during optimization, preventing spurious updates in static areas [S4, unofficial].
+
+### Dirty-Row Flush with Hashing
+The specific implementation using per-row FNV hashing to detect changes in console/ASCII rendering, as detailed in the main algorithm [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of dirty tiles/rows. Clean regions are skipped entirely, reducing effective work to $O(D)$ where $D$ is the number of dirty regions [S1, S2, unofficial].
+*   **Memory Complexity:** $O(W \times H)$ for storing previous frame buffers and hash arrays [S1, S2, unofficial].
+*   **Performance:** In scenes with high temporal coherence, performance scales linearly with the number of changes. In static scenes, rendering cost approaches zero [S1, S2, unofficial].
+*   **Strengths:** Eliminates redundant computation; high fidelity (no temporal blending artifacts); simple implementation [S1, S2, unofficial].
+*   **Limitations:** Requires strict temporal consistency; cannot handle large camera movements or scene changes without full re-render; hash collisions may cause artifacts [S2, unofficial].
+*   **When to Use:** Dynamic scenes with small, localized changes (e.g., voxel games, fluid simulations) [S1, unofficial].
+*   **When Not to Use:** Scenes with large, global changes or high-frequency noise where temporal accumulation is more appropriate [S1, S2, unofficial].
+
+## Background
+Temporal differential rendering originated in the context of voxel-based real-time rendering and console-based graphics. The dirty-brick approach was implemented in the `voxelG` project by mstampfli, leveraging GPU compute shaders for efficient tile-based culling [S1, unofficial]. The dirty-row hashing approach was developed for console canvas rendering in `csRaymarching` by 0gecco, using FNV hashing for efficient row-level change detection [S2, unofficial]. The concept of partial updates and freezing for flicker reduction has also been explored in differentiable rendering of bitmap primitives (DiffBMP) [S4, unofficial] and procedural volume exploration [S3, unofficial].
+
+## Sources
+[S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+[S2] 0gecco/csRaymarching, https://github.com/0gecco/csRaymarching, fetched 2026-10-27 (unofficial)
+[S3] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+[S4] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

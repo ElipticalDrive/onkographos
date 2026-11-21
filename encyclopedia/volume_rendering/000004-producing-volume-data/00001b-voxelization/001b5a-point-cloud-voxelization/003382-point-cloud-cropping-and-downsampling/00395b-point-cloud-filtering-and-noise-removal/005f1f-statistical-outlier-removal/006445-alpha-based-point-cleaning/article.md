@@ -1,0 +1,93 @@
+# Alpha-based Point Cleaning
+
+Also called: Alpha Threshold Cleaning, Point Cleaning
+
+## Overview
+Alpha-based Point Cleaning is a post-processing and iterative optimization strategy used in neural point rendering to remove outlier points from a point cloud based on their learned opacity (alpha) values [S1]. It solves the problem of noisy initial reconstructions (e.g., from COLMAP) or spurious points generated during training (e.g., from spawning mechanisms) by explicitly identifying points with low confidence [S1]. Unlike sibling methods that rely on geometric density or distance metrics, this method leverages the neural optimization process itself, where valid geometry converges to high opacity while outliers converge to zero [S1]. It is a child of Statistical Outlier Removal, specifically utilizing the alpha parameter rather than statistical distance [Parent](17819-statistical-outlier-removal.md).
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of points $P = \{p_i\}$, where each point $p_i$ has a position, color, and an opacity value $\alpha_i$ (also referred to as confidence).
+- Output: A filtered subset of points $P' \subset P$ containing only those with $\alpha_i \ge T$.
+
+**Data Structures:**
+- The point cloud is typically stored as a list or array of structures. Each element contains:
+  - `position`: 3D vector $(x, y, z)$.
+  - `color`: 3D vector $(r, g, b)$.
+  - `alpha`: Scalar float in $[0, 1]$, representing the point's opacity or confidence.
+
+**Parameters:**
+- $T$: The alpha threshold. The default value used in the source is $0.3$ [S1].
+- $E_{clean}$: The frequency of cleaning steps during training. The source recommends removing points every $50$ epochs for faster training, though convergence checks often occur every $200$ epochs [S1].
+
+**Steps:**
+1. **Initialization**: During the neural rendering optimization, each point $p_i$ is assigned an opacity $\alpha_i$. The optimization process (e.g., Gaussian Splatting or similar neural point rendering) adjusts these values to minimize rendering loss [S1].
+2. **Thresholding**: At specified intervals (e.g., every $50$ epochs or at the end of training), iterate through all points $p_i$.
+3. **Filtering**: For each point, check if $\alpha_i < T$.
+   - If $\alpha_i < T$, mark $p_i$ as an outlier.
+   - If $\alpha_i \ge T$, retain $p_i$.
+4. **Removal**: Remove all marked outliers from the active point cloud. This reduces the number of points, accelerating subsequent training iterations [S1].
+5. **Iteration**: Repeat steps 2-4 throughout the training process. The source notes that a threshold of $0.3$ effectively removes most outliers while allowing variance during training [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def alpha_based_point_cleaning(points, threshold=0.3, epoch=0, clean_every=50):
+    """
+    Removes points with alpha (opacity) below the threshold.
+    
+    Args:
+        points: List of point objects, each having an 'alpha' attribute.
+        threshold: Float, the alpha value below which a point is considered an outlier.
+        epoch: Int, the current training epoch.
+        clean_every: Int, frequency of cleaning steps.
+        
+    Returns:
+        List of filtered points.
+    """
+    # Only perform cleaning at specified intervals to save computation
+    if epoch % clean_every != 0:
+        return points
+
+    cleaned_points = []
+    for point in points:
+        # Check if the point's opacity/confidence is above the threshold
+        if point.alpha >= threshold:
+            cleaned_points.append(point)
+        # Points with alpha < threshold are discarded (outliers)
+        
+    return cleaned_points
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision**: The alpha values are floats. Ensure the comparison `point.alpha >= threshold` handles floating-point precision correctly, though standard comparisons are sufficient given the binary-like convergence at the end of training [S1].
+- **Boundary Conditions**: A threshold of $0.0$ retains all points; a threshold of $1.0$ retains only fully opaque points. The source uses $0.3$ as a balance [S1].
+- **Degenerate Input**: If the initial reconstruction is extremely noisy, aggressive cleaning (high $T$) might remove valid geometry. The source notes that $T=0.3$ works well across tested scenes [S1].
+
+## Subtopics
+
+### Point Cleaning Confidence Threshold
+This variant explicitly defines the threshold $T$ as a configurable parameter for controlling the trade-off between point cloud size and rendering quality. It sets apart from the general method by providing empirical data on how varying $T$ affects metrics like LPIPS and PSNR. It is chosen when one needs to aggressively reduce point cloud size or fine-tune the balance between detail and noise.
+- **Definition**: In every cleaning step, points with confidence (alpha) below a threshold $T$ are removed [S1].
+- **Parameter**: $T$ is the confidence threshold. The default used in experiments is $0.3$, which results in point clouds similarly sized to the initial COLMAP reconstruction. Thresholds up to $0.9$ provide reasonable results with significant size reduction [S1].
+- **Performance Data (Garden Scene, 7.8M initial points)**:
+  - $T=0.30$: 7.3M points, LPIPS 0.178, PSNR 23.70 [S1].
+  - $T=0.90$: 2.6M points, LPIPS 0.200, PSNR 23.44 [S1].
+  - $T=0.99$: 0.1M points, LPIPS 0.446, PSNR 19.08 [S1].
+- **Link**: [Alpha-based Point Cleaning](17820-alpha-based-point-cleaning.md)
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ per cleaning step, where $N$ is the number of points. Cleaning is performed every $E_{clean}$ epochs, so the overhead is amortized over the training duration [S1].
+- **Memory Complexity**: $O(N)$ to store the point cloud. Cleaning reduces $N$, thereby reducing memory usage for subsequent training steps [S1].
+- **Measured Performance**: On the Garden scene, cleaning with $T=0.3$ reduced points from 7.8M to 7.3M with negligible impact on PSNR (23.70) and LPIPS (0.178) [S1]. On the Playground scene, adding 1 million random outliers resulted in a final cloud with almost no visible outliers after cleaning [S1]. On the Opera scene, it effectively cleaned up water-area artifacts from COLMAP [S1].
+- **Strengths**: Explicitly leverages neural optimization to distinguish geometry from noise; effective against environment sphere artifacts and spawning outliers; reduces training time by decreasing point count [S1].
+- **Limitations**: Requires the optimization process to have converged sufficiently for alpha values to be meaningful; aggressive thresholds ($T > 0.9$) can degrade rendering quality significantly (e.g., PSNR drop to 19.08 at $T=0.99$) [S1].
+- **When to Use**: When using neural point rendering with initial noisy reconstructions (e.g., COLMAP) or active spawning mechanisms.
+- **When Not to Use**: When the initial point cloud is already clean and noise is not a concern, or when real-time inference without iterative optimization is required.
+
+## Background
+Alpha-based Point Cleaning was introduced in the VET (Visual Error Tomography) paper by Linus Franke et al. in 2024 [S1]. It is part of a pipeline that combines neural rendering with point cloud completion. The method builds on the observation that outlier points receive low or zero opacity during the optimization of point-based neural rendering [S1]. It is used in conjunction with other techniques like spawning and sigmoid narrowing to achieve high-quality neural rendering from sparse or noisy initial data [S1].
+
+## Sources
+[S1] VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering, https://doi.org/10.1145/3610548.3618212, fetched 2026-10-26

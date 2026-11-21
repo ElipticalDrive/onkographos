@@ -1,0 +1,977 @@
+### cube.cpp
+```
+#include "geom.h"
+#include <cassert>
+#include <iomanip>
+#include <cstdio>
+#include <bitset>
+
+struct tet {
+    int a, b, c, d;
+};
+
+int cubefaces[6][4] = {
+    {0, 2, 6, 4}, {1, 5, 7, 3},
+    {0, 4, 5, 1}, {2, 3, 7, 6},
+    {0, 1, 3, 2}, {4, 6, 7, 5}
+};
+
+int cubeedge(int v1, int v2) {
+    // v1 = x1 + 2y1 + 4z1
+    // v2 = x2 + 2y2 + 4z2
+    int x1, x2, y1, y2, z1, z2;
+    x1 = v1 & 1;
+    x2 = v2 & 1;
+    y1 = (v1 & 2) >> 1;
+    y2 = (v2 & 2) >> 1;
+    z1 = v1 >> 2;
+    z2 = v2 >> 2;
+    if (x1 != x2) {
+        assert(y1 == y2 && z1 == z2);
+        return y1 + 2 * z1;
+    }
+    if (y1 != y2) {
+        assert(x1 == x2 && z1 == z2);
+        return 4 + x1 + 2 * z1;
+    }
+    assert(x1 == x2 && y1 == y2);
+    return 8 + x1 + 2 * y1;
+}
+
+#include <vector>
+#include <fstream>
+#include <algorithm>
+#include <cmath>
+#include <unordered_map>
+#include <unordered_set>
+#include <iostream>
+
+#include <Eigen/Core>
+
+void save(const std::string &filename, const std::vector<point> &pts, const std::vector<tet> &tets, const std::vector<double> &vals) {
+    std::ofstream f(filename, std::ios::binary);
+    f << "# vtk DataFile Version 3.0\n";
+    f << "Cube\n";
+    f << "ASCII\n";
+    f << "DATASET UNSTRUCTURED_GRID\n";
+    f << "POINTS " << pts.size() << " float\n";
+    for (const auto &p : pts)
+        f << p.x << " " << p.y << " " << p.z << "\n";
+    f << "CELLS " << tets.size() << " " << 5 * tets.size() << "\n";
+    for (const auto &t : tets)
+        f << "4 " << t.a << " " << t.b << " " << t.c << " " << t.d << "\n";
+    f << "CELL_TYPES " << tets.size() << "\n";
+    std::for_each(tets.begin(), tets.end(), [&f] (const tet &) { f << "10\n"; });
+    f << "POINT_DATA " << pts.size() << "\n";
+    f << "SCALARS u float\nLOOKUP_TABLE default\n";
+    for (const auto &v: vals)
+        f << v << "\n";
+}
+
+int edgeid(int u, int v) {
+    return std::min(u, v) * 100 + std::max(u, v);
+}
+
+int main() {
+    std::vector<point> pts;
+
+    for (int z = 0; z < 2; z++)
+        for (int y = 0; y < 2; y++)
+            for (int x = 0; x < 2; x++)
+                pts.emplace_back(point(x, y, z));
+
+    for (int f = 0; f < 6; f++) {
+        point sum(0, 0, 0);
+        for (int v = 0; v < 4; v++)
+            sum += pts[cubefaces[f][v]];
+        pts.push_back(sum * 0.25);
+    }
+
+    pts.emplace_back(point(.5, .5, .5));
+
+    std::vector<tet> tets;
+
+    for (int f = 0; f < 6; f++)
+        for (int j = 0; j < 4; j++)
+            tets.emplace_back(tet{cubefaces[f][(j+1)&3], cubefaces[f][j], 8+f, 14});
+
+    std::unordered_map<int, int> edgemap;
+    std::vector<int> iedgemap;
+    for (const auto &t : tets) {
+        int p[4] = {t.a, t.b, t.c, t.d};
+        int i[6] = {0, 0, 0, 1, 1, 2};
+        int j[6] = {1, 2, 3, 2, 3, 3};
+        for (int k = 0; k < 6; k++) {
+            int id = edgemap.size();
+            int eid = edgeid(p[i[k]], p[j[k]]);
+            if (edgemap.find(eid) == edgemap.end()) {
+                edgemap[eid] = id;
+                iedgemap.push_back(eid);
+            }
+        }
+    }
+
+    std::vector<std::unordered_set<int>> graph(edgemap.size());
+
+    for (const auto &t : tets) {
+        int p[4] = {t.a, t.b, t.c, t.d};
+        int i[6] = {0, 0, 0, 1, 1, 2};
+        int j[6] = {1, 2, 3, 2, 3, 3};
+        for (int k = 0; k < 6; k++) {
+            int eid = edgemap[edgeid(p[i[k]], p[j[k]])];
+            for (int ks = k + 1; ks < 6; ks++) {
+                int eids = edgemap[edgeid(p[i[ks]], p[j[ks]])];
+                graph[eid].insert(eids);
+                graph[eids].insert(eid);
+            }
+        }
+    }
+
+    std::vector<double> vals(pts.size());
+
+    double theta = .7;
+
+    std::vector<int> marks(edgemap.size());
+
+    FILE *lut = fopen("lut.h", "wb");
+    fprintf(lut, "static unsigned int edgeGroup[256] = {");
+
+    for (int cases = 0; cases < (1 << 8); cases++) {
+        std::cout << "*** CASE " << cases << " ***" << std::endl;
+
+        for (int k = 0; k < 8; k++)
+            vals[k] = (cases & (1 << k)) ? 1 : 0;
+
+        vals[14] = 0;
+        for (int k = 0; k < 8; k++)
+            vals[14] += vals[k];
+        vals[14] *= 0.125;
+
+        for (int f = 0; f < 6; f++) {
+            vals[8 + f] = 0;
+            for (int j = 0; j < 4; j++)
+                vals[8 + f] += vals[cubefaces[f][j]];
+            vals[8 + f] *= 0.25;
+        }
+
+        for (size_t e = 0; e < edgemap.size(); e++) {
+            int eid = iedgemap[e];
+            int u = eid % 100;
+            int v = eid / 100;
+            marks[e] = (vals[u] > theta) ^ (vals[v] > theta) ? 0 : -1;
+        }
+
+        assert(graph.size() == 50);
+
+        Eigen::Matrix<int, 50, 50> A, B;
+        A.setZero();
+
+        for (size_t u = 0; u < graph.size(); u++) {
+            if (marks[u] == -1)
+                continue;
+            A(u, u) = 1;
+            for (int v : graph[u]) {
+                if (marks[v] == -1)
+                    continue;
+                A(u, v) = A(v, u) = 1;
+            }
+        }
+        A.swap(B);
+        do {
+            A.swap(B);
+            B.noalias() = (A * A).unaryExpr([] (int v) { return v > 0; } ).cast<int>();
+        } while (B != A);
+
+        int color = 1;
+        for (size_t u = 0; u < graph.size(); u++) {
+            if (marks[u] == -1)
+                continue;
+            if (marks[u] != 0)
+                continue;
+            for (size_t v = 0; v < graph.size(); v++)
+                if (A(u, v) == 1) {
+                    assert(marks[v] == 0);
+                    marks[v] = color;
+                }
+            color++;
+        }
+
+        std::cout << "disjoint patches: " << color - 1 << std::endl;
+
+        int code = 0;
+
+        for (const auto &e : edgemap) {
+            int v1, v2;
+            v1 = e.first / 100;
+            v2 = e.first % 100;
+            if (v1 < 8 && v2 < 8) {
+                int ceid = cubeedge(v1, v2);
+                int mkid = marks[e.second];
+                assert(mkid != 0);
+                if (mkid < 0)
+                    mkid = 3;
+                else
+                    mkid--;
+                assert(mkid < 4 && mkid >= 0);
+                code |= mkid << (2 * ceid);
+                std::cout << "(" << v1 << ", " << v2 << ") [" << ceid << "] -> " << marks[e.second] << std::endl;
+            }
+        }
+        if ((cases % 8) == 0)
+            fprintf(lut, "\n\t");
+        fprintf(lut, "0x%06x,", code);
+        std::cout << std::bitset<24>(code) << std::endl;
+
+        std::ofstream dot("cube." + std::to_string(cases) + ".dot", std::ios::binary);
+
+        dot << "strict graph cube {\n";
+        for (size_t u = 0; u < graph.size(); u++) {
+            if (marks[u] == -1)
+                continue;
+            int eu = iedgemap[u];
+            if ((eu / 100) < 8 && (eu % 100) < 8) {
+                dot << "e" << eu / 100 << "_" << eu % 100;
+                dot << " [style = bold];\n";
+            }
+            dot << "e" << eu / 100 << "_" << eu % 100 << " -- {";
+            for (int v : graph[u]) {
+                int ev = iedgemap[v];
+                if (marks[v] == -1)
+                    continue;
+                dot << "e" << ev / 100 << "_" << ev % 100 << " ";
+            }
+            dot << "}\n";
+        }
+        dot << "}\n";
+
+        save("cube." + std::to_string(cases) + ".vtk", pts, tets, vals);
+    }
+    fprintf(lut, "\n};\n");
+    fclose(lut);
+
+    return 0;
+}
+```
+
+### geom.h
+```
+#pragma once
+
+#include "point.h"
+
+struct triangle {
+    int p1, p2, p3;
+};
+
+struct quad {
+    int p1, p2, p3, p4;
+};
+
+struct mesh_vertex {
+    dim3 cube; // cube coordinates
+    int patchid; // 0-3
+};
+
+struct edge {
+    dim3 beg;
+    dim3 end;
+
+    edge(int num) {
+        int idir = num / 4;
+        int a = num & 1;
+        int b = (num & 2) >> 1;
+        if (idir == 0) {
+            beg.i = 0;
+            end.i = 1;
+            beg.j = end.j = a;
+            beg.k = end.k = b;
+        } else if (idir == 1) {
+            beg.i = end.i = a;
+            beg.j = 0;
+            end.j = 1;
+            beg.k = end.k = b;
+        } else {
+            beg.i = end.i = a;
+            beg.j = end.j = b;
+            beg.k = 0;
+            end.k = 1;
+        }
+    }
+};
+```
+
+### lut.h
+```
+static unsigned int edgeGroup[256] = {
+	0xffffff,0xfcfcfc,0xf3f3fc,0xf0f0ff,0xcffcf3,0xccfff0,0xc7f4f1,0xc0f3f3,
+	0x3ff3f3,0x7cf4f4,0x33fff0,0x30fcf3,0x0ff0ff,0x0cf3fc,0x03fcfc,0x00ffff,
+	0xfccfcf,0xffcccc,0xf4c7cd,0xf3c0cf,0xcddcd3,0xcfcfc0,0xc9d8d2,0xc3c3c3,
+	0x7cc7c7,0x7fc4c4,0x74cfc5,0x33ccc3,0x0dd0df,0x0fc3cc,0x01dcdc,0x03cfcf,
+	0xf33fcf,0xf47cdc,0xff33cc,0xfc30cf,0xc77cd3,0xc47fd0,0xcf74d1,0xcc33c3,
+	0x7337c7,0xb478d8,0x3f3fc0,0x3c3cc3,0x0770df,0x0473dc,0x0f3ccc,0x0c3fcf,
+	0xf00fff,0xf30cfc,0xfc03fc,0xff00ff,0xc55cf3,0xc30ff0,0xcd54f1,0xcf03f3,
+	0x7007f7,0x7304f4,0x3c0ff0,0x3f0cf3,0x0550ff,0x0303fc,0x0c0cfc,0x0f0fff,
+	0xcfcf3f,0xdcdc7c,0xc7c73d,0xd0d07f,0xffcc33,0xfccf30,0xf7c431,0xf0c333,
+	0x4fc737,0x9cd878,0x47cf35,0x10dc73,0x3fc03f,0x3cc33c,0x33cc3c,0x30cf3f,
+	0xccff0f,0xcffc0c,0xc4f70d,0xc3f00f,0xfcfc03,0xffff00,0xf4f401,0xf3f303,
+	0x4cf707,0x4ff404,0x44ff05,0x03fc03,0x3cf00f,0x3ff30c,0x30fc0c,0x33ff0f,
+	0xc74f1f,0xd89c6c,0xcf471d,0xdc104f,0xf74c13,0xf44f10,0xff4411,0xfc0303,
+	0x874b1b,0xd89c6c,0x4f4f15,0x1c1c43,0x37401f,0x34431c,0x3f0c0c,0x3c0f0f,
+	0xc03f3f,0xc33c3c,0xcc333c,0xcf303f,0xf03c33,0xf33f30,0xfc3030,0xff3333,
+	0x403737,0x433434,0x0c3f30,0x0f3c33,0x30303f,0x33333c,0x7c7c7c,0x3f3f3f,
+	0x3f3f3f,0x7c7c7c,0x73737c,0x70707f,0x4f7c73,0x4c7f70,0x87b4b1,0x407373,
+	0xff3333,0xfc7474,0xf33f30,0xf03c33,0xcf303f,0xcc333c,0xc33c3c,0xc03f3f,
+	0x7c4f4f,0x7f4c4c,0xb4878d,0x73404f,0x8d9c93,0x4f4f40,0xc9d8d2,0x434343,
+	0xfc4747,0xff4444,0xf44f45,0xf30c03,0xcd101f,0xcf030c,0xc11c1c,0xc30f0f,
+	0x33ff0f,0x74fc5c,0x3ff30c,0x3cf00f,0x47fc53,0x44ff50,0x4ff451,0x0cf303,
+	0xf3f303,0xf4f454,0xffff00,0xfcfc03,0xc3f00f,0xc0f30c,0xcffc0c,0xccff0f,
+	0x30cf3f,0x33cc3c,0x3cc33c,0x3fc03f,0x45dc73,0x03cf30,0x4dd471,0x0fc333,
+	0xf0c333,0xf3c030,0xfccf30,0xffcc33,0xc0c03f,0xc7c73d,0xcccc3c,0xcfcf3f,
+	0x0f0fff,0x5c5cfc,0x0707fd,0x5050ff,0x3f0cf3,0x3c0ff0,0x3704f1,0x3003f3,
+	0xcf03f3,0xdc54f4,0xc30ff0,0xc00cf3,0xff00ff,0xfc03fc,0xf30cfc,0xf00fff,
+	0x0c3fcf,0x0f3ccc,0x0437cd,0x0330cf,0x3c3cc3,0x3f3fc0,0x3434c1,0x3333c3,
+	0xcc33c3,0xcf30c0,0xc03fc0,0xc77cd3,0xfc30cf,0xff33cc,0xf03ccc,0xf33fcf,
+	0x03cfcf,0x54dcdc,0x0fc3cc,0x0cc0cf,0x33ccc3,0x30cfc0,0x3fc0c0,0x7cc7c7,
+	0xc3c3c3,0xd4d4d4,0xcfcfc0,0xccccc3,0xf3c0cf,0xf0c3cc,0xffcccc,0xfccfcf,
+	0x00ffff,0x03fcfc,0x0cf3fc,0x0ff0ff,0x30fcf3,0x33fff0,0x3cf0f0,0x3ff3f3,
+	0xc0f3f3,0xc3f0f0,0xccfff0,0xcffcf3,0xf0f0ff,0xf3f3fc,0xfcfcfc,0xffffff,
+};
+```
+
+### main.cpp
+```
+#include <iostream>
+
+#include "mesh.h"
+
+struct metaball {
+    const point c;
+    double charge;
+    metaball(const point &c, double charge = 1) : c(c), charge(charge) { }
+    double operator()(const point &p) const {
+        return charge / (p - c).dot(p - c);
+    }
+};
+
+double randv() {
+    return 1. * rand() / RAND_MAX;
+}
+
+int main(int argc, char **argv) {
+    VoxelMesh vm(dim3(20, 20, 20), point(0, 0, 0), point(1, 1, 1));
+
+    std::vector<metaball> mbs;
+
+    for (int i = 0; i < 20; i++) {
+        mbs.push_back(metaball(point(randv(), randv(), randv()), 3 * randv() - 1));
+    }
+
+    std::cout << "Setting voxel data" << std::endl;
+
+    vm.for_each_voxel([&mbs] (VoxelMesh &vm, const dim3 &vox) {
+            const point &p = vm.center(vox);
+/*            vm[vox] = 0;
+            for (const auto &m : mbs)
+                vm[vox] += m(p); */
+            vm[vox] = 1. / (p - point(.5, .5, .5)).norm();
+        });
+
+    bool tri = true;
+    if (argc > 1)
+        tri = std::string(argv[1])[0] == 't';
+
+    std::cout << "Generating mesh" << std::endl;
+    double th = 2.1;
+    if (tri) {
+        SurfaceMesh<triangle> sm(vm, th);
+        std::cout << "Saving TRI mesh" << std::endl;
+        sm.save_vtk("res_tri.vtk");
+        sm.save_txt("res.tri");
+    } else {
+        SurfaceMesh<quad> sm(vm, th);
+        std::cout << "Saving QUAD mesh" << std::endl;
+        sm.save_vtk("res_quad.vtk");
+        sm.save_txt("res.quad");
+    }
+    return 0;
+}
+```
+
+### mesh.cpp
+```
+#include "mesh.h"
+#include "lut.h"
+
+#include <iostream>
+
+EdgeMesh::EdgeMesh(const dim3 &n)
+    : n(n),
+    _xedge((n.i + 1) * (n.j + 2) * (n.k + 2)),
+    _yedge((n.i + 2) * (n.j + 1) * (n.k + 2)),
+    _zedge((n.i + 2) * (n.j + 2) * (n.k + 1))
+{
+}
+
+EdgeMesh::mark &EdgeMesh::xedge(const dim3 &_idx) {
+    const dim3 &idx(_idx + dim3(1, 1, 1));
+    return _xedge[idx.linear_index(n + dim3(1, 2, 2))];
+}
+EdgeMesh::mark &EdgeMesh::yedge(const dim3 &_idx) {
+    const dim3 &idx(_idx + dim3(1, 1, 1));
+    return _yedge[idx.linear_index(n + dim3(2, 1, 2))];
+}
+EdgeMesh::mark &EdgeMesh::zedge(const dim3 &_idx) {
+    const dim3 &idx(_idx + dim3(1, 1, 1));
+    return _zedge[idx.linear_index(n + dim3(2, 2, 1))];
+}
+const EdgeMesh::mark &EdgeMesh::xedge(const dim3 &_idx) const {
+    const dim3 &idx(_idx + dim3(1, 1, 1));
+    return _xedge[idx.linear_index(n + dim3(1, 2, 2))];
+}
+const EdgeMesh::mark &EdgeMesh::yedge(const dim3 &_idx) const {
+    const dim3 &idx(_idx + dim3(1, 1, 1));
+    return _yedge[idx.linear_index(n + dim3(2, 1, 2))];
+}
+const EdgeMesh::mark &EdgeMesh::zedge(const dim3 &_idx) const {
+    const dim3 &idx(_idx + dim3(1, 1, 1));
+    return _zedge[idx.linear_index(n + dim3(2, 2, 1))];
+}
+
+void EdgeMesh::update_edge(const dim3 &cube, const edge &e, int edgeid,
+        bool cb, bool ce, int patchid)
+{
+    int dir = edgeid >> 2;
+    int ab = edgeid & 3;
+    int ccb = cb ? 1 : 0;
+    int cce = ce ? 1 : 0;
+    int sig = (ccb << 3) | (cce << 2) | patchid;
+    if (dir == 0)
+        xedge(cube + e.beg)[ab] = sig;
+    else if (dir == 1)
+        yedge(cube + e.beg)[ab] = sig;
+    else
+        zedge(cube + e.beg)[ab] = sig;
+}
+
+void VoxelMesh::for_each_edge(const EdgeMesh &em, EdgeFunctor f) const {
+    dim3 vox;
+    for (vox.k = 0; vox.k < n.k; vox.k++)
+        for (vox.j = 0; vox.j < n.j; vox.j++)
+            for (vox.i = -1; vox.i < n.i; vox.i++) {
+                int sig = 0;
+                if (vox.i == -1)
+                    sig = 1;
+                if (vox.i == n.i - 1)
+                    sig = 2;
+                dim3 cubes[4] = {vox, vox - dim3::Y(), vox - dim3::Z(), vox - dim3::Y() - dim3::Z()};
+                f(*this, em.xedge(vox), cubes, sig, dim3::X());
+            }
+    for (vox.k = 0; vox.k < n.k; vox.k++)
+        for (vox.j = -1; vox.j < n.j; vox.j++)
+            for (vox.i = 0; vox.i < n.i; vox.i++) {
+                int sig = 0;
+                if (vox.j == -1)
+                    sig = 3;
+                if (vox.j == n.j - 1)
+                    sig = 4;
+                dim3 cubes[4] = {vox, vox - dim3::X(), vox - dim3::Z(), vox - dim3::X() - dim3::Z()};
+                f(*this, em.yedge(vox), cubes, sig, dim3::Y());
+            }
+    for (vox.k = -1; vox.k < n.k; vox.k++)
+        for (vox.j = 0; vox.j < n.j; vox.j++)
+            for (vox.i = 0; vox.i < n.i; vox.i++) {
+                int sig = 0;
+                if (vox.k == -1)
+                    sig = 5;
+                if (vox.k == n.k - 1)
+                    sig = 6;
+                dim3 cubes[4] = {vox, vox - dim3::X(), vox - dim3::Y(), vox - dim3::X() - dim3::Y()};
+                f(*this, em.zedge(vox), cubes, sig, dim3::Z());
+            }
+}
+
+VoxelMesh::VoxelMesh(const dim3 &n, const point &ll, const point &ur)
+    : n(n),
+    val(n.i * n.j * n.k),
+    ll(ll), ur(ur),
+    h((ur.x - ll.x) / n.i, (ur.y - ll.y) / n.j, (ur.z - ll.z) / n.k)
+{
+}
+
+double &VoxelMesh::operator[](const dim3 &idx) {
+    return val[idx.linear_index(n)];
+}
+const double &VoxelMesh::operator[](const dim3 &idx) const {
+    return val[idx.linear_index(n)];
+}
+const point VoxelMesh::center(const dim3 &idx) const {
+    return point(idx, ll, h);
+}
+const point VoxelMesh::edge_point(const dim3 &cube, const edge &e, double w) const {
+    point p1(cube + e.beg, ll, h);
+    point p2(cube + e.end, ll, h);
+    return p1 * (1 - w) + p2 * w;
+}
+int VoxelMesh::gen_vertices(const dim3 &cube, unsigned int cubeflag, double level, std::vector<point> &pts, EdgeMesh &em) const {
+    double v[8];
+    point newpts[4];
+    int cnt[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 4; i++)
+        newpts[i] = point(0, 0, 0);
+    int cases = 0;
+//        std::cout << "cube, (" << cube.i << ", " << cube.j << ", " << cube.k << ") -> " << cubeflag << ", case ";
+    for (int i = 0; i < 8; i++) {
+        dim3 cv = dim3::cube_vertex(i);
+        double val = level;
+        if (!(  (cv.i == 0 && (cubeflag & (1 << 0))) ||
+                (cv.i == 1 && (cubeflag & (1 << 1))) ||
+                (cv.j == 0 && (cubeflag & (1 << 2))) ||
+                (cv.j == 1 && (cubeflag & (1 << 3))) ||
+                (cv.k == 0 && (cubeflag & (1 << 4))) ||
+                (cv.k == 1 && (cubeflag & (1 << 5)))))
+            val = (*this)[cube + cv];
+        v[i] = val;
+        if (val > level)
+            cases |= (1 << i);
+    }
+//        std::cout << cases << std::endl;
+    int code = edgeGroup[cases];
+    for (int i = 0; i < 12; i++) {
+        edge e(i);
+        int patchid = (code >> (2 * i)) & 3;
+        double v1 = v[e.beg.vertex_id()];
+        double v2 = v[e.end.vertex_id()];
+        bool c1 = v1 > level;
+        bool c2 = v2 > level;
+        em.update_edge(cube, e, i, c1, c2, patchid);
+        if (c1 == c2) {
+            assert(patchid == 3);
+            continue;
+        }
+        double w = (level - v1) / (v2 - v1);
+        cnt[patchid]++;
+        newpts[patchid] += edge_point(cube, e, w);
+    }
+    int patches = 0;
+    for (int i = 0; i < 4; i++)
+        if (cnt[i] > 0) {
+            point p = newpts[i] * (1. / cnt[i]);
+//                std::cout << "yield point " << p.x << ", " << p.y << ", " << p.z << std::endl;
+
+            if (cubeflag & (1 << 0)) p.x = ll.x;
+            if (cubeflag & (1 << 1)) p.x = ur.x;
+            if (cubeflag & (1 << 2)) p.y = ll.y;
+            if (cubeflag & (1 << 3)) p.y = ur.y;
+            if (cubeflag & (1 << 4)) p.z = ll.z;
+            if (cubeflag & (1 << 5)) p.z = ur.z;
+
+            pts.push_back(p);
+            patches++;
+        }
+    for (int i = patches; i < 4; i++)
+        assert(cnt[i] == 0);
+    return patches;
+}
+
+void VoxelMesh::for_each_voxel(VoxelFunctor f) {
+    dim3 vox;
+    for (vox.k = 0; vox.k < n.k; vox.k++)
+        for (vox.j = 0; vox.j < n.j; vox.j++)
+            for (vox.i = 0; vox.i < n.i; vox.i++)
+                f(*this, vox);
+}
+void VoxelMesh::for_each_cube(CubeFunctor f) const {
+    dim3 cube;
+    for (cube.k = -1; cube.k < n.k; cube.k++)
+        for (cube.j = -1; cube.j < n.j; cube.j++)
+            for (cube.i = -1; cube.i < n.i; cube.i++) {
+                unsigned int cubeflag = 0;
+                if (cube.i == -1)
+                    cubeflag |= (1 << 0);
+                if (cube.i == n.i - 1)
+                    cubeflag |= (1 << 1);
+                if (cube.j == -1)
+                    cubeflag |= (1 << 2);
+                if (cube.j == n.j - 1)
+                    cubeflag |= (1 << 3);
+                if (cube.k == -1)
+                    cubeflag |= (1 << 4);
+                if (cube.k == n.k - 1)
+                    cubeflag |= (1 << 5);
+                f(*this, cube, cubeflag);
+            }
+}
+
+template<>
+void SurfaceMesh<quad>::add_face(int p1, int p2, int p3, int p4, int sig, const dim3 &) {
+    elems.push_back(quad{p1, p2, p3, p4});
+    facetype.push_back(sig);
+}
+
+#ifdef NON_SYMMETRIC_SPLIT
+double quality(const point &p1, const point &p2, const point &p3) {
+    double a = (p2 - p3).norm();
+    double b = (p1 - p3).norm();
+    double c = (p1 - p2).norm();
+    double r = 0.5 * std::sqrt((b + c - a) * (c + a - b) * (a + b - c) / (a + b + c));
+    double s = 0.5 * (a + b + c);
+    double R = a * b * c / (4 * r * s);
+    return r / R;
+}
+
+template<>
+void SurfaceMesh<triangle>::add_face(int p1, int p2, int p3, int p4, int sig, const dim3 &dir) {
+    point proj[4];
+    proj[0] = pts[p1];
+    proj[1] = pts[p2];
+    proj[2] = pts[p3];
+    proj[3] = pts[p4];
+    for (int i = 0; i < 4; i++) {
+        proj[i].x *= (1 - dir.i);
+        proj[i].y *= (1 - dir.j);
+        proj[i].z *= (1 - dir.k);
+    }
+
+    double q11 = quality(proj[0], proj[1], proj[2]);
+    double q12 = quality(proj[0], proj[2], proj[3]);
+
+    double q21 = quality(proj[0], proj[1], proj[3]);
+    double q22 = quality(proj[1], proj[2], proj[3]);
+
+    if (std::min(q11, q12) > std::min(q21, q22)) {
+        elems.push_back(triangle{p1, p2, p3});
+        elems.push_back(triangle{p1, p3, p4});
+    } else {
+        elems.push_back(triangle{p1, p2, p4});
+        elems.push_back(triangle{p2, p3, p4});
+    }
+
+    facetype.push_back(sig);
+    facetype.push_back(sig);
+}
+#else
+template<>
+void SurfaceMesh<triangle>::add_face(int p1, int p2, int p3, int p4, int sig, const dim3 &dir) {
+    int p5 = pts.size();
+    point center = (pts[p1] + pts[p2] + pts[p3] + pts[p4]) * 0.25;
+    pts.push_back(center);
+
+    elems.push_back(triangle{p1, p2, p5});
+    elems.push_back(triangle{p2, p3, p5});
+    elems.push_back(triangle{p3, p4, p5});
+    elems.push_back(triangle{p4, p1, p5});
+
+    facetype.push_back(sig);
+    facetype.push_back(sig);
+    facetype.push_back(sig);
+    facetype.push_back(sig);
+}
+#endif
+```
+
+### mesh.h
+```
+#pragma once
+
+#include <vector>
+#include <array>
+
+#include "geom.h"
+
+class EdgeMesh {
+public:
+    using mark = std::array<char, 4>;
+private:
+    const dim3 n;
+    std::vector<mark> _xedge, _yedge, _zedge;
+    mark &xedge(const dim3 &_idx);
+    mark &yedge(const dim3 &_idx);
+    mark &zedge(const dim3 &_idx);
+public:
+    EdgeMesh(const dim3 &n);
+    void update_edge(const dim3 &cube, const edge &e, int edgeid, bool cb, bool ce, int patchid);
+    const mark &xedge(const dim3 &_idx) const;
+    const mark &yedge(const dim3 &_idx) const;
+    const mark &zedge(const dim3 &_idx) const;
+};
+
+class VoxelMesh {
+public:
+    const dim3 n;
+private:
+    std::vector<double> val;
+    const point ll, ur, h;
+    const point edge_point(const dim3 &cube, const edge &e, double w) const;
+public:
+    VoxelMesh(const dim3 &n, const point &ll, const point &ur);
+    double &operator[](const dim3 &idx);
+    const double &operator[](const dim3 &idx) const;
+    const point center(const dim3 &idx) const;
+
+    int gen_vertices(const dim3 &cube, unsigned int cubeflag, double level, std::vector<point> &pts, EdgeMesh &em) const;
+
+    using VoxelFunctor = std::function<void(VoxelMesh &, const dim3 &)>;
+    using CubeFunctor = std::function<void(const VoxelMesh &, const dim3 &, int)>;
+    using EdgeFunctor = std::function<void(const VoxelMesh &,
+            const EdgeMesh::mark &, const dim3 [4], int, const dim3 &)>;
+
+    void for_each_voxel(VoxelFunctor f);
+    void for_each_cube(CubeFunctor f) const;
+    void for_each_edge(const EdgeMesh &em, EdgeFunctor f) const;
+};
+
+template<typename Element>
+class SurfaceMesh {
+    std::vector<point> pts;
+    std::vector<Element> elems;
+    std::vector<int> facetype;
+
+    EdgeMesh em;
+public:
+    SurfaceMesh(const VoxelMesh &vm, const double level) : em(vm.n) {
+        std::vector<int> ptsoffs((vm.n.i + 1) * (vm.n.j + 1) * (vm.n.k + 1));
+        vm.for_each_cube([this, &ptsoffs, level]
+            (const VoxelMesh &vm, const dim3 &cube, unsigned int cubeflag) {
+                int cid = (cube + dim3(1, 1, 1)).linear_index(vm.n + dim3(1, 1, 1));
+                ptsoffs[cid] = pts.size();
+                vm.gen_vertices(cube, cubeflag, level, pts, em);
+            });
+        vm.for_each_edge(em, [this, &ptsoffs] (
+                    const VoxelMesh &vm,
+                    const std::array<char, 4> &edgedata,
+                    const dim3 cubes[4], int sig,
+                    const dim3 &dir)
+            {
+                int ec = edgedata[0] & 12;
+                for (int j = 1; j < 4; j++)
+                    assert((edgedata[j] & 12) == ec);
+                ec >>= 2;
+                if (ec == 0 || ec == 3) {
+                    for (int j = 0; j < 4; j++)
+                        assert((edgedata[j] & 3) == 3);
+                    return;
+                }
+                int ptsid[4];
+                for (int j = 0; j < 4; j++) {
+                    int cid = (cubes[j] + dim3(1, 1, 1)).linear_index(vm.n + dim3(1, 1, 1));
+                    ptsid[j] = ptsoffs[cid] + (edgedata[j] & 3);
+                }
+                if ((ec == 1) ^ (dir.j == 1))
+                    this->add_face(ptsid[0], ptsid[1], ptsid[3], ptsid[2], sig, dir);
+                else
+                    this->add_face(ptsid[0], ptsid[2], ptsid[3], ptsid[1], sig, dir);
+            });
+    }
+    void add_face(int p1, int p2, int p3, int p4, int sig, const dim3 &dir);
+    void save_vtk(const std::string &filename) const;
+    void save_txt(const std::string &filename) const;
+};
+```
+
+### point.h
+```
+#pragma once
+
+#include <cmath>
+#include <cstddef>
+#include <cassert>
+#include <functional>
+
+struct dim3 {
+    std::ptrdiff_t i, j, k;
+
+    struct hash {
+        size_t operator()(const dim3 &o) const {
+            size_t i = o.i;
+            size_t j = o.j;
+            size_t k = o.k;
+            std::hash<size_t> hasher;
+            return hasher(hasher(hasher(i) ^ j) ^ k);
+        }
+    };
+    dim3(const std::ptrdiff_t i, const std::ptrdiff_t j, const std::ptrdiff_t k) : i(i), j(j), k(k) { }
+    dim3() : dim3(0, 0, 0) { }
+    dim3(const dim3 &o) : dim3(o.i, o.j, o.k) { }
+    bool operator==(const dim3 &o) const {
+        return (i == o.i) && (j == o.j) && (k == o.k);
+    }
+    dim3 &operator=(const dim3 &o) {
+        i = o.i;
+        j = o.j;
+        k = o.k;
+        return *this;
+    }
+    std::ptrdiff_t linear_index(const dim3 &n) const {
+        assert(i < n.i && j < n.j && k < n.k && i >= 0 && j >= 0 && k >= 0);
+        return i + n.i * (j + n.j * k);
+    }
+    const dim3 operator+(const dim3 &o) const {
+        return dim3(i + o.i, j + o.j, k + o.k);
+    }
+    const dim3 operator-(const dim3 &o) const {
+        return dim3(i - o.i, j - o.j, k - o.k);
+    }
+    dim3 &operator+=(const dim3 &o) {
+        *this = *this + o;
+        return *this;
+    }
+    dim3 &operator-=(const dim3 &o) {
+        *this = *this - o;
+        return *this;
+    }
+    static const dim3 X() {
+        return dim3(1, 0, 0);
+    }
+    static const dim3 Y() {
+        return dim3(0, 1, 0);
+    }
+    static const dim3 Z() {
+        return dim3(0, 0, 1);
+    }
+    static const dim3 cube_vertex(int v) {
+        assert(v < 8 && v >= 0);
+        return dim3(v & 1, (v & 2) >> 1, (v & 4) >> 2);
+    }
+    int vertex_id() const {
+        assert(i < 2 && j < 2 && k < 2 && i >= 0 && j >= 0 && k >= 0);
+        return i + 2 * j + 4 * k;
+    }
+};
+
+struct point {
+    double x, y, z;
+    point() { }
+    point(const double x, const double y, const double z) : x(x), y(y), z(z) { }
+    point(const point &p) : point(p.x, p.y, p.z) { }
+    explicit point(const dim3 &p, const point &ll = point(0, 0, 0), const point &h = point(1, 1, 1))
+        : point(ll.x + (p.i + 0.5) * h.x, ll.y + (p.j + 0.5) * h.y, ll.z + (p.k + 0.5) * h.z)
+    { }
+    double dot(const point &p) const {
+        return x * p.x + y * p.y + z * p.z;
+    }
+    const point cross(const point &p) const {
+        return point(
+                y * p.z - p.y * z,
+                z * p.x - p.z * x,
+                x * p.y - p.x * y
+            );
+    }
+    const point operator-(const point &p) const {
+        return point(
+                x - p.x,
+                y - p.y,
+                z - p.z
+            );
+    }
+    const point operator+(const point &p) const {
+        return point(
+                x + p.x,
+                y + p.y,
+                z + p.z
+            );
+    }
+    point &operator-=(const point &p) {
+        x -= p.x;
+        y -= p.y;
+        z -= p.z;
+        return *this;
+    }
+    point &operator+=(const point &p) {
+        x += p.x;
+        y += p.y;
+        z += p.z;
+        return *this;
+    }
+    point &operator*=(const double m) {
+        x *= m;
+        y *= m;
+        z *= m;
+        return *this;
+    }
+    const double norm() const {
+        return std::sqrt(dot(*this));
+    }
+    const point operator*(const double m) const {
+        return point(m * x, m * y, m * z);
+    }
+};
+```
+
+### vtk.cpp
+```
+#include <fstream>
+#include <algorithm>
+
+#include "mesh.h"
+
+template<>
+void SurfaceMesh<quad>::save_vtk(const std::string &filename) const {
+    std::ofstream f(filename, std::ios::out | std::ios::binary);
+    f << "# vtk DataFile Version 3.0\n";
+    f << "Trinagulated surface\n";
+    f << "ASCII\n";
+    f << "DATASET UNSTRUCTURED_GRID\n";
+    f << "POINTS " << pts.size() << " float\n";
+    for (const auto &p : pts)
+        f << p.x << " " << p.y << " " << p.z << "\n";
+    f << "CELLS " << elems.size() << " " << 5 * elems.size() << "\n";
+    for (const auto &q : elems)
+        f << "4 " << q.p1 << " " << q.p2 << " " << q.p3 << " " << q.p4 << "\n";
+    f << "CELL_TYPES " << elems.size() << "\n";
+    std::for_each(elems.begin(), elems.end(), [&f] (const quad &) { f << "9\n"; });
+    f << "CELL_DATA " << elems.size() << "\n";
+    f << "SCALARS type int\nLOOKUP_TABLE default\n";
+    for (const auto &v : facetype)
+        f << v << "\n";
+}
+
+template<>
+void SurfaceMesh<triangle>::save_vtk(const std::string &filename) const {
+    std::ofstream f(filename, std::ios::out | std::ios::binary);
+    f << "# vtk DataFile Version 3.0\n";
+    f << "Trinagulated surface\n";
+    f << "ASCII\n";
+    f << "DATASET UNSTRUCTURED_GRID\n";
+    f << "POINTS " << pts.size() << " float\n";
+    for (const auto &p : pts)
+        f << p.x << " " << p.y << " " << p.z << "\n";
+    f << "CELLS " << elems.size() << " " << 4 * elems.size() << "\n";
+    for (const auto &t : elems)
+        f << "3 " << t.p1 << " " << t.p2 << " " << t.p3 << "\n";
+    f << "CELL_TYPES " << elems.size() << "\n";
+    std::for_each(elems.begin(), elems.end(), [&f] (const triangle &) { f << "5\n"; });
+    f << "CELL_DATA " << elems.size() << "\n";
+    f << "SCALARS type int\nLOOKUP_TABLE default\n";
+    for (const auto &v : facetype)
+        f << v << "\n";
+}
+
+template<>
+void SurfaceMesh<quad>::save_txt(const std::string &filename) const {
+    std::ofstream f(filename, std::ios::out | std::ios::binary);
+    f << pts.size() << "\n";
+    for (const auto &p : pts)
+        f << p.x << " " << p.y << " " << p.z << "\n";
+    f << elems.size() << "\n";
+    for (size_t i = 0; i < elems.size(); i++) {
+        const auto &q = elems[i];
+        const auto &v = facetype[i];
+        f << q.p1 << " " << q.p2 << " " << q.p3 << " "
+            << q.p4 << " " << v << "\n";
+    }
+}
+
+template<>
+void SurfaceMesh<triangle>::save_txt(const std::string &filename) const {
+    std::ofstream f(filename, std::ios::out | std::ios::binary);
+    f << pts.size() << "\n";
+    for (const auto &p : pts)
+        f << p.x << " " << p.y << " " << p.z << "\n";
+    f << elems.size() << "\n";
+    for (size_t i = 0; i < elems.size(); i++) {
+        const auto &q = elems[i];
+        const auto &v = facetype[i];
+        f << q.p1 << " " << q.p2 << " " << q.p3 << " " << v << "\n";
+    }
+}
+```

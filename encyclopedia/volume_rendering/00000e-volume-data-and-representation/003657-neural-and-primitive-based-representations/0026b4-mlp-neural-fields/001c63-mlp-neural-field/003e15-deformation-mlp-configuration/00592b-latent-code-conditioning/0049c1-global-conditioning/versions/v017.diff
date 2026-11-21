@@ -1,0 +1,176 @@
+--- v016.md
++++ v017.md
+@@ -4,33 +4,26 @@
+ 
+ ## Overview
+-Global conditioning encodes the entire information of a data sample into a single latent vector $z$ [S2, unofficial]. It maps this global code to an intermediate non-linear latent space, allowing a shared decoder to interpret instance-specific details [S1]. It differs from local conditioning, which distributes information across multiple latent codes assigned to specific spatio-temporal coordinates [S2, unofficial].
++Global conditioning encodes the entire information of a data sample into a single latent vector $z$, which is then used to condition a shared neural field decoder [S2, unofficial]. It serves as the foundational mechanism for instance association in neural field representations, distinguishing itself from local conditioning methods that distribute latent codes across spatial or temporal coordinates [S2, unofficial]. It is typically implemented via a mapping network that transforms the raw latent code into an intermediate non-linear latent space [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: Global latent code $z \in \mathbb{R}^D$.
+-*   Output: Intermediate latent representation (shape 128 for the Mapping Network; spatial grid $W$ for the Global Generator).
++- Input: A global latent code $z \in \mathbb{R}^D$.
++- Output: A transformed latent representation $z'$ used to condition the decoder.
+ 
+ **Data Structures:**
+-*   **Mapping Network:** A sequence of linear transformations.
+-*   **Global Generator:** A 2D grid of local latent codes $W$.
++The mapping network is a multi-layer perceptron (MLP) consisting of normalization and linear layers.
+ 
+-**Steps (Mapping Network):**
+-1.  Normalize the input $z$.
+-2.  Pass through three linear layers.
+-3.  Apply LeakyReLU(0.2) activation after each linear layer.
+-4.  The output shape is 128 [S1].
+-
+-**Steps (Global Generator):**
+-1.  Initialize with a constant input tensor.
+-2.  Apply a $3 \times 3$ modulated convolution conditioned on $z$.
+-3.  Apply LeakyReLU(0.2).
+-4.  For subsequent layers, apply pairs of modulated convolutions.
+-5.  Upsample resolution by $2\times$ using a transposed convolution with stride 2, followed by bilinear filtering.
+-6.  Apply LeakyReLU(0.2) after each convolution.
+-7.  The output resolution is a hyperparameter, typically $32 \times 32$ [S1].
++**Steps:**
++1.  **Normalization**: Normalize the input vector $z$. The specific normalization technique (e.g., LayerNorm) is not detailed in the primary source, but it is a required step before the linear layers [S1].
++2.  **Linear Transformation 1**: Apply a linear layer to the normalized $z$.
++3.  **Activation 1**: Apply LeakyReLU with negative slope 0.2 to the output of the first linear layer [S1].
++4.  **Linear Transformation 2**: Apply a second linear layer.
++5.  **Activation 2**: Apply LeakyReLU(0.2) [S1].
++6.  **Linear Transformation 3**: Apply a third linear layer.
++7.  **Activation 3**: Apply LeakyReLU(0.2) [S1].
+ 
+ **Parameters:**
+-*   Mapping Network: Output dimension 128 [S1].
+-*   Global Generator: Output spatial resolution $32 \times 32$ [S1].
++-   Output dimension of each linear layer: 128 [S1].
++-   Activation function: LeakyReLU with slope 0.2 [S1].
+ 
+ **Pseudocode:**
+@@ -40,83 +33,24 @@
+ 
+ class MappingNetwork(nn.Module):
+-    def __init__(self, input_dim: int):
++    def __init__(self, latent_dim: int):
+         super().__init__()
+-        # Normalize step [S1]
+-        self.norm = nn.LayerNorm(input_dim)
+-        # Three linear layers with LeakyReLU(0.2) [S1]
+-        self.fc1 = nn.Linear(input_dim, 128)
+-        self.fc2 = nn.Linear(128, 128)
+-        self.fc3 = nn.Linear(128, 128)
+-        self.act = nn.LeakyReLU(0.2)
++        # Note: The specific normalization layer type is not specified in [S1].
++        # We assume a standard LayerNorm for implementation completeness [G].
++        self.norm = nn.LayerNorm(latent_dim)
++        self.linear1 = nn.Linear(latent_dim, 128)
++        self.linear2 = nn.Linear(128, 128)
++        self.linear3 = nn.Linear(128, 128)
++        self.leaky_relu = nn.LeakyReLU(negative_slope=0.2)
+ 
+     def forward(self, z: torch.Tensor) -> torch.Tensor:
++        # Step 1: Normalize
+         z = self.norm(z)
+-        z = self.act(self.fc1(z))
+-        z = self.act(self.fc2(z))
+-        z = self.act(self.fc3(z))
++        # Step 2-3: Linear + Activation
++        z = self.leaky_relu(self.linear1(z))
++        # Step 4-5: Linear + Activation
++        z = self.leaky_relu(self.linear2(z))
++        # Step 6-7: Linear + Activation
++        z = self.leaky_relu(self.linear3(z))
+         return z
+-
+-class GlobalGenerator(nn.Module):
+-    def __init__(self, z_dim: int, out_res: int = 32, channels: int = 256):
+-        super().__init__()
+-        self.out_res = out_res
+-        # Constant input initialization [S1]
+-        self.const = nn.Parameter(torch.randn(1, channels, 4, 4))
+-        
+-        # First modulated conv [S1]
+-        self.conv1 = ModulatedConv2d(channels, channels, kernel_size=3, z_dim=z_dim)
+-        
+-        # Subsequent pairs with upsampling [S1]
+-        # Resolution path: 4x4 -> 8x8 -> 16x16 -> 32x32
+-        self.conv2 = ModulatedConv2d(channels, channels, kernel_size=3, z_dim=z_dim)
+-        self.conv3 = ModulatedConv2d(channels, channels, kernel_size=3, z_dim=z_dim)
+-        self.conv4 = ModulatedConv2d(channels, channels, kernel_size=3, z_dim=z_dim)
+-        self.conv5 = ModulatedConv2d(channels, channels, kernel_size=3, z_dim=z_dim)
+-        self.conv6 = ModulatedConv2d(channels, channels, kernel_size=3, z_dim=z_dim)
+-        
+-        # Final projection to output channels [S1]
+-        self.final_conv = nn.Conv2d(channels, 32, kernel_size=1)
+-        
+-        self.act = nn.LeakyReLU(0.2)
+-
+-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+-        x = self.const.expand(1, -1, -1, -1)
+-        
+-        x = self.act(self.conv1(x, z))
+-        x = self.act(self.conv2(x, z))
+-        x = self.act(self.conv3(x, z))
+-        x = self.act(self.conv4(x, z))
+-        x = self.act(self.conv5(x, z))
+-        x = self.act(self.conv6(x, z))
+-        
+-        # Transposed convolutions for upsampling are handled inside ModulatedConv2d
+-        # or as separate layers following the pattern:
+-        # TransposedConv(stride=2) -> BilinearFilter [S1]
+-        
+-        x = self.final_conv(x)
+-        return x
+-
+-# Placeholder for ModulatedConv2d implementation details not fully specified in source
+-class ModulatedConv2d(nn.Module):
+-    def __init__(self, in_ch, out_ch, kernel_size, z_dim):
+-        super().__init__()
+-        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size, padding=kernel_size//2)
+-        self.linear = nn.Linear(z_dim, out_ch * 2) # For modulation scale/bias
+-        self.kernel_size = kernel_size
+-
+-    def forward(self, x, z):
+-        # Modulation logic [S1]
+-        style = self.linear(z).view(x.size(0), -1, 1, 1)
+-        scale = style[:, :style.size(1)//2, :, :]
+-        bias = style[:, style.size(1)//2:, :, :]
+-        
+-        # Apply modulation to weights or features
+-        # Note: Exact modulated conv implementation varies; standard approach scales weights
+-        w = self.conv.weight
+-        w = w * scale.view(-1, 1, 1, 1)
+-        
+-        out = self.conv(x)
+-        out = out + bias
+-        return out
+ ```
+ 
+@@ -124,11 +58,23 @@
+ 
+ ### Global Generator
+-Maps a single global latent code $z$ to a 2D grid of local latent codes $W$ representing the spatial layout of the scene [S1]. It uses successive modulated convolutional layers conditioned on $z$, starting with a constant input and $3 \times 3$ modulated convolutions, followed by upsampling via transposed convolutions and bilinear filtering [S1]. The output resolution (e.g., $32 \times 32$) controls the spatial region size per local latent code [S1].
++A variant that maps a single global latent code $z$ to a 2D grid of local latent codes $W$, representing the spatial layout of the scene [S1]. It is chosen when the scene requires spatially varying local details rather than a single global context [S1].
++-   **Definition**: Maps $z$ to a grid $W$ of local latent codes [S1].
++-   **Steps**:
++    1.  Initialize with a constant input tensor [S1].
++    2.  Apply a $3 \times 3$ modulated convolutional layer conditioned on $z$ [S1].
++    3.  Apply LeakyReLU(0.2) [S1].
++    4.  For subsequent layers, upsample resolution by $2\times$ using a transposed convolution with stride 2, followed by bilinear filtering [S1].
++    5.  Apply a $3 \times 3$ modulated convolutional layer conditioned on $z$ [S1].
++    6.  Apply LeakyReLU(0.2) [S1].
++    7.  Repeat steps 4-6 until the target resolution is reached [S1].
++-   **Parameters**:
++    -   Output resolution of $W$: $32 \times 32$ [S1]. This controls the spatial region size represented by each local latent code [S1].
++    -   Intermediate feature map channels: 256 for resolutions $4\times4$ to $16\times16$, and 32 for the final $32\times32$ output [S1].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++Global conditioning is computationally efficient in terms of memory per instance compared to storing large local grids, as it only requires one vector $z$ per sample [S2, unofficial]. However, it may lack the capacity to model highly localized, instance-specific geometric details compared to local conditioning methods [S2, unofficial]. The mapping network adds negligible computational overhead during inference [S1].
+ 
+ ## Background
+-Originated in the context of unconstrained scene generation with locally conditioned radiance fields [S1]. The concept of global conditioning contrasts with local conditioning, where information is spread over multiple latent codes [S2, unofficial].
++Global conditioning was introduced in the context of unconstrained scene generation with locally conditioned radiance fields [S1]. It builds on the concept of mapping networks used in StyleGAN [S1][S2, unofficial], where a latent code is mapped to an intermediate space to improve training stability and representational power [S1]. The term "global" distinguishes it from "local" conditioning, where latent codes are assigned to specific spatial regions [S2, unofficial].
+ 
+ ## Sources

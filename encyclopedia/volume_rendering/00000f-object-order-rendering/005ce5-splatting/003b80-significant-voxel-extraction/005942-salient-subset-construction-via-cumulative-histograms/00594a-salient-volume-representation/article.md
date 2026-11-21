@@ -1,0 +1,110 @@
+# Salient Volume Representation
+
+Also called: Salient Representation, Salient Representation via Smallest Hessian Eigenvalue, Smallest 2nd order directional derivative method
+
+## Overview
+Salient Volume Representation is a sparse volume data construction method that identifies significant voxels by computing the smallest eigenvalue of the Hessian matrix of the density function [S1]. It solves the problem of efficiently representing object boundaries and narrow solid structures (blobs, lines, sheets) by selecting voxels with large negative second derivatives, thereby conveying shape information with fewer voxels than gradient-based methods [S1]. Unlike its sibling [Salient Subset Construction via Cumulative Histograms](16361-salient-subset-construction-via-cumulative-histograms.md) which selects subsets based on cumulative thresholds, this method defines the *salience metric* itself using second-order directional derivatives, specifically the minimal response direction [S1].
+
+## How it works
+**Inputs:** A 3D volume density function $I(x, y, z)$.
+**Outputs:** A set of salient voxels $\Lambda$ (and optionally $\Gamma$) representing the volume structure.
+
+**Data Structures:**
+*   **Hessian Matrix $H(x_0)$:** A $3 \times 3$ symmetric matrix at each voxel $x_0$.
+    *   Fields: $H_{xx}, H_{yy}, H_{zz}$ (diagonal second partials), $H_{xy}, H_{xz}, H_{yz}$ (off-diagonal mixed partials).
+    *   Layout: Stored as 9 floating-point values per voxel during computation.
+
+**Formulas:**
+The method relies on the Taylor expansion of the density function $I$ at point $x_0$ with displacement $\Delta x$:
+$$ I(x_0 + \Delta x) \approx I(x_0) + \Delta x^T \nabla I(x_0) + \Delta x^T H(x_0) \Delta x \quad (1) $$
+The second-order information is expressed by the symmetric Hessian matrix $H$:
+$$ H = \begin{pmatrix} I_{xx} & I_{xy} & I_{xz} \\ I_{yx} & I_{yy} & I_{yz} \\ I_{zx} & I_{zy} & I_{zz} \end{pmatrix} \quad (2) $$
+where $I_{ab} = \frac{\partial^2 I}{\partial a \partial b}$ [S1].
+
+For a fixed $x_0$, the term $\Delta x^T H \Delta x$ gives the second derivative of the density in the direction of $\Delta x$. The eigenvalues $\lambda_i$ of $H$ satisfy $H v_i = \lambda_i v_i$. The salience is determined by the smallest eigenvalue $\lambda_3$ (most negative) [S1].
+
+**Steps:**
+1.  **Compute Gradients:** Calculate first-order partial derivatives $\nabla I$ at all voxels using standard finite differences or Gaussian derivatives.
+2.  **Compute Hessian:** Calculate second-order partial derivatives ($I_{xx}, I_{yy}, I_{zz}, I_{xy}, I_{xz}, I_{yz}$) at all voxels. This typically involves convolving the gradient components with a Gaussian kernel to handle noise and define a scale [S1].
+3.  **Eigenvalue Decomposition:** For each voxel, compute the eigenvalues of the $3 \times 3$ Hessian matrix $H$. Sort them such that $\lambda_1 \ge \lambda_2 \ge \lambda_3$ [S1].
+4.  **Salience Calculation:** The salience value for a voxel is defined by the smallest eigenvalue $\lambda_3$. Large negative values indicate strong boundaries (inner side) or narrow structures [S1].
+5.  **Subset Construction:** Pass the salience values to the parent method [Salient Subset Construction via Cumulative Histograms](16361-salient-subset-construction-via-cumulative-histograms.md) to generate the final sparse subsets $\Gamma$ and $\Lambda$ based on desired voxel percentages [S1].
+
+**Parameters:**
+*   **Gaussian Scale:** The standard deviation $\sigma$ of the Gaussian kernel used for derivative computation. This acts as a structure detector proportional to the scale [S1].
+*   **Threshold/Percentage:** The target percentage of voxels to retain (e.g., 2%, 4%, 0.67%) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Partial Volume Effect:** The method suppresses the partial volume effect because it represents object boundaries by their internal parts (large negative second derivatives) rather than the transition zone [S1].
+*   **Computational Cost:** Computing Hessian eigenvalues is approximately 2.7 times more expensive than computing gradient magnitude [S1].
+*   **Shape Restrictions:** Unlike Frangi or Sato methods, this method enforces no shape restrictions (blob, tubular, sheet-like) and detects structures uniformly [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_hessian_eigenvalues(volume):
+    """
+    Computes the smallest eigenvalue of the Hessian matrix for each voxel.
+    Assumes volume is a 3D numpy array or similar.
+    """
+    # 1. Compute Gaussian derivatives for Hessian components
+    # H_xx, H_yy, H_zz, H_xy, H_xz, H_yz
+    # In practice, these are convolutions of the volume with Gaussian derivatives.
+    # For implementation from text, we assume a function `gaussian_derivative_3d` exists.
+    
+    sigma = 1.0 # Typical scale parameter, not given in sources [G]
+    
+    H_xx = gaussian_derivative_3d(volume, order=(2,0,0), sigma=sigma)
+    H_yy = gaussian_derivative_3d(volume, order=(0,2,0), sigma=sigma)
+    H_zz = gaussian_derivative_3d(volume, order=(0,0,2), sigma=sigma)
+    H_xy = gaussian_derivative_3d(volume, order=(1,1,0), sigma=sigma)
+    H_xz = gaussian_derivative_3d(volume, order=(1,0,1), sigma=sigma)
+    H_yz = gaussian_derivative_3d(volume, order=(0,1,1), sigma=sigma)
+    
+    # 2. Initialize output array for smallest eigenvalues
+    salience_map = np.zeros_like(volume)
+    
+    # 3. Iterate over voxels to compute eigenvalues
+    # Note: For performance, this is usually vectorized, but here shown explicitly.
+    for x in range(volume.shape[0]):
+        for y in range(volume.shape[1]):
+            for z in range(volume.shape[2]):
+                # Construct Hessian matrix H
+                H = np.array([
+                    [H_xx[x,y,z], H_xy[x,y,z], H_xz[x,y,z]],
+                    [H_xy[x,y,z], H_yy[x,y,z], H_yz[x,y,z]],
+                    [H_xz[x,y,z], H_yz[x,y,z], H_zz[x,y,z]]
+                ])
+                
+                # Compute eigenvalues
+                eigenvalues = np.linalg.eigvalsh(H)
+                
+                # Sort eigenvalues: lambda1 >= lambda2 >= lambda3
+                eigenvalues.sort()
+                eigenvalues = eigenvalues[::-1]
+                
+                # The salience is the smallest eigenvalue (lambda3)
+                salience_map[x,y,z] = eigenvalues[2]
+                
+    return salience_map
+```
+
+## Operating characteristics
+*   **Time Complexity:** Higher than gradient-based methods. Computation of Hessian eigenvalues is approximately 2.7 times more expensive than computing gradient magnitude [S1].
+*   **Memory Complexity:** Requires storage for the full Hessian matrix (9 values) per voxel during computation, plus the salience map.
+*   **Performance:**
+    *   Lobster dataset (120x120x34): Uses 2.01% of voxels for subsets [S1].
+    *   Vertebra1 and Vertebra2 datasets: Uses 4.03% of voxels for subsets [S1].
+    *   Tooth dataset: Uses 0.67% of voxels for subsets [S1].
+*   **Strengths:** Uniformly identifies object boundaries and narrow structures without shape restrictions; suppresses partial volume effect; reduces necessary voxel count compared to gradient maxima methods by representing objects only by the internal side of boundaries [S1].
+*   **Limitations:** Higher computational cost; requires careful selection of derivation scale [S1].
+*   **Usage:** Evaluated using direct volume rendering provided by the VolumePro architecture [S1].
+
+## Background
+*   **Origin:** Introduced in the paper "Salient Representation of Volume Data" (2001) [S1].
+*   **History:** The method was developed to address the limitations of edge and line detectors that required special filters for narrow structures. It unifies boundary and structure detection using second-order derivatives [S1].
+*   **Comparison:** It differs from Frangi and Sato methods by enforcing no shape restrictions [S1]. It improves upon gradient-based methods by reducing voxel count while maintaining visual quality [S1].
+
+## Sources
+[S1] Salient Representation of Volume Data, https://doi.org/10.2312/vissym/vissym01/203-212, fetched 2026-10-30

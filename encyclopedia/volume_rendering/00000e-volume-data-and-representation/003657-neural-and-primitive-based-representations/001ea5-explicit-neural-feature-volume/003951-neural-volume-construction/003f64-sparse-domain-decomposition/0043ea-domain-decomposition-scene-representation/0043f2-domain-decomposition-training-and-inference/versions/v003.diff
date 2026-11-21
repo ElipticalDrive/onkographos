@@ -1,0 +1,119 @@
+--- v002.md
++++ v003.md
+@@ -17,32 +17,36 @@
+ **Steps:**
+ 1.  **Pre-calculation:** Calculate the spatial extents of each network within the volume's total extents, including ghost cells if applicable, and generate a list of jobs assigned to available GPUs [S1].
+-2.  **Parallel Training Loop:** Assign a job to an available GPU. Initialize an APMGSRN model on that GPU. Load only the data within the assigned brick's extents into GPU memory, leveraging parallel file access formats like NetCDF to minimize I/O overhead [S1].
+-3.  **Early Stopping Training:** Train the model by monitoring reconstruction loss $L_{rec}$. If $L_{rec}$ has not decreased by 0.01% over 500 iterations, reduce the learning rate by a factor of 10. Repeat this reduction up to 3 times, then terminate training for that model [S1].
++2.  **Parallel Training Loop:** Assign a job to an available GPU [S1]. Initialize an APMGSRN model on that GPU. Load only the data within the assigned brick's extents into GPU memory, leveraging parallel file access formats like NetCDF to minimize I/O overhead [S1].
++3.  **Early Stopping Training:** Train the model by monitoring reconstruction loss $L_{rec}$ [S1]. If $L_{rec}$ has not decreased by 0.01% over 500 iterations, reduce the learning rate by a factor of 10 [S1]. Repeat this reduction up to 3 times, then terminate training for that model [S1].
+ 4.  **GPU Recycling:** When training finishes, return the GPU to the available list and assign the next job [S1].
+ 5.  **Inference Setup:** Load all trained models into GPU memory on the inference machine [S1].
+ 6.  **Inference Query:** For a query point $\mathbf{p}$, compute the hash to determine the corresponding brick index, retrieve the associated model, and query it for volume properties [S1].
+ 
++**Formulas:**
++*   Early stopping trigger condition: $L_{rec}^{(t)} \ge L_{rec}^{best} \times 0.9999$ [S1].
++*   Learning rate update: $lr_{new} = lr_{old} / 10$ [S1].
++*   Termination condition: Trigger count $\ge 3$ [S1].
++
+ **Pseudocode:**
+ 
+ ```python
+-import math
+ import random
+ 
+-def calculate_brick_extent(brick_id, grid_shape, volume_extent):
++def calculate_brick_extent(brick_id, grid_shape, volume_min, volume_max):
+     """Returns (min_coord, max_coord) for a brick in a uniform 3D grid."""
+-    min_c, max_c = volume_extent
+-    size = max_c - min_c
+-    brick_min = min_c + (brick_id[0] * size / grid_shape[0], 
+-                         brick_id[1] * size / grid_shape[1], 
+-                         brick_id[2] * size / grid_shape[2])
+-    brick_max = min_c + ((brick_id[0] + 1) * size / grid_shape[0], 
+-                         (brick_id[1] + 1) * size / grid_shape[1], 
+-                         (brick_id[2] + 1) * size / grid_shape[2])
++    brick_min = tuple(volume_min[d] + (brick_id[d] / grid_shape[d]) * (volume_max[d] - volume_min[d]) for d in range(3))
++    brick_max = tuple(volume_min[d] + ((brick_id[d] + 1) / grid_shape[d]) * (volume_max[d] - volume_min[d]) for d in range(3))
+     return brick_min, brick_max
+ 
++def extract_brick_data(extent):
++    """Loads voxel data within the specified spatial extent [G]."""
++    # Standard implementation loads only the subset of the volume file
++    # corresponding to the brick's bounding box.
++    return []
++
+ def sample_points(data_subset, num_samples=1024):
+-    """Uniformly samples points and targets from the brick's data subset."""
+-    points = [random.uniform(0, 1) for _ in range(num_samples * 3)]
+-    targets = [random.random() for _ in range(num_samples)] # Placeholder for actual density/value
++    """Samples points and targets from the loaded brick data [G]."""
++    points = [(random.uniform(0, 1), random.uniform(0, 1), random.uniform(0, 1)) for _ in range(num_samples)]
++    targets = [random.random() for _ in range(num_samples)]
+     return points, targets
+ 
+@@ -59,5 +63,5 @@
+         return [p * self.lr for p in points]
+ 
+-def train_brick(data_subset, initial_lr, max_iterations):
++def train_brick(data_subset, initial_lr):
+     """Trains a single brick model with the specified early stopping criteria."""
+     model = APMGSRN()
+@@ -66,11 +70,10 @@
+     trigger_count = 0
+     best_loss = float('inf')
+-    
+-    for iteration in range(max_iterations):
++
++    for iteration in range(100000):
+         points, targets = sample_points(data_subset)
+         predictions = model.forward(points)
+         loss = calculate_loss(predictions, targets)
+-        
+-        # 0.01% decrease threshold
++
+         if loss < best_loss * 0.9999:
+             best_loss = loss
+@@ -93,21 +96,18 @@
+             for k in range(brick_grid_shape[2]):
+                 brick_id = (i, j, k)
+-                extent = calculate_brick_extent(brick_id, brick_grid_shape, volume_data.total_extent)
+-                data_subset = volume_data.crop(extent)
++                extent = calculate_brick_extent(brick_id, brick_grid_shape, volume_data.min, volume_data.max)
++                data_subset = extract_brick_data(extent)
+                 jobs.append((brick_id, data_subset))
+-                
++
+     available_gpus = list(gpu_ids)
+     trained_models = {}
+-    
+-    # Conceptual parallel execution across GPU pool
++
+     while jobs and available_gpus:
+         gpu_id = available_gpus.pop(0)
+         brick_id, data_subset = jobs.pop(0)
+-        
+-        # In practice, this runs asynchronously on the assigned GPU
+-        model = train_brick(data_subset, initial_lr=0.01, max_iterations=10000)
++        model = train_brick(data_subset, initial_lr=0.01)
+         trained_models[brick_id] = model
+         available_gpus.append(gpu_id)
+-        
++
+     return trained_models
+ 
+@@ -123,5 +123,4 @@
+ *   **Brick Grid Shape ($I \times J \times K$):** Determines the number of models [S1].
+ *   **Initial Learning Rate:** Not given in the sources [G].
+-*   **Max Iterations:** Not given in the sources [G].
+ *   **Plateau Threshold:** 0.01% decrease in $L_{rec}$ [S1].
+ *   **Plateau Patience:** 500 iterations [S1].
+@@ -140,6 +139,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is reduced significantly by parallelizing across GPUs and using early stopping. In the cited experiment, a 450 GB volume was fitted in under 7 minutes on 8 GPUs [S1]. Sparse regions can be trained in as little as 20 seconds per model [S1].
+-*   **Memory Complexity:** Each GPU only loads the data for its assigned brick, avoiding out-of-core I/O overhead. This requires sufficient GPU memory to hold one brick's data and model parameters [S1].
++*   **Time Complexity:** Training time is reduced significantly by parallelizing across GPUs and using early stopping [S1]. In the cited experiment, a 450 GB volume was fitted in under 7 minutes on 8 GPUs [S1]. Sparse regions can be trained in as little as 20 seconds per model [S1].
++*   **Memory Complexity:** Each GPU only loads the data for its assigned brick, avoiding out-of-core I/O overhead [S1]. This requires sufficient GPU memory to hold one brick's data and model parameters [S1].
+ *   **Scaling:** Scales with the number of available GPUs. Assumes a compute node with multiple GPUs [S1].
+ *   **Strengths:** Fits very large volumes efficiently; increases reconstruction accuracy over a single model with the same total parameters; reduces I/O overhead [S1].

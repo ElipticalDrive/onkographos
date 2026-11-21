@@ -1,0 +1,192 @@
+# Mie Phase Function Calculation
+
+Also called: Mie Theory Phase Function, MiePlot Calculation
+
+## Overview
+Calculates the phase function for homogeneous spheres significantly larger than the wavelength of light, specifically modeling scattering by rain and cloud particles [S1]. It distinguishes itself from Rayleigh scattering (which handles particles smaller than the wavelength) by capturing complex interference phenomena such as the strong forward peak, rainbow angles, and the glory effect [S1].
+
+## How it works
+**Inputs:**
+- Particle radius distribution parameters (lognormal distribution) [S1].
+- Wavelength of incident light [S1].
+- Refractive index of the particle material (water for clouds/rain) [S1].
+- Angular resolution for discretization (typically 0.1 degrees) [S1].
+
+**Outputs:**
+- A discrete phase function $P(\Theta)$ sampled at the specified angular resolution, where $\Theta$ is the scattering angle [S1].
+
+**Data Structures:**
+- The output is typically a 1D array or texture mapping scattering angle $\Theta$ to phase function value $P(\Theta)$ [S1].
+
+**Steps:**
+1. **Define Particle Size Distribution:** Model the collection of randomly distributed particles using a lognormal distribution. The parameters for this distribution are derived from empirical data described by Pruppacher and Klett [S1, PK00].
+2. **Compute Single-Particle Scattering:** For a given spherical particle of radius $r$ and refractive index $m$, calculate the scattering amplitudes $S_1(\Theta)$ and $S_2(\Theta)$ using Mie theory. This involves solving Maxwell's equations via infinite series expansions of spherical vector wave functions [S1, BH83].
+3. **Calculate Phase Function for Single Particle:** Compute the phase function for a single sphere using the scattering amplitudes:
+   $$ P_{single}(\Theta) = \frac{|S_1(\Theta)|^2 + |S_2(\Theta)|^2}{2k^2} $$
+   where $k$ is the wavenumber [S1, BH83]. Note: Standard Mie theory normalizes this such that $\int P(\Theta) d\Omega = 1$.
+4. **Integrate Over Size Distribution:** Convolve the single-particle phase function with the lognormal particle size distribution to obtain the ensemble phase function:
+   $$ P_{ensemble}(\Theta) = \int_0^\infty P_{single}(\Theta, r) f(r) dr $$
+   where $f(r)$ is the lognormal probability density function [S1].
+5. **Sample at Required Resolution:** Evaluate the resulting ensemble phase function at the specified angular resolution (e.g., 0.1 degrees) [S1].
+
+**Parameters:**
+- Angular resolution: 0.1 degrees [S1].
+- Particle size distribution: Lognormal, parameters per Pruppacher and Klett [S1, PK00].
+
+**Edge Cases and Pitfalls:**
+- **Refractive Index:** Must be complex for absorbing media; for water droplets, it is primarily real with a small imaginary part [S1].
+- **Size Parameter:** The method assumes particles are "much larger" than the wavelength. If particles approach the wavelength scale, Mie theory remains valid but computational cost increases significantly due to the number of terms required in the series expansion [S1].
+- **Numerical Stability:** The infinite series in Mie theory must be truncated at a sufficiently high order ($n_{max} \approx kr + 4(kr)^{1/3}$) to ensure convergence [S1, BH83].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_mie_phase_function(wavelength, refractive_index, size_params, angular_resolution_deg):
+    """
+    Calculates the Mie phase function for a lognormal distribution of spheres.
+    
+    Args:
+        wavelength: float, wavelength of light in meters.
+        refractive_index: complex, refractive index of the sphere material.
+        size_params: tuple, (mean_radius, sigma) for lognormal distribution.
+        angular_resolution_deg: float, angular step size in degrees.
+        
+    Returns:
+        angles: array of scattering angles in degrees.
+        phase_values: array of phase function values.
+    """
+    # 1. Define angular grid
+    angles_deg = numpy.arange(0, 180.1, angular_resolution_deg)
+    angles_rad = numpy.radians(angles_deg)
+    
+    # 2. Define lognormal size distribution parameters
+    # Parameters derived from Pruppacher and Klett [PK00]
+    # Note: Exact parameters depend on specific cloud/rain type
+    mean_radius = size_params[0]
+    sigma = size_params[1]
+    
+    # 3. Precompute constants
+    k = 2 * numpy.pi / wavelength
+    refractive_index_m = refractive_index / 1.0  # relative to air
+    
+    # 4. Initialize ensemble phase function accumulator
+    ensemble_phase = numpy.zeros_like(angles_rad)
+    
+    # 5. Integrate over particle sizes
+    # Discretize the lognormal distribution
+    num_sizes = 100
+    radii = numpy.logspace(numpy.log10(mean_radius * 0.1), 
+                           numpy.log10(mean_radius * 10), 
+                           num_sizes)
+    weights = lognormal_pdf(radii, mean_radius, sigma)
+    weights = weights / numpy.sum(weights)  # Normalize
+    
+    for i, r in enumerate(radii):
+        # Calculate single-particle phase function for radius r
+        single_phase = compute_single_mie_phase(angles_rad, r, wavelength, refractive_index_m)
+        
+        # Accumulate weighted contribution
+        ensemble_phase += weights[i] * single_phase
+        
+    return angles_deg, ensemble_phase
+
+def compute_single_mie_phase(angles_rad, radius, wavelength, refractive_index_m):
+    """
+    Computes the Mie phase function for a single homogeneous sphere.
+    Uses Bohren and Huffman's implementation [BH83].
+    """
+    k = 2 * numpy.pi / wavelength
+    x = k * radius  # Size parameter
+    
+    # Initialize scattering amplitudes
+    S1 = numpy.zeros_like(angles_rad, dtype=complex)
+    S2 = numpy.zeros_like(angles_rad, dtype=complex)
+    
+    # Determine maximum order for series expansion
+    n_max = int(x + 4 * x**(1/3) + 10)
+    
+    # Compute Mie coefficients an and bn
+    # This involves Bessel and Hankel functions
+    # Implementation details per Bohren and Huffman [BH83]
+    an, bn = compute_mie_coefficients(x, refractive_index_m, n_max)
+    
+    # Compute scattering amplitudes
+    for i, theta in enumerate(angles_rad):
+        sin_theta = numpy.sin(theta)
+        cos_theta = numpy.cos(theta)
+        
+        # Series expansion for S1 and S2
+        sum_S1 = 0
+        sum_S2 = 0
+        
+        for n in range(1, n_max + 1):
+            pi_n = compute_pi_n(n, cos_theta)
+            tau_n = compute_tau_n(n, cos_theta)
+            
+            sum_S1 += (2 * n + 1) / (n * (n + 1)) * (an[n] * pi_n + bn[n] * tau_n)
+            sum_S2 += (2 * n + 1) / (n * (n + 1)) * (an[n] * tau_n + bn[n] * pi_n)
+            
+        S1[i] = sum_S1
+        S2[i] = sum_S2
+        
+    # Calculate phase function
+    # Normalization factor ensures integral over sphere is 1
+    # P(theta) = (|S1|^2 + |S2|^2) / (2 * k^2 * integral(|S|^2 dOmega))
+    # However, standard Mie code returns normalized phase function directly
+    
+    intensity = (numpy.abs(S1)**2 + numpy.abs(S2)**2)
+    
+    # Normalize so that average over 4pi steradians is 1
+    # Integral of phase function over solid angle is 4pi
+    # P(theta) = intensity / (2 * k^2 * normalization)
+    # The standard definition is P(theta) = (|S1|^2 + |S2|^2) / (2 * k^2)
+    # But this is not normalized. We need to normalize by the total scattering cross section.
+    
+    # For a single sphere, the phase function is defined as:
+    # P(theta) = (|S1|^2 + |S2|^2) / (2 * k^2 * Q_sca * pi * r^2)
+    # where Q_sca is the scattering efficiency.
+    
+    # Simplified: Most implementations return the normalized phase function directly.
+    # We assume compute_single_mie_phase returns the normalized value.
+    
+    return intensity / (2 * k**2) # Placeholder for actual normalization per [BH83]
+
+def compute_pi_n(n, cos_theta):
+    """Compute the Legendre function of the first kind derivative term."""
+    if n == 1:
+        return cos_theta
+    # Recursive relation or direct computation
+    # pi_n(x) = n * x * pi_{n-1}(x) - (n + x^2) * pi_{n-2}(x) / (n - 1)
+    # This is a simplified placeholder. Actual implementation requires careful recursion.
+    return 0 # [G] Placeholder for actual Legendre function computation
+
+def compute_tau_n(n, cos_theta):
+    """Compute the Legendre function of the second kind derivative term."""
+    return n * cos_theta * compute_pi_n(n, cos_theta) - n * compute_pi_n(n-1, cos_theta) # [G] Simplified
+
+def lognormal_pdf(x, mean, sigma):
+    """Lognormal probability density function."""
+    return 1 / (x * sigma * numpy.sqrt(2 * numpy.pi)) * numpy.exp(-(numpy.log(x) - numpy.log(mean))**2 / (2 * sigma**2))
+```
+
+## Subtopics
+
+### [Mie Phase Function Lookup](15797-mie-phase-function-lookup.md)
+Provides a practical technique for evaluating the Mie phase function in real-time volume rendering by precomputing values into a 1D texture, trading memory bandwidth for speed while preserving diffraction and interference features.
+
+## Operating characteristics
+- **Time Complexity:** Calculating the Mie phase function analytically is computationally expensive due to the infinite series expansions required for scattering amplitudes. The complexity depends on the size parameter $x = kr$ and the required accuracy [S1, BH83].
+- **Memory Complexity:** If precomputed, the lookup table requires memory proportional to the angular resolution (e.g., 1800 entries for 0.1-degree resolution) [S1].
+- **Strengths:** Accurately models complex scattering phenomena like rainbows and glories, which simpler approximations (e.g., Henyey-Greenstein) cannot capture [S1].
+- **Limitations:** High computational cost for real-time applications if calculated on the fly; requires accurate knowledge of particle size distribution and refractive index [S1].
+- **When to Use:** When visual fidelity of atmospheric phenomena (rainbows, glories) is critical and offline precomputation or lookup tables are feasible [S1].
+
+## Background
+Mie theory was developed by Gustav Mie in 1908 to describe the scattering of electromagnetic radiation by spherical particles [S1]. The implementation used in this context is based on Bohren and Huffman's [BH83] code, widely regarded as the standard reference for Mie scattering calculations. Philip Laven’s MiePlot [Lav] provides a practical implementation of this theory for atmospheric phenomena. The specific application to cloud and rain particles uses lognormal size distributions described by Pruppacher and Klett [PK00].
+
+## Sources
+[S1] Efficient Rendering of Atmospheric Phenomena, https://doi.org/10.2312/egwr/egsr04/375-386, fetched 2026-10-26
+[BH83] Absorption and Scattering of Light by Small Particles, Bohren and Huffman, Wiley, 1983
+[Lav] MiePlot, Philip Laven, http://www.philip-laven.com/mieplot/
+[PK00] Microphysical Processes in Clouds, Pruppacher and Klett, Kluwer Academic Publishers, 2000

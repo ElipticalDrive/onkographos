@@ -1,0 +1,130 @@
+# Divergence Grid Computation
+
+Also called: Divergence Calculation with Obstacle Velocity Boundary Conditions, Divergence Computation, Finite Difference Divergence
+
+## Overview
+Computes the divergence $\nabla \cdot \mathbf{F}$ of a vector field grid (typically velocity) at every active voxel using central differences [S1, S2, unofficial]. It is distinct from sibling methods like [Laplacian Grid Computation](3160-laplacian-grid-computation.md) because it operates on a vector field rather than a scalar field, summing the partial derivatives of each component along its respective axis [S1, unofficial]. It is primarily used in fluid simulation to enforce incompressibility constraints via projection steps [S2, unofficial].
+
+## How it works
+**Inputs:**
+- A vector grid $\mathbf{V}$ of size $W \times H \times D$, where each voxel stores a 3D vector $(v_x, v_y, v_z)$.
+- A boundary mask or obstacle grid indicating solid cells.
+- Obstacle velocity data for solid cells.
+
+**Outputs:**
+- A scalar grid $\Phi$ of size $W \times H \times D$, where each voxel stores the divergence value.
+
+**Data Structures:**
+- The grid is typically stored as a dense array or a sparse structure (e.g., GPUNanoGrid) with active voxel coordinates [S1, unofficial].
+- Neighbors are accessed via 6-point cross stencil offsets: Left ($-x$), Right ($+x$), Bottom ($-y$), Top ($+y$), Down ($-z$), Up ($+z$).
+
+**Steps:**
+1. Initialize a stencil context with the grid tree or texture coordinates [S1, unofficial].
+2. Iterate over all active voxels $(c_x, c_y, c_z)$ in the grid [S1, unofficial].
+3. For each active voxel, sample the velocity vectors from its six immediate neighbors:
+   - $\mathbf{v}_L = \mathbf{V}(c_x-1, c_y, c_z)$
+   - $\mathbf{v}_R = \mathbf{V}(c_x+1, c_y, c_z)$
+   - $\mathbf{v}_B = \mathbf{V}(c_x, c_y-1, c_z)$
+   - $\mathbf{v}_T = \mathbf{V}(c_x, c_y+1, c_z)$
+   - $\mathbf{v}_D = \mathbf{V}(c_x, c_y, c_z-1)$
+   - $\mathbf{v}_U = \mathbf{V}(c_x, c_y, c_z+1)$
+4. Apply boundary conditions: If a neighbor is a boundary (solid) cell, replace its sampled velocity with the obstacle velocity at that location [S1, S2, unofficial].
+5. Compute the divergence using the central difference formula:
+   $$ \text{div} = 0.5 \times \left( (v_{R,x} - v_{L,x}) + (v_{T,y} - v_{B,y}) + (v_{U,z} - v_{D,z}) \right) $$
+   where $v_{R,x}$ is the x-component of the right neighbor's velocity, etc. The scalar $0.5$ represents $1/(2 \cdot \Delta x)$ assuming unit voxel spacing in index space [S1, S2, unofficial].
+6. Store the result in the output grid at coordinate $c$ [S1, unofficial].
+7. Build the result grid using the computed data, a background value of zero, and the original grid's voxel size [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_divergence_grid(velocity_grid, obstacle_grid, obstacle_velocity_grid, width, height, depth):
+    """
+    Computes divergence of a velocity grid with obstacle boundary conditions.
+    
+    Args:
+        velocity_grid: 3D array of shape (width, height, depth) of float3 vectors.
+        obstacle_grid: 3D array of shape (width, height, depth) of bools (True if solid).
+        obstacle_velocity_grid: 3D array of shape (width, height, depth) of float3 vectors.
+        width, height, depth: Dimensions of the grid.
+        
+    Returns:
+        divergence_grid: 3D array of shape (width, height, depth) of floats.
+    """
+    divergence_grid = [[0.0 for _ in range(depth)] for _ in range(height)]
+    for _ in range(width):
+        divergence_grid = [row[:] for row in divergence_grid] # Re-initialize inner lists if needed, 
+                                                               # but here we assume list of lists of lists structure
+                                                               # Correct initialization for 3D:
+    div_grid = [[[0.0 for _ in range(depth)] for _ in range(height)] for _ in range(width)]
+
+    for x in range(width):
+        for y in range(height):
+            for z in range(depth):
+                # Sample neighbors
+                # Helper to get velocity with boundary check
+                def get_vel(nx, ny, nz):
+                    if 0 <= nx < width and 0 <= ny < height and 0 <= nz < depth:
+                        if obstacle_grid[nx][ny][nz]:
+                            return obstacle_velocity_grid[nx][ny][nz]
+                        else:
+                            return velocity_grid[nx][ny][nz]
+                    else:
+                        # Out of bounds: assume zero or handle as boundary? 
+                        # Sources imply sampling from texture with clamping or specific boundary logic.
+                        # For standard central difference on active domain, out-of-bounds are often 0.
+                        return (0.0, 0.0, 0.0)
+
+                v_left = get_vel(x - 1, y, z)
+                v_right = get_vel(x + 1, y, z)
+                v_bottom = get_vel(x, y - 1, z)
+                v_top = get_vel(x, y + 1, z)
+                v_down = get_vel(x, y, z - 1)
+                v_up = get_vel(x, y, z + 1)
+
+                # Compute divergence
+                # div = 0.5 * ((v_R.x - v_L.x) + (v_T.y - v_B.y) + (v_U.z - v_D.z))
+                dx = v_right[0] - v_left[0]
+                dy = v_top[1] - v_bottom[1]
+                dz = v_up[2] - v_down[2]
+                
+                div_val = 0.5 * (dx + dy + dz)
+                
+                div_grid[x][y][z] = div_val
+
+    return div_grid
+```
+
+**Parameters:**
+- `half`: The scalar multiplier $0.5$, representing $1/(2 \cdot \text{voxel\_size})$ in index space [S1, unofficial].
+
+**Edge Cases:**
+- **Boundary Cells:** The method explicitly checks if neighbors are boundary cells. If a neighbor is solid, its velocity is replaced by the obstacle velocity [S1, S2, unofficial].
+- **Out of Bounds:** Standard implementations assume zero-padding for neighbors outside the active domain, or use clamping depending on the texture sampler configuration [S2, unofficial].
+
+## Subtopics
+
+### Projection Step with Free-Slip Boundary Conditions
+A variant used in the pressure projection step of fluid simulation. It computes the pressure gradient $\nabla p$ and subtracts it from the old velocity to enforce divergence-free flow, while explicitly handling free-slip boundary conditions [S2, unofficial].
+- **Mechanism:** If the center cell is solid, return the obstacle velocity immediately. Otherwise, sample pressure from the center and six neighbors. If a neighbor is solid, set its pressure to the center pressure and accumulate its obstacle velocity component into an accumulator `obstV` with a corresponding mask component set to 0 [S2, unofficial].
+- **Formula:**
+  $$ \nabla p = 0.5 \times (p_R - p_L, p_T - p_B, p_U - p_D) $$
+  $$ \mathbf{v}_{new} = \mathbf{v}_{old} - \nabla p $$
+  $$ \mathbf{v}_{final} = (\mathbf{v}_{new} \odot \mathbf{v}_{mask}) + \mathbf{v}_{obst} $$
+  where $\odot$ is component-wise multiplication [S2, unofficial].
+- **When to choose:** Use this when simulating fluids with solid obstacles where the fluid can slide along the surface (free-slip) rather than sticking to it (no-slip) [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of active voxels, as each voxel requires a constant number of memory accesses and arithmetic operations [S1, S2, unofficial].
+- **Memory Complexity:** $O(N)$ for the input velocity grid and output divergence grid [S1, unofficial].
+- **Performance:** Real-time performance is achievable on GPU using fragment shaders or compute shaders, as demonstrated in GPU Gems 3 [S2, unofficial]. The operation is memory-bandwidth bound due to the 6 neighbor samples per voxel [S2, unofficial].
+- **Strengths:** Simple to implement, efficient on GPU, handles obstacles explicitly [S2, unofficial].
+- **Limitations:** Accuracy is limited by the first-order central difference approximation. Boundary handling can be complex if obstacles are not aligned with the grid [S2, unofficial].
+
+## Background
+The method originates from real-time fluid simulation techniques, specifically those described in *GPU Gems 3* for simulating 3D fluids on the GPU [S2, unofficial]. It is a fundamental component of the projection method for solving the Navier-Stokes equations in a discrete grid setting [S2, unofficial]. The specific handling of obstacle velocities for divergence calculation ensures that the pressure projection step correctly enforces boundary conditions [S2, unofficial]. The Julia implementation in Lyr.jl provides a reference for the algorithmic structure on CPU/GPU [S1, unofficial].
+
+## Sources
+[S1] Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S2] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)

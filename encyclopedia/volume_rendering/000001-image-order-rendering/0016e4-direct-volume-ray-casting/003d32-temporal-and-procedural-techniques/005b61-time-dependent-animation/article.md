@@ -1,0 +1,66 @@
+# Time-Dependent Animation
+Also called: Temporal Visualization, Time Animation Update, VCR-like Controls
+
+## Overview
+Time-Dependent Animation is a technique for visualizing the temporal development of volumetric data by concatenating all time steps of a variable into a single file and playing them back with VCR-like controls [S2, unofficial]. It sets itself apart from static volume rendering by treating time as a continuous dimension within the data structure, allowing for smooth playback, stepping, and speed adjustment of dynamic phenomena [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A sequence of $N$ volumetric data sets (time steps), each with dimensions $D_x \times D_y \times D_z$.
+- Output: A rendered image sequence or real-time video stream representing the animation.
+
+**Data Structures:**
+The core data structure is a single concatenated file containing all time steps. To fit available memory, the data sets are pre-processed to resample them to smaller sizes [S2, unofficial]. The file layout is a linear concatenation of the voxel data for each time step. For example, if each time step is $128 \times 128 \times 100$ voxels, the file contains $N$ such blocks sequentially [S2, unofficial].
+
+**Parameters:**
+- `animation_duration`: Total duration of the animation loop in seconds.
+- `dt`: Time step interval in seconds.
+- `render_settings.time`: Current normalized time position in $[0, 1)$.
+
+**Steps:**
+1. **Pre-processing**: Resample all time steps to a uniform smaller size to fit into texture memory [S2, unofficial]. Concatenate all time steps into a single file on disk [S2, unofficial].
+2. **Initialization**: Load the concatenated data into GPU texture memory. Initialize `render_settings.time` to 0.
+3. **Animation Loop**:
+   - If playing is true and `volumes[0].volume.timesteps > 1`:
+     - Update `render_settings.time` by adding `dt.as_secs_f32() / animation_duration.as_secs_f32()` [S1, unofficial].
+     - Apply `fract()` to `render_settings.time` to wrap it to $[0, 1)$ [S1, unofficial].
+   - Use `render_settings.time` to interpolate or select the appropriate time step from the concatenated data for ray casting.
+4. **User Controls**: Provide VCR-like controls on the interface (e.g., icon wall) to start/stop animation, single step forward/backward, set playback speed, and select specific time steps [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_animation(render_settings, dt, animation_duration, is_playing, num_timesteps):
+    if is_playing and num_timesteps > 1:
+        # Calculate time increment normalized to animation duration
+        time_increment = dt / animation_duration
+        render_settings.time += time_increment
+        # Wrap time to [0, 1)
+        render_settings.time = render_settings.time % 1.0
+
+def get_current_time_step(render_settings, num_timesteps):
+    # Map normalized time [0, 1) to integer time step index
+    time_step_index = int(render_settings.time * num_timesteps)
+    # Handle edge case where time is exactly 1.0 (should be 0 due to modulo)
+    if time_step_index >= num_timesteps:
+        time_step_index = 0
+    return time_step_index
+```
+
+**Edge Cases and Pitfalls:**
+- Memory constraints: Large data sets must be resampled to fit into texture memory [S2, unofficial].
+- Boundary conditions: Ensure time wrapping handles the transition from the last time step back to the first smoothly.
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of time steps for pre-processing. Real-time rendering depends on the resolution and the efficiency of the ray casting algorithm.
+- **Memory Complexity**: Proportional to the total size of all concatenated time steps. Resampling reduces this significantly [S2, unofficial].
+- **Strengths**: Allows for detailed temporal analysis and comparison of dynamic phenomena. VCR-like controls provide intuitive user interaction [S2, unofficial].
+- **Limitations**: Limited by available memory for storing all time steps. Performance may degrade with high-resolution data or large numbers of time steps [S2, unofficial].
+
+## Background
+This technique was demonstrated in the IEEE Visualization 2004 Contest, where the Cave software suite was used to explore volume data sets [S2, unofficial]. The method was implemented using the Virvo software suite's VConv tool to merge channels and time steps into a single data file [S2, unofficial]. It was tested on an nVidia 3000G graphics card with data sets such as CLOUDf at resolutions of $128 \times 128 \times 100$ and $500 \times 500 \times 100$ voxels [S2, unofficial].
+
+## Sources
+[S1] jonathonb21/volume4d-viewer, https://github.com/jonathonb21/volume4d-viewer, fetched 2026-10-26 (unofficial)
+[S2] IEEE Visualization 2004 Contest: User Friendly Volume Data Set Exploration in the Cave, http://web.eng.ucsd.edu/~jschulze/projects/vis04-contest/, fetched 2026-10-28 (unofficial)

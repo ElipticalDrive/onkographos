@@ -1,0 +1,1860 @@
+Soft Anisotropic Diagrams for Differentiable Image Representation
+arXiv:2604.21984v2 [cs.CV] 27 Apr 2026
+LAKI IINBOR, Independent Researcher, USA
+ZHIYANG DOU† , MIT, USA
+WOJCIECH MATUSIK† , MIT, USA
+Fig. 1. SAD achieves superior reconstruction quality and remarkably higher training speed across different compression rates and resolutions. At 2.0 BPP
+(shown here), our method delivers 30.97 dB PSNR in 5.3s, compared to Image-GS [Zhang et al. 2025] (26.63 dB, 48.42s) and Instant-NGP [Müller et al. 2022]
+(23.26 dB, 12.19s). Error maps (bottom row, 2× scaled) reveal significantly lower error on sharp edges and structural boundaries. Here, zoom insets demonstrate
+accurate reconstruction of fine details through our temperature-controlled soft Apollonius partition.
+We introduce Soft Anisotropic Diagrams (SAD), an explicit and differentiable
+image representation parameterized by a set of adaptive sites in the image
+plane. In SAD, each site specifies an anisotropic metric and an additively
+weighted distance score, and we compute pixel colors as a softmax blend over
+a small per-pixel top-𝐾 subset of sites. We induce a soft anisotropic additively
+weighted Voronoi partition (i.e., an Apollonius diagram) with learnable persite temperatures, preserving informative gradients while allowing clear,
+content-aligned boundaries and explicit ownership. Such a formulation
+enables efficient rendering by maintaining a per-query top-𝐾 map that
+Visiting research assistant at MIT CDFG.
+† Joint Last Author.
+Authors’ Contact Information: Laki Iinbor, lacoz@icloud.com, Independent Researcher,
+USA; Zhiyang Dou† , frankdou@mit.edu, MIT, Massachusetts, USA; Wojciech Matusik† ,
+wojciech@csail.mit.edu, MIT, Massachusetts, USA.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+SIGGRAPH ’26, Los Angeles, CA, USA
+© 2026 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-1-XXXX-XXXX-X/26/07
+https://doi.org/XXXXXXX.XXXXXXX
+approximates nearest neighbors under the same shading score, allowing
+GPU-friendly, fixed-size local computation. We update this list using our top𝐾 propagation scheme inspired by jump flooding, augmented with stochastic
+injection to provide probabilistic global coverage. Training follows a GPUfirst pipeline with gradient-weighted initialization, Adam optimization, and
+adaptive budget control through densification and pruning. Across standard
+benchmarks, SAD consistently outperforms Image-GS and Instant-NGP at
+matched bitrate. On Kodak, SAD reaches 46.0 dB PSNR with 2.2 s encoding
+time (vs. 28 s for Image-GS), and delivers 4–19× end-to-end training speedups
+over state-of-the-art baselines. We demonstrate the effectiveness of SAD
+by showcasing the seamless integration with differentiable pipelines for
+forward and inverse problems, efficiency of fast random access, and compact
+storage. You can find the code here: https://luckyiyi.github.io/SAD.
+CCS Concepts: • Computing methodologies → Image compression; Image processing; Artificial intelligence; Parallel algorithms; • Theory
+of computation → Computational geometry.
+Additional Key Words and Phrases: Image Representation, Generalized
+Voronoi Diagram, Neural Networks, GPUs, Parallel Computation, Function
+Approximation.
+ACM Reference Format:
+Laki Iinbor, Zhiyang Dou† , and Wojciech Matusik† . 2026. Soft Anisotropic
+Diagrams for Differentiable Image Representation. In ACM SIGGRAPH 2026
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:2
+•
+Iinbor et al.
+Conference Papers (SIGGRAPH ’26), July 19–23, 2026, Los Angeles, CA, USA.
+ACM, New York, NY, USA, Article XXX, 19 pages. https://doi.org/XXXXXXX.
+XXXXXXX
+1
+Introduction
+Efficient, compact, and differentiable image representations [Ballé
+et al. 2016; Müller et al. 2022; Sitzmann et al. 2020; Ulyanov et al.
+2018; Wang et al. 2025; Zeng et al. 2025; Zhang et al. 2024, 2025;
+Zhu et al. 2025] that are fast to fit and evaluate are increasingly
+important for a wide range of applications in vision and graphics,
+including random-access compression, continuous decoders in generative models, adaptive-resolution evaluation and differentiable
+resampling for analysis as well as editing, and as compact priors for
+different inverse problems.
+Many efforts [Dupont et al. 2021; Saragadam et al. 2023; Sitzmann et al. 2020; Tancik et al. 2020] adopt implicit neural representations for their flexibility and expressiveness. However, they
+typically lack explicit structure: spatial ownership is not directly
+represented, pruning and localized reallocation are non-trivial, and
+controlling representation budget often relies on indirect heuristics.
+Explicit splat-based representations [Zhang et al. 2024, 2025] improve content adaptivity and can be efficient to query, yet kernel
+overlap blurs per-pixel responsibility and complicates pruning and
+budget control—especially when sharp discontinuities must be represented without excessive overlap. Beyond structural limitations,
+a persistent obstacle is encoding cost: fitting a compact representation while maintaining high quality is often orders of magnitude
+slower than evaluating it. This gap hinders high-throughput and
+resource-constrained settings—such as large dataset encoding, video
+representation, interactive workflows, and general-purpose compression on consumer devices.
+These considerations motivate a design choice: we favor a representation in which each pixel depends on a small, fixed number of
+primitives with an interpretable neighborhood structure, i.e., explicit
+spatial locality and adjacency. Such locality provides (i) predictable
+query cost, (ii) localized responsibilities that facilitate pruning and
+densification, and (iii) the ability to align discontinuities with image
+content rather than smearing them through kernel overlap. Crucially, locality maps naturally to GPU execution: constant-size perpixel neighborhoods enable regular, bandwidth-friendly kernels (coalesced reads and shared-memory reductions) and propagation-style
+updates, avoiding overlap-driven culling pipelines and contentionheavy gradient accumulation.
+Motivated by these considerations, we introduce SAD, an explicit,
+differentiable image representation that replaces kernel overlap with
+a learnable soft partition of the 2D image plane. We parameterize
+the image with adaptive anisotropic sites and render each pixel via
+a softmax blend over its top-𝐾 sites, using a site-dependent distance
+score under a learnable anisotropic metric. This fixed-𝐾 per-pixel
+neighborhood makes both rendering and fitting GPU-friendly, enabling regular local kernels and efficient propagation-style updates.
+This yields a partition of unity with dense gradients while making ownership explicit. Learnable per-site temperatures can then
+sharpen the partition into crisp, content-aligned boundaries and
+expose adjacency structure useful for analysis, compression, and
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+downstream learning. Geometrically, SAD can be viewed as a generalized Voronoi construction [Aurenhammer 1991; Voronoi 1908] (also
+known as an Apollonius diagram1 ): different choices of the per-site
+score recover familiar tessellations. In our instantiation, we adopt
+an additively weighted form (a per-site radius offset) [Emiris and
+Karavelas 2006], which integrates cleanly with our anisotropic norm,
+provides an intuitive “influence radius” per site, and—through the
+softmax relaxation—supports a soft-to-sharp transition controlled
+by temperature. In this paper, although we use the term “diagram” to
+emphasize the underlying Apollonius-style score and induced neighborhood structure, the rendered representation is a soft partition of
+unity rather than a hard nearest-site tessellation.
+SAD avoids evaluating all 𝑁 sites per pixel by maintaining a
+fixed-size per-pixel top-𝐾 list (𝐾=8) under the same score used for
+shading—an approximate 𝐾-order Voronoi query. We update this
+list with our top-𝐾 propagation scheme inspired by Jump Flooding
+Algorithm (JFA) [Rong and Tan 2006]: temporal warm starts, spatial
+propagation from a small fixed neighborhood (self + 4 neighbors),
+and stochastic injection for probabilistic global coverage. This yields
+fixed per-pixel compute, i.e., 𝑂 (𝑃 ·𝐾) work per pass plus 𝑂 (𝑃 ·𝐾)
+for rendering or gradient computation with small constants (with
+𝑃=𝐻 ·𝑊 pixels), rather than overlap-dependent scanning and periteration rebuilds of global acceleration structures; in practice, the
+resulting kernels are highly regular and bandwidth-efficient while
+reducing the atomic contention during backpropagation that hinders
+the performance of methods such as Image-GS [Zhang et al. 2025].
+Our experiments show that SAD improves the quality–efficiency
+trade-off of compact image representations, reducing per-instance
+encoding cost while improving rate–distortion quality. On the ImageGS benchmark, SAD consistently outperforms Image-GS and InstantNGP at matched bitrate (e.g., 37.86 dB at 0.5 bits-per-pixel (BPP) in
+Table 3). On Kodak [Eastman Kodak Company 1993] with 𝑁 =50,000
+primitives, SAD achieves 46.00 dB while cutting encoding time from
+28 s to 2.2 s under the same protocol (Table 4). Moreover, SAD is substantially faster to fit in wall-clock time (up to 19× over Image-GS),
+and reaches visually clean reconstructions much earlier in optimization (e.g., 5 s vs. 48 s in Figure 1). Beyond reconstruction, explicit
+ownership and induced adjacency make SAD a convenient primitive for downstream tasks that benefit from local control and hard
+spatial constraints. We demonstrate its application in differentiable
+PDE solving on irregular domains with hard boundary constraints.
+We further perform several ablation studies to validate our design
+choices. In summary, we make the following contributions:
+• We propose SAD, a soft anisotropic additively weighted (Apolloniusstyle) partition-of-unity image model with learnable per-site
+temperatures, enabling sharp content-aligned boundaries and
+explicit ownership.
+• We develop a GPU-friendly top-𝐾 propagation algorithm that
+maintains per-pixel top-𝐾 lists via reuse, jump-flood propagation,
+and global probing, yielding constant per-pixel query cost.
+• We present a GPU-first optimization and budget-control pipeline
+with adaptive densification and removal-delta pruning, together
+with efficient gradient accumulation.
+1 In this paper, we use the terms Apollonius diagram and additively weighted Voronoi
+diagram interchangeably.
+Soft Anisotropic Diagrams for Differentiable Image Representation
+•
+XXX:3
+2 Related Work
+2.1 Image Representations and Differentiable Partitions
+The field of neural image representation and compression has a
+rich history, spanning learned transform coding and end-to-end
+optimization [Ballé et al. 2016; Cheng et al. 2020; Theis et al. 2017] as
+well as implicit, coordinate-based signal models [Dupont et al. 2021;
+Karnewar et al. 2022; Ladune et al. 2023; Martel et al. 2021; Müller
+et al. 2022; Sitzmann et al. 2020; Tancik et al. 2020; Vaidyanathan et al.
+2023]. Recently, point- or splat-based primitives have also emerged
+as compact image representations [Zhang et al. 2024, 2025]. In the
+following, we focus on recent implicit neural signal representations
+and on point-based and splat-based rendering techniques.
+Implicit neural signal representations. Implicit coordinate-based
+networks represent images or scenes as continuous functions of
+coordinates and are often paired with modern encodings [Dupont
+et al. 2021, 2022], including Fourier features [Tancik et al. 2020], periodic activations [Sitzmann et al. 2020], adaptive coordinates [Martel
+et al. 2021], vector-quantized auto-decoders [Takikawa et al. 2022],
+and multiresolution hash grids such as Instant-NGP [Müller et al.
+2022]. They are also widely used as implicit priors for image reconstruction and compression [Dupont et al. 2021; Ulyanov et al. 2018].
+However, their implicit parameterization typically obscures explicit
+spatial ownership, making direct editing, localized reallocation of
+capacity, and budget-aware compression less straightforward. SAD
+instead targets an explicit primitive-based structure with localized
+responsibilities and predictable query cost, while remaining fully
+differentiable. Recent discontinuity-aware neural fields are closer
+to mesh-based neural representations than to point- or splat-based
+image primitives. DANF [Belhe et al. 2023] assumes input discontinuity curves, constructs a curved triangulation constrained by
+them, stores features on mesh vertices and discontinuous edges, and
+decodes discontinuity-aware interpolated features with a shallow
+MLP. NFLD [Liu et al. 2025] further learns unknown discontinuities
+on a triangle mesh by defining local discontinuous feature functions
+over vertex one-rings, treating all mesh edges as potentially discontinuous, and jointly optimizing discontinuity magnitudes with the
+field on a mesh initialized from Canny edges [Canny 2009] followed
+by TriWild triangulation [Hu et al. 2019]. Earlier hybrid randomaccess texture representations also combine compact decoding with
+learned predictors [Song et al. 2015], but do not provide the explicit
+ownership and adjacency structure of SAD. In contrast, SAD is a
+compact, explicit primitive-based image representation that captures
+sharp, content-aligned discontinuities without requiring prescribed
+curves or edge-to-mesh preprocessing, while enabling adaptive budget control and efficient fitting through fixed-size, per-pixel top-𝐾
+evaluation. Earlier classical graphics has also explored image and
+texture representations with embedded discontinuities, including
+Scale-Dependent Reproduction of Pen-and-Ink Illustrations [Salisbury et al. 1996], Feature-Based Textures [Ramanarayanan et al.
+2004], Bixels [Tumblin and Choudhury 2004], Pinchmaps [Tarini
+et al. 2005], and Real-Time Rendering of Textures with Feature
+Curves [Parilov and Zorin 2008]. These methods explicitly encode
+sharp boundaries or feature curves for magnification and filtering,
+whereas SAD targets a differentiable, per-instance optimized image
+Voronoi diagram
+Power diagram
+Apollonius diagram
+Fig. 2. Voronoi, power (Laguerre), and additively weighted Voronoi (Apollonius) diagrams in 2D. Red points denote sites. Solid black segments show
+the induced partition boundaries. Dashed gray connections visualize site
+adjacencies (the dual graph). Colored disks illustrate per-site weights/radii
+for the weighted variants.
+representation with adaptive primitives and learnable soft-to-sharp
+ownership.
+Point-based and splat-based rendering. Point-based rendering [Botsch
+et al. 2005; Botsch and Kobbelt 2003; Pfister et al. 2000; Zwicker et al.
+2001] has a long history (e.g., surfels [Pfister et al. 2000] and surface
+splatting [Zwicker et al. 2001]), with anisotropic filtering and efficient evaluation. More recently, 2D Gaussian Splatting [Huang et al.
+2024] (2D version of 3D Gaussian Splatting [Kerbl et al. 2023]) has
+been adapted for compact image representations, including ImageGS [Zhang et al. 2025] and GaussianImage [Zhang et al. 2024]. In
+contrast, SAD replaces kernel overlap with a temperature-controlled
+soft partition of unity induced by distance-based scores, which yields
+clearer spatial ownership, explicit adjacency, and more direct signals
+for budget control (e.g., pruning and densification).
+Point-based methods are closely related to Voronoi diagrams and
+their variants (as well as their dual graphs, e.g., Delaunay Triangulation), which have been extensively explored in related areas [Di Sario
+et al. 2025; Govindarajan et al. 2025; Gu et al. 2024]. We next summarize the necessary preliminaries and review the relevant prior
+work.
+3
+Preliminaries
+Voronoi, Apollonius, and Power Diagrams. Let Ω ⊂ R𝑑 denote a
+𝑁 be a set of sites (generabounded domain and let P = {𝑝𝑖 ∈ Ω}𝑖=1
+tors). We briefly review the Euclidean, weighted, and anisotropic
+constructions most relevant to our method.
+Voronoi diagram. The (Euclidean) Voronoi diagram [Aurenhammer 1991; Voronoi 1908] partitions Ω into cells
+n
+o
+Ω𝑖vor = 𝑥 ∈ Ω ∥𝑥 − 𝑝𝑖 ∥ ≤ ∥𝑥 − 𝑝 𝑗 ∥, ∀𝑗 ≠ 𝑖 .
+(1)
+Each cell contains points closest to its generator in Euclidean distance, yielding piecewise-linear boundaries (in 2D, polygonal cells).
+Voronoi diagrams provide explicit ownership and adjacency (via
+shared cell boundaries), properties that are useful for structured
+representations.
+Additively weighted Voronoi (Apollonius) diagrams. Additively
+weighted Voronoi diagrams compare distances after subtracting a
+per-site radius (equivalently, distances to weighted balls), yielding
+Apollonius diagrams [Emiris and Karavelas 2006]. Defining the
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:4
+•
+Iinbor et al.
+additively weighted distance
+apo
+𝑑𝑖 (𝑥) = ∥𝑥 − 𝑝𝑖 ∥ − 𝑟𝑖 ,
+the Apollonius (additively weighted Voronoi) cell is
+n
+o
+apo
+apo
+apo
+Ω𝑖 = 𝑥 ∈ Ω 𝑑𝑖 (𝑥) ≤ 𝑑 𝑗 (𝑥), ∀𝑗 ≠ 𝑖 .
+(2)
+(3)
+Intuitively, larger 𝑟𝑖 expands the influence of site 𝑖 by shifting the distance comparison, providing an intuitively interpretable “influence
+radius” for each site.
+Power diagrams / Laguerre tessellations. Power diagrams (also
+known as Laguerre diagrams) generalize Voronoi diagrams by adding
+weights to the squared distance [Aurenhammer 1987]. Given weights
+{𝑤𝑖 }, the power distance is
+pow
+𝑑𝑖
+(𝑥) = ∥𝑥 − 𝑝𝑖 ∥ 2 − 𝑤𝑖 ,
+and the corresponding cell is
+n
+o
+pow
+pow
+pow
+Ω𝑖 = 𝑥 ∈ Ω 𝑑𝑖 (𝑥) ≤ 𝑑 𝑗 (𝑥), ∀𝑗 ≠ 𝑖 .
+(4)
+(5)
+Unlike the Apollonius construction, the comparison in Eq. (4) is quadratic in 𝑥. Power diagrams are also dual to regular triangulations
+(weighted Delaunay).
+Anisotropic Voronoi and centroidal tessellations. Voronoi-like partitions can be extended to anisotropic settings by replacing the
+Euclidean norm with a metric. A common form uses an SPD matrix
+𝐺𝑖 ≻ 0 to define a site-dependent norm
+√︁
+∥𝑥 − 𝑝𝑖 ∥𝐺𝑖 = (𝑥 − 𝑝𝑖 ) ⊤𝐺𝑖 (𝑥 − 𝑝𝑖 ).
+(6)
+Anisotropic and centroidal variants have been studied for mesh generation and approximation under such metrics. Figure 2 illustrates
+the Euclidean Voronoi, power/Laguerre, and Apollonius variants
+together with their induced adjacency structures.
+Connection to SAD. SAD adopts an additively weighted formulation under an anisotropic norm. Concretely, each site defines an
+SPD metric 𝐺𝑖 and an additive radius 𝑟𝑖 , and we compare sites using
+𝑑𝑖 (𝑥) = ∥𝑥 − 𝑝𝑖 ∥𝐺𝑖 − 𝑟𝑖 ,
+(7)
+which yields an anisotropic Apollonius-style comparison rather
+than a power/Laguerre (quadratic) score. Instead of forming a hard
+partition via arg min𝑖 𝑑𝑖 (𝑥), SAD relaxes this construction into a differentiable soft partition of unity through a temperature-controlled
+softmax [Di Sario et al. 2025], enabling stable gradients for optimization while still allowing sharp, content-aligned transitions.
+Differentiable Voronoi representation and its applications. Voronoi
+diagrams and their variants have been extensively used in classical
+geometric processing and modeling, including shape reconstruction
+and generation [Amenta and Bern 1998; Amenta et al. 1998, 2001;
+Boltcheva and Lévy 2017; Guo et al. 2024; Xu et al. 2023; Yan et al.
+2013], shape analysis [Amenta et al. 2001; Dou et al. 2022; Li et al.
+2015; Wang et al. 2024b, 2022, 2024a], and motion planning [Bhattacharya and Gavrilova 2007; Takahashi and Schilling 1989]. Beyond classical computational geometry, several recent works make
+Voronoi-style partitions differentiable and optimize generators as
+learnable primitives. VoronoiNet [Williams et al. 2020] uses soft
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+Voronoi cells with local support as general functional approximators. In geometry, VoroMesh [Maruani et al. 2023] and VoroLight [Lu
+et al. 2025] learn Voronoi-based surface and volumetric structures
+by optimizing generator locations. Differentiable Voronoi diagrams
+have also been used for design and optimization, including cellular
+topology optimization [Feng et al. 2023] and free-form floor-plan
+generation [Wu et al. 2024]. Related structured differentiable representations also extend beyond the 2D image plane: Differentiable
+Surface Triangulation [Rakotosaona et al. 2021] optimizes soft triangulations, Spherical Voronoi [Di Sario et al. 2025] introduces a
+differentiable temperature-controlled Voronoi-like partition on the
+unit sphere for modeling view-dependent appearance, and RadiantFoam [Govindarajan et al. 2025] uses volumetric-mesh primitives
+for real-time differentiable ray tracing. Unlike these methods, SAD
+focuses on per-image 2D signal representation, using an anisotropic,
+additively weighted (Apollonius) score with a learnable per-site
+temperature. Leveraging locality, it enables GPU-resident, constantcost evaluation through a per-pixel top-𝐾 propagation scheme with
+jump-flooding-inspired updates [Rong and Tan 2006], delivering
+efficient image fitting while preserving explicit ownership and adjacency.
+4
+Method
+We model an image as a set of 𝑁 anisotropic sites with colors and
+learnable temperatures. Each site defines an additively weighted
+score, and the image is rendered by a soft partition of unity over
+a small top-𝐾 site set. The resulting representation is explicit and
+spatially local, but unlike a classical hard Voronoi partition, it remains differentiable because multiple nearby sites can contribute at
+once. We next describe the site parameterization, how we maintain
+the per-pixel top-𝐾 list with Jump Flood warm-up and subsequent
+single-pass local refreshes, and how we optimize and adapt the site
+budget during training. An overview of the full pipeline is shown
+in Figure 3.
+4.1
+Site Representation
+We represent an image with 𝑁 sites. Each site 𝑖 has:
+• position 𝑝𝑖 ∈ R2
+• temperature parameter log 𝜏𝑖 (𝜏𝑖 = exp(log 𝜏𝑖 ))
+• radius (additive weight) 𝑟𝑖
+• color 𝑐𝑖 ∈ R3
+• anisotropy direction 𝑢𝑖 ∈ R2 , ∥𝑢𝑖 ∥ = 1
+• log-anisotropy 𝑎𝑖 controlling aspect with det(𝐺𝑖 ) = 1
+During optimization we clamp positions to image bounds and
+re-normalize 𝑢𝑖 after each step.
+We use the following notation throughout. Site 𝑖 has position
+𝑝𝑖 , color 𝑐𝑖 , radius 𝑟𝑖 , temperature 𝜏𝑖 , anisotropy direction 𝑢𝑖 , and
+anisotropy scalar 𝑎𝑖 . The matrix 𝐺𝑖 is the corresponding SPD metric,
+so 𝑎𝑖 and 𝐺𝑖 are linked: 𝑎𝑖 sets the eigenvalues 𝑒 𝑎𝑖 and 𝑒 −𝑎𝑖 of 𝐺𝑖
+along 𝑢𝑖 and its orthogonal direction. For a query pixel 𝑥, C(𝑥)
+denotes the maintained top-𝐾 candidate set and 𝑐 (𝑥) the rendered
+color. We use 𝐾 for candidate list size, 𝐹𝑑 and 𝐹𝑝 for densify/prune
+frequencies, and 𝛼, 𝜀 for the densify-score constants.
+Soft Anisotropic Diagrams for Differentiable Image Representation
+We define an anisotropic metric per site. Let 𝑣𝑖 be a unit vector
+orthogonal to 𝑢𝑖 :
+𝐺𝑖 = 𝑒 𝑎𝑖 𝑢𝑖 𝑢𝑖⊤ + 𝑒 −𝑎𝑖 𝑣𝑖 𝑣𝑖⊤ .
+(8)
+This SPD (symmetric positive definite) metric has det(𝐺𝑖 ) = 1, so it
+changes aspect without area scaling.
+We use the norm induced by 𝐺𝑖 ,
+√︁
+∥𝑥 − 𝑝𝑖 ∥𝐺𝑖 = (𝑥 − 𝑝𝑖 ) ⊤𝐺𝑖 (𝑥 − 𝑝𝑖 ).
+To make the model resolution-invariant, let 𝑠 = 1/max(𝐻,𝑊 ). We
+define a signed, normalized additively weighted distance score
+𝑑 mix (𝑥, 𝑖) = ∥𝑥 − 𝑝𝑖 ∥𝐺𝑖 𝑠 − 𝑟𝑖 𝑠,
+(9)
+where any constant scale can be absorbed into 𝜏𝑖 , so we omit a
+separate logits factor.
+Intuitively, 𝑟𝑖 controls how far site 𝑖 reaches before its score becomes unfavorable, 𝐺𝑖 controls directional stretch and orientation,
+and 𝜏𝑖 controls how sharply that score is converted into mixture
+weights. Larger radii increase effective support, larger |𝑎𝑖 | elongates
+the footprint, and larger 𝜏𝑖 sharpens transitions.
+4.2
+Soft Additively Weighted Voronoi Rendering
+Given a pixel 𝑥, each site produces a logit:
+ℓ𝑖 (𝑥) = −𝜏𝑖 𝑑 mix (𝑥, 𝑖).
+(10)
+4.3
+•
+XXX:5
+Top-𝐾 Propagation
+Evaluating all sites per pixel is expensive. We therefore maintain
+a small per-pixel top-𝐾 site set that approximates the top-𝐾 sites
+under the same additively weighted score used for rendering. This
+can be viewed as an approximate 𝐾-th order diagram query under
+the SAD score, but the practical goal is locality: each pixel tracks
+only a small explicit neighborhood of competitive sites.
+We use Jump Flooding Algorithm (JFA) [Rong and Tan 2006] to
+warm up the candidate field. Standard JFA propagates seed information across the image with a coarse-to-fine schedule 𝐵/2, 𝐵/4, . . . , 1.
+2 max(𝐻,𝑊 ) ⌉ . At candidate-refresh event 𝑡, the jump step
+Let 𝐵 = 2 ⌈log
+
+
+is 𝑠𝑡 = max 1, 𝐵/2min(𝑡,log2 𝐵−1)+1 , so the step sizes are 𝐵/2, 𝐵/4, . . . , 1
+and then remain 1. Thus JFA serves as the early long-range warm-up;
+once the jump step reaches 1, later training refreshes are single-pass
+immediate-neighbor updates.
+Temporal reuse warm-starts the update from the previous top-𝐾
+field. This is effective because site parameters usually change gradually, so most strong candidates remain competitive from one refresh
+to the next. Spatial propagation then merges candidates from a fixed
+local neighborhood (self + 4 neighbors) at the current step. A small
+nonlocal probe set is still needed because purely local propagation
+can miss a newly competitive distant site, especially after densification, pruning, or larger site motion. These occasional nonlocal
+candidates seed regions that can then be propagated locally in later
+refreshes, improving recovery speed and practical convergence of
+the maintained top-𝐾 field. We formalize the update as:
+Each site has its own temperature 𝜏𝑖 .
+We compute weights over a top-𝐾 site set C(𝑥):
+𝑤𝑖 (𝑥) = Í
+exp(ℓ𝑖 (𝑥))
+.
+𝑗 ∈ C (𝑥 ) exp(ℓ 𝑗 (𝑥))
+C̃𝑡 (𝑥) = C𝑡 −1 (𝑥) ∪ P𝑡 (𝑥) ∪ G𝑡 (𝑥),
+(11)
+The pixel color is:
+𝑐 (𝑥) =
+∑︁
+𝑤𝑖 (𝑥) 𝑐𝑖 .
+(12)
+𝑖 ∈ C (𝑥 )
+We use the term diagram in the geometric sense that the score
+field induces an Apollonius-Diagram-style neighborhood structure.
+The rendered model itself is not a strict hard nearest-site partition:
+the softmax produces a soft partition of unity over C(𝑥), so several
+nearby sites may jointly explain a pixel. Restricting the blend to
+top-𝐾 is both a computational device and a locality prior, since each
+pixel depends only on a small explicit neighborhood of candidate
+sites.
+Our score adopts an anisotropic additively weighted form, 𝑑 mix (𝑥, 𝑖) =
+𝑠 ∥𝑥 − 𝑝𝑖 ∥𝐺𝑖 − 𝑠 𝑟𝑖 with 𝑠 = 1/max(𝐻,𝑊 ), which can be interpreted
+as a signed distance to an oriented anisotropic ball with effective
+radius 𝑟𝑖 . Compared to power/Laguerre distances, the square-root
+form keeps 𝑟𝑖 more geometrically interpretable under anisotropy
+and better decouples reach (𝑟𝑖 ) from hardness (𝜏𝑖 ). The temperaturecontrolled softmax 𝑤𝑖 (𝑥) ∝ exp(−𝜏𝑖 𝑑 mix (𝑥, 𝑖)) then provides a continuous soft-to-hard knob, so optimization can start with smooth
+responsibilities and progressively sharpen transitions where needed.
+This behavior is analyzed in Section 6.8. Figure 4 illustrates the
+rendering process and the role of the soft partition.
+C𝑡 (𝑥) = topK𝑖 ∈ C̃𝑡 (𝑥 ) ℓ𝑖 (𝑥),
+(13)
+where P𝑡 (𝑥) denotes sites propagated from the self + 4-neighbor
+stencil and G𝑡 (𝑥) denotes the small global probe set.
+The parallel nature of the algorithm makes it a perfect fit for
+modern GPUs. Each thread has nearly constant work and coalesced
+memory access, resulting in high utilization and cost efficiency.
+Although a larger site count might require more iterations, by design,
+the computational cost per pass stays constant, which is an essential
+property for fast encoding. Figure 5 summarizes the update steps.
+4.4
+Initialization
+We use a content-adaptive, gradient-weighted initialization similar
+in spirit to Image-GS. Positions are sampled at pixel centers from a
+mixture of normalized gradient magnitude and a uniform prior:
+∥∇𝐼 (𝑥)∥ 2
+1
++ 𝜆init
+,
+′ )∥
+∥∇𝐼
+(𝑥
+𝐻
+·𝑊
+′
+2
+𝑥
+𝑃init (𝑥) = (1−𝜆init ) Í
+𝜆init ∈ [0, 1].
+(14)
+The gradient term concentrates sites in high-frequency regions,
+while the uniform term preserves coverage of soft areas. Each site
+is initialized with the target pixel color at its sampled location,
+and other parameters use fixed defaults. This simple initialization
+accelerates convergence but is not a novel contribution.
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:6
+•
+Iinbor et al.
+Fig. 3. The Pipeline of SAD. Left: Given an input image, we initialize sites using content-adaptive sampling that places more sites in high-gradient regions
+(edges and textures). Middle: We jointly optimize site parameters including positions, colors, radii, and blending temperatures (𝜏). The Voronoi Partition row
+(bottom right) shows the evolving spatial decomposition, while the Tau Heatmap (top right) visualizes the learned blending sharpness: warm colors indicate
+harder, sharper transitions (high 𝜏) suited for edges, while cool colors indicate softer transitions (low 𝜏) suited for soft gradients. Through iterative densification
+and pruning, the site count reduces from 128K to 25K while preserving quality. Right: The final output includes the reconstructed image, Apollonius partition
+boundaries, and optimized site distribution. We also visualize the content-adaptive site density and learned partition structure.
+4.5
+Adaptive Budget: Densify and Prune
+We adapt the number of active sites during training. Define soft
+responsibilities:
+∑︁
+∑︁
+𝑚𝑖 =
+𝑤𝑖 (𝑥),
+𝐸𝑖 =
+𝑤𝑖 (𝑥) ∥𝑐 (𝑥) − 𝐼 (𝑥) ∥ 2 .
+(15)
+𝑥
+𝑥
+We use an error-density heuristic:
+𝑠𝑖 =
+Fig. 4. Representation diagram of our soft anisotropic additively
+weighted rendering. (1) Sites induce an anisotropic additively weighted
+diagram under the score 𝑑 mix (𝑥, 𝑖 ) = 𝑠 ∥𝑥 −𝑝𝑖 ∥𝐺𝑖 −𝑠 𝑟𝑖 . Here 𝑝𝑖 sets position,
+𝑟𝑖 controls reach, and 𝐺𝑖 controls orientation and anisotropic stretch. (2)
+For a query pixel 𝑥, we consider a small set of nearest candidate sites C (𝑥 )
+under this score. (3) We compute
+temperature-controlled softmax weights
+
+𝑤𝑖 (𝑥 ) ∝ exp − 𝜏𝑖 𝑑 mix (𝑥, 𝑖 ) over 𝑖 ∈ C (𝑥 ) and blend site colors to render
+Í
+𝑐 (𝑥 ) = 𝑖 ∈C (𝑥 ) 𝑤𝑖 (𝑥 ) 𝑐𝑖 , where larger 𝜏𝑖 yields sharper boundaries and
+smaller 𝜏𝑖 yields softer blending.
+Fig. 5. Top-𝐾 propagation algorithm for maintaining per-pixel candidate site sets at constant cost. (1) Initialize each pixel’s list with the
+previous top-𝐾 set C𝑡 −1 (𝑥 ) (temporal reuse). (2) Spatial propagation: merge
+candidate site IDs from a fixed neighborhood (self + 4 neighbors) using the
+current jump step 𝑠𝑡 . (3) After propagation, each pixel holds an expanded
+candidate pool. (4) A small global probe step adds nonlocal candidate IDs
+when spatial propagation alone may miss distant competitors. (5) Score all
+candidates and keep the top 𝐾 by ℓ𝑖 (𝑥 ) to obtain the updated set C𝑡 (𝑥 )
+(an approximate 𝐾-th order diagram update under the SAD score).
+𝐸𝑖
+.
+max(𝑚𝑖 , 𝜀) 𝛼
+This score favors sites whose residual error remains high relative
+to the soft mass they currently explain. As a result, even a lowerresponsibility site can be selected for splitting if it sits in an underserved region with concentrated error, which is the regime where
+allocating extra local capacity is most useful. We set 𝜀 = 10−8 and
+ignore sites with 𝑚𝑖 ≤ 1 in densify scoring. We densify every 𝐹𝑑
+iterations (densify frequency) within a window [𝑡𝑑start, 𝑡𝑑end ] by splitting the top percentile of sites by 𝑠𝑖 (ignoring very small-mass sites).
+For each selected site, we estimate a residual-weighted centroid and
+covariance from per-site statistics and split along the principal axis;
+if statistics are insufficient, we fall back to the local image gradient.
+√
+Children are offset along this axis by 0.5 𝑚𝑖 pixels (clamped to [1.5,
+48]), inherit the parent parameters, and apply log 𝜏 ← log 𝜏 − 0.25,
+𝑟 ← 0.85 𝑟 , and 𝑎 from the covariance (clamped to [−2, 2]; or 0.8 𝑎
+when statistics are unavailable). Colors are re-sampled from the
+target at the new positions. We prune every 𝐹𝑝 iterations (prune
+frequency) within [𝑡𝑝start, 𝑡𝑝end ) by removing the bottom percentile of
+sites under the removal-delta score (normalized by the number of
+valid pixels), optionally delaying pruning until densification ends.
+When a target BPP is specified, we scale the base densify/prune
+percentiles with a schedule simulator to match the expected final
+site count under the iteration budget, via a 1D search over a shared
+scale factor.
+Removal delta (per-site prune signal). Let 𝑐ˆ = 𝑐 (𝑥) be the rendered
+color at pixel 𝑥. Given a pixel with weights 𝑤 that sum to 1, removing
+site 𝑘 and renormalizing the remaining weights yields
+𝑐ˆ′ =
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+(16)
+𝑐ˆ − 𝑤𝑘 𝑐𝑘
+.
+1 − 𝑤𝑘
+(17)
+Soft Anisotropic Diagrams for Differentiable Image Representation
+The local loss increase ΔL (𝑥) = ∥𝑐ˆ′ − 𝐼 (𝑥)∥ 2 − ∥𝑐ˆ − 𝐼 (𝑥)∥ 2 can be
+computed in closed form from ˆ𝑐, 𝐼 (𝑥), 𝑐𝑘 , and 𝑤𝑘 , and accumulated
+per site to form an efficient prune score. Intuitively, this removal
+delta estimates how much the reconstruction would deteriorate if a
+site were deleted and the remaining contributors were renormalized,
+so sites with small accumulated delta are natural prune candidates.
+Implementation details, including top-𝐾 list storage and gradient
+accumulation, are described in the Implementation section.
+4.6
+Top-𝐾 Site Set Storage and Updates
+We store the per-pixel top-𝐾 site set as a fixed-size list (𝐾 = 8),
+packed into two textures for coalesced access. The update algorithm
+itself is described in Section 4.3; here we focus on the storage layout and constant-time maintenance of the packed top-𝐾 list. Each
+refresh operates directly on this packed fixed-size layout and maintains the list with insertion into a fixed-size array, yielding O(𝐾)
+time per insert (constant in practice for small 𝐾). For full refreshes,
+we can run multiple passes and optionally reseed with JFA when
+the top-𝐾 list is invalidated.
+4.7
+Gradient Accumulation
+Naive per-pixel atomic accumulation suffers from high contention
+because many pixels update the same sites, creating heavy contention on global atomics, serialized updates, and scattered writes
+that thrash caches. To reduce contention while keeping the pipeline
+fully GPU-driven, we use a tiled threadgroup hash reduction (Algorithm 1 and Figure 6).
+This replaces 𝑂 (𝑃 ·𝐾) scattered global atomics with a small number of localized reductions per tile, improving cache locality and
+reducing contention.
+5
+XXX:7
+Algorithm 1 Threadgroup hash reduction for gradient accumulation.
+1: Initialize shared hash table keyed by siteID.
+2: for each pixel in tile do
+3:
+for each top-𝐾 site for pixel do
+4:
+Probe insert key.
+5:
+Accumulate gradients in shared memory.
+6:
+end for
+7: end for
+8: Synchronize threads.
+9: for each entry in hash table do
+10:
+Flush to global buffers (one atomic per site per tile).
+11: end for
+12: if table overflows then
+13:
+Fallback: accumulate those sites via global atomics.
+14: end if
+Cost Profile and Bandwidth Tradeoff
+Our per-pixel computation is constant and does not scale with the
+total number of sites. Maintaining the per-pixel top-𝐾 field costs
+O(𝑃 ·𝐾), and rendering also costs O(𝑃 ·𝐾), both with small constants
+because each pixel only evaluates a fixed-size candidate list. By
+contrast, Image-GS rasterizes every Gaussian overlapping each tile,
+incurring O(𝑃 ·𝐺) work, where 𝐺 is the average number of overlaps
+per tile (top-𝐾 normalization does not reduce this scan). It also
+rebuilds tile bins every render via global intersection generation
+and sorting, adding an O(𝑁 int log 𝑁 int ) term, where 𝑁 int is the total
+number of intersections.
+These algorithmic differences translate into a computation and
+bandwidth tradeoff on GPU: our kernels are bandwidth-bound
+but highly regular (packed 16-byte quantized site records in the
+inference/candidate pipelines, coalesced top-𝐾 reads, and sharedmemory reductions), while Gaussian methods incur both higher
+compute and substantial global memory traffic from sorting, scatter
+or gather, and atomic-heavy backprop. This fixed-cost structure
+explains the large practical speedups we observe even at high resolutions.
+4.8
+•
+Implementation Details
+We implement the full training and rendering pipeline as a single
+GPU-resident renderer using compute shaders, with backends for
+Fig. 6. Threadgroup hash table gradient accumulation. (1) Each tile
+processes multiple pixels, with each pixel potentially affected by multiple
+sites (shown in different colors). (2) Sites are hashed into a threadgroup-local
+hash table where gradients are accumulated using local atomics. When sites
+collide (e.g., 𝑠 3 and 𝑠 4 both hash to slot 2), open addressing is used with
+bounded probing. (3) After all pixels in the tile are processed, accumulated
+gradients are flushed to global memory. Sites that were successfully accumulated in the hash table require only 1 atomic write, while overflowed
+or collided sites may require multiple atomic writes. This approach significantly reduces global atomic contention compared to naive per-pixel
+atomics.
+Metal, CUDA, and WebGPU. All forward kernels and their corresponding gradients are hand-derived and implemented directly. We
+do not rely on automatic differentiation frameworks. The entire
+pipeline, including forward rendering, backward differentiation,
+candidate propagation, and Adam optimization, executes without
+any CPU work during training iterations, eliminating host-device
+roundtrips that typically dominate latency in differentiable rendering systems. We validate the method on a broad range of devices,
+including multiple Apple Silicon GPUs (Metal) and NVIDIA GPUs
+(CUDA), and keep a shared set of default parameters across backends to avoid device-specific tuning. Optimization uses Adam with
+per-parameter base learning rates and fixed betas/epsilon, and the
+densification/pruning and candidate-update schedules follow a single shared default configuration across backends. The implementation details and the full list of runtime parameters/constants are
+summarized in the Appendix.
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:8
+•
+Iinbor et al.
+6 Evaluation
+6.1 Experimental Setup
+We evaluate reconstruction quality using three complementary metrics: PSNR (peak signal-to-noise ratio, higher is better), SSIM (structural similarity index, higher is better), and LPIPS (learned perceptual image patch similarity, lower is better). We also report training
+time and rendering performance.
+Our method (SAD). We use 𝐾 = 8 top-𝐾 sites per pixel and train
+for 4000 iterations with adaptive pruning. We optimize site parameters with Adam using a pure MSE reconstruction loss:
+For Image-GS [Zhang et al. 2025], we assume 8 per-Gaussian parameters stored in fp16 (16 bytes): 𝜇𝑥 , 𝜇 𝑦 , 𝜎𝑥 , 𝜎 𝑦 , 𝜃, 𝑐𝑟 , 𝑐𝑔 , 𝑐𝑏 (no opacity
+term in their 2D model), and use the same accounting.
+For Instant-NGP, which uses an implicit parameterization, we
+compute BPP from the total number of trainable parameters (hashgrid + MLP) and an assumed 16-bit storage precision (2 bytes per
+parameter), i.e.,
+BPP =
+6.2
+𝑁 param · 2 · 8
+.
+𝐻 ·𝑊
+Image Compression Performance
+On Kodak dataset [Eastman Kodak Company 1993] (Table 4), at 𝑁 =
+50,000 primitives (≈ 16.0 BPP), SAD reaches 46.00 dB PSNR (0.9871
+SSIM, 0.0032 LPIPS) with a 2.2s encoding time. Under the same
+and clamp parameters to valid ranges (positions in image bounds,
+protocol, it improves over Fast 2DGS by +2.87 dB (43.13 dB, PSNRlog 𝜏 ∈ [2, 20], 𝑟 ∈ [1, 512], 𝑎 ∈ [−2, 2], colors in [0, 1]), with 𝑢𝑖 reonly) while being 4.5× faster (10s → 2.2s), and also outperforms the
+normalized after each step. Notably, we do not use SSIM loss during
+re-evaluated Image-GS and Instant-NGP baselines in both quality
+training, relying entirely on pixel-level MSE. Top-𝐾 propagation
+and encoding cost. For completeness, Table 4 also reports DANF
+uses 𝐽 =4 injected site IDs per pass. The base densify/prune schedule
+and NFLD as discontinuity-aware references. Their intended use
+uses densify every 20 iterations from 20–3000 with percentile 0.01
+cases differ from that of SAD: DANF assumes known discontinuity
+and 𝛼=0.7, and prune every 40 iterations from 100–3000 with percurves, whereas NFLD learns discontinuities on a triangle mesh
+centile 0.033; when pruning during densification is disabled, pruning
+initialized from detected edges. In contrast, SAD captures sharp,
+starts after densification ends. When a target BPP is specified, we
+content-aligned discontinuities without prescribed curves or edgescale the base densify/prune percentiles with a schedule simulator
+to-mesh preprocessing, while retaining adaptive budget control and
+that matches the expected final site count under the iteration budfixed-size per-pixel top-𝐾 evaluation for efficient fitting. We also
+get (by scaling both percentiles with a single factor, capped at 0.95).
+compare against Variable Bitrate Neural Fields (VBNF) [Takikawa
+Densify scores use 𝜀=10−8 and ignore sites with 𝑚𝑖 ≤ 1.
+et al. 2022], a variable-bitrate neural-field baseline based on vectorBaselines. We compare against the SOTA methods Instant-NGP [Müller quantized feature grids. SAD outperforms VBNF in both quality and
+et al. 2022] and Image-GS [Zhang et al. 2025] using their official
+encoding time, including on Kodak and at both evaluated bitrates
+implementations.
+on DIV2K (Table 5).
+Note that both SAD and Image-GS can be viewed as normalized
+Across datasets and bitrates (Tables 3–6), SAD shows consistent
+mixtures of exponentiated distance scores over a restricted top-𝐾
+rate–distortion gains: +2.55–3.29 dB over Image-GS on the Image-GS
+set. The difference is in parameterization and the geometric interprebenchmark (0.2–0.5 BPP), +1.52/+2.58 dB on DIV2K, and +1.17/+1.98
+tation: SAD uses an additively weighted anisotropic distance score
+dB on CLIC at 0.5/2.0 BPP. These gains stem from the structure of
+with a det-1 metric and a separate temperature, while Image-GS
+the representation: the explicit soft partition provides localized ownuses Gaussian covariance and kernel overlap. Table 1 summarizes
+ership and content-aligned transitions, while the anisotropic metric
+how SAD compares to common 2D representations across structural
+with separate temperature control enables sharper discontinuities
+properties.
+and tighter spatial adaptation than isotropic Gaussian kernels under
+We match model sizes to target bitrates by adjusting grid resolua fixed-size local query budget.
+tions, MLP width/depth, or the number of primitives as appropriate.
+In this paper, we focus on parametric compression in a narrower
+All metrics are computed in linear color space.
+sense: the image is represented by optimized site parameters that
+We report bitrate as parameter-space bits-per-pixel (BPP), i.e., the
+remain directly usable inside a differentiable renderer. Accordingly,
+memory required to store the optimized representation divided by
+the BPP reported here measures parameter-space storage of the
+the number of image pixels. For SAD, we compute BPP from the
+representation and should be read as a proxy for representational
+packed inference format used by our renderer: each site is encoded
+compactness within this setting, not as a claim that SAD is a reinto 128 bits (uint4) with position stored as two 15-bit unorms over
+placement for mature production codecs such as JPEG2000 or WebP.
+[0,𝑊 −1] and [0, 𝐻 −1], color quantized to 11/11/10-bit unorms with
+Those codecs target a different operating point, combining transper-image min/scale (colorR/G/B min + scale), log 𝜏 and 𝑟 as 16-bit
+form design, entropy coding, and deployment-oriented decoding
+unorms with per-image min/scale, anisotropy direction as a 16-bit
+pipelines. Our empirical comparisons are therefore against differenangle, and log 𝑎 as fp16. The per-image quantization ranges (10 float
+tiable image representations with similar per-instance optimization
+scalars: logTauMin/Scale, radiusMin/Scale, colorR/G/B min/scale)
+and random-access goals. Entropy coding of SAD parameters is an
+are stored once and are negligible at typical resolutions. We thus
+important future direction, but not a completely orthogonal one:
+compute
+the achievable gains will depend on the statistics of the learned sites
+and their induced adjacency. We nevertheless expect the explicit
+𝑁 prim · 16 · 8
+BPP =
+.
+site layout to provide useful handles for prediction and coding, e.g.,
+𝐻 ·𝑊
+2
+L = E𝑥 ∥𝑐 (𝑥) − 𝐼 (𝑥)∥ ,
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+Soft Anisotropic Diagrams for Differentiable Image Representation
+•
+XXX:9
+Table 1. Qualitative comparison of 2D image representations by structural properties.
+Method
+Explicit
+primitives
+Convex
+output
+Local
+Handles
+discontinuities
+Const.
+query cost
+No edge/mesh
+preproc.
+●
+✗
+●
+●
+✗
+✓
+✓
+✓
+Gaussian splats [Zhang et al. 2024, 2025]
+Neural Fields [Dupont et al. 2021; Müller et al. 2022]
+Discontinuity-aware Neural Fields [Belhe et al. 2023; Liu
+et al. 2025]†
+RBF [Buhmann 2000]
+B-spline [de Boor 1978]
+✓
+✗
+●
+✗
+●
+✗
+✓
+✓
+●
+✗
+✓
+✓
+✗
+✓
+●
+✓
+●
+●
+●
+✓
+✓
+✓
+SAD (ours)
+✓
+✓
+✓
+✓
+✓
+✓
+Legend: ✓ = yes, ● = partial/depends, ✗ = no.
+Property
+SAD
+Image-GS
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+Time (s)↓
+Primitive
+Anisotropic additively
+weighted Voronoi cell
+−𝜏 ( ∥𝑥 − 𝑝 ∥𝐺 𝑠 − 𝑟 𝑠 )
+Separate
+temperature
+log 𝜏
+Partition-of-unity
+weights
+det(𝐺 ) = 1 with explicit
+radius 𝑟
+Pixel-aligned or gradientweighted
+Induced adjacency graph
+Anisotropic 2D Gaussians
+G.Image (Chy.) [Zhang et al. 2024]
+G.Image (RS) [Zhang et al. 2024]
+Image-GS (g) [Zhang et al. 2025]
+Image-GS (S) [Zhang et al. 2025]
+Instant-GI [Zeng et al. 2025]
+VBNF [Takikawa et al. 2022]
+DANF [Belhe et al. 2023]
+NFLD [Liu et al. 2025]
+Fast 2DGS [Wang et al. 2025]
+(w/o Positions)
+(w/o Attributes)
+(w/o Both)
+39.36
+39.78
+39.04
+38.65
+41.41
+36.49
+22.90
+26.44
+43.13
+39.96
+35.69
+35.55
+—
+—
+—
+—
+—
+0.9609
+0.6176
+0.7032
+—
+—
+—
+—
+—
+—
+—
+—
+—
+0.0857
+0.3379
+0.3458
+—
+—
+—
+—
+13
+14
+28
+28
+10
+374
+5.1
+1700
+10
+10
+10
+10
+Image-GS [Zhang et al. 2025]†
+Instant-NGP [Müller et al. 2022]†
+36.90
+37.72
+0.9521
+0.9494
+0.0272
+0.0249
+28
+8.2
+SAD (ours)
+46.00
+0.9871
+0.0032
+2.2
+Logit/weight form
+Sharpness control
+Continuity model
+Parameterization
+Initialization
+Structure for compression
+Acceleration
+Top-𝐾 propagation
+− 12 (𝑥 − 𝜇 ) ⊤ Σ −1 (𝑥 − 𝜇 )
+Coupled to covariance
+(scale)
+Kernel superposition
+Full covariance Σ
+Gradient-weighted
+or
+saliency map
+No inherent adjacency
+graph
+Tile binning
+Table 2. Comparison of SAD and Image-GS. Key architectural and algorithmic differences between our Voronoi-based approach and Gaussian
+splatting methods.
+Method
+Metric
+0.2 BPP
+0.3 BPP
+0.4 BPP
+0.5 BPP
+Image-GS [Zhang et al. 2025]
+PSNR↑
+SSIM↑
+LPIPS↓
+31.32
+0.8923
+0.1309
+32.79
+0.9112
+0.1033
+33.80
+0.9228
+0.0873
+34.57
+0.9307
+0.0769
+Instant-NGP [Müller et al. 2022]
+PSNR↑
+SSIM↑
+LPIPS↓
+26.66
+0.7703
+0.2472
+29.41
+0.8253
+0.1701
+29.86
+0.8304
+0.1656
+30.69
+0.8461
+0.1463
+PSNR↑
+SSIM↑
+LPIPS↓
+33.87
+0.8983
+0.0914
+35.72
+0.9202
+0.0678
+36.97
+0.9334
+0.0546
+37.86
+0.9422
+0.0458
+SAD (ours)
+Table 3. Reconstruction quality on Image-GS dataset. Average metrics
+over 45 images from the Image-GS benchmark [Zhang et al. 2025] at varying
+bitrates. SAD outperforms baselines across all metrics and compression
+ratios.
+neighbor-conditioned differential coding or graph-aware quantization.
+6.3
+Training Performance
+To isolate per-iteration computational cost from convergence behavior, we benchmark training performance on a controlled test set
+with consistent epoch definitions across all methods. We define one
+epoch as a single pass over all pixels in the image.
+Experimental protocol. We created five test images at resolutions
+5122 , 7682 , 10242 , 15362 , and 20482 by downscaling a single source
+image from the Image-GS dataset. Each method was trained at 1.0
+Table 4. Image compression on Kodak. Average reconstruction quality
+and training time over 24 images at 𝑁 = 50,000 primitives (approximately
+16.0 BPP). Results for G.Image [Zhang et al. 2024], Instant-GI [Zeng et al.
+2025], Fast 2DGS [Wang et al. 2025], and ablations are from Fast 2DGS
+paper (PSNR only). † We re-evaluated Image-GS and Instant-NGP under the
+same protocol with all metrics. For Instant-GI, 𝑁 = 47,246.
+BPP with three runs per resolution on an NVIDIA RTX 5090 GPU.
+For SAD, we used default settings (4000 iterations) with CUDA
+backend. For Image-GS [Zhang et al. 2025], we used 5000 training
+steps with the number of Gaussians set to achieve 1.0 BPP.
+For Instant-NGP [Müller et al. 2022], standard practice uses a
+fixed batch size (262,144 random UV samples per step), which results in dramatically different sample coverage across resolutions:
+at 5122 each pixel is sampled once per step on average, while
+at 20482 each pixel is sampled only once every 16 steps. To enable consistent per-epoch comparison, we modified Instant-NGP
+to set training_batch_size equal to the total number of pixels
+(width × height), ensuring each training step constitutes exactly one
+full epoch over the image. We trained for 10,000 steps with this
+configuration. Under these settings, all three methods process the
+same total number of pixel samples per epoch.
+Results. Figure 8 shows time per epoch as a function of image resolution. SAD is the fastest method per epoch across all resolutions,
+achieving 1.75–3.36× speedup over Instant-NGP and 4.08–15.10×
+speedup over Image-GS. At 2k resolution (4.19 MP), SAD processes
+one epoch in 3.6 ms compared to 12.1 ms for Instant-NGP and 14.7
+ms for Image-GS. All methods exhibit near-linear scaling with resolution, as expected when processing all pixels per epoch.
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:10
+•
+Iinbor et al.
+Fig. 7. Qualitative comparison on DIV2K. Results for Instant-NGP, Image-GS, and SAD; error maps are shown at the bottom-right of each result.
+Critically, SAD not only runs faster per epoch but also attains
+higher final quality under the official step budgets (Image-GS 5,000,
+Instant-NGP 10,000, ours 4,000). As shown in our convergence analysis (Section 6.4), SAD achieves strong reconstruction quality (37.5
+dB PSNR on 2k images at 0.5 BPP) in 2000 iterations. Combining
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+faster per-epoch execution with these step budgets, under the equalsample regime (full-image batch for Instant-NGP), SAD achieves
+4–8× end-to-end speedup over Instant-NGP and 5–19× speedup
+over Image-GS in total wall-clock training time. This wall-clock
+advantage is not due only to a lower iteration count, but also to
+Soft Anisotropic Diagrams for Differentiable Image Representation
+Method
+Metric
+0.5 BPP
+2.0 BPP
+Image-GS [Zhang et al. 2025]
+PSNR↑
+SSIM↑
+LPIPS↓
+28.48
+0.7914
+0.2515
+32.15
+0.8820
+0.1480
+Instant-NGP [Müller et al. 2022]
+PSNR↑
+SSIM↑
+LPIPS↓
+26.44
+0.7045
+0.2778
+29.24
+0.7940
+0.1755
+VBNF [Takikawa et al. 2022]
+PSNR↑
+SSIM↑
+LPIPS↓
+27.13
+0.7495
+0.4321
+31.28
+0.8737
+0.2765
+Instant-GI [Zeng et al. 2025]∗
+Fast 2DGS [Wang et al. 2025]∗
+PSNR↑
+PSNR↑
+—
+—
+38.01
+37.81
+SAD (ours)
+PSNR↑
+SSIM↑
+LPIPS↓
+30.00
+0.7982
+0.1995
+34.73
+0.9115
+0.0844
+Table 5. Reconstruction quality on DIV2K validation set. Average metrics over 100 images at varying bitrates and variable resolution (BPP computed per-image from its H×W). ∗ Results from Fast 2DGS [Wang et al. 2025]
+use 𝑁 = 50,000 primitives (approximately 2.0 BPP) and require pre-trained
+priors (PSNR only).
+Method
+Metric
+0.5 BPP
+2.0 BPP
+Image-GS [Zhang et al. 2025]
+PSNR↑
+SSIM↑
+LPIPS↓
+30.65
+0.8223
+0.2280
+34.15
+0.8907
+0.1449
+Instant-NGP [Müller et al. 2022]
+PSNR↑
+SSIM↑
+LPIPS↓
+28.59
+0.7559
+0.2351
+32.67
+0.8475
+0.1287
+SAD (ours)
+PSNR↑
+SSIM↑
+LPIPS↓
+31.82
+0.8176
+0.1870
+36.13
+0.9112
+0.0884
+Table 6. Reconstruction quality on CLIC validation set. Average metrics
+over 41 images at varying bitrates.
+representation-enabled implementation choices: reusing the previous top-𝐾 lists avoids full per-pixel candidate search, and our tiled
+threadgroup-hash reduction substantially reduces the cost of gradient accumulation, making the overall speedup a representation–
+implementation co-design effect.
+6.4
+Convergence Analysis
+Unlike Gaussian splatting approaches that start with few primitives
+and progressively add more through densification, SAD begins with
+a large initial site count and progressively removes sites with low
+contribution through adaptive pruning. To study the convergence
+behavior and training efficiency, we trained SAD on three resolution/bitrate configurations with varying iteration counts (500, 1000,
+2000, 3000, 4000, 5000): (1) five diverse 2k images (2048×2048) from
+•
+XXX:11
+Fig. 8. Training performance: time per epoch vs image resolution.
+We report time per epoch (one full pass over all pixels) across methods. All
+methods were trained at 1.0 BPP on five test resolutions (5122 to 20482 )
+with three runs each. For Instant-NGP, we set batch size equal to total
+pixels to ensure each step processes exactly one epoch; standard NGP uses
+a fixed 262k batch size, resulting in vastly different sample coverage across
+resolutions. SAD is 1.75–3.36× faster per epoch than Instant-NGP and
+4.08–15.10× faster than Image-GS. Results averaged over three runs with
+negligible variance (std dev <2% of mean). NVIDIA RTX 5090.
+the Image-GS dataset [Zhang et al. 2025] at 0.5 BPP, (2) the same
+five images downscaled to 1k (1024×1024) at 1.0 BPP, and (3) five
+Kodak images [Eastman Kodak Company 1993] (768×512) at 4.0
+BPP. Importantly, the final site count remains consistent across all
+iteration variants within each configuration because our target BPP
+calculation automatically adjusts the prune schedule based on the
+total iteration budget—longer training uses more aggressive early
+pruning to reach the same final primitive count.
+Figure 9 shows the average PSNR as a function of training time
+for all three configurations. All curves exhibit rapid initial improvement followed by diminishing returns, with a consistent pattern
+across resolutions and bitrates. For 2k images (0.5 BPP), training for
+2000 iterations (∼6s) achieves 37.5 dB, nearly matching the peak of
+38.0 dB at 4000 iterations (∼12s), with degradation to 37.8 dB at 5000
+iterations. For 1k images (1.0 BPP), 2000 iterations (∼1.5s) achieves
+36.8 dB, approaching the peak of 37.2 dB at 4000 iterations (∼3s),
+with degradation to 36.8 dB at 5000 iterations. For Kodak images
+(4.0 BPP), 2000 iterations (∼0.6s) achieves 40.4 dB, approaching the
+peak of 40.8 dB at 4000 iterations (∼1.3s), with degradation to 40.2
+dB at 5000 iterations. This behavior is a schedule-induced optimization effect under a fixed-BPP constraint, not classical overfitting:
+changing the total iteration budget changes the densify/prune trajectory required to reach the same final site count, which can lead
+to a slightly worse local optimum after saturation. Critically, SAD
+achieves strong reconstruction quality in approximately half the
+time of full training across all configurations, making it well-suited
+for high-throughput scenarios.
+6.5
+Top-𝐾 Propagation Convergence
+We evaluate the convergence of the top-𝐾 propagation by comparing
+the approximate top-𝐾 lists against exact top-𝐾 on 256 random
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:12
+•
+Iinbor et al.
+Method
+5122
+10242
+20482
+Instant-NGP
+Image-GS
+SAD
+0.405
+0.625
+1.100
+0.411
+0.953
+4.614
+0.444
+2.571
+26.539
+Table 8. Render time per call (ms). Full GPU render time for each method.
+For SAD, this includes JFA seeding, 16 propagation passes, and rendering.
+Stage (SAD)
+5122
+10242
+20482
+Render only (cached top-𝐾 list)
+Update only (16 passes)
+Update only (1 pass, training)
+0.015
+0.728
+0.053
+0.034
+2.568
+0.168
+0.132
+16.009
+1.006
+Table 9. SAD rendering breakdown (ms). Top-𝐾 propagation update and
+render costs are reported separately.
+Fig. 9. Convergence analysis. Average PSNR vs training time across three
+resolution/bitrate configurations. All show similar convergence patterns:
+quality plateaus around half the maximum training time (2000 iterations),
+with minimal improvement or slight degradation from longer training.
+Domain, Sites
+8 passes
+12 passes
+16 passes
+16k
+65k
+131k
+0.963
+0.398
+0.072
+0.970
+0.867
+0.782
+0.970
+0.867
+0.782
+20482
+16k
+65k
+131k
+0.981
+0.393
+0.059
+0.987
+0.956
+0.907
+0.987
+0.956
+0.907
+10242
+Table 7. Top-𝐾 propagation convergence (Top-8 exact match). Sites
+are in thousands (e.g., 16k = 16,384). Values are averages over 4 trials with
+256 random pixels per image.
+pixels in Table 7. Site centers are initialized without collisions by
+sampling unique pixel cells and adding layered subpixel offsets. We
+report Top-8 exact match: the fraction of pixels whose top-8 set
+exactly matches the ground-truth top-8 under the rendering score,
+for the default propagation settings, averaged over 4 trials.
+In this experiment, across 1k–2k domains, Top-8 exact match
+rises steeply through 8 passes and largely saturates by 12–16. We
+use a single pass per training step; for rendering, we treat 8 passes
+as coherent and report 12–16 to show convergence.
+6.6
+Rendering Performance
+Protocol. We measure GPU time per render call on an NVIDIA
+RTX 5090 at 5122 , 10242 , and 20482 . We keep the 1.0 BPP setting
+used in the training benchmark (primitive counts set by the same
+parameter-space BPP accounting as above). For SAD, we separate
+top-𝐾 propagation updates from rendering. Reported SAD render
+times include 1 JFA round + 16 propagation passes + render, which
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+is the setting used for near-converged rendering; training uses a
+single propagation pass per step. Image-GS and Instant-NGP have
+no reusable top-𝐾 propagation, so their per-call cost is the full render.
+All timings use 10 warmup and 100 timed runs, measured with GPU
+events and excluding CPU readback or image saving.
+Table 9 decomposes SAD into its update and render stages. The
+gap between the full refresh (Table 8) and the update-only cost corresponds to the one-time JFA seed. A single-pass update approximates
+the incremental update used during training iterations.
+These measurements expose three regimes for SAD: render-only
+(cached top-𝐾 list), incremental update (1 pass, typical during training), and full refresh (16 passes after large edits or re-initialization).
+In practice, a single-pass update produces a coherent preview almost
+immediately, while additional passes progressively refine boundaries
+and fine detail. For pure image-space zoom/pan, the rendered image can be resampled without re-rendering; generating a new pixel
+grid (true re-render at a different resolution) requires rebuilding the
+top-𝐾 list. Fast random access corresponds to the render-only path
+with cached top-𝐾 lists; a refresh incurs the update costs above. During training, candidate updates are amortized through single-pass
+temporal updates, and the total cost is dominated by the combined
+forward, backward, and gradient-accumulation kernels rather than
+full candidate refreshes.
+6.7
+Ablation Study on Site Count
+In Figure 10, we visualize reconstruction quality for three DIY photos
+at increasing site budgets (3k, 6k, 12k, 24k), followed by the original.
+Inputs are 2048×1900 and are not part of a benchmark dataset. The
+global layout and dominant colors are stable even at 3k sites, while
+additional budget primarily restores mid- and high-frequency detail
+(thin structures, text, brush strokes, wire grids, and fur strands).
+Visual gains are most apparent from 3k to 12k, with diminishing
+returns by 24k as remaining improvements are fine texture and edge
+crispness. All examples use the default training configuration with
+a target BPP chosen to reach the shown site counts. Training starts
+from 128k initialized sites and uses the adaptive budget mechanism
+from §4: densify splits the highest error-density sites (𝑠𝑖 ), while
+Soft Anisotropic Diagrams for Differentiable Image Representation
+•
+XXX:13
+Fig. 10. Effect of site budget on reconstruction quality. Three 2048×1900 DIY photos rendered by SAD at 3k/6k/12k/24k sites (left to right), with the
+original in the final column.
+prune removes the lowest removal-delta sites; the prune/densify
+percentiles are automatically rescaled to meet the target count under
+the fixed iteration budget.
+6.8
+Ablation Study on Learnable Parameters
+We conduct a comprehensive ablation study to evaluate the contribution of each learnable parameter in our representation. Starting
+from a baseline with fixed temperature (log 𝜏), we progressively
+enable optimization of additional parameters: adaptive temperature,
+additive radius, and anisotropy (direction and magnitude). All experiments use identical training settings on 5 test images at 2048×2048
+resolution at 0.5 BPP.
+Fixed Temperature Baseline. Figure 12 shows reconstruction quality across different fixed temperature values (log 𝜏 ∈ {5.0, 7.5, 10.0}).
+Higher temperatures produce sharper cell boundaries suited for
+edges, while lower temperatures enable softer blending for smooth
+gradients. No single fixed temperature achieves optimal results
+across all image regions, motivating adaptive temperature learning.
+Parameter Ablation. Table 10 quantifies the contribution of each
+learnable parameter. Enabling adaptive temperature improves PSNR
+by +2.30 dB over the best fixed baseline (28.20 dB → 30.50 dB),
+allowing sites to locally adjust their influence regions. Adding a
+learnable radius provides +1.26 dB additional improvement (30.50
+dB → 31.76 dB) by enabling sites to expand or contract their effective coverage. The most substantial gain comes from anisotropy:
+adding directional adaptation to adaptive temperature yields +4.27
+dB (30.50 dB → 34.77 dB), demonstrating that elongated cells aligned
+with image gradients dramatically improve reconstruction of edges
+and directional textures. The full model combining all parameters
+achieves 35.35 dB, a +7.15 dB improvement over the fixed baseline.
+Visual Analysis. Figure 11 visualizes the effect of each parameter
+combination. The diagrams (top row) reveal qualitatively different
+cell structures: fixed temperature produces uniform cell sizes, adaptive temperature allows local size variation, adding radius enables
+expansion of important cells, and anisotropy creates elongated cells
+that align with image edges. These structural differences directly
+translate to reconstruction quality, with the full model producing
+the sharpest edges and most accurate textures.
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:14
+•
+Iinbor et al.
+Fig. 11. Effect of learnable parameters on cell structure and reconstruction. Top row: SAD diagrams. Bottom row: Reconstructed images. From left to
+right: Fixed log 𝜏 = 7.5, Adaptive Tau, +Radius, +Anisotropy, Full model (+Radius+Anisotropy). Anisotropic cells create characteristic spiral patterns in smooth
+regions and align with edges in detailed areas.
+Configuration
+Tau
+Radius
+Aniso
+PSNR↑
+Fixed log 𝜏 = 5.0
+Fixed log 𝜏 = 7.5
+Fixed log 𝜏 = 10.0
+✗
+✗
+✗
+✗
+✗
+✗
+✗
+✗
+✗
+27.84
+28.20
+26.02
+Adaptive Tau
++ Radius
++ Anisotropy
+Full SAD
+✓
+✓
+✓
+✓
+✗
+✓
+✗
+✓
+✗
+✗
+✓
+✓
+30.50
+31.76
+34.77
+35.35
+Table 10. Ablation study: contribution of learnable parameters. Average PSNR over 5 test images (2048×2048). Checkmarks indicate parameters
+with non-zero learning rate. Adaptive temperature provides +2.30 dB over
+fixed baseline; anisotropy contributes the largest single improvement (+4.27
+dB over adaptive tau alone).
+Fig. 12. Effect of fixed temperature on reconstruction. From left to
+right: log 𝜏 = 10.0 (23.96 dB), log 𝜏 = 7.5 (25.12 dB), log 𝜏 = 5.0 (25.37 dB).
+Higher temperatures produce sharper boundaries while lower temperatures
+create softer blending.
+7 More Applications
+7.1 Differentiable PDE Solving
+Beyond image fitting, SAD serves as an adaptive mesh-free representation for differentiable physics simulation. We demonstrate
+this by solving the 2D Poisson equation ∇2𝑢 = 𝑓 on an irregular
+domain Ω (smiley mask, 512×512), with Dirichlet boundary conditions 𝑢 = 0 on 𝜕Ω and a spatially constant source term 𝑓 (x) = −4
+for x ∈ Ω. We initialize 20k interior sites (optimized via gradient
+descent on the PDE residual) and 3k boundary sites placed along
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+the zero-level contour. Critically, the explicit site structure allows us
+to freeze boundary sites after initialization, enforcing hard Dirichlet constraints by simply excluding them from gradient updates—a
+straightforward operation that is non-trivial in implicit MLP-based
+representations [Sitzmann et al. 2020] where satisfying hard boundary conditions typically requires specialized distance-function constructions [Kraus and Tatsis 2024] or penalty-based soft constraints.
+With this setup, our representation converges to machine precision
+(MSE < 10−6 ) in 1000–2000 gradient steps. The learned site distribution (Figure 13) concentrates naturally near boundaries and highcurvature regions, demonstrating content-adaptive behavior. This
+shows that SAD can serve as a general differentiable spatial representation for physics-informed optimization, with explicit structure
+enabling direct constraint enforcement and localized control.
+Soft Anisotropic Diagrams for Differentiable Image Representation
+•
+XXX:15
+and (ii) SIREN, a small sinusoidal coordinate MLP that encodes the
+signal through global frequencies.
+Figure 14 reports results on three characteristic targets. Gaussian
+splatting dominates the smooth sine (79.6 dB) because a Gaussian
+basis is near-optimal for band-limited interpolation, but its fixedshape kernels round off the sharp step (47.3 dB): it cannot model a
+discontinuity directly. SIREN handles continuous variation through
+its global sinusoidal basis, but approximates discontinuities only by
+truncating their frequency content, producing Gibbs-like ringing
+around the step (43.1 dB). SAD, in contrast, exploits its learnable
+per-site temperature to sharpen the soft partition exactly at the discontinuity while staying smooth in the flat regions, leading on both
+the step (57.2 dB) and multi-frequency (42.0 dB) targets. This mirrors
+the same mechanism that aligns SAD cells with object boundaries
+in 2D, confirming that temperature-controlled ownership —not the
+site budget or dimensionality—is what lets SAD represent sharp
+structure without sacrificing smoothness.
+Fig. 13. Differentiable Poisson solving on irregular domain. Top:
+Ground truth solution, shaded heightfield visualization, and binary mask
+defining the smiley domain. Bottom: Our reconstructed solution, shaded
+output, and learned site IDs. The colorful ID map reveals adaptive site concentration near boundaries and high-curvature features. Explicit sites enable
+hard constraint enforcement by freezing boundary sites during optimization.
+Fig. 14. 1D signal fitting at a matched 256-parameter budget. Rows:
+SAD (64 sites × 4 params), Gaussian splatting [Kerbl et al. 2023] (64 splats × 4
+params), and SIREN [Sitzmann et al. 2020] ([1, 16, 16, 1], 𝜔 0 =15, 321 params).
+Columns: smooth sine, step-plus-sine, and multi-frequency periodic target.
+Dots on the SAD and Gaussian rows mark primitive positions. Gaussian
+splatting fits smooth regions near-optimally but rounds off the step; SIREN
+encodes frequency content globally yet exhibits Gibbs-like ringing at the
+discontinuity; SAD’s learnable per-site temperature sharpens the partition
+exactly at the step while remaining smooth elsewhere.
+7.2
+1D Signal Fitting
+SAD extends naturally across low-dimensional signal domains: soft
+partition of unity applies unchanged to a 1D signal, with each site
+parameterized by a position, value, log-temperature, and radius (4
+parameters, versus the 9 used in 2D). We compare SAD to two 1D
+baselines at approximately matched parameter budget (64 primitives,
+256 parameters): (i) front-to-back Gaussian splatting (position, 𝜎,
+opacity, value per splat), which blends overlapping Gaussian kernels;
+8
+Conclusion
+We presented Soft Anisotropic Diagrams (SAD), an explicit and
+differentiable image representation based on a soft anisotropic additively weighted Voronoi (Apollonius-style) partition of the image
+plane. Pixels are rendered as a temperature-controlled softmax blend
+over a small per-pixel top-𝐾 subset of adaptive sites, which keeps optimization well-conditioned while making spatial ownership explicit
+and allowing boundaries to sharpen where the content demands
+it. In SAD, we maintain the per-query top-𝐾 map under the same
+shading score and update it with a jump-flood-inspired propagation
+scheme with stochastic injection, enabling GPU-friendly, fixed-size
+local computation. Combined with a GPU-first training pipeline
+(gradient-weighted initialization, Adam optimization, and adaptive densification/pruning), this substantially reduces per-instance
+encoding cost without sacrificing quality. Across standard benchmarks, SAD consistently outperforms Image-GS and Instant-NGP
+at matched bitrate. We also perform ablation studies to demonstrate
+the effectiveness of our method.
+Limitations and future work. SAD relies on maintaining accurate per-pixel top-𝐾 candidate sets via propagation; while effective
+in practice, imperfect or stale lists can reduce quality at very low
+budgets, after aggressive densification/pruning, or during abrupt
+parameter changes. Moreover, the fastest rendering regime assumes
+cached top-𝐾 lists; when the candidate map must be refreshed (e.g.,
+after large edits or when re-rendering at a new resolution), multiple propagation passes and/or re-seeding are required and the
+update can dominate end-to-end rendering time, especially at high
+resolutions. While SAD captures sharp boundaries well, very fine
+stochastic textures and highly irregular natural-image microstructure may still require larger site budgets (or temperature schedules)
+to avoid visible oversmoothing or residual grain. We also note that
+the explicit structure of SAD is designed to enforce locality, rather
+than to guarantee exact edge alignment; in practice, boundary alignment with image structure is an emergent optimization outcome
+and can still degrade on thin structures, weak-contrast edges, or
+highly stochastic textures. Finally, our implementation is optimized
+for GPU execution and bandwidth-efficient kernels, so absolute
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:16
+•
+Iinbor et al.
+performance and the best configuration choices may vary across
+hardware and kernel configurations.
+Promising directions include hierarchical and adaptive candidate
+maintenance—multi-resolution caches, resolution-aware reuse, and
+streaming-friendly refresh schedules—to reduce update cost while
+preserving quality at extreme budgets. Another direction is richer
+per-site models beyond constant color (e.g., low-order local appearance, small learned decoders, or material cues where applicable).
+Equally important is improving the distance model itself: incorporating better-designed anisotropic metrics and/or learned distance
+functions could increase expressivity without proportionally increasing site count. We also expect better initialization to further
+reduce optimization time: instead of gradient-based heuristics, one
+could use a pre-trained prior to propose an initial site layout and
+attributes, in the spirit of deep priors used for fast primitive initialization (e.g., [Wang et al. 2025]).
+Beyond 2D images, extending SAD to 3D (e.g., anisotropic cells
+for volumetric or surface representations) and to 2D/3D inverse
+problems could broaden its utility in differentiable rendering and
+physics. Finally, the explicit sites and induced adjacency suggest ML
+uses such as tokenization/encoding of images into structured primitives and using SAD as an explicit decoder or generative domain in
+place of implicit coordinate MLPs.
+Ethical and societal impact. Our method targets compact, differentiable image representation with fast per-image fitting, and
+currently does not add new capabilities for content generation or
+identity inference beyond standard neural primitive-based codecs.
+As with any image representation technique, it may be misused
+to store or transmit sensitive imagery or to support downstream
+manipulation at scale, raising privacy (lack of consent), IP, and
+deceptive-editing concerns. We therefore position it as a drop-in
+representation for user-provided images, encourage responsible data
+practices (consent, access control, licensing compliance), and emphasize transparent, reproducible implementation. Societally, improved
+rate–distortion and faster encoding can reduce bandwidth/storage
+costs and benefit resource-constrained deployment.
+References
+Nina Amenta and Marshall Bern. 1998. Surface reconstruction by Voronoi filtering. In
+Proceedings of the fourteenth annual symposium on Computational geometry. 39–48.
+Nina Amenta, Marshall Bern, and Manolis Kamvysselis. 1998. A new Voronoi-based
+surface reconstruction algorithm. In Proceedings of the 25th annual conference on
+Computer graphics and interactive techniques. 415–421.
+Nina Amenta, Sunghee Choi, and Ravi Krishna Kolluri. 2001. The power crust. In
+Proceedings of the sixth ACM symposium on Solid modeling and applications. 249–
+266.
+Franz Aurenhammer. 1987. Power diagrams: properties, algorithms and applications.
+SIAM journal on computing 16, 1 (1987), 78–96.
+Franz Aurenhammer. 1991. Voronoi diagrams—a survey of a fundamental geometric
+data structure. ACM computing surveys (CSUR) 23, 3 (1991), 345–405.
+Johannes Ballé, Valero Laparra, and Eero P Simoncelli. 2016. End-to-end optimized
+image compression. arXiv preprint arXiv:1611.01704 (2016).
+Yash Belhe, Michaël Gharbi, Matthew Fisher, Iliyan Georgiev, Ravi Ramamoorthi, and
+Tzu-Mao Li. 2023. Discontinuity-aware 2D neural fields. ACM Transactions on
+Graphics (TOG) 42, 6 (2023), 1–11.
+Priyadarshi Bhattacharya and Marina L Gavrilova. 2007. Voronoi diagram in optimal
+path planning. In 4th International Symposium on Voronoi Diagrams in Science and
+Engineering (ISVD 2007). IEEE, 38–47.
+Dobrina Boltcheva and Bruno Lévy. 2017. Surface reconstruction by computing restricted voronoi cells in parallel. Computer-Aided Design 90 (2017), 123–134.
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+Mario Botsch, Alexander Hornung, Matthias Zwicker, and Leif Kobbelt. 2005. Highquality surface splatting on today’s GPUs. In Proceedings Eurographics/IEEE VGTC
+Symposium Point-Based Graphics, 2005. IEEE, 17–141.
+Mario Botsch and Leif Kobbelt. 2003. High-quality point-based rendering on modern GPUs. In 11th Pacific Conference onComputer Graphics and Applications, 2003.
+Proceedings. IEEE, 335–343.
+Martin D. Buhmann. 2000. Radial basis functions. Acta Numerica 9 (2000), 1–38.
+https://www.math.ucdavis.edu/~saito/data/jim/buhmann-actanumerica.pdf
+John Canny. 2009. A computational approach to edge detection. IEEE Transactions on
+pattern analysis and machine intelligence 6 (2009), 679–698.
+Zhengxue Cheng, Heming Sun, Masaru Takeuchi, and Jiro Katto. 2020. Learned image
+compression with discretized gaussian mixture likelihoods and attention modules.
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition.
+7939–7948.
+Carl de Boor. 1978.
+A Practical Guide to Splines.
+Springer, New York.
+https://www.stat.cmu.edu/~brian/valerie/617-2022/week07/spline%20references/
+pdfcookie.com_a-practical-guide-to-splines.pdf
+Francesco Di Sario, Daniel Rebain, Dor Verbin, Marco Grangetto, and Andrea Tagliasacchi. 2025. Spherical Voronoi: Directional Appearance as a Differentiable Partition of
+the Sphere. arXiv preprint arXiv:2512.14180 (2025).
+Zhiyang Dou, Cheng Lin, Rui Xu, Lei Yang, Shiqing Xin, Taku Komura, and Wenping
+Wang. 2022. Coverage axis: Inner point selection for 3d shape skeletonization. In
+Computer Graphics Forum, Vol. 41. Wiley Online Library, 419–432.
+Emilien Dupont, Adam Goliński, Milad Alizadeh, Yee Whye Teh, and Arnaud Doucet.
+2021. Coin: Compression with implicit neural representations. arXiv preprint
+arXiv:2103.03123 (2021).
+Emilien Dupont, Hrushikesh Loya, Milad Alizadeh, Adam Goliński, Yee Whye Teh, and
+Arnaud Doucet. 2022. Coin++: Neural compression across modalities. arXiv preprint
+arXiv:2201.12904 (2022).
+Eastman Kodak Company. 1993. Kodak Lossless True Color Image Suite. https:
+//r0k.us/graphics/kodak/ PhotoCD PCD0992.
+Ioannis Z Emiris and Menelaos I Karavelas. 2006. The predicates of the Apollonius
+diagram: algorithmic analysis and implementation. Computational Geometry 33, 1-2
+(2006), 18–57.
+Fan Feng, Shiying Xiong, Ziyue Liu, Zangyueyang Xian, Yuqing Zhou, Hiroki Kobayashi,
+Atsushi Kawamoto, Tsuyoshi Nomura, and Bo Zhu. 2023. Cellular topology optimization on differentiable Voronoi diagrams. Internat. J. Numer. Methods Engrg. 124,
+1 (2023), 282–304.
+Shrisudhan Govindarajan, Daniel Rebain, Kwang Moo Yi, and Andrea Tagliasacchi. 2025.
+Radiant foam: Real-time differentiable ray tracing. arXiv preprint arXiv:2502.01157
+(2025).
+Chun Gu, Zeyu Yang, Zijie Pan, Xiatian Zhu, and Li Zhang. 2024. Tetrahedron splatting
+for 3d generation. Advances in Neural Information Processing Systems 37 (2024),
+80165–80190.
+Minghao Guo, Bohan Wang, and Wojciech Matusik. 2024. Medial Skeletal Diagram: A
+Generalized Medial Axis Approach for Compact 3D Shape Representation. ACM
+Transactions on Graphics (TOG) 43, 6 (2024), 1–23.
+Yixin Hu, Teseo Schneider, Xifeng Gao, Qingnan Zhou, Alec Jacobson, Denis Zorin, and
+Daniele Panozzo. 2019. TriWild: Robust Triangulation with Curve Constraints. ACM
+Trans. Graph. 38, 4, Article 52 (July 2019), 15 pages. doi:10.1145/3306346.3323011
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2024. 2d
+gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH
+2024 conference papers. 1–11.
+Animesh Karnewar, Tobias Ritschel, Oliver Wang, and Niloy Mitra. 2022. Relu fields:
+The little non-linearity that could. In ACM SIGGRAPH 2022 conference proceedings.
+1–9.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3D Gaussian splatting for real-time radiance field rendering. ACM Trans. Graph. 42,
+4 (2023), 139–1.
+Michael A. Kraus and Konstantinos E. Tatsis. 2024. SDF-PINNs: Joining PhysicsInformed Neural Networks with Neural Implicit Geometry Representation. In 5th
+International Conference on Uncertainty Quantification in Computational Sciences
+and Engineering (UNCECOMP 2024). ETH Zurich. doi:10.3929/ethz-b-000717387
+Théo Ladune, Pierrick Philippe, Félix Henry, Gordon Clare, and Thomas Leguay. 2023.
+Cool-chic: Coordinate-based low complexity hierarchical image codec. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision. 13515–13522.
+Pan Li, Bin Wang, Feng Sun, Xiaohu Guo, Caiming Zhang, and Wenping Wang. 2015.
+Q-mat: Computing medial axis transform by quadratic error minimization. ACM
+Transactions on Graphics (TOG) 35, 1 (2015), 1–16.
+Chenxi Liu, Siqi Wang, Matthew Fisher, Deepali Aneja, and Alec Jacobson. 2025. 2D
+Neural Fields with Learned Discontinuities. In Computer Graphics Forum, Vol. 44.
+Wiley Online Library, e70023.
+Jiayin Lu, Ying Jiang, Yin Yang, and Chenfanfu Jiang. 2025. VoroLight: Learning Quality
+Volumetric Voronoi Meshes from General Inputs. arXiv preprint arXiv:2512.12984
+(2025).
+Soft Anisotropic Diagrams for Differentiable Image Representation
+Julien NP Martel, David B Lindell, Connor Z Lin, Eric R Chan, Marco Monteiro, and
+Gordon Wetzstein. 2021. Acorn: Adaptive coordinate networks for neural scene
+representation. arXiv preprint arXiv:2105.02788 (2021).
+Nissim Maruani, Roman Klokov, Maks Ovsjanikov, Pierre Alliez, and Mathieu Desbrun.
+2023. Voromesh: Learning watertight surface meshes with voronoi diagrams. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision. 14565–
+14574.
+Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant Neural Graphics Primitives with a Multiresolution Hash Encoding. ACM Transactions
+on Graphics (ToG) 41, 4 (2022), 1–15. doi:10.1145/3528223.3530127
+Evgueni Parilov and Denis Zorin. 2008. Real-time rendering of textures with feature
+curves. ACM Transactions on Graphics (TOG) 27, 1 (2008), 1–15.
+Hanspeter Pfister, Matthias Zwicker, Jeroen Van Baar, and Markus Gross. 2000. Surfels:
+Surface elements as rendering primitives. In Proceedings of the 27th annual conference
+on Computer graphics and interactive techniques. 335–342.
+Marie-Julie Rakotosaona, Noam Aigerman, Niloy J Mitra, Maks Ovsjanikov, and Paul
+Guerrero. 2021. Differentiable surface triangulation. ACM Trans. Graph. 40, 6 (2021),
+267–1.
+Ganesh Ramanarayanan, Kavita Bala, and Bruce Walter. 2004. Feature-based textures.
+Technical Report. Cornell University.
+Guodong Rong and Tiow-Seng Tan. 2006. Jump flooding in GPU with applications to
+Voronoi diagram and distance transform. In Proceedings of the 2006 symposium on
+Interactive 3D graphics and games. 109–116.
+Mike Salisbury, Corin Anderson, Dani Lischinski, and David H Salesin. 1996. Scaledependent reproduction of pen-and-ink illustrations. In Proceedings of the 23rd
+annual conference on Computer graphics and interactive techniques. 461–468.
+Vishwanath Saragadam, Daniel LeJeune, Jasper Tan, Guha Balakrishnan, Ashok Veeraraghavan, and Richard G Baraniuk. 2023. Wire: Wavelet implicit neural representations. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. 18507–18516.
+Vincent Sitzmann, Julien Martel, Alexander Bergman, David Lindell, and Gordon
+Wetzstein. 2020. Implicit neural representations with periodic activation functions.
+Advances in neural information processing systems 33 (2020), 7462–7473.
+Ying Song, Jiaping Wang, Li-Yi Wei, and Wencheng Wang. 2015. Vector regression
+functions for texture compression. ACM Transactions on Graphics (TOG) 35, 1 (2015),
+1–10.
+Osamu Takahashi and Robert J Schilling. 1989. Motion planning in a plane using
+generalized Voronoi diagrams. IEEE Transactions on robotics and automation 5, 2
+(1989), 143–150.
+Towaki Takikawa, Alex Evans, Jonathan Tremblay, Thomas Müller, Morgan McGuire,
+Alec Jacobson, and Sanja Fidler. 2022. Variable Bitrate Neural Fields. In ACM
+SIGGRAPH 2022 Conference Proceedings. 1–9.
+Matthew Tancik, Pratul Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan Barron, and Ren Ng. 2020. Fourier
+features let networks learn high frequency functions in low dimensional domains.
+Advances in neural information processing systems 33 (2020), 7537–7547.
+Marco Tarini, Paolo Cignoni, et al. 2005. Pinchmaps: Textures with customizable
+discontinuities. In Computer Graphics Forum, Vol. 24. 557–568.
+Lucas Theis, Wenzhe Shi, Andrew Cunningham, and Ferenc Huszár. 2017. Lossy image
+compression with compressive autoencoders. arXiv preprint arXiv:1703.00395 (2017).
+Jack Tumblin and Prasun Choudhury. 2004. Bixels: Picture Samples with Sharp Embedded Boundaries. Rendering Techniques 255 (2004), 264.
+Dmitry Ulyanov, Andrea Vedaldi, and Victor Lempitsky. 2018. Deep image prior. In
+Proceedings of the IEEE conference on computer vision and pattern recognition. 9446–
+9454.
+Karthik Vaidyanathan, Marco Salvi, Bartlomiej Wronski, Tomas Akenine-Möller, Pontus
+Ebelin, and Aaron Lefohn. 2023. Random-access neural compression of material
+textures. arXiv preprint arXiv:2305.17105 (2023).
+Georges Voronoi. 1908. Nouvelles applications des paramètres continus à la théorie
+des formes quadratiques. Premier mémoire. Sur quelques propriétés des formes
+quadratiques positives parfaites. Journal für die reine und angewandte Mathematik
+(Crelles Journal) 1908, 133 (1908), 97–102.
+Hao Wang, Ashish Bastola, Chaoyi Zhou, Wenhui Zhu, Xiwen Chen, Xuanzhao Dong,
+Siyu Huang, and Abolfazl Razi. 2025. Fast 2DGS: Efficient Image Representation
+with Deep Gaussian Prior. arXiv preprint arXiv:2512.12774 (2025).
+Ningna Wang, Hui Huang, Shibo Song, Bin Wang, Wenping Wang, and Xiaohu Guo.
+2024b. MATTopo: Topology-preserving Medial Axis Transform with Restricted
+Power Diagram. arXiv preprint arXiv:2403.18761 (2024).
+Ningna Wang, Bin Wang, Wenping Wang, and Xiaohu Guo. 2022. Computing medial axis transform with feature preservation via restricted power diagram. ACM
+Transactions on Graphics (TOG) 41, 6 (2022), 1–18.
+Zimeng Wang, Zhiyang Dou, Rui Xu, Cheng Lin, Yuan Liu, Xiaoxiao Long, Shiqing
+Xin, Taku Komura, Xiaoming Yuan, and Wenping Wang. 2024a. Coverage axis++:
+Efficient inner point selection for 3D shape skeletonization. In Computer Graphics
+Forum, Vol. 43. Wiley Online Library, e15143.
+•
+XXX:17
+Francis Williams, Jerome Parent-Levesque, Derek Nowrouzezahrai, Daniele Panozzo,
+Kwang Moo Yi, and Andrea Tagliasacchi. 2020. Voronoinet: General functional
+approximators with local support. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition Workshops. 264–265.
+Xuanyu Wu, Kenji Tojo, and Nobuyuki Umetani. 2024. Free-form floor plan design
+using differentiable Voronoi diagram. In Pacific Graphics Conference Papers and
+Posters, Vol. 43.
+Rui Xu, Zhiyang Dou, Ningna Wang, Shiqing Xin, Shuangmin Chen, Mingyan Jiang,
+Xiaohu Guo, Wenping Wang, and Changhe Tu. 2023. Globally consistent normal orientation for point clouds by regularizing the winding-number field. ACM
+Transactions on Graphics (TOG) 42, 4 (2023), 1–15.
+Dong-Ming Yan, Wenping Wang, Bruno Lévy, and Yang Liu. 2013. Efficient computation
+of clipped Voronoi diagram for mesh generation. Computer-Aided Design 45, 4 (2013),
+843–852.
+Zhaojie Zeng, Yuesong Wang, Tao Guan, Chao Yang, and Lili Ju. 2025. Instant GaussianImage: A Generalizable and Self-Adaptive Image Representation via 2D Gaussian
+Splatting. In Proceedings of the IEEE/CVF International Conference on Computer Vision.
+27896–27905.
+Xinjie Zhang, Xingtong Ge, Tongda Xu, Dailan He, Yan Wang, Hongwei Qin, Guo Lu,
+Jing Geng, and Jun Zhang. 2024. GaussianImage: 1000 FPS Image Representation
+and Compression by 2D Gaussian Splatting. In European Conference on Computer
+Vision (ECCV). arXiv:2403.08551.
+Yunxiang Zhang, Bingxuan Li, Alexandr Kuznetsov, Akshay Jindal, Stavros Diolatzis,
+Kenneth Chen, Anton Sochenov, Anton Kaplanyan, and Qi Sun. 2025. Image-GS:
+Content-Adaptive Image Representation via 2D Gaussians. In ACM SIGGRAPH 2025
+Conference Proceedings. arXiv:2407.01866.
+Lingting Zhu, Guying Lin, Jinnan Chen, Xinjie Zhang, Zhenchao Jin, Zhao Wang,
+and Lequan Yu. 2025. Large Images Are Gaussians: High-Quality Large Image
+Representation with Levels of 2D Gaussian Splatting. In Proceedings of the AAAI
+Conference on Artificial Intelligence, Vol. 39. 10977–10985.
+Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and Markus Gross. 2001. Surface
+splatting. In Proceedings of the 28th annual conference on Computer graphics and
+interactive techniques. 371–378.
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+XXX:18
+•
+Iinbor et al.
+A Appendix
+B Implementation Details
+B.1 Parameters and Constants
+Table B11 lists the runtime parameters referenced in this section,
+while Table B12 lists fixed constants shared across backends.
+Parameter Meaning
+𝐾
+Top-𝐾 candidate list size (we use 𝐾 = 8)
+𝑠 grid
+Candidate grid downscale factor
+𝑓cand
+Candidate update period (iterations per update)
+𝑛 cand
+Passes per candidate update
+Table B11. Runtime parameters used by the implementation.
+Constant
+Meaning
+Grad-quant scale (106 ) Scale for integer gradient accumulation
+Tile hash size (256)
+Number of slots in the per-tile hash table
+Max probes (8)
+Linear-probing cap per hash insertion
+Empty key (0xffffffff)
+Sentinel for unused hash slots / invalid IDs
+Table B12. Fixed constants shared across backends.
+B.2
+Data Layout and Packing
+Site buffer. Training uses full-precision float32 site parameters.
+Each site stores the 10 semantic values (𝑥, 𝑦, log 𝜏, 𝑟, 𝑐𝑟 , 𝑐𝑔 , 𝑐𝑏 , 𝑎𝑥 , 𝑎 𝑦 , 𝑎).
+The sentinel for inactive sites is 𝑥 < 0 (we set position to (−1, −1)),
+and all kernels skip inactive entries. This layout is shared across
+Metal, CUDA, and WebGPU.
+Packed storage for evaluation. For evaluation we render from a
+16-byte packed site format that encodes all 10 semantic values. The
+layout is four 32-bit words: (w0) position 𝑥, 𝑦 as 15-bit UNORM
+each (scaled by image width/height) plus an active flag in the high
+bits; (w1) color 𝑟, 𝑔, 𝑏 as 11/11/10-bit UNORMs; (w2) (log 𝜏, 𝑟 ) as
+16/16-bit UNORMs using per-image min/scale; (w3) lower 16 bits =
+anisotropy direction as a 16-bit UNORM angle code over [−𝜋, 𝜋],
+upper 16 bits = 𝑎 as float16. The per-image quantization parameters
+(min/scale for log 𝜏, 𝑟 , and color channels) are stored once alongside
+the packed array. In our evaluation this packed representation does
+not change PSNR, while reducing memory bandwidth substantially.
+Candidate updates use a separate 16-byte half2-packed format for
+speed.
+Top-𝐾 candidate list. We store the per-pixel top-𝐾 indices in two
+4-channel 32-bit unsigned integer textures, each texel containing
+four site IDs. With 𝐾 = 8, the first texture stores IDs 0–3 and the
+second stores IDs 4–7. The invalid sentinel is 0xffffffff. This design
+yields coalesced loads for both rendering and gradients.
+Packed candidate sites. For candidate updates we use a compact
+per-site representation to reduce bandwidth. Each site is packed into
+16 bytes (four 32-bit words) using half-precision pairs (two float16
+per word): position, (log 𝜏, 𝑟 ), anisotropy direction, and (𝑎, 0). The
+packed buffer is regenerated after densification and used by the
+candidate update kernel.
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.
+B.3
+Candidate Field and Jump Schedule
+Downscaled candidate grid. We maintain a candidate grid of size
+⌈𝑊 /𝑠 grid ⌉ × ⌈𝐻 /𝑠 grid ⌉ with downscale 𝑠 grid . The mapping from image
+coordinates to candidate cells is integer (no interpolation), while
+candidate evaluation uses the centered UV of the candidate cell to
+avoid systematic bias.
+Step encoding. The jump schedule is encoded in a single 32-bit
+step parameter: the lower 16 bits store the step index, and the upper
+16 bits store the jump distance. This allows a compact parameter
+buffer and deterministic per-pass randomization (xorshift state is
+seeded by the step index and pixel ID).
+JFA prepass. When a full refresh is needed (e.g., for rendering),
+we run a seed pass and ⌈log2 max(𝑊 , 𝐻 )⌉ flood passes. Each flood
+pass samples a 3×3 neighborhood at the current step size and writes
+the four closest sites into the first candidate texture. This prepass is
+optional: the candidate field can be built from VPT updates alone,
+while JFA mainly helps when reinitializing or after large edits.
+Candidate update frequency. We expose the candidate update
+frequency and number of passes per update. In our experiments,
+updating the candidate field less frequently (e.g., once every 8–16
+iterations) did not measurably change the final PSNR, while further
+reducing training time.
+B.4
+Gradient Computation and Reduction
+Per-pixel gradients. Gradients are computed from the softmax
+weights of the top-𝐾 list. We use the standard max-subtracted softmax for numerical stability and compute derivatives with respect
+to position, log 𝜏, 𝑟 , color, anisotropy direction, and 𝑎 (anisotropy
+scale). Invalid sites are skipped and all NaNs are guarded.
+Quantized vs. float atomics. WebGPU uses 32-bit integer gradient buffers with a fixed scale (grad-quant scale in Table B12) because floating-point atomics are not universally available. Metal
+and CUDA use native float atomics for the same gradients. In all
+backends, the Adam update converts the accumulated values back
+to floating point and normalizes by the number of pixels.
+Threadgroup hash reduction. We implement a fixed-size, per-tile
+hash table sized to the 16×16 workgroup (256 slots). Each slot stores
+a site ID key and 11 accumulators (10 gradients + removal-delta).
+Slots are initialized to the empty sentinel 0xffffffff with per-thread
+strided clearing. Keys are hashed with a multiplicative hash (𝑘𝑒𝑦 ×
+2654435761), and we use linear probing with a hard cap of 8 probes.
+Insertion is via atomic compare-and-swap on the key; if a probe
+hits an existing key, we accumulate into that slot. If no slot is found
+within the probe bound, we fall back to global atomics for that site.
+After all pixels in the tile are processed, we synchronize and have
+each thread flush a strided subset of slots: for every occupied slot,
+we perform one global atomic per parameter (and removal-delta
+when enabled). In Metal and WGSL, the threadgroup accumulators
+are stored as scaled 32-bit integers (grad-quant scale in Table B12)
+and dequantized on flush; in CUDA they are stored as float in shared
+memory. This yields at most one global atomic per site per tile and
+keeps the hash-table overhead bounded and deterministic.
+Soft Anisotropic Diagrams for Differentiable Image Representation
+Kernel family
+Workgroup size
+Candidate init/clear/update, render, gradients, stats
+16 × 16
+JFA seed
+64 × 1
+Pack / Adam / split / prune / tau diffusion
+256 × 1
+Table B13. Typical dispatch sizes used across backends.
+B.5
+Densification and Pruning
+Densification scores. A statistics pass accumulates per-site mass,
+energy, and weighted second moments (𝑤, 𝑤𝑥, 𝑤𝑦, 𝑤𝑥𝑥, 𝑤𝑥𝑦, 𝑤𝑦𝑦)
+from the per-pixel residuals. We score each site as energy/mass𝛼
+and use a radix sort over key-value pairs to select the top candidates
+for splitting.
+Split kernel. Each selected site is split into two children. When
+sufficient statistics are available, we estimate the dominant axis from
+the weighted covariance; if not, we fall back to a local Sobel-like
+gradient around the site. Children are offset along this axis, inherit
+color from the target image at their positions, and slightly reduce
+log 𝜏 and 𝑟 (e.g., 𝑟 ← 0.85 𝑟 ). The Adam state for both parent and
+child is reset to zero.
+Pruning. We compute a per-site removal score from the removaldelta accumulator, sort the scores, and mark the lowest-ranked sites
+as inactive by setting position to (−1, −1). Inactive sites are ignored
+by all kernels.
+B.6
+•
+XXX:19
+Tau Diffusion
+We optionally smooth log 𝜏 gradients by averaging over the local
+candidate neighborhood at each site. This is implemented as a persite Jacobi update that mixes the raw gradient with neighboring
+gradients using a scalar 𝜆.
+B.7
+Dispatch Configuration
+Table B13 summarizes the workgroup sizes. Image-space kernels
+(render, candidate update, gradients, stats, JFA flood/clear) use 16×16
+groups. Per-site kernels use 1D groups of 64 threads (JFA seed) or
+256 threads (Adam, split, prune, pack, tau diffusion).
+B.8
+Backend Notes
+The Metal, CUDA, and WebGPU implementations share identical
+math, memory layout, and candidate update logic. WebGPU uses
+a shared WGSL source (also used by the JS viewer), while Metal
+and CUDA translate the same kernels into MSL and CUDA C++.
+The main differences are binding models and buffer creation; all
+buffers are kept in GPU memory and only site I/O crosses the host
+boundary. We avoid backend-specific features in the training path
+to keep behavior consistent across devices.
+Received 22 Jan 2026; revised 19 Apr 2026; accepted 20 Apr 2026
+SIGGRAPH ’26, July 19–23, 2026, Los Angeles, CA, USA.

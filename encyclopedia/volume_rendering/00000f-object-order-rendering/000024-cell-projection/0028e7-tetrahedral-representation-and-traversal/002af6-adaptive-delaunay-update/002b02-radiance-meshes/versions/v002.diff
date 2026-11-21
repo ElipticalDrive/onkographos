@@ -1,0 +1,228 @@
+--- v001.md
++++ v002.md
+@@ -18,7 +18,6 @@
+ **Data Structures:**
+ - **Points:** $\{v_i\}$, 3D coordinates.
+-- **Tetrahedra:** $\{T_k\}$, defined by 4 vertices.
++- **Tetrahedra:** $\{T_k\}$, defined by 4 vertex indices.
+ - **Attributes:** Stored per tetrahedron, queried from $G_\theta$.
+-- **Instant-NGP:** Hash-based multi-resolution grid structure [S1, unofficial].
+ 
+ **Parameters:**
+@@ -41,5 +40,5 @@
+    b. Compute entry $t_k^{\text{in}}$ and exit $t_k^{\text{out}}$ distances using the Cyrus-Beck algorithm [S1, unofficial].
+    c. Compute color contribution $\Delta \mathbf{C}_k$ and opacity $\alpha_k$ [S1, unofficial].
+-   d. Blend results using hardware alpha blending [S1, unofficial].
++   d. Blend results using hardware blending operations to compute the product of opacities $w_k$ [S1, unofficial].
+ 
+ **Formulas:**
+@@ -74,5 +73,7 @@
+ 
+ ```python
+-def radiance_mesh_render(points, camera_origin, ngp_model, tetrahedra):
++import math
++
++def radiance_mesh_render(points, camera_origin, ngp_model, tetrahedra, pixel_count, ray_directions):
+     """
+     Render a radiance mesh.
+@@ -83,151 +84,70 @@
+         ngp_model: Instant-NGP model G_theta.
+         tetrahedra: List of tetrahedra {T_k}, each defined by 4 vertex indices.
++        pixel_count: Number of pixels.
++        ray_directions: List of 3D ray direction vectors for each pixel.
+         
+     Returns:
+-        Image buffer.
++        List of pixel colors.
+     """
+-    # Step 1: Compute attributes for each tetrahedron
++    # Step 1: Query attributes for each tetrahedron
+     tetra_attrs = []
+     for t in tetrahedra:
+-        # Query Instant-NGP for constant density, base color, and gradient
+-        # Note: The specific query mechanism for G_theta is implementation-dependent,
+-        # but conceptually it maps the tetrahedron geometry to attributes.
+-        sigma, c0, grad_c = ngp_model.query(t)
+-        
+-        # Determine reference point O_k (circumcenter or centroid)
+-        # For simplicity, using centroid here. Circumcenter requires more computation.
+-        vertices = [points[v_idx] for v_idx in t.vertices]
+-        O_k = sum(vertices) / len(vertices)
+-        
+-        tetra_attrs.append({
+-            'sigma': sigma,
+-            'c0': c0,
+-            'grad_c': grad_c,
+-            'O_k': O_k,
+-            'vertices': vertices
+-        })
++        vertices = [points[v_idx] for v_idx in t]
++        sigma, c0, grad_c = ngp_model.query(vertices)
++        O_k = sum(vertices) / len(vertices)  # Centroid as reference point [G]
++        tetra_attrs.append({'vertices': vertices, 'sigma': sigma, 'c0': c0, 'grad_c': grad_c, 'O_k': O_k})
+ 
+     # Step 2: Power Sort
+-    # P(T) = ||O(T) - o||^2 - R(T)^2
+-    def power_sort_key(t_attr):
+-        # Compute circumsphere center and radius
+-        # This is a geometric calculation based on the 4 vertices of the tetrahedron
+-        O_T, R_T = compute_circumsphere(t_attr['vertices'])
+-        dist_sq = np.linalg.norm(O_T - camera_origin)**2
+-        return dist_sq - R_T**2
++    def power_sort_key(attr):
++        O_T, R_T = compute_circumsphere(attr['vertices'])
++        return math.dist(O_T, camera_origin)**2 - R_T**2
+ 
+-    sorted_tetra_attrs = sorted(tetra_attrs, key=power_sort_key)
++    sorted_attrs = sorted(tetra_attrs, key=power_sort_key)
+ 
+     # Step 3: Rasterization / Ray Casting
+-    # For each pixel, cast a ray and blend tetrahedra
+-    image = np.zeros((height, width, 3))
+-    
+-    for y in range(height):
+-        for x in range(width):
+-            ray = get_ray(x, y, camera_origin)
+-            accumulated_color = np.array([0.0, 0.0, 0.0])
+-            accumulated_alpha = 0.0
+-            
+-            for t_attr in sorted_tetra_attrs:
+-                # Compute entry and exit distances using Cyrus-Beck
+-                t_in, t_out = cyrus_beck_intersect(ray, t_attr['vertices'])
+-                
+-                if t_in is None or t_out is None:
+-                    continue
+-                
+-                # If the ray does not pass through the tetrahedron in the forward direction
+-                if t_out <= t_in:
+-                    continue
+-                
+-                # Compute intermediate variables
+-                d_k = (t_out - t_in) * t_attr['sigma']
+-                alpha_k = 1.0 - np.exp(-d_k)
+-                
+-                # Compute colors at entry and exit points
+-                p_in = ray.origin + ray.direction * t_in
+-                p_out = ray.origin + ray.direction * t_out
+-                
+-                c_in = compute_color(p_in, t_attr)
+-                c_out = compute_color(p_out, t_attr)
+-                
+-                # Compute color contribution (premultiplied alpha)
+-                # Delta_C_k = (1 - alpha_k/d_k) * c_in + (alpha_k/d_k - exp(-d_k)) * c_out
+-                if d_k == 0:
+-                    # Handle degenerate case where density is 0 or distance is 0
+-                    delta_C_k = np.array([0.0, 0.0, 0.0])
+-                else:
+-                    term1 = (1.0 - alpha_k / d_k) * c_in
+-                    term2 = (alpha_k / d_k - np.exp(-d_k)) * c_out
+-                    delta_C_k = term1 + term2
+-                
+-                # Blend into accumulated color
+-                # C = sum(w_k * Delta_C_k)
+-                # w_k = product(1 - alpha_l) for l < k
+-                # This is equivalent to:
+-                # C_new = C_old * (1 - alpha_k) + delta_C_k
+-                # But since delta_C_k is premultiplied, we just add it?
+-                # Wait, the formula says C = sum w_k Delta C_k.
+-                # Standard alpha blending: C_out = C_in * (1 - alpha) + color * alpha
+-                # Here, Delta C_k is the color contribution *already* multiplied by the transmission?
+-                # Let's re-read Eq 6 and 8.
+-                # Eq 6: Delta C_k is the integral result.
+-                # Eq 8: C = sum w_k Delta C_k.
+-                # w_k is the transmission through all previous primitives.
+-                # So we need to track transmission.
+-                
+-                # Let's track transmission T_k = product(1 - alpha_l)
+-                # But we are iterating front-to-back.
+-                # Let T_prev = product(1 - alpha_l) for l < k
+-                # Contribution = T_prev * Delta_C_k
+-                # New T_prev = T_prev * (1 - alpha_k)
+-                
+-                # However, hardware rasterization often uses standard blending.
+-                # If we use hardware blending, we might need to pass (Delta_C_k, alpha_k)
+-                # and let the hardware handle the accumulation.
+-                # But the formula is explicit.
+-                
+-                # Let's implement the explicit formula for clarity.
+-                pass # Placeholder for pixel loop logic
+-            
+-            # Note: The explicit pixel loop above is O(N) per pixel.
+-            # The paper mentions using hardware rasterization to compute w_k efficiently.
+-            # In a software implementation, we would iterate.
+-            # In a hardware implementation, we would rasterize triangles and use blending.
+-            
+-            # For the sake of the "How it works" section, we describe the math.
+-            # The pseudocode here is a conceptual software renderer.
+-            
+-            # To match the paper's claim of hardware rasterization:
+-            # The fragment shader computes Delta_C_k and alpha_k for each triangle.
+-            # The hardware blending unit computes the accumulation.
+-            # The order must be front-to-back.
+-            
+-            # We will leave the pixel loop as a conceptual description.
+-            pass
++    image = []
++    for i in range(pixel_count):
++        ray_origin = camera_origin
++        ray_direction = ray_directions[i]
++        accumulated_color = [0.0, 0.0, 0.0]
++        transmission = 1.0
+ 
++        for attr in sorted_attrs:
++            t_in, t_out = cyrus_beck_intersect(ray_origin, ray_direction, attr['vertices'])
++            if t_in is None or t_out is None or t_out <= t_in:
++                continue
++
++            d_k = (t_out - t_in) * attr['sigma']
++            alpha_k = 1.0 - math.exp(-d_k)
++
++            p_in = [ray_origin[j] + ray_direction[j] * t_in for j in range(3)]
++            p_out = [ray_origin[j] + ray_direction[j] * t_out for j in range(3)]
++
++            c_in = compute_color(p_in, attr)
++            c_out = compute_color(p_out, attr)
++
++            if d_k == 0:
++                delta_C_k = [0.0, 0.0, 0.0]
++            else:
++                term1 = [(1.0 - alpha_k / d_k) * c_in[j] for j in range(3)]
++                term2 = [(alpha_k / d_k - math.exp(-d_k)) * c_out[j] for j in range(3)]
++                delta_C_k = [term1[j] + term2[j] for j in range(3)]
++
++            accumulated_color = [accumulated_color[j] + transmission * delta_C_k[j] for j in range(3)]
++            transmission *= (1.0 - alpha_k)
++
++        image.append(accumulated_color)
+     return image
+ 
+-def compute_color(p, t_attr):
+-    """Compute color at point p inside tetrahedron t_attr."""
+-    c0 = t_attr['c0']
+-    grad_c = t_attr['grad_c']
+-    O_k = t_attr['O_k']
+-    return c0 + np.dot(grad_c, p - O_k)
++def compute_color(p, attr):
++    """Compute color at point p inside tetrahedron attr."""
++    return [attr['c0'][i] + sum(attr['grad_c'][i][j] * (p[j] - attr['O_k'][j]) for j in range(3)) for i in range(3)]
+ 
+ def compute_circumsphere(vertices):
+-    """Compute the center and radius of the circumsphere of a tetrahedron."""
+-    # This is a standard geometric computation.
+-    # Given 4 points A, B, C, D.
+-    # The center O is the solution to ||O-A||^2 = ||O-B||^2 = ...
+-    # This can be solved via linear algebra.
+-    # For brevity, we assume this helper exists.
++    # Standard geometric computation for tetrahedron circumsphere center and radius [G]
+     pass
+ 
+-def cyrus_beck_intersect(ray, vertices):
+-    """Compute entry and exit distances using Cyrus-Beck algorithm."""
+-    # Cyrus-Beck is a line-clipping algorithm.
+-    # It finds the intersection of a line with a convex polygon (or polyhedron).
+-    # For a tetrahedron, we clip against 4 planes.
+-    # This is a standard algorithm.
++def cyrus_beck_intersect(origin, direction, vertices):
++    # Standard line-clipping algorithm against convex polyhedron planes [G]
+     pass
+ ```

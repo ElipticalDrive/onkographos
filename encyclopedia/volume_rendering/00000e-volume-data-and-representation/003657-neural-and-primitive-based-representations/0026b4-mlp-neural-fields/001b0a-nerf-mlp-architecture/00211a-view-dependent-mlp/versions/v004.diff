@@ -1,0 +1,109 @@
+--- v003.md
++++ v004.md
+@@ -4,19 +4,20 @@
+ 
+ ## Overview
+-The View-Dependent MLP is a specialized neural network component used in neural radiance field rendering to model complex view-dependent appearance effects, such as specularities, which simpler models fail to capture. It replaces the small bottleneck representation in InstantNGP with a larger, deeper architecture to reduce rendering artifacts known as "floaters" that arise when the model attempts to explain view-dependent effects using small, spurious geometry [S1]. It builds on [NeRF MLP Architecture](910-nerf-mlp-architecture.md) by expanding the capacity of the view-dependent processing stage.
++The View-Dependent MLP is an expanded neural field component designed to model complex view-dependent appearance effects, such as specularities, which standard compact representations often fail to capture. It addresses the problem where insufficient capacity in the view-dependent bottleneck leads to rendering artifacts, including incorrect semi-transparent voxels near surfaces and the generation of "floaters" (small, spurious geometry) that the network uses to explain away view-dependent color variations [S1]. It sets itself apart from its sibling [Position-Only NeRF Field](1253-position-only-nerf-field.md) by explicitly incorporating viewing direction into the color prediction, and from the parent [NeRF MLP Architecture](910-nerf-mlp-architecture.md) by utilizing a significantly larger hidden dimension and specific skip connections to improve expressivity [S1].
+ 
+ ## How it works
++The method replaces the small view-dependent bottleneck found in standard InstantNGP architectures with a larger, dedicated MLP branch.
++
+ **Inputs and Outputs:**
+-The module takes a view-dependent bottleneck vector $b \in \mathbb{R}^{256}$ as input. This vector is typically derived from the 3D position and viewing direction via an initial encoding stage. The output is a directional emitted color vector $c \in \mathbb{R}^3$ (RGB).
++*   **Input:** A bottleneck feature vector $b \in \mathbb{R}^{256}$, derived from the position encoding and previous network layers.
++*   **Output:** A directional emitted color vector $c \in \mathbb{R}^3$.
+ 
+ **Data Structures:**
+-The network consists of a 3-layer Multi-Layer Perceptron (MLP) with 256 hidden units per layer.
+-
+-**Algorithm:**
+-1.  **Input:** Receive bottleneck vector $b$ of size 256.
+-2.  **Layer 1:** Compute $h_1 = \text{ReLU}(W_1 b + \beta_1)$, where $W_1 \in \mathbb{R}^{256 \times 256}$ and $\beta_1 \in \mathbb{R}^{256}$.
+-3.  **Layer 2:** Compute $h_2 = \text{ReLU}(W_2 h_1 + \beta_2 + b)$. This layer includes a skip connection from the input bottleneck $b$ to the pre-activation sum. $W_2 \in \mathbb{R}^{256 \times 256}$ and $\beta_2 \in \mathbb{R}^{256}$.
+-4.  **Layer 3:** Compute $h_3 = \text{ReLU}(W_3 h_2 + \beta_3)$. $W_3 \in \mathbb{R}^{256 \times 256}$ and $\beta_3 \in \mathbb{R}^{256}$.
+-5.  **Output:** Compute $c = W_4 h_3 + \beta_4$, where $W_4 \in \mathbb{R}^{3 \times 256}$ and $\beta_4 \in \mathbb{R}^3$. The result $c$ is the predicted RGB color.
++The network is a Multi-Layer Perceptron (MLP) with the following structure:
++1.  **Input Layer:** Receives the 256-dimensional bottleneck vector.
++2.  **Hidden Layer 1:** Linear transformation to 256 units.
++3.  **Hidden Layer 2:** Linear transformation to 256 units. This layer receives a skip connection from the input bottleneck vector.
++4.  **Hidden Layer 3:** Linear transformation to 256 units.
++5.  **Output Layer:** Linear transformation to 3 units (RGB).
+ 
+ **Parameters:**
+@@ -24,23 +25,66 @@
+ *   Hidden units per layer: 256 [S1].
+ *   Number of hidden layers: 3 [S1].
+-*   Activation function: ReLU (standard for MLPs in this context, implied by typical usage in Zip-NeRF/InstantNGP lineage).
+-*   Weight decay: $10^{-9}$ (used in ablation studies, though performance is largely insensitive to the multiplier) [S1].
++*   Weight decay multiplier: $10^{-9}$ (found to be largely insensitive) [S1].
++
++**Algorithm:**
++Let $b$ be the input bottleneck vector. Let $W_i$ and $b_i$ denote the weight matrix and bias vector for layer $i$, and $\sigma(\cdot)$ be the activation function (typically ReLU).
++
++1.  Compute the first hidden representation:
++    $$h_1 = \sigma(W_1 b + b_1)$$
++2.  Compute the second hidden representation with a skip connection from the input $b$:
++    $$h_2 = \sigma(W_2 h_1 + W_{skip} b + b_2)$$
++    *Note: The source specifies a skip connection from the bottleneck to the second layer. In standard MLP notation, this implies the input to the second layer's linear operation includes the original bottleneck vector scaled by a skip weight matrix $W_{skip}$.*
++3.  Compute the third hidden representation:
++    $$h_3 = \sigma(W_3 h_2 + b_3)$$
++4.  Compute the final color output:
++    $$c = W_4 h_3 + b_4$$
++
++**Pseudocode:**
++```python
++def view_dependent_mlp(bottleneck: Tensor) -> Tensor:
++    """
++    Implements the larger view-dependent MLP from Zip-NeRF.
++    
++    Args:
++        bottleneck: Tensor of shape (..., 256) representing the view-dependent feature vector.
++        
++    Returns:
++        Tensor of shape (..., 3) representing the predicted RGB color.
++    """
++    # Layer 1: 256 -> 256
++    h1 = relu(linear(bottleneck, W1, b1))
++    
++    # Layer 2: 256 -> 256 with skip connection from bottleneck
++    # The skip connection adds the original bottleneck vector (scaled by W_skip) to the input of this layer
++    h2 = relu(linear(h1, W2, b2) + linear(bottleneck, W_skip, b_skip))
++    
++    # Layer 3: 256 -> 256
++    h3 = relu(linear(h2, W3, b3))
++    
++    # Output Layer: 256 -> 3
++    color = linear(h3, W4, b4)
++    
++    return color
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Usage:** Larger batch sizes with supersampling (e.g., 6x) can cause out-of-memory errors due to the increased parameter count and intermediate activations compared to smaller bottlenecks [S1]. Mitigation involves reducing batch size or training for more iterations [S1].
+-*   **Floaters:** Without this larger capacity, the model may optimize view-dependent effects by creating small, spurious geometric structures ("floaters") in front of the camera [S1].
++*   **Memory Usage:** The larger bottleneck size (256 vs. typical smaller values) increases memory consumption during training. Ablations using naive supersampling (6x) caused out-of-memory errors, requiring a reduction in batch size and increased iteration count [S1].
++*   **Floaters:** Without sufficient capacity, the network may optimize for view-dependent effects by placing small, spurious geometry ("floaters") in front of the camera. This specific architecture aims to reduce this by providing adequate capacity to model the appearance directly [S1].
+ 
+ ## Subtopics
+ 
+ ### [View-Conditioned Rendering](2783-view-conditioned-rendering.md)
+-Extends this approach by conditioning the RGB decoder $V_{rgb}$ on the viewpoint to explicitly model view-dependent effects.
++A technique that conditions the RGB decoder on the camera viewpoint to model specularities. It differs from the View-Dependent MLP by keeping the alpha (opacity) branch view-independent, whereas the View-Dependent MLP focuses on the architectural capacity of the MLP itself to handle view-dependent features.
+ 
+ ## Operating characteristics
+-*   **Complexity:** Higher memory and compute cost than smaller bottleneck variants due to the 256-unit hidden layers and skip connections.
+-*   **Performance:** Reduces floaters and improves rendering quality on shiny surfaces compared to smaller models [S1].
+-*   **Limitations:** Susceptible to out-of-memory errors during training with high supersampling rates if batch size is not adjusted [S1].
++*   **Memory Complexity:** Higher than compact variants due to the 256-dimensional bottleneck and additional parameters in the 3-layer MLP. This can lead to out-of-memory errors during training with large batch sizes or high supersampling rates [S1].
++*   **Performance:** Reduces rendering artifacts such as floaters and incorrect semi-transparent voxels on shiny surfaces compared to smaller bottlenecks [S1].
++*   **Strengths:** Better expression of view-dependent effects; reduced floaters.
++*   **Limitations:** Increased memory footprint; potential for training instability if batch size is not adjusted for supersampling [S1].
++*   **When to use:** When rendering scenes with significant specularities or complex view-dependent appearance where smaller models produce artifacts.
++*   **When not to use:** When memory is constrained and view-dependent effects are minimal.
+ 
+ ## Background
+-This architecture was introduced in Zip-NeRF as a modification to the InstantNGP network structure to address limitations in modeling complex view-dependent effects [S1]. It was developed to mitigate the issue of "floaters" caused by insufficient capacity in the view-dependent bottleneck.
++The View-Dependent MLP was introduced in the context of Zip-NeRF, an anti-aliased grid-based neural radiance field method. It was developed to address limitations in the original InstantNGP architecture, specifically the tendency of small bottlenecks to generate floaters when trying to explain view-dependent effects [S1]. The method is part of the broader development of efficient neural radiance fields for real-time rendering.
+ 
+ ## Sources

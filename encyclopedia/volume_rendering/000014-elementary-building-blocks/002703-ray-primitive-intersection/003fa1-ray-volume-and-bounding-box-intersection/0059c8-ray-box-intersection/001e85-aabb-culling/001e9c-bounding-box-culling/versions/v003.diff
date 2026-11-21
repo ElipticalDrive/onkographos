@@ -1,0 +1,177 @@
+--- v002.md
++++ v003.md
+@@ -32,45 +32,57 @@
+ **Pseudocode:**
+ ```python
+-def bounding_box_culling(gaussians, view_proj_matrix, viewport_bounds):
++def bounding_box_culling(gaussians, view_proj_matrix, viewport_min, viewport_max):
+     alive_primitives = []
+     depth_buffer = []
+-    
++
+     for g in gaussians:
+         # 1. Project 3D center and covariance to 2D screen space
+-        clip_c = view_proj_matrix @ np.append(g.center, 1.0)
+-        screen_c = clip_c[:2] / clip_c[2]
+-        J = compute_projection_jacobian(g.center, view_proj_matrix)
+-        screen_cov = J @ g.covariance @ J.T
+-        
+-        # 2. Calculate major and minor axes of the projected 2D ellipse
+-        eigenvalues, eigenvectors = np.linalg.eigh(screen_cov)
+-        major_axis = eigenvectors[:, 1] * np.sqrt(eigenvalues[1])
+-        minor_axis = eigenvectors[:, 0] * np.sqrt(eigenvalues[0])
+-        
+-        # 3. Compute AABB for the 2D ellipse
+-        extent_x = np.abs(major_axis[0]) + np.abs(minor_axis[0])
+-        extent_y = np.abs(major_axis[1]) + np.abs(minor_axis[1])
+-        aabb_min = screen_c - np.array([extent_x, extent_y])
+-        aabb_max = screen_c + np.array([extent_x, extent_y])
+-        
+-        # 4. Culling Test: Check intersection with camera viewport
+-        if aabb_min[0] > viewport_bounds[1][0] or aabb_max[0] < viewport_bounds[0][0] or \
+-           aabb_min[1] > viewport_bounds[1][1] or aabb_max[1] < viewport_bounds[0][1]:
+-            continue  # Drop the Gaussian
+-            
+-        # 5. Calculate depth and store as 32-bit float
++        w = view_proj_matrix[2][0]*g.center[0] + view_proj_matrix[2][1]*g.center[1] + view_proj_matrix[2][2]*g.center[2] + view_proj_matrix[2][3]
++        clip_c = [
++            view_proj_matrix[0][0]*g.center[0] + view_proj_matrix[0][1]*g.center[1] + view_proj_matrix[0][2]*g.center[2] + view_proj_matrix[0][3],
++            view_proj_matrix[1][0]*g.center[0] + view_proj_matrix[1][1]*g.center[1] + view_proj_matrix[1][2]*g.center[2] + view_proj_matrix[1][3],
++            w
++        ]
++        screen_c = [clip_c[0] / w, clip_c[1] / w]
++
++        # 2. Compute projection Jacobian and screen covariance [G]
++        f = 1.0 / w
++        f2 = f * f
++        J = [
++            [view_proj_matrix[0][0]*f - view_proj_matrix[0][2]*g.center[0]*f2, view_proj_matrix[0][1]*f - view_proj_matrix[0][2]*g.center[1]*f2, -view_proj_matrix[0][2]*g.center[2]*f2],
++            [view_proj_matrix[1][0]*f - view_proj_matrix[1][2]*g.center[0]*f2, view_proj_matrix[1][1]*f - view_proj_matrix[1][2]*g.center[1]*f2, -view_proj_matrix[1][2]*g.center[2]*f2]
++        ]
++        screen_cov = mat_mul(mat_mul(J, g.covariance), transpose(J))
++
++        # 3. Calculate major and minor axes of the projected 2D ellipse [G]
++        eigenvalues, eigenvectors = eigh_2x2(screen_cov)
++        major_axis = [eigenvectors[0][0] * eigenvalues[0], eigenvectors[1][0] * eigenvalues[0]]
++        minor_axis = [eigenvectors[0][1] * eigenvalues[1], eigenvectors[1][1] * eigenvalues[1]]
++
++        # 4. Compute AABB for the 2D ellipse
++        extent_x = abs(major_axis[0]) + abs(minor_axis[0])
++        extent_y = abs(major_axis[1]) + abs(minor_axis[1])
++        aabb_min = [screen_c[0] - extent_x, screen_c[1] - extent_y]
++        aabb_max = [screen_c[0] + extent_x, screen_c[1] + extent_y]
++
++        # 5. Culling Test: Check intersection with camera viewport
++        if aabb_min[0] > viewport_max[0] or aabb_max[0] < viewport_min[0] or \
++           aabb_min[1] > viewport_max[1] or aabb_max[1] < viewport_min[1]:
++            continue
++
++        # 6. Calculate depth and store as 32-bit float
+         depth = clip_c[2]
+         depth_buffer.append(depth)
+-        
+-        # 6. Evaluate SH coefficients for RGB color
+-        view_dir = normalize(view_proj_matrix[:3, 3] - g.center)
++
++        # 7. Evaluate SH coefficients for RGB color [G]
++        view_dir = normalize([view_proj_matrix[0][3] - g.center[0], view_proj_matrix[1][3] - g.center[1], view_proj_matrix[2][3] - g.center[2]])
+         rgb = evaluate_sh(g.sh_coeffs, view_dir)
+-        
+-        # 7. Pack major/minor axes into pair of 32-bit uints (16-bit floats per component)
++
++        # 8. Pack major/minor axes into pair of 32-bit uints (16-bit floats per component)
+         packed_axes = pack_16bit_vectors(major_axis, minor_axis)
+-        
+-        # 8. Pack color and opacity into single 32-bit uint (RGBA8)
++
++        # 9. Pack color and opacity into single 32-bit uint (RGBA8)
+         packed_color = pack_rgba8(rgb, g.opacity)
+-        
++
+         alive_primitives.append({
+             'axes': packed_axes,
+@@ -79,35 +91,50 @@
+             'screen_center': screen_c
+         })
+-        
++
+     return alive_primitives, depth_buffer
+ 
+-def compute_projection_jacobian(center, view_proj):
+-    x, y, z = center
+-    w = view_proj[2, 0]*x + view_proj[2, 1]*y + view_proj[2, 2]*z + view_proj[2, 3]
+-    f = 1.0 / w
+-    f2 = f * f
+-    J = np.zeros((2, 3))
+-    J[0, 0] = view_proj[0, 0] * f - view_proj[0, 2] * x * f2
+-    J[0, 1] = view_proj[0, 1] * f - view_proj[0, 2] * y * f2
+-    J[0, 2] = -view_proj[0, 2] * z * f2
+-    J[1, 0] = view_proj[1, 0] * f - view_proj[1, 2] * x * f2
+-    J[1, 1] = view_proj[1, 1] * f - view_proj[1, 2] * y * f2
+-    J[1, 2] = -view_proj[1, 2] * z * f2
+-    return J
+-
++# Standard linear algebra helpers [G]
++def transpose(M): return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
++def mat_mul(A, B):
++    C = [[0.0]*len(B[0]) for _ in range(len(A))]
++    for i in range(len(A)):
++        for j in range(len(B[0])):
++            for k in range(len(B)): C[i][j] += A[i][k]*B[k][j]
++    return C
++def eigh_2x2(M):
++    # Symmetric 2x2 eigen decomposition [G]
++    trace = M[0][0] + M[1][1]
++    det = M[0][0]*M[1][1] - M[0][1]*M[1][0]
++    disc = trace*trace - 4*det
++    if disc < 0: disc = 0
++    sqrt_disc = disc**0.5
++    lam1 = (trace + sqrt_disc) / 2.0
++    lam2 = (trace - sqrt_disc) / 2.0
++    if abs(M[0][1]) > 1e-8:
++        v1 = [M[0][1], lam1 - M[0][0]]
++        v2 = [M[0][1], lam2 - M[0][0]]
++    else:
++        v1 = [1.0, 0.0]
++        v2 = [0.0, 1.0]
++    norm1 = (v1[0]**2 + v1[1]**2)**0.5
++    norm2 = (v2[0]**2 + v2[1]**2)**0.5
++    v1 = [x/norm1 for x in v1]
++    v2 = [x/norm2 for x in v2]
++    return [lam1, lam2], [[v1[0], v2[0]], [v1[1], v2[1]]]
++def normalize(v):
++    n = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++    return [x/n for x in v]
+ def evaluate_sh(coeffs, direction):
+     # Standard SH evaluation [G]
+-    return np.clip(np.dot(coeffs, direction), 0.0, 1.0)
+-
++    return [max(0.0, min(1.0, sum(c*d for c,d in zip(coeffs, direction))))]
+ def pack_16bit_vectors(major, minor):
+     def pack_2d(v):
+-        return (int(v[0] * 65535) & 0xFFFF) | ((int(v[1] * 65535) & 0xFFFF) << 16)
++        return (int(v[0]*65535) & 0xFFFF) | ((int(v[1]*65535) & 0xFFFF) << 16)
+     return (pack_2d(major), pack_2d(minor))
+-
+ def pack_rgba8(rgb, opacity):
+-    r = int(np.clip(rgb[0], 0, 1) * 255)
+-    g = int(np.clip(rgb[1], 0, 1) * 255)
+-    b = int(np.clip(rgb[2], 0, 1) * 255)
+-    a = int(np.clip(opacity, 0, 1) * 255)
++    r = int(max(0.0, min(1.0, rgb[0])) * 255)
++    g = int(max(0.0, min(1.0, rgb[1])) * 255)
++    b = int(max(0.0, min(1.0, rgb[2])) * 255)
++    a = int(max(0.0, min(1.0, opacity)) * 255)
+     return (r << 24) | (g << 16) | (b << 8) | a
+ ```
+@@ -120,8 +147,8 @@
+ ## Operating characteristics
+ -   **Time Complexity:** Linear with respect to the number of Gaussians $O(N)$, as each Gaussian is processed independently [S1, unofficial].
+--   **Memory Complexity:** Requires additional buffers for depth, packed axes, and packed color/opacity, increasing memory bandwidth requirements during the pre-processing stage but reducing it during rasterization [S1, unofficial].
++-   **Memory Complexity:** Requires additional buffers for depth, packed axes, and packed color/opacity, which compresses data to significantly reduce memory bandwidth during the final rendering stage [S1, unofficial].
+ -   **Performance:** Significantly reduces the number of primitives passed to the Sort and Rasterization stages, improving overall rendering efficiency [S1, unofficial].
+ -   **Strengths:** Effective early rejection of off-screen primitives; reduces memory bandwidth for subsequent stages [S1, unofficial].
+--   **Limitations:** Requires projection and ellipse axis calculation for every Gaussian, even those culled [S1, unofficial].
++-   **Limitations:** Requires projection and ellipse axis calculation per primitive during the culling pass [S1, unofficial].
+ 
+ ## Background

@@ -1,0 +1,108 @@
+# RoDynRF
+Also called: Robust Dynamic Radiance Fields
+## Overview
+RoDynRF enables dynamic scene reconstruction from monocular videos without known camera poses by jointly optimizing intrinsics, extrinsics, and both static and dynamic radiance fields [S1]. It distinguishes itself from static pose optimization methods by introducing a two-branch architecture that separates background and moving regions, using motion masks to exclude dynamic pixels during pose estimation to prevent optimization drift [S1].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sequence of monocular video frames (images) with unknown camera poses and intrinsics.
+*   **Output:** Optimized camera poses ($P$), intrinsics ($K$), a static radiance field ($\Theta_{static}$), a dynamic radiance field ($\Theta_{dynamic}$), and a time-conditioned deformation network ($\Theta_{def}$).
+
+**Data Structures:**
+*   **Static Radiance Field:** Standard NeRF representation (MLP or grid) encoding static scene geometry and appearance.
+*   **Dynamic Radiance Field:** Separate representation for moving objects.
+*   **Deformation Network:** A time-conditioned network mapping spatial coordinates and time to deformation vectors.
+*   **Motion Masks:** Binary masks identifying dynamic pixels in each frame.
+
+**Steps:**
+1.  **Initialization:** Initialize static and dynamic radiance fields. Initialize camera poses and intrinsics.
+2.  **Motion Masking:** Generate motion masks for each frame to identify dynamic regions. These masks are used to exclude dynamic pixels from the pose estimation loss [S1].
+3.  **Coarse-to-Fine Optimization:** Employ a coarse-to-fine voxel optimization scheme to stabilize the joint optimization of poses and fields [S1].
+4.  **Joint Optimization Loop:**
+    a.  **Ray Casting:** For each pixel, cast a ray using current camera estimates.
+    b.  **Differentiable Rendering:** Compute rendered color $\hat{C}$ by volume rendering through both static and dynamic fields. The dynamic field is deformed using the time-conditioned deformation network based on the current time step [S1].
+    c.  **Loss Computation:** Compute loss $\mathcal{L}$ using only static pixels (masked out dynamic regions) for pose and static field updates. Include reconstruction loss for dynamic pixels for dynamic field updates.
+    d.  **Gradient Update:** Update camera poses, intrinsics, static fields, dynamic fields, and deformation network parameters using an optimizer (e.g., Adam) [S1].
+5.  **Refinement:** Iterate until convergence.
+
+**Formulas:**
+*   **Deformation:** $\mathbf{x}' = \mathbf{x} + \Delta \mathbf{x}(\mathbf{x}, t; \Theta_{def})$, where $\mathbf{x}$ is the 3D coordinate, $t$ is time, and $\Delta \mathbf{x}$ is the deformation vector [S1].
+*   **Rendering:** $\hat{C}(r) = \sum_{i=1}^N T_i \alpha_i c_i$, where $T_i$ is transmittance, $\alpha_i$ is opacity, and $c_i$ is color, sampled from the deformed dynamic field or static field [S1].
+*   **Pose Loss:** $\mathcal{L}_{pose} = \sum_{p \in \text{static}} || \hat{C}(r_p) - C(r_p) ||^2$, where $p$ are pixels in static regions [S1].
+
+**Parameters:**
+*   Learning rates for poses, intrinsics, static fields, dynamic fields, and deformation network.
+*   Coarse-to-fine voxel grid resolutions.
+*   Time conditioning frequency.
+
+**Edge Cases:**
+*   **Degenerate Motion:** If motion is minimal, motion masks may be unreliable. [G] Use temporal consistency checks or additional constraints.
+*   **Occlusion:** Dynamic objects occluding static background. [G] Ensure motion masks accurately capture occlusion boundaries.
+*   **Precision:** Joint optimization can be unstable. [G] Use different learning rates for poses and fields.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ro_dyn_rf_optimization(frames, initial_poses, initial_intrinsics):
+    # Initialize fields and deformation network
+    static_nerf = initialize_nerf()
+    dynamic_nerf = initialize_nerf()
+    deformation_net = initialize_deformation_network()
+    
+    # Initialize poses and intrinsics
+    poses = copy(initial_poses)
+    intrinsics = copy(initial_intrinsics)
+    
+    # Coarse-to-fine loop
+    for resolution in coarse_to_fine_resolutions:
+        for epoch in range(max_epochs):
+            for frame_idx, frame in enumerate(frames):
+                # Generate motion mask for current frame
+                motion_mask = compute_motion_mask(frame, previous_frame)
+                
+                # Ray casting using current poses and intrinsics
+                rays = cast_rays(frame, poses[frame_idx], intrinsics)
+                
+                # Volume rendering
+                # Deform dynamic points based on time
+                deformed_dynamic_points = deform_points(dynamic_points, frame_idx, deformation_net)
+                
+                # Render static and dynamic components
+                static_color = volume_render(rays, static_nerf)
+                dynamic_color = volume_render(rays, dynamic_nerf, deformed_dynamic_points)
+                rendered_color = static_color + dynamic_color
+                
+                # Compute loss
+                # Exclude dynamic pixels from pose loss
+                static_pixels = mask_static_pixels(motion_mask)
+                pose_loss = compute_reconstruction_loss(rendered_color[static_pixels], 
+                                                        frame[static_pixels])
+                dynamic_loss = compute_reconstruction_loss(rendered_color[~static_pixels], 
+                                                           frame[~static_pixels])
+                total_loss = pose_loss + dynamic_loss
+                
+                # Update parameters
+                update_parameters(poses, intrinsics, static_nerf, dynamic_nerf, 
+                                  deformation_net, total_loss)
+                
+                previous_frame = frame
+    return poses, intrinsics, static_nerf, dynamic_nerf, deformation_net
+```
+## Subtopics
+
+### SceneRF
+SceneRF is a self-supervised monocular 3D scene reconstruction method trained using only image sequences with poses [S2]. It handles large scenes through explicit depth optimization and a novel probabilistic sampling strategy [S2]. It achieves the best performance in all metrics for new depth view synthesis, including absolute relative error, root mean square error, and IoU [S2].
+
+## Operating characteristics
+*   **Time Complexity:** High due to joint optimization of poses, intrinsics, and two radiance fields. Coarse-to-fine scheme helps convergence speed [S1].
+*   **Memory Complexity:** High due to storing static and dynamic fields and deformation network [S1].
+*   **Performance:** Robust to unposed, in-the-wild video data [S1].
+*   **Strengths:** Handles dynamic scenes, no need for known poses, robust to motion [S1].
+*   **Limitations:** Computationally expensive, requires careful tuning of motion masks and learning rates [S1].
+*   **When to use:** Dynamic scene reconstruction from monocular video without known poses [S1].
+*   **When not to use:** Static scenes, or when poses are known [S1].
+## Background
+RoDynRF was introduced in January 2023 [S1]. It builds on the static-to-dynamic learning paradigm, first learning static scene representation from multi-view stills, then learning deformation from a few-view dynamic sequence, allowing much faster convergence than fully implicit networks [S1].
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30

@@ -1,0 +1,130 @@
+--- v006.md
++++ v007.md
+@@ -1,55 +1,97 @@
+ # Animatable Gaussians
+ 
++
+ ## Overview
+-Animatable Gaussians reconstructs animatable 3D human avatars by binding 3D Gaussians to an SMPL-X parametric model [S1, unofficial]. It solves the problem of generating pose-dependent geometry by using explicit pose-conditioned offsets rather than implicit deformation fields [S1, unofficial]. It builds on [SMPL-based rigid/non-rigid deformation](8385-smpl-based-rigid-non-rigid-deformation.md) and differs from [Gaussian Avatar](1479-gaussian-avatar.md) and [3DGS-Avatar](1480-3dgs-avatar.md) by predicting explicit offsets [S1, unofficial].
++Animatable Gaussians is a method for reconstructing animatable 3D human avatars using 3D Gaussian Splatting (3DGS) driven by the SMPL-X parametric model [S1, unofficial]. It solves the problem of generating high-fidelity, real-time renderable human avatars from monocular video by explicitly modeling pose-conditioned deformation offsets [S1, unofficial]. It is distinguished from sibling methods like 3DGS-Avatar, which uses per-Gaussian deformation MLPs, and GaussianAvatars, which focuses on head-driven avatars using the FLAME model [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** SMPL-X template and training images [S1, unofficial].
+-*   **Outputs:** A set of canonical 3D Gaussians and explicit pose-conditioned offset parameters or a deformation network [S1, unofficial].
++*   **Inputs:** Monocular video sequence of a human subject; SMPL-X mesh parameters (pose $\theta$, expression $\beta$) fitted to the video (e.g., via MICA or DECA) [S1, unofficial].
++*   **Outputs:** A set of 3D Gaussians with parameters (position, covariance, opacity, spherical harmonics coefficients) that can be rendered in real-time for any given pose/expression [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Canonical Gaussians:** Stored in a flat array [G]. Each Gaussian $i$ stores position $\mathbf{p}_i \in \mathbb{R}^3$, covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (parameterized as rotation $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$ and scale $\mathbf{s}_i \in \mathbb{R}^3$), opacity $\alpha_i \in [0, 1]$, and spherical harmonics coefficients $\mathbf{c}_i$ [G].
+-*   **Deformation Parameters:** A network or parameter set $f_{def}$ that outputs residual offsets conditioned on pose and canonical position [S1, unofficial].
++Each Gaussian $i$ is initialized on the surface of the canonical SMPL-X mesh.
++*   **Position $\mathbf{p}_i$:** Canonical position on the mesh surface.
++*   **Covariance $\Sigma_i$:** Initial covariance in canonical space.
++*   **Appearance:** Opacity $\alpha_i$ and spherical harmonics coefficients $\mathbf{c}_i$.
++*   **Deformation Parameters:** Explicit pose-conditioned offset parameters $\Delta \mathbf{p}$ associated with each Gaussian or its local tangent space [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Gaussians are initialized on the surface of the SMPL-X mesh in the canonical rest pose [S1, unofficial].
+-2.  **Rigid Deformation:** Canonical positions $\mathbf{p}_i$ are transformed using Linear Blend Skinning (LBS) [S1, unofficial]:
+-    $$ \mathbf{p}_{rigid} = \sum_{j=1}^{N_{bones}} w_{i,j} \mathbf{T}_j(\theta) \mathbf{p}_i $$
+-    where $w_{i,j}$ are skinning weights and $\mathbf{T}_j(\theta)$ are bone transformation matrices [S1, unofficial].
+-3.  **Non-Rigid Deformation:** Explicit pose-conditioned offsets $\Delta \mathbf{p}$ are predicted conditioned on the target pose $\theta$ and canonical position [S1, unofficial]. The final position is computed as $\mathbf{p}'_i = \mathbf{p}_{rigid} + \Delta \mathbf{p}$ [S1, unofficial].
+-4.  **Covariance Update:** The covariance matrix is transformed using the Jacobian $J$ of the deformation map with respect to the canonical position [G]:
+-    $$ \Sigma'_i = J \Sigma_i J^T + \sigma^2 I $$
+-    where $\sigma^2 I$ is a small regularization term to ensure positive definiteness [G].
+-5.  **Rendering:** The deformed Gaussians are rasterized and composited using differentiable 3D Gaussian Splatting [S1, unofficial].
+-6.  **Training:** Gaussian parameters and deformation offsets are optimized by minimizing $\mathcal{L} = \mathcal{L}_{L1} + \lambda \mathcal{L}_{MS-SSIM}$ between rendered and ground truth images [S1, unofficial], where $\mathcal{L}_{L1}$ is the L1 loss and $\mathcal{L}_{MS-SSIM}$ is the multi-scale structural similarity loss [S1, unofficial].
++1.  **Initialization:** Fit SMPL-X to the input video to obtain canonical mesh and initial parameters. Initialize one Gaussian per mesh triangle or vertex in the canonical tangent space [S1, unofficial].
++2.  **Deformation:** For a target pose $\theta$ and expression $\beta$:
++    *   Compute rigid deformation $\mathbf{p}_{rigid}$ using Linear Blend Skinning (LBS) on the canonical position $\mathbf{p}_i$ [S1, unofficial].
++    *   Compute explicit pose-conditioned offset $\Delta \mathbf{p}(\theta, \beta)$ [S1, unofficial].
++    *   Final position: $\mathbf{p}'_i = \mathbf{p}_{rigid} + \Delta \mathbf{p}$ [S1, unofficial].
++    *   Update covariance $\Sigma'_i$ using the Jacobian $J$ of the deformation map: $\Sigma'_i = J \Sigma_i J^T + \sigma^2 I$ [G].
++3.  **Rendering:** Render the deformed Gaussians using differentiable 3D Gaussian Splatting [S1, unofficial].
++4.  **Training:** Minimize photometric loss between rendered image and ground truth video frame.
++
++**Pseudocode:**
++```python
++def render_animatable_gaussians(gaussians, pose, expression):
++    """
++    Render a frame for a given pose and expression.
++    gaussians: List of Gaussian objects with canonical pos, cov, appearance, offset_params
++    pose: SMPL-X pose parameters theta
++    expression: SMPL-X expression parameters beta
++    """
++    deformed_gaussians = []
++    for g in gaussians:
++        # 1. Rigid Deformation (LBS)
++        p_rigid = apply_lbs(g.canonical_pos, pose, g.bone_weights)
++        
++        # 2. Non-Rigid Offset (Explicit Pose-Conditioned)
++        delta_p = compute_offset(g.offset_params, pose, expression)
++        
++        # 3. Final Position
++        p_final = p_rigid + delta_p
++        
++        # 4. Covariance Update
++        J = compute_jacobian(pose, expression, g.canonical_pos)
++        cov_final = J @ g.canonical_cov @ J.T + 0.0001 * np.eye(3)
++        
++        deformed_gaussians.append(Gaussian(p_final, cov_final, g.opacity, g.sh_coeffs))
++        
++    # 5. Differentiable Rasterization
++    image = rasterize_3dgs(deformed_gaussians)
++    return image
++
++def compute_offset(offset_params, pose, expression):
++    """
++    Computes explicit pose-conditioned offset.
++    Note: Specific network architecture not detailed in source [S1, unofficial].
++    Typically a small MLP or lookup table conditioned on pose/expression.
++    """
++    # Placeholder for the specific offset prediction mechanism
++    # The source specifies "explicit pose-conditioned offsets" [S1, unofficial]
++    return offset_params # Simplified representation
++```
+ 
+ **Parameters:**
+-*   Learning rate: Not given in the sources [G].
+-*   Number of Gaussians: Not given in the sources [G].
+-*   Deformation network depth/width: Not given in the sources [G].
++*   **Offset Network/Parameters:** Not given in the sources. [S1, unofficial]
++*   **Regularization $\sigma^2$:** Small value (e.g., $10^{-4}$) to ensure positive definiteness of covariance [G].
+ 
+ **Edge Cases:**
+-*   **Degenerate Poses:** Extreme poses may cause skinning weights to become unstable or the Jacobian to become singular [G].
+-*   **Precision:** Floating-point precision in Jacobian computation may affect gradient stability [G].
++*   **Degenerate Poses:** Extreme poses may cause LBS artifacts; the explicit offset helps mitigate this but may require careful training data coverage [S1, unofficial].
++*   **Precision:** Jacobian computation must be numerically stable [G].
+ 
+ ## Subtopics
+ 
+-### GSMs
+-GSMs generates animatable 3D humans using a model prior (SMPL) and generative adversarial networks [S2]. It builds multi-layer shells from the SMPL template and binds 3D Gaussians on these shells [S2]. Animatable 3D humans are efficiently generated by utilizing the differentiable rendering of 3DGS and the generative adversarial network of StyleGAN2 [S2].
++### [GSMs](7832-gsms.md)
++Gaussian Shell Maps (GSMs) is a method for generating animatable 3D humans by combining CNN-based generators with 3D Gaussian Splatting (3DGS) to recreate virtual humans with sophisticated details such as clothing and accessories. It builds multi-layer shells from the SMPL template and binds 3D Gaussians to these shells. By utilizing the differentiable rendering of 3DGS and the generative adversarial network of StyleGAN2, animatable 3D humans are efficiently generated. It is distinguished from sibling methods like GAvatar, which attaches Gaussians to SMPL-X primitives, and HumanGaussian, which initializes Gaussians via random sampling.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time scales with the number of Gaussians and the complexity of the deformation network [G].
+-*   **Memory Complexity:** Memory usage scales with the number of Gaussians and the size of the deformation parameters [G].
+-*   **Performance:** Not given in the sources [G].
+-*   **Strengths:** Explicit pose-conditioned offsets enable efficient deformation [S1, unofficial].
+-*   **Limitations:** Requires an SMPL-X rig and training data [S1, unofficial].
+-*   **When to use:** Not given in the sources [G].
+-*   **When not to use:** Not given in the sources [G].
++*   **Time Complexity:** Rendering is $O(N)$ where $N$ is the number of Gaussians, typical for 3DGS [S1, unofficial]. Deformation computation is $O(N)$ per frame [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for storing Gaussian parameters and deformation offsets [S1, unofficial].
++*   **Performance:** Real-time rendering is achievable on modern GPUs [S1, unofficial].
++*   **Strengths:** High fidelity, real-time performance, explicit control via SMPL-X [S1, unofficial].
++*   **Limitations:** Requires fitted SMPL-X parameters; quality depends on deformation offset modeling [S1, unofficial].
++*   **When to Use:** When real-time, high-fidelity human avatars are needed from monocular video [S1, unofficial].
++*   **When Not to Use:** When multi-view data is available and higher geometric accuracy is prioritized over speed, or when no SMPL-X fit is available [S1, unofficial].
+ 
+ ## Background
+-Animatable Gaussians is introduced as an avatar method using an SMPL-X rig with explicit pose-conditioned offsets [S1, unofficial]. It builds on the principles of SMPL-based rigid/non-rigid deformation and differentiable rendering [S1, unofficial]. The method is documented in surveys of 3D Gaussian Splatting variants [S1, unofficial].
++Animatable Gaussians is part of the evolution of Gaussian Avatar Reconstruction methods. It builds on the SMPL-based rigid/non-rigid deformation principles [8385-smpl-based-rigid-non-rigid-deformation.md]. It is distinguished by its use of explicit pose-conditioned offsets within the SMPL-X rig [S1, unofficial].
+ 
+ ## Sources
+ [S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+-[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26+[S2] Unofficial notes on GSMs, fetched 2026-10-27 (unofficial)

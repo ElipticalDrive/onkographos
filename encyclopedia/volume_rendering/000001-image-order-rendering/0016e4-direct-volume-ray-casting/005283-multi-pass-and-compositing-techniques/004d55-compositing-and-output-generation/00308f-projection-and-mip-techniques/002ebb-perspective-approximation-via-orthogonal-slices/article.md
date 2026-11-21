@@ -1,0 +1,113 @@
+# Perspective Approximation via Orthogonal Slices
+Also called: Perspective Volume Rendering Approximation
+## Overview
+This method approximates perspective volume rendering by using view-orthogonal slices instead of the concentric spherical shells required for exact ray casting [S1]. It enables interactive frame rates on standard graphics hardware by leveraging optimized texture mapping, trading the geometric precision of spherical sampling for significant performance gains [S1].
+## How it works
+**Inputs and Outputs:**
+- Input: Volumetric data set, perspective camera parameters (eye position, view direction, field of view), and a slice thickness parameter.
+- Output: A 2D image where each pixel color is composited from the volume samples along the corresponding perspective ray.
+
+**Data Structures:**
+- The volume is accessed via 3D texture mapping.
+- Slices are generated as 2D textures (or rendered as quads) orthogonal to the view direction.
+- Unlike exact perspective ray casting, where sample positions form concentric spherical shells, this method assumes sample positions lie on planes orthogonal to the view [S1].
+
+**Steps:**
+1. **Camera Setup:** Define the perspective projection matrix based on the eye position and view parameters.
+2. **Slice Generation:** Generate a sequence of 2D slices orthogonal to the view direction. The spacing between slices is determined by the desired sampling density.
+3. **Ray Sampling Approximation:** For each pixel, cast a ray through the volume. Instead of calculating the exact intersection with spherical shells, sample the volume at regular intervals along the view-orthogonal slices.
+4. **Compositing:** Perform front-to-back compositing using the standard optical model. The transmittance $T$ and accumulated color $C_{acc}$ are updated for each sample $i$:
+   $$
+   C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i C_i
+   $$
+   $$
+   \alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i
+   $$
+   where $C_i$ and $\alpha_i$ are the color and opacity of the sample at the $i$-th slice intersection [G].
+5. **Rendering:** Render the composited result to the screen.
+
+**Pitfalls:**
+- The approximation introduces error because the distances of sample positions along a ray depend on the ray's orientation relative to the view direction [S1].
+- Generating exact concentric spherical shells is expensive; this method avoids that cost but sacrifices geometric accuracy [S1].
+- Precision issues may arise if the slice spacing is too coarse relative to the volume features, leading to aliasing or missing details.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def perspective_approximation_slice_rendering(volume, camera, slice_spacing):
+    """
+    Approximates perspective volume rendering using view-orthogonal slices.
+    volume: 3D texture or array representing the volumetric data.
+    camera: Object containing eye position, view direction, and projection matrix.
+    slice_spacing: Distance between consecutive view-orthogonal slices.
+    """
+    # Initialize output image
+    image = create_empty_image(camera.resolution)
+    
+    # Get view direction and up vector for slice orientation
+    view_dir = camera.get_view_direction()
+    up_vec = camera.get_up_vector()
+    
+    # Determine the range of slices to render based on camera near/far planes
+    # and volume bounds. Not given in sources, assumed to be calculated.
+    slice_positions = calculate_slice_positions(camera, volume.bounds, slice_spacing)
+    
+    for y in range(image.height):
+        for x in range(image.width):
+            # Cast ray through pixel (x, y)
+            ray = camera.cast_ray(x, y)
+            
+            # Initialize compositing state
+            C_acc = vec3(0.0)
+            alpha_acc = 0.0
+            T = 1.0  # Transmittance
+            
+            # Iterate through slices along the ray
+            for slice_pos in slice_positions:
+                # Calculate intersection of ray with the current slice plane
+                # This is the key approximation: assuming planar slices instead of spherical shells
+                intersection = ray.intersect_plane(slice_pos.normal, slice_pos.position)
+                
+                if intersection is None or intersection.distance < 0:
+                    continue
+                
+                # Sample the volume at the intersection point
+                # The sample position is on the view-orthogonal slice
+                sample_pos = intersection.point
+                color, opacity = volume.sample(sample_pos)
+                
+                # Update compositing state
+                transmittance = T
+                C_acc = C_acc + transmittance * opacity * color
+                T = T * (1.0 - opacity)
+                alpha_acc = 1.0 - T
+                
+                # Early ray termination
+                if alpha_acc >= 1.0:
+                    break
+            
+            # Composite over background
+            background_color = vec3(0.0) # Or camera background
+            final_color = C_acc + T * background_color
+            image.set_pixel(x, y, final_color)
+            
+    return image
+```
+## Subtopics
+
+### [Multi-view Depth Perception via Slice Multiplexing](19364-multi-view-depth-perception-via-slice-multiplexing.md)
+Multi-view Depth Perception via Slice Multiplexing is a technique for recovering depth perception in virtual microscopy by projecting different slices of a volume onto multiple views, effectively simulating off-centered parallel cameras. Unlike orbital camera approaches that allow different view angles, this method positions views on the same plane as the slices, using a depth step parameter to determine slice selection for each view.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of pixels and the number of slices intersected by the rays. Significantly faster than exact perspective ray casting due to the avoidance of spherical shell generation and intersection calculations [S1].
+- **Memory Complexity:** Depends on the volume data size and the number of slices stored in texture memory.
+- **Performance:** Allows interactive frame rates even on "cheap" graphics boards due to hardware optimization for texture mapping [S1].
+- **Strengths:** High speed, suitability for real-time applications like Virtual Reality [S1].
+- **Limitations:** Approximation error due to the assumption of planar slices instead of spherical shells; quality may degrade for large field-of-view perspectives or when high geometric accuracy is required [S1].
+- **When to use:** When interactive performance is critical and the volume is viewed with a perspective camera, especially in Virtual Reality applications [S1].
+- **When not to use:** When exact geometric accuracy of the ray casting is required, or when the volume features are very small relative to the slice spacing.
+## Background
+This technique was discussed in the context of texture-based volume rendering for parallel projections and extended to perspective projections [S1]. It addresses the computational expense of generating concentric spherical shells for exact perspective ray casting [S1]. The method leverages the fact that using view-orthogonal slices is a "good-enough" approximation for many applications, particularly in Virtual Reality [S1].
+## Sources
+[S1] Interactive Volume Rendering Using 3D Texture-Mapping ..., https://web.cs.ucdavis.edu/~okreylos/PhDStudies/Winter2000/TextureMapping.html, fetched 2026-10-27

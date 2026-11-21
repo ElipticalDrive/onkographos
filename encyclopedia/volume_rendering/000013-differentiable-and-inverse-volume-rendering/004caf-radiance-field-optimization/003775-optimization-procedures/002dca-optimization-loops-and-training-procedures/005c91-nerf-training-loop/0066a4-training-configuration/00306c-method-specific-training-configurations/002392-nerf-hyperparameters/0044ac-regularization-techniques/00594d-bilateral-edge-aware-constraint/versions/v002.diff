@@ -1,0 +1,213 @@
+--- v001.md
++++ v002.md
+@@ -4,114 +4,136 @@
+ 
+ ## Overview
+-The Bilateral Edge-Aware Constraint is a geometric regularization technique for NeRF that uses photometric differences between neighboring rays to dynamically weight geometric smoothness, preserving discontinuities at roofs, walls, and shadow transitions while suppressing local noise [S1]. It differs from standard smoothness constraints by employing adaptive bilateral weights based on both spatial proximity and albedo similarity, which is critical for implicit NeRF representations that lack fixed surface connectivity [S1].
++The Bilateral Edge-Aware Constraint is a geometric regularization technique for NeRF-based volume rendering that suppresses high-frequency noise while preserving sharp geometric discontinuities such as building roofs and shadow boundaries [S1]. Unlike standard smoothness constraints that blur distinct edges, this method dynamically weights geometric penalties using photometric differences between neighboring rays, ensuring that significant color changes are not penalized as geometric errors [S1].
+ 
+ ## How it works
++The method enforces local coplanarity of sampled 3D points by minimizing their projected distance onto the tangent plane of a central point, weighted by bilateral coefficients derived from spatial proximity and photometric similarity [S1].
++
+ **Inputs and Outputs**
+-*   **Inputs:** For each primary ray $i$, the method requires the rendered 3D position $P_i$, the predicted surface normal $n_i$, and the albedo feature $c_i$. It also samples $K$ neighboring rays.
+-*   **Outputs:** A scalar loss value $L_{bilateral}$ that penalizes deviations from local planarity, weighted by bilateral consistency.
++*   **Inputs:** A set of training rays. For each ray $i$, the method requires the rendered 3D position $P_i$, the albedo feature $c_i$, and the surface normal $n_i$ at the sampled point.
++*   **Outputs:** A scalar loss value $\mathcal{L}_{bilateral}$ added to the total optimization objective.
+ 
+ **Data Structures**
+-*   **Neighbor Set $N_i$:** A set of $K$ indices corresponding to neighboring rays.
+-*   **Geometric Data:** For each ray $k \in N_i \cup \{i\}$, the 3D position $P_k \in \mathbb{R}^3$, normal $n_k \in \mathbb{R}^3$, and albedo $c_k \in \mathbb{R}^d$ (where $d$ is the feature dimension).
++*   **Ray Sample:** Contains 3D coordinates $P \in \mathbb{R}^3$, albedo feature $c \in \mathbb{R}^C$ (where $C$ is the feature dimension), and normal vector $n \in \mathbb{R}^3$.
++*   **Neighbor Set:** For each ray $i$, a set $N_i$ of $K$ neighbor rays.
+ 
+ **Parameters**
+ *   $K$: Number of neighbors sampled per ray. Value: 4 [S1].
+-*   $\sigma_d$: Adaptive spatial scale. Computed dynamically per ray [S1].
+-*   $\sigma_w$: Adaptive photometric scale. Computed dynamically per ray [S1].
+-*   $\gamma_{bi}$: Weight for the bilateral edge-aware term. Selected from $\{0.1, 0.01, 0.001\}$ [S1].
++*   $\gamma_{bi}$: Weight for the bilateral edge-aware term. Selected from $\{0.1, 0.01, 0.001\}$ based on validation performance [S1].
++*   $\sigma_d$: Adaptive spatial scale.
++*   $\sigma_w$: Adaptive photometric scale.
+ 
+-**Steps**
+-1.  **Neighbor Sampling:** For each ray $i$, sample $K=4$ neighbors by drawing integer image-plane offsets uniformly from $[-2, 2] \times [-2, 2]$, excluding the zero offset $(0,0)$ [S1].
+-2.  **Neighbor Rendering:** Render the corresponding neighbor rays to recover their 3D positions $P_j$, normals $n_j$, and albedo features $c_j$ for all $j \in N_i$ [S1].
++**Algorithm Steps**
++1.  **Neighbor Sampling:** For each training ray $i$, draw $K=4$ integer image-plane offsets uniformly from the range $[-2, 2] \times [-2, 2]$, excluding the zero offset $(0,0)$ [S1].
++2.  **Neighbor Rendering:** Render the corresponding neighbor rays to recover their 3D positions $P_j$, albedo features $c_j$, and normals $n_j$ for all $j \in N_i$ [S1].
+ 3.  **Compute Adaptive Scales:**
+-    *   Compute the spatial scale $\sigma_d$ as the root-mean-square of the Euclidean distances between the central point $P_i$ and its neighbors $P_j$:
++    *   Calculate the adaptive spatial scale $\sigma_d$ as the root mean square of the Euclidean distances between the central point $P_i$ and its neighbors $P_j$:
+         $$ \sigma_d = \sqrt{\frac{1}{K} \sum_{j \in N_i} \| P_i - P_j \|^2} $$
+-    *   Compute the photometric scale $\sigma_w$ as the root-mean-square of the Euclidean distances between the central albedo $c_i$ and its neighbors $c_j$:
++    *   Calculate the adaptive photometric scale $\sigma_w$ as the root mean square of the Euclidean distances between the central albedo $c_i$ and its neighbors $c_j$:
+         $$ \sigma_w = \sqrt{\frac{1}{K} \sum_{j \in N_i} \| c_i - c_j \|^2} $$
+-    [S1]
++    *   *Note:* If $K=0$ or distances are zero, $\sigma$ values may require a small epsilon guard to avoid division by zero or undefined weights [G].
+ 4.  **Calculate Bilateral Weights:** For each neighbor $j \in N_i$, compute the weight $w_{i,j}$ using the exponential terms for spatial and photometric distances:
+     $$ w_{i,j} = \exp\left(-\frac{\| P_i - P_j \|^2}{2\sigma_d^2}\right) \cdot \exp\left(-\frac{\| c_i - c_j \|^2}{2\sigma_w^2}\right) $$
+-    [S1]
+-5.  **Compute Normalization Factor:** Calculate $l_i$, the average edge length for normalization, defined as the mean distance to neighbors:
++    Points close in both geometry and albedo receive strong weights; points with inconsistent photometric cues receive weak weights, preserving potential discontinuities [S1].
++5.  **Compute Normalization Factor:** Calculate $l_i$, the average edge length for the central point, defined as the mean distance to its neighbors:
+     $$ l_i = \frac{1}{K} \sum_{j \in N_i} \| P_i - P_j \| $$
+-    [S1]
+-6.  **Compute Local Loss:** Minimize the projected distance of neighboring points onto the tangent plane of the central point. The loss for ray $i$ is the sum of squared distances of neighbors projected onto the normal $n_i$, weighted by $w_{i,j}$ and normalized by $l_i$:
+-    $$ L_{bilateral}^{(i)} = \frac{1}{l_i} \sum_{j \in N_i, j \neq i} w_{i,j} \left( (P_i - P_j) \cdot n_i \right)^2 $$
+-    [S1]
+-7.  **Aggregate Loss:** Average the loss over all $N$ rays:
+-    $$ L_{bilateral} = \frac{1}{N} \sum_{i=1}^{N} L_{bilateral}^{(i)} $$
+-    [S1]
++    This ensures the loss is scale-invariant [S1].
++6.  **Calculate Loss:** Minimize the projected distance of neighboring points onto the tangent plane of the central point. The bilateral geometric loss is:
++    $$ \mathcal{L}_{bilateral} = \frac{1}{N} \sum_{i=1}^{N} \frac{1}{l_i} \sum_{j \in N_i, j \neq i} w_{i,j} \left( (P_i - P_j) \cdot n_i \right)^2 $$
++    where $n_i$ is the unit normal vector at point $i$, and $N$ is the total number of rays [S1].
+ 
+ **Pseudocode**
+ ```python
+-def bilateral_edge_aware_loss(central_ray, neighbor_rays, K=4):
++def bilateral_edge_aware_constraint(rays, neighbors, normals, albedos, gamma_bi):
+     """
+-    Computes the Bilateral Edge-Aware Constraint loss for a single central ray.
++    Computes the Bilateral Edge-Aware Constraint loss.
+     
+     Args:
+-        central_ray: Object containing P (3D pos), n (normal), c (albedo feature).
+-        neighbor_rays: List of K ray objects, each containing P, n, c.
++        rays: List of ray objects, each containing:
++            - P: 3D position (tensor, shape [3])
++            - c: Albedo feature (tensor, shape [C])
++            - n: Surface normal (tensor, shape [3])
++        neighbors: List of lists. neighbors[i] contains indices of K neighbor rays for ray i.
++        normals: List of normal tensors for all rays.
++        albedos: List of albedo feature tensors for all rays.
++        gamma_bi: Weight for the bilateral term.
+         
+     Returns:
+-        Scalar loss value.
++        loss: Scalar tensor representing the bilateral loss.
+     """
+-    P_i = central_ray.P
+-    n_i = central_ray.n
+-    c_i = central_ray.c
++    K = 4
++    total_loss = 0.0
++    N = len(rays)
+     
+-    # Step 3: Compute adaptive scales
+-    # Spatial scale sigma_d
+-    spatial_diffs_sq = [np.sum((P_i - ray.P)**2) for ray in neighbor_rays]
+-    sigma_d = np.sqrt(np.mean(spatial_diffs_sq))
+-    
+-    # Photometric scale sigma_w
+-    photometric_diffs_sq = [np.sum((c_i - ray.c)**2) for ray in neighbor_rays]
+-    sigma_w = np.sqrt(np.mean(photometric_diffs_sq))
+-    
+-    # Step 5: Compute normalization factor l_i
+-    l_i = np.mean([np.sqrt(diff) for diff in spatial_diffs_sq])
+-    
+-    # Avoid division by zero if all neighbors are identical
+-    if l_i == 0:
+-        return 0.0
++    for i in range(N):
++        P_i = rays[i].P
++        c_i = rays[i].c
++        n_i = normals[i]
+         
+-    # Step 4 & 6: Compute weights and local loss
+-    local_loss = 0.0
+-    for ray in neighbor_rays:
+-        P_j = ray.P
+-        c_j = ray.c
++        neighbor_indices = neighbors[i]
++        if len(neighbor_indices) != K:
++            # Fallback or error handling if sampling fails
++            continue
++            
++        # Step 3: Compute Adaptive Scales
++        spatial_diffs_sq = []
++        photometric_diffs_sq = []
+         
+-        # Spatial distance squared
+-        dist_sq_spatial = np.sum((P_i - P_j)**2)
++        for j_idx in neighbor_indices:
++            P_j = rays[j_idx].P
++            c_j = rays[j_idx].c
++            
++            dist_sq = torch.sum((P_i - P_j) ** 2)
++            spatial_diffs_sq.append(dist_sq)
++            
++            photometric_dist_sq = torch.sum((c_i - c_j) ** 2)
++            photometric_diffs_sq.append(photometric_dist_sq)
++            
++        # Calculate sigma_d and sigma_w
++        # Using mean of squared distances inside sqrt
++        sigma_d_sq = sum(spatial_diffs_sq) / K
++        sigma_w_sq = sum(photometric_diffs_sq) / K
+         
+-        # Photometric distance squared
+-        dist_sq_photometric = np.sum((c_i - c_j)**2)
++        # Guard against zero variance
++        sigma_d_sq = max(sigma_d_sq, 1e-8)
++        sigma_w_sq = max(sigma_w_sq, 1e-8)
+         
+-        # Step 4: Bilateral weight
+-        # Handle potential division by zero in sigma if all neighbors are identical
+-        w_spatial = np.exp(-dist_sq_spatial / (2 * sigma_d**2 + 1e-8))
+-        w_photometric = np.exp(-dist_sq_photometric / (2 * sigma_w**2 + 1e-8))
+-        w_ij = w_spatial * w_photometric
++        # Step 5: Compute Normalization Factor l_i
++        l_i = sum(torch.sqrt(torch.tensor(d)) for d in spatial_diffs_sq) / K
++        l_i = max(l_i, 1e-8) # Guard against zero length
+         
+-        # Projected distance onto tangent plane (normal)
+-        # (P_i - P_j) dot n_i
+-        projected_dist = np.dot(P_i - P_j, n_i)
++        # Step 4 & 6: Calculate Weights and Accumulate Loss
++        ray_loss = 0.0
++        for idx, j_idx in enumerate(neighbor_indices):
++            P_j = rays[j_idx].P
++            c_j = rays[j_idx].c
++            
++            # Spatial weight
++            w_spatial = torch.exp(-spatial_diffs_sq[idx] / (2 * sigma_d_sq))
++            # Photometric weight
++            w_photometric = torch.exp(-photometric_diffs_sq[idx] / (2 * sigma_w_sq))
++            
++            w_ij = w_spatial * w_photometric
++            
++            # Projected distance onto tangent plane
++            diff_vec = P_i - P_j
++            projected_dist = torch.dot(diff_vec, n_i)
++            
++            ray_loss += w_ij * (projected_dist ** 2)
++            
++        total_loss += ray_loss / l_i
+         
+-        local_loss += w_ij * (projected_dist**2)
+-        
+-    # Normalize by l_i
+-    loss_i = local_loss / l_i
+-    
+-    return loss_i
++    return (gamma_bi * total_loss) / N
+ ```
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method adds $O(K)$ rendering calls and geometric computations per ray, where $K=4$. This increases the per-step computational cost compared to unregularized training but remains constant relative to scene size.
+-*   **Strengths:** It effectively preserves sharp geometric boundaries (roofs, walls) that are often blurred by standard L2 smoothness constraints [S1]. It is specifically designed to handle the lack of fixed connectivity in implicit NeRF representations [S1].
+-*   **Limitations:** Performance depends on the selection of $\gamma_{bi}$, which must be tuned per scene from $\{0.1, 0.01, 0.001\}$ [S1]. If $\sigma_d$ or $\sigma_w$ become very small (e.g., in flat regions with identical neighbors), numerical stability requires care (handled in pseudocode via epsilon) [S1].
+-*   **When to use:** Use when reconstructing scenes with distinct geometric discontinuities (urban environments, terrain with buildings) from sparse multi-view inputs [S1].
++*   **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of rays and $K$ is the number of neighbors (typically 4). Each neighbor requires a forward pass to render $P_j$ and $c_j$, making it computationally more expensive than simple smoothness terms that rely on pre-computed or cached data [S1].
++*   **Memory Complexity:** Requires storing neighbor indices and temporary tensors for distances and weights. No significant additional persistent memory compared to standard NeRF training [S1].
++*   **Strengths:** Effectively preserves sharp geometric features (roofs, walls, shadow transitions) that are often blurred by standard L2 smoothness constraints [S1]. It is adaptive to local scene complexity via $\sigma_d$ and $\sigma_w$ [S1].
++*   **Limitations:** Relies on accurate normal estimation and albedo features; errors in these inputs propagate to the weights. The requirement to render neighbor rays adds overhead to each training step [S1].
++*   **When to use:** Recommended for 3D reconstruction tasks requiring high geometric fidelity, such as Digital Surface Model (DSM) generation from satellite imagery, where building boundaries are critical [S1].
++*   **When not to use:** Not suitable for scenes with uniform albedo and no sharp edges, where simpler smoothness constraints suffice, or in resource-constrained environments where the extra rendering cost is prohibitive [S1].
+ 
+ ## Background
+-The Bilateral Edge-Aware Constraint was proposed in the context of DSM (Digital Surface Model) reconstruction from multi-view satellite images using NeRF [S1]. It was introduced to address the limitation of standard smoothness constraints that over-smooth distinct boundaries [S1]. The method is part of a broader geometric structure constraint framework that also includes a Normal Smoothness Constraint [S1].
++The Bilateral Edge-Aware Constraint was introduced in the context of Neural Radiance Fields (NeRF) for Digital Surface Model (DSM) reconstruction from multi-view satellite images [S1]. It addresses the limitation of implicit NeRF geometry, which lacks fixed surface connectivity, by using image-plane offsets to define neighborhoods [S1]. The method was proposed alongside a Normal Smoothness Constraint and a Physical Shading Loss to enhance geometric accuracy and suppress noise while maintaining structural integrity [S1].
+ 
+ ## Sources

@@ -1,0 +1,159 @@
+I open this issue as a place to discuss about using or not geometries as light, like currently (0.1.1) done in the project. @shadowislord and @Nehon (from jmonkeyengine core team) though it's a bad idea. As a user, I like the idea to be ...
+
+Using geometrie for light ?? · Issue #1 · davidB/jme3_ext_deferred · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Using geometrie for light ?? #1
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Using geometrie for light ??#1
+Copy link
+Description
+davidB
+opened on Dec 9, 2014
+Issue body actions
+I open this issue as a place to discuss about using or not geometries as light, like currently (0.1.1) done in the project.
+@shadowislord and @Nehon (from jmonkeyengine core team) though it's a bad idea.
+As a user, I like the idea to be able to use any geometrie to define the volume where light has effect (eg allow to have ambient light region, "to mask / shadow" area, to envelop an object with bouding light od any shape)
+I agree about adding support of regular jme Light (convertion hidden in scene processor), but I would like to keep the ability to use custom geometrie.
+So @shadowislord, @Nehon, and any body what is your opinion ? ( we can move the discussion on the jme forum if you thought it's a better place).
+some links :
+Tutorial 36 - Deferred Shading - Part 2
+how-are-lights-rendered-as-geometry-in-deferred-shading
+Activity
+Nehon commented on Dec 9, 2014
+Nehon
+on Dec 9, 2014
+More actions
+The thing is, you're basing the entire design on this particular use case.
+Also you're answering this particular need by a way that has huge side effects.
+The basic use case for deferred is to render Point, Spot and Directional lights. The area of influence of those lights should be rendered as Geometries, yes. But they should not be part of the scene graph for the following reasons :
+1- Those geometries are not managed by the user and may interfere with his scene management (for picking for example). That would be source of many confusions. We already have some cases like this in the engine, for example the skybox, or the BatchNode, that are adding "non-user" geoms in the scene graph and it has always been a source of confusion. Since we're at the design time, I'd rather not do the same mistake as in the past.
+2- You already have a LightNode class that allows you to manipulate light as a node in the scene graph. The user decides if he needs it or not. You say that it adds an indirection, I'm not really sure why you think so. That's a Node, you manage it as a Node.
+3- You don't need to. In 3.0, you already have an exhaustive list of lights by doing rootNode.getWorldLightList(). in 3.1 master if you do the light pass just right after the geometry pass you'll even have a intersectsFrustum flag set on each light. We could even come up with something that only gives you the lights in the frustum.
+the deferred processor can easily iterate over them and render a geometry for each one in a framebuffer. You'd have 3 geometries (for all the lights).
+A full screen quad for directional light, no updates needed.
+A Sphere for point light. Just have to set the scale depending on the light radius, and update its position
+A Cone for spot lights. you have to update the position, the direction, the range and the outer angle. That's actually the most expensive, because range and outer angle would need to update the underlying mesh (you might get away with non uniform scaling for range even). But those operations can easily be done only if needed.
+So the pseudo code would be
+```
+viewport.setOutputFrameBuffer(ligthFB)
+for each light in rootNodesLightList {
+     if light.intersectFrustum{
+           updateLightTransformsIfNeeded(light, appropriateLightGeom)
+           renderManager.renderGeometry(appropriateLightGeom)
+     }
+}
+viewport.setOutputFrameBuffer(whateverFrameBufferThereWasBefore)
+```
+This way would entirely separate the light management from the scene graph making it very unintrusive to user code and scene management. It would also allow to switch back and forth from forward to deferred just by adding or removing a SceneProcessor.
+Now for your particular use case, if I understand it correctly, you need an API so that the "appropriateLightGeom" is the one you want. For example you could have a map in the processor that matches a light and a geom. Something like defferedProc.setLightVolume(light, geometry) or even defferedProc.setLightVolume(lightType, geometry) could be enough.
+Rémy
+davidB commented on Dec 10, 2014
+davidB
+on Dec 10, 2014
+OwnerAuthor
+More actions
+Thanks for this detailled response.
+I agree about using jme's Light on public side (and geometry under the hood), and I'll change the code (before 2015):
+for current jme's users, it's more coherent.
+frustrum culling is probably more performante with Light than with Geometry (defined by mesh) I currently use. But until 3.1 is out I'll stay with 3.0 and geometry based culling (I would like regular user to be able to use it without having to clone, build the same version of 3.1 than me).
+same Light can be used by deferred and forward renderer
+I disagree about ( lot of points, but I'll limit them :-P ):
+ideally switching from forward to deferred with a simple flag is too many work and I didn't find use-case (execpt for demo and saying "I can"). IMO it's a waste of time.
+Because the materials are build differently, in deferred : Geometry's material (shader) is used only to fill the g-buffer,the Lighting is define by the Light's material, the final shading is by final "compose" material (ignoring some intermadiary optionnal step AO, translucent).
+I like this separation of concerns (vs forward where geometry or lighting or shading should be duplicate if you want to customize one of them).
+Adding or removing the sceneprocessor is not enough. Because object rendered by the deferred should not be renderred by forward. Today, the trick is to use material with empty default technique (no shader), and a "GBuf" technique. (I use the same trick for light : empty default + "LBuf" technique) + a MaterialCustom that don't throw shader exception when there are no shader.
+Why I dislike LightNode, LightControl, CameraControl ...
+It's uncommon : do you use artifice like LightNode in 3D editor (blender), level editor ?
+not available in SDK's scene editor (explorer + viewer). I no longer use it, too many issue and I spend too many time trying to fix, but newcomer begin with it.
+it's not coherent (and smell like a workaround about the fact that Light has effect only on child of it's owned spatial, rule that my deferred ignore):
+David (10:19 AM) :I have some difficulty with this split Ligth/Spatial/Camera
+if Light are not Spatial, then why Geometry are Spatial ?
+Kirill (10:19 AM): well.. that's a good point
+but this is how things work now
+it is an optimization
+it's against the best practice (from wiki) : "do not extends Spatial/Node"
+It's an indirection because both (Light and LightNode) have "transform" and the goal of LightNode is to update the spatial transform of Light
+Picking is not an issue, in picking, ray-cast, user already filter the result to grab what he want (filter by selecting the parent node of collidable, and sometime the collection of collidable (enemmy, wall,...))
+To end, I would like to share 2 use-cases that become more complexe (and annoying to debug the first time) due to Ligth only apply on children (+ LightNode ):
+Create a scene with statics and mobiles ligths (eg in blender), every I load the scene (at runtime), I have to for every light (recursively):
+move the light from the scene'node into the rootNode (else additionnal item will not receive light)
+create a LightNode, attach it to the original owner of the Light, link the Light to the LightNode
+and remove the light (original in the scene) when I change the scene
+=> at end I have a LightNode for every Light (or a list of the scene's Light), instead of simply attach the scene to rootNode
+Create an asset with light (a torchlight):
+I have to do the same as for the scene, every time the light is loaded, toggled on/off
+For scene, I already have a post-load process, because I abuse Geometry and I use them to define placeholder, trigger geometry/area, spawn area, ... But it's a gameplay post-load, the above process is due to the engine IMHO.
+I thought to write a post on my blog about "how I use blender (object + name + custom properties) to level design scene for jme".
+PS (fr): Cette conversation a perturbé mon sommeil, hier soir ;-)
+Nehon commented on Dec 10, 2014
+Nehon
+on Dec 10, 2014
+More actions
+Switching is no work at all, it's nice side effect if things are done properly. You probably won't need it, it's not something that has to be changed at run time (wouldn't make sense). but deferred performances is very relative to the scene, the number of lights, the hardware you're running on. Having an easy way to switch without changing all your materials, is a nice feature.
+The lighting material already has a gbuf technique (it doesn't work afaik) but to use it, you just have to go renderManager.setForcedTechnique("gbuf"). This means, in your scene, you just set lighting material (as usual) and the processor select the correct technique for you. and the normal forward rendering renders your gbuffer. Your processor should extend FilterPostProcessor or work in a similar way. In the post frame of your processor, you have to render the light buffer
+Then you just have to add Filters to the processor : LightingFilter which you feed with the Gbuffer, and the light buffer. You can of course add any filter before or after the lightingFilter this way you completely control your rendering pipeline.
+And once again to switch back to forward you just have to remove the processor from the viewport.
+About lightNodes
+"it's uncommon", not sure why it's an argument. Blender has tons of things that are not in JME and the other way around, we don't design things regarding if it's common or not.
+"Not available in the SDK" true. Support for lights and camera manipulation is poor. But you have to admit than making them geometries to manipulate them is a bit hacky.
+"It's not coherent". Never occurred to me to be honest, but even if we were to revise ourselves and make Lights and Camera Spatials, they wouldn't be geometries neither. They would just benefit from the transforms updates. Also the fact that a light lights only its subgraph is a necessary optimisation for forward rendering, and you're right that maybe it was the motivation behind this design at first. It's not really related to Deferred though.
+"Do not extend spatial/nodes". You have to understand why you can read that on the wiki. People making a game with stock JME and using standard rendering don't need to extend Node or Geometry. 99% of the time it's bad design that tend to mix model and view (like I make a characterNode that extends Node an that has health stats and so on...). that's very bad practice in general and we absolutely want to avoid that.
+Now, for core features it's not prohibited to extends Spatial, Node or geometry, we're still in an OOP architecture. You have to sort out what is advised to the average user for a game development and what an advanced user should do for core features like deferred.
+"Both light and camera have transforms". Well that's true and not true. Transforms are translation,rotation and scale. Not all the light types need all this, but I admit it could be adapted in some way. I'm not completely against the idea to have Lights and Geometries as spatials, we just have to think thoroughly about the implications it would have.
+About Picking, "that's not an issue". It's not an issue if you have a correct management of your scene graph and separate the lights from the rest of the scene. I would not assume that's what's gonna happen in real life If you let the user handle that by himself.
+About the use cases, I understand the practical need you have behind that. but again, that's a hack, that is fixing issues with the exporter/SDK by changing how things are considered in the engine itself. IMO this issues should be fixed another way.
+PS (fr) : Faut pas que ça t'empêche de dormir :p. Encore une fois, je veux pas dénigrer ton travail, je veux juste que tu comprennes les mécanismes déjà en place dans le moteur qui peuvent t'aider, sans transgresser les concepts de JME.
+Si tu savais le nombre de fois ou j'ai rêvé de shaders :))
+davidB commented on Dec 10, 2014
+davidB
+on Dec 10, 2014
+OwnerAuthor
+More actions
+"uncommon" is not only blender, but unity, udk, 3ds.
+At first try, I used the existing GBuf technique (remember my PR about the test) and the though about using PostProcessor. But it failed as is, because step aren't independent, each step nead to read data
+from previous step. So step are linked by order and data format. (so can't permute, remove or change format isolated). all the presentation I viewed do 1) deferred (gbuffer -> shading) 2) forward if needed 3) 2D postprocess. (note that some deferred use AO for shading (modulate ambient) and not as a postprocess).
+GBuffer can be filled differently (eg, I encode normal differently than in the existing GBuf). Any AAA game engine use a different way to encode GBuf, MaterielTable too match there need. In our case, we should allow user to customize GBuf and other shader accordingly.
+When I'll mastering more the pipeline, maybe I'll try to split it into a sceneprocessor and several postprocessor. Currently it's already tricky with a sceneprocessor that manage all the pass internaly. like PBR, there are theory idea and little details that break the ideal. ;-)
+davidB commented on Dec 10, 2014
+davidB
+on Dec 10, 2014
+OwnerAuthor
+More actions
+This discussion is not a waste of time (I hope). But I should balance between, the pleasure to create a nice/matching deferred pipeline for jme and the need to create game (I should sell in 2015).
+So it's a very early version of the pipeline, that I hope could evolve, with your help/discussion to a acceptable solution for jme core and users.
+Nehon commented on Dec 11, 2014
+Nehon
+on Dec 11, 2014
+More actions
+Hey,
+All should be managed in 1 processor only, the subsequent passes are filters and the transparent object handled in the translucent bucket filter.
+I'll try to make a diagram of the idea I have of the process. I gave that a long though once and ended up with a really clear process.
+Customizing the GBuffer is supposed to be done through shaderNodes. I plan to add some API on the FilterPostProcessor to allow users to mutualise some buffers and share them between post process passes. A deferred pipeline would greatly benefit from it, and in the end it should be possible to make A DefferedProcessor that would just extend the FPP and that would additionally handle the light Volume pass.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

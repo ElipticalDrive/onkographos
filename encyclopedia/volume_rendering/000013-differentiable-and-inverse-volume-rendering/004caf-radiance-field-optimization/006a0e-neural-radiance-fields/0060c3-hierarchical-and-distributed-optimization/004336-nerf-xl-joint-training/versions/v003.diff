@@ -1,0 +1,115 @@
+--- v002.md
++++ v003.md
+@@ -19,5 +19,5 @@
+ *   **Region Assignment:** A mapping from 3D coordinates to GPU ID based on disjoint bounding boxes [S1]. Each GPU $k$ stores parameters $\theta_k$ for its tile [S1].
+ *   **Per-Camera Embeddings:** A global list of embeddings, one per training image, shared across all GPUs [S1].
+-*   **Sample Buffer:** For each ray, a list of samples $(t_i, \mathbf{x}_i)$ along the ray segment within the scene bounding box [G].
++*   **Sample Buffer:** For each ray, a list of samples $(t_i, \mathbf{x}_i, \mathbf{c}_i, \sigma_i, T_i)$ along the ray segment within the scene bounding box [G].
+ 
+ **Numbered Steps:**
+@@ -38,4 +38,6 @@
+ 
+ ```python
++import math
++
+ # Global state
+ num_gpus = K
+@@ -43,41 +45,44 @@
+ nerf_params = [MLP() for _ in range(num_gpus)]
+ region_bounds = [Box(min_i, max_i) for i in range(num_gpus)]
++lr = 0.001
+ 
+ def sample_ray(origin, direction, num_samples):
+     t_vals = [i / num_samples for i in range(num_samples)]
+-    return [origin + direction * t for t in t_vals]
++    return [Point(t=t, x=origin + direction * t) for t in t_vals]
+ 
+ def get_gpu_for_point(point, region_bounds):
+     for k, box in enumerate(region_bounds):
+-        if box.contains(point):
++        if box.contains(point.x):
+             return k
+     return 0
+ 
+-def volume_render(all_samples):
++def volume_render(samples):
+     T = 1.0
+     color = [0.0, 0.0, 0.0]
+-    prev_t = all_samples[0].t
+-    for sample in all_samples:
+-        delta = sample.t - prev_t
++    prev_t = samples[0].t
++    for sample in samples:
++        delta = max(1e-6, sample.t - prev_t)
+         alpha = 1.0 - math.exp(-sample.sigma * delta)
+-        color = [color[d] + T * alpha * sample.color[d] for d in range(3)]
+-        T = T * (1.0 - alpha)
++        for d in range(3):
++            color[d] += T * alpha * sample.color[d]
++        T *= (1.0 - alpha)
++        sample.T = T
+         prev_t = sample.t
+     return color
+ 
+-def compute_distortion_loss(all_samples):
++def compute_distortion_loss(samples):
+     loss = 0.0
+-    for i in range(len(all_samples)):
+-        for j in range(len(all_samples)):
+-            t_i = all_samples[i].t
+-            t_j = all_samples[j].t
+-            w_i = all_samples[i].T * all_samples[i].sigma
+-            w_j = all_samples[j].T * all_samples[j].sigma
+-            delta_i = all_samples[i].t - (all_samples[i-1].t if i > 0 else 0)
+-            delta_j = all_samples[j].t - (all_samples[j-1].t if j > 0 else 0)
++    for i in range(len(samples)):
++        for j in range(len(samples)):
++            t_i = samples[i].t
++            t_j = samples[j].t
++            w_i = samples[i].T * samples[i].sigma
++            w_j = samples[j].T * samples[j].sigma
++            delta_i = max(1e-6, t_i - (samples[i-1].t if i > 0 else 0))
++            delta_j = max(1e-6, t_j - (samples[j-1].t if j > 0 else 0))
+             loss += w_i * w_j * abs(t_i - t_j) * delta_i * delta_j
+     return loss
+ 
+-def forward_pass(ray_origin, ray_direction, image_idx):
++def forward_pass(ray_origin, ray_direction, image_idx, ground_truth_color):
+     samples = sample_ray(ray_origin, ray_direction, num_samples=M)
+     local_samples = [[] for _ in range(num_gpus)]
+@@ -85,23 +90,27 @@
+     for point in samples:
+         gpu_id = get_gpu_for_point(point, region_bounds)
+-        color, density = nerf_params[gpu_id].forward(point, camera_embeddings[image_idx])
+-        local_samples[gpu_id].append((point, color, density))
++        color, density = nerf_params[gpu_id].forward(point.x, camera_embeddings[image_idx])
++        local_samples[gpu_id].append(Point(t=point.t, x=point.x, color=color, sigma=density))
+ 
+     all_samples = []
+     for gpu_samples in local_samples:
+         all_samples.extend(gpu_samples)
+-    all_samples.sort(key=lambda x: x.point.t)
++    all_samples.sort(key=lambda x: x.t)
+ 
+     final_color = volume_render(all_samples)
+-    photometric_loss = mse(final_color, ground_truth_color)
++    photometric_loss = sum((final_color[d] - ground_truth_color[d])**2 for d in range(3))
+     distortion_loss = compute_distortion_loss(all_samples)
+     return final_color, photometric_loss, distortion_loss
+ 
+ def backward_pass(photometric_loss, distortion_loss):
+-    grads_camera = compute_gradients(camera_embeddings, photometric_loss + distortion_loss)
++    total_loss = photometric_loss + distortion_loss
++    grads_camera = compute_gradients(camera_embeddings, total_loss)
+     for gpu_id in range(num_gpus):
+-        local_grads = compute_gradients(nerf_params[gpu_id], photometric_loss + distortion_loss)
+-        update(nerf_params[gpu_id], local_grads)
+-    update(camera_embeddings, grads_camera)
++        local_grads = compute_gradients(nerf_params[gpu_id], total_loss)
++        for param in nerf_params[gpu_id].parameters:
++            param -= lr * local_grads[param]
++    for emb in camera_embeddings:
++        for param in emb.parameters:
++            param -= lr * grads_camera[param]
+ ```
+ 

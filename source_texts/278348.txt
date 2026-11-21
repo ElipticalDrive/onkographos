@@ -1,0 +1,557 @@
+The Vesuvius Challenge monorepo. Contribute to ScrollPrize/villa development by creating an account on GitHub.
+
+vc_obj2tifxyz: write scale as cells per voxel measured from the grid, fail on an empty grid by CVasilopoulos · Pull Request #1781 · ScrollPrize/villa · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+CVasilopoulos
+commented
+Sep 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+In one sentence: You can convert a published paths/ OBJ with vc_obj2tifxyz and flatten the result at its true size, and a conversion that produced nothing, or only a 2 x 2 grid, now fails instead of reporting success.
+One real example: Starting with the published Scroll 1 segment mesh PHercParis4.volpkg/paths/20231007101619/20231007101619.obj (1,521,895 vertices, UVs normalised to [0,1]), I ran vc_obj2tifxyz 20231007101619.obj out 2000 1.0, and it produced a 2001 x 2001 tifxyz (3,532,144 valid points) whose meta.json now stores scale: [0.0602, 0.1244], matching the measured 16.6 x 8.0 voxel spacing of its samples; vc_flatten on that output produced a 961 x 4113 grid with 3,485,607 valid points.
+Before: The same command wrote scale: [0.0005, 0.0005], the UV step, which is the inverse of the format's convention (a tracer patch grown at step 20 stores 0.05, and vc_flatten, vesuvius.tifxyz and Tifxyz.full_resolution_shape all size their output as extent x scale). vc_flatten sized its output from that value and collapsed the whole segment to a 9 x 18 grid with 159 points (#1319). With no stretch factor the tool built a 2 x 2 grid, rasterized 0 points, printed "Successfully converted to tifxyz format" and exited 0, leaving a directory whose bbox is all -1 (#1320). In --tifxyz-source mode the source scale was copied as is, even when --uv-downsample made the grid sparser.
+After this PR:
+scale is measured on the grid actually written, after any decimation, and stored as its reciprocal per axis. This applies to the UV-metric and the non-metric mode.
+--tifxyz-source mode keeps the source scale when nothing is decimated, so the VC3D flatten flow is unchanged. With decimation it writes src_scale * (decimated_cols - 1) / (source_cols - 1) per axis.
+mesh_units is still accepted but no longer changes scale, because the measured spacing is already in voxels.
+Zero valid grid points is an error, and so is any 2 x 2 output grid, even one with valid corners: exit 1, nothing written. A 2 x 2 grid is the clamped minimum, so it is degenerate whatever else the user passes. The errors print no hint. The first commit's hint named --uv-to-obj, which @bruniss asked vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630 to stop recommending (see Prior work). It never changes the grid size, because the UV-metric grid is ceil(uv_range * stretch_factor) + 1. The help text still explains that normalised UVs need a stretch_factor such as 800.
+The help text no longer calls the default invocation "legacy behavior", and it says the tool exits non-zero when no grid point is rasterized or the output grid is only 2 x 2. lasagna/tifxyz_format.md now defines scale as grid cells per voxel and drops the two bullets that contradicted that definition.
+New opt-in end-to-end test test_obj2tifxyz_e2e (VC_RUN_E2E=1) on synthetic meshes covers the empty grid, the 2 x 2 grid, the measured scale, grid size and scale across stretch_factor, the decimated scale, mesh_units, and source-scale mode with and without decimation.
+Proof: Same data and commands on both sides of each comparison. Look at the scale each run prints and writes to meta.json, the exit codes of the default invocation and the 2 x 2 window, and the vc_flatten output grid size. The two screenshots below are from the upstream vs 69a1c530b runs. The text blocks after them are copied terminal output.
+In the first four blocks, "before" is vc_obj2tifxyz built from upstream d82e13edf and "after" is 69a1c530b as first pushed.
+Default invocation (#1320):
+```
+# before
+UV-metric mode: grid 2 x 2  scale(OBJ units): 1, 1
+Warning: no valid grid points were rasterized.
+Valid grid points: 0 / 4 (0%)
+Successfully converted to tifxyz format
+EXIT=0        meta.json: scale [1.0, 1.0], bbox [[-1,-1,-1],[-1,-1,-1]]
+
+# after (69a1c530b; the follow-up commit drops the Hint line)
+Error: no valid grid points were rasterized (grid 2 x 2); refusing to write an empty tifxyz.
+Hint: the UVs span 1 x 1 (normalised to [0,1]), so at the default stretch_factor of 1 the grid has no room for any sample. Pass a stretch_factor (e.g. 800) to set the grid resolution, or --uv-to-obj=<OBJ units per UV unit> if the UVs are metric.
+Failed to create quad surface
+EXIT=1        (no output directory)
+```
+2000 1.0 (#1319):
+```
+# before
+Valid grid points: 3532144 / 4004001 (88.2154%)
+Scale from UV (micrometers): 0.0005, 0.0005
+
+# after
+Valid grid points: 3532144 / 4004001 (88.2154%)
+Measured cell spacing: 16.6178, 8.03642 OBJ units -> scale: 0.0601765, 0.124434 cells per unit
+```
+Independent check with numpy/tifffile (mean distance between adjacent valid samples; the x/y/z grids of the two runs are byte-identical, only meta.json differs):
+```
+before: written scale 0.0005, 0.0005   -> implies 2000 voxels per cell
+        measured spacing x 16.613 (median 16.609), y 8.034 (median 8.036) voxels per cell
+after:  written scale 0.0601765, 0.124434 -> implies 16.62, 8.036 voxels per cell
+        measured spacing x 16.613, y 8.034
+```
+Downstream, vc_flatten -i <out> -o <flat> --downsample 4 on each output:
+```
+before:  Creating output grid 9 x 18 (input scale=0.0005x0.0005, UV range=15941.6x33037.9)   Valid points: 159
+after:   Creating output grid 961 x 4113 (input scale=0.0601765x0.124434, UV range=15941.6x33037.9)   Valid points: 3485607
+```
+Apart from refusing 2 x 2 grids, the follow-up commit changes only the written scale, never the x/y/z grids. On it, 2000 1.0 writes the identical scale 0.0601765, 0.124434. The default invocation was re-run on it (see the paragraph after the 2 x 2 window block). vc_flatten was not.
+In the remaining blocks, "before" is 69a1c530b and "after" is the follow-up commit.
+2000 7.91, with mesh_units set to the Scroll 1 voxel size:
+```
+before: written scale 0.00760764, 0.0157312 -> implies 131.4, 63.57 voxels per cell
+after:  written scale 0.0601765, 0.124434   -> implies 16.62, 8.036 voxels per cell
+        measured spacing x 16.613 (median 16.609), y 8.034 (median 8.036) -> matching scale 0.06020, 0.12448
+        x/y/z grids identical between the two runs
+```
+Source-scale mode on the published tifxyz 20231007101619-on-20260310170716-45.532um.tifxyz (scale 0.05), converted with vc_tifxyz2obj and back with --tifxyz-source=<that dir>:
+```
+no decimation:      before 0.05, 0.05   after 0.05, 0.05
+                    measured spacing x 19.9 (median 19.96), y 19.5 (median 19.70) voxels
+
+--uv-downsample=4:  grid 72 x 35
+                    before 0.05, 0.05       -> implies 20 voxels per cell
+                    after  0.0125, 0.0125   -> implies 80 voxels per cell
+                    measured spacing x 77.48 (median 79.06), y 75.08 (median 76.50) -> matching scale 0.01291, 0.01332
+```
+2 x 2 grid on real data: a fully valid 30 x 30 window (900 of 900 points) of the same published tifxyz, exported with vc_tifxyz2obj <window> <obj> --normalize-uv and converted back with vc_obj2tifxyz <obj> <out> at the default stretch:
+```
+# before
+UV-metric mode: grid 2 x 2  UV-derived cell spacing (OBJ units): 1, 1
+Valid grid points: 1 / 4 (25%)
+Successfully converted to tifxyz format
+EXIT=0        wrote a 2 x 2 tifxyz, scale [1.0, 1.0]
+
+# after
+UV-metric mode: grid 2 x 2  UV-derived cell spacing (OBJ units): 1, 1
+Valid grid points: 1 / 4 (25%)
+Error: degenerate 2 x 2 output grid (1 of 4 points rasterized); refusing to write a tifxyz.
+Failed to create quad surface
+EXIT=1        (nothing written)
+```
+Default invocation on 20231007101619.obj (0 of 4 rasterized): both exit 1 and write nothing. 69a1c530b prints the error and the Hint line shown above. The follow-up prints the same error with no Hint line.
+The e2e test: against the 69a1c530b binary, 6 checks fail (2 each in the mesh_units and the source-scale decimation subcases, and 2 in the 2 x 2 subcase). Against the follow-up commit: 1 test case(s) passed.
+Why / where this is useful: Anyone converting a published OBJ (all the paths/ meshes carry normalised UVs) or a mesh produced outside VC3D into tifxyz, to flatten it with vc_flatten, render it with vc_render_tifxyz, or read it with vesuvius.tifxyz. Scripts that drive the tool no longer mistake an empty or 2 x 2 conversion for success. mesh_units no longer changes the scale, and a round trip through OBJ with --tifxyz-source plus --uv-downsample gets a scale that matches the sparser grid. The older CWindowContextMenu flatten path (--uv-downsample=20, no --tifxyz-source) previously got scale 1.0 for a 20-voxel grid and now gets 0.05, the value the rest of the pipeline expects for that spacing.
+[Christos: I picked up #1319 and #1320 because I wanted a working way to turn the published Scroll 1 paths/ meshes into tifxyz and flatten them. With the current tool, that path silently produces an empty or collapsed surface. I reproduced both bugs myself on 20231007101619.obj before changing anything, and I compared the before and after runs in the screenshots above, including the vc_flatten output size. I read through the diff to vc_obj2tifxyz.cpp [and checked that the scale now matches the measured sample spacing]. When I found the three earlier PRs, I credited them and brought in the parts of their fixes that mine was missing.
+I personally verified that the example and proof above were produced by this PR on the stated data.
+Details
+Tested commits: 69a1c530b and the follow-up commit directly on top of it, based on upstream d82e13edf. Built with cmake --preset ci-release-gcc inside ghcr.io/scrollprize/villa/volume-cartographer:builder-ubuntu-26.04, Linux x86_64.
+Data: https://dl.ash2txt.org/full-scrolls/Scroll1/PHercParis4.volpkg/paths/20231007101619/20231007101619.obj (311.8 MiB), and the published tifxyz PHercParis4/segments/20231007101619/mesh/20231007101619-on-20260310170716-45.532um.tifxyz (285 x 137 grid, cols x rows, scale 0.05), plus a fully valid 30 x 30 window of it.
+Commands: vc_obj2tifxyz mesh.obj out-default and vc_obj2tifxyz mesh.obj out-2000 2000 1.0 with upstream d82e13edf, 69a1c530b and the follow-up commit; vc_obj2tifxyz mesh.obj out-units 2000 7.91 with 69a1c530b and the follow-up commit; vc_flatten -i out-2000 -o flat --downsample 4 on the upstream and 69a1c530b outputs; the tifxyz converted with vc_tifxyz2obj (UVs = grid index / scale) and back with vc_obj2tifxyz seg.obj out --tifxyz-source=<tifxyz dir>, with and without --uv-downsample=4, on 69a1c530b and the follow-up commit; the 30 x 30 window exported with vc_tifxyz2obj <window> <obj> --normalize-uv and converted back with vc_obj2tifxyz <obj> <out> on 69a1c530b and the follow-up commit. Spacing measured with a short numpy/tifffile script (mean and median of adjacent-sample distances along x and y over valid pairs).
+The measured scale is anisotropic here (0.060 vs 0.124) because a non-square surface normalised into a [0,1] square and rasterized on a square grid has different spacing per axis. tifxyz carries a per-axis scale and vc_flatten honours it per axis, so it is reported rather than averaged; the geometric mean, 0.0865, is the single figure vc_obj2tifxyz writes scale from the stretch factor, not the actual grid density - breaks vc_flatten downstream #1319 measured.
+mesh_units is accepted for compatibility and not used for scale. Upstream multiplied the scale by it, and this PR's first commit divided by it. The measured spacing is already in voxels.
+Limitation: spacing is a mean over the grid interior (borders skipped, every 4th sample on grids of 20+ cells). On a grid too sparse to measure, the tool falls back to the UV-derived estimate with a warning; if that is not positive either, it exits non-zero. A 2 x 2 grid is refused however many points it rasterizes. A grid with 2 points on one axis and more on the other is still written.
+Prior work
+Three earlier PRs worked on these issues and none was merged. All three got there before this PR, and it overlaps with each of them. The follow-up commit adopts #1683's source-scale and mesh_units handling, with Matteo as co-author, and #1630's refusal of every 2 x 2 grid without a hint, with Anay as co-author.
+Fix vc_obj2tifxyz TIFXYZ scale semantics (#1319) #1391 by Olga Ivanova (@olgaiv39) (opened 2026-08-11, auto-closed for inactivity 2026-08-28). It measured scale from the emitted grid and wrote 1 / spacing, kept mesh_units out of it, left --tifxyz-source unchanged, and corrected tifxyz_format.md. @pmh47 said it would be considered for merge once his review points were addressed, and Olga addressed them. @hendrikschilling then said the change looked fine apart from test coverage. He asked for tests of --uv-downsample, --tifxyz-source scale preservation, varying stretch_factor, and a check against the emitted grid. Her remaining test covered normalised UVs, anisotropic spacing and mesh_units independence. This PR's scale change is the same fix. The test here now has a subcase for each of his points. The stretch_factor subcase runs stretch 20 and 80 and checks the size of the written x.tif and the scale.
+vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630 by @AnayGarodia (opened 2026-08-28, auto-closed 2026-09-13). It fixed vc_obj2tifxyz: 'Successfully converted' and exit 0 after rasterizing 0 points #1320 with before/after on the published Scroll 1 mesh paths/20230503225234 and a metric-UV control: exit non-zero when nothing is rasterized, and a corrected "legacy behavior" help label. @Bullo27 reproduced the bug there with a quad whose UVs form a diamond, so no bounding-box corner is covered. This PR's empty-grid test uses the same idea. @Bullo27 later reported a normalised-UV mesh that fills 1 of the 4 corners and slips past a zero-only check. Anay then refused every 2 x 2 grid, since a 2 x 2 grid is the clamped minimum and comes out degenerate whatever the user passes next. After that, @bruniss asked vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630 to stop recommending --uv-to-obj, since a 2 x 2 grid still fails with it, and to just report the invalid output. Anay dropped the flag suggestion. The vc_obj2tifxyz: 'Successfully converted' and exit 0 after rasterizing 0 points #1320 part of this PR's first commit matched vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630's first commit. The follow-up commit takes the later changes too: it refuses every 2 x 2 grid and prints no hint.
+vc_obj2tifxyz: write meta.json scale as grid cells per voxel measured from the emitted grid (#1319) #1683 by Matteo Bulloni (@Bullo27) (opened 2026-09-02, closed by its author 2026-09-10, not reviewed). It took the same core approach for vc_obj2tifxyz writes scale from the stretch factor, not the actual grid density - breaks vc_flatten downstream #1319 and credited Fix vc_obj2tifxyz TIFXYZ scale semantics (#1319) #1391. It also reduced the --tifxyz-source scale by the decimation applied, stopped using mesh_units for the scale, updated tifxyz_format.md, and added a 7-conversion CLI test that reads each written grid back, with render evidence on a PHerc1447 segment. The follow-up commit here adopts both behaviours and vc_obj2tifxyz: write meta.json scale as grid cells per voxel measured from the emitted grid (#1319) #1683's wording for the definition of scale and the resampling rule.
+Where this PR differs: vc_obj2tifxyz writes scale from the stretch factor, not the actual grid density - breaks vc_flatten downstream #1319 and vc_obj2tifxyz: 'Successfully converted' and exit 0 after rasterizing 0 points #1320 are fixed in one change. It has before/after on a published Scroll 1 paths/ mesh through vc_flatten, the pipeline vc_obj2tifxyz writes scale from the stretch factor, not the actual grid density - breaks vc_flatten downstream #1319 reported. When the grid is too sparse to measure, it falls back to the UV-derived estimate with a warning, where Fix vc_obj2tifxyz TIFXYZ scale semantics (#1319) #1391 and vc_obj2tifxyz: write meta.json scale as grid cells per voxel measured from the emitted grid (#1319) #1683 exit with an error. The source-scale subcases repeat vc_obj2tifxyz: write meta.json scale as grid cells per voxel measured from the emitted grid (#1319) #1683's scenarios, including --uv-downsample=4, and the mesh_units subcase covers the same check as Fix vc_obj2tifxyz TIFXYZ scale semantics (#1319) #1391's final test. Unlike vc_obj2tifxyz: write meta.json scale as grid cells per voxel measured from the emitted grid (#1319) #1683's test, it does not vary --grid-cap, and it reads back only the size of x.tif, not the x/y/z values.
+AI-assisted, human-directed. The conversions and flattening above ran on the stated Scroll 1 data. The e2e test uses synthetic meshes.
+Fixes #1319
+Fixes #1320
+CVasilopoulos
+requested a review
+from hendrikschilling
+as a code owner
+September 14, 2026 19:55
+vercel
+Bot
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+@CVasilopoulos is attempting to deploy a commit to the scroll Team on Vercel.
+A member of the Team first needs to authorize it.
+CVasilopoulos
+commented
+Sep 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Pushed a follow-up commit on top of 69a1c530b. @Bullo27 and @AnayGarodia are co-authors on it.
+Two behaviour changes come from #1683 by @Bullo27:
+--tifxyz-source now reduces the source scale by the decimation applied: src_scale * (decimated_cols - 1) / (source_cols - 1) per axis. On the published 20231007101619-on-20260310170716-45.532um.tifxyz, round-tripped with --uv-downsample=4, the 72 x 35 grid now gets 0.0125 (80 voxels per cell) instead of 0.05 (20). Measured spacing is 77.5 x 75.1 voxels. Without decimation it still writes 0.05.
+mesh_units no longer changes the scale. 20231007101619.obj with 2000 7.91 wrote 0.00760764, 0.0157312 and now writes 0.0601765, 0.124434. That matches the measured 16.61 x 8.03 voxel spacing and the 2000 1.0 result.
+The push also takes #1683's wording for the definition of scale in tifxyz_format.md and drops the two bullets there that contradicted it. It adds five e2e subcases (the previous binary fails 6 checks, the new one passes) and removes most of the code comments from the first commit. The description now includes these numbers and a Prior work section.
+@Bullo27, @AnayGarodia, @olgaiv39: thank you for #1683, #1630 and #1391. All three got to these fixes before this PR, and the new commit takes #1683's source-scale and mesh_units handling and #1630's 2 x 2 refusal and hint removal directly.
+Points raised on the earlier PRs that the first commit did not cover, and the new commit now addresses:
+On vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630, @Bullo27 found a normalised-UV mesh that fills 1 of the 4 corners of a 2 x 2 grid and slips past a zero-only check. @AnayGarodia then refused every 2 x 2 grid, since it is the clamped minimum and comes out degenerate whatever the user passes. The new commit does the same: exit 1, nothing written. A fully valid 30 x 30 window of the published tifxyz above, exported with --normalize-uv and converted at the default stretch, rasterized 1 of 4 points. 69a1c530b wrote a 2 x 2 tifxyz with scale 1.0 and exited 0. Now it prints Error: degenerate 2 x 2 output grid (1 of 4 points rasterized); refusing to write a tifxyz. and exits 1.
+On vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630, @bruniss asked to stop recommending --uv-to-obj and just report the invalid output. The hint is gone. --uv-to-obj never changed the grid size, since the UV-metric grid is ceil(uv_range * stretch_factor) + 1. The default invocation on 20231007101619.obj now prints the empty-grid error with no hint and exits 1.
+On Fix vc_obj2tifxyz TIFXYZ scale semantics (#1319) #1391, @hendrikschilling asked for tests that vary stretch_factor and check the emitted grid. A new subcase runs stretch 20 and 80 and checks for a 21 x 21 and an 81 x 81 x.tif, with scale 0.05 and 0.2.
+If anything else from your versions should come across, please say so.
+[Christos: I only found #1391, #1630 and #1683 after opening this PR. So I went back through their review threads and brought in the points that mine didn't cover yet. I reran the conversions on the published Scroll 1 data after the change, and I [looked at the new outputs / reviewed the follow-up diff] myself.
+nerln
+mentioned this pull request
+Sep 15, 2026
+vc_obj2tifxyz: fail instead of writing an empty tifxyz when no grid point rasterizes
+#1794
+Closed
+nerln
+commented
+Sep 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Independent reproduction, same numbers on both commits: 449369 / 496584 valid points at stretch 800, and a 54 x 619 vc_flatten grid with 28059 valid points at stretch 200, from a binary built off this branch and run on a real published PHerc0125 segment.
+I opened #1794 for the #1320 half before seeing this consolidation and have closed it in favour of this PR.
+Setup: z6336_w020_normuv.obj, UVs normalised to [0,1], built from the actual geometry of a published PHerc0125 segment (declared scale 0.05, i.e. a 20-voxel step; measured spacing between adjacent grid points 20.8 voxels along u and 20.0 along v). vc_obj2tifxyz/vc_flatten built from this branch on macOS arm64 (LLVM/OpenBLAS, OpenCV 5), first at 69a1c530b and again at 8b8537e45. I had prepared local patches for #1319/#1320 and validated them on the same file; they are superseded by this PR.
+Numbers from the 8b8537e45 binary, unchanged from 69a1c530b on every case:
+Default args (no stretch factor): exit code 1, output directory not created. stderr, in full: Error: no valid grid points were rasterized (grid 2 x 2); refusing to write an empty tifxyz. then Failed to create quad surface. The Hint: line of the first commit is gone, as bruniss asked in vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630. Matches vc_obj2tifxyz: 'Successfully converted' and exit 0 after rasterizing 0 points #1320.
+stretch_factor=800, mesh_units=1.0: grid 792 x 627, 449369 / 496584 valid points (90.49%).
+stretch_factor=200, mesh_units=1.0: grid 199 x 158, 28221 / 31442 valid points. meta.json scale [0.0588083, 0.1824135]; measured independently in Python (mean distance between adjacent valid grid points along u and v, 17.00 and 5.48 voxels, inverted) [0.0588, 0.1825]: written vs. measured differ by 0.00% and 0.05%, rounding only. Matches vc_obj2tifxyz writes scale from the stretch factor, not the actual grid density - breaks vc_flatten downstream #1319.
+vc_flatten on that output: grid 54 x 619, 28059 valid points, instead of the 6 x 18 / 64-point collapse the old UV-derived scale produced.
+No discrepancy: this confirms both fixes, on both commits, on data neither of us used to write the patches.
+Two notes from the diff, not from running anything, and not asking to expand the PR: (1) the --uv-non-metric path is rewritten onto the same measured-spacing logic, but every subcase in test_obj2tifxyz_e2e.cpp still runs default UV-metric mode, so that branch stays untested; (2) the follow-up refuses every 2 x 2 output grid, including one where all four corners rasterize (grid_size[0] <= 2 && grid_size[1] <= 2 fires regardless of valid_count), so a legitimately tiny or heavily decimated segment is refused like the degenerate 1-of-4 case; worth knowing. The mesh_units gap I saw on the first commit is closed by the new subcase and the numbers in your comment.
+CVasilopoulos
+commented
+Sep 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks @nerln for the independent reproduction on a real PHerc0125 segment, on both commits, and for folding #1794 into this PR.
+On your two notes:
+Agreed, the --uv-non-metric path has no end-to-end subcase yet. I'm happy to add one here if the maintainers want it in this PR.
+Refusing every 2 x 2 output grid is intentional. @bruniss asked for that in vc_obj2tifxyz: fail instead of writing an all-sentinel tifxyz for normalized UVs #1630, because a 2 x 2 grid from this tool almost always means a degenerate UV or scale input rather than a real, tiny segment.
+ItIsCuthNotCup
+mentioned this pull request
+Sep 19, 2026
+surface_preflight: surface-only mode plus metadata scale and bbox consistency gates
+#1840
+Merged
+1 task done
+hendrikschilling
+commented
+Sep 21, 2026
+Copy link
+Copy Markdown
+Contributor
+```
+1. P2: Make the coordinate-unit contract explicit instead of silently ignoring mesh_units.
+     In volume-cartographer/apps/src/vc_obj2tifxyz.cpp, the old mesh_units behavior was incorrect: it changed scale metadata without converting the stored coordinates. Removing that       
+     multiplication is correct for OBJs already expressed in base voxels, but silently accepting an argument documented as “micrometers per OBJ unit” remains misleading.
+
+     Support the two cases explicitly:
+
+     --coords base-voxels                  # default: leave XYZ unchanged
+
+     --coords physical
+     --obj-um-per-unit <value>
+     --voxel-size-um <scalar or x,y,z>
+
+     For physical coordinates, convert vertices before rasterization:
+
+     xyz_base = xyz_obj * obj_um_per_unit / voxel_size_um
+
+     Then derive scale from the reciprocal of measured output-grid spacing in base voxels. Preserve the existing source-scale policy when --tifxyz-source is supplied, including its        
+     decimation adjustment. Require positive, finite conversion parameters and reject contradictory options. Deprecate mesh_units; until explicit conversion exists, reject non-default     
+     values with an explanatory error. Alternatively, keep this PR narrow and explicitly support only base-voxel OBJs.
+
+  2. P2: Cover the changed --uv-non-metric path.
+     volume-cartographer/core/test/test_obj2tifxyz_e2e.cpp currently exercises metric and source-scale modes only. Add a non-metric conversion test that reads the emitted XYZ arrays,      
+     measures adjacent-point distances, and checks their reciprocals against the written scale. Include decimation. If coordinate conversion is added, test equivalent base-voxel and       
+     physical-coordinate OBJs producing equivalent outputs.
+
+  3. P3: Make the E2E process invocation portable.
+     The new test concatenates unquoted paths into std::system() and splits PATH using :. Paths containing spaces fail, and Windows uses a different separator. Prefer an argument-list     
+     process API, such as QProcess, using the executable path already supplied by CMake.
+```
+CVasilopoulos
+commented
+Sep 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks for the review. Three commits on top of 8b8537e45, one per point, pushed to this branch.
+1. Coordinate-unit contract (P2) — 30b330f83 takes the narrow route: the tool explicitly supports base-voxel OBJs only. mesh_units is deprecated; 1.0 is still accepted so existing invocations keep working, and any other value exits 1 before the OBJ is read, with nothing written:
+```
+Error: mesh_units 7.91 is not supported. vc_obj2tifxyz expects OBJ coordinates in
+base voxels and writes them unchanged; it does not convert physical units. The
+argument is deprecated and only its default 1.0 is accepted.
+```
+The help text states the same contract (mesh_units: deprecated; must be 1.0. OBJ coordinates are expected in base voxels and are written unchanged; the tool does not convert physical units.), each run logs OBJ coordinates: base voxels (written unchanged), and the 800 1.0 example no longer advertises the argument. Nothing in the repo passes mesh_units (VC3D passes --uv-downsample=20, render_ink.py passes --tifxyz-source). The explicit conversion (--coords physical with --obj-um-per-unit and --voxel-size-um, converting vertices before rasterisation and keeping the --tifxyz-source policy) is left for a follow-up PR.
+2. --uv-non-metric coverage (P2) — 2b60cf6f3 adds the subcase offered in the reply to @nerln. It converts the normalised 41 x 41 plane (10-voxel spacing) with --uv-non-metric, once plain and once with --uv-downsample=2, reads the emitted x/y/z.tif, averages the distance between adjacent valid grid points along each axis and checks the reciprocals against the written scale (2% tolerance). It also pins both runs to a 401 x 401 grid at scale 1.0: in non-metric mode the decimation only thins the preliminary grid the spacing is measured on, and the final grid is round(spacing * stretch) + 1 from the compensated measurement either way (that sizing predates this PR), so a wrong compensation would change the grid even though the scale would still describe it.
+3. Portable process invocation (P3) — 39bb6ae2e starts the tool through QProcess with a QStringList; Qt6::Core is already required by the test build. The only binary lookup is VC_OBJ2TIFXYZ_BIN, which the ctest registration sets to $<TARGET_FILE:vc_obj2tifxyz>; the PATH split and the relative build/bin probes are gone. The temporary root is now vc_obj2tifxyz e2e <n>, so every subcase runs the tool on paths with spaces. A run that fails to start or exits abnormally is a test failure instead of a non-zero code that a negative subcase could mistake for the expected refusal.
+Evidence (Linux, ci-release-gcc preset with VC_TESTING=ON VC_RUN_E2E=ON, at 2b60cf6f3):
+ctest -R obj2tifxyz --output-on-failure: test_obj2tifxyz_e2e passed, 1/1 in 0.73 s. That runs all nine subcases: empty-grid refusal, 2 x 2 refusal, normalised-UV scale, stretch 20/80 grid sizes, decimation, mesh_units 1.0 accepted and 7.91 rejected, non-metric plain and decimated, source-scale with and without decimation.
+The same test executable pointed at a vc_obj2tifxyz built from 8b8537e45 fails exactly the three mesh_units checks (7.91 accepted, output directory created, no error text) and nothing else, so the non-metric, metric and source-scale subcases pass on both binaries and only the new rejection separates them.
+AI-assisted (Claude Code), human-directed.
+nerln
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Happy to take the --coords physical follow-up once this lands (P2.1 as written: --obj-um-per-unit, --voxel-size-um scalar or x,y,z, vertices converted before rasterisation, --tifxyz-source policy kept, contradictory or non-positive options rejected, one E2E subcase with equivalent base-voxel and physical OBJs) — unless you'd rather keep it, in which case say so and I'll leave it.
+AI-assisted (Claude Code), human-directed.
+CVasilopoulos
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Please do take it, @nerln — thanks. Two things from this PR worth keeping aligned: the mesh_units error text now states the base-voxel contract, so --coords base-voxels should read as the documented default of the new flag; and test_obj2tifxyz_e2e.cpp already has the QProcess spawn helper and a temp root with spaces, so the equivalence subcase can drop straight in. I'll leave the follow-up to you.
+AI-assisted (Claude Code), human-directed.
+hendrikschilling
+assigned
+bruniss
+Sep 23, 2026
+pmh47
+assigned
+hendrikschilling and
+bruniss and unassigned
+bruniss and
+hendrikschilling
+Sep 25, 2026
+pmh47
+mentioned this pull request
+Sep 25, 2026
+Draft: fix vc_obj2tifxyz scale from measured grid density
+#1861
+Closed
+Kaluzy
+added a commit
+to Kaluzy/villa
+that referenced
+this pull request
+Sep 27, 2026
+submission: correct Sept status after ScrollPrize#1781 consolidation
+eb529d9
+Kaluzy
+mentioned this pull request
+Sep 27, 2026
+vc_obj2tifxyz: fail when rasterization produces zero valid points
+#1859
+Closed
+CVasilopoulos
+and others
+added 5 commits
+October 1, 2026 06:37
+vc_obj2tifxyz: write scale as cells per voxel measured from the grid,…
+…
+7526201
+```
+… fail on an empty grid
+
+tifxyz "scale" counts grid cells per voxel: a tracer patch grown at step 20
+stores 0.05, and vc_flatten, the Python reader and the upsampler all size
+their output as extent * scale. vc_obj2tifxyz wrote the inverse in both the
+UV-metric and the non-metric mode (OBJ units per cell, times mesh_units), so
+a published segment converted with a stretch factor of 2000 carried
+scale 0.0005 while its samples were 16.6 x 8.0 voxels apart. Downstream
+vc_flatten then collapsed the 2001 x 2001 grid to a handful of cells (ScrollPrize#1319).
+
+Measure the spacing of the grid actually rasterized, after any decimation,
+and store its reciprocal per axis. Source-scale mode (--tifxyz-source) still
+adopts the input scale verbatim, so the VC3D flatten flow is unchanged.
+
+With the default stretch factor an OBJ with UVs normalised to [0,1], the
+parametrisation of every published segment mesh, produced a 2 x 2 grid with
+no valid point and the tool still printed "Successfully converted" and exited
+0 (ScrollPrize#1320). Refuse to write in that case, exit non-zero, and explain that a
+stretch factor or --uv-to-obj is needed. Fix the help text that called the
+default invocation "legacy behavior".
+
+Add an opt-in end-to-end test (VC_RUN_E2E=1) covering the empty grid, the
+measured scale and the decimated scale on a synthetic normalised-UV mesh.
+
+Fixes ScrollPrize#1319
+Fixes ScrollPrize#1320
+```
+vc_obj2tifxyz: refuse 2 x 2 grids, reduce source scale by decimation,…
+…
+c379646
+```
+… ignore mesh_units
+
+The source-scale and mesh_units changes come from ScrollPrize#1683 by Matteo
+Bulloni, which took the same measured-spacing approach to ScrollPrize#1319
+earlier. The 2 x 2 refusal and the removal of the hint follow ScrollPrize#1630 by
+Anay.
+
+With --tifxyz-source, the source scale was copied even when
+--uv-downsample made the grid sparser. It is now
+src_scale * (decimated_cols - 1) / (source_cols - 1) per axis, which
+leaves it unchanged when nothing is decimated. The published
+PHercParis4 tifxyz 20231007101619-on-20260310170716-45.532um (scale
+0.05) was converted with vc_tifxyz2obj and back with --tifxyz-source
+and --uv-downsample=4, which gives a 72 x 35 grid. The previous commit
+wrote 0.05 (20 voxels per cell). This one writes 0.0125 (80 voxels per
+cell). The measured spacing of adjacent samples is 77.5 x 75.1 voxels.
+Without decimation both write 0.05, against a measured 19.9 x 19.5.
+The --tifxyz-source help no longer says the output scale equals the
+input scale.
+
+mesh_units no longer divides the scale. The measured spacing is already
+in voxels, so passing the Scroll 1 voxel size made the scale 7.91 times
+too small: 20231007101619.obj with "2000 7.91" wrote 0.00760764,
+0.0157312 (131.4 and 63.57 voxels per cell) against a measured spacing
+of 16.61 x 8.03. It now writes 0.0601765, 0.124434, the same as
+"2000 1.0". The argument is still accepted, and the help text says it
+is not used for the scale. ScrollPrize#1391 by Olga Ivanova had already kept
+mesh_units out of the scale.
+
+Any 2 x 2 output grid is now refused, not only an empty one. The tool
+prints "Error: degenerate 2 x 2 output grid (N of 4 points rasterized);
+refusing to write a tifxyz.", exits 1 and writes nothing. On ScrollPrize#1630,
+Matteo Bulloni reported a normalised-UV mesh that fills 1 of the 4
+corners and slips past a zero-only check. As Anay put it there, a 2 x 2
+grid is the clamped minimum, so it is degenerate whatever the user
+passes. Real data shows the same: a fully valid 30 x 30 window (900 of
+900 points) of the tifxyz above, exported with vc_tifxyz2obj
+--normalize-uv and converted back at the default stretch, rasterizes 1
+of 4 points. The previous commit wrote a 2 x 2 tifxyz with scale 1.0
+and exited 0. This one exits 1 and writes nothing.
+
+The Hint line after the empty-grid error is removed. It suggested a
+stretch_factor and --uv-to-obj. --uv-to-obj never changes the grid
+size, because the UV-metric grid is ceil(uv_range * stretch_factor) + 1,
+and bruniss asked ScrollPrize#1630 to stop recommending it and just report the
+invalid output. The empty-grid error itself is unchanged. The help
+note now says the tool exits non-zero when no grid point is rasterized
+or the output grid is only 2 x 2, and the stretch_factor help says a
+2 x 2 grid is refused.
+
+lasagna/tifxyz_format.md takes ScrollPrize#1683's wording for the definition of
+scale and the resampling rule. It also drops the two bullets that
+contradicted that definition (u = col * sx, and 1/sx as a
+pixels-per-unit scaling), which ScrollPrize#1683 and ScrollPrize#1391 removed too.
+
+test_obj2tifxyz_e2e gains five subcases and links vc_core to write the
+source tifxyz with QuadSurface::save. The source-scale subcases with
+and without decimation are the scenarios ScrollPrize#1683's test covers, and the
+mesh_units subcase covers the same check as ScrollPrize#1391's final test. A 2 x 2
+subcase converts a normalised 41 x 41 plane at the default stretch,
+whose 2 x 2 grid is not empty, and expects a refusal. A stretch_factor
+subcase checks that stretch 20 gives a 21 x 21 x.tif with scale 0.05
+and stretch 80 gives 81 x 81 with 0.2, one of the tests
+hendrikschilling asked for on ScrollPrize#1391. Against the previous commit the
+test fails 6 checks: 4 scale checks in the mesh_units and decimated
+source-scale subcases, and 2 in the 2 x 2 subcase. Here it passes.
+Most code comments added in the previous commit are removed, and two
+older comments that called the source scale verbatim are fixed.
+
+Refs ScrollPrize#1319
+Refs ScrollPrize#1320
+
+Co-authored-by: Matteo Bulloni <15571724+Bullo27@users.noreply.github.com>
+Co-authored-by: anay <agarodia98@gmail.com>
+```
+test_obj2tifxyz_e2e: spawn the tool with an argument list
+…
+5623840
+```
+The test built one shell string from unquoted paths and handed it to
+std::system, and it looked for the binary by splitting PATH on ':'.
+Paths with spaces broke the command, and the separator is wrong on
+Windows.
+
+The tool is now started through QProcess with a QStringList, and the
+only lookup is the VC_OBJ2TIFXYZ_BIN environment variable that the
+ctest registration already sets to $<TARGET_FILE:vc_obj2tifxyz>. The
+temporary root now contains spaces, so every subcase runs the tool on
+such paths. A run that fails to start or does not exit normally is a
+test failure instead of a non-zero code that a negative subcase could
+mistake for the expected refusal. Qt6::Core is already required by the
+test build.
+```
+vc_obj2tifxyz: reject non-default mesh_units with an explanatory error
+…
+f158afd
+```
+The previous commit stopped multiplying the scale by mesh_units, which
+is right for OBJs in base voxels, but it kept accepting an argument
+documented as micrometers per OBJ unit without doing anything with it.
+That leaves the coordinate contract implicit.
+
+The tool now supports base-voxel OBJs only and says so. mesh_units is
+deprecated: 1.0 is still accepted so existing invocations keep working,
+and any other value exits 1 before the OBJ is read, with an error that
+states that coordinates are expected in base voxels and are written
+unchanged. The help text and the per-run log carry the same contract.
+An explicit conversion from physical coordinates (--coords physical
+with --obj-um-per-unit and --voxel-size-um) is left for a follow-up.
+
+The e2e subcase that passed 7.91 now checks that 1.0 still writes the
+measured scale and that 7.91 is rejected, writes nothing and names the
+argument in the error.
+```
+test_obj2tifxyz_e2e: cover --uv-non-metric with decimation
+…
+e60c4bf
+```
+Every subcase ran the default UV-metric mode, so the non-metric path,
+whose written scale changed in 69a1c53, had no end-to-end check.
+
+A new subcase converts the normalised plane with --uv-non-metric, once
+plain and once with --uv-downsample=2. It reads the emitted x/y/z.tif,
+averages the distance between adjacent valid grid points along each
+axis and checks that the reciprocals match the written scale. It also
+pins the grid to 401 x 401 at scale 1.0 for both runs: in non-metric
+mode decimation only thins the preliminary grid used to measure the
+spacing, and the final grid is sized from the compensated measurement
+either way, which for this mesh is one cell per OBJ unit. A wrong
+compensation would change the grid even though the written scale
+would still describe it.
+```
+CVasilopoulos
+force-pushed
+the
+fix/obj2tifxyz-scale
+branch
+from
+2b60cf6 to
+e60c4bf
+Compare
+October 1, 2026 04:37
+CVasilopoulos
+commented
+Oct 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Rebased onto 56d7c3aee; this is mergeable again.
+The only conflict was lasagna/tifxyz_format.md, and it resolved in main's favour: @ItIsCuthNotCup's #1922 (3a4754ffc, merged yesterday) now documents scale as grid cells per voxel, the reciprocal of the step, which is exactly the contract this PR writes. Main's §2 and §5.1 are strictly more complete than the wording I had added — they cover the resample rule and the "never write the step" warning that I did not — so I dropped my documentation hunk entirely rather than restate it. The spec and this code now agree, where before this PR the tool contradicted both.
+Net diff is unchanged otherwise: vc_obj2tifxyz.cpp (+130/-60), the e2e test, and its CMake registration.
+To be exact about what I did and did not verify: the conflict resolution and the rebase are mechanical and I read every hunk, but I have not rebuilt this locally since the rebase — I am away from the machine I build on until Friday. The numbers in the earlier comments stand on the pre-rebase commits, which @nerln independently reproduced. CI is the build here; if anything is red I will fix it.
+@hendrikschilling — all three points from your review are still addressed in c37964671, f158afdfa and e60c4bf06. @nerln's --coords physical follow-up is waiting on this landing.
+AI-assisted, human-directed.
+CVasilopoulos
+mentioned this pull request
+Oct 1, 2026
+spiral-fitting: keep every measured equation in the minimal-fix repair model (#1855)
+#1876
+Closed
+1 task
+evilaliv3
+mentioned this pull request
+Oct 5, 2026
+vc_obj2tifxyz_legacy: size the grid by the median UV-to-3D scale, not the mean
+#1978
+Merged
+1 task done
+CVasilopoulos
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Could a maintainer add the keep-open label? This PR is ready for review (evidence is in the description), and the 28-day rule would close it on Oct 12. Happy to rebase or adjust anything. AI-assisted, human-directed.
+github-actions
+Bot
+closed this
+Oct 13, 2026
+github-actions
+Bot
+commented
+Oct 13, 2026
+Copy link
+Copy Markdown
+Contributor
+Closed automatically under the repository PR time limits because this PR has been open for 28 days without being merged.
+This was referenced Oct 13, 2026
+Resampled tifxyz grids: don't keep vertices interpolated from a missing vertex (merge_concat_runs)
+#2067
+Merged
+labels_to_zarr: use the resized label on the first run instead of writing an empty volume
+#2088
+Merged
+tifxyz writer: overwrite=True keeps the other files in the segment directory
+#2108
+Merged
+boredspaceape
+mentioned this pull request
+Oct 19, 2026
+vc_tifxyz -s: write the right scale for a resampled surface (renders came out 4x too big or small per axis)
+#2151
+Closed
+1 task done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

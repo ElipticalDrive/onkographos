@@ -1,0 +1,42 @@
+# NeRF Editing and Inpainting Procedures
+
+
+## Overview
+NeRF Editing and Inpainting Procedures are optimization strategies that modify a pre-trained Neural Radiance Field (NeRF) to remove unwanted objects, inpaint missing geometry, or alter semantic content without retraining the model from scratch. This family solves the problem of 3D scene manipulation by leveraging 2D priors (such as image inpainting or depth completion) or feature fields to guide the optimization of radiance field parameters. It sets itself apart from standard training by operating on an existing model $F_\Theta$ using external guidance or feature-based selection, rather than minimizing a standard photometric loss on ground-truth images alone.
+
+## Shared principles
+All methods in this family share the core mechanism of optimizing the parameters $\Theta$ of a pre-trained NeRF $F_\Theta$ to satisfy new constraints defined by editing masks or inpainted guidance. The rendering process remains the standard volume rendering integral [S1, 12372]:
+
+$$
+\hat{C}(r) = \sum_{i=1}^{N} T(t_i)(1 - \exp(-\sigma(t_i)\delta_i))c(t_i)
+$$
+
+where $T(t_i) = \exp(-\sum_{j=1}^{i-1} \sigma(t_j)\delta_j)$, $N$ is the number of quadrature points, $\delta_i = t_{i+1} - t_i$, and $c(t_i), \sigma(t_i)$ are color and density produced by $F_\Theta$ [S1, 12372].
+
+The optimization objective typically combines a color-guiding loss and a depth-guiding loss, or uses feature-based selection to modify density and color on a per-point basis. The process generally involves:
+1.  **Masking/Selection:** Defining regions of interest (ROI) via user masks, feature probabilities, or conflict detection.
+2.  **Guidance Generation:** Creating target RGB and Depth images for the ROI using external 2D models (e.g., Stable Diffusion, depth estimators) or feature fields.
+3.  **Joint Optimization:** Minimizing a loss function that penalizes deviations from the guidance in the ROI while preserving the original appearance outside the ROI.
+
+## Subtopics
+
+### [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md)
+**What it is:** A training strategy for single-view NeRF that avoids geometry conflicts between visible and invisible regions by computing a mask of conflicted regions and eliminating them from NeRF training [8658]. It sets itself apart by integrating a collaborative RGBD inpainting step with a progressive erasing mechanism to handle the ambiguity of unseen geometry, building on the [NeRF Training Loop](970-nerf-training-loop.md) by dynamically expanding the reference view set [8658].
+**When to choose it:** Use when starting from a single input panorama and needing to generate novel views with consistent geometry, particularly where standard single-view methods fail due to invisible region ambiguity.
+**Link:** [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md)
+
+### [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md)
+**What it is:** A framework for removing unwanted objects from a 3D scene represented by a pre-trained NeRF without requiring category-specific training data or additional training procedures [12372]. It solves the problem of intuitive 3D editing by allowing a user to specify a region for removal via a 2D mask on a single view, then optimizing the NeRF parameters to inpaint that region across all views using RGB-D priors [12372]. Unlike methods that require retraining from scratch or category-specific conditional fields, NeRF-In updates an existing model by jointly minimizing color and depth guiding losses derived from 2D image inpainting and depth completion [12372].
+**When to choose it:** Use when you have a pre-trained NeRF and want to remove specific objects using only a 2D mask and external 2D inpainting/depth tools, without retraining the entire field.
+**Link:** [NeRF-In Inpainting Optimization](12372-nerf-in-inpainting-optimization.md)
+
+### NeRF Editing Procedure
+**What it is:** A procedure that uses a Distilled Feature Field (DFF) to query the probability of a coordinate matching a set of semantic queries, allowing for deletion, colorization, and translation/rescaling of objects. It sets itself apart by operating directly on the ray sampling process, modifying density and color based on feature-matching probabilities rather than explicit geometric masks.
+**When to choose it:** Use when semantic editing (e.g., changing object color, moving objects, deleting specific classes) is required, leveraging pre-trained feature encoders like LSeg or DINO.
+**Link:** [DFF (Decomposing NeRF for Editing Via Feature Field Distillation)](12068-dff-decomposing-nerf-for-editing-via-feature-field-distillat.md)
+
+## Background
+The concept of editing NeRFs emerged as the technology matured from static scene reconstruction to interactive 3D content creation. Early methods focused on retraining, but later approaches like NeRF-In and DFF introduced optimization-based editing to preserve the original scene's fidelity while modifying specific elements. The Progressive Inpainting-and-Erasing method addresses the specific challenge of single-view NeRFs, where the lack of multi-view constraints leads to geometry conflicts in unseen regions. These methods build on the foundational [NeRF Training Loop](970-nerf-training-loop.md) and [Scene Representation and Architecture](11368-scene-representation-and-architecture.md).
+
+## Sources
+[S1] Decomposing NeRF for Editing Via Feature Field Distillation, https://doi.org/10.52202/068431-1694, fetched 2026-10-26

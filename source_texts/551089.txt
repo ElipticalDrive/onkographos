@@ -1,0 +1,200 @@
+Contribute to takashikasuya/IfcToUsd development by creating an account on GitHub.
+
+Voxel fill flood-fill robustness + Morton index compression (Issues #36, #38) by takashikasuya · Pull Request #49 · takashikasuya/IfcToUsd · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+takashikasuya
+commented
+Jul 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Issue #36 / E7-2: voxelize_mesh(..., fill=True) no longer builds a trimesh.Trimesh and calls .contains() (ray-cast point-in-mesh parity) to detect interior voxels. It now runs a pure voxel-grid exterior flood-fill (6-neighbor BFS from outside the surface-voxel AABB, treating surface voxels as walls) and fills whatever cells the flood-fill can't reach.
+Real-data investigation on files/ToyodaLab.ifc showed trimesh's watertightness check false-positives on 71% of elements (an artifact of weld-vertices=False's per-face vertices) and, more importantly, that mesh.contains() itself gives ray-direction-dependent disagreements on real non-manifold furniture geometry (up to 182/3375 sample points). Flood-fill is insensitive to both issues since it only depends on the surface-voxel shell having no gaps.
+Documented (and tested) the one real limitation: a shape with a genuine hole (true boundary edge, e.g. a box missing a face) leaks exterior flood-fill through the hole, so its interior stays unfilled — this is the correct outcome for a shape that isn't actually closed, not a robustness gap.
+Removed now-dead trimesh/logging imports and the is_watertight warning from voxel.py.
+Issue #38 / E7-4: voxels.json's per-element indices (a naive flat list of Morton codes) is now delta + run-length encoded (encode_morton_indices()/decode_morton_indices()), since sorted storage (already mandated by spec.md §2) makes consecutive deltas small and repetitive.
+Measured on synthetic large voxel grids: ~99.8% smaller for a solid-filled cube (typical of fill=True walls/floors/slabs), ~73% smaller for a surface-only shell (the default, less regular case).
+viewer.js's decodeMortonIndices() mirrors the Python decoder but passes a plain array straight through unchanged, so older v2-shaped indices (and the client-side v1-conversion path) still load with no special-casing.
+Bumped voxels.json to v3 (only the indices representation changed from v2) and updated docs/viewer/spec.md §2 accordingly.
+Also refreshed CLAUDE.md's stale "Planned work" section: Epic E7 is now fully done, and Epic E8 (previously listed as unimplemented there) was actually completed and merged in an earlier session (PRs #47/#48).
+Test plan
+Issue [E7-2] fill=True内部充填判定の非watertightメッシュへの頑健化 #36: new touching-non-manifold-cubes test and genuine-hole (missing-face) limitation test; existing voxel tests pass unchanged
+Issue [E7-4] Mortonインデックス配列の圧縮（voxels.json） #38: new JSON-size-reduction measurement test; encode/decode round-trip tests; JS/Python decode parity test (Playwright)
+Full suite: 240 passed
+Both changes adversarially reviewed — no real bugs found; minor findings (test threshold margin, cosmetic naming) fixed
+Closes #36. Closes #38.
+claude
+added 2 commits
+July 7, 2026 13:59
+fix(voxel): replace ray-cast interior fill with grid flood-fill (Issue …
+…
+9fc26f9
+```
+…#36)
+
+trimesh.contains() ray-parity was unreliable on real ToyodaLab.ifc data:
+weld-vertices=False means every face has its own vertices, so trimesh's
+edge-sharing watertightness check always reports non-watertight (71% of
+converted elements), and for multi-body touching geometry (furniture,
+building-element proxies) the ray-cast itself disagreed across ray
+directions on the same points. Structural elements (walls/columns/slabs)
+were already fully watertight and unaffected; windows/doors are
+legitimately non-volumetric and have no consistent "interior" to begin
+with.
+
+_fill_voxels now floods the voxel grid's exterior via 6-neighbor BFS from
+outside the surface-voxel AABB and fills whatever it can't reach, instead
+of asking trimesh whether a point is inside the mesh. This depends only
+on the surface voxel shell having no gaps, not on mesh topology or ray
+numerics, so it's robust to unwelded per-face vertices and non-manifold
+touching bodies. It still can't fill through a genuine hole (a real
+boundary edge, e.g. IfcWindow) — that's an inherent limitation of any
+surface-based fill and is now covered by a regression test documenting
+it, alongside a synthetic touching-cubes test reproducing the
+non-manifold defect class found in the real data.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01193RLSMFn12ou1wq7eDavo
+```
+feat(voxel): delta+RLE compress Morton indices in voxels.json (Issue #38
+…
+0e60a0f
+```
+)
+
+Each element's `indices` in voxels.json was a flat sorted JSON array of
+Morton (Z-order) codes, which grows linearly with voxel count and, since
+codes can be large 63-bit integers, dominates output size on big models.
+
+encode_morton_indices()/decode_morton_indices() replace it with a
+{"base": ..., "deltas": [[delta, run_length], ...]} encoding: since
+spec.md already mandates sorted storage, consecutive deltas are small
+and often repeat (long runs of the same delta are common in filled
+regions), so delta + run-length coding compresses well. Measured on
+synthetic grids: ~99.8% smaller for a solid-filled cube, ~73% smaller
+for a surface-only shell (the default, less regular case) -- both
+covered by a dedicated size-reduction test.
+
+viewer.js's decodeMortonIndices() is the JS-side mirror, and passes a
+plain array straight through unchanged, so v2-shaped indices (older
+files, or the client-side v1-to-current converter's output) still load
+without any special-casing.
+
+Bumped voxels.json to v3 (indices encoding is the only change from v2)
+and updated spec.md, all affected tests, and CLAUDE.md accordingly.
+Also refreshed CLAUDE.md's stale "Planned work" section: Epic E7 is now
+fully done and Epic E8 (previously listed as unimplemented) was actually
+completed and merged in an earlier session (PRs #47/#48).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01193RLSMFn12ou1wq7eDavo
+```
+takashikasuya
+mentioned this pull request
+Jul 7, 2026
+[E7-4] Mortonインデックス配列の圧縮（voxels.json）
+#38
+Closed
+takashikasuya
+changed the title
+Replace ray-cast interior fill with voxel-grid flood-fill (Issue #36 / E7-2)
+Voxel fill flood-fill robustness + Morton index compression (Issues #36, #38)
+Jul 7, 2026
+takashikasuya
+requested a review
+from Copilot
+July 7, 2026 21:21
+Copilot started reviewing on behalf of
+takashikasuya
+July 7, 2026 21:22
+View session
+Copilot
+AI
+reviewed
+Jul 7, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR improves voxel pipeline robustness and storage efficiency by (1) replacing fill=True interior detection with a voxel-grid exterior flood-fill (avoiding trimesh.contains() instability on real non-manifold geometry) and (2) compressing voxels.json Morton indices via delta + run-length encoding, bumping the schema to v3 and updating the viewer/tests/docs accordingly.
+Changes:
+Replace voxelize_mesh(..., fill=True) interior filling with 6-neighbor exterior flood-fill on the voxel grid (Issue #36).
+Delta+RLE encode per-element Morton indices in voxels.json (v3), add Python/JS decode helpers and parity tests (Issue #38).
+Update docs/backlog/CLAUDE and adjust tests/CLI expectations for voxels.json v3.
+Reviewed changes
+Copilot reviewed 11 out of 11 changed files in this pull request and generated 1 comment.
+Show a summary per file
+File
+Description
+tests/test_voxelize_cli.py
+Update CLI voxel JSON version assertion to v3.
+tests/test_voxel.py
+Add tests for Morton indices encode/decode and flood-fill fill robustness/limitations.
+tests/test_voxel_viewer_e2e.py
+Update E2E expectations to decode v3 indices; add JS/Python decode parity test.
+tests/test_voxel_v1_convert.py
+Update v1 conversion tests to expect current schema version (v3) and decoded indices.
+tests/test_voxel_json.py
+Update schema assertions to v3; add JSON-size reduction measurement test for encoding.
+tests/test_serve.py
+Update serve output voxel JSON version assertion to v3.
+ifc2usd/voxel.py
+Implement flood-fill based interior filling; implement Morton indices delta+RLE encode/decode; write v3 JSON.
+ifc2usd/viewer/viewer.js
+Add decodeMortonIndices() and use it when building voxel instancing data.
+docs/viewer/spec.md
+Document v3 schema and the new indices encoding + backward-compat behavior.
+docs/viewer/backlog.md
+Update Epic E7 status to reflect completed work (incl. E7-2/E7-4).
+CLAUDE.md
+Refresh project overview notes to reflect v3 JSON + flood-fill and encoding behavior.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+ifc2usd/voxel.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+docs(voxel): fix stale v2 wording in convert_v1_voxel_json docstring
+…
+c7a811c
+```
+Copilot review on PR #49 caught that the indices/metadata bullets still
+said "v2" while the docstring intro already says "current schema" post
+the v3 bump.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01193RLSMFn12ou1wq7eDavo
+```
+takashikasuya
+merged commit e780050
+into
+master
+Jul 7, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

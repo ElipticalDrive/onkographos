@@ -1,0 +1,39 @@
+# View-Dependent Appearance Representations
+
+Also called: Gaussian Appearance Encoding
+
+## Overview
+This family encompasses methods for modeling view-dependent appearance within 3D Gaussian splats, addressing the limitation of static isotropic color vectors in standard Gaussian Splatting [S1, unofficial]. It distinguishes itself from sibling methods like [Spec-Gaussian](8087-spec-gaussian.md) by providing a modular framework for various encoding strategies, including fixed basis functions, neural feature vectors, explicit caching structures, and codebook quantization [S1, unofficial].
+
+## Shared principles
+All methods in this family share the following mechanism and data structure extensions:
+
+1.  **Extended Primitive Attributes**: Each 3D Gaussian primitive $i$ stores additional appearance attributes $\mathbf{a}_i$ alongside the standard geometric parameters (position $\mathbf{\mu}_i$, covariance $\mathbf{\Sigma}_i$, opacity $\alpha_i$).
+2.  **View-Dependent Evaluation**: The final color $C(p)$ at pixel $p$ is computed by querying $\mathbf{a}_i$ with the viewing direction $\mathbf{v}$ and potentially other parameters (e.g., light direction $\mathbf{l}$, surface normal $\mathbf{n}$), rather than using a static isotropic color vector.
+3.  **Alpha-Blending**: The rendering equation remains a front-to-back alpha blending process, but the contribution $c_i$ of each Gaussian is modulated by the appearance function:
+    $$ C(p) = \sum_{i \in \text{sorted}} c_i(\mathbf{v}, \mathbf{a}_i) \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    where $c_i$ is the color contribution derived from the specific appearance representation [S1, unofficial].
+4.  **Trade-off**: The choice of representation involves a trade-off between storage bandwidth, computational cost during decoding, and the complexity of the appearance being modeled [S1, unofficial].
+
+## Subtopics
+
+### Fixed Basis Functions
+Uses Spherical Harmonics (SH) for view-dependent color. Also supports Anisotropic Spherical Gaussians (ASG) for specular components and Spherical Gaussians (SG) for balancing quality and speed. Supports PBR parameters and indirect illumination. Choose this for standard real-time rendering where analytical approximations are sufficient.
+
+### Neural Feature Vectors
+Each point is associated with a compact Neural Feature Vector decoded using a small MLP. Choose this for high-fidelity view-dependent effects where a direct mapping from position/direction to color is needed without explicit spatial caching.
+
+### Triplane
+Neural features are cached in explicit data structures. Position is projected onto axis-aligned feature planes, and final feature $f_t$ is obtained by concatenating three trilinear interpolated features. Choose this for bounded scenes where axis-aligned projection is efficient.
+
+### Hash Grid
+Features are interpolated from a multi-resolution grid stored using instant-ngp. Supports unbounded scenes via contraction technique. Choose this for unbounded or large-scale scenes requiring multi-resolution detail.
+
+### Codebook Quantization
+A discrete codebook of vector codes is learned during training. Rendering requires only a simple lookup into the codebook using stored indices, exploiting lower bandwidth and computational costs. Choose this for maximum rendering efficiency and compact storage.
+
+## Background
+Originated in the context of enhancing 3D Gaussian Splatting frameworks to support complex material and lighting decomposition. The GauStudio framework presents these methods as modular components for initialization, optimization, enhancement, and compression of 3D Gaussians [S1, unofficial].
+
+## Sources
+[S1] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)

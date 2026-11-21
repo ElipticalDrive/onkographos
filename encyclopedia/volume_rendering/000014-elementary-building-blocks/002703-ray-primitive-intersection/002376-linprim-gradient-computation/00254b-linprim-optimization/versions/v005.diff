@@ -1,0 +1,106 @@
+--- v004.md
++++ v005.md
+@@ -17,5 +17,5 @@
+     *   $\alpha_i$: Scalar opacity.
+     *   $\mathbf{f}_i$: Color/feature vector.
+-*   **Ray Space Geometry:** Primitives are transformed into ray space for intersection computation. The position of corners in ray space depends on the ray space center and the offsets to it [S2].
++*   **Ray Space Geometry:** Primitives are transformed into ray space for intersection computation, where the position of corners depends on the ray space center and offsets to it [S2].
+ 
+ **Numbered Steps:**
+@@ -28,9 +28,10 @@
+ 3.  **Rasterization Backpropagation:**
+     *   Backpropagate through the alpha blending process to obtain gradients with respect to each primitive's alpha $\alpha_i$ and color $\mathbf{f}_i$ [S2].
+-    *   The gradient of alpha $\frac{\partial \mathcal{L}}{\partial \alpha_i}$ indicates whether the primitive should be more or less transparent. This implies whether the intersections should move closer together or farther apart along the pixel's ray [S2].
++    *   The gradient of alpha $\frac{\partial \mathcal{L}}{\partial \alpha_i}$ indicates whether the primitive should be more or less transparent, implying whether the intersections should move closer together or farther apart along the pixel's ray [S2].
+     *   Propagate gradients through the MTIA to obtain gradients with respect to the intersection depths $\mathbf{i}$ [S2].
+     *   Aggregate gradients over the triangle corners and both intersections to propagate gradients from alpha to the geometric features (primitive center and vertices) [S2]. The intersection depth is influenced by the position of each corner of the triangle [S2].
+ 4.  **Preprocessing Backpropagation:**
+-    *   The gradients obtained in Step 3 are in ray space. Reverse the projection and view transformations to yield world space gradients [S2].
++    *   The gradients obtained in Step 3 are in ray space [S2].
++    *   Reverse the projection and view transformations to yield world space gradients [S2].
+     *   Compute final center gradients by combining the propagated ray space center gradients with the impact of the position on the ray space approximation and view-dependent color [S2].
+     *   Split the gradient flow with respect to the corners when undoing the rotation, propagating gradients onto quaternion and distance features respectively [S2].
+@@ -44,15 +45,11 @@
+ **Pseudocode:**
+ ```python
+-def linprim_optimization(primitives, ground_truth_images, cameras, gamma, num_epochs, lr_pos, lr_dist):
+-    # primitives: list of objects with attributes mu, Sigma, alpha, f
+-    # cameras: list of objects with view_matrix, proj_matrix
+-    # lr_pos, lr_dist: base learning rates for position and distance features
++def linprim_optimization(primitives, ground_truth_images, cameras, gamma, num_epochs, lr_pos_base, lr_dist_base):
++    # Approximate scene size for learning rate adjustment [S2]
++    scene_size = max(camera.position.norm() for camera in cameras)
++    lr_pos = lr_pos_base * scene_size
++    lr_dist = lr_dist_base * scene_size
+     
+-    # Approximate scene size for learning rate adjustment [S2]
+-    scene_size = max(camera.position.norm() for camera in cameras) # [G]
+-    lr_pos *= scene_size
+-    lr_dist *= scene_size
+-    
+-    # Initialize optimizer state [G]
++    # Initialize optimizer state for ADAM [S2]
+     optimizer_state = {p: {'m': 0.0, 'v': 0.0} for p in primitives}
+     
+@@ -60,22 +57,28 @@
+         total_loss = 0.0
+         for image, camera in zip(ground_truth_images, cameras):
+-            # 1. Forward Rendering
+-            ray_space_prims = [p.transform(camera.view_matrix, camera.proj_matrix) for p in primitives] # [G]
+-            rendered_image = rasterize_linprims(ray_space_prims, camera) # Not given in the sources.
++            # 1. Forward Rendering: Transform primitives to ray space, compute intersections via MTIA, rasterize [S2]
++            ray_space_prims = [transform_to_ray_space(p, camera) for p in primitives]
++            rendered_image = rasterize_linprims(ray_space_prims, camera)
+             
+             # 2. Loss Computation [S1, S2]
+             l1_loss = sum((rendered_image - image).abs()) / rendered_image.numel()
+-            ssim_loss = compute_ssim_window(rendered_image, image) # Not given in the sources.
++            ssim_loss = compute_ssim_window(rendered_image, image)
+             loss = (1 - gamma) * l1_loss + gamma * ssim_loss
+             
+             # 3. Rasterization Backpropagation [S2]
+-            d_alpha, d_color = backprop_blending(loss, rendered_image) # Not given in the sources.
+-            d_intersection = backprop_mtia(d_alpha, ray_space_prims) # Not given in the sources.
+-            d_geometric_ray = aggregate_geometric_gradients(d_intersection, ray_space_prims) # Not given in the sources.
++            # Backprop through blending to get d_alpha and d_color
++            d_alpha, d_color = backprop_blending(loss, rendered_image)
++            # Alpha gradient indicates transparency change, implying intersection depth adjustments
++            d_intersection = backprop_mtia(d_alpha, ray_space_prims)
++            # Aggregate over corners and intersections to get geometric gradients in ray space
++            d_geometric_ray = aggregate_geometric_gradients(d_intersection, ray_space_prims)
+             
+             # 4. Preprocessing Backpropagation [S2]
+-            d_geometric_world = backprop_preprocessing(d_geometric_ray, camera) # Not given in the sources.
+-            d_mu_world = combine_center_gradients(d_geometric_world, primitives, camera) # Not given in the sources.
+-            d_quat, d_dist = split_corner_gradients(d_geometric_world, primitives) # Not given in the sources.
++            # Reverse projection and view transformations to yield world space gradients
++            d_geometric_world = backprop_preprocessing(d_geometric_ray, camera)
++            # Combine ray space center gradients with position impact on approximation and color
++            d_mu_world = combine_center_gradients(d_geometric_world, primitives, camera)
++            # Split gradient flow w.r.t corners when undoing rotation onto quaternion and distance
++            d_quat, d_dist = split_corner_gradients(d_geometric_world, primitives)
+             
+             # 5. Update Gradients
+@@ -89,20 +92,10 @@
+         
+         # 6. Parameter Update [S2]
+-        update_adam_step(primitives, optimizer_state, lr_pos, lr_dist) # Not given in the sources.
++        update_adam_step(primitives, optimizer_state, lr_pos, lr_dist)
+         
+         # Adaptive control for population N_p [S1, S2]
+-        primitives.adaptive_control() # Not given in the sources.
++        primitives.adaptive_control()
+         
+     return primitives
+-
+-# Helper definitions
+-def rasterize_linprims(ray_space_prims, camera): ... # Not given in the sources.
+-def backprop_blending(loss, rendered_image): ... # Not given in the sources.
+-def backprop_mtia(d_alpha, ray_space_prims): ... # Not given in the sources.
+-def aggregate_geometric_gradients(d_intersection, ray_space_prims): ... # Not given in the sources.
+-def backprop_preprocessing(d_ray, camera): ... # Not given in the sources.
+-def combine_center_gradients(d_world, primitives, camera): ... # Not given in the sources.
+-def split_corner_gradients(d_world, primitives): ... # Not given in the sources.
+-def update_adam_step(primitives, state, lr_pos, lr_dist): ... # Not given in the sources.
+ ```
+ 

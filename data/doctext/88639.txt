@@ -1,0 +1,1125 @@
+# Sampled DMC
+This crate defines a fast implementation for the [Dual Marching Cubes technique](https://www.cs.rice.edu/~jwarren/papers/dmc.pdf),
+also known as Linear Hashed Marching Cubes, along with a concurrent octree structure for storing node data.
+
+Unlike [isosurface](https://docs.rs/isosurface/0.0.4/isosurface/), this crate does NOT expect Signed Distance Functions (SDFs) or use them in any way.
+The input of the mesh creation functions is the data octree itself, not a sampling source, which makes it appropiate for situations where storing
+the sampled points is appropiate (i.e. complex SDFs, destructible environments or objects with different LODs).
+
+## TODO
+- Allow for inputting a "LOD function" which determines how detailed each point should be (as in how deep into the octree it should go)
+- Add benchmarks
+
+### src/dmc.rs
+```
+//! Contains the Dual Marching Cubes implementation, along with a function
+//! ([`mesh_from_octree`]) to interface with it.
+//!
+//! # Explanation
+//! The goal here is to adapt the Marching Cubes algorithm to hashed octrees using Morton keys.
+//! The [original Marching Cubes algorithm](http://paulbourke.net/geometry/polygonise/) used an
+//! uniform grid to generate the final mesh. However, with this approach, we use the dual grid
+//! generated from the octree given. The dual grid is composed of vertices (One at the center of
+//! each leaf node) and edges, which connect vertices of adjacent leaves.
+//!
+//! # References
+//! Refer to the comments at the start of [`src/lib.rs`](https://github.com/alexdevteam/dmc/blob/main/src/lib.rs).
+
+use crate::duals::DualGrid;
+use crate::octree::*;
+use crate::tables;
+use crate::util::*;
+
+use cgmath::{Point3, Vector3};
+use rayon::prelude::*;
+use std::mem::MaybeUninit;
+
+/// Creates a mesh from an octree full of values sampled from a Signed Distance Function (SDF).
+/// The triangles of the resulting mesh will be in **counter-clockwise** order.
+/// # Panics
+/// Should never panic. If it does, it's an error in the crate; please report it.
+pub fn mesh_from_octree<T: McNode>(octree: &HashedOctree<T>, scale: f32) -> Mesh {
+    let dual = DualGrid::from_octree(octree);
+
+    // Let's process the dual volumes one by one, concurrently.
+    let vertices = dual
+        .volumes
+        .into_par_iter()
+        .map(|volume| {
+            let VolumeData { nodes, cube_index } = fetch_volume_data(volume, &octree);
+            (volume, nodes, cube_index)
+        })
+        .filter(|(_, _, cube_index)| is_cell_visible(*cube_index))
+        .map(|(volume, nodes, cube_index)| {
+            let cell_data = calculate_mc_vertex_data(volume, nodes, cube_index, scale);
+            (cell_data, cube_index)
+        })
+        .flat_map_iter(|(cell_data, cube_index)| obtain_mc_vertices(cell_data, cube_index))
+        .collect::<Vec<_>>();
+
+    // Since the algorithm doesn't merge vertices yet, the indices to use are just the items in
+    // the `vertices` vector incrementally.
+    let indices = (0..vertices.len() as u32).collect();
+
+    Mesh { indices, vertices }
+}
+
+/// A simple mesh type that holds a vector of vertices and another one of indices.
+/// This type is meant to be converted to your own mesh type via the [`std::convert::From`] trait.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mesh {
+    /// The vertices of the mesh.
+    pub vertices: Vec<Vertex>,
+    /// The vertex indices of the mesh.
+    pub indices: Vec<u32>,
+}
+
+/// A 3D vertex that holds a position and a normal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vertex {
+    /// The position of the vertex.
+    pub position: cgmath::Point3<f32>,
+    /// The normalized normal of the vertex.
+    pub normal: cgmath::Vector3<f32>,
+}
+
+/// Provides the functions that a node must define to create a mesh out of a group of them.
+pub trait McNode: Copy + Send + Sync {
+    /// This function should return the distance from this node's center to its contour. This can be
+    /// precalculated using a Signed Distance Function (SDF).
+    ///
+    /// # Resources
+    /// [Here](https://iquilezles.org/www/articles/distfunctions/distfunctions.htm) is a link with
+    /// basic SDFs and operations over them.
+    fn density(&self) -> f32;
+
+    /// This function should return the gradient of the SDF sampled, that is, the normal of the node
+    /// if it were on the surface of the SDF.
+    ///
+    /// # How To Calculate The Gradient
+    /// The gradient of a SDF is its derivative. However, if you don't want to calculate it (Which
+    /// you won't, because it will get complex really quickly), you can approximate it with the
+    /// following formula:
+    /// ```rust
+    /// use cgmath::*;
+    ///
+    /// fn sdf(pos: Point3<f32>) -> f32 {
+    ///     // Calculate SDF here...
+    ///     pos.distance(point3(0.,0.,0.)) - 0.4
+    /// }
+    ///
+    /// pub fn sdf_gradient(pos: Point3<f32>) -> Vector3<f32> {
+    ///     vec3(
+    ///        sdf(point3(pos.x + f32::EPSILON, pos.y, pos.z))
+    ///            - sdf(point3(pos.x - f32::EPSILON, pos.y, pos.z)),
+    ///        sdf(point3(pos.x, pos.y + f32::EPSILON, pos.z))
+    ///             - sdf(point3(pos.x, pos.y - f32::EPSILON, pos.z)),
+    ///        sdf(point3(pos.x, pos.y, pos.z + f32::EPSILON))
+    ///             - sdf(point3(pos.x, pos.y, pos.z - f32::EPSILON)),
+    ///     )
+    ///     .normalize()
+    /// }
+    /// ```
+    fn normal(&self) -> Vector3<f32>;
+}
+
+struct CellVertexData {
+    pub positions: [Point3<f32>; 12],
+    pub normals: [Vector3<f32>; 12],
+}
+
+fn obtain_mc_vertices(
+    cell_data: CellVertexData,
+    cube_index: u8,
+) -> impl std::iter::Iterator<Item = Vertex> {
+    tables::TRI_TABLE[cube_index as usize]
+        .chunks(3)
+        .take_while(|chunk| chunk[0] != -1)
+        .flat_map(move |chunk| {
+            let (vtx1, vtx2, vtx3) = (
+                cell_data.positions[chunk[0] as usize],
+                cell_data.positions[chunk[1] as usize],
+                cell_data.positions[chunk[2] as usize],
+            );
+            let (n1, n2, n3) = (
+                cell_data.normals[chunk[0] as usize],
+                cell_data.normals[chunk[1] as usize],
+                cell_data.normals[chunk[2] as usize],
+            );
+
+            std::array::IntoIter::new([(vtx1, n1), (vtx2, n2), (vtx3, n3)]).map(
+                move |(vtx, norm)| Vertex {
+                    position: vtx.into(),
+                    normal: norm.into(),
+                },
+            )
+        })
+}
+
+struct VolumeData {
+    pub nodes: [NodeData; 8],
+    pub cube_index: u8,
+}
+
+struct NodeData {
+    pub density: f32,
+    pub normal: Vector3<f32>,
+}
+
+fn calculate_mc_vertex_data(
+    volume: [MortonKey; 8],
+    nodes: [NodeData; 8],
+    cube_index: u8,
+    vertex_position_scale: f32,
+) -> CellVertexData {
+    /// Bindings from volume vertex (index) to Marching Cubes corner vertex (item).
+    const MC_CUBE_EDGES: [(usize, usize); 12] = [
+        (4, 5),
+        (1, 5),
+        (0, 1),
+        (0, 4),
+        (6, 7),
+        (3, 7),
+        (2, 3),
+        (2, 6),
+        (4, 6),
+        (5, 7),
+        (1, 3),
+        (0, 2),
+    ];
+
+    let mut positions: [Point3<f32>; 12] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    let mut normals: [Vector3<f32>; 12] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    let edges = tables::EDGE_TABLE[cube_index as usize];
+
+    (0..12)
+        .into_iter()
+        .filter(|i| (edges & (1 << i)) > 0)
+        .for_each(|i| {
+            let (v1_i, v2_i) = MC_CUBE_EDGES[i];
+            let factor = interpolation_factor(nodes[v1_i].density, nodes[v2_i].density);
+            positions[i] = (volume[v1_i]
+                .position()
+                .interpolate(volume[v2_i].position(), factor)
+                * vertex_position_scale)
+                .into();
+            normals[i] = nodes[v1_i]
+                .normal
+                .interpolate(nodes[v2_i].normal, factor)
+                .into();
+        });
+
+    CellVertexData { positions, normals }
+}
+
+fn is_cell_visible(cube_index: u8) -> bool {
+    cube_index != 0 && cube_index != 0xFF
+}
+
+fn fetch_volume_data<T: McNode>(volume: [MortonKey; 8], octree: &HashedOctree<T>) -> VolumeData {
+    const VOLUME_TO_MC_VERTEX: [usize; 8] = [3, 2, 7, 6, 0, 1, 4, 5];
+
+    let mut nodes: [MaybeUninit<NodeData>; 8] = unsafe { MaybeUninit::uninit().assume_init() };
+
+    let mut cube_index = 0;
+    volume.iter().enumerate().for_each(|(volume_i, &key)| {
+        let mc_i = VOLUME_TO_MC_VERTEX[volume_i];
+
+        if key == MortonKey::none() {
+            // If any of the vertices of the volume are null, that means that the volume is
+            // in the edge of the octree, and as such should not be processed since there
+            // is not enough data to form a marching cubes mesh out of it.
+            return;
+        }
+
+        match octree.value(key) {
+            Some(node) => {
+                let (density, normal) = (node.density(), node.normal());
+                if density > 0. {
+                    cube_index |= 1 << mc_i;
+                }
+                nodes[volume_i] = MaybeUninit::new(NodeData { density, normal });
+            }
+
+            // This node should ALWAYS exist, since the duals algorithm always returns
+            // either 0 (MortonKey::none()) or valid nodes as volume vertices.
+            None => unreachable!(),
+        }
+    });
+
+    let nodes: [NodeData; 8] = unsafe { std::mem::transmute(nodes) };
+
+    VolumeData { nodes, cube_index }
+}
+
+/// Given two values p1 and p2, estimates a relative value R such that `p1 + (p2 - p1) * R == 0`.
+/// Used to estimate where to place marching cube vertices to match up the isosurface.
+/// [Visual example](https://editor.p5js.org/alexinfdev/sketches/ldqHrNcr8)
+fn interpolation_factor(p1: f32, p2: f32) -> f32 {
+    if p1.abs() < 0.00001 {
+        p1
+    } else if p2.abs() < 0.00001 {
+        p2
+    } else if (p1 - p2).abs() < 0.00001 {
+        p1
+    } else {
+        (0. - p1) / (p2 - p1)
+    }
+}
+```
+
+### src/duals.rs
+```
+//! Defines the dual grid generation for a given octree with the [`DualGrid::from_octree`] function.
+//!
+//! For more information about what is a dual grid, check out the [`DualGrid`] struct.
+
+use crate::octree::*;
+use rayon::prelude::*;
+
+/// Type that defines a grid made from the dual edges of an octree.
+///
+/// # Visual Example
+/// [Here's an example simplified in a quadtree.](https://imgur.com/7YJrNLK)
+///
+/// # Possible Implementation
+/// [Here's a possible implementation simplified in a quadtree](https://editor.p5js.org/alexinfdev/sketches/4I0506NqA),
+/// without comments or nice code: It's meant mostly as a visual guide of what the dual grid looks
+/// like.
+pub struct DualGrid {
+    /// The cells or volumes that make up this dual grid.
+    /// Each one is composed by, at most, 8 different dual vertices.
+    /// They are always presented in the same order: The same one as defined in
+    /// [`dmc::octree::OctreeIndex`].
+    ///
+    /// # Notes
+    /// Some cells will have shared vertices, however, their topology will be the same one as a
+    /// cube, so the Marching Cubes algorithm will work over them.
+    pub volumes: Vec<[MortonKey; 8]>,
+}
+
+impl DualGrid {
+    /// Constructs a dual grid from a given octree.
+    /// You won't require to create an object of this type yourself unless you plan on processing
+    /// the duals. If you want to generate a mesh from an octree, use
+    /// [`crate::dmc::mesh_from_octree`].
+    /// # Example
+    /// ```rust
+    /// use dmc::octree::*;
+    /// use dmc::duals::*;
+    ///
+    /// let mut octree = HashedOctree::new(1);
+    /// octree.subdivide(MortonKey::root()).for_each(drop);
+    ///
+    /// assert!(octree.is_subdivided(MortonKey::root()));
+    /// assert_eq!(
+    ///     octree.leaves(MortonKey::root()),
+    ///     vec![
+    ///         MortonKey(0b1111),
+    ///         MortonKey(0b1110),
+    ///         MortonKey(0b1101),
+    ///         MortonKey(0b1100),
+    ///         MortonKey(0b1011),
+    ///         MortonKey(0b1010),
+    ///         MortonKey(0b1001),
+    ///         MortonKey(0b1000),
+    ///     ]
+    /// );
+    ///
+    /// let duals = DualGrid::from_octree(&octree);
+    ///
+    /// assert_eq!(
+    ///     duals.volumes,
+    ///     vec![[
+    ///         MortonKey(0b1111),
+    ///         MortonKey(0b1110),
+    ///         MortonKey(0b1101),
+    ///         MortonKey(0b1100),
+    ///         MortonKey(0b1011),
+    ///         MortonKey(0b1010),
+    ///         MortonKey(0b1001),
+    ///         MortonKey(0b1000),
+    ///     ]]
+    /// );
+    /// ```
+    pub fn from_octree<T: Copy + Send + Sync>(octree: &HashedOctree<T>) -> Self {
+        let leaves = octree.leaves(MortonKey::root());
+
+        let volumes = leaves
+            .into_par_iter()
+            .map(|leaf| {
+                // Get the vertex codes of the leaf.
+                leaf2vert(leaf)
+            })
+            .flat_map_iter(|(vertex_lv, vertex_keys)| {
+                // To obtain all the vertices and cells contained in the dual grid, we need to execute and filter
+                // everything in a precise order in order to only process each vertex exactly once.
+                std::array::IntoIter::new(vertex_keys)
+                    .enumerate()
+                    .take_while(|(_vertex_i, vertex_k)| vertex_k != &MortonKey::none())
+                    .flat_map(move |(vertex_i, vertex_k)| {
+                        // Get all the neighbours to this vertex.
+                        let neighbours = vert2leaf(vertex_k, vertex_lv);
+
+                        // Filter the neighbours and only accept these with the same level as this leaf.
+                        std::iter::once(())
+                            .take_while(move |()| {
+                                for neighbour_i in 0..8 {
+                                    // Skip processing the node we came from!
+                                    if neighbour_i == vertex_i {
+                                        continue;
+                                    }
+
+                                    let neighbour_k = neighbours[neighbour_i];
+
+                                    // Skip the neighbour if the leaf `leaf` is deeper.
+                                    if !octree.node_exists(neighbour_k) {
+                                        continue;
+                                    }
+
+                                    // Skip the whole vertex if the neighbour is deeper than the leaf,
+                                    // since it will be processed by that neighbour.
+                                    if octree.is_subdivided(neighbour_k) {
+                                        return false;
+                                    }
+
+                                    // Neighbour has the same level as this leaf: It's a tie. Process the vertex
+                                    // only if neighbour_i < vertex_i.
+                                    if neighbour_i < vertex_i {
+                                        return false;
+                                    }
+                                }
+                                true
+                            })
+                            .map(move |()| {
+                                let mut keys: [MortonKey; 8] =
+                                    unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+                                (0..8).for_each(|neighbour_i| {
+                                    let mut neighbour_k = neighbours[neighbour_i];
+                                    while neighbour_k != MortonKey::none()
+                                        && !octree.node_exists(neighbour_k)
+                                    {
+                                        neighbour_k = neighbour_k.parent();
+                                    }
+                                    keys[neighbour_i] = neighbour_k;
+                                });
+                                keys
+                            })
+                    })
+            })
+            .collect();
+
+        Self { volumes }
+    }
+}
+
+// Dilation constants
+const DIL_X: u64 = 0b001001001001001001001001001001001001001001001001001001001001001u64;
+const DIL_Y: u64 = 0b010010010010010010010010010010010010010010010010010010010010010u64;
+const DIL_Z: u64 = 0b100100100100100100100100100100100100100100100100100100100100100u64;
+
+/// Returns morton-like keys for the 8 vertices belonging to a leaf node, along with their level.
+fn leaf2vert(key: MortonKey) -> (u32, [MortonKey; 8]) {
+    let level = key.level();
+    let level_key: u64 = 1 << (3 * level);
+
+    let mut keys: [MortonKey; 8] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    (0..8u64).into_iter().for_each(|vertex_i| {
+        // Perform the dilated integer addition of k + i.
+        let vertex_key = (((key.0 | !DIL_X) + (vertex_i & DIL_X)) & DIL_X)
+            | (((key.0 | !DIL_Y) + (vertex_i & DIL_Y)) & DIL_Y)
+            | (((key.0 | !DIL_Z) + (vertex_i & DIL_Z)) & DIL_Z);
+
+        // Check if the vertex is within the volume of the octree and not on its surface
+        // (Check for overflows)
+        keys[vertex_i as usize] = if (vertex_key >= (level_key << 1))
+            || ((vertex_key - level_key) & DIL_X) == 0
+            || ((vertex_key - level_key) & DIL_Y) == 0
+            || ((vertex_key - level_key) & DIL_Z) == 0
+        {
+            MortonKey::none()
+        } else {
+            MortonKey(vertex_key)
+        };
+    });
+
+    (level, keys)
+}
+
+/// Returns the 8 Morton keys for the adjacent nodes to a vertex, given its Morton-like key and level.
+fn vert2leaf(vertex_k: MortonKey, vertex_lv: u32) -> [MortonKey; 8] {
+    let dc = vertex_k.0 << (vertex_lv - vertex_k.level()) * 3;
+
+    let mut keys: [MortonKey; 8] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    (0..8u64).into_iter().for_each(|node_i| {
+        // Perform the dilated integer substraction of dc - i.
+        keys[node_i as usize] = MortonKey(
+            (((dc & DIL_X) - (node_i & DIL_X)) & DIL_X)
+                | (((dc & DIL_Y) - (node_i & DIL_Y)) & DIL_Y)
+                | (((dc & DIL_Z) - (node_i & DIL_Z)) & DIL_Z),
+        );
+    });
+
+    keys
+}
+```
+
+### src/lib.rs
+```
+// Made by Alejandro Perea (aleok), 2021
+// Based on:
+//
+// - Schaefer, Scott & Warren, Joe. (2004).
+// Dual Marching Cubes: Primal Contouring of Dual Grids.
+// Computer Graphics Forum. 24. 10.1111/j.1467-8659.2005.00843.x.
+//
+// - Lewiner, Thomas & Mello, Vinícius & Peixoto, Adelailson & Pesco, Sinesio & Lopes, Hélio. (2010).
+// Fast Generation of Pointerless Octree Duals.
+// Comput. Graph. Forum. 29. 1661-1669. 10.1111/j.1467-8659.2010.01775.x.
+//
+// - Stocco, Leo & Schrack, Guenther. (1995).
+// Integer dilation and contraction for quadtrees and octrees.
+// 426 - 428. 10.1109/PACRIM.1995.519560.
+//
+// Bourke, Paul. (1994).
+// Polygonising a scalar field
+// http://paulbourke.net/geometry/polygonise/
+
+// Licensed under the MIT License. You may find a copy of this license in the root directory of the
+// crate.
+
+//! Dual Marching Cubes implementation for octree structures
+
+#![warn(missing_docs)]
+#![warn(missing_doc_code_examples)]
+
+pub mod dmc;
+
+pub mod duals;
+pub mod octree;
+pub mod prelude;
+mod tables;
+mod util;
+```
+
+### src/octree.rs
+```
+//! Contains the container for the mesh generation [`HashedOctree`], which relies on
+//! [`MortonKey`] for indexing.
+
+use ahash::RandomState;
+use bitflags::bitflags;
+use cgmath::*;
+use dashmap::{mapref::one::*, DashMap};
+
+bitflags! {
+    /// Indicates a node for when indexing an octree for any of its children.
+    pub struct OctreeIndex : u8 {
+        /// Index +X (1) or -X (0).
+        const RIGHT = 1 << 0;
+        /// Index +Y (1) or -Y (0).
+        const TOP = 1 << 1;
+        /// Index +Z (1) or -Z (0).
+        const FOREMOST = 1 << 2;
+    }
+}
+
+impl<T> From<OctreeIndex> for Vector3<T>
+where
+    T: From<i8>,
+{
+    fn from(x: OctreeIndex) -> Self {
+        let result = Vector3::new(
+            if x.contains(OctreeIndex::RIGHT) {
+                T::from(1)
+            } else {
+                T::from(-1)
+            },
+            if x.contains(OctreeIndex::TOP) {
+                T::from(1)
+            } else {
+                T::from(-1)
+            },
+            if x.contains(OctreeIndex::FOREMOST) {
+                T::from(-1)
+            } else {
+                T::from(1)
+            },
+        );
+
+        result
+    }
+}
+
+/// A 64-bit integer that indicates a single node in a hashed octree.
+/// Its internal representation starts with 1 as the root node and appends 3 bits for each following
+/// child node, indicating its position in the X, Y and Z axis.
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
+pub struct MortonKey(pub u64);
+
+impl MortonKey {
+    /// Returns a Morton key pointing to the octree root node.
+    pub const fn root() -> Self {
+        Self(1)
+    }
+
+    /// Returns a Morton key pointing to no node.
+    pub const fn none() -> Self {
+        Self(0)
+    }
+
+    /// Returns the parent of this Morton key.
+    /// If this key is pointing to the root node, the node given will be equal to [`MortonKey::none()`].
+    pub fn parent(self) -> Self {
+        Self(self.0 >> 3)
+    }
+
+    /// Returns a child of the node this key is pointing to.
+    /// # Panics
+    /// Panics if the level of this key is equal to the maximum level possible.
+    pub fn child(self, index: OctreeIndex) -> Self {
+        assert!(self.level() < Self::max_level());
+        Self(self.0 << 3 | index.bits as u64)
+    }
+
+    /// Returns the level or depth of this node, where 0 is the root node.
+    /// # Panics
+    /// Panics if this is a Morton key pointing to no node.
+    pub fn level(self) -> u32 {
+        assert_ne!(self.0, 0);
+        (63 - self.0.leading_zeros()) / 3
+    }
+
+    /// Returns the maximum depth of the nodes that this type can point to.
+    pub const fn max_level() -> u32 {
+        63 / 3
+    }
+
+    /// Returns the position of the center of the node this key is pointing to.
+    /// All axis are in the (0, 1) interval.
+    ///
+    pub fn position(self) -> Point3<f32> {
+        let (mut x, mut y, mut z) = (0, 0, 0);
+        let level = self.level();
+
+        let mut bits = self.0;
+
+        for i in 1..=level {
+            x |= (bits & 1) << i;
+            bits >>= 1;
+            y |= (bits & 1) << i;
+            bits >>= 1;
+            z |= (bits & 1) << i;
+            bits >>= 1;
+        }
+
+        let max_level_k = (1 << level) as f32;
+
+        Point3::new(
+            (x + 1) as f32 / max_level_k - 1.,
+            (y + 1) as f32 / max_level_k - 1.,
+            (z + 1) as f32 / max_level_k - 1.,
+        )
+    }
+
+    /// Returns the Morton key with level `level` of an octree of bounds \[-1]³ to \[1]³ which is
+    /// closest to the position `position`.
+    /// # Panics
+    /// Panics if `level < Self::max_level()`.
+    pub fn closest_to_position(position: Point3<f32>, level: u32) -> Self {
+        assert!(level < Self::max_level());
+
+        let position = point3(
+            position.x.clamp(-1., 1.),
+            position.y.clamp(-1., 1.),
+            position.z.clamp(-1., 1.),
+        );
+
+        let max_level_k = (1 << level) as f32;
+
+        let (x, y, z) = (
+            ((position.x + 1.) * max_level_k - 1.) as u64,
+            ((position.y + 1.) * max_level_k - 1.) as u64,
+            ((position.z + 1.) * max_level_k - 1.) as u64,
+        );
+
+        let mut bits = 1u64;
+
+        for i in (1..=level).rev() {
+            bits <<= 1;
+            bits |= (z >> i) & 1;
+            bits <<= 1;
+            bits |= (y >> i) & 1;
+            bits <<= 1;
+            bits |= (x >> i) & 1;
+        }
+
+        Self(bits)
+    }
+
+    /// Returns a key that goes along the current key until a given level.
+    /// # Panics
+    /// If `self.level() < level`.
+    pub fn until_level(self, level: u32) -> Self {
+        assert!(self.level() >= level);
+        Self(self.0 >> (self.level() - level) * 3)
+    }
+}
+
+/// A hashed (linear) octree implementation which uses [`MortonKey`] for indexing.
+/// This type supports concurrent access and uses a fast hashing algorithm for best performance.
+/// # Example
+/// ```rust
+/// use dmc::octree::*;
+///
+/// let mut octree = HashedOctree::new(0usize);
+///
+/// let mut i = 0;
+/// octree.subdivide(MortonKey::root()).for_each(|child| {
+///     *octree.value_mut(child).unwrap() = i; i += 1;
+/// });
+/// dbg!(octree);
+/// ```
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct HashedOctree<T: Copy> {
+    values: DashMap<MortonKey, T, RandomState>,
+}
+
+impl<T: Copy> HashedOctree<T> {
+    /// Creates a new hashed octree, with a value for the root node.
+    pub fn new(root_value: T) -> Self {
+        Self {
+            values: {
+                let x = DashMap::with_capacity_and_hasher(256, RandomState::new());
+                x.insert(MortonKey::root(), root_value);
+                x
+            },
+        }
+    }
+
+    /// Returns a reference to a node if it exists.
+    ///
+    /// # Concurrent Behaviour
+    /// May deadlock if called when holding a mutable reference into the octree.
+    pub fn value(&self, key: MortonKey) -> Option<Ref<'_, MortonKey, T, RandomState>> {
+        self.values.get(&key)
+    }
+
+    /// Returns a mutable reference to a node if it exists.
+    ///
+    /// # Concurrent Behaviour
+    /// May deadlock if called when holding any sort of reference into the octree.
+    pub fn value_mut(&mut self, key: MortonKey) -> Option<RefMut<'_, MortonKey, T, RandomState>> {
+        self.values.get_mut(&key)
+    }
+
+    /// Subdivides a node and returns an iterator over its newly created children.
+    /// The value of the children will be copied from the parent.
+    ///
+    /// # Panics
+    /// Panics if the node passed is already subdivided.
+    pub fn subdivide(&mut self, key: MortonKey) -> impl std::iter::Iterator<Item = MortonKey> {
+        assert!(
+            !self.is_subdivided(key),
+            "Tried to subdivide already subdivided node"
+        );
+        let child_value = *self
+            .value(key)
+            .expect("Tried to subdivide null octree node");
+
+        let vec = (0..8)
+            .into_iter()
+            .map(move |child| {
+                let child_key = key.child(unsafe { OctreeIndex::from_bits_unchecked(child) });
+                self.values.insert(child_key, child_value);
+                child_key
+            })
+            .collect::<Vec<_>>();
+
+        vec.into_iter()
+    }
+
+    /// Returns an iterator over the children of a node, or None if the children (or parent) don't
+    /// exist.
+    pub fn children(&self, key: MortonKey) -> Option<impl std::iter::Iterator<Item = MortonKey>> {
+        if self.is_subdivided(key) {
+            Some((0..8).into_iter().map(move |child| {
+                let child_key = key.child(unsafe { OctreeIndex::from_bits_unchecked(child) });
+                child_key
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if a node exists.
+    pub fn node_exists(&self, key: MortonKey) -> bool {
+        self.values.contains_key(&key)
+    }
+
+    /// Returns true if the children of a node exists.
+    ///
+    /// # Panics
+    /// Panics if the level of the key given is equal to the maximum level possible.
+    pub fn is_subdivided(&self, key: MortonKey) -> bool {
+        self.values.contains_key(&(key.child(OctreeIndex::empty())))
+    }
+
+    /// Finds all the leaf nodes belonging to `parent` and returns a vector with a key for each of
+    /// them.
+    pub fn leaves(&self, parent: MortonKey) -> Vec<MortonKey> {
+        let mut leaves = Vec::with_capacity(128);
+        let mut to_process = Vec::with_capacity(64);
+        to_process.push(parent);
+
+        while let Some(node_to_process) = to_process.pop() {
+            if let Some(children) = self.children(node_to_process) {
+                for child in children {
+                    to_process.push(child);
+                }
+            } else {
+                leaves.push(node_to_process);
+            }
+        }
+
+        leaves
+    }
+
+    /// Returns the total node count, including leaf and branch nodes.
+    pub fn node_count(&self) -> usize {
+        self.values.len()
+    }
+}
+```
+
+### src/prelude.rs
+```
+//! References everything neccesary to use this crate regularly, namely [`crate::dmc`] and
+//! [`crate::octree`].
+
+pub use crate::dmc::*;
+pub use crate::octree::*;
+```
+
+### src/tables.rs
+```
+#[rustfmt::skip]
+pub const EDGE_TABLE: [i32; 256] = [
+    0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+    0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+    0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+    0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+    0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+    0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+    0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0   
+];
+
+#[rustfmt::skip]
+pub const TRI_TABLE: [[i32; 16]; 256] = [
+    [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [9, 1, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 1, 1, 8, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 0, 10, 2, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 9, 9, 2, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 2, 8, 10, 2, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1],
+    [2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [2, 11, 0, 0, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [0, 9, 1, 11, 3, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [2, 11, 1, 11, 9, 1, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1],
+    [1, 10, 3, 3, 10, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [1, 10, 0, 10, 8, 0, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1],
+    [0, 9, 3, 9, 11, 3, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1],
+    [10, 8, 9, 11, 8, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [0, 3, 4, 4, 3, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [9, 1, 0, 7, 4, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [9, 1, 4, 1, 7, 4, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 1, 7, 4, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [7, 4, 3, 4, 0, 3, 10, 2, 1, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 9, 2, 0, 9, 7, 4, 8, -1, -1, -1, -1, -1, -1, -1],
+    [9, 10, 2, 7, 9, 2, 3, 7, 2, 4, 9, 7, -1, -1, -1, -1],
+    [7, 4, 8, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [7, 4, 11, 4, 2, 11, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1],
+    [1, 0, 9, 7, 4, 8, 11, 3, 2, -1, -1, -1, -1, -1, -1, -1],
+    [11, 7, 4, 11, 4, 9, 2, 11, 9, 1, 2, 9, -1, -1, -1, -1],
+    [1, 10, 3, 10, 11, 3, 4, 8, 7, -1, -1, -1, -1, -1, -1, -1],
+    [10, 11, 1, 11, 4, 1, 4, 0, 1, 4, 11, 7, -1, -1, -1, -1],
+    [8, 7, 4, 11, 0, 9, 10, 11, 9, 3, 0, 11, -1, -1, -1, -1],
+    [11, 7, 4, 9, 11, 4, 10, 11, 9, -1, -1, -1, -1, -1, -1, -1],
+    [4, 5, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [4, 5, 9, 3, 8, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [4, 5, 0, 0, 5, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [4, 5, 8, 5, 3, 8, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 1, 4, 5, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 0, 3, 10, 2, 1, 5, 9, 4, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 5, 2, 4, 5, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1],
+    [5, 10, 2, 5, 2, 3, 4, 5, 3, 8, 4, 3, -1, -1, -1, -1],
+    [4, 5, 9, 11, 3, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [2, 11, 0, 11, 8, 0, 5, 9, 4, -1, -1, -1, -1, -1, -1, -1],
+    [4, 5, 0, 5, 1, 0, 11, 3, 2, -1, -1, -1, -1, -1, -1, -1],
+    [5, 1, 2, 8, 5, 2, 11, 8, 2, 5, 8, 4, -1, -1, -1, -1],
+    [11, 3, 10, 3, 1, 10, 4, 5, 9, -1, -1, -1, -1, -1, -1, -1],
+    [5, 9, 4, 1, 8, 0, 1, 10, 8, 10, 11, 8, -1, -1, -1, -1],
+    [0, 4, 5, 11, 0, 5, 10, 11, 5, 3, 0, 11, -1, -1, -1, -1],
+    [8, 4, 5, 10, 8, 5, 11, 8, 10, -1, -1, -1, -1, -1, -1, -1],
+    [8, 7, 9, 9, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [0, 3, 9, 3, 5, 9, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1],
+    [8, 7, 0, 7, 1, 0, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 5, 1, 7, 5, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 7, 9, 7, 5, 9, 2, 1, 10, -1, -1, -1, -1, -1, -1, -1],
+    [2, 1, 10, 0, 5, 9, 0, 3, 5, 3, 7, 5, -1, -1, -1, -1],
+    [2, 0, 8, 5, 2, 8, 7, 5, 8, 2, 5, 10, -1, -1, -1, -1],
+    [5, 10, 2, 3, 5, 2, 7, 5, 3, -1, -1, -1, -1, -1, -1, -1],
+    [5, 9, 7, 9, 8, 7, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1],
+    [7, 5, 9, 2, 7, 9, 0, 2, 9, 11, 7, 2, -1, -1, -1, -1],
+    [11, 3, 2, 8, 1, 0, 8, 7, 1, 7, 5, 1, -1, -1, -1, -1],
+    [1, 2, 11, 7, 1, 11, 5, 1, 7, -1, -1, -1, -1, -1, -1, -1],
+    [8, 5, 9, 7, 5, 8, 3, 1, 10, 11, 3, 10, -1, -1, -1, -1],
+    [0, 7, 5, 9, 0, 5, 0, 11, 7, 10, 0, 1, 0, 10, 11, -1],
+    [0, 10, 11, 3, 0, 11, 0, 5, 10, 7, 0, 8, 0, 7, 5, -1],
+    [5, 10, 11, 5, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 0, 6, 10, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [1, 0, 9, 6, 10, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 1, 8, 9, 1, 6, 10, 5, -1, -1, -1, -1, -1, -1, -1],
+    [5, 6, 1, 1, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [5, 6, 1, 6, 2, 1, 8, 0, 3, -1, -1, -1, -1, -1, -1, -1],
+    [5, 6, 9, 6, 0, 9, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1],
+    [8, 9, 5, 2, 8, 5, 6, 2, 5, 8, 2, 3, -1, -1, -1, -1],
+    [11, 3, 2, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 0, 11, 0, 2, 11, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1],
+    [9, 1, 0, 11, 3, 2, 6, 10, 5, -1, -1, -1, -1, -1, -1, -1],
+    [6, 10, 5, 2, 9, 1, 2, 11, 9, 11, 8, 9, -1, -1, -1, -1],
+    [11, 3, 6, 3, 5, 6, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1],
+    [11, 8, 0, 5, 11, 0, 1, 5, 0, 6, 11, 5, -1, -1, -1, -1],
+    [6, 11, 3, 6, 3, 0, 5, 6, 0, 9, 5, 0, -1, -1, -1, -1],
+    [9, 5, 6, 11, 9, 6, 8, 9, 11, -1, -1, -1, -1, -1, -1, -1],
+    [6, 10, 5, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [0, 3, 4, 3, 7, 4, 10, 5, 6, -1, -1, -1, -1, -1, -1, -1],
+    [0, 9, 1, 6, 10, 5, 7, 4, 8, -1, -1, -1, -1, -1, -1, -1],
+    [5, 6, 10, 7, 9, 1, 3, 7, 1, 4, 9, 7, -1, -1, -1, -1],
+    [2, 1, 6, 1, 5, 6, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1],
+    [5, 2, 1, 6, 2, 5, 4, 0, 3, 7, 4, 3, -1, -1, -1, -1],
+    [7, 4, 8, 5, 0, 9, 5, 6, 0, 6, 2, 0, -1, -1, -1, -1],
+    [9, 3, 7, 4, 9, 7, 9, 2, 3, 6, 9, 5, 9, 6, 2, -1],
+    [2, 11, 3, 4, 8, 7, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1],
+    [6, 10, 5, 2, 7, 4, 0, 2, 4, 11, 7, 2, -1, -1, -1, -1],
+    [9, 1, 0, 8, 7, 4, 11, 3, 2, 6, 10, 5, -1, -1, -1, -1],
+    [1, 2, 9, 2, 11, 9, 11, 4, 9, 4, 11, 7, 6, 10, 5, -1],
+    [7, 4, 8, 5, 11, 3, 1, 5, 3, 6, 11, 5, -1, -1, -1, -1],
+    [11, 1, 5, 6, 11, 5, 11, 0, 1, 4, 11, 7, 11, 4, 0, -1],
+    [9, 5, 0, 5, 6, 0, 6, 3, 0, 3, 6, 11, 7, 4, 8, -1],
+    [9, 5, 6, 11, 9, 6, 9, 7, 4, 9, 11, 7, -1, -1, -1, -1],
+    [9, 4, 10, 10, 4, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [6, 10, 4, 10, 9, 4, 3, 8, 0, -1, -1, -1, -1, -1, -1, -1],
+    [1, 0, 10, 0, 6, 10, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1],
+    [1, 3, 8, 6, 1, 8, 4, 6, 8, 10, 1, 6, -1, -1, -1, -1],
+    [9, 4, 1, 4, 2, 1, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1],
+    [8, 0, 3, 9, 2, 1, 9, 4, 2, 4, 6, 2, -1, -1, -1, -1],
+    [4, 2, 0, 6, 2, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [2, 3, 8, 4, 2, 8, 6, 2, 4, -1, -1, -1, -1, -1, -1, -1],
+    [9, 4, 10, 4, 6, 10, 3, 2, 11, -1, -1, -1, -1, -1, -1, -1],
+    [2, 8, 0, 11, 8, 2, 10, 9, 4, 6, 10, 4, -1, -1, -1, -1],
+    [2, 11, 3, 6, 1, 0, 4, 6, 0, 10, 1, 6, -1, -1, -1, -1],
+    [1, 4, 6, 10, 1, 6, 1, 8, 4, 11, 1, 2, 1, 11, 8, -1],
+    [4, 6, 9, 6, 3, 9, 3, 1, 9, 3, 6, 11, -1, -1, -1, -1],
+    [1, 11, 8, 0, 1, 8, 1, 6, 11, 4, 1, 9, 1, 4, 6, -1],
+    [6, 11, 3, 0, 6, 3, 4, 6, 0, -1, -1, -1, -1, -1, -1, -1],
+    [8, 4, 6, 8, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [6, 10, 7, 10, 8, 7, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1],
+    [3, 7, 0, 7, 10, 0, 10, 9, 0, 10, 7, 6, -1, -1, -1, -1],
+    [7, 6, 10, 7, 10, 1, 8, 7, 1, 0, 8, 1, -1, -1, -1, -1],
+    [7, 6, 10, 1, 7, 10, 3, 7, 1, -1, -1, -1, -1, -1, -1, -1],
+    [6, 2, 1, 8, 6, 1, 9, 8, 1, 7, 6, 8, -1, -1, -1, -1],
+    [9, 6, 2, 1, 9, 2, 9, 7, 6, 3, 9, 0, 9, 3, 7, -1],
+    [0, 8, 7, 6, 0, 7, 2, 0, 6, -1, -1, -1, -1, -1, -1, -1],
+    [2, 3, 7, 2, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [11, 3, 2, 8, 6, 10, 9, 8, 10, 7, 6, 8, -1, -1, -1, -1],
+    [7, 0, 2, 11, 7, 2, 7, 9, 0, 10, 7, 6, 7, 10, 9, -1],
+    [0, 8, 1, 8, 7, 1, 7, 10, 1, 10, 7, 6, 11, 3, 2, -1],
+    [1, 2, 11, 7, 1, 11, 1, 6, 10, 1, 7, 6, -1, -1, -1, -1],
+    [6, 9, 8, 7, 6, 8, 6, 1, 9, 3, 6, 11, 6, 3, 1, -1],
+    [1, 9, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [0, 8, 7, 6, 0, 7, 0, 11, 3, 0, 6, 11, -1, -1, -1, -1],
+    [6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 0, 3, 6, 7, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [9, 1, 0, 6, 7, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [9, 1, 8, 1, 3, 8, 6, 7, 11, -1, -1, -1, -1, -1, -1, -1],
+    [2, 1, 10, 7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 1, 8, 0, 3, 7, 11, 6, -1, -1, -1, -1, -1, -1, -1],
+    [0, 9, 2, 9, 10, 2, 7, 11, 6, -1, -1, -1, -1, -1, -1, -1],
+    [7, 11, 6, 3, 10, 2, 3, 8, 10, 8, 9, 10, -1, -1, -1, -1],
+    [3, 2, 7, 7, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 0, 7, 0, 6, 7, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1],
+    [6, 7, 2, 7, 3, 2, 9, 1, 0, -1, -1, -1, -1, -1, -1, -1],
+    [2, 6, 1, 6, 8, 1, 8, 9, 1, 6, 7, 8, -1, -1, -1, -1],
+    [6, 7, 10, 7, 1, 10, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1],
+    [6, 7, 10, 10, 7, 1, 7, 8, 1, 8, 0, 1, -1, -1, -1, -1],
+    [7, 3, 0, 10, 7, 0, 9, 10, 0, 7, 10, 6, -1, -1, -1, -1],
+    [10, 6, 7, 8, 10, 7, 9, 10, 8, -1, -1, -1, -1, -1, -1, -1],
+    [4, 8, 6, 6, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [11, 6, 3, 6, 0, 3, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1],
+    [11, 6, 8, 6, 4, 8, 1, 0, 9, -1, -1, -1, -1, -1, -1, -1],
+    [6, 4, 9, 3, 6, 9, 1, 3, 9, 6, 3, 11, -1, -1, -1, -1],
+    [4, 8, 6, 8, 11, 6, 1, 10, 2, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 1, 11, 0, 3, 11, 6, 0, 6, 4, 0, -1, -1, -1, -1],
+    [8, 11, 4, 11, 6, 4, 9, 2, 0, 9, 10, 2, -1, -1, -1, -1],
+    [3, 9, 10, 2, 3, 10, 3, 4, 9, 6, 3, 11, 3, 6, 4, -1],
+    [3, 2, 8, 2, 4, 8, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1],
+    [2, 4, 0, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [0, 9, 1, 4, 3, 2, 6, 4, 2, 8, 3, 4, -1, -1, -1, -1],
+    [4, 9, 1, 2, 4, 1, 6, 4, 2, -1, -1, -1, -1, -1, -1, -1],
+    [3, 1, 8, 1, 6, 8, 6, 4, 8, 1, 10, 6, -1, -1, -1, -1],
+    [0, 1, 10, 6, 0, 10, 4, 0, 6, -1, -1, -1, -1, -1, -1, -1],
+    [3, 6, 4, 8, 3, 4, 3, 10, 6, 9, 3, 0, 3, 9, 10, -1],
+    [4, 9, 10, 4, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [5, 9, 4, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 0, 5, 9, 4, 6, 7, 11, -1, -1, -1, -1, -1, -1, -1],
+    [1, 0, 5, 0, 4, 5, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1],
+    [6, 7, 11, 4, 3, 8, 4, 5, 3, 5, 1, 3, -1, -1, -1, -1],
+    [4, 5, 9, 2, 1, 10, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1],
+    [7, 11, 6, 10, 2, 1, 3, 8, 0, 5, 9, 4, -1, -1, -1, -1],
+    [11, 6, 7, 10, 4, 5, 10, 2, 4, 2, 0, 4, -1, -1, -1, -1],
+    [8, 4, 3, 4, 5, 3, 5, 2, 3, 2, 5, 10, 6, 7, 11, -1],
+    [3, 2, 7, 2, 6, 7, 9, 4, 5, -1, -1, -1, -1, -1, -1, -1],
+    [4, 5, 9, 6, 8, 0, 2, 6, 0, 7, 8, 6, -1, -1, -1, -1],
+    [2, 6, 3, 6, 7, 3, 0, 5, 1, 0, 4, 5, -1, -1, -1, -1],
+    [8, 2, 6, 7, 8, 6, 8, 1, 2, 5, 8, 4, 8, 5, 1, -1],
+    [4, 5, 9, 6, 1, 10, 6, 7, 1, 7, 3, 1, -1, -1, -1, -1],
+    [10, 6, 1, 6, 7, 1, 7, 0, 1, 0, 7, 8, 4, 5, 9, -1],
+    [10, 0, 4, 5, 10, 4, 10, 3, 0, 7, 10, 6, 10, 7, 3, -1],
+    [10, 6, 7, 8, 10, 7, 10, 4, 5, 10, 8, 4, -1, -1, -1, -1],
+    [5, 9, 6, 9, 11, 6, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1],
+    [11, 6, 3, 3, 6, 0, 6, 5, 0, 5, 9, 0, -1, -1, -1, -1],
+    [8, 11, 0, 11, 5, 0, 5, 1, 0, 11, 6, 5, -1, -1, -1, -1],
+    [3, 11, 6, 5, 3, 6, 1, 3, 5, -1, -1, -1, -1, -1, -1, -1],
+    [10, 2, 1, 11, 5, 9, 8, 11, 9, 6, 5, 11, -1, -1, -1, -1],
+    [3, 11, 0, 11, 6, 0, 6, 9, 0, 9, 6, 5, 10, 2, 1, -1],
+    [5, 8, 11, 6, 5, 11, 5, 0, 8, 2, 5, 10, 5, 2, 0, -1],
+    [3, 11, 6, 5, 3, 6, 3, 10, 2, 3, 5, 10, -1, -1, -1, -1],
+    [9, 8, 5, 8, 2, 5, 2, 6, 5, 2, 8, 3, -1, -1, -1, -1],
+    [6, 5, 9, 0, 6, 9, 2, 6, 0, -1, -1, -1, -1, -1, -1, -1],
+    [8, 5, 1, 0, 8, 1, 8, 6, 5, 2, 8, 3, 8, 2, 6, -1],
+    [6, 5, 1, 6, 1, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [6, 3, 1, 10, 6, 1, 6, 8, 3, 9, 6, 5, 6, 9, 8, -1],
+    [0, 1, 10, 6, 0, 10, 0, 5, 9, 0, 6, 5, -1, -1, -1, -1],
+    [8, 3, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [6, 5, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [10, 5, 11, 11, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [10, 5, 11, 5, 7, 11, 0, 3, 8, -1, -1, -1, -1, -1, -1, -1],
+    [7, 11, 5, 11, 10, 5, 0, 9, 1, -1, -1, -1, -1, -1, -1, -1],
+    [5, 7, 10, 7, 11, 10, 1, 8, 9, 1, 3, 8, -1, -1, -1, -1],
+    [2, 1, 11, 1, 7, 11, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 0, 7, 2, 1, 5, 7, 1, 11, 2, 7, -1, -1, -1, -1],
+    [5, 7, 9, 7, 2, 9, 2, 0, 9, 7, 11, 2, -1, -1, -1, -1],
+    [2, 5, 7, 11, 2, 7, 2, 9, 5, 8, 2, 3, 2, 8, 9, -1],
+    [10, 5, 2, 5, 3, 2, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1],
+    [0, 2, 8, 2, 5, 8, 5, 7, 8, 5, 2, 10, -1, -1, -1, -1],
+    [1, 0, 9, 3, 10, 5, 7, 3, 5, 2, 10, 3, -1, -1, -1, -1],
+    [2, 8, 9, 1, 2, 9, 2, 7, 8, 5, 2, 10, 2, 5, 7, -1],
+    [5, 3, 1, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [7, 8, 0, 1, 7, 0, 5, 7, 1, -1, -1, -1, -1, -1, -1, -1],
+    [3, 0, 9, 5, 3, 9, 7, 3, 5, -1, -1, -1, -1, -1, -1, -1],
+    [7, 8, 9, 7, 9, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [4, 8, 5, 8, 10, 5, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1],
+    [4, 0, 5, 0, 11, 5, 11, 10, 5, 0, 3, 11, -1, -1, -1, -1],
+    [9, 1, 0, 10, 4, 8, 11, 10, 8, 5, 4, 10, -1, -1, -1, -1],
+    [4, 11, 10, 5, 4, 10, 4, 3, 11, 1, 4, 9, 4, 1, 3, -1],
+    [1, 5, 2, 5, 8, 2, 8, 11, 2, 8, 5, 4, -1, -1, -1, -1],
+    [11, 4, 0, 3, 11, 0, 11, 5, 4, 1, 11, 2, 11, 1, 5, -1],
+    [5, 2, 0, 9, 5, 0, 5, 11, 2, 8, 5, 4, 5, 8, 11, -1],
+    [5, 4, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [10, 5, 2, 2, 5, 3, 5, 4, 3, 4, 8, 3, -1, -1, -1, -1],
+    [2, 10, 5, 4, 2, 5, 0, 2, 4, -1, -1, -1, -1, -1, -1, -1],
+    [2, 10, 3, 10, 5, 3, 5, 8, 3, 8, 5, 4, 9, 1, 0, -1],
+    [2, 10, 5, 4, 2, 5, 2, 9, 1, 2, 4, 9, -1, -1, -1, -1],
+    [5, 4, 8, 3, 5, 8, 1, 5, 3, -1, -1, -1, -1, -1, -1, -1],
+    [5, 4, 0, 5, 0, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [5, 4, 8, 3, 5, 8, 5, 0, 9, 5, 3, 0, -1, -1, -1, -1],
+    [5, 4, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [7, 11, 4, 11, 9, 4, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1],
+    [3, 8, 0, 7, 9, 4, 7, 11, 9, 11, 10, 9, -1, -1, -1, -1],
+    [11, 10, 1, 4, 11, 1, 0, 4, 1, 11, 4, 7, -1, -1, -1, -1],
+    [4, 1, 3, 8, 4, 3, 4, 10, 1, 11, 4, 7, 4, 11, 10, -1],
+    [7, 11, 4, 4, 11, 9, 11, 2, 9, 2, 1, 9, -1, -1, -1, -1],
+    [4, 7, 9, 7, 11, 9, 11, 1, 9, 1, 11, 2, 3, 8, 0, -1],
+    [4, 7, 11, 2, 4, 11, 0, 4, 2, -1, -1, -1, -1, -1, -1, -1],
+    [4, 7, 11, 2, 4, 11, 4, 3, 8, 4, 2, 3, -1, -1, -1, -1],
+    [10, 9, 2, 9, 7, 2, 7, 3, 2, 9, 4, 7, -1, -1, -1, -1],
+    [7, 10, 9, 4, 7, 9, 7, 2, 10, 0, 7, 8, 7, 0, 2, -1],
+    [10, 7, 3, 2, 10, 3, 10, 4, 7, 0, 10, 1, 10, 0, 4, -1],
+    [2, 10, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [1, 9, 4, 7, 1, 4, 3, 1, 7, -1, -1, -1, -1, -1, -1, -1],
+    [1, 9, 4, 7, 1, 4, 1, 8, 0, 1, 7, 8, -1, -1, -1, -1],
+    [3, 0, 4, 3, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [7, 8, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 10, 9, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [9, 0, 3, 11, 9, 3, 10, 9, 11, -1, -1, -1, -1, -1, -1, -1],
+    [10, 1, 0, 8, 10, 0, 11, 10, 8, -1, -1, -1, -1, -1, -1, -1],
+    [10, 1, 3, 10, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [11, 2, 1, 9, 11, 1, 8, 11, 9, -1, -1, -1, -1, -1, -1, -1],
+    [9, 0, 3, 11, 9, 3, 9, 2, 1, 9, 11, 2, -1, -1, -1, -1],
+    [11, 2, 0, 11, 0, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [11, 2, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 3, 2, 10, 8, 2, 9, 8, 10, -1, -1, -1, -1, -1, -1, -1],
+    [2, 10, 9, 2, 9, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 3, 2, 10, 8, 2, 8, 1, 0, 8, 10, 1, -1, -1, -1, -1],
+    [2, 10, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 3, 1, 8, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [1, 9, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [8, 3, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+];
+```
+
+### src/util.rs
+```
+use cgmath::{Point3, Vector3};
+
+pub trait Interpolatable {
+    fn interpolate(self, other: Self, factor: f32) -> Self;
+}
+
+impl Interpolatable for Point3<f32> {
+    fn interpolate(self, other: Self, factor: f32) -> Self {
+        let diff = other - self;
+        self + diff * factor
+    }
+}
+
+impl Interpolatable for Vector3<f32> {
+    fn interpolate(self, other: Self, factor: f32) -> Self {
+        let diff = other - self;
+        self + diff * factor
+    }
+}
+```

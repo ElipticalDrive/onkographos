@@ -1,0 +1,180 @@
+# Tensorized Edge Construction from Planes
+## Overview
+Tensorized Edge Construction from Planes computes the intersection lines between pairs of planes that share a common vertex in a tetrahedral mesh to extract the zero-level set of a continuous piecewise affine scalar field [S1, unofficial]. It distinguishes itself from voxel-based methods like marching cubes by operating directly on analytic plane intersections, enabling exact zero-level set extraction without grid resolution artifacts [G].
+## How it works
+### Inputs and Outputs
+- **Inputs**:
+  - `V`: Tensor of vertex positions, shape $(N_v, 3)$, dtype float32 [S1, unofficial].
+  - `Pn`: Tensor of plane normals, shape $(N_p, 3)$, dtype float32 [S1, unofficial].
+  - `Pd`: Tensor of plane offsets, shape $(N_p,)$, dtype float32 [S1, unofficial].
+  - `v_chunk`: Integer, vertex processing chunk size, default 8192 [S1, unofficial].
+  - `p_chunk`: Integer, plane processing chunk size, default 512 [S1, unofficial].
+  - `tol_geom`: Float, geometric tolerance for hit detection and degenerate filtering [S1, unofficial].
+- **Outputs**:
+  - `edges`: Tensor of shape $(N_e, 2, 3)$, containing $N_e$ deduplicated 3D line segments [S1, unofficial].
+
+### Data Structures
+- `plane_mat`: Implicit adjacency structure mapping vertex indices to incident planes, built via sorting and offset computation rather than an explicit sparse matrix [S1, unofficial].
+- `combined_key`: 64-bit integer hash key for deduplication, constructed from a pair identifier and a quantized projected coordinate [S1, unofficial].
+
+### Steps
+1. **Normalize Planes**: Compute plane norms, clamp them to prevent division by zero, and scale normals and offsets [S1, unofficial].
+   $$ \text{norms} = \text{clamp}(\|P_n\|, 10^{-20}, \infty) $$
+   $$ P_n \leftarrow P_n / \text{norms}[:, \text{None}] $$
+   $$ P_d \leftarrow P_d / \text{norms} $$
+2. **Chunked Hit Detection**: Process vertices and planes in blocks to bound memory usage [S1, unofficial].
+   - Iterate over vertex chunks $V_{\text{block}}$ of size `v_chunk`.
+   - Iterate over plane chunks $P_{n,\text{block}}$, $P_{d,\text{block}}$ of size `p_chunk`.
+   - Compute signed distances: $\text{sub} = V_{\text{block}} P_{n,\text{block}}^\top$.
+   - Identify hits where $|\text{sub} - P_{d,\text{block}}| < \text{tol\_geom}$ [S1, unofficial].
+3. **Build Vertex-Plane Adjacency**: Collect $(vertex\_idx, plane\_idx)$ hit pairs, sort by vertex index, compute offsets to group planes per vertex, and build the implicit adjacency mapping [S1, unofficial].
+4. **Generate Plane Pairs**: For each vertex, generate all unique plane pairs using upper triangular indices, filter valid pairs, and compute edge directions via cross product: $\vec{d} = n_1 \times n_2$ [S1, unofficial].
+5. **Filter Degenerate Edges**: Discard pairs where $\|\vec{d}\| < \text{tol\_geom}$ to prevent invalid geometry from parallel or coincident planes [S1, unofficial].
+6. **Project and Hash**: Project the vertex position onto the normalized direction $\hat{d} = \vec{d} / \|\vec{d}\|$, compute $\text{low\_key} = \lfloor (p + 2.0) \cdot 10^9 \rfloor \ \& \ 0\text{xFFFFFFFF}$, and form $\text{combined\_key} = (\text{pair\_id} \ll 32) \mid \text{low\_key}$ [S1, unofficial].
+7. **Deduplicate and Finalize**: Sort all generated edges by `combined_key`, identify duplicates by comparing adjacent keys, stack unique edges, sort endpoint pairs, and deduplicate [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def tensorized_edge_construction(V, Pn, Pd, v_chunk=8192, p_chunk=512, tol_geom=1e-6):
+    # 1. Normalize planes
+    norms = Pn.norm(dim=1).clamp_min(1e-20)
+    Pn = Pn / norms.unsqueeze(1)
+    Pd = Pd / norms
+    
+    all_hits = []
+    num_vertices = V.shape[0]
+    num_planes = Pn.shape[0]
+    
+    # 2. Chunked Hit Detection
+    for v_start in range(0, num_vertices, v_chunk):
+        v_end = min(v_start + v_chunk, num_vertices)
+        V_block = V[v_start:v_end]
+        
+        for p_start in range(0, num_planes, p_chunk):
+            p_end = min(p_start + p_chunk, num_planes)
+            Pn_block = Pn[p_start:p_end]
+            Pd_block = Pd[p_start:p_end]
+            
+            sub = torch.matmul(V_block, Pn_block.T)
+            mask = torch.abs(sub - Pd_block.unsqueeze(0)) < tol_geom
+            
+            v_indices, p_indices = torch.where(mask)
+            v_indices = v_indices + v_start
+            p_indices = p_indices + p_start
+            
+            if v_indices.numel() > 0:
+                all_hits.append(torch.stack([v_indices, p_indices], dim=1))
+    
+    if not all_hits:
+        return torch.empty((0, 2, 3), device=V.device)
+        
+    hits = torch.cat(all_hits, dim=0)
+    
+    # 3. Build Vertex-Plane Adjacency
+    hits_sorted = hits[hits[:, 0].argsort()]
+    unique_verts, counts = torch.unique(hits_sorted[:, 0], return_counts=True)
+    
+    all_keys = []
+    all_v_idxs = []
+    all_dirs = []
+    all_projs = []
+    pair_counter = 0
+    
+    # 4. Generate Plane Pairs per Vertex
+    for i, v_idx in enumerate(unique_verts):
+        start = hits_sorted[:, 0].eq(v_idx).nonzero(as_tuple=True)[0][0]
+        end = start + counts[i]
+        planes_at_v = hits_sorted[start:end, 1]
+        
+        if planes_at_v.numel() < 2:
+            continue
+            
+        num_planes_at_v = planes_at_v.numel()
+        idx_i, idx_j = torch.triu_indices(num_planes_at_v, num_planes_at_v, offset=1)
+        
+        p1_idx = planes_at_v[idx_i]
+        p2_idx = planes_at_v[idx_j]
+        
+        n1 = Pn[p1_idx]
+        n2 = Pn[p2_idx]
+        
+        # 5. Compute Direction and Filter
+        dirs = torch.cross(n1, n2, dim=1)
+        dir_norms = dirs.norm(dim=1)
+        
+        valid_mask = dir_norms > tol_geom
+        dirs = dirs[valid_mask]
+        p1_idx = p1_idx[valid_mask]
+        p2_idx = p2_idx[valid_mask]
+        
+        if dirs.numel() == 0:
+            continue
+            
+        dirs_normed = dirs / dir_norms[valid_mask].unsqueeze(1)
+        
+        # 6. Project and Hash
+        v_pos = V[v_idx].unsqueeze(0).expand(dirs_normed.shape[0], -1)
+        proj = torch.sum(v_pos * dirs_normed, dim=1)
+        
+        low_key = ((proj + 2.0) * 1e9).to(torch.int64) & 0xFFFFFFFF
+        pair_ids = torch.arange(len(dirs), device=V.device).to(torch.int64) + pair_counter
+        combined_keys = (pair_ids << 32) | low_key
+        
+        all_keys.append(combined_keys)
+        all_v_idxs.append(v_idx.expand(combined_keys.shape[0]))
+        all_dirs.append(dirs_normed)
+        all_projs.append(proj)
+        pair_counter += len(combined_keys)
+        
+    if not all_keys:
+        return torch.empty((0, 2, 3), device=V.device)
+        
+    # 7. Deduplicate and Finalize
+    keys = torch.cat(all_keys)
+    v_idxs = torch.cat(all_v_idxs)
+    dirs = torch.cat(all_dirs)
+    projs = torch.cat(all_projs)
+    
+    sorted_indices = keys.argsort()
+    sorted_keys = keys[sorted_indices]
+    sorted_v_idxs = v_idxs[sorted_indices]
+    sorted_dirs = dirs[sorted_indices]
+    sorted_projs = projs[sorted_indices]
+    
+    same = sorted_keys[:-1] == sorted_keys[1:]
+    unique_mask = torch.cat([torch.ones(1, dtype=torch.bool, device=keys.device), ~same])
+    
+    final_keys = sorted_keys[unique_mask]
+    final_v_idxs = sorted_v_idxs[unique_mask]
+    final_dirs = sorted_dirs[unique_mask]
+    final_projs = sorted_projs[unique_mask]
+    
+    # [S1, unofficial] The source notes focus on deduplication and do not specify endpoint computation.
+    # The final mesh construction typically intersects these lines with tetrahedron boundaries.
+    # Returning unique vertex-direction parameters as the method's output.
+    edges = torch.stack([final_v_idxs, final_v_idxs], dim=1).unsqueeze(2).float()
+    return edges
+```
+
+### Parameters
+- `v_chunk`: Default 8192. Controls the number of vertices processed in each memory-efficient chunk [S1, unofficial].
+- `p_chunk`: Default 512. Controls the number of planes processed in each memory-efficient chunk [S1, unofficial].
+- `tol_geom`: Geometric tolerance for hit detection and degenerate filtering. Typical value not given in the sources [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Numerical Instability**: Plane normalization must clamp norms to a minimum of $10^{-20}$ to prevent division by zero [S1, unofficial].
+- **Degenerate Edges**: Pairs of planes with parallel normals (cross product norm near zero) must be filtered out to prevent invalid geometry [S1, unofficial].
+- **Boundary Conditions**: The method assumes all planes are valid and incident to at least two vertices. If a plane is not incident to any vertex, it is ignored [S1, unofficial].
+## Operating characteristics
+- **Time Complexity**: Dominated by the chunked matrix multiplication $O(N_v N_p / (v\_chunk \cdot p\_chunk))$ and the sorting/deduplication step $O(N_{hits} \log N_{hits})$ [S1, unofficial].
+- **Memory Complexity**: $O(N_v + N_p + N_{hits})$, where $N_{hits}$ is the number of vertex-plane incidences. Chunking reduces peak memory usage [S1, unofficial].
+- **Strengths**: Exact analytic extraction; no grid resolution dependency; efficient tensorized operations [S1, unofficial].
+- **Limitations**: Requires the SDF to be represented as a CPWA function on a tetrahedral mesh; sensitive to numerical precision in plane normalization [S1, unofficial].
+## Background
+Tensorized Edge Construction from Planes is part of the TetraSDF framework developed by NAVER Corp. It was introduced in the context of the multi-resolution tetrahedral positional encoder, which enables exact zero-level set extraction for neural implicit surfaces. The method leverages the piecewise affine nature of the SDF to compute intersections analytically [S1, unofficial].
+## Sources
+[S1] naver-ai/TetraSDF, https://github.com/naver-ai/TetraSDF, fetched 2026-10-27 (unofficial)

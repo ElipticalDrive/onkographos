@@ -1,0 +1,67 @@
+# Gaussian Avatar
+
+Also called: SMPL-based Gaussian Splatting Avatar
+
+## Overview
+Gaussian Avatar is a method for reconstructing animatable full-body human avatars from video by leveraging the SMPL parametric model as a geometric prior [S1][S2, unofficial]. It solves the problem of dynamic human reconstruction by using a feedforward network to predict Gaussian parameters directly from pose features, enabling real-time novel view synthesis and animation [S1][S2, S3, unofficial]. It is distinguished from siblings like 3DGS-Avatar by its reliance on a feedforward prediction of parameters via pose features rather than explicit per-Gaussian rigid/non-rigid transformation pipelines during inference [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A sequence of monocular or multi-view images of a human subject; corresponding SMPL pose parameters $\theta$ and shape parameters $\beta$ [S1][S2, unofficial].
+- **Outputs:** A set of 3D Gaussians $\{G_i\}$ defined in the canonical space, along with a trained feedforward network and dynamic appearance network that map pose/position to Gaussian attributes [S1][S2, S3, unofficial].
+
+**Data Structures:**
+- **Canonical Gaussians:** Each Gaussian $i$ is initialized on the surface of the canonical SMPL mesh [S1][S2, unofficial]. It stores:
+    - Position $\mathbf{p}_i$ in canonical space.
+    - Covariance $\Sigma_i$ in canonical space.
+    - Opacity $\alpha_i$.
+    - Spherical Harmonics (SH) coefficients for view-dependent color.
+- **Feedforward Network:** A neural network (e.g., MLP) that takes canonical position and pose features as input and outputs Gaussian parameters (position offset, covariance, opacity, SH coefficients) [S1][S2, unofficial].
+- **Dynamic Appearance Network:** An optimizable tensor or network module that captures dynamic appearance variations (e.g., clothing folds, lighting changes) conditioned on pose and time [S3, unofficial].
+
+**Steps:**
+1. **Initialization:** Initialize Gaussians on the canonical SMPL mesh surface [S1][S2, unofficial].
+2. **Pose Encoding:** Encode the current pose $\theta$ and shape $\beta$ into a pose feature vector [S1][S2, unofficial].
+3. **Parameter Prediction:** Pass the canonical position $\mathbf{p}_i$ and pose features through the feedforward network to predict the deformed Gaussian parameters [S1][S2, unofficial]. This includes predicting the deformed position $\mathbf{p}'_i$, covariance $\Sigma'_i$, opacity $\alpha'_i$, and color coefficients [S1][S2, unofficial].
+4. **Deformation:** The predicted parameters define the Gaussians in the camera space. The deformation is implicit in the network's output, mapping canonical space to posed space [S1][S2, unofficial].
+5. **Rendering:** Render the deformed Gaussians using differentiable 3D Gaussian Splatting [S1][S2, unofficial].
+6. **Training:** Minimize the loss between rendered images and ground truth images using photometric and perceptual losses [S1][S2, unofficial]. The dynamic appearance network is optimized to capture temporal dynamics [S3, unofficial].
+
+**Formulas:**
+- **Loss Function:**
+  $$ \mathcal{L} = \mathcal{L}_{L1} + \lambda \mathcal{L}_{MS-SSIM} $$
+  where $\mathcal{L}_{L1}$ is the L1 loss and $\mathcal{L}_{MS-SSIM}$ is the multi-scale structural similarity loss [S1][S2, unofficial].
+- **Gaussian Parameter Prediction:**
+  $$ \{\mathbf{p}'_i, \Sigma'_i, \alpha'_i, \mathbf{c}_i\} = \text{Network}(\mathbf{p}_i, \theta, \beta) $$
+  where $\mathbf{c}_i$ are the color coefficients [S1][S2, unofficial].
+
+**Parameters:**
+- $\lambda$: Weight for MS-SSIM loss. Typical value: 0.2 [S1][S2, unofficial].
+- Network architecture: Typically an MLP with hidden layers [S1][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Occlusion:** Monocular input may lead to ambiguities in depth; SMPL prior helps but may not resolve severe occlusions [S1][S2, unofficial].
+- **Generalization:** The feedforward network may struggle with poses significantly different from the training set [S1][S2, unofficial].
+
+## Subtopics
+
+### [GoMAvatar](6156-gomavatar.md)
+GoMAvatar is a monocular video avatar reconstruction method that embeds 3D Gaussians onto a canonical human body mesh driven by the SMPL-X rig. It solves the problem of reconstructing high-fidelity dynamic human avatars from single-camera video by coupling Gaussian parameters with mesh geometry, allowing for realistic novel animation in real time. Unlike methods that rely on per-Gaussian deformation MLPs, GoMAvatar determines Gaussian positions via barycentric coordinates and normal displacements on the canonical mesh.
+
+### [GAvatar](7590-gavatar.md)
+GAvatar is a text-to-3D generation method that creates animatable human avatars by binding 3D Gaussians to a primitive-based representation attached to the SMPL-X model. It distinguishes itself by leveraging an implicit network to predict Gaussian attributes and converting opacity to a signed distance field (SDF) via a NeuS-like approach to provide geometry constraints for mesh extraction. It builds on [Gaussian Avatar](1479-gaussian-avatar.md) by incorporating text-based generation guided by Score Distillation Sampling (SDS) loss.
+
+## Operating characteristics
+- **Time Complexity:** Training time is reduced compared to per-Gaussian optimization methods due to the feedforward network [S3, unofficial]. Rendering is real-time (e.g., 166 FPS) [S3, unofficial].
+- **Memory Complexity:** Depends on the number of Gaussians and the size of the feedforward network [S1][S2, unofficial].
+- **Performance:** Achieves high-fidelity dynamic human reconstruction [S3, unofficial].
+- **Strengths:** Real-time rendering, efficient training, good generalization to novel poses [S1][S2, S3, unofficial].
+- **Limitations:** May struggle with extreme poses or severe occlusions [S1][S2, unofficial].
+
+## Background
+Gaussian Avatar was introduced as a method to leverage the SMPL model for full-body avatar reconstruction [S1][S2, unofficial]. It builds on the principles of 3D Gaussian Splatting and parametric human models [S1][S2, unofficial]. Recent advances have further improved its efficiency and quality [S3, unofficial].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+[S3] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

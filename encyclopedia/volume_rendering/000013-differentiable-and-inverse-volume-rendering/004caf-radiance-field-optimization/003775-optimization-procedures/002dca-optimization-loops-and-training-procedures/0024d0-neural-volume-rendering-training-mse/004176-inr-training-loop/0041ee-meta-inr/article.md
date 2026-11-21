@@ -1,0 +1,143 @@
+# Meta-INR
+
+Also called: Few-shot INR Adaptation, MAML-based INR Training
+
+## Overview
+Meta-INR is a pretraining strategy for Implicit Neural Representations (INR) that uses meta-learning to optimize initial network parameters from a sparse, spatiotemporally subsampled volumetric dataset, enabling rapid adaptation to unseen similar volumes via few gradient steps [S1]. It differs from standard INR training by optimizing a shared initialization that serves as a strong prior for generalizability, rather than focusing on network architecture design or training each volume independently from scratch [S1]. This approach significantly reduces the computational overhead of encoding new volumes in time-varying or ensemble datasets, achieving encoding speeds approximately 5.87× faster than training from scratch while maintaining higher reconstruction quality [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A volumetric dataset $D$ consisting of $T$ timesteps or ensembles. Each volume $d_i$ is a set of coordinate-value pairs $(C_i, V_i)$, where $C_i$ contains spatial coordinates $(x, y, z)$ and $V_i$ contains corresponding voxel values [S1].
+*   **Output:** Optimized meta-model parameters $\theta_m$ [S1].
+
+**Data Structures**
+*   **Network Architecture ($\Phi$):** Maps a 3D spatial coordinate to a scalar voxel value: $\Phi : \mathbb{R}^3 \rightarrow \mathbb{R}$ [S1]. The implementation uses a seven-layer SIREN model with a hidden layer dimension of 256 [S1].
+*   **Meta-Model Parameters ($\theta_m$):** The shared weights initialized randomly and optimized via meta-learning [S1].
+*   **Cloned Parameters ($\theta'$):** A copy of $\theta_m$ used for inner-loop adaptation [S1].
+
+**Parameters**
+*   **Spatial subsampling interval ($\lambda_s$):** 4 [S1].
+*   **Temporal subsampling interval ($\lambda_t$):** 2 [S1].
+*   **Inner-loop steps ($K$):** 16 [S1].
+*   **Inner-loop learning rate ($\alpha$):** 0.0001 during meta-pretraining [S1].
+*   **Outer-loop learning rate ($\beta$):** 0.0001 during meta-pretraining [S1].
+*   **Batch size:** 50,000 coordinate-value pairs per iteration for both meta-pretraining and finetuning [S1].
+*   **Finetuning learning rates ($\alpha, \beta$):** 0.00001 [S1].
+
+**Algorithm Steps**
+
+1.  **Subsampling:** Create a downsampled dataset $\hat{D} = \{\hat{d}_1, ..., \hat{d}_{T'}\}$ from $D$ by subsampling spatially with interval $\lambda_s$ and temporally with interval $\lambda_t$. This configuration retains approximately 0.78% of the original data samples [S1].
+2.  **Initialization:** Randomly initialize meta-model parameters $\theta_m$ [S1].
+3.  **Meta-Pretraining Loop:** Iterate until convergence:
+    a. Initialize outer-loop gradients $\nabla_{\theta_m} = 0$ [S1].
+    b. For each subsampled volume $\hat{d}_i$ in $\hat{D}$:
+        i. Clone parameters: $\theta' \leftarrow \theta_m$ [S1].
+        ii. Randomly sample a batch of coordinate-value pairs $(C_i, V_i)$ from $\hat{d}_i$ [S1].
+        iii. Perform $K$ inner-loop gradient steps:
+            1. Compute loss: $L \leftarrow \text{MSE}(\Phi(C_i; \theta'), V_i)$ [S1].
+            2. Update cloned parameters: $\theta' \leftarrow \theta' - \alpha \nabla_{\theta'} L$ [S1].
+        iv. Accumulate gradients for the outer loop: $\nabla_{\theta_m} \leftarrow \nabla_{\theta_m} + (\theta_m - \theta')$ [S1].
+    c. Update meta-model parameters: $\theta_m \leftarrow \theta_m - \beta \frac{\nabla_{\theta_m}}{T'}$ [S1].
+4.  **Volume-Specific Finetuning:** For a specific target volume, take the pre-trained $\theta_m$ and update it in $K$ gradient steps using all available (non-subsampled) data points from that volume, using the finetuning learning rates [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def meta_inr_pretraining(D, lambda_s, lambda_t, alpha, beta, K, batch_size):
+    """
+    Meta-INR Pretraining Algorithm.
+    D: List of volumes, where each volume is a list of (coordinates, values) pairs.
+    lambda_s: Spatial subsampling interval.
+    lambda_t: Temporal subsampling interval.
+    alpha: Inner-loop learning rate.
+    beta: Outer-loop learning rate.
+    K: Number of inner-loop steps.
+    batch_size: Number of coordinate-value pairs per batch.
+    """
+    # Step 1: Subsample dataset
+    # D_hat contains T' volumes. Each volume is subsampled spatially by lambda_s
+    # and temporally by lambda_t.
+    D_hat = subsample_dataset(D, lambda_s, lambda_t)
+    T_prime = len(D_hat)
+    
+    # Step 2: Initialize meta-model parameters
+    theta_m = random_initialize_parameters()
+    
+    # Step 3: Meta-pretraining loop
+    while not converged(theta_m):
+        # Initialize gradients for the outer loop
+        grad_theta_m = zeros_like(theta_m)
+        
+        for d_hat_i in D_hat:
+            # Clone parameters for inner loop
+            theta_prime = copy_parameters(theta_m)
+            
+            # Randomly sample batch from the subsampled volume
+            coords, values = sample_batch(d_hat_i, batch_size)
+            
+            # Inner-loop adaptation (K steps)
+            for k in range(K):
+                # Compute MSE loss
+                predictions = network_forward(coords, theta_prime)
+                loss = mean_squared_error(predictions, values)
+                
+                # Compute gradients w.r.t cloned parameters
+                grad_theta_prime = compute_gradients(loss, theta_prime)
+                
+                # Update cloned parameters
+                theta_prime = theta_prime - alpha * grad_theta_prime
+            
+            # Accumulate gradient for outer loop update
+            # Note: The source defines this as (theta_m - theta_prime)
+            # This approximates the gradient of the adapted loss w.r.t initial parameters
+            grad_theta_m = grad_theta_m + (theta_m - theta_prime)
+        
+        # Update meta-model parameters
+        # Average gradient across all volumes in the subsampled set
+        theta_m = theta_m - beta * (grad_theta_m / T_prime)
+        
+    return theta_m
+
+def meta_inr_finetuning(theta_m, volume_data, alpha_ft, K, batch_size):
+    """
+    Volume-Specific Finetuning.
+    theta_m: Pre-trained meta-model parameters.
+    volume_data: Full (non-subsampled) data for a specific volume.
+    alpha_ft: Finetuning learning rate (0.00001).
+    K: Number of adaptation steps (same as pretraining).
+    """
+    theta_adapted = copy_parameters(theta_m)
+    
+    for k in range(K):
+        # Sample batch from full volume data
+        coords, values = sample_batch(volume_data, batch_size)
+        
+        # Compute loss and update
+        predictions = network_forward(coords, theta_adapted)
+        loss = mean_squared_error(predictions, values)
+        grad_theta = compute_gradients(loss, theta_adapted)
+        
+        theta_adapted = theta_adapted - alpha_ft * grad_theta
+        
+    return theta_adapted
+```
+
+## Operating characteristics
+*   **Time Complexity:** Meta-pretraining requires significant upfront computation (e.g., 2h 14m on half-cylinder), but volume-specific finetuning is extremely fast. The encoding time of adapted INRs is 5.87× faster on average across datasets compared to training from scratch [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:**
+    *   **Half-cylinder:** PSNR 55.92 dB, LPIPS 0.0705, CD 0.2989, Encoding Time 43m 45s [S1].
+    *   **Ionization:** PSNR 51.30 dB, LPIPS 0.0576, CD 0.4622, Encoding Time 3h 15m [S1].
+    *   **Tangaroa:** PSNR 48.68 dB, LPIPS 0.1969, CD 0.5499, Encoding Time 33m 59s [S1].
+    *   **Vortex:** PSNR 48.19 dB, LPIPS 0.0294, CD 0.2029, Encoding Time 5m 10s [S1].
+*   **Strengths:** Reduces computational overhead; enhances interpretability of adapted INR parameters for simulation analysis; captures intrinsic patterns from partial observation better than vanilla pretraining [S1].
+*   **Limitations:** Validated only with MLP-based SIREN backbones; transfer to hash-grid or feature-grid encoders is untested [S2, unofficial]. Vanilla pretraining (without inner-loop updating) produces block-like artifacts and significant deviations from Ground Truth [S1].
+
+## Background
+Meta-INR was proposed to address the computational inefficiency of training INRs from scratch for each new volume in large-scale time-varying or ensemble datasets [S1]. It is the first application of meta-learning techniques to volume data representation [S1]. The method adapts Model-Agnostic Meta-Learning (MAML) principles to learn initial INR parameters from partial observation [S1]. It builds on [INR Training Loop](10522-inr-training-loop.md) by introducing a meta-learning optimization loop.
+
+## Sources
+[S1] Meta-INR: Efficient Encoding of Volumetric Data via Meta-Learning Implicit Neural Representation, https://doi.org/10.1109/pacificvis64226.2025.00030, fetched 2026-10-26
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

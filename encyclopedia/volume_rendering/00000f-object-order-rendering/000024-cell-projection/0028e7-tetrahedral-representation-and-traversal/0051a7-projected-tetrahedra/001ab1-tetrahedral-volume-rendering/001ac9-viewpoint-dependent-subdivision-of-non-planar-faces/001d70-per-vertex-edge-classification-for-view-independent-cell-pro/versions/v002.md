@@ -1,0 +1,42 @@
+# Per-vertex edge classification for view-independent cell projection
+
+Also called: Edge classification for cell projection
+
+## Overview
+This method avoids defects in per-vertex classification during rasterization by ensuring that at least one vertex on a shared edge carries the correct visibility classification of the adjacent face [S1]. It addresses artifacts caused by per-vertex computations where edge visibility is ambiguous, ensuring the correct classification affects the entire edge during rasterization [S1]. Unlike [Viewpoint-dependent subdivision of non-planar faces](835-viewpoint-dependent-subdivision-of-non-planar-faces.md), which subdivides non-planar faces based on the viewpoint, this method relies on vertex attributes to propagate visibility information across shared edges in a view-independent manner [S1].
+
+## How it works
+**Inputs:**
+- Vertex positions of the tetrahedron faces, face normals, adjacency information specifying which faces share an edge, and the view direction [S1].
+
+**Outputs:**
+- Modified texture coordinates, specifically the $r$ component, for each vertex to encode the visibility classification of adjacent faces [S1].
+
+**Data Structures:**
+- Each vertex stores standard attributes (position, normal) plus additional texture coordinates [S1].
+- Specifically, the $r$ texture coordinate encodes the classification of the adjacent face sharing an edge [S1].
+
+**Steps:**
+1. **Define Edge Directions:** Utilize the counterclockwise winding order of each face to define a directed edge for each vertex [S1]. For a face with vertices $v_0, v_1, v_2$, each vertex $v_i$ is considered the start of the edge from $v_i$ to $v_{i+1 \pmod 3}$ [S1].
+2. **Supply Adjacent Face Normal:** For each directed edge starting at vertex $v$, supply the normal of the adjacent face sharing that edge as a vertex attribute to $v$ [S1]. This allows the vertex shader to access the geometry of the neighboring face [G].
+3. **Check for Entering Face:** In the vertex program, determine if the adjacent face is potentially entering relative to the view direction [S1].
+4. **Modify Texture Coordinate:** If the adjacent face is potentially entering, set the $r$ texture coordinate of the start vertex to a large positive value instead of $0$ [S1]. If not, leave it unchanged [S1]. This ensures that the edge classification is correctly propagated during rasterization [S1].
+
+**Example:**
+Consider two adjacent faces $f_0$ and $f_1$ sharing an edge between vertices $v_2$ and $v_3$ [S1]. For face $f_1$, vertex $v_3$ is the start of the edge from $v_3$ to $v_2$ [S1]. The vertex program checks if $f_1$ is entering; if so, it sets the $r$ coordinate of $v_3$ to a large positive value, while the $r$ coordinate of $v_2$ remains unchanged for rendering $f_1$ [S1]. For face $f_0$, vertex $v_2$ is the start of the edge from $v_2$ to $v_3$ [S1]. The vertex program checks if $f_1$ is entering; if so, it modifies the $r$ component of $v_2$ since $f_1$ is potentially entering for all fragments of $f_0$ [S1].
+
+**Pitfalls:**
+- **Unclassified Endpoint:** One endpoint of the edge remains unclassified [S1]. Computing full classification would require normals of all three remaining faces per vertex, requiring more per-vertex parameters [S1]. This problem is considered negligible as mistakes occur at singular positions, affecting at most one pixel per tetrahedron [S1].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** View-independent, avoids complex geometric subdivision, minimal additional memory overhead [S1].
+- **Limitations:** May result in minor classification errors at singular positions, affecting at most one pixel per tetrahedron [S1].
+
+## Background
+This method is part of the hardware-based view-independent cell projection approach, which aims to render curvilinear grids efficiently on modern graphics hardware [S1]. It addresses the limitations of per-fragment classification by using per-vertex attributes to propagate visibility information [S1]. The technique was introduced by Weiler and Kraus in their work on hardware-based view-independent cell projection [S1].
+
+## Sources
+
+[S1] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29

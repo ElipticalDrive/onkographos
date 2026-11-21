@@ -1,0 +1,154 @@
+# CUDA Tile-and-Bin Implementation
+
+Also called: Tile-and-Bin CUDA Pipeline, Tile-and-Bin CUDA Pipeline for 2D Bitmaps, tile-based differentiable splatting for 2D bitmaps
+
+## Overview
+The CUDA Tile-and-Bin Implementation is a parallelization strategy for computing the forward and backward passes of 2D bitmap primitive rendering on a GPU [S1, unofficial]. It partitions the image plane into tiles and assigns primitives to the tiles they overlap, using one CUDA thread block per tile to achieve complete pixel-level parallelism [S1, unofficial]. It sets itself apart from parent [Binned Raster Traversal](10295-binned-raster-traversal.md) by explicitly managing the tile-to-primitive assignment on the CPU and staging primitive parameters in shared memory for cooperative compositing within the block, rather than relying on a linear scan of a pre-binned pair stream [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ primitives, each defined by parameters $\{(x_i, y_i, s_i, \theta_i, \nu_i, c_i)\}_{i=1}^N$, where $(x_i, y_i)$ is position, $s_i$ is scale, $\theta_i$ is rotation, $\nu_i$ is opacity logit, and $c_i$ is color logits [S1, unofficial]. A tile-primitive mapping generated on the CPU.
+*   **Output:** Rendered image $I \in [0,1]^3$ and alpha channel $I_\alpha$ [S1, unofficial].
+
+**Data Structures:**
+*   **Tile-Primitive Mapping:** A list associating each tile with the indices of primitives whose bounding boxes overlap the tile region (with a small padding margin) [S1, unofficial].
+*   **Shared Memory:** Stages per-primitive parameters cooperatively by threads in a block [S1, unofficial].
+*   **Global Memory:** Caches computed $\alpha_k$ and $c_k$ values in FP16 for each primitive assigned to the tile [S1, unofficial].
+
+**Formulas:**
+The transmittance at step $k$ is defined as [S1, unofficial]:
+$$ T_k(x,y) = \prod_{j=0}^{k-1}(1 - \alpha_j(x,y)) $$
+The image color is computed as [S1, unofficial]:
+$$ I(x,y) = \sum_{k=0}^{N-1} T_k(x,y) \alpha_k(x,y) \sigma(c_k) \in [0,1]^3 $$
+where $\alpha_k$ is the opacity, $\sigma$ is the sigmoid function, and $c_k$ is the primitive color [S1, unofficial].
+
+The interpolated value $M_i(x,y)$ for a primitive is computed via bilinear interpolation [S1, unofficial]:
+$$ M_i(x,y) = \mathbf{w}^T \mathbf{p} = \sum_{j=0}^{3} w_j p_j $$
+where $\mathbf{p}$ are the four surrounding points in the primitive template grid and $\mathbf{w}$ are the interpolation weights [S1, unofficial].
+
+**Parameters:**
+*   **Tile Size ($T$):** Default value is 32 pixels [S1, unofficial].
+
+**Steps:**
+1.  **CPU Preprocessing:** Partition the image plane into $T \times T$ tiles (default $T=32$). Assign each primitive to every tile whose bounding box on the image plane overlaps the tile region with a small padding margin [S1, unofficial].
+2.  **GPU Launch:** Launch a CUDA grid with dimensions $(\lceil W_{canvas}/32 \rceil, \lceil H_{canvas}/32 \rceil)$ blocks. Each block has $32 \times 32$ threads [S1, unofficial].
+3.  **Forward Pass (Per Thread):**
+    *   Each thread handles a specific pixel $(x,y)$ [S1, unofficial].
+    *   For each primitive $i$ assigned to the current tile:
+        *   Transform $(x,y)$ to $(u,v)$ in primitive space [S1, unofficial].
+        *   Compute $M_i(x,y)$ via bilinear interpolation at $(u,v)$ [S1, unofficial].
+        *   If $M_i(x,y) < \epsilon$, skip this primitive [S1, unofficial].
+        *   Compute $\alpha_k = \alpha_{max} \cdot \sigma(\nu_i) \cdot M_i(x,y)$ and $c_k = \sigma(c_i)$ [S1, unofficial].
+        *   Cache $\alpha_k$ and $c_k$ in global memory (FP16) [S1, unofficial].
+    *   **Alpha Compositing:**
+        *   Initialize transmittance $T \leftarrow 1$ and accumulated color $C \leftarrow (0,0,0)$ [S1, unofficial].
+        *   For each cached primitive $k$ (in front-to-back order):
+            *   Store $T_k$ for backward pass [S1, unofficial].
+            *   Update $C \leftarrow C + T \alpha_k c_k$ [S1, unofficial].
+            *   Update $T \leftarrow T (1 - \alpha_k)$ [S1, unofficial].
+        *   Write $I[x,y] \leftarrow C$ and $I_\alpha[x,y] \leftarrow 1 - T$ [S1, unofficial].
+4.  **Backward Pass:**
+    *   Uses the same grid structure [S1, unofficial].
+    *   Each thread rebuilds its cached primitive list [S1, unofficial].
+    *   Computes gradients via the chain rule. For the Over operator, gradients depend on suffix sums [S1, unofficial].
+    *   Color gradients are calculated as [S1, unofficial]:
+        $$ \frac{\partial L}{\partial c_{k,j}} = \frac{\partial L}{\partial I_j} \cdot T_k \alpha_k \cdot \sigma(c_{k,j})(1 - \sigma(c_{k,j})) $$
+    *   Geometric gradients $(x_i, y_i, s_i, \theta_i)$ flow through bilinear sampling of $M_i(x,y)$ [S1, unofficial].
+    *   Accumulates gradients using packed `half2` atomic operations for parameter pairs $(x_i, y_i)$, $(\nu_i, s_i)$, $(\theta_i, c_{r,i})$, and $(c_{g,i}, c_{b,i})$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Forward Pass Kernel
+@cuda.jit
+def forward_pass_kernel(primitive_params, tile_mapping, width, height, epsilon, alpha_max):
+    # Grid: (ceil(width/32), ceil(height/32))
+    # Block: (32, 32)
+    tile_idx = cuda.blockIdx.x + cuda.blockIdx.y * cuda.gridDim.x
+    pixel_x = cuda.threadIdx.x
+    pixel_y = cuda.threadIdx.y
+    
+    # Calculate global pixel coordinates
+    # Note: Exact mapping of threadIdx to global x,y depends on tile origin
+    # Assuming tile_mapping provides list of primitive indices for this tile
+    primitives = tile_mapping[tile_idx]
+    
+    # Shared memory for staging (conceptual, size depends on max primitives per tile)
+    # In practice, threads cooperatively load parameters
+    
+    # Step 1: Compute alpha and color for each primitive
+    cached_primitives = []
+    for i in primitives:
+        # Extract params for primitive i
+        xi, yi, si, theta_i, nu_i, ci = primitive_params[i]
+        
+        # Transform (pixel_x, pixel_y) to (u, v) in primitive space
+        # Eq. (1) transformation logic
+        u, v = transform_to_primitive_space(pixel_x, pixel_y, xi, yi, si, theta_i)
+        
+        # Bilinear interpolation M_i(x,y)
+        Mi = bilinear_interpolate(u, v, primitive_templates[i])
+        
+        if Mi < epsilon:
+            continue
+            
+        # Compute alpha and color
+        alpha_k = alpha_max * sigmoid(nu_i) * Mi
+        ck = sigmoid(ci)
+        
+        cached_primitives.append((alpha_k, ck))
+        
+    # Step 2: Alpha Compositing
+    T = 1.0
+    C = (0.0, 0.0, 0.0)
+    stored_T = []
+    
+    for alpha_k, ck in cached_primitives:
+        stored_T.append(T)
+        C = (
+            C[0] + T * alpha_k * ck[0],
+            C[1] + T * alpha_k * ck[1],
+            C[2] + T * alpha_k * ck[2]
+        )
+        T = T * (1.0 - alpha_k)
+        
+    # Write output
+    global_idx = pixel_y * width + pixel_x
+    output_image[global_idx] = C
+    output_alpha[global_idx] = 1.0 - T
+    output_transmittance[global_idx] = stored_T # For backward pass
+
+# Backward Pass Kernel
+@cuda.jit
+def backward_pass_kernel(grad_L, stored_T, cached_primitives_info, width, height):
+    tile_idx = cuda.blockIdx.x + cuda.blockIdx.y * cuda.gridDim.x
+    pixel_x = cuda.threadIdx.x
+    pixel_y = cuda.threadIdx.y
+    
+    global_idx = pixel_y * width + pixel_x
+    grad_I = grad_L[global_idx]
+    
+    # Rebuild cached list (or load from global memory)
+    # Compute gradients
+    # Accumulate using half2 atomic operations
+    pass
+```
+
+## Subtopics
+
+### [XPR Rasterizer](17625-xpr-rasterizer.md)
+The XPR rasterizer converts variable-length per-tile primitive lists into a fixed-size matrix $Q$ of dimensions $T \times P_{\max}$, enabling execution on accelerators that require static tensor shapes and prohibit dynamic control flow. Unlike traditional rasterizers that rely on dynamic lists or linked structures, this method uses a sequence of static-shape modules (Replicate, Assign, Cull, Sort, Gather) to produce a dense, depth-sorted array of primitive indices for each tile, padding unused entries with a sentinel value.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of primitives assigned to each tile and the number of pixels per tile. The forward pass involves a bilinear interpolation and sigmoid for each primitive-pixel pair. The backward pass involves similar computations plus atomic operations.
+*   **Memory Complexity:** Depends on the number of primitives per tile. Shared memory is used for staging, and global memory is used for caching $\alpha_k$ and $c_k$.
+*   **Performance:** Uses FP16 halves to reduce bandwidth and enable tensor core acceleration via `hfma()` intrinsics [S1, unofficial]. Atomic operations are optimized using packed `half2` buffers to halve atomic contention [S1, unofficial].
+*   **Strengths:** Achieves complete pixel-level parallelism. Efficient for differentiable rendering due to the backward pass implementation. Allows optimization at low resolution and export at high resolution [S1, unofficial].
+*   **Limitations:** Atomic operations are unsuitable for generating layered PSD files; a dedicated export kernel is required for that use case [S1, unofficial].
+
+## Background
+The method was introduced in the paper "DiffBMP: Differentiable Rendering with Bitmap Primitives" [S1, unofficial]. It follows tile-based differentiable splatting practices as in [57], adapted for 2D bitmap primitives [S1, unofficial].
+
+## Sources
+[S1] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

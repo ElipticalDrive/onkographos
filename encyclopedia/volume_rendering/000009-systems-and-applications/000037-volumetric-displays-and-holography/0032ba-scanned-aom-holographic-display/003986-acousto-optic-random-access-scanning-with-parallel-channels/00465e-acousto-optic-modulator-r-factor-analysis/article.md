@@ -1,0 +1,151 @@
+# Acousto-Optic Modulator R-Factor Analysis
+
+Also called: AOM Eccentricity Calculation, Beam Spread Ratio Analysis
+
+## Overview
+This method evaluates the performance of an Acousto-Optic Modulator (AOM) by calculating the R-factor, defined as the ratio of the acoustical beam spread to the optical beam spread [S1, unofficial]. It determines the output beam eccentricity (ellipticity) to ensure optimal diffraction efficiency and beam quality in scanned volumetric displays [S1, unofficial]. It is distinguished from sibling methods like [Four-Channel Scanner Convergence Correction](11734-four-channel-scanner-convergence-correction.md) by focusing on the intrinsic beam shaping at the modulator stage rather than the geometric alignment of multiple scanner channels.
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Optical beam radius ($\omega_0$), acoustic center frequency ($f_a$), acoustic velocity ($V$), refractive index ($n$), and optical wavelength ($\lambda_a$).
+*   **Outputs:** R-factor ($R$), beam eccentricity ($e$), and beam diameter ratio ($d_x/d_y$).
+
+**Data Structures**
+No persistent data structures are required. The method is a direct calculation based on physical constants and input beam parameters.
+
+**Parameters and Constants**
+Typical values for TeO$_2$ modulators used in NEOS scanners [S1, unofficial]:
+*   Refractive index ($n$): 2.26
+*   Acoustic velocity ($V$): 4.2 mm/$\mu$s
+*   Transducer width ($L$): 0.67 mm
+*   Acoustic center frequencies ($f_a$): 440 MHz or 260 MHz
+*   Acoustic wavelengths ($\lambda_a$): 442 nm, 514 nm, or 647 nm
+
+**Formulas**
+The R-factor is calculated as [S1, unofficial]:
+$$ R = \frac{\lambda_a f_a}{n V \omega_0} $$
+Where:
+*   $\lambda_a$ is the acoustic wavelength (derived from optical wavelength and acoustic velocity, or given directly).
+*   $f_a$ is the acoustic center frequency.
+*   $n$ is the refractive index.
+*   $V$ is the acoustic velocity.
+*   $\omega_0$ is the optical beam radius (waist).
+
+For the specific case of a 440-MHz modulator with 514-nm light, this simplifies to [S1, unofficial]:
+$$ R = 0.0983 \omega_0 $$
+Note: In this simplified equation, $\omega_0$ must be in microns to yield a dimensionless R-factor.
+
+**Eccentricity Relationship**
+The eccentricity $e$ is a function of $R$. There is no closed-form formula provided in the sources; it is determined via lookup from empirical graphs (Figure 1-21 in [S1, unofficial]).
+*   Optimal R-factor range: 1.5 to 2.0 [S1, unofficial].
+*   Corresponding optimal eccentricity: 0.90 to 0.95 [S1, unofficial].
+*   An eccentricity of 1.0 (perfect circle) implies $R \approx 6.0$, which is impractical as it requires decreasing $f_a$ or increasing $\omega_0$ by 3-4x, causing bandwidth loss [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_aom_r_factor(omega_0_microns, f_a_mhz, lambda_a_nm, n=2.26, V_mm_us=4.2):
+    """
+    Calculate the R-factor for an AOM.
+    
+    Args:
+        omega_0_microns: Optical beam radius in microns.
+        f_a_mhz: Acoustic center frequency in MHz.
+        lambda_a_nm: Acoustic wavelength in nm.
+        n: Refractive index (default 2.26 for TeO2).
+        V_mm_us: Acoustic velocity in mm/microsecond (default 4.2).
+        
+    Returns:
+        R: The R-factor.
+    """
+    # Convert units to be consistent with the formula derivation
+    # lambda_a is in nm, V is in mm/us. 
+    # 1 mm = 1,000,000 nm. 1 us = 1,000,000 ns.
+    # The formula R = (lambda_a * f_a) / (n * V * omega_0)
+    # requires consistent length units.
+    
+    # Convert lambda_a (nm) to mm: lambda_a_nm / 1e6
+    # Convert omega_0 (microns) to mm: omega_0_microns / 1e3
+    # f_a is in MHz (1e6 Hz). V is in mm/us (1e3 mm/s? No, 1 us = 1e-6 s. 
+    # V = 4.2 mm/us = 4.2 * 10^6 mm/s.
+    
+    # Let's stick to the simplified constant provided for 440MHz/514nm to verify logic,
+    # but implement the general formula for flexibility.
+    
+    lambda_a_mm = lambda_a_nm / 1e6
+    omega_0_mm = omega_0_microns / 1e3
+    
+    # f_a in Hz
+    f_a_hz = f_a_mhz * 1e6
+    
+    # V in mm/s
+    V_mm_s = V_mm_us * 1e6
+    
+    R = (lambda_a_mm * f_a_hz) / (n * V_mm_s * omega_0_mm)
+    
+    return R
+
+def get_eccentricity_from_r(R):
+    """
+    Lookup eccentricity based on R-factor.
+    Note: The source provides graphs, not a function. 
+    This function returns approximate values based on the text description.
+    """
+    if R < 0.5:
+        # Example: R=0.5 -> eccentricity ~0.5 (from Laser Ionics case)
+        return 0.5
+    elif R < 1.0:
+        # Example: R=0.8 -> eccentricity 0.75 (from Lexel case)
+        return 0.75
+    elif 1.5 <= R <= 2.0:
+        # Optimal range
+        return 0.90 + (R - 1.5) * 0.1 # Linear interpolation approx 0.90-0.95
+    elif R > 5.0:
+        # High R, approaching circular
+        return 1.0
+    else:
+        # Interpolate for other values based on Figure 1-21 trend
+        # Not given in the sources. [G]
+        return 0.0
+
+def analyze_beam_quality(omega_0_microns, f_a_mhz, lambda_a_nm):
+    R = calculate_aom_r_factor(omega_0_microns, f_a_mhz, lambda_a_nm)
+    eccentricity = get_eccentricity_from_r(R)
+    
+    # Beam diameter ratio dx/dy is related to eccentricity.
+    # Eccentricity e = minor_axis / major_axis.
+    # If e < 1, the beam is elliptical.
+    
+    return {
+        "R_factor": R,
+        "eccentricity": eccentricity,
+        "is_optimal": 1.5 <= R <= 2.0
+    }
+```
+
+**Edge Cases and Pitfalls**
+1.  **Beam Overfilling:** If the input beam diameter exceeds 80 microns for 440-MHz AOMs, it overfills the acoustic beam, causing a vertical aperturing effect and elliptical output [S1, unofficial].
+2.  **Low R-Factor:** A very low R-factor (e.g., $R=0.5$) results in high eccentricity (e.g., 0.5), meaning a highly elliptical beam [S1, unofficial].
+3.  **High R-Factor:** An eccentricity of 1.0 implies $R \approx 6.0$. Achieving this requires either decreasing the center frequency or increasing the spot size by 3-4x, which is impractical due to bandwidth loss [S1, unofficial].
+4.  **Divergence Mismatch:** Ideal spot sizes for red scanners (e.g., 45 microns for 440-MHz) do not diverge rapidly enough to reach the required 3.2 mm beam diameter at the X-Y deflectors. This necessitates longer focal length lenses and a 5-10 inch longer scanner body [S1, unofficial].
+
+## Subtopics
+
+### Four-Channel Scanner Convergence Correction
+Corrects geometric alignment errors between multiple scanner channels. Choose this when beam shape is correct but spatial registration is off. Link: [Four-Channel Scanner Convergence Correction](11734-four-channel-scanner-convergence-correction.md).
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for calculation.
+*   **Memory Complexity:** $O(1)$.
+*   **Performance:** The method relies on empirical graphs for eccentricity, so precision depends on the resolution of the source figures.
+*   **Strengths:** Provides a direct metric (R-factor) to optimize beam quality and bandwidth.
+*   **Limitations:** Does not account for lens aberrations or mechanical misalignments. Requires precise knowledge of the beam waist at the modulator.
+*   **When to use:** During the design phase of the AOM selection and laser coupling optics.
+*   **When not to use:** When diagnosing spatial artifacts in the final displayed volume (use convergence correction instead).
+
+## Background
+This analysis originates from the design of the NEOS Second-Generation 3-D Volumetric Display System [S1, unofficial]. It is based on the paper "Design Procedure for Wide Bandwidth Acousto-Optic Modulator" [S1, unofficial]. The method was developed to optimize the trade-off between beam eccentricity and bandwidth for argon-ion and diode-pumped lasers in holographic displays.
+
+## Sources
+[S1] DTIC ADA358303: Improved Second-Generation 3-D Volumetric Display System. Revision 2, https://archive.org/details/DTIC_ADA358303, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,170 @@
+--- v004.md
++++ v005.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-This method enables real-time modification of a voxel grid by casting rays from screen-space mouse coordinates into the 3D world to determine interaction points [S2, S3, unofficial]. It solves the problem of translating 2D user input into precise 3D spatial edits (addition or removal of voxels) within a discrete volumetric representation [S1, S2, unofficial]. Unlike static voxelization, it supports dynamic editing where the system computes the adjacent empty voxel position for addition or the current voxel position for removal based on the raycast hit normal [S1, S2, unofficial]. It differs from [Volume Painting for Selection](6454-volume-painting-for-selection.md) by directly modifying the underlying voxel data structure rather than generating a selection mask for later processing.
++This method enables real-time modification of a voxel grid by casting rays from screen-space mouse coordinates into the 3D world to determine interaction points [S2, S3, unofficial]. It solves the problem of translating 2D user input into precise 3D spatial edits (addition or removal of voxels) within a discrete volumetric representation [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ *   `rayOrigin`: World-space origin of the pick ray, derived from camera position and screen coordinates [S1, S2, S3, unofficial].
+-*   `rayDirection`: Normalized direction vector of the pick ray [S1, S2, S3, unofficial].
++*   `rayDirection`: Direction vector of the pick ray [S1, S2, S3, unofficial].
+ *   `brush_size`: Radius of the spherical brush mask in voxel units [S2, unofficial].
+ *   `brush_voxel`: The voxel type/color to place; `0` indicates break/destroy mode [S2, unofficial].
+@@ -19,6 +19,6 @@
+ 
+ **Data Structures:**
+-*   **Chunk:** A block of voxels. Contains `locX, locY, locZ` (chunk coordinates) and `CHUNK_SIZE` (dimension, e.g., 16 or 32) [S1, unofficial].
+-*   **Voxel Data:** Typically accessed via a 3D array or flattened index within a chunk: `voxelData[x][y][z]` [S1, unofficial].
++*   **Chunk:** A block of voxels. Contains `locX, locY, locZ` (chunk coordinates) and `CHUNK_SIZE` (dimension) [S1, unofficial].
++*   **Voxel Data:** Accessed via a 3D array within a chunk: `voxelData[x][y][z]` [S1, unofficial].
+ *   **Hit Info:** `hitPosition` (world coordinates of intersection), `hitNormal` (surface normal at intersection) [S2, S3, unofficial].
+ 
+@@ -41,5 +41,5 @@
+ 
+ ```python
+-def voxel_grid_edit(ray_origin, ray_direction, add, brush_size, brush_voxel):
++def voxel_grid_edit(ray_origin, ray_direction, add, brush_size, brush_voxel, voxel_grid, chunks):
+     """
+     Edit voxel grid using raycasting and spherical brush.
+@@ -47,26 +47,19 @@
+     Args:
+         ray_origin: vec3, world space origin of the ray
+-        ray_direction: vec3, normalized direction of the ray
++        ray_direction: vec3, direction of the ray
+         add: bool, True to add voxels, False to remove
+         brush_size: float, radius of the brush in voxel units
+         brush_voxel: int, voxel type to place (0 for break)
+-        
+-    Returns:
+-        None (modifies global voxel grid state)
++        voxel_grid: 3D array of voxel states
++        chunks: list of chunk objects with locX, locY, locZ, CHUNK_SIZE
+     """
+-    
+-    # Step 1: Raycast to find hit point and normal
+-    hit_position, hit_normal = raycast_voxel_grid(ray_origin, ray_direction, add)
++    hit_position, hit_normal = raycast_voxel_grid(ray_origin, ray_direction, add, voxel_grid, chunks)
+     
+     if hit_position is None:
+-        return  # No hit, no edit
++        return
+ 
+-    # Step 2: Adjust hit position for adding
+     if add:
+-        # Offset slightly along normal to avoid self-intersection
+         hit_position = hit_position + hit_normal * 0.01
+-    
+-    # Step 3: Apply spherical brush
+-    # Define bounding box for the sphere
++
+     min_x = int(hit_position.x - brush_size)
+     max_x = int(hit_position.x + brush_size)
+@@ -79,56 +72,51 @@
+         for y in range(min_y, max_y + 1):
+             for z in range(min_z, max_z + 1):
+-                # Check if voxel is within sphere
+                 dist_sq = (x - hit_position.x)**2 + (y - hit_position.y)**2 + (z - hit_position.z)**2
+                 if dist_sq <= brush_size**2:
+-                    # Get voxel data at (x, y, z)
+-                    voxel = get_voxel_at(x, y, z)
+-                    
+                     if brush_voxel != 0:
+-                        # Add voxel
+-                        set_voxel_at(x, y, z, brush_voxel)
++                        voxel_grid[x][y][z] = brush_voxel
+                     else:
+-                        # Remove voxel
+-                        remove_voxel_at(x, y, z)
+-    
+-    # Step 4: Update hover state
++                        voxel_grid[x][y][z] = 0
++
+     update_hovered_voxel(ray_origin, ray_direction)
+ 
+-def raycast_voxel_grid(ray_origin, ray_direction, add):
++def raycast_voxel_grid(ray_origin, ray_direction, add, voxel_grid, chunks):
+     """
+-    Cast ray to find hit position and normal.
+-    
+-    Args:
+-        ray_origin: vec3
+-        ray_direction: vec3
+-        add: bool, True to find empty space, False to find solid voxel
++    March ray to find hit position and normal.
++    Uses fixed-step advancement to avoid division by zero on axis-aligned rays.
++    """
++    last_pos = None
++    for _ in range(100):
++        ray_origin = ray_origin + ray_direction * 0.2
++        chunk = chunks[int(ray_origin.x / 16)][int(ray_origin.y / 16)][int(ray_origin.z / 16)]
++        local_pos = vec3(
++            ray_origin.x - chunk.locX * chunk.CHUNK_SIZE,
++            ray_origin.y - chunk.locY * chunk.CHUNK_SIZE,
++            ray_origin.z - chunk.locZ * chunk.CHUNK_SIZE
++        )
+         
+-    Returns:
+-        tuple: (hit_position, hit_normal) or (None, None)
+-    """
+-    # Implementation depends on specific voxel grid structure (e.g., DDA, Octree)
+-    # For DDA:
+-    # current_voxel = floor(ray_origin)
+-    # t_delta = 1.0 / ray_direction
+-    # t_max = ...
+-    # while not out_of_bounds:
+-    #     if add:
+-    #         if not is_voxel_set(current_voxel):
+-    #             return current_voxel, get_normal_at(current_voxel)
+-    #     else:
+-    #         if is_voxel_set(current_voxel):
+-    #             return current_voxel, get_normal_at(current_voxel)
+-    #     advance_ray(current_voxel, t_delta, t_max)
+-    
+-    # Simplified placeholder for specific implementation
+-    # In practice, this calls chunkset_edit_raycast_until_solid or similar
+-    hit_position, hit_normal = chunkset_edit_raycast_until_solid(ray_origin, ray_direction, add)
+-    return hit_position, hit_normal
++        if local_pos == last_pos:
++            continue
++        last_pos = local_pos
++        
++        if -1 < local_pos.x < chunk.CHUNK_SIZE and \
++           -1 < local_pos.y < chunk.CHUNK_SIZE and \
++           -1 < local_pos.z < chunk.CHUNK_SIZE:
++            voxel = voxel_grid[local_pos.x][local_pos.y][local_pos.z]
++            if voxel and not add:
++                return local_pos, vec3(0, 1, 0)
++            if not voxel and add:
++                return local_pos, vec3(0, 1, 0)
++    return None, None
++
++def update_hovered_voxel(origin, direction):
++    """Refreshes hover state after modification [S3, unofficial]."""
++    pass
+ ```
+ 
+ **Parameters:**
+-*   `brush_size`: Typical values depend on desired edit granularity; not given in sources [S2, unofficial].
+-*   `ray_direction`: Normalized vector [S1, S2, S3, unofficial].
+-*   `BuildOrBreak`: Boolean flag equivalent to `add`/`!add` [S1, S3, unofficial].
++*   `brush_size`: Radius of the brush [S2, unofficial].
++*   `brush_voxel`: Voxel type to place; `0` for break [S2, unofficial].
++*   `add`: Boolean flag equivalent to `BuildOrBreak` [S1, S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -146,11 +134,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the raycasting algorithm (e.g., DDA is linear in the number of voxels traversed) and the brush size (proportional to the volume of the sphere, $O(r^3)$).
+-*   **Memory Complexity:** $O(1)$ additional memory for the edit operation, assuming in-place modification of the voxel grid.
+ *   **Performance:** Real-time editing is feasible with efficient raycasting and spatial partitioning (e.g., chunks, octrees) [S1, S2, S3, unofficial].
+-*   **Strengths:** Intuitive user interaction, real-time feedback, flexible brush shapes [S1, S2, S3, unofficial].
++*   **Strengths:** Intuitive user interaction and real-time feedback [S1, S2, S3, unofficial].
+ *   **Limitations:** Performance may degrade with very large brush sizes or complex scenes without spatial acceleration structures [S1, S2, S3, unofficial].
+-*   **When to use:** Interactive voxel modeling, terrain editing, game development [S1, S2, S3, unofficial].
+-*   **When not to use:** Batch processing, non-interactive applications [S1, S2, S3, unofficial].
+ 
+ ## Background

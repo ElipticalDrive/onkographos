@@ -1,0 +1,301 @@
+--- v001.md
++++ v002.md
+@@ -4,72 +4,61 @@
+ 
+ ## Overview
+-SparseLeap is a ray-guided volume rendering technique that separates empty-space skipping metadata from volume data, using a ray segment list to process rays in discrete intervals [S1, unofficial]. It distinguishes itself from sibling methods like [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) by delaying the determination of a brick's occupancy status until it is actually intersected by a view ray, thereby reducing depth complexity and avoiding unnecessary culling computations for occluded or out-of-frustum regions [S1, unofficial].
++SparseLeap is a volume rendering acceleration technique that separates meta-data for empty space skipping from the volume data itself, using a ray-guided framework where ray segments are processed via a list [S1, unofficial]. It extends standard ray-casting by introducing an outer loop over ray segments and handling 'occupancy misses' to delay the determination of whether a brick is empty or non-empty until it is actually needed [S1, unofficial]. Unlike octree-based skipping which incurs high depth complexity due to fragmented space subdivision, SparseLeap limits depth complexity by generating a sparse list of ray segments, significantly reducing the number of traversal steps per ray [S1, unofficial].
+ 
+ ## How it works
+-SparseLeap extends standard ray-casting by introducing an outer loop over a pre-computed list of ray segments. It utilizes an "occupancy histogram tree" to manage metadata and supports an "unknown" occupancy class to enable lazy evaluation of empty space [S1, unofficial].
++SparseLeap operates on a ray-guided rendering framework [S1, unofficial]. The method relies on a pre-computed or dynamically updated occupancy histogram tree to guide ray traversal, avoiding the loading of volume data until necessary.
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Volume data (stored in bricks).
+-    *   Occupancy histogram tree (metadata structure).
+-    *   Ray segment list (generated via rasterization of occupancy geometry).
++    *   Volume data (stored in bricks/blocks).
++    *   Occupancy histogram tree (meta-data structure).
++    *   Ray segment list (generated from occupancy geometry).
+     *   Ray origin and direction.
+ *   **Outputs:**
+-    *   Rendered pixel color and opacity.
++    *   Final color and opacity for the pixel.
++    *   Updated occupancy histogram tree (homogeneous sub-trees substituted).
++    *   Cache state updates (data loading and LRU retirement).
+ 
+ ### Data Structures
+ 
+-**Ray Segment List**
+-A linear list of ray events defining intervals along a ray. Each event marks a transition between segments. The list allows linear iteration through consecutive overlapping pairs to determine segment boundaries.
+-
+-**Occupancy Histogram Tree**
+-A hierarchical structure storing occupancy metadata for volume bricks.
+-*   **Nodes:** Represent spatial regions (bricks or sub-bricks).
++**1. Occupancy Histogram Tree**
++A hierarchical structure representing the occupancy status of volume blocks.
++*   **Nodes:** Each node represents a block (e.g., $4^3$, $8^3$, $16^3$, or $32^3$ voxels).
+ *   **Fields:**
+     *   `occupancy_class`: Enum {EMPTY, NONEMPTY, UNKNOWN}.
+-    *   `histogram`: Counts of voxel types within the node's region (used to detect homogeneity).
+-*   **Homogeneity:** A sub-tree is homogeneous if all leaf nodes share the same `occupancy_class`. Such sub-trees are substituted by a single representative node.
++    *   `histogram`: Counts of occupied/empty voxels within the block (used to determine homogeneity).
++    *   `children`: Pointers to child nodes (if not a leaf).
++*   **Homogeneity:** A sub-tree is homogeneous if all nodes share the same `occupancy_class`. Such sub-trees are substituted by a single node of that class [S1, unofficial].
+ 
+-**Occupancy Class**
+-*   `EMPTY`: The region contains no visible data.
+-*   `NONEMPTY`: The region contains visible data.
+-*   `UNKNOWN`: The occupancy status has not yet been determined.
++**2. Ray Segment List**
++A linear list of segments along a ray, derived from rasterizing occupancy geometry.
++*   **Elements:** Consecutive pairs of ray events (start/end points).
++*   **Properties:** Each segment is tagged with an `occupancy_class` (EMPTY, NONEMPTY, UNKNOWN) [S1, unofficial].
+ 
+-### Algorithm Steps
++**3. Volume Cache**
++Manages the loading of volume data bricks.
++*   **Mechanism:** Out-of-core memory management with LRU retirement [S1, unofficial].
+ 
+-1.  **Ray Segment Iteration:**
+-    The ray-casting loop is augmented by an outer loop that iterates through the ray segment list. The loop processes consecutive pairs of ray events to define the start and end of each segment $[t_{start}, t_{end}]$.
++### Numbered Steps
+ 
+-2.  **Segment Classification:**
+-    For each segment, retrieve the `occupancy_class` from the occupancy histogram tree.
+-    *   If `occupancy_class` is `EMPTY`:
+-        *   Skip the segment.
+-        *   Advance the ray position to $t_{end}$.
+-    *   If `occupancy_class` is `NONEMPTY`:
+-        *   Proceed to sampling.
+-    *   If `occupancy_class` is `UNKNOWN`:
+-        *   Generate an **occupancy miss**.
+-        *   Resolve the miss (see Step 3).
+-
+-3.  **Occupancy Miss Resolution:**
+-    When an occupancy miss occurs:
+-    *   Perform culling to determine the actual occupancy class of the underlying brick/region.
+-    *   Update the `occupancy_class` in the occupancy histogram tree to `EMPTY` or `NONEMPTY`.
+-    *   If the updated sub-tree becomes homogeneous, substitute it with a single node of that class.
+-    *   Re-evaluate the segment classification using the updated class.
+-
+-4.  **Sampling:**
+-    If the segment is classified as `NONEMPTY` (either initially or after resolution):
+-    *   Perform standard ray-casting sampling within the segment bounds.
+-    *   Check for data cache residency.
+-
+-5.  **Data Cache Management:**
+-    *   If the volume data for the current brick is not in memory, generate a **data cache miss**.
++1.  **Initialization:** Generate the ray segment list by rasterizing occupancy geometry. Ensure fragments are processed in submission order using `ARB_fragment_shader_interlock` to guarantee correct depth complexity [S1, unofficial].
++2.  **Outer Loop (Segment Iteration):** Iterate linearly through the ray segment list. For each segment, determine its `occupancy_class`.
++3.  **Segment Processing:**
++    *   **If `occupancy_class` is EMPTY:** Skip the segment. Advance the ray position to the start of the next segment.
++    *   **If `occupancy_class` is NONEMPTY:** Proceed to sample the volume data (see Step 4).
++    *   **If `occupancy_class` is UNKNOWN:** Generate an **Occupancy Miss**.
++4.  **Occupancy Miss Resolution:**
++    *   Trigger culling to determine the actual occupancy class of the current block.
++    *   Update the `occupancy_class` in the occupancy histogram tree.
++    *   If the sub-tree becomes homogeneous, substitute it with a single node [S1, unofficial].
++    *   Re-evaluate the segment's class (now EMPTY or NONEMPTY).
++5.  **Data Loading (Data Cache Miss):**
++    *   If the segment is NONEMPTY and the volume data brick is not in the cache, generate a **Data Cache Miss**.
+     *   Load the brick into memory.
+-    *   Note: A data cache miss is *not* generated for `UNKNOWN` segments until after the occupancy miss is resolved and the class is determined to be `NONEMPTY`. This prevents loading data that may turn out to be empty or unnecessary [S1, unofficial].
+-
+-6.  **Memory Management (LRU):**
+-    *   The ray-caster reports usage of volume regions to the out-of-core memory management system.
+-    *   Unused nodes in the occupancy histogram tree are retired using a Least-Recently Used (LRU) scheme based on this usage report. This scales the metadata size to the current working set rather than the entire volume [S1, unofficial].
++    *   If the segment is EMPTY or UNKNOWN, do *not* generate a data cache miss, even if the data is not in cache, to avoid loading unnecessary data [S1, unofficial].
++6.  **Volume Sampling:** Perform standard front-to-back ray-casting sampling for the current segment using the loaded volume data.
++    $$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
++    $$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
++7.  **Cache Management:** The ray-caster reports usage to the out-of-core memory management system. Unused nodes in the occupancy histogram tree are retired using an LRU scheme based on this usage [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -78,12 +67,12 @@
+ def sparse_leap_ray_cast(ray_origin, ray_direction, ray_segment_list, occupancy_tree, volume_cache):
+     """
+-    Renders a single ray using SparseLeap.
++    Performs ray casting using SparseLeap with occupancy misses.
+     
+     Args:
+         ray_origin: vec3
+         ray_direction: vec3
+-        ray_segment_list: List of ray events (t_start, t_end, segment_id)
++        ray_segment_list: List of Segment objects (each has start, end, occupancy_class)
+         occupancy_tree: OccupancyHistogramTree
+-        volume_cache: Out-of-core cache for volume bricks
++        volume_cache: VolumeCache (supports load(brick_id) and is_resident(brick_id))
+         
+     Returns:
+@@ -91,88 +80,103 @@
+     """
+     color = vec4(0.0, 0.0, 0.0, 0.0)
+-    t = ray_origin
+-    alpha = 0.0
++    alpha_acc = 0.0
+     
+-    # Iterate through ray segments
+-    for i in range(0, len(ray_segment_list) - 1):
+-        event_start = ray_segment_list[i]
+-        event_end = ray_segment_list[i + 1]
++    # Outer loop over ray segments
++    for segment in ray_segment_list:
++        # Skip if transmittance is too low (standard early termination)
++        if (1.0 - alpha_acc) < 0.001:
++            break
++            
++        occ_class = segment.occupancy_class
+         
+-        t_start = event_start.t
+-        t_end = event_end.t
++        # Handle Unknown occupancy via Occupancy Miss
++        if occ_class == OCCUPANCY_UNKNOWN:
++            # Resolve occupancy miss: determine actual class via culling
++            actual_class = resolve_occupancy_miss(segment, occupancy_tree)
++            occ_class = actual_class
++            
++            # If still unknown after resolution (should not happen if culling is robust),
++            # treat as nonempty to ensure sampling, or skip if empty.
++            # Assuming resolve_occupancy_miss updates the tree and returns EMPTY or NONEMPTY.
+         
+-        # Determine occupancy class
+-        class_id = occupancy_tree.get_occupancy_class(event_start.segment_id)
+-        
+-        if class_id == OCCUPANCY_EMPTY:
+-            # Skip empty segments
+-            t = ray_origin + ray_direction * t_end
++        # Skip empty segments
++        if occ_class == OCCUPANCY_EMPTY:
+             continue
+             
+-        elif class_id == OCCUPANCY_UNKNOWN:
+-            # Resolve occupancy miss
+-            actual_class = culling_resolve(event_start.segment_id, occupancy_tree)
+-            if actual_class == OCCUPANCY_EMPTY:
+-                t = ray_origin + ray_direction * t_end
+-                continue
+-            elif actual_class == OCCUPANCY_NONEMPTY:
+-                class_id = OCCUPANCY_NONEMPTY
+-            else:
+-                # Should not happen if culling is correct
+-                t = ray_origin + ray_direction * t_end
+-                continue
+-        
+-        # If NONEMPTY, sample
+-        # Check data cache
+-        brick = volume_cache.get_brick(event_start.segment_id)
+-        if brick is None:
+-            # Data cache miss: load brick
+-            brick = volume_cache.load(event_start.segment_id)
++        # Process non-empty segments
++        if occ_class == OCCUPANCY_NONEMPTY:
++            # Check for Data Cache Miss
++            brick_id = get_brick_id(segment)
++            if not volume_cache.is_resident(brick_id):
++                # Generate Data Cache Miss
++                volume_cache.load(brick_id)
++                
++            # Sample volume data
++            sample_color, sample_alpha = sample_volume(segment, volume_cache)
+             
+-        # Standard ray-casting sampling within [t_start, t_end]
+-        # Note: t_start and t_end are relative to ray origin
+-        sample_t = t_start
+-        step_size = 1.0 / volume_resolution # Or adaptive step
+-        while sample_t < t_end:
+-            sample_pos = ray_origin + ray_direction * sample_t
+-            density = brick.sample(sample_pos)
+-            color_sample = transfer_function(density)
++            # Front-to-back compositing
++            contribution = sample_color * sample_alpha * (1.0 - alpha_acc)
++            color += contribution
++            alpha_acc += sample_alpha * (1.0 - alpha_acc)
+             
+-            # Alpha blending
+-            alpha += (1.0 - alpha) * density
+-            color += color_sample * (1.0 - alpha)
+-            
+-            if alpha >= 1.0:
+-                break
+-            sample_t += step_size
+-            
+-        t = ray_origin + ray_direction * t_end
+-        
+-        if alpha >= 1.0:
+-            break
++            # Report usage for LRU retirement
++            volume_cache.report_usage(brick_id)
+             
+     return color
++
++def resolve_occupancy_miss(segment, occupancy_tree):
++    """
++    Determines the actual occupancy class of a segment.
++    Updates the occupancy histogram tree.
++    Returns OCCUPANCY_EMPTY or OCCUPANCY_NONEMPTY.
++    """
++    # Perform culling on the block corresponding to the segment
++    # This may involve fetching meta-data from disk if not in cache
++    is_empty = perform_culling(segment)
++    
++    new_class = OCCUPANCY_EMPTY if is_empty else OCCUPANCY_NONEMPTY
++    
++    # Update the occupancy histogram tree
++    update_occupancy_tree(occupancy_tree, segment, new_class)
++    
++    # Substitute homogeneous sub-trees if applicable
++    substitute_homogeneous_subtrees(occupancy_tree)
++    
++    return new_class
++
++def update_occupancy_tree(tree, segment, new_class):
++    """
++    Updates the occupancy class in the tree.
++    """
++    node = find_node_in_tree(tree, segment)
++    node.occupancy_class = new_class
++
++def substitute_homogeneous_subtrees(tree):
++    """
++    If a sub-tree is homogeneous (all nodes same class), replace with single node.
++    """
++    # Traversal to find homogeneous sub-trees
++    # This is trivial using occupancy histograms
++    pass
+ ```
+ 
+ ### Parameters
+-*   **Culling Granularity:** The size of blocks used for empty space skipping. Can be as small as $4^3$ blocks for terabyte-sized volumes, allowing finer granularity than the memory management brick size (e.g., $32^3$ blocks) [S1, unofficial].
+-*   **Evaluated Block Sizes:** $4^3, 8^3, 16^3, 32^3$ blocks [S1, unofficial].
++*   **Culling Granularity:** The size of blocks used for empty space skipping. Can be as small as $4^3$ blocks for terabyte-sized volumes, allowing finer granularity than the brick size used for memory management (e.g., $32^3$ blocks) [S1, unofficial].
++*   **Block Sizes Evaluated:** $4^3$, $8^3$, $16^3$, and $32^3$ blocks [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Order-Dependent Rasterization:** The rasterization of occupancy geometry into ray segment lists must process fragments in the same order as submitted to OpenGL to ensure correct segment ordering. This is handled using the `ARB_fragment_shader_interlock` extension [S1, unofficial].
+-*   **Precision:** Not given in the sources.
+-*   **Degenerate Input:** Not given in the sources.
++*   **Order-Dependent Rasterization:** Rasterization of occupancy geometry into ray segment lists must process fragments in the same order as submitted to OpenGL. This is handled using the `ARB_fragment_shader_interlock` capability [S1, unofficial].
++*   **Short Empty Segments:** Very short empty ray segments that cannot be merged into a longer empty segment because they precede a non-empty segment are detected and removed to reduce depth complexity [S1, unofficial].
++*   **Occupancy Miss Overhead:** Resolving occupancy misses adds computational overhead. However, it avoids loading data for occluded or frustum-out volumes [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of ray segments. SparseLeap significantly limits depth complexity compared to octree-based skipping. For the SEM Mouse Cortex dataset, SparseLeap had an average of 3.84 segments per ray (min 1, max 31), while octree traversal had an average of 13.44 intersected nodes (min 4, max 45) [S1, unofficial].
+-*   **Memory Complexity:** Scales with the current output size (working set) rather than the whole volume, due to LRU retirement of unused nodes in the occupancy histogram tree [S1, unofficial].
+-*   **Measured Performance:** Tested on NVIDIA GeForce Titan X (Pascal) GPU with 12 GB RAM [S1, unofficial]. Performance scales better to finely detailed, sparse data compared to octree-based approaches. Octree skipping can be slower than no skipping for some resolution levels in sparse data [S1, unofficial].
+-*   **Strengths:** Reduced depth complexity; lazy evaluation of occupancy metadata; fine-grained empty space skipping independent of brick size.
+-*   **Limitations:** Requires fragment shader interlock support; relies on pre-computed ray segment lists.
+-*   **When to use:** Large-scale, sparse volume rendering where metadata overhead and depth complexity of octrees are prohibitive.
+-*   **When not to use:** Dense volumes where empty space skipping provides little benefit; hardware lacking `ARB_fragment_shader_interlock`.
++*   **Time Complexity:** Depends on the number of ray segments. SparseLeap significantly reduces depth complexity compared to octree traversal. For the SEM Mouse Cortex dataset, SparseLeap had an average of 3.84 segments per ray (min 1, max 31), while octree traversal had an average of 13.44 intersected nodes (min 4, max 45) [S1, unofficial].
++*   **Memory Complexity:** Scales with the current output size (visible part of the volume) rather than the whole volume, due to LRU retirement of unused nodes in the occupancy histogram tree [S1, unofficial].
++*   **Performance:** Tested on NVIDIA GeForce Titan X (Pascal) GPU with 12 GB RAM [S1, unofficial]. Performance scales better to finely detailed, sparse data compared to octree-based approaches. Octree skipping can be slower than no skipping for some resolution levels in sparse data [S1, unofficial].
++*   **Strengths:** Low depth complexity, output-sensitive culling, fine granularity for empty space skipping.
++*   **Limitations:** Requires fragment shader interlock support. Overhead from occupancy miss resolution if many blocks are unknown.
+ 
+ ## Background
+-SparseLeap was introduced in the paper "SparseLeap: Efficient Empty Space Skipping for Large-Scale Volume Rendering" [S1, unofficial]. It is implemented using OpenGL with GLSL shaders and integrated with a large-scale out-of-core raycasting system [S1, unofficial]. The method builds on the concept of ray-guided volume rendering and lazy evaluation [S1, unofficial].
++SparseLeap was introduced in the paper "SparseLeap: Efficient Empty Space Skipping for Large-Scale Volume Rendering" [S1, unofficial]. It is implemented using OpenGL with GLSL shaders, integrated with a large-scale out-of-core raycasting system [S1, unofficial]. The method builds on the concept of lazy evaluation in ray-guided volume rendering, extending it to occupancy class determination [S1, unofficial].
+ 
+ ## Sources

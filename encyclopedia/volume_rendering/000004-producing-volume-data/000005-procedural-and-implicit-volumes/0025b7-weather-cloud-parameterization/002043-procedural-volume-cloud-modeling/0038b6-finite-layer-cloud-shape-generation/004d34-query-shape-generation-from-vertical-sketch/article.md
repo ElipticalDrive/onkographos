@@ -1,0 +1,225 @@
+# Query Shape Generation from Vertical Sketch
+
+Also called: Vertical Sketch Query Shape Generation
+
+## Overview
+This method generates a 3D query shape for cloud volume retrieval by extruding a user-sketched 2D vertical profile into a volume where every cross-section is an ellipsoid [S1]. It solves the problem of converting a simple 2D artistic sketch into a volumetric representation suitable for similarity matching against a pre-simulated database [S1]. It differs from its sibling [Cumulonimbus and Cumulus Shape Generation](8296-cumulonimbus-and-cumulus-shape-generation.md) by focusing on layer-cloud-like ellipsoidal cross-sections derived from a single vertical curve, rather than complex convective structures [S1]. It serves as the geometric foundation for [Sketch-based Cloud Volume Retrieval via SVD](16210-sketch-based-cloud-volume-retrieval-via-svd.md), which uses this shape for database matching [S1].
+
+## How it works
+**Inputs:**
+1.  User-specified cloud plane height $H_{plane}$ [S1].
+2.  User-specified horizontal thickness parameter $d$ [S1].
+3.  User-sketched 2D curve representing the vertical shape of the desired clouds [S1].
+
+**Outputs:**
+A 3D query shape defined by its horizontal thickness $T(x, z)$ at any point $(x, 0, z)$ in the local coordinate system [S1].
+
+**Data Structures:**
+The method does not explicitly store a voxel grid or mesh in this generation phase; it defines the shape analytically via the thickness function $T(x, z)$ [S1]. The input sketch is treated as a set of points defining the height function $h(x)$ [S1].
+
+**Steps:**
+1.  **Generate Cloud Plane:** Create a horizontal plane at the user-specified height $H_{plane}$ [S1].
+2.  **Sketch Input:** The user sketches the vertical shape of the desired clouds as a single continuous curve on the screen [S1].
+3.  **Project Endpoints:** Identify the start and end points of the sketched curve. Project the line segment connecting these two endpoints onto the cloud plane [S1].
+4.  **Create Vertical Plane:** Construct a vertical plane that is perpendicular to the cloud plane and contains the projected line segment from Step 3 [S1].
+5.  **Project Sketch:** Project the user's sketched curve onto this vertical plane [S1].
+6.  **Define Local Coordinate System:** Establish a local coordinate system $(x, y, z)$ with the following properties [S1]:
+    *   Origin: Center of the line segment connecting the endpoints of the sketched curve.
+    *   $x$-axis: Coincides with the direction of the line segment.
+    *   $z$-axis: Coincides with the normal vector of the cloud plane (pointing upwards).
+    *   $y$-axis: Completes the right-handed system, perpendicular to both $x$ and $z$.
+7.  **Extract Height Function:** Determine the height of the vertical shape at each $x$ coordinate, denoted as $h(x)$, based on the projected sketch in the local coordinate system [S1].
+8.  **Compute Thickness:** For each point $(x, 0, z)$ within the bounds of the shape, compute the horizontal thickness $T(x, z)$ using the formula below [S1].
+
+**Formula:**
+The horizontal thickness $T(x, z)$ at a point $(x, 0, z)$ is given by:
+
+$$
+T(x, z) = \pm d \sqrt{1 - \left(\frac{z}{h(x)}\right)^2} \quad \text{for } 0 < z < h(x)
+$$
+
+Where:
+*   $T(x, z)$ is the horizontal thickness at position $x$ and height $z$ [S1].
+*   $d$ is the user-specified parameter for horizontal thickness [S1].
+*   $h(x)$ is the height of the vertical shape at $(x, 0, 0)$ [S1].
+*   The $\pm$ indicates that the thickness extends symmetrically in the $y$ direction (positive and negative $y$) [S1].
+
+**Parameters:**
+*   $d$: User-specified parameter used to adjust the horizontal thickness of the query shape [S1]. Typical values are not specified in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Height:** If $h(x) = 0$ at any point, the term $\frac{z}{h(x)}$ becomes undefined. The formula is valid only for $0 < z < h(x)$ [S1]. Implementers must handle points where the sketch height is zero or negative by excluding them or clamping [G].
+*   **Boundary Conditions:** The formula applies strictly within the vertical extent of the sketch. Outside this range, the thickness is zero [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_query_shape(sketch_points, cloud_plane_normal, d):
+    """
+    Generates a query shape from a vertical sketch.
+    
+    Args:
+        sketch_points: List of 2D points (x, y_screen) representing the user's sketch.
+                       These are assumed to be in a 2D projection space.
+        cloud_plane_normal: 3D vector representing the normal of the cloud plane.
+        d: User-specified horizontal thickness parameter.
+        
+    Returns:
+        A function or data structure representing the thickness T(x, z).
+        For implementation, this typically involves storing h(x) and using the formula.
+    """
+    
+    # Step 1: Identify endpoints of the sketch
+    if len(sketch_points) < 2:
+        raise ValueError("Sketch must have at least two points")
+    
+    start_point = sketch_points[0]
+    end_point = sketch_points[-1]
+    
+    # Step 2: Project endpoints onto the cloud plane
+    # Assuming the sketch is given in a 2D screen space, we need to map this to 3D.
+    # The source implies a projection process. We assume the sketch points are already
+    # projected onto the vertical plane or can be mapped to the local x-axis.
+    # For simplicity, we assume the sketch defines h(x) directly along the x-axis
+    # after projection.
+    
+    # Step 3: Define local coordinate system
+    # Origin: Center of the line segment connecting start and end points
+    # We need to map the 2D sketch to the local x-axis.
+    # Let's assume the sketch points are ordered along the x-axis in the local system.
+    
+    # Extract x-coordinates and corresponding heights (y in 2D sketch becomes z in 3D)
+    # Note: The source says "x and z axes coincide with the line segment and the normal vector".
+    # The sketch is vertical, so the vertical dimension of the sketch maps to z.
+    # The horizontal dimension of the sketch maps to x.
+    
+    # Re-map sketch points to local coordinates
+    # Assume sketch_points are (x_sketch, z_sketch) in the vertical plane
+    local_x_coords = [p[0] for p in sketch_points]
+    local_z_coords = [p[1] for p in sketch_points]
+    
+    # Find the center of the line segment in the local x-z plane
+    # The line segment connects the first and last points of the sketch
+    # Project this segment onto the cloud plane (which is horizontal, so z=constant)
+    # The projection of the segment onto the cloud plane defines the x-axis direction.
+    # The source says "x axis coincides with the line segment".
+    # So the x-axis is along the chord of the sketch.
+    
+    # Calculate the vector of the line segment
+    dx = end_point[0] - start_point[0]
+    dz = end_point[1] - start_point[1]
+    
+    # The length of the segment
+    segment_length = (dx**2 + dz**2)**0.5
+    
+    # If the segment is degenerate, handle error
+    if segment_length == 0:
+        raise ValueError("Start and end points are identical")
+    
+    # Define the local x-axis unit vector along the segment
+    # However, the source says "x axis coincides with the line segment".
+    # This implies the x-axis is rotated to align with the segment.
+    # For simplicity, we can assume the sketch is already aligned or we rotate it.
+    # Let's assume we rotate the sketch so that the segment lies on the x-axis.
+    
+    # Rotation angle
+    angle = atan2(dz, dx)
+    
+    # Rotate sketch points to align segment with x-axis
+    rotated_points = []
+    for p in sketch_points:
+        # Translate to origin
+        px = p[0] - start_point[0]
+        pz = p[1] - start_point[1]
+        # Rotate
+        rx = px * cos(angle) + pz * sin(angle)
+        rz = -px * sin(angle) + pz * cos(angle)
+        rotated_points.append((rx, rz))
+        
+    # Shift origin to center of the segment
+    # The segment goes from (0,0) to (segment_length, 0) in rotated coords
+    center_x = segment_length / 2
+    center_z = 0
+    
+    final_points = []
+    for p in rotated_points:
+        fx = p[0] - center_x
+        fz = p[1] - center_z
+        final_points.append((fx, fz))
+        
+    # Now, final_points are in local coordinates (x, z)
+    # The x-axis is along the segment, z-axis is vertical (normal to cloud plane)
+    
+    # Step 4: Extract height function h(x)
+    # h(x) is the maximum z value for a given x? Or the z value of the curve?
+    # The source says "h(x) represents the height of the vertical shape at (x, 0, 0)".
+    # This implies the sketch defines the boundary.
+    # Since it's a single curve, h(x) is the z-coordinate of the curve at x.
+    # However, a single curve might not be a function h(x) if it folds.
+    # We assume the sketch is monotonic in x or we take the envelope.
+    # For simplicity, we assume h(x) is the z-value of the curve.
+    
+    # Create a lookup for h(x)
+    # Sort points by x
+    final_points.sort(key=lambda p: p[0])
+    
+    # Interpolate h(x) for any x
+    def get_h(x):
+        # Find the two points surrounding x
+        for i in range(len(final_points) - 1):
+            x1, z1 = final_points[i]
+            x2, z2 = final_points[i+1]
+            if x1 <= x <= x2:
+                # Linear interpolation
+                if x2 == x1:
+                    return z1
+                t = (x - x1) / (x2 - x1)
+                return z1 + t * (z2 - z1)
+        return 0.0 # Outside bounds
+        
+    # Step 5: Compute thickness T(x, z)
+    def get_thickness(x, z):
+        h_x = get_h(x)
+        if h_x <= 0:
+            return 0.0
+        if z <= 0 or z >= h_x:
+            return 0.0
+        
+        # Formula: T(x, z) = +/- d * sqrt(1 - (z/h(x))^2)
+        term = 1 - (z / h_x)**2
+        if term < 0:
+            return 0.0
+        return d * (term**0.5)
+        
+    return get_thickness
+```
+
+## Subtopics
+
+### [Sketch-based Cloud Volume Retrieval via SVD](16210-sketch-based-cloud-volume-retrieval-via-svd.md)
+Sketch-based Cloud Volume Retrieval via SVD is a method for retrieving realistic 3D cloud volumes from a pre-simulated database by matching a user-sketched 2D shape to 3D data using Singular Value Decomposition (SVD) basis vectors for efficient similarity calculation. It differs from direct voxel comparison by projecting both the query and database volumes into a low-dimensional subspace, reducing the computational cost of similarity search from proportional to the total number of voxels $M$ to proportional to the number of basis vectors $K$. This method builds on [Query Shape Generation from Vertical Sketch](13408-query-shape-generation-from-vertical-sketch.md) by converting the generated query shape into a volumetric representation suitable for database matching.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The generation of the query shape itself is $O(N)$ where $N$ is the number of points in the sketch, as it involves simple geometric projections and evaluations of the thickness formula [S1]. The memory complexity is low, storing only the sketch points and the parameter $d$ [S1]. The subsequent retrieval process using SVD has a complexity proportional to the number of basis vectors $K$, which is much smaller than the total number of voxels $M$ [S1].
+
+**Measured Performance:**
+Specific performance metrics for the shape generation step are not provided in the sources [S1]. However, the SVD-based retrieval process reduces storage cost to 84% of the original and accelerates retrieval [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement; allows intuitive user input via sketching; generates smooth ellipsoidal cross-sections suitable for layer clouds [S1].
+*   **Limitations:** Limited to shapes that can be represented by a single vertical curve; assumes ellipsoidal cross-sections which may not fit all cloud types; requires a pre-simulated database for retrieval [S1].
+
+**When to Use:**
+Use this method when the user wants to quickly generate a cloud volume shape for layer clouds (e.g., Stratus, Altostratus) using a simple 2D sketch and intends to retrieve a similar volume from a database [S1].
+
+**When Not to Use:**
+Do not use this method for convective clouds (e.g., Cumulonimbus) which require more complex shapes [S1]. Do not use it if a direct volumetric generation without database retrieval is required [S1].
+
+## Background
+This method was introduced in the context of a sketch-based system for cloud volume retrieval from simulated datasets for realistic image synthesis [S1]. It is part of a pipeline that allows users to interactively specify cloud shapes and retrieve realistic volumes from a database [S1]. The method relies on the assumption that cloud cross-sections can be approximated by ellipsoids [S1].
+
+## Sources
+[S1] A sketch-based system for cloud volume retrieval from simulated dataset for realistic image synthesis, https://doi.org/10.1145/2817675.2817690, fetched 2026-11-05

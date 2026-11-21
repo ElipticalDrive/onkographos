@@ -1,0 +1,178 @@
+# Hybrid Distributed-Memory Parallel Volume Rendering
+Also called: Montani et al. Hybrid Approach
+
+## Overview
+This method is a distributed-memory parallel volume rendering algorithm that combines object-order and image-order techniques to mitigate load imbalance on unstructured grids [S1]. It differs from pure object-order methods, which suffer from uneven sample distribution when camera zoom or mesh heterogeneity varies, and pure image-order methods, which struggle when tile boundaries cut through dense cell regions [S1]. By bounding the work per processor in each phase, it ensures scalability for both structured and unstructured data [S1].
+
+## How it works
+**Inputs:**
+- Unstructured or structured grid data (cells, vertices, attributes).
+- Camera parameters (view matrix, projection matrix).
+- Rendering resolution (image width $W$, height $H$).
+- Threshold parameter $T$ (integer $\ge 1$) [S1].
+
+**Outputs:**
+- Final image (pixel colors).
+
+**Data Structures:**
+- **Cell:** Contains geometry (vertices/bounding box) and attribute data (scalar field values).
+- **Partial Composite ($PC$):** A compressed representation of ray samples for a specific depth range. It stores:
+  - Depth start ($Z_s$) and depth end ($Z_e$) [S1].
+  - Compositing result (color and opacity) for the range $[Z_s, Z_e]$ [S1].
+  - *Note:* The source describes "partial composites" as reducing memory by compositing consecutive samples, storing 2 integer point values and 2 floating point values instead of individual sample floats [S1]. Exact bit-packing is not specified beyond "2 integer point values and 2 floating point values" [S1].
+
+**Algorithm Steps:**
+
+1. **Cluster Grouping:**
+   Processors are grouped into clusters. The number of clusters and processors per cluster is determined by the system topology [S1].
+
+2. **Tile Assignment (Image Order at Cluster Level):**
+   The image is partitioned into tiles. One tile is assigned to each cluster [S1].
+
+3. **Data Distribution:**
+   Data is copied to each cluster. Within a cluster, data is distributed among its processors using an object-order approach [S1].
+   - *Option A:* If data is a single file, each processor reads $C/P$ cells, where $C$ is total cells and $P$ is total processors [S1].
+   - *Option B:* If data is decomposed into blocks, each processor reads its assigned block [S1].
+
+4. **Phase 1: Object Order Sampling (Small Cells):**
+   - **Cell Assessment:** For each cell owned by the processor, estimate the number of samples $S_{cell}$. The estimate is the product of:
+     - Number of pixels covered by the cell's bounding box in image space.
+     - Number of samples in depth overlapping the bounding box [S1].
+   - **Classification:**
+     - If $S_{cell} < T$, classify as **Small Cell**.
+     - If $S_{cell} \ge T$, classify as **Large Cell** [S1].
+   - **Sampling:** Processors sample all their Small Cells using standard ray-casting. Large Cells are deferred [S1].
+
+5. **Phase 2: Exchange Phase:**
+   - **Pixel Partitioning:** The image pixels are partitioned among all processors (not just within the cluster) for the next phase [S1].
+   - **Communication:** Processors exchange:
+     - Results from Phase 1 (partial composites of small cells).
+     - The Large Cells that were not sampled in Phase 1 [S1].
+   - *Note:* The source states processors exchange results "among themselves" and the large cells [S1].
+
+6. **Phase 3: Image Order Sampling (Large Cells):**
+   - Each processor samples the Large Cells that contribute to its assigned pixels [S1].
+   - For each pixel, samples from the Large Cells are composited with the partial composites received in Phase 2 [S1].
+   - This produces a **sub-image** (partial composite for the pixel's depth range) [S1].
+
+7. **Final Compositing:**
+   - The final pixel color is obtained by accumulating partial composites.
+   - Partial composites are sorted in correct z-depth order (front-to-back) using their stored $Z_s$ and $Z_e$ values [S1].
+   - Example sort order: If $PC_1=(501,1000)$, $PC_2=(0,2)$, $PC_3=(3,500)$, the order is $PC_2, PC_3, PC_1$ [S1].
+   - Standard front-to-back compositing is applied to the sorted partial composites [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_volume_rendering(data, camera, resolution, threshold, num_processors, num_clusters):
+    # 1. Cluster Grouping
+    clusters = group_processors_into_clusters(num_processors, num_clusters)
+    
+    # 2. Tile Assignment
+    tiles = partition_image(resolution, num_clusters)
+    cluster_tile_map = {cluster: tiles[i] for i, cluster in enumerate(clusters)}
+    
+    # 3. Data Distribution
+    # Each cluster receives a copy of relevant data or full data depending on implementation
+    # Within cluster, data is distributed by object order
+    local_data = distribute_data_object_order(data, cluster)
+    
+    # 4. Phase 1: Object Order Sampling (Small Cells)
+    small_cell_composites = []
+    large_cells = []
+    
+    for cell in local_data:
+        # Estimate samples
+        bbox_image = project_bbox_to_image(cell.bbox, camera)
+        pixel_count = count_pixels_in_bbox(bbox_image, resolution)
+        depth_samples = estimate_depth_overlap(cell, camera)
+        estimated_samples = pixel_count * depth_samples
+        
+        if estimated_samples < threshold:
+            # Small Cell: Sample immediately
+            pc = sample_cell_object_order(cell, camera, local_data)
+            small_cell_composites.append(pc)
+        else:
+            # Large Cell: Defer
+            large_cells.append(cell)
+            
+    # 5. Phase 2: Exchange Phase
+    # Partition pixels for Phase 3
+    pixel_partition = partition_pixels(resolution, num_processors)
+    
+    # Exchange small cell composites and large cells
+    # Note: Exact communication pattern (all-to-all vs cluster-local) 
+    # is described as "exchange among themselves" and "partition image pixels over processors"
+    exchanged_small_composites = communicate(small_cell_composites, pixel_partition)
+    exchanged_large_cells = communicate(large_cells, pixel_partition)
+    
+    # 6. Phase 3: Image Order Sampling (Large Cells)
+    final_sub_images = {}
+    
+    for pixel in pixel_partition:
+        # Get large cells contributing to this pixel
+        contributing_large_cells = filter_cells_by_pixel(exchanged_large_cells, pixel, camera)
+        
+        # Get partial composites from Phase 1 for this pixel
+        phase1_composites = filter_composites_by_pixel(exchanged_small_composites, pixel)
+        
+        # Composite large cells
+        large_cell_composite = composite_large_cells(contributing_large_cells, camera)
+        
+        # Combine with phase 1 results
+        # The source implies the final result is an accumulation of partial composites
+        # sorted by depth. Here we create a composite for this pixel's contribution
+        pixel_composite = create_partial_composite(phase1_composites + [large_cell_composite], pixel)
+        final_sub_images[pixel] = pixel_composite
+        
+    # 7. Final Compositing
+    final_image = {}
+    for pixel in resolution:
+        # Gather all partial composites for this pixel from all processors
+        all_composites = gather_composites_for_pixel(pixel, final_sub_images)
+        
+        # Sort by depth (Zs, Ze)
+        sorted_composites = sort_by_depth(all_composites)
+        
+        # Front-to-back compositing
+        final_color = composite_front_to_back(sorted_composites)
+        final_image[pixel] = final_color
+        
+    return final_image
+```
+
+**Parameters:**
+- **Threshold ($T$):** Integer $\ge 1$.
+  - If $T=1$, all cells are "Large" (behaves as Image Order) [S1].
+  - If $T$ is very large, all cells are "Small" (behaves as Object Order) [S1].
+  - Typical value: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Cluster-Level Load Imbalance:** If one tile assigned to a cluster contains significantly larger cells than other tiles, the processors in that cluster will do more work [S1].
+- **Intra-Cluster Load Imbalance:** If data assigned to one processor within a cluster covers a larger region of the tile than other processors in the same cluster, load imbalance occurs [S1].
+- **Interleaving Blocks:** The algorithm must correctly handle rays entering and exiting multiple blocks in complex interleaving patterns. The exchange phase ensures correct ordering of contributions from different processors [S1].
+
+## Subtopics
+
+### [Hybrid Distributed-Memory Parallel Volume Rendering (Childs et al.)](11426-hybrid-distributed-memory-parallel-volume-rendering-childs-e.md)
+The Childs et al. hybrid approach is a distributed-memory parallel volume rendering algorithm that balances load by classifying cells as "small" or "large" based on their estimated sample count. It combines object-order sampling for small cells with image-order sampling for large cells, ensuring that neither the number of cells nor the number of samples per processor becomes a bottleneck for load imbalance. Unlike pure object-order methods which suffer when camera zoom or mesh heterogeneity causes uneven sample distribution, and pure image-order methods which suffer when tile boundaries cut through dense cell regions, this method bounds both metrics to maintain scalability on unstructured grids.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Reduced compared to pure image-order methods due to the use of partial composites. Partial composites store 2 integer point values and 2 floating point values per composite, reducing storage from 400 bytes (for 100 samples) to 24 bytes [S1].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Designed for data scalability on distributed-memory systems [S1].
+- **Strengths:** Reduces load imbalance on unstructured grids; reduces memory and communication costs via partial composites; handles complex block interleaving [S1].
+- **Limitations:** Potential for load imbalance at cluster level and within clusters if tile/cell distribution is uneven [S1].
+- **When to Use:** Unstructured grids prone to load imbalance; distributed-memory systems [S1].
+- **When Not to Use:** Not specified.
+
+## Background
+- **Origin:** Developed by Montani et al. [S1].
+- **History:** It is an initial hybrid approach that combines object-order and image-order techniques [S1]. It extends the work of Childs et al. [S1].
+- **Usage:** Designed for distributed-memory parallel volume rendering, specifically for unstructured grids [S1].
+
+## Sources
+[S1] A Scalable Hybrid Scheme for Ray-Casting of Unstructured Volume Data, https://doi.org/10.1109/tvcg.2018.2833113, fetched 2026-10-24

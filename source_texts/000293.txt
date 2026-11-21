@@ -1,0 +1,395 @@
+Building a Wolfenstein 3D style raycasting engine from scratch in plain JavaScript: grid maps, DDA traversal explained step by step, textured wall projection, billboard sprites, sliding doors, and a weapon HUD. 
+
+A minimal Wolfenstein 3D raycasting engine Skip to content
+Wolfenstein 3D (id Software, 1992)[04] rendered first-person corridors on 286/386-class hardware with no GPU, no z-buffer, and no polygons at all. The trick that made it possible is raycasting: the world is stored as a flat 2D grid, the camera never leaves the plane of that grid, and the renderer does only as much work as there are columns of pixels on screen. One ray per column, marched until it hits a wall, is enough to reconstruct a fully textured, moving 3D scene[01][02].
+This post builds a minimal version of that engine in plain JavaScript on top of Canvas2D. All of the art: walls, sprites, and weapons, is generated procedurally at runtime; nothing is copied from the original game’s released source[06]. It is an homage to the technique, not a clone of the original game and assets.
+Here is the finished engine:
+Loading
+The world is a grid
+The map is authored as an array of strings for readability, one character per tile, and then parsed once at startup into a flat Uint8Array:
+```
+const MAP_ROWS = [
+  '1111111111122222222222',
+  '1.........1..........2',
+  '1.........1..........2',
+  '1..11D11..1...22D22..2',
+  '1..1...1..1...2...2..2',
+  '1..1...1..1...2...2..2',
+  '1..11111..1...22222..2',
+  '1.........1..........2',
+  '11111D11111..........2',
+  '3.........3333D3333332',
+  '3....................3',
+  '3..33333333..44444...3',
+  '3..3......3..4...4...3',
+  '3..3......D..4...D...3',
+  '3..3......3..4...4...3',
+  '3..33333333..44444...3',
+  '3....................3',
+  '3..4444444444444.....3',
+  '3..4.............4...3',
+  '3..44444444444444....3',
+  '3....................3',
+  '3333333333333333333333',
+];
+const MAP_W = 22, MAP_H = MAP_ROWS.length;
+if (MAP_ROWS.some((r) => r.length !== MAP_W)) throw new Error('bad map row');
+const map = new Uint8Array(MAP_W * MAP_H);
+for (let y = 0; y < MAP_H; y++) {
+  for (let x = 0; x < MAP_W; x++) {
+    const c = MAP_ROWS[y][x];
+    map[y * MAP_W + x] = c === '.' ? 0 : c === 'D' ? 5 : c.charCodeAt(0) - 48;
+  }
+}
+```
+A . is empty floor, digits 1-4 select which procedural texture a wall tile uses, and D marks a sliding door (handled separately, see the doors section below). Every row must have exactly MAP_W characters or the map fails to load; there is no implicit padding.
+The player is a small bundle of vectors, not a matrix or a camera object:
+```
+const player = { x: 2.5, y: 2.5, dirX: 1, dirY: 0, planeX: 0, planeY: 0.66 };
+```
+dirX, dirY is the unit-length view direction. planeX, planeY is the camera plane: a vector perpendicular to the view direction whose length sets the field of view. For a screen column x out of FB_W columns, the raycaster maps that column to a position on the camera plane:
+\[\vec{r} = \vec{d} + cameraX \cdot \vec{p}\]
+where cameraX = 2x/W - 1 runs from -1 at the left edge of the screen to +1 at the right edge, d is the direction vector, and p is the plane vector. With |p|/|d| = 0.66, the half-angle to the screen edge is atan(0.66), so the full horizontal field of view is 2 atan(0.66), about 66.8 degrees, matching the classic Wolf3D FOV.
+Finding the wall: DDA step by step
+Given a ray direction for a screen column, the renderer needs the exact distance to the nearest wall along that ray. A naive approach would march the ray forward in small fixed steps and check the tile at each point, but that either skips thin features like corners when the step is too large, or wastes enormous amounts of work re-checking the same tile when the step is small enough to be safe.
+The grid structure gives a better way. A ray only ever changes which cell it occupies at a grid line, a vertical or horizontal boundary between tiles. So instead of marching in fixed steps, the ray can jump directly from boundary to boundary, doing exactly one tile lookup per crossing. This is the DDA (digital differential analyzer) algorithm described by Amanatides and Woo[03], also written up for raycasting engines specifically by Lodev[01].
+The quantities involved are:
+\[\Delta_x = \left| \frac{1}{r_x} \right|, \quad \Delta_y = \left| \frac{1}{r_y} \right|\]
+deltaDistX and deltaDistY are the distance traveled along the ray between one vertical grid line and the next, and between one horizontal grid line and the next, respectively. Because the ray direction is fixed, these are constants for the whole cast; only the reciprocal of each ray component is needed. The same stepping idea, advancing along whichever axis is closer, appears generally as the digital differential analyzer algorithm for line drawing[05].
+sideDistX and sideDistY start out as the distance from the player to the first boundary crossing on each axis, then get extended by deltaDistX/deltaDistY every time that axis is stepped. The loop invariant is simple: at any point, sideDistX and sideDistY hold the total ray distance at which the ray will next cross an x boundary and a y boundary. Whichever of the two is smaller tells you which boundary the ray reaches first, so each iteration advances that one and steps the corresponding map coordinate:
+```
+  let side = 0;
+  for (let i = 0; i < 128; i++) {
+    if (sideDistX < sideDistY) { sideDistX += deltaDistX; mapX += stepX; side = 0; }
+    else { sideDistY += deltaDistY; mapY += stepY; side = 1; }
+    const tile = mapAt(mapX, mapY);
+    if (tile === 0) continue;
+    if (tile === 5) {
+      const d = doorAt(mapX, mapY);
+      // Advance the ray to the center line of the door cell; if it
+      // exits the cell before reaching that line, keep traversing.
+      const halfStep = (side === 0 ? deltaDistX : deltaDistY) / 2;
+      const distToMid = (side === 0 ? sideDistX - deltaDistX : sideDistY - deltaDistY) + halfStep;
+      const other = side === 0 ? sideDistY : sideDistX;
+      if (distToMid >= other) continue; // ray leaves cell before midline
+      const wx = side === 0
+        ? player.y + distToMid * rayDirY - mapY
+        : player.x + distToMid * rayDirX - mapX;
+      if (wx < 0 || wx >= 1) continue;
+      const slide = d ? d.openness : 0;
+      if (wx < slide) continue; // ray passes through the opened gap
+      return { dist: distToMid, side, tile, wallX: wx, doorShift: -slide };
+    }
+    const dist = side === 0 ? sideDistX - deltaDistX : sideDistY - deltaDistY;
+    const wallX = side === 0
+      ? player.y + dist * rayDirY - Math.floor(player.y + dist * rayDirY)
+      : player.x + dist * rayDirX - Math.floor(player.x + dist * rayDirX);
+    return { dist, side, tile, wallX, doorShift: 0 };
+  }
+```
+side records which kind of boundary was just crossed, 0 for a vertical (x) grid line, 1 for a horizontal (y) grid line, which the wall renderer later uses both for texture orientation and for the darkening trick described below. The door branch is a special case, deferred to the sliding doors section further down; for solid tiles the loop simply stops and reports the perpendicular distance so far.
+Try single-stepping through a cast yourself and watch which of the two side-distance bars is shorter at each step, that is the one the algorithm advances:
+Loading
+From distance to a wall column
+The dist returned by castRay is not quite what the renderer wants yet. If it were used directly to size the wall column, straight walls would appear to bow outward toward the edges of the screen, a classic fisheye distortion. It happens because the raw distance is measured along the ray, and rays for columns near the screen edge are longer than the ray straight ahead even when they hit the same flat wall at the same depth.
+The fix falls out of the DDA for free. sideDistX - deltaDistX and sideDistY - deltaDistY, the expressions already computed at the moment a wall is hit, are exactly the distance from the player to the wall measured perpendicular to the camera plane, not along the ray. No extra trigonometry is needed; the same subtraction that finds dist already removes the fisheye. Column height then follows directly from similar triangles:
+\[h_{column} = \frac{H}{d_{perp}}\]
+```
+    const lineHeight = Math.floor(FB_H / hit.dist);
+    const drawStart = Math.max(0, (FB_H - lineHeight) >> 1);
+    const drawEnd = Math.min(FB_H - 1, (FB_H + lineHeight) >> 1);
+```
+H is the framebuffer height, so a wall exactly one unit of perpendicular distance away fills the entire vertical extent of the screen, and farther walls shrink proportionally. drawStart/drawEnd clamp that column to the visible screen and center it vertically on the horizon.
+Texturing needs a horizontal coordinate into the 64x64 texture, wallX, the fractional position where the ray struck the wall face, already computed inside castRay. Two of the four possible wall faces would otherwise show a texture that reads backward, so the texture x is mirrored based on which face was hit and which way the ray was travelling:
+```
+    const tex = textures[hit.tile] || textures[1];
+    let texX = Math.floor((hit.wallX + hit.doorShift) * TEX_SIZE) & (TEX_SIZE - 1);
+    // Mirror so textures do not appear flipped on two of the four faces.
+    if ((hit.side === 0 && rayDirX > 0) || (hit.side === 1 && rayDirY < 0))
+      texX = TEX_SIZE - 1 - texX;
+```
+```
+    // Fixed-point vertical texture step (avoids per-pixel division).
+    const step = TEX_SIZE / lineHeight;
+    let texPos = (drawStart - (FB_H - lineHeight) / 2) * step;
+```
+Walking down the column, texPos accumulates by a fixed step per pixel instead of dividing per pixel; step is just how many texture rows one screen row covers, so a tall on-screen column (a nearby wall) samples the texture slowly and a short column (a distant wall) skips through it quickly. Walls hit on a y-side boundary are also drawn darker to fake a simple directional light, which keeps corners readable; that darkening rides along with the distance fog as a single per-column brightness factor, covered in its own section further down.
+Flip the fisheye toggle in the demo below to see the distortion the perpendicular-distance correction avoids:
+Loading
+Procedural textures
+Since this is an homage rather than a recreation, none of the wall or sprite art is copied from the original game; every texture is painted at runtime with Canvas2D onto an offscreen 64x64 canvas, then read back into a Uint32Array for fast pixel access during rendering. The art is crude on purpose: the goal of this demo is to demonstrate the rendering technique, not to build a full game, so every texture and sprite is a handful of flat-colored rectangles, just detailed enough for walls, faces, and props to read at 480x300.
+```
+const TEX_SIZE = 64;
+
+function makeTexture(painter) {
+  const cnv = document.createElement('canvas');
+  cnv.width = TEX_SIZE; cnv.height = TEX_SIZE;
+  const c = cnv.getContext('2d', { willReadFrequently: true });
+  painter(c);
+  return new Uint32Array(c.getImageData(0, 0, TEX_SIZE, TEX_SIZE).data.buffer);
+}
+```
+Brick and stone textures use a small deterministic RNG, mulberry32, seeded per texture so the per-brick lightness jitter looks organic but is identical every time the page loads, rather than regenerating (and potentially flickering) on every reload.
+Sprites: billboards in a z-buffered world
+Sprites, NPCs, barrels, lamps, are flat billboards: images that always face the camera regardless of viewing angle. Placing one on screen starts with a change of basis from world space into camera space, using the inverse of the matrix formed by the direction and plane vectors:
+```
+  const invDet = 1 / (player.planeX * player.dirY - player.dirX * player.planeY);
+  for (const s of order) {
+    const dx = s.x - player.x, dy = s.y - player.y;
+    // Transform into camera space: transformY is depth along the
+    // view direction, transformX the lateral offset on the plane.
+    const transformX = invDet * (player.dirY * dx - player.dirX * dy);
+    const transformY = invDet * (-player.planeY * dx + player.planeX * dy);
+    if (transformY <= 0.05) continue; // behind or on the camera
+
+    const screenX = Math.floor((FB_W / 2) * (1 + transformX / transformY));
+    const size = Math.abs(Math.floor(FB_H / transformY)); // square billboard
+```
+transformY is the sprite’s depth along the view direction, reused directly for both screen size and z-buffer comparison; transformX is its lateral offset, which converts to a screen column the same way the camera plane maps a column to a ray direction in the wall pass.
+Multiple sprites need to occlude each other and be occluded by walls correctly, but the engine has no z-buffer in the depth-testing GPU sense, only the one-perpendicular-distance-per-column array filled in during renderWalls. The classic fix is the painter’s algorithm: sort sprites far to near by squared distance to the player, then draw them back to front so nearer sprites simply overdraw farther ones on shared pixels. Within a sprite, each column is still clipped against the wall’s stored depth so sprites behind walls are correctly hidden:
+```
+  const order = sprites.filter((s) => s.alive)
+    .sort((a, b) =>
+      ((b.x - player.x) ** 2 + (b.y - player.y) ** 2) -
+      ((a.x - player.x) ** 2 + (a.y - player.y) ** 2));
+```
+```
+    const sShade = fogShade(transformY); // sprites sit in the same fog
+    for (let x = x0; x <= x1; x++) {
+      if (transformY >= zbuffer[x]) continue; // wall in front here
+      const texX = Math.floor((x - (screenX - size / 2)) * TEX_SIZE / size);
+      if (texX < 0 || texX >= TEX_SIZE) continue;
+      for (let y = y0; y <= y1; y++) {
+        const texY = Math.floor((y - (FB_H - size) / 2) * TEX_SIZE / size);
+        if (texY < 0 || texY >= TEX_SIZE) continue;
+        const col = s.img[texY * TEX_SIZE + texX];
+        if ((col >>> 24) < 128) continue; // transparent texel
+        fb32[y * FB_W + x] = shadeColor(col, sShade);
+      }
+    }
+```
+The zbuffer[x] check is a straight per-column comparison against whatever perpendicular wall distance the wall pass wrote there, and the alpha check on the top byte of each packed pixel skips fully transparent texels so sprites can have non-rectangular silhouettes.
+Drag the sprites around in the demo below, or disable the distance sort, to see why draw order matters once sprites overlap on screen:
+Loading
+Making the NPCs move and die
+The human sprites are not static props: each one is a small state machine, walk -> dying -> dead, ticked once per frame before the render pass. Walking NPCs wander the map with no interest in the player. Each carries a heading angle and a timer; when the timer runs out, or the next step would walk into something, it simply picks a new random heading:
+```
+    if (s.state === 'walk') {
+      s.stateTimer -= dt;
+      if (s.stateTimer <= 0) { // wander: new heading every few seconds
+        s.heading = Math.random() * Math.PI * 2;
+        s.stateTimer = 2 + Math.random() * 2;
+      }
+      const nx = s.x + Math.cos(s.heading) * NPC_SPEED * dt;
+      const ny = s.y + Math.sin(s.heading) * NPC_SPEED * dt;
+      // Turn instead of walking into walls, closed doors, or the player.
+      if (npcBlocked(nx, ny) || Math.hypot(nx - player.x, ny - player.y) < 0.6) {
+        s.heading = Math.random() * Math.PI * 2;
+      } else {
+        s.x = nx; s.y = ny;
+      }
+      s.walkPhase += dt;
+      s.img = npcFrames.walk[Math.floor(s.walkPhase / NPC_FRAME_TIME) % 2];
+    }
+```
+Collision reuses the exact rules the player moves by. boxClear tests all four corners of a bounding box against isSolidForMove, so NPCs are stopped by walls and closed doors but pass through open ones, with no separate NPC-only collision logic to maintain:
+```
+function boxClear(x, y, r) {
+  return !isSolidForMove(x - r, y - r) && !isSolidForMove(x + r, y - r) &&
+         !isSolidForMove(x - r, y + r) && !isSolidForMove(x + r, y + r);
+}
+```
+```
+function npcBlocked(x, y) {
+  return !boxClear(x, y, NPC_RADIUS);
+}
+```
+Sampling all four corners, not just points along the movement axis, is not a style choice: the first version of this check sampled only along the axis being moved and produced a genuine stuck-against-the-wall bug, dissected in the postmortem section near the end of this post. The player’s tryMove runs each axis through the same boxClear.
+Animation is a frame swap, nothing more. Two walk frames drawn by the same procedural painter with the legs in different positions alternate every NPC_FRAME_TIME seconds of accumulated walking. Dying works the same way: a hit flips the state to dying, and the update loop steps through three collapse frames, each painted with the body sunk a few pixels lower, before settling on a corpse frame drawn lying along the floor line of the tile:
+```
+    } else if (s.state === 'dying') {
+      s.stateTimer += dt;
+      if (s.stateTimer >= NPC_DIE_TIME) {
+        s.state = 'dead';
+        s.img = npcFrames.dead;
+      } else {
+        const frame = Math.min(2, Math.floor(s.stateTimer / (NPC_DIE_TIME / 3)));
+        s.img = npcFrames.dying[frame];
+      }
+    }
+```
+Corpses persist. The sprite stays in the list with alive still true, so the billboard keeps rendering through the normal sprite pass, but the hitscan skips any NPC whose state is not walk, and the minimap stops drawing dead NPCs. Barrels and lamps get the same treatment through a smaller state machine, idle, breaking, broken, covered in the weapons section below.
+Distance fog
+Wolfenstein 3D shipped with no depth cue except size; everything drew at full brightness no matter how far away it was. Later engines in the same family added “light diminishing”, and it is cheap enough here to be worth the atmosphere. Every rendered surface fades linearly toward black with distance, clamped to a brightness floor so far surfaces stay barely readable instead of vanishing entirely:
+```
+const FOG_DIST = 10; // distance of full fade, in cells
+const FOG_MIN = 36;  // brightness floor, 0..256
+
+function fogShade(dist) {
+  return Math.max(FOG_MIN, 256 - ((dist * 256 / FOG_DIST) | 0));
+}
+
+function shadeColor(col, shade) {
+  const r = ((col & 0xff) * shade) >> 8;
+  const g = (((col >> 8) & 0xff) * shade) >> 8;
+  const b = (((col >> 16) & 0xff) * shade) >> 8;
+  return 0xff000000 | (b << 16) | (g << 8) | r;
+}
+```
+The shade is an integer in 0..256 so the per-channel scaling is a multiply and a shift, no floating point in the per-pixel path. Walls already know their perpendicular distance for every column, and sprites their camera-space depth, so both simply pass their pixels through shadeColor. The y-side directional darkening from the wall section folds into the same per-column factor rather than being a separate per-pixel operation:
+```
+    // Fog and the y-side darkening fold into one per-column shade.
+    const shade = fogShade(hit.dist);
+    const sideShade = hit.side === 1 ? (shade * 140) >> 8 : shade;
+```
+The interesting case is the floor and ceiling, which are flat fills with no ray and no distance, or so it seems. In fact each screen row shows the floor at one fixed distance, determined entirely by the projection: the same similar-triangles argument that gave the wall column height, inverted, gives
+\[d_{row} = \frac{H / 2}{y - H / 2}\]
+for a floor pixel on screen row y below the horizon, mirrored for the ceiling above it. Because that distance depends only on the row, the fogged floor and ceiling colors are precomputed into two row tables once at load, and the per-frame fill loops just index them:
+```
+const CEIL_ROW = new Uint32Array(FB_H);
+const FLOOR_ROW = new Uint32Array(FB_H);
+for (let y = 0; y < FB_H; y++) {
+  const dy = Math.abs(y - FB_H / 2);
+  const shade = dy < 1 ? FOG_MIN : fogShade((FB_H / 2) / dy);
+  CEIL_ROW[y] = shadeColor(CEIL_COLOR, shade);
+  FLOOR_ROW[y] = shadeColor(FLOOR_COLOR, shade);
+}
+```
+The result is a smooth gradient that darkens toward the horizon and meets the fogged walls there, which sells the depth far better than either effect alone.
+Sliding doors
+A door tile is really just a thin wall recessed to the midline of its cell rather than sitting flush on the grid boundary. castRay handles this as a special case once it steps into a tile with id 5: instead of stopping at the cell boundary, it keeps advancing the ray until it reaches the door’s centerline, distToMid, then bails out if the ray exits the cell through a different face before getting there (`distToMid
+= other`), meaning the ray missed the door and should keep marching:
+```
+    if (tile === 5) {
+      const d = doorAt(mapX, mapY);
+      // Advance the ray to the center line of the door cell; if it
+      // exits the cell before reaching that line, keep traversing.
+      const halfStep = (side === 0 ? deltaDistX : deltaDistY) / 2;
+      const distToMid = (side === 0 ? sideDistX - deltaDistX : sideDistY - deltaDistY) + halfStep;
+      const other = side === 0 ? sideDistY : sideDistX;
+      if (distToMid >= other) continue; // ray leaves cell before midline
+      const wx = side === 0
+        ? player.y + distToMid * rayDirY - mapY
+        : player.x + distToMid * rayDirX - mapX;
+      if (wx < 0 || wx >= 1) continue;
+      const slide = d ? d.openness : 0;
+      if (wx < slide) continue; // ray passes through the opened gap
+      return { dist: distToMid, side, tile, wallX: wx, doorShift: -slide };
+    }
+```
+Once the ray is confirmed to reach the door’s midline plane inside the cell, wx is the fractional position along the door face, exactly like wallX for an ordinary wall. The sliding animation is then just a horizontal shift of that coordinate: slide is how far open the door is (0 closed, 1 fully open), and if the ray’s wx falls inside that opened gap, it passes straight through to whatever is beyond, rather than hitting the door at all.
+Doors are driven by a small per-door state machine, closed, opening, open, closing, that opens whenever the player is adjacent and closes automatically a few seconds after the player leaves, but is careful never to close on top of anyone. That last rule matters more once NPCs wander the map: a door that closed on an NPC standing in its cell would entomb it forever, since every heading out of a solid cell is blocked. So the open-timer freezes and a closing door reopens while the doorway cell is occupied:
+```
+function doorOccupied(dx, dy) {
+  return sprites.some((s) => s.kind === 'npc' && s.alive && s.state !== 'dead' &&
+    Math.floor(s.x) === dx && Math.floor(s.y) === dy);
+}
+
+function updateDoors(dt) {
+  for (const [key, d] of doors) {
+    const [dx, dy] = key.split(',').map(Number);
+    const near = Math.hypot(player.x - (dx + 0.5), player.y - (dy + 0.5)) < 1.2;
+    if (near && (d.state === 'closed' || d.state === 'closing'))
+      d.state = 'opening';
+    if (d.state === 'opening') {
+      d.openness = Math.min(1, d.openness + DOOR_SPEED * dt);
+      if (d.openness === 1) { d.state = 'open'; d.timer = DOOR_OPEN_TIME; }
+    } else if (d.state === 'open') {
+      if (!near && !doorOccupied(dx, dy)) d.timer -= dt;
+      if (d.timer <= 0) d.state = 'closing';
+    } else if (d.state === 'closing') {
+      // Reopen instead of closing on anyone standing in the doorway.
+      const inside = Math.floor(player.x) === dx && Math.floor(player.y) === dy;
+      if (inside || doorOccupied(dx, dy)) { d.state = 'opening'; continue; }
+      d.openness = Math.max(0, d.openness - DOOR_SPEED * dt);
+      if (d.openness === 0) d.state = 'closed';
+    }
+  }
+}
+```
+The dressing: weapons, minimap
+The rest of the engine is comparatively simple bookkeeping on top of the same building blocks. There are three weapons, each a small pixel-art sprite drawn once to an offscreen canvas and blitted as a screen-space overlay every frame. The art cheats perspective the same way the original did: each weapon is drawn broad near the hands at the bottom of the screen and tapers in stacked steps toward the muzzle, so it reads as pointing into the scene rather than held up in front of the camera. The idle bob is a sine wave whose phase only accumulates while the player is actually moving, so it settles instantly when the player stops instead of continuing to swing.
+Each weapon is one row in a table pairing its HUD art with its firing behavior, and the 1/2/3 keys just change an index:
+```
+const WEAPONS = [
+  { name: 'knife',    cooldown: 0.3,  range: 1.4,      flash: 0    },
+  { name: 'pistol',   cooldown: 0.4,  range: Infinity, flash: 0.07 },
+  { name: 'chaingun', cooldown: 0.12, range: Infinity, flash: 0.05 },
+];
+```
+The trigger is held state rather than a click event: pressing Space or the mouse button sets a flag, releasing clears it, and the per-frame weapon update fires whenever the flag is up and the cooldown has expired. That one mechanism gives every weapon its character for free. The chaingun is just a short cooldown held down; the knife is a range limit of 1.4 cells on the same hitscan, plus a forward lunge instead of a recoil kick.
+Firing is a hitscan, not a projectile: it checks the screen-space extents that renderSprites already recorded for each visible sprite against the z-buffer at the exact center column, so a shot only registers if the nearest sprite under the crosshair is not itself hidden behind a wall, and, for the knife, only if it is within reach:
+```
+function fire() {
+  if (weapon.cooldown > 0) return;
+  const w = WEAPONS[weapon.current];
+  weapon.cooldown = w.cooldown;
+  weapon.recoil = w.name === 'knife' ? -6 : 7; // knife lunges, guns kick
+  weapon.flash = w.flash;
+  // Hitscan straight down the center column.
+  const c = FB_W >> 1;
+  let best = null;
+  for (const s of sprites) {
+    if (!s.alive || s.screenX0 < 0) continue;
+    if (s.state !== 'walk' && s.state !== 'idle') continue; // already hit: no target
+    if (c < s.screenX0 || c > s.screenX1) continue;
+    if (s.depth >= zbuffer[c]) continue; // wall between player and sprite
+    if (!best || s.depth < best.depth) best = s;
+  }
+  if (!best || best.depth > w.range) return; // melee: out of reach
+  // Both kinds animate to a persistent end state (corpse or debris).
+  best.state = best.kind === 'npc' ? 'dying' : 'breaking';
+  best.stateTimer = 0;
+}
+```
+Note the last lines: props die the same way NPCs do. A hit barrel or lamp flips from idle to breaking, plays two destruction frames, bursting staves for the barrel, falling shards for the lamp, and settles into a persistent broken frame: a debris pile on the floor, or a bare chain where the lamp hung. The prop branch of the sprite update is the NPC dying branch with different frame tables:
+```
+    if (s.kind !== 'npc') { // destructible props
+      if (s.state === 'breaking') {
+        s.stateTimer += dt;
+        if (s.stateTimer >= BREAK_TIME) {
+          s.state = 'broken';
+          s.img = breakFrames[s.kind].broken;
+        } else {
+          const frame = Math.min(1, Math.floor(s.stateTimer / (BREAK_TIME / 2)));
+          s.img = breakFrames[s.kind].breaking[frame];
+        }
+      }
+      continue;
+    }
+```
+The minimap is not part of the 3D scene at all; it is a flat, screen-space overlay drawn with ordinary 2D canvas calls after the raycast framebuffer has already been blitted with ctx.putImageData, showing tile colors, door states, sprite positions, and the player’s position and facing direction.
+Postmortem: two collision bugs
+Both of these bugs shipped in early versions of this demo and were found by playtesting. They are worth documenting because they are classic members of the “stuck in a wall” family, and the same mistakes show up in most first raycaster builds.
+Pinned to the wall line
+The symptom: walking close along a wall, the player would suddenly stick to it, still able to slide parallel to the wall but unable to pull away until reaching the end of the wall segment.
+The original tryMove checked each axis of movement with two samples placed on the moving axis only:
+```
+  if (!isSolidForMove(nx + r, player.y) && !isSolidForMove(nx - r, player.y))
+    player.x = nx;
+```
+This looks reasonable and works almost everywhere, because earlier moves on the other axis have already clamped the box against any wall it faces. The hole is at wall edges. Standing with the box dipping a tenth of a cell into an open row, then walking parallel past the point where a wall begins in that row, keeps both samples on open floor: the samples sit at the center’s y, but the box’s corner has entered the wall. Nothing stops the slide, and the box ends up overlapping the wall by up to the player radius.
+The overlap itself is not what the player feels. The trap comes from the escape attempt: moving away from the wall is tested against the destination, and at sixty frames per second one step is about 0.05 cells, smaller than the 0.1 cell overlap. The destination is still inside the wall, so the move is rejected, every frame, forever. The all-or-nothing axis move can never reduce the penetration it should never have allowed. Walking along the wall still works, which is why the player stays pinned exactly until the wall segment ends.
+The fix is the boxClear corner check shown in the NPC section: test all four corners of the box on both axis moves, so the overlap state becomes unreachable and the escape logic never has to deal with it. The reproduction that proved the fix drives tryMove directly, one frame-sized step at a time, walks the edge scenario, and asserts both that no corner ever enters a solid cell and that pulling away from the wall works from the pressed position.
+Entombed in a door
+The symptom: an NPC frozen mid-stride, half sunk into a closed door, looking for all the world like it was bricked into the wall.
+The cause is an interaction between two features that were each correct alone. Doors auto-close three seconds after the player walks away; that logic was written when only the player moved through doorways, so it consulted only the player’s position. Then NPCs learned to walk through open doors. An NPC standing in the doorway cell when the timer expired was sealed in: the cell becomes solid, all four corner samples of every candidate step start inside that solid cell, and every heading is rejected. The NPC stands in place for the rest of the session.
+The reproduction is fully deterministic: open the door, park an NPC in the cell, move the player away, and simulate six seconds of door updates. The door closes on the NPC, and thirty further simulated seconds of wandering produce a displacement of exactly zero.
+The fix is doorOccupied in the doors section: the open-timer freezes and a closing door reopens while anyone is standing in its cell. The general lesson applies beyond doors: bugs in the “stuck” family are rarely about the moment of sticking. They are about an earlier transition into a state the system should never permit, an overlapped box, a solid cell with someone inside it, and the durable fix is to make that state unreachable rather than to patch the symptom.
+Performance notes
+The whole renderer is built around a small number of cheap, predictable operations rather than clever math. Every visible pixel is written exactly once, directly into a Uint32Array view over the canvas’s raw pixel buffer; the only per-pixel work in the hot column loop is a texture fetch and the fog multiply, three integer multiplies and shifts. The internal framebuffer is only 480x300, 144,000 pixels, upscaled to fill the viewport with an integer scale factor and image-rendering: pixelated.
+Because exactly one ray is cast per screen column regardless of how large or complex the map is, the whole frame costs O(columns x height + sprites). The rendering time depends on screen resolution and the number of visible sprites, not on the size of the map.
+References / Further Reading
+[01]
+Vandevenne, L. Lode's Computer Graphics Tutorial: Raycasting.
+[02]
+Permadi, F. (1996). Ray-Casting Tutorial.
+[03]
+Amanatides, J., Woo, A. (1987). A Fast Voxel Traversal Algorithm for Ray Tracing. Eurographics '87.
+[04]
+Wolfenstein 3D. Wikipedia.
+[05]
+Digital differential analyzer (graphics algorithm). Wikipedia.
+[06]
+id Software (1992). Wolfenstein 3D source code release (1995).
+Comments

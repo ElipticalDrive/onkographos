@@ -1,0 +1,870 @@
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+Julian Knodt
+arXiv:2203.13800v1 [cs.CV] 25 Mar 2022
+Princeton University
+Abstract. The problem of reconstructing continuous functions over time
+is important for problems such as reconstructing moving scenes, and
+interpolating between time steps. Previous approaches that use deeplearning rely on regularization to ensure that reconstructions are approximately continuous, which works well on short sequences. As sequence
+length grows, though, it becomes more difficult to regularize, and it becomes less feasible to learn only through regularization.
+We propose a new architecture for function reconstruction based on classical Bezier splines, which ensures C 0 and C 1 -continuity, where C 0 continuity is that ∀c : lim f (x) = f (c), or more intuitively that there are
+x→c
+no breaks at any point in the function. In order to demonstrate our architecture, we reconstruct dynamic scenes using Neural Radiance Fields,
+but hope it is clear that our approach is general and can be applied
+to a variety of problems. We recover a Bezier spline B(β, t ∈ [0, 1]),
+parametrized by the control points β. Using Bezier splines ensures reconstructions have C 0 and C 1 continuity, allowing for guaranteed interpolation over time. We reconstruct β with a multi-layer perceptron
+(MLP), blending machine learning with classical animation techniques.
+All code is available at https://github.com/JulianKnodt/nerf_atlas,
+and datasets are from prior work.
+Introduction
+Learning continuous, smooth, functions is a key problem in machine learning,
+as many problems are framed as finding good interpolations between a few data
+points, where we define continuity as lim f (x) = f (c). The continuity of a learned
+x→c
+model is not guaranteed, and is enforced through regularization of the output,
+either by having enough training samples in a short time, or using regularization
+such as total variation across time. Since consistency is dependent on data and
+regularization and cannot be guaranteed, it is empirically demonstrated. This
+leads to difficulties in interpolating between sparse training data, and the possibility for sudden changes in output between training points, such as suddenly
+jumping from one frame to the next in a learned video. To enforce continuity, we
+are interested in recovering functions which guarantee C 0 continuity. C 0 continuity is a useful property for many tasks, such as in reconstructing movement to
+ensure that an object cannot warp between two points instantaneously. We are
+also interested in C 1 continuity, or that the derivative of a function is continuous
+2
+Julian Knodt
+Fig. 1. Overview of approach. Conceptually, our approach models movement as
+interpolation along a high-dimensional bezier spline, where each control point is an
+object. This is done by learning a function which maps from x ∈ R3 to a Bezier spline
+with N control points. In the figure above, only the first and last control points are
+visible while rendering. Using this classical formulation, we impose a strong prior on
+continuity of movement, while enforcing that it is smooth. We compare our model to
+an implementation of NR-NeRF [20], and find our model is on par qualitatively and
+produces more coherent movement. A qualitative difference can also be seen in videos
+comparing the two reconstructions, due to the difference in the velocity of movement.
+on some domain. This is because it is not physically possible for an object to
+instantly change its velocity, therefore reconstructions must have C 1 continuity
+for plausible movement.
+To demonstrate how to construct functions with these properties, we tackle
+the problem of dynamic scene reconstruction using NeRF [11], which is a recent
+method for reconstructing scenes. Following previous work, we define a static
+scene, which is referred to as the canonical scene, and a model which can produce deformations to the canonical scene. Our approach is a small modification
+to prior work: to represent the canonical scene, we use a NeRF [11], and the
+deformation model used to model movement is our proposed learned approach.
+The use of deformation networks has been shown to be effective at reconstructing
+synthetic scenes with movement as in D-NeRF [16] and real scenes in NR(nonrigid)-NeRF [20]. These works show convincing reconstructions of moving scenes,
+allowing for novel view synthesis from video. These methods do not have an analytic form, relying purely on learned components, but we would like to be able
+to analyze and modify the movement. For example, an application may want
+to cluster movement, or change directions, but prior work does not immediately
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+3
+provide a method for doing so. In contrast, classical animation tools are designed
+to allow for control of movement, but their use has not been explored in prior
+work.
+To this end, we look to existing tools in animation for creating realistic
+movement while allowing a high-degree of control for artists and animators. For
+example, there are tools such as keyframing and splines, which allow animators
+to construct movement with a small set of tunable knobs. Despite few degrees of
+freedom, these tools allow artists and animators to breathe life into animation
+with a high degree of control. In addition, mathematical constructs such as
+splines have also been thoroughly studied to understand their behaviour and how
+they can be manipulated, and thus are readily modifiable in post-processing.
+Thus, we use the animation techniques of Bezier splines as a method to
+enforce continuous interpolation in Dynamic NeRF, finding that we are able to
+get comparable performance without additional cost in memory, and the desired
+properties of C 0 , C 1 continuity. In summary, our contributions are as follows:
+1. A general architecture for C 0 , C 1 continuity over a continuous domain.
+2. An application of this architecture, building on NR-NeRF to enforce continuity of movement with an analytic form with negligible computational cost,
+while performing on par with the original.
+Fig. 2.
+Spline-based Dynamic
+NeRF. Instead of using an MLP to
+directly predict ray-bending, x′ =
+∆(MLP(x, t)) + x, at a given time, we
+predict a set of Bezier spline control
+points. Then, we use the Bezier spline
+defined by these points to interpolate
+position based on time:
+x′ = ∆(B(β, t))+x, where B is a Bezier
+spline parametrized by β = MLP(x).
+Related Work & Background
+Static Scene Reconstruction
+Before considering scenes with movement or other changing parameters, it’s useful to consider static scenes with no transformations. Static scene reconstruction
+is the problem of reconstructing a 3D scene from a set of 2D views of a nonchanging scene, and Neural Radiance Fields (NeRFs) [11] are a recent technique
+achieving this. NeRFs model a scene as a continuous volume of varying density,
+which has view-dependent color, allowing for reconstruction of highly-detailed
+scenes. NeRF is based on traditional volume rendering techniques:
+\label {eq:nerf} I(r) &= \int _{t_n}^{t_f} T(t, r) \sigma (r(t)) c(r(t), r_d)dt \nonumber \\ T(t, r) &= \exp (-\int _{t_n}^{t} \sigma (r(s))ds)
+(1)
+4
+Julian Knodt
+where I(r) is the illumination along camera ray r(t) = ro + rd t, ro , rd are the ray
+origin and direction respectively, and t is some positive distance along the ray.
+NeRFs are able to accurately reconstruct high-frequency features by recovering
+σ and c, the density and view-dependent color at a given point by modelling
+them as multi-layer perceptrons (MLPs) with a positional encoding scheme that
+can differentiate between nearby points in space. NeRFs evaluate
+the above
+P
+equations by performing ray-marching and computing T (j, r) = − exp σi ci , by
+partitioning the ray into evenly spaced bins and sampling randomly from within
+each bin. There has been a plethora of work exploring NeRF and extensions
+which permit capturing more variance.
+These extensions to NeRF include optimizations on the encoding for differentiating positions in space [19], better sampling approaches [3], faster training [2],
+and more [17,4,18,5]. The underlying canonical model is crucial to our formulation of dynamic NeRF, and for this we use SIREN [17] without a coarse-to-fine
+approach to get high-frequency details.
+Dynamic NeRF Reconstruction
+Dynamic scene reconstruction builds on static scene reconstruction, removing
+the assumption that all views are under the same condition, such as having the
+same lighting or that nothing has moved, since NeRFs were designed to only
+handle static scenes, and thus cannot handle changes between frames. In order
+to model dynamic scenes, there have been two diverging approaches.
+One kind of approach directly models the transformation in the time domain,
+by learning a function σ(x, t) = f (x ∈ R3 , t ∈ [0, 1]), which include works such as
+HyperNeRF [15], NeRFies [14], Space-Time Invariant Irradiance Fields [22], and
+others [21,6]. By directly modelling the variation of the density, these methods
+are able to reconstruct large deformations in latent spaces and reconstruct a
+wide variety of transformations from a single radiance field. These often allow
+for new transformations in some learned space between similar views, allowing
+for warping and interpolation between observed views.
+The other kind of approach models movement directly as translation, preventing changes in density or view-dependent effects. NeRFs are not able to
+move the objects inside the scene since we can only evaluate the NeRF at a
+given x ∈ R3 . Instead we bend the rays, warping what is visible from a given
+view. This is essentially a perspective shift of a transformation of the space
+being rendered: instead of moving an object that should be seen by ray r, we
+warp ray r such that it sees the object. The equation for density is defined as
+σ(x, t) = f (x + ∆(x, t)). This formulation enforces a coherent canonical representation, while directly modelling movement, and has been shown to be able
+to reconstruct both synthetic scenes with D-NeRF [16] and real scenes in NRNeRF [20]. There has also been work on recovering movements of multiple NeRFs
+whose bounding boxes move within a scene, such as in [13], but our work diverges
+from that approach as we are interested in reconstructing movement within one
+instance of a NeRF.
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+5
+The benefits of directly including time as a function in the NeRF are that
+we are able to represent a broader class of functions: every time step or point in
+latent space may be fully distinct from others. On the other hand, explicit warping lends itself to smoothness between frames and accurate reconstruction of the
+physical process. Our approach falls into the warping category, as we are interested in accurately reconstructing smooth movement as opposed to generalizing
+over many classes of transformations.
+As an aside, we note that a lot of prior work related to dynamic NeRFs
+have not been peer-reviewed [16,9,14,8], but these works still have a significant
+impact, especially since the field moves quickly.
+Bezier Curves
+Bezier curves refer to a specific set of polynomials parametrized by a set of control
+points. They are most commonly represented as cubics: f (t) = a(1 − t)3 + 3b(1 −
+t)2 t + 3c(1 − t)t2 + dt3 , where t ∈ [0, 1] is the variable we are interested in
+interpolating over, and a, b, c, d are “control points” of the function. An example
+of a Bezier spline (we will use spline and curve interchangeably from here on)
+is shown in Figure 3. The general formulation for the Bezier basis functions
+n
+
+P
+n
+n−i i
+is defined as B n (t) =
+t where n is the degree of the Bezier
+i (1 − t)
+i=0
+polynomial. In order to control the Bezier curve, we use control points Pi , which
+n
+
+P
+control the shape of the curve: B n (t) =
+Pi ni (1 − t)n−i ti , where Pi ∈ R3 for
+i=0
+3D movement. For a more comprehensive guide on Bezier splines, we refer the
+reader to a more complete reference [1]1 .
+Fig. 3. Example of a Bezier Spline. Bezier splines are a low-dimensional polynomial
+for smooth interpolation between a few control points. Our method learns control points
+to produce smooth movement and induce a prior on continuity, drawing inspiration
+from animation and drawing software.
+1
+While this is a not a published, peer-reviewed source, the author found it to be the
+most well-written, free, and comprehensive resource available.
+6
+Julian Knodt
+Method
+Our approach imposes structure on top of machine learning approaches, enforcing properties on the reconstructed values. For functions
+f(p, t)\to \mathbb {R}^n, t\in [0,1],
+we decompose f (p, t) into a function:
+f(p)\to \mathbb {R}^{n\times O}, B_O(f(p), t)\to \mathbb {R}^n
+(2)
+Where O is the order of the Bezier spline, f (p) is the learned control points, and
+BO (f (p), ·) is the evaluation of the Oth order Bezier spline with control points
+defined by f (p).
+Architecture
+For dynamic NeRF, we define f (p) as MLP(x, y, z) → R3×O . We ray march
+from a camera with known position and view direction through the scene, and
+at every point we compute the set of control points for a Bezier curve. We then
+evaluate the Bezier curve at a given time, and deform the ray by the result,
+producing some ∆0 (x). The number of spline points for the Bezier curve is a
+hyperparameter, and our experiments use 5 spline points. In order to evaluate
+the Bezier curve in a numerically stable way, we use De Casteljau’s algorithm.
+De Casteljau’s algorithm evaluated at time t is defined by the recurrence
+relation:
+\beta _i^{(0)} &= \beta _i \nonumber \\ \beta _i^{j} &= (1-t)\beta _i^{(j-1)} + t\beta _{i-1}^{(j-1)}
+(3)
+which can be thought of as linearly interpolating between adjacent control points
+until there is only a single fixed point. This takes O(n2 ) operations to evaluate,
+where n is the number of control points. For a small n, i.e. 5 spline points which
+is what we evaluate on, this is negligible.
+We are also interested in constructing a reasonable canonical NeRF, and
+without loss of generality select t = 0 to be canonical. From this, we are inter→
+−
+ested in Bezier Curves where BO (0) = 0 . This can be achieved in two different
+→
+−
+ways, either by assigning p0 = 0 , and only computing the other control points:
+f (p) = p1···O−1 . Then, we can use the Bezier spline with the control points as the
+→
+−
+→
+−
+concatenation of 0 with the other control points: [ 0 , p1···O−1 ]. Alternatively, we
+can compute p0···O−1 and use the Bezier spline with control points but subtract
+the first predicted point from all of them: [p0···O−1 ] − p0 , and the final change
+in position is ∆0 (x) = BO (f (p) − f (p)0 , t) + p0 . While both formulations are
+theoretically equivalent, we find it better to explicitly compute p0 , otherwise the
+initial frame will have deformations. In our evaluation, we do not subtract the
+first point at all, allowing movement in the first frame, but this can be subtracted
+out later from all points in a post-processing step.
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+7
+A diagram of the spline component for ray-bending can be seen in Fig. 2.
+Following NR-NeRF, we also learn how rigid each point in space is, allowing
+for efficient categorization of fixed regions. This rigidity is computed as a function
+of position:
+\text {r}\in [0,1] =\sigma (\text {MLP}(x))\label {eq:rigidity_defn}
+(4)
+where σ is defined as the sigmoid function 1+e1−x , and this MLP is shared2 with
+computing the Bezier control points. Rigidity ∈ [0, 1] rescales the difficulty of
+learning movement, making it easy to handle static scene objects, where even
+slight motion would look incorrect in new views. The final change in position is
+defined as ∆(x) = r∆0 (x).
+In order to reconstruct RGB values, we also diverge from the original NeRF
+and NR-NeRF. Instead of only allowing for fully positional or view-dependent
+colors, we allow a small amount of linear scaling as a function of the view direction.
+\text {RGB}_{pos} &= \sigma (\text {MLP}(x)) \nonumber \\ \text {RGB} &= (1-\sigma (\text {MLP}(v))/2)\text {RGB}_{pos} \label {eq:refl_defn}
+(5)
+Because of the low number of samples for a moving object at a given view, it
+is more difficult to learn specular reflection, but it is often the case there are
+lighting changes which are necessary to model. Motivation for this modification
+can be found under the section on limitations(1).
+Training
+For training, we sample random crops of random frames, computing the loss and
+back-propagating through both the NeRF and spline network. We use gradient
+descent to optimize control points and the canonical NeRF jointly, but note that
+there are also classical approaches to optimizing control points which could lead
+to faster optimization in the future. We use the Adam optimizer [7] with cosine
+simulated annealing [10] to go from 2 × 10−4 to 5 × 10−5 over the course of two
+days, and start with a low resolution 32 × 32 training image size as initialization
+before scaling to 256 × 256. We develop our approach on an NVIDIA GTX 1060,
+but run each experiment on one Tesla P100.
+For some scenes, we are able to have higher learning rates at 3 × 10−4 , but
+for much darker scenes it’s necessary to lower the learning rate to 1 × 10−4 to
+converge, and find that if the scene is too dark, specifically the Hellwarrior scene,
+we revert back to using only positionally dependent RGB, but still have difficulty
+converging since it is too dark.
+Despite the guarantees of our method, it is still crucial to apply offset and
+divergence regularization defined in NR-NeRF [20] as:
+\ell _{\text {off}} = \frac {1}{|C|} \sum _{j\in C} \alpha _j \
+(\lVert \Delta _0(x_j) \rVert _2^{2-\text {r}}+\lambda _r \text {r})
+2
+This differs from NR-NeRF which uses two separate MLPs.
+(6)
+8
+Julian Knodt
+\ell _{\text {div}} = \frac {1}{|C|} \sum _{j\in C} \omega _j' |\nabla \cdot (\Delta (x_j))|^2
+(7)
+Where r is rigidity as defined in Eq.4, and λr is a hyper-parameter, set to
+0.3, and αj refers to the accumulated visibility weight along a ray T , as defined
+in Eq. 1. We defer to NR-NeRF [20] for a complete explanation of these losses.
+Our complete loss function is thus:
+\ell = \sum \limits _{r\in \text {GT}}\lVert \text {GT} - f(r_o, r_d, t)\rVert _2^2 + \lambda _{\text {div}}\ell _\text {div} + \lambda _\text {off}\ell _\text {off}
+(8)
+Where we assign λdiv = 0.3, λoff = 30, and f is the rendering the described
+model at time t with the rays from the known camera.
+Voxel Spline-NeRF
+In addition to a model that uses an MLP to predict the control points, we
+demonstrate that using control points is also possible with a voxel-based approach, leading to much faster reconstruction times. Our formulation is identical to the MLP model, but instead of querying an MLP, the model trilinearly
+interpolates between the surrounding set of control points. We demonstrate the
+possibility of using a voxelized approach for reconstructing dynamic scenes in our
+experiments, but do not precisely measure how much faster it is than the MLP
+based approach, since it is heavily implementation-dependent, for example a
+voxel based approach would do well from using a handwritten CUDA extension,
+while our implementation is only written in Pytorch. We do note that training
+is faster and much less memory-intensive than the MLP based approach, allowing for an order of magnitude higher batch size while training, and converging
+faster. As compared to the MLP-based approach though, there is a degradation
+in quality. We expect there to be a need for additional regularization terms as
+compared to both previous voxel and dynamic reconstruction approaches.
+Our voxel approach closely resembles the MLP based approach, only differing in storing a set of spline control points at every voxel position, as well as
+spherical harmonic coefficients in order to compute the linear color rescaling.
+Our simple implementation also does not differ significantly from our dynamic
+NeRF approach, differing by around 50 LOC. We defer to the supplementary
+material for results on the voxel model.
+In order for our voxel approach to converge, we use losses introduced in NRNeRF [20] and also find it necessary to apply total variational loss as used in
+Plenoxels [2]:
+\ell _{TV} = \frac {1}{|V|} \sum _{v\in V} \sqrt {\sum _{d\in \{x,y,z\}} \Delta ^2_d(v)}
+(9)
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+9
+Where ∆2d (v) is the difference between one of a voxel’s value and one of its
+neighbor on the d axis’s corresponding values. This guarantees that there is relative consistency in the voxel grid. We note that we apply this to all components
+stored in the voxel grid, including the spline control points, rigidity, density, and
+the RGB. As in Plenoxels [2], we stochastically sample this at each step.
+Results
+In order to demonstrate our method, we run it on D-NeRF’s [16] synthetic
+dataset which contains 8 different rendered scenes with simple movement. These
+scenes have ground truth camera positions, viewing directions and timestamps.
+They capture physically plausible movement, without large discontinuities or
+jumps between frames.
+We also demonstrate our method on a closed-room dataset, the Gibson
+dataset rendered for NeRFlow [6] using the iGibson environment [23]. This contains a single moving TurtleRobot from many similar views, similar to LLFF
+datasets.
+We also note that we compare our method to our own implementation of NRNeRF, to isolate the difference between our approach and using just an MLP.
+We make some modifications, by passing time explicitly rather than a latent
+vector, not varying regularization over epochs, and not requiring that at time
+t = 0 we have no deformation in the rays.
+Qualitative Results
+The difference between our work and NR-NeRF can be observed in the difference
+of flow between scenes. It can be observed from Fig. 4 that our method captures
+coherent movement for objects, whereas for NR-NeRF movement may not be in
+the same direction, and we define coherence loosely as having similar movement
+within nearby space. For example, on the ball (top right), a significant portion
+does not appear to be moving. In addition, for the Lego scene (bottom left), our
+method isolates the loader on the tractor, whereas NR-NeRF cannot.
+The difference between the two is also more clearly seen in videos of reconstruction. Spline-NeRF visibly has the effect of “tweening” between views,
+slowing into stops, while NR-NeRF appears less smooth.
+Quantitative Results
+The qualitative comparison of our method to NR-NeRF is shown in Tab. 1.
+Spline-NeRF is able to perform on par or with minimal degraded performance
+with our implementation of NR-NeRF on D-NeRF’s synthetic dataset. This is
+likely because NR-NeRF does not impose constraints on the velocity or acceleration of movement, whereas Spline-NeRF is forced to create a smooth interpolation, which is more difficult. To be more precise, Spline-NeRF must learn
+10
+Julian Knodt
+PSNR↑ | MS-SSIM↑ Bouncing Balls Hellwarrior†
+Hook
+Jumping Jacks
+NR-NeRF
+27.573 0.984 33.314 0.968 27.954 0.978 28.476 0.985
+Spline-NeRF
+26.418 0.979 33.504 0.968 28.104 0.979 28.424 0.986
+Lego
+Mutant
+Standup
+T-Rex
+NR-NeRF
+23.663 0.946 30.382 0.989 31.624 0.989 26.649 0.985
+Spline-NeRF
+23.656 0.943 31.183 0.992 31.349 0.990 26.056 0.982
+Table 1. Comparison of mean PSNR and MS-SSIM for Spline-NeRF and
+NR-NeRF. Bolded values are those that are significantly greater than the other.
+Bezier splines are able to recover movement with near equal accuracy in dynamic scenes
+as compared to NR-NeRF [20]. Due to the forced prior of continuous movement, we
+learn a smooth interpolation through each frame. We randomly samples all frames from
+the start of training. Here, we parametrize Spline-NeRF with 5 control points.
+†
+We had difficulty consistently reproducing results on this dataset. This is mostly
+because it is extremely dark: it is difficult to distinguish the black background from
+the object.
+a continuous function, which is strictly more constrained than the set of functions that an MLP can learn, as the MLP can reproduce the observed views
+at each time, and implicit smooth between views. In practice NR-NeRF learns
+fairly smooth movement, but quantitatively looks different from our methods’
+movement, due to differences in velocity and acceleration. Bezier splines enforce
+that movement is fluid and can better reproduce in-between frames, trading off
+reproduction quality for smoothness. We expect that in longer sequences and
+data with larger gaps Spline-NeRF would benefit from this constraint.
+Gibson Dataset
+We also include a more realistic dataset from NeRFlow [6], the Gibson dataset,
+rendered from the iGibson environment [23]. Our method has median PSNR
+24.537 dB and 0.886 SSIM, and NR-NeRF has median PSNR 24.591 dB and
+0.887 SSIM. Instead of the mean, we use the median since there are test frames
+which contain an object close to the camera which is rarely seen in the training set, thus there are some frames with extremely low quality on both methods. Fig. 5 highlights the differences, notably, our method produces coherent
+movement, despite having lower quantitative metrics, and this can be seen in
+NR-NeRF’s artifacts and the motion flow fields.
+Discussion
+Learned Bezier splines produce coherent movement in objects and are able to
+converge with equal to speed as prior work. Our method demonstrates smooth
+interpolation, as enforced by the structure of our approach. We are thus able to
+super-sample between frames at arbitrary resolution while guaranteeing smoothness. In addition, because of the analytic nature of splines, we are better able to
+understand the movement of objects within a scene.
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+11
+Fig. 4. Visual comparison of Spline-NeRF to NR-NeRF. Results comparing
+movement in our implementation of NR-NeRF [20] versus the proposed approach for
+using Bezier splines for modelling movement. The direction of motion is shown by color,
+distance is shown by intensity, and gray is 0 motion. Non-rigid regions are visualized as
+brighter. There is substantial difference in the predicted motion, and this can be seen
+in the Mutant and Hook scenes (top left, bottom right respectively), where NR-NeRF
+predicts very noisy 3D flow, but our approach is coherent, where coherence is loosely
+defined as being similar to nearby points. There is also a large difference in rigidity,
+where the spline has highly coherent non-rigid regions. This is especially noticeable in
+the Lego scene (bottom left), where NR-NeRF makes the entire model non-rigid, but
+adding a spline isolates the loader on the tractor to be non-rigid. We expect this is
+because splines are forced to have similar scale for movement, and the rigidity is less
+needed to compensate for error or differences in scale. For an MLP, it may predict
+different scales of motion for nearby points, but rigidity can compensate for this since
+it doesn’t strictly learn 0 or 1. The quality of the output is similar. In some portions,
+NR-NeRF captures higher quality output, such as in the shadows of the balls, or in the
+crispness of the Mutant’s blue claws. On the other hand, the spline more accurately
+captures the knobs and shadows of the knobs on the Lego scene.
+12
+Julian Knodt
+Fig. 5. Visual comparison of Spline-NeRF to NR-NeRF on Gibson Dataset.
+Our method produces coherent movement as compared to NR-NeRF, and is also visually more coherent, despite having a lower PSNR and MS-SSIM. It can be easily
+seen that the TurtleBot in NR-NeRF has artifacts, and does not move as a whole unit,
+whereas Spline-NeRF moves the whole robot uniformly. We do not include samples
+around t = 1, since both our approach and NR-NeRF produce low-quality reconstructions around those times.
+Another computational benefit of our approach is that for a single view, we
+only need to evaluate the deformation MLP once to compute the Bezier spline
+at each point, then we can sample the Bezier spline at an arbitrary number
+of times to compute a video. This should allow for efficient single view video
+reconstruction, but we leave future work for this.
+Finally, even without the above optimization, our model runs approximately
+as fast as NR-NeRF, but can be optimized further, either by introducing voxels,
+or using other approaches such as a different optimization scheme for splines.
+Limitations
+Reduced PSNR. Our work reduces the PSNR and MS-SSIM on the test set
+slightly. This is due to the requirement for a continuous function, which is more
+difficult to learn than directly predicting from an MLP, which from our qualitative results may not produce coherent movement or isolate non-rigid regions.
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+13
+This can be considered a trade-off between bias and variance, where we reduce
+the space of learned functions, in order to enforce that they are physically plausible. We argue that this trade-off may be beneficial in some cases, for example
+if we are interested in controlling movement, it’s easier to modify our method’s
+control points than it is to modify the output of the MLP. Our method is also
+easily interpretable and provably correct and for certain kinds of applications,
+these qualities would be preferable to quality. For applications which purely
+focus on reconstruction quality, and do not care about coherent movement or
+interpretability, it may make more sense to use an MLP.
+Bezier Hyperparameters. While our work is able to capture 3D movement, there
+are still limitations in what movement it can capture. Specifically, the number
+spline points determines the degrees of freedom of movement, and correctly selecting the number can be challenging. If too many points are selected, it can
+suffer from oscillations, akin to Runge’s phenomenon, and this was observed
+during experimentation. If too few points are selected, the space of learnable
+movement is significantly smaller. For the datasets used and those examined in
+prior work, simple movement is learned, which protects against these issues by
+selecting between 4-6 control points, but for more complex movement it is be
+more difficult.
+Transient Content. This work also does not tackle transient content in a scene.
+For example, effects such as fire or complex lighting changes beyond moving
+shadow cannot be accurately captured. This is not a focus of this work, but is
+orthogonal and important when broadly considering dynamic scenes. While this
+work does not handle this, in contrast to prior work which may enable learning
+this by teleporting particles with the deformation network, our approach prevents
+modelling those effects, which is beneficial since an orthogonal component may
+be able to learn them more effectively.
+Reflectance Another change in our approach is that the reflectance model defined
+in Eq. 5 may not be clearly motivated. It is able to model more than prior work,
+by limited linear scaling. This may be seen as a pro and con, in that we may be
+overfitting to the specific dataset we are testing on, but we argue it is broadly
+viable. In fact, the necessity for this reflectance is that there are non-negligible
+view-dependent effects in the dataset which a purely positional model cannot
+capture, but a fully view-dependent model cannot generalize to. Ours fits in the
+middle, capturing just what is necessary, while preventing content from becoming
+completely dark from other views. The idea behind this approach was learning
+a general gamma correction: A(RGB)γ , but found that learning γ even in the
+limited range [0.5, 1.5] failed due to instability. Thus, we only retained the linear
+term, and found this to improve performance. We can think of this as a diffuse
+BSDF, which has an explicit term for diffusion V · L, where in our case L is
+unknown but fixed. In addition, our limitation of A ∈ [0.5, 1] can be considered
+an implicit bias on the existence of global illumination, in that no particle can be
+14
+Julian Knodt
+fully black. Hopefully, this sufficiently motivates the modification to prior work’s
+RGB prediction.
+Future Work
+One large next step in neural rendering is to encode dynamic models on top
+of highly-efficient NeRF representations, such as using a Plenoxel [2], Instant
+Neural Graphics Primitives [12] or other structure to allow for rapid reconstruction of dynamic scenes. Our voxel implementation does not utilize sparsity as
+much as possible, nor does it use modifications such as hash-encoding, partially
+to demonstrate the efficacy of our approach on its own two feet. To the author’s
+knowledge, there is no real-time construction of 3D scenes since there did not
+exist a classical approach to reliably reconstruct movement. Bezier splines may
+help fill in this gap, requiring a small number of parameters and allowing for efficient rendering and training without requiring a costly MLP evaluation. If this
+follows the trend of scene reconstruction, it may be multiple orders of magnitude
+faster to reconstruct dynamic scenes, without loss in quality, and we hope that
+this work gets adopted for this purpose.
+In addition, long duration (minutes or hours) dynamic scene reconstruction
+has not yet shown to be plausible, but Bezier splines are easily extendable to
+long scenes by turning them into poly-Bezier splines or adding more control
+points. It is not immediately clear how to enable efficient reconstruction over
+long sequences, but using splines is a clear avenue for future work for learning
+long dynamic scenes with continuity guarantees.
+We also hope that future work explores variations on spline formulations,
+as we select Bezier splines due to simplicity, numerical stability and efficiency
+of evaluation. It may be that other splines might have stronger expressivity for
+reconstruction or other desirable properties, and thus may be useful in different
+contexts.
+Conclusion
+In conclusion, we devise a new architecture for C 0 , C 1 continuous interpolation,
+and show that it works with dynamic NeRF, performing on par with prior work.
+Our architecture is able to accurately reconstruct scenes, while providing strong
+smoothness guarantees using a well-studied tool. This leads to coherent movement, which can be observed in a reconstructed video. Hopefully, this inspires
+more use of classical tools inside of the differentiable rendering pipeline, so we
+can accurately and efficiently recover physical phenomenon.
+While our work is incremental, requiring very little modification to existing
+code, since it changes the underlying structure to an analytic form, so we expect
+a large amount of tooling and analytical tools can be built on top of this change,
+leading to better understanding and analysis of dynamic 3D content.
+Spline-NeRF: C 0 -Continuous Dynamic NeRF
+15
+References
+1. A primer on bézier curves (Sep 2021), https://pomax.github.io/bezierinfo/, a
+complete, open-source reference to Bezier Curves.
+2. Alex Yu and Sara Fridovich-Keil, Tancik, M., Chen, Q., Recht, B., Kanazawa, A.:
+Plenoxels: Radiance fields without neural networks (2021)
+3. Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R., Srinivasan, P.P.: Mip-nerf: A multiscale representation for anti-aliasing neural radiance
+fields (2021)
+4. Bi, S., Xu, Z., Srinivasan, P., Mildenhall, B., Sunkavalli, K., Hašan, M., HoldGeoffroy, Y., Kriegman, D., Ramamoorthi, R.: Neural reflectance fields for appearance acquisition (2020)
+5. Boss, M., Braun, R., Jampani, V., Barron, J.T., Liu, C., Lensch, H.P.: Nerd: Neural
+reflectance decomposition from image collections. In: IEEE International Conference on Computer Vision (ICCV) (2021)
+6. Du, Y., Zhang, Y., Yu, H.X., Tenenbaum, J.B., Wu, J.: Neural radiance flow for
+4d view synthesis and video processing. In: Proceedings of the IEEE/CVF International Conference on Computer Vision (2021)
+7. Kingma, D.P., Ba, J.: Adam: A method for stochastic optimization. CoRR
+abs/1412.6980 (2015)
+8. Li, T., Slavcheva, M., Zollhöfer, M., Green, S., Lassner, C., Kim, C., Schmidt,
+T., Lovegrove, S., Goesele, M., Lv, Z.: Neural 3d video synthesis. CoRR
+abs/2103.02597 (2021), https://arxiv.org/abs/2103.02597
+9. Li, Z., Niklaus, S., Snavely, N., Wang, O.: Neural scene flow fields for space-time
+view synthesis of dynamic scenes (2021)
+10. Loshchilov, I., Hutter, F.: Sgdr: Stochastic gradient descent with warm restarts
+(2017)
+11. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis (2020)
+12. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. arXiv:2201.05989 (Jan 2022)
+13. Ost, J., Mannan, F., Thuerey, N., Knodt, J., Heide, F.: Neural scene graphs for
+dynamic scenes. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR). pp. 2856–2865 (June 2021)
+14. Park, K., Sinha, U., Barron, J.T., Bouaziz, S., Goldman, D.B., Seitz, S.M., MartinBrualla, R.: Nerfies: Deformable neural radiance fields. ICCV (2021)
+15. Park, K., Sinha, U., Hedman, P., Barron, J.T., Bouaziz, S., Goldman, D.B., MartinBrualla, R., Seitz, S.M.: Hypernerf: A higher-dimensional representation for topologically varying neural radiance fields. ACM Trans. Graph. 40(6) (dec 2021)
+16. Pumarola, A., Corona, E., Pons-Moll, G., Moreno-Noguer, F.: D-nerf: Neural radiance fields for dynamic scenes (2020)
+17. Sitzmann, V., Martel, J.N., Bergman, A.W., Lindell, D.B., Wetzstein, G.: Implicit
+neural representations with periodic activation functions. In: Proc. NeurIPS (2020)
+18. Srinivasan, P.P., Deng, B., Zhang, X., Tancik, M., Mildenhall, B., Barron, J.T.:
+Nerv: Neural reflectance and visibility fields for relighting and view synthesis. arXiv
+preprint arXiv:2012.03927 (2020)
+19. Tancik, M., Srinivasan, P.P., Mildenhall, B., Fridovich-Keil, S., Raghavan, N., Singhal, U., Ramamoorthi, R., Barron, J.T., Ng, R.: Fourier features let networks learn
+high frequency functions in low dimensional domains. NeurIPS (2020)
+16
+Julian Knodt
+20. Tretschk, E., Tewari, A., Golyanik, V., Zollhöfer, M., Lassner, C., Theobalt, C.:
+Non-rigid neural radiance fields: Reconstruction and novel view synthesis of a dynamic scene from monocular video. In: IEEE International Conference on Computer Vision (ICCV). IEEE (2021)
+21. Wang, Z., Bagautdinov, T., Lombardi, S., Simon, T., Saragih, J., Hodgins, J.,
+Zollhofer, M.: Learning compositional radiance fields of dynamic human heads.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). pp. 5704–5713 (June 2021)
+22. Xian, W., Huang, J.B., Kopf, J., Kim, C.: Space-time neural irradiance fields for
+free-viewpoint video. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). pp. 9421–9431 (2021)
+23. Xu, Q., Wang, W., Ceylan, D., Mech, R., Neumann, U.: Disn: Deep implicit surface network for high-quality single-view 3d reconstruction. In: Wallach, H., Larochelle, H., Beygelzimer, A., d'Alché-Buc, F., Fox, E., Garnett,
+R. (eds.) Advances in Neural Information Processing Systems. vol. 32. Curran
+Associates, Inc. (2019), https://proceedings.neurips.cc/paper/2019/file/
+39059724f73a9969845dfe4146c5660e-Paper.pdf
+001
+002
+003
+004
+005
+006
+007
+008
+009
+010
+011
+012
+013
+014
+015
+016
+017
+018
+019
+020
+021
+022
+023
+024
+025
+026
+027
+028
+029
+030
+031
+032
+033
+034
+035
+036
+037
+arXiv:2203.13800v1 [cs.CV] 25 Mar 2022
+000
+Spline-NeRF: Supplement
+000
+001
+002
+Anonymous ECCV Submission
+Paper ID 6195
+003
+004
+005
+006
+007
+Additional Qualitative Results
+008
+009
+We include additional qualitative results in Fig. 2 to allow for comparison of the
+two methods. We include these additional results in order to better visualize the
+qualitative differences in our method, which cannot be seen through quantitative
+results alone.
+010
+011
+012
+013
+014
+015
+Voxel Spline Results
+016
+017
+018
+019
+Fig. 1. Voxel implementation of
+Spline-NeRF. Our implementation of
+Spline-NeRF does not deviate much
+from our MLP-based implementation,
+but instead stores control points at
+each voxel coordinate.
+We also include some results from our naive voxel implementation in Fig. 3.
+We pick a few successful results to highlight that a voxel implementation can
+accurately recover a moving scene, but also show some failure cases to highlight
+that a naive voxel implementation may need additional regularization. Notably,
+there are a large amount of floating black spots, which is not necessarily a problem in a static reconstruction if they are not observed, but may be more of a
+problem if they are moved into the line of sight. Thus, we suspect that regularization on unobserved voxels may be necessary.
+Since a complete voxel implementation is not the focus of this work, we leave
+this for future work, but highlight its potential for fast reconstruction of dynamic
+scenes.
+020
+021
+022
+023
+024
+025
+026
+027
+028
+029
+030
+031
+032
+033
+034
+035
+036
+037
+038
+038
+039
+039
+040
+040
+041
+041
+042
+042
+043
+043
+044
+044
+2
+Anonymous ECCV Submission
+045
+045
+046
+046
+047
+047
+048
+048
+049
+049
+050
+050
+051
+051
+052
+052
+053
+053
+054
+054
+055
+055
+056
+056
+057
+057
+058
+058
+059
+059
+060
+060
+061
+061
+062
+062
+063
+063
+064
+064
+065
+065
+066
+066
+067
+067
+068
+068
+069
+069
+070
+070
+071
+071
+072
+072
+073
+073
+074
+074
+075
+075
+076
+076
+077
+077
+078
+078
+079
+079
+080
+080
+081
+082
+083
+084
+085
+Fig. 2. Additional test frames from D-NeRF dataset. More qualitative comparisons of our method to NR-NeRF. There are some cases where NR-NeRF can capture
+more high-quality details than Spline-NeRF, but also cases where Spline-NeRF is able
+to more accurately reconstruct the output. These manifest in high-frequency details,
+but the low-frequency components of both reconstructions are approximately the same.
+081
+082
+083
+084
+085
+086
+086
+087
+087
+088
+088
+089
+089
+Spline-NeRF: Supplement
+3
+090
+090
+091
+091
+092
+092
+093
+093
+094
+094
+095
+095
+096
+096
+097
+097
+098
+098
+099
+099
+100
+100
+101
+101
+102
+102
+103
+103
+104
+104
+105
+105
+106
+106
+107
+107
+108
+108
+109
+109
+110
+110
+111
+111
+112
+112
+113
+113
+114
+114
+115
+115
+116
+116
+117
+117
+118
+118
+119
+120
+121
+122
+123
+124
+Fig. 3. Results from Voxel Spline-NeRF. Results of reconstruction using a Voxel
+implementation of Spline-NeRF. We include both successful output from the voxel
+implementation, which is cherry-picked to showcase the potential of the method, as well
+as failure cases in order to show that there are still shortcomings without additional
+regularization. We note that even in the successful cases, it’s clear from the visualized
+depth that there are artifacts, but they are black and thus do not affect the output.
+119
+120
+121
+122
+123
+124
+125
+125
+126
+126
+127
+127
+128
+128
+129
+129
+130
+130
+131
+131
+132
+132
+133
+133
+134
+134

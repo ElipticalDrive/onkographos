@@ -1,0 +1,228 @@
+--- v001.md
++++ v002.md
+@@ -7,16 +7,16 @@
+ ## How it works
+ **Inputs:**
+-*   `vessel_positions`: Array of shape $(N, 2, 3)$ containing the start and end 3D coordinates for $N$ vessel segments.
+-*   `vessel_radii`: Array of shape $(N,)$ containing the radius $r^i$ for each vessel segment $i$.
+-*   `volume_shape`: Array of integers defining the dimensions $(n_x, n_y, n_z)$ of the output voxel grid.
+-*   `volume_origin`: Array of floats $(x_0, y_0, z_0)$ defining the world coordinates of the voxel at index $(0,0,0)$.
+-*   `volume_spacing`: Float or array of size 3 defining the side length of each voxel.
++*   `vessel_positions`: Array of shape $(N, 2, 3)$ containing the start and end 3D coordinates for $N$ vessel segments [S1, unofficial].
++*   `vessel_radii`: Array of shape $(N,)$ containing the radius $r^i$ for each vessel segment $i$ [S1, unofficial].
++*   `volume_shape`: Array of integers defining the dimensions $(n_x, n_y, n_z)$ of the output voxel grid [S1, unofficial].
++*   `volume_origin`: Array of floats $(x_0, y_0, z_0)$ defining the world coordinates of the voxel at index $(0,0,0)$ [S1, unofficial].
++*   `volume_spacing`: Float or array of size 3 defining the side length of each voxel [S1, unofficial].
+ 
+ **Outputs:**
+-*   `volume`: A 3D array of shape `volume_shape` with `float32` values in the range $[0.0, 1.0]$, representing the fractional occupancy of each voxel by the vessels.
++*   `volume`: A 3D array of shape `volume_shape` with `float32` values in the range $[0.0, 1.0]$, representing the fractional occupancy of each voxel by the vessels [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `vessel_bbox`: Precomputed bounding boxes for each vessel. For vessel $i$, this is an array of shape $(N, 2, 3)$ where `vessel_bbox[i, 0, :]` is the minimum corner and `vessel_bbox[i, 1, :]` is the maximum corner of the bounding box enclosing the cylinder segment $i$ expanded by its radius.
+-*   `internal_point`: A temporary array of size $K^3$ used within the CUDA kernel to count supersampled points inside the vessel radius for the current voxel.
++*   `vessel_bbox`: Precomputed bounding boxes for each vessel. For vessel $i$, this is an array of shape $(N, 2, 3)$ where `vessel_bbox[i, 0, :]` is the minimum corner and `vessel_bbox[i, 1, :]` is the maximum corner of the bounding box enclosing the cylinder segment $i$ expanded by its radius [S1, unofficial].
++*   `internal_point`: A temporary array of size $K^3$ used within the CUDA kernel to count supersampled points inside the vessel radius for the current voxel [S1, unofficial].
+ 
+ **Parameters:**
+@@ -37,8 +37,8 @@
+     ))
+     ```
+-    The resulting `vessel_bbox` has shape $(N, 2, 3)$.
++    The resulting `vessel_bbox` has shape $(N, 2, 3)$ [S1, unofficial].
+ 
+ 2.  **Kernel Launch:**
+-    Launch a CUDA kernel where each thread corresponds to a single voxel $(x, y, z)$ in the output volume.
++    Launch a CUDA kernel where each thread corresponds to a single voxel $(x, y, z)$ in the output volume [S1, unofficial].
+ 
+ 3.  **Voxel Boundary Calculation:**
+@@ -50,5 +50,5 @@
+     \text{voxel\_max}[d] = \text{voxel\_min}[d] + \text{volume\_spacing}[d]
+     $$
+-    where $d \in \{0, 1, 2\}$ corresponds to axes $x, y, z$.
++    where $d \in \{0, 1, 2\}$ corresponds to axes $x, y, z$ [S1, unofficial].
+ 
+ 4.  **Bounding Box Culling:**
+@@ -80,7 +80,8 @@
+     \text{dist\_squared} = \| \text{check\_point} - p_{proj} \|^2
+     $$
++    [S1, unofficial]
+ 
+ 7.  **Inside Test:**
+-    If $\text{dist\_squared} \le (r^i)^2$, set the corresponding entry in `internal_point` to 1. Otherwise, it remains 0. Note: The source implementation sums intersections across all vessels. If multiple vessels overlap within the same sample point, the point is counted multiple times, potentially resulting in voxel values $> 1.0$ if not clamped, though the description implies mapping 0 points to 0.0 and all points to 1.0. The code sums `internal_point` values. If a point is inside multiple vessels, it increments the count. The final value is `intersections / (K*K*K)`.
++    If $\text{dist\_squared} \le (r^i)^2$, set the corresponding entry in `internal_point` to 1. Otherwise, it remains 0. Note: The source implementation sums intersections across all vessels. If multiple vessels overlap within the same sample point, the point is counted multiple times, potentially resulting in voxel values $> 1.0$ if not clamped, though the description implies mapping 0 points to 0.0 and all points to 1.0. The code sums `internal_point` values. If a point is inside multiple vessels, it increments the count. The final value is `intersections / (K*K*K)` [S1, unofficial].
+ 
+ 8.  **Volume Update:**
+@@ -89,5 +90,5 @@
+     \text{volume}[x, y, z] = \frac{\text{intersections}}{K^3}
+     $$
+-    This represents the fraction of supersampled points that fell within at least one vessel's radius.
++    This represents the fraction of supersampled points that fell within at least one vessel's radius [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -96,113 +97,51 @@
+ import numpy as np
+ 
+-def vessel_voxelizer(vessel_positions, vessel_radii, volume_shape, volume_origin, volume_spacing, K=10):
+-    """
+-    CPU-side preparation and simulation of the Vessel Voxelizer logic.
+-    Note: The actual method is GPU-accelerated. This pseudocode outlines the logic
+-    for a single voxel to demonstrate the algorithm.
+-    """
+-    # 1. Preprocessing: Compute Bounding Boxes
+-    # Sort start/end points for each vessel
+-    sorted_pos = np.sort(vessel_positions, axis=1) # Shape (N, 2, 3)
+-    # Expand by radius
+-    # vessel_radii shape (N,) -> reshape to (N, 1, 1)
+-    neg_r = -vessel_radii.reshape(-1, 1, 1)
+-    pos_r = vessel_radii.reshape(-1, 1, 1)
+-    vessel_bbox = sorted_pos + np.hstack((neg_r, pos_r)) # Shape (N, 2, 3)
+-    
+-    # 2. Initialize Output Volume
+-    volume = np.zeros(volume_shape, dtype=np.float32)
+-    
+-    # 3. Iterate Voxels (Simulated for one voxel (x,y,z))
+-    # In reality, this loop is parallelized across CUDA threads
+-    for x in range(volume_shape[0]):
+-        for y in range(volume_shape[1]):
+-            for z in range(volume_shape[2]):
+-                
+-                # Calculate voxel boundaries
+-                spacing = np.array(volume_spacing) if isinstance(volume_spacing, (int, float)) else volume_spacing
+-                voxel_min = volume_origin + np.array([x, y, z]) * spacing
+-                voxel_max = voxel_min + spacing
+-                
+-                # Initialize sample counter
+-                intersections = 0
+-                total_samples = K * K * K
+-                
+-                # 4. Supersampling Grid
+-                # Generate K^3 points
+-                # Using meshgrid for clarity, though kernel uses linear indices
+-                ix, iy, iz = np.meshgrid(np.arange(K), np.arange(K), np.arange(K), indexing='ij')
+-                
+-                # Calculate check points
+-                # check_point[d] = voxel_min[d] + (1/(2K) + i_d/K) * spacing[d]
+-                check_points = np.zeros((K, K, K, 3))
+-                for d in range(3):
+-                    check_points[:, :, :, d] = voxel_min[d] + (1.0/(2*K) + ix/d if d==0 else iy/d if d==1 else iz/d) * spacing[d] # Simplified logic for pseudocode
++def vessel_voxelizer_kernel(x, y, z, volume_start, vol_spacing, n_x, n_y, n_z, vessels, vessel_bbox, rads, n_vessels, K=10):
++    """Simulates the CUDA kernel logic for a single voxel thread."""
++    if not (x < n_x and y < n_y and z < n_z):
++        return 0.0
++
++    spacing = vol_spacing
++    voxel_min = [volume_start[d] + x * spacing[d] for d in range(3)]
++    voxel_max = [voxel_min[d] + spacing[d] for d in range(3)]
++
++    intersections = 0
++    for i in range(n_vessels):
++        # Bounding box culling
++        v_min = [vessel_bbox[i * 6 + d] for d in range(3)]
++        v_max = [vessel_bbox[i * 6 + 3 + d] for d in range(3)]
++        if not (voxel_max[0] >= v_min[0] and voxel_min[0] <= v_max[0] and
++                voxel_max[1] >= v_min[1] and voxel_min[1] <= v_max[1] and
++                voxel_max[2] >= v_min[2] and voxel_min[2] <= v_max[2]):
++            continue
++
++        ls_start = [vessels[i * 6 + d] for d in range(3)]
++        ls_end = [vessels[i * 6 + 3 + d] for d in range(3)]
++        radius = rads[i]
++
++        for ix in range(K):
++            for iy in range(K):
++                for iz in range(K):
++                    check_point = [voxel_min[d] + (1.0 / (2 * K) + ix / K) * spacing[d] for d in range(3)]
+                     
+-                # Correct calculation for check_points:
+-                # ix, iy, iz are indices 0..K-1
+-                # offset = (1/(2K) + index/K) * spacing
+-                offsets = (1.0/(2*K) + np.arange(K)/K) * spacing # Shape (3, K) if transposed correctly
+-                # Let's do it explicitly per axis
+-                x_offsets = (1.0/(2*K) + ix.flatten()/K) * spacing[0]
+-                y_offsets = (1.0/(2*K) + iy.flatten()/K) * spacing[1]
+-                z_offsets = (1.0/(2*K) + iz.flatten()/K) * spacing[2]
+-                
+-                # Flatten indices for iteration
+-                n_samples = K**3
+-                sample_points = np.zeros((n_samples, 3))
+-                for s in range(n_samples):
+-                    sample_points[s, 0] = voxel_min[0] + x_offsets[s]
+-                    sample_points[s, 1] = voxel_min[1] + y_offsets[s]
+-                    sample_points[s, 2] = voxel_min[2] + z_offsets[s]
++                    # Distance to line segment
++                    ls_dir = [ls_end[d] - ls_start[d] for d in range(3)]
++                    p_to_ls_start = [check_point[d] - ls_start[d] for d in range(3)]
++                    ls_dir_dot = sum(ls_dir[d] * ls_dir[d] for d in range(3))
++                    
++                    if ls_dir_dot == 0.0:
++                        continue # Degenerate segment guard [G]
++                    
++                    t = sum(p_to_ls_start[d] * ls_dir[d] for d in range(3)) / ls_dir_dot
++                    t = max(0.0, min(1.0, t))
++                    
++                    p_proj = [ls_start[d] + t * ls_dir[d] for d in range(3)]
++                    diff = [check_point[d] - p_proj[d] for d in range(3)]
++                    dist_sq = sum(diff[d] * diff[d] for d in range(3))
++                    
++                    if dist_sq <= radius * radius:
++                        intersections += 1
+ 
+-                # 5. Check against Vessels
+-                for i in range(len(vessel_positions)):
+-                    # Bounding Box Culling
+-                    v_min = vessel_bbox[i, 0]
+-                    v_max = vessel_bbox[i, 1]
+-                    
+-                    if not (voxel_max[0] >= v_min[0] and voxel_min[0] <= v_max[0] and
+-                            voxel_max[1] >= v_min[1] and voxel_min[1] <= v_max[1] and
+-                            voxel_max[2] >= v_min[2] and voxel_min[2] <= v_max[2]):
+-                        continue
+-                    
+-                    # Distance Calculation
+-                    p0 = vessel_positions[i, 0]
+-                    p1 = vessel_positions[i, 1]
+-                    r = vessel_radii[i]
+-                    
+-                    v = p1 - p0
+-                    v_dot_v = np.dot(v, v)
+-                    
+-                    # Avoid division by zero for degenerate segments
+-                    if v_dot_v == 0:
+-                        continue
+-                        
+-                    # Vector from p0 to sample point
+-                    # Vectorized over all sample points
+-                    p_to_p0 = sample_points - p0 # Shape (n_samples, 3)
+-                    
+-                    # Projection parameter t
+-                    t = np.dot(p_to_p0, v) / v_dot_v
+-                    t = np.clip(t, 0.0, 1.0)
+-                    
+-                    # Closest point on segment
+-                    # p_proj = p0 + t * v
+-                    # Since t is scalar per point, we broadcast
+-                    p_proj = p0 + t[:, np.newaxis] * v # Shape (n_samples, 3)
+-                    
+-                    # Squared distance
+-                    diff = sample_points - p_proj
+-                    dist_sq = np.sum(diff**2, axis=1)
+-                    
+-                    # Inside test
+-                    inside = dist_sq <= (r * r)
+-                    intersections += np.sum(inside)
+-                
+-                # 6. Volume Update
+-                volume[x, y, z] = intersections / total_samples
+-                
+-    return volume
++    return intersections / (K * K * K)
+ ```
+ 
+@@ -210,5 +149,5 @@
+ *   **Hardcoded K:** The number of sample points $K$ is hardcoded to 10 in the source code. The TODO list indicates a need to make this adaptable [S1, unofficial].
+ *   **Degenerate Segments:** If a vessel segment has zero length ($p_0 = p_1$), the dot product $v \cdot v$ is zero. The source code does not explicitly show a guard for this in the kernel, which could lead to division by zero. [G] A robust implementation should check `v_dot_v > epsilon` before computing $t$.
+-*   **Overlap:** If vessels overlap, a single sample point may be counted multiple times. The final value is the sum of intersections divided by $K^3$. If the sum exceeds $K^3$, the value exceeds 1.0. The source description says "Map 0 points to 0.0 and all points to 1.0", but the code simply divides by $K^3$. [S1, unofficial]
++*   **Overlap:** If vessels overlap, a single sample point may be counted multiple times. The final value is the sum of intersections divided by $K^3$. If the sum exceeds $K^3$, the value exceeds 1.0. The source description says "Map 0 points to 0.0 and all points to 1.0", but the code simply divides by $K^3$ [S1, unofficial].
+ 
+ ## Operating characteristics

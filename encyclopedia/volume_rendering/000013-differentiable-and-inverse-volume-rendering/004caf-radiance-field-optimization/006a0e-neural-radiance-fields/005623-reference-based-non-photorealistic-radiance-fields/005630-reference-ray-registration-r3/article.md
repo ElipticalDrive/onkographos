@@ -1,0 +1,139 @@
+# Reference Ray Registration (R3)
+
+
+## Overview
+Reference Ray Registration (R3) is a method for establishing semantic consistency between a stylized reference view and novel views in non-photorealistic radiance field optimization. It solves the problem of propagating style from a single 2D reference image to 3D novel views by creating a reference dictionary of rays and assigning stylized colors to registered novel view rays. Unlike methods that rely solely on 2D warping or implicit feature matching, R3 explicitly maps pixels in the stylized reference view to 3D space using pseudo-depth information to create a supervision signal for novel views [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A pre-trained photorealistic radiance field $\omega_P$ (typically Plenoxels [S1]), a stylized reference view $S_R$ with camera pose $\phi_R$, a set of accessible camera poses $\Phi$ for novel views, and a foreground mask for the reference view.
+*   **Outputs:** A reference-dependent pseudo-ray supervision set $\Gamma_R$, which contains registered rays from novel views and their assigned stylized colors.
+
+**Data Structures**
+*   **Reference Dictionary $D$:** A 3D grid (cube) containing $256^3$ voxels [S1].
+    *   Each entry $D(x,y,z)$ stores a list of rays.
+    *   Maximum number of rays stored per entry: 8 [S1].
+*   **Supervision Set $\Gamma_R$:** A collection of tuples $(r_j, \hat{C}_R(\hat{r}_j))$ where $r_j$ is a registered ray and $\hat{C}_R(\hat{r}_j)$ is the assigned stylized color [S1].
+
+**Steps**
+1.  **Estimate Pseudo-Depth:** Estimate pseudo-depth information for the radiance field $\omega_P$ using the depth rendering property [S1]. Let $l(r_i)$ be the ray length (pseudo-depth) for a ray $r_i$.
+2.  **Map Reference Pixels to 3D:** For each pixel in the stylized reference view $S_R$, estimate the 3D intersection point $x(r_i)$ of the corresponding ray $r_i \in \phi_R$ using the pseudo-depth $l(r_i)$ [S1].
+3.  **Construct Reference Dictionary:** Split 3D space into discrete voxels. For each ray $r_i$ in the reference camera set $\phi_R$, compute its intersection point $x(r_i)$ and map it to a voxel index $(x,y,z)$ using a quantization operator $Q(\cdot)$. The dictionary is defined as:
+    $$ D(x,y,z) = \{ r_i \in \phi_R \mid Q(x(r_i)) = (x, y, z) \} $$
+    [S1]
+4.  **Register Novel View Rays:** For each ray $r_j$ from the accessible camera poses $\Phi$ (or $\phi_R$), find a ray $\hat{r}_j$ in the reference dictionary $D(x,y,z)$ such that $\hat{r}_j$ intersects the same voxel and the angle between their directions $d_{r_i}$ and $d_{r_j}$ is within a threshold $\theta$. The registration finds the ray minimizing the distance in the voxel:
+    $$ \arg \min \| x(r_i) - x(r_j) \|^2, \quad \text{subject to } r_i \in D(x,y,z) \text{ and } \angle(d_{r_i}, d_{r_j}) < \theta $$
+    [S1]
+5.  **Assign Colors:** Construct the reference-dependent pseudo-ray supervision set $\Gamma_R$ by collecting each validated, registered ray $r_j$ and assigning its color $\hat{C}_R(\hat{r}_j)$ according to the corresponding reference ray $\hat{r}_j$. The set is defined as:
+    $$ \Gamma_R = \{ (r_j, \hat{C}_R(\hat{r}_j)) \mid r_j \in \Phi \cup \phi_R, \hat{r}_j \neq \emptyset \} $$
+    [S1]
+
+**Parameters**
+*   **Dictionary Size:** $256^3$ voxels [S1].
+*   **Max Rays per Voxel:** 8 [S1].
+*   **Angle Constraint:** $\cos(\theta) > 0.6$ [S1].
+*   **Sample Size:** $|N_s| = 10^6$ pseudo-ray samples per training step, with half from $\phi_R$ and half from registered rays in correlated views [S1].
+
+**Edge Cases and Pitfalls**
+*   **Mask Boundary Overflow:** To avoid the stylized view overflowing onto the background at the mask boundary, apply a 2D morphological erosion on the foreground mask in R3 [S1].
+*   **Dictionary Compactness:** In the Tanks and Temples (T&T) dataset, register only rays in Plenoxels’s foreground model (apart from the reference view) to make the dictionary more compact [S1].
+*   **Occlusion:** R3 struggles to register reference rays to occluded regions under the reference camera, especially in 360° scenes [S1]. This is addressed by the Template-Based Correspondence Module (TCM) [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reference_ray_registration(omega_P, S_R, phi_R, Phi, foreground_mask):
+    """
+    omega_P: Pre-trained radiance field for depth estimation
+    S_R: Stylized reference view
+    phi_R: Camera pose of the reference view
+    Phi: Set of accessible camera poses for novel views
+    foreground_mask: Binary mask for the reference view
+    """
+    # 1. Erode foreground mask to prevent boundary overflow [S1]
+    eroded_mask = morphological_erosion(foreground_mask)
+    
+    # 2. Estimate pseudo-depths for reference rays [S1]
+    # Rays from reference camera
+    ref_rays = get_rays_from_pose(phi_R, S_R.resolution)
+    pseudo_depths = estimate_depth(omega_P, ref_rays)
+    
+    # 3. Construct Reference Dictionary D [S1]
+    # D is a 3D array of size 256^3, each entry is a list of rays
+    D = initialize_dictionary(size=256)
+    quantization_op = QuantizationOperator(grid_size=256)
+    
+    for ray in ref_rays:
+        if not is_in_mask(ray, eroded_mask):
+            continue
+            
+        # Estimate 3D intersection point from pseudo-depth [S1]
+        x_ray = ray.origin + ray.direction * pseudo_depths[ray.id]
+        
+        # Map to voxel index
+        voxel_idx = quantization_op(x_ray)
+        
+        # Add to dictionary if space available (max 8 rays) [S1]
+        if len(D[voxel_idx]) < 8:
+            D[voxel_idx].append(ray)
+            
+    # 4. Register novel view rays and build supervision set Gamma_R [S1]
+    Gamma_R = []
+    angle_threshold_cos = 0.6
+    
+    # Combine reference rays and novel view rays for registration
+    all_candidate_rays = list(Phi.rays) + list(ref_rays)
+    
+    for r_j in all_candidate_rays:
+        x_j = r_j.origin + r_j.direction * estimate_depth(omega_P, r_j)
+        voxel_idx_j = quantization_op(x_j)
+        
+        best_match = None
+        min_dist = infinity
+        best_match_ray = None
+        
+        # Search for a ray in the same voxel with similar direction [S1]
+        for r_i in D[voxel_idx_j]:
+            x_i = r_i.origin + r_i.direction * pseudo_depths[r_i.id]
+            
+            # Check angle constraint [S1]
+            cos_angle = dot_product(normalize(r_i.direction), normalize(r_j.direction))
+            if cos_angle < angle_threshold_cos:
+                continue
+                
+            # Check distance in voxel space [S1]
+            dist = squared_distance(x_i, x_j)
+            if dist < min_dist:
+                min_dist = dist
+                best_match = r_i
+                best_match_ray = r_i
+                
+        if best_match is not None:
+            # Assign stylized color from the matched reference ray [S1]
+            # C_R denotes the stylized color according to S_R
+            assigned_color = get_stylized_color(S_R, best_match)
+            Gamma_R.append((r_j, assigned_color))
+            
+    return Gamma_R
+```
+
+## Subtopics
+
+### [Template-Based Correspondence Module](15648-template-based-correspondence-module.md)
+A module that leverages semantic correspondence consistency to broadcast reference style to novel views with semantically similar content, overcoming occlusion issues in 360° scenes where R3 fails to register reference rays. It uses a content-style mapping template established from the stylized reference view and source content to provide implicit feature-level supervision.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** The reference dictionary $D$ consumes memory proportional to $256^3$ voxels, with up to 8 rays per voxel [S1].
+*   **Measured Performance:** Evaluated on Tanks and Temples (T&T), LLFF, and Synthetic datasets [S1]. Trained on one NVIDIA 3090 GPU for 10 epochs [S1].
+*   **Strengths:** Establishes explicit semantic consistency between stylized reference and novel views using 3D information [S1].
+*   **Limitations:** Struggles with occluded regions in 360° scenes without the TCM module [S1].
+*   **When to use:** When stylizing a 3D scene with a single 2D reference view and maintaining semantic consistency across novel views is required [S1].
+*   **When not to use:** When the scene has significant occlusions relative to the reference view and TCM is not available or applicable [S1].
+
+## Background
+Reference Ray Registration (R3) is part of the Ref-NPR (Reference-Based Non-Photorealistic Radiance Fields) method, introduced in 2023 [S1]. It builds on the idea that precise 3D positions and camera parameters enable pixel-wise correspondence between views, utilizing pseudo-depth from a radiance field to create supervision signals [S1]. Ref-NPR is based on the ARF codebase and uses Plenoxels as the radiance field representation [S1].
+
+## Sources
+[S1] Ref-NPR: Reference-Based Non-Photorealistic Radiance Fields for Controllable Scene Stylization, https://doi.org/10.1109/cvpr52729.2023.00413, fetched 2026-10-26

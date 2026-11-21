@@ -1,0 +1,284 @@
+--- v001.md
++++ v002.md
+@@ -4,224 +4,84 @@
+ 
+ ## Overview
+-SLS4D is a method for 4D novel view synthesis that represents dynamic scenes using a sparse, compact, and informative latent feature space, significantly reducing the number of network parameters compared to dense voxel-based or fully implicit alternatives [S1]. It distinguishes itself by abandoning direct coordinate-to-feature mapping in favor of relative relationships within a latent space, utilizing dense learnable time slots for temporal continuity and an attention-based interpolator decoder for spatial feature aggregation [S1].
++SLS4D is a method for 4D novel view synthesis that represents dynamic scenes using a sparse, compact, and informative latent feature space, significantly reducing the number of network parameters compared to previous state-of-the-art methods like V4D [S1]. It distinguishes itself from sibling methods by abandoning direct coordinate-based feature determination in favor of relative relationships in a latent space, utilizing dense learnable time slots for temporal continuity and an attention-based interpolator decoder for spatial feature aggregation [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of images capturing a dynamic scene over time, along with their corresponding camera poses and timestamps.
+-*   **Output:** A radiance field model capable of rendering novel views at arbitrary spatial coordinates $(x, y, z)$ and time $t$.
++*   **Inputs:** A 4D coordinate $\mathbf{q} = (x, y, z, t)$ representing a point in space and time, and a view direction $\mathbf{d}$.
++*   **Outputs:** Volume density $\sigma$ and color $\mathbf{c}$ for the ray at the queried point.
+ 
+ **Data Structures:**
+-1.  **Latent Codes ($\mathcal{L}$):** A finite set of globally learnable spatial latent codes.
+-    *   Size: $B$ codes.
+-    *   Dimension: $D_L$ (Not given in the sources).
+-    *   Layout: A tensor of shape $(B, D_L)$.
+-2.  **Time Slots ($\mathcal{T}$):** Dense learnable features representing temporal states.
+-    *   Size: $T$ slots.
+-    *   Dimension: $D_T$ (Not given in the sources).
+-    *   Layout: A tensor of shape $(T, D_T)$.
+-3.  **Deformation Field ($\Phi$):** A 7-layer Multi-Layer Perceptron (MLP).
+-    *   Input: Concatenation of 3D spatial coordinate $(x, y, z)$ and a specific time slot feature from $\mathcal{T}$.
++1.  **Time Slot Features ($\mathbf{T}$):** A dense set of learnable vectors representing temporal slots.
++    *   Size: $T$ vectors, each of dimension $D_t$.
++    *   Typical Value: $T = 512$ [S1].
++2.  **Spatial Latent Codes ($\mathbf{L}$):** A sparse set of globally learnable latent codes.
++    *   Size: $B$ vectors, each of dimension $D_l$.
++    *   Typical Value: $B = 512$ [S1].
++3.  **Deformation Field ($\mathcal{M}$):** A Multi-Layer Perceptron (MLP) network.
++    *   Architecture: 7-layer MLP [S1].
++    *   Input: 4D coordinate $(x, y, z, t)$.
+     *   Output: 3D displacement vector $(\Delta x, \Delta y, \Delta z)$.
+-4.  **Interpolator Decoder:** A network module using GeGLU (bilinear Gated Linear Unit) activation.
+-    *   Input: Aggregated spatial features.
+-    *   Output: Density $\sigma$ and view-dependent color $\mathbf{c}$.
+-
+-**Parameters:**
+-*   $B = 512$: Number of latent features [S1].
+-*   $T = 512$: Number of time slots [S1].
+-*   Typical values are based on the HyperNeRF dataset duration; for D-NeRF, smaller values may be used, but the source specifies 512 for the reported experiments [S1].
++4.  **Interpolator Decoder ($\mathcal{D}$):** A network that aggregates spatial features and predicts radiance.
++    *   Activation: GeGLU (Gated Linear Unit with GeLU gating) [S1].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Temporal Encoding:**
+-    For a query time $t$, identify the corresponding time slot index or interpolate between time slots in $\mathcal{T}$ to obtain the time feature $\mathbf{t}_{feat} \in \mathbb{R}^{D_T}$. The source notes that time slots ensure smoothness of dense temporal information [S1].
++1.  **Temporal Encoding via Time Slots:**
++    The time component $t$ is used to select or interpolate features from the dense time slot set $\mathbf{T}$. The specific mechanism for mapping $t$ to $\mathbf{T}$ is not explicitly detailed in the provided notes, but the time slots ensure smoothness of dense temporal information [S1].
+ 
+ 2.  **Deformation Field Prediction:**
+-    Compute the deformation displacement for a 3D position $\mathbf{p} = (x, y, z)$ at time $t$:
+-    $$ \Delta \mathbf{p} = \Phi(\mathbf{p}, \mathbf{t}_{feat}) $$
+-    where $\Phi$ is the 7-layer MLP. The deformed position is:
+-    $$ \mathbf{p}' = \mathbf{p} + \Delta \mathbf{p} $$
+-    This step decouples time and space, allowing the spatial latent space to represent the scene in a canonical, undeformed state [S1].
++    The deformation field $\mathcal{M}$ takes the 4D coordinate $\mathbf{q} = (x, y, z, t)$ as input. It predicts the displacement $\Delta \mathbf{p} = (\Delta x, \Delta y, \Delta z)$ required to map the dynamic point to a canonical static space.
++    $$
++    \Delta \mathbf{p} = \mathcal{M}(x, y, z, t)
++    $$
++    The canonical position $\mathbf{p}'$ is computed as:
++    $$
++    \mathbf{p}' = (x, y, z) + \Delta \mathbf{p}
++    $$
++    *Note:* The deformation field is sparse in space but dense in time due to motion continuity [S1].
+ 
+ 3.  **Spatial Feature Aggregation via Attention:**
+-    Retrieve the spatial features for $\mathbf{p}'$ from the sparse latent space $\mathcal{L}$. This is done using an attention mechanism:
+-    *   Compute a query feature $\mathbf{q}$ from the position $\mathbf{p}'$ (implementation detail: "query feature of the 3D position" [S1]).
+-    *   Compute attention weights $\alpha_i$ for each latent code $\mathbf{l}_i \in \mathcal{L}$ using the inner product of the query $\mathbf{q}$ and the key value $\mathbf{k}_i$ of the latent code:
+-        $$ \alpha_i = \text{softmax}\left(\frac{\mathbf{q} \cdot \mathbf{k}_i}{\sqrt{d}}\right) $$
+-        where $d$ is the dimensionality of the key/query vectors [S1].
+-    *   Aggregate the latent codes:
+-        $$ \mathbf{f}_{spatial} = \sum_{i=1}^{B} \alpha_i \mathbf{l}_i $$
++    The canonical position $\mathbf{p}'$ is used to query the sparse spatial latent codes $\mathbf{L}$. An attention mechanism determines the adaptive weights of each latent code.
++    *   Let $\mathbf{q}_{spatial}$ be a query feature derived from $\mathbf{p}'$ (implementation detail: [G] typically involves a small MLP or positional encoding of $\mathbf{p}'$ to match the dimension of the latent codes).
++    *   Let $\mathbf{K}_i$ be the key vector for the $i$-th latent code in $\mathbf{L}$.
++    *   The attention weight $\alpha_i$ for the $i$-th code is calculated using the inner product of the query and key:
++        $$
++        \alpha_i = \text{softmax}_i \left( \frac{\mathbf{q}_{spatial} \cdot \mathbf{K}_i}{\sqrt{d}} \right)
++        $$
++        where $d$ is the dimension of the latent codes.
++    *   The aggregated spatial feature $\mathbf{h}$ is the weighted sum of the latent codes:
++        $$
++        \mathbf{h} = \sum_{i=1}^{B} \alpha_i \mathbf{L}_i
++        $$
+     This approach abandons direct coordinate relationships, relying instead on relative relationships in the latent feature space [S1].
+ 
+-4.  **Radiance Field Decoding:**
+-    Pass the aggregated spatial feature $\mathbf{f}_{spatial}$ through the Interpolator Decoder to predict density $\sigma$ and color $\mathbf{c}$:
+-    $$ \sigma, \mathbf{c} = \text{Decoder}(\mathbf{f}_{spatial}) $$
+-    The decoder uses GeGLU activations, which offer higher fitting capacity than standard GeLU or MLPs for modeling complex nonlinear relationships [S1].
++4.  **Radiance Prediction (Interpolator Decoder):**
++    The aggregated spatial feature $\mathbf{h}$, the view direction $\mathbf{d}$, and potentially the time slot features are concatenated and passed through the Interpolator Decoder $\mathcal{D}$.
++    $$
++    [\sigma, \mathbf{c}] = \mathcal{D}(\mathbf{h}, \mathbf{d}, \dots)
++    $$
++    The decoder uses GeGLU activations to offer higher fitting capacity for complex nonlinear relationships compared to standard GeLU or MLPs [S1].
+ 
+-5.  **Rendering:**
+-    Perform volume rendering along the ray using the predicted $\sigma$ and $\mathbf{c}$ values [S1].
+-
+-**Loss Functions:**
+-*   **Reconstruction Loss:** Standard photometric loss between rendered and ground truth images [S1].
+-*   **Total Variance (TV) Loss:** Applied to the deformation field to supervise temporal smoothness. This ensures smooth transitions between deformation fields for adjacent timestamps [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class SLS4D:
+-    def __init__(self, B=512, T=512, dim_latent=256, dim_time=256):
+-        """
+-        Initialize SLS4D model.
+-        B: Number of spatial latent codes.
+-        T: Number of time slots.
+-        dim_latent: Dimension of latent codes.
+-        dim_time: Dimension of time slots.
+-        """
+-        # Sparse Latent Space: B learnable codes
+-        self.latent_codes = nn.Parameter(torch.randn(B, dim_latent))
+-        
+-        # Dense Time Slots: T learnable features
+-        self.time_slots = nn.Parameter(torch.randn(T, dim_time))
+-        
+-        # Deformation Field: 7-layer MLP
+-        # Input: spatial (3) + time_feat (dim_time)
+-        # Output: displacement (3)
+-        self.deformation_mlp = self._build_mlp(3 + dim_time, 3, layers=7)
+-        
+-        # Interpolator Decoder
+-        # Input: dim_latent
+-        # Output: density (1) + color (3)
+-        self.decoder = self._build_decoder(dim_latent)
+-
+-    def _build_mlp(self, input_dim, output_dim, layers=7):
+-        """Build a standard MLP."""
+-        modules = []
+-        current_dim = input_dim
+-        for _ in range(layers):
+-            modules.append(nn.Linear(current_dim, 256)) # Hidden size not specified, 256 is typical [G]
+-            modules.append(nn.ReLU())
+-            current_dim = 256
+-        modules.append(nn.Linear(256, output_dim))
+-        return nn.Sequential(*modules)
+-
+-    def _build_decoder(self, input_dim):
+-        """Build decoder with GeGLU."""
+-        # GeGLU is a bilinear GLU. 
+-        # GeGLU(x, W, V) = xW * sigmoid(xV)
+-        # Assuming a simple structure for decoding density and color [G]
+-        self.proj_density = nn.Linear(input_dim, 1)
+-        self.proj_color = nn.Linear(input_dim, 3)
+-        return nn.Sequential(
+-            nn.Linear(input_dim, 256),
+-            # GeGLU activation
+-            lambda x: F.gelu(x) # Placeholder for specific GeGLU implementation if not standard [G]
+-        )
+-
+-    def get_time_feature(self, t, T=512):
+-        """
+-        Get time feature for continuous time t in [0, 1].
+-        Interpolates between discrete time slots.
+-        """
+-        # Map t to index in [0, T-1]
+-        idx = t * (T - 1)
+-        idx_low = int(idx)
+-        idx_high = min(idx_low + 1, T - 1)
+-        weight = idx - idx_low
+-        
+-        t_low = self.time_slots[idx_low]
+-        t_high = self.time_slots[idx_high]
+-        
+-        return t_low * (1 - weight) + t_high * weight
+-
+-    def deform(self, xyz, time_feat):
+-        """
+-        Deform 3D position xyz using deformation field and time feature.
+-        xyz: (N, 3)
+-        time_feat: (D_T)
+-        """
+-        # Expand time_feat to match batch size
+-        time_feat_exp = time_feat.unsqueeze(0).expand(xyz.shape[0], -1)
+-        input_tensor = torch.cat([xyz, time_feat_exp], dim=-1)
+-        displacement = self.deformation_mlp(input_tensor)
+-        return xyz + displacement
+-
+-    def aggregate_spatial_features(self, xyz_deformed):
+-        """
+-        Aggregate spatial features using attention mechanism.
+-        xyz_deformed: (N, 3)
+-        """
+-        # Query feature from position (simplified as identity or small MLP [G])
+-        # Source says "inner product of the query feature of the 3D position and the key value of the latent code"
+-        # Assuming query is derived from position, key is latent code.
+-        # For simplicity, let's assume query = position embedding or just position [G]
+-        query = xyz_deformed # (N, 3) -> needs projection to match latent dim if different [G]
+-        
+-        # Project query to latent dim if necessary, or assume latent codes are keys
+-        # Let's assume latent_codes serve as both values and keys
+-        # Query projection
+-        query_proj = query @ self.latent_codes.T # (N, B) if latent_codes is (B, D) and query is (N, D)
+-        # Note: Dimensions must match. Assuming latent_codes are (B, D) and query is projected to D [G]
+-        
+-        # Attention weights
+-        attn_weights = F.softmax(query_proj, dim=-1) # (N, B)
+-        
+-        # Aggregate
+-        features = attn_weights @ self.latent_codes # (N, D)
+-        return features
+-
+-    def forward(self, xyz, t):
+-        """
+-        Forward pass.
+-        xyz: (N, 3)
+-        t: (N,) scalar time values in [0, 1]
+-        """
+-        # 1. Get time feature
+-        time_feat = self.get_time_feature(t, T=512)
+-        
+-        # 2. Deform
+-        xyz_deformed = self.deform(xyz, time_feat)
+-        
+-        # 3. Aggregate spatial features
+-        spatial_feat = self.aggregate_spatial_features(xyz_deformed)
+-        
+-        # 4. Decode
+-        # Density and Color prediction
+-        # Using a simple MLP head for demonstration as specific decoder architecture details are sparse [G]
+-        density = self.proj_density(spatial_feat)
+-        color = self.proj_color(spatial_feat)
+-        
+-        return density, color
+-
+-    def compute_tv_loss(self, deformation_field_output):
+-        """
+-        Compute Total Variance loss for temporal smoothness.
+-        deformation_field_output: displacement vectors for adjacent time steps.
+-        """
+-        # TV loss is typically sum of absolute differences
+-        # Implementation depends on how deformation outputs are stored/accessed [G]
+-        pass
+-```
++**Parameters:**
++*   $B = 512$: Number of spatial latent codes [S1].
++*   $T = 512$: Number of time slots [S1].
++*   Learning Rate Decay: Cosine * Exponential decay function [S1]. Cosine decay alone is unstable; exponential decay alone may get stuck in local optima [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Excessively Long Durations:** If the input scene duration is very long, the fixed number of parameters ($B, T$) may struggle to fit the data adequately [S1].
+-*   **Absence of Deformation Fields:** Removing the deformation field (SLS4Dnd) leads to challenges in extracting information for reconstruction due to the lack of decoupling between time and space [S1].
+-*   **Removing Time Slots:** Removing time slots (SLS4Dnf) results in degradation of rendering quality because smoothness of dense temporal information is lost [S1].
++*   **Long-Duration Inputs:** Excessively long-duration inputs may struggle to fit data adequately with a small number of parameters [S1].
++*   **Absence of Deformation:** Removing the deformation field (SLS4Dnd) causes a decline in reconstruction quality due to the lack of decoupling between time and space [S1].
++*   **Absence of Time Slots:** Removing time slots (SLS4Dnf) results in degradation of rendering quality [S1].
+ *   **Decoder Choice:** Using only GeLU (SLS4Dge) or a standard MLP (SLS4Dml) as the interpolator decoder results in inferior performance compared to GeGLU [S1].
+-*   **Learning Rate Stability:** Using only cosine decay (SLS4Dco) is unstable; using only exponential decay (SLS4Deo) may get stuck in local optima. The method uses a combined cosine*exp decay [S1].
++*   **Temporal Smoothness:** Using pure time slots without Total Variance (TV) loss supervision (SLS4Dnr) leads to poorer performance due to lack of temporal smoothness [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is approximately 3 hours to achieve results similar to V4D, with a total of 6 hours to reach final results on an Nvidia 4090 [S1].
+-*   **Memory Complexity:** The method uses a sparse latent space, significantly reducing memory footprint compared to dense voxel grids. The feature vector space (FS) is small [S1].
+-*   **Performance:** On the D-NeRF dataset, SLS4D achieves PSNR 34.84, SSIM 0.981, and LPIPS 0.025 [S1].
+-*   **Parameter Count:** Approximately 0.25M parameters, which is about 6% of the parameters of the previous SOTA work V4D (~0.1M parameters for V4D? Note: Source says V4D is ~0.1M and SLS4D is ~0.25M, but also says SLS4D is 6% of V4D. This is a contradiction in the source text. Table I lists V4D PN as ~0.1M and SLS4D as ~0.25M. However, the text explicitly states "approximately only 6% of the parameters of the previous SOTA work V4D". Another table entry lists V4D PN as ~0.1M. Let's look closer. Table I: V4D PN ~0.1M. SLS4D PN ~0.25M. This contradicts the 6% claim. However, the text says "6% of the parameters of the previous SOTA work V4D". It is possible V4D refers to a different variant or the table values are illustrative. The text claim of 6% is repeated in the abstract and conclusion. I will cite the text claim and note the table discrepancy if necessary, but the prompt asks for exact numbers. The text says "6%". The table says 0.25M vs 0.1M. I will state the 6% claim as the primary metric for comparison as it is emphasized in the text, but note the absolute numbers from the table [S1].
+-*   **Strengths:** Compact representation, high quality, fast training compared to V4D.
+-*   **Limitations:** Struggles with excessively long-duration inputs due to fixed parameter count [S1].
++*   **Parameter Efficiency:** SLS4D uses approximately 6% of the parameters of the previous state-of-the-art work V4D [S1]. The parameter count is ~0.25M [S1].
++*   **Training Time:** On an Nvidia 4090, SLS4D takes 3 hours to achieve results similar to V4D (which takes 7 hours) and 6 hours total to reach final results [S1].
++*   **Performance:** On the D-NeRF dataset, SLS4D achieves PSNR 34.84, SSIM 0.981, and LPIPS 0.025 [S1]. This outperforms V4D (PSNR 33.47) and TiNeuVox-B (PSNR 32.67) [S1].
++*   **Strengths:** Significant reduction in network parameters; high-quality rendering; effective capture of high-frequency temporal information and dynamic alignment [S1].
++*   **Limitations:** Struggles with excessively long-duration scenes due to limited parameter capacity [S1].
+ 
+ ## Background
+-SLS4D was introduced as a novel approach for 4D novel-view synthesis, representing the first method to use a sparse latent space representation for dynamic neural radiance fields [S1]. It builds upon the D-NeRF framework by introducing a sparse spatial latent space and dense temporal time slots [S1]. The method was developed to address the high parameter count and computational cost of previous state-of-the-art methods like V4D and TiNeuVox [S1].
++SLS4D was introduced as a novel approach for 4D novel-view synthesis, representing the first method to use a sparse latent space representation for dynamic neural radiance fields [S1]. It builds upon the D-NeRF framework [S1] by introducing time slots and a spatial latent feature space with attention-based interpolation. The method was developed to address the high parameter count and computational burden of previous dynamic NeRF methods like V4D [S1].
+ 
+ ## Sources

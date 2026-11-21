@@ -1,0 +1,909 @@
+Neural Human Performer: Learning Generalizable
+Radiance Fields for Human Performance Rendering
+Youngjoong Kwon1 , Dahun Kim2 , Duygu Ceylan3 , Henry Fuchs1
+University of North Carolina at Chapel Hill. 2 KAIST. 3 Adobe Research.
+arXiv:2109.07448v1 [cs.CV] 15 Sep 2021
+1
+{youngjoong,fuchs}@cs.unc.edu
+{mcahny}@kaist.ac.kr
+{ceylan}@adobe.com
+Abstract
+In this paper, we aim at synthesizing a free-viewpoint video of an arbitrary human
+performance using sparse multi-view cameras. Recently, several works have
+addressed this problem by learning person-specific neural radiance fields (NeRF) to
+capture the appearance of a particular human. In parallel, some work proposed to
+use pixel-aligned features to generalize radiance fields to arbitrary new scenes and
+objects. Adopting such generalization approaches to humans, however, is highly
+challenging due to the heavy occlusions and dynamic articulations of body parts.
+To tackle this, we propose Neural Human Performer, a novel approach that learns
+generalizable neural radiance fields based on a parametric human body model for
+robust performance capture. Specifically, we first introduce a temporal transformer
+that aggregates tracked visual features based on the skeletal body motion over
+time. Moreover, a multi-view transformer is proposed to perform cross-attention
+between the temporally-fused features and the pixel-aligned features at each time
+step to integrate observations on the fly from multiple views. Experiments on the
+ZJU-MoCap and AIST datasets show that our method significantly outperforms
+recent generalizable NeRF methods on unseen identities and poses. The video
+results and code are available at https://youngjoongunc.github.io/nhp.
+1
+Introduction
+Free-viewpoint video of a human performer has a variety of applications in the area of telepresence, mixed reality, gaming and etc. Conventional free-viewpoint video systems require extremely
+expensive setups such as dense camera rigs [4, 9, 43] or accurate depth sensors [6, 15], to capture
+person-specific appearance information. In this paper, we aim at a scalable solution for free-viewpoint
+human performance rendering that generalizes across different human performers and requires only
+sparse camera views. However, representing and rendering arbitrary human performances is extremely challenging when the observations are highly sparse (up to three to four views) due to heavy
+self-occlusions and dynamic articulations of the body parts. In particular, an effective solution needs
+to coherently aggregate appearance information from sparse multi-view observations across time as
+the body undergoes a 3D motion. Furthermore, the solution needs to generalize to unseen motions
+and characters at test time.
+Recently, neural radiance fields (NeRF) [28, 13, 19, 32, 33, 35, 36, 47, 50, 52, 53] have shown
+photo-realistic novel view synthesis results in per-scene optimization settings. To avoid the expensive
+per-scene training and improve the practicality, generalizable NeRFs [36, 52, 47] have been proposed
+which use image-conditioned, pixel-aligned features and achieve feed-forward view synthesis from
+sparse input views [36, 52]. Direct application of these methods to complex and non-rigid human
+motion is not straightforward, however, and naive solutions suffer from significant artifacts as shown
+in Fig. 3. Some existing methods [37, 52] aggregate image features across multiple views by simple
+average pooling, which often leads to over-smoothed outputs when details observed from multiple
+Preprint. Under review.
+views (e.g., front and side views) differ due to self occlusions of humans. Alternatively, several
+methods [25, 33] have proposed to learn person-specific global appearance features from multi-view
+observations. However, such methods are not able to generalize to new human performers.
+To address these challenges, we propose Neural Human Performer, a novel approach that learns
+generalizable radiance fields based on a parametric 3D body model for robust performance capture.
+In addition to exploiting a parametric body model as a geometric prior, the core of our method
+is a combination of temporal and multi-view transformers which help to effectively aggregate
+spatio-temporal observations to robustly compute the density and color of a query point. First, the
+temporal transformer aggregates trackable visual features based on the input skeletal body motion
+across time. The following multi-view transformer performs cross-attention between the temporallyaugmented skeletal features and the pixel-aligned features for each time step. The proposed modules
+collectively contribute to the adaptive aggregation of multi-time and multi-view information, resulting
+in significant improvements in synthesis results in different generalization settings of unseen motions
+and identities.
+We study the efficacy of Neural Human Performer on two multi-view human performance capture
+datasets, ZJU-MoCap [33] and AIST [18]. Experiments show that our method significantly outperforms recent generalizable radience field (NeRF) methods. Furthermore, we compare ours with
+identity-specific methods [33, 44, 49] that also utilize a 3D human body model prior. Surprisingly,
+our generalized method achieves better rendering quality than the person-specific dedicated methods
+when tested on novel poses demonstrating the effectiveness of our transformer-based generalizable
+representation.
+To summarize, our contributions are:
+• We present a new feed-forward method of synthesizing novel-view videos of arbitrary
+human performers from sparse camera views. We propose Neural Human Performer that
+learns generalizable neural radiance representations by leveraging a 3D body motion prior.
+• We design a combination of temporal and multi-view transformers that can aggregate
+information on the fly over video frames across multiple views to render each frame of the
+novel-view video.
+• We show significant improvements over recent generalizable NeRF methods on unseen
+identities and poses. Moreover, our generalization results can outperform even personspecific methods when tested on unseen poses.
+2
+Related works
+Human performance capture. Novel view synthesis of human performance has a long history
+in computer vision and graphics. Traditional methods rely on complicated hardware such as dense
+camera rigs [4, 9, 43] or accurate depth sensors [6, 15]. To enable free-view video from sparse
+camera views, template-based methods [3, 5, 12, 42] exploit pre-scanned human models to track the
+motion of a person. However, their synthesis results are not photo-realistic and pre-scanned human
+models are not available in most cases. Recent methods [29, 37, 38, 54] learn 3D human geometry
+priors along with pixel aligned features to enable detailed 3D human reconstructions even from single
+images. However, these methods often suffer under complex human poses that are never seen during
+training and hence cannot be directly used for our purpose of human performance synthesis.
+Neural 3D representations. Recently, there has been great progress in learning neural networks
+to represent the shape and appearance of scenes. The 3D representations are learned from 2D images
+via differentiable rendering networks. Convolutional neural networks are used to predict volumetric
+representations via 3D voxel-grid features [40, 25, 31, 27, 16, 17], point clouds [1, 49], textured
+meshes [20, 23, 44] and multi-plane images [11, 55]. The learnt representations are projected by a
+3D-to-2D operation to synthesize images. However, these methods often have difficulty in scaling to
+higher resolution due to memory restrictions, and in rendering multi-view consistent images.
+To eschew these problems, implicit function-based methods [22, 24, 30, 41] learn a multi-layer
+perceptron that directly translates a 3D positional feature into a pixel generator. The more recent
+NeRF [28] learns implicit fields of density and color with a volume rendering technique and achieves
+photo-realistic view synthesis. Among many following NeRF extensions, [32, 35, 53, 19] focus on
+dynamic scenes. While showing impressive results, it’s an extremely under-constrained problem
+2
+𝒅
+Cam-1
+Skeletal feature bank
+Cam-2
+NeRF
+⋯
+𝑡!
+𝑡"
+𝑡
+(𝑟𝑔𝑏 # , 𝜎# )
+Fused query feature
+Cam-C
+Temporal
+Transformer
+Sec 3.2
+Multi-view
+Transformer
+Sec 3.3
+𝑡"
+⋮
+Trilinear
+sampling
+𝑡!
+𝑡
+Time-augmented
+skeletal features
+Pixel-aligned
+features of query x
+Sampled skeletal
+feature w.r.t. query x
+Figure 1: Overview of Neural Human Performer.
+to jointly learn NeRF and highly dynamic deformation fields. To regularize the training, Neural
+Body [33] combines NeRF with a deformable human body model (e.g., SMPL [26]). Despite
+the promising results, these general NeRF [19, 53] and human-specific NeRF [13, 32, 33, 35, 50]
+methods must be optimized for each new video separately, and generalize poorly on unseen scenarios.
+Generalizable NeRFs [36, 47, 52] try to avoid the expensive per-scene optimization by imageconditioning using pixel-aligned features. However, directly extending such methods to model
+complex and dynamic 3D humans is not straightforward when available observations are highly
+sparse. Unlike existing works, our method exploits temporal and multi-view information on-the-fly
+and achieves free-viewpoint human rendering in a feed-forward manner, also generalizing to new,
+unseen human identities and poses.
+3
+Method
+3.1
+Neural Human Performer
+Problem definition.
+In our setting, given a sparse set (e.g., 3 or 4) of multi-view cameras
+c = 1, . . . , C, input videos of an arbitrary human performance Ic,1:T := {Ic,1 , Ic,2 , ..., Ic,T } are
+captured for each camera view c defined by {Kc , [R|t]c }. We assume that the 3D human body model
+fit corresponding to each frame is given. Our goal is to synthesize a novel view video Iˆq,1:T for a
+query viewpoint q defined by {Kq , [R|t]q }.
+Overview. To compensate for the sparsity of available input views, we propose to exploit temporal
+information across video frames. In practice, we sample M memory frames from the original input
+videos to augment each queried timestep t. Our goal is to learn generalizable 3D representations of
+human performers from multi-time (M ) and multi-view (C) observations.
+To this end, the Neural Human Performer is proposed with two main components. The overview is
+illustrated in Fig. 1. First, we construct the time-augmented skeletal features {s}. We exploit a human
+body model (SMPL [26]) to construct 3D skeletal features by projecting all the SMPL vertices onto
+each memory frame and picking up the pixel-aligned image features [36, 37, 52] at the projected 2D
+locations. The skeletal features are sampled from all memory frames to construct the skeletal feature
+bank. Inspired by Transformers[2, 46, 48], we propose a temporal Transformer that aggregates these
+memory features into the time-augmented skeletal features {s0 }.
+In the second stage, given a query 3D point x, skeletal features are sampled at x. In addition, pixelaligned features {p} at each time t are sampled by directly projecting x onto the input images {I}t .
+The multi-view Transformer is proposed to learn the correlation between the pixel-aligned features
+{p} and the time-augmented skeletal features {s0 }, and to adaptively fuse multi-view information.
+Finally, the output representation of the query point x is fed into the radiance field module to become
+the color and density values.
+3
+3.2
+Construction of time-augmented skeletal features
+For video inputs of moving characters, compared to the static scenes, there are inherently more visual
+cues as the occluded regions in a frame may be visible in other (potentially distant) frames. To take
+advantage of the temporal information, we first build up the skeletal feature bank from memory
+frames by leveraging a parametric body model (see Fig. 1). Then, we propose a temporal Transformer
+module that aggregates the collected time information.
+For each view c and time t, we first build frame-level skeletal features sc,t ∈ RL×d by sampling
+image features at the SMPL vertices’ R3→2 projected locations on Ic,t ∈ RH×W ×3 . L denotes the
+number of SMPL vertices and d the dimension of image features.
+After collecting all the skeletal features from all memory frames, we propose to aggregate the time
+information in an attention-aware manner, instead of using simple average pooling.
+For any ith skeletal feature vertex sic,t ∈ Rd , the proposed temporal Transformer casts attention over
+all other features contained in the vertex’s memory bank sic,t1 :tM = {sic,t1 , sic,t2 , ..., sic,tM } ∈ RM ×d .
+In particular, soft weights of all memory feature vertices are computed in a non-local manner with
+respect to the current timestep t. Then, the values of the memory features are weighted summed as
+1
+T
+t_attic,t = ψ √ q(sic,t ) · k(sic,t1 :tM ) , t_attic,t ∈ R1×M
+d0
+(1)
+i
+s0c,t = t_attic,t · v(sic,t1 :tM ) + sic,t ,
+s0c,t ∈ RL×d
+∀i
+where ψ represents the softmax operator along the second axis, q(·), k(·) and v(·) are learnable query,
+key and value embedding functions Rd→d0 of the temporal Transformer.
+In other words, the representation sic,t of each skeletal vertex at time t is computed through a
+dynamically weighted combination of all its previous and next representations in the memory frames.
+This allows our network to incorporate helpful information and ignore irrelevant ones from other
+timesteps. In practice, the temporal Transformer operation in Eq. (1) is performed by a batch matrix
+multiplication for all skeletal vertices L and all available viewpoints C.
+3.3
+Multi-view aggregation of skeletal and query features
+Given a query 3D point x ∈ R3 , we retrieve the corresponding (time-augmented) skeletal feature
+x
+s0c,t ∈ Rd at the queried location via trilinear interpolation in the SMPL space with SparseConvNet [21], following [39, 34, 51, 33].
+In addition, we sample pixel-aligned image feature pxc,t via direct R3→2 projection of the query point
+x on Ic,t . It is important to note that the pixel-aligned feature pxc,t is time-specific and represents the
+x
+exact query location of x, while the skeletal feature s0c,t is time-augmented (w.r.t t) and contains
+inherent geometric deviations in the SMPL vertices and the following trilinear interpolations. We
+propose to combine these two complementary features, which will be shown to be effective in Sec. 4.4.
+x
+x
+Given the two sets of multi-view features, skeletal s01:C,t = {s0c,t |c = 1, ..., C} ∈ RC×d and
+pixel-aligned px1:C,t = {pxc,t |c = 1, ..., C} ∈ RC×d , we propose a multi-view Transformer that
+performs cross-attention from skeletal to pixel-aligned features. Specifically, the values of pixelaligned features from all viewpoints is re-weighted based on how much compatible they are with
+each skeletal features. The non-local cross-attention mv_att is constructed as:
+
+1
+x
+mv_attxt = ψ √ k(s01:C,t ) · k(px1:C,t )T , mv_attxt ∈ RC×C
+d1
+(2)
+x
+x
+x
+x
+0
+x
+C×d
+x
+1×d
+z1:C,t = mv_attt · v(p1:C,t ) + v(s1:C,t ),
+z1:C,t ∈ R
+, zc,t ∈ R
+where ψ represents the softmax operator along the second axis. Note that k and v are new layers
+independent from those in the temporal Transformer. The confident observations in each view will
+have large
+and be highlighted, and vice versa. Finally, we use the view-wise mean of
+P weights
+x
+∈ Rd as our meta-time and meta-view representation of the query point x.
+ztx = C1 c zc,t
+The final density σt (x) and color values rgbt (x) at time t are computed as:
+X
+x
+σt (x) = M LPσ (ztx ),
+rgbt (X) = M LPrgb (
+(zc,t
+; γd (d))/C),
+c
+4
+(3)
+where M LPσ and M LPrgb consist of four and two linear layers respectively, and γd : R3→6×l is a
+positional encoding of viewing direction d ∈ R3 as in [28] with 2 × l different basis functions.
+More details on the network architecture can be found in the supplementary material.
+3.4
+Volume Rendering
+The predicted color of a pixel p ∈ R2 for a target viewpoint q in the focal plane of the camera and
+center r0 ∈ R3 is obtained by marching rays into the scene using the camera-to-world projection
+P−1 p−r0
+matrix, P−1 = [Rq |tq ]−1 K−1
+q with the direction of the rays given by d = kP−1 p−r0 k .
+We then accumulate the radiance and opacity along the ray r(z) = r0 + zd for z ∈ [znear , zfar ] as
+defined in NeRF [28] as follows:
+ Z z
+
+Z zfar
+Iq (p) =
+T(z)σ(r(z))c(r(z), d)dz, where T(z) = exp −
+σ(r(s))ds
+(4)
+znear
+znear
+In practice, we uniformly sample a set of 64 points z ∼ [znear , zf ar ]. We set X = r(z) and use
+the quadrature rule to approximate the integral. We compute the 3D bounding box of the SMPL
+parameters at time t and derive the bounds for ray sampling znear , zf ar .
+3.5
+Loss Function
+For ground truth target image Iq,t , we train both the radiance field and feature extraction network
+using a simple photo-metric reconstruction loss L = kÎq,t − Iq,t k2 .
+4
+Experiments
+We present novel view synthesis and 3d reconstruction results of human performances in different
+generalization scenarios. We compare our method against the current best view-synthesis methods
+from two classes: body model-based, per-scene optimization methods (Sec. 4.1) and generalizable
+NeRF methods (Sec. 4.2). We experiment on ZJU-MoCap [33] and AIST datasets [45, 18]. For
+training and testing of our model as well as the baselines, we remove the background using the
+foreground mask that is either provided by the dataset or pre-computed. Unless otherwise specified,
+we sample two memory frames {t − 20, t + 20} at time t (total three timesteps) and take three
+canonical input views in all experiments. The details of the datasets, training process, additional
+results and video results are provided in the supplementary material.
+4.1
+Comparison with body model-based, per-scene optimization methods.
+Baselines. For body model-based methods, we compare with the state-of-the-art Neural Body
+(NB) [33] that combines SMPL and NeRF in a per-scene optimization setting. Neural Textures (NT)
+[44] renders a coarse mesh with latent texture maps and uses a 2D CNN to render target images. We
+use the SMPL mesh as the input mesh. NHR [49] extracts 3D features from input point clouds and
+renders them into 2D images. Since dense point clouds are difficult to obtain from sparse camera
+views, we take SMPL vertices as input point clouds. These methods have reported that their learnt
+per-model representations can adapt to new poses of the same performer, i.e., novel pose synthesis.
+Setup. We experiment with ZJU-MoCap dataset [33] which provides performance captures of
+10 human subjects captured from 23 synchronized cameras, human body model parameters as well
+as the foreground mask corresponding to each frame. Each video contains complicated motions
+such as kicking and Taichi and a length between 1000 to 2000 frames. We consider three different
+comparison settings as detailed below. We first split the dataset into two parts: source and target
+videos. In all comparisons, the first 300 frames of either source or target videos are used during
+training, and the remaining next frames (unseen poses) are held out for testing. Note that the baseline
+methods are always trained in a per-model manner. To validate whether the training is reproducible,
+we experiment with 5 independent runs with random train/test splits and observe a variance of 0.15
+PSNR, showing that the results are quite robust. In each independent run, we used seven models for
+training and the other three for testing.
+5
+Method
+PSNR SSIM
+Trained on source models
+NB
+23.79 0.887
+NHR
+22.31 0.871
+NT
+22.28 0.872
+Trained on source models
+Ours
+26.94 0.929
+Method
+PSNR SSIM
+Trained on target models
+NB
+22.88 0.880
+NHR
+22.03 0.875
+NT
+21.92 0.873
+Trained on source models
+Ours
+24.75 0.906
+a . Test results on source models’ b . Test results on target models’
+unseen poses
+unseen poses
+Method
+PSNR
+Trained on source models
+NB
+28.51
+NHR
+23.95
+NT
+23.86
+Trained on source models
+Ours
+28.73
+Ours
+per-scene 31.57
+SSIM
+0.947
+0.897
+0.896
+0.936
+0.966
+c . Test results on source models’
+seen poses
+Table 1: Comparison with other body model-based, per-scene optimization methods.
+Figure 2: Pose generalization – comparison with other body model-based, per-person optimization methods. Results of NT: Neural textures [44], NHR: Neural human rendering [49], NB: Neural body [33] and ours.
+Novel view synthesis on ZJU-MoCap. Tested on source models’ unseen poses (All methods are trained on
+source models; Competing methods are trained in a per-person manner.)
+Results. We present three different comparison settings to validate our method. We would like
+to point out that all the comparison settings place our method (‘ours’) in disadvantage. This is
+because our model is trained on all the source subjects at once (one network for all subjects), while
+the competing methods are per-subject trained on the subject to be tested (one network for one
+subject) - easier setting. First, we evaluate 1) Pose generalization (Table. 1a and Fig. 2). For all
+methods, we train on source models, and test on the same source models’ unseen poses. Our method
+significantly outperforms all the baselines and the state-of-the-art Neural Body [33] by +3.15 PSNR
+and +0.042 SSIM scores. We also present a very challenging setting: 2) Identity generalization
+(Table. 1b). Our method is trained on source models, while other baselines are trained on target
+models. Then, all methods are tested on the target models’ unseen poses. Note that this comparison
+is disadvantageous to ours since the competing methods have seen the testing models as they must
+be trained separately per human model (no identity generalization for baselines). Surprisingly, our
+unseen-model generalization outperforms all per-scene optimized baselines by a health margin of
++1.87 PSNR and +0.026 SSIM scores. The comparison results 1 and 2 indicate that our improvements
+are not merely from the use of body model prior (SMPL), but that our proposed architecture with the
+temporal as well as the multi-view transformer can generalize well onto the novel identities and poses,
+and can produce photo-realistic results. In Table. 1c, we show the 3) performance on seen model
+with seen pose, where all the methods are trained on the source models and tested on the seen trained
+poses. Our method (‘ours’) shows comparable results with the state-of-the-art per-scene optimization
+method [33]. Finally, to make a more fair comparison, we conduct an additional experiment in the
+exact same per-scene training and testing setting as the other competing methods. Table. 1c shows our
+model (‘ours per-scene’) achieves significant improvements over the best-performing baseline [33]
+by +3 PSNR and +1.4% SSIM.
+4.2
+Comparison with generalizable NeRF methods.
+Baselines. Among the recent generalizable NeRF methods [36, 52, 47], we compare with PixelNeRF [52] and PVA [36] which focus on very sparse (up to 3 or 4) input views. we reimplement [36]
+since it is not open-sourced.
+6
+Figure 3: Identity-and-pose generalization – comparison with generalizable NeRF methods. Results of
+Pixel-Nerf [52], PVA: Pixel-aligned volumetric avatar [36] and ours. Novel view synthesis on ZJU-MoCap.
+Tested on target models’ unseen poses (All methods are trained on source models.)
+Method
+Pixel-NeRF
+PVA
+Ours
+PSNR
+23.17
+23.15
+24.75
+SSIM
+0.8693
+0.8663
+0.9058
+Method
+Pixel-NeRF
+PVA
+Ours
+a . Generalization results on ZJU-MoCap.
+PSNR
+18.06
+17.82
+19.03
+SSIM
+0.7304
+0.7211
+0.8390
+b . Generalization results on AIST.
+Table 2: Comparison with generalizable NeRF methods.
+Setup. In addition to ZJU-MoCap (details are in Sec. 4.1), we experiment on larger AIST dataset
+[45, 18] to further evaluate different methods’ generalization abilities. AIST dataset provides dance
+videos of 30 human subjects captured from 9 cameras, together with the SMPL parameters. We
+extract the foregroud mask of each image using an off-the-shelf human parser [14]. AIST dataset
+contains highly diverse motions, slow to fast, simple to complicated. We split the dataset into 20 and
+10 subjects for training and testing respectively, where the testing dataset contains novel models and
+novel poses.
+Novel view synthesis results. Table. 2 shows the comparison. For all datasets and all metrics, our
+method consistently outperforms the baselines by healthy margins of +1.6 PSNR and +0.037 SSIM
+scores. Fig. 3 and Fig. 5 present the same tendency in visualizations. Pixel-NeRF and PVA aggregate
+multi-view observations via average pooling without explicitly considering the correlation between
+the views. In contrast, our temporal and multi-view transformers learn to model the correlation
+between input views and integrate different observations to help the NeRF module to produce more
+accurate results. Another advantage of our method is that the used body model prior provides a robust
+geometric cue to handle the self-occlusion of human subjects.
+3D reconstruction results. We also evaluate 3D reconstruction of generalizable NeRF methods
+and our method on ZJU-MoCap (Fig. 4) and AIST datasets (Fig. 5) given three input views. The
+visualization shows that our 3D reconstruction aligns well with the input image, and is more reliable
+than even the per-person method [33] (e.g., the shape of upper cloth in Fig. 4).
+Overall, these results indicate that as human models are complex and occlusion-heavy, more sophisticated designs than simple image-conditioning are required to learn robust and accurate 3D human
+representations.
+4.3
+Cross-dataset generalization.
+We further further study the generalization ability of our method across different datasets. Table. 4a
+shows the cross-dataset generalization results. We would like to first point out that the two datasets [19,
+45] have highly different color distribution (background, lighting) and distance of camera to the
+subject, making the cross-dataset generalization extremely challenging. Nevertheless, we found that
+only 8-minute fine-tuning on the target dataset can already outperform the baselines fully-trained
+on the target dataset, and 16-minute fine-tuning performs on par with our model fully-trained on the
+target dataset.
+7
+Input views
+NB
+per-person
+optimized
+Pixel-NeRF
+PVA
+Ours
+Figure 4: 3D reconstruction on ZJU-MoCap. Tested on unseen model’s unseen pose except Neural Body
+(per-person optimized). NB: Neural Body [33], PVA: Pixel volumetric avatar [36], Pixel-NeRF [52] and ours.
+View
+#1
+View
+#2
+GT
+Pixel-Nerf
+Ours
+GT
+Pixel-Nerf
+Ours
+Figure 5: Generalization results on AIST. Novel view synthesis and 3D reconstruction results on unseen
+models’ unseen poses.
+4.4
+Ablation studies
+Table. 3 shows the ablation study on ZJU-MoCap on unseen identities and unseen poses, using
+three time-steps and three camera views as input. Note that all the items without either temporal or
+multi-view transformer module use simple average pooling instead, to fuse temporal or multi-view
+observations respectively.
+‘Sk’ uses only timeComplementariness of skeletal and pixel-aligned query features.
+augmented skeletal features (Sec. 3.2) without time-specific pixel-aligned features, while ‘Px’ uses
+only the time-specific pixel-aligned features, on the contrary. Both ‘only’ models show the largest
+drops compared to our full model, and ‘Sk + Px’ model improves them by +1.2 PSNR and +0.9
+PSNR respectively. This validates the complementariness between the skeletal and pixel-aligned
+features in that one is time-augmented but involves slight geometric deviations, while another is
+time-specific and represents exact query location, as discussed in Sec. 3.3.
+Impact of temporal and multi-view transformers. ‘Sk + Px’ uses no transformers so far, falling
+behind our full model by -1.3 PSNR score. Then ‘Sk + Px + T’ adds the temporal transformer
+and improves +0.7 PSNR score, showing its effectiveness in aggregating information over video
+frames. ‘Sk + Px + MV’ uses the multi-view transformer module and shows the largest gain of +1.0
+PSNR, indicating the efficacy of learnt cross-attention between the skeletal features and pixel-aligned
+features, as well as the importance of learnt inter-view correlations. Our full model ‘Sk + Px + T +
+MV’ shows the best use of all the proposed components and achieves 24.75 PSNR and 0.9058 SSIM.
+Impact of number of camera views. Table. 4b shows our model’s testing results with the different
+number of input views, fixing the number of timesteps as one. Our method degrades reasonably as
+the input views become very sparse (as few as one).
+5
+Limitations
+We tackle some shortcomings of existing body model-based and generalizable NeRF methods with a
+focus on generalizable human performance rendering, but there are challenges yet to be explored. 1)
+While we show that our method can generalize across datasets with finetuning, the generalization
+capability will be limited as the distribution of the datasets become significantly different. 2) The
+8
+Variant
+Skeletal Pixel-aligned T-transformer MV-transformer PSNR SSIM
+Sk
+X
+22.31 0.8865
+Px
+X
+22.58 0.8780
+Sk + Px
+X
+X
+23.47 0.8906
+Sk + Px + T
+X
+X
+X
+24.21 0.9016
+Sk + Px + MV
+X
+X
+X
+24.44 0.9034
+Sk + Px + T + MV
+X
+X
+X
+X
+24.75 0.9058
+Table 3: Ablation study. Generalization results on ZJU-MoCap. Sk: skeletal features, Px: pixel-aligned features,
+T: temporal transformer, MV: multi-view transformer.
+Exp. protocol
+Trained on AIST
+Fine-tuned on ZJU-Mocap
+Trained on ZJU-Mocap
+Fine-tuned on AIST
+Fine-tune
+8-min
+16-min
+8-min
+16-min
+PSNR
+24.25
+24.73
+18.63
+18.83
+SSIM
+0.8954
+0.9023
+0.8242
+0.8374
+# Timesteps
+1
+# Views
+1
+2
+3
+4
+PSNR
+20.13
+21.82
+23.33
+23.51
+SSIM
+0.835
+0.871
+0.906
+0.913
+a . Cross-dataset generalization.
+b . Impact of number of camera views.
+Table 4: Cross-dataset transferability (left) and impact of different number of camera views tested on the
+ZJU-Mocap unseen subject in unseen poses (right).
+performance of our method will be affected as the SMPL parameter accuracy degrades. This is the
+reason why the scores on the AIST dataset, where the motions are complicated and thus relatively
+difficult to obtain accurate SMPL parameters, are lower compared to the scores experimented on
+the ZJU-Mocap dataset. It would be an interesting direction to jointly refine the SMPL parameters
+using differentiable rendering for in-the-wild applications. 3) Our algorithm does not have an explicit
+assumption of static cameras. However, in practice, it might be hard to estimate the inputs to our
+method (SMPL fits, camera parameters, foreground masks) with moving cameras due to motion blur,
+changing background, lighting, and synchronization issues etc. We consider this as an orthogonal
+problem and expect that any advancements in unconstrained multi-view capture setups will help to
+generalize our method to in-the-wild settings.
+6
+Societal impact
+We discuss the potential societal impact of our work. The positive side is that the human performance
+synthesis is the key component of realizing telepresence, which has become more important especially
+in this pandemic era. In the future, people physically apart can feel like they are in the same space
+and feel connected with a few inexpensive webcams and AR/VR headsets thanks to the development
+of the telepresence. The negative aspect is that it can help organizations easier to identify people by
+reconstructing them from an only small number of surveillance cameras. We strongly hope that our
+research could be used in positive directions.
+7
+Conclusion
+We present Neural Human Performer, a generalizable radiance field network based on a parametric
+body model that can synthesize free-viewpoint videos for arbitrary human performers from sparse
+camera views. Leveraging the trackable visual features from the input body motion prior, we propose
+a combination of a temporal Transformer and a multi-view Transformer that integrates multi-time
+and multi-view observations in a feed-forward manner. Our method can produce photo-realistic
+view synthesis of new unseen poses and identities at test time. In various generalization settings on
+ZJU-MoCap and AIST datasets, our method achieves state-of-the-art performance outperforming the
+body model-based per-scene optimization methods as well as the generalizable NeRF methods.
+Acknowledgments
+We thank Sida Peng of Zhejiang University, Hangzhou, China, for many very helpful discussions on
+a variety of implementation details of Neural Body [33]. We also thank Ruilong li and Alex Yu of
+UC Berkeley for many discussions on the AIST++ dataset [18] and pixelNeRF [52] details.
+9
+References
+[1] Kara-Ali Aliev, Dmitry Ulyanov, and Victor Lempitsky. Neural point-based graphics. arXiv preprint
+arXiv:1906.08240, 2(3):4, 2019.
+[2] Nicolas Carion, Francisco Massa, Gabriel Synnaeve, Nicolas Usunier, Alexander Kirillov, and Sergey
+Zagoruyko. End-to-end object detection with transformers. In European Conference on Computer Vision,
+pages 213–229. Springer, 2020.
+[3] Joel Carranza, Christian Theobalt, Marcus A Magnor, and Hans-Peter Seidel. Free-viewpoint video of
+human actors. ACM transactions on graphics (TOG), 22(3):569–577, 2003.
+[4] Alvaro Collet, Ming Chuang, Pat Sweeney, Don Gillett, Dennis Evseev, David Calabrese, Hugues Hoppe,
+Adam Kirk, and Steve Sullivan. High-quality streamable free-viewpoint video. ACM Transactions on
+Graphics (ToG), 34(4):1–13, 2015.
+[5] Edilson De Aguiar, Carsten Stoll, Christian Theobalt, Naveed Ahmed, Hans-Peter Seidel, and Sebastian
+Thrun. Performance capture from sparse multi-view video. In ACM SIGGRAPH 2008 papers, pages 1–10.
+2008.
+[6] Paul Debevec, Tim Hawkins, Chris Tchou, Haarm-Pieter Duiker, Westley Sarokin, and Mark Sagar.
+Acquiring the reflectance field of a human face. In Proceedings of the 27th annual conference on Computer
+graphics and interactive techniques, pages 145–156, 2000.
+[7] Junting Dong, Qi Fang, Wen Jiang, Yurou Yang, Hujun Bao, and Xiaowei Zhou. Fast and robust multiperson 3d pose estimation and tracking from multiple views. In T-PAMI, 2021.
+[8] Junting Dong, Qing Shuai, Yuanqing Zhang, Xian Liu, Xiaowei Zhou, and Hujun Bao. Motion capture
+from internet videos. In European Conference on Computer Vision, pages 210–227. Springer, 2020.
+[9] Mingsong Dou, Sameh Khamis, Yury Degtyarev, Philip Davidson, Sean Ryan Fanello, Adarsh Kowdle,
+Sergio Orts Escolano, Christoph Rhemann, David Kim, Jonathan Taylor, et al. Fusion4d: Real-time
+performance capture of challenging scenes. ACM Transactions on Graphics (TOG), 35(4):1–13, 2016.
+[10] Qi Fang, Qing Shuai, Junting Dong, Hujun Bao, and Xiaowei Zhou. Reconstructing 3d human pose by
+watching humans in the mirror. In CVPR, 2021.
+[11] John Flynn, Michael Broxton, Paul Debevec, Matthew DuVall, Graham Fyffe, Ryan Overbeck, Noah
+Snavely, and Richard Tucker. Deepview: View synthesis with learned gradient descent. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 2367–2376, 2019.
+[12] Juergen Gall, Carsten Stoll, Edilson De Aguiar, Christian Theobalt, Bodo Rosenhahn, and Hans-Peter
+Seidel. Motion capture using joint skeleton tracking and surface estimation. In 2009 IEEE Conference on
+Computer Vision and Pattern Recognition, pages 1746–1753. IEEE, 2009.
+[13] Chen Gao, Yichang Shih, Wei-Sheng Lai, Chia-Kai Liang, and Jia-Bin Huang. Portrait neural radiance
+fields from a single image. arXiv preprint arXiv:2012.05903, 2020.
+[14] Ke Gong, Xiaodan Liang, Yicheng Li, Yimin Chen, Ming Yang, and Liang Lin. Instance-level human
+parsing via part grouping network. In Proceedings of the European Conference on Computer Vision
+(ECCV), pages 770–785, 2018.
+[15] Kaiwen Guo, Peter Lincoln, Philip Davidson, Jay Busch, Xueming Yu, Matt Whalen, Geoff Harvey, Sergio
+Orts-Escolano, Rohit Pandey, Jason Dourgarian, et al. The relightables: Volumetric performance capture
+of humans with realistic relighting. ACM Transactions on Graphics (TOG), 38(6):1–19, 2019.
+[16] Youngjoong Kwon, Stefano Petrangeli, Dahun Kim, Haoliang Wang, Henry Fuchs, and Viswanathan
+Swaminathan. Rotationally-consistent novel view synthesis for humans. In Proceedings of the 28th ACM
+International Conference on Multimedia, pages 2308–2316, 2020.
+[17] Youngjoong Kwon, Stefano Petrangeli, Dahun Kim, Haoliang Wang, Eunbyung Park, Viswanathan
+Swaminathan, and Henry Fuchs. Rotationally-temporally consistent novel view synthesis of human
+performance video. In European Conference on Computer Vision, pages 387–402. Springer, 2020.
+[18] Ruilong Li, Shan Yang, David A Ross, and Angjoo Kanazawa. Ai choreographer: Music conditioned 3d
+dance generation with aist++. In International Conference on Computer Vision, 2021.
+[19] Tianye Li, Mira Slavcheva, Michael Zollhoefer, Simon Green, Christoph Lassner, Changil Kim, Tanner
+Schmidt, Steven Lovegrove, Michael Goesele, and Zhaoyang Lv. Neural 3d video synthesis. arXiv preprint
+arXiv:2103.02597, 2021.
+[20] Yiyi Liao, Katja Schwarz, Lars Mescheder, and Andreas Geiger. Towards unsupervised learning of
+generative models for 3d controllable image synthesis. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 5871–5880, 2020.
+[21] Baoyuan Liu, Min Wang, Hassan Foroosh, Marshall Tappen, and Marianna Pensky. Sparse convolutional
+neural networks. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages
+806–814, 2015.
+10
+[22] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields.
+arXiv preprint arXiv:2007.11571, 2020.
+[23] Lingjie Liu, Weipeng Xu, Michael Zollhoefer, Hyeongwoo Kim, Florian Bernard, Marc Habermann,
+Wenping Wang, and Christian Theobalt. Neural rendering and reenactment of human actor videos. ACM
+Transactions on Graphics (TOG), 38(5):1–14, 2019.
+[24] Shaohui Liu, Yinda Zhang, Songyou Peng, Boxin Shi, Marc Pollefeys, and Zhaopeng Cui. Dist: Rendering
+deep implicit signed distance function with differentiable sphere tracing. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 2019–2028, 2020.
+[25] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and Yaser Sheikh.
+Neural volumes: Learning dynamic renderable volumes from images. arXiv preprint arXiv:1906.07751,
+2019.
+[26] Matthew Loper, Naureen Mahmood, Javier Romero, Gerard Pons-Moll, and Michael J Black. Smpl: A
+skinned multi-person linear model. ACM transactions on graphics (TOG), 34(6):1–16, 2015.
+[27] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy
+networks: Learning 3d reconstruction in function space. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 4460–4470, 2019.
+[28] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren
+Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In European Conference on
+Computer Vision, pages 405–421. Springer, 2020.
+[29] Ryota Natsume, Shunsuke Saito, Zeng Huang, Weikai Chen, Chongyang Ma, Hao Li, and Shigeo Morishima. Siclope: Silhouette-based clothed people. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 4480–4490, 2019.
+[30] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and Andreas Geiger. Differentiable volumetric
+rendering: Learning implicit 3d representations without 3d supervision. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 3504–3515, 2020.
+[31] Kyle Olszewski, Sergey Tulyakov, Oliver Woodford, Hao Li, and Linjie Luo. Transformable bottleneck
+networks. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 7648–
+7657, 2019.
+[32] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Steven M Seitz, and
+Ricardo-Martin Brualla. Deformable neural radiance fields. arXiv preprint arXiv:2011.12948, 2020.
+[33] Sida Peng, Yuanqing Zhang, Yinghao Xu, Qianqian Wang, Qing Shuai, Hujun Bao, and Xiaowei Zhou.
+Neural body: Implicit neural representations with structured latent codes for novel view synthesis of
+dynamic humans. In CVPR, 2021.
+[34] Songyou Peng, Michael Niemeyer, Lars Mescheder, Marc Pollefeys, and Andreas Geiger. Convolutional
+occupancy networks. arXiv preprint arXiv:2003.04618, 2, 2020.
+[35] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-nerf: Neural radiance
+fields for dynamic scenes. arXiv preprint arXiv:2011.13961, 2020.
+[36] Amit Raj, Michael Zollhoefer, Tomas Simon, Jason Saragih, Shunsuke Saito, James Hays, and Stephen
+Lombardi. Pva: Pixel-aligned volumetric avatars. arXiv preprint arXiv:2101.02697, 2021.
+[37] Shunsuke Saito, Zeng Huang, Ryota Natsume, Shigeo Morishima, Angjoo Kanazawa, and Hao Li. Pifu:
+Pixel-aligned implicit function for high-resolution clothed human digitization. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision, pages 2304–2314, 2019.
+[38] Shunsuke Saito, Tomas Simon, Jason Saragih, and Hanbyul Joo. Pifuhd: Multi-level pixel-aligned implicit
+function for high-resolution 3d human digitization. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 84–93, 2020.
+[39] Shaoshuai Shi, Chaoxu Guo, Li Jiang, Zhe Wang, Jianping Shi, Xiaogang Wang, and Hongsheng Li.
+Pv-rcnn: Point-voxel feature set abstraction for 3d object detection. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, pages 10529–10538, 2020.
+[40] Vincent Sitzmann, Justus Thies, Felix Heide, Matthias Nießner, Gordon Wetzstein, and Michael Zollhofer.
+Deepvoxels: Learning persistent 3d feature embeddings. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 2437–2446, 2019.
+[41] Vincent Sitzmann, Michael Zollhöfer, and Gordon Wetzstein. Scene representation networks: Continuous
+3d-structure-aware neural scene representations. arXiv preprint arXiv:1906.01618, 2019.
+[42] Carsten Stoll, Juergen Gall, Edilson De Aguiar, Sebastian Thrun, and Christian Theobalt. Video-based
+reconstruction of animatable human characters. ACM Transactions on Graphics (TOG), 29(6):1–10, 2010.
+[43] Zhuo Su, Lan Xu, Zerong Zheng, Tao Yu, Yebin Liu, et al. Robustfusion: Human volumetric capture with
+data-driven visual cues using a rgbd camera. Springer, 2020.
+11
+[44] Justus Thies, Michael Zollhöfer, and Matthias Nießner. Deferred neural rendering: Image synthesis using
+neural textures. ACM Transactions on Graphics (TOG), 38(4):1–12, 2019.
+[45] Shuhei Tsuchida, Satoru Fukayama, Masahiro Hamasaki, and Masataka Goto. Aist dance video database:
+Multi-genre, multi-dancer, and multi-camera database for dance information processing. In ISMIR, pages
+501–510, 2019.
+[46] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz
+Kaiser, and Illia Polosukhin. Attention is all you need. arXiv preprint arXiv:1706.03762, 2017.
+[47] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul Srinivasan, Howard Zhou, Jonathan T Barron,
+Ricardo Martin-Brualla, Noah Snavely, and Thomas Funkhouser. Ibrnet: Learning multi-view image-based
+rendering. arXiv preprint arXiv:2102.13090, 2021.
+[48] Xiaolong Wang, Ross Girshick, Abhinav Gupta, and Kaiming He. Non-local neural networks. In
+Proceedings of the IEEE conference on computer vision and pattern recognition, pages 7794–7803, 2018.
+[49] Minye Wu, Yuehao Wang, Qiang Hu, and Jingyi Yu. Multi-view neural human rendering. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 1682–1691, 2020.
+[50] Wenqi Xian, Jia-Bin Huang, Johannes Kopf, and Changil Kim. Space-time neural irradiance fields for
+free-viewpoint video. arXiv preprint arXiv:2011.12950, 2020.
+[51] Yan Yan, Yuxing Mao, and Bo Li. Second: Sparsely embedded convolutional detection. Sensors,
+18(10):3337, 2018.
+[52] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa. pixelnerf: Neural radiance fields from one or
+few images. arXiv preprint arXiv:2012.02190, 2020.
+[53] Wentao Yuan, Zhaoyang Lv, Tanner Schmidt, and Steven Lovegrove. Star: Self-supervised tracking and
+reconstruction of rigid objects in motion with neural rendering. arXiv preprint arXiv:2101.01602, 2020.
+[54] Zerong Zheng, Tao Yu, Yixuan Wei, Qionghai Dai, and Yebin Liu. Deephuman: 3d human reconstruction
+from a single image. In Proceedings of the IEEE/CVF International Conference on Computer Vision,
+pages 7739–7749, 2019.
+[55] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo magnification:
+Learning view synthesis using multiplane images. arXiv preprint arXiv:1805.09817, 2018.
+12
+Figure 6: Overview of temporal Transformer’s attention between the skeletal features at t and skeletal
+memory features.
+Appendix
+A
+Video results
+Video results on free-viewpoint rendering and 3D reconstruction with ZJU-MoCap and AIST datasets
+can be found at https://youngjoongunc.github.io/nhp.
+B
+Reproducibility
+B.1
+Implementation details.
+We describe the implementation details in the interest of reproducibility. Note that due to the high
+computing cost, we did not spend significant effort to tune the architecture or training procedure, and
+it is possible that variations can perform better, or that smaller models may suffice. Code will be
+made public upon publication.
+Image feature extractor. As briefly discussed in the main paper, we use an ImageNet-pretrained
+ResNet18 backbone to extract a feature pyramid. For an image of shape H×W, we take the multi-scale
+feature maps of shapes
+{ 64 × H/2 × W/2,
+64 × H/4 × W/4,
+128 × H/8 × W/8,
+256 × H/16 × W/16 }.
+These feature maps are bilinearly upsampled to the highest resolution i.e., H/2 × W/2, and concatenated into a shape 512 × H/2 × W/2.
+Temporal transformer.
+The temporal Transformer is used in construction of time-augmented skeletal features in Section 3.2
+of the manuscript. The overview of the attention between the skeletal feature at t and skeletal memory
+features is illustrated in Fig. 6. All the L vertices are processed batch-wise, where the attention is
+computed for each vertex. d is set to 64.
+Sampling of time-augmented skeletal feature w.r.t. a query point x.
+When we are given a query point x in 3D space, we sample the corresponding feature at x’s
+x
+3D location, s01:C,t ∈ RC×d , from the previously constructed time-augmented skeletal features
+0
+L×C×d
+s1:C,t ∈ R
+. Inspired by [51, 39, 34, 33], we adopt the SparseConvNet [21] to perform such
+sampling, whose architecture is described in Table 5. First, we compute the 3D bounding box of
+the human body based on the SMPL parameters, and divide the 3D box into small voxels of size of
+5mm×5mm×5mm, resulting in a D0 ×H 0 ×W 0 (depth, height, width) volume. The SparseConvNet
+13
+Figure 7: Overview of multi-view Transformer’s cross-attention between the sampled time-augmented
+skeletal features and time-specific pixel-aligned feature at t.
+1-2
+3
+4-5
+6
+7-9
+10
+11-13
+14
+15-17
+Layer Description
+Input volume
+(3 × 3 × 3 conv, 64 features, stride 1) × 2
+(3 × 3 × 3 conv, 64 features, stride 2)
+(3 × 3 × 3 conv, 64 features, stride 1) × 2
+(3 × 3 × 3 conv, 64 features, stride 2)
+(3 × 3 × 3 conv, 64 features, stride 1) × 3
+(3 × 3 × 3 conv, 128 features, stride 2)
+(3 × 3 × 3 conv, 128 features, stride 1) × 3
+(3 × 3 × 3 conv, 128 features, stride 2)
+(3 × 3 × 3 conv, 128 features, stride 1) × 3
+Resize & Concat. outputs of layer 5, 9, 13, and 17
+Output Dim.
+D’ × H’ × W’ × 64
+D’ × H’ × W’ × 64
+D’/2 × H’/2 × W’/2 × 64
+D’/2 × H’/2 × W’/2 × 64
+D’/4 × H’/4 × W’/4 × 64
+D’/4 × H’/4 × W’/4 × 128
+D’/8 × H’/8 × W’/8 × 128
+D’/8 × H’/8 × W’/8 × 128
+D’/16 × H’/16 × W’/16 × 128
+D’/16 × H’/16 × W’/16 × 128
+D’/16 × H’/16 × W’/16 × 384
+Table 5: Architecture of SparseConvNet. Each layer consists of sparse convolution, batch normalization and
+ReLU.
+consists in 3D sparse convolutions to process the input volume, diffusing the skeletal features into
+the nearby 3D space. We resize and concatenate the multi-scale outputs from the 5, 9, 13, 17-th
+H0
+W0
+D0
+layers as the output feature ∈ R 16 × 16 × 16 ×384 . Since the diffusion of the skeletal feature should
+not be affected by the human position and orientation in the world coordinate system, we transform
+the skeletal feature locations to the SMPL coordinate system. Then, the query location x is also
+x
+transformed to the SMPL coordinate system, and the corresponding skeletal feature s01:C,t ∈ RC×384
+is sampled via trilinear interpolation, and a fully-connected layer reduces the channel-size to 128.
+x
+The resulting skeletal feature s01:C,t ∈ RC×128 is fed into the following multi-view transformer.
+x
+Multi-view transformer. The sampled time-augmented skeletal feature s01:C,t is fed into the
+proposed multi-view transformer to obtain our meta-time and meta-view representation of the query
+point x, which is explained in Section 3.3 of the manuscript. The overview of the cross-attention
+between the sampled time-augmented skeletal features and time-specific pixel-aligned features is
+illustrated in Fig. 7. d is set as 128.
+NeRF network.
+x
+The NeRF network takes the final representation from above z1:C,t
+as input and predicts density σtx
+x
+and color rgbt . It consists of the fully-connected layers as illustrated in Fig. 8.
+Query point sampling details. We first compute the 3D bounding box of the human subject from
+the corresponding SMPL vertice coordinates. Since there is a gap between the exact human subject
+geometry and the SMPL model, we enlarge the side length of the bounding box by 2.5% and this
+becomes the query point sampling bounds. We sample 1024 rays, and 64 points are sampled per ray
+for the training. For the inference, 64 points are sampled along each ray.
+14
+𝐱
+z!:#,%
+[1, 128]
+z%𝐱
+Avg
+Pool
+[1, 1]
+𝜎 %𝐱
+[C, 128]
+𝛾! (𝒅) [C, 27]
+Cat
+[C, 155]
+Avg
+Pool
+[1, 155]
+[1, 3]
+𝑟𝑔𝑏𝐱#
+Positional encoded
+Viewing direction
+= Linear layer
+Figure 8: Overview of NeRF architecture.
+C
+Datasets
+We discuss the additional details about the datasets used, including the train/test splits and license
+information. Note that both the ZJU-Mocap and AIST datasets do not contain any personally
+identifiable information or offensive content.
+C.1
+ZJU-MoCap
+We use the 512 × 512 videos for the training and testing following the original Neural Body [33].
+ZJU-Mocap provides 10 human subjects, and we reserved 7 for the training and 3 for testing on
+unseen identities. As mentioned in the main paper, we experiment with 5 independent runs with
+random train/test splits. For the qualitative results, we used subject 387, 393, 394 for the testing.
+ZJU-Mocap provides SMPL parameters obtained using EasyMocap1 [8, 33, 10, 7] and foreground
+mask extracted using PGN [14]. ZJU-Mocap is the public dataset that is only meant for the research
+purposes as stated in their GitHub page.
+C.2
+AIST
+The original AIST dataset provides 60 fps videos with 1080 × 1920 resolutions [45] with corresponding SMPL parameters [18] obtained using AIST++ API2 . AIST dataset does not provide foreground
+mask, so we obtained the foreground mask using PGN [14]. Since most part of the images are
+background, we center-crop the video to 800 × 800 sizes. During the training and evaluation, we
+resize the center-cropped video to 512 × 512. AIST contains 30 human subjects. We split the train
+and testing sets based on different subjects, which also makes sure the human motions in the train (20
+identities) and testing sets (10 identities) have no overlap. AIST videos are public dataset only for the
+research purposes. The annotations of the AIST dataset is also public for research purposes and it is
+licensed by Google LLC CC-BY-4.0 license.
+1
+2
+https://github.com/zju3dv/EasyMocap
+https://github.com/google/aistplusplus_api
+15

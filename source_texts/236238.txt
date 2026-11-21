@@ -1,0 +1,282 @@
+A high performance rendering engine implemented in Rust - Repair meshlet construction and culling for production use by Tuafo · Pull Request #55 · Far-Beyond-Pulsar/Helio
+
+Repair meshlet construction and culling for production use by Tuafo · Pull Request #55 · Far-Beyond-Pulsar/Helio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Tuafo
+commented
+Jul 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Current work
+preserve full vertex identity during welding so UV, normal, tangent, and lightmap seams survive meshlet construction
+reject malformed and non-finite topology before meshoptimizer FFI
+build a progressive attribute-aware LOD chain with measured monotonic object-space error
+deduplicate meshlet descriptors across instances and publish one object descriptor per instance
+select one measured-error LOD per object, then cull the selected range through immutable 64-meshlet work spans
+split scheduling into an object-selection pass (one lane per object) and a meshlet-cull pass (one lane per meshlet)
+bound indirect publication and draw metadata by the exact worst-case selected-LOD meshlet count
+preserve the indirect draw-count ABI at byte 0 and count rejected publications at byte 4
+carry stable meshlet and LOD metadata into draws without relying on non-portable draw-index shader features
+make mode 20 one solid color per real meshlet and mode 21 one flat color per object LOD with an automatic legend
+propagate F3/F4 debug-mode changes into already-created render graph passes
+retain conservative cone, projected-sphere, and Hi-Z culling behavior
+upload transform-only VG changes as bounded instance ranges with reusable culling scratch
+require INDIRECT_FIRST_INSTANCE at the renderer boundary after auditing Helio and Pulsar callers
+benchmark culling occupancy, indirect draw amplification, overflow behavior, and explicit scheduling/publication memory
+enforce a configurable publication ceiling, defaulting to 262,144 meshlets / 9 MiB of indirect commands and draw metadata
+Scheduling basis
+The two-stage shape follows NVIDIA's Using Mesh Shaders for Professional Graphics and Introduction to Turing Mesh Shaders: parallelize cluster decisions across lanes, batch enough independent work to occupy the GPU, and use a dedicated compute pass when task work becomes substantial. AMD's Mesh Shader Optimization and Best Practices similarly separates per-instance LOD selection from per-meshlet culling. Helio maps that structure to portable WebGPU compute plus indexed indirect draws rather than requiring hardware mesh shaders.
+NVIDIA also notes that hardware mesh shading replaces instancing/multi-draw-indirect for small meshes. Helio cannot assume hardware mesh shaders through portable WebGPU, so this PR measures the indexed-indirect front-end cost directly and treats visible draw count as a bounded resource.
+Verification
+cargo test -p libhelio --lib (3 passed)
+cargo test -p helio --lib (17 passed, including required-feature and transform-only publication tests)
+cargo test -p helio-pass-virtual-geometry --lib --tests (9 + 23 + 21 passed)
+cargo build --release -p examples --bin meshlet_cull_benchmark --bin editor_demo_mini --bin voxel_demo --bin voxel_demo_raymarch
+release editor_demo_mini, voxel_demo, and voxel_demo_raymarch each initialized and remained alive through a six-second smoke window
+visual runtime check confirmed contiguous solid-color meshlet clusters and a flat object-level LOD heatmap
+cargo run --release -p examples --bin meshlet_cull_benchmark (all normal cases zero overflow; forced capacity-minus-17 probe reports exactly 17 rejected writes)
+HELIO_BENCH_BACKEND=dx12 forced a native D3D12 run of the same compute, indirect draw, memory, and overflow gates
+git diff --check
+Occupancy gate: one-stage rejected, two-stage passes
+RTX 3060 / Vulkan, 1,048,576 visible meshlets, 5 warmups + 20 samples. The one-stage values are the rejected baseline; current two-stage values are from commit 2cbe4bf.
+Shape
+One-stage median
+Two-stage median
+Two-stage P95
+1 object x 1,048,576 meshlets
+21.2275 ms
+0.2232 ms
+0.2263 ms
+16 objects x 65,536 meshlets
+1.3107 ms
+0.2150 ms
+0.2161 ms
+4,096 objects x 256 meshlets
+0.1608 ms
+0.1915 ms
+0.1956 ms
+65,536 objects x 16 meshlets
+0.5683 ms
+0.5765 ms
+0.5857 ms
+The rejected path varied by 132x across equal-work shapes. The current two-stage path reduces that to 3.01x and improves the pathological single-object case by about 95x while publishing the exact expected count.
+A forced D3D12 run also completed every gate. With 2 warmups + 5 samples, its equal-work medians were 0.3215, 0.3236, 0.2529, and 0.6246 ms; the forced overflow probe again rejected exactly 17 writes.
+Portable indexed-indirect front-end gate
+This is intentionally a pre-rasterization comparison: the same triangle invocation count is submitted offscreen, meshlets use N one-triangle indirect draws, and the best-case conventional path uses one indexed instanced draw. It does not claim equivalent full material/raster cost.
+RTX 3060 / Vulkan, 10 render samples:
+Triangles / meshlet draws
+Meshlet indirect
+One indexed draw
+Added front-end cost
+1,024
+0.0051 ms
+0.0041 ms
+0.0010 ms
+16,384
+0.0522 ms
+0.0123 ms
+0.0399 ms
+65,536
+0.2017 ms
+0.0430 ms
+0.1587 ms
+262,144
+0.8018 ms
+0.1679 ms
+0.6339 ms
+1,048,576
+3.2031 ms
+0.6636 ms
+2.5395 ms
+The amplification is negligible at small visible counts but becomes a real linear budget at planet scale. This is not an automatic rejection of portable meshlets; it requires view-driven LOD and a hard visible-publication cap.
+Scheduling/publication memory probe
+The synthetic cases share one unique mesh per shape and reserve exact worst-case output capacity for 1,048,576 visible draws. These figures isolate scheduling/publication storage; they are not complete scene-memory comparisons.
+Shape
+VG scheduling/publication total
+Conventional object/draw records
+single huge
+104,988,968 B
+164 B
+few huge
+42,078,728 B
+2,624 B
+balanced
+39,075,848 B
+671,744 B
+many small
+57,148,424 B
+10,747,904 B
+The uncapped one-million-draw probe reserves 37,748,744 bytes (20-byte indirect command + 16-byte draw metadata per slot, plus counters). Commit 281b0f3 makes publication a first-class VirtualGeometryBudget: the default graph is capped at 262,144 meshlets / 9 MiB plus counters, custom graphs can choose a measured platform limit, growth never exceeds it, and excess visible publications are counted and rejected. Planetary residency must select a tighter target as needed rather than size from total planet content.
+Still required before ready
+rerun interactive visual checks on the final candidate across supported backends
+Tracks #52
+Tuafo
+added 6 commits
+July 13, 2026 16:10
+Fix meshlet construction correctness
+8ef3a2d
+Fix meshlet culling conservatism
+6873756
+Fix object-level meshlet LOD publication
+4ac6adf
+Propagate live debug modes through render graph
+057bbb8
+Add meshlet cull occupancy benchmark
+6d08e8f
+Parallelize meshlet culling across fixed work spans
+f5d2dd2
+Tuafo
+mentioned this pull request
+Jul 13, 2026
+Audit and repair Helio meshlet virtual geometry for production use
+#52
+Closed
+Tuafo
+added 7 commits
+July 13, 2026 18:09
+Require indirect first-instance support
+a4c7b64
+Count rejected meshlet draw publications
+a14c70c
+Upload virtual geometry transform ranges in place
+d690bfe
+Benchmark meshlet draw amplification and memory
+2cbe4bf
+Bound virtual geometry draw publication
+281b0f3
+Make meshlet backend benchmarks reproducible
+a9c307d
+Make meshlet LOD diagnostics truthful
+b616f92
+Tuafo
+commented
+Jul 13, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Visual-validation follow-up is now in b616f92 (Make meshlet LOD diagnostics truthful). The previous fixed eight-slot generation could label duplicate geometry as deeper LODs, and the overlay was static. The branch now has variable-depth real simplification chains and non-blocking live GPU LOD telemetry in mode 21. Focused CPU/shader/example checks pass; visual re-test is still requested for the new live overlay and radar-dome deep LOD chain.
+Tuafo
+mentioned this pull request
+Jul 13, 2026
+Fix editor resize distortion and stale input capture
+#57
+Merged
+Tuafo
+commented
+Jul 13, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Visual gate update: the LOD fix and live debug behavior were validated successfully on Windows. The demo does not contain enough assets to make every LOD transition simultaneously obvious, but the reported available/selected levels now match real generated chains.
+Tuafo
+mentioned this pull request
+Jul 13, 2026
+Fix editor resize distortion and stale input capture
+#56
+Closed
+Merge remote-tracking branch 'origin/v4' into fix/meshlet-production
+…
+0641da2
+```
+# Conflicts:
+#	crates/examples/editor_demo_mini.rs
+```
+Tuafo
+commented
+Jul 13, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Merged updated �4 after resize PR #57 landed. Combined branch commit
+Tuafo
+commented
+Jul 13, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Final combined Windows runtime gate passed on
+Tuafo
+marked this pull request as ready for review
+July 13, 2026 23:26
+Tuafo
+commented
+Jul 13, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Promoted from draft to ready after the final combined Windows runtime gate passed. Current GitHub state is clean/mergeable; no repository checks are configured on this PR.
+Tuafo
+requested a review
+from tristanpoland
+July 13, 2026 23:26
+tristanpoland
+commented
+Jul 13, 2026
+Copy link
+Copy Markdown
+Member
+LGTM
+tristanpoland
+merged commit c779383
+into
+v4
+Jul 13, 2026
+This was referenced Jul 13, 2026
+Audit engine-wide camera shaking across TAA, HLFS, and FXAA pipelines
+#58
+Closed
+[Tracking] Production planetary voxel terrain
+#60
+Closed
+Tuafo
+deleted the
+fix/meshlet-production
+branch
+July 20, 2026 03:48
+tristanpoland
+mentioned this pull request
+Jul 26, 2026
+[Tracking] Production planetary voxel terrain
+#134
+Closed
+tristanpoland
+added this to Pulsar Tracker
+Aug 25, 2026
+github-project-automation
+Bot
+moved this to Todo
+in Pulsar Tracker
+Aug 25, 2026
+github-project-automation
+Bot
+moved this from Todo
+to Pending Release
+in Pulsar Tracker
+Aug 25, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

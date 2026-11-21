@@ -1,0 +1,150 @@
+--- v004.md
++++ v005.md
+@@ -4,9 +4,7 @@
+ 
+ ## Overview
+-This method renders transparent point-based models on GPUs in an order-independent manner by extending depth-peeling techniques to deferred-shaded multi-pass splatting [S1]. It solves the problem of correctly compositing translucent fragments without explicit depth sorting, which is computationally expensive or impossible to perform efficiently on the GPU for arbitrary fragment counts [S1]. Unlike standard alpha blending, which is order-dependent and produces incorrect results when fragments overlap in arbitrary orders, this method approximates the correct compositing result in a single or multi-pass pipeline [S1]. It distinguishes itself from siblings like [Stop-the-pop](1472-stop-the-pop.md) by using iterative layer reconstruction with deferred shading, and from [Weighted Blended Order-Independent Transparency](8931-weighted-blended-order-independent-transparency.md) by explicitly separating layers by depth rather than blending weights [S1].
++This method renders transparent point-based models on GPUs in an order-independent manner by extending depth-peeling techniques to deferred-shaded multi-pass splatting [S1]. It reconstructs transparent layers iteratively from closest to farthest, avoiding the need for explicit per-pixel fragment sorting [S1]. It distinguishes itself from siblings like [Stop-the-pop](1472-stop-the-pop.md) by using iterative layer reconstruction with deferred shading [S1].
+ 
+ ## How it works
+-The algorithm consists of three main phases: opaque rendering, iterative transparent layer reconstruction, and final compositing.
+-
+ **Inputs and Outputs:**
+ *   **Input:** Point-based model (set of splats with position, density, color, normal), camera parameters, number of transparent layers $n$ (typically 3 or 4) [S1].
+@@ -21,42 +19,16 @@
+ 
+ 1.  **Opaque Rendering:**
+-    Render opaque objects using the standard three-pass splatting approach: visibility, attribute accumulation, and deferred shading [S1]. This establishes the background depth and attributes.
++    Render opaque objects using the standard three-pass splatting approach: visibility, attribute accumulation, and deferred shading [S1].
+ 
+ 2.  **Iterative Transparent Layer Reconstruction (for $i = 1$ to $n$):**
+-    For each layer $i$, reconstruct the visible transparent fragments behind the previously reconstructed layers.
+-
+-    *   **Initialization (Layer 1):**
+-        *   Bind the opaque objects' depth buffer as the reference depth texture [S1].
+-        *   Clear destination buffers (attributes, depth) [S1].
+-
+-    *   **Initialization (Layer $i > 1$):**
+-        *   Bind the depth buffer of layer $i-1$ as a read-only depth texture [S1].
+-        *   Clear destination buffers (attributes, depth) [S1].
+-
+-    *   **Visibility Splatting (Pass 1 of Layer $i$):**
+-        *   Rasterize all transparent splats.
+-        *   Perform an additional depth comparison: only fragments with depth greater than the depth of the previous layer (or opaque objects for $i=1$) pass the test [S1].
+-        *   This pass identifies which splats are visible at this depth layer [S1].
+-
+-    *   **Attribute Accumulation (Pass 2 of Layer $i$):**
+-        *   Rasterize all transparent splats again.
+-        *   In the fragment shader, perform two additional depth comparisons:
+-            1.  Compare with the depth of the previous layer.
+-            2.  Compare with the depth of opaque objects.
+-        *   Only visible splats behind both the previous transparent layers and opaque objects pass these tests [S1].
+-        *   Accumulate attributes (e.g., color, normal) for passing splats [S1].
+-
+-    *   **Normalization and Deferred Shading (Pass 3 of Layer $i$):**
+-        *   Normalize the accumulated attributes [S1].
+-        *   Apply deferred shading to compute the final color for this layer [S1].
+-        *   Store the result in a layer texture [S1].
+-
+-    *   **Special Handling for Last Layer ($i = n$):**
+-        *   **Skip Visibility Splatting:** To reduce rendering time, skip the visibility splatting pass for the last layer [S1].
+-        *   **Modulate Weights:** Use transparency coefficients to modulate splatting weights, giving more importance to more opaque surfaces to diminish artifacts [S1].
+-        *   **Switch Lighting:** Switch from deferred shading to per-splat lighting for the last layer. Blending surface attributes from different surfaces in deferred shading makes no sense for the farthest layer, which contains small splats where per-pixel lighting quality is equivalent [S1].
++    For each layer $i$, reconstruct the visible transparent fragments behind the previously reconstructed layers [S1].
++    *   **Initialization:** Bind the previous depth buffer as a read-only depth texture (except for the first pass) [S1]. Clear the destination buffers (attributes, depth) [S1].
++    *   **Visibility Splatting:** Perform an additional depth comparison with the depth of the previous layer; only fragments behind the previous layer pass the test [S1].
++    *   **Attribute Accumulation:** Add two additional depth comparisons in the fragment shader: one with the depth of the previous layer and one with the depth of opaque objects; only visible splats behind the previous layers pass these tests [S1].
++    *   **Normalization and Deferred Shading:** Normalize the accumulated attributes and apply deferred shading to compute the final color for this layer. Store the result in a layer texture [S1].
++    *   **Special Handling for Last Layer ($i = n$):** Skip the visibility splatting pass to reduce rendering time [S1]. Modulate splatting weights with transparency coefficients so that more opaque surfaces have more importance to diminish artifacts [S1]. Switch from deferred shading to per-splat lighting because blending surface attributes from different surfaces makes no sense for the farthest layer, which contains small splats where per-pixel lighting quality is equivalent [S1].
+ 
+ 3.  **Final Compositing:**
+-    *   Combine all reconstructed layers with the final image by drawing them with alpha-blending in the inverse order of their construction (from farthest layer $n$ to closest layer 1) [S1].
++    Combine all reconstructed layers with the final image by drawing them with alpha-blending in the inverse order of their construction (from farthest to closest) [S1].
+ 
+ **Pseudocode:**
+@@ -64,47 +36,34 @@
+ ```python
+ def render_point_based_transparency(splats, camera, num_layers=3):
+-    # 1. Opaque Rendering
+-    # Render opaque objects using standard 3-pass splatting (visibility, attribute accumulation, deferred shading)
+-    opaque_depth_buffer = render_opaque_passes(splats, camera)
++    # 1. Opaque Rendering: visibility, attribute accumulation, deferred shading
++    opaque_depth = rasterize_opaque_splats(splats, camera)
+     
+-    # Initialize layer storage
+-    layer_textures = []
+-    layer_depth_buffers = []
++    layer_colors = []
++    layer_depths = []
+     
+-    # 2. Iterative Transparent Layer Reconstruction
+     for i in range(1, num_layers + 1):
+-        # Determine reference depth
+-        if i == 1:
+-            ref_depth_texture = opaque_depth_buffer
++        ref_depth = opaque_depth if i == 1 else layer_depths[i-2]
++        clear_render_targets()
++        
++        if i < num_layers:
++            # Visibility splatting: discard fragments with depth <= ref_depth
++            rasterize_visibility_splats(splats, camera, ref_depth)
++            
++        # Attribute accumulation: discard fragments with depth <= ref_depth or depth <= opaque_depth
++        attrs = rasterize_attribute_splats(splats, camera, ref_depth, opaque_depth)
++        
++        if i == num_layers:
++            # Last layer: modulate weights with transparency coefficients, switch to per-splat lighting
++            color = compute_last_layer_lighting(splats, camera, attrs)
+         else:
+-            ref_depth_texture = layer_depth_buffers[i-2] # Depth of previous layer
++            norm_attrs = normalize(attrs)
++            color = compute_deferred_shading(norm_attrs)
+             
+-        # Clear destination buffers
+-        clear_buffers()
++        layer_colors.append(color)
++        layer_depths.append(read_current_depth_buffer())
+         
+-        # Visibility Splatting (Skip for last layer)
+-        if i < num_layers:
+-            render_visibility_splatting(splats, camera, ref_depth_texture)
+-            
+-        # Attribute Accumulation
+-        # Perform depth comparisons against ref_depth_texture and opaque objects
+-        accumulated_attributes = render_attribute_accumulation(splats, camera, ref_depth_texture, opaque_depth_buffer)
+-        
+-        # Normalization and Deferred Shading
+-        if i == num_layers:
+-            # Last layer: switch to per-splat lighting and modulate weights
+-            layer_color = render_last_layer_lighting(splats, camera, accumulated_attributes)
+-        else:
+-            # Normal layers: deferred shading
+-            normalized_attributes = normalize(accumulated_attributes)
+-            layer_color = deferred_shade(normalized_attributes)
+-            
+-        layer_textures.append(layer_color)
+-        layer_depth_buffers.append(get_current_depth_buffer())
+-        
+-    # 3. Final Compositing
+-    final_image = render_opaque_passes(splats, camera) # Start with opaque background
+-    for i in range(num_layers - 1, -1, -1): # From farthest to closest
+-        final_image = alpha_blend(final_image, layer_textures[i])
++    final_image = rasterize_opaque_splats(splats, camera)
++    for i in range(num_layers - 1, -1, -1):
++        final_image = alpha_composite(final_image, layer_colors[i])
+         
+     return final_image
+@@ -121,10 +80,9 @@
+ 
+ ### [Order Independent Transparency Approaches](3611-order-independent-transparency-approaches.md)
+-Provides the theoretical framework and specific algorithmic variations (such as weight-based approximation or closest-sample separation) used to handle non-commutative transparency accumulation. This method is a specific implementation of this family using depth-peeling for splats.
++Provides the theoretical framework and specific algorithmic variations used to handle non-commutative transparency accumulation. This method is a specific implementation of this family using depth-peeling for splats.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(n \cdot N)$, where $N$ is the number of splats and $n$ is the number of layers. Each layer requires multiple passes (visibility, attribute accumulation, shading) [S1].
+-*   **Memory Complexity:** $O(n \cdot W \cdot H)$, where $W$ and $H$ are image dimensions. Requires storing depth and color buffers for each layer [S1].
+-*   **Measured Performance:** On a GeForce 7800, rendering 27 transparent point-sampled spheres with 6 layers achieved 21 fps. With 3 layers, performance improved to 45 fps without heuristic and 49 fps with heuristic [S1].
++*   **Time and Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** On a GeForce 7800, rendering 27 transparent point-sampled spheres with 6 layers achieved 21 fps. With 3 layers, performance was 45 fps without heuristic and 49 fps with heuristic [S1].
+ *   **Strengths:** Order-independent transparency for point-based models; leverages GPU rasterization; deferred shading allows efficient lighting [S1].
+ *   **Limitations:** Limited by the number of layers $n$; artifacts if more than $n$ layers are visible; requires multiple passes [S1].

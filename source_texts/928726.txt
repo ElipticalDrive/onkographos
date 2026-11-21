@@ -1,0 +1,182 @@
+A WebGPU engine for creative coding. Contribute to Siroko/kansei development by creating an account on GitHub.
+
+feat(atmosphere): physically based sky after Hillaire 2020 (K10, part 1) by Siroko · Pull Request #5 · Siroko/kansei · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siroko
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Owner
+K10, part 1: a physically based sky
+This is the first atmosphere PR for the Midsommar intro on the web (Siroko/midsommar-web). The gap list's biggest difference from Unreal is the sky: Unreal shows a clear dusk gradient over a black treeline, while the web version shows only fog. This PR adds the sky model. Later PRs add aerial perspective, sky lighting for materials, fog coupling and local fog volumes.
+rust/kansei-wasm/examples/sky-atmosphere in headless Chrome, physical units (sun 100 000 lux) with manual EV100 exposure. The sun sits at bearing 140° (the intro's sun yaw).
+Top row: noon, then a 4° sun behind the treeline.
+Middle row: a 0.5° sun, then the intro's −2.5° dusk looking toward the sun.
+Bottom row: the same dusk away from the sun, then with the Unreal scene's own haze and ozone values.
+What's in it
+atmosphere::SkyAtmosphere builds the LUTs from Hillaire 2020, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique", with compute shaders:
+Transmittance LUT, 256×64, in Bruneton's (x_μ, x_r) parameterisation.
+Multiple-scattering LUT, 32×32: one 64-thread workgroup per texel, with Ψ_ms = L₂ / (1 − f_ms).
+Sky-view LUT, 256×128, rebuilt every frame. Its rows are packed toward the horizon with a square-root mapping. Its columns span the full world azimuth, not azimuth relative to the sun, so a moon scatters in the same LUT.
+The transmittance and multiple-scattering LUTs depend only on the atmosphere, so they are rebuilt only when params change.
+postprocessing::effects::AtmosphereEffect draws the sky, the sun disk (limb-darkened) and the moon disk wherever depth is still at the far plane. Where no geometry covers the planet's surface, it draws the surface, lit and seen through the atmosphere. Put it first in the chain.
+Dusk works: the sun can sit below the horizon.
+Each light's visibility is a smooth terminator over its disk, so there is no hard shadow line.
+Sunlit air above the planet's shadow plus multiple scattering light the twilight sky. At −2.5° the zenith is about 50 cd/m² at 100 000 lux.
+Data-driven, Unreal-compatible: AtmosphereParams mirrors SkyAtmosphereComponent's fields, units (per km) and Earth defaults. CelestialLight holds the sun or moon direction, illuminance (lux), angular diameter and disk scale. direction_from_elevation_bearing() uses the same bearing convention as midsommar-web's exporter.
+Sky-consistent sun light: sun_illuminance_at(world_pos) is the CPU twin of the transmittance LUT, with the same soft horizon. Use it as the colour of the scene's directional light so surfaces and sky agree.
+Units: the output is proportional to the lights' illuminance, so lux gives cd/m². The sun disk is clamped to the rgba16f range.
+Module layout: new module src/atmosphere/ with its own shaders. The only shared-code edits are lib.rs and effects/mod.rs exports and a pollster dev-dependency.
+```
+let mut sky = SkyAtmosphere::new(renderer.device(), SkyAtmosphereOptions::default());
+sky.sun.direction = direction_from_elevation_bearing(-2.5, 140.0);
+sky.sun.illuminance = Vec3::new(1e5, 1e5, 1e5);            // lux
+sky.params.mie_scattering_scale = 0.003996 * haze;          // as the Unreal scene's script
+let mut volume = PostProcessingVolume::new(&renderer, vec![Box::new(AtmosphereEffect::new(&sky)), /* fog, tonemap */]);
+// every frame, after placing the camera:
+sun_light.color = sky.sun_illuminance_at(camera_pos);
+sky.update(renderer.device(), renderer.queue(), &mut camera);
+renderer.render_with_postprocessing(&mut scene, &mut camera, &mut volume);
+```
+A note for matching Unreal
+create_intro_scene.py sets mie_scattering_scale = 0.003996 * haze (relative) but other_absorption_scale = ozone (absolute: 0.8, which is 425× Unreal's default 0.001881).
+With the default ozone, the −2.5° sky is the violet twilight Unreal's own comment mentions.
+With 0.8 it is a deep, saturated blue (bottom right).
+The Unreal frames sit between the two once their grade and 90% cloud cover apply.
+Both values are plain parameters, so midsommar-web can match either.
+Verified
+cargo test -p kansei-core: all pass. New tests:
+Every atmosphere WGSL module validates with naga, and the Rust uniform structs match their WGSL sizes.
+CPU zenith transmittance matches the analytic optical depth.
+Direction and bearing conventions.
+The sun disk integrates to its illuminance.
+tests/atmosphere_gpu.rs builds the LUTs on the GPU (Metal here; it skips without an adapter) and reads them back:
+The transmittance LUT's ground-zenith texel matches the CPU model within 0.5%.
+The multiple-scattering LUT is finite and bounded.
+The noon zenith is blue; the sunset horizon toward the sun is brighter and redder than the opposite one.
+The −2.5° zenith is lit, blue-dominant and under 5% of noon.
+cargo clippy -p kansei-core (wasm32 and tests): no warnings in the new code. cargo build --workspace and kansei-wasm for wasm32 pass.
+The example renders in headless Chrome with no WebGPU errors (screenshot above).
+Next, as separate PRs:
+Aerial-perspective froxel volume.
+Sky irradiance SH for materials.
+Sky ambient in the volumetric fog, with the order of fog and aerial perspective.
+Local fog volumes (lake and bog mist).
+feat(atmosphere): physically based sky after Hillaire 2020 (K10, part 1)
+…
+618ac48
+```
+Add a SkyAtmosphere to kansei-core: the transmittance (256x64), multiple-scattering
+(32x32) and sky-view (256x128) LUTs of Hillaire 2020, built by compute shaders, and an
+AtmosphereEffect that renders the sky, the sun and the moon behind the scene.
+
+- AtmosphereParams mirrors Unreal's SkyAtmosphereComponent (names, units, Earth
+  defaults), so exported scenes can copy values across.
+- The sun can sit below the horizon: a soft terminator over the disk and the
+  multiple-scattering LUT light the dusk sky from above the planet's shadow.
+- The sky-view LUT spans the world azimuth, so an optional moon scatters as a second
+  light in the same LUT. Sun and moon disks integrate to their illuminance.
+- CPU twin of the transmittance LUT: sun_illuminance_at() gives the colour of a
+  directional light that agrees with the sky.
+- The static LUTs are rebuilt only when the atmosphere changes.
+- Tests: naga validation and uniform sizes; CPU optical depth against the analytic
+  value; a headless GPU test that builds the LUTs and checks them against the CPU
+  model and the sky from noon to dusk (skipped without an adapter).
+- Example: rust/kansei-wasm/examples/sky-atmosphere, driven by URL parameters.
+```
+vercel
+Bot
+commented
+Sep 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated
+kansei
+Ready
+Preview
+Sep 27, 2026 3:36pm UTC
+kansei-fluid
+Ready
+Preview
+Sep 27, 2026 3:36pm UTC
+vercel
+Bot
+deployed
+to
+Preview – kansei
+September 27, 2026 15:36
+View deployment
+This was referenced Sep 27, 2026
+feat(atmosphere): aerial perspective volume (K10, part 2)
+#6
+Merged
+feat(atmosphere): sky lighting for materials (K10, part 3)
+#8
+Merged
+feat(fog): sky-lit fog, albedo and local fog volumes (K4, fog part)
+#9
+Merged
+feat(atmosphere): GGX-prefiltered sky environment cubemap (K10, part 4)
+#12
+Merged
+feat(fog): analytic exponential height fog for the far distance
+#13
+Merged
+docs: AGENTS.md for agent sessions (Rust workspace, verification, sharp edges)
+#14
+Merged
+Hide details
+View details
+Siroko
+merged commit aa83d4e
+into
+development
+Sep 27, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Hide environments
+Show environments
+This branch was successfully deployed
+2 active
+deployments
+Preview – kansei
+—
+618ac487
+Deployed
+Sep 27, 2026 by
+vercel[bot]
+View deployment
+Preview – kansei-fluid
+—
+618ac487
+Deployed
+Sep 27, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

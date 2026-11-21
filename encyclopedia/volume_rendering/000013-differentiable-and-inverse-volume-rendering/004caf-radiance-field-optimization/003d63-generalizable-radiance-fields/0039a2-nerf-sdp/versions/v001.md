@@ -1,0 +1,74 @@
+# NeRF-SDP
+
+Also called: NeRF with Scene Depth Perception
+
+## Overview
+NeRF-SDP is a generalizable neural radiance field method that achieves high-fidelity novel view synthesis with sparse sampling points by incorporating scene depth perception via geometry feature extraction and a depth-encoded ray transformer [S1]. It addresses the trade-off in existing generalizable NeRFs where simpler networks or fewer sampling points lead to artifacts, by using monocular depth estimation to provide geometric priors that allow for accurate reconstruction with fewer query points [S1].
+
+## How it works
+**Inputs:** A set of $N$ reference images $I_i$ (where $i=1, \dots, N$) and their corresponding camera poses.
+**Outputs:** A radiance field model capable of rendering novel views.
+
+**Data Structures:**
+*   **Texture Feature Map ($F_{tex}^i$):** Extracted from image $I_i$ using a shared feature extraction network.
+*   **Geometry Feature Map ($F_{geo}^i$):** Extracted from the estimated relative depth map of view $i$.
+*   **Total Feature Map ($F^i$):** Concatenation of $F_{tex}^i$ and $F_{geo}^i$.
+*   **Feature Volume ($V_f^i$):** 3D volume representation derived from $F^i$.
+*   **Cost Volume ($V_c$):** Aggregated volume constructed from feature volumes of all views.
+*   **Depth Probability Volume ($V_p$):** Output of a 3D CNN, representing the probability of depth at each voxel.
+*   **3D Feature Volume ($F_{cv}$):** Geometric feature volume associated with the depth probability.
+
+**Steps:**
+
+1.  **Geometry Feature Extraction:**
+    For each reference image $I_i$, a pre-trained monocular depth estimation model $H_{mono}$ estimates the relative depth map $\tilde{D}_i$ [S1]. This depth map is input to a shared feature extraction network $G_{fe}$ to calculate the geometry feature map $F_{geo}^i$ [S1]:
+    $$ F_{geo}^i = G_{fe}(H_{mono}(I_i)) \quad i = 1, \dots, N $$
+    [S1]
+
+2.  **Feature Concatenation:**
+    The texture feature map $F_{tex}^i$ (obtained from the image via the same or similar feature extraction process) and the geometry feature map $F_{geo}^i$ are concatenated to form the total feature map $F^i$ [S1]:
+    $$ F^i = \text{Concat}(F_{tex}^i, F_{geo}^i) $$
+    [S1]
+
+3.  **Cost Volume Construction:**
+    A feature volume $V_f^i$ is obtained from $F^i$. The cost volume $V_c$ is constructed from the set of feature volumes $\{V_f^i\}$ using the following element-wise operation [S1]:
+    $$ V_c = \frac{1}{N} \sum_{i=1}^{N} (V_f^i - \bar{V}_f)^2 $$
+    where $\bar{V}_f$ denotes the mean feature volume of the $N$ views [S1].
+
+4.  **Depth Probability and 3D Feature Volume Generation:**
+    A 3D CNN network processes the cost volume $V_c$ to produce two outputs: a depth probability volume $V_p$ and a 3D feature volume $F_{cv}$ [S1].
+
+5.  **Depth Estimation on Ray:**
+    For a ray $r$, the estimated depth $d$ and confidence interval (variance) $s$ are calculated from the depth probability volume $V_p$ [S1]:
+    $$ d = \sum_{j=1}^{L} p_j d_j $$
+    $$ s = \sum_{j=1}^{L} p_j (d_j - d)^2 $$
+    where $L$ is the number of depth layers, $p_j$ is the depth probability at the $j$-th layer on ray $r$, and $d_j$ is the depth value at the $j$-th layer on ray $r$ [S1].
+
+6.  **Volume Density Inference (Depth-Encoded Ray Transformer):**
+    The method uses a Depth-Encoded Ray Transformer (DERT) to infer the volume density of each query point [S1]. This step aggregates features from the $N$ views for each point, utilizing the depth information derived from $V_p$ to guide the inference [S1]. *Note: The specific architecture details of DERT are referenced as following [25] in the source, but exact layer configurations are not provided in the excerpt.*
+
+**Parameters:**
+*   $N$: Number of reference views.
+*   $L$: Number of depth layers/discretization steps.
+*   Typical Performance: On the dataset in Figure 1 of [S1], NeRF-SDP achieves a PSNR of 26.95 dB with a rendering time of 5.16 seconds.
+
+**Edge Cases and Pitfalls:**
+*   **Monocular Depth Accuracy:** The quality of the geometry features depends on the pre-trained monocular depth estimation model. Errors in depth estimation may propagate to the feature extraction stage [S1].
+*   **Scene Scale:** The method addresses the issue that generalizable NeRFs often infer query points without positional information, which can fail across different scene structures and scales [S1].
+
+## Subtopics
+
+### [Cost Volume Construction for Neural Radiance Fields](10643-cost-volume-construction-for-neural-radiance-fields.md)
+A variant focusing on the specific construction of the cost volume from feature volumes.
+
+## Operating characteristics
+*   **Time Complexity:** The method is designed for efficiency. In comparative tests, NeRF-SDP rendered in 5.16 seconds, compared to 7.44 seconds for MVSNeRF and 15.48 seconds for IBRNet [S1].
+*   **Quality:** NeRF-SDP achieves a PSNR of 26.95 dB, outperforming MVSNeRF (25.33 dB) and IBRNet (26.29 dB) in the reported comparison [S1].
+*   **Strengths:** Balances rendering speed and quality by reducing sampling points while maintaining high fidelity through geometry priors [S1]. It is the first generalizable method to use estimated depth during the feature extraction stage [S1].
+*   **Limitations:** Relies on the accuracy of the external monocular depth estimation model. Existing methods that rely solely on appearance information or use simpler networks/fewer sampling points suffer from artifacts, which NeRF-SDP mitigates but does not eliminate if the depth prior is poor [S1].
+
+## Background
+NeRF-SDP was proposed to address the challenge of balancing rendering speed and quality in generalizable NeRFs. Existing methods either used complex networks (leading to low efficiency) or simple networks/fewer sampling points (leading to unsatisfactory quality) [S1]. The authors, from Shanghai Jiao Tong University, introduced scene depth perception by incorporating geometry features from monocular depth estimation and a depth-encoded ray transformer [S1]. This approach allows for accurate reconstruction with fewer sampling points, leveraging the fact that depth priors can aid the learning process and improve inference speed [S1].
+
+## Sources
+[S1] NeRF-SDP: Efficient Generalizable Neural Radiance Field with Scene Depth Perception, https://doi.org/10.1145/3595916.3626380, fetched 2026-10-30

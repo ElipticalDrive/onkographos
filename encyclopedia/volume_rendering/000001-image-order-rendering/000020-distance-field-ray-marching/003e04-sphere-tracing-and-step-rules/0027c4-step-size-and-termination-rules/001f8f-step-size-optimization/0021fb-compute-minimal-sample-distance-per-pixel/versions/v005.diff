@@ -1,0 +1,197 @@
+--- v004.md
++++ v005.md
+@@ -3,21 +3,21 @@
+ 
+ ## Overview
+-This method computes the minimal sample distance per pixel by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms [S1, unofficial]. It serves as a geometric heuristic to determine the appropriate step size for ray marching, ensuring that the sampling density is sufficient to resolve the voxel structure without excessive oversampling [S1, unofficial]. It differs from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by focusing on the projected geometric footprint of the volume cells rather than local field gradients or distance field bounds.
++This method computes the minimal sample distance per pixel by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms [S1, unofficial]. It differs from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by using the projected geometric footprint of volume cells rather than local field gradients or distance-field bounds [G].
+ 
+ ## How it works
+ **Inputs:**
+-*   `renderer`: A pointer to the rendering context providing camera position, orientation, and viewport dimensions [S1, unofficial].
+-*   `volume`: A pointer to the volume object providing dataset geometry (cell dimensions) and transformation matrices [S1, unofficial].
++*   `renderer`: A `vtkRenderer` pointer providing camera position, orientation, and viewport dimensions [S1, unofficial].
++*   `volume`: A `vtkVolume` pointer providing dataset geometry (cell dimensions) and transformation matrices [S1, unofficial].
+ 
+ **Data Structures:**
+-*   The method operates on the volume's dataset cell axes. Let the cell dimensions be $\mathbf{c} = (c_x, c_y, c_z)$ in local space [S1, unofficial].
+-*   The camera state provides a view matrix $\mathbf{V}$ and projection matrix $\mathbf{P}$ [S1, unofficial].
++*   The method operates on the volume's dataset cell axes. Let the cell dimensions in local space be $\mathbf{c} = (c_x, c_y, c_z)$ [G].
++*   The camera state provides a view matrix $\mathbf{V}$, projection matrix $\mathbf{P}$, camera position $\mathbf{o}$, and view direction $\mathbf{v}$ [G].
+ 
+ **Steps:**
+-1.  **Transform Axes:** Transform the volume's local cell axes into world space using the volume's transformation matrix $\mathbf{T}_{vol}$ [S1, unofficial]. Let the transformed axes be $\mathbf{a}_x, \mathbf{a}_y, \mathbf{a}_z$.
+-2.  **Project to Viewport:** Project these world-space axes onto the viewport using the camera's view and projection matrices [S1, unofficial]. This involves transforming the axis vectors by the view matrix $\mathbf{V}$ and considering the perspective projection defined by $\mathbf{P}$ [S1, unofficial].
+-3.  **Compute Projected Size:** Calculate the scalar metric representing the projected size of the voxel relative to the camera. This is typically derived from the angular spread or the pixel footprint of the cell dimensions in the image plane [S1, unofficial].
+-4.  **Determine Minimal Distance:** The minimal sample distance is derived from the maximum projected cell dimension to ensure at least one sample per projected cell width (or a specified fraction thereof) [S1, unofficial].
+-5.  **Degeneracy Check:** If any axis is degenerate (aligned with the view direction), the projected size becomes zero or undefined. In this case, set `IgnoreSampleDistancePerPixel` to true [S1, unofficial]. This flag indicates that this specific heuristic should not constrain the step size, allowing fallback to other step size rules [S1, unofficial].
++1.  **Transform Axes:** Transform the volume's local cell axes into world space using the volume's transformation matrix $\mathbf{T}_{\text{vol}}$ [G].
++2.  **Project to Viewport:** Project the world-space axes onto the viewport using $\mathbf{V}$, $\mathbf{P}$, and $\mathbf{o}$ [G].
++3.  **Compute Projected Size:** Calculate the projected length in pixels for each axis by mapping the transformed endpoints to screen coordinates [G].
++4.  **Determine Minimal Distance:** The minimal sample distance is derived from the smallest projected axis length to guarantee at least one sample per cell width in the worst-case orientation [G].
++5.  **Degeneracy Check:** If any axis is degenerate (aligned with the view direction), the projected size becomes zero or undefined. In this case, set `IgnoreSampleDistancePerPixel` to true [S1, unofficial]. This flag indicates that this specific heuristic should not constrain the step size, allowing fallback to other step size rules [G].
+ 
+ **Parameters:**
+@@ -28,67 +28,83 @@
+ ```python
+ def compute_minimal_sample_distance_per_pixel(renderer, volume):
+-    # Get cell dimensions in local space
+-    cell_dims = volume.get_cell_dimensions() # Returns (dx, dy, dz)
+-    
+-    # Get volume-to-world transformation
+-    T_vol = volume.get_transformation_matrix()
+-    
+-    # Get camera view and projection matrices
+-    V = renderer.get_view_matrix()
+-    P = renderer.get_projection_matrix()
+-    
+-    # Transform cell axes to world space
+-    # Assuming axes are aligned with coordinate axes for simplicity
+-    axis_x = T_vol.transform_vector((cell_dims[0], 0, 0))
+-    axis_y = T_vol.transform_vector((0, cell_dims[1], 0))
+-    axis_z = T_vol.transform_vector((0, 0, cell_dims[2]))
+-    
+-    # Project axes to viewport space
+-    # Note: Exact projection logic depends on camera model (perspective/orthographic)
+-    # For perspective, project the endpoints of the axis vectors from the camera origin
+-    projected_x = project_to_viewport(axis_x, V, P, renderer.get_camera_position())
+-    projected_y = project_to_viewport(axis_y, V, P, renderer.get_camera_position())
+-    projected_z = project_to_viewport(axis_z, V, P, renderer.get_camera_position())
+-    
+-    # Compute projected sizes (e.g., length in pixels)
+-    size_x = length(projected_x)
+-    size_y = length(projected_y)
+-    size_z = length(projected_z)
+-    
+-    # Check for degeneracy (alignment with view direction)
+-    view_dir = renderer.get_view_direction()
+-    if is_aligned(axis_x, view_dir) or is_aligned(axis_y, view_dir) or is_aligned(axis_z, view_dir):
+-        return {
+-            "minimal_distance": None,
+-            "ignore_flag": True
+-        }
+-    
+-    # Minimal sample distance is based on the largest projected dimension
+-    # to ensure coverage. A factor may be applied to ensure multiple samples per cell if needed.
+-    max_projected_size = max(size_x, size_y, size_z)
+-    
+-    # Convert pixel size back to world distance or use directly as a heuristic
+-    # Assuming the method returns a world-space distance
+-    minimal_distance = max_projected_size * renderer.get_pixel_size_in_world_units()
+-    
+-    return {
+-        "minimal_distance": minimal_distance,
+-        "ignore_flag": False
+-    }
++    # Inputs from evidence
++    # renderer: vtkRenderer pointer providing camera and viewport state
++    # volume: vtkVolume pointer providing dataset geometry and transformation
++    c = volume.get_cell_dimensions() # (cx, cy, cz)
++    T_vol = volume.get_transformation_matrix() # 4x4 matrix
++    V = renderer.get_view_matrix() # 4x4 matrix
++    P = renderer.get_projection_matrix() # 4x4 matrix
++    o = renderer.get_camera_position() # 3D vector
++    view_dir = renderer.get_view_direction() # 3D vector
++    width, height = renderer.get_viewport_size() # pixels
+ 
+-def project_to_viewport(vector, V, P, cam_pos):
+-    # Transform vector endpoint by view and projection
+-    # This is a simplified representation; actual implementation requires
+-    # handling of homogeneous coordinates and perspective division
+-    endpoint = vector # Assuming vector starts at origin for direction
+-    # In practice, project the vector's length along the ray direction
+-    # This step is implementation-specific to the renderer's projection model
+-    pass # Placeholder for specific projection math
++    def transform_point(p, M):
++        # Apply 4x4 matrix M to point p (homogeneous coordinates)
++        w = M[3][0]*p[0] + M[3][1]*p[1] + M[3][2]*p[2] + M[3][3]
++        return (M[0][0]*p[0] + M[0][1]*p[1] + M[0][2]*p[2] + M[0][3]) / w, \
++               (M[1][0]*p[0] + M[1][1]*p[1] + M[1][2]*p[2] + M[1][3]) / w, \
++               (M[2][0]*p[0] + M[2][1]*p[1] + M[2][2]*p[2] + M[2][3]) / w
+ 
+-def is_aligned(v1, v2):
+-    # Check if vectors are parallel
+-    dot = dot_product(normalize(v1), normalize(v2))
+-    return abs(dot) > 0.99 # Threshold for alignment
++    def project_to_screen(p_world):
++        # View transform
++        p_view = transform_point(p_world, V)
++        # Projection transform
++        p_proj = transform_point(p_view, P)
++        # Perspective divide and scale to viewport
++        sx = (p_proj[0] + 1.0) * 0.5 * width
++        sy = (p_proj[1] + 1.0) * 0.5 * height
++        return sx, sy
++
++    def vector_length(v):
++        return (v[0]**2 + v[1]**2)**0.5
++
++    def dot(a, b):
++        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++
++    def normalize(v):
++        l = vector_length(v)
++        return (v[0]/l, v[1]/l, v[2]/l) if l > 1e-8 else (0, 0, 0)
++
++    ignore_flag = False
++    min_projected_len = float('inf')
++
++    # Process each axis
++    axes = [
++        (c[0], 0, 0),
++        (0, c[1], 0),
++        (0, 0, c[2])
++    ]
++
++    for axis in axes:
++        p0 = transform_point((0, 0, 0), T_vol)
++        p1 = transform_point(axis, T_vol)
++        dir_vec = (p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2])
++
++        # Degeneracy check
++        if abs(dot(normalize(dir_vec), normalize(view_dir))) > 0.999:
++            ignore_flag = True
++            continue
++
++        sx0, sy0 = project_to_screen(p0)
++        sx1, sy1 = project_to_screen(p1)
++        proj_len = vector_length((sx1-sx0, sy1-sy0))
++        if proj_len < min_projected_len:
++            min_projected_len = proj_len
++
++    if ignore_flag:
++        return {"minimal_distance": None, "ignore_flag": True}
++
++    # Convert minimal projected pixel length to world distance
++    # Approximate pixel size at camera origin distance [G]
++    cam_dist = vector_length(o)
++    focal_length = renderer.get_focal_length() # [G]
++    minimal_distance = min_projected_len * (cam_dist / width) * focal_length
++
++    return {"minimal_distance": minimal_distance, "ignore_flag": False}
+ ```
++
++**Edge cases and pitfalls:**
++*   Precision loss may occur when axes are nearly parallel to the view direction; the degeneracy threshold ($0.999$) prevents division by zero or invalid projections [G].
++*   Non-uniform cell sizes require processing each axis independently to find the true minimal projected dimension [G].
+ 
+ ## Subtopics
+@@ -98,12 +114,12 @@
+ 
+ ## Operating characteristics
+-*   **Complexity:** The computation is $O(1)$ per pixel as it involves a fixed number of matrix-vector multiplications and comparisons.
+-*   **Strengths:** Provides a geometrically sound lower bound on step size based on the volume's resolution and camera distance. It prevents undersampling of fine details in the volume.
+-*   **Limitations:** It does not account for local variations in density or opacity. It may overestimate the required step size in regions of low gradient or underestimate it in regions with high-frequency features not captured by cell size. It is sensitive to the volume's orientation relative to the camera.
+-*   **When to use:** Use as a baseline step size constraint in conjunction with other adaptive methods. It is particularly useful for static volumes with uniform resolution.
+-*   **When not to use:** Do not use as the sole step size determinant for volumes with highly anisotropic resolution or when the volume is viewed edge-on (degenerate case).
++*   **Complexity:** The computation is $O(1)$ per pixel as it involves a fixed number of matrix-vector multiplications and comparisons [G].
++*   **Strengths:** Provides a geometrically sound lower bound on step size based on the volume's resolution and camera distance [G]. It prevents undersampling of fine details in the volume [G].
++*   **Limitations:** It does not account for local variations in density or opacity [G]. It may overestimate the required step size in regions of low gradient or underestimate it in regions with high-frequency features not captured by cell size [G]. It is sensitive to the volume's orientation relative to the camera [G].
++*   **When to use:** Use as a baseline step size constraint in conjunction with other adaptive methods [G]. It is particularly useful for static volumes with uniform resolution [G].
++*   **When not to use:** Do not use as the sole step size determinant for volumes with highly anisotropic resolution or when the volume is viewed edge-on (degenerate case) [S1, unofficial].
+ 
+ ## Background
+-This method is part of the VTK (Visualization Toolkit) multi-volume ray casting implementation [S1, unofficial]. It was developed to handle the rendering of multiple volumes with different resolutions and transformations, ensuring that the sampling rate adapts to the geometric projection of each volume's cells. The specific implementation is found in the `bozorgi/VTKMultiVolumeRayCaster` repository [S1, unofficial].
++This method is implemented in the VTK multi-volume ray casting pipeline [S1, unofficial]. The specific implementation resides in the `bozorgi/VTKMultiVolumeRayCaster` repository [S1, unofficial].
+ 
+ ## Sources

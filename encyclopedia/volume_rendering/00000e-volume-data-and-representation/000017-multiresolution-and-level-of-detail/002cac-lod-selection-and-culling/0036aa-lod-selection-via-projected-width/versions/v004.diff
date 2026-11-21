@@ -1,0 +1,175 @@
+--- v003.md
++++ v004.md
+@@ -4,110 +4,91 @@
+ 
+ ## Overview
+-This method selects the appropriate resolution level for volume rendering by calculating the screen-space footprint (projected width) of the data elements, analogous to Mipmap selection in path tracing [S1]. It solves the problem of static LOD allocation by adapting resolution to view-dependent importance, ensuring that distant or small features use simplified representations while close features retain high detail [S1]. Unlike distance-based methods which rely on Euclidean distance from the camera, this approach uses the actual projected size on the image plane, providing a more accurate representation of visual significance for complex microgeometry like vegetation and hair [S1].
++LoD Selection via Projected Width determines the appropriate resolution level for volume rendering by calculating the screen-space footprint of the data, analogous to Mipmap selection in path tracing [S1]. It solves the problem of static LOD allocation by adapting resolution to view-dependent importance based on geometric projection rather than Euclidean distance [S1]. Unlike [Distance-Based Level Selection](14162-distance-based-level-selection.md), which uses camera-to-voxel distance, this method relies on the projected width on the camera plane to balance rendering cost and visual fidelity [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A hierarchy of pre-computed volume representations (one per LOD level), camera parameters (position, orientation, field of view), and the geometric bounds of the volume data.
+-*   **Outputs:** A selected LOD index for each rendering sample or voxel lookup.
++*   **Inputs:** A hierarchy of pre-computed LoD volumes (one per level), camera parameters (projection matrix, viewport dimensions), and the spatial bounds of the volume data.
++*   **Outputs:** A selected LoD index for each rendering sample or voxel lookup.
+ 
+ **Data Structures:**
+-The method assumes a set of $L$ volume levels, indexed $0$ (highest resolution) to $L-1$ (lowest resolution). Each level $l$ has a resolution $N_l$. The geometric extent of the volume is known in world space.
++The method assumes a set of $L$ volume levels, where level $l \in [0, L-1]$ has resolution $N_l$. The volumes are loaded simultaneously into memory [S1].
+ 
+ **Steps:**
+-1.  **Load Volumes:** Load all $L$ LOD volumes into memory simultaneously [S1].
+-2.  **Calculate Projected Width:** For a given voxel or sample point at world position $\mathbf{p}$, calculate its projected size on the image plane. This is typically derived from the voxel's world-space size and the camera's projection matrix. Let $w_{world}$ be the physical width of the voxel. The projected width $w_{screen}$ in pixels is:
+-    $$ w_{screen} = \frac{w_{world} \cdot f \cdot \text{pixel\_density}}{d} $$
+-    where $f$ is the focal length, $d$ is the distance from the camera to $\mathbf{p}$, and $\text{pixel\_density}$ relates to the image resolution [S1, G].
+-3.  **Determine LOD Level:** Compare $w_{screen}$ against predefined thresholds or a target pixel coverage. The LOD level $l$ is chosen such that the voxel's projected size matches the desired sampling rate for that level. This follows the "usual PathTracer MipMap selection" logic [S1].
+-4.  **Lookup Data:** Use the selected LOD level $l$ to access the corresponding volume data for the voxel value [S1].
++1.  **Compute Projected Width:** For a voxel or sample at world position $\mathbf{p}$, project it to screen space using the camera's projection matrix $\mathbf{P}$ and viewport dimensions $W, H$.
++2.  **Calculate Metric:** Determine the projected width $w_{proj}$ of the voxel's extent on the screen. This is typically derived from the derivative of the screen-space coordinates with respect to world space, or the difference in screen coordinates between adjacent voxels.
++3.  **Select Level:** Map the projected width $w_{proj}$ to a LoD index $l$. The selection follows the standard PathTracer MipMap selection logic [S1], where larger projected widths (closer objects) select higher resolution levels (lower indices), and smaller widths select lower resolution levels (higher indices).
++
++**Formula:**
++Let $\mathbf{p}_{screen} = \text{Project}(\mathbf{p})$. The projected width $w_{proj}$ can be approximated by the magnitude of the gradient of the screen-space position with respect to the world-space voxel size $s$:
++$$ w_{proj} \approx \left\| \frac{\partial \mathbf{p}_{screen}}{\partial \mathbf{p}} \right\| \cdot s $$
++The LoD index $l$ is chosen such that the texel size at level $l$ matches the projected width.
+ 
+ **Pseudocode:**
+ ```python
+-def select_lod_level(projected_width_pixels, target_coverage_pixels, num_levels):
++def select_lod(projected_width, lod_levels):
+     """
+-    Selects the LOD level based on projected width.
+-    :param projected_width_pixels: The size of the voxel in screen pixels.
+-    :param target_coverage_pixels: The desired screen coverage for the highest resolution level.
+-    :param num_levels: Total number of LOD levels.
+-    :return: Selected LOD index (0 is highest res).
++    Selects the LoD index based on projected width.
++    projected_width: float, the screen-space size of the voxel.
++    lod_levels: list of floats, the texel size (or inverse resolution) for each LoD level.
++    Returns: int, the selected LoD index.
+     """
+-    # Calculate the ratio of current projected width to target coverage
+-    # Higher ratio means the voxel is larger on screen, requiring higher detail
+-    ratio = projected_width_pixels / target_coverage_pixels
+-    
+-    # Map ratio to LOD level
+-    # Level 0 is highest detail (largest projected size)
+-    # Level N is lowest detail (smallest projected size)
+-    # Assuming geometric progression in resolution levels
+-    
+-    if ratio < 1.0:
+-        return num_levels - 1
+-    
+-    # Logarithmic mapping to find the appropriate level
+-    # This assumes each level halves the resolution (doubles the voxel size)
+-    # level = log2(ratio)
+-    # Clamp to valid range
+-    import math
+-    level = int(math.log2(ratio))
+-    
+-    # Clamp to [0, num_levels - 1]
+-    level = max(0, min(level, num_levels - 1))
+-    
+-    return level
++    # Find the first level where the texel size is smaller than or equal to the projected width
++    # This mimics standard Mipmap selection where we want the smallest texture that covers the pixel
++    for l, texel_size in enumerate(lod_levels):
++        if texel_size <= projected_width:
++            return l
++    # If no level is fine enough, return the highest resolution (index 0)
++    return 0
+ 
+-def render_voxel_with_lod(voxel_world_pos, voxel_world_size, camera, volumes):
++def render_with_lod(volumes, camera, voxel_size):
+     """
+-    Renders a single voxel using LOD selection via projected width.
+-    :param voxel_world_pos: World position of the voxel center.
+-    :param voxel_world_size: Physical size of the voxel.
+-    :param camera: Camera object with projection matrix and resolution.
+-    :param volumes: List of volume data structures, one per LOD level.
+-    :return: Rendered color/value.
++    Renders using the selected LoD for each voxel.
++    volumes: list of volume data structures, one per LoD level.
++    camera: object with project() method and viewport dimensions.
++    voxel_size: float, the world-space size of a voxel in the finest level.
+     """
+-    # Step 1: Calculate projected width in pixels
+-    # Project voxel center to screen space
+-    screen_pos = camera.project(voxel_world_pos)
+-    
+-    # Calculate distance from camera
+-    dist = camera.distance_to(voxel_world_pos)
+-    
+-    # Estimate projected size based on focal length and distance
+-    # Simplified model: size_screen = (size_world * focal_length) / distance
+-    # Adjust for pixel density
+-    focal_length = camera.focal_length
+-    pixel_density = camera.resolution / camera.fov # pixels per unit angle
+-    
+-    projected_width = (voxel_world_size * focal_length * pixel_density) / dist
+-    
+-    # Step 2: Select LOD level
+-    # Assume target coverage for level 0 is 1 pixel (or a specific threshold)
+-    target_coverage = 1.0 
+-    lod_index = select_lod_level(projected_width, target_coverage, len(volumes))
+-    
+-    # Step 3: Lookup data from the selected volume
+-    volume_data = volumes[lod_index]
+-    voxel_value = volume_data.lookup(voxel_world_pos)
+-    
+-    return voxel_value
++    # Load all volumes simultaneously [S1]
++    # For each voxel in the view frustum:
++    for voxel in view_frustum_voxels:
++        # Project voxel center to screen space
++        screen_pos = camera.project(voxel.center)
++        
++        # Calculate projected width based on voxel size and camera projection
++        # This requires computing the derivative of screen coordinates w.r.t world coordinates
++        projected_width = compute_projected_width(screen_pos, voxel_size, camera)
++        
++        # Select the appropriate LoD level
++        lod_index = select_lod(projected_width, [v.resolution for v in volumes])
++        
++        # Lookup data from the selected volume [S1]
++        data = volumes[lod_index].lookup(voxel.local_coords)
++        # Proceed with volume rendering step using 'data'
+ ```
+ 
+ **Parameters:**
+-*   **Target Coverage:** The screen-space size (in pixels) that corresponds to the highest resolution level (LOD 0). Not given in the sources [S1].
+-*   **Number of Levels:** Determined by the user based on GPU memory and input sparsity [S1].
++*   **First level resolution:** Controls the highest detail level.
++*   **Second level resolution:** Controls the next detail level.
++*   **Sample number:** Number of samples per pixel.
++*   *Note:* Combining high resolution with a high sample number can lead to out-of-memory problems [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Out of Memory:** Combining high resolution with a high number of samples can lead to out-of-memory errors. Users must balance resolution and sample count [S1].
+-*   **Degenerate Input:** If the projected width is extremely small (very distant), the method should select the lowest LOD level. If extremely large (very close), it should select the highest. Clamping is necessary [G].
++**Edge Cases:**
++*   **Out of Memory:** Users must balance resolution and sample count to avoid GPU memory exhaustion [S1].
++*   **Degenerate Input:** If the projected width is extremely small (very distant), the method selects the coarsest level. If extremely large (very close), it selects the finest.
+ 
+ ## Subtopics
+ 
++### [Distance-Based Level Selection](14162-distance-based-level-selection.md)
++Uses Euclidean distance from the camera to select octree levels, providing a view-dependent hierarchy that balances rendering cost and visual fidelity.
++
+ ## Operating characteristics
+-*   **Time Complexity:** LOD selection is $O(1)$ per voxel/sample, involving basic arithmetic and a logarithmic lookup.
+-*   **Memory Complexity:** Requires loading all LOD levels into memory simultaneously, which can be significant for large volumes [S1].
+-*   **Strengths:** View-dependent and accurate for microgeometry (vegetation, hair) where distance alone is insufficient [S1].
+-*   **Limitations:** Memory usage scales with the number of LOD levels. Requires pre-computation of all LODs [S1].
++*   **Time Complexity:** Selection is $O(1)$ per voxel/sample after pre-computing the projected width.
++*   **Memory Complexity:** Requires loading all LoD volumes simultaneously into memory [S1]. This can lead to out-of-memory issues if the number of samples and resolution are too high [S1].
++*   **Strengths:** View-dependent adaptation based on screen-space footprint ensures consistent visual quality regardless of camera orientation or distance.
++*   **Limitations:** Memory usage scales with the number of LoD levels and their resolutions. Requires pre-computation of all LoD levels.
++*   **When to use:** When screen-space consistency is critical and sufficient GPU memory is available.
++*   **When not to use:** When memory is constrained or when distance-based culling is sufficient for the scene.
+ 
+ ## Background
+-This method is used in the context of fast voxelization and level of detail for microgeometry rendering, specifically for rendering vegetation and hair models which are difficult to represent accurately with static LOD [S1]. It adapts the Mipmap selection strategy from path tracing to volume rendering [S1].
++This method is derived from the PathTracer MipMap selection technique [S1]. It was applied to voxelized and rendered vegetation and hair models, which are known for their difficulty in accurate Level of Detail representation [S1]. The approach exposes three main parameters to the user: first level resolution, second level resolution, and sample number [S1].
+ 
+ ## Sources

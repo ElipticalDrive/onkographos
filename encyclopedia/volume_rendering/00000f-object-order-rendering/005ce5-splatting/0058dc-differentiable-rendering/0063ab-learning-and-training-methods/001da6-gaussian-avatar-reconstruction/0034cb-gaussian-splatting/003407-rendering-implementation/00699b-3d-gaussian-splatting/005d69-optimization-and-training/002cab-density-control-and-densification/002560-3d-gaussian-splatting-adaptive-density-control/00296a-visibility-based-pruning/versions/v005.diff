@@ -1,0 +1,141 @@
+--- v004.md
++++ v005.md
+@@ -1,5 +1,5 @@
+ # Visibility-Based Pruning
+ 
+-Also called: Gradient-based Pruning, Visibility mask pruning, Visibility-Based Geometry Pruning, Zero-gradient Pruning
++Also called: Visibility mask pruning, Visibility-Based Geometry Pruning, Zero-gradient Pruning
+ 
+ ## Overview
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method operates by constructing a visibility mask for all scene elements across all training views and pruning those that fail to meet a minimum visibility threshold. Two primary implementations exist: one based on geometric projection (thickness) [S1] and one based on gradient accumulation (zero-gradient) [S2, unofficial].
++The method operates by constructing a visibility mask for all scene elements across all training views and pruning those that fail to meet a minimum visibility threshold [S1]. Two primary implementations exist: one based on geometric projection (thickness) [S1] and one based on gradient accumulation (zero-gradient) [S2, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -20,5 +20,5 @@
+         *   $\tau_v$: Visibility threshold for view-frequency (in Anchor Pruning variant) [S3].
+ *   **Outputs:**
+-    *   Pruned set of elements $P'_w \subset P_w$.
++    *   Pruned set of elements $P'_w \subset P_w$ [S1].
+     *   Binary visibility mask $O \in \{0, 1\}^{N \times K}$ [S1].
+ 
+@@ -32,14 +32,14 @@
+ 1.  **Projection:** For each camera pose $d_j \in D$ (where $j=1 \dots K$):
+     a. For each element $p_i \in P_w$ (where $i=1 \dots N$):
+-        i. Convert $p_i$ to homogeneous coordinates $\tilde{p} = [x_i, y_i, z_i, 1]^T$.
+-        ii. Transform to Camera Coordinate System (CCS): $\tilde{p}_c = d_j \tilde{p}$.
+-        iii. Compute homogeneous image coordinates: $\tilde{x}_c = K \tilde{p}_c$.
+-        iv. Normalize by depth $z_c$ (the third component of $\tilde{p}_c$) to obtain 2D pixel coordinates: $(u, v) = \pi(p_i) = (\tilde{x}_c[0]/\tilde{x}_c[2], \tilde{x}_c[1]/\tilde{x}_c[2])$.
+-        v. Check if $(u, v)$ is within the image bounds. If not, mark $p_i$ as invisible for view $j$ ($O_{ij} = 0$) and continue to next element.
++        i. Convert $p_i$ to homogeneous coordinates $\tilde{p} = [x_i, y_i, z_i, 1]^T$ [S1].
++        ii. Transform to Camera Coordinate System (CCS): $\tilde{p}_c = d_j \tilde{p}$ [S1].
++        iii. Compute homogeneous image coordinates: $\tilde{x}_c = K \tilde{p}_c$ [S1].
++        iv. Normalize by depth $z_c$ (the third component of $\tilde{p}_c$) to obtain 2D pixel coordinates: $(u, v) = \pi(p_i) = (\tilde{x}_c[0]/\tilde{x}_c[2], \tilde{x}_c[1]/\tilde{x}_c[2])$ [S1].
++        v. Check if $(u, v)$ is within the image bounds [G]. If not, mark $p_i$ as invisible for view $j$ ($O_{ij} = 0$) and continue to next element [G].
+ 2.  **Grouping:** For each pixel $(u, v)$ in the image, identify the set of elements $M_{uv} = \{p_i \mid \pi(p_i) = (u, v)\}$ projected to that pixel [S1].
+ 3.  **Occlusion Culling (Thickness):**
+-    a. Sort elements in $M_{uv}$ by their $z$-value in the Camera Coordinate System (ascending, i.e., closest to camera first).
+-    b. Mark the $\tau$ elements with the smallest $z$-values as visible.
+-    c. Mark all remaining elements in $M_{uv}$ as occluded (invisible) for view $j$.
++    a. Sort elements in $M_{uv}$ by their $z$-value in the Camera Coordinate System (ascending, i.e., closest to camera first) [S1].
++    b. Mark the $\tau$ elements with the smallest $z$-values as visible [S1].
++    c. Mark all remaining elements in $M_{uv}$ as occluded (invisible) for view $j$ [S1].
+     d. Update $O_{ij}$ accordingly: $O_{ij} = 1$ if visible, $0$ if occluded or out of bounds [S1].
+ 4.  **Repeat:** Steps 1-3 for all $K$ camera poses to fill the mask $O$ [S1].
+@@ -57,15 +57,19 @@
+ In surfel-based representations, pruning is performed at the end of each training epoch [S2, unofficial].
+ 
+-1.  **Accumulate Gradients:** During the backward pass, accumulate the screen-space gradient magnitude for each surfel across all views.
+-2.  **Check Gradient:** Identify surfels whose cumulative screen-space gradient magnitude is zero.
+-3.  **Prune:** Remove surfels with zero cumulative gradient. A zero gradient implies the surfel was never reached during the backward pass (persistently occluded, outside frustums, or failed kernel cutoff) and carried no information [S2, unofficial].
++1.  **Accumulate Gradients:** During the backward pass, accumulate the screen-space gradient magnitude for each surfel across all views [S2, unofficial].
++2.  **Check Gradient:** Identify surfels whose cumulative screen-space gradient magnitude is zero [S2, unofficial].
++3.  **Prune:** Remove surfels with zero cumulative gradient [S2, unofficial]. A zero gradient implies the surfel was never reached during the backward pass (persistently occluded, outside frustums, or failed kernel cutoff) and carried no information [S2, unofficial].
+ 
+ ### Pseudocode
+ ```python
++def mat_vec_mul(M, v):
++    """Multiplies a 2D matrix M by a 1D vector v."""
++    return [sum(M[r][c] * v[c] for c in range(len(v))) for r in range(len(M))]
++
+ def compute_visibility_mask(points, cameras, intrinsics, thickness):
+     """
+     Computes the N x K visibility mask O.
+     points: List of N 3D points (x, y, z)
+-    cameras: List of K extrinsic matrices (4x4)
++    cameras: List of K camera objects with .height and .width attributes
+     intrinsics: 3x3 intrinsic matrix K
+     thickness: int, number of closest points to mark visible per pixel
+@@ -73,8 +77,7 @@
+     N = len(points)
+     K = len(cameras)
+-    O = [[0 for _ in range(K)] for _ in range(N)]
++    O = [[0] * K for _ in range(N)]
+     
+-    # Group points by pixel for each view
+-    # pixel_points[view_idx][u][v] = list of (point_idx, z_cam)
++    # pixel_points[view_idx][v][u] = list of (point_idx, z_cam)
+     pixel_points = [[{} for _ in range(cameras[0].height)] for _ in range(K)]
+     
+@@ -87,5 +90,5 @@
+             
+             # Transform to camera coords
+-            p_cam_hom = mat_mul(extrinsic, p_hom)
++            p_cam_hom = mat_vec_mul(extrinsic, p_hom)
+             z_cam = p_cam_hom[2]
+             
+@@ -95,5 +98,5 @@
+                 
+             # Project to image coords
+-            p_img_hom = mat_mul(intrinsics, p_cam_hom)
++            p_img_hom = mat_vec_mul(intrinsics, p_cam_hom)
+             u = p_img_hom[0] / p_img_hom[2]
+             v = p_img_hom[1] / p_img_hom[2]
+@@ -103,5 +106,7 @@
+                 u_int = int(u)
+                 v_int = int(v)
+-                if (u_int, v_int) not in pixel_points[k][v_int]:
++                if v_int not in pixel_points[k]:
++                    pixel_points[k][v_int] = {}
++                if u_int not in pixel_points[k][v_int]:
+                     pixel_points[k][v_int][u_int] = []
+                 pixel_points[k][v_int][u_int].append((i, z_cam))
+@@ -111,5 +116,5 @@
+         for v in range(cameras[0].height):
+             for u in range(cameras[0].width):
+-                if (u, v) in pixel_points[k][v]:
++                if u in pixel_points[k][v]:
+                     candidates = pixel_points[k][v][u]
+                     # Sort by z_cam (ascending)
+@@ -131,5 +136,5 @@
+     """
+     N = len(points)
+-    pruned_indices = []
++    pruned_indices = set()
+     
+     for i in range(N):
+@@ -137,5 +142,5 @@
+         visible_views = sum(O[i])
+         if visible_views < mve_threshold:
+-            pruned_indices.append(i)
++            pruned_indices.add(i)
+             
+     # Return new list of points excluding pruned indices
+@@ -146,12 +151,12 @@
+ 
+ ### Isolation-Based Pruning
+-A variant that removes surfels with no neighbors within their kernel support radius. It queries the spatial index to check for neighbors; surfels with no such neighbor are considered isolated, forming degenerate single-surfel groups with low accumulated weight and coverage, and are removed [S2, unofficial]. This complements visibility pruning by removing geometrically disconnected artifacts that might still have non-zero gradients if they briefly entered a frustum but lack surface coherence [S2, unofficial].
++A variant that removes surfels with no neighbors within their kernel support radius [S2, unofficial]. It queries the spatial index to check for neighbors; surfels with no such neighbor are considered isolated, forming degenerate single-surfel groups with low accumulated weight and coverage, and are removed [S2, unofficial]. This complements visibility pruning by removing geometrically disconnected artifacts that might still have non-zero gradients if they briefly entered a frustum but lack surface coherence [S2, unofficial].
+ 
+ ### Anchor Pruning with View-Frequency
+-A variant used in Octree-GS that removes redundant anchors based on "view-frequency" rather than opacity alone. View-frequency is the probability that an anchor is selected in training views, correlating with the received gradient. Anchors with view-frequency below a threshold $\tau_v$ are removed. This prevents artifacts from insufficiently optimized anchors that are not visible in most training frustums [S3]. It also involves computing average opacity over $T$ iterations and adjusting loss gradients with $\epsilon=0.01$ for selected anchors [S3].
++A variant used in Octree-GS that removes redundant anchors based on "view-frequency" rather than opacity alone [S3]. View-frequency is the probability that an anchor is selected in training views, correlating with the received gradient [S3]. Anchors with view-frequency below a threshold $\tau_v$ are removed [S3]. This prevents artifacts from insufficiently optimized anchors that are not visible in most training frustums [S3]. The method also computes the average opacity of Gaussians generated over $T$ training iterations for each anchor to assist in the selection process [S3].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N \cdot K \cdot \log(\text{avg\_points\_per\_pixel}))$ for mask construction due to sorting points by depth per pixel [S1]. Pruning decision is $O(N \cdot K)$ for summing the mask, or $O(N)$ if the mask is pre-computed [S1].
+-*   **Memory Complexity:** $O(N \cdot K)$ to store the visibility mask $O$ [S1]. For large $N$ and $K$, this can be significant, though bit-packing can reduce this to $N \cdot K / 8$ bytes.
++*   **Memory Complexity:** $O(N \cdot K)$ to store the visibility mask $O$ [S1]. For large $N$ and $K$, this can be significant, though bit-packing can reduce this to $N \cdot K / 8$ bytes [G].
+ *   **Strengths:** Explicitly handles occlusion and self-occlusion, preserving "watertightness" of the object [S1]. Effective at removing floating artifacts caused by elements that are rarely visible [S1]. Does not require ground-truth geometry [S1].
+ *   **Limitations:** Requires forward projection of all points for all views, which can be computationally expensive during training if done every epoch [S1]. The choice of $\tau$ (thickness) affects the perceived object thickness and pruning aggressiveness; too low $\tau$ may remove valid surface points, too high may retain occluded noise [S1].

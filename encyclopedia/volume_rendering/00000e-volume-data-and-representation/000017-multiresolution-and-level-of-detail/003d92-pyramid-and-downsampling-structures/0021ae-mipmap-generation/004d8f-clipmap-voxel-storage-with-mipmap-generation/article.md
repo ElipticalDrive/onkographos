@@ -1,0 +1,167 @@
+# Clipmap Voxel Storage with Mipmap Generation
+
+Also called: Clipmap Voxel Storage
+
+## Overview
+This method implements a voxel storage structure using clipmaps that generates mipmaps for inner clipmaps and the largest clipmap via compute shaders, copying regions between textures to handle axis-aligned downsampling [S1, unofficial]. It differs from standard 3D mipmap chains by organizing data into a clipmap layout (concentric rings or layers) and using explicit region copies for downsampling rather than recursive texture sampling, which optimizes memory locality for view-dependent rendering [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** Source voxel textures (`ClipMaps`), configuration parameters (`ClipMapResolution`, `ClipMapCount`, `LayoutSize`, `MipmapInner`).
+- **Output:** Downsampled mipmap levels stored in `ClipMaps` (for the largest clipmap) and `TempMipMaps` (intermediate buffers for inner clipmaps).
+
+**Data Structures**
+The storage structure `VoxelStorageTextureClipmap` contains the following fields [S1, unofficial]:
+- `ClipMapResolution`: `Vector3` defining the resolution of individual clipmaps.
+- `ClipMapCount`: `int` count of clipmaps.
+- `LayoutSize`: `int` defining the layout dimension for axis copying.
+- `VoxelMatrix`: `Matrix` transformation matrix.
+- `VoxelSize`: `float` size of a single voxel.
+- `MipmapInner`: `bool` flag to enable inner clipmap mipmap generation.
+- `ClipMaps`: `Texture` array holding the primary clipmap data.
+- `MipMaps`: `Texture` array holding generated mipmaps.
+- `TempMipMaps`: `Texture[]` array of temporary textures used for intermediate mipmap calculations.
+- Shader references: `VoxelMipmapSimple` and `VoxelMipmapSimpleGroups` (array of compute shaders).
+
+**Parameters**
+- `ClipMapResolution`: Defines the base resolution $(R_x, R_y, R_z)$ of a single clipmap layer.
+- `ClipMapCount`: The number of clipmap levels $N$.
+- `LayoutSize`: The number of axes or slices involved in the layout copying process.
+- `MipmapInner`: Boolean flag. If true, inner clipmaps are downsampled; otherwise, only the largest clipmap is processed.
+
+**Algorithm Steps**
+1. **Shader Initialization:** Check if the current mipmap shader (`curMipmapShader`) differs from the active shader or if the shader is null. If so, initialize or update the `VoxelMipmapSimple` compute shader [S1, unofficial].
+2. **Group Array Initialization:** Initialize the `VoxelMipmapSimpleGroups` array. If the array is null, its length mismatches `TempMipMaps.Length`, or the shader changed, resize the array to match `TempMipMaps.Length` [S1, unofficial].
+3. **Calculate Total Resolution:** Compute `totalResolution` as `ClipMapResolution` multiplied by `(1, LayoutSize, 1)`.
+   $$ \text{totalResolution} = (R_x, R_y \times \text{LayoutSize}, R_z) $$
+4. **Set Thread Group Counts:** Set the base thread group count to `Int3(32, 32, 32)` [S1, unofficial].
+5. **Inner Clipmap Mipmap Generation (if `MipmapInner` is true):**
+   - Loop $i$ from $0$ to $\text{ClipMapCount} - 2$.
+   - Calculate thread group counts and numbers based on `totalResolution` divided by the base thread group counts.
+   - Set `ReadTex` to `ClipMaps`.
+   - Set `WriteTex` to `TempMipMaps[0]`.
+   - Set `ReadOffset` to $(0, \text{totalResolution}.Y \times i, 0)$.
+   - Execute the draw call for the compute shader [S1, unofficial].
+6. **Axis-Aligned Region Copying:**
+   - For each axis $a$ from $0$ to $\text{LayoutSize} - 1$:
+     - Calculate `offset` as $a \times \text{ClipMapResolution}.Y$.
+     - Copy a region from `TempMipMaps[0]` to `ClipMaps`.
+     - **Source Region:** Dimensions are halved $(X/2, Z/2)$. The Y offset is adjusted by $/2 + 1$.
+     - **Destination Region:** The destination offset is calculated as:
+       $$ \text{DestOffset} = \text{totalResolution}.Y \times (i + 1) + \text{offset} + \frac{\text{ClipMapResolution}.Y}{4} + 1 $$
+     - The destination Z dimension is halved.
+     - This step handles the axis-aligned downsampling by copying specific regions between textures [S1, unofficial].
+7. **Largest Clipmap Mipmap Generation:**
+   - Set resolution to `ClipMapResolution`.
+   - Set thread group counts to `resolution / 4`.
+   - Multiply `resolution.Y` by `LayoutSize`.
+   - Loop $i$ from $0$ to `TempMipMaps.Length` - 2.
+   - Get the mipmap shader from `VoxelMipmapSimpleGroups[i]`.
+   - Divide resolution by 2.
+   - Clamp resolution dimensions $X, Y, Z$ to a minimum of 1.
+   - If resolution dimensions fall below thread group counts, handle appropriately (implementation detail varies) [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GenerateClipmapMipmaps(ClipMaps, TempMipMaps, ClipMapResolution, ClipMapCount, LayoutSize, MipmapInner, VoxelMipmapSimple, VoxelMipmapSimpleGroups):
+    # 1. Shader Initialization
+    if curMipmapShader != VoxelMipmapSimple or VoxelMipmapSimple is null:
+        InitializeVoxelMipmapSimple()
+        curMipmapShader = VoxelMipmapSimple
+
+    # 2. Group Array Initialization
+    if VoxelMipmapSimpleGroups is null or len(VoxelMipmapSimpleGroups) != len(TempMipMaps) or shader_changed:
+        VoxelMipmapSimpleGroups = new Array[ComputeShader](len(TempMipMaps))
+
+    # 3. Calculate Total Resolution
+    totalResolution = Vector3(ClipMapResolution.X, ClipMapResolution.Y * LayoutSize, ClipMapResolution.Z)
+    
+    # 4. Set Thread Group Counts
+    baseThreadGroupCounts = Vector3(32, 32, 32)
+
+    # 5. Inner Clipmap Mipmap Generation
+    if MipmapInner:
+        for i in range(ClipMapCount - 1):
+            # Calculate thread numbers based on totalResolution / baseThreadGroupCounts
+            threadNumbers = Vector3(
+                int(totalResolution.X / baseThreadGroupCounts.X),
+                int(totalResolution.Y / baseThreadGroupCounts.Y),
+                int(totalResolution.Z / baseThreadGroupCounts.Z)
+            )
+            
+            VoxelMipmapSimple.ThreadGroupCounts = baseThreadGroupCounts
+            VoxelMipmapSimple.ThreadNumbers = threadNumbers
+            
+            VoxelMipmapSimple.Parameters.Set("ReadTex", ClipMaps)
+            VoxelMipmapSimple.Parameters.Set("WriteTex", TempMipMaps[0])
+            VoxelMipmapSimple.Parameters.Set("ReadOffset", Vector3(0, int(totalResolution.Y * i), 0))
+            
+            VoxelMipmapSimple.Draw()
+
+    # 6. Axis-Aligned Region Copying
+    for a in range(LayoutSize):
+        offset = a * ClipMapResolution.Y
+        
+        # Source region dimensions halved
+        srcWidth = int(ClipMapResolution.X / 2)
+        srcDepth = int(ClipMapResolution.Z / 2)
+        srcYOffset = int(ClipMapResolution.Y / 2) + 1
+        
+        # Destination offset calculation
+        # Note: 'i' is not defined in this scope in the source snippet, assuming it refers to the current clipmap index or a loop variable.
+        # Based on source: "copying to a destination offset of (int)totalResolution.Y * (i + 1) + offset + (int)ClipMapResolution.Y / 4 + 1"
+        # We assume this step is part of the inner loop or a separate pass. 
+        # For clarity, we assume this is done for each clipmap level 'i' if MipmapInner is true, or specifically for the largest.
+        # The source text implies this copying happens after the inner loop or as part of the largest clipmap logic.
+        # Re-reading source: "For each axis... Copy a region...". This seems to be a separate step.
+        # Let's assume this is for the largest clipmap or a specific level 'i'.
+        # To be safe, we'll assume this is for the largest clipmap (i = ClipMapCount - 1) or a specific pass.
+        # However, the source lists it after the inner loop. Let's assume it's for the largest clipmap.
+        
+        destYOffset = int(totalResolution.Y * (ClipMapCount - 1 + 1)) + offset + int(ClipMapResolution.Y / 4) + 1
+        destDepth = int(ClipMapResolution.Z / 2)
+        
+        CopyRegion(TempMipMaps[0], ClipMaps, srcWidth, srcDepth, srcYOffset, destYOffset, destDepth)
+
+    # 7. Largest Clipmap Mipmap Generation
+    resolution = ClipMapResolution
+    baseThreadGroupCounts = resolution / 4
+    resolution.Y = resolution.Y * LayoutSize
+    
+    for i in range(len(TempMipMaps) - 1):
+        shader = VoxelMipmapSimpleGroups[i]
+        resolution = resolution / 2
+        resolution.X = max(1, resolution.X)
+        resolution.Y = max(1, resolution.Y)
+        resolution.Z = max(1, resolution.Z)
+        
+        if resolution.X < baseThreadGroupCounts.X or resolution.Y < baseThreadGroupCounts.Y or resolution.Z < baseThreadGroupCounts.Z:
+            # Handle appropriately (e.g., skip or adjust)
+            pass
+            
+        # Execute shader with current resolution
+        shader.ThreadGroupCounts = baseThreadGroupCounts
+        shader.ThreadNumbers = resolution / baseThreadGroupCounts
+        shader.Draw()
+```
+
+**Edge Cases and Pitfalls**
+- **Memory Leaks:** If `ThreadGroupCounts` or `ThreadNumbers` change due to shader recompilation, memory leaks can occur. The implementation caches thread group configurations as separate shaders to avoid this [S1, unofficial].
+- **Resolution Clamping:** Resolution dimensions must be clamped to a minimum of 1 to prevent invalid thread group calculations [S1, unofficial].
+- **Boundary Conditions:** The source code snippet cuts off when resolution dimensions fall below thread group counts. Implementers must define the fallback behavior (e.g., skipping the draw call or using a fallback shader) [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of voxels and clipmap levels, as each level requires a full pass of downsampling.
+- **Memory Complexity:** Requires additional temporary textures (`TempMipMaps`) for intermediate calculations, effectively doubling the memory requirement for the mipmap generation phase.
+- **Strengths:** Optimized for view-dependent rendering by using clipmaps, which focus detail near the viewer. The axis-aligned copying reduces overhead compared to full 3D downsampling.
+- **Limitations:** Requires careful management of shader recompilation to avoid memory leaks. The specific region copying logic is complex and prone to off-by-one errors in offset calculations.
+- **When to Use:** Suitable for real-time voxel-based rendering where view-dependent detail is critical, such as in voxel GI or terrain rendering.
+- **When Not to Use:** Not suitable for static volumes where full-resolution access is not required, or when memory is extremely constrained.
+
+## Background
+This method is derived from the Xenko VoxelGI implementation, specifically the `VoxelStorageTextureClipmap` class. It was developed to optimize voxel data access for real-time global illumination in the Xenko engine [S1, unofficial]. The approach combines clipmap data structures with compute shader-based mipmap generation to efficiently handle large voxel datasets.
+
+## Sources
+[S1] WhyPenguins/XenkoVoxelGI, https://github.com/WhyPenguins/XenkoVoxelGI, fetched 2026-10-26 (unofficial)

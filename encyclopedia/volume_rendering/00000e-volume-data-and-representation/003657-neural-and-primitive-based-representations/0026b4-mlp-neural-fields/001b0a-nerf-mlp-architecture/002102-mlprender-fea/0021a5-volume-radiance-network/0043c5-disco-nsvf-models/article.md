@@ -1,0 +1,13 @@
+# Disco NSVF Models
+## Overview
+Disco NSVF models represent 3D scenes using a disentangled radiance field, registered as `disco_nsvf` and `multi_disco_nsvf` [S1, unofficial]. The `disco_nsvf` variant uses `compressed_light_dim=64` and `nerf3_architecture`, while `multi_disco_nsvf` employs `multi_sparsevoxel_encoder` with `inputs_to_density="pos:10, context:0:256"` and `inputs_to_texture="feat:0:256, pos:10, normal:4, ray:4, context:0:256"` [S1, unofficial]. They differ from their sibling [SDF NSVF Models](11064-sdf-nsvf-models.md) by utilizing a disentangled radiance field representation rather than a unified SDF-based approach [S1, unofficial].
+## Shared principles
+## Subtopics
+
+### [SDF NSVF Models](11064-sdf-nsvf-models.md)
+SDF NSVF models represent 3D geometry and appearance using a signed distance field (SDF) radiance field, registered as `sdf_nsvf` and `sdf_nsvf_sfx`. They differ from their sibling [Disco NSVF Models](11063-disco-nsvf-models.md) by utilizing a unified SDF-based representation rather than a disentangled radiance field, and the `sdf_nsvf_sfx` variant specifically employs a surface volume rendering raymarcher.
+
+## Background
+The Disco NSVF models are part of the NSVF framework developed by Facebook Research [S1, unofficial]. The source code is licensed under the MIT license [S1, unofficial].
+## Sources
+[S1] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)

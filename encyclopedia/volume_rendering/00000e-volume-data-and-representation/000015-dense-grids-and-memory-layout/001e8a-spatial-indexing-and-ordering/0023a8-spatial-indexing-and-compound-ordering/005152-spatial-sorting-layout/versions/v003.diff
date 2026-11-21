@@ -1,0 +1,175 @@
+--- v002.md
++++ v003.md
+@@ -1,108 +1,86 @@
+ # Spatial Sorting Layout
+-
+ Also called: Directional sort, Spatial layout
+-
+ ## Overview
+-Spatial sorting is a memory layout technique for tetrahedral meshes that orders vertices along a dominant spatial direction to maximize cache coherence during streaming rendering [S1]. It solves the problem of poor spatial locality in unstructured grids by ensuring that cells sharing vertices are stored contiguously in memory [S1]. Unlike general spatial indexing, it relies on a single global sorting direction, making it highly efficient for meshes with anisotropic geometry but ineffective for isotropic shapes like spheres [S1].
+-
++Spatial sorting is a memory layout technique for tetrahedral meshes that reorders vertices and cells to maximize spatial coherence along a dominant principal direction. It solves the problem of poor cache locality in large meshes by ensuring that cells sharing vertices are stored contiguously in memory. Unlike general spatial indexing methods that handle arbitrary geometries, this approach is specifically optimized for meshes with a strong linear orientation, sacrificing performance on isotropic data like spheres [S1].
+ ## How it works
+-**Inputs:** A tetrahedral mesh defined by a vertex list and a cell list (tetrahedra defined by 4 vertex indices).
+-**Outputs:** A new interleaved file/stream containing vertices and their associated cells in spatial order.
++**Inputs:** A tetrahedral mesh defined by a vertex list $V$ and a cell list $C$, where each cell references four vertex indices.
++**Outputs:** A new interleaved file containing vertices and cells in the sorted order.
+ 
+ **Data Structures:**
+-1.  **Vertex List:** Array of vertex positions.
+-2.  **Mapping File:** A lookup table mapping old vertex indices to new vertex indices.
+-3.  **Cell List:** Array of tetrahedra, each storing 4 vertex indices.
++1.  **Vertex File:** Stores vertex coordinates.
++2.  **Mapping File:** Stores the permutation array $P$ where $P[i]$ is the new index of the vertex originally at index $i$.
++3.  **Cell File:** Stores cell indices, reindexed according to $P$.
+ 
+ **Steps:**
+-1.  **Select Direction:** Identify a spatial direction vector that intersects the maximum number of tetrahedra in the mesh [S1].
+-2.  **Sort Vertices:** Perform an out-of-core sort of the vertices based on their projection onto the selected direction [S1].
+-3.  **Create Mapping:** Generate a mapping file that records the permutation from the original vertex indices to the new sorted indices [S1].
+-4.  **Reindex Cells:** Write the tetrahedral cells to a new file, updating all vertex indices according to the mapping file [S1].
+-5.  **Sort Cells:** Sort the reindexed cell file based on the largest vertex index contained within each tetrahedron [S1].
+-6.  **Interleave:** Read the sorted vertex file and sorted cell file simultaneously. Write each cell to the output file immediately after the vertex corresponding to the cell’s largest index has been written [S1].
++1.  **Direction Selection:** Identify a spatial direction vector $\vec{d}$ that crosses the maximum number of tetrahedra. This direction represents the dominant principal axis of the mesh [S1].
++2.  **Vertex Sorting:** Perform an out-of-core sort of the vertices based on their projection onto $\vec{d}$. The projection value for vertex $v_i$ is $p_i = v_i \cdot \vec{d}$ [S1].
++3.  **Mapping Generation:** Create the mapping file $P$ that records the permutation from the original vertex indices to the new sorted indices [S1].
++4.  **Cell Reindexing:** Write the tetrahedral cells to a new file, replacing every vertex index $v$ in the cell definition with $P[v]$ [S1].
++5.  **Cell Sorting:** Sort the reindexed cell file based on the largest vertex index contained within each cell. For a cell $c_j = [v_a, v_b, v_c, v_d]$, the sort key is $k_j = \max(P[v_a], P[v_b], P[v_c], P[v_d])$ [S1].
++6.  **Interleaving:** Read the sorted vertex file and the sorted cell file simultaneously. Write each cell to the output file immediately after the vertex corresponding to the cell’s largest index has been written. This ensures that when a cell is accessed, its primary vertex is likely still in cache [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Step 1: Select direction (implementation detail omitted, assumed known)
+-direction = find_dominant_direction(mesh.vertices)
+-
+-# Step 2: Sort vertices
+-# Project vertices onto direction and sort
+-vertex_projections = [dot(v.position, direction) for v in mesh.vertices]
+-sorted_indices = argsort(vertex_projections)
+-
+-# Step 3: Create mapping
+-mapping = [0] * len(mesh.vertices)
+-for new_idx, old_idx in enumerate(sorted_indices):
+-    mapping[old_idx] = new_idx
+-    # Store mapping to file
+-    write_mapping_file(new_idx, old_idx)
+-
+-# Step 4: Reindex cells
+-new_cells = []
+-for cell in mesh.cells:
+-    # cell is a tuple/list of 4 old indices
+-    new_cell_indices = [mapping[old_idx] for old_idx in cell]
+-    new_cells.append(new_cell_indices)
+-
+-# Step 5: Sort cells by max index
+-# Sort the new_cells list based on the maximum value in each cell
+-sorted_cells = sorted(new_cells, key=lambda cell: max(cell))
+-
+-# Step 6: Interleave
+-output_file = open("interleaved.dat", "wb")
+-# We need to access vertices in the new sorted order
+-sorted_vertices = [mesh.vertices[i] for i in sorted_indices]
+-
+-# Map max_cell_index to the position in the sorted_vertices list
+-# Since sorted_cells contains indices into the NEW vertex list,
+-# and sorted_vertices is ordered by the NEW indices,
+-# we can iterate through sorted_vertices and append cells.
+-
+-# However, the source says: "writing each cell immediately after the vertex 
+-# corresponding to the cell’s largest index has been written."
+-# This implies we iterate through the sorted vertices, and for each vertex,
+-# we check if it is the max index of any cell.
+-
+-# To do this efficiently, we can group cells by their max index.
+-cells_by_max_index = {}
+-for cell in sorted_cells:
+-    max_idx = max(cell)
+-    if max_idx not in cells_by_max_index:
+-        cells_by_max_index[max_idx] = []
+-    cells_by_max_index[max_idx].append(cell)
+-
+-for new_vertex_idx, vertex in enumerate(sorted_vertices):
+-    write_vertex(output_file, vertex)
+-    if new_vertex_idx in cells_by_max_index:
+-        for cell in cells_by_max_index[new_vertex_idx]:
+-            write_cell(output_file, cell)
++def spatial_sort_layout(vertices, cells):
++    # Step 1: Determine dominant direction (implementation detail omitted)
++    direction = compute_dominant_direction(vertices, cells)
++    
++    # Step 2: Sort vertices by projection onto direction
++    # Store original indices to build mapping
++    projected = [(v.dot(direction), i) for i, v in enumerate(vertices)]
++    projected.sort(key=lambda x: x[0])
++    
++    # Step 3: Create mapping from old index to new index
++    mapping = [0] * len(vertices)
++    for new_idx, (proj, old_idx) in enumerate(projected):
++        mapping[old_idx] = new_idx
++        
++    # Step 4: Reindex cells using mapping
++    reindexed_cells = []
++    for cell in cells:
++        new_cell = [mapping[v] for v in cell]
++        reindexed_cells.append(new_cell)
++        
++    # Step 5: Sort cells by their maximum vertex index
++    # Key is max index in the reindexed cell
++    reindexed_cells.sort(key=lambda c: max(c))
++    
++    # Step 6: Interleave vertices and cells
++    output = []
++    # We need to track which vertices have been written
++    # Since cells are sorted by max index, we write vertices in order
++    # and insert cells when their max index is reached
++    
++    # Create a list of cells waiting for each vertex index
++    cells_for_vertex = [[] for _ in range(len(vertices))]
++    for cell in reindexed_cells:
++        max_idx = max(cell)
++        cells_for_vertex[max_idx].append(cell)
++        
++    # Write vertices and interleaved cells
++    for i in range(len(vertices)):
++        output.append(vertices[i])
++        for cell in cells_for_vertex[i]:
++            output.append(cell)
++            
++    return output
+ ```
+ 
+-**Parameters:**
+-*   **Sorting Direction:** Not given in the sources.
+-*   **Out-of-core Sort:** Required for large meshes [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Isotropic Meshes:** The method works especially well only for meshes with a dominant principal direction [S1]. It performs poorly on meshes without such a direction, such as spheres [S1].
++*   **Dominant Direction Requirement:** The method works especially well only for meshes with a dominant principal direction. It performs poorly on isotropic meshes (e.g., spheres) where no single direction crosses significantly more cells than others [S1].
++*   **Out-of-Core Sorting:** For very large meshes, sorting must be performed out-of-core to avoid memory exhaustion. Standard in-memory sorts are insufficient [S1].
++*   **Tie Breaking:** If multiple directions cross the same number of tetrahedra, a secondary criterion is not specified in the source [S1].
+ 
+ ## Subtopics
+-
+-### Density-sorted point storage
+-Storing points sorted by density results in the least spatial coherence among point-based layouts [S2, book]. Points are sorted by their density value, allowing irrelevant points (assigned transparent values in transfer functions) to be quickly culled from the rendering pipeline [S2, book]. This approach requires storing $(x,y,z)$ coordinates and possibly gradient vectors alongside the points because neighborhood relations are completely lost [S2, book]. All points must be transformed to view space before culling for occlusion or viewing pyramid exclusion [S2, book]. During rendering, points must be depth-sorted or tossed into depth bins [S2, book]. A compromise involves sorting points by density within volume slices only, providing implicit depth-ordering when used with an axis-aligned sheet-buffer method [S2, book].
+-
+ ## Operating characteristics
+-**Time Complexity:** Dominated by the out-of-core sorting of vertices and cells [S1].
+-**Memory Complexity:** Requires storage for the vertex list, cell list, and a mapping file [S1].
+-**Strengths:** Maximizes spatial coherence for streaming rendering on meshes with a dominant direction [S1].
+-**Limitations:** Ineffective for isotropic meshes (e.g., spheres) [S1]. Loses neighborhood information if applied to points rather than meshes [S2, book].
+-**When to use:** When rendering large tetrahedral meshes with a clear principal direction and limited memory bandwidth.
+-**When not to use:** For isotropic meshes or when neighborhood relations are critical for other algorithms [S1][S2, book].
++**Time Complexity:** Dominated by the sorting steps. Sorting $N$ vertices and $M$ cells takes $O(N \log N + M \log M)$ time [S1].
++**Memory Complexity:** Requires storage for the original mesh, the mapping file, and the intermediate cell files. The interleaved output is roughly the same size as the input [S1].
++**Performance:** Provides high cache efficiency for streaming rendering of large tetrahedral meshes with a clear orientation. It is not suitable for data without a dominant direction [S1].
++**Strengths:** Simple to implement; effective for directional data; enables out-of-core processing.
++**Limitations:** Fails on isotropic data; requires multiple passes over the data (sort, map, reindex, sort, interleave) [S1].
+ 
+ ## Background
+-The technique was proposed for streaming simplification of tetrahedral meshes, building on work by Wu and Kobbelt for triangle mesh simplification [S1]. It addresses the need for efficient memory access patterns in large-scale volume rendering.
++The method was described in the context of streaming simplification of tetrahedral meshes. It builds on earlier work by Wu and Kobbelt for triangle mesh simplification, adapting the concept of directional sorting to tetrahedral volumes [S1]. The approach is designed to facilitate efficient out-of-core rendering and simplification of large datasets [S1].
+ 
+ ## Sources
+-[S1] Streaming Simplification of Tetrahedral Meshes, https://doi.org/10.1109/tvcg.2007.21, fetched 2026-11-04
+-[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)+[S1] Streaming Simplification of Tetrahedral Meshes, https://doi.org/10.1109/tvcg.2007.21, fetched 2026-11-04

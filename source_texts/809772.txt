@@ -1,0 +1,973 @@
+Maintained classic Atrinik client, server, editor, libraries, and protocol monorepo - feat(client): compose client-computed local light for protocol 1085 by zoeyrose · Pull Request #619 · atrinik/classic
+
+feat(client): compose client-computed local light for protocol 1085 by zoeyrose · Pull Request #619 · atrinik/classic · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+zoeyrose
+commented
+Oct 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Summary
+This is step 2 of the client-computed lighting rollout from #617. The client evaluates the emitters it receives through protocol 1085 (#618) and composes them with the server's coarse level. With client_lighting enabled, the client then shows local light it computed itself on top of the server's base radiance.
+It's stacked on #618; the base branch is feat/client-lighting-protocol.
+Implementation / behavior
+Shared profiles (libatrinik/light_profile.{c,h}):
+These moved verbatim from server light.c:
+the light_mask and light_profiles tables;
+the fixed-point radial falloff;
+the canonical sRGB8→linear Q0.16 table with per-channel normalization;
+raw→Q5.11 conversion.
+The server delegates to them, so server masks and client evaluation can't drift. The colour normalization uses (n·m + ⌊d/2⌋)/d, which equals the server's overflow-free mul-div rounding for these bounds.
+Client reference evaluation (client/src/client/client_lighting.c):
+Grouping: emitters on a tile are grouped like the server's per-space counters. The scalar uses the summed radius through light_mask, so the same-tile cap matches, and the positive part uses the summed positive radii.
+Colour: every distinct constituent keeps its own profile and exact server weight, and nothing is folded. A tile has at most one emitter per sent layer record, so the work stays bounded.
+No cap: every visible emitter is evaluated; group storage and the map's emitter list grow as needed.
+Rays: they walk the occluder grid. A view blocker stops light beyond it but keeps its own exposed face lit, and transmissive cells attenuate by 256 - 16a in travel order.
+Hue: resolved like the server's local radiance resolver.
+Composition (client_lighting_compose): max with a positive coarse level, min with a negative one, then a limit to the block's level. The level is a block-wide bleed hint, not a per-cell bound (see docs(server): propose client-computed lighting for protocol 1085 #617).
+Map integration (gui/widgets/map.c):
+Each level keeps an emitter field over the visible window plus the 4-cell light radius. It's rebuilt when that level's lighting revision, cell store or cache origin changes.
+The SETUP echo fixes the connection mode (map_set_client_lighting_mode()). On a compositor connection, base words are signed Q4.11:
+keyframe endpoints interpolate in the signed domain;
+the sampler adds composed local light to the signed base and clamps only afterwards, so negative environment cancels equal light exactly;
+the vision floor and then the unchanged player field (radius 8, centre 80, never on fog) follow.
+Remembered fog keeps its base radiance and composes its live coarse level, but never its remembered objects' emitters.
+A legacy connection's samples are complete radiance and stay unchanged.
+Validation
+All builds and tests ran in the pinned linux-build:1.18.0 worker, using fenced --plan / --expected-plan builds:
+client: 100/100 tests pass:
+The new client-lighting suite checks server-identical profile values, wall occlusion with the exposed face lit, the same-tile cap, transmission, darkness sign, colour hue, constituent colours keeping their own profiles, a 400-emitter viewport with none dropped, and every composition and block-limit branch.
+test_many_colors_keep_exact_server_weights: a red radius 6 and a blue radius 7 beyond eight fillers weigh equally, as on the server.
+--map-state-test now also checks composition end to end through the real sampler:
+base 160 plus a radius-1 emitter gives 224;
+the vision floor applies;
+a negative base cancels an equal coarse level exactly to 0, and a lesser one leaves the exact difference;
+remembered fog composes its coarse level;
+signed keyframe interpolation passes through zero;
+a legacy connection keeps 65000 unchanged.
+libatrinik: 25/25 pass.
+server: the light suite (exact radiance expectations) and the toolkit packet suite pass after the profile move. los_callbacks and server-plugin-python fail locally with the same 13 cases as unmodified v5.99.0, and pass in CI on main.
+python3 tools/verify_import_history.py and git diff --check pass.
+Limitations / follow-up
+Merge constraint (unsafe to merge alone): feat(lighting): move lighting to the client (protocol 1085) #618 and feat(client): compose client-computed local light for protocol 1085 #619 must merge together with, or after, the celestial follow-up that removes celestial light from the base radiance. Until then the signed base carries the server's all-object celestial field, which would expose unsent door and gate state (CLIENT_LIGHTING.md, Celestial light). Merging to main triggers semantic-release automatically, so merging feat(lighting): move lighting to the client (protocol 1085) #618/feat(client): compose client-computed local light for protocol 1085 #619 without that follow-up would release this state. The protocol-1085 release gate is confirmed by the maintainer: docs(server): propose client-computed lighting for protocol 1085 #617, feat(lighting): move lighting to the client (protocol 1085) #618, feat(client): compose client-computed local light for protocol 1085 #619 and the celestial follow-up feat(lighting): move celestial light to the client (protocol 1085) #623 land as a unit.
+Follow-up, frame-rate flicker in static scenes: a flicker redraw requested during the draw is consumed with that frame, so in a static scene flicker updates on the 125 ms animation tick rather than every frame. Re-arm it after the frame is consumed, as the emitter-budget deferral does.
+Follow-up, memory lift on empty fog: the signed memory-floor lift applies to every FOW cell. A previously visible empty tile that was soft-cleared into fog is lifted too, and the smooth-light grid can blend that into a faint band at fog boundaries (presentation only). Apply the lift only where map_cell_has_remembered_geometry() holds, as the vertex path and MAP_RENDERING.md do.
+Draft: there's no live rendering observation yet. It needs a GPU display session, which wasn't available to this automated run.
+This is the CPU reference, not the GPU stage. It evaluates one depth and follows the server's supercover events there. The GPU emitter stage with linked depths and qualification is the next step (CLIENT_LIGHTING.md, Rollout step 3).
+Client-computed lighting is always on and is the only path; the Smooth lighting setting is removed. The offline-only discrete projection stays for conformance goldens until step 3 retires it.
+The CPU reference ignores the vertical attenuation byte because it evaluates one depth; the GPU stage applies it on linked-depth steps.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01TboQ496gSkFn2wRAaJNS24
+feat(client): compose client-computed local light for protocol 1085
+…
+2c0212c
+```
+Move the local light profiles, sRGB linearization and Q5.11 conversion into
+libatrinik's light_profile so the server's masks and the client evaluate
+identical fixed-point falloff; the server now delegates to them.
+
+Add client_lighting.c, the CPU reference for the emitter stage. It groups a
+tile's emitters like the server's per-space counters, walks rays through the
+occluder grid with transmission, resolves hue like the server's radiance
+resolver, and composes with the signed coarse level by sign with clamping. The
+map sampler adds the result to received base radiance and then applies the
+viewer's vision floor; cells without a coarse level keep full server radiance.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+github-actions
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Dependency Review
+✅ No vulnerabilities or license issues found.
+Scanned Files
+None
+zoeyrose
+and others
+added 2 commits
+October 17, 2026 00:08
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+7caa969
+```
+…g-composition
+
+# Conflicts:
+#	server/src/server/light.c
+```
+fix(client): evaluate every visible emitter and keep constituent colors
+…
+1e3a628
+```
+Drop the 256-emitter cap: a weak visible emitter below the coarse quantization
+step would otherwise vanish when stronger emitters fill the buffer. Group
+storage and the map's emitter list now grow as needed. Cover per-emitter color
+profiles on a shared tile and a viewport full of emitters.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+zoeyrose
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-10-18T01:57:23.947019Z
+cb376f0
+Draft marked ready
+🔒 Security Review
+✅ Completed 2026-10-18T01:59:05.779450Z
+cb376f0
+Draft marked ready
+Security findings
+Advisory findings (11)
+🟡 Bound emitter regrouping to prevent remote CPU exhaustion · Medium · Resolved
+🟡 Cap distinct emitter profiles per tile · Medium · Resolved
+🟡 Avoid full-field relighting for no-op clears · Medium · Resolved
+🟡 Avoid full-field relighting after no-op aborts · Medium · Resolved
+🟡 Skip relighting for vertical-only occluder changes · Medium · Resolved
+🟡 Mask ignored occluder bits from field revisions · Medium · Resolved
+🟡 Treat zero occluder knownness as field-equivalent · Medium · Resolved
+🟡 Gate FOW relighting on emitter membership · Medium · Resolved
+🟡 Bound relighting after genuine emitter deltas · Medium · Resolved
+🟡 Budget rebuilds after cache-origin changes · Medium · Resolved
+🟡 Apply the relighting budget to auxiliary map draws · Medium
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 17, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 1e3a628f90
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+client/src/gui/widgets/map.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+libatrinik/light_profile.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+client/src/gui/widgets/map.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: 1e3a628f90
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+zoeyrose
+and others
+added 2 commits
+October 17, 2026 00:31
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+fd57cca
+```
+…g-composition
+
+# Conflicts:
+#	client/src/gui/widgets/map.c
+```
+fix(client): keep hue deltas signed and rebuild emitter fields only o…
+…
+7771d89
+```
+…n emitter changes
+
+Carry each channel as the scalar plus a signed hue delta and clamp only after
+adding base radiance, so overlapping light and darkness keep the server's color
+shift. Track a separate per-level emitter revision, advanced by emitter,
+occluder, clear, fog-of-war and transaction-abort changes, so base and timed
+light updates no longer rebuild the emitter field. Document the shared profile
+API's ranges, failure behavior and thread safety.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+zoeyrose
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. You're on a roll.
+Reviewed commit: 7771d89731
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: 7771d89731
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+zoeyrose
+and others
+added 3 commits
+October 17, 2026 01:01
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+42ee339
+```
+…g-composition
+```
+fix(client): advance the emitter revision when scrolling marks fog
+…
+4d32294
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+6948aae
+```
+…g-composition
+```
+zoeyrose
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 17, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 6948aaebee
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+client/src/client/client_lighting.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+client/src/gui/widgets/map.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: 6948aaebee
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+zoeyrose
+and others
+added 2 commits
+October 17, 2026 01:18
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+dff3df8
+```
+…g-composition
+```
+fix(client): honor authored transmission on blockers and compose disc…
+…
+f081a2a
+```
+…rete light
+
+Treat only attenuation 15 as opaque so glass or grates that also block view
+still transmit emitter light, and apply client light composition in the
+discrete (non-smooth) lighting path, which reads cached base radiance directly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+zoeyrose
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. You're on a roll.
+Reviewed commit: f081a2aa4c
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: f081a2aa4c
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+2e236be
+```
+…g-composition
+
+# Conflicts:
+#	server/doc/CLIENT_LIGHTING.md
+```
+zoeyrose
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: f081a2aa4c
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 17, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: f081a2aa4c
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+client/src/gui/widgets/map.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zoeyrose
+and others
+added 2 commits
+October 17, 2026 01:53
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+43fd652
+```
+…g-composition
+```
+feat(client): advertise the client-lighting compositor and reset fiel…
+…
+51dc1d5
+```
+…ds on map clears
+
+Send SETUP CMD_SETUP_CLIENT_LIGHTING with the compositor capability so servers
+with client_lighting enabled send base radiance and the client-lighting
+fields to this client, and advance every level's emitter revision when
+clear_map() clears slots in place.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 17, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 15d219ea6d
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+client/src/gui/widgets/map.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zoeyrose
+added 2 commits
+October 17, 2026 18:18
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+46de664
+```
+…g-composition
+
+# Conflicts:
+#	server/src/server/light.c
+```
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+b70f64f
+```
+…g-composition
+```
+zoeyrose
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. Hooray!
+Reviewed commit: b70f64ff75
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+chatgpt-codex-connector
+Bot
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: b70f64ff75
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+zoeyrose
+marked this pull request as ready for review
+October 17, 2026 23:38
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+19018f2
+```
+…g-composition
+```
+zoeyrose
+marked this pull request as draft
+October 18, 2026 00:15
+zoeyrose
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: 19018f2f17
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. What shall we delve into next?
+Reviewed commit: 19018f2f17
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+f796e40
+```
+…g-composition
+
+# Conflicts:
+#	server/src/server/light.c
+```
+zoeyrose
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. Chef's kiss.
+Reviewed commit: f796e40e45
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: f796e40e45
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+414eb6d
+```
+…g-composition
+```
+zoeyrose
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: 414eb6de96
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. 👍
+Reviewed commit: 414eb6de96
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Merge branch 'feat/client-lighting-protocol' into feat/client-lightin…
+…
+cb376f0
+```
+…g-composition
+```
+zoeyrose
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Member
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. 🎉
+Reviewed commit: cb376f0f8b
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+chatgpt-codex-connector
+Bot
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+🛡️ Codex Security Review · Automatically triggered
+Security review completed. No security issues were found in this pull request.
+Reviewed commit: cb376f0f8b
+View security finding report
+Only the user who started this review can view the report in Codex.
+ℹ️ About Codex security reviews in GitHub
+This is an experimental Codex feature. Security reviews are triggered when:
+You comment "@codex security review"
+A regular code review gets triggered (for example, "@codex review" or when a PR is opened), and you’re opted in so security review runs alongside code review
+Once complete, Codex will leave suggestions, or a comment if no findings are found.
+zoeyrose
+added a commit
+that referenced
+this pull request
+Oct 18, 2026
+docs(server): propose client-computed lighting for protocol 1085 (#617)
+…
+8d914f9
+```
+## Summary
+
+This PR adds the design for moving Classic presentation lighting, local
+and celestial, from the server to the client GPU. There's no code
+change. The design is in `server/doc/CLIENT_LIGHTING.md`, and
+`MAP_RENDERING.md` stays normative until the rollout completes.
+
+Why:
+- Server-side lighting stalls the game thread (seconds while walking
+Brynknot on 5.99.0; see #616 for the immediate fixes).
+- Presentation is limited to one interpolated sample per cell.
+- Q5.11 RGB radiance near walls lets a client triangulate a hidden
+source's tile and hue.
+
+## Privacy principle
+
+The privacy boundary is the set of tiles already sent to this client
+(LOS plus the per-socket MAP2 cache), visible or remembered. The client
+gets as much as it can have inside that boundary. Light from around a
+corner is fine. Creatures, and the current light of objects behind
+walls, are never disclosed.
+
+## Implementation / behavior
+
+Proposed protocol 1085:
+
+- **Signed base radiance**: the existing per-sub-layer scalar and RGB
+words become signed Q4.11 for compositor connections. They carry
+environment only, negative environment included, so there's no aggregate
+fallback any more.
+- **`MAP2_FLAG2_EMITTER`** (5 bytes): radius, a flags byte (bit 0
+flicker opt-in) and color, for objects MAP2 already sends. Colors are
+kept exactly, never folded.
+- **`MAP2_FLAG_EXT_LOCAL_LIGHT`**: a signed coarse level for the fixed
+3×3 block, sent to visible and remembered tiles alike.
+- **`MAP2_FLAG_EXT_OCCLUDER`** (3 bytes): geometry bits, horizontal and
+vertical attenuation, and face bits. Face bits encode static seam
+continuity only between two cells both in view, and never residency.
+- **Celestial**: a `CELESTIAL` command with region light constants and
+the effective phases for the current and next hour, plus a
+`CELESTIAL_STRUCTURE` command with the static structure the solver
+reads. Unseen doors are always reported closed. The solver moves to
+libatrinik so the server and client share it, and MAP2 stops calling the
+celestial solve for these connections.
+- **Client**: emitters are traced through occluders and composed by sign
+against the coarse level. Then it adds signed base and client celestial
+light, applies the vision floor and then the unchanged player field
+(radius 8, center 80, never on fog).
+- **Gameplay authority is unchanged**: darkness gating, infravision,
+`tli`, XRAY and the celestial field stay on the server.
+
+## Validation
+
+- `git diff --check` passes. The wire values are checked against current
+definitions:
+  - the cell fields use `ext_flags` 8 and 16, and 32 is now rejected;
+  - the emitter uses `flags2` 2048.
+
+## Limitations / follow-up
+
+- **Merge constraint (unsafe to merge alone):** the implementation PRs
+#618 and #619 must merge together with, or after, the celestial
+follow-up that removes celestial light from the base radiance. Until
+then the signed base carries the server's all-object celestial field,
+which would expose unsent door and gate state (CLIENT_LIGHTING.md,
+Celestial light). Merging to `main` triggers semantic-release
+automatically, so merging #618/#619 without that follow-up would release
+this state. The protocol-1085 release gate is confirmed by the
+maintainer: #617, #618, #619 and the celestial follow-up #623 land as a
+unit.
+- **Hidden floors in base light (within the maintainer's boundary):** a
+floor withheld from MAP2 still adds its `last_sp` to its tile's
+environment light, which is sent as that authorized tile's light level.
+It discloses an environment value, not the object. Follow-up: derive the
+base from viewer-authorized floor contributions only.
+- **Follow-up, emitter memory budget:** emitter entries scale with sent
+layer records, up to 49 per cell (294 bytes of entries). Define and test
+a per-object budget beside the 72-byte lighting cap.
+- **Unaligned legacy stacks (documented limitation):** a vertical link
+to a level of other or undersized dimensions can't share the coarse
+vertical bucket, so such a stack can tell its floors apart. Shipping
+content uses aligned stacks of full-size maps. Follow-up: fail the whole
+linked component closed for unaligned stacks.
+- Implementation PRs: #618 (protocol and server), #619 (client
+composition), then the celestial PR(s) stacked on top.
+- Decisions recorded in the doc:
+  - static seam faces;
+  - 3×3 blocks with 16 levels per sign;
+  - signed base;
+  - the flicker flag;
+  - `light_private` deferred;
+  - celestial light moves to the client.
+- **Open questions**:
+  - Per-face horizontal transmission.
+- How much of the celestial closure to disclose: the full solver reach,
+which is exact, or authorized tiles plus their upper chains only, which
+is approximate.
+- Whether unseen doors should stay reported closed, which is private but
+inexact.
+- Whether the reserved emitter flag bits should later carry flicker
+parameters.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+zoeyrose
+marked this pull request as ready for review
+October 18, 2026 01:52
+chatgpt-codex-connector
+Bot
+reviewed
+Oct 18, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: cb376f0f8b
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+client/src/gui/widgets/map.c
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Hide details
+View details
+zoeyrose
+merged commit 8d919d5
+into
+feat/client-lighting-protocol
+Oct 18, 2026
+19 of 20 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+zoeyrose
+deleted the
+feat/client-lighting-composition
+branch
+October 18, 2026 03:31
+zoeyrose
+mentioned this pull request
+Oct 18, 2026
+feat(lighting): solve the celestial closure on the client (protocol 1085)
+#626
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

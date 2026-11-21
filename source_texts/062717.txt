@@ -1,0 +1,486 @@
+Streaming 3D reconstruction (LingBot-Map) — personal development repo with viewer upload/trim UI, sequence save/load browser, and TSDF voxel/mesh views - feat(vis): gaussian-splat view of the TSDF band (#13) · kaylC4/lingbot-map@3db481f
+
+feat(vis): gaussian-splat view of the TSDF band (#13) · kaylC4/lingbot-map@3db481f · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+README.md
+lingbot_map/vis
+__init__.py
+point_cloud_viewer.py
+voxel_viewer.py
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎README.md‎
+Copy file name to clipboardExpand all lines: README.md
++5-4Lines changed: 5 additions & 4 deletions
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -284,13 +284,14 @@ python tsdf_fusion.py seq.npz --mesh
+284284
+The same fusion is also available inside the point-cloud viewer: the
+285285
+**TSDF Voxels** panel's *Voxelize* button fuses the currently shown sequence
+286286
+in place — the point cloud disappears and the voxels appear in the same
+287-
+scene. The *Scene* dropdown then switches between **Point Cloud**, **Voxels**
+288-
+and **Mesh** without recomputing (the mesh is extracted once per Min Weight
+289-
+value and cached).
+287+
+scene. The *Scene* dropdown then switches between **Point Cloud**, **Voxels**,
+288+
+**Mesh** and **Splats** without recomputing (the mesh is extracted once per
+289+
+Min Weight value and cached; splats render one gaussian per surface voxel
+290+
+with viser's native splat renderer).
+290291
+291292
+The standalone viewer shows colored voxel cubes with **Iso Threshold** /
+292293
+**Min Weight** sliders that re-filter the surface band live (no re-fusing)
+293-
+and a Cubes/Points/Mesh render toggle. The mesh is the `tsdf = 0`
+294+
+and a Cubes/Points/Mesh/Splats render toggle. The mesh is the `tsdf = 0`
+294295
+isosurface via marching cubes with per-vertex colors — Iso does not apply
+295296
+to it, only Min Weight does (raise it to clean up speckle from
+296297
+rarely-observed voxels). Mesh extraction needs `scikit-image` (included in
+Collapse file
+‎lingbot_map/vis/__init__.py‎
+Copy file name to clipboardExpand all lines: lingbot_map/vis/__init__.py
++2Lines changed: 2 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -32,6 +32,7 @@
+3232
+from lingbot_map.vis.voxel_viewer import (
+3333
+VoxelViewer,
+3434
+add_mesh_scene,
+35+
+add_splat_scene,
+3536
+add_voxel_scene,
+3637
+export_voxels_glb,
+3738
+voxels_to_trimesh,
+@@ -53,6 +54,7 @@
+5354
+"VoxelViewer",
+5455
+"add_voxel_scene",
+5556
+"add_mesh_scene",
+57+
+"add_splat_scene",
+5658
+"voxels_to_trimesh",
+5759
+"export_voxels_glb",
+5860
+# Quick visualization
+Collapse file
+‎lingbot_map/vis/point_cloud_viewer.py‎
+Copy file name to clipboardExpand all lines: lingbot_map/vis/point_cloud_viewer.py
++40-12Lines changed: 40 additions & 12 deletions
+Original file line numberDiff line numberDiff line change
+@@ -1076,6 +1076,7 @@ def _setup_tsdf_gui(self):
+10761076
+self._voxel_handle = None
+10771077
+self._mesh_handle = None
+10781078
+self._mesh_cache = None # (min_weight, extract_mesh result)
+1079+
+self._splat_handle = None
+10791080
+self._tsdf_running = False
+10801081
+10811082
+with self.server.gui.add_folder("TSDF Voxels"):
+@@ -1090,10 +1091,10 @@ def _setup_tsdf_gui(self):
+10901091
+"Visibility Threshold as confidence filter).",
+10911092
+)
+10921093
+self.tsdf_scene_dropdown = self.server.gui.add_dropdown(
+1093-
+"Scene", options=("Point Cloud", "Voxels", "Mesh"),
+1094+
+"Scene", options=("Point Cloud", "Voxels", "Mesh", "Splats"),
+10941095
+initial_value="Point Cloud", disabled=True,
+1095-
+hint="Switch between the point cloud, the fused voxels, and "
+1096-
+"the marching-cubes mesh.",
+1096+
+hint="Switch between the point cloud, the fused voxels, the "
+1097+
+"marching-cubes mesh, and gaussian splats.",
+10971098
+)
+10981099
+self.tsdf_iso_slider = self.server.gui.add_slider(
+10991100
+"Iso Threshold", min=0.05, max=1.0, step=0.01,
+@@ -1121,19 +1122,17 @@ def _(_) -> None:
+11211122
+def _(_) -> None:
+11221123
+self._apply_scene_mode()
+11231124
+1125+
+# _apply_scene_mode already dispatches the rebuild for the current
+1126+
+# scene, so both filter sliders just re-apply it.
+11241127
+@self.tsdf_iso_slider.on_update
+11251128
+def _(_) -> None:
+1126-
+if self._voxel_band is not None and self.tsdf_scene_dropdown.value == "Voxels":
+1127-
+self._rebuild_voxels()
+1129+
+if self._voxel_band is not None:
+1130+
+self._apply_scene_mode()
+11281131
+11291132
+@self.tsdf_weight_slider.on_update
+11301133
+def _(_) -> None:
+1131-
+if self._voxel_band is None:
+1132-
+return
+1133-
+if self.tsdf_scene_dropdown.value == "Voxels":
+1134-
+self._rebuild_voxels()
+1135-
+elif self.tsdf_scene_dropdown.value == "Mesh":
+1136-
+self._rebuild_mesh()
+1134+
+if self._voxel_band is not None:
+1135+
+self._apply_scene_mode()
+11371136
+11381137
+def _run_tsdf(self):
+11391138
+"""Fuse the current sequence into a TSDF voxel band (background)."""
+@@ -1192,7 +1191,7 @@ def _run_tsdf(self):
+11921191
+self.tsdf_button.disabled = self._vis_pred_dict is None
+11931192
+11941193
+def _apply_scene_mode(self):
+1195-
+"""Show the point cloud, the fused voxels, or the extracted mesh."""
+1194+
+"""Show the point cloud, voxels, mesh, or gaussian splats."""
+11961195
+with self._scene_lock:
+11971196
+mode = self.tsdf_scene_dropdown.value
+11981197
+if self._voxel_band is None:
+@@ -1212,10 +1211,15 @@ def _apply_scene_mode(self):
+12121211
+if mode != "Mesh" and self._mesh_handle is not None:
+12131212
+self._mesh_handle.remove()
+12141213
+self._mesh_handle = None
+1214+
+if mode != "Splats" and self._splat_handle is not None:
+1215+
+self._splat_handle.remove()
+1216+
+self._splat_handle = None
+12151217
+if mode == "Voxels":
+12161218
+self._rebuild_voxels()
+12171219
+elif mode == "Mesh":
+12181220
+self._rebuild_mesh()
+1221+
+elif mode == "Splats":
+1222+
+self._rebuild_splats()
+12191223
+12201224
+def _rebuild_voxels(self):
+12211225
+"""(Re)draw the voxel band with the current iso/min-weight filters."""
+@@ -1239,6 +1243,27 @@ def _rebuild_voxels(self):
+12391243
+f"{shown:,} voxels" + ("" if shown == total else f" (of {total:,})")
+12401244
+)
+12411245
+1246+
+def _rebuild_splats(self):
+1247+
+"""(Re)draw the band as gaussian splats with the current filters."""
+1248+
+from lingbot_map.vis.voxel_viewer import add_splat_scene
+1249+
+1250+
+with self._scene_lock:
+1251+
+if self._splat_handle is not None:
+1252+
+self._splat_handle.remove()
+1253+
+self._splat_handle = None
+1254+
+if self._voxel_band is None:
+1255+
+return
+1256+
+self._splat_handle, shown = add_splat_scene(
+1257+
+self.server, self._voxel_band,
+1258+
+iso=self.tsdf_iso_slider.value,
+1259+
+min_weight=self.tsdf_weight_slider.value,
+1260+
+name="/tsdf_splats",
+1261+
+)
+1262+
+if self._splat_handle is None:
+1263+
+self.tsdf_status.value = "0 voxels — lower Min Weight / raise Iso"
+1264+
+else:
+1265+
+self.tsdf_status.value = f"{shown:,} splats"
+1266+
+12421267
+def _rebuild_mesh(self):
+12431268
+"""(Re)extract and draw the tsdf=0 mesh at the current min weight."""
+12441269
+from lingbot_map.utils.meshing import extract_mesh
+@@ -1277,6 +1302,9 @@ def _invalidate_voxels(self):
+12771302
+if self._mesh_handle is not None:
+12781303
+self._mesh_handle.remove()
+12791304
+self._mesh_handle = None
+1305+
+if self._splat_handle is not None:
+1306+
+self._splat_handle.remove()
+1307+
+self._splat_handle = None
+12801308
+self._mesh_cache = None
+12811309
+self._voxel_band = None
+12821310
+self.tsdf_scene_dropdown.value = "Point Cloud"
+Collapse file
+‎lingbot_map/vis/voxel_viewer.py‎
+Copy file name to clipboardExpand all lines: lingbot_map/vis/voxel_viewer.py
++44-5Lines changed: 44 additions & 5 deletions
+Original file line numberDiff line numberDiff line change
+@@ -73,6 +73,32 @@ def add_voxel_scene(server, band, *, iso=0.3, min_weight=1.0, name="/voxels",
+7373
+return handle, len(centers), total
+7474
+7575
+76+
+def add_splat_scene(server, band, *, iso=0.3, min_weight=1.0, name="/splats",
+77+
+scale_mult=1.0):
+78+
+"""Add the filtered band as isotropic gaussian splats; (handle, count).
+79+
+80+
+One gaussian per surface voxel (viser's native splat renderer): center =
+81+
+voxel center, color = voxel color, std = 0.6 * voxel_size * scale_mult
+82+
+so neighbors overlap into a continuous surface. (None, 0) when empty.
+83+
+"""
+84+
+out = filter_band(band, iso=iso, min_weight=min_weight)
+85+
+centers, colors = out["centers"], out["colors"]
+86+
+if len(centers) == 0:
+87+
+return None, 0
+88+
+std = float(band["voxel_size"]) * 0.6 * scale_mult
+89+
+covariances = np.broadcast_to(
+90+
+np.eye(3, dtype=np.float32) * (std * std), (len(centers), 3, 3)
+91+
+)
+92+
+handle = server.scene.add_gaussian_splats(
+93+
+name,
+94+
+centers=centers,
+95+
+covariances=covariances,
+96+
+rgbs=colors,
+97+
+opacities=np.ones((len(centers), 1), dtype=np.float32),
+98+
+)
+99+
+return handle, len(centers)
+100+
+101+
+76102
+def add_mesh_scene(server, band, *, min_weight=1.0, name="/mesh", mesh=None):
+77103
+"""Add the tsdf=0 marching-cubes mesh of the band to a viser scene.
+78104
+@@ -135,7 +161,7 @@ def __init__(self, band, *, port=8080, iso=0.3, min_weight=1.0,
+135161
+self.voxel_size = float(band["voxel_size"])
+136162
+self._handle = None
+137163
+self._mesh_cache = None # (min_weight, extract_mesh result)
+138-
+if mode not in ("Cubes", "Points", "Mesh"):
+164+
+if mode not in ("Cubes", "Points", "Mesh", "Splats"):
+139165
+raise ValueError(f"unknown render mode: {mode}")
+140166
+self._initial_mode = mode
+141167
+@@ -169,12 +195,13 @@ def _setup_gui(self):
+169195
+hint="Require at least this many observations per voxel.",
+170196
+)
+171197
+self.mode_dropdown = self.server.gui.add_dropdown(
+172-
+"Render Mode", options=["Cubes", "Points", "Mesh"],
+198+
+"Render Mode", options=["Cubes", "Points", "Mesh", "Splats"],
+173199
+initial_value=self._initial_mode,
+174200
+)
+175201
+self.psize_slider = self.server.gui.add_slider(
+176202
+"Point Size", min=0.1, max=5.0, step=0.1, initial_value=1.0,
+177-
+disabled=True, hint="Multiplier of the voxel size (Points mode).",
+203+
+disabled=self._initial_mode not in ("Points", "Splats"),
+204+
+hint="Multiplier of the voxel size (Points/Splats modes).",
+178205
+)
+179206
+180207
+@self.iso_slider.on_update
+@@ -189,20 +216,32 @@ def _(_) -> None:
+189216
+190217
+@self.mode_dropdown.on_update
+191218
+def _(_) -> None:
+192-
+self.psize_slider.disabled = self.mode_dropdown.value != "Points"
+219+
+self.psize_slider.disabled = self.mode_dropdown.value not in ("Points", "Splats")
+193220
+self.iso_slider.disabled = self.mode_dropdown.value == "Mesh"
+194221
+self._rebuild()
+195222
+196223
+@self.psize_slider.on_update
+197224
+def _(_) -> None:
+198-
+if self.mode_dropdown.value == "Points":
+225+
+if self.mode_dropdown.value in ("Points", "Splats"):
+199226
+self._rebuild()
+200227
+201228
+def _rebuild(self):
+202229
+if self._handle is not None:
+203230
+self._handle.remove()
+204231
+self._handle = None
+205232
+233+
+if self.mode_dropdown.value == "Splats":
+234+
+self._handle, shown = add_splat_scene(
+235+
+self.server, self.band, iso=self.iso,
+236+
+min_weight=self.min_weight, name="/voxels",
+237+
+scale_mult=self.psize_slider.value,
+238+
+)
+239+
+if self._handle is None:
+240+
+self.shown_text.value = "0 voxels — lower Min Weight / raise Iso"
+241+
+return
+242+
+self.shown_text.value = f"{shown:,} splats"
+243+
+return
+244+
+206245
+if self.mode_dropdown.value == "Mesh":
+207246
+if self._mesh_cache is None or self._mesh_cache[0] != self.min_weight:
+208247
+self._mesh_cache = (
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

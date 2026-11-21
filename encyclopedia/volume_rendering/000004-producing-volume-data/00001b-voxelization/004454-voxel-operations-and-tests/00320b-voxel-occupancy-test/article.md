@@ -1,0 +1,129 @@
+# Voxel Occupancy Test
+
+Also called: Voxel Mask, Voxel Mask Output
+
+## Overview
+The Voxel Occupancy Test determines whether specific continuous points lie within occupied voxels of a discrete 3D grid, producing a binary mask that indicates presence or absence of geometry [S1, S5]. It differs from [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) by operating on a pre-constructed voxel grid structure rather than explicit axis-aligned bounds, and from [Voxel Filled Check](1705-voxel-filled-check.md) by accepting a batch of query points to generate a mask rather than querying a single coordinate [S1, S5].
+
+## How it works
+**Inputs:**
+1. A voxel grid data structure representing the spatial domain.
+2. An array of query points $P$ with shape $(N, 3)$, where each row is a continuous coordinate $(x, y, z)$ [S1, S5].
+
+**Outputs:**
+1. A boolean array or binary `UInt8` mask $M$ of length $N$, where $M[i] = 1$ (or `True`) if point $P[i]$ is inside an occupied voxel, and $0$ (or `False`) otherwise [S1, S5][S4, unofficial].
+
+**Data Structures:**
+The voxel grid is typically stored as a sparse or dense 3D array indexed by integer coordinates $(i, j, k)$. In implementations like Open3D, the grid is created from a point cloud or mesh with a defined `voxel_size` [S1, S5]. The occupancy status is stored as a boolean or integer flag per voxel.
+
+**Steps:**
+1. **Coordinate Mapping**: For each query point $P_i = (x, y, z)$, map the continuous coordinates to discrete voxel indices $(i, j, k)$. This involves subtracting the grid origin and dividing by the voxel size. The specific axis ordering (e.g., XYZ vs ZYX) must match the grid's storage convention [G].
+2. **Boundary Check**: Verify if the computed indices $(i, j, k)$ fall within the valid bounds of the voxel grid. If any index is negative or exceeds the grid dimensions, the point is considered outside the grid [S2, unofficial].
+3. **Occupancy Query**: Access the voxel at $(i, j, k)$ in the grid data structure.
+4. **Result Assignment**: If the voxel is marked as occupied, set the corresponding output mask value to 1 (or `True`); otherwise, set it to 0 (or `False`) [S1, S5].
+5. **Aggregation**: If multiple points map to the same voxel, the mask records the status for each point individually. In some implementations, duplicate points or multiple points per voxel collapse to a single 1 in a global mask, but the primary test returns per-point results [S4, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_occupancy_test(voxel_grid, query_points):
+    """
+    Tests if query points are within occupied voxels.
+    
+    Args:
+        voxel_grid: A structure containing occupancy data and grid parameters.
+                    Must have attributes:
+                    - origin: (x0, y0, z0)
+                    - voxel_size: float
+                    - dimensions: (nx, ny, nz)
+                    - is_occupied(i, j, k): bool function or array access
+        query_points: numpy array of shape (N, 3)
+        
+    Returns:
+        mask: numpy array of shape (N,) with dtype bool or uint8
+    """
+    N = query_points.shape[0]
+    mask = np.zeros(N, dtype=np.uint8)
+    
+    origin = voxel_grid.origin
+    v_size = voxel_grid.voxel_size
+    dims = voxel_grid.dimensions
+    
+    for idx in range(N):
+        p = query_points[idx]
+        
+        # 1. Map to voxel indices
+        # Handle potential non-finite coordinates
+        if not np.isfinite(p).all():
+            mask[idx] = 0
+            continue
+            
+        # Calculate relative position
+        rel_x = p[0] - origin[0]
+        rel_y = p[1] - origin[1]
+        rel_z = p[2] - origin[2]
+        
+        # Integer indices (floor for positive, ceil for negative depending on convention)
+        # Assuming standard floor-based indexing for positive coordinates
+        i = int(rel_x / v_size)
+        j = int(rel_y / v_size)
+        k = int(rel_z / v_size)
+        
+        # 2. Boundary Check
+        if i < 0 or i >= dims[0] or \
+           j < 0 or j >= dims[1] or \
+           k < 0 or k >= dims[2]:
+            mask[idx] = 0
+            continue
+            
+        # 3. Occupancy Query
+        # Access the grid. Implementation varies: sparse hash, dense array, etc.
+        occupied = voxel_grid.is_occupied(i, j, k)
+        
+        # 4. Result Assignment
+        if occupied:
+            mask[idx] = 1
+            
+    return mask
+```
+
+**Parameters:**
+- `voxel_size`: The side length of a voxel. Typical values depend on the scene scale (e.g., 0.05 in Open3D examples) [S1, S5].
+- `origin`: The world coordinate of the grid's $(0,0,0)$ voxel. Default is often $(0,0,0)$ [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Out-of-Bounds Points**: Points outside the destination grid are silently dropped with no warning, resulting in a 0 in the mask [S4, unofficial].
+- **Non-Finite Coordinates**: Points with NaN or Inf coordinates are skipped and treated as empty [S4, unofficial].
+- **I/O Performance**: If the mask is written to disk or a buffer in the order of the input point cloud, a spatially unsorted cloud produces scattered writes, which is I/O-bound. Pre-sorting the point cloud spatially helps performance [S4, unofficial].
+- **Coordinate Mismatch**: If the origin or spacing of the query points does not match the voxel grid's geometry, points may be incorrectly classified or dropped [S4, unofficial].
+
+## Subtopics
+
+### Voxel Contains Scene Geometry Test
+A method to determine if any scene geometry exists inside a voxel, used to flag voxels for subdivision [S6, unofficial]. It differs from standard point-inclusion tests by using rendering techniques (occlusion queries or cubemap sampling) to detect geometry presence rather than geometric intersection [S6, unofficial].
+- **Definition**: Determines if scene geometry intersects a voxel volume [S6, unofficial].
+- **Steps**:
+    1. Sample scene depth at the voxel corners; only some cubemap texels are used to test for intersection [S6, unofficial].
+    2. Alternatively, use occlusion queries: Place the camera at the center of the voxel, render into each face of a cubemap (first drawing quads for the voxel faces, then the scene), and check if any draw calls pass the occlusion query [S6, unofficial].
+- **When to choose**: Use for adaptive subdivision or irradiance volume computation where geometric presence within a volume is required, rather than point containment [S6, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ for $N$ query points, assuming $O(1)$ voxel lookup. If the grid is sparse and uses hashing, lookup is $O(1)$ average. If dense, it is $O(1)$ direct access.
+- **Memory Complexity**: $O(N)$ for the output mask. The voxel grid itself requires memory proportional to the number of voxels (sparse or dense).
+- **Performance**: Fast for batched queries. Performance degrades if the point cloud is unsorted and writes are scattered to memory [S4, unofficial].
+- **Strengths**: Simple, efficient for point-in-voxel queries; supports batch processing.
+- **Limitations**: Does not handle partial voxel occupancy (binary only); sensitive to coordinate system mismatches [S4, unofficial].
+- **When to use**: When you need to know which points from a cloud lie inside a voxelized representation.
+- **When not to use**: When you need to know *which* voxel a point is in for spatial indexing (use [Mask Cache Lookup](6434-mask-cache-lookup.md) or index generation), or when you need to detect geometry inside a voxel using rendering (use [Voxel Contains Scene Geometry Test](1281-voxel-occupancy-test.md#voxel-contains-scene-geometry-test)).
+
+## Background
+The Voxel Occupancy Test is a fundamental operation in voxel-based graphics and geometry processing. It is commonly used in point cloud processing pipelines to convert continuous point data into discrete voxel representations. The method `check_if_included` is part of the Open3D library's voxel grid API, which allows testing if points are within an occupied voxel after voxelization [S1, S5]. The concept is also used in game development for irradiance volume computation and adaptive subdivision [S6, unofficial].
+
+## Sources
+[S1] Voxelization — Open3D 0.12.0 documentation, https://www.open3d.org/docs/0.12.0/tutorial/geometry/voxelization.html, fetched 2026-10-26
+[S2] ria8651/bevy-voxel-engine, https://github.com/ria8651/bevy-voxel-engine, fetched 2026-10-27 (unofficial)
+[S3] tonadr1022/vulkan_voxels, https://github.com/tonadr1022/vulkan_voxels, fetched 2026-10-27 (unofficial)
+[S4] FILT: Voxelize Point Cloud, https://github.com/BlueQuartzSoftware/simplnx/pull/1724, fetched 2026-10-27 (unofficial)
+[S5] Voxelization - Open3D 0.19.0 documentation, https://www.open3d.org/docs/release/tutorial/geometry/voxelization.html, fetched 2026-10-28
+[S6] PDF Irradiance Volumes for Games, https://chrisoat.com/papers/Oat_GDC2005_IrradianceVolumesForGames.pdf, fetched 2026-10-28 (unofficial)

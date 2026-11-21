@@ -1,0 +1,110 @@
+# Incremental Tensor Reconstruction
+
+Also called: Incremental TTM Reconstruction, Rearranged Summation TTM Reconstruction
+
+## Overview
+Incremental Tensor Reconstruction is a GPU-based volume reconstruction method that computes the outer-products of basis matrices and core tensor entries by rearranging the summation order to reduce computational complexity from $O(R_1 \cdot R_2 \cdot R_3 \cdot I_1 \cdot I_2 \cdot I_3)$ to $O(R_1 \cdot I_1 \cdot I_2 \cdot I_3)$ [S1]. It builds on [Tensor Times Matrix (TTM) Reconstruction](7404-tensor-times-matrix-ttm-reconstruction.md) by optimizing the sequential application of TTM kernels for the Tucker decomposition model. It sets itself apart from [Partial Decoding](14061-partial-decoding.md) by focusing on the algebraic rearrangement of the full summation to minimize floating-point operations rather than skipping data blocks.
+
+## How it works
+**Inputs:**
+*   Core tensor $B$ of size $R_1 \times R_2 \times R_3$.
+*   Basis matrices $U^{(1)} \in \mathbb{R}^{I_1 \times R_1}$, $U^{(2)} \in \mathbb{R}^{I_2 \times R_2}$, $U^{(3)} \in \mathbb{R}^{I_3 \times R_3}$.
+*   Output volume dimensions $I_1, I_2, I_3$.
+
+**Outputs:**
+*   Reconstructed volume $A_f \in \mathbb{R}^{I_1 \times I_2 \times I_3}$.
+
+**Data Structures:**
+*   $B$: Stored as a flat array or 3D array of size $R_1 R_2 R_3$.
+*   $U^{(k)}$: Stored as column-major or row-major matrices of size $I_k \times R_k$.
+*   $A_f$: Output buffer of size $I_1 I_2 I_3$, initialized to zero.
+
+**Steps:**
+1.  **Permutation:** Determine the optimal mode ordering. Permute the modes such that the first mode index $r$ corresponds to the smallest rank $R_1$. This minimizes the intermediate accumulation size [S1].
+2.  **Inner Loop (Mode 3):** Compute the weighted sum of the third basis matrix columns scaled by the core tensor entries. For each $r \in [1, R_1]$ and $s \in [1, R_2]$, compute an intermediate vector $V_{r,s} \in \mathbb{R}^{I_3}$:
+    $$ V_{r,s}[t] = \sum_{t=1}^{R_3} B[r, s, t] \cdot U^{(3)}[t, t] \quad \text{(Note: indices adjusted for vector access)} $$
+    More precisely, for fixed $r, s$, $V_{r,s}$ is the linear combination of the columns of $U^{(3)}$ weighted by $B[r, s, :]$.
+3.  **Middle Loop (Mode 2):** Compute the outer product accumulation. For each $r \in [1, R_1]$, compute an intermediate matrix $M_r \in \mathbb{R}^{I_2 \times I_3}$:
+    $$ M_r = \sum_{s=1}^{R_2} U^{(2)}[:, s] \otimes V_{r,s} $$
+    Here, $U^{(2)}[:, s]$ is the $s$-th column of $U^{(2)}$. The outer product $u \otimes v$ creates a matrix where $M_r[i, j] = u[i] \cdot v[j]$.
+4.  **Outer Loop (Mode 1):** Accumulate the final volume. For each $r \in [1, R_1]$, add the scaled intermediate matrix to the output volume:
+    $$ A_f += U^{(1)}[:, r] \otimes M_r $$
+    This adds the outer product of the $r$-th column of $U^{(1)}$ and the matrix $M_r$ to the global accumulator $A_f$.
+
+**Formula:**
+The reconstruction is defined by the rearranged summation [S1]:
+$$ A_f = \sum_{r=1}^{R_1} U^{(1)}[:, r] \otimes \left( \sum_{s=1}^{R_2} U^{(2)}[:, s] \otimes \left( \sum_{t=1}^{R_3} B[r, s, t] \cdot U^{(3)}[:, t] \right) \right) $$
+
+**Parameters:**
+*   $R_1, R_2, R_3$: Ranks of the Tucker decomposition. To achieve best performance, $R_1$ should be the smallest rank [S1].
+*   Typical values: Ranks are chosen based on visual accuracy or error thresholds. A common starting point is $R_n = I_n / 2$ for the first level [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Accumulating many small outer products can lead to floating-point precision loss. Use double precision for accumulation if high dynamic range is required [G].
+*   **Memory:** The intermediate storage for $V_{r,s}$ and $M_r$ must fit in cache or local memory to avoid bandwidth bottlenecks. $M_r$ requires $I_2 \cdot I_3$ space.
+*   **Degenerate Input:** If any $R_k = 0$, the output is zero. If $I_k < R_k$, the basis matrix columns exceed the volume dimension, which is invalid for standard reconstruction [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def incremental_tensor_reconstruction(B, U1, U2, U3, I1, I2, I3):
+    """
+    Reconstructs volume Af from Tucker core B and basis matrices U1, U2, U3.
+    Assumes modes are permuted such that U1 has the smallest rank R1.
+    """
+    R1, R2, R3 = B.shape
+    Af = zeros((I1, I2, I3))
+    
+    # Precompute U3 columns for faster access if needed, 
+    # but direct indexing is standard.
+    
+    for r in range(R1):
+        # Compute intermediate matrix Mr of size I2 x I3
+        Mr = zeros((I2, I3))
+        
+        for s in range(R2):
+            # Compute weighted sum of U3 columns for fixed r, s
+            # V_rs is a vector of size I3
+            V_rs = zeros(I3)
+            for t in range(R3):
+                weight = B[r, s, t]
+                # U3[:, t] is the t-th column of U3
+                for i3 in range(I3):
+                    V_rs[i3] += weight * U3[i3, t]
+            
+            # Outer product of U2[:, s] and V_rs
+            # U2[:, s] is a vector of size I2
+            for i2 in range(I2):
+                u2_val = U2[i2, s]
+                for i3 in range(I3):
+                    Mr[i2, i3] += u2_val * V_rs[i3]
+        
+        # Outer product of U1[:, r] and Mr, added to Af
+        # U1[:, r] is a vector of size I1
+        for i1 in range(I1):
+            u1_val = U1[i1, r]
+            for i2 in range(I2):
+                for i3 in range(I3):
+                    Af[i1, i2, i3] += u1_val * Mr[i2, i3]
+                    
+    return Af
+```
+
+## Subtopics
+
+### Progressive Tensor Approximation Reconstruction
+A technique to generate reconstructions at coarser or finer resolutions by eliminating the least significant columns of the basis matrices and corresponding data entries in the core tensor from a single initial tensor decomposition [S1]. It leverages the natural order in the rank-space where ranks with higher impact are ordered first [S1]. The approximation at rank $R_k$ is recursively defined as $A_{f_{R_k}} = A_{f_{R_{k-1}}} + \sum_{r_k=R_{k-1}}^{R_k} B[\dots] \cdot U^{(1)}[\dots] \otimes \dots \otimes U^{(N)}[\dots]$ [S1]. This allows variable rank reconstruction using any index subranges $r_k \in 1 \dots \le R_k$ without recomputing the decomposition [S1]. Ranks are typically chosen as $R_n = I_n/2$ for the first level, then divided by 2 progressively for subsequent steps [S1].
+
+## Operating characteristics
+**Time Complexity:** $O(R_1 \cdot I_1 \cdot I_2 \cdot I_3)$ [S1]. This is a significant reduction from the naive $O(R_1 \cdot R_2 \cdot R_3 \cdot I_1 \cdot I_2 \cdot I_3)$ [S1].
+**Space Complexity:** $O(R_1 \cdot R_2 \cdot R_3 + R_1 \cdot I_1 + R_2 \cdot I_2 + R_3 \cdot I_3)$ [S1]. This contrasts with the $O(I_1 \cdot I_2 \cdot I_3)$ space of the original uncompressed volume [S1].
+**Performance:** The method is optimized for GPU execution by rearranging summation order to maximize data reuse and minimize intermediate storage [S1]. Performance is best when $R_1$ is the smallest rank [S1].
+**Strengths:** Linear growth of computational cost with respect to the volume dimensions $I_1, I_2, I_3$ (scaled by $R_1$), enabling efficient reconstruction of large volumes from compressed representations [S1]. Supports progressive/multiscale rendering without additional decomposition [S1].
+**Limitations:** Requires the tensor decomposition to be pre-computed. The complexity still depends linearly on the volume size, so extremely high-resolution volumes may still be costly if ranks are not sufficiently small [G].
+
+## Background
+Originating from the application of Tensor Approximation to multiscale volume feature representations, this method was introduced by S.K. Suter, C.P.E. Zollikofer, and R. Pajarola [S1]. It builds upon the Higher-Order Singular Value Decomposition (HOSVD) and Alternating Least Squares (ALS) algorithms for tensor decomposition [S1]. The approach addresses the need for efficient visualization and compression of large 3D medical and scientific volume data, allowing for variable resolution rendering from a single compressed model [S1].
+
+## Sources
+[S1] Application of Tensor Approximation to Multiscale Volume Feature Representations, https://doi.org/10.2312/pe/vmv/vmv10/203-210, fetched 2026-10-26

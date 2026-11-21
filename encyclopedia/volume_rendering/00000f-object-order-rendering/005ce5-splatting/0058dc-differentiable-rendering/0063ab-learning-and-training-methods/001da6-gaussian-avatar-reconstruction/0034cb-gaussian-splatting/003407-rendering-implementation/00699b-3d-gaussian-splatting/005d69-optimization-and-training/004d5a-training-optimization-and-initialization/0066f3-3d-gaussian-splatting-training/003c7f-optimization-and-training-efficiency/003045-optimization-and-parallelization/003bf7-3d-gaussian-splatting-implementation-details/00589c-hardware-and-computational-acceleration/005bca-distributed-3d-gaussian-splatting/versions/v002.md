@@ -1,0 +1,47 @@
+# Distributed 3D Gaussian Splatting
+
+Also called: Distributed 3D Gaussian Splatting for Scientific Visualization, Distributed 3D-GS, Multi-GPU 3D-GS
+
+## Overview
+Distributed 3D Gaussian Splatting is a multi-GPU extension of the 3D Gaussian Splatting (3D-GS) pipeline designed for scientific visualization, enabling the scalable processing of large datasets that exceed the memory capacity of a single GPU [S1]. It differs from standard 3D-GS by partitioning the global set of Gaussian primitives and training data across multiple GPUs, utilizing a fused all-reduce scheme for gradient synchronization to maintain high-fidelity isosurface reconstruction at scales previously infeasible [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scientific volume data (e.g., CFD simulation outputs), number of GPUs $M$, image resolution $R \times R$.
+*   **Output:** Optimized set of 3D Gaussian primitives $\mathcal{G}$ and rendered images matching synthetic camera views.
+
+**Data Structures:**
+The global set of Gaussians $\mathcal{G}$ is partitioned into $M$ shards $\mathcal{G}^{(m)}$, where each GPU $m \in \{0, \dots, M-1\}$ holds a local shard. Each Gaussian primitive retains the standard 3D-GS attributes: center position $\mathbf{x}$, covariance matrix $\Sigma$ (or rotation/scale parameters), opacity $\alpha$, and spherical harmonic coefficients for view-dependent color [S1, 12180]. The optimizer state (momentum, variance) is also sharded locally [15108].
+
+**Algorithm Steps:**
+1.  **Initialization:** Extract an isosurface point cloud directly from the scientific volume data using ParaView [S1]. This point cloud serves as the initialization for the Gaussian primitives, bypassing image-based reconstruction methods [S1].
+2.  **Data Partitioning:** Distribute the global point cloud and corresponding Gaussian parameters across the $M$ GPUs such that each GPU holds a shard $\mathcal{G}^{(m)}$ [S1]. Distribute the training data (synthetic camera views) across the workers [S1].
+3.  **Synthetic View Generation:** Generate a set of synthetic camera views in a structured orbit [S1]. The number of views is increased to 448 (compared to 250 in prior work [4]) to better support the complexity of scientific data [S1].
+4.  **Distributed Training Loop:**
+    a.  **Local Forward Pass:** Each GPU performs local projection and rasterization of its shard $\mathcal{G}^{(m)}$ to render images for its assigned subset of camera views [15108].
+    b.  **Loss Computation:** Compute the reconstruction loss (e.g., L1, SSIM) between rendered images and ground truth views [S1].
+    c.  **Gradient Synchronization:** Synchronize gradients across all GPUs via a fused all-reduce scheme [S1]. This ensures that the global optimization step accounts for gradients from all shards.
+    d.  **Local Update:** Each GPU updates its local shard $\mathcal{G}^{(m)}$ and optimizer state using the synchronized gradients [15108].
+5.  **Rendering:** For inference, the distributed shards can be aggregated or accessed via all-to-all communication to render high-resolution images [15108].
+
+**Parameters:**
+*   **Number of Synthetic Camera Views:** 448 [S1].
+*   **Image Resolutions:** 512x512, 1024x1024, 2048x2048 [S1].
+*   **Hardware:** NVIDIA A100 GPUs [S1].
+
+**Pitfalls:**
+*   **Memory Limits:** A single NVIDIA A100 GPU supports up to approximately 11.2M Gaussians [S1]. Datasets exceeding this limit (e.g., Miranda with ~18M Gaussians) are infeasible on a single GPU and require distributed training [S1].
+*   **Communication Overhead:** While not explicitly quantified, the reliance on fused all-reduce implies that network bandwidth and latency between GPUs are critical factors for performance [S1].
+
+## Operating characteristics
+*   **Scalability:** The method achieves significant speedups with increased GPU counts. For the Kingsnake dataset (4M Gaussians) at 2048x2048 resolution, using 4 GPUs provides a 5.6x speedup compared to a single GPU (8.50 min vs 48.00 min) [S1].
+*   **Memory Efficiency:** Enables training on datasets with >11.2M Gaussians, which exceed single A100 memory capacity [S1].
+*   **Performance:** On the Miranda dataset (18M Gaussians) at 2048x2048 resolution with 4 GPUs, training time is 16.84 minutes [S1].
+*   **Quality:** Maintains high reconstruction quality. Kingsnake (4 GPUs): PSNR 29.32, SSIM 0.97, LPIPS 0.03 [S1]. Miranda (4 GPUs): PSNR 36.37, SSIM 0.99, LPIPS 0.011 [S1].
+*   **Limitations:** Requires access to multi-GPU hardware (e.g., HPC nodes) and efficient interconnects for all-reduce operations [S1].
+
+## Background
+This method was presented in 2025 by Mateevitsi, Papka, Petruzza, and Sizzi from the University of Illinois Chicago, Argonne National Laboratory, and Utah State University [S1]. It builds on previous work by Sewell et al. [4] which demonstrated high-fidelity isosurface reconstruction using Gaussian primitives, and incorporates the distributed training design from Grendel-GS [6] to enable scalable processing of large scientific datasets. The work aims to integrate 3D-GS into HPC-based scientific workflows for real-time post hoc and in situ visualization [S1].
+
+## Sources
+[S1] Toward Distributed 3D Gaussian Splatting for High-Resolution Isosurface Visualization, https://doi.org/10.1109/escience65000.2025.00056, fetched 2026-10-29

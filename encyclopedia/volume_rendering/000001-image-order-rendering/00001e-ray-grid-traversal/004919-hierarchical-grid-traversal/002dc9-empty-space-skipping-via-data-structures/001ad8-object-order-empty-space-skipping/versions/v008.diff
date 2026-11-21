@@ -1,0 +1,97 @@
+--- v007.md
++++ v008.md
+@@ -43,6 +43,6 @@
+ 3.  **Object-Order Skip Range Determination (Rasterization Pass):**
+     *   Compute the initial search range $[t_{\text{start}}(x, y), t_{\text{exit}}(x, y)]$ for each ray [S1].
+-    *   **Front Faces:** Rasterize the front faces of the active block bounding geometry. Use a depth test (e.g., `GL_LESS`) to retain the closest intersection depth $t_{\text{start}}$ [S1].
+-    *   **Back Faces:** Rasterize the back faces of the active block bounding geometry. Use an inverted depth test (e.g., `GL_GREATER`) to retain the farthest intersection depth $t_{\text{exit}}$ [S1].
++    *   **Front Faces:** Rasterize the front faces of the active block bounding geometry [S1]. Use a depth test (e.g., `GL_LESS`) to retain the closest intersection depth $t_{\text{start}}$ [S1].
++    *   **Back Faces:** Rasterize the back faces of the active block bounding geometry [S1]. Use an inverted depth test (e.g., `GL_GREATER`) to retain the farthest intersection depth $t_{\text{exit}}$ [S1].
+     *   *Note:* This step effectively skips large inactive regions outside the active block cluster [S1].
+ 
+@@ -57,5 +57,5 @@
+             *   Skip the samples within this block.
+             *   Advance $t$ to the exit of the current block [S1].
+-            *   *Pitfall:* Inactive blocks enclosed by active blocks are not excluded by the bounding geometry. They are skipped here on a per-sample basis [S1].
++            *   *Pitfall:* Inactive blocks enclosed by active blocks are not excluded by the bounding geometry [S1]. They are skipped here on a per-sample basis [S1].
+         *   If the block is active:
+             *   Perform standard ray marching/sampling within the block [S1].
+@@ -68,6 +68,9 @@
+ import math
+ 
+-def compute_block_exit_t(ray_origin, ray_dir, block_min_x, block_min_y, block_min_z, block_size):
+-    # Standard slab method to find exit t for an axis-aligned block
++def texture_fetch(tex, pos):
++    # Standard 3D texture lookup [G]
++    return tex[pos]
++
++def compute_block_exit_t(ray_origin, ray_dir, block_min, block_max):
+     t_min = -math.inf
+     t_max = math.inf
+@@ -76,37 +79,33 @@
+         d = ray_dir[i]
+         if abs(d) > 1e-6:
+-            t1 = (block_min_x if i == 0 else block_min_y if i == 1 else block_min_z) / d
+-            t2 = (block_min_x + block_size if i == 0 else block_min_y + block_size if i == 1 else block_min_z + block_size) / d
++            t1 = block_min[i] / d
++            t2 = block_max[i] / d
+             t_min = max(t_min, min(t1, t2))
+             t_max = min(t_max, max(t1, t2))
+         else:
+-            if o < (block_min_x if i == 0 else block_min_y if i == 1 else block_min_z):
++            if o < block_min[i]:
+                 return math.inf
+     return t_max
+ 
+-def fragment_shader(pixel_x, pixel_y, camera_pos, ray_dir, t_start, t_exit, block_stats, block_size, isovalue, step_size):
++def fragment_shader(V, camera_pos, ray_dir, t_start, t_exit, block_stats, block_size, isovalue, step_size):
+     t = t_start
+-    acc_color = [0.0, 0.0, 0.0, 0.0] # RGBA
++    acc_color = [0.0, 0.0, 0.0, 0.0] # RGBA [G]
+ 
+     while t < t_exit:
+-        # Map ray position to volume coordinates
+         voxel_pos = [camera_pos[i] + t * ray_dir[i] for i in range(3)]
+-        # Map to block coordinates
+         block_x = math.floor(voxel_pos[0] / block_size)
+         block_y = math.floor(voxel_pos[1] / block_size)
+         block_z = math.floor(voxel_pos[2] / block_size)
+ 
+-        # Query block stats
+         min_val, max_val = block_stats[block_x, block_y, block_z]
+ 
+         if max_val <= isovalue:
+-            # Block inactive: skip to block exit
+-            block_exit_t = compute_block_exit_t(camera_pos, ray_dir, block_x * block_size, block_y * block_size, block_z * block_size, block_size)
++            block_min = [block_x * block_size, block_y * block_size, block_z * block_size]
++            block_max = [(block_x + 1) * block_size, (block_y + 1) * block_size, (block_z + 1) * block_size]
++            block_exit_t = compute_block_exit_t(camera_pos, ray_dir, block_min, block_max)
+             t = max(t, block_exit_t)
+         else:
+-            # Block active: sample and composite
+-            sample_val = voxel_pos[0] # Standard volume texture lookup [G]
+-            color, opacity = sample_val, 0.5 # Standard transfer function evaluation [G]
+-            # Front-to-back compositing
++            sample_val = texture_fetch(V, voxel_pos) # [G]
++            color, opacity = evaluate_transfer_function(sample_val) # [G]
+             acc_color[3] += (1.0 - acc_color[3]) * opacity
+             acc_color[0:3] = [acc_color[i] + color[i] * (1.0 - acc_color[3]) for i in range(3)]
+@@ -118,9 +117,9 @@
+ 
+ ### Parameters
+-*   **Block Size ($B$):** Regular subdivision of volume into small blocks. Typical values are $4^3$ or $8^3$ voxels per block [S1].
++*   **Block Size ($B$):** Regular subdivision of volume into small blocks [S1]. Typical values are $4^3$ or $8^3$ voxels per block [S1].
+ *   **Isovalue Threshold ($\tau$):** The threshold above which a block is considered active [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Enclosed Inactive Blocks:** Inactive blocks enclosed by active blocks are not excluded from the search range by the bounding geometry (object-order skip). Samples in these blocks are skipped on a per-sample basis (image-order skip) early in the ray-casting loop [S1].
++*   **Enclosed Inactive Blocks:** Inactive blocks enclosed by active blocks are not excluded from the search range by the bounding geometry (object-order skip) [S1]. Samples in these blocks are skipped on a per-sample basis (image-order skip) early in the ray-casting loop [S1].
+ *   **Isovalue Changes:** The active status of blocks must be recomputed whenever the isovalue changes, as this affects the min-max culling [S1].
+ 
+@@ -131,5 +130,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. Rendering cost is proportional to the number of active blocks and samples within them [S1].
++*   **Time Complexity:** Not given in the sources [G]. Rendering cost is proportional to the number of active blocks and samples within them [S1].
+ *   **Memory Complexity:** Requires additional memory for the min-max block structure, which is $O(N/B^3)$, significantly smaller than the volume itself [G].
+ *   **Strengths:** Most empty space is skipped with no cost using modified ray segments $[t_{\text{start}}, t_{\text{exit}}]$ [S1]. Only for a small number of samples empty space has to be skipped on a sample-by-sample basis [S1].

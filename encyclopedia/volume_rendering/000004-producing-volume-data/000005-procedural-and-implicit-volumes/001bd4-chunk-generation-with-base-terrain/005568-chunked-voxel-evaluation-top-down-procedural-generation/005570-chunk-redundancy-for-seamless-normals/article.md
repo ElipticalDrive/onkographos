@@ -1,0 +1,102 @@
+# Chunk Redundancy for Seamless Normals
+
+Also called: Redundant Chunk Generation, Oversized Chunk Voxelization
+
+## Overview
+This method solves the discontinuity in normal vectors at chunk boundaries in top-down procedural voxel generation by generating voxels with dimensions larger than the renderable area [S1, unofficial]. It sets itself apart from standard chunked evaluation by decoupling the generation domain from the rendering domain, allowing the shader to sample neighbors across logical boundaries without requiring global data structures or complex seam-blending logic [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Chunk ID and global seed for deterministic procedural generation.
+*   Base terrain or object parameters passed from CPU to GPU [Parent].
+*   Render bounds for the current chunk.
+
+**Outputs:**
+*   A voxel grid (texture or buffer) containing density and material data.
+*   Normal vectors calculated per-voxel or per-pixel.
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array or 3D texture.
+*   **Dimensions:** The grid dimensions $D_{gen}$ are scaled by a redundancy factor $R$ relative to the render dimensions $D_{render}$.
+    $$ D_{gen} = \lceil R \times D_{render} \rceil $$
+    Typical value for $R$ is 1.25 [S1, unofficial].
+
+**Steps:**
+1.  **Calculate Generation Bounds:** Determine the spatial extent of the chunk required for generation. If the render bounds are $[0, W] \times [0, H] \times [0, D]$, the generation bounds extend beyond these limits by a margin derived from $R$.
+2.  **Procedural Evaluation:** Evaluate the procedural voxel function (e.g., noise, SDF, or terrain generation) for all voxels within the expanded generation bounds. This evaluation must be deterministic based on the chunk ID and global seed [S1, unofficial].
+3.  **Store Voxels:** Write the density and material data for all generated voxels into the output structure. Note that voxels outside the render bounds are stored but not sampled for color/opacity during the final render pass.
+4.  **Render Pass:** Render the chunk using only the voxels within the original render bounds $[0, W] \times [0, H] \times [0, D]$.
+5.  **Normal Calculation:** Inside the shader, calculate normals using the gradient of the density field. Because the voxel data includes the redundant margin, the gradient calculation at the edge of the render bounds can sample voxels that belong to the logical neighbor chunk (which shares the same generation logic due to the overlap) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_chunk(chunk_id, render_width, render_height, render_depth, redundancy_factor=1.25):
+    # 1. Calculate expanded dimensions
+    gen_width = int(render_width * redundancy_factor)
+    gen_height = int(render_height * redundancy_factor)
+    gen_depth = int(render_depth * redundancy_factor)
+    
+    # 2. Initialize voxel grid
+    # Grid size matches generation dimensions
+    voxel_grid = create_3d_texture(gen_width, gen_height, gen_depth)
+    
+    # 3. Evaluate procedural function for all voxels in generation bounds
+    for z in range(gen_depth):
+        for y in range(gen_height):
+            for x in range(gen_width):
+                # Map local voxel coordinate to world/object space
+                # This mapping must account for the offset relative to the chunk's origin
+                world_pos = voxel_to_world(x, y, z, chunk_id)
+                
+                # Evaluate density and material
+                density = procedural_voxel_function(world_pos, chunk_id)
+                material = get_material(density)
+                
+                voxel_grid.set(x, y, z, density, material)
+                
+    return voxel_grid
+
+def render_chunk(voxel_grid, render_width, render_height, render_depth):
+    # 4. Render only within render bounds
+    for pixel in screen_pixels:
+        ray = cast_ray(pixel)
+        color = trace_ray_through_voxels(ray, voxel_grid, render_width, render_height, render_depth)
+        set_pixel_color(pixel, color)
+
+def calculate_normal(voxel_grid, x, y, z):
+    # 5. Seamless normal calculation using redundant data
+    # Sample neighbors. Because grid is oversized, neighbors at boundary
+    # are valid data from the overlapping generation region.
+    dx = sample_density(voxel_grid, x + 1, y, z) - sample_density(voxel_grid, x - 1, y, z)
+    dy = sample_density(voxel_grid, x, y + 1, z) - sample_density(voxel_grid, x, y - 1, z)
+    dz = sample_density(voxel_grid, x, y, z + 1) - sample_density(voxel_grid, x, y, z - 1)
+    
+    normal = normalize(vec3(dx, dy, dz))
+    return normal
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The redundancy factor must be large enough to cover the gradient kernel size. If the normal calculation uses a larger stencil, $R$ must increase [S1, unofficial].
+*   **Memory:** Memory usage increases by $R^3$ relative to the render volume. For $R=1.25$, this is a ~95% increase in memory per chunk.
+*   **Seams:** If the procedural function is not continuous or deterministic across chunk boundaries, seams will appear in the redundant region, causing artifacts in the normal calculation [S1, unofficial].
+
+## Subtopics
+
+### Toroidal Volume Tiling
+This variant applies to volumetric fur or microgeometry where the volume wraps around a model surface [S2, unofficial]. Instead of spatial redundancy, it tiles the volume toroidally across the UV map of the model to ensure seamless projection without seams [S2, unofficial]. It requires careful generation to avoid boundary artifacts and relies on UV mapping that minimizes distortion to ensure smooth fur without local distortions [S2, unofficial]. Unlike chunk redundancy, which handles spatial adjacency in world space, this handles topological adjacency in texture space.
+
+## Operating characteristics
+*   **Time Complexity:** Generation time increases by a factor of $R^3$ per chunk. For $R=1.25$, generation is ~95% slower per chunk compared to non-redundant generation.
+*   **Memory Complexity:** Memory usage per chunk increases by $R^3$.
+*   **Strengths:** Eliminates normal seams at chunk boundaries without requiring inter-chunk communication or global data structures. Allows fully parallel chunk generation [S1, unofficial].
+*   **Limitations:** Increased memory bandwidth and storage requirements. The redundancy factor is a trade-off between seamlessness and performance.
+*   **When to use:** When rendering large procedural volumes with high-frequency detail where normal continuity is critical, and inter-chunk synchronization is undesirable.
+
+## Background
+This method was described in the context of the VoxelQuest engine, where it was used to generate seamless normals for procedural chunks in a top-down voxel generation pipeline [S1, unofficial]. The approach leverages the deterministic nature of procedural generation to allow overlapping generation domains.
+
+## Sources
+[S1] How Does It Work?, https://www.voxelquest.com/news/how-does-it-work, fetched 2026-10-29 (unofficial)
+[S2] A Volumetric Approach to Rendering Microgeometry Using PRT, https://www.cs.umbc.edu/~ugrad/honors/theses/JohnKloetzli.pdf, fetched 2026-10-28 (unofficial)

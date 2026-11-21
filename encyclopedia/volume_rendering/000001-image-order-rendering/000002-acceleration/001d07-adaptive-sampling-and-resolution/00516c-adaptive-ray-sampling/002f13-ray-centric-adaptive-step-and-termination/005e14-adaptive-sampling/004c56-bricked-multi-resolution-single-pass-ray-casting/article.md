@@ -1,0 +1,127 @@
+# Bricked Multi-Resolution Single-Pass Ray-Casting
+
+Also called: Adaptive Sampling with Bricking
+
+## Overview
+Bricked Multi-Resolution Single-Pass Ray-Casting is a GPU-based volume rendering technique that combines hierarchical data storage (bricking) with adaptive sampling to efficiently render large-scale multi-resolution volumes. It solves the problem of high memory bandwidth consumption and cache inefficiency in large datasets by varying the sampling density based on proximity to the isosurface and screen-space statistics. It sets itself apart from its siblings by executing a single-pass fragment program that performs both adaptive object-space sampling (along the ray) and adaptive image-space sampling (based on screen tiles), using transfer function-based Level of Detail (LOD) selection to fetch correct neighborhood samples for interpolation directly in the shader [S1, unofficial].
+
+## How it works
+The method operates on a multi-resolution grid stored in bricks. The rendering pipeline executes a single-pass fragment program.
+
+**Inputs:**
+*   Multi-resolution volume data (bricks).
+*   Transfer function (for LOD selection and color/opacity).
+*   View parameters (camera, ray origin, direction).
+*   Screen tile statistics (for adaptive image-space sampling).
+
+**Outputs:**
+*   Final pixel color and opacity.
+
+**Data Structures:**
+*   **Bricks:** Blocks of volume data at various resolution levels.
+*   **Page Tables:** Hierarchical structures mapping virtual coordinates to brick locations.
+*   **Tile Statistics:** Metadata per screen tile indicating required sampling density or error bounds.
+
+**Steps:**
+1.  **Ray Initialization:** For each pixel, compute the ray origin and direction.
+2.  **Adaptive Image-Space Sampling:** Determine the sampling rate for the current screen tile based on pre-computed statistics. This may involve skipping pixels or adjusting the step size in screen space if the method supports it, though the primary adaptation is often along the ray [S1, unofficial].
+3.  **Ray Marching Loop:**
+    a.  **Position Calculation:** Determine the current sample position $p$ in normalized virtual volume space along the ray.
+    b.  **LOD Selection:** Compute a floating-point Level of Detail value $lod(p)$ for the current sample. This is typically estimated by calculating the projected screen-space size of the corresponding voxel at the current depth [S2].
+    c.  **Resolution Level Determination:** Convert $lod(p)$ to an integer resolution level $l$ by rounding to the nearest integer [S2].
+    d.  **Address Translation:** Perform hierarchical address translation to find the brick containing the sample at level $l$. This involves traversing the page table hierarchy (page directory, page table) to locate the brick [S2]. Spatial coherence is exploited by tracking the last used indices to reduce lookup overhead [S2].
+    e.  **Data Fetching:** Fetch the voxel data from the identified brick. Ensure correct neighborhood samples are fetched for interpolation [S1, unofficial].
+    f.  **Interpolation:** Sample the data at position $p$ using tri-linear interpolation at the selected resolution level $l$ [S2]. Alternatively, compute two adjacent resolution levels, sample both, and interpolate linearly in-between [S2].
+    g.  **Transfer Function Application:** Use the transfer function to determine color and opacity based on the sampled value. The transfer function also aids in LOD selection [S1, unofficial].
+    h.  **Accumulation:** Composite the color and opacity into the final pixel value using front-to-back or back-to-front compositing.
+    i.  **Step Advancement:** Advance the ray position. The step size is adapted based on the sampling density requirements (adaptive object-space sampling) [S1, unofficial].
+4.  **Termination:** Stop when the ray exits the volume or the accumulated opacity reaches a threshold.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_pixel(ray_origin, ray_direction, tile_stats):
+    # Adaptive image-space sampling: determine initial step or skip logic based on tile_stats
+    # [S1, unofficial] Adaptive image-space sampling, based on statistics for screen tiles
+    
+    accumulated_color = (0.0, 0.0, 0.0, 0.0)
+    t = 0.0
+    last_page_dir_idx = -1
+    last_page_table_idx = -1
+    
+    while t < ray_length:
+        # Compute sample position in normalized virtual volume space
+        p = ray_origin + ray_direction * t
+        
+        # Compute floating-point LOD value based on projected screen space size of voxel
+        lod_p = compute_lod(p, ray_direction, camera_params)
+        
+        # Determine integer resolution level
+        l = round(lod_p)
+        
+        # Hierarchical address translation with coherence optimization
+        # [S2] Exploiting Spatial Coherence for Page Table Look-Ups
+        page_dir_idx, page_table_idx, brick_offset = translate_address(p, l, last_page_dir_idx, last_page_table_idx)
+        
+        # Update last used indices for coherence
+        last_page_dir_idx = page_dir_idx
+        last_page_table_idx = page_table_idx
+        
+        # Fetch voxel data from brick
+        # [S1, unofficial] Correct neighborhood samples for interpolation fetched in shader
+        voxel_value = fetch_voxel(brick_offset, p)
+        
+        # Interpolation
+        # [S2] Tri-linear interpolation at level l
+        # Or: sample two adjacent levels and interpolate linearly
+        interpolated_value = tri_linear_interpolate(voxel_value, p)
+        
+        # Transfer function application for color, opacity, and LOD selection
+        # [S1, unofficial] Transfer function-based LOD selection
+        color, opacity = apply_transfer_function(interpolated_value, l)
+        
+        # Front-to-back compositing
+        accumulated_color = composite(accumulated_color, color, opacity)
+        
+        if accumulated_color.a >= 1.0:
+            break
+            
+        # Adaptive step size along ray
+        # [S1, unofficial] Adapting sampling density along ray
+        step = compute_adaptive_step(p, l, tile_stats)
+        t += step
+        
+    return accumulated_color
+```
+
+**Parameters:**
+*   $lod(p)$: Level of detail function. Typical implementation: estimate projected screen space size of the voxel [S2].
+*   $l$: Integer resolution level. Derived from $lod(p)$ by rounding [S2].
+*   $b_{pt}, b_{vox}$: Page table and voxel block sizes. Example: $b_{pt} = b_{vox} = 32$, $t = 2$ [S2].
+
+**Edge Cases:**
+*   **Precision:** Floating-point precision in $lod(p)$ calculation may affect LOD selection stability.
+*   **Boundaries:** Ray exit conditions must be handled correctly.
+*   **Degenerate Input:** Rays parallel to axes may have specific coherence patterns (e.g., page table accessed every 32 voxels, page directory every 1024 voxels for $b_{pt}=32, t=2$) [S2].
+
+## Subtopics
+
+### Ray-Casting Virtual Multi-Resolution Volumes
+This variant focuses on the hierarchical address translation mechanism for virtual multi-resolution volumes. It emphasizes the computation of $lod(p)$ and the choice between sampling a single resolution level with tri-linear interpolation or sampling two adjacent levels and interpolating linearly in-between. It highlights the exploitation of spatial coherence in page table look-ups to reduce overhead [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of samples per ray, which is adaptive. Address translation overhead is reduced by spatial coherence [S2].
+*   **Memory Complexity:** Proportional to the size of the multi-resolution grid and page tables. Bricking allows for efficient memory management and streaming [S1, unofficial].
+*   **Performance:** Efficient for large-scale volumes due to adaptive sampling and bricking. Single-pass execution reduces overhead [S1, unofficial].
+*   **Strengths:** Handles large datasets, adaptive resolution, efficient memory usage.
+*   **Limitations:** Complexity of implementation, potential artifacts from LOD transitions.
+*   **When to use:** Large-scale scientific visualization, petascale data streams [S1, unofficial][S2].
+*   **When not to use:** Small datasets where overhead is not justified, or when strict consistency between LOD levels is critical without interpolation [S2].
+
+## Background
+Bricked Multi-Resolution Single-Pass Ray-Casting was introduced by Ljung et al. in 2006, Beyer et al. in 2008, and Jeong et al. in 2009 [S1, unofficial]. It builds on earlier work in bricked single-pass ray-casting [S1, unofficial]. The method is part of the evolution of GPU-based large-scale scientific visualization, aiming to handle huge data volumes efficiently [S1, unofficial].
+
+## Sources
+[S1] GPU-Based Large-Scale Scientific Visualization, https://johanna-b.github.io/LargeSciVis2018/slides/LargeScaleVisualization_Architectures.pdf, fetched 2026-10-29 (unofficial)
+[S2] PDF Interactive Volume Exploration of Petascale Microscopy Data Streams ..., https://vccvisualization.org/publications/2012_hadwiger_petascale.pdf, fetched 2026-10-28

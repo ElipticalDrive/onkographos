@@ -1,0 +1,116 @@
+# Bit-serial Chunk Serialization
+
+Also called: Bit-serial chunk transfer, VTC Format, Voxel Chunk Serialization
+
+## Overview
+Bit-serial Chunk Serialization is a binary serialization method for voxel data chunks, designed for network transmission or persistent storage. It extends the parent [Chunk Serialization with RLE](5162-chunk-serialization-with-rle.md) by employing bit-level serialization to encode voxel data, allowing for variable-length encoding of chunk identifiers and efficient bit-packing of the underlying voxel states.
+
+## How it works
+**Inputs and Outputs:**
+The method takes a collection of voxel chunks, each defined by a 3D position $(x, y, z)$ and a root identifier. The output is a contiguous byte array (or 4D byte array structure) containing the serialized binary representation of the chunks.
+
+**Data Structures:**
+1.  **VTC Header:** A fixed-size header containing a magic number and potentially global metadata.
+2.  **Chunk Entry:** For each chunk, the serialized data includes:
+    *   Position: 3 signed 32-bit integers ($i32$) in Big-Endian byte order.
+    *   Root ID: A variable-length integer (VarInt) representing the mapped root identifier.
+    *   Voxel Data: A bit-stream of voxel states, serialized bit-by-bit.
+3.  **Output Layout:** The total output can be viewed as a 4D byte array `bytes[x][y][z][bit_data]`, where the first three dimensions correspond to chunk coordinates and the fourth holds the serialized bit data for that specific chunk [S2, unofficial].
+
+**Parameters:**
+*   `VTC_MAGIC`: A constant byte array identifying the file format [S1, unofficial].
+*   `id_map`: A hash map (dictionary) mapping old root IDs to new, compact IDs for efficient VarInt encoding [S1, unofficial].
+
+**Steps:**
+1.  Initialize the output buffer or 4D byte array structure.
+2.  Write the `VTC_MAGIC` bytes to the beginning of the stream [S1, unofficial].
+3.  Iterate through each chunk in the world data structure [S2, unofficial].
+4.  For each chunk at position $(x, y, z)$:
+    a. Write the position components $x, y, z$ as Big-Endian $i32$ values [S1, unofficial].
+    b. Retrieve the chunk's current root ID.
+    c. Map the old root ID to a new ID using `id_map` [S1, unofficial].
+    d. Encode the new ID as a variable-length integer (VarInt) and write it to the stream [S1, unofficial].
+    e. Serialize the voxel data of the chunk using bit-serial writing (writing each voxel bit individually or in packed groups) [S2, unofficial].
+5.  Return the resulting byte array [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def serialize_chunks_to_bytes(chunks, id_map, vtc_magic):
+    """
+    Serializes a list of voxel chunks to a byte array using bit-serial chunk serialization.
+    
+    Args:
+        chunks: List of Chunk objects, each having .x, .y, .z, .root_id, and .serialize_bits() method.
+        id_map: Dict mapping old root_id (int) to new root_id (int).
+        vtc_magic: Bytes object representing the format magic number.
+        
+    Returns:
+        bytes: The complete serialized byte array.
+    """
+    output = bytearray()
+    
+    # Step 1: Write Magic Number
+    output.extend(vtc_magic)
+    
+    # Step 2: Iterate through chunks
+    for chunk in chunks:
+        # Step 3a: Write Position (Big-Endian i32)
+        output.extend(chunk.x.to_bytes(4, byteorder='big', signed=True))
+        output.extend(chunk.y.to_bytes(4, byteorder='big', signed=True))
+        output.extend(chunk.z.to_bytes(4, byteorder='big', signed=True))
+        
+        # Step 3b & 3c: Map Root ID
+        old_id = chunk.root_id
+        new_id = id_map.get(old_id)
+        if new_id is None:
+            raise ValueError(f"Root ID {old_id} not found in id_map")
+            
+        # Step 3d: Write VarInt Encoded ID
+        output.extend(varint_encode(new_id))
+        
+        # Step 3e: Write Bit-Serialized Voxel Data
+        # The chunk's internal method handles bit-level serialization
+        chunk_bits = chunk.serialize_bits()
+        output.extend(chunk_bits)
+        
+    return bytes(output)
+
+def varint_encode(value):
+    """
+    Encodes an integer as a variable-length integer (VarInt).
+    Uses the standard Google Protobuf VarInt encoding scheme.
+    """
+    result = bytearray()
+    while True:
+        # Take lower 7 bits
+        byte = value & 0x7F
+        value >>= 7
+        if value != 0:
+            # Set high bit if more bytes follow
+            byte |= 0x80
+        result.append(byte)
+        if value == 0:
+            break
+    return bytes(result)
+```
+
+**Edge Cases and Pitfalls:**
+*   **ID Mapping:** If `id_map` is incomplete, serialization fails. The map must contain all active root IDs [S1, unofficial].
+*   **Bit Alignment:** The bit-serial nature requires careful handling of byte boundaries. The `serialize_bits` method must ensure correct bit packing [S2, unofficial].
+*   **Endianness:** Position data is explicitly Big-Endian. Mismatched endianness during deserialization will corrupt coordinates [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot B)$, where $N$ is the number of chunks and $B$ is the number of bits per chunk. VarInt encoding is $O(\log(\text{ID}))$.
+*   **Memory Complexity:** $O(S)$, where $S$ is the size of the serialized byte array. The 4D array structure is a logical view; the physical storage is contiguous [S2, unofficial].
+*   **Strengths:** Compact representation for sparse or low-ID ranges due to VarInt; flexible bit-level packing for voxel data.
+*   **Limitations:** Requires pre-computation of `id_map`; bit-serial writing can be slower than byte-serial if not optimized.
+*   **When to use:** Network transmission of voxel worlds where bandwidth is constrained and chunk IDs are sparse [S1, S2, unofficial].
+
+## Background
+This method is implemented in the `voxelis` and `cubes` projects, which are unofficial voxel engine implementations [S1, S2, unofficial]. It builds upon the concept of chunk serialization with Run-Length Encoding (RLE) by adding bit-level serialization for the voxel data itself and VarInt encoding for chunk identifiers.
+
+## Sources
+[S1] WildPixelGames/voxelis, https://github.com/WildPixelGames/voxelis, fetched 2026-10-26 (unofficial)
+[S2] destroflyer/cubes, https://github.com/destroflyer/cubes, fetched 2026-10-26 (unofficial)

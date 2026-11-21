@@ -1,0 +1,147 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - The gsplat alpha-over gate measures the frame, not its own luck (#1493) by royerloic · Pull Request #1606 · royerlab/luxar
+
+The gsplat alpha-over gate measures the frame, not its own luck (#1493) by royerloic · Pull Request #1606 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Closes #1493.
+What was actually wrong
+Nothing in the renderer. The gate blending-modes.spec.ts › GSplat normal mode › background splat shows through the overlap (real alpha-over) sampled a sparse lattice of canvas fractions (gx/gy += 0.05) and asserted each colour class had at least one hit. The red-dominant region in that scene is a genuinely thin rim — the two big splats project nearly concentric (centres ~44 px apart against ~46/54 px screen sigmas, and the nearer green splat is the larger on screen), so the background survives only in a crescent covering ~0.35% of the frame.
+Against that, a 140-point lattice (float accumulation cut it to 14 x 10 over x ∈ [0.15, 0.80], y ∈ [0.25, 0.70]) expects about one hit: a coin-flip oracle. It finally came up tails when the canonical gsplat truncation radius moved 3.0 → 2.75 (#1179/#1181/#1182 — deliberate and documented): the tighter kernel shrinks the support ~9% and doubles the subtracted shift C = exp(-T²/2), which dimmed the single marginal sample from rgb ≈ (51, 21, 3) to ≈ (39, 5, 2) against an r > 40 threshold.
+Measured on the real frame (headless Chromium, 1280x720, ?dpr=1, whole frame = 921,600 px):
+class
+healthy renderer
+forced coverage = 1.0 (the pre-fix defect)
+red-dominant
+3215 px (0.349%)
+156 px (0.017%)
+green-dominant
+18429 px (2.000%)
+38164 px (4.141%)
+mixed (alpha-over)
+14173 px (1.538%)
+0 px (0.000%)
+So the background splat is clearly visible and alpha-over is compositing. The spec sanctions the rest of what makes the rim thin — GSPLAT_DEPTH_SORTING_SPEC.md §10 is explicit that coverage is clamp(intensity·opacity) so "dim splats occlude almost nothing … while saturated ones occlude hard", and this fixture is deliberately the saturated case (amplitude 2.0 x opacity 0.5, peak projection ⇒ coverage 1.0 at the core).
+What changed
+Test-side only — one test body in blending-modes.spec.ts. No shader, material, constant, fixture or Python change.
+One captureCanvasRGBA capture, then every pixel of the whole frame classified, instead of 140 lattice probes. No sub-box: the old rectangle was not even centred on the content (y ≤ 0.70 effectively cut nearer the bottom half of both discs) and re-introduced the framing sensitivity that caused this issue.
+Per-class floors as fractions of the frame (so the gate is invariant to canvas scale and dpr): 0.08% for the thin red rim (4.4x under healthy, 4.7x over the defect's residual), 0.5% for green and mixed (4.0x / 3.1x under healthy, against a defect value of 0.000% for mixed). Both measurement sets and the margin arithmetic are recorded next to the constants, with an instruction to retune by re-measuring rather than nudging.
+Dominance predicates are now three-way (r > 2g && r > 2b), matching the sibling additive test's form, so magenta/cyan can no longer count as red/green. The brightness floors stay at 40/30 (not the sibling's 100/80) because the crescent's pixels bottom out near r ≈ 63.
+The scene-identity banner is asserted absent before the capture: it is the one non-neutral overlay whose fill (rgba(160,44,44) / rgba(150,110,20)) would satisfy the red and mixed predicates, and at ~1.9% of the frame it is larger than any healthy class — a whole-frame scan would otherwise be vacuously passable if the watchdog ever raised it.
+The counts are logged on success too, so margin erosion shows up in a passing run instead of surfacing as a red gate later.
+Test evidence
+All runs in a real headless-Chromium Playwright run of this fixture:
+Fixed gate, current renderer: passes — red=3215 (0.349% vs floor 0.080%) green=18429 (2.000% vs floor 0.500%) mixed=14173 (1.538% vs floor 0.500%).
+Negative control — coverage = 1.0 forced in the LUXAR_NORMAL_PREMULT branch (bit-identical to the pre-fix alpha=1.0 contract under One/OneMinusSrcAlpha): fails, red=156 (0.017%) … mixed=0 (0.000%). Shader restored; the diff is the spec file alone.
+Whole GSplat normal mode (premultiplied coverage alpha) describe block: 6/6 pass.
+pnpm typecheck, pnpm lint, prettier clean.
+Honest notes:
+Running the full blending-modes.spec.ts in my checkout gives 18 pass / 4 fail; all four failures are the Blending Modes point-cloud tests that read datasets/examples/ (not generated in that checkout) and they fail identically on stock main there. Untouched by this change.
+The WASM module was not built in that checkout, so these runs used the TypeScript backend. Pixel output is the same path either way, but the absolute counts were measured on the TS backend.
+The gate keeps a 4.4x margin on the red class, which is a property of the auto-framing. A fatter separation between the two big splats would make that margin comfortable, but it means changing a fixture six tests share (and preserving the reversed twin's depth-sort invariant), so it is not folded in here.
+One measurement worth recording: a 3x over-occlusion control (coverage = clamp(3·intensity·opacity)) still reads mixed 1.386% / red 0.326% and passes. These are hue-dominance classes, so this gate bounds the total-replacement defect, not graded over-occlusion; that is stated in the comment rather than implied.
+test(viewer): measure the gsplat alpha-over gate densely, not on a la…
+…
+cba0d51
+```
+…ttice (#1493)
+
+The 'background splat shows through the overlap' gate sampled a sparse
+lattice of canvas fractions and asserted each colour class had at least one
+hit. The red-dominant region is a thin rim (~0.35% of the frame), so the
+lattice landed on it about once — a coin-flip oracle that finally came up
+tails when the canonical truncation radius moved 3.0 -> 2.75 and dimmed its
+one marginal sample from r~51 to r~39 against an r>40 threshold.
+
+The renderer is fine: a dense scan of the same frame counts 3215
+red-dominant and 14173 alpha-over mixed pixels. Replace the lattice with one
+whole-frame capture, count every pixel, and gate on per-class pixel
+fractions, with the measured numbers and their margins recorded next to the
+floors.
+```
+royerloic
+mentioned this pull request
+Aug 14, 2026
+GSplat normal mode: background splat does not show through the overlap (real alpha-over) — blending-modes.spec.ts:525
+#1493
+Closed
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+No findings.
+Checked packages/luxar-viewer/src/tests/e2e/blending-modes.spec.ts:524-671 for classifier correctness, threshold math, screenshot dimensions, overlay-induced false positives, regression sensitivity, and retained helper usage. The full-frame predicates are mutually appropriate, normalized thresholds match the documented controls, the scene-identity banner guard addresses the identified vacuous-pass case, and samplePixelsAt remains used elsewhere in the suite. No security concerns in this test-only change.
+royerloic
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Reviewed at cba0d51. Test-only change: the background splat shows through the overlap (real alpha-over) gate in blending-modes.spec.ts stops probing a 140-point lattice and instead classifies every pixel of one full-frame capture, with per-class floors expressed as fractions of the frame.
+I re-ran both measurements in my own checkout rather than taking the numbers on trust, and they reproduce exactly:
+Current renderer, this spec: passes — red=3215 (0.349% vs floor 0.080%) green=18429 (2.000% vs floor 0.500%) mixed=14173 (1.538% vs floor 0.500%), frame 1280x720.
+Negative control, coverage = 1.0 forced in the LUXAR_NORMAL_PREMULT branch of shader-glsl.ts (the pre-fix alpha contract under One/OneMinusSrcAlpha): fails on the red assertion with red=156 (0.017%) green=38164 (4.141%) mixed=0 (0.000%). Shader reverted; the branch is untouched.
+Whole GSplat normal mode (premultiplied coverage alpha) describe block: 6/6 green.
+So the diagnosis in the description holds up — the renderer was never broken, the old oracle expected about one hit and finally rolled tails when the truncation radius moved to 2.75. The new gate is non-vacuous in both directions: mixed goes to exactly 0 under the defect, and red still crosses its floor from above.
+No changes pushed — I did not find anything worth fixing.
+What I checked and found clean:
+Chrome can't satisfy the predicates. This is the real hazard of scanning the whole frame instead of a crop, and the negative-control run bounds it empirically: with the splat overlap destroyed, the whole frame yields 156 red-dominant pixels (a fifth of the 737-pixel floor) and zero mixed. Nothing in the rail, the panels, or the debug overlay reaches these classes.
+No single splat can produce a mixed pixel. Worked the ACES matrices by hand for the red fixture colour (1, 0.1, 0.1): green and blue enter the input matrix equal but come out of the output matrix with b ≈ 0.9·g, nowhere near the b < min(r,g)/2 cut. Green-only clamps r to the floor. The discriminator really does require both splats.
+The banner guard is wired to the right thing. #luxar-scene-identity-banner is the id ui/scene-identity-banner.ts actually assigns, the element is position: fixed over the canvas, and captureCanvasRGBA takes an element screenshot, so it would indeed composite into the frame. Worth having.
+The lattice arithmetic quoted in the comment is right (14x10 = 140 points over x ≤ 0.80 / y ≤ 0.70 at 64x36 px spacing), the Desktop Chrome project is 1280x720 so the recorded fractions are the ones CI will measure, samplePixelsAt is still used by seven other tests in the file, and typecheck / eslint / prettier are clean. No spec or guide documents the old sampling method, so nothing to sync.
+Dropped as not worth changing:
+The banner absence is asserted just before the capture rather than after it, so there is a nominal window. The watchdog only raises against a scene swap or a dead data server, neither of which happens against a static fixture server inside a 20 s test — not worth the churn.
+The red class keeps only a 4.4x margin because the two big splats project nearly concentric. Widening the separation means editing a fixture six tests share (and preserving the reversed twin's sort invariant); the comment records both measurement sets and says to retune by re-measuring, which is the right call here.
+The sibling additive points test above still uses a lattice, but it was already densified to ~5.5k probes for ~8 expected hits, so it is not in the same coin-flip regime. Leaving it alone.
+Nothing deferred, no follow-up filed.
+royerloic
+changed the base branch from
+main
+to
+dev
+August 14, 2026 23:03
+Hide details
+View details
+royerloic
+merged commit 9843ab1
+into
+dev
+Aug 14, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+deleted the
+issue-1493-gsplat-normal-alpha-over
+branch
+August 14, 2026 23:04
+royerloic
+mentioned this pull request
+Aug 16, 2026
+E2E: blending-modes "background splat shows through the overlap (real alpha-over)" failing on main
+#1667
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

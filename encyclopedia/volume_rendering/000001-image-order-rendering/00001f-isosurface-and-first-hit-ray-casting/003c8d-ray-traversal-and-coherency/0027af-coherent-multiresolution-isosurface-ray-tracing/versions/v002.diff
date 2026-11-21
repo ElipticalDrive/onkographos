@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -4,23 +4,22 @@
+ 
+ ## Overview
+-Coherent Multiresolution Isosurface Ray Tracing is an optimization for interactive isosurface extraction from large volumetric datasets stored in octrees. It solves the problem of low spatial coherence in large volumes by grouping neighboring rays into 2x2 packets and adapting coherent traversal algorithms to hierarchical grid structures [S1, unofficial]. Unlike single-ray tracers or coherent kd-tree tracers for meshes, this method leverages the inherent multiresolution level-of-detail (LOD) of the octree to maintain coherence on complex data, allowing interactive performance on commodity CPUs [S1, unofficial].
++Coherent Multiresolution Isosurface Ray Tracing optimizes interactive isosurface extraction from large volumetric datasets stored in octrees [S1, unofficial]. It solves the problem of low spatial coherence in large volumes by grouping neighboring rays into 2x2 packets and adapting coherent traversal algorithms to hierarchical grid structures [S1, unofficial]. Unlike single-ray tracers or coherent kd-tree tracers for meshes, this method leverages the inherent multiresolution level-of-detail (LOD) of the octree to maintain coherence on complex data, allowing interactive performance on commodity CPUs [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   A multiresolution octree representing the scalar field $f(\mathbf{p})$.
+-*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$).
+-*   Isovalue $\tau$.
++*   A multiresolution octree representing the scalar field [S1, unofficial].
++*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) [S1, unofficial].
++*   Isovalue $\tau$ [S1, unofficial].
+ *   Ray packet size (conservative 2x2, i.e., 4 rays) [S1, unofficial].
+ *   LOD cut depth (optional, to specify resolution) [S1, unofficial].
+ 
+ **Outputs:**
+-*   Pixel colors for the isosurface, including shading (normals, lighting) [S1, unofficial].
++*   Pixel colors for the isosurface, including shading [S1, unofficial].
+ 
+ **Data Structures:**
+ *   **Octree Node:** Contains min/max values of the scalar field within the voxel/cell to guide traversal. Interior nodes may store coarser-resolution voxel data for LOD [S1, unofficial].
+-*   **Ray Packet:** A group of 4 rays (2x2 grid) sharing similar origins and directions.
++*   **Ray Packet:** A group of 4 rays (2x2 grid) sharing similar origins and directions [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-
+ 1.  **Offline Construction:** Losslessly compress the original large dataset into a multiresolution octree structure stored in CPU main memory. The octree stores min/max acceleration values and potentially coarser voxel data in interior nodes [S1, unofficial].
+ 2.  **Packet Generation:** Group neighboring rays (2x2) into packets. Distribute these packets to worker threads for parallel processing [S1, unofficial].
+@@ -28,83 +27,92 @@
+ 4.  **SSE Intersection:** Perform SSE-optimized isosurface intersection tests for the rays in the packet against the leaf cells or LOD cells [S1, unofficial].
+     *   For fine resolution: Intersect against the smallest voxels.
+-    *   For LOD resolution: At the termination depth (cut depth), intersect the coarser, larger cells instead of fine voxels. The scalar field value is assumed constant or interpolated from the coarser representation [S1, unofficial].
+-5.  **Refinement:** Refine the intersection position if necessary (e.g., linear interpolation) to reduce discretization artifacts [S3, unofficial][S6, unofficial].
+-6.  **Shading:** Compute surface normals using the gradient $\nabla f$ at the hit point (via finite differences or tri-cubic filtering) and apply Phong-like shading [S3, unofficial][S1, unofficial].
++    *   For LOD resolution: At the termination depth (cut depth), intersect the coarser, larger cells instead of fine voxels [S1, unofficial].
++5.  **Shading:** Perform shading for the intersected surfaces [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def render_packet(packet, octree, isovalue, cut_depth, current_depth):
+-    """
+-    Render a 2x2 ray packet through an octree.
+-    packet: list of 4 rays (origin, direction)
+-    octree: root node of the multiresolution octree
+-    isovalue: tau
+-    cut_depth: maximum depth to traverse (LOD level)
+-    current_depth: current depth in octree
+-    """
+-    # 1. Coherent Traversal
+-    # Test packet against octree node's min/max bounds
+-    if not packet_intersects_node_minmax(packet, octree):
+-        return None # No intersection for this packet in this subtree
++def render_packet(packet, octree_node, isovalue, cut_depth, current_depth):
++    # packet: list of 4 rays, each ray is (origin, direction)
++    # octree_node: node with bbox (min, max), is_leaf flag, children list, scalar_data (if leaf)
++    # Returns list of 4 colors or None
++    
++    # 1. Coherent Traversal: Test packet against node's min/max bounds
++    if not ray_aabb_intersect_packet(packet, octree_node.bbox):
++        return None
+ 
+     # If leaf node or reached cut depth, perform intersection
+-    if octree.is_leaf or current_depth >= cut_depth:
+-        # 2. Intersection
+-        # For LOD: intersect with coarser cell. For fine: intersect with voxels.
+-        hit_points = []
++    if octree_node.is_leaf or current_depth >= cut_depth:
++        colors = []
+         for ray in packet:
+-            # Perform SSE-optimized intersection test
+-            # Check if ray intersects the cell defined by octree
+-            # Scalar field f(p) is accessed from octree data
+-            hit = sse_isosurface_intersect(ray, octree, isovalue)
+-            hit_points.append(hit)
+-        
+-        # 3. Shading
+-        colors = []
+-        for i, hit in enumerate(hit_points):
+-            if hit is not None:
+-                # Compute normal from gradient
+-                normal = compute_gradient_normal(octree, hit.position)
+-                # Apply lighting model
+-                color = phong_shading(hit.position, normal, ray.direction)
++            # 2. Intersection: Check ray against cell bbox
++            t_min, t_max = ray_aabb_intersect(ray, octree_node.bbox)
++            if t_min is None:
++                colors.append(None) # Miss
++                continue
++            
++            # 3. Scalar field evaluation and isosurface intersection
++            # Sources do not specify the exact 1D intersection method for the scalar field [G].
++            # Typically, one samples f(p) along the ray segment [t_min, t_max] and finds sign change or f(p) == isovalue.
++            hit_t = find_scalar_isovalue(ray, octree_node.scalar_data, t_min, t_max, isovalue)
++            
++            if hit_t is not None and hit_t >= 0:
++                hit_pos = ray.origin + hit_t * ray.direction
++                # 4. Shading: Sources state shading is performed but do not specify the lighting model [G].
++                color = compute_shading(hit_pos, ray.direction, octree_node)
+                 colors.append(color)
+             else:
+-                colors.append(background_color)
++                colors.append(None)
+         return colors
+-    
+-    # 4. Recurse to children
+-    # Distribute rays to children based on coherence
+-    results = []
+-    for child in octree.children:
+-        # Determine which rays in the packet might intersect this child
+-        # This maintains coherence by grouping rays that go to the same child
+-        sub_packet = filter_rays_for_child(packet, child)
++
++    # 5. Recurse to children
++    results = [None] * 4
++    for child in octree_node.children:
++        # Distribute rays to children based on coherence
++        sub_packet = filter_rays_for_child(packet, child.bbox)
+         if sub_packet:
+-            child_result = render_packet(sub_packet, child, isovalue, cut_depth, current_depth + 1)
+-            if child_result:
+-                results.append(child_result)
+-    
+-    # Merge results back into packet structure
+-    return merge_results(results, packet)
++            child_colors = render_packet(sub_packet, child, isovalue, cut_depth, current_depth + 1)
++            if child_colors:
++                for i, c in enumerate(child_colors):
++                    if c is not None:
++                        results[i] = c
++    return results
+ 
+-def sse_isosurface_intersect(ray, node, isovalue):
+-    """
+-    Perform intersection test for a single ray against a node's cell.
+-    Uses SSE instructions for parallel evaluation if possible.
+-    Returns hit point or None.
+-    """
+-    # Check if ray passes through the cell bounding box
+-    if not ray_intersects_box(ray, node.bbox):
+-        return None
+-    
+-    # Sample scalar field along ray
+-    # For LOD, the cell is larger, so fewer samples or coarser interpolation
+-    # Find t where f(ray.o + t * ray.d) == isovalue
+-    # Use binary search or linear interpolation for refinement
+-    t_hit = find_isovalue_intersection(ray, node.scalar_data, isovalue)
+-    
+-    if t_hit is not None:
+-        return HitPoint(position=ray.o + t_hit * ray.d, t=t_hit)
++def ray_aabb_intersect(ray, bbox):
++    # Slab method for ray-AABB intersection
++    # Returns (t_min, t_max) or (None, None) if miss
++    t_min, t_max = 0.0, float('inf')
++    for i in range(3):
++        if ray.direction[i] == 0:
++            if ray.origin[i] < bbox.min[i] or ray.origin[i] > bbox.max[i]:
++                return None, None
++        else:
++            t1 = (bbox.min[i] - ray.origin[i]) / ray.direction[i]
++            t2 = (bbox.max[i] - ray.origin[i]) / ray.direction[i]
++            if t1 > t2: t1, t2 = t2, t1
++            t_min = max(t_min, t1)
++            t_max = min(t_max, t2)
++            if t_min > t_max:
++                return None, None
++    if t_max < 0:
++        return None, None # Box is behind the ray
++    return t_min, t_max
++
++def ray_aabb_intersect_packet(packet, bbox):
++    # Returns True if at least one ray in packet intersects bbox
++    for ray in packet:
++        if ray_aabb_intersect(ray, bbox)[0] is not None:
++            return True
++    return False
++
++def filter_rays_for_child(packet, child_bbox):
++    # Returns rays that intersect child_bbox
++    return [ray for ray in packet if ray_aabb_intersect(ray, child_bbox)[0] is not None]
++
++def find_scalar_isovalue(ray, scalar_data, t_min, t_max, isovalue):
++    # Sources do not specify the exact scalar field sampling and 1D root-finding method [G].
++    return None
++
++def compute_shading(hit_pos, ray_dir, node):
++    # Sources do not specify the lighting model [G].
+     return None
+ ```

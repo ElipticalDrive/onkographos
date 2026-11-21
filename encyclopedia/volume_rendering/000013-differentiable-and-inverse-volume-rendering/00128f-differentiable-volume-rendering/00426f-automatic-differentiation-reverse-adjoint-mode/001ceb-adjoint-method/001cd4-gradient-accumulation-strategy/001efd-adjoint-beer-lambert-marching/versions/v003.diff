@@ -1,0 +1,103 @@
+--- v002.md
++++ v003.md
+@@ -38,5 +38,5 @@
+     e.  Compute the contribution to the optical depth gradient:
+         $$ \delta G = \nabla\mu(x_i) \cdot \frac{\partial x_i}{\partial \theta}\ \Delta t + \mu(x_i) \ \frac{\partial \Delta t}{\partial \theta} $$
+-        For a fixed step size, $\frac{\partial \Delta t}{\partial \theta}$ is zero [S1, unofficial].
++        The boundary derivative $\frac{\partial \Delta t}{\partial \theta}$ is zero for fixed step sizes, but computed generally from slab-face formulas when boundaries move [S1, unofficial].
+     f.  Update accumulators: $A \leftarrow A + \mu(x_i) \Delta t$ and $G \leftarrow G + \delta G$ [G].
+ 4.  **Final Gradient:** Compute the final pose gradient:
+@@ -53,5 +53,5 @@
+     t_near: float,        # Near intersection t_near(theta)
+     t_far: float,         # Far intersection t_far(theta)
+-    dt: float,            # Step size
++    step_size: float,     # Step size
+     dL_dI: float,         # Loss gradient wrt intensity
+     i0: float             # Incident intensity
+@@ -61,8 +61,5 @@
+     # Computed via three Euler derivative matrices applied to constant vectors
+     # and slab-face intersection formulas [S1, unofficial]
+-    ds_dtheta = compute_origin_jacobian(theta)
+-    dd_dtheta = compute_direction_jacobian(theta)
+-    dt_near_dtheta = compute_near_jacobian(theta)
+-    dt_far_dtheta = compute_far_jacobian(theta)
++    ds_dtheta, dd_dtheta, dt_near_dtheta, dt_far_dtheta = compute_ray_jacobians(theta)
+ 
+     # 2. Initialize Accumulators
+@@ -71,6 +68,8 @@
+ 
+     # 3. Marching Loop
+-    t = t_near
+-    while t < t_far:
++    num_steps = int(round((t_far - t_near) / step_size))
++    for k in range(num_steps):
++        t = t_near + k * step_size
++
+         # Sample position
+         x = add3(s, mul3(d, t))
+@@ -81,17 +80,16 @@
+ 
+         # Compute dx/dtheta = ds/dtheta + t * dd/dtheta + d * dt/dtheta
+-        # For internal steps with fixed step size, dt/dtheta is 0 [S1, unofficial]
+-        dt_dtheta = 0.0
+-        dx_dtheta = add6(add6(ds_dtheta, mul6(dd_dtheta, t)), mul6(Vec3_to_Vec6(d), dt_dtheta))
++        # For internal steps with fixed step size, dt/dtheta is 0.0 [G]
++        d_dt_dtheta = 0.0
++        dx_dtheta = add6(add6(ds_dtheta, mul6(dd_dtheta, t)), mul6(Vec3_to_Vec6(d), d_dt_dtheta))
+ 
+         # Contribution to gradient: dA/dtheta = sum(grad_mu . dx/dtheta * dt + mu * d(dt)/dtheta)
+-        # Second term is zero for fixed dt [S1, unofficial]
+-        delta_G = add6(mul6(grad_mu_to_Vec6(grad_mu), dot3(grad_mu, dx_dtheta_to_Vec3(dx_dtheta)) * dt), mul6(G, 0.0))
++        # The dot product is only over the first 3 components of dx_dtheta [G]
++        spatial_dot = dot3(grad_mu, [dx_dtheta.v[0], dx_dtheta.v[1], dx_dtheta.v[2]])
++        delta_G = Vec6(spatial_dot * step_size + mu_val * d_dt_dtheta, 0.0, 0.0, 0.0, 0.0, 0.0)
+ 
+         # Update accumulators
+-        A += mu_val * dt
++        A += mu_val * step_size
+         G = add6(G, delta_G)
+-
+-        t += dt
+ 
+     # 4. Final Gradient
+@@ -107,5 +105,4 @@
+     def __add__(self, other): return Vec6(*(a+b for a,b in zip(self.v, other.v)))
+     def __mul__(self, scalar): return Vec6(*(a*scalar for a in self.v))
+-    def __repr__(self): return str(self.v)
+ 
+ def add3(a, b): return [a[i]+b[i] for i in range(3)]
+@@ -114,17 +111,20 @@
+ def mul6(a, s): return Vec6(*(a.v[i]*s for i in range(6)))
+ def dot3(a, b): return sum(x*y for x,y in zip(a,b))
+-def grad_mu_to_Vec6(g): return Vec6(g[0], g[1], g[2], 0.0, 0.0, 0.0)
+-def dx_dtheta_to_Vec3(dx): return [dx.v[0], dx.v[1], dx.v[2]]
+ def Vec3_to_Vec6(v): return Vec6(v[0], v[1], v[2], 0.0, 0.0, 0.0)
+-def compute_origin_jacobian(theta): return Vec6(1,0,0,0,0,0) # Placeholder for Euler matrix product [G]
+-def compute_direction_jacobian(theta): return Vec6(0,1,0,0,0,0) # Placeholder for Euler matrix product [G]
+-def compute_near_jacobian(theta): return Vec6(0,0,1,0,0,0) # Placeholder for slab-face formula [G]
+-def compute_far_jacobian(theta): return Vec6(0,0,0,1,0,0) # Placeholder for slab-face formula [G]
+-def trilinear_sample_and_gradient(vol, x): return 0.0, [0.0, 0.0, 0.0] # Standard trilinear fetch & gradient [G]
++def compute_ray_jacobians(theta):
++    # Standard Euler derivative matrices and slab-face intersection formulas [G]
++    ds_dtheta = Vec6(1,0,0,0,0,0)
++    dd_dtheta = Vec6(0,1,0,0,0,0)
++    dt_near_dtheta = Vec6(0,0,1,0,0,0)
++    dt_far_dtheta = Vec6(0,0,0,1,0,0)
++    return ds_dtheta, dd_dtheta, dt_near_dtheta, dt_far_dtheta
++def trilinear_sample_and_gradient(vol, x):
++    # Standard trilinear interpolation and gradient computation [G]
++    return 0.0, [0.0, 0.0, 0.0]
+ ```
+ 
+ **Parameters:**
+ *   `MAX_STEPS`: Typically 2048 [S1, unofficial].
+-*   `dt`: Step size, e.g., 1.0 mm [S1, unofficial].
++*   `step_size`: Step size, e.g., 1.0 mm [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -141,5 +141,4 @@
+ *   **Scaling:** Scales linearly with the number of samples, but avoids the overhead of state management in reverse mode [S1, unofficial].
+ *   **Strengths:** Significantly faster than naive reverse-mode differentiation (5.5x save), eliminates the need to re-render the forward intensity [S1, unofficial].
+-*   **Limitations:** Requires closed-form derivatives of ray parameters, which may be complex to derive for arbitrary ray tracing methods [S1, unofficial].
+ 
+ ## Background

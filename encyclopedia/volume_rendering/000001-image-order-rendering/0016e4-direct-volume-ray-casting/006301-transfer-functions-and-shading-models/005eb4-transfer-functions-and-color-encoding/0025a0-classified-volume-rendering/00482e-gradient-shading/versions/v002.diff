@@ -1,0 +1,143 @@
+--- v001.md
++++ v002.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-Gradient Shading is a technique for Direct Volume Ray Casting that enhances surface perception by computing per-voxel lighting based on local intensity gradients, typically using the Phong illumination model [S2]. It builds on [Classified Volume Rendering](3590-classified-volume-rendering.md) by replacing simple opacity accumulation with physically-based shading, distinguishing itself from siblings like [Image-Centric Volume Rendering with SN-SVM Classification](7509-image-centric-volume-rendering-with-sn-svm-classification.md) by relying on explicit gradient vectors rather than learned classification boundaries [S2].
++Gradient Shading is a technique for Direct Volume Ray Casting that enhances surface perception by computing per-voxel lighting based on local intensity gradients, typically using the Phong illumination model [S2]. It builds on [Classified Volume Rendering](3590-classified-volume-rendering.md) by incorporating physically-based shading into the ray casting pipeline [S2].
+ 
+ ## How it works
+@@ -21,10 +21,8 @@
+     *   If the gradient parameter is not specified on GPU systems supporting `ARB_fragment_program`, the shader computes gradients internally using central differencing [S2].
+     *   *Note:* Using a separate gradient texture increases texture memory usage by a factor of 2 to 4 compared to the original volume texture [S2].
+-
+ 2.  **Ray Casting Loop:**
+     *   For each pixel, cast a ray through the volume [S1, unofficial].
+     *   Sample the volume texture $V$ at the current ray position to get voxel intensity $I$ [S1, unofficial].
+     *   Apply the transfer function (lookup table) to map $I$ to color $(R, G, B)$ and opacity $\alpha$ [S2].
+-
+ 3.  **Lighting Calculation:**
+     *   Retrieve the gradient vector $\vec{g}$ from the gradient texture $G$ at the current position [S2].
+@@ -35,7 +33,6 @@
+         *   Specular: $k_s (\vec{r} \cdot \vec{v})^{\text{shininess}}$, where $\vec{r}$ is the reflection vector and $\vec{v}$ is the view vector [S2].
+     *   Combine with ambient light $k_a$ [S2].
+-
+ 4.  **Compositing:**
+-    *   Accumulate color and opacity using front-to-back or back-to-front blending [S1, unofficial].
++    *   Accumulate color and opacity using front-to-back blending [S1, unofficial].
+     *   If `isGradient` is enabled and specific conditions are met (e.g., bone detection in CT data), apply the calculated lighting $L$ to modulate the color contribution [S1, unofficial].
+ 
+@@ -56,57 +53,50 @@
+ def render_gradient_shading(volume_texture, gradient_texture, light_pos, ambient, diffuse, specular, shininess, is_gradient_enabled):
+     # Initialize output image
+-    image = create_empty_image()
++    image = [[0.0, 0.0, 0.0] for _ in range(height)]
+     
+-    for each pixel (x, y) in image:
+-        ray_origin, ray_direction = generate_ray(x, y)
+-        alpha_accum = 0.0
+-        color_accum = [0.0, 0.0, 0.0]
+-        
+-        # Ray marching through volume
+-        t = 0.0
+-        while t < max_depth:
+-            pos = ray_origin + t * ray_direction
+-            voxel_intensity = sample_volume(volume_texture, pos)
++    for y in range(height):
++        for x in range(width):
++            ray_origin = [0.0, 0.0, 0.0] # Not given in the sources.
++            ray_direction = [0.0, 0.0, 1.0] # Not given in the sources.
++            alpha_accum = 0.0
++            color_accum = [0.0, 0.0, 0.0]
+             
+-            # Get gradient for normal calculation
+-            if is_gradient_enabled:
+-                if gradient_texture is not None:
+-                    gradient_vec = sample_volume(gradient_texture, pos)
++            t = 0.0
++            while t < max_depth:
++                pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++                voxel_intensity = volume_texture.sample(pos) # Not given in the sources.
++                
++                if is_gradient_enabled:
++                    if gradient_texture is not None:
++                        gradient_vec = gradient_texture.sample(pos)
++                    else:
++                        # GPU fallback: compute central difference internally
++                        gradient_vec = volume_texture.compute_central_difference(pos) # Not given in the sources.
++                    
++                    normal = normalize(gradient_vec)
++                    light_dir = normalize([light_pos[i] - pos[i] for i in range(3)])
++                    view_dir = normalize([-ray_direction[i] for i in range(3)])
++                    
++                    diff = max(dot(normal, light_dir), 0.0)
++                    reflect_dir = reflect(-light_dir, normal)
++                    spec = pow(max(dot(reflect_dir, view_dir), 0.0), shininess)
++                    
++                    lighting = ambient + diffuse * diff + specular * spec
+                 else:
+-                    # GPU fallback: compute central difference internally
+-                    gradient_vec = compute_central_difference(volume_texture, pos)
++                    lighting = 1.0
+                 
+-                # Normalize gradient to get surface normal
+-                normal = normalize(gradient_vec)
++                color, alpha = volume_texture.apply_transfer_function(voxel_intensity) # Not given in the sources.
+                 
+-                # Calculate lighting
+-                light_dir = normalize(light_pos - pos)
+-                view_dir = normalize(-ray_direction)
++                alpha_contrib = alpha * (1.0 - alpha_accum)
++                color_accum = [color_accum[i] + color[i] * lighting * alpha_contrib for i in range(3)]
++                alpha_accum += alpha_contrib
+                 
+-                # Phong model
+-                diff = max(dot(normal, light_dir), 0.0)
+-                reflect_dir = reflect(-light_dir, normal)
+-                spec = pow(max(dot(reflect_dir, view_dir), 0.0), shininess)
++                if alpha_accum >= 1.0:
++                    break
++                    
++                t += step_size # Not given in the sources.
+                 
+-                lighting = ambient + diffuse * diff + specular * spec
+-            else:
+-                lighting = 1.0 # No shading
++            image[y][x] = color_accum
+             
+-            # Apply transfer function
+-            color, alpha = apply_transfer_function(voxel_intensity)
+-            
+-            # Composite
+-            # Front-to-back blending
+-            alpha_contrib = alpha * (1.0 - alpha_accum)
+-            color_accum += color * lighting * alpha_contrib
+-            alpha_accum += alpha_contrib
+-            
+-            if alpha_accum >= 1.0:
+-                break
+-                
+-            t += step_size
+-            
+-        image.set_pixel(x, y, color_accum)
+-        
+     return image
+ ```
+@@ -118,13 +108,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of pixels and $R$ is the number of samples per ray. Gradient computation adds overhead if done per-voxel during rendering or requires pre-computation.
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** $O(V + G)$, where $V$ is the volume texture size and $G$ is the gradient texture size. $G$ can be 2-4 times the size of $V$ [S2].
+ *   **Strengths:** Provides more accurate lighting effects than tangent-space shading and avoids bricking artifacts associated with shape bricking [S2]. Enhances surface perception in volume rendering [S2].
+ *   **Limitations:** Increased memory usage [S2]. Dependent on hardware support for advanced OpenGL extensions for full feature set (specular/shininess) [S2].
+-*   **When to use:** When surface detail and depth perception are critical, and sufficient memory is available.
+-*   **When not to use:** When memory is constrained or hardware does not support required OpenGL extensions and specular lighting is desired.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Gradient Shading in volume rendering is implemented via shaders such as `vzTMGradientShader` in SGI OpenGL Volumizer [S2]. It was introduced in versions prior to OpenGL Volumizer 2.1 for related tagging shaders, indicating its integration into the Volumizer framework [S2]. The method leverages the Phong illumination model to compute diffuse and specular contributions based on per-voxel gradient information [S2]. It is used in medical imaging applications, such as CT viewer volume rendering, to enhance the visualization of anatomical structures [S1, unofficial].
++Gradient Shading in volume rendering is implemented via shaders such as `vzTMGradientShader` in SGI OpenGL Volumizer [S2]. The method leverages the Phong illumination model to compute diffuse and specular contributions based on per-voxel gradient information [S2]. It is used in medical imaging applications, such as CT viewer volume rendering, to enhance the visualization of anatomical structures [S1, unofficial].
+ 
+ ## Sources

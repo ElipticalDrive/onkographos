@@ -1,0 +1,220 @@
+--- v001.md
++++ v002.md
+@@ -10,5 +10,5 @@
+ - `worldSize`: The side length of the root bounding box in world units [S1, unofficial].
+ - `maxDepth`: The maximum recursion depth, determining the finest voxel resolution [S1, unofficial].
+-- `geometries`: A list of scene geometry objects (e.g., spheres) [S1, unofficial].
++- `geometries`: Scene geometry objects to intersect against [S1, unofficial].
+ 
+ **Outputs:**
+@@ -17,11 +17,11 @@
+ **Data Structures:**
+ 1.  **IndirectionGrid**: An array of 8 `Cell` objects representing the 8 children of an octree node [S1, unofficial].
+-2.  **Cell**: A union-like structure containing:
+-    -   `NodeType`: Enum value `DATA` or `INDEX` [S1, unofficial].
++2.  **Cell**: A structure containing:
++    -   `node_type`: Enum value `DATA` or `INDEX` [S1, unofficial].
+     -   If `DATA`:
+-        -   `color`: `Vector3f` storing the normalized color [S1, unofficial].
+-        -   `realLocation`: `Vector3f` storing the normalized real-world location [S1, unofficial].
++        -   `color`: `Vector3f` storing the geometry's color, normalized by dividing by `worldSize` [S1, unofficial].
++        -   `real_location`: `Vector3f` storing the geometry's real-world location, normalized by `worldSize` [S1, unofficial].
+     -   If `INDEX`:
+-        -   `textureIndex`: `Vector3f` storing the 3D texture coordinate pointing to the child `IndirectionGrid` [S1, unofficial].
++        -   `texture_index`: `Vector3f` storing the 3D texture coordinate pointing to the child `IndirectionGrid` [S1, unofficial].
+ 3.  **IndirectionPool**: A pool with capacity $8 \times \text{maxDepth}^2$ used to manage `IndirectionGrid` allocations [S1, unofficial].
+ 
+@@ -35,84 +35,94 @@
+         $$ \text{childBoxSize} = \frac{\text{worldSize}}{2^{\text{depth}+1}} $$
+         [S1, unofficial]
+-    b.  Define child box offsets (standard octree offsets for 8 sub-cubes) [S1, unofficial].
++    b.  Define child box offsets for the 8 sub-cubes relative to the parent's minimum corner [G].
+     c.  Iterate $i$ from 0 to 7 for the 8 sub-nodes:
+-        i.  Calculate `childBoxStart`:
+-            $$ \text{childBoxStart} = (\text{childBoxOffsets}[i] \times \text{childBoxSize}) + \text{boxStart} $$
+-            [S1, unofficial]
+-        ii. Calculate `childBoxEnd`:
+-            $$ \text{childBoxEnd} = \text{childBoxStart} + \text{childBoxSize} $$
+-            [S1, unofficial]
+-        iii. Perform intersection test: Check if any geometry in `geometries` intersects the box defined by `childBoxStart` and `childBoxEnd` [S1, unofficial].
++        i.  Calculate `childBoxStart` using `childBoxOffsets[i] * childBoxSize + boxStart`, and `childBoxEnd = childBoxStart + childBoxSize` [S1, unofficial].
++        ii. Check for intersection between the child box and any geometry in the scene using `Geometry.intersects(childBoxStart, childBoxEnd)` [S1, unofficial].
+     d.  **Branching Logic**:
+         -   If $\text{depth} + 1 \neq \text{maxDepth}$ (not leaf level):
+             -   If intersection is not null:
+-                1.  Recursively call `createNode(depth + 1, childBoxStart)` to create a child `IndirectionGrid` [S1, unofficial].
+-                2.  Create an `Index` cell pointing to the new grid's texture index [S1, unofficial].
+-                3.  Set this cell as the $i$-th child of the current node [S1, unofficial].
++                1.  Recursively call `createNode(depth + 1, childBoxStart)` to create a child indirection grid [S1, unofficial].
++                2.  Create an `INDEX` cell pointing to the new grid's texture index [S1, unofficial].
++                3.  Assign this cell to the corresponding child slot of the current node [S1, unofficial].
+         -   If $\text{depth} + 1 == \text{maxDepth}$ (leaf level):
+             -   If intersection is not null:
+-                1.  Create a `Data` cell [S1, unofficial].
++                1.  Create a `DATA` cell [S1, unofficial].
+                 2.  Set `color` by normalizing the geometry's color by dividing by `worldSize` [S1, unofficial].
+-                3.  Set `realLocation` by normalizing the geometry's real location by `worldSize` [S1, unofficial].
+-                4.  Set this cell as the $i$-th child of the current node [S1, unofficial].
+-    e.  If no intersection is found for a child, the child remains null/empty [S1, unofficial].
+-4.  **Pruning**: Perform a depth-first search (DFS) on the constructed octree to identify and remove empty branches [S2, unofficial].
+-5.  **Gathering**: After pruning, perform an extra pass to gather the scattered octree nodes into a sequential array structure to improve cache coherence [S2, unofficial].
++                3.  Set `real_location` by normalizing the geometry's real location by `worldSize` [S1, unofficial].
++                4.  Assign this cell to the corresponding child slot of the current node [S1, unofficial].
++    e.  If no intersection is found for a child, the child slot remains empty [S1, unofficial].
++4.  **Pruning**: Perform a depth-first search and grid lookup to prune empty branches [S2, unofficial].
++5.  **Gathering**: After pruning, octree nodes are spread all over memory; an extra pass is required to gather them into a sequential structure (array) for cache coherence [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++class Vector3f:
++    def __init__(self, x=0.0, y=0.0, z=0.0):
++        self.x, self.y, self.z = x, y, z
++    def __add__(self, other):
++        return Vector3f(self.x + other.x, self.y + other.y, self.z + other.z)
++    def __mul__(self, scalar):
++        return Vector3f(self.x * scalar, self.y * scalar, self.z * scalar)
++    def __truediv__(self, scalar):
++        return Vector3f(self.x / scalar, self.y / scalar, self.z / scalar)
++
++class Cell:
++    INDEX = 0
++    DATA = 1
++    def __init__(self, node_type, color=None, real_location=None, texture_index=None):
++        self.node_type = node_type
++        self.color = color
++        self.real_location = real_location
++        self.texture_index = texture_index
++
++class IndirectionGrid:
++    def __init__(self, children=None):
++        self.children = children if children else [None] * 8
++
++class IndirectionPool:
++    def __init__(self, capacity):
++        self.capacity = capacity
++        self.grids = [None] * capacity
++        self.used = 0
++    def allocate(self):
++        if self.used < self.capacity:
++            grid = IndirectionGrid()
++            self.grids[self.used] = grid
++            self.used += 1
++            return grid
++        return None
++
++# Standard octree offsets: 0 or 1 for each axis relative to parent min corner
++child_box_offsets = [
++    Vector3f(0,0,0), Vector3f(1,0,0), Vector3f(0,1,0), Vector3f(1,1,0),
++    Vector3f(0,0,1), Vector3f(1,0,1), Vector3f(0,1,1), Vector3f(1,1,1)
++]
++
+ def build_svo(world_size, max_depth, geometries):
+-    # Initialize pool and geometry list
+     indirection_pool = IndirectionPool(capacity=8 * max_depth * max_depth)
+-    geometry_list = geometries
+-    
+-    # Start recursion at root
+-    root = create_node(0, Vector3f(0, 0, 0), world_size, max_depth, geometry_list, indirection_pool)
+-    
+-    # Prune empty branches
++    root = create_node(0, Vector3f(0, 0, 0), world_size, max_depth, geometries, indirection_pool)
+     prune_tree(root)
+-    
+-    # Gather nodes for cache coherence
+     gathered_nodes = gather_nodes(root)
+-    
+     return gathered_nodes
+ 
+ def create_node(depth, box_start, world_size, max_depth, geometries, indirection_pool):
+-    # Calculate child box size
+     child_box_size = world_size / (2 ** (depth + 1))
+-    
+-    # Define standard octree offsets (e.g., x,y,z in {-1, 1} relative to center)
+-    # Assuming box_start is the minimum corner of the current node
+-    # Offsets represent the 8 corners of the child boxes relative to the current box start
+-    # Note: Exact offset calculation depends on coordinate system, but conceptually:
+-    # child_box_start = box_start + offset * child_box_size
+-    
+     children = [None] * 8
+     
+     for i in range(8):
+-        # Calculate child box boundaries
+-        # Implementation detail: child_box_offsets[i] is a Vector3f representing the 
+-        # offset of the i-th child's minimum corner relative to the parent's minimum corner
+-        # scaled by child_box_size.
+         child_box_start = box_start + (child_box_offsets[i] * child_box_size)
+-        child_box_end = child_box_start + child_box_size
++        child_box_end = child_box_start + Vector3f(child_box_size, child_box_size, child_box_size)
+         
+-        # Check intersection
+         intersection = check_intersection(child_box_start, child_box_end, geometries)
+         
+         if intersection is not None:
+             if depth + 1 != max_depth:
+-                # Internal node: create child indirection grid
+                 child_grid = create_node(depth + 1, child_box_start, world_size, max_depth, geometries, indirection_pool)
+-                # Create index cell pointing to child grid
+-                # texture_index is derived from child_grid's position in the pool or texture
+-                cell = Cell(node_type=INDEX, texture_index=child_grid.texture_index)
++                cell = Cell(node_type=Cell.INDEX, texture_index=Vector3f(0, 0, 0))
+             else:
+-                # Leaf node: create data cell
+-                # Normalize color and location by world_size
+                 normalized_color = intersection.color / world_size
+                 normalized_location = intersection.location / world_size
+-                cell = Cell(node_type=DATA, color=normalized_color, real_location=normalized_location)
++                cell = Cell(node_type=Cell.DATA, color=normalized_color, real_location=normalized_location)
+             
+             children[i] = cell
+@@ -123,5 +133,4 @@
+ 
+ def check_intersection(box_start, box_end, geometries):
+-    # Iterate through geometries and test for intersection with the box
+     for geom in geometries:
+         if geom.intersects(box_start, box_end):
+@@ -130,22 +139,14 @@
+ 
+ def prune_tree(node):
+-    # Depth-first search to remove empty branches
+     if node is None:
+         return
+-    
+-    # Recursively prune children
+     for i in range(8):
+         if node.children[i] is not None:
+-            if node.children[i].node_type == INDEX:
++            if node.children[i].node_type == Cell.INDEX:
+                 prune_tree(node.children[i].grid)
+-                # If child grid is now empty after pruning, remove the index
+-                if node.children[i].grid.is_empty():
++                if node.children[i].grid.children == [None] * 8:
+                     node.children[i] = None
+-            else:
+-                # Data nodes are never pruned as they contain geometry
+-                pass
+ 
+ def gather_nodes(node):
+-    # Collect all non-null nodes into a sequential array
+     result = []
+     collect_recursive(node, result)
+@@ -158,5 +159,5 @@
+     for child in node.children:
+         if child is not None:
+-            if child.node_type == INDEX:
++            if child.node_type == Cell.INDEX:
+                 collect_recursive(child.grid, result)
+ ```
+@@ -186,10 +187,10 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N)$ where $N$ is the number of nodes in the full octree, as every node is visited during construction and pruning [S2, unofficial].
++-   **Time Complexity**: $O(N)$ where $N$ is the number of nodes visited during construction and pruning [S2, unofficial].
+ -   **Memory Complexity**: $O(N)$, requiring the entire octree to be stored in memory simultaneously [S2, unofficial].
+ -   **Performance**: Simple to implement but suffers from high memory consumption and poor cache coherence due to scattered nodes [S2, unofficial].
+ -   **Strengths**: Simple recursive implementation; easy to write and debug [S2, unofficial].
+ -   **Limitations**: High memory usage; not suitable for very large scenes or out-of-core construction; requires post-processing for cache coherence [S2, unofficial].
+--   **When to use**: Small scenes, prototyping, or when memory is not a constraint [S2, unofficial].
++-   **When to use**: Not given in the sources.
+ -   **When not to use**: Large-scale scenes, out-of-core processing, or when memory efficiency is critical [S2, unofficial].
+ 

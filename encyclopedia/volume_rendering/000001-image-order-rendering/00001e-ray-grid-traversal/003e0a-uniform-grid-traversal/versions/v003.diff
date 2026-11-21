@@ -1,0 +1,210 @@
+--- v002.md
++++ v003.md
+@@ -4,44 +4,136 @@
+ 
+ ## Overview
+-Uniform Grid Traversal accelerates ray traversal through uniformly distributed data (such as particles or voxels) by organizing the scene into a regular 3D grid [S1]. It solves the problem of $O(N)$ ray-scene intersection costs by reducing the search space to only the voxels intersected by the ray [S1]. Unlike [DDA](2323-dda.md) which traverses every voxel along the ray's path regardless of content, or [Wide DDA Cell Traversal](5122-wide-dda-cell-traversal.md) which processes cells in batches, Uniform Grid Traversal explicitly skips empty regions by storing data in voxel containers, making it optimal for sparse, uniformly distributed scenes [S1].
++Uniform Grid Traversal accelerates ray-scene intersection tests by partitioning space into a regular lattice of voxels, allowing the ray to skip empty regions and jump directly to occupied cells [S1]. It differs from hierarchical methods like [Octree and Tree Traversal](4134-octree-and-tree-traversal.md) by using a fixed-size array with $O(1)$ indexing, eliminating the overhead of pointer chasing and tree traversal logic, but requiring a denser grid to maintain similar acceleration benefits [S1]. It is the foundational traversal strategy for [DDA Traversal](3061-digital-differential-analyzer-dda-traversal.md) and [Hierarchical Grid Traversal](2560-hierarchical-grid-traversal.md).
+ 
+ ## How it works
+-**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, grid resolution $Res$ (integer, same for all axes), and the scene data (e.g., particles) distributed in world space.
+-**Outputs:** List of occupied voxels intersected by the ray, or the traversal state required to sample data within those voxels.
++The method advances a ray through a 3D uniform voxel grid by analytically computing the distance to the next cell boundary along each axis, selecting the minimum distance to determine the next cell visited [S2][S3, unofficial][S5]. This builds on the shared principles of [Ray-grid traversal](17-ray-grid-traversal.md).
+ 
+-**Data Structures:**
+-1.  **Uniform Grid:** A 3D array of size $Res \times Res \times Res$.
+-2.  **Voxel Container:** Each cell in the grid holds a list of references to the scene objects (e.g., particles) contained within that voxel's spatial bounds [S1].
+-3.  **Ray State:** Standard DDA state variables: current voxel indices $(i, j, k)$, step directions $(s_x, s_y, s_z) \in \{-1, 1\}$, and distances to next boundary crossings $(t_{max\_x}, t_{max\_y}, t_{max\_z})$ [S1].
++### Inputs and Outputs
++- **Inputs**: Ray origin $\mathbf{o} = (o_x, o_y, o_z)$, ray direction $\mathbf{d} = (d_x, d_y, d_z)$, voxel size $v$ (assumed uniform across axes for the basic method), grid dimensions $N_x, N_y, N_z$, and grid bounds (typically $[0, N_x] \times [0, N_y] \times [0, N_z]$).
++- **Outputs**: A sequence of voxel indices $(i, j, k)$ visited by the ray, and optionally the entry/exit distances for each voxel.
+ 
+-**Algorithm Steps:**
+-1.  **Grid Construction:**
+-    *   Determine the world-space bounding box of the scene.
+-    *   Divide the bounding box into $Res^3$ uniform voxels.
+-    *   For each scene object, compute its bounding box.
+-    *   Map the object's bounding box to the set of voxel indices it intersects.
+-    *   Insert the object reference into the lists of all intersected voxels [S1].
+-2.  **Ray Initialization:**
+-    *   Compute the initial voxel index $(i_0, j_0, k_0)$ containing the ray origin $\mathbf{o}$ [S1].
+-    *   Determine step directions $s_x, s_y, s_z$ based on the sign of $\mathbf{d}$ [S1].
+-    *   Compute $t_{max\_x}, t_{max\_y}, t_{max\_z}$ as the distance from $\mathbf{o}$ to the first voxel boundary in each dimension [S1].
+-    *   Compute $\Delta t_x, \Delta t_y, \Delta t_z$ as the distance between consecutive voxel boundaries in each dimension [S1].
+-3.  **Traversal Loop:**
+-    *   While the ray is within the grid bounds:
+-        *   Access the current voxel $(i, j, k)$.
+-        *   Process all objects stored in the current voxel's container [S1].
+-        *   Identify the smallest non-negative distance among $t_{max\_x}, t_{max\_y}, t_{max\_z}$.
+-        *   Increment the corresponding voxel index by its step direction ($i += s_x$, etc.).
+-        *   Update the corresponding $t_{max}$ by adding $\Delta t$ [S1].
+-4.  **Termination:**
+-    *   Stop when the ray exits the grid boundaries or when a termination condition (e.g., opacity threshold) is met [S1].
++### Data Structures
++- **Grid**: A 3D array of size $N_x \times N_y \times N_z$. For sparse data, this may be a hash map or a compact list of occupied voxels, but the traversal logic assumes a logical uniform grid [S1].
++- **State Variables**:
++  - `current_voxel`: Tuple $(i, j, k)$ of integers, initialized to the voxel containing $\mathbf{o}$.
++  - `t_max`: Tuple $(t_{max, x}, t_{max, y}, t_{max, z})$ of floats, storing the ray parameter $t$ at which the ray crosses the next boundary in each axis.
++  - `t_delta`: Tuple $(\Delta t_x, \Delta t_y, \Delta t_z)$ of floats, storing the ray parameter distance to cross one voxel width in each axis.
++  - `step`: Tuple $(step_x, step_y, step_z)$ of integers ($+1$ or $-1$), indicating the direction of index increment.
+ 
+-**Parameters:**
+-*   **Grid Resolution ($Res$):** The number of divisions per axis. No analytical formula exists for the optimal value [S1].
+-    *   *Typical Value:* Empirically, the optimal resolution yields roughly one particle per voxel [S1]. For a scene with $2 \times 10^5$ particles (Bench scene), $Res = 60$ ($60 \times 60 \times 60$) is optimal [S1].
++### Initialization
++1.  **Compute Voxel Index**: Determine the starting voxel index $i_0 = \lfloor o_x / v \rfloor$, $j_0 = \lfloor o_y / v \rfloor$, $k_0 = \lfloor o_z / v \rfloor$. Clamp indices to grid bounds $[0, N_x-1] \times [0, N_y-1] \times [0, N_z-1]$ [G].
++2.  **Compute Step Directions**:
++    $$
++    step_i = \begin{cases} 
++    +1 & \text{if } d_i > 0 \\
++    -1 & \text{if } d_i < 0 \\
++    0 & \text{if } d_i = 0 
++    \end{cases}
++    $$
++    If $d_i = 0$, the ray is parallel to the grid planes in that dimension and never crosses a boundary [S5].
++3.  **Compute Distance Deltas**:
++    $$
++    \Delta t_i = \frac{v}{|d_i|} \quad \text{for } d_i \neq 0
++    $$
++    If $d_i = 0$, set $\Delta t_i = 0$ (or infinity, depending on implementation; typically treated as non-traversable) [S5].
++4.  **Compute Initial Boundary Distances ($t_{max}$)**:
++    The first boundary in axis $i$ is at coordinate $B_i = (i_0 + step_i) \cdot v$.
++    $$
++    t_{max, i} = \frac{B_i - o_i}{d_i} \quad \text{for } d_i \neq 0
++    $$
++    If $d_i = 0$, set $t_{max, i} = \infty$ [S5].
+ 
+-**Pitfalls:**
+-*   **Resolution Sensitivity:** If $Res$ is much lower than optimal (e.g., $< 60 \times 60 \times 60$ for the Bench scene), performance degrades significantly because too many particles reside in each voxel, increasing the cost of processing each visited voxel [S1].
+-*   **Over-resolution:** As $Res$ increases, runtime grows steadily due to the overhead of grid traversal itself, even if voxel processing becomes faster [S1].
++### Traversal Loop
++Iterate while `current_voxel` is within grid bounds:
++1.  **Identify Axis**: Find axis $k \in \{x, y, z\}$ such that $t_{max, k} = \min(t_{max, x}, t_{max, y}, t_{max, z})$ [S2][S3, unofficial][S5].
++2.  **Process Voxel**: Record `current_voxel` and the interval $[t_{entry}, t_{max, k}]$ where $t_{entry}$ is the $t$ value when entering the current voxel [S1][S5].
++3.  **Advance Index**: Update `current_voxel[k] += step[k]` [S2][S3, unofficial][S5].
++4.  **Update Boundary**: Update $t_{max, k} \leftarrow t_{max, k} + \Delta t_k$ [S2][S3, unofficial][S5].
++5.  **Update Entry**: Set $t_{entry} \leftarrow t_{max, k}$ (the old value) [S5].
++
++### Pseudocode
++```python
++def uniform_grid_traversal(ray_origin, ray_direction, voxel_size, grid_dims):
++    # Clamp ray origin to grid bounds to handle rays starting outside
++    # Note: This is a simplification; robust implementations handle entry/exit
++    # from the grid bounding box separately.
++    
++    # 1. Initialize current voxel index
++    current_voxel = [
++        int(ray_origin[0] // voxel_size),
++        int(ray_origin[1] // voxel_size),
++        int(ray_origin[2] // voxel_size)
++    ]
++    
++    # Clamp to grid bounds [0, N-1]
++    for axis in range(3):
++        if current_voxel[axis] < 0:
++            current_voxel[axis] = 0
++        elif current_voxel[axis] >= grid_dims[axis]:
++            current_voxel[axis] = grid_dims[axis] - 1
++            
++    # 2. Compute step directions
++    step = [0, 0, 0]
++    for axis in range(3):
++        if ray_direction[axis] > 0:
++            step[axis] = 1
++        elif ray_direction[axis] < 0:
++            step[axis] = -1
++        else:
++            step[axis] = 0
++            
++    # 3. Compute t_delta (distance to cross one voxel)
++    t_delta = [0.0, 0.0, 0.0]
++    for axis in range(3):
++        if ray_direction[axis] != 0:
++            t_delta[axis] = voxel_size / abs(ray_direction[axis])
++        else:
++            t_delta[axis] = float('inf') # Or 0, handled in t_max
++            
++    # 4. Compute t_max (distance to next boundary)
++    t_max = [0.0, 0.0, 0.0]
++    for axis in range(3):
++        if ray_direction[axis] != 0:
++            # Boundary coordinate: current_voxel + step
++            boundary_coord = (current_voxel[axis] + step[axis]) * voxel_size
++            t_max[axis] = (boundary_coord - ray_origin[axis]) / ray_direction[axis]
++        else:
++            t_max[axis] = float('inf')
++            
++    t_entry = 0.0
++    
++    # 5. Traversal Loop
++    while 0 <= current_voxel[0] < grid_dims[0] and \
++          0 <= current_voxel[1] < grid_dims[1] and \
++          0 <= current_voxel[2] < grid_dims[2]:
++        
++        # Find axis with minimum t_max
++        min_axis = 0
++        min_t = t_max[0]
++        if t_max[1] < min_t:
++            min_axis = 1
++            min_t = t_max[1]
++        if t_max[2] < min_t:
++            min_axis = 2
++            min_t = t_max[2]
++            
++        # Yield current voxel and interval
++        yield current_voxel, t_entry, min_t
++        
++        # Advance index in the chosen axis
++        current_voxel[min_axis] += step[min_axis]
++        
++        # Update t_max for that axis
++        t_max[min_axis] += t_delta[min_axis]
++        
++        # Update t_entry
++        t_entry = min_t
++```
++
++### Parameters and Edge Cases
++- **Voxel Size**: Must be positive. If the grid is non-uniform, this method requires modification (see [Computational Space Traversal](10339-computational-space-traversal.md)) [S1].
++- **Zero Direction Components**: If $d_i = 0$, the ray never crosses a boundary in that dimension. $t_{max, i}$ is set to infinity, and $\Delta t_i$ is effectively ignored in the min-selection [S5].
++- **Ray Origin Outside Grid**: The initialization step must clamp the starting voxel or handle the "entry into grid" case explicitly. If the ray starts outside, the first few $t_{max}$ values may be negative, indicating the ray has already passed those boundaries. The loop should typically begin only after the ray enters the grid bounding box [G].
++- **Precision Errors**: Floating-point inaccuracies can cause the ray to miss intersections or visit voxels incorrectly. [Robust Grid Traversal](#robust-grid-traversal) addresses this by retaining intersections even if they fall slightly outside the current cell due to precision errors [S2].
+ 
+ ## Subtopics
+@@ -51,21 +143,25 @@
+ 
+ ### [Grid Traversal Setup (DDA)](12499-grid-traversal-setup-dda.md)
+-Grid Traversal Setup (DDA) initializes the parameters required for a 3D Digital Differential Analyzer (DDA) to traverse a voxel grid along a ray. It computes step directions, initial voxel indices, and distances to the next voxel boundaries, preparing the state for the iterative traversal loop. It differs from [Computational Space Traversal](10339-computational-space-traversal.md) by operating directly in the uniform grid's coordinate space, mapping ray origins and directions to voxel indices and boundary distances rather than abstract computational steps.
++Grid Traversal Setup (DDA) initializes the parameters required for a 3D Digital Differential Analyzer (DDA) to traverse a voxel grid along a ray. It computes the step directions, initial voxel indices, and distances to the next voxel boundaries for the ray. This method sets the stage for the iterative traversal loop, ensuring that the ray correctly enters the grid and aligns with the voxel lattice. It differs from computational space traversal by operating directly in the grid's coordinate system and from one-pass over-allocated methods by computing exact boundary crossings rather than pre-allocating a fixed set of samples.
++
++### [Grid Traversal (One-Pass Over-Allocated)](14347-grid-traversal-one-pass-over-allocated.md)
++A single-pass algorithm to traverse voxel grids along rays, using pre-allocated maximum memory to avoid a second pass. It differs from [Grid Traversal (Two-Pass)](#grid-traversal-two-pass) by allocating buffers large enough for the worst-case scenario upfront, trading memory for a single kernel launch, and from [Computational Space Traversal](10339-computational-space-traversal.md) by operating directly on grid coordinates rather than abstract computational spaces.
+ 
+ ### Robust Grid Traversal
+-Robust Grid Traversal is a modification to standard grid traversal that prevents numerical robustness errors by keeping the closest intersection parameter even if it falls outside the current cell, terminating only when the cell's maximum ray parameter exceeds this closest intersection [S2]. It solves the problem where intersections on grid bounding boxes or implied planes are missed due to precision errors placing them outside the currently visited cell [S2]. Unlike traditional methods that discard intersections outside the current cell, this method retains them, avoiding the need for scene-dependent epsilon tests which are hard to choose correctly [S2]. It is used by some researchers [PH04], though many sources still discard intersections [Shi00, Suf07].
++**Definition**: A grid traversal modification that prevents numerical robustness errors by keeping the closest intersection parameter even if it falls outside the current cell, terminating only when the cell's maximum ray parameter exceeds this closest intersection [S2].
++**Pitfall**: Numerical robustness errors can cause intersections on grid bounding boxes or implied planes to be missed if intersections outside the current cell are rejected. This happens when computing intersections while visiting a cell, but the result is rejected due to precision errors placing it outside that cell [S2].
++**Comparison**: Unlike traditional methods that discard intersections outside the current cell, this method retains them. Traditional methods require scene-dependent epsilon tests which are hard to choose correctly [S2].
++**Usage**: Used by some researchers [PH04], but many sources still discard intersections [Shi00, Suf07] [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(V + P_{visited})$, where $V$ is the number of voxels visited by the ray and $P_{visited}$ is the total number of particles in those voxels. Grid construction is $O(N \cdot V_{obj})$ where $N$ is the number of objects and $V_{obj}$ is the average number of voxels an object intersects [S1].
+-*   **Memory Complexity:** $O(Res^3 + N)$, storing the grid structure and the object lists [S1].
+-*   **Measured Performance:** In the Bench scene with $2 \times 10^5$ particles, optimal performance is achieved at a grid resolution of $60 \times 60 \times 60$ [S1].
+-*   **Scaling:** Runtime grows steadily as grid resolution increases due to additional grid traversal costs [S1].
+-*   **Strengths:** Efficient for uniformly distributed sparse data; simple implementation; effective culling of empty space [S1].
+-*   **Limitations:** Performance degrades if resolution is poorly chosen; not suitable for highly non-uniform data without adaptation; memory overhead for large $Res$ [S1].
+-*   **When to Use:** When scene data (e.g., particles) is uniformly distributed and the number of objects is large [S1].
+-*   **When Not to Use:** When data is highly clustered or non-uniform, or when the optimal resolution is unknown and memory is constrained [S1].
++- **Time Complexity**: $O(V)$ where $V$ is the number of voxels visited by the ray. In the worst case (ray traversing the entire grid), $V = N_x + N_y + N_z$. The cost per voxel is constant time $O(1)$ [S2][S3, unofficial][S5].
++- **Memory Complexity**: $O(N_x N_y N_z)$ for the grid structure. For sparse data, this can be inefficient compared to hierarchical structures [S1].
++- **Performance**: Performance is highly dependent on grid resolution. Optimal performance is achieved when the grid resolution yields roughly one particle per voxel [S1]. For example, in a scene with $2 \times 10^5$ particles, a resolution of $60 \times 60 \times 60$ provided optimal performance [S1].
++- **Scaling**: Runtime grows steadily as grid resolution increases due to additional grid traversal costs [S1]. If the resolution is too low (e.g., $< 60 \times 60 \times 60$ for the Bench scene), performance degrades significantly because too many particles reside in each voxel, leading to expensive per-voxel processing [S1].
++- **Strengths**: Simple implementation, low memory overhead for dense grids, cache-friendly access patterns for uniform grids, and no recursion overhead [S1].
++- **Limitations**: Inefficient for sparse data due to large empty space coverage; sensitive to grid resolution choice; numerical robustness issues if not handled carefully [S2].
+ 
+ ## Background
+-Uniform Grid Traversal is a foundational acceleration technique in volume rendering and ray tracing. It relies on the principle that a regular grid allows for efficient spatial partitioning of uniformly distributed scene elements. The method is widely used in rendering discrete participating media, where particles are distributed in space [S1]. The choice of grid resolution is a critical empirical parameter, with optimal performance typically occurring when the grid density matches the particle density (roughly one particle per voxel) [S1].
++Uniform Grid Traversal is a fundamental technique in volume rendering and ray tracing, often associated with the Digital Differential Analyzer (DDA) algorithm [S2][S3, unofficial][S5]. It is widely used in scientific visualization and medical imaging where data is naturally stored in uniform grids [S1]. The method's simplicity and efficiency make it a standard choice for accelerating ray traversal in uniform voxel grids [S1].
+ 
+ ## Sources

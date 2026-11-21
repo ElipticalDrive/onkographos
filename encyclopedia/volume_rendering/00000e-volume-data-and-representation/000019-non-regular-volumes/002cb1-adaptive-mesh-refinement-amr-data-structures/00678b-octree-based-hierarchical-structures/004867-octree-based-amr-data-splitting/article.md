@@ -1,0 +1,174 @@
+# Octree-based AMR Data Splitting
+
+Also called: Chopping up AMR data set, Overlaying with octree
+
+## Overview
+This method partitions hierarchical Adaptive Mesh Refinement (AMR) data into uniform, rectilinear blocks suitable for parallel rendering by overlaying the domain with an octree aligned to the finest grid resolution [S1, unofficial]. It sets itself apart from sibling methods like [TET-AMR Data Structure](1094-tet-amr-data-structure.md) by converting unstructured hierarchical elements into uniform grids, and from [Homogeneity-Based KD-Tree Construction](1325-homogeneity-based-kd-tree-construction.md) by using a fixed octree alignment rather than data-driven spatial partitioning.
+
+## How it works
+**Inputs:** An AMR dataset containing a hierarchy of grid levels with varying resolutions.
+**Outputs:** A set of uniform rectilinear grid blocks, each corresponding to an octree leaf, ready for distribution to processing nodes.
+
+**Data Structures:**
+*   **Octree Node:** Contains a bounding box (aligned with the finest grid), a flag indicating if it is a leaf, and a pointer to child nodes (if not a leaf).
+*   **Uniform Block:** A 3D array of scalar values corresponding to the data within the octree leaf's bounding box.
+
+**Steps:**
+1.  **Overlay:** Define an octree structure over the entire data domain. The root node covers the full extent of the AMR data. The octree is aligned such that its finest possible resolution matches the finest grid cells in the AMR hierarchy [S1, unofficial].
+2.  **Recursive Splitting:** For each octree node, determine if it is "completely overlaid" by a single AMR grid level.
+    *   A node is completely overlaid if its bounding box is fully contained within a single grid cell or a contiguous block of cells from one specific AMR grid level, and all data values within that box are defined by that single grid.
+    *   If the node is completely overlaid, it becomes a leaf node. The data values for this leaf are extracted from the corresponding AMR grid to form a uniform rectilinear grid [S1, unofficial].
+    *   If the node is not completely overlaid (i.e., it spans multiple grid levels or partial cells), split it into 8 children (subdividing the bounding box equally in all three dimensions) and recurse.
+3.  **Leaf Extraction:** For every leaf node in the resulting octree, generate a uniform 3D texture or volume block containing the scalar values from the underlying AMR grids that fall within the leaf's bounds [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def split_amr_to_octree(amr_data, finest_resolution):
+    """
+    Splits AMR data into uniform blocks using an overlaying octree.
+    
+    Args:
+        amr_data: Object containing hierarchical grid levels.
+                  Each level has a bounding box, resolution, and data array.
+        finest_resolution: The maximum grid resolution in the AMR hierarchy.
+        
+    Returns:
+        list of UniformBlock: Each block contains a 3D array of values 
+                               and its spatial bounds.
+    """
+    # Determine the total domain extent based on the finest resolution
+    # and the bounding boxes of the finest grid cells.
+    domain_extent = get_domain_extent(amr_data, finest_resolution)
+    
+    # Initialize the root of the octree
+    root = OctreeNode(bounds=domain_extent, depth=0)
+    
+    # Build the octree
+    build_octree(root, amr_data, finest_resolution)
+    
+    # Extract uniform blocks from leaves
+    uniform_blocks = []
+    collect_leaves(root, uniform_blocks)
+    
+    return uniform_blocks
+
+def build_octree(node, amr_data, finest_resolution):
+    """
+    Recursively splits the octree node if it is not completely overlaid
+    by a single AMR grid level.
+    """
+    # Check if the current node's bounds are fully contained within
+    # a single AMR grid level's data.
+    overlaid_grid_level = check_single_grid_overlay(node.bounds, amr_data)
+    
+    if overlaid_grid_level is not None:
+        # Node is completely overlaid by one grid level.
+        # Extract the data for this block.
+        node.is_leaf = True
+        node.data = extract_uniform_data(
+            overlaid_grid_level, 
+            node.bounds, 
+            finest_resolution
+        )
+    else:
+        # Node is not completely overlaid. Split into 8 children.
+        node.is_leaf = False
+        children_bounds = split_bounds(node.bounds)
+        
+        for child_bounds in children_bounds:
+            child = OctreeNode(bounds=child_bounds, depth=node.depth + 1)
+            node.children.append(child)
+            build_octree(child, amr_data, finest_resolution)
+
+def check_single_grid_overlay(bounds, amr_data):
+    """
+    Returns the grid level if the entire 'bounds' box is covered by
+    a single AMR grid level. Returns None otherwise.
+    """
+    # Iterate through AMR grid levels from finest to coarsest.
+    # A grid level covers the bounds if:
+    # 1. The grid's bounding box contains 'bounds'.
+    # 2. All cells in 'bounds' are defined in this grid.
+    # 3. No finer grid level overlaps with 'bounds' (handled by recursion order).
+    for level in amr_data.levels:
+        if bounds_contained_in(level.bounds, bounds) and \
+           all_cells_defined_in(level, bounds):
+            return level
+    return None
+
+def extract_uniform_data(grid_level, bounds, finest_resolution):
+    """
+    Extracts scalar values from a grid level into a uniform 3D array
+    aligned with 'finest_resolution'.
+    """
+    # Calculate the dimensions of the uniform block based on bounds
+    # and finest_resolution.
+    dims = calculate_dims(bounds, finest_resolution)
+    data_array = zeros(dims)
+    
+    # Map the grid level's cells to the uniform array indices.
+    # Since the grid level may have a coarser resolution, multiple
+    # uniform cells may map to a single grid cell.
+    for i, j, k in grid_level.cells_within(bounds):
+        # Determine the corresponding indices in the uniform array.
+        u, v, w = map_to_uniform(i, j, k, finest_resolution)
+        
+        # If multiple uniform cells map to one grid cell, assign the value.
+        # [G] Assuming constant value per coarse cell for simplicity.
+        data_array[u, v, w] = grid_level.values[i, j, k]
+        
+    return data_array
+
+def collect_leaves(node, blocks):
+    """
+    Recursively collects data from all leaf nodes.
+    """
+    if node.is_leaf:
+        blocks.append(node.data)
+    else:
+        for child in node.children:
+            collect_leaves(child, blocks)
+```
+
+**Parameters:**
+*   **Finest Resolution:** The resolution of the finest AMR grid level. This determines the granularity of the octree leaves. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+*   **Partial Overlays:** If a node's bounds partially overlap with a grid cell, the `check_single_grid_overlay` function must handle interpolation or value assignment carefully. The source implies that leaves correspond to uniform rectilinear grids, suggesting that partial overlaps are resolved by the recursive splitting until a fully contained single-grid region is found [S1, unofficial].
+*   **Precision:** Aligning the octree with the finest grid cells requires precise floating-point arithmetic to avoid gaps or overlaps between blocks.
+
+## Subtopics
+
+### Back-to-front Cell Assignment
+A parallel distribution strategy that breaks octree leaves down to the cell level, numbers them in viewing direction, and assigns contiguous ranges of cells to processing nodes for good load balancing [S1, unofficial]. It sets itself apart from [Round-robin Leaf Assignment](12287-round-robin-leaf-assignment.md) by providing better load balancing and simpler compositing, at the cost of view-dependent I/O overhead [S1, unofficial].
+
+**Steps:**
+1.  Break octree leaves down to the cell level.
+2.  Traverse the resulting octree in viewing direction and number leaves on-the-fly.
+3.  In a second traversal, assign each processing node $i$ a range of leaves to render.
+
+**Formula:**
+Node $i$ renders leaves from index $(N*i)/n$ to $(N*(i+1))/n$, where $N$ is the total number of octree leaves and $n$ is the number of processing nodes [S1, unofficial].
+
+**Pitfalls:**
+Assignment depends on viewing direction, which might increase I/O overhead during viewpoint animation [S1, unofficial].
+
+**Comparison:**
+This approach provides very good load balancing because rendering cost can be estimated accurately, unlike round-robin leaf assignment [S1, unofficial]. Compositing is extremely simple because partial images can be composited in order of processing node numbers, unlike round-robin [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Building the octree requires traversing the AMR hierarchy. The splitting step is proportional to the number of octree nodes, which depends on the complexity of the AMR data. Extracting uniform blocks is proportional to the number of cells in the finest grid. [S1, unofficial]
+*   **Memory Complexity:** The memory usage is proportional to the size of the AMR data plus the overhead of the octree structure. Uniform blocks may introduce some redundancy if adjacent blocks share boundary cells, but the source does not specify the exact overhead. [S1, unofficial]
+*   **Measured Performance:** The method is described as "very simple and efficient" [S1, unofficial]. Hardware acceleration is used for rendering uniform blocks by uploading them as stacks of axis-aligned 2D textures [S1, unofficial].
+*   **Strengths:** Converts unstructured AMR data into uniform blocks, which are easy to handle in parallel rendering pipelines. The octree structure allows for efficient spatial partitioning. [S1, unofficial]
+*   **Limitations:** The uniform blocks may not perfectly match the underlying AMR structure, potentially leading to some data duplication or interpolation. The method does not inherently optimize for load balancing; this is handled by the distribution strategies (e.g., Back-to-front Cell Assignment). [S1, unofficial]
+*   **When to use:** When rendering AMR data on parallel hardware that benefits from uniform data blocks, such as GPUs using texture-based rendering. [S1, unofficial]
+*   **When not to use:** When the AMR data is highly irregular and the overhead of creating uniform blocks outweighs the benefits of parallel processing. [S1, unofficial]
+
+## Background
+The method was developed in the context of volume visualization of AMR data, specifically for parallel rendering on graphics workstations. It is part of the AMRVis project, which investigates efficient methods for visualizing adaptive mesh refinement data [S1, unofficial]. The approach leverages the simplicity of uniform grids to facilitate hardware-accelerated rendering while maintaining the adaptive resolution benefits of AMR [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization of AMR Data, https://graphics.cs.ucdavis.edu/~okreylos/Research/AMRVis/MainPage.html, fetched 2026-10-26 (unofficial)

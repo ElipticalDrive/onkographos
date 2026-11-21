@@ -1,0 +1,3562 @@
+# Real-Time Fluid Simulation with Advection-Reflection
+
+Based on the paper *"Advection-Reflection: An Efficient Advection Scheme for Fluid Simulation" (Zein et al.)*.
+
+This project implements a high-performance fluid simulation (Eulerian Grid) using Modern C++ (C++23), supporting multiple backends (**Metal**, **CUDA**, **OpenGL**, **CPU/OpenMP**) and rendered in real-time using OpenGL Volumetric Raymarching.
+
+## ✨ Features
+
+### 🌊 Fluid Simulation Algorithms
+The project implements and compares four different advection schemes across all supported backends:
+1.  **Basic Stable Fluids**: Semi-Lagrangian advection (fast but diffuses details quickly).
+2.  **MacCormack**: Second-order accuracy scheme (sharpens details but can be unstable).
+3.  **BFECC (Back and Forth Error Compensation and Correction)**: Reduces dissipation, robust.
+4.  **Advection-Reflection**: The target implementation. A novel scheme that provides high detail preservation with low computational overhead compared to BFECC.
+
+### 🚀 Multi-Backend Support
+The simulation engine is decoupled and runs on multiple high-performance computing backends:
+*   **Metal**: Optimized for **macOS** using native Apple Silicon/Intel GPU kernels.
+*   **CUDA**: High-performance backend for **Nvidia GPUs**.
+*   **OpenGL Compute**: Cross-platform GPU backend (Windows/Linux) using Compute Shaders (requires OpenGL 4.3+).
+*   **CPU (OpenMP)**: Reference implementation using multithreading for portability.
+
+### ⚛️ Advanced Physics
+*   **Vorticity Confinement**: Restores small-scale swirling details (turbulence) lost due to numerical dissipation.
+*   **Solid-Fluid Coupling**: Interaction with arbitrary moving objects via Signed Distance Fields (SDF) and velocity field coupling.
+*   **Simple Obstacles**: Built-in toggleable spherical obstacle for quick testing.
+
+### 🎨 Volumetric Rendering
+High-quality visualization using Single-Pass Raymarching in GLSL:
+*   **Volumetric Raycasting**: Direct rendering of the 3D density field.
+*   **Velocity Visualization**: Optional overlay to visualize the velocity vector field colors.
+*   **Self-Shadowing**: Real-time volumetric shadows using secondary raymarching (Beer's Law).
+*   **Henyey-Greenstein Scattering**: Physically approxiated phase function for anisotropic light scattering (silver lining effects).
+*   **Stochastic Jittering**: Eliminates wood-grain artifacts in low-sample-count rendering.
+*   **Tone Mapping**: Reinhard tone mapping and partial Gamma correction.
+
+### 🎮 Interactive Controls
+*   **3D Orbit Camera**: Freely rotate and zoom around the simulation volume.
+*   **Volumetric Interaction**: Inject smoke and velocity directly into the 3D volume using the mouse cursor (Ray-Box Intersection).
+*   **Real-time Tuning**: Adjust lighting direction, smoke density, and scattering anisotropy on the fly.
+
+## 📂 Code Structure
+
+The project uses a unified `FluidSolver` interface with specialized implementations:
+
+| File | Description |
+|------|-------------|
+| `src/main.cpp` | **Entry Point**. Manages the Game Loop, GLFW window, Input processing, and orchestrates the Solver and Renderer. |
+| `src/FluidSolver.h` | **Interface**. Defines the abstract base class `FluidSolver` and the `SolverType` enum. |
+| `src/MetalFluidSolver.mm` | **Metal Backend**. Optimized MSL kernels and Metal API management for macOS. |
+| `src/CudaFluidSolver.cu` | **CUDA Backend**. Nvidia CUDA kernels for massively parallel simulation. |
+| `src/GlComputeFluidSolver.h` | **OpenGL Backend**. Compute Shaders for cross-platform GPU support. |
+| `src/CpuFluidSolver.h` | **CPU Backend**. Reference OpenMP implementation. |
+| `src/Renderer.h` | **Renderer**. Handles 3D Texture upload (or Interop) and raymarching visualization. |
+| `src/SimpleMath.h` | **Math Library**. Minimal arithmetic for vectors and matrices. |
+
+## 🕹️ Controls
+
+| Input | Action |
+|-------|--------|
+| **LMB (Left Mouse)** | Inject Smoke & Velocity (GPU backends utilize Spherical Splats at cursor) |
+| **RMB** or **Ctrl + LMB** | Rotate Camera (Orbit) |
+| **Scroll Wheel** | Zoom In/Out |
+| **M** | Switch Advection Algorithm (Stable -> MacCormack -> BFECC -> AdvRef) |
+| **V** | Toggle Velocity Visualization Overlay |
+| **O** | Toggle Spherical Obstacle |
+| **K** / **L** | Decrease / Increase Vorticity Confinement Strength |
+| **Arrow Keys** | Rotate Light Direction (Sun position) |
+| **`[` / `]`** | Decrease / Increase Smoke Density |
+| **`;` / `'`** | Adjust Scattering Phase (Left: Back-scattering, Right: Forward-scattering) |
+| **ESC** | Exit |
+
+## 🛠️ Build & Run
+
+### Prerequisites
+*   **C++ Compiler**: C++20/23 support.
+*   **CMake**: Version 3.10+.
+*   **Libraries**:
+    *   **GLFW**: Windowing and input.
+    *   **OpenGL**: Core functionality.
+*   **Backends (Optional)**:
+    *   **CUDA Toolkit**: For CUDA backend (CMake will auto-detect).
+    *   **Metal**: Included in Xcode Command Line Tools (macOS only).
+
+### Compilation
+
+```bash
+mkdir build
+cd build
+cmake ..
+make
+```
+
+### Usage
+
+Run with default settings (Resolution: 64^3, Backend: CPU):
+```bash
+./AdvectionReflectionFluid
+```
+
+**Select Backend via Command Line:**
+
+```bash
+# MacOS optimized
+./AdvectionReflectionFluid --mode metal --res 128
+
+# Nvidia GPUs
+./AdvectionReflectionFluid --mode cuda --res 128
+
+# Cross-platform GPU
+./AdvectionReflectionFluid --mode gl --res 128
+
+# CPU Reference
+./AdvectionReflectionFluid --mode cpu --res 64
+```
+
+## 🚀 Future Roadmap
+- [x] **Arbitrary Obstacles**: Load mesh-based colliders (SDF generation support added to all backends).
+- [x] **Moving Objects**: Two-way coupling between fluid and solid bodies (Velocity Field Coupling implemented).
+Fluid simulation with multi gpu backend and volume rendering
+
+### FluidSolver.h
+```
+#pragma once
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+
+// 基本的数据结构，使用一维数组存储3D数据
+// Index = z * (width * height) + y * width + x
+class FluidGrid {
+public:
+    int width, height, depth;
+    int size;
+    std::vector<float> data;
+
+    FluidGrid(int w, int h, int d) : width(w), height(h), depth(d), size(w * h * d) {
+        data.resize(size, 0.0f);
+    }
+
+    // 交换两个网格的数据（Ping-Pong Buffer）
+    void swap(FluidGrid& other) {
+        std::swap(data, other.data);
+    }
+
+    float& at(int x, int y, int z) {
+        // 边界保护可在此添加
+        x = std::clamp(x, 0, width - 1);
+        y = std::clamp(y, 0, height - 1);
+        z = std::clamp(z, 0, depth - 1);
+        return data[z * width * height + y * width + x];
+    }
+    
+    // 三线性插值采样 (Trilinear Interpolation)
+    // 这是 Advection 的核心
+    float sample(float x, float y, float z) {
+        int x0 = (int)x; int x1 = x0 + 1;
+        int y0 = (int)y; int y1 = y0 + 1;
+        int z0 = (int)z; int z1 = z0 + 1;
+        
+        float sx = x - x0;
+        float sy = y - y0;
+        float sz = z - z0;
+
+        float c000 = at(x0, y0, z0);
+        float c100 = at(x1, y0, z0);
+        // ... 继续完成剩下的6个采样点 ...
+        // 自行实现 Lerp 逻辑
+        return 0.0f; // Placeholder
+    }
+};
+
+class FluidSolver {
+public:
+    int N; // Grid size
+    float dt;
+    float diffusion;
+    float viscosity;
+
+    // 速度场 (u, v, w) 通常需要双缓冲来做 Advection
+    // 这里为了简化，可以用三个 Grid 分别存 u,v,w，或者一个存 Vector3 的 Grid
+    FluidGrid u, u_prev; // x-velocity
+    FluidGrid v, v_prev; // y-velocity
+    FluidGrid w, w_prev; // z-velocity
+    
+    // 密度场 (smoke)
+    FluidGrid density, density_prev;
+
+    // 辅助场 (用于 Projection 步骤)
+    FluidGrid divergence;
+    FluidGrid pressure;
+
+    FluidSolver(int n, float dt) 
+        : N(n), dt(dt), 
+          u(n,n,n), u_prev(n,n,n),
+          v(n,n,n), v_prev(n,n,n),
+          w(n,n,n), w_prev(n,n,n),
+          density(n,n,n), density_prev(n,n,n),
+          divergence(n,n,n), pressure(n,n,n) {}
+
+    // 核心步骤 1: 半拉格朗日平流
+    void advect(int b, FluidGrid& d, FluidGrid& d0, FluidGrid& u, FluidGrid& v, FluidGrid& w, float dt) {
+        // 遍历所有格子 (x, y, z)
+        // 回溯位置 = (x,y,z) - dt * velocity(x,y,z)
+        // d[pos] = d0.sample(backtraced_pos)
+        // b 参数用于处理边界条件类型
+    }
+
+    // 核心步骤 2: 投影 (计算散度 -> 求解压力泊松方程 -> 减去梯度)
+    void project(FluidGrid& u, FluidGrid& v, FluidGrid& w, FluidGrid& p, FluidGrid& div) {
+        // 1. 计算散度 div
+        // 2. 求解 p (Jacobi Iteration 20-40次)
+        // 3. u -= grad(p)
+    }
+
+    // 核心步骤 3: 反射操作 (Advection-Reflection 论文特有)
+    // result = 2 * projected - advected
+    void reflect_operation(FluidGrid& result, const FluidGrid& projected, const FluidGrid& advected) {
+        for(int i=0; i<result.size; i++) {
+            result.data[i] = 2.0f * projected.data[i] - advected.data[i];
+        }
+    }
+
+    // 完整的反射时间步逻辑
+    void step_reflection() {
+        // 论文流程：
+        // 1. Half-Step Advection: u0 -> advect(dt/2) -> u_tilde_half
+        // 2. Mid-Step Projection: u_tilde_half -> project -> u_half
+        // 3. Reflection: u_hat_half = 2 * u_half - u_tilde_half
+        // 4. Final Advection: u_hat_half -> advect(dt/2) -> u_tilde_1 (注意: advect velocity field 依然是 u_half)
+        // 5. Final Projection: u_tilde_1 -> project -> u_final
+        
+        // 注意：这需要仔细管理 u, u_prev 等缓冲区的交换，避免覆盖
+    }
+
+    // 传统的 Stable Fluids 时间步 (用于对比)
+    void step_stable_fluids() {
+        // 1. Diffuse (如果你想忽略粘性，可跳过)
+        // 2. Project
+        // 3. Advect
+        // 4. Project
+    }
+};
+```
+
+### read_pdfs.py
+```
+from pypdf import PdfReader
+import os
+
+def read_pdf(file_path):
+    print(f"--- Reading {os.path.basename(file_path)} ---")
+    try:
+        reader = PdfReader(file_path)
+        # Read up to first 5 pages or max pages
+        num_pages = len(reader.pages)
+        text = ""
+        for i in range(min(num_pages, 5)):
+            page = reader.pages[i]
+            text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        return f"Error reading {file_path}: {str(e)}"
+
+files = ["311535.311548.pdf", "advection_reflection.pdf"]
+for f in files:
+    full_path = os.path.join(os.getcwd(), f)
+    if os.path.exists(full_path):
+        content = read_pdf(full_path)
+        print(content)
+    else:
+        print(f"File not found: {f}")
+```
+
+### src/CpuFluidSolver.h
+```
+#pragma once
+#include "FluidSolver.h"
+#include <vector>
+#include <cmath>
+#include <algorithm>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+#include <cstring>
+#include <iostream>
+
+class CpuFluidSolver : public FluidSolver {
+private:
+    // 展平的 1D 数组，索引 = z*N*N + y*N + x
+    std::vector<float> u, u_prev; // X velocity
+    std::vector<float> v, v_prev; // Y velocity
+    std::vector<float> w, w_prev; // Z velocity
+    std::vector<float> density, density_prev;
+
+    // 辅助场
+    std::vector<float> u_aux, v_aux, w_aux; // 用于存储中间结果
+    std::vector<float> u_aux2, v_aux2, w_aux2; // 第二个辅助缓冲区 (for higher order methods)
+    std::vector<float> div, p, p_prev;      // Projection 用
+    
+    // SDF & Object Velocity
+    std::vector<float> sdf;
+    std::vector<float> obs_u, obs_v, obs_w;
+
+    // Visualization Buffer (RGBA Interleaved)
+    mutable std::vector<float> velocity_vis_buffer;
+
+    int size;
+
+public:
+    CpuFluidSolver(int n, float time_step) : FluidSolver(n, time_step) {
+        size = n * n * n;
+        u.resize(size, 0.0f); u_prev.resize(size, 0.0f);
+        v.resize(size, 0.0f); v_prev.resize(size, 0.0f);
+        w.resize(size, 0.0f); w_prev.resize(size, 0.0f);
+        density.resize(size, 0.0f); density_prev.resize(size, 0.0f);
+        
+        velocity_vis_buffer.resize(size * 4, 0.0f); // 4 components per voxel
+
+        // 辅助 buffer
+        u_aux.resize(size, 0.0f); 
+        v_aux.resize(size, 0.0f); 
+        w_aux.resize(size, 0.0f);
+
+        u_aux2.resize(size, 0.0f); 
+        v_aux2.resize(size, 0.0f); 
+        w_aux2.resize(size, 0.0f);
+        
+        div.resize(size, 0.0f);
+        p.resize(size, 0.0f); p_prev.resize(size, 0.0f);
+
+        // SDF defaults (1.0 = empty)
+        sdf.resize(size, 1.0f);
+        obs_u.resize(size, 0.0f);
+        obs_v.resize(size, 0.0f);
+        obs_w.resize(size, 0.0f);
+    }
+
+    void update_obstacle_sdf(const std::vector<float>& input_sdf, const std::vector<float>& input_velocity) override {
+        if (input_sdf.size() == size) {
+            std::copy(input_sdf.begin(), input_sdf.end(), sdf.begin());
+        }
+        if (input_velocity.size() == size * 3) {
+            #pragma omp parallel for
+            for(int i=0; i<size; ++i) {
+                obs_u[i] = input_velocity[i*3 + 0];
+                obs_v[i] = input_velocity[i*3 + 1];
+                obs_w[i] = input_velocity[i*3 + 2];
+            }
+        }
+        useSDF = true;
+    }
+
+    std::string get_backend_name() const override { return "CPU (OpenMP)"; }
+    const float* get_density_data() const override { return density.data(); }
+    
+    const float* get_velocity_data() const override {
+        // Interleave u,v,w into RGBA for visualization
+        // Using OpenMP for speed
+        #pragma omp parallel for
+        for (int i = 0; i < size; ++i) {
+            velocity_vis_buffer[i * 4 + 0] = u[i];
+            velocity_vis_buffer[i * 4 + 1] = v[i];
+            velocity_vis_buffer[i * 4 + 2] = w[i];
+            velocity_vis_buffer[i * 4 + 3] = 0.0f; // Alpha unused
+        }
+        return velocity_vis_buffer.data();
+    }
+
+    void init_data() override {
+        // 在中心初始化一个球形烟雾
+        int c = N / 2;
+        int r = N / 5;
+        // set obstacle
+        if(useObstacle) {
+             obstaclePos[0] = N/2.0f; obstaclePos[1] = N*0.3f; obstaclePos[2] = N/2.0f;
+             obstacleRadius = N/8.0f;
+        }
+
+        for (int z = 0; z < N; z++) {
+            for (int y = 0; y < N; y++) {
+                for (int x = 0; x < N; x++) {
+                    float dx = x - c; float dy = y - c; float dz = z - c;
+                    if (dx*dx + dy*dy + dz*dz < r*r) {
+                        density[IX(x,y,z)] = 1.0f;
+                    }
+                    // 仅供测试的初始速度
+                    if (dx*dx + dy*dy + dz*dz < r*r) {
+                         v[IX(x,y,z)] = 5.0f; // 向上冲
+                    }
+                }
+            }
+        }
+    }
+
+    void add_density(int x, int y, int z, float amount) override {
+        int idx = IX(x, y, z);
+        if(idx >=0 && idx < size) density[idx] += amount;
+    }
+
+    void add_velocity(int x, int y, int z, float amountX, float amountY, float amountZ) override {
+        int idx = IX(x, y, z);
+        if(idx >=0 && idx < size) {
+            u[idx] += amountX;
+            v[idx] += amountY;
+            w[idx] += amountZ;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 核心算法实现
+    // ---------------------------------------------------------
+
+    void step() override {
+        // 0. Vorticity Confinement
+        if (vorticityConf > 0.0f) {
+            apply_vorticity_confinement();
+        }
+
+        if (current_type == SolverType::Advection_Reflection) {
+            step_reflection();
+        } else if (current_type == SolverType::MacCormack) {
+            step_maccormack();
+        } else if (current_type == SolverType::BFECC) {
+             step_bfecc();
+        } else {
+            step_stable_fluids();
+        }
+        
+        // Final Obstacle Enforcement
+        if (useObstacle) {
+            apply_obstacle();
+        }
+    }
+    
+    void apply_obstacle() {
+        #pragma omp parallel for
+        for (int z = 0; z < N; z++) {
+            for (int y = 0; y < N; y++) {
+                for (int x = 0; x < N; x++) {
+                    float dx = x - obstaclePos[0];
+                    float dy = y - obstaclePos[1];
+                    float dz = z - obstaclePos[2];
+                    if (dx*dx + dy*dy + dz*dz < obstacleRadius*obstacleRadius) {
+                        int idx = IX(x, y, z);
+                        u[idx] = 0; v[idx] = 0; w[idx] = 0;
+                        density[idx] = 0;
+                    }
+                }
+            }
+        }
+    }
+    
+    void apply_vorticity_confinement() {
+        // Need temp buffers for curl magnitude
+        // reuse u_aux2 for curl_x, v_aux2 for curl_y, w_aux2 for curl_z
+        // reuse div for |curl|
+        float h = 1.0f; // grid spacing (normalized logic) or just 1.0
+        
+        #pragma omp parallel for
+        for (int z = 1; z < N - 1; z++) {
+            for (int y = 1; y < N - 1; y++) {
+                for (int x = 1; x < N - 1; x++) {
+                     int idx = IX(x, y, z);
+                     // curl = (dw/dy - dv/dz, du/dz - dw/dx, dv/dx - du/dy)
+                     float dw_dy = (w[IX(x, y+1, z)] - w[IX(x, y-1, z)]) * 0.5f;
+                     float dv_dz = (v[IX(x, y, z+1)] - v[IX(x, y, z-1)]) * 0.5f;
+                     float du_dz = (u[IX(x, y, z+1)] - u[IX(x, y, z-1)]) * 0.5f;
+                     float dw_dx = (w[IX(x+1, y, z)] - w[IX(x-1, y, z)]) * 0.5f;
+                     float dv_dx = (v[IX(x+1, y, z)] - v[IX(x-1, y, z)]) * 0.5f;
+                     float du_dy = (u[IX(x, y+1, z)] - u[IX(x, y-1, z)]) * 0.5f;
+                     
+                     float cx = dw_dy - dv_dz;
+                     float cy = du_dz - dw_dx;
+                     float cz = dv_dx - du_dy;
+                     
+                     u_aux2[idx] = cx; v_aux2[idx] = cy; w_aux2[idx] = cz;
+                     div[idx] = sqrt(cx*cx + cy*cy + cz*cz);
+                }
+            }
+        }
+        
+        // Calculate Force
+        #pragma omp parallel for
+        for (int z = 1; z < N - 1; z++) {
+            for (int y = 1; y < N - 1; y++) {
+                for (int x = 1; x < N - 1; x++) {
+                    int idx = IX(x, y, z);
+                    // Grad |curl|
+                    float dlen_dx = (div[IX(x+1, y, z)] - div[IX(x-1, y, z)]) * 0.5f;
+                    float dlen_dy = (div[IX(x, y+1, z)] - div[IX(x, y-1, z)]) * 0.5f;
+                    float dlen_dz = (div[IX(x, y, z+1)] - div[IX(x, y, z-1)]) * 0.5f;
+                    
+                    float len = sqrt(dlen_dx*dlen_dx + dlen_dy*dlen_dy + dlen_dz*dlen_dz) + 1e-5f;
+                    float nx = dlen_dx / len;
+                    float ny = dlen_dy / len;
+                    float nz = dlen_dz / len;
+                    
+                    // Force = N x Curl
+                    float cx = u_aux2[idx]; float cy = v_aux2[idx]; float cz = w_aux2[idx];
+                    float fx = ny * cz - nz * cy;
+                    float fy = nz * cx - nx * cz;
+                    float fz = nx * cy - ny * cx;
+                    
+                    u[idx] += fx * vorticityConf * dt;
+                    v[idx] += fy * vorticityConf * dt;
+                    w[idx] += fz * vorticityConf * dt;
+                }
+            }
+        }
+    }
+
+    // Standard Stable Fluids: Advect -> Project -> Advect Density
+    void step_stable_fluids() {
+         // --- Step 1: Advect Velocity (u0 -> u_aux) using full dt ---
+         // source: u, vel: u, dt: dt
+         advect_velocity(u_aux, v_aux, w_aux, u, v, w, u, v, w, dt);
+
+         // --- Step 2: Project (u_aux -> u) ---
+         // copy advected result to u for in-place projection
+         u = u_aux; v = v_aux; w = w_aux;
+         project(u, v, w, u_aux, v_aux, w_aux); // u is result
+
+         // --- Step 3: Advect Density ---
+         advect_scalar(density_prev, density, u, v, w, dt);
+         std::swap(density, density_prev);
+    }
+
+    // MacCormack Advection: Prediction-Correction
+    // phi_n+1 = A(phi_n) + (phi_n - A_rev(A(phi_n))) / 2
+    // A_rev is advection backwards in time
+    void step_maccormack() {
+        // --- Step 1: Forward Advect u0 -> u_fwd (u_aux) ---
+        advect_velocity(u_aux, v_aux, w_aux, u, v, w, u, v, w, dt); 
+
+        // --- Step 2: Backward Advect u_fwd -> u_bwd (u_aux2) ---
+        // Note: use u_aux (u_n+1*) as velocity field? Standard MacCormack uses u_n usually, semi-lagrangian reversible uses u_n+1.
+        // For simplicity and stability in fluids, we usually trace back using u_n for forward, and u_n for backward (or -u_n).
+        // Let's use u for velocity field for now.
+        advect_velocity(u_aux2, v_aux2, w_aux2, u_aux, v_aux, w_aux, u, v, w, -dt);
+
+        // --- Step 3: Correction ---
+        // u_new = u_fwd + (u_old - u_bwd) / 2
+        #pragma omp parallel for
+        for(int i=0; i<size; i++) {
+            float err_u = (u[i] - u_aux2[i]) * 0.5f;
+            float err_v = (v[i] - v_aux2[i]) * 0.5f;
+            float err_w = (w[i] - w_aux2[i]) * 0.5f;
+            
+            // Limiter can be added here to prevent oscillations (Min/Max clamp)
+            // For now, raw MacCormack
+            u_aux[i] += err_u;
+            v_aux[i] += err_v;
+            w_aux[i] += err_w;
+        }
+        
+        // --- Step 4: Project ---
+        u = u_aux; v = v_aux; w = w_aux;
+        project(u, v, w, u_aux, v_aux, w_aux);
+
+        // --- Step 5: Advect Density (using MacCormack scheme too) ---
+        // 5.1 Fwd
+        advect_scalar(density_prev, density, u, v, w, dt); // density_prev = den_fwd
+        // 5.2 Bwd
+        // reuse u_aux as den_bwd buffer (float) - risky if type differs, but here all float. 
+        // Safer to use div or p buffer if unused. Let's use p buffer.
+        advect_scalar(p, density_prev, u, v, w, -dt); // p = den_bwd
+        // 5.3 Correct
+        #pragma omp parallel for
+        for (int i=0; i<size; i++) {
+            float err = (density[i] - p[i]) * 0.5f;
+            density_prev[i] += err;
+            // Clamp to avoid negative density
+            if(density_prev[i] < 0) density_prev[i] = 0;
+        }
+        std::swap(density, density_prev);
+    }
+    
+    // BFECC (Back and Forth Error Compensation and Correction)
+    // Similar to MacCormack but operating on the field before advection.
+    // phi_mod = phi_n + (phi_n - A_rev(A(phi_n))) / 2
+    // phi_n+1 = A(phi_mod)
+    void step_bfecc() {
+        // --- Step 1: Forward u0 -> u_fwd (u_aux) ---
+        advect_velocity(u_aux, v_aux, w_aux, u, v, w, u, v, w, dt);
+        
+        // --- Step 2: Backward u_fwd -> u_bwd (u_aux2) ---
+        advect_velocity(u_aux2, v_aux2, w_aux2, u_aux, v_aux, w_aux, u, v, w, -dt);
+        
+        // --- Step 3: Compute Modified Field u_mod (store in u_aux2 to save space) ---
+        // u_mod = u + (u - u_bwd) / 2
+        #pragma omp parallel for
+        for(int i=0; i<size; i++) {
+            u_aux2[i] = u[i] + (u[i] - u_aux2[i]) * 0.5f;
+            v_aux2[i] = v[i] + (v[i] - v_aux2[i]) * 0.5f;
+            w_aux2[i] = w[i] + (w[i] - w_aux2[i]) * 0.5f;
+        }
+        
+        // --- Step 4: Advect u_mod -> final predicted (u_aux) ---
+        advect_velocity(u_aux, v_aux, w_aux, u_aux2, v_aux2, w_aux2, u, v, w, dt);
+        
+        // --- Step 5: Project ---
+        u = u_aux; v = v_aux; w = w_aux;
+        project(u, v, w, u_aux, v_aux, w_aux);
+        
+        // --- Step 6: Density BFECC ---
+        // 6.1 Fwd: den -> p (temp)
+        advect_scalar(p, density, u, v, w, dt);
+        // 6.2 Bwd: p -> div (temp)
+        advect_scalar(div, p, u, v, w, -dt);
+        // 6.3 Mod & Final Advect: 
+        // reuse p_prev as den_mod? p_prev is safe
+        #pragma omp parallel for
+        for(int i=0; i<size; i++) {
+            // den_mod = den + (den - den_bwd) / 2
+            p_prev[i] = density[i] + (density[i] - div[i]) * 0.5f;
+        }
+        advect_scalar(density_prev, p_prev, u, v, w, dt);
+        std::swap(density, density_prev);
+    }
+
+    // Advection-Reflection Logic
+    void step_reflection() {
+        // Flow:
+        // 1. Advect u0 by u0 for dt/2 -> u_tilde_half
+        // 2. Project u_tilde_half -> u_half
+        // 3. Reflect: u_hat_half = 2 * u_half - u_tilde_half
+        // 4. Advect u_hat_half by u_half for dt/2 -> u_tilde_1
+        // 5. Project u_tilde_1 -> u_1
+        
+        // Density Advection:
+        // 6. Advect density by u_1 for dt
+
+        float half_dt = dt * 0.5f;
+
+        // --- Step 1: u_prev (store u0) ---
+        u_prev = u; v_prev = v; w_prev = w;
+
+        // --- Step 2: Advect u0 by u0 (dt/2) -> stored in u_aux (u_tilde_half) ---
+        advect_velocity(u_aux, v_aux, w_aux, u_prev, v_prev, w_prev, u_prev, v_prev, w_prev, half_dt);
+
+        // --- Step 3: Project u_tilde_half -> result in u (u_half) ---
+        // Copy u_tilde_half to u for inplace projection
+        u = u_aux; v = v_aux; w = w_aux;
+        project(u, v, w, u_aux, v_aux, w_aux); 
+        // Now u,v,w is u_half
+
+        // --- Step 4: Reflection -> u_hat_half stored in u_prev (reuse buffer) ---
+        // u_hat = 2 * u_half - u_tilde_half
+        #pragma omp parallel for
+        for(int i=0; i<size; i++) {
+            u_prev[i] = 2.0f * u[i] - u_aux[i];
+            v_prev[i] = 2.0f * v[i] - v_aux[i];
+            w_prev[i] = 2.0f * w[i] - w_aux[i];
+        }
+        // Now u_prev is u_hat_half. u is u_half.
+
+        // --- Step 5: Advect u_hat_half by u_half (dt/2) -> stored in u_aux (u_tilde_1) ---
+        // source field: u_prev (hat), velocity field: u (half)
+        advect_velocity(u_aux, v_aux, w_aux, u_prev, v_prev, w_prev, u, v, w, half_dt);
+
+        // --- Step 6: Final Project u_tilde_1 -> u_1 (final result) ---
+        u = u_aux; v = v_aux; w = w_aux;
+        project(u, v, w, u_prev, v_prev, w_prev);
+
+        // --- Step 7: Advect Density ---
+        // source: density, result: density_prev (swap later), vel: u
+        advect_scalar(density_prev, density, u, v, w, dt);
+        std::swap(density, density_prev);
+    }
+
+private:
+    inline int IX(int x, int y, int z) const {
+        return std::clamp(z, 0, N-1) * N * N + std::clamp(y, 0, N-1) * N + std::clamp(x, 0, N-1);
+    }
+
+    // 三线性插值
+    inline float sample_linear(const std::vector<float>& field, float x, float y, float z) const {
+        if (x < 0.5f) x = 0.5f; if (x > N - 1.5f) x = N - 1.5f;
+        if (y < 0.5f) y = 0.5f; if (y > N - 1.5f) y = N - 1.5f;
+        if (z < 0.5f) z = 0.5f; if (z > N - 1.5f) z = N - 1.5f;
+        
+        int x0 = (int)x; int x1 = x0 + 1;
+        int y0 = (int)y; int y1 = y0 + 1;
+        int z0 = (int)z; int z1 = z0 + 1;
+
+        float s1 = x - x0; float s0 = 1.0f - s1;
+        float t1 = y - y0; float t0 = 1.0f - t1;
+        float u1 = z - z0; float u0 = 1.0f - u1;
+
+        int i000 = IX(x0, y0, z0); int i100 = IX(x1, y0, z0);
+        int i010 = IX(x0, y1, z0); int i110 = IX(x1, y1, z0);
+        int i001 = IX(x0, y0, z1); int i101 = IX(x1, y0, z1);
+        int i011 = IX(x0, y1, z1); int i111 = IX(x1, y1, z1);
+
+        return u0 * (t0 * (s0 * field[i000] + s1 * field[i100]) +
+                     t1 * (s0 * field[i010] + s1 * field[i110])) +
+               u1 * (t0 * (s0 * field[i001] + s1 * field[i101]) + 
+                     t1 * (s0 * field[i011] + s1 * field[i111]));
+    }
+
+    void advect_scalar(std::vector<float>& dest, const std::vector<float>& src, 
+                       const std::vector<float>& u, const std::vector<float>& v, const std::vector<float>& w, float dt) {
+        #pragma omp parallel for
+        for (int z = 1; z < N - 1; z++) {
+            for (int y = 1; y < N - 1; y++) {
+                for (int x = 1; x < N - 1; x++) {
+                    int i = IX(x, y, z);
+                    
+                    if (useSDF && sdf[i] < 0.0f) {
+                        dest[i] = 0.0f;
+                        continue;
+                    }
+                    
+                    float vx = u[i];
+                    float vy = v[i];
+                    float vz = w[i];
+                    
+                    // Backtrace
+                    float b_x = x - dt * vx;
+                    float b_y = y - dt * vy;
+                    float b_z = z - dt * vz;
+                    
+                    dest[i] = sample_linear(src, b_x, b_y, b_z);
+                }
+            }
+        }
+        set_boundary(0, dest);
+    }
+
+    void advect_velocity(std::vector<float>& u_dst, std::vector<float>& v_dst, std::vector<float>& w_dst,
+                         const std::vector<float>& u_src, const std::vector<float>& v_src, const std::vector<float>& w_src,
+                         const std::vector<float>& u_vel, const std::vector<float>& v_vel, const std::vector<float>& w_vel, float dt) {
+        #pragma omp parallel for
+        for (int z = 1; z < N - 1; z++) {
+            for (int y = 1; y < N - 1; y++) {
+                for (int x = 1; x < N - 1; x++) {
+                    int i = IX(x, y, z);
+                    
+                    if (useSDF && sdf[i] < 0.0f) {
+                        u_dst[i] = 0.0f;
+                        v_dst[i] = 0.0f;
+                        w_dst[i] = 0.0f;
+                        continue;
+                    }
+
+                    // Trace back using the *advection velocity field*
+                    float vx = u_vel[i];
+                    float vy = v_vel[i];
+                    float vz = w_vel[i];
+
+                    float b_x = x - dt * vx;
+                    float b_y = y - dt * vy;
+                    float b_z = z - dt * vz;
+
+                    // Interpolate the *source field*
+                    u_dst[i] = sample_linear(u_src, b_x, b_y, b_z);
+                    v_dst[i] = sample_linear(v_src, b_x, b_y, b_z);
+                    w_dst[i] = sample_linear(w_src, b_x, b_y, b_z);
+                }
+            }
+        }
+        set_boundary(1, u_dst);
+        set_boundary(2, v_dst);
+        set_boundary(3, w_dst);
+    }
+
+    void project(std::vector<float>& u, std::vector<float>& v, std::vector<float>& w, 
+                 std::vector<float>& p, std::vector<float>& div, std::vector<float>& /*unused*/) { // reuse buffers if needed
+        
+        // 1. Calculate Divergence (-div)
+        float h = 1.0f / N;
+        #pragma omp parallel for
+        for (int z = 1; z < N - 1; z++) {
+            for (int y = 1; y < N - 1; y++) {
+                for (int x = 1; x < N - 1; x++) {
+                    int idx = IX(x, y, z);
+
+                    if (useSDF && sdf[idx] < 0.0f) {
+                        div[idx] = 0.0f;
+                        p[idx] = 0.0f;
+                        continue;
+                    }
+
+                    float uR = u[IX(x + 1, y, z)];
+                    float uL = u[IX(x - 1, y, z)];
+                    float vT = v[IX(x, y + 1, z)];
+                    float vB = v[IX(x, y - 1, z)];
+                    float wF = w[IX(x, y, z + 1)];
+                    float wBk = w[IX(x, y, z - 1)];
+
+                    if (useSDF) {
+                        if (sdf[IX(x + 1, y, z)] < 0.0f) uR = obs_u[IX(x + 1, y, z)];
+                        if (sdf[IX(x - 1, y, z)] < 0.0f) uL = obs_u[IX(x - 1, y, z)];
+                        if (sdf[IX(x, y + 1, z)] < 0.0f) vT = obs_v[IX(x, y + 1, z)];
+                        if (sdf[IX(x, y - 1, z)] < 0.0f) vB = obs_v[IX(x, y - 1, z)];
+                        if (sdf[IX(x, y, z + 1)] < 0.0f) wF = obs_w[IX(x, y, z + 1)];
+                        if (sdf[IX(x, y, z - 1)] < 0.0f) wBk = obs_w[IX(x, y, z - 1)];
+                    }
+
+                    div[IX(x, y, z)] = -0.5f * h * (
+                        uR - uL +
+                        vT - vB +
+                        wF - wBk
+                    );
+                    p[IX(x, y, z)] = 0;
+                }
+            }
+        }
+        set_boundary(0, div);
+        set_boundary(0, p);
+
+        // 2. Solve Poisson (Jacobi Iteration)
+        for (int k = 0; k < 20; k++) {
+            #pragma omp parallel for
+            for (int z = 1; z < N - 1; z++) {
+                for (int y = 1; y < N - 1; y++) {
+                    for (int x = 1; x < N - 1; x++) {
+                        int idx = IX(x, y, z);
+
+                        if (useSDF && sdf[idx] < 0.0f) {
+                            p_prev[idx] = 0.0f;
+                            continue;
+                        }
+
+                        float pL = p[IX(x - 1, y, z)];
+                        float pR = p[IX(x + 1, y, z)];
+                        float pB = p[IX(x, y - 1, z)];
+                        float pT = p[IX(x, y + 1, z)];
+                        float pBk = p[IX(x, y, z - 1)];
+                        float pF = p[IX(x, y, z + 1)];
+
+                        if (useSDF) {
+                             if (sdf[IX(x - 1, y, z)] < 0.0f) pL = p[idx];
+                             if (sdf[IX(x + 1, y, z)] < 0.0f) pR = p[idx];
+                             if (sdf[IX(x, y - 1, z)] < 0.0f) pB = p[idx];
+                             if (sdf[IX(x, y + 1, z)] < 0.0f) pT = p[idx];
+                             if (sdf[IX(x, y, z - 1)] < 0.0f) pBk = p[idx];
+                             if (sdf[IX(x, y, z + 1)] < 0.0f) pF = p[idx];
+                        }
+
+                        p_prev[IX(x, y, z)] = (div[IX(x, y, z)] +
+                            pL + pR +
+                            pB + pT +
+                            pBk + pF) / 6.0f;
+                    }
+                }
+            }
+            set_boundary(0, p_prev);
+            std::swap(p, p_prev);
+        }
+
+        // 3. Subtract Gradient
+        #pragma omp parallel for
+        for (int z = 1; z < N - 1; z++) {
+            for (int y = 1; y < N - 1; y++) {
+                for (int x = 1; x < N - 1; x++) {
+                    int idx = IX(x, y, z);
+                    
+                    if (useSDF && sdf[idx] < 0.0f) {
+                         u[idx] = obs_u[idx];
+                         v[idx] = obs_v[idx];
+                         w[idx] = obs_w[idx];
+                         continue;
+                    }
+
+                    float pL = p[IX(x - 1, y, z)];
+                    float pR = p[IX(x + 1, y, z)];
+                    float pB = p[IX(x, y - 1, z)];
+                    float pT = p[IX(x, y + 1, z)];
+                    float pBk = p[IX(x, y, z - 1)];
+                    float pF = p[IX(x, y, z + 1)];
+
+                    if (useSDF) {
+                         if (sdf[IX(x - 1, y, z)] < 0.0f) pL = p[idx];
+                         if (sdf[IX(x + 1, y, z)] < 0.0f) pR = p[idx];
+                         if (sdf[IX(x, y - 1, z)] < 0.0f) pB = p[idx];
+                         if (sdf[IX(x, y + 1, z)] < 0.0f) pT = p[idx];
+                         if (sdf[IX(x, y, z - 1)] < 0.0f) pBk = p[idx];
+                         if (sdf[IX(x, y, z + 1)] < 0.0f) pF = p[idx];
+                    }
+
+                    u[idx] -= 0.5f * (pR - pL) / h;
+                    v[idx] -= 0.5f * (pT - pB) / h;
+                    w[idx] -= 0.5f * (pF - pBk) / h;
+                }
+            }
+        }
+        set_boundary(1, u);
+        set_boundary(2, v);
+        set_boundary(3, w);
+    }
+
+    // 简单边界条件：1=X reflection, 2=Y reflection, 3=Z reflection
+    void set_boundary(int b, std::vector<float>& x) {
+        #pragma omp parallel for
+        for (int k = 1; k < N - 1; k++) {
+            for (int j = 1; j < N - 1; j++) {
+                // Faces
+                x[IX(0, j, k)] = (b == 1) ? -x[IX(1, j, k)] : x[IX(1, j, k)];
+                x[IX(N-1, j, k)] = (b == 1) ? -x[IX(N-2, j, k)] : x[IX(N-2, j, k)];
+
+                x[IX(k, 0, j)] = (b == 2) ? -x[IX(k, 1, j)] : x[IX(k, 1, j)];
+                x[IX(k, N-1, j)] = (b == 2) ? -x[IX(k, N-2, j)] : x[IX(k, N-2, j)];
+
+                x[IX(k, j, 0)] = (b == 3) ? -x[IX(k, j, 1)] : x[IX(k, j, 1)];
+                x[IX(k, j, N-1)] = (b == 3) ? -x[IX(k, j, N-2)] : x[IX(k, j, N-2)];
+            }
+        }
+        // Corners - simplified
+        x[IX(0, 0, 0)] = 0.33f * (x[IX(1, 0, 0)] + x[IX(0, 1, 0)] + x[IX(0, 0, 1)]);
+        // ... (省略其他角)
+    }
+};
+```
+
+### src/CudaFluidSolver.cu
+```
+#include "CudaFluidSolver.h"
+#include <iostream>
+#include <vector>
+
+#ifdef HAS_CUDA
+
+#define BLOCK_SIZE 8
+
+// Helper macros
+#define IX(x, y, z) ((x) + (y) * N + (z) * N * N)
+
+__device__ float lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
+// 3D Linear Interpolation
+__device__ float interp3D(const float* data, float x, float y, float z, int N) {
+    int x0 = (int)x; int x1 = x0 + 1;
+    int y0 = (int)y; int y1 = y0 + 1;
+    int z0 = (int)z; int z1 = z0 + 1;
+
+    // Clamp
+    if (x0 < 0) x0 = 0; if (x0 > N-1) x0 = N-1;
+    if (x1 < 0) x1 = 0; if (x1 > N-1) x1 = N-1;
+    if (y0 < 0) y0 = 0; if (y0 > N-1) y0 = N-1;
+    if (y1 < 0) y1 = 0; if (y1 > N-1) y1 = N-1;
+    if (z0 < 0) z0 = 0; if (z0 > N-1) z0 = N-1;
+    if (z1 < 0) z1 = 0; if (z1 > N-1) z1 = N-1;
+
+    // Weights
+    float tx = x - x0;
+    float ty = y - y0;
+    float tz = z - z0;
+
+    float c000 = data[IX(x0, y0, z0)];
+    float c100 = data[IX(x1, y0, z0)];
+    float c010 = data[IX(x0, y1, z0)];
+    float c110 = data[IX(x1, y1, z0)];
+    float c001 = data[IX(x0, y0, z1)];
+    float c101 = data[IX(x1, y0, z1)];
+    float c011 = data[IX(x0, y1, z1)];
+    float c111 = data[IX(x1, y1, z1)];
+
+    float c00 = lerp(c000, c100, tx);
+    float c10 = lerp(c010, c110, tx);
+    float c01 = lerp(c001, c101, tx);
+    float c11 = lerp(c011, c111, tx);
+
+    float c0 = lerp(c00, c10, ty);
+    float c1 = lerp(c01, c11, ty);
+
+    return lerp(c0, c1, tz);
+}
+
+__global__ void advect_kernel(int N, float *d, float *d0, float *u, float *v, float *w, float *sdf, float dt) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i >= N || j >= N || k >= N) return;
+    
+    // Solid mask
+    if (sdf[IX(i, j, k)] < 0.0f) {
+        d[IX(i, j, k)] = 0.0f; 
+        return;
+    }
+
+    // Backtrace
+    float dt0 = dt * N;
+    float x = i - dt0 * u[IX(i, j, k)];
+    float y = j - dt0 * v[IX(i, j, k)];
+    float z = k - dt0 * w[IX(i, j, k)];
+
+    // Clamp
+    if (x < 0.5f) x = 0.5f; if (x > N - 1.5f) x = N - 1.5f;
+    if (y < 0.5f) y = 0.5f; if (y > N - 1.5f) y = N - 1.5f;
+    if (z < 0.5f) z = 0.5f; if (z > N - 1.5f) z = N - 1.5f;
+
+    d[IX(i, j, k)] = interp3D(d0, x, y, z, N);
+}
+
+__device__ bool is_solid(int idx, float* sdf, float* ou, float* ov, float* ow, float& u, float& v, float& w) {
+    if (sdf[idx] < 0.0f) {
+        u = ou[idx]; v = ov[idx]; w = ow[idx];
+        return true;
+    }
+    return false;
+}
+
+__global__ void divergence_kernel(int N, float *u, float *v, float *w, float *div, float *p, float *sdf, float *ou, float *ov, float *ow) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i <= 0 || i >= N-1 || j <= 0 || j >= N-1 || k <= 0 || k >= N-1) return;
+
+    int idx = IX(i, j, k);
+    if (sdf[idx] < 0.0f) { div[idx]=0; p[idx]=0; return; }
+
+    float uR=u[IX(i+1, j, k)], uL=u[IX(i-1, j, k)];
+    float vT=v[IX(i, j+1, k)], vB=v[IX(i, j-1, k)];
+    float wF=w[IX(i, j, k+1)], wBk=w[IX(i, j, k-1)];
+
+    float tu, tv, tw;
+    if (sdf[IX(i+1, j, k)] < 0.0f) uR = ou[IX(i+1, j, k)];
+    if (sdf[IX(i-1, j, k)] < 0.0f) uL = ou[IX(i-1, j, k)];
+    if (sdf[IX(i, j+1, k)] < 0.0f) vT = ov[IX(i, j+1, k)];
+    if (sdf[IX(i, j-1, k)] < 0.0f) vB = ov[IX(i, j-1, k)];
+    if (sdf[IX(i, j, k+1)] < 0.0f) wF = ow[IX(i, j, k+1)];
+    if (sdf[IX(i, j, k-1)] < 0.0f) wBk = ow[IX(i, j, k-1)];
+
+    div[idx] = -0.5f * (uR - uL + vT - vB + wF - wBk) / N;
+    p[idx] = 0;
+}
+
+__global__ void jacobi_kernel(int N, float *p, float *p_old, float *div, float *sdf) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i <= 0 || i >= N-1 || j <= 0 || j >= N-1 || k <= 0 || k >= N-1) return;
+
+    if (sdf[IX(i, j, k)] < 0.0f) { p[IX(i, j, k)] = 0; return; }
+
+    float pL = p_old[IX(i-1, j, k)]; if (sdf[IX(i-1, j, k)] < 0.0f) pL = p_old[IX(i, j, k)];
+    float pR = p_old[IX(i+1, j, k)]; if (sdf[IX(i+1, j, k)] < 0.0f) pR = p_old[IX(i, j, k)];
+    float pB = p_old[IX(i, j-1, k)]; if (sdf[IX(i, j-1, k)] < 0.0f) pB = p_old[IX(i, j, k)];
+    float pT = p_old[IX(i, j+1, k)]; if (sdf[IX(i, j+1, k)] < 0.0f) pT = p_old[IX(i, j, k)];
+    float pBk= p_old[IX(i, j, k-1)]; if (sdf[IX(i, j, k-1)] < 0.0f) pBk = p_old[IX(i, j, k)];
+    float pF = p_old[IX(i, j, k+1)]; if (sdf[IX(i, j, k+1)] < 0.0f) pF = p_old[IX(i, j, k)];
+
+    p[IX(i, j, k)] = (div[IX(i, j, k)] + pL + pR + pB + pT + pBk + pF) / 6.0f;
+}
+
+__global__ void subtract_gradient_kernel(int N, float *u, float *v, float *w, float *p, float *sdf, float *ou, float *ov, float *ow) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i <= 0 || i >= N-1 || j <= 0 || j >= N-1 || k <= 0 || k >= N-1) return;
+
+    int idx = IX(i, j, k);
+    if (sdf[idx] < 0.0f) {
+        u[idx] = ou[idx]; v[idx] = ov[idx]; w[idx] = ow[idx];
+        return;
+    }
+
+    float pL = p[IX(i-1, j, k)]; if (sdf[IX(i-1, j, k)] < 0.0f) pL = p[IX(i, j, k)];
+    float pR = p[IX(i+1, j, k)]; if (sdf[IX(i+1, j, k)] < 0.0f) pR = p[IX(i, j, k)];
+    float pB = p[IX(i, j-1, k)]; if (sdf[IX(i, j-1, k)] < 0.0f) pB = p[IX(i, j, k)];
+    float pT = p[IX(i, j+1, k)]; if (sdf[IX(i, j+1, k)] < 0.0f) pT = p[IX(i, j, k)];
+    float pBk= p[IX(i, j, k-1)]; if (sdf[IX(i, j, k-1)] < 0.0f) pBk = p[IX(i, j, k)];
+    float pF = p[IX(i, j, k+1)]; if (sdf[IX(i, j, k+1)] < 0.0f) pF = p[IX(i, j, k)];
+
+    u[idx] -= 0.5f * (pR - pL) * N;
+    v[idx] -= 0.5f * (pT - pB) * N;
+    w[idx] -= 0.5f * (pF - pBk) * N;
+}
+
+__global__ void add_source_kernel(int N, float *dest, int x, int y, int z, float val, float radius) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i >= N || j >= N || k >= N) return;
+    
+    float dx = i - x;
+    float dy = j - y;
+    float dz = k - z;
+    float dist2 = dx*dx + dy*dy + dz*dz;
+    if (dist2 < radius*radius) {
+        dest[IX(i, j, k)] += val * exp(-dist2/radius);
+    }
+}
+
+__global__ void maccormack_correct_kernel(int N, float *fwd, float *orig, float *bwd, float *dest) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x + 
+              (threadIdx.y + blockIdx.y * blockDim.y) * N + 
+              (threadIdx.z + blockIdx.z * blockDim.z) * N * N;
+    if (idx >= N*N*N) return;
+    dest[idx] = fwd[idx] + (orig[idx] - bwd[idx]) * 0.5f;
+}
+
+__global__ void scaled_add_kernel(int N, float *A, float *B, float *dest, float sA, float sB) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x + 
+              (threadIdx.y + blockIdx.y * blockDim.y) * N + 
+              (threadIdx.z + blockIdx.z * blockDim.z) * N * N;
+    if (idx >= N*N*N) return;
+    dest[idx] = A[idx] * sA + B[idx] * sB;
+}
+
+__global__ void interleave_velocity_kernel(int N, float* u, float* v, float* w, float* out) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x + 
+              (threadIdx.y + blockIdx.y * blockDim.y) * N + 
+              (threadIdx.z + blockIdx.z * blockDim.z) * N * N;
+    if (idx >= N*N*N) return;
+    out[idx*4 + 0] = u[idx];
+    out[idx*4 + 1] = v[idx];
+    out[idx*4 + 2] = w[idx];
+    out[idx*4 + 3] = 0.0f;
+}
+__global__ void curl_kernel(int N, float *u, float *v, float *w, float *cx, float *cy, float *cz, float *mag) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i <= 0 || i >= N-1 || j <= 0 || j >= N-1 || k <= 0 || k >= N-1) return;
+    
+    int idx = IX(i, j, k);
+    float term1 = (w[IX(i, j+1, k)] - w[IX(i, j-1, k)]) * 0.5f;
+    float term2 = (v[IX(i, j, k+1)] - v[IX(i, j, k-1)]) * 0.5f;
+    float valX = term1 - term2;
+    
+    float term3 = (u[IX(i, j, k+1)] - u[IX(i, j, k-1)]) * 0.5f;
+    float term4 = (w[IX(i+1, j, k)] - w[IX(i-1, j, k)]) * 0.5f;
+    float valY = term3 - term4;
+    
+    float term5 = (v[IX(i+1, j, k)] - v[IX(i-1, j, k)]) * 0.5f;
+    float term6 = (u[IX(i, j+1, k)] - u[IX(i, j-1, k)]) * 0.5f;
+    float valZ = term5 - term6;
+    
+    cx[idx] = valX;
+    cy[idx] = valY;
+    cz[idx] = valZ;
+    mag[idx] = sqrt(valX*valX + valY*valY + valZ*valZ);
+}
+
+__global__ void vorticity_force_kernel(int N, float *u, float *v, float *w, float *cx, float *cy, float *cz, float *mag, float scale, float dt) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i <= 0 || i >= N-1 || j <= 0 || j >= N-1 || k <= 0 || k >= N-1) return;
+    
+    int idx = IX(i, j, k);
+    float dx = (mag[IX(i+1, j, k)] - mag[IX(i-1, j, k)]) * 0.5f;
+    float dy = (mag[IX(i, j+1, k)] - mag[IX(i, j-1, k)]) * 0.5f;
+    float dz = (mag[IX(i, j, k+1)] - mag[IX(i, j, k-1)]) * 0.5f;
+    float len = sqrt(dx*dx + dy*dy + dz*dz) + 1e-5f;
+    
+    float nx = dx / len; 
+    float ny = dy / len;
+    float nz = dz / len;
+    
+    // F = N x Curl
+    float vcx = cx[idx];
+    float vcy = cy[idx];
+    float vcz = cz[idx];
+    
+    float fx = ny*vcz - nz*vcy;
+    float fy = nz*vcx - nx*vcz;
+    float fz = nx*vcy - ny*vcx;
+    
+    u[idx] += fx * scale * dt;
+    v[idx] += fy * scale * dt;
+    w[idx] += fz * scale * dt;
+}
+
+__global__ void obstacle_kernel(int N, float *u, float *v, float *w, float *dens, float *pos, float rad) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int k = threadIdx.z + blockIdx.z * blockDim.z;
+    if (i >= N || j >= N || k >= N) return;
+    
+    float dx = i - pos[0];
+    float dy = j - pos[1];
+    float dz = k - pos[2];
+    
+    if (dx*dx + dy*dy + dz*dz < rad*rad) {
+        int idx = IX(i, j, k);
+        u[idx] = 0; v[idx] = 0; w[idx] = 0;
+        dens[idx] = 0;
+    }
+}
+// ---------------- Implementation ----------------
+
+CudaFluidSolver::CudaFluidSolver(int n, float dt) : FluidSolver(n, dt) {
+    size_t size = N * N * N * sizeof(float);
+    
+    cudaMalloc(&d_u, size); cudaMalloc(&d_v, size); cudaMalloc(&d_w, size);
+    cudaMalloc(&d_u0, size); cudaMalloc(&d_v0, size); cudaMalloc(&d_w0, size);
+    cudaMalloc(&d_dens, size); cudaMalloc(&d_dens0, size);
+    cudaMalloc(&d_p, size); cudaMalloc(&d_p0, size); cudaMalloc(&d_div, size);
+
+    cudaMalloc(&d_u_aux, size); cudaMalloc(&d_v_aux, size); cudaMalloc(&d_w_aux, size);
+    cudaMalloc(&d_dens_aux, size);
+    
+    // SDF
+    cudaMalloc(&d_sdf, size);
+    cudaMalloc(&d_obs_u, size); cudaMalloc(&d_obs_v, size); cudaMalloc(&d_obs_w, size);
+    
+    // Fill SDF with 1.0 (empty)
+    std::vector<float> initSDF(N*N*N, 1.0f);
+    cudaMemcpy(d_sdf, initSDF.data(), size, cudaMemcpyHostToDevice);
+    cudaMemset(d_obs_u, 0, size); cudaMemset(d_obs_v, 0, size); cudaMemset(d_obs_w, 0, size);
+    
+    // allocate vis buffer later or here? Let's do it lazy or now.
+    // cudaMalloc(&d_vel_vis, size * 4); // done in getter lazy
+    
+    cudaMemset(d_u, 0, size); cudaMemset(d_v, 0, size); cudaMemset(d_w, 0, size);
+    cudaMemset(d_dens, 0, size);
+    
+    h_density.resize(N*N*N);
+    std::cout << "CUDA Initialized" << std::endl;
+}
+
+CudaFluidSolver::~CudaFluidSolver() {
+    cudaFree(d_u); cudaFree(d_v); cudaFree(d_w);
+    cudaFree(d_u0); cudaFree(d_v0); cudaFree(d_w0);
+    cudaFree(d_dens); cudaFree(d_dens0);
+    cudaFree(d_p); cudaFree(d_p0); cudaFree(d_div);
+    cudaFree(d_u_aux); cudaFree(d_v_aux); cudaFree(d_w_aux);
+    cudaFree(d_dens_aux);
+    cudaFree(d_sdf);
+    cudaFree(d_obs_u); cudaFree(d_obs_v); cudaFree(d_obs_w);
+    if(d_vel_vis) cudaFree(d_vel_vis);
+}
+
+void CudaFluidSolver::init_data() {
+    size_t size = N * N * N * sizeof(float);
+    cudaMemset(d_dens, 0, size);
+    cudaMemset(d_u, 0, size);
+    cudaMemset(d_v, 0, size);
+    cudaMemset(d_w, 0, size);
+}
+
+void CudaFluidSolver::step() {
+    int N = _n;
+    dim3 threads(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    dim3 blocks((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+    SolverType type = get_solver_type();
+    
+    // Vorticity Confinement start
+    if (vorticityConf > 0.0f) {
+        // reuse d_u_aux, d_v_aux, d_w_aux for curl
+        // reuse d_div for mag
+        curl_kernel<<<blocks, threads>>>(N, d_u, d_v, d_w, d_u_aux, d_v_aux, d_w_aux, d_div);
+        vorticity_force_kernel<<<blocks, threads>>>(N, d_u, d_v, d_w, d_u_aux, d_v_aux, d_w_aux, d_div, vorticityConf, _dt);
+    }
+    
+    // Helper LAMBDAs (macros in CUDA C++ 98/11 mixture can be tricky, using simple calls)
+    
+    auto project = [&]() {
+        divergence_kernel<<<blocks, threads>>>(N, d_u, d_v, d_w, d_div, d_p, d_sdf, d_obs_u, d_obs_v, d_obs_w);
+        for(int k=0; k<20; k++) {
+            cudaMemcpy(d_p0, d_p, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+            jacobi_kernel<<<blocks, threads>>>(N, d_p, d_p0, d_div, d_sdf);
+        }
+        subtract_gradient_kernel<<<blocks, threads>>>(N, d_u, d_v, d_w, d_p, d_sdf, d_obs_u, d_obs_v, d_obs_w);
+    };
+
+    if (type == SolverType::Basic_StableFluids) {
+        // Save Old
+        cudaMemcpy(d_u0, d_u, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_v0, d_v, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_w0, d_w, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+
+        // Advect
+        advect_kernel<<<blocks, threads>>>(N, d_u, d_u0, d_u0, d_v0, d_w0, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_v, d_v0, d_u0, d_v0, d_w0, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_w, d_w0, d_u0, d_v0, d_w0, d_sdf, _dt);
+        
+        project();
+        
+        // Density
+        cudaMemcpy(d_dens0, d_dens, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+        advect_kernel<<<blocks, threads>>>(N, d_dens, d_dens0, d_u, d_v, d_w, d_sdf, _dt);
+
+    } else if (type == SolverType::MacCormack) {
+        // 1. Fwd: U -> Aux (using U)
+        advect_kernel<<<blocks, threads>>>(N, d_u_aux, d_u, d_u, d_v, d_w, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_v_aux, d_v, d_u, d_v, d_w, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_w_aux, d_w, d_u, d_v, d_w, d_sdf, _dt);
+        
+        // 2. Bwd: Aux -> U0 (temp) (using Aux)
+        advect_kernel<<<blocks, threads>>>(N, d_u0, d_u_aux, d_u_aux, d_v_aux, d_w_aux, d_sdf, -_dt);
+        advect_kernel<<<blocks, threads>>>(N, d_v0, d_v_aux, d_u_aux, d_v_aux, d_w_aux, d_sdf, -_dt);
+        advect_kernel<<<blocks, threads>>>(N, d_w0, d_w_aux, d_u_aux, d_v_aux, d_w_aux, d_sdf, -_dt);
+        
+        // 3. Correct: U = Aux + (U - U0) * 0.5
+        maccormack_correct_kernel<<<blocks, threads>>>(N, d_u_aux, d_u, d_u0, d_u);
+        maccormack_correct_kernel<<<blocks, threads>>>(N, d_v_aux, d_v, d_v0, d_v);
+        maccormack_correct_kernel<<<blocks, threads>>>(N, d_w_aux, d_w, d_w0, d_w);
+        
+        project();
+
+        // Density MacCormack
+        // Fwd: Dens(d_dens) -> Aux(d_dens_aux) using U
+        advect_kernel<<<blocks, threads>>>(N, d_dens_aux, d_dens, d_u, d_v, d_w, d_sdf, _dt);
+        // Bwd: Aux -> Dens0(temp) using U
+        advect_kernel<<<blocks, threads>>>(N, d_dens0, d_dens_aux, d_u, d_v, d_w, d_sdf, -_dt);
+        // Correct: Dens = Aux + (Dens - Dens0) * 0.5
+        maccormack_correct_kernel<<<blocks, threads>>>(N, d_dens_aux, d_dens, d_dens0, d_dens);
+
+    } else if (type == SolverType::BFECC) {
+        // 1. Fwd: U -> Aux
+        advect_kernel<<<blocks, threads>>>(N, d_u_aux, d_u, d_u, d_v, d_w, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_v_aux, d_v, d_u, d_v, d_w, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_w_aux, d_w, d_u, d_v, d_w, d_sdf, _dt);
+        
+        // 2. Bwd: Aux -> U0
+        advect_kernel<<<blocks, threads>>>(N, d_u0, d_u_aux, d_u_aux, d_v_aux, d_w_aux, d_sdf, -_dt);
+        advect_kernel<<<blocks, threads>>>(N, d_v0, d_v_aux, d_u_aux, d_v_aux, d_w_aux, d_sdf, -_dt);
+        advect_kernel<<<blocks, threads>>>(N, d_w0, d_w_aux, d_u_aux, d_v_aux, d_w_aux, d_sdf, -_dt);
+        
+        // 3. Modified: Aux = 1.5 * U - 0.5 * U0
+        scaled_add_kernel<<<blocks, threads>>>(N, d_u, d_u0, d_u_aux, 1.5f, -0.5f);
+        scaled_add_kernel<<<blocks, threads>>>(N, d_v, d_v0, d_v_aux, 1.5f, -0.5f);
+        scaled_add_kernel<<<blocks, threads>>>(N, d_w, d_w0, d_w_aux, 1.5f, -0.5f);
+        
+        // 4. Final Advect: Modified(Aux) -> U
+        advect_kernel<<<blocks, threads>>>(N, d_u, d_u_aux, d_u, d_v, d_w, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_v, d_v_aux, d_u, d_v, d_w, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_w, d_w_aux, d_u, d_v, d_w, d_sdf, _dt);
+        
+        project();
+        
+        // Density BFECC
+        advect_kernel<<<blocks, threads>>>(N, d_dens_aux, d_dens, d_u, d_v, d_w, d_sdf, _dt);
+        advect_kernel<<<blocks, threads>>>(N, d_dens0, d_dens_aux, d_u, d_v, d_w, d_sdf, -_dt);
+        scaled_add_kernel<<<blocks, threads>>>(N, d_dens, d_dens0, d_dens_aux, 1.5f, -0.5f);
+        advect_kernel<<<blocks, threads>>>(N, d_dens, d_dens_aux, d_u, d_v, d_w, d_sdf, _dt);
+
+    } else if (type == SolverType::Advection_Reflection) {
+        // 1. Advect(dt/2): U -> Aux
+        advect_kernel<<<blocks, threads>>>(N, d_u_aux, d_u, d_u, d_v, d_w, d_sdf, _dt * 0.5f);
+        advect_kernel<<<blocks, threads>>>(N, d_v_aux, d_v, d_u, d_v, d_w, d_sdf, _dt * 0.5f);
+        advect_kernel<<<blocks, threads>>>(N, d_w_aux, d_w, d_u, d_v, d_w, d_sdf, _dt * 0.5f);
+        
+        // 2. Project Aux (in place? No, need separate buffers usually, assume inplace for aux works if careful or use U0 as temp)
+        // Let's use U0, V0, W0 as temp for projection of Aux?
+        // Actually `project` operates on d_u, d_v, d_w.
+        // Swap pointers to project Aux.
+        std::swap(d_u, d_u_aux); std::swap(d_v, d_v_aux); std::swap(d_w, d_w_aux);
+        project();
+        // Now d_u/v/w holds the Projected Aux (u_half). d_u_aux holds original u (un-projected? no, overwritten by swap).
+        // Wait, d_u_aux was "Original U". After swap, d_u_aux is "Aux (Fwd)".
+        // No, swap swaps the pointers.
+        // Before swap: d_u (Orig), d_u_aux (Advected).
+        // After swap: d_u (Advected), d_u_aux (Orig).
+        // Project() acts on d_u. So d_u (Advected) gets projected. Result is in d_u.
+        // So d_u is now u_half. d_u_aux is Orig.
+        
+        // 3. Reflect: U = 2 * U_half(d_u) - Aux(Orig?? No.)
+        // Formula: u_hat = 2 * u_half - u_tilde_half.
+        // u_tilde_half is the UNPROJECTED advection result.
+        // Uh oh, Project() modifies in place. 
+        // We need to save u_tilde_half before projecting if we want it.
+        // Wait, simplified reflection: 2 * u_half - u_star. (u_star = u_tilde_half).
+        // So we need a copy of u_tilde_half. 
+        // Use d_u0 to store u_tilde_half.
+        cudaMemcpy(d_u0, d_u, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_v0, d_v, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_w0, d_w, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+        // Now d_u is u_tilde_half, d_u0 is copy.
+        
+        // Project d_u -> u_half.
+        project(); // d_u is u_half.
+        
+        // Reflect: U_hat (into d_u_aux? no using d_u as dest?)
+        // d_u (u_half), d_u0 (u_tilde_half).
+        // d_u = 2 * d_u - d_u0.
+        scaled_add_kernel<<<blocks, threads>>>(N, d_u, d_u0, d_u, 2.0f, -1.0f);
+        scaled_add_kernel<<<blocks, threads>>>(N, d_v, d_v0, d_v, 2.0f, -1.0f);
+        scaled_add_kernel<<<blocks, threads>>>(N, d_w, d_w0, d_w, 2.0f, -1.0f);
+        
+        // Now d_u is u_hat. 
+        // Need to restore pointers? No, we swapped d_u and d_u_aux.
+        // Currently d_u points to Buffer 2. d_u_aux points to Buffer 1.
+        // We want final result in Buffer 1? Or just consistent.
+        // Current state: d_u holds u_hat. d_u_aux holds U_old.
+        
+        // 4. Advect u_hat (d_u) by u_half.
+        // Wait, "Advect u_hat by u_half".
+        // We lost u_half? Yes, we overwrote it with u_hat.
+        // We need u_half for velocity field.
+        // Ok, we needed another backup.
+        // Buffer count: d_u (1), d_u0 (2), d_u_aux (3).
+        // 1. Advect d_u -> d_u_aux (u_tilde_half).
+        // 2. Copy d_u_aux -> d_u0 (save u_tilde).
+        // 3. Swap d_u, d_u_aux. (d_u=u_tilde, d_u_aux=u_old).
+        // 4. Project d_u -> u_half.
+        // 5. Reflect? 
+        //    u_hat = 2*u_half - u_tilde. 
+        //    Calculate u_hat, store in... d_u_aux? (Overwrite u_old).
+        //    d_u_aux = 2*d_u - d_u0.
+        // 6. Advect d_u_aux (u_hat) using d_u (u_half) -> d_u0 (Temp).
+        //    Dest: d_u0.
+        // 7. Swap d_u0, d_u. (d_u=Result_Unprojected).
+        // 8. Project d_u.
+        
+        // Let's re-verify pointers.
+        // Swap back to avoid confusion at end?
+        // Pointer hell. Let's stick to using specific buffers.
+        // Restore Swap: std::swap(d_u, d_u_aux); std::swap(...);
+        // After this: d_u (Orig), d_u_aux (Result of u_hat). 
+        // But logic complex.
+        
+        // SIMPLIFIED LOGIC WITH SPECIFIC POINTERS:
+        // PtrA=d_u, PtrB=d_u_aux, PtrC=d_u0.
+        // 1. Advect(dt/2) PtrA -> PtrB (u_tilde).
+        // 2. Copy PtrB -> PtrC (u_tilde_copy).
+        
+        // Project PtrB (u_tilde -> u_half).
+        // We must swap d_u pointers for `project()` to work on PtrB.
+        float *tmpU=d_u, *tmpV=d_v, *tmpW=d_w;
+        d_u=d_u_aux; d_v=d_v_aux; d_w=d_w_aux; 
+        project(); 
+        // Now d_u_aux (aliased as d_u) holds u_half.
+        
+        // Reflect: Target=d_u (u_half, overwriting). 
+        // Wait, u_hat = 2*u_half - u_tilde.
+        // We overwrite u_half with u_hat?? 
+        // If we do, we lose u_half for advection velocity.
+        // Write u_hat to PtrA (Original, free now)? 
+        // scaling: PtrA = 2 * PtrB - PtrC.
+        d_u=tmpU; d_v=tmpV; d_w=tmpW; // Restore pointers.
+        // d_u (Orig-Free), d_u_aux (u_half), d_u0 (u_tilde).
+        
+        scaled_add_kernel<<<blocks, threads>>>(N, d_u_aux, d_u0, d_u, 2.0f, -1.0f);
+        // d_u is u_hat. d_u_aux is u_half.
+        
+        // Advect d_u (u_hat) using d_u_aux (u_half) -> d_u0.
+        advect_kernel<<<blocks, threads>>>(N, d_u0, d_u, d_u_aux, d_v_aux, d_w_aux, d_sdf, _dt * 0.5f);
+        advect_kernel<<<blocks, threads>>>(N, d_v0, d_v, d_u_aux, d_v_aux, d_w_aux, d_sdf, _dt * 0.5f);
+        advect_kernel<<<blocks, threads>>>(N, d_w0, d_w, d_u_aux, d_v_aux, d_w_aux, d_sdf, _dt * 0.5f);
+        
+        // Final Project d_u0.
+        // Swap d_u with d_u0 so project works on result.
+        d_u=d_u0; d_v=d_v0; d_w=d_w0;
+        project();
+        // d_u0 now holds final. d_u (original pointer logic) expects result in d_u.
+        // Swap d_u0 and original d_u pointer (which is currently tmpU?? No).
+        // We need to ensure class d_u points to next step result.
+        // We swapped d_u=d_u0. So d_u points to valid result. 
+        // The other buffers d_u0, d_u_aux are scratch.
+        // Consistency: d_u is always the main array. 
+        // But we just changed what d_u points to. Next frames will use this.
+        // Pointers d_u, d_u0, d_u_aux are permuted. This is fine.
+        cudaMemcpy(d_dens0, d_dens, N*N*N*sizeof(float), cudaMemcpyDeviceToDevice);
+        advect_kernel<<<blocks, threads>>>(N, d_dens, d_dens0, d_u, d_v, d_w, d_sdf, _dt);
+    }
+    
+    // Obstacle
+    if (useObstacle) {
+        // Need to copy posArray to device or pass as args
+        // Passing floats is simpler
+        float pos[3] = {obstaclePos[0], obstaclePos[1], obstaclePos[2]};
+        float *d_pos; 
+        cudaMalloc(&d_pos, 3*sizeof(float));
+        cudaMemcpy(d_pos, pos, 3*sizeof(float), cudaMemcpyHostToDevice);
+        
+        obstacle_kernel<<<blocks, threads>>>(N, d_u, d_v, d_w, d_dens, d_pos, obstacleRadius);
+        
+        cudaFree(d_pos);
+    }
+    
+    cudaDeviceSynchronize();
+}
+
+void CudaFluidSolver::update_obstacle_sdf(const std::vector<float>& sdf, const std::vector<float>& velocity) {
+    size_t size = _n * _n * _n * sizeof(float);
+    if (sdf.size() == _n*_n*_n) {
+        cudaMemcpy(d_sdf, sdf.data(), size, cudaMemcpyHostToDevice);
+    }
+    // velocity expected interleaved XYZ? Or assume planar input?
+    // Interface says std::vector. Let's assume passed as XYZ... 
+    // Wait, Generic interface handles format.
+    // If input is packed, we need to unpack to d_obs_u/v/w for CUDA (Structure of Arrays perf).
+    // Let's assume input is XYZXYZ...
+    if (velocity.size() == _n*_n*_n*3) {
+        std::vector<float> tmpU(_n*_n*_n), tmpV(_n*_n*_n), tmpW(_n*_n*_n);
+        for(size_t i=0; i<_n*_n*_n; ++i) {
+            tmpU[i] = velocity[i*3+0];
+            tmpV[i] = velocity[i*3+1];
+            tmpW[i] = velocity[i*3+2];
+        }
+        cudaMemcpy(d_obs_u, tmpU.data(), size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_obs_v, tmpV.data(), size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_obs_w, tmpW.data(), size, cudaMemcpyHostToDevice);
+    }
+    useSDF = true;
+}
+
+void CudaFluidSolver::add_density(int x, int y, int z, float amount) {
+    int N = _n;
+    dim3 threads(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    dim3 blocks((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    add_source_kernel<<<blocks, threads>>>(N, d_dens, x, y, z, amount, 4.0f);
+}
+
+void CudaFluidSolver::add_velocity(int x, int y, int z, float ax, float ay, float az) {
+    int N = _n;
+    dim3 threads(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    dim3 blocks((N + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE, (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    add_source_kernel<<<blocks, threads>>>(N, d_u, x, y, z, ax, 5.0f);
+    add_source_kernel<<<blocks, threads>>>(N, d_v, x, y, z, ay, 5.0f);
+    add_source_kernel<<<blocks, threads>>>(N, d_w, x, y, z, az, 5.0f);
+}
+
+const float* CudaFluidSolver::get_density_data() const {
+    cudaMemcpy(const_cast<float*>(h_density.data()), d_dens, _n*_n*_n*sizeof(float), cudaMemcpyDeviceToHost);
+    return h_density.data();
+}
+
+const float* CudaFluidSolver::get_velocity_data() const {
+    if (!d_vel_vis) {
+        cudaMalloc(const_cast<float**>(&d_vel_vis), _n*_n*_n * 4 * sizeof(float));
+    }
+    if (h_vel_vis.size() != _n*_n*_n*4) {
+        h_vel_vis.resize(_n*_n*_n*4);
+    }
+    
+    dim3 threads(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    dim3 blocks((_n + BLOCK_SIZE - 1) / BLOCK_SIZE, (_n + BLOCK_SIZE - 1) / BLOCK_SIZE, (_n + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    
+    interleave_velocity_kernel<<<blocks, threads>>>(_n, d_u, d_v, d_w, d_vel_vis);
+    
+    cudaMemcpy(const_cast<float*>(h_vel_vis.data()), d_vel_vis, _n*_n*_n * 4 * sizeof(float), cudaMemcpyDeviceToHost);
+    return h_vel_vis.data();
+}
+
+#endif
+```
+
+### src/CudaFluidSolver.h
+```
+#pragma once
+#include "FluidSolver.h"
+#include <vector>
+
+#ifdef HAS_CUDA
+#include <cuda_runtime.h>
+
+class CudaFluidSolver : public FluidSolver {
+public:
+    // Velocity fields (current and previous/temp)
+    float *d_u, *d_v, *d_w;
+    float *d_u0, *d_v0, *d_w0;
+    
+    // Density field
+    float *d_dens, *d_dens0;
+    
+    // Pressure and Divergence
+    float *d_p, *d_p0, *d_div;
+
+    // Aux buffers for MacCormack / BFECC
+    float *d_u_aux, *d_v_aux, *d_w_aux;
+    float *d_dens_aux;
+    
+    // SDF Obstacles
+    float *d_sdf;
+    float *d_obs_u, *d_obs_v, *d_obs_w;
+    
+    // Visualization Buffer
+    mutable float *d_vel_vis = nullptr;
+
+    CudaFluidSolver(int n, float dt);
+    ~CudaFluidSolver();
+
+    void init_data() override;
+    void step() override;
+    void add_density(int x, int y, int z, float amount) override;
+    void add_velocity(int x, int y, int z, float ax, float ay, float az) override;
+    void update_obstacle_sdf(const std::vector<float>& sdf, const std::vector<float>& velocity) override;
+
+    const float* get_density_data() const override; 
+    const float* get_velocity_data() const override;
+    
+    unsigned int get_gl_texture_id() const override { return 0; }
+    std::string get_backend_name() const override { return "CUDA (Nvidia)"; }
+
+private:
+    mutable std::vector<float> h_density; // Host buffer for rendering
+    mutable std::vector<float> h_vel_vis;
+};
+#else
+class CudaFluidSolver : public FluidSolver {
+public:
+    CudaFluidSolver(int n, float dt) : FluidSolver(n, dt) {}
+    void init_data() override {}
+    void step() override {}
+    void add_density(int x, int y, int z, float amount) override {}
+    void add_velocity(int x, int y, int z, float ax, float ay, float az) override {}
+    const float* get_density_data() const override { return nullptr; }
+    const float* get_velocity_data() const override { return nullptr; }
+    unsigned int get_gl_texture_id() const override { return 0; }
+    std::string get_backend_name() const override { return "CUDA (Dummy)"; }
+};
+#endif
+```
+
+### src/FluidSolver.h
+```
+#pragma once
+#include <vector>
+#include <memory>
+#include <string>
+#include <cmath>
+
+// 抽象基类，用于统一不同后端的接口
+class FluidSolver {
+public:
+    int N;
+    float dt;
+    // 仿真参数
+    float viscosity = 0.0f;
+    float diffusion = 0.0f;
+    float vorticityConf = 0.0f;
+    
+    // Scene Object (Simple Sphere Obstacle)
+    bool useObstacle = false;
+    float obstacleRadius = 0.0f;
+    float obstaclePos[3] = {0.0f, 0.0f, 0.0f}; 
+    // New Voxel-based Collider System
+    bool useSDF = false;
+    
+    // Upload generic SDF and Velocity field (3 separate components for velocity to match grid or interleaved?)
+    // Let's use interleaved for velocity input for convenience: XYZXYZ...
+    // SDF is scalar.
+    virtual void update_obstacle_sdf(const std::vector<float>& sdf, const std::vector<float>& velocity) {
+        // Base implementation does nothing
+    }
+
+    void set_obstacle(float x, float y, float z, float r) {
+        useObstacle = true;
+        obstaclePos[0] = x; obstaclePos[1] = y; obstaclePos[2] = z;
+        obstacleRadius = r;
+        
+        // Generate SDF for this sphere and upload
+        // Note: For real-time updates of simple shapes, we should use uniforms (like existing code).
+        // But for "Arbitrary Mesh" roadmap, we use this SDF path.
+        // We will switch 'useObstacle' to 'useSDF' logic in implementations potentially.
+    }
+    
+    void clear_obstacle() {
+        useObstacle = false;
+        useSDF = false;
+    }
+
+    FluidSolver(int n, float time_step) : N(n), dt(time_step) {
+        obstaclePos[0] = n/2.0f; obstaclePos[1] = n/2.0f; obstaclePos[2] = n/2.0f;
+        obstacleRadius = n/10.0f;
+    }
+    virtual ~FluidSolver() = default;
+
+    // 初始化流体状态（例如添加一个初始烟雾团）
+    virtual void init_data() = 0;
+
+    // 核心仿真步：必须根据 backend 实现 Advection-Reflection
+    virtual void step() = 0;
+
+    // 添加外力/密度源 (交互用)
+    virtual void add_density(int x, int y, int z, float amount) = 0;
+    virtual void add_velocity(int x, int y, int z, float amountX, float amountY, float amountZ) = 0;
+    
+    // Add "Splat" (Source blob) - helper for GPU efficiency
+    virtual void add_density_splat(int x, int y, int z, float radius, float amount) {
+        // Default implementation: loop (slow but correct for CPU)
+        int r = (int)ceil(radius);
+        for(int kz = -r; kz <= r; kz++) {
+            for(int ky = -r; ky <= r; ky++) {
+                for(int kx = -r; kx <= r; kx++) {
+                    float distSq = (float)(kx*kx + ky*ky + kz*kz);
+                    if (distSq < radius*radius) {
+                        float w = exp(-distSq / (radius*radius)); // Gaussian-ish
+                        add_density(x+kx, y+ky, z+kz, amount * w);
+                    }
+                }
+            }
+        }
+    }
+    
+    virtual void add_velocity_splat(int x, int y, int z, float radius, float ax, float ay, float az) {
+        int r = (int)ceil(radius);
+        for(int kz = -r; kz <= r; kz++) {
+            for(int ky = -r; ky <= r; ky++) {
+                for(int kx = -r; kx <= r; kx++) {
+                     float distSq = (float)(kx*kx + ky*ky + kz*kz);
+                    if (distSq < radius*radius) {
+                        float w = exp(-distSq / (radius*radius));
+                        add_velocity(x+kx, y+ky, z+kz, ax*w, ay*w, az*w);
+                    }
+                }
+            }
+        }
+    }
+
+    // 获取密度数据指针 (用于渲染上传)
+    virtual const float* get_density_data() const = 0;
+
+    // 获取速度数据指针 (用于渲染上传, interleaved RGBA or RGB)
+    virtual const float* get_velocity_data() const { return nullptr; }
+    
+    // 获取后端名称
+    virtual std::string get_backend_name() const = 0;
+    
+    // For GPU backends that manage their own texture
+    virtual unsigned int get_gl_texture_id() const { return 0; }
+    virtual unsigned int get_velocity_gl_texture_id() const { return 0; }
+
+    // Solver Types
+    enum class SolverType {
+        Basic_StableFluids, // Standard Semi-Lagrangian Advection + Projection
+        MacCormack,         // Second Order Prediction-Correction
+        BFECC,              // Back and Forth Error Compensation and Correction
+        Advection_Reflection // Detail Preserving
+    };
+    SolverType current_type = SolverType::Advection_Reflection;
+    
+    virtual void set_solver_type(SolverType type) { current_type = type; };
+    virtual SolverType get_solver_type() const { return current_type; }
+    virtual std::string get_solver_type_name() const {
+        switch (current_type) {
+            case SolverType::Basic_StableFluids: return "Basic Stable Fluids";
+            case SolverType::MacCormack: return "MacCormack";
+            case SolverType::BFECC: return "BFECC";
+            case SolverType::Advection_Reflection: return "Advection-Reflection";
+            default: return "Unknown";
+        }
+    }
+};
+```
+
+### src/GlComputeFluidSolver.h
+```
+#pragma once
+#include "FluidSolver.h"
+#include <iostream>
+
+#ifdef __APPLE__
+// On macOS, OpenGL Compute Shaders (GL 4.3+) are not supported.
+// We provide a dummy implementation so the project compiles, 
+// but this backend should not be selected at runtime.
+class GlComputeFluidSolver : public FluidSolver {
+public:
+    GlComputeFluidSolver(int n, float dt) : FluidSolver(n, dt) {
+        std::cerr << "CRITICAL ERROR: GlComputeFluidSolver instantiated on macOS!" << std::endl;
+    }
+    ~GlComputeFluidSolver() {}
+
+    std::string get_backend_name() const override { return "OpenGL Compute (Unsupported on macOS)"; }
+    const float* get_density_data() const override { return nullptr; }
+    unsigned int get_gl_texture_id() const override { return 0; }
+    
+    void init_data() override {}
+    void step() override {}
+    void add_density(int x, int y, int z, float amount) override {}
+    void add_velocity(int x, int y, int z, float ax, float ay, float az) override {}
+};
+#else
+
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+#include <vector>
+#include <string>
+#include <iostream>
+
+// OpenGL Compute Shader Backend
+class GlComputeFluidSolver : public FluidSolver {
+public:
+    // Textures
+    GLuint texDensity[2];
+    GLuint texVelocity[2];
+    GLuint texDivergence;
+    GLuint texPressure[2]; 
+
+    // Aux for advanced solvers
+    GLuint texAuxVelocity;
+    GLuint texAuxDensity;
+    GLuint texCurl;
+    
+    // SDF Obstacles
+    GLuint texSDF;
+    GLuint texObsVel;
+
+    // Programs
+    GLuint progAdvect, progDivergence, progJacobi, progSubtractGrad, progSplat;
+    GLuint progMacCormackCorrect, progScaledAdd;
+    GLuint progCurl, progConfinement, progObstacle; // Added
+    
+    // Work Group Size
+    static const int WG_SIZE = 8; 
+
+    GlComputeFluidSolver(int n, float dt) : FluidSolver(n, dt) {
+        init_data(); // Calls internal init
+    }
+
+    ~GlComputeFluidSolver() {
+         // Cleanup details omitted for brevity
+    }
+
+    std::string get_backend_name() const override { return "OpenGL Compute"; }
+    const float* get_density_data() const override { return nullptr; } 
+    unsigned int get_gl_texture_id() const override { return texDensity[0]; } 
+    unsigned int get_velocity_gl_texture_id() const override { return texVelocity[0]; }
+
+    void init_data() override {
+        // Init Textures (3D RGBA32F)
+        create_texture(texDensity[0]); create_texture(texDensity[1]);
+        create_texture(texVelocity[0], GL_RGBA32F, GL_RGBA); create_texture(texVelocity[1], GL_RGBA32F, GL_RGBA);
+        create_texture(texDivergence);
+        create_texture(texPressure[0]); create_texture(texPressure[1]);
+
+        create_texture(texAuxVelocity, GL_RGBA32F, GL_RGBA);
+        create_texture(texAuxDensity);
+        create_texture(texCurl, GL_RGBA32F, GL_RGBA);
+        
+        create_texture(texSDF, GL_R32F, GL_RED);
+        create_texture(texObsVel, GL_RGBA32F, GL_RGBA);
+        
+        // Clear SDF
+        std::vector<float> dummySDF(N*N*N, 100.0f);
+        glBindTexture(GL_TEXTURE_3D, texSDF);
+        glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, N, N, N, GL_RED, GL_FLOAT, dummySDF.data());
+        glBindTexture(GL_TEXTURE_3D, 0);
+
+        compile_compute_shaders();
+    }
+    
+    void update_obstacle_sdf(const std::vector<float>& sdf, const std::vector<float>& velocity) override {
+        if (sdf.size() != N*N*N) return;
+        glBindTexture(GL_TEXTURE_3D, texSDF);
+        glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, N, N, N, GL_RED, GL_FLOAT, sdf.data());
+        
+        if (velocity.size() >= N*N*N*3) {
+            // Assume packed RGBA or repack
+            if (velocity.size() == N*N*N*4) {
+                 glBindTexture(GL_TEXTURE_3D, texObsVel);
+                 glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, N, N, N, GL_RGBA, GL_FLOAT, velocity.data());
+            } else {
+                 std::vector<float> packed(N*N*N*4, 0.0f);
+                 for(int i=0; i<N*N*N; ++i) {
+                     packed[i*4+0] = velocity[i*3+0];
+                     packed[i*4+1] = velocity[i*3+1];
+                     packed[i*4+2] = velocity[i*3+2];
+                 }
+                 glBindTexture(GL_TEXTURE_3D, texObsVel);
+                 glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, N, N, N, GL_RGBA, GL_FLOAT, packed.data());
+            }
+        }
+        glBindTexture(GL_TEXTURE_3D, 0);
+        useSDF = true;
+    }
+    
+    void step() override {
+        SolverType type = get_solver_type();
+        
+        // 1. Vorticity Confinement
+        if (vorticityConf > 0.0f) {
+            dispatch_curl(texVelocity[0], texCurl);
+            // Apply force: Read Vel[0], Write to Aux, Mix back
+            dispatch_confinement(texVelocity[0], texCurl, texAuxVelocity);
+            // Copy Aux -> Vel[0]
+            dispatch_scaled_add(texAuxVelocity, texAuxVelocity, texVelocity[0], 1.0f, 0.0f);
+        }
+
+        auto project = [&](GLuint velIn, GLuint velOut) {
+            // Divergence
+            dispatch_divergence(velIn, texDivergence);
+            // Jacobi
+            for(int i=0; i<20; i++) {
+                dispatch_jacobi(texPressure[0], texDivergence, texPressure[1]);
+                std::swap(texPressure[0], texPressure[1]);
+            }
+            // Subtract
+            dispatch_subtract_grad(velIn, texPressure[0], velOut);
+        };
+
+        if (type == SolverType::Basic_StableFluids) {
+            // 1. Advect Velocity
+            dispatch_advect(texVelocity[0], texVelocity[0], texVelocity[1], 1.0f);
+            std::swap(texVelocity[0], texVelocity[1]);
+            
+            // 2. Project
+            // In place projection often requires swap.
+            // dispatch_subtract_grad writes to Out.
+            // Let's assume project() handles internal swap or we use temp.
+            // Current basic implementation uses ping-pong.
+            // Project: Input=Vel[0], Output=Vel[1]?
+            // Re-implementing project logic inline for clarity:
+            dispatch_divergence(texVelocity[0], texDivergence);
+            for(int i=0; i<20; i++) {
+                 dispatch_jacobi(texPressure[0], texDivergence, texPressure[1]);
+                 std::swap(texPressure[0], texPressure[1]);
+            }
+            dispatch_subtract_grad(texVelocity[0], texPressure[0], texVelocity[1]);
+            std::swap(texVelocity[0], texVelocity[1]);
+
+            // 3. Advect Density
+            dispatch_advect(texDensity[0], texVelocity[0], texDensity[1], 1.0f);
+            std::swap(texDensity[0], texDensity[1]);
+
+        } else if (type == SolverType::MacCormack) {
+            // Velocity
+            // Fwd: V0 -> Aux
+            dispatch_advect(texVelocity[0], texVelocity[0], texAuxVelocity, dt);
+            // Bwd: Aux -> V1 (temp)
+            dispatch_advect(texAuxVelocity, texAuxVelocity, texVelocity[1], -dt);
+            // Correct: V0 = Aux + (V0 - V1) * 0.5. (Result to V0? Or swap?)
+            // We need V0 (Orig) preserved? 
+            // dispatch_maccormack_correct(Fwd, Orig, Bwd, Dest)
+            // Fwd=Aux, Orig=V0, Bwd=V1, Dest=V0.
+            dispatch_maccormack_correct(texAuxVelocity, texVelocity[0], texVelocity[1], texVelocity[0]);
+
+            // Project V0 -> V1, Swap.
+            dispatch_divergence(texVelocity[0], texDivergence);
+            for(int i=0; i<20; ++i) {
+                dispatch_jacobi(texPressure[0], texDivergence, texPressure[1]);
+                std::swap(texPressure[0], texPressure[1]);
+            }
+            dispatch_subtract_grad(texVelocity[0], texPressure[0], texVelocity[1]);
+            std::swap(texVelocity[0], texVelocity[1]); // Result in V0
+
+            // Density
+            dispatch_advect(texDensity[0], texVelocity[0], texAuxDensity, dt);
+            dispatch_advect(texAuxDensity, texVelocity[0], texDensity[1], -dt);
+            dispatch_maccormack_correct(texAuxDensity, texDensity[0], texDensity[1], texDensity[0]);
+
+        } else if (type == SolverType::BFECC) {
+            // 1. Fwd: V0 -> Aux
+            dispatch_advect(texVelocity[0], texVelocity[0], texAuxVelocity, dt);
+            // 2. Bwd: Aux -> V1
+            dispatch_advect(texAuxVelocity, texAuxVelocity, texVelocity[1], -dt);
+            // 3. Aux = 1.5 * V0 - 0.5 * V1
+            dispatch_scaled_add(texVelocity[0], texVelocity[1], texAuxVelocity, 1.5f, -0.5f);
+            // 4. Advect Aux -> V1 (Final)
+            dispatch_advect(texAuxVelocity, texVelocity[0], texVelocity[1], dt);
+            
+            // Project
+            std::swap(texVelocity[0], texVelocity[1]); // put unprojected Result in V0
+            dispatch_divergence(texVelocity[0], texDivergence);
+            for(int i=0; i<20; ++i) {
+                dispatch_jacobi(texPressure[0], texDivergence, texPressure[1]);
+                std::swap(texPressure[0], texPressure[1]);
+            }
+            dispatch_subtract_grad(texVelocity[0], texPressure[0], texVelocity[1]);
+            std::swap(texVelocity[0], texVelocity[1]);
+
+            // Density
+            dispatch_advect(texDensity[0], texVelocity[0], texAuxDensity, dt);
+            dispatch_advect(texAuxDensity, texVelocity[0], texDensity[1], -dt);
+            dispatch_scaled_add(texDensity[0], texDensity[1], texAuxDensity, 1.5f, -0.5f);
+            dispatch_advect(texAuxDensity, texVelocity[0], texDensity[1], dt);
+            std::swap(texDensity[0], texDensity[1]);
+
+        } else if (type == SolverType::Advection_Reflection) {
+            // 1. Advect V0 (dt/2) -> Aux
+            dispatch_advect(texVelocity[0], texVelocity[0], texAuxVelocity, dt * 0.5f);
+            
+            // 2. Reflect: V_hat = 2 * P(Aux) - Aux.
+            // Problem: project() modifies input. 
+            // Copy Aux -> V1.
+            dispatch_scaled_add(texAuxVelocity, texAuxVelocity, texVelocity[1], 1.0f, 0.0f);
+            // Project V1. (V1 becomes u_half).
+            dispatch_divergence(texVelocity[1], texDivergence);
+            for(int i=0; i<20; ++i) { dispatch_jacobi(texPressure[0], texDivergence, texPressure[1]); std::swap(texPressure[0], texPressure[1]); }
+            dispatch_subtract_grad(texVelocity[1], texPressure[0], texVelocity[0]); // Write to V0? (V0 is free?)
+            // V0 now holds u_half. Aux holds u_tilde.
+            
+            // u_hat = 2 * u_half(V0) - u_tilde(Aux).
+            // Write to Aux?
+            dispatch_scaled_add(texVelocity[0], texAuxVelocity, texAuxVelocity, 2.0f, -1.0f);
+            // Aux is u_hat. V0 is u_half.
+            
+            // 3. Advect u_hat(Aux) using u_half(V0) -> V1.
+            dispatch_advect(texAuxVelocity, texVelocity[0], texVelocity[1], dt * 0.5f);
+            
+            // 4. Project V1 -> V0 (Final).
+            dispatch_divergence(texVelocity[1], texDivergence);
+             for(int i=0; i<20; ++i) { dispatch_jacobi(texPressure[0], texDivergence, texPressure[1]); std::swap(texPressure[0], texPressure[1]); }
+            dispatch_subtract_grad(texVelocity[1], texPressure[0], texVelocity[0]);
+            
+            // Density
+            dispatch_advect(texDensity[0], texVelocity[0], texDensity[1], dt);
+            std::swap(texDensity[0], texDensity[1]);
+        }
+        
+        // 2. Obstacles
+        if (useObstacle) {
+            // Apply to Velocity (0 is current)
+            dispatch_obstacle(texVelocity[0], texVelocity[0]);
+            // Apply to Density (0 is current)
+            dispatch_obstacle(texDensity[0], texDensity[0]);
+        }
+    }
+    
+    void add_density(int x, int y, int z, float amount) override {
+        dispatch_splat(texDensity[0], x, y, z, amount); 
+    }
+    
+    void dispatch_curl(GLuint vel, GLuint dst) {
+        glUseProgram(progCurl);
+        glBindImageTexture(0, vel, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, dst, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_confinement(GLuint velIn, GLuint curl, GLuint velOut) {
+        glUseProgram(progConfinement);
+        glBindImageTexture(0, velIn, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, curl, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(2, velOut, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glUniform1f(glGetUniformLocation(progConfinement, "strength"), vorticityConf);
+        glUniform1f(glGetUniformLocation(progConfinement, "dt"), dt);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_obstacle(GLuint src, GLuint dst) {
+        glUseProgram(progObstacle);
+        glBindImageTexture(0, src, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, dst, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glUniform3f(glGetUniformLocation(progObstacle, "pos"), obstaclePos[0], obstaclePos[1], obstaclePos[2]);
+        glUniform1f(glGetUniformLocation(progObstacle, "radius"), obstacleRadius);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    
+    
+    void add_velocity(int x, int y, int z, float vx, float vy, float vz) override {
+        dispatch_splat_vel(texVelocity[0], x, y, z, vx, vy, vz);
+    }
+
+private:
+    void dispatch_maccormack_correct(GLuint fwd, GLuint orig, GLuint bwd, GLuint dest) {}
+    void dispatch_scaled_add(GLuint A, GLuint B, GLuint dest, float sA, float sB) {}
+
+    void create_texture(GLuint &tex, GLenum internalFormat = GL_R32F, GLenum format = GL_RED) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_3D, tex);
+        // Use TexStorage for immutable storage (better for Compute)
+        glTexStorage3D(GL_TEXTURE_3D, 1, internalFormat, N, N, N);
+        
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    }
+    
+    // Shader Sources
+    const char* cs_advect = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        
+        layout(rgba32f, binding=0) uniform image3D velocity; 
+        layout(rgba32f, binding=1) uniform image3D source;   
+        layout(rgba32f, binding=2) uniform image3D dest;
+        layout(r32f, binding=3) uniform image3D sdf; // New
+        
+        uniform float dt;
+        uniform float dissipation;
+
+        vec4 sample_linear(image3D tex, vec3 p) {
+            ivec3 dim = imageSize(tex);
+            vec3 pf = p * vec3(dim) - 0.5;
+            ivec3 base = ivec3(floor(pf));
+            vec3 f = fract(pf);
+            
+            vec4 c000 = imageLoad(tex, clamp(base + ivec3(0,0,0), ivec3(0), dim-1));
+            vec4 c100 = imageLoad(tex, clamp(base + ivec3(1,0,0), ivec3(0), dim-1));
+            vec4 c010 = imageLoad(tex, clamp(base + ivec3(0,1,0), ivec3(0), dim-1));
+            vec4 c110 = imageLoad(tex, clamp(base + ivec3(1,1,0), ivec3(0), dim-1));
+            
+            vec4 c001 = imageLoad(tex, clamp(base + ivec3(0,0,1), ivec3(0), dim-1));
+            vec4 c101 = imageLoad(tex, clamp(base + ivec3(1,0,1), ivec3(0), dim-1));
+            vec4 c011 = imageLoad(tex, clamp(base + ivec3(0,1,1), ivec3(0), dim-1));
+            vec4 c111 = imageLoad(tex, clamp(base + ivec3(1,1,1), ivec3(0), dim-1));
+            
+            vec4 c00 = mix(c000, c100, f.x);
+            vec4 c10 = mix(c010, c110, f.x);
+            vec4 c01 = mix(c001, c101, f.x);
+            vec4 c11 = mix(c011, c111, f.x);
+            
+            vec4 c0 = mix(c00, c10, f.y);
+            vec4 c1 = mix(c01, c11, f.y);
+            
+            return mix(c0, c1, f.z);
+        }
+
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            ivec3 dim = imageSize(dest);
+            if (any(greaterThan(gid, dim-1))) return;
+            
+            if (imageLoad(sdf, gid).x < 0.0) {
+                 imageStore(dest, gid, vec4(0));
+                 return;
+            }
+
+            // Backtrace
+            vec3 coord = (vec3(gid) + 0.5) / vec3(dim);
+            vec3 vel = imageLoad(velocity, gid).xyz;
+            vec3 backCoord = coord - vel * dt; 
+            imageStore(dest, gid, sample_linear(source, backCoord) * dissipation);
+        }
+    )";
+    
+    const char* cs_divergence = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D velocity;
+        layout(rgba32f, binding=1) uniform image3D divergence;
+        layout(r32f, binding=2) uniform image3D sdf;
+        layout(rgba32f, binding=3) uniform image3D obsVel;
+
+        bool is_solid(vec3 p, out vec3 ov) {
+            ivec3 dim = imageSize(sdf);
+            vec3 pf = p * vec3(dim) - 0.5;
+            // Nearest sample for now
+            ivec3 ip = ivec3(floor(pf + 0.5));
+            if (imageLoad(sdf, clamp(ip, ivec3(0), dim-1)).x < 0.0) {
+                ov = imageLoad(obsVel, clamp(ip, ivec3(0), dim-1)).xyz;
+                return true;
+            }
+            return false;
+        }
+
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            ivec3 dim = imageSize(velocity);
+            if (any(greaterThan(gid, dim-1))) return;
+            
+            if (imageLoad(sdf, gid).x < 0.0) {
+                imageStore(divergence, gid, vec4(0));
+                return;
+            }
+
+            vec3 ov;
+            vec3 p = (vec3(gid)+0.5)/vec3(dim);
+            vec3 invDim = 1.0/vec3(dim);
+            
+            vec3 pL = p - vec3(invDim.x, 0, 0);
+            float left = is_solid(pL, ov) ? ov.x : imageLoad(velocity, clamp(gid - ivec3(1,0,0), ivec3(0), dim-1)).x;
+            
+            vec3 pR = p + vec3(invDim.x, 0, 0);
+            float right = is_solid(pR, ov) ? ov.x : imageLoad(velocity, clamp(gid + ivec3(1,0,0), ivec3(0), dim-1)).x;
+            
+            vec3 pB = p - vec3(0, invDim.y, 0);
+            float bottom = is_solid(pB, ov) ? ov.y : imageLoad(velocity, clamp(gid - ivec3(0,1,0), ivec3(0), dim-1)).y;
+            
+            vec3 pT = p + vec3(0, invDim.y, 0);
+            float top = is_solid(pT, ov) ? ov.y : imageLoad(velocity, clamp(gid + ivec3(0,1,0), ivec3(0), dim-1)).y;
+            
+            vec3 pBk = p - vec3(0, 0, invDim.z);
+            float back = is_solid(pBk, ov) ? ov.z : imageLoad(velocity, clamp(gid - ivec3(0,0,1), ivec3(0), dim-1)).z;
+            
+            vec3 pF = p + vec3(0, 0, invDim.z);
+            float front = is_solid(pF, ov) ? ov.z : imageLoad(velocity, clamp(gid + ivec3(0,0,1), ivec3(0), dim-1)).z;
+            
+            float div = 0.5 * (right - left + top - bottom + front - back);
+            imageStore(divergence, gid, vec4(div, 0, 0, 1));
+        }
+    )";
+
+    const char* cs_jacobi = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D pressureIn;
+        layout(rgba32f, binding=1) uniform image3D divergence;
+        layout(rgba32f, binding=2) uniform image3D pressureOut;
+        layout(r32f, binding=3) uniform image3D sdf;
+
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            ivec3 dim = imageSize(pressureOut);
+            if (any(greaterThan(gid, dim-1))) return;
+            
+            if (imageLoad(sdf, gid).x < 0.0) {
+                 imageStore(pressureOut, gid, vec4(0));
+                 return;
+            }
+            
+            float pC = imageLoad(pressureIn, gid).x;
+            
+            // If neighbor is solid, use pC (Neumann)
+            float pL = (imageLoad(sdf, clamp(gid - ivec3(1,0,0), ivec3(0), dim-1)).x < 0.0) ? pC : imageLoad(pressureIn, clamp(gid - ivec3(1,0,0), ivec3(0), dim-1)).x;
+            float pR = (imageLoad(sdf, clamp(gid + ivec3(1,0,0), ivec3(0), dim-1)).x < 0.0) ? pC : imageLoad(pressureIn, clamp(gid + ivec3(1,0,0), ivec3(0), dim-1)).x;
+            float pB = (imageLoad(sdf, clamp(gid - ivec3(0,1,0), ivec3(0), dim-1)).x < 0.0) ? pC : imageLoad(pressureIn, clamp(gid - ivec3(0,1,0), ivec3(0), dim-1)).x;
+            float pT = (imageLoad(sdf, clamp(gid + ivec3(0,1,0), ivec3(0), dim-1)).x < 0.0) ? pC : imageLoad(pressureIn, clamp(gid + ivec3(0,1,0), ivec3(0), dim-1)).x;
+            float pBk= (imageLoad(sdf, clamp(gid - ivec3(0,0,1), ivec3(0), dim-1)).x < 0.0) ? pC : imageLoad(pressureIn, clamp(gid - ivec3(0,0,1), ivec3(0), dim-1)).x;
+            float pF = (imageLoad(sdf, clamp(gid + ivec3(0,0,1), ivec3(0), dim-1)).x < 0.0) ? pC : imageLoad(pressureIn, clamp(gid + ivec3(0,0,1), ivec3(0), dim-1)).x;
+            
+            float bC = imageLoad(divergence, gid).x;
+            float newP = (pL + pR + pB + pT + pBk + pF - bC) / 6.0;
+            imageStore(pressureOut, gid, vec4(newP, 0, 0, 1));
+        }
+    )";
+    
+    const char* cs_subtract_grad = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D velocityIn;
+        layout(rgba32f, binding=1) uniform image3D pressure;
+        layout(rgba32f, binding=2) uniform image3D velocityOut;
+        layout(r32f, binding=3) uniform image3D sdf;
+        layout(rgba32f, binding=4) uniform image3D obsVel;
+
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            ivec3 dim = imageSize(velocityOut);
+            if (any(greaterThan(gid, dim-1))) return;
+            
+            if (imageLoad(sdf, gid).x < 0.0) {
+                vec3 ov = imageLoad(obsVel, gid).xyz;
+                imageStore(velocityOut, gid, vec4(ov, 0));
+                return; 
+            }
+            
+            float pL = imageLoad(pressure, clamp(gid - ivec3(1,0,0), ivec3(0), dim-1)).x;
+            float pR = imageLoad(pressure, clamp(gid + ivec3(1,0,0), ivec3(0), dim-1)).x;
+            float pB = imageLoad(pressure, clamp(gid - ivec3(0,1,0), ivec3(0), dim-1)).x;
+            float pT = imageLoad(pressure, clamp(gid + ivec3(0,1,0), ivec3(0), dim-1)).x;
+            float pBk= imageLoad(pressure, clamp(gid - ivec3(0,0,1), ivec3(0), dim-1)).x;
+            float pF = imageLoad(pressure, clamp(gid + ivec3(0,0,1), ivec3(0), dim-1)).x;
+            
+            vec3 oldVel = imageLoad(velocityIn, gid).xyz;
+            vec3 grad = 0.5 * vec3(pR - pL, pT - pB, pF - pBk);
+            imageStore(velocityOut, gid, vec4(oldVel - grad, 0));
+        }
+    )";
+    
+    const char* cs_maccormack_correct = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D fwd;
+        layout(rgba32f, binding=1) uniform image3D orig;
+        layout(rgba32f, binding=2) uniform image3D bwd;
+        layout(rgba32f, binding=3) uniform image3D dest;
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            if (any(greaterThan(gid, imageSize(dest)-1))) return;
+            vec4 f = imageLoad(fwd, gid);
+            vec4 o = imageLoad(orig, gid);
+            vec4 b = imageLoad(bwd, gid);
+            imageStore(dest, gid, f + (o - b) * 0.5);
+        }
+    )";
+
+    const char* cs_splat = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D dest;
+        uniform ivec3 center;
+        uniform float radius;
+        uniform vec4 val;
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            if (any(greaterThan(gid, imageSize(dest)-1))) return;
+            vec3 diff = vec3(gid - center);
+            float distSq = dot(diff, diff);
+            if (distSq < radius*radius) {
+                vec4 cur = imageLoad(dest, gid);
+                float w = exp(-distSq / (radius*radius));
+                imageStore(dest, gid, cur + val * w);
+            }
+        }
+    )";
+
+    const char* cs_curl = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D velocity;
+        layout(rgba32f, binding=1) uniform image3D curl;
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            ivec3 dim = imageSize(velocity);
+            if (any(greaterThan(gid, dim-1))) return;
+            vec3 vR = imageLoad(velocity, clamp(gid + ivec3(1,0,0), ivec3(0), dim-1)).xyz;
+            vec3 vL = imageLoad(velocity, clamp(gid - ivec3(1,0,0), ivec3(0), dim-1)).xyz;
+            vec3 vT = imageLoad(velocity, clamp(gid + ivec3(0,1,0), ivec3(0), dim-1)).xyz;
+            vec3 vB = imageLoad(velocity, clamp(gid - ivec3(0,1,0), ivec3(0), dim-1)).xyz;
+            vec3 vF = imageLoad(velocity, clamp(gid + ivec3(0,0,1), ivec3(0), dim-1)).xyz;
+            vec3 vBk = imageLoad(velocity, clamp(gid - ivec3(0,0,1), ivec3(0), dim-1)).xyz;
+            float dvz_dy = (vT.z - vB.z) * 0.5;
+            float dvy_dz = (vF.y - vBk.y) * 0.5;
+            float dvx_dz = (vF.x - vBk.x) * 0.5;
+            float dvz_dx = (vR.z - vL.z) * 0.5;
+            float dvy_dx = (vR.y - vL.y) * 0.5;
+            float dvx_dy = (vT.x - vB.x) * 0.5;
+            vec3 c = vec3(dvz_dy - dvy_dz, dvx_dz - dvz_dx, dvy_dx - dvx_dy);
+            float mag = length(c);
+            imageStore(curl, gid, vec4(c, mag));
+        }
+    )";
+    const char* cs_confinement = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D velocityIn;
+        layout(rgba32f, binding=1) uniform image3D curlTex;
+        layout(rgba32f, binding=2) uniform image3D velocityOut;
+        uniform float strength;
+        uniform float dt;
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            ivec3 dim = imageSize(velocityIn);
+            if (any(greaterThan(gid, dim-1))) return;
+            float magR = imageLoad(curlTex, clamp(gid + ivec3(1,0,0), ivec3(0), dim-1)).w;
+            float magL = imageLoad(curlTex, clamp(gid - ivec3(1,0,0), ivec3(0), dim-1)).w;
+            float magT = imageLoad(curlTex, clamp(gid + ivec3(0,1,0), ivec3(0), dim-1)).w;
+            float magB = imageLoad(curlTex, clamp(gid - ivec3(0,1,0), ivec3(0), dim-1)).w;
+            float magF = imageLoad(curlTex, clamp(gid + ivec3(0,0,1), ivec3(0), dim-1)).w;
+            float magBk = imageLoad(curlTex, clamp(gid - ivec3(0,0,1), ivec3(0), dim-1)).w;
+            vec3 eta = vec3(magR - magL, magT - magB, magF - magBk) * 0.5;
+            vec3 force = vec3(0);
+            if (length(eta) > 1e-5) {
+                eta = normalize(eta);
+                vec3 c = imageLoad(curlTex, gid).xyz;
+                force = cross(eta, c) * strength * dt;
+            }
+            vec3 vel = imageLoad(velocityIn, gid).xyz;
+            imageStore(velocityOut, gid, vec4(vel + force, 0));
+        }
+    )";
+    const char* cs_obstacle = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D src;
+        layout(rgba32f, binding=1) uniform image3D dst;
+        uniform vec3 pos;
+        uniform float radius;
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            ivec3 dim = imageSize(dst);
+            if (any(greaterThan(gid, dim-1))) return;
+            if (distance(vec3(gid), pos) < radius) {
+                imageStore(dst, gid, vec4(0));
+            } else {
+                imageStore(dst, gid, imageLoad(src, gid));
+            }
+        }
+    )";
+    const char* cs_scaled_add = R"(
+        #version 430
+        layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+        layout(rgba32f, binding=0) uniform image3D texA;
+        layout(rgba32f, binding=1) uniform image3D texB;
+        layout(rgba32f, binding=2) uniform image3D dest;
+        uniform float sA;
+        uniform float sB;
+        void main() {
+            ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
+            if (any(greaterThan(gid, imageSize(dest)-1))) return;
+            vec4 a = imageLoad(texA, gid);
+            vec4 b = imageLoad(texB, gid);
+            imageStore(dest, gid, a * sA + b * sB);
+        }
+    )";
+
+    GLuint compile_program(const char* src) {
+        GLuint p = glCreateProgram();
+        GLuint s = glCreateShader(GL_COMPUTE_SHADER);
+        glShaderSource(s, 1, &src, NULL);
+        glCompileShader(s);
+        // Error checking could be here
+        glAttachShader(p, s);
+        glLinkProgram(p);
+        glDeleteShader(s);
+        return p;
+    }
+    
+    void compile_compute_shaders() {
+        progAdvect = compile_program(cs_advect);
+        progDivergence = compile_program(cs_divergence);
+        progJacobi = compile_program(cs_jacobi);
+        progSubtractGrad = compile_program(cs_subtract_grad);
+        progSplat = compile_program(cs_splat);
+        progMacCormackCorrect = compile_program(cs_maccormack_correct);
+        progScaledAdd = compile_program(cs_scaled_add);
+        progCurl = compile_program(cs_curl);
+        progConfinement = compile_program(cs_confinement);
+        progObstacle = compile_program(cs_obstacle);
+    }
+    
+    void dispatch_advect(GLuint src, GLuint vel, GLuint dst, float decay) {
+        glUseProgram(progAdvect);
+        glBindImageTexture(0, vel, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, src, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(2, dst, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glBindImageTexture(3, texSDF, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R32F);
+        glUniform1f(glGetUniformLocation(progAdvect, "dt"), dt);
+        glUniform1f(glGetUniformLocation(progAdvect, "dissipation"), decay);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_divergence(GLuint velocity, GLuint divergence) {
+        glUseProgram(progDivergence);
+        glBindImageTexture(0, velocity, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, divergence, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glBindImageTexture(2, texSDF, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(3, texObsVel, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_jacobi(GLuint pIn, GLuint div, GLuint pOut) {
+        glUseProgram(progJacobi);
+        glBindImageTexture(0, pIn, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, div, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(2, pOut, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glBindImageTexture(3, texSDF, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R32F);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_subtract_grad(GLuint velIn, GLuint p, GLuint velOut) {
+        glUseProgram(progSubtractGrad);
+        glBindImageTexture(0, velIn, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, p, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(2, velOut, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glBindImageTexture(3, texSDF, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(4, texObsVel, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_splat(GLuint tex, int x, int y, int z, float v) {
+        glUseProgram(progSplat);
+        glBindImageTexture(0, tex, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA32F);
+        glUniform3i(glGetUniformLocation(progSplat, "center"), x, y, z);
+        glUniform1f(glGetUniformLocation(progSplat, "radius"), 4.0f);
+        glUniform4f(glGetUniformLocation(progSplat, "val"), v, v, v, 1.0f);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+    
+    void dispatch_splat_vel(GLuint tex, int x, int y, int z, float vx, float vy, float vz) {
+        glUseProgram(progSplat);
+        glBindImageTexture(0, tex, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA32F);
+        glUniform3i(glGetUniformLocation(progSplat, "center"), x, y, z);
+        glUniform1f(glGetUniformLocation(progSplat, "radius"), 5.0f);
+        glUniform4f(glGetUniformLocation(progSplat, "val"), vx, vy, vz, 0.0f);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_maccormack_correct(GLuint fwd, GLuint orig, GLuint bwd, GLuint dest) {
+        glUseProgram(progMacCormackCorrect);
+        glBindImageTexture(0, fwd, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, orig, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(2, bwd, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(3, dest, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+
+    void dispatch_scaled_add(GLuint A, GLuint B, GLuint dest, float sA, float sB) {
+        glUseProgram(progScaledAdd);
+        glBindImageTexture(0, A, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(1, B, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F);
+        glBindImageTexture(2, dest, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+        glUniform1f(glGetUniformLocation(progScaledAdd, "sA"), sA);
+        glUniform1f(glGetUniformLocation(progScaledAdd, "sB"), sB);
+        glDispatchCompute((N+7)/8, (N+7)/8, (N+7)/8);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    }
+};
+
+#endif
+```
+
+### src/MetalFluidSolver.h
+```
+#pragma once
+
+#include "FluidSolver.h"
+#include <memory>
+#include <string>
+
+#ifdef __APPLE__
+
+class MetalFluidSolver : public FluidSolver {
+public:
+    MetalFluidSolver(int n, float dt);
+    ~MetalFluidSolver();
+    
+    void init_data() override;
+    void step() override;
+    void add_density(int x, int y, int z, float amount) override;
+    void add_velocity(int x, int y, int z, float ax, float ay, float az) override;
+    void update_obstacle_sdf(const std::vector<float>& sdf, const std::vector<float>& velocity) override;
+    
+    const float* get_density_data() const override;
+    const float* get_velocity_data() const override;
+    unsigned int get_gl_texture_id() const override;
+    std::string get_backend_name() const override { return "Metal (macOS)"; }
+
+private:
+    // PIMPL idiom to hide Objective-C types from C++ compilers
+    struct MetalContext;
+    std::unique_ptr<MetalContext> _ctx;
+};
+
+#else
+
+// Dummy implementation for non-Apple platforms
+class MetalFluidSolver : public FluidSolver {
+public:
+    MetalFluidSolver(int n, float dt) : FluidSolver(n, dt) {}
+    void init_data() override {}
+    void step() override {}
+    void add_density(int x, int y, int z, float amount) override {}
+    void add_velocity(int x, int y, int z, float ax, float ay, float az) override {}
+    const float* get_density_data() const override { return nullptr; }
+    unsigned int get_gl_texture_id() const override { return 0; }
+    std::string get_backend_name() const override { return "Metal (Dummy)"; }
+};
+
+#endif
+```
+
+### src/Renderer.h
+```
+#pragma once
+
+#define GL_SILENCE_DEPRECATION
+#ifdef __APPLE__
+#include <OpenGL/gl3.h>
+#endif
+#include <GLFW/glfw3.h>
+#include <vector>
+#include <iostream>
+#include <cmath>
+#include "SimpleMath.h"
+
+// 一个简单的 Raymarching Renderer
+class VolumeRenderer {
+public:
+    GLuint volume_texture;
+    GLuint velocity_texture; 
+    GLuint shader_program;
+    GLuint vao, vbo;
+    int N;
+    Camera camera; 
+    
+    // Lighting Params
+    Vec3 lightDir = Vec3(0.577f, 0.577f, 0.577f);
+    Vec3 lightColor = Vec3(1.0f, 0.95f, 0.8f);
+    float phaseG = 0.5f;       // Scattering Anisotropy
+    float densityCoef = 50.0f; // Global Density Multiplier
+    bool showVelocity = false;
+
+    VolumeRenderer(int n) : N(n) {
+        init_gl_resources();
+    }
+
+    ~VolumeRenderer() {
+        glDeleteTextures(1, &volume_texture);
+        glDeleteTextures(1, &velocity_texture);
+        glDeleteProgram(shader_program);
+        glDeleteVertexArrays(1, &vao);
+        glDeleteBuffers(1, &vbo);
+    }
+
+    void update_texture(const float* data) {
+        glBindTexture(GL_TEXTURE_3D, volume_texture);
+        glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, N, N, N, GL_RED, GL_FLOAT, data);
+    }
+
+    void update_velocity_texture(const float* data) {
+        if (!data) return;
+        glBindTexture(GL_TEXTURE_3D, velocity_texture);
+        // Assuming 4 floats per voxel (RGBA) for velocity
+        glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, N, N, N, GL_RGBA, GL_FLOAT, data);
+    }
+    
+    // Valid for GPU Solvers that share texture
+    void use_external_texture(GLuint tex_id) {
+         // ...
+    }
+
+    void render(int width, int height, GLuint external_density = 0, GLuint external_velocity = 0) {
+        glUseProgram(shader_program);
+        
+        // ... Uniforms ...
+        glUniform1i(glGetUniformLocation(shader_program, "u_volume"), 0);
+        glUniform1i(glGetUniformLocation(shader_program, "u_velocityTex"), 1); // Slot 1 for velocity
+
+        glUniform2f(glGetUniformLocation(shader_program, "u_resolution"), (float)width, (float)height);
+        
+        glUniform3f(glGetUniformLocation(shader_program, "u_camPos"), camera.pos.x, camera.pos.y, camera.pos.z);
+        glUniform3f(glGetUniformLocation(shader_program, "u_camFwd"), camera.fwd.x, camera.fwd.y, camera.fwd.z);
+        glUniform3f(glGetUniformLocation(shader_program, "u_camRight"), camera.right.x, camera.right.y, camera.right.z);
+        glUniform3f(glGetUniformLocation(shader_program, "u_camUp"), camera.up.x, camera.up.y, camera.up.z);
+        
+        glUniform3f(glGetUniformLocation(shader_program, "u_lightDir"), lightDir.x, lightDir.y, lightDir.z);
+        glUniform3f(glGetUniformLocation(shader_program, "u_lightColor"), lightColor.x, lightColor.y, lightColor.z);
+        glUniform1f(glGetUniformLocation(shader_program, "u_phaseG"), phaseG);
+        glUniform1f(glGetUniformLocation(shader_program, "u_densityCoef"), densityCoef);
+        glUniform1i(glGetUniformLocation(shader_program, "u_showVelocity"), showVelocity ? 1 : 0);
+
+        glActiveTexture(GL_TEXTURE0);
+        if (external_density != 0) {
+            glBindTexture(GL_TEXTURE_3D, external_density);
+        } else {
+            glBindTexture(GL_TEXTURE_3D, volume_texture);
+        }
+
+        glActiveTexture(GL_TEXTURE1);
+        if (external_velocity != 0) {
+            glBindTexture(GL_TEXTURE_3D, external_velocity);
+        } else {
+            glBindTexture(GL_TEXTURE_3D, velocity_texture);
+        }
+
+        #ifdef __APPLE__
+        glBindVertexArray(vao);
+        #else
+        glBindVertexArray(vao);
+        #endif
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+private:
+    void init_gl_resources() {
+        // 1. Create 3D Texture (Density)
+        glGenTextures(1, &volume_texture);
+        glBindTexture(GL_TEXTURE_3D, volume_texture);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, N, N, N, 0, GL_RED, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+
+        // 2. Create 3D Texture (Velocity)
+        glGenTextures(1, &velocity_texture);
+        glBindTexture(GL_TEXTURE_3D, velocity_texture);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA32F, N, N, N, 0, GL_RGBA, GL_FLOAT, nullptr); // RGBA for XYZW
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+        // 2. Compile Shaders
+        const char* vs_code = R"(
+            #version 330 core
+            layout(location = 0) in vec2 aPos;
+            out vec2 vUv;
+            void main() {
+                vUv = aPos * 0.5 + 0.5;
+                gl_Position = vec4(aPos, 0.0, 1.0);
+            }
+        )";
+
+        const char* fs_code = R"(
+            #version 330 core
+            out vec4 FragColor;
+            in vec2 vUv;
+            
+            uniform sampler3D u_volume;
+            uniform sampler3D u_velocityTex;
+            
+            uniform vec2 u_resolution;
+            
+            uniform vec3 u_camPos;
+            uniform vec3 u_camFwd;
+            uniform vec3 u_camRight;
+            uniform vec3 u_camUp;
+            
+            uniform vec3 u_lightDir;
+            uniform vec3 u_lightColor;
+            uniform float u_phaseG;
+            uniform float u_densityCoef;
+            uniform int u_showVelocity;
+
+            #define MAX_STEPS 128
+            #define STEP_SIZE 0.015
+            #define SHADOW_STEPS 16
+            #define SHADOW_STEP_SIZE 0.02
+            #define SHADOW_FACTOR 5.0
+            
+            // Henyey-Greenstein Phase Function
+            float hg_phase(float g, float cos_theta) {
+                float g2 = g * g;
+                return (1.0 - g2) / (4.0 * 3.14159 * pow(1.0 + g2 - 2.0 * g * cos_theta, 1.5));
+            }
+            
+            void main() {
+                vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y; 
+                
+                vec3 rd = normalize(u_camFwd + u_camRight * uv.x + u_camUp * uv.y);
+                vec3 ro = u_camPos;
+
+                vec3 boxMin = vec3(-0.5);
+                vec3 boxMax = vec3(0.5);
+                
+                vec3 invDir = 1.0 / rd;
+                vec3 tBot = (boxMin - ro) * invDir;
+                vec3 tTop = (boxMax - ro) * invDir;
+                
+                vec3 tMinV = min(tBot, tTop);
+                vec3 tMaxV = max(tBot, tTop);
+                
+                float t0 = max(max(tMinV.x, tMinV.y), tMinV.z);
+                float t1 = min(min(tMaxV.x, tMaxV.y), tMaxV.z);
+                
+                if (t0 > t1 || t1 < 0.0) {
+                     float gy = gl_FragCoord.y / u_resolution.y;
+                     vec3 bg = mix(vec3(0.1, 0.15, 0.25), vec3(0.05, 0.05, 0.1), gy);
+                     FragColor = vec4(bg, 1.0);
+                     return;
+                }
+                
+                float t = max(t0, 0.0);
+                float tMax = t1;
+                
+                vec3 col = vec3(0.0);
+                float transmit = 1.0;
+                vec3 ambientColor = vec3(0.15, 0.2, 0.3); // Sky reflection
+
+                float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233))) * 43758.5453);
+                t += noise * STEP_SIZE;
+                
+                // Precalculate phase
+                float phaseVal = hg_phase(u_phaseG, dot(rd, u_lightDir));
+
+                for(int i=0; i<MAX_STEPS; i++) {
+                    if(t > tMax) break;
+                    
+                    vec3 p = ro + rd * t;
+                    vec3 texCoord = p + 0.5;
+                    
+                    if(texCoord.x >= 0.0 && texCoord.x <= 1.0 &&
+                       texCoord.y >= 0.0 && texCoord.y <= 1.0 &&
+                       texCoord.z >= 0.0 && texCoord.z <= 1.0) {
+                           
+                        float density = 0.0;
+                        vec3 sampleCol = vec3(0.0);
+                        
+                        if (u_showVelocity == 1) {
+                            vec3 vel = texture(u_velocityTex, texCoord).xyz;
+                            float mag = length(vel);
+                            // Visualize velocity magnitude as density
+                            density = mag * 0.1 * u_densityCoef; // Scale factor
+                            // Map direction to color
+                            sampleCol = normalize(vel) * 0.5 + 0.5;
+                            // Make it emit light
+                            // Ignore shadows for velocity visualization (make it emissive)
+                        } else {
+                            // Standard Density Render
+                            density = texture(u_volume, texCoord).r * u_densityCoef;
+                            sampleCol = vec3(1.0); // White smoke
+                        }
+                        
+                        if(density > 0.01) {
+                            float alpha = 1.0 - exp(-density * STEP_SIZE);
+
+                            if (u_showVelocity == 1) {
+                                // Emissive style
+                                col += sampleCol * alpha * transmit;
+                            } else {
+                                // Lighting Calculation
+                                float shadowDens = 0.0;
+                                vec3 sPos = texCoord;
+                                
+                                for(int s=0; s<SHADOW_STEPS; s++) {
+                                    sPos += u_lightDir * SHADOW_STEP_SIZE;
+                                    if(sPos.x < 0.0 || sPos.x > 1.0 ||
+                                       sPos.y < 0.0 || sPos.y > 1.0 ||
+                                       sPos.z < 0.0 || sPos.z > 1.0) break;
+                                    shadowDens += texture(u_volume, sPos).r;
+                                }
+                                float lightVal = exp(-shadowDens * SHADOW_FACTOR * u_densityCoef * 0.1); 
+                                vec3 incomingLight = u_lightColor * lightVal * phaseVal + ambientColor;
+                                col += incomingLight * alpha * transmit;
+                            }
+                            
+                            transmit *= (1.0 - alpha);
+                            if(transmit < 0.01) break;
+                        }
+                    }
+                    t += STEP_SIZE;
+                }
+
+                float gy = gl_FragCoord.y / u_resolution.y;
+                vec3 bg = mix(vec3(0.1, 0.15, 0.25), vec3(0.05, 0.05, 0.1), gy);
+                col += bg * transmit;
+
+                col = col / (col + vec3(1.0)); 
+                col = pow(col, vec3(0.4545)); 
+                
+                FragColor = vec4(col, 1.0);
+            }
+        )";
+
+        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+        glShaderSource(vs, 1, &vs_code, nullptr);
+        glCompileShader(vs);
+        check_shader(vs);
+
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        glShaderSource(fs, 1, &fs_code, nullptr);
+        glCompileShader(fs);
+        check_shader(fs);
+
+        shader_program = glCreateProgram();
+        glAttachShader(shader_program, vs);
+        glAttachShader(shader_program, fs);
+        glLinkProgram(shader_program);
+
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+
+        // 3. Setup Screen Quad
+        float quadVertices[] = { 
+            -1.0f,  1.0f,
+            -1.0f, -1.0f,
+             1.0f,  1.0f,
+             1.0f, -1.0f 
+        };
+        glGenVertexArrays(1, &vao);
+        glGenBuffers(1, &vbo);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    }
+
+    void check_shader(GLuint shader) {
+        int success;
+        char infoLog[512];
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+        if(!success) {
+            glGetShaderInfoLog(shader, 512, NULL, infoLog);
+            std::cerr << "SHADER ERROR: " << infoLog << std::endl;
+        }
+    }
+};
+```
+
+### src/Shaders.metal
+```
+#include <metal_stdlib>
+using namespace metal;
+
+constant float dt [[function_constant(0)]];
+constant float dissipation [[function_constant(1)]];
+
+// ------------------------------------------------------------------
+// Sampler for linear interpolation (Crucial for semi-Lagrangian advection)
+constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+constexpr sampler pointSampler(coord::normalized, address::clamp_to_edge, filter::nearest);
+
+// ------------------------------------------------------------------
+// 1. Advection Kernel
+kernel void advect(
+    texture3d<float, access::sample> source [[texture(0)]],
+    texture3d<float, access::sample> velocity [[texture(1)]],
+    texture3d<float, access::write> dest [[texture(2)]],
+    constant float& deltaTime [[buffer(0)]],
+    constant float& decay [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= dest.get_width() || gid.y >= dest.get_height() || gid.z >= dest.get_depth()) return;
+    
+    float3 dimensions = float3(dest.get_width(), dest.get_height(), dest.get_depth());
+    
+    // Normalized coordinates for current cell center: [0.5/N, (N-0.5)/N]
+    float3 coords = (float3(gid) + 0.5) / dimensions;
+    
+    // Sample velocity at current position
+    // Velocity texture stores (vx, vy, vz, 0)
+    float3 vel = velocity.sample(linearSampler, coords).xyz;
+    
+    // Backtrace: p_prev = p - v * dt
+    // We normalize velocity by grid dimensions to match normalized texture coords logic
+    // Usually velocity is in grid_units/second. If so: backCoords = coords - vel * dt * invDim
+    float3 backCoords = coords - (vel * deltaTime) / dimensions; 
+    
+    // Sample source field at backtraced position
+    float4 result = source.sample(linearSampler, backCoords);
+    
+    // Apply dissipation
+    result *= decay;
+    
+    dest.write(result, gid);
+}
+
+// ------------------------------------------------------------------
+// 2. Divergence Kernel
+kernel void divergence(
+    texture3d<float, access::sample> velocity [[texture(0)]],
+    texture3d<float, access::write> divTex [[texture(1)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= divTex.get_width() || gid.y >= divTex.get_height() || gid.z >= divTex.get_depth()) return;
+    
+    float3 dim = float3(divTex.get_width(), divTex.get_height(), divTex.get_depth());
+    float3 invDim = 1.0 / dim;
+    float3 p = (float3(gid) + 0.5) * invDim;
+    
+    // Finite difference: (R - L + T - B + F - Bk) * 0.5
+    float left   = velocity.sample(pointSampler, p - float3(invDim.x, 0, 0)).x;
+    float right  = velocity.sample(pointSampler, p + float3(invDim.x, 0, 0)).x;
+    float bottom = velocity.sample(pointSampler, p - float3(0, invDim.y, 0)).y;
+    float top    = velocity.sample(pointSampler, p + float3(0, invDim.y, 0)).y;
+    float back   = velocity.sample(pointSampler, p - float3(0, 0, invDim.z)).z;
+    float front  = velocity.sample(pointSampler, p + float3(0, 0, invDim.z)).z;
+    
+    float div = 0.5 * (right - left + top - bottom + front - back);
+    
+    divTex.write(float4(div, 0, 0, 1), gid);
+}
+
+// ------------------------------------------------------------------
+// 3. Jacobi Iteration Kernel (Pressure Solve)
+kernel void jacobi(
+    texture3d<float, access::sample> pressureIn [[texture(0)]],
+    texture3d<float, access::sample> divergence [[texture(1)]],
+    texture3d<float, access::write> pressureOut [[texture(2)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= pressureOut.get_width() || gid.y >= pressureOut.get_height() || gid.z >= pressureOut.get_depth()) return;
+    
+    float3 dim = float3(pressureOut.get_width(), pressureOut.get_height(), pressureOut.get_depth());
+    float3 invDim = 1.0 / dim;
+    float3 p = (float3(gid) + 0.5) * invDim;
+    
+    float pL = pressureIn.sample(pointSampler, p - float3(invDim.x, 0, 0)).x;
+    float pR = pressureIn.sample(pointSampler, p + float3(invDim.x, 0, 0)).x;
+    float pB = pressureIn.sample(pointSampler, p - float3(0, invDim.y, 0)).x;
+    float pT = pressureIn.sample(pointSampler, p + float3(0, invDim.y, 0)).x;
+    float pBk = pressureIn.sample(pointSampler, p - float3(0, 0, invDim.z)).x;
+    float pF = pressureIn.sample(pointSampler, p + float3(0, 0, invDim.z)).x;
+    
+    float bC = divergence.sample(pointSampler, p).x;
+    
+    // Jacobi formula: (Neighbors - Div) / 6
+    float newPressure = (pL + pR + pB + pT + pBk + pF - bC) / 6.0;
+    
+    pressureOut.write(float4(newPressure, 0, 0, 1), gid);
+}
+
+// ------------------------------------------------------------------
+// 4. Subtract Gradient Kernel
+kernel void subtract_gradient(
+    texture3d<float, access::sample> velocityIn [[texture(0)]],
+    texture3d<float, access::sample> pressure [[texture(1)]],
+    texture3d<float, access::write> velocityOut [[texture(2)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= velocityOut.get_width() || gid.y >= velocityOut.get_height() || gid.z >= velocityOut.get_depth()) return;
+    
+    float3 dim = float3(velocityOut.get_width(), velocityOut.get_height(), velocityOut.get_depth());
+    float3 invDim = 1.0 / dim;
+    float3 p = (float3(gid) + 0.5) * invDim;
+    
+    float pL = pressure.sample(pointSampler, p - float3(invDim.x, 0, 0)).x;
+    float pR = pressure.sample(pointSampler, p + float3(invDim.x, 0, 0)).x;
+    float pB = pressure.sample(pointSampler, p - float3(0, invDim.y, 0)).x;
+    float pT = pressure.sample(pointSampler, p + float3(0, invDim.y, 0)).x;
+    float pBk = pressure.sample(pointSampler, p - float3(0, 0, invDim.z)).x;
+    float pF = pressure.sample(pointSampler, p + float3(0, 0, invDim.z)).x;
+    
+    float3 oldVel = velocityIn.sample(pointSampler, p).xyz;
+    float3 gradP = 0.5 * float3(pR - pL, pT - pB, pF - pBk);
+    
+    float3 newVel = oldVel - gradP; 
+    
+    velocityOut.write(float4(newVel, 0), gid);
+}
+
+// ------------------------------------------------------------------
+// 5. Splat Kernel
+kernel void splat(
+    texture3d<float, access::read> source [[texture(0)]], 
+    texture3d<float, access::write> dest [[texture(1)]],
+    constant int3& center [[buffer(0)]],
+    constant float& radius [[buffer(1)]],
+    constant float4& value [[buffer(2)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= dest.get_width() || gid.y >= dest.get_height() || gid.z >= dest.get_depth()) return;
+    
+    int3 diff = int3(gid) - center;
+    float distSq = float(diff.x*diff.x + diff.y*diff.y + diff.z*diff.z);
+    float rSq = radius * radius;
+    
+    float4 current = source.read(gid);
+    
+    if (distSq < rSq) {
+        float amount = exp(-distSq / rSq);
+        dest.write(current + value * amount, gid);
+    } else {
+        dest.write(current, gid);
+    }
+}
+```
+
+### src/SimpleMath.h
+```
+#pragma once
+#include <cmath>
+#include <iostream>
+
+// Minimal Vector3 Struct
+struct Vec3 {
+    float x, y, z;
+
+    Vec3() : x(0), y(0), z(0) {}
+    Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
+
+    Vec3 operator+(const Vec3& v) const { return Vec3(x + v.x, y + v.y, z + v.z); }
+    Vec3 operator-(const Vec3& v) const { return Vec3(x - v.x, y - v.y, z - v.z); }
+    Vec3 operator*(float s) const { return Vec3(x * s, y * s, z * s); }
+    Vec3 operator/(float s) const { return Vec3(x / s, y / s, z / s); }
+    
+    Vec3& operator+=(const Vec3& v) { x += v.x; y += v.y; z += v.z; return *this; }
+    
+    float length() const { return std::sqrt(x*x + y*y + z*z); }
+    
+    Vec3 normalize() const {
+        float len = length();
+        if (len > 0) return *this / len;
+        return *this;
+    }
+
+    static float dot(const Vec3& a, const Vec3& b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    }
+
+    static Vec3 cross(const Vec3& a, const Vec3& b) {
+        return Vec3(
+            a.y * b.z - a.z * b.y,
+            a.z * b.x - a.x * b.z,
+            a.x * b.y - a.y * b.x
+        );
+    }
+    
+    // Rotate vector around Y axis (for orbit)
+    Vec3 rotateY(float angle) const {
+        float c = std::cos(angle);
+        float s = std::sin(angle);
+        return Vec3(x * c + z * s, y, -x * s + z * c);
+    }
+};
+
+// Simple Camera Helper
+struct Camera {
+    float theta; // Azimuth (Latitude)
+    float phi;   // Elevation (Longitude)
+    float radius;
+    Vec3 target;
+
+    // Computed vectors
+    Vec3 pos;
+    Vec3 fwd, right, up;
+
+    Camera() : theta(0.0f), phi(0.0f), radius(2.5f), target(0, 0, 0) {
+        update_vectors();
+    }
+
+    void rotate(float dTheta, float dPhi) {
+        theta += dTheta;
+        phi += dPhi;
+        // Clamp phi to avoid Gimbal lock issues (stay within -89 to 89 degrees)
+        phi = std::max(-1.5f, std::min(1.5f, phi));
+        update_vectors();
+    }
+
+    void zoom(float dRadius) {
+        radius -= dRadius;
+        if (radius < 0.1f) radius = 0.1f;
+        update_vectors();
+    }
+
+    void update_vectors() {
+        // Spherical to Cartesian
+        // Y-up system
+        pos.x = radius * std::cos(phi) * std::sin(theta);
+        pos.y = radius * std::sin(phi);
+        pos.z = radius * std::cos(phi) * std::cos(theta);
+        pos += target;
+
+        fwd = (target - pos).normalize();
+        
+        Vec3 worldUp(0, 1, 0);
+        right = Vec3::cross(fwd, worldUp).normalize();
+        up = Vec3::cross(right, fwd).normalize();
+    }
+};
+
+// Ray-AABB Intersection
+// Box is defined from (0,0,0) to (N,N,N) in Simulation Space
+// But Renderer treats box as [0,1]^3 texture space.
+// We should perform intersection in Texture Space [0,1]^3
+struct Ray {
+    Vec3 origin;
+    Vec3 direction;
+};
+
+bool intersectBox(const Ray& r, const Vec3& boxMin, const Vec3& boxMax, float& tNear, float& tFar) {
+    Vec3 invDir(1.0f/r.direction.x, 1.0f/r.direction.y, 1.0f/r.direction.z);
+    Vec3 tBot = (boxMin - r.origin); tBot.x *= invDir.x; tBot.y *= invDir.y; tBot.z *= invDir.z;
+    Vec3 tTop = (boxMax - r.origin); tTop.x *= invDir.x; tTop.y *= invDir.y; tTop.z *= invDir.z;
+
+    Vec3 tMin(std::min(tBot.x, tTop.x), std::min(tBot.y, tTop.y), std::min(tBot.z, tTop.z));
+    Vec3 tMax(std::max(tBot.x, tTop.x), std::max(tBot.y, tTop.y), std::max(tBot.z, tTop.z));
+
+    float t0 = std::max(std::max(tMin.x, tMin.y), tMin.z);
+    float t1 = std::min(std::min(tMax.x, tMax.y), tMax.z);
+
+    tNear = t0;
+    tFar = t1;
+
+    return t1 > std::max(t0, 0.0f);
+}
+
+// 4x4 Matrix for basic transforms
+struct Mat4 {
+    float m[16];
+
+    static Mat4 identity() {
+        Mat4 res;
+        for(int i=0; i<16; ++i) res.m[i] = 0;
+        res.m[0] = res.m[5] = res.m[10] = res.m[15] = 1;
+        return res;
+    }
+    
+    static Mat4 translation(float x, float y, float z) {
+        Mat4 res = identity();
+        res.m[12] = x; res.m[13] = y; res.m[14] = z;
+        return res;
+    }
+};
+
+// SDF Primitives
+inline float sdSphere(const Vec3& p, float s) {
+  return p.length() - s;
+}
+
+inline float sdBox(const Vec3& p, const Vec3& b) {
+  Vec3 d(std::abs(p.x) - b.x, std::abs(p.y) - b.y, std::abs(p.z) - b.z);
+  float maxComp = std::max(d.x, std::max(d.y, d.z));
+  return std::min(maxComp, 0.0f) + Vec3(std::max(d.x, 0.0f), std::max(d.y, 0.0f), std::max(d.z, 0.0f)).length();
+}
+```
+
+### src/main.cpp
+```
+#include <iostream>
+#include <vector>
+#include <string>
+#include <chrono>
+#include <memory>
+#include <thread>
+#include <algorithm> // for std::max/min
+
+// Include backend headers
+#include "FluidSolver.h"
+#include "CpuFluidSolver.h"
+#include "Renderer.h"
+#include "SimpleMath.h" 
+
+// Backend Includes
+#include "GlComputeFluidSolver.h"
+#include "MetalFluidSolver.h"
+#include "CudaFluidSolver.h"
+
+// GLFW
+#define GL_SILENCE_DEPRECATION
+#include <GLFW/glfw3.h>
+
+// Globals for interaction
+int WIDTH = 800;
+int HEIGHT = 800;
+float mouseX = 0, mouseY = 0;
+float lastMouseX = 0, lastMouseY = 0;
+bool leftMouseDown = false;
+bool rightMouseDown = false;
+
+// Toggle states
+bool mKeyPressed = false; 
+bool vKeyPressed = false;
+bool oKeyPressed = false;
+bool kKeyPressed = false;
+bool lKeyPressed = false;
+
+std::unique_ptr<FluidSolver> solver;
+std::unique_ptr<VolumeRenderer> renderer;
+
+void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+    float x = (float)xpos;
+    float y = (float)ypos;
+    
+    float dx = x - lastMouseX;
+    float dy = y - lastMouseY;
+    
+    lastMouseX = x;
+    lastMouseY = y;
+    
+    // Camera Rotation (Right Mouse or Ctrl+Left)
+    bool isCtrl = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS);
+    if (rightMouseDown || (leftMouseDown && isCtrl)) {
+        if (renderer) {
+            float sensitivity = 0.005f;
+            renderer->camera.rotate(dx * sensitivity, dy * sensitivity);
+        }
+    }
+}
+
+void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_LEFT) {
+        leftMouseDown = (action == GLFW_PRESS);
+    }
+    if (button == GLFW_MOUSE_BUTTON_RIGHT) {
+        rightMouseDown = (action == GLFW_PRESS);
+    }
+}
+
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    if (renderer) {
+         float sensitivity = 0.2f;
+         renderer->camera.zoom((float)yoffset * sensitivity);
+    }
+}
+
+// Config
+struct Config {
+    int res = 64;
+    float dt = 0.1f;
+    std::string backend = "cpu";
+};
+
+Config parse_args(int argc, char* argv[]) {
+    Config cfg;
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--res" && i + 1 < argc) cfg.res = std::stoi(argv[++i]);
+        if (arg == "--dt" && i + 1 < argc) cfg.dt = std::stof(argv[++i]);
+        if (arg == "--mode" && i + 1 < argc) cfg.backend = argv[++i];
+    }
+    return cfg;
+}
+
+void process_input(GLFWwindow* window, int N, const std::string& backend) {
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, true);
+
+    // [M] Toggle Solver Mode
+    if (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS) {
+        if (!mKeyPressed) {
+            mKeyPressed = true;
+            if (solver) {
+                auto current = solver->get_solver_type();
+                FluidSolver::SolverType next_type;
+                switch (current) {
+                    case FluidSolver::SolverType::Basic_StableFluids: 
+                        next_type = FluidSolver::SolverType::MacCormack; break;
+                    case FluidSolver::SolverType::MacCormack: 
+                        next_type = FluidSolver::SolverType::BFECC; break;
+                    case FluidSolver::SolverType::BFECC: 
+                        next_type = FluidSolver::SolverType::Advection_Reflection; break;
+                    case FluidSolver::SolverType::Advection_Reflection: 
+                        next_type = FluidSolver::SolverType::Basic_StableFluids; break;
+                }
+                solver->set_solver_type(next_type);
+                std::cout << "Switched to " << solver->get_solver_type_name() << std::endl;
+            }
+        }
+    } else {
+        mKeyPressed = false;
+    }
+    
+    // [V] Toggle Velocity Vis
+    if (glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS) {
+        if (!vKeyPressed) {
+            vKeyPressed = true;
+            if (renderer) {
+                renderer->showVelocity = !renderer->showVelocity;
+                std::cout << "Velocity Visualization: " << (renderer->showVelocity ? "ON" : "OFF") << std::endl;
+            }
+        }
+    } else {
+        vKeyPressed = false;
+    }
+
+    // [O] Toggle Obstacle
+    if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) {
+        if (!oKeyPressed && solver) {
+            oKeyPressed = true;
+            solver->useObstacle = !solver->useObstacle;
+            std::cout << "Obstacle (Sphere): " << (solver->useObstacle ? "ON" : "OFF") << std::endl;
+        }
+    } else {
+        oKeyPressed = false;
+    }
+
+    // [K / L] Adjust Vorticity
+    if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) {
+        if (solver) {
+             solver->vorticityConf -= 0.5f;
+             if (solver->vorticityConf < 0.0f) solver->vorticityConf = 0.0f;
+        }
+    }
+    if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) {
+        if (solver) {
+             solver->vorticityConf += 0.5f;
+        }
+    }
+    
+    // Interaction: Rendering Parameters
+    if (renderer) {
+        // Density
+        if (glfwGetKey(window, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS) renderer->densityCoef -= 1.0f;
+        if (glfwGetKey(window, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) renderer->densityCoef += 1.0f;
+        if (renderer->densityCoef < 1.0f) renderer->densityCoef = 1.0f;
+        
+        // Phase G
+        if (glfwGetKey(window, GLFW_KEY_SEMICOLON) == GLFW_PRESS) renderer->phaseG -= 0.01f;
+        if (glfwGetKey(window, GLFW_KEY_APOSTROPHE) == GLFW_PRESS) renderer->phaseG += 0.01f;
+        if (renderer->phaseG < -0.99f) renderer->phaseG = -0.99f;
+        if (renderer->phaseG > 0.99f) renderer->phaseG = 0.99f;
+        
+        // Light Rotation (Arrow Keys)
+        float rotSpeed = 0.02f;
+        if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) {
+             float y = renderer->lightDir.y * cos(rotSpeed) - renderer->lightDir.z * sin(rotSpeed);
+             float z = renderer->lightDir.y * sin(rotSpeed) + renderer->lightDir.z * cos(rotSpeed);
+             renderer->lightDir.y = y; renderer->lightDir.z = z;
+        }
+        if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) {
+             float y = renderer->lightDir.y * cos(-rotSpeed) - renderer->lightDir.z * sin(-rotSpeed);
+             float z = renderer->lightDir.y * sin(-rotSpeed) + renderer->lightDir.z * cos(-rotSpeed);
+             renderer->lightDir.y = y; renderer->lightDir.z = z;
+        }
+        if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) {
+             float x = renderer->lightDir.x * cos(rotSpeed) - renderer->lightDir.z * sin(rotSpeed);
+             float z = renderer->lightDir.x * sin(rotSpeed) + renderer->lightDir.z * cos(rotSpeed);
+             renderer->lightDir.x = x; renderer->lightDir.z = z;
+        }
+        if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) {
+             float x = renderer->lightDir.x * cos(-rotSpeed) - renderer->lightDir.z * sin(-rotSpeed);
+             float z = renderer->lightDir.x * sin(-rotSpeed) + renderer->lightDir.z * cos(-rotSpeed);
+             renderer->lightDir.x = x; renderer->lightDir.z = z;
+        }
+        renderer->lightDir = renderer->lightDir.normalize();
+    }
+
+
+    // Interaction: Inject Smoke at Cursor
+    bool isCtrl = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS);
+    if (leftMouseDown && !isCtrl && solver && renderer) {
+        float x_ndc = (2.0f * lastMouseX) / WIDTH - 1.0f;
+        float y_ndc = 1.0f - (2.0f * lastMouseY) / HEIGHT;
+        
+        float aspect = (float)WIDTH / HEIGHT;
+        float tanFov = 0.5f; 
+        
+        Vec3 rayDir = (renderer->camera.fwd + 
+                       renderer->camera.right * (x_ndc * aspect * tanFov) + 
+                       renderer->camera.up * (y_ndc * tanFov)).normalize();
+        Vec3 rayOrig = renderer->camera.pos;
+        
+        Vec3 boxMin(-0.5f, -0.5f, -0.5f);
+        Vec3 boxMax(0.5f, 0.5f, 0.5f);
+        
+        Ray r = {rayOrig, rayDir};
+        float tNear, tFar;
+        
+        if (intersectBox(r, boxMin, boxMax, tNear, tFar)) {
+             // Inject at user defined depth or just mid point
+             float tMid = (tNear + tFar) * 0.5f;
+             Vec3 p = r.origin + r.direction * tMid;
+             
+             // Convert to Grid Space [0, N]
+             Vec3 p_grid = p + Vec3(0.5f, 0.5f, 0.5f); // [0,1]
+             if (p_grid.x >= 0 && p_grid.x <= 1 && 
+                 p_grid.y >= 0 && p_grid.y <= 1 && 
+                 p_grid.z >= 0 && p_grid.z <= 1) {
+                    
+                int ix = (int)(p_grid.x * N);
+                int iy = (int)(p_grid.y * N);
+                int iz = (int)(p_grid.z * N);
+                
+                // Feedback Prompt
+                static auto lastPrint = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPrint).count() > 200) {
+                     std::cout << "[Interaction] Injecting Smoke at (" << ix << ", " << iy << ", " << iz << ")" << std::endl;
+                     lastPrint = now;
+                }
+
+                if (backend == "cpu") {
+                    // CPU: Needs explicit loop to create a blob (single voxel is too small)
+                    int radius = N / 12;
+                    float splatAmt = 0.5f;
+                    for(int kz = -radius; kz <= radius; kz++) {
+                        for(int ky = -radius; ky <= radius; ky++) {
+                            for(int kx = -radius; kx <= radius; kx++) {
+                                if (kx*kx + ky*ky + kz*kz < radius*radius) {
+                                    solver->add_density(ix+kx, iy+ky, iz+kz, splatAmt);
+                                    solver->add_velocity(ix+kx, iy+ky, iz+kz, 0, 5.0f, 0); 
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // GPU: Kernels handle radius ("Splat"). Calling in a loop causes massive lag (blocking calls).
+                    // Call once with high intensity.
+                    solver->add_density(ix, iy, iz, 5.0f);
+                    solver->add_velocity(ix, iy, iz, 0, 50.0f, 0); 
+                }
+            }
+        }
+    }
+}
+
+int main(int argc, char* argv[]) {
+    Config cfg = parse_args(argc, argv);
+    
+    std::cout << "--- Advection-Reflection Fluid Solver ---" << std::endl;
+    std::cout << "Resolution: " << cfg.res << "^3" << std::endl;
+    std::cout << "Time Step: " << cfg.dt << std::endl;
+    std::cout << "Backend: " << cfg.backend << std::endl;
+    std::cout << "\nControls:" << std::endl;
+    std::cout << "  [Left Mouse]      Inject Smoke" << std::endl;
+    std::cout << "  [Right Mouse]     Rotate Camera (or Ctrl+Left)" << std::endl;
+    std::cout << "  [Scroll]          Zoom" << std::endl;
+    std::cout << "  [M]               Switch Solver Scheme" << std::endl;
+    std::cout << "  [V]               Toggle Velocity Visualization" << std::endl;
+    std::cout << "  [O]               Toggle Obstacle (Sphere)" << std::endl;
+    std::cout << "  [K] / [L]         Decrease / Increase Vorticity" << std::endl;
+    std::cout << "  [Arrows]          Rotate Light" << std::endl;
+    std::cout << "  [[] / []]         Adjust Density Scale" << std::endl;
+    std::cout << "  [;] / [']         Adjust Phase Anisotropy" << std::endl;
+
+    // 1. Init Window
+    if (!glfwInit()) {
+        std::cerr << "Failed to init GLFW" << std::endl;
+        return -1;
+    }
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    #ifdef __APPLE__
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    #endif
+
+    GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "Fluid Simulation", NULL, NULL);
+    if (!window) {
+        std::cerr << "Failed to create window" << std::endl;
+        glfwTerminate();
+        return -1;
+    }
+    glfwMakeContextCurrent(window);
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetMouseButtonCallback(window, mouse_button_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+
+    // 2. Init Solver
+    if (cfg.backend == "cpu") {
+        solver = std::make_unique<CpuFluidSolver>(cfg.res, cfg.dt);
+    } else if (cfg.backend == "gl") {
+        #ifdef __APPLE__
+        std::cerr << "Warning: OpenGL Compute Shaders require OpenGL 4.3 which is not supported on macOS. Falling back to Metal." << std::endl;
+        solver = std::make_unique<MetalFluidSolver>(cfg.res, cfg.dt);
+        #else
+        solver = std::make_unique<GlComputeFluidSolver>(cfg.res, cfg.dt);
+        #endif
+    } else if (cfg.backend == "metal") {
+        #ifdef __APPLE__
+        solver = std::make_unique<MetalFluidSolver>(cfg.res, cfg.dt);
+        #else
+        std::cerr << "Metal is only available on macOS." << std::endl;
+        return -1;
+        #endif
+    } else if (cfg.backend == "cuda") {
+        #ifdef HAS_CUDA
+        solver = std::make_unique<CudaFluidSolver>(cfg.res, cfg.dt);
+        #else
+        std::cerr << "CUDA backend not compiled. Ensure CUDAToolkit found by CMake." << std::endl;
+        return -1;
+        #endif
+    } else {
+        std::cerr << "Unknown backend: " << cfg.backend << std::endl;
+        return -1;
+    }
+    solver->init_data();
+
+    // 3. Init Renderer
+    renderer = std::make_unique<VolumeRenderer>(cfg.res);
+
+    // 4. Main Loop
+    double lastTime = glfwGetTime();
+    int frameCount = 0;
+
+    // Enable VSync
+    glfwSwapInterval(1);
+
+    while (!glfwWindowShouldClose(window)) {
+        double currentTime = glfwGetTime();
+        
+        // Input
+        process_input(window, cfg.res, cfg.backend);
+
+        // Simulation Step
+        auto start = std::chrono::steady_clock::now();
+        solver->step();
+        auto end = std::chrono::steady_clock::now();
+        std::chrono::duration<double, std::milli> sim_ms = end - start;
+
+        // Render
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // Upload/Bind Textures
+        GLuint sTexDens = solver->get_gl_texture_id();
+        GLuint sTexVel = solver->get_velocity_gl_texture_id();
+
+        if (sTexDens == 0) {
+            // CPU / Readback Path
+            renderer->update_texture(solver->get_density_data());
+            if (renderer->showVelocity) {
+                renderer->update_velocity_texture(solver->get_velocity_data());
+            }
+            renderer->render(WIDTH, HEIGHT, 0, 0);
+        } else {
+            // GPU Direct Path
+            renderer->render(WIDTH, HEIGHT, sTexDens, sTexVel);
+        }
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+        
+        frameCount++;
+        if (currentTime - lastTime >= 1.0) {
+            std::string title = "Fluid Sim [" + solver->get_backend_name() + 
+                              "] [" + solver->get_solver_type_name() +
+                              "]" +
+                              " | Res: " + std::to_string(cfg.res) + 
+                              " | Sim: " + std::to_string((int)sim_ms.count()) + "ms" +
+                              " | Vort: " + std::to_string((int)solver->vorticityConf) + 
+                              " | Obs: " + (solver->useObstacle ? "ON" : "OFF");
+            glfwSetWindowTitle(window, title.c_str());
+            frameCount = 0;
+            lastTime = currentTime;
+        }
+    }
+
+    glfwTerminate();
+    return 0;
+}
+```

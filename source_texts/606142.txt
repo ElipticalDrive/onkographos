@@ -1,0 +1,436 @@
+AI-native browser 3D engine: a Rust core in WebAssembly on worker threads, WebGPU and WebGL2 rendering, and a TypeScript API with three.js-style names.  - feat(engine): cull objects that marked occluders hide on WebGPU, in two phases on the GPU by hiddentao · Pull Request #379 · null3d-engine/null3d
+
+feat(engine): cull objects that marked occluders hide on WebGPU, in two phases on the GPU by hiddentao · Pull Request #379 · null3d-engine/null3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hiddentao
+commented
+Oct 7, 2026
+Copy link
+Copy Markdown
+Collaborator
+Task: M2-I1. Decision records: D-40 (the method), D-22 (the preset rows).
+What it does
+WebGPU skips opaque objects that marked occluders hide, in the same frame, so no object shows a frame late.
+First phase: the culling shader keeps the marked occluders that showed last frame and look large on screen (at least a sixteenth of the render's longer side). Their depth draws alone, at one sample per pixel.
+A compute pass builds a depth pyramid in a storage buffer, four levels per dispatch. Level 0 keeps the farthest depth of 4 x 4 pixels, so one-sample depth stays safe for MSAA.
+Second phase: every object in view tests against the pyramid and writes its history. The single opaque pass draws what shows.
+A frame with no marked occluder culls once, as on main, and records none of the extra passes.
+Off on every preset. createEngine({ gpuOcclusion: true }) or ?occlusion=on turns it on.
+The render graph gains "reads so far": a pass that reads a resource as its earlier writers left it, before a later writer.
+The core marks an object changed when its occluder flag changes, as it does for bounds, so the GPU table sees a mark set after the object was created.
+Shaders that load on first use (D-56)
+The two phases (the culling shader's OCCLUSION build, early and late) and the depth pyramid form the occlusion feature's shader file, 3.8 KB after Brotli. The start files keep only the plain culling entry point, so a page that never marks an occluder downloads none of it.
+The WebGPU builder asks for the three compute pipelines once GPU occlusion culling is on and the scene has a marked occluder. Until they are built, each camera view culls once, into the draws that the opaque pass reads.
+preload: ['occlusion'] builds the three pipelines before the first frame.
+Tests
+Rust: 11 occlusion tests, 3 of them new (no occlusion pipeline before the first marked occluder; one cull per view until the pipelines are built; marking and unmarking). 27 of 27 no-allocation tests pass.
+Engine test: marked occluders download the occlusion shader file once with ?occlusion=on, and none with ?occlusion=off, on WebGPU.
+The GPU occlusion page compares six views, culled against unculled. The local image and occlusion browser runs on both GPU sets are queued on the Mac.
+Shared numbers
+Render templates 24 and 25 (the two phases), template 28 and bind layout 14 (the pyramid). Compute pipeline ids 9 to 11 (main's skinning builds took 6 to 8).
+For the coordinator
+Clash: M2-K1 (feat(engine): add a test switch for vertex shaders that read instance data by index #378) changes the same culling files (cull.rs, cull.wgsl, mod.rs, opaque.rs, shaders.toml, null3d-wasm).
+Prototype G1 on the Mac, quiet and loaded, waits for a quiet window (script ready). D-22 and D-40 get its figures. The iPad gpu-occlusion plan fills D-22's iPad row.
+hiddentao
+added 30 commits
+October 4, 2026 08:38
+feat(engine): hide objects behind blockers on WebGL2 with software oc…
+…
+4189e51
+```
+…clusion culling
+
+On WebGL2 the job workers draw the meshes that setOccluder(true) marks into a
+small masked depth buffer each frame, nearest first, and the camera's culling
+skips every object whose bounding sphere lies wholly behind them. Each blocker
+clears the pixels its outline touches, so the buffer never hides an object that
+a finer depth buffer shows. The softwareOcclusion setting turns it on and off
+during play, and engine.measure reports occludedEntries. D-41 records the
+method and its figures.
+
+Docs-Checked: updated docs/concepts/culling.md, docs/api/objects.md, docs/guides/performance.md and the generated api pages and preset table; re-read docs/concepts/quality-presets.md
+Skills-Checked: updated skills/null3d-develop/references/api-quickref.md (setOccluder); re-read the port skill's mapping, which has no occlusion entry
+Task: M2-I2
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i2-soft-occlu…
+…
+feb87f7
+```
+…sion
+
+# Conflicts:
+#	.dev/decisions/README.md
+```
+perf(core): draw blockers faster and test four spheres at a time, in …
+…
+2e14863
+```
+…less code
+
+Bands skip blockers that lie wholly behind what they hold, each row of subtiles
+takes a triangle's run of subtiles from its corners, and depths go four at a
+time. Culling tests four spheres per call. The blockers' sorts reuse the
+cluster code's radix sort, corners weld through a small table of their own, and
+64-bit bounds avoid the standard clamp, whose panic message linked the float
+printing code. D-41 has the timings, the comparison with main and the sizes.
+
+Docs-Checked: updated .dev/decisions/D-41-software-occlusion.md and docs/concepts/culling.md; re-read docs/api/objects.md and docs/guides/performance.md
+Skills-Checked: re-read skills/null3d-develop/references/api-quickref.md; the calls did not change
+Size-Growth: threaded/null3d_bg.wasm and single/null3d_bg.wasm +6.9%, software occlusion culling: the blockers' drawing on the job workers, their setup and the sphere test
+Task: M2-I2
+```
+fix(engine): keep the preset's occlusion setting on WebGPU, which ign…
+…
+2a862ef
+```
+…ores it
+
+A page on WebGPU now starts softwareOcclusion at its preset's value, as every
+other setting does, so the settings match the preset on every path. WebGPU
+draws the same either way. The scratch timing test that the merge carried is
+gone.
+
+Docs-Checked: updated the softwareOcclusion TSDoc and the generated docs/api/quality.md; re-read docs/concepts/culling.md and docs/api/engine.md
+Skills-Checked: re-read skills/null3d-develop/references/api-quickref.md; no call changed
+Task: M2-I2
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i2-soft-occlu…
+…
+7fcf884
+```
+…sion
+
+# Conflicts:
+#	.dev/decisions/README.md
+#	docs/index.md
+```
+feat(engine): cull hidden objects on the GPU in two phases on WebGPU
+…
+cc78a6c
+```
+Each camera view first draws the depth of the objects that showed in its last frame, builds a
+depth pyramid from it, then culls every object against the pyramid before its one opaque pass.
+Frames without marked occluders cull once, as before. The render graph gains reads "so far".
+
+Docs-Checked: updated docs/concepts/culling.md, quality-presets.md, render-graph.md, architecture.md, backends.md, generated api/engine.md and api/quality.md
+Skills-Checked: updated skills/null3d-develop/references/api-quickref.md, performance.md, testing-and-debugging.md
+Task: M2-I1
+```
+Merge M2-I2's software occlusion culling into GPU occlusion culling
+…
+8b876e6
+```
+WebGPU's occlusion culling now takes its occluders from the same mark as WebGL2's: objects that
+setOccluder(true) or the occluder option marks, and that look large on the screen. A change of
+the mark rewrites the object's culling table entry from the next frame. The room scene, its page,
+spec and plan take names of their own beside M2-I2's city.
+
+Docs-Checked: updated docs/concepts/culling.md, docs/api/objects.md, quality-presets.md, .dev/devices.md; regenerated api/engine.md, api/quality.md, api/scene pages and index.md
+Skills-Checked: re-read skills/null3d-develop/references/api-quickref.md and performance.md
+Task: M2-I1
+```
+feat(engine): draw only marked occluders' depth, at one sample, and l…
+…
+945e1e6
+```
+…eave GPU occlusion off
+
+Docs-Checked: updated docs/concepts/culling.md and quality-presets.md for marked occluders and presets that leave it off
+Skills-Checked: updated the performance and api-quickref references for the preset default
+Task: M2-I1
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i2-soft-occlu…
+…
+2869f29
+```
+…sion
+
+# Conflicts:
+#	.dev/decisions/README.md
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i1-gpu-occlusion
+…
+85f9e34
+```
+# Conflicts:
+#	.dev/decisions/README.md
+#	tests/pages/animation.ts
+```
+build(engine): record the size growth of GPU occlusion culling
+…
+789ae84
+```
+Size-Growth: js/shaders-wgsl.js, js/shaders-wgsl-tone-map.js, js/shaders-wgsl-half.js and js/shaders-wgsl-tone-map-half.js +8.7% to +8.9%, GPU occlusion culling: the depth pyramid shader and the two culling phases
+Size-Growth: threaded/null3d_bg.wasm and single/null3d_bg.wasm about +1.2% beyond software occlusion culling, GPU occlusion culling: the depth pyramid, the occluders' pass and the second culling phase in the renderer
+Docs-Checked: no documented behavior changed; this commit records sizes only
+Skills-Checked: no calls changed
+Task: M2-I1
+```
+test(engine): read the occlusion page's frames a few frames after eac…
+…
+e68d469
+```
+…h turn, not after a fixed wait
+
+SwiftShader draws slowly, so a quarter second after a turn it could still show the view before.
+The sketch now counts frames after the turn before it tells the page.
+
+Docs-Checked: updated .dev/decisions/D-40-gpu-occlusion.md with the SwiftShader result
+Skills-Checked: test pages only; no calls changed
+Task: M2-I1
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i1-gpu-occlusion
+2951899
+Merge remote-tracking branch 'origin/main' into feat/m2-i2-soft-occlu…
+…
+04f30cc
+```
+…sion
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i2-soft-occlu…
+…
+2d66ef1
+```
+…sion
+
+# Conflicts:
+#	docs/api/engine.md
+#	docs/api/quality.md
+```
+test(engine): compare the culled city with the unculled one drawn on …
+…
+8155fe0
+```
+…the same machine
+
+CI's occlusion-on image differed from the occlusion-off reference in one pixel, by one step of
+red. The culling was not at fault: CI's x86 SwiftShader draws that pixel so with the culling off
+too, and the reference came from SwiftShader on the Mac's ARM processor. Drawn in Playwright's
+x86 Linux image, the culling-off and culling-on images were the same at 20 times along the street.
+
+occlusion-on now matches the reference at the usual tolerance, and the occlusion spec draws the
+held city with the culling off and on at six times along the street, in one run, and requires the
+same pixels and some hidden entries.
+
+The cost page measures again for twice as long while a measurement holds no finished frame, and
+?light draws the lighter city. The city test uses both, so a busy Mac where SwiftShader draws a
+frame every few seconds still fills each half-second window.
+
+Docs-Checked: updated .dev/image-tests.md (SwiftShader differs between x86 and ARM) and D-41 (images, the cost page's measurements); re-read docs/concepts/culling.md and docs/guides/testing.md, which need no change
+Skills-Checked: re-read skills/null3d-develop/references/testing-and-debugging.md, which needs no change
+Task: M2-I2
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i2-soft-occlu…
+…
+ed2015b
+```
+…sion
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i1-gpu-occlusion
+…
+c3c93af
+```
+# Conflicts:
+#	.claude/skills/null3d-develop/references/api-quickref.md
+#	.claude/skills/null3d-develop/references/testing-and-debugging.md
+#	crates/null3d-render/src/gpu_driven/layout.rs
+#	crates/null3d-render/src/gpu_driven/mod.rs
+#	crates/null3d-render/src/pipelines.rs
+#	docs/api/engine.md
+#	docs/api/quality.md
+#	docs/concepts/architecture.md
+#	docs/concepts/backends.md
+#	packages/engine/src/page/engine.ts
+#	skills/null3d-develop/references/api-quickref.md
+#	skills/null3d-develop/references/testing-and-debugging.md
+```
+Merge remote-tracking branch 'origin/feat/m2-i2-soft-occlusion' into …
+…
+3f4153f
+```
+…feat/m2-i1-gpu-occlusion
+
+# Conflicts:
+#	.dev/decisions/README.md
+#	docs/api/engine.md
+#	docs/api/quality.md
+```
+docs(dev): record that GPU occlusion culling saves 37% on a quiet GPU
+…
+22d866b
+```
+A run with nothing else heavy on the GPU took the room scene from 1.64
+to 1.04 ms with culling on, with no gaps between passes. Under another
+program's GPU load the gaps came back. D-40 records the figures and the
+likely cause, other GPU work waiting between the frame's passes; D-22
+notes that its preset rows hold only on a busy GPU.
+
+Task: M2-I1
+```
+docs(dev): add D-53's rules for turning GPU occlusion culling on
+…
+b953a94
+```
+On desktops, High and Ultra turn it on only if a second quiet Mac run
+saves time and a run under another program's GPU load loses at most 5%.
+On Android it stays off until prototype G1 passes on the GPUs that Bevy
+and Unity block.
+
+Task: M2-I1
+```
+Merge commit 'e75ec03e' (#279, already in this branch as ed2015b) int…
+…
+4fde018
+```
+…o feat/m2-i1-gpu-occlusion
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i1-gpu-occlusion
+…
+dc19105
+```
+# Conflicts:
+#	crates/null3d-gpu/src/drawlist.rs
+#	packages/engine/src/generated/gpu.ts
+#	packages/engine/src/gpu/webgpu/pipelines.ts
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i1-gpu-occlusion
+…
+75eae7e
+```
+# Conflicts:
+#	docs/api/objects.md
+#	docs/api/scene.md
+#	packages/engine/src/scene/scene.ts
+```
+Merge remote-tracking branch 'origin/main' into feat/m2-i1-gpu-occlusion
+…
+bd9bf4d
+```
+Ambient occlusion turns the depth prepass on while it draws, so occlusion culling's two phases
+run only while no prepass does. The culling pipelines are made at the start whenever the phases
+can run later, and a view binds its depth group the first frame that any depth pass draws.
+```
+test(render): start GPU occlusion culling once ambient occlusion turn…
+…
+aeb7d6b
+```
+…s the prepass off
+
+Ambient occlusion on from the first frame holds the depth prepass, so the camera culls once. The
+test checks that the two phases' pipelines exist from the start, and that the camera culls in two
+phases and builds its depth pyramid once ambient occlusion turns off. It fails when the pipelines
+are made only for culling that runs at the first frame. D-22 and D-40 link D-53.
+
+Docs-Checked: no docs page changes, a render crate test; D-22 and D-40 link D-53
+Task: M2-I1
+```
+Merge origin/main into feat/m2-i1-gpu-occlusion, and load occlusion c…
+…
+220e667
+```
+…ulling's shaders on first use
+
+Main brought outlines, morph targets, skinning builds by vertex format, first-use shader files
+and the draw list's growth. Occlusion culling's two phases (the culling shader's OCCLUSION build)
+and its depth pyramid now form the `occlusion` feature's shader file. The WebGPU builder asks for
+their pipelines once the scene marks an occluder, and each camera view culls once until they are
+built. A preload builds them at once.
+
+Docs-Checked: updated docs/concepts/culling.md, docs/guides/loading-screens.md, the engine option's TSDoc (preload, gpuOcclusion) and the regenerated docs/api pages; re-read docs/concepts/quality-presets.md
+Skills-Checked: updated skills/null3d-develop/references/performance.md
+Task: M2-I1
+```
+Merge origin/main into feat/m2-i1-gpu-occlusion
+…
+5d0d5ad
+```
+Main brought 16-bit shadow cascades with the atlas tiles' own bundle, fog, HDR environments, the
+on-demand loader and the generated decision list. D-22 and D-40 gain their Summary lines.
+
+Docs-Checked: re-read docs/concepts/culling.md and docs/concepts/quality-presets.md; regenerated docs/api pages unchanged
+Skills-Checked: re-read skills/null3d-develop/references/performance.md
+Task: M2-I1
+```
+fix(shaders): work out the depth pyramid's levels in the culling shad…
+…
+8903271
+```
+…er, not from a uniform table
+
+The Galaxy S25's driver can give every thread of a culling dispatch one thread's entry of a
+uniform-block table read at a per-thread index. The second culling phase read each object's
+pyramid level from such a table. Each level's shape now follows from the render size, with a loop
+that runs the same passes in every thread, and the culling parameters lose the table.
+
+Docs-Checked: no public page describes the culling parameters; re-read docs/concepts/culling.md
+Skills-Checked: no skill file describes the culling parameters; re-read skills/null3d-develop/references/performance.md
+Task: M2-I1
+```
+build(engine): regenerate the GPU constants, and record the S25's occ…
+…
+6b64aef
+```
+…lusion run
+
+The culling parameters' occlusion values are 96 bytes now, and the generated TypeScript constants
+follow. The Galaxy S25 drew all six views of the room with GPU occlusion culling on WebGPU, equal
+to culling off in every pixel.
+
+Size-Growth: js/shaders-occlusion-wgsl.js is new, GPU occlusion culling's two phases and depth pyramid, which load on first use once a scene marks an occluder
+Docs-Checked: no public page names the culling parameters' size; updated .dev/tested-devices.md
+Skills-Checked: no skill file names the culling parameters' size; re-read skills/null3d-develop/references/performance.md
+Task: M2-I1
+```
+docs(dev): record the Galaxy S25's GPU occlusion timing in D-22
+…
+e2d5181
+```
+Task: M2-I1
+```
+hiddentao
+enabled auto-merge
+October 7, 2026 04:15
+hiddentao
+added this pull request to the merge queue
+Oct 7, 2026
+Hide details
+View details
+Merged
+via the queue into
+main
+with commit 0f50026
+Oct 7, 2026
+18 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+hiddentao
+deleted the
+feat/m2-i1-gpu-occlusion
+branch
+October 7, 2026 04:43
+This was referenced Oct 7, 2026
+fix(engine): keep far objects in place and captures whole on the Galaxy S25's WebGPU
+#384
+Merged
+feat(engine): add a test switch for vertex shaders that read instance data by index
+#378
+Merged
+feat(engine): hold textures under each preset's memory budget
+#346
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

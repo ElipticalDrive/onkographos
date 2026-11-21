@@ -1,0 +1,242 @@
+Simulation phantom file format specification and reference implementation, based on NIfTI + JSON - Implement density-weighted footprint resampling by J-Endres · Pull Request #20 · mrx-org/bifti-phantoms
+
+Implement density-weighted footprint resampling by J-Endres · Pull Request #20 · mrx-org/bifti-phantoms · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+J-Endres
+commented
+Aug 28, 2026
+Copy link
+Copy Markdown
+Member
+Summary
+Replaces naive trilinear interpolation with density-weighted footprint resampling when resampling phantoms onto a new voxel grid. This prevents intensive tissue properties (T1, T2, dB0, etc.) from being artificially diluted by zeros outside the source FOV or between tissues.
+Key Changes
+New resampling module (rust/bifti/src/resample.rs and python/bifti/src/bifti/resample.py):
+Implements exact box-average resampling for axis-aligned transforms via three 1-D matrix contractions (separable path)
+Falls back to midpoint quadrature for oblique transforms
+Weights intensive properties by tissue density: P_out = sum(w·W·P) / sum(w·W) where W = density + eps
+Extensive properties like density are averaged unweighted: D_out = sum(w·D)
+Out-of-bounds taps contribute to neither sum, so they are excluded rather than averaged in
+Loader refactoring (rust/bifti/src/loader.rs and python/bifti/src/bifti/loader.py):
+Introduces NiftiCache to avoid reading the same file multiple times when multiple tissues reference it
+Separates native volume loading from resampling so density can be used as the resampling weight
+Builds a Resampler once per tissue and applies it to all maps
+Volume trait enhancements (rust/bifti/src/volume.rs and python/bifti/src/bifti/volume.py):
+Adds Acc (accumulator) type to VolumeDataElement for lossless weighted averaging of integer types
+Adds acc_fma (fused multiply-add) and acc_div operations for numerically stable resampling
+Adds Clone derive to Volume and VolumeData for caching
+New backend abstraction (python/bifti/src/bifti/_backend.py):
+Provides pluggable array backends (NumPy and PyTorch)
+Uses PyTorch when available for faster matrix contractions, falls back to NumPy
+Handles device/dtype selection (float32 on CUDA, float64 on CPU)
+Test coverage:
+Rust: phantom_load.rs exercises the full load path including resampling
+Python: test_resample.py validates exact block means, edge behavior, and NaN avoidance
+Python: test_phantom_load.py loads example phantoms with various resampling scenarios
+Example data:
+Added shapes_downsampled.json demonstrating 9× downsampling
+Updated schema URLs from nifti-phantoms to bifti-phantoms
+Implementation Details
+Axis alignment detection: Checks if the transform maps each output axis onto a single source axis; if so, uses the exact separable path
+Weight epsilon handling: Filters out rounding-error taps (~1e-17) that would otherwise make lone voxels appear as footprint averages
+Partial-volume preservation: Footprints that extend outside the source FOV keep their unclipped weight sum, so density fades naturally at edges rather than ending abruptly
+NaN avoidance: When a footprint has zero density, falls back to unweighted mean of in-bounds taps via epsilon regularization
+Separable path: Exact (no quadrature error) and has no substep cap; oblique path uses up to 8 substeps per axis
+https://claude.ai/code/session_017nV8GSLCXXVEDstVwhuKdY
+claude
+and others
+added 4 commits
+August 27, 2026 14:26
+Rust: density-weighted footprint resampling for reslice_to
+…
+59d1f2e
+```
+Reslicing point-sampled with trilinear interpolation, which only ever reads the
+8 voxels around a sample point. Resampling onto a coarser grid therefore threw
+most of the source data away and aliased badly - a 0.5mm phantom resliced to 4mm
+kept about 2% of its voxels and averaged nothing.
+
+Averaging over each output voxel's full source footprint fixes the aliasing, but
+averaging naively would introduce a worse problem: outside the source FOV, and in
+the background between tissues, every map reads 0, and T1/T2/T2'/ADC/dB0/B1 are
+intensive quantities. Plain averaging drags them toward zero at every edge. So
+intensive properties are now averaged weighted by the tissue's density, while
+density itself - being extensive - keeps a plain footprint average:
+
+    P_out = sum_j w_j*W_j*P_j / sum_j w_j*W_j    with W = density + eps
+    D_out = sum_j w_j*D_j
+
+Sampling W as a volume in its own right is what makes this work: taps outside the
+source contribute to neither sum, so they are excluded rather than averaged in.
+The eps regularisation keeps an entirely empty footprint well-defined (it falls
+back to the unweighted mean of the in-bounds taps) instead of 0/0.
+
+For axis-aligned grids - every affine this repo's own tools emit - the footprint
+average factorises into three 1-D passes and is computed exactly, as a true box
+average with no quadrature error and no substep cap. Oblique transforms fall back
+to midpoint quadrature over the output voxel's parallelepiped. Axes that are not
+being downsampled keep two-tap linear weights, so upsampling and identity grids
+behave exactly as before.
+
+Supporting changes:
+- VolumeDataElement gains an Acc associated type (f64 / Complex<f64>) so weighted
+  sums accumulate without loss. to_f64 could not serve: it takes the magnitude of
+  complex data, which would have destroyed B1 phase.
+- Volume::load_nifti_ref no longer reslices; resampling moved up to Tissue::load,
+  which is where the density map is available as the weight. This also removes a
+  double-reslice: load_tissue_property resliced a volume load_nifti_ref had
+  already resliced, which was wasted work and silently replaced the data with a
+  constant when reslice_to.resolution was [1, 1, 1].
+- Added a native NIfTI cache keyed by file and sub-volume index. A file shared by
+  several tissues was previously re-read once per reference, and every tissue
+  needs its density twice (as a map and as the weight).
+
+Drive-by, unrelated to reslicing: the `func` expression parser accepted only runs
+of digits, so it rejected `x * 0.5 + 10` and the crate could not load two of the
+three example phantoms. JSON.md allows decimal, leading-dot and scientific
+notation, so parse a float.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017nV8GSLCXXVEDstVwhuKdY
+```
+Python: density-weighted footprint resampling, matching Rust
+…
+d139e4e
+```
+Ports the resampling rewrite from the previous commit to the Python package, so
+both implementations now average each output voxel over the whole source region
+it covers, weighted by the tissue's density:
+
+    P_out = sum_j w_j*W_j*P_j / sum_j w_j*W_j    with W = density + eps
+    D_out = sum_j w_j*D_j
+
+Previously reslicing went through nibabel/scipy's resample_from_to(order=1),
+which point-samples: downsampling discarded most of the source data, and nothing
+stopped T1/T2/dB0 from being averaged against the zeros outside the FOV.
+
+New modules:
+- bifti/resample.py - the sampler. For axis-aligned grids the footprint average
+  factorises into three matrix contractions and is exact; oblique transforms
+  fall back to midpoint quadrature. All coil channels of a B1 map go through one
+  contraction instead of a per-channel loop.
+- bifti/_backend.py - torch when importable (CPU as well as CUDA, since the
+  contraction is a matmul either way), NumPy otherwise. Selectable with
+  $BIFTI_RESAMPLE_BACKEND. torch is a new optional extra, not a dependency.
+
+loader.py: load_tissue now loads density natively first, since it defines the
+source grid and supplies the weight, then resamples everything against it. The
+whole-file reslice cache is split - _load_nifti caches the raw 4-D load and no
+longer varies with the target grid, which is if anything a stronger cache, since
+resampling now depends on the tissue rather than the file. A map that does not
+share the density map's grid (which NIFTI.md forbids) warns and falls back to an
+unweighted average rather than erroring.
+
+scipy was a dependency only for resample_from_to, so it drops out of the runtime
+requirements; it stays in the dev group, where the tests use it as an
+independent reference for the non-downsampling path.
+
+Both implementations clamp footprint weights below 1e-12 to zero. Inverting the
+source affine is inexact, so a voxel that only *touches* an output voxel's
+footprint - zero-width overlap - could come out weighing ~1e-17. Left in, the
+weighted mean divided a crumb by a crumb and reported that lone voxel's raw
+value as the footprint average, producing a hard non-zero fringe just outside
+the FOV. The shapes_downsampled fixture hits exactly this geometry, and it is
+what a Rust/Python cross-check surfaced.
+
+Fixtures: adds shapes_downsampled.json, which reslices onto a *coarser* grid
+whose FOV deliberately overhangs the source. Nothing in the repo downsampled
+before - subj42 goes 3.4mm -> 2.2mm and shapes_resliced 3mm -> 2mm, both
+upsampling - which is why none of this was caught. Regenerating also refreshes
+the $schema URL in the two existing fixtures, which still pointed at the
+pre-rename nifti-phantoms path.
+
+Tests: first test suites in the repo. Rust has unit tests for the sampler plus
+integration tests over the example phantoms; Python has the same coverage under
+pytest, including a check that both backends agree and that the upsample path
+still matches scipy's trilinear exactly. Rust and Python agree on every fixture
+to within float32 rounding (Rust stores results back in the NIfTI's native
+dtype; Python works in float64).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017nV8GSLCXXVEDstVwhuKdY
+```
+CI: run the Rust and Python test suites
+…
+8c127cc
+```
+The previous two commits added the repo's first tests - 14 in Rust, 21 in Python
+- but nothing ran them. The only workflow was validate-registry.yml, which
+checks registry.json and nothing else, so the resampling kernel was guarded only
+by tests someone had to remember to run locally.
+
+Three jobs, following validate-registry.yml's conventions:
+
+- rust: cargo clippy --all-targets -- -D warnings, then cargo test. Pins an
+  explicit stable toolchain because the crate is edition 2024, and caches the
+  build - the dependency tree pulls in ureq/rustls, so a cold build is slow.
+- python: uv sync --frozen + pytest. --frozen fails on a stale uv.lock rather
+  than quietly re-resolving it.
+- python-torch: the same tests against the torch backend, which is a separate
+  code path from the NumPy one. Kept as its own job so the fast NumPy result is
+  not gated on a large third-party download, and so an install outage is
+  visibly its own failure.
+
+Two things worth knowing about the torch job. It installs the CPU wheel, which
+is a fraction of the size of the default CUDA one. And it runs pytest with
+--no-sync: `uv run --frozen` re-syncs the environment against the lock, which
+uninstalls the torch just added and silently reverts the job to the NumPy path
+it exists to avoid testing. That is not hypothetical - it is what `uv sync
+--frozen` does to an environment torch was added to, so the job would have
+passed while testing nothing new.
+
+No paths filter: the Rust integration tests read the example phantoms under
+python/bifti/examples/data/, so a Python-only change still has to run the Rust
+job.
+
+cargo fmt --check is deliberately absent. It currently fails on one pre-existing
+long line in examples/download_random_phantom.rs, untouched by this branch, so
+adding the gate would mean reformatting an unrelated example in a CI-only
+change.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017nV8GSLCXXVEDstVwhuKdY
+```
+adjust readme and spec details
+69a6bec
+Hide details
+View details
+J-Endres
+merged commit e01fdbf
+into
+main
+Aug 28, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+J-Endres
+deleted the
+claude/reslicing-weighted-averaging-lf8e6q
+branch
+August 28, 2026 09:26
+mzaiss
+mentioned this pull request
+Sep 15, 2026
+resample: the oblique path is silently approximate, and a per-tissue weight can't be batched
+#23
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

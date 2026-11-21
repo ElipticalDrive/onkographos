@@ -1,0 +1,136 @@
+# Generalizable Radiance Fields via Transformer Attention
+
+Also called: Transformer-based Generalizable Radiance Fields
+
+## Overview
+This method addresses the problem of generalizing neural radiance field representations to unseen objects or scenes without requiring per-scene optimization. It solves the limitation of standard NeRFs, which overfit to specific training views, by learning generalizable geometric priors from source images. It sets itself apart from sibling methods like [DuDoTrans](1409-dudotrans.md) and [Transformer-based Tomographic Reconstruction](11047-transformer-based-tomographic-reconstruction.md) by focusing on cross-view feature aggregation via attention mechanisms rather than iterative tomographic inversion or specific architectural variants like Ray Transformers.
+
+## How it works
+The method constructs a generalizable representation by aggregating information from multiple source views using a transformer-based attention module.
+
+**Inputs and Outputs:**
+- **Inputs:** A set of source images (views) with known camera parameters (intrinsics and extrinsics).
+- **Outputs:** A generalizable radiance field representation capable of rendering novel views of unseen objects or scenes.
+
+**Data Structures:**
+The core data structure is a feature volume or a set of view-dependent features aggregated via attention. The specific layout depends on the implementation variant (e.g., cost volumes or feature volumes), but generally involves multi-view feature tensors aligned in 3D space.
+
+**Steps:**
+1. **Feature Extraction:** Extract features from the source images using a backbone network (e.g., CNN or ViT).
+2. **View Aggregation:** Use a transformer-based attention module to aggregate source view information. This involves computing attention weights between query features (at a target 3D location or ray) and key/value features from the source views.
+3. **Generalization:** The aggregated features encode geometric and appearance priors learned from the dataset, allowing the model to generalize to unseen instances.
+4. **Rendering:** Render the novel view by querying the aggregated representation along rays.
+
+**Formulas:**
+The attention mechanism typically computes the output $Z$ from queries $Q$, keys $K$, and values $V$:
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
+$$
+where $d_k$ is the dimension of the keys. The specific formulation for generalizable radiance fields may involve spatial attention or ray-wise attention to aggregate multi-view features.
+
+**Parameters:**
+- Number of attention heads.
+- Dimension of feature vectors.
+- Number of source views used for aggregation.
+
+**Edge Cases and Pitfalls:**
+- **Generalization Gap:** Performance may degrade on objects significantly different from the training distribution.
+- **View Density:** Requires a sufficient number of source views to capture geometry accurately.
+- **Occlusion:** Handling occluded regions in source views requires robust attention mechanisms.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generalizable_radiance_field_transformer(source_images, camera_params):
+    """
+    Aggregates source view information using transformer attention.
+    
+    Args:
+        source_images: List of source images.
+        camera_params: List of camera parameters (intrinsics, extrinsics).
+        
+    Returns:
+        Generalizable radiance field representation.
+    """
+    # Step 1: Feature Extraction
+    # Extract features from each source image
+    features = []
+    for img, cam in zip(source_images, camera_params):
+        # Use a backbone network (e.g., CNN) to extract features
+        feat = extract_features(img, cam)
+        features.append(feat)
+    
+    # Step 2: View Aggregation via Transformer Attention
+    # Aggregate features from all source views
+    # This step involves computing attention between query and source features
+    aggregated_features = transformer_attention(features)
+    
+    # Step 3: Return the generalizable representation
+    return aggregated_features
+
+def extract_features(image, camera_params):
+    """
+    Extracts features from a single image using a backbone network.
+    
+    Args:
+        image: Input image.
+        camera_params: Camera parameters.
+        
+    Returns:
+        Feature tensor.
+    """
+    # Placeholder for feature extraction logic
+    # Typically involves convolutional layers or ViT
+    return feature_tensor
+
+def transformer_attention(features):
+    """
+    Aggregates features from multiple views using transformer attention.
+    
+    Args:
+        features: List of feature tensors from source views.
+        
+    Returns:
+        Aggregated feature tensor.
+    """
+    # Compute attention weights
+    # Q, K, V are derived from the features
+    # Attention(Q, K, V) = softmax(QK^T / sqrt(d_k)) V
+    aggregated = compute_attention(features)
+    return aggregated
+
+def compute_attention(features):
+    """
+    Computes attention between features.
+    
+    Args:
+        features: List of feature tensors.
+        
+    Returns:
+        Aggregated feature tensor.
+    """
+    # Implementation of attention mechanism
+    # This is a placeholder for the actual attention computation
+    return aggregated_features
+```
+
+## Subtopics
+
+### Scene Rendering Transformer
+A geometry-free method using a CNN and Encoder-Decoder Transformer to produce output color for an entire ray at once. It uses a CNN to extract feature patches from scene images, feeds patches into an Encoder-Decoder Transformer along with camera ray and viewpoint coordinates $\{o, d\}$, and produces output color by querying the entire ray at once. It does not produce the scene's density function nor rely on geometric inductive biases [S2].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of source views and the transformer architecture. Attention mechanisms can be $O(N^2)$ in the number of views or tokens.
+- **Memory Complexity:** Requires storing features for all source views and the aggregated representation.
+- **Strengths:** Generalizes well to unseen objects/scenes; leverages multi-view consistency.
+- **Limitations:** May require careful tuning of attention mechanisms; performance depends on the diversity and quality of the training dataset.
+- **When to use:** When generalization to new objects/scenes is required without per-scene optimization.
+- **When not to use:** When high-fidelity reconstruction of a specific, known scene is needed with dense input views.
+
+## Background
+This approach builds on the trend of using deep learning for 3D representation. It specifically leverages transformer architectures to handle the non-local dependencies inherent in multi-view aggregation. The method is part of the broader effort to make neural radiance fields more practical for real-world applications by reducing the need for extensive per-scene training.
+
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

@@ -1,0 +1,200 @@
+--- v001.md
++++ v002.md
+@@ -4,36 +4,42 @@
+ 
+ ## Overview
+-This method generates voxel data on-demand by evaluating procedural objects within specific spatial chunks based on camera locality, rather than pre-generating the entire world. It solves the problem of efficiently rendering large-scale procedural structures (such as trees or buildings) that span multiple chunks without explicit geometric splitting. It differs from [Procedural Terrain Heightmap Generation](1850-procedural-terrain-heightmap-generation.md) by operating on full 3D volumetric primitives defined by high-level parameters, and from [Voxel Evaluation with AABB Culling](2415-voxel-evaluation-with-aabb-culling.md) by explicitly managing chunk redundancy for seamless normal calculation [S1, unofficial].
++This method generates voxel data on-demand by evaluating procedural object definitions within GPU shaders, driven by high-level parameters computed on the CPU. It solves the problem of rendering large, continuous procedural structures (such as trees or buildings) that span multiple discrete chunks without requiring explicit meshing or pre-computed voxel storage for the entire world. It sets itself apart from [Chunk Generation with Base Terrain](1110-chunk-generation-with-base-terrain.md) by decoupling the structural definition (CPU) from the voxel evaluation (GPU), allowing for seamless normal generation via redundant chunk boundaries [S1, unofficial].
+ 
+ ## How it works
+-The method operates in a top-down fashion: high-level structural parameters are defined on the CPU (C++), and voxel-level evaluation occurs in the GPU shader (GLSL) for chunks near the camera.
+-
+ **Inputs and Outputs:**
+-*   **Input:** Camera position, chunk grid coordinates, list of active procedural objects with their parameters.
+-*   **Output:** Voxel density/normal data for the current chunk.
++*   **Input:** A deterministic seed, camera position, and a list of high-level object parameters (bounds, control points, thicknesses) computed in C++.
++*   **Output:** A voxel grid for the current chunk, generated in the shader.
+ 
+ **Data Structures:**
+-*   **Object Definition (CPU):** Each procedural object (e.g., a tree branch) is defined by high-level parameters: start point, end point, control points, start thickness, end thickness, and a computed bounding box [S1, unofficial].
+-*   **Chunk Definition:** Each chunk has a defined world-space bounding box (start and end coordinates) [S1, unofficial].
+-*   **Shader Input:** A list of active objects and the current chunk's bounding box [S1, unofficial].
++*   **Object Definition (C++):** Structs containing start/end coordinates, control points, start/end thicknesses, and a computed bounding box.
++*   **Shader Input:** A list of active objects and their parameters, passed per chunk.
++*   **Chunk Context:** Start and end world-space coordinates defining the chunk's bounding box.
+ 
+ **Steps:**
+-1.  **Define High-Level Structures (CPU):** Generate the world map, place cities/roads, and define neighborhood layouts. For each object (e.g., tree branch), compute its bounding box in world space [S1, unofficial].
+-2.  **Determine Active Chunks:** Identify which chunks intersect with the bounding boxes of active objects. Only these chunks require evaluation [S1, unofficial].
+-3.  **Pass Parameters to GPU:** Send the list of active objects and their parameters to the shader [S1, unofficial].
+-4.  **Evaluate Per Chunk (GPU):** For each active chunk:
+-    a.  Define the chunk's world-space bounding box (start and end coordinates) [S1, unofficial].
+-    b.  Derive relative (object) coordinates for each voxel within the chunk based on the bounding box [S1, unofficial].
+-    c.  Evaluate each active object against the current chunk's voxels. Determine if a voxel lies within the object's geometry using the object's parameters (bounds, control points, thicknesses) [S1, unofficial].
+-    d.  Generate voxel representation (density/normal) for the chunk [S1, unofficial].
+-5.  **Render:** Render the chunk within its bounds. Note that chunks are generated with redundant voxels (1.25x dimensions) to allow seamless normal calculation in the shader [S1, unofficial].
++1.  **High-Level Generation (CPU):** Generate world structures (e.g., world map, cities, roads) deterministically based on a seed. For each object (e.g., tree branch), compute its bounding box in world space.
++2.  **Chunk Selection:** Identify which chunks intersect with the bounding boxes of active objects.
++3.  **Parameter Passing (CPU to GPU):** For each chunk to be rendered, compile a list of objects whose bounding boxes intersect the chunk. Pass these object parameters to the shader.
++4.  **Bounding Box Derivation (Shader):** For each chunk, define the start and end world coordinates (the chunk's bounding box).
++5.  **Coordinate Transformation (Shader):** For each voxel in the chunk, derive its relative (object) coordinates by subtracting the chunk's start coordinates from the voxel's world coordinates.
++6.  **Voxel Evaluation (Shader):** Evaluate each passed object against the voxel's relative coordinates. Determine if the voxel lies within the object's geometric definition (e.g., within a cylinder defined by control points and thickness).
++7.  **Redundant Generation:** Generate voxels in a domain larger than the renderable chunk area (e.g., 1.25x the dimensions) to ensure seamless normal calculation at boundaries [S1, unofficial].
++
++**Formulas:**
++*   **Relative Coordinate:** $v_{rel} = v_{world} - c_{start}$
++    *   $v_{world}$: World-space coordinate of the voxel.
++    *   $c_{start}$: Start coordinate of the chunk's bounding box.
++*   **Object Containment:** Determined by evaluating the voxel against the object's geometric primitive (e.g., distance to line segment for branches) using $v_{rel}$.
+ 
+ **Parameters:**
+-*   **Generation Order:** Top-down [S1, unofficial].
++*   **Redundancy Factor:** 1.25 (current value, subject to change) [S1, unofficial].
++*   **Generation Order:** Top-down (world -> cities -> neighborhoods -> objects) [S1, unofficial].
+ *   **Determinism:** All generation is deterministic based on a seed [S1, unofficial].
+-*   **Chunk Redundancy Factor:** Approximately 1.25x in dimensions to ensure seamless normals [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Seams:** Without redundant generation, normal vectors will be discontinuous at chunk boundaries.
++*   **Performance:** Evaluating all objects for every chunk can be expensive; culling by bounding box is essential.
++*   **Precision:** Floating-point precision in shader calculations may affect boundary accuracy for very large worlds.
+ 
+ **Pseudocode:**
+-
+ ```python
+ # CPU Side
+@@ -41,32 +47,21 @@
+     world_map = generate_map(seed)
+     cities = place_cities(world_map, seed)
+-    objects = []
+     for city in cities:
+         neighborhoods = generate_neighborhoods(city, seed)
+         for neighborhood in neighborhoods:
+-            streets = generate_street_layout(neighborhood, seed)
++            streets = generate_streets(neighborhood, seed)
+             for street in streets:
+-                buildings = generate_building_layout(street, seed)
++                buildings = generate_buildings(street, seed)
+                 for building in buildings:
+-                    # Define high-level parameters for each object
+-                    obj = {
+-                        'type': 'building',
+-                        'start_point': building.start,
+-                        'end_point': building.end,
+-                        'control_points': building.controls,
+-                        'start_thickness': building.thickness_start,
+-                        'end_thickness': building.thickness_end,
+-                        'bounding_box': compute_bounding_box(building)
+-                    }
+-                    objects.append(obj)
+-    return objects
++                    building.compute_bounding_box()
++                    active_objects.append(building)
+ 
+-def get_active_chunks(camera_pos, objects, chunk_size):
+-    active_chunks = set()
+-    for obj in objects:
+-        # Find chunks intersecting with object's bounding box
+-        chunks = get_chunks_intersecting_bbox(obj['bounding_box'], chunk_size)
+-        active_chunks.update(chunks)
+-    return active_chunks
++def prepare_chunk(chunk_bounds, camera_pos):
++    # Determine which objects are relevant to this chunk
++    relevant_objects = []
++    for obj in active_objects:
++        if bbox_intersects(obj.bbox, chunk_bounds):
++            relevant_objects.append(obj.params)
++    return relevant_objects
+ 
+ # GPU Side (Shader)
+@@ -74,42 +69,31 @@
+     vec3 start_point;
+     vec3 end_point;
+-    vec3 control_points[2];
++    vec3 control_point;
+     float start_thickness;
+     float end_thickness;
+-    vec3 bbox_min;
+-    vec3 bbox_max;
++    // ... other parameters
+ };
+ 
+-void evaluate_chunk(vec3 chunk_min, vec3 chunk_max, ObjectParams[] objects, out VoxelData voxel_data) {
+-    // Iterate over voxels in the chunk
+-    for each voxel in chunk:
+-        vec3 world_pos = get_voxel_world_position(voxel, chunk_min);
+-        
+-        // Check if voxel is within any active object
+-        for each obj in objects:
+-            if (is_voxel_in_object(world_pos, obj)) {
+-                voxel_data[voxel].density = 1.0;
+-                voxel_data[voxel].normal = compute_normal(world_pos, obj);
+-                break;
+-            }
+-}
+-
+-bool is_voxel_in_object(vec3 world_pos, ObjectParams obj) {
+-    // Derive relative coordinates (object space) from the bounding box
+-    vec3 local_pos = (world_pos - obj.bbox_min) / (obj.bbox_max - obj.bbox_min);
++void main() {
++    vec3 voxel_world_pos = get_voxel_world_position();
++    vec3 chunk_start = get_chunk_start();
+     
+-    // Determine where a given voxel is on the current object
+-    // Example: Simple bounding box check or more complex shape evaluation
+-    if (local_pos.x >= 0.0 && local_pos.x <= 1.0 &&
+-        local_pos.y >= 0.0 && local_pos.y <= 1.0 &&
+-        local_pos.z >= 0.0 && local_pos.z <= 1.0) {
+-        
+-        // Evaluate shape based on parameters (e.g., thickness interpolation)
+-        float thickness = mix(obj.start_thickness, obj.end_thickness, local_pos.y);
+-        // Check if voxel is within the thickness bounds
+-        // ... implementation details for specific shape ...
+-        return true;
++    // Derive relative coordinates
++    vec3 rel_pos = voxel_world_pos - chunk_start;
++    
++    bool is_voxel = false;
++    for (ObjectParams obj : u_objects) {
++        // Evaluate if rel_pos is inside the object's geometry
++        if (is_inside_object(rel_pos, obj)) {
++            is_voxel = true;
++            break;
++        }
+     }
+-    return false;
++    
++    if (is_voxel) {
++        // Generate voxel data, including normals
++        // Note: Redundant generation ensures neighbors are available for normal calc
++        set_voxel_data();
++    }
+ }
+ ```
+@@ -118,17 +102,17 @@
+ 
+ ### [Chunk Redundancy for Seamless Normals](15485-chunk-redundancy-for-seamless-normals.md)
+-Generates chunks with redundant voxels beyond their render bounds to allow seamless normal calculation inside the shader.
++Solves normal discontinuities at chunk boundaries by generating voxels in a domain larger than the renderable area. Choose this when visual continuity of surface normals is critical and global data structures are undesirable.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(N * M) where N is the number of active chunks and M is the number of voxels per chunk. Evaluation is per-voxel, per-object.
+-*   **Memory Complexity:** O(N) for storing active object parameters. Voxel data is generated on-demand.
+-*   **Performance:** Efficient for sparse or large-scale worlds as only nearby chunks are evaluated. Deterministic generation allows regeneration.
+-*   **Strengths:** No need for pre-generation; handles objects spanning multiple chunks seamlessly; parallelizable chunk generation.
+-*   **Limitations:** Requires redundant voxel generation for normals; shader evaluation can be costly for complex objects.
+-*   **When to use:** Large procedural worlds with dynamic camera movement; objects spanning multiple chunks.
+-*   **When not to use:** Static, small-scale worlds; objects with extremely complex per-voxel evaluation.
++*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of voxels in the chunk and $M$ is the number of active objects per chunk. Evaluation is parallelizable per voxel.
++*   **Memory Complexity:** $O(N)$ for the current chunk's voxel data. No global voxel storage required.
++*   **Performance:** Highly dependent on the number of active objects per chunk. Bounding box culling is critical to reduce $M$.
++*   **Strengths:** Seamless normals, deterministic regeneration, no pre-computed storage, easy parallelization.
++*   **Limitations:** High GPU load if many objects overlap a chunk; requires careful culling.
++*   **When to use:** Procedural worlds with large, continuous structures where memory bandwidth is a constraint.
++*   **When not to use:** Scenes with static, pre-computed geometry where storage is cheap.
+ 
+ ## Background
+-Originated in the development of VoxelQuest, an unofficial voxel engine. The method was described in a blog post by the developer in 2014. It addresses the challenges of procedural generation in voxel engines by combining high-level CPU-side structure generation with low-level GPU-side voxel evaluation.
++Originating from the VoxelQuest project (2014), this method was developed to handle procedural generation of large voxel worlds without pre-computing the entire world data. It emphasizes a top-down approach where high-level structures are defined in C++ and evaluated at the voxel level in GLSL shaders based on camera locality [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,117 @@
+# Gradient-Magnitude Opacity Modulation
+
+Also called: Gradient-Magnitude Opacity Modulation for Encrypted Volume Rendering, Gradient-based Opacity Modulation
+
+## Overview
+Gradient-Magnitude Opacity Modulation is a technique used in encrypted volume rendering to improve visual quality by incorporating surface boundary information into the opacity calculation [S1]. It addresses the limitation of standard encrypted volume rendering, where the inability to perform complex compositing operations (like the Porter/Duff 'over' operator) results in degraded image fidelity [S1]. By pre-calculating and encrypting gradient magnitudes, the method modulates opacity based on local data variation, preserving edge details that would otherwise be lost in encrypted space [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Encrypted volume data values and pre-calculated, encrypted gradient magnitudes for each voxel.
+*   **Output:** A rendered image with improved visual quality compared to unmodulated encrypted rendering, though inferior to standard Porter/Duff compositing [S1].
+
+**Data Structures:**
+*   **Encrypted Data Values:** Ciphertexts corresponding to voxel intensities.
+*   **Encrypted Gradient Magnitudes:** Ciphertexts corresponding to the magnitude of the gradient vector at each voxel. The gradient magnitude is typically computed from the underlying plaintext data before encryption [S1].
+
+**Steps:**
+1.  **Pre-calculation (Plaintext Domain):** Compute the gradient magnitude for each voxel in the volume data. This involves calculating the spatial derivatives (e.g., using finite differences) and computing the Euclidean norm of the gradient vector [S1].
+2.  **Encryption:** Encrypt both the original voxel data values and the pre-calculated gradient magnitudes using a homomorphic encryption scheme (specifically Paillier, as noted in the source context) [S1].
+3.  **Rendering (Encrypted Domain):** During ray casting, use the encrypted gradient magnitude to modulate the opacity contribution of each voxel. The specific modulation function is not detailed in the sources, but the gradient magnitude serves as a scaling factor or threshold for opacity [S1].
+4.  **Compositing Limitation:** The method acknowledges that it cannot implement the standard Porter/Duff 'over' operator compositing because the Paillier scheme does not support multiplication of encrypted numbers [S1].
+
+**Formulas:**
+*   Gradient Magnitude: $|\nabla f| = \sqrt{(\frac{\partial f}{\partial x})^2 + (\frac{\partial f}{\partial y})^2 + (\frac{\partial f}{\partial z})^2}$ [G] (Standard definition implied by "gradient magnitude").
+*   Opacity Modulation: $ \alpha_{modulated} = f(\alpha_{base}, |\nabla f|_{encrypted}) $ [G] (Specific function not given in sources).
+
+**Parameters:**
+*   **Encryption Scheme:** Paillier Homomorphic Encryption [S1].
+*   **Gradient Calculation:** Not specified in sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Visual Quality Limit:** The method does not reach the visual quality outcome of compositing using the Porter/Duff 'over' operator [S1].
+*   **Multiplication Limitation:** The Paillier scheme cannot support alpha blending directly because it requires multiplication of encrypted numbers, which is not supported [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Note: Specific modulation function and compositing logic are not provided in sources.
+# This pseudocode reflects the high-level workflow described.
+
+def gradient_magnitude_opacity_modulation(encrypted_voxel_data, encrypted_gradient_magnitudes):
+    """
+    Renders volume using gradient-magnitude opacity modulation.
+    
+    Args:
+        encrypted_voxel_data: List of encrypted voxel values.
+        encrypted_gradient_magnitudes: List of encrypted gradient magnitudes.
+        
+    Returns:
+        Rendered image (encrypted or decrypted, depending on pipeline).
+    """
+    # 1. Pre-calculation and encryption happen outside this function
+    #    as per source description.
+    
+    # 2. Ray casting loop
+    for each ray:
+        accumulated_color = 0
+        accumulated_opacity = 0
+        
+        for each voxel along ray:
+            # Retrieve encrypted values
+            enc_val = encrypted_voxel_data[voxel_index]
+            enc_grad = encrypted_gradient_magnitudes[voxel_index]
+            
+            # Decrypt to get values for shading/transfer function?
+            # Source implies gradient magnitude is used to modulate opacity.
+            # Since Paillier doesn't support multiplication, direct alpha blending
+            # is not possible. The modulation likely happens via addition or
+            # comparison if supported, or the source implies a simplified approach.
+            
+            # Decrypt gradient magnitude to determine opacity modulation factor
+            # [G] Assuming decryption is possible for the modulation logic or
+            # the modulation is done via a supported homomorphic operation.
+            grad_mag = decrypt(enc_grad)
+            
+            # Calculate base opacity from voxel value
+            base_opacity = transfer_function(decrypt(enc_val))
+            
+            # Modulate opacity using gradient magnitude
+            # [G] Specific formula not in sources. 
+            # Common approach: alpha = base_alpha * (1 + k * grad_mag) or similar.
+            modulated_opacity = base_opacity * (1 + grad_mag) 
+            
+            # Compositing
+            # [G] Standard Porter/Duff 'over' requires multiplication of alpha.
+            # Paillier does not support this. The source states this method
+            # does not reach Porter/Duff quality.
+            # Implementation likely uses an additive or simplified compositing
+            # that is supported by the encryption scheme.
+            
+            # accumulated_color = accumulated_color + modulated_opacity * color
+            # accumulated_opacity = accumulated_opacity + modulated_opacity
+            pass
+            
+    return accumulated_color
+```
+
+## Subtopics
+
+### [Homomorphic-Encrypted Volume Rendering](15987-homomorphic-encrypted-volume-rendering.md)
+Direct volume rendering performed entirely on encrypted volume data using homomorphic encryption, ensuring data and rendered image are uninterpretable to the rendering server. Gradient-Magnitude Opacity Modulation is a technique proposed within this context to improve visual quality.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The method provides a "substantial visual quality improvement" over unmodulated encrypted rendering [S1]. However, it is limited by the computational constraints of homomorphic encryption, particularly the lack of multiplication support in the Paillier scheme [S1].
+*   **Strengths:** Improves visual quality by preserving edge information via gradient magnitude modulation [S1].
+*   **Limitations:** Cannot achieve the visual quality of standard Porter/Duff 'over' operator compositing due to the inability to multiply encrypted numbers in the Paillier scheme [S1]. Requires pre-calculation and encryption of gradient magnitudes, increasing preprocessing overhead [S1].
+*   **When to use:** When visual quality is critical in encrypted volume rendering and the rendering infrastructure supports the necessary homomorphic operations for gradient-based modulation, but full alpha blending is not feasible [S1].
+*   **When not to use:** When the highest possible visual quality (equivalent to standard compositing) is required, or when the encryption scheme does not support the necessary operations for gradient modulation [S1].
+
+## Background
+Gradient-Magnitude Opacity Modulation was proposed in the context of homomorphic-encrypted volume rendering to address the visual quality degradation caused by the limitations of homomorphic encryption schemes like Paillier [S1]. The Paillier scheme, while supporting addition and scalar multiplication, does not support the multiplication of encrypted numbers, which is necessary for standard alpha blending (Porter/Duff 'over' operator) [S1]. The technique was introduced as a way to leverage gradient information, which can be pre-calculated and encrypted, to modulate opacity and improve the perceived quality of the rendered volume [S1].
+
+## Sources
+[S1] Homomorphic-Encrypted Volume Rendering, https://arxiv.org/abs/2009.02122v2, fetched 2026-10-26

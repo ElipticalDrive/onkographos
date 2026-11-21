@@ -1,0 +1,202 @@
+--- v002.md
++++ v003.md
+@@ -3,102 +3,120 @@
+ 
+ ## Overview
+-Polygon-based cropping is a voxel-wise volume rendering technique that masks voxels based on a user-defined 2D polygon drawn in the display (screen) coordinate space. It solves the problem of interactive, free-form region-of-interest selection by converting screen-space constraints into volume-space visibility masks. It differs from its parent, [Clipped Cropping Region Planes](2931-clipped-cropping-region-planes.md), which uses axis-aligned or planar boundaries, by allowing arbitrary convex or non-convex polygonal shapes projected onto the view.
++Polygon-based cropping is a voxel-wise volume rendering technique that masks voxels based on a user-defined 2D polygon drawn in the display (screen) coordinate space. It solves the problem of interactive, free-form region-of-interest selection by converting screen-space constraints into volume-space visibility masks. It differs from planar clipping methods by supporting arbitrary convex or non-convex polygonal shapes rather than just axis-aligned or arbitrary planar cuts, and it operates by explicitly iterating over voxels to test their projected positions against the polygon boundary [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `image_data`: A `vtkImageData` object containing the volume scalar data, dimensions, spacing, and origin.
+-- `volume`: A `vtkVolume` object associated with the renderer.
+-- `renderer`: The `vtkRenderer` instance managing the scene.
+-- `polygon`: A `QPolygonF` representing the user-drawn 2D polygon in display coordinates.
+-- `type`: An integer flag indicating the clipping mode: `RenderWidget::CutLineInside` (keep inside) or `RenderWidget::CutLineOutside` (keep outside).
+-
+-**Outputs:**
+-- Modified `image_data` where voxels outside the desired region are set to 0 (transparent).
+-- Updated `volume` and `renderer` state reflecting the new cropping.
++**Inputs and Outputs:**
++- Input: A `vtkImageData` object containing the volume scalar data, a `vtkRenderer` for coordinate transformation, a `QPolygonF` defining the 2D clipping boundary in screen coordinates, and an integer `type` flag determining the clipping mode.
++- Output: The modified `vtkImageData` where voxels outside the valid region are set to zero (transparent), effectively cropping the volume.
+ 
+ **Data Structures:**
+-- `image_data`: Standard VTK image data structure. The scalar data is assumed to be stored as `unsigned char` (8-bit unsigned integer) [S1, unofficial]. If the scalar type differs, pointer casting must be adjusted [S1, unofficial].
+-- `polygon`: A list of 2D points `(x, y)` in display coordinates.
++- `vtkImageData`: Stores voxel data. The implementation assumes the scalar type is `unsigned char` [S1, unofficial]. If the type differs, pointer casting must be adjusted [S1, unofficial].
++- `QPolygonF`: A 2D polygon defined by a sequence of `QPointF` vertices.
++- `vtkCoordinate`: Used to transform world coordinates to display coordinates.
+ 
+ **Steps:**
+-1. **Retrieve Volume Metadata:**
+-   Get the dimensions, spacing, and origin of the volume data:
+-   ```python
+-   img_dims = image_data.GetDimensions()
+-   img_spacing = image_data.GetSpacing()
+-   img_origin = image_data.GetOrigin()
+-   ```
+-   Note: The implementation assumes the bounding box origin starts at `(0,0,0)` in world space if not explicitly retrieved, but production code must validate actual bounds [S1, unofficial].
++1. Retrieve volume metadata:
++   - Get dimensions: `img_dims = image_data->GetDimensions()`
++   - Get spacing: `img_spacing = image_data->GetSpacing()`
++   - Get origin: `img_origian = image_data->GetOrigin()` [S1, unofficial]
++2. Iterate over all voxel coordinates $(i, j, k)$ within the volume bounds. Note: Direct indexing is required; `vtkImageIterator` cannot retrieve spatial positions [S1, unofficial].
++3. Compute the world position of the current voxel:
++   $$
++   \text{world\_pos} = [i \cdot \text{img\_spacing}[0] + \text{img\_origian}[0], \quad j \cdot \text{img\_spacing}[1] + \text{img\_origian}[1], \quad k \cdot \text{img\_spacing}[2] + \text{img\_origian}[2]]
++   $$
++   [S1, unofficial]
++4. Transform the world position to display coordinates:
++   - Use `coordinate->GetComputedDoubleDisplayValue(renderer)` to obtain `display_pos` [S1, unofficial].
++5. Check if `display_pos` lies inside the user-drawn polygon:
++   - Call `polygon.containsPoint(QPointF(display_pos[0], display_pos[1]), Qt::OddEvenFill)` [S1, unofficial].
++6. Apply clipping based on `type`:
++   - If `type == RenderWidget::CutLineInside` and the point is inside the polygon, keep the voxel value. If outside, set `*pPixel = 0`.
++   - If `type == RenderWidget::CutLineOutside` and the point is outside the polygon, set `*pPixel = 0`. If inside, keep the voxel value.
++   [S1, unofficial]
++7. After modification, update the volume and re-add it to the renderer:
++   - `volume->Update()`
++   - `renderer->RemoveVolume(volume)`
++   - `renderer->AddVolume(volume)`
++   [S1, unofficial]
+ 
+-2. **Iterate Over Voxels:**
+-   Loop through all voxel coordinates `(i, j, k)` within the volume bounds:
+-   ```python
+-   for i in range(img_dims[0]):
+-       for j in range(img_dims[1]):
+-           for k in range(img_dims[2]):
+-   ```
+-
+-3. **Compute World Position:**
+-   Convert voxel indices to world coordinates:
+-   $$
+-   \text{world\_pos} = [i \cdot \text{img\_spacing}[0] + \text{img\_origin}[0], \quad j \cdot \text{img\_spacing}[1] + \text{img\_origin}[1], \quad k \cdot \text{img\_spacing}[2] + \text{img\_origin}[2]]
+-   $$
+-
+-4. **Compute Display Position:**
+-   Transform the world position to display (screen) coordinates using the renderer's coordinate transformation:
+-   ```python
+-   display_pos = coordinate.GetComputedDoubleDisplayValue(renderer)
+-   ```
+-   This step maps the 3D world point to the 2D screen plane corresponding to the current view.
+-
+-5. **Point-in-Polygon Test:**
+-   Check if the `display_pos` lies inside the user-defined polygon using the Odd-Even Fill rule:
+-   ```python
+-   contains_point = polygon.containsPoint(QPointF(display_pos[0], display_pos[1]), Qt::OddEvenFill)
+-   ```
+-
+-6. **Apply Cropping Mask:**
+-   Modify the voxel value based on the `type` flag:
+-   - If `type == RenderWidget::CutLineInside` and `contains_point` is `true`, set the voxel value to 0:
+-     ```python
+-     *pPixel = 0
+-     ```
+-   - If `type == RenderWidget::CutLineOutside` and `contains_point` is `false`, set the voxel value to 0:
+-     ```python
+-     *pPixel = 0
+-     ```
+-   - Otherwise, leave the voxel value unchanged.
+-
+-7. **Update Renderer:**
+-   After modifying the image data, update the volume and re-add it to the renderer to reflect changes:
+-   ```python
+-   volume.Update()
+-   renderer.RemoveVolume(volume)
+-   renderer.AddVolume(volume)
+-   ```
++**Pseudocode:**
++```python
++def polygon_based_cropping(image_data, volume, renderer, polygon, clip_type):
++    # Retrieve metadata
++    img_dims = image_data.GetDimensions()
++    img_spacing = image_data.GetSpacing()
++    img_origian = image_data.GetOrigin()
++    
++    # Create coordinate converter
++    coordinate = vtkCoordinate()
++    coordinate.SetCoordinateSystemToWorld()
++    coordinate.SetRenderer(renderer)
++    
++    # Iterate over all voxels
++    for k in range(img_dims[2]):
++        for j in range(img_dims[1]):
++            for i in range(img_dims[0]):
++                # Compute world position
++                world_pos = [
++                    i * img_spacing[0] + img_origian[0],
++                    j * img_spacing[1] + img_origian[1],
++                    k * img_spacing[2] + img_origian[2]
++                ]
++                
++                # Transform to display coordinates
++                # Note: GetComputedDoubleDisplayValue expects world coordinates
++                coordinate.SetCoordinate(world_pos[0], world_pos[1], world_pos[2])
++                display_pos = coordinate.GetComputedDoubleDisplayValue(renderer)
++                
++                # Check if point is inside polygon
++                # Qt::OddEvenFill is used for winding rule
++                contains_point = polygon.containsPoint(
++                    QPointF(display_pos[0], display_pos[1]), 
++                    Qt.OddEvenFill
++                )
++                
++                # Get pointer to voxel data
++                # Assumes unsigned char type [S1, unofficial]
++                pixel_ptr = image_data.GetScalarPointer(i, j, k)
++                
++                # Apply clipping logic
++                if clip_type == RenderWidget.CutLineInside:
++                    if not contains_point:
++                        pixel_ptr[0] = 0
++                elif clip_type == RenderWidget.CutLineOutside:
++                    if contains_point:
++                        pixel_ptr[0] = 0
++                        
++    # Update volume and renderer
++    volume.Update()
++    renderer.RemoveVolume(volume)
++    renderer.AddVolume(volume)
++```
+ 
+ **Parameters:**
+-- `type`: `RenderWidget::CutLineInside` or `RenderWidget::CutLineOutside`.
+-- `polygon`: User-defined 2D polygon.
++- `clip_type`: Enum or integer flag. `CutLineInside` (keep inside polygon), `CutLineOutside` (keep outside polygon) [S1, unofficial].
++- `fill_rule`: `Qt::OddEvenFill` is used for point-in-polygon testing [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Voxel Data Type:** The implementation assumes `unsigned char` scalar data. If the data type is different, the pointer cast and assignment must be adjusted [S1, unofficial].
+-- **Bounding Box Origin:** The code assumes the bounding box origin starts at `(0,0,0)`. Production code must validate actual bounds [S1, unofficial].
+-- **Iterator Limitation:** Do not use `vtkImageIterator` as it cannot retrieve spatial positions; direct indexing is required [S1, unofficial].
++- The implementation assumes the bounding box origin starts at `(0,0,0)`. Production code must validate actual bounds [S1, unofficial].
++- Do not use `vtkImageIterator` as it cannot retrieve spatial positions; direct indexing is required [S1, unofficial].
++- The scalar type is assumed to be `unsigned char`. If the scalar type differs, the pointer cast and assignment must be adjusted [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Convex VOI Clipping via Weighted Sweep Graph](15939-convex-voi-clipping-via-weighted-sweep-graph.md)
+-This method is a CPU-based clipping algorithm that intersects a sequence of parallel sampling planes against a user-defined convex Volume of Interest (VOI) to reduce the computational load on the GPU. It solves the problem of unnecessary volume rendering computation in empty or irrelevant regions by transmitting only the clipped, valid portions of sampling planes to the GPU. It sets itself apart from general convex clipping algorithms by exploiting the coherence between parallel planes and using a Weighted Sweep Graph (WSG) to efficiently manage topological changes (vertex events) during the sweep, avoiding the recomputation of edge lists from scratch for every plane.
++A CPU-based algorithm that intersects parallel sampling planes against a convex VOI using a Weighted Sweep Graph to exploit coherence between planes, reducing GPU load by transmitting only valid portions. Choose this for large volumes where reducing ray casting overhead is critical and the VOI is convex.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the total number of voxels in the volume, as each voxel is processed once.
+-- **Memory Complexity:** $O(1)$ additional memory, as the operation modifies the volume data in place.
+-- **Performance:** The method is CPU-bound due to the per-voxel transformation and point-in-polygon test. It is suitable for interactive editing but may be slow for large volumes.
+-- **Strengths:** Allows arbitrary 2D polygonal cropping shapes. Simple to implement.
+-- **Limitations:** Requires full volume iteration. Not suitable for real-time rendering without optimization. Assumes specific data types and bounding box origins.
++- **Time Complexity:** $O(N)$ where $N$ is the total number of voxels in the volume, as every voxel is visited and transformed.
++- **Memory Complexity:** $O(1)$ auxiliary space, as it modifies the volume in place.
++- **Performance:** The method is CPU-bound due to the per-voxel coordinate transformation and polygon containment test. It is suitable for interactive editing but may be slow for very large volumes compared to GPU-based clipping.
++- **Strengths:** Supports arbitrary 2D polygonal shapes in screen space, allowing for intuitive free-form cropping.
++- **Limitations:** Requires full volume iteration; not suitable for real-time rendering of large datasets without optimization. Assumes specific data types and coordinate systems.
++- **When to use:** Interactive volume editing where the user draws a custom 2D shape to define the region of interest.
++- **When not to use:** Real-time rendering of large volumes where performance is critical; use GPU-based clipping or the Convex VOI Clipping method instead.
+ 
+ ## Background
+-The method is derived from an unofficial GitHub repository [S1, unofficial]. It demonstrates a voxel-wise approach to volume cropping using VTK and Qt.
++The method is described in the open-source project `kpengk/VolumeClipping` [S1, unofficial]. It is part of a larger system for interactive volume visualization using VTK and Qt. The approach leverages VTK's coordinate transformation capabilities and Qt's polygon geometry classes to implement a simple, voxel-wise clipping mechanism.
+ 
+ ## Sources

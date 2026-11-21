@@ -1,0 +1,92 @@
+--- v004.md
++++ v005.md
+@@ -16,6 +16,6 @@
+     *   **Physical Brick Size:** $66^3$ voxels (to facilitate interpolation during sampling) [S1, unofficial].
+     *   **Storage:** Compressed, stored server-side in structured binary blobs [S1, unofficial].
+-2.  **Indirection Texture:** A compact 2D or 3D texture storing cache slot indices. Each texel corresponds to a logical brick coordinate in the pyramid and points to its current physical location (slot index) in the GPU page cache [S1, unofficial].
+-3.  **GPU Page Cache (Atlas):** A fixed-size array of slots holding decompressed bricks.
++2.  **Indirection Texture:** A compact 2D or 3D texture storing cache slot indices [S1, unofficial]. Each texel corresponds to a logical brick coordinate in the pyramid and points to its current physical location (slot index) in the GPU page cache [S1, unofficial].
++3.  **GPU Page Cache (Atlas):** A fixed-size array of slots holding decompressed bricks [S1, unofficial].
+     *   **Default Size:** 512 slots.
+     *   **Scalable Size:** Up to $768^3$ or $1024^3$ slots for larger volumes or high-DPI screens [S1, unofficial].
+@@ -50,6 +50,6 @@
+ 
+ **Formulas:**
+-*   Logical brick coordinate: $B = \lfloor P / 64 \rfloor$, where $P$ is the world-space voxel coordinate.
+-*   Local brick coordinate: $L = P \mod 64$.
++*   Logical brick coordinate: $B = \lfloor P / 64 \rfloor$, where $P$ is the world-space voxel coordinate [S1, unofficial].
++*   Local brick coordinate: $L = P \mod 64$ [S1, unofficial].
+ *   Physical interpolation padding: Bricks are stored as $66^3$ to provide a 1-voxel halo for trilinear interpolation at brick boundaries [S1, unofficial].
+ 
+@@ -61,8 +61,8 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Bandwidth Limitation:** Volume ray marching is texture bandwidth intensive. Older or mobile GPUs may drop below 60 FPS at full resolution [S1, unofficial].
++*   **Bandwidth Limitation:** Volume ray marching is texture bandwidth intensive [S1, unofficial]. Older or mobile GPUs may drop below 60 FPS at full resolution [S1, unofficial].
+ *   **Pre-processing Requirement:** Raw volume files cannot be rendered directly; they must be pre-processed and compressed, adding an offline ingestion step and increasing total storage requirements by ~15–20% [S1, unofficial].
+-*   **Network Dependency:** User experience is tied to internet connection quality. Lack of smart prefetching or offline capabilities means performance degrades with poor connectivity [S1, unofficial].
+-*   **Scalability Limit:** Tested up to ~$2048^3$ voxels. Larger datasets require manual adjustment of indirection table dimensions and page cache size [S1, unofficial].
++*   **Network Dependency:** User experience is tied to internet connection quality [S1, unofficial]. Lack of smart prefetching or offline capabilities means performance degrades with poor connectivity [S1, unofficial].
++*   **Scalability Limit:** Tested up to ~$2048^3$ voxels [S1, unofficial]. Larger datasets require manual adjustment of indirection table dimensions and page cache size [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -70,4 +70,5 @@
+ def render(out_of_core_volume, camera):
+     # 1. View Update & Cache Management
++    # Identify bricks intersecting the view frustum [G]
+     relevant_bricks = identify_bricks_in_view(camera, out_of_core_volume.brick_pyramid)
+     for brick_coord in relevant_bricks:
+@@ -76,5 +77,9 @@
+             compressed_data = fetch_http_range_read(out_of_core_volume.server, brick_coord)
+             decompressed = decompress(compressed_data)
+-            slot = evict_lru_if_full(out_of_core_volume.cache)
++            # Evict LRU brick if cache is full [G]
++            if len(out_of_core_volume.cache) >= out_of_core_volume.cache_size:
++                evicted_slot = out_of_core_volume.cache.lru_evict()
++                out_of_core_volume.indirection_texture[out_of_core_volume.cache[evicted_slot].brick_coord] = None
++            slot = out_of_core_volume.cache.allocate_slot()
+             out_of_core_volume.cache[slot] = decompressed
+             out_of_core_volume.indirection_texture[brick_coord] = slot
+@@ -87,8 +92,11 @@
+         t = ray.origin
+         while t < ray.far_plane and accumulated_opacity < 1.0:
+-            brick_coord = world_to_brick(ray.origin + t * ray.direction)
++            sample_point = ray.origin + t * ray.direction
++            # Compute logical brick coordinate [S1, unofficial]
++            brick_coord = (floor(sample_point.x / 64), floor(sample_point.y / 64), floor(sample_point.z / 64))
+             slot = out_of_core_volume.indirection_texture[brick_coord]
+             if slot is not None and slot < out_of_core_volume.cache_size:
+-                local_coord = world_to_local_brick(ray.origin + t * ray.direction, brick_coord)
++                # Compute local brick coordinate [S1, unofficial]
++                local_coord = (sample_point.x % 64, sample_point.y % 64, sample_point.z % 64)
+                 density = out_of_core_volume.cache[slot].sample(local_coord)
+                 accumulated_color, accumulated_opacity = composite(accumulated_color, accumulated_opacity, density)
+@@ -100,19 +108,19 @@
+ 
+ ### [I/O-Conscious Volume Rendering](6929-i-o-conscious-volume-rendering.md)
+-I/O-Conscious Volume Rendering is an out-of-core rendering technique that minimizes end-to-end rendering time by overlapping disk I/O with rendering computation using a data-driven execution model where data blocks are accessed as indivisible units. It sets itself apart from Out-of-core brick-based volume rendering by tightly integrating algorithm-specific prefetching with the ray casting traversal to ensure data is available exactly when needed, rather than relying on general-purpose disk prefetching or fixed memory budgets. Unlike program-driven approaches where the renderer controls the I/O, this method uses a dedicated prefetch thread that mirrors the ray caster's traversal logic to hide latency.
++I/O-Conscious Volume Rendering is an out-of-core rendering technique that minimizes end-to-end rendering time by overlapping disk I/O with rendering computation using a data-driven execution model where data blocks are accessed as indivisible units. It sets itself apart from Out-of-core brick-based volume rendering by tightly integrating algorithm-specific prefetching with the ray casting traversal to ensure data is available exactly when needed, rather than relying on general-purpose disk prefetching or fixed memory budgets. Unlike program-driven approaches where the renderer controls the I/O, this method uses a dedicated prefetch thread that mirrors the ray caster's traversal logic to hide latency. Choose it when I/O latency dominates rendering time and data access patterns are predictable [G].
+ 
+ ### Out-of-core bricking
+-Out-of-core bricking is a technique to create bricks of volumetric data along with a directed acyclic graph (DAG) of the relative distance of each brick along a single view direction. Bricks are aligned with cropped subvolumes [S2, unofficial]. A heuristic is used to evaluate the coherency of a series of data slices, which are parsed into a set of bricks sized for rendering hardware [S2, unofficial].
++Out-of-core bricking is a technique to create bricks of volumetric data along with a directed acyclic graph (DAG) of the relative distance of each brick along a single view direction [S2, unofficial]. Bricks are aligned with cropped subvolumes [S2, unofficial]. A heuristic is used to evaluate the coherency of a series of data slices, which are parsed into a set of bricks sized for rendering hardware [S2, unofficial]. Choose it when view-dependent distance ordering improves compositing efficiency [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not explicitly given in the sources. Performance depends on network latency, decompression speed, and GPU texture bandwidth. First render times for 2-3 GB datasets range from 544 ms to 2162 ms depending on hardware and dataset density [S1, unofficial].
++*   **Time Complexity:** Not explicitly given in the sources [S1, unofficial]. Performance depends on network latency, decompression speed, and GPU texture bandwidth [S1, unofficial]. First render times for 2-3 GB datasets range from 544 ms to 2162 ms depending on hardware and dataset density [S1, unofficial].
+ *   **Memory Complexity:** Fixed $O(1)$ VRAM usage determined by cache slot count, independent of the total volumetric dataset size [S1, unofficial].
+ *   **Measured Performance:**
+-    *   **Chameleon Dataset (1024×1024×1080, 2160 MB):** First render on M2: 544 ms, Zenfone: 655 ms. Data streamed: M2 0.73 MB, Zenfone 0.77 MB. Atlas occupancy: 2/512 (0.4%) [S1, unofficial].
+-    *   **Beechnut Dataset (1024×1024×1546, 3092 MB):** First render on M2: 1079 ms, Zenfone: 2162 ms. Data streamed: M2 1.10 MB, Zenfone 2.19 MB. Atlas occupancy: 18/512 (4%) [S1, unofficial].
+-*   **Strengths:** Fixed VRAM footprint; interactive frame rates for multi-GB datasets; leverages standard HTTP range reads; decouples logical and physical memory.
+-*   **Limitations:** Requires pre-processing; storage overhead ~15-20%; dependent on network quality; no smart prefetching; limited tested scale (~2048³); texture bandwidth bound on GPUs.
+-*   **When to use:** Interactive web-based visualization of large bioimaging or scientific datasets where VRAM is constrained and network bandwidth is sufficient.
+-*   **When not to use:** Offline scenarios; datasets requiring immediate full-volume access without streaming latency; environments with very low-end GPUs lacking WebGPU support.
++    *   **Chameleon Dataset (1024×1024×1080, 2160 MB):** First render on M2: 544 ms, Zenfone: 655 ms [S1, unofficial]. Data streamed: M2 0.73 MB, Zenfone 0.77 MB [S1, unofficial]. Atlas occupancy: 2/512 (0.4%) [S1, unofficial].
++    *   **Beechnut Dataset (1024×1024×1546, 3092 MB):** First render on M2: 1079 ms, Zenfone: 2162 ms [S1, unofficial]. Data streamed: M2 1.10 MB, Zenfone 2.19 MB [S1, unofficial]. Atlas occupancy: 18/512 (4%) [S1, unofficial].
++*   **Strengths:** Fixed VRAM footprint; interactive frame rates for multi-GB datasets; leverages standard HTTP range reads; decouples logical and physical memory [S1, unofficial].
++*   **Limitations:** Requires pre-processing; storage overhead ~15-20%; dependent on network quality; no smart prefetching; limited tested scale (~2048³); texture bandwidth bound on GPUs [S1, unofficial].
++*   **When to use:** Interactive web-based visualization of large bioimaging or scientific datasets where VRAM is constrained and network bandwidth is sufficient [S1, unofficial].
++*   **When not to use:** Offline scenarios; datasets requiring immediate full-volume access without streaming latency; environments with very low-end GPUs lacking WebGPU support [S1, unofficial].
+ 
+ ## Background

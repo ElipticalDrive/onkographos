@@ -1,0 +1,311 @@
+--- v005.md
++++ v006.md
+@@ -4,172 +4,182 @@
+ 
+ ## Overview
+-FastNeRF is a neural rendering method that accelerates inference by factorizing the view-dependent radiance field into position-dependent and direction-dependent components, enabling efficient caching of intermediate network outputs [S4, unofficial]. It solves the problem of high computational cost in standard NeRF by avoiding MLP evaluations at inference time, instead relying on hardware-accelerated ray tracing and grid lookups to achieve interactive frame rates (200Hz) on consumer hardware [S4, unofficial]. It differs from its siblings, such as [C-NeRF](7275-c-nerf.md) and [V4D](8762-v4d-voxel-for-4d-novel-view-synthesis.md), by using a low-rank inner-product factorization to decouple spatial and directional information, whereas other methods may use spherical harmonics or explicit voxel grids for density only [S3].
++FastNeRF is a neural rendering method that accelerates the inference of Neural Radiance Fields (NeRF) by factorizing the view-dependent color function into position-dependent and direction-dependent components, enabling efficient caching of intermediate radiance values [S4, unofficial]. It solves the problem of high computational cost in standard NeRF, which requires hundreds of MLP evaluations per pixel, by reducing inference to memory-bound cache lookups and dot products, achieving speeds over 3000 times faster than the original NeRF [S1][S4, unofficial]. It differs from its siblings, such as [C-NeRF](7275-c-nerf.md) and [VoxGRAF](12633-voxgraf.md), by explicitly separating the 5D radiance field into two independent low-dimensional manifolds (position and direction) to allow for compact, sparse caching of a "deep radiance map" rather than caching the full 5D function or using smaller local MLPs [S4, unofficial][S3].
+ 
+ ## How it works
+-FastNeRF builds on [Voxel-based Representation](10852-voxel-based-representation.md) by replacing the continuous MLP query with cached lookups from sparse 3D grids.
++FastNeRF builds on [Voxel-based Representation](10852-voxel-based-representation.md) by replacing the single monolithic MLP with two factorized networks and caching their outputs.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** Camera parameters (position, orientation, intrinsics), scene bounding box $V$, and trained network weights.
+-*   **Output:** Rendered image $\hat{C}(\mathbf{r})$ for each pixel ray $\mathbf{r}$.
++### Inputs and Outputs
++*   **Inputs:** A set of training images with known camera poses; a bounding box $V$ enclosing the scene.
++*   **Outputs:** A trained position-dependent network $\mathcal{F}_{\text{pos}}$, a direction-dependent network $\mathcal{F}_{\text{dir}}$, and optionally, cached grids for inference.
+ 
+-**Data Structures:**
+-1.  **Position Cache:** A sparse 3D grid of size $k^3$. Each cell stores the output of $\mathcal{F}_{\text{pos}}$: density $\sigma$ (1 value) and a deep radiance map $(\mathbf{u}, \mathbf{v}, \mathbf{w})$ (3 vectors of dimension $D$). Stored as 16-bit floating point values [S4, unofficial].
+-2.  **Direction Cache:** A sparse 2D grid of size $l^2$ (representing spherical coordinates $\theta, \phi$). Each cell stores the output of $\mathcal{F}_{\text{dir}}$: a weight vector $\boldsymbol{\beta}$ of dimension $D$. Stored as 16-bit floating point values [S4, unofficial].
+-3.  **Collision Mesh:** A triangle mesh derived from the density volume $\sigma$ using Marching Cubes, used for ray intersection to skip empty space [S4, unofficial].
++### Data Structures
++1.  **Position Cache:** A sparse 3D grid storing outputs of $\mathcal{F}_{\text{pos}}$.
++    *   **Fields:** Density $\sigma$ (scalar) and a deep radiance map components $(\mathbf{u}, \mathbf{v}, \mathbf{w})$ (each $D$-dimensional vectors).
++    *   **Layout:** Stored as dense 16-bit floating point values in a grid of size $k^3$ (or sparse subset thereof).
++2.  **Direction Cache:** A sparse 2D grid storing outputs of $\mathcal{F}_{\text{dir}}$.
++    *   **Fields:** Weight vector $\boldsymbol{\beta}$ ($D$-dimensional).
++    *   **Layout:** Stored as dense 16-bit floating point values in a grid of size $l^2$ (parameterized by spherical coordinates $\theta, \phi$).
++3.  **Collision Mesh:** A triangle mesh derived from the density volume $\sigma$ using Marching Cubes, used for hardware-accelerated ray tracing to skip empty space [S4, unofficial].
+ 
+-**Network Architecture:**
+-*   $\mathcal{F}_{\text{pos}}$: An 8-layer MLP with 384 hidden units (256 for LLFF scenes) [S4, unofficial]. Input: 3D position $\mathbf{p}$ with positional encoding. Output: $\sigma$ and $(\mathbf{u}, \mathbf{v}, \mathbf{w})$.
+-*   $\mathcal{F}_{\text{dir}}$: A 4-layer MLP with 128 hidden units [S4, unofficial]. Input: 2D viewing direction $(\theta, \phi)$ or 3D unit vector with positional encoding. Output: $\boldsymbol{\beta}$.
++### Network Architecture
++*   **$\mathcal{F}_{\text{pos}}$:** An 8-layer MLP with 384 hidden units (256 for LLFF scenes). Input: 3D position $\mathbf{p}$. Output: $\{\sigma, (\mathbf{u}, \mathbf{v}, \mathbf{w})\}$.
++*   **$\mathcal{F}_{\text{dir}}$:** A 4-layer MLP with 128 hidden units. Input: 2D viewing direction $\mathbf{d}$ (parameterized as a unit vector or spherical coordinates). Output: $\boldsymbol{\beta}$.
++*   **Positional Encoding:** Applied to inputs of both MLPs, as in standard NeRF [S4, unofficial].
+ 
+-**Parameters:**
+-*   $D$: Number of components in the deep radiance map. Typical values: 8 for NeRF Synthetic 360, 6 for LLFF [S4, unofficial].
+-*   $k$: Number of bins for position coordinates $(x, y, z)$. Typical values: 512 to 1024 [S4, unofficial].
+-*   $l$: Number of bins for direction coordinates $(\theta, \phi)$. Typical values: 256 to 1024 [S4, unofficial].
+-*   Grid Resolution: Defined by the longest side of the bounding volume $V$. Typical values: $256^3$ to $1024^3$ [S4, unofficial].
++### Training Steps
++1.  Define bounding box $V$ for the scene.
++2.  Sample $k$ uniform values for $x, y, z$ within $V$ and $l$ uniform values for $\theta \in [0, \pi], \phi \in [0, 2\pi]$.
++3.  Compute $\mathcal{F}_{\text{pos}}$ for all position combinations and $\mathcal{F}_{\text{dir}}$ for all direction combinations to initialize caches (optional, primarily for initialization or analysis; training typically optimizes the MLPs directly on rendered images).
++4.  Train $\mathcal{F}_{\text{pos}}$ and $\mathcal{F}_{\text{dir}}$ jointly using the standard NeRF loss (MSE between rendered and ground truth colors) [S4, unofficial].
+ 
+-**Steps:**
++### Inference Steps
++1.  **Ray Generation:** For each pixel, generate a ray $\mathbf{r}$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
++2.  **Empty Space Skipping:** Intersect $\mathbf{r}$ with the collision mesh. Start integration only after the first hit [S4, unofficial].
++3.  **Sampling:** Uniformly sample $N$ points $\mathbf{p}_i$ along the ray within the mesh bounds.
++4.  **Cache Lookup:**
++    *   For each $\mathbf{p}_i$, lookup $\sigma_i$ and $(\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$ from the Position Cache using nearest-neighbor interpolation [S4, unofficial].
++    *   For the ray direction $\mathbf{d}$, lookup $\boldsymbol{\beta}$ from the Direction Cache using trilinear sampling (on the $\theta, \phi$ grid) [S4, unofficial].
++5.  **Color Computation:** Compute color $\mathbf{c}_i$ for each sample point:
++    $$
++    \mathbf{c}_i = \boldsymbol{\beta}^T \cdot (\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i) = \sum_{j=1}^D \beta_j (u_{i,j}, v_{i,j}, w_{i,j})
++    $$
++    where $D$ is the number of components (typically 8 for Synthetic 360, 6 for LLFF) [S4, unofficial][S3].
++6.  **Volume Rendering:** Integrate color and density along the ray using the standard NeRF volume rendering equation [44-radiance-field-optimization.md]:
++    $$
++    \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
++    $$
++    where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ and $\delta_i$ is the distance between samples [S4, unofficial].
++7.  **Termination:** Terminate ray integration once transmittance $T_i$ drops below a threshold (saturation) [S1].
+ 
+-1.  **Cache Population (Preprocessing):**
+-    *   Define bounding box $V$ for the scene.
+-    *   Uniformly sample $k$ values for $x, y, z$ within $V$.
+-    *   Uniformly sample $l$ values for $\theta \in [0, \pi]$ and $\phi \in [0, 2\pi]$.
+-    *   Compute $\mathcal{F}_{\text{pos}}(\mathbf{p})$ for all $k^3$ positions to populate the Position Cache with $\{\sigma, (\mathbf{u}, \mathbf{v}, \mathbf{w})\}$ [S4, unofficial].
+-    *   Compute $\mathcal{F}_{\text{dir}}(\mathbf{d})$ for all $l^2$ directions to populate the Direction Cache with $\boldsymbol{\beta}$ [S4, unofficial].
+-    *   Generate a collision mesh from the density volume $\sigma$ in the Position Cache using Marching Cubes. If volume resolution $> 512^3$, downsample by factor of 2 before meshing [S4, unofficial].
+-
+-2.  **Ray Casting (Per Pixel):**
+-    *   Generate ray $\mathbf{r}$ from camera origin through pixel center.
+-    *   Intersect $\mathbf{r}$ with the collision mesh.
+-    *   If no hit, discard pixel (background).
+-    *   If hit, start integration at the intersection point.
+-
+-3.  **Volume Rendering Integration:**
+-    *   For each sample point $\mathbf{x}_i$ along the ray within the bounding box:
+-        a.  **Lookup Position Data:** Query the Position Cache at $\mathbf{x}_i$ using nearest-neighbor interpolation to retrieve $\sigma_i$ and $(\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$ [S4, unofficial].
+-        b.  **Lookup Direction Data:** Determine the ray direction $\mathbf{d}$ at $\mathbf{x}_i$. Query the Direction Cache at $(\theta, \phi)$ of $\mathbf{d}$ using trilinear interpolation to retrieve $\boldsymbol{\beta}_i$ [S4, unofficial].
+-        c.  **Compute Color:** Calculate color $\mathbf{c}_i$ as the inner product:
+-            $$
+-            \mathbf{c}_i = \boldsymbol{\beta}_i^T \cdot (\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i) = \sum_{j=1}^D \beta_{i,j} (u_{i,j}, v_{i,j}, w_{i,j})
+-            $$
+-        d.  **Accumulate:** Update transmittance $T_i$ and accumulated color using the standard volume rendering equation:
+-            $$
+-            T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)
+-            $$
+-            $$
+-            \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+-            $$
+-            where $\delta_i$ is the distance between sample points [S4, unofficial].
+-    *   Terminate integration if transmittance $T_i$ drops below a saturation threshold (early ray termination) [S1].
+-
+-**Pseudocode:**
++### Pseudocode
+ 
+ ```python
+ import math
+ 
+-def fast_nerf_render(ray_origin, ray_direction, pos_cache, dir_cache, mesh, k, l, D):
++def fast_nerf_infer(ray_origin, ray_direction, pos_cache, dir_cache, D, k, l):
+     """
+-    Renders a single pixel using FastNeRF caching.
++    Renders a single pixel using FastNeRF caches.
+     
+     Args:
+-        ray_origin: (3,) float array, camera origin.
+-        ray_direction: (3,) float array, normalized ray direction.
+-        pos_cache: Sparse 3D grid storing {sigma, u, v, w} for each voxel.
++        ray_origin: (3,) array, camera origin.
++        ray_direction: (3,) array, normalized ray direction.
++        pos_cache: Sparse 3D grid storing {sigma, u, v, w}.
+                    Access via nearest neighbor interpolation.
+-        dir_cache: Sparse 2D grid storing beta for each direction bin.
+-                   Access via trilinear interpolation on spherical coords.
+-        mesh: Triangle mesh for empty space skipping.
+-        k: Number of position bins per dimension.
+-        l: Number of direction bins per dimension.
+-        D: Number of factorization components.
++        dir_cache: Sparse 2D grid storing beta.
++                   Access via trilinear interpolation on theta/phi.
++        D: Number of components (e.g., 8).
++        k: Grid resolution for position (x,y,z).
++        l: Grid resolution for direction (theta, phi).
+         
+     Returns:
+-        color: (3,) float array, RGB color.
++        color: (3,) array, RGB color.
+     """
+-    # 1. Skip empty space using hardware-accelerated ray tracing
+-    hit_point, hit_dist = ray_intersect_mesh(ray_origin, ray_direction, mesh)
++    # 1. Empty Space Skipping using Collision Mesh
++    # Note: Collision mesh is pre-computed from density volume via Marching Cubes.
++    hit_point, t_near, t_far = intersect_ray_with_mesh(ray_origin, ray_direction)
+     if hit_point is None:
+-        return [0.0, 0.0, 0.0] # Background
+-
+-    # 2. Initialize integration
+-    accumulated_color = [0.0, 0.0, 0.0]
+-    transmittance = 1.0
+-    current_pos = hit_point
+-    sample_step = 0.01 # Fixed step size or adaptive based on grid resolution
++        return (0.0, 0.0, 0.0) # Background color
+     
+-    # Determine grid bounds for sampling
+-    # In practice, samples are taken at voxel centers or uniform intervals
+-    # within the bounding box V.
++    # 2. Sample points along the ray within the mesh bounds
++    num_samples = 1024 # Typical value, can vary
++    samples = []
++    for i in range(num_samples):
++        t = t_near + (t_far - t_near) * (i + 0.5) / num_samples
++        p = ray_origin + ray_direction * t
++        samples.append(p)
++        
++    # 3. Lookup from Caches
++    # Pre-fetch direction weights once per ray
++    # Convert ray_direction to spherical coordinates (theta, phi)
++    theta = math.acos(ray_direction[2]) # Assuming z-up or standard convention
++    phi = math.atan2(ray_direction[1], ray_direction[0])
++    beta = dir_cache.trilinear_sample(theta, phi) # Shape: (D,)
+     
+-    while transmittance > 1e-4: # Saturation threshold
+-        # Convert 3D position to cache indices
+-        # Assuming pos_cache covers bounding box V with k bins per dim
+-        pos_indices = world_to_cache_index(current_pos, k)
+-        
+-        # Lookup position-dependent data (Nearest Neighbor)
+-        sigma, u, v, w = pos_cache.lookup_nearest(pos_indices)
+-        
+-        # If sigma is effectively zero, skip (though mesh should handle empty space)
+-        if sigma <= 0:
+-            current_pos += ray_direction * sample_step
+-            continue
+-            
+-        # Convert ray direction to spherical coordinates (theta, phi)
+-        theta = math.acos(ray_direction[2]) # Assuming z-up or similar convention
+-        phi = math.atan2(ray_direction[1], ray_direction[0])
+-        
+-        # Convert spherical coords to cache indices
+-        dir_indices = spherical_to_cache_index(theta, phi, l)
+-        
+-        # Lookup direction-dependent data (Trilinear)
+-        beta = dir_cache.lookup_trilinear(dir_indices)
++    # 4. Compute Color and Density for each sample
++    sigmas = []
++    colors = []
++    
++    for p in samples:
++        # Lookup position cache
++        sigma, u, v, w = pos_cache.nearest_neighbor_sample(p)
++        sigmas.append(sigma)
+         
+         # Compute color via inner product
+-        # c = beta^T . (u, v, w)
+-        # u, v, w are D-dimensional vectors
+-        r = sum(beta[j] * u[j] for j in range(D))
+-        g = sum(beta[j] * v[j] for j in range(D))
+-        b = sum(beta[j] * w[j] for j in range(D))
+-        color = [r, g, b]
++        # c = beta . (u, v, w)
++        # u, v, w are each D-dimensional vectors
++        color = dot_product(beta, u, v, w, D)
++        colors.append(color)
+         
+-        # Volume rendering integration
+-        # T_i = exp(-sum(sigma_j * delta_j))
+-        # Contribution = T_i * (1 - exp(-sigma_i * delta_i)) * c_i
+-        delta = sample_step
++    # 5. Volume Rendering Integration
++    total_color = (0.0, 0.0, 0.0)
++    transmittance = 1.0
++    
++    # Calculate step size delta
++    delta = (t_far - t_near) / num_samples
++    
++    for i in range(num_samples):
++        sigma = sigmas[i]
++        c = colors[i]
++        
++        # Alpha for this segment
+         alpha = 1.0 - math.exp(-sigma * delta)
++        
++        # Weight for this segment
+         weight = transmittance * alpha
+         
+-        accumulated_color[0] += weight * color[0]
+-        accumulated_color[1] += weight * color[1]
+-        accumulated_color[2] += weight * color[2]
++        # Accumulate color
++        total_color += weight * c
+         
++        # Update transmittance
+         transmittance *= (1.0 - alpha)
+         
+-        # Move to next sample
+-        current_pos += ray_direction * delta
+-        
+-        # Check if out of bounds (optional, mesh intersection usually bounds it)
+-        if not is_inside_bounding_box(current_pos):
++        # Early termination if transmittance is negligible
++        if transmittance < 1e-4:
+             break
+             
+-    return accumulated_color
++    return total_color
++
++def dot_product(beta, u, v, w, D):
++    """
++    Computes the inner product of beta with the deep radiance map (u, v, w).
++    """
++    r = 0.0
++    g = 0.0
++    b = 0.0
++    for i in range(D):
++        r += beta[i] * u[i]
++        g += beta[i] * v[i]
++        b += beta[i] * w[i]
++    return (r, g, b)
+ ```
++
++### Parameters
++*   **$D$ (Components):** Dimensionality of the deep radiance map and direction weights. Typical values: 8 for NeRF Synthetic 360 scenes, 6 for LLFF scenes [S4, unofficial].
++*   **$k$ (Position Grid Size):** Number of uniform samples for each worldspace coordinate ($x, y, z$) in the position cache bounding box. Typical values: 512, 768, 1024 [S4, unofficial].
++*   **$l$ (Direction Grid Size):** Number of uniform samples for each ray direction coordinate ($\theta, \phi$). Typical values: 256, 512 [S4, unofficial].
++*   **Grid Resolution:** Number of divisions of the longest side of the bounding volume. Typical values: $256^3, 384^3, 512^3, 768^3, 1024^3$ [S4, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Aliasing:** Caching the model to a grid after training can introduce aliasing artifacts, leading to a decrease in metrics as a function of grid resolution [S4, unofficial].
++*   **Memory Limits:** Discretizing the full 5D space with 512 bins per dimension would require ~176 TB, which is infeasible. FastNeRF reduces this to ~54 GB (dense) or ~3 GB (sparse) [S4, unofficial][S3].
++*   **Mesh Complexity:** For density volumes larger than $512^3$, the collision mesh must be downsampled by a factor of two to reduce complexity [S4, unofficial].
++*   **Uncached Performance:** Without caching, FastNeRF is slower than standard NeRF due to larger MLPs (384 hidden units vs 256) [S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [FastNeRF Cache Size Estimation](11428-fastnerf-cache-size-estimation.md)
+-Provides analytical formulas to calculate the memory footprint of the position-dependent and direction-dependent caches. It solves the problem of determining whether a specific configuration fits within available hardware memory, accounting for the factorized representation which results in significantly smaller memory requirements compared to standard NeRF caches.
++Provides analytical formulas to calculate the memory footprint of the position-dependent and direction-dependent caches, solving the problem of determining if a configuration fits in hardware memory.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Inference is memory-bound rather than compute-bound due to cache lookups. Rendering speed exceeds 3000x compared to original NeRF [S1][S4, unofficial].
+-*   **Memory Complexity:** Standard NeRF caching requires $O(k^3 l^2)$ memory. FastNeRF reduces this to $O(k^3(1 + 3D) + l^2 D)$ [S4, unofficial].
+-*   **Measured Performance:** On a high-end consumer GPU (e.g., Nvidia Tesla V100), FastNeRF renders 300x300 pixel images at 200Hz (200 FPS) [S4, unofficial]. For LLFF scenes at 504x378 resolution, it achieves ~30 FPS in telepresence scenarios, 50x faster than NeRF [S4, unofficial].
+-*   **Memory Footprint:** For $k=l=1024$ and $D=8$, dense cache size is ~54 GB. Sparse cache size is ~3 GB [S3][S4, unofficial]. Standard NeRF with same resolution would require ~5600 TB [S4, unofficial].
+-*   **Strengths:** Interactive frame rates on consumer hardware; high visual fidelity comparable to NeRF; compatible with ray-tracing pipelines.
+-*   **Limitations:** Aliasing artifacts due to grid discretization after training; memory overhead of several GBs per scene makes it prohibitive for embedded systems without further factorization (e.g., SqueezeNeRF) [S3][S4, unofficial]; slower than cached version when not cached due to larger MLPs [S4, unofficial].
+-*   **When to use:** Scenarios requiring interactive rates on consumer hardware, such as telepresence or mixed reality [S4, unofficial].
+-*   **When not to use:** Memory-constrained embedded systems (use SqueezeNeRF instead) [S3]; applications requiring minimal memory footprint without sacrificing speed.
++*   **Time Complexity:** Inference is $O(N)$ where $N$ is the number of samples per ray, dominated by cache lookups and dot products, avoiding MLP evaluations [S4, unofficial].
++*   **Memory Complexity:** Caching standard NeRF is $O(k^3 l^2)$. FastNeRF reduces this to $O(k^3 (1 + 3D) + l^2 D)$ [S4, unofficial]. For $k=l=1024, D=8$, dense cache size is ~54 GB, compared to ~5600 TB for standard NeRF [S4, unofficial]. Sparse cache size is ~3 GB [S3].
++*   **Performance:** Renders high-fidelity photorealistic images at 200Hz on high-end consumer GPUs [S4, unofficial]. It is on average more than 3000x faster than NeRF [S4, unofficial]. On Nvidia Tesla V100, it renders 300x300 pixel images of a face at 30 fps in telepresence scenarios, ~50x faster than NeRF [S4, unofficial].
++*   **Strengths:** Extremely fast inference; compatible with hardware-accelerated ray tracing; maintains visual quality comparable to NeRF [S4, unofficial].
++*   **Limitations:** High memory usage for caches (several GBs); aliasing artifacts at lower resolutions; slower than NeRF when not cached [S4, unofficial][S3].
++*   **When to use:** Scenarios requiring interactive rates on consumer hardware, such as mobile devices, mixed reality, and telepresence [S4, unofficial].
++*   **When not to use:** Memory-constrained embedded systems without large caches; scenarios where training speed is the primary bottleneck (FastNeRF does not address training speed) [S4, unofficial].
+ 
+ ## Background
+-FastNeRF was introduced by Garbin et al. in March 2021 [S1][S4, unofficial]. It was motivated by the need for real-time neural rendering on mobile and mixed reality devices [S4, unofficial]. The method draws inspiration from real-time computer graphics techniques for approximating the rendering equation, specifically using spherical harmonics to factorize view-dependent appearance into a dot product of position-dependent and direction-dependent coefficients [S4, unofficial]. It is a direct extension of the Neural Radiance Fields (NeRF) framework [27], modifying the network architecture to enable caching [S4, unofficial].
++FastNeRF was proposed by Garbin et al. in March 2021 [S1]. It was motivated by the need for real-time neural rendering on mobile and mixed reality devices [S4, unofficial]. The method draws inspiration from real-time computer graphics techniques for approximating the rendering equation, such as spherical harmonics, by factorizing the 5D radiance field into position and direction components [S4, unofficial]. It is a key development in the evolution of NeRF acceleration, preceding methods like KiloNeRF and PlenOctrees [S1].
+ 
+ ## Sources

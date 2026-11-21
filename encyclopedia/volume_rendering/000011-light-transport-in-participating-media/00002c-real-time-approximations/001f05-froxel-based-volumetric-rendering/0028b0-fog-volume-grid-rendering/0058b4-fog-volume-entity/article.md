@@ -1,0 +1,108 @@
+# Fog Volume Entity
+
+Also called: Fog Volume Entity Setup, FogVolume
+## Overview
+The Fog Volume Entity is a spatial entity used to define local volumetric fog density, color, and noise-based structure within a 3D level [S1]. It solves the problem of creating non-uniform, patchy fog effects (such as fog banks or layered mist) that cannot be achieved with global fog settings alone [S1]. It differs from sibling methods like [Fog Volume Grid Rendering](4350-fog-volume-grid-rendering.md) by providing a high-level, user-configurable entity interface for shaping fog via noise parameters, rather than directly manipulating the underlying froxel data structures [S1].
+## How it works
+### Inputs and Outputs
+The entity accepts spatial placement (position and scale) and parameter values. It outputs a modified fog field that contributes to the global volumetric lighting calculation [S1].
+
+### Data Structures
+The entity exposes a set of scalar and boolean parameters. The specific ranges and defaults are defined below.
+
+**Parameter Layout:**
+*   `Density`: Float. Range: $[0, 100]$. Default: Not specified. Controls base fog density.
+*   `DensityNoiseOffset`: Float. Range: $[-2, +2]$. Default: Not specified. Offsets the noise value for density.
+*   `DensityNoiseScale`: Float. Range: $[0, 10]$. Default: $1$. Scales the noise value for density.
+*   `DensityNoiseFrequency`: Vector3 $(X, Y, Z)$. Default: Not specified. Defines the frequency of noise patches.
+*   `DensityNoiseTimeFrequency`: Float. Default: Not specified. Controls the speed of temporal morphing.
+*   `WindInfluence`: Float. Range: $[0, 20]$. Default: Not specified. Controls the influence of global wind.
+*   `UseGlobalFogColor`: Boolean. Default: Not specified. Overrides local color with global fog color.
+*   `Enabled`: Boolean. Default: True. Controls entity state.
+
+### Steps and Formulas
+The entity generates a local fog field by combining a base density with a noise function. The exact noise function implementation is not provided in the sources [G]. The following procedural steps describe the configuration and runtime behavior:
+
+1.  **Initialization**: Place the entity in the level. Define its spatial bounds (e.g., $50m \times 50m \times 50m$) [S1].
+2.  **Base Density Setup**: Set `Density` to a high value (e.g., $100$) for visibility during setup, or to a production value (typically $1-3$) for subtle effects [S1].
+3.  **Noise Offset Application**: Apply `DensityNoiseOffset`. A negative value (e.g., $-1.2$) breaks the solid volume into patches [S1].
+4.  **Noise Scaling**: Apply `DensityNoiseScale`. This defines the thickness of individual fog patches (clouds) or the spacing between them. A value of $0.5$ thins density and increases spacing [S1].
+5.  **Frequency Definition**: Set `DensityNoiseFrequency` $(X, Y, Z)$.
+    *   Increasing $Z$ (e.g., from $10$ to $100$) creates a layered effect [S1].
+    *   Higher $X$ and $Y$ values create more individual patches [S1].
+    *   Varying $X, Y, Z$ values randomly breaks up patches into different sizes [S1].
+6.  **Temporal Morphing**: Apply `DensityNoiseTimeFrequency`. A low value (e.g., $0.2$) ensures natural morphing; higher values cause unnatural quick morphing [S1].
+7.  **Color Blending**: If `UseGlobalFogColor` is enabled, the entity's local color is overridden by the global fog color, ensuring natural blending [S1].
+8.  **Wind Interaction**: Apply `WindInfluence` to allow global wind to affect the fog volume's shape or movement [S1].
+
+### Pseudocode
+The following pseudocode represents the runtime update loop for a Fog Volume Entity, assuming a noise function `Noise3D(x, y, z, time)` is available. This is a reconstruction based on the parameter interactions described [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_fog_volume_entity(entity, global_wind, time_step):
+    # 1. Get parameters
+    density_base = entity.Density
+    noise_offset = entity.DensityNoiseOffset
+    noise_scale = entity.DensityNoiseScale
+    freq = entity.DensityNoiseFrequency # Vector3
+    time_freq = entity.DensityNoiseTimeFrequency
+    wind_inf = entity.WindInfluence
+    use_global_color = entity.UseGlobalFogColor
+    
+    # 2. Calculate temporal offset for noise
+    # The source mentions morphing patches over time [S1]
+    time_offset = time * time_freq
+    
+    # 3. For each point P within the entity's bounding box:
+    # Note: Exact shader integration is not provided [G]
+    # The following represents the logical contribution to density
+    
+    local_wind = global_wind * wind_inf
+    
+    # Calculate noise value at point P
+    # Assuming P is relative to entity center
+    noise_val = Noise3D(
+        P.x * freq.x, 
+        P.y * freq.y, 
+        P.z * freq.z, 
+        time_offset
+    )
+    
+    # Apply offset and scale
+    # Source: Offset breaks solid shape, Scale defines thickness/spacing [S1]
+    adjusted_noise = (noise_val + noise_offset) * noise_scale
+    
+    # Combine with base density
+    # Source: Density controls overall density [S1]
+    final_density = density_base * adjusted_noise
+    
+    # 4. Determine color
+    if use_global_color:
+        final_color = global_fog_color
+    else:
+        final_color = entity.local_color
+        
+    return final_density, final_color
+```
+
+### Edge Cases and Pitfalls
+*   **High Density Values**: Setting `Density` to $100$ is intended for setup visibility only. Using this in production results in unnatural, opaque fog [S1].
+*   **Fast Morphing**: High `DensityNoiseTimeFrequency` values cause unnatural, rapid morphing of fog patches [S1].
+*   **Parameter Coupling**: `DensityNoiseOffset` and `DensityNoiseScale` work closely together; adjusting one often requires tweaking the other to maintain the desired patch structure [S1].
+*   **Color Clashing**: Without `UseGlobalFogColor` enabled, local colors (e.g., red) may blend poorly with the scene [S1].
+
+## Operating characteristics
+*   **Performance**: Performance impact depends on the number of active Fog Volume entities and their overlap with the view frustum. The entity is controlled via Flow Graph, allowing runtime modification of parameters [S1].
+*   **Memory**: Memory usage is associated with the entity's transform and parameter storage. The underlying froxel data is handled by the [Fog Volume Grid Rendering](4350-fog-volume-grid-rendering.md) system [S1].
+*   **Strengths**: Allows for complex, non-uniform fog structures (banks, layers) without manual texture painting or complex shader graphs [S1].
+*   **Limitations**: Limited to the parameters exposed by the entity. Fine-grained control requires understanding the interaction between noise parameters [S1].
+*   **When to use**: For creating localized fog effects like mist, fog banks, or layered clouds in specific areas of a level [S1].
+*   **When not to use**: For uniform, global fog effects, which are better handled by global fog settings [S1].
+
+## Background
+The Fog Volume Entity is part of the CRYENGINE 5 Volumetric Fog system [S1]. It was introduced to provide artists with control over density noise, enabling the creation of interesting shapes within fog volumes [S1]. It is used in conjunction with the Flow Graph system for runtime control [S1].
+
+## Sources
+[S1] CRYENGINE | Documentation - Volumetric Fog, https://www.cryengine.com/docs/static/engines/cryengine-5/categories/23756816/pages/26215326, fetched 2026-10-29

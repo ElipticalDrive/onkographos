@@ -1,0 +1,100 @@
+# Immediate Mode to Array Mode Optimization
+
+Also called: Client State Array Rendering, Replacing glBegin/glEnd with glDrawArrays, VBO Optimization, Vertex Buffer Object (VBO) Optimization
+
+## Overview
+Immediate Mode to Array Mode Optimization is a technique to optimize rendering performance by replacing the immediate mode API (`glBegin`/`glEnd` with per-vertex calls) with array-based drawing commands (`glDrawArrays`/`glDrawElements`), reducing driver overhead and state changes [S1, unofficial]. It further improves performance by storing vertex data in GPU memory (Buffer Object) rather than client memory, reducing transfer overhead [S1, unofficial]. This method builds on [OpenGL Client State Array Rendering](11008-opengl-client-state-array-rendering.md) by introducing the Vertex Buffer Object (VBO) extension.
+
+## How it works
+**Inputs:** A static array of vertex data in client memory.
+**Outputs:** Rendered geometry on the GPU.
+
+**Data Structures:**
+The vertex data is organized in a C struct. For a vertex with position and color, the layout is:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```c
+struct vec3 { GLfloat x, y, z; };
+struct vertex_t {
+    vec3 position;
+    vec3 color;
+};
+```
+Note: In C, struct tags are not automatically type names; one must use `struct vec3` explicitly or define a typedef [S1, unofficial].
+
+**Steps:**
+1.  **Define Data:** Create a static array of `vertex_t` instances containing the vertex attributes [S1, unofficial].
+2.  **Setup Pointers (Client-Side Arrays):**
+    *   Enable vertex array state: `glEnableClientState(GL_VERTEX_ARRAY)` [S1, unofficial].
+    *   Enable color array state: `glEnableClientState(GL_COLOR_ARRAY)` [S1, unofficial].
+    *   Set vertex pointer: `glVertexPointer(3, GL_FLOAT, sizeof(vertex_t), (char*)vertices + offsetof(vertex_t, position))` [S1, unofficial].
+    *   Set color pointer: `glColorPointer(3, GL_FLOAT, sizeof(vertex_t), (char*)vertices + offsetof(vertex_t, color))` [S1, unofficial].
+3.  **Draw (Immediate Mode Replacement):** Call `glDrawArrays(GL_TRIANGLES, 0, vertex_count)` instead of looping `glBegin`/`glVertex` [S1, unofficial].
+4.  **Upload to GPU (VBO):**
+    *   Generate a buffer object name: `glGenBuffers(1, &vbo)` [S1, unofficial].
+    *   Bind the buffer to `GL_ARRAY_BUFFER`: `glBindBuffer(GL_ARRAY_BUFFER, vbo)` [S1, unofficial].
+    *   Upload data: `glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW)` [S1, unofficial].
+5.  **Update Pointers for VBO:** Modify the `glVertexPointer` and `glColorPointer` calls to use `nullptr` (or `0`) for the data pointer argument, as the data is now residing in the buffer object bound to `GL_ARRAY_BUFFER` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# 1. Define data structures (C-style struct layout)
+# struct vec3 { GLfloat x, y, z; };
+# struct vertex_t { vec3 position, color; };
+
+# 2. Define static vertex data
+vertices = [
+    { position: (0.0, 0.5, 0.0), color: (1.0, 0.0, 0.0) },
+    { position: (0.5, -0.5, 0.0), color: (0.0, 1.0, 0.0) },
+    { position: (-0.5, -0.5, 0.0), color: (0.0, 0.0, 1.0) }
+]
+
+# 3. Setup client-side arrays (OpenGL 1.1)
+glEnableClientState(GL_VERTEX_ARRAY)
+glEnableClientState(GL_COLOR_ARRAY)
+glVertexPointer(3, GL_FLOAT, sizeof(vertex_t), offset(vertices, 'position'))
+glColorPointer(3, GL_FLOAT, sizeof(vertex_t), offset(vertices, 'color'))
+
+# 4. Draw using array mode
+glDrawArrays(GL_TRIANGLES, 0, len(vertices))
+
+# 5. Optimize with VBO (OpenGL 1.5+)
+vbo = glGenBuffers(1)
+glBindBuffer(GL_ARRAY_BUFFER, vbo)
+glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW)
+
+# 6. Update pointers to use VBO (data pointer is null)
+glVertexPointer(3, GL_FLOAT, sizeof(vertex_t), None)
+glColorPointer(3, GL_FLOAT, sizeof(vertex_t), None)
+```
+
+**Parameters:**
+*   `GL_STATIC_DRAW`: Usage hint indicating data will not change often [S1, unofficial].
+*   `sizeof(vertex_t)`: Stride between consecutive vertices [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **C vs C++ Structs:** In C, `struct vec3` is not a type alias; use `typedef struct vec3 vec3;` or prefix with `struct` [S1, unofficial].
+*   **Deprecated Primitives:** `GL_QUADS` are deprecated in OpenGL 3.0+; geometry should be built from triangles [S1, unofficial].
+*   **Version Requirements:** Array mode setup is OpenGL 1.1; VBOs require OpenGL 1.5 or higher [S1, unofficial].
+
+## Subtopics
+
+### OpenGL Mesh Setup (VAO/VBO/EBO)
+A more modern approach using Vertex Array Objects (VAOs) to encapsulate vertex attribute state, reducing state management overhead. Choose this for modern OpenGL pipelines (3.0+). [OpenGL Mesh Setup (VAO/VBO/EBO)](11322-opengl-mesh-setup-vao-vbo-ebo.md)
+
+## Operating characteristics
+*   **Time Complexity:** Reduces API call overhead from $O(N)$ (one call per vertex) to $O(1)$ (one draw call) [S1, unofficial].
+*   **Memory:** VBOs move data from client memory to GPU memory, reducing PCI-E transfer overhead during rendering [S1, unofficial].
+*   **Performance:** Significant speedup for large vertex counts (e.g., 100,000 vertices) by eliminating per-vertex driver overhead [S1, unofficial].
+*   **Strengths:** Simple to implement; compatible with legacy OpenGL (1.1+); effective for static geometry.
+*   **Limitations:** Requires OpenGL 1.5+ for VBOs; does not address shader-based attribute management (modern OpenGL); deprecated primitives like quads should be avoided [S1, unofficial].
+*   **When to Use:** Legacy OpenGL projects, simple geometry, static meshes where VAOs are not yet implemented.
+*   **When Not to Use:** Modern OpenGL pipelines (use VAO/VBO/EBO); dynamic geometry requiring frequent updates (consider `GL_DYNAMIC_DRAW` or persistent mappings).
+
+## Background
+The technique originated as a standard optimization in OpenGL development, moving from immediate mode (OpenGL 1.0) to array mode (OpenGL 1.1) and further to Vertex Buffer Objects (OpenGL 1.5) [S1, unofficial]. It is widely documented in community forums and tutorials as a fundamental step in optimizing OpenGL rendering performance [S1, unofficial].
+
+## Sources
+[S1] Optimising the rendition of quads using GLUT?, https://stackoverflow.com/questions/68302713/optimising-the-rendition-of-quads-using-glut, fetched 2026-10-27 (unofficial)

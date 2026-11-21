@@ -1,0 +1,145 @@
+Cyberdyne Game Engine inpired in GoDot and Unreal. Contribute to CyberdyneCorp/CyberdyneEngine development by creating an account on GitHub.
+
+First-person weapon view: its own lens and near plane, never in the wall; the first-person camera; ABI 1.13 by leonardoaraujosantos · Pull Request #140 · CyberdyneCorp/CyberdyneEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+leonardoaraujosantos
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+What
+The first-person weapon view camera-system describes — "WHEN a first-person camera renders the world and a separate weapon view THEN both SHALL be render views derived from one evaluated camera" — and the first-person camera that drives it.
+The weapon view is drawn into the world's frame, not composited over it: one depth buffer, one prepass, one light loop, one temporal resolve. What differs is the matrix a weapon vertex goes through — the viewmodel's own field of view and near plane (1 cm), with its depth squeezed into the slice of the reversed-Z range nearest the eye (z' = (1 - s) + s·z, s = 1/16). Every world surface past near / (1 - s) (10.7 cm) is behind every weapon fragment, and the weapon still orders itself.
+Weapon pushed into a wall 0.45 m out (barrel reaches 0.85 m)
+with the weapon view: 5995 of 5995 texels
+as world geometry: 4654 of 5995 texels
+Depth composition golden (references/weapon_view_composition.png): the barrel reaches into the pillar and is drawn whole; every texel off the weapon is the world's, byte for byte.
+Pieces
+cy::rendering-viewmodel (new, src/rendering/viewmodel/): the squeezed projection, guaranteed_clear_distance, settings_from_views (checks the weapon view is the primary view's camera: same pose, distinct history identity), assembly_view, ViewmodelFrame (last frame's lens) and write_viewmodel.
+Assembly: AssemblyView::viewmodel (appended). The world view no longer draws the weapon layers (survivors on any weapon layer are dropped); the weapon view is culled against its own frustum; its draws are marked render::kInstanceViewmodel (new bit) and carry the shadow policy on kInstanceCastsShadow / kInstanceReceivesShadow. A device-culled frame refuses a weapon view.
+Frame: CyFrameData / FrameViewData append the viewmodel rows, last frame's rows and a policy word (688 → 832 bytes). cy/frame.slang appends cyViewmodelDepthVertex, cyViewmodelForwardVertex and their skinned forms (the rigid entries are untouched). The forward pass finds a weapon surface's light list through the world's projection of its position (frameClusterPixel) and skips the contact term for it unless asked. PipelineSetup::viewmodel creates the variants; the recorder binds them for marked draws. Frame, particle, strip and selection headers regenerated (embedded_headers.py, never hand-merged).
+Lighting, shadows, GI: the weapon is lit at its camera-attached world position — lights, shadow map (received by default, cast on request), fog, irradiance volume. Screen-space terms see it as a thin shell at the eye.
+Motion vectors: previous rows = last frame's viewmodel lens over previous_camera_relative_view (split out of previous_camera_relative_to_clip, same arithmetic). A carried weapon has zero motion; a raised weapon moves as its lens does.
+Camera (servers/camera/first_person.h): FirstPersonCamera — mouse look with the sensitivity applied once, head bob by distance walked, recoil as a damped spring stepped in closed form, ADS blending both lenses (camera::blend), motion reduction, and the three aims (control / view / weapon). produce_weapon_view, ViewPurpose::Viewmodel.
+ABI 1.13 (append only, baseline updated, just quality-abi green): first_person_configure/input/kick/reset/state/release, viewmodel_configure/get over cy::game-backend-first-person; refused in a fixed step. CyberdyneKit FirstPersonCamera, WeaponView, FirstPersonTests; Rust SDK and Swift overlay regenerated.
+Docs: new guide docs/guides/first-person-weapon-view.md; README, ABI README, Swift README/guide; OpenSpec change add-first-person-weapon-view (strict-valid) with the living specs synced; requirements map — "Aim is three things" moved from exempt:m11e to a case, two new camera-system requirements and one native-abi requirement mapped.
+Tests
+Suite
+What it holds
+render.weapon_view (new)
+off is the frame before: 129600/129600 texels byte-identical to frame_scene_before_bloom.png, and an enabled-but-empty weapon view 129600/129600 identical; a weapon in a wall loses 0 texels (as world geometry it loses 1341); its own near plane (34096 vs 3614 texels); the composition golden; lit as world geometry: 0 of 5995 texels differ; world lens 1.35 and 0.60: 0 weapon texels moved, 0 recoloured; turning camera: weapon motion 0.000000 (world least 0.0266); sights 0.95→0.75 rad: worst motion error 6.1e-5 over 5496 texels vs the analytic n(k-1)/2; shadow policy (received -16%, cast darkens 266 floor texels, brightens none); 1080p timing
+unit.render_viewmodel, integration.viewmodel_assembly (new)
+the squeeze and its guarantee, view pairing, last lens, block words; second cull, dropped layers, mark and policy
+unit.camera_system (+13 cases)
+look/sensitivity, bob, spring (exact composition), recoil and ADS at 60 vs 144 Hz, motion reduction, three aims, two views of one camera
+unit.abi, integration.game_backend_first_person, FirstPersonTests
+ABI 1.13
+Every new case was proved red by a mutation (11 mutations, openspec/changes/add-first-person-weapon-view/evidence/falsification.txt).
+Local runs (GCC 13, Development, RTX 5060 Vulkan): 115 unit, 273 integration (incl. swift_package), all 53 render suites run serially — all pass. build-shaders --strict src samples: target_refusals=0, disagreements=0. quality-shader-headers, quality-abi, quality-format-check, quality-docs, quality-swift-format, quality-spelling, quality-licence, quality-layers, quality-specs, ci-check and clang-tidy over the changed directories green.
+Measured (1920×1080, RTX 5060, Vulkan, mean of 24 frames)
+Prepass
+Opaque
+To the post-process
+Weapon view
+0.050 ms
+0.097 ms
+0.253 ms
+Same boxes as world geometry
+0.049 ms
+0.097 ms
+0.252 ms
+Vulkan only
+Device runs are Vulkan only. Metal and D3D12 compile every new entry (MSL embedded, build-shaders --strict); not run on a device.
+Gaps
+No sample drives a first-person rig end to end yet (the host places the eye and writes the weapon rows; the adapter and first_person_eye / first_person_weapon are the pieces). No video: there is no sample to capture.
+A weapon draw ignores DrawPipelineFn (a material variant's vertex stage projects through the world's rows); the selection mask and virtual geometry don't know the weapon view; the device cull refuses one.
+Depth of field and screen-space effects read the squeezed depth (weapon flattened at the near plane).
+CameraSettings::reduce_motion does not yet drive the first-person motion_scale.
+leonardoaraujosantos
+added 6 commits
+October 27, 2026 03:06
+Add the first-person camera's behaviours and the weapon view a camera…
+…
+fe7b2c7
+```
+… produces
+
+Mouse look with the sensitivity applied once, head bob advanced by distance
+walked, recoil as a damped spring stepped in closed form, the sights blending
+the world's lens and the weapon view's, motion reduction and the three aims.
+produce_weapon_view gives the second render view of one evaluated camera.
+```
+Expose the first-person camera and the weapon view through ABI 1.13
+…
+98c25f1
+```
+first_person_configure/input/kick/reset/state/release and
+viewmodel_configure/get over cy::game-backend-first-person; refused in a fixed
+step. CyberdyneKit's FirstPersonCamera and WeaponView with their tests; the
+Rust SDK, the Swift overlay and the baseline regenerated.
+```
+Draw the first-person weapon view into the world's frame
+…
+94ca277
+```
+cy::rendering-viewmodel squeezes the viewmodel's own projection into the slice
+of the reversed-Z range nearest the eye, so the arms and the weapon are drawn in
+front of any wall they are pushed into while being lit, shadowed and fogged
+where they are. The assembly culls the weapon view's layers on their own and
+marks its draws; the frame appends the viewmodel rows, four vertex entries and
+the weapon's cluster lookup through the world's projection; its motion comes
+from last frame's lens. render.weapon_view holds it to the pixels.
+```
+Document the weapon view, record its mutation proofs, and map its req…
+…
+ab3f4b9
+```
+…uirements
+```
+Satisfy clang-tidy across the weapon view sources and regenerate the …
+…
+df6e7fb
+```
+…selection shaders
+```
+Count the weapon view's requirements in the capability matrix
+3f355d8
+Hide details
+View details
+leonardoaraujosantos
+merged commit 6c25edc
+into
+main
+Oct 27, 2026
+34 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Oct 27, 2026
+Blend spaces with sync groups, foot placement on uneven ground, and aim
+#141
+Merged
+Add the UI layout editor, ABI 1.17 for menus, and samples/16-menus
+#139
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

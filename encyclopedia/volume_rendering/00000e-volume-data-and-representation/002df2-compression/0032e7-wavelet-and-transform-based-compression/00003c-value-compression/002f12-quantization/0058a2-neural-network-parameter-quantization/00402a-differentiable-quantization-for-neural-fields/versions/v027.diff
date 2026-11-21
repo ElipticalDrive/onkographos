@@ -1,0 +1,161 @@
+--- v026.md
++++ v027.md
+@@ -4,32 +4,33 @@
+ 
+ ## Overview
+-This method reduces the render-time memory footprint of neural radiance fields by quantizing grid-based feature and density values to single bytes during the optimization process [S1]. Unlike post-training quantization, which causes quality degradation due to the mismatch between the optimized continuous model and the discrete inference model, this approach integrates quantization into the training loop [S1]. It sets itself apart from siblings like [Global Quantization](15134-global-quantization.md) by applying per-dimension byte quantization with specific affine scaling factors tailored to the data distribution (density vs. color) rather than a global uniform range [S1].
++Differentiable quantization reduces the render-time memory footprint of neural radiance fields by compressing grid values into single bytes during the optimization phase [S1]. Unlike post-training quantization, which causes quality degradation due to the mismatch between the optimized continuous model and the discrete inference model, this method integrates quantization directly into the training loop [S1]. It sets itself apart from sibling methods like Global Quantization by applying per-component affine scaling and sigmoid mapping to handle the specific dynamic ranges of densities versus colors [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** Continuous grid values $\tilde{\mathbf{t}}$ (densities, diffuse colors, or features) optimized during training.
+-*   **Output:** Quantized grid values $\tilde{\mathbf{t}}'$ stored as single bytes, which are affinely mapped back to a specific range for rendering.
++*   **Output:** Quantized grid values $\tilde{\mathbf{t}}'$ stored as single bytes, which are affinely mapped back to the target range for rendering [S1].
+ 
+ **Data Structures:**
+-*   Grid values are stored as single-byte integers (uint8) in memory.
+-*   During forward pass, these bytes are converted to floats and scaled.
++*   Grid values are stored as 8-bit unsigned integers (bytes) [S1].
++*   The quantization function $q(x)$ maps a float in $[0, 1]$ to one of $2^8 - 1 = 255$ discrete levels [S1].
+ 
+ **Parameters:**
+-*   $m$: Scaling factor for affine mapping.
+-    *   $m = 14$ for densities (computed using exponential nonlinearity) [S1].
++*   $m$: The scaling factor for the affine mapping.
++    *   $m = 14$ for densities (which use an exponential nonlinearity) [S1].
+     *   $m = 7$ for diffuse colors and features [S1].
+-*   $B = 2^8 - 1 = 255$: Number of quantization levels [S1].
++*   Bit depth: Fixed at 8 bits (1 byte) per value [S1].
++
++**Steps:**
++1.  **Sigmoid Mapping:** Apply a sigmoid function $\sigma(\cdot)$ to the continuous grid values $\tilde{\mathbf{t}}$ to map them into the range $[0, 1]$ [S1].
++2.  **Quantization:** Apply the differentiable quantization function $q(x)$ to the sigmoided values [S1].
++3.  **Affine Mapping:** Map the quantized result to the range $[-m, m]$ using the formula:
++    $$ \tilde{\mathbf{t}}' = 2m \cdot q(\sigma(\tilde{\mathbf{t}})) - m $$
++    where $m$ is chosen based on the data type (14 for density, 7 for color/features) [S1].
++4.  **Interpolation and Summation:** During rendering, linearly interpolate the quantized grid values and apply subsequent non-linearities (e.g., exponential for density) as defined in the base neural field architecture [S1].
+ 
+ **Quantization Function:**
+-The core operation maps continuous values to bytes and back, using a Straight-Through Estimator (STE) to allow gradients to flow through the non-differentiable rounding operation [S1].
+-
+-1.  **Sigmoid Mapping:** Map input $\tilde{\mathbf{t}}$ to $[0, 1]$ using a sigmoid function $\sigma(\cdot)$ [S1].
+-    $$ x = \sigma(\tilde{\mathbf{t}}) $$
+-2.  **Quantization:** Round $x$ to the nearest of $2^8$ levels. The quantization function $q(x)$ is defined as:
+-    $$ q(x) = x + \mathcal{V}\left(\frac{\lfloor (2^8 - 1)x + 1/2 \rfloor}{2^8 - 1} - x\right) $$
+-    Where $\mathcal{V}$ is the Straight-Through Estimator operator, which returns the gradient of the identity function for the input $x$, effectively bypassing the gradient of the rounding term $\frac{\lfloor (2^8 - 1)x + 1/2 \rfloor}{2^8 - 1} - x$ [S1].
+-3.  **Affine Mapping:** Map the quantized value $q(x)$ to the range $[-m, m]$:
+-    $$ \tilde{\mathbf{t}}' = 2m \cdot q(\sigma(\tilde{\mathbf{t}})) - m $$
+-    This $\tilde{\mathbf{t}}'$ is the value stored in the grid and used for interpolation during rendering [S1].
++The function $q(x)$ implements a straight-through estimator (STE) to allow gradients to flow through the non-differentiable rounding operation [S1]. It is defined as:
++$$ q(x) = x + \mathcal{V}\left(\frac{\lfloor (2^8 - 1)x + 1/2 \rfloor}{2^8 - 1} - x\right) $$
++where $\mathcal{V}$ is the stop-gradient operator, effectively returning the rounded value $\frac{\lfloor (2^8 - 1)x + 1/2 \rfloor}{2^8 - 1}$ during the forward pass, while passing the input $x$ as the gradient during the backward pass [S1].
+ 
+ **Pseudocode:**
+@@ -38,55 +39,78 @@
+ import torch.nn.functional as F
+ 
+-def sigmoid_quantize(t, m):
++def differentiable_quantize(t, m):
+     """
+-    Quantizes grid values t to single bytes during optimization.
++    Quantizes grid values to single bytes during optimization.
+     
+     Args:
+-        t: Continuous tensor of grid values.
+-        m: Scaling factor (14 for density, 7 for color/features).
++        t (torch.Tensor): Continuous grid values.
++        m (float): Scaling factor (14 for density, 7 for color/features).
+         
+     Returns:
+-        Quantized and affine-mapped tensor t_prime.
++        torch.Tensor: Quantized and affinely mapped values.
+     """
+-    # 1. Sigmoid mapping to [0, 1]
+-    x = torch.sigmoid(t)
++    # Step 1: Sigmoid mapping to [0, 1]
++    t_sigmoid = torch.sigmoid(t)
+     
+-    # 2. Quantization to byte levels [0, 255]
+-    # Calculate the nearest integer level
+-    levels = 2**8 - 1  # 255
+-    quantized_float = (torch.floor((levels * x) + 0.5) / levels)
++    # Step 2: Quantization to 256 levels (0 to 255)
++    # Calculate the discrete index: floor((2^8 - 1) * x + 0.5)
++    # This rounds to the nearest integer level
++    levels = 2**8 - 1
++    quantized_index = torch.floor(levels * t_sigmoid + 0.5)
+     
+-    # 3. Straight-Through Estimator (STE)
+-    # The gradient flows through 'x' (the input to quantization),
+-    # ignoring the gradient of the floor operation.
+-    quantized_ste = x + (quantized_float - x).detach()
++    # Normalize back to [0, 1]
++    quantized_normalized = quantized_index / levels
+     
+-    # 4. Affine mapping to [-m, m]
+-    t_prime = 2 * m * quantized_ste - m
++    # Step 3: Straight-Through Estimator (STE)
++    # Forward pass uses quantized_normalized
++    # Backward pass uses t_sigmoid (gradient flows through sigmoid)
++    # torch.stop_gradient is simulated by detaching the quantized value
++    # and adding the original value as a zero-gradient residual, 
++    # or simply using the quantized value for forward and letting 
++    # the gradient of the identity connection flow.
++    # The formula q(x) = x + V(rounded - x) implies:
++    # Forward: rounded
++    # Backward: gradient of x (which is 1) * gradient of (rounded - x) [0] + gradient of x [1]
++    # Effectively, we just return the quantized value, but ensure gradients 
++    # flow from the loss to t_sigmoid as if the quantization was identity.
+     
+-    return t_prime
++    # Implementation of STE:
++    # Forward: quantized_normalized
++    # Backward: gradient flows to t_sigmoid directly
++    quantized_ste = t_sigmoid + (quantized_normalized - t_sigmoid).detach()
++    
++    # Step 4: Affine mapping to [-m, m]
++    # t' = 2 * m * quantized_ste - m
++    t_quantized = 2 * m * quantized_ste - m
++    
++    return t_quantized
+ 
+-# Example usage during training step:
+-# t_quantized = sigmoid_quantize(t_continuous, m=14) # for density
+-# t_quantized = sigmoid_quantize(t_continuous, m=7)  # for color/features
++# Example usage for density
++density_quantized = differentiable_quantize(density_grid, m=14)
++# Example usage for color
++color_quantized = differentiable_quantize(color_grid, m=7)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Post-training Quantization:** Simply quantizing grid values after training converges causes a significant drop in rendering quality due to the mismatch between the optimized model and the quantized inference model [S1].
+-*   **Non-linearity Application:** The non-linearities defined in the radiance field equations (e.g., exponential for density) are applied *after* linear interpolation and summation of the quantized values, not before [S1].
++*   **Post-Training Quantization:** Simply quantizing grid values after training leads to a mismatch between the optimized model and the rendering model, causing significant quality drops [S1]. Quantization must be performed *during* optimization [S1].
++*   **Gradient Flow:** The non-differentiable rounding operation requires the straight-through estimator to allow gradients to propagate during backpropagation [S1].
++*   **Dynamic Range:** The choice of $m$ is critical. Using incorrect $m$ values for densities or colors can lead to clipping or loss of precision [S1].
+ 
+ ## Subtopics
+ 
+ ### [Quantization-Aware Fine-Tuning](11387-quantization-aware-fine-tuning.md)
+-A post-clustering optimization step to recover quality lost during vector quantization. It differs by fine-tuning scene parameters while simulating low-precision quantization during the forward pass to obtain stable gradients.
++A post-clustering optimization step to recover quality lost during vector quantization by fine-tuning with simulated low-precision quantization.
++
++### [Learned Bitwidth Quantization (LBQ)](16775-learned-bitwidth-quantization-lbq.md)
++A framework that treats bitwidth as a learnable variable, dynamically allocating bits per component based on content sensitivity, unlike the fixed byte size of this method.
+ 
+ ## Operating characteristics
+-*   **Memory:** Reduces grid memory consumption significantly by storing each dimension as a single byte [S1].
+-*   **Performance:** Enables real-time view synthesis in unbounded scenes by lowering memory bandwidth requirements [S1].
+-*   **Quality:** Maintains high rendering quality comparable to full-precision models when quantization is integrated during optimization, avoiding the quality drops associated with post-training quantization [S1].
+-*   **Limitations:** Requires careful tuning of the scaling factor $m$ for different data types (density vs. color) [S1].
++*   **Memory Reduction:** Reduces render-time memory by storing grid values as single bytes (8 bits) instead of full-precision floats [S1].
++*   **Performance:** Enables real-time view synthesis in unbounded scenes by reducing memory bandwidth requirements [S1].
++*   **Quality:** Maintains high rendering quality when integrated into the optimization process, avoiding the degradation seen in post-training quantization [S1].
++*   **Limitations:** The method is specific to grid-based neural fields and requires careful tuning of the scaling parameter $m$ for different data types [S1].
+ 
+ ## Background
+-This method was introduced in the MERF (Memory-Efficient Radiance Fields) paper for real-time view synthesis in unbounded scenes [S1]. It addresses the high memory consumption of neural radiance fields by baking content only in regions occupied by a proposal MLP and quantizing the grid values to bytes during optimization [S1].
++This method was introduced in the MERF (Memory-Efficient Radiance Fields) paper for real-time view synthesis in unbounded scenes [S1]. It addresses the high memory consumption of neural radiance fields by quantizing grid values during optimization, allowing for efficient storage and rendering [S1].
+ 
+ ## Sources

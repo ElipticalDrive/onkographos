@@ -1,0 +1,129 @@
+--- v002.md
++++ v003.md
+@@ -7,7 +7,5 @@
+ 
+ ## How it works
+-The method addresses the scale-ambiguity in 3D scenes where expanding the ray length $L$ requires volume density $\sigma$ to scale down to maintain the same rendered color [S1]. Standard exponential activations often produce $\sigma$ values that are too large for scaled-up scenes, resulting in "cloudiness" [S1]. This method solves this by:
+-1. Parameterizing distance and volume densities in log-space for easier multiplicative scaling [S1].
+-2. Using a closed-form initialization formula for the bias/offset to guarantee high ray transmittance $T$ [S1].
++The method addresses the scale-ambiguity in 3D scenes where expanding the ray length $L$ requires volume density $\sigma$ to scale down to maintain the same rendered color [S1]. Standard exponential activations often produce $\sigma$ values that are too large for scaled-up scenes, resulting in "cloudiness" [S1]. This method solves this by parameterizing distance and volume densities in log-space for easier multiplicative scaling [S1], and by using a closed-form initialization formula for the bias/offset to guarantee high ray transmittance $T$ [S1].
+ 
+ ### Inputs and Outputs
+@@ -23,27 +21,30 @@
+ ### Data Structures
+ *   **DensityField Class:**
+-    *   `self.offset`: A scalar float computed during initialization.
+-    *   `self.encoder`: A neural network module (e.g., MLP) that takes `xyz_locs` and outputs `log_densities` [S1].
++    *   `self.offset`: A scalar float computed during initialization [S1].
++    *   `self.encoder`: A neural network module that takes `xyz_locs` and outputs `log_densities` [S1].
++
++### Steps
++1. Initialize `DensityField` with scene length $L$, expected standard deviation $\tau$ (default 1.0), and target transmittance $T$ (default 0.99) [S1].
++2. Encode spatial locations to obtain log densities [S1].
++3. Compute density delta by adding log distances, the GumbelCDF transformation, and the high transmittance offset [S1].
++4. Compute transmittance by accumulating the density delta along the ray, appending zeros at the front, and exponentiating the negative sum [S1].
++5. Compute alphas and weights for volume rendering [S1].
+ 
+ ### Formulas
+-1.  **High Transmittance Offset:**
+-    $$ \text{offset} = \log(\log(1/T)) - \log(L) - \frac{\tau^2}{2} $$
+-    Where:
+-    *   $\log$ is the natural logarithm.
+-    *   $T$ is the target transmittance.
+-    *   $L$ is the ray length.
+-    *   $\tau$ is the expected standard deviation of the output [S1].
++1. **High Transmittance Offset:**
++   $$ \text{offset} = \log(\log(1/T)) - \log(L) - \frac{\tau^2}{2} $$
++   Where $\log$ is the natural logarithm, $T$ is the target transmittance, $L$ is the ray length, and $\tau$ is the expected standard deviation of the output [S1].
+ 
+-2.  **Density Delta (GumbelCDF Activation):**
+-    $$ \text{density\_delta} = \exp\left( \text{log\_densities} + \log(\text{deltas}) + \text{offset} \right) $$
+-    The term $\log(\text{deltas}) + \text{offset}$ is invariant with respect to $L$ [S1]. This activation function corresponds to the CDF of the Gumbel distribution, providing a smooth, sigmoid-like transition for alpha values [S1].
++2. **Density Delta (GumbelCDF Activation):**
++   $$ \text{density\_delta} = \exp\left( \text{log\_densities} + \log(\text{deltas}) + \text{offset} \right) $$
++   The term $\log(\text{deltas}) + \text{offset}$ is invariant with respect to $L$ [S1]. This activation function corresponds to the CDF of the Gumbel distribution, providing a smooth, sigmoid-like transition for alpha values [S1].
+ 
+-3.  **Transmittance:**
+-    $$ \text{trans} = \exp\left( -\text{cumsum}(\text{density\_delta}[\dots, :-1], \text{dim}=-1) \right) $$
+-    Zeros are appended to the front of the cumulative sum to align dimensions [S1].
++3. **Transmittance:**
++   $$ \text{trans} = \exp\left( -\text{cumsum}(\text{density\_delta}[\dots, :-1], \text{dim}=-1) \right) $$
++   Zeros are appended to the front of the cumulative sum to align dimensions [S1].
+ 
+-4.  **Alphas and Weights:**
+-    $$ \text{alphas} = 1. - \exp(-\text{density\_delta}) $$
+-    $$ \text{weights} = \text{alphas} * \text{trans} $$
++4. **Alphas and Weights:**
++   $$ \text{alphas} = 1. - \exp(-\text{density\_delta}) $$
++   $$ \text{weights} = \text{alphas} * \text{trans} $$
+ 
+ ### Pseudocode
+@@ -62,20 +63,6 @@
+             T: Target initial transmittance (must be < 1.0).
+         """
+-        # Calculate the closed-form offset for high transmittance
+-        # offset = log(log(1/T)) - log(L) - (tau**2)/2
+         self.offset = math.log(math.log(1.0 / T)) - math.log(L) - (tau ** 2) / 2
+-        
+-        # Initialize the encoder. In practice, this is a neural network.
+-        # [G] The source does not specify the encoder architecture; 
+-        # a standard MLP is used in implementations.
+-        self.encoder = self._init_encoder()
+-
+-    def _init_encoder(self):
+-        """Stub for the density encoder network."""
+-        # [G] Returns log densities. Shape matches xyz_locs.
+-        class DummyEncoder:
+-            def __call__(self, xyz_locs):
+-                return np.zeros_like(xyz_locs) 
+-        return DummyEncoder()
++        self.encoder = YourDensityEncoder()  # [G] Source does not specify architecture; typically an MLP.
+ 
+     def compute_volrend_ws(self, xyz_locs, deltas):
+@@ -90,27 +77,12 @@
+             weights: Rendering weights, shape [N_rays, N_samp].
+         """
+-        # 1. Encode spatial locations to get log densities
+         log_densities = self.encoder(xyz_locs)
+-        
+-        # 2. Compute density delta using GumbelCDF activation and high transmittance offset
+-        # Guard against deltas <= 0 (miss cases, boundaries) to prevent log(0) -> -inf
+-        # and subsequent division-by-zero errors in downstream operations.
+-        log_deltas = np.log(np.maximum(deltas, 1e-8))
++        log_deltas = np.log(np.maximum(deltas, 1e-8))  # [G] Guard against log(0) for missed rays or boundaries.
+         density_delta = np.exp(log_densities + log_deltas + self.offset)
+-        
+-        # 3. Compute transmittance
+-        # Accumulate density delta along the ray (excluding the last sample for trans calculation)
+-        # Append zeros at the front to maintain shape [N_rays, N_samp]
+         cumsum_delta = np.cumsum(density_delta[..., :-1], axis=-1)
+-        # Prepend zeros
+         trans_sum = np.concatenate([np.zeros_like(cumsum_delta[..., :1]), cumsum_delta], axis=-1)
+         trans = np.exp(-trans_sum)
+-        
+-        # 4. Compute alphas
+         alphas = 1.0 - np.exp(-density_delta)
+-        
+-        # 5. Compute weights
+         weights = alphas * trans
+-        
+         return weights
+ ```
+@@ -122,15 +94,8 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Numerical Stability:** The method is designed to be numerically stable because $\log(\text{deltas})$ and the offset naturally cancel out variations in scene size $L$ or ray sampling strategies [S1].
+-*   **Scene Scaling:** Without this initialization, scaling up the scene (increasing $L$) often results in $\sigma$ values that are too large, trapping optimization in bad local optima [S1].
+-*   **Zero or Negative Deltas:** Rays that miss the scene or hit boundaries may have `deltas` equal to zero. Directly computing $\log(0)$ yields $-\infty$, which can propagate as $-\infty$ through exponentials and trigger downstream division-by-zero errors. A small epsilon guard (e.g., $\max(\text{deltas}, 10^{-8})$) must be applied before the logarithm [G].
+-*   **Target Transmittance Constraint:** $T$ must be strictly less than 1.0, otherwise $\log(1/T)$ becomes zero and $\log(0)$ causes a domain error [G].
++Numerical stability is inherent because $\log(\text{deltas})$ and the offset naturally cancel out variations in scene size $L$ or ray sampling strategies [S1]. Without this initialization, scaling up the scene (increasing $L$) often results in $\sigma$ values that are too large, trapping optimization in bad local optima [S1]. Rays that miss the scene or hit boundaries may have `deltas` equal to zero, which would cause $\log(0)$ to yield $-\infty$ [G]. A small epsilon guard (e.g., $\max(\text{deltas}, 10^{-8})$) must be applied before the logarithm to prevent downstream numerical errors [G]. The target transmittance $T$ must be strictly less than 1.0, otherwise $\log(1/T)$ becomes zero and $\log(0)$ causes a domain error [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Robustly handles different scene scalings; prevents cloudiness in large scenes; ensures high initial transmittance for stable optimization [S1].
+-*   **Limitations:** Requires knowledge of the scene scale $L$ and expected output std $\tau$ for initialization [S1].
+-*   **When to use:** When training NeRFs on scenes with varying scales or when standard initialization leads to poor convergence due to overly dense geometry [S1].
++Time complexity: Not given in the sources [G]. Memory complexity: Not given in the sources [G]. Strengths include robust handling of different scene scalings, prevention of cloudiness in large scenes, and guaranteed high initial transmittance for stable optimization [S1]. Limitations include the requirement to know the scene scale $L$ and expected output standard deviation $\tau$ for initialization [S1]. It should be used when training NeRFs on scenes with varying scales or when standard initialization leads to poor convergence due to overly dense geometry [S1].
+ 
+ ## Background

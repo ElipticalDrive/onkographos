@@ -1,0 +1,105 @@
+--- v001.md
++++ v002.md
+@@ -4,61 +4,54 @@
+ 
+ ## Overview
+-Early Z-Test Acceleration is a hardware-level optimization that prevents fragment shader execution for fragments determined to be occluded by the depth buffer before the shader program runs [S1, unofficial]. It solves the problem of wasted computational effort in volume rendering by integrating early ray termination and empty-space skipping directly into the graphics pipeline's fixed-function depth testing stage [S1, unofficial]. Unlike software-based termination checks which still incur the overhead of shader invocation, this method allows the fragment processor to immediately discard occluded work and process the next incoming fragment, offering performance gains of up to a factor of 3 on typical volumetric datasets [S1, unofficial].
++Early Z-Test Acceleration is a hardware optimization applied before the fragment shader executes for a particular fragment to avoid shader execution, enabling the fragment processor to immediately process the next incoming fragment [S1, unofficial]. It is used to integrate early ray termination and empty-space skipping into the rendering pipeline [S1, unofficial]. Unlike software-based checks that still invoke the shader, this method discards occluded fragments at the hardware level, yielding performance gains of up to a factor of 3 for typical volumetric datasets on hardware such as the ATI 9700 [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A depth buffer (z-buffer) containing depth values from previously rendered opaque geometry or previous passes; a fragment being processed by the rasterizer.
+-*   **Output:** The fragment is either discarded (if it fails the depth test) or passed to the fragment shader (if it passes).
++*   **Input:** A depth buffer containing depth values from prior rendering passes; a fragment with an associated depth value [S1, unofficial][G].
++*   **Output:** The fragment is discarded if it fails the depth test, or passed to the fragment shader if it passes [G].
+ 
+ **Data Structures:**
+-*   **Depth Buffer:** A 2D array of depth values (typically 16, 24, or 32 bits per pixel) representing the closest surface depth encountered so far for each screen coordinate.
++*   **Depth Buffer:** A 2D array of depth values per screen coordinate, storing the closest surface depth encountered so far [G].
+ 
+ **Prerequisites and Constraints:**
+-1.  The depth test must be enabled in the graphics state [S1, unofficial].
+-2.  Depth values must have been written to the depth buffer in prior rendering passes (e.g., an opaque background or occluding geometry) [S1, unofficial].
+-3.  **Critical Constraint:** The early z-test is only enabled if all other per-fragment tests (such as stencil or alpha tests) are disabled [S1, unofficial].
+-4.  **Critical Constraint:** The fragment's depth value must not be modified in the fragment shader (e.g., via `gl_FragDepth` or equivalent) [S1, unofficial]. If depth is modified, the hardware cannot guarantee the early test's validity and will fall back to standard execution order.
++1. The depth test must be enabled in the graphics state [S1, unofficial].
++2. Depth values must have been written to the depth buffer in prior rendering passes [S1, unofficial].
++3. All other per-fragment tests (e.g., stencil, alpha) must be disabled [S1, unofficial].
++4. The fragment's depth value must not be modified in the fragment shader [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Rasterization:** The geometry (e.g., a ray-casting quad) is rasterized into fragments. Each fragment is assigned a depth value $z_{frag}$ based on its position in view space.
+-2.  **Depth Comparison:** The hardware compares $z_{frag}$ against the existing value $z_{buffer}$ stored in the depth buffer at the corresponding screen coordinate.
+-3.  **Test Execution:**
+-    *   If $z_{frag}$ fails the depth test (e.g., $z_{frag} > z_{buffer}$ for standard depth testing where closer objects have smaller depth values), the fragment is discarded immediately.
+-    *   If $z_{frag}$ passes, the fragment shader is executed to compute color and opacity.
+-4.  **Depth Update:** If the fragment passes and the depth buffer is writable, $z_{buffer}$ is updated to $z_{frag}$.
++1. The rasterizer assigns a depth value $z_{\text{frag}}$ to each fragment based on its view-space position [G].
++2. The hardware compares $z_{\text{frag}}$ against the stored depth value $z_{\text{buffer}}$ at the corresponding screen coordinate [G].
++3. If $z_{\text{frag}}$ fails the depth test, the fragment is discarded immediately without shader execution [S1, unofficial][G].
++4. If $z_{\text{frag}}$ passes, the fragment shader executes to compute color and opacity [G].
++5. If the fragment passes and the depth buffer is writable, $z_{\text{buffer}}$ is updated to $z_{\text{frag}}$ [G].
+ 
+ **Pseudocode:**
+ ```python
+-# This logic is handled by the GPU hardware, not the shader.
+-# The shader must NOT modify depth.
++def early_z_test(z_frag, z_buffer):
++    # Hardware depth comparison performed before shader execution.
++    # Returns True if fragment passes, False if discarded.
++    return z_frag <= z_buffer
+ 
+ def fragment_shader():
+-    # 1. Sample volume data to compute color (C) and opacity (alpha)
+-    color = sample_volume(ray_origin, ray_direction)
+-    alpha = compute_opacity(color)
+-    
+-    # 2. Compositing logic (standard front-to-back)
+-    # Note: In a single-pass ray-cast, this shader runs once per fragment.
+-    # For multi-pass or ray-marching within a shader, early z-test 
+-    # applies to the fragment as a whole, not individual samples.
+-    
+-    # 3. Return color. Depth is implicitly the fragment's depth.
+-    return color
++    # Shader executes only if early_z_test returns True.
++    # Must not modify output depth; hardware relies on implicit z_frag.
++    # Standard front-to-back compositing loop would run here.
++    return (0.0, 0.0, 0.0)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Depth Modification:** If the shader modifies the output depth, the early z-test is disabled by the hardware, resulting in no performance gain [S1, unofficial].
+-*   **Other Tests:** Enabling stencil or alpha tests disables the early z-test optimization [S1, unofficial].
+-*   **Empty Depth Buffer:** If no opaque geometry has been rendered prior to the volume pass, the depth buffer contains default values (usually far plane). The early z-test will pass for all fragments, providing no acceleration [S1, unofficial].
++*   Depth modification in the shader disables the early z-test, forcing fallback to standard execution order [S1, unofficial].
++*   Enabling other per-fragment tests (stencil, alpha) disables the optimization [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Hardware Z-Buffer Slicing
+-A hardware acceleration technique used to speed up parity counting by using a z-buffer [S2]. This method is based on an idea originally by Emil Praun [S2]. It is distinct from general early z-test acceleration as it specifically targets the voxelization or parity counting phase of volume processing rather than the final compositing stage.
++A hardware acceleration technique used to speed up parity counting by using a z-buffer [S2]. Based on an idea originally by Emil Praun [S2].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Time:** Reduces shader execution time proportionally to the area of occluded fragments. Performance gains are directly proportional to the area of occluded parts of the volume [S1, unofficial].
+-*   **Memory:** Requires a depth buffer. No additional memory structures are needed for the acceleration itself.
++*   **Time:** Reduces shader execution time proportionally to the area of occluded fragments [S1, unofficial].
++*   **Memory:** Requires a depth buffer. Not given in the sources.
+ 
+ **Measured Performance:**
+@@ -66,10 +59,10 @@
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Significant reduction in shader invocations for occluded regions; leverages existing hardware depth testing logic.
+-*   **Limitations:** Only effective when there is opaque occlusion in front of the volume. Strict constraints on shader behavior (no depth modification, no other per-fragment tests) limit its applicability in complex rendering pipelines.
++*   **Strengths:** Significant reduction in shader invocations for occluded regions; leverages existing hardware depth testing logic [G].
++*   **Limitations:** Only effective when there is opaque occlusion in front of the volume. Strict constraints on shader behavior (no depth modification, no other per-fragment tests) limit its applicability in complex rendering pipelines [S1, unofficial].
+ 
+ **When to Use:**
+-*   Use when rendering volumes behind opaque geometry or when a previous pass has established a depth buffer.
+-*   Do not use if the volume is the first object rendered or if the shader requires depth modification.
++*   Use when rendering volumes behind opaque geometry or when a previous pass has established a depth buffer [G].
++*   Do not use if the volume is the first object rendered or if the shader requires depth modification [S1, unofficial].
+ 
+ ## Background

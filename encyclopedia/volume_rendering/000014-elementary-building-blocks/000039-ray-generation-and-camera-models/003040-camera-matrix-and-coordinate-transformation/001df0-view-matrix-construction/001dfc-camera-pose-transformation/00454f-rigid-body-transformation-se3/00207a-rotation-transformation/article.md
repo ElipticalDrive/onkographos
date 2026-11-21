@@ -1,0 +1,226 @@
+# Rotation Transformation
+
+Also called: Model Rotation
+
+## Overview
+Rotation Transformation is a geometric primitive that rotates a point, vector, or shape around a specified coordinate axis (X, Y, or Z) by a given angle [S1, S2, S3, unofficial]. It sets itself apart from [Translation Transformation](2281-translation-transformation.md) by altering orientation rather than position, and from [Rigid Body Transformation (SE3)](11475-rigid-body-transformation-se3.md) by isolating the rotational degrees of freedom [G]. Unlike [Quaternion Rotation](2302-quaternion-rotation.md), it operates directly on Cartesian coordinates using trigonometric functions, which is computationally simpler for single-axis rotations but lacks the singularity-free interpolation properties of quaternions for complex orientations [G].
+
+## How it works
+**Inputs:**
+1.  `coords`: A collection of 3D points, typically represented as a matrix or array of shape $(N, 3)$ or $(3, N)$, where $N$ is the number of points [S2, S5, unofficial].
+2.  `axis`: The axis of rotation, specified as an integer index $i \in \{0, 1, 2\}$ corresponding to X, Y, Z respectively [S1, unofficial], or a string identifier ('x', 'y', 'z') [S2, unofficial]. Default is 'z' (index 2) [S2, unofficial].
+3.  `angle`: The rotation angle $\theta$ in radians [S2, unofficial]. If provided in degrees, it must be converted: $\theta_{rad} = \theta_{deg} \times \frac{\pi}{180}$ [S4, unofficial].
+
+**Outputs:**
+1.  `rotated_coords`: The transformed coordinates, maintaining the same shape and data type as the input `coords` [S2, unofficial].
+2.  Optionally, the $4 \times 4$ homogeneous rotation matrix $R$ [S1, S4, unofficial].
+
+**Data Structures:**
+*   **Rotation Matrix ($R$):** A $4 \times 4$ homogeneous matrix. The upper-left $3 \times 3$ submatrix contains the rotation components; the last column and row are $[0, 0, 0, 1]^T$ and $[0, 0, 0, 1]$ respectively, preserving homogeneous coordinates [S4, unofficial].
+
+**Formulas:**
+For a rotation around axis $i$, let $j = (i + 1) \pmod 3$ and $k = (j + 1) \pmod 3$. The non-zero elements of the $3 \times 3$ rotation submatrix $R_{3\times3}$ are:
+$$
+R_{jj} = \cos\theta, \quad R_{jk} = -\sin\theta, \quad R_{kj} = \sin\theta, \quad R_{kk} = \cos\theta, \quad R_{ii} = 1
+$$
+All other entries in rows and columns $i, j, k$ are zero [S1, unofficial].
+
+The transformed point $p'$ is computed as:
+$$
+p' = R \cdot p
+$$
+Some implementations apply the transpose of the rotation matrix ($R^T$) depending on whether the rotation is applied to the object (active) or the coordinate system (passive) [S3, unofficial].
+
+**Pseudocode:**
+The following implementation constructs the $4 \times 4$ matrix and applies it to a batch of points. It handles the axis selection and trigonometric computation explicitly.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rotation_transformation(coords, axis='z', angle=0.0):
+    """
+    Rotates a set of 3D points around a specified axis.
+    
+    Args:
+        coords: Array of shape (N, 3) or (3, N) containing point coordinates.
+        axis: String 'x', 'y', or 'z' (or integer 0, 1, 2).
+        angle: Rotation angle in radians.
+        
+    Returns:
+        rotated_coords: Array of the same shape as coords.
+    """
+    # 1. Normalize axis input
+    if isinstance(axis, str):
+        axis_map = {'x': 0, 'y': 1, 'z': 2}
+        i = axis_map.get(axis.lower(), 2)
+    else:
+        i = int(axis) % 3
+        
+    # 2. Compute indices j and k
+    j = (i + 1) % 3
+    k = (j + 1) % 3
+    
+    # 3. Compute trigonometric values
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    
+    # 4. Construct the 4x4 Rotation Matrix R
+    # Initialize with identity
+    R = [[1.0, 0.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0, 0.0],
+         [0.0, 0.0, 1.0, 0.0],
+         [0.0, 0.0, 0.0, 1.0]]
+    
+    # Set the 2D rotation sub-block for axes j and k
+    R[j][j] = cos_a
+    R[j][k] = -sin_a
+    R[k][j] = sin_a
+    R[k][k] = cos_a
+    
+    # R[i][i] remains 1, others in row/col i are 0 (already set by identity)
+    
+    # 5. Prepare coordinates for matrix multiplication
+    # Ensure coords is (N, 3)
+    if len(coords[0]) == 3:
+        pts = coords
+    else:
+        # Assume (3, N) format, transpose to (N, 3)
+        pts = list(zip(*coords))
+        
+    # 6. Apply rotation using 3x3 submatrix
+    R_3x3 = [row[:3] for row in R[:3]]
+    rotated_pts = []
+    for p in pts:
+        # p is row vector, multiply by transpose of R_3x3
+        x, y, z = p
+        nx = x * R_3x3[0][0] + y * R_3x3[0][1] + z * R_3x3[0][2]
+        ny = x * R_3x3[1][0] + y * R_3x3[1][1] + z * R_3x3[1][2]
+        nz = x * R_3x3[2][0] + y * R_3x3[2][1] + z * R_3x3[2][2]
+        rotated_pts.append([nx, ny, nz])
+        
+    return rotated_pts
+
+def compute_rotation_matrix_from_vectors(from_vec, to_vec):
+    """
+    Constructs a rotation matrix that rotates 'from_vec' to align with 'to_vec'.
+    Uses Rodrigues' rotation formula logic.
+    
+    Args:
+        from_vec: Array of shape (N, 3) or (3,)
+        to_vec: Array of shape (N, 3) or (3,)
+        
+    Returns:
+        R: Rotation matrix of shape (N, 3, 3) or (3, 3)
+    """
+    # Normalize inputs
+    def normalize(v):
+        norm = math.sqrt(sum(x**2 for x in v))
+        return [x / norm for x in v] if norm > 0 else v
+        
+    from_norm = normalize(from_vec) if len(from_vec) == 3 else [normalize(v) for v in from_vec]
+    to_norm = normalize(to_vec) if len(to_vec) == 3 else [normalize(v) for v in to_vec]
+    
+    is_batch = isinstance(from_norm[0], list)
+    if not is_batch:
+        from_norm = [from_norm]
+        to_norm = [to_norm]
+        
+    N = len(from_norm)
+    out = [[[0.0]*3 for _ in range(3)] for _ in range(N)]
+    
+    for idx in range(N):
+        fv = from_norm[idx]
+        tv = to_norm[idx]
+        
+        # Compute cross product v and dot product c
+        v = [fv[1]*tv[2] - fv[2]*tv[1],
+             fv[2]*tv[0] - fv[0]*tv[2],
+             fv[0]*tv[1] - fv[1]*tv[0]]
+        c = fv[0]*tv[0] + fv[1]*tv[1] + fv[2]*tv[2]
+        
+        # Handle degenerate cases: parallel vectors
+        v_norm_sq = sum(x**2 for x in v)
+        if v_norm_sq < 1e-8:
+            if c > 0:
+                # Identical vectors -> Identity
+                out[idx] = [[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]]
+                continue
+            else:
+                # Opposite vectors -> Negative Identity
+                out[idx] = [[[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]]
+                continue
+                
+        # Compute k = 1 / (1 + c)
+        k = 1.0 / (1.0 + c)
+        
+        # Construct rotation matrix components using v and k
+        v0, v1, v2 = v[0], v[1], v[2]
+        out[idx][0][0] = v0**2 * k + c
+        out[idx][0][1] = v0 * v1 * k - v2
+        out[idx][0][2] = v0 * v2 * k + v1
+        out[idx][1][0] = v0 * v1 * k + v2
+        out[idx][1][1] = v1**2 * k + c
+        out[idx][1][2] = v1 * v2 * k - v0
+        out[idx][2][0] = v0 * v2 * k - v1
+        out[idx][2][1] = v1 * v2 * k + v0
+        out[idx][2][2] = v2**2 * k + c
+        
+    if not is_batch:
+        return out[0]
+    return out
+```
+
+**Edge Cases and Pitfalls:**
+1.  **Parallel/Opposite Vectors:** When constructing rotation matrices from vectors, if the cross product is zero, the vectors are parallel [S5, unofficial]. If the dot product is positive, they are identical, so set the rotation matrix to the identity matrix. If negative, they are opposite, so set the rotation matrix to the negative identity matrix [S5, unofficial].
+2.  **Precision:** Floating-point errors in trigonometric functions can cause the resulting matrix to drift from orthogonality over successive multiplications [G].
+3.  **Coordinate System Handedness:** The sign of the sine term depends on the coordinate system (left-handed vs. right-handed) [S4, unofficial].
+4.  **Voxel Rotation:** Automatic rotation or flipping of voxels is not supported; each rotated version must be created as a separate model variant [S6].
+
+## Subtopics
+
+### RotateY
+RotateY is a geometric transformation primitive that rotates a point or shape around the Y-axis in 3D space [S1, unofficial]. It serves as a fundamental building block for constructing camera poses and deforming Signed Distance Fields (SDFs) [G]. Unlike [Rotation Transformation](2279-rotation-transformation.md), which may imply a general rotation matrix, RotateY specifically isolates the Y-axis component [G]. Unlike [Twist](1722-twist.md), it applies a uniform rotation angle to the entire object rather than a spatially varying one [G]. It is a sibling to [RotateX](2278-rotatex.md) and [RotateZ](2280-rotatez.md) [S1, unofficial].
+
+### [Rotation Matrix Computation](2280-rotation-matrix-computation.md)
+Computes a $3 \times 3$ rotation matrix from a rotation axis and angle. It provides a direct algebraic solution for orientation, distinct from sequential axis rotations or quaternion conversions [G].
+
+### [Quaternion Rotation](2302-quaternion-rotation.md)
+Quaternion Rotation computes the rotated position of a 3D vector $v$ given a quaternion $q$ representing the rotation. It solves the problem of applying 3D rotations to vectors in volume rendering pipelines without constructing an intermediate $3 \times 3$ matrix. It differs from [Quaternion to SO3 Conversion](2305-quaternion-to-so3-conversion.md) by operating directly on the vector components rather than converting the rotation representation to a matrix format [G].
+
+### [SE2 Lie Group Implementation](3144-se2-lie-group-implementation.md)
+The SE2 Lie group implementation parameterizes 2D rigid body transformations using a tangent parameterization of $(v_x, v_y, \omega)$ and an internal parameterization of $(\cos, \sin, x, y)$. It operates in 2D rather than 3D like [Quaternion Rotation](2302-quaternion-rotation.md), and includes translation components unlike [2D Rotation](3357-2d-rotation.md) [G].
+
+### [2D Rotation](3357-2d-rotation.md)
+2D Rotation rotates a 2D vector by a specified angle in the plane perpendicular to a specified axis. It differs from [Quaternion Rotation](2302-quaternion-rotation.md) and [SE2 Lie Group Implementation](3144-se2-lie-group-implementation.md) by operating directly on the two vector components rather than constructing a full 3×3 matrix or quaternion representation [G].
+
+### RotateZ
+RotateZ is similar to RotateX, but rotates around the z-axis instead [S7, unofficial]. It takes a float input representing the angle of rotation, implied by its similarity to RotateX [S7, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(N)$ for transforming $N$ points, as it involves a constant number of arithmetic operations per point [G]. Matrix construction is $O(1)$ [G].
+
+**Memory Complexity:** $O(N)$ to store the output coordinates [G]. The rotation matrix itself requires constant memory [G].
+
+**Measured Performance:** Performance is highly dependent on hardware vectorization. Batched operations using libraries like NumPy or JAX can leverage SIMD instructions for significant speedups [S5, unofficial].
+
+**Strengths:** Computationally inexpensive for single-axis rotations [G].
+
+**Limitations:** Euler angle representations suffer from Gimbal Lock when two axes align [G]. Not suitable for interpolation between orientations without artifacts [G]. Accumulation of floating-point errors in chained rotations can degrade orthogonality [G].
+
+**When to use:** When rotating around a single, fixed axis [G]. When constructing the initial view matrix from camera angles [G].
+
+**When not to use:** When interpolating between rotations (use Quaternions) [G]. When combining multiple rotations frequently (use Quaternions or SE3 to avoid Gimbal Lock and precision loss) [G].
+
+## Background
+Rotation Transformation operates on the Special Euclidean group $SE(3)$, which consists of all rigid transformations in 3D space [G]. It is essential for defining camera orientation and orienting volume data within world space [G]. The use of homogeneous coordinates allows rotation to be combined with translation in a single matrix multiplication, facilitating efficient pipeline processing [S4, unofficial].
+
+## Sources
+[S1] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
+[S2] isocubes: Voxel Data Visualization with Isometric Cubes, https://doi.org/10.32614/cran.package.isocubes, fetched 2026-10-26 (unofficial)
+[S3] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S4] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
+[S5] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)
+[S6] Blocky terrains - Voxel Tools documentation, https://voxel-tools.readthedocs.io/en/latest/blocky_terrain/, fetched 2026-10-27
+[S7] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)

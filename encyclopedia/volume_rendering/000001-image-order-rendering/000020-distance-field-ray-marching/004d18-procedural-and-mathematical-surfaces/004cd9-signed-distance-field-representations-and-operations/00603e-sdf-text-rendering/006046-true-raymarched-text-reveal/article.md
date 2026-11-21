@@ -1,0 +1,168 @@
+# True Raymarched Text Reveal
+
+Also called: Raymarched SDF Heading, Text load-in v2, true raymarching
+
+## Overview
+True Raymarched Text Reveal is a technique that renders text animations by converting DOM glyphs into a 3D Signed Distance Field (SDF), marching rays through it, and revealing the text using smooth-min metaballs and SDF-gradient lighting [S1, unofficial]. It differs from its sibling [RayMarchedHeading](18123-sdf-text-rendering.md) by performing actual 3D raymarching through an extruded SDF rather than marching 2D blur taps along a smear line [S1, unofficial].
+
+## How it works
+**Inputs:** DOM heading glyphs at measured positions, scene parameters (MAX_STEPS, SURFACE_DIST, smooth-min k, front softness).
+**Outputs:** A rendered image of the text reveal, eventually crossfading to the selectable DOM heading.
+
+**Data Structures:**
+*   **SDF Texture:** A 3D texture representing the extruded SDF of the text.
+*   **Ray State:** Per-pixel ray origin and direction.
+
+**Steps:**
+
+1.  **SDF Generation:**
+    *   Rasterize DOM heading glyphs at their measured positions on a 2D grid [S1, unofficial].
+    *   Convert the rasterized glyphs into a real Signed Distance Field (SDF) using an exact Euclidean distance transform. The implementation uses the Felzenszwalb–Huttenlocher algorithm with tiny-sdf style seeding to handle sub-pixel edges [S1, unofficial].
+    *   Extrude the 2D SDF into 3D space to create a volumetric representation of the text [S1, unofficial].
+
+2.  **Ray Setup:**
+    *   Set the ray origin and per-pixel ray direction.
+    *   Use CSS pixels as world units. This ensures that a ray passing through pixel coordinate $q$ in the viewport hits the text plane exactly at $q$, keeping the WebGL rendering aligned with the DOM layout [S1, unofficial].
+
+3.  **Raymarching:**
+    *   March rays through the 3D SDF.
+    *   In each step, evaluate the SDF distance $d$ at the current ray position.
+    *   Advance the ray by distance $d$.
+    *   Repeat up to `MAX_STEPS` iterations.
+    *   Terminate if the distance $d$ is within `SURFACE_DIST` (indicating a hit) or if `MAX_STEPS` is reached [S1, unofficial].
+
+4.  **Reveal Logic:**
+    *   The text is revealed via a smooth-max intersection with a sweeping half-space [S1, unofficial].
+    *   Metaball droplets are placed on the front of the reveal sweep. These droplets melt into the emerging glyphs using a polynomial smooth-min function controlled by the parameter `smooth-min k` [S1, unofficial].
+    *   The `front softness` parameter controls the softness of the reveal sweep [S1, unofficial].
+
+5.  **Shading:**
+    *   Compute normals at hit points using the SDF gradient. The implementation uses Inigo Quilez's `getNormal` method [S1, unofficial].
+    *   Calculate lighting as ambient (based on `normal.y`) plus diffuse lighting [S1, unofficial].
+    *   Apply a Beer's-law exponential depth fade to the lighting [S1, unofficial].
+
+6.  **Handoff:**
+    *   As the animation progress settles, the shader converges onto analytically antialiased flat glyphs.
+    *   Crossfade from the raymarched shader to the selectable DOM heading [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def raymarch_text_reveal(pixel_coord, ray_origin, ray_direction, sdf_texture, params):
+    """
+    Renders a single pixel of the raymarched text reveal.
+    
+    Args:
+        pixel_coord: (x, y) CSS pixel coordinates.
+        ray_origin: vec3 origin of the ray.
+        ray_direction: vec3 direction of the ray.
+        sdf_texture: 3D texture containing the extruded SDF of the text.
+        params: Object containing MAX_STEPS, SURFACE_DIST, smooth_min_k, front_softness, progress.
+        
+    Returns:
+        vec3: Final color of the pixel.
+    """
+    current_pos = ray_origin
+    color = vec3(0.0)
+    hit = False
+    
+    # Raymarching loop
+    for i in range(params.MAX_STEPS):
+        # Evaluate SDF at current position
+        # Note: sdf_texture lookup returns distance to nearest surface
+        dist = sdf_texture.sample(current_pos)
+        
+        # Check for surface hit
+        if dist < params.SURFACE_DIST:
+            hit = True
+            break
+            
+        # Advance ray
+        current_pos += ray_direction * dist
+        
+    if hit:
+        # Compute normal using SDF gradient (Inigo Quilez's method)
+        # This requires sampling the SDF at small offsets around current_pos
+        normal = compute_sdf_gradient(current_pos, sdf_texture)
+        
+        # Lighting calculation
+        ambient = normal.y * 0.5 + 0.5 # Simple ambient based on normal.y
+        diffuse = compute_diffuse_lighting(normal, params.light_angle)
+        
+        # Beer's law exponential depth fade
+        depth = length(current_pos - ray_origin)
+        fade = exp(-params.depth_fade_factor * depth)
+        
+        color = (ambient + diffuse) * fade
+        
+        # Reveal logic (simplified representation)
+        # The actual reveal is a smooth-max intersection with a sweeping half-space
+        # and metaball droplets melting into glyphs via polynomial smooth-min.
+        # This affects whether the hit is considered "visible" in the final composite.
+        reveal_factor = compute_reveal_factor(current_pos, params.progress, params.front_softness, params.smooth_min_k)
+        color *= reveal_factor
+    else:
+        # Background color or transparency
+        color = vec3(0.0, 0.0, 0.0, 0.0)
+        
+    return color
+
+def compute_sdf_gradient(pos, sdf_texture):
+    """
+    Computes the gradient of the SDF at pos using central differences.
+    """
+    eps = 0.001
+    dx = sdf_texture.sample(pos + vec3(eps, 0, 0)) - sdf_texture.sample(pos - vec3(eps, 0, 0))
+    dy = sdf_texture.sample(pos + vec3(0, eps, 0)) - sdf_texture.sample(pos - vec3(0, eps, 0))
+    dz = sdf_texture.sample(pos + vec3(0, 0, eps)) - sdf_texture.sample(pos - vec3(0, 0, eps))
+    return normalize(vec3(dx, dy, dz))
+
+def compute_reveal_factor(pos, progress, front_softness, smooth_min_k):
+    """
+    Computes the visibility factor based on the reveal animation.
+    This involves a smooth-max intersection with a sweeping half-space
+    and polynomial smooth-min with metaball droplets.
+    """
+    # Placeholder for the complex reveal logic described in [S1, unofficial]
+    # The exact polynomial smooth-min formula and half-space sweep parameters
+    # are not fully detailed in the source notes.
+    # [G] Assuming a simple progress-based mask for implementation completeness.
+    # In practice, this would use smoothmin(pos, half_space, k) and droplet interactions.
+    return smoothstep(0.0, 1.0, progress)
+```
+
+**Parameters:**
+*   `MAX_STEPS`: Maximum number of raymarch steps allowed per ray [S1, unofficial].
+*   `SURFACE_DIST`: Distance threshold below which a ray is considered to have hit the surface [S1, unofficial].
+*   `smooth-min k`: Smoothness parameter controlling the blending of the polynomial smooth-min function [S1, unofficial].
+*   `front softness`: Controls the softness of the reveal sweep [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Sub-pixel edges require careful handling during SDF generation (Felzenszwalb–Huttenlocher with tiny-sdf seeding) to avoid aliasing artifacts [S1, unofficial].
+*   **Alignment:** Using CSS pixels as world units is critical to keep WebGL and DOM aligned; deviation causes misalignment [S1, unofficial].
+*   **Performance:** Raymarching is computationally expensive; `MAX_STEPS` must be tuned to balance quality and performance.
+
+## Subtopics
+
+### SDF Text Rendering
+The parent method that generates the 3D SDF from text. True Raymarched Text Reveal builds on this by adding the raymarching and reveal logic. See [SDF Text Rendering](18123-sdf-text-rendering.md).
+
+### RayMarchedHeading
+The previous attempt which used 2D blur taps along a smear line. It is not true raymarching and lacks the 3D SDF volume and metaball interactions. See [RayMarchedHeading](18123-sdf-text-rendering.md).
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to `MAX_STEPS` per pixel. The SDF generation is done offline or on the CPU/GPU once per frame if dynamic.
+*   **Memory Complexity:** Proportional to the size of the 3D SDF texture.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** True 3D raymarching allows for complex lighting, shadows, and interactions (metaballs) that 2D techniques cannot achieve. The alignment with DOM ensures crisp final output.
+*   **Limitations:** Computationally intensive compared to 2D techniques. Requires careful tuning of parameters to avoid artifacts.
+*   **When to use:** When high-quality, animated 3D text reveals are needed and performance allows for raymarching.
+*   **When not to use:** When performance is critical and 2D effects are sufficient.
+
+## Background
+The technique was developed by milesroxas and added to the Suits & Sandals website as part of an immersive demo section [S1, unofficial]. It is built from the techniques described in Maxime Heckel's "Painting with Math: A Gentle Study of Raymarching" [S1, unofficial]. It serves as an improved approach to the previous "RayMarchedHeading" attempt, which was not true raymarching [S1, unofficial].
+
+## Sources
+[S1] Add true-raymarching text reveal section to immersive demo, https://github.com/milesroxas/sas-site/pull/5, fetched 2026-10-27 (unofficial)

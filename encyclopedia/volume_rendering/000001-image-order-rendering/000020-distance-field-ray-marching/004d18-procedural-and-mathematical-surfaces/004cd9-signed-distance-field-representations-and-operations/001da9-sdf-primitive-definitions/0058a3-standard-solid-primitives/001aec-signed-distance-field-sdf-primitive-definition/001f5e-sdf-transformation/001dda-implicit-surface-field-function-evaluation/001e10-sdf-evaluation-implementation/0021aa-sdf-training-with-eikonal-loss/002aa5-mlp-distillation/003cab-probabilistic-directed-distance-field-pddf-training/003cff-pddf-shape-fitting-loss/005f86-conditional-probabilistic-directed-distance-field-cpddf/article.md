@@ -1,0 +1,186 @@
+# Conditional Probabilistic Directed Distance Field (CPDDF)
+Also called: CPDDF decoder, Conditional Probabilistic Directed Distance Field (CPDDF) with Shape VAE, Shape VAE
+
+## Overview
+The Conditional Probabilistic Directed Distance Field (CPDDF) is a generative method that encodes 3D shapes into a latent vector and decodes it into a depth field for efficient rendering [S1]. It builds on [PDDF Shape-Fitting Loss](9353-pddf-shape-fitting-loss.md) by conditioning the probabilistic distance field on a learned latent representation $z_s$ rather than a fixed parameterization [S1]. This allows for the generation of diverse shapes from a Gaussian prior while maintaining the rendering efficiency of directed distance fields [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A point cloud $P$ with associated normals $N$ (size 1024 points).
+*   **Output:** A latent shape vector $z_s$ (dimension $d_{zs}$) and, via the decoder, a depth value $d(p, v | z_s)$ for a query point $p$ and view direction $v$ [S1].
+
+**Data Structures:**
+1.  **PointNet Encoder Output:** A vector of size $2 d_{zs}$ [S1].
+2.  **Latent Vector $z_s$:** A vector of size $d_{zs}$ [S1].
+3.  **Posterior Parameters:** Mean $\mu$ and diagonal log-variance $\Sigma$, each of size $d_{zs}$ [S1].
+
+**Architecture Details:**
+1.  **PointNet Encoder:** Consists of four Conv1D-BatchNorm-ReLU blocks with channel sizes 64, 64, 128, and 1024, followed by global max pooling [S1]. The pooled output passes through an MLP with two hidden layers of size 512 (Linear-BatchNorm-ReLU, dropout 0.1) [S1]. The final output size is $2 d_{zs}$ [S1].
+2.  **Variational Posterior Networks:** Two separate networks compute the parameters for the approximate posterior $q(z_s | P, N) = \mathcal{N}(z_s | \mu(P, N), \Sigma(P, N))$ [S1]. Each network is structured as Linear-ReLU-Linear with layer dimensions equal to $d_{zs}$ [S1]. The first network takes the first half of the PointNet output to compute $\mu$, and the second takes the second half to compute $\Sigma$ [S1].
+3.  **CPDDF Decoder:** An eight-layer modulated SIREN network [S1]. The layer sizes are 512, 512, 512, 512, 256, 256, 256, 256 [S1]. It takes the latent vector $z_s$ and spatial/view inputs to compute the depth field [S1].
+
+**Training Objective:**
+The model is trained using a $\beta$-VAE loss [S1]:
+$$
+\mathcal{E}_{\text{VAE}} = \mathcal{E}_S + \beta \mathcal{L}_{\text{KL}}
+$$
+where $\mathcal{L}_{\text{KL}}$ is the KL divergence between the approximate posterior and a standard Gaussian prior $\mathcal{N}(0, I)$, and $\mathcal{E}_S$ is the reconstruction likelihood loss [S1]. The total loss includes weighted terms for depth, normals, and other constraints:
+$$
+\mathcal{L}_{\text{total}} = \gamma_d \mathcal{L}_d + \gamma_\xi \mathcal{L}_\xi + \gamma_n \mathcal{L}_n + \gamma_V \mathcal{L}_V + \gamma_{E,d} \mathcal{L}_{E,d} + \gamma_{E,\xi} \mathcal{L}_{E,\xi} + \gamma_{V,\xi} \mathcal{L}_{V,\xi} + \gamma_T \mathcal{L}_T
+$$
+[S1].
+
+**Parameters:**
+*   $d_{zs}$ (latent dimension): 400 [S1].
+*   $\beta$ (KL weight): 0.05 [S1].
+*   Loss weights: $\gamma_d=5, \gamma_\xi=10, \gamma_n=10, \gamma_V=1, \gamma_{E,d}=0.1, \gamma_{E,\xi}=0.1, \gamma_{V,\xi}=0.1, \gamma_T=0.1$ [S1].
+*   Optimizer: Adam ($lr=10^{-4}, \beta_1=0.9, \beta_2=0.999$) [S1].
+*   Training iterations: 100,000 [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class PointNetEncoder(nn.Module):
+    def __init__(self, dim_zs):
+        super().__init__()
+        # Four Conv1D-BatchNorm-ReLU blocks
+        self.conv1 = nn.Sequential(nn.Conv1d(4, 64, 1), nn.BatchNorm1d(64), nn.ReLU()) # 4 inputs: 3 coords + 1 normal? Source says point cloud with normals. Standard PointNet uses 3 coords + 1 normal = 4 channels.
+        self.conv2 = nn.Sequential(nn.Conv1d(64, 64, 1), nn.BatchNorm1d(64), nn.ReLU())
+        self.conv3 = nn.Sequential(nn.Conv1d(64, 128, 1), nn.BatchNorm1d(128), nn.ReLU())
+        self.conv4 = nn.Sequential(nn.Conv1d(128, 1024, 1), nn.BatchNorm1d(1024), nn.ReLU())
+        
+        # MLP with two hidden layers of size 512
+        self.mlp = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Linear(512, 2 * dim_zs)
+        )
+
+    def forward(self, x):
+        # x shape: (B, 4, 1024)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+        # Global max pooling
+        x = torch.max(x, 2, keepdim=True)[0]
+        x = x.view(x.size(0), -1)
+        return self.mlp(x)
+
+class PosteriorNetwork(nn.Module):
+    def __init__(self, dim_zs):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim_zs, dim_zs),
+            nn.ReLU(),
+            nn.Linear(dim_zs, dim_zs)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class CPDDFDecoder(nn.Module):
+    def __init__(self, dim_zs):
+        super().__init__()
+        # Eight layers: 512, 512, 512, 512, 256, 256, 256, 256
+        # Using modulated SIREN. For implementation, we assume a standard MLP structure 
+        # with sine activations as per SIREN [41], modulated by z_s.
+        # Note: Exact SIREN modulation implementation details are not fully specified in [S1] 
+        # beyond "modulated SIREN approach [41]". We use a placeholder for the SIREN layer logic.
+        self.layers = nn.ModuleList()
+        sizes = [512, 512, 512, 512, 256, 256, 256, 256]
+        in_dim = dim_zs # Assuming z_s is concatenated or modulates the first layer input
+        
+        # Simplified structure for demonstration of dimensions
+        # In practice, SIREN layers use sin activation and frequency modulation
+        current_dim = dim_zs
+        for size in sizes:
+            self.layers.append(SIRENLayer(current_dim, size)) # [G] SIRENLayer is a standard SIREN layer with sine activation
+            current_dim = size
+
+    def forward(self, z_s, query):
+        # query: (B, 3) or (B, 4) depending on view direction inclusion
+        x = z_s # Initial modulation or concatenation logic from [41]
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+class SIRENLayer(nn.Module):
+    def __init__(self, in_features, out_features, w0=30.0):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.w0 = w0
+        self.init_weights()
+
+    def init_weights(self):
+        with torch.no_grad():
+            self.linear.weight.uniform_(-1 / self.linear.in_features, 1 / self.linear.in_features)
+    
+    def forward(self, x):
+        return torch.sin(self.linear(x) * self.w0)
+
+def compute_vae_loss(mu, log_var, beta=0.05):
+    # KL divergence between N(mu, exp(log_var)) and N(0, I)
+    kl_loss = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
+    return kl_loss * beta
+
+def train_step(point_cloud, normals, encoder, posterior_mu, posterior_log_var, decoder, optimizer):
+    # point_cloud: (B, 1024, 3), normals: (B, 1024, 3)
+    # Combine to (B, 4, 1024)
+    x = torch.cat([point_cloud, normals], dim=2).permute(0, 2, 1)
+    
+    # Encode
+    encoder_out = encoder(x) # (B, 2*dim_zs)
+    
+    # Split for posterior
+    mu = posterior_mu(encoder_out[:, :encoder_out.size(1)//2])
+    log_var = posterior_log_var(encoder_out[:, encoder_out.size(1)//2:])
+    
+    # Reparameterization
+    std = torch.exp(0.5 * log_var)
+    eps = torch.randn_like(std)
+    z_s = mu + eps * std
+    
+    # Decode (example: compute depth for a set of query points)
+    # queries: (B, N, 3)
+    # depth = decoder(z_s, queries)
+    
+    # Compute losses (simplified)
+    kl = compute_vae_loss(mu, log_var)
+    recon_loss = 0 # Placeholder for E_S calculation
+    total_loss = recon_loss + kl
+    
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+    
+    return total_loss.item()
+```
+
+**Edge Cases and Pitfalls:**
+*   The PointNet encoder requires exactly 1024 points with normals [S1]. Input point clouds must be upsampled or downsampled to this size [S1].
+*   The posterior networks split the encoder output evenly; incorrect splitting will break the independence assumption of the mean and variance networks [S1].
+*   The modulated SIREN decoder requires careful initialization of frequencies (typically $w_0=30$) to avoid high-frequency artifacts, as per standard SIREN practice [S1, G].
+
+## Operating characteristics
+*   **Time Complexity:** Training requires 100K iterations with a minibatch size of 32 shapes [S1]. Each shape uses 1.2K points (for A/U categories) or 300 points (for S/B/T/O categories) [S1].
+*   **Memory Complexity:** The latent vector size is 400 [S1]. The encoder output is 800 [S1]. The decoder has 8 layers with up to 512 units [S1].
+*   **Strengths:** Enables efficient rendering of diverse shapes via latent sampling [S1]. The directed distance field allows for fast depth estimation [S1].
+*   **Limitations:** Limited to single categories of ShapeNet (e.g., cars) [S1]. Requires point cloud input with normals [S1].
+
+## Background
+The CPDDF method was introduced in "Representing 3D Shapes with Probabilistic Directed Distance Fields" (CVPR 2022) [S1]. It extends the Probabilistic Directed Distance Field (PDDF) framework by incorporating a Variational Autoencoder (VAE) structure to learn a latent space of shapes [S1]. The method uses a PointNet encoder and a modulated SIREN decoder [S1].
+
+## Sources
+[S1] Representing 3D Shapes with Probabilistic Directed Distance Fields, https://doi.org/10.1109/cvpr52688.2022.01874, fetched 2026-10-26

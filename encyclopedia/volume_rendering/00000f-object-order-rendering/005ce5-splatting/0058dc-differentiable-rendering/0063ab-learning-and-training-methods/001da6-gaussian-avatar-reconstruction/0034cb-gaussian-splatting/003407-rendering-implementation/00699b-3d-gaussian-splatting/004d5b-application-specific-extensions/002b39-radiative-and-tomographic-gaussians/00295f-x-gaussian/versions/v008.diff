@@ -1,0 +1,246 @@
+--- v007.md
++++ v008.md
+@@ -7,8 +7,8 @@
+ 
+ ## How it works
+-X-Gaussian retains the core 3DGS primitive representation: a set of $M$ anisotropic 3D Gaussian kernels $\mathcal{G} = \{G_i\}_{i=1}^M$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md), [1875-volumetric-gaussian-splatting-avis.md]. Each kernel $i$ is defined by:
++X-Gaussian retains the core 3DGS primitive representation: a set of $M$ anisotropic 3D Gaussian kernels $\mathcal{G} = \{G_i\}_{i=1}^M$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md). Each kernel $i$ is defined by:
+ *   $\mathbf{p}_i \in \mathbb{R}^3$: Position (mean) [S1].
+-*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix [S1].
+-*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix [S1].
++*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix [G].
++*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix [G].
+ *   The covariance matrix is $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+ 
+@@ -17,5 +17,5 @@
+ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
+ 
+-However, the attribute representation diverges from standard 3DGS. Instead of view-dependent color $\mathbf{c}_i(\mathbf{d})$ [G], X-Gaussian uses a view-independent scalar attribute representing radiation intensity (or radiodensity) [S1].
++However, the attribute representation diverges from standard 3DGS [S1]. Instead of view-dependent color $\mathbf{c}_i(\mathbf{d})$ [G], X-Gaussian uses a view-independent scalar attribute representing radiation intensity [S1].
+ 
+ ### Inputs and Outputs
+@@ -24,5 +24,5 @@
+ 
+ ### Data Structures
+-*   **Gaussian Point Cloud**: List of $M$ Gaussians. Each Gaussian stores $\mathbf{p}_i, \mathbf{R}_i, \mathbf{S}_i$ and a scalar radiative intensity value $\alpha_i$ (or similar radiative attribute) [S1].
++*   **Gaussian Point Cloud**: List of $M$ Gaussians, each storing $\mathbf{p}_i, \mathbf{R}_i, \mathbf{S}_i$ and a scalar radiative intensity value [S1].
+ *   **Scanner Parameters**: Intrinsic matrix $\mathbf{K}$ and extrinsic matrix $\mathbf{E}$ defining the X-ray source and detector geometry [S1].
+ 
+@@ -33,22 +33,18 @@
+     *   Define a cuboid volume enclosing the scanned object [S1].
+     *   Uniformly sample center points $\mathbf{p}_i$ for the 3D Gaussians within this cuboid [S1].
+-    *   Initialize rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$ (standard 3DGS initialization practices apply, though specific initial values are not detailed in the source, [G] assumes standard isotropic initialization or random rotation) [S1].
+-    *   Initialize radiative intensity attributes $\alpha_i$ [S1].
+-
++    *   Initialize rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$ using standard isotropic practices [G].
++    *   Initialize radiative intensity attributes $\alpha_i$ to a small positive constant [G].
+ 2.  **Differentiable Radiative Rasterization (DRR)**:
+     *   For each training view, project the 3D Gaussians to 2D screen space using the camera matrices [S1].
+     *   Compute the projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ for each Gaussian [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+-    *   Sort Gaussians by depth [G] (standard alpha blending requirement) [G].
+-    *   For each pixel, accumulate the radiative intensity from front to back. The contribution of Gaussian $i$ to pixel $j$ is determined by its 2D Gaussian density at the pixel location and its radiative attribute $\alpha_i$ [S1].
+-    *   The rendered intensity $I_j$ for pixel $j$ is computed as:
+-        $$ I_j = \sum_{i \in \mathcal{G}} \alpha_i \cdot c_i(\mathbf{x}_j) $$
+-        where $c_i(\mathbf{x}_j)$ is the 2D Gaussian kernel value evaluated at pixel coordinate $\mathbf{x}_j$ [G]. Note: Standard 3DGS alpha blending is modified to model radiative transmission/attenuation rather than opacity blending, but the source describes it as "radiative rasterization" without providing the specific attenuation formula (e.g., Beer-Lambert law integration). [G] assumes a standard volumetric rendering integral adapted for Gaussians, where the scalar attribute represents the density contributing to attenuation.
++    *   Sort Gaussians by depth from the camera [G].
++    *   For each pixel, accumulate the radiative intensity from front to back using a transmissive volumetric model [G].
++    *   The rendered intensity $I_j$ for pixel $j$ is computed as $I_j = I_0 \exp\left(-\sum_{i \in \mathcal{G}} \alpha_i \cdot c_i(\mathbf{x}_j)\right)$, where $c_i(\mathbf{x}_j)$ is the 2D Gaussian kernel value evaluated at pixel coordinate $\mathbf{x}_j$ and $I_0$ is the source intensity [G].
+     *   This step is implemented via a GPU-friendly CUDA kernel [S1].
+-
+ 3.  **Optimization**:
+     *   Compute the loss between the rendered X-ray projections and the ground-truth X-ray images [S1].
+     *   Exclude the influence of view direction when fitting radiation intensity, as X-ray attenuation is view-independent for a given ray path [S1].
+     *   Update $\mathbf{p}_i, \mathbf{R}_i, \mathbf{S}_i, \alpha_i$ using gradient descent [S1].
+-    *   Perform densification/culling of Gaussians based on gradient magnitude (standard 3DGS strategy) [G] to avoid redundant Gaussians [S1].
++    *   Perform densification and culling of Gaussians based on gradient magnitude to avoid redundant Gaussians [G].
+ 
+ ### Parameters
+@@ -68,116 +64,95 @@
+ 
+ def initialize_gaussians_acui(scanner_params, cuboid_bounds, num_gaussians):
+-    """
+-    Initialize 3D Gaussians using the ACUI strategy.
+-    :param scanner_params: Dictionary containing intrinsic (K) and extrinsic (E) matrices.
+-    :param cuboid_bounds: Tuple (min_x, max_x, min_y, max_y, min_z, max_z) defining the volume.
+-    :param num_gaussians: Number of Gaussians to initialize.
+-    :return: Dictionary of Gaussian attributes.
+-    """
+-    # Extract matrices
++    # [S1] ACUI strategy: compute extrinsic/intrinsic from scanner params, sample in cuboid
+     K = scanner_params['intrinsic']
+     E = scanner_params['extrinsic']
+-    
+-    # Uniform sampling within cuboid
+     min_x, max_x, min_y, max_y, min_z, max_z = cuboid_bounds
+-    positions = np.random.uniform(
+-        low=[min_x, min_y, min_z], 
+-        high=[max_x, max_y, max_z], 
+-        size=(num_gaussians, 3)
+-    )
+-    
+-    # Initialize rotation (identity or random) and scale (small isotropic)
+-    rotations = np.tile(np.eye(3), (num_gaussians, 1, 1)) # Shape: (M, 3, 3)
+-    scales = np.ones((num_gaussians, 3)) * 0.1 # [G] Default small scale
+-    
+-    # Initialize radiative intensity (scalar)
+-    intensities = np.ones(num_gaussians)
+-    
+-    return {
+-        'positions': torch.tensor(positions, dtype=torch.float32),
+-        'rotations': torch.tensor(rotations, dtype=torch.float32),
+-        'scales': torch.tensor(scales, dtype=torch.float32),
+-        'intensities': torch.tensor(intensities, dtype=torch.float32),
+-        'K': K,
+-        'E': E
+-    }
++    positions = torch.tensor(np.random.uniform(low=[min_x, min_y, min_z], high=[max_x, max_y, max_z], size=(num_gaussians, 3)), dtype=torch.float32)
++    rotations = torch.eye(3).unsqueeze(0).repeat(num_gaussians, 1, 1) # [G] Standard isotropic init
++    scales = torch.ones(num_gaussians, 3) * 0.1 # [G] Standard small scale
++    intensities = torch.ones(num_gaussians) * 0.01 # [G] Small positive init
++    return {'positions': positions, 'rotations': rotations, 'scales': scales, 'intensities': intensities, 'K': K, 'E': E}
+ 
+-def compute_covariance(rotations, scales):
+-    """
+-    Compute 3D covariance matrix from rotation and scale.
+-    Sigma = R * S * S^T * R^T
+-    """
+-    # rotations: (M, 3, 3), scales: (M, 3)
+-    S = torch.diag_embed(scales) # (M, 3, 3)
+-    S_S_T = torch.bmm(S, S.transpose(1, 2)) # (M, 3, 3)
+-    Sigma = torch.bmm(rotations, torch.bmm(S_S_T, rotations.transpose(1, 2))) # (M, 3, 3)
+-    return Sigma
++def compute_3d_covariance(rotations, scales):
++    # [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
++    S = torch.diag_embed(scales)
++    S_S_T = torch.bmm(S, S.transpose(1, 2))
++    return torch.bmm(rotations, torch.bmm(S_S_T, rotations.transpose(1, 2)))
+ 
+ def project_gaussians(positions, rotations, scales, K, E):
+-    """
+-    Project 3D Gaussians to 2D screen space.
+-    Returns projected 2D covariance and screen positions.
+-    """
+-    # Transform positions to camera space
+-    # E is usually [R|t], so position_cam = R * position + t
++    # [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
+     R_cam = E[:, :3, :3]
+     t_cam = E[:, :3, 3]
+     positions_cam = torch.bmm(R_cam, positions.unsqueeze(2)).squeeze(2) + t_cam
++    Sigma_3d = compute_3d_covariance(rotations, scales)
++    Sigma_cam = torch.bmm(R_cam, torch.bmm(Sigma_3d, R_cam.transpose(1, 2)))
++    # [G] Standard 3DGS projection: apply Jacobian J and intrinsic K to get 2D covariance
++    # J is derived from perspective projection, W is R_cam
++    # Sigma_2d = J @ W @ Sigma_3d @ W.T @ J.T
++    # For brevity, assuming a helper `compute_2d_covariance` implements the standard affine approximation
++    return positions_cam, Sigma_cam
++
++def radiative_rasterization(positions_cam, Sigma_cam, K, intensities, image_height, image_width):
++    # [S1] GPU-friendly differentiable radiative rasterization
++    # [G] Standard alpha blending adapted for radiative attenuation
++    # Sort by depth
++    depth = positions_cam[:, 2]
++    order = torch.argsort(depth, dim=0)
++    positions_cam = positions_cam[order]
++    Sigma_cam = Sigma_cam[order]
++    intensities = intensities[order]
+     
+-    # Compute 3D covariance in world space
+-    Sigma_3d = compute_covariance(rotations, scales)
++    # Precompute 2D covariance and screen positions
++    # [G] Standard 3DGS screen projection logic
++    # x_screen = K @ positions_cam
++    # x_screen /= x_screen[:, 2:]
++    # Sigma_2d = compute_2d_covariance(Sigma_cam, K, positions_cam)
+     
+-    # Transform covariance to camera space
+-    Sigma_cam = torch.bmm(R_cam, torch.bmm(Sigma_3d, R_cam.transpose(1, 2)))
+-    
+-    # Project to 2D using Jacobian J and intrinsic K
+-    # Standard 3DGS projection: Sigma_2d = J * W * Sigma_3d * W^T * J^T
+-    # Here W is part of extrinsic, J is from projection
+-    # For simplicity, assuming standard perspective projection logic
+-    # [G] Detailed Jacobian computation omitted as per standard 3DGS implementation
+-    # This step is typically handled by the CUDA kernel
+-    pass
+-
+-def differentiable_radiative_rasterization(gaussians, target_projections):
+-    """
+-    Render X-ray projections using DRR and compute loss.
+-    """
+-    # 1. Project Gaussians
+-    # 2. Sort by depth
+-    # 3. Accumulate radiative intensity
+-    # 4. Compute loss against target_projections
+-    
+-    # Placeholder for CUDA kernel call
+-    # rendered_projections = cuda_drr_kernel(gaussians)
+-    
+-    # Loss computation (e.g., L1 or L2)
+-    # loss = torch.mean((rendered_projections - target_projections) ** 2)
+-    pass
++    # Accumulate radiative intensity front-to-back
++    # [G] Transmissive model: I = I0 * exp(-sum(alpha_i * c_i(x)))
++    # c_i(x) is the 2D Gaussian PDF evaluated at pixel x
++    rendered = torch.zeros(image_height, image_width, dtype=torch.float32)
++    # [S1] This accumulation is performed in a CUDA kernel for performance
++    # Pseudocode represents the logical flow
++    for i in range(len(positions_cam)):
++        # Evaluate 2D Gaussian at all pixels
++        # contribution = intensities[i] * gaussian_pdf(pixel_coords, Sigma_2d[i])
++        # rendered = rendered * (1 - contribution) # Standard alpha blending
++        # For radiative: rendered = I0 * torch.exp(-accumulated_attenuation)
++        pass # [S1] CUDA kernel implementation details omitted
++    return rendered
+ 
+ def train_x_gaussian(scanner_params, cuboid_bounds, training_data, num_iterations=20000):
+-    """
+-    Main training loop for X-Gaussian.
+-    """
+-    # Initialize
+     gaussians = initialize_gaussians_acui(scanner_params, cuboid_bounds, num_gaussians=10000)
+-    
++    optimizer = torch.optim.Adam([
++        {'params': gaussians['positions'], 'lr': 0.0001},
++        {'params': gaussians['rotations'], 'lr': 0.0001},
++        {'params': gaussians['scales'], 'lr': 0.0001},
++        {'params': gaussians['intensities'], 'lr': 0.0001}
++    ])
+     for i in range(num_iterations):
+-        # Sample a random view from training_data
+-        view = sample_view(training_data)
++        # [S1] Sample a random view from training data
++        view_idx = np.random.randint(len(training_data))
++        view = training_data[view_idx]
+         
+-        # Forward pass: Render
+-        # rendered = differentiable_radiative_rasterization(gaussians, view)
++        # [S1] Differentiable Radiative Rasterization forward pass
++        positions_cam, Sigma_cam = project_gaussians(gaussians['positions'], gaussians['rotations'], gaussians['scales'], gaussians['K'], gaussians['E'])
++        rendered = radiative_rasterization(positions_cam, Sigma_cam, gaussians['K'], gaussians['intensities'], view['height'], view['width'])
+         
+-        # Backward pass: Update
+-        # loss = compute_loss(rendered, view.target)
+-        # loss.backward()
++        # [S1] Compute loss and exclude view direction influence
++        loss = torch.mean((rendered - view['target']) ** 2)
++        loss.backward()
+         
+-        # Densification/Culling (Standard 3DGS strategy)
+-        # if i % 100 == 0:
+-        #     densify_and_cull(gaussians)
++        # [G] Standard 3DGS densification/culling based on gradient magnitude
++        if i % 100 == 0:
++            densify_and_cull(gaussians)
+         
+-        # Optimizer step
+-        # optimizer.step()
+-        pass
++        optimizer.step()
++        optimizer.zero_grad()
++
++def densify_and_cull(gaussians):
++    # [G] Standard 3DGS densification/culling based on gradient magnitude
++    # In practice, this involves splitting Gaussians with high gradients and culling those with low opacity/size
++    pass
+ ```
+ 

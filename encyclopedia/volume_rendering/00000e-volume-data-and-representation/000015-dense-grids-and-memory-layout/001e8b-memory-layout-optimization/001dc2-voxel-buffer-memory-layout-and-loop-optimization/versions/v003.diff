@@ -1,0 +1,135 @@
+--- v002.md
++++ v003.md
+@@ -1,69 +1,92 @@
+ # Voxel Buffer Memory Layout and Loop Optimization
++
+ Also called: Cache-Optimized Voxel Access, Dense Field Implementation
++
+ ## Overview
+-This method optimizes the traversal of dense 3D voxel grids by aligning loop iteration order with the underlying 1D memory layout, thereby maximizing spatial locality and cache hit rates [S1, unofficial]. It maps 3D coordinates to a contiguous array and reorders traversal loops to match the memory stride, differing from sibling methods that use bank-avoidance or bit-interleaving [G].
++This method optimizes the memory access patterns of dense 3D voxel grids during volume rendering by enforcing a row-major linear layout and aligning loop traversal with the memory stride. It solves the performance degradation caused by cache misses when traversing along axes with large memory strides [S1, S1638, S2174]. Unlike [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md), which handles hardware bank conflicts, or [Volume Interleaving](2174-volume-interleaving.md), which interleaves attributes, this method focuses on the fundamental alignment of the traversal loop with the contiguous 1D array representation of the volume [S1, unofficial]. It builds on [Memory Layout Optimization](1798-memory-layout-optimization.md) by ensuring spatial locality and stride minimization for the dominant rendering direction [S1, S1638, S2174].
++
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: 3D volume dimensions $x_{size}$, $y_{size}$, and $z_{size}$ [S1, unofficial].
+-- Output: A contiguous 1D array and an optimized iteration pattern that minimizes cache misses [S1, unofficial].
++- Input: 3D grid dimensions $(x_{size}, y_{size}, z_{size})$, voxel data type (e.g., `float`), and traversal direction (typically ray marching along Z, but loop optimization applies to any bulk voxel access).
++- Output: A contiguous 1D memory buffer and optimized iteration code that minimizes cache misses.
+ 
+ **Data Structures:**
+-The voxel buffer is a flat 1D array of size $N = x_{size} \times y_{size} \times z_{size}$ [S1, unofficial]. The memory layout follows row-major ordering, where the x-axis is the innermost dimension (fastest varying index) [S1, unofficial].
++The voxel buffer is a contiguous 1D array (e.g., `std::vector<float>` or raw `float*`). The memory layout follows row-major ordering where the X-axis is the innermost dimension.
+ 
+ **Index Calculation:**
+-To map 3D coordinates $(i, j, k)$ to a 1D index $I$, the following formula is used [S1, unofficial]:
++A 3D coordinate $(i, j, k)$ maps to a 1D index $I$ using the formula:
+ $$ I = i + j \cdot x_{size} + k \cdot x_{size} \cdot y_{size} $$
+-Where:
+-- $i \in [0, x_{size}-1]$ is the index along the x-axis [S1, unofficial].
+-- $j \in [0, y_{size}-1]$ is the index along the y-axis [S1, unofficial].
+-- $k \in [0, z_{size}-1]$ is the index along the z-axis [S1, unofficial].
++where $i \in [0, x_{size}-1]$, $j \in [0, y_{size}-1]$, and $k \in [0, z_{size}-1]$ [S1, unofficial].
+ 
+-**Optimization Steps:**
+-1. **Identify Memory Stride:** In a naive loop where the x-dimension is outermost, the inner loop increments $k$ (z-axis) [S1, unofficial]. This results in a memory stride of $x_{size} \cdot y_{size}$ between consecutive accesses [S1, unofficial]. For realistic resolutions, this stride exceeds cache line sizes, causing a cache miss for every voxel access [S1, unofficial].
+-2. **Reorder Loops:** Reorder the nested loops so that the x-axis is the innermost dimension [S1, unofficial]. This ensures that consecutive iterations access adjacent memory locations, maximizing spatial locality [S1, unofficial].
+-3. **Use Iterators or Bulk Operations:** Replace explicit index calculations with iterators or standard library functions to avoid redundant multiplication and bounds checking overhead [S1, unofficial].
++**Algorithm Steps:**
++1.  **Allocate Buffer:** Allocate a contiguous block of memory of size $x_{size} \cdot y_{size} \cdot z_{size} \cdot \text{sizeof}(\text{voxel\_type})$.
++2.  **Determine Inner Loop Axis:** Identify the axis with the smallest stride (smallest dimension) to be the innermost loop. In standard row-major layouts, this is the X-axis [S1, unofficial].
++3.  **Order Loops:** Structure the iteration loops such that the innermost loop increments the index with a stride of 1 (sequential memory access). The outer loops increment with larger strides ($x_{size}$ for Y, $x_{size} \cdot y_{size}$ for Z) [S1, unofficial].
++4.  **Execute Traversal:** Iterate through the buffer. If using explicit loops, calculate indices or use pointer arithmetic. Prefer iterators or bulk operations to avoid redundant multiplication [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Naive implementation: x is outermost
+-# Access pattern jumps by x_size * y_size, causing cache misses
+-for i in range(x_size):
+-    for j in range(y_size):
+-        for k in range(z_size):
+-            buffer[i + j * x_size + k * x_size * y_size] = 0.0
++# Assume buffer is a contiguous 1D list or array of size x_size * y_size * z_size
++# Dimensions: x_size, y_size, z_size
+ 
+-# Optimized implementation: x is innermost
+-# Access pattern is sequential, stride 1
+-for k in range(z_size):
+-    for j in range(y_size):
+-        for i in range(x_size):
+-            buffer[i + j * x_size + k * x_size * y_size] = 0.0
++def optimize_voxel_buffer_access(buffer, x_size, y_size, z_size):
++    """
++    Iterates through a dense voxel buffer with cache-optimized loop ordering.
++    X is the innermost dimension (stride 1).
++    """
++    # Naive approach (bad for cache if traversing Z):
++    # for i in range(x_size):
++    #     for j in range(y_size):
++    #         for k in range(z_size):
++    #             idx = i + j * x_size + k * x_size * y_size
++    #             buffer[idx] = 0.0
+ 
+-# Efficient alternative using bulk operations
+-# Avoids explicit index calculation and bounds checks
+-for idx in range(len(buffer)):
+-    buffer[idx] = 0.0
++    # Optimized approach: X is innermost
++    for k in range(z_size):
++        base_k = k * x_size * y_size
++        for j in range(y_size):
++            base_j = base_k + j * x_size
++            for i in range(x_size):
++                idx = base_j + i
++                buffer[idx] = 0.0
++
++    # Even better: Use iterators or bulk fill to avoid index calculation overhead
++    # buffer[:] = [0.0] * len(buffer)  # Pythonic bulk assignment
++    # or std::fill in C++
+ ```
+ 
++**Parameters:**
++- $x_{size}, y_{size}, z_{size}$: Dimensions of the voxel grid. Typical values range from $64^3$ to $1024^3$ for dense buffers [S1, unofficial].
++- Cache Line Size: Typically 64 bytes. The optimization ensures that consecutive accesses in the inner loop fall within the same or adjacent cache lines [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-- **Cache Thrashing:** Using the x-dimension as the outermost loop causes severe cache thrashing due to the large memory stride ($x_{size} \cdot y_{size}$) [S1, unofficial].
+-- **Non-Zero Origins:** Voxel indices do not necessarily start at $(0,0,0)$ [S1, unofficial].
+-- **High Resolution:** Dense 1D arrays become unmanageable for resolutions above $1000^3$ on standard hardware [S1, unofficial]. This method assumes the entire volume fits in memory; for larger volumes, sparse structures are required [S1, unofficial].
++- **Naive Loop Ordering:** If the X-dimension is the outermost loop, the inner loop steps along the Z-axis. The memory stride becomes $x_{size} \cdot y_{size}$, causing a cache miss for every voxel increment in realistic resolutions [S1, unofficial].
++- **Index Multiplication:** Explicitly calculating $i + j \cdot x_{size} + k \cdot x_{size} \cdot y_{size}$ inside the inner loop adds computational overhead. Using iterators or maintaining a running pointer/index is preferred [S1, unofficial].
++- **Non-Uniform Grids:** This method assumes uniform spacing. For non-uniform grids, additional mapping logic is required, potentially negating some cache benefits [S1, unofficial].
++
+ ## Subtopics
+ 
+ ### [Voxel Data Structure Layout](3584-voxel-data-structure-layout.md)
+-Defines the internal memory organization of per-voxel attributes within the dense buffer, focusing on field ordering and packing to optimize for specific rendering algorithms like shading or classification.
++Voxel Data Structure Layout defines the memory organization of per-voxel attributes within a dense 3D grid, addressing bandwidth and capacity constraints. It differs from this method by focusing on the internal composition of the voxel element itself (e.g., bit-packing, floating-point density fields) rather than the global buffer traversal order[3, unofficial]. While this method handles the mapping of 3D coordinates to linear memory, Voxel Data Structure Layout handles the alignment and size of the data stored at each linear index [G].
+ 
+ ### Shared Position Buffer with Per-Chunk Color
+-An optimization where vertex positions for all voxels in all chunks are stored in a single global structured buffer, while colors are stored per-chunk [S2, unofficial]. Vertex positions are pre-calculated by multiplying the 3D voxel index by the edge length and adding 8 local vertex offsets to generate global positions [S2, unofficial]. The shared position buffer uses a `StructuredBuffer<DirectX::XMFLOAT3>` layout with a size of `Chunk::NUMBER_OF_VOXELS * 8` [S2, unofficial]. A chunk constant buffer holds the translation vector, the shared position buffer index, and the per-chunk color buffer index [S2, unofficial].
++An optimization variant where vertex positions for all voxels in all chunks are stored in a single global structured buffer (`m_shared_chunk_position_buffer`), while colors are stored per-chunk [S2, unofficial]. This reduces memory bandwidth for positions if many chunks share similar geometry structures [S2, unofficial].
++- **Steps:** Pre-calculate all vertex positions for all voxels in a chunk. For each voxel `i`, get its 3D index, calculate its world space offset (`index_3d * EDGE_LENGTH`), and add the 8 local vertex offsets to create 8 global positions [S2, unofficial].
++- **Layout:**
++    - Shared Position Buffer: `StructuredBuffer<DirectX::XMFLOAT3>`. Size is `Chunk::NUMBER_OF_VOXELS * 8` per chunk. Each voxel contributes 8 vertices [S2, unofficial].
++    - Chunk Constant Buffer (`ChunkConstantBuffer`): Contains `translation_vector` (XMVECTOR4: chunk world offset), `position_buffer_index` (u32: SRV index of shared position buffer), `color_buffer_index` (u32: SRV index of this chunk's color buffer) [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for traversal, where $N$ is the number of voxels [S1, unofficial]. The constant factor is significantly reduced due to cache efficiency [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ for the contiguous buffer [S1, unofficial].
+-- **Performance:** Sequential access patterns (x-innermost) drastically reduce cache misses compared to naive implementations [S1, unofficial]. Iterators or bulk operations further improve performance by eliminating index calculation overhead [S1, unofficial].
+-- **Strengths:** Simple to implement; highly effective for dense volumes that fit in memory; leverages hardware cache prefetching [S1, unofficial].
+-- **Limitations:** Not suitable for sparse data or extremely high resolutions ($>1000^3$) where memory capacity is exceeded; requires the entire volume to be resident in memory [S1, unofficial].
++- **Time Complexity:** $O(N)$ where $N = x_{size} \cdot y_{size} \cdot z_{size}$ for traversal. The constant factor is significantly reduced due to cache hits.
++- **Memory Complexity:** $O(N)$ for the contiguous buffer. No additional overhead for index calculation structures if iterators are used.
++- **Performance:** On a buffer of realistic resolution (e.g., $256^3$), reordering loops from naive (X-outermost) to optimized (X-innermost) can improve performance by an order of magnitude due to reduced cache misses [S1, unofficial].
++- **Strengths:** Simple to implement; leverages hardware prefetching and burst capabilities; minimal memory overhead [S1, S1638, S2174].
++- **Limitations:** Only effective for dense grids; does not address bank conflicts in parallel hardware (requires [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md)); less effective for sparse data where [Memory-Insensitive Rendering](2774-memory-insensitive-rendering.md) or sparse structures are better [S1, unofficial].
++- **When to Use:** When rendering dense volumes with uniform resolution and cache performance is the bottleneck.
++- **When Not to Use:** For highly sparse volumes, or when memory bandwidth is not the primary constraint (e.g., compute-bound shading).
++
+ ## Background
+-This approach is a standard practice in dense field implementations [S1, unofficial]. It addresses the fundamental mismatch between 3D spatial locality and 1D linear memory storage [S1, unofficial]. The concept of extents and data windows, allowing for non-zero starting indices, parallels image processing standards like OpenEXR [S1, unofficial].
++The concept of optimizing memory access patterns for dense grids originated in early voxel rendering and scientific visualization research. The specific formulation of row-major ordering and loop reordering for cache efficiency is detailed in production volume rendering fundamentals [S1, unofficial]. The shared position buffer variant is derived from modern voxel engine implementations using DirectX 12, demonstrating the application of these principles in real-time graphics [S2, unofficial].
++
+ ## Sources
+ [S1] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)

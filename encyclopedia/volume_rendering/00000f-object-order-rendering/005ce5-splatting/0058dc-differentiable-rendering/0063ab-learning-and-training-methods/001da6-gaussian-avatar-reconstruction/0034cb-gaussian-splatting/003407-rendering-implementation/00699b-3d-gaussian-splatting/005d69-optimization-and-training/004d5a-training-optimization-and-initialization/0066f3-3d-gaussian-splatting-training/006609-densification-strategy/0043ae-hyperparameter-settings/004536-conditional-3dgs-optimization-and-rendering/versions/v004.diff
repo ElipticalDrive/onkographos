@@ -1,0 +1,335 @@
+--- v003.md
++++ v004.md
+@@ -4,84 +4,75 @@
+ 
+ ## Overview
+-Conditional 3DGS Optimization and Rendering extends 3D Gaussian Splatting to handle dynamic scenes by incorporating temporal and directional dependencies into the Gaussian representation [S1]. It solves the problem of rendering animated or view-dependent content by conditioning the Gaussian parameters on time and view direction, allowing for unified spatial-temporal-angular optimization [S1]. Unlike static 3DGS, this method leverages temporal cues for densification and uses conditional covariance matrices to capture motion dynamics, distinguishing it from siblings like [Blended Error Densification and Splitting](13892-blended-error-densification-and-splitting.md) which focus on spatial error metrics alone [S1].
++Conditional 3DGS Optimization and Rendering extends 3D Gaussian Splatting to handle dynamic scenes by incorporating temporal and directional dependencies into the Gaussian parameters [S1]. It solves the problem of representing time-varying geometry and appearance by conditioning the Gaussian covariance and opacity on time $t$ and view direction $d$ [S1]. It differs from static 3DGS by using a conditional covariance matrix to drive densification and splitting, and from other dynamic variants by integrating these cues directly into the standard 3DGS rasterization pipeline with minimal architectural changes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of 3D Gaussians with base parameters (mean $\mu$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients), observed time $t$, and view direction $d$. Ground truth images for optimization.
+-*   **Outputs:** Rendered images for given $t$ and $d$, optimized Gaussian parameters.
++*   **Input:** A sequence of images (video) with known camera poses and timestamps.
++*   **Output:** A set of 7D Gaussians (3D position, 3D covariance, 3D color, opacity) conditioned on time and view direction, rendered as a video sequence.
+ 
+ **Data Structures:**
+-The core data structure is the Gaussian, extended with conditional components. The conditional covariance matrix $\Sigma_{cond}$ is derived from the base covariance and conditioned on $t$ and $d$. It is structured as a block matrix:
+-$$
+-\Sigma_{cond} = \begin{bmatrix} \Sigma_s & \Sigma_{st} \\ \Sigma_{ts} & \Sigma_t \end{bmatrix}
+-$$
+-where $\Sigma_s$ is the spatial covariance, $\Sigma_t$ is the temporal covariance, and $\Sigma_{st} = \Sigma_{ts}^T$ is the spatial-temporal correlation block [S1].
++The core data structure is the Gaussian, defined by:
++*   Mean position $\mu \in \mathbb{R}^3$.
++*   Conditional Covariance $\Sigma_{cond} \in \mathbb{R}^{7 \times 7}$, which encodes spatial, temporal, and angular correlations.
++*   Color coefficients $c \in \mathbb{R}^3$.
++*   Conditional Opacity $\alpha_{cond}$, modulated by time and direction.
+ 
+-**Numbered Steps:**
++**Method Steps:**
+ 
+-1.  **Initialization:** Initialize point clouds. For synthetic datasets (e.g., D-NeRF), use 100,000 randomly initialized points within a bounding cube or marching cubes for specific objects (e.g., heart models) [S1]. For in-the-wild data (e.g., Technicolor), initialize from COLMAP sparse reconstructions [S1].
+-2.  **Conditional Covariance Extraction:** For each Gaussian, compute the conditional covariance $\Sigma_{cond}$ based on the current time $t$ and view direction $d$ [S1].
+-3.  **Scale and Rotation Extraction:** Perform Singular Value Decomposition (SVD) on $\Sigma_{cond}$:
++1.  **Covariance Decomposition for Densification:**
++    To guide splitting and pruning, extract scale and rotation from the conditional covariance $\Sigma_{cond}$ using Singular Value Decomposition (SVD) [S1]:
+     $$ \Sigma_{cond} = U D U^T $$
+     where $U$ is an orthogonal matrix and $D$ is a diagonal matrix of singular values [S1].
+-    Define the rotation matrix $R = U$ and scale vector $S = \text{diag}(D)$ [S1].
+-    Ensure $R$ represents a right-handed coordinate system by adjusting the last column:
+-    $$ R_{:,3} = R_{:,3} \cdot \text{sign}(\det(R)) $$
+-    [S1].
+-4.  **Conditional Densification (Splitting):** Determine if a Gaussian should be split based on temporal cues [S1]:
+-    *   Calculate the magnitude of the off-diagonal block $\Sigma_{pt}$ (spatial-temporal correlation) [S1].
+-    *   Split the Gaussian if:
+-        1.  $|\Sigma_{pt}| > 0.05$ (relative to screen extent) [S1].
+-        2.  The normalized temporal scale (derived from $\Sigma_t$) is larger than 0.25 [S1].
+-    This criterion ensures regions with significant motion dynamics are densely represented [S1].
+-5.  **Rendering Pipeline:**
++    *   Define rotation matrix $R = U$.
++    *   Define scale vector $S = \text{diag}(D)$ [S1].
++    *   Ensure a right-handed coordinate system by adjusting the last column of $R$:
++        $$ R_{:,3} = R_{:,3} \cdot \text{sign}(\det(R)) $$
++        [S1]
++
++2.  **Conditional Splitting Criteria:**
++    Leverage temporal cues for Gaussian splitting in addition to spatial gradients [S1]. Quantify spatial-temporal correlation using the magnitude of the off-diagonal block $\Sigma_{pt}$ of $\Sigma_{cond}$, which captures interaction between spatial and temporal components [S1].
++    *   Split a Gaussian if:
++        1.  $|\Sigma_{pt}| > 0.05$ (relative to screen extent).
++        2.  Normalized temporal scale (derived from $\Sigma_t$) $> 0.25$ [S1].
++    This ensures regions with significant motion dynamics are densely represented [S1].
++
++3.  **Rendering Pipeline:**
++    The pipeline remains compatible with standard 3DGS [S1].
+     *   Convert the 7DGS representation to a 3DGS-compatible format via conditional slicing [S1].
+     *   Project the resulting conditional 3D Gaussian mean and covariance onto the image plane using standard perspective projection to yield 2D Gaussians [S1].
+-    *   Splat the 2D Gaussians onto the image canvas using a differentiable rasterization routine [S1].
++    *   Splat onto the image canvas using a differentiable rasterization routine [S1].
+     *   Compute final pixel colors by aggregating contributions in a depth-aware, opacity-blended manner [S1].
+-6.  **Optimization:** Use standard 3DGS loss functions and optimizers (e.g., Adam) [S1].
+-    *   Modulate opacity $\alpha_{cond}$ by time and view direction [S1].
+-    *   Prune Gaussians with opacity below $\tau_{min} = 0.01$ [S1]. This threshold is increased from the standard 3DGS value to compensate for the modulation of conditional opacity [S1].
+-    *   Directional and temporal modulation parameters ($\lambda_d$ and $\lambda_t$) are initially fixed and become trainable after 15,000 iterations [S1].
+ 
+-**Parameters:**
+-*   $\tau_{min}$: Minimum opacity threshold for pruning. Value: $0.01$ [S1].
+-*   $\lambda_d, \lambda_t$: Directional and temporal modulation parameters.
+-    *   7DGS-PBR: Initially $0.5$ [S1].
+-    *   D-NeRF: Initially $0.05$ [S1].
+-    *   Technicolor: Initially $0.1$ [S1].
+-    *   These become trainable after 15,000 iterations [S1].
+-*   Splitting Thresholds: Spatial-temporal correlation magnitude $> 0.05$; normalized temporal scale $> 0.25$ [S1].
+-*   Batch Size: 4 for most datasets; 1 for Technicolor [S1].
+-*   Downscaling Factor: 2 for most datasets; none for Technicolor [S1].
++4.  **Optimization and Pruning:**
++    *   Use the same loss functions and optimizers as standard 3DGS [S1].
++    *   Increase the minimum opacity threshold for pruning to $\tau_{min} = 0.01$ to compensate for the modulation of conditional opacity $\alpha_{cond}$ by time and view direction [S1].
++
++5.  **Modulation Parameters:**
++    *   Directional and temporal modulation parameters ($\lambda_d$ and $\lambda_t$) are initialized based on dataset characteristics:
++        *   0.5 for 7DGS-PBR.
++        *   0.05 for D-NeRF.
++        *   0.1 for Technicolor [S1].
++    *   These parameters become trainable after 15,000 iterations [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import numpy as np
+-
+-def extract_scale_rotation(covariance_cond):
++def decompose_conditional_covariance(Sigma_cond):
+     """
+-    Extracts scale and rotation from conditional covariance matrix.
++    Extracts scale and rotation from the conditional covariance matrix.
+     Args:
+-        covariance_cond: 3x3 (or 7x7 if including time/direction dimensions explicitly in block form) 
+-                         covariance matrix Sigma_cond.
++        Sigma_cond: 7x7 conditional covariance matrix.
+     Returns:
+-        R: Rotation matrix (3x3)
+-        S: Scale vector (3,)
++        R: 3x3 rotation matrix.
++        S: 3D scale vector.
+     """
+-    # SVD: Sigma_cond = U D U^T
+-    U, D, Vt = np.linalg.svd(covariance_cond)
++    # SVD decomposition
++    U, D, Vt = np.linalg.svd(Sigma_cond)
+     
+-    # Define rotation matrix R = U
+-    R = U
+-    
+-    # Define scale vector S = diag(D)
+-    S = np.diag(D)
++    # Define rotation and scale
++    R = U[:, :3]  # Extract 3x3 spatial rotation block
++    S = np.diag(D)[:3]  # Extract top 3 singular values as scale
+     
+     # Ensure right-handed coordinate system
+-    # Adjust last column: R[:, 3] = R[:, 3] * sign(det(R))
+-    # Note: For 3x3 matrix, indices are 0,1,2. The text says R:,3 which implies 1-based indexing or 
+-    # a larger matrix. Assuming standard 3D Gaussian, we adjust the 3rd column (index 2).
+     det_R = np.linalg.det(R)
+     if det_R < 0:
+@@ -90,137 +81,95 @@
+     return R, S
+ 
+-def check_splitting_criteria(covariance_cond, screen_extent):
++def check_splitting_criteria(Sigma_cond, screen_extent):
+     """
+-    Checks if a Gaussian should be split based on temporal cues.
++    Determines if a Gaussian should be split based on temporal cues.
+     Args:
+-        covariance_cond: The conditional covariance matrix.
+-        screen_extent: Normalization factor for screen extent.
++        Sigma_cond: 7x7 conditional covariance matrix.
++        screen_extent: Normalization factor for screen size.
+     Returns:
+         bool: True if splitting criteria are met.
+     """
+-    # Extract blocks from Sigma_cond
+-    # Assuming Sigma_cond is structured such that we can access spatial-temporal correlation
+-    # and temporal scale. The text mentions off-diagonal block Sigma_pt and Sigma_t.
+-    # In a 7D context, this might be a sub-block. For implementation, we assume 
+-    # covariance_cond contains the necessary blocks or is derived from them.
++    # Extract off-diagonal block Sigma_pt (interaction between spatial and temporal)
++    # Assuming layout: [Spatial (3x3), Temporal/Angular (4x4)]
++    # Sigma_pt corresponds to the cross-terms between spatial (0-2) and temporal/angular (3-6)
++    Sigma_pt = Sigma_cond[0:3, 3:7]
+     
+-    # Let's assume covariance_cond is the full conditional covariance.
+-    # We need to identify the spatial-temporal correlation block magnitude.
+-    # The text says "magnitude of the off-diagonal block Sigma_pt".
+-    # And "normalized temporal scale (derived from Sigma_t)".
++    # Calculate magnitude of spatial-temporal correlation
++    correlation_magnitude = np.linalg.norm(Sigma_pt)
+     
+-    # Placeholder for block extraction logic depending on exact matrix layout
+-    # Sigma_pt is the off-diagonal block between spatial and temporal components.
+-    # Sigma_t is the temporal component block.
++    # Check threshold relative to screen extent
++    if correlation_magnitude <= 0.05 * screen_extent:
++        return False
++        
++    # Calculate normalized temporal scale from Sigma_t (temporal block)
++    Sigma_t = Sigma_cond[3:7, 3:7]
++    # Assuming temporal scale is derived from the trace or max eigenvalue of Sigma_t
++    # Note: Exact derivation of "normalized temporal scale" from Sigma_t is not fully specified in [S1] beyond "derived from"
++    # We assume it refers to the magnitude of temporal variance components.
++    temporal_scale = np.max(np.linalg.eigvals(Sigma_t))
+     
+-    # For the sake of the algorithm, we assume helper functions or indices are known.
+-    # Sigma_pt_mag = magnitude of off-diagonal block
+-    # Temporal_scale = derived from Sigma_t
+-    
+-    # Since the exact block indices are not provided in the text for a generic 7D matrix,
+-    # we rely on the thresholds provided.
+-    
+-    # Check correlation threshold
+-    # The text says "exceeds a threshold of 0.05 (relative to the screen extent)"
+-    # This implies: |Sigma_pt| > 0.05 * screen_extent? Or just 0.05 relative to it?
+-    # "relative to screen extent" usually means normalized. 
+-    # Let's assume the value is already normalized or compared against 0.05.
+-    
+-    # We need to extract these values. Let's assume we have them.
+-    # In a real implementation, covariance_cond would be constructed from 
+-    # spatial, temporal, and cross terms.
+-    
+-    # For this pseudocode, we assume the existence of these values derived from Sigma_cond.
+-    # This is a gap [G] in the source text regarding exact block indexing.
+-    
+-    # Let's assume:
+-    # sigma_pt_mag = ... (extracted from Sigma_cond)
+-    # normalized_temporal_scale = ... (extracted from Sigma_cond)
+-    
+-    # Since we cannot implement the extraction without knowing the exact 7D layout,
+-    # we will state the condition.
+-    
+-    # Condition 1: |Sigma_pt| > 0.05
+-    # Condition 2: Normalized temporal scale > 0.25
+-    
+-    # We return True if both are met.
+-    # Note: The source does not provide the exact formula for "normalized temporal scale".
+-    # It says "derived from Sigma_t". [G]
+-    
+-    return False # Placeholder, logic depends on implementation of block extraction
++    if temporal_scale > 0.25:
++        return True
++        
++    return False
+ 
+-def render_conditional_gaussians(gaussians, camera, time, view_direction):
++def render_conditional_gaussians(gaussians, camera_params, time_t, view_dir_d):
+     """
+     Renders the scene using conditional 3DGS.
++    Args:
++        gaussians: List of Gaussian objects with conditional parameters.
++        camera_params: Camera intrinsic and extrinsic matrices.
++        time_t: Current time step.
++        view_dir_d: Current view direction.
++    Returns:
++        Image tensor.
+     """
+-    # 1. Conditional Slicing
+-    # Convert 7DGS to 3DGS-compatible format
+-    conditional_gaussians = conditional_slice(gaussians, time, view_direction)
+-    
+-    # 2. Projection
+-    # Project mean and covariance to 2D
++    # 1. Conditional Slicing: Convert 7DGS to 3DGS-compatible format
++    # This involves evaluating the conditional dependencies for the current t and d
+     projected_gaussians = []
+-    for g in conditional_gaussians:
+-        mu_2d, sigma_2d = perspective_project(g.mu, g.sigma, camera)
++    for g in gaussians:
++        # Get conditional mean and covariance for current t, d
++        mu_cond = g.get_conditional_mean(time_t, view_dir_d)
++        Sigma_cond = g.get_conditional_covariance(time_t, view_dir_d)
++        
++        # 2. Project to 2D
++        # Standard perspective projection
++        mu_2d, Sigma_2d = project_to_image_plane(mu_cond, Sigma_cond, camera_params)
++        
+         projected_gaussians.append({
+             'mu': mu_2d,
+-            'sigma': sigma_2d,
+-            'opacity': g.alpha,
+-            'sh': g.sh
++            'Sigma': Sigma_2d,
++            'color': g.color,
++            'opacity': g.get_conditional_opacity(time_t, view_dir_d)
+         })
+         
+-    # 3. Rasterization
+-    # Splat onto image canvas
+-    image = differentiable_rasterize(projected_gaussians, camera.image_shape)
++    # 3. Splatting
++    # Differentiable rasterization
++    image = splat_2d_gaussians(projected_gaussians, image_width, image_height)
+     
+     return image
++```
+ 
+-def optimize_step(gaussians, gt_image, camera, time, view_direction, iteration):
+-    """
+-    Performs one optimization step.
+-    """
+-    # Render
+-    pred_image = render_conditional_gaussians(gaussians, camera, time, view_direction)
+-    
+-    # Compute Loss
+-    loss = compute_loss(pred_image, gt_image)
+-    
+-    # Backpropagate
+-    loss.backward()
+-    
+-    # Update parameters
+-    optimizer.step()
+-    
+-    # Densification (Splitting)
+-    for g in gaussians:
+-        if check_splitting_criteria(g.covariance_cond, camera.screen_extent):
+-            split_gaussian(g)
+-            
+-    # Pruning
+-    for g in gaussians:
+-        if g.opacity < 0.01:
+-            prune_gaussian(g)
+-            
+-    # Modulation Parameters
+-    if iteration > 15000:
+-        make_trainable(lambda_d, lambda_t)
+-```
++**Edge Cases and Pitfalls:**
++*   **Precision:** SVD decomposition must handle near-singular covariance matrices carefully to avoid numerical instability in scale extraction [S1].
++*   **Boundaries:** The threshold for splitting ($0.05$ relative to screen extent) requires accurate calculation of screen extent, which depends on camera FOV and resolution [S1].
++*   **Degenerate Input:** If temporal scale is zero (static scene), splitting criteria based on temporal cues will not trigger, relying solely on spatial gradients [S1].
+ 
+ ## Subtopics
+ 
+ ### [Ground Truth Downsampling](15761-ground-truth-downsampling.md)
+-A technique to adapt a pre-trained 3D Gaussian Splatting (3DGS) model for anti-aliased rendering at lower resolutions (zoom-out) by generating pseudo-ground truth through downsampling high-resolution renderings. It prevents misguidance from aliased supervision during the optimization of low-resolution (LR) Gaussian renderings. Unlike Mip-Splatting, which uses filters that only mitigate dilation artifacts, this method achieves better visual effects and improves PSNR by 5dB compared to baseline 3DGS.
++A supervision strategy used during the low-resolution optimization stage to prevent optimization misguidance caused by aliased ground truth images. It differs from standard upsampling by explicitly downscaling target images using an anti-aliasing filter before computing the loss.
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method leverages the existing 3DGS training pipeline, implying similar complexity to 3DGS for rasterization and optimization, with additional overhead for conditional covariance computation and temporal correlation checks [S1].
+-*   **Measured Performance:** Evaluated on D-NeRF (synthetic, 800x800), Technicolor (in-the-wild video), and 7DGS-PBR [S1]. Experiments conducted on NVIDIA Tesla V100 GPU (16GB memory) [S1].
+-*   **Scaling:** Uses batch size of 4 (or 1 for Technicolor) and downscaling factor of 2 (or none for Technicolor) [S1].
+-*   **Strengths:** Integrates seamlessly with existing 3DGS training pipeline, leveraging adaptive density control and efficient rasterization [S1]. Handles dynamic scenes via temporal cues [S1].
+-*   **Limitations:** Requires careful tuning of modulation parameters ($\lambda_d, \lambda_t$) [S1]. Increased opacity threshold ($\tau_{min}=0.01$) is specific to this method [S1].
+-*   **When to use:** When rendering dynamic scenes with significant motion dynamics or view-dependent effects where standard 3DGS fails [S1].
+-*   **When not to use:** For static scenes where standard 3DGS is sufficient and faster [S1].
++*   **Time Complexity:** Rendering is compatible with standard 3DGS, implying $O(N)$ complexity with respect to the number of Gaussians $N$ per frame [S1].
++*   **Memory Complexity:** Requires storing additional covariance blocks for temporal and angular dependencies, increasing memory per Gaussian compared to static 3DGS [S1].
++*   **Measured Performance:** Evaluated on D-NeRF (800x800), Technicolor, and 7DGS-PBR datasets [S1]. Experiments conducted on NVIDIA Tesla V100 GPU (16GB) [S1].
++*   **Strengths:** Integrates seamlessly with existing 3DGS training pipeline, leveraging adaptive density control and efficient rasterization with minimal modifications [S1].
++*   **Limitations:** Requires careful tuning of modulation parameters ($\lambda_d, \lambda_t$) and thresholds for splitting [S1].
++*   **When to Use:** Dynamic scenes with significant motion and view-dependent appearance changes [S1].
++*   **When Not to Use:** Static scenes where standard 3DGS is sufficient and more efficient [S1].
+ 
+ ## Background
+-Originated from the 7DGS paper, which proposes a unified spatial-temporal-angular Gaussian Splatting framework [S1]. It builds on 3DGS and 4DGS, extending them to include directional dependencies [S1]. The method was evaluated on synthetic and in-the-wild datasets to demonstrate its ability to handle dynamic content [S1].
++Originated in the paper "7DGS: Unified Spatial-Temporal-Angular Gaussian Splatting" [S1]. The method builds on the 3DGS framework [S1] and extends it to handle 4D scenes (3D space + time) and view-dependent effects by conditioning Gaussian parameters on time and view direction [S1]. It was evaluated on synthetic (D-NeRF) and in-the-wild (Technicolor) video datasets [S1].
+ 
+ ## Sources

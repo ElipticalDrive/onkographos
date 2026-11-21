@@ -1,0 +1,83 @@
+# EOGS (Earth-observation Gaussian Splatting)
+Also called: Gaussian Splatting for Efficient Satellite Image Photogrammetry
+
+## Overview
+EOGS is a method for digital elevation modeling and appearance recovery from remote sensing images, adapting the standard 3DGS framework for satellite photogrammetry to achieve state-of-the-art performance with significantly faster training times (minutes vs. days) [S1]. It sets itself apart from standard 3DGS by replacing the generic camera model with an affine approximation of pushbroom satellite sensors and incorporating remote-sensing specific improvements like radiometric correction and shadow modeling, while distinguishing itself from NeRF-based Earth observation methods like EO-NeRF by being approximately 300× faster [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** $N$ non-orthorectified satellite images and their corresponding RPC (Rational Polynomial Coefficient) camera model coefficients [S1].
+*   **Outputs:** A set of $K$ Gaussian primitives representing the 3D geometry and appearance of the scene [S1].
+
+**Data Structures:**
+The method optimizes a set of $K$ Gaussian primitives. Each primitive $k$ is defined by parameters $\gamma_k$ which include position, covariance, opacity, and spherical harmonics for color, consistent with the standard 3DGS representation [S1]. The primitives are stored in world-space coordinates [S1].
+
+**Coordinate System:**
+The Gaussian primitive centers and shapes are expressed in world-space coordinates [S1]. This coordinate system is a uniformly rescaled and recentered version of the Universal Transverse Mercator (UTM) system [S1]. The transformation ensures:
+1.  The scene center coincides with the origin.
+2.  The scene is contained in a unit cube.
+3.  The alignment is east-north-up [S1].
+
+**Camera Model and Projection:**
+EOGS replaces the full RPC-based transformation pipeline (World $\to$ UTM $\to$ Longitude/Latitude/Altitude $\to$ Row/Column $\to$ NDC) with a per-scene affine approximation [S1]. This affine camera model $A: \mathbf{x} \in \mathbb{R}^3 \to A\mathbf{x} + \mathbf{a} \in \mathbb{R}^2$ maps world-space coordinates directly to 2D NDC-space (normalized to range $[-1, 1]$) [S1].
+*   The mean of the Gaussian in NDC space is computed as: $\mu'_k = A\mu_k + \mathbf{a}$ [S1].
+*   The covariance in NDC space is computed as: $\Sigma'_k = A\Sigma_k A^T$ [S1].
+This approach eliminates the need for the local first-order approximation used in the original 3DGS method, as the approximation is moved to the camera model itself [S1]. The mean error introduced by this approximation is negligible, approximately 0.012 pixels [S1].
+
+**Optimization Objective:**
+The optimization problem is formulated as minimizing the photometric distance between input satellite images and synthesized views over $K$ primitives [S1]:
+$$ \arg \min_{(\gamma_k)_{k=1}^K} \sum_{i=1}^N \ell(\hat{I}_i, I_i) $$
+where:
+*   $N$ is the number of non-orthorectified satellite images [S1].
+*   $K$ is the number of Gaussian primitives [S1].
+*   $I_i$ is the $i$-th input satellite observation [S1].
+*   $\hat{I}_i$ is the corresponding synthesized view [S1].
+*   $\ell$ is the photometric distance function used in 3DGS [S1].
+
+**Regularization and Enhancements:**
+EOGS introduces three new regularization terms to the standard 3DGS loss to improve quality and reduce training time [S1]:
+1.  **Sparsity:** Promotes sparsity in the Gaussians' opacities [S1].
+2.  **View Consistency:** Ensures consistency across different viewing angles [S1].
+3.  **Opacity Regularization:** Encourages completely opaque objects where appropriate [S1].
+
+Additionally, the framework incorporates shadow modeling based on shadow mapping to render shadows in a physically accurate manner [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+# 1. Load N satellite images and their RPC coefficients.
+# 2. Compute the per-scene affine approximation A and offset a from RPC coefficients.
+#    This involves fitting A: R^3 -> R^2 to minimize projection error over the scene volume.
+#    Error is approx 0.012 pixels [S1].
+# 3. Initialize K Gaussian primitives in the rescaled UTM world-space (unit cube, ENU aligned) [S1].
+
+# Optimization Loop
+for iteration in range(max_iterations):
+    # 1. Sample a random input image i from the N images [S1].
+    # 2. For each Gaussian primitive k:
+    #    a. Get world-space mean mu_k and covariance Sigma_k [S1].
+    #    b. Transform to NDC space:
+    #       mu_prime_k = A @ mu_k + a
+    #       Sigma_prime_k = A @ Sigma_k @ A.T
+    #    c. Splat the Gaussian onto the image plane using standard 3DGS rasterization [S1].
+    # 3. Composite the splatted Gaussians to form the synthesized view I_hat_i [S1].
+    # 4. Compute photometric loss: L_photo = sum(I_hat_i, I_i) using 3DGS loss function [S1].
+    # 5. Compute regularization losses:
+    #    L_sparsity = sparsity_loss(opacities) [S1]
+    #    L_view_consistency = view_consistency_loss(synthesized_views) [S1]
+    #    L_opacity = opacity_regularization_loss(opacities) [S1]
+    # 6. Compute shadow loss using shadow mapping pipeline [S1].
+    # 7. Total Loss = L_photo + lambda1 * L_sparsity + lambda2 * L_view_consistency + lambda3 * L_opacity + lambda4 * L_shadow [S1]
+    # 8. Backpropagate and update Gaussian parameters gamma_k [S1].
+```
+
+## Operating characteristics
+EOGS achieves state-of-the-art performance in digital elevation modeling and appearance recovery in just a few minutes, compared to the day-long optimization required by the best-performing NeRF-based Earth observation methods [S1]. It is approximately 300× faster than previous state-of-the-art NeRF-based approaches like EO-NeRF [S1]. It retains the high efficiency of 3DGS while incorporating remote-sensing improvements [S1]. The method introduces negligible mean error (≈ 0.012 pixels) due to the affine approximation [S1].
+
+## Background
+EOGS was introduced as the first method for digital elevation modeling based on 3DGS [S1]. It adapts the 3DGS framework for satellite photogrammetry, building on the efficiency of 3DGS [23] and incorporating remote-sensing improvements from EO-NeRF [32] such as radiometric correction and shadow modeling [S1]. The work addresses the exponential growth in active satellites and the increasing availability of optical images of the same areas at regular intervals [S1].
+
+## Sources
+[S1] Gaussian Splatting for Efficient Satellite Image Photogrammetry, https://doi.org/10.1109/cvpr52734.2025.00559, fetched 2026-10-26

@@ -1,0 +1,190 @@
+--- v003.md
++++ v004.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A 3D volume dataset $V$, a viewing ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, a user-defined intensity threshold $T$, and the volume bounds.
+-- **Output:** A single color value for each pixel, corresponding to the intensity of the first local maximum above $T$ encountered along the ray.
++- **Input:** A 3D volume dataset $V$, a viewing ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, a user-defined intensity threshold $T$, and the volume bounds [S4, S5, S8, unofficial].
++- **Output:** A single color value for each pixel, corresponding to the intensity of the first local maximum above $T$ encountered along the ray [S6, unofficial].
+ 
+ **Data Structures:**
+-- **Volume Data:** A 3D grid of scalar values (e.g., density or attenuation).
++- **Volume Data:** A 3D grid of scalar values (e.g., density or attenuation) [S4, S8, unofficial].
+ - **Threshold Mask (Optional Optimization):** A binary representation where each voxel is 1 if $V(x,y,z) \ge T$ and 0 otherwise. This allows bit-parallel processing [S3, unofficial].
+ - **Lookup Table (LUT):** A precomputed table mapping byte patterns to the position of the first non-zero bit, used to accelerate the search for the first sample above the threshold [S3, unofficial].
+@@ -40,7 +40,7 @@
+ 4. **Refinement (Optional):**
+    - To improve precision, perform a refinement pass around the identified local maximum position [S4, unofficial].
+-   - Set the refinement step size $\Delta t_{refine} = \Delta t / N_{refine}$, where $N_{refine}$ is a constant (e.g., 4) [S4, unofficial].
++   - Set the refinement step size $\Delta t_{refine} = \Delta t / \text{REFINEMENT\_STEPS}$, where $\text{REFINEMENT\_STEPS}$ is a constant (e.g., 4) [S4, unofficial].
+    - Center the search around the found maximum position [S4, unofficial].
+-   - Iterate $N_{refine}$ times, sampling the volume and updating the maximum value found [S4, unofficial].
++   - Iterate $\text{REFINEMENT\_STEPS}$ times, sampling the volume and updating the maximum value found [S4, unofficial].
+ 
+ 5. **Compositing and Output:**
+@@ -53,123 +53,59 @@
+ 
+ ```python
+-def render_lmip(ray_origin, ray_direction, volume, threshold, refinement_steps=4):
+-    """
+-    Renders a single pixel using Local Maximum Intensity Projection.
+-    
+-    Args:
+-        ray_origin: vec3, origin of the view ray.
+-        ray_direction: vec3, direction of the view ray (should be normalized).
+-        volume: 3D array, the volume dataset.
+-        threshold: float, the intensity threshold T.
+-        refinement_steps: int, number of refinement samples around the max.
+-        
+-    Returns:
+-        vec3, the final color for the pixel.
+-    """
+-    # 1. Ray-Box Intersection
+-    # Assuming volume is in a unit cube [0,1]^3 for simplicity
+-    t_min = 0.0
+-    t_max = 1.0
+-    
+-    # Calculate intersection with unit cube
+-    # This is a simplified intersection logic; real implementations use slab method
++def render_lmip(ray_origin, ray_direction, volume, threshold, REFINEMENT_STEPS=4):
++    # 1. Ray-Box Intersection (unit cube [0,1]^3)
+     t_entry = 0.0
+     t_exit = 1.0
+-    
+-    # Example: intersect with unit cube bounds
+-    # In practice, use the standard ray-aabb intersection algorithm
+-    # For this pseudocode, assume t_entry and t_exit are computed correctly
+-    # and ray_direction is normalized.
+-    
++    # Standard slab method intersection logic would go here
+     if t_entry > t_exit:
+-        return vec3(0, 0, 0) # No intersection
+-    
+-    # Clamp entry to start of volume
++        return vec3(0, 0, 0)
+     t_entry = max(t_entry, 0.0)
+     
+-    # 2. Marching
+-    step_size = 1.0 / volume.resolution # Assuming uniform grid resolution
+-    current_pos = ray_origin + t_entry * ray_direction
++    # 2. Ray Setup
++    ray_dir = normalize(ray_direction)
++    dt = 1.0 / volume.resolution
++    p = ray_origin + t_entry * ray_dir
++    max_val = -1e6
++    max_step = vec3(0)
+     
+-    max_val = -infinity
+-    found_above_threshold = False
+-    local_max_val = -infinity
+-    
+-    # Check if any voxel is above threshold
+-    # Optimization: Use bit-parallel search or min/max grid to skip
+-    # Here we do a simple linear scan for clarity
+-    
+-    samples = []
+-    pos = current_pos
+-    while pos_inside_volume(pos):
+-        val = sample_volume(pos, volume)
+-        samples.append((val, pos))
++    # 3. Initial Marching
++    while p_inside_volume(p):
++        val = sample_volume(p, volume)
+         if val >= threshold:
+-            found_above_threshold = True
+-        pos += ray_direction * step_size
+-        
+-    if not found_above_threshold:
+-        # Fallback to Global MIP
+-        for val, pos in samples:
+             if val > max_val:
+                 max_val = val
+-        return apply_color(max_val)
+-    
+-    # 3. Find First Local Maximum Above Threshold
+-    # Iterate through samples to find the first local max >= threshold
+-    for i in range(1, len(samples) - 1):
+-        val_prev, pos_prev = samples[i-1]
+-        val_curr, pos_curr = samples[i]
+-        val_next, pos_next = samples[i+1]
++                max_step = p
++        p += ray_dir * dt
+         
+-        if val_curr >= threshold:
+-            # Check if local maximum
+-            if val_curr >= val_prev and val_curr >= val_next:
+-                local_max_val = val_curr
+-                local_max_pos = pos_curr
+-                break
+-    
+-    # If no strict local max found, take the first sample above threshold (surface entry)
+-    if local_max_val == -infinity:
+-        for val, pos in samples:
+-            if val >= threshold:
+-                local_max_val = val
+-                local_max_pos = pos
+-                break
+-    
+-    # 4. Refinement
+-    # Refine the position and value around local_max_pos
+-    refine_step = step_size / refinement_steps
+-    refined_max = local_max_val
+-    
+-    # Center refinement around the found position
+-    refine_start = local_max_pos - ray_direction * (refine_step * refinement_steps / 2.0)
+-    
+-    for i in range(refinement_steps):
+-        refine_pos = refine_start + ray_direction * (i * refine_step)
+-        refine_val = sample_volume(refine_pos, volume)
+-        if refine_val > refined_max:
+-            refined_max = refine_val
+-            
+-    return apply_color(refined_max)
++    # Fallback to global MIP if no threshold crossing found
++    if max_val == -1e6:
++        return apply_color(global_mip(ray_origin, ray_direction, volume))
++        
++    # 4. Refinement Pass
++    dt = dt / float(REFINEMENT_STEPS)
++    p = max_step - ray_dir * dt * 0.5
++    for i in range(REFINEMENT_STEPS):
++        val = sample_volume(p, volume)
++        if val > max_val:
++            max_val = val
++        p += ray_dir * dt
++        
++    return apply_color(max_val)
+ 
+ def sample_volume(pos, volume):
+-    # Trilinear interpolation
+-    # ... implementation details ...
+-    pass
++    # Trilinear interpolation of volume at pos
++    return volume.trilinear_interpolate(pos)
+ 
+-def pos_inside_volume(pos):
+-    # Check if pos is within [0,1]^3
+-    return all(0 <= c <= 1 for c in pos)
++def p_inside_volume(pos):
++    return all(0.0 <= c <= 1.0 for c in pos)
+ 
+ def apply_color(val):
+     # Map intensity to color
+-    # ... implementation details ...
+-    pass
++    return vec3(val, val, val) # Placeholder for actual color map
+ ```
+ 
+ **Parameters:**
+ - **Threshold ($T$):** A user-defined intensity value. Typical values depend on the data range (e.g., 0.5 for normalized data) [S5, S8, unofficial].
+-- **Refinement Steps ($N_{refine}$):** Number of samples in the refinement pass. A common value is 4 [S4, unofficial].
++- **Refinement Steps ($\text{REFINEMENT\_STEPS}$):** Number of samples in the refinement pass. A common value is 4 [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -177,5 +113,4 @@
+ - **Occlusion:** LMIP does not support translucent materials; it discards all samples after the first local maximum, which can lead to occlusion artifacts if the local maximum is not the true surface [S5, S8, unofficial].
+ - **Ray Direction Normalization:** The ray direction must be normalized after interpolation to ensure correct step sizes [S4, unofficial].
+-- **Boundary Conditions:** Care must be taken when sampling at the volume boundaries to avoid out-of-bounds access [S4, unofficial].
+ 
+ ## Subtopics

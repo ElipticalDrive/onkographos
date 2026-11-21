@@ -1,0 +1,282 @@
+--- v001.md
++++ v002.md
+@@ -9,11 +9,11 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: A ray defined by origin $o$ and direction $d$; a scalar field defined by a Blob Tree (sum of primitives, potentially with deformation operators); scene bounding box.
+-*   **Outputs**: Intersection distance $t$, accumulated opacity $\alpha$, and accumulated color $C$.
++*   **Inputs**: A ray defined by origin $o$ and direction $d$; a scalar field defined by a Blob Tree (sum of primitives, potentially with deformation operators); scene bounding box [S2, unofficial].
++*   **Outputs**: Intersection distance $t$, accumulated opacity $\alpha$, and accumulated color $C$ [S2, unofficial].
+ 
+ ### Data Structures
+ 
+ **Blob Tree Node Hierarchy**
+-The scalar field is represented as a tree. Two primary node types are defined in the reference implementation [S2, unofficial]:
++The scalar field is represented as a tree [S2, unofficial]. Two primary node types are defined in the reference implementation [S2, unofficial]:
+ 
+ 1.  **BlobTreePoint (Primitive)**
+@@ -34,10 +34,10 @@
+ 
+ **Segment**
+-*   Defined by endpoints $a$ and $b$ (vectors). Used to compute local bounds.
++*   Defined by endpoints $a$ and $b$ (vectors). Used to compute local bounds [S2, unofficial].
+ 
+ ### Formulas
+ 
+ **1. Deformed Field Gradient**
+-For a warping function $\omega: \mathbb{R}^3 \to \mathbb{R}^3$ deforming space, the field function is $f_W = f_N \circ \omega^{-1}$. The gradient is:
++For a warping function $\omega: \mathbb{R}^3 \to \mathbb{R}^3$ deforming space, the field function is $f_W = f_N \circ \omega^{-1}$ [S1]. The gradient is:
+ $$ \nabla f_W = \nabla(f_N \circ \omega^{-1}) = \nabla f_N \circ \omega^{-1} \cdot \mathbf{J}_{\omega^{-1}} $$
+ where $\mathbf{J}_{\omega^{-1}}$ is the Jacobian matrix of the inverse deformation [S1].
+@@ -46,10 +46,8 @@
+ The local Lipschitz bound $\lambda(e)$ for a segment $e$ is estimated by bounding the gradient norm and the Jacobian norm:
+ $$ \|\nabla(f_N \circ \omega^{-1})\| \leq \|\nabla f_N \circ \omega^{-1}\| \cdot \|\mathbf{J}_{\omega^{-1}}\| $$
+-Two bounds must be computed for segment $e$:
+-1.  Bound of the gradient norm $\|\nabla(f_N \circ \omega^{-1})(e)\|$.
+-2.  Bound of the Jacobian norm $\|\mathbf{J}_{\omega^{-1}}(e)\|$ [S1].
++Two bounds must be computed for segment $e$: the bound of the gradient norm $\|\nabla(f_N \circ \omega^{-1})(e)\|$ and the bound of the Jacobian norm $\|\mathbf{J}_{\omega^{-1}}(e)\|$ [S1].
+ 
+ **3. Gradient Bound via Bounding Sphere**
+-To bound the gradient over the deformed segment $\omega^{-1}(e)$, a bounding sphere $S$ is computed such that $S \supset \omega^{-1}(e)$. Let $\lambda$ be the global Lipschitz bound of $\omega^{-1}$ and $c$ be the segment center. The inclusion property is:
++To bound the gradient over the deformed segment $\omega^{-1}(e)$, a bounding sphere $S$ is computed such that $S \supset \omega^{-1}(e)$ [S1]. Let $\lambda$ be the global Lipschitz bound of $\omega^{-1}$ and $c$ be the segment center [S1]. The inclusion property is:
+ $$ \omega^{-1}(e) \subset \mathbf{S}(\omega^{-1}(c), \lambda \|e\|/2) $$
+ The upper bound is then:
+@@ -84,132 +82,135 @@
+ ```python
+ def SegmentTracing(ray_o, ray_d, blob_tree, box_min, box_max):
+-    """
+-    Main ray marching loop using local Lipschitz bounds.
+-    """
+     # 1. Intersect with scene bounding box
+     t_min, t_max = box_min.Intersect(ray_o, ray_d)
+-    if no_intersection:
+-        return False, 0, 0, 0
++    if t_min is None:
++        return False, 0.0, 0.0, 0.0
+ 
+     t = t_min
+     alpha = 0.0
+-    color = Vector(0, 0, 0)
++    color = [0.0, 0.0, 0.0]
+     step_count = 0
+-    t_prev = 0.0
+-    t_max_allowed = t_max - t_min
++    ts = t_max - t_min  # max allowed step size
++    te = 0.0            # previous step size
+     overstep_factor = 1.0
++    ce = overstep_factor - 1.0  # = 0.0 per implementation
+     accel_factor = 1.5
+     epsilon = 1e-3
+ 
+-    # 2. Marching Loop
+     while t < t_max and alpha < 1.0:
+         step_count += 1
+         p = ray_o + t * ray_d
+-        
+-        # Evaluate field intensity
+-        # Note: BlobTree::Intensity may subtract 0.5 offset depending on primitive definition
++
+         intensity = blob_tree.Intensity(p)
+-        
+-        # Check for intersection (surface crossing)
+-        # In the provided code, intersection is detected if intensity > 0.0
+-        # This implies the field represents a blob where inside > 0
+         if intensity > 0.0:
+             return True, t, alpha, color
+ 
+-        # Evaluate gradient at current point
+         grad = blob_tree.Gradient(p)
+         grad_norm = Norm(grad)
+ 
+-        # Define current segment for Lipschitz calculation
+-        # Segment from current t to t + t_max_allowed
+         seg_start = ray_o + t * ray_d
+-        seg_end = ray_o + (t + t_max_allowed) * ray_d
++        seg_end = ray_o + (t + ts) * ray_d
+         segment = Segment(seg_start, seg_end)
+ 
+-        # Compute local Lipschitz constant K for the segment
+-        # This traverses the Blob Tree to find max gradient/Jacobian bounds
+         K = blob_tree.K(segment)
+-
+-        # If K is zero (empty space), take max step
+         if K == 0.0:
+-            dt = t_max_allowed
++            tk = ts
+         else:
+-            # Safe step size: dt = epsilon / K
+-            # Clamp to max allowed step
+-            dt_safe = epsilon / K
+-            dt = min(dt_safe, t_max_allowed)
+-
+-        # Overstepping safety check
+-        # If the previous step was too large relative to local bounds
+-        if dt < overstep_factor * t_prev:
+-            # Backtrack
+-            t = t - overstep_factor * t_prev
+-            t_prev = 0.0
++            tk = abs(intensity) / K
++            tk = min(tk, ts)
++
++        ts = tk
++
++        if tk < ce * te:
++            t = t - ce * te
++            te = 0.0
+             continue
+ 
+-        # Advance ray
+-        t_prev = max(dt * overstep_factor, epsilon)
+-        t += t_prev
+-
+-        # Attempt to increase max allowed step size for future iterations
+-        # ts = tk * c
+-        t_max_allowed = dt * accel_factor
+-
+-        # Volume rendering accumulation (if not just intersection)
+-        # Density sigma derived from intensity
+-        # alpha_seg = 1 - exp(-sigma * dt)
+-        # For blob tree intensity I, sigma might be proportional to I
+-        # Standard volume rendering step:
+-        # alpha_seg = 1.0 - exp(-intensity * dt) # Simplified
+-        # color += alpha_seg * alpha * material_color
++        te = max(tk * overstep_factor, epsilon)
++        t = t + te
++
++        ts = tk * accel_factor
++
++        # Volume accumulation (not detailed in core algorithm notes)
++        # alpha_seg = 1.0 - exp(-intensity * te)
++        # color += alpha_seg * alpha * [1.0, 1.0, 1.0]
+         # alpha += alpha_seg * (1.0 - alpha)
+-        
+-        # Note: The reference code snippet for marching focuses on intersection detection
+-        # and step size logic. Full volume compositing requires specific shader logic
+-        # not fully detailed in the C++ snippet provided, but the step size logic is complete.
+ 
+     return False, t, alpha, color
+ 
+-def BlobTreePoint_K(segment):
+-    """
+-    Computes local Lipschitz constant for a point primitive over a segment.
+-    """
++def Norm(v):
++    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++
++def SquaredNorm(v):
++    return v[0]**2 + v[1]**2 + v[2]**2
++
++def Dot(u, v):
++    return u[0]*v[0] + u[1]*v[1] + u[2]*v[2]
++
++def Normalize(v):
++    n = Norm(v)
++    if n == 0.0: return [0.0, 0.0, 0.0]
++    return [x/n for x in v]
++
++class Segment:
++    def __init__(self, start, end):
++        self.start = start
++        self.end = end
++    def GetBox(self):
++        return Box(Min(self.start, self.end), Max(self.start, self.end))
++    def Intersect(self, box):
++        # Simplified AABB intersection check
++        b = box.GetBox()
++        for i in range(3):
++            if self.start[i] > b.b[i] or self.end[i] < b.a[i]:
++                return False
++        return True
++
++class Box:
++    def __init__(self, a, b):
++        self.a = a
++        self.b = b
++    def GetBox(self):
++        return self
++    def Intersect(self, ray_o, ray_d):
++        t_min, t_max = -float('inf'), float('inf')
++        for i in range(3):
++            if abs(ray_d[i]) < 1e-6:
++                if ray_o[i] < self.a[i] or ray_o[i] > self.b[i]:
++                    return None, None
++            else:
++                t1 = (self.a[i] - ray_o[i]) / ray_d[i]
++                t2 = (self.b[i] - ray_o[i]) / ray_d[i]
++                t_min = max(t_min, min(t1, t2))
++                t_max = min(t_max, max(t1, t2))
++        if t_min > t_max:
++            return None, None
++        return t_min, t_max
++
++def Min(a, b):
++    return [min(a[i], b[i]) for i in range(3)]
++
++def Max(a, b):
++    return [max(a[i], b[i]) for i in range(3)]
++
++def BlobTreePoint_K(segment, c, r, e):
+     a = segment.start
+     b = segment.end
+-    
+-    # Check intersection with primitive bounding box
+-    if not segment.Intersect(box):
++    if not segment.Intersect(Box([c[i]-r for i in range(3)], [c[i]+r for i in range(3)])):
+         return 0.0
+-
+     axis = Normalize(b - a)
+-    # Project center c onto segment direction
+     l = Dot(c - a, axis)
+-    
+     kk = 0.0
+     if l < 0.0:
+-        # Closest point is a
+         kk = CubicFalloffK(SquaredNorm(c - a), SquaredNorm(c - b), r, e)
+     elif Norm(b - a) < l:
+-        # Closest point is b
+         kk = CubicFalloffK(SquaredNorm(c - b), SquaredNorm(c - a), r, e)
+     else:
+-        # Closest point is projection pc on segment
+         dd = SquaredNorm(c - a) - (l * l)
+-        pc = a + axis * l
+         kk = CubicFalloffK(dd, max(SquaredNorm(c - b), SquaredNorm(c - a)), r, e)
+-        
+-    # Gradient direction factor
+     grad_factor = max(abs(Dot(axis, Normalize(c - a))), abs(Dot(axis, Normalize(c - b))))
+-    
+     return kk * grad_factor
+ 
+ def CubicFalloffK(a_sq, b_sq, R, s):
+-    """
+-    Computes Lipschitz bound contribution for cubic falloff.
+-    a_sq: squared distance to one end
+-    b_sq: squared distance to other end
+-    R: radius
+-    s: energy
+-    """
+     R_sq = R * R
+     if a_sq > R_sq:
+@@ -217,13 +218,10 @@
+     if b_sq < (R_sq / 5.0):
+         t = 1.0 - b_sq / R_sq
+-        return abs(s) * 6.0 * (sqrt(b_sq) / R_sq) * (t * t)
++        return abs(s) * 6.0 * (b_sq**0.5 / R_sq) * (t * t)
+     elif a_sq > (R_sq / 5.0):
+         t = 1.0 - a_sq / R_sq
+-        return abs(s) * 6.0 * (sqrt(a_sq) / R_sq) * (t * t)
++        return abs(s) * 6.0 * (a_sq**0.5 / R_sq) * (t * t)
+     else:
+-        return CubicFalloffK(s, R)
+-
+-def CubicFalloffK(s, R):
+-    return 1.72 * abs(s) / R
++        return 1.72 * abs(s) / R
+ ```
+ 
+@@ -238,5 +236,5 @@
+ 
+ ### Time and Memory Complexity
+-*   **Time**: The algorithm reduces field function queries by one to two orders of magnitude for complex models compared to global Sphere Tracing [S1]. However, the computation of $\lambda(e)$ adds overhead per step.
++*   **Time**: The algorithm reduces field function queries by one to two orders of magnitude for complex models compared to global Sphere Tracing [S1]. However, the computation of $\lambda(e)$ adds overhead per step [S1].
+ *   **Memory**: Preserves the compact format of hierarchical implicit surface models (Blob Trees). Does not require additional memory structures like voxel grids [S1].
+ 

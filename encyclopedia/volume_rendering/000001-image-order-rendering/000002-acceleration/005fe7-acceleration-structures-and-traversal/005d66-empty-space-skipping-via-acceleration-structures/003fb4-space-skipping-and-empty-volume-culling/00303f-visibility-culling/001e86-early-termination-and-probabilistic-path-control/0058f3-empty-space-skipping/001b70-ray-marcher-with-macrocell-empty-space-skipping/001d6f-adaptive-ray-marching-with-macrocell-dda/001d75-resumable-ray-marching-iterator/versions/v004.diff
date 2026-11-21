@@ -1,0 +1,214 @@
+--- v003.md
++++ v004.md
+@@ -4,118 +4,93 @@
+ 
+ ## Overview
+-The Resumable Ray Marching Iterator is a GPU-based ray marching algorithm that traverses a volumetric grid using a 3D Digital Differential Analyzer (DDA) over macrocells, adapting the sampling step size based on opacity upper bounds to skip empty regions [S1, S2, unofficial]. It differs from its parent [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by explicitly supporting interruption and resumption of the ray traversal state, allowing the algorithm to pause mid-ray for external operations (such as data streaming or neural network inference) and resume later without losing progress [S1, S3, unofficial]. Unlike [Network Ray Marching Iterator](1510-network-ray-marching-iterator.md), which may handle network-specific traversal, this method focuses on general volumetric density grids with macrocell-based empty space skipping.
++The Resumable Ray Marching Iterator traverses a volumetric grid using a 3D Digital Differential Analyzer (DDA) over macrocells, adapting the sampling step size based on opacity upper bounds to skip empty regions [S1, S2, unofficial]. It differs from its parent [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by explicitly supporting interruption and resumption of the ray traversal state, allowing the algorithm to pause mid-ray for external operations and resume later without losing progress [S1, S3, unofficial].
+ 
+ ## How it works
+-The method operates in two modes: adaptive sampling (enabled by a preprocessor macro) and linear sampling. It relies on a DDA to traverse macrocells and an internal state to track the ray's position for resumption.
+-
+ ### Inputs and Outputs
+-*   **Inputs**: Ray origin `org`, ray direction `dir`, ray segment bounds `tMin`, `tMax`, volume dimensions `dims`, macrocell spacing inverse `macrocell_spacings_rcp`, and a fixed step size `step` (for non-adaptive mode).
+-*   **Outputs**: Accumulated radiance/color and opacity, computed via a callback `body(t)` invoked for each sampled segment.
++*   **Inputs**: Ray origin `org`, ray direction `dir`, ray segment bounds `tMin`, `tMax`, volume dimensions `dims`, macrocell spacing inverse `macrocell_spacings_rcp`, fixed step size `step`, and a callback `body(t)` [S1, S2, unofficial].
++*   **Outputs**: Accumulated radiance/color and opacity, computed via `body(t)` invoked for each sampled segment [S2, unofficial].
+ 
+ ### Data Structures
+-The iterator maintains state in a payload structure to support resumption.
++The iterator maintains state in a payload structure to support resumption [S1, unofficial].
++**SampleStreamingPayload** (stores iteration state):
++*   `iter.cell`: Current macrocell coordinates (integer vector). Present only if `ADAPTIVE_SAMPLING` is defined [S1, unofficial].
++*   `iter.t_next`: The next time parameter to process. Present only if `ADAPTIVE_SAMPLING` is defined [S1, unofficial].
++*   `iter.next_cell_begin`: Offset from `tMin` to the next cell boundary. Always present [S1, unofficial].
++*   `pixel_index`: Pixel identifier [S1, unofficial].
++*   `jitter`: Sampling jitter [S1, unofficial].
++*   `alpha`: Accumulated opacity [S1, unofficial].
++*   `color`: Accumulated color [S1, unofficial].
++**RadiancePayload** (for ray generation):
++*   `alpha`: Float, initialized to `0.f` [S2, unofficial].
++*   `color`: `vec3f`, initialized to `0.f` [S2, unofficial].
++*   `rng`: Pointer to random number generator state, initialized to `nullptr` [S2, unofficial].
++**ShadowPayload** (for shadow rays):
++*   `alpha`: Float, initialized to `0.f` [S2, unofficial].
++*   `rng`: Pointer to random number generator state, initialized to `nullptr` [S2, unofficial].
+ 
+-**SampleStreamingPayload** (stores iteration state):
+-*   `iter.cell`: Current macrocell coordinates (integer vector). Present only if `ADAPTIVE_SAMPLING` is defined.
+-*   `iter.t_next`: The next time parameter to process. Present only if `ADAPTIVE_SAMPLING` is defined.
+-*   `iter.next_cell_begin`: Offset from `tMin` to the next cell boundary. Always present.
+-*   `pixel_index`: Pixel identifier.
+-*   `jitter`: Sampling jitter.
+-*   `alpha`: Accumulated opacity.
+-*   `color`: Accumulated color.
++### Pseudocode
++```python
++def resumable_ray_marching_iterator(org, dir, tMin, tMax, dims, macrocell_spacings_rcp, step, body, ADAPTIVE_SAMPLING):
++    next_cell_begin = 0.0
++    if ADAPTIVE_SAMPLING:
++        m_org = org * macrocell_spacings_rcp
++        m_dir = dir * macrocell_spacings_rcp
++        DDAIter.init(m_org, m_dir, tMin, tMax, dims)
++        while DDAIter.next(lambda cell, t0, t1: process_macrocell(cell, t0, t1)):
++            pass
++    else:
++        t = [max(tMin + next_cell_begin, tMin), min(max(tMin + next_cell_begin, tMin) + step, tMax)]
++        while t[1] > t[0]:
++            next_cell_begin = t[1] - tMin
++            body(t[0], t[1])
++            t[0] = t[1]
++            t[1] = min(t[0] + step, tMax)
++        next_cell_begin = float('inf')
++    return resumable_check(ADAPTIVE_SAMPLING, m_dir, tMin, tMax, dims, next_cell_begin)
+ 
+-**RadiancePayload** (for ray generation):
+-*   `alpha`: Float, initialized to `0.f`.
+-*   `color`: `vec3f`, initialized to `0.f`.
+-*   `rng`: Pointer to random number generator state, initialized to `nullptr`.
++def process_macrocell(cell, t0, t1):
++    r = opacityUpperBound(cell)
++    if abs(r) <= float_epsilon:
++        return True
++    ss = sample_size_scaler(adaptiveSamplingRate(step, r), t0, t1)
++    t = [t0, min(t1, t0 + ss)]
++    while t[1] > t[0]:
++        next_cell_begin = t[1] - tMin
++        body(t[0], t[1])
++        t[0] = t[1]
++        t[1] = min(t[0] + ss, t1)
++    return True
+ 
+-**ShadowPayload** (for shadow rays):
+-*   `alpha`: Float, initialized to `0.f`.
+-*   `rng`: Pointer to random number generator state, initialized to `nullptr`.
++def sample_size_scaler(ss, t0, t1):
++    N = floor((t1 - t0) / ss) + 1
++    return (t1 - t0) / N
+ 
+-### Algorithm Steps
+-
+-#### 1. Initialization
+-If `ADAPTIVE_SAMPLING` is defined:
+-1.  Initialize the DDA iterator: `DDAIter::init(m_org, m_dir, tMin, tMax, dims)`.
+-2.  Compute macrocell coordinates:
+-    $$ m\_org = org \times macrocell\_spacings\_rcp $$
+-    $$ m\_dir = dir \times macrocell\_spacings\_rcp $$
+-3.  Set `next_cell_begin = 0`.
+-
+-If `ADAPTIVE_SAMPLING` is not defined:
+-1.  Set `t.x = max(tMin + next_cell_begin, tMin)`.
+-2.  Set `t.y = min(t.x + step, tMax)`.
+-
+-#### 2. Ray Marching Loop
+-The core logic depends on the sampling mode.
+-
+-**Adaptive Mode (`ADAPTIVE_SAMPLING` defined):**
+-1.  Loop while `DDAIter::next(...)` returns true (indicating more macrocells to traverse):
+-    a.  The DDA provides the current macrocell interval `[t0, t1]` and the current cell.
+-    b.  Calculate the opacity upper bound `r` for the current cell:
+-        $$ r = opacityUpperBound(self, cell) $$
+-    c.  **Empty Space Skip**: If `fabsf(r) <= float_epsilon`, the cell is empty. Return `true` to continue to the next macrocell in the DDA loop.
+-    d.  **Step Size Calculation**: Compute the adaptive step size `ss`:
+-        $$ ss = sample\_size\_scaler(adaptiveSamplingRate(step, r), t0, t1) $$
+-        Where `sample_size_scaler` ensures an integer number of steps fit in the interval:
+-        $$ N = \lfloor (t1 - t0) / ss \rfloor + 1 $$
+-        $$ ss_{final} = (t1 - t0) / N $$
+-    e.  **Iterate within Macrocell**:
+-        Initialize `t.x = t0` and `t.y = min(t1, t0 + ss_final)`.
+-        While `t.y > t.x`:
+-        i.  Set `next_cell_begin = t.y - tMin`.
+-        ii. Call `body(t)` to process the segment `[t.x, t.y]`.
+-        iii. Update `t.x = t.y`.
+-        iv. Update `t.y = min(t.x + ss_final, t1)`.
+-    f.  Store the current cell and `t.y` (as `iter.t_next`) in the payload for resumption.
+-
+-**Non-Adaptive Mode (`ADAPTIVE_SAMPLING` not defined):**
+-1.  Loop while `t.y > t.x`:
+-    a.  Set `next_cell_begin = t.y - tMin`.
+-    b.  Call `body(t)` to process the segment `[t.x, t.y]`.
+-    c.  Update `t.x = t.y`.
+-    d.  Update `t.y = min(t.x + step, tMax)`.
+-2.  Set `next_cell_begin = float_large` to indicate completion.
+-
+-#### 3. Resumption Check
+-To determine if the ray can be resumed later:
+-*   If `ADAPTIVE_SAMPLING`: Return `DDAIter::resumable(m_dir, tMin, tMax, dims)`.
+-*   Else: Return `tMin + next_cell_begin < tMax`.
+-
+-#### 4. Shadow Ray Calculation
+-For shadow rays, a separate path is used:
+-1.  Create `ShadowPayload` with a random number generator.
+-2.  Pack the pointer to the shadow payload into `u0` and `u1` using `packPointer`.
+-3.  Invoke `optixTrace` with:
+-    *   Traversable from `optixLaunchParams`.
+-    *   Ray origin `org`, direction `dir`.
+-    *   `tmin = 0.f`, `tmax = float_large`.
+-    *   `time = 0.0f`, `mask = 255`.
+-    *   `flag = OPTIX_RAY_FLAG_DISABLE_ANYHIT`.
+-    *   `rayType = SHADOW_RAY_TYPE`.
+-    *   `sbtStride = RAY_TYPE_COUNT`, `missIndex = SHADOW_RAY_TYPE`.
+-    *   `u0`, `u1`.
+-4.  Return transmittance: `1.f - shadow.alpha`.
++def resumable_check(ADAPTIVE_SAMPLING, m_dir, tMin, tMax, dims, next_cell_begin):
++    if ADAPTIVE_SAMPLING:
++        return DDAIter.resumable(m_dir, tMin, tMax, dims)
++    else:
++        return tMin + next_cell_begin < tMax
++```
+ 
+ ### Parameters
+-*   `ADAPTIVE_SAMPLING`: Preprocessor macro. Must be defined to enable adaptive logic. If not defined, the code compiles in linear mode.
+-*   `step`: Fixed step size for non-adaptive mode.
+-*   `adaptiveSamplingRate`: Function determining base step size based on opacity bound `r`.
+-*   `sample_size_scaler`: Normalizes step size to fit integer steps in interval `[t0, t1]`.
++*   `ADAPTIVE_SAMPLING`: Preprocessor macro. Must be defined to enable adaptive logic [S2, unofficial].
++*   `step`: Fixed step size for non-adaptive mode [S1, unofficial].
++*   `adaptiveSamplingRate`: Function determining base step size based on opacity bound `r` [S1, unofficial].
++*   `sample_size_scaler`: Normalizes step size to fit an integer number of steps in interval `[t0, t1]` [S2, unofficial].
++*   `next_cell_begin`: Member variable tracking the offset from `tMin` to the next cell boundary, used for resumption [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Empty Cells**: If `fabsf(r) <= float_epsilon`, the cell is skipped. Failure to check this leads to unnecessary sampling in empty space.
+-*   **Precision**: `float_epsilon` is used for empty space detection. Ensure this value is appropriate for the volume's density range.
+-*   **Resumption State**: The `next_cell_begin` variable must be correctly updated and stored to allow resumption. If the ray is interrupted, the DDA state (`iter.cell`, `iter.t_next`) must be preserved.
+-*   **Boundary Conditions**: `t.y` is clamped to `t1` (macrocell end) or `tMax` (ray end) to prevent overshooting.
++*   **Empty Cells**: If `fabsf(r) <= float_epsilon`, the cell is skipped to avoid unnecessary sampling [S1, S2, unofficial].
++*   **Precision**: `float_epsilon` is used for empty space detection; its value must match the volume's density range [S1, unofficial].
++*   **Resumption State**: `next_cell_begin` must be correctly updated and stored. If interrupted, `iter.cell` and `iter.t_next` must be preserved for adaptive mode [S1, unofficial].
++*   **Boundary Conditions**: `t.y` is clamped to `t1` (macrocell end) or `tMax` (ray end) to prevent overshooting [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Woodcock Collision Estimation (Standard)](3331-woodcock-collision-estimation-standard.md)
+-A ray marching technique for volume rendering that uses Woodcock collision estimation (delta tracking) to skip empty space, avoiding the need for spatial acceleration structures for sampling but requiring a global maximum density estimate. It differs from sibling methods like [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md) by not requiring hierarchical traversal or voxel grid lookups, instead relying on probabilistic step sizing based on a global density bound.
++A ray marching technique for volume rendering that uses Woodcock collision estimation (delta tracking) to skip empty space, avoiding the need for spatial acceleration structures for sampling but requiring a global maximum density estimate. It differs from sibling methods like [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md) by avoiding the need for spatial acceleration structures for sampling, instead relying on probabilistic step sizing based on a global maximum density estimate.
+ 
+ ### [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md)
+-Adaptive Ray Marching with Voxel Skipping is a two-pass algorithm that determines the optimal sampling positions for rays traversing a volumetric density grid, skipping empty space to reduce computational load. It solves the problem of inefficient uniform sampling in sparse volumes by dynamically adjusting step sizes based on local density. It differs from its parent, the Resumable Ray Marching Iterator, by pre-computing the exact number of steps and their locations in a dedicated pass, allowing for compact, contiguous memory storage of samples, whereas the parent yields samples on-the-fly. It differs from [Woodcock Collision Estimation (Standard)](3331-woodcock-collision-estimation-standard.md) by using deterministic DDA-based boundary traversal rather than probabilistic collision estimation.
++Adaptive Ray Marching with Voxel Skipping is a two-pass algorithm that determines the optimal sampling positions for rays traversing a volumetric density grid, skipping empty space to reduce computational load [G]. It solves the problem of inefficient uniform sampling in sparse volumes by dynamically adjusting step sizes based on local density [G]. It differs from its parent, the Resumable Ray Marching Iterator, by pre-computing the exact number of steps and their locations in a dedicated pass, allowing for compact, contiguous memory storage of samples, whereas the parent yields samples on-the-fly [G]. It differs from [Woodcock Collision Estimation (Standard)](3331-woodcock-collision-estimation-standard.md) by using deterministic DDA-based boundary traversal rather than probabilistic collision estimation [G].
+ 
+ ### Ray-Guided Streaming with Interrupt/Resume
+@@ -133,14 +108,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Depends on the volume density and macrocell structure. Adaptive sampling reduces the number of samples in empty regions, improving performance for sparse volumes.
+-*   **Memory Complexity**: Low, as it processes rays on-the-fly and only stores minimal state per ray for resumption.
+-*   **Performance**: Efficient for large volumes with significant empty space due to macrocell skipping. Performance is hardware-dependent, leveraging GPU parallelism and early-Z culling.
+-*   **Strengths**: Resumability allows for complex data streaming and neural network integration. Adaptive sampling reduces computational load.
+-*   **Limitations**: Requires careful management of resumption state. Adaptive sampling may introduce complexity in step size calculation.
+-*   **When to Use**: Suitable for large volumetric datasets, especially when data streaming or neural network inference is involved.
+-*   **When Not to Use**: For small, dense volumes where the overhead of macrocell traversal and resumption state management outweighs the benefits.
++*   **Time Complexity**: Not given in the sources. Adaptive sampling reduces the number of samples in empty regions, improving performance for sparse volumes [S1, S2, unofficial].
++*   **Memory Complexity**: Not given in the sources. Low, as it processes rays on-the-fly and only stores minimal state per ray for resumption [S1, unofficial].
++*   **Performance**: Not given in the sources. Efficient for large volumes with significant empty space due to macrocell skipping. Performance is hardware-dependent, leveraging GPU parallelism and early-Z culling [S1, S2, unofficial].
++*   **Strengths**: Resumability allows for complex data streaming and neural network integration. Adaptive sampling reduces computational load [S1, S3, unofficial].
++*   **Limitations**: Requires careful management of resumption state. Adaptive sampling may introduce complexity in step size calculation [S1, unofficial].
++*   **When to Use**: Suitable for large volumetric datasets, especially when data streaming or neural network inference is involved [S1, S3, unofficial].
++*   **When Not to Use**: Not given in the sources.
+ 
+ ## Background
+-The Resumable Ray Marching Iterator is part of the Open Volume Renderer (OVR) project, developed by VIDILabs [S1, S2, unofficial]. It builds upon the Adaptive Ray Marching with Macrocell DDA method, adding support for interruption and resumption to facilitate advanced rendering techniques such as ray-guided streaming [S3, unofficial]. The method is implemented in C++ and utilizes NVIDIA OptiX for ray tracing [S1, S2, unofficial].
++The method is implemented in C++ and utilizes NVIDIA OptiX for ray tracing, found in the `instantvnr` and `open-volume-renderer` repositories [S1, S2, unofficial]. The interrupt/resume capability enables ray-guided streaming for missing GPU memory, allowing multiple passes to complete a frame by loading data on-demand [S3, unofficial].
+ 
+ ## Sources

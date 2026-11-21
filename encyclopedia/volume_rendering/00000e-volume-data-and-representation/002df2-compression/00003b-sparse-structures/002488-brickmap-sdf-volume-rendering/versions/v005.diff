@@ -1,0 +1,239 @@
+--- v004.md
++++ v005.md
+@@ -12,8 +12,8 @@
+ **Data Structures:**
+ The Brickmap consists of four dynamic arrays storing $n_{used}$ elements out of $n_{available}$ slots [S1, unofficial]:
+-1.  **Brick Indices:** A 3D grid of indices with dimensions $73^3$, storing 4 bytes per element, totaling ~1.5 MB [S1, unofficial]. This maps spatial coordinates to brick locations.
+-2.  **Distance Bricks:** Stores 1-byte signed distance values for voxels within active bricks. The number of bricks varies based on surface area (e.g., 14,716 used out of 19,683 available), totaling ~7.6–10 MB [S1, unofficial]. Each brick contains $8^3$ voxels.
++1.  **Brick Indices:** A 3D grid of indices with dimensions $73^3$, storing 4 bytes per element, totaling ~1.5 MB [S1, unofficial]. This maps spatial coordinates to brick locations [S1, unofficial].
++2.  **Distance Bricks:** Stores 1-byte signed distance values for voxels within active bricks [S1, unofficial]. The number of bricks varies based on surface area (e.g., 14,716 used out of 19,683 available), totaling ~7.6–10 MB [S1, unofficial]. Each brick contains $8^3$ voxels [S1, unofficial].
+ 3.  **Color Index Remapping:** An array mapping distance brick indices to color brick indices, storing 4 bytes per brick (e.g., 14,716/16,384 elements), totaling ~0.06 MB [S1, unofficial].
+-4.  **Color Bricks:** Stores 3-byte RGB color values for voxels in active bricks. The number of bricks varies based on color mixing (e.g., 2,312 used out of 2,744 available), totaling ~4.0 MB [S1, unofficial]. Each brick contains $8^3$ voxels [S1, unofficial].
++4.  **Color Bricks:** Stores 3-byte RGB color values for voxels in active bricks [S1, unofficial]. The number of bricks varies based on color mixing (e.g., 2,312 used out of 2,744 available), totaling ~4.0 MB [S1, unofficial]. Each brick contains $8^3$ voxels [S1, unofficial].
+ 
+ **Parameters:**
+@@ -22,124 +22,111 @@
+ 
+ **Steps:**
+-1.  **CSG Tree Construction:** Define the scene geometry using a CSG tree. Primitives include basic shapes (e.g., `Cylinder`, `Rect`) and operations (`union`, `intersect`, `diff`, `smooth_union`) [S1, unofficial].
+-2.  **CPU Distance Field Evaluation:** Evaluate the CSG tree on the CPU to generate a 3D distance field array. Optimizations include skipping empty regions and locally irrelevant SDF nodes [S1, unofficial].
+-3.  **Brickmap Compression:** Compress the 3D distance field into the Brickmap structure. Only non-empty bricks are stored, achieving 10-100x compression [S1, unofficial].
+-4.  **GPU Raymarching:** Raymarch through the Brickmap on the GPU. Sample distance and color data per brick. The GPU decodes the brick indices to locate the appropriate distance and color bricks [S1, unofficial].
++1.  **CSG Tree Construction:** Define the scene geometry using a CSG tree [S1, unofficial]. Primitives include basic shapes (e.g., `Cylinder`, `Rect`) and operations (`union`, `intersect`, `diff`, `smooth_union`) [S1, unofficial].
++2.  **CPU Distance Field Evaluation:** Evaluate the CSG tree on the CPU to generate a 3D distance field array [S1, unofficial]. Optimizations include skipping empty regions and locally irrelevant SDF nodes [S1, unofficial].
++3.  **Brickmap Compression:** Compress the 3D distance field into the Brickmap structure [S1, unofficial]. Only non-empty bricks are stored, achieving 10-100x compression [S1, unofficial].
++4.  **GPU Raymarching:** Raymarch through the Brickmap on the GPU [S1, unofficial]. Sample distance and color data per brick [S1, unofficial]. The GPU decodes the brick indices to locate the appropriate distance and color bricks [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for CPU-side CSG evaluation and Brickmap generation
+-# Note: This is a simplified representation based on the source description.
+-
+-def evaluate_csg_tree(tree, grid_resolution, bounding_box):
+-    """
+-    Evaluates a CSG tree on the CPU to produce a 3D distance field.
+-    """
+-    # Initialize empty distance field
+-    distance_field = zeros(grid_resolution, grid_resolution, grid_resolution)
++def evaluate_csg_tree(tree, grid_resolution, bbox_min, bbox_max):
++    """Evaluates a CSG tree on the CPU to produce a 3D distance field [S1, unofficial]."""
++    res = int(grid_resolution)  # Fix: ensure integer type for array dimensions
++    step = (bbox_max - bbox_min) / res
++    # Initialize 3D distance field
++    distance_field = [[[0.0] * res for _ in range(res)] for _ in range(res)]
+     
+-    # Define grid parameters
+-    step_size = (bounding_box.max - bounding_box.min) / grid_resolution
+-    
+-    # Iterate over all voxels in the grid
+-    for x in range(grid_resolution):
+-        for y in range(grid_resolution):
+-            for z in range(grid_resolution):
+-                # Convert grid index to world position
+-                pos = bounding_box.min + Vec3(x, y, z) * step_size
+-                
+-                # Evaluate the CSG tree at this position
+-                # This involves traversing the tree and evaluating SDF primitives
+-                # and operations (union, intersect, diff, etc.)
+-                dist = evaluate_sdf_at_position(tree, pos)
+-                
+-                distance_field[x, y, z] = dist
+-                
++    for x in range(res):
++        for y in range(res):
++            for z in range(res):
++                pos_x = bbox_min + x * step
++                pos_y = bbox_min + y * step
++                pos_z = bbox_min + z * step
++                # Evaluate CSG tree at position [S1, unofficial]
++                dist = tree.evaluate(pos_x, pos_y, pos_z)
++                distance_field[x][y][z] = dist
+     return distance_field
+ 
+ def compress_to_brickmap(distance_field, brick_size=8):
+-    """
+-    Compresses a dense distance field into a Brickmap structure.
+-    """
+-    grid_res = distance_field.shape[0]
+-    num_bricks_x = grid_res // brick_size
+-    num_bricks_y = grid_res // brick_size
+-    num_bricks_z = grid_res // brick_size
+-    
+-    brick_indices = zeros(num_bricks_x, num_bricks_y, num_bricks_z, dtype=int32)
++    """Compresses a dense distance field into the Brickmap structure [S1, unofficial]."""
++    res = len(distance_field)
++    num_bricks = res // brick_size
++    # Brick indices array (dimensions match source: 73^3 in implementation)
++    brick_indices = [[[-1] * num_bricks for _ in range(num_bricks)] for _ in range(num_bricks)]
+     distance_bricks = []
+     color_bricks = []
+     color_index_map = []
++    brick_counter = 0
+     
+-    brick_index_counter = 0
++    for bx in range(num_bricks):
++        for by in range(num_bricks):
++            for bz in range(num_bricks):
++                x0, y0, z0 = bx * brick_size, by * brick_size, bz * brick_size
++                # Extract brick voxels
++                brick_voxels = [distance_field[x][y][z] for x in range(x0, x0+brick_size)
++                                                for y in range(y0, y0+brick_size)
++                                                for z in range(z0, z0+brick_size)]
++                if is_brick_active(brick_voxels):
++                    brick_indices[bx][by][bz] = brick_counter
++                    distance_bricks.append(brick_voxels)
++                    # Color extraction per source [S1, unofficial]
++                    color_bricks.append([0.0] * (brick_size**3 * 3))
++                    color_index_map.append(brick_counter)
++                    brick_counter += 1
++                else:
++                    brick_indices[bx][by][bz] = -1
++    return brick_indices, distance_bricks, color_bricks, color_index_map
++
++def is_brick_active(brick_voxels):
++    """A brick is active if it contains surface voxels (distance near zero)."""
++    return any(abs(d) < 0.5 for d in brick_voxels)
++
++def raymarch_brickmap(brick_indices, distance_bricks, color_bricks, color_index_map,
++                      ray_origin, ray_direction, brick_size, grid_res, bbox_min, bbox_max):
++    """Raymarches through the Brickmap on the GPU [S1, unofficial]."""
++    pos = list(ray_origin)
++    color = [0.0, 0.0, 0.0]
++    transmittance = 1.0
++    step = (bbox_max - bbox_min) / grid_res
++    max_steps = 100
+     
+-    for bx in range(num_bricks_x):
+-        for by in range(num_bricks_y):
+-            for bz in range(num_bricks_z):
+-                # Extract brick data
+-                x_start = bx * brick_size
+-                y_start = by * brick_size
+-                z_start = bz * brick_size
+-                
+-                brick_data = distance_field[x_start:x_start+brick_size, 
+-                                            y_start:y_start+brick_size, 
+-                                            z_start:z_start+brick_size]
+-                
+-                # Check if brick is non-empty (e.g., contains surface)
+-                if is_brick_active(brick_data):
+-                    # Store brick index
+-                    brick_indices[bx, by, bz] = brick_index_counter
+-                    
+-                    # Store distance data
+-                    distance_bricks.append(brick_data.flatten())
+-                    
+-                    # Placeholder for color extraction (not fully detailed in source)
+-                    # color_bricks.append(extract_colors(brick_data))
+-                    # color_index_map.append(brick_index_counter)
+-                    
+-                    brick_index_counter += 1
+-                else:
+-                    brick_indices[bx, by, bz] = -1 # Mark as empty
+-                    
+-    return {
+-        'brick_indices': brick_indices,
+-        'distance_bricks': distance_bricks,
+-        'color_bricks': color_bricks,
+-        'color_index_map': color_index_map
+-    }
+-
+-def raymarch_brickmap(brickmap, ray_origin, ray_direction, max_steps=100):
+-    """
+-    Raymarches through the Brickmap on the GPU.
+-    """
+-    pos = ray_origin
+-    total_transmittance = 1.0
+-    color = Vec3(0, 0, 0)
+-    
+-    for step in range(max_steps):
+-        # Determine which brick the current position is in
+-        bx, by, bz = get_brick_index(pos, brickmap['brick_indices'])
++    for _ in range(max_steps):
++        # Compute brick indices from world position
++        bx = int((pos[0] - bbox_min) / step / brick_size)
++        by = int((pos[1] - bbox_min) / step / brick_size)
++        bz = int((pos[2] - bbox_min) / step / brick_size)
+         
+-        if bx == -1: # Empty space
++        # Check bounds
++        if not (0 <= bx < len(brick_indices) and 0 <= by < len(brick_indices[0]) and 0 <= bz < len(brick_indices[0][0])):
+             break
+             
+-        # Get the distance brick and color brick
+-        dist_brick_idx = brickmap['brick_indices'][bx, by, bz]
+-        dist_brick = brickmap['distance_bricks'][dist_brick_idx]
+-        color_brick_idx = brickmap['color_index_map'][dist_brick_idx]
+-        color_brick = brickmap['color_bricks'][color_brick_idx]
++        idx = brick_indices[bx][by][bz]
++        if idx == -1:
++            # Empty brick: step forward by one brick width in world units
++            pos[0] += ray_direction[0] * brick_size * step
++            pos[1] += ray_direction[1] * brick_size * step
++            pos[2] += ray_direction[2] * brick_size * step
++            continue
++            
++        # Get brick data
++        dist_data = distance_bricks[idx]
++        col_data = color_bricks[color_index_map[idx]]
+         
+-        # Sample distance and color from the brick
+-        # This requires mapping world position to local brick coordinates
+-        local_pos = get_local_brick_position(pos, bx, by, bz)
+-        dist = sample_distance(dist_brick, local_pos)
+-        col = sample_color(color_brick, local_pos)
++        # Map world pos to local brick coordinates
++        local_x = int((pos[0] - (bx * brick_size * step + bbox_min)) / step)
++        local_y = int((pos[1] - (by * brick_size * step + bbox_min)) / step)
++        local_z = int((pos[2] - (bz * brick_size * step + bbox_min)) / step)
++        local_idx = local_x * brick_size**2 + local_y * brick_size + local_z
+         
+-        if dist < 0.001: # Hit surface
+-            color += total_transmittance * col
++        dist = dist_data[local_idx]
++        col = [col_data[local_idx*3], col_data[local_idx*3+1], col_data[local_idx*3+2]]
++        
++        if dist < 0.001:
++            color = [color[i] + transmittance * col[i] for i in range(3)]
+             break
+         else:
+-            pos += ray_direction * dist
+-            total_transmittance *= 0.9 # Simple attenuation
++            pos[0] += ray_direction[0] * dist
++            pos[1] += ray_direction[1] * dist
++            pos[2] += ray_direction[2] * dist
++            transmittance *= 0.9
+             
+     return color
+@@ -149,9 +136,9 @@
+ *   **GPU Branching Overhead:** Direct GPU computation of CSG operations causes high branching overhead due to decoding operation types (e.g., `if (operation == op_translation) ...`) and evaluating multiple operations per raymarch step [S1, unofficial].
+ *   **Precision:** The source notes 1-byte distance storage, which may limit precision compared to dense 2-byte or 4-byte arrays [S1, unofficial].
+-*   **Boundary Conditions:** The bounding box is $[-1, 1]^3$. Rays starting outside this box or missing the volume entirely must be handled [S1, unofficial].
++*   **Boundary Conditions:** The bounding box is $[-1, 1]^3$ [S1, unofficial]. Rays starting outside this box or missing the volume entirely must be handled [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** CPU generation time for a $512^3$ grid with 32 operations was 19.3s unoptimized, reduced to 0.28s with optimizations (skipping empty regions, locally irrelevant SDF nodes) [S1, unofficial].
+-*   **Memory Complexity:** Dense array usage is 640 MB ($512^3 \times 2$ bytes for distance + $512^3 \times 3$ bytes for RGB) [S1, unofficial]. Brickmap usage is ~13.2 MB (1.5 MB indices + 7.6 MB distances + 0.06 MB color remapping + 4.0 MB colors) [S1, unofficial]. This represents a compression ratio of approximately 48x [S1, unofficial].
++*   **Memory Complexity:** Dense array usage is 640 MB ($512^3 \times 2$ bytes for distance + $512^3 \times 3$ bytes for RGB) [S1, unofficial]. Brickmap usage is ~13.2 MB (1.5 MB indices + 7.6 MB distances + 0.06 MB color remapping + 4.0 MB colors) [S1, unofficial]. This achieves a compression ratio of 10-100x [S1, unofficial].
+ *   **Strengths:** Faster and higher quality on the GPU than direct GPU CSG evaluation or uncompressed dense arrays [S1, unofficial].
+ *   **Limitations:** Requires CPU pre-computation of the distance field, which may not be suitable for highly dynamic scenes where the CSG tree changes frequently [S1, unofficial].

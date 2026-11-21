@@ -1,0 +1,228 @@
+# pi-GAN
+
+Also called: Periodic Implicit Generative Adversarial Networks
+
+## Overview
+pi-GAN is a generative adversarial network (GAN) approach to unsupervised 3D representation learning from 2D images [S2]. It conditions an implicit radiance field, represented by a SIREN network, on a noise vector to produce a 5D spatio-angular radiance field, which is rendered via volume rendering to synthesize view-consistent images [S2]. It is distinguished from its sibling [StyleNeRF](8659-stylenerf.md) and [GRAF](9572-generative-and-style-based-models.md) by using a StyleGAN-inspired mapping network with Feature-wise Linear Modulation (FiLM) to condition the entire SIREN backbone, rather than concatenating latent codes or using separate shape/appearance codes [S2]. It outperformed GRAF in image quality and achieved state-of-the-art results on CelebA, Cats, and CARLA datasets [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A latent noise vector $\mathbf{z} \sim p_z$ (typically standard normal) and a camera pose $\xi$ (defining the ray origin $\mathbf{o}$ and direction $\mathbf{d}$) [S2].
+*   **Output:** A 2D image $I$ synthesized from the camera pose $\xi$ [S2].
+
+**Data Structures:**
+1.  **Mapping Network ($M$):** A Multi-Layer Perceptron (MLP) with ReLU activations.
+    *   Input: Noise vector $\mathbf{z} \in \mathbb{R}^{d_z}$.
+    *   Output: A set of frequency parameters $\{\gamma_i\}$ and phase shift parameters $\{\beta_i\}$ for each layer $i$ of the SIREN backbone [S2].
+2.  **SIREN Backbone ($\Phi$):** A sequence of $n$ layers.
+    *   Layer $i$ parameters: Weight matrix $\mathbf{W}_i \in \mathbb{R}^{N_i \times M_i}$, bias vector $\mathbf{b}_i \in \mathbb{R}^{N_i}$, frequency $\gamma_i \in \mathbb{R}$, phase shift $\beta_i \in \mathbb{R}$ [S2].
+    *   Input to layer $i$: $\mathbf{x}_i \in \mathbb{R}^{M_i}$.
+    *   Output of layer $i$: $\mathbf{x}_{i+1} \in \mathbb{R}^{N_i}$ [S2].
+3.  **Density Head:**
+    *   Parameters: $\mathbf{W}_\sigma \in \mathbb{R}^{1 \times N_{n-1}}$, $\mathbf{b}_\sigma \in \mathbb{R}$ [S2].
+4.  **Color Head:**
+    *   Parameters: $\mathbf{W}_c \in \mathbb{R}^{3 \times (N_{n-1} + 3)}$, $\mathbf{b}_c \in \mathbb{R}^3$ [S2].
+    *   Note: The color head takes the concatenation of the backbone output and the viewing direction [S2].
+
+**Numbered Steps:**
+
+1.  **Latent Mapping:** The mapping network $M$ processes the noise vector $\mathbf{z}$ to generate the conditioning parameters for the SIREN layers:
+    $$
+    \{(\gamma_i, \beta_i)\}_{i=0}^{n-1} = M(\mathbf{z})
+    $$
+    [S2]
+
+2.  **SIREN Forward Pass (Backbone):** Compute the backbone representation $\Phi(\mathbf{x})$ for a 3D position $\mathbf{x} \in \mathbb{R}^3$:
+    $$
+    \Phi(\mathbf{x}) = \phi_{n-1} \circ \phi_{n-2} \circ \dots \circ \phi_0(\mathbf{x})
+    $$
+    where each layer $\phi_i$ is defined as:
+    $$
+    \phi_i(\mathbf{x}_i) = \sin(\gamma_i \cdot (\mathbf{W}_i \mathbf{x}_i + \mathbf{b}_i) + \beta_i)
+    $$
+    Here, $\mathbf{x}_0 = \mathbf{x}$, and $\mathbf{x}_{i+1} = \phi_i(\mathbf{x}_i)$ [S2].
+
+3.  **Density Prediction:** Compute the volume density $\sigma(\mathbf{x})$ using the final backbone output $\Phi(\mathbf{x}) = \mathbf{x}_n$:
+    $$
+    \sigma(\mathbf{x}) = \mathbf{W}_\sigma \Phi(\mathbf{x}) + \mathbf{b}_\sigma
+    $$
+    [S2]
+
+4.  **Color Prediction:** Compute the view-dependent color $\mathbf{c}(\mathbf{x}, \mathbf{d})$ by concatenating the backbone output $\Phi(\mathbf{x})$ with the viewing direction $\mathbf{d} \in \mathbb{R}^3$:
+    $$
+    \mathbf{c}(\mathbf{x}, \mathbf{d}) = \mathbf{W}_c [\Phi(\mathbf{x}), \mathbf{d}]^T + \mathbf{b}_c
+    $$
+    where $[\cdot, \cdot]^T$ denotes concatenation [S2].
+
+5.  **Volume Rendering:** Cast rays from the camera origin $\mathbf{o}$ with direction $\mathbf{d}$ defined by camera pose $\xi$. Sample points $\mathbf{x}_i$ along the ray within near/far bounds $[t_n, t_f]$. Compute pixel color $C(\mathbf{r})$ using the standard volumetric rendering equation:
+    $$
+    C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
+    $$
+    and $\delta_i$ is the distance between samples [S2]. (See [NeRF Training Loop](9572-generative-and-style-based-models.md) for rendering details).
+
+6.  **Adversarial Training:** The generated image is passed to a traditional convolutional discriminator. The generator parameters (including $\mathbf{W}, \mathbf{b}$ of SIREN and $M$) are updated to fool the discriminator, while the discriminator is updated to distinguish real from generated images [S2].
+
+7.  **Progressive Growing:** Training employs a progressive growing strategy, gradually increasing the resolution of the generated images to accelerate training and stabilize convergence [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MappingNetwork(nn.Module):
+    """
+    StyleGAN-inspired mapping network.
+    Input: z (latent vector)
+    Output: gamma (frequencies), beta (phase shifts) for each SIREN layer
+    """
+    def __init__(self, latent_dim, num_layers, hidden_dim):
+        super().__init__()
+        layers = []
+        # Simple ReLU MLP as per source [S2]
+        layers.append(nn.Linear(latent_dim, hidden_dim))
+        layers.append(nn.ReLU())
+        for _ in range(num_layers - 2):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        # Output layer produces gamma and beta for all layers
+        # Assuming all layers have same output dimension N for simplicity in structure
+        # In practice, dimensions might vary, but source describes a single mapping network
+        # outputting parameters for the backbone.
+        layers.append(nn.Linear(hidden_dim, num_layers * 2)) 
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, z):
+        out = self.net(z)
+        # Reshape to (num_layers, 2) -> [gamma, beta]
+        params = out.view(-1, 2)
+        return params[:, 0], params[:, 1]
+
+class SIRENLayer(nn.Module):
+    def __init__(self, in_features, out_features, gamma, beta):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=True)
+        # Initialize weights for sine activation stability [G]
+        # Source [S2] implies standard initialization but sine activation
+        self.gamma = gamma
+        self.beta = beta
+
+    def forward(self, x):
+        # phi_i(x_i) = sin(gamma_i * (W_i x_i + b_i) + beta_i)
+        affine = self.linear(x)
+        return torch.sin(self.gamma * affine + self.beta)
+
+class PiGANGenerator(nn.Module):
+    """
+    pi-GAN Generator.
+    Input: z (latent), camera pose (defines ray origin o and direction d)
+    Output: Rendered Image
+    """
+    def __init__(self, latent_dim, num_siren_layers, siren_hidden_dim, num_siren_layers_out):
+        super().__init__()
+        self.mapping = MappingNetwork(latent_dim, num_siren_layers, siren_hidden_dim)
+        
+        # Build SIREN backbone
+        self.siren_layers = nn.ModuleList()
+        for i in range(num_siren_layers):
+            in_f = siren_hidden_dim if i > 0 else 3 # Input dim is 3 for x
+            out_f = siren_hidden_dim
+            # Parameters are learned by mapping network, but we need placeholders
+            # In implementation, gamma/beta are passed to forward or set dynamically
+            self.siren_layers.append(SIRENLayer(in_f, out_f, 1.0, 0.0)) # Dummy init
+
+        # Density Head
+        self.density_head = nn.Linear(siren_hidden_dim, 1)
+        
+        # Color Head
+        # Input is [Phi(x), d] -> [siren_hidden_dim, 3]
+        self.color_head = nn.Linear(siren_hidden_dim + 3, 3)
+
+    def forward(self, z, rays_o, rays_d, num_samples):
+        """
+        z: [B, latent_dim]
+        rays_o: [B, 3]
+        rays_d: [B, 3]
+        num_samples: int
+        """
+        # 1. Get conditioning parameters
+        gammas, betas = self.mapping(z)
+        
+        # 2. Sample points along rays
+        # t values uniformly distributed between 0 and 1, then scaled to near/far
+        # Assuming near=0, far=1 for simplicity, or standard NeRF bounds
+        t_vals = torch.linspace(0., 1., num_samples).to(z.device)
+        # Expand for batch
+        t_vals = t_vals.unsqueeze(0).expand(rays_o.shape[0], -1)
+        
+        # Sample points x = o + t * d
+        # rays_o: [B, 3], rays_d: [B, 3], t_vals: [B, N]
+        pts = rays_o.unsqueeze(1) + t_vals.unsqueeze(2) * rays_d.unsqueeze(1) # [B, N, 3]
+        
+        # 3. Forward through SIREN backbone
+        x = pts # [B, N, 3]
+        
+        for i, layer in enumerate(self.siren_layers):
+            # Set layer parameters from mapping output
+            layer.gamma = gammas[i]
+            layer.beta = betas[i]
+            x = layer(x) # [B, N, H]
+            
+        # x is now Phi(x) -> [B, N, H]
+        
+        # 4. Predict Density
+        sigma = self.density_head(x).squeeze(-1) # [B, N]
+        
+        # 5. Predict Color
+        # Concatenate Phi(x) and viewing direction d
+        # rays_d needs to be expanded to match N samples
+        rays_d_expanded = rays_d.unsqueeze(1).expand(-1, num_samples, -1) # [B, N, 3]
+        concat_input = torch.cat([x, rays_d_expanded], dim=-1) # [B, N, H+3]
+        color = self.color_head(concat_input) # [B, N, 3]
+        
+        # 6. Volume Rendering
+        # Compute alpha and T
+        # delta_t is distance between samples
+        delta_t = 1.0 / num_samples # Assuming uniform sampling in [0,1]
+        
+        alpha = 1.0 - torch.exp(-sigma * delta_t) # [B, N]
+        transmittance = torch.cumsum(sigma, dim=1)
+        transmittance = torch.cat([torch.zeros_like(transmittance[:, :1]), transmittance[:, :-1]], dim=1)
+        T = torch.exp(-transmittance * delta_t) # [B, N]
+        
+        weights = T * alpha # [B, N]
+        image = torch.sum(weights.unsqueeze(-1) * color, dim=1) # [B, 3]
+        
+        return image
+
+```
+
+**Parameters:**
+*   $\mathbf{z}$: Latent noise vector, dimension not specified in sources, typically 512 or similar for StyleGAN-style networks [S2].
+*   $\gamma_i$: Frequency parameter for layer $i$, output by mapping network [S2].
+*   $\beta_i$: Phase shift parameter for layer $i$, output by mapping network [S2].
+*   $\mathbf{W}_i, \mathbf{b}_i$: Weights and biases of SIREN layers [S2].
+*   Progressive growing: Strategy used to accelerate training [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Local Overfitting:** SIREN is prone to local overfitting to the last batch if sufficient coverage of the space is not maintained. This is why pi-GAN does not employ a patch-based discriminator (unlike GRAF) [S2].
+*   **Rendering Bounds:** Standard volume rendering bounds ($t_n, t_f$) must be defined for ray sampling [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Training is computationally expensive due to the 3D nature of the GAN and the need to render images via volume sampling for every discriminator update. Progressive growing helps mitigate this [S2].
+*   **Memory Complexity:** High, as it stores the implicit radiance field (MLP weights) and requires sampling multiple points per ray during training and inference [S2].
+*   **Performance:** Achieved state-of-the-art results on CelebA, Cats, and CARLA datasets for 3D-aware image synthesis [S2]. Outperformed GRAF [S1].
+*   **Strengths:** High-quality view-consistent image synthesis; interpretable 3D proxy shapes can be extracted via marching cubes [S2].
+*   **Limitations:** SIREN sensitivity to local overfitting requires careful training strategies (e.g., global discriminator, progressive growing) [S2].
+
+## Background
+*   **Origin:** pi-GAN was developed by Chan et al. in December 2020, within three months of GRAF [S1].
+*   **Paper:** "pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis" [S2].
+*   **History:** It was proposed as a novel generative model for high-quality 3D-aware image synthesis, leveraging neural representations with periodic activation functions (SIREN) and volumetric rendering [S2]. It introduced a StyleGAN-inspired mapping network with FiLM conditioning and a progressive growing discriminator [S2].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis, https://doi.org/10.1109/cvpr46437.2021.00574, fetched 2026-10-26

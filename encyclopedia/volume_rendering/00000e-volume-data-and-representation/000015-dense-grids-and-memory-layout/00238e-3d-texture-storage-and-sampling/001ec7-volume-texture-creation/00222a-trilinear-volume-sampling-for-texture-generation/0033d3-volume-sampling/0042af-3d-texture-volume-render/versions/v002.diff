@@ -1,0 +1,365 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,8 @@
+ # 3D Texture Volume Render
+ 
+-Also called: 3D Texture Volume Render node, SDF Volume Render
++Also called: 3D Texture Volume Render node
+ 
+ ## Overview
+-The 3D Texture Volume Render node renders volumetric textures from 3D data to create cloud and fog effects by integrating light through a volume defined by a 3D texture and its corresponding signed distance field (SDF) [S1]. It differs from standard ray marching on raw voxel grids by operating on a specific compressed texture layout (16x16 grid of 256 slices) and providing built-in lighting models (directional + hemispherical skylight) and post-processing features like dithering and ground planes [S1]. It builds on [Volume Sampling](7111-volume-sampling.md) for density retrieval.
++The 3D Texture Volume Render node renders volumetric textures from 3D data to create cloud and fog effects by integrating light through a volume defined by a 3D texture and its corresponding signed distance field (SDF) [S1]. It differs from standard ray marching on raw voxel grids by operating on a specific compressed texture layout (16x16 grid of 256 slices) and providing built-in lighting models (directional + hemispherical skylight) and post-processing features like dithering and ground planes [S1]. It builds on [Volume Sampling](7111-volume-sampling.md) for density retrieval [G].
+ 
+ ## How it works
+@@ -17,18 +17,8 @@
+ ### Data Structures
+ The input textures follow a specific layout defined by Adobe Substance 3D Designer [S1]:
+-*   **Dimensions**: 4096 pixels width x 4096 pixels height.
+-*   **Logical Structure**: Represents 256 slices of 3D data.
+-*   **Grid Layout**: The 256 slices are arranged in a 16x16 grid within the 2D texture.
+-    *   Each slice is a 256x256 pixel square ($4096 / 16 = 256$).
+-    *   Slices are indexed $i \in [0, 255]$.
+-    *   Slice $i$ is located at grid coordinates $(gx, gy)$ where:
+-        $$gx = i \pmod{16}$$
+-        $$gy = \lfloor i / 16 \rfloor$$
+-    *   Pixel coordinates $(u, v)$ for a specific slice $i$ and local coordinate $(sx, sy)$ within the slice ($sx, sy \in [0, 255]$) are:
+-        $$u = gx \times 256 + sx$$
+-        $$v = gy \times 256 + sy$$
+-*   **Value Range**:
+-    *   **SDF**: Signed distance values. The node expects the SDF to be computed via the [3D Texture SDF](link) node [S1].
+-    *   **Density**: Mapped from 0 (entirely transparent) to 1 (entirely opaque) [S1].
++*   **Dimensions**: 4096 pixels width x 4096 pixels height [S1].
++*   **Logical Structure**: Represents 256 slices of 3D data [S1].
++*   **Grid Layout**: The 256 slices are arranged in a 16x16 grid within the 2D texture [S1]. Each slice is a 256x256 pixel square ($4096 / 16 = 256$) [S1]. Slices are indexed $i \in [0, 255]$. Slice $i$ is located at grid coordinates $(gx, gy)$ where $gx = i \pmod{16}$ and $gy = \lfloor i / 16 \rfloor$ [S1]. Pixel coordinates $(u, v)$ for a specific slice $i$ and local coordinate $(sx, sy)$ within the slice are $u = gx \times 256 + sx$ and $v = gy \times 256 + sy$ [S1].
++*   **Value Range**: SDF contains signed distance values [S1]. Density is mapped from 0 (entirely transparent) to 1 (entirely opaque) [S1].
+ 
+ ### Parameters
+@@ -38,5 +28,5 @@
+ *   **Camera Distance** (Float): Distance from the camera to the shape [S1].
+ *   **Camera FOV** (Float): Field of view of the camera in degrees [S1].
+-*   **Absorption** (Float): Adjusts light absorption as it passes through the volume [S1].
++*   **Absorption** (Float): Adjusts how much light is absorbed as it passes through the volume [S1].
+ *   **Feather** (Float): Multiplies the Density input with the inner distance field value to adjust the fading gradient width from the volume's outer limit inwards [S1].
+ *   **Light Color Mode** (Integer): `0` for Temperature (Kelvin), `1` for RGB Color [S1].
+@@ -55,54 +45,11 @@
+ 
+ ### Algorithm
+-The volume is represented within the bounds of a unit cube [S1]. The rendering process involves casting rays from the camera through the unit cube, sampling the density and SDF, computing transmittance and color, and applying lighting.
+-
+-1.  **Initialize Camera**:
+-    *   Construct the camera projection matrix using `Camera FOV`, `Camera Distance`, and `Output Resolution`.
+-    *   Define the camera origin and direction vectors based on `Camera Position` and `Camera Distance` [S1].
+-
+-2.  **Light Color Calculation**:
+-    *   If `Light Color Mode` is Temperature: Convert `Light Temperature` to RGB color $C_{light}$ using a blackbody radiation approximation or lookup table [S1].
+-    *   If `Light Color Mode` is RGB: Set $C_{light} = \text{Light Color}$ [S1].
+-    *   Calculate directional light vector $L$ from `Light Position` [S1].
+-
+-3.  **Background Calculation**:
+-    *   If `Background Mode` is Constant: $C_{bg} = \text{Background Color}$ [S1].
+-    *   If `Background Mode` is Shaded: Calculate $C_{bg}$ based on `Background Color`, `Light Color`, and `Light Intensity` [S1].
+-
+-4.  **Ray Casting Loop**:
+-    *   For each pixel $(x, y)$ in the output image:
+-        *   Compute ray origin $O$ and direction $D$ in world space.
+-        *   Intersect ray with the unit cube $[-0.5, 0.5]^3$ (or $[0, 1]^3$ depending on convention; the node states "unit cube" [S1]). Let the entry point be $t_{min}$ and exit point be $t_{max}$.
+-        *   Initialize accumulated color $C_{acc} = (0, 0, 0, 0)$ and transmittance $T = 1.0$.
+-        *   Define step size $\Delta t$ based on `Output Resolution` and `Camera Distance` [G].
+-        *   Iterate $t$ from $t_{min}$ to $t_{max}$ with step $\Delta t$:
+-            *   Compute world position $P = O + t \cdot D$.
+-            *   Normalize $P$ to texture coordinates if necessary (assuming unit cube bounds $[0,1]$ or $[-0.5, 0.5]$ mapped to $[0,1]$).
+-            *   **Sample Density**:
+-                *   Determine slice index $i$ from the normalized Z-coordinate.
+-                *   Sample the **Density Grayscale** texture at $(u, v)$ corresponding to slice $i$ and XY coordinates. Let raw density be $d_{raw}$ [S1].
+-                *   Sample the **SDF** texture at $(u, v)$ for slice $i$. Let SDF value be $s$ [S1].
+-                *   Apply **Feather**: $d = d_{raw} \times \max(0, s) \times \text{Feather}$ [S1]. Note: The source says "Multiplies the value supplied by the Density input with the inner distance field value". This implies $d = d_{raw} \times s \times \text{Feather}$, clamped to 0 if $s < 0$ or if the product is negative.
+-            *   **Absorption**:
+-                *   Calculate optical depth increment: $\Delta \tau = d \cdot \Delta t \cdot \text{Absorption}$ [S1].
+-                *   Update transmittance: $T = T \cdot e^{-\Delta \tau}$ [S1].
+-            *   **Lighting**:
+-                *   Calculate diffuse contribution from directional light: $C_{dir} = C_{light} \cdot \text{Light Intensity} \cdot \text{Albedo} \cdot \max(0, N \cdot L)$ [G]. Note: Normal $N$ is not explicitly defined in the source. In SDF rendering, $N$ is often approximated by the gradient of the SDF or the surface normal if a surface is hit. However, this is a *volume* render. The source mentions "Lighting is computed using directional light and a hemispherical skylight" [S1]. Without explicit normal calculation steps, we assume a simplified volume lighting model or that the "inner distance field value" influences the shading directly. Given the lack of explicit normal calculation in the source, we assume the lighting is applied to the accumulated color or a simplified model. A common approach in such nodes is to modulate the albedo by the light direction relative to the view or a fixed normal. *Pitfall*: The source does not specify how the normal is derived for lighting in a volume context. It might be using the SDF gradient. We will assume the lighting term is applied to the emitted/scattered light.
+-                *   Calculate ambient contribution: $C_{amb} = \text{Ambient Color} \cdot \text{Ambient Intensity} \cdot \text{Albedo}$ [S1].
+-                *   Total light contribution $C_{light\_total} = C_{dir} + C_{amb}$ [G].
+-            *   **Accumulation**:
+-                *   Calculate emitted color $C_{emit} = C_{light\_total} \cdot d$ [G].
+-                *   Update accumulated color: $C_{acc} = C_{acc} + C_{emit} \cdot T \cdot \Delta t$ [S1].
+-            *   **Termination**:
+-                *   If $T < \epsilon$ (e.g., $10^{-4}$), break loop [G].
+-        *   **Final Color**:
+-            *   $C_{final} = C_{acc} + C_{bg} \cdot T$ [S1].
+-            *   Apply **Dithering**: Add blue noise scaled by `Dithering` to $C_{final}$ to smooth shading [S1].
+-            *   Set pixel $(x, y)$ to $C_{final}$ [S1].
+-
+-5.  **Ground Plane**:
+-    *   If `Enable Ground Plane` is True:
+-        *   Intersect ray with the ground plane (z = -0.5 or similar, depending on unit cube placement) [S1].
+-        *   If intersection exists and is closer than the volume exit, replace $C_{final}$ with the ground plane color (shaded or constant based on `Background Mode` and `Ground Plane Size`/`Infinite Plane`) [S1].
++The volume is represented within the bounds of a unit cube [S1]. The rendering process involves casting rays from the camera through the unit cube, sampling the density and SDF, computing transmittance and color, and applying lighting [G].
++
++1.  **Initialize Camera**: Construct the camera projection matrix using `Camera FOV`, `Camera Distance`, and `Output Resolution` [G]. Define the camera origin and direction vectors based on `Camera Position` and `Camera Distance` [S1].
++2.  **Light Color Calculation**: If `Light Color Mode` is Temperature: Convert `Light Temperature` to RGB color $C_{light}$ using a blackbody radiation approximation [S1]. If `Light Color Mode` is RGB: Set $C_{light} = \text{Light Color}$ [S1]. Calculate directional light vector $L$ from `Light Position` [S1].
++3.  **Background Calculation**: If `Background Mode` is Constant: $C_{bg} = \text{Background Color}$ [S1]. If `Background Mode` is Shaded: Calculate $C_{bg}$ based on `Background Color`, `Light Color`, and `Light Intensity` [S1].
++4.  **Ray Casting Loop**: For each pixel $(x, y)$ in the output image: Compute ray origin $O$ and direction $D$ in world space [G]. Intersect ray with the unit cube $[-0.5, 0.5]^3$ [G]. Let the entry point be $t_{min}$ and exit point be $t_{max}$ [G]. Initialize accumulated color $C_{acc} = (0, 0, 0)$ and transmittance $T = 1.0$ [G]. Define step size $\Delta t$ based on `Output Resolution` and `Camera Distance` [G]. Iterate $t$ from $t_{min}$ to $t_{max}$ with step $\Delta t$: Compute world position $P = O + t \cdot D$ [G]. Normalize $P$ to texture coordinates assuming unit cube bounds $[0,1]$ [G]. Determine slice index $i$ from the normalized Z-coordinate [G]. Sample the **Density Grayscale** texture at $(u, v)$ corresponding to slice $i$ and XY coordinates. Let raw density be $d_{raw}$ [S1]. Sample the **SDF** texture at $(u, v)$ for slice $i$. Let SDF value be $s$ [S1]. Apply **Feather**: $d = d_{raw} \times \max(0, s) \times \text{Feather}$ [S1]. Calculate optical depth increment: $\Delta \tau = d \cdot \Delta t \cdot \text{Absorption}$ [G]. Update transmittance: $T = T \cdot e^{-\Delta \tau}$ [G]. Calculate diffuse contribution from directional light: $C_{dir} = C_{light} \cdot \text{Light Intensity} \cdot \text{Albedo} \cdot \max(0, N \cdot L)$ [G]. Calculate ambient contribution: $C_{amb} = \text{Ambient Color} \cdot \text{Ambient Intensity} \cdot \text{Albedo}$ [S1]. Total light contribution $C_{light\_total} = C_{dir} + C_{amb}$ [G]. Calculate emitted color $C_{emit} = C_{light\_total} \cdot d$ [G]. Update accumulated color: $C_{acc} = C_{acc} + C_{emit} \cdot T \cdot \Delta t$ [G]. If $T < \epsilon$ (e.g., $10^{-4}$), break loop [G]. Final Color: $C_{final} = C_{acc} + C_{bg} \cdot T$ [G]. Apply **Dithering**: Add blue noise scaled by `Dithering` to $C_{final}$ to smooth shading [S1]. Set pixel $(x, y)$ to $C_{final}$ [S1].
++5.  **Ground Plane**: If `Enable Ground Plane` is True: Intersect ray with the ground plane (z = -0.5 or similar, depending on unit cube placement) [G]. If intersection exists and is closer than the volume exit, replace $C_{final}$ with the ground plane color (shaded or constant based on `Background Mode` and `Ground Plane Size`/`Infinite Plane`) [S1].
+ 
+ ### Pseudocode
+@@ -111,33 +58,49 @@
+ import math
+ 
+-def sample_texture_3d_grid(texture, slice_idx, u, v):
+-    """
+-    Samples a 4096x4096 texture representing 256 slices in a 16x16 grid.
+-    Each slice is 256x256 pixels.
+-    """
++def add_vectors(a, b):
++    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
++
++def scale_vector(v, s):
++    return (v[0] * s, v[1] * s, v[2] * s)
++
++def normalize(v):
++    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    if length == 0:
++        return (0.0, 0.0, 0.0)
++    return (v[0] / length, v[1] / length, v[2] / length)
++
++def intersect_unit_cube(origin, direction):
++    t_min = -math.inf
++    t_max = math.inf
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < -0.5 or origin[i] > 0.5:
++                return (-math.inf, -math.inf)
++        else:
++            t1 = (-0.5 - origin[i]) / direction[i]
++            t2 = (0.5 - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    return (t_min, t_max)
++
++def blue_noise(x, y):
++    h = x * 374761393.0 + y * 668265263.0
++    h = (h & 0x7fffffff) / 2147483647.0
++    return h - 0.5
++
++def sample_3d_texture(texture, slice_idx, u, v):
+     slice_size = 256
+     grid_size = 16
+-    
+-    # Calculate grid coordinates for the slice
+     gx = slice_idx % grid_size
+     gy = slice_idx // grid_size
+-    
+-    # Calculate pixel coordinates
+     px = gx * slice_size + u
+     py = gy * slice_size + v
+-    
+-    # Clamp to texture bounds
+     px = max(0, min(px, 4095))
+     py = max(0, min(py, 4095))
+-    
+-    return texture[py, px]
+-
+-def blackbody_temperature_to_rgb(temp_k):
+-    """
+-    Approximate blackbody radiation color from temperature in Kelvin.
+-    """
++    return texture[py][px]
++
++def blackbody_to_rgb(temp_k):
+     temp_k = max(1000, min(40000, temp_k))
+     temp_c = temp_k / 100.0
+-    
+     if temp_c <= 66:
+         r = 255.0
+@@ -148,11 +111,7 @@
+         g = 288.1221695283 * math.pow(temp_c - 60.0, -0.0755146169)
+         b = 255.0
+-        
+     return (r / 255.0, g / 255.0, b / 255.0)
+ 
+ def render_3d_texture_volume(sdf_texture, density_texture, params):
+-    """
+-    Renders the 3D volume based on the provided parameters.
+-    """
+     output_res = params['output_resolution']
+     camera_pos = params['camera_position']
+@@ -175,114 +134,82 @@
+     infinite_plane = params['infinite_plane']
+     ground_size = params['ground_plane_size']
+-    
+-    # Determine light color
+-    if light_color_mode == 0: # Temperature
+-        light_color = blackbody_temperature_to_rgb(light_temp)
+-    else: # RGB
++
++    if light_color_mode == 0:
++        light_color = blackbody_to_rgb(light_temp)
++    else:
+         light_color = light_color_rgb
+-        
+-    # Calculate light direction (simplified)
+-    light_dir = normalize(light_pos - camera_pos) # [G] Assumption
+-    
+-    # Background color calculation
+-    if bg_mode == 1: # Constant
++
++    light_dir = normalize(add_vectors(light_pos, scale_vector(camera_pos, -1.0)))
++
++    if bg_mode == 1:
+         bg_color_final = bg_color
+-    else: # Shaded
+-        # [G] Simplified shading for background
+-        bg_color_final = (bg_color[0] * light_color[0] * light_intensity, 
+-                          bg_color[1] * light_color[1] * light_intensity, 
+-                          bg_color[2] * light_color[2] * light_intensity, 
++    else:
++        bg_color_final = (bg_color[0] * light_color[0] * light_intensity,
++                          bg_color[1] * light_color[1] * light_intensity,
++                          bg_color[2] * light_color[2] * light_intensity,
+                           bg_color[3])
+-                          
+-    output_image = zeros((output_res, output_res, 4))
+-    
+-    # Ray generation setup
+-    # [G] Assuming standard perspective projection
+-    aspect = 1.0 # Assuming square pixels/output
++
++    output_image = [[0.0] * 4 for _ in range(output_res)]
++
++    aspect = 1.0
+     fov_rad = math.radians(camera_fov)
+     h = math.tan(fov_rad / 2.0) * camera_dist
+     w = h * aspect
+-    
++
+     for y in range(output_res):
+         for x in range(output_res):
+-            # Normalized device coordinates
+             ndc_x = (x / output_res - 0.5) * 2.0
+             ndc_y = (y / output_res - 0.5) * 2.0
+-            
+-            # Ray direction
+-            ray_dir = normalize(vec3(ndc_x * w, ndc_y * h, -camera_dist))
++            ray_dir = normalize((ndc_x * w, ndc_y * h, -camera_dist))
+             ray_origin = camera_pos
+-            
+-            # Intersect with unit cube [-0.5, 0.5]
+-            # [G] Standard ray-box intersection
++
+             t_min, t_max = intersect_unit_cube(ray_origin, ray_dir)
+-            
++
+             if t_max < 0:
+-                output_image[y, x] = bg_color_final
++                output_image[y][x] = list(bg_color_final)
+                 continue
+-                
++
+             t = t_min
+-            acc_color = vec3(0.0)
++            acc_color = [0.0, 0.0, 0.0]
+             transmittance = 1.0
+-            step_size = (t_max - t_min) / output_res # [G] Adaptive step size
+-            
++            step_size = (t_max - t_min) / output_res
++
+             while t < t_max and transmittance > 1e-4:
+-                # World position
+-                pos = ray_origin + ray_dir * t
+-                
+-                # Normalize to [0, 1] for texture sampling
+-                # Assuming unit cube is [-0.5, 0.5]
+-                norm_pos = pos + 0.5
+-                
+-                # Extract slice index from Z
+-                slice_idx = int(norm_pos.z * 256)
++                pos = add_vectors(ray_origin, scale_vector(ray_dir, t))
++                norm_pos = add_vectors(pos, (0.5, 0.5, 0.5))
++
++                slice_idx = int(norm_pos[2] * 256)
+                 slice_idx = max(0, min(255, slice_idx))
+-                
+-                # Local coordinates within slice
+-                u = int((norm_pos.x) * 256)
+-                v = int((norm_pos.y) * 256)
++
++                u = int(norm_pos[0] * 256)
++                v = int(norm_pos[1] * 256)
+                 u = max(0, min(255, u))
+                 v = max(0, min(255, v))
+-                
+-                # Sample textures
+-                density_raw = sample_texture_3d_grid(density_texture, slice_idx, u, v)
+-                sdf_val = sample_texture_3d_grid(sdf_texture, slice_idx, u, v)
+-                
+-                # Apply Feather
+-                # "Multiplies the value supplied by the Density input with the inner distance field value"
+-                # Clamping to 0 if negative
++
++                density_raw = sample_3d_texture(density_texture, slice_idx, u, v)
++                sdf_val = sample_3d_texture(sdf_texture, slice_idx, u, v)
++
+                 density = density_raw * sdf_val * feather
+                 if density < 0:
+                     density = 0.0
+-                    
+-                # Absorption
++
+                 delta_tau = density * absorption * step_size
+                 transmittance *= math.exp(-delta_tau)
+-                
+-                # Lighting
+-                # [G] Simplified volume lighting
+-                # Diffuse from directional light
+-                # Normal is not explicitly defined for volume. 
+-                # Assuming a simple model where light affects the albedo directly or via a fixed normal.
+-                # Given the lack of normal info, we assume the light term is modulated by density.
+-                light_contrib = light_color * light_intensity * albedo
+-                ambient_contrib = ambient_color * ambient_intensity * albedo
+-                
+-                emitted = (light_contrib + ambient_contrib) * density
+-                
+-                acc_color += emitted * transmittance * step_size
+-                
++
++                light_contrib = scale_vector(light_color, light_intensity)
++                ambient_contrib = scale_vector(ambient_color, ambient_intensity)
++                emitted = scale_vector(add_vectors(light_contrib, ambient_contrib), density)
++
++                acc_color = add_vectors(acc_color, scale_vector(emitted, transmittance * step_size))
++
+                 t += step_size
+-                
+-            # Final color
+-            final_color = acc_color + bg_color_final[:3] * transmittance
+-            
+-            # Dithering
+-            # [G] Add blue noise
++
++            final_color = add_vectors(acc_color, scale_vector(bg_color_final[:3], transmittance))
++
+             noise = blue_noise(x, y) * dithering
+-            final_color += noise
+-            
+-            output_image[y, x] = vec4(final_color[0], final_color[1], final_color[2], 1.0)
+-            
++            final_color = add_vectors(final_color, (noise, noise, noise))
++
++            output_image[y][x] = [final_color[0], final_color[1], final_color[2], 1.0]
++
+     return output_image
+ ```
+@@ -291,5 +218,5 @@
+ *   **SDF Input Format**: The SDF must be a 4096x4096 texture with 256 slices in a 16x16 grid. Using a different layout will result in incorrect sampling [S1].
+ *   **Density Range**: Density values are expected to be in [0, 1]. Values outside this range may cause unexpected transparency or opacity [S1].
+-*   **Feather Negative Values**: If the SDF value is negative (outside the shape) and Feather is positive, the density becomes negative. The algorithm must clamp the density to 0 to prevent negative absorption/emission [S1].
++*   **Feather Negative Values**: If the SDF value is negative (outside the shape) and Feather is positive, the density becomes negative. The algorithm must clamp the density to 0 to prevent negative absorption/emission [G].
+ *   **Camera Position**: The camera position is relative to the unit cube. Moving the camera too close or too far may result in the volume being out of frame or clipped [S1].
+ *   **Ground Plane**: The ground plane is only rendered if `Enable Ground Plane` is True. If `Infinite Plane` is False, `Ground Plane Size` must be set appropriately [S1].
+@@ -297,5 +224,4 @@
+ ## Operating characteristics
+ *   **Time Complexity**: $O(R^2 \cdot N)$, where $R$ is the output resolution and $N$ is the number of steps per ray. $N$ is determined by the volume depth and step size [G].
+-*   **Memory Complexity**: $O(T)$, where $T$ is the size of the input textures (2 x 4096x4096x1 bytes for grayscale) [S1].
+ *   **Performance**: Performance depends heavily on the output resolution and the number of steps. Higher `Output Resolution` and smaller `Absorption` (requiring more steps for transmittance to drop) will increase render time [S1].
+ *   **Strengths**: Simple setup for volumetric effects like clouds and fog. Built-in lighting and post-processing (dithering) [S1].

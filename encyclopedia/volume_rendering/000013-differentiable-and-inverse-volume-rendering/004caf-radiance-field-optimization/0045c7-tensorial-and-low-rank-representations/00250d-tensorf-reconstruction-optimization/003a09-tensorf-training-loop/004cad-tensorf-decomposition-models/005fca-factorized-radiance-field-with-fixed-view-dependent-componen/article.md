@@ -1,0 +1,380 @@
+# Factorized Radiance Field with Fixed View-Dependent Components
+
+Also called: Point Cloud Fusion NeRF, VM Decomposition NeRF
+
+## Overview
+This method reconstructs a radiance field from sparse input views by factorizing geometry and appearance tensors into a fixed number of components equal to the number of input views ($n$), rather than a small fixed constant [S1]. It differs from TensoRF by binding each tensor component to a specific input view, enabling robust point cloud fusion that substitutes inaccurate depth-derived points with accurate ones from other views [S1]. The approach uses Vector-Matrix (VM) decomposition for spatial factors and a global appearance dictionary to abstract commonalities across the scene [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   $n$ input views, each containing an RGB image, a depth map, and camera parameters (intrinsic matrix $K$, rotation matrix $R$, translation vector $t$) [S1].
+*   Hyperparameters: $\lambda_{depth}$ (balance between color and depth loss), $\omega_{reg}$ (L1 regularization weight), $P$ (feature decoding MLP dimension, set to 27), $N_0$ (initial grid size, set to 128), $N$ (final grid size), $Q$ (number of shading points per ray) [S1].
+
+**Outputs:**
+*   Rendered RGB images and depth maps for novel viewpoints [S1].
+
+### Data Structures
+
+**1. Geometry Grid ($G_\sigma$)**
+A factorized 3D tensor representing volume density $\sigma$. It is decomposed into $n$ components, one per input view. Each component $r$ ($1 \le r \le n$) consists of:
+*   Three 1D vectors: $v_{\sigma,r}^X \in \mathbb{R}^I$, $v_{\sigma,r}^Y \in \mathbb{R}^J$, $v_{\sigma,r}^Z \in \mathbb{R}^K$ [S1].
+*   Three 2D matrices: $M_{\sigma,r}^{XY} \in \mathbb{R}^{I \times J}$, $M_{\sigma,r}^{XZ} \in \mathbb{R}^{I \times K}$, $M_{\sigma,r}^{YZ} \in \mathbb{R}^{J \times K}$ [S1].
+*   The grid dimensions are $I \times J \times K$.
+
+**2. Appearance Grid ($G_c$)**
+A factorized 3D tensor representing color $c$. It is also decomposed into $n$ components. Each component $r$ involves:
+*   Three 1D vectors: $v_{c,r}^X \in \mathbb{R}^I$, $v_{c,r}^Y \in \mathbb{R}^J$, $v_{c,r}^Z \in \mathbb{R}^K$ [S1].
+*   Three 2D matrices: $A_{c,r}^X \in \mathbb{R}^{I \times J}$, $A_{c,r}^Y \in \mathbb{R}^{J \times K}$, $A_{c,r}^Z \in \mathbb{R}^{I \times K}$ [S1].
+    *   Note: The source defines $A_{c,r}^X = v_{c,r}^X \circ M_{c,r}^{XY}$, implying the matrices are derived from vector-matrix outer products or similar factorizations, but stored as distinct factors in the decomposition sum [S1].
+*   Three basis vectors: $b_{3r-2}, b_{3r-1}, b_{3r} \in \mathbb{R}^P$ [S1].
+
+**3. Global Appearance Dictionary ($B$)**
+A matrix of size $P \times 3n$ formed by stacking the $3n$ basis vectors $b_r$ [S1].
+
+### Initialization
+
+1.  **NDC Mapping:** Map depth values to Normalized Device Coordinate (NDC) space to ensure all visible locations fit within a predetermined cubic space [S1].
+2.  **Point Cloud Generation:** For each input view $r$, map every 2D pixel location $x_p$ to a 3D world location $x_w$ using the camera parameters:
+    $$x_w = R^{-1} (K^{-1} x_p D - t)$$
+    where $D$ is the depth value at $x_p$ [S1].
+3.  **Grid Assignment:**
+    *   **Geometry:** For each point $x_w$ from view $r$, identify the corresponding voxel indices $(i,j,k)$ in the $I \times J \times K$ grid. Set the elements of $v_{\sigma,r}^X, v_{\sigma,r}^Y, v_{\sigma,r}^Z$ and $M_{\sigma,r}^{XY}, M_{\sigma,r}^{XZ}, M_{\sigma,r}^{YZ}$ corresponding to these projections to 1. All other elements are set to 0 [S1].
+    *   **Appearance:** For the same projections, assign the average RGB color of the projected points to the elements of $A_{c,r}^X, A_{c,r}^Y, A_{c,r}^Z$. Assign random values to $v_{c,r}^X, v_{c,r}^Y, v_{c,r}^Z$ [S1].
+4.  **Dictionary Initialization:** Initialize the basis vectors $b_r$ (and thus matrix $B$) [S1].
+
+### Rendering
+
+To render a pixel, march along a ray and sample $Q$ shading points $x_q$ with step size $\Delta_q$.
+
+1.  **Density Interpolation:** Calculate $\sigma_q = G_\sigma(x_q)$ using trilinear interpolation of the factorized geometry grid. For a single component $r$, the interpolated value is:
+    $$A_{\sigma,r}(x) = v_{\sigma,r}(x) M_{\sigma,r}(y, z)$$
+    (Generalizing to 3D via the sum of modes) [S1].
+2.  **Color Interpolation:** Calculate the feature vector $f_q$ by concatenating the interpolated appearance factors for component $r$, then multiplying by the dictionary $B$:
+    $$f_q = B \oplus [A_{c,r}(x_q)]_{r}$$
+    The color $c_q$ is obtained by passing $f_q$ through a feature decoding MLP $S$:
+    $$c_q = S(f_q, d_q)$$
+    where $d_q$ is the view direction at $x_q$ [S1].
+3.  **Volume Rendering:** Compute the pixel color $C$ and transmittance $\tau_q$:
+    $$\tau_q = \exp\left(-\sum_{p=1}^{q-1} \sigma_p \Delta_p\right)$$
+    $$C = \sum_{q=1}^{Q} \tau_q (1 - \exp(-\sigma_q \Delta_q)) c_q$$
+    $$\tau_{Q+1} = \exp\left(-\sum_{p=1}^{Q} \sigma_p \Delta_p\right)$$
+    (Background color is typically added as $\tau_{Q+1} c_{bg}$, though not explicitly detailed in the source, the formula for $C$ is given as above) [S1].
+
+### Optimization
+
+The model is optimized using a composite loss function $L$:
+$$L = L_{RGB} + \lambda_{depth} L_{depth}$$
+
+1.  **RGB Loss ($L_{RGB}$):**
+    $$L_{RGB} = \|C - \hat{C}\|_2^2 + \omega_{reg} L_{reg}$$
+    where $\hat{C}$ is the ground truth color, and $L_{reg}$ is the L1 regularization term applied to all tensor factors to promote sparsity and eliminate floaters [S1].
+2.  **Depth Loss ($L_{depth}$):**
+    $$L_{depth} = \|D - \hat{D}\|_2^2$$
+    where $D$ is the rendered depth and $\hat{D}$ is the ground truth depth [S1].
+
+### Coarse-to-Fine Reconstruction
+
+Training starts with a grid of size $N_0^3$ ($N_0=128$). The grid is upsampled at specific training steps (2000, 3000, 4000, 5500, 7000) to the final size $N^3$. Upsampling is performed by linearly and bilinearly upsampling the XYZ-mode vector and matrix factors [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+class FactorizedRadianceField:
+    def __init__(self, n_views, I, J, K, P, N0=128):
+        """
+        Initialize the factorized radiance field.
+        n_views: Number of input views (n)
+        I, J, K: Grid dimensions
+        P: Feature decoding MLP dimension
+        """
+        self.n = n_views
+        self.I, self.J, self.K = I, J, K
+        self.P = P
+        
+        # Geometry Grid Factors: n components
+        # Each component has 3 vectors and 3 matrices
+        self.v_sigma_X = nn.Parameter(torch.randn(n, I))
+        self.v_sigma_Y = nn.Parameter(torch.randn(n, J))
+        self.v_sigma_Z = nn.Parameter(torch.randn(n, K))
+        
+        self.M_sigma_XY = nn.Parameter(torch.randn(n, I, J))
+        self.M_sigma_XZ = nn.Parameter(torch.randn(n, I, K))
+        self.M_sigma_YZ = nn.Parameter(torch.randn(n, J, K))
+        
+        # Appearance Grid Factors: n components
+        # Each component has 3 vectors, 3 matrices, and 3 basis vectors
+        self.v_c_X = nn.Parameter(torch.randn(n, I))
+        self.v_c_Y = nn.Parameter(torch.randn(n, J))
+        self.v_c_Z = nn.Parameter(torch.randn(n, K))
+        
+        self.A_c_X = nn.Parameter(torch.randn(n, I, J))
+        self.A_c_Y = nn.Parameter(torch.randn(n, J, K))
+        self.A_c_Z = nn.Parameter(torch.randn(n, I, K))
+        
+        # Global Appearance Dictionary B: P x 3n
+        # Stacked basis vectors b_r for r=1..n (3 vectors per view)
+        self.B = nn.Parameter(torch.randn(P, 3 * n))
+        
+        # Feature Decoding MLP
+        self.mlp = nn.Sequential(
+            nn.Linear(P, 64),
+            nn.ReLU(),
+            nn.Linear(64, 3) # Output RGB
+        )
+        
+        # Hyperparameters
+        self.lambda_depth = 1.0
+        self.omega_reg = 1e-4
+
+    def get_density(self, x, y, z):
+        """
+        Interpolate density sigma at continuous coordinates x, y, z.
+        x, y, z are tensors of shape (batch, 1) or similar, normalized to [0, I], [0, J], [0, K]
+        """
+        # Trilinear interpolation for vectors
+        # Note: In practice, use torch.nn.functional.grid_sample or custom interpolation
+        # Here we assume helper functions for interpolation exist or use simple indexing for discrete case
+        # For continuous, we interpolate the factors first.
+        
+        # Interpolate vectors
+        v_x = interpolate_1d(self.v_sigma_X, x, dim=1) # Shape (n, batch)
+        v_y = interpolate_1d(self.v_sigma_Y, y, dim=1) # Shape (n, batch)
+        v_z = interpolate_1d(self.v_sigma_Z, z, dim=1) # Shape (n, batch)
+        
+        # Interpolate matrices
+        # M_XY: (n, I, J) -> interpolate x and y
+        M_xy = interpolate_2d(self.M_sigma_XY, x, y, dim1=1, dim2=2) # Shape (n, batch)
+        M_xz = interpolate_2d(self.M_sigma_XZ, x, z, dim1=1, dim2=2) # Shape (n, batch)
+        M_yz = interpolate_2d(self.M_sigma_YZ, y, z, dim1=1, dim2=2) # Shape (n, batch)
+        
+        # Sum over modes and components
+        # G_sigma = sum_r ( v_x * M_xy + v_y * M_yz + v_z * M_xz ) ? 
+        # Source formula: G_sigma = sum_r sum_m Am_sigma_r
+        # Where Am are the mode factors. 
+        # Typically VM decomposition sums the outer products.
+        # Based on source: G_sigma,ijk = sum_r ( v_X * M_XY + v_Y * M_YZ + v_Z * M_XZ ) is not quite right.
+        # Source says: G_sigma = sum_r ( v_X_r o M_XY_r + ... )
+        # Let's follow the source structure:
+        # sigma = sum_{r=1}^n ( v_sigma_X[r] * M_sigma_XY[r] + v_sigma_Y[r] * M_sigma_YZ[r] + v_sigma_Z[r] * M_sigma_XZ[r] )
+        # Note: The source lists M_XY, M_XZ, M_YZ. The vectors correspond to the missing dimension.
+        # v_X (I) * M_XY (I,J) -> (I,J) ? No, v_X is vector. 
+        # Standard VM: v_i * M_jk. 
+        # So: v_X[r] * M_XY[r] gives a matrix? No, v_X is 1D. 
+        # The source says: v_X o M_XY. This likely means outer product or element-wise if dimensions match.
+        # Given v_X is I, M_XY is IxJ. This doesn't match for element-wise.
+        # Re-reading source: "v_sigma,r in R^I, M_sigma,r in R^{I x J}".
+        # Equation: G_sigma = sum_r sum_m A_m_sigma_r.
+        # A_X = v_X o M_XY? This notation is ambiguous. 
+        # However, standard TensoRF VM: v_i * M_jk. 
+        # If v is I, M is IxJ, then v_i * M_ijk is not defined.
+        # Let's assume the source implies: 
+        # Term 1: v_X[r] (I) * M_XY[r] (I,J) -> This is likely v_X[r] * M_XY[r] where v is broadcast? 
+        # Or maybe M_XY is actually JxK? 
+        # Source: "v_X in R^I, M_XY in R^{I x J}". 
+        # If we interpret "o" as outer product, v_X (I) o M_XY (I,J) -> (I,I,J). Too big.
+        # Let's look at the rendering equation again.
+        # A_X_r(x) = v_r(x) M_r(y,z). 
+        # This implies v is a function of x, M is a function of y,z.
+        # So for a voxel (i,j,k):
+        # Value = v_X[i] * M_XY[j,k] ? No, M_XY is IxJ.
+        # Let's assume the standard VM decomposition:
+        # G[i,j,k] = sum_r ( v_X[r,i] * M_XY[r,j,k] + v_Y[r,j] * M_YZ[r,i,k] + v_Z[r,k] * M_XZ[r,i,j] )
+        # Wait, M_XY is IxJ. It doesn't have k.
+        # M_XZ is IxK. It doesn't have j.
+        # M_YZ is JxK. It doesn't have i.
+        # So:
+        # Term 1: v_X[r,i] * M_XY[r,j,k] -> M_XY must be JxK? 
+        # Source says M_XY is IxJ. 
+        # This is a contradiction in the source text vs standard notation.
+        # However, the source explicitly writes:
+        # G_sigma = sum_r ( v_X o M_XY + v_Y o M_YZ + v_Z o M_XZ )
+        # And defines v_X in R^I, M_XY in R^{I x J}.
+        # If we assume the indices are:
+        # v_X[i] * M_XY[i,j] -> leaves k? No.
+        # Let's stick to the interpolation formula provided:
+        # A_r(x) = v_r(x) M_r(y,z).
+        # This implies M_r takes 2 coordinates.
+        # So M_XY takes y,z? But it's called X Y.
+        # Let's assume the source meant:
+        # M_XY corresponds to Y,Z plane? No, that's YZ.
+        # Let's assume the standard interpretation:
+        # v_X (I) * M_YZ (J,K) -> (I,J,K)
+        # v_Y (J) * M_XZ (I,K) -> (I,J,K)
+        # v_Z (K) * M_XY (I,J) -> (I,J,K)
+        # This matches the dimensions if M_XY is IxJ, M_XZ is IxK, M_YZ is JxK.
+        # And the source labels might be swapped or "M_XY" means "Matrix for X and Y modes" which is actually the YZ plane?
+        # Or "M_XY" means the matrix associated with the X vector?
+        # Let's use the explicit interpolation formula:
+        # A_r(x) = v_r(x) M_r(y,z).
+        # If x is the first coord, y,z are the others.
+        # So for density:
+        # sigma = sum_r ( v_X[r](x) * M_XYZ[r](y,z) + v_Y[r](y) * M_YXZ[r](x,z) + v_Z[r](z) * M_ZXY[r](x,y) )
+        # We need to map the source's M_XY, M_XZ, M_YZ to these.
+        # Source: v_X (I), M_XY (I,J). This doesn't fit M(y,z).
+        # Let's assume the source has a typo and M_XY is actually the matrix for the YZ plane (JxK)?
+        # Or M_XY is IxJ and corresponds to x,y, and we need a vector for z?
+        # The source lists 3 vectors and 3 matrices.
+        # Let's implement based on the explicit formula:
+        # sigma = sum_r ( v_X[r] * M_1[r] + v_Y[r] * M_2[r] + v_Z[r] * M_3[r] )
+        # where M_1 depends on y,z; M_2 depends on x,z; M_3 depends on x,y.
+        
+        # Interpolate M matrices
+        # M_1 (YZ plane): Interpolate M_YZ (J,K) at y,z
+        M_1 = interpolate_2d(self.M_sigma_YZ, y, z, dim1=1, dim2=2) # (n, batch)
+        # M_2 (XZ plane): Interpolate M_XZ (I,K) at x,z
+        M_2 = interpolate_2d(self.M_sigma_XZ, x, z, dim1=1, dim2=2) # (n, batch)
+        # M_3 (XY plane): Interpolate M_XY (I,J) at x,y
+        M_3 = interpolate_2d(self.M_sigma_XY, x, y, dim1=1, dim2=2) # (n, batch)
+        
+        # Interpolate vectors
+        v_x = interpolate_1d(self.v_sigma_X, x, dim=1) # (n, batch)
+        v_y = interpolate_1d(self.v_sigma_Y, y, dim=1) # (n, batch)
+        v_z = interpolate_1d(self.v_sigma_Z, z, dim=1) # (n, batch)
+        
+        # Sum
+        sigma = torch.sum(v_x * M_1 + v_y * M_2 + v_z * M_3, dim=0) # (batch,)
+        return sigma
+
+    def get_color(self, x, y, z, d):
+        """
+        Interpolate color c at continuous coordinates x, y, z and direction d.
+        """
+        # Interpolate appearance factors
+        v_x = interpolate_1d(self.v_c_X, x, dim=1)
+        v_y = interpolate_1d(self.v_c_Y, y, dim=1)
+        v_z = interpolate_1d(self.v_c_Z, z, dim=1)
+        
+        M_1 = interpolate_2d(self.A_c_Y, y, z, dim1=1, dim2=2) # Assuming A_c_Y is JxK? Source says A_c_Y is JxK? 
+        # Source: A_c_X (I,J), A_c_Y (J,K), A_c_Z (I,K).
+        # So M_1 (YZ) uses A_c_Y (J,K).
+        M_2 = interpolate_2d(self.A_c_Z, x, z, dim1=1, dim2=2) # A_c_Z is IxK.
+        M_3 = interpolate_2d(self.A_c_X, x, y, dim1=1, dim2=2) # A_c_X is IxJ.
+        
+        # Concatenate features for each view r
+        # f_r = [v_x[r], v_y[r], v_z[r], M_1[r], M_2[r], M_3[r]]?
+        # Source: S(B o [A_c,r(x)]_r, d)
+        # [A_c,r(x)]_r implies concatenating the interpolated factors for all r.
+        # Each A_c,r contributes 3 vectors and 3 matrices?
+        # The source says "concatenation (o)".
+        # Let's assume we concatenate the interpolated values of the 6 factors for each r.
+        # Total features per view = 3 (vectors) + 3 (matrices) = 6 scalars?
+        # But B is P x 3n. P=27. 3n * 9 = 27? n=3?
+        # If n is variable, P must scale or the factors are projected.
+        # Source: "We maintain 3n vectors br... P x 3n matrix B".
+        # This implies the input to B has size 3n.
+        # So each view r contributes 3 scalars to the feature vector before B?
+        # Or maybe the "3n vectors br" are the basis, and the coefficients are the interpolated factors?
+        # Let's assume the feature vector for view r is a scalar or small vector.
+        # Given the ambiguity, we assume the interpolated factors are flattened/summed to produce a 3n-dimensional vector.
+        
+        # Simplified: Create a feature vector of size 3n
+        # For each r, compute a scalar feature f_r from the interpolated factors.
+        # f_r = sum of interpolated factors?
+        
+        # Let's assume the source implies:
+        # Feature vector F of size 3n.
+        # F[3r-2] = interpolated value of A_c_X[r]
+        # F[3r-1] = interpolated value of A_c_Y[r]
+        # F[3r] = interpolated value of A_c_Z[r]
+        # (Ignoring vectors for color as they were random init and might be for geometry?)
+        # Source says: "appearance grid... vectors vc,r assigned random values".
+        # And "S(B o [A_c,r(x)]_r, d)".
+        # Let's use the 3 matrices as the primary features.
+        
+        F = torch.cat([
+            interpolate_2d(self.A_c_X, x, y, dim1=1, dim2=2).flatten(),
+            interpolate_2d(self.A_c_Y, y, z, dim1=1, dim2=2).flatten(),
+            interpolate_2d(self.A_c_Z, x, z, dim1=1, dim2=2).flatten()
+        ], dim=-1) # Shape (batch, 3n)
+        
+        # Multiply by Dictionary B
+        # B is (P, 3n). F is (batch, 3n).
+        # Result: (batch, P)
+        features = torch.matmul(F, self.B.T)
+        
+        # Pass through MLP
+        colors = self.mlp(features)
+        return colors
+
+    def render_ray(self, ray_origins, ray_directions, t_near, t_far, Q=128):
+        """
+        Render a batch of rays.
+        """
+        # Sample points
+        t_vals = torch.linspace(t_near, t_far, Q).unsqueeze(0) # (1, Q)
+        t_vals = t_vals.expand(ray_origins.shape[0], -1) # (batch, Q)
+        
+        # Interpolate t_vals to match ray directions? 
+        # Standard: x_q = o + t_q * d
+        points = ray_origins.unsqueeze(1) + t_vals.unsqueeze(2) * ray_directions.unsqueeze(1) # (batch, Q, 3)
+        
+        # Normalize points to grid coordinates [0, I], [0, J], [0, K]
+        # Assuming points are in world space, need inverse transform to grid space
+        # This step depends on the specific NDC mapping, omitted for brevity
+        x_grid, y_grid, z_grid = world_to_grid(points)
+        
+        # Get density and color
+        sigma = self.get_density(x_grid, y_grid, z_grid) # (batch, Q)
+        colors = self.get_color(x_grid, y_grid, z_grid, ray_directions) # (batch, Q, 3)
+        
+        # Volume rendering
+        deltas = t_vals[:, 1:] - t_vals[:, :-1]
+        deltas = torch.cat([deltas, torch.zeros_like(deltas[:, :1])], dim=1)
+        
+        alpha = 1.0 - torch.exp(-sigma * deltas)
+        T = torch.cumprod(torch.exp(-sigma * deltas), dim=1)
+        T = torch.cat([torch.ones_like(T[:, :1]), 1.0 - T], dim=1)
+        
+        weights = alpha * T[:, :-1]
+        C = torch.sum(weights.unsqueeze(2) * colors[:, :-1], dim=1)
+        
+        return C
+
+    def loss(self, pred_color, pred_depth, gt_color, gt_depth):
+        L_rgb = torch.mean((pred_color - gt_color)**2) + self.omega_reg * torch.mean(torch.abs(self.v_sigma_X)) # Simplified reg
+        L_depth = torch.mean((pred_depth - gt_depth)**2)
+        return L_rgb + self.lambda_depth * L_depth
+```
+
+## Operating characteristics
+
+**Time and Memory Complexity:**
+*   Memory: Scales with $n \times (I \cdot J + J \cdot K + I \cdot K)$ for geometry and appearance matrices, plus $P \times 3n$ for the dictionary. Since $n$ is the number of views, memory grows linearly with the number of input views, unlike TensoRF which uses a fixed small number of components [S1].
+*   Time: Rendering involves interpolating factors for each sample point. The number of components $n$ adds a summation loop during density/color calculation [S1].
+
+**Measured Performance:**
+*   **LLFF Dataset (2 views):** PSNR 17.83, SSIM 0.5512, LPIPS 0.3832 [S1].
+*   **LLFF Dataset (4 views):** PSNR 20.86, SSIM 0.5967, LPIPS 0.3247 [S1].
+*   **DTU Dataset (0% noise):** PSNR 19.34, SSIM 0.7431, LPIPS 0.2576 [S1].
+*   **DTU Dataset (10% depth noise):** PSNR 16.63, SSIM 0.4144, LPIPS 0.5561 [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Robust to inaccurate depth values through point cloud fusion; eliminates floaters via L1 regularization; performs well on sparse views [S1].
+*   **Limitations:** Performance degrades with noisy depth maps (e.g., 10% noise significantly reduces PSNR) [S1]. Memory usage increases with the number of input views [S1].
+
+**When to Use:**
+*   Sparse view reconstruction where depth maps are available but potentially noisy [S1].
+*   Scenes where view-dependent appearance can be abstracted into a global dictionary [S1].
+
+## Background
+
+**Origin:**
+The method was introduced in the paper "Depth-Guided Robust and Fast Point Cloud Fusion NeRF for Sparse Input Views" presented at the Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24) [S1].
+
+**History and Development:**
+It builds upon TensoRF but modifies the decomposition to fix the number of components to the number of input views, enabling explicit point cloud fusion [S1]. It uses NDC normalization similar to DSNeRF [S1].
+
+**Usage:**
+Implemented in PyTorch, optimized on NVIDIA RTX 4090 GPU with a batch size of 4096 pixel rays [S1].
+
+## Sources
+
+[S1] Depth-Guided Robust and Fast Point Cloud Fusion NeRF for Sparse Input Views, https://doi.org/10.1609/aaai.v38i3.27968, fetched 2026-10-29

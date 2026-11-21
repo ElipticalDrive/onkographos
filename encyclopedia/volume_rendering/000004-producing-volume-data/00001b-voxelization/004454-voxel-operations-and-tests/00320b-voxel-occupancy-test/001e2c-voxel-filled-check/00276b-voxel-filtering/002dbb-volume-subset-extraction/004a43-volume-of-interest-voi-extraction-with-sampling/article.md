@@ -1,0 +1,78 @@
+# Volume of Interest (VOI) Extraction with Sampling
+
+Also called: Subvolume Extraction, vtkExtractVOI
+
+## Overview
+A technique to extract a rectangular sub-region from a 3D volume dataset and optionally downsample it using integer sampling rates [S1, unofficial]. Unlike continuous interpolation-based cropping, this method uses integer strides for sampling, which is computationally simpler but limits resolution adjustments to integer factors [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D volume dataset (e.g., `vtkImageData` in VTK) defined by dimensions, extent, and scalar type.
+*   **Output:** A new 3D volume dataset representing the extracted sub-volume, with dimensions determined by the VOI bounds and sampling rates.
+
+**Data Structures**
+The input volume is typically represented as a 3D grid of voxels. The output volume retains the same scalar type and component count but has reduced dimensions. The internal layout is a contiguous array or structured grid where indices map linearly to memory.
+
+**Parameters**
+1.  **VOI Bounds:** Six integers $(minX, maxX, minY, maxY, minZ, maxZ)$ defining the inclusive range of the sub-volume within the original dataset dimensions [S1, unofficial].
+2.  **Sampling Rate:** Three integers $(sx, sy, sz)$ defining the stride for sampling along each axis [S1, unofficial].
+
+**Steps**
+1.  Create an instance of the extraction filter (e.g., `vtkExtractVOI`) [S1, unofficial].
+2.  Connect the input volume data to the filter using the `SetInput` method [S1, unofficial].
+3.  Define the Volume of Interest bounds by calling `SetVOI` with the six integer arguments $(minX, maxX, minY, maxY, minZ, maxZ)$ [S1, unofficial].
+4.  Define the sampling rate by calling `SetSampleRate` with the three integer arguments $(sx, sy, sz)$ [S1, unofficial].
+5.  Execute the filter (e.g., via `Update()` in VTK) to generate the output data [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume 'input_volume' is a pre-loaded 3D volume dataset object
+# with methods SetInput, SetVOI, SetSampleRate, and Update.
+
+# 1. Create the extraction filter instance
+voi_filter = CreateVOIExtractionFilter()
+
+# 2. Connect the input volume data
+voi_filter.SetInput(input_volume)
+
+# 3. Define the Volume of Interest bounds
+# minX, maxX, minY, maxY, minZ, maxZ are inclusive integer indices
+# Example: Extracting a central sub-volume
+minX, maxX = 0, 255
+minY, maxY = 60, 255
+minZ, maxZ = 0, 100
+voi_filter.SetVOI(minX, maxX, minY, maxY, minZ, maxZ)
+
+# 4. Define the sampling rate
+# sx, sy, sz are integer strides. 1 means no downsampling.
+# Example: No downsampling
+sx, sy, sz = 1, 1, 1
+voi_filter.SetSampleRate(sx, sy, sz)
+
+# 5. Execute the filter to produce the output
+voi_filter.Update()
+
+# 6. Retrieve the result
+output_volume = voi_filter.GetOutput()
+```
+
+**Edge Cases and Pitfalls**
+*   **Integer Constraints:** Sampling rates must be integers; fractional sampling rates are not supported [S1, unofficial]. This leads to discrete steps in resolution rather than continuous scaling [S1, unofficial].
+*   **Bounds Validation:** The specified VOI bounds must be within the valid extent of the input volume. Out-of-bounds indices may cause errors or undefined behavior [G].
+*   **Degenerate VOI:** If $minX > maxX$ or similar for other axes, the resulting volume may be empty or invalid [G].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels in the output volume, $O(N_{out})$, where $N_{out}$ is the product of the output dimensions. The sampling step involves simple strided access, which is efficient.
+*   **Memory Complexity:** Linear with respect to the output volume size, $O(N_{out})$.
+*   **Strengths:** Computationally simple and fast due to the lack of interpolation [S1, unofficial].
+*   **Limitations:** Resolution adjustments are limited to integer factors, preventing fine-grained downsampling [S1, unofficial].
+*   **When to use:** When rapid extraction of a sub-region is needed and integer downsampling is acceptable.
+*   **When not to use:** When continuous scaling or high-quality interpolation is required.
+
+## Background
+This method is implemented via the VTK filter `vtkExtractVOI` [S1, unofficial]. It is part of the Visualization Toolkit (VTK) library for 3D computer graphics, image processing, and visualization [S1, unofficial]. The approach is commonly used in medical imaging and scientific visualization to focus on specific regions of interest within large 3D datasets [S1, unofficial].
+
+## Sources
+[S1] Isosurface Generation using VTK: Trying Different Volumes of Interest, https://www.evl.uic.edu/aspale/cs526/final/3-5-4-0.htm, fetched 2026-10-30 (unofficial)

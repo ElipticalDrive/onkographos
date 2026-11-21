@@ -1,0 +1,256 @@
+--- v001.md
++++ v002.md
+@@ -4,87 +4,163 @@
+ 
+ ## Overview
+-Atomic Fragment List Insertion is a GPU-side algorithm for building a per-pixel linked list of fragments using atomic operations to handle concurrent writes from multiple fragments without locks [S1, unofficial]. It solves the problem of accumulating geometry fragments into a dynamic acceleration structure (A-buffer) for subsequent compositing or ray processing [S1, unofficial]. It differs from brute-force ray marching by avoiding empty space evaluation and from [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md) by using a global atomic counter for list construction rather than tiled accumulation buffers [S1, unofficial].
++Atomic Fragment List Insertion is a GPU-side algorithm for building a linked list of fragments per pixel using atomic operations to handle concurrent writes from multiple fragments without locks [S1, unofficial]. It solves the problem of accumulating arbitrary numbers of overlapping geometry or volume fragments into a per-pixel data structure, enabling subsequent sorting and compositing passes. It differs from sibling methods like [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md) by deferring the compositing logic to a separate resolve pass, and from [A-buffer linked-list creation and ray processing](3878-a-buffer-linked-list-creation-and-ray-processing.md) by relying on a global atomic counter for list construction rather than geometry shader-based support calculation [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Fragment color (vec4), fragment depth/distance (float), viewport dimensions (int), fragment buffer width (int).
+-*   **Output:** Updated `uStartOffsetTex` (texture storing head pointers per pixel), updated `uFragmentBufferTex` (texture storing fragment nodes), updated `uFragCounter` (global atomic counter).
++The method consists of two distinct phases: initialization (Clear Pass) and fragment accumulation (Gather Pass). It relies on global atomic counters and image atomics to manage concurrency.
+ 
+-**Data Structures:**
+-1.  **`uStartOffsetTex`**: A 2D texture (or image buffer) of size `ViewportW x ViewportH`. Each texel is a `uvec4`. The `r` component stores the linear index of the head of the linked list for that pixel. Initialized to `0xFFFFFFFF` (sentinel for empty list) by the [PPLL Clear Pass](2803-ppll-resolve-pass.md).
+-2.  **`uFragmentBufferTex`**: A 2D texture of size `FRAG_BUFFER_W x ceil(TotalFragments / FRAG_BUFFER_W)`. Each texel is a `uvec4` representing a fragment node.
+-    *   `r`: Packed color (rgba 10/10/10/10 bit format).
++### Inputs and Outputs
++*   **Inputs:**
++    *   Fragment color (vec4, RGBA).
++    *   Fragment depth (float).
++    *   Fragment screen coordinates (derived from `gl_FragCoord`).
++    *   Global atomic counter (`uFragCounter`).
++    *   Per-pixel start offset texture (`uStartOffsetTex`, `uvec4`).
++    *   Fragment buffer texture (`uFragmentBufferTex`, `uvec4`).
++*   **Outputs:**
++    *   Updated `uStartOffsetTex`: Each texel `(x, y)` contains the index of the most recently inserted fragment for that pixel (the new head of the linked list).
++    *   Updated `uFragmentBufferTex`: Contains the linked list nodes.
++
++### Data Structures
++**1. Per-Pixel Start Offset Texture (`uStartOffsetTex`)**
++*   **Type:** `uvec4` (4x uint32).
++*   **Layout:**
++    *   `r`: Head index of the linked list for the pixel. Initialized to `0xFFFFFFFF` (-1u) to indicate an empty list.
++    *   `g, b, a`: Unused (0u).
++*   **Dimensions:** Matches the viewport resolution (`uViewportW` x `uViewportH`).
++
++**2. Fragment Buffer Texture (`uFragmentBufferTex`)**
++*   **Type:** `uvec4` (4x uint32).
++*   **Layout:**
++    *   `r`: Packed color (RGBA 10/10/10/10 bit format).
+     *   `g`: Depth (float bits converted to uint).
+-    *   `b`: Next pointer (linear index of the next fragment in the list).
++    *   `b`: Next pointer (uint index into the fragment buffer).
+     *   `a`: Unused (0u).
+-3.  **`uFragCounter`**: A global atomic counter initialized to 0.
++*   **Dimensions:** Width `FRAG_BUFFER_W` (typically 2048), Height calculated to hold `uLinkedListSize` fragments.
++*   **Addressing:** Linear index `i` maps to texel coordinates `(i % FRAG_BUFFER_W, i / FRAG_BUFFER_W)`.
+ 
+-**Parameters:**
++### Parameters
+ *   `FRAG_BUFFER_W`: Width of the fragment buffer image. Typical value: 2048 [S1, unofficial].
++*   `uLinkedListSize`: Maximum number of fragments supported. If exceeded, fragments are dropped [S1, unofficial].
++*   `uViewportW`, `uViewportH`: Viewport dimensions [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Early Depth Cull:** If fragment depth `a < 1e-4`, return immediately [S1, unofficial].
+-2.  **Pixel Coordinates:** Calculate `x = int(gl_FragCoord.x)` and `y = int(gl_FragCoord.y)` [S1, unofficial].
+-3.  **Atomic Index Allocation:** Atomically increment `uFragCounter` to get a unique linear index: `insertIndex = atomicCounterIncrement(uFragCounter)` [S1, unofficial].
+-4.  **Buffer Full Check:** If `insertIndex >= uLinkedListSize` (total capacity), silently drop the fragment [S1, unofficial].
+-5.  **Head Pointer Swap:** Atomically exchange the head pointer for the pixel in `uStartOffsetTex` at `(x, y)` with `insertIndex`. The return value `oldHead` is the previous head [S1, unofficial].
+-    *   `oldHead = imageAtomicExchange(uStartOffsetTex, ivec2(x, y), insertIndex)` [S1, unofficial].
+-    *   This `oldHead` becomes the `next` pointer for the new fragment, effectively prepending it to the list [S1, unofficial].
+-6.  **Buffer Address Calculation:** Calculate the 2D coordinates in the fragment buffer:
++### Steps
++
++#### Phase 1: PPLL Clear Pass
++Before accumulation, the linked lists must be initialized to empty.
++
++1.  Render a fullscreen quad.
++2.  For each pixel `(x, y)`:
++    *   If `x >= uViewportW` or `y >= uViewportH`, return.
++    *   Write sentinel value `0xFFFFFFFF` to `uStartOffsetTex` at `(x, y)`.
++    *   Reset the global atomic counter `uFragCounter` to 0 (handled in host code or via `gl.clearBufferfv`) [S1, unofficial].
++
++#### Phase 2: PPLL Gather Pass
++For each fragment generated by the rendering pipeline:
++
++1.  **Early Depth Cull:**
++    *   Let `a` be the fragment's alpha value.
++    *   If `a < 1e-4`, return immediately [S1, unofficial].
++
++2.  **Get Coordinates:**
++    *   `x = int(gl_FragCoord.x)`
++    *   `y = int(gl_FragCoord.y)` [S1, unofficial]
++
++3.  **Allocate Buffer Slot:**
++    *   Atomically increment the global counter: `insertIndex = atomicCounterIncrement(uFragCounter)` [S1, unofficial].
++    *   **Buffer Full Check:** If `insertIndex >= uLinkedListSize`, silently drop the fragment [S1, unofficial].
++
++4.  **Update Head Pointer:**
++    *   Atomically exchange the head pointer for pixel `(x, y)` in `uStartOffsetTex`:
++        `oldHead = imageAtomicExchange(uStartOffsetTex, ivec2(x, y), insertIndex)` [S1, unofficial].
++    *   This operation returns the previous head index, which becomes the `next` pointer for the new node.
++
++5.  **Calculate Buffer Address:**
+     *   `fragAddr = ivec2(int(insertIndex) % FRAG_BUFFER_W, int(insertIndex) / FRAG_BUFFER_W)` [S1, unofficial].
+-7.  **Node Construction:** Build the fragment node:
+-    *   `frag.r = packColor(color)` (packed rgba 10/10/10/10) [S1, unofficial].
+-    *   `frag.g = floatBitsToUint(depth)` [S1, unofficial].
+-    *   `frag.b = oldHead` [S1, unofficial].
+-    *   `frag.a = 0u` [S1, unofficial].
+-8.  **Store Node:** Store the fragment node into `uFragmentBufferTex` at `fragAddr` [S1, unofficial].
+ 
+-**Pseudocode:**
++6.  **Build and Store Fragment Node:**
++    *   Pack color: `packedColor = packColor(color)` (RGBA 10/10/10/10) [S1, unofficial].
++    *   Convert depth to uint: `depthUint = floatBitsToUint(fragmentDistance)` [S1, unofficial].
++    *   Construct node:
++        *   `node.r = packedColor`
++        *   `node.g = depthUint`
++        *   `node.b = oldHead`
++        *   `node.a = 0u`
++    *   Store node: `imageStore(uFragmentBufferTex, fragAddr, node)` [S1, unofficial].
++
++### Pseudocode
++
+ ```python
+-# Fragment Shader Entry Point
+-# Uniforms: uFragCounter (atomic counter), uStartOffsetTex (image2D), uFragmentBufferTex (image2D), uLinkedListSize (int), FRAG_BUFFER_W (int)
+-# Inputs: color (vec4), fragmentDistance (float)
++# PPLL Clear Pass
++def ppll_clear_pass(viewport_w, viewport_h, start_offset_tex):
++    """
++    Initializes per-pixel linked list start offsets to empty (sentinel).
++    """
++    for y in range(viewport_h):
++        for x in range(viewport_w):
++            # Write sentinel 0xFFFFFFFF (-1u) to the 'r' component
++            # g, b, a are set to 0
++            start_offset_tex[x, y] = uvec4(0xFFFFFFFF, 0, 0, 0)
++    # Note: Global atomic counter reset is handled outside the shader,
++    # typically via gl.clearBufferfv or similar API call.
+ 
+-def atomic_fragment_list_insertion(color, fragmentDistance):
+-    # 1. Early Depth Cull
+-    if color.a < 1e-4:
++# PPLL Gather Pass
++def ppll_gather_pass(fragment_color, fragment_distance, viewport_w, viewport_h,
++                     frag_buffer_w, u_linked_list_size, frag_counter,
++                     start_offset_tex, frag_buffer_tex):
++    """
++    Atomically inserts a fragment into the per-pixel linked list.
++    """
++    # 1. Early Depth/Alpha Cull
++    if fragment_color.a < 1e-4:
+         return
+ 
+-    # 2. Pixel Coordinates
++    # 2. Get Coordinates
+     x = int(gl_FragCoord.x)
+     y = int(gl_FragCoord.y)
+ 
+-    # 3. Atomic Index Allocation
+-    insertIndex = atomicCounterIncrement(uFragCounter)
++    # 3. Allocate Buffer Slot
++    # atomicCounterIncrement returns the value BEFORE increment in some APIs,
++    # but the source implies it returns the unique linear index to use.
++    # Assuming standard GLSL atomicCounterIncrement returns the new value.
++    insert_index = atomic_counter_increment(frag_counter)
+ 
+-    # 4. Buffer Full Check
+-    if insertIndex >= uLinkedListSize:
++    # Buffer Full Check
++    if insert_index >= u_linked_list_size:
+         return
+ 
+-    # 5. Head Pointer Swap
+-    # imageAtomicExchange returns the old value at the location
+-    oldHead = imageAtomicExchange(uStartOffsetTex, ivec2(x, y), insertIndex)
++    # 4. Update Head Pointer
++    # imageAtomicExchange swaps the value at (x,y) with insert_index
++    # and returns the OLD value (previous head)
++    old_head = image_atomic_exchange(start_offset_tex, ivec2(x, y), insert_index)
+ 
+-    # 6. Buffer Address Calculation
+-    fragAddr = ivec2(insertIndex % FRAG_BUFFER_W, insertIndex / FRAG_BUFFER_W)
++    # 5. Calculate Buffer Address
++    frag_addr_x = insert_index % frag_buffer_w
++    frag_addr_y = insert_index // frag_buffer_w
++    frag_addr = ivec2(frag_addr_x, frag_addr_y)
+ 
+-    # 7. Node Construction
+-    # Pack color into 10/10/10/10 format
+-    packedColor = packColor10101010(color)
++    # 6. Build and Store Fragment Node
++    # Pack color: RGBA 10/10/10/10
++    packed_color = pack_rgba_10_10_10_10(fragment_color)
+     
+-    # Convert depth float to uint bits
+-    depthUint = floatBitsToUint(fragmentDistance)
++    # Convert depth to uint
++    depth_uint = float_bits_to_uint(fragment_distance)
+     
+-    # Construct node: r=packedColor, g=depth, b=nextPtr, a=unused
+-    node = uvec4(packedColor, depthUint, oldHead, 0u)
+-
+-    # 8. Store Node
+-    imageStore(uFragmentBufferTex, fragAddr, node)
++    # Construct node
++    node = uvec4(
++        r=packed_color,
++        g=depth_uint,
++        b=old_head,
++        a=0
++    )
++    
++    # Store node
++    image_store(frag_buffer_tex, frag_addr, node)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Race Condition:** Using `imageAtomicExchange` ensures that two concurrent inserts do not read the same old head and overwrite each other, which would orphan the first fragment [S1, unofficial].
+-*   **Buffer Overflow:** If the fragment count exceeds `uLinkedListSize`, fragments are silently dropped. The application must ensure sufficient buffer size or handle the drop gracefully [S1, unofficial].
+-*   **Sentinel Value:** The initial value `0xFFFFFFFF` (-1u) must be used as the sentinel for empty lists. The resolve pass must recognize this value to terminate list traversal [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Buffer Overflow:** If `insertIndex >= uLinkedListSize`, the fragment is dropped. This can lead to visual artifacts if the scene contains more fragments than the buffer can hold. [S1, unofficial]
++*   **Race Conditions:** Using `imageAtomicExchange` ensures that concurrent inserts do not read the same old head and overwrite each other, which would orphan the first fragment. [S1, unofficial]
++*   **Precision:** Depth is stored as uint bits. Ensure consistent conversion between float depth and uint representation across the pipeline. [S1, unofficial]
++*   **Sentinel Value:** The sentinel `0xFFFFFFFF` must not be a valid fragment index. Since indices start at 0, this is safe. [S1, unofficial]
+ 
+ ## Subtopics
+@@ -93,23 +169,18 @@
+ The PPLL Resolve Pass is a fragment shader pass that resolves a linked list of fragments per pixel into a final color by sorting and front-to-back blending. It takes the raw fragment data collected by the [Atomic Fragment List Insertion](2465-atomic-fragment-list-insertion.md) method and produces the final image, distinguishing itself from sibling methods like [A-buffer linked-list creation and ray processing](3878-a-buffer-linked-list-creation-and-ray-processing.md) by relying on a global atomic counter for list construction and a subsequent CPU/GPU synchronization to resolve the lists via sorting and blending.
+ 
+-### [A-buffer linked-list creation and ray processing](3878-a-buffer-linked-list-creation-and-ray-processing.md)
+-This method constructs a dynamic acceleration structure (A-buffer) on the GPU to efficiently identify which segment primitives overlap a given ray, avoiding the evaluation of empty space in expensive field computations. It differs from brute-force ray marching by using a geometry shader to generate quads covering primitive supports and a fragment shader to compute ray-support intersections, storing entry/exit points in a linked list. Unlike [Bru19], which requires explicit cutoff of primitive influences, this approach leverages compact support kernels (specifically clipped sphere-cones for Cauchy kernels) to naturally limit the interaction domain.
+-
+ ### PPLL Clear Pass
+-A fullscreen quad render pass that initializes the per-pixel linked list start offset texture. It writes the sentinel value `0xFFFFFFFF` (-1u) to indicate an empty list [S1, unofficial].
+-**Steps:**
+-1.  Calculate pixel coordinates `x = int(gl_FragCoord.x)`, `y = int(gl_FragCoord.y)`. If `x >= uViewportW` or `y >= uViewportH`, return [S1, unofficial].
+-2.  Write sentinel to start offset texture: `imageStore(uStartOffsetTex, ivec2(x, y), uvec4(0xFFFFFFFFu, 0u, 0u, 0u))` [S1, unofficial].
++A fullscreen quad render pass that initializes the per-pixel linked list start offset texture. It writes the sentinel value `0xFFFFFFFF` (-1u) to indicate an empty list. For each pixel `(x, y)`, if `x >= uViewportW` or `y >= uViewportH`, it returns; otherwise, it writes `uvec4(0xFFFFFFFFu, 0u, 0u, 0u)` to `uStartOffsetTex` [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) per fragment for insertion. The global atomic counter increment is the primary contention point.
+-*   **Memory Complexity:** O(N) where N is the maximum number of fragments. The fragment buffer size is determined by `FRAG_BUFFER_W` and the total fragment count.
+-*   **Strengths:** Lock-free, simple to implement, handles arbitrary fragment counts (up to buffer limit), works well with geometry shaders or fragment shaders outputting multiple fragments.
+-*   **Limitations:** Atomic counter contention can become a bottleneck with very high fragment counts. Buffer overflow requires careful sizing. List resolution requires additional passes (sorting/compositing).
+-*   **When to use:** When fragment count is moderate, and simplicity of implementation is prioritized over maximum throughput for extremely high-density scenes. Suitable for pre-passes in volume rendering pipelines.
+-*   **When not to use:** When fragment count exceeds available buffer memory, or when extremely high throughput is required and atomic contention is a proven bottleneck (consider [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md) or [Parallel Direct Compositing](3201-parallel-direct-compositing.md)).
++*   **Time Complexity:** O(N) for N fragments, where each fragment performs a constant number of atomic operations and memory writes. The resolve pass is O(F + M), where F is the number of fragments and M is the number of pixels (for sorting and blending).
++*   **Memory Complexity:** O(P + F), where P is the number of pixels (for `uStartOffsetTex`) and F is the maximum number of fragments (for `uFragmentBufferTex`).
++*   **Performance:** Highly efficient on GPUs due to coalesced atomic operations and lack of locks. Performance is limited by atomic contention on `uStartOffsetTex` for pixels with many fragments.
++*   **Strengths:** Simple implementation, no need for complex data structures like trees or grids, handles arbitrary fragment counts (up to buffer limit).
++*   **Limitations:** Buffer overflow requires careful sizing. Sorting is required in the resolve pass, which can be expensive for high fragment counts.
++*   **When to Use:** When fragment count per pixel is moderate and unpredictable, and a simple linked list structure is sufficient for subsequent compositing.
++*   **When Not to Use:** When fragment count per pixel is very high and buffer overflow is likely, or when memory bandwidth is extremely constrained.
+ 
+ ## Background
+-Originated in the context of GPU-based volume rendering and A-buffer techniques. The specific implementation details (ST-7, PPLL Gather) are documented in unofficial sources related to the "geresim-spike" project [S1, unofficial]. It builds on the general concept of linked-list A-buffers for ray tracing and compositing, adapted for fragment shader execution with atomic counters.
++The method is part of the Parallel Per-Pixel Linked List (PPLL) technique, used in modern GPU rendering pipelines for deferred shading, volume rendering, and transparent object rendering. It leverages hardware atomic operations available in OpenGL 4.0+ and Vulkan to manage concurrent list insertions. The specific implementation details (ST-7) are derived from unofficial sources describing a spike renderer implementation [S1, unofficial].
+ 
+ ## Sources

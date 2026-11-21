@@ -1,0 +1,186 @@
+--- v005.md
++++ v006.md
+@@ -4,121 +4,96 @@
+ 
+ ## Overview
+-This method computes the photometric training loss for differentiable volume rendering by comparing rendered and ground-truth RGB values using a Huber loss [S1, unofficial]. It masks the loss with a ray validity flag to exclude invalid or background-only rays, then averages the result over valid rays to prevent bias from empty space [S1, unofficial]. It differs from standard MSE loss by being more robust to outliers while maintaining differentiability [G].
++This method defines the standard photometric loss computation pipeline for differentiable volume rendering, specifically combining Huber loss for robustness against outliers with binary masking to exclude invalid background rays. It solves the problem of biased gradient updates caused by saturated pixels or empty background regions during radiance-field optimization. It differs from its sibling [Masked Volume Metrics](1927-masked-volume-metrics.md) by focusing on the training-time loss aggregation rather than evaluation-time metric calculation, and from [Masked and Weighted Losses](15713-masked-and-weighted-losses.md) by specifying the exact Huber loss function and the `ray_is_valid` masking logic used in modern JAX-based implementations [S1, unofficial].
+ 
+ ## How it works
++The method computes the total training loss by rendering predictions, blending ground truth to match rendering conditions, and aggregating masked Huber losses.
+ 
+-### Inputs and Outputs
+ **Inputs:**
+-- `pred_rgbds`: Tensor of shape $(N, 4)$ containing predicted RGB and depth values for $N$ rays [S1, unofficial].
+-- `gt_rgba_f32`: Ground truth RGBA image array (float32) [S1, unofficial].
++- `pred_rgbds`: Tensor of shape $(N_{rays}, 4)$ containing predicted RGB and depth values [S1, unofficial].
++- `gt_rgba_f32`: Ground truth RGBA image array [S1, unofficial].
+ - `bg`: Background color tensor [S1, unofficial].
+-- `batch_metrics`: Dictionary containing `ray_is_valid` (boolean mask of shape $(N,)$), `n_valid_rays` (scalar count of valid rays), and `loss` (accumulator tree) [S1, unofficial].
+-- `render_rays_train`: Function that integrates density and color along worldspace rays with appearance embeddings and background [S1, unofficial].
++- `batch_metrics`: Dictionary containing `ray_is_valid` (boolean mask of shape $(N_{rays})$) and `n_valid_rays` (scalar count) [S1, unofficial].
++- `loss`: Accumulator for other loss components (e.g., TV, regularization) [S1, unofficial].
+ 
+ **Outputs:**
+-- `loss`: Scalar total loss value including the RGB Huber loss and aggregated components [S1, unofficial].
++- `loss`: Scalar total loss value [S1, unofficial].
+ 
+-### Data Structures
+-- `pred_rgbds`: Packed tensor where the first 3 channels are RGB and the 4th is depth [S1, unofficial].
+-- `ray_is_valid`: Boolean array indicating whether a ray intersects the scene geometry or contains meaningful signal [S1, unofficial].
++**Data Structures:**
++- `ray_is_valid`: Binary mask where $1$ indicates the ray intersects valid scene geometry or foreground, and $0$ indicates background-only rays [S1, unofficial].
++- `pred_rgbs`: Tensor of shape $(N_{rays}, 3)$ extracted from `pred_rgbds` [S1, unofficial].
++- `pred_depths`: Tensor of shape $(N_{rays}, 1)$ extracted from `pred_rgbds` [S1, unofficial].
++- `gt_rgbs`: Tensor of shape $(N_{rays}, 3)$ representing ground truth RGB blended with the background [S1, unofficial].
+ 
+-### Steps
+-1. **Render Predictions**: Generate predicted RGB and depth values for the current batch of rays by calling `render_rays_train` with worldspace rays, appearance embeddings, background, and total samples [S1, unofficial].
+-2. **Split Predictions**: Separate the packed prediction tensor into RGB and depth components using an array split at index 3 along the last axis [S1, unofficial].
+-3. **Blend Ground Truth**: Blend the ground truth RGBA image with the background color using alpha compositing to match rendering conditions [S1, unofficial].
+-4. **Compute Huber Loss**: Calculate the per-ray Huber loss between predicted and ground truth RGB values with $\delta=0.1$, mask it with `ray_is_valid`, and average over valid rays [S1, unofficial].
+-5. **Aggregate**: Add the computed RGB loss to the existing loss accumulator tree using a tree reduction operation [S1, unofficial].
++**Steps:**
++1. **Render Predictions:** Call the training renderer with worldspace rays, appearance embeddings, background color, and total sample count to obtain `pred_rgbds` [S1, unofficial].
++2. **Split Predictions:** Separate `pred_rgbds` into `pred_rgbs` (first 3 channels) and `pred_depths` (last channel) [S1, unofficial].
++3. **Blend Ground Truth:** Compute `gt_rgbs` by blending the ground truth RGBA image with the background color to ensure consistency with the renderer's background handling [S1, unofficial].
++4. **Compute RGB Huber Loss:** Calculate the per-ray Huber loss between `pred_rgbs` and `gt_rgbs` using a delta parameter $\delta = 0.1$. Apply the `ray_is_valid` mask to zero out losses for invalid rays. Average the loss over the valid rays [S1, unofficial].
++   $$ L_{rgb} = \frac{1}{N_{valid}} \sum_{i=1}^{N_{rays}} \mathbb{I}(valid_i) \cdot \text{Huber}(pred\_rgbs_i, gt\_rgbs_i, \delta=0.1) $$
++   where $\mathbb{I}(valid_i)$ is $1$ if `ray_is_valid[i]` is true, else $0$, and $N_{valid}$ is the count of valid rays [S1, unofficial].
++5. **Aggregate Loss:** Sum the computed RGB loss with other components in the `loss` accumulator (e.g., total variation, other regularization terms) [S1, unofficial].
+ 
+-### Pseudocode
++**Parameters:**
++- Huber Delta ($\delta$): $0.1$ [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Division by Zero:** If `n_valid_rays` is zero, the division in step 4 must be handled to prevent NaN gradients. The source implementation divides by `n_valid_rays` [S1, unofficial].
++- **Background Consistency:** Ground truth must be blended with the same background color used during rendering; otherwise, background pixels will contribute large errors [S1, unofficial].
++
++**Pseudocode:**
+ ```python
+ def compute_training_loss(pred_rgbds, gt_rgba_f32, bg, batch_metrics):
+-    """
+-    Computes the training loss using Huber loss on RGB, masked by ray validity.
++    # Step 1 & 2: Split predictions
++    pred_rgbs, pred_depths = jnp.split(pred_rgbds, [3], axis=-1)
+     
+-    Args:
+-        pred_rgbds: Array of shape (N, 4), predicted RGBD.
+-        gt_rgba_f32: Array of shape (H, W, 4), ground truth RGBA.
+-        bg: Array of shape (3,), background color.
+-        batch_metrics: Dict with 'ray_is_valid' (N,), 'n_valid_rays' (scalar), 'loss' (tree).
+-        
+-    Returns:
+-        loss: Scalar total loss.
+-    """
+-    # Step 2: Split predictions into RGB and Depth
+-    pred_rgbs = pred_rgbds[:, :3]
++    # Step 3: Blend ground truth to match rendering conditions
++    gt_rgbs = blend_rgba_image_array(gt_rgba_f32, bg)
+     
+-    # Step 3: Blend ground truth RGB with background
+-    gt_rgb = gt_rgba_f32[:, :, :3]
+-    gt_alpha = gt_rgba_f32[:, :, 3:4]
+-    gt_rgbs = gt_rgb * gt_alpha + bg * (1.0 - gt_alpha)
+-    gt_rgbs = gt_rgbs.reshape(-1, 3)  # Flatten to (N, 3)
++    # Step 4: Compute masked Huber loss for RGB
++    # Huber loss with delta=0.1
++    huber_rgb = optax.huber_loss(pred_rgbs, gt_rgbs, delta=0.1)
+     
+-    # Step 4: Compute Huber Loss with masking
+-    delta = 0.1
++    # Mask by ray validity
+     ray_is_valid = batch_metrics["ray_is_valid"]
++    masked_loss = jnp.where(ray_is_valid, huber_rgb.mean(axis=-1), 0.0)
++    
++    # Average over valid rays
+     n_valid_rays = batch_metrics["n_valid_rays"]
++    loss_rgb = masked_loss.sum() / n_valid_rays
+     
+-    # Huber loss function (element-wise over channels, then mean over channels)
+-    def huber_loss(pred, target, delta):
+-        diff = pred - target
+-        diff = diff if diff >= 0 else -diff
+-        quadratic = diff if diff <= delta else delta
+-        linear = diff - quadratic
+-        return 0.5 * quadratic**2 + delta * linear
++    # Step 5: Aggregate with other losses
++    # Assuming batch_metrics["loss"] contains other components like TV or regularization
++    total_loss = jax.tree_util.tree_reduce(lambda x, y: x + y, batch_metrics["loss"]) + loss_rgb
+     
+-    per_pixel_loss = huber_loss(pred_rgbs, gt_rgbs, delta)
+-    per_ray_loss = sum(per_pixel_loss[i][j] for j in range(3)) / 3.0  # Mean over channels
+-    
+-    # Mask and average
+-    masked_loss = per_ray_loss * ray_is_valid
+-    if n_valid_rays > 0:
+-        loss_rgb = sum(masked_loss) / n_valid_rays
+-    else:
+-        loss_rgb = 0.0
+-        
+-    # Step 5: Aggregate with existing loss components
+-    def sum_tree(tree):
+-        if isinstance(tree, (int, float)):
+-            return tree
+-        if isinstance(tree, dict):
+-            return sum(sum_tree(v) for v in tree.values())
+-        if isinstance(tree, (list, tuple)):
+-            return sum(sum_tree(v) for v in tree)
+-        return tree
+-        
+-    loss = sum_tree(batch_metrics["loss"]) + loss_rgb
+-    return loss
++    return total_loss
+ ```
+-
+-### Parameters
+-- **Huber Delta ($\delta$)**: $0.1$ [S1, unofficial].
+-- **Convergence Loss Weights ($\lambda_{cvg}^{fg}, \lambda_{cvg}^{bg}$)**: $0.1$ [S2].
+-- **Foreground Coverage Threshold ($\eta_{fg}$)**: $0.4$ for AFHQ/FFHQ, $0.1$ for Carla [S2].
+-- **Background Coverage Threshold ($\eta_{bg}$)**: $0.1$ [S2].
+-
+-### Edge Cases and Pitfalls
+-- **No Valid Rays**: If `n_valid_rays` is zero, division by zero occurs [S1, unofficial]. The pseudocode guards against this by setting `loss_rgb` to $0.0$ [S1, unofficial].
+-- **Masking Accuracy**: The `ray_is_valid` mask must correctly identify rays that intersect the scene [G]. Invalid rays (e.g., those hitting only the background) should be excluded to prevent the model from optimizing for background colors that are already fixed [G].
+-- **Precision**: Use float32 for RGB values to maintain gradient stability [G]. The Huber loss is continuous and differentiable everywhere, avoiding gradient vanishing/exploding issues associated with pure L1 or L2 at the boundary [G].
+ 
+ ## Subtopics
+ 
+ ### Convergence Hinge Loss
+-A regularization term used to ensure that both foreground and background generators in a sparse voxel grid architecture are actively used and cover a minimum fraction of the image [S2]. It prevents the model from collapsing to a single generator (all foreground or all background) [S2]. It sets itself apart from standard photometric losses by operating on the mask values themselves rather than pixel colors [S2]. When to choose it: When using a dual-generator architecture with sparse voxels to avoid degenerate solutions where one generator dominates [S2]. Formula:
++A regularization term used in sparse voxel grid generators (e.g., VoxGRAF) to ensure both foreground and background generators cover a minimum fraction of the image, preventing one generator from dominating [S2]. It uses a hinge loss on the mean mask value [S2].
++
++**Formula:**
++Foreground coverage loss:
+ $$ L_{cvg}^{fg} = \lambda_{cvg}^{fg} \max\left(0, \eta_{fg} - \frac{1}{|S|} \sum_{i \in S} \hat{m}_{mask}^{fg}[i]\right) $$
++Background coverage loss:
+ $$ L_{cvg}^{bg} = \lambda_{cvg}^{bg} \max\left(0, \eta_{bg} - \frac{1}{|S|} \sum_{i \in S} (1 - \hat{m}_{mask}^{bg}[i])\right) $$
+-where $\hat{m}_{mask}$ is the predicted mask value, $S$ is the set of voxels, and $\eta$ is the minimum coverage fraction [S2].
++where $\hat{m}_{mask}$ is the predicted mask, $S$ is the set of samples, and $\eta$ is the minimum coverage fraction [S2].
++
++**Parameters:**
++- Foreground minimum coverage ($\eta_{fg}$): $0.4$ for AFHQ and FFHQ; $0.1$ for Carla [S2].
++- Background minimum coverage ($\eta_{bg}$): $0.1$ [S2].
++- Convergence loss weight ($\lambda_{cvg}^{fg}$): $0.1$ [S2].
++- Convergence loss weight ($\lambda_{cvg}^{bg}$): $0.1$ [S2] [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not given in the sources.
+-- **Memory Complexity**: Not given in the sources.
+-- **Performance**: Not given in the sources.
+-- **Strengths**: Robust to saturated pixels and noise; handles invalid rays explicitly; differentiable [G].
+-- **Limitations**: Requires a valid mask; delta parameter needs tuning for specific datasets [G].
+-- **When to use**: Standard photometric loss for NeRF and volume rendering training, especially when outliers are present [G].
+-- **When not to use**: When strict L2 optimality is required (use MSE) or when no valid mask is available [G].
++- **Time Complexity:** Linear in the number of rays $N_{rays}$ for the loss computation [S1, unofficial]. The rendering step dominates the cost.
++- **Memory Complexity:** Linear in $N_{rays}$ to store intermediate loss tensors [S1, unofficial].
++- **Strengths:** Huber loss is robust to outliers (e.g., saturated pixels) compared to MSE [S1, unofficial]. Masking prevents background rays from biasing the optimization [S1, unofficial].
++- **Limitations:** Requires accurate `ray_is_valid` masks. The choice of $\delta=0.1$ is specific to the implementation in [S1, unofficial] and may need tuning for other datasets.
++- **When to use:** Standard training for differentiable volume rendering where background exclusion and outlier robustness are needed [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of training Neural Radiance Fields (NeRF) and related differentiable volume rendering methods [S1, unofficial]. The use of Huber loss for RGB is common in modern NeRF implementations to handle outliers [S1, unofficial]. The convergence hinge loss was introduced in VoxGRAF to manage sparse voxel grid generators [S2]. The specific implementation details (splitting RGBD, blending GT) are derived from JAX-based NeRF implementations [S1, unofficial].
++This method is derived from the training pipeline of JAX-based neural rendering frameworks, specifically `jaxngp` [S1, unofficial], which adapts techniques from Instant Neural Graphics Primitives (NGP) and other differentiable rendering works. The use of Huber loss and ray masking is standard in modern neural rendering optimization to stabilize training [S1, unofficial]. The Convergence Hinge Loss variant originates from VoxGRAF, which uses sparse voxel grids and mask-based generators [S2].
+ 
+ ## Sources

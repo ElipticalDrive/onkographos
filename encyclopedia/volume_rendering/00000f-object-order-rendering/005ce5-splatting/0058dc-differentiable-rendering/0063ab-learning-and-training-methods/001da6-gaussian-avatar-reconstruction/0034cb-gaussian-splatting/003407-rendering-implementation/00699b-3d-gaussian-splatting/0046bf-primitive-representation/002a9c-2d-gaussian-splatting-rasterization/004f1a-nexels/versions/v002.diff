@@ -1,0 +1,214 @@
+--- v001.md
++++ v002.md
+@@ -7,14 +7,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ surfels; camera parameters (origin $o$, direction $d$, focal length $f$); training images for optimization.
+-*   **Outputs:** A rendered image $I \in \mathbb{R}^{H \times W \times 3}$; optimized surfel parameters and neural field weights.
++*   **Inputs:** A set of $N$ surfels; camera parameters (origin $o$, direction $d$, focal length $f$); training images for optimization [S1].
++*   **Outputs:** A rendered image $I \in \mathbb{R}^{H \times W \times 3}$; optimized surfel parameters and neural field weights [S1].
+ 
+ **Data Structures:**
+ 1.  **Surfel:** Defined by mean $\mu_i \in \mathbb{R}^3$, rotation $R_i \in SO^3$, scale $\sigma_i \in \mathbb{R}^2$, opacity $o_i \in \mathbb{R}$, and gamma parameter $\gamma_i \in \mathbb{R}^2$ [S1]. The surfel normal is derived from the rotation matrix [S1].
+-2.  **Non-textured Appearance:** Per-primitive view-dependent radiance $c_i^\odot \in \mathbb{R}^{3S}$ parameterized by spherical harmonics coefficients, where $S$ is the number of coefficients (typically $S=16$ for degree 3) [S1].
++2.  **Non-textured Appearance:** Per-primitive view-dependent radiance $c_i^\odot \in \mathbb{R}^3$ parameterized by spherical harmonics coefficients, where $S$ is the number of coefficients (typically $S=16$ for degree 3) [S1].
+ 3.  **Neural Field:** Instant-NGP architecture [S1].
+-    *   **Hash-Grid:** $L$ levels. Each level $\ell$ has a hash-table $H_\ell$ with $T$ entries. Feature dimension is $F$. Total parameters: $L \times T \times F$ [S1].
++    *   **Hash-Grid:** $L$ levels. Each level $\ell$ has a hash-table $H_\ell$ with $T$ entries [S1]. Feature dimension is $F$. Total parameters: $L \times T \times F$ [S1].
+     *   **MLP:** $G$, with 2 hidden layers, width 64, no bias, ReLU activations. Output dimension 48 (for $S=16$ SH coefficients) [S1].
+-4.  **Per-Pixel Buffer:** Size $K$. Contains primitive ID, weight, and depth. Total $3K$ 32-bit registers per pixel [S1]. Written into $H \times W \times K$ images $I$ (IDs), $D$ (depths), and $W$ (weights) [S1].
++4.  **Per-Pixel Buffer:** Size $K$. Contains primitive ID, weight, and depth [S1]. Total $3K$ 32-bit registers per pixel [S1]. Written into $H \times W \times K$ images $I$ (IDs), $D$ (depths), and $W$ (weights) [S1].
+ 
+ **Parameters:**
+@@ -26,5 +26,5 @@
+ **Steps:**
+ 
+-1.  **Initialization:** Sample point cloud from COLMAP. Use farthest point sampling to reduce to $0.5P$ points. Initialize scale based on distance to predecessors during sampling [S1].
++1.  **Initialization:** Sample point cloud from COLMAP [S1]. Use farthest point sampling to reduce to $0.5P$ points [S1]. Initialize scale based on distance to predecessors during sampling [S1].
+ 2.  **Preprocessing:** Sort surfels by the depth of their centers [S1].
+ 3.  **Collection Pass (First Rendering Pass):**
+@@ -34,5 +34,5 @@
+         [S1]
+     *   Compute the blending weight $w_i := \alpha_i T_i$, where $T_i := \prod_{j=0}^{i-1} (1 - \alpha_j)$ [S1].
+-    *   Maintain the per-pixel buffer of size $K$. Update the buffer to store the running primitives with the highest weights. The buffer entries contain primitive ID, weight, and depth $t^*_i(r)$ [S1].
++    *   Maintain the per-pixel buffer of size $K$ [S1]. Update the buffer to store the running primitives with the highest weights [S1]. The buffer entries contain primitive ID, weight, and depth $t^*_i(r)$ [S1].
+     *   Compute the non-textured render $N_p$ for pixel $p$:
+         $$ N_p := \sum_{i=0}^{M-1} w_i c_i^\odot - \sum_{i \in I_p} w_i c_i^\odot $$
+@@ -64,77 +64,111 @@
+     """
+     Render nexels using two-pass rasterization.
+-    surfels: List of dicts with keys 'mu', 'R', 'sigma', 'o', 'gamma', 'c_odot'
+-    camera: Dict with 'origin', 'direction', 'focal_length'
++    surfels: List of dicts with keys 'mu', 'R', 'sigma', 'o', 'gamma', 'c_odot', 'id'
++    camera: Dict with 'origin', 'direction', 'focal_length', 'image_size'
+     K: Number of textured primitives per pixel
+     """
+     H, W = camera['image_size']
+-    # Initialize buffers
+-    # I: H x W x K (int), D: H x W x K (float), W_buf: H x W x K (float)
+-    # N: H x W x 3 (float)
+-    I = torch.zeros(H, W, K, dtype=torch.int32)
+-    D = torch.zeros(H, W, K, dtype=torch.float32)
++    o = camera['origin']
++    d = camera['direction']
++    f = camera['focal_length']
++    
++    # Buffers: I (ids), D (depths), W_buf (weights), N (non-textured color)
++    I = torch.full((H, W, K), -1, dtype=torch.int32)
++    D_buf = torch.zeros(H, W, K, dtype=torch.float32)
+     W_buf = torch.zeros(H, W, K, dtype=torch.float32)
+     N = torch.zeros(H, W, 3, dtype=torch.float32)
+-    
+-    # Sort surfels by depth
+-    sorted_surfels = sort_surfels_by_depth(surfels, camera)
+-    
+-    # Collection Pass
++    acc_alpha = torch.zeros(H, W, dtype=torch.float32)
++    
++    # Sort surfels by depth of centers
++    depths = torch.tensor([dot(s['mu'] - o, d) for s in surfels])
++    sorted_surfels = [s for _, s in sorted(zip(depths, surfels))]
++    
+     for surfel in sorted_surfels:
+         # Compute intersection in primitive space (u, v)
+-        u, v = compute_primitive_space_intersection(surfel, camera)
++        u, v = compute_primitive_space_intersection(surfel, o, d)
+         
+         # Compute alpha
+         gamma_u, gamma_v = surfel['gamma']
+-        alpha = surfel['o'] * math.exp(-abs(u)**(2*gamma_u) / 2) * math.exp(-abs(v)**(2*gamma_v) / 2)
+-        
+-        # Compute T_i (product of (1-alpha) of previous primitives)
+-        # Note: In a real rasterizer, this is done per-pixel with accumulated alpha
+-        # Here we assume a simplified accumulation or that T_i is passed/computed in the rasterizer loop
+-        # For the purpose of this pseudocode, we assume T_i is available from the rasterizer state
+-        T_i = get_accumulated_transparency(surfel, camera) # [G] Placeholder for rasterizer state
+-        
++        alpha = surfel['o'] * torch.exp(-torch.abs(u)**(2*gamma_u) / 2) * torch.exp(-torch.abs(v)**(2*gamma_v) / 2)
++        
++        T_i = 1.0 - acc_alpha
+         weight = alpha * T_i
+         
+-        # Update per-pixel buffer
+-        update_pixel_buffer(I, D, W_buf, weight, surfel['id'], compute_depth(surfel, camera))
+-        
+-        # Update non-textured render
+-        update_non_textured_render(N, weight, surfel['c_odot'])
+-        
+-    # Remove non-textured color of textured primitives from N
+-    # This requires knowing which primitives are in the final buffer
+-    for p in range(H*W):
+-        pixel_ids = I[:, :, :].flatten()[p] # [G] Simplified indexing
+-        for k in range(K):
+-            if pixel_ids[k] != -1: # -1 indicates empty
+-                surfel = get_surfel_by_id(pixel_ids[k])
+-                N[:, :, :] -= W_buf[:, :, k] * surfel['c_odot']
+-                
++        # Update per-pixel buffer to keep top K weights
++        update_pixel_buffer(I, D_buf, W_buf, weight, surfel['id'], dot(surfel['mu'] - o, d))
++        
++        # Accumulate non-textured color
++        N += weight.unsqueeze(-1) * surfel['c_odot']
++        
++        acc_alpha += alpha * T_i
++        
++    # Remove non-textured color of top-K primitives from N
++    for k in range(K):
++        valid = I[:, :, k] != -1
++        ids = I[valid]
++        weights = W_buf[valid, k]
++        colors = torch.stack([surfels_by_id[id]['c_odot'] for id in ids])
++        N[valid] -= weights.unsqueeze(-1) * colors
++        
+     # Texturing Pass
+-    # Compute world-space intersection positions from D
+-    x_positions = compute_world_space_positions(D, camera) # H x W x K x 3
++    # Compute world-space positions from depth buffer
++    x_positions = o.unsqueeze(0).unsqueeze(0).unsqueeze(0) + D_buf.unsqueeze(-1) * d.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+     
+     # Query neural field
+-    T_textured = query_neural_field(x_positions, camera['focal_length']) # H x W x K x 3
++    T_textured = query_neural_field(x_positions, f, D_buf)
+     
+     # Composite
+     final_image = N + (W_buf.unsqueeze(-1) * T_textured).sum(dim=2)
+-    
+     return final_image
+ 
+-def update_pixel_buffer(I, D, W_buf, weight, surfel_id, depth):
+-    # Find the position in the buffer where this weight should be inserted
+-    # Keep only top K weights
+-    # [G] Implementation of priority queue or sorted buffer update
+-    pass
+-
+-def query_neural_field(x_positions, focal_length):
++def compute_primitive_space_intersection(surfel, o, d):
++    # Transform ray origin and direction to surfel's local frame
++    R_inv = surfel['R'].T
++    local_o = R_inv @ (o - surfel['mu'])
++    local_d = R_inv @ d
++    # Intersection parameter t in local frame
++    t_local = -local_o[2] / local_d[2]
++    u = local_o[0] + t_local * local_d[0]
++    v = local_o[1] + t_local * local_d[1]
++    return u, v
++
++def update_pixel_buffer(I, D_buf, W_buf, weight, surfel_id, depth):
++    # For each pixel, insert (weight, surfel_id, depth) into top-K list
++    for y in range(I.shape[0]):
++        for x in range(I.shape[1]):
++            pos = 0
++            while pos < K and W_buf[y, x, pos] > weight[y, x]:
++                pos += 1
++            if pos < K:
++                for j in range(K - 2, pos - 1, -1):
++                    I[y, x, j+1] = I[y, x, j]
++                    D_buf[y, x, j+1] = D_buf[y, x, j]
++                    W_buf[y, x, j+1] = W_buf[y, x, j]
++                I[y, x, pos] = surfel_id
++                D_buf[y, x, pos] = depth
++                W_buf[y, x, pos] = weight
++
++def query_neural_field(x_positions, f, D_buf):
+     # x_positions: H x W x K x 3
+     # Returns: H x W x K x 3 (radiance)
+-    # For each position, compute hash-grid features and MLP output
+-    # Apply down-weighting factor
+-    # [G] Implementation of Instant-NGP lookup
+-    pass
++    L = 16; F = 2; T = 2**20; s = [2**i for i in range(L)]
++    H_grid = torch.randn(L, T, F) # Placeholder for actual grid
++    G = torch.nn.Sequential(torch.nn.Linear(F*L, 64), torch.nn.ReLU(), torch.nn.Linear(64, 64), torch.nn.ReLU(), torch.nn.Linear(64, 48))
++    
++    radiance = torch.zeros_like(x_positions)
++    for k in range(K):
++        x = x_positions[:, :, k, :]
++        features = []
++        for l in range(L):
++            h = hash_function(s[l] * x) % T
++            feat = H_grid[l, h, :]
++            features.append(feat)
++        H_x = torch.cat(features, dim=-1) # L*F
++        out = G(H_x) # 48
++        t_star = D_buf[:, :, k]
++        delta = 1.0 - torch.exp(-f**2 / (2 * math.pi * s * t_star.unsqueeze(-1)))
++        out = out * delta
++        radiance[:, :, k, :] = out[:, :3]
++    return radiance
+ ```
+ 
+@@ -147,11 +181,11 @@
+ 
+ ### Per-Primitive Texture Mapping for Reflective Gaussian Splatting
+-Uses per-primitive textures for reflective scenes. [8629-per-primitive-texture-mapping-for-reflective-gaussian-splatt.md]
++Uses per-primitive textures for reflective scenes [S1]. [8629-per-primitive-texture-mapping-for-reflective-gaussian-splatt.md]
+ 
+ ### ToF Gaussian Rasterization Forward Pass
+-Handles Time-of-Flight data in Gaussian rasterization. [9261-tof-gaussian-rasterization-forward-pass.md]
++Handles Time-of-Flight data in Gaussian rasterization [S1]. [9261-tof-gaussian-rasterization-forward-pass.md]
+ 
+ ### Vanilla 2D Gaussian Splatting Rendering
+-Standard 2DGS without neural texturing. [12208-vanilla-2d-gaussian-splatting-rendering.md]
++Standard 2DGS without neural texturing [S1]. [12208-vanilla-2d-gaussian-splatting-rendering.md]
+ 
+ ## Operating characteristics

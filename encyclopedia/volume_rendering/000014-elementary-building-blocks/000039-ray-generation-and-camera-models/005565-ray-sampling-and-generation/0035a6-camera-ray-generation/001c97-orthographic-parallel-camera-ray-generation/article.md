@@ -1,0 +1,135 @@
+# Orthographic (Parallel) Camera Ray Generation
+
+Also called: Orthographic ray casting, Parallel Ray Casting, Parallel Ray Generation, PlaneParallelLens
+
+## Overview
+Orthographic (Parallel) Camera Ray Generation constructs initial rays for volume rendering by defining a projection plane parallel to the scanline and casting rays in the viewing direction within that plane [S1, unofficial]. It serves as the geometric foundation for orthographic ray casting, where ray origins are distributed across a 2D grid and all rays share a single normalized direction [S1, unofficial][S2, unofficial]. This method models a camera at infinity where all rays are parallel to one viewing vector, commonly used in applications like biomedicine that do not benefit from perspective distortion [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `eye`: Camera position reference in world space (3D vector).
+- `target`: Look-at target point in world space (3D vector).
+- `up`: World up vector (3D vector, typically $(0,1,0)$).
+- `width`, `height`: Image resolution in pixels.
+- `extent`: Half-size of the viewing region in world units along both right and up axes (scalar, default 1.0) [S1, unofficial].
+
+**Outputs:**
+- `origins`: Array of ray origins distributed on a grid perpendicular to the viewing direction [S1, unofficial].
+- `directions`: Array of identical normalized directions for the orthographic camera [S1, unofficial].
+
+**Data Structures:**
+- `origins` and `directions`: Dense arrays matching the pixel grid dimensions, populated via broadcasting [G].
+
+**Steps:**
+1.  **Compute Camera Basis:** Calculate the forward, right, and camera-up vectors using a standard look-at routine `camera_basis(eye, target, up)` [G].
+    -   `forward = normalize(target - eye)`
+    -   `right = normalize(cross(forward, up))`
+    -   `cam_up = cross(right, forward)`
+2.  **Compute Image Plane Dimensions:** Determine the half-width and half-height of the viewing region in world units [S1, unofficial].
+    -   `aspect = width / height`
+    -   `half_w = extent * aspect`
+    -   `half_h = extent`
+3.  **Generate Pixel Coordinates:** Create a meshgrid of pixel indices $i$ (row, $0 \dots height-1$) and $j$ (column, $0 \dots width-1$). Map these to normalized coordinates $u$ and $v$ on the image plane [S1, unofficial]:
+    -   $u = \left( \frac{2.0 \cdot (j + 0.5)}{width} - 1.0 \right) \cdot half\_w$
+    -   $v = \left( 1.0 - \frac{2.0 \cdot (i + 0.5)}{height} \right) \cdot half\_h$
+    -   Note: The $v$ formula uses $(1.0 - \dots)$ to align the image plane's vertical axis with the camera's up vector, assuming standard screen coordinates where $i=0$ is the top [G].
+4.  **Compute Origins:** Calculate the world-space origin for each ray by offsetting the `eye` position by the scaled basis vectors [S1, unofficial]:
+    -   $origin_{i,j} = eye + u_{i,j} \cdot right + v_{i,j} \cdot cam\_up$
+5.  **Set Directions:** Broadcast the normalized `forward` vector to match the shape of `origins` [S1, unofficial]. All rays share this identical direction.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def orthographic_ray_generation(eye, target, up, width, height, extent=1.0):
+    """
+    Generates orthographic camera rays.
+    
+    Args:
+        eye: (3,) array-like, camera position reference.
+        target: (3,) array-like, look-at target.
+        up: (3,) array-like, world up vector.
+        width: int, image width.
+        height: int, image height.
+        extent: float, half-size of viewing region in world units.
+        
+    Returns:
+        origins: (height, width, 3) array of ray origins.
+        directions: (height, width, 3) array of ray directions.
+    """
+    eye = np.asarray(eye, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+    up = np.asarray(up, dtype=np.float32)
+    
+    # 1. Compute Camera Basis
+    forward = target - eye
+    forward = forward / np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    right = right / np.linalg.norm(right)
+    cam_up = np.cross(right, forward)
+    
+    # 2. Compute Image Plane Dimensions
+    aspect = width / height
+    half_w = extent * aspect
+    half_h = extent
+    
+    # 3. Generate Pixel Coordinates
+    # Create meshgrid of indices
+    j, i = np.meshgrid(np.arange(width), np.arange(height))
+    
+    # Map to world coordinates on the image plane
+    u = (2.0 * (j + 0.5) / width - 1.0) * half_w
+    v = (1.0 - 2.0 * (i + 0.5) / height) * half_h
+    
+    # 4. Compute Origins
+    # Expand dimensions for broadcasting: eye (3,), right (3,), cam_up (3,)
+    # u (H, W), v (H, W)
+    origins = (eye[np.newaxis, np.newaxis, :] + 
+               u[:, :, np.newaxis] * right[np.newaxis, np.newaxis, :] + 
+               v[:, :, np.newaxis] * cam_up[np.newaxis, np.newaxis, :])
+               
+    # 5. Set Directions
+    # Broadcast forward vector to (H, W, 3)
+    directions = np.broadcast_to(forward[np.newaxis, np.newaxis, :], (height, width, 3))
+    
+    return origins, directions
+```
+
+**Parameters:**
+- `extent`: Half-size of the viewing region in world units along both right and up axes. Default value is 1.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **Degenerate Basis:** If `eye` equals `target`, the `forward` vector is zero, causing normalization failure. A guard should check for this distance [G].
+-   **Up Vector Alignment:** If `up` is parallel to `forward`, the `right` vector becomes zero. The `camera_basis` helper must handle this by rotating the up vector or using a default right vector [G].
+-   **Precision:** Using `float32` for large `extent` values may cause precision loss in origin calculation. Use `float64` for large scenes or high-precision requirements [G].
+
+## Subtopics
+
+### [Viewing Plane Ray Generation](2424-viewing-plane-ray-generation.md)
+Viewing Plane Ray Generation constructs the initial rays for volume rendering by defining a projection plane parallel to the scanline and casting rays in the viewing direction within that plane. It serves as the geometric foundation for orthographic ray casting, where ray origins are distributed across a 2D grid and all rays share a single normalized direction. This method generates parallel rays, contrasting with perspective ray generation which supports non-parallel viewing.
+
+### [Orthographic Projection](4019-orthographic-projection.md)
+A size-preserving projection where objects in the foreground take up the same amount of screen space as objects in the background, and parallel lines in the 3D scene remain parallel when drawn on the screen.
+
+### Orthographic Camera Handling for Point Clouds
+This variant involves alternating the camera type from Orthographic to PerspectiveCamera with a similar viewing scope to enable rendering of point clouds [S4, unofficial]. It is used when differentiable rendering of point clouds requires perspective effects or specific focal length adjustments for zooming [S4, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** $O(W \cdot H)$ to generate all ray origins and directions, where $W$ and $H$ are image width and height [G].
+-   **Memory Complexity:** $O(W \cdot H)$ to store the origin and direction arrays [G].
+-   **Performance:** Very fast ray generation as it involves simple vector additions and broadcasts, with no division by depth required [G].
+-   **Strengths:** No perspective distortion; uniform sampling density across the image plane; suitable for scientific visualization where metric accuracy is required [G].
+-   **Limitations:** Does not simulate depth perception via foreshortening; field of view is fixed by `extent` and aspect ratio, not by a focal length [G].
+-   **When to use:** Scientific visualization, CAD, architectural rendering, or any scenario requiring metric-preserving projections [G].
+-   **When not to use:** When realistic human-like vision or depth cues from perspective are required [G].
+
+## Background
+Orthographic projection is a fundamental concept in computer graphics, historically used in technical drawing and CAD [G]. In the context of volume rendering, it provides a consistent sampling grid [G]. The method generates parallel rays for applications like biomedicine where perspective distortion is undesirable [S2, unofficial]. The PlaneParallelLens is the standard lens type for this projection [S3]. In differentiable rendering pipelines, it may be alternated with perspective cameras for specific point cloud tasks [S4, unofficial].
+
+## Sources
+[S1] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)
+[S2] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)
+[S3] https://yt-project.org/docs/dev/visualizing/volume_rendering.html#volume-rendering-components, https://yt-project.org/docs/dev/visualizing/volume_rendering.html, fetched 2026-10-29
+[S4] VoGE: A Differentiable Volume Renderer using Gaussian Ellipsoids for Analysis-by-Synthesis, https://doi.org/10.48550/arxiv.2205.15401, fetched 2026-10-26 (unofficial)

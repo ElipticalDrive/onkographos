@@ -1,0 +1,465 @@
+Contribute to forest-rs/exedra development by creating an account on GitHub.
+
+Mesh implicit fields by restricted Delaunay refinement by waywardmonkeys · Pull Request #180 · forest-rs/exedra · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+waywardmonkeys
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Contributor
+Implicit fields are now meshed by restricted Delaunay refinement instead of dual contouring, and constructive recipes can hold them as leaves.
+The stack, bottom up:
+exedra_math owns the exact-sign predicates (orient2d, orient3d, incircle, plane_side, moved from exedra_triangulate). It adds insphere and the weighted power test, both exact for every finite input, through one shared dyadic accumulator. orient3d now stays exact through underflow.
+exedra_tetrahedralize (new, no_std) is an incremental 3D Delaunay and regular tetrahedralization built from an exact grid. It provides weighted insertion with hidden vertices, nearby walk starts, stars, spaced insertion, stats and validate.
+exedra_implicit (new, no_std) defines each field once as a Formula over any Number. From that one formula come values, exact gradients, outward-rounded bounds, gradient bounds and crease ties. ScalarField is the consumer boundary, and Expr describes fields as data. It includes the built-in shapes, profiles, combinations, smooth blends and placements.
+exedra_isosurface is now delaunay_mesh alone: DelPSC-style protection of traced creases and corners, and refinement until faces are well shaped, close to the surface, and each vertex's faces close into a disk. DelaunayReport accounts for passes, samples, refinements by reason, field queries, and anything left unmet. Dual contouring, the f32 fields, their ADRs and their benchmarks are removed.
+exedra_constructive gains NodeKind::Implicit leaves. They are meshed at EvalPolicy::implicit resolution, with creases marked sharp, tagged regions carried as face regions, reports carried into GeometryReport::implicit_meshes, and an eval.implicit.incomplete warning. Leaves are fingerprinted and round-trip through text and JSON interchange.
+exedra_fidget, the Fidget and render benchmarks, and the Boolean oracle move onto exedra_implicit. The facade gains an implicit namespace.
+At 32 cells across:
+A drilled and notched block meshes in 0.3 s, with no angle below 19°.
+Four fins 0.4 of a cell thick mesh in 0.8 s, complete, with both edges of each fin sharp.
+A gyroid sheet cut by a ball meshes in under a second.
+All of these are closed and manifold.
+Known limits, reported through DelaunayReport rather than hidden:
+Knife edges of about 10° or sharper, and the rims of a cut gyroid can be left with unmet faces.
+Crease spacing is conservative, so heavily creased scenes at fine resolution sample more than they need. A 64-cube lattice at 128 cells takes about 10 s.
+TypeScript wiring of implicit leaves comes later. This replaces the dual-contouring work in #126.
+waywardmonkeys
+added 14 commits
+October 31, 2026 16:45
+math: own the exact-sign predicates
+…
+3aa0ccc
+```
+`orient2d`, `orient3d`, `incircle` and `plane_side` move from
+`exedra_triangulate::predicates` to `exedra_math::predicates`. Mesh surgery,
+Booleans, charts and the coming tetrahedralization decide topology with them,
+so they belong beside the shared coordinate arithmetic rather than inside the
+2D triangulator. Triangulation now depends on `exedra_math`, forwards its
+`std` and `libm` features, and keeps re-exporting `MAX_COORDINATE` as its
+input envelope.
+
+The predicate notes move from the triangulation README to `exedra_math`, and
+now credit Shewchuk's paper and public-domain `predicates.c` for the filter
+bounds and expansion arithmetic.
+```
+math: share one exact accumulator between the predicates
+…
+dcaf036
+```
+`orient2d` and `incircle` each carried their own binary64 decoding and limb
+arithmetic for their exact fallbacks. Both now use `dyadic::Accumulator`,
+generic over the number of factors per product and the limb count, which
+each predicate still sizes from its reviewed carry bound. Behaviour is
+unchanged; the next predicate reuses the same accumulator for five-factor
+products.
+```
+math: keep orient3d exact through underflow
+…
+f5b618d
+```
+The exact fallback summed triple products of the original coordinates as
+Shewchuk expansions, which are exact only while no product underflows. A
+tetrahedron with subnormal edges therefore read as coplanar, contradicting
+the exact-sign contract.
+
+The fallback now has two stages. When subtracting the fourth point loses
+nothing, as for grid-aligned or exactly coplanar input, Shewchuk's adaptive
+middle stage expands six exact triple products of the differences: the
+common and cheap case. Otherwise the 24 monomials of the original
+coordinates are summed in the dyadic accumulator, which covers every finite
+input. The filter defers whenever a product underflows or its bound is
+subnormal, and non-finite input returns `Coplanar` explicitly rather than by
+accident of NaN comparisons.
+```
+math: add an exact-sign insphere predicate
+…
+2456ffc
+```
+`insphere` classifies a point against the circumsphere of four others, the
+test incremental 3D Delaunay construction decides every cavity with. It has
+the same shape as `incircle`: Shewchuk's floating-point filter and error
+bound from `predicates.c`, deferring whenever a product underflows, then an
+exact fallback that expands the lifted 5×5 determinant into 360 five-factor
+monomials of the original coordinates and sums them in the shared dyadic
+accumulator. The sign is exact for every finite input, including subnormal
+and overflowing scales. `insphere_evaluated` reports which path decided.
+
+Tests cover one-ULP displacements around exact ties, extreme scales, the
+non-finite sentinel, and agreement with an independent `i128` determinant.
+```
+math: add an exact power test for weighted points
+…
+a1e9bbc
+```
+`insphere_weighted` decides whether a weighted point has negative power
+distance to the sphere orthogonal to four others, the conflict test of
+regular (weighted Delaunay) tetrahedralizations. Weighted points let a
+mesher place protecting balls on sharp creases, and power diagrams serve
+volumetric representations as well.
+
+`insphere` and the weighted test share one implementation. The filter is
+Shewchuk's, with each lift reduced by its point's weight and each weight
+entering the permanent by magnitude; the weighted bound carries half again
+the slack for the extra subtraction. The exact path is the lifted
+determinant with each weight subtracted from its point's lift, adding 24
+monomials per point to the same accumulator.
+
+Tests check how weights move the orthosphere, exact cancellation of equal
+weights, agreement with `insphere` at zero weight, and an independent `i128`
+power test.
+```
+tetrahedralize: add incremental 3D Delaunay tetrahedralization
+…
+2a2fb54
+```
+`exedra_tetrahedralize` builds a Delaunay tetrahedralization of a rectilinear
+grid and grows it by Bowyer–Watson insertion, deciding everything with the
+exact `orient3d` and `insphere` predicates. It is the 3D sibling of
+`exedra_triangulate`: points in, tetrahedra with explicit adjacency out, no
+knowledge of meshes or fields, `no_std` + `alloc`, deterministic.
+
+Grid cells are exact axis-aligned boxes whose corners are exactly cospherical,
+so their Freudenthal split is exactly Delaunay without jitter or symbolic
+perturbation. Walks start at the nearest grid vertex through a per-vertex
+tetrahedron table, which keeps location short in any insertion order. Points
+on the hull split hull faces, coincident points return the existing vertex,
+and points outside the hull are refused. Tetrahedra are positively oriented
+and faces are wound outward, so a consumer can read a consistently oriented
+surface between two classes of tetrahedra directly.
+
+`stats` reports walk, cavity and predicate work; `validate` checks
+orientation, adjacency, local Delaunay faces and the vertex table.
+```
+tetrahedralize: insert weighted points
+…
+79015da
+```
+`insert_weighted` gives a point a weight, a squared radius, and keeps the
+tetrahedralization regular (weighted Delaunay) with the exact power test.
+Unweighted tetrahedralizations keep the cheaper `insphere` until the first
+nonzero weight arrives.
+
+A point whose power cell would be empty is refused as `TetError::Hidden`. A
+heavy point can hide existing vertices; they leave every tetrahedron, keep
+their `VertexId`, and report `is_hidden`, and walks that would start from a
+hidden grid vertex fall back to the last insertion. `stats` counts hidden
+points and vertices, and `validate` checks the weighted Delaunay property and
+that hidden vertices belong to no tetrahedron.
+
+Weights let a mesher place protecting balls on sharp features, where
+refinement must not cut between neighboring feature samples.
+```
+tetrahedralize: start walks nearby and report new tetrahedra
+…
+ac9f226
+```
+A tetrahedralization grown inside a coarse grid, such as a bounding box,
+gave walks no nearby start: every location crossed most of the mesh. A 32³
+grid of cells over the hull now remembers the latest vertex inserted in
+each, and walks start from whichever is closer, that vertex or the nearest
+grid vertex.
+
+Callers that already know a nearby vertex, as a refinement loop does for the
+face it is refining, pass it to `insert_near` or `locate_near`. And
+`new_tetrahedra` lists the star the latest insertion created, so incremental
+algorithms re-examine only what changed instead of rescanning everything.
+```
+tetrahedralize: list the tetrahedra around a vertex
+…
+4aecb12
+```
+`star` walks face neighbors from the tetrahedron a vertex records and
+returns every tetrahedron around it, at a cost proportional to the star.
+Refinement checks such as whether a vertex's surface triangles form a disk,
+and remeshing operations generally, work on vertex neighborhoods and should
+not have to scan the whole tetrahedralization to find them.
+```
+tetrahedralize: refuse insertions too close to a vertex
+…
+d5f480b
+```
+Refinement inserts points it computes, and a point almost on an existing
+vertex leaves needle tetrahedra and, on a surface, needle triangles.
+Checking beforehand means locating the point twice.
+
+`insert_spaced` inserts like `insert_near` unless a vertex lies closer
+than a given spacing, and then returns `TetError::Crowded` with the
+nearest such vertex and changes nothing. The new vertex's nearest
+neighbor would be one of its Delaunay neighbors, all of which bound the
+cavity, so the check reads only the cavity the insertion has already
+found; the cavity is now grown before the point is recorded, and a
+refused point leaves no trace but a count in `stats().crowded_points`.
+With weights the nearest vertex need not be a neighbor, and only
+neighbors are checked.
+```
+tetrahedralize: keep the plain insphere test among unweighted points
+…
+e304ad5
+```
+Once any weight was nonzero, every conflict test used the power test,
+although most tests in a mesher's tetrahedralization involve only
+unweighted points, for which it is the plain insphere test with extra
+terms. The power test now runs only when the point or a corner of the
+tetrahedron is weighted.
+```
+tetrahedralize: name a tetrahedron at a vertex
+…
+185a09f
+```
+`star` collects the tetrahedra around a vertex with a linear search for
+repeats, fine for occasional queries. A caller walking many stars can
+keep its own marks per slot, and needs only where to start:
+`tetrahedron_at` gives a tetrahedron with the vertex as a corner, or
+`None` for a hidden vertex.
+```
+tetrahedralize: find hidden vertices by position
+…
+b15c0bb
+```
+Inserting a point equal to an existing vertex returns that vertex, but
+the walk finds coincidence only among the corners of the tetrahedron it
+reaches, and a hidden vertex is a corner of none. Hidden vertices are
+now kept by position, so reinserting one returns it rather than
+reporting the point hidden.
+```
+implicit: add fields written once as formulas
+…
+a0d7107
+```
+A field is a function of space, negative inside a solid, whose zero set
+is its surface. Consumers ask a field several questions: values,
+gradients, bounds over a box, bounds on the gradient, where its creases
+lie, and how its values relate to distance. Writing each answer by hand
+for every shape multiplies the work by every new question, and a
+composite only answers what all its parts answer.
+
+`exedra_implicit` defines a field once, as a `Formula` over any `Number`:
+`f64` for values, `Dual` for exact gradients by forward differentiation,
+`Interval`, rounded outward, for bounds over a box, `Dual<Interval>` for
+bounds on the gradient, and an internal number that follows each `min`,
+`max` and `abs` to the creases they mark. `Number` has no comparisons,
+so a formula cannot branch on a value; `select` joins pieces that meet
+smoothly without marking a crease, and `hypot` keeps gradients bounded
+where a length vanishes.
+
+`ScalarField` is the boundary consumers use, in `f64`: batched values and
+gradients, value and gradient bounds over a region, the two creases
+nearest a point, and claims. Every formula is one, with value bounds the
+tightest of the natural interval form, the mean-value form and its
+Lipschitz claim. Fields that cannot be formulas implement it directly,
+the defaults answering the rest soundly from their claims, and join
+formulas through `Opaque`, which answers each number from the field's
+own queries, through the chain rule where the formula moves it.
+
+A crease is reported as a `Tie`: a function zero where two pieces meet,
+with how far away it counts as. A side a `min` or `max` does not choose
+keeps its own ties, counted as no nearer than the tie to the side that
+was chosen, so at a corner where three faces meet both creases nearest
+it are found from any face.
+
+`Claims` state a `Metric` and a `Support`. Shapes state theirs from
+their checked parameters, and combinators derive theirs from their
+parts'. The built-ins are the shapes `Sphere`, `Cuboid`, `Cylinder`,
+`Torus`, `HalfSpace`, `Capsule` and `RoundCone`; the profiles `Circle`,
+`Rectangle` and `HalfPlane`, lifted by `Extrude` and `Revolve`; the
+combinations `Union`, `Intersection`, `Difference`, `SmoothUnion` and
+`SmoothUnionN`, a symmetric blend of any number of parts that skips
+those whose claims put them out of reach; and `Translate`, `Scale` and
+`Placed`. The crate is `no_std` and depends only on `exedra_math`.
+```
+waywardmonkeys
+mentioned this pull request
+Oct 31, 2026
+Lower the workspace MSRV to 1.89 and keep 1.92 for Fidget
+#181
+Merged
+waywardmonkeys
+force-pushed
+the
+implicit
+branch
+from
+da4c745 to
+95d99e3
+Compare
+October 31, 2026 10:51
+waywardmonkeys
+added 5 commits
+October 31, 2026 18:18
+isosurface: mesh fields by restricted Delaunay refinement
+…
+99e2f2e
+```
+Dual contouring places one vertex per cell, so its triangles follow the
+grid: slivers where the surface grazes a cell, folds where cell sizes
+meet, and creases cut short wherever two surfaces meet at an acute
+angle. `delaunay_mesh` meshes an `exedra_implicit` field from its
+restricted Delaunay triangulation instead, refined until every triangle
+is well shaped and close to the surface.
+
+A grid of signs over the bounds seeds points where cell edges cross the
+surface, points on creases, and points on features thinner than a cell,
+found by probing cells the field's bounds cannot prove empty; blocks of
+cells whose bounds exclude zero are skipped whole. Creases are traced
+from their seeds with steps as long as the crease stays within the
+distance tolerance and turns less than the turning limit, stopping at
+corners, which are solved where the field and two ties are zero.
+Tracing stops only at samples of the same crease, told apart by their
+ties, so both sides of a fin thinner than a ball are traced; probes
+around each corner then find every crease leaving it, so an edge too
+short for the grid to seed is traced from corner to corner too. As in
+Cheng, Dey and Levine's DelPSC, each crease sample becomes a weighted
+vertex protected by a ball overlapping its neighbors, spaced so that no
+ball reaches another crease and neighboring balls differ by at most half.
+
+In the regular tetrahedralization of crease samples and seeds, each
+tetrahedron takes the field's sign at its orthocenter; the faces between
+inside and outside tetrahedra are the surface. A face too large, too
+badly shaped, too far from the surface or folded is refined where its
+dual edge meets the surface, found by one Newton step along the face
+normal and confirmed by the gradient there, falling back to a bracketed
+search; points are kept apart with `insert_spaced`. Faces bad in size or
+shape alone are judged in full only when their turn comes, and a face's
+surface point is kept while its dual edge still reaches it. Every
+vertex's faces must close into one disk. A face whose point falls in a
+protecting ball, or a protected vertex whose faces do not close, shows
+the ball is too large: that stretch of crease is split, or a corner's
+gap shrunk, and the pass starts again; the last pass refines to the end.
+
+`DelaunayParams::new` derives every length from the cell size.
+`DelaunayResult` holds `f64` positions and outward-wound triangles, with
+`mesh` building an Exedra mesh, and `DelaunayReport` counts passes,
+crease samples and corners, refinements by reason, field queries, and
+anything left unmet, with `is_complete` summarizing. Identical inputs
+give identical meshes.
+
+At 32 cells across, a drilled and notched block meshes in 0.3 s with no
+angle below 19 degrees; a gyroid sheet cut by a ball in under a second;
+four fins 0.4 of a cell thick in 0.8 s, complete, with the edges on both
+sides of each fin sharp; all closed and manifold.
+```
+Move Fidget, the benchmarks and the oracle onto exedra_implicit
+…
+6217885
+```
+`exedra_fidget` implements `exedra_implicit::ScalarField`. Fidget
+evaluates in single precision, so points round to `f32` and interval
+bounds are taken over the box rounded outward and widened by one `f32`
+step. Specialization stays as `FidgetField::specialize`, since no
+extractor consumed the trait it implemented.
+
+The Fidget and render benchmarks mesh the toothed torus with
+`delaunay_mesh`. The oracle's field witness composes `exedra_implicit`
+fields, now in `f64`, and its fixed suite meshes `Tagged` box and
+cylinder combinations, requiring every vertex where the two parts' faces
+meet to lie on both surfaces.
+
+The facade gains an `implicit` namespace, which `isosurface` selects.
+```
+isosurface: retire dual contouring and the f32 fields
+…
+a7d87b9
+```
+Fields now live in `exedra_implicit`, and restricted Delaunay meshing
+replaces dual contouring as the way to mesh them: it keeps creases and
+corners sharp without fitting QEFs or projecting onto known primitives,
+closes a disk around every vertex, and labels faces with the regions of
+tagged parts.
+
+Gone are the f32 `ScalarField` and `ScalarField2d` with their
+specialization and provenance traits, the analytic, profile, skeletal
+and transform fields, dual contouring with its octree, Hermite data, QEF
+solver, transitions and semi-analytic projection, their ADRs, and the
+isosurface wind tunnel and QEF benchmarks that measured them.
+`exedra_isosurface` is now the Delaunay extractor alone.
+
+The open ticket on manifold dual contouring closes as superseded.
+```
+implicit: describe fields as data
+…
+8b5014b
+```
+`Expr` is a field as a value: a tree of the built-in shapes, `ProfileExpr`
+profiles, combinations, placements and tags, each variant holding the
+type it names over boxed sub-expressions. It evaluates exactly as those
+types do, so values, gradients, bounds, creases, regions and claims carry
+over, and it can be built at run time, compared and serialized by a
+consumer.
+
+Rebuilding a field from its own parameters now gives the same field: a
+unit direction and an already rigid placement are kept exactly, rather
+than normalized again, which could move them by an ulp.
+```
+constructive: add implicit-field leaves
+…
+ef0cb7f
+```
+`NodeKind::Implicit { field, bounds, placement }` holds a solid as an
+`exedra_implicit::Expr` in its local frame. Evaluation meshes it by
+restricted Delaunay refinement within `bounds`, or the box the field's
+claims bound it by, at `EvalPolicy::implicit` resolution: `cells` along
+the longest side, 32 by default, so one policy suits leaves in any units.
+The mesher's `f64` positions are placed before the mesh narrows them, so
+a field far from the origin placed near it keeps its precision. Creases
+are marked sharp, and faces carry the regions of `Tagged` parts as face
+regions and `Feature::ImplicitRegion` provenance.
+
+The builder refuses bounds that are not a finite, ordered box, and fields
+nesting deeper than `MAX_IMPLICIT_NESTING`, which keeps every accepted
+leaf within what the interchange readers take.
+
+Each leaf's meshing report rides with its body, so cache hits replay it,
+and appears in `GeometryReport::implicit_meshes`; an incomplete mesh adds
+an `eval.implicit.incomplete` warning. Fingerprints encode the field's
+tree and parameters, the policy fingerprint covers the new policy, and
+text and JSON interchange round-trip the field through its constructors.
+The frozen JSON corpus gains the leaf, the hostile-input suite builds and
+meshes hostile fields, and the gallery adds a bracket with a blended boss
+and a bore.
+```
+waywardmonkeys
+force-pushed
+the
+implicit
+branch
+from
+95d99e3 to
+ef0cb7f
+Compare
+October 31, 2026 11:19
+waywardmonkeys
+added this pull request to stack #182
+October 31, 2026 11:28
+Hide details
+View details
+waywardmonkeys
+merged commit 511d6b9
+into
+main
+Oct 31, 2026
+18 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+waywardmonkeys
+deleted the
+implicit
+branch
+October 31, 2026 11:50
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

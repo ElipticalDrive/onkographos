@@ -1,0 +1,474 @@
+--- v002.md
++++ v003.md
+@@ -27,29 +27,14 @@
+ 
+ 1.  **Preprocessing (Tracking):** Apply facial expression tracking using a 3D morphable model to estimate pose parameters $P_i$ and expression parameters $\delta_i$ for each frame $i$ in the training video [S1].
+-
+-2.  **Ray Dispatch:** For each frame to be synthesized, dispatch rays in a canonical space shared by all frames. Transform the rays from camera space to this canonical space using the pose parameters $P_i$ from the morphable model [S1].
+-
+-3.  **Coarse Sampling:** Perform stratified sampling of 64 points along each viewing ray [S1].
+-    *   95% of rays correspond to pixels within the head bounding box [S1].
+-    *   Sample 2048 viewing rays per training image/iteration [S1].
+-
+-4.  **Coarse Network Evaluation:** For each sample point $t$ on ray $r$, input its canonical position $p$, view direction $\vec{v}$, expression parameters $\delta_i$, and latent code $\gamma_i$ into the coarse dynamic radiance field MLP $D_{\theta_{coarse}}$ [S1].
+-    *   The MLP outputs density $\sigma$ and color $RGB$ [S1].
+-
++2.  **Ray Dispatch:** For each frame to be synthesized, dispatch rays in a canonical space shared by all frames [S1]. Transform the rays from camera space to this canonical space using the pose parameters $P_i$ from the morphable model [S1].
++3.  **Coarse Sampling:** Perform stratified sampling of 64 points along each viewing ray [S1]. 95% of rays correspond to pixels within the head bounding box [S1]. Sample 2048 viewing rays per training image/iteration [S1].
++4.  **Coarse Network Evaluation:** For each sample point $t$ on ray $r$, input its canonical position $p$, view direction $\vec{v}$, expression parameters $\delta_i$, and latent code $\gamma_i$ into the coarse dynamic radiance field MLP $D_{\theta_{coarse}}$ [S1]. The MLP outputs density $\sigma$ and color $RGB$ [S1].
+ 5.  **Importance Sampling:** Use the density distribution predicted by the coarse network to guide importance sampling for the fine network [S1].
+-
+ 6.  **Fine Sampling:** Re-sample 64 points along the ray based on the coarse density distribution [S1].
+-
+-7.  **Fine Network Evaluation:** For each fine sample point, input $p$, $\vec{v}$, $\delta_i$, and $\gamma_i$ into the fine dynamic radiance field MLP $D_{\theta_{fine}}$ [S1].
+-    *   The MLP outputs density $\sigma$ and color $RGB$ [S1].
+-
++7.  **Fine Network Evaluation:** For each fine sample point, input $p$, $\vec{v}$, $\delta_i$, and $\gamma_i$ into the fine dynamic radiance field MLP $D_{\theta_{fine}}$ [S1]. The MLP outputs density $\sigma$ and color $RGB$ [S1].
+ 8.  **Volumetric Integration:** Compute the expected color $C(r)$ for the ray by integrating the density and color values predicted by the fine network along the ray [S1]. The transmittance $T(t)$ is accumulated along the ray [S1].
+-
+ 9.  **Background Handling:** For the last sample point of each ray (representing the background), set the color to the corresponding value from the static background image $B$ [S1]. The network learns to predict low density for foreground samples if the ray hits a background pixel, and high density for foreground pixels, achieving self-supervised foreground-background decomposition [S1].
+-
+ 10. **Loss Computation:** Compute the reconstruction loss for both coarse and fine networks against the ground truth image $I_i$ [S1].
+-
+ 11. **Optimization:** Update $\theta_{coarse}$, $\theta_{fine}$, and $\gamma_i$ using the Adam optimizer [S1].
+-
+ 12. **Test Time Synthesis:** At test time, always employ the latent code $\gamma$ from the first frame of the training set [S1].
+ 
+@@ -64,5 +49,5 @@
+ $$ C(r; \theta, P, \delta, \gamma) = \int_{z_{near}}^{z_{far}} \sigma_\theta(r(t)) \cdot RGB_\theta(r(t), \vec{d}) \cdot T(t) \, dt $$
+ 
+-Where $T(t)$ is the accumulated transmittance along the ray [S1]. Note: The source text contains a typo in the integrand argument for $RGB$ ($\vec{d} \cdot T(t)$), but standard volumetric rendering and the context of $T(t)$ being transmittance imply $T(t)$ is a scalar multiplier outside the color function or part of the transmittance term. The standard definition is $\sigma \cdot RGB \cdot T$. The source writes: $\sigma_\theta (r (t)) \cdot RGB_\theta r (t) , \vec{d} \cdot T (t)dt$. Given $T(t)$ is transmittance, it is a scalar. The dot product $\vec{d} \cdot T(t)$ is invalid. It is interpreted as $RGB_\theta(\dots) \cdot T(t)$ [S1, G].
++Where $T(t)$ is the accumulated transmittance along the ray [S1].
+ 
+ The total loss is the sum of losses for the coarse and fine networks [S1]:
+@@ -96,16 +81,17 @@
+ 
+ class DynamicNeRF:
+-    def __init__(self, num_frames, num_expression_coeffs=76, latent_dim=32):
+-        """
+-        Initialize the Dynamic NeRF model.
+-        
+-        Args:
+-            num_frames: Number of frames in the training sequence.
+-            num_expression_coeffs: Dimension of the expression vector (delta-blendshapes).
+-            latent_dim: Dimension of the per-frame latent code.
+-        """
++    def __init__(self, num_frames, latent_dim=32):
+         # Backbone: 8 linear layers, 256 neurons, ReLU
+         # Input to backbone: Position (encoded) + Expression + Latent Code
+-        # Output of backbone: Feature vector
++        self.backbone = nn.Sequential(
++            nn.Linear(10*6 + 76 + latent_dim, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU()
++        )
+         
+         # Density Head: 1 linear layer from backbone output
+@@ -115,24 +101,13 @@
+         # Input to color head: Backbone output + View Direction (encoded)
+         self.color_head = nn.Sequential(
+-            nn.Linear(256 + 24, 128), # 24 = 4 freq * 3 dims for view dir
+-            nn.ReLU(),
+-            nn.Linear(128, 128),
+-            nn.ReLU(),
+-            nn.Linear(128, 128),
+-            nn.ReLU(),
++            nn.Linear(256 + 4*6, 128), nn.ReLU(),
++            nn.Linear(128, 128), nn.ReLU(),
++            nn.Linear(128, 128), nn.ReLU(),
+             nn.Linear(128, 3) # RGB
+         )
+         
+         # Two instances of the network: Coarse and Fine
+-        # Note: In practice, these are separate MLPs or the same architecture with different weights
+-        # For simplicity, we define one architecture and instantiate twice
+-        self.coarse_net = DynamicNeRFNetwork(
+-            density_head=self.density_head,
+-            color_head=self.color_head
+-        )
+-        self.fine_net = DynamicNeRFNetwork(
+-            density_head=self.density_head,
+-            color_head=self.color_head
+-        )
++        self.coarse_net = DynamicNeRFNetwork(self.backbone, self.density_head, self.color_head)
++        self.fine_net = DynamicNeRFNetwork(self.backbone, self.density_head, self.color_head)
+         
+         # Learnable latent codes for each frame
+@@ -151,150 +126,76 @@
+ 
+     def positional_encoding(self, x, num_frequencies):
+-        """
+-        Apply positional encoding to input x.
+-        
+-        Args:
+-            x: Input tensor of shape (..., 3) for position or (..., 3) for view direction.
+-            num_frequencies: Number of frequencies to use.
+-            
+-        Returns:
+-            Encoded tensor of shape (..., 2 * num_frequencies * 3)
+-        """
+-        # Standard positional encoding: sin(2^i * pi * x) and cos(2^i * pi * x)
+         # x shape: (..., 3)
+-        # freq_bands shape: (num_frequencies,)
+         freq_bands = 2.0 ** torch.arange(num_frequencies, device=x.device).float()
+-        # Expand x to (..., 1, 3) and freq_bands to (1, num_frequencies, 1)
+         x = x.unsqueeze(-2) # (..., 1, 3)
+         freq_bands = freq_bands.view(1, -1, 1) # (1, num_frequencies, 1)
+-        
+-        # Compute sin and cos
+         x_sin = torch.sin(x * freq_bands * torch.pi)
+         x_cos = torch.cos(x * freq_bands * torch.pi)
+-        
+-        # Concatenate
+         encoded = torch.cat([x_sin, x_cos], dim=-1) # (..., num_frequencies * 2, 3)
+-        # Flatten last two dims
+         encoded = encoded.view(*x.shape[:-1], -1) # (..., num_frequencies * 6)
+         return encoded
+ 
+     def forward(self, position, view_dir, expression, latent_code, network):
+-        """
+-        Forward pass through the dynamic radiance field network.
+-        
+-        Args:
+-            position: Canonical position (x, y, z), shape (..., 3).
+-            view_dir: Viewing direction (x, y, z), shape (..., 3).
+-            expression: Expression coefficients, shape (..., 76).
+-            latent_code: Per-frame latent code, shape (..., 32).
+-            network: Either 'coarse' or 'fine' to select the appropriate MLP weights.
+-            
+-        Returns:
+-            density: Density values, shape (..., 1).
+-            color: RGB color values, shape (..., 3).
+-        """
+-        # Encode position (10 frequencies)
+         pos_encoded = self.positional_encoding(position, 10)
+-        
+-        # Encode view direction (4 frequencies)
+         view_encoded = self.positional_encoding(view_dir, 4)
+-        
+-        # Concatenate position, expression, and latent code for backbone input
+-        # Input to backbone: pos_encoded + expression + latent_code
+         backbone_input = torch.cat([pos_encoded, expression, latent_code], dim=-1)
+-        
+-        # Backbone: 8 linear layers, 256 neurons, ReLU
+-        # We assume the backbone is part of the network's layers
+-        # For this pseudocode, we simulate the backbone as a sequential module
+-        # In the actual implementation, this would be self.coarse_net.backbone or self.fine_net.backbone
+-        
+-        # Since we can't easily separate backbone/color head in this simple class structure
+-        # without defining sub-modules, we will assume the network object has these layers.
+-        # Let's refine the class structure for clarity.
+-        pass
++        backbone_output = network.backbone(backbone_input)
++        density = network.density_head(backbone_output)
++        color_input = torch.cat([backbone_output, view_encoded], dim=-1)
++        color = network.color_head(color_input)
++        return density, color
+ 
+ class DynamicNeRFNetwork(nn.Module):
+-    def __init__(self, density_head, color_head):
++    def __init__(self, backbone, density_head, color_head):
+         super().__init__()
+-        # Backbone: 8 linear layers, 256 neurons, ReLU
+-        layers = []
+-        layers.append(nn.Linear(10*6 + 76 + 32, 256)) # 60 + 76 + 32 = 168
+-        for _ in range(7):
+-            layers.append(nn.ReLU())
+-            layers.append(nn.Linear(256, 256))
+-        self.backbone = nn.Sequential(*layers)
+-        
++        self.backbone = backbone
+         self.density_head = density_head
+         self.color_head = color_head
+ 
+-    def forward(self, position, view_dir, expression, latent_code):
+-        # Encode position (10 frequencies) -> 60 dims
+-        pos_encoded = positional_encoding(position, 10)
+-        
+-        # Encode view direction (4 frequencies) -> 24 dims
+-        view_encoded = positional_encoding(view_dir, 4)
+-        
+-        # Concatenate position, expression, and latent code
+-        backbone_input = torch.cat([pos_encoded, expression, latent_code], dim=-1)
+-        
+-        # Backbone
+-        backbone_output = self.backbone(backbone_input)
+-        
+-        # Density
+-        density = self.density_head(backbone_output)
+-        
+-        # Color: Backbone output + encoded view direction
+-        color_input = torch.cat([backbone_output, view_encoded], dim=-1)
+-        color = self.color_head(color_input)
+-        
+-        return density, color
+-
+-def positional_encoding(x, num_frequencies):
+-    """
+-    Apply positional encoding to input x.
+-    
+-    Args:
+-        x: Input tensor of shape (..., 3).
+-        num_frequencies: Number of frequencies to use.
+-        
+-    Returns:
+-        Encoded tensor of shape (..., 2 * num_frequencies * 3)
+-    """
+-    freq_bands = 2.0 ** torch.arange(num_frequencies, device=x.device).float()
+-    x = x.unsqueeze(-2) # (..., 1, 3)
+-    freq_bands = freq_bands.view(1, -1, 1) # (1, num_frequencies, 1)
+-    
+-    x_sin = torch.sin(x * freq_bands * torch.pi)
+-    x_cos = torch.cos(x * freq_bands * torch.pi)
+-    
+-    encoded = torch.cat([x_sin, x_cos], dim=-1) # (..., num_frequencies * 2, 3)
+-    encoded = encoded.view(*x.shape[:-1], -1) # (..., num_frequencies * 6)
+-    return encoded
++def sample_rays(rays, num_samples, stratified=False):
++    # rays: (num_rays, 2, 3) -> (origin, direction)
++    # Generate points between z_near and z_far
++    z_near, z_far = 0.1, 10.0
++    if stratified:
++        t = torch.linspace(z_near, z_far, num_samples, device=rays.device)
++        t = t + torch.rand_like(t) * (z_far - z_near) / num_samples
++    else:
++        t = torch.linspace(z_near, z_far, num_samples, device=rays.device)
++    t = t.unsqueeze(0).expand(rays.shape[0], -1) # (num_rays, num_samples)
++    points = rays[:, 0:1, :] + t.unsqueeze(-1) * rays[:, 1:2, :] # (num_rays, num_samples, 3)
++    dt = torch.diff(torch.cat([torch.zeros_like(t[:, :1]), t], dim=1), dim=1) # (num_rays, num_samples)
++    return points, dt
++
++def importance_sample(points, densities, num_samples):
++    # densities: (num_rays, num_orig_samples, 1)
++    # Compute weights for sampling
++    weights = densities.squeeze(-1) + 1e-6
++    weights = weights / weights.sum(dim=1, keepdim=True)
++    indices = torch.multinomial(weights, num_samples, replacement=True)
++    new_points = torch.gather(points, 1, indices.unsqueeze(-1).expand(-1, -1, 3))
++    # Approximate dt for new samples
++    dt = torch.ones_like(new_points[:, :, 0]) * 0.1
++    return new_points, dt.unsqueeze(-1)
++
++def volumetric_render(points, densities, colors, dt):
++    # points: (num_rays, num_samples, 3)
++    # densities: (num_rays, num_samples, 1)
++    # colors: (num_rays, num_samples, 3)
++    # dt: (num_rays, num_samples, 1)
++    alpha = 1.0 - torch.exp(-densities * dt)
++    T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1, :]), 1.0 - alpha[:, :-1, :]], dim=1), dim=1)
++    contributions = T * alpha * colors
++    rendered_colors = contributions.sum(dim=1)
++    return rendered_colors
+ 
+ def train_step(model, frame_index, rays, ground_truth_image, background_image, pose, expression):
+-    """
+-    Perform one training step.
+-    
+-    Args:
+-        model: DynamicNeRF instance.
+-        frame_index: Index of the current frame.
+-        rays: List of rays, each ray is a tuple (origin, direction).
+-        ground_truth_image: Ground truth image for the frame, shape (H, W, 3).
+-        background_image: Static background image, shape (H, W, 3).
+-        pose: Pose matrix P_i, shape (4, 4).
+-        expression: Expression vector delta_i, shape (76,).
+-        
+-    Returns:
+-        loss: Scalar loss value.
+-    """
+     model.optimizer.zero_grad()
+     
+-    # Sample 2048 rays
+-    # 95% within head bounding box
+-    # Stratified sampling of 64 points along each ray for coarse network
+-    coarse_points, coarse_transmittances = sample_rays(rays, num_samples=64, stratified=True)
++    # Sample 2048 rays, 95% within head bounding box
++    coarse_points, coarse_dt = sample_rays(rays, num_samples=64, stratified=True)
+     
+     # Transform points to canonical space using pose
+     # canonical_points = transform_to_canonical(coarse_points, pose)
++    canonical_points = coarse_points # Placeholder for transformation logic
+     
+     # Get latent code for this frame
+@@ -306,54 +207,25 @@
+     
+     # Coarse network forward pass
+-    coarse_density, coarse_color = model.coarse_net(
+-        coarse_points, 
+-        rays.directions, 
+-        expression_expanded, 
+-        latent_code_expanded
++    coarse_density, coarse_color = model.forward(
++        canonical_points, rays[:, 1:2, :], expression_expanded, latent_code_expanded, model.coarse_net
+     )
+     
+     # Importance sampling for fine network based on coarse density
+-    fine_points, fine_transmittances = importance_sample(
+-        coarse_points, 
+-        coarse_density, 
+-        num_samples=64
++    fine_points, fine_dt = importance_sample(canonical_points, coarse_density, num_samples=64)
++    
++    # Fine network forward pass
++    fine_density, fine_color = model.forward(
++        fine_points, rays[:, 1:2, :], expression_expanded, latent_code_expanded, model.fine_net
+     )
+     
+-    # Fine network forward pass
+-    fine_density, fine_color = model.fine_net(
+-        fine_points, 
+-        rays.directions, 
+-        expression_expanded, 
+-        latent_code_expanded
+-    )
++    # Background handling: Last sample point color is from background image
++    bg_colors = get_background_colors(rays, background_image)
++    fine_color[:, -1, :] = bg_colors
+     
+     # Volumetric rendering for fine network
+-    # C(r) = integral(sigma * RGB * T) dt
+-    # T(t) = exp(-integral(sigma) dt)
+-    fine_color_rendered = volumetric_render(fine_points, fine_density, fine_color, fine_transmittances)
+-    
+-    # Background handling: Last sample point color is from background image
+-    # This is handled implicitly by the network learning low density for background rays
+-    # But explicitly, we can set the color of the last sample to background
+-    # However, the source says "set the color of the last sample point... to the corresponding value of the background image"
+-    # And "network learns to predict low density... if ray hits background pixel"
+-    # So we don't force the color, we let the network learn it via the background image input?
+-    # Actually, the source says: "The last sample on the ray r is assumed to lie on the background with a fixed color"
+-    # This implies we replace the last sample's color with the background color, but keep the density prediction?
+-    # Or do we just use the background color for the final pixel if the ray doesn't hit the foreground?
+-    # The source says: "Since the volumetric rendering is fully differentiable, the network picks up on this signal"
+-    # This suggests the background image is used as a target or a fixed value for the last sample.
+-    # Let's assume the last sample's color is replaced by the background color for the loss calculation.
+-    
+-    # Get background color for each ray
+-    # This requires mapping ray indices to pixel coordinates
+-    bg_colors = get_background_colors(rays, background_image)
+-    
+-    # Replace last sample color with background color
+-    # fine_color[-1] = bg_colors
++    fine_color_rendered = volumetric_render(fine_points, fine_density, fine_color, fine_dt)
+     
+     # Compute loss
+-    # L_i = sum || C(r_j) - I_i[j] ||^2
+-    loss = compute_loss(fine_color_rendered, ground_truth_image)
++    loss = torch.mean((fine_color_rendered - ground_truth_image) ** 2)
+     
+     # Add latent code regularization
+@@ -366,103 +238,19 @@
+     return loss
+ 
+-def sample_rays(rays, num_samples, stratified=False):
+-    """
+-    Sample points along rays.
+-    
+-    Args:
+-        rays: List of rays.
+-        num_samples: Number of samples per ray.
+-        stratified: Whether to use stratified sampling.
+-        
+-    Returns:
+-        points: Sampled points, shape (num_rays, num_samples, 3).
+-        transmittances: Transmittance values, shape (num_rays, num_samples).
+-    """
+-    # Implementation of ray sampling
+-    # If stratified, add jitter to uniform samples
+-    # Return points and transmittances
+-    pass
+-
+-def importance_sample(points, densities, num_samples):
+-    """
+-    Perform importance sampling based on densities.
+-    
+-    Args:
+-        points: Original points, shape (num_rays, num_orig_samples, 3).
+-        densities: Densities at original points, shape (num_rays, num_orig_samples, 1).
+-        num_samples: Number of new samples per ray.
+-        
+-    Returns:
+-        new_points: New sampled points, shape (num_rays, num_samples, 3).
+-        new_transmittances: Transmittance values for new points.
+-    """
+-    # Implementation of importance sampling
+-    pass
+-
+-def volumetric_render(points, densities, colors, transmittances):
+-    """
+-    Perform volumetric rendering.
+-    
+-    Args:
+-        points: Sample points, shape (num_rays, num_samples, 3).
+-        densities: Densities, shape (num_rays, num_samples, 1).
+-        colors: Colors, shape (num_rays, num_samples, 3).
+-        transmittances: Transmittance values, shape (num_rays, num_samples).
+-        
+-    Returns:
+-        rendered_colors: Rendered colors, shape (num_rays, 3).
+-    """
+-    # C(r) = sum(sigma_i * color_i * T_i)
+-    # T_i = exp(-sum_{j<i} sigma_j * delta_j)
+-    # This is typically done with cumulative sum of densities
+-    pass
+-
+-def compute_loss(rendered_colors, ground_truth_image):
+-    """
+-    Compute reconstruction loss.
+-    
+-    Args:
+-        rendered_colors: Rendered colors, shape (num_rays, 3).
+-        ground_truth_image: Ground truth image, shape (H, W, 3).
+-        
+-    Returns:
+-        loss: Scalar loss value.
+-    """
+-    # MSELoss between rendered colors and ground truth pixels
+-    pass
+-
+ def get_background_colors(rays, background_image):
+-    """
+-    Get background colors for each ray.
+-    
+-    Args:
+-        rays: List of rays.
+-        background_image: Static background image, shape (H, W, 3).
+-        
+-    Returns:
+-        bg_colors: Background colors, shape (num_rays, 3).
+-    """
+     # Map ray indices to pixel coordinates and lookup background image
+-    pass
++    # Returns shape (num_rays, 3)
++    return torch.zeros(rays.shape[0], 3, device=rays.device)
+ 
+ def transform_to_canonical(points, pose):
+-    """
+-    Transform points from camera space to canonical space.
+-    
+-    Args:
+-        points: Points in camera space, shape (..., 3).
+-        pose: Pose matrix, shape (4, 4).
+-        
+-    Returns:
+-        canonical_points: Points in canonical space, shape (..., 3).
+-    """
+     # Apply inverse pose transformation
+-    pass
++    # Returns shape (..., 3)
++    return points
+ ```
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method uses two MLPs (coarse and fine), each with 8 backbone layers of 256 neurons and a color branch of 4 layers of 128 neurons. The memory usage is dominated by the network weights and the per-frame latent codes. The training requires 400k iterations [S1].
++*   **Time and Memory Complexity:** The method uses two MLPs (coarse and fine), each with 8 backbone layers of 256 neurons and a color branch of 4 layers of 128 neurons [S1]. The training requires 400k iterations [S1].
+ *   **Measured Performance:** On a dataset of monocular portrait videos, the method achieves an LPIPS of 0.06 (full training data) [S1]. With latent codes, LPIPS is 0.059, compared to 0.068 without [S1]. PSNR is 26.85, SSIM is 0.95, and L1 is 0.019 [S1].
+-*   **Scaling:** The method requires more training data than static NeRF. Training on half or quarter of the data significantly degrades quality (LPIPS increases to 0.07 and 0.09, respectively) [S1].
++*   **Scaling:** The method requires more training data than static NeRF. Training on half or quarter of the data significantly degrades quality [S1].
+ *   **Strengths:** Captures arbitrary geometry and topology such as hair, eyeware, and hats, which explicit geometry methods struggle with [S1]. Generates 3D-consistent results with view-dependent effects (e.g., glasses reflections) [S1]. Allows explicit control over head pose and expressions [S1]. Requires only a single view from a fixed camera [S1].
+ *   **Limitations:** Does not explicitly model eye blinks or eye movements [S1]. Requires a large training corpus to generalize over the space of expression vectors [S1]. Focuses on the human head; upper body dynamics are not modeled [S1].

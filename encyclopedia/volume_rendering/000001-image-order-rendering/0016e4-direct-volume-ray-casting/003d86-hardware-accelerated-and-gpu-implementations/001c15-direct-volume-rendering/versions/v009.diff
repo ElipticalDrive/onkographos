@@ -1,0 +1,126 @@
+--- v008.md
++++ v009.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method implements the emission-absorption optical model defined in [Direct volume ray casting](19-direct-volume-ray-casting.md). The core pipeline for each pixel consists of ray generation, hardware-accelerated sampling, classification, and compositing [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md).
++The method implements the emission-absorption optical model defined in [Direct volume ray casting](19-direct-volume-ray-casting.md) [S7, unofficial]. The core pipeline for each pixel consists of ray generation, hardware-accelerated sampling, classification, and compositing [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md).
+ 
+ ### Inputs and Outputs
+@@ -15,5 +15,5 @@
+ ### Data Structures
+ 1.  **Volume Data**: Stored in 3D texture memory on the GPU. The volume is a 3D array $V_{i,j,k}$ where values are sampled at regular grid points [S9, unofficial][S13].
+-2.  **Transfer Function (TF)**: Maps scalar density values to optical properties (color $C$ and opacity $\alpha$). Often implemented as a 1D or 2D texture map with hardware-supported linear interpolation [S7, unofficial][S13].
++2.  **Transfer Function (TF)**: Maps scalar density values to optical properties (color $C$ and opacity $\alpha$) [S7, unofficial][S23, unofficial]. Often implemented as a 1D texture map with hardware-supported linear interpolation [S13].
+ 3.  **Front-Face Texture (Optional)**: A screen-size texture encoding the entry point’s texture coordinate and depth for every pixel, used to determine ray start positions efficiently [S12].
+ 4.  **Depth Texture (Optional)**: Stores the depth of entry points to maintain correct depth order, particularly when cutting planes are used [S12].
+@@ -22,8 +22,8 @@
+ 
+ 1.  **Ray Generation**:
+-    For each pixel $(i, j)$ in the image plane, compute the ray origin $\mathbf{x}$ and direction $\omega$. The ray is defined parametrically as $\mathbf{r}(t) = \mathbf{x} + \omega \cdot t$, where $t$ is the distance along the ray [S9, unofficial]. The ray origin is typically the intersection of the view ray with the volume's entry surface (front face) [S12].
++    For each pixel $(i, j)$ in the image plane, compute the ray origin $\mathbf{x}$ and direction $\omega$ [S9, unofficial]. The ray is defined parametrically as $\mathbf{r}(t) = \mathbf{x} + \omega \cdot t$, where $t$ is the ray parameter [S9, unofficial]. The ray origin is typically the intersection of the view ray with the volume's entry surface (front face) [S12].
+ 
+ 2.  **Sampling**:
+-    Discretize the ray into $N$ segments of length $\Delta t$. The position of the $i$-th sample is $\mathbf{x}_i = \mathbf{x} + i \cdot \Delta t \cdot \omega$ [S13]. Sample the scalar value $d_i$ from the volume at $\mathbf{x}_i$ using trilinear interpolation of the eight surrounding voxels [S7, unofficial][S13]. Trilinear interpolation is preferred for its simplicity and hardware support [S5, unofficial].
++    Discretize the ray into $N$ segments of length $\Delta t$ [S13]. The position of the $i$-th sample is $\mathbf{x}_i = \mathbf{x} + i \cdot \Delta t \cdot \omega$ [S13]. Sample the scalar value $d_i$ from the volume at $\mathbf{x}_i$ using trilinear interpolation of the eight surrounding voxels [S7, unofficial][S13]. Trilinear interpolation is preferred for its simplicity and hardware support [S5, unofficial].
+ 
+ 3.  **Classification**:
+@@ -36,8 +36,8 @@
+ 
+ 4.  **Compositing**:
+-    Accumulate the color and opacity from front-to-back using alpha blending. Initialize accumulated color $C'_{-1} = 0$ and opacity $\alpha'_{-1} = 0$. For each sample $i$ from $0$ to $N-1$:
++    Accumulate the color and opacity from front-to-back using alpha blending [S1, unofficial][S13]. Initialize accumulated color $C'_{-1} = 0$ and opacity $\alpha'_{-1} = 0$ [S15, unofficial]. For each sample $i$ from $0$ to $N-1$:
+     $$ C'_i = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i $$
+     $$ \alpha'_i = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i $$
+-    [S1, unofficial][S13]. The final pixel color is $C'_{N-1}$ and opacity is $\alpha'_{N-1}$.
++    [S1, unofficial][S13]. The final pixel color is $C'_{N-1}$ and opacity is $\alpha'_{N-1}$ [S13].
+ 
+ 5.  **Early Ray Termination (ERT)**:
+@@ -47,5 +47,5 @@
+ 
+ ```python
+-def direct_volume_rendering(volume_texture, transfer_function, ray_origin, ray_direction, step_size, max_samples):
++def direct_volume_rendering(volume_texture, transfer_function, ray_origin, ray_direction, step_size, max_samples, volume_bounds_min, volume_bounds_max):
+     """
+     Renders a single ray using direct volume rendering.
+@@ -53,9 +53,11 @@
+     Args:
+         volume_texture: 3D texture object supporting trilinear sampling.
+-        transfer_function: 1D or 2D texture mapping scalar density to (color, opacity).
++        transfer_function: 1D texture mapping scalar density to (color, opacity).
+         ray_origin: vec3, starting point of the ray.
+         ray_direction: vec3, normalized direction of the ray.
+         step_size: float, distance between samples (Delta t).
+         max_samples: int, maximum number of samples to prevent infinite loops.
++        volume_bounds_min: vec3, minimum bounds of the volume.
++        volume_bounds_max: vec3, maximum bounds of the volume.
+         
+     Returns:
+@@ -66,26 +68,24 @@
+     acc_opacity = 0.0
+     
+-    # Pre-calculate inverse opacity for compositing factor
+-    # (1 - acc_opacity) is the transmittance from the eye to the current sample
+-    
+     for i in range(max_samples):
+         # 1. Calculate current sample position
+         current_pos = ray_origin + ray_direction * (i * step_size)
+         
+-        # 2. Sample volume density at current position
++        # 2. Check if sample is within volume bounds to avoid out-of-bounds sampling
++        if not all(volume_bounds_min <= current_pos <= volume_bounds_max):
++            break
++            
++        # 3. Sample volume density at current position
+         # Trilinear interpolation is handled by hardware texture sampling
+         density = volume_texture.sample_trilinear(current_pos)
+         
+-        # 3. Classify: Map density to color and opacity
++        # 4. Classify: Map density to color and opacity
+         # Transfer function returns (color, opacity_density)
+         sample_color, opacity_density = transfer_function.sample(density)
+         
+-        # 4. Calculate segment opacity using Beer-Lambert law
+-        # alpha_segment = 1 - exp(-density * step_size)
+-        # Note: opacity_density is the density value mapped to opacity range [0,1]
+-        # If transfer function returns opacity directly as alpha_val:
++        # 5. Calculate segment opacity using Beer-Lambert law
+         alpha_segment = 1.0 - exp(-opacity_density * step_size)
+         
+-        # 5. Compositing: Front-to-back blending
++        # 6. Compositing: Front-to-back blending
+         # Transmittance from previous step
+         transmittance = 1.0 - acc_opacity
+@@ -98,5 +98,5 @@
+         acc_opacity += alpha_segment * transmittance
+         
+-        # 6. Early Ray Termination
++        # 7. Early Ray Termination
+         if acc_opacity >= 0.95:
+             break
+@@ -111,5 +111,5 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Aliasing**: Fixed sampling rates can cause "onion ring" artifacts. Mitigated by ray jittering (random offset) or adaptive sampling [S5, unofficial].
++*   **Aliasing**: Fixed sampling rates can cause "onion ring" artifacts. Mitigated by increasing the number of samples (reducing segment length) [S5, unofficial].
+ *   **Opacity Scaling**: When using fewer samples (larger step size), opacity must be scaled up to maintain correct visual intensity [S12].
+ *   **Boundary Conditions**: Rays may exit the volume before reaching `max_samples`. Entry and exit points should be calculated to limit the marching range [S12].
+@@ -125,14 +125,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of samples per ray. Early ray termination reduces the average $P$ for opaque regions [S1, unofficial].
+-*   **Memory Complexity**: $O(V)$, where $V$ is the volume of the dataset stored in 3D texture memory. Up to four data values per voxel may occupy 32 bits of graphics memory [S22, unofficial].
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
+ *   **Performance**: Limited by pixel fill rate and texture bandwidth. On mobile devices, moderate datasets (64×64×64) can achieve ~2.40 FPS [S10]. Loading new data from disk causes noticeable delay, but runtime interactions (navigation, TF changes) are typically smooth [S21, unofficial].
+ *   **Strengths**: Preserves all data information; no preprocessing (isosurface extraction) required; handles transparent and amorphous data well [S11, unofficial][S17, unofficial].
+-*   **Limitations**: Computationally expensive for large volumes; sensitive to transfer function choice; aliasing artifacts if undersampled [S5, unofficial][S25, unofficial].
++*   **Limitations**: Computationally expensive for large volumes [G]. Sensitive to transfer function choice [S7, unofficial]. Prone to aliasing artifacts if undersampled [S5, unofficial][S25, unofficial].
+ *   **When to Use**: Rendering amorphous data (clouds, fluids), medical imaging with transparent tissues, or when full internal structure visibility is needed [S2, unofficial][S10].
+ *   **When Not to Use**: When explicit surface geometry is required (use [Indirect Volume Rendering](3314-indirect-volume-rendering.md)), or when rendering unstructured data on GPU without specialized acceleration structures [S25, unofficial].
+ 
+ ## Background
+-Direct Volume Rendering was introduced in the late 1980s. Tuy and Tuy (1984) presented one of the earliest techniques using ray casting for iso-surfaces [S1, unofficial]. Levoy (1988) and Drebin, Carpenter, and Hanrahan (1988) provided foundational improvements for direct volume rendering, establishing the ray-casting pipeline and front-to-back compositing [S1, unofficial]. The method has since been widely adopted in medical imaging, scientific visualization, and mobile platforms using OpenGL ES and WebGL [S10].
++Direct Volume Rendering was introduced in the late 1980s [S1, unofficial]. Tuy and Tuy (1984) presented one of the earliest techniques using ray casting for iso-surfaces [S1, unofficial]. Levoy (1988) and Drebin, Carpenter, and Hanrahan (1988) provided foundational improvements for direct volume rendering, establishing the ray-casting pipeline and compositing techniques [S1, unofficial]. The method has since been widely adopted in medical imaging, scientific visualization, and mobile platforms using OpenGL ES and WebGL [S10].
+ 
+ ## Sources

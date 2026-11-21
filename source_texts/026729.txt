@@ -1,0 +1,2683 @@
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+1
+MesonGS++: Post-training Compression of 3D
+Gaussian Splatting with Hyperparameter Searching
+arXiv:2604.26799v2 [cs.CV] 7 May 2026
+Shuzhao Xie⋆ , Junchen Ge⋆ , Weixiang Zhang, Jiahang Liu, Chen Tang, Yunpeng Bai, Shijia Ge,
+Jingyan Jiang, Yuzhi Huang, Fengnian Yang, Cong Zhang, Xiaoyi Fan, Zhi Wang† , Senior Member, IEEE
+Abstract—3D Gaussian Splatting (3DGS) achieves high-quality
+novel view synthesis with real-time rendering, but its storage
+cost remains prohibitive for practical deployment. Existing posttraining compression methods still rely on many coupled hyperparameters across pruning, transformation, quantization, and
+entropy coding, making it difficult to control the final compressed
+size and fully exploit the rate-distortion trade-off. We propose
+MesonGS++, a size-aware post-training codec for 3D Gaussian
+compression. On the codec side, MesonGS++ combines joint
+importance-based pruning, octree geometry coding, attribute
+transformation, selective vector quantization for higher-degree
+spherical harmonics, and group-wise mixed-precision quantization with entropy coding. On the configuration side, it treats
+the reserve ratio and bit-width allocation as the dominant ratedistortion knobs and jointly optimizes them under a target
+storage budget via discrete sampling and 0–1 integer linear
+programming. We further propose a linear size estimator and
+a CUDA parallel quantization operator to accelerate the hyperparameter searching process. Extensive experiments show that
+MesonGS++ achieves over 34× compression while preserving
+rendering fidelity, outperforming state-of-the-art post-training
+methods and accurately meeting target size budgets. Remarkably,
+without any training, MesonGS++ can even surpass the PSNR
+of vanilla 3DGS at a 20× compression rate on the Stump scene.
+Our code is available at here.
+Index Terms—Compression, 3D Gaussians, discrete space
+search, mixed precision quantization
+I. I NTRODUCTION
+N
+OVEL view synthesis is a fundamental task in 3D vision
+and has significant applications in virtual reality [1]–
+[7], autonomous driving [8]–[10], and robotics [11]–[13]. This
+task involves using a collection of images captured from
+different viewpoints along with their corresponding camera
+poses, with the objective of generating highly realistic images
+from arbitrary viewpoints. By reparameterizing the point with
+a 3D Gaussian function in the point cloud, 3D Gaussian
+Splatting (3D-GS) [14] shows excellent quality and real-time
+rendering speed in this task. A Gaussian point consists of
+a 3D coordinate, spherical harmonics (SH) coefficients to
+⋆ Equal contribution. † Zhi Wang is the corresponding author.
+Shuzhao Xie, Junchen Ge, Shijia Ge, Fengnian Yang, and Zhi Wang are
+with Shenzhen International Graduate School, Tsinghua University, Shenzhen,
+China. Weixiang Zhang is with The Hong Kong University of Science and
+Technology, Hong Kong SAR, China. Jiahang Liu is with Harbin Institute of
+Technology, Shenzhen, China. Chen Tang is with The Chinese University of
+Hong Kong, Hong Kong SAR, China. Yunpeng Bai is with The University of
+Texas at Austin, USA. Jingyan Jiang is with Shenzhen Technology University,
+China. Yuzhi Huang is with Xiamen University, China. Cong Zhang is with
+Simon Fraser University, Canada. Xiaoyi Fan is with Jiangxing Intelligence
+Inc., China.
+represent its color, an opacity parameter, a scale vector, and a
+rotation quaternion. 3D-GS utilizes scale vectors and rotation
+quaternions to characterize the covariance matrix of the 3D
+Gaussian function. The coordinates of Gaussians are usually
+referred as geometry and the other parameters of Gaussians
+are referred as attributes. Despite the efficiency of 3D-GS,
+the sheer volume of Gaussians and the multi-channel attributes
+within each Gaussian result in a considerable file size. Notably,
+5.27 × 106 Gaussians are required to represent the bicycle
+scene in the Mip-NeRF 360 dataset [15], occupying 1.3
+GB of storage under 32-bit float precision. This sizable file
+poses challenges in the transmission and storage. Hence, it is
+essential to design a tailored codec for 3D Gaussians.
+Due to the heterogeneous attributes and intricate rendering
+pipeline of 3D Gaussian Splatting, designing an efficient
+compression framework for 3D Gaussians is highly nontrivial.
+Although a growing body of 3DGS compression methods has
+been proposed, many of them [16]–[50] operate during training
+and obtain compact models by modifying the optimization
+procedure itself. In many practical scenarios, however, one
+instead wishes to re-encode an already trained 3DGS model afterward, much like conventional image or video compression.
+This motivates post-training 3DGS compression [25]–[27],
+[50], [51], which starts from an existing representation and
+compresses it without retraining the full model from scratch.
+The central challenge of post-training compression is not
+only how to compress, but also how to configure the compression pipeline. A practical post-training codec [25]–[27],
+[50] typically involves multiple stages, such as pruning, transformation, quantization, and entropy coding, each introducing
+its own hyperparameters. These hyperparameters are strongly
+coupled: pruning changes the attribute distribution seen by the
+downstream transform and quantizer; transformation affects
+entropy and quantization sensitivity; and bit-width allocation
+determines both quality loss and final file size. As a result,
+existing post-training methods often rely on manual tuning
+or locally designed heuristics, which provide limited global
+control over the final compressed size and frequently force
+overly coarse quantization configurations. This issue becomes
+particularly problematic when the target file size is a hard
+constraint, as in transmission and storage-limited applications.
+To address this problem, we propose MesonGS++, a sizeaware post-training codec for 3D Gaussian compression. The
+key idea is to co-design the compression operators and the
+hyperparameter configuration mechanism, so that the codec is
+0000–0000/00$00.00 © 2021 IEEE
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+100
+60
+40
+20
+0
+100
+chair
+drums
+ficus
+hotdog
+lego
+materials
+mic
+ship
+80
+0
+20
+% of Importance
+% of Importance
+not only effective in reducing redundancy, but also structured
+for explicit size-constrained compression. On the codec side,
+MesonGS++ first prunes insignificant Gaussians using a joint
+importance metric that combines view-dependent rendering
+contribution with a view-independent volume prior, making
+pruning robust in both bounded and unbounded scenes. It
+then reduces attribute redundancy through two transformations
+that better suit entropy coding, namely replacing rotation
+quaternions with Euler angles and applying region adaptive
+hierarchical transform (RAHT) [52] to key attributes to expose low-entropy AC coefficients. For higher-degree spherical
+harmonics, we retain a subset directly and compress the
+remainder with vector quantization [53] to better preserve
+rendering quality. Geometry is compressed by octree voxelization and encoded by G-PCC [54]. The transformed attributes
+are quantized by group-wise mixed precision and encoded
+by torchac [55] so that different parameter groups can use
+different bit-widths, avoiding the quality bottleneck of coarse
+uniform quantization.
+On the configuration side, MesonGS++ treats the reserve
+ratio τ and group-wise mixed-precision bit allocation as the
+dominant rate-distortion knobs, and jointly optimizes them
+under a prescribed storage budget. Specifically, we formulate
+this configuration problem as a mixed integer nonlinear programming problem, and solve it efficiently through discrete
+sampling of τ and a 0-1 ILP for bit allocation. We further
+introduce a linear size estimator, use quantization loss as a
+proxy for visual degradation, and parallelize group-wise quantization to accelerate the search. When finetuning is allowed, a
+piecewise finetuning strategy is used to restore reconstruction
+quality. In this way, MesonGS++ unifies high-quality posttraining compression and accurate target-size control within a
+single framework.
+Our contributions can be summarized as follows:
+• We propose MesonGS++, a size-aware post-training
+codec for 3D Gaussian compression that unifies joint
+importance-based pruning, octree geometry coding, attribute transformation, selective vector quantization for
+higher-degree spherical harmonics, group-wise mixedprecision quantization, and entropy coding in a single
+framework.
+• We identify hyperparameter configuration as a central
+bottleneck of post-training 3DGS compression, and formulate the dominant configuration variables, namely the
+reserve ratio and group-wise bit-width allocation, as a
+budget-constrained optimization problem. We solve it
+efficiently through discrete sampling of τ , 0-1 ILP for
+mixed-precision bit allocation. A linear size estimator and
+a parallel group-wise quantization scheme are designed
+for acceleration.
+• Extensive experiments demonstrate that MesonGS++
+achieves over 34× compression while maintaining fidelity, surpassing state-of-the-art post-training methods in
+rate-distortion performance, with accurate target-size control and favorable speed-quality trade-offs. Remarkably,
+without any training, MesonGS++ can even surpass the
+PSNR of vanilla 3DGS at a 20× compression rate. The
+resulting compression configuration also exhibits trans-
+2
+40
+60
+% of Gaussians
+80
+(a) Bounded scenes.
+bicycle
+garden
+bonsai
+counter
+kitchen
+room
+stump
+80
+60
+40
+20
+0
+100
+0
+20
+40
+60
+% of Gaussians
+80
+100
+(b) Unbounded scenes.
+Fig. 1: Quantile-quantile curve. x% of the least important
+Gaussians contribute to y% of total importance. For both kinds
+of scenes, 40% of the Gaussians contribute over 80% of the
+importance. The importance refers to the contribution to the
+final rendering results.
+ferability to other compressed Gaussian representations.
+II. P RELIMINARY
+3D-GS [14] is an explicit 3D scene representation in the
+form of point clouds, utilizing Gaussians to model the scene.
+Each Gaussian is characterized by a covariance matrix Σ and
+a center point X, which is referred to as the mean value of
+the Gaussian:
+⊤ −1
+1
+(1)
+G(x) = e− 2 X Σ X .
+To maintain the positive definiteness of the covariance matrix Σ, 3D-GS decomposes Σ into a scaling matrix S =
+diag(s), s ∈ R3 and a rotation matrix R: Σ = RSS⊤ R⊤ . The
+rotation matrix R is parameterized by a rotation quaternion
+q ∈ R4 . The backpropagation process is illustrated in [14].
+When rendering novel views, the technique of splatting [56],
+[57] is employed for the Gaussians within the camera planes.
+As introduced by [58], using a viewing transform denoted as
+W and the Jacobian J of the affine approximation of the
+projective transformation, the covariance matrix Σ′ in camera
+coordinates system can be computed by Σ′ = JWΣW⊤ J⊤ .
+In summary, each element of 3D Gaussians has the following parameters: (1) a 3D center µ ∈ R3 ; (2) a rotation
+quaternion q ∈ R4 ; (3) a scale vector s ∈ R3 ; (4) a color
+feature defined by spherical harmonics coefficients SH ∈ Rd ,
+with d = 3(f + 1)2 , where f is the harmonics degree; and (5)
+an opacity logit o ∈ R. Specifically, for each pixel, the color
+and opacity of all the Gaussians are computed using Eq. 1.
+The blending of N ordered points that overlap the pixel is
+given by:
+i−1
+X
+Y
+C=
+ci αi
+(1 − αj ).
+(2)
+i∈N
+j=1
+Here, ci and αi represent the density and color of this point
+computed by a Gaussian with covariance Σ multiplied by an
+optimizable per-point opacity and SH color coefficients.
+III. M ETHODOLOGY
+In this section, we first present the proposed post-training
+compression pipeline for 3D Gaussian Splatting, as illustrated
+in Fig. 2. The pipeline comprises five stages: (1) pruning insignificant Gaussians using a joint importance metric
+that combines view-dependent and view-independent cues;
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+3
+o
+x
+q
+s
+spherical harmonics (SH)
+…
+Pretrained 3DGS
+…
+𝑠#
+RAHT
+𝑠! 𝑠"
+View-dependent
+1$ D SH coeff.
+View-independent
+Octree
+Sorted by
+importance
+…
+Codebook
+AC
+DC
+2
+I
+Keep
+Attributes Transformation
+Sort
+Pruning
++
+g
+1
+9
+11
+2
+12
+13
+13
+10
+11
+1-𝝉
+Pruned
+Gaussians
+1
+Quantization
+Group
+Flatten
+3
+Gaussians Pruning
+Quantized
+coeff.
+DC
+coeff.
+Metadata
+Codebook
+Bit-width
+Setting Q
+Mixed Precision Quantization
+Min &
+Max
+Octree
+4
+SH
+Entropy Coding
+Fig. 2: Overview of the proposed compression pipeline. ⃝
+1 We first prune insignificant Gaussians using a joint importance
+metric that combines view-dependent and view-independent cues. 2
+⃝ We then compress geometry by building an octree to
+obtain voxelized coordinates, and apply RAHT to opacity, quaternion, and degree-0 spherical harmonics. For higher-degree
+SH coefficients, we retain a subset directly and compress the remainder with vector quantization to preserve rendering quality.
+RAHT is not applied to scales when the quantization bit-width is 8. 3
+⃝ Next, we perform group-wise quantization on the
+RAHT-transformed AC coefficients, allowing different parameter groups to use different bit-widths. ⃝
+4 Finally, all components
+are encoded by our entropy coding scheme. Since the pipeline involves numerous interdependent hyperparameters whose joint
+optimization is critical to achieving the best rate-distortion performance, we further introduce an automated hyperparameter
+configuration algorithm; see Fig. 5.
+(2) compressing the geometry via an octree structure over
+voxelized coordinates; (3) transforming important attributes
+with the Region Adaptive Hierarchical Transform (RAHT)
+and applying vector quantization to higher-degree spherical
+harmonics (SH) coefficients; (4) applying group-wise quantization to the RAHT-transformed AC coefficients, allowing
+different attribute groups to use different bit-widths; and (5)
+encoding all components via entropy coding. After that, to
+find the optimal hyperparameter configuration, specifically
+the reserve ratio and quantization bit-widths, under a given
+size constraint, we formulate the search as a Mixed Integer
+Nonlinear Programming (MINLP) problem and propose an
+efficient hierarchical solver, as illustrated in Fig. 5.
+Here P is the pixel set that are overlapped by the Gaussian
+g, and i is the rank of Gaussian g in a set of Gaussians that
+overlap with the pixel p. In contrast to VQRF [59], where the
+importance score is the mean value of corresponding sample
+points, our method allows for the direct recording of the
+importance score throughout the testing phase. LightGaussian
+[17] uses the opacity (αi in Eq. 3) as the view-dependent
+score. They have not considered the masking caused by other
+Gaussians. The usage of backward gradients as importance
+scores in C3DGS [16] is not ideal for 3D-GS that is not welllearned. Typically, Gaussians that are not well-learned exhibit
+larger gradients. However, these poorly-learned Gaussians may
+not be the significant ones, making the pruning strategy of
+C3DGS ineffective in inadequately learned 3D Gaussians.
+A. Gaussians Pruning
+The view-independent score Ii is given by Ii = (Vnorm )β .
+Here the volume V is the product of the scale vector. To
+obtain Vnorm , we normalize the V by the 90% largest of all
+sorted Gaussians and clip the range between 0 and 1, β is the
+hyperparameter to control the size of Ii .
+As 3D-GS has a huge number of points, pruning unimportant Gaussians is a necessary step. We first define the
+importance score of each Gaussian. Here the importance score
+refers to the contribution to the final rendering results. For a
+Gaussian g, we define its importance score Ig as the product
+of the view-dependent importance score Id and the viewindependent importance score Ii : Ig = Id Ii . Based on Eq. 2,
+we define view-dependent importance score Id as:
+Id =
+X
+p∈P
+αi
+i−1
+Y
+(1 − αj ).
+j=1
+(3)
+In Fig. 1, we sort the importance score and visualize its
+cumulative distribution function (CDF). We notice that 40%
+of the Gaussians contain over 80% of the importance. Hence,
+we use a importance threshold τ to set the reserve ratio of
+Gaussians, which means that we cut the percent of 1 − τ of
+the least important Gaussians.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+𝒂𝟎
+𝑥
+𝒂𝟏 𝒂𝟐
+4
+32 bit
+𝒂𝟎
+1 bit
+𝒅𝟐
+𝒅𝟏
+𝒄𝟐
+𝑦
+𝑎$
+𝑑$
+= 𝑇$ 𝑎
+𝑐$
+%
+𝒄𝟏
+𝑑%
+𝑑
+= 𝑇% $
+𝑐%
+𝑎&
+Fig. 3: 2D example of RAHT.
+Fig. 4: Effect of 1+ D spherical harmonics coefficients. “FT” refers to finetune.
+B. Geometry Compression
+After pruning, we compress the 3D positions with the
+octree structure. An octree recursively divides occupied voxels
+into 8 subvoxels until the required resolution is reached.
+The occupancy symbol is composed of 8 bits (1 to 255 in
+decimal), where each bit indicates the occupancy status of the
+corresponding subvoxel. We use the depth d to control the size
+of the octree. When multiple Gaussians existing within a voxel,
+we average the corresponding attributes for deduplication.
+C. Attribute Transformation
+We categorize attributes into important attributes and unimportant attributes. Important attributes include opacity, scales,
+rotations/Euler angles, and 0D-SH coefficients. Here, 0DSH coefficient refers to SH coefficients in degree 0. The
+unimportant attributes refer to the SH coefficients in degrees
+greater than 0.
+Replacement. We replace the rotation quaternion (4 numbers)
+with the corresponding Euler angles (3 numbers). The Euler
+angles are three angles to describe the orientation of a rigid
+body with respect to a fixed coordinate system. This replacement can reduce a number of storage.
+Specifically, for a quaternion q = [w, x, y, z] ∈ R4 , we
+calculate the euler angle e = [ϕ, θ, ψ] ∈ R3 with:
+2
+2
+atan2(2(wx
++ yz), 1 − 2(x
+p
+p + y ))
+
+π
+− 2 + 2atan2( 1 + 2(wy − xz), 1 − 2(wy − xz)) 
+.
+atan2(2(wz + xy), 1 − 2(y 2 + z 2 ))
+(4)
+During decoding, we directly build the rotation matrix R from
+the Euler angles by:
+
+
+
+
+
+
+
+
+
+Our w/o FT
+Cθ Cψ
+Cθ Sψ
+−Sθ
+−Cϕ Sψ + Sϕ Sθ Cψ
+Cϕ Cψ + Sϕ Sθ Sψ
+Sϕ Cθ
+
+Sϕ Sψ + Cϕ Sθ Cψ
+
+−Sϕ Cψ + Cϕ Sθ Sψ 
+. (5)
+Cϕ Cθ
+Here Sθ and Cθ represents sine and cosine of θ. Similarly, ϕ
+and ψ follow the same notation.
+As the covariance matrix is symmetry, replacing the scales
+and rotation quaternions (7 numbers) with the upper triangular part (6 numbers) of the covariance matrix seems to
+be an alternative. This strategy can also reduce the storage
+of one number. Our contemporary, C3DGS [16], proposes a
+similar covariance-based replacement strategy. However, the
+subsequent quantization steps will cause a large number of
+covariance matrices to become indefinite, resulting in degraded
+rendering outcomes. In contrast, using Euler angles can ensure
+that the positive definiteness of covariance is not compromised.
+The comparison results are illustrated in Fig. 8.
+Region Adaptive Hierarchical Transform. To reduce signal
+redundancy in important attributes, we apply RAHT [52] to the
+remained attributes. RAHT involves taking voxelized coordinates from octree and converting the corresponding attributes
+into transformed coefficients. Each channel of the transformed
+coefficients consists of a direct current (DC) coefficient and
+serveral alternating current (AC) coefficients. The low entropy
+of the AC coefficients enables the subsequent entropy coding
+procedure to achieve larger compression rate. Here we briefly
+introduce the RAHT through a 2D example. Fig. 3 shows how
+to apply RAHT to a0 , a1 , and a2 . First, RAHT merges the
+coefficients along the x axis with transform T1 :
+T1 = √
+1
+w1 + w2
+ √
+w
+√1
+− w2
+
+√
+w
+√ 2 ,
+w1
+(6)
+where wi is the number of Gaussians in ai (1 for leaf nodes;
+the sum of child weights otherwise). Applying T1 to a1 and a2
+yields DC coefficient d1 and AC coefficient c1 ; d1 is further
+transformed with a0 , while AC coefficients are retained for
+encoding. Unmatched coefficients (e.g., a0 ) pass to the next
+layer, ultimately producing one DC coefficient d2 and two AC
+coefficients c1 , c2 . Weight coefficients are recovered from the
+octree during decoding.
+Clustering 1+ D SH Coefficients. The size of spherical
+harmonics (SH) coefficients takes up 85.7% in a 3D Gaussians
+file. In the middle of Fig. 4, after applying 1-bit quantization to
+the 1+ D SH coefficients, only the reflectance is affected, while
+the overall structure and color remain unchanged. Therefore,
+quantization is not the optimal choice for 1+ D SH coefficients.
+We employ vector quantization to significantly reduce the size
+of these SH coefficients. Specifically, we use a codebook and
+a corresponding index mapping table to connect the origin
+vectors with the vectors in the codebook. The right side
+of Fig. 4 shows the final result of our method. To reduce
+memory occupation and encoding time, a batched clustering
+strategy [60] is used. Clustering runs for multiple iterations
+to refine the results. However, replacing every SH vector with
+a codebook entry inevitably introduces approximation errors,
+particularly for high-importance Gaussians. To mitigate this,
+we adopt a budget-first allocation strategy. We first estimate
+the compressed size of essential components, including octree geometry, VQ indices, base codebook, and quantized
+RAHT coefficients. Then, we allocate any remaining budget
+to preserve the original 1+ D SH coefficients of the top-ranked
+Gaussians by importance score. These retained vectors are
+appended to the codebook and encoded jointly.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+Hyperparameter Searching
+Pick 𝝉 & 𝐐
+Compression
+F
+T
+Finetune
+Hierachical ILP Solver
+1 Size budget 𝑆!
+0-1
+ILP
+Target
+Size
+Trial & Error Loop
+5
+0
+2
+7
+9
+7
+Parallel Group-wise Quantization
+7
+7
+Size budget for
+a channel 𝑆!
+11
+1
+9
+7
+7
+0-1 ILP
+7
+10
+8
++ 9
+K0
++ 7
+K1
++ 10
+K2
+Group Bit-width Kernel
+Time
+% & Metadata
+𝐀
+Fig. 5: Procedure of Hyperparameter Search. We formulate the hyperparameter search problem as the mixed integer
+programming, with the optimization goal of reducing quality distortion and constraint by the size. As shown in the circle in
+the left, each iteration is started by adjusting the reserve ratio τ and bit-width setting Q. Algo. 1 presents our hyperparameter
+optimization algorithm, which aims to meet the size target while maximizing quality. To accelerate the bit-width setting solver,
+we use 0–1 ILP to compute the bit-width for each channel, and then construct a 0–1 ILP per channel to solve for the bit-width
+of each group. Additionally, we implement parallel group-wise quantization to further speed up the process.
+D. Group-wise Attribute Quantization
+After applying RAHT to important attributes, we save the
+DC coefficient in float, and quantize the AC coefficients. We
+use group-wise quantization [61]–[64] to prevent significant
+quality degradation caused by the coarse-grained channel-wise
+quantization. Specifically, we first partition a channel of attributes into multiple groups. Then we quantize a quantization
+group c with:
+c
+(7)
+cq = ⌊clamp( + Zc , 0, 2b − 1)⌉,
+Sc
+where
+max(c)
+max(c) − min(c)
+, Zc = ⌊2b −
+Sc =
+⌉.
+(8)
+b
+2
+Sc
+Here b refers to the bit-width, ⌊·⌉ represents the roundingto-nearest function, and cq refers to the quantized attributes.
+Besides, function clamp(·) specifies a range of values. Values
+below the minimum are set to the minimum. Values above the
+maximum are set to the maximum.
+Note that we do not apply RAHT to the scale vectors when
+the quantization bit is 8. The reason is that the activation
+function of the scale vector is exponential function, which
+magnifies the errors caused by transformation and quantization. We save the minimum and maximum values of all blocks
+of quantized attributes for decoding.
+E. Hyperparameter Searching as MINLP
+Motivation. The previous sections introduced efficient compression methods, but these methods also introduce many hyperparameters, such as the reserve ratio τ and the quantization
+bit-width of each attribute. For a given size budget, there
+exists an optimal hyperparameter configuration that maximizes rendering quality, representing the Pareto-optimal tradeoff between size and visual quality within this framework.
+However, these hyperparameters are difficult to tune manually,
+and a naive configuration is unlikely to reach this optimum.
+Therefore, a principled search strategy is required to identify
+the optimal hyperparameter configuration under a specified
+size constraint.
+Overview. Specifically, we first introduce the compression
+pipeline. Then, we formulate the size-aware 3DGS compression as a mixed integer nonlinear programming (MINLP)
+problem, aiming to search for the suitable values of the
+reserve ratio τ and bit-width settings Q. Next, we decouple
+the MINLP into two subproblems: (1) discrete sampling of
+τ , and (2) solving for Q using integer linear programming
+(ILP) with a fixed τ . To fit the ILP solver, we establish
+an analytical relationship between Q and size. To obtain
+more accurate solutions, we further model the ILP as a 0–
+1 ILP problem and refine the size estimation through multiple
+iterations. To accelerate ILP solver, we adopt the quantization
+loss to estimate the visual quality degradation and implement
+a CUDA kernel to accelerate group-wise quantization. Finally,
+we describe the finetune strategy.
+Problem Formulation. Given the above pipeline, our goal is
+to search for suitable values of the τ and Q under a given size
+constraint, while maximizing visual quality. Hence, we formulate this problem as a mixed integer nonlinear programming
+(MINLP) model:
+minimize
+M(τ, Q),
+subject to
+S(τ, Q) ≤ Size Budget,
+τ,Q
+(9)
+τ ∈ [0, 1],
+Q ∈ [1, 32]C×B ∩ ZC×B .
+Here, M(·) and S(·) are the quality loss and the estimated
+size of compressed model under the configuration of {τ, Q},
+respectively. “Mixed” in MINLP means that the variable types
+include both discrete (Q) and continuous (τ ) variables. A
+detailed introduction of MINLP are proposed in the supplementary material.
+Structure Decoupling. Since both M(·) and S(·) are nonlinear functions of {τ, Q}, and the search space is extremely
+large, solving this problem directly is highly challenging.
+For example, even when C = 8 and B = 8, the discrete
+combinatorial space already contains 3264 possibilities—far
+beyond astronomical scale! Moreover, optimizing the continuous variable τ within this vast space further increases the
+difficulty. Besides, existing MINLP solvers [65], [66] often
+require hours to find a reasonable solution.
+However, we observe that only τ is continuous among these
+variables, while all others are integers. Besides, by fixing τ ,
+we find that the compressed size varies approximately linearly
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+6
+size for more accurate results. After each iteration, the newly
+determined bit-width setting is used to store the results. If the
+stored result size Sa is sufficiently close to the target size
+ST , the search is terminated. For each pair of {τ, Q}, we
+compute the estimated quality Ω and retain the pair that yields
+the highest quality. We will introduce Ω below.
+Algorithm 1: Hyperparameter Optimization
+Input: Size budget ST and a pre-trained 3DGS model
+Output: Hyperparameter set Φ∗ = {τ ∗ , Q∗ }
+C×B
+1 Initialize bit-width setting Q ← {8}
+;
+∗
+2 Initialize the best quality M ← 0;
+3 for τ ∈ {τ1 , τ2 , τ3 , ...} do
+4
+Compress model with current hyperparameters, obtain
+size Sa ;
+5
+if 2 × Sa < ST then
+6
+continue;
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+while true do
+S∆ ← Sa − ST ;
+/* 01-ILP (·) solver takes Q and S∆
+as input.
+*/
+Search bit-widths via 01-ILP: Q ←
+01-ILP(Q, S∆ );
+Compress model with τ and updated Q, obtain new
+size Sa ;
+T|
+if |Sa|S−S
+< 0.05 then
+T|
+break;
+/* Retain the one with the best
+quality.
+if Ω(Q) > M ∗ then
+M ∗ ← Ω(Q);
+Φ∗ ← {τ, Q};
+*/
+return Φ∗ ;
+Binary ILP for Q. The input of mixed precision quantization
+is the important attributes A, which can be seen as a 2Dmatrix. We divide this 2D-matrix into C × B blocks and there
+are Q quantization options for each attribute block (e.g., 16
+options for 1–16 bits). The search space of the ILP problem is
+(C × B)Q . The objective of solving the ILP is to find the best
+bit configuration in this search space that optimally balances
+quality loss Ω and the a size limit S. Besides, we define the
+bit-width variables as Q ∈ {0, 1}C×B×Q , which means that
+we use a one-hot vector v ∈ {0, 1}Q , |v| = 1 to represent
+the bit-width setting for an attribute block. In all, the 0–1
+ILP model tries to find the right bit-width setting Q can be
+formulated as
+minimize
+Ω(Q),
+subject to
+S(Q) ≤ Size Budget,
+Q
+∀(i, j) ∈ [0, C) × [0, B),
+Q
+X
+(10)
+Qi,j,q = 1.
+q=1
+with the bit-width setting Q. Here, the 8-bit value on the
+horizontal axis indicates that all quantization groups use an
+8-bit width. Additionally, we found that the file size under the
+16-bit setting is approximately twice that of the 8-bit setting,
+suggesting that the 16-bit file size can be estimated based
+on the 8-bit file size. Hence, if we fix the value of τ and
+approximate M and S as functions that are linearizable with
+respect to Q, then this problem can be decoupled into two
+problems: 1) using discrete sampling to search and fix the
+value of τ , and then 2) solve the Q via ILP. The advantage
+of such a decoupling lies in the efficiency of recent ILP
+solvers [67], [68], which just requires a few seconds.
+F. Solve the MINLP
+Discrete Sampling of τ . Based on the above observations,
+we propose to traverse the value of reserve ratio τ . Then,
+we can search the bit-width settings Q by solving the ILP.
+Hence, the hyperparameter searching algorithm for size-aware
+3D Gaussian compression are proposed in Algo. 1. The input
+is a target size and a pretrained 3DGS, and the output is the
+optimal hyperparameters set Φ∗ = {τ ∗ , Q∗ } that can satisfy
+the size constraint while maximizing visual quality. We iterate
+over all possible values of τ . Here, 2 × Sa < ST refers to
+the situation where, if doubling the bit-width setting under the
+current configuration (up to a maximum value of 16) cannot
+achieve the target size, it indicates that τ is too small, and
+thus, more Gaussian points need to be retained. For the bitwidth setting search, we formulate the problem as a 0–1 ILP
+task. The ILP solver takes Q and S∆ as inputs, where Q
+serves as the initialization for each search iteration, enabling
+faster convergence, and S∆ is used to calibrate the estimated
+Here, S(Q) and Ω(Q) denote the estimated file size and
+estimated quality loss under a bit-width setting Q, respectively.
+Next, we introduce the details of the Ω and S.
+Hierarchical Solver. As there are (C × B)Q options for Q,
+if we set (C, B, Q) to (10, 60, 16), a typically setting for
+compressing 3DGS, then there are 2.96 × 10722 options. In
+such a giant search space, figuring out a suitable bit-width
+setting is time-consuming. Neither of GPU-based [68] or CPUbased [67] solver can solve the this in minutes. Hence, to
+accelerate the solving process, we solve this 0–1 ILP problem
+with two steps. As shown in the left bottom of Fig. 2, at
+the first step, we search the channel-level bit-width setting
+Qc ∈ [1, 16]C . Then, we calculate the size budget for each
+channel of attributes based on the Qc . For example, the size
+Q
+budget of channel i can be computed by: Sc = ST P Qc,ic,i .
+At the second step, we solve the group-level bit-width setting
+Qg ∈ [0, 16]B for each channel based on the size limit Sc .
+Acceleration. We propose the following techniques to accelerate the problem solving. Since computing the quality
+metric like PSNR requires traversing the entire training set
+and evaluating the metric, it takes at least 10 seconds, which
+significantly slows down the search process. To solve this,
+we use quantization loss Ω(·) to replace the metric function
+M(·). Here, we assume that the bit-width of each group are
+independent of one another. This allows us to precompute the
+quantization loss of each group of attributes separately, and
+it only requires Q times quantizations. As for the metric of
+quality loss, we use the distance between the original attributes
+and the restored attributes1 . Formally, we can precompute the
+1 Similar assumption can be found in [69], [70].
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+27.0
+26.8
+26.6
+26.4
+26.2
+40
+50
+Size (MB)
+23.4
+23.2
+23.0
+22.8
+22.6
+60
+FCGS (ICLR 25)
+Tanks & Temples
+MesonGS (ECCV 24)
+PSNR (dB)
+SizeGS (MM 25)
+PSNR (dB)
+PSNR (dB)
+MesonGS++ (Ours)
+Mip-NeRF 360
+7
+20
+25
+Size (MB)
+30
+FlexGaussian (MM 25)
+Deep Blending
+29.6
+29.4
+29.2
+29.0
+28.8
+30
+40
+Size (MB)
+50
+Fig. 6: Rate-distortion curves for post-training compression. MesonGS++ achieves better performance across diverse datasets
+and size budgets.
+estimated quality loss matrix Ω ∈ RC×B×Q with:
+Ω(i, j, b) = |Âbi,j − Ai,j |.
+G. Entropy Encoding
+(11)
+The | · | can be 1-norm, 2-norm, or ∞-norm. We plot the
+relationship between PNSR and Ω in the supplementary material, which reveals that minimizing Ω is equal to maximizing
+PSNR. Besides, we set Q as 16 to prune the search space.
+Finally, we implement a CUDA kernel to accelerate the
+quantization process, in which each quantization group is
+quantized in parallel, as shown in Fig. 2.
+Size Estimator. A compresssed 3DGS file constains these
+components: 1) voxelized coordinates, 2) quantized attributes,
+and 3) metadata, which is used to restore the coordinates and
+attributes. Fortunately, we can store the voxelized coordinates
+and metadata to obtain the accurate compressed size in a
+few seconds. Then the challenge of size estimator lies in
+estimating the size of quantized attributes. This is to say,
+we only have to establish a analytical relationship between
+the compressed file size and the bit-width settings, the actual
+size of other components can be obtained by saving them to
+storage. Besides, the size estimator must be a linear function
+of the bit-width variables.
+According to information theory [71], the lower
+P bound of
+bit consumption can be calculated by τ N × (− i pi log2 pi ).
+However, such a size estimator is not suitable for the formulation of ILP. The reason is that, for each searching iteration, we
+have to quantize the attributes into integers with the candidate
+bit-width setting and calculate the probability of each values
+to derive the bit consumption, which costs a lot of time.
+Moreover, the relationship between the bit-width settings and
+the estimated size is non-linear, which cannot satisfy the
+linear requirement of the ILP. Hence, an explicit and linear
+relationship between the size S and the bit-width setting Q
+must be established. Thus, we estimate the size by
+X
+S(Q) =
+Pij Qij + C + S∆ .
+(12)
+i,j
+Here, P ∈ RC×B refers to size of quantization groups. C refers
+to the accurate storage consumption of the metadata and the
+coordinates, which can be obtained by storing them to the disk
+directly. This process is very fast. Of course, such a estimation
+for the compressed file size is not accurate. To calibrate it, we
+update the S∆ multiple times, as shown in Algo. 1.
+The final file contains the following components: (1) Octree, i.e., quantized 3D coordinates; (2) DC coefficients and
+quantized coefficients; (3) Codebook and the corresponding
+mapping table, or the preserved original 1+ SH coefficients
+under big size budget; (4) Metadata: Min-Max values of
+each block of quantized coefficients, octree depth, number of
+blocks, and bit-width settings. Notably, the DC coefficients,
+codebook, and metadata are stored in floating-point format,
+whereas other components are saved as integers. We compress
+the octree with G-PCC, and the remained elements are coded
+and packed via torchac [55] and LZ77 [72], [73].
+We also provide a fine-tuning module for practical convenience. Specifically, we directly quantize the coordinates and
+attributes without applying any transformations. To improve
+compression quality, we fine-tune the model for multiple
+epochs after each of the point pruning and coordinate quantization steps to restore reconstruction quality. In the final round
+of fine-tuning, the coordinates are fixed because, when G-PCC
+is used to compress coordinates, the decompressed coordinates
+are unordered and do not correspond to the original attribute
+ordering. To align coordinates and attributes, we compute
+the Morton order based on the coordinates after the secondstage fine-tuning to jointly sort both, and then construct the
+quantization groups based on the attributes. Consequently,
+modifying the coordinate values after quantization may alter
+the Morton order, disrupting the previously constructed quantization groups and invalidating the searched bit-width settings.
+IV. E XPERIMENTS
+We conduct extensive experiments to evaluate rate-distortion
+performance, target-size control, and visual fidelity under the post-training setting. Compared with existing posttraining 3DGS compression methods, MesonGS++ consistently achieves favorable compression-quality trade-offs across
+diverse size budgets, while preserving rendering quality and
+satisfying target storage constraints more accurately.
+Datasets and Compression Settings. (1) Mip-NeRF 360.
+The Mip-NeRF 360 dataset [15] contains five outdoor and
+four indoor scenes. Each scene contains 100 to 300 images.
+We use the images at 1600×1063. (2) Tank&Temples. This
+dataset [74] contains two scenes, including train and truck.
+(3) Deep Blending. This dataset [75] contains two scenes,
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+8
+GT
+Room
+3DGS
+377 MB/34.89 dB
+FlexGaussian
+22.0 MB/33.65 dB
+FCGS
+15.2 MB/33.67 dB
+Ours(Small)
+15.2 MB/34.52 dB
+Ours(Large)
+22.0 MB/34.70 dB
+Stump
+1174 MB/27.62 dB
+58.0 MB/26.47 dB
+56.5 MB/26.90 dB
+56.3 MB/27.56 dB
+57.9 MB/27.78 dB
+Garden
+1380 MB/27.62 dB
+89.8 MB/26.58 dB
+69.0 MB/27.09 dB
+68.0 MB/27.28 dB
+89.7 MB/28.52 dB
+Drjohnson
+805 MB/35.30 dB
+29.2 MB/32.89 dB
+34.8 MB/33.05 dB
+29.2 MB/34.47 dB
+34.8 MB/34.70 dB
+Fig. 7: Qualitative comparison. MesonGS++ preserves visual fidelity after compression, producing renderings that closely
+match the original 3DGS model. Compared with competing post-training codecs, our method better preserves reflective regions
+and fine local structures while introducing fewer visible artifacts. Notably, on the Stump and Garden scenes, our method not
+only achieves higher PSNR than the original 3DGS but also attains compression rates of 20× and 15×, respectively.
+including drjohnson and playroom. We evaluate rendering
+quality and compression performance using PSNR, SSIM [76],
+LPIPS [77], and size. If not otherwise specified, all the
+metrics are evaluated on the test set. When calculating the
+important score, we only use the training dataset. To obtain
+the pre-trained 3D Gaussians for compression, we train 30, 000
+iterations and then save the checkpoints for both datasets.
+We set the background as white. Our code is built on the
+SplatWizard [28].
+Baselines. We compare our method with state-of-the-art
+post-training compression methods, including MesonGS [25],
+FCGS [51], SizeGS [26], and FlexGaussian [50]. Although
+FCGS employs a feed-forward compressor, it operates on the
+same input as post-training methods, i.e., a pre-trained 3DGS
+model, making the comparison fair.
+A. Main Results
+Rate Distortion Curves. As shown in Fig. 6, MesonGS++
+consistently achieves better compression-quality trade-offs
+than prior post-training methods across diverse datasets and
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+3.5M/100%
+3/3.3M/40%
+2/3.4M/42%
+1/3.6M/46%
+0.5/3.8M/52%
+0.2/5.3M/92%
+9
+0.1/5.5M/92%
+Fig. 8: Euler-angle-based vs. Covariance-based. “A/B/C”
+refers to the “λc / the size of the compressed file / the percent
+of positive-definite covariance matrices”. Replacing scales and
+rotations with covariance leads to white line artifacts, which
+greatly affects the visual effect. We adjust the final file size
+by compressing a portion of the covariance using the λc .
+TABLE I: Ablation study of different stages. “HS” refers to
+searching hyperparameters as MINLP.
+Stages
+3D-GS
++Prune
++Voxel
++Replace
++Cluster
++RAHT
++HS
+PSNR
+33.37
+30.52
+30.44
+30.44
+29.71
+29.71
+29.47
+C3dgs-color
+C3dgs-cov
+LightGaussian
+Our
+C3dgs-color C3dgs-cov
+Covariance-based replacement
+Euler-angle
+Synthetic-NeRF
+SSIM
+LPIPS
+Size
+0.9696
+0.0305
+68.55
+0.9597
+0.0383
+20.99
+0.9592
+0.0388
+20.72
+0.9592
+0.0388
+20.36
+0.9513
+0.0469
+5.63
+0.9513
+0.0469
+5.63
+0.9476
+0.0511
+1.14
+Latency (s)
+–
+22.73
+5.98
+0.00
+96.75
+0.04
+111.83
+PSNR
+28.98
+28.69
+28.68
+28.68
+27.74
+27.74
+27.20
+SSIM
+0.8647
+0.8612
+0.8610
+0.8610
+0.8427
+0.8427
+0.8238
+Mip-NeRF 360
+LPIPS
+Size
+0.1931
+641.73
+0.1970
+265.94
+0.1971
+260.58
+0.1971
+255.61
+0.2187
+79.35
+0.2187
+79.35
+0.2402
+18.43
+Latency (s)
+–
+165.98
+238.78
+0.02
+267.66
+0.19
+253.35
+size budgets. These results verify that combining an effective
+post-training codec with size-aware hyperparameter configuration improves both rate-distortion performance and target-size
+controllability.
+Visualization Results. In Fig. 7, we present the rendering
+results and the corresponding error maps. MesonGS++ better
+preserves reflective regions and fine local structures than
+competing post-training codecs, while keeping the rendered
+appearance visually close to the original model. Notably, on
+the Stump and Garden scenes, MesonGS++ not only achieves
+higher PSNR than the original 3DGS but also attains compression rates of 20× and 15×, respectively.
+B. Ablation Study
+Efficiency and Latency of Different Stages. We conduct
+an experiment to demonstrate the benefit of each module
+in post-training compression. We calculate the size after a
+zip compression for fair comparison. As shown in Tab. I,
+compared to the uncompressed baseline, Pruning achieves 5×
+compression but causes a significant PSNR drop for bounded
+360 scenes. However, such a drop is slighter for unbounded
+scenes. The following stages are all influenced by the pruning
+stage. Of course, all of these stages, instead of Replacement
+and RAHT, have caused varying degrees of damage to the
+rendering quality. We can see that the Replacement step is
+indeed a free lunch of the 3D-GS attribute compression. We
+also evaluate the latency of each part of the size-aware hyperparameter search. Computing the estimated quality is very fast
+due to our parallel group-wise quantization implementation,
+only cost 0.49 s. The subsequent calibration (15.10s) and 0-1
+ILP stages (58.52) take comparable time, and together (104.51)
+provide an efficient way to search the bit-width configuration
+under a prescribed size budget.
+Composition of Final Storage. In the Synthetic-NeRF
+dataset, the proportions of octree, metadata, important attributes, and unimportant attributes are: 43%, 0.04%, 34%,
+Ground Truth (Reference Image)
+LightGaussian
+Our
+Fig. 9: Qualitative comparison of different pruning strategies. Our startegy shows less artifacts.
+TABLE II: Quantitative comparison on pruning strategy.
+Our pruning strategy performs better on average. The best
+results are in bold, and the second best are underlined.
+Methods
+C3DGS-color [16]
+C3DGS-cov [16]
+LightGaussian [17]
+Our(Ii )
+Our(Ii Id )
+Synthetic-NeRF
+PSNR
+SSIM
+LPIPS
+30.79
+0.9606
+0.0375
+24.37
+0.9104
+0.0738
+26.75
+0.9372
+0.0568
+30.39
+0.9591
+0.0389
+30.52
+0.9597
+0.0383
+Mip-NeRF 360
+PSNR
+SSIM
+LPIPS
+22.89
+0.7852
+0.2471
+15.04
+0.6992
+0.3044
+26.93
+0.8327
+0.2290
+27.01
+0.8411
+0.2164
+27.52
+0.8441
+0.2139
+Average PSNR
+26.84
+19.71
+26.84
+28.70
+29.02
+23%, respectively. In the Mip-NeRF 360 dataset, the proportions of the above four elements are: 39%, 0.02%, 47%, 14%,
+respectively.
+Pruning Strategy. Here we compare our pruning strategies
+with LightGaussian [17] and C3DGS [16]. To achieve fair
+comparison, we prune 66% of the Gaussians for all methods.
+Tab. II shows the superiority of our pruning strategy. Moreover,
+Tab. II indicates that it is necessary to incorporate viewdependent importance score Id in pruning procedure. Note
+that the output sizes of these strategies are same, because
+they prune the same percent of Gaussians. We also provide
+a qualitative comparison in Fig. 9.
+Replacement Strategy. We set the bit width as 16 and show
+the close-up rendering results of Euler-angle based replacement and covariance-based replcaement in the left of Fig. 8.
+We adjust the final file size by compressing a portion of the
+covariance. We can see that there are some white line artifacts
+in the right of covariance-based strategy. The reason is that
+the lots of covariance matrices are not positive definite after
+the quantization, i.e., 92% for Euler angle-based vs. ∼ 50%
+for covariance-based replacement.
+RAHT and Quantization. For 8-bit quantization, we recommend to not apply RAHT for scales. Due to the activation
+function of the scale is an exponential function, it is more sensitive than other attributes. The empirical evidences are shown
+in Fig. 10. The information loss caused by the operation of
+RAHT + Quantization is greater than only using Quantization,
+and the exponential function amplifies this error, leading to
+severe performance degradation.
+Group-wise Attribute Quantization. As shown in Tab. III,
+when employing the per-channel quantization strategy and
+lowering the pruning threshold from 66% to 50%, the compressed file size expands while the rendering quality diminishes. This decline in quality stems from the amplified
+information loss linked to the extended channel length. As the
+number of Gaussian points rises, the information loss further
+intensifies. In contrast, the block quantization method fixes the
+length of the quantization unit, thereby reducing information
+10
+Opacity
+R
+G
+B
+Euler_x
+Euler_y
+Euler_z
+Scale_0
+Scale_1
+Scale_2
+16
+15
+14
+13
+12
+11
+10
+Quantization Bits
+Channel
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+Block Index
+Rotations
+PSNR: 29.70
+Size: 1.48 MB
+Euler angles
+PSNR: 29.71
+Size: 1.40 MB
+R+ Opacity, 0-SHs
+PSNR: 29.55
+Size: 1.20 MB
+R+ Euler angles
+PSNR: 29.47
+Size: 1.14 MB
+R+ Scales
+PSNR: 26.45
+Size: 1.04 MB
+Fig. 10: Visual results of different attribute transformation
+stages. The first image from the left shows the baseline,
+which means saving the rotations quaternions in the final
+storage. The second image shows the rendering results after
+replacing Rotation quaternions with Euler angles. “R+*” refers
+to applying RAHT to *. Severe degradation in rendering
+quality occurrs after applying RAHT to Scales.
+TABLE III: The advantage of block quantization. By fixing
+the length of the vector requiring quantization, block quantization prevents quantization from becoming a performance
+bottleneck and provides more flexibility.
+Strategy
+Channel
+Block
+τ
+66%
+50%
+66%
+50%
+PSNR(dB)
+29.47
+30.65
+29.60
+30.97
+Synthetic-NeRF
+SSIM
+LPIPS
+0.9476 0.0511
+0.9529 0.0475
+0.9494 0.0490
+0.9560 0.0441
+Size(MB)
+1.14
+1.59
+1.21
+1.73
+PSNR(dB)
+25.30
+25.35
+26.28
+27.20
+Mip-NeRF 360
+SSIM
+LPIPS
+0.7533
+0.3074
+0.7461
+0.3147
+0.8035
+0.2598
+0.8238
+0.2402
+Size(MB)
+11.64
+16.47
+12.46
+18.42
+loss while providing more flexibility.
+Effectiveness of Mixed Bit-width Setting. An alternative is
+letting the groups that belong to the same channel share the
+same bit-width, like the first step of hierarchical solver in
+Sec. III-F. To verify the necessity of group-wise bit-width
+setting, we compare the effectiveness of channel-wise and
+group-wise mixed bit-widths setting in Fig. 12a. The results
+are conducted with enough finetuning. The results show that
+the performance is improved by fine-grained bit-width setting.
+In Fig. 11, we visualize the bit-widths of all quantization
+groups. We observe that opacity and Euler-angle rotations are
+typically assigned higher bit-widths, whereas the 0th-order SH
+coefficients (RGB) and scales tend to use lower bit-widths.
+This pattern indicates that opacity and rotations are more
+sensitive to quantization and therefore require higher precision
+to preserve visual quality.
+0-1 ILP Superiority in Searching Bit-widths. In solving the
+optimal bit-width setting for different attribute channels, we
+also demonstrate the superiority of the 0-1 ILP. As shown in
+Tab. IV, we experiment with widely-used General ILP [78] and
+genetic algorithms [79], [80], both of which proved inferior.
+The 0-1 ILP fully utilizes the size budget while minimizing
+information loss. General ILP involves variables ranging from
+1 to 16. In contrast, 0-1 ILP’s binary values offer finer control,
+easier integration of constraints, and more efficient solution
+techniques. Genetic algorithms, though suited for black-box
+problems, handle constraints less efficiently, making them
+unsuitable for our problem.
+Importance Threshold τ . Pruning is a necessary step for
+3D Gaussians compression. In Tab. III, under the bit width
+of 8, we observe that pruning 33% of points resulted in
+lower performance compared to pruning 66% of points. The
+Fig. 11: Bit widths of quantization groups. The heatmap
+visualizes the bit-width assigned to each quantization group.
+With 10 channels and 80 blocks, there are 800 groups in total.
+The experiment is conducted on the bicycle scene.
+TABLE IV: Superiority of 0-1 ILP. “GA”: Genetic Algorithm.
+With up to 16 bit-width choices, the Vanilla ILP and GA that
+are widely adopted in model quantization methods are unable
+to quickly search for suitable mixed-precision settings.
+Method
+GA
+Vanilla ILP
+0-1 ILP (Our)
+Budget (B)
+3 × 107
+Searched (B)
+21,833,128
+28,934,805
+29,831,203
+∆ size (B)
+8,166,872
+1,065,195
+168,797
+Information loss
+42,821,038
+1,258,394
+11,826
+reason for this counterintuitive performance drop is that the
+bit depth of the quantization step is too low, and pruning
+33% of points in the 3D-GS model of unbounded scenes
+still leaves too many points, resulting in excessive information
+loss after quantization. Therefore, the quantization bit-width is
+the bottleneck of overall performance here. In Tab. III, after
+increasing the quantization bit-width to 16, the performance
+of the 33% surpasses other baselines.
+Estimated Quality Loss Ω. There are many ways to calculate
+the distance between the original attributes and the restored
+attributes. To investigate which metric is better, in Fig. 12b, we
+show the impact of different metrics on the information loss of
+the final rendering results. We present the PNSR-Size curves
+under three metrics, including 1-norm, 2-norm, and ∞-norm.
+It can be seen that the performance of 2-norm and ∞-norm
+are nearly the same, both of which outperform 1-norm by a
+significant margin.
+Robustness Evaluation. We evaluated the size and corresponding performance of the searching algorithm under different numbers of blocks. As shown in Tab. V, for varying
+numbers of blocks and different target sizes, our method
+consistently finds appropriate bit-width settings, ensuring that
+the final file size is close to the target while maintaining
+optimal visual quality. Regardless of the block number setting,
+the final file size and performance are similar, indicating that
+our method is robust to the number of blocks.
+C. Applications and Transferability
+Size-aware Compression on 3DGS Variants. We further
+evaluate the size-aware compression capability of MesonGS++
+and the efficiency of its fine-tuning strategy on representative
+3DGS variants, including ScaffoldGS [81] and 4DGS [82].
+Table VI reports the rendering quality and final storage cost
+after sufficient fine-tuning. The final model sizes obtained
+by our search deviate from the prescribed budgets by only
+0.8% for ScaffoldGS and 0.5% for 4DGS, demonstrating
+the accuracy of the proposed size estimator. The ScaffoldGS
+experiments are conducted on the Deep Blending dataset [75].
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+11
+K
+40
+30
+50
+40
+30
+50
+Budget (MB)
+30
+20
+SSIM ↑
+0.7410
+0.7411
+0.7413
+0.7353
+0.7357
+0.7368
+PSNR (dB)↑
+25.13
+25.15
+25.14
+25.07
+25.07
+25.12
+LPIPS ↓
+0.2684
+0.2685
+0.2686
+0.2752
+0.2757
+0.2743
+Searched Size (MB) ↓
+29.85
+29.91
+29.86
+19.83
+19.85
+19.92
+TABLE VI: Quantitative results on 3DGS variants. “CP
+Time” refers to post-training compression time. “FT Time”
+refers to finetune time.
+Method
+ScaffoldGS
+Ours+ScaffoldGS
+4DGS
+Ours+4DGS
+24.0
+23.6
+Channel
+Group
+23.4
+8
+9
+10
+Size (MB)
+11
+(a) Group vs. Channel
+12
+PSNR
+23.8
+PSNR (dB)
+PSNR (dB)
+23.5
+23.0
+22.5
+1-Norm
+2-Norm
+-Norm
+22.0
+16.0
+16.5
+Size (MB)
+17.0
+(b) Different norms for Ω.
+Fig. 12: Ablation studies. (a) Results were conducted with
+sufficient finetuning, confirming that mixed bit-width settings
+enhance the upper bound of compression quality. (b) 2- and
+∞-norms significantly outperform 1-norm.
+For 4DGS, MesonGS++ reaches the target budget within
+51 s and further improves rendering quality after 28 s of
+fine-tuning. The 4DGS experiments are conducted on the
+flame steak scene from the N3DV dataset [83]. These results
+indicate that MesonGS++ is not restricted to the original 3DGS
+representation; it also transfers effectively to compact and
+dynamic Gaussian variants.
+Transferability to Online 3DGS Compression. We investigate transferring three types of priors from MesonGS++
+to HAC++, a famous online 3DGS compression method.
+First, params loads anchor positions, offsets, features, scales,
+rotations, and opacities to preserve the coarse geometry and
+latent state. Second, mask initializes pruning logits from
+MesonGS++ importance scores rather than hard binary decisions: the normalized scores are percentile-clipped to [τl , τh ],
+linearly mapped to [pmin , pmax ], and converted to logits via
+p
+ℓ = log 1−p
+. Third, qbits converts the searched bit-widths
+into target quantization steps for the feature, scaling, and offset
+groups, and uses them to initialize the bias terms of the three
+Q-prediction heads in the grid MLP. Together, params, mask,
+and qbits provide state, sparsity, and quantization priors,
+respectively. As shown in Fig. 13a and Fig. 13b, these priors
+help HAC++ converge faster without sacrificing accuracy,
+while achieving the same final performance as the HAC++.
+V. R ELATED W ORK
+3DGS Compression. Early compression methods mainly focus on the original 3DGS representation [16]–[19], [25], [30],
+[31], [34], [37], [84]–[87]. C3DGS [16] introduces attributesensitivity scoring, replaces quaternion-scale parameterization
+with covariance, and applies separate vector quantization to
+Budget
+8 MB
+200 MB
+PSNR
+29.42
+30.24
+32.06
+32.07
+Size
+663.9 MB
+7.92 MB
+5.10 GB
+198.64 MB
+32.5
+33.0
+30.0
+32.8
+27.5
+32.6
+PSNR
+TABLE V: Robustness evaluation. The bit-width setting can
+adapt to different values of the number of blocks K, ensuring
+the visual quality within a given size is not affected by K.
+25.0
+Original HAC++
+Meson++ & HAC++
+20.0
+5000 10000 15000 20000
+22.5
+Iter
+(a) Convergence.
+CP Time (s)
+447
+79
+32.4
+32.2
+32.0
+4
+5
+FT Time (s)
+816
+28
+Original HAC++
+Meson++ & HAC++
+w/o qbit
+w/o mask
+6
+7
+8
+Size (MB)
+(b) Ablation.
+Fig. 13: Transferability to online 3DGS compression. (a)
+Transferring the compression configuration from MesonGS++
+helps HAC++ converge faster without sacrificing final accuracy. (b) Ablation over the transferred priors verifies the
+effectiveness of params, mask, and qbits, and shows that
+MesonGS++-based initialization achieves performance comparable to the original HAC++.
+geometry and appearance. Lee et al. [84] combine learningbased pruning, residual vector quantization for scales and
+rotations, and NeRF-based coding of SH coefficients. LightGaussian [17] further integrates octree-based geometry coding,
+opacity/volume-aware pruning, SH distillation, and vector
+quantization. Compact3D [18], EAGLES [34], SOGS [19],
+and ReducingGS [37] respectively explore vector quantization, latent autoencoding, smooth 2D attribute structuring,
+and mixed-band SH design for additional bitrate reduction.
+More recent studies have also considered compressing efficient
+GS variants [33], [88], [89] derived from compact representations [44], [81], [90]–[92]. In particular, ScaffoldGS [81]
+organizes anchors into voxels and predicts neural Gaussian
+attributes from anchor features. Building on this representation, HAC [32], [33] uses coordinate-conditioned context for
+quantization and entropy coding, ContextGS [36] introduces
+hierarchical progressive anchor coding, and HEMGS [89]
+incorporates pretrained PointNet++ [93] to strengthen context
+modeling. FCGS [51] is a concurrent feed-forward approach
+that enables one-shot compression, but it is limited to fixed
+target rates for specific pre-trained models. Orthogonally,
+layered codec designs [23], [94], [95] address rate adaptation under fluctuating network conditions, while recent posttraining methods such as POTR [27] further broaden the design
+space for 3D Gaussian compression. Although effective, many
+existing methods require nontrivial retraining or distillation,
+which can make them less suitable for resource-constrained
+scenarios and less compatible with 3DGS extensions [96].
+MesonGS++ differs from previous post-training methods by
+co-designing the codec and its size-aware configuration mech-
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+12
+anism. It combines joint importance-based pruning, attribute
+transformation, and group-wise mixed-precision quantization,
+while jointly optimizing the reserve ratio and bit-width allocation under a storage budget. Compared with prior post-training
+codecs [16], [17], [50], our method provides an explicit global
+control scheme over complicated hyperparameters.
+transform coding into transmitted symbols and reduce the high
+frequency components. Entropy coding [124]–[127] aims to
+encode these symbols into a bitstream. 3DAC [128] and Song
+et al. [129] propose learning-based entropy models to further
+reduce the size.
+Mixed Precision Quantization. Mixed Precision quantization
+(MPQ) is a widely-used technique to improve the trade-off
+between the accuracy and efficiency of neural networks [64],
+[69], [70], [78], [97]. The challenge with this approach is to
+find the right mixed-precision setting for the different layers of
+neural networks. A brute force approach is not feasible since
+the search space is exponentially large in the number of layers.
+HAQ [97] employed reinforcement learning to search this
+space. However, this RL-based solution requires tremendous
+computational resources. HAWQ [69], [70], [78] proposed to
+assign each layer a sensitivity score with the Hessian spectrum
+and then use an ILP solver to generate mixed-precision settings
+with various constraints (such as model size and latency).
+Though CA-NeRF [98] uses the MPQ scheme, their method
+cannot be applied to 3DGS.
+The bit-width setting Q in our framework is similar to
+the deep learning models. The optimization for the bit-width
+setting is closely related to mixed precision quantization that
+mentioned above. Unlike the HAWQ3 [78] that uses the ILP,
+we use binary ILP to search a better results for the bit-width
+settings of 3DGS compression. Though some works [31], [33]
+employed MPQ, their required retraining for configuring the
+quantization settings.
+VI. C ONCLUSION
+NeRF Compression. Neural Radiance Field (NeRF) compression primarily targets grid-based NeRF [99]–[102]. The
+“grid” can be voxel-grids [103]–[105], tri-planes [106], point
+clouds [107], or hash grids [108]. Though grid-based NeRF
+achieves great acceleration, it introduces huge storage requirements, leading to the emergence of NeRF compression works.
+VQAD [109] proposes to generalize different versions of a
+NeRF with hierarchical coding methods. [59], [110], [111]
+propose to use frequency domain transformation to reduce
+the storage demand of the voxel grids. SHACIRA [112] and
+CAwa-NeRF [113] compress the hash grid of InstantNGP
+[108]. BiRF [114] introduces a binary quantization scheme.
+Masked-wavelet-NeRF [115] and ACRF [116] adopt wavelet
+transform and RAHT. ReRF [117] is proposed to compress the
+dynamic NeRF. To accelerate rendering, some works [118]–
+[120] quantize features to 8 bits and save them as 2D images.
+Point Cloud Compression. Point cloud compression consists
+of geometry compression and attribute compression. The goal
+of geometry compression is to compress the 3D coordinates
+of points. Existing methods [121], [122] typically use octree
+to organize coordinates. Attribute compression generally comprises three steps: transform coding, quantization, and entropy
+coding. Transform coding involves designing a careful transformation of attributes into the frequency domain to minimize
+signal redundancy. For instance, [123] constructs a graph from
+the point cloud and applies the graph fourier transform to
+attributes. [52] introduces Haar wavelet transforms to attribute
+compression. Quantization is used to convert coefficients from
+We present MesonGS++, a size-aware post-training codec
+for 3D Gaussian compression. Beyond effective compression operators, MesonGS++ tackles a key practical bottleneck: globally configuring the many coupled hyperparameters across the pruning–transformation–quantization–encoding
+pipeline under a prescribed budget. The codec integrates
+importance-based pruning, octree geometry coding, attribute
+transformation, selective vector quantization for higher-degree
+spherical harmonics, and group-wise mixed-precision quantization with entropy coding. A size-aware configuration module
+jointly optimizes the reserve ratio and bit allocation via
+discrete sampling, 0-1 ILP, a linear size estimator, and parallel
+quantization. An optional piecewise finetuning stage further
+restores quality. Experiments show strong rate-distortion performance, accurate size control, and favorable speed-quality
+trade-offs, with the searched configurations also serving as
+useful priors for other compressed Gaussian representations.
+ACKNOWLEDGMENTS
+This work is supported in part by National Natural Science
+Foundation of China (Grant No. 92467204 and 62472249),
+and Shenzhen Science and Technology Program (Grant No.
+JCYJ20220818101014030 and KJZD20240903102300001).
+R EFERENCES
+[1] Z. Luo, Z. Cui, S. Luo, M. Chu, and M. Li, “Vr-doh: Hands-on 3d
+modeling in virtual reality,” ACM Trans. Graph., vol. 44, no. 4, Jul.
+2025. [Online]. Available: https://doi.org/10.1145/3731154
+[2] Y. Jiang, C. Yu, T. Xie, X. Li, Y. Feng, H. Wang, M. Li, H. Lau,
+F. Gao, Y. Yang et al., “Vr-gs: A physical dynamics-aware interactive
+gaussian splatting system in virtual reality,” in ACM SIGGRAPH 2024
+conference papers, 2024, pp. 1–1.
+[3] W. Yao, S. Xie, L. Li, W. Zhang, Z. Lai, S. Dai, K. Zhang, and Z. Wang,
+“Sd-gs: Structured deformable 3d gaussians for efficient dynamic scene
+reconstruction,” arXiv preprint arXiv:2507.07465, 2025.
+[4] W. Zhang, S. Xie, C. Ren, S. Xie, C. Tang, S. Ge, M. Wang, and
+Z. Wang, “Evos: Efficient implicit neural training via evolutionary
+selector,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), June 2025, pp. 30 472–30 482.
+[5] W. Zhang, S. Xie, C. Ren, S. Ge, M. Wang, and Z. Wang, “Enhancing
+implicit neural representations via symmetric power transformation,”
+in AAAI. AAAI Press, 2025, pp. 10 157–10 165.
+[6] W. Zhang, B. Li, S. Xie, C. Ren, Y. Xue, and Z. Wang, “Understanding
+bias terms in neural representations,” in Advances in Neural Information Processing Systems (NeurIPS), 2025.
+[7] C. Gu, Z. Li, Z. Zhang, Y. Bai, S. Xie, and Z. Wang, “Dragscene:
+Interactive 3d scene editing with single-view drag instructions,” arXiv
+preprint arXiv:2412.13552, 2024.
+[8] X. Zhou, Z. Lin, X. Shan, Y. Wang, D. Sun, and M.-H. Yang,
+“Drivinggaussian: Composite gaussian splatting for surrounding dynamic autonomous driving scenes,” in Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, 2024, pp.
+21 634–21 643.
+[9] Y. Yan, H. Lin, C. Zhou, W. Wang, H. Sun, K. Zhan, X. Lang,
+X. Zhou, and S. Peng, “Street gaussians: Modeling dynamic urban
+scenes with gaussian splatting,” in European Conference on Computer
+Vision. Springer, 2024, pp. 156–173.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+[10] Y. Wang, P. Yang, Z. Xu, J. Sun, Z. Zhang, Y. Chen, H. Bao,
+S. Peng, and X. Zhou, “Freetimegs: Free gaussian primitives at anytime
+anywhere for dynamic scene reconstruction,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), June 2025, pp. 21 750–21 760.
+[11] Y. Zhao, H. Fan, D. Chen, S. Chen, L. Chen, X. Li, G. Ren, and
+H. Dong, “Real2edit2real: Generating robotic demonstrations via a 3d
+control interface,” arXiv preprint arXiv:2512.19402, 2025.
+[12] H. Fan, H. Dai, J. Zhang, J. Li, Q. Yan, Y. Zhao, M. Gao, J. Wu,
+H. Tang, and H. Dong, “Twinaligner: Visual-dynamic alignment empowers physics-aware real2sim2real for robotic manipulation,” arXiv
+preprint arXiv:2512.19390, 2025.
+[13] C. Gu, H. Kang, J. Lin, J. Wang, D. Wu, S. Xie, F. Huang, J. Ge,
+Z. Gong, L. Li et al., “Igen: Scalable data generation for robot learning
+from open-world images,” arXiv preprint arXiv:2512.01773, 2025.
+[14] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering,” ACM Transactions on
+Graphics (ToG), vol. 42, no. 4, pp. 1–14, 2023.
+[15] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-nerf 360: Unbounded anti-aliased neural radiance fields,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2022, pp. 5470–5479.
+[16] S. Niedermayr, J. Stumpfegger, and R. Westermann, “Compressed 3d
+gaussian splatting for accelerated novel view synthesis,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2024.
+[17] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang, “LightGaussian: Unbounded 3D Gaussian Compression with 15x Reduction
+and 200+ FPS,” in Advances in neural information processing systems
+(NeurIPS), 2024.
+[18] K. Navaneet, K. P. Meibodi, S. A. Koohpayegani, and H. Pirsiavash,
+“Compgs: Smaller and faster gaussian splatting with vector quantization,” ECCV, 2024.
+[19] W. Morgenstern, F. Barthel, A. Hilsmann, and P. Eisert, “Compact 3d
+scene representation via self-organizing gaussian grids,” in European
+Conference on Computer Vision. Springer, 2024.
+[20] J. Červený, https://gsplat.tech, 2023, accessed: 2023-10-28.
+[21] A. Pranckevičius, “Making gaussian splats smaller,” https://aras-p.info/
+blog/2023/09/13/Making-Gaussian-Splats-smaller/, 2023, accessed:
+2023-10-28.
+[22] ——, “Making gaussian splats more smaller,” https://aras-p.info/blog/
+2023/09/27/Making-Gaussian-Splats-more-smaller/, 2023, accessed:
+2023-10-28.
+[23] Y. Chen, M. Li, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Pcgs:
+Progressive compression of 3d gaussian splatting,” arXiv preprint
+arXiv:2503.08511, 2025.
+[24] Y.-T. Zhan, C.-Y. Ho, H. Yang, Y.-H. Chen, J. C. Chiang, Y.-L.
+Liu, and W.-H. Peng, “Cat-3dgs: A context-adaptive triplane approach to rate-distortion-optimized 3dgs compression,” arXiv preprint
+arXiv:2503.00357, 2025.
+[25] S. Xie, W. Zhang, C. Tang, Y. Bai, R. Lu, S. Ge, and Z. Wang,
+“Mesongs: Post-training compression of 3d gaussians via efficient
+attribute transformation,” in European Conference on Computer Vision.
+Springer, 2024.
+[26] S. Xie, J. Liu, W. Zhang, S. Ge, S. Pan, C. Tang, Y. Bai, C. Zhang,
+X. Fan, and Z. Wang, “Sizegs: Size-aware compression of 3d gaussian
+splatting via mixed integer programming,” in ACM MM, 2025.
+[27] B. Ramlot, M. Courteaux, P. Lambert, and G. V. Wallendael,
+“Potr: Post-training 3dgs compression,” 2026. [Online]. Available:
+https://arxiv.org/abs/2601.14821
+[28] X. Liu, Y. Zhou, J. Wang, Y. Huang, S. Xie, S. Qin, M. Hong,
+J. Li, Y. Wang, Z. Wang, S.-T. Xia, and B. Chen, “Splatwizard:
+A benchmark toolkit for 3d gaussian splatting compression,” 2025.
+[Online]. Available: https://arxiv.org/abs/2512.24742
+[29] Y. Zhang, W. Jia, W. Niu, and M. Yin, “Gaussianspa: An” optimizingsparsifying” simplification framework for compact and high-quality 3d
+gaussian splatting,” in Proceedings of the Computer Vision and Pattern
+Recognition Conference, 2025, pp. 26 673–26 682.
+[30] M. Wu and T. Tuytelaars, “Implicit gaussian splatting with efficient
+multi-level tri-plane representation,” 2024. [Online]. Available:
+https://arxiv.org/abs/2408.10041
+[31] X. Liu, X. Wu, P. Zhang, S. Wang, Z. Li, and S. Kwong, “Compgs:
+Efficient 3d scene representation via compressed gaussian splatting,” in
+Proceedings of the 32nd ACM International Conference on Multimedia,
+2024.
+13
+[32] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Hac++: Towards 100x compression of 3d gaussian splatting,” arXiv preprint
+arXiv:2501.12255, 2025.
+[33] ——, “Hac: Hash-grid assisted context for 3d gaussian splatting
+compression,” in European Conference on Computer Vision, 2024.
+[34] S. Girish, K. Gupta, and A. Shrivastava, “Eagles: Efficient accelerated
+3d gaussians with lightweight encodings,” in European Conference on
+Computer Vision, 2024.
+[35] H. Wang, H. Zhu, T. He, R. Feng, J. Deng, J. Bian, and Z. Chen,
+“End-to-end rate-distortion optimized 3d gaussian representation,” in
+European Conference on Computer Vision. Springer, 2024, pp. 76–
+92.
+[36] Y. Wang, Z. Li, L. Guo, W. Yang, A. C. Kot, and B. Wen, “Contextgs:
+Compact 3d gaussian splatting with anchor level context model,” in
+Advances in neural information processing systems (NeurIPS), 2024.
+[37] P. Papantonakis, G. Kopanas, B. Kerbl, A. Lanvin, and G. Drettakis,
+“Reducing the memory footprint of 3d gaussian splatting,” Proceedings
+of the ACM on Computer Graphics and Interactive Techniques, vol. 7,
+no. 1, May 2024. [Online]. Available: https://repo-sam.inria.fr/
+fungraph/reduced-3dgs/
+[38] S. Shin, J. Park, and S. Cho, “Locality-aware gaussian compression
+for fast and high-quality rendering,” arXiv preprint arXiv:2501.05757,
+2025.
+[39] J. Cao, V. Goel, C. Wang, A. Kag, J. Hu, S. Korolev, C. Jiang,
+S. Tulyakov, and J. Ren, “Lightweight predictive 3d gaussian splats,”
+arXiv preprint arXiv:2406.19434, 2024.
+[40] Z. Zhang, T. Song, Y. Lee, L. Yang, C. Peng, R. Chellappa, and D. Fan,
+“Lp-3dgs: Learning to prune 3d gaussian splatting,” Advances in Neural
+Information Processing Systems, vol. 37, pp. 122 434–122 457, 2024.
+[41] A. Hanson, A. Tu, V. Singla, M. Jayawardhana, M. Zwicker, and
+T. Goldstein, “Pup 3d-gs: Principled uncertainty pruning for 3d gaussian splatting,” in Proceedings of the Computer Vision and Pattern
+Recognition Conference, 2025, pp. 5949–5958.
+[42] A. Hanson, A. Tu, G. Lin, V. Singla, M. Zwicker, and T. Goldstein,
+“Speedy-splat: Fast 3d gaussian splatting with sparse pixels and sparse
+primitives,” in Proceedings of the Computer Vision and Pattern Recognition Conference, 2025, pp. 21 537–21 546.
+[43] M. Niemeyer, F. Manhardt, M.-J. Rakotosaona, M. Oechsle, D. Duckworth, R. Gosula, K. Tateno, J. Bates, D. Kaeser, and F. Tombari,
+“Radsplat: Radiance field-informed gaussian splatting for robust realtime rendering with 900+ fps,” in 2025 International Conference on
+3D Vision (3DV). IEEE, 2025, pp. 134–144.
+[44] G. Fang and B. Wang, “Mini-splatting: Representing scenes with a constrained number of gaussians,” in European Conference on Computer
+Vision, 2024.
+[45] ——, “Mini-splatting2: Building 360 scenes within minutes via aggressive gaussian densification,” arXiv preprint arXiv:2411.12788, 2024.
+[46] J. Chen, Y. Chen, Y. Zou, Y. Huang, P. Wang, Y. Liu, Y. Sun, and
+W. Wang, “MEGS2 : Memory-efficient gaussian splatting via spherical
+gaussians and unified pruning,” arXiv preprint arXiv:2509.07021, 2025.
+[47] Y. Lee, Z. Zhang, and D. Fan, “Safeguardgs: 3d gaussian primitive
+pruning while avoiding catastrophic scene destruction,” in Proceedings
+of the IEEE/CVF Winter Conference on Applications of Computer
+Vision, 2026, pp. 8479–8489.
+[48] Y. Huang, J. Pang, F. Zhu, and D. Tian, “Entropygs: An efficient entropy coding on 3d gaussian splatting,” arXiv preprint
+arXiv:2508.10227, 2025.
+[49] W. Liu, T. Guan, B. Zhu, L. Xu, Z. Song, D. Li, Y. Wang, and
+W. Yang, “Efficientgs: Streamlining gaussian splatting for large-scale
+high-resolution scene representation,” IEEE MultiMedia, 2025.
+[50] B. Tian, Q. Gao, S. Xianyu, X. Cui, and M. Zhang, “Flexgaussian:
+Flexible and cost-effective training-free compression for 3d gaussian
+splatting,” in Proceedings of the 33rd ACM International Conference
+on Multimedia, ser. MM ’25. New York, NY, USA: Association
+for Computing Machinery, 2025, p. 7287–7296. [Online]. Available:
+https://doi.org/10.1145/3746027.3754744
+[51] Y. Chen, Q. Wu, M. Li, W. Lin, M. Harandi, and J. Cai,
+“Fast feedforward 3d gaussian splatting compression,” arXiv preprint
+arXiv:2410.08017, 2024.
+[52] R. L. De Queiroz and P. A. Chou, “Compression of 3d point clouds
+using a region-adaptive hierarchical transform,” IEEE Transactions on
+Image Processing, vol. 25, no. 8, pp. 3947–3956, 2016.
+[53] W. H. Equitz, “A new vector quantization clustering algorithm,” IEEE
+transactions on acoustics, speech, and signal processing, vol. 37,
+no. 10, pp. 1568–1575, 1989.
+[54] MPEG Group, “MPEG G-PCC Test Model TMC13,” https://github.
+com/MPEGGroup/mpeg-pcc-tmc13, 2024, accessed: 2024.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+[55] F. Mentzer, E. Agustsson, M. Tschannen, R. Timofte, and L. Van Gool,
+“Practical full resolution learned lossless image compression,” in
+Proceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2019.
+[56] M. Zwicker, H. Pfister, J. van Baar, and M. Gross, “Ewa volume
+splatting,” in Proceedings Visualization, 2001. VIS ’01., 2001, pp. 29–
+538.
+[57] W. Yifan, F. Serena, S. Wu, C. Öztireli, and O. Sorkine-Hornung,
+“Differentiable surface splatting for point-based geometry processing,”
+ACM Transactions on Graphics (TOG), vol. 38, no. 6, pp. 1–14, 2019.
+[58] M. Zwicker, H. Pfister, J. Van Baar, and M. Gross, “Surface splatting,”
+in Proceedings of the 28th annual conference on Computer graphics
+and interactive techniques, 2001, pp. 371–378.
+[59] L. Li, Z. Shen, Z. Wang, L. Shen, and L. Bo, “Compressing volumetric
+radiance fields to 1 mb,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 2023, pp. 4222–4231.
+[60] D. Sculley, “Web-scale k-means clustering,” in Proceedings of the
+19th International Conference on World Wide Web, ser. WWW ’10.
+New York, NY, USA: Association for Computing Machinery, 2010,
+p. 1177–1178. [Online]. Available: https://doi.org/10.1145/1772690.
+1772862
+[61] E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh, “GPTQ: Accurate post-training compression for generative pretrained transformers,”
+ICLR, 2023.
+[62] X. Wei, Y. Zhang, Y. Li, X. Zhang, R. Gong, J. Guo, and X. Liu,
+“Outlier suppression+: Accurate quantization of large language models
+by equivalent and effective shifting and scaling,” in Proceedings of
+the 2023 Conference on Empirical Methods in Natural Language
+Processing, H. Bouamor, J. Pino, and K. Bali, Eds. Singapore:
+Association for Computational Linguistics, December 2023, pp. 1648–
+1665. [Online]. Available: https://aclanthology.org/2023.emnlp-main.
+102
+[63] Y. Zhao, C.-Y. Lin, K. Zhu, Z. Ye, L. Chen, S. Zheng,
+L. Ceze, A. Krishnamurthy, T. Chen, and B. Kasikci, “Atom:
+Low-bit quantization for efficient and accurate llm serving,”
+in Proceedings of Machine Learning and Systems, P. Gibbons,
+G. Pekhimenko, and C. D. Sa, Eds., vol. 6, 2024, pp. 196–209.
+[Online]. Available: https://proceedings.mlsys.org/paper files/paper/
+2024/file/5edb57c05c81d04beb716ef1d542fe9e-Paper-Conference.pdf
+[64] C. Tang, K. Ouyang, Z. Wang, Y. Zhu, Y. Wang, W. Ji, and W. Zhu,
+“Mixed-precision neural network quantization via learned layer-wise
+importance,” in European Conference on Computer Vision, 2022.
+[65] (2018) The SCIP Optimization Suite 6.0. [Online]. Available:
+https://www.scipopt.org/
+[66] (2025) BARON Solver. [Online]. Available: https://minlp.com/
+baron-solver
+[67] J. S. Roy and S. A. Mitchell, “PuLP: An lp modeler written in python,”
+https://github.com/coin-or/pulp, 2020, accessed: 2026-04-29.
+[68] A. Abbas and P. Swoboda, “Fastdog: Fast discrete optimization
+on GPU,” in IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June
+18-24, 2022. IEEE, 2022, pp. 439–449. [Online]. Available:
+https://doi.org/10.1109/CVPR52688.2022.00053
+[69] Z. Dong, Z. Yao, A. Gholami, M. W. Mahoney, and K. Keutzer,
+“HAWQ: Hessian AWare Quantization of neural networks with mixedprecision,” in The IEEE International Conference on Computer Vision
+(ICCV), October 2019.
+[70] Z. Dong, Z. Yao, D. Arfeen, A. Gholami, M. W. Mahoney, and
+K. Keutzer, “HAWQ-V2: Hessian aware trace-weighted quantization of
+neural networks,” in Advances in neural information processing systems
+(NeurIPS), 2020.
+[71] T. M. Cover, Elements of information theory. John Wiley & Sons,
+1999.
+[72] J. Ziv and A. Lempel, “A universal algorithm for sequential data
+compression,” IEEE Transactions on information theory, vol. 23, no. 3,
+pp. 337–343, 1977.
+[73] ——, “Compression of individual sequences via variable-rate coding,”
+IEEE transactions on Information Theory, vol. 24, no. 5, pp. 530–536,
+1978.
+[74] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and temples:
+Benchmarking large-scale scene reconstruction,” ACM Transactions on
+Graphics (ToG), vol. 36, no. 4, pp. 1–13, 2017.
+[75] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and G. Brostow, “Deep blending for free-viewpoint image-based rendering,” ACM
+Transactions on Graphics (ToG), vol. 37, no. 6, pp. 1–15, 2018.
+14
+[76] Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli, “Image
+quality assessment: from error visibility to structural similarity,” IEEE
+transactions on image processing, vol. 13, no. 4, pp. 600–612, 2004.
+[77] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang, “The
+unreasonable effectiveness of deep features as a perceptual metric,” in
+Proceedings of the IEEE conference on computer vision and pattern
+recognition, 2018, pp. 586–595.
+[78] Z. Yao, Z. Dong, Z. Zheng, A. Gholami, J. Yu, E. Tan, L. Wang,
+Q. Huang, Y. Wang, M. Mahoney et al., “Hawq-v3: Dyadic neural
+network quantization,” in International Conference on Machine Learning. PMLR, 2021, pp. 11 875–11 886.
+[79] Z. Guo, X. Zhang, H. Mu, W. Heng, Z. Liu, Y. Wei, and J. Sun, “Single
+path one-shot neural architecture search with uniform sampling,” in
+Computer Vision–ECCV 2020: 16th European Conference, Glasgow,
+UK, August 23–28, 2020, Proceedings, Part XVI 16. Springer, 2020,
+pp. 544–560.
+[80] C. Tang, Y. Meng, J. Jiang, S. Xie, R. Lu, X. Ma, Z. Wang, and
+W. Zhu, “Retraining-free model quantization via one-shot weightcoupling learning,” in Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2024, pp. 15 855–15 865.
+[81] T. Lu, M. Yu, L. Xu, Y. Xiangli, L. Wang, D. Lin, and B. Dai,
+“Scaffold-gs: Structured 3d gaussians for view-adaptive rendering,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, 2024, pp. 20 654–20 664.
+[82] Z. Yang, H. Yang, Z. Pan, X. Zhu, and L. Zhang, “Real-time photorealistic dynamic scene representation and rendering with 4d gaussian
+splatting,” in ICLR, 2024.
+[83] T. Li, M. Slavcheva, M. Zollhöfer, S. Green, C. Lassner, C. Kim,
+T. Schmidt, S. Lovegrove, M. Goesele, R. Newcombe, and Z. Lv,
+“Neural 3d video synthesis from multi-view video,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), June 2022, pp. 5521–5531.
+[84] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, “Compact 3d gaussian
+representation for radiance field,” CVPR, 2024.
+[85] H. Wang, H. Zhu, T. He, R. Feng, J. Deng, J. Bian, and Z. Chen,
+“End-to-end rate-distortion optimized 3d gaussian representation,” in
+European Conference on Computer Vision, 2024.
+[86] Z. Tang, C. Feng, X. Cheng, W. Yu, J. Zhang, Y. Liu, X. Long,
+W. Wang, and L. Yuan, “Neuralgs: Bridging neural fields and 3d
+gaussian splatting for compact 3d representations,” 2025. [Online].
+Available: https://arxiv.org/abs/2503.23162
+[87] H. Xu, X. Wu, and X. Zhang, “Learning hierarchical sparse transform
+coding of 3dgs,” arXiv preprint arXiv:2505.22908, 2025.
+[88] J. C. Lee, J. H. Ko, and E. Park, “Optimized minimal 3d gaussian
+splatting,” 2025. [Online]. Available: https://arxiv.org/abs/2503.16924
+[89] L. Liu, Z. Chen, and D. Xu, “HEMGS: A hybrid entropy model for
+3d gaussian splatting data compression,” CoRR, vol. abs/2411.18473,
+2024. [Online]. Available: https://doi.org/10.48550/arXiv.2411.18473
+[90] M. S. Ali, M. Qamar, S.-H. Bae, and E. Tartaglione, “Trimming the
+fat: Efficient compression of 3d gaussian splats through pruning,” in
+BMVC, 2024.
+[91] K. Ren, L. Jiang, T. Lu, M. Yu, L. Xu, Z. Ni, and B. Dai, “Octreegs: Towards consistent real-time rendering with lod-structured 3d
+gaussians,” arXiv preprint arXiv:2403.17898, 2024.
+[92] Y.-T. Zhan, C.-Y. Ho, H. Yang, Y.-H. Chen, J. C. Chiang, Y.-L. Liu,
+and W.-H. Peng, “CAT-3DGS: A context-adaptive triplane approach
+to rate-distortion-optimized 3DGS compression,” in The Thirteenth
+International Conference on Learning Representations, 2025. [Online].
+Available: https://openreview.net/forum?id=m3KuuE2ozw
+[93] C. R. Qi, L. Yi, H. Su, and L. J. Guibas, “Pointnet++: Deep hierarchical
+feature learning on point sets in a metric space,” in Advances in Neural
+Information Processing Systems 30: Annual Conference on Neural
+Information Processing Systems 2017, December 4-9, 2017, Long
+Beach, CA, USA, I. Guyon, U. von Luxburg, S. Bengio, H. M. Wallach,
+R. Fergus, S. V. N. Vishwanathan, and R. Garnett, Eds., 2017, pp.
+5099–5108. [Online]. Available: https://proceedings.neurips.cc/paper/
+2017/hash/d8bf84be3800d12f74d8b05e9b89836f-Abstract.html
+[94] F. D. Sario, R. Renzulli, M. Grangetto, A. Sugimoto, and
+E. Tartaglione, “Gode: Gaussians on demand for progressive level
+of detail and scalable compression,” 2025. [Online]. Available:
+https://arxiv.org/abs/2501.13558
+[95] Y. Shi, S. Gasparini, G. Morin, and W. T. Ooi, “LapisGS: Layered
+progressive 3D Gaussian splatting for adaptive streaming,” in International Conference on 3D Vision, 3DV 2025, Singapore, March 25-28,
+2025. IEEE, 2025.
+[96] M. Qin, W. Li, J. Zhou, H. Wang, and H. Pfister, “Langsplat: 3d
+language gaussian splatting,” arXiv preprint arXiv:2312.16084, 2023.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+[97] K. Wang, Z. Liu, Y. Lin, J. Lin, and S. Han, “HAQ: Hardware-aware
+automated quantization,” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 2019.
+[98] W. Liu, X. X. Zheng, J. Yu, and X. Lou, “Content-aware radiance
+fields: Aligning model complexity with scene intricacy through learned
+bitwidth quantization,” in European Conference on Computer Vision.
+Springer, 2024, pp. 239–256.
+[99] A. Chen, Z. Xu, X. Wei, S. Tang, H. Su, and A. Geiger, “Factor
+fields: A unified framework for neural fields and beyond,” 2023.
+[Online]. Available: https://arxiv.org/abs/2302.01226
+[100] Z. Chen, Z. Li, L. Song, L. Chen, J. Yu, J. Yuan, and Y. Xu, “Neurbf:
+A neural fields representation with adaptive radial basis functions,” in
+Proceedings of the IEEE/CVF International Conference on Computer
+Vision, 2023, pp. 4182–4194.
+[101] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Zip-nerf: Anti-aliased grid-based neural radiance fields,” ICCV, 2023.
+[102] W. Hu, Y. Wang, L. Ma, B. Yang, L. Gao, X. Liu, and Y. Ma, “Trimiprf: Tri-mip representation for efficient anti-aliasing neural radiance
+fields,” in ICCV, 2023.
+[103] C. Sun, M. Sun, and H.-T. Chen, “Direct voxel grid optimization:
+Super-fast convergence for radiance fields reconstruction,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 2022, pp. 5459–5469.
+[104] S. Fridovich-Keil, A. Yu, M. Tancik, Q. Chen, B. Recht,
+and A. Kanazawa, “Plenoxels: Radiance fields without neural
+networks,” in IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, CVPR 2022, New Orleans, LA, USA, June
+18-24, 2022. IEEE, 2022, pp. 5491–5500. [Online]. Available:
+https://doi.org/10.1109/CVPR52688.2022.00542
+[105] Y. Chen, Q. Wu, M. Harandi, and J. Cai, “How far can we compress
+instant-ngp-based nerf?” in Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, 2024.
+[106] A. Chen, Z. Xu, A. Geiger, J. Yu, and H. Su, “Tensorf: Tensorial
+radiance fields,” in Computer Vision - ECCV 2022 - 17th European
+Conference, Tel Aviv, Israel, October 23-27, 2022, Proceedings,
+Part XXXII, ser. Lecture Notes in Computer Science, S. Avidan,
+G. J. Brostow, M. Cissé, G. M. Farinella, and T. Hassner, Eds.,
+vol. 13692. Springer, 2022, pp. 333–350. [Online]. Available:
+https://doi.org/10.1007/978-3-031-19824-3 20
+[107] Q. Xu, Z. Xu, J. Philip, S. Bi, Z. Shu, K. Sunkavalli, and U. Neumann,
+“Point-nerf: Point-based neural radiance fields,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2022, pp. 5438–5448.
+[108] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics
+primitives with a multiresolution hash encoding,” ACM Transactions
+on Graphics (ToG), vol. 41, no. 4, pp. 1–15, 2022.
+[109] T. Takikawa, A. Evans, J. Tremblay, T. Müller, M. McGuire,
+A. Jacobson, and S. Fidler, “Variable bitrate neural fields,” in
+SIGGRAPH ’22: Special Interest Group on Computer Graphics and
+Interactive Techniques Conference, Vancouver, BC, Canada, August
+7 - 11, 2022, M. Nandigjav, N. J. Mitra, and A. Hertzmann,
+Eds. ACM, 2022, pp. 41:1–41:9. [Online]. Available: https:
+//doi.org/10.1145/3528233.3530727
+[110] C. L. Deng and E. Tartaglione, “Compressing explicit voxel grid
+representations: fast nerfs become also small,” in Proceedings of the
+IEEE/CVF Winter Conference on Applications of Computer Vision,
+2023, pp. 1236–1245.
+[111] T. Zhao, J. Chen, C. Leng, and J. Cheng, “Tinynerf: Towards 100
+x compression of voxel radiance fields,” in Proceedings of the AAAI
+Conference on Artificial Intelligence, 2023, pp. 3588–3596.
+[112] S. Girish, A. Shrivastava, and K. Gupta, “Shacira: Scalable hash-grid
+compression for implicit neural representations,” in Proceedings of the
+IEEE/CVF International Conference on Computer Vision, 2023, pp.
+17 513–17 524.
+[113] O. Mahmoud, T. Ladune, and M. Gendrin, “Cawa-nerf: Instant learning
+of compression-aware nerf features,” arXiv preprint arXiv:2310.14695,
+2023.
+[114] S. Shin and J. Park, “Binary radiance fields,” arXiv preprint
+arXiv:2306.07581, 2023.
+[115] D. Rho, B. Lee, S. Nam, J. C. Lee, J. H. Ko, and E. Park, “Masked
+wavelet representation for compact neural radiance fields,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2023, pp. 20 680–20 690.
+[116] G. Fang, Q. Hu, L. Wang, and Y. Guo, “ACRF: Compressing explicit
+neural radiance fields via attribute compression,” in International
+Conference on Learning Representations(ICLR), 2024.
+15
+[117] L. Wang, Q. Hu, Q. He, Z. Wang, J. Yu, T. Tuytelaars, L. Xu, and
+M. Wu, “Neural residual radiance fields for streamably free-viewpoint
+videos,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, 2023, pp. 76–87.
+[118] C. Reiser, R. Szeliski, D. Verbin, P. P. Srinivasan, B. Mildenhall,
+A. Geiger, J. T. Barron, and P. Hedman, “MERF: memory-efficient
+radiance fields for real-time view synthesis in unbounded scenes,”
+ACM Trans. Graph., vol. 42, no. 4, pp. 89:1–89:12, 2023. [Online].
+Available: https://doi.org/10.1145/3592426
+[119] P. Hedman, P. P. Srinivasan, B. Mildenhall, J. T. Barron, and
+P. E. Debevec, “Baking neural radiance fields for real-time
+view synthesis,” in 2021 IEEE/CVF International Conference on
+Computer Vision, ICCV 2021, Montreal, QC, Canada, October
+10-17, 2021. IEEE, 2021, pp. 5855–5864. [Online]. Available:
+https://doi.org/10.1109/ICCV48922.2021.00582
+[120] Z. Chen, T. A. Funkhouser, P. Hedman, and A. Tagliasacchi,
+“Mobilenerf: Exploiting the polygon rasterization pipeline for efficient
+neural field rendering on mobile architectures,” in IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, CVPR 2023,
+Vancouver, BC, Canada, June 17-24, 2023. IEEE, 2023, pp. 16 569–
+16 578. [Online]. Available: https://doi.org/10.1109/CVPR52729.2023.
+01590
+[121] D. Meagher, “Geometric modeling using octree encoding,” Computer
+graphics and image processing, vol. 19, no. 2, pp. 129–147, 1982.
+[122] S. Schwarz, M. Preda, V. Baroncini, M. Budagavi, P. Cesar, P. A. Chou,
+R. A. Cohen, M. Krivokuća, S. Lasserre, Z. Li et al., “Emerging mpeg
+standards for point cloud compression,” IEEE Journal on Emerging and
+Selected Topics in Circuits and Systems, vol. 9, no. 1, pp. 133–148,
+2018.
+[123] C. Zhang, D. Florencio, and C. Loop, “Point cloud attribute compression with graph transform,” in 2014 IEEE International Conference on
+Image Processing (ICIP). IEEE, 2014, pp. 2066–2070.
+[124] D. A. Huffman, “A method for the construction of minimumredundancy codes,” Proceedings of the IRE, vol. 40, no. 9, pp. 1098–
+1101, 1952.
+[125] I. H. Witten, R. M. Neal, and J. G. Cleary, “Arithmetic coding for
+data compression,” Communications of the ACM, vol. 30, no. 6, pp.
+520–540, 1987.
+[126] M. J. Weinberger, G. Seroussi, and G. Sapiro, “The loco-i lossless
+image compression algorithm: Principles and standardization into jpegls,” IEEE Transactions on Image processing, vol. 9, no. 8, pp. 1309–
+1324, 2000.
+[127] I. E. Richardson, H. 264 and MPEG-4 video compression: video coding
+for next-generation multimedia. John Wiley & Sons, 2004.
+[128] G. Fang, Q. Hu, H. Wang, Y. Xu, and Y. Guo, “3dac: Learning attribute
+compression for point clouds,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2022, pp.
+14 819–14 828.
+[129] R. Song, C. Fu, S. Liu, and G. Li, “Efficient hierarchical entropy model
+for learned point cloud compression,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2023, pp.
+14 368–14 377.
+Shuzhao Xie is currently a PhD student at Shenzhen International Graduate School, Tsinghua University. He received his
+B.S. degree from Beijing Normal University, China, in 2020,
+and his M.Eng. degree from Tsinghua University, China, in
+2023. His research focuses on graphics and deep learning.
+Junchen Ge is currently a master’s student at Shenzhen
+International Graduate School, Tsinghua University. He received his B.S. degree from Dalian University of Technology,
+China, in 2025. His research interests include 3D computer
+vision and graphics, with applications in gaming and embodied
+intelligence. His recent work spans human pose estimation, 3D
+Gaussian splatting, and robust SLAM for robotics.
+Weixiang Zhang is currently a PhD student at The Hong
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+Kong University of Science and Technology. He received his
+B.S. degree from Beihang University, China, in 2020, and his
+M.Eng. degree from Tsinghua University, China, in 2025. His
+research focuses on efficient deep learning.
+Jiahang Liu is currently an undergraduate student at Harbin
+Institute of Technology, Shenzhen, China. His research interests include embodied intelligence and 3D vision.
+Chen Tang is currently a Ph.D. student at the Multimedia
+Laboratory (MMLab), The Chinese University of Hong Kong.
+He received his Master’s degree in Computer Technology
+from Tsinghua University. Before CUHK, he worked as a
+research assistant in the Department of Computer Science and
+Technology at Tsinghua University. He was a research intern
+in the System and Networking Research Group of Microsoft
+Research Asia (MSRA). His research interests are in efficient
+deep learning (e.g., quantization, sparsity), hardware-aware
+neural architecture search, and dynamic neural networks.
+Yunpeng Bai received his Bachelor’s degree in Computer
+Science and Technology from the Dalian University of Technology, China, in 2020, followed by a Master’s degree from
+Tsinghua University, China, in 2023. He is currently a CS PhD
+student at UT Austin advised by Qixing Huang. His research
+interests include computer vision and computer graphics.
+Shijia Ge is currently a master’s student at the Shenzhen International Graduate School, Tsinghua University. He received
+his B.S. degree from Huazhong University of Science and
+Technology, China, in 2023. His research focuses on 3D vision
+and robotics.
+Jingyan Jiang received her Ph.D. degree in Computer Science
+from Jilin University, China, in 2020. From 2020 to 2022,
+she was a Postdoctoral Research Fellow at the Shenzhen
+International Graduate School, Tsinghua University. She is
+currently an assistant professor with the School of Artificial Intelligence, Shenzhen Technology University, Shenzhen,
+China. Her research interests mainly focus on model domain
+generalization and distributed machine learning.
+Yuzhi Huang received the B.E. degree from Fujian Normal
+University, China, in 2023. He is currently pursuing the M.S.
+degree with the School of Informatics, Xiamen University,
+China. His research interests include vision-language models
+(VLMs), foundation models, and computer vision.
+Fengnian Yang is currently a master’s student at Shenzhen International Graduate School, Tsinghua University. He received
+his B.S. degree from Xidian University, China, in 2024. His
+research interests lie in 3D vision and embodied intelligence.
+16
+Cong Zhang received M.Sc. from Zhengzhou University,
+Zhengzhou, China, in 2012, and Ph.D. from Simon Fraser University, Canada, in 2018. He is currently a visiting researcher at
+Simon Fraser University. His research interests include deep
+learning for smart energy, multimedia communications, and
+cloud/edge computing. His co-authored papers received the
+Distinguished Paper Award of IEEE ICDCS (2024) and the
+Best Paper Award Honorable Mention of IEEE Transactions
+on Multimedia (2016).
+Xiaoyi Fan received the B.Eng. degree from the Beijing
+University of Posts and Telecommunications in 2013, and the
+PhD degree from Simon Fraser University in 2018. He is
+currently CTO with Shenzhen Jiangxing Intelligence Inc. He
+is a recipient of NSERC Postdoctoral Fellowship (2019). He
+is a recipient of the IEEE ICDCS Distinguished Paper Award
+(2024) and the IWQoS Best Poster Award (2024). His research
+interests include physical AI, edge computing, and smart grid.
+Zhi Wang is currently an associate professor at Shenzhen International Graduate School, Tsinghua University. He received
+his Ph.D. in 2014 and his B.E. in 2008, both from Department
+of Computer Science and Technology, Tsinghua University.
+His research areas include multimedia networks, mobile cloud
+computing, and large-scale machine learning systems. He is
+a recipient of the Natural Science Award of the Ministry of
+Education (First Prize) in 2017, the National Natural Science
+Award (Second Prize) in 2018, and the Technology Invention
+Award of the Chinese Institute of Electronics (First Prize) in
+2020. In addition, his research won the Best Paper Award of
+ACM Multimedia, Best Paper Award of IEEE TMM, the Best
+Student Paper Award of MMM, and the Best Paper Award
+of ACM Multimedia, HUMA Workshop. He is an Associate
+Editor of IEEE TMM and Guest Editor of ACM TIST and
+JCST.
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+17
+TABLE VII: Detailed results on Mip-NeRF 360. We report
+the size and rendering quality of MesonGS++ under five targetsize profiles.
+Type
+Large
+Medium
+Small
+Very Small
+Tiny
+Scene
+bicycle
+bonsai
+counter
+flowers
+garden
+kitchen
+room
+stump
+treehill
+AVG
+bicycle
+bonsai
+counter
+flowers
+garden
+kitchen
+room
+stump
+treehill
+AVG
+bicycle
+bonsai
+counter
+flowers
+garden
+kitchen
+room
+stump
+treehill
+AVG
+bicycle
+bonsai
+counter
+flowers
+garden
+kitchen
+room
+stump
+treehill
+AVG
+bicycle
+bonsai
+counter
+flowers
+garden
+kitchen
+room
+stump
+treehill
+AVG
+Size (MB)
+109.0751
+24.293
+24.2901
+72.8299
+112.996
+39.1796
+26.5124
+101.5627
+77.536
+65.3639
+95.6088
+21.298
+21.2983
+63.9522
+98.8334
+34.3881
+23.3253
+88.6841
+67.3652
+57.1948
+83.713
+18.6092
+18.6033
+55.762
+85.358
+29.69
+20.4055
+77.3974
+58.4913
+49.7811
+71.4395
+15.7028
+15.8929
+47.594
+71.246
+24.8944
+17.3102
+65.737
+49.5787
+42.1551
+62.1525
+13.5061
+13.5964
+40.5834
+61.0334
+20.7034
+15.2096
+56.3407
+42.1912
+36.1463
+PSNR (↑)
+24.4798
+31.9207
+28.904
+21.232
+26.211
+30.7541
+31.5163
+26.3179
+22.1635
+27.0555
+24.4703
+31.8358
+28.8568
+21.2201
+26.1958
+30.6926
+31.4718
+26.3107
+22.1591
+27.0237
+24.4335
+31.7454
+28.7987
+21.2031
+26.1642
+30.6111
+31.4142
+26.2979
+22.153
+26.9801
+24.4202
+31.6188
+28.7175
+21.1754
+26.0987
+30.4957
+31.3587
+26.2812
+22.1406
+26.9230
+24.3973
+31.5318
+28.6485
+21.1358
+25.9982
+30.3032
+31.281
+26.2594
+22.1279
+26.8537
+SSIM (↑)
+0.735407
+0.941863
+0.909689
+0.580182
+0.830662
+0.924736
+0.923454
+0.757056
+0.624007
+0.803006
+0.734414
+0.94098
+0.908494
+0.579133
+0.829802
+0.923854
+0.922728
+0.756331
+0.623254
+0.802110
+0.733459
+0.939945
+0.906964
+0.577685
+0.828
+0.922741
+0.922475
+0.755284
+0.622094
+0.800961
+0.732045
+0.938923
+0.905882
+0.574814
+0.823746
+0.921001
+0.921477
+0.754719
+0.620585
+0.799244
+0.729589
+0.937773
+0.904086
+0.572934
+0.81838
+0.917772
+0.91991
+0.753323
+0.618904
+0.796964
+LPIPS (↓)
+0.289537
+0.243593
+0.252471
+0.398802
+0.180954
+0.152784
+0.275306
+0.295586
+0.405221
+0.277140
+0.290847
+0.24479
+0.254131
+0.399991
+0.182632
+0.153942
+0.2767
+0.297154
+0.40638
+0.278507
+0.292415
+0.246396
+0.25618
+0.401654
+0.185808
+0.155509
+0.27728
+0.29914
+0.407919
+0.280256
+0.294274
+0.248307
+0.258231
+0.404517
+0.191957
+0.157975
+0.279093
+0.30025
+0.411527
+0.282904
+0.297164
+0.25025
+0.260673
+0.406518
+0.199791
+0.162754
+0.281948
+0.302683
+0.413925
+0.286190
+A PPENDIX
+We provide MesonGS++’s per-scene results on the MipNeRF 360 dataset [15], the Tank&Temples [74], and the Deep
+Blending dataset [75]. Tables VII, VIII, and IX report the
+compressed model size and rendering quality under five targetsize profiles, from Large to Tiny. These results show the
+detailed per-scene trade-off between storage cost and visual
+quality, where higher PSNR/SSIM and lower LPIPS indicate
+better reconstruction quality. These results corresponds to the
+data points in the RD curves of Fig. 6 in the main paper.
+An Integer Linear Programming (ILP) problem is a mathematical optimization model defined as:
+minimize
+c⊤ x
+subject to
+Ax ≤ b,
+x
+x ≥ 0,
+x ∈ Zn ,
+where x is the vector of integer decision variables, c ∈ Rn
+defines the objective coefficients, A ∈ Rm×n is the constraint
+matrix, and b ∈ Rm represents the right-hand side coefficients.
+The notation ≤ applies component-wise to vectors.
+TABLE VIII: Detailed results on Deep Blending. We report
+the size and rendering quality of MesonGS++ under five targetsize profiles.
+Type
+Large
+Medium
+Small
+Very Small
+Tiny
+Scene
+drjohnson
+playroom
+AVG
+drjohnson
+playroom
+AVG
+drjohnson
+playroom
+AVG
+drjohnson
+playroom
+AVG
+drjohnson
+playroom
+AVG
+Size (MB)
+61.7229
+49.1817
+55.4523
+54.1369
+42.7007
+48.4188
+47.4457
+37.0633
+42.2545
+40.1182
+31.6761
+35.8971
+34.8362
+27.5852
+31.2107
+PSNR (↑)
+29.0222
+30.2752
+29.6487
+29.0129
+30.266
+29.6394
+28.9912
+30.2511
+29.6212
+28.9786
+30.2377
+29.6082
+28.956
+30.2176
+29.5868
+SSIM (↑)
+0.898561
+0.906758
+0.902660
+0.898347
+0.906512
+0.902429
+0.897917
+0.906299
+0.902108
+0.898112
+0.905984
+0.902048
+0.897644
+0.90557
+0.901607
+LPIPS (↓)
+0.318163
+0.306569
+0.312366
+0.318926
+0.307227
+0.313077
+0.32024
+0.308087
+0.314164
+0.320289
+0.308999
+0.314644
+0.321631
+0.309945
+0.315788
+TABLE IX: Detailed results on Tank&Temples. We report
+the size and rendering quality of MesonGS++ under five targetsize profiles.
+Type
+Large
+Medium
+Small
+Very Small
+Tiny
+Scene
+train
+truck
+AVG
+train
+truck
+AVG
+train
+truck
+AVG
+train
+truck
+AVG
+train
+truck
+AVG
+Size (MB)
+20.0593
+42.1151
+31.0872
+17.4636
+37.0383
+27.2509
+15.0683
+32.4929
+23.7806
+12.7776
+28.0126
+20.3951
+10.8851
+24.7253
+17.8052
+PSNR (↑)
+21.78
+24.9694
+23.3747
+21.7679
+24.9503
+23.3591
+21.7446
+24.901
+23.3228
+21.6899
+24.8752
+23.2825
+21.6609
+24.8336
+23.2472
+SSIM (↑)
+0.804435
+0.873929
+0.839182
+0.803621
+0.872773
+0.838197
+0.802214
+0.872069
+0.837141
+0.798386
+0.870751
+0.834568
+0.796549
+0.868258
+0.832404
+LPIPS (↓)
+0.260408
+0.18465
+0.222529
+0.261529
+0.186297
+0.223913
+0.263405
+0.186955
+0.225180
+0.267648
+0.188907
+0.228278
+0.270259
+0.191999
+0.231129
+A 0-1 Integer Linear Programming (0-1 ILP) problem
+extends the ILP formulation with additional binary constraints,
+defined as:
+maximize c⊤ x
+x
+subject to
+Ax ≤ b,
+x ≥ 0,
+x ∈ {0, 1}n ,
+where all components must maintain linearity in both the
+objective function and constraints. Specifically:
+⊤
+• The objective function c x is linear in decision variables
+x;
+• All inequality constraints Ax ≤ b are linear combinations of variables;
+• Decision variables are restricted to binary values: xi ∈
+{0, 1}, ∀i ∈ {1, ..., n}.
+The matrix-vector notation Ax ≤ b represents a system of
+m linear inequalities, and both the objective and constraints
+must contain only first-order terms of variables without any
+products between variables or nonlinear functions.
+Mixed-Integer Nonlinear Programming (MINLP) refers to
+a class of optimization problems that involve both continuous
+and discrete (typically integer) decision variables, and include
+JOURNAL OF LATEX CLASS FILES, VOL. 14, NO. 8, AUGUST 2021
+nonlinearities in the objective function and/or the constraints.
+Formally, a general MINLP can be written as:
+min f (x, y)
+x,y
+s.t.
+gi (x, y) ≤ 0,
+i = 1, . . . , m
+hj (x, y) = 0,
+j = 1, . . . , p
+n
+x∈R ,
+y ∈ Zk
+Here:
+n
+• x ∈ R are the continuous variables,
+k
+• y ∈ Z
+are the integer (often binary or bounded)
+variables,
+• f (x, y) is the nonlinear objective function to be minimized (or maximized),
+• gi (x, y) and hj (x, y) are the nonlinear inequality and
+equality constraints, respectively.
+MINLP combines the complexity of:
+• Nonlinear Programming (NLP), which deals with nonlinear relationships,
+• Mixed-Integer Programming (MIP), which deals with
+linear problems involving integer variables and continuous variables.
+Due to the presence of integer variables and nonlinearities,
+MINLP problems are generally non-convex and computationally hard to solve. Exact methods (such as branch-and-bound,
+outer approximation, and generalized Benders decomposition)
+and heuristic/metaheuristic algorithms (such as genetic algorithms, simulated annealing, etc.) are often employed depending on the problem structure and required solution quality.
+18

@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -1,32 +1,37 @@
+ # Depth to Distance Conversion
+ 
+-Also called: Depth to Distance, z_vals to dists
++Also called: Depth to Distance, depth2dist, z_vals to dists
+ 
+ ## Overview
+-Depth to Distance Conversion transforms sampled depth values ($z_{vals}$) along a ray into segment lengths ($dists$) required for volume rendering integration. It accounts for the viewing angle by scaling the depth differences with the cosine of the angle between the ray direction and the viewing direction. This method is distinct from [Interpolation Schemes for Volume Rendering](817-interpolation-schemes-for-volume-rendering.md) as it focuses on metric length calculation rather than value estimation, and from [Sampling and Jittering](2516-sampling-and-jittering.md) as it operates on already sampled points.
++Depth to Distance Conversion transforms sampled depth values ($z_{vals}$) along a ray into segment lengths ($dists$) required for volume rendering integration [S1, unofficial][S2, unofficial]. It accounts for the viewing angle by scaling the depth differences with the cosine of the angle between the ray direction and the viewing direction [S1, unofficial][S2, unofficial]. This method is distinct from [Interpolation Schemes for Volume Rendering](817-interpolation-schemes-for-volume-rendering.md) as it focuses on metric length calculation rather than value estimation, and from [Sampling and Jittering](2516-sampling-and-jittering.md) as it operates on already sampled points [G].
+ 
+ ## How it works
+ **Inputs:**
+-- $z_{vals}$: Tensor of sampled depth values, shape $(..., N)$, where $N$ is the number of samples.
+-- $cos\_angle$: Tensor of cosine values of the angle between the ray direction and the viewing direction, shape $(..., 1)$.
++- $z_{vals}$: Tensor of sampled depth values, shape $(..., N)$, where $N$ is the number of samples [S1, unofficial][S2, unofficial].
++- $cos\_angle$: Tensor of cosine values of the angle between the ray direction and the viewing direction, shape $(..., 1)$ [S1, unofficial][S2, unofficial].
+ 
+ **Outputs:**
+-- $dists$: Tensor of segment distances, shape $(..., N)$.
++- $dists$: Tensor of segment distances, shape $(..., N)$ [S1, unofficial][S2, unofficial].
+ 
+ **Data Structures:**
+-- $z_{vals}$: Floating-point tensor.
+-- $dists$: Floating-point tensor.
++- $z_{vals}$ and $dists$: Floating-point tensors [S1, unofficial][S2, unofficial].
+ 
+ **Steps:**
+-1. Compute raw distances between consecutive depth samples:
+-   $$dists_{raw} = z_{vals}[:, 1:] - z_{vals}[:, :-1]$$
+-   This results in a tensor of shape $(..., N-1)$.
++1. Compute raw distances between consecutive depth samples [S1, unofficial][S2, unofficial].
++2. Append a large value to represent the distance to the last segment [S1, unofficial][S2, unofficial].
++3. Scale the distances by the cosine of the viewing angle to account for perspective projection effects [S1, unofficial][S2, unofficial].
+ 
+-2. Append a large value to represent the distance to the last segment (often used to ensure the last sample contributes fully or to handle boundary conditions). The value $10^{10}$ is used as a proxy for infinity.
+-   $$dists = \text{concat}(dists_{raw}, [10^{10}])$$
+-   The appended value is expanded to match the batch dimensions.
++**Formulas:**
++- Raw distances: $dists_{raw} = z_{vals}[:, 1:] - z_{vals}[:, :-1]$ [S1, unofficial][S2, unofficial]. This results in a tensor of shape $(..., N-1)$ [G].
++- Boundary append: $dists = \text{concat}(dists_{raw}, [10^{10}])$ [S1, unofficial][S2, unofficial]. The value $10^{10}$ is used as a proxy for infinity [S1, unofficial][S2, unofficial]. The appended value is expanded to match the batch dimensions [S1, unofficial][S2, unofficial].
++- Angle scaling: $dists = dists \times cos\_angle$ [S1, unofficial][S2, unofficial].
+ 
+-3. Scale the distances by the cosine of the viewing angle to account for perspective projection effects:
+-   $$dists = dists \times cos\_angle$$
++**Parameters:**
++- Typical values: Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++- **Precision:** Ensure $z_{vals}$ and $cos\_angle$ are on the same device and have compatible dtypes to avoid runtime errors [G].
++- **Boundary Conditions:** The last segment is approximated with a large value ($10^{10}$) [S1, unofficial][S2, unofficial]. This assumes that the last sample is effectively at infinity or that the contribution of the last segment is negligible if the density is zero [G]. If the last sample is not at infinity, this approximation may introduce errors [G].
++- **Cosine Angle:** If $cos\_angle$ is zero (ray perpendicular to view direction), all distances become zero, which may lead to incorrect integration if not handled [G].
+ 
+ **Pseudocode:**
+@@ -35,59 +40,42 @@
+ 
+ def depth_to_distance(z_vals, cos_angle):
+-    """
+-    Convert depth values to segment distances.
+-    
+-    Args:
+-        z_vals (torch.Tensor): Sampled depth values, shape (..., N).
+-        cos_angle (torch.Tensor): Cosine of the angle between ray and view direction, shape (..., 1).
+-        
+-    Returns:
+-        torch.Tensor: Segment distances, shape (..., N).
+-    """
+     # Step 1: Compute raw distances between consecutive samples
+-    # z_vals[..., 1:] - z_vals[..., :-1] computes the difference along the last dimension
+     dists = z_vals[..., 1:] - z_vals[..., :-1]
+     
+     # Step 2: Append a large value for the last segment
+-    # Create a tensor of shape (..., 1) with value 1e10
+-    # The device and dtype should match dists
++    # Create a tensor of shape (..., 1) with value 1e10, matching device and dtype
+     large_val = torch.full_like(dists[..., :1], 1e10)
+     dists = torch.cat([dists, large_val], dim=-1)
+     
+     # Step 3: Scale by cosine of the angle
+-    # cos_angle is assumed to be broadcastable to dists
+-    dists = dists * cos_angle
++    # Ensure cos_angle is broadcastable to dists
++    dists = dists * cos_angle.unsqueeze(-1)
+     
+     return dists
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Ensure $z_{vals}$ and $cos\_angle$ are on the same device and have compatible dtypes to avoid runtime errors.
+-- **Boundary Conditions:** The last segment is approximated with a large value ($10^{10}$). This assumes that the last sample is effectively at infinity or that the contribution of the last segment is negligible if the density is zero. If the last sample is not at infinity, this approximation may introduce errors.
+-- **Cosine Angle:** If $cos\_angle$ is zero (ray perpendicular to view direction), all distances become zero, which may lead to division by zero or incorrect integration if not handled.
+-
+ ## Subtopics
+ 
+ ### NDC Points to Distance
+-Computes segment distances between consecutive Normalized Device Coordinate (NDC) points. It differs from the standard Depth to Distance method by using Euclidean distance in NDC space rather than depth differences.
+-- **Definition:** Computes Euclidean distance between consecutive NDC points and scales by cosine angle.
++Computes segment distances between consecutive Normalized Device Coordinate (NDC) points [S2, unofficial]. It differs from the standard Depth to Distance method by using Euclidean distance in NDC space rather than depth differences [S2, unofficial].
++- **Definition:** Computes Euclidean distance between consecutive NDC points and scales by cosine angle [S2, unofficial].
+ - **Steps:**
+-  1. Compute Euclidean distance: $dists = \text{norm}(ndc\_pts[:, 1:] - ndc\_pts[:, :-1], \text{dim}=-1)$.
+-  2. Append large value and scale: $dists = \text{concat}(dists, 10^{10} \times cos\_angle)$, scaled by cosine.
+-- **When to choose:** Use when working with NDC space representations where Euclidean distance in NDC space is more appropriate than depth differences.
+-- **Link:** [NDC Points to Distance](ndc-points-to-distance.md) (hypothetical link)
++  1. Compute Euclidean distance: $dists = \text{norm}(ndc\_pts[:, 1:] - ndc\_pts[:, :-1], \text{dim}=-1)$ [S2, unofficial].
++  2. Append large value and scale: $dists = \text{concat}(dists, 10^{10} \times cos\_angle)$, scaled by cosine [S2, unofficial].
++- **When to choose:** Use when working with NDC space representations where Euclidean distance in NDC space is more appropriate than depth differences [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of samples. The operations are element-wise and involve simple arithmetic.
+-- **Memory Complexity:** $O(N)$ for storing the output distances.
+-- **Performance:** Efficient for large-scale volume rendering as it involves minimal computation per sample.
+-- **Strengths:** Simple to implement, accounts for viewing angle, handles boundary conditions with a large value approximation.
+-- **Limitations:** The large value approximation for the last segment may not be accurate for all scenes. Assumes uniform sampling in depth space.
+-- **When to use:** Standard volume rendering pipelines where depth samples are uniformly distributed in depth space.
+-- **When not to use:** When non-uniform sampling is used, or when the last segment needs precise distance calculation.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Measured Performance:** Not given in the sources.
++- **Strengths:** Accounts for viewing angle [S1, unofficial][S2, unofficial].
++- **Limitations:** The large value approximation for the last segment may not be accurate for all scenes [G].
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Originated in the context of Neural Radiance Fields (NeRF) and volume rendering, where accurate segment distances are crucial for correct integration of radiance along rays. The method is commonly used in implementations of NeRF and related techniques.
++Originated in the context of Neural Radiance Fields (NeRF) and volume rendering, where accurate segment distances are crucial for correct integration of radiance along rays [G]. The method is commonly used in implementations of NeRF and related techniques [S1, unofficial][S2, unofficial].
+ 
+ ## Sources
+-[S1] Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)+[S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)
++[S2] Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

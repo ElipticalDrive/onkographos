@@ -1,0 +1,58 @@
+# Sliced Wasserstein-based Gaussian Cloning Update
+
+Also called: Slice-based Scale Update, Sliced Wasserstein Cloning
+
+## Overview
+A method to determine the scale update for cloned Gaussians by minimizing the difference between the integrated color of the new and old Gaussians along arbitrary 1D slices passing through their centers, ensuring rasterization integral conservation [S1]. It sets itself apart from standard densification by enforcing a specific integral constraint on 1D projections rather than relying solely on position gradient magnitudes, leading to improved PSNR, SSIM, and lower LPIPS compared to base 3DGS [S1].
+
+## How it works
+**Inputs:**
+*   A set of $N$ cloned Gaussians with new opacity $o^{\text{new}}$ and sliced covariance $\Sigma^{\text{new}}$ [S1].
+*   The corresponding old Gaussians with opacity $o^{\text{old}}$ and sliced covariance $\Sigma^{\text{old}}$ [S1].
+*   A set of arbitrary 1D slices $\mathcal{S}$ passing through the Gaussian centers [S1].
+
+**Outputs:**
+*   Updated scale parameters for the cloned Gaussians that satisfy the integral conservation constraint [S1].
+
+**Data Structures:**
+*   Gaussians are represented by their mean $\mu$, covariance $\Sigma$, opacity $o$, and spherical harmonics coefficients (for color) [G].
+*   The derivation sets the mean $\mu$ to zero without loss of generality to simplify the equations [S1].
+*   The 'sliced' covariance $\Sigma$ denotes the 1D variance of the Gaussian along an arbitrary slice direction $S(\cdot)$ [S1].
+
+**Steps:**
+1.  **Define the Objective:** Minimize the squared L2 norm of the difference between the integrals of the new and old color functions $\mathbf{C}$ over the entire real line for all slices $\mathcal{S}$ [S1]:
+    $$ \left\| \int_{-\infty}^{\infty} \mathbf{C}^{\text{new}}(x) dx - \int_{-\infty}^{\infty} \mathbf{C}^{\text{old}}(x) dx \right\|_2^2, \quad \forall \mathcal{S}. $$
+    This ensures that the rasterization integral remains equal before and after cloning for any arbitrary slice [S1].
+
+2.  **Derive Color Function for New Gaussians:** The color function $\mathbf{C}^{\text{new}}(x)$ along the slice is derived from the standard 3DGS rasterization equation [S1]. For $N$ Gaussians, it is given by:
+    $$ \mathbf{C}^{\text{new}}(x) = \sum_{i=1}^N o^{\text{new}} \exp\left(-\frac{x^2}{2\Sigma^{\text{new}}}\right) \prod_{j=1}^{i-1} \left(1 - o^{\text{new}} \exp\left(-\frac{x^2}{2\Sigma^{\text{new}}}\right)\right). $$
+
+3.  **Apply Binomial Expansion:** Using the binomial expansion for $p < 1$ where $(1-p)^{i-1} = \sum_{k=0}^{i-1} \binom{i-1}{k} (-1)^k p^k$, let $p = o^{\text{new}} \exp\left(-\frac{x^2}{2\Sigma^{\text{new}}}\right)$ [G]. The color function becomes:
+    $$ \mathbf{C}^{\text{new}}(x) = \sum_{i=1}^N \sum_{k=0}^{i-1} \binom{i-1}{k} (-1)^k (o^{\text{new}})^{k+1} \exp\left(-\frac{(k+1)x^2}{2\Sigma^{\text{new}}}\right). $$
+
+4.  **Compute Integrals:** The integral of $\mathbf{C}^{\text{new}}(x)$ over $x \in (-\infty, \infty)$ is computed analytically using the standard Gaussian integral $\int_{-\infty}^{\infty} \exp(-ax^2) dx = \sqrt{\pi/a}$ [G]. Substituting $a = \frac{k+1}{2\Sigma^{\text{new}}}$ yields a closed-form expression for the integrated color. Similarly, the integral for $\mathbf{C}^{\text{old}}(x)$ is computed using its parameters [G].
+
+5.  **Solve for Scale Update:** Equating $\int_{-\infty}^{\infty} \mathbf{C}^{\text{new}}(x) dx = \int_{-\infty}^{\infty} \mathbf{C}^{\text{old}}(x) dx$ and solving for $\Sigma^{\text{new}}$ provides the scale update, as detailed in the source's equation (9) [S1].
+
+**Parameters:**
+*   Number of Gaussians $N$: Varies per scene and training stage. Not given in the sources.
+*   Opacity $o^{\text{new}}$: Typically initialized or updated based on the cloning strategy. Not given in the sources.
+*   Sliced Covariance $\Sigma^{\text{new}}$: Derived from the 3D covariance matrix along the slice direction. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   The binomial expansion assumes $p < 1$, i.e., $o^{\text{new}} \exp\left(-\frac{x^2}{2\Sigma^{\text{new}}}\right) < 1$. This holds for valid Gaussian splats, but extreme opacity values or very small covariances could violate this assumption locally [G].
+*   The derivation assumes the mean $\mu$ is zero. In practice, the slice is defined relative to the Gaussian center, so this is a coordinate transformation [S1].
+*   The method relies on the assumption that integrating over 1D slices is sufficient to preserve the rasterization integral, an approximation inspired by sliced Wasserstein methods [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The analytical integration is $O(1)$ per term, but the double summation in the expanded color function scales as $O(N^2)$ per slice [G].
+*   **Memory Complexity:** Operates on existing Gaussian parameters with no additional significant memory overhead compared to standard 3DGS [G].
+*   **Performance:** On the NeRF Synthetic dataset with the same number of Gaussians, the method achieves higher PSNR, SSIM, and lower LPIPS than base 3DGS [S1]. For example, on the 'Mic' scene, PSNR is 37.29 vs 35.35 for 3DGS. Average PSNR is 33.80 for the proposed method vs 33.42 for 3DGS [S1].
+*   **Strengths:** Improves reconstruction quality (PSNR, SSIM, LPIPS) without increasing the number of Gaussians [S1].
+*   **Limitations:** The method is specific to the cloning step and does not replace the entire training loop. It relies on the validity of the 1D slice approximation [S1].
+
+## Background
+The method is introduced in "3D Gaussian Splatting as Markov Chain Monte Carlo" [S1]. It draws inspiration from sliced Wasserstein methods [S1] to enforce integral conservation during the cloning operation in 3D Gaussian Splatting training.
+
+## Sources
+[S1] 3D Gaussian Splatting as Markov Chain Monte Carlo, https://ubc-vision.github.io/3dgs-mcmc/, fetched 2026-10-26

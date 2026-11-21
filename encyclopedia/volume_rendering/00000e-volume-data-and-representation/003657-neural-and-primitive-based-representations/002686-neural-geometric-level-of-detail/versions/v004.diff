@@ -1,0 +1,88 @@
+--- v003.md
++++ v004.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-Neural Geometric Level of Detail (NGLD) is a neural representation for implicit 3D shapes that uses a Sparse Voxel Octree (SVO) to store learned feature vectors, enabling adaptive multi-level detail (LOD) and real-time rendering via sparse sphere tracing [S1]. Unlike fixed-size neural networks (e.g., DeepSDF, FFN) or dense voxel grids, NGLD decouples geometric complexity from network size by storing features in a sparse octree and using small, shallow MLPs as decoders [S1]. This allows the representation to scale memory usage with geometric detail while maintaining constant inference cost per query, achieving state-of-the-art geometry reconstruction quality with real-time performance [S1].
++Neural Geometric Level of Detail (NGLD) is a neural representation for implicit 3D shapes that uses a Sparse Voxel Octree (SVO) to store learned feature vectors, enabling adaptive multi-level detail (LOD) and real-time rendering via sparse sphere tracing [S1]. Unlike fixed-size neural networks or dense voxel grids, NGLD decouples geometric complexity from network size by storing features in a sparse octree and using small, shallow MLPs as decoders [S1]. This allows the representation to scale memory usage with geometric detail while maintaining constant inference cost per query, achieving state-of-the-art geometry reconstruction quality with real-time performance [S1].
+ 
+ ## How it works
+-NGLD builds on [Neural and primitive-based representations](10-neural-and-primitive-based-representations.md) by replacing the single latent vector or dense grid with a sparse octree of features. It represents Signed Distance Functions (SDFs) using an SVO of learned feature vectors and small MLP decoders for each level of detail (LOD) [S1].
++NGLD builds on [Neural and primitive-based representations](10-neural-and-primitive-based-representations.md) by replacing the single latent vector or dense grid with a sparse octree of features [S1]. It represents Signed Distance Functions (SDFs) using an SVO of learned feature vectors and small MLP decoders for each level of detail (LOD) [S1].
+ 
+ ### Inputs and Outputs
+-- **Inputs**: Query point $\mathbf{x} \in \mathbb{R}^3$, target continuous LOD level $\tilde{L} \ge 1$.
+-- **Outputs**: Signed distance value $\hat{d}_{\bar{L}} \in \mathbb{R}$.
++- **Inputs**: Query point $\mathbf{x} \in \mathbb{R}^3$, target continuous LOD level $\tilde{L} \ge 1$ [S1].
++- **Outputs**: Signed distance value $\hat{d}_{\bar{L}} \in \mathbb{R}$ [S1].
+ 
+ ### Data Structures
+@@ -68,24 +68,24 @@
+         -   Store ray index, voxel position, parent voxel, and pointers to 8 corner feature vectors $\mathbf{z}_V^{(j)}$ in $V_l(r)$ [S1].
+         -   Pointers are precalculated by iterating all voxels [S1].
+-    2.  **Sparse Ray-Octree Intersection (Algorithm 1)**:
++    2.  **Sparse Ray-Octree Intersection**:
+         ```python
+-        def RAYTRACEOCTREE(L, R):
+-            # R is list of rays, N(0) initialized with root node for each ray
+-            N = [ (ray_index, root_node) for ray_index in range(len(R)) ]
+-            for l in range(0, L + 1):
+-                # D: binary list, Dj=1 if ray intersects voxel j at level l
+-                D = DECIDE(R, N[l], l)
+-                # S: exclusive sum of D
+-                S = EXCLUSIVESUM(D)
++        def RAYTRACEOCTREE(L, rays):
++            # Initialize N[0] with root node for each ray
++            N = [[(ray_idx, 0) for ray_idx in range(len(rays))] for _ in range(L + 1)]
++            for l in range(L + 1):
++                # DECIDE: Check ray-AABB intersection for each ray-voxel pair at level l
++                D = [1 if ray_intersects_voxel(rays[i], N[l][i].voxel) else 0 for i in range(len(rays))]
++                # EXCLUSIVESUM: Parallel prefix sum to compute offsets
++                S = exclusive_scan(D)
+                 if l == L:
+-                    # Compactify to get final list of intersections
+-                    N[l] = COMPACTIFY(N[l], D, S)
++                    # COMPACTIFY: Filter rays that hit and reorder by distance
++                    N[l] = compactify_hits(rays, N[l], D, S)
+                 else:
+-                    # Subdivide to get next level proposals
+-                    N[l+1] = SUBDIVIDE(N[l], D, S)
++                    # SUBDIVIDE: Generate child voxel indices for next level
++                    N[l+1] = subdivide_voxels(N[l], D, S)
+             return N[L]
+         ```
+         -   Uses breadth-first traversal and parallel scan kernels [S1].
+-        -   Child voxels are ordered by distance to ray origin based on octant analysis [S1].
++        -   Child voxels are ordered by distance to the ray origin by analyzing the octant of the ray origin within the voxel [S1].
+     3.  **Adaptive Ray Stepping**:
+         -   Choose continuous LOD $\tilde{L}$ using a depth heuristic based on distance to object [S1].
+@@ -102,7 +102,7 @@
+ 
+ ### Edge Cases and Pitfalls
+--   **Empty Space**: Standard SDFs are defined on all $\mathbb{R}^3$, but NGLD is sparse. Proper handling of distance queries in empty space is required to avoid overshooting [S1].
++-   **Empty Space**: Standard SDFs are defined on all $\mathbb{R}^3$, but NGLD is sparse [S1]. Proper handling of distance queries in empty space is required to avoid overshooting [S1].
+ -   **Low LOD Quality**: At the lowest LOD, the surface extractor struggles to reconstruct good surfaces because features become increasingly high-level and complex [S1].
+--   **Non-Metric SDFs**: Non-metric SDFs (e.g., Oldcar model) do not satisfy the Eikonal equation $|\nabla f| = 1$ and contain discontinuities. NGLD can capture these, whereas standard FFN and SIREN fail [S1].
++-   **Non-Metric SDFs**: Non-metric SDFs (e.g., Oldcar model) do not satisfy the Eikonal equation $|\nabla f| = 1$ and contain discontinuities [S1]. NGLD can capture these, whereas standard FFN and SIREN fail [S1].
+ -   **Scaling**: Scaling to extremely large scenes or very thin, volume-less geometry is difficult due to dependence on training point samples [S1].
+ -   **Animation**: Traditional methods for animating or deforming geometry are not easily supported [S1].
+@@ -110,13 +110,13 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Inference costs are fixed at 4737 floats across all resolutions [S1]. The bottleneck is MLP inference and memory I/O, not ray-octree intersection [S1].
++-   **Time Complexity**: Inference costs are fixed at 4737 floats across all resolutions [S1]. The rendering bottleneck is MLP inference and memory I/O rather than ray-octree intersection [S1].
+ -   **Memory Complexity**: $M = (m+1)|V_{1:L_{\max}}|$ bytes [S1]. Storage is sparse, with voxels allocated only where surfaces exist [S1].
+ -   **Performance**:
+-    -   On TurboSquid, speeds are 50x faster than FFN and comparable to Neural Implicits (NI) [S1].
+-    -   Sparse frametimes are >100x faster than DeepSDF [S1].
+-    -   Over 500x faster than NeRF in frametimes [S1].
+-    -   50x faster than NSVF [S1].
++    -   On the TurboSquid dataset, the method achieves speeds 50× faster than FFN and comparable to Neural Implicits (NI) [S1].
++    -   Sparse frametimes are >100× faster than DeepSDF [S1].
++    -   Over 500× faster than NeRF in frametimes [S1].
++    -   50× faster than NSVF [S1].
+ -   **Training**: Converges quickly, achieving better reconstruction with ~45% the training time of DeepSDF and FFN (30 epochs vs 100) [S1].
+--   **Strengths**: Real-time rendering, state-of-the-art geometry quality, smooth LOD blending, handles non-metric SDFs.
++-   **Strengths**: Real-time rendering, state-of-the-art geometry quality, smooth LOD blending, handles non-metric SDFs [S1].
+ -   **Limitations**: Difficult to scale to very large scenes or thin geometry; hard to animate/deform; low LOD quality can be poor [S1].
+ 

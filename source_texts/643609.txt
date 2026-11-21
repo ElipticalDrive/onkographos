@@ -1,0 +1,563 @@
+Contribute to amazon-far/holosoma development by creating an account on GitHub.
+
+Select the ray-cast depth camera through the Isaac Sim camera config by Mark2000 · Pull Request #281 · amazon-far/holosoma · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Mark2000
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Stacked on #238. The ray-cast depth camera stops being its own sensor type: the only entry point is a regular CameraSensorConfig with isaacsim.renderer = "raycast". Isaac Sim then renders it with #238's Warp kernel instead of an RTX TiledCamera; other backends ignore the field and render the camera natively, like every other isaacsim option.
+```
+CameraSensorConfig(
+    mount=...,
+    data_types=["depth"],
+    isaacsim=IsaacSimCameraConfig(renderer="raycast", raycast_link_meshes={"pelvis": "...STL", ...}),
+)
+```
+Changes
+Config (config_types/sensor.py): RayCastDepthCameraConfig is removed. IsaacSimCameraConfig gains renderer: "rtx" | "raycast" (default "rtx") and raycast_link_meshes — robot link -> mesh file(s), ray cast against at the link's current pose in addition to the terrain (Add a Warp ray-cast depth camera sensor #238's self_occlusion). A ray-cast camera must be depth-only, pinhole (no f_stop), and mounted on a robot link; raycast_link_meshes requires renderer="raycast".
+Isaac Sim (simulator/isaacsim/sensor_setup.py, isaacsim.py, utils/sim_utils.py): a ray-cast camera is a regular camera record. register_cameras creates its RayCastDepthCamera in sim.raycast_cameras (next to sim.tiled_cameras) and sets its re-render callback; render_cameras renders it on the camera's cadence. Only RTX cameras get a TiledCamera, de-instance the robot, enable the renderer, or constrain render_interval, so a ray-cast-only run doesn't start the RTX pipeline.
+SensorManager is back to main: Add a Warp ray-cast depth camera sensor #238's separate shared-camera registry (SharedCameraRecord, register_shared_camera, render_shared) is removed. The mount-randomization term finds its camera in sim.raycast_cameras.
+MuJoCo: back to main; a ray-cast-configured camera is a normal native camera there.
+Preset: g1-head-d435i-depth is a CameraSensorConfig with renderer="raycast". Its near is now 0.01 (was 0): native renderers can't use near=0 (MuJoCo classic aborts, MuJoCo Warp returns no hits), and returns between 1 cm and the D435i's 0.3 m range are still kept for the preprocessing clamp.
+Notes
+Depth differs from RTX near the horizon, by design. Add a Warp ray-cast depth camera sensor #238's kernel casts rays through integer pixel coordinates (its documented convention); RTX samples pixel centres. Next to an RTX camera on flat ground the ray-cast depth reads ~1 % nearer in the near field and up to ~8 % nearer in the pixels next to the horizon (median −2.6 %); camera pose agrees to < 1 mm. So the live test checks the ray-cast path itself rather than RTX parity.
+setup_depth_camera_mount (the opt-in mount randomization) still raises if its camera isn't ray-cast, so it can't be enabled for a camera MuJoCo renders natively.
+Validation
+Live Isaac Sim test_raycast_camera[frame|rerender]: a ray-cast-only run builds no TiledCamera and runs no RTX sensor; raising the robot in two envs and re-rendering only those envs, without stepping, moves their depth while the third env's frame is unchanged.
+No-sim: config validation for the renderer rules; Add a Warp ray-cast depth camera sensor #238's kernel tests render a CameraSensorConfig into a regular camera record.
+pre-commit and full mypy . are clean.
+In progress after the shared-camera removal: full no-sim suite, Isaac Sim camera/LiDAR/render-cadence/frame-freshness tests, MuJoCo camera tests.
+🤖 Generated with Claude Code
+zhenkirito123456
+and others
+added 20 commits
+October 22, 2026 19:46
+Re-render and notify after env state is overwritten
+…
+72085ef
+```
+Sensors render at FRAME_END, before terminations and resets run, so an env
+that is reset (or teleported by any other code) in a control step is
+observed with a sensor frame of its state before the overwrite. Stateful
+observation terms have no way to learn about such teleports either, other
+than reading another component's private flags.
+
+- BaseTask.notify_state_overwritten(env_ids) records overwritten envs;
+  reset_envs_idx calls it after writing the new state. Before the next
+  observation compute, the task re-renders those envs for sensors that
+  support partial rendering and calls on_state_overwritten(env_ids) on
+  stateful observation terms, once per compute with all such envs.
+- SensorRecord.rerender is an optional per-sensor partial-render callback,
+  and set_buffer_rows overwrites rows of a buffer with the same depth
+  clipping as set_buffer. No existing sensor registers a callback yet, so
+  their behaviour is unchanged.
+- ObservationTermBase.on_state_overwritten defaults to a no-op.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Re-render reset envs from ObservationManager.reset; treat teleports a…
+…
+233839b
+```
+…s resets
+
+Review feedback on the state-overwrite mechanism:
+
+- Drop notify_state_overwritten / on_state_overwritten. ObservationManager.reset
+  now marks the envs it resets, and step() re-renders them lazily before
+  reading, after every state write in the frame; step_terminal still sees the
+  pre-reset frame.
+- MotionCommand's clip-end teleport calls observation_manager.reset on the
+  ended envs, so they are re-rendered (and their history zeroed) instead of
+  being observed with a pre-teleport frame.
+- SensorRecord.set_buffer_rows writes into a clone, so buffers already handed
+  out by get_camera_data stay immutable.
+- Shorten the rerender_sensors docstring, and move the tests next to the
+  observation manager and sensor manager tests.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Add a Warp ray-cast depth camera sensor
+…
+318e0d3
+```
+WarpDepthCameraConfig is a new SensorConfig: a pinhole depth camera mounted on
+a robot link that casts one ray per pixel against the terrain mesh and against
+selected robot link meshes at their current poses (self-occlusion). It reads
+only backend-neutral simulator state (rigid_body_pos_w / rigid_body_quat_w,
+find_rigid_body_indice, the terrain term's warp_mesh), so IsaacSim, MuJoCo and
+IsaacGym register and render it through the same shared code. Its frames are
+read with get_camera_data(name, "depth") like any depth camera, and it
+supports re-rendering a subset of envs, so envs reset in a control step are
+observed at their new state.
+
+- SensorManager.register_shared_camera / render_shared run shared-code cameras
+  on their own cadence; collect_due and `cameras` keep returning only
+  backend-rendered cameras, so backend render loops are unchanged.
+- The kernel follows the PHP release depth camera: rays through integer pixel
+  coordinates, image-plane depth, nearest robot hit unless terrain is closer.
+- g1-head-d435i-depth preset: the D435i head rig used for perceptive
+  locomotion (106x60, 58.6 deg vertical FOV, 27 deg pitch, per-env mount
+  perturbation), with leg, waist and arm self-occlusion; adds the combined
+  pelvis mesh.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Fix type annotations in the Warp depth kernel for full mypy
+…
+309393c
+```
+With Warp's stubs available, the array subscripts type-check without
+ignores, the tid()-derived pixel coordinates need has-type, and the mesh id
+array needs an explicit annotation.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Give the MuJoCo render test's fake sensor manager render_shared
+…
+ae0a465
+```
+render_sensors now also renders shared-code cameras through
+SensorManager.render_shared, so the stand-in manager the MuJoCo-Warp lidar
+test passes to render_sensors needs the method too.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Type-check the Warp depth kernel under main's Python 3.10 mypy and ru…
+…
+9ed66a1
+```
+…ff targets
+```
+Describe shared-camera re-renders in terms of resets
+…
+e718e33
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Merge main into zhwuuu/state-overwrite-notify
+…
+52b9c15
+```
+Picks up #273 (skip following tensordict imports in mypy), which the
+stacked PRs' CI needs.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Merge zhwuuu/state-overwrite-notify into zhwuuu/warp-depth-camera
+…
+1cf9039
+```
+Brings in main's #273 (skip following tensordict imports in mypy) through
+the stack.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Import the Warp depth camera only when one is configured in MuJoCo
+…
+49fa0ad
+```
+Warp is optional for MuJoCo's classic backend, and main now tests that
+the simulator starts without it. Registering the Warp depth camera
+imported warp_depth_camera, and so warp, whenever MuJoCo was imported.
+Import it only when a WarpDepthCameraConfig sensor is configured.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Cast the depth camera's principal ray along +Z and order its launch o…
+…
+ec46b81
+```
+…n torch's stream
+
+The cosine correction measured against pixel (width // 2, height // 2)
+while K puts the principal point at (width / 2, height / 2), so odd
+image sizes were half a pixel off the optical axis; the principal ray
+is the camera's +Z axis. Launch rows-major so neighbouring threads
+write contiguous pixels, and on torch's current stream so the pose
+writes before and the reads after are ordered on any stream. Output
+at even sizes is unchanged.
+
+Camera defaults now match CameraSensorConfig; the D435i values stay in
+the G1 preset. Move the config and preset tests next to the code they
+cover, and test the shared-camera manager API without Warp.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Draw the depth camera's mount offsets in a randomization setup term
+…
+06056f1
+```
+The camera drew its per-env mount perturbation from torch.rand at its
+first render, so the offsets depended on global RNG state and were not
+reproducible per env. setup_depth_camera_mount draws them through the
+term sampler, like setup_dof_pos_bias, and hands them to the camera,
+which applies them before or after its first render. The G1 D435i
+ranges move to g1_head_d435i_mount_setup_terms.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Name the depth camera for ray casting, not Warp
+…
+7a9ddab
+```
+In user-facing config Warp means the MuJoCo Warp backend, but this
+camera runs on every backend; what sets it apart is that it ray-casts
+against the terrain and listed meshes. WarpDepthCameraConfig becomes
+RayCastDepthCameraConfig, with the camera, its module and its tests
+renamed to match.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Cast the pelvis contour as its own mesh instead of shipping a combine…
+…
+90acf29
+```
+…d STL
+
+combined_pelvis.STL was exactly pelvis.STL + pelvis_contour_link.STL,
+which already ship with the G1 model. self_occlusion now maps a link
+to one mesh or a list of meshes, so the PR adds no mesh files. Over
+113,840 pelvis pixels from 64 views, the two meshes render the same
+hits as the combined one, with one grazing-edge pixel 4.8 cm apart.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Merge main into zhwuuu/warp-depth-camera
+…
+facfa23
+```
+# Conflicts:
+#	src/holosoma/holosoma/simulator/shared/sensor_manager.py
+```
+Add a ray-cast renderer for Isaac Sim depth cameras
+…
+407978f
+```
+CameraSensorConfig.isaacsim.renderer selects how Isaac Sim produces a camera:
+"rtx" (default) keeps the TiledCamera; "raycast" builds an IsaacLab
+MultiMeshRayCasterCamera that ray casts depth against USD meshes. Ray-cast
+cameras are depth-only and pinhole-only, skip the RTX render pass entirely,
+and re-render only the envs reset or teleported in a control step.
+
+- IsaacSimCameraConfig gains renderer, body_filter (default: the mount body,
+  so a camera inside a link's mesh sees past it) and mesh_prim_paths, with
+  the same discovery semantics as the Isaac Sim LiDAR.
+- The LiDAR's IsaacLab 2.3.2 fixes (disabled rigid-body tracking and the
+  owner-to-mesh pose composition) move to a shared ray-caster base used by
+  both sensors; the camera also composes its mount prim's offset from its
+  physics owner, which the upstream camera omits.
+- LidarBodyFilterConfig is renamed RayCastBodyFilterConfig (alias kept);
+  mount resolution, target configs and body-filter discovery are shared.
+- Only RTX cameras enable the renderer or constrain render_interval.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Revert "Add a ray-cast renderer for Isaac Sim depth cameras"
+…
+f367796
+```
+This reverts commit 407978f.
+```
+Select the ray-cast depth camera through isaacsim.renderer
+…
+0e6ad12
+```
+The ray-cast depth camera is no longer its own sensor type. A regular
+CameraSensorConfig with isaacsim.renderer="raycast" (plus isaacsim.self_occlusion)
+is ray cast with the shared Warp kernel on Isaac Sim, which builds no TiledCamera
+for it and skips the RTX pipeline when no RTX camera is configured. Other
+backends ignore the field and render the camera natively.
+
+- RayCastDepthCameraConfig is removed; IsaacSimCameraConfig gains renderer and
+  self_occlusion, and ray-cast cameras must be depth-only, pinhole, robot-link
+  mounted cameras.
+- MuJoCo no longer registers or renders shared cameras.
+- The g1-head-d435i-depth preset is a CameraSensorConfig with near=0.01, since
+  native renderers cannot use near=0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Name the ray-cast camera's link meshes raycast_link_meshes
+…
+be3f2c3
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Check the ray-cast camera without an RTX reference
+…
+877a986
+```
+The ray-cast kernel casts rays through integer pixel coordinates while RTX
+samples pixel centres, so their depth differs near the horizon by design. The
+live check now asserts a ray-cast-only run builds no TiledCamera and runs no
+RTX sensor, alongside the subset re-render check.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Mark2000
+changed the title
+Add a ray-cast renderer for Isaac Sim depth cameras
+Select the ray-cast depth camera through the Isaac Sim camera config
+Oct 29, 2026
+Render ray-cast cameras as regular Isaac Sim cameras
+…
+84e1e0e
+```
+Ray-cast cameras are ordinary CameraRecords: Isaac Sim's register_cameras
+creates each RayCastDepthCamera into sim.raycast_cameras (next to
+sim.tiled_cameras) and sets its re-render callback, and render_cameras renders
+it on the camera's cadence. SensorManager's separate shared-camera registry,
+records and render_shared are removed, back to main's SensorManager. The mount
+randomization term finds its camera in sim.raycast_cameras.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Mark2000
+changed the base branch from
+zhwuuu/warp-depth-camera
+to
+main
+October 29, 2026 18:40
+Mark2000
+and others
+added 2 commits
+October 29, 2026 11:57
+Allow any raycast_link_meshes entries
+…
+60b218d
+```
+Empty link entries and empty paths are skipped, and non-ray-cast renderers
+ignore the field, so the preset can switch renderer from the CLI.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Rename setup_depth_camera_mount to setup_raycast_depth_camera_mount
+…
+5661814
+```
+Its error for a missing camera names what the term needs: Isaac Sim and
+isaacsim.renderer='raycast'.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Mark2000
+marked this pull request as ready for review
+October 29, 2026 21:05
+Mark2000
+and others
+added 4 commits
+October 29, 2026 14:10
+Expect the ray-cast camera fields' defaults when loading old configs
+…
+7fc1d20
+```
+Configs saved before isaacsim.renderer and isaacsim.raycast_link_meshes
+existed load them as 'rtx' and {}.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Address review findings on the ray-cast depth camera
+…
+19b3d3d
+```
+- Cast rays through pixel centres, matching the native renderers.
+- Render every env when a camera's first render is a partial re-render,
+  so envs outside the subset don't hold zero-filled no-return depth.
+- Raise RandomizerNotSupportedError from the mount term on backends
+  without ray-cast cameras, so ignore_unsupported can skip it.
+- Share one is_isaacsim_rtx_camera check across the Isaac Sim launcher,
+  render-interval guard and sensor setup.
+- Fix the file named in the BSD-3 notice, stale comments and docstrings,
+  merge near-duplicate kernel tests and drop the disabled-term test.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Check for the ray-cast camera, the special case, instead of RTX
+…
+e669d21
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Build TiledCameras inside a positive camera check
+…
+b5cea36
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Name the two reasons the Isaac Sim robot is de-instanced
+…
+bbae59d
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Mark2000
+requested a review
+from juan-g-bonilla
+October 29, 2026 21:28
+juan-g-bonilla
+requested changes
+Nov 3, 2026
+View reviewed changes
+juan-g-bonilla
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Look actually much cleaner that I expected! thanks
+Comment thread
+src/holosoma/holosoma/config_types/sensor.py
+Comment on lines
++228
+to
++231
+raycast_link_meshes: dict[str, str | list[str]] = field(default_factory=dict)
+"""For ``renderer="raycast"``: robot link name -> triangle mesh file, or list of files (STL/OBJ,
+link frame), to ray cast against at the link's current pose in addition to the terrain. Paths are
+resolved with ``resolve_data_file_path``; empty paths are skipped. Ignored by other renderers."""
+juan-g-bonilla
+Nov 3, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I didnt know we were loading our own meshes ONLY for this sensor type. That doesn't feel sane... Everything else in holosoma renders based on the meshes loaded by the robot and objects. Speaking of: this does not support depth rendering on objects? I would think that that's an important feature.
+Comment thread
+src/holosoma/holosoma/config_values/sensor.py
+# Egocentric G1 head camera, forward-facing.
+CAMERA_REGISTRY.add("g1-head", head_camera)
+# D435i depth in the G1 head; Isaac Sim ray casts it with self-occlusion by the legs, waist and arms.
+SENSOR_REGISTRY.add("g1-head-d435i-depth", g1_head_d435i_depth)
+juan-g-bonilla
+Nov 3, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I think this should have a name that identifies this as the special raycast camera, given that that camera has some limitations users should be aware of (e.g. not doing depth renderings of objects). We dont want users thinking this is a "normal" camera with all the features you could expect from a reasonable depth camera.
+Comment thread
+src/holosoma/holosoma/simulator/isaacsim/sensor_setup.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/holosoma/holosoma/simulator/shared/raycast_depth_camera.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/holosoma/holosoma/simulator/shared/raycast_depth_camera.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/holosoma/holosoma/simulator/shared/raycast_depth_camera.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/holosoma/holosoma/simulator/shared/raycast_depth_camera.py
+Comment on lines
++239
+to
++258
+stream = wp.stream_from_torch(self.device) if self._wp_device.is_cuda else None
+wp.launch(
+_render_depth_kernel,
+dim=(ids.numel(), cfg.height, cfg.width),
+inputs=[
+wp.from_torch(ids.contiguous(), dtype=wp.int32),
+self._terrain_mesh.id,
+self._body_mesh_ids,
+wp.from_torch(self._body_pos, dtype=wp.vec3),
+wp.from_torch(self._body_quat, dtype=wp.quat),
+len(self._body_ids),
+wp.from_torch(self._cam_pos, dtype=wp.vec3),
+wp.from_torch(self._cam_quat, dtype=wp.quat),
+self._k_inv,
+float(cfg.far),
+wp.from_torch(self._image, dtype=wp.float32),
+],
+device=self._wp_device,
+stream=stream,
+)
+juan-g-bonilla
+Nov 3, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+render_cameras will always call this with all environments, so you might consider using wp graph capture for this entire block with the fixed dim.
+Comment thread
+THIRD_PARTY_LICENSES
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/holosoma/holosoma/simulator/shared/raycast_depth_camera.py
+[mesh.id for mesh in self._body_meshes] or [0], dtype=wp.uint64, device=self._wp_device
+)
+terrain = sim.terrain_manager.get_state("locomotion_terrain")
+terrain_mesh = getattr(terrain, "warp_mesh", None)
+juan-g-bonilla
+Nov 3, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+didn't know (forgot?) that the terrain "warp_mesh" was already a thing. The whole terrain manager thing is not great.
+Comment thread
+src/holosoma/holosoma/simulator/shared/raycast_depth_camera.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Tidy the ray-cast camera's Warp setup
+…
+d5fe4b7
+```
+- Build Warp meshes with the SAH BVH constructor, favouring ray-query
+  speed over build time.
+- Compile the render kernel without a backward pass.
+- Wrap the persistent pose and image buffers for Warp once at setup.
+- Drop a redundant str() on the simulator device and a provenance note.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

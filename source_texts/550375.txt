@@ -1,0 +1,132 @@
+# realtime-avatar
+
+A realtime, photoreal-*ish* head avatar that runs in a browser tab and talks back.
+Talk or type → LLM reply → speech out → the face moves → everything renders
+client-side as 3D Gaussians.
+
+```
+mic ──▶ speech → text ──┐
+                        ├──▶ server ──▶ LLM ──▶ TTS ──▶ audio → blendshapes ──▶ SSE
+keyboard ───────────────┘                                                        │
+   ▲                                                                             │
+   └──────────── WebGL2 gaussian splatting ◀──── audio + 60 fps stream ──────────┘
+```
+
+![the avatar mid-sentence](docs/screenshot.png)
+
+The avatar is a static asset (~6.25 MB here) plus ~50 floats per frame. The server
+never renders anything; the GPU cost per user is the user's own. That is the whole
+point of the design.
+
+## Quickstart
+
+```bash
+node server/server.mjs          # or: npm start
+open http://127.0.0.1:8787/client/
+```
+
+No dependencies, no build step for local development, and no API key is required for the demo. On macOS the voice comes from `say`;
+elsewhere it falls back to a synthetic babble, and the LLM streams a canned reply
+so the pipeline still runs.
+
+Click the microphone and just talk: the recorder stops when you pause, the server
+transcribes it, and the text takes the same path as typing. Typing still works,
+and Esc cancels a recording or a transcription in flight. Voice input needs a
+speech-to-text provider — see below — but the avatar itself does not.
+
+![the avatar listening](docs/voice.png)
+
+For a real conversation, copy the example env file and fill in what you have:
+
+```bash
+cp .env.example .env
+# ELEVENLABS_API_KEY=...                            real voice
+# DEEPSEEK_API_KEY=... (or OPENAI_API_KEY / ANTHROPIC_API_KEY)  real replies
+node server/server.mjs
+npm run smoke                                  # checks LLM + TTS + speech-to-text, no browser
+npm run voices                                 # list ElevenLabs voice IDs
+```
+
+Voice input reuses `ELEVENLABS_API_KEY` (Scribe) or `OPENAI_API_KEY` (Whisper),
+so it needs no second account. The ElevenLabs key must have the
+**speech_to_text** permission enabled — a key scoped to `text_to_speech` only,
+which is enough for the avatar's own voice, returns `401` on the first
+recording. Add it under **ElevenLabs → profile → API keys**, then restart. No
+key at all simply turns the mic off, with a note in the transcript.
+
+The server loads `.env` on every start, so there is nothing to `source` or
+export before `npm start`. Keep the file private (`chmod 600 .env`); it is
+gitignored.
+
+Provider selection is automatic: with `ELEVENLABS_API_KEY` set the server uses
+ElevenLabs, otherwise `say` on macOS. `DEEPSEEK_API_KEY` alone selects DeepSeek
+with the right base URL and model; `OPENAI_API_KEY` uses any OpenAI-compatible
+endpoint, and `ANTHROPIC_API_KEY` uses Anthropic. The full matrix, env vars, and
+troubleshooting are in **[docs/PROVIDERS.md](docs/PROVIDERS.md)**.
+
+```bash
+node tools/make-avatar.mjs      # regenerate the procedural head (assets/head.avtr, ignored)
+node tools/preview.mjs --out preview.png --yaw 0.3 --preset talk
+node tools/check-avatar.mjs assets/me.avtr
+npm test                        # provider + Worker tests, mocked (no keys/network)
+```
+
+## Deploy to Cloudflare
+
+One Worker serves the built client and proxies `/api/*`, so provider keys stay
+server-side. A push to `main` deploys through GitHub Actions.
+
+```bash
+gh secret set CF_API_TOKEN     # Workers Scripts: Edit
+gh secret set CF_ACCOUNT_ID
+gh secret set DEEPSEEK_API_KEY         # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+gh secret set ELEVENLABS_API_KEY
+gh secret set ELEVENLABS_VOICE_ID      # optional; defaults to Rachel
+
+git push origin main
+```
+
+The workflow tests, builds `dist/`, deploys the Worker, and pushes the provider
+keys as Worker secrets. `say` is macOS-only, so the cloud voice is ElevenLabs
+(or the synthetic fallback if no key is set). The same key transcribes voice
+input; it needs the `speech_to_text` permission for the mic to work, and the site
+must be served over https (Workers are), because browsers only record on a secure
+origin. Setup, custom domains, and the security checklist are in
+**[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
+## What is real, what is a stand-in
+
+| Piece | State | Swap for |
+|---|---|---|
+| Gaussian rig + WebGL2 renderer | real | — |
+| Sorting, deformation, idle motion | real | — |
+| LLM (`server/pipeline/llm.mjs`) | real: DeepSeek, OpenAI-compatible, or Anthropic, streamed with history | — |
+| Speech → text (`server/pipeline/stt.mjs`) | real: ElevenLabs Scribe or OpenAI Whisper | Deepgram / AssemblyAI behind the same `transcribe()` |
+| TTS (`server/pipeline/tts.mjs`) | real: ElevenLabs raw PCM, cached and retried | Cartesia / CosyVoice behind the same `speak()` |
+| Audio → blendshapes (`server/pipeline/a2e.mjs`) | classical DSP, works, not SOTA | LAM-A2E, or any streaming audio→expression model |
+| Avatar asset (`assets/me.avtr`) | personal LAM capture, ~20k gaussians | replace with your own `.avtr` |
+
+With no keys, the demo falls back to macOS `say` and a canned LLM; the table
+above describes the wired configuration. The last row is the one that matters
+for visual quality — everything above it is plumbing around a `.avtr` file whose
+interface is: *N gaussians + a blendshape rig*.
+
+## Replace the avatar
+
+The default is a personal LAM capture in `assets/me.avtr` (~20k gaussians). It is
+intentionally tracked in this public repo. To swap in a different face, you need
+a **rigged head mesh** — any GLB with ARKit shape keys (a scan + Faceit in
+Blender, or an avatar SDK export):
+
+```bash
+node tools/import-mesh.mjs --list --in me.glb
+node tools/import-mesh.mjs --in me.glb --out assets/me.avtr --count 20000
+node tools/check-avatar.mjs assets/me.avtr
+npm run build:web
+```
+
+The client defaults to `/assets/me.avtr`; `?asset=/assets/<name>.avtr` still works
+for assets you add locally. Channels are matched by name, morph targets become
+per-Gaussian deltas, and the client keeps working.
+
+Full walkthrough, including the channel mapping table: **[docs/ASSET.md](docs/ASSET.md)**.

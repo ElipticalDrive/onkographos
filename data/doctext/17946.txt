@@ -1,0 +1,1581 @@
+Goxels
+======
+
+An in-progress sparse voxel octree renderer written in Go, loosely based on the [Gigavoxels paper](http://maverick.inria.fr/Publications/2009/CNLE09/).
+
+Dependencies
+------------
+
+This implementation uses OpenGL 4.3 features, and requires GLEW 1.9.
+
+My fork of the Go-gl project must also be used.
+
+Images
+------
+
+![Screenshot](https://raw.github.com/dylanswiggett/goxels/master/screenshot/Goxels%20cone%20screenshot.png "Rendering a simple equation with alpha based compositing")
+
+### camera.go
+```
+package main
+
+import (
+	"github.com/drakmaniso/glam"
+	"github.com/dylanswiggett/gl"
+)
+
+var (
+	View, Projection *glam.Mat4
+	VP *glam.Mat4
+	MName, VpName string
+)
+
+type Camera struct {
+	isChanged bool
+	// VP *glam.Mat4
+	// View, Projection *glam.Mat4
+	position glam.Vec3
+	// MName, VpName string
+}
+
+func MakeCamera() *Camera {
+	VP = MatIdentity4
+	View = MatIdentity4
+	Projection = MatIdentity4
+	MName = ""
+	VpName = ""
+	return &Camera{false, glam.Vec3{0, 0, 0}}
+}
+
+func (c *Camera) ToVPMatrix() *glam.Mat4 {
+	if c.isChanged {
+		c.isChanged = false
+		newVP := View.Times(Projection)
+		VP = &newVP
+	}
+	return VP
+}
+
+func (c *Camera) ToVP() *[16]float32 {
+	MVPSlice := MatToSlice(c.ToVPMatrix())
+	return &MVPSlice
+}
+
+func (c *Camera) SetPerspective(FOV float32) {
+	c.isChanged = true
+	perspecMat := glam.Perspective(FOV,
+		float32(WindowW)/float32(WindowH), 0.1, 100.0)
+	Projection = &perspecMat
+}
+
+func (c *Camera) SetOrthographic(zoom float32) {
+	c.isChanged = true
+	orthoMat := glam.Orthographic(zoom,
+		float32(WindowW)/float32(WindowH), 0.1, 100.0)
+	Projection = &orthoMat
+}
+
+func (c *Camera) LookAt(eye, look, up glam.Vec3) {
+	c.isChanged = true
+	lookMat := glam.LookAt(eye, look, up)
+	View = &lookMat
+}
+
+func (c *Camera) SetView(position, forward, up glam.Vec3) {
+	c.LookAt(position, position.Plus(forward), up)
+}
+
+// Set the name of the Model matrix used in the vertex shader
+func(c *Camera) SetMName(name string) {
+	MName = name
+}
+
+// Set the name of the View-Projection matrix used in the vertex shader
+func(c *Camera) SetVPName(name string) {
+	VpName = name
+}
+
+// Prepares to draw an object that has undergone the given model transformation
+func (c *Camera) Prepare(shader gl.Program, model *Transform) {
+	shader.GetUniformLocation(MName).UniformMatrix4fv(
+		 					false, MatToSlice(&((*model).TransformMat)))
+	shader.GetUniformLocation(VpName).UniformMatrix4fv(
+		 					false, *c.ToVP())
+}
+```
+
+### main.go
+```
+package main
+
+import(
+	"github.com/go-gl/glfw"
+	"github.com/hishboy/gocommons/lang"
+	"github.com/dylanswiggett/gl"
+	"github.com/drakmaniso/glam"
+	"fmt"
+	"time"
+	"math"
+	"runtime"
+	"unsafe"
+)
+
+const (
+	SSBO_BINDING     = 1 	// Must line up with the # in voxelRes/shader.frag
+	MAX_OCTREE_NODES = 1000000
+	WindowW, WindowH = 1200, 800
+	CAMERA_SLOWDOWN  = .7
+)
+
+var (
+	Cam *Camera
+	CameraPosition, ForwardDirection, RightDirection, UpDirection glam.Vec3
+	CameraVelocity glam.Vec3
+	CameraRotXVel, CameraRotYVel float32
+
+	Bricks gl.Texture
+	OctreeBuffer gl.Buffer
+	shader gl.Program
+	OctreeData, BrickData []uint32
+	BrickDim int
+	OctreeDataList *[MAX_OCTREE_NODES]uint32
+	OctreeDataPointer unsafe.Pointer
+	Running bool
+)
+
+type TestBlock struct {
+	test1 int
+	test2 int
+}
+
+func InitGL() {
+	gl.Enable(gl.TEXTURE_3D)
+}
+
+func main() {
+	// fmt.Println("Generating simple test octree...")
+	// tree := NewOctree(V3(0, 0, 0), V3(40, 10, 30), 6)
+	// data := 0
+	// for x := float32(0); x < 10.0; x += .02 {
+	// 	for y := float32(0); y < 10.0; y+= .02 {
+	// 		// for z := float32(0); float64(z) < math.Sin(float64(x)) + 2.0 && x + z < 10.0; z+= 0.1 {
+	// 		// 	data++
+	// 		// 	testVoxel := NewVoxel(0, float32(int(x * 100) % 100) / 100.0, 0, .2, V3(1, 0, 0))
+	// 		// 	tree.AddVoxel(&testVoxel, V3(x, y, x + z))
+	// 		// }
+	// 		testVoxel := NewVoxel(x / 10.0, y / 10.0, 0, x / 20.0, V3(1, 0, 0))
+	// 		tree.AddVoxel(&testVoxel, V3(x, y, float32(math.Sqrt(math.Pow(float64(x - 5.0), 2) + math.Pow(float64(y - 5.0), 2)))))
+	// 		data++
+	// 	}
+	// }
+	// fmt.Println("Called AddVoxel", data, "times.")
+	fmt.Println("Loading a data set.")
+	tree := readRAWVoxelFile("voxelRes/models/walnut.raw", 352, 296, 400)
+	tree.BuildTree()
+	OctreeData, BrickData, BrickDim = tree.BuildGPURepresentation()
+
+	/*
+	 * A few tests to confirm octree integrity.
+	 */
+
+	testBools := make([]bool, len(OctreeData) / 2)
+	testQueue := lang.NewQueue()
+	testQueue.Push(uint32(0))
+	numNonLeaf := 0
+	for testQueue.Len() != 0 {
+		loc := testQueue.Poll().(uint32)
+		if testBools[loc] == true {
+			fmt.Println("Found node loop. Exiting.")
+			panic(1)
+		}
+		testBools[loc] = true
+		if OctreeData[loc * 2] & 0x80000000 == 0 {
+			childLoc := OctreeData[loc * 2] & 0x3FFFFFFF;
+			testQueue.Push(childLoc)
+			testQueue.Push(childLoc + 1)
+			testQueue.Push(childLoc + 2)
+			testQueue.Push(childLoc + 3)
+			testQueue.Push(childLoc + 4)
+			testQueue.Push(childLoc + 5)
+			testQueue.Push(childLoc + 6)
+			testQueue.Push(childLoc + 7)
+			numNonLeaf++
+		}
+	}
+
+	disconnectedNodes := 0
+	for _, test := range(testBools) {
+		if test == false {
+			disconnectedNodes++
+		}
+	}
+	if disconnectedNodes != 0 {
+		fmt.Println("Found", disconnectedNodes, "disconnected nodes. Exiting.")
+		panic(1)
+	}
+
+	fmt.Println("Initializing rendering...")
+	glfw.Init()
+	defer glfw.Terminate()
+
+	glfw.OpenWindow(WindowW, WindowH, 8, 8, 8, 8, 0, 0, glfw.Windowed)
+
+	glfw.Disable(glfw.MouseCursor)
+	defer glfw.Enable(glfw.MouseCursor)
+	glfw.SetMousePos(WindowW / 2, WindowH / 2)
+
+	if err := gl.Init(); int(err) != 0 {
+		panic(err)
+	}
+
+	InitGL()
+	EnableModelRendering()
+
+	shader = createShader("voxelRes/shader.vert",
+		"voxelRes/shader.frag")
+
+	CameraPosition = glam.Vec3{-1, 0, 0}
+	ForwardDirection = glam.Vec3{1, 0, 0}
+	RightDirection = glam.Vec3{0, 0, -1}
+	UpDirection = glam.Vec3{0, -1, 0}
+
+	Bricks = gl.GenTexture()
+	defer Bricks.Delete()
+	Bricks.Bind(gl.TEXTURE_3D)
+	gl.TexParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+	gl.TexParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+	gl.TexImage3D(gl.TEXTURE_3D, 0, gl.RGBA,
+		BrickDim, BrickDim, BrickDim,
+		0, gl.RGBA, gl.UNSIGNED_BYTE, BrickData)
+	Bricks.Unbind(gl.TEXTURE_3D)
+
+	shader.Use()
+
+	// Make the octree buffer
+	OctreeBuffer = gl.GenBuffer()
+	defer OctreeBuffer.Delete()
+	OctreeBuffer.Bind(gl.SHADER_STORAGE_BUFFER)
+	gl.BufferData(gl.SHADER_STORAGE_BUFFER, len(OctreeData) * 4, nil, gl.STATIC_DRAW)
+	
+	// Fill the octree buffer
+	OctreeDataPointer = gl.MapBuffer(gl.SHADER_STORAGE_BUFFER, gl.WRITE_ONLY)
+	OctreeDataList = (*[MAX_OCTREE_NODES]uint32)(OctreeDataPointer)
+	OctreeDataPointer = nil
+	for i, dataPoint := range(OctreeData) {
+		OctreeDataList[i] = dataPoint
+	}
+	gl.UnmapBuffer(gl.SHADER_STORAGE_BUFFER)
+
+	// Tell the shader where the octree buffer is
+	OctreeBuffer.BindBufferBase(gl.SHADER_STORAGE_BUFFER, SSBO_BINDING)
+
+	shader.GetUniformLocation("worldSize").Uniform3f(10.0, 10.0, 10.0)
+	shader.GetUniformLocation("worldVoxelSize").Uniform1i(
+		int(math.Pow(2, float64(tree.MaxSubdiv))) * BRICK_SIZE);
+	shader.GetUniformLocation("numNodes").Uniform1i(len(OctreeData) / 2);
+
+	Cam = MakeCamera()
+	Cam.SetOrthographic(1)
+	Cam.SetMName("M")
+	Cam.SetVPName("VP")
+	Cam.SetView(CameraPosition, ForwardDirection, UpDirection)
+
+	plane := LoadModel("voxelRes/models/plane.obj")
+	
+	/* HANDLE OPENGL RENDERING */
+
+	gl.ActiveTexture(gl.TEXTURE0)
+	Bricks.Bind(gl.TEXTURE_3D)
+	defer Bricks.Unbind(gl.TEXTURE_3D)
+
+	OctreeBuffer.Bind(gl.SHADER_STORAGE_BUFFER)
+	defer OctreeBuffer.Unbind(gl.SHADER_STORAGE_BUFFER)
+
+	// go handleInput()
+
+	ticks := 2000
+	startTime := time.Now().UnixNano()
+	Running = true
+	for Running {
+		time.Sleep(10 * time.Millisecond)
+		// For some reason, Cgo occasionally segfaults w/o this lock.
+		runtime.LockOSThread()
+		ticks += 1
+
+		/* HANDLE UI INTERACTIONS */
+
+		mX, mY := glfw.MousePos()
+		mX -= WindowW / 2
+		mY -= WindowH / 2
+		glfw.SetMousePos(WindowW / 2, WindowH / 2)
+		CameraRotXVel = (CameraRotXVel + .001 * float32(mX)) * CAMERA_SLOWDOWN
+		CameraRotYVel = (CameraRotYVel - .001 * float32(mY)) * CAMERA_SLOWDOWN
+		if (CameraRotXVel != 0 || CameraRotYVel != 0) {
+			hRot := glam.Rotation(CameraRotXVel, UpDirection)
+			ForwardDirection = VecTimesMat(ForwardDirection, hRot)
+			RightDirection = VecTimesMat(RightDirection, hRot)
+
+			vRot := glam.Rotation(CameraRotYVel, RightDirection)
+			ForwardDirection = VecTimesMat(ForwardDirection, vRot)
+			UpDirection = VecTimesMat(UpDirection, vRot)
+		}
+
+		if (glfw.Key(glfw.KeyEsc) == glfw.KeyPress) ||
+		   (glfw.Key(81) == glfw.KeyPress) {	//q
+			Running = false
+		}
+
+		if glfw.Key(65) == glfw.KeyPress {	//a
+			CameraVelocity = CameraVelocity.Plus(RightDirection.Times(-.5))
+		}
+		if glfw.Key(68) == glfw.KeyPress {	//d
+			CameraVelocity = CameraVelocity.Plus(RightDirection.Times(.5))
+		}
+		if glfw.Key(87) == glfw.KeyPress {	//w
+			CameraVelocity = CameraVelocity.Plus(ForwardDirection.Times(.5))
+		}
+		if glfw.Key(83) == glfw.KeyPress {	//s
+			CameraVelocity = CameraVelocity.Plus(ForwardDirection.Times(-.5))
+		}
+
+		CameraPosition = CameraPosition.Plus(CameraVelocity)
+		CameraVelocity = CameraVelocity.Times(CAMERA_SLOWDOWN)
+
+		if ticks % 20 == 0 {
+			seconds := time.Now().UnixNano() - startTime;
+			fmt.Println("20 ticks at", float32(20.0 * 1e9) / float32(seconds), "FPS.");
+			startTime = time.Now().UnixNano()
+		}
+
+		// go runtime.GC()
+		// fmt.Println("ROUTINES: ", runtime.NumGoroutine())
+		var mems runtime.MemStats
+		runtime.ReadMemStats(&mems)
+		fmt.Println("Allocated:", mems.HeapAlloc)
+
+		shader.GetUniformLocation("voxelBlocks").Uniform1i(0)
+
+		shader.GetUniformLocation("cameraPos").Uniform3f(CameraPosition.X, CameraPosition.Y, CameraPosition.Z);
+		shader.GetUniformLocation("cameraUp").Uniform3f(UpDirection.X, UpDirection.Y, UpDirection.Z)
+		shader.GetUniformLocation("cameraRight").Uniform3f(RightDirection.X, RightDirection.Y, RightDirection.Z)
+		shader.GetUniformLocation("cameraForwards").Uniform3f(ForwardDirection.X, ForwardDirection.Y, ForwardDirection.Z)
+		shader.GetUniformLocation("time").Uniform1i(ticks)
+		shader.GetUniformLocation("widthPix").Uniform1i(WindowW);
+		shader.GetUniformLocation("heightPix").Uniform1i(WindowH);
+
+		Cam.Prepare(shader, Scale(glam.Vec3{0,float32(WindowH) / float32(WindowW), 1}))
+		plane.Draw()
+
+		glfw.SwapBuffers()
+		
+		runtime.UnlockOSThread()
+	}
+}
+
+func handleInput() {
+	Running = true
+	for Running {
+		time.Sleep(10 * time.Millisecond)
+
+		/* HANDLE UI INTERACTIONS */
+
+		mX, mY := glfw.MousePos()
+		mX -= WindowW / 2
+		mY -= WindowH / 2
+		glfw.SetMousePos(WindowW / 2, WindowH / 2)
+		if (mX != 0 || mY != 0) {
+			hRot := glam.Rotation(.001 * float32(mX), UpDirection)
+			ForwardDirection = VecTimesMat(ForwardDirection, hRot)
+			RightDirection = VecTimesMat(RightDirection, hRot)
+
+			vRot := glam.Rotation(-.001 * float32(mY), RightDirection)
+			ForwardDirection = VecTimesMat(ForwardDirection, vRot)
+			UpDirection = VecTimesMat(UpDirection, vRot)
+		}
+
+		if (glfw.Key(glfw.KeyEsc) == glfw.KeyPress) ||
+		   (glfw.Key(81) == glfw.KeyPress) {	//q
+			Running = false
+		}
+
+		if glfw.Key(65) == glfw.KeyPress {	//a
+			CameraPosition = CameraPosition.Plus(RightDirection.Times(-.5))
+		}
+		if glfw.Key(68) == glfw.KeyPress {	//d
+			CameraPosition = CameraPosition.Plus(RightDirection.Times(.5))
+		}
+		if glfw.Key(87) == glfw.KeyPress {	//w
+			CameraPosition = CameraPosition.Plus(ForwardDirection.Times(.5))
+		}
+		if glfw.Key(83) == glfw.KeyPress {	//s
+			CameraPosition = CameraPosition.Plus(ForwardDirection.Times(-.5))
+		}
+	}
+}
+```
+
+### matUtil.go
+```
+package main
+
+import "github.com/drakmaniso/glam"
+
+var MatIdentity4 = glam.NewMat4(1, 0, 0, 0,
+								0, 1, 0, 0,
+								0, 0, 1, 0,
+								0, 0, 0, 1)
+
+func MatToSlice(mat *(glam.Mat4)) [16]float32 {
+	vals := [4][4]float32(*mat)
+	var expanded [16]float32
+	for i, _ := range(vals) {
+		for j, val := range(vals[i]) {
+			expanded[i * 4 + j] = val
+		}
+	}
+	return expanded
+}
+
+func ScalarMatrix(s float32) *glam.Mat4 {
+	return glam.NewMat4(s, 0, 0, 0,
+						0, s, 0, 0,
+						0, 0, s, 0,
+						0, 0, 0, 1)
+}
+
+func VecTimesMat(v glam.Vec3, m glam.Mat4) glam.Vec3 {
+	m2 := glam.NewMat4(v.X, v.Y, v.Z, 0,
+					   0, 0, 0, 0,
+					   0, 0, 0, 0,
+					   0, 0, 0, 0)
+	rotated := m.Times(m2)
+	newVec := MatToSlice(&rotated)
+	return glam.Vec3{newVec[0], newVec[4], newVec[8]}
+}
+```
+
+### model.go
+```
+package main
+
+import "github.com/dylanswiggett/gl"
+
+/*
+ * NO SUPPORT FOR TEXTURED MODELS
+ */
+
+var modelUniqueIdCounter = 0
+var currentLoadedModel = -1
+var vertexAttrib, colorAttrib, normalAttrib gl.AttribLocation
+
+func EnableModelRendering() {
+	vertexAttrib = 0
+	colorAttrib = 1
+	normalAttrib = 2
+}
+
+func DisableModelRendering() {
+	vertexAttrib.DisableArray()
+	colorAttrib.DisableArray()
+	normalAttrib.DisableArray()
+	currentLoadedModel = -1
+}
+
+type Color struct {
+	R, G, B byte
+}
+
+type Vertex struct {
+	P, N Vec3	// Position, Normal,
+	C Color		// Color
+}
+
+// Note: Only triangles supported
+type Polygon struct {
+	Vertices [3]Vertex
+}
+
+type Model struct {
+	uid int
+	polygons []Polygon
+	pFloats []float32
+	cBytes  []byte
+	nFloats []float32
+	vertexBuffer, normalBuffer, colorBuffer gl.Buffer
+}
+
+func MakeModel(polygons []Polygon) Model {
+	model := Model{modelUniqueIdCounter, polygons,
+		nil, nil, nil, gl.GenBuffer(), gl.GenBuffer(), gl.GenBuffer()}
+	modelUniqueIdCounter++
+	model.genFloatArrays()
+	model.genGLBuffers()
+	return model
+}
+
+func MakeScaledModel(polygons []Polygon, scale float32) Model {
+	for i := 0; i < len(polygons); i++ {
+		for j := 0; j < len(polygons[i].Vertices); j++ {
+			polygons[i].Vertices[j].P = polygons[i].Vertices[j].P.Scale(scale)
+		}
+	}
+
+	// for _, poly := range(polygons) {
+	// 	for _, vert := range(poly.Vertices) {
+	// 		vert.P = vert.P.Scale(scale)
+	// 	}
+	// }
+	return MakeModel(polygons)
+}
+
+func (m *Model) Draw() {
+	if currentLoadedModel != m.uid {
+		vertexAttrib.EnableArray()
+		m.vertexBuffer.Bind(gl.ARRAY_BUFFER)
+		vertexAttrib.AttribPointer(3, gl.FLOAT, false, 0, nil)
+
+		colorAttrib.EnableArray()
+		m.colorBuffer.Bind(gl.ARRAY_BUFFER)
+		colorAttrib.AttribPointer(3, gl.UNSIGNED_BYTE, false, 0, nil)
+
+		normalAttrib.EnableArray()
+		m.normalBuffer.Bind(gl.ARRAY_BUFFER)
+		normalAttrib.AttribPointer(3, gl.FLOAT, false, 0, nil)
+
+		currentLoadedModel = m.uid
+	}
+	gl.DrawArrays(gl.TRIANGLES, 0, len(m.polygons) * 3)
+}
+
+func (m *Model) genGLBuffers() {
+	m.vertexBuffer.Bind(gl.ARRAY_BUFFER)
+	gl.BufferData(gl.ARRAY_BUFFER, len(m.pFloats)*4, m.pFloats, gl.STATIC_DRAW)
+
+	m.colorBuffer.Bind(gl.ARRAY_BUFFER)
+	gl.BufferData(gl.ARRAY_BUFFER, len(m.cBytes), m.cBytes, gl.STATIC_DRAW)
+
+	m.normalBuffer.Bind(gl.ARRAY_BUFFER)
+	gl.BufferData(gl.ARRAY_BUFFER, len(m.nFloats)*4, m.nFloats, gl.STATIC_DRAW)
+}
+
+// Get the 3 float arrays to use with OpenGL Buffers.
+func (m *Model) genFloatArrays() {
+	numEntries := 3 * 3 * len(m.polygons)
+	vertices := make([]float32, numEntries)
+	colors := make([]byte, numEntries)
+	normals := make([]float32, numEntries)
+
+	i := 0
+
+	for _, poly := range(m.polygons) {
+		for _, vert := range(poly.Vertices) {
+			vertices[i] = vert.P.X
+			colors[i] = vert.C.R
+			normals[i] = vert.N.X
+			i++
+			vertices[i] = vert.P.Y
+			colors[i] = vert.C.G
+			normals[i] = vert.N.Y
+			i++
+			vertices[i] = vert.P.Z
+			colors[i] = vert.C.B
+			normals[i] = vert.N.Z
+			i++
+		}
+	}
+
+	m.pFloats = vertices
+	m.cBytes = colors
+	m.nFloats = normals
+}
+
+func (m *Model) EnableRendering() {
+
+}
+```
+
+### modelloader.go
+```
+package main
+
+import (
+	"io/ioutil"
+	"strings"
+	"strconv"
+	"fmt"
+)
+
+func toFloat(s string) float32 {
+	val, _ := strconv.ParseFloat(s, 32)
+	return float32(val)
+}
+
+func toByte(s string) byte {
+	val, _ := strconv.Atoi(s)
+	return byte(val)
+}
+
+// Convert "1/2/3" to [1, 2, 3]
+// This format is used in .obj files for vertices.
+func toInts(s string) [3]int {
+	vals := strings.Split(s, "/")
+	var ints [3]int
+	if len(vals) == 1 {
+		intVal, _ := strconv.Atoi(vals[0])
+		ints[0] = intVal
+		ints[1] = 1
+		ints[2] = intVal
+	} else {
+		for i, val := range(vals) {
+			intVal, _ := strconv.Atoi(val)
+			ints[i] = intVal
+		}
+	}
+	return ints
+}
+
+func makePolygons(filePath string) []Polygon {
+	contents, _ := ioutil.ReadFile(filePath)
+	file := string(contents)
+	lines := strings.Split(file, "\n")
+
+	positions := make(map[int]Vec3)
+	colors := make(map[int]Color)
+	normals := make(map[int]Vec3)
+
+	polygons := make([]Polygon, 0)
+
+	for _, line := range(lines) {
+		if len(line) == 0 || line[0] == '#' {	// Comment line
+			continue
+		}
+
+		params := strings.Split(line, " ")
+		switch params[0] {
+		case "v":	// Vertex
+			positions[len(positions) + 1] =
+				V3(toFloat(params[1]), toFloat(params[2]), toFloat(params[3]))
+		case "c":	// Should be "vt" for texture vertex
+			colors[len(colors) + 1] =
+				Color{toByte(params[1]), toByte(params[2]), toByte(params[3])}
+		case "vn":	// Vertex normal
+			normals[len(normals) + 1] =
+				V3(toFloat(params[1]), toFloat(params[2]), toFloat(params[3]))
+		case "f":
+			v1 := toInts(params[1])
+			v2 := toInts(params[2])
+			v3 := toInts(params[3])
+			var vertices [3]Vertex
+			vertices[0] = Vertex{positions[v1[0]], normals[v1[2]], colors[v1[1]]}
+			vertices[1] = Vertex{positions[v2[0]], normals[v2[2]], colors[v2[1]]}
+			vertices[2] = Vertex{positions[v3[0]], normals[v3[2]], colors[v3[1]]}
+			polygons = append(polygons, Polygon{vertices})
+		default:
+			fmt.Println("Unsupported model param: " + line)
+		}
+	}
+
+	return polygons
+}
+
+// Loads a shitty semi-.obj file format.
+// See http://www.martinreddy.net/gfx/3d/OBJ.spec for actual spec
+// See http://www.opengl-tutorial.org/beginners-tutorials/tutorial-7-model-loading/
+// 		for fake spec.
+func LoadModel(filePath string) Model {
+	return MakeModel(makePolygons(filePath))
+}
+
+func LoadScaledModel(filePath string, scale float32) Model {
+	return MakeScaledModel(makePolygons(filePath), scale)
+}
+```
+
+### octree.go
+```
+package main
+
+import(
+	"github.com/hishboy/gocommons/lang"
+	"math"
+	"fmt"
+)
+
+type OctreeNode struct {
+	Children [2][2][2]*OctreeNode
+	IsLeaf, IsSolid bool
+	Contents Brick
+	SolidProperties RGBA
+}
+
+func NewOctreeNode() OctreeNode{
+	var children [2][2][2]*OctreeNode
+	return OctreeNode{children, true, true, NewBrick(), RGBA{0, 0, 0, 0}}
+}
+
+type Octree struct {
+	Root OctreeNode
+	MaxSubdiv int
+	Position, Dimension Vec3
+}
+
+func NewOctree(position, dimension Vec3, maxSubdiv int) Octree {
+	return Octree{NewOctreeNode(), maxSubdiv, position, dimension}
+}
+
+func (o *OctreeNode) Subdivide() {
+	for x := 0; x < len(o.Children); x++ {
+		for y := 0; y < len(o.Children[x]); y++ {
+			for z := 0; z < len(o.Children[x][y]); z++ {
+				newNode := NewOctreeNode()
+				o.Children[x][y][z] = &newNode
+			}
+		}
+	}
+}
+
+/*
+ * Scales the vector so that each of its elements is in the range [0,1],
+ * as long as those values were non-negative and less than or equal to
+ * the corresponding value in dimension.
+ */
+func ScaleToUnitDimension(v, dimension Vec3) Vec3 {
+	return V3(v.X / dimension.X, v.Y / dimension.Y, v.Z / dimension.Z)
+}
+
+/*
+ * Recursively adds the given voxel at the most precise point possible
+ * in the octree. Subdivides the tree as necessary to put the voxel in
+ * the correct location.
+ * 
+ * Assumes that the given voxel falls within the bounds of the octree.
+ */
+func (node *OctreeNode) AddVoxel(v *Voxel, pos Vec3, maxSubdiv int) {
+	node.IsSolid = false
+	if node.IsLeaf {
+		if maxSubdiv == 0 {
+			// TODO: If there's already a voxel here, average!
+			node.Contents.SetVoxel(int(pos.X * float32(BRICK_SIZE)),
+								   int(pos.Y * float32(BRICK_SIZE)),
+								   int(pos.Z * float32(BRICK_SIZE)), v)
+			return
+		} else {
+			node.IsLeaf = false
+			node.Subdivide()
+		}
+	}
+	// Pick the right subnode, then calculate the new sub-position vector.
+	pos = pos.Scale(2)
+	var x, y, z = int(pos.X), int(pos.Y), int(pos.Z)
+	if pos.X >= 1 {
+		pos.X -= 1
+	}
+	if pos.Y >= 1 {
+		pos.Y -= 1
+	}
+	if pos.Z >= 1 {
+		pos.Z -= 1
+	}
+	node.Children[x][y][z].AddVoxel(v, pos, maxSubdiv - 1)
+}
+
+/*
+ * Adds the given voxel at the most precise point possible in the octree.
+ * Assumes that the given voxel falls within the bounds of the octree.
+ */
+func (tree *Octree) AddVoxel(v *Voxel, pos Vec3) {
+	pos = pos.Subtract(tree.Position)	// Produce a relative vector
+	pos = ScaleToUnitDimension(pos, tree.Dimension)
+		// It's easier to index when the position is in [0,1]^3
+	tree.Root.AddVoxel(v, pos, tree.MaxSubdiv)
+}
+
+func (tree *Octree) BuildTree() {
+	tree.Root.BuildTree()
+}
+
+func (node *OctreeNode) BuildTree() {
+	if !node.IsLeaf {
+		for x := 0; x < 2; x++ {
+			for y := 0; y < 2; y++ {
+				for z := 0; z < 2; z++ {
+					node.Children[x][y][z].BuildTree()
+				}
+			}
+		}
+
+		dim := node.Contents.Dimension()
+		for x := 0; x < dim; x++ {
+			for y := 0; y < dim; y++ {
+				for z := 0; z < dim; z++ {
+					xMod := (x * 2) % dim
+					yMod := (y * 2) % dim
+					zMod := (z * 2) % dim
+					avgVox := node.Children[(x * 2) / dim][(y * 2) / dim][(z * 2) / dim].
+						Contents.AverageVoxelsInRange(xMod, yMod, zMod, xMod + 1, yMod + 1, zMod + 1)
+					node.Contents.SetVoxel(x, y, z, &avgVox)
+				}
+			}
+		}
+	}
+}
+
+func (tree *Octree) BuildGPURepresentation() ([]uint32, []uint32, int) {
+	nodes := make([]OctreeNode, 0, 1000)
+	childOffsets := make([]int, 0)
+	nodeCount := 0
+	nodeQueue := lang.NewQueue()
+	nodeQueue.Push(tree.Root)
+
+	// Find every node. Store in a list as a prefix traversal
+	for nodeQueue.Len() != 0 {
+		n := nodeQueue.Poll().(OctreeNode)
+		nodeCount++
+		nodes = append(nodes, n)
+		childOffsets = append(childOffsets, nodeQueue.Len() + 1)
+		if !n.IsLeaf {
+			for x := 0; x < len(n.Children); x++ {
+				for y := 0; y < len(n.Children[x]); y++ {
+					for z := 0; z < len(n.Children[x][y]); z++ {
+						nodeQueue.Push(*n.Children[x][y][z])
+					}
+				}
+			}
+		}
+	}
+
+	fmt.Println("Processing", nodeCount, "octree nodes.")
+
+	// Build a small block for voxel data
+	brickDimension := int(math.Ceil(math.Pow(float64(nodeCount), 1.0/3.0)))
+	brickBlockDimension := BRICK_SIZE * brickDimension
+	bricks := make([][][]uint32, brickBlockDimension)
+	for i, _ := range(bricks) {
+		bricks[i] = make([][]uint32, brickBlockDimension)
+		for j, _ := range(bricks[i]) {
+			bricks[i][j] = make([]uint32, brickBlockDimension)
+		}
+	}
+
+	fmt.Println("Using a", brickBlockDimension, "cubed block of voxel data.")
+
+	// Populate both of the return lists
+	nodeData := make([]uint32, nodeCount * 2)
+	totalVoxels := 0
+	for pos := 0; pos < len(nodes); pos++ {
+		nodeVal := uint32(0)
+		if nodes[pos].IsLeaf {
+			nodeVal = 1
+		}
+		nodeVal = (nodeVal << 1)
+		if (nodes[pos].IsSolid) {
+			nodeVal += 1
+			nodeData[pos * 2 + 1] = nodes[pos].SolidProperties.ColorInt()
+		} else {
+			brickX := BRICK_SIZE * (pos % brickDimension)
+			brickY := BRICK_SIZE * ((pos / brickDimension) % brickDimension)
+			brickZ := BRICK_SIZE * ((pos / (brickDimension * brickDimension)) % brickDimension)
+			for x := 0; x < BRICK_SIZE; x++ {
+				for y := 0; y < BRICK_SIZE; y++ {
+					for z := 0; z < BRICK_SIZE; z++ {
+						vox := nodes[pos].Contents.Voxels[x][y][z]
+						colorInt := uint32(0)
+						if vox != nil {
+							colorInt = vox.ColorInt()
+							totalVoxels++
+						}
+						bricks[brickX + x][brickY + y][brickZ + z] = colorInt
+					}
+				}
+			}
+			nodeData[pos * 2 + 1] = uint32((brickX << 10 + brickY) << 10 + brickZ)
+		}
+		nodeVal = nodeVal << 30
+		if !nodes[pos].IsLeaf {
+			nodeVal += uint32(pos + childOffsets[pos])
+		}
+
+		nodeData[pos * 2] = nodeVal
+	}
+	fmt.Println("Found", totalVoxels, "individual voxels.")
+
+	// Produce the final, 1D slice of brick data.
+	// TODO: Make everything write to this 1D array to start with, rather than copying.
+	flattenedBricks := make([]uint32, brickBlockDimension * brickBlockDimension * brickBlockDimension)
+	for x := 0; x < brickBlockDimension; x++ {
+		for y := 0; y < brickBlockDimension; y++ {
+			for z := 0; z < brickBlockDimension; z++ {
+				flattenedBricks[(x * brickBlockDimension + y) * brickBlockDimension + z] = bricks[x][y][z]
+			}
+		}
+	}
+	return nodeData, flattenedBricks, brickBlockDimension
+}
+```
+
+### shader.go
+```
+package main
+
+import(
+	"io/ioutil"
+	"github.com/dylanswiggett/gl"
+)
+
+func readFileToString(path string) string{
+	contents, _ := ioutil.ReadFile(path)
+	return string(contents)
+}
+
+func createShader(vertex, fragment string) gl.Program{
+	// vertex shader
+	vshader := gl.CreateShader(gl.VERTEX_SHADER)
+	vshader.Source(readFileToString(vertex))
+	vshader.Compile()
+	if vshader.Get(gl.COMPILE_STATUS) != gl.TRUE {
+		panic("vertex shader error: " + vshader.GetInfoLog())
+	}
+
+	// fragment shader
+	fshader := gl.CreateShader(gl.FRAGMENT_SHADER)
+	fshader.Source(readFileToString(fragment))
+	fshader.Compile()
+	if fshader.Get(gl.COMPILE_STATUS) != gl.TRUE {
+		panic("fragment shader error: " + fshader.GetInfoLog())
+	}
+
+	// program
+	prg := gl.CreateProgram()
+	prg.AttachShader(vshader)
+	prg.AttachShader(fshader)
+	prg.Link()
+	if prg.Get(gl.LINK_STATUS) != gl.TRUE {
+		panic("linker error: " + prg.GetInfoLog())
+	}
+
+	return prg
+}
+```
+
+### transform.go
+```
+package main
+
+import "github.com/drakmaniso/glam"
+
+type Transform struct {
+	TransformMat glam.Mat4
+}
+
+func NewTransform(matrix glam.Mat4) *Transform {
+	return &Transform{matrix}
+}
+
+func MakeTransform() *Transform {
+	return NewTransform(*MatIdentity4)
+}
+
+func Translate(amount glam.Vec3) *Transform {
+	return NewTransform(glam.Translation(amount))
+}
+
+func (t *Transform) Translate(amount glam.Vec3) *Transform {
+	translation := glam.Translation(amount)
+	return NewTransform(t.TransformMat.Times(&translation))
+}
+
+func Rotate(angle float32, axis glam.Vec3) *Transform {
+	return NewTransform(glam.Rotation(angle, axis))
+}
+
+func (t *Transform) Rotate(angle float32, axis glam.Vec3) *Transform {
+	rotation := glam.Rotation(angle, axis)
+	return NewTransform(t.TransformMat.Times(&rotation))
+}
+
+func Scale(amount glam.Vec3) *Transform {
+	scale := glam.NewMat4(amount.X, 0, 0, 0,
+						  0, amount.Y, 0, 0,
+						  0, 0, amount.Z, 0,
+						  0, 0, 0, 1)
+	return NewTransform(*scale)
+}
+
+func (t *Transform) Scale(amount glam.Vec3) *Transform {
+	return NewTransform(t.TransformMat.Times(glam.NewMat4(amount.X, 0, 0, 0,
+													   0, amount.Y, 0, 0,
+													   0, 0, amount.Z, 0,
+													   0, 0, 0, 1)))
+}
+
+func ScaleBy(amount float32) *Transform {
+	scale := glam.NewMat4(amount, 0, 0, 0,
+						  0, amount, 0, 0,
+						  0, 0, amount, 0,
+						  0, 0, 0, 1)
+	return NewTransform(*scale)
+}
+
+func (t *Transform) ScaleBy(amount float32) *Transform {
+	return NewTransform(t.TransformMat.Times(glam.NewMat4(amount, 0, 0, 0,
+													   0, amount, 0, 0,
+													   0, 0, amount, 0,
+													   0, 0, 0, 1)))
+}
+```
+
+### vector.go
+```
+package main
+
+import "math"
+
+/*
+ * NOTE: This is in addition to the glam implementation.
+ * This is only for use when the features of glam aren't needed,
+ * since it allows much less verbose vector manipulation.
+ */
+
+/*
+ * 3D VECTORS
+ */
+
+type Vec3 struct {
+	X, Y, Z float32
+}
+
+func V3(x, y, z float32) Vec3 {
+	return Vec3{x, y, z}
+}
+
+func (v *Vec3) Mag2() float32 {
+	return v.X * v.X + v.Y * v.Y + v.Z * v.Z
+}
+
+func (v *Vec3) Mag() float32 {
+	return float32(math.Sqrt(float64(v.Mag2())))
+}
+
+func (v *Vec3) Normalize() Vec3 {
+	return v.Scale(1 / (v.Mag()))
+}
+
+func (v *Vec3) Add(v1 Vec3) Vec3 {
+	return V3(v.X + v1.X, v.Y + v1.Y, v.Z + v1.Z)
+}
+
+func (v *Vec3) Subtract(v1 Vec3) Vec3 {
+	return V3(v.X - v1.X, v.Y - v1.Y, v.Z - v1.Z)
+}
+
+func (v *Vec3) Scale(s float32) Vec3 {
+	return V3(v.X * s, v.Y * s, v.Z * s)
+}
+
+func (v *Vec3) Dot(v1 Vec3) float32 {
+	return v.X * v1.X + v.Y * v1.Y + v.Z * v1.Z
+}
+
+func (v *Vec3) Cross(v1 Vec3) Vec3 {
+	return V3(v.Y * v1.Z - v.Z * v1.Y, v.Z * v1.X - v.X * v1.Z, v.X * v1.Y - v.Y * v1.X)
+}
+
+
+/*
+ * 2D VECTORS
+ */
+
+type Vec2 struct {
+	X, Y float32
+}
+
+func V2(x, y float32) Vec2 {
+	return Vec2{x, y}
+}
+
+func (v *Vec2) Mag2() float32 {
+	return v.X * v.X + v.Y * v.Y
+}
+
+func (v *Vec2) Mag() float32 {
+	return float32(math.Sqrt(float64(v.Mag2())))
+}
+
+func (v *Vec2) Normalize() Vec2 {
+	return v.Scale(1 / v.Mag())
+}
+
+func (v *Vec2) Add(v1 Vec2) Vec2{
+	return V2(v.X + v1.X, v.Y + v1.Y)
+}
+
+func (v *Vec2) Subtract(v1 Vec2) Vec2{
+	return V2(v.X - v1.X, v.Y - v1.Y)
+}
+
+func (v *Vec2) Scale(s float32) Vec2 {
+	return V2(v.X * s, v.Y * s)
+}
+
+func (v *Vec2) Dot(v1 Vec2) float32 {
+	return v.X * v1.X + v.Y * v1.Y
+}
+
+/*
+ * Computes the z value of the cross product of the two vectors,
+ * assuming that they each have z coordinates equal to zero.
+ */
+func (v *Vec3) CrossZ(v1 Vec2) float32 {
+	return v.X * v1.Y - v.Y * v1.X
+}
+```
+
+### voxel.go
+```
+package main
+
+var BRICK_SIZE = 8
+
+type RGBA struct {
+	R, G, B, A float32
+}
+
+type Voxel struct {
+	Properties RGBA
+	Normal Vec3
+}
+
+func (c *RGBA) ColorInt() uint32 {
+	r := int(c.R * 255)
+	g := int(c.G * 255)
+	b := int(c.B * 255)
+	a := int(c.A * 255)
+	return (((uint32(a) << 8 + uint32(b)) << 8 + uint32(g)) << 8) + uint32(r)
+}
+
+func (v *Voxel) ColorInt() uint32 {
+	return v.Properties.ColorInt()
+}
+
+func NewVoxel(r, g, b, a float32, normal Vec3) Voxel {
+	return Voxel{RGBA{r, g, b, a}, normal}
+}
+
+func AverageVoxels(voxels []Voxel) Voxel {
+	var avgR, avgG, avgB, avgA float32
+	avgR, avgG, avgB, avgA = 0, 0, 0, 0
+	avgNorm := V3(0, 0, 0)
+
+	numAvg := 0
+
+	for _, vox := range(voxels) {
+		if (vox.Properties.R == 0 &&
+			vox.Properties.G == 0 &&
+			vox.Properties.B == 0 &&
+			vox.Properties.A == 0) {
+			continue
+		}
+		avgR += vox.Properties.R
+		avgG += vox.Properties.G
+		avgB += vox.Properties.B
+		avgA += vox.Properties.A
+		avgNorm = avgNorm.Add(vox.Normal)
+		numAvg++
+	}
+
+	n := float32(numAvg)
+
+	return NewVoxel(avgR / n, avgG / n, avgB / n, avgA / n, avgNorm.Scale(1.0 / n))
+}
+
+type Brick struct {
+	Voxels [][][]*Voxel
+}
+
+func NewBrick() Brick{
+	newVoxels := make([][][]*Voxel, BRICK_SIZE)
+	for x := 0; x < BRICK_SIZE; x++ {
+		newVoxels[x] = make([][]*Voxel, BRICK_SIZE)
+		for y := 0; y < BRICK_SIZE; y++ {
+			newVoxels[x][y] = make([]*Voxel, BRICK_SIZE)
+		}
+	}
+	return Brick{newVoxels}
+}
+
+func (b *Brick) SetVoxel(x, y, z int, v *Voxel) {
+	b.Voxels[x][y][z] = v
+}
+
+func (b *Brick) AverageVoxelsInRange(x1, y1, z1, x2, y2, z2 int) Voxel{
+	toAverage := make([]Voxel, (x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1))
+	addPos := 0
+	for x := x1; x <= x2; x++ {
+		for y := y1; y <= y2; y++ {
+			for z := z1; z <= z2; z++ {
+				if (b.Voxels[x][y][z] == nil) {
+					toAverage[addPos] = NewVoxel(0, 0, 0, 0, V3(0, 0, 0))
+				} else {
+					toAverage[addPos] = *(b.Voxels[x][y][z])
+				}
+				addPos++
+			}
+		}
+	}
+	return AverageVoxels(toAverage)
+}
+
+func (b Brick) Dimension() int {
+	return len(b.Voxels)
+}
+```
+
+### voxelLoader.go
+```
+package main
+
+import(
+	"io/ioutil"
+	"os"
+	"image"
+	"fmt"
+)
+
+func readPGM(path string) Octree {
+	fImg, _ := os.Open(path)
+	defer fImg.Close()
+	img, _, err := image.Decode(fImg)
+
+	if err != nil {
+		panic(err)
+	}
+
+	bounds := img.Bounds()
+
+	fmt.Println(bounds.Size().X)
+	panic("exit!")
+
+	tree := NewOctree(V3(0, 0, 0), V3(1, 1, 1), 3)
+
+	return tree
+}
+
+func readRAWVoxelFile(path string, d1, d2, d3 int) Octree {
+	contents, err := ioutil.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+
+	// for i := 0; i < 100000; i++ {
+	// 	if (contents[i] != 0) {
+	// 		fmt.Printf("%d: 0x%8x\n", i, contents[i])
+	// 	}
+	// }
+	// panic("exit")
+
+	tree := NewOctree(V3(0, 0, 0), V3(1, 1, 1), 4)
+
+	index := 0
+
+	for x := 0; x < d1; x++ {
+		fmt.Println("X:", x)
+		for y := 0; y < d2; y++ {
+			for z := 0; z < d3; z++ {
+				// a := (uint(contents[index + 1]) << 8) + uint(contents[index])
+				g := float32(uint(contents[index] >> 4)) / 16
+				r := float32(uint(contents[index] & 15)) / 16
+				a := float32(uint(contents[index + 1] >> 4)) / 16
+				b := float32(uint(contents[index + 1] & 15)) / 16
+				// a := contents[index + 0] & 0xF
+				// r := contents[index + 1] >> 4
+				// g := contents[index + 1] & 0xF
+
+				// r := uint(0)
+				// g := uint(0)
+				// b := uint(0)
+				// a := uint(0)
+
+				// r := float32(10)
+				// g := float32(10)
+				// b := float32(10)
+
+				// if data > 5 {
+				// 	r = 1
+				// 	a = 1
+				// }
+
+				// if r > 1 {
+				// 	a = 100
+				// } else {
+				// 	a = 0
+				// }
+				// r = 10
+				// g = 10
+				// b = 10
+				// a = 10
+				if a >= .1 {
+					
+					// r = 100 * float32(x) / float32(d1)
+					// g = 100 * float32(y) / float32(d2)
+					// b = 100 * float32(z) / float32(d3)
+					r *= 30
+					g *= 15
+					b *= 3
+					// r = 40
+					// g = 15
+					// b = 3
+					a *= 100
+					// if (r > 20) {
+					// 	r *= 2
+					// 	a = 50
+					// } else {
+					// 	a = 10
+					// }
+					// r = 0
+					// b = 0
+					testVoxel := NewVoxel(float32(r) / 100,
+										  float32(g) / 100,
+										  float32(b) / 100,
+										  float32(a) / 100, V3(1, 0, 0))
+					tree.AddVoxel(&testVoxel, V3(float32(x) / float32(d1),
+											     float32(y) / float32(d2),
+											     float32(z) / float32(d3)))
+				}
+				index += 2
+			}
+		}
+	}
+
+	return tree
+}
+```
+
+### voxelRes/shader.frag
+```
+#version 430 core
+
+#define MAX_COMP(v) max(max(v.x, v.y), v.z)
+#define MIN_COMP(v) min(min(v.x, v.y), v.z)
+
+#define INT(b) (b ? 1 : 0)
+
+#define PICK_BY(choice, v1, v2) vec3((choice.x != 0) ? v1.x : v2.x, (choice.y != 0) ? v1.y : v2.y, (choice.z != 0) ? v1.z : v2.z)
+
+#define LEAF_MASK  uint(0x80000000)
+#define SOLID_MASK uint(0x40000000)
+#define FINAL_MASK uint(0xA0000000)
+#define CHILD_MASK uint(0x3FFFFFFF)
+#define COORD_MASK uint(0x000003FF)
+
+#define MAX_DEPTH  10
+
+struct octreeNode {
+	uint childData;
+	uint colorData;
+};
+
+layout(std430, binding = 1) buffer octree {
+	octreeNode nodes [];
+};
+
+// Nodes in the octree reference locations here for actual voxel data.
+// Actually a huge number of 8x8x8 voxel blocks, packed into a single texture.
+uniform sampler3D voxelBlocks;
+uniform vec3 worldSize;
+uniform int worldVoxelSize;
+
+uniform int numNodes;
+
+out vec3 color;
+
+uniform int time;
+uniform vec3 cameraPos;
+uniform vec3 cameraUp;
+uniform vec3 cameraRight;
+uniform vec3 cameraForwards;
+uniform int widthPix, heightPix;
+
+in vec3 cameraDir;
+
+vec4 colorAtBrickLoc(ivec3 pos) {
+	return texelFetch(voxelBlocks, pos.zyx, 0);
+}
+
+ivec3 nodeBrick(uint node) {
+	uint loc = nodes[node].colorData;
+	return ivec3((loc >> 20) & COORD_MASK, (loc >> 10) & COORD_MASK, loc & COORD_MASK);
+}
+
+vec4 cAlong(vec3 start, vec3 dir) {
+	vec4 c = vec4(0, 0, 0, 0);
+
+	// Search through the octree.
+	dir = normalize(dir);
+	vec3 dInv = 1 / dir;
+	vec3 deltaT = abs(dInv);
+
+	ivec3 vMask = ivec3(INT(dir.x <= 0), INT(dir.y <= 0), INT(dir.z <= 0));
+	ivec3 stepDir = ivec3(sign(dir));
+
+	vec3 xMin = vec3(0, 0, 0);
+	vec3 xMax = worldSize;
+	vec3 sMin = (xMin - start) * dInv;
+	vec3 sMax = (xMax - start) * dInv;
+
+	vec3 lowerLimits = PICK_BY(vMask, sMax, sMin);
+	vec3 upperLimits = PICK_BY(vMask, sMin, sMax);
+	float sLMax = MAX_COMP(lowerLimits);
+	float sUMin = MIN_COMP(upperLimits);
+
+	// if (sLMax >= sUMin)
+		// return vec4(0, 0, (sLMax - sUMin) / 100, 1);
+	if (sLMax >= sUMin || sUMin < 0)
+		return vec4(0, 0, 0, 1);
+
+	if (sLMax < 0)
+		sLMax = 0;
+
+	// Keeps track of current position when raymarching.
+	vec3 pos = start + dir * (sLMax + .001);
+	vec3 dim = xMax;
+
+	float dispPerUnit = length(dir);
+
+	float dist = sLMax * dispPerUnit;
+
+	ivec3 subNodeLoc;
+
+	vec3 nextXMin = xMin;
+	// XMax will always be xMin + dim, so we don't need a separate var.
+
+	uint node = 0;
+	uint nextNode = node;
+	int depth = 0;
+
+	int maxSteps = 200;
+	while (--maxSteps > 0) {
+		dist = sLMax * dispPerUnit;
+		if ((nodes[nextNode].childData & FINAL_MASK) != 0 || depth > 10) {
+			vec3 nextXMax = nextXMin + dim;
+			sMin = (nextXMin - start) * dInv;
+			sMax = (nextXMax - start) * dInv;
+
+			if ((nodes[nextNode].childData & SOLID_MASK) == 0) {
+				/*
+				 * Look at a leaf node.
+				 */
+
+				sLMax = MAX_COMP(PICK_BY(vMask, sMax, sMin));
+				pos = start + dir * (sLMax + .0001) - nextXMin;
+
+				vec3 fLinePos = pos * 8 / dim;
+				ivec3 linePos = ivec3(fLinePos);
+				vec3 stepTmax = (vec3(linePos + stepDir) - fLinePos) * dInv;
+
+				ivec3 brickLoc = nodeBrick(nextNode);
+
+				while (true) {
+					vec4 checkColor = colorAtBrickLoc(brickLoc + linePos);
+					if (checkColor.a != 0) {
+						c += vec4(checkColor.rgb, 0) * (1.0 - c.a);
+						c.a += checkColor.a;
+						if (c.a >= 1)
+							return c;
+					}
+					if (stepTmax.x < stepTmax.y && stepTmax.x < stepTmax.z) {
+							linePos.x += stepDir.x;
+							if (linePos.x < 0 || linePos.x >= 8)
+								break;
+							stepTmax.x += deltaT.x;
+					} else if (stepTmax.y < stepTmax.z) {
+							linePos.y += stepDir.y;
+							if (linePos.y < 0 || linePos.y >= 8)
+								break;
+							stepTmax.y += deltaT.y;
+					} else {
+							linePos.z += stepDir.z;
+							if (linePos.z < 0 || linePos.z >= 8)
+								break;
+							stepTmax.z += deltaT.z;
+					}
+				}
+			}
+			/*
+			 * Prepare for next node to check.
+			 */
+			sUMin = MIN_COMP(PICK_BY(vMask, sMin, sMax));
+
+			nextXMin = xMin;
+			nextNode = node;
+			pos = start + dir * (sUMin + .0001);
+			dim *= 2;
+			depth--;
+			// return vec4(nextPos / 20, 1);	// For pretty colors!
+		} else {
+			/*
+			 * Parse down to find a leaf node (or empty node)
+			 */
+			node = nextNode;
+			xMin = nextXMin;
+
+			dim /= 2;
+			subNodeLoc = ivec3(floor((pos - xMin) / dim));
+			if (subNodeLoc.x < 0 || subNodeLoc.x > 1 ||
+				subNodeLoc.y < 0 || subNodeLoc.y > 1 ||
+				subNodeLoc.z < 0 || subNodeLoc.z > 1) {
+				/*
+				 * In this case we either need to exit our search,
+				 * or restart from the root node.
+				 */
+				if (depth == 0) {
+					return c;
+			 	} else {
+			 		nextXMin = vec3(0, 0, 0);
+			 		dim = worldSize;
+			 		nextNode = 0;
+			 		depth = 0;
+			 	}
+			} else {
+				nextXMin = xMin + dim * subNodeLoc;
+				nextNode = (nodes[node].childData & CHILD_MASK)
+					+ (subNodeLoc.x << 2) + (subNodeLoc.y << 1) + subNodeLoc.z;
+				depth++;
+			}
+		}
+	}
+	return c;
+}
+
+void main(){
+	// Calculate the vector for this fragment into the screen
+	float xDisp = (gl_FragCoord.x - float(widthPix) / 2) / widthPix;
+	float yDisp = (gl_FragCoord.y - float(heightPix) / 2) / heightPix;
+	vec3 cDir = cameraForwards + xDisp * cameraRight - yDisp * cameraUp;
+	vec4 actualColor = cAlong(cameraPos, cDir);
+	color = actualColor.rgb * actualColor.a;
+}
+```
+
+### voxelRes/shader.vert
+```
+#version 430 core
+layout(location = 0) in vec3 vertexPosition_modelspace;
+layout(location = 1) in vec3 vertexColor;
+layout(location = 2) in vec3 vertexNormal_modelspace;
+
+uniform int time;
+uniform mat4 M;
+uniform mat4 VP;
+uniform vec3 cameraPos;
+uniform vec3 lightPos;
+
+out vec3 cameraDir;
+
+void main() {
+	vec4 v = vec4(vertexPosition_modelspace, 1);
+	vec4 worldV = M * v;
+	gl_Position = VP * worldV;
+
+	cameraDir = worldV.xyz - cameraPos;
+}
+```

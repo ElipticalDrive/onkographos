@@ -1,0 +1,235 @@
+# Neural Texture Field
+
+Also called: Continuous Texture Representation, Function Space Texture, Texture Field
+
+## Overview
+A Neural Texture Field is a continuous texture representation that maps any 3D point to a color value using a neural network parameterized by $\theta$, independent of shape discretization or UV mapping [S1]. It solves the problem of high-frequency texture reconstruction and generation for 3D objects by avoiding the resolution limits of voxel grids and the topology constraints of UV-mapped meshes [S1]. Unlike [Neural Textures Architecture](9534-neural-textures-architecture.md), which separates models for RGB and transparency per mesh, the Neural Texture Field learns a single continuous function conditioned on a shape embedding and a latent code to predict RGB color directly in 3D space [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A 3D shape (typically a triangular mesh), optionally a 2D image of the object, and a latent code $z$ (for generative models).
+*   **Outputs:** A 3-dimensional color value $c \in \mathbb{R}^3$ (RGB) for any queried 3D point $p$.
+
+**Data Structures:**
+1.  **Shape Embedding ($s$):** A fixed-dimensional vector (dimension not explicitly stated, but implied to match the input dimension of the Texture Field's injection mechanism) representing the 3D shape.
+2.  **Latent Code ($z$):** A fixed-dimensional vector encoding viewpoint-invariant appearance information (conditional) or sampled from a Gaussian distribution (unconditional).
+3.  **Texture Field ($t_\theta$):** A fully connected ResNet architecture.
+    *   **Input Layer:** Concatenation of point position $p \in \mathbb{R}^3$, shape embedding $s$, and latent code $z$.
+    *   **Hidden Layers:** $L$ ResNet blocks. Each block consists of fully connected layers.
+    *   **Output Layer:** A final fully connected layer mapping the 128-dimensional feature vector to $\mathbb{R}^3$.
+
+**Numbered Steps:**
+
+1.  **Shape Encoding:** Uniformly sample $N_p$ points (typically 2048) from the input 3D mesh surface to form a point cloud. Pass this point cloud through a PointNet-based encoder [S1]. This encoder consists of 5 ResNet blocks with max pooling layers [S1]. The output is the shape embedding $s$.
+2.  **Image Encoding (Conditional Only):** If a 2D image is provided, encode it into a latent code $z$ using a pre-trained ResNet-18 architecture [S1]. If no image is provided (unconditional/generative), sample $z$ from a standard Gaussian distribution [S1].
+3.  **Rendering for Training:** Render a depth map $D$ and a corresponding color image $X$ from an arbitrary viewpoint using OpenGL [S1]. Identify pixels $u_i$ with finite depth values $d_i$. The number of such foreground pixels is $N$.
+4.  **3D Point Unprojection:** For each pixel $i \in \{1, \dots, N\}$, compute the 3D position $p_i$ in the object's local coordinate system using the camera intrinsics $K$, extrinsics $(R, t)$, depth $d_i$, and homogeneous pixel coordinates $u_i$:
+    $$ p_i = d_i R K^{-1} u_i + t $$
+    [S1]
+5.  **Color Prediction:** For each 3D point $p_i$, predict the color $\hat{c}_i$ by passing the concatenated inputs through the Texture Field network $t_\theta$:
+    $$ \hat{c}_i = t_\theta(p_i, s, z) $$
+    [S1]
+    The network $t_\theta$ processes the inputs as follows:
+    *   Concatenate $p_i$, $s$, and $z$.
+    *   Pass through an initial fully connected layer to produce a feature vector.
+    *   Iterate through $L$ ResNet blocks. In each block, concatenate $s$ and $z$, pass them through a fully connected network, and add the result to the point features [S1].
+    *   The final feature vector has dimension 128 [S1].
+6.  **Loss Minimization:** Minimize the reconstruction loss between the predicted colors $\hat{c}_i$ and the ground truth colors $c_i$ from the rendered image $X$ [S1].
+
+**Parameters:**
+*   **$L$ (Number of ResNet blocks):** 6 for single image texture reconstruction; 4 for generative models (GAN/VAE) [S1].
+*   **Feature Dimension:** The feature vector before the final output layer is 128-dimensional [S1].
+*   **Optimizer:** Adam with learning rate $10^{-4}$ for supervised and VAE models; RMSProp with learning rate $10^{-4}$ for GAN [S1].
+*   **Point Sampling:** 2048 points per mesh for shape encoding [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Ill-posed Generation:** Texture generation is ill-posed without constraints. Conditioning on the shape embedding $s$ is critical to guide predictions toward the object surface and exploit geometric context (e.g., surface discontinuities) [S1].
+*   **Unconstrained Regions:** Predictions far from the shape are meaningless as they are unconstrained by observations. The network typically learns to output background colors (e.g., white) outside the shape and interior colors (e.g., gray) inside [S1].
+*   **Topology Independence:** Unlike mesh-based approaches, this method does not require UV mapping or predefined template meshes, making it robust to varying topologies [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TextureFieldResNetBlock(nn.Module):
+    """
+    A single ResNet block for the Texture Field.
+    Injects shape embedding s and latent code z.
+    """
+    def __init__(self, input_dim, hidden_dim):
+        super(TextureFieldResNetBlock, self).__init__()
+        # Fully connected layers for the residual branch
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, input_dim)
+        
+        # Fully connected layers for injecting s and z
+        # s and z are concatenated before injection
+        self.inject_fc = nn.Linear(hidden_dim + hidden_dim, hidden_dim) # Assuming s, z dims match hidden_dim for simplicity in injection logic described
+        
+        # Note: The source describes injecting s and z by concatenating them,
+        # passing through a FC network, and adding to point features.
+        # We assume s and z are projected to the same dimension as the point features
+        # or concatenated and projected. The source says "concatenating them... adding the output".
+        # Let's assume s and z are already projected to 'hidden_dim' or the injection
+        # handles the dimensionality. Based on "concatenating them... passing through FC",
+        # we project the combined condition to the feature space.
+        
+        self.relu = nn.ReLU()
+
+    def forward(self, x, s, z):
+        # x: (N, input_dim) point features
+        # s: (1, hidden_dim) shape embedding
+        # z: (1, hidden_dim) latent code
+        
+        residual = x
+        
+        # Main branch
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        
+        # Condition injection branch
+        # Concatenate s and z. s and z are broadcastable to N.
+        # Source: "inject features of s and z by concatenating them, passing through a fully-connected network"
+        # We assume s and z are of dimension 'hidden_dim' or compatible.
+        # Let's assume they are projected to 'input_dim' or the injection FC handles it.
+        # The source implies the injection output is added to the features.
+        
+        # To be precise to source: "concatenating them [s and z], passing through a fully-connected network"
+        # If s and z are scalars or vectors, we concatenate.
+        # Let's assume s and z are vectors of size D_cond.
+        # The injection FC maps D_cond*2 -> input_dim? Or D_cond*2 -> hidden_dim?
+        # Source says: "adding the output to the features of each point".
+        # So the injection output must match x's dimension.
+        
+        # Simplified injection as per source description:
+        # Concatenate s and z.
+        cond = torch.cat([s, z], dim=1) # (1, 2*D_cond)
+        # Project to input_dim
+        cond_proj = self.inject_fc(cond) # (1, input_dim)
+        cond_proj = self.relu(cond_proj)
+        
+        # Add to residual
+        out = out + cond_proj
+        
+        return self.relu(out + residual)
+
+class TextureField(nn.Module):
+    def __init__(self, L=6, hidden_dim=256, point_dim=3, cond_dim=256):
+        super(TextureField, self).__init__()
+        self.L = L
+        self.point_dim = point_dim
+        self.cond_dim = cond_dim
+        
+        # Initial projection to hidden_dim
+        self.input_fc = nn.Linear(point_dim + cond_dim + cond_dim, hidden_dim)
+        self.relu = nn.ReLU()
+        
+        # ResNet blocks
+        self.blocks = nn.ModuleList([
+            TextureFieldResNetBlock(hidden_dim, hidden_dim) for _ in range(L)
+        ])
+        
+        # Final output layer
+        self.output_fc = nn.Linear(hidden_dim, 3) # RGB
+
+    def forward(self, p, s, z):
+        """
+        p: (N, 3) 3D points
+        s: (1, cond_dim) shape embedding
+        z: (1, cond_dim) latent code
+        """
+        # Concatenate p, s, z
+        # s and z are broadcasted to N
+        s_exp = s.expand(p.size(0), -1)
+        z_exp = z.expand(p.size(0), -1)
+        
+        x = torch.cat([p, s_exp, z_exp], dim=1)
+        
+        # Initial layer
+        x = self.input_fc(x)
+        x = self.relu(x)
+        
+        # ResNet blocks
+        for block in self.blocks:
+            x = block(x, s, z)
+            
+        # Final output
+        c = self.output_fc(x)
+        return c
+
+def render_and_train(mesh, image, camera_params, texture_field, shape_encoder, image_encoder, L=6):
+    """
+    One step of training.
+    """
+    # 1. Shape Encoding
+    points = sample_points_from_mesh(mesh, num_points=2048)
+    s = shape_encoder(points) # (1, cond_dim)
+    
+    # 2. Image Encoding (Conditional)
+    z = image_encoder(image) # (1, cond_dim)
+    
+    # 3. Rendering
+    # Render depth map D and color image X from viewpoint defined by camera_params
+    # camera_params: K (3x3), R (3x3), t (3)
+    D, X = render_opengl(mesh, K=camera_params['K'], R=camera_params['R'], t=camera_params['t'])
+    
+    # Get pixel indices with finite depth
+    valid_mask = D > 0
+    u_indices = torch.where(valid_mask)
+    
+    # 4. Unproject to 3D points
+    # u_i in homogeneous coordinates
+    u_homo = torch.stack([u_indices[1], u_indices[0], torch.ones_like(u_indices[0])], dim=1) # (N, 3)
+    d_i = D[valid_mask] # (N,)
+    
+    # p_i = d_i * R * K^-1 * u_i + t
+    # K_inv_u = K^-1 * u_homo.T -> (3, N)
+    K_inv = torch.inverse(camera_params['K'])
+    K_inv_u = torch.matmul(K_inv, u_homo.T) # (3, N)
+    
+    # R * K_inv_u -> (3, N)
+    R_K_inv_u = torch.matmul(camera_params['R'], K_inv_u)
+    
+    # d_i * ... -> (3, N)
+    # Add t -> (3, N)
+    # Transpose to (N, 3)
+    p_i = (d_i.unsqueeze(0) * R_K_inv_u).T + camera_params['t']
+    
+    # 5. Predict Color
+    c_pred = texture_field(p_i, s, z) # (N, 3)
+    
+    # 6. Loss
+    c_gt = X[valid_mask] # (N, 3)
+    loss = F.mse_loss(c_pred, c_gt)
+    
+    return loss
+```
+
+## Subtopics
+
+### Conditional Texture Reconstruction
+Uses a specific input image to condition the texture field. The latent code $z$ is derived from the image. Choose this when reconstructing texture for a known object from a single view. [S1]
+
+### Unconditional Generative Synthesis
+Uses a latent code $z$ sampled from a Gaussian distribution. Choose this for generating novel textures for unseen shapes or for probabilistic modeling (GAN/VAE). [S1]
+
+## Operating characteristics
+*   **Time Complexity:** Training time depends on the number of pixels $N$ rendered per step and the depth of the ResNet ($L$). Inference is fast as it involves a forward pass through a small MLP for each point.
+*   **Memory Complexity:** Memory usage is dominated by the neural network parameters and the storage of the shape embedding $s$. It does not require storing a voxel grid or UV atlas, making it memory-efficient for high-frequency details compared to $64^3$ voxel grids [S1].
+*   **Performance:** Capable of representing high-frequency texture details that voxel-based methods (limited to $32^3$ or $64^3$) cannot capture [S1].
+*   **Strengths:** Independent of shape topology; no UV mapping required; continuous representation allows arbitrary resolution; blends with deep learning techniques [S1].
+*   **Limitations:** Predictions far from the shape surface are unconstrained and meaningless; requires a 3D shape mesh as input; training requires rendering depth maps and unprojecting pixels [S1].
+*   **When to use:** Single-image texture reconstruction of 3D objects; generative modeling of 3D object textures.
+*   **When not to use:** When the 3D shape is unknown or unavailable; when UV-mapped textures are required for compatibility with legacy pipelines.
+
+## Background
+The Neural Texture Field was introduced in "Texture Fields: Learning Texture Representations in Function Space" by the Autonomous Vision Group at the Max Planck Institute for Intelligent Systems and University of Tübingen, along with ETAS GmbH, Bosch Group [S1]. The paper was published in October 2019 (ICCV 2019) [S1]. It addresses the limitations of previous texture representations, such as the low resolution of voxel-based methods and the topological constraints of UV-mapped mesh approaches [S1]. The method builds on PointNet for shape encoding and ResNet architectures for feature extraction and regression [S1].
+
+## Sources
+[S1] Texture Fields: Learning Texture Representations in Function Space, https://doi.org/10.1109/iccv.2019.00463, fetched 2026-10-26

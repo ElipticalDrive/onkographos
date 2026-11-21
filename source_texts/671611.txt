@@ -1,0 +1,124 @@
+Problem luxar gsplat cal selects K* from a held-out PSNR computed over all masked voxels. On sparse volumes that number is background-dominated: a predict-zero reconstruction already scores tens of dB, so the curve rewards getting empty ...
+
+gsplat cal: foreground-weighted held-out PSNR for blind-spot cross-validation on sparse volumes · Issue #2509 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+gsplat cal: foreground-weighted held-out PSNR for blind-spot cross-validation on sparse volumes #2509
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+gsplat cal: foreground-weighted held-out PSNR for blind-spot cross-validation on sparse volumes#2509
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requestpriorityHigh priority: prioritised by the orchestrator and the fleetHigh priority: prioritised by the orchestrator and the fleet
+Description
+royerloic
+opened on Sep 4, 2026
+Issue body actions
+Problem
+luxar gsplat cal selects K* from a held-out PSNR computed over all masked voxels. On sparse volumes that number is background-dominated: a predict-zero reconstruction already scores tens of dB, so the curve rewards getting empty space right as much as getting signal right.
+Measured on the h2afva benchmark crop (deconvolved light-sheet, 407×512×512, ~99% background): full-volume held-out PSNR at the 512K operating point is 37.8 dB, the gain over the predict-zero baseline is only 17.8 dB, and the foreground-restricted held-out PSNR is 25.3 dB. The full-volume figure overstates foreground fidelity by ~12 dB, and K* detected on it lands where the background stops improving.
+The two existing alternatives each miss something:
+--k-star-metric gain removes the free background credit but still averages over the whole volume.
+--k-star-metric psnr_foreground ignores background entirely, so haze, ringing and pedestal errors that are plainly visible in the viewer never enter the score.
+Proposal: a foreground-weighted held-out PSNR
+Keep every foreground voxel and a controlled share of background, with a fixed weight ratio so the score is comparable across volumes of very different sparsity:
+Foreground mask F from an Otsu threshold on a lightly smoothed copy of the original volume (never the reconstruction), fixed across the whole K sweep.
+Weights on the masked (blind-spot) voxels: w_i = 1 on F, w_i = |F| / (r · |F^c|) off F, with r the foreground:background weight ratio (r = 1 equal total weight; expose r as a knob, default 1).
+PSNR_fgw = 10·log10( 1 / Σ w_i (V_i − V̂_i)² / Σ w_i ) on the masked voxels against the original values — otherwise identical to the current held-out PSNR, so find_k_star runs unchanged on the new curve.
+Report it alongside psnr_minmax and gain rather than replacing them; the three together bracket the behaviour (empty-space credit, whole-volume, foreground-weighted).
+Equivalent formulation for the sampling-minded: stratified held-out evaluation, all foreground masked voxels plus a random background subsample of matched weight.
+Scope
+New --k-star-metric psnr_fg_weighted (+ --fg-bg-ratio, default 1.0) in luxar gsplat cal, computed in the same pass as the existing metrics.
+Report the mask fraction and the ratio in cal.json so a K* is reproducible.
+Unit test on a synthetic sparse volume where the full-volume and foreground-weighted K* provably differ.
+Docs: cli/README.md cal options + the gsplat-pipeline skill's "which metric" note; recommend psnr_fg_weighted for sparse or deconvolved volumes.
+Why now
+The manuscript's SD2 already documents the h2afva inflation; this closes the gap between what cal optimises and what a user sees in the viewer on sparse data, and it is cheap: no refitting, scoring only.
+Activity
+royerloic
+added
+enhancementNew feature or requestNew feature or request
+on Sep 4, 2026
+royerloic commented on Sep 4, 2026
+royerloic
+on Sep 4, 2026
+MemberAuthor
+More actions
+Valid, correctly diagnosed, and worth doing. I checked it against the code rather than the write-up, and the premise holds — but the gap is bigger than the issue states, so I want to widen the scope slightly before anyone picks this up.
+Confirmed. calibration/driver.py reduces held_mse over rendered[mask_dev] for the whole held-out set, and find_k_star runs on the resulting held_psnr curve. psnr_foreground is computed over mask & foreground_mask_otsu(V), i.e. background is dropped entirely. So the two alternatives are exactly as characterised.
+The part that changes the priority: --k-star-metric gain is inert for selection. baseline_mse is computed once, before the K loop, from V and mask — it does not vary with K. So
+psnr_minmax(K) = 10log10(data_range²) − 10log10(held_mse(K))
+gain(K) = 10log10(baseline_mse) − 10log10(held_mse(K))
+differ by a constant, and every quantity find_k_star uses is a difference of curve values (argmax, peak − mean(flank), np.diff of the tail, peak − knee_margin_db, total_rise). It is shift-invariant. I ran find_k_star on 2000 random 10-point curves under both parameterisations: k_star, type, k_knee and confidence_db were identical on every one, to the last bit.
+Which means gain returns the min–max K* under a different name, and the σ̂≈0 warning we print on exactly the noise-free/deconvolved volumes this issue is about — "prefer --k-star-metric gain" (cli/gsplat_ops/fitting/calibrate.py) — sends users down a dead end. Same for the CLI help ("far more reliable than the background-dominated min–max PSNR") and the metric table in cli/README.md and the pipeline skill's cli-options.md. gain is a fine reported diagnostic (how far above predict-zero we are); it is not a selector, and there's no honest way to make it one without a per-K baseline. Adding priority for that reason: a flag we actively recommend, on the data class we recommend it for, that silently does nothing, and whose K* then flows into splat_density.k_star_reference and out to the planner's per-box budgets.
+Fold into this issue (one coherent PR, the guidance is the direct motivation for the new metric): correct the help text, the σ̂≈0 warning and both docs tables to point at psnr_fg_weighted, and say plainly next to gain that it selects identically to psnr_minmax. My preference is to keep accepting gain rather than removing the choice — it's a published-ish surface and the reported curve stays useful. Shout if you'd rather it just go away.
+One prerequisite before the mask can carry a published metric. calibration/content.py::_otsu_threshold lazily imports skimage.filters.threshold_otsu and falls back to V.min() on ImportError, and scikit-image is only in the demos extra — not in gsplats. On a plain luxar[gsplats] install, "foreground" therefore silently becomes "every voxel above the floor", which collapses the proposed weighted metric back toward psnr_minmax with no warning. We already fixed this once elsewhere: gsplats/metrics.py::otsu_threshold is a dependency-free reimplementation pinned bin-for-bin to skimage, and its docstring names calibration.content._otsu_threshold as precisely the thing it exists to avoid. Point the calibration mask at it. That also makes the existing psnr_foreground number mean one thing everywhere, which today it does not.
+Spec details worth pinning while writing it (no need to come back to me on these):
+Normalise the weights over the held-out subset, not the whole volume — w_bg = |F ∩ mask| / (r · |F^c ∩ mask|). Then r = 1 is exactly equal total weight, rather than equal up to the Bernoulli draw.
+Use the same data_range as the sibling metrics (_psnr_db(mse, data_range)), not the implicit 1 in the issue's formula, so the three reported numbers sit on one scale. It doesn't move K*, only the printed dB.
+The "lightly smoothed" mask should be a separate helper for this metric. Don't add smoothing inside foreground_mask_otsu — it is also the feature_method="intensity" counter via feature_threshold, and moving it would shift feature counts and the whole cal→planner density contract.
+Note the mask is built on the floor-subtracted V (the driver subtracts once, up front). That's the right scale — the fits and the held-out truth are all on it — but the docstring should say so, since the issue says "original volume".
+Degenerate cases need defined behaviour and tests: F ∩ mask empty (very sparse volume, small mask fraction) and F^c ∩ mask empty (fully-foreground crop, which --auto-region --region-strategy densest can hand you). nan, not a division by zero.
+Record the Otsu cut itself in cal.json, not just the mask fraction and r. The fraction alone doesn't make a K* reproducible across volumes.
+Also fold in: calibration_report.py plots held_out_psnr_db and stars held_out_peak.k_star unconditionally, ignoring k_star_metric / held_out_peak_selected. Anyone running a non-default metric today gets a PDF whose star disagrees with the CLI headline. Adding a fourth metric widens that; the report should plot the selected curve and star the selected K*.
+Relation to other work: nothing in flight touches gsplats/calibration/ — #2498 is only near the h2afva demo tests, #2505 is fitting config/docs. The one real neighbour is #1910 (on-hold), which is the same underlying question from the other end: on a specimen-in-medium stack the floor resolves to the medium, so the haze inside the specimen survives and would land inside F here. The weighted metric is still an improvement there, just a weaker one; no dependency, and this shouldn't wait on it.
+Default stays psnr_minmax — agreed with the issue that this reports alongside rather than replaces.
+royerloic
+added
+priorityHigh priority: prioritised by the orchestrator and the fleetHigh priority: prioritised by the orchestrator and the fleet
+in-progressWe have an open PR for this issueWe have an open PR for this issue
+on Sep 4, 2026
+royerloic commented on Sep 7, 2026
+royerloic
+on Sep 7, 2026
+MemberAuthor
+More actions
+Taking this one. Plan:
+Add the foreground-weighted held-out metric with a smoothed, dependency-free Otsu mask and explicit degenerate handling.
+Thread the metric, ratio, threshold, selected peak, and report plotting through calibration output/CLI.
+Correct the gain guidance and update both user-facing metric tables.
+Add focused regressions, including a sparse-volume K* divergence case, then run the calibration and docs checks.
+royerloic
+added a commit that references this issue on Sep 8, 2026
+feat(gsplats): add foreground-weighted calibration metric (#2587)
+...
+69276c1
+royerloic
+removed
+in-progressWe have an open PR for this issueWe have an open PR for this issue
+on Sep 8, 2026
+royerloic commented on Sep 8, 2026
+royerloic
+on Sep 8, 2026
+MemberAuthor
+More actions
+Landed in #2587.
+royerloic
+closed this as completedon Sep 8, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requestpriorityHigh priority: prioritised by the orchestrator and the fleetHigh priority: prioritised by the orchestrator and the fleet
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

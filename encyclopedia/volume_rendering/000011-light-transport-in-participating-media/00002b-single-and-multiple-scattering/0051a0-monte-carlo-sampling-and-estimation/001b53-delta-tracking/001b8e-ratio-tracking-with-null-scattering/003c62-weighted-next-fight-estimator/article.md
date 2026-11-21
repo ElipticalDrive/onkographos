@@ -1,0 +1,172 @@
+# Weighted Next-Fight Estimator
+
+Also called: Integral Formulation of Transmittance Estimators, Next-flight estimator
+
+## Overview
+The Weighted Next-Fight Estimator is a Monte Carlo method for estimating transmittance (uncollided radiance) in participating media by modifying the Radiative Transfer Equation (RTE) to account for losses and a point source of unit radiance. It sets itself apart from standard delta tracking by explicitly adding an underestimated uncollided contribution at each collision point and using null collision sampling to correct for the initial underestimation, thereby providing an unbiased estimator for the transmittance term in light transport. It builds on [Ratio Tracking with Null Scattering](1044-ratio-tracking-with-null-scattering.md) by utilizing the null scattering framework to handle heterogeneous media.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Starting position $\mathbf{x}_0$, direction $\omega$, remaining distance to the point source $d_i$, combined extinction coefficient function $\bar{\mu}(\mathbf{x}) = \mu_t(\mathbf{x}) + \mu_n(\mathbf{x})$, null collision coefficient function $\mu_n(\mathbf{x})$, and PDF of sampled free paths $p(t)$.
+- **Output:** The estimated transmittance $L(\mathbf{x}_0, \omega)$.
+
+**Data Structures:**
+- No specific complex data structures are required beyond the coefficient functions $\bar{\mu}$ and $\mu_n$, which are typically accessed via volume lookup or analytical evaluation.
+- The estimator maintains a running weight product and a sum of scores.
+
+**Numbered Steps:**
+1. Initialize the Monte Carlo score sum $W = 0$ and the current weight product $w_{prod} = 1$.
+2. Set the current position $\mathbf{x}_{curr} = \mathbf{x}_0$ and remaining distance $d_{rem} = d_i$.
+3. Sample a free path distance $t$ from the PDF $p(t)$. [G] If $p(t)$ is not explicitly provided, standard exponential sampling $t = -\ln(\xi)/\bar{\mu}_{max}$ is used, where $\xi \in (0,1)$ is a uniform random number and $\bar{\mu}_{max}$ is the maximum combined extinction coefficient.
+4. Update the current position: $\mathbf{x}_{next} = \mathbf{x}_{curr} + t\omega$.
+5. Calculate the transmittance from $\mathbf{x}_{curr}$ to $\mathbf{x}_{next}$ through the combined medium:
+   $$ T_{curr} = \exp\left(-\int_0^t \bar{\mu}(\mathbf{x}_s) \, ds\right) $$
+   where $\mathbf{x}_s = \mathbf{x}_{curr} + s\omega$ for $s \in [0, t]$.
+6. Add the underestimated uncollided contribution to the score. If the path segment does not exceed the remaining distance to the source ($t \le d_{rem}$), the contribution is:
+   $$ \text{score\_add} = T_{curr} \times w_{prod} $$
+   If the path segment exceeds the remaining distance ($t > d_{rem}$), the contribution is the transmittance to the source:
+   $$ \text{score\_add} = \exp\left(-\int_0^{d_{rem}} \bar{\mu}(\mathbf{x}_s) \, ds\right) \times w_{prod} $$
+   Update the total score: $W \leftarrow W + \text{score\_add}$.
+7. If the path segment exceeds the remaining distance ($t > d_{rem}$), terminate the estimator and return $W$.
+8. Update the weight product for the next iteration by multiplying by the ratio of null collision to combined extinction at the collision point $\mathbf{x}_{next}$:
+   $$ w_{prod} \leftarrow w_{prod} \times \frac{\mu_n(\mathbf{x}_{next})}{\bar{\mu}(\mathbf{x}_{next})} $$
+9. Update the remaining distance: $d_{rem} \leftarrow d_{rem} - t$.
+10. Update the current position: $\mathbf{x}_{curr} \leftarrow \mathbf{x}_{next}$.
+11. Repeat from step 3.
+
+**Formulas:**
+The estimator is derived from the modified RTE:
+$$ (\omega \cdot \nabla) L(\mathbf{x}, \omega) = -[\mu_t(\mathbf{x}) + \mu_n(\mathbf{x})]L(\mathbf{x}, \omega) + \delta(\mathbf{x} - \mathbf{x}_d) + \mu_n(\mathbf{x}) \int_{S^2} \delta(\omega - \bar{\omega}) L(\mathbf{x}, \bar{\omega}) d\bar{\omega} $$
+where $\mathbf{x}_d = \mathbf{x}_0 - d\omega$ is the position of the point source of unit radiance.
+
+The integral formulation is:
+$$ L(\mathbf{x}, \omega) = \exp\left(-\int_0^{d_i} \bar{\mu}(\mathbf{x}_s) \, ds\right) + \int_0^{d_i} p(t) \frac{\mu_n(\mathbf{x}_t)}{\bar{\mu}(\mathbf{x}_t)} L(\mathbf{x}_t, \omega) \, dt $$
+
+The Monte Carlo score for a path $\mathbf{X} = \{\mathbf{x}_0, \dots, \mathbf{x}_k\}$ where $k$ is the index of the first collision after exceeding distance $d$ from $\mathbf{x}_0$ is:
+$$ w(\mathbf{X}) = \sum_{i=0}^{k-1} \exp\left(-\int_0^{d_i} \bar{\mu}(\mathbf{x}_s) \, ds\right) \prod_{j=1}^i \frac{\mu_n(\mathbf{x}_j)}{\bar{\mu}(\mathbf{x}_j)} $$
+
+**Parameters:**
+- $\bar{\mu}(\mathbf{x})$: Combined extinction coefficient. Must be known or bounded.
+- $\mu_n(\mathbf{x})$: Null collision coefficient. Must satisfy $\mu_n(\mathbf{x}) \ge 0$ and $\bar{\mu}(\mathbf{x}) \ge \mu_t(\mathbf{x})$.
+- $p(t)$: PDF of sampled free paths.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The integrals $\int \bar{\mu} ds$ must be computed accurately. In heterogeneous media, this may require numerical integration or precomputed lookup tables.
+- **Boundaries:** The estimator assumes the point source is at a finite distance $d_i$. If $d_i \to \infty$, the transmittance term vanishes, and the estimator may become inefficient or require modification.
+- **Degenerate Input:** If $\bar{\mu}(\mathbf{x}) = 0$ anywhere along the path, the transmittance is 1, and the weight product update becomes undefined if $\mu_n(\mathbf{x})$ is also 0. [G] Handle this by checking for zero extinction and skipping weight updates or treating it as a vacuum.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def weighted_next_flight_estimator(x0, omega, d_i, mu_t_func, mu_n_func, p_sample_func, max_steps=1000):
+    """
+    Estimates transmittance using the Weighted Next-Fight Estimator.
+    
+    Args:
+        x0: Starting position (vector).
+        omega: Direction (vector, normalized).
+        d_i: Remaining distance to the point source (scalar).
+        mu_t_func: Function returning true extinction coefficient at position.
+        mu_n_func: Function returning null collision coefficient at position.
+        p_sample_func: Function sampling free path distance t from PDF p(t).
+        max_steps: Maximum number of collision steps to prevent infinite loops.
+        
+    Returns:
+        Estimated transmittance L(x0, omega).
+    """
+    W = 0.0
+    w_prod = 1.0
+    x_curr = x0
+    d_rem = d_i
+    
+    for step in range(max_steps):
+        # Sample free path
+        t = p_sample_func()
+        
+        # Check if path exceeds remaining distance
+        if t > d_rem:
+            # Calculate transmittance to the source
+            # Integral from 0 to d_rem
+            # [G] Assuming a simple numerical integration or analytical form is available
+            # For demonstration, we use a placeholder for the integral calculation
+            integral_val = compute_transmittance_integral(x_curr, omega, d_rem, mu_t_func, mu_n_func)
+            T_to_source = exp(-integral_val)
+            W += T_to_source * w_prod
+            break
+        
+        # Calculate transmittance for the sampled path
+        # Integral from 0 to t
+        integral_val = compute_transmittance_integral(x_curr, omega, t, mu_t_func, mu_n_func)
+        T_curr = exp(-integral_val)
+        
+        # Add score
+        W += T_curr * w_prod
+        
+        # Update position
+        x_next = x_curr + t * omega
+        
+        # Update weight product
+        mu_n_next = mu_n_func(x_next)
+        mu_t_next = mu_t_func(x_next)
+        mu_n_combined_next = mu_t_next + mu_n_next
+        
+        if mu_n_combined_next == 0:
+            # Handle zero extinction case
+            # [G] If combined extinction is zero, weight product doesn't change
+            # because the ratio is 0/0, but physically it means no interaction.
+            # However, the formula uses mu_n / mu_combined. If both are 0, ratio is undefined.
+            # In practice, if mu_t=0 and mu_n=0, the medium is vacuum, so no scattering.
+            # The weight product should remain unchanged.
+            pass
+        else:
+            w_prod *= (mu_n_next / mu_n_combined_next)
+        
+        # Update remaining distance and current position
+        d_rem -= t
+        x_curr = x_next
+        
+        if d_rem <= 0:
+            break
+            
+    return W
+
+def compute_transmittance_integral(x_start, omega, distance, mu_t_func, mu_n_func):
+    """
+    Computes the integral of combined extinction along a ray segment.
+    [G] This is a placeholder for the actual integration method.
+    In practice, this might involve numerical quadrature or volume traversal.
+    """
+    # Simple midpoint rule for demonstration
+    num_samples = 10
+    step = distance / num_samples
+    integral = 0.0
+    for i in range(num_samples):
+        t = (i + 0.5) * step
+        x = x_start + t * omega
+        mu_t = mu_t_func(x)
+        mu_n = mu_n_func(x)
+        integral += (mu_t + mu_n) * step
+    return integral
+```
+
+## Subtopics
+
+### [Sampling Proportional to Transmittance](14989-sampling-proportional-to-transmittance.md)
+Sampling Proportional to Transmittance is a technique for generating free-flight distances distributed according to the transmittance function $T(t)$, rather than the standard extinction-weighted distribution. It solves the problem of needing to sample from $T(t)$ for unbiased inverse volume rendering estimators without requiring explicit evaluation of the normalization constant $C = \int_0^{t_s} T(t') dt'$, which is generally intractable. It sets itself apart from standard delta tracking by producing samples proportional to $T(t)$ directly, whereas standard delta tracking produces samples proportional to $\sigma_t(t)T(t)$ (the probability of the *first* interaction). It builds on [Weighted Next-Fight Estimator](9226-weighted-next-fight-estimator.md) by providing the specific sampling distribution required for the uncollided radiance term.
+
+## Operating characteristics
+- **Time Complexity:** The complexity depends on the number of collisions $k$ before exceeding the distance $d$. In homogeneous media, $k$ is small. In highly heterogeneous media with many null collisions, $k$ can be large, leading to higher computational cost.
+- **Memory Complexity:** $O(1)$ auxiliary memory, assuming the coefficient functions are accessible in $O(1)$ time.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance degrades in media with high variance in extinction coefficients, as the number of null collisions increases.
+- **Strengths:** Provides an unbiased estimator for transmittance. Integrates naturally with null scattering methods.
+- **Limitations:** Can suffer from high variance if the null collision coefficient is not chosen optimally. Requires accurate evaluation of the transmittance integral.
+- **When to use:** When estimating uncollided radiance in participating media, especially in conjunction with null scattering methods.
+- **When not to use:** When the medium is homogeneous and simple analytical solutions are available, or when the computational cost of evaluating the transmittance integral is prohibitive.
+
+## Background
+The Weighted Next-Fight Estimator was presented by Cramer in 1978. This document claims it is the first derivation of the next-flight estimator directly from a modified version of the RTE and its first description in computer graphics literature. It is used in volume rendering for estimating transmittance, which is a key component in solving the radiative transfer equation for participating media.
+
+## Sources
+[S1] PDF Spectral and Decomposition Tracking for Rendering Heterogeneous Volumes, https://media.disneyanimation.com/uploads/production/publication_asset/158/asset/SpectralAndDecompositionTracking.pdf, fetched 2026-10-30

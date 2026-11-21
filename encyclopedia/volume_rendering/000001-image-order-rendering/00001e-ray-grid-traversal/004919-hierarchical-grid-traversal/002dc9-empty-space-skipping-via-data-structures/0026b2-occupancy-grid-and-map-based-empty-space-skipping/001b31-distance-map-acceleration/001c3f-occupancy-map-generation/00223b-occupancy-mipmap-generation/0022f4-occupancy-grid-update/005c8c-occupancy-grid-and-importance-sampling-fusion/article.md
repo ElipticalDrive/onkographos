@@ -1,0 +1,295 @@
+# Occupancy Grid and Importance Sampling Fusion
+
+Also called: GridNeRFSampler, Lightning-NeRF Sampler
+
+## Overview
+A ray sampling method that fuses occupancy grid-based sparse sampling with importance sampling to generate ray samples efficiently for neural radiance fields, specifically designed for autonomous driving scenes [S1, unofficial]. It builds on [Occupancy Grid Update](2916-occupancy-grid-update.md) by using the grid to perform an initial coarse pass, then redistributing samples based on the resulting density weights to concentrate computation on opaque regions [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `rays_o`: Tensor of ray origins, shape $(N, 3)$, contiguous.
+*   `rays_d`: Tensor of ray directions, shape $(N, 3)$, contiguous.
+*   `t_min`: Optional near plane distance. If not provided, defaults to `None` (handled as $-\infty$ or ignored by backend).
+*   `t_max`: Optional far plane distance. If not provided, defaults to $10^{10}$.
+*   `density_fn`: Callable evaluating density $\sigma$ at positions. If `None`, density checking is disabled during inference [S1, unofficial].
+*   `render_step_size`: Minimum step size for coarse sampling [S1, unofficial].
+*   `alpha_thre`: Opacity threshold for skipping samples. Default $0.01$ [S1, unofficial].
+*   `cone_angle`: Cone angle for adaptive raymarching. $0$ for uniform marching. Typical value for real scenes is $1/256 \approx 0.004$; $0.0$ for Blender scenes [S1, unofficial].
+*   `num_fine_samples`: Number of importance samples to generate per ray for the fine pass. Default $32$ [S1, unofficial].
+*   `self.training`: Boolean flag determining if stratified perturbation is applied [S1, unofficial].
+*   `occupancy_grid`: An `OccGridEstimator` instance used to skip empty space [S1, unofficial].
+
+**Outputs:**
+*   `ray_samples`: Object containing `origins`, `directions`, `starts`, `ends`, and `pixel_area`.
+*   `ray_indices`: Tensor mapping samples back to original rays.
+
+**Data Structures:**
+*   `packed_info`: Tensor of shape $(R, 2)$, where $R$ is the number of active rays. Column 0 is the start index in the flattened sample arrays, Column 1 is the count of samples for that ray.
+*   `ray_indices`: LongTensor mapping each sample to its source ray ID.
+*   `starts`, `ends`: 1D Tensors of shape $(S,)$ containing the $t$-coordinates of sample boundaries, where $S$ is the total number of sample boundaries.
+
+**Steps:**
+
+1.  **Coarse Sampling via Occupancy Grid:**
+    Call `self.occupancy_grid.sampling()` with `rays_o`, `rays_d`, `t_min`, `t_max`, `sigma_fn` (derived from `density_fn`), `render_step_size`, `near_plane`, `far_plane`, `stratified` (based on `self.training`), `cone_angle`, and `alpha_thre`. This returns `ray_indices`, `starts`, and `ends` for the coarse samples [S1, unofficial].
+
+2.  **Edge Case Handling:**
+    If the number of coarse samples is 0 (i.e., `starts.shape[0] == 0`), create a single fake sample to prevent empty tensor issues:
+    *   Set `ray_indices` to `torch.zeros((1,))`.
+    *   Set `starts` and `ends` to `torch.ones((1,))`.
+    *   This effectively represents a single sample on the last ray starting and ending at $t=1$ [S1, unofficial].
+
+3.  **Compact Ray Indexing:**
+    Transform dilated ray indices to compact indices:
+    *   Compute `unique_ray_indices = torch.unique(ray_indices)`.
+    *   Compute `new_ray_indices = torch.bucketize(ray_indices, unique_ray_indices, right=False)`.
+    *   Compute `new_num_rays = len(unique_ray_indices)` [S1, unofficial].
+
+4.  **Pack Uniform Samples:**
+    Create packed info for the coarse samples:
+    *   `packed_info_uniform = nerfacc.pack_info(new_ray_indices, new_num_rays)` [S1, unofficial].
+
+5.  **Evaluate Density:**
+    *   Compute positions for coarse samples:
+        $$ \mathbf{p}_i = \mathbf{o}_{r_i} + \mathbf{d}_{r_i} \cdot \frac{\text{starts}_i + \text{ends}_i}{2} $$
+        where $\mathbf{o}$ and $\mathbf{d}$ are indexed by `new_ray_indices`.
+    *   Evaluate density: $\sigma_i = \text{density\_fn}(\mathbf{p}_i)$. Squeeze to 1D [S1, unofficial].
+
+6.  **Compute Weights:**
+    *   Compute weights from density using the backend's rendering function:
+        $$ w_i = \text{render\_weight\_from\_density}(\text{starts}, \text{ends}, \sigma_i, \text{packed\_info\_uniform}) $$
+    *   Add epsilon to prevent zero weights:
+        $$ w_i \leftarrow w_i + 10^{-2} $$ [S1, unofficial].
+
+7.  **Prepare for PDF Sampling:**
+    *   **Append Trailing Zeros:** Create `trailing_zeros` of shape $(\text{new\_num\_rays}, \dots)$ (zeros). Use `packed_append` to append these zeros to `weights_uniform` to serve as the PDF denominator/normalization tail.
+        *   `weights_uniform, packed_info_merged = packed_append(weights_uniform, trailing_zeros, 1, new_ray_indices, packed_info_uniform)` [S1, unofficial].
+    *   **Append Trailing Ends:** Compute the last sample ID for each ray:
+        $$ \text{last\_sample\_id}_r = \text{packed\_info\_uniform}[r, 0] + \text{packed\_info\_uniform}[r, 1] - 1 $$
+        Get `trailing_ends = ends[last_sample_id]`. Use `packed_append` to append these trailing ends to `starts` to form the bins for sampling.
+        *   `existing_bins, _ = packed_append(starts, trailing_ends, 1, new_ray_indices, packed_info_uniform)` [S1, unofficial].
+
+8.  **Importance Sampling (Fine Pass):**
+    *   Perform PDF sampling to get fine sample positions $t$:
+        $$ t_{\text{fine}} = \text{packed\_sample\_PDF}(\text{bins}=\text{existing\_bins}, \text{weights}=\text{weights\_uniform}, \text{pack\_infos}=\text{packed\_info\_merged}, \text{num\_to\_sample}=\text{num\_fine\_samples} + 1, \text{perturb}=\text{self.training}) $$
+        Extract the sampled $t$ values [S1, unofficial].
+
+9.  **Merge Coarse and Fine Samples:**
+    *   **Create Fine Ray Indices:**
+        $$ \text{ray\_indices\_fine} = \text{torch.arange}(\text{new\_num\_rays}) \cdot \text{repeat\_interleave}(\text{num\_fine\_samples}) $$
+        *   `packed_info_fine = nerfacc.pack_info(ray_indices_fine, new_num_rays)` [S1, unofficial].
+    *   **Merge Starts:**
+        *   `starts = merge_two_packs_sorted_aligned(starts, packed_info_uniform, samples_t[..., :-1].reshape(-1), packed_info_fine, b_sorted=True, return_val=True)[0]` [S1, unofficial].
+    *   **Merge Ends:**
+        *   `ends = merge_two_packs_sorted_aligned(ends, packed_info_uniform, samples_t[..., 1:].reshape(-1), packed_info_fine, b_sorted=True, return_val=True)[0]` [S1, unofficial].
+    *   **Update Ray Indices:**
+        *   `ray_indices_complete = packed_append(new_ray_indices, ray_indices_fine, num_fine_samples, new_ray_indices, packed_info_uniform)[0]`
+        *   `ray_indices = unique_ray_indices[ray_indices_complete]` [S1, unofficial].
+
+10. **Construct Output:**
+    *   Extract origins and directions: $\mathbf{o} = \text{rays\_o}[\text{ray\_indices}]$, $\mathbf{d} = \text{rays\_d}[\text{ray\_indices}]$.
+    *   If `camera_indices` exists, index it similarly.
+    *   Create `Frustums` with `origins`, `directions`, `starts[..., None]`, `ends[..., None]`, and `pixel_area = zeros`.
+    *   Return `ray_samples` and `ray_indices` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+from typing import Tuple
+
+def occupancy_grid_and_importance_sampling_fusion(
+    rays_o: torch.Tensor,
+    rays_d: torch.Tensor,
+    t_min: float,
+    t_max: float,
+    density_fn,
+    render_step_size: float,
+    alpha_thre: float,
+    cone_angle: float,
+    num_fine_samples: int,
+    training: bool,
+    occupancy_grid,
+    nerfacc,
+    near_plane: float,
+    far_plane: float
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Returns: ray_indices, starts, ends, origins, directions
+    """
+    # 1. Coarse Sampling
+    ray_indices, starts, ends = occupancy_grid.sampling(
+        rays_o=rays_o,
+        rays_d=rays_d,
+        t_min=t_min,
+        t_max=t_max,
+        sigma_fn=density_fn, # Derived from density_fn
+        render_step_size=render_step_size,
+        near_plane=near_plane,
+        far_plane=far_plane,
+        stratified=training,
+        cone_angle=cone_angle,
+        alpha_thre=alpha_thre
+    )
+
+    # 2. Edge Case: Empty Samples
+    if starts.shape[0] == 0:
+        ray_indices = torch.zeros((1,), dtype=torch.long, device=rays_o.device)
+        starts = torch.ones((1,), device=rays_o.device)
+        ends = torch.ones((1,), device=rays_o.device)
+        # Construct fake frustum and return
+        origins = rays_o[ray_indices]
+        directions = rays_d[ray_indices]
+        return ray_indices, starts, ends, origins, directions
+
+    # 3. Compact Ray Indices
+    unique_ray_indices = torch.unique(ray_indices)
+    new_ray_indices = torch.bucketize(ray_indices, unique_ray_indices, right=False)
+    new_num_rays = len(unique_ray_indices)
+
+    # 4. Pack Uniform Samples
+    packed_info_uniform = nerfacc.pack_info(new_ray_indices, new_num_rays)
+
+    # 5. Evaluate Density
+    # Compute positions: origins + dirs * (starts + ends) / 2
+    # Note: origins and dirs must be indexed by new_ray_indices
+    origins_coarse = rays_o[new_ray_indices]
+    dirs_coarse = rays_d[new_ray_indices]
+    
+    # (starts + ends) / 2
+    mid_t = (starts + ends) / 2.0
+    positions_uniform = origins_coarse + dirs_coarse * mid_t[:, None]
+    
+    sigmas_uniform = density_fn(positions_uniform).squeeze()
+
+    # 6. Compute Weights
+    weights_uniform, _, _ = nerfacc.render_weight_from_density(
+        t_starts=starts,
+        t_ends=ends,
+        sigmas=sigmas_uniform,
+        packed_info=packed_info_uniform
+    )
+    
+    # Add epsilon
+    weights_uniform = weights_uniform + 1e-2
+
+    # 7. Prepare for PDF Sampling
+    # Append trailing zeros to weights
+    trailing_zeros = torch.zeros(new_num_rays, device=weights_uniform.device)
+    weights_uniform, packed_info_merged = packed_append(
+        feat=weights_uniform,
+        other=trailing_zeros,
+        num_append_per_pack=1,
+        ray_indices=new_ray_indices,
+        pack_infos=packed_info_uniform
+    )
+
+    # Append trailing ends to starts
+    last_sample_id = packed_info_uniform[:, 0] + packed_info_uniform[:, 1] - 1
+    trailing_ends = ends[last_sample_id]
+    existing_bins, _ = packed_append(
+        feat=starts,
+        other=trailing_ends,
+        num_append_per_pack=1,
+        ray_indices=new_ray_indices,
+        pack_infos=packed_info_uniform
+    )
+
+    # 8. Importance Sampling
+    samples_t = nerfacc.packed_sample_pdf(
+        bins=existing_bins,
+        weights=weights_uniform,
+        pack_infos=packed_info_merged,
+        num_to_sample=num_fine_samples + 1,
+        perturb=training
+    )[0]
+
+    # 9. Merge Coarse and Fine
+    # Create fine ray indices
+    ray_indices_fine = torch.arange(new_num_rays, device=rays_o.device)
+    # Repeat interleave logic for indices: each ray index appears num_fine_samples times
+    # However, packed_info_fine expects counts. 
+    # The source uses: ray_indices_fine = torch.arange(new_num_rays).repeat_interleave(num_fine_samples)
+    # But wait, packed_info_fine is created from ray_indices_fine and new_num_rays?
+    # Actually, the source says:
+    # ray_indices_fine = torch.arange(new_num_rays, ...).repeat_interleave(num_fine_samples)
+    # packed_info_fine = nerfacc.pack_info(ray_indices_fine, new_num_rays)
+    # This implies ray_indices_fine has length new_num_rays * num_fine_samples.
+    
+    ray_indices_fine = torch.repeat_interleave(torch.arange(new_num_rays, device=rays_o.device), num_fine_samples)
+    packed_info_fine = nerfacc.pack_info(ray_indices_fine, new_num_rays)
+
+    # Merge Starts
+    fine_starts = samples_t[..., :-1].reshape(-1)
+    starts = nerfacc.merge_two_packs_sorted_aligned(
+        starts, packed_info_uniform,
+        fine_starts, packed_info_fine,
+        b_sorted=True, return_val=True
+    )[0]
+
+    # Merge Ends
+    fine_ends = samples_t[..., 1:].reshape(-1)
+    ends = nerfacc.merge_two_packs_sorted_aligned(
+        ends, packed_info_uniform,
+        fine_ends, packed_info_fine,
+        b_sorted=True, return_val=True
+    )[0]
+
+    # Update Ray Indices
+    ray_indices_complete = packed_append(
+        feat=new_ray_indices,
+        other=ray_indices_fine,
+        num_append_per_pack=num_fine_samples,
+        ray_indices=new_ray_indices,
+        pack_infos=packed_info_uniform
+    )[0]
+    ray_indices = unique_ray_indices[ray_indices_complete]
+
+    # 10. Construct Output
+    origins = rays_o[ray_indices]
+    directions = rays_d[ray_indices]
+    
+    return ray_indices, starts, ends, origins, directions
+
+def packed_append(
+    feat: torch.Tensor,
+    other: torch.Tensor,
+    num_append_per_pack: int,
+    ray_indices: torch.LongTensor,
+    pack_infos: torch.LongTensor
+) -> Tuple[torch.Tensor, torch.LongTensor]:
+    num_rays = pack_infos.shape[0]
+    new_vals = feat.new_empty([feat.numel() + num_rays * num_append_per_pack])
+    original_indices = torch.arange(feat.numel(), device=feat.device)
+    original_aranges = torch.arange(num_rays * num_append_per_pack, device=feat.device)
+    
+    pidx_a = original_indices + (ray_indices * num_append_per_pack)
+    
+    expand_pack_infos = pack_infos.unsqueeze(1).expand(-1, num_append_per_pack, -1).reshape(-1, 2)
+    pidx_b = expand_pack_infos[:, 0] + expand_pack_infos[:, 1] + original_aranges
+    
+    new_vals.scatter_(0, pidx_a, feat)
+    new_vals.scatter_(0, pidx_b, other)
+    
+    new_packed_infos = pack_infos.clone()
+    new_packed_infos[:, 0] += original_aranges[::num_append_per_pack]
+    new_packed_infos[:, 1] += num_append_per_pack
+    
+    return new_vals, new_packed_infos
+```
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the occupancy grid traversal for coarse sampling and the density evaluation at coarse sample positions. Importance sampling adds overhead proportional to `num_fine_samples` but reduces the total number of samples needed for high-quality rendering by concentrating them in opaque regions.
+*   **Memory Complexity:** Linear with respect to the number of active samples. The `packed_info` structures and intermediate tensors (weights, bins) scale with the number of rays and samples per ray.
+*   **Strengths:** Significantly accelerates rendering in large-scale autonomous driving scenes by skipping empty space via the occupancy grid and reducing noise/variance via importance sampling [S1, unofficial].
+*   **Limitations:** Requires maintaining and updating the occupancy grid. The fusion logic adds implementation complexity compared to simple uniform or stratified sampling. Performance depends heavily on the accuracy of the occupancy grid and the density function [S1, unofficial].
+*   **When to use:** Neural Radiance Fields for large-scale outdoor scenes (e.g., KITTI-360, Argoverse2) where empty space is prevalent and computational efficiency is critical [S1, unofficial].
+*   **When not to use:** Small-scale indoor scenes with dense geometry where empty space skipping provides little benefit, or when inference speed is prioritized over quality and density checking is disabled.
+
+## Background
+The method is part of the Lightning-NeRF framework, designed for efficient training and inference of neural radiance fields in autonomous driving scenarios [S1, unofficial]. It leverages the `nerfacc` library for efficient ray marching and packing operations [S1, unofficial]. The approach combines the spatial efficiency of occupancy grids with the statistical efficiency of importance sampling to handle the scale and sparsity of real-world driving data [S1, unofficial].
+
+## Sources
+[S1] Lightning-NeRF, https://github.com/VISION-SJTU/Lightning-NeRF, fetched 2026-10-29 (unofficial)

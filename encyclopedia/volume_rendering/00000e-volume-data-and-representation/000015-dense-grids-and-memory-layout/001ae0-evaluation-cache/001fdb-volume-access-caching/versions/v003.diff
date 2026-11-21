@@ -1,0 +1,151 @@
+--- v002.md
++++ v003.md
+@@ -1,80 +1,70 @@
+ # Volume Access Caching
+ 
+-Also called: Back-sample caching, Iteration-level volume access caching
+ 
+ ## Overview
+-Volume Access Caching is a technique used within the Evaluation Cache framework to reduce redundant memory bandwidth consumption during ray-marching volume rendering. It solves the problem of repeatedly fetching the same voxel data when the sampling step for the current iteration overlaps with the end point of the previous iteration. It sets itself apart from sibling methods like [Edge Point Caching](891-edge-point-caching.md) by focusing on temporal coherence between consecutive samples along a single ray, rather than spatial coherence across neighboring pixels or rays.
++Volume Access Caching is an optimization for direct volume rendering that reduces redundant memory bandwidth by caching the volume value at the end of one ray-marching step for use as the starting value of the next step [S1]. It solves the problem of repeatedly fetching overlapping voxel data between consecutive iterations along a single ray, distinguishing itself from spatial caching methods like [Edge Point Caching](891-edge-point-caching.md) by exploiting temporal coherence along the ray [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: The current ray parameter $t_{current}$, the previous ray parameter $t_{prev}$, the step size $\Delta t$, and the volume data structure.
+-*   Output: The interpolated voxel value at $t_{current}$.
++*   Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, step size $\Delta t$, volume data structure, and number of steps $N$.
++*   Output: Accumulated radiance or density along the ray.
+ 
+ **Data Structures:**
+-*   `cached_value`: A scalar or vector holding the voxel value sampled at the previous iteration's end point.
+-*   `cached_t`: A scalar holding the ray parameter $t$ corresponding to `cached_value`.
++*   `cached_value`: A scalar or vector holding the volume value sampled at the previous iteration's end point.
++*   `t`: A scalar tracking the current ray parameter.
+ 
+ **Steps:**
+-1.  **Calculate Previous End Point:** Determine the end point of the previous sample. If this is the first iteration, no cache exists. Otherwise, the previous end point is $t_{prev} + \Delta t$.
+-2.  **Check Cache Hit:** Compare the current sampling position $t_{current}$ with the cached position $t_{cached}$.
+-    *   If $t_{current} == t_{cached}$ (within floating-point tolerance), the value is already in `cached_value`. Return `cached_value`.
+-    *   Otherwise, perform a texture lookup or grid traversal to fetch the value at $t_{current}$.
+-3.  **Update Cache:** Store the fetched value in `cached_value` and the current parameter $t_{current}$ in `cached_t`.
+-4.  **Return Value:** Return the fetched value.
++1.  **Initialize Cache:** Sample the volume at the ray origin $\mathbf{o}$ and store the result in `cached_value`. Set $t = 0$.
++2.  **Iterate:** For each step $i$ from $0$ to $N-1$:
++    a. Use `cached_value` as the current sample at parameter $t$.
++    b. Perform the required integration or compositing operation using the current sample.
++    c. Advance the ray parameter: $t \leftarrow t + \Delta t$.
++    d. Sample the volume at the new position $\mathbf{o} + t\mathbf{d}$ and store the result in `cached_value` for the next iteration.
++3.  **Return:** Output the accumulated result.
+ 
+ **Formulas:**
+-Let $V(t)$ be the volume function.
+-Let $t_i$ be the parameter for the $i$-th sample.
+-Let $\Delta t$ be the step size.
+-$t_i = t_{i-1} + \Delta t$.
+-
+-The cache hit condition is:
+-$$ t_i == t_{i-1} + \Delta t $$
+-
+-If the condition holds, $V(t_i)$ is retrieved from cache. Otherwise, $V(t_i)$ is computed via trilinear interpolation or higher-order scheme, and stored in cache for the next iteration ($i+1$).
++Let $V(\mathbf{p})$ be the volume function.
++Let $t_i$ be the ray parameter at step $i$, with $t_0 = 0$ and $t_{i+1} = t_i + \Delta t$.
++The cache hit condition is implicit in the loop structure: the value $V(\mathbf{o} + t_i\mathbf{d})$ is retrieved from `cached_value` at the start of iteration $i$, and $V(\mathbf{o} + t_{i+1}\mathbf{d})$ is computed and cached at the end of iteration $i$.
++The total number of texture accesses per ray is exactly $N$, independently of the integration order [S1].
+ 
+ **Parameters:**
+-*   Step size $\Delta t$: Typically determined by the desired sampling density or adaptive sampling criteria.
+-*   Tolerance: A small epsilon for floating-point comparison, e.g., $10^{-6}$.
++*   Step size $\Delta t$: Determines sampling density; typically derived from voxel size or adaptive criteria [G].
++*   Number of steps $N$: Determines ray length coverage [G].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **First Iteration:** The cache must be initialized or marked as invalid. [G] Initialize `cached_t` to $-\infty$ or use a boolean flag `cache_valid = false`.
+-*   **Variable Step Size:** If $\Delta t$ varies per iteration (adaptive sampling), the cache hit condition must account for the specific $\Delta t$ used in the previous step. The cache stores the absolute position $t$, so variable steps do not break the logic, but the overlap must be exact.
+-*   **Precision Errors:** Floating-point inaccuracies may cause $t_i$ to differ slightly from $t_{i-1} + \Delta t$. Use a small tolerance or round to the nearest representable voxel coordinate if the volume is discrete.
++*   **First Iteration:** The cache must be explicitly initialized with the ray origin sample before the loop begins [G].
++*   **Floating-Point Drift:** Accumulating $t$ directly can cause positional drift over many steps. Recompute the sampling position as $\mathbf{o} + t\mathbf{d}$ each iteration to maintain alignment with voxel coordinates [G].
++*   **Early Exit:** If the ray exits the volume bounds before $N$ steps, the loop must terminate early and the accumulated result returned [G].
+ 
+ **Pseudocode:**
+ ```python
+-def get_volume_value(t_current, t_prev, delta_t, volume_data, cache):
++def ray_march_with_back_sample_cache(origin, direction, step_size, volume_data, num_steps):
+     """
+-    Retrieve volume value with caching.
++    Ray-marches through a volume using back-sample caching.
++    Matches the optimization described in [S1]: exactly N texture accesses,
++    caching the back sample for the next iteration.
++    """
++    t = 0.0
++    # Step 1: Initialize cache with the first sample at the ray origin
++    cached_value = volume_data.sample(origin)
+     
+-    Args:
+-        t_current: Current ray parameter.
+-        t_prev: Previous ray parameter.
+-        delta_t: Step size used in previous iteration.
+-        volume_data: Volume data structure (e.g., texture handle, grid pointer).
+-        cache: Object containing 'value' and 't' fields.
++    accumulated = 0.0
++    
++    # Step 2: Iterate N times
++    for _ in range(num_steps):
++        # Step 2a: Use cached value as current sample
++        # Step 2b: Perform integration/compositing (simplified accumulation)
++        accumulated += cached_value
+         
+-    Returns:
+-        Interpolated volume value at t_current.
+-    """
+-    # Calculate expected position of previous sample's end
+-    t_prev_end = t_prev + delta_t
+-    
+-    # Check if cache is valid and position matches
+-    if cache.is_valid and abs(cache.t - t_prev_end) < 1e-6:
+-        # Cache hit: reuse previous sample's end value
+-        return cache.value
+-    
+-    # Cache miss or invalid: fetch new value
+-    # Perform trilinear interpolation or higher-order sampling at t_current
+-    value = volume_data.sample(t_current)
+-    
+-    # Update cache for next iteration
+-    cache.value = value
+-    cache.t = t_current
+-    cache.is_valid = True
+-    
+-    return value
++        # Step 2c: Advance ray parameter
++        t += step_size
++        
++        # Step 2d: Sample back point for next iteration and update cache
++        next_pos = origin + direction * t
++        cached_value = volume_data.sample(next_pos)
++        
++    # Step 3: Return result
++    return accumulated
+ ```
+ 
+@@ -94,14 +84,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per sample after the first fetch, assuming a cache hit. The cost of a cache miss is the cost of one volume lookup (texture fetch or tree traversal).
+-*   **Memory Complexity:** $O(1)$ additional memory per ray or per thread, storing only the last sample's value and parameter.
+-*   **Performance:** Reduces memory bandwidth usage by approximately 50% for standard first-order integration with constant step size, as every other sample is a cache hit [S1]. For second-order pre-integration, the number of texture accesses remains $N$, but the back sample is cached for the next iteration, maintaining efficiency [S1].
+-*   **Strengths:** Simple to implement, low overhead, effective for coherent sampling patterns.
+-*   **Limitations:** Only effective when consecutive samples overlap or are adjacent. Ineffective for random access or highly adaptive sampling with large, non-overlapping steps.
+-*   **When to Use:** Direct volume rendering with ray marching, especially with constant or smoothly varying step sizes.
+-*   **When Not to Use:** Random access volume queries, or when memory bandwidth is not the bottleneck (e.g., compute-bound transfer function evaluations).
++*   **Time Complexity:** $O(N)$ total per ray, with $O(1)$ work per step after initialization [S1].
++*   **Memory Complexity:** $O(1)$ additional memory per ray or thread, storing only the last sample's value and parameter [G].
++*   **Performance:** Reduces texture accesses to exactly $N$ per ray, matching the theoretical minimum for sequential sampling, independently of the pre-integration order [S1].
++*   **Strengths:** Minimal overhead, highly effective for coherent ray-marching patterns, and simplifies shader logic by eliminating redundant lookups [G].
++*   **Limitations:** Only beneficial when consecutive samples overlap or are adjacent; ineffective for random access queries or highly discontinuous sampling patterns [G].
++*   **When to Use:** Direct volume rendering with ray marching, particularly with constant or smoothly varying step sizes [G].
++*   **When Not to Use:** Random access volume queries, or when memory bandwidth is not the bottleneck [G].
+ 
+ ## Background
+-Volume Access Caching is a standard optimization in direct volume rendering, often implicit in implementations of pre-integration. The specific mention of caching the "back sample" for the next iteration is highlighted in the context of Second Order Pre-Integrated Volume Rendering [S1]. The technique leverages the fact that pre-integration or higher-order schemes often require evaluating the volume at points that are shared between consecutive integration steps. The concept is distinct from file-level caching, which is a data management strategy described in Blender's volume system [S2].
++Volume Access Caching originates from direct volume rendering optimizations for pre-integration schemes, specifically highlighted in Second Order Pre-Integrated Volume Rendering [S1]. The technique leverages the mathematical property that higher-order integration or pre-integration requires evaluating the volume at points shared between consecutive integration steps, making the back sample inherently reusable [S1]. It is a standard implementation detail in modern direct volume renderers and is distinct from file-level data management strategies [S2].
+ 
+ ## Sources

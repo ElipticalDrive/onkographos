@@ -1,0 +1,191 @@
+# Composite Image Loss with Visibility Weighting
+
+Also called: Color and Silhouette Loss, L_c + lambda * L_m, Objective Function, Optimization Loss Function, Total Optimization Loss, Visibility-weighted Photometric Loss
+
+## Overview
+Composite Image Loss with Visibility Weighting is a training objective for differentiable volume rendering that combines photometric fidelity terms (L1, SSIM, LPIPS) with auxiliary regularization losses, where the photometric terms are modulated by a visibility mask to suppress errors in background or occluded regions [S5]. It sets itself apart from standard photometric losses by explicitly incorporating a visibility map $V_M$ to weight the pixel-wise reconstruction error, ensuring the network focuses supervision only on visible foreground content, while also allowing for the inclusion of silhouette consistency via binary cross-entropy [S4, S5].
+
+## How it works
+The method optimizes a neural radiance field or similar implicit representation by minimizing a total loss function $\mathcal{L}$ composed of a composite image loss $\mathcal{L}_c$ and regularization terms [S5]. The composite image loss compares the rendered image $I_r$ against the ground-truth image $I_{gt}$, applying weights based on visibility [S5].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Rendered color image $I_r \in \mathbb{R}^{H \times W \times 3}$ [S5].
+    *   Ground-truth color image $I_{gt} \in \mathbb{R}^{H \times W \times 3}$ [S5].
+    *   Visibility map $V_M \in [0, 1]^{H \times W}$ used to mask photometric losses [S5].
+    *   Rendered alpha mask $\alpha(\mathbf{r})$ for silhouette supervision [S4].
+    *   Ground-truth binary mask $M_{\mathbf{r}}$ [S4].
+    *   Shadow output $S$ (optional, for relighting variants) [S1].
+*   **Outputs:**
+    *   Scalar loss value $\mathcal{L}$ to be minimized via gradient descent [S5].
+
+### Data Structures
+*   **Visibility Map ($V_M$):** A 2D tensor of spatial resolution $H \times W$ that modulates the L1 and SSIM terms [S5]. In implementations using segmentation masks, background pixels in $I_{gt}$ are often set to black (0) before loss computation to prevent background noise from influencing the gradient [S2].
+*   **Rendered Mask ($\alpha$):** Computed via volume rendering integration along rays [S4].
+
+### Formulas
+The total loss is defined as:
+$$ \mathcal{L} = \mathcal{L}_c + \lambda_{\text{sc}} L_{\text{sc}} + \lambda_{\text{vm}} L_{\text{vm}} $$
+where $\mathcal{L}_c$ is the composite image loss, and $L_{\text{sc}}$, $L_{\text{vm}}$ are sampling coordinate and visibility map regularization losses respectively [S5].
+
+The composite image loss $\mathcal{L}_c$ is a weighted sum of L1, SSIM, and LPIPS losses, where L1 and SSIM are applied only to visible regions:
+$$ \mathcal{L}_c = \lambda_1 L_1(V_M \odot I_r, V_M \odot I_{gt}) + \lambda_{\text{SSIM}} L_{\text{SSIM}}(V_M \odot I_r, V_M \odot I_{gt}) + \lambda_{\text{LPIPS}} L_{\text{LPIPS}}(I_r, I_{gt}) $$
+Here, $\odot$ denotes the Hadamard (element-wise) product [S5].
+
+In variants focusing on silhouette consistency, a color loss $\mathcal{L}_c$ and a silhouette loss $\mathcal{L}_m$ are combined:
+$$ \mathcal{L}_c = \sum_{\mathbf{r} \in \mathcal{R}} \|C_{\mathbf{r}} - \hat{C}_{\mathbf{r}}\|_2^2 $$
+$$ \mathcal{L}_m = \sum_{\mathbf{r} \in \mathcal{R}} \text{BCE}(M_{\mathbf{r}} - \alpha_{\mathbf{r}}) $$
+$$ \mathcal{L} = \mathcal{L}_c + \lambda \mathcal{L}_m $$
+where $\alpha(\mathbf{r})$ is the rendered mask for ray $\mathbf{r}$ [S4]:
+$$ \alpha(\mathbf{r}) = \sum_{i=1}^{N} T(p_i)(1 - e^{-\sigma_{p_i}\delta_{p_i}}) $$
+with $T(p_i)$ being the transmittance, $\sigma_{p_i}$ the density, and $\delta_{p_i}$ the distance between samples [S4].
+
+In relighting variants, shadow regularization is added:
+$$ \mathcal{L}(\mathbf{C}, \mathbf{C}^{\text{(GT)}}, S) = \text{MSE}(\mathbf{C}, \mathbf{C}^{\text{(GT)}}) + \lambda \,\text{MSE}(S, 1) $$
+where $S$ is the shadow output and $\mathbf{C}$ is the estimated color [S1].
+
+### Parameters
+*   $\lambda_1$: Weight for L1 loss. Value: 0.8 [S5].
+*   $\lambda_{\text{SSIM}}$: Weight for SSIM loss. Value: 0.2 [S5].
+*   $\lambda_{\text{LPIPS}}$: Weight for LPIPS loss. Value: 0.005 [S5].
+*   $\lambda_{\text{sc}}$: Weight for sampling coordinate regularization loss. Value: 0.001 [S5].
+*   $\lambda_{\text{vm}}$: Weight for visibility map regularization loss. Value: 0.15 [S5].
+*   $\lambda$ (silhouette): Weight balancing color and silhouette loss. Value: 0.1 [S4].
+*   $\lambda$ (shadow): Regularization strength for shadow output. Set to the largest value that does not degrade PSNR [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_composite_loss(I_r, I_gt, V_M, alpha, M_gt, shadow_output, 
+                           lambda_1=0.8, lambda_ssim=0.2, lambda_lpips=0.005,
+                           lambda_sc=0.001, lambda_vm=0.15, lambda_sil=0.1,
+                           lambda_shadow=0.1):
+    """
+    Computes the composite image loss with visibility weighting.
+    
+    Args:
+        I_r: Rendered image tensor (H, W, 3).
+        I_gt: Ground truth image tensor (H, W, 3).
+        V_M: Visibility map tensor (H, W), values in [0, 1].
+        alpha: Rendered alpha mask tensor (H, W).
+        M_gt: Ground truth binary mask tensor (H, W).
+        shadow_output: Shadow network output tensor (H, W) or scalar.
+        lambda_1: Weight for L1 loss.
+        lambda_ssim: Weight for SSIM loss.
+        lambda_lpips: Weight for LPIPS loss.
+        lambda_sc: Weight for sampling coordinate regularization.
+        lambda_vm: Weight for visibility map regularization.
+        lambda_sil: Weight for silhouette loss.
+        lambda_shadow: Weight for shadow regularization.
+        
+    Returns:
+        Total loss scalar.
+    """
+    # 1. Composite Image Loss (L_c) per [S5]
+    # Apply visibility mask to rendered and ground truth images
+    I_r_visible = I_r * V_M.unsqueeze(-1)  # Broadcast mask to 3 channels
+    I_gt_visible = I_gt * V_M.unsqueeze(-1)
+    
+    # Calculate L1 loss on visible regions
+    loss_l1 = torch.mean(torch.abs(I_r_visible - I_gt_visible))
+    
+    # Calculate SSIM loss on visible regions
+    loss_ssim = ssim_loss(I_r_visible, I_gt_visible)
+    
+    # Calculate LPIPS loss on full images
+    loss_lpips = lpips_loss(I_r, I_gt)
+    
+    # Weighted sum for L_c
+    L_c = (lambda_1 * loss_l1) + (lambda_ssim * loss_ssim) + (lambda_lpips * loss_lpips)
+    
+    # 2. Silhouette Loss (L_m) per [S4]
+    loss_sil = bce_loss(alpha, M_gt)
+    
+    # 3. Shadow Regularization per [S1]
+    loss_shadow = mse_loss(shadow_output, 1.0)
+    
+    # 4. Regularization Terms per [S5]
+    # L_sc and L_vm formulas are not given in the sources.
+    # loss_sc = compute_sampling_coord_regularization()  # Not given in the sources.
+    # loss_vm = compute_visibility_map_regularization()  # Not given in the sources.
+    loss_sc = 0.0
+    loss_vm = 0.0
+    
+    # 5. Total Loss Combination
+    # Primary variant from [S5]
+    L_total = L_c + (lambda_sc * loss_sc) + (lambda_vm * loss_vm)
+    
+    return L_total
+
+def ssim_loss(img1, img2, window_size=11):
+    """Standard SSIM implementation placeholder."""
+    # Computes structural similarity index between img1 and img2
+    return torch.mean(1 - ssim_map(img1, img2, window_size))
+
+def lpips_loss(img1, img2):
+    """Standard LPIPS implementation placeholder."""
+    # Computes perceptual distance using pre-trained VGG features
+    return torch.mean(lpips_model(img1) - lpips_model(img2))
+
+def bce_loss(pred, target):
+    """Binary Cross Entropy loss."""
+    return torch.mean(torch.nn.functional.binary_cross_entropy(pred, target))
+
+def mse_loss(pred, target):
+    """Mean Squared Error loss."""
+    return torch.mean((pred - target) ** 2)
+```
+
+### Edge Cases and Pitfalls
+*   **Background Noise:** If the visibility map $V_M$ is inaccurate, background noise can be penalized or foreground details ignored. Setting background pixels in $I_{gt}$ to black is a common mitigation [S2].
+*   **Shadow Learning:** Without shadow regularization, the shadow network $S$ may learn all illumination components except chromaticity, rendering the spherical harmonic lighting useless [S1].
+*   **Precision:** The Hadamard product $V_M \odot I_r$ requires careful handling of floating-point precision if $V_M$ contains soft values (transparency) rather than hard binary masks [G].
+
+## Subtopics
+
+### [SRF-Loss](6978-srf-loss.md)
+SRF-Loss is the composite objective function used to train SuRFNet for generating high-quality Sparse Radiance Fields (SRFs) from partial or noisy inputs. It addresses the problem of ensuring that generated 3D radiance fields not only match the input density and color statistics but also produce visually accurate renderings from novel views. It sets itself apart from simple pixel-wise reconstruction losses by incorporating a 3D-supervised density/radiance component and an online perceptual loss that explicitly optimizes for rendering quality.
+
+### [NTS Training Objective](18042-nts-training-objective.md)
+The NTS Training Objective is a composite loss function designed to optimize UV volumes and neural texture stack parameters for real-time rendering of human performances. It solves the problem of training differentiable radiance fields by combining photometric, perceptual, semantic, UV-metric, and silhouette losses. Unlike methods that sample image patches during training, this objective renders entire images, leveraging a memory-saving framework that disentangles appearance and geometry.
+
+### [Recovery-stage optimization objective](18623-recovery-stage-optimization-objective.md)
+The recovery-stage optimization objective is a composite loss function designed to restore rendering quality and minimize artifacts introduced by feature and attribute quantization in differentiable volume rendering pipelines. It sets itself apart from sibling methods by explicitly combining image-space reconstruction, teacher-student feature distillation, and explicit constraints on geometric offsets and scaling factors, rather than relying solely on perceptual or standard L2 losses.
+
+### Single Image 3D Reconstruction Loss
+A composite loss function used to optimize geometry, material, and lighting from a single image without supervision [S6]. It combines image loss ($L_{im}$), mask loss ($L_{msk}$), perceptual loss ($L_{per}$), and Laplacian loss ($L_{lap}$) [S6]. The weight for image loss $\alpha_{im}$ is set to 20 [S6]. The network predicts relative offsets for vertices, a 256x256 texture map, and lighting parameters (256x256 RGB env map or SG coefficients) [S6].
+
+### Frequency Domain and Spectral Losses
+This variant emphasizes supervision in the frequency domain due to smaller local variability [S7, unofficial]. It uses spectral loss ($L_{spec}$), amplitude loss ($L_{amp}$), phase loss ($L_{phase}$), and time domain loss ($L_{time}$) [S7, unofficial]. The weights are $\lambda_{amp}=0.5$, $\lambda_{phase}=0.5$, $\lambda_{time}=100$, $\lambda_{stft}=1$, $\lambda_{energy}=5$ [S7, unofficial]. Training uses Adam with a cosine learning rate scheduler from $10^{-3}$ to $10^{-4}$ for 200 epochs [S7, unofficial].
+
+### Gaussian Splatting Loss
+A variant for Gaussian Splatting that combines per-view reconstruction loss with perceptual loss [S9]. The total loss is $L_{gs} = \sum_{m=1}^M (\text{MSE}(I^m_{\text{render}}, I^m_{\text{gt}}) + \lambda \cdot \text{LPIPS}(I^m_{\text{render}}, I^m_{\text{gt}}))$, where $M$ is the number of novel views rendered in a single forward pass and $\lambda=0.05$ [S9].
+
+### Loss Combination
+Combines color loss (L1 + SSIM), depth loss, and coverage loss into a final scalar loss for backpropagation [S10, unofficial]. The final loss is computed as `loss = color_loss + depth_lambda * d_loss + coverage_lambda * coverage_loss` [S10, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
+
+## Background
+The concept of combining photometric losses with visibility weighting emerged in the context of differentiable rendering and neural radiance fields (NeRF) [S5]. Early works used simple L1 or L2 losses [S2]. The explicit incorporation of visibility maps to weight these losses was introduced to handle scenes with complex backgrounds or partial observations [S5]. Silhouette losses were added to enforce silhouette consistency [S4]. Shadow regularization was introduced in outdoor relighting contexts to prevent the shadow network from absorbing lighting information [S1].
+
+## Sources
+[S1] NeRF for Outdoor Scene Relighting, https://doi.org/10.1007/978-3-031-19787-1_35, fetched 2026-10-26
+[S2] Human Gaussian Splatting: Real-Time Rendering of Animatable Avatars, https://doi.org/10.1109/cvpr52733.2024.00081, fetched 2026-10-26
+[S3] Ray-Distance Volume Rendering for Neural Scene Reconstruction, https://doi.org/10.1007/978-3-031-72630-9_22, fetched 2026-10-26
+[S4] HumanNeRF: Efficiently Generated Human Radiance Field from Sparse Inputs, https://doi.org/10.1109/cvpr52688.2022.00759, fetched 2026-10-26
+[S5] Gaussian in the Wild: 3D Gaussian Splatting for Unconstrained Image Collections, https://doi.org/10.1007/978-3-031-73116-7_20, fetched 2026-10-27
+[S6] DIB-R++: Learning to Predict Lighting and Material with a Hybrid Differentiable Renderer, https://doi.org/10.48550/arxiv.2111.00140, fetched 2026-10-26
+[S7] Acoustic Volume Rendering for Neural Impulse Response Fields, https://doi.org/10.52202/079017-1417, fetched 2026-10-26 (unofficial)
+[S8] Acoustic Volume Rendering for Neural Impulse Response Fields, https://doi.org/10.52202/079017-1417, fetched 2026-10-26
+[S9] DepthSplat: Connecting Gaussian Splatting and Depth, https://doi.org/10.1109/cvpr52734.2025.01534, fetched 2026-10-26
+[S10] SpaceCollectors/dust3r-3dgs, https://github.com/SpaceCollectors/dust3r-3dgs, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,215 @@
+# Unbounded inward-facing scene parameterization
+
+Also called: Mip-NeRF 360 parameterization, Mip-NeRF 360 Scene Contraction, Contracted space parameterization, Mip-NeRF 360 contraction
+
+## Overview
+This method parameterizes unbounded 3D scenes into a bounded coordinate space, enabling the use of voxel grids or hash-based encodings that require finite domains [S1][S2, unofficial][S4, unofficial]. It solves the problem where infinite coordinate values break hash tables or MLPs by compressing distant background geometry into a finite ball or cube [S2, unofficial][S6]. It differs from standard normalization by preserving angular direction while non-linearly compressing radial distance, ensuring points at infinity map to the boundary of the bounded space [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: 3D world coordinates $\mathbf{x} \in \mathbb{R}^3$.
+- Output: Contracted coordinates $\mathbf{x}'$ within a bounded domain (typically $[-2, 2]^3$ or a unit sphere/cube).
+
+**Data Structures:**
+- The method operates on scalar or vector coordinates. No persistent data structures are required for the transformation itself, though it is often used in conjunction with a voxel grid or occupancy grid.
+
+**Steps:**
+1. **Preprocessing (Optional but recommended for grid allocation):**
+   - Rotate the world coordinate system to align the first two Principal Component Analysis (PCA) directions of the camera positions with the grid's XY axis [S2, unofficial].
+   - Shift the world coordinate to align with the centroid of the camera positions [S2, unofficial].
+   - Scale the world coordinate so that all cameras lie near the planes of a unit sphere [S2, unofficial].
+
+2. **Apply Contraction Function:**
+   - Evaluate the contraction function $\operatorname{contract}(\mathbf{x})$ based on the chosen norm and parameterization variant.
+
+**Formulas:**
+
+The standard spherical contraction (from Mip-NeRF 360) maps $\mathbb{R}^3$ to a sphere of radius 2 [S1][S3]:
+$$
+\operatorname{contract}(\mathbf{x}) = \begin{cases} 
+\mathbf{x} & \|\mathbf{x}\| \leq 1 \\ 
+\left(2 - \frac{1}{\|\mathbf{x}\|}\right)\left(\frac{\mathbf{x}}{\|\mathbf{x}\|}\right) & \|\mathbf{x}\| > 1 
+\end{cases}
+$$
+where $\|\mathbf{x}\|$ is the Euclidean norm ($L_2$) [S1][S3].
+
+The generalized cuboid contraction (used in DVGOv2) allows control over the background proportion via a hyperparameter $b$ [S2, unofficial]:
+$$
+\mathbf{x}' = \begin{cases} 
+\mathbf{x} & \|\mathbf{x}\|_p \leq 1 \\ 
+\left(1 + b - \frac{b}{\|\mathbf{x}\|_p}\right) \left(\frac{\mathbf{x}}{\|\mathbf{x}\|_p}\right) & \|\mathbf{x}\|_p > 1 
+\end{cases}
+$$
+where $\|\mathbf{x}\|_p$ is the $L_p$ norm and $b > 0$ controls the proportion of voxel grid points allocated to the background [S2, unofficial].
+
+**Jacobian for Scale Contraction (Isotropic Gaussians):**
+When contracting isotropic Gaussians, the scale $\sigma_j$ in contracted space is computed using the geometric mean of the eigenvalues of the Jacobian $J_C(\mathbf{x}_j)$ [S1]:
+$$
+\operatorname{contract}(\sigma_j) = \sigma_j \left| \det(J_C(\mathbf{x}_j)) \right|^{1/d}
+$$
+where $d=3$ is the dimensionality [S1].
+
+**Parameters:**
+- $b$: Hyperparameter controlling background voxel proportion. Typical values depend on scene scale; not explicitly fixed in sources but $b>0$ [S2, unofficial].
+- $p$: Norm type. $p=2$ (Euclidean) or $p=\infty$ (Chebyshev/Cuboid). $p=\infty$ is preferred for voxel grids to avoid wasting ~50% of grid points on empty corners of a cube bounding a sphere [S2, unofficial].
+- Grid Resolution: $320^3$ for unbounded inward-facing scenes in DVGOv2 [S2, unofficial].
+- Initial Alpha: $\alpha_{\text{init}} = 10^{-4}$ [S2, unofficial].
+- Voxel Step Size: $0.5$ (in contracted space) [S2, unofficial].
+
+**Pitfalls:**
+- Using $p=2$ with a cuboid voxel grid wastes approximately 50% of grid points because a sphere occupies only a fraction of a cube [S2, unofficial].
+- Standard Occupancy Grids (e.g., from Instant-NGP) only support bounded scenes; scene contraction is required to extend them to unbounded scenes [S4, unofficial].
+- Spherical contraction maps straight lines to curves, making ray-AABB intersections challenging for empty space skipping [S5].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def contract_spherical(x):
+    """
+    Standard Mip-NeRF 360 spherical contraction.
+    Maps R^3 to a sphere of radius 2.
+    """
+    norm_x = math.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+    if norm_x <= 1.0:
+        return x
+    else:
+        factor = (2.0 - 1.0 / norm_x) / norm_x
+        return [x[0] * factor, x[1] * factor, x[2] * factor]
+
+def contract_cuboid(x, p_norm_type='L2', b=0.0):
+    """
+    Generalized cuboid contraction from DVGOv2.
+    Maps R^3 to a bounded region.
+    p_norm_type: 'L2' for Euclidean, 'Linfty' for Chebyshev.
+    b: Hyperparameter for background proportion. If b=0, behaves like standard contraction.
+    """
+    if p_norm_type == 'L2':
+        norm_x = math.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+    elif p_norm_type == 'Linfty':
+        norm_x = max(abs(x[0]), abs(x[1]), abs(x[2]))
+    else:
+        raise ValueError("Unsupported norm type")
+
+    if norm_x <= 1.0:
+        return x
+    else:
+        # Formula: (1 + b - b/norm_x) * (x / norm_x)
+        scale_factor = (1.0 + b - b / norm_x) / norm_x
+        return [x[0] * scale_factor, x[1] * scale_factor, x[2] * scale_factor]
+
+def contract_isotropic_scale(sigma, x, p_norm_type='L2'):
+    """
+    Computes the contracted isotropic scale for a Gaussian at x with scale sigma.
+    Uses the determinant of the Jacobian of the contraction.
+    """
+    # Calculate norm for Jacobian derivation
+    if p_norm_type == 'L2':
+        norm_x = math.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+    elif p_norm_type == 'Linfty':
+        # For L_inf, the Jacobian is more complex due to non-differentiability at boundaries.
+        # Standard Mip-NeRF 360 derivation assumes L2. 
+        # For L_inf, specific implementations may vary or use L2 approximation.
+        # Here we assume L2 for the scale contraction formula as per [S1].
+        norm_x = math.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+    else:
+        norm_x = 0
+
+    if norm_x <= 1.0:
+        # Identity region, Jacobian determinant is 1
+        det_J = 1.0
+    else:
+        # For spherical contraction (L2), the determinant of the Jacobian 
+        # for the radial part is derived from the scaling factor.
+        # The formula in [S1] implies: |det(J)|^(1/3)
+        # For spherical contraction: contract(x) = (2 - 1/||x||) * (x/||x||)
+        # The Jacobian determinant for this specific map in 3D is:
+        # det(J) = (1 - 1/||x||^2)^2 * (1 + 2/||x||) ? 
+        # Actually, [S1] provides the closed form acceleration:
+        # |det(J)|^(1/3) = ( (2 * (1 - 1/||x||^2) + 1/||x||^2 * (1 + 2/||x||)) ... ) 
+        # Simplified from [S1] context:
+        # The geometric mean of eigenvalues.
+        # Eigenvalues are: lambda1 = 1 - 1/||x||^2 (tangential, multiplicity 2)
+        #                  lambda2 = 1 + 2/||x||^2 - 2/||x||^3 ? 
+        # Let's use the explicit determinant formula derived from the contraction map.
+        # For f(x) = g(r) * x/r, det(J) = g(r)^2 * (g'(r) * r + 2*g(r)) / r^2 ?
+        # Standard result for spherical contraction (2 - 1/r):
+        # det(J) = (1 - 1/r^2)^2 * (1 + 2/r) ? No.
+        # Let's stick to the definition: geometric mean of eigenvalues.
+        # Tangential eigenvalues: 1 - 1/r^2
+        # Radial eigenvalue: 1 + 2/r - 2/r^2 ? 
+        # Actually, [S1] Eq 12 and surrounding text imply:
+        # |det(J)|^(1/3) = ( (1 - 1/r^2)^2 * (1 + 2/r) )^(1/3) is incorrect.
+        # Correct derivation for f(x) = (2 - 1/r)x/r:
+        # df/dr = 1/r^2 + (2-1/r)(-1/r^2) = 1/r^2 - 2/r^2 + 1/r^3 = 1/r^3 - 1/r^2
+        # Tangential: f/r = (2-1/r)/r = 2/r - 1/r^2
+        # Det = (Tangential)^2 * Radial = (2/r - 1/r^2)^2 * (1/r^3 - 1/r^2) ?
+        # This is getting complex. [S1] says "accelerated further by deriving a closed-form".
+        # We will use the standard determinant calculation for the spherical map.
+        
+        r = norm_x
+        tangential = 2.0/r - 1.0/(r*r)
+        radial = 1.0/(r*r*r) - 1.0/(r*r) # derivative of (2-1/r) is 1/r^2, times x/r... 
+        # Let's use the property that for isotropic scaling, we just need the volume change.
+        # Volume change = (scale_factor)^2 * (scale_factor + r * d(scale_factor)/dr)
+        scale_factor = 2.0/r - 1.0/(r*r)
+        d_scale_dr = -2.0/(r*r) + 2.0/(r*r*r)
+        radial_eigenvalue = scale_factor + r * d_scale_dr
+        
+        det_J = (tangential ** 2) * radial_eigenvalue
+        
+    # d=3
+    scale_multiplier = abs(det_J) ** (1.0/3.0)
+    return sigma * scale_multiplier
+```
+
+## Subtopics
+
+### [Scene Contraction](9762-scene-contraction.md)
+Scene Contraction is a coordinate transformation method that maps unbounded 3D space into a bounded region, enabling the use of hash-based encodings or voxel grids for large-scale neural radiance fields. It solves the problem of infinite coordinate values breaking hash tables or MLPs by compressing distant background geometry into a finite ball or cube. It differs from standard normalization by preserving angular direction while non-linearly compressing radial distance, ensuring points at infinity map to the boundary of the bounded space.
+
+### [Scene Parameterization Radius](15160-scene-parameterization-radius.md)
+Constrains large-scale unbounded street-view scenes into a bounded unit sphere volume to enable efficient voxel grid allocation and position encoding, avoiding the heavy range compression of close objects inherent in standard Normalized Device Coordinates (NDC) or basic contraction methods. It sets apart from its siblings by using a piecewise mapping function controlled by a radius parameter $r$ to preserve high-frequency details for nearby objects while mapping distant geometry, specifically tailored for ego-vehicle scenarios where camera motion complicates standard NDC assumptions.
+
+### Forward-facing scene parameterization
+A method to handle unbounded forward-facing scenes by warping the frustum to a bounded volume using a dense voxel grid allocation similar to Multiplane Images (MPIs) [S2, unofficial]. It places $D$ RGB-density images at fixed depths, each with $X \times Z$ resolution, and traces every ray from the first to the $D$-th images with a step size of $s$ image, resulting in $2D - 1$ sampled points if $s = 0.5$ [S2, unofficial]. Parameters: $D=256$, $XZ=384^2$, $s=1.0$ layer, TV loss weights $10^{-5}$ (density) and $10^{-6}$ (feature), distortion loss weight $10^{-2}$ [S2, unofficial].
+
+### Piecewise-Projective Contraction
+A contraction function that maps unbounded space into a finite domain while preserving straight lines (piecewise-linear), allowing for efficient ray-AABB intersection tests for empty space skipping [S5]. It consists of seven regions (unit cube + 6 outer regions) [S5]. Unlike spherical contraction which maps to a radius-2 ball, this contraction preserves the unit cube and maps other regions via projective transformations. It performs on par with spherical contraction but enables efficient empty space skipping [S5]. Formula:
+$$
+\operatorname{contract}_{\pi}(\mathbf{x})_j = \begin{cases} 
+x_j & \text{if } \|\mathbf{x}\|_{\infty} \leq 1 \\ 
+\frac{x_j}{\|\mathbf{x}\|_{\infty}} & \text{if } x_j \neq \|\mathbf{x}\|_{\infty} > 1, \\ 
+\left(2 - \frac{1}{|x_j|}\right) & \text{if } x_j = \|\mathbf{x}\|_{\infty} > 1 
+\end{cases}
+$$
+where $\|\mathbf{x}\|_{\infty} = \max_i |x_i|$ [S5].
+
+### Initial Meshes for Scene Types
+Coordinate system definitions and transformations for different scene types [S6]. 
+- **Synthetic 360° scenes:** Apply scaling $p' = w p$ where $w=2.4$ or $3$ depending on object size [S6].
+- **Forward-facing scenes:** Apply exponential transformation to concentrate voxels near the camera: $p'_z = \exp(w(p_z + 0.5))$, $p'_x = u p_x p'_z$, $p'_y = v p_y p'_z$, with $p'_z=25$ when $p_z=0.5$, $u=v=1.75$ [S6].
+- **Unbounded 360° scenes:** No transformation to the regular grid. Add $L+1$ concentric boxes around the grid to model surrounding environments. Box distances: $d_i = (\exp(\frac{wi}{L}) + w - 1) / 2w$, where $d_L=8$ and $d_i \in [0.5, 8]$ [S6]. Grid size $P=128$ for all types [S6].
+
+## Operating characteristics
+- **Time Complexity:** The contraction function itself is $O(1)$ per sample. The cost is dominated by the subsequent voxel grid lookup or MLP query.
+- **Memory Complexity:** Depends on the underlying representation (voxel grid size or hash table size). The contraction allows these structures to be bounded and finite.
+- **Measured Performance:** DVGOv2 using this parameterization achieved comparable quality to Plenoxels and TensoRF with less training time on low-spec GPUs (RTX 2080Ti) [S2, unofficial].
+- **Strengths:** Enables the use of efficient voxel grids and hash encodings for unbounded scenes; allocates model capacity proportional to disparity (inverse distance), giving more resolution to nearby content [S1].
+- **Limitations:** Spherical contraction distorts straight lines, complicating ray-AABB intersection tests for empty space skipping [S5]. Using $L_2$ norm with cuboid grids wastes ~50% of grid points [S2, unofficial].
+- **When to use:** When rendering large-scale unbounded scenes (e.g., street view, 360° indoor) with voxel-based or hash-based neural fields.
+- **When not to use:** When bounded scenes are sufficient, or when real-time empty space skipping is critical and piecewise-projective contraction is not available.
+
+## Background
+The scene contraction idea originates from Mip-NeRF 360 [S4, unofficial][S1]. It was introduced to parameterize unbounded scenes with bounded coordinates, mapping $[-\infty, \infty]^d$ to $[-2, 2]^d$ [S1]. It has been adopted by various subsequent methods including DVGOv2 [S2, unofficial], Zip-NeRF [S1], NerfAcc [S4, unofficial], and MERF [S5].
+
+## Sources
+[S1] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26
+[S2] Improved Direct Voxel Grid Optimization for Radiance Fields Reconstruction, https://doi.org/10.48550/arxiv.2206.05085, fetched 2026-10-26 (unofficial)
+[S3] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26
+[S4] NerfAcc: A General NeRF Acceleration Toolbox, https://doi.org/10.48550/arxiv.2210.04847, fetched 2026-10-26 (unofficial)
+[S5] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26
+[S6] MobileNeRF: Exploiting the Polygon Rasterization Pipeline for Efficient Neural Field Rendering on Mobile Architectures, https://doi.org/10.1109/cvpr52729.2023.01590, fetched 2026-10-26

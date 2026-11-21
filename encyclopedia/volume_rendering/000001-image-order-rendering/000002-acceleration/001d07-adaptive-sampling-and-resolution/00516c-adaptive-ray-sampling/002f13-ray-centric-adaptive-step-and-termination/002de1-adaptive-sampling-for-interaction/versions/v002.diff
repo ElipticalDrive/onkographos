@@ -1,0 +1,176 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Adaptive Sampling for Interaction is a technique to maintain interactivity during user input (such as transfer function editing) by lowering the volume sampling rate, then re-rendering at a high rate once the action is completed [S1, S2]. It differs from [Adaptive Sampling](1385-adaptive-sampling.md) and [Adaptive Refinement for Volume Rendering](1892-adaptive-refinement-for-volume-rendering.md) by using a binary state switch (interaction vs. idle) rather than continuous error estimation, and from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on traditional ray-casted volume data rather than neural representations [S1, S2].
++Adaptive Sampling for Interaction is a technique to maintain interactivity during user input, such as transfer function editing, by lowering the volume sampling rate, then re-rendering at a high rate once the action is completed [S1, S2]. During interaction, the volume rendered surface appears coarser, but its size and location remain readily apparent, providing effective feedback for guiding user exploration [S1, S2].
+ 
+ ## How it works
+@@ -13,100 +13,109 @@
+ **Data Structures:**
+ *   `interaction_active`: Boolean flag indicating if the user is currently modifying parameters (e.g., transfer function).
+-*   `samples_per_voxel`: Integer or float specifying the sampling density.
++*   `samples_per_voxel`: Float specifying the sampling density along the ray.
+ 
+ **Parameters:**
+ *   High sampling rate: 6 to 10 samples per voxel [S1, S2].
+-*   Low sampling rate: Not given in the sources.
++*   Low sampling rate: Not given in the sources [S1, S2].
+ 
+ **Algorithm:**
+-1.  Detect user interaction state. If the user is modifying the transfer function or other rendering parameters, set `interaction_active = true`. Otherwise, set `interaction_active = false`.
+-2.  Determine the sampling rate:
+-    *   If `interaction_active` is true, use a low sampling rate (value not specified in sources) [S1, S2].
+-    *   If `interaction_active` is false, use the high sampling rate of 6 to 10 samples per voxel [S1, S2].
+-3.  Perform volume rendering using the determined sampling rate.
+-4.  If `interaction_active` becomes false after being true, trigger a final re-render at the high sampling rate to restore visual quality [S1, S2].
++1.  Monitor user interaction state. If the user is modifying the transfer function or other rendering parameters, set `interaction_active = true` [G]. Otherwise, set `interaction_active = false` [G].
++2.  Determine the sampling rate: if `interaction_active` is true, use a low sampling rate (value not specified in sources) [S1, S2]; otherwise, use the high sampling rate of 6 to 10 samples per voxel [S1, S2].
++3.  Render the volume using the determined sampling rate [S1, S2].
++4.  When `interaction_active` transitions to false after being true, trigger a final re-render at the high sampling rate to restore visual quality [S1, S2].
+ 
+ **Pseudocode:**
+ ```python
+ def render_volume(volume_data, transfer_function, user_input_active):
+-    """
+-    Renders volume with adaptive sampling based on interaction state.
+-    
+-    Args:
+-        volume_data: The 3D scalar field.
+-        transfer_function: The current transfer function mapping.
+-        user_input_active: Boolean, True if user is currently interacting (e.g., editing TF).
+-        
+-    Returns:
+-        Image buffer.
+-    """
+     # Determine sampling rate based on interaction state
+     if user_input_active:
+         # Low sampling rate for interactivity.
+-        # Exact value not given in sources [S1, S2].
+-        samples_per_voxel = LOW_RATE_VALUE # Placeholder for unspecified low rate
++        # Exact value not given in the sources [S1, S2].
++        samples_per_voxel = 2.0  # [G] Example low rate; empirical tuning required
+     else:
+         # High sampling rate for quality
+-        samples_per_voxel = 8.0 # Typical value from range 6-10 [S1, S2]
+-        
+-    # Perform ray casting with the determined sampling rate
+-    image = ray_cast(volume_data, transfer_function, samples_per_voxel)
+-    
+-    return image
++        samples_per_voxel = 8.0  # Typical value from range 6-10 [S1, S2]
+ 
+-def handle_user_interaction(volume_data, transfer_function, user_input_active):
+-    """
+-    Wrapper for interaction loop.
+-    """
+-    # Render at low rate during interaction
+-    image = render_volume(volume_data, transfer_function, user_input_active)
+-    display(image)
+-    
+-    if not user_input_active:
+-        # Re-render at high rate after action completes
+-        image = render_volume(volume_data, transfer_function, user_input_active=False)
+-        display(image)
++    # Ray marching parameters
++    t_near = 0.0
++    t_far = 1.0  # Normalized ray length through unit volume
++    step_size = 1.0 / samples_per_voxel
++
++    # Ray origin and direction (passed per pixel in practice)
++    ray_origin = [0.0, 0.0, 0.0]
++    ray_direction = [0.0, 0.0, 1.0]
++
++    # Initialize compositing variables
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_alpha = 0.0
++    t = t_near
++
++    while t < t_far and accumulated_alpha < 1.0:
++        # Compute sample position
++        x = ray_origin[0] + t * ray_direction[0]
++        y = ray_origin[1] + t * ray_direction[1]
++        z = ray_origin[2] + t * ray_direction[2]
++
++        # Clamp to volume bounds [0, 1]
++        x = max(0.0, min(1.0, x))
++        y = max(0.0, min(1.0, y))
++        z = max(0.0, min(1.0, z))
++
++        # Sample density and map to color/opacity
++        density = volume_data.sample(x, y, z)
++        color = transfer_function(density)
++        opacity = density  # Simplified mapping; typically density maps to opacity
++
++        # Front-to-back compositing
++        alpha_contribution = opacity * step_size
++        weight = (1.0 - accumulated_alpha) * alpha_contribution
++        accumulated_color = [accumulated_color[i] + weight * color[i] for i in range(3)]
++        accumulated_alpha += weight
++
++        t += step_size
++
++    return accumulated_color
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   The transition from low to high sampling rate may cause a visible "pop-in" or latency spike if not handled smoothly. The sources do not specify a smoothing mechanism [S1, S2].
+-*   The exact low sampling rate value is not provided, which may require empirical tuning [S1, S2].
++*   The exact low sampling rate is not provided in the sources, requiring empirical tuning [S1, S2].
++*   Precision limits in `accumulated_alpha` may cause premature termination or over-sampling if `step_size` is extremely small; standard floating-point guards apply [G].
+ 
+ ## Subtopics
+ 
+-### [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md)
+-Uses coarse and fine neural networks for different stages, not sampling rate switching.
++### [Adaptive Sampling](1385-adaptive-sampling.md)
++Adjusts sampling density based on local error metrics or frequency content rather than user interaction state. Choose when visual fidelity must adapt to scene complexity continuously.
+ 
+-### [Adaptive Sampling](1385-adaptive-sampling.md)
+-Uses error metrics to adjust sampling, not interaction state.
++### [Adaptive Refinement for Volume Rendering](1892-adaptive-refinement-for-volume-rendering.md)
++Refines voxel resolution or sampling density in regions of high detail or gradient magnitude. Choose when geometric or material boundaries require localized enhancement.
+ 
+ ### [Random Pixel Subsampling](1668-random-pixel-subsampling.md)
+-Subsamples pixels randomly, not based on interaction.
+-
+-### [Adaptive Refinement for Volume Rendering](1892-adaptive-refinement-for-volume-rendering.md)
+-Refines regions based on detail, not interaction.
++Selects a random subset of pixels to render per frame to reduce load. Choose when frame-rate stability is prioritized over spatial consistency.
+ 
+ ### [Temporal Upsampling and Dithering](2872-temporal-upsampling-and-dithering.md)
+-Uses temporal information, not interaction state.
++Reuses and interpolates data from previous frames to reduce per-frame sampling. Choose when motion coherence is high and latency must be minimized.
+ 
+ ### [Resolution Adaptation](3063-resolution-adaptation.md)
+-Changes resolution, not sampling rate.
++Changes the output image resolution rather than the sampling rate along rays. Choose when display scaling or viewport resizing impacts performance.
+ 
+ ### [Adaptive Sampling Step with Early Ray Termination](4573-adaptive-sampling-step-with-early-ray-termination.md)
+-Combines sampling and ERT, not interaction-based switching.
++Combines variable step sizing with opacity-based ray termination. Choose when transparent regions dominate and early exit yields significant speedups.
+ 
+ ### [Adaptive Undersampling](5397-adaptive-undersampling.md)
+-Undersamples based on content, not interaction.
++Reduces sampling density in regions deemed visually unimportant by a quality metric. Choose when perceptual uniformity is required across the frame.
++
++### [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md)
++Uses coarse and fine neural networks for different rendering passes. Choose when neural representations are the primary data source rather than traditional volumes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** During interaction, rendering time is reduced proportionally to the reduction in sampling rate. Post-interaction, rendering time returns to the high-rate cost.
++*   **Time Complexity:** During interaction, rendering time is reduced proportionally to the reduction in sampling rate [S1, S2]. Post-interaction, rendering time returns to the high-rate cost [S1, S2].
+ *   **Measured Performance:** At the high sampling rate (6-10 samples/voxel), frame updates take nearly two seconds on an Octane2 workstation and nearly one second on a GeForce3 GPU [S1, S2].
+ *   **Strengths:** Maintains interactivity during parameter editing by reducing computational load [S1, S2].
+-*   **Limitations:** Visual quality is reduced during interaction (coarser surfaces) [S1, S2]. The exact low sampling rate is not specified, making performance prediction difficult [S1, S2].
+-*   **When to use:** When user interaction (e.g., transfer function editing) requires real-time feedback and high-quality rendering is not critical during the interaction phase [S1, S2].
++*   **Limitations:** Visual quality is reduced during interaction, resulting in coarser surfaces [S1, S2]. The exact low sampling rate is not specified, making performance prediction difficult [S1, S2].
++*   **When to use:** When user interaction requires real-time feedback and high-quality rendering is not critical during the interaction phase [S1, S2].
+ *   **When not to use:** When continuous high-quality visualization is required during interaction [S1, S2].
+ 
+ ## Background
+-This technique was introduced by Kindermann et al. in 2001 in the paper "Interactive Volume Rendering Using Multi-Dimensional Transfer Functions" [S1, S2]. It was developed to address the performance bottleneck of high-quality volume rendering during user interaction, specifically for transfer function exploration [S1, S2]. The method leverages the observation that surface size and location remain apparent even with lower sampling rates, providing sufficient feedback for users [S1, S2].
++This technique addresses the performance bottleneck of high-quality volume rendering during user interaction, specifically for transfer function exploration [S1, S2]. It leverages the observation that surface size and location remain apparent even with lower sampling rates, providing sufficient feedback for users [S1, S2].
+ 
+ ## Sources

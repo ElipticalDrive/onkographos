@@ -1,0 +1,168 @@
+# Multi-stage Proposal Sampling
+
+Also called: Multi-scale Proposal Sampling, Progressive Sampling, Proposal Network Sampling (nerfstudio)
+
+## Overview
+Multi-stage proposal sampling is a hierarchical ray sampling strategy that iteratively refines sample distributions along camera rays using a sequence of lightweight proposal networks. It solves the problem of inefficient uniform sampling in Neural Radiance Fields (NeRF) by concentrating samples near high-density surfaces, thereby improving reconstruction quality and training stability. It differs from its sibling [Coarse-Fine Sampling](8172-coarse-fine-sampling.md) by using multiple intermediate proposal stages rather than a single coarse-to-fine pass, and from [Combined Sampling (Occupancy Grid + Proposal Network)](1626-combined-sampling-occupancy-grid-proposal-network.md) by relying exclusively on learned density priors without spatial acceleration structures.
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Ray bundle (origin, direction), current training step, configuration parameters (`num_proposal_network_iterations`, `num_proposal_samples_per_ray`, `num_nerf_samples_per_ray`, `anneal`), list of proposal network density functions, and previous stage weights.
+- **Outputs:** Final ray samples for the NeRF stage, list of weights from all proposal stages, list of ray samples from all stages.
+
+**Data Structures:**
+- `ray_bundle`: Contains ray origins and directions.
+- `ray_samples`: Structured container for sample positions and frustums.
+- `weights`: Tensor of importance weights from the previous stage, used for PDF sampling.
+- `density_fns`: List of callable functions, one per proposal stage, mapping ray sample positions to density values.
+
+**Parameters:**
+- `num_proposal_network_iterations` ($n$): Number of proposal stages. The loop runs for $i_{level} \in [0, n]$.
+- `num_proposal_samples_per_ray[i_level]`: Number of samples at proposal level $i_{level}$.
+- `num_nerf_samples_per_ray`: Number of samples at the final stage ($i_{level} == n$).
+- `anneal` ($\alpha$): Exponent for weight annealing. Default 1.0. [S1, unofficial]
+- `update_sched(step)`: Function determining update frequency. [S1, unofficial]
+
+**Algorithm Steps:**
+1. **Update Check:** Determine if proposal networks need gradient updates. Update if `steps_since_update > update_sched(step)` OR `step < 10`. [S1, unofficial]
+2. **Loop:** Iterate $i_{level}$ from 0 to $n$ (inclusive).
+   - **Stage Type:** If $i_{level} < n$, it is a proposal stage. If $i_{level} == n$, it is the final NeRF stage.
+   - **PDF Sampling (for $i_{level} > 0$):**
+     - Compute annealed weights: $w_{annealed} = w^{\alpha}$. [S1, unofficial]
+     - Perform PDF sampling using `pdf_sampler` with `ray_bundle`, previous `ray_samples`, `w_{annealed}`, and `num_samples`. [S1, unofficial]
+   - **Density Evaluation (if proposal stage):**
+     - If update is required: Evaluate density with gradients enabled: $d = \text{density\_fns}[i_{level}](\text{positions})$. [S1, unofficial]
+     - If update is not required: Evaluate density with gradients disabled (`torch.no_grad()`). [S1, unofficial]
+   - **Weight Computation:** Compute importance weights from density and volume rendering equations (standard NeRF weighting). [G]
+3. **Reset:** If update occurred, reset `steps_since_update` to 0. [S1, unofficial]
+4. **Return:** Final ray samples, list of all weights, list of all ray samples. [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_stage_proposal_sampling(
+    ray_bundle,
+    density_fns,
+    num_proposal_network_iterations,
+    num_proposal_samples_per_ray,
+    num_nerf_samples_per_ray,
+    anneal=1.0,
+    update_sched=None,
+    steps_since_update=0,
+    step=0
+):
+    """
+    Multi-stage proposal sampling algorithm.
+    
+    Args:
+        ray_bundle: Ray origins and directions.
+        density_fns: List of proposal network density functions.
+        num_proposal_network_iterations: Number of proposal stages (n).
+        num_proposal_samples_per_ray: List of sample counts for each proposal stage.
+        num_nerf_samples_per_ray: Sample count for final NeRF stage.
+        anneal: Weight annealing exponent.
+        update_sched: Function for update scheduling.
+        steps_since_update: Counter for steps since last update.
+        step: Current training step.
+        
+    Returns:
+        final_ray_samples, all_weights, all_ray_samples
+    """
+    all_weights = []
+    all_ray_samples = []
+    current_ray_samples = None
+    
+    # Determine if update is needed
+    # Hardcoded condition for first 10 steps to prevent gradient scaling crashes [S1, unofficial]
+    should_update = (steps_since_update > update_sched(step)) or (step < 10)
+    
+    for i_level in range(num_proposal_network_iterations + 1):
+        is_proposal_stage = (i_level < num_proposal_network_iterations)
+        
+        if i_level == 0:
+            # Initial uniform sampling [G]
+            # Not explicitly detailed in sources, assumed uniform distribution along ray
+            num_samples = num_proposal_samples_per_ray[0]
+            current_ray_samples = uniform_sample_ray(ray_bundle, num_samples)
+        else:
+            # PDF sampling using previous stage weights
+            # Anneal weights: w_annealed = weights ^ anneal [S1, unofficial]
+            prev_weights = all_weights[-1]
+            annealed_weights = torch.pow(prev_weights, anneal)
+            
+            num_samples = num_proposal_samples_per_ray[i_level]
+            current_ray_samples = pdf_sampler(
+                ray_bundle, 
+                all_ray_samples[-1], 
+                annealed_weights, 
+                num_samples
+            )
+        
+        if is_proposal_stage:
+            # Evaluate density
+            positions = current_ray_samples.frustums.get_positions()
+            
+            if should_update:
+                with torch.enable_grad():
+                    densities = density_fns[i_level](positions)
+            else:
+                with torch.no_grad():
+                    densities = density_fns[i_level](positions)
+            
+            # Compute importance weights from density [G]
+            # Standard volume rendering weight computation
+            weights = compute_importance_weights(densities, current_ray_samples)
+            all_weights.append(weights)
+        else:
+            # Final NeRF stage
+            # Density evaluation happens inside the NeRF forward pass, not here
+            # We just store the ray samples for the final rendering
+            pass
+            
+        all_ray_samples.append(current_ray_samples)
+        
+        if should_update:
+            steps_since_update = 0
+        else:
+            steps_since_update += 1
+            
+    return current_ray_samples, all_weights, all_ray_samples
+```
+
+**Edge Cases and Pitfalls:**
+- **Gradient Scaling Crashes:** The first 10 steps must force an update to prevent issues with gradient scaling in mixed precision training. [S1, unofficial]
+- **Annealing:** If `anneal` is 1.0, no annealing occurs. Lower values can sharpen the distribution. [S1, unofficial]
+- **Update Frequency:** If `update_sched` returns a large value, proposal networks may become stale, leading to poor sampling. [S1, unofficial]
+
+## Subtopics
+
+### [Combined Sampling (Occupancy Grid + Proposal Network)](1626-combined-sampling-occupancy-grid-proposal-network.md)
+Combines spatial acceleration with proposal networks for faster inference.
+
+### [VF-NeRF Rendering Pipeline](3302-vf-nerf-rendering-pipeline.md)
+Uses volume features for rendering, often paired with proposal sampling.
+
+### [Coarse-Fine Sampling](8172-coarse-fine-sampling.md)
+Simple two-stage sampling without intermediate proposal networks.
+
+### [Semantic Loss Computation](15616-semantic-loss-computation.md)
+Loss function that can be applied to samples generated by proposal networks.
+
+### [One-Step NeRF Rendering](17160-one-step-nerf-rendering.md)
+Eliminates multi-stage sampling entirely for real-time rendering.
+
+## Operating characteristics
+- **Time Complexity:** $O(n \cdot N)$, where $n$ is the number of proposal stages and $N$ is the number of samples per ray. Each stage requires a forward pass through a proposal network.
+- **Memory Complexity:** $O(n \cdot N)$ to store intermediate ray samples and weights.
+- **Performance:** Significantly faster convergence than uniform sampling due to adaptive sampling. [S1, unofficial]
+- **Strengths:** Improves reconstruction quality in complex scenes; stabilizes training. [S1, unofficial]
+- **Limitations:** Requires training multiple proposal networks; increased memory usage. [S1, unofficial]
+- **When to Use:** When training NeRFs with complex geometry or when uniform sampling is too slow. [S1, unofficial]
+- **When Not to Use:** For real-time inference where latency is critical; for simple scenes with uniform geometry. [S1, unofficial]
+
+## Background
+Multi-stage proposal sampling was introduced in the nerfstudio framework as a key component for efficient NeRF training. It builds on the idea of using learned priors to guide sampling, extending the coarse-fine approach to multiple stages. [S1, unofficial]
+
+## Sources
+[S1] nerfstudio-project/nerfstudio, https://github.com/nerfstudio-project/nerfstudio, fetched 2026-10-26 (unofficial)

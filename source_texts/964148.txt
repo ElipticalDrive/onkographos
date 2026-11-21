@@ -1,0 +1,253 @@
+New core to match plans of Oct 2024. Contribute to dtcc-platform/dtcc-core development by creating an account on GitHub.
+
+volume grid with non-uniform z height by dwastberg · Pull Request #170 · dtcc-platform/dtcc-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+dwastberg
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Update VolumeGrid to support non-uniform z heights. Does not change the default behavior of VolumeGrid
+volume grid with non-uniform z height
+1fd06d1
+dwastberg
+requested review from
+Georspai,
+anderslogg and
+vbassn
+as code owners
+October 28, 2026 12:59
+claude
+Bot
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @dwastberg's task in 30s —— View job
+Review of PR #170 (non-uniform z for VolumeGrid)
+1 issue found. I left it as an inline comment.
+dtcc_core/model/geometry/grid.py: the new ndarray field z_levels sits on a dataclass with the default eq=True. Comparing two grids that have z_levels should raise an ambiguous-truth-value ValueError. This is unverified because I couldn't run Python here.
+Notes
+REVIEW.md doesn't exist in the repo, so I reviewed against general criteria. The PR description has no Testing, Risk or How to revert answers to check against.
+git diff origin/develop...HEAD failed with no merge base (shallow checkout), so I reviewed the single commit with git show HEAD.
+I didn't run the tests.
+Defaults are unchanged when z_levels is None. The validation, the protobuf round trip (new optional field 5) and the plotting changes read as correct.
+claude
+Bot
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+dtcc_core/model/geometry/grid.py
+Outdated
+width: int = 0
+height: int = 0
+depth: int = 0
+z_levels: ArrayLike | None = field(default=None, kw_only=True)
+claude
+Bot
+Oct 28, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+z_levels is now an ndarray field on a dataclass that keeps the default eq=True (@dataclass(repr=False)). The generated __eq__ compares field tuples. For two distinct grids with z_levels, that comparison should hit ValueError: truth value of an array ... is ambiguous. Before this PR, == on two VolumeGrids worked. I couldn't run code in this environment, so this is from reading the code and is unverified. Consider field(default=None, kw_only=True, compare=False) plus an explicit __eq__, or a test such as VolumeGrid(..., z_levels=[0,1,3]) == VolumeGrid(..., z_levels=[0,1,3]).
+vbassn
+mentioned this pull request
+Oct 28, 2026
+CI: Made the review workflow read REVIEW.md first
+#172
+Merged
+anderslogg
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Collaborator
+The nonuniform layers are useful, and the coordinate ordering, plotting and round-trip coverage look good. I would like the equality issue addressed before approval, along with the precision edge case below.
+Important — array-aware equality (dtcc_core/model/geometry/grid.py:165). I reproduced the existing review finding at 1fd06d1:
+```
+from dataclasses import replace
+from dtcc_core.model import VolumeGrid
+
+grid = VolumeGrid(width=1, height=1, z_levels=[0, 1, 3])
+grid == replace(grid)
+```
+This raises ValueError: The truth value of an array with more than one element is ambiguous. The equivalent comparison works for a uniform grid. Please implement array-aware equality for the layer boundaries and add tests for matching and differing boundaries. Simply excluding z_levels from comparison would let grids with different interior layers compare equal.
+Nit — precision loss for large integer elevations (dtcc_core/model/geometry/grid.py:181–182 and dtcc_core/model/exchange.py:849–850). This round trip silently changes an interior boundary:
+```
+import numpy as np
+from dtcc_core.model import VolumeGrid
+from dtcc_core.model.exchange import dumps, loads
+
+grid = VolumeGrid(width=1, height=1, z_levels=[0, 1, 3])
+grid.z_levels = np.array([0, 2**53 + 1, 2**54], dtype=np.int64)
+restored = loads(dumps(grid))
+int(grid.z_levels[1]), int(restored.z_levels[1])
+```
+Result: (9007199254740993, 9007199254740992). Construction also accepts z_levels=[2**53, 2**53 + 1, 2**53 + 2], then converts the first two boundaries to the same float; coordinates() subsequently rejects the constructed grid. Please reject precision-losing values before conversion/serialization, consistently with the existing coordinate checks, and validate the normalized boundaries.
+Validation at 1fd06d1: CI passed, and 194 focused geometry, plotting and serialization tests passed locally. Please add regression coverage for these cases and complete the PR description with Testing, Risk and How to revert sections.
+Finding count: 1 important, 1 nit.
+implement equality check
+56b459a
+dwastberg
+requested a review
+from a team
+as a code owner
+November 3, 2026 14:27
+claude
+Bot
+reviewed
+Nov 3, 2026
+View reviewed changes
+Comment thread
+tests/model/test_geometry_contract.py
+def test_volume_grid_equality_distinguishes_explicit_and_uniform_layers():
+grid = VolumeGrid(width=1, height=1, depth=2)
+assert grid == replace(grid)
+assert grid != replace(grid, z_levels=[0, 1, 2])
+claude
+Bot
+Nov 3, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nit: only one blank line separates this test from test_volume_grid_rejects_layer_boundaries_inconsistent_with_wire_depth, so ruff format --check (a required CI check) should fail. Run uv run ruff format. I didn't run it.
+claude
+Bot
+reviewed
+Nov 3, 2026
+View reviewed changes
+Comment thread
+dtcc_core/model/geometry/grid.py
+self.z_levels = np.asarray(self.z_levels)
+if self.depth == 0 and self.z_levels.ndim == 1 and self.z_levels.size:
+self.depth = self.z_levels.size - 1
+self._validate_z_levels()
+claude
+Bot
+Nov 3, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nit (still open from the previous review): the precision-loss case is not addressed in 56b459a. astype(float) here and the serialization in exchange.py still silently merge or alter large integer boundaries such as 2**53 + 1. No regression test covers it. If you decline it, say so under Risk.
+claude
+Bot
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Re-review of 56b459a (the commits since the last review). The array-aware VolumeGrid.__eq__ fixes the earlier equality finding, and its tests cover matching and differing boundaries. I read the diff only and did not run the tests or ruff.
+Findings: 2 nits, both inline.
+Only one blank line before the next test, so ruff format --check will likely fail.
+The precision-loss case for large integer z_levels is still open.
+The PR description still has no Testing, Risk or How to revert sections. dtcc_core/model/dtcc_pb2.py was regenerated with protobuf 5.28.1 instead of 5.29.0. That is generated code, but confirm the older gencode is intended.
+Finding count: 2 (0 important, 2 nits).
+handle z level precision
+5b66062
+claude
+Bot
+reviewed
+Nov 3, 2026
+View reviewed changes
+Comment thread
+tests/model/test_geometry_contract.py
+grid = VolumeGrid(width=1, height=1, depth=2)
+assert grid == replace(grid)
+assert grid != replace(grid, z_levels=[0, 1, 2])
+claude
+Bot
+Nov 3, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Important (lint): only one blank line before this top-level def, so ruff format --check . (and E302) will fail, and lint is a required CI check. Add a second blank line. I confirmed the spacing in the checked-out file; I did not run ruff.
+claude
+Bot
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Re-review of 56b459a and 5b66062 (new commits since 1fd06d1)
+Both earlier findings are addressed. VolumeGrid.__eq__ compares z_levels with np.array_equal and treats None versus explicit as different. The precision check rejects integer or wide-float boundaries that don't survive conversion to double. Regression tests cover both.
+Finding: 1 important. A missing blank line before test_volume_grid_rejects_layer_boundaries_inconsistent_with_wire_depth will fail ruff format --check. It is an inline comment.
+Not verified: I didn't run tests or ruff. The PR description still has no Testing, Risk or How to revert answers, which AGENTS.md requires.
+Finding count: 1
+fix formating
+f4eaa14
+claude
+Bot
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Re-review of f4eaa14 (the only commit since my last review). It adds the missing blank line before test_volume_grid_rejects_layer_boundaries_inconsistent_with_wire_depth, which was the one open finding, so I consider it addressed. I read the diff only and did not run ruff or the tests in this session.
+Still open and not a code finding: the PR description has no Testing, Risk or How to revert sections, which AGENTS.md requires.
+Finding count: no issues
+vbassn
+requested changes
+Nov 4, 2026
+View reviewed changes
+vbassn
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed f4eaa14 against develop (a7296ed). The feature is in good shape: uniform grids behave exactly as before, the codec round-trips the new field with validation, plotting honours the layers, nothing in builder or io assumes uniform spacing, and the new tests assert real contracts (coordinate values and order, wire round trip, equality, each validation error). Lint and format pass on the head, and it merges cleanly. Two things need fixing before merge, then four nits. Line numbers refer to the PR head.
+1. important — dtcc_core/model/geometry/grid.py:247-250 and :303: two float comparisons reject ordinary input.
+The agreement check between z_levels and explicit vertical bounds is exact, but from_zsteps builds the levels with np.cumsum. Ten layers of 0.1 sum to 0.9999999999999999 that way, and [0.1, 0.2] to 0.30000000000000004, so a grid from from_zsteps raises "z_levels must match vertical bounds" as soon as the domain is assigned from outside, which is the existing pattern (scripts/generate_fields.py:53 does grid.bounds = bounds.copy()), either at assignment or at the next coordinates() or to_proto().
+zstep accepts layered grids only when the thicknesses agree within rtol=1e-12, but the thicknesses are differences of absolute elevations, whose rounding grows with the elevation. from_zsteps([0.1]*10, zmin=1000).zstep raises "nonuniform z spacing"; so do 0.01 m layers at 100 m and 0.1 m layers at 5000 m. At 0, 10 and 100 m with 0.1 m layers it passes.
+Both raise rather than produce wrong geometry, but both make the new helper unusable for ordinary decimal thicknesses. Scale the tolerance to the elevation magnitude in both places (for example atol = k * eps * max(abs(levels))), and add tests for from_zsteps([0.1]*10) with explicit zmax=1.0 and for from_zsteps([0.1]*10, zmin=1000).zstep.
+2. important — the description against AGENTS.md. It is one sentence; Testing, Risk and How to revert are absent. The PR changes dtcc_core/schemas/dtcc.proto:214-215 and dtcc_core/model/dtcc_pb2.py, a sensitive path, which adds the manual check (one demo end to end) to Testing, needs approval from a human other than the operator, and needs Risk to say so. Risk should also state what older readers do with a .dtcc file carrying z_levels: every build since 2026-09-12 raises "Canonical payload contains unsupported fields" (the guard at dtcc_core/model/exchange.py:1190-1196), older builds silently read a uniform grid, and reverting the merge commit does not make such files readable again. The description should also name the new public API (z_levels, from_zsteps, zsteps) and that zstep now raises for nonuniform layers. CI ran on Ubuntu only; the change is floating-point handling, so add the full-ci label before it is marked ready.
+Nits:
+grid.py:165 and :194: subclass equality. z_levels is compare=False and the layer comparison lives only in the hand-written __eq__, so a @dataclass subclass regenerates __eq__ without the layers: two subclass grids with levels [0, 1, 3] and [0, 2, 3] compare equal. And fields(self) makes an eq=False subclass compare its own extra fields, which the generated base __eq__ did not. No subclass exists in this repository. Dropping compare=False makes a generated subclass __eq__ raise on the arrays instead of ignoring them, and fields(VolumeGrid) keeps the compared set as before.
+grid.py:178 and :228: the precision guard at :241-244 runs after conversion. A mixed list such as [0.0, 2**53 + 1, 2**54] is promoted to float64 first and accepted with the middle level stored as 253, and from_zsteps([2**53 + 1] * 2) accumulates in float and stores [0, 2**53, 2**54], while the homogeneous integer case the guard targets raises. No real elevation is near 253, so either check before converting or drop the guard.
+dtcc_core/model/dtcc_pb2.py:5: the regenerated module declares protoc 5.28.1 where the previous one was 5.29.0; scripts/build_proto runs whatever protoc is on PATH. The descriptor itself is right (the old descriptor plus field 5, repeated double) and loads under the pinned runtime. Regenerate with 5.29 or newer, or accept the header moving backwards.
+docs/design/model-inventory.md:81 lists VolumeGrid's native state as width, height, depth and bounds; the layers are now native, wire-carried state.
+Pre-existing, not introduced here: two independently constructed grids cannot be compared at all, because Transform is a dataclass whose generated __eq__ compares the affine arrays and raises. The new equality tests share the transform through replace, which is why they pass.
+Verified: ruff check and ruff format --check on the head; a clean merge with develop, and no commit on develop since the merge base touching the seven files; the numbers above with the PR's own expressions under NumPy 2.5; the head's dtcc_pb2.py loaded under protobuf 5.29.6 with field 5 present and round-tripped; the decoder's unknown-field guard and the commit that introduced it; a search for every consumer of VolumeGrid and vertical spacing in dtcc_core and scripts. Not run: the test suite, a demo, macOS or Windows, or an exact regeneration with scripts/build_proto; this machine cannot build the extension.
+2 important, 4 nits.
+dsjolie
+commented
+Nov 7, 2026
+Copy link
+Copy Markdown
+Review of #170 at f4eaa14.
+nit — dtcc_core/model/geometry/grid.py:165: z_levels annotated ArrayLike and documented as stored float ndarray, but assignment after construction is not normalized. post_init converts to a float ndarray (grid.py:177-182), but grid.z_levels = [0, 1, 3] keeps a list, and coordinates() then returns it via meshgrid while zsteps calls asarray. Every consumer copes (plotting, the encoder and eq all use asarray or array_equal), so no behaviour is wrong today. The docstring promise ('stored as a float NumPy array') only holds for construction. Make it a property, or reword the docstring.
+Still open from vbassn's review at this head (no commits since): both important points. Reproduced on Windows: VolumeGrid.from_zsteps([0.1]*10) has top level 0.9999999999999999, so after setting bounds with zmax=1.0, coordinates() raises z_levels must match vertical bounds; and with zmin=1000, zstep raises nonuniform z spacing. The PR description still lacks the API/format statement, Testing, Risk and How to revert.
+Ran on Windows 11, Python 3.12, at the PR head: tests with coverage + strict public-API check 3,291 passed, 33 skipped, 0 missed; ruff check and format pass and the volume-meshing tests (with tetgen).
+Not verified: whether protobuf accepts numpy int64 elements in target.z_levels.extend(...) when z_levels is assigned as an integer array after construction (the constructor path converts to float first). The review did not inspect downstream DTCC repositories for zstep use on grids that could become layered.
+1 finding (nit).
+Automated review from my Claude Code setup; I review the process, not each comment. Let me know if something is off.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

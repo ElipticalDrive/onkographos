@@ -1,0 +1,86 @@
+# Sphere-based Empty Space Leaping
+Also called: Sphere at empty voxel, Sphere-based Empty Voxel Navigation
+## Overview
+A technique that places a sphere at every empty voxel position, where the sphere radius indicates the distance to the closest non-empty voxel, used for navigation inside hollow volumetric objects [S1, unofficial][S2, book]. It reduces a ray's space traversal to just a few hops until a boundary wall is reached [S1, unofficial][S2, book]. Unlike standard sphere tracing which uses the global maximum empty sphere radius, this method is view-sensitive and specifically optimized for hollow structures like those in virtual colonoscopy [S1, unofficial][S2, book].
+## How it works
+**Inputs:**
+- Ray origin $O$ and direction $D$.
+- Volume grid containing empty and non-empty voxels.
+- A precomputed data structure mapping each empty voxel to the radius of the largest empty sphere centered at that voxel.
+
+**Outputs:**
+- Intersection point with the nearest non-empty voxel boundary.
+
+**Data Structures:**
+- **Empty Voxel Map**: A texture or grid where each entry corresponds to a voxel in the volume.
+  - If the voxel is non-empty, the value is $0$ or undefined.
+  - If the voxel is empty, the value is $r$, the radius of the largest empty sphere centered at the voxel's center. This radius is determined by the distance to the nearest non-empty voxel [S1, unofficial][S2, book].
+
+**Steps:**
+1. **Initialization**: Start the ray at origin $O$. Determine the initial voxel containing $O$.
+2. **Sphere Query**: If the current voxel is empty, retrieve its associated sphere radius $r$ [S1, unofficial][S2, book].
+3. **Step Calculation**: Compute the step size $t$ as the minimum of:
+   - The distance to the sphere boundary along the ray direction: $t_{sphere} = \frac{-(O \cdot D) + \sqrt{(O \cdot D)^2 - (|O|^2 - r^2)}}{|D|^2}$ (if $O$ is inside the sphere).
+   - Or more simply, if the ray origin is at the voxel center, $t = r$.
+   - [G] In practice, the step size is often limited by the voxel size to prevent overshooting the current voxel's bounds if the ray does not start exactly at the center.
+4. **Ray Advance**: Advance the ray origin: $O_{new} = O + t \cdot D$.
+5. **Boundary Check**: Check if the new position $O_{new}$ is inside a non-empty voxel.
+   - If yes, terminate the leap and perform standard volume rendering sampling at $O_{new}$.
+   - If no, repeat from Step 2 with the new voxel.
+6. **Termination**: The process repeats until a non-empty voxel is hit or the ray exits the volume.
+
+**Parameters:**
+- Sphere radius $r$: Precomputed for each empty voxel.
+
+**Edge Cases:**
+- **Non-empty voxels**: The technique only applies to empty voxels. Rays hitting non-empty voxels must switch to standard sampling or other traversal methods.
+- **Precision**: Floating-point precision errors may cause the ray to slightly overshoot or undershoot the boundary. A small epsilon should be used for boundary checks [G].
+- **Degenerate Input**: If the volume has no empty voxels, the technique is not applicable.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sphere_based_empty_space_leaping(ray_origin, ray_direction, empty_voxel_map, voxel_size):
+    current_pos = ray_origin
+    while True:
+        # Determine current voxel
+        voxel_coords = world_to_voxel(current_pos, voxel_size)
+        
+        # Check if voxel is empty
+        if not is_empty_voxel(voxel_coords, empty_voxel_map):
+            break  # Hit non-empty voxel
+        
+        # Get sphere radius for current empty voxel
+        r = get_sphere_radius(voxel_coords, empty_voxel_map)
+        
+        # Calculate step size
+        # Assuming ray origin is at voxel center for simplicity
+        step_size = r
+        
+        # Advance ray
+        current_pos = current_pos + ray_direction * step_size
+        
+        # Check for exit or boundary
+        if not is_inside_volume(current_pos, voxel_size):
+            break
+            
+    return current_pos
+```
+## Subtopics
+
+### [Cube Assisted Raymarching](4940-cube-assisted-raymarching.md)
+Uses cubes instead of spheres for empty space leaping. Choose when the volume has more box-like empty regions.
+
+## Operating characteristics
+- **Time Complexity**: Proportional to the number of empty voxels traversed. Significantly reduces the number of steps compared to single-voxel traversal in large empty regions.
+- **Memory Complexity**: Requires additional storage for the sphere radius map, one value per empty voxel.
+- **Strengths**: Efficient for hollow objects with large empty interiors. Reduces traversal steps to a few hops.
+- **Limitations**: Only applicable to empty voxels. Precomputation required. Not effective for dense or complex internal structures.
+- **When to use**: Virtual colonoscopy, navigation inside hollow volumetric objects.
+- **When not to use**: Dense volumes, volumes with no empty space, or when memory is constrained.
+## Background
+Proposed by Wan [S1, unofficial][S2, book] as a view-sensitive extension of proximity clouds. It addresses the shortcoming of proximity clouds being insensitive to viewing direction, where rays missing the object are still slowed down. It is used for navigation inside hollow volumetric objects, such as in virtual colonoscopy [S1, unofficial][S2, book]. Meissner suggested an algorithm to quickly re-compute the proximity cloud when the transfer function changes [S1, unofficial][S2, book].
+## Sources
+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

@@ -1,0 +1,113 @@
+On current master (761661c), a + b of two boxes stacked in z drops 1400.6 of 16807.7 volume. Status() is NoError, genus is 0, and the test suite's strict params don't catch it. b + a is correct. The boxes overlap by less than epsilon in ...
+
+Union of two stacked boxes loses 8% of its volume · Issue #1888 · elalish/manifold · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Union of two stacked boxes loses 8% of its volume #1888
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Union of two stacked boxes loses 8% of its volume#1888
+Copy link
+Description
+zmerlynn
+opened on Oct 14, 2026
+Issue body actions
+On current master (761661c), a + b of two boxes stacked in z drops 1400.6 of 16807.7 volume. Status() is NoError, genus is 0, and the test suite's strict params don't catch it. b + a is correct. The boxes overlap by less than epsilon in z, and the other coordinates are off by up to about 3e-11.
+```
+const double c = 0x1.454bec795f0a5p+4;  // about 20.33
+const vec3 lo0(-0x1.66cdfacd7e0dap-38, 0x1.1ca271c8bb656p-37, 0);
+const vec3 hi0(c, 0x1.454bec7960496p+4, 0x1.454bec7960994p+4);
+const vec3 lo1(0x1.d9e2b6a00d28cp-36, 0x1.0f73c593fcbcdp-37, 0x1.454bec795e854p+4);
+const vec3 hi1(c, c, 2 * c);
+const Manifold a = Manifold::Cube(hi0 - lo0).Translate(lo0);
+const Manifold b = Manifold::Cube(hi1 - lo1).Translate(lo1);
+EXPECT_NEAR((a + b).Volume(), a.Volume() + b.Volume(), 1e-6);
+// a + b: 15407.07, b + a and a.Volume() + b.Volume(): 16807.71
+```
+The missing piece is the tetrahedron (0, 0, 0), (20.33, 0, 0), (0, 0, 40.66), (0, 10.17, 10.17). The last vertex is new, at the center of the lower box's x = 0 face. The two output triangles that bound the tetrahedron lie on no input face.
+Here's what I think happens, from tracing RemoveDegenerates:
+SwapDegenerateEdges calls SplitQuad. Its triB is a zero-area triangle along the edge where x = 0 and y = 0, and its stored faceNormal_ is (0, -1, 0) from the y = 0 face.
+SplitQuad refills triB and the new triN with triangles on the x = 0 face, but both keep the (0, -1, 0) normal.
+In the colinear pass, Colinear checks the move against those stored normals and finds no offset. CollapseDegenerate then moves the vertex at (0, 0, 20.33) to (20.33, 0, 0), across the x = 0 face.
+Giving triB and triN the normal of triA in SplitQuad fixes this case. It also fixes three similar volume losses that came up while fuzzing #1877, which reaches this code more often. I haven't run the test suite with that change, and I'm not sure triA is always the right plane, so treat it as a guess. #1884 is included and doesn't change this case.
+Activity
+elalish commented on Oct 14, 2026
+elalish
+on Oct 14, 2026
+Owner
+More actions
+That sounds reasonable to me. Perhaps even more robust would be to recalculate the normals of the new triangles? Want to try a PR?
+zmerlynn commented on Oct 16, 2026
+zmerlynn
+on Oct 16, 2026
+CollaboratorAuthor
+More actions
+Yup, working on it!
+👍React with 👍1Reacted by Emmett Lalish
+SaulNunez
+added a commit that references this issue on Oct 20, 2026
+Pick real boolean operands instead of "last two created" (Phase 6, re…
+...
+e7214cc
+elalish commented on Nov 6, 2026
+elalish
+on Nov 6, 2026
+Owner
+More actions
+Does this still repro?
+zmerlynn commented on Nov 6, 2026
+zmerlynn
+on Nov 6, 2026
+CollaboratorAuthor
+More actions
+The two-box case above no longer reproduces on current master (067016c). I think the tie-breaking changes in #1877/#1887 stopped it from reaching SplitQuad, so it doesn't look like the underlying bug was fixed.
+The stale normal is still there. This union of three rotated boxes loses 0.179 of 6.438 on master, again with NoError:
+```
+const vec3 box[3][2] = {
+    {{-0x1.f0b186232dfbcp-40, 0x1.ef4c7fd7b158ep+1, 0x1.ef4c7fd7b1995p+1},
+     {0x1.4a32ffe5214cdp+0, 0x1.4a32ffe5209c1p+2, 0x1.4a32ffe5202a6p+2}},
+    {{0x1.4a32ffe5200e5p+1, 0x1.d0aeb20c7aa1bp-40, 0x1.4a32ffe520942p+1},
+     {0x1.ef4c7fd7b0deep+1, 0x1.4a32ffe51f2b9p+0, 0x1.ef4c7fd7b0c13p+1}},
+    {{0x1.ef4c7fd7aff1cp+1, -0x1.df81ffc6e34b2p-40, 0x1.4a32ffe521698p+0},
+     {0x1.4a32ffe52048bp+2, 0x1.4a32ffe51f1f4p+0, 0x1.4a32ffe5217ccp+1}}};
+Manifold u;
+double sum = 0;
+for (const auto& b : box) {
+  Manifold m = Manifold::Cube(b[1] - b[0])
+                   .Translate(b[0])
+                   .Rotate(0x1.beb3d52d8afcp+7, 0x1.525735df484a4p+8,
+                           0x1.565d35b2172ep+5);
+  m = Manifold(m.GetMeshGL64());
+  sum += m.Volume();
+  u = u + m;
+  u.Status();
+}
+EXPECT_NEAR(u.Volume(), sum, 1e-6);  // union 6.258857, sum 6.437681
+```
+Disabling SplitQuad fixes it, and so does giving triB and triN the normal of triA. Sorry this sat after I said I was working on it. I'll put up a PR, and I'll try recomputing the normals of the new triangles as you suggested.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

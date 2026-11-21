@@ -1,0 +1,171 @@
+Open-source deep-learning framework for building, training, and fine-tuning deep learning models using state-of-the-art Physics-ML methods - Make Mesh intrinsic point gradients independent of cell winding by peterdsharpe · Pull Request #2227 · NVIDIA/physicsnemo
+
+Make Mesh intrinsic point gradients independent of cell winding by peterdsharpe · Pull Request #2227 · NVIDIA/physicsnemo · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+peterdsharpe
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Extracting the boundary surface of a volume mesh with get_boundary_mesh() produces triangles that inherit their vertex order from their parent tetrahedra rather than having a consistent orientation across faces. On main, computing an intrinsic point gradient on that surface (or on a non-orientable surface such as a Möbius strip) gives wrong answers even in the middle of a flat face:
+```
+import torch
+from physicsnemo.mesh.primitives.volumes import cube_volume
+
+surf = cube_volume.load(subdivisions=4).to(torch.float64).get_boundary_mesh()
+g = torch.tensor([1.0, 2.0, -3.0], dtype=torch.float64)
+
+grad = surf.gradient(surf.points @ g)  # default: method="lsq", gradient_type="intrinsic"
+# At the 54 vertices strictly inside the 6 flat cube faces:
+# main:    max |grad - exact_projection| = 3.606
+# this PR: max |grad - exact_projection| = 4.4e-16
+```
+Why this happens and how it is fixed
+For codimension-1 meshes, both intrinsic LSQ (_lsq_intrinsic.py) and the point branch of project_to_tangent_space (gradient.py, used by DEC) build each vertex's tangent plane from mesh.point_normals. Because point_normals is an area-angle-weighted sum of incident cell_normals, two coplanar triangles with opposite winding cancel out or tilt the normal into the face plane, projecting out part of the tangential gradient.
+The tangent plane at a vertex does not depend on normal sign. At the same time, consistently wound meshes (including sharp cone tips and thin trailing edges) should produce the exact same gradients as main. This PR therefore modifies only vertices where incident cells have opposite windings:
+_inconsistently_wound_points (physicsnemo/mesh/repair/orientation.py) flags vertices that lie on a facet shared by two cells that induce the same orientation on that facet (or shared by $\ge 3$ cells). It sorts packed (facet, parity) keys without host-device synchronization and caches the boolean mask under ("topology", "inconsistently_wound_points").
+_unoriented_point_normals (physicsnemo/mesh/calculus/gradient.py) computes the tangent-plane normals. At flagged vertices, any incident cell normal pointing more than $120^\circ$ ($\cos\theta &lt; -0.5$) away from the vertex's largest-area incident cell normal is negated before accumulation. Taking the largest-area incident cell as reference prevents zero-area or roundoff slivers from skewing the reference direction.
+At unflagged vertices, flip is False everywhere, so the result is bit-for-bit identical to mesh.point_normals. mesh.point_normals and mesh.compute_point_normals() themselves are unchanged.
+Scope, limits, and cost
+Consistently wound meshes (tested on spheres, tori, the cone apex, and a $10^\circ$ wedge) produce the exact same intrinsic gradients as main.
+On inconsistently wound meshes, interior face vertices and smooth surfaces up to $60^\circ$ dihedral angles are orientation-independent, and a Möbius strip's intrinsic gradient stays tangent at every vertex. At sharp $90^\circ$ creases (such as cube edges) where facets are also inconsistently wound, opposing cell normals meet at $\sim 90^\circ$ rather than $&gt; 120^\circ$, so local normals cannot distinguish a crease from a flip. Call fix_orientation when consistent crease normals are needed on orientable surfaces.
+On an RTX 4090 Laptop GPU, the first intrinsic LSQ gradient call on a fresh 40,962-point icosphere takes 9.6 ms vs 5.4 ms on main (best of 30 runs, and 11.0 ms vs 11.8 ms at 163,842 points), and the topology flag mask is computed once per connectivity. The public API is unchanged.
+Checklist
+I am familiar with the Contributing Guidelines.
+New or existing tests cover these changes.
+The documentation is up to date with these changes.
+The CHANGELOG.md is up to date with these changes.
+An issue is linked to this pull request.
+If I am implementing a new model or modifying any existing model, I have followed the Models Implementation Coding Standards.
+Dependencies
+None.
+Review Process
+All PRs are reviewed by the PhysicsNeMo team before merging.
+Depending on which files are changed, GitHub may automatically assign a maintainer for review.
+We are also testing AI-based code review tools (e.g., Greptile), which may add automated comments with a confidence score. This score reflects the AI’s assessment of merge readiness and is not a qualitative judgment of your work, nor is it an indication that the PR will be accepted / rejected.
+AI-generated feedback should be reviewed critically for usefulness. You are not required to respond to every AI comment, but they are intended to help both authors and reviewers. Please react to Greptile comments with 👍 or 👎 to provide feedback on their accuracy.
+peterdsharpe
+added 3 commits
+November 4, 2026 11:30
+Mesh: intrinsic point gradients independent of cell winding
+…
+57c4133
+```
+Intrinsic point gradients, LSQ and DEC, took their tangent planes from
+Mesh.point_normals, whose sum of cell normals cancels where neighboring
+cells are wound oppositely, as in get_boundary_mesh output and on the
+Mobius strip. They now use point normals that, at points on a facet
+that two cells orient alike, flip each incident cell normal more than
+120 degrees from that of the incident cell of largest area before
+summing. Elsewhere they are point_normals, so consistently wound meshes
+give bit-identical results. Mesh.point_normals is unchanged.
+
+The points are flagged by sorting the facets with the orientations
+that their cells induce, without a host-device sync, and cached with
+the topology.
+
+Signed-off-by: Peter Sharpe <peterdsharpe@gmail.com>
+```
+Mesh: tangent normals skip the second point-normal pass
+…
+731270a
+```
+At unflagged points the flipped sum already equals point_normals, so return
+it directly instead of computing point_normals as well and selecting.
+
+Signed-off-by: Peter Sharpe <peterdsharpe@gmail.com>
+```
+Mesh: winding tests open TestManifolds
+…
+ebd26e9
+```
+Placed before the existing manifold test, so that this branch and the calculus
+fixes branch, which adds tests after it, merge without conflict.
+
+Signed-off-by: Peter Sharpe <peterdsharpe@gmail.com>
+```
+copy-pr-bot
+Bot
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+This pull request requires additional validation before any workflows can run on NVIDIA's runners.
+Pull request vetters can view their responsibilities here.
+Contributors can view more details about this message here.
+github-actions
+Bot
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+Contributor
+CODEOWNERS review map
+Current for commit ebd26e9ee893. An approval covers every file listed for that owner; one owner is sufficient for shared files.
+⏳ @peterdsharpe — 5 file(s)
+physicsnemo/mesh/calculus/_lsq_intrinsic.py
+physicsnemo/mesh/calculus/gradient.py
+physicsnemo/mesh/mesh.py
+physicsnemo/mesh/repair/orientation.py
+test/mesh/calculus/test_calculus.py
+No CODEOWNER
+CHANGELOG.md
+Comment /codeowners-info to refresh.
+peterdsharpe
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+/ok to test ebd26e9
+peterdsharpe
+changed the title
+Mesh: intrinsic point gradients independent of cell winding
+Make Mesh intrinsic point gradients independent of cell winding
+Nov 4, 2026
+peterdsharpe
+marked this pull request as ready for review
+November 6, 2026 04:10
+greptile-apps
+Bot
+commented
+Nov 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+[Medium impact] The PR appears safe to merge within its stated limits.
+Summary
+Makes intrinsic point gradients use normals that account for inconsistent cell winding.
+Intrinsic point gradients use tangent planes that ignore inconsistent cell winding.
+Acknowledged limit: peterdsharpe explicitly describes and defers inconsistently wound sharp 90-degree creases. The normal-angle test cannot distinguish those creases from winding changes; the description recommends fix_orientation when consistent crease normals are needed.
+Reviews (1) · Last reviewed commit: "Mesh: winding tests open TestManifolds" · Reviewed by Greptile
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

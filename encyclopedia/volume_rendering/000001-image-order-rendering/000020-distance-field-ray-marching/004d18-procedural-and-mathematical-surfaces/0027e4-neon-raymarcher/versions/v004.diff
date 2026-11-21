@@ -1,0 +1,299 @@
+--- v003.md
++++ v004.md
+@@ -4,15 +4,13 @@
+ 
+ ## Overview
+-Neon Raymarcher is a real-time WebGL2 renderer that generates an infinite procedural synthwave city using signed-distance fields (SDFs) within a single fullscreen fragment shader, requiring no meshes, textures, or scene graph [S1, unofficial]. It distinguishes itself from general-purpose SDF renderers by enforcing a strict deterministic hashing contract between CPU and GPU to ensure consistency between the rendered visual scene and the underlying game logic [S1, unofficial].
++Neon Raymarcher is a real-time WebGL2 renderer that generates an infinite procedural synthwave city using signed-distance fields (SDFs) within a single fullscreen fragment shader, requiring no meshes, textures, or scene graph [S1, unofficial]. It distinguishes itself from general-purpose SDF renderers by employing a deterministic integer-hashing contract shared between CPU and GPU to generate building layouts, and an analytic sine-wave curve to define the road centerline, ensuring perfect synchronization between the rendered visual and the camera path [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera state (position, orthonormal basis vectors: right, up, forward), time, resolution, and fixed procedural constants (road parameters, block dimensions) [S1, unofficial].
+-*   **Outputs:** A color buffer representing the rendered frame [S1, unofficial].
++*   **Inputs:** Frame time (`uTime`), camera state (`uCamPos`, `uCamRight`, `uCamUp`, `uCamForward`), and resolution (`uResolution`).
++*   **Outputs:** A color buffer representing the rendered city scene.
+ 
+ **Data Structures:**
+-*   **Ray Basis:** A structure containing `position` (vec3), `right` (vec3), `up` (vec3), and `forward` (vec3) [S1, unofficial].
+-*   **Cell Coordinates:** Integer triplets `(cx, cy, cz)` representing the grid cell of a building block [S1, unofficial].
+-*   **Hash Seed:** A 32-bit unsigned integer derived from cell coordinates [S1, unofficial].
++The scene is defined implicitly. No vertex buffers or texture arrays are used for geometry. The only persistent data structures are the uniform variables passed from the CPU and the local variables within the fragment shader.
+ 
+ **Parameters:**
+@@ -22,32 +20,34 @@
+ *   `BLOCK_DEPTH`: 14.0 [S1, unofficial].
+ *   `MARGIN`: 1.5 [S1, unofficial].
+-*   Road Amplitudes: `RD_A1=6.0`, `RD_A2=3.0`, `RD_A3=1.2` [S1, unofficial].
+-*   Road Frequencies: `RD_F1=0.03141593`, `RD_F2=0.06613879`, `RD_F3=0.11424174` [S1, unofficial].
+-*   Road Phases: `RD_P2=1.7`, `RD_P3=4.2` [S1, unofficial].
++*   Road Amplitudes: `RD_A1 = 6.0`, `RD_A2 = 3.0`, `RD_A3 = 1.2` [S1, unofficial].
++*   Road Frequencies: `RD_F1 = 0.03141593` ($2\pi/200$), `RD_F2 = 0.06613879` ($2\pi/95$), `RD_F3 = 0.11424174` ($2\pi/55$) [S1, unofficial].
++*   Road Phases: `RD_P2 = 1.7`, `RD_P3 = 4.2` [S1, unofficial].
+ 
+-**Algorithm Steps:**
++**Steps:**
+ 
+-1.  **Initialization:** Create a WebGL2 context with antialiasing and alpha disabled, generate a fullscreen triangle using `gl_VertexID`, and compile/link a vertex shader and fragment shader [S1, unofficial].
+-2.  **Frame Loop:** On each frame, calculate delta time `dt` (clamped to 0.1s to handle tab switches) and update the camera position along the procedural road [S1, unofficial].
+-3.  **Camera Basis:** Compute the camera's orthonormal basis [S1, unofficial]. The camera position is defined by the road centerline at the current `z` coordinate [S1, unofficial]. The forward vector points to a lookahead position on the road [S1, unofficial]. The right vector is the normalized cross product of forward and world up [S1, unofficial]. The up vector is the normalized cross product of right and forward [S1, unofficial].
+-4.  **Ray Generation:** For each pixel, compute the ray origin `o` from the camera position and the ray direction `d` using the pixel UV coordinates, resolution, and the camera basis vectors [S1, unofficial].
+-5.  **Sphere Tracing:** Iterate up to `MAX_STEPS` or until the accumulated distance `t` exceeds `MAX_DIST` [S1, unofficial].
+-    *   Query the scene SDF at the current point `p = o + t*d` [S1, unofficial].
+-    *   Advance `t` by the distance value `d_val = SDF(p)` [S1, unofficial].
+-    *   If `d_val < epsilon` (convergence threshold), record the hit point and normal, then break [S1, unofficial].
+-6.  **Scene SDF Evaluation:** The scene SDF is the union of the ground plane and a domain-repeated array of building boxes [S1, unofficial].
+-    *   **Road Centerline:** Compute the lateral offset `roadX(z)` using the sum of three sine waves [S1, unofficial]:
++1.  **Initialization:** Create a WebGL2 context with antialiasing disabled and alpha disabled. Generate a fullscreen triangle using `gl_VertexID` in the vertex shader. Compile and link the vertex shader (`fullscreen.vert.glsl`) and fragment shader (`raymarch.frag.glsl`) [S1, unofficial].
++2.  **Uniform Setup:** Cache locations for `uResolution`, `uTime`, `uCamPos`, `uCamRight`, `uCamUp`, and `uCamForward` [S1, unofficial].
++3.  **Frame Loop:** On each frame, resize the canvas to `clientSize * devicePixelRatio * renderScale`. Set the viewport. Pass the current time and camera basis to the shader uniforms. Draw a single triangle using `gl.drawArrays(gl.TRIANGLES, 0, 3)` [S1, unofficial].
++4.  **Ray Generation (Fragment Shader):** For each pixel, compute the ray origin $\mathbf{o}$ from `uCamPos`. Compute the ray direction $\mathbf{d}$ using the pixel's normalized UV coordinates $(u, v)$, the resolution, and the camera basis vectors:
++    $$ \mathbf{d} = \text{normalize}(\mathbf{f} + u \cdot \mathbf{r} + v \cdot \mathbf{u}) $$
++    where $\mathbf{f}$ is `uCamForward`, $\mathbf{r}$ is `uCamRight`, and $\mathbf{u}$ is `uCamUp` [S1, unofficial].
++5.  **Sphere Tracing:** Iterate up to `MAX_STEPS` (128). In each step $i$:
++    *   Evaluate the scene SDF at the current point $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{d}$.
++    *   If the distance $d < \epsilon$ (convergence threshold), return the hit color.
++    *   If $t > \text{MAX\_DIST}$ (180.0), return the background color.
++    *   Advance $t$ by $d$ (sphere tracing step).
++6.  **Scene SDF Evaluation:** The scene SDF $S(\mathbf{p})$ is the union of the ground plane and the buildings.
++    *   **Ground Plane:** $S_{ground}(\mathbf{p}) = \mathbf{p}_y$ (assuming $y=0$ is the ground) [S1, unofficial].
++    *   **Road Offset:** Compute the lateral offset of the road centerline at the ray's $z$ coordinate:
+         $$ \text{roadX}(z) = \text{RD\_A1} \sin(z \cdot \text{RD\_F1}) + \text{RD\_A2} \sin(z \cdot \text{RD\_F2} + \text{RD\_P2}) + \text{RD\_A3} \sin(z \cdot \text{RD\_F3} + \text{RD\_P3}) $$
+-    *   **Building Placement:** Determine the cell coordinates `(cx, cy, cz)` for the query point relative to the road [S1, unofficial]. The buildings are tiled with `BLOCK_WIDTH` and `BLOCK_DEPTH` [S1, unofficial].
+-    *   **Hashing:** Compute a deterministic 32-bit hash seed for the cell using the `hashCell` function [S1, unofficial].
+-    *   **Primitive SDF:** Evaluate the SDF for a box primitive centered at the cell location, scaled and translated according to the hash-derived footprint and height [S1, unofficial]. The box is placed with a setback from the road centerline defined by the margin [S1, unofficial].
+-    *   **Combination:** The final scene SDF is the minimum of the ground plane SDF and the building SDF [S1, unofficial].
++    *   **Building Placement:** Determine the building cell $(c_x, c_y, c_z)$ for point $\mathbf{p}$. The $z$-cell is derived from the ray's $z$ position relative to the road. The $x$-cell is derived from the lateral distance from the road centerline $\text{roadX}(z)$. The $y$-cell is derived from the height.
++    *   **Hashing:** Compute a deterministic 32-bit seed for the cell using `hashCell(c_x, c_y, c_z)`. This function uses integer bit-mixing to ensure CPU/GPU consistency [S1, unofficial].
++    *   **Building SDF:** Use the hash seed to determine building properties (footprint, height, material). Construct the SDF for the building box, shifted to the cell's position and offset by the road curve. Apply the margin (1.5 units) to prevent overlap [S1, unofficial].
++    *   **Union:** $S(\mathbf{p}) = \min(S_{ground}(\mathbf{p}), S_{buildings}(\mathbf{p}))$ [S39, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+-
+-# Constants from [S1, unofficial]
++# Constants
+ MAX_STEPS = 128
+ MAX_DIST = 180.0
+@@ -63,147 +63,116 @@
+ RD_P2 = 1.7
+ RD_P3 = 4.2
+-WORLD_UP = [0, 1, 0]
++
++def road_x(z):
++    return (RD_A1 * sin(z * RD_F1) +
++            RD_A2 * sin(z * RD_F2 + RD_P2) +
++            RD_A3 * sin(z * RD_F3 + RD_P3))
+ 
+ def uhash(x):
+-    """Deterministic 32-bit integer hash [S1, unofficial]."""
+     x = x & 0xFFFFFFFF
+     x ^= (x >> 16)
+-    x = (x * 0x7feb352d) & 0xFFFFFFFF
++    x = imul(x, 0x7feb352d)
+     x ^= (x >> 15)
+-    x = (x * 0x846ca68b) & 0xFFFFFFFF
++    x = imul(x, 0x846ca68b)
+     x ^= (x >> 16)
+     return x & 0xFFFFFFFF
+ 
+ def hash_cell(cx, cy, cz):
+-    """Hash 3D cell coordinates to 32-bit seed [S1, unofficial]."""
+-    h = uhash(cx * 0x9e3779b9)
+-    h = uhash(h ^ (cy * 0x85ebca6b))
+-    h = uhash(h ^ (cz * 0xc2b2ae35))
++    h = uhash(imul(cx, 0x9e3779b9))
++    h = uhash(h ^ imul(cy, 0x85ebca6b))
++    h = uhash(h ^ imul(cz, 0xc2b2ae35))
+     return h & 0xFFFFFFFF
+ 
+-def road_x(z):
+-    """Analytic road centerline [S1, unofficial]."""
+-    return (RD_A1 * math.sin(z * RD_F1) +
+-            RD_A2 * math.sin(z * RD_F2 + RD_P2) +
+-            RD_A3 * math.sin(z * RD_F3 + RD_P3))
+-
+-def normalize(v):
+-    """Normalize vector v [G]."""
+-    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+-    if length == 0: return [0, 0, 0]
+-    return [v[0]/length, v[1]/length, v[2]/length]
+-
+-def sub(a, b):
+-    return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+-
+-def cross(a, b):
+-    return [a[1]*b[2] - a[2]*b[1],
+-            a[2]*b[0] - a[0]*b[2],
+-            a[0]*b[1] - a[1]*b[0]]
+-
+-def get_camera_basis(camera_z, look_ahead, height, look_height):
+-    """Compute camera position and orthonormal basis [S1, unofficial]."""
+-    pos = [road_x(camera_z), height, camera_z]
+-    ahead_z = camera_z + look_ahead
+-    target = [road_x(ahead_z), look_height, ahead_z]
+-    
+-    forward = normalize(sub(target, pos))
+-    right = normalize(cross(forward, WORLD_UP))
+-    up = normalize(cross(right, forward))
+-    
+-    return pos, right, up, forward
+-
+-def sdf_box(p, center, size):
+-    """SDF for an axis-aligned box [G]."""
+-    d = [abs(p[0]-center[0]) - size[0],
+-         abs(p[1]-center[1]) - size[1],
+-         abs(p[2]-center[2]) - size[2]]
+-    outside = max(d[0], max(d[1], d[2]))
+-    inside = min(max(d[0], d[1]), max(max(d[0], d[1]), d[2]))
+-    if outside < 0:
+-        return outside
+-    else:
+-        return outside + max(0, inside)
++def hash_to_float(h):
++    return ((h >> 8) / 16777216.0)
+ 
+ def sdf_ground(p):
+-    """SDF for ground plane y=0 [S1, unofficial]."""
+-    return p[1]
++    return p.y
+ 
+-def sdf_building(p, cell_cx, cell_cy, cell_cz):
+-    """Evaluate building SDF for a specific cell [S1, unofficial]."""
+-    seed = hash_cell(cell_cx, cell_cy, cell_cz)
+-    # The source uses the hash to determine footprint, height, and materials.
+-    # Exact mapping is not detailed; we derive deterministic dimensions from the seed [G].
+-    w = (seed & 0xFF) / 255.0 * BLOCK_WIDTH * 0.8 + BLOCK_WIDTH * 0.2
+-    h = (seed >> 8 & 0xFF) / 255.0 * 20.0 + 5.0
+-    d = (seed >> 16 & 0xFF) / 255.0 * BLOCK_DEPTH * 0.8 + BLOCK_DEPTH * 0.2
+-    
+-    cell_z = cell_cz * BLOCK_DEPTH
+-    road_offset = road_x(cell_z)
+-    
+-    # Setback from road centerline using margin
+-    center = [road_offset + MARGIN + w/2, h/2, cell_z]
+-    size = [w/2, h/2, d/2]
+-    
+-    return sdf_box(p, center, size)
++def sdf_building(p, cell_seed):
++    # Determine building dimensions and position based on cell_seed
++    # This is a placeholder for the specific building generation logic
++    # which uses hash_to_float to derive width, height, and offset
++    # within the block.
++    # For implementation, one would decode the seed to get:
++    #   width = BLOCK_WIDTH * (0.5 + hash_to_float(seed) * 0.5)
++    #   height = ...
++    #   offset_x = ...
++    #   offset_y = ...
++    # Then compute the distance to the box centered at (offset_x, offset_y, 0)
++    # in the local cell space.
++    pass
+ 
+ def scene_sdf(p):
+-    """Evaluate the full scene SDF [S1, unofficial]."""
+-    # Map world point to road-space cell coordinates
+-    cell_cz = int(p[2] / BLOCK_DEPTH)
+-    road_z = cell_cz * BLOCK_DEPTH
+-    road_x_val = road_x(road_z)
+-    cell_cx = int((p[0] - road_x_val) / BLOCK_WIDTH)
+-    cell_cy = int(p[1] / BLOCK_DEPTH)
++    # Calculate road offset at current z
++    rx = road_x(p.z)
+     
+-    d_building = sdf_building(p, cell_cx, cell_cy, cell_cz)
++    # Transform point to "road space"
++    # The road runs along Z, so we shift X by the road curve
++    p_local_x = p.x - rx
++    
++    # Determine cell coordinates
++    # Assuming cells are aligned to BLOCK_WIDTH and BLOCK_DEPTH
++    cx = floor(p_local_x / BLOCK_WIDTH)
++    cz = floor(p.z / BLOCK_DEPTH)
++    cy = floor(p.y / BLOCK_DEPTH) # Assuming similar vertical tiling
++    
++    # Get building SDF
++    seed = hash_cell(cx, cy, cz)
++    d_build = sdf_building(p, seed)
++    
++    # Union with ground
+     d_ground = sdf_ground(p)
+     
+-    # Union of ground and buildings [S1, unofficial]
+-    return min(d_ground, d_building)
++    return min(d_ground, d_build)
+ 
+-def raymarch(origin, direction):
+-    """Sphere tracing loop [S1, unofficial]."""
++def render_pixel(uv, cam_pos, cam_right, cam_up, cam_forward):
++    # Ray origin and direction
++    o = cam_pos
++    d = normalize(cam_forward + uv.x * cam_right + uv.y * cam_up)
++    
+     t = 0.0
+     for i in range(MAX_STEPS):
+-        p = [origin[0] + t*direction[0],
+-             origin[1] + t*direction[1],
+-             origin[2] + t*direction[2]]
+-        
++        p = o + t * d
+         d_val = scene_sdf(p)
+         
+         if d_val < 0.001:
+-            return True, p, d_val
++            return compute_color(p, d) # Placeholder for shading
++        if t > MAX_DIST:
++            return background_color()
+         
+         t += d_val
+         
+-        if t > MAX_DIST:
+-            return False, p, d_val
+-            
+-    return False, p, d_val
++    return background_color()
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hash Drift:** The CPU and GPU must use identical integer hashing logic [S1, unofficial]. Float-based hashing (e.g., `sin`) is avoided because it drifts between platforms, causing visual/logic mismatches [S1, unofficial].
+-*   **Road Curve Complexity:** The road centerline is a sum of three sine waves [S1, unofficial]. The camera and raymarching must use the exact same `roadX(z)` function to stay aligned [S1, unofficial].
+-*   **Precision:** The use of 32-bit integer arithmetic for hashing ensures bit-identical results across JavaScript and GLSL [S1, unofficial].
++*   **Precision:** The hash function uses 32-bit integer arithmetic to ensure bit-identical results between JavaScript (CPU) and GLSL (GPU). Using floating-point hashing (e.g., `fract(sin(...))`) would cause drift and mismatched geometry [S1, unofficial].
++*   **Road Curvature:** The road curve is designed to have a maximum heading of ~28 degrees and a minimum radius of curvature of ~29 units to ensure drivability and visual coherence [S1, unofficial].
++*   **Overlap:** The margin of 1.5 units prevents adjacent building cells from overlapping, ensuring the SDF union remains valid [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Deterministic Hashing
+-A method for generating procedural content that is identical on CPU and GPU [S1, unofficial]. It uses integer bit-mixing operations (`uhash`) instead of floating-point functions to ensure determinism [S1, unofficial]. Choose this when game logic and rendering must share the same procedural data [S1, unofficial]. Link: [Deterministic Hashing](deterministic-hashing.md).
++### Terrain Raymarching
++Renders heightmap-based terrain using SDFs. Differs from Neon Raymarcher by using a 2D heightmap instead of a 3D procedural hash for geometry. Choose for natural landscapes. [Terrain Raymarching](1357-terrain-raymarching.md)
+ 
+-### Procedural Road Generation
+-The use of analytic sine-wave sums to define a drivable, infinite road centerline [S1, unofficial]. It avoids storing road geometry, computing it on-the-fly for both camera movement and scene generation [S1, unofficial]. Link: [Procedural Road Generation](procedural-road-generation.md).
++### Menger Sponge Raymarching
++Renders fractal geometry using recursive SDF operations. Differs by using iterative min/max operations for fractal detail rather than hash-based placement. Choose for mathematical fractals. [Menger Sponge Raymarching](4875-menger-sponge-raymarching.md)
++
++### Fractals and Mathematical Surfaces
++General category for rendering fractals via SDFs. Neon Raymarcher is a specific application using hash-based placement. [Fractals and Mathematical Surfaces](10024-fractals-and-mathematical-surfaces.md)
++
++### Signed Distance Field Representations and Operations
++Defines the mathematical foundation (union, intersection, subtraction) used by Neon Raymarcher. [Signed Distance Field Representations and Operations](13339-signed-distance-field-representations-and-operations.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$ per pixel, where $N$ is the number of pixels and $S$ is the number of steps (128) [S1, unofficial].
+-*   **Memory Complexity:** $O(1)$ auxiliary memory, as the scene is generated procedurally without storing meshes or textures [S1, unofficial].
+-*   **Performance:** Real-time on WebGL2-capable hardware [S1, unofficial]. Performance depends on the complexity of the SDF evaluation per step, which includes hashing and road calculations [S1, unofficial].
+-*   **Strengths:** No asset loading, infinite world, deterministic consistency between logic and rendering [S1, unofficial].
+-*   **Limitations:** Limited to SDF-representable geometry, potential aliasing without supersampling, fixed step size may miss thin features if not tuned [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot S)$ where $N$ is the number of pixels and $S$ is the number of steps (128). The SDF evaluation is $O(1)$ per step.
++*   **Memory Complexity:** $O(1)$ auxiliary memory. No scene graph or geometry buffers are stored.
++*   **Performance:** Runs in real-time on WebGL2-capable hardware. Performance is limited by fragment shader complexity and fill rate.
++*   **Strengths:** Infinite procedural generation, no asset loading, deterministic CPU/GPU sync.
++*   **Limitations:** Limited to procedural geometry; cannot render arbitrary meshes. Resolution limited by WebGL2 capabilities.
+ 
+ ## Background
+-Neon Raymarcher is a WebGL2 experiment that demonstrates the capabilities of modern fragment shaders for procedural generation [S1, unofficial]. It specifically targets the "synthwave" aesthetic with neon-lit cities [S1, unofficial]. The project emphasizes the importance of deterministic hashing for shared procedural logic between client-side game code and rendering shaders [S1, unofficial].
++Neon Raymarcher is a WebGL2 experiment by PIGJET, published on GitHub [S1, unofficial]. It demonstrates the capability of modern fragment shaders to render complex procedural scenes without traditional graphics pipeline assets. The project emphasizes the importance of deterministic hashing for cross-platform consistency in procedural generation [S1, unofficial].
+ 
+ ## Sources

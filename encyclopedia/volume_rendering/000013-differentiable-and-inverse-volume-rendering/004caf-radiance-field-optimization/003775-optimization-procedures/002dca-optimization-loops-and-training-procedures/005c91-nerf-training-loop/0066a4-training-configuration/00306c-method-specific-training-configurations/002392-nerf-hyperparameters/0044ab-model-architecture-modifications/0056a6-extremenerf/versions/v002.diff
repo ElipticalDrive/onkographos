@@ -1,0 +1,559 @@
+--- v001.md
++++ v002.md
+@@ -4,298 +4,278 @@
+ 
+ ## Overview
+-ExtremeNeRF is a few-shot view synthesis framework designed to generate novel views from sparse multi-view images captured under unconstrained, varying illumination [S1]. Unlike standard NeRF or illumination-robust methods like NeRF-W and RegNeRF that require dense input views or constrained lighting, ExtremeNeRF achieves robustness by enforcing multi-view albedo consistency through a two-stage intrinsic decomposition pipeline [S1]. It distinguishes itself by using an offline full-image network (FIDNet) to generate pseudo-albedo ground truths for input images, which then guide an online patch-wise network (PIDNet) to decompose synthesized novel view patches, ensuring that the learned geometry and appearance are illumination-invariant [S1].
++ExtremeNeRF is a few-shot view synthesis framework designed to generate novel views from sparse multi-view images captured under unconstrained, varying illumination [S1]. It solves the problem of illumination-induced geometry errors in standard NeRF by enforcing multi-view albedo consistency, ensuring that the intrinsic surface color (albedo) remains identical across views regardless of lighting changes [S1]. Unlike methods requiring massive image collections (e.g., NeRF-W, RegNeRF) or those that struggle with limited data, ExtremeNeRF uses a two-stage intrinsic decomposition pipeline (FIDNet and PIDNet) to guide NeRF optimization, achieving robust performance with as few as three input views [S1].
+ 
+ ## How it works
+-ExtremeNeRF builds on the standard NeRF architecture [Parent](11313-model-architecture-modifications.md), consisting of a coarse and fine MLP that map 3D positions and view directions to volume density $\sigma$ and color $\mathbf{c}$ [14428-sparse-view-and-few-shot-optimization.md]. The method introduces two additional neural networks: FIDNet (Full-image Intrinsic Decomposition Network) and PIDNet (Patch-wise Intrinsic Decomposition Network) [S1].
++ExtremeNeRF integrates a pre-trained intrinsic decomposition network with NeRF optimization to regularize albedo consistency. The method operates in two stages: an offline full-image decomposition to generate ground truth for input images, and an online patch-wise decomposition for novel views during training [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of $N$ input images $\{I_i\}$ with known camera poses $(K_i, T_i)$ and intrinsics $K_i$, captured under varying illumination. The input resolution is $300 \times 400$ pixels [S1].
+-*   **Outputs:** A trained NeRF model capable of rendering novel views $\hat{c}(x)$ and depth maps $\hat{d}(x)$ for arbitrary camera poses, along with decomposed albedo $\hat{a}(x)$ and shading $\hat{s}(x)$ components [S1].
++*   **Inputs:** A set of $N$ input images $\{I_i\}$ with known camera poses $(K_i, T_i)$ and intrinsics $K_i$. The method is evaluated on few-shot settings (e.g., 3 views) [S1].
++*   **Outputs:** A trained NeRF model capable of rendering novel views (color and depth) under arbitrary illumination, and intrinsic maps (albedo, shading) for the novel views [S1].
+ 
+ ### Data Structures
+-1.  **NeRF MLPs:** Standard coarse and fine networks. The positional encoding $\gamma(\mathbf{x}, d_1, d_2)$ is applied to coordinates and view directions [14428-sparse-view-and-few-shot-optimization.md].
+-2.  **FIDNet:** A pre-trained intrinsic decomposition network (specifically IIDWW [S1]) used offline. It takes an input image $I$ and outputs a pseudo-albedo map $a_{pseudo}$ [S1].
+-3.  **PIDNet:** A convolutional network used during training. It takes a patch of the synthesized color image $\hat{c}(x)$ of size $S_{patch} \times S_{patch}$ (default $32 \times 32$) and outputs local albedo $\hat{a}(x)$ and shading $\hat{s}(x)$ [S1].
+-4.  **Depth Buffer:** Stores rendered depth $\hat{d}(x)$ for each pixel, computed as:
+-    $$
+-    \hat{d}(x) = \frac{\sum_{i=1}^{N} T_i \alpha_i t_i}{\sum_{i=1}^{N} T_i \alpha_i}
+-    $$
+-    where $T_i$ is transmittance, $\alpha_i$ is opacity, and $t_i$ is the sampled depth [S1].
++1.  **NeRF MLP:** Maps 3D coordinates $\mathbf{x}$ and viewing direction $\mathbf{d}$ to volume density $\sigma$ and color $\mathbf{c}$ [S1].
++2.  **FIDNet (Full-image Intrinsic Decomposition Network):** A pre-trained network (based on IIDWW [S1]) that takes an input image and outputs pseudo-albedo $\hat{a}_{input}$ and shading [S1].
++3.  **PIDNet (Patch-wise Intrinsic Decomposition Network):** A network that takes a color patch $\hat{c}(\mathbf{x})$ from a novel view and outputs extracted albedo $\hat{a}(\mathbf{x})$ and shading [S1].
++4.  **Depth Buffer:** Stores rendered depth $d(\mathbf{x})$ for each pixel $\mathbf{x}$ [S1].
++
++### Numbered Steps
++
++1.  **Offline Pseudo-Albedo Generation (FIDNet):**
++    *   For each input image $I_i$, pass it through the pre-trained FIDNet.
++    *   Extract the pseudo-albedo ground truth $\hat{a}_{input}(\mathbf{x})$ for all pixels $\mathbf{x}$ in the input view [S1].
++    *   This step is performed once before NeRF training begins [S1].
++
++2.  **NeRF Forward Pass:**
++    *   For a sampled pixel $\mathbf{x}$ in a novel view, cast a ray and sample points along the ray.
++    *   Compute the rendered color $\hat{c}(\mathbf{x})$ and depth $d(\mathbf{x})$ using standard volume rendering equations [S1]:
++        $$ \hat{c}(\mathbf{x}) = \sum_{i=1}^{n} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++        $$ d(\mathbf{x}) = \sum_{i=1}^{n} T_i (1 - \exp(-\sigma_i \delta_i)) t_i $$
++        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, $\delta_i$ is the distance between samples, and $t_i$ is the depth of the $i$-th sample [S1].
++
++3.  **Geometric Alignment (Pixel Correspondence):**
++    *   Map the novel view pixel $\mathbf{x}$ to the corresponding pixel $\mathbf{x}'$ in an input view using the rendered depth $d(\mathbf{x})$ and camera poses [S1].
++    *   Convert pixel $\mathbf{x}$ to world coordinates $\mathbf{x}_w$:
++        $$ \mathbf{x}_w = T d(\mathbf{x}) K^{-1} \bar{\mathbf{x}} $$
++        where $\bar{\mathbf{x}} = [x, y, 1]^T$ is the homogeneous coordinate, $K$ is the intrinsic matrix, and $T$ is the camera-to-world transformation [S1].
++    *   Project $\mathbf{x}_w$ to the input view's pixel coordinates $\mathbf{x}'$:
++        $$ \mathbf{x}' = (K' T'^{-1} T) d(\mathbf{x}) K^{-1} \bar{\mathbf{x}} $$
++        where $K'$ and $T'$ are the intrinsics and pose of the input view [S1].
++
++4.  **Projection Error and Visibility Mask:**
++    *   Calculate the projected depth $d(\tilde{\mathbf{x}}')$ at $\mathbf{x}'$ from the input view's depth map (or rendered depth if available) [S1].
++    *   Compute the projection error $E_{proj}(\mathbf{x}')$:
++        $$ E_{proj}(\mathbf{x}') = (d(\hat{\mathbf{x}}') - d(\tilde{\mathbf{x}}'))^2 $$
++        where $d(\hat{\mathbf{x}}')$ is the depth of the novel view point projected into the input view, and $d(\tilde{\mathbf{x}}')$ is the actual depth at $\mathbf{x}'$ in the input view [S1].
++    *   Define the visibility mask weight $\omega(\mathbf{x})$ to exclude invalid correspondences (e.g., occlusions, out-of-bounds):
++        $$ \omega(\mathbf{x}) = r_e \left( 1 - \frac{E_{proj}(\mathbf{x}')}{M_{proj}} \right) $$
++        where $r_e$ is an error rate coefficient that diminishes toward the end of training, and $M_{proj}$ is the maximum projection error threshold [S1].
++    *   If $\mathbf{x}'$ is outside the input view's field of view, $\omega(\mathbf{x}) = 0$ [S1].
++
++5.  **Patch-wise Intrinsic Decomposition (PIDNet):**
++    *   Extract a color patch $\hat{c}(\mathbf{x})$ of size $S_{patch} \times S_{patch}$ (default 32x32) centered at $\mathbf{x}$ from the rendered novel view [S1].
++    *   Pass $\hat{c}(\mathbf{x})$ through PIDNet to extract the albedo $\hat{a}(\mathbf{x})$ and shading [S1].
++    *   The intrinsic decomposition follows the Lambertian model:
++        $$ \log c(\mathbf{x}) = \log a(\mathbf{x}) + \log s(\mathbf{x}) $$
++        Extended for real-world non-Lambertian surfaces and colored lights:
++        $$ \log c(\mathbf{x}) = \log a(\mathbf{x}) + \log s(\mathbf{x}) + l + R $$
++        where $l$ is the light color vector and $R$ represents non-Lambertian residuals [S1].
++
++6.  **Albedo Consistency Loss:**
++    *   Compute the loss between the albedo extracted from the novel view $\hat{a}(\mathbf{x})$ and the pseudo-albedo ground truth $\hat{a}_{input}(\mathbf{x}')$ from the corresponding input pixel [S1]:
++        $$ L_{ac} = \sum_{\mathbf{x} \in P} \omega(\mathbf{x}) \| \hat{a}(\mathbf{x}) - \hat{a}_{input}(\mathbf{x}') \|^2 $$
++        where $P$ is the set of all pixels in the novel view [S1].
++
++7.  **Depth Consistency Loss:**
++    *   To prevent smoothing of unrelated surfaces due to occlusions, regularize the projection error between adjacent pixels $\mathbf{x}'$ and their neighbors $y \in N(\mathbf{x}')$ (4-neighborhood) [S1]:
++        $$ L_{dc} = \sum_{\mathbf{x}' \in P'} \sum_{y \in N(\mathbf{x}')} (E_{proj}(y) - E_{proj}(\mathbf{x}'))^2 $$
++        where $P'$ is the set of pixels in the input view [S1].
++
++8.  **Total Loss and Optimization:**
++    *   Combine the color loss, albedo consistency loss, and depth consistency loss, along with auxiliary losses (depth smoothness $L_{ds}$, edge-preserving $L_{edge}$, intrinsic smoothness $L_{pid}$, chromaticity consistency $L_{chrom}$, and frequency regularization) [S1]:
++        $$ L_{total} = L_{color} + L_{ac} + L_{dc} + \lambda_1 L_{ds} + \lambda_2 L_{edge} + \lambda_3 L_{pid} + \lambda_4 L_{chrom} + \lambda_5 L_{freq} $$
++    *   Optimize NeRF parameters and PIDNet weights using gradient descent [S1].
++
++### Pseudocode
++
++```python
++def train_extreme_nerf(input_images, input_poses, input_intrinsics, num_iterations=70000):
++    """
++    Trains ExtremeNeRF for few-shot view synthesis under varying illumination.
++    
++    Args:
++        input_images: List of input images (N images).
++        input_poses: List of camera-to-world transformations T (N x 4x4).
++        input_intrinsics: List of camera intrinsic matrices K (N x 3x3).
++        num_iterations: Number of training steps.
++        
++    Returns:
++        Trained NeRF model and PIDNet.
++    """
++    
++    # Initialize NeRF MLP and PIDNet
++    nerf = NeRFMLP()
++    pidnet = PIDNet()
++    
++    # Stage 1: Offline Pseudo-Albedo Generation using FIDNet
++    # FIDNet is pre-trained (e.g., IIDWW) and used without fine-tuning
++    fidnet = load_pretrained_fidnet()
++    pseudo_albedos = []
++    for img in input_images:
++        # Extract global context-aware pseudo-albedo
++        albedo, _ = fidnet(img)
++        pseudo_albedos.append(albedo)
++        
++    # Optimization Loop
++    for iteration in range(num_iterations):
++        # Sample a novel view or random input view for training
++        # In few-shot setting, novel views are synthesized during training
++        # For simplicity, assume we render a random ray from the NeRF
++        ray = sample_ray(nerf)
++        
++        # 1. NeRF Forward Pass
++        color, depth = nerf.render_ray(ray)
++        
++        # 2. Geometric Alignment
++        # Map novel view pixel x to input view pixel x'
++        # x is the pixel coordinate corresponding to the ray origin/direction
++        x_homogeneous = [x, y, 1]
++        x_world = transform_pixel_to_world(x_homogeneous, depth, ray.camera_pose.T, ray.camera_intrinsics)
++        
++        # Find corresponding pixel in one of the input views
++        # Select an input view i
++        input_view_idx = random_choice(len(input_images))
++        input_T = input_poses[input_view_idx]
++        input_K = input_intrinsics[input_view_idx]
++        
++        # Project world point to input view
++        x_prime_homogeneous = transform_world_to_pixel(x_world, input_T, input_K)
++        x_prime = x_prime_homogeneous[:2]
++        
++        # Check if x_prime is within bounds
++        if not is_within_bounds(x_prime, input_images[input_view_idx].shape):
++            continue
++            
++        # 3. Projection Error Calculation
++        # Get depth at x' from input view's depth map (or render it if not available)
++        # Assuming we have access to input depth or render it
++        input_depth_at_x_prime = get_depth_at_pixel(input_images[input_view_idx], x_prime)
++        projected_depth = depth # Depth of the novel view point projected to input view
++        
++        e_proj = (projected_depth - input_depth_at_x_prime) ** 2
++        
++        # 4. Visibility Mask Weight
++        # re diminishes over time
++        re = get_error_rate_coefficient(iteration, num_iterations)
++        m_proj = 100.0 # Maximum projection error threshold, not given in sources, set to arbitrary large value or derived from data stats [G]
++        omega = re * (1 - e_proj / m_proj)
++        if omega < 0:
++            omega = 0
++            
++        # 5. Patch-wise Intrinsic Decomposition
++        # Extract patch from rendered novel view color
++        patch_size = 32
++        color_patch = extract_patch(color, x, patch_size)
++        
++        # Extract albedo from patch using PIDNet
++        extracted_albedo, _ = pidnet(color_patch)
++        
++        # Get corresponding pseudo-albedo from input view
++        # Note: pseudo_albedos are stored for input images
++        # We need to sample the pseudo-albedo at x'
++        pseudo_albedo_at_x_prime = sample_albedo(pseudo_albedos[input_view_idx], x_prime)
++        
++        # 6. Albedo Consistency Loss
++        lac = omega * (extracted_albedo - pseudo_albedo_at_x_prime) ** 2
++        
++        # 7. Depth Consistency Loss
++        # Regularize projection error between adjacent pixels
++        neighbors = get_4_neighbors(x_prime)
++        l_dc = 0
++        for y in neighbors:
++            if is_within_bounds(y, input_images[input_view_idx].shape):
++                # Calculate e_proj for neighbor y
++                # This requires depth at y in input view and projected depth of neighbor
++                # Simplified: assume we can compute e_proj for y
++                e_proj_y = compute_projection_error(y, input_T, input_K, nerf)
++                l_dc += (e_proj_y - e_proj) ** 2
++                
++        # 8. Color Loss
++        l_color = (color - ground_truth_color) ** 2 # Assuming ground truth is available for input views or synthetic novel views
++        
++        # Total Loss
++        total_loss = l_color + lac + l_dc + auxiliary_losses()
++        
++        # Backpropagate and update
++        total_loss.backward()
++        optimizer.step()
++        
++    return nerf, pidnet
++
++def transform_pixel_to_world(pixel_homogeneous, depth, T_inv, K_inv):
++    """
++    Maps pixel coordinate to world coordinate.
++    xw = T * d(x) * K^-1 * x_bar
++    """
++    # pixel_homogeneous is [x, y, 1]
++    # K_inv is 3x3
++    # T_inv is 4x4 (inverse of camera-to-world, i.e., world-to-camera)
++    # Wait, the formula in source is: xw = T d(x) K^-1 x_bar
++    # T is camera-to-world. K is intrinsic.
++    
++    # Step 1: K^-1 * x_bar
++    vec = K_inv @ pixel_homogeneous
++    
++    # Step 2: Scale by depth
++    vec = vec * depth
++    
++    # Step 3: T * vec
++    # T is 4x4, vec is 3x1. We need to homogenize vec to 4x1
++    vec_homogeneous = [vec[0], vec[1], vec[2], 1]
++    xw = T @ vec_homogeneous
++    
++    return xw[:3]
++
++def transform_world_to_pixel(x_world, T, K):
++    """
++    Maps world coordinate to pixel coordinate.
++    x = K * T^-1 * xw
++    """
++    # xw is 3x1
++    # T is 4x4 (camera-to-world)
++    # T_inv is 4x4 (world-to-camera)
++    T_inv = invert_matrix(T)
++    
++    # Homogenize xw
++    xw_homogeneous = [x_world[0], x_world[1], x_world[2], 1]
++    
++    # T_inv * xw_homogeneous
++    vec = T_inv @ xw_homogeneous
++    
++    # K * vec
++    # vec is 4x1, but K is 3x3. We take the first 3 components of vec (which are x,y,z in camera frame)
++    # Actually, vec[3] is 1.0 if T_inv is affine.
++    # Standard projection: x_cam = T_inv * xw
++    # x_pixel = K * x_cam[:3]
++    
++    x_cam = vec[:3]
++    x_pixel = K @ x_cam
++    
++    # Normalize by z
++    if x_pixel[2] != 0:
++        x_pixel = x_pixel / x_pixel[2]
++        
++    return x_pixel[:2]
++```
+ 
+ ### Parameters
+-*   $S_{patch}$: Patch size for PIDNet input/output. Default: $32 \times 32$ [S1].
+-*   $re$: Error rate coefficient for the visibility mask. Diminishes toward the end of training [S1].
+-*   $M_{proj}$: Maximum projection error threshold [S1].
+-*   Training iterations: 70,000 per scene [S1].
+-*   Hardware: 4 NVIDIA A100 GPUs [S1].
+-
+-### Numbered Steps
+-
+-1.  **Offline Albedo Extraction (FIDNet):**
+-    For each input image $I_i$, apply the pre-trained FIDNet to extract the global context-aware pseudo-albedo $a_{pseudo, i}$ [S1]. This step is performed once before training begins [S1].
+-
+-2.  **NeRF Rendering:**
+-    For a random ray $r$ sampled from a novel view:
+-    a. Sample $N$ points $t_i$ along the ray.
+-    b. Query the NeRF MLPs to obtain volume density $\sigma_i$ and color $\mathbf{c}_i$.
+-    c. Compute opacity $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1].
+-    d. Render the color $\hat{c}(x)$ and depth $\hat{d}(x)$ for the pixel $x$ corresponding to ray $r$ [S1].
+-
+-3.  **Geometric Alignment (Pixel Correspondence):**
+-    For a pixel $x$ in the novel view with rendered depth $\hat{d}(x)$, compute the corresponding pixel $x'$ in an input view $I_j$:
+-    a. Map pixel $x$ to world coordinates $x_w$:
+-       $$
+-       x_w = T_j \hat{d}(x) K_j^{-1} \bar{x}
+-       $$
+-       where $\bar{x} = [x^T, 1]^T$ is the homogeneous coordinate, $T_j$ is the camera-to-world transformation, and $K_j$ is the intrinsic matrix [S1].
+-    b. Project $x_w$ to the input view $I_j$ (with pose $T'_j, K'_j$) to find $x'$:
+-       $$
+-       x' = (K'_j (T'_j)^{-1} T_j) \hat{d}(x) K_j^{-1} \bar{x}
+-       $$
+-       Note: The source formula uses $T$ and $T'$ generically; specifically, if mapping from novel view $j$ to input view $k$, the transformation involves the relative pose [S1].
+-    c. If $x'$ is outside the field of view of the input image, discard the correspondence [S1].
+-
+-4.  **Projection Error Calculation:**
+-    Compute the projection error $E_{proj}(x')$ for the corresponding pixel $x'$:
+-    $$
+-    E_{proj}(x') = (\hat{d}(x') - \tilde{d}(x'))^2
+-    $$
+-    where $\hat{d}(x')$ is the depth rendered from the novel view at the projected location, and $\tilde{d}(x')$ is the depth projected from the input view's geometry (if available) or derived from the novel view's depth consistency [S1]. *Note: The source defines $\tilde{d}(x')$ as "projected depth, a byproduct of Eq. 7". In the context of few-shot NeRF without ground truth depth, this often refers to consistency checks between adjacent pixels or multi-view consistency. The source explicitly states $E_{proj}$ measures the difference between rendered depth and projected depth.* [S1].
+-
+-5.  **Visibility Mask Weighting:**
+-    Calculate the weight $\omega(x)$ to exclude invalid correspondences caused by occlusions or large projection errors:
+-    $$
+-    \omega(x) = r_e \left( 1 - \frac{E_{proj}(x')}{M_{proj}} \right)
+-    $$
+-    where $r_e$ is the error rate coefficient and $M_{proj}$ is the maximum projection error. $r_e$ decreases as training progresses to rectify inaccurate geometry alignments while persistent occlusions remain [S1].
+-
+-6.  **Patch-wise Intrinsic Decomposition (PIDNet):**
+-    Extract a patch $\hat{c}(x)$ of size $S_{patch} \times S_{patch}$ centered at $x$ from the rendered novel view image.
+-    Feed $\hat{c}(x)$ into PIDNet to obtain the estimated albedo $\hat{a}(x)$ and shading $\hat{s}(x)$ [S1].
+-
+-7.  **Loss Computation:**
+-    Compute the total loss $L_{total}$ as a weighted sum of the following components:
+-    a. **Color Loss:** Mean Squared Error between rendered color and ground truth color $c_{gt}(x)$ for pixels in the training set $S$:
+-       $$
+-       L_{color} = \sum_{x \in S} \|\hat{c}(x) - c_{gt}(x)\|_2^2
+-       $$
+-       [S1].
+-    b. **Albedo Consistency Loss ($L_{ac}$):** Enforces that the albedo extracted from the novel view $\hat{a}(x)$ matches the pseudo-albedo $a_{pseudo, j}$ from the corresponding input view pixel $x'$, weighted by $\omega(x)$:
+-       $$
+-       L_{ac} = \sum_{x \in P} \omega(x) \|\hat{a}(x) - a_{pseudo, j}(x')\|_2^2
+-       $$
+-       where $P$ is the set of all pixels in the novel view [S1].
+-    c. **Depth Consistency Loss ($L_{dc}$):** Regularizes the projection error between adjacent pixels to prevent smoothing unrelated surfaces due to occlusions:
+-       $$
+-       L_{dc} = \sum_{x' \in P'} \sum_{y \in N(x')} (E_{proj}(y) - E_{proj}(x'))^2
+-       $$
+-       where $P'$ is the set of pixels in the input view and $N(x')$ are the 4-neighbor adjacent pixels of $x'$ [S1].
+-    d. **Auxiliary Losses:** Depth smoothness loss $L_{ds}$, edge-preserving loss $L_{edge}$, intrinsic smoothness loss $L_{pid}$, chromaticity consistency loss $L_{chrom}$, and frequency regularization mask [S1].
+-
+-8.  **Optimization:**
+-    Update the NeRF MLPs, PIDNet, and any other trainable parameters using gradient descent to minimize $L_{total}$ for 70,000 iterations [S1].
+-
+-### Pseudocode
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import numpy as np
+-
+-# Assume standard NeRF, FIDNet (IIDWW), and PIDNet are defined
+-# NeRF: coarse_mlp, fine_mlp
+-# FIDNet: fidnet_model (pre-trained, frozen)
+-# PIDNet: pidnet_model (trainable)
+-
+-def get_positional_encoding(x, d1, d2):
+-    """
+-    Standard positional encoding for NeRF.
+-    x: tensor of shape (..., 3) for position or (..., 3) for direction
+-    """
+-    # Implementation details of gamma(x) as per Parent article
+-    # [x, sin(2^d1 pi x), cos(2^d1 pi x), ...]
+-    pass
+-
+-def render_neRF(ray_o, ray_d, coarse_mlp, fine_mlp, N_coarse, N_fine):
+-    """
+-    Standard NeRF volume rendering.
+-    Returns: color, depth, alpha, transmittance
+-    """
+-    # Sample points along ray
+-    # Query coarse and fine MLPs
+-    # Compute alpha, sigma, color
+-    # Composite
+-    pass
+-
+-def project_pixel_to_input_view(x_novel, d_novel, K_novel, T_novel, K_input, T_input):
+-    """
+-    Maps a pixel x in the novel view to the corresponding pixel x' in the input view
+-    using the rendered depth d_novel.
+-    """
+-    # Homogeneous coordinate
+-    x_bar = torch.cat([x_novel, torch.ones_like(x_novel[..., :1])], dim=-1)
+-    
+-    # Map to world coordinates
+-    # x_w = T_novel * d_novel * K_novel^-1 * x_bar
+-    # Note: d_novel is scalar depth. K^-1 * x_bar gives direction.
+-    # T_novel transforms direction and origin.
+-    # Simplified: x_w = T_novel @ (K_novel^-1 @ x_bar) * d_novel + T_novel_origin
+-    # Assuming T includes translation.
+-    
+-    # Project world point to input view
+-    # x' = K_input @ T_input^-1 @ x_w
+-    pass
+-
+-def compute_projection_error(x_novel, d_novel, K_novel, T_novel, K_input, T_input, input_depth_map):
+-    """
+-    Computes E_proj = (d_rendered - d_projected)^2
+-    """
+-    # 1. Get projected pixel x'
+-    x_prime = project_pixel_to_input_view(x_novel, d_novel, K_novel, T_novel, K_input, T_input)
+-    
+-    # 2. Get depth at x' from input view (if available) or use consistency logic
+-    # The source defines E_proj as (d(x_hat') - d(x_tilde'))^2
+-    # d(x_hat') is rendered depth at x' (from novel view ray passing through x')
+-    # d(x_tilde') is projected depth.
+-    # In few-shot, we often compare rendered depth of novel view at x' vs input view depth at x'
+-    # Or use depth consistency between adjacent pixels.
+-    # Here we assume we have a way to get d_projected (e.g. from input view's depth if known, 
+-    # or via multi-view stereo). For ExtremeNeRF, it relies on the consistency term.
+-    pass
+-
+-def compute_visibility_mask(E_proj, M_proj, r_e):
+-    """
+-    Computes weight omega(x)
+-    """
+-    # Clip E_proj to M_proj to avoid negative weights if error exceeds max
+-    clipped_E = torch.clamp(E_proj, max=M_proj)
+-    omega = r_e * (1.0 - clipped_E / M_proj)
+-    return omega
+-
+-def train_step(batch, neRF, pidnet, fidnet, K_novel, T_novel, K_input, T_input, 
+-               S_patch=32, M_proj=1.0, r_e=1.0, lambda_color=1.0, lambda_ac=1.0, lambda_dc=1.0):
+-    """
+-    Single training step.
+-    """
+-    # 1. Render novel view
+-    # batch contains rays for novel view and corresponding input view info
+-    rays = batch['rays']
+-    c_gt = batch['color_gt']
+-    
+-    # Render color and depth
+-    c_hat, d_hat, alpha, transmittance = render_neRF(rays.o, rays.d, neRF.coarse_mlp, neRF.fine_mlp)
+-    
+-    # 2. Color Loss
+-    L_color = torch.mean((c_hat - c_gt)**2)
+-    
+-    # 3. Geometric Alignment & Projection Error
+-    # For each pixel x in novel view
+-    # Get corresponding x' in input view
+-    # Compute E_proj
+-    
+-    # Note: Implementing full pixel-wise loop is slow. Usually done via grid operations.
+-    # Here we outline the logic.
+-    
+-    # Get pixel coordinates grid
+-    H, W = c_hat.shape[1], c_hat.shape[2]
+-    x_coords, y_coords = torch.meshgrid(torch.arange(W), torch.arange(H))
+-    x_novel = torch.stack([x_coords, y_coords], dim=-1).float()
+-    
+-    # Project to input view
+-    # This requires vectorized projection logic
+-    x_prime = project_pixel_to_input_view(x_novel, d_hat, K_novel, T_novel, K_input, T_input)
+-    
+-    # Compute E_proj
+-    # E_proj = (d_hat_at_x_prime - d_input_at_x_prime)^2
+-    # Assuming we can sample d_input at x_prime
+-    d_input = sample_depth_at_pixel(x_prime, batch['input_depth'])
+-    d_hat_at_x_prime = sample_depth_at_pixel(x_prime, d_hat)
+-    
+-    E_proj = (d_hat_at_x_prime - d_input)**2
+-    
+-    # Visibility Mask
+-    omega = compute_visibility_mask(E_proj, M_proj, r_e)
+-    
+-    # 4. Albedo Consistency Loss
+-    # Extract patch from c_hat
+-    # Apply PIDNet to patch
+-    # Compare with pseudo-albedo from FIDNet on input view
+-    
+-    # Extract patch centered at x
+-    # This is complex to vectorize fully without specific grid sampling functions
+-    # Assume extract_patches(c_hat, x_prime) returns patches
+-    
+-    # Get pseudo-albedo from input view
+-    # FIDNet is offline, so we precomputed a_pseudo for input images
+-    a_pseudo_input = batch['pseudo_albedo_input']
+-    
+-    # Sample a_pseudo at x'
+-    a_pseudo = sample_albedo_at_pixel(x_prime, a_pseudo_input)
+-    
+-    # Extract patch from c_hat at x
+-    # Note: PIDNet takes a patch, not a single pixel.
+-    # We need to extract patches centered at x for all x? 
+-    # Or just for the pixels used in loss?
+-    # The source says "PIDNet extracts albedo of synthesized color patch... minimizing difference"
+-    
+-    # Let's assume we process a subset or use grid_sample for patches
+-    patches = extract_patches(c_hat, x_novel, S_patch)
+-    
+-    # Run PIDNet
+-    a_hat, s_hat = pidnet(patches)
+-    
+-    # Compare a_hat with a_pseudo
+-    # a_pseudo needs to be expanded to patch size or compared at center
+-    # Source implies pixel-wise comparison guided by patch context
+-    L_ac = torch.mean(omega * (a_hat - a_pseudo)**2)
+-    
+-    # 5. Depth Consistency Loss
+-    # L_dc = sum over x' in input view of sum over neighbors y of (E_proj(y) - E_proj(x'))^2
+-    # This requires computing E_proj for all pixels in input view
+-    # And then comparing adjacent E_proj values
+-    
+-    # Compute E_proj for all pixels in input view
+-    # This involves projecting all input view pixels to novel view and back?
+-    # Or using the forward projection from novel to input.
+-    # The source defines L_dc on the input view pixels P'.
+-    
+-    # For simplicity, assume we have E_proj_map for input view
+-    E_proj_input = compute_projection_error_for_input_view(...)
+-    
+-    # Compute smoothness of E_proj
+-    # L_dc = mean((E_proj(y) - E_proj(x'))^2) for neighbors
+-    L_dc = compute_depth_consistency_loss(E_proj_input)
+-    
+-    # 6. Total Loss
+-    L_total = lambda_color * L_color + lambda_ac * L_ac + lambda_dc * L_dc
+-    
+-    # Add auxiliary losses (L_ds, L_edge, etc.)
+-    
+-    return L_total
+-```
++*   **$S_{patch}$:** Patch size for PIDNet input/output, set to $32 \times 32$ [S1].
++*   **Training Resolution:** Image size used for training is $300 \times 400$ [S1].
++*   **Training Duration:** 70,000 iterations per scene [S1].
++*   **Hardware:** 4 NVIDIA A100 GPUs [S1].
++*   **$r_e$:** Error rate coefficient, diminishes toward the end of training [S1].
++*   **$M_{proj}$:** Maximum projection error threshold. Not given in the sources. [G] (Set to a value larger than typical depth errors, e.g., 100.0, or derived from dataset statistics).
+ 
+ ### Edge Cases and Pitfalls
+-*   **Projection Errors:** Incorrect synthesized depth values lead to large projection errors $E_{proj}$. If $E_{proj}$ is large, the correspondence is likely invalid due to occlusion or floating artifacts. The visibility mask $\omega(x)$ handles this by reducing the weight [S1].
+-*   **Occlusions:** Direct minimization of $E_{proj}$ can be counterproductive because occlusions smooth unrelated surface depths. The depth consistency loss $L_{dc}$ regularizes the *variation* of projection error between adjacent pixels rather than minimizing the error itself [S1].
+-*   **Geometry Rectification:** The error rate coefficient $r_e$ diminishes toward the end of training. This allows the model to rectify inaccurate geometry alignments while still respecting persistent occlusions [S1].
+-*   **FIDNet Substitution:** Replacing FIDNet with other intrinsic decomposition models (e.g., Das et al. 2022) degrades performance, suggesting the specific pre-trained model (IIDWW) is crucial for the pseudo-albedo quality [S1].
++*   **Projection Errors:** Incorrect synthesized depth values lead to projection errors. If $E_{proj}$ is large, the correspondence is invalid [S1].
++*   **Occlusions:** Direct minimization of $E_{proj}$ is counterproductive because occlusions smooth unrelated surface depths. The depth consistency loss $L_{dc}$ and visibility mask $\omega(\mathbf{x})$ are used to handle this [S1].
++*   **Floating Artifacts:** Projection errors caused by floating artifacts must be distinguished from those caused by scene geometry (occlusions). The weight $\omega$ diminishes $r_e$ toward the end of training to rectify inaccurate geometry alignments while occlusions persist [S1].
++*   **Intrinsic Decomposition Accuracy:** Replacing FIDNet with other intrinsic decomposition models (e.g., Das, Karaoglu, and Gevers 2022) shows degraded performance, indicating FIDNet (IIDWW) is a suitable guide for cross-view consistency [S1].
+ 
+ ## Operating characteristics
+-*   **Training Time:** ExtremeNeRF requires approximately 1.5 hours for few-shot view synthesis with 3 input views on 4 NVIDIA A100 GPUs [S1]. This is significantly faster than other methods like RegNeRF (2.4 hours) and FreeNeRF (2 hours), and much faster than dense-view methods which require 10–20 hours [S1].
+-*   **Memory:** The method uses standard NeRF memory plus the overhead of FIDNet (offline, pre-computed) and PIDNet (online, patch-wise). PIDNet operates on $32 \times 32$ patches, keeping memory footprint low compared to global intrinsic decomposition [S1].
++*   **Training Time:** ExtremeNeRF requires 1.5 hours for 3 views on 4 NVIDIA A100 GPUs. This is significantly faster than most other methods, which require 10 to 20 hours on the same hardware [S1]. For comparison, RegNeRF takes 2.4 hours and FreeNeRF takes 2 hours for 3 views [S1].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:**
+-    *   Works with very few input views (few-shot) [S1].
+-    *   Robust to unconstrained, varying illumination [S1].
+-    *   Fast training time compared to baselines [S1].
+-    *   Produces illumination-robust geometry and appearance [S1].
++    *   Works with few-shot inputs (sparse multi-view images) under unconstrained illumination [S1].
++    *   Achieves illumination-robust view synthesis by regularizing albedo consistency [S1].
++    *   Faster training time compared to other few-shot NeRF methods [S1].
+ *   **Limitations:**
+-    *   Relies on the quality of the pre-trained FIDNet (IIDWW). Performance degrades if FIDNet is replaced with inferior models [S1].
+-    *   Performance is sensitive to geometric alignment errors, handled by the visibility mask but still a potential pitfall in highly occluded scenes [S1].
+-    *   Evaluated on specific datasets (Phototourism F3, NeRF Extreme); generalization to other domains not explicitly detailed [S1].
+-*   **When to Use:** When input data consists of sparse multi-view images with varying illumination, and fast training is desired.
+-*   **When Not to Use:** When dense multi-view images are available (other methods may be more accurate), or when illumination is constrained and consistent (standard NeRF suffices).
++    *   Relies on the accuracy of the pre-trained FIDNet for pseudo-albedo generation [S1].
++    *   Performance degrades if FIDNet is replaced with less suitable intrinsic decomposition models [S1].
++    *   Requires careful tuning of the visibility mask and depth consistency loss to handle occlusions [S1].
++*   **When to Use:** Suitable for few-shot view synthesis in in-the-wild scenarios with varying illumination, where standard NeRF fails due to inconsistent lighting [S1].
++*   **When Not to Use:** Not suitable for scenarios requiring high-fidelity relighting or when a large number of input images are available (other methods may be more robust) [S1].
+ 
+ ## Background
+-ExtremeNeRF was introduced in the paper "Few-Shot Neural Radiance Fields under Unconstrained Illumination" presented at the AAAI Conference on Artificial Intelligence in 2024 [S1]. It addresses the limitation of standard NeRF and existing illumination-robust methods (like NeRF-W, RegNeRF) that require large numbers of input images. The authors created the "NeRF Extreme" benchmark, the first in-the-wild benchmark for novel view synthesis with varying illumination, to evaluate such methods [S1]. The method builds upon the intrinsic image decomposition literature (Lambertian assumption $\log c = \log a + \log s$) and integrates it with NeRF optimization via a two-stage pipeline [S1].
++ExtremeNeRF was introduced in the paper "Few-Shot Neural Radiance Fields under Unconstrained Illumination" presented at the Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24) [S1]. It addresses the limitations of previous NeRF variants (e.g., NeRF-W, RegNeRF) that require massive amounts of input images taken under constrained illumination [S1]. The method builds on the intrinsic image decomposition framework, specifically utilizing the IIDWW model [S1]. It is evaluated on the Phototourism F3 and the newly created NeRF Extreme benchmark, which is the first in-the-wild benchmark for novel view synthesis under varying illumination [S1].
+ 
+ ## Sources

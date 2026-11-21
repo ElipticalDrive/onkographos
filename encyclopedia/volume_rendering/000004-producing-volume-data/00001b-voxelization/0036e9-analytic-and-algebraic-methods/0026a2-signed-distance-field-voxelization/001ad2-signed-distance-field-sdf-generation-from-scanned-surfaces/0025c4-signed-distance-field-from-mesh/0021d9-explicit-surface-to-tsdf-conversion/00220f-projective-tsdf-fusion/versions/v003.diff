@@ -1,0 +1,117 @@
+--- v002.md
++++ v003.md
+@@ -4,52 +4,53 @@
+ 
+ ## Overview
+-Projective TSDF Fusion is a method to compute signed distance values for voxels from calibrated depth images by projecting voxel centers into the camera frame and comparing projected depth with observed depth [S1]. It differs from static TSDF integration by supporting dynamic scale allocation within a multi-resolution octree, ensuring that distant voxels are not allocated as contiguous blocks and that the voxel size remains proportional to the camera distance [S1].
++Projective TSDF Fusion computes signed distance values for voxels from calibrated depth images by projecting voxel centers into the camera frame and comparing projected depth with observed depth [S1]. It differs from explicit surface conversion methods by operating directly on depth buffers rather than requiring a pre-fused mesh or point cloud, enabling incremental integration of raw sensor data [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A global TSDF volume (initialized to empty or previous fusion), a set of calibrated depth images $D(u,v)$, camera intrinsics $\mathbf{K} = \{f_x, f_y, c_x, c_y\}$, and camera poses $(R, \mathbf{t})$ relative to the global frame.
+-*   **Outputs:** Updated global TSDF volume with fused signed distance values and weights.
++**Inputs:** A global voxel grid (implicitly defined by bounds and resolution), a sequence of depth images $D(u,v)$, and for each image, the camera intrinsics $\mathbf{K} = \{f_x, f_y, c_x, c_y\}$ and extrinsics $(R, \mathbf{t})$ where $R$ is the rotation matrix and $\mathbf{t}$ is the translation vector relative to the global frame. A truncation threshold $\tau$ defines the valid distance range.
++
++**Outputs:** A global Truncated Signed Distance Field (TSDF) volume where each voxel stores a fused TSDF value and a weight.
+ 
+ **Data Structures:**
+-*   **TSDF Volume:** A 3D grid where each voxel stores a truncated signed distance value $s(\mathbf{p})$ and an accumulated weight $w(\mathbf{p})$. The truncation limits are typically $d_{min}$ and $d_{max}$ [S2].
+-*   **Depth Image:** A 2D array where each element $(u,v)$ contains the observed depth $\hat{z}$.
++*   **Global TSDF Volume:** A 3D array or octree structure. Each voxel entry contains:
++    *   `tsdf_value`: Float, the weighted average of signed distances.
++    *   `weight`: Float, the sum of weights for valid observations.
++    *   `integrated`: Boolean, flag indicating if the voxel has been updated.
+ 
+ **Steps:**
+-1.  **Iterate** over all voxels $\mathbf{p}$ in the global TSDF volume that are within the viewing frustum of the current camera.
+-2.  **Transform** the voxel center $\mathbf{p}$ from the global frame to the camera frame:
++1.  **Initialize** the global TSDF volume. Set all `tsdf_value` to 0, `weight` to 0, and `integrated` to false.
++2.  **Iterate** over each depth image $D$ in the sequence with associated pose $(R, \mathbf{t})$.
++3.  **Iterate** over all voxels $\mathbf{p}$ in the global volume that intersect the camera's viewing frustum.
++4.  **Transform** the voxel center $\mathbf{p}$ from the global frame to the camera frame:
+     $$ \mathbf{p}_c = R^\top (\mathbf{p} - \mathbf{t}) = (x, y, z)^\top $$
+-    Here $R$ is the rotation matrix, $\mathbf{t}$ is the translation vector, $\mathbf{p}$ is the global voxel center, and $\mathbf{p}_c$ is the camera-frame coordinates [S1].
+-3.  **Project** the camera-frame coordinates $(x, y, z)$ to 2D image coordinates $(u, v)$ using the pinhole camera model:
++    Here, $\mathbf{p}_c$ is the camera-frame coordinate, $R$ is the rotation matrix, and $\mathbf{t}$ is the translation vector [S1].
++5.  **Project** $\mathbf{p}_c$ to 2D image coordinates $(u, v)$ using the pinhole camera model:
+     $$ u = f_x \frac{x}{z} + c_x, \quad v = f_y \frac{y}{z} + c_y $$
+-    Here $f_x, f_y$ are focal lengths, $c_x, c_y$ are principal points [S1].
+-4.  **Validate** the projection:
++    where $f_x, f_y$ are focal lengths and $c_x, c_y$ are principal points [S1].
++6.  **Validate** the projection:
+     *   Check if $z > 0$.
+-    *   Check if $(u, v)$ lies inside the image boundaries.
+-    *   If valid, read the observed depth $\hat{z} = D(u, v)$.
+-5.  **Compute** the projective signed distance:
++    *   Check if $(u, v)$ lies within the image boundaries $[0, W-1] \times [0, H-1]$.
++    *   If invalid, skip this voxel for this view.
++7.  **Sample** the observed depth $\hat{z} = D(u, v)$ at the projected pixel. If the depth is invalid (e.g., infinity or zero), skip this voxel.
++8.  **Compute** the projective signed distance:
+     $$ s(\mathbf{p}) = \hat{z} - z $$
+-    Here $\hat{z}$ is the observed depth at pixel $(u,v)$, and $z$ is the depth of the voxel center in the camera frame [S1].
+-6.  **Truncate** the signed distance:
+-    *   If $|s(\mathbf{p})| \le d_{max}$, the measurement is valid.
+-    *   If $s(\mathbf{p}) < d_{min}$, set $s(\mathbf{p}) = d_{min}$.
+-    *   If $s(\mathbf{p}) > d_{max}$, set $s(\mathbf{p}) = d_{max}$.
+-    *   If $|s(\mathbf{p})| > d_{max}$, the measurement is invalid for this voxel [S2].
+-7.  **Fuse** the measurement into the global TSDF volume using weighted averaging [S1]:
+-    *   Let $w_{new}(\mathbf{p})$ be the weight of the current measurement (e.g., 1.0).
+-    *   Let $w_{old}(\mathbf{p})$ be the accumulated weight in the global volume.
+-    *   Update the TSDF value:
+-        $$ s_{new}(\mathbf{p}) = \frac{w_{old}(\mathbf{p}) \cdot s_{old}(\mathbf{p}) + w_{new}(\mathbf{p}) \cdot s(\mathbf{p})}{w_{old}(\mathbf{p}) + w_{new}(\mathbf{p})} $$
+-    *   Update the weight:
+-        $$ w_{new}(\mathbf{p}) = w_{old}(\mathbf{p}) + w_{new}(\mathbf{p}) $$
++    where $\hat{z}$ is the observed depth and $z$ is the depth of the voxel center in the camera frame [S1].
++9.  **Truncate** the distance:
++    *   If $|s(\mathbf{p})| \le \tau$, the measurement is valid.
++    *   Otherwise, skip this voxel for this view.
++10. **Fuse** the measurement into the global volume:
++    *   Let $w$ be the weight of the current measurement (often 1.0 or inversely proportional to variance).
++    *   Update the voxel's accumulated weight: $W_{new} = W_{old} + w$.
++    *   Update the TSDF value: $V_{new} = \frac{W_{old} \cdot V_{old} + w \cdot s(\mathbf{p})}{W_{new}}$.
++    *   Set `integrated` to true.
+ 
+ **Parameters:**
+-*   **Truncation Limits:** $d_{min} = -0.04$, $d_{max} = 0.1$ [S2].
+-*   **Intrinsics:** $f_x, f_y, c_x, c_y$ [S1].
+-*   **Pose:** $R, \mathbf{t}$ [S1].
++*   $\tau$ (Truncation threshold): Not given in the sources for the general method, but typical values in related TSDF systems are often small fractions of the voxel size. [S2] uses $d_{min} = -0.04$ and $d_{max} = 0.1$ for sub-volume sampling, implying a truncation range of $[-0.04, 0.1]$.
++*   $f_x, f_y, c_x, c_y$: Camera intrinsics.
++*   $R, \mathbf{t}$: Camera extrinsics.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Invalid Depth:** If the projected pixel has no valid depth (e.g., occlusion or sensor noise), the measurement is skipped [S1].
+-*   **Precision:** Floating-point precision in depth calculation and projection can affect accuracy, especially at large distances [G].
+-*   **Boundaries:** Voxels near the image boundary may have partial visibility; standard projective fusion assumes full visibility within the pixel footprint [G].
++*   **Precision:** Floating-point errors in $z$ calculation can affect depth comparison. Ensure $z$ is strictly positive before projection.
++*   **Boundaries:** Voxels outside the image plane or with $z \le 0$ must be handled to avoid division by zero or invalid memory access.
++*   **Degenerate Input:** Invalid depth values (e.g., 0 or infinity) must be filtered out before computing $s(\mathbf{p})$.
+ 
+ ## Subtopics
+@@ -59,18 +60,16 @@
+ 
+ ### TSDF Sub-volume Sampling and Preprocessing
+-This variant involves fusing sequences of depth images into a Truncated Signed Distance Field (TSDF) using truncation limits $d_{min} = -0.04$ and $d_{max} = 0.1$ [S2]. Sub-volumes of size $16 \times 16 \times 16$ voxels are sampled from the TSDF at every eight voxels along each spatial dimension [S2]. The indexing order along each axis is permuted for every sample to generate five additional reflections at each location [S2]. Distance values are mapped from the interval $[d_{min}, d_{max}]$ to $[0, 1]$ and saved [S2]. Sub-volumes where the mean sum of normalized distances (in $[0, 1]$) is below 0.85 are discarded to avoid disproportionate empty space samples, and a small proportion of empty samples is explicitly included to balance the dataset [S2]. The input data structure is $X \in \{ \mathbb{R}^{m \times n} \mid 0 \le x_{i,j} \le 1 \}$, where $m$ is the number of samples and $n$ is the dimensionality of each sub-volume ($n=4096$) [S2]. The dataset size is $m=200,000$ samples [S2].
++This variant involves preprocessing TSDF data for machine learning applications. It fuses sequences of depth images into a TSDF using truncation limits $d_{min} = -0.04$ and $d_{max} = 0.1$ [S2]. Sub-volumes of size $16 \times 16 \times 16$ voxels are sampled from the TSDF at every eight voxels along each spatial dimension [S2]. The indexing order along each axis is permuted for every sample to generate five additional reflections at each location [S2]. Distance values are mapped from the interval $[d_{min}, d_{max}]$ to $[0, 1]$ [S2]. Sub-volumes where the mean sum of normalized distances (in $[0, 1]$) is below 0.85 are discarded to avoid disproportionate empty space samples, and a small proportion of empty samples is explicitly included to balance the dataset [S2]. The resulting dataset has dimensionality $n = 4096$ ($16^3$) and size $m = 200,000$ samples, structured as $X \in \{\mathbb{R}^{m \times n} \mid 0 \le x_{i,j} \le 1\}$ [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(V \cdot N)$, where $V$ is the number of voxels in the viewing frustum and $N$ is the number of views. Each voxel is processed once per view.
+-*   **Memory Complexity:** $O(V_{total})$, where $V_{total}$ is the total number of voxels in the global TSDF volume.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales linearly with the number of voxels and views. Multi-resolution octrees can reduce memory usage for large scenes [S1].
+-*   **Strengths:** Efficient integration of depth data; robust to noise via truncation and weighted averaging; supports dynamic resolution [S1].
+-*   **Limitations:** Requires calibrated depth images; sensitive to camera pose errors; may suffer from aliasing at large distances if voxel size is not adjusted [S1].
+-*   **When to Use:** Real-time 3D reconstruction from depth cameras (e.g., KinectFusion, voxel hashing) [S1].
+-*   **When Not to Use:** When only explicit geometry (meshes/point clouds) is available without depth images; when high-precision global alignment is required without pose correction [S1].
++*   **Time Complexity:** $O(V \cdot N)$, where $V$ is the number of voxels in the frustum and $N$ is the number of depth images. Each voxel is processed once per view.
++*   **Memory Complexity:** $O(V_{total})$, where $V_{total}$ is the total number of voxels in the global volume.
++*   **Strengths:** Directly uses depth sensor data; robust to noise via weighted averaging; supports incremental updates.
++*   **Limitations:** Requires accurate camera calibration; performance depends on voxel grid resolution and frustum size; truncation limits must be chosen carefully to balance detail and noise.
++*   **When to use:** Real-time 3D reconstruction from depth cameras (e.g., KinectFusion).
++*   **When not to use:** When only explicit meshes are available without depth buffers (use Explicit Surface to TSDF Conversion instead).
+ 
+ ## Background
+-Projective TSDF fusion was introduced in volumetric fusion systems such as KinectFusion [Newcombe et al. 2011] and voxel hashing systems [Nießner et al. 2013] [S1]. It builds on the weighted TSDF integration method by Curless and Levoy [Curless and Levoy 1996] [S1].
++Projective TSDF fusion was introduced in volumetric fusion systems such as KinectFusion [Newcombe et al. 2011] and voxel hashing systems [Nießner et al. 2013] [S1]. It builds on the weighted averaging fusion technique by Curless and Levoy [Curless and Levoy 1996] [S1]. The method is widely used in real-time 3D reconstruction from depth sensors.
+ 
+ ## Sources

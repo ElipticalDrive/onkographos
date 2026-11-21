@@ -1,0 +1,107 @@
+# Point Cloud Filtering and Noise Removal
+
+Also called: 3D Statistical Filter for Floater Removal, Open3D Statistical Outlier Removal, Statistical Outlier Removal
+
+## Overview
+Removes statistical outliers from a point cloud to clean noise and artifacts [S1, unofficial][S2]. It sets itself apart from sibling downsampling methods by focusing on geometric consistency and density rather than spatial coverage or surface complexity [S1, unofficial][S2]. Unlike [Farthest Point Sampling](7182-farthest-point-sampling-fps.md) which maximizes coverage, this method minimizes error by discarding points that deviate significantly from local density [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A point cloud $P = \{p_1, p_2, \dots, p_N\}$ where each $p_i \in \mathbb{R}^3$.
+- Output: A filtered point cloud $P' \subseteq P$ containing only inliers.
+
+**Data Structures:**
+- The point cloud is stored as an array of 3D coordinates.
+- For each point, the Euclidean distances to its $k$ nearest neighbors are computed and stored in a list.
+
+**Parameters:**
+- $k$ (nb_neighbors): Number of neighboring points considered for statistical analysis. Default: 20 [S1, unofficial][S2].
+- $\sigma_{ratio}$ (std_ratio): Standard deviation ratio threshold for outlier removal. Default: 10 [S1, unofficial]. In specific implementations (e.g., EVolSplat), $\sigma_{ratio}$ is set to 2.0 [S2].
+
+**Algorithm Steps:**
+1. For each point $p_i$ in $P$, find the $k$ nearest neighbors using a spatial index (e.g., KD-Tree) [S1, unofficial][S2].
+2. Compute the mean distance $\mu_i$ for point $p_i$ as the average of the distances to its $k$ nearest neighbors:
+   $$ \mu_i = \frac{1}{k} \sum_{j \in \text{neighbors}(p_i)} \| p_i - p_j \|_2 $$
+3. Compute the global mean $\mu$ and global standard deviation $\sigma$ of all $\mu_i$ values across the entire point cloud:
+   $$ \mu = \frac{1}{N} \sum_{i=1}^{N} \mu_i $$
+   $$ \sigma = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (\mu_i - \mu)^2} $$
+4. Identify outliers: A point $p_i$ is considered an outlier if its mean neighbor distance $\mu_i$ exceeds the threshold:
+   $$ \mu_i > \mu + \sigma_{ratio} \cdot \sigma $$
+5. Remove all identified outliers from $P$ to produce $P'$ [S1, unofficial][S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial import KDTree
+
+def remove_statistical_outliers(points, nb_neighbors=20, std_ratio=10.0):
+    """
+    Remove statistical outliers from a point cloud.
+    
+    Args:
+        points: numpy array of shape (N, 3) containing 3D coordinates.
+        nb_neighbors: int, number of neighbors for distance calculation.
+        std_ratio: float, standard deviation ratio threshold.
+        
+    Returns:
+        filtered_points: numpy array of shape (M, 3) with outliers removed.
+    """
+    if len(points) == 0:
+        return points
+
+    # Build KD-Tree for efficient nearest neighbor search
+    tree = KDTree(points)
+    
+    # Query k-nearest neighbors for each point
+    # k=nb_neighbors + 1 because the point itself is the nearest neighbor
+    distances, indices = tree.query(points, k=nb_neighbors + 1)
+    
+    # Exclude the point itself (distance 0) from the mean calculation
+    # distances[:, 0] is always 0.0
+    neighbor_distances = distances[:, 1:]
+    
+    # Calculate mean distance to neighbors for each point
+    mean_distances = np.mean(neighbor_distances, axis=1)
+    
+    # Calculate global mean and standard deviation of these mean distances
+    global_mean = np.mean(mean_distances)
+    global_std = np.std(mean_distances)
+    
+    # Define threshold
+    threshold = global_mean + std_ratio * global_std
+    
+    # Filter points: keep those with mean distance <= threshold
+    inliers_mask = mean_distances <= threshold
+    filtered_points = points[inliers_mask]
+    
+    return filtered_points
+```
+
+**Edge Cases and Pitfalls:**
+- If the point cloud is too sparse, the nearest neighbor distances may be large and inconsistent, leading to over-filtering [S1, unofficial].
+- The choice of $\sigma_{ratio}$ is critical. A high value (e.g., 10) retains more noise but preserves structure; a low value (e.g., 2.0) aggressively removes floaters but may remove valid sparse points [S1, unofficial][S2].
+- Precision issues may arise if the point cloud contains points at vastly different scales or densities [G].
+
+## Subtopics
+
+### Score-based Denoising
+A deep learning-based denoiser for 3D point clouds that identifies optimal fitting regions for each point by aligning outlier clusters with a predicted score function using gradient ascent [S3]. The workflow comprises: 1. Score estimation network; 2. Objective function for training the network; 3. Score-based denoising algorithm [S3]. The process employs a gradient ascent method to align clusters of outliers with a predicted score function [S3]. The approach mimics an intelligent smoothing process on potential surfaces, relying on a majority voting mechanism (or the density/magnitude of points) [S3]. The algorithm smooths the point cloud and rearranges the position of points to increase accuracy with the original object [S3]. By adapting the points on an ideal surface, cancelling the ones too far from it [S3]. Comparison metric: C2C (Cloud-to-Cloud) signed distances, which looks for the nearest points and makes a comparison [S3].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ for building the KD-Tree and $O(N \cdot k)$ for querying neighbors, where $N$ is the number of points and $k$ is the number of neighbors [S1, unofficial][S2].
+- **Memory Complexity:** $O(N)$ for storing the point cloud and neighbor distances [S1, unofficial][S2].
+- **Measured Performance:** In EVolSplat, using $k=20$ and $\sigma_{ratio}=2.0$ effectively removes clear floaters from unprojected point clouds per frame [S2]. In 3DGS-to-PC, the filter is applied after point cloud generation to clean noise [S1, unofficial].
+- **Strengths:** Simple, fast, and effective for removing isolated noise and floaters [S1, unofficial][S2].
+- **Limitations:** May remove valid points in sparse regions or if the noise distribution is not Gaussian-like [S1, unofficial][S2].
+- **When to use:** When cleaning up point clouds generated from Gaussian Splatting or multi-view stereo that contain significant noise or floaters [S1, unofficial][S2].
+- **When not to use:** When preserving sparse but valid data is critical, or when the noise is structured and not statistical [S1, unofficial].
+
+## Background
+Originated from the Open3D library's statistical outlier removal module [S1, unofficial][S2]. It is widely used in 3D Gaussian Splatting pipelines to clean point clouds before meshing or further processing [S1, unofficial][S2]. The method is based on the assumption that inliers have a mean neighbor distance that follows a Gaussian distribution, while outliers deviate significantly [S1, unofficial][S2].
+
+## Sources
+[S1] Lewis-Stuart-11/3DGS-to-PC, https://github.com/Lewis-Stuart-11/3DGS-to-PC, fetched 2026-10-27 (unofficial)
+[S2] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
+[S3] Denoising and Voxelization Algorithms for Finite Element Analysis of Cultural Heritage, https://doi.org/10.5194/isprs-archives-xlviii-m-9-2025-541-2025, fetched 2026-10-26

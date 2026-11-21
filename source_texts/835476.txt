@@ -1,0 +1,600 @@
+Portable intermediate representation for array operation plans - docs: Warp, with resampling defined independently of GDAL by charles-turner-1 · Pull Request #22 · charles-turner-bot/ArrIR
+
+docs: Warp, with resampling defined independently of GDAL by charles-turner-1 · Pull Request #22 · charles-turner-bot/ArrIR · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+charles-turner-1
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+This is the third PR in the grids design stack. It builds on #20, is independent of #21, and contains no code.
+Warp covers reprojection and regridding between any two grids. Its struct lands after Select and Reduce (roadmap step 6). Its shape is fixed now, so that adding it changes neither the schema nor Select. It resolves the three Warp issues recorded in #20's discussion note.
+What this proposes
+The proposal is a new file, plans/warp.md.
+Resampling is defined in ArrIR, not by GDAL. The methods are Nearest, Interpolate (with a kernel and a scaling choice), Mode and Conservative (planar or spherical area, with or without renormalising). Each has its own definition. Where implementations disagree, the choice is a field. For example, gdalwarp widens its kernel when downsampling, and xESMF doesn't. There's no Average: GDAL's average isn't assumed to equal Conservative.
+Each variable has its own output. Warp lists the variables it warps, each with its own method, output type, rounding, out-of-range rule and nodata. A single set of options can't serve int16 and float32 variables together, or a land-cover class and a temperature. Variables not listed stay on the source grid.
+Cell edges come from an explicit EdgeRule. Nearest, Mode and Conservative need edges, which grids with centre coordinates only lack. Requiring bounds would block the common swath case. Implying edges silently would break purity rule 4. So the plan states either FromBounds or MidpointsBetweenCentres.
+The target geometry is a binding with a declared schema, like Open. Mesh and DGGS targets are defined by data, and the plan can't contain data. The declared schema is what lets the plan validate offline.
+Missing values are declared in the schema. Each variable says which values are missing, and whether NaN counts, or that this isn't known. A warp of a variable with unknown missing values is invalid. target_nodata is always required, because whether a target cell ends up empty depends on data and geometry that validation can't see. The declaration lives in the logical schema, not the layout, since arrir can't depend on arrir-layout. Reduce's skipna needs the same field.
+Mode ties are an explicit option, ModeTie::Smallest or Largest, so adapters have a rule to match.
+Reference fixtures check the meaning. Small fixtures, with expected values worked out by hand from the definitions, are checked into the repository. Every adapter that emits Warp must match them, GDAL's and xESMF's included.
+The transformer's error threshold is a field, because gdalwarp approximates by default.
+Effect on the schema: the target's dimensions replace the placement dimensions. So (time, row, column) warped to a mesh becomes (time, face). The source grid is dropped once no data variable is placed on it.
+One semantic decision: resampling semantics belong to ArrIR. Every adapter, GDAL included, either matches them or rejects the plan.
+Questions for Mike
+Does gdalwarp's mode break ties by the smallest or the largest value, or by something else, such as scan order?
+Does GDAL's average equal Conservative { area: Planar, renormalise: true }, or does it differ, for example because it measures overlap in source pixel space?
+Can gdalwarp turn off kernel widening when downsampling, so that it can emit KernelScaling::Point?
+How does gdalwarp round and clamp when it warps into an integer type?
+When arrir-layout produces a Schema, should the layout's fill count as a missing value, or only the CF attributes?
+Stack
+Base: docs: grids, CRS and staggering in the logical schema #20 (grids, CRS and staggering).
+docs: Select's effect on grids #21 (Select on grids) also builds on docs: grids, CRS and staggering in the logical schema #20. The two merge together cleanly.
+The GDAL adapter PR builds on this one.
+🤖 Generated with Claude Code
+docs: propose Warp, with resampling defined independently of GDAL
+…
+67a4511
+```
+Warp covers reprojection and regridding between any two grids. Its shape
+is fixed before Select and Reduce are written, so that adding it changes
+neither the schema nor Select. This stacks on the grids PR (#20) and
+resolves the three Warp issues recorded there.
+
+plans/warp.md proposes:
+
+- Resampling methods defined in ArrIR: Nearest, Interpolate (kernel and
+  scaling), Mode and Conservative (planar or spherical area, with or
+  without renormalising). Defining them as "what GDAL does" would swap
+  a tie to xarray for a tie to GDAL. Where implementations disagree,
+  for example gdalwarp widening kernels when downsampling, the choice
+  is a field. GDAL's average isn't assumed to be conservative.
+- An explicit EdgeRule. Nearest, Mode and Conservative need cell
+  edges, which grids with centre coordinates only don't have.
+  Requiring bounds would block the common swath case. Implying them
+  silently would break purity rule 4, so the plan states which it
+  wants.
+- A list of warped variables, each with its own method, output type,
+  rounding, out-of-range rule and nodata. One set of options can't
+  serve integer and float variables together, or categorical and
+  continuous ones. Unlisted variables stay on the source grid.
+- A target geometry given as a binding with a declared schema, as Open
+  has, so a mesh or DGGS target validates offline.
+- The transformer's error threshold as a field, since gdalwarp
+  approximates by default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MhkH4hMxRGP9tLiaB6mP6L
+```
+charles-turner-1
+mentioned this pull request
+Oct 28, 2026
+docs: a GDAL adapter that renders plans as VRT
+#23
+Merged
+charles-turner-1
+added this pull request to stack #24
+October 28, 2026 07:26
+docs: settle Mode ties, declare missing values, add reference fixtures
+…
+a7a13e4
+```
+A second review of the Warp proposal found three gaps.
+
+- Mode left its tie rule as an open question, so an adapter had
+  nothing to match. Ties are now an explicit option, ModeTie::Smallest
+  or Largest. Each cell counts once, and NaN never wins.
+- A plan without target_nodata was invalid only if an empty target cell
+  could happen. That depends on the data, and on whether target cells
+  fall outside the source, and neither can be checked offline. So
+  target_nodata is now always required. Each variable also declares
+  its missing values in the logical schema (MissingValues, Known or
+  Unknown, with NaN declared rather than assumed). A Warp of a variable
+  with unknown missing values is invalid. The declaration can't come
+  from the layout's fill directly, because arrir can't depend on
+  arrir-layout, so arrir-layout maps fill and the CF attributes into
+  it. Reduce's skipna needs the same field, so it belongs with the step
+  3 schema work.
+- Comparing GDAL's output with GDAL run directly only checks the
+  rendering. Hand-worked reference fixtures, derived from warp.md's
+  definitions and checked into the repo, now check the meaning. Every
+  adapter that emits Warp must match them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MhkH4hMxRGP9tLiaB6mP6L
+```
+mdsumner
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+answers from the swarmy, worked out from inspecting the trunk source code. (5 answered in context, not in source). All read by a human and the bits I'm familiar with check out. Now seems a good time to ask if you had a look at each of opengeos/terrio by Quisheng Wu, rwarp: port of GDAL warp core, by me, and wxylib.org, also my fault.
+CLAUDE:
+1. Does gdalwarp's mode break ties by the smallest or the largest value, or by something else, such as scan order?
+Short answer: by default it uses scan order. You can change this with the
+warp option MODE_TIES=FIRST|MIN|MAX (GDAL >= 3.11, added in commit
+94e69abd2e), e.g. gdalwarp -r mode -wo MODE_TIES=MIN .... The default is
+FIRST.
+Option documentation: alg/gdalwarper.cpp:1524. It says that by default
+"the first value encountered will be used".
+Default value: alg/gdalwarper.cpp:1549 (eTieStrategy = GWKTS_First).
+Enum and field: alg/gdalwarper.h:242, alg/gdalwarper.h:456.
+How the kernel actually does it
+There are three mode implementations in alg/gdalwarpkernel.cpp:
+Path
+Used for
+Location
+Histogram ("binned")
+Byte/Int8/UInt16/Int16-like integer data with a small value range
+gdalwarpkernel.cpp:~8115-8170
+Generic templated (T)
+Other real types (Int32, Float32, Float64, ...)
+gdalwarpkernel.cpp:~7147-7235
+Generic complex
+Complex types
+gdalwarpkernel.cpp:~7409-7500
+All of them go through the source window row by row (iSrcY), then column by
+column (iSrcX), adding each valid pixel's weight to a running count for its
+value. The current mode only changes when a count is incremented:
+if the new count is strictly greater than the current mode's count, that value
+becomes the mode;
+if it is equal, then eTieStrategy decides:
+FIRST: keep the current mode;
+MIN: switch if the new value is less than the current mode;
+MAX: switch if the new value is greater than the current mode.
+What "FIRST" really means
+FIRST is not "the tied value that appears first in scan order". It is "the
+tied value that reached the winning count first" (row-major, top-left to
+bottom-right of the source window). Checked empirically, with a 2x2 source
+[[5,3],[3,5]] going to one output pixel:
+dtype
+FIRST
+MIN
+MAX
+Byte
+3
+3
+5
+Int32
+3
+3
+5
+Float32
+3
+3
+5
+5 is seen first, but 3 reaches count 2 first (at the 3rd pixel). When 5 later
+also reaches 2, that is only a tie, so FIRST keeps 3.
+Caveat: MIN/MAX are ignored in the generic path when the tie is at a value's first occurrence
+In the generic (non-histogram) paths, a value seen for the first time is added
+as a new entry (gdalwarpkernel.cpp:~7212-7223). It only becomes the mode if
+there is no mode yet (iModeIndex < 0). New entries are never compared
+against the current mode, either for count or for tie strategy. So when every
+value occurs once (all tied at count 1), MIN/MAX have no effect there.
+The histogram path does compare on every pixel, so the results differ by data
+type. Source [[5,3],[7,1]]:
+dtype
+FIRST
+MIN
+MAX
+Byte (histogram path)
+5
+1
+7
+Int32 (generic path)
+5
+5
+5
+Float32 (generic path)
+5
+5
+5
+A related side effect, inferred from the code and not tested: with fractional
+weights (partial source-pixel coverage at window edges), a value that appears
+only once with a large weight cannot replace a mode that has a smaller
+accumulated weight. The existing test test_warp_mode_ties
+(autotest/alg/warp.py:1724) only checks ties at count 3 in Int16/Int32, so it
+does not catch this. This looks like a bug worth reporting upstream.
+2. Does GDAL's average equal Conservative { area: Planar, renormalise: true }, or does it differ, for example because it measures overlap in source pixel space?
+Short answer: it is renormalised, but it is not exact conservative
+remapping. Overlap is measured in source pixel space, against an
+axis-aligned rectangle built from only two opposite corners of the
+destination pixel. The result matches planar conservative remapping only when
+the destination pixel maps to an axis-aligned rectangle in source pixel space,
+i.e. the same CRS (or a pure scale/translate) with north-up grids on both sides.
+What the code does (alg/gdalwarpkernel.cpp)
+GWKAverageOrModeComputeLineCoords() (~line 6873) transforms only the
+destination pixel's top-left (x, y) and bottom-right (x+1, y+1)
+corners into source pixel/line coordinates. The other two corners and the
+edges are never transformed.
+GWKAverageOrModeComputeSourceCoords() (~line 6919) swaps those values if
+needed so that min < max, giving the rectangle
+[dfXMin, dfXMax] x [dfYMin, dfYMax] in source pixel space. A code comment
+there calls this "really an approximative fix" and says that a correct
+version would take the bounding box of the whole transformed square. The
+antimeridian wrap is handled heuristically (bWrapOverX).
+COMPUTE_WEIGHT_Y / COMPUTE_WEIGHT (~line 6849) give each source pixel a
+weight equal to its fractional overlap with that rectangle, as
+x_fraction * y_fraction. Only the first and last row/column of the window
+get partial weights.
+The GRA_Average branch (~line 7960) computes a weighted incremental mean
+over valid pixels only: nodata/masked pixels and pixels with
+density <= BAND_DENSITY_THRESHOLD are skipped and add no weight. That is
+the same as sum(w*v) / sum(w_valid), i.e. renormalise = true.
+Options that change this: NODATA_VALUES_PCT_THRESHOLD (default 100) and
+EXCLUDED_VALUES / EXCLUDED_VALUES_PCT_THRESHOLD switch to a variant
+(~line 7760) that can output nodata when too much of the footprint is
+invalid. Even then, valid values are still averaged with renormalisation.
+How it differs from a true planar conservative scheme
+Area is measured in source pixel space. Each source pixel counts as one
+unit of area. For a north-up affine source this is proportional to planar
+area in the source CRS. It is not planar area in the target CRS, and it is
+not area on the ground: for example, with a lon/lat source, high-latitude
+pixels get the same weight as equatorial ones.
+Rectangle, not polygon. The footprint is an axis-aligned box in source
+pixel space. Curved or rotated footprints are not intersected exactly.
+Only two corners are used, so rotation or shear can make the box badly
+wrong. In the extreme case it collapses to a line, after which the code
+forces at least one source pixel (iSrcXMax++).
+Checked against the local build
+Case
+Exact planar conservative
+GDAL average
+src [0,10,20] → 2 px (each covers 1.5 src px)
+3.333, 16.667
+3.333, 16.667 ✅
+src [0,nodata,20] → 2 px
+0, 20 (renormalised)
+0, 20 ✅
+10x10 src with value = column index; one dst pixel, axis-aligned 4x4 box over cols 3–6
+4.5
+4.5 ✅
+Same source; one dst pixel rotated 45° (a diamond centred on x=5)
+4.5
+5.0 ❌
+In the rotated case, the top-left and bottom-right corners of the diamond have
+the same source x (5.0). The box therefore has zero width, and GDAL averages
+only source column 5.
+Conclusion: the results are the same for axis-aligned scaling and
+translation within one CRS. In general they are not, and the gap widens with
+rotation, shear, or non-linear reprojection, where area is not measured in the
+CRS you have in mind.
+3. Can gdalwarp turn off kernel widening when downsampling, so that it can emit KernelScaling::Point?
+Short answer: yes. Pass the warp options XSCALE=1 and YSCALE=1:
+```
+gdalwarp -r cubic -wo XSCALE=1 -wo YSCALE=1 ...
+```
+Why this works
+GDALWarpKernel::PerformWarp() (alg/gdalwarpkernel.cpp ~1092–1295)
+normally estimates dfXScale / dfYScale for each warp chunk, as the ratio
+of destination pixels to source pixels. It samples a grid of up to 10x10
+points, removes outliers, averages, and rounds to 1/n when close. If
+XSCALE / YSCALE are set, they override that estimate (lines
+1289–1292).
+The kernel radius is nXRadius = dfXScale < 1 ? ceil(dfXFilter / dfXScale) : dfXFilter (line 1319). The kernel argument is (i - dfDeltaX) * dfXScale
+(e.g. ~4133, ~4252, ~4780). With scale = 1, both the radius and the argument
+stay at their native, point-sampled values.
+The general path uses std::min(poWK->dfXScale, 1.0) (~4854, ~4964). So
+values above 1 (upsampling) never narrow the kernel, and XSCALE=1 is
+exactly "no widening".
+Side effect: with scale > 0.5, CanUse4SamplesFormula() (~1041) allows the
+fast 2x2 bilinear / 4x4 cubic paths. This is the classic point kernel.
+Documentation: alg/gdalwarper.cpp:1391. That documentation recommends
+setting a fixed value anyway for reproducibility, because the automatic
+value can vary between chunks.
+Which resampling methods it affects
+It affects the convolution kernels: bilinear, cubic, cubicspline, and
+lanczos. It has no effect on near or on the area-based methods
+(average, rms, mode, min, max, med, q1, q3, sum), because
+their footprint comes from the transformed pixel corners (see Q2). In those
+methods, dfXScale only sets a bounds-check margin.
+Checked against the local build
+Source: 32x32 grid with a single column of 100s at col 19, downsampled 4x to
+8x8. The output pixel centred on src x=18.0 (row 4, cols 3–5):
+method
+default (widened)
+XSCALE=1 YSCALE=1 (point)
+near
+0, 0, 0
+0, 0, 0
+bilinear
+0, 15.6, 9.4
+0, 0, 0
+cubic
+−1.8, 18.2, 9.7
+0, −6.25, 0
+cubicspline
+1.0, 13.8, 10.0
+0, 2.08, 0
+lanczos
+−3.7, 19.2, 11.0
+0, −13.6, 2.4
+average
+0, 25, 0
+0, 25, 0 (unchanged)
+−6.25 is exactly 100 × the Keys cubic (a = −0.5) weight at distance 1.5, so the
+point kernel is being used.
+A practical note: on a tiny 8x1 source, the widened cubic and lanczos returned
+0 everywhere. This is most likely because the widened kernel reaches past the
+source edge, so those output pixels are skipped and keep their initial value
+(0 / nodata). I didn't trace this in the code.
+4. How does gdalwarp round and clamp when it warps into an integer type?
+Short answer: values are clamped to the type's range, then rounded to
+nearest, but there are two different rounding rules. Which one you get
+depends on the warp working data type:
+Working type
+Where conversion happens
+Rule
+−2.5 →
+2.5 →
+NaN →
+Integer (source and destination, plus nodata values, all integer)
+Warp kernel (ClampRoundAndAvoidNoData, GWKClampValueT)
+clamp, then floor(x + 0.5): round half up (toward +∞)
+−2
+3
+UB in theory; nodata normally stops NaN getting here
+Float (e.g. Float32 source → Int16 output)
+Kernel writes float; RasterIO / GDALCopyWords converts when writing the destination band
+clamp, then round half away from zero
+−3
+3
+0
+Where the working type comes from
+GDALWarpResolveWorkingDataType() (alg/gdalwarper.cpp:1764) sets
+eWorkingDataType to GDALDataTypeUnion of the source and destination band
+types and any src/dst nodata values. You can force it with -wt. So a Float32
+source always gives a float working buffer, and rounding to integer happens
+only at the end, in GDALCopyWords.
+Kernel path (integer working type), alg/gdalwarpkernel.cpp
+ClampRoundAndAvoidNoData<T>() (~1856): if x < lowest → lowest; if
+x > max → max; otherwise signed types use floor(x + 0.5) and unsigned
+types use (T)(x + 0.5). The same logic is in GWKClampValueT /
+GWKRoundValueT (~1545–1600), which the typed fast paths and
+density-blending path use. Clamping is done in double before rounding.
+Only resampled values go through this (bilinear/cubic/average/...).
+near/mode/min/max copy an existing source value, which is already
+representable in the working type.
+Float working type path, gcore/gdal_priv_templates.hpp
+GDALCopyWord float→signed int (~608–870): NaN → 0, clamp, then
+x >= 0 ? x + 0.5 : x - 0.5 truncated, i.e. round half away from zero.
+Float→unsigned is x + 0.5 after clamping to [0, max]. SSE versions
+(~950–980) use the same rule.
+Destination nodata avoidance (AvoidNoData, ~1613)
+If the kernel produces a value equal to the destination nodata, it is moved
+off it, with a one-time warning:
+integers: decrement by 1, or lowest + 1 if the value is lowest (for
+example Byte nodata 0 → 1);
+floats: nextafter toward +max (toward 0 if the value is already max).
+This only happens in single-band mode, or when UNIFIED_SRC_NODATA is not
+true.
+Gotcha: with a float working type, the check runs on the float before
+GDALCopyWords rounds it. So a value like 0.2 is not equal to nodata 0, passes
+the check, and then rounds to 0 = nodata in the integer output. Nodata
+avoidance is therefore only reliable when the working type is integer. You can
+force that with -wt Int16 etc., but then the kernel's rounding rule applies.
+Checked against the local build
+Case
+Result
+Int16 src [-3,-2], average → Int16 (kernel)
+−2
+Float32 src [-3,-2], average → -ot Int16 (CopyWords)
+−3
+Int16 src [3,2], average → Int16
+3
+Float32 [300.7, -5] → Byte
+255, 0 (clamped)
+Int16 [300, -5] → Byte
+255, 0 (clamped)
+Int16 [0,1], -dstnodata 0
+−1, 1 (warning issued)
+Byte [0,1], -dstnodata 0
+1, 1 (warning issued)
+Float32 [0.2, 1] → Byte, -dstnodata 0
+0, 1 (silently becomes nodata)
+Float32 [NaN, 1] → Int16
+0, 1
+Question 5: should the layout's fill count as a missing value in the Schema?
+No. The Schema's missing values come from the CF attributes only (_FillValue, missing_value), and the layout's fill stays in arrir-layout.
+They answer different questions. fill is structural: it's what unwritten elements read as, which the physical layer needs when a chunk is known-empty. A missing value is meaning: which values to skip, mask or propagate. That's what the logical layer needs, for example for reductions that skip NaN.
+Promoting fill would be inferring a fact the source didn't state. A store with fill = 0 and no CF attributes is saying unwritten elements are zero, not that zero means missing. The contract's rule that unknown facts aren't invented applies here. A host that promotes fill to a missing value does so in its adapter, not in the schema. I believe xarray does this for some Zarr stores, but I'm not sure of the details across Zarr v2 and v3, so that's worth checking.
+In a byterefs 0.1 table the two can't conflict. Validation requires fill to agree with _FillValue and missing_value wherever those are set. So the question only matters when no CF attributes exist, and then the schema records that no missing value is declared. Whether a store should be publishable without CF attributes at all is a description-contract question for byterefs (its Q10), not for arrir.
+One detail for the schema: CF missing values are stated in the packed type, before scale_factor and add_offset are applied. The schema should record a missing value together with the type it applies to, so an adapter compares raw values, not decoded ones.
+mdsumner
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+we've riled up the teams too, they're busy extending rwarp towards parity+better with all of the GDAL warp engine.
+mdsumner
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+Everything below is Claude generated.
+Follow-up on questions 1-4, from implementing them in rwarp ([hypertidy/rwarp#3](hypertidy/rwarp#3), merged, checked against gdalwarp 3.14.0dev-739fcf03bf with fixtures). Most of it confirms the answers above. Three findings change what the GDAL adapter in #23 can promise. Details and repros: [osgeo-upstream notes](https://github.com/mdsumner/osgeo-upstream/blob/main/notes/2026-10-28-gdalwarp-kernel-findings.md).
+Q3: gdalwarp's default widening isn't a fixed rule in chunked warps. PerformWarp estimates dfXScale/dfYScale from sample points that don't include the chunk's destination offset (~L1092-1295), so every chunk estimates its scale at the top-left of the whole output. A lon/lat source warped to EPSG:3857 with cubic gives a different answer with a small -wm than without: 319,985 of 320,000 pixels differ, by up to 0.113 on data in [0, 1]. The same happens on GDAL 3.8.4, so it's long-standing.
+So KernelScaling::WidenWhenDownsampling matches gdalwarp only for single-chunk warps.
+For the adapter: emit XSCALE/YSCALE explicitly (computed for the output, or 1 for Point), and treat the automatic estimate as unreliable.
+Also confirmed: bilinear and cubic widen only once the scale is at most 0.5 (CanUse4SamplesFormula); lanczos widens at any scale below 1.
+Q1: MODE_TIES can only be trusted for 8/16-bit working types. As answered above, MIN/MAX are ignored on a value's first occurrence in the list path for 32/64-bit and float types. In a fixture where every 2x2 block has four distinct values, Int32 and Float32 differ from Byte on 768 of 1024 pixels for MIN and MAX.
+For the adapter: accept ModeTie::Smallest/Largest only when the working type is 8- or 16-bit, or reject them.
+rwarp implements the 8/16-bit behaviour for every type, so it gives the same answer as GDAL's histogram path everywhere.
+Q2: average overweights edge pixels when the footprint overhangs the source. The box start is clamped to 0 but its partial fraction isn't (COMPUTE_WEIGHT ~L6849), so an edge pixel gets weight above 1. That's one more way average differs from Conservative { area: Planar, renormalise: true }, alongside the two-corner box. rwarp offers both footprints: GdalBox (gdalwarp-compatible, edge weights included) and Exact (first-order conservative, via coverage fractions, about 25 times the cost).
+Q4: unchanged. The two rounding rules (half up in the kernel for integer working types, half away from zero in GDALCopyWords for float) and the nodata-avoidance gotcha both reproduce on GDAL 3.8.4 as well. rwarp#3 includes the rounding and clamping work.
+mdsumner
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+https://hypertidy.github.io/rwarp/
+mdsumner
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Collaborator
+tales from the punchbowl:
+Everything below is Claude generated.
+Heads-up on where rwarp is going for Conservative, because it bears on how AreaMeasure is defined here. Design: rwarp design/conservative.md (with curvilinear-frontend.md for curvilinear and periodic grids).
+What rwarp does now, and plans
+Now (0.3): Footprint::Exact is first-order conservative remapping. Each target cell's outline is transformed into the source grid, intersected exactly with the source cells, and averaged by area over valid cells. That is ESMF's conserve in what it computes, with areas measured in source index space.
+Planned, one PR per stage, each with its own oracle:
+Weights as values: a table of (target cell, source cell, overlap) plus target-cell areas, computed with no pixels read.
+An ESMF oracle suite: fixtures from ESMF or TempestRemap, committed, so cargo test needs no ESMF.
+A spherical measure.
+Curvilinear and periodic grids (cells from corner bounds, as ESMF defines them).
+Mesh sources and targets: mesh to grid, and grid to mesh. Mesh to mesh is out of scope.
+Second order.
+So rwarp could execute Conservative plans that the GDAL adapter in #23 rejects, and Planar exists already.
+How it maps onto Conservative { area, renormalise }
+renormalise: true is ESMF's fracarea and rwarp's FracArea. false is destarea and DestArea. xESMF defaults to the destarea form (conserve), so it's good that ArrIR makes this a required field rather than a default.
+Planar matches rwarp's current measure for an affine source: area in source index space is planar area in the source CRS, up to a constant. For a curvilinear source the two differ unless the cell definition makes them agree; rwarp's curvilinear note does this with an equal-area cell map.
+One suggestion for the definition
+AreaMeasure currently ties two things together: how area is measured, and what shape a cell's edges have. Spherical says "cell edges as great circles". But the combinations that come up are at least three:
+Edges
+Area
+Who
+straight in index space (densified, then mapped)
+planar
+rwarp now; GDAL's average uses a cruder box
+straight in longitude/latitude
+spherical
+rwarp stage 3.1, exact by a closed-form Green's-theorem term; how many model grids define their cells
+great circles
+spherical
+ESMF; rwarp stage 3.2, to a stated tolerance
+An option is to split them:
+```
+Conservative { edges: CellEdges, area: AreaMeasure, renormalise: bool }
+
+pub enum CellEdges { StraightInIndex, StraightInLonLat, GreatCircle }
+pub enum AreaMeasure { Planar, Spherical }
+```
+This would let an adapter say exactly what it supports and reject the rest (purity rule 4). For example, rwarp stage 3.1 would accept StraightInLonLat with Spherical, and reject GreatCircle until stage 3.2.
+Two more connections
+Weights are a data-free plan artifact, like a chunk list. Given the two grids, they're computed with no pixels read, then applied to any number of variables or time steps. That puts them in the physical-planning layer (or an adapter's output), not the logical plan, and it fits purity rules 1 and 2.
+Mesh targets reach rwarp through the same shape as GeometryBinding here: the mesh is bound data, not plan parameters. rwarp's stage 5 burns mesh faces into the grid, so its output is the weight table transposed.
+The ESMF fixture suite (stage 2) could also feed this PR's reference fixtures for Conservative. The fixtures record how far each implementation is from ESMF's great-circle definition, as a number to shrink rather than a failure.
+docs: fold Mike's warp answers in, and split type conversion into Cast
+…
+5b13e59
+```
+Warp no longer converts types: its output type follows from the method,
+and Cast (plans/cast.md) states rounding, clamping and how missing values
+are written. gdalwarp converts at the end, so Cast(Warp(x)) describes it.
+Variants with options hold named structs. The edge shape is split from
+the area measure and applies to every method. The kernel's widening
+factor is stated in the plan. Questions 1 to 5 are answered.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MhkH4hMxRGP9tLiaB6mP6L
+```
+charles-turner-1
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Author
+Again, all this GDAL specific(ish) stuff goes over my head a bit, but the structure generally looks sensible to me here. Warp was getting too big and splitting casting out into a separate optype seemed very natural here.
+Update in 5b13e59, following Mike's answers to questions 1 to 5:
+Type conversion moved out of Warp into a new Cast operation (plans/cast.md). The test for splitting was whether each is useful alone: a float warp needs no conversion, and an astype needs no warp. gdalwarp converts at the end of its computation, so Cast(Warp(x)) describes it, and the GDAL adapter emits the pair as one call.
+WarpVariable is now { var, resampling, empty_value }. The output type follows from the method: the source type for Nearest and Mode, float64 for the others.
+empty_value must be NaN or one of the source's declared missing values, so Warp never writes a valid value that reads as missing.
+Cast holds Rounding (now including NearestTiesUp, gdalwarp's rule for integer working types), OutOfRange, and MissingEncoding { value, collision }. Collision is Nudge or Keep. It ends with a table of the combinations gdalwarp can emit, taken from Mike's reading of the source and not yet checked by fixture.
+Every resampling variant that takes options holds a named struct: Interpolate(InterpolateOptions), Mode(ModeOptions), Conservative(ConservativeOptions). This is added to design.md as a convention.
+GeometryRules { edges, edge_shape, error_threshold } groups the settings that describe the grids rather than the values.
+Edge shape is split from the area measure, as Mike suggested. EdgeShape is StraightInIndex, StraightInLonLat or GreatCircle, and AreaMeasure is Planar (source index space) or Spherical. The edge shape sits in GeometryRules rather than in the Conservative options, because containment for Nearest and overlap for Mode depend on it too. This is new question 6.
+The kernel's widening factor is stated in the plan: KernelScaling::Widen { column, row } replaces WidenWhenDownsampling, because gdalwarp's own estimate varies between chunks (osgeo-upstream#50).
+MidpointsBetweenCentres is redefined in the coordinates' own CRS, with each corner at the mean of the four centres around it. This matches gdalwarp's geolocation transformer with PIXEL_CENTER.
+Missing values. The layout's fill doesn't count as missing. CF missing values are compared in the packed type. Packed variables are added to "Not settled".
+Reference data. Regridding weights are noted as a physical-planning output. Conservative fixtures can come from ESMF and TempestRemap, via the gdal-r-esmf image in hypertidy/gdal-r-ci.
+Questions 1 to 5 are summarised as answered.
+🤖 Generated with Claude Code
+charles-turner-1
+and others
+added 3 commits
+October 29, 2026 15:22
+Merge branch 'design/grids' into design/warp
+…
+2da01af
+```
+# Conflicts:
+#	plans/2026-10-28-discussion.md
+```
+docs: mark the earlier per-variable output note as superseded by Cast
+…
+3a7c338
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MhkH4hMxRGP9tLiaB6mP6L
+```
+docs: explain why a warp target can be bound data
+…
+128c699
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MhkH4hMxRGP9tLiaB6mP6L
+```
+charles-turner-1
+mentioned this pull request
+Oct 29, 2026
+docs: Select's effect on grids
+#21
+Merged
+charles-turner-1
+added 2 commits
+October 29, 2026 17:49
+Merge branch 'design/grids' into design/warp
+65ad108
+Merge branch 'design/grids' into design/warp
+2973783
+charles-turner-1
+merged commit 04dd2c8
+into
+main
+Oct 29, 2026
+charles-turner-bot
+mentioned this pull request
+Oct 31, 2026
+[P1][Design] Review explicit Cast against Array API astype without folding it into Warp
+#38
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

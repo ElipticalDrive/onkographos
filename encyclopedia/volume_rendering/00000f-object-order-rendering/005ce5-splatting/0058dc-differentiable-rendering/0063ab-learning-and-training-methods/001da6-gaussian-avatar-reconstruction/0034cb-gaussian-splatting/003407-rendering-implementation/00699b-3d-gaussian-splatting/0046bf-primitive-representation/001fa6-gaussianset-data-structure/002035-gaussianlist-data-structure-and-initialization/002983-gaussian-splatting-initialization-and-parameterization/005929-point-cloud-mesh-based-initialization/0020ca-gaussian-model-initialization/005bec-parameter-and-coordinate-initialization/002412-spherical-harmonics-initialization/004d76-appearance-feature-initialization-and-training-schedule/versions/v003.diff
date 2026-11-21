@@ -1,0 +1,178 @@
+--- v002.md
++++ v003.md
+@@ -4,111 +4,96 @@
+ 
+ ## Overview
+-This method defines the temporal schedule for introducing and initializing appearance features within a 3D Gaussian Splatting optimization pipeline, specifically within the context of optimized minimal implementations like Mini-Splatting [S1]. It addresses the problem of balancing training stability with the capacity to model complex appearance variations by delaying the introduction of appearance parameters until the geometric structure (scale and rotation) has stabilized. It sets itself apart from standard Gaussian Splatting by decoupling the initialization of static and view-dependent appearance features from the initial scene setup, instead deriving static features from intermediate training states [S1].
++This method defines a staged training protocol for 3D Gaussian Splatting that introduces appearance features after an initial period of geometry optimization, followed by simplification and quantization. It solves the problem of premature optimization of appearance parameters by decoupling them from the initial scale and rotation learning phases. Unlike standard Gaussian Splatting which optimizes all parameters simultaneously, this approach introduces static and view-dependent appearance features at iteration 15K, simplifies the primitive count at 20K, and applies Sub-Vector Quantization (SVQ) in the final 1K iterations [S1].
+ 
+ ## How it works
+-The method operates on a fixed training schedule of 30,000 iterations. It manages the lifecycle of Gaussian parameters, specifically introducing appearance features at iteration 15,000 and applying quantization in the final phase.
+-
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians with initialized positions, covariances (scale/rotation), and initial colors. The current iteration count $t$.
+-*   **Output:** Updated Gaussian parameters including appearance features and optimized codebooks for quantization.
++- Input: Initial 3D Gaussian primitives (position, covariance/scale, rotation, opacity, and initial SH coefficients).
++- Output: Optimized Gaussian primitives with quantized appearance features.
+ 
+ **Data Structures:**
+-*   **Appearance Features:** A tensor of shape $(N, D)$, where $N$ is the number of Gaussians and $D=3$ is the feature dimension [S1].
+-*   **Static Appearance Features:** Initialized from trained SH DC coefficients.
+-*   **View-Dependent Appearance Features:** Initialized as zero vectors.
+-*   **SVQ Codebooks:** Fixed indices from K-means clustering; optimized codebooks for Scale, Rotation, and Appearance.
++The Gaussian primitive stores appearance features as a vector of dimension $D=3$ [S1]. The training schedule manages the state of these features and the primitive set through specific iteration milestones.
++
++**Parameters:**
++- Total iterations: 30,000 [S1].
++- Appearance introduction iteration: 15,000 [S1].
++- Simplification iteration: 20,000 [S1].
++- SVQ start iteration: 29,000 [S1].
++- Local distinctiveness factor ($\lambda$): 2 [S1].
++- Appearance feature dimension ($D$): 3 [S1].
+ 
+ **Steps:**
+ 
+-1.  **Iterations 0–14,999: Geometry-Only Training**
+-    *   Train scale and rotation parameters from the initial iteration [S1].
+-    *   Do not train appearance features.
++1. **Initial Training (Iterations 0–14,999):**
++   Train scale and rotation parameters from the initial training iteration. Do not optimize appearance features. The spherical harmonics (SH) coefficients are updated, specifically the DC term, which serves as the basis for later initialization [S1].
+ 
+-2.  **Iteration 15,000: Appearance Feature Introduction**
+-    *   Introduce appearance features into the optimization [S1].
+-    *   **Static Feature Initialization:** Initialize the static appearance features using the spherical harmonics DC coefficients that have been trained up to iteration 15,000. Let $c_{DC}^{(t)}$ be the DC coefficient at iteration $t$. The static feature $a_{static}$ is set as:
+-        $$ a_{static} = c_{DC}^{(15000)} $$
+-    *   **View-Dependent Feature Initialization:** Initialize view-dependent appearance features as zero vectors:
+-        $$ a_{view} = \mathbf{0} $$
++2. **Appearance Feature Introduction (Iteration 15,000):**
++   Introduce appearance features. Initialize static appearance features using the spherical harmonics DC coefficients trained up to iteration 15,000. Initialize view-dependent appearance features as zero vectors [S1].
+ 
+-3.  **Iterations 15,001–19,999: Appearance Training**
+-    *   Optimize both static and view-dependent appearance features alongside geometry.
++3. **Simplification (Iteration 20,000):**
++   Run the simplification process incorporating local distinctiveness (LD) scoring with factor $\lambda=2$ [S1]. This step reduces the number of Gaussians while preserving visual fidelity.
+ 
+-4.  **Iteration 20,000: Simplification with Local Distinctiveness**
+-    *   Run the simplification process (pruning/densification) [S1].
+-    *   Incorporate Local Distinctiveness (LD) scoring with factor $\lambda = 2$ [S1].
+-    *   The LD score $L_i$ for Gaussian $i$ typically influences the decision to prune or split based on its uniqueness relative to neighbors, weighted by $\lambda$.
+-
+-5.  **Iterations 20,001–28,999: Continued Training**
+-    *   Continue optimizing all parameters including appearance features.
+-
+-6.  **Iterations 29,000–29,999: Sub-Vector Quantization (SVQ) Optimization**
+-    *   Apply SVQ to per-Gaussian features [S1].
+-    *   Use fixed K-means indices (computed once prior to this phase) and optimize only the codebooks [S1].
+-    *   **Bit Allocations:**
+-        *   Scale: Length 1, 26 codes per sub-vector.
+-        *   Rotation: Length 2, 29 codes per sub-vector.
+-        *   Appearance features: Length 2, 210 codes per sub-vector [S1].
+-    *   The length 1 SVQ for scale acts as scalar quantization, dynamically learning the quantization range via codebooks [S1].
++4. **Sub-Vector Quantization (Iterations 29,000–30,000):**
++   Apply SVQ to per-Gaussian features using fixed K-means indices and optimized codebooks. K-means clustering is performed once to assign indices, which remain fixed. Only the codebooks are optimized for the remaining 1,000 iterations [S1].
++   - Scale: length 1, 26 codes for each sub-vector.
++   - Rotation: length 2, 29 codes for each sub-vector.
++   - Appearance features: length 2, 210 codes for each sub-vector [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def train_gaussian_splatting_schedule(gaussians, images, cameras, total_iterations=30000):
+-    # Initialization phase
+-    gaussians.init_scale_rotation()
+-    # Appearance features not yet added to optimization
++def train_gaussian_avatar(total_iterations=30000, appearance_start=15000, simplification_iter=20000, svq_start=29000):
++    # Initialize Gaussians with position, scale, rotation, opacity, SH coefficients
++    gaussians = initialize_gaussians()
+     
+-    for t in range(total_iterations):
+-        # Render and compute loss
+-        rendered_image = render(gaussians, cameras[t % len(cameras)])
+-        loss = compute_loss(rendered_image, images[t % len(images)])
+-        
+-        if t < 15000:
+-            # Phase 1: Geometry only
+-            optimize(gaussians.scale, gaussians.rotation, loss)
++    # Pre-compute K-means for SVQ if needed, but indices are fixed later
++    # Note: K-means is performed once before SVQ optimization
++    
++    for iter in range(total_iterations):
++        # 1. Initial Training: Optimize scale and rotation only
++        if iter < appearance_start:
++            optimize_scale_rotation(gaussians)
++            update_sh_dc(gaussians) # SH DC coefficients are tracked for later initialization
+             
+-        elif t == 15000:
+-            # Phase 2: Introduce Appearance
+-            # Initialize static features from current SH DC coefficients
++        # 2. Appearance Feature Introduction
++        elif iter == appearance_start:
++            # Initialize static appearance features from trained SH DC coefficients
+             gaussians.static_appearance = gaussians.sh_dc_coefficients
+-            # Initialize view-dependent features as zeros
+-            gaussians.view_dependent_appearance = zeros_like(gaussians.sh_dc_coefficients)
+-            # Add appearance parameters to optimizer
+-            optimizer.add_parameters(gaussians.static_appearance)
+-            optimizer.add_parameters(gaussians.view_dependent_appearance)
++            # Initialize view-dependent appearance features as zero vectors
++            gaussians.view_dependent_appearance = zeros_like(gaussians.position)
+             
+-        elif t == 20000:
+-            # Phase 3: Simplification with Local Distinctiveness
+-            # Lambda factor for LD scoring
+-            lambda_ld = 2
+-            simplify_gaussians(gaussians, lambda_ld=lambda_ld)
++        # 3. Simplification
++        elif iter == simplification_iter:
++            # Simplify primitives using Local Distinctiveness scoring with lambda=2
++            gaussians = simplify_gaussians(gaussians, lambda_factor=2)
+             
+-        elif t >= 29000:
+-            # Phase 4: SVQ Optimization
+-            # Indices are fixed from prior K-means
+-            # Only optimize codebooks
+-            optimize_codebooks(gaussians, lambda_scale=26, lambda_rot=29, lambda_appearance=210)
++        # 4. SVQ Optimization
++        elif iter >= svq_start:
++            # Apply SVQ with fixed indices and optimized codebooks
++            # Scale: length 1, 26 codes
++            # Rotation: length 2, 29 codes
++            # Appearance: length 2, 210 codes
++            optimize_svq_codebooks(gaussians, fixed_indices=True)
+             
+-        # Standard optimization step for active parameters
+-        optimizer.step()
+-        optimizer.zero_grad()
++        # Standard rendering and loss computation for all iterations
++        render_image(gaussians)
++        compute_loss()
++        update_gradients(gaussians)
+ ```
++
++**Edge Cases and Pitfalls:**
++- Precision: The SVQ step uses fixed K-means indices. If the initial K-means clustering is poor, the final quantization may be suboptimal [S1].
++- Boundaries: The transition at iteration 15,000 requires that SH DC coefficients are fully trained up to that point to provide a meaningful initialization for static appearance features [S1].
+ 
+ ## Subtopics
+ 
+-### [Appearance Embedding](14693-appearance-embedding.md)
+-Associates each training image with a unique learnable vector to model appearance variations such as lighting changes and shadows. It sets itself apart from standard Gaussian Splatting by decoupling appearance from the static 3D geometry, allowing the radiance field to adapt to per-image illumination conditions without altering the underlying Gaussian parameters.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds minimal computational overhead during the first 15,000 iterations. The introduction of appearance features increases memory usage and gradient computation cost from iteration 15,000 onwards. The SVQ phase (29K–30K) involves codebook optimization but uses fixed indices, reducing the search space compared to full quantization training [S1].
+-*   **Memory Complexity:** Memory usage increases at iteration 15,000 when appearance features (dimension $D=3$) are added to each Gaussian [S1].
+-*   **Hardware:** Experiments were conducted on an NVIDIA RTX 4090 [S1].
+-*   **Framework:** Implemented within the Mini-Splatting framework [S1].
+-*   **Strengths:** Improves training stability by allowing geometry to converge before introducing appearance complexity. The delayed initialization prevents early-stage instability from appearance parameters.
+-*   **Limitations:** Requires a fixed total iteration count (30K) for the schedule to be effective. The simplification step at 20K is critical and sensitive to the $\lambda=2$ factor [S1].
++- **Time Complexity:** The training runs for 30,000 iterations [S1]. The simplification step at 20,000 iterations adds computational overhead for LD scoring. The SVQ step in the last 1,000 iterations involves optimizing codebooks but uses fixed indices, reducing the search space [S1].
++- **Memory Complexity:** The introduction of appearance features increases the memory footprint per Gaussian. The SVQ step reduces memory usage by quantizing features, with specific codebook sizes: 26 codes for scale, 29 for rotation, and 210 for appearance features [S1].
++- **Performance:** Experiments were conducted on an NVIDIA RTX 4090 using the Mini-Splatting framework [S1]. The method aims to improve training efficiency and final quality through staged optimization and quantization [S1].
++- **Strengths:** Decoupling appearance from geometry/rotation optimization may lead to more stable convergence. SVQ reduces memory and potentially speeds up rendering.
++- **Limitations:** The fixed K-means indices in SVQ may not adapt to later training dynamics. The method requires careful tuning of iteration milestones.
+ 
+ ## Background
+-This schedule originates from the "Optimized Minimal 3D Gaussian Splatting" paper [S1]. It was developed to enhance training efficiency and reconstruction quality by carefully managing the introduction of appearance parameters and applying quantization techniques in the final stages of training. The method builds on the standard 3D Gaussian Splatting framework but introduces specific temporal controls for parameter optimization.
++This method is part of the "Optimized Minimal 3D Gaussian Splatting" framework, implemented within the Mini-Splatting library [S1]. It builds on the standard 3D Gaussian Splatting rendering pipeline but introduces a specific training schedule to handle appearance features and quantization efficiently [S1]. The approach is designed to optimize the trade-off between training time, memory usage, and rendering quality.
+ 
+ ## Sources

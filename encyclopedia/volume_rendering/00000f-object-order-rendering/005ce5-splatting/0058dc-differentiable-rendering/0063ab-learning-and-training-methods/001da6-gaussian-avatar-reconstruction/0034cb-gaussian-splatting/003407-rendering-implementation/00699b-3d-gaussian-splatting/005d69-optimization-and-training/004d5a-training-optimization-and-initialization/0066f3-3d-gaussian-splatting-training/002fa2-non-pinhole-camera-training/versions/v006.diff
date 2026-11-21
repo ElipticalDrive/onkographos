@@ -1,0 +1,153 @@
+--- v005.md
++++ v006.md
+@@ -4,76 +4,67 @@
+ 
+ ## Overview
+-Non-Pinhole Camera Training extends 3D Gaussian Splatting to handle camera models that deviate from the standard pinhole assumption, such as fisheye, undistorted, or uncentered projections. It solves the problem of scene reconstruction failure when standard pinhole rasterizers are applied to non-linear optical systems. It sets itself apart from standard training by integrating differentiable image-space warping and masking to bridge the gap between perspective view coordinates and distorted sensor coordinates, ensuring end-to-end differentiability.
++Non-Pinhole Camera Training extends 3D Gaussian Splatting to handle camera models that deviate from the standard pinhole assumption, such as fisheye lenses or uncentered projections. It solves the problem of geometric distortion and coordinate misalignment in non-standard imaging systems by integrating differentiable image-space warping and masking into the training loop. It sets itself apart from standard 3DGS by explicitly supporting uncentered-distorted and uncentered-undistorted camera models, whereas standard 3DGS assumes a centered pinhole model [S3].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Inputs:** Training images from non-pinhole cameras (e.g., fisheye, wide-angle), corresponding camera parameters (intrinsics, distortion coefficients, or undistortion maps), and initial 3D Gaussian parameters (position, covariance, opacity, spherical harmonics).
+-- **Outputs:** Optimized 3D Gaussian scene representation and camera parameters.
++The method adapts the differentiable rasterizer to accommodate various non-pinhole camera geometries by modifying the projection pipeline. The core requirement is that all coordinate transformations and pixel masking operations must remain differentiable to enable end-to-end gradient backpropagation [S3].
+ 
+-**Data Structures:**
+-- **Camera Model:** A structure defining the projection function $P: \mathbb{R}^3 \to \mathbb{R}^2$. For non-pinhole models, this includes:
+-    - Centered vs. Uncentered principal point offsets.
+-    - Distortion coefficients (e.g., radial distortion $k_1, k_2, k_3$).
+-    - Undistortion maps (pre-computed lookup tables for pixel coordinates).
+-- **Differentiable Warping Layer:** A module that maps coordinates from the ideal pinhole space to the distorted sensor space.
+-- **Mask:** A binary or soft mask indicating valid pixels (excluding black borders introduced by undistortion).
++### Inputs and Outputs
++- **Inputs**: Training images from non-pinhole cameras (e.g., fisheye, wide-angle), corresponding camera parameters (intrinsics, distortion coefficients, center offsets), and initial 3D Gaussian attributes (position, covariance, opacity, spherical harmonics).
++- **Outputs**: Optimized 3D Gaussian representation and camera parameters that reconstruct the scene under the specific non-pinhole projection.
+ 
+-**Steps:**
+-1. **Camera Model Selection:** Identify the specific non-pinhole model for the dataset.
+-    - For centered-undistorted models (e.g., Neural 3D Video Dataset), use the standard pinhole projection with undistorted coordinates [S3].
+-    - For uncentered-undistorted models (e.g., Technicolor Dataset), implement a camera model that accounts for principal point offsets in the undistorted space [S3].
+-    - For uncentered-distorted models (e.g., Google Immersive Dataset), use a differentiable image-space warping function that maps perspective views to fish-eye distorted views [S3].
+-2. **Coordinate Transformation:**
+-    - For distorted models, compute the ideal pinhole coordinates $(u_{pinhole}, v_{pinhole})$ from 3D Gaussian projections.
+-    - Apply the differentiable warping function $W(u_{pinhole}, v_{pinhole})$ to obtain distorted sensor coordinates $(u_{sensor}, v_{sensor})$ [S3].
+-    - If using undistorted images, map sensor coordinates to pinhole coordinates using the inverse undistortion function [S3].
+-3. **Rasterization:**
+-    - Project Gaussians onto the image plane using the transformed coordinates.
+-    - Rasterize the Gaussians to produce the predicted image $I_{pred}$ [S3].
+-4. **Masking:**
+-    - Generate a mask $M$ to exclude invalid pixels (e.g., black pixels resulting from undistortion or fisheye cropping) [S3].
+-    - The mask must be differentiable to allow gradient flow through the masking operation [S3].
+-5. **Loss Computation:**
+-    - Compute the reconstruction loss (e.g., L1, SSIM) between $I_{pred}$ and the ground truth image $I_{gt}$, weighted by the mask $M$:
+-      $$ \mathcal{L} = \sum_{i,j} M_{i,j} \cdot \text{Loss}(I_{pred}[i,j], I_{gt}[i,j]) $$
+-    - Optimize Gaussian parameters and camera parameters using gradient descent [S3].
++### Data Structures
++The Gaussian attributes remain standard (position $\mathbf{p}$, rotation $\mathbf{q}$, scale $\mathbf{s}$, opacity $\alpha$, SH coefficients). The camera model structure is extended to include:
++- **Center Offset**: $(c_x, c_y)$ for uncentered models.
++- **Distortion Coefficients**: $k_1, k_2, \dots$ for radial/tangential distortion.
++- **Warping Function**: A differentiable mapping $W: \mathbb{R}^2 \to \mathbb{R}^2$ that maps ideal perspective coordinates to distorted image coordinates.
+ 
+-**Parameters:**
+-- **Distortion Coefficients:** Typically 2-3 radial coefficients ($k_1, k_2, k_3$) for fisheye models [S3].
+-- **Mask Threshold:** Pixels with intensity below a threshold (e.g., 0) are masked out [S3].
++### Steps
++1. **Camera Model Selection**: Choose the appropriate camera model based on the dataset:
++   - **Centered-Undistorted**: Standard pinhole model (used for Neural 3D Video Dataset) [S3].
++   - **Uncentered-Undistorted**: Pinhole model with principal point offset (used for Technicolor Dataset) [S3].
++   - **Uncentered-Distorted**: Fisheye or wide-angle model with distortion and offset (used for Google Immersive Dataset) [S3].
++2. **Differentiable Warping**: For distorted models, apply a differentiable image-space warping function $W$ to map perspective view coordinates to the distorted image plane. This function must support gradient computation [S3].
++3. **Masking**: Generate a binary mask $M$ to exclude invalid pixels (e.g., black borders resulting from undistortion or out-of-bounds warping). The mask must be differentiable or applied in a way that allows gradients to flow through valid pixels [S3].
++4. **Rasterization**: Render the Gaussians using the adapted projection. The rasterizer computes the contribution of each Gaussian to the image plane, accounting for the warped coordinates and masked regions.
++5. **Loss Computation**: Compute the rendering loss (e.g., L1, SSIM) only over valid pixels where $M=1$.
++6. **Optimization**: Update Gaussian attributes and camera parameters using gradient descent. The differentiability of $W$ and $M$ ensures gradients propagate correctly from the loss to the Gaussians [S3].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Non-Differentiable Warping:** Image warping and masking must remain differentiable to allow end-to-end training. Standard interpolation or hard thresholding may break gradient flow [S3].
+-- **Coordinate System Mismatch:** Ensure consistent coordinate systems (e.g., center vs. corner of pixels) across the warping and rasterization steps [S3].
+-- **Black Pixels:** Undistortion often introduces black borders. These must be masked out to prevent gradient noise [S3].
++### Formulas
++- **Warping**: $\mathbf{u}_{distorted} = W(\mathbf{u}_{perspective})$, where $\mathbf{u}$ are 2D image coordinates.
++- **Masking**: $\mathbf{I}_{rendered} = \mathbf{I}_{rendered} \odot M$, where $\odot$ is element-wise multiplication.
++- **Loss**: $\mathcal{L} = \sum_{i,j} M_{i,j} \cdot \|\mathbf{I}_{rendered}(i,j) - \mathbf{I}_{target}(i,j)\|$.
+ 
+-**Pseudocode:**
++### Parameters
++- **Distortion Coefficients**: Typically $k_1, k_2$ for radial distortion. Values depend on the lens.
++- **Center Offset**: $(c_x, c_y)$ determined by camera calibration.
++- **Mask Threshold**: Pixels with intensity below a threshold (e.g., 0) are masked out [S3].
++
++### Edge Cases and Pitfalls
++- **Non-Differentiable Masking**: If the mask is not differentiable, gradients may be blocked. Use soft masks or ensure the warping function handles boundaries smoothly [S3].
++- **Black Pixels**: Undistorted images often have black borders. These must be masked out to prevent loss computation on invalid data [S3].
++- **Coordinate System Mismatch**: Ensure the warping function aligns with the rasterizer's coordinate system (e.g., origin at center vs. corner) [S3].
++
++### Pseudocode
+ ```python
+-def non_pinhole_training_step(gaussians, camera_params, image, mask):
+-    # 1. Project Gaussians to ideal pinhole coordinates
+-    # gaussians: list of Gaussian objects with position, covariance, opacity, SH
+-    # camera_params: intrinsics, distortion coefficients
+-    projected_coords = project_gaussians_pinhole(gaussians, camera_params)
++def render_non_pinhole(gaussians, camera, image_size):
++    # 1. Project Gaussians to perspective plane
++    perspective_coords = project_to_perspective(gaussians, camera)
+     
+-    # 2. Apply differentiable warping for non-pinhole models
+-    # For fisheye/distorted models:
+-    if camera_params.model_type == "distorted":
+-        sensor_coords = differentiable_warp(projected_coords, camera_params.distortion_coeffs)
++    # 2. Apply differentiable warping for distorted models
++    if camera.is_distorted:
++        distorted_coords = differentiable_warp(perspective_coords, camera.distortion_coeffs)
+     else:
+-        sensor_coords = projected_coords
++        distorted_coords = perspective_coords
+         
+-    # 3. Rasterize using sensor coordinates
+-    rendered_image = rasterize_gaussians(gaussians, sensor_coords, camera_params.resolution)
++    # 3. Rasterize using distorted coordinates
++    rendered_image = rasterize(gaussians, distorted_coords, image_size)
+     
+-    # 4. Apply mask to exclude invalid pixels
+-    # mask: differentiable mask, 1 for valid, 0 for invalid
+-    masked_rendered = rendered_image * mask
+-    masked_gt = image * mask
++    # 4. Apply differentiable mask for invalid pixels
++    mask = generate_differentiable_mask(distorted_coords, image_size)
++    masked_image = rendered_image * mask
+     
+-    # 5. Compute loss
+-    loss = l1_loss(masked_rendered, masked_gt)
++    # 5. Compute loss against target
++    loss = compute_loss(masked_image, target_image, mask)
+     
+-    # 6. Backpropagate
+-    loss.backward()
+     return loss
+ ```
+@@ -85,15 +76,17 @@
+ 
+ ### Non-Pinhole Camera Adaptation
+-Adaptation of the 3D Gaussian Splatting framework to specific non-pinhole camera models. For the Neural 3D Video Dataset, use the original centered-undistorted camera model [S3]. For the Technicolor Dataset, implement and use an uncentered-undistorted camera model [S3]. For the Google Immersive Dataset, adapt the method to fit an uncentered-distorted camera model using a differentiable image space warping function that maps perspective views to fish-eye distorted views [S3]. For real-time demos, retrain models on undistorted videos and apply a differentiable mask to exclude black pixels resulting from undistortion [S3]. Image warping and masking must remain differentiable to allow end-to-end training despite the coordinate transformations and pixel masking [S3].
++Adaptation of the 3DGS pipeline to specific non-pinhole datasets. For the Neural 3D Video Dataset, use the original centered-undistorted camera model [S3]. For the Technicolor Dataset, implement and use an uncentered-undistorted camera model [S3]. For the Google Immersive Dataset, adapt the method to fit an uncentered-distorted camera model using a differentiable image space warping function that maps perspective views to fish-eye distorted views [S3]. For real-time demos, retrain models on undistorted videos and apply a differentiable mask to exclude black pixels resulting from undistortion [S3]. Image warping and masking must remain differentiable to allow end-to-end training despite the coordinate transformations and pixel masking [S3].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Similar to standard 3D Gaussian Splatting, with additional overhead for differentiable warping and masking operations [S3].
+-- **Memory Complexity:** Increased memory usage for storing distortion maps or warping parameters [S3].
+-- **Measured Performance:** On the Matterport dataset, the proposed method successfully reconstructs the scene, whereas standard 3D-GS fails entirely [S1].
+-- **Strengths:** Enables reconstruction of scenes captured with non-pinhole cameras (e.g., fisheye, wide-angle) [S1].
+-- **Limitations:** Requires careful implementation of differentiable warping and masking [S3]. Performance may degrade if the warping function is not sufficiently smooth [S3].
++- **Time Complexity**: Similar to standard 3DGS, but with additional overhead for warping and masking operations. The differentiable warping adds computational cost per pixel [S3].
++- **Memory Complexity**: No significant increase in memory usage compared to standard 3DGS, as the Gaussian attributes remain the same [S3].
++- **Performance**: Successfully reconstructs scenes on non-pinhole datasets where standard 3DGS fails entirely, such as the Matterport dataset [S1].
++- **Strengths**: Handles a wide variety of camera models, including fisheye and uncentered projections. Enables training on real-world data with non-standard lenses [S3].
++- **Limitations**: Requires careful implementation of differentiable warping and masking. Performance may degrade if the warping function is not smooth or if the mask is not properly handled [S3].
++- **When to Use**: When training on datasets with non-pinhole cameras (e.g., fisheye, wide-angle, uncentered) [S3].
++- **When Not to Use**: For standard pinhole camera datasets, where standard 3DGS is sufficient and simpler [S3].
+ 
+ ## Background
+-Non-Pinhole Camera Training was developed to address the limitations of standard pinhole camera models in 3D Gaussian Splatting. It builds on the differentiable rasterization framework of 3D Gaussian Splatting [S1]. The method was introduced to handle datasets with non-linear optical systems, such as the Matterport dataset [S1], the Neural 3D Video Dataset [S3], the Technicolor Dataset [S3], and the Google Immersive Dataset [S3]. The approach leverages differentiable image-space warping to bridge the gap between perspective and distorted coordinates [S3].
++Non-Pinhole Camera Training was developed to address the limitations of standard 3DGS in handling non-standard camera models. It builds on the differentiable rasterizer of 3DGS, extending it to support various camera geometries [S3]. The method has been applied to datasets such as the Neural 3D Video Dataset, Technicolor Dataset, and Google Immersive Dataset [S3]. It has also been shown to succeed on the Matterport dataset, where standard 3DGS fails [S1]. The technique of Aperture Randomized Training, while related to defocus disentanglement, shares the principle of randomizing camera parameters during training to improve representation learning [S2].
+ 
+ ## Sources

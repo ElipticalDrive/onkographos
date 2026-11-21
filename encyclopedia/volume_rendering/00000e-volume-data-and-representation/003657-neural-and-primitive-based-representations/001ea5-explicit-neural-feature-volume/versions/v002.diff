@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -8,52 +8,49 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: A set of 2D projection images (sinograms) and their corresponding camera poses.
++*   Input: A set of 2D projection images and corresponding camera poses.
+ *   Output: A 3D density volume reconstructed via volume rendering.
+ 
+ **Data Structures:**
+-The core data structure is an explicit tensor storing feature vectors.
+-*   **Feature Tensor:** A 3D grid where each cell contains a fixed-size feature vector.
+-*   **Feature Vector Size:** 8 elements (floats) [S1].
+-*   **Grid Resolution:** Varies by configuration; a typical high-quality configuration uses a resolution of $8 \times 173 \times 173$ (or similar anisotropic scaling) [S1].
+-*   **Sparse Representation:** The tensor is often organized hierarchically (e.g., octree) to allow empty space skipping and structural refinement (merging/splitting/culling leaf nodes) [S1].
++*   **Feature Tensor:** An explicit 3D grid storing feature vectors [S1].
++*   **Sparse Representation:** The tensor is organized hierarchically (e.g., octree) to enable empty space skipping and structural refinement (merging, splitting, and culling leaf nodes) [S1].
+ 
+ **Steps:**
+-1.  **Initialization:** Initialize the explicit feature tensor with random or zero values. The grid resolution is chosen to balance variable count with detail [S1].
+-2.  **Ray Casting:** For each pixel in a target view, cast a ray through the 3D space.
+-3.  **Feature Sampling:** Sample the feature tensor at points along the ray. If using a sparse/octree structure, traverse the tree to find active nodes [S1].
+-4.  **Decoding (Density Activation):** Pass the sampled 8-element feature vector through a small decoder network to produce a single scalar density value $\sigma$ [S1].
+-    *   *Note:* The decoder acts as a regularizer. Without it, blurry artifacts appear similar to iterative reconstruction methods [S1].
+-5.  **Volume Rendering:** Compute the accumulated color and opacity along the ray using standard volume rendering integrals, weighted by the decoded density $\sigma$ [S1].
+-6.  **Loss Computation:** Compare the rendered image against the ground truth projection.
+-7.  **Optimization:** Update the feature tensor values and decoder network weights using gradient descent.
+-8.  **Structural Refinement:** Periodically (every few epochs), perform octree optimization: merge, split, and cull leaf nodes to optimize reconstruction time and memory [S1].
++1.  **Storage:** Store neural features explicitly as a large tensor, rather than compressing them into an implicit neural network [S1].
++2.  **Decoding:** Pass sampled feature vectors through a decoder network to produce scalar density values [S1]. The decoder acts as a regularizer to improve reconstruction in difficult conditions [S1].
++3.  **Rendering:** Compute accumulated color and opacity along rays using the decoded density values [G]. The opacity at each step follows $\alpha = 1 - e^{-\sigma \Delta t}$, where $\sigma$ is the decoded density and $\Delta t$ is the step size [G].
++4.  **Refinement:** Periodically (every few epochs), perform octree optimization by merging, splitting, and culling leaf nodes to reduce reconstruction time via empty space skipping [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Simplified forward pass for a single ray
+-def render_ray(ray_origin, ray_direction, feature_grid, decoder_network):
+-    # 1. Traverse the sparse grid (octree) along the ray
+-    # Returns a list of (position, feature_vector) tuples
+-    samples = feature_grid.sample_along_ray(ray_origin, ray_direction)
++import math
++
++def render_ray(ray_origin, ray_direction, feature_grid, decoder_network, step_size, grid_min, grid_max):
++    # March along ray within grid bounds
++    t_min = max(0.0, (grid_min - ray_origin) / ray_direction)
++    t_max = min(grid_max, (grid_max - ray_origin) / ray_direction)
++    num_steps = int((t_max - t_min) / step_size)
+     
+     accumulated_color = 0.0
+-    accumulated_alpha = 0.0
+     T = 1.0  # Transmittance
+     
+-    for pos, feature_vec in samples:
+-        # 2. Decode feature vector to density
+-        # feature_vec is size 8
+-        density = decoder_network(feature_vec)
++    for i in range(num_steps):
++        t = t_min + i * step_size
++        pos = ray_origin + ray_direction * t
+         
+-        # 3. Volume rendering step (simplified)
+-        # alpha = 1 - exp(-density * step_size)
+-        alpha = 1.0 - exp(-density * 0.1) # step_size assumed 0.1
++        # Sample feature vector from explicit grid (sparse octree traversal omitted for brevity) [G]
++        feature_vec = feature_grid.sample(pos)
+         
+-        color = compute_color(pos, feature_vec) # Color might be separate or derived
++        # Decode feature vector to scalar density
++        density = float(decoder_network(feature_vec))
+         
+-        # 4. Composite
++        # Compute alpha from density
++        alpha = 1.0 - math.exp(-density * step_size)
++        
++        # Retrieve color (typically stored in grid or decoded separately) [G]
++        color = float(feature_vec[0])
++        
++        # Composite
+         weight = T * alpha
+         accumulated_color += weight * color
+-        accumulated_alpha += weight
+         T *= (1.0 - alpha)
+         
+@@ -65,19 +62,16 @@
+ 
+ **Parameters:**
+-*   **Feature Vector Dimension:** 8 [S1].
+-*   **Grid Resolution:** $8 \times 173 \times 173$ (with decoder) vs $1 \times 333 \times 333$ (without decoder) [S1]. Note: Both configurations use the same total number of variables [S1].
+ *   **Refinement Frequency:** Every few epochs [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Missing Wedge Blur:** In limited-angle tomography, reconstructions are naturally blurred in the direction orthogonal to the missing viewing direction [S1].
+-*   **Hybrid Model Degradation:** Using a hybrid explicit-implicit model (compressing features into an implicit network) worsens PSNR in limited-angle scenarios because the implicit network's regularization encourages additional blur instead of repairing the missing wedge artifacts [S1].
++*   **Hybrid Model Degradation:** Using a hybrid explicit-implicit model worsens PSNR in limited-angle scenarios because the implicit network's regularization encourages additional blur instead of repairing the missing wedge artifacts [S1].
+ *   **Memory Consumption:** Hybrid models have higher *intermediate* memory consumption during training because all feature volumes must be decoded to trace rays for a single view, despite potentially smaller final model size [S1].
+ *   **Training Time:** Hybrid models dramatically increase training times [S1].
+-*   **Blur without Decoder:** Omitting the decoder network leads to blurry artifacts [S1].
+ 
+ ## Subtopics
+ 
+ ### [Density Activation](2421-density-activation.md)
+-Density Activation is the specific mechanism within the Explicit Neural Feature Volume pipeline that converts the raw 8-element feature vector into a valid, non-negative density value. It differs from the parent method by focusing solely on the final non-linear mapping step rather than the storage and retrieval of the feature tensor. It is chosen when regularization is needed to prevent blurry artifacts in difficult reconstruction conditions (e.g., limited angles). The decoder network typically transforms the 8-element feature vector into a single density value. A key implementation detail is that the variant *with* the decoder uses a grid resolution of $8 \times 173$, while the variant *without* the decoder uses $1 \times 333$, maintaining the same total variable count. Without this activation/decoder step, blurry artifacts similar to those in iterative reconstruction methods appear.
++Density Activation converts raw neural feature outputs into valid, non-negative density values suitable for volume rendering [G]. It ensures that density values remain physically meaningful and differentiable for gradient-based optimization [G]. It differs from the parent [Explicit Neural Feature Volume](1838-explicit-neural-feature-volume.md) by specifically handling the final non-linear mapping step from feature space to scalar density, whereas the parent focuses on the storage and retrieval of the feature tensor itself [G].
+ 
+ ## Operating characteristics
+@@ -85,8 +79,4 @@
+ *   **Memory Complexity:** Intermediate memory consumption is lower than hybrid models because features are stored explicitly and do not require decoding an implicit network for ray tracing [S1]. Final model size is larger than hybrid models, but this is a trade-off for better reconstruction quality [S1].
+ *   **Performance:** Achieves higher PSNR than hybrid explicit-implicit models, particularly in limited-angle tomography [S1].
+-*   **Strengths:** Better reconstruction quality in limited-angle scenarios; avoids the "blur encouragement" of implicit regularizers; lower intermediate memory usage during training compared to hybrids.
+-*   **Limitations:** Higher final model size compared to hybrid approaches; requires careful tuning of grid resolution and decoder architecture.
+-*   **When to Use:** Limited-angle tomography where hybrid models fail to repair missing wedge blur; scenarios where intermediate training memory is a constraint.
+-*   **When Not to Use:** When final model compactness is the absolute priority and limited-angle artifacts are not a concern; when training time is extremely constrained (though hybrids are slower).
+ 
+ ## Background

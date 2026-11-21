@@ -1,0 +1,30 @@
+# Navier-Stokes Solvers
+Also called: Fluid Simulation, Grid-Based Fluid Dynamics
+
+## Overview
+This family encompasses numerical methods for discretizing and solving the Navier-Stokes equations to simulate incompressible fluid flow, producing velocity and pressure fields for volumetric rendering [13501-navier-stokes-solver-components.md]. It solves the problem of computing physically plausible fluid motion from continuous partial differential equations into a discrete grid-based representation. It is distinguished from particle-based methods (like [Position Based Fluids](1765-position-based-fluids.md)) by its Eulerian grid-based approach, and from pure advection methods (like [Smoke Advection](4639-smoke-advection.md)) by its inclusion of pressure projection and diffusion steps required to maintain incompressibility and viscosity [13501-navier-stokes-solver-components.md].
+
+## Shared principles
+All methods in this family solve the incompressible Navier-Stokes equations on a staggered or collocated grid. The core mechanism involves:
+1.  **Velocity Advection**: Advecting the velocity field $\mathbf{u}$ by itself using the convective term $(\mathbf{u} \cdot \nabla) \mathbf{u}$ [13501-navier-stokes-solver-components.md].
+2.  **Pressure Projection**: Solving a Poisson equation for pressure $p$ to enforce the divergence-free constraint ($\nabla \cdot \mathbf{u} = 0$) [13501-navier-stokes-solver-components.md].
+3.  **Diffusion**: Solving a diffusion equation for viscosity $\nu$ to handle viscous forces $\nu \nabla^2 \mathbf{u}$ [13501-navier-stokes-solver-components.md].
+4.  **Time Integration**: Advancing the state using a semi-Lagrangian or similar scheme, typically splitting the operations into advection, diffusion, and pressure solve steps per time step $dt$ [13501-navier-stokes-solver-components.md].
+
+## Subtopics
+
+### [Navier-Stokes Solver Components](13501-navier-stokes-solver-components.md)
+This family encompasses the numerical methods used to discretize and solve the Navier-Stokes equations for incompressible flow, producing the velocity and pressure fields that drive fluid simulation. It solves the problem of computing physically plausible fluid motion (velocity, pressure, density) from a continuous partial differential equation into a discrete grid-based representation. It is distinguished from particle-based methods (like [Position Based Fluids](1765-position-based-fluids.md)) by its Eulerian grid-based approach, and from pure advection methods (like [Smoke Advection](4639-smoke-advection.md)) by its inclusion of pressure projection and diffusion steps required to maintain incompressibility and viscosity.
+
+### [Grid-Based Simulation](13502-grid-based-simulation.md)
+Grid-Based Simulation discretizes physical sources (fluids, smoke, fire) into a volumetric representation on a structured spatial domain [G]. It differs from particle-based siblings like [Gaussian Splashing](1387-gaussian-splashing.md) and [Position Based Fluids](1765-position-based-fluids.md) by storing state in fixed voxel arrays, which enables efficient divergence and advection calculations via 3D textures [G].
+
+### [Navier-Stokes Fire Simulation](14659-navier-stokes-fire-simulation.md)
+Navier-Stokes Fire Simulation models fire as a hot, turbulent gas by solving the physical laws of fluid dynamics, specifically the Navier-Stokes equations, to generate time-varying volumetric data. It differs from procedural or particle-based siblings by deriving motion from conservation of momentum and mass rather than noise functions or ad-hoc particle rules, providing physically accurate convection and buoyancy.
+
+## Background
+The Navier-Stokes equations, formulated in the 19th century, describe the motion of viscous fluid substances. In computer graphics, their application to fluid simulation was pioneered by Jos Stam in 1999 with "Stable Fluids," which introduced semi-Lagrangian advection and stable integration schemes suitable for real-time rendering . This work laid the foundation for grid-based fluid simulation in visual effects and games. The family has since expanded to include specialized variants for fire and smoke, integrating thermal buoyancy and density transport .
+
+## Sources
+[S1] Jos Stam, "Stable Fluids," SIGGRAPH 1999 Course Notes.
+[S2] Unofficial lecture notes on Navier-Stokes Fire Simulation.

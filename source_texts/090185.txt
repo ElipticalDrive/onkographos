@@ -1,0 +1,209 @@
+GPU Texture Compression Everywhere – Ignacio Castaño
+Skip to content
+When I joined NVIDIA in 2005, one of my main goals was to work on texture and mesh processing tools. The NVIDIA Texture Tools were widely used, and Cem Cebenoyan, Sim Dietrich and Clint Brewer had been doing interesting work on mesh processing and optimization (nvtristrip, nvmeshmender). That was exactly the kind of work I wanted to be involved in.
+However, the priorities of the tools team were different, and I ended up working on FX Composer instead. I wasn’t particularly excited about that, so in 2006, I switched to the Developer Technology group.
+At the time, NVIDIA and ATI were competing for dominance in the GPU market. While we had a solid market share, our real goal was to grow the overall market. Expanding the “pie” rather than just our slice of it. If you imagine a gamer with a fixed budget, we wanted him to allocate more of that budget to the GPU rather than the CPU. One way to achieve this was by encouraging developers to shift workloads from the CPU to the GPU.
+This push was part of the broader GPGPU movement. CUDA had just been released, but it had no integration with graphics APIs, and compute shaders didn’t exist yet. One of the workloads that caught our attention was GPU texture compression. Under the pretext of harnessing the GPU, I found my way back to working on texture compression.
+Another idea gaining traction at the time was runtime texture compression.
+In April 2004, Farbrausch released .kkrieger, a first-person shooter that packed all its content into just 96 KB by using procedural generation for levels, models, and textures, but it wasn’t until late into the development of fr-041: debris in 2007 that they started using runtime DXT compression to reduce GPU memory usage and improve performance.
+Around the same time, Allegorithmic was developing ProFX, the predecessor to Substance Designer, a middleware for real-time procedural texturing. ProFX also included a fast DXT encoder, allowing procedural textures to be converted into GPU-friendly formats at load time.
+Simon Brown was working on PlayStation Home, Sony’s 3D social virtual world where players could create and customize their avatars. To support this, he wrote a fast DXT encoder optimized for the PS3’s SPUs, demonstrating the potential of offloading texture compression to parallel processors.
+John Carmack had been talking about the megatexture technology for a while, but in 2006, when Jan Paul van Waveren published the details of their Real-Time DXT Compression implementation on the Intel Software Network, we at NVIDIA saw a potential problem: if Rage ended up CPU-limited, it could push gamers toward CPU upgrades rather than GPUs. That made real-time texture compression in the GPU a strategic priority for us.
+The first problem we encountered was that in Direct3D 10, updating a DXT texture without transferring data back to the CPU wasn’t possible. Fortunately, OpenGL had recently introduced pixel buffer objects (PBOs). While not designed for this purpose, PBOs provided a workaround: we could render each block to an integer render target, copy the contents to a PBO, and then transfer the compressed data from the PBO to a DXT-compressed texture.
+This is the technique that I employed in the examples that accompanied the papers that Jan Paul and I co-authored and that can still be found online:
+Compress YCoCg-DXT
+Compress Normal-DXT
+These examples allowed us to demonstrate that GPU texture compression was possible and show its potential.
+Direct3D 10
+I then pushed for changes in graphics APIs to better support this use case. The first API to enable direct copies from uncompressed to compressed textures was Direct3D 10.1, which relaxed the restrictions in the CopyResource and CopySubresourceRegion APIs to allow copies between prestructured-typed textures and block-compressed textures of the same bit width.
+For more details see: Format Conversion Using Direct3D 10.1
+This functionality was also available on consoles at the time through low-level APIs provided by hardware vendors. In this GDC talk, Jason Tranchida from Volition discusses their experience implementing real-time DXT compression using these APIs and Direct3D 10.1.
+OpenGL
+A year later, this feature arrived in OpenGL with NV_copy_image. However, it wasn’t until 2012, six years after its introduction in Direct3D, that it became more widely available via ARB_copy_image and OpenGL 4.3.
+In OpenGL, the equivalent of D3D’s CopySubresourceRegion is glCopyImageSubData. Like its Direct3D 10 counterpart, it enables copying data from an uncompressed texture to a block-compressed texture, provided the formats are compatible, which generally means that the texel size matches the block size.
+This feature could have facilitated the use of GPU texture compression in id Tech 5, enabling Rage to offload more work from the CPU to the GPU. However, Rage did not employ GPU texture compression at launch. Instead, it continued relying on the CPU-based approach described in Jan Paul’s paper.
+At that point I was already working on The Witness, so it was Evan Hart from NVIDIA’s Developer Technology team who revisited this problem and implemented GPU texture compression for id Tech 5, building on the foundations I had put in place, and addressing all the practical challenges that arise when integrating real-time GPU compression into a production engine.
+OpenGL ES
+I didn’t pay much attention to these features again until I started developing Spark. Since my focus was on mobile, I was particularly interested in OpenGL ES, which appeared to support the same functionality through the GL_EXT_copy_image extension and had become a core feature in OpenGL ES 3.2.
+While testing this feature, I encountered an unexpected limitation: OpenGL ES does not support the rg32ui output image layout. Instead, to output 64-bit blocks, you have to use rgba16ui:
+```
+layout(rgba16ui) uniform restrict writeonly highp uimage2D dst;
+```
+This requires packing the 64-bit uvec2 block manually before passing it to imageStore:
+```
+uvec4 pack_uvec2(uvec2 v) {
+    return uvec4(v.x & 0xFFFFu, v.x >> 16, v.y & 0xFFFFu, v.y >> 16);
+}
+...
+imageStore(dst, uv, pack_uvec2(block));
+```
+That said, in a world where compute shaders are ubiquitous, there’s now a much simpler way to accomplish the same task. By using a compute shader to write compressed data into a temporary buffer, we can bind that buffer to the GL_PIXEL_UNPACK_BUFFER target and source data directly from it using glCompressedTexSubImage2D:
+```
+glBindBuffer(GL_PIXEL_UNPACK_BUFFER, tmp_buffer);
+glBindTexture(GL_TEXTURE_2D, dst_texture);
+glCompressedTexSubImage2D(GL_TEXTURE_2D, dst_level, dst_x, dst_y, width, height, 
+    gl_format, tmp_buffer_size, (const void*)tmp_buffer_offset);
+```
+This turned out to work well on all devices and run with similar performance.
+Vulkan
+Like OpenGL, Vulkan supports copying data from uncompressed to block-compressed textures. This functionality has been available since Vulkan 1.0 through the vkCmdCopyImage API.
+So imagine my surprise when I tested it and found that most devices didn’t implement it correctly. The following screenshots show the results on Adreno, PowerVR, and Mali devices. Only Mali produced the correct output!
+At first, I thought my efforts to bring real-time texture compression to Vulkan on Android were doomed. But there was still some hope. I discovered that the KHR_maintenance2 extension allowed the creation of uncompressed image views of compressed images, eliminating the need for a copy altogether. This feature was later promoted to core in Vulkan 1.1, which happened to be our minimum requirement, so it seemed like a promising solution.
+Getting this to work, however, was far from straightforward. The documentation was sparse, and initial attempts led to validation errors, but after some effort, I managed to get it running correctly on PC. My optimism was short-lived, though. When I tested on mobile, the results were disastrous. The image below shows the output from two Adreno devices (left) and a PowerVR device (right):
+By this point, I had been working on Spark for almost 6 months, and it felt like all that work might have been for nothing. And this wasn’t the only problem. Under Vulkan most of my codecs produced incorrect output, failed to compile, or outright crashed the device. Only the simplest kernels worked correctly, and even they ran at much lower performance than their OpenGL ES equivalents.
+Thankfully, I was stubborn and persevered. I spent the next few months narrowing down every issue, sending repro cases to IHVs, and trying every possible workaround. That effort paid off. A few months later, all Spark codecs were running correctly and performing as well as, or better than, their GLES counterparts.
+The root cause of many of these issues was my initial reliance on fragment shaders. At the time, the version of the Hype engine that I was using lacked support for compute shaders, so my first integration experiments ran the codecs using fragment shaders. This meant I couldn’t output compressed blocks to a buffer like in OpenGL, but instead, I had to render to a texture, requiring vkCmdCopyImage.
+However, Vulkan also allows updating block-compressed textures using vkCmdCopyBufferToImage. In fact, this is the same command that you would use to upload block-compressed textures, which means this code path was heavily tested across vendors, and unsurprisingly, it worked flawlessly.
+It also turned out that the texture corruption issues when using block-texel views were associated to the use of fragment shaders, in particular, to the use of VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT. Replacing that flag with VK_IMAGE_USAGE_STORAGE_BIT resolved the problems entirely.
+Getting this to work correctly was challenging, and this was enhanced by the fact that I never knew whether I was doing something wrong and the validation layer was not catching my errors, or whether the hardware or the software was at fault. So, I’m gonna explain this procedure in a bit more detail:
+To create block-texel views you first have to create an image with the following flags:
+EXTENDED_USAGE: This allows creating a block-compressed image with the VK_IMAGE_USAGE_STORAGE_BIT flag, even if that usage isn’t normally supported for compressed formats, as long as it is removed from the block-compressed views.
+MUTABLE_FORMAT: This allows us to create image views with different, but compatible formats.
+BLOCK_TEXEL_VIEW_COMPATIBLE: This extends the list of compatible formats to include uncompressed formats where the texel matches the block size.
+Here’s an example:
+```
+VkFormat compressed_format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+VkFormat uncompressed_format = VK_FORMAT_R32G32B32A32_UINT;
+
+VkImageCreateInfo image_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+image_info.imageType = VK_IMAGE_TYPE_2D;
+image_info.format = compressed_format;
+image_info.extent = { w, h, 1 };
+image_info.mipLevels = 1;
+image_info.arrayLayers = 1;
+image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+// Note, we create the compressed image with the *STORAGE* usage flag. This is only allowed thanks to EXTENDED_USAGE image flag.
+image_info.usage = 
+    VK_IMAGE_USAGE_SAMPLED_BIT | 
+    VK_IMAGE_USAGE_TRANSFER_DST_BIT | 
+    VK_IMAGE_USAGE_STORAGE_BIT;
+
+// Provide the required flags:
+image_info.flags = 
+    VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | 
+    VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT | 
+    VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+```
+After this you would allocate, create the image, and upload the data as you would do normally.
+In order to create a view for sampling the texture in the shader, you use the compressed format, but for that to succeed you have to explicitly remove the VK_IMAGE_USAGE_STORAGE_BIT:
+```
+VkImageViewCreateInfo sample_view_info = {};
+sample_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+sample_view_info.image = image;
+sample_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+sample_view_info.format = compressed_format;
+sample_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+sample_view_info.subresourceRange.levelCount = 1;
+sample_view_info.subresourceRange.layerCount = 1;
+
+// Remove the STORAGE usage flag from this view.
+VkImageViewUsageCreateInfo sample_view_usage_info = {};
+sample_view_usage_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+sample_view_usage_info.usage = image_info.usage & ~VK_IMAGE_USAGE_STORAGE_BIT;
+sample_view_info.pNext = &sample_view_usage_info;
+
+VkImageView sample_view = VK_NULL_HANDLE;
+vkCreateImageView(device, &sample_view_info, nullptr, &sample_view);
+```
+And to create a view to use the texture as storage in the compute shader, you use the uncompressed format. For maximum compatibility you should also remove the VK_IMAGE_USAGE_SAMPLED_BIT:
+```
+// Create texel view for storage:
+VkImageViewCreateInfo store_view_info = {};
+store_view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+store_view_info.image = image;
+store_view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+store_view_info.format = uncompressed_format;
+store_view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+store_view_info.subresourceRange.levelCount = 1;
+store_view_info.subresourceRange.layerCount = 1;
+
+// Remove the SAMPLED usage flag from this view.
+VkImageViewUsageCreateInfo store_view_usage_info = {};
+store_view_usage_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+store_view_usage_info.usage = image_info.usage & ~VK_IMAGE_USAGE_SAMPLED_BIT;
+store_view_info.pNext = &store_view_usage_info;
+
+VkImageView store_view = VK_NULL_HANDLE;
+VK_CHECK(vkCreateImageView(device, &image_view_create_info, nullptr, &store_view));
+```
+Vulkan also provides the KHR_image_format_list extension, which is promoted to Vulkan 1.2. This allows you to provide a list of compatible formats at creation time. Using this extension is not strictly required, but is recommended as it can be an optimization on some devices.
+Here’s an usage example:
+```
+VkImageFormatListCreateInfo format_list_info = {
+    VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO_KHR 
+};
+
+VkFormat view_formats[2];
+if (physical_device_properties.apiVersion >= VK_API_VERSION_1_2 || supported_extensions.KHR_image_format_list)
+{
+    view_formats[0] = compressed_format;
+    view_formats[1] = uncompressed_format;
+    format_list_info.viewFormatCount = 2;
+    format_list_info.pViewFormats = view_formats;
+    image_info.pNext = &format_list_info;
+}
+```
+You can use this same procedure to create render target textures with the VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT flag and then remove it from the corresponding compressed views for sampling. However, as noted earlier, this is known to be broken on many devices. For simplicity, I strongly recommend running the codecs in a compute shader instead.
+Direct3D 12
+The Direct3D 10.1 CopyResource APIs are available in both Direct3D 11 and Direct3D 12, but like Vulkan 1.1, Direct3D 12.1 also offers the possibility of creating a compressed Unordered Access View (UAV) of a block-compressed texture. To use this functionality you first need to check that the device supports the RelaxedFormatCastingSupported feature:
+```
+D3D12_FEATURE_DATA_D3D12_OPTIONS12 feature_options12 = {};
+hr = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12,
+                                 &feature_options12, sizeof(feature_options12));
+if (SUCCEEDED(hr)) {
+    supports_relaxed_format_casting = feature_options12.RelaxedFormatCastingSupported;
+}
+```
+Compared to Vulkan this is refreshingly easy. The only additional requirement is to use the CreateCommittedResource3 method in ID3D12Device10 and provide the list of compatible formats up front:
+```
+DXGI_FORMAT format_list[2] = {
+    DXGI_FORMAT_BC7_UNORM, DXGI_FORMAT_R32G32B32A32_UINT
+};
+hr = device10->CreateCommittedResource3(
+    &heap_properties,
+    D3D12_HEAP_FLAG_NONE,
+    &texture_desc,
+    D3D12_BARRIER_LAYOUT_COMMON,
+    nullptr,
+    nullptr,
+    countof(format_list),
+    format_list,
+    IID_PPV_ARGS(bc_texture));
+```
+After that you simply create the shader resource views and unordered access view using the formats specified on the list and it just works!
+Metal
+Unlike Vulkan and Direct3D 12, Metal does not support copying data directly from uncompressed to compressed textures. The only available method is to use a compute shader to write the compressed data to a buffer and then use a blit encoder to transfer the buffer contents to the texture:
+```
+let blitEncoder = commandBuffer.makeBlitCommandEncoder()
+
+blitEncoder.copy(
+    from: buffer, 
+    sourceOffset: bufferOffset, 
+    sourceBytesPerRow: bufferRowLength, 
+    sourceBytesPerImage: 0, 
+    sourceSize: MTLSize(width:width, height:height, depth:1), 
+    to: outputTexture, 
+    destinationSlice: 0, 
+    destinationLevel: 0, 
+    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+
+blitEncoder.endEncoding()
+```
+If, for any reason, the encoder outputs compressed data to an uncompressed texture, two additional copies are required: one from the texture to a buffer and another from the buffer to the compressed texture. The recommended approach is to have the encoder write compressed blocks directly to a buffer, so that only a single copy is required.
+It’s a bit disappointing that Metal lacks the resource casting capabilities available in Vulkan and Direct3D 12. However, iOS devices generally perform exceptionally well compared to Android, so in practice, they don’t fall behind despite this limitation. The main challenge is maintaining an efficient cross-API abstraction that achieves optimal performance across platforms, because that requires slightly different code paths and shader variations.
+Conclusions
+Getting this to work everywhere was a rollercoaster. If I had been doing this as part of a regular job, it would have been a fun ride, but since I was investing my own resources, it was nerve-wracking. For a long time, it wasn’t even clear whether I’d be able to make Spark work reliably on a sizeable subset of the devices I was targeting.
+Initially, I chose to keep these details private, sharing them only with clients to assist their integration efforts. However, I’ve come to realize that many developers don’t fully grasp the immense amount of work that has gone into ensuring Spark runs well across platforms, or the risks I’ve taken to get there.
+Hopefully, this not only helps others facing similar challenges but also provides a better appreciation for the effort behind Spark.
+3 Comments
+Thanks for the hints about Vulkan, I would never get it myself.
+Still I have difficulties in understanding.
+Vulkan reference insists on size compatibility between image formats, to be able to copy between compressed and uncompressed. Since all BC formats could never be less than 8 bytes (8 and 16 bytes in particular) this means that I can not operate with 4 byte formats like R8G8B8A8. It is very frustrating, and means that I should either perform additional step to convert my textures from 8 to 16 bit per channel, prior to copy it to compressed texture. Am I right or I missing something?
+Reply
+Vulkan does not perform texture compression automatically. You are responsible for providing the encoder, and since you cannot write directly to a compressed texture, this is usually done through an intermediate texture or an alias that maps an 8-byte or 16-byte texel to a block in the compressed texture. Writing an encoder is not trivial, but there are some free implementations available. I also provide commercial codecs that can be licensed: https://ludicon.com/spark/
+Reply
+Pingback: Writing to Compressed Textures in Metal – Ignacio Castaño
+Leave a Comment Cancel reply

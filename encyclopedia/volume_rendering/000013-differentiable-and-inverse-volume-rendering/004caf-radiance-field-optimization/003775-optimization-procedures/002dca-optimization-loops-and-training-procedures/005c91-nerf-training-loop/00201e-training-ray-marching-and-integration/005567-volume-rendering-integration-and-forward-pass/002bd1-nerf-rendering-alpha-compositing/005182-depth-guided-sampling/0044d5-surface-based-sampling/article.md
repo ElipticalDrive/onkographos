@@ -1,0 +1,96 @@
+# Surface-Based Sampling
+
+Also called: Near-Surface Sampling
+
+## Overview
+Surface-Based Sampling is a strategy that restricts 3D sample point generation to a narrow band around the estimated surface of an object, rather than sampling throughout the entire volume or free space [S1]. It solves the problem of quality degradation caused by standard NeRF sampling in irrelevant regions (free space or occluded areas) by concentrating computational resources where the radiance field actually varies [S1]. It differs from its siblings by explicitly using depth priors to define this sampling band: [Pixel Region and Depth Guided Ray Sampling](8866-pixel-region-and-depth-guided-ray-sampling.md) uses pixel-region constraints, [Truncated Depth-Based Sampling](10613-truncated-depth-based-sampling.md) truncates rays based on depth, while Surface-Based Sampling defines a symmetric range around the depth value [S1].
+
+## How it works
+**Inputs:**
+*   $d$: The depth value for a pixel/ray, representing the distance from the camera to the surface [S1].
+*   $\alpha$: Half of the specified sampling range (bandwidth) [S1].
+*   $N$: The number of sample points per ray [S1].
+*   Ray origin and direction (implicit in the calculation of sample positions along the ray) [S1].
+
+**Outputs:**
+*   A set of $N$ sample locations $\{S_{r,1}, ..., S_{r,N}\}$ along the ray, clustered around the surface [S1].
+
+**Data Structures:**
+*   The method generates a 1D array of $N$ scalar distances from the camera origin. No complex spatial data structures are required for the sampling step itself, though the source notes mention an offline point cloud generation step for novel view depth estimation [S1].
+
+**Parameters:**
+*   $\alpha$: Determines sampling density. Typical values: $1/2$, $1/16$ [S1].
+*   $N$: Number of samples. Typical value: $8$ [S1].
+*   $\gamma$: A random number for stratified sampling [S1].
+
+**Steps:**
+1.  Calculate the starting distance of the sampling range from the camera:
+    $$S_{r,0} = d - \alpha$$
+    where $S_{r,0}$ is the location of the point nearest to the camera within the sampling range [S1].
+2.  Generate $N$ sample points using stratified sampling within the range $[S_{r,0}, S_{r,0} + 2\alpha]$:
+    $$S_{r,n} = S_{r,0} + (n - 1) \frac{2\alpha}{N} + \gamma, \quad n = 1, \dots, N$$
+    where $\gamma$ is a random number uniformly generated between $0$ and $\frac{2\alpha}{N}$ [S1].
+3.  Use the resulting points $\{S_{r,1}, \dots, S_{r,N}\}$ to query the NeRF network for color and density [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def surface_based_sampling(depth_d, alpha, N):
+    """
+    Generates N sample points along a ray, centered around the surface depth.
+    
+    Args:
+        depth_d (float): Depth value from the camera to the surface.
+        alpha (float): Half of the specified sampling range.
+        N (int): Number of sample points.
+        
+    Returns:
+        list[float]: List of N sample distances from the camera origin.
+    """
+    # Step 1: Calculate the start of the sampling range
+    # S_r,0 = d - alpha
+    start_dist = depth_d - alpha
+    
+    # Step 2: Calculate bin width for stratified sampling
+    # Bin width = 2 * alpha / N
+    bin_width = (2.0 * alpha) / N
+    
+    samples = []
+    for n in range(1, N + 1):
+        # Generate random offset gamma within [0, bin_width)
+        # Note: In practice, this is often done by generating N random numbers
+        # and adding them to the deterministic grid, or generating one per sample.
+        # The formula implies gamma is specific to the sample index or a single
+        # random offset applied to the grid. The source says "gamma is a random 
+        # number generated between 0 and 2alpha/N". Standard stratified sampling
+        # usually adds a random offset to each bin start.
+        gamma = random.uniform(0, bin_width)
+        
+        # S_r,n = S_r,0 + (n - 1) * (2*alpha/N) + gamma
+        sample_dist = start_dist + (n - 1) * bin_width + gamma
+        samples.append(sample_dist)
+        
+    return samples
+```
+
+**Edge Cases and Pitfalls:**
+*   **Depth Accuracy:** If the depth $d$ is poorly estimated, using a small $\alpha$ degrades rendering quality because the sampling band misses the actual surface [S1].
+*   **Parameter Selection:** The value of $\alpha$ must be set considering the accuracy of the input depth images. A larger $\alpha$ provides a wider band, tolerating depth errors but reducing density near the surface [S1].
+
+## Subtopics
+
+### [Adaptive Primary Surface Sampling](16708-adaptive-primary-surface-sampling.md)
+Accelerates neural rendering by sampling only on the primary surface using a point cloud distribution, avoiding redundant sampling of multiple surfaces or empty space.
+
+## Operating characteristics
+*   **Complexity:** The sampling step itself is $O(N)$ per ray, identical to standard uniform or stratified sampling, but the query efficiency is higher because samples are concentrated in the relevant region [S1].
+*   **Performance:** Restricting sampling to the near-surface area prevents quality degradation caused by sampling in free space or occluded regions, potentially improving rendering accuracy (PSNR) even without a fine sampling process [S1].
+*   **Strengths:** Improves rendering performance by focusing on the object surface; allows for denser sampling near the surface with fewer total samples if $\alpha$ is small [S1].
+*   **Limitations:** Heavily dependent on the accuracy of the depth images. Poor depth estimation leads to degraded quality, especially with small $\alpha$ [S1]. Requires depth images during training or a mechanism to generate them for novel views (e.g., point cloud refinement) [S1].
+
+## Background
+The method was introduced in "Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation" [S1]. It addresses the inefficiency of standard NeRF, which samples uniformly or hierarchically across the entire volume, including empty space. By leveraging depth information (either from training data or estimated for novel views), the method confines the search space to the object's vicinity [S1].
+
+## Sources
+[S1] Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation, https://link.springer.com/article/10.1007/s11063-024-11654-5, fetched 2026-10-30

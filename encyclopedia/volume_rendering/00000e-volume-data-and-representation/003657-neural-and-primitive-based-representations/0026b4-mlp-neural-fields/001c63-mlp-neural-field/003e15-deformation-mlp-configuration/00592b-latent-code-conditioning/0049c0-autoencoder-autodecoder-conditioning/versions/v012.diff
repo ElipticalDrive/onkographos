@@ -1,0 +1,235 @@
+--- v011.md
++++ v012.md
+@@ -4,177 +4,83 @@
+ 
+ ## Overview
+-Autoencoder/Autodecoder Conditioning is a method for representing a collection of distinct data instances (e.g., 3D shapes) using a shared neural field decoder $f_\theta$ and a unique latent code $z_i$ per instance [S1, unofficial][S2, unofficial]. It solves the problem of multi-instance representation by optimizing either an encoder to produce $z_i$ (autoencoder) or directly optimizing $z_i$ as a learnable parameter alongside $\theta$ (autodecoder) [S2, unofficial]. It differs from sibling methods by treating the latent code as a direct input to the MLP (concatenation) or optimizing it end-to-end without an explicit encoder network in the autodecoder variant, whereas HyperNetwork Conditioning uses the latent code to generate weights [12585-hypernetwork-conditioning.md] and Global Conditioning typically injects the code via bias or modulation layers rather than simple concatenation [12589-global-conditioning.md].
++Autoencoder/Autodecoder Conditioning is a method for representing a collection of distinct data instances (e.g., 3D shapes or images) using a shared neural field decoder $f_\theta$ and a unique latent code $z_i$ per instance [S1, unofficial][S2, unofficial]. It solves the problem of multi-instance representation by optimizing either an encoder to produce $z_i$ (autoencoder) or directly optimizing $z_i$ as a learnable parameter alongside $\theta$ (autodecoder) [S2, unofficial]. It differs from sibling methods by its specific optimization strategy for the latent code: in the autodecoder variant, $z_i$ is treated as an independent trainable variable optimized via gradient descent for each instance, rather than being computed by a separate encoder network or injected via hypernetwork weights [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of training instances $J$. For each instance $j \in J$, a target signal (e.g., point cloud, volume samples) is available.
+-*   **Output:** A trained decoder network $f_\theta$ and a set of latent codes $\{z_j\}_{j \in J}$, where $z_j \in \mathbb{R}^L$.
++*   **Input:** A dataset of instances $J$. For each instance $j \in J$, training data consists of target observations (e.g., point clouds with normals, depth maps, or image pixels).
++*   **Output:** A trained decoder network $f_\theta$ and a set of latent codes $\{z_j\}_{j \in J}$.
+ 
+ **Data Structures:**
+-*   **Latent Code $z_j$:** A vector of size $L$. In shape reconstruction, $L=0$ (effectively no conditioning, shared shape) [S1, unofficial]. In shape space learning, $L=256$ [S1, unofficial].
+-*   **Decoder Network $f_\theta$:** A Multi-Layer Perceptron (MLP).
+-    *   **Input Dimension:** $3 + L$ (3 spatial coordinates $x$, $L$ latent dimensions).
+-    *   **Architecture:**
+-        1.  Input Layer ($3+L$)
+-        2.  Fully Connected + Softplus ($FC^+$)
+-        3.  Fully Connected ($FC$)
+-        4.  Fully Connected + Softplus ($FC^+$)
+-        5.  Fully Connected + Softplus ($FC^+$)
+-        6.  Fully Connected + Softplus ($FC^+$) with a **skip connection** from the Input Layer.
+-        7.  Fully Connected ($FC$)
+-        8.  Fully Connected + Softplus ($FC^+$)
+-        9.  Fully Connected ($FC$)
+-    *   **Activation:** Softplus with $\beta = 100$. Formula: $\text{softplus}(x) = \frac{1}{\beta} \ln(1 + e^{\beta x})$ [S1, unofficial].
++*   **Latent Code $z_j$:** A vector in $\mathbb{R}^L$.
++    *   For shape reconstruction: $L=0$ (no latent code, effectively a standard MLP field).
++    *   For shape space learning/multi-shape: $L=256$ [S1, unofficial].
++*   **Decoder Network $f_\theta$:** A Multi-Layer Perceptron (MLP) taking concatenated input $[x; z_j]$ where $x \in \mathbb{R}^3$ is the spatial coordinate.
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** For each training example $j \in J$, initialize the latent vector $z_j \in \mathbb{R}^L$ to zero [S1, unofficial]. Initialize decoder weights $\theta$ randomly.
+-2.  **Batch Sampling:** For each training iteration, sample a batch $B \subset J$.
+-3.  **Forward Pass:** For each $j \in B$, construct the input vector $v_j = [x_j; z_j]$ where $x_j$ are the sampled spatial coordinates. Compute the prediction $y_j = f_\theta(v_j)$.
+-4.  **Loss Computation:** Compute the reconstruction loss $\ell(\theta, z_j)$ for each instance in the batch. If using a regularizer, add $\mathcal{L}_l(z_j) = \|z_j\|_2$ [S3].
+-5.  **Optimization:** Update $\theta$ and $\{z_j\}_{j \in B}$ to minimize the total loss:
+-    $$ \mathcal{L} = \frac{1}{|B|} \sum_{j \in B} \left( \ell(\theta, z_j) + \alpha \|z_j\|_2 \right) $$
+-    where $\alpha = 0.01$ [S1, unofficial].
+-6.  **Test-Time Inference (Autodecoder):** For a new test shape, do not use an encoder. Instead, fix $\theta$ and optimize $z_{test}$ for 800 iterations using the loss $\ell(\theta, z_{test})$ [S1, unofficial].
++**Network Architecture:**
++The decoder uses Fully Connected (FC) layers with Softplus activation.
++*   **Activation:** Softplus with $\beta=100$: $\text{Softplus}(x) = \frac{1}{\beta} \ln(1 + e^{\beta x})$ [S1, unofficial].
++*   **Layer Sequence:**
++    1.  Input: $3 + L$ dimensions.
++    2.  FC+ (Fully Connected + Softplus)
++    3.  FC+
++    4.  FC+
++    5.  FC+ (Skip connection from input to this layer)
++    6.  FC (Linear, 512 units)
++    7.  FC+
++    8.  FC+
++    9.  FC (Linear, output dimension depends on task, e.g., 1 for SDF)
++    *   *Note:* The skip connection connects the raw input $[x; z_j]$ directly to the 4th layer (the 4th FC+ layer) [S1, unofficial].
+ 
+-**Pseudocode:**
+-```python
+-import torch
+-import torch.nn as nn
+-import torch.optim as optim
++**Optimization Steps:**
+ 
+-class Softplus(nn.Module):
+-    def __init__(self, beta=100):
+-        super().__init__()
+-        self.beta = beta
+-    def forward(self, x):
+-        return (1 / self.beta) * torch.log(1 + torch.exp(self.beta * x))
++1.  **Initialization:**
++    *   Initialize decoder weights $\theta$ randomly.
++    *   Initialize latent codes $z_j = \mathbf{0} \in \mathbb{R}^L$ for all $j \in J$ [S1, unofficial].
+ 
+-class DecoderMLP(nn.Module):
+-    def __init__(self, latent_dim):
+-        super().__init__()
+-        self.latent_dim = latent_dim
+-        # Layer sequence: FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC
+-        # Note: The source describes the architecture as:
+-        # Input(3+L) -> FC+ -> FC+ -> FC+ -> FC+ (skip from input) -> FC -> FC+ -> FC
+-        # However, standard implementations often group layers. Based on [S1, unofficial]:
+-        # "FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC"
+-        # This implies 4 FC+ layers, then a layer to 512? Or 512 is the hidden size?
+-        # Re-reading [S1, unofficial]: "Layer sequence: FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC"
+-        # And "L is the latent vector's size... L=256".
+-        # And "Input dimension: 3 + L".
+-        # And "skip connection connects the input directly to the 4th layer".
+-        # Let's interpret strictly:
+-        # 1. FC+ (input 3+L -> 512)
+-        # 2. FC+ (512 -> 512)
+-        # 3. FC+ (512 -> 512)
+-        # 4. FC+ (512 -> 512) -- Skip connection from input (3+L) adds to this? Or before?
+-        # "dashed line connecting the input to the 4th layer indicates a skip connection"
+-        # Usually skip connections add to the output of the layer.
+-        # 5. FC (512 -> 512) ? The text says "-> 512 ->". This likely means a layer with 512 units.
+-        # Let's assume standard MLP structure with 512 hidden units.
+-        
+-        self.fc1 = nn.Linear(3 + latent_dim, 512)
+-        self.act1 = Softplus()
+-        self.fc2 = nn.Linear(512, 512)
+-        self.act2 = Softplus()
+-        self.fc3 = nn.Linear(512, 512)
+-        self.act3 = Softplus()
+-        self.fc4 = nn.Linear(512, 512)
+-        self.act4 = Softplus()
+-        
+-        self.fc5 = nn.Linear(512 + (3 + latent_dim), 512) # Skip connection adds input dim
+-        self.act5 = Softplus()
+-        self.fc6 = nn.Linear(512, 512)
+-        self.act6 = Softplus()
+-        self.fc7 = nn.Linear(512, 1) # Output dimension depends on task (SDF/RGB etc)
++2.  **Training Loop (Joint Optimization):**
++    For each batch $B \subset J$:
++    *   Sample target data for each $j \in B$.
++    *   Compute loss $\mathcal{L}_j(\theta, z_j)$ based on reconstruction error (e.g., Chamfer distance, depth loss, silhouette loss) [S1, unofficial][S3].
++    *   Add latent regularizer $\mathcal{L}_l(z_j) = \|z_j\|_2$ to encourage codes to stay near zero [S3].
++    *   Total loss for batch:
++        $$ \mathcal{L}_{batch} = \frac{1}{|B|} \sum_{j \in B} \left( \mathcal{L}_j(\theta, z_j) + \alpha \|z_j\|_2 \right) $$
++        where $\alpha = 0.01$ [S1, unofficial].
++    *   Update $\theta$ and $z_j$ for $j \in B$ using an optimizer (e.g., Adam) [S1, unofficial].
+ 
+-    def forward(self, x, z):
+-        # x: (B, 3), z: (B, L)
+-        v = torch.cat([x, z], dim=1) # (B, 3+L)
+-        
+-        h1 = self.act1(self.fc1(v))
+-        h2 = self.act2(self.fc2(h1))
+-        h3 = self.act3(self.fc3(h2))
+-        
+-        # Skip connection to 4th layer
+-        h4_pre = self.fc4(h3)
+-        h4 = self.act4(h4_pre + v) # Skip connection adds input v
+-        
+-        h5 = self.act5(self.fc5(h4))
+-        h6 = self.act6(self.fc6(h5))
+-        out = self.fc7(h6)
+-        return out
+-
+-def train_autoencoder(decoder, latent_codes, points, targets, optimizer, alpha=0.01):
+-    """
+-    decoder: DecoderMLP
+-    latent_codes: Tensor (N, L) - learnable parameters
+-    points: Tensor (N, 3) - sampled points
+-    targets: Tensor (N, 1) - target values
+-    """
+-    decoder.train()
+-    optimizer.zero_grad()
+-    
+-    # Forward pass
+-    preds = decoder(points, latent_codes)
+-    
+-    # Reconstruction loss (MSE example)
+-    recon_loss = torch.mean((preds - targets) ** 2)
+-    
+-    # Latent regularizer
+-    reg_loss = torch.mean(torch.norm(latent_codes, dim=1))
+-    
+-    total_loss = recon_loss + alpha * reg_loss
+-    total_loss.backward()
+-    optimizer.step()
+-    return total_loss.item()
+-
+-def test_inference(decoder, points, targets, num_iters=800, lr=0.0001):
+-    """
+-    Optimizes a single latent vector z for a test shape.
+-    """
+-    decoder.eval()
+-    # Initialize z to 0
+-    z = torch.zeros(1, decoder.latent_dim, requires_grad=True)
+-    optimizer = optim.Adam([z], lr=lr)
+-    
+-    for _ in range(num_iters):
+-        optimizer.zero_grad()
+-        pred = decoder(points, z)
+-        loss = torch.mean((pred - targets) ** 2)
+-        loss.backward()
+-        optimizer.step()
+-    return z.detach()
+-```
++3.  **Inference/Test-Time Optimization (Autodecoder Specific):**
++    For a new test instance $k$ with target data:
++    *   Initialize $z_k = \mathbf{0} \in \mathbb{R}^L$ [S1, unofficial].
++    *   Fix $\theta$ to the trained weights.
++    *   Optimize $z_k$ by minimizing the reconstruction loss $\mathcal{L}_k(\theta, z_k)$ for a fixed number of iterations (e.g., 800 iterations) [S1, unofficial].
++    *   The final reconstruction is obtained by evaluating $f_\theta(x; z_k)$.
+ 
+ **Parameters:**
+-*   $L$: Latent vector size. $L=0$ for single-shape reconstruction, $L=256$ for shape space learning [S1, unofficial].
+-*   $\alpha$: Regularization weight for latent norm. Default $0.01$ [S1, unofficial].
+-*   $\beta$: Softplus parameter. Default $100$ [S1, unofficial].
+-*   Optimizer: Adam [S1, unofficial].
+-*   Learning Rate: $0.0001$ for reconstruction, $0.0005$ for shape space learning [S1, unofficial].
++*   $\alpha$: Latent regularizer weight. Default: $0.01$ [S1, unofficial].
++*   $\beta$: Softplus smoothness. Default: $100$ [S1, unofficial].
++*   $L$: Latent dimension. Default: $256$ for shape space, $0$ for reconstruction [S1, unofficial].
++*   Learning Rate: $0.0001$ (reconstruction) or $0.0005$ (shape space) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Softplus with $\beta=100$ can cause overflow if inputs are large; ensure inputs are normalized [S1, unofficial].
+-*   **Degenerate Input:** If $L=0$, the model collapses to a single shared shape; it cannot represent a dataset of diverse shapes [S1, unofficial].
+-*   **SDF/DDF Sharing:** In some frameworks (e.g., FIRe), SDF and DDF share the same latent code $z$ for a given shape, which may limit independent control of geometry and directionality [S3].
++*   **SDF/DDF Latent Sharing:** In inverse rendering contexts, Signed Distance Fields (SDF) and Directional Distance Fields (DDF) must share the same latent code $z$ for a given shape to ensure geometric consistency [S3].
++*   **Precision:** The Softplus approximation with $\beta=100$ is used to avoid numerical instability of standard ReLU while maintaining smoothness [S1, unofficial].
++*   **Test-Time Optimization:** The autodecoder requires iterative optimization at test time, which is computationally expensive compared to encoder-based methods [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Latent Code Regularizer
+-A specific variant or component of the autodecoder framework that adds an L2 norm penalty $\mathcal{L}_l(z) = \|z\|_2$ to the loss function [S3]. This keeps latent codes close to zero, enforcing similarity between different shapes in the latent space and preventing overfitting to individual instances [S3]. It is particularly useful in unpaired generative modeling where the latent space should be compact and continuous [S3].
++A specific regularization term $\mathcal{L}_l(z) = \|z\|_2$ applied in the autodecoder framework to penalize large latent code magnitudes, keeping codes close to zero and ensuring similarity between different shapes [S3]. Pitfall: SDF and DDF models must share the same latent code for a given shape to maintain consistency [S3].
+ 
+ ### [Two-Stage Unpaired Generative Modelling](17908-two-stage-unpaired-generative-modelling.md)
+-A specific application of autoencoder conditioning for 3D-to-2D translation [17908-two-stage-unpaired-generative-modelling.md]. It uses a two-stage architecture: Stage 1 encodes point clouds to a latent shape vector $z_s$ using a PointNet encoder and decodes it via a CPDDF decoder. Stage 2 renders normals from $z_s$ and camera parameters, concatenates them with a latent texture vector $z_T$, and generates an RGB image. This separates shape and texture learning within the conditioning framework [17908-two-stage-unpaired-generative-modelling.md].
++A two-stage architecture for 3D-to-2D translation using unpaired data. Stage 1 uses a Variational Autoencoder (VAE) with a Conditional Probabilistic Directed Distance Field (CPDDF) to map 3D point clouds to a latent shape vector. Stage 2 uses a GAN to render RGB images from surface normals, conditioned on a separate latent texture vector. It is distinguished by handling unpaired datasets and providing explicit 3D-aware geometry unlike pure 2D GANs.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time scales with the number of instances $|J|$ and the number of optimization iterations. Autodecoder inference requires iterative optimization (e.g., 800 iterations) per test instance, making it slower than encoder-based methods at test time [S1, unofficial].
+-*   **Memory Complexity:** Memory usage scales with $|J| \times L$ to store the latent codes, plus the memory for the decoder weights $\theta$ [S1, unofficial].
+-*   **Performance:** On the D-Faust dataset, this method achieved state-of-the-art results compared to SAL (Atzmon & Lipman, 2020) for shape reconstruction and shape space interpolation [S1, unofficial].
+-*   **Strengths:** No need to train a separate encoder network; the latent space is learned directly from the data distribution via optimization [S2, unofficial].
+-*   **Limitations:** Slow inference due to per-instance optimization; requires careful tuning of $\alpha$ to balance reconstruction and latent norm [S1, unofficial].
++*   **Time Complexity:** Training is $O(N \cdot I \cdot D)$ where $N$ is batch size, $I$ is iterations, and $D$ is decoder depth. Test-time inference for autodecoders requires $O(I_{test} \cdot D)$ per instance due to latent optimization [S1, unofficial].
++*   **Memory Complexity:** $O(|J| \cdot L)$ to store latent codes for all instances, plus standard MLP memory [S1, unofficial].
++*   **Performance:** On Nvidia V-100 GPUs, shape reconstruction trains for 100k iterations (128k points sampled per iteration) [S1, unofficial]. Shape space learning uses 4 V-100s for 1k epochs [S1, unofficial].
++*   **Strengths:** Enables learning a continuous shape space; allows interpolation of latent vectors to generate novel shapes [S1, unofficial].
++*   **Limitations:** Test-time optimization is slow; requires careful tuning of $\alpha$ to prevent code collapse or explosion [S1, unofficial][S3].
+ 
+ ## Background
+-The auto-decoder setup was introduced by Park et al. (2019) in "Implicit Geometric Regularization for Learning Shapes" [S1, unofficial]. It was applied to learning shape spaces from raw scans (D-Faust dataset) and demonstrated the ability to interpolate latent vectors to blend body shapes and poses [S1, unofficial]. The concept of conditioning neural fields on latent codes is further discussed in general introductions to neural fields [S2, unofficial] and applied in inverse rendering contexts like FIRe [S3].
++Originated in the context of implicit geometric regularization for learning shapes, specifically the "auto-decoder" setup popularized by Park et al. (2019) [S1, unofficial]. It was applied to tasks like learning shape spaces from raw scans (e.g., D-Faust dataset) and inverse rendering (FIRe) [S1, unofficial][S3]. The method decouples instance identity (latent code) from the shared geometric prior (decoder weights) [S2, unofficial].
+ 
+ ## Sources

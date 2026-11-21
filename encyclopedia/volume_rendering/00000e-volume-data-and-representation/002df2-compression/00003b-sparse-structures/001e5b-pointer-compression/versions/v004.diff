@@ -1,0 +1,246 @@
+--- v003.md
++++ v004.md
+@@ -8,19 +8,16 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sparse voxel structure (e.g., a Sparse Voxel DAG) containing child pointers.
+-*   **Output:** A compressed bitstream where pointers are encoded as either table indices or absolute addresses, along with the pointer lookup tables.
++*   **Input:** A sparse voxel structure (e.g., a Sparse Voxel DAG) containing child pointers [S1].
++*   **Output:** A compressed bitstream where pointers are encoded as either table indices or absolute addresses, along with the per-level pointer lookup tables [S1].
+ 
+ **Data Structures:**
+ 1.  **Pointer Lookup Table:** A list of the most common absolute pointers per tree level, sorted by occurrence in descending order [S1].
+-2.  **Encoded Pointer:** A variable-length field stored in the node structure.
++2.  **Encoded Pointer:** A variable-length field stored in the node structure [S1].
+ 
+ **Numbered Steps:**
+ 1.  **Frequency Analysis:** Traverse the structure and count the occurrence of each unique child pointer value for each tree level [S1].
+ 2.  **Table Construction:** For each level, select the most frequent pointers and store them in a lookup table, sorted by frequency [S1].
+-3.  **Index Mapping:** Replace each absolute pointer in the DAG with its index in the corresponding level's lookup table. If a pointer is not in the table, it is treated as an absolute pointer [S1].
+-4.  **Bit-Packing:** Encode each pointer using a 1-byte initial header to determine the encoding type and length [S1]:
+-    *   The first two bits indicate the **type**.
+-    *   **Types 0, 1, 2:** Indicate that the remaining bits represent an index into the lookup table. The bit lengths are fixed at 6, 14, or 22 bits respectively [S1].
+-    *   **Type 3:** Indicates that the remaining 30 bits represent an absolute pointer [S1].
++3.  **Index Mapping:** Replace each absolute pointer in the DAG with its index in the corresponding level's lookup table [S1]. Pointers not present in the table fall back to absolute encoding [S1].
++4.  **Bit-Packing:** Encode each pointer using a 1-byte initial assumption where the first two bits indicate the type and actual bit length [S1]. The first two bits indicate the **type** [S1]. **Types 0, 1, 2** indicate that the remaining bits represent an index into the lookup table, with fixed lengths of 6, 14, or 22 bits respectively [S1]. **Type 3** indicates that the remaining 30 bits represent an absolute pointer [S1].
+ 5.  **Alignment:** Ensure the total bit length for any pointer is a multiple of 8 bits (bytes) [S1].
+ 
+@@ -29,5 +26,5 @@
+ If $P \in T_L$ at index $i$, and the table size requires $b$ bits:
+ $$ \text{Encoded} = \text{Type}_k \parallel \text{Index}_i $$
+-Where $\text{Type}_k$ is 2 bits and $\text{Index}_i$ is $b$ bits (6, 14, or 22).
++Where $\text{Type}_k$ is 2 bits and $\text{Index}_i$ is $b$ bits (6, 14, or 22) [S1].
+ 
+ If $P \notin T_L$:
+@@ -42,111 +39,108 @@
+ **Edge Cases and Pitfalls:**
+ *   **Performance:** Entropy encoding decreases rendering performance due to the overhead of decoding variable-length pointers [S1].
+-*   **Pointer Sufficiency:** 30-bit absolute pointers were found sufficient for the DAG nodes in the evaluated examples [S1].
+-*   **Precision:** The method assumes pointers can be mapped to indices. Degenerate cases where a pointer is not in the table fall back to absolute encoding [S1].
++*   **Pointer Sufficiency:** 30-bit absolute pointers proved sufficient for the DAG nodes in all evaluated examples [S1].
++*   **High-Level Inefficiency:** Compression is less effective for pointers on the highest tree levels because those levels generally require the full four bytes per pointer, though these nodes represent only ≈ 0.1% of the structure [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compress_pointers(nodes, levels):
++def compress_pointers(nodes_by_level):
+     """
+     Compress child pointers using frequency-based lookup tables.
+-    nodes: List of node objects, each having a 'children' list of absolute pointers.
+-    levels: List of levels, each containing a list of nodes belonging to that level.
++    nodes_by_level: List of lists, where each inner list contains node objects with a 'children' attribute.
+     Returns:
+-        compressed_data: List of encoded integers (bit-packed).
++        compressed_bytes: List of integers (0-255) representing the packed bitstream.
+         lookup_tables: Dict mapping level index to list of pointers.
+     """
+     lookup_tables = {}
+-    compressed_data = []
++    bit_buffer = 0
++    bits_in_buffer = 0
++    compressed_bytes = []
+ 
+     # Step 1 & 2: Build lookup tables per level
+-    for level_idx, level_nodes in enumerate(levels):
+-        pointer_counts = {}
+-        for node in level_nodes:
+-            for child_ptr in node.children:
+-                if child_ptr is not None:
+-                    pointer_counts[child_ptr] = pointer_counts.get(child_ptr, 0) + 1
+-        
+-        # Sort by occurrence descending
+-        sorted_pointers = sorted(pointer_counts.keys(), key=lambda k: pointer_counts[k], reverse=True)
+-        lookup_tables[level_idx] = sorted_pointers
++    for level_idx, nodes in enumerate(nodes_by_level):
++        counts = {}
++        for node in nodes:
++            for ptr in node.children:
++                if ptr is not None:
++                    counts[ptr] = counts.get(ptr, 0) + 1
++        sorted_ptrs = sorted(counts.keys(), key=lambda k: counts[k], reverse=True)
++        lookup_tables[level_idx] = sorted_ptrs
+ 
+     # Step 3 & 4: Encode pointers
+-    for level_idx, level_nodes in enumerate(levels):
++    for level_idx, nodes in enumerate(nodes_by_level):
+         table = lookup_tables[level_idx]
+-        table_size = len(table)
+-        
+-        for node in level_nodes:
+-            for child_ptr in node.children:
+-                if child_ptr is None:
+-                    # Handle null pointers if necessary [G]
+-                    continue
+-                
+-                # Check if pointer is in table
+-                if child_ptr in table:
+-                    index = table.index(child_ptr)
+-                    
+-                    # Determine bit length based on index size
+-                    # Heuristic: 6 bits for small indices, 14 for medium, 22 for large
+-                    # The source specifies fixed types for 6, 14, 22 bits [S1]
+-                    if index < 64: # 2^6
+-                        type_code = 0
+-                        bits = 6
+-                    elif index < 16384: # 2^14
+-                        type_code = 1
+-                        bits = 14
+-                    else:
+-                        type_code = 2
+-                        bits = 22
+-                    
+-                    # Pack: 2 bits type + bits index
+-                    encoded = (type_code << bits) | index
++        for node in nodes:
++            for ptr in node.children:
++                if ptr is None: continue
++
++                if ptr in table:
++                    idx = table.index(ptr)
++                    if idx < 64: type_code, payload_bits = 0, 6
++                    elif idx < 16384: type_code, payload_bits = 1, 14
++                    else: type_code, payload_bits = 2, 22
++                    payload = idx
+                 else:
+-                    # Absolute pointer
+-                    type_code = 3
+-                    bits = 30
+-                    # Mask pointer to 30 bits [S1]
+-                    encoded = (type_code << bits) | (child_ptr & 0x3FFFFFFF)
+-                
+-                compressed_data.append(encoded)
++                    type_code, payload_bits = 3, 30
++                    payload = ptr & 0x3FFFFFFF
+ 
+-    return compressed_data, lookup_tables
++                # Pack: 2 bits type, then payload_bits bits
++                total_bits = 2 + payload_bits
++                combined = (type_code << payload_bits) | payload
+ 
+-def decompress_pointers(compressed_data, lookup_tables, num_children):
++                # Write to bit stream MSB-first
++                for i in range(total_bits - 1, -1, -1):
++                    bit = (combined >> i) & 1
++                    bit_buffer = (bit_buffer << 1) | bit
++                    bits_in_buffer += 1
++                    if bits_in_buffer == 8:
++                        compressed_bytes.append(bit_buffer)
++                        bit_buffer = 0
++                        bits_in_buffer = 0
++
++    # Flush remaining bits
++    if bits_in_buffer > 0:
++        compressed_bytes.append(bit_buffer << (8 - bits_in_buffer))
++
++    return compressed_bytes, lookup_tables
++
++def decompress_pointers(compressed_bytes, lookup_tables):
+     """
+     Decompress pointers back to absolute addresses.
+     """
+     decompressed = []
+-    for encoded in compressed_data:
+-        # Extract type (first 2 bits) and payload
+-        # Note: The source implies the type is in the first 2 bits of the byte,
+-        # but the bit packing logic suggests the type determines the length.
+-        # We assume the type is stored in the most significant bits of the first byte.
+-        
+-        # Reconstruct based on type
+-        # Since the encoding is variable length, we need to know the length.
+-        # The type bits are part of the first byte.
+-        
+-        # Extract type from the first 2 bits of the first byte
+-        # Assuming big-endian bit packing for simplicity [G]
+-        first_byte = (encoded >> 24) & 0xFF # Assuming 32-bit int storage
+-        type_code = (first_byte >> 6) & 0x03
+-        
++    bit_buffer = 0
++    bits_in_buffer = 0
++    byte_idx = 0
++
++    while byte_idx < len(compressed_bytes):
++        # Read next byte
++        bit_buffer = (bit_buffer << 8) | compressed_bytes[byte_idx]
++        bits_in_buffer += 8
++        byte_idx += 1
++
++        # Extract type (first 2 bits of the current pointer)
++        type_code = (bit_buffer >> (bits_in_buffer - 2)) & 0x03
++        bits_in_buffer -= 2
++
+         if type_code == 0:
+-            # 6 bits index
+-            index = encoded & 0x3F
+-            decompressed.append(lookup_tables[0][index]) # Assuming level 0 for demo
++            payload_bits = 6
+         elif type_code == 1:
+-            # 14 bits index
+-            index = encoded & 0x3FFF
+-            decompressed.append(lookup_tables[1][index])
++            payload_bits = 14
+         elif type_code == 2:
+-            # 22 bits index
+-            index = encoded & 0x3FFFFF
+-            decompressed.append(lookup_tables[2][index])
+-        elif type_code == 3:
+-            # 30 bits absolute
+-            ptr = encoded & 0x3FFFFFFF
+-            decompressed.append(ptr)
+-            
++            payload_bits = 22
++        else: # type_code == 3
++            payload_bits = 30
++
++        # Extract payload
++        payload = (bit_buffer >> (bits_in_buffer - payload_bits)) & ((1 << payload_bits) - 1)
++        bits_in_buffer -= payload_bits
++
++        # Reconstruct pointer
++        if type_code < 3:
++            # Table index lookup (assumes level 0 for demo; in practice, track level context)
++            decompressed.append(lookup_tables[0][payload])
++        else:
++            decompressed.append(payload)
++
+     return decompressed
+ ```
+@@ -159,6 +153,6 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Memory:** Reduces memory usage for child pointers, particularly in scenes with repetitive subtrees [S1]. The compression is less effective for offsets on the highest levels, but these nodes are rare (≈ 0.1%) [S1].
+-*   **Time:** Encoding requires frequency analysis and table construction. Decoding requires table lookups and bit extraction, which increases CPU/GPU overhead compared to direct pointer access [S1].
++*   **Memory:** Reduces memory usage for child pointers, particularly in scenes with repetitive subtrees [S1]. The compression is less effective for pointers on the highest levels, but these nodes are rare (≈ 0.1%) [S1].
++*   **Time:** Encoding requires frequency analysis and table construction [S1]. Decoding requires table lookups and bit extraction, which increases CPU/GPU overhead compared to direct pointer access [S1].
+ 
+ **Measured Performance:**
+@@ -168,9 +162,5 @@
+ **Strengths and Limitations:**
+ *   **Strengths:** Effective for scenes with repetitive subtrees; reduces memory footprint for pointers [S1].
+-*   **Limitations:** Decreases rendering performance; less effective for offsets on high levels [S1].
+-
+-**When to Use:**
+-*   Use when memory bandwidth is a bottleneck and the scene has high structural redundancy [S1].
+-*   Avoid when rendering performance is critical and the scene has low pointer redundancy [S1].
++*   **Limitations:** Decreases rendering performance; less effective for high-level pointers that require full 4-byte storage [S1].
+ 
+ ## Background

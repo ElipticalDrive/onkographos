@@ -1,0 +1,349 @@
+--- v005.md
++++ v006.md
+@@ -1,182 +1,205 @@
+ # Physics-based Gaussian Simulation
+ 
+-Also called: GASP (Gaussian Splatting for Physic-Based Simulations)
++Also called: PhysGaussian, Gaussian Splashing, VR-GS, Spring-Gaus, Feature Splatting
+ 
+ ## Overview
+-Physics-based Gaussian Simulation integrates continuum mechanics directly into 3D Gaussian Splatting (3DGS) to enable physically accurate animation and dynamic behavior [S1][S2, S3, unofficial]. Unlike methods that rely on external meshing strategies (e.g., marching cubes) or modify the physics engine itself, this approach treats flat 3D Gaussians as discrete physical particles, converting them into triangle faces for simulation and reconstructing them afterward [S3, unofficial]. It distinguishes itself from [PhysGaussian](1036-ray-marching-on-3d-gaussians.md) by avoiding first-order deformation approximations and linear transformations, instead using a black-box physics engine with explicit geometric reconstruction [S3, unofficial].
++Physics-based Gaussian Simulation integrates continuum mechanics or particle dynamics directly into 3D Gaussian Splatting (3DGS), treating each Gaussian kernel as a discrete physical particle with volume [S1][S2, S3, unofficial]. This approach creates a unified simulation-to-rendering pipeline where the geometric representation serves as the simulation mesh, enabling physically accurate dynamics, real-time interaction, and editing of high-fidelity virtual content [S1][S2, S3, unofficial]. Unlike standard 3DGS which optimizes static appearance, these methods decouple or tightly couple physical state (position, velocity, deformation) from radiometric properties to support dynamic scenes [S3, unofficial].
+ 
+ ## How it works
+-The method operates on **flat Gaussians**, where the scaling matrix $S = \text{diag}(s_1, s_2, s_3)$ has $s_1 = \epsilon$ (a small value, typically $\approx 0$), effectively reducing the Gaussian to a 2D surface [S3, unofficial].
+ 
+ ### Inputs and Outputs
+-- **Input**: A set of 3D Gaussian components $N(m, R, S)$, where $m$ is the mean, $R$ is the rotation matrix, and $S$ is the scaling matrix.
+-- **Output**: Updated Gaussian parameters $(\hat{m}, \hat{R}, \hat{S})$ after physics simulation.
++**Inputs:**
++1.  Initial 3DGS representation: A set of $N$ Gaussians $\{G_i\}_{i=1}^N$, where each $G_i$ is defined by mean position $\mu_i$, covariance matrix $\Sigma_i$ (or rotation $R_i$ and scale $S_i$), opacity $\alpha_i$, and spherical harmonic coefficients for color $c_i$ [S1][S2, S3, unofficial].
++2.  Physical parameters: Mass $m_i$, damping coefficients, and material properties (e.g., stiffness, viscosity) [S3, unofficial].
++3.  External forces: Gravity, collisions, or user interactions [S3, unofficial].
++
++**Outputs:**
++1.  Updated Gaussian parameters: New positions $\mu'_i$, covariances $\Sigma'_i$, and potentially updated colors/opacities if coupled with rendering [S1][S2, S3, unofficial].
++2.  Rendered image: Computed via standard 3DGS rasterization using the updated physical state [S1][S2, S3, unofficial].
+ 
+ ### Data Structures
+-Each Gaussian is represented by:
+-- Mean $m \in \mathbb{R}^3$
+-- Rotation $R \in \mathbb{R}^{3 \times 3}$ (columns $\hat{r}_1, \hat{r}_2, \hat{r}_3$)
+-- Scaling $S = \text{diag}(\epsilon, s_2, s_3)$
+-- Color $c$ and opacity $\sigma$ (unchanged during simulation)
++The core data structure extends the standard 3DGS attribute list with physics-specific fields:
++*   **Position ($\mu$):** 3D vector $(x, y, z)$ [S1][S2, S3, unofficial].
++*   **Velocity ($v$):** 3D vector $(v_x, v_y, v_z)$ [S3, unofficial].
++*   **Mass ($m$):** Scalar value, potentially learned from input video or assigned based on volume [S3, unofficial].
++*   **Covariance ($\Sigma$):** $3 \times 3$ symmetric positive-definite matrix, often parameterized by rotation $R$ and scale $S$ [S1][S2, S3, unofficial].
++*   **Physical State Flags:** Boolean or integer flags indicating if a Gaussian is part of the active simulation domain (e.g., fluid vs. solid) [S1][S2, unofficial].
+ 
+ ### Steps
+-1. **Conversion to Triangle Soup**: Map each flat Gaussian $N(m, R, S)$ to a triangle face $V = [v_1, v_2, v_3]$ using the mapping $T(\cdot)$ [S3, unofficial].
+-2. **Physics Simulation**: Extract vertices from the triangle soup and run a physics engine (e.g., Material Point Method (MPM)) on the point cloud to obtain deformed vertex positions [S3, unofficial].
+-3. **Reconstruction**: Recover Gaussian parameters from the deformed vertices $V$ using the inverse mapping $T^{-1}(\cdot)$ [S3, unofficial].
+-4. **Artifact Control**: Apply rescaling rules if triangles undergo significant size changes to prevent artifacts caused by treating points as discrete entities [S3, unofficial].
+-5. **Optional Hierarchy**: Use a Gaussian grouping strategy to simulate only "Core Gaussians" for efficiency [S3, unofficial].
+-
+-### Formulas
+-**Forward Mapping** $T(m, R, S) \rightarrow V$:
+-Given a Gaussian with mean $m$, rotation axes $\hat{r}_1, \hat{r}_2, \hat{r}_3$, and scales $s_2, s_3$ (where $s_1=\epsilon$):
+-$$
+-v_1 = m
+-$$
+-$$
+-v_2 = m + s_2 \hat{r}_2
+-$$
+-$$
+-v_3 = m + s_3 \hat{r}_3
+-$$
+-
+-**Inverse Mapping** $T^{-1}(V) \rightarrow (\hat{m}, \hat{R}, \hat{S})$:
+-Given deformed vertices $V = [v_1, v_2, v_3]$:
+-1. Mean:
+-   $$ \hat{m} = v_1 $$
+-2. Rotation Axes:
+-   $$ \hat{r}_1 = \frac{(v_2 - v_1) \times (v_3 - v_1)}{\|(v_2 - v_1) \times (v_3 - v_1)\|} \quad \text{(Normalized face normal)} $$
+-   $$ \hat{r}_2 = \frac{v_2 - v_1}{\|v_2 - v_1\|} \quad \text{(Normalized edge vector)} $$
+-   $$ \hat{r}_3 = \text{orth}(v_3 - v_1; \hat{r}_1, \hat{r}_2) \quad \text{(Gram-Schmidt orthogonalization)} $$
+-3. Scaling:
+-   $$ \hat{s}_1 = \epsilon $$
+-   $$ \hat{s}_2 = \|v_2 - v_1\| $$
+-   $$ \hat{s}_3 = \langle v_3 - v_1, \hat{r}_3 \rangle $$
+-
+-The resulting covariance matrix is $\hat{\Sigma} = \hat{R} \hat{S} \hat{S}^T \hat{R}^T$ [S3, unofficial].
++1.  **Initialization:**
++    *   Reconstruct initial 3DGS from input images/video using standard 3DGS optimization [S1][S2, unofficial].
++    *   Assign physical properties:
++        *   Mass $m_i$ is learned from input video dynamics or estimated from Gaussian volume [S3, unofficial].
++        *   Velocity $v_i$ is initialized to zero or estimated from temporal changes in position [S3, unofficial].
++        *   Define material parameters (stiffness, damping) based on object type (solid, fluid) [S1][S3, unofficial].
++
++2.  **Physics Simulation Step:**
++    *   Compute forces $F_i$ acting on each Gaussian $i$:
++        $$ F_i = F_{gravity} + F_{collision} + F_{interaction} + F_{internal} $$
++        *   $F_{gravity} = m_i \cdot g$ [S3, unofficial].
++        *   $F_{collision}$: Derived from contact detection with other Gaussians or static meshes [S1][S3, unofficial].
++        *   $F_{internal}$: Depends on the chosen physics model:
++            *   *Continuum Mechanics (PhysGaussian):* Uses continuum deformation of Gaussian kernels, treating the cloud as a deformable body [S3, unofficial].
++            *   *Position-Based Dynamics (Gaussian Splashing):* Uses Position-Based Fluids (PBD) constraints to enforce incompressibility and cohesion [S1][S2, unofficial].
++            *   *Spring-Mass (Spring-Gaus):* Applies spring forces between neighboring Gaussians based on a spring-mass model [S3, unofficial].
++    *   Update velocity and position using a numerical integrator (e.g., Verlet or Euler):
++        $$ v_i^{t+1} = v_i^t + \frac{F_i}{m_i} \Delta t $$
++        $$ \mu_i^{t+1} = \mu_i^t + v_i^{t+1} \Delta t $$
++        [S3, unofficial].
++    *   Update covariance $\Sigma_i$ to reflect deformation:
++        *   For continuum deformation, $\Sigma_i$ is transformed by the local deformation gradient [S3, unofficial].
++        *   For PBD, $\Sigma_i$ may be adjusted to maintain volume consistency [S1][S2, unofficial].
++
++3.  **Rendering Step:**
++    *   Rasterize the updated Gaussians using standard 3DGS alpha blending [S1][S2, S3, unofficial].
++    *   *Deferred Shading:* Some methods (e.g., VR-GS) use deferred shading to avoid blending artifacts from multiple shading calculations [S3, unofficial].
++    *   *Material Rendering:* For fluids/solids, material parameters (diffusiveness, specularity, roughness, normals) are applied to each Gaussian to enhance physical appearance [S1][S2, unofficial]. Normals are aligned with surface normals to improve reflection accuracy [S3, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def physics_based_gaussian_simulation(gaussians, physics_engine):
++def physics_based_gaussian_simulation(gaussians, dt, external_forces):
+     """
+-    Simulate physics on a list of flat Gaussians.
++    Simulate physics for a set of 3D Gaussians.
+     
+     Args:
+-        gaussians: List of dicts with keys 'm', 'r1', 'r2', 'r3', 's2', 's3', 'color', 'opacity'.
+-                   Assumes s1 = epsilon (small constant).
+-        physics_engine: A callable that takes a list of triangles (vertices) and returns
+-                        deformed vertices.
+-    
++        gaussians: List of Gaussian objects with attributes:
++            - mu: (3,) position vector
++            - v: (3,) velocity vector
++            - m: float mass
++            - Sigma: (3,3) covariance matrix
++            - type: str ('solid', 'fluid', 'particle')
++        dt: float time step
++        external_forces: dict of force functions, e.g., {'gravity': lambda m: m * 9.81}
++        
+     Returns:
+-        Updated list of gaussians.
++        Updated list of Gaussians
+     """
+-    epsilon = 1e-6
+-    
+-    # Step 1: Convert Gaussians to Triangle Soup
+-    triangles = []
+     for g in gaussians:
+-        v1 = g['m']
+-        v2 = g['m'] + g['s2'] * g['r2']
+-        v3 = g['m'] + g['s3'] * g['r3']
+-        triangles.append([v1, v2, v3])
++        # 1. Compute Forces
++        F = np.zeros(3)
+         
+-    # Step 2: Run Physics Engine
+-    # The engine modifies vertex positions based on physical laws (e.g., MPM)
+-    deformed_triangles = physics_engine(triangles)
+-    
+-    # Step 3 & 4: Reconstruct Gaussians and Apply Controls
+-    updated_gaussians = []
+-    for i, tri in enumerate(deformed_triangles):
+-        v1, v2, v3 = tri
++        # Gravity
++        if 'gravity' in external_forces:
++            F += external_forces['gravity'](g.m)
++            
++        # Internal Forces (Model-dependent)
++        if g.type == 'solid':
++            # Continuum mechanics or Spring-Mass
++            # Example: Spring-Mass with neighbors
++            for neighbor in get_neighbors(g, gaussians):
++                displacement = g.mu - neighbor.mu
++                distance = np.linalg.norm(displacement)
++                if distance > 0:
++                    # Hooke's Law
++                    F += -k * (distance - rest_length) * (displacement / distance)
++        elif g.type == 'fluid':
++            # Position-Based Dynamics (PBD)
++            # Compute density and pressure
++            density = compute_density(g, gaussians)
++            pressure = compute_pressure(density)
++            # Apply pressure force
++            F -= pressure * gradient_of_density(g, gaussians)
++            
++        # Collision Forces
++        for other in gaussians:
++            if g is other: continue
++            dist = np.linalg.norm(g.mu - other.mu)
++            if dist < collision_radius:
++                # Repulsive force
++                F += repulsion_force(g, other, dist)
++                
++        # 2. Integrate
++        # Verlet integration or Euler
++        a = F / g.m
++        g.v += a * dt
++        g.mu += g.v * dt
+         
+-        # Recover Mean
+-        m_hat = v1
+-        
+-        # Recover Rotation Axes
+-        edge1 = v2 - v1
+-        edge2 = v3 - v1
+-        
+-        # r1 is the normal to the triangle face
+-        normal = cross(edge1, edge2)
+-        norm_len = length(normal)
+-        if norm_len < epsilon:
+-            # Degenerate triangle fallback [G]
+-            r1_hat = [0, 0, 1] 
+-        else:
+-            r1_hat = normalize(normal)
++        # 3. Update Covariance (Deformation)
++        if g.type == 'solid':
++            # Update Sigma based on deformation gradient
++            # Simplified: Rotate and scale based on velocity gradient
++            g.Sigma = update_covariance(g, g.v, dt)
+             
+-        # r2 is the direction of the first edge
+-        edge1_len = length(edge1)
+-        if edge1_len < epsilon:
+-            r2_hat = [1, 0, 0] # Fallback [G]
+-        else:
+-            r2_hat = normalize(edge1)
+-            
+-        # r3 is orthogonal to r1 and r2 (Gram-Schmidt)
+-        # orth(v, r1, r2) = v - proj_r1(v) - proj_r2(v)
+-        proj_r1 = dot(edge2, r1_hat) * r1_hat
+-        proj_r2 = dot(edge2, r2_hat) * r2_hat
+-        r3_raw = edge2 - proj_r1 - proj_r2
+-        r3_len = length(r3_raw)
+-        if r3_len < epsilon:
+-            r3_hat = cross(r1_hat, r2_hat) # Ensure orthogonality [G]
+-        else:
+-            r3_hat = normalize(r3_raw)
+-            
+-        # Recover Scaling
+-        s1_hat = epsilon
+-        s2_hat = edge1_len
+-        s3_hat = dot(edge2, r3_hat)
+-        
+-        # Artifact Control: Rescale if significant change [S3, unofficial]
+-        # (Implementation detail: check ratio of new vs old scales)
+-        # If scale change > threshold, clamp or smooth [G]
+-        
+-        # Store updated Gaussian
+-        updated_gaussians.append({
+-            'm': m_hat,
+-            'r1': r1_hat,
+-            'r2': r2_hat,
+-            'r3': r3_hat,
+-            's2': s2_hat,
+-            's3': s3_hat,
+-            'color': gaussians[i]['color'],
+-            'opacity': gaussians[i]['opacity']
+-        })
+-        
+-    return updated_gaussians
++    return gaussians
+ ```
+ 
+ ### Parameters
+-- $\epsilon$: Small constant for $s_1$ (e.g., $10^{-6}$) [S3, unofficial].
+-- Physics Engine: Can be any black-box engine (e.g., Genesis, Blender, Taichi Elements) [S3, unofficial].
++*   **Time Step ($\Delta t$):** Typically $1/60$ s for real-time VR [S3, unofficial].
++*   **Stiffness ($k$):** For spring-mass models, tuned to prevent oscillation [S3, unofficial].
++*   **Collision Radius:** Determines interaction range between Gaussians [S3, unofficial].
++*   **Mass ($m$):** Learned from input video or estimated from volume [S3, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-- **Degenerate Triangles**: If vertices collapse (zero area), cross products become zero. Fallback orthogonal vectors must be defined [G].
+-- **Discrete Artifacts**: Treating points as discrete entities causes artifacts. Using triangles and rescaling mitigates this [S3, unofficial].
+-- **Significant Size Changes**: Large deformations require additional rescaling rules to maintain Gaussian validity [S3, unofficial].
++*   **Precision:** High-velocity simulations may require double precision to avoid numerical instability [G].
++*   **Boundaries:** Gaussians near scene boundaries may experience incorrect collision forces if not handled with boundary conditions [G].
++*   **Degenerate Input:** If initial Gaussians are poorly distributed, physics simulation may produce unrealistic artifacts (e.g., clumping) [S3, unofficial].
++*   **Performance:** Computing neighbor interactions for large $N$ is $O(N^2)$ without spatial hashing [G].
+ 
+ ## Subtopics
+ 
+-### GASP Pipeline
+-The specific implementation using flat Gaussians and black-box physics engines, avoiding meshing [S3, unofficial].
+-
+-### PhysGaussian
+-Uses first-order approximation of deformation maps and linear transformations, requiring physics engine adjustments [S3, unofficial].
+-
+-### Gaussian Splashing
+-Uses Position-Based Fluids for fluid simulation, building on GaussianShader for material parameters [S1][S2, unofficial].
++### OTS Marching Ray Marching Algorithm
++*   **What it is:** A ray-marching algorithm for distance fields.
++*   **Difference:** Focuses on efficient ray traversal for implicit surfaces, not physics simulation.
++*   **When to choose:** When rendering static or deforming distance fields without explicit particle dynamics.
++*   **Link:** [OTS Marching Ray Marching Algorithm](1073-ots-marching-ray-marching-algorithm.md)
++
++### View-dependent color with Spherical Harmonics
++*   **What it is:** Technique to encode view-dependent appearance using spherical harmonics.
++*   **Difference:** Handles radiometric properties, not physical dynamics.
++*   **When to choose:** When view-dependent effects (specularity) are needed but physics is not.
++*   **Link:** [View-dependent color with Spherical Harmonics](1369-view-dependent-color-with-spherical-harmonics.md)
++
++### Weighted Blending (Fuzzy Metaballs)
++*   **What it is:** Blending technique for smooth volume rendering.
++*   **Difference:** Focuses on visual blending, not physical forces.
++*   **When to choose:** When smooth, blobby appearance is desired without physics.
++*   **Link:** [Weighted Blending (Fuzzy Metaballs)](3691-weighted-blending-fuzzy-metaballs.md)
++
++### Two-Stage Optimization Pipeline
++*   **What it is:** Optimization strategy for 3DGS.
++*   **Difference:** Focuses on training convergence, not runtime simulation.
++*   **When to choose:** When training static 3DGS models.
++*   **Link:** [Two-Stage Optimization Pipeline](15284-two-stage-optimization-pipeline.md)
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Linear with respect to the number of Gaussians for conversion and reconstruction. Simulation cost depends on the physics engine (e.g., MPM complexity) [S3, unofficial].
+-- **Memory Complexity**: Proportional to the number of Gaussians and triangle vertices [S3, unofficial].
+-- **Performance**: Demonstrated superior performance on benchmark datasets for 3D object rendering [S3, unofficial].
+-- **Strengths**: No additional meshing strategies required; compatible with any black-box physics engine; hierarchical grouping enhances efficiency [S3, unofficial].
+-- **Limitations**: Artifacts from discrete point treatment if not managed; requires flat Gaussian initialization [S3, unofficial].
++
++### Time and Memory Complexity
++*   **Time:** Physics simulation is $O(N)$ for simple forces but $O(N^2)$ for neighbor interactions without spatial acceleration structures [G]. Rendering remains $O(N)$ per pixel [S1][S2, unofficial].
++*   **Memory:** Additional memory for velocity, mass, and neighbor lists [S3, unofficial].
++
++### Measured Performance
++*   **Hardware:** Tested on VR headsets and GPUs [S3, unofficial].
++*   **Resolution:** Real-time at 1080p for moderate $N$ [S3, unofficial].
++*   **Scene:** Dynamic scenes with interacting objects [S3, unofficial].
++
++### Scaling
++*   Scales with number of Gaussians; spatial hashing can reduce neighbor search to $O(N)$ [G].
++
++### Strengths and Limitations
++*   **Strengths:** Physically accurate dynamics, real-time interaction, high-fidelity rendering [S3, unofficial].
++*   **Limitations:** Computationally expensive for large scenes, requires careful tuning of physical parameters [S3, unofficial].
++
++### When to Use
++*   Use for dynamic, interactive scenes requiring physical realism [S3, unofficial].
++*   Do not use for static scenes or when performance is critical and physics is not needed [S3, unofficial].
+ 
+ ## Background
+-Originating from the GASP paper (2024), this method addresses the need for physically accurate dynamics in 3DGS [S3, unofficial]. It builds on GaMeS (flat Gaussian parameterization) [S3, unofficial] and contrasts with PhysGaussian (2023) which uses linear approximations [S3, unofficial]. It is demonstrated using the Genesis engine, Blender, and Taichi Elements [S3, unofficial].
++
++### Origin
++*   **PhysGaussian:** Integrates physics-based continuum mechanics directly within 3DGS [S1][S2, unofficial].
++*   **Gaussian Splashing:** Combines 3DGS with Position-Based Dynamics (PBD) for fluids [S1][S2, unofficial].
++*   **VR-GS:** Physical dynamics-aware interactive Gaussian Splatting for VR [S3, unofficial].
++*   **Spring-Gaus:** Applies spring-mass model to dynamic 3DGS [S3, unofficial].
++
++### History
++*   Developed as extensions to 3DGS to enable animation and dynamic content [S1][S2, S3, unofficial].
++*   Addresses the gap between generated and manually crafted 3D content in VR/AR [S3, unofficial].
++
++### Applications
++*   VR/AR environments, robotics, autonomous driving, and dynamic scene editing [S3, unofficial].
+ 
+ ## Sources
++
+ [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+ [S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+-[S3] GASP: Gaussian Splatting for Physic-Based Simulations, https://doi.org/10.48550/arXiv.2409.05819, fetched 2026-10-30 (unofficial)+[S3] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

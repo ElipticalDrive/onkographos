@@ -1,0 +1,168 @@
+OptiX + GL based implementations of ANARI. Contribute to NVIDIA/VisRTX development by creating an account on GitHub.
+
+Volume correctness by tarcila · Pull Request #298 · NVIDIA/VisRTX · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+tarcila
+commented
+May 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+Improve Quality volume rendering:
+Shadows: ratio-track instead of one-event-then-stop; multiply transmittance, not albedo.
+In-volume scatter: uniform-sphere phase pdf 1/(4π), was wrongly using cosine-hemisphere around the TF gradient.
+HDRI: gate miss-path HDRI on first bounce; NEE already counts it.
+Woodcock fixes
+Improve Interactive/Fast volume rendering:
+ray-march: skip empty macrocells via GridTraversal
+Transfer function:
+Fixed wrong pre-folding color.w into opacity — discritizeTFData already does it
+Commits no longer trigger BLAS/TLAS rebuild (TF doesn't change AABB).
+In severe-broken cases:
+before
+after
+Subsequent PRs to work on performances.
+tarcila
+added 9 commits
+May 24, 2026 20:42
+rtx: ratio-tracking transmittance for Quality volume shadows
+…
+4e3719c
+```
+Quality's volume shadow anyhit ran sampleDistanceVolume, took the first
+accepted event, multiplied attenuation by the albedo (TF colour, not
+transmittance), and ignored the intersection. Two bugs: albedo ≠
+transmittance (white volumes cast no shadow); optixIgnoreIntersection
+resumes at the next BVH AABB, not the next Woodcock step (one event per
+segment regardless of optical depth).
+
+Replace with ratio-tracking: walk GridTraversal, multiply attenuation
+*= (1 - σ_t / σ_maj) per candidate, RR-terminate near zero.
+```
+rtx: uniform-sphere NEE at Quality volume in-scatter
+…
+6fdc16d
+```
+Volume in-scatter NEE was calling the surface sampleLights, returning
+ambient with cosine-hemisphere pdf cos(θ)/π around the TF-gradient
+normal. Two bugs: phase is isotropic (1/(4π)), not Lambertian; gradient
+= 0 in uniform regions biases the basis toward world +Z.
+
+Split out sampleLightsVolume with uniform-sphere ambient pdf 1/(4π).
+Surface NEE keeps the cosine-hemisphere variant.
+```
+rtx: Decouple volume parameter commits from BLAS rebuild
+…
+b0d7bbe
+```
+TF parameter commits (UI slider drags on TF colour/opacity) forced a full
+volume BLAS + TLAS rebuild via Volume::markFinalized, even though TF
+doesn't affect AABB.
+
+Bump lastVolumeBLASChange only on visible-flag flip or m_field pointer
+change. Frame accumulation reset still fires off commitBuffer, so TF
+edits re-converge as before — just without paying for the BVH rebuild.
+```
+rtx: decomposition tracking + drop biasing Woodcock step cap
+…
+241beeb
+```
+Pure delta/ratio tracking wasted Woodcock candidates on near-uniform
+volume interiors. Lift per-cell σ_min into a control variate (Kutz et
+al. 2017 / Novák et al. 2014): race a closed-form Exp(σ_c) free-flight
+against a residual Woodcock walk on (σ_maj - σ_c).
+
+Also drop MAX_WOODCOCK_STEPS_PER_CELL — the 128-event cap silently
+truncated free-flights in dense regions, biasing distributions toward
+longer paths. Loop is finite without the cap; RR (added later in the
+stack) is the right mitigation if pathological cells appear.
+```
+rtx: Macrocell space-skipping in rayMarchVolume
+…
+f5fd10b
+```
+Interactive/Fast's rayMarchVolume did a TF lookup + classify every dt step
+even in empty regions (>90% of steps on sparse data). Wrap in the existing
+GridTraversal; per-cell max-opacity == 0 ⇒ skip the cell.
+
+dt-lattice phase preserved across hops so stratification matches the old
+marcher on non-empty cells.
+```
+rtx: Stop double-counting HDRI between NEE and miss path
+…
+a66f143
+```
+NEE samples HDRI at every non-Dirac bounce; miss path was adding HDRI
+radiance on the BSDF-sampled direction on top, double-counting. Background
+bled into diffuse path bounces at the wrong intensity.
+
+Gate miss-path HDRI on isFirstBounce. Caveat: under-counts BSDF-sampled
+HDRI for Dirac mirrors / specular transmission until MIS lands.
+```
+rtx: Rename UniformGrid worldBounds → objectBounds
+…
+c80c932
+```
+Stored object-space bounds all along (GridTraversal consumes object-space
+ray). Misleading name fed at least one false-positive review finding about
+a non-existent world/object t mismatch. Pure rename.
+```
+rtx: Disambiguate shadow attenuation helpers by convention
+…
+ffe4294
+```
+Two helper pairs named surface/volumeAttenuation existed with incompatible
+semantics — one returns opacity (float, init 0), the other transmittance
+(vec3, init 1). Readers read the same name as if it meant the same thing.
+
+Rename: *ShadowOpacity vs *ShadowTransmittance. No behavioural change.
+```
+rtx: Stop double-folding color alpha into TF1D uniform opacity
+…
+46cd7f9
+```
+ANARI 1.1 §5.12.1 says final TF α = color.w · opacity. discritizeTFData
+already does that per bin; commitParameters was *also* pre-folding
+m_uniformColor.w into m_uniformOpacity → A² for uniform color + uniform
+opacity.
+
+Bug visible only when m_uniformColor.w ≠ 1, which is why it survived.
+```
+jeffamstutz
+commented
+May 26, 2026
+Copy link
+Copy Markdown
+Collaborator
+LGTM, thanks!
+Hide details
+View details
+jeffamstutz
+merged commit 5e7a9e2
+into
+NVIDIA:next_release
+May 26, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+tarcila
+deleted the
+volume-correctness
+branch
+May 26, 2026 19:49
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

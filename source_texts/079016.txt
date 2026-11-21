@@ -1,0 +1,1231 @@
+Optimized View and Geometry Distillation from Multi-view Diffuser
+arXiv:2312.06198v4 [cs.CV] 13 May 2025
+Youjia Zhang1 , Zikai Song1 , Junqing Yu1 , Yawei Luo2 and Wei Yang1†
+1
+Huazhong University of Science and Technology
+2
+Zhejiang University
+{youjiazhang, weiyangcs}@hust.edu.cn
+Abstract
+Generating multi-view images from a single input
+view using image-conditioned diffusion models is
+a recent advancement and has shown considerable
+potential. However, issues such as the lack of consistency in synthesized views and over-smoothing
+in extracted geometry persist. Previous methods
+integrate multi-view consistency modules or impose additional supervisory to enhance view consistency while compromising on the flexibility of
+camera positioning and limiting the versatility of
+view synthesis. In this study, we consider the radiance field optimized during geometry extraction as
+a more rigid consistency prior, compared to volume
+and ray aggregation used in previous works. We
+further identify and rectify a critical bias in the traditional radiance field optimization process through
+score distillation from a multi-view diffuser. We
+introduce an Unbiased Score Distillation (USD)
+that utilizes unconditioned noises from a 2D diffusion model, greatly refining the radiance field fidelity. We leverage the rendered views from the
+optimized radiance field as the basis and develop
+a two-step specialization process of a 2D diffusion
+model, which is adept at conducting object-specific
+denoising and generating high-quality multi-view
+images. Finally, we recover faithful geometry and
+texture directly from the refined multi-view images. Empirical evaluations demonstrate that our
+optimized geometry and view distillation technique
+generates comparable results to the state-of-theart models trained on extensive datasets, all while
+maintaining freedom in camera positioning. Source
+code of our work is publicly available at: https:
+//youjiazhang.github.io/USD/.
+1
+Introduction
+Traditionally, the process of generating a three-dimensional
+model from a singular image necessitates extensive and
+meticulous efforts by highly skilled artists. However, recent advancements in neural networks, particularly through
+†
+Corresponding author.
+the adaptation of 2D diffusion models for 3D synthesis, have
+rendered the conversion of a single image into a 3D object
+feasible. The early breakthrough comes from the text to 3D
+domain, where DreamFusion [Poole et al., 2023] and Score
+Jacobian Chaining (SJC) [Wang et al., 2023a] proposes a
+Score Distilling Sampling (SDS) strategy to distill the scores
+learned by 2D diffusion models from large-scale images to
+optimize a Neural Radiance Field (NeRF) [Mildenhall et al.,
+2020], circumventing the need for 3D data. Successive approaches further improve the quality and diversity of generated geometries from textural prompts [Wang et al., 2023b;
+Lin et al., 2023; Chen et al., 2023]. Particularly, RealFusion [Melas-Kyriazi et al., 2023] migrates the scheme to generate plausible 3D reconstruction matches to a single input
+image via textual inversion adapted supervision.
+More relevantly, 3DiM [Watson et al., 2023] and MVDream [Shi et al., 2024] develop a pose-conditional imageto-image diffusion model, which generates the novel view
+at a target pose from a source view. Zero-1-to-3 [Liu et
+al., 2023b] adopts a similar framework and learns control
+of viewpoints through a synthetic dataset and demonstrates
+zero-shot generalization to in-the-wild images. Though Zero1-to-3 demonstrates plausible novel views, they are not multiview consistent and the geometry distilled from SDS tends
+to be oversmoothed. To enhance the multi-view consistency,
+SyncDreamer [Liu et al., 2024b] devises a volume-encoded
+multi-view noise predictor to share information across different views. Wonder3D [Long et al., 2024] predicts the multiview color images along with their normal maps from a crossdomain diffusion model. Though enhancing the multi-view
+consistency of image generation, these methods compromise
+the flexibility of camera positioning and only allow synthesis
+for a limited number of views.
+In this study, we observe that the predicted unconditional noise from the multi-view diffuser, i.e., the Zero-1-to-3
+model, appears to be biased. That is, even if we only add
+very low-level noise to a normal image and use the unconditional noise predicted by a Zero-1-to-3 model for denoising, the result still tends to deviate greatly from the original
+image. We analyze and rectify the critical bias by using an
+unconditioned noise from a pre-trained 2D diffusion model
+and greatly refining the geometry fidelity. Moreover, previous approaches use either 3D volume [Liu et al., 2024b]
+or ray aggregation [Tseng et al., 2023] to share information
+T=100
+T=200
+T=300
+Stable Diffusion Zero-1-to-3
+T=50
+Figure 1: The unconditional noise predicted by Zero-1-to-3 model
+tends to be biased. As a demonstration, we use the ‘Mario’ image as
+a toy example and add various levels of noise to the image (larger T
+means more noise has been added). We use the predicted unconditional noise to recover the original image from noisy input and find
+the results of Zero-1-to-3 deviate from the input image greatly even
+for very small amount of noise. The right sub-figure shows the averaged difference between the predicted noise and the added noise.
+across views. We consider the radiance field as the consistency prior, and encourage the generated multi-view images
+to be consistent with the NeRF renderings. We develop a twostep specialization process of a 2D diffusion model, which
+is adept at conducting target-specific denoising and generating high-quality multi-view images from NeRF renderings.
+We then further use the refined views to generate the geometry and texture from NeuS [Wang et al., 2021], and in the
+meanwhile enforce input view consistency using view score
+distillation. Our approach generates comparable-quality of
+multi-view images and geometry to the SOTA approaches, including SyncDreamer and Wonder3D, without enforcing any
+restriction on camera poses. Consequently, we posit that our
+approach offers superior adaptability and effectiveness in addressing the challenges associated with generating consistent
+and high-quality multi-view imagery and geometry, affirming
+its substantial potential for widespread application in relevant
+fields.
+2
+Related Work
+2D Diffusion Models for 3D Generation. Recent advancements in 2D diffusion models [Ho et al., 2020; Rombach et
+al., 2022; Croitoru et al., 2023] and large-scale visual language models, notably the CLIP model [Radford et al., 2021;
+Song et al., 2024], have catalyzed new approaches for generating 3D assets. Pioneering efforts such as DreamFusion
+[Poole et al., 2023] and SJC [Wang et al., 2023a] have developed methods for transforming 2D text into images, subsequently facilitating the generation of 3D shapes from text.
+This approach has inspired a range of subsequent studies
+that adopt a shape-by-shape optimization scheme. Additionally, the integration of 2D diffusion models with robust vision language models, especially CLIP [Radford et al., 2021],
+has emerged as a significant exploration in the generation of
+3D assets [Xu et al., 2023b]. The typical methodology involves optimizing a 3D representation, such as NeRF, mesh,
+or SDF, and then utilizing neural rendering to generate 2D
+images from various viewpoints. These images are processed
+through 2D diffusion models or the CLIP model to calcu-
+late SDS losses, which guide the optimization of the 3D
+shape. Building on the foundations laid by DreamFusion
+and SJC, numerous works have enhanced text-to-3D distillation methods in various aspects. Notably, Magic3D [Lin et
+al., 2023] develops a two-stage coarse-to-fine optimization
+framework for high-resolution 3D content generation, and
+ProlificDreamer [Wang et al., 2023b] proposes a Variational
+Score Distillation (VSD) for generating highly detailed geometry. However, challenges such as low efficiency and the
+multi-face Janus problem, where optimized geometry tends
+to produce multiple faces due to the lack of explicit 3D supervision, remain prevalent. Furthermore, some works [Radford et al., 2021] have applied this distillation pipeline in
+single-view reconstruction tasks. While these methods have
+achieved impressive results, they often require extensive time
+for textual inversion and NeRF optimization, without always
+guaranteeing satisfactory outcomes. In contrast with the 2D
+diffusion to 3D extension, which is ignorant to multi-view
+consistency, our method focuses on the multi-view diffuser
+technique, which predicts the noises for novel views, and inherently avoids the Janus problem.
+Multi-view Diffusion Models. In light of the complexities involved in ensuring the integrity of generated 3D content, recent efforts [Watson et al., 2023; Gu et al., 2023;
+Deng et al., 2023; Tseng et al., 2023; Chan et al., 2023;
+Yu et al., 2023; Tang et al., 2023; Liu et al., 2023c; Tewari
+et al., 2023] have explored the feasibility of directly generating novel views from a single image input. Notably, the
+Scene Representation Transformer [Sajjadi et al., 2022] extends the vision transformer to image sets, enabling global
+information integration for 3D reasoning. Similarly, 3DiM
+[Watson et al., 2023] develops a pose-conditional image-toimage diffusion model, translating a single input view into
+consistent and sharp completions across multiple views. A
+seminal work in this area, Zero-1-to-3 [Liu et al., 2023b],
+utilizes a similar network structure, trained on a large-scale
+synthetic 3D dataset, demonstrating notable generalizability. Recent advancements, such as One-2-3-45 [Xu et al.,
+2023a], have leveraged the generalizable neural reconstruction method SparseNeuS [Long et al., 2022] to directly produce 3D geometry from images generated by Zero-1-to-3.
+While this approach is more efficient and alleviates the Janus
+(multi-head) problem, it tends to produce lower-quality results with reduced geometric detail. In a different vein, SyncDreamer [Liu et al., 2024b] concentrates on object reconstruction, generating images in a single reverse process and
+utilizing attention to synchronize states among views. This
+contrasts with Viewset Diffusion [Szymanowicz et al., 2023],
+which requires predicting a radiance field. SyncDreamer
+solely relies on attention for synchronization, fixing the viewpoints of generated views to enhance training convergence. A
+significant trend in recent research has been the design of various functional attention layers. Consistent123 [Weng et al.,
+2023] employs a shared self-attention layer, where all views
+query the same key and value from the input view. ConsistNet [Yang et al., 2024] introduces two sub-modules: a view
+aggregation module and a ray aggregation module, to extract
+features consistent across multiple views. MVDream [Shi et
+al., 2024] utilizes 3D self-attention. Wonder3D [Long et al.,
+NeuS
+Generated by
+Zero-1-to-3
+Noisy
+Rendered
+View
+Stable
+Diffusion
+NeRF
+Input View
+“a [V] toy” 1
+2 “a [S] [V] toy”
+DreamBooth
+Denoise
+Zero-1-to-3
+Input View
+Consistency Prior
+Low Noisy
+Rendered View
+Figure 2: The overall pipeline of our approach. We first use our Unbiased Score Distillation to extract an optimized underlying radiance field.
+And then we use the NeRF as our consistency prior, i.e., the generated views should be consistent with the NeRF renderings. We propose a
+two-stage specialization scheme to obtain a specified DreamBooth specifically for the target. We then denoise the NeRF renderings to obtain
+high-quality views and subsequently use NeuS technique to recover the geometry. Our optimized scheme generates comparable, sometimes
+better particularly for irregular camera poses, results to the SOTA works without training on large-scale data.
+2024] goes a step further by not only outputting multi-view
+images but also outputting the normal map for each perspective, using cross-domain attention to maintain the consistency
+of the 3D structure. Both SyncDreamer and Wonder3D, resulting from fixed view outputs, exhibit sensitivity to the camera angle of the input image. In contrast, our method can reconstruct accurate 3D structures from inputs captured at varying camera angles. While existing approaches have focused
+on developing novel modules for enforcing multi-view consistency, our work demonstrates that an optimized distillation
+strategy can yield views and geometries comparable to models trained on large-scale datasets. This insight may inspire
+further exploration in improved strategies for geometry and
+view extraction.
+3
+Method
+Our objective is to synthesize consistent multi-view images
+and high-quality geometric representations from a single input image. Notable prior work, such as the Zero-1-to-3, has
+demonstrated impressive results by utilizing an image and
+camera pose-conditioned diffusion model. However, this approach encounters limitations, particularly in terms of generating inconsistent multi-view images and a tendency for
+over-smoothing in the geometric output. The state-of-theart research, including SyncDreamer [Liu et al., 2024b] and
+Wonder3D [Long et al., 2024], addresses these challenges by
+incorporating additional modules for consistency or employing normal supervision. However, this often compromises
+the flexibility of positioning the target camera at will. Contrastingly, our work adopts a distinct methodology, showcasing that comparable quality in views and geometry can be
+achieved through a meticulously crafted distillation strategy.
+Central to our approach is the insight that the unconditional
+noise predictions from Zero-1-to-3 are inherently biased. We
+propose the utilization of unconditional noise from the Stable Diffusion [Takagi and Nishimoto, 2023] model to rectify
+this issue, as elaborated in Sec. 3.1. Our method, termed
+Unbiased Score Distillation (USD), significantly enhances
+the quality of the radiance field relative to previously used
+SDS/SJC methods. Furthermore, we employ the optimized
+NeRF [Mildenhall et al., 2020] as a consistency prior, in contrast to previous implicit constraints such as 3D volume or
+ray aggregation. We ensure that the generated views and geometry align coherently with the distilled NeRF to achieve
+consistency. We posit that specializing a diffusion model to
+denoise the target object is crucial. To this end, we implement
+the DreamBooth [Ruiz et al., 2023] technique and engage in
+a two-stage fine-tuning process, detailed in Sec. 3.2. The first
+stage involves using multi-view images from Zero-1-to-3 as
+positive samples, contrasting them with text-prompt generated images as negative samples for image style learning. In
+the subsequent stage, the input image serves as the positive
+sample, with all Zero-1-to-3 generated images as negatives,
+focusing on learning finer details. Subsequently, we introduce
+a low level of noise into the NeRF renderings and employ the
+fine-tuned diffusion model for denoising. The final step involves applying the NeuS technique for mesh reconstruction,
+while in the meanwhile using View Score Distillation to ensure input view consistency. Fig. 2 illustrates the complete
+pipeline of our methodology.
+3.1
+Unbiased Score Distillation
+In this section, we highlight the significant bias in Zero-1to-3’s unconditional noise due to insufficient unconditional
+training and object-level dataset bias, affecting geometry
+quality in SDS-based distillation, both theoretically and empirically. We then propose a rectification method.
+Bias in Unconditional Noise. As a multi-view diffuser, Zero1-to-3 predicts noises of a target image latent z given two conditions: the input image cI and relative camera pose cP , i.e.,
+it learns the probability distribution P (z|cI , cP ) for image latent z. We apply Bayes’ Rule to decompose the conditional
+probability:
+P (z|cI , cP ) =
+P (cI |cP , z)P (cP |z)P (z)
+P (z, cI , cP )
+=
+P (cI , cP )
+P (cI , cP )
+(1)
+Input Images
+Ours
+Wonder3D
+SyncDreamer
+Figure 3: The qualitative comparisons with baseline models on multi-view color images. Our approach generates consistent multi-view
+images while preserving the image details.
+Diffusion models estimate the score [Hyvärinen and Dayan,
+2005] of the data distribution, i.e., the derivative of the log
+probability, giving us the following expression:
+∇z log(P (z|cI , cP )) =∇z log(P (cI |cP , z))+
+∇z log(P (cP |z))+
+∇z log(P (z))
+(2)
+This leads to the score estimate with classifier-free guidance
+(CFG [Ho and Salimans, 2022]):
+ϵCFG
+ϕ (zt , cI , cP ) = α1 [ϵϕ (zt , cI , cP ) − ϵϕ (zt , cP , ∅)]+
+α2 [ϵϕ (zt , cP , ∅) − ϵϕ (zt , ∅, ∅)]+
+ϵϕ (zt , ∅, ∅)
+(3)
+where ϵϕ is a neural network for predicting noises given conditions, α1 and α2 are guidance scales that enable separately
+trading off the strength of conditions cI and cP separately. To
+ensure accurate prediction of ϵϕ (zt , cP , ∅) and ϵϕ (zt , ∅, ∅),
+one needs to randomly drop cI and cP during training ϵϕ .
+However, we observed that Zero-1-to-3 did not truly follow
+this procedure to supervise unconditional noise. As shown
+in Fig. 4, Zero-1-to-3 only randomly dropped image conditions cI while keeping cP untouched. During inference, it
+replaces the tensor after fully connected (FC) layer f (·) with
+zeros (not exactly equal to setting both cI and cP to zeros as
+f (0) ̸= 0), leads to a bias. Moreover, the dataset used for
+fine-tuning is majorly object-centric, which may also introduce additional domain bias. Fully addressing this bias problem requires re-training the multi-view diffuser on a broader
+and more balanced dataset, which requires tremendous effort.
+Here we propose an effortless fix in the following.
+Rectification. To alleviate the inaccurate unconditional
+noise problem, we first set α1 = α2 = ω to eliminate ϵϕ (zt , cP , ∅). We then and yield a special case of
+ϵCFG
+ϕ (zt , cI , cP ) as:
+ϵCFG
+ϕ (zt , cI , cP ) = ω[ϵϕ (zt , cI , cP ) − ϵϕ (zt , ∅, ∅)]+
+ϵϕ (zt , ∅, ∅)
+(4)
+To demonstrate our setting of α1 and α2 is valid, we provide an empirical validation can be found in the Appendix E.
+Further, we consider ϵϕ (zt , ∅, ∅) predicts noises from only
+the noisy latent and is equivalent to the unconditional noise
+ϵψ (zt , ∅) of Stable Diffusion (SD) as it uses the same variational autoencoders (VAE [Kingma and Welling, 2013]) as
+Zero-1-to-3. As such, the bias has been well rectified. To
+verify the effect of our rectification, Tab. 1 shows the denoising effect using various unconditional noise settings: (1)
+use SD unconditional noise ϵψ (zt , ∅). (2) use Zero-1-to-3
+noise ϵϕ (zt , f (0, cP )) with f (0, cP ) as a condition (same to
+the training process as in Fig 4). (3) use Zero-1-to-3 noise
+ϵϕ (zt , 0) with 0 as a condition (referring to the inference process, as shown in Fig 4). The SD noise generates the best result, and setting (2) is slightly better than (3) as it follows the
+training set up. More details can be found in the Appendix A.
+Unbiased Score Distillation. One major application of a
+multi-view diffuser is to distill 3D content, represented as
+NeRF paramater θ, using the SDS loss for optimization:
+
+
+ ∂zt
+CFG
+(5)
+∇θ LSDS = Et,cP ,ϵ w(t) ϵϕ (zt , cI , cP ) − ϵ
+∂θ
+where w(t) is a weighting function, ϵ is standard Gaussian
+√
+noise,
+and zt refers to the noisy latent as zt = αt z +
+√
+1 − αt ϵ, with αt being the noise scheduler. We rewrite the
+noise difference in Formula 5 by adding an additional weighting factor λ to [ϵψ (zt , ∅) − ϵ]:
+ϵCFG
+ϕ (zt , cI , cP ) − ϵ = ω [ϵϕ (zt , cI , cP ) − ϵψ (zt , ∅)] +
+λ [ϵψ (zt , ∅) − ϵ]
+(6)
+where setting λ = 1 we get Formula 5. Inspired by DDS
+[Hertz et al., 2023] and CSD [Yu et al., 2024], we observed
+that setting λ = 0 can significantly improve the details of
+the 3D details generated using SDS. Further details and an
+in-depth analysis are provided in the Appendix D. We obtain
+Pose embedding
+0
+Randomly
+dropout
+CLIP embedding
+0
+VAE embedding
+0
+Zero-1-to-3
+Training process
+Zero-1-to-3
+Unconditional noise inference
+FC layer
+0 Null value
+Concat
+Figure 4: Training and inference process of Zero-1-to-3. Training for predicting unconditional noise involves setting the cI conditions to 0 at
+regular intervals.
+Noise level
+Metrics
+ϵψ (zt , ∅)
+ϵϕ (zt , f (0, cP ))
+ϵϕ (zt , 0)
+PSNR↑
+40.26
+36.17
+36.13
+T=50
+SSIM↑
+0.992
+0.981
+0.979
+LPIPS↓
+0.008
+0.015
+0.015
+PSNR↑
+36.94
+34.85
+34.70
+T=100
+SSIM↑
+0.988
+0.979
+0.970
+LPIPS↓
+0.014
+0.024
+0.026
+PSNR↑
+33.99
+33.07
+32.76
+T=200
+SSIM↑
+0.981
+0.975
+0.973
+LPIPS↓
+0.023
+0.031
+0.033
+PSNR↑
+31.98
+30.44
+29.94
+T=300
+SSIM↑
+0.974
+0.969
+0.963
+LPIPS↓
+0.027
+0.046
+0.055
+Table 1: Quantitative evaluation of different unconditional noises. We randomly samples 1,000 different images from the GSO dataset,
+RTMV, and Objaverse, add a certain level of noise w.r.t. T, where larger T means more noise is added, and compare the denoising effect
+under different conditions of Stable Diffusion and Zero-1-to-3. The top three for each metric are highlighted in red , orange, and yellow
+respectively.
+style of the target. In the second stage, we set only the inour Unbiased Score Distillation (USD) as:
+
+ put image as the positive sample and the images generated by
+∂zt Zero-1-to-3 as negative ones, and use the additional identifier
+∇θ LUSD = Et,cP ,ϵ w(t) [ω (ϵϕ (zt , cI , cP ) − ϵψ (zt , ∅))]
+∂θ [S] to capture the identity of the specific target.
+(7)
+Geometry and Texture Distillation with Input View SuOur USD generates much better and consistent 3D than the
+pervision. With the specialization diffusion model, we add a
+SDS/SJC method used in Zero-1-to-3, the results can be
+small noise, Stable Diffusion scheduler t = 200, to the NeRF
+found in the Appendix E.
+render images and conduct the denoising process. Then, we
+use the NeuS technique to reconstruct the geometry from the
+3.2 Consistent View and Geometry Distillation
+high-quality and clear images (i.e., 100 input images).
+Although USD can be used to optimize NeRF for view synWe observe that the input view is rarely used for optimizathesis, the resulting images still tend to be blurry, and directly
+tion of the geometry and texture in multi-view diffusers, deextracting geometry from the NeRF density field introduces
+spite the fact that the input image is most faithful to the tarnoise into the mesh. Since our ultimate goal is to extract highget object. To exploit the input view information, we furquality geometry and consistent multi-views, we propose to
+ther develop a reference view score distillation during the
+utilize the generated NeRF as the view consistency prior, i.e.,
+NeuS reconstruction process. Specifically, we consider the
+the final high-quality view images should be consistent with
+image render from NeuS at the input image viewpoint as
+the NeRF rendering. Thus, our problem transformed into a
+zt ∗ = R(Θ, p∗ ), where R is the rendering function from
+denoising problem.
+NeuS model defined by Θ, p∗ is the camera pose of the input
+Two-Stage Specified Diffusion. We leverage the recent
+image, can be set to a particular relative pose. We define the
+advance in diffusion model specialization, i.e., the Dreamfollowing reference view distillation loss as:
+Booth [Ruiz et al., 2023], to fine-tune a 2D diffusion model
+for the specific target in the input image. We observe that
+
+
+the novel view images generated by Zero-1-to-3, though not
+(8)
+LRV = Et,ϵ w(t)||ϵψ (zt ∗ , ∅) − ϵψ (yt , ∅) ||22
+multi-view consistent, tend to have the same style as the input
+image. We design a two-stage tuning method to gradually let
+the diffusion model learn the object details. In the first stage,
+where yt is input view image. We add this reference view
+we use the multi-view images generated by Zero-1-to-3 as
+distillation loss LRV to original photometric loss with optipositive samples, contrasting them with text-prompt genermized images for optimizing the NeuS parameter Θ. This
+ated images as negative samples for learning the visual style
+scheme is a better supervision strategy than directly applying
+of the target. In the subsequent stage, the input image serves
+MSE loss on the input view. The reason for this is that, comas the positive sample, with all Zero-1-to-3 generated images
+pared to computing MSE loss directly at the pixel-level, our
+as negatives, focusing on learning finer details. During optipatch-aware noise(latent)-level approach places greater emmization, we use a unique identifier [V] to capture the visual
+phasis on the perceptual quality of the image.
+Input Images
+Ours
+Wonder3D
+SyncDreamer
+One-2-3-45
+Figure 5: Qualitative comparisons of our method with baseline approaches, namely Wonder3D, SyncDreamer, and One-2-3-45, on the GSO
+dataset, focusing on the quality of the reconstructed textured meshes.
+4
+Experiments
+We conduct extensive experiments, both qualitatively and
+quantitatively, to demonstrate the effectiveness of our
+method.
+4.1
+Implementation Details
+Optimizing the Pipeline. We use exactly the same set of
+hyperparameters for all experiments and do not perform any
+per-object hyperparameter optimization. We use the implicitvolume implementation in threestudio [Guo et al., 2023]
+as our 3D representation (NeRF), which includes a multiresolution hash-grid and a MLP to predict density and RGB.
+The NeRF is optimized for 10,000 steps with an Adam optimizer at a learning rate of 0.01, weight decay of 0.05, and
+betas of (0.9, 0.95). For USD, the maximum and minimum
+time steps are decreased from 0.98 to 0.5 and 0.02, respectively, over the first 5,000 steps. We adopt the Stable Diffusion [Takagi and Nishimoto, 2023] model of V2.1. The
+classifier-free guidance (CFG) scale of the USD is set to 7.5
+following [Wang et al., 2023b]. The DreamBooth backbone
+is implemented using Stable Diffusion V2.1. In the first stage,
+we use Stable Diffusion to generate 200 images as negative
+samples. Additionally, we utilize 6 positive sample images
+with 360◦ surrounding camera poses (at 60◦ intervals) for
+training. The USD (NeRF) process takes about 1.5 hours on a
+NVIDIA Tesla V100 (32GB) GPU. To achieve reduced running time, we provide additional discussions and experimental results in the Appendix C. For DreamBooth fine-tuning,
+we train the model around for 600 steps with a learning-rate
+as 2e-6, weight decay as 0.01 and a batch size of 2. More details on the experimental setup are provided in the Appendix
+B.
+Camera Setting. Since the reference image is unposed, we
+assume its camera parameters [Face, 2023] are as follows.
+We set the field of view (FOV) of the camera is 40◦ , and the
+radial distance is 1.5 meters. Note this camera setting works
+for images subject to the front-view assumption. For images
+taken deviating from the front view, a manual change of polar
+Method
+Realfusion [Melas-Kyriazi et al., 2023]
+Magic123 [Qian et al., 2024]
+One-2-3-45 [Liu et al., 2023a]
+Point-E [Nichol et al., 2022]
+Shap-E [Jun and Nichol, 2023]
+Zero-1-to-3 [Liu et al., 2023b]
+SyncDreamer [Liu et al., 2024b] (NeuS)
+Wonder3D [Long et al., 2024] (iNGP+NeuS)
+Ours (NeuS)
+Ours (iNGP+NeuS)
+Chamfer Dist.↓
+Volume IoU↑
+0.0819
+0.0516
+0.0629
+0.0426
+0.0436
+0.0339
+0.0261
+0.0199
+0.0240
+0.0177
+0.2741
+0.4528
+0.4086
+0.2875
+0.3584
+0.5035
+0.5421
+0.6244
+0.5688
+0.6330
+Table 2: Quantitative comparison with baseline methods. We report
+Chamfer Distance and Volume IoU on the GSO dataset. The original implementation of SyncDreamer uses vanilla NeuS for extracting 3D meshes, while Wonder3D uses Instant NGP (iNGP) adapted
+NeuS. We report results using both techniques for better demonstration.
+angle or a camera estimation is required.
+4.2
+Evaluation Protocol
+Evaluation Datasets. Following prior research [Liu et al.,
+2023b; Liu et al., 2024b; Long et al., 2024], we adopt the
+Google Scanned Object dataset [Downs et al., 2022] for our
+evaluation, which includes a wide variety of common everyday objects. Our evaluation dataset matches that of SyncDreamer [Liu et al., 2024b], consisting of 30 objects that span
+from everyday items to animals. For each object in the evaluation set, we render an image with a size of 256 × 256 and
+use it as the input. Additionally, to assess the generalization
+ability of our model, we include images with diverse styles
+collected from the website in Zero-1-to-3, SyncDreamer and
+Wonder3D.
+Metrics. To evaluate the quality of single view reconstruction, we used two commonly used metrics: the chamfer distance (CD) between the ground truth shape and the reconstructed shape, and the volume IoU. Due to different methods
+using different normative systems, before calculating these
+two metrics, we first align the generated shapes with the
+basic fact shapes. Moreover, we adopt the metrics PSNR,
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+Realfusion [Melas-Kyriazi et al., 2023]
+Zero-1-to-3 [Liu et al., 2023b]
+SyncDreamer [Liu et al., 2024b]
+Wonder3D [Long et al., 2024]
+Ours
+15.26
+18.93
+20.05
+26.07
+25.38
+0.722
+0.779
+0.798
+0.924
+0.927
+0.283
+0.166
+0.146
+0.065
+0.049
+Input Images
+w/o USD
+w/o DB[1st+2nd]
+w/o DB[2nd]
+w/o ℒ𝑅𝑉
+Ours
+Table 3: The quantitative comparison in novel view synthesis. We
+report PSNR, SSIM, LPIPS on the GSO dataset.
+Method
+Chamfer Dist.↓
+Volume IoU↑
+w/o USD
+w/o DB[1st+2nd]
+w/o DB[2nd]
+w/o LRV
+0.0253
+0.0217
+0.0190
+0.0185
+0.5515
+0.6023
+0.6216
+0.6229
+Figure 6: Ablation study on the effect of each components, including
+the USD (Sec. 3.1), the reference view score distillation (Sec. 3.2),
+the DreamBooth (Sec. 3.2) refinement of our method.
+Ours
+0.0177
+0.6330
+method [Guo, 2022], and we use Blender Cycles [Community, 2018] to render the results.
+Table 4: Quantitative results of ablation studies. We report Chamfer
+Distance and Volume IoU on the GSO dataset.
+SSIM [Wang et al., 2004], LPIPS [Zhang et al., 2018] for
+evaluating the generated color images.
+4.3
+Ablation Study
+We validate our design choices by ablating 4 major model
+variants, that are without Unbiased Score Distillation, without
+reference view distillation loss, without the two-stage DreamBooth (DB). As shown in Fig. 6, the 3D models generated
+without USD exhibit biased texture colors, and their shapes
+are not smooth. Not using reference view supervision will
+result in the inability to recover the same texture details as
+the input image, and not using DB will result in blurring of
+texture details. We also conducted a quantitative analysis on
+the GSO dataset, presented in Tab. 4. The results demonstrate
+that USD is crucial for geometric accuracy, and all our submodules collectively enhance overall performance.
+4.4
+Different Viewing Angle Comparisons
+We found that SyncDreamer [Liu et al., 2024b] and Wonder3D [Long et al., 2024] are very sensitive to viewing angles. If a relatively high viewing angle is input, SyncDreamer
+and Wonder3D will predict incorrect multi-view images. The
+results can be found in the Appendix E.
+4.5
+Single View Reconstruction
+We evaluate the quality of the reconstructed geometry of
+different methods. The quantitative results are summarized
+in Tab. 5, and the qualitative comparisons are presented in
+Fig. 5. The quality of Wonder3D shape reconstruction depends on the perspective of the input view, such as ‘Train’
+shown in Fig. 5, where Wonder3D generated incorrect prediction results. The shape generated by SyncDreamer undergoes
+deformation due to the camera pose in the input view. One-23-45 [Liu et al., 2023a] attempts to reconstruct meshes from
+the multiview-inconsistent outputs of Zero-1-to-3 [Liu et al.,
+2023b]. While it can capture coarse geometries, it loses important details in the process. In contrast, our method can
+achieve good reconstruction quality and texture in terms of
+geometric structure and texture. In the paper, all the surface
+extraction demonstrated by our method is built on the Instant
+NGP (iNGP) [Müller et al., 2022] based SDF reconstruction
+4.6
+Novel View Synthesis
+We evaluate the quality of novel view synthesis for different methods. The quantitative results are presented in Tab. 6,
+and the qualitative results can be found in Fig. 3. Zero1-to-3 produces visually reasonable images, but they lack
+multi-view consistency since it operates on each view independently (we don’t show the results of Zero-1-to-3). Although SyncDreamer introduces a volume attention scheme
+to enhance the consistency of multi-view images, their model
+is sensitive to the elevation degrees of the input images and
+tends to produce unreasonable results. Wonder3D ensures 3D
+consistency by generating normal maps, but may result in incorrect results for some input viewpoints.
+4.7
+Text-to-Image-to-3D
+As a case study, we combine text-to-image models, i.e., the
+Stable Diffusion or Imagen [Saharia et al., 2022] to generate 3D models from text. We show some examples in the
+Appendix E. Compared to DreamFusion [Poole et al., 2023],
+ProlificDreamer [Wang et al., 2023b] and MVDream [Shi et
+al., 2024], our method shows no multi-face Janus problem
+and conforms to the text faithfully.
+5
+Conclusions
+In this work, we introduce an optimized approach for distilling geometry and views from a multi-view diffuser, with a
+specific focus on the Zero-1-to-3 model. We observed that
+the direct application of the SDS/SJC technique to Zero-1-to3 is often suboptimal, primarily due to bias issues inherent
+in unconditional noise. To address this, we propose an Unbiased Score Distillation (USD) strategy by leveraging unconditioned noises from a 2D diffusion model to effectively enhance the optimized radiance field. Moreover, we developed
+a two-stage DreamBooth refinement process to improve the
+rendering of views. This process ensures consistency across
+multiple perspectives while simultaneously enhancing image
+quality. While we have identified and addressed the bias issue in the Zero-1-to-3 model, the underlying causes remain to
+be fully understood. Future research will delve into the theoretical aspects of this bias problem. Additionally, we aim to
+explore the potential applications of USD in other fields, such
+as image translation and view synthesis.
+Acknowledgements
+This work is supported by the National Natural Science Foundation of China (NSFC No. 62272184 and No. 62402189),
+the China Postdoctoral Science Foundation under Grant
+Number GZC20230894, the China Postdoctoral Science
+Foundation (Certificate Number: 2024M751012). The computation is completed in the HPC Platform of Huazhong University of Science and Technology.
+References
+[Barron et al., 2022] Jonathan T Barron, Ben Mildenhall,
+Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mipnerf 360: Unbounded anti-aliased neural radiance fields.
+In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, pages 5470–5479, 2022.
+[Chan et al., 2023] Eric R Chan, Koki Nagano, Matthew A
+Chan, Alexander W Bergman, Jeong Joon Park, Axel
+Levy, Miika Aittala, Shalini De Mello, Tero Karras,
+and Gordon Wetzstein. Generative novel view synthesis
+with 3d-aware diffusion models. In Proceedings of the
+IEEE/CVF international conference on computer vision,
+2023.
+[Chen et al., 2023] Rui Chen, Yongwei Chen, Ningxin Jiao,
+and Kui Jia. Fantasia3d: Disentangling geometry and appearance for high-quality text-to-3d content creation. In
+Proceedings of the IEEE/CVF international conference on
+computer vision, 2023.
+[Community, 2018] Blender Online Community. Blender a 3D modelling and rendering package. Blender Foundation, Stichting Blender Foundation, Amsterdam, 2018.
+[Croitoru et al., 2023] Florinel-Alin Croitoru, Vlad Hondru,
+Radu Tudor Ionescu, and Mubarak Shah. Diffusion models in vision: A survey. T-PAMI, 2023.
+[Deng et al., 2023] Congyue Deng, Chiyu Jiang, Charles R
+Qi, Xinchen Yan, Yin Zhou, Leonidas Guibas, Dragomir
+Anguelov, et al. Nerdi: Single-view nerf synthesis with
+language-guided diffusion as general image priors. In Proceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, 2023.
+[Downs et al., 2022] Laura Downs, Anthony Francis, Nate
+Koenig, Brandon Kinman, Ryan Hickman, Krista Reymann, Thomas B McHugh, and Vincent Vanhoucke.
+Google scanned objects: A high-quality dataset of 3d
+scanned household items. In 2022 IEEE International
+Conference on Robotics and Automation (ICRA), pages
+2553–2560. IEEE, 2022.
+[Face, 2023] Hugging Face.
+One-2-3-45.
+https://
+huggingface.co/spaces/One-2-3-45/One-2-3-45, 2023.
+[Gu et al., 2023] Jiatao Gu, Alex Trevithick, Kai-En Lin,
+Joshua M Susskind, Christian Theobalt, Lingjie Liu, and
+Ravi Ramamoorthi. Nerfdiff: Single-image view synthesis with nerf-guided distillation from 3d-aware diffusion.
+In International conference on machine learning, 2023.
+[Guo et al., 2023] Yuan-Chen Guo, Ying-Tian Liu, Ruizhi
+Shao, Christian Laforte, Vikram Voleti, Guan Luo, ChiaHao Chen, Zi-Xin Zou, Chen Wang, Yan-Pei Cao,
+and Song-Hai Zhang. threestudio: A unified framework for 3d content generation.
+https://github.com/
+threestudio-project/threestudio, 2023.
+[Guo, 2022] Yuan-Chen Guo. Instant neural surface reconstruction, 2022. https://github.com/bennyguo/instant-nsrpl.
+[Hertz et al., 2023] Amir Hertz, Kfir Aberman, and Daniel
+Cohen-Or. Delta denoising score. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 2328–2337, 2023.
+[Ho and Salimans, 2022] Jonathan Ho and Tim Salimans.
+Classifier-free diffusion guidance.
+arXiv preprint
+arXiv:2207.12598, 2022.
+[Ho et al., 2020] Jonathan Ho, Ajay Jain, and Pieter Abbeel.
+Denoising diffusion probabilistic models. In Advances in
+Neural Information Processing Systems, 2020.
+[Hu et al., 2022] Edward J Hu, Phillip Wallis, Zeyuan AllenZhu, Yuanzhi Li, Shean Wang, Lu Wang, Weizhu Chen,
+et al. Lora: Low-rank adaptation of large language models.
+In International Conference on Learning Representations,
+2022.
+[Hyvärinen and Dayan, 2005] Aapo Hyvärinen and Peter
+Dayan. Estimation of non-normalized statistical models by
+score matching. Journal of Machine Learning Research,
+6(4), 2005.
+[Jun and Nichol, 2023] Heewoo Jun and Alex Nichol. Shape: Generating conditional 3d implicit functions. arXiv
+preprint arXiv:2305.02463, 2023.
+[Kerbl et al., 2023] Bernhard Kerbl, Georgios Kopanas,
+Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM
+Transactions on Graphics, 42(4):1–14, 2023.
+[Kingma and Welling, 2013] Diederik P Kingma and Max
+Welling. Auto-encoding variational bayes. arXiv preprint
+arXiv:1312.6114, 2013.
+[Lin et al., 2023] Chen-Hsuan Lin, Jun Gao, Luming Tang,
+Towaki Takikawa, Xiaohui Zeng, Xun Huang, Karsten
+Kreis, Sanja Fidler, Ming-Yu Liu, and Tsung-Yi Lin.
+Magic3d: High-resolution text-to-3d content creation. In
+Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, 2023.
+[Liu et al., 2023a] Minghua Liu, Chao Xu, Haian Jin, Linghao Chen, Zexiang Xu, and Hao Su. One-2-3-45: Any
+single image to 3d mesh in 45 seconds without per-shape
+optimization. In Advances in Neural Information Processing Systems, 2023.
+[Liu et al., 2023b] Ruoshi Liu,
+Rundi Wu,
+Basile
+Van Hoorick, Pavel Tokmakov, Sergey Zakharov,
+and Carl Vondrick. Zero-1-to-3: Zero-shot one image to
+3d object. In Proceedings of the IEEE/CVF international
+conference on computer vision, 2023.
+[Liu et al., 2023c] Xinhang Liu, Shiu-hong Kao, Jiaben
+Chen, Yu-Wing Tai, and Chi-Keung Tang. Deceptive-nerf:
+Enhancing nerf reconstruction using pseudo-observations
+from diffusion models. arXiv preprint arXiv:2305.15171,
+2023.
+[Liu et al., 2024a] Minghua Liu, Ruoxi Shi, Linghao Chen,
+Zhuoyang Zhang, Chao Xu, Xinyue Wei, Hansheng Chen,
+Chong Zeng, Jiayuan Gu, and Hao Su. One-2-3-45++:
+Fast single image to 3d objects with consistent multiview generation and 3d diffusion. In Proceedings of the
+IEEE/CVF conference on computer vision and pattern
+recognition, pages 10072–10083, 2024.
+[Liu et al., 2024b] Yuan Liu, Cheng Lin, Zijiao Zeng, Xiaoxiao Long, Lingjie Liu, Taku Komura, and Wenping
+Wang. Syncdreamer: Generating multiview-consistent images from a single-view image. In International Conference on Learning Representations, 2024.
+[Long et al., 2022] Xiaoxiao Long, Cheng Lin, Peng Wang,
+Taku Komura, and Wenping Wang. Sparseneus: Fast generalizable neural surface reconstruction from sparse views.
+In European Conference on Computer Vision, pages 210–
+227. Springer, 2022.
+[Long et al., 2024] Xiaoxiao Long, Yuan-Chen Guo, Cheng
+Lin, Yuan Liu, Zhiyang Dou, Lingjie Liu, Yuexin Ma,
+Song-Hai Zhang, Marc Habermann, Christian Theobalt,
+et al. Wonder3d: Single image to 3d using cross-domain
+diffusion. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, 2024.
+[Melas-Kyriazi et al., 2023] Luke Melas-Kyriazi, Iro Laina,
+Christian Rupprecht, and Andrea Vedaldi. Realfusion:
+360deg reconstruction of any object from a single image.
+In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, 2023.
+[Mildenhall et al., 2020] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as
+neural radiance fields for view synthesis. In Proceedings
+of the European conference on computer vision (ECCV),
+2020.
+[Müller et al., 2022] Thomas Müller, Alex Evans, Christoph
+Schied, and Alexander Keller. Instant neural graphics
+primitives with a multiresolution hash encoding. ACM
+Transactions on Graphics (ToG), 41(4):1–15, 2022.
+[Nichol et al., 2022] Alex Nichol, Heewoo Jun, Prafulla
+Dhariwal, Pamela Mishkin, and Mark Chen. Point-e:
+A system for generating 3d point clouds from complex
+prompts. arXiv preprint arXiv:2212.08751, 2022.
+[Paszke et al., 2019] Adam Paszke, Sam Gross, Francisco
+Massa, Adam Lerer, James Bradbury, Gregory Chanan,
+Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca
+Antiga, et al. Pytorch: An imperative style, highperformance deep learning library. Advances in neural information processing systems, 32, 2019.
+[Poole et al., 2023] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Mildenhall. Dreamfusion: Text-to-3d using 2d diffusion. In International Conference on Learning
+Representations, 2023.
+[Qian et al., 2024] Guocheng Qian, Jinjie Mai, Abdullah
+Hamdi, Jian Ren, Aliaksandr Siarohin, Bing Li, Hsin-Ying
+Lee, Ivan Skorokhodov, Peter Wonka, Sergey Tulyakov,
+et al. Magic123: One image to high-quality 3d object generation using both 2d and 3d diffusion priors. In International Conference on Learning Representations, 2024.
+[Radford et al., 2021] Alec Radford, Jong Wook Kim, Chris
+Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack
+Clark, et al. Learning transferable visual models from natural language supervision. In International conference on
+machine learning, 2021.
+[Rombach et al., 2022] Robin
+Rombach,
+Andreas
+Blattmann, Dominik Lorenz, Patrick Esser, and Björn
+Ommer. High-resolution image synthesis with latent
+diffusion models. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition,
+2022.
+[Ruiz et al., 2023] Nataniel Ruiz, Yuanzhen Li, Varun Jampani, Yael Pritch, Michael Rubinstein, and Kfir Aberman.
+Dreambooth: Fine tuning text-to-image diffusion models for subject-driven generation. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 22500–22510, 2023.
+[Ryu, 2022] Simo Ryu.
+Low-rank adaptation for
+fast text-to-image diffusion fine-tuning,
+2022.
+https://github.com/cloneofsimo/lora.
+[Saharia et al., 2022] Chitwan Saharia, William Chan,
+Saurabh Saxena, Lala Li, Jay Whang, Emily L Denton,
+Kamyar Ghasemipour, Raphael Gontijo Lopes, Burcu
+Karagol Ayan, Tim Salimans, et al.
+Photorealistic
+text-to-image diffusion models with deep language understanding. Advances in neural information processing
+systems, 35:36479–36494, 2022.
+[Sajjadi et al., 2022] Mehdi SM Sajjadi, Henning Meyer,
+Etienne Pot, Urs Bergmann, Klaus Greff, Noha Radwan,
+Suhani Vora, Mario Lučić, Daniel Duckworth, Alexey
+Dosovitskiy, et al. Scene representation transformer:
+Geometry-free novel view synthesis through set-latent
+scene representations. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 6229–6238, 2022.
+[Shi et al., 2024] Yichun Shi, Peng Wang, Jianglong Ye,
+Long Mai, Kejie Li, and Xiao Yang. Mvdream: Multiview diffusion for 3d generation. In The Twelfth International Conference on Learning Representations, 2024.
+[Song et al., 2024] Zikai Song, Ying Tang, Run Luo, Lintao
+Ma, Junqing Yu, Yi-Ping Phoebe Chen, and Wei Yang. Autogenic language embedding for coherent point tracking.
+In ACM International Conference on Multimedia, 2024.
+[Szymanowicz et al., 2023] Stanislaw Szymanowicz, Christian Rupprecht, and Andrea Vedaldi. Viewset diffusion:(0) image-conditioned 3d generative models from 2d data. In
+Proceedings of the IEEE/CVF international conference on
+computer vision, pages 8863–8873, 2023.
+[Takagi and Nishimoto, 2023] Yu Takagi and Shinji Nishimoto. High-resolution image reconstruction with latent
+diffusion models from human brain activity. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 14453–14463, 2023.
+[Tang et al., 2023] Shitao Tang, Fuyang Zhang, Jiacheng
+Chen, Peng Wang, and Yasutaka Furukawa. Mvdiffusion: Enabling holistic multi-view image generation with
+correspondence-aware diffusion. In Advances in Neural
+Information Processing Systems, 2023.
+[Tang et al., 2024] Jiaxiang Tang, Jiawei Ren, Hang Zhou,
+Ziwei Liu, and Gang Zeng. Dreamgaussian: Generative gaussian splatting for efficient 3d content creation.
+In International Conference on Learning Representations,
+2024.
+[Tewari et al., 2023] Ayush Tewari, Tianwei Yin, George
+Cazenavette, Semon Rezchikov, Joshua B Tenenbaum,
+Frédo Durand, William T Freeman, and Vincent Sitzmann.
+Diffusion with forward models: Solving stochastic inverse
+problems without direct supervision. In Advances in Neural Information Processing Systems, 2023.
+[Tseng et al., 2023] Hung-Yu Tseng, Qinbo Li, Changil
+Kim, Suhib Alsisan, Jia-Bin Huang, and Johannes Kopf.
+Consistent view synthesis with pose-guided diffusion
+models. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, 2023.
+[Wang et al., 2004] Zhou Wang, Alan C Bovik, Hamid R
+Sheikh, and Eero P Simoncelli. Image quality assessment:
+from error visibility to structural similarity. TIP, 2004.
+[Wang et al., 2021] Peng Wang, Lingjie Liu, Yuan Liu,
+Christian Theobalt, Taku Komura, and Wenping Wang.
+Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. In Advances in Neural
+Information Processing Systems, 2021.
+[Wang et al., 2023a] Haochen Wang, Xiaodan Du, Jiahao Li,
+Raymond A Yeh, and Greg Shakhnarovich. Score jacobian chaining: Lifting pretrained 2d diffusion models for
+3d generation. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages
+12619–12629, 2023.
+[Wang et al., 2023b] Zhengyi Wang, Cheng Lu, Yikai Wang,
+Fan Bao, Chongxuan Li, Hang Su, and Jun Zhu. Prolificdreamer: High-fidelity and diverse text-to-3d generation
+with variational score distillation. In Advances in Neural
+Information Processing Systems, 2023.
+[Warburg et al., 2023] Frederik Warburg, Ethan Weber,
+Matthew Tancik, Aleksander Holynski, and Angjoo
+Kanazawa. Nerfbusters: Removing ghostly artifacts
+from casually captured nerfs. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 18120–18130, 2023.
+[Watson et al., 2023] Daniel Watson, William Chan, Ricardo
+Martin-Brualla, Jonathan Ho, Andrea Tagliasacchi, and
+Mohammad Norouzi. Novel view synthesis with diffusion
+models. In International Conference on Learning Representations, 2023.
+[Weng et al., 2023] Haohan Weng, Tianyu Yang, Jianan
+Wang, Yu Li, Tong Zhang, CL Chen, and Lei Zhang. Consistent123: Improve consistency for one image to 3d object synthesis. arXiv preprint arXiv:2310.08092, 2023.
+[Xu et al., 2023a] Dejia Xu, Yifan Jiang, Peihao Wang, Zhiwen Fan, Yi Wang, and Zhangyang Wang. Neurallift-360:
+Lifting an in-the-wild 2d photo to A 3d object with 360°
+views. In IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, CVPR 2023, Vancouver, BC, Canada,
+June 17-24, 2023, pages 4479–4489. IEEE, 2023.
+[Xu et al., 2023b] Jiale Xu, Xintao Wang, Weihao Cheng,
+Yan-Pei Cao, Ying Shan, Xiaohu Qie, and Shenghua Gao.
+Dream3d: Zero-shot text-to-3d synthesis using 3d shape
+prior and text-to-image diffusion models. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern recognition, 2023.
+[Yang et al., 2024] Jiayu Yang, Ziang Cheng, Yunfei Duan,
+Pan Ji, and Hongdong Li. Consistnet: Enforcing 3d consistency for multi-view images diffusion. In Proceedings
+of the IEEE/CVF conference on computer vision and pattern recognition, 2024.
+[Yi et al., 2024] Taoran Yi, Jiemin Fang, Junjie Wang, Guanjun Wu, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu, Qi Tian,
+and Xinggang Wang. Gaussiandreamer: Fast generation
+from text to 3d gaussians by bridging 2d and 3d diffusion
+models. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, 2024.
+[Yu et al., 2023] Jason J. Yu, Fereshteh Forghani, Konstantinos G. Derpanis, and Marcus A. Brubaker. Long-term
+photometric consistent novel view synthesis with diffusion
+models. In Proceedings of the IEEE/CVF international
+conference on computer vision, 2023.
+[Yu et al., 2024] Xin Yu, Yuan-Chen Guo, Yangguang Li,
+Ding Liang, Song-Hai Zhang, and Xiaojuan Qi. Text-to-3d
+with classifier score distillation. In International Conference on Learning Representations, 2024.
+[Zhang et al., 2018] Richard Zhang, Phillip Isola, Alexei A
+Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric.
+In Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition, 2018.
+[Zhang et al., 2023] Youjia Zhang, Teng Xu, Junqing Yu,
+Yuteng Ye, Yanqing Jing, Junle Wang, Jingyi Yu, and Wei
+Yang. Nemf: Inverse volume rendering with neural microflake field. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 22919–
+22929, 2023.
+[Zou et al., 2024] Zi-Xin Zou, Zhipeng Yu, Yuan-Chen Guo,
+Yangguang Li, Ding Liang, Yan-Pei Cao, and Song-Hai
+Zhang. Triplane meets gaussian splatting: Fast and generalizable single-view 3d reconstruction with transformers. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 10324–
+10335, 2024.
+𝐳𝐭
+𝐳𝐭
+Generating samples by denoising
+Noise
+New View
+Rectification
+Zero-1-to-3
+Input View
+Zero-1-to-3
+Rectification
+Input View
+Zero-1-to-3
+Input View
+Rectification
+Zero-1-to-3
+Rectification
+Figure 7: Novel view synthesis on in-the-wild images. Comparison between Zero-1-to-3 and our rectification. Starting from the input view,
+the task is to generate an image of the object under a specific camera pose transformation.
+Appendix
+This supplementary material provides additional information
+and experiment results pertaining to the main paper, “Optimized View and Geometry Distillation from Multi-view Diffuser”, including detailed descriptions of more visual results to complement the experiments reported in the main
+manuscript.
+SyncDreamer [Liu et al., 2024b]. Our rectification is able
+to generate novel views that are more consistent with the input view. Additionally, rectification is able to generate novel
+views from input view while keeping the original style as well
+as object geometric details. These examples show the effectiveness of our rectification.
+B
+A
+Two-Stage Specified Diffusion Details
+Unbiased Sampling of Multi-view Diffuser
+We rectify the unconditional noise in Formula 4 of the main
+paper:
+1
+First stage
+2
+Generated by Zero-1-to-3
+ϵCFG
+ϕ (zt , cI , cP ) = ω[ϵϕ (zt , cI , cP ) − ϵϕ (zt , ∅, ∅)] + ϵϕ (zt , ∅, ∅)
+ϵCFG
+ϕ,ψ (zt , cI , cP ) = ω[ϵϕ (zt , cI , cP ) − ϵψ (zt , ∅)] + ϵψ (zt , ∅)
+Our proposed rectification method essentially combines
+the unconditional noise prediction from the base model with
+the conditional noise prediction from the fine-tuned model.
+Rectification
+Fine-tuned
+Base Model
+Second stage
+Positive (1 image)
+Positive (6 images)
+Input View
+Input View
+···
+“a [V] owl”
+“a owl”
+DreamBooth
+(LoRA)
+“a [S] [V] owl”
+“a [V] owl”
+Negative (200 images)
+Negative (5 images)
+Generated by Stable Diffusion
+Generated by Zero-1-to-3
+···
+···
+Base Model
+ϵCFG
+ϕ,ψ (zt , c) = ω[ ϵϕ (zt , c) − ϵψ (zt , ∅) ] + ϵψ (zt , ∅)
+We found that rectifying the bias in Zero-1-to-3 [Liu et
+al., 2023b] achieves significantly better novel views from
+in-the-wild inputs. Fig. 7 shows examples from One-2-345++ [Liu et al., 2024a], Wonder3D [Long et al., 2024] and
+Figure 8: Fine-tuning. As a demonstration, we use the ‘owl’ image
+as a toy example.
+DreamBooth [Ruiz et al., 2023] provides a network finetuning strategy to adapt a given text-to-image denoising network to generate images of a specific subject.
+Input View
+20 seconds
+40 seconds
+3 minutes
+5 minutes
+Training Time
+A [S] [V] owl in the jungle
+A [S] [V] owl in the snow
+A [S] [V] owl with a
+mountain in the background
+A [S] [V] owl wearing
+a santa hat
+3D Gaussian
+locations
+A shiny [S] [V] owl
+Figure 9: Results for re-contextualization of a ‘owl’ subject instances.
+Low Rank Adaptation (LoRA) [Hu et al., 2022] provides a
+memory-efficient and faster technique for DreamBooth. Priors work show that this low-rank residual fine-tuning is an
+effective technique that preserves several favorable properties of the original DreamBooth while also being memoryefficient as well as fast.
+We implement our DreamBooth on the Stable Diffusion [Rombach et al., 2022] V2.1 diffusion model and we
+predict the LoRA weights for all cross and self-attention layers of the diffusion U-Net [Ryu, 2022]. Fig. 8 illustrates the
+model fine-tuning with the class-generated samples. Fig. 9
+shows a collection of generation results to illustrate how our
+method can generate novel images for a specific subject in
+different contexts with descriptive prompts.
+NeRF [Mildenhall et al., 2020] uses a volume rendering
+method to learn a volumetric radiance field for novel view
+synthesis. However, NeRF architectures [Mildenhall et al.,
+2020; Zhang et al., 2023; Warburg et al., 2023; Barron et
+al., 2022] are prone to cloudy artifacts (floaters), which it is
+difficult to extract a high-quality surface, as shown in Fig. 10.
+To address this issue, we denoise multi-view renderings from
+the trained NeRF using the fine-tuned DreamBooth model.
+Input View
+Small
+Noise
+Novel View
+“a [S] [V] owl”
+NeRF
+(USD)
+DreamBooth
+Denoise
+Input View
+Denoise
+Input View
+Denoise
+Figure 11: Optimization Progress. The shape to initializa the 3D
+Gaussians as sphere.
+Input Images
+C
+3D Gaussian Splatting Representation
+Recently, DreamGaussian [Tang et al., 2024] and GaussianDreamer [Yi et al., 2024] utilizes 3D Gaussians as an efficient
+3D representation that supports real-time high-resolution rendering via rasterization. We adapt 3D Gaussian Splatting [Kerbl et al., 2023] into the generative setting with Unbiased Score Distillation (USD). The quantitative results are
+summarized in Tab. 5 and Tab. 6. Our method is implemented
+in PyTorch [Paszke et al., 2019], based on threestudio [Guo
+et al., 2023].
+Triplane Gaussian
+DreamGaussian
+Figure 12: The qualitative comparisons of novel view synthesis with
+DreamGaussian and Triplane Gaussian. Our approach achieves both
+quality and consistency across different novel views.
+On comparison to DreamGaussian and Triplane Gaussian. We here include some qualitative comparisons with
+DreamGaussian and Triplane Gaussian [Zou et al., 2024] in
+Fig. 12.
+Table 5: Quantitative comparison with baseline methods.
+Method
+Realfusion [Melas-Kyriazi et al., 2023]
+Magic123 [Qian et al., 2024]
+One-2-3-45 [Liu et al., 2023a]
+Point-E [Nichol et al., 2022]
+Shap-E [Jun and Nichol, 2023]
+Zero-1-to-3 [Liu et al., 2023b]
+SyncDreamer [Liu et al., 2024b] (NeuS)
+Wonder3D [Long et al., 2024] (iNGP+NeuS)
+3DGS+USD (NeuS)
+3DGS+USD (iNGP+NeuS)
+D
+Figure 10: With the specialization diffusion model, we add a small
+noise, Stable Diffusion scheduler t = 200, to the NeRF render images and conduct the denoising process.
+Ours (USD)
+Chamfer Dist.↓ Volume IoU↑
+0.0819
+0.0516
+0.0629
+0.0426
+0.0436
+0.0339
+0.0261
+0.0199
+0.0245
+0.0175
+0.2741
+0.4528
+0.4086
+0.2875
+0.3584
+0.5035
+0.5421
+0.6244
+0.5701
+0.6342
+Analysis of Unbiased Score Distillation
+We have carefully reviewed the discussion in SJC [Wang et
+al., 2023a] regarding the challenge of Out-of-Distribution
+(OOD) when using a pretrained denoiser. In response, we
+have conducted a more in-depth analysis of the role of λ
+in Formula 6 of the main paper and the underlying principles behind it, providing a more detailed comparison between
+SDS [Poole et al., 2023], DDS [Hertz et al., 2023], CSD [Yu
+et al., 2024] and VSD [Wang et al., 2023b]:
+SDS: w∆C + ∆O − ϵ
+Due to the OOD issue, the residual (∆O −ϵ) is generally
+non-zero, which introduces artifacts in the image. For
+reducing the impact of (∆O − ϵ), DreamFusion [Poole
+et al., 2023] sets a large guidance weight (w = 100) to
+improve the sampling quality.
+Input Images
+Ours
+Wonder3D
+SyncDreamer
+Input Images
+Ours
+Wonder3D
+SyncDreamer
+Input Images
+Ours
+Wonder3D
+SyncDreamer
+-15°
+10°
+35°
+60°
+70°
+Textured meshes
+Figure 13: SOTA methods, like SyncDreamer and Wonder3D impose limitations on the viewing angles of the input image. For instance,
+these methods proficiently manage near-horizontal viewing angles but often falter with upward views. In contrast, our approach consistently
+generates reasonable structures across a broader range of input view poses.
+Table 6: The quantitative comparison in novel view synthesis. We
+report PSNR, SSIM, LPIPS on the GSO dataset.
+Method
+PSNR↑ SSIM↑ LPIPS↓
+Realfusion [Melas-Kyriazi et al., 2023]
+Zero-1-to-3 [Liu et al., 2023b]
+SyncDreamer [Liu et al., 2024b]
+Wonder3D [Long et al., 2024]
+3DGS+USD (3 min)
+3DGS+USD (6 min)
+15.26
+18.93
+20.05
+26.07
+25.20
+25.84
+0.722
+0.779
+0.798
+0.924
+0.917
+0.925
+0.283
+0.166
+0.146
+0.065
+0.050
+0.048
+DDS: w(∆Cedit − ∆Corig )
+The residual component that causes over-smoothing and
+over-saturation in SDS is removed, allowing DDS to
+generate high-quality results.
+VSD: w∆C + ∆O − ∆O (LoRA)
+The rendered images during the optimization are OOD
+for the original pretrained model distribution, but are indomain for ϵLoRA which simply predicts ∆O (LoRA). As
+a result, mitigating the impact of ∆O .
+USD/CSD: w∆C + λ(∆O − ϵ)
+In our approach, we reparameterized SDS and aim to
+achieve a similar effect by tuning λ to mitigate the OOD.
+where ∆C = ϵϕ (zt ; y, t) − ϵϕ (zt ; ∅, t) can be regarded as
+an optimization direction toward the condition y; ∆O =
+ϵϕ (zt ; ∅, t) since directly evaluating the denoiser ϵϕ on rendered images zt to compute the score leads to OOD and the
+residual component (∆O −ϵ) that leads to over-smoothed and
+over-saturated.
+E
+More Details in Main Paper
+Different Viewing Angle Comparisons. Our approach
+demonstrates significant strengths: (1). viewing angle flex-
+ibility: unlike Wonder3D, which is limited to near-horizontal
+viewing angles and underperforms outside this range, our
+method supports a much wider range of viewing directions
+(Fig. 13); (2). target view generation: our method generates reasonable target views for any given relative pose, in
+contrast to Wonder3D’s restriction to six fixed relative poses.
+These advantages, crucial for diverse applications, highlight
+our method’s unique contributions beyond what is reflected
+in the current metrics.
+Text-to-Image-to-3D. As a case study, we demonstrate that
+our Unbiased Score Distillation (USD) and view and geometry refinement strategy effectively bridges the gap between
+multi-view diffuser with text prompts. We use the Stable Diffusion model to generate an image from a text prompt and
+use our scheme to generate geometry from this image. The
+result shows a significant advantage of our method in mitigating the multi-face Janus problem and can generate more
+realistic results, as shown in Fig. 14.
+“A blue jay
+standing on a
+large basket of
+rainbow macarons”
+“3d render of a
+statue of an
+astronaut”
+View 1
+Ours
+View 2
+ProlificDreamer
+DreamFusion
+MVDream
+Figure 14: Qualitative results of various text to 3D approaches.
+SDS/SJC Method. We compare our geometry and texture distillation method based USD with Magic123 [Qian et
+al., 2024] and Zero-1-to-3 [Liu et al., 2023b] (using SJC).
+Input Images
+𝜶𝟐 > 𝜶𝟏
+𝜶𝟐 = 𝜶𝟏
+Image-to-3D
+Text-to-3D
+𝜶𝟐 < 𝜶𝟏
+SDS(𝛌=0)
+SDS(𝛌=1)
+SDS(𝛌=0)
+“A delicious croissant”
+“A 3D model of an adorable cottage
+with a thatched roof”
+Figure 15: (Left) We compare the effect of the relationship between α1 and α2 on SDS, which can achieve the best when α1 = α2 . (Right)
+Experiments on both text-to-3D and image-to-3D tasks demonstrate that SDS can achieve more detailed results when λ = 0.
+Figure 16: More results. Our model is generally applicable to various types of 2D images.
+Though the results of Magic123 tend to be smooth and clear,
+it heavily relies on the estimated depth from the input view,
+which may lead to incorrect estimations when the depth estimator fails. Zero-1-to-3 uses SJC for geometry and texture
+reconstruction, its formation is biased and hence lead to bad
+estimations. Ours, however, generate consistent and faithful
+estimations, as shown in Fig. 17.
+The Setting of α1 and α2 . We provide an empirical validation as in Fig. 15 (Left).
+The Variable λ. We found that setting λ = 0 can significantly improve the details of the 3D details generated using
+SDS, as shown in Fig. 15 (Right).
+F
+More Results
+We present more reconstruction results in Fig. 16. The readers may refer to supplementary videos for 360◦ visualization.
+Input Images
+Ours
+Magic123
+Zero-1-to-3+SJC
+Figure 17: The qualitative comparisons with Magic123 and Zero-1to-3 (using SJC) in terms of the reconstructed textured meshes.

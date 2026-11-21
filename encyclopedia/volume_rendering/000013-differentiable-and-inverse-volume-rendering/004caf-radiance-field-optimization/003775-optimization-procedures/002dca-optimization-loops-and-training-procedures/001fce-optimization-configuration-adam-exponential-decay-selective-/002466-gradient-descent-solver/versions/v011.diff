@@ -1,0 +1,179 @@
+--- v010.md
++++ v011.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-The Gradient Descent Solver is a matrix-free optimization method used to update voxel grid parameters in differentiable volume rendering, specifically within frameworks like DiffVox [S2, unofficial]. It supports both constant learning rate updates and the Adam optimizer, providing stable behavior for ill-conditioned systems [S1, unofficial]. Unlike second-order methods or conjugate gradient solvers, it minimizes the objective function directly via gradient steps, supporting both $l_2$-norm (least squares) and $l_1$-norm (least absolute deviations) loss formulations [S1, unofficial].
++The Gradient Descent Solver is a matrix-free optimization method used to update voxel grid parameters in differentiable volume rendering, supporting both constant update rates and the Adam optimizer [S1, S2, unofficial]. It addresses gradient noise and anisotropy by filtering gradients temporally using exponential moving averages, providing stable behavior for ill-conditioned systems [S1, unofficial][S3]. Unlike direct solvers that form normal equations, it accumulates gradients via atomic additions, making it suitable for large-scale or rank-deficient problems where memory efficiency is critical [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Parameter vector $\theta$ (e.g., voxel grid values or transfer function coefficients).
+-- Gradient $\nabla_\theta f$ of the objective function $f$ with respect to $\theta$.
++- Parameter vector $\theta \in \mathbb{R}^N$ (e.g., voxel densities or transfer function coefficients).
++- Loss function $L(\theta)$, supporting $L_2$-norm (least squares) or $L_1$-norm (least absolute deviations) [S1, unofficial].
+ - Learning rate $\alpha$.
+-- Adam hyperparameters: $\beta_1$ (gradient moving average decay), $\beta_2$ (squared gradient moving average decay).
++- Adam hyperparameters: $\beta_1$ (gradient decay), $\beta_2$ (squared gradient decay) [S3].
+ 
+ **Outputs:**
+@@ -17,83 +17,70 @@
+ 
+ **Data Structures:**
+-- $\theta$: Array of parameters, shape $(N)$.
+-- $m_t$: Exponential moving average of gradients, shape $(N)$, initialized to zeros.
+-- $v_t$: Exponential moving average of squared gradients, shape $(N)$, initialized to zeros.
+-- $t$: Iteration counter, initialized to 1.
++- $\theta$: Current parameter state.
++- $m_t$: Exponential moving average of gradients (first moment), initialized to zero vector of size $N$.
++- $v_t$: Exponential moving average of squared gradients (second moment), initialized to zero vector of size $N$.
+ 
+-**Numbered Steps:**
+-1. **Gradient Accumulation:** Compute the gradient $\nabla_\theta f$ of the loss function. In a distributed or parallel implementation, gradients are accumulated via atomic additions to ensure thread safety [S1, unofficial].
+-2. **Update Moments (Adam):**
+-   - Update the first moment estimate (mean of gradients):
+-     $$ m_t = \beta_1 m_{t-1} + (1 - \beta_1) \nabla_\theta f $$
+-   - Update the second moment estimate (uncentered variance of gradients):
+-     $$ v_t = \beta_2 v_{t-1} + (1 - \beta_2) (\nabla_\theta f)^2 $$
+-   - Here, operations are element-wise [S3].
+-3. **Compute Update Step:**
+-   - The update direction is determined by the ratio of the moments scaled by the learning rate:
+-     $$ \Delta \theta = \alpha \frac{m_t}{v_t} $$
+-   - Note: Bias correction terms are omitted in this implementation description [S3].
+-4. **Parameter Update:**
+-   - Update the parameters:
+-     $$ \theta_{t+1} = \theta_t - \Delta \theta $$
+-   - Increment $t \leftarrow t + 1$.
+-
+-**Loss Function Selection:**
+-- The solver supports two loss norms [S1, unofficial]:
+-  - **$l_2$-norm (Least Squares):** Penalizes larger residuals more strongly due to the quadratic term.
+-  - **$l_1$-norm (Least Absolute Deviations):** Tolerates larger outliers in favor of minimizing many lower deviations.
+-
+-**Parameters:**
+-- $\alpha$: Learning rate. Typical values depend on the specific rendering task but are generally small (e.g., $10^{-3}$ to $10^{-4}$) when using Adam.
+-- $\beta_1$: Controls the filtering strength for $m_t$. Typical value: 0.9.
+-- $\beta_2$: Controls the filtering strength for $v_t$. Typical value: 0.999.
+-
+-**Pitfalls and Edge Cases:**
+-- **Per-parameter filtering assumption:** The Adam update assumes no correlations across parameters, treating each component of $\theta$ independently [S3].
+-- **High-frequency artifacts:** This independence can cause high-frequency artifacts if:
+-  1. Gradients are very noisy.
+-  2. The objective function $f$ is highly anisotropic.
+-  3. Optimization is terminated early [S3].
+-- **Ill-conditioning:** While stable for ill-conditioned systems, it may be slower than direct matrix methods for small, well-conditioned problems [S1, unofficial].
++**Steps:**
++1. **Gradient Accumulation:** Compute the gradient $\nabla_\theta L(\theta_t)$ of the loss with respect to the parameters. In a distributed or parallel rendering context, gradients are accumulated into a global buffer using atomic additions to ensure thread safety [S1, unofficial].
++2. **Moment Updates:** Update the first and second moment estimates using exponential moving averages [S3]:
++   $$ m_t = \beta_1 m_{t-1} + (1 - \beta_1) \nabla_\theta L(\theta_t) $$
++   $$ v_t = \beta_2 v_{t-1} + (1 - \beta_2) (\nabla_\theta L(\theta_t))^2 $$
++   Here, $\beta_1$ and $\beta_2$ control the filtering strength (decay rates) for the gradient and its square, respectively [S3].
++3. **Update Step:** Compute the parameter update. The solver uses the ratio of the filtered gradient to the filtered squared gradient, scaled by the learning rate $\alpha$ [S3]:
++   $$ \theta_{t+1} = \theta_t - \alpha \frac{m_t}{v_t} $$
++   Note: Bias correction terms are omitted in this implementation variant for brevity, as per the source description [S3].
++4. **Norm Selection:** The loss function $L$ can be defined using either the $L_2$-norm or $L_1$-norm [S1, unofficial]. The $L_2$-norm penalizes larger residuals quadratically, while the $L_1$-norm tolerates outliers better by minimizing absolute deviations [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def gradient_descent_solver_step(theta, gradient, alpha, beta1, beta2, m, v, t):
++def gradient_descent_solver_step(theta, gradient, alpha, beta1, beta2):
+     """
+-    Performs one step of the Gradient Descent Solver with Adam updates.
++    Performs one step of the Gradient Descent Solver with Adam-style filtering.
+     
+     Args:
+-        theta: Current parameter array (shape N).
+-        gradient: Current gradient array (shape N).
+-        alpha: Learning rate.
+-        beta1: Decay rate for first moment.
+-        beta2: Decay rate for second moment.
+-        m: Previous first moment array (shape N), updated in place.
+-        v: Previous second moment array (shape N), updated in place.
+-        t: Current iteration count.
++        theta: Current parameter array (numpy array).
++        gradient: Computed gradient array (numpy array).
++        alpha: Learning rate (float).
++        beta1: Decay rate for first moment (float).
++        beta2: Decay rate for second moment (float).
+         
+     Returns:
+-        theta: Updated parameter array.
++        Updated theta array.
+     """
++    # Initialize moments if not already present (assumed persistent state)
++    # In a real implementation, m and v are stored between steps.
++    # Here we assume m and v are passed or maintained in closure.
++    # For self-contained pseudocode, we show the update logic.
++    
+     # Update first moment estimate (exponential moving average of gradient)
+-    m = beta1 * m + (1 - beta1) * gradient
++    m = beta1 * m_prev + (1 - beta1) * gradient
+     
+     # Update second moment estimate (exponential moving average of squared gradient)
+-    v = beta2 * v + (1 - beta2) * (gradient ** 2)
++    v = beta2 * v_prev + (1 - beta2) * (gradient ** 2)
+     
+     # Compute update step: alpha * (m / v)
+-    # Note: Bias correction is omitted as per source [S3]
++    # Note: Source [S3] omits bias correction and epsilon stabilization.
+     update = alpha * (m / v)
+     
+     # Update parameters
+-    theta = theta - update
++    theta_new = theta - update
+     
+-    return theta
++    return theta_new, m, v
+ ```
++
++**Parameters:**
++- $\alpha$: Learning rate. Typical values depend on the problem scale; not specified in sources.
++- $\beta_1$: Gradient decay rate. Typical value 0.9 (standard Adam), not explicitly given but implied by "Adam optimizer" [S1, unofficial][S3].
++- $\beta_2$: Squared gradient decay rate. Typical value 0.999 (standard Adam), not explicitly given but implied by "Adam optimizer" [S1, unofficial][S3].
++
++**Edge Cases and Pitfalls:**
++- **Per-parameter filtering assumption:** The method assumes no correlations across parameters, treating each component of $\theta$ independently [S3].
++- **High-frequency artifacts:** This independence assumption can cause high-frequency artifacts if: (a) gradients are very noisy, (b) the objective function is highly anisotropic, or (c) optimization is terminated early [S3].
++- **Ill-conditioning:** While stable for ill-conditioned systems, it may be slower than computing $A^T A$ and $A^T b$ for moderately sized problems [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md)
+-The CGLS solver is a sparse linear least squares solver designed to avoid the ill-conditioning inherent in normal equations ($A^T A$) for large or rank-deficient problems. It provides numerically stable results where direct methods fail, distinguishing itself from its sibling [Newton's Method](6442-newton-s-method.md) by using iterative conjugate gradients rather than explicit matrix inversion, and from [Gradient Descent Solver](3280-gradient-descent-solver.md) by solving the least-squares formulation directly rather than minimizing the residual via gradient steps.
++The CGLS solver is a sparse linear least squares method used to solve optimization problems where the normal equations ($A^T A$) are ill-conditioned due to quadratic condition numbers. It provides numerically stable results for large or almost rank-deficient problems, distinguishing itself from direct solvers by avoiding the explicit formation of $A^T A$. While generally slower than computing $A^T A$ and $A^T b$ for moderately sized problems, it is preferred when numerical stability is critical.
+ 
+ ### [Partially Learned Gradient Descent](3771-partially-learned-gradient-descent.md)
+@@ -104,5 +91,5 @@
+ 
+ ### [Newton's Method](6442-newton-s-method.md)
+-Newton's method is a second-order optimization algorithm that approximates the objective function $f$ using a second-order Taylor expansion to determine an update step that targets the stationary point where the gradient is zero. It sets itself apart from first-order solvers like Gradient Descent by incorporating local curvature information via the Hessian matrix, allowing for faster convergence near optima, though at the cost of significant computational overhead for high-dimensional problems.
++Newton's Method is a second-order optimization algorithm derived from the second-order Taylor expansion of the objective function. It solves for the root of the gradient (where the derivative is zero) to find local minima or maxima, offering quadratic convergence for well-behaved functions. Unlike [Gradient Descent Solver](3280-gradient-descent-solver.md), which uses only first-order gradient information and a fixed or adaptive step size, Newton's Method incorporates the Hessian matrix to account for local curvature, allowing it to take larger, more informed steps toward the optimum. In the context of inverse volume rendering, it is also applied as a root-finding algorithm to solve for ray intersections with implicit geometry.
+ 
+ ### [Inexact Line Search Optimization](7741-inexact-line-search-optimization.md)
+@@ -119,17 +106,17 @@
+ 
+ ### PDHG Solver (Primal-Dual Hybrid Gradient)
+-A solver that keeps the main solver state on the selected NVIDIA GPU during the PDHG loop, including volume, extrapolated volume, previous volume, gradient buffer, TV duals, projection data duals, measured projections, and projection batches [S4, unofficial]. Default resident projector backend is `matched_voxel`. ASTRA is rejected for production resident PDHG because its 3-D CUDA FP/BP pair failed strict matched-adjoint checks [S4, unofficial]. LEAP/PyTorch support is experimental and should only be used when its adjointness guard passes [S4, unofficial]. Current resident multi-GPU support is not a pooled-memory solver; full memory pooling across two GPUs requires volume-sharded resident PDHG implementation [S4, unofficial]. If resident PDHG runs out of VRAM, do not raise GPU PDHG memory safety to force a run; that only weakens the safety check [S4, unofficial].
++A solver that keeps the main solver state on the selected NVIDIA GPU during the PDHG loop, including volume, extrapolated volume, previous volume, gradient buffer, TV duals, projection data duals, measured projections, and projection batches [S4, unofficial]. Default resident projector backend is `matched_voxel` [S4, unofficial]. ASTRA is rejected for production resident PDHG because its 3-D CUDA FP/BP pair failed strict matched-adjoint checks [S4, unofficial]. LEAP/PyTorch support is experimental and should only be used when its adjointness guard passes [S4, unofficial]. Current resident multi-GPU support is not a pooled-memory solver; full memory pooling across two GPUs requires volume-sharded resident PDHG implementation [S4, unofficial]. If resident PDHG runs out of VRAM, do not raise GPU PDHG memory safety to force a run; that only weakens the safety check [S4, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Per iteration, the cost is proportional to the number of parameters $N$ for gradient computation and update. Adam adds constant overhead per parameter for maintaining moments.
+-- **Memory Complexity:** $O(N)$ for storing parameters, gradients, and the two moment estimates ($m_t, v_t$).
+-- **Performance:** Stable for ill-conditioned systems [S1, unofficial]. Generally slower than computing the matrix $A^T A$ and vector $A^T b$ for small problems, but more stable for very large or almost rank-deficient problems [S1, unofficial].
+-- **Strengths:** Matrix-free implementation allows handling large voxel grids without explicit matrix storage. Supports both $l_1$ and $l_2$ norms.
+-- **Limitations:** Per-parameter filtering can cause high-frequency artifacts under noise or anisotropy [S3]. Convergence can be slow compared to second-order methods near the optimum.
+-- **When to use:** When dealing with large-scale differentiable volume rendering where explicit Hessian or normal matrix computation is infeasible, and stability is preferred over speed.
+-- **When not to use:** When high-frequency artifact sensitivity is critical and the problem is well-conditioned, or when exact line search or second-order curvature information is available and affordable.
++- **Time Complexity:** Not explicitly given, but matrix-free methods generally scale linearly with the number of parameters per iteration, avoiding $O(N^2)$ or $O(N^3)$ costs of dense matrix operations [S1, unofficial].
++- **Memory Complexity:** Matrix-free implementation reduces memory overhead by storing only gradients and moments, not the Hessian or normal equations [S1, unofficial].
++- **Performance:** Stable for ill-conditioned systems [S1, unofficial]. Slower than computing $A^T A$ and $A^T b$ for moderately sized problems [S1, unofficial].
++- **Strengths:** Handles ill-conditioned problems well; supports $L_1$ and $L_2$ norms; matrix-free (memory efficient); stable with Adam filtering [S1, unofficial][S3].
++- **Limitations:** Per-parameter filtering can cause high-frequency artifacts under noise, anisotropy, or early termination [S3]. Assumes no parameter correlations [S3].
++- **When to use:** Large-scale or rank-deficient problems where memory is constrained and stability is prioritized over speed [S1, unofficial].
++- **When not to use:** When high-frequency detail preservation is critical and gradients are noisy/anisotropic, or when faster convergence is needed for well-conditioned moderate-sized problems [S1, unofficial][S3].
+ 
+ ## Background
+-The Gradient Descent Solver, particularly in its Adam variant, was introduced by Kingma and Ba in 2015 [S2, unofficial]. It is widely used in differentiable volume rendering frameworks such as DiffVox to optimize voxel grid parameters [S2, unofficial]. The method addresses gradient noise and anisotropy by filtering gradients temporally across iterations using exponential moving averages [S3].
++The Gradient Descent Solver, specifically the Adam optimizer variant, was introduced by Kingma and Ba in 2015 [S2, unofficial]. It is used in differentiable volume rendering frameworks such as DiffVox to update voxel grid parameters [S2, unofficial]. The method addresses issues of gradient noise and anisotropy by filtering gradients temporally, a technique also discussed in the context of spatiotemporal bilateral gradient filtering [S3].
+ 
+ ## Sources

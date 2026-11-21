@@ -1,0 +1,375 @@
+--- v001.md
++++ v002.md
+@@ -8,51 +8,86 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: `PackedGaussians` struct containing raw byte buffers for each attribute, metadata (`numPoints`, `shDegree`, `fractionalBits`, `usesFloat16`, `usesQuaternionSmallestThree`), and a `PackOptions` struct.
+-- Output: `GaussianCloud` struct with `std::vector<float>` for positions, scales, rotations (quaternions), alphas, colors, and SH coefficients.
++- Input: A packed attribute buffer (e.g., `packed.positions`), point offset, point count, and a `CoordinateConverter` instance [S1, unofficial].
++- Output: A contiguous floating-point array for the unpacked attribute (e.g., `out` for positions) [S1, unofficial].
+ 
+ **Data Structures:**
+-- `NgspFileHeader` (32 bytes): Magic, version, numPoints, shDegree, fractionalBits, flags, numStreams, tocByteOffset.
+-- `PackedGaussians`: Contains `positions`, `scales`, `rotations`, `alphas`, `colors`, `sh` vectors of `uint8_t` or `uint16_t`.
+-- `CoordinateConverter`: Holds flip vectors (`flipP`, `flipQ`, `flipSh`) and optional function pointers (`rotFlipPFunc`, `rotFlipShFuncs`, `rotFlipQFunc`) for coordinate system transformations.
++- `NgspFileHeader` (32 bytes): Contains magic, version, `numPoints`, `shDegree`, `fractionalBits`, `flags`, `numStreams`, and `tocByteOffset` [S1, unofficial].
++- `PackedGaussians`: Contains raw byte buffers for `positions`, `scales`, `rotations`, `alphas`, `colors`, and `sh` [S1, unofficial].
++- `CoordinateConverter`: Holds flip vectors (`flipP`, `flipQ`, `flipSh`) and optional function pointers (`rotFlipPFunc`, `rotFlipShFuncs`, `rotFlipQFunc`) for coordinate system transformations [S1, unofficial].
+ 
+ **Steps:**
+-1. **Validation:** Check `pointOffset >= 0`, `pointCount >= 0`, `pointOffset + pointCount <= packed.numPoints`, and `out != nullptr`. If `pointCount == 0`, return success.
+-2. **Buffer Check:** Ensure the buffer for the requested attribute is not empty if `packed.numPoints > 0`.
+-3. **Coordinate Converter:** Create `CoordinateConverter c` based on source/target coordinate systems.
+-4. **SH Dimension:** Calculate `shDim = dimForDegree(packed.shDegree)`.
+-5. **Dispatch:** Switch on attribute type to call specific unpacker.
++1. **Validation:** Check `pointOffset >= 0`, `pointCount >= 0`, `pointOffset + pointCount <= packed.numPoints`, and `out != nullptr`. If `pointCount == 0`, return true [S1, unofficial].
++2. **Buffer Check:** Get buffer for attribute. If buffer empty and `packed.numPoints > 0`, return false [S1, unofficial].
++3. **Coordinate Converter:** Create `CoordinateConverter c` [S1, unofficial].
++4. **SH Dimension:** Calculate `shDim = dimForDegree(packed.shDegree)` [S1, unofficial].
++5. **Dispatch:** Switch on `attr` to call specific unpacker [S1, unofficial].
+ 
+ **Position Unpacking:**
+-- If `usesFloat16` is true: Cast packed data to `Half*`, iterate `coordCount = pointCount * 3`, convert each half to float using `halfToFloat`, and multiply by `c.flipP[i % 3]`.
+-- If `usesFloat16` is false: Calculate `scale = 1.0f / (1 << fractionalBits)`. Iterate `coordCount`, reconstructing a 24-bit signed integer from 3 bytes (little-endian): `fixed32 = src[i*3+0] | (src[i*3+1] << 8) | (src[i*3+2] << 16)`. Sign-extend if bit 23 is set: `fixed32 |= (fixed32 & 0x800000) ? 0xff000000 : 0`. Convert to float: `out[i] = static_cast<float>(fixed32) * scale * c.flipP[i % 3]`.
+-- If `c.rotFlipPFunc` exists, apply it to each point's 3 floats in `out`.
++- If `usesFloat16` is true: Cast packed data to `Half*`, iterate `coordCount` (`pointCount * 3`), convert each half to float using `halfToFloat`, and multiply by `c.flipP[i % 3]` [S1, unofficial].
++- If `usesFloat16` is false: Calculate `scale = 1.0f / (1 << fractionalBits)`. Iterate `coordCount`, reconstructing a 24-bit signed integer from 3 bytes (little-endian): `fixed32 = src[i*3+0] | (src[i*3+1] << 8) | (src[i*3+2] << 16)` [S1, unofficial]. Sign-extend if bit 23 is set: `fixed32 |= (fixed32 & 0x800000) ? 0xff000000 : 0` [S1, unofficial]. Convert to float: `out[i] = static_cast<float>(fixed32) * scale * c.flipP[i % 3]` [S1, unofficial].
++- If `c.rotFlipPFunc` exists, apply it to each point's 3 floats in `out` [S1, unofficial].
+ 
+ **Scale Unpacking:**
+-- Scales are stored as 8-bit integers per component.
+-- Decode: `out[i] = src[i] / 16.0f - 10.0f`.
++- Scales are stored as 8-bit integers per component (x, y, z) [S1, unofficial].
++- Decode: `out[i] = src[i] / 16.0f - 10.0f` [S1, unofficial].
+ 
+ **Rotation Unpacking:**
+-- Two modes based on `usesQuaternionSmallestThree`.
+-- If true: Uses 4 bytes per quaternion (smallest three representation). Decode involves extracting the largest component index, sign, and 9-bit magnitude for the other three components, then reconstructing the quaternion and normalizing.
+-- If false: Uses 3 bytes per quaternion (first three components). Decode: `q[i] = (src[i] - 127.5f) / 127.5f * 2.0f` (approximate, see packing for exact inverse). Reconstruct w from normalization.
+-- Apply `c.rotFlipQFunc` if present, else apply `c.flipQ` to xyz components.
++- Two modes based on `usesQuaternionSmallestThree` [S1, unofficial].
++- If true: Uses 4 bytes per quaternion (smallest three representation) [S1, unofficial].
++- If false: Uses 3 bytes per quaternion (first three components) [S1, unofficial].
++- Apply `c.rotFlipQFunc` if present, else apply `c.flipQ` to xyz components [S1, unofficial].
+ 
+ **Alpha Unpacking:**
+-- Stored as 8-bit integers.
+-- Decode via inverse sigmoid: `out[i] = invSigmoid(src[i] / 255.0f)`, where `invSigmoid(y) = log(y / (1 - y))`.
++- Stored as 8-bit integers [S1, unofficial].
++- Decode via inverse sigmoid: `out[i] = invSigmoid(src[i] / 255.0f)` [S1, unofficial].
+ 
+ **Color Unpacking:**
+-- Stored as 3 bytes per point (RGB).
+-- Decode: `out[i] = ((src[i] / 255.0f) - 0.5f) / colorScale`.
++- Stored as 3 bytes per point (RGB) [S1, unofficial].
++- Decode: `out[i] = ((src[i] / 255.0f) - 0.5f) / colorScale` [S1, unofficial].
+ 
+ **SH Unpacking:**
+-- Stored as `shDim` coefficients × 3 RGB channels.
+-- **Within-Family:** For each point `p`, for each coefficient `j` in `0..shDim-1`, for each channel `c` in `0..2`: `out[base + j*3 + c] = flip * unquantizeSH(src[base + j*3 + c])`. `unquantizeSH` uses `sh1Bits` for degree 1 and `shRestBits` for degree 2+.
+-- **Cross-Family:** If `c.rotFlipShFuncs[0]` exists, for each point `p`, for each band `band` in `0..SH_MAX_DEGREE-1`: if `rotFlipShFuncs[band]` is null, break. Calculate `bandStart = band * (band + 2)` and `bandSize = 2 * band + 3`. If `bandStart + bandSize > shDim`, break. For each channel `0..2`, copy `bandSize` coefficients to `tmp`, apply `c.rotFlipShFuncs[band](tmp)`, and copy back.
++- Stored as `shDim` coefficients × 3 RGB channels [S1, unofficial].
++- **Within-Family:** For each point `p`, for each coefficient `j` in `0..shDim-1`, for each channel `c` in `0..2`: `out[base + j*3 + c] = flip * unquantizeSH(src[base + j*3 + c])` [S1, unofficial].
++- **Cross-Family:** If `c.rotFlipShFuncs[0]` exists, for each point `p`, for each band `band` in `0..SH_MAX_DEGREE-1`: if `rotFlipShFuncs[band]` is null, break. Calculate `bandStart = band * (band + 2)` and `bandSize = 2 * band + 3`. If `bandStart + bandSize > shDim`, break. For each channel `0..2`, copy `bandSize` coefficients to `tmp`, apply `rotFlipShFuncs[band](tmp)`, and copy back [S1, unofficial].
++- **Pitfall:** If `shDim == 0`, `unpackSh` returns immediately without processing [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def unpack_gaussians(packed: PackedGaussians, options: PackOptions) -> GaussianCloud:
+-    num_points = packed.num_points
++import math
++
++def dim_for_degree(degree):
++    return (degree + 1) ** 2  # [G] Standard SH dimension formula
++
++def half_to_float(h):
++    sign = (h >> 15) & 1
++    exp = (h >> 10) & 0x1F
++    mantissa = h & 0x3FF
++    if exp == 0:
++        return (-1)**sign * (mantissa / 1024.0)
++    elif exp == 31:
++        return (-1)**sign * (float('inf') if mantissa else float('nan'))
++    else:
++        return (-1)**sign * (1.0 + mantissa / 1024.0) * (2 ** (exp - 15))  # [G] IEEE 754 half conversion
++
++def inv_sigmoid(y):
++    return math.log(y / (1.0 - y))  # [G] Standard inverse sigmoid
++
++class CoordinateConverter:
++    def __init__(self):
++        self.flip_p = [1.0, 1.0, 1.0]
++        self.flip_q = [1.0, 1.0, 1.0]
++        self.flip_sh = [1.0] * 100
++        self.rot_flip_p_func = None
++        self.rot_flip_q_func = None
++        self.rot_flip_sh_funcs = [None] * 10
++
++def unpack_gaussians(packed, point_offset, point_count, coord_converter):
++    if point_offset < 0 or point_count < 0 or point_offset + point_count > packed.num_points:
++        return False
++    if point_count == 0:
++        return True
++    if packed.num_points > 0 and not packed.positions:
++        return False
++    
+     sh_degree = packed.sh_degree
+     sh_dim = dim_for_degree(sh_degree)
+@@ -60,28 +95,26 @@
+     uses_float16 = packed.uses_float16
+     uses_smallest_three = packed.uses_quaternion_smallest_three
++    color_scale = packed.color_scale  # [G] Parameter from context
+     
+-    cloud = GaussianCloud()
+-    cloud.num_points = num_points
+-    cloud.sh_degree = sh_degree
++    cloud = {
++        'num_points': point_count,
++        'sh_degree': sh_degree,
++        'positions': [0.0] * (point_count * 3),
++        'scales': [0.0] * (point_count * 3),
++        'rotations': [0.0] * (point_count * 4),
++        'alphas': [0.0] * point_count,
++        'colors': [0.0] * (point_count * 3),
++        'sh': [0.0] * (point_count * sh_dim * 3) if sh_dim > 0 else []
++    }
+     
+-    # Initialize vectors
+-    cloud.positions = [0.0] * (num_points * 3)
+-    cloud.scales = [0.0] * (num_points * 3)
+-    cloud.rotations = [0.0] * (num_points * 4)
+-    cloud.alphas = [0.0] * num_points
+-    cloud.colors = [0.0] * (num_points * 3)
+-    cloud.sh = [0.0] * (num_points * sh_dim * 3)
+-    
+-    coord_converter = CoordinateConverter()
+-    
+-    # Unpack Positions
++    # Position Unpacking
++    coord_count = point_count * 3
+     if uses_float16:
+-        half_data = cast_to_half(packed.positions)
+-        for i in range(num_points * 3):
+-            val = half_to_float(half_data[i])
+-            cloud.positions[i] = val * coord_converter.flip_p[i % 3]
++        for i in range(coord_count):
++            val = half_to_float(packed.positions[i])
++            cloud['positions'][i] = val * coord_converter.flip_p[i % 3]
+     else:
+         scale = 1.0 / (1 << fractional_bits)
+-        for i in range(num_points * 3):
++        for i in range(coord_count):
+             b0 = packed.positions[i * 3]
+             b1 = packed.positions[i * 3 + 1]
+@@ -89,19 +122,17 @@
+             fixed32 = b0 | (b1 << 8) | (b2 << 16)
+             if fixed32 & 0x800000:
+-                fixed32 |= 0xff000000
+-            cloud.positions[i] = float(fixed32) * scale * coord_converter.flip_p[i % 3]
+-    
++                fixed32 |= 0xFF000000
++            cloud['positions'][i] = float(fixed32) * scale * coord_converter.flip_p[i % 3]
+     if coord_converter.rot_flip_p_func:
+-        for i in range(num_points):
+-            coord_converter.rot_flip_p_func(cloud.positions[i*3:i*3+3])
++        for i in range(point_count):
++            coord_converter.rot_flip_p_func(cloud['positions'][i*3:i*3+3])
+             
+-    # Unpack Scales
+-    for i in range(num_points * 3):
+-        cloud.scales[i] = packed.scales[i] / 16.0 - 10.0
+-        
+-    # Unpack Rotations
+-    for i in range(num_points):
++    # Scale Unpacking
++    for i in range(point_count * 3):
++        cloud['scales'][i] = packed.scales[i] / 16.0 - 10.0
++        
++    # Rotation Unpacking
++    for i in range(point_count):
+         if uses_smallest_three:
+-            # Smallest three decoding
+             comp = packed.rotations[i*4] | (packed.rotations[i*4+1] << 8) | (packed.rotations[i*4+2] << 16) | (packed.rotations[i*4+3] << 24)
+             i_largest = comp & 0x3
+@@ -112,27 +143,21 @@
+                     negbit = (comp >> (9 + idx * 10)) & 1
+                     mag = (comp >> (idx * 10)) & 0x1FF
+-                    val = (mag / 511.0) * sqrt(2.0)
++                    val = (mag / 511.0) * math.sqrt(2.0)
+                     if negbit:
+                         val = -val
+                     q[k] = val
+                     idx += 1
+-            # Reconstruct w
+             sum_sq = sum(v*v for v in q)
+-            q[i_largest] = sqrt(max(0.0, 1.0 - sum_sq))
+-            # Normalize
+-            norm = sqrt(sum(v*v for v in q))
++            q[i_largest] = math.sqrt(max(0.0, 1.0 - sum_sq))
++            norm = math.sqrt(sum(v*v for v in q))
+             q = [v / norm for v in q]
+         else:
+-            # First three components decoding
+             q = [0.0] * 4
+             for k in range(3):
+                 q[k] = (packed.rotations[i*3 + k] - 127.5) / 127.5 * 2.0
+-            # Reconstruct w
+             sum_sq = sum(v*v for v in q[:3])
+-            q[3] = sqrt(max(0.0, 1.0 - sum_sq))
+-            # Normalize
+-            norm = sqrt(sum(v*v for v in q))
++            q[3] = math.sqrt(max(0.0, 1.0 - sum_sq))
++            norm = math.sqrt(sum(v*v for v in q))
+             q = [v / norm for v in q]
+-            
+         if coord_converter.rot_flip_q_func:
+             coord_converter.rot_flip_q_func(q)
+@@ -140,22 +165,23 @@
+             for k in range(3):
+                 q[k] *= coord_converter.flip_q[k]
+-                
+-        cloud.rotations[i*4:i*4+4] = q
+-        
+-    # Unpack Alphas
+-    for i in range(num_points):
+-        cloud.alphas[i] = inv_sigmoid(packed.alphas[i] / 255.0)
+-        
+-    # Unpack Colors
+-    color_scale = options.color_scale # Not given in sources, assumed from context
+-    for i in range(num_points * 3):
+-        cloud.colors[i] = (packed.colors[i] / 255.0 - 0.5) / color_scale
+-        
+-    # Unpack SH
++        cloud['rotations'][i*4:i*4+4] = q
++        
++    # Alpha Unpacking
++    for i in range(point_count):
++        cloud['alphas'][i] = inv_sigmoid(packed.alphas[i] / 255.0)
++        
++    # Color Unpacking
++    for i in range(point_count * 3):
++        cloud['colors'][i] = (packed.colors[i] / 255.0 - 0.5) / color_scale
++        
++    # SH Unpacking
+     if sh_dim > 0:
+-        sh1_bits = options.sh1_bits # Default 5
+-        sh_rest_bits = options.sh_rest_bits # Default 4
+-        
+-        for i in range(num_points):
++        sh1_bits = 5
++        sh_rest_bits = 4
++        def unquantize_sh(val, bits):
++            max_val = (1 << (bits - 1)) - 1
++            return (val - (1 << (bits - 1))) / max_val  # [G] Symmetric quantization
++        
++        for i in range(point_count):
+             base = i * sh_dim * 3
+             for j in range(sh_dim):
+@@ -163,44 +189,11 @@
+                     idx = base + j * 3 + c
+                     val = packed.sh[idx]
+-                    # Unquantize
+-                    if j < dim_for_degree(1):
+-                        bits = sh1_bits
+-                    else:
+-                        bits = sh_rest_bits
+-                    # Assuming signed quantization
+-                    max_val = (1 << (bits - 1)) - 1
+-                    min_val = -(1 << (bits - 1))
+-                    # Map 0..2^bits-1 to min_val..max_val
+-                    # Note: Exact unquantize formula depends on packing, assuming symmetric
+-                    # From packing: q = clamp(val, 0, 255) -> this is for uint8.
+-                    # For SH, it's likely fixed point or similar.
+-                    # Simplified: assume linear mapping from uint8 to float range [-1, 1] or similar
+-                    # The source mentions unquantizeSH(src[...])
+-                    # Let's assume standard 8-bit to float mapping for simplicity if bits=8
+-                    # But bits can be 1-8.
+-                    # Generic unquantize:
+-                    # val_float = (val - 2^(bits-1)) / 2^(bits-1)
+-                    # This is a guess [G] as exact unquantizeSH is not detailed in snippets.
+-                    # However, source says: "unquantizeSH(src[base + j*3 + c])"
+-                    # And packing uses: return static_cast<uint8_t>(std::clamp(q, 0, 255))
+-                    # This implies the packed value is uint8.
+-                    # So unquantize is likely: (val - 128) / 128.0 for 8-bit.
+-                    # For other bits, it's more complex.
+-                    # Let's use the standard symmetric quantization for 8-bit as default [G]
+-                    if bits == 8:
+-                        cloud.sh[idx] = (val - 128) / 128.0
+-                    else:
+-                        # For bits < 8, assume similar scaling [G]
+-                        max_q = (1 << (bits - 1)) - 1
+-                        cloud.sh[idx] = (val - (1 << (bits - 1))) / max_q
++                    bits = sh1_bits if j < dim_for_degree(1) else sh_rest_bits
++                    cloud['sh'][idx] = unquantize_sh(val, bits) * coord_converter.flip_sh[j]
+                     
+-                    # Apply flip
+-                    cloud.sh[idx] *= coord_converter.flip_sh[j]
+-                    
+-        # Cross-family rotation
+-        if coord_converter.rot_flip_sh_funcs[0]:
+-            for i in range(num_points):
++        if coord_converter.rot_flip_sh_funcs[0] is not None:
++            for i in range(point_count):
+                 base = i * sh_dim * 3
+-                for band in range(SH_MAX_DEGREE):
++                for band in range(10):
+                     if coord_converter.rot_flip_sh_funcs[band] is None:
+                         break
+@@ -210,49 +203,23 @@
+                         break
+                     for c in range(3):
+-                        tmp = cloud.sh[base + band_start*3 + c : base + (band_start + band_size)*3 + c : 3] # Strided access
+-                        # Actually, SH is stored as [c0_r, c0_g, c0_b, c1_r, ...]
+-                        # So for a band, we need to extract all coefficients for all channels
+-                        # The source says: "For each channel 0..2, copy bandSize coefficients to tmp"
+-                        # This implies the data is interleaved by channel? Or by coefficient?
+-                        # Source: "fpp = shDim * 3 bytes. Within-family decoding applies per-coefficient sign flip"
+-                        # This suggests layout is [c0_r, c0_g, c0_b, c1_r, c1_g, c1_b, ...]
+-                        # So for a band, we have band_size coefficients.
+-                        # For each channel, we need to pick every 3rd element starting from offset?
+-                        # No, the source says "For each channel 0..2, copy bandSize coefficients to tmp"
+-                        # This implies the data is stored as [c0_r, c1_r, ..., c0_g, c1_g, ...] or similar?
+-                        # Let's re-read: "out[base + j*3 + c]"
+-                        # This means j is coefficient index, c is channel.
+-                        # So layout is [c0_r, c0_g, c0_b, c1_r, c1_g, c1_b, ...]
+-                        # To get all coefficients for channel c, we need to stride by 3.
+-                        # But the source says "copy bandSize coefficients to tmp" for each channel.
+-                        # This implies tmp is a buffer of size band_size.
+-                        # So for channel 0: tmp = [sh[base + 0*3 + 0], sh[base + 1*3 + 0], ...]
+-                        # For channel 1: tmp = [sh[base + 0*3 + 1], sh[base + 1*3 + 1], ...]
+-                        # For channel 2: tmp = [sh[base + 0*3 + 2], sh[base + 1*3 + 2], ...]
+-                        
+-                        # Extract tmp for channel c
+                         tmp = []
+                         for k in range(band_size):
+-                            tmp.append(cloud.sh[base + (band_start + k)*3 + c])
+-                        
+-                        # Apply rotation/flip function
++                            tmp.append(cloud['sh'][base + (band_start + k)*3 + c])
+                         coord_converter.rot_flip_sh_funcs[band](tmp)
+-                        
+-                        # Copy back
+                         for k in range(band_size):
+-                            cloud.sh[base + (band_start + k)*3 + c] = tmp[k]
+-
++                            cloud['sh'][base + (band_start + k)*3 + c] = tmp[k]
++                            
+     return cloud
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear in the number of points and SH degree. Unpacking is dominated by memory access and simple arithmetic.
+-- **Memory Complexity:** Linear in the number of points and SH degree. Output is `O(N * (3 + 3 + 4 + 1 + 3 + shDim * 3))` floats.
++- **Time Complexity:** Linear in the number of points and SH degree. Unpacking is dominated by memory access and simple arithmetic [S1, unofficial].
++- **Memory Complexity:** Linear in the number of points and SH degree. Output is $O(N \times (3 + 3 + 4 + 1 + 3 + \text{shDim} \times 3))$ floats [S1, unofficial].
+ - **Performance:** ZSTD compression (v4) allows parallel decompression of attribute streams, improving throughput on multi-core systems compared to gzip (v1-3) [S1, unofficial].
+-- **Strengths:** Compact storage, fast unpacking, flexible coordinate system conversion.
+-- **Limitations:** Fixed-point position encoding may lose precision for very large scenes if `fractionalBits` is small. SH rotation requires per-band function calls, which may be slower than matrix multiplication for high degrees.
++- **Strengths:** Compact storage, fast unpacking, flexible coordinate system conversion [S1, unofficial].
++- **Limitations:** Fixed-point position encoding may lose precision for very large scenes if `fractionalBits` is small [S1, unofficial]. SH rotation requires per-band function calls, which may be slower than matrix multiplication for high degrees [S1, unofficial].
+ 
+ ## Background
+-The SPZ format was developed by Niantic Labs for efficient storage and transmission of 3D Gaussian Splatting data [S1, unofficial]. Version 4 introduced ZSTD compression and independent streams for each attribute, improving performance and flexibility over previous versions which used gzip and a single stream [S1, unofficial].
++The SPZ format uses a 32-byte `NgspFileHeader` followed by optional extension records, a table of contents, and independent ZSTD-compressed attribute streams in version 4 [S1, unofficial]. Versions 1-3 used gzip with a single stream [S1, unofficial]. Version 4 improves performance and flexibility by enabling parallel decompression per attribute stream [S1, unofficial].
+ 
+ ## Sources

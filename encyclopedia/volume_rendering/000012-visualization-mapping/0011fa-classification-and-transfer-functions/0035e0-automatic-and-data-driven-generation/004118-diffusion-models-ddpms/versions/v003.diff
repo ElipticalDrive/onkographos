@@ -1,0 +1,106 @@
+--- v002.md
++++ v003.md
+@@ -3,60 +3,69 @@
+ 
+ ## Overview
+-Diffusion Models (DDPMs) generate data by learning to reverse a gradual noising process, iteratively denoising from pure noise to a data distribution sample [S1, unofficial][S2]. In the context of volume rendering, they are applied to volume generation, Transfer Function (TF) design, and visualization synthesis [S1, unofficial]. They set themselves apart from GAN-based siblings (e.g., [Opacity GAN](7664-opacity-gan.md)) by their iterative refinement nature, which naturally handles the multimodal distributions common in scientific data [S1, unofficial].
++Diffusion Models (DDPMs) are generative models that transform a sample from a noise distribution into a data distribution by learning to reverse a gradual noising process [S1][S2, unofficial][S3]. In the context of volume rendering, they are applied to volume generation, transfer function (TF) design, and visualization synthesis [S2, unofficial]. They are distinguished from sibling methods like GANs and Gaussian Mixture Models by their iterative refinement process, which naturally handles the multimodal distributions common in scientific data [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A noise sample $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$ and a conditioning signal $\mathbf{c}$ (e.g., class label, text prompt, or coarse volume) [S1, unofficial][S2].
+-*   **Output:** A generated sample $\mathbf{x}_0$ representing the target data (e.g., a volume grid, transfer function parameters, or rendered image) [S1, unofficial][S2].
++**Inputs:**
++*   $z_0$: The target data sample (e.g., a latent representation of a volume or transfer function).
++*   $y$: Conditioning information (e.g., text prompts, low-resolution images, or other guidance signals) [S1].
++*   $T$: The total number of diffusion timesteps.
++*   $\{\alpha_t\}_{t=1}^T$: A predetermined noising schedule defining the variance added at each step.
++
++**Outputs:**
++*   A generated sample $z_0$ drawn from the learned data distribution [S1][S2, unofficial].
+ 
+ **Data Structures:**
+-The model parameterizes the reverse process using a neural network $\epsilon_\theta$. The network typically takes the noisy sample $\mathbf{x}_t$, the time step $t$, and the condition $\mathbf{c}$ as inputs [S1, unofficial][S2].
++*   **Noising Schedule:** A sequence of coefficients $\bar{\alpha}_t$ (cumulative product of $\alpha_t$) and $\sigma_t$ (noise scale at step $t$). These are typically precomputed constants.
++*   **Denoising Network ($\epsilon_\phi$):** A neural network (often a U-Net) parameterized by $\phi$ that predicts the noise component $\epsilon$ given a noisy input $z_t$, condition $y$, and timestep $t$ [S1].
+ 
+-**Algorithm:**
+-The method consists of a forward process (data noising) and a reverse process (denoising).
++**Algorithm Steps:**
+ 
+-1.  **Forward Process (Fixed):**
+-    The data $\mathbf{x}_0$ is gradually corrupted by adding Gaussian noise over $T$ steps. The transition kernel $q(\mathbf{x}_t | \mathbf{x}_{t-1})$ is defined as:
+-    $$ q(\mathbf{x}_t | \mathbf{x}_{t-1}) = \mathcal{N}(\mathbf{x}_t; \sqrt{1-\beta_t}\mathbf{x}_{t-1}, \beta_t \mathbf{I}) $$
+-    where $\beta_t \in (0, 1)$ is the variance schedule [S2]. This allows sampling $\mathbf{x}_t$ directly from $\mathbf{x}_0$:
+-    $$ \mathbf{x}_t = \sqrt{\bar{\alpha}_t}\mathbf{x}_0 + \sqrt{1-\bar{\alpha}_t}\boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I}) $$
+-    where $\alpha_t = 1 - \beta_t$ and $\bar{\alpha}_t = \prod_{i=1}^t \alpha_i$ [S2].
++1.  **Forward Process (Training Data Preparation):**
++    For a clean data sample $z_0$ and a randomly sampled timestep $t \sim U(0, T)$, compute the noisy latent $z_t$ using the closed-form reparameterization [S1]:
++    $$
++    z_t = \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon
++    $$
++    where $\epsilon \sim \mathcal{N}(0, I)$ is Gaussian noise [S1].
+ 
+-2.  **Training (Reverse Process Parameterization):**
+-    The model learns to predict the noise $\boldsymbol{\epsilon}$ added at step $t$. The loss function is the mean squared error between the predicted noise and the actual noise:
+-    $$ \mathcal{L}(\theta) = \mathbb{E}_{t, \mathbf{x}_0, \boldsymbol{\epsilon}} \left[ \| \boldsymbol{\epsilon} - \epsilon_\theta(\mathbf{x}_t, t, \mathbf{c}) \|^2 \right] $$
+-    where $\epsilon_\theta$ is the neural network [S1, unofficial][S2].
++2.  **Training Objective:**
++    Train the denoising network $\epsilon_\phi(z_t, y, t)$ to predict the noise $\epsilon$ used in the forward process. The loss function is the weighted mean squared error [S1]:
++    $$
++    \mathcal{L} = \mathbb{E}_{t \sim U(0,T), \epsilon \sim \mathcal{N}(0,I)} \left[ \gamma(t) \| \epsilon_\phi(z_t, y, t) - \epsilon \|_2^2 \right]
++    $$
++    where $\gamma(t)$ is a weighting function (often constant or dependent on the schedule) [S1].
+ 
+ 3.  **Sampling (Reverse Process):**
+-    Starting from $\mathbf{x}_T \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$, the model iteratively denoises from $t=T$ down to $t=0$. The reverse transition $p_\theta(\mathbf{x}_{t-1} | \mathbf{x}_t)$ is approximated as:
+-    $$ p_\theta(\mathbf{x}_{t-1} | \mathbf{x}_t) = \mathcal{N}(\mathbf{x}_{t-1}; \boldsymbol{\mu}_\theta(\mathbf{x}_t, t), \boldsymbol{\Sigma}_\theta(\mathbf{x}_t, t)) $$
+-    The mean $\boldsymbol{\mu}_\theta$ is computed from the predicted noise $\epsilon_\theta(\mathbf{x}_t, t, \mathbf{c})$ [S2].
++    To generate data, start with pure Gaussian noise $z_T \sim \mathcal{N}(0, I)$ and iteratively denoise from $t=T$ down to $t=0$ [S1][S2, unofficial]. At each step $t$, compute the predicted noise $\hat{\epsilon} = \epsilon_\phi(z_t, y, t)$ and update to $z_{t-1}$ using the ancestral sampling formula [S1]:
++    $$
++    z_{t-1} = \sqrt{\alpha_t} \left( \frac{z_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \hat{\epsilon}}{\sqrt{\alpha_t}} \right) + \sigma_t \epsilon'
++    $$
++    where $\epsilon' \sim \mathcal{N}(0, I)$ is new Gaussian noise added at each step to maintain stochasticity [S1]. Note: The term inside the parenthesis simplifies to the estimate of the clean data $z_0$ derived from $z_t$ and $\hat{\epsilon}$.
+ 
+ **Parameters:**
+-*   $T$: Total number of diffusion steps. Typical values range from 100 to 1000 [S1, unofficial][S2].
+-*   $\beta_t$: Variance schedule. Common choices include linear or cosine schedules [S2].
++*   $T$: Total timesteps. Not given in the sources.
++*   $\gamma(t)$: Loss weighting. Not given in the sources.
++*   $\alpha_t, \bar{\alpha}_t, \sigma_t$: Schedule parameters. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Computational Cost:** The iterative nature requires $T$ network evaluations per sample, making it slower than single-pass methods like GANs [S1, unofficial].
+-*   **Mode Collapse:** While less prone than GANs, poor variance schedules or insufficient training can lead to incomplete coverage of the data distribution [S1, unofficial].
++*   **Conditioning Mismatch:** The network requires $y$ (conditioning). If $y$ is missing or malformed, the prediction $\epsilon_\phi$ may be arbitrary [S1].
++*   **Stochasticity:** The addition of $\epsilon'$ in the sampling step means results are not deterministic for the same seed unless the noise sequence is fixed [S1].
+ 
+ ## Subtopics
+ 
+ ### [Latent Diffusion Models (LDM) for 3D](12787-latent-diffusion-models-ldm-for-3d.md)
+-Performs diffusion in a compressed latent space rather than directly in the high-dimensional 3D representation space, significantly improving computational efficiency and output quality. It sets itself apart from standard DDPMs by decoupling the high-dimensional data representation from the diffusion process, allowing the use of powerful 2D diffusion priors adapted for 3D latent structures.
++Performs diffusion in a compressed latent space using a pretrained VAE, improving computational efficiency and allowing the use of 2D diffusion priors for 3D structures.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(T \cdot N)$, where $T$ is the number of diffusion steps and $N$ is the cost of one neural network evaluation [S1, unofficial][S2].
+-*   **Memory Complexity:** $O(N)$ for storing the model parameters and intermediate states [S1, unofficial][S2].
+-*   **Performance:** DDPMs produce high-quality samples with stable training compared to GANs [S2]. However, they are computationally expensive during inference due to the iterative denoising process [S1, unofficial].
+-*   **Strengths:** Handles multimodal distributions well; stable training; high fidelity [S1, unofficial].
+-*   **Limitations:** Slow inference speed; requires careful tuning of the variance schedule [S1, unofficial][S2].
+-*   **When to use:** When high-fidelity generation is required and computational budget allows for iterative refinement [S1, unofficial].
+-*   **When not to use:** When real-time inference is required [S1, unofficial].
++*   **Time Complexity:** Sampling is iterative, requiring $T$ forward passes through the denoising network. Not given in the sources.
++*   **Memory Complexity:** Depends on the resolution of $z_t$ and the size of the denoising network. Latent Diffusion reduces this by operating in a lower-dimensional space [S1].
++*   **Strengths:** Handles multimodal distributions effectively; produces high-quality samples; flexible conditioning [S2, unofficial].
++*   **Limitations:** Slow sampling due to iterative nature; requires significant training data and compute [S2, unofficial].
++*   **When to use:** When generating complex, multimodal volume data or transfer functions where GANs might suffer from mode collapse [S2, unofficial].
+ 
+ ## Background
+-Diffusion models entered volume visualization after Wang and Han’s survey [147]. They have garnered significant attention in 3D editing and generation tasks [S2]. Latent Diffusion Models (LDMs) further leveraged pre-trained models like Stable Diffusion to improve efficiency [S2].
++Diffusion models were introduced as generative models that transform noise to data via a fixed forward process and a learned reverse process [S1, S3]. They entered volume visualization following surveys by Wang and Han, who noted their iterative refinement capabilities [S2, unofficial]. Latent Diffusion Models (LDMs) further improved efficiency by projecting data into a latent space using a Variational Autoencoder (VAE) before diffusion [S1, S3].
+ 
+ ## Sources
+-[S1] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+-[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28+[S1] DiSR-NeRF: Diffusion-Guided View-Consistent Super-Resolution NeRF, https://doi.org/10.1109/cvpr52733.2024.01943, fetched 2026-10-26
++[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
++[S3] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

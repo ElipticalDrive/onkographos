@@ -1,0 +1,206 @@
+ReUseX is a comprehensive tool for processing 3D point cloud scans of building interiors, designed to support building reuse and renovation projects. The project processes LiDAR scans to create semantic 3D models with advanced segmentation capabilities for architectural elements. - feat(gui,core): store Gaussian splats in the project and render them in the viewport (#322) by pfmephisto · Pull Request #347 · pfmephisto/ReUseX
+
+feat(gui,core): store Gaussian splats in the project and render them in the viewport (#322) by pfmephisto · Pull Request #347 · pfmephisto/ReUseX · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pfmephisto
+commented
+Sep 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #322
+The GUI viewport could only draw THREE.Points. Gaussian splats are a different primitive — depth-sorted, alpha-blended quads scaled by a 3D covariance — so PointCloudScene had nothing to render them with. And rux create gsplat left its model in a .ply outside the project, where no server could reliably find it.
+Both halves change here.
+Scope note. The issue asked only for the viewer, and ProjectDB storage was explicitly out of scope. The first implementation matched that: the endpoint served a file located by a <project stem>.splat.ply sidecar convention. Partway through I switched to real project storage on my own initiative, and an earlier version of this description wrongly attributed that to a maintainer request. No such request was made. The change is left in because it is built, tested and (I think) the better design — but it is unrequested scope, and reviewers should weigh it on that basis rather than assume it was signed off.
+The splat is project state now (schema v12)
+ProjectDB gains gaussian_splats + gaussian_splat_data, chunked at 8 MiB the way point clouds are, because a splat is hundreds of megabytes.
+rux create gsplat stores its model under --name (default splat). -o/--out is no longer required: it is an export of the same bytes, not the output.
+One gaussian_ply_bytes() call feeds both destinations, so a project's splat and its exported .ply can never be different models under one name. There is a test pinning that byte-for-byte.
+rux import gsplat <file.ply> brings in a .ply trained before v12 or by another 3DGS implementation.
+core::parse_gaussian_splat_ply_header() validates on the way in and derives gaussian_count / sh_degree from the header, so a row cannot describe a different model than the blob beside it. It also refuses the interesting wrong file: rux export ply writes a perfectly valid PLY with no f_dc_*/opacity/scale_*/rot_* properties, which without the check would render as an empty viewport with no clue why.
+```
+$ rux -p scan.rux import gsplat cloud.ply
+error: the file is a PLY but not an INRIA 3D Gaussian Splatting file: it has
+no f_dc_*/opacity/scale_*/rot_* properties. A point cloud exported with
+`rux export ply` cannot be rendered as a splat — use the output of
+`rux create gsplat`
+```
+Read paths degrade gracefully on a pre-v12 project opened read-only (tableExists guard), so /project and rux info do not break on an unmigrated database.
+Stage contract
+gsplat now produces splat instead of declaring an external-only output. That leaves no stage using external_outputs; the field stays for a future one, and the test that required a witness for it now says why it no longer does. docs/CONTRACTS.md is updated in the same pass — it is asserted against the table by a unit test.
+Viewport
+Three routes on the rux gui server, shaped after the mesh routes:
+GET /api/v1/gsplats
+inventory, metadata only
+GET /api/v1/gsplats/{name}
+one record
+GET /api/v1/gsplats/{name}/data
+the PLY, verbatim
+The listing is unpaged on purpose: a project holds a handful of splats — one per training run somebody chose to keep — not a number that grows with the scan. Same reasoning as /meshes/{name}/textures.
+Renderer choice
+@mkkellogg/gaussian-splats-3d 0.4.7 (MIT). It reads the INRIA .ply with no conversion step, and its peer range is three: >=0.160 against the three@^0.185.1 this app already pins — checked before committing to it. luma-web was the alternative named in the issue: broader format support and a WebGPU path, but it is built around Luma's hosted captures and wants to own the render loop, which is the one thing not on offer in a viewport that already exists.
+Embedded, not overlaid
+The issue leaves this open. This embeds. DropInViewer extends THREE.Group and runs its depth sort from an onBeforeRender hook on an invisible child, so it draws with whatever camera drew the frame:
+one canvas, one camera, one OrbitControls — the user orbits splat and cloud together because they are together;
+one depth buffer, so a point cloud inside the splat volume occludes correctly instead of always winning or always losing.
+A second canvas would have needed the camera mirrored every frame and could never have interleaved depth at all.
+The splat is offset by the same recentring origin PointCloudScene applies to points (float32 precision on georeferenced scans), derived from a stride-sampled bbox of the loaded splat centres. That needed two small additions to PointCloudScene — sceneRoot() and registerExternalBounds() — and nothing else in it moved.
+Behaviour
+Splats toggle independently of each other and of the point cloud, and are not downloaded until switched on: unlike a cloud, which streams in pages, a splat is a single large response, so the panel shows its size and Gaussian count and lets the user decide. Hiding does not unload. ?splat=<name> deep-links one on.
+The library is import()ed, so it lands in its own 247 kB chunk that a page without a splat never fetches (main bundle unchanged at 864 kB).
+Two forced settings worth knowing about:
+sharedMemoryForWorkers: false — the library defaults it on and has no fallback for a document that is not cross-origin-isolated. rux gui sends no COOP/COEP headers (and should not — they would break the rest of the page for one layer), so the default would throw inside the sort worker.
+format: SceneFormat.Ply — the data URL has no extension for the loader to sniff.
+Verification
+817/817 ctest, including 5 new [gpu] stage tests that run the real trainer and assert the splat lands in the project, that --out gets the identical bytes, and that a rerun replaces rather than duplicates.
+345 vitest, 17 files. The existing point-cloud streaming suite is untouched and green.
+End-to-end against a live rux gui: import a splat, GET /gsplats reports 5000 Gaussians / SH degree 0 / 340414 B, GET /gsplats/splat/data returns bytes cmp-identical to the imported file, an unknown name is a 404 naming both ways to get one.
+pre-commit (clang-format + REUSE) clean.
+No screenshot of the rendered splat: that needs a browser, and there is no headless-browser test infra in this repo to borrow.
+Follow-ups, not in scope
+rux export gsplat — the counterpart to import. --out covers the fresh-training case, so nothing is stranded, but the symmetry is missing.
+Serving the blob with range requests / progressive load, if splat sizes outgrow the 1 GiB single-response ceiling.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_015ogHBxbWy5kcgdzqFYhTmX
+pfmephisto
+mentioned this pull request
+Sep 10, 2026
+Add Gaussian splat viewer to rux GUI frontend (rux create gsplat output)
+#322
+Closed
+feat(gui,core): store Gaussian splats in the project and render them …
+…
+609e662
+```
+…in the viewport (#322)
+
+The GUI viewport could only draw `THREE.Points`. Gaussian splats are a
+different primitive — depth-sorted, alpha-blended quads scaled by a 3D
+covariance — so `PointCloudScene` had nothing to render them with, and
+`rux create gsplat` left its model in a `.ply` outside the project where
+no server could find it.
+
+Both halves change here.
+
+`ProjectDB` gains `gaussian_splats` + `gaussian_splat_data`, chunked the
+way point clouds are because a splat is hundreds of megabytes.
+`rux create gsplat` writes there under `--name` (default `splat`);
+`-o/--out` became optional and is now an *export* of the same bytes, not
+the output. One `gaussian_ply_bytes()` call feeds both, so a project's
+splat and its exported `.ply` can never be different models under one
+name.
+
+`core::parse_gaussian_splat_ply_header()` validates on the way in and
+derives `gaussian_count`/`sh_degree` from the header, so a row cannot
+describe a different model than the blob beside it. It also refuses the
+interesting wrong file: `rux export ply` writes a perfectly valid PLY
+with no `f_dc_*`/`opacity`/`scale_*`/`rot_*`, which would otherwise
+render as an empty viewport with no clue why.
+
+`rux import gsplat <file.ply>` brings in a `.ply` trained before v12 or
+by another 3DGS implementation.
+
+The stage contract follows: `gsplat` now **produces** `splat` instead of
+declaring an external-only output, which leaves no stage using
+`external_outputs` — the field stays for a future one, and the test that
+required a witness for it says why it no longer does.
+
+`GET /api/v1/gsplats`, `/gsplats/{name}` and `/gsplats/{name}/data` on
+the `rux gui` server, shaped after the mesh routes. The listing is
+unpaged on purpose: a project holds a handful of splats, not a number
+that grows with the scan.
+
+The renderer is `@mkkellogg/gaussian-splats-3d` (MIT, peer `three
+>=0.160` against our 0.185). Its `DropInViewer` is a `THREE.Group` that
+sorts from an `onBeforeRender` hook, so the splat is **embedded in the
+existing scene** rather than overlaid on a second canvas: one camera,
+one `OrbitControls`, one depth buffer, and a point cloud inside the
+splat volume occludes correctly. `luma-web` was the alternative and
+wants to own the render loop, which is the one thing on offer here.
+
+Splats toggle independently of each other and of the point cloud, and
+are not downloaded until switched on — unlike a cloud, which streams in
+pages, a splat is a single large response, so the panel shows its size
+and Gaussian count and lets the user decide. The library is
+`import()`ed, so the 247 kB chunk is only fetched by a page that
+actually renders one.
+
+Two forced settings worth knowing: `sharedMemoryForWorkers: false`
+(SharedArrayBuffer needs cross-origin isolation, which `rux gui` does
+not send) and an explicit `format: SceneFormat.Ply` (the data URL has no
+extension to sniff).
+
+Closes #322
+```
+pfmephisto
+force-pushed
+the
+feat/gsplat-viewer-322
+branch
+from
+c95ef08 to
+609e662
+Compare
+September 10, 2026 08:25
+pfmephisto
+had a problem deploying
+to
+CI
+September 10, 2026 08:25 — with
+GitHub Actions
+Failure
+Hide details
+View details
+pfmephisto
+merged commit 317e17d
+into
+main
+Sep 10, 2026
+11 of 12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+pfmephisto
+deleted the
+feat/gsplat-viewer-322
+branch
+September 10, 2026 08:27
+This was referenced Sep 10, 2026
+GUI Phase 5: 360 panorama mode in the viewport (#265)
+#361
+Merged
+GUI application: web frontend + C++ backend, designed via Claude Design
+#265
+Closed
+Hide environments
+Show environments
+This branch had an error being deployed
+1 failed
+deployment
+CI
+—
+609e6629
+Deployed
+Sep 10, 2026 by
+pfmephisto
+via Build + ctest (CPU variant) #39
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

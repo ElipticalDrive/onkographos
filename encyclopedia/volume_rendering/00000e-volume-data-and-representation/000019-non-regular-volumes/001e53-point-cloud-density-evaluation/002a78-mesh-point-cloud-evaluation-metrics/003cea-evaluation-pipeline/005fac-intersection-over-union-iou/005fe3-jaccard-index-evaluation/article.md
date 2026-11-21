@@ -1,0 +1,112 @@
+# Jaccard Index Evaluation
+Also called: IoU for Volumes, Jaccard Index
+
+## Overview
+A metric used to evaluate the voxel segmentation quality by computing the Jaccard index between target and predicted voxel grids [S1, unofficial]. It measures the spatial overlap between two binary or multi-class voxel sets, serving as a stricter alternative to correlation-based metrics by requiring exact voxel-wise agreement [S2].
+
+## How it works
+**Inputs and Outputs:**
+- Inputs: `target` (ground-truth voxel grid), `pred` (predicted voxel grid), `cfg` (configuration object containing `num_classes`).
+- Output: A scalar float representing the Jaccard index (IoU) for each class or the mean across classes.
+
+**Data Structures:**
+- `target.voxel`: A tensor or array of shape $(N, D, H, W)$ or $(N, C, D, H, W)$ containing integer class labels or binary masks.
+- `pred.voxel`: A tensor or array of the same shape as `target.voxel`, containing predicted class labels or probabilities.
+- `cfg.num_classes`: An integer $C$ specifying the number of distinct classes.
+
+**Steps:**
+1. **Binarize or One-Hot Encode:** If `pred` contains probabilities, apply a threshold (typically 0.5) or argmax to convert it to discrete class labels matching `target`. If multi-class, create binary masks for each class $c \in \{0, \dots, C-1\}$.
+2. **Compute Intersection:** For each class $c$, compute the intersection of the target and predicted voxel sets:
+   $$ I_c = \sum_{v} (\mathbb{I}(target(v) = c) \land \mathbb{I}(pred(v) = c)) $$
+   where $\mathbb{I}(\cdot)$ is the indicator function and $v$ iterates over all voxels.
+3. **Compute Union:** For each class $c$, compute the union of the target and predicted voxel sets:
+   $$ U_c = \sum_{v} (\mathbb{I}(target(v) = c) \lor \mathbb{I}(pred(v) = c)) $$
+4. **Calculate Jaccard Index:** For each class $c$, compute the ratio:
+   $$ J_c = \frac{I_c}{U_c} $$
+   If $U_c = 0$, define $J_c = 1$ (perfect match if both are empty) or $0$ depending on convention; typically, empty sets are ignored in mean calculations [G].
+5. **Aggregate:** Compute the mean Jaccard index across all classes:
+   $$ \text{Jaccard Index} = \frac{1}{C} \sum_{c=0}^{C-1} J_c $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_jaccard_index(target, pred, num_classes):
+    """
+    Compute the mean Jaccard Index (IoU) for voxel segmentation.
+    
+    Args:
+        target: Tensor of shape (N, D, H, W) or (N, C, D, H, W) with integer labels.
+        pred: Tensor of shape (N, D, H, W) or (N, C, D, H, W) with integer labels.
+        num_classes: Integer C, the number of classes.
+        
+    Returns:
+        float: Mean Jaccard Index across all classes.
+    """
+    # Ensure inputs are long/int tensors for indexing
+    target = target.long()
+    pred = pred.long()
+    
+    # Handle potential channel dimension: if shape is (N, C, D, H, W), squeeze or permute
+    # Assuming target and pred are aligned in shape.
+    # If pred is probabilities, argmax is needed. Here we assume pred is already labels.
+    
+    total_jaccard = 0.0
+    count = 0
+    
+    for c in range(num_classes):
+        # Create binary masks for class c
+        target_mask = (target == c)
+        pred_mask = (pred == c)
+        
+        # Compute intersection
+        intersection = (target_mask & pred_mask).sum().item()
+        
+        # Compute union
+        union = (target_mask | pred_mask).sum().item()
+        
+        # Avoid division by zero
+        if union == 0:
+            # If both are empty, consider it a perfect match (1.0) or skip?
+            # Standard practice in segmentation: skip or count as 1.0.
+            # We'll skip to avoid bias, or add 1.0 if strict.
+            # Let's skip for mean calculation if both empty.
+            continue
+            
+        jaccard = intersection / union
+        total_jaccard += jaccard
+        count += 1
+        
+    if count == 0:
+        return 0.0
+        
+    return total_jaccard / count
+```
+
+**Parameters:**
+- `num_classes`: Typically determined by the dataset (e.g., 2 for binary segmentation).
+- Threshold: If `pred` is probabilistic, a threshold of 0.5 is standard [G].
+
+**Edge Cases and Pitfalls:**
+- **Empty Sets:** If both target and predicted masks for a class are empty, the union is 0. Division by zero must be handled. Commonly, such classes are excluded from the mean or assigned a score of 1.0 [G].
+- **Precision:** Use integer arithmetic for intersection/union counts to avoid floating-point errors in large grids.
+- **Boundary Conditions:** Ensure `target` and `pred` have identical dimensions and spacing. Misalignment leads to incorrect IoU.
+
+## Subtopics
+
+### Modified Jaccard Index with Spatial Tolerance
+A metric to measure the spatial overlap between a set of voxels with the highest variances and a set of voxels with the highest errors, relaxing the strict intersection requirement of the standard Jaccard index [S2]. It is used to evaluate uncertainty quantification in scene representation networks, where exact voxel coincidence is less informative than spatial proximity [S2]. Choose this when evaluating models that output variance estimates alongside predictions, particularly in super-resolution or reconstruction tasks [S2]. It differs from the standard Jaccard Index by expanding the error set with one-voxel neighbors before computing intersection [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of voxels and $C$ is the number of classes. The modified variant requires sorting voxels by variance/error, adding $O(N \log N)$ overhead.
+- **Memory Complexity:** $O(N)$ to store masks and intermediate sums.
+- **Strengths:** Robust to small misalignments in the modified variant; provides a clear, interpretable overlap score [S2].
+- **Limitations:** Sensitive to class imbalance; empty classes can skew results if not handled [G]. The modified variant requires computing variance and error maps, which may not be available for all models [S2].
+- **When to Use:** For voxel segmentation tasks where exact boundary alignment is critical [S1, unofficial]. Use the modified variant for uncertainty-aware models where spatial proximity of errors is more important than exact voxel match [S2].
+
+## Background
+The Jaccard Index, also known as Intersection over Union (IoU), is a classic set similarity metric. In volume rendering and voxel segmentation, it has been adopted to evaluate the quality of predicted voxel grids against ground truth [S1, unofficial]. The Modified Jaccard Index with Spatial Tolerance was proposed in the context of Regularized Multi-Decoder Ensembles for error-aware scene representation, specifically to evaluate the correlation between prediction variance and reconstruction error in super-resolution networks [S2].
+
+## Sources
+[S1] cvlab-epfl/voxel2mesh, https://github.com/cvlab-epfl/voxel2mesh, fetched 2026-10-27 (unofficial)
+[S2] Regularized Multi-Decoder Ensemble for an Error-Aware Scene Representation Network, https://doi.org/10.1109/tvcg.2024.3456357, fetched 2026-10-26

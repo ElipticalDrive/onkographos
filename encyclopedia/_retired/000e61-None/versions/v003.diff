@@ -1,0 +1,254 @@
+--- v002.md
++++ v003.md
+@@ -1,153 +1,158 @@
+ # Interior Voxelize
+ 
+-Also called: point-in-mesh test, solid voxelization via containment
++Also called: point-in-mesh voxelization, grid containment sampling
+ 
+ ## Overview
+-Interior Voxelize determines which voxels in a discrete grid lie strictly inside a closed 3D mesh by sampling points within the voxel volume and testing for geometric containment [S1, S2, unofficial]. Unlike sibling methods that rely on ray-casting parity [1067-stochastic-ray-casting-voxelization.md], winding numbers [2328-mesh-winding-number-voxelization.md], or rasterization coverage [908-rasterization-based-voxelization.md], this approach directly evaluates the boolean "inside" status of specific sample points, making it robust against non-manifold geometry and self-intersections where deterministic ray paths might fail [S1, unofficial]. It serves as the core occupancy determination step in producing volume data from mesh inputs [12-voxelization.md].
++Interior Voxelize determines the occupancy status of a voxel grid by sampling discrete points within the grid volume and testing whether each point lies inside the input mesh [S1, S2, unofficial]. It differs from its siblings [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxel-filling.md) and [Front/Back Face Flagging](1506-front-back-face-flagging.md) by relying on direct point containment queries rather than deterministic ray intersections or surface normal orientation flags [S1, unofficial]. This method is distinct from [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) because it uses a fixed grid of sample points rather than randomized ray directions, making it deterministic for a given grid resolution [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A closed 3D mesh (triangle soup or BRep) and a target grid resolution $N$.
+-- Output: A 3D boolean grid (Bitmap) where `True` indicates the voxel is interior to the mesh.
++- Input: A triangle mesh (typically manifold or closed) and a target voxel resolution $N$.
++- Output: A 3D boolean occupancy grid (or bitmap) where each voxel is marked as interior (1) or exterior (0).
+ 
+ **Data Structures:**
+-1.  **Mesh**: A collection of triangles.
+-2.  **Spatial Index**: An Acceleration Structure (e.g., AABB Tree) built over the mesh triangles to accelerate point-in-mesh queries [S2, unofficial].
+-3.  **Grid Indexer**: A mapping structure (e.g., `ShiftGridIndexer3`) that converts integer grid indices $(i, j, k)$ to world-space coordinates $(x, y, z)$ based on the mesh bounding box [S2, unofficial].
+-4.  **Bitmap**: A 3D array of booleans with dimensions $(N, N, N)$ [S2, unofficial].
++1.  **Mesh**: Represented as a collection of triangles. For efficient queries, a spatial acceleration structure (e.g., AABB tree) is built [S2, unofficial].
++2.  **Spatial Index**: `DMeshAABBTree3` or equivalent, built from the mesh with auto-build enabled [S2, unofficial].
++3.  **Grid Indexer**: `ShiftGridIndexer3` (or equivalent) mapping integer grid coordinates $(i, j, k)$ to 3D world coordinates [S2, unofficial].
++4.  **Occupancy Bitmap**: `Bitmap3` of dimensions $(N, N, N)$ storing boolean values [S2, unofficial].
+ 
+ **Steps:**
+-
+-1.  **Construct Spatial Index**: Build a spatial acceleration structure (e.g., `DMeshAABBTree3`) from the input mesh with automatic building enabled [S2, unofficial].
+-2.  **Calculate Bounds**: Determine the axis-aligned bounding box (AABB) of the mesh, denoted as $B_{min}$ and $B_{max}$ [S2, unofficial].
+-3.  **Define Grid Parameters**:
+-    -   Set the resolution $N$ (typical value: 32) [S2, unofficial].
+-    -   Calculate the cell size:
+-        $$ cell\_size = \frac{\max(B_{max} - B_{min})}{N} $$
+-        where $\max(\cdot)$ takes the maximum dimension of the bounding box vector [S2, unofficial].
+-    -   Create a grid indexer mapping grid coordinates to 3D space using $B_{min}$ and $cell\_size$ [S2, unofficial].
++1.  **Compute Bounding Box**: Calculate the axis-aligned bounding box (AABB) of the input mesh, denoted as $B_{min}$ and $B_{max}$ [S2, unofficial].
++2.  **Determine Grid Parameters**:
++    -   Let $N$ be the resolution (number of cells along the maximum dimension of the bounding box) [S2, unofficial].
++    -   Calculate the cell size $s$:
++        $$ s = \frac{\max(B_{max} - B_{min})}{N} $$
++        where $\max(B_{max} - B_{min})$ is the length of the longest side of the bounding box [S2, unofficial].
++3.  **Initialize Indexer**: Create a grid indexer that maps grid indices to world space using $B_{min}$ and $s$ [S2, unofficial].
+ 4.  **Generate Sample Points**:
+-    -   Create a set of 3D points representing the sample locations within the grid. Common strategies include:
+-        -   **Center Sampling**: Points at the center of each voxel cell [S3, unofficial].
+-        -   **Uniform Grid**: Points distributed across the bounding box volume [S1, unofficial].
+-    -   *Optional*: Add small random noise to points to break symmetry and avoid degenerate cases on mesh boundaries [S1, unofficial].
+-    -   *Optional*: Normalize points to a canonical range (e.g., $[-0.5, 0.5]$) if required by the containment function [S1, unofficial].
+-5.  **Test Containment**:
+-    -   Iterate over all grid indices $(i, j, k)$.
+-    -   Map the grid index to a world coordinate $v$ using the indexer: $v = \text{Indexer.FromGrid}(i, j, k)$ [S2, unofficial].
+-    -   Query the spatial index to determine if $v$ is inside the mesh: $inside = \text{Spatial.IsInside}(v)$ [S2, unofficial].
+-    -   Alternatively, use a direct point-in-mesh containment function if available [S1, unofficial].
+-6.  **Assign Occupancy**: Set the voxel at $(i, j, k)$ in the Bitmap to the result of the containment test [S2, unofficial].
+-7.  **Post-Processing (Optional)**:
+-    -   If "Tight Voxelization" is enabled, verify if the center point of each voxel is inside the mesh. If outside, remove the voxel (set to false) [S3, unofficial]. Note: This step is computationally expensive [S3, unofficial].
++    -   Define the grid shape as $(N, N, N)$ [S1, unofficial].
++    -   Generate a 3D grid of points covering the bounding box. The points are typically centered within the cells. For a grid from $0$ to $N-1$, the center coordinates in grid units are $0.5, 1.5, \dots, N-0.5$ [S1, unofficial].
++    -   Transform these grid coordinates to world coordinates using the indexer [S2, unofficial].
++    -   *Optional Noise*: To break symmetry or handle degenerate cases where points lie exactly on edges/faces, small random noise may be added to the sample points [S1, unofficial].
++5.  **Containment Test**:
++    -   For each sample point $p$, use the spatial index to determine if $p$ is inside the mesh: $occ = \text{IsInside}(p)$ [S2, unofficial].
++    -   The `IsInside` function typically uses ray casting or winding number logic internally, but is abstracted as a single query [S2, unofficial].
++6.  **Store Results**: Assign the result of the containment test to the corresponding voxel in the `Bitmap3` [S2, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ def interior_voxelize(mesh, resolution=32):
+     """
+-    Voxelize a mesh by testing point containment.
++    Voxelize a mesh by checking point containment in a grid.
+     
+     Args:
+-        mesh: A 3D mesh object with triangles.
+-        resolution: Integer grid resolution along the maximum dimension.
++        mesh: A triangle mesh object with a method to build a spatial index.
++        resolution: Integer, number of cells along the longest axis.
+         
+     Returns:
+-        A 3D boolean numpy array of shape (resolution, resolution, resolution).
++        occ: A 3D numpy array of shape (resolution, resolution, resolution) with boolean values.
+     """
+-    # Step 1: Construct Spatial Index
+-    # Build an AABB tree for fast ray/point queries
+-    spatial_index = build_aabb_tree(mesh)
++    # 1. Build spatial index
++    spatial = build_aabb_tree(mesh, auto_build=True)
+     
+-    # Step 2: Calculate Bounds
++    # 2. Get bounding box
+     bounds = mesh.get_bounding_box()
+     bb_min = bounds.min
+     bb_max = bounds.max
+     
+-    # Step 3: Define Grid Parameters
+-    numcells = resolution
+-    # Calculate cell size based on the largest dimension of the bounding box
++    # 3. Calculate cell size based on max dimension
+     max_dim = max(bb_max.x - bb_min.x, bb_max.y - bb_min.y, bb_max.z - bb_min.z)
+-    cell_size = max_dim / numcells
++    cell_size = max_dim / resolution
+     
+-    # Create a grid indexer to map grid indices to world coordinates
+-    # This maps integer (i,j,k) to world (x,y,z)
+-    indexer = create_shift_grid_indexer(bb_min, cell_size)
++    # 4. Create grid indexer
++    # Maps grid index (i,j,k) to world coordinate
++    indexer = ShiftGridIndexer3(bb_min, cell_size)
+     
+-    # Initialize Bitmap
+-    bitmap = create_bitmap3(numcells, numcells, numcells)
++    # 5. Generate grid points
++    # Create indices 0 to resolution-1
++    indices = np.arange(resolution)
++    # Create meshgrid for i, j, k
++    i_grid, j_grid, k_grid = np.meshgrid(indices, indices, indices, indexing='ij')
+     
+-    # Step 4 & 5: Generate Points and Test Containment
+-    for i in range(numcells):
+-        for j in range(numcells):
+-            for k in range(numcells):
+-                # Map grid index to world coordinate
+-                v = indexer.from_grid(i, j, k)
+-                
+-                # Test if point is inside the mesh
+-                # Uses the spatial index to determine interior status
+-                is_inside = spatial_index.is_inside(v)
+-                
+-                # Step 6: Assign Occupancy
+-                bitmap.set(i, j, k, is_inside)
+-                
+-    # Step 7: Optional Tight Voxelization
+-    # If enabled, re-verify center points and remove false positives
+-    # This is time-consuming [S3, unofficial]
+-    # for i, j, k in bitmap.indices():
+-    #     center = indexer.from_grid(i, j, k)
+-    #     if not spatial_index.is_inside(center):
+-    #         bitmap.set(i, j, k, False)
+-            
+-    return bitmap.to_numpy_array()
++    # Convert to world coordinates using indexer
++    # Note: The indexer expects integer grid coordinates. 
++    # Depending on implementation, points might be cell centers or corners.
++    # Here we assume cell centers are derived from integer indices via the indexer's FromGrid method.
++    # If the indexer maps integer indices to cell centers, we pass (i, j, k).
++    # If it maps to corners, we might need to adjust. 
++    # Based on S2, FromGrid(idx) is used directly on integer indices.
++    
++    # Flatten indices for batch processing
++    flat_indices = np.column_stack([i_grid.ravel(), j_grid.ravel(), k_grid.ravel()])
++    
++    # Map to world space
++    # This step depends on the specific indexer implementation. 
++    # Assuming indexer.FromGrid takes a single Vector3i and returns Vector3d.
++    # We iterate or vectorize this call.
++    points = []
++    for idx in flat_indices:
++        v = indexer.from_grid(idx)
++        points.append(v)
++    points = np.array(points)
++    
++    # Optional: Add noise to break symmetry (S1)
++    # noise = 0.1 * (np.random.rand(*points.shape) - 0.5)
++    # points += noise
++    
++    # 6. Check containment
++    # spatial.IsInside(v) returns boolean
++    occ_flat = np.array([spatial.is_inside(p) for p in points])
++    
++    # 7. Reshape to grid
++    occ = occ_flat.reshape(resolution, resolution, resolution)
++    
++    return occ
+ ```
+ 
+ **Parameters:**
+--   `resolution` ($N$): The number of cells along the maximum dimension of the bounding box. Typical value: 32 [S2, unofficial].
+--   `tight` (Boolean): If true, performs an additional check to remove voxels whose centers are outside the mesh. Default: false [S3, unofficial].
++-   `resolution` ($N$): The number of voxels along the longest axis of the bounding box. Typical value: 32 [S2, unofficial]. Higher values increase accuracy but also memory and compute cost.
+ 
+ **Edge Cases and Pitfalls:**
+--   **Performance**: Point-in-mesh tests are computationally expensive, especially for high resolutions or complex meshes [S3, unofficial]. The use of a spatial index (AABB tree) is critical for performance [S2, unofficial].
+--   **Non-Watertight Meshes**: If the mesh is not closed, the definition of "inside" may be ambiguous. Methods like Mesh Winding Number [2328-mesh-winding-number-voxelization.md] may handle this better, but standard point-in-mesh tests may produce inconsistent results [S1, unofficial].
+--   **Boundary Precision**: Points exactly on the mesh surface may yield undefined results. Adding small noise to sample points can help break symmetry and avoid degenerate cases [S1, unofficial].
+--   **Memory**: Storing a dense 3D bitmap for high resolutions (e.g., 256^3) requires significant memory. Sparse structures may be needed for large grids [4391-sparse-and-hierarchical-structures.md].
++-   **Degenerate Geometry**: If the mesh is not closed or has holes, point containment tests may yield inconsistent results depending on the winding number or ray-casting logic used internally by `IsInside` [S2, unofficial].
++-   **Precision**: Points lying exactly on mesh faces may lead to ambiguous results. Adding small noise (as suggested in [S1, unofficial]) can mitigate this.
++-   **Performance**: Testing every voxel center can be slow for high resolutions. Spatial indexing is critical for performance [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md)
+-Determines interior status by casting multiple random rays from each voxel center and counting intersections with mesh triangles. It differs from Ray-Cast Style Voxel Filling [1502-ray-cast-style-voxel-filling.md] and Front/Back Face Flagging [1506-front-back-face-flagging.md] by relying on statistical majority voting over randomized directions rather than deterministic axis-aligned rays or face orientation flags, making it robust against non-manifold geometry, broken meshes, and self-intersections where a single deterministic ray might fail [1067-stochastic-ray-casting-voxelization.md].
++Uses random rays from voxel centers to determine interior status via majority voting. Choose when dealing with non-manifold geometry where deterministic point tests might fail due to ambiguity.
+ 
+ ### [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxel-filling.md)
+-Determines interior voxels by scanning along a principal axis (typically Z) and filling intervals between front-facing and back-facing surface voxels [1502-ray-cast-style-voxel-filling.md]. It differs from Stochastic Ray-Casting Voxelization [1067-stochastic-ray-casting-voxelization.md] by using deterministic scanline logic rather than probabilistic sampling, and from Mesh Winding Number Voxelization [2328-mesh-winding-number-voxelization.md] by relying on explicit face orientation flags rather than topological winding counts [1502-ray-cast-style-voxel-filling.md].
++Scans along principal axes to fill intervals between front/back faces. Choose for faster, deterministic filling on manifold meshes.
+ 
+ ### [Front/Back Face Flagging](1506-front-back-face-flagging.md)
+-Determines the interior of a mesh by assigning a boolean orientation flag to voxels intersected by triangle surfaces. It solves the problem of distinguishing interior from exterior voxels in non-watertight or open meshes by tracking the direction of surface traversal relative to a specified filling direction. Unlike sibling methods that rely on ray-casting parity [1067-stochastic-ray-casting-voxelization.md], winding numbers [2328-mesh-winding-number-voxelization.md], or stencil buffer accumulation [3722-polyhedron-moment-integration-and-voxelization.md], this approach explicitly records whether a voxel's boundary triangle is front-facing or back-facing relative to a global vector, allowing subsequent filling algorithms to resolve ambiguity by prioritizing back-facing surfaces [1506-front-back-face-flagging.md].
++Assigns orientation flags to surface voxels. Choose when surface orientation is critical for attribute assignment.
++
++### [Tight Voxelization (Point-in-Mesh Test)](1709-tight-voxelization-point-in-mesh-test.md)
++Post-processing step to verify voxel centers. Choose as a refinement step to remove false positives.
+ 
+ ### [Mesh Winding Number Voxelization](2328-mesh-winding-number-voxelization.md)
+-Determines the interior of a mesh by evaluating the Mesh Winding Number (MWN) at sample points within a voxel grid. Unlike Ray-Cast Style Voxel Filling [1502-ray-cast-style-voxel-filling.md] or Front/Back Face Flagging [1506-front-back-face-flagging.md], which rely on ray intersection parity or face orientation, MWN provides a robust signed distance-like field that handles meshes with holes and non-manifold geometry gracefully. It sets itself apart by yielding an integer value for closed meshes and a smoothly diffusing value around open boundaries, allowing for a consistent threshold-based classification [2328-mesh-winding-number-voxelization.md].
++Computes winding number for smooth density fields. Choose for handling open boundaries or non-manifold geometry with smooth transitions.
+ 
+ ### [Polyhedron Moment Integration and Voxelization](3722-polyhedron-moment-integration-and-voxelization.md)
+-Computes the polynomial density moments of a convex polyhedron within a voxel grid by recursively splitting the polyhedron along its longest axis until it occupies single voxels, then integrating the polynomial density field over the resulting polyhedron volume for each voxel [3722-polyhedron-moment-integration-and-voxelization.md]. It differs from Stochastic Ray-Casting Voxelization [1067-stochastic-ray-casting-voxelization.md] and Ray-Cast Style Voxel Filling [1502-ray-cast-style-voxel-filling.md] by providing exact analytic integration of density moments rather than stochastic or rasterization-based approximations, and from Mesh Winding Number Voxelization [2328-mesh-winding-number-voxelization.md] by supporting arbitrary polynomial density orders (not just binary occupancy) [3722-polyhedron-moment-integration-and-voxelization.md].
++Analytic integration of density moments. Choose for exact density representation rather than binary occupancy.
+ 
+ ### [Point-Containment Voxelization](3882-point-containment-voxelization.md)
+-Converts a 3D solid model into a 3D grid of voxels by determining which voxels intersect the solid's volume. It achieves this by sampling the grid vertices and checking their containment against the solid's Boundary Representation (BRep). It is distinguished from sibling methods by its reliance on exact geometric containment queries for grid vertices rather than ray casting, winding numbers, or stochastic sampling [3882-point-containment-voxelization.md].
++Uses exact geometric containment queries for grid vertices. Choose when vertex-based accuracy is prioritized over cell-center accuracy.
+ 
+ ### [CPU Solid Voxelization](6756-cpu-solid-voxelization.md)
+-A deterministic, CPU-based algorithm that fills the interior of a triangle mesh into a voxel grid by projecting triangles onto the Y-Z plane and sweeping along the X-axis [6756-cpu-solid-voxelization.md]. It determines which voxels are inside the mesh by testing voxel centers against the projected 2D triangle and calculating the maximum X-intersection, then filling all voxels from the origin up to that intersection [6756-cpu-solid-voxelization.md]. Unlike Stochastic Ray-Casting Voxelization [1067-stochastic-ray-casting-voxelization.md] which uses probabilistic sampling, or Ray-Cast Style Voxel Filling [1502-ray-cast-style-voxel-filling.md] which casts rays per voxel, this method uses exact geometric projection and edge traversal logic derived from the Schwarz-Seidel approach [6756-cpu-solid-voxelization.md]. It differs from Front/Back Face Flagging [1506-front-back-face-flagging.md] by explicitly computing the X-extent of the surface intersection rather than relying on normal orientation flags alone [6756-cpu-solid-voxelization.md].
++Deterministic sweep-line algorithm on CPU. Choose for CPU-only implementations requiring exact geometric projection.
++
++### [Sub-Voxel Volume Clipping](6989-sub-voxel-volume-clipping.md)
++Smooths clipped voxel boundaries. Choose when post-processing clipped volumes to avoid stair-stepping artifacts.
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N^3 \cdot \log T)$, where $N$ is the grid resolution and $T$ is the number of triangles in the mesh. The $\log T$ factor comes from the spatial index query [S2, unofficial]. Without a spatial index, it is $O(N^3 \cdot T)$, which is prohibitive for large meshes.
+--   **Memory Complexity**: $O(N^3)$ for the dense bitmap. For high resolutions, this can be significant. Sparse representations can reduce this to $O(V)$, where $V$ is the number of interior voxels [4391-sparse-and-hierarchical-structures.md].
+--   **Measured Performance**: At resolution 32, the method is relatively fast for simple meshes but becomes slow for complex meshes due to the large number of containment queries [S2, unofficial]. The "Tight" post-processing step adds significant overhead [S3, unofficial].
+--   **Strengths**: Robust to non-manifold geometry and self-intersections when using stochastic or winding-based containment tests. Simple to implement if a robust point-in-mesh function is available.
+--   **Limitations**: Computationally expensive for high resolutions. Requires a watertight mesh for consistent results with simple containment tests.
+--   **When to Use**: When robustness to mesh quality is more important than speed, or when the mesh is known to be watertight and simple.
+--   **When Not to Use**: For real-time applications or very high-resolution grids where performance is critical. Consider sparse voxelization or hierarchical structures [4391-sparse-and-hierarchical-structures.md] in such cases.
++-   **Time Complexity**: $O(N^3 \cdot \log T)$, where $N$ is the resolution and $T$ is the number of triangles in the mesh. Each of the $N^3$ voxels requires a spatial query, which is typically $O(\log T)$ with an AABB tree [S2, unofficial].
++-   **Memory Complexity**: $O(N^3)$ for the occupancy grid, plus $O(T)$ for the mesh and spatial index [S2, unofficial].
++-   **Measured Performance**: For $N=32$, the method is fast enough for real-time or near-real-time applications on modern hardware [S2, unofficial]. Performance degrades linearly with $N^3$.
++-   **Strengths**: Simple to implement; robust to complex mesh topology if the underlying `IsInside` function is robust; deterministic [S1, S2, unofficial].
++-   **Limitations**: Computationally expensive for high resolutions ($N > 128$); sensitive to mesh quality (non-manifold, holes) if `IsInside` is not robust; requires building a spatial index [S2, unofficial].
++-   **When to Use**: When a simple, deterministic occupancy grid is needed and the mesh is reasonably well-formed. Suitable for pre-processing steps in volume rendering pipelines [S1, S2, unofficial].
++-   **When Not to Use**: For very high-resolution grids where performance is critical; for meshes with significant non-manifold geometry if the `IsInside` implementation is not robust to such cases.
+ 
+ ## Background
+-Interior Voxelize is a fundamental technique in volume rendering and 3D computer graphics for converting polygonal meshes into voxel grids. The specific implementation using point containment tests with spatial acceleration structures is popularized by tutorials and libraries such as those by gradientspace [S2, unofficial] and the differentiable volumetric rendering framework [S1, unofficial]. The "Tight Voxelization" variant is documented in open-source voxelizers like topskychen/voxelizer [S3, unofficial]. The method builds on the general principles of voxelization [12-voxelization.md], specifically the occupancy determination step.
++Interior Voxelize is a fundamental technique in volumetric rendering and 3D computer graphics for converting surface representations (meshes) into volume representations (voxel grids). The method of sampling grid points and testing containment is a standard approach in computational geometry [S1, S2, unofficial]. The specific implementation using `DMeshAABBTree3` and `ShiftGridIndexer3` is documented in tutorials on 3D bitmaps and mesh winding numbers [S2, unofficial]. The use of noise to break symmetry is noted in the context of differentiable volumetric rendering [S1, unofficial].
+ 
+ ## Sources
+ [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)
+-[S2] 3D Bitmaps, Minecraft Cubes, and Mesh Winding Numbers — gradientspace, https://www.gradientspace.com/tutorials/2017/12/14/3d-bitmaps-and-minecraft-meshes, fetched 2026-10-29 (unofficial)
+-[S3] topskychen/voxelizer, https://github.com/topskychen/voxelizer, fetched 2026-10-27 (unofficial)+[S2] 3D Bitmaps, Minecraft Cubes, and Mesh Winding Numbers — gradientspace, https://www.gradientspace.com/tutorials/2017/12/14/3d-bitmaps-and-minecraft-meshes, fetched 2026-10-29 (unofficial)

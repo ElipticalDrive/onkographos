@@ -1,0 +1,381 @@
+Contribute to hans/neural-footprints development by creating an account on GitHub.
+
+Add visual diversity: background objects, backdrop, camera jitter, wider scene variation by hans · Pull Request #17 · hans/neural-footprints · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hans
+commented
+May 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Motivation
+Increases pixel-space dimensionality without touching physics. The study's
+core argument rests on renders vastly outnumbering physics dimensions —
+that
+information asymmetry is what forces encoding models and RSA toward
+render-correlated variables. More physics-irrelevant visual variation
+strengthens the asymmetry and makes the simulation more realistic.
+Secondary goal: lay groundwork for OpenGL/shadow rendering in the
+visualization path.
+Changes
+Scene generation (scene_generator.py)
+5 visual-only background spheres per scene (N_BACKGROUND_OBJECTS=5),
+random position/size/color/specular
+Backdrop wall (large visual plane behind the scene), random
+color/specular
+Ground color randomized per scene (was fixed gray 0.6)
+Cylinder added as a third foreground shape (alongside sphere, box)
+Wider object size range: 0.07–0.5 (was 0.1–0.35)
+Per-scene camera jitter: ±0.35 m all axes, ±0.2/0.15 target jitter
+Per-scene specular on foreground objects
+Ambient lighting range: 0.1–0.7 (was fixed 0.4); light color 0.4–1.0,
+distance 2.5–10.0
+_lock_rotation applied after each sim step (rotation not in observable
+physics dims)
+SCENE_LIGHTING_DIM: 8 → 74 (15 base + 10 × 5 background objects)
+SCENE_CONFIG_DIM: 9 → 13 per object (adds cylinder params + specular)
+Reuse one PyBullet connection per batch (resetSimulation between
+scenes)
+_render_scene accepts use_opengl flag for shadow-enabled
+visualization renders
+Config (config.yaml)
+n_timesteps: 30 → 120
+linvel_x_max: 8.0 → 3.0 (object stays on-screen across longer window)
+x_accel_max: 15.0 → 6.0
+pp_early_frame / pp_late_frame: 5/15 → 40/80
+Known issue: PP inverse model fails on these scenes
+The SpatialSoftmaxV2 inverse model (validated at R²=0.83 on pre-diversity
+scenes) collapses to R²≈0 on the new scenes. Root causes in order of
+impact:
+Background spheres — the spatial softmax latches onto colorful
+background objects whose image coordinates are physics-irrelevant noise.
+Camera jitter — same physical position → different image-space
+keypoint coordinates in every scene; the head cannot learn the mapping.
+Ground/backdrop color variation — fills large image fractions with
+random per-scene color, corrupting CNN feature maps.
+The inverse model needs an architectural update (or the diversity needs to
+be
+scoped) before the PP analysis can run. The encoding/RSA/dissociation
+analyses are unaffected.
+Test plan
+uv run snakemake -n dry-run completes without errors
+Scene generation produces correct array shapes (metadata assertions
+in tests)
+uv run pytest tests/test_scene_generator.py
+Encoding and RSA results still pass evaluation.py criteria
+Decide on PP inverse model strategy before merging to main
+hans
+and others
+added 19 commits
+May 12, 2026 12:06
+Add pytest and hypothesis as dev dependencies
+…
+360d535
+```
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix stale 3-frame off-pipeline generator after x_accel promotion
+…
+933345b
+```
+scripts/gen_scenes_3frame.py predates commit 22cceae (which made x_accel
+the 16th physics_labels dim). Two fallout bugs: physics_dim was hardcoded
+to 15 * N_OBJECTS and crashed the broadcast on the first scene; both
+_collect_physics_labels calls omitted applied_accels and so silently saved
+x_accel=0 for every scene. Both fixed; scripts/eval_pp.py now runs end-to-end
+on a fresh 3-frame fixture.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Add simplified-CNN diagnostic to probe the GAP bottleneck
+…
+019711d
+```
+The prior InverseCNN (scripts/eval_pp_cnn.py + analyses.predictive_processing.
+InverseCNNNet) plateaus at mean R²=0.499 on rotation-locked scenes — below the
+PCA(50)+MLP baseline at 0.655. Hypothesis: AdaptiveAvgPool2d(1) at the end of
+the per-frame conv tower erases spatial position, which is exactly what
+pos_x / pos_y prediction needs.
+
+scripts/eval_pp_cnn_simple.py sweeps four progressively-more-CNN-like
+architectures on the same val split / schedule (Adam lr=1e-3, ReduceLROnPlateau,
+patience=30, max 200 epochs, no BN, CPU):
+
+  variant            params   val_mse   mean R²   min R²   notes
+  linear              246k     0.636    +0.361   +0.073   flatten → Linear
+  downsample_mlp      199k     0.839    +0.156   -0.005   AvgPool2d(8) → MLP
+  gridpool (=4)      1.70M     0.203    +0.796   +0.638   GAP → AdaptiveAvgPool2d(4)
+  spatial_softmax      34k     0.243    +0.756   +0.572   DSAE-style (x,y) readout
+
+Reference: PCA(50)+MLP=0.655, prior CNN with GAP (291k)=0.499.
+
+Both gridpool and spatial_softmax clear the PCA+MLP bar by 10-14 R² points
+while the prior CNN sat 16 points below it — confirming the GAP bottleneck was
+the whole story. spatial_softmax matches ~95% of gridpool's signal at 1/50th
+the parameters via an explicit "where each channel fires" inductive bias. The
+spec row-3 conclusion ("perceiver isn't the bottleneck") needs revising:
+capacity wasn't the issue; head architecture was.
+
+Per-dim R² for the two winners — pos_x and linvel_x saturate near ceiling
+(~0.98 / ~0.84), pos_y / pos_z / x_accel are noticeably harder for both:
+
+       dim       gridpool   spatial_softmax
+       pos_x       +0.98       +0.98
+       pos_y       +0.87       +0.81
+       pos_z       +0.64       +0.57
+       linvel_x    +0.84       +0.84
+       x_accel     +0.65       +0.58
+
+Exploration only: analyses.predictive_processing.InverseCNN is unchanged. Next
+iterations will continue here on architecture variants before integration into
+the main pipeline.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Push spatial-softmax: 128 ch + learned temp + deeper head beats gridpool
+…
+e491c60
+```
+Sweep on rotation-locked scenes (1700 train / 300 val):
+
+  config             params   mean R²   vs gridpool
+  gridpool (simple)  1.70M    0.7963    100% / 100%
+  v2_32_baseline*    34k      0.7564     95% /   2%
+  v2_32_temp         34k      0.7708     97% /   2%
+  v2_64_temp         81k      0.7616     96% /   5%
+  v2_128_temp        195k     0.8013    101% /  11%
+  v2_128_temp_mlp    360k     0.8277    104% /  21%   ← best
+  v2_128_temp_var    556k     0.8233    103% /  33%
+
+  *bit-exact reproduction of v1 in the simple-CNN diagnostic (val_mse 0.2425)
+
+v2_128_temp_mlp lifts x_accel R² 0.65 → 0.80 and linvel_x 0.84 → 0.90 vs
+gridpool. Variance-of-attention features (E[x²], E[y²]) didn't help on
+top of the deeper head. 64 keypoints underperformed 32 — the dataset is
+small enough that extra channels need a wider head to absorb them.
+
+Three new files:
+  - scripts/eval_pp_cnn_softmax_sweep.py defines SpatialSoftmaxV2 with
+    knobs for n_filters, learnable per-channel inverse temperature β,
+    keypoint variance features, and a configurable head MLP.
+  - scripts/report_softmax_sweep.py prints the side-by-side table above
+    against the v1 baselines stored in REFERENCE_ROWS.
+  - scripts/eval_pp_cnn_simple.py: train_one gains a min_epochs guard so
+    patience can't fire while loss is still on the initial ~1.0 plateau.
+```
+Add inferred-physics forward bar to dynamics figure
+…
+be20076
+```
+The future-brain-state plot previously compared only render forecast
+(MLP on initial pixels) vs. GT physics oracle (PyBullet from
+initial_physics_labels). The inferred-physics forward model — same
+resimulation path but driven by the InverseModel's per-scene output —
+is the cognitive-PP version of the test, and lands cleanly between
+the two (R² 0.49 vs render 0.38 vs GT 0.63 on the seed=43 run).
+
+Pipeline change: dynamics rule now consumes data/inferred_physics.npz;
+plot_dynamics auto-detects and renders 3 bars when the field is present
+(falls back to 2 bars if absent for back-compat).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Make PP inverse-model backbone pluggable; default to softmax CNN
+…
+36ea332
+```
+Extract pure nn.Module architectures into a new models/ package so the
+fit/predict wrappers in analyses/predictive_processing.py can swap them
+in via a single config flag. Adds InverseSoftmaxCNN wrapper around the
+v2_128_temp_mlp config that won the sweep, plus a make_inverse_model()
+factory and a backbone-tagged checkpoint format so pp_io can round-trip
+either backbone. Default pp_inverse_backbone flipped to softmax_cnn,
+and random_seed bumped 42 -> 43 to mark the rerun.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Restore PP rule chain dropped by neurips merge
+…
+0c24a72
+```
+The merge that brought pp-port's PP work into main (10cd488) kept
+gen_neural.py's read of `pp_activations.npz` and dynamics' input
+wiring for `inferred_physics.npz`, but dropped the producer rules.
+The DAG was unresolvable.
+
+Restores train_pp_for_neural, predictive_processing, and plot_pp
+rules verbatim from pp-port, plus the pp_activations input to
+generate_neural and the PP figures in rule all / rule figures.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Add joint-inference forward-model channel to brain state
+…
+166f7a0
+```
+Brain state changes from [actual_render | inv_acts | P_hat] to
+[fwd_render | inv_acts | P_hat]: the camera bytes are replaced by the
+cognitive forward model's predicted render (resimulated from inferred
+physics), so raw sensation enters only through the inverse model rather
+than as a direct brain-state component.
+
+New gen_forward_renders.py script resimulates all scenes from PP
+inferred physics and saves forward_program_states. All three analyses
+(encoding, RSA, dissociation) gain an optional Predicted-S feature
+family. All figures gain a corresponding bar/column. plot_pp and
+plot_pp_frames functions are added (previously a gap). config.smoke.yaml
+supports fast end-to-end smoke tests via CONFIG_FILE env var.
+
+Fixes: render vectors include depth+seg after RGBA (frame_stack.py and
+predictive_processing.py now slice only the RGBA portion); double-PCA
+in dissociation behavioral scoring (raw pixels now used for behavioral
+PCA, encoder PCA for neural R² only); PP frame index mismatch in
+plot_pp.py (frame_idx saved and used to correctly align forward renders
+to oracle test scenes).
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix PP analysis renderer + behavioral-target mismatch
+…
+037d514
+```
+predictive_processing.py was the only resim caller still using the DIRECT
+tiny renderer (no shadows) while scene generation uses GUI/OpenGL, and was
+comparing against the LATE frame (t=PP_LATE_FRAME) inside program_state
+instead of target_renders (t=N_TIMESTEPS). Together these drove the oracle
+to R²=-13 and dragged pp_r2 to the same floor, making the physics chain
+look catastrophic.
+
+Match the pattern in dissociation.py / dynamics.py: shared open_render_client
+with use_gui=True across oracle, pp, and frame-viz resim calls, and switch
+the behavioral target to target_renders[:, target_pixel_indices].
+
+Resulting numbers: oracle R² 1.00, pp R² 0.87, render-only 0.67.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+Add permutation-null significance test to brain encoder
+…
+dcca1e0
+```
+Shuffles scene→physics association n_null_permutations times (default 50,
+config: encoding_n_null_permutations), refits the physics-only and
+combined ridge encoders, and returns null distributions for
+r2_physics_only, r2_combined, and ΔR² with 95% CIs and one-sided
+p-values. Pixel-only baseline is held fixed across permutations so the
+ΔR² null directly brackets the observed delta.
+
+Adds ridge_r2_per_neuron_fast — closed-form K-fold ridge with cached
+per-fold SVD and per-target α selection via the LOO hat-matrix-diagonal
+trick — used for both observed and null fits so they are directly
+comparable (and ~50–100× faster than RidgeCV wrapped in
+cross_val_predict). Also switches r2_predicted_pixel to the fast helper
+for consistency across all four R² channels.
+
+Null arrays flow through the encoder pickle into dissociation;
+plot_dissociation and plot_dissociation_combined overlay a thin
+mean-with-CI marker on the physics / combined bars. LaTeX macros
+\encodingRsq{Physics,Combined}Null{Lo,Hi,Mean,PValue} and
+\encodingDeltaRsqNull{...} are emitted.
+
+Carried over from an uncommitted worktree on the
+brain-encoding-null-hypothesis-statistical-testing branch.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+```
+stage superset launcher
+d24f299
+Replace per-dim z-scoring with per-block operator-norm normalization
+…
+9293ebe
+```
+Brain state is now [fwd_render | hidden_acts | inferred_physics]; each block
+is divided by its largest singular value so the trace ratio across blocks
+reflects intrinsic-dimensionality asymmetry rather than raw amplitude
+differences. Restores the normalization from 00d797a, adapted for the
+PP brain-state structure introduced in this branch.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix operator-norm computation to avoid OOM on large render block
+…
+f6a3ba6
+```
+svds on float64 and the Gram-matrix float64 cast both required allocating
+a full (n_scenes × D_render) float64 copy (~2.4 GB) that the container
+couldn't accommodate.  Three changes:
+
+- Compute the Gram matrix in float32 and cast only the small (n × n)
+  result to float64 for eigvalsh, eliminating the large intermediate copy.
+- Keep W in float32 so normalized @ W.T stays float32 (avoids numpy
+  upcasting the full normalized matrix to float64 for the matmul).
+- In gen_neural.py, delete scenes (2.75 GB) and pp/fwd as soon as their
+  needed slices are extracted, so generate_neural_activity enters with
+  only the ~1.2 GB neural_input live.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Add Predicted-S encoding and residual analysis paths
+…
+ded83f6
+```
+Extends encoding and residual analyses to use forward-model predicted
+renders (Predicted S) alongside ground-truth pixels, testing whether
+physics labels add variance beyond what the forward model already
+explains. Adds evaluation checks (ΔR² < 0.005 physics | predicted-S,
+residual sanity), memory cleanup to reclaim ~2 GB mid-run, and wires
+forward_renders.npz into the residual Snakemake rule.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Remove port 8888 mapping from superset launcher
+…
+70d5d1e
+```
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+ignore venv-container
+c279e57
+superset updates
+0d30677
+Add visual diversity: background objects, backdrop, cylinder shape, s…
+…
+571e4ea
+```
+…pecular variation
+
+Increases pixel-space dimensionality without touching physics — adds N=5
+visual-only background spheres, a backdrop wall, cylinder as a third
+foreground shape, per-scene specular for all objects, randomised ground
+colour, and wider light/camera jitter ranges.  Encoder dimensions updated
+(SCENE_CONFIG_DIM 9→13, SCENE_LIGHTING_DIM 15→74) and tests extended.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Add missing numpy import to evaluation.py
+…
+a72a4e5
+```
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,128 @@
+# 3D Perlin-Worley Noise Texture Generation
+
+Also called: Low-Frequency Cloud Shape Generation, Multi-Octave Worley, Noise-based Density Sampling, Perlin-Worley Hybrid, Volumetric Density Map Generation, sampleLowFrequency
+
+## Overview
+This method generates 3D volumetric density maps for procedural cloud rendering by combining low-frequency Perlin noise for broad cloud mass with inverted Worley (cellular) noise to carve hollows, producing a puffy cumulus appearance [S3, unofficial]. It differs from pure Perlin noise methods by introducing cellular structures that define cloud edges and internal voids, and from pure Worley methods by retaining the organic, continuous mass of gradient-based noise [S3, unofficial]. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by using fBm principles to sum multiple noise octaves [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Input position $P$ (3D vector).
+- Texture size $T$ (3D integer vector).
+- Global invocation ID $G$ (3D integer vector from compute shader).
+- Cloud coverage parameter (hardcoded to 0.6 in source implementations) [S2, unofficial].
+
+**Outputs:**
+- A 3D texture (e.g., `rgba8`) storing density values [S3, unofficial].
+
+**Data Structures:**
+- `u_NoiseTexture`: A `writeonly uniform image3D` bound at binding point 0 with `rgba8` layout [S3, unofficial].
+- `cloudBaseShapeSampler`: A 3D texture sampler used to sample low-frequency noise fields [S2, unofficial].
+
+**Steps:**
+1. **Coordinate Calculation:** Compute fractional coordinates for the current voxel by dividing the global invocation ID by the texture size: $C = G / T$. Add an offset and scale the position if required by the specific noise implementation [S1, S3, unofficial].
+2. **Sample Low-Frequency Base Shape:** Sample the `cloudBaseShapeSampler` at the fractional coordinates to retrieve a `vec4` of low-frequency noise values: $L = \text{texture}(cloudBaseShapeSampler, C)$ [S2, unofficial].
+3. **Compute Low-Frequency FBM:** Construct a fractal sum from the Green, Blue, and Alpha channels of $L$ using specific weights:
+   $$ L_{FBM} = (L.g \times 0.625) + (L.b \times 0.25) + (L.a \times 0.125) $$
+   Clamp the result to $[0.0, 1.0]$ [S2, unofficial].
+4. **Generate Base Cloud Density:** Remap the Red channel of $L$ ($L.r$) using the computed $L_{FBM}$ to create the base cloud density. The source uses a function `remapClamped` with parameters derived from $L_{FBM}$:
+   $$ D_{base} = \text{remapClamped}(L.r, L_{FBM} - 0.9, 1.0, 0.0, 1.0) $$
+   This step effectively thresholds and scales the noise to define where clouds exist [S2, unofficial].
+5. **Generate Worley Noise (Inverted):** Sample Worley noise at frequency 1.0 and amplitude 1.0. Invert the result and scale to the range $[-1, 1]$. Store this in a variable named `wor1` [S1, unofficial].
+6. **Generate Multi-Octave Perlin Noise:** Sample Perlin noise at 6 different frequencies and amplitudes to create a fractal sum. The specific octaves are:
+   - Frequency 1, Amplitude 8
+   - Frequency 2, Amplitude 4
+   - Frequency 4, Amplitude 2
+   - Frequency 8, Amplitude 1
+   - Frequency 16, Amplitude 0.5
+   - Frequency 32, Amplitude 0.25
+   Sum these values to get the total Perlin contribution [S1, unofficial].
+7. **Combine and Finalize Density:** Sum the Perlin noise layers and the inverted Worley noise (`wor1`). Subtract a constant offset of 0.2 and clamp the result to a minimum of 0:
+   $$ D = \max(0, \sum_{i=1}^{6} P_i + \text{wor1} - 0.2) $$
+   This formula represents the core density calculation [S1, unofficial].
+8. **Write Output:** Store the computed density into the `u_NoiseTexture` using `imageStore()` at the index corresponding to $G$ [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_perlin_worley_noise(G, T):
+    # 1. Calculate fractional coordinates
+    C = G / T
+    # Add offset and scale as required by implementation [G]
+    C = C * 1.0 + 0.0
+
+    # 2. Sample low-frequency base shape
+    L = sample_cloud_base_shape(C)
+
+    # 3. Compute Low-Frequency FBM
+    low_frequency_fbm = (L.g * 0.625) + (L.b * 0.25) + (L.a * 0.125)
+    low_frequency_fbm = clamp(low_frequency_fbm, 0.0, 1.0)
+
+    # 4. Define Base Cloud
+    base_cloud = remap_clamped(L.r, low_frequency_fbm - 0.9, 1.0, 0.0, 1.0)
+
+    # 5. Generate Inverted Worley Noise (Frequency 1.0, Amplitude 1.0)
+    worley_val = worley_noise(C, 1.0, 1.0)
+    worley_inverted = invert_and_scale(worley_val)
+
+    # 6. Generate Multi-Octave Perlin Noise
+    octaves = [(1, 8), (2, 4), (4, 2), (8, 1), (16, 0.5), (32, 0.25)]
+    perlin_sum = 0.0
+    for freq, amp in octaves:
+        perlin_sum += perlin_noise(C, freq, amp)
+
+    # 7. Combine and Finalize Density
+    density = max(0.0, perlin_sum + worley_inverted - 0.2)
+
+    # 8. Return density
+    return density
+
+def sample_cloud_base_shape(pos):
+    # Standard 3D texture lookup returning vec4 (r, g, b, a) [G]
+    return texture3d(cloudBaseShapeSampler, pos)
+
+def worley_noise(pos, freq, amp):
+    # Standard cellular noise implementation [G]
+    # Returns value in [0, 1]
+    return amp * standard_cellular(pos * freq)
+
+def perlin_noise(pos, freq, amp):
+    # Standard 3D gradient noise implementation [G]
+    # Returns value in [-1, 1]
+    return amp * standard_gradient_noise(pos * freq)
+
+def invert_and_scale(worley_val):
+    # Invert and scale to [-1, 1]
+    inverted = 1.0 - worley_val
+    return inverted * 2.0 - 1.0
+
+def remap_clamped(value, min_val, max_val, out_min, out_max):
+    # Linear remapping with clamping
+    if max_val == min_val:
+        return out_min
+    t = clamp((value - min_val) / (max_val - min_val), 0.0, 1.0)
+    return out_min + t * (out_max - out_min)
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The use of `rgba8` for the output texture limits density resolution to 256 levels per channel, which may cause banding in smooth gradients [G]. Use `rgba16f` or `rgba32f` if higher precision is required for raymarching.
+- **Boundary Conditions:** The noise functions must handle periodic or seamless wrapping if the cloud layer is expected to tile or wrap around a sphere [G].
+- **Degenerate Input:** If the camera is inside the cloud layer, the ray start point must be clamped to the camera position to avoid sampling errors at the entry point [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the 3D texture, as each voxel requires 6 Perlin noise evaluations and 1 Worley noise evaluation, plus texture sampling for the base shape [S1, S3, unofficial].
+- **Memory Complexity:** $O(N)$ for the 3D texture storage [G].
+- **Measured Performance:** Not given in the sources. [S1, S2, S3, unofficial]
+- **Strengths:** Produces visually appealing, puffy cumulus clouds with natural-looking hollows and edges due to the Worley component [S3, unofficial]. The separation of base shape and detail erosion allows for flexible tuning [G].
+- **Limitations:** The fixed octaves and weights are hardcoded, reducing flexibility [G]. The `rgba8` output may limit dynamic range [S3, unofficial]. The method is computationally expensive due to multiple noise evaluations per voxel [G].
+- **When to use:** Ideal for real-time volumetric cloud rendering where visual quality is prioritized over absolute physical accuracy [G].
+- **When not to use:** When high-precision density maps are required or when the scene geometry does not support the spherical cloud layer model [G].
+
+## Background
+The technique originates from implementations of volumetric clouds in OpenGL, specifically described in "Volumetric Clouds with 3D Perlin-Worley Noise in OpenGL" [S3, unofficial]. It combines two distinct noise types: Perlin noise for organic, continuous mass and Worley noise for cellular, void-like structures [S3, unofficial]. The method is implemented in community-driven WebGL and OpenGL projects [S1, S2, unofficial]. The specific parameters (octaves, weights) are derived from practical implementations aimed at achieving a "puffy cumulus appearance" [S3, unofficial].
+
+## Sources
+[S1] M4trixStrike/WebGL-Volumetric-clouds, https://github.com/M4trixStrike/WebGL-Volumetric-clouds, fetched 2026-10-27 (unofficial)
+[S2] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
+[S3] Volumetric Clouds with 3D Perlin-Worley Noise in OpenGL, https://salivity.github.io/opengl/article/volumetric-clouds-with-3-d-perlin-worley-noise-in-open-gl, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,331 @@
+--- v003.md
++++ v004.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Bitwise Marching Cubes is a surface extraction algorithm that generates a triangle mesh from voxel data by computing the isosurface topology within each voxel cube using bitwise propagation of cube indices. It sets itself apart from standard implementations by reusing bits from the previous cell in the X, Y, and Z directions to derive the current cell's case index, thereby avoiding redundant voxel lookups for shared corners [S1, unofficial]. This optimization targets the computational cost of determining edge intersections, though the authors note that voxel retrieval remains the dominant cost [S1, unofficial].
++Bitwise Marching Cubes is a surface extraction algorithm that generates a triangle mesh from voxel data by determining the isosurface topology within each voxel cube using bitwise propagation of cube indices [S1, unofficial]. It sets itself apart from standard implementations by reusing bits from the previous cell in the X, Y, and Z directions to derive the current cell's case index, thereby avoiding redundant voxel lookups for shared corners [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A structured 3D voxel grid. Each voxel contains a value (e.g., density) and a solid flag.
++*   **Input:** A structured 3D voxel grid. Each voxel contains a scalar value (e.g., density) and a solid flag [S1, unofficial].
+ *   **Input:** A threshold value. Voxels with density below this threshold are considered part of the surface boundary [S1, unofficial].
+ *   **Output:** A triangle mesh consisting of vertices and indices.
+@@ -15,8 +15,8 @@
+ The algorithm maintains several state arrays to propagate cube indices and store vertex indices across the traversal:
+ 
+-1.  **`pPreviousSliceCellIndices`**: A 2D array of `uint8`, indexed by `[uXRegSpace, uYRegSpace]`. Stores the cube index for the previous slice (Z-1) at each X, Y position [S1, unofficial].
+-2.  **`pPreviousRowCellIndices`**: A 1D array of `uint8`, indexed by `uXRegSpace`. Stores the cube index for the previous row (Y-1) at each X position [S1, unofficial].
+-3.  **`pIndices`**: A 2D array of `FVector` (or equivalent 3D vector type), indexed by `[uXRegSpace, uYRegSpace]`. Stores the vertex indices for edge intersections generated in the current slice (Z) [S1, unofficial].
+-4.  **`pPreviousIndices`**: A 2D array of `FVector`, indexed by `[uXRegSpace, uYRegSpace]`. Stores the vertex indices for edge intersections generated in the previous slice (Z-1) [S1, unofficial].
++1.  **`pPreviousSliceCellIndices`**: A 2D array of `uint8`, indexed by `[uXRegSpace, uYRegSpace]`, storing the cube index for the previous slice (Z-1) at each X, Y position [S1, unofficial].
++2.  **`pPreviousRowCellIndices`**: A 1D array of `uint8`, indexed by `uXRegSpace`, storing the cube index for the previous row (Y-1) at each X position [S1, unofficial].
++3.  **`pIndices`**: A 2D array of 3D vectors, indexed by `[uXRegSpace, uYRegSpace]`, storing vertex indices for edge intersections generated in the current slice (Z) [S1, unofficial].
++4.  **`pPreviousIndices`**: A 2D array of 3D vectors, indexed by `[uXRegSpace, uYRegSpace]`, storing vertex indices for edge intersections generated in the previous slice (Z-1) [S1, unofficial].
+ 5.  **`uPreviousCellIndex`**: A `uint8` variable storing the cube index of the immediately preceding cell in the X-direction iteration [S1, unofficial].
+ 
+@@ -59,5 +59,5 @@
+     *   *Note: Positive direction edges (1, 2, 4, 8, 16, 128, 256, 512, 2048) are handled by the neighbor cells in subsequent iterations or by the logic of storing indices in `pIndices` for the current cell's positive neighbors.*
+ 6.  **Triangle Generation**: If `uEdge` is non-zero and `uXRegSpace != 0`, `uYRegSpace != 0`, and `uZRegSpace != 0`:
+-    *   Initialize `indlist[12]`.
++    *   Initialize `indlist[12]` with -1.
+     *   Map edge bits (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048) to indices in `indlist`. Retrieve stored vertex indices from `pPreviousIndices` (for Z-1 neighbors) or `pIndices` (for current slice neighbors) based on the edge bit and neighbor coordinates [S1, unofficial].
+     *   Iterate through `TriTable[uCellIndex]` in steps of 3. For each triplet of edge indices, retrieve the corresponding vertex indices from `indlist`. If all three are not -1, add a triangle to the result [S1, unofficial].
+@@ -70,141 +70,147 @@
+ 
+ ```python
+-# Constants
+-MASK_Z = 0x0F       # Bits 0-3 (top face of previous slice)
+-MASK_Y = 0xCC       # Binary 11001100 (bits 7,6,3,2)
+-MASK_X = 0xAA       # Binary 10101010 (bits 7,5,3,1)
+-SCALE = 256.0
+-
+-# Initialization
+-sampler = VolumeSampler(start_of_row)
+-uPreviousCellIndex = 0
+-pPreviousSliceCellIndices = Initialize2DArray(width, height, 0)
+-pPreviousRowCellIndices = Initialize1DArray(width, 0)
+-pIndices = Initialize2DArray(width, height, None)
+-pPreviousIndices = Initialize2DArray(width, height, None)
+-
+-for uZRegSpace in range(Z):
+-    for uYRegSpace in range(Y):
+-        # Initialize sampler for the start of the row
+-        sampler = VolumeSampler(start_of_row)
++def bitwise_marching_cubes(grid, threshold, edge_table, tri_table, width, height, depth):
++    # Data structures
++    p_previous_slice_cell_indices = [[0] * width for _ in range(height)]
++    p_previous_row_cell_indices = [0] * width
++    p_indices = [[None] * width for _ in range(height)]
++    p_previous_indices = [[None] * width for _ in range(height)]
++    u_previous_cell_index = 0
++    
++    vertices = []
++    triangles = []
++    
++    def get_voxel(x, y, z):
++        # Simulates sampler.GetVoxel() with bounds checking
++        if 0 <= x < width and 0 <= y < height and 0 <= z < depth:
++            return grid[z][y][x]
++        return 0.0
++
++    def convert_to_density(voxel):
++        # Simulates controller->ConvertToDensity()
++        return 255 if voxel.bIsSolid else 0.0
++
++    def add_vertex(pos):
++        vertices.append(pos)
++        return len(vertices) - 1
++
++    def add_triangle(i0, i1, i2):
++        triangles.append((i0, i1, i2))
++
++    for u_z in range(depth):
++        for u_y in range(height):
++            # Initialize sampler for the start of the row
++            # (In practice, sampler position is tracked via coordinates)
++            
++            for u_x in range(width):
++                u_cell_index = 0
++                
++                # 1. From Z-1 (Previous Slice)
++                if u_z > 0:
++                    u_prev_z = p_previous_slice_cell_indices[u_y][u_x]
++                    u_cell_index |= (u_prev_z >> 4)
++                
++                # 2. From Y-1 (Previous Row)
++                if u_y > 0:
++                    u_prev_y = p_previous_row_cell_indices[u_x]
++                    u_prev_y &= 0xCC  # 11001100
++                    u_cell_index |= (u_prev_y >> 2)
++                
++                # 3. From X-1 (Previous Cell)
++                u_prev_x = u_previous_cell_index
++                u_prev_x &= 0xAA  # 10101010
++                u_cell_index |= (u_prev_x >> 1)
++                
++                # 4. Current Corner (111)
++                v111 = get_voxel(u_x, u_y, u_z)
++                density_111 = convert_to_density(v111)
++                if density_111 < threshold:
++                    u_cell_index |= 128
++                
++                # Update State
++                u_previous_cell_index = u_cell_index
++                p_previous_row_cell_indices[u_x] = u_cell_index
++                p_previous_slice_cell_indices[u_y][u_x] = u_cell_index
++                
++                # Edge Intersection
++                u_edge = edge_table[u_cell_index]
++                
++                if u_edge != 0:
++                    # Edge 64: X-axis negative
++                    if (u_edge & 64) and u_x > 0:
++                        v011 = get_voxel(u_x - 1, u_y, u_z)
++                        density_011 = convert_to_density(v011)
++                        denom = density_111 - density_011
++                        f_interp = 0.0 if abs(denom) < 1e-9 else (threshold - density_011) / denom
++                        pos = ((u_x - 1 + f_interp) * 256.0, u_y * 256.0, u_z * 256.0)
++                        p_indices[u_y][u_x] = add_vertex(pos)
++                    
++                    # Edge 32: Y-axis negative
++                    if (u_edge & 32) and u_y > 0:
++                        v101 = get_voxel(u_x, u_y - 1, u_z)
++                        density_101 = convert_to_density(v101)
++                        denom = density_111 - density_101
++                        f_interp = 0.0 if abs(denom) < 1e-9 else (threshold - density_101) / denom
++                        pos = (u_x * 256.0, (u_y - 1 + f_interp) * 256.0, u_z * 256.0)
++                        p_indices[u_y][u_x] = add_vertex(pos)
++                    
++                    # Edge 1024: Z-axis negative
++                    if (u_edge & 1024) and u_z > 0:
++                        v110 = get_voxel(u_x, u_y, u_z - 1)
++                        density_110 = convert_to_density(v110)
++                        denom = density_111 - density_110
++                        f_interp = 0.0 if abs(denom) < 1e-9 else (threshold - density_110) / denom
++                        pos = (u_x * 256.0, u_y * 256.0, (u_z - 1 + f_interp) * 256.0)
++                        p_indices[u_y][u_x] = add_vertex(pos)
++                    
++                    # Triangle Generation
++                    if u_x != 0 and u_y != 0 and u_z != 0:
++                        indlist = [-1] * 12
++                        
++                        # Map edge bits to stored vertex indices
++                        # Edges are processed relative to current cell (u_x, u_y, u_z)
++                        # Positive edges are stored in neighbor arrays, negative in current
++                        def fetch_vertex(edge_bit, cx, cy, cz):
++                            if edge_bit == 64: return p_indices[cy][cx] if cx > 0 else -1
++                            if edge_bit == 32: return p_indices[cy][cx] if cy > 0 else -1
++                            if edge_bit == 1024: return p_indices[cy][cx] if cz > 0 else -1
++                            # Positive edges rely on neighbor storage
++                            if edge_bit == 1: return p_indices[cy][cx+1] if cx+1 < width else -1
++                            if edge_bit == 2: return p_indices[cy+1][cx] if cy+1 < height else -1
++                            if edge_bit == 4: return p_indices[cy][cx-1] if cx > 0 else -1
++                            if edge_bit == 8: return p_indices[cy-1][cx] if cy > 0 else -1
++                            if edge_bit == 16: return p_previous_indices[cy][cx+1] if cx+1 < width else -1
++                            if edge_bit == 128: return p_previous_indices[cy-1][cx] if cy > 0 else -1
++                            if edge_bit == 256: return p_previous_indices[cy][cx] if cz > 0 else -1
++                            if edge_bit == 512: return p_previous_indices[cy][cx+1] if cx+1 < width else -1
++                            if edge_bit == 2048: return p_previous_indices[cy-1][cx] if cy > 0 else -1
++                            return -1
++
++                        # Populate indlist for edges 0-11 corresponding to bits 1,2,4,8,16,32,64,128,256,512,1024,2048
++                        edge_bits = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
++                        for i, bit in enumerate(edge_bits):
++                            if u_edge & bit:
++                                indlist[i] = fetch_vertex(bit, u_x, u_y, u_z)
++                        
++                        # Iterate TriTable
++                        tri_entry = tri_table[u_cell_index]
++                        i = 0
++                        while i < len(tri_entry) and tri_entry[i] != -1:
++                            e0, e1, e2 = tri_entry[i], tri_entry[i+1], tri_entry[i+2]
++                            v0, v1, v2 = indlist[e0], indlist[e1], indlist[e2]
++                            if v0 != -1 and v1 != -1 and v2 != -1:
++                                add_triangle(v0, v1, v2)
++                            i += 3
++
++            # End of X loop
++            # Sampler moves positive X implicitly via coordinate tracking
++            
++        # End of Y loop
++        # Start of row moves positive Y implicitly
+         
+-        for uXRegSpace in range(X):
+-            uCellIndex = 0
+-            
+-            # 1. From Z-1 (Previous Slice)
+-            if uZRegSpace > 0:
+-                uPreviousCellIndexZ = pPreviousSliceCellIndices[uXRegSpace][uYRegSpace]
+-                uCellIndex |= (uPreviousCellIndexZ >> 4)
+-            
+-            # 2. From Y-1 (Previous Row)
+-            if uYRegSpace > 0:
+-                uPreviousCellIndexY = pPreviousRowCellIndices[uXRegSpace]
+-                uPreviousCellIndexY &= MASK_Y
+-                uCellIndex |= (uPreviousCellIndexY >> 2)
+-            
+-            # 3. From X-1 (Previous Cell)
+-            uPreviousCellIndexX = uPreviousCellIndex
+-            uPreviousCellIndexX &= MASK_X
+-            uCellIndex |= (uPreviousCellIndexX >> 1)
+-            
+-            # 4. Current Corner (111)
+-            v111 = sampler.GetVoxel()
+-            density_111 = controller.ConvertToDensity(v111)
+-            if density_111 < Threshold:
+-                uCellIndex |= 128
+-            
+-            # Update State
+-            uPreviousCellIndex = uCellIndex
+-            pPreviousRowCellIndices[uXRegSpace] = uCellIndex
+-            pPreviousSliceCellIndices[uXRegSpace][uYRegSpace] = uCellIndex
+-            
+-            # Edge Intersection
+-            uEdge = EdgeTable[uCellIndex]
+-            
+-            if uEdge != 0:
+-                # Edge 64: X-axis negative
+-                if (uEdge & 64) and uXRegSpace > 0:
+-                    sampler.MoveNegativeX()
+-                    v011 = sampler.GetVoxel()
+-                    density_011 = controller.ConvertToDensity(v011)
+-                    fInterp = (Threshold - density_011) / (density_111 - density_011)
+-                    pos = (uXRegSpace - 1 + fInterp, uYRegSpace, uZRegSpace)
+-                    scaled_pos = (pos.x * SCALE, pos.y * SCALE, pos.z * SCALE)
+-                    vertex_idx = AddVertex(scaled_pos)
+-                    pIndices[uXRegSpace][uYRegSpace] = vertex_idx
+-                    sampler.MovePositiveX() # Reset sampler position for next edge checks if needed, or rely on relative moves
+-                
+-                # Edge 32: Y-axis negative
+-                if (uEdge & 32) and uYRegSpace > 0:
+-                    sampler.MoveNegativeY()
+-                    v101 = sampler.GetVoxel()
+-                    density_101 = controller.ConvertToDensity(v101)
+-                    fInterp = (Threshold - density_101) / (density_111 - density_101)
+-                    pos = (uXRegSpace, uYRegSpace - 1 + fInterp, uZRegSpace)
+-                    scaled_pos = (pos.x * SCALE, pos.y * SCALE, pos.z * SCALE)
+-                    vertex_idx = AddVertex(scaled_pos)
+-                    pIndices[uXRegSpace][uYRegSpace] = vertex_idx
+-                    sampler.MovePositiveY()
+-
+-                # Edge 1024: Z-axis negative
+-                if (uEdge & 1024) and uZRegSpace > 0:
+-                    sampler.MoveNegativeZ()
+-                    v110 = sampler.GetVoxel()
+-                    density_110 = controller.ConvertToDensity(v110)
+-                    fInterp = (Threshold - density_110) / (density_111 - density_110)
+-                    pos = (uXRegSpace, uYRegSpace, uZRegSpace - 1 + fInterp)
+-                    scaled_pos = (pos.x * SCALE, pos.y * SCALE, pos.z * SCALE)
+-                    vertex_idx = AddVertex(scaled_pos)
+-                    pIndices[uXRegSpace][uYRegSpace] = vertex_idx
+-                    sampler.MovePositiveZ()
+-
+-                # Triangle Generation
+-                if uXRegSpace != 0 and uYRegSpace != 0 and uZRegSpace != 0:
+-                    indlist = [None] * 12
+-                    
+-                    # Map edge bits to indices
+-                    # Edge 1 (X+, Y-, Z-): Neighbor X+1, Y-1, Z-1 -> pPreviousIndices[uXRegSpace+1][uYRegSpace-1] ? 
+-                    # The source code implies retrieving from pPreviousIndices or pIndices based on edge bit and neighbor coords.
+-                    # Simplified mapping based on standard MC edge numbering and neighbor logic:
+-                    # Edge 1: (1,0,0) relative to cell. Vertex stored in pIndices[uXRegSpace+1][uYRegSpace][uZRegSpace] ? 
+-                    # The source code snippet shows: UArrayHelper::Get2DFVector(pPreviousIndices, uXRegSpace, uYRegSpace - 1, uRegionWidthInVoxels).X
+-                    # This suggests specific indexing. We will use a placeholder comment for the exact mapping as it depends on the specific edge-to-vertex storage convention.
+-                    
+-                    # Example for Edge 1 (bit 1):
+-                    # indlist[0] = GetVertexIndex(pPreviousIndices, uXRegSpace, uYRegSpace - 1) # Hypothetical
+-                    
+-                    # Iterate TriTable
+-                    tri_table_entry = TriTable[uCellIndex]
+-                    i = 0
+-                    while tri_table_entry[i] != -1:
+-                        edge_idx0 = tri_table_entry[i]
+-                        edge_idx1 = tri_table_entry[i+1]
+-                        edge_idx2 = tri_table_entry[i+2]
+-                        
+-                        # Retrieve vertex indices from indlist
+-                        # Note: The source code uses indlist[TriTable[uCellIndex][i]]
+-                        # We need to populate indlist with the correct vertex indices for the 12 edges
+-                        # This part requires the specific mapping of edge bits to the stored vertex indices in pIndices/pPreviousIndices
+-                        
+-                        # For the sake of completeness, we assume indlist is populated correctly
+-                        # based on the edge bits set in uEdge and the neighbor coordinates.
+-                        
+-                        v0 = indlist[edge_idx0]
+-                        v1 = indlist[edge_idx1]
+-                        v2 = indlist[edge_idx2]
+-                        
+-                        if v0 is not None and v1 is not None and v2 is not None:
+-                            AddTriangle(v0, v1, v2)
+-                        
+-                        i += 3
+-
+-        # End of X loop
+-        sampler.MovePositiveX()
+-        
+-    # End of Y loop
+-    start_of_row.MovePositiveY()
+-
+-# End of Z loop
+-SwapBuffers(pIndices, pPreviousIndices)
++    # End of Z loop
++    p_previous_indices, p_indices = p_indices, p_previous_indices
++    
++    return vertices, triangles
+ ```
+ 
+@@ -219,9 +225,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The algorithm processes each voxel in O(1) time per cell, with bitwise operations for index propagation. The authors note that bitwise combining is faster than calling `setPosition()` for every corner, but retrieving voxel values is not the main cost [S1, unofficial].
++*   **Time Complexity**: The algorithm processes each voxel in O(1) time per cell, using bitwise operations for index propagation [S1, unofficial].
+ *   **Memory Complexity**: Requires storage for `pPreviousSliceCellIndices` (2D uint8), `pPreviousRowCellIndices` (1D uint8), `pIndices` (2D vectors), and `pPreviousIndices` (2D vectors). The size scales with the grid dimensions [S1, unofficial].
+-*   **Measured Performance**: The inline version runs in 34ms on an empty volume on the tested hardware (CPU: i7 4790) [S1, unofficial]. A hypothetical 'false' condition runs in 24ms [S1, unofficial].
+-*   **Strengths**: Avoids redundant voxel lookups by propagating cube indices bitwise. Optimized for the specific hardware and compiler (Unreal Engine 4, C++) [S1, unofficial].
+-*   **Limitations**: The optimization is specific to the traversal order and data layout. Packing 4 cell indices into a 32-bit value was considered but rejected due to complexity and packing/unpacking costs [S1, unofficial]. Normals are not computed [S1, unofficial].
++*   **Strengths**: Avoids redundant voxel lookups by propagating cube indices bitwise [S1, unofficial]. Optimized for the specific hardware and compiler (Unreal Engine 4, C++) [S1, unofficial].
++*   **Limitations**: The optimization is specific to the traversal order and data layout. Normals are not computed [S1, unofficial].
+ 
+ ## Background

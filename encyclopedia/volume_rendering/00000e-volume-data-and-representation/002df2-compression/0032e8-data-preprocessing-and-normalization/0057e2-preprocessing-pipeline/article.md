@@ -1,0 +1,205 @@
+# Preprocessing Pipeline
+
+Also called: VolCon and Compress Pipeline, Volume Preprocessing Pipeline, buildVolumeImage, crop-downsample-convert
+
+## Overview
+The Preprocessing Pipeline prepares raw volumetric data for rendering by applying label banding, cropping to the body bounding box, downsampling, adjusting spacing, and optionally converting to 16-bit float before wrapping in VTK `imageData` [S2, unofficial]. It differs from the [Volume Partitioning Pipeline](11585-volume-partitioning-pipeline.md) by focusing on monolithic volume normalization and format conversion rather than spatial segmentation and brick-based partitioning, and from the [3D Seismic Data Compression Pipeline](11727-3d-seismic-data-compression-pipeline.md) by operating on general-purpose medical volumes rather than seismic-specific blocks [S1].
+
+## How it works
+**Inputs:** Raw volumetric data (e.g., DICOM slices or raw scalar arrays), optional label maps, and a configuration object `PERF` containing flags and parameters.
+**Outputs:** A VTK `imageData` object containing the processed scalar field, dimensions, spacing, and origin.
+
+**Data Structures:**
+*   `PERF`: Configuration object.
+    *   `crop`: Boolean. If true, crop to body bounding box.
+    *   `down`: Integer. Downsampling factor (stride).
+    *   `tex`: String. If `'f16'`, convert to 16-bit float.
+*   `AIR_HU`: Constant threshold for air detection. Value: -500 [S2, unofficial].
+
+**Steps:**
+1.  **Label Banding:** If label maps exist, apply `bandLabeledHuValues` to raw values to map HU values to specific bands; otherwise, use raw values [S2, unofficial].
+2.  **Cropping:** If `PERF.crop` is true:
+    a. Compute the body bounding box using `AIR_HU` (-500) as the threshold to identify air outside the body [S2, unofficial].
+    b. Crop the volume to this bounding box.
+    c. Shift the origin to preserve world coordinates relative to the original data space [S2, unofficial].
+3.  **Downsampling:** Downsample the volume by `PERF.down` factor using `strideDownsample` [S2, unofficial].
+4.  **Spacing Adjustment:** Multiply the volume spacing by `PERF.down` to maintain physical dimensions [S2, unofficial].
+5.  **Format Conversion:** If `PERF.tex === 'f16'`, convert the scalar values to 16-bit float [S2, unofficial].
+6.  **VTK Construction:** Build a `vtkImageData` object with the new dimensions, adjusted spacing, adjusted origin, and processed scalars [S2, unofficial].
+7.  **Mapper Configuration:** If using `f16` texture, set the mapper's `preferSizeOverAccuracy` flag to true [S2, unofficial].
+8.  **Binding:** Bind the data to the mapper [S2, unofficial].
+
+**Pitfalls:**
+*   **Precision/Performance:** Reinterpreting a `Uint8Array` buffer as `Float32Array` is safe in JavaScript engines because they are natively little-endian and metadata validates `byte_order === 'little'`. Using `DataView` for byte-by-byte reading takes ~15s+ for a 145MB volume, causing stale canvas frames during dataset switches [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_volume(raw_volume, labels, perf_config):
+    """
+    Preprocesses raw volume data for rendering.
+    
+    Args:
+        raw_volume: 3D numpy array or similar structure of raw HU values.
+        labels: Optional 3D array of label maps.
+        perf_config: Dict with keys 'crop' (bool), 'down' (int), 'tex' (str).
+        
+    Returns:
+        vtkImageData object.
+    """
+    AIR_HU = -500
+    
+    # Step 1: Label Banding
+    if labels is not None:
+        # Apply banding function to map HU values based on labels
+        volume = band_labeled_hu_values(raw_volume, labels)
+    else:
+        volume = raw_volume.copy()
+        
+    origin = volume.origin if hasattr(volume, 'origin') else [0, 0, 0]
+    spacing = volume.spacing if hasattr(volume, 'spacing') else [1, 1, 1]
+    dimensions = volume.dimensions if hasattr(volume, 'dimensions') else volume.shape
+    
+    # Step 2: Cropping
+    if perf_config.get('crop', False):
+        # Compute body bounding box using AIR_HU threshold
+        # Find min/max indices where value > AIR_HU
+        mask = volume > AIR_HU
+        if not np.any(mask):
+            # Handle case where no body is detected
+            pass
+        else:
+            indices = np.argwhere(mask)
+            min_idx = indices.min(axis=0)
+            max_idx = indices.max(axis=0)
+            
+            # Crop volume to bounding box
+            volume = volume[min_idx[0]:max_idx[0]+1, 
+                            min_idx[1]:max_idx[1]+1, 
+                            min_idx[2]:max_idx[2]+1]
+            
+            # Shift origin to preserve world coordinates
+            # Assuming original origin corresponds to index [0,0,0]
+            # New origin = Original Origin - (Min Index * Original Spacing)
+            origin = [
+                origin[0] - min_idx[0] * spacing[0],
+                origin[1] - min_idx[1] * spacing[1],
+                origin[2] - min_idx[2] * spacing[2]
+            ]
+            
+            # Update dimensions
+            dimensions = volume.shape
+
+    # Step 3: Downsampling
+    down_factor = perf_config.get('down', 1)
+    if down_factor > 1:
+        # Stride downsampling
+        volume = volume[::down_factor, ::down_factor, ::down_factor]
+        
+        # Step 4: Spacing Adjustment
+        spacing = [s * down_factor for s in spacing]
+        
+        # Update dimensions
+        dimensions = volume.shape
+
+    # Step 5: Format Conversion
+    use_f16 = perf_config.get('tex') == 'f16'
+    if use_f16:
+        volume = volume.astype(np.float16)
+
+    # Step 6: VTK Construction
+    # Assuming a helper function to create vtkImageData
+    vtk_data = create_vtk_image_data(volume, dimensions, spacing, origin)
+    
+    # Step 7: Mapper Configuration
+    if use_f16:
+        # Set mapper preference for size over accuracy
+        # This is typically a property of the mapper, not the data object
+        # Here we return a flag or metadata indicating this preference
+        vtk_data.metadata['prefer_size_over_accuracy'] = True
+
+    # Step 8: Binding
+    # Binding is typically done in the rendering engine, not the preprocessing step
+    # Return the data object ready for binding
+    return vtk_data
+```
+
+## Subtopics
+
+### [VolumeSegmenter Pipeline](11584-volumesegmenter-pipeline.md)
+The VolumeSegmenter Pipeline is an end-to-end method for compressing large RAW volumetric datasets into compact, spatially mapped bricks organized into selectable logical groups, enabling efficient rendering in WebGL2. It reduces stored and GPU-resident voxel data significantly, though it may increase rendering time due to sparse lookup and ray-marching overhead compared to monolithic source rendering. It differs from the [Volume Partitioning Pipeline](11585-volume-partitioning-pipeline.md) by explicitly grouping bricks via intensity bands and adjacency rather than purely spatial partitioning, and builds on the general [Preprocessing Pipeline](6733-preprocessing-pipeline.md) framework [G].
+
+### [Volume Partitioning Pipeline](11585-volume-partitioning-pipeline.md)
+The Volume Partitioning Pipeline preprocesses 3D volumetric data by segmenting foreground regions, optionally partitioning them spatially or by intensity, cropping to bounding boxes, downsampling, and exporting as raw files with metadata. It solves the problem of managing large, sparse, or complex volumes by reducing data size and organizing it into manageable components for downstream rendering or compression. It differs from sibling methods like the [VolumeSegmenter Pipeline](11584-volumesegmenter-pipeline.md) by explicitly handling partitioning strategies and raw export, and from the [3D Seismic Data Compression Pipeline](11727-3d-seismic-data-compression-pipeline.md) by focusing on general-purpose volume partitioning rather than seismic-specific compression.
+
+### [3D Seismic Data Compression Pipeline](11727-3d-seismic-data-compression-pipeline.md)
+The 3D Seismic Data Compression Pipeline is a lossy compression method for 3D seismic data that processes volumes in 3D blocks (cubes), applying normalization, closed-loop differential pulse-code modulation (DPCM) with quantization, and Deflate compression to reduce file size while preserving trace integrity. It operates on fixed 3D spatial-temporal blocks rather than semantic segments or arbitrary partitions.
+
+### [Wild Scene Preprocessing & Test Set Selection](13103-wild-scene-preprocessing-test-set-selection.md)
+A coarse pre-filtering pipeline to remove low-quality images dominated by transient objects from unconstrained photo collections, ensuring robust training and evaluation for view synthesis systems. It differs from sibling pipelines by focusing specifically on semantic quality (NIMA) and transient occlusion metrics (DeepLab) rather than geometric consistency or voxel-based segmentation.
+
+### [Video Frame Extraction and Preprocessing](15598-video-frame-extraction-and-preprocessing.md)
+This method extracts and cleans video frames from laparoscopic surgical recordings to create a high-quality input dataset for 3D scene reconstruction. It solves the problem of degraded input quality caused by camera motion artifacts, lighting inconsistencies, and redundant video borders. It is distinguished from general volume preprocessing by its specific focus on surgical video characteristics, such as discarding frames based on camera pose discontinuities and handling specific black-bar cropping ratios.
+
+### [Raw Image Tile Processing](16085-raw-image-tile-processing.md)
+Raw Image Tile Processing is a pipeline stage that generates 2D mipmaps for image tiles emitted by an Electron Microscope (EM) as they arrive, chopping them into sub-tiles for efficient storage and resampling. It solves the problem of managing large, high-throughput raw image data streams by decoupling storage formatting from registration and alignment. Unlike its siblings, which may focus on segmentation or partitioning, this method specifically handles the immediate tiling and optional compression of incoming EM image tiles, forwarding only metadata to the volume construction stage while keeping actual data transmission on-demand.
+
+#### Slice Preprocessing
+A preprocessing phase used for creating cropped slices to be distributed across the network for rendering. Each raw data slice is read once. Non-empty regions are segmented using a mask volume, cropped and written to disc memory. Out-of-core region growing is used if no mask has been provided. Concurrently, data extent information is consolidated into a series of slab-projection slices [S4, unofficial].
+
+#### Feature Map Preprocessing for Visualization
+A procedure to transform and normalize feature maps from encoders (LSeg or SAM) for visualization by centering, projecting, and scaling values to a consistent range [S5].
+**Steps:**
+1.  Use `sklearn.decomposition.PCA` with 3 components (RGB channels) [S5].
+2.  Calculate PCA mean by sampling every third element along $h \times w$ vectors (dim 512 for LSeg, 256 for SAM) [S5].
+3.  Center features with PCA mean and project onto PCA components [S5].
+4.  Normalize transformed features based on min/max values with outliers removed to standardize range [S5].
+**Parameters:**
+*   Number of PCA components: 3 [S5].
+*   LSeg feature dimension: 512 [S5].
+*   SAM feature dimension: 256 [S5].
+*   LSeg feature map size: $360 \times 480$ [S5].
+
+#### TripoSR Image Preprocessing
+Image preprocessing pipeline that removes background, resizes foreground, and converts to a 50% gray background format required by the TripoSR model [S6, unofficial].
+**Steps:**
+1.  Initialize rembg session: `rembg_session = rembg.new_session()`. Remove background: `image = remove_background(image, rembg_session)` [S6, unofficial].
+2.  Resize foreground to target ratio: `image = resize_foreground(image, foreground_ratio)`. Default `foreground_ratio` is 0.85 [S6, unofficial].
+3.  Convert to float32 and normalize to [0, 1]: `image = np.array(image).astype(np.float32) / 255.0` [S6, unofficial].
+4.  Composite RGB over 50% gray background using alpha channel: `image = image[:, :, :3] * image[:, :, 3:4] + (1 - image[:, :, 3:4]) * 0.5` [S6, unofficial].
+5.  Convert back to uint8: `image = Image.fromarray((image * 255.0).astype(np.uint8))` [S6, unofficial].
+
+#### Raw Image Preprocessing Pipeline
+**Steps:**
+1.  Apply bilinear demosaicking when necessary [S7].
+2.  Apply elementwise white balance gains. Formula: $z \leftarrow z / g_{wb}$, where $g_{wb}$ is the `AsShotNeutral` vector [S7].
+3.  Apply a color correction matrix (from camera RGB to canonical XYZ) and XYZ-to-RGB matrix, combined into a $3 \times 3$ transformation. Formula: $z \leftarrow C_{ccm} * z$, where $C_{ccm}$ is the `ColorMatrix2` [S7].
+4.  Clip values to the range [0, 1]. Formula: $z \leftarrow \text{clip}(z, 0, 1)$ [S7].
+
+#### Data Pre-processing for Animation
+**Steps:**
+1.  To play animations of all 48 time steps, down-sample the data sets to $128 \times 128 \times 100$ voxels in a separate off-line process [S8, unofficial].
+2.  To generate animation using available memory on the nVidia 3000G card, pre-process data sets to resample them to smaller size and concatenate all time steps into a single file on disk [S8, unofficial].
+**Numbers:**
+*   Single time step size: $500 \times 500 \times 100$ voxels fits completely on the graphics card [S8, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The preprocessing time depends on the octree depth and wavelet compression levels. Deeper octrees generate smaller brick files but increase file access overhead [S1].
+*   **Memory Complexity:** The pipeline reduces stored and GPU-resident voxel data significantly, particularly when using the VolumeSegmenter variant [S1].
+*   **Performance:** On a Core2Duo laptop with 2GB RAM, preprocessing times vary by dataset size and octree depth [S1].
+*   **Strengths:** Efficiently prepares raw data for rendering, handles large volumes via downsampling and cropping, and supports various output formats (VTK, raw, compressed) [S2, unofficial][S1].
+*   **Limitations:** May increase rendering time due to sparse lookup and ray-marching overhead in segmented variants [S1]. Precision issues can arise if byte-order is not handled correctly during buffer reinterpretation [S2, unofficial].
+
+## Background
+The Preprocessing Pipeline originates from the need to handle large-scale volumetric data for distributed rendering and interactive visualization. Early implementations focused on medical imaging, where data often requires filtering, interpolation, and segmentation before rendering [S3, unofficial]. The VolCon and Compress pipeline was developed for gigascale multiresolution volume rendering on distributed display clusters, using octree structures and wavelet compression to manage data distribution [S1]. The VTK-based preprocessing approach was developed to standardize the conversion of raw medical volumes into a format suitable for web-based rendering [S2, unofficial].
+
+## Sources
+[S1] Giga-Scale Multiresolution Volume Rendering on Distributed Display Clusters, https://doi.org/10.1007/978-3-642-19641-6_10, fetched 2026-10-26
+[S2] kevinkunkel98/reinforcement-learning-volume-rendering-transfer-function, https://github.com/kevinkunkel98/reinforcement-learning-volume-rendering-transfer-function, fetched 2026-10-27 (unofficial)
+[S3] 14 Acceleration Techniques for Volume Rendering Mark W. Jones 14 Acceleration Techniques for Volume Rendering Mark W. Jones, https://docslib.org/doc/3014834/14-acceleration-techniques-for-volume-rendering-mark-w-jones, fetched 2026-10-28 (unofficial)
+[S4] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S5] Feature 3DGS: Supercharging 3D Gaussian Splatting to Enable Distilled Feature Fields, https://doi.org/10.1109/cvpr52733.2024.02048, fetched 2026-10-26
+[S6] mohamedmansour/image-to-voxel, https://github.com/mohamedmansour/image-to-voxel, fetched 2026-10-26 (unofficial)
+[S7] NeRF in the Dark: High Dynamic Range View Synthesis from Noisy Raw Images, https://doi.org/10.1109/cvpr52688.2022.01571, fetched 2026-10-26
+[S8] IEEE Visualization 2004 Contest: User Friendly Volume Data Set Exploration in the Cave, http://vis.computer.org/vis2004contest/brown/, fetched 2026-10-28 (unofficial)

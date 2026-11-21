@@ -1,0 +1,123 @@
+# 3D Gaussian Point Spread Function Model
+
+Also called: 3D Gaussian PDF, 3D Gaussian Probability Density Function, Gaussian PSF, Gaussian Point Spread Function Model
+
+## Overview
+The 3D Gaussian Point Spread Function (PSF) Model defines the spatial response of an imaging system using a 3D Gaussian kernel parameterized by a covariance matrix [S1, unofficial]. It serves as the baseline differentiable model for blur in volumetric rendering, where the covariance matrix is optimized during inference to control the level of blur in the rendered image [S1, unofficial]. Unlike its sibling [2D Gaussian Probability Density (Standard)](2d-gaussian-probability-density-standard.md) which operates in screen space, this model operates in 3D space, providing the foundational blur kernel before projection [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D position vector $\mathbf{x} \in \mathbb{R}^3$ and a $3 \times 3$ symmetric positive semi-definite covariance matrix $\Sigma$.
+- Output: The scalar intensity value $h(\mathbf{x})$ representing the PSF response at $\mathbf{x}$.
+
+**Data Structures:**
+- $\Sigma$: A $3 \times 3$ matrix. In implementation, this is typically stored as a flat array of 9 floats or explicitly as a symmetric structure (6 unique values) to enforce positive semi-definiteness during optimization.
+
+**Formula:**
+The PSF is defined as:
+$$h(\mathbf{x}) = \frac{\exp\left(-\frac{1}{2}\mathbf{x}^T \Sigma^{-1} \mathbf{x}\right)}{\sqrt{(2\pi)^3 \det \Sigma}}$$
+where:
+- $\mathbf{x}$ is the displacement vector from the center of the PSF.
+- $\Sigma^{-1}$ is the inverse of the covariance matrix.
+- $\det \Sigma$ is the determinant of the covariance matrix.
+
+The Fourier transform $\hat{h}$ of this PSF is given by:
+$$\hat{h}(\boldsymbol{\xi}) = \exp\left(-\frac{1}{2}\boldsymbol{\xi}^T \Sigma^{-1} \boldsymbol{\xi}\right)$$
+where $\boldsymbol{\xi} \in \mathbb{R}^3$ is the wavevector [S1, unofficial].
+
+**Parameters:**
+- $\Sigma$: The covariance matrix. It is the primary learnable parameter. Optimizing $\Sigma$ directly controls the blur level [S1, unofficial].
+
+**Pitfalls:**
+- The Gaussian model is a simplification. More photorealistic PSFs can be used, such as those based on differentiable physical models, refractive indices, or optical aberrations expressed using Zernike polynomials [S1, unofficial]. However, the Gaussian model is the standard baseline implemented for differentiability and simplicity [S1, unofficial].
+- $\Sigma$ must remain symmetric positive semi-definite. During optimization, constraints or parameterizations (e.g., Cholesky decomposition) are required to ensure this property holds [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def gaussian_psf_3d(x, Sigma):
+    """
+    Computes the 3D Gaussian Point Spread Function value at position x.
+    
+    Args:
+        x: numpy array of shape (3,), the displacement vector.
+        Sigma: numpy array of shape (3, 3), symmetric positive semi-definite covariance matrix.
+        
+    Returns:
+        float: The PSF value h(x).
+    """
+    # Compute inverse of Sigma
+    Sigma_inv = np.linalg.inv(Sigma)
+    
+    # Compute determinant of Sigma
+    det_Sigma = np.linalg.det(Sigma)
+    
+    # Check for numerical stability (det should be > 0 for valid PDF)
+    if det_Sigma <= 0:
+        return 0.0
+        
+    # Compute quadratic form: x^T * Sigma_inv * x
+    # Using dot product for efficiency: (x^T @ Sigma_inv) @ x
+    quadratic_form = np.dot(x, np.dot(Sigma_inv, x))
+    
+    # Compute the exponent term
+    exponent = -0.5 * quadratic_form
+    
+    # Compute the normalization constant
+    # sqrt((2*pi)^3 * det(Sigma))
+    normalization = np.sqrt((2 * np.pi)**3 * det_Sigma)
+    
+    # Compute the final value
+    h = np.exp(exponent) / normalization
+    
+    return h
+
+def gaussian_psf_fourier(xi, Sigma):
+    """
+    Computes the Fourier Transform of the 3D Gaussian PSF at wavevector xi.
+    
+    Args:
+        xi: numpy array of shape (3,), the wavevector.
+        Sigma: numpy array of shape (3, 3), symmetric positive semi-definite covariance matrix.
+        
+    Returns:
+        float: The FT value h_hat(xi).
+    """
+    # Compute inverse of Sigma
+    Sigma_inv = np.linalg.inv(Sigma)
+    
+    # Compute quadratic form: xi^T * Sigma_inv * xi
+    quadratic_form = np.dot(xi, np.dot(Sigma_inv, xi))
+    
+    # Compute the exponent term
+    exponent = -0.5 * quadratic_form
+    
+    # Compute the final value
+    h_hat = np.exp(exponent)
+    
+    return h_hat
+```
+
+## Subtopics
+
+### CT Modulation Transfer Function Gaussian Model
+This variant models the frequency response (Modulation Transfer Function, MTF) of a CT scanner with a Gaussian PSF as a Gaussian function in the frequency domain [S2, unofficial]. It is used to determine Nyquist-compliant sampling distances [S2, unofficial].
+- **Formula:** The MTF is given by $MTF(f) = e^{-\frac{f^2}{2(2\sigma_f)^2}}$ where $f$ is spatial frequency and $\sigma_f$ is the standard deviation in the frequency domain [S2, unofficial]. The spatial and frequency domain standard deviations are related by $\sigma_f \sigma_x = \frac{1}{2\pi}$ [S2, unofficial].
+- **Parameters:** The sampling distance $sd$ must satisfy $sd = \frac{1}{f_s} \le \frac{1}{6\sigma_f} = \frac{2\pi\sigma_x}{6} \approx \sigma_x$ to meet the Nyquist criterion [S2, unofficial]. Specifically, $sd$ should be at most $0.43 \times w$ (where $w \approx 2.35\sigma_x$ is the PSF width) [S2, unofficial].
+- **Pitfalls:** If $sd > \sigma_x$, aliasing occurs. At $sd=2\sigma_x$, the MTF has a nonzero value at the sampling frequency, causing folding visible as an offset at $f=0$. The MTF' at the Nyquist frequency is twice the MTF due to folding [S2, unofficial].
+
+## Operating characteristics
+- **Complexity:** The evaluation of the 3D Gaussian PSF involves matrix inversion ($O(1)$ for fixed $3 \times 3$) and dot products, making it computationally inexpensive per sample.
+- **Performance:** The Gaussian model is chosen for its differentiability and simplicity, allowing efficient gradient-based optimization of the blur parameters [S1, unofficial].
+- **Strengths:** Simple parameterization via $\Sigma$; analytically tractable Fourier transform; differentiable with respect to $\Sigma$ [S1, unofficial].
+- **Limitations:** Less photorealistic than physical models (e.g., Zernike polynomials) [S1, unofficial]. The Gaussian assumption may not hold for all imaging systems, particularly if optical transfer functions differ significantly in different axes [S2, unofficial].
+
+## Background
+The 3D Gaussian PSF model is used in differentiable rendering for 3D fluorescence microscopy [S1, unofficial]. It provides a parameterized prior for the shape representation and topology of biological objects, such as cell membranes, by optimizing the covariance matrix $\Sigma$ to match observed data [S1, unofficial]. The connection to the Modulation Transfer Function in CT imaging highlights its broader application in medical imaging for determining sampling criteria [S2, unofficial].
+
+## Sources
+[S1] Differentiable Rendering for 3D Fluorescence Microscopy, https://doi.org/10.48550/arxiv.2303.10440, fetched 2026-10-27 (unofficial)
+[S2] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)

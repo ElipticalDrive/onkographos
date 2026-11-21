@@ -1,0 +1,237 @@
+# NeRF-Casting
+
+Also called: NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections
+
+## Overview
+NeRF-Casting is a method for synthesizing photorealistic specular appearance and reflections in real-world scenes by integrating ray tracing into the Neural Radiance Field (NeRF) rendering pipeline [S1]. It solves the problem of view-dependent appearance modeling by replacing expensive neural network queries for outgoing radiance with reflection rays cast into the NeRF geometry, which allows for consistent reflections of nearby and distant content [S1]. Unlike Ref-NeRF, which requires a large MLP to encode the entire environment at every point, or inverse rendering methods that perform expensive Monte Carlo integration over the hemisphere, NeRF-Casting renders accurate reflections with low computational overhead by using a small MLP to decode features sampled from traced reflection rays [S1].
+
+## How it works
+NeRF-Casting improves upon the standard NeRF architecture [Parent](11313-model-architecture-modifications.md) by decoupling the representation of geometry/density from the representation of view-dependent specular appearance. Instead of predicting color $\mathbf{c}$ directly from position $\mathbf{x}$ and view direction $\mathbf{d}$ via a large MLP, it predicts a feature vector $\mathbf{f}$ and decodes it into color using a small MLP, where $\mathbf{f}$ is obtained by casting reflection rays into the scene [S1].
+
+### Inputs and Outputs
+*   **Inputs**: Camera ray origin $\mathbf{o}$, camera ray direction $\mathbf{d}$, scene geometry (density $\tau$), and a pre-trained or concurrently trained NeRF representation.
+*   **Outputs**: Volume-rendered color $\bar{\mathbf{c}}$ for the pixel.
+
+### Data Structures
+The method relies on the standard NeRF data structures but modifies the query logic:
+1.  **NeRF Representation**: A function $F_\Theta$ that maps a 3D position $\mathbf{x}$ to volume density $\tau(\mathbf{x})$. In NeRF-Casting, this representation is used to trace reflection rays.
+2.  **Color Decoder**: A small Multi-Layer Perceptron (MLP), denoted as $D$, that maps a feature vector $\mathbf{f} \in \mathbb{R}^k$ to RGB color $\mathbf{c} \in \mathbb{R}^3$. This MLP is significantly smaller than the standard NeRF shading MLP [S1].
+
+### Spatial Contraction
+To give higher representational capacity to points near the cameras, NeRF-Casting employs a spatial contraction function $C: \mathbb{R}^3 \rightarrow \mathbb{R}^3$ that maps all points in $\mathbb{R}^3$ to a sphere of radius 2 [S1].
+
+$$
+C(\mathbf{x}) = 
+\begin{cases} 
+\mathbf{x} & \text{if } \|\mathbf{x}\| \le 1 \\
+\frac{1}{2 - \|\mathbf{x}\|} \frac{\mathbf{x}}{\|\mathbf{x}\|} & \text{if } \|\mathbf{x}\| > 1 
+\end{cases}
+$$
+
+This contracted coordinate $C(\mathbf{x})$ is used as the input to the NeRF density query when tracing reflection rays [S1].
+
+### Rendering Algorithm
+The rendering process for a single camera ray proceeds as follows:
+
+1.  **Sample Points**: Sample $N$ points $t^{(i)}$ along the camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ for $i = 1, \dots, N$.
+2.  **Query Density**: For each sample point $\mathbf{x}^{(i)} = \mathbf{o} + t^{(i)}\mathbf{d}$, query the NeRF to obtain the volume density $\tau^{(i)} = \tau(C(\mathbf{x}^{(i)}))$.
+3.  **Cast Reflection Rays**: For each sample point $\mathbf{x}^{(i)}$ with non-negligible density, cast a reflection ray. The direction of the reflection ray $\mathbf{d}_{refl}^{(i)}$ is determined by the surface normal at $\mathbf{x}^{(i)}$. In the absence of an explicit normal field, the normal is typically approximated by the gradient of the density field or the view direction relative to the camera [G]. The reflection direction is calculated as:
+    $$ \mathbf{d}_{refl}^{(i)} = \mathbf{d} - 2(\mathbf{d} \cdot \mathbf{n}^{(i)})\mathbf{n}^{(i)} $$
+    where $\mathbf{n}^{(i)}$ is the normal at $\mathbf{x}^{(i)}$.
+4.  **Trace Reflection**: Trace the reflection ray $\mathbf{r}_{refl}(t) = \mathbf{x}^{(i)} + t\mathbf{d}_{refl}^{(i)}$ through the NeRF geometry. Sample points along this reflection ray and use the standard volume rendering equation to compute a feature vector $\mathbf{f}^{(i)}$. The feature vector represents the anti-aliased content of the reflected scene [S1].
+    *   Note: The specific feature dimensionality and encoding are implementation details not fully specified in the source, but the core idea is that $\mathbf{f}^{(i)}$ captures the view-dependent appearance of the reflected environment [S1].
+5.  **Decode Color**: Pass the feature vector $\mathbf{f}^{(i)}$ through the small Color Decoder MLP $D$ to obtain the color $\mathbf{c}^{(i)} = D(\mathbf{f}^{(i)})$ [S1].
+6.  **Volume Render**: Combine the colors $\mathbf{c}^{(i)}$ and densities $\tau^{(i)}$ using the standard volume rendering equation to produce the final pixel color $\bar{\mathbf{c}}$ [S1].
+
+The weight $w^{(i)}$ for the $i$-th sample is calculated as:
+$$ w^{(i)} = \left( 1 - \exp\left(-\tau^{(i)} \left( t^{(i+1)} - t^{(i)} \right) \right) \right) \exp\left( -\sum_{j < i} \tau^{(j)} \left( t^{(j+1)} - t^{(j)} \right) \right) $$
+
+The final color is:
+$$ \bar{\mathbf{c}} = \sum_i w^{(i)} \mathbf{c}^{(i)} $$
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def spatial_contraction(x):
+    """
+    Maps points in R^3 to a sphere of radius 2.
+    x: numpy array of shape (3,)
+    """
+    norm = np.linalg.norm(x)
+    if norm <= 1.0:
+        return x
+    else:
+        return (1.0 / (2.0 - norm)) * (x / norm)
+
+def query_density(nerf_model, x_contracted):
+    """
+    Queries the NeRF model for density at the contracted position.
+    nerf_model: function or object that takes contracted coordinates and returns density.
+    x_contracted: numpy array of shape (3,)
+    """
+    # Implementation detail: The NeRF model is queried at x_contracted.
+    # The source does not specify if the NeRF also outputs features for the main ray,
+    # but NeRF-Casting specifically uses reflection rays for features.
+    # We assume the NeRF model provides density.
+    return nerf_model.get_density(x_contracted)
+
+def trace_reflection_ray(nerf_model, origin, direction, num_samples=64):
+    """
+    Traces a reflection ray through the NeRF to render a feature vector.
+    nerf_model: function or object that takes contracted coordinates and returns density.
+    origin: numpy array of shape (3,)
+    direction: numpy array of shape (3,)
+    num_samples: int
+    Returns: feature vector (numpy array)
+    """
+    # Sample points along the reflection ray
+    t_vals = np.linspace(0.0, 10.0, num_samples) # Range depends on scene bounds
+    points = origin[:, np.newaxis] + direction[:, np.newaxis] * t_vals[np.newaxis, :]
+    
+    # Contract points
+    contracted_points = np.array([spatial_contraction(p) for p in points.T])
+    
+    # Query densities
+    densities = np.array([query_density(nerf_model, cp) for cp in contracted_points])
+    
+    # Standard volume rendering to get a feature vector.
+    # Note: The source states "samples properly anti-aliased features".
+    # It does not specify if the NeRF outputs features along the reflection ray 
+    # or if the feature is derived from the density/color of the reflection ray.
+    # Given the description "render feature vectors which are decoded into color",
+    # we assume the reflection ray trace produces a feature vector.
+    # For the purpose of this implementation, we assume the NeRF model 
+    # can also output a feature vector along the ray, or we use a placeholder 
+    # for the feature extraction logic which is not fully detailed in the source.
+    # However, the source emphasizes that the *reflection ray* renders the feature.
+    # Let's assume the NeRF model has a method to render features along a ray.
+    
+    # Since the source doesn't give the exact feature rendering code for the reflection ray,
+    # we use a standard volume render of a 'feature' channel if available, 
+    # or simply return a placeholder indicating the trace result.
+    # To be implementable, we assume the NeRF model supports feature rendering.
+    
+    # Pseudocode for feature rendering along a ray:
+    # weights = compute_weights(densities, t_vals)
+    # features = render_features(nerf_model, contracted_points, weights)
+    # return features
+    
+    # As the source does not specify the feature rendering mechanism for the reflection ray,
+    # we note this as a gap. However, the core innovation is the *casting* of the ray.
+    # We will return a dummy feature vector to satisfy the structure, 
+    # noting that in practice, this would be the result of volume rendering 
+    # the scene content along the reflection ray.
+    return np.zeros(32) # Placeholder for feature vector dimension
+
+def render_camera_ray(nerf_model, origin, direction, num_samples=64):
+    """
+    Renders a single camera ray using NeRF-Casting.
+    """
+    t_vals = np.linspace(0.0, 10.0, num_samples)
+    points = origin[:, np.newaxis] + direction[:, np.newaxis] * t_vals[np.newaxis, :]
+    
+    contracted_points = np.array([spatial_contraction(p) for p in points.T])
+    densities = np.array([query_density(nerf_model, cp) for cp in contracted_points])
+    
+    # Compute weights
+    # tau = densities
+    # delta = np.diff(np.concatenate(([0], t_vals)))
+    # alpha = 1 - np.exp(-tau * delta)
+    # T = np.cumprod(1 - alpha + 1e-10)
+    # T = np.concatenate(([1], T[:-1]))
+    # weights = alpha * T
+    
+    # Standard weight calculation
+    delta = np.diff(np.concatenate(([0], t_vals)))
+    alpha = 1.0 - np.exp(-densities * delta)
+    T = np.cumprod(1.0 - alpha + 1e-10)
+    T = np.concatenate(([1.0], T[:-1]))
+    weights = alpha * T
+    
+    final_color = np.zeros(3)
+    
+    for i in range(num_samples):
+        if weights[i] > 1e-5:
+            x = points[:, i]
+            # Approximate normal from density gradient or view direction
+            # Source does not specify normal estimation method exactly.
+            # We use a placeholder for normal estimation.
+            normal = estimate_normal(nerf_model, x) 
+            
+            # Calculate reflection direction
+            # d is the camera ray direction
+            d = direction
+            d_refl = d - 2 * np.dot(d, normal) * normal
+            
+            # Trace reflection ray to get feature
+            feature = trace_reflection_ray(nerf_model, x, d_refl)
+            
+            # Decode feature to color
+            color = color_decoder(feature)
+            
+            final_color += weights[i] * color
+            
+    return final_color
+
+def estimate_normal(nerf_model, x):
+    """
+    Estimates surface normal at x.
+    Source does not specify. Common approach: gradient of density.
+    """
+    # Numerical gradient of density
+    eps = 1e-4
+    x_contracted = spatial_contraction(x)
+    d = query_density(nerf_model, x_contracted)
+    
+    grad = np.zeros(3)
+    for axis in range(3):
+        x_plus = x.copy()
+        x_plus[axis] += eps
+        x_plus_contracted = spatial_contraction(x_plus)
+        d_plus = query_density(nerf_model, x_plus_contracted)
+        
+        x_minus = x.copy()
+        x_minus[axis] -= eps
+        x_minus_contracted = spatial_contraction(x_minus)
+        d_minus = query_density(nerf_model, x_minus_contracted)
+        
+        grad[axis] = (d_plus - d_minus) / (2 * eps)
+        
+    return grad / np.linalg.norm(grad)
+
+def color_decoder(feature):
+    """
+    Small MLP to decode feature to color.
+    """
+    # Placeholder for the small MLP
+    return feature / np.linalg.norm(feature) # Placeholder normalization
+```
+
+### Parameters
+*   **Spatial Contraction**: The sphere radius is fixed at 2 [S1].
+*   **Reflection Ray Sampling**: The number of samples along the reflection ray is not specified in the source, but the method implies it is sufficient to capture anti-aliased features [S1].
+*   **Color Decoder Size**: Described as "small" and "inexpensive" compared to the standard NeRF MLP [S1]. Exact dimensions are not given.
+
+### Edge Cases and Pitfalls
+*   **Normal Estimation**: The source does not specify how surface normals are estimated for reflection ray casting. Using density gradients can be noisy in sparse regions [G].
+*   **Reflection Ray Tracing**: Tracing reflection rays adds significant computational cost per sample compared to standard NeRF, although it is cheaper than Monte Carlo integration [S1].
+*   **Feature Dimensionality**: The dimensionality of the feature vector $\mathbf{f}$ is not specified [S1].
+
+## Operating characteristics
+*   **Time Complexity**: Higher than standard NeRF due to the additional ray tracing for reflections, but significantly lower than inverse rendering methods that use hundreds to thousands of samples per point [S1].
+*   **Memory Complexity**: Similar to standard NeRF, as it does not require storing large environment maps or complex light transport data structures [S1].
+*   **Strengths**: Synthesizes photorealistic specular appearance and reflections in real-world scenes; consistent reflections of nearby and distant content; comparable optimization time to state-of-the-art view synthesis models [S1].
+*   **Limitations**: Requires ray tracing integration; performance depends on the accuracy of normal estimation for reflection directions [S1].
+*   **When to use**: When view synthesis of scenes containing shiny objects is required, and photorealistic specular appearance is needed [S1].
+*   **When not to use**: When computational resources are extremely limited and specular reflections are not important [S1].
+
+## Background
+NeRF-Casting was introduced in 2024 by the authors of the paper "NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections" [S1]. It addresses the limitations of prior NeRF methods that rely on large neural networks to model outgoing radiance, which limits optimization and rendering speed [S1]. It is distinct from Ref-NeRF and other inverse rendering approaches by using ray tracing to naturally synthesize reflections [S1].
+
+## Sources
+[S1] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26

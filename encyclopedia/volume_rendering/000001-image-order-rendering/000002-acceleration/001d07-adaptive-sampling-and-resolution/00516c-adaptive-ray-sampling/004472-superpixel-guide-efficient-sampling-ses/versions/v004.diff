@@ -1,0 +1,249 @@
+--- v003.md
++++ v004.md
+@@ -3,119 +3,157 @@
+ 
+ ## Overview
+-Superpixel-guide Efficient Sampling (SES) is a training strategy for neural radiance fields that uses SLIC superpixels as the smallest processing units to guide ray sampling, addressing slow convergence and scattered sampling in high-resolution NeRF training by focusing computation on complex regions [S1]. Unlike quadtrees which cause redundant computations and fragmented information due to fixed shapes, superpixels resolve inadequate partitioning issues and reduce computational overhead per instance [S1].
++Superpixel-guide Efficient Sampling (SES) is a training strategy for neural fields (such as NeRF) that uses SLIC superpixels as the smallest processing units to guide ray sampling, addressing slow convergence and scattered sampling in high-resolution training by focusing computation on complex regions [S1]. Unlike sibling methods like [Context-Based Adaptive Ray Sampling with Quadtree Subdivision](8164-context-based-adaptive-ray-sampling-with-quadtree-subdivisio.md) which use fixed geometric partitions that cause redundant computations and fragmented information, SES resolves inadequate partitioning issues by adapting to image content and rendering error, thereby reducing computational overhead per instance [S1].
+ 
+ ## How it works
+-**Inputs:** Input RGB image $I$, ground truth images, neural field parameters (e.g., Instant-NGP or DVGO baselines) [S1].
+-**Outputs:** Updated neural field parameters, rendered images [S1].
++**Inputs:** Input RGB images $I$, ground truth images, neural field parameters (e.g., Instant-NGP or DVGO), and hyperparameters $\beta_0$, $\lambda_{sp}$, $\lambda_{mse}$, $t$, $\lambda_{error}$, $\lambda_{std}$.
++**Outputs:** Trained neural field model, rendered images.
+ 
+ **Data Structures:**
+-*   **Superpixels ($L$):** A collection of superpixels $\ell_i$ covering the image. Each superpixel $\ell_i$ contains a set of pixel indices $N_i$.
+-*   **Error Map:** A map storing the rendering error $r_j$ for each sampled pixel $j$ [S1].
+-*   **Sampling Probability Map:** A map storing the probability $\gamma_K(x)$ for each pixel or superpixel to be sampled [S1].
++*   **Superpixel Map:** An array of integers where each element corresponds to a pixel in the input image, storing the superpixel ID it belongs to.
++*   **Error Map:** A 2D array storing the rendering error $r_j$ for each pixel $j$.
++*   **Sampling Probability Map:** A 2D array storing the probability $\gamma_K(x)$ for each pixel $x$ to be sampled.
++
++**Numbered Steps:**
++
++1.  **Initialization:**
++    *   Apply the SLIC algorithm to partition the input RGB image $I$ into superpixels. Let $\ell_i$ be the $i$-th superpixel and $L$ be the collection of all superpixels [S1].
++    *   Initialize the neural field with random weights.
++    *   Set initial sampling probabilities uniformly or based on initial random sampling.
++
++2.  **Initial Training and Error Recording:**
++    *   Perform random ray sampling for training.
++    *   After each training iteration/session, record the rendering error $r_j$ for each sampled pixel $j$ [S1].
++    *   Calculate the average error for each superpixel $\ell_{error}^i$:
++        $$ \ell_{error}^i = \frac{1}{N} \sum_{j \in N} r_j $$
++        where $N$ is the set of pixels in superpixel $\ell_i$ [S1].
++
++3.  **Secondary Segmentation (Re-segmentation):**
++    *   Identify areas with the largest rendering errors and their adjacent regions for re-segmentation. This preserves the original segmentation structure in well-learned regions [S1].
++    *   Use a masked SLIC algorithm. The combined feature vector $C_k$ for distance calculation in SLIC considers both RGB color and rendering error:
++        $$ C_k = \beta_0 \cdot T_{CIE}(I) + (1 - \beta_0) \cdot T_{CIE}(R) $$
++        where $R$ is the portion of render error to be recalculated, replicated three times to match RGB dimensions, and $T_{CIE}$ transforms from RGB to CIE color space [S1]. $\beta_0$ is the weight between RGB image and render error (0.8 for synthetic, 0.65 for real datasets) [S1].
++    *   Perform SLIC segmentation on these masked regions to obtain updated superpixels.
++
++4.  **Guided Sampling Probability Calculation:**
++    *   Calculate sampling probabilities based on superpixel errors. The probability component for error $\ell_{p_i}^{error}$ and standard deviation $\ell_{p_i}^{std}$ are calculated as [S1]:
++        $$ \ell_{p_i}^{error} = \lambda_{error} \cdot \ell_{error}^i $$
++        $$ \ell_{p_i}^{std} = \lambda_{std} \cdot \ell_{std\_p}^i $$
++        where $t$ is a minimum error threshold used in a clamp function to exclude negligible errors (blank/well-learned regions) [S1].
++    *   Normalize the sampling probability of the rendering error component to lie between 0 and 1. Let $m$ be the number of pixels in the current superpixel and $\bar{c}$ denote the average color within the superpixel [S1].
++    *   Update the global sampling probability map $\gamma_K(x)$ for position encoding $g_i(x)$:
++        $$ \gamma_K'(x) = \gamma_K(x) * M(i) $$
++        where $M(i)$ is the mask or weight derived from the superpixel probabilities [S1].
++
++5.  **Ray Generation and Training:**
++    *   Regenerate sampled rays according to the updated probability map [S1].
++    *   Train the neural field using the sampled rays.
++    *   Accumulate rendering errors during this phase.
++    *   Upon completion of training for all rays generated in a single sampling step, update the superpixel errors and regenerate sampled rays for the next iteration [S1].
++
++6.  **Loss Function:**
++    *   Optimize neural field parameters using pixel-level Mean Squared Error (MSE) loss $L_{mse}$ and superpixel loss $L_{sp}$ [S1].
++    *   Total loss:
++        $$ L = \lambda_{mse} \cdot L_{mse} + \lambda_{sp} \cdot L_{sp} $$
++    *   Superpixel loss $L_{sp}$ is defined as [S1]:
++        $$ L_{sp} = \ell_{error}^i + 0.001 \cdot \ell_{std\_p}^i $$
++    *   $\lambda_{sp}$ is typically three to four orders of magnitude smaller than $\lambda_{mse}$ due to the strong bias of $L_{sp}$ [S1].
+ 
+ **Parameters:**
+ *   $\beta_0$: Weight between RGB image and render error in secondary segmentation. Synthetic datasets: 0.8. Real datasets: 0.65 [S1].
+ *   $\lambda_{sp}$: Coefficient for superpixel loss. Synthetic datasets: $10^{-6}$. Real datasets: $10^{-4}$ [S1].
+-*   $\lambda_{mse}$: Coefficient for MSE loss. Value: 1 [S1].
+-*   $t$: Minimum error threshold to exclude negligible errors (blank/well-learned regions). Value not explicitly given, but used in clamp function [S1].
+-*   $\lambda_{error}, \lambda_{std}$: Coefficients for sampling probabilities. Value not explicitly given [S1].
+-
+-**Steps:**
+-
+-1.  **Initialization:** Apply the SLIC algorithm $F$ to partition the input RGB image $I$ into superpixels $L$.
+-    $$ \ell_i = F(T_{CIE}(I)), \quad \ell_i \in L $$
+-    where $T_{CIE}$ transforms the image from RGB to CIE color space [S1].
+-
+-2.  **Initial Training (Random Sampling):** Use random ray sampling for training. After each training session/iteration, record the rendering error $r_j$ for each sampled pixel $j$ within a superpixel [S1].
+-
+-3.  **Error Calculation:** Compute the average sampling error within each superpixel $\ell_i$. The error of each superpixel, denoted as $\ell_{error}^i$, is calculated as:
+-    $$ \ell_{error}^i = \frac{1}{|N_i|} \sum_{j \in N_i} r_j $$
+-    where $N_i$ is the set of pixels in superpixel $\ell_i$ [S1].
+-
+-4.  **Secondary Segmentation (Re-segmentation):** After a training period, identify areas with the largest rendering errors and their adjacent regions. Use a masked SLIC algorithm to re-segment these specific regions. In this process, consider both RGB color and rendering error simultaneously. Map the rendering error to the RGB color space, replicate it three times for dimensional requirements, and convert to CIE space. Calculate the distance in SLIC using both RGB and CIE spaces. The combined feature vector $C_k$ is:
+-    $$ C_k = \beta_0 \cdot T_{CIE}(I) + (1 - \beta_0) \cdot T_{CIE}(R) $$
+-    where $R$ is the portion of render error to be recalculated and $\beta_0$ is the weight [S1].
+-
+-5.  **Sampling Probability Calculation:** Calculate the sampling probability for each superpixel. The probability $\ell_p^i$ is computed as:
+-    $$ \ell_p^i = \lambda_{error} \cdot \ell_{error}^i + \lambda_{std} \cdot \ell_{std\_p}^i $$
+-    where $\ell_{std\_p}^i$ is the standard deviation of errors within the superpixel. The error component is normalized to lie between 0 and 1. $m$ represents the number of pixels in the current superpixel, and $\bar{c}$ denotes the average color within the superpixel. The error component is clamped using threshold $t$ [S1].
+-
+-6.  **Guided Sampling:** Use the calculated sampling probabilities to direct pixel-level ray sampling. Regenerate sampled rays according to the probability map. Accumulate rendering errors during this phase [S1].
+-
+-7.  **Loss Calculation:** Optimize the parameters of the neural fields using pixel-level Mean Squared Error (MSE) loss $L_{mse}$ and superpixel loss $L_{sp}$. The superpixel loss $L_{sp}$ is calculated as:
+-    $$ L_{sp} = \ell_{error}^i + 0.001 \cdot \ell_{std\_p}^i $$
+-    The total loss is:
+-    $$ L = \lambda_{mse} \cdot L_{mse} + \lambda_{sp} \cdot L_{sp} $$
+-    [S1].
+-
+-8.  **Update:** Upon completion of training for all rays generated in a single sampling, the superpixel errors are updated, and sampled rays are regenerated [S1].
++*   $\lambda_{mse}$: Coefficient for MSE loss. Typically 1 [S1].
++*   $t$: Minimum error threshold to exclude negligible errors. Value not explicitly given, but used in clamp function [S1].
++*   $\lambda_{error}, \lambda_{std}$: Coefficients for sampling probabilities. Adjusted to balance weights [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def ses_training(image, ground_truth, neural_field, num_iterations):
+-    # Step 1: Initialization
+-    superpixels = slic_segmentation(image) # F(T_CIE(I))
++def ses_training(input_images, ground_truth, neural_field, hyperparams):
++    """
++    SES Training Loop
++    """
++    # Hyperparameters
++    beta_0 = hyperparams['beta_0']
++    lambda_sp = hyperparams['lambda_sp']
++    lambda_mse = hyperparams['lambda_mse']
++    t = hyperparams['t'] # Minimum error threshold
++    lambda_error = hyperparams['lambda_error']
++    lambda_std = hyperparams['lambda_std']
+     
+-    # Step 2: Initial Training
+-    for iteration in range(num_iterations):
+-        # Random sampling initially
+-        rays = random_sample_rays(image.shape)
++    # Initialization
++    # Apply SLIC to partition input images into superpixels
++    superpixel_map = slic_segmentation(input_images, beta_0=beta_0)
++    
++    # Initialize sampling probabilities uniformly
++    sampling_prob = initialize_uniform_probability(input_images.shape)
++    
++    # Initial random sampling
++    rays = generate_random_rays(input_images.shape, sampling_prob)
++    
++    for epoch in range(num_epochs):
++        # 1. Train with current rays
++        rendered_images = neural_field.render(rays)
++        loss_mse = compute_mse_loss(rendered_images, ground_truth)
+         
+-        # Render and record errors
+-        rendered_images = neural_field.render(rays)
+-        errors = (rendered_images - ground_truth) ** 2
++        # Record rendering error for each pixel
++        pixel_errors = compute_pixel_errors(rendered_images, ground_truth)
+         
+         # Update superpixel errors
+-        for superpixel in superpixels:
+-            pixel_indices = superpixel.get_pixel_indices()
+-            superpixel.error = mean(errors[pixel_indices])
++        superpixel_errors = compute_superpixel_errors(pixel_errors, superpixel_map)
++        
++        # 2. Secondary Segmentation (every N epochs or iterations)
++        # Identify regions with largest errors
++        regions_to_resegment = identify_high_error_regions(superpixel_errors, threshold=t)
++        
++        if regions_to_resegment:
++            # Re-segment specific regions using masked SLIC
++            # Combine RGB and Render Error in CIE space
++            error_map_replicated = replicate_error_to_rgb(pixel_errors)
++            combined_features = beta_0 * rgb_to_cie(input_images) + (1 - beta_0) * rgb_to_cie(error_map_replicated)
+             
+-        # Check if re-segmentation is needed
+-        if should_resegment(superpixels):
+-            # Step 4: Secondary Segmentation
+-            high_error_regions = identify_high_error_regions(superpixels)
+-            combined_features = combine_rgb_and_error(image, high_error_regions, beta_0)
+-            superpixels = masked_slic_segmentation(combined_features, high_error_regions)
++            # Apply masked SLIC
++            superpixel_map = masked_slic_segmentation(input_images, combined_features, regions_to_resegment)
+             
+-        # Step 5: Sampling Probability Calculation
+-        for superpixel in superpixels:
+-            pixel_indices = superpixel.get_pixel_indices()
+-            superpixel.std_error = std(errors[pixel_indices])
+-            superpixel.probability = calculate_probability(superpixel.error, superpixel.std_error)
+-            
+-        # Step 6: Guided Sampling
+-        rays = probability_sample_rays(superpixels)
++            # Recalculate superpixel errors after re-segmentation
++            superpixel_errors = compute_superpixel_errors(pixel_errors, superpixel_map)
+         
+-        # Render and calculate loss
+-        rendered_images = neural_field.render(rays)
+-        mse_loss = mean((rendered_images - ground_truth) ** 2)
++        # 3. Calculate Sampling Probabilities
++        # Calculate error and std components
++        error_component = lambda_error * superpixel_errors
++        std_component = lambda_std * compute_superpixel_std(pixel_errors, superpixel_map)
+         
+-        # Step 7: Loss Calculation
+-        sp_loss = sum(superpixel.error + 0.001 * superpixel.std_error for superpixel in superpixels)
+-        total_loss = lambda_mse * mse_loss + lambda_sp * sp_loss
++        # Normalize and clamp
++        # Note: Exact normalization formula from source involves m and c_bar, 
++        # simplified here as probability map update based on errors
++        normalized_prob = normalize_probabilities(error_component, std_component, t)
+         
+-        # Update neural field
+-        neural_field.update(total_loss)
++        # Update global sampling probability map
++        sampling_prob = update_sampling_probability(sampling_prob, normalized_prob, superpixel_map)
++        
++        # 4. Generate new rays based on probabilities
++        rays = generate_rays_from_probability(input_images.shape, sampling_prob)
++        
++        # 5. Compute Total Loss
++        # L_sp = l_error^i + 0.001 * l_std_p^i
++        loss_sp = compute_superpixel_loss(superpixel_errors, std_component)
++        total_loss = lambda_mse * loss_mse + lambda_sp * loss_sp
++        
++        # Backpropagate
++        neural_field.backward(total_loss)
++        
++    return neural_field
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Threshold $t$:** The minimum error threshold $t$ is used to exclude negligible errors. If set too low, well-learned regions may be re-segmented unnecessarily. If set too high, complex regions may be ignored. Value not explicitly given [S1].
+-*   **Dimensional Requirements:** The render error must be replicated three times to meet the dimensional requirements for transforming to CIE space [S1].
+-*   **Computational Overhead:** While superpixels reduce overhead compared to quadtrees, the re-segmentation process adds computational cost. The method is implemented on CUDA to mitigate this [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Not explicitly given. The method involves SLIC segmentation and re-segmentation, which adds overhead compared to uniform sampling. However, it reduces the number of MLP evaluations by focusing on complex regions [S1].
+-*   **Memory Complexity:** Not explicitly given. Requires storing superpixel structures and error maps [S1].
+-*   **Measured Performance:** Integrated with Instant-NGP and DVGO baselines. Experiments conducted on a single NVIDIA RTX 4090 GPU. Improved rendering quality of neural field baselines [S1].
+-*   **Strengths:** Resolves inadequate partitioning issues caused by structures such as quadtrees. Reduces computational overhead per instance. Focuses computation on complex regions [S1].
+-*   **Limitations:** Requires re-segmentation, which adds computational cost. Performance depends on the choice of parameters $\beta_0$, $\lambda_{sp}$, etc. [S1].
+-*   **When to use:** High-resolution NeRF training where uniform sampling is inefficient. When computational resources are limited but high quality is required [S1].
+-*   **When not to use:** Low-resolution scenes where uniform sampling is sufficient. When computational overhead of re-segmentation is prohibitive [S1].
++*   **Time Complexity:** The method introduces overhead for SLIC segmentation and probability map updates, but reduces the number of rays needed for high-quality rendering by focusing on complex regions. The sources state that superpixels resolve inadequate partitioning issues and reduce computational overhead per instance compared to quadtrees [S1].
++*   **Memory Complexity:** Requires storing superpixel maps, error maps, and probability maps. The sources do not specify exact memory overhead in bytes, but note that the method is implemented on CUDA to maximize hardware performance [S1].
++*   **Performance:** Integrated with Instant-NGP and DVGO baselines, SES improves rendering quality for high-resolution inputs. Experiments were conducted on a single NVIDIA RTX 4090 GPU [S1].
++*   **Strengths:** Addresses slow convergence and scattered sampling in high-resolution NeRF training. Reduces computational overhead compared to fixed-shape partitions like quadtrees.
++*   **Limitations:** Requires careful tuning of hyperparameters ($\beta_0$, $\lambda_{sp}$). The method is specific to neural field training and may not directly apply to inference-only scenarios without modification.
++*   **When to use:** High-resolution neural field training where standard random sampling is inefficient.
++*   **When not to use:** Low-resolution scenes where random sampling is sufficient, or when computational resources for SLIC segmentation are limited.
+ 
+ ## Background
+-*   **Origin:** Proposed by Zhongwei Xuan et al. in "Superpixel-based Efficient Sampling for Learning Neural Fields from Large Input" published in MM '24, October 28-November 1, 2024, Melbourne, VIC, Australia [S1].
+-*   **History and Development:** The method addresses issues with quadtrees and other segmentation methods that increase with input scale and are impractical. It utilizes the SLIC algorithm to segment images into superpixels [S1].
+-*   **Usage:** Integrated with Instant-NGP (using nerf-template/torch-ngp implementation) and DVGO baselines [S1].
++SES was introduced by Zhongwei Xuan et al. in 2024 at the ACM Multimedia Conference (MM '24) [S1]. The method was developed to address the limitations of existing adaptive sampling methods, such as quadtrees, which suffer from redundant computations and fragmented information due to fixed shapes, and methods based on color gradients that struggle with large-scale image blocks [S1]. The authors integrated SES into popular neural field methods like Instant-NGP and DVGO to demonstrate its effectiveness in improving rendering quality for large input images [S1].
+ 
+ ## Sources

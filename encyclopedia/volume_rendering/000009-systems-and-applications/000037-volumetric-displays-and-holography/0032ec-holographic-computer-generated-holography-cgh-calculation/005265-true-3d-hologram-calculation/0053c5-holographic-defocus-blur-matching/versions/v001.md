@@ -1,0 +1,57 @@
+# Holographic Defocus Blur Matching
+
+Also called: Blur Circle Diameter Calculation, CoC Eye Matching, Determining the diameter of the blur circle
+
+## Overview
+Holographic Defocus Blur Matching is a method for calculating the maximum propagation distance of a hologram ($\Delta z$) and the diameter of the blur circle of a human eye ($CoC_{eye}$) in display pixels, ensuring that the holographic defocus blur matches the optical defocus blur of the human eye [S1]. It sets apart from sibling methods by explicitly linking the physical constraints of the spatial light modulator (SLM) and lens array optics to the physiological limits of the human pupil, allowing for the determination of rendering camera aperture sizes that produce perceptually correct depth cues [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Pixel pitch of the SLM ($\Delta x$), display resolution ($res$), system field of view ($FoV$), virtual image distance of the floating object ($d$), and human pupil diameter ($A$).
+*   **Outputs:** Maximum hologram propagation distance ($\Delta z$) and the eye's blur circle diameter in pixels ($CoC_{eye}$).
+
+**Data Structures**
+No complex data structures are required; the method relies on scalar geometric and optical parameters.
+
+**Steps and Formulas**
+1.  **Calculate Maximum Propagation Distance ($\Delta z$):**
+    The maximum distance the hologram can propagate while still reconstructing a virtual image from distance $d$ to infinity is determined by approximating the lens array as a thin lens [S1]. The formula is:
+    $$ \Delta z \approx \frac{1}{\Delta x^2 res^2} \frac{d}{4 \tan^2(FoV/2)} $$
+    Where:
+    *   $\Delta x$: Pixel pitch of the SLM.
+    *   $res$: Resolution of the display.
+    *   $FoV$: Field of view of the system.
+    *   $d$: Virtual image distance of the floating object synthesized by the hologram.
+    *   The virtual image distance of the display is assumed to be infinity [S1].
+
+2.  **Calculate Eye Blur Circle Diameter ($CoC_{eye}$):**
+    Calculate the diameter of the blur circle of a human eye when focused at infinity, while the holographic object is at distance $d$, expressed in units of display pixels [S1]:
+    $$ CoC_{eye} = \frac{A \cdot res}{2d \cdot \tan(FoV/2)} $$
+    Where:
+    *   $A$: Pupil diameter.
+
+3.  **Determine Rendering Aperture:**
+    Set the aperture size of the rendering camera to satisfy the calculated $CoC_{eye}$ diameter to ensure the rendered images match the human eye's defocus blur [S1].
+
+**Parameters and Typical Values**
+*   **Pupil Diameter ($A$):** Set to 1.5 mm [S1]. This value is chosen to avoid image degradation originating from a partially blocked wave field, as the pupil diameter is larger than 1.5 mm in the majority of cases [S1].
+*   **Typical Scenario:** For a 55° FoV, 4K resolution, $\Delta x = 7.2 \, \mu\text{m}$, and $d = 0.35 \, \text{m}$:
+    *   $\Delta z = 2 \, \text{mm}$ [S1].
+    *   $CoC_{eye} = 15 \, \text{pixels}$ [S1].
+
+**Pitfalls and Edge Cases**
+*   **FoV Dependency:** Achieving a blur circle equivalent to that of a human eye is only possible under a small FoV (~10°) [S1].
+*   **Propagation Distance Trade-off:** Increasing the propagation distance to enlarge the defocus blur diameter causes the virtual image distance ($d$) to come closer, which also increases $CoC_{eye}$ [S1]. Consequently, an increase in the diameter of the defocus blur under a fixed propagation distance is required to attain a human eye-equivalent defocus blur with a holographic display [S1].
+*   **Wave Field Blocking:** If the wave field of the hologram is partially blocked by the iris, image quality degrades due to noise from the blocked wave field [S1].
+
+## Operating characteristics
+*   **Complexity:** The method involves constant-time arithmetic operations and trigonometric functions.
+*   **Strengths:** Provides a direct mapping between hardware parameters (SLM, lens array) and perceptual parameters (pupil size, defocus), enabling physically accurate depth cue synthesis in volumetric displays.
+*   **Limitations:** The method's ability to match human eye defocus is constrained by the system's Field of View; it is difficult to match under small FoV conditions when adjusting propagation distance [S1].
+*   **Use Cases:** Holographic optical tweezers, one-step volumetric printings, and volumetric displays requiring accurate depth perception [S1].
+
+## Background
+The method originates from research into diffraction-engineered holography, specifically addressing the depth representation limits of holographic displays [S1]. It was developed to support time applications such as holographic optical tweezers, one-step volumetric printings, and volumetric displays by ensuring that the synthesized holographic defocus matches the optical defocus of the human eye [S1]. The work was published in *Nature Communications* in 2022 [S1].
+
+## Sources
+[S1] Diffraction-engineered holography: Beyond the depth representation limit of holographic displays, https://www.nature.com/articles/s41467-022-33728-5, fetched 2026-10-29

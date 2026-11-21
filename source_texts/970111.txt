@@ -1,0 +1,205 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(mesh): a ring of output slots, so a draw can outlive the next extract by taojin-6 · Pull Request #48 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Aug 3, 2026
+Copy link
+Copy Markdown
+Owner
+Blocker 1 of the four MarchingCubesConfig's TODO(mesh) enumerates. Stacked on #47 — review that first.
+The hazard
+The arena is one grow-only buffer reused in place. The next extract overwrites the memory an in-flight draw is reading, and a grow frees it — vmaDestroyBuffer runs immediately, no fence wait, because this tier's own work is fence-blocked inside submit_single_time and never needed one. DeviceMesh::generation guards only the host download() path.
+The contract
+MarchingCubesConfig::slot_count gives each outstanding extract its own arena and index run.
+1 (default) — exactly the old behaviour. A DeviceMesh dies at the next extract; generation enforces it.
+>1 — turns on the release contract. The consumer calls release_through(generation) as its frames retire, and an extract only ever writes, grows, or frees a slot that has been released.
+That's what makes the immediate destroy safe again, and it's why this needs no fence queue in the library and no semaphore across the seam. A cross-library GPU wait is the one thing the shared-queue arrangement forbids — waiting on a value the sibling hasn't signalled deadlocks against a swapchain rebuild, which drains the queue while holding the submit mutex. Reporting completion after the fact can't.
+Two things I got wrong first, both found by running it
+The slot must be claimed once per extract, not once per call. A call that plans its capacity low returns through ensure_output_buffers to refit against the measured count. Advancing again would strand the first dispatch's output in the previous slot. Gating on "the current slot already carries this generation" fixes it — and makes the refit's grow safe for free, since the buffer it frees is one only this extract has written.
+The slots are a fixed array, not a std::vector. This class promises a self-move leaves it intact, and marching_cubes_sparse_test exercises mc = std::move(mc) directly. Every other member keeps that promise; std::vector doesn't — self-move-assignment is valid-but-unspecified, and libc++ empties it, so the extractor passed valid() and then indexed nothing. Segfaulted on the first run.
+The test
+Pins what the feature is for: consecutive extracts land in different buffers, a third with both slots outstanding is refused rather than corrupting a live read, releasing frees one, and a stale release never un-releases. Disabling the ring fails it; restoring passes.
+It deliberately does not assert the ring reuses gen1's buffer. A slot may grow when the ring comes round, so pinning the handle would test the growth policy while claiming to test the ring — I had that assertion, it failed, and it was wrong rather than the code.
+26/26 green, pre-commit clean.
+Left
+Blocker 4: counter_ carries no INDIRECT_BUFFER usage and isn't on DeviceMesh, so the count still round-trips to the host. Then gfx#87 reimplemented against current main, and the iOS app's download() + upload_mesh() delete — ~53 MB through the host per remesh for data that never left the device.
+🤖 Generated with Claude Code
+feat(mesh): a ring of output slots, so a draw can outlive the next ex…
+…
+69f675c
+```
+…tract
+
+Blocker 1 of the four between recon's device mesh and the renderer
+drawing it. The arena was one grow-only buffer reused in place, so the
+next extract overwrote the memory an in-flight draw was reading -- and a
+grow *freed* it, through a vmaDestroyBuffer with no fence wait, because
+this tier's own work is fence-blocked inside submit_single_time and
+never needed one.
+
+MarchingCubesConfig::slot_count gives each outstanding extract its own
+arena and index run. One (the default) is exactly the old behaviour: a
+DeviceMesh dies at the next extract, and generation enforces it. More
+turns on a release contract -- the consumer calls release_through as its
+frames retire, and an extract only ever writes, grows, or frees a slot
+that has been released.
+
+That contract is what makes the immediate destroy safe again, and it is
+why this needs no fence queue in the library and no semaphore across the
+seam. A cross-library GPU wait is the one thing the shared-queue
+arrangement forbids: waiting on a value the sibling has not signalled
+deadlocks against a swapchain rebuild, which drains the queue while
+holding the submit mutex. Reporting completion after the fact cannot.
+
+Two things this got wrong first, both found by running it:
+
+The slot is claimed once per extract, not once per call. A call that
+plans its capacity low comes back through ensure_output_buffers to refit
+against the measured count, and advancing again would strand the first
+dispatch's output in the previous slot. The current slot already
+carrying this generation is what "already claimed" means -- and it makes
+the refit's grow safe for free, since the buffer it frees is one only
+this extract has written.
+
+The slots are a fixed array, not a std::vector, and that is load-bearing.
+This class promises a self-move leaves it intact, and the sparse test
+exercises `mc = std::move(mc)` directly. Every other member keeps that
+promise; std::vector does not -- self-move-assignment is valid but
+unspecified, and libc++ empties it, so the extractor passed valid() and
+then indexed nothing. It segfaulted on the first run.
+
+The test pins the property the feature exists for: consecutive extracts
+land in different buffers, a third with both slots outstanding is
+refused rather than corrupting a live read, releasing frees one, and a
+stale release never un-releases. Disabling the ring fails it. It does
+not assert that the ring reuses gen1's *buffer* -- a slot may grow when
+the ring comes round, and pinning the handle would test the growth
+policy while claiming to test the ring. 26/26 green.
+
+Still no consumer: seam B also wants the indirect command on DeviceMesh
+(blocker 4).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+force-pushed
+the
+feat/seam-b-arena-ring
+branch
+from
+55312e2 to
+69f675c
+Compare
+August 3, 2026 07:09
+taojin-6
+changed the base branch from
+feat/seam-b-buffer-access
+to
+main
+August 3, 2026 07:09
+taojin-6
+mentioned this pull request
+Aug 3, 2026
+feat(mesh): the draw command, written by the kernel that counts it
+#49
+Merged
+fix(mesh): make the refusal free, and give release_through a threadin…
+…
+5f8c663
+```
+…g contract
+
+Review of the ring found one behavioural bug and four places the prose had
+fallen behind the code.
+
+The refusal was not free. claim_output_slot ran inside ensure_output_buffers,
+which is after ++generation_ -- so an extract refused because every slot was
+still outstanding, the one path whose entire purpose is to protect a slot the
+consumer is still reading, advanced the generation and made download() retire
+the very mesh it had just protected. Probed before the fix: download(gen2) is
+OK before the refused extract and REFUSED after, with gen2's slot untouched
+either way. The claim is now its own method, called once at the top of each
+extract and before the bump.
+
+That also makes "once per extract, not once per call" structural instead of a
+generation-equality trick. A call that plans its capacity low re-enters
+ensure_output_buffers to refit, and the old guard leaned on the slot already
+carrying this generation to avoid advancing twice; with the claim hoisted to
+the extract entry point there is only ever one visit to advance from, and
+ensure_output_buffers just stamps (idempotently).
+
+release_through is not atomic and not internally synchronized, while the
+consumer it is written for is on another thread -- fuse_viewer fuses on a
+background thread and retires frames on the render thread, which is the exact
+pattern the doc invites. Documented as a caller obligation rather than made
+std::atomic: an atomic is not movable and this class's rule-of-zero defaulted
+moves are load-bearing, and the consumer already holds a mutex to hand the
+DeviceMesh across, so a uint64_t store under it is free. Silence was the one
+option that was not safe.
+
+download() reads the current slot unqualified, which is correct only because
+the generation check and the slot claim together make "current generation" and
+"current slot" the same statement. Its comment was still justifying the check
+with the single-arena argument -- that a superseded view names the *same*
+VkBuffer -- which a ring inverts. Restated, including that widening it to
+older generations means indexing slots_ by generation rather than relaxing a
+comparison.
+
+Also: the seam-B TODO(mesh) and CLAUDE.md now record blocker 1 as settled and,
+more to the point, that this takes the ring DESIGN.md specifies and
+deliberately declines its timeline semaphore; the empty-mesh early return says
+why it may advance the generation without claiming a slot; and kMaxSlots notes
+what the unused slots cost.
+
+Verified on MoltenVK (M5 Max): 26/26 ctest, 26/26 under ASan+UBSan,
+pre-commit clean, and 100-frame room0 fuses to 793,473 vertices / 264,491
+triangles -- unchanged from main. Restoring the old claim ordering fails the
+new assertion; nothing else in the suite notices it.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit 713709f
+into
+main
+Aug 3, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+mentioned this pull request
+Aug 3, 2026
+fix(mesh): plan the arena against the slot about to be written
+#50
+Merged
+taojin-6
+deleted the
+feat/seam-b-arena-ring
+branch
+August 9, 2026 07:29
+taojin-6
+mentioned this pull request
+Oct 23, 2026
+build: core 0.19.0; the viewer on gfx with it
+#271
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,133 @@
+--- v002.md
++++ v003.md
+@@ -3,20 +3,20 @@
+ 
+ ## Overview
+-Animated 3D Gaussian Splatting is a GPU-accelerated rendering method for time-varying 3D Gaussian splats that computes time-dependent position, rotation, and scale deltas from packed texture data to enable smooth animation without per-frame CPU updates [S1, unofficial]. It differs from static 3D Gaussian Splatting by evaluating polynomial motion deltas and applying temporal opacity decay in the vertex and fragment shaders, building on the screen-space quad rendering of [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) [S1, unofficial].
++Animated 3D Gaussian Splatting (Splatv rendering) is a GPU-accelerated rendering method for time-varying 3D Gaussian splats that computes time-dependent position, rotation, and scale deltas from packed texture data to enable smooth animation without per-frame CPU updates [S1, unofficial]. It differs from static 3D Gaussian Splatting by evaluating polynomial motion deltas and applying temporal opacity decay in the vertex and fragment shaders, building on the screen-space quad rendering of [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** A packed 2D texture (`u_texture`) containing static and motion data for $N$ splats; camera matrices (View $V$, Projection $P$); camera intrinsics (`focal` vector $(f_x, f_y)$); current animation timestamp (`time`); viewport dimensions (`viewport` $(W, H)$); and the splat index `i` [S1, unofficial].
+-*   **Outputs:** Screen-space quad vertices for each splat; final color and alpha per fragment.
++*   **Outputs:** Screen-space quad vertices for each splat; final color and alpha per fragment [S1, unofficial].
+ 
+ **Data Structures:**
+ Splat data is packed into a 2D texture where each splat index `i` occupies 4 consecutive texels [S1, unofficial].
+ *   **Row Index:** `row = uint(i) >> 10`
+-*   **Column Index:** `col = ((uint(i) & 0x3ffu) << 2) | k`, where $k \in \{0, 1, 2, 3\}$ is the texel offset within the splat's block [S1, unofficial].
++*   **Column Index:** `col = ((uint(i) & 0x3ffu) << 2)`, where $k \in \{0, 1, 2, 3\}$ is the texel offset within the splat's block [S1, unofficial].
+ *   **Texel Layout:**
+     *   `.x`: `motion0.x`
+     *   `.y`: `motion0.y`
+     *   `.z`: `motion0.z`
+-    *   `.w`: `motion1.w`
++    *   `.w`: `motion1.w` (packed half-float pair)
+ *   **Static Data:** `static0` and `static1` are fetched at offsets `| 0` and `| 1` respectively from the base index [S1, unofficial].
+ 
+@@ -39,5 +39,5 @@
+     $$ q = \text{normalize}(q_{static} + \Delta q) $$
+     [S1, unofficial].
+-7.  **Compute World Covariance:** Construct the scale matrix $S = \text{diag}(s_x, s_y, s_z)$ and rotation matrix $R$ from $q$. Compute the transformation matrix $M = S R$ and the world covariance matrix:
++7.  **Compute World Covariance:** Construct the scale matrix $S = \text{diag}(s_x, s_y, s_z)$ and rotation matrix $R$ from $q$ [S1, unofficial]. Compute the transformation matrix $M = S R$ and the world covariance matrix:
+     $$ \Sigma_{world} = 4 M^T M $$
+     [S1, unofficial].
+@@ -68,5 +68,5 @@
+     where $\tau$ is unpacked from `motion1.w` as the y-component of a half-float pair [S1, unofficial].
+     $$ C = \exp(A) \alpha_{time} C_{base} $$
+-    Apply depth fog factor $\min(\frac{z}{w}+1, 1)$ if required by the specific implementation context [S1, unofficial].
++    Apply depth fog factor $\min(\frac{z}{w}+1, 1)$ [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -77,6 +77,6 @@
+ 
+ def unpack_half2(half_val):
+-    # Converts a half-float representation to a float
+-    return float(half_val)
++    # Converts a packed half-float representation to a float vec2
++    return vec2(float(half_val.x), float(half_val.y))
+ 
+ def quaternion_to_matrix(q):
+@@ -91,12 +91,12 @@
+     # 1. Fetch Data
+     row = splat_index >> 10
+-    col = ((splat_index & 0x3ff) << 2)
++    col = (splat_index & 0x3ff) << 2
+ 
+     # Fetch 4 consecutive texels for motion data
+     texels = [texture_2d(u_texture, row, col + k) for k in range(4)]
+-    motion0_x = unpack_half2(texels[0].x)
+-    motion0_y = unpack_half2(texels[0].y)
+-    motion0_z = unpack_half2(texels[0].z)
+-    motion1_w = unpack_half2(texels[0].w)
++    motion0_x = texels[0].x
++    motion0_y = texels[0].y
++    motion0_z = texels[0].z
++    motion1_w = texels[0].w
+ 
+     # Static data fetch at offsets | 0 and | 1
+@@ -105,18 +105,20 @@
+ 
+     # 2. Time Delta
+-    t_start = unpack_half2(motion1_w)
+-    tau = unpack_half2(motion1_w)
++    motion1_pair = unpack_half2(motion1_w)
++    t_start = motion1_pair.x
++    tau = motion1_pair.y
+     dt = time - t_start
+ 
+     # 3. Motion Deltas
+-    cp1, cp2, cp3 = motion0_x, motion0_y, motion0_z
+-    cq1 = unpack_half2(motion1_w)
+-
+-    delta_p = vec3(cp1 * dt + cp2 * (dt ** 2) + cp3 * (dt ** 3), 0.0)
++    # Coefficients unpacked as vectors for each axis
++    cp1, cp2, cp3 = vec3(motion0_x), vec3(motion0_y), vec3(motion0_z)
++    cq1 = motion1_pair.y # Reused from motion1.w per source layout
++
++    delta_p = cp1 * dt + cp2 * (dt ** 2) + cp3 * (dt ** 3)
+     delta_q = vec4(cq1 * dt, 0.0, 0.0, 0.0)
+ 
+     # 4. Transform Position
+     p_static = vec4(unpack_half2(static0.x), unpack_half2(static0.y), unpack_half2(static0.z), 1.0)
+-    p_cam = view_matrix * (p_static + vec4(delta_p.x, delta_p.y, delta_p.z, 0.0))
++    p_cam = view_matrix * (p_static + vec4(delta_p, 0.0))
+     p_clip = projection_matrix * p_cam
+ 
+@@ -131,5 +133,4 @@
+ 
+     # 7. World Covariance
+-    # Scale components are assumed to be unpacked from static data per source layout
+     sx, sy, sz = unpack_half2(static0.w), unpack_half2(static1.x), unpack_half2(static1.y)
+     S = mat3(sx, 0, 0, 0, sy, 0, 0, 0, sz)
+@@ -177,6 +178,6 @@
+     alpha_time = exp(-((dt / tau) ** 2))
+ 
+-    B = exp(A) * v_color.a * alpha_time
+-    frag_color = vec4(B * v_color.rgb, B)
++    B = exp(A) * alpha_time
++    frag_color = vec4(B * v_color.rgb, B * v_color.a)
+ 
+     return frag_color
+@@ -189,11 +190,11 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Negative Eigenvalue:** $\lambda_2 < 0$ indicates a degenerate or flipped covariance matrix, often caused by extreme perspective or invalid transforms. The shader discards the splat to prevent rendering artifacts [S1, unofficial].
++*   **Negative Eigenvalue:** $\lambda_2 < 0$ indicates a degenerate or flipped covariance matrix, often caused by extreme perspective or invalid transforms [S1, unofficial]. The shader discards the splat to prevent rendering artifacts [S1, unofficial].
+ *   **Axis Clamping:** Axis lengths are clamped to a maximum of 1024 pixels to prevent overdraw and performance degradation from excessively large splats [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ for $N$ splats, performed entirely on the GPU in the vertex and fragment shaders. No CPU sorting or per-frame update overhead for motion [S1, unofficial].
++*   **Time Complexity:** $O(N)$ for $N$ splats, performed entirely on the GPU in the vertex and fragment shaders [S1, unofficial]. No CPU sorting or per-frame update overhead for motion [S1, unofficial].
+ *   **Memory Complexity:** $O(N)$ for the packed texture storing static and motion data [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources [S1, unofficial].
+ *   **Strengths:** Enables smooth, real-time animation of Gaussian splats without CPU-side interpolation or sorting updates per frame [S1, unofficial].
+ *   **Limitations:** Relies on pre-computed polynomial coefficients, limiting the complexity of motion to cubic polynomials for position and linear for rotation [S1, unofficial].
+@@ -202,5 +203,5 @@
+ 
+ ## Background
+-Animated 3D Gaussian Splatting (Splatv rendering) is an extension of 3D Gaussian Splatting designed for time-varying scenes. It was introduced in the context of GPU-accelerated web-based Gaussian Splatting implementations, specifically within the `gsplat.js` project [S1, unofficial]. The method allows for the rendering of animated Gaussian splats by embedding motion parameters directly into the texture data and evaluating them in the shader pipeline [S1, unofficial].
++Animated 3D Gaussian Splatting (Splatv rendering) is an extension of 3D Gaussian Splatting designed for time-varying scenes [S1, unofficial]. It was introduced in the context of GPU-accelerated web-based Gaussian Splatting implementations, specifically within the `gsplat.js` project [S1, unofficial]. The method allows for the rendering of animated Gaussian splats by embedding motion parameters directly into the texture data and evaluating them in the shader pipeline [S1, unofficial].
+ 
+ ## Sources

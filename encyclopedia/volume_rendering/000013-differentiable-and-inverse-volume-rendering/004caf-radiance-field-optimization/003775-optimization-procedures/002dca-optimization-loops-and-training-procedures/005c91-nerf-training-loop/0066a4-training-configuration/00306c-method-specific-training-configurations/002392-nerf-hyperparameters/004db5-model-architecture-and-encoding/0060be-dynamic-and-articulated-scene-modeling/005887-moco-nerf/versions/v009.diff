@@ -1,0 +1,513 @@
+--- v008.md
++++ v009.md
+@@ -4,447 +4,103 @@
+ 
+ ## Overview
+-MoCo-NeRF is a framework for free-viewpoint rendering of monocular human videos that models non-rigid body motions as radiance residual fields rather than spatial offsets, using rigid skeletal transformations as a prior [S1]. It decomposes the representation into a rigid branch learning a canonical T-pose radiance field and a non-rigid branch optimizing pose-driven radiance residuals, conditioned by pose-embedded implicit features [S1]. Unlike offset-based strategies that suffer from high computational complexity and misaligned learning objectives, MoCo-NeRF reduces prediction range to the radiance space and establishes direct supervision from ground-truth pixel colors [S1].
++MoCo-NeRF is a framework for free-viewpoint rendering of monocular human videos that models non-rigid motions (e.g., cloth dynamics) as radiance residual fields rather than spatial offsets [S1]. It decomposes the representation into a rigid branch learning a canonical T-pose radiance field via rigid skeletal transformations and a non-rigid branch optimizing pose-driven radiance residuals [S1]. Unlike offset-based strategies that suffer from high computational complexity and misaligned learning objectives, MoCo-NeRF reduces prediction range to the radiance space and establishes direct supervision from ground-truth pixel colors [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Monocular video frames of a dynamic human subject; camera poses; skeletal joint positions $J$ for each frame; camera intrinsics.
+-*   **Outputs:** Rendered RGB images for arbitrary viewpoints and poses.
++*   **Inputs:** Monocular video frames, camera poses, and skeletal joint positions $J = \{j_i\}_{i=1}^{23}$ for each frame.
++*   **Outputs:** Rendered RGB images for novel viewpoints and poses.
+ 
+ **Data Structures:**
+ 1.  **Skeletal Weights Volume Decoder:** An explicit volume decoder optimizing canonical skinning weights $w^c_k$ for $K$ joints [S1].
+-2.  **Multi-Hash Encoding (MHE):** A hash-based encoding $\psi_{hash}$ with 16 levels and feature dimension $H=2$ per level [S1].
+-    *   **Global MHE ($\psi^G_{hash}$):** Used in multi-subject mode; 4 levels, $H=2$ [S1].
+-    *   **Local MHEs ($\psi^i_{hash}$):** One per subject $i$; 16 levels, $H=2$ [S1].
+-3.  **Learnable Base Code ($S$):** A tensor $S \in \mathbb{R}^{64}$, randomly initialized, jointly optimized [S1].
+-4.  **Identity Codes ($S_i$):** Learnable base codes for each subject $i$ in multi-subject mode [S1].
++2.  **Multi-Hash Encoding (MHE):**
++    *   **Single-Subject:** One MHE $\psi_{hash}$ with 16 levels, feature dimension $H=2$ per level [S1].
++    *   **Multi-Subject:** One global MHE $\psi^G_{hash}$ (4 levels, $H=2$) shared across subjects, and $N_s$ local MHEs $\{\psi^i_{hash}\}$ for subject-specific details [S1].
++3.  **Learnable Base Code:** $S \in \mathbb{R}^{64}$, randomly initialized [S1].
++4.  **Identity Codes:** $\{S_i\}_{i=1}^{N_s}$, learnable base codes for each subject in multi-subject settings [S1].
+ 5.  **MLP Decoders:**
+-    *   $M_{rigid}$: Predicts rigid color and density.
+-    *   $M_{nr}$: Predicts non-rigid residuals.
++    *   $M_{rigid}$: Predicts rigid color $\mathbf{c}$ and density $\sigma$ [S1].
++    *   $M_{nr}$: Predicts residuals $\Delta \mathbf{c}, \Delta \sigma$ [S1].
+ 6.  **Projection Matrices:** $W_p, W_Q, W_K, W_V$ for pose-embedded feature generation [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Canonical Transformation:**
+-    For a query point $\mathbf{x}$ in observation space, transform it to canonical space $\mathbf{x}_c$ using inverse linear blend skinning [S1]:
++1.  **Canonical Point Transformation:**
++    Transform an observation point $\mathbf{x}$ to a canonical point $\mathbf{x}_c$ using inverse linear blend skinning [S1]:
+     $$ \mathbf{x}_c = \sum_{k=1}^K w^o_k (R_k \mathbf{x} + \mathbf{t}_k) $$
+-    where $w^o_k$ are observation skinning weights derived from canonical weights $w^c_k$ [S1]:
+-    $$ w^o_k = \frac{w^c_k(R_k \mathbf{x} + \mathbf{t}_k)}{\sum_{j=1}^K w^c_j(R_j \mathbf{x} + \mathbf{t}_j)} $$
+-    $R_k, \mathbf{t}_k$ are the rotation and translation of bone $k$ [S1].
++    where $w^o_k = \frac{w^c_k(R_k \mathbf{x} + \mathbf{t}_k)}{\sum_{j=1}^K w^c_j(R_j \mathbf{x} + \mathbf{t}_j)}$, $R_k, \mathbf{t}_k$ are rotation and translation of bone $k$, and $w^c_k$ are optimized canonical skinning weights [S1].
+ 
+ 2.  **Rigid Branch Feature Query:**
+-    Query multiresolution volumetric features $\mathbf{f}_{\mathbf{x}_c}$ from the MHE $\psi_{hash}$ (or global/local MHEs in multi-subject mode) [S1]:
++    Query multiresolution volumetric features $\mathbf{f}_{\mathbf{x}_c}$ from the MHE $\psi_{hash}$:
+     $$ \mathbf{f}_{\mathbf{x}_c} = \psi_{hash}(\mathbf{x}_c) $$
+     Slice the first half ($H$ dimensions) of $\mathbf{f}_{\mathbf{x}_c}$ at each resolution level to compute $\mathbf{f}^{:H}_{\mathbf{x}_c}$ [S1].
+ 
+ 3.  **Rigid Radiance Prediction:**
+-    Predict rigid color $\mathbf{c}$ and density $\sigma$ using MLP $M_{rigid}$ [S1]:
++    Predict rigid color $\mathbf{c}$ and density $\sigma$ using MLP $M_{rigid}$:
+     $$ \mathbf{c}, \sigma = M_{rigid}(\mathbf{f}^{:H}_{\mathbf{x}_c}) $$
+-    *Multi-subject extension:* Concatenate global features, sliced local features, and subject ID code $\mathbf{S}_i$:
+-    $$ \mathbf{c}, \sigma = M_{rigid}(\psi^G_{hash}(\mathbf{x}_c) \oplus (\psi^i_{hash}(\mathbf{x}_c))^{:H} \oplus \mathbf{S}_i) $$ [S1].
++    For multi-subject training, concatenate global features, sliced local features, and subject ID code $S_i$:
++    $$ \mathbf{c}, \sigma = M_{rigid}(\psi^G_{hash}(\mathbf{x}_c) \oplus (\psi^i_{hash}(\mathbf{x}_c))^{:H} \oplus S_i) $$
++    [S1].
+ 
+ 4.  **Non-Rigid Feature Preparation:**
+-    Use the full feature $\mathbf{f}_{\mathbf{x}_c}$ (not sliced). Freeze the first half representing canonical radiance. Denote the remaining optimized half as $\mathbf{f}^*_{\mathbf{x}_c}$ [S1].
++    Use the full feature $\mathbf{f}_{\mathbf{x}_c}$ but freeze the first half representing canonical radiance. Denote the remaining optimized half as $\mathbf{f}^*_{\mathbf{x}_c}$ [S1].
+ 
+ 5.  **Pose-Embedded Implicit Feature Generation:**
+-    *   **Joint Encoding:** Apply sinusoidal positional encoding $\gamma$ to 23 joint positions $J=\{j_i\}_{i=1}^{23}$ [S1]:
+-        $$ \gamma(j_i) = [j_i, \sin(2^0 \pi j_i), \cos(2^0 \pi j_i), \dots, \sin(2^{L-1} \pi j_i), \cos(2^{L-1} \pi j_i)] $$
+-        where $L=10$ frequency bands [S1]. This results in $\gamma(J) \in \mathbb{R}^{23 \times 63}$ [S1].
+-    *   **Raw Pose Code:** Project encoded joints using matrix $W_p$ [S1]:
+-        $$ \mathbf{P}_{raw} = W_p \cdot \gamma(J) $$ [S1].
+-    *   **Attention Projections:** Generate query $\mathbf{P}_q$ from base code $S$, and key $\mathbf{P}_k$, value $\mathbf{P}_v$ from $\mathbf{P}_{raw}$ [S1]:
+-        $$ \mathbf{P}_q = W_Q \cdot S, \quad \mathbf{P}_k = W_K \cdot \mathbf{P}_{raw}, \quad \mathbf{P}_v = W_V \cdot \mathbf{P}_{raw} $$ [S1].
+-    *   **Implicit Feature:** Compute final pose-embedded implicit feature $\mathbf{P}_{nr}$ [S1]:
+-        $$ \mathbf{P}_{nr} = \text{softmax}(\mathbf{P}_q \cdot \mathbf{P}_k^\top) \cdot \mathbf{P}_v $$ [S1].
++    a. Apply sinusoidal positional encoding $\gamma$ to 23 joint positions $J$:
++    $$ \gamma(j_i) = [j_i, \sin(2^0 \pi j_i), \cos(2^0 \pi j_i), \dots, \sin(2^{L-1} \pi j_i), \cos(2^{L-1} \pi j_i)] $$
++    where $L=10$ frequency bands [S1].
++    b. Project encoded joints $\gamma(J) \in \mathbb{R}^{23 \times 63}$ to raw pose-embedded code $\mathbf{P}_{raw}$:
++    $$ \mathbf{P}_{raw} = W_p \cdot \gamma(J) $$
++    [S1].
++    c. Generate query $\mathbf{P}_q$ from $S$, and key $\mathbf{P}_k$, value $\mathbf{P}_v$ from $\mathbf{P}_{raw}$:
++    $$ \mathbf{P}_q = W_Q \cdot S, \quad \mathbf{P}_k = W_K \cdot \mathbf{P}_{raw}, \quad \mathbf{P}_v = W_V \cdot \mathbf{P}_{raw} $$
++    [S1].
++    d. Compute final implicit feature $\mathbf{P}_{nr}$ using cross-attention:
++    $$ \mathbf{P}_{nr} = \text{softmax}(\mathbf{P}_q \cdot \mathbf{P}_k^\top) \cdot \mathbf{P}_v $$
++    [S1].
+ 
+-6.  **Non-Rigid Residual Prediction:**
+-    Predict color and density residuals $\Delta \mathbf{c}, \Delta \sigma$ using MLP $M_{nr}$ conditioned on $\mathbf{f}^*_{\mathbf{x}_c}$ and $\mathbf{P}_{nr}$ [S1]:
+-    $$ \Delta \mathbf{c}, \Delta \sigma = M_{nr}(\mathbf{f}^*_{\mathbf{x}_c}; \mathbf{P}_{nr}) $$ [S1].
++6.  **Non-Rigid Radiance Residual Prediction:**
++    Predict color and density residuals $\Delta \mathbf{c}, \Delta \sigma$ using MLP $M_{nr}$ conditioned on $\mathbf{f}^*_{\mathbf{x}_c}$ and $\mathbf{P}_{nr}$:
++    $$ \Delta \mathbf{c}, \Delta \sigma = M_{nr}(\mathbf{f}^*_{\mathbf{x}_c}; \mathbf{P}_{nr}) $$
++    [S1].
+ 
+ 7.  **Compositional Rendering:**
+-    For each ray $\mathbf{r}$, query $M$ samples. Compute final RGB $\mathbf{C}_{final}$ using stratified sampling and volume rendering with compositional density $(\sigma + \Delta \sigma)$ and color $(\mathbf{c} + \Delta \mathbf{c})$ [S1]:
+-    $$ \mathbf{C}_{final}(\mathbf{r}) = \sum_{m=1}^M T_m (1 - \exp(-(\sigma_m + \Delta \sigma_m)\delta_m)) (\mathbf{c}_m + \Delta \mathbf{c}_m) $$ [S1].
+-    Transmittance $T_m$ is defined as [S1]:
+-    $$ T_m = \exp\left(-\sum_{n=1}^{m-1} \sigma_n \delta_n\right) $$
+-    where $\delta_m$ is the adjacent distance from the $m$-th to the $(m+1)$-th sample [S1].
+-    Also compute $\mathbf{C}_{rigid}$ from $(\mathbf{c}, \sigma)$ for loss calculation [S1].
++    For each ray $\mathbf{r}$, query $M$ samples. Compute final RGB $\hat{C}_{final}$ using stratified sampling and volume rendering with compositional density $(\sigma + \Delta \sigma)$ and color $(\mathbf{c} + \Delta \mathbf{c})$ [S1]:
++    $$ \hat{C}_{final}(\mathbf{r}) = \sum_{m=1}^M T_m (1 - \exp(-(\sigma_m + \Delta \sigma_m)\delta_m)) (\mathbf{c}_m + \Delta \mathbf{c}_m) $$
++    where transmittance $T_m = \exp(-\sum_{n=1}^{m-1} \sigma_n \delta_n)$ and $\delta_m$ is the distance between adjacent samples [S1].
++    Also compute $\hat{C}_{rigid}$ from $(\mathbf{c}, \sigma)$ for loss calculation [S1].
++
++8.  **Optimization:**
++    Sample $N_p$ patches per iteration. Render patches from $\hat{C}_{rigid}$ ($\hat{P}^r_k$) and $\hat{C}_{final}$ ($\hat{P}^f_k$). Compute losses against ground truth patch $P^{GT}_k$ [S1]:
++    *   LPIPS loss: $\mathcal{L}_{LPIPS} = \text{LPIPS}(VGG(\hat{P}_k), VGG(P^{GT}_k))$ [S1].
++    *   MSE loss: $\mathcal{L}_{MSE}$ for rigid and final patches [S1].
++    *   SSIM loss: $\mathcal{L}_{SSIM}$ for final patches only [S1].
++    Total loss:
++    $$ \mathcal{L}^o = \lambda \mathcal{L}^r + (1-\lambda) \mathcal{L}^f $$
++    where $\mathcal{L}^r = \mathcal{L}^r_{LPIPS} + \mathcal{L}^r_{MSE}$ and $\mathcal{L}^f = \mathcal{L}^f_{LPIPS} + \mathcal{L}^f_{MSE} + \mathcal{L}^f_{SSIM}$ [S1].
+ 
+ **Parameters:**
+ *   $K$: Total number of joints (23) [S1].
+-*   $L$: Number of frequency bands in sinusoidal PE ($L=10$) [S1].
+-*   $\lambda$: Hyperparameter for balancing rigid and final loss terms ($\lambda=0.2$) [S1].
+-*   Optimizer: Adam with betas $(0.9, 0.99)$ [S1].
++*   $L$: Number of frequency bands in positional encoding (10) [S1].
++*   $\lambda$: Hyperparameter balancing rigid and final loss (0.2) [S1].
++*   Optimizer: Adam with betas (0.9, 0.99) [S1].
+ *   Learning Rate: $5 \times 10^{-5}$ for skeletal weights volume decoder; $5 \times 10^{-3}$ for all other components [S1].
+-*   MHE Levels: 16 levels for local MHEs, 4 levels for global MHE [S1].
+-*   Feature Dimension: $H=2$ per level [S1].
+-*   Sampling: 256 samples per ray [S1].
+-*   Patch Sampling: 6 patches of size $32 \times 32$ per iteration [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class MoCoNeRF:
+-    def __init__(self, num_joints=23, num_freq_bands=10, num_mhe_levels=16, 
+-                 mhe_feature_dim=2, num_subjects=1, use_multi_subject=False):
+-        self.num_joints = num_joints
+-        self.num_freq_bands = num_freq_bands
+-        self.num_mhe_levels = num_mhe_levels
+-        self.mhe_feature_dim = mhe_feature_dim
+-        self.use_multi_subject = use_multi_subject
+-        
+-        # Skeletal weights decoder (explicit volume decoder)
+-        self.skeletal_weights_decoder = nn.Linear(3, num_joints) # [G] Input dim assumed 3 for x_c
+-        
+-        # MHE Encoders
+-        if use_multi_subject:
+-            self.global_mhe = MultiHashEncoding(num_levels=4, feature_dim=mhe_feature_dim)
+-            self.local_mhes = nn.ModuleList([
+-                MultiHashEncoding(num_levels=num_mhe_levels, feature_dim=mhe_feature_dim) 
+-                for _ in range(num_subjects)
+-            ])
+-        else:
+-            self.local_mhes = nn.ModuleList([
+-                MultiHashEncoding(num_levels=num_mhe_levels, feature_dim=mhe_feature_dim)
+-            ])
+-            
+-        # Rigid Branch MLP
+-        self.m_rigid = nn.Sequential(
+-            nn.Linear(mhe_feature_dim, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 4) # 3 for color, 1 for density
+-        )
+-        
+-        # Non-Rigid Branch MLP
+-        self.m_nr = nn.Sequential(
+-            nn.Linear(mhe_feature_dim, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 4) # 3 for color residual, 1 for density residual
+-        )
+-        
+-        # Pose-Embedded Implicit Feature Generation
+-        self.base_code = nn.Parameter(torch.randn(64)) # S in R^64
+-        self.joint_projection = nn.Linear(num_joints * (1 + 2 * num_freq_bands), 64) # W_p
+-        self.q_proj = nn.Linear(64, 64) # W_Q
+-        self.k_proj = nn.Linear(64, 64) # W_K
+-        self.v_proj = nn.Linear(64, 64) # W_V
+-        
+-        # Identity codes for multi-subject
+-        if use_multi_subject:
+-            self.identity_codes = nn.Parameter(torch.randn(num_subjects, 64))
+-            
+-        # Hyperparameters
+-        self.lambda_loss = 0.2
+-        self.num_samples_per_ray = 256
+-        self.num_patches = 6
+-        self.patch_size = 32
+-
+-    def get_canonical_point(self, x, joints):
+-        """
+-        Transform observation point x to canonical point xc using inverse linear blend skinning.
+-        x: (B, 3)
+-        joints: (B, num_joints, 3)
+-        """
+-        # [G] Skeletal weights decoder takes canonical point coordinates to predict weights
+-        # Note: The paper says "optimize an explicit volume decoder to optimize {w^c_k}".
+-        # Here we assume the decoder outputs weights for the current canonical point.
+-        # In practice, this might be a grid or another MLP. We use a simple MLP for [G].
+-        w_c = self.skeletal_weights_decoder(x) # (B, K)
+-        
+-        # Extract rotations and translations from joints? 
+-        # The paper uses R_k, t_k from the skeletal model. 
+-        # For implementation, we assume these are provided or derived from joints.
+-        # Here we assume a helper function `get_skinning_transforms` exists or is passed.
+-        # To keep it self-contained, we assume R_k, t_k are available or computed from joints.
+-        # Let's assume `joints` contains the necessary info or we have a separate transform module.
+-        # For the sake of the pseudocode, we assume `compute_obs_weights` is implemented.
+-        
+-        # w_o_k = w^c_k(R_k x + t_k) / sum_j w^c_j(R_j x + t_j)
+-        # This requires R_k, t_k. Let's assume they are passed or computed.
+-        # We will skip the detailed R/t computation and assume `compute_obs_weights` handles it.
+-        w_o = compute_obs_weights(w_c, x, joints) # (B, K)
+-        
+-        # x_c = sum_k w^o_k (R_k x + t_k)
+-        # This requires R_k, t_k.
+-        x_c = compute_canonical_point(w_o, x, joints) # (B, 3)
+-        return x_c
+-
+-    def encode(self, x_c, subject_id=None):
+-        """
+-        Query features from MHE.
+-        """
+-        if self.use_multi_subject and subject_id is not None:
+-            global_feat = self.global_mhe(x_c) # (B, num_levels * H)
+-            local_feat = self.local_mhes[subject_id](x_c) # (B, num_levels * H)
+-            # Slice first half H dimensions at each level
+-            # local_feat shape: (B, num_levels * H)
+-            # Reshape to (B, num_levels, H)
+-            local_feat_reshaped = local_feat.view(local_feat.size(0), self.num_mhe_levels, self.mhe_feature_dim)
+-            sliced_local = local_feat_reshaped[:, :, :self.mhe_feature_dim//2] # (B, num_levels, H/2)
+-            sliced_local_flat = sliced_local.view(local_feat.size(0), -1)
+-            
+-            # Concatenate global, sliced local, and identity code
+-            id_code = self.identity_codes[subject_id].unsqueeze(0).expand(local_feat.size(0), -1)
+-            feat = torch.cat([global_feat, sliced_local_flat, id_code], dim=-1)
+-        else:
+-            local_feat = self.local_mhes[0](x_c)
+-            # Slice first half
+-            local_feat_reshaped = local_feat.view(local_feat.size(0), self.num_mhe_levels, self.mhe_feature_dim)
+-            sliced_local = local_feat_reshaped[:, :, :self.mhe_feature_dim//2]
+-            sliced_local_flat = sliced_local.view(local_feat.size(0), -1)
+-            feat = sliced_local_flat
+-            
+-        return feat
+-
+-    def encode_full(self, x_c, subject_id=None):
+-        """
+-        Query full features for non-rigid branch.
+-        """
+-        if self.use_multi_subject and subject_id is not None:
+-            global_feat = self.global_mhe(x_c)
+-            local_feat = self.local_mhes[subject_id](x_c)
+-            # Concatenate global and full local
+-            id_code = self.identity_codes[subject_id].unsqueeze(0).expand(local_feat.size(0), -1)
+-            feat = torch.cat([global_feat, local_feat, id_code], dim=-1)
+-        else:
+-            feat = self.local_mhes[0](x_c)
+-        return feat
+-
+-    def generate_pose_feature(self, joints):
+-        """
+-        Generate pose-embedded implicit feature P_nr.
+-        joints: (B, num_joints, 3)
+-        """
+-        # Sinusoidal PE
+-        # gamma(j_i) = [j_i, sin(2^0 pi j_i), cos(2^0 pi j_i), ..., sin(2^{L-1} pi j_i), cos(2^{L-1} pi j_i)]
+-        # This is applied to each joint.
+-        # We can use a standard positional encoding function.
+-        # Input: (B, num_joints, 3) -> Output: (B, num_joints, 1 + 2*L)
+-        # Note: The paper says gamma(J) in R^{23x63}. 1 + 2*10 = 21? 
+-        # Wait, 23 joints * 21 = 483. But the paper says R^{23x63}. 
+-        # 63 / 23 is not integer. 
+-        # Let's re-read: "gamma(j_i) = [j_i, sin(...), cos(...)]". 
+-        # If j_i is 3D, then 1 + 2*L = 21. 23 * 21 = 483.
+-        # The paper says "gamma(J) in R^{23x63}". 
+-        # Maybe L is different or the encoding is different. 
+-        # "L=10 frequency bands". 
+-        # Perhaps the input is not 3D? Or maybe the projection is different.
+-        # Let's stick to the formula: gamma(j_i) has 1 + 2*L components.
+-        # If the paper says 63, maybe L=31? Or maybe the joint is not 3D?
+-        # "23 joint positions J". 
+-        # Let's assume the paper's dimension 63 is correct and L might be derived or there's a specific encoding.
+-        # However, the formula explicitly shows L=10. 
+-        # 1 + 2*10 = 21. 
+-        # 23 * 21 = 483. 
+-        # 63 is 3 * 21. 
+-        # Maybe the encoding is applied to each coordinate separately? 
+-        # If j_i = (x,y,z), and we encode each coordinate with L bands? 
+-        # Then for one joint: 3 * (1 + 2*L) = 3 * 21 = 63. 
+-        # This matches! So gamma is applied to each coordinate of the joint.
+-        
+-        B, K, _ = joints.shape
+-        # joints: (B, K, 3)
+-        # Reshape to (B*K, 3)
+-        joints_flat = joints.view(-1, 3)
+-        
+-        # Apply sinusoidal PE to each coordinate
+-        # Standard PE: [x, sin(x), cos(x), ..., sin(Lx), cos(Lx)]
+-        # We need to do this for x, y, z separately.
+-        # Let's assume a function `sinusoidal_pe` that takes (N, 1) and returns (N, 1+2L)
+-        
+-        x_coords = joints_flat[:, 0].unsqueeze(-1)
+-        y_coords = joints_flat[:, 1].unsqueeze(-1)
+-        z_coords = joints_flat[:, 2].unsqueeze(-1)
+-        
+-        pe_x = sinusoidal_pe(x_coords, self.num_freq_bands)
+-        pe_y = sinusoidal_pe(y_coords, self.num_freq_bands)
+-        pe_z = sinusoidal_pe(z_coords, self.num_freq_bands)
+-        
+-        pe_joint = torch.cat([pe_x, pe_y, pe_z], dim=-1) # (B*K, 63)
+-        pe_joints = pe_joint.view(B, K, -1) # (B, K, 63)
+-        
+-        # Project to raw pose-embedded code
+-        P_raw = self.joint_projection(pe_joints) # (B, K, 64)
+-        
+-        # Attention
+-        P_q = self.q_proj(self.base_code.unsqueeze(0).expand(B, -1)) # (B, 64)
+-        P_k = self.k_proj(P_raw) # (B, K, 64)
+-        P_v = self.v_proj(P_raw) # (B, K, 64)
+-        
+-        # Softmax attention
+-        # P_q: (B, 64), P_k: (B, K, 64)
+-        # P_q @ P_k^T -> (B, K)
+-        attn_weights = F.softmax(torch.matmul(P_q, P_k.transpose(1, 2)), dim=-1) # (B, K)
+-        
+-        # P_nr = attn_weights @ P_v
+-        P_nr = torch.matmul(attn_weights, P_v) # (B, 64)
+-        
+-        return P_nr
+-
+-    def forward(self, x, joints, subject_id=None):
+-        """
+-        Forward pass for a single point.
+-        """
+-        # 1. Canonical Transformation
+-        x_c = self.get_canonical_point(x, joints)
+-        
+-        # 2. Rigid Branch
+-        feat_rigid = self.encode(x_c, subject_id)
+-        out_rigid = self.m_rigid(feat_rigid)
+-        c_rigid = out_rigid[:, :3]
+-        sigma_rigid = out_rigid[:, 3:]
+-        
+-        # 3. Non-Rigid Branch
+-        feat_nr = self.encode_full(x_c, subject_id)
+-        # Freeze first half of feat_nr? 
+-        # The paper says "freeze the first half of fxc that represents the canonical radiance field".
+-        # In training, we can detach the first half or mask gradients.
+-        # For simplicity, we assume the network is designed such that the first half is not updated in M_nr.
+-        # Here we just pass the full feature.
+-        
+-        # Slice the first half for the non-rigid branch input? 
+-        # "Denote the remaining optimized half as f*_xc".
+-        # So we pass f*_xc to M_nr.
+-        # feat_nr shape: (B, num_levels * H)
+-        # Reshape to (B, num_levels, H)
+-        feat_nr_reshaped = feat_nr.view(feat_nr.size(0), self.num_mhe_levels, self.mhe_feature_dim)
+-        # Slice first half (H/2)
+-        feat_nr_frozen = feat_nr_reshaped[:, :, :self.mhe_feature_dim//2]
+-        feat_nr_opt = feat_nr_reshaped[:, :, self.mhe_feature_dim//2:]
+-        feat_nr_opt_flat = feat_nr_opt.view(feat_nr.size(0), -1)
+-        
+-        # Generate pose feature
+-        P_nr = self.generate_pose_feature(joints)
+-        
+-        # Concatenate P_nr to the first intermediate output of M_nr?
+-        # "concatenating Pnr to the first intermediate output of the MLP decoder Mnr"
+-        # This implies M_nr has an internal structure. 
+-        # For simplicity, we concatenate P_nr to the input of M_nr.
+-        # Or we modify M_nr to accept P_nr.
+-        # Let's assume M_nr takes (feat, P_nr) as input.
+-        
+-        out_nr = self.m_nr(torch.cat([feat_nr_opt_flat, P_nr], dim=-1))
+-        delta_c = out_nr[:, :3]
+-        delta_sigma = out_nr[:, 3:]
+-        
+-        # 4. Compositional Radiance
+-        c_final = c_rigid + delta_c
+-        sigma_final = sigma_rigid + delta_sigma
+-        
+-        return c_final, sigma_final, c_rigid, sigma_rigid
+-
+-    def render_ray(self, ray_origins, ray_directions, joints, subject_id=None):
+-        """
+-        Render a ray using stratified sampling.
+-        """
+-        # Sample points along the ray
+-        t_vals = torch.linspace(0, 1, self.num_samples_per_ray)
+-        # Stratified sampling
+-        t_vals = t_vals + torch.rand_like(t_vals) / self.num_samples_per_ray
+-        # Map to near/far bounds (assuming fixed bounds for simplicity)
+-        # [G] Near and far bounds should be defined.
+-        near, far = 0.1, 10.0
+-        z_vals = near * (1.0 - t_vals) + far * t_vals
+-        
+-        # Points
+-        points = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * z_vals.unsqueeze(2)
+-        points = points.view(-1, 3)
+-        
+-        # Forward pass
+-        c_final, sigma_final, c_rigid, sigma_rigid = self.forward(points, joints, subject_id)
+-        
+-        # Volume Rendering
+-        # delta_z = z_vals[i+1] - z_vals[i]
+-        delta_z = torch.diff(z_vals, dim=-1, append=torch.tensor([0.0]).to(z_vals.device))
+-        delta_z = delta_z.unsqueeze(0).expand(points.size(0), -1) # (B, M)
+-        
+-        # Transmittance
+-        # T_m = exp(-sum_{n=1}^{m-1} sigma_n delta_n)
+-        # Accumulate sigma * delta
+-        alpha = 1.0 - torch.exp(-sigma_final * delta_z)
+-        transmittance = torch.cumprod(torch.exp(-sigma_final * delta_z), dim=-1)
+-        transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=-1)
+-        
+-        # Color
+-        # C = sum T_m (1 - exp(-sigma_m delta_m)) c_m
+-        # C = sum T_m alpha_m c_m
+-        color = torch.sum(transmittance.unsqueeze(-1) * alpha.unsqueeze(-1) * c_final, dim=1)
+-        
+-        return color
+-
+-    def compute_loss(self, rendered_patches, gt_patches, rigid_patches, joints, subject_id=None):
+-        """
+-        Compute loss.
+-        """
+-        # LPIPS
+-        lpips_r = lpips_loss(rigid_patches, gt_patches)
+-        lpips_f = lpips_loss(rendered_patches, gt_patches)
+-        
+-        # MSE
+-        mse_r = F.mse_loss(rigid_patches, gt_patches)
+-        mse_f = F.mse_loss(rendered_patches, gt_patches)
+-        
+-        # SSIM
+-        ssim_f = ssim_loss(rendered_patches, gt_patches)
+-        
+-        L_r = lpips_r + mse_r
+-        L_f = lpips_f + mse_f + ssim_f
+-        
+-        L_o = self.lambda_loss * L_r + (1 - self.lambda_loss) * L_f
+-        
+-        return L_o
+-
+-# Helper functions
+-def sinusoidal_pe(x, num_freq_bands):
+-    # x: (N, 1)
+-    # Output: (N, 1 + 2*num_freq_bands)
+-    # [G] Standard sinusoidal PE implementation
+-    freq_bands = torch.linspace(0, num_freq_bands - 1, num_freq_bands).to(x.device)
+-    scales = 2 ** freq_bands * torch.pi
+-    pe = torch.cat([x, torch.sin(x * scales), torch.cos(x * scales)], dim=-1)
+-    return pe
+-
+-def compute_obs_weights(w_c, x, joints):
+-    # [G] Placeholder for complex skinning weight computation
+-    # This function should compute w_o_k based on w_c, x, and joint transforms
+-    pass
+-
+-def compute_canonical_point(w_o, x, joints):
+-    # [G] Placeholder for complex canonical point computation
+-    pass
+-
+-def lpips_loss(pred, gt):
+-    # [G] Placeholder for LPIPS loss
+-    pass
+-
+-def ssim_loss(pred, gt):
+-    # [G] Placeholder for SSIM loss
+-    pass
+-```
++*   MHE Levels: 16 levels, $H=2$ for local MHEs; 4 levels, $H=2$ for global MHE [S1].
++*   Sampling: 6 patches of size $32 \times 32$ per iteration, 256 samples per ray [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Spatial Offset Misalignment:** Traditional methods model non-rigid motions as spatial offsets, which span an unbounded range and are unique for every 3D point, leading to high computational complexity and misaligned learning objectives with RGB supervision [S1]. MoCo-NeRF avoids this by modeling residuals in radiance space [S1].
+-*   **Precision:** The freezing of the first half of the MHE features for the non-rigid branch requires careful gradient management to ensure only the optimized half is updated [S1].
+-*   **Boundary Conditions:** The inverse linear blend skinning transformation requires valid skinning weights and joint transforms. Degenerate poses or missing joints may cause undefined behavior [S1].
++*   Spatial offset strategies suffer from high computational complexity because a single spatial offset spans an unbounded range and is unique for every 3D point across all input frames and body poses [S1].
++*   Spatial offset strategies suffer from misaligned learning objectives because the learning objective of spatial offsets is not directly aligned with conventional RGB-based supervision [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is significantly reduced compared to offset-based methods. Single-subject training takes 1–2 hours on an RTX 3090 GPU [S1]. Multi-subject training (6 subjects) takes ~2 hours on one RTX 3090 GPU [S1].
+-*   **Memory Complexity:** Uses a single MHE for single-subject, and global + local MHEs for multi-subject. MHE is memory-efficient compared to dense voxel grids [S1].
+-*   **Performance:** Achieves state-of-the-art PSNR, SSIM, and LPIPS* on ZJU-MoCap and MonoCap datasets [S1].
+-    *   Single-subject (ZJU-MoCap): PSNR 31.06, SSIM 0.9734, LPIPS* 28.83 [S1].
+-    *   Multi-subject (ZJU-MoCap): PSNR 31.97, SSIM 0.9781, LPIPS* 24.54 [S1].
+-*   **Strengths:** Direct color supervision for non-rigid residuals; efficient training; scalable to multi-subject; handles complex cloth dynamics [S1].
+-*   **Limitations:** Requires skeletal joint positions as input; relies on the quality of the skeletal model [S1].
+-*   **When to Use:** Free-viewpoint rendering of dynamic humans from monocular videos where training time and non-rigid motion fidelity are critical [S1].
+-*   **When Not to Use:** Static scenes; scenes without skeletal structure; multi-view setups where other methods might be more efficient [S1].
++*   **Time Complexity:** Training time is significantly reduced compared to offset-based methods. Single-subject training takes 1–2 hours; multi-subject training (6 subjects) takes 2 hours on one Nvidia RTX 3090 GPU [S1].
++*   **Memory Complexity:** Uses a single MHE for single-subject; global MHE plus $N_s$ local MHEs for multi-subject [S1].
++*   **Performance:** On ZJU-MoCap subjects 377, 386, 387, 392, 393, 394 (23 views: 1 train, 22 eval), MoCo-NeRF achieves PSNR 31.06, SSIM 0.9734, LPIPS* 28.83 [S1]. Multi-subject evaluation on subjects 377, 386, 392 yields PSNR 31.97, SSIM 0.9781, LPIPS* 24.54 [S1].
++*   **Strengths:** Avoids high learning complexity of spatial offsets; direct color supervision enhances learning efficiency; supports unified multi-subject training without significant time increase [S1].
++*   **Limitations:** Requires accurate skeletal joint positions as input [S1].
++*   **When to use:** Free-viewpoint rendering of dynamic human subjects from monocular videos where non-rigid motion modeling is critical [S1].
++*   **When not to use:** Static scenes or scenes without articulated human subjects [S1].
+ 
+ ## Background
+-MoCo-NeRF was proposed by J. Kim et al. in 2024 [S1]. It addresses the limitations of spatial offset-based methods for modeling non-rigid motions in dynamic human rendering [S1]. The method builds on the principles of Neural Radiance Fields (NeRF) and linear blend skinning [S1]. It is evaluated on the ZJU-MoCap and MonoCap datasets [S1].
++MoCo-NeRF was proposed by J. Kim et al. in the paper "Motion-Oriented Compositional Neural Radiance Fields for Monocular Dynamic Human Modeling" [S1]. It addresses the limitations of conventional spatial offset strategies in modeling non-rigid motions for dynamic clothed humans [S1]. The method is evaluated on the ZJU-MoCap and MonoCap datasets [S1].
+ 
+ ## Sources

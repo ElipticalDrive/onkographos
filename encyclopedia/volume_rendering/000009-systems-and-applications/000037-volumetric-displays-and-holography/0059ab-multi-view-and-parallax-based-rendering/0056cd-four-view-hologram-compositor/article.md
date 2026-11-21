@@ -1,0 +1,190 @@
+# Four-View Hologram Compositor
+
+Also called: FourViewCompositor, Pepper's Ghost volumetric display rendering
+
+## Overview
+The Four-View Hologram Compositor is a rendering technique that projects four synchronized perspective views of a 3D scene onto a four-sided acrylic pyramid to create a floating volumetric image via the Pepper's Ghost illusion [S1, unofficial]. It differs from lenticular or light-field systems by using physical reflection parity rather than angular sampling, requiring independent rotation and mirroring of each view to match the geometry of the pyramid's reflective surfaces [S1, unofficial].
+
+## How it works
+The method generates four perspective views from cameras arranged in a circle around the scene center, renders them to separate texture targets, and composites them onto a single screen using textured quads with specific transformations to align with the physical pyramid [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**: A 3D scene graph (objects, lights), camera parameters (elevation, FOV), and calibration data (pyramid scale, rotation, per-view offsets and mirroring flags).
+*   **Outputs**: A single 2D bitmap displayed on a screen, which serves as the light source for the holographic pyramid.
+
+### Data Structures
+The implementation uses the following structures [S1, unofficial]:
+
+1.  **ViewSlot**: Represents one of the four views.
+    *   `name`: Enum `ViewName` ('front', 'right', 'back', 'left').
+    *   `camera`: A `PerspectiveCamera` instance.
+    *   `target`: A `WebGLRenderTarget` with `RGBAFormat`, `LinearFilter`, and a depth buffer.
+    *   `quad`: A `Mesh` using `PlaneGeometry`.
+    *   `material`: A `MeshBasicMaterial` with `AdditiveBlending`, `transparent: true`, `depthTest: false`, and `depthWrite: false`.
+
+2.  **VIEW_LAYOUT**: A constant mapping view names to their geometric properties [S1, unofficial]:
+    *   `front`: azimuth $0$, dir $[0, -1]$
+    *   `right`: azimuth $\pi/2$, dir $[1, 0]$
+    *   `back`: azimuth $\pi$, dir $[0, 1]$
+    *   `left`: azimuth $-\pi/2$, dir $[-1, 0]$
+
+### Parameters
+*   `elevation`: Camera elevation angle above the object in degrees. Default: $12^\circ$ [S1, unofficial].
+*   `fov`: Field of view for the perspective cameras in degrees. Default: $42^\circ$ [S1, unofficial].
+*   `pyramid.scale`: Global scaling factor for the pyramid geometry [S1, unofficial].
+*   `view.scale`: Per-view scaling factor [S1, unofficial].
+*   `view.rotation`: Per-view rotation offset [S1, unofficial].
+*   `view.offset`: Per-view position offset [S1, unofficial].
+*   `mirrorX`, `mirrorY`: Boolean flags for texture mirroring [S1, unofficial].
+
+### Steps
+
+1.  **Initialize Cameras and Targets**: Create four `PerspectiveCamera` instances and four `WebGLRenderTarget` instances. Configure targets with `RGBAFormat`, `LinearFilter`, and depth buffers [S1, unofficial].
+2.  **Position Cameras**: For each view in `VIEW_LAYOUT`:
+    *   Calculate horizontal distance: $d_{horiz} = \cos(\text{elevation}) \times \text{distance}$ [S1, unofficial].
+    *   Calculate vertical height: $d_{vert} = \sin(\text{elevation}) \times \text{distance}$ [S1, unofficial].
+    *   Set camera position:
+        $$
+        \begin{aligned}
+        x &= \sin(\text{azimuth}) \times d_{horiz} \\
+        y &= d_{vert} \\
+        z &= \cos(\text{azimuth}) \times d_{horiz}
+        \end{aligned}
+        $$
+    *   Call `lookAt(target)` and `updateProjectionMatrix()` [S1, unofficial].
+3.  **Create Composite Quads**: For each view, create a `Mesh` with `PlaneGeometry` and `MeshBasicMaterial` (AdditiveBlending, transparent, no depth test/write). These quads will display the rendered views [S1, unofficial].
+4.  **Render Views**: For each frame:
+    *   For each `ViewSlot`:
+        *   Set the renderer's render target to the slot's `target`.
+        *   Clear the renderer.
+        *   Render the scene using the slot's `camera` [S1, unofficial].
+    *   Set the renderer's render target back to the screen (previous target).
+    *   Clear the renderer.
+    *   Render the `compositeScene` (containing the four quads) using an orthographic `compositeCamera` [S1, unofficial].
+5.  **Calibrate Composite Quads**: Apply calibration to each quad's position, scale, rotation, and texture mirroring [S1, unofficial]:
+    *   Calculate base size: $s_{base} = \min(\text{width}, \text{height}) / 2$ [S1, unofficial].
+    *   Calculate global rotation from calibration data [S1, unofficial].
+    *   For each slot:
+        *   Rotate the view direction vector by the global rotation.
+        *   Scale by $s_{base} \times \text{pyramid.scale} \times \text{view.scale}$.
+        *   Add `view.offset` to determine quad position.
+        *   Set quad scale to $(s, s, 1)$ where $s$ is the calculated size.
+        *   Set quad rotation.z to $\text{globalRot} + \text{view.rotation}$ [S1, unofficial].
+        *   Apply texture mirroring:
+            *   Set `tex.repeat` to $(-1, 1)$ or $(1, -1)$ based on `mirrorX`/`mirrorY` flags.
+            *   Set `tex.offset` to $(1, 0)$ or $(0, 1)$ to compensate for the repeat flip [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+cameras = []
+targets = []
+quads = []
+VIEW_LAYOUT = {
+    'front': {'azimuth': 0, 'dir': [0, -1]},
+    'right': {'azimuth': PI/2, 'dir': [1, 0]},
+    'back': {'azimuth': PI, 'dir': [0, 1]},
+    'left': {'azimuth': -PI/2, 'dir': [-1, 0]}
+}
+
+def init():
+    for name, layout in VIEW_LAYOUT.items():
+        # Create camera
+        cam = PerspectiveCamera(fov=42, aspect=1.0) # Aspect assumed 1.0 for square pyramid base mapping
+        # Position camera
+        elev_rad = radians(12)
+        d_horiz = cos(elev_rad) * distance
+        d_vert = sin(elev_rad) * distance
+        az = layout['azimuth']
+        cam.position.set(sin(az) * d_horiz, d_vert, cos(az) * d_horiz)
+        cam.lookAt(target)
+        cam.updateProjectionMatrix()
+        cameras.append(cam)
+        
+        # Create render target
+        target = WebGLRenderTarget(width, height, format=RGBAFormat, filter=LinearFilter, depth=True)
+        targets.append(target)
+        
+        # Create quad
+        quad = Mesh(PlaneGeometry(1, 1), MeshBasicMaterial(
+            blending=AdditiveBlending,
+            transparent=True,
+            depthTest=False,
+            depthWrite=False
+        ))
+        quads.append(quad)
+
+def render_frame(scene, calibration):
+    # 1. Render four views
+    for i in range(4):
+        renderer.setRenderTarget(targets[i])
+        renderer.clear()
+        renderer.render(scene, cameras[i])
+        
+    # 2. Composite
+    renderer.setRenderTarget(None) # Screen
+    renderer.clear()
+    
+    base_size = min(renderer.width, renderer.height) / 2
+    global_rot = calibration.global_rotation
+    
+    for i in range(4):
+        view_cal = calibration.views[i]
+        layout = VIEW_LAYOUT[view_cal.name]
+        
+        # Calculate position
+        # Rotate view direction by global rotation
+        dir_vec = layout['dir']
+        rot_mat = rotation_matrix_z(global_rot)
+        rotated_dir = multiply_vector_matrix(dir_vec, rot_mat)
+        
+        scale_factor = base_size * calibration.pyramid_scale * view_cal.scale
+        pos = multiply_vector_matrix(rotated_dir, scale_factor)
+        pos = add_vectors(pos, view_cal.offset)
+        
+        quads[i].position.copy(pos)
+        quads[i].scale.set(scale_factor, scale_factor, 1)
+        quads[i].rotation.z = global_rot + view_cal.rotation
+        
+        # Apply texture mirroring
+        tex = quads[i].material.map
+        if view_cal.mirrorX:
+            tex.repeat.x = -1
+            tex.offset.x = 1
+        else:
+            tex.repeat.x = 1
+            tex.offset.x = 0
+            
+        if view_cal.mirrorY:
+            tex.repeat.y = -1
+            tex.offset.y = 1
+        else:
+            tex.repeat.y = 1
+            tex.offset.y = 0
+            
+    # Render composite scene with orthographic camera
+    renderer.render(composite_scene, ortho_camera)
+```
+
+### Edge Cases and Pitfalls
+*   **Opaque Quads**: Using opaque quads for compositing causes the last drawn view to paint black corners over adjacent views, creating visible rectangular bites. This is solved by using `AdditiveBlending`, as the scene renders emissive marks on black, and black adds nothing, allowing overlapping corners to contribute zero [S1, unofficial].
+*   **Mirroring vs. Culling**: Mirroring via negative scale breaks backface culling. Therefore, texture mirroring is achieved via `tex.repeat` and `tex.offset` rather than mesh scaling [S1, unofficial].
+*   **Scissor Passes**: Scissor viewport passes cannot rotate or mirror views independently, which is required because the reflection parity through the acrylic is not knowable in advance [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: The cost is four scene passes plus one composite pass [S1, unofficial].
+*   **Memory Complexity**: Requires memory for four render targets (width $\times$ height $\times$ 4 bytes per pixel for RGBA) plus the scene graph [S1, unofficial].
+*   **Measured Performance**: Holds 60 fps comfortably on a phone because the scene consists of a handful of additive primitives [S1, unofficial].
+*   **Strengths**: No headset or glasses required; viewable from every side; real-time interaction via hand gestures [S1, unofficial].
+*   **Limitations**: Requires a physical acrylic pyramid; limited to scenes that fit within the pyramid's field of view; performance depends on the complexity of the 3D scene rendered in four passes [S1, unofficial].
+*   **When to Use**: When a physical, glasses-free volumetric display is desired for presentations, education, or interactive installations [S1, unofficial].
+*   **When Not to Use**: When high-resolution, large-scale volumetric displays are needed, or when the hardware setup (pyramid) is not feasible [S1, unofficial].
+
+## Background
+The Four-View Hologram Compositor is based on the Pepper's Ghost illusion, adapted for modern mobile devices and 3D models [S1, unofficial]. It was implemented as part of the `hologram-system` project by Ojasra Kulkarni, which integrates hand tracking via MediaPipe and WebSocket communication to control the rendered views in real time [S1, unofficial]. The system is designed for applications in engineering, medical imaging, product presentation, and education [S1, unofficial].
+
+## Sources
+[S1] ojasra0kulkarni/hologram-system, https://github.com/ojasra0kulkarni/hologram-system, fetched 2026-10-26 (unofficial)

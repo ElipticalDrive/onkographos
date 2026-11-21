@@ -1,0 +1,110 @@
+# Dichotomy-based Triggering for Occupancy Field
+
+Also called: Bisection Triggering, OF Triggering
+
+## Overview
+Dichotomy-based Triggering is a root-finding strategy for locating zero-crossings in relaxed binary Occupancy Fields (OF). It solves the problem where gradient-based optimization (e.g., SGD) fails to converge to the surface $Z$ when the initial query point is far from the isosurface. Unlike SGD, which relies on local gradients that may be vanishing or misleading in relaxed binary fields, this method uses Bolzano's theorem to guarantee convergence to a root within a bounded interval, making it robust for implicit surface extraction [S1].
+
+## How it works
+**Inputs:**
+- Implicit occupancy field function $F(\mathbf{x}) = f(T(\mathbf{x}))$, where $T$ is the neural network and $f$ is a sigmoid relaxation function [S1].
+- Search tolerance $\epsilon$ (scalar).
+- Maximum iterations (optional, for safety) [G].
+
+**Outputs:**
+- A point $\mathbf{x}^*$ such that $F(\mathbf{x}^*) \approx 0$ (within tolerance $\epsilon$).
+
+**Data Structures:**
+- Two points $\mathbf{x}_t^+$ and $\mathbf{x}_t^-$ representing the current interval endpoints.
+- Scalars $F(\mathbf{x}_t^+)$ and $F(\mathbf{x}_t^-)$ storing the occupancy values at endpoints.
+
+**Steps:**
+1. **Initialization:** Randomly sample points in the domain until a pair $\{\mathbf{x}_0^+, \mathbf{x}_0^-\}$ is found such that $F(\mathbf{x}_0^+) > 0$ and $F(\mathbf{x}_0^-) < 0$. This ensures the interval brackets a root [S1].
+2. **Bisection Loop:** While $|F(\mathbf{x}_t^+) - F(\mathbf{x}_t^-)| > \epsilon$:
+   a. Compute midpoint: $\mathbf{x}_m = \frac{\mathbf{x}_t^+ + \mathbf{x}_t^-}{2}$.
+   b. Evaluate $F(\mathbf{x}_m)$.
+   c. If $F(\mathbf{x}_m) > 0$, set $\mathbf{x}_{t+1}^+ = \mathbf{x}_m$ and $\mathbf{x}_{t+1}^- = \mathbf{x}_t^-$.
+   d. Else, set $\mathbf{x}_{t+1}^+ = \mathbf{x}_t^+$ and $\mathbf{x}_{t+1}^- = \mathbf{x}_m$.
+   e. Increment $t$.
+3. **Termination:** Return $\mathbf{x}_t^+$ or $\mathbf{x}_t^-$ (or their average) as the zero-crossing point [S1].
+
+**Parameters:**
+- $\epsilon$: Tolerance for convergence. Not given in the sources.
+
+**Edge Cases:**
+- **No Bracketing Pair:** If the search space is bounded and no pair with opposite signs is found, the method fails. [G] Implementation should include a fallback or error handling.
+- **Flat Regions:** If $F$ is flat near the root, convergence may be slow. [G] The bisection method is robust but linearly convergent; derivative-free.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dichotomy_triggering(F, epsilon, max_samples=10000, max_iter=100):
+    """
+    Find a zero-crossing of F using dichotomy (bisection).
+    F: callable, returns occupancy value.
+    epsilon: tolerance for |F(x+) - F(x-)|.
+    """
+    # Step 1: Find bracketing pair
+    x_plus = None
+    x_minus = None
+    
+    for _ in range(max_samples):
+        # Random sample in domain [G]: assume domain is known or bounded
+        # For simplicity, assume uniform sampling in [-1, 1]^3
+        candidate = random.uniform(-1, 1, 3)
+        val = F(candidate)
+        
+        if val > 0:
+            if x_minus is not None:
+                x_plus = candidate
+                break
+            else:
+                x_plus = candidate
+        elif val < 0:
+            if x_plus is not None:
+                x_minus = candidate
+                break
+            else:
+                x_minus = candidate
+                
+    if x_plus is None or x_minus is None:
+        raise ValueError("Could not find bracketing pair")
+
+    # Step 2: Bisection
+    for _ in range(max_iter):
+        f_plus = F(x_plus)
+        f_minus = F(x_minus)
+        
+        if abs(f_plus - f_minus) <= epsilon:
+            return (x_plus + x_minus) / 2.0
+            
+        midpoint = (x_plus + x_minus) / 2.0
+        f_mid = F(midpoint)
+        
+        if f_mid > 0:
+            x_plus = midpoint
+        else:
+            x_minus = midpoint
+            
+    return (x_plus + x_minus) / 2.0
+```
+
+## Subtopics
+
+### [SparseOcc](19154-sparseocc.md)
+SparseOcc is a method for learning neural implicit shape representations from point clouds using binary occupancy fields rather than Signed Distance Fields (SDFs). It stabilizes training by avoiding the eikonal equation constraints required by SDFs, making it suitable for sparse or noisy data such as medical CT scans. It differs from SDF-based methods by optimizing the zero-crossings of a margin uncertainty function via Newton-Raphson iteration, and from other occupancy methods by introducing an entropy-based regularization to guide the field toward minimal entropy in free space and maximal entropy at the surface.
+
+## Operating characteristics
+- **Time Complexity:** Linear in the number of bisection iterations, which is logarithmic in the inverse of the tolerance $\epsilon$ ($O(\log(1/\epsilon))$). Each iteration requires one evaluation of $F(\mathbf{x})$, which involves a neural network forward pass.
+- **Memory Complexity:** $O(1)$ auxiliary memory for the interval endpoints.
+- **Strengths:** Guaranteed convergence if a bracketing pair exists. Robust to poor initialization compared to SGD. [S1]
+- **Limitations:** Requires finding an initial bracketing pair, which may be expensive in large empty spaces. Slower than gradient-based methods when close to the surface and gradients are informative. [S1]
+- **When to Use:** When extracting meshes from relaxed binary OFs where SGD fails to converge to the zero-level set, especially for points far from the surface. [S1]
+- **When Not to Use:** When high precision is needed very quickly and the initial point is close to the surface (SGD may be faster).
+
+## Background
+The method was proposed in the context of efficient implementation of analytic marching for deep implicit surface networks [S1]. It addresses the limitation of gradient-based optimization in relaxed binary occupancy fields, where the sigmoid relaxation makes the gradient small or misleading far from the surface. By leveraging Bolzano's theorem, it provides a deterministic way to locate the zero-crossing [S1].
+
+## Sources
+[S1] Learning and Meshing From Deep Implicit Surface Networks Using an Efficient Implementation of Analytic Marching, https://doi.org/10.1109/tpami.2021.3135007, fetched 2026-10-26

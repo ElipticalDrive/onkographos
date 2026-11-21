@@ -1,0 +1,147 @@
+# Voxel Edit Brush Operations
+
+Also called: Place/Carve/Fill/Paint
+
+## Overview
+Voxel Edit Brush Operations provide a set of interactive tools (Place, Carve, Fill, Paint) for modifying unbounded 3D voxel grids using world-space spherical or cylindrical selection volumes [S1, unofficial][S2]. The method solves the problem of real-time, view-independent sculpting and material insertion in volumetric data, ensuring consistent behavior across chunk boundaries by addressing voxels via unbounded world-grid coordinates rather than local indices [S1, unofficial]. Unlike parent methods that may rely on sparse structures or offline processing, this approach utilizes dense 3D textures for mask lookups to enable O(1) per-fragment operations [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A 3D voxel grid (represented as a `VolumeTex` and a `SculptMap` mask texture), a brush center $P$, and a brush radius $r$ [S2]. For cylindrical operations, a projection plane is also required [S2].
+*   **Outputs:** Modified voxel occupancy or material values in the affected region [S2].
+
+**Data Structures:**
+*   **SculptMap:** A 3D texture (`sampler3D`) storing mask information [S2]. The alpha channel ($a$) typically represents visibility or erasure masks, while the blue channel ($b$) may represent addition or insertion masks [S2].
+*   **VolumeTex:** A 3D texture (`sampler3D`) storing the base volume data, including RGB color and alpha occupancy [S2].
+*   **Brush Parameters:**
+    *   $P$: A 4D vector (`float4`) where $P.xyz$ is the 3D center of the brush and $P.a$ is the tool radius $r$ [S2].
+    *   For cylindrical tools, $P$ represents a 2D point on a projection plane, with $r$ as the cylinder radius [S2].
+
+**Steps:**
+1.  **Coordinate Addressing:** Address voxels using unbounded world-grid coordinates to ensure consistent behavior across chunk boundaries (e.g., 32-cell boundaries) [S1, unofficial].
+2.  **Stroke Accumulation:** Accumulate edits into a stroke across frames [S1, unofficial]. On mouse release, push a single `VoxelEditCommand` to process the batch [S1, unofficial].
+3.  **Selection Volume Definition:**
+    *   **Spherical (Carve/Fill):** Define a sphere with center $P$ and radius $r$ [S2].
+    *   **Cylindrical (Eraser):** Define a projection plane and a 2D point $P$ on it, independent of viewing parameters [S2].
+4.  **Distance Calculation:**
+    *   **Spherical:** Calculate the 3D Euclidean distance $d$ from the voxel center $V$ to $P$:
+        $$ d = \text{distance}(P, V) $$
+        If $d < r$, the voxel is selected [S2].
+    *   **Cylindrical:** Orthogonally project the voxel center $V$ onto the projection plane to get $V_{proj}$ [S2]. Calculate the 2D Euclidean distance $d$ from $V_{proj}$ to $P$:
+        $$ d = \text{length}(V_{proj}.xy - P.xy) $$
+        If $d < r$, the voxel is selected [S2].
+5.  **Operation Execution:**
+    *   **Carve:** If the voxel is selected, remove it by clearing its visibility mask [S2].
+    *   **Fill:** If the voxel is selected, check if it currently holds a background value; if so, insert material without overwriting existing material [S2].
+    *   **Place/Paint:** Modify specific channels of the mask texture (e.g., setting alpha or color channels) based on the selection [S2].
+
+**Pseudocode (Spherical Carve/Fill in Fragment Shader):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_brush(voxel_pos, brush_center, brush_radius, mode, sculpt_map, volume_tex):
+    # 1. Calculate normalized 3D Euclidean distance
+    d = length(voxel_pos - brush_center) / brush_radius
+    if d >= 1.0:
+        return sculpt_map(voxel_pos)  # Outside brush radius, return unchanged
+
+    mask = sculpt_map(voxel_pos)
+    volume = volume_tex(voxel_pos)
+
+    if mode == "carve":
+        # Remove voxel by clearing visibility mask
+        mask.a = 0.0
+    elif mode == "fill":
+        # Insert material only if voxel is background; do not overwrite
+        if volume.r == 0.0 or mask.a == 0.0:
+            mask.b = 1.0  # Mark for addition
+    elif mode == "paint":
+        # Modify mask channels for visual feedback or material stamping
+        mask.a = 1.0
+    elif mode == "place":
+        # Add material to empty space
+        if volume.r == 0.0:
+            mask.b = 1.0
+
+    return mask
+```
+
+**Parameters:**
+*   **Brush Radius ($r$):** World-space radius defining the spherical area of influence [S1, unofficial][S2].
+*   **Brush Center ($P$):** 3D point specifying the center of the selection volume [S2].
+*   **Projection Plane:** Required for cylindrical operations; defines the axis and orientation of the brush [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Chunk Boundaries:** Using chunk-local indices causes inconsistent behavior at boundaries; unbounded world-grid coordinates must be used [S1, unofficial].
+*   **Overwriting:** The Fill tool must check current voxel values to avoid overwriting existing material [S2].
+*   **Undo/Losslessness:** Snapshots should capture whole chunks, not cell deltas, to allow lossless undo (removing a chunk entirely if it becomes empty) [S1, unofficial].
+
+## Subtopics
+
+### [Voxel Edit Brush Operations — Place/Carve/Fill/Paint, Real-time Voxel Editing, VoxelEdit](12596-voxel-edit-brush-operations-place-carve-fill-paint-real-time.md)
+This variant implements real-time voxel carving in a browser-based 3D Gaussian Splatting (3DGS) renderer by injecting a discrete voxel occupancy mask into the fragment shader via a shader patching hook [12596-voxel-edit-brush-operations-place-carve-fill-paint-real-time.md]. It solves the problem of crisp, axis-aligned removal of splats using a `discard` instruction, avoiding the performance penalty of per-fragment analytic SDF evaluations or per-splat geometric tests [12596-voxel-edit-brush-operations-place-carve-fill-paint-real-time.md]. Unlike parent methods that may rely on sparse structures or offline processing, this approach uses a dense 3D texture sized to the voxel grid, enabling O(1) per-fragment lookup regardless of the number of carved cells [12596-voxel-edit-brush-operations-place-carve-fill-paint-real-time.md].
+
+### FSEraser
+A fragment shader that implements the eraser tool for volume sculpting, modifying the alpha channel of a SculptMap texture based on the distance from a 3D point $P$ to the current fragment [S2]. It uses a virtual hand metaphor, detaching the cursor from viewing parameters to allow free rotation and translation [S2].
+**Layout:**
+*   **Input Struct:** `vertex2fragment` with field `Tex0` (float2, TEXCOORD0) [S2].
+*   **Uniforms:** `SculptMap` (sampler3D, TEXUNIT0), `VolumeTex` (sampler3D, TEXUNIT1), `P` (float4, C0) where `P.xyz` is the 3D point and `P.a` is the tool radius [S2].
+**Steps:**
+1.  Sample `SculptMap` at `v2f.Tex0`: `Col = tex3D(SculptMap, v2f.Tex0)` [S2].
+2.  Calculate normalized 3D Euclidean distance $D$ between $P$ and `texCoord`:
+    $$ D = \frac{\text{distance}(\text{float4}(P.xyz, 1), \text{texCoord})}{P.a} $$
+    [S2].
+3.  If $D < \text{Col}.a$, update `Col.a` to $D$ [S2].
+
+### Brush-based Voxel Editing & Island Detachment
+Applies a volumetric brush to a voxel world, then identifies and detaches disconnected support islands that lose structural integrity after the edit [S4, unofficial].
+**Steps:**
+1.  Convert spec to brush object via `brushFromSpec(spec)` [S4, unofficial].
+2.  If `lift` is true, call `liftGrid(w, brush)` to extract matter before carving [S4, unofficial].
+3.  Call `w.applyBrush(brush, { op, mat, hardness })` to modify the world [S4, unofficial].
+4.  If `conn` and `op === 'carve'` and `r.changed`, call `findIslands(w, box, { erode, near })` [S4, unofficial].
+5.  For each island, call `detachIsland(w, isl, { keepGrid: !small })` [S4, unofficial].
+6.  If island count < `debris`, add to `reply.dust` with center and removed count [S4, unofficial].
+7.  Else, call `gridPrep(g, 0)`, transfer buffers, and add to `reply.islands` [S4, unofficial].
+**Parameters:** `debris` (minimum voxel count for an island to become a physics body instead of dust, default: 16), `erode` (erosion radius applied to island detection box, default: 0), `lift` (boolean flag to extract carved matter as a separate grid before removal, default: false) [S4, unofficial].
+
+### Local-to-World Frame Grid Carving
+Carves a voxel body's grid using a world-space brush, transforming the brush's signed distance field into the body's local frame for evaluation [S4, unofficial].
+**Steps:**
+1.  Parse brush spec, world transform $t$, local frame $f$, and row-major matrix $m$ [S4, unofficial].
+2.  Define local distance function: $lx = x - f[0]$, $ly = y - f[1]$, $lz = z - f[2]$; $world\_x = t[0] + m[0]*lx + m[1]*ly + m[2]*lz$, $world\_y = t[1] + m[3]*lx + m[4]*ly + m[5]*lz$, $world\_z = t[2] + m[6]*lx + m[7]*ly + m[8]*lz$; return $b.d(world\_x, world\_y, world\_z)$ [S4, unofficial].
+3.  Call `carveGrid(g, local, { hardness })` [S4, unofficial].
+4.  Transfer `g.sdf.buffer` and `g.mat.buffer` [S4, unofficial].
+5.  Return `{ grid, removed, changed }` [S4, unofficial].
+
+### Virtual Sculpture Operations
+Sculpture actions (addition or subtraction of material) performed by intersecting tool and material voxels and modifying material voxel values based on filling percentage [S5, unofficial].
+**Steps:**
+1.  Perform a collision test between the bounding boxes of the tool and the material [S5, unofficial].
+2.  If collision occurs, find voxels of material and tool in the collision zone [S5, unofficial].
+3.  Extract the value of each tool voxel in the collision zone using discrete rotation [S5, unofficial].
+4.  Find which tool voxel intersects which material voxel in the collision zone [S5, unofficial].
+5.  Compute the filling percentage of the material voxel by the tool voxel [S5, unofficial].
+6.  In 'Adding material' mode: if tool voxel is not null, add filling percentage to material voxel value; clamp to 255 if greater [S5, unofficial].
+7.  In 'Subtracting material' mode: if tool voxel is not null, subtract filling percentage from material voxel value; clamp to 0 if negative [S5, unofficial].
+8.  Rebuild triangulated surface by marching cubes only for modified parts of the 3D object for each level of detail [S5, unofficial].
+**Performance:** Sculpting a chain with a ball, in 256x256x256, using spherical, cubic, and ring tools took less than 10 minutes [S5, unofficial]. Sculpting a more complicated object using a previously designed tool took less than 5 minutes [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** O(1) per-fragment lookup for mask access when using dense 3D textures [S1, unofficial]. Stroke accumulation allows batch processing, pushing a single command on release [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of chunks affected by the edit, as only changed chunks are kept in snapshots for undo [S1, unofficial].
+*   **Measured Performance:** Byte-equality validated against voxlap C's `setspans`, ensuring identical behavior to the reference implementation [S3]. Sculpting a 256x256x256 chain with various tools completes in under 10 minutes [S5, unofficial].
+*   **Strengths:** View-independent, consistent across chunk boundaries, supports lossless undo via chunk snapshots [S1, unofficial].
+*   **Limitations:** Dense texture approach may consume significant memory for large grids [S1, unofficial]. Cylindrical tools require additional projection plane calculations [S2].
+*   **When to Use:** Real-time voxel sculpting, destructible terrain, interactive volume editing where view independence is critical [S1, unofficial][S2].
+*   **When Not to Use:** Extremely large sparse volumes where dense textures are prohibitive, or when analytic SDFs are preferred for smooth surfaces [S1, unofficial].
+
+## Background
+The concept of voxel editing brushes originated in 3D sculpting tools that use a virtual hand metaphor to detach the cursor from viewing parameters, allowing free rotation and translation [S2]. The specific implementation of Place/Carve/Fill/Paint operations over unbounded grids with chunk-based undo was developed for real-time voxel engines, such as those used in browser-based 3D Gaussian Splatting renderers [S1, unofficial]. The FSEraser and related tools were described in academic literature on volume sculpting based on geometric tools [S2]. The runtime editing pipeline for spans, cubes, and spheres has been validated against reference implementations like voxlap's `setspans` [S3]. Virtual sculpture operations using Haar wavelets and voxel representations were later introduced to handle subtraction and addition of material efficiently [S5, unofficial].
+
+## Sources
+[S1] feat(terrain): DDA voxel raycast + editing brushes with undo/redo, https://github.com/drsnuggles8/OloEngineBase/pull/973, fetched 2026-10-25 (unofficial)
+[S2] Volume sculpting based on geometric tools, https://doi.org/10.1007/bf03194498, fetched 2026-10-26
+[S3] roxlap-cli 0.32.0, https://docs.rs/crate/roxlap-cli/latest, fetched 2026-10-29
+[S4] sh1ftmaker/voxel-wars, https://github.com/sh1ftmaker/voxel-wars, fetched 2026-10-28 (unofficial)
+[S5] , https://www.scitepress.org/PublishedPapers/2006/13546/pdf/index.html, fetched 2026-10-27 (unofficial)

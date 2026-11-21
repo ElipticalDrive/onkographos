@@ -1,0 +1,103 @@
+# Default Camera Sort
+
+Also called: Back-to-front sort, Splat Painter's Sort, sort splats for the scene camera by default
+
+## Overview
+Default Camera Sort is a compositing technique for oriented Gaussian ellipses (splats) that sorts them back-to-front relative to a camera viewpoint to ensure correct translucent blending [S2, unofficial]. It differs from its siblings by automatically binding the sort order to the active scene camera without requiring explicit provider configuration [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A cloud of splats managed by `SplatNode`, and a camera viewpoint (either the scene camera or a custom provider) [S2, unofficial].
+*   **Output:** A compositing order of splats sorted back-to-front relative to the camera [S2, unofficial].
+
+**Data Structures:**
+The `SplatNode` manages the `SplatCloud` and triggers the sort operation on a background thread whenever the camera moves [S2, unofficial].
+
+**Steps:**
+1.  **Determine Viewpoint:** Check if a `cameraPositionProvider` is set. If `null` (the default), use the scene camera position [S2, unofficial]. If provided, invoke the lambda to retrieve the `Position` object representing the custom viewpoint [S2, unofficial].
+2.  **Calculate Depths:** For each splat $i$, calculate the distance $d_i$ from the splat's center position $P_i$ to the camera position $C$:
+    $$ d_i = \| P_i - C \| $$
+3.  **Sort:** Sort the splats in descending order of $d_i$ (back-to-front) [S2, unofficial]. The sort executes on a background thread to avoid blocking the main rendering loop [S2, unofficial].
+4.  **Update Compositing Order:** The node automatically applies the sorted order to the rendering pipeline [S2, unofficial].
+
+**Parameters:**
+*   `cameraPositionProvider`: A lambda returning a `Position` object representing the camera's world position. If `null`, the scene camera is used (default). If provided, it enables the back-to-front painter's sort for that specific viewpoint [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Orbiting Artifacts:** If `cameraPositionProvider` is explicitly set to `null` in older versions where it was required for sorting, or if the automatic default sort is inactive, the compositing order remains as loaded. This causes visual popping artifacts when orbiting the camera because the splat order does not update to match the new viewpoint [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the Default Camera Sort logic within SplatNode
+# Assumes SplatCloud has a list of splats, each with a position vector.
+
+def update_sort_order(splat_cloud, camera_position_provider):
+    if splat_cloud is None:
+        return
+
+    # Step 1: Determine camera position
+    if camera_position_provider is not None:
+        camera_pos = camera_position_provider()
+    else:
+        # Default: use scene camera
+        camera_pos = get_scene_camera_position()
+
+    # Step 2: Calculate depths
+    # Each splat has a 'pos' attribute (vec3)
+    depths = []
+    for i in range(splat_cloud.count):
+        splat = splat_cloud.splats[i]
+        # Euclidean distance
+        diff = splat.pos - camera_pos
+        depth = (diff.x**2 + diff.y**2 + diff.z**2)**0.5
+        depths.append((depth, i))
+
+    # Step 3: Sort back-to-front (descending depth)
+    # Stable sort is preferred to maintain original order for equal depths
+    depths.sort(key=lambda x: x[0], reverse=True)
+
+    # Step 4: Apply order
+    # Reorder the splat cloud or update the index buffer
+    sorted_indices = [item[1] for item in depths]
+    splat_cloud.apply_render_order(sorted_indices)
+
+def get_scene_camera_position():
+    # Standard operation to retrieve the active scene camera's world position [G]
+    pass
+```
+
+## Subtopics
+
+### Camera Distance Sorting
+Sorts visible meshes in ascending order of squared distance to the camera position [S3, unofficial]. Choose when a distance-based metric is preferred over Euclidean depth for visibility culling or rendering order [G].
+
+### Gaussian Sorting
+General term for ordering splats by depth. Choose when implementing custom sort logic outside the default node behavior [G]. See [Gaussian Sorting](2845-gaussian-sorting.md).
+
+### Fast Splat Sorting
+Optimized sorting techniques. Choose when performance is critical and the default sort is too slow [G]. See [Fast Splat Sorting](2953-fast-splat-sorting.md).
+
+### Gaussian Splat Sorting
+Specific implementations for Gaussian splats. Choose for specialized Gaussian rendering pipelines [G]. See [Gaussian Splat Sorting](3372-gaussian-splat-sorting.md).
+
+### 32-bit Tile-Depth Pair Sorting
+Tile-based sorting approach. Choose for tile-based renderers or when depth precision issues arise with standard sorting [G]. See [32-bit Tile-Depth Pair Sorting](9408-32-bit-tile-depth-pair-sorting.md).
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The sort is executed on a background thread to prevent frame drops during camera movement [S2, unofficial].
+*   **Strengths:** Eliminates visual popping artifacts during camera orbiting by automatically updating the compositing order [S2, unofficial]. Removes the need for manual camera position tracking in standard use cases [S1, S2, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Standard Gaussian splat rendering where correct translucent blending is required and the camera moves [S2, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The Default Camera Sort was introduced as part of the `SplatNode` implementation in the SceneView library, specifically in commit `e7e8fd4` [S2, unofficial]. It was developed to address visual popping artifacts that occurred when orbiting cameras in Gaussian splat visualizations, which previously relied on a static load order or required an explicit `cameraPositionProvider` [S2, unofficial]. The change was part of a broader effort to improve the robustness of Gaussian splatting on platforms like iOS and VisionOS, removing potential AI-generated bugs associated with previous default sort sources [S1, unofficial].
+
+## Sources
+[S1] Explore: Gaussian splatting, OpenUSD, AI world generation, volumetric video — study, https://github.com/sceneview/sceneview/issues/4023, fetched 2026-10-27 (unofficial)
+[S2] feat(sceneview): sort splats for the scene camera by default and add …, https://github.com/sceneview/sceneview/commit/e7e8fd42c0b46c8e9c62db902f6bb1e60474006f, fetched 2026-10-30 (unofficial)
+[S3] nickgildea/leven, https://github.com/nickgildea/leven, fetched 2026-10-26 (unofficial)

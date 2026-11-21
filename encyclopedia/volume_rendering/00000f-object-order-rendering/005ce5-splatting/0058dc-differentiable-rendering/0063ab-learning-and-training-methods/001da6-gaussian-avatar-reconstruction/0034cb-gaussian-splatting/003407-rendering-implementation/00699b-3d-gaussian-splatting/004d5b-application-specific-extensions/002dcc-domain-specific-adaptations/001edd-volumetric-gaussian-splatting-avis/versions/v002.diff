@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -18,8 +18,8 @@
+ **Algorithm Steps:**
+ 1. **Initialization:** Sample initial Gaussian centers from voxels inside the ROI mask. The number of points is controlled by `--init_n_points` [S1, unofficial].
+-2. **Rasterization:** Rasterize the 3D Gaussians back into a voxel grid. This involves sampling the volume at Gaussian positions using trilinear interpolation [S1, unofficial].
++2. **Rasterization:** Rasterize the 3D Gaussians back into a voxel grid. This involves sampling the volume at Gaussian positions using trilinear interpolation via `F.grid_sample` [S1, unofficial].
+ 3. **Supervision:** Compute losses between the rasterized Gaussian output and the target volume/mask. The supervision target is selected via `--supervision_target` (`mask`, `ct`, or `joint`) [S1, unofficial].
+ 4. **Optimization:** Update Gaussian parameters (position, scale, rotation, opacity, intensity) using gradient descent. Densification and pruning can be enabled via `--enable_densification` [S1, unofficial].
+-5. **Footprint Pooling (Optional):** If `enable_footprint_pooling=True` and `radius_scale > 0`, for points where `max(scale) >= max(voxel_norm)`, compute offsets in sigma units using a `[-1, 0, 1]^3` meshgrid scaled by `0.5 * radius_scale`. Weights are Gaussian: `exp(-0.5 * offset^2)`. Sample volume at `pts + scale * offsets`, clamp to `[0, 1]`, and average using weights [S1, unofficial].
++5. **Footprint Pooling (Optional):** If `enable_footprint_pooling=True` and `radius_scale > 0`, for points where `max(scale) >= max(voxel_norm)`, compute offsets in sigma units using a `[-1, 0, 1]^3` meshgrid scaled by `0.5 * radius_scale` [S1, unofficial]. Weights are Gaussian: `exp(-0.5 * offset^2)` [S1, unofficial]. Sample volume at `pts + scale * offsets`, clamp to `[0, 1]`, and average using weights [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -28,10 +28,10 @@
+ import torch.nn.functional as F
+ 
+-def sample_volume_intensity(volume_tensor, gaussian_positions, padding_mode='zeros'):
++def sample_volume_intensity(volume_tensor: torch.Tensor, gaussian_positions: torch.Tensor, padding_mode: str = "zeros") -> torch.Tensor:
+     """
+     Sample intensity from a 3D volume at given Gaussian positions using trilinear interpolation.
+     
+     Args:
+-        volume_tensor: Tensor of shape [D, H, W] or [1, 1, D, H, W].
++        volume_tensor: Tensor of shape [D, H, W].
+         gaussian_positions: Tensor of shape [N, 3] with normalized coordinates in [0, 1].
+         padding_mode: Padding mode for F.grid_sample. Default 'zeros'.
+@@ -40,23 +40,14 @@
+         intensities: Tensor of shape [N, 1].
+     """
+-    # Ensure volume is 5D for grid_sample: [N, C, D, H, W]
+-    # Assuming input is [D, H, W], we unsqueeze to [1, 1, D, H, W]
+-    if volume_tensor.dim() == 3:
+-        volume_5d = volume_tensor.unsqueeze(0).unsqueeze(0)
+-    elif volume_tensor.dim() == 4 and volume_tensor.shape[0] == 1 and volume_tensor.shape[1] == 1:
+-        volume_5d = volume_tensor
+-    else:
+-        raise ValueError("Unsupported volume tensor dimension")
+-
+-    # gaussian_positions are in [0, 1]. grid_sample expects coordinates in [-1, 1].
+-    # Convert [0, 1] to [-1, 1]: grid = 2 * pos - 1
++    # Ensure volume is 5D for grid_sample: [1, 1, D, H, W]
++    volume_5d = volume_tensor.unsqueeze(0).unsqueeze(0)
++    
++    # Convert [0, 1] to [-1, 1] for grid_sample
+     grid = 2.0 * gaussian_positions - 1.0
+     
+-    # Reshape grid for grid_sample: [N, 1, 1, 1, 3]
+-    grid = grid.unsqueeze(0).unsqueeze(1).unsqueeze(1)
+-    
+-    # Perform trilinear interpolation
+-    # Note: F.grid_sample uses bilinear for 2D, trilinear for 3D. 
+-    # The source code uses mode="bilinear" but with 5D input, it performs trilinear interpolation.
++    # Reshape grid for grid_sample: [1, 1, 1, N, 3]
++    grid = grid.view(1, 1, 1, -1, 3)
++    
++    # Perform trilinear interpolation (PyTorch uses "bilinear" string for 3D grids)
+     samples = F.grid_sample(
+         volume_5d,
+@@ -72,5 +63,6 @@
+     return intensities
+ 
+-def compute_footprint_pooling(volume_tensor, gaussian_positions, scales, radius_scale=2.0, padding_mode='zeros'):
++def compute_footprint_pooling(volume_tensor: torch.Tensor, gaussian_positions: torch.Tensor, 
++                              scales: torch.Tensor, radius_scale: float = 2.0, padding_mode: str = "zeros") -> torch.Tensor:
+     """
+     Optional footprint pooling for large Gaussians.
+@@ -87,10 +79,4 @@
+     """
+     N = gaussian_positions.shape[0]
+-    pooled_intensities = torch.zeros(N, 1, device=gaussian_positions.device)
+-    
+-    # Check condition: max(scale) >= max(voxel_norm)
+-    # Assuming voxel_norm is 1.0 for normalized grid, or derived from voxel size.
+-    # For simplicity, we assume the condition is met for all points if radius_scale > 0 and scales are large.
+-    # In practice, this check should be per-point.
+     
+     # Create meshgrid for offsets: [-1, 0, 1]^3
+@@ -111,22 +97,16 @@
+     # Compute weights: exp(-0.5 * offset^2)
+     weights = torch.exp(-0.5 * scaled_offsets ** 2)
+-    weights = weights / weights.sum(dim=1, keepdim=True) # Normalize weights
+-    
+-    # Sample volume at pts + scale * offsets
+-    # Note: This is a simplified implementation. The actual implementation may vary.
+-    # We assume scales are in voxel units or normalized units consistent with the volume.
+-    
+-    # For each Gaussian, compute sampled positions
+-    # positions_expanded: [N, 1, 3]
+-    positions_expanded = gaussian_positions.unsqueeze(1)
+-    # scaled_offsets: [1, 27, 3]
+-    scaled_offsets_expanded = scaled_offsets.unsqueeze(0)
+-    
+-    # Sampled positions: [N, 27, 3]
+-    sampled_positions = positions_expanded + scaled_offsets_expanded
++    weights = weights / weights.sum(dim=1, keepdim=True)  # Normalize weights
++    
++    # Compute sampled positions: pts + scale * offsets
++    positions_expanded = gaussian_positions.unsqueeze(1)  # [N, 1, 3]
++    scales_expanded = scales.unsqueeze(1)                 # [N, 1, 3]
++    scaled_offsets_expanded = scaled_offsets.unsqueeze(0) # [1, 27, 3]
++    
++    sampled_positions = positions_expanded + scales_expanded * scaled_offsets_expanded  # [N, 27, 3]
+     
+     # Convert to [-1, 1] range for grid_sample
+     grid = 2.0 * sampled_positions - 1.0
+-    grid = grid.unsqueeze(0).unsqueeze(1) # [1, N, 27, 1, 3]
++    grid = grid.view(1, 1, 1, -1, 3)  # [1, 1, 1, N*27, 3]
+     
+     # Volume tensor: [1, 1, D, H, W]
+@@ -142,9 +122,8 @@
+     )
+     
+-    # samples shape: [1, 1, N, 27, 1]
+-    samples = samples.squeeze(0).squeeze(0) # [N, 27, 1]
++    # Reshape: [1, 1, 1, N*27, 1] -> [N, 27, 1]
++    samples = samples.view(N, 27, 1)
+     
+     # Weighted average
+-    # weights shape: [N, 27]
+     pooled_intensities = (samples * weights.unsqueeze(2)).sum(dim=1, keepdim=True)
+     
+@@ -154,5 +133,5 @@
+     return pooled_intensities
+ 
+-def handle_near_constant_volume(volume_tensor, normalize=True):
++def handle_near_constant_volume(volume_tensor: torch.Tensor, normalize: bool = True) -> torch.Tensor:
+     """
+     Handle near-constant volume intensity to avoid division by zero.
+@@ -170,9 +149,8 @@
+     if (volume_max - volume_min) <= 1e-8:
+         if normalize:
+-            return torch.tensor(0.5)
++            return torch.tensor(0.5, device=volume_tensor.device)
+         else:
+             return volume_min
+     else:
+-        # Return None or handle normally in the main pipeline
+         return None
+ ```
+@@ -211,8 +189,8 @@
+ 
+ ### R2-Gaussian Training Paradigm
+-A volume reconstruction method trained primarily from X-ray projections, using volumetric data only as a regularization signal, optimized to match projection consistency rather than direct volumetric fidelity [S2, unofficial]. It synthesizes X-ray projections from ground-truth volume using TIGRE toolbox, provides both synthetic projections and ground-truth volume to R2-Gaussian during reconstruction, and optimizes network to match X-ray projections [S2, unofficial]. It achieves higher 2D PSNR than volumetric methods because it is optimized for projection matching, but yields significantly lower 3D PSNR (e.g., 22.92 vs 51.54 on Aneurysm) due to lower 3D spatial fidelity [S2, unofficial]. Training time is notably faster [S2, unofficial]. Due to lack of support for large raw volumetric data, comparisons are limited to datasets up to the Neuron size [S2, unofficial].
++A volume reconstruction method trained primarily from X-ray projections, using volumetric data only as a regularization signal, optimized to match projection consistency rather than direct volumetric fidelity [S2, unofficial]. It synthesizes X-ray projections from ground-truth volume using TIGRE toolbox, provides both synthetic projections and ground-truth volume to R2-Gaussian during reconstruction, and optimizes network to match X-ray projections [S2, unofficial]. It achieves higher 2D PSNR than volumetric methods because it is optimized for projection matching, but yields significantly lower 3D PSNR (e.g., 22.92 vs 51.54 on Aneurysm) due to lower 3D spatial fidelity [S2, unofficial]. R2-Gaussian demonstrates notably faster training times compared to AVIS [S2, unofficial]. Due to lack of support for large raw volumetric data, comparisons are limited to datasets up to the Neuron size [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources. Training time is notably faster than some volumetric methods for R2-Gaussian, but AVIS training time depends on the number of iterations and densification steps [S2, unofficial][S1, unofficial].
++- **Time Complexity:** Not given in the sources. R2-Gaussian demonstrates notably faster training times compared to AVIS [S2, unofficial]. AVIS training time scales with the number of iterations and densification steps [S1, unofficial].
+ - **Memory Complexity:** Not given in the sources. VRAM usage is controlled by `--max_points_per_iter` [S1, unofficial].
+ - **Measured Performance:** On the Aneurysm dataset, AVIS achieves a 3D PSNR of 51.54, compared to 22.92 for R2-Gaussian [S2, unofficial].

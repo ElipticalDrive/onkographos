@@ -1,0 +1,124 @@
+# Octree Neighbor Finding without Parent Pointers
+
+Also called: Mask-based Neighbor Finding, Neighbor Finding without Parent Pointers
+
+## Overview
+This method locates the voxel at a coordinate direction relative to an origin node by traversing up the octree hierarchy to find a common parent, then using point location to find the destination leaf [S1]. It is distinguished from parent-pointer-based approaches by omitting explicit parent pointers to minimize memory footprint, instead relying on an `index trace[]` array populated during ray traversal to provide parent indices [S1]. Unlike Frisken and Perry’s method which uses exclusive OR with depth masks, this implementation uses bitwise AND masking on both source and destination coordinates followed by integer equality checks to identify common parents, as it is not more expensive [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Origin node index, destination coordinate (or direction), and the `index trace[]` array containing indices of all parent nodes for the current cap [S1].
+*   **Output:** Index of the destination leaf node [S1].
+
+**Data Structures:**
+*   `index trace[]`: An array storing the indices of parent nodes encountered during the ray traversal up to the current cap [S1].
+*   Coordinates: Integer coordinates representing node positions [S1].
+
+**Steps:**
+1.  **Masking:** Apply a bitwise AND mask to both the source (origin) and destination coordinates. The mask corresponds to the depth of the current level in the octree, effectively zeroing out the lower bits that distinguish children within a parent [S1].
+2.  **Comparison:** Perform integer equality comparison on the masked source and destination values [S1].
+3.  **Recursion:** If the masked values are not equal, move up the tree using the `index trace[]` array to access the parent node indices [S1]. Repeat the masking and comparison at the parent level [S1].
+4.  **Common Parent:** Continue until a common parent is found where the masked coordinates are equal [S1].
+5.  **Point Location:** Once the common parent is identified, perform point location from this ancestor to find the specific leaf node at the destination coordinate [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def find_neighbor(origin_index, dest_coord, index_trace, current_depth):
+    """
+    Finds the neighbor node index given an origin, destination coordinate,
+    and the trace of parent indices.
+    
+    Args:
+        origin_index: Index of the starting node.
+        dest_coord: Target coordinate vector.
+        index_trace: Array of parent node indices from root to current cap.
+        current_depth: Current depth level in the octree.
+        
+    Returns:
+        Index of the destination leaf node.
+    """
+    # Determine the mask for the current depth.
+    # The mask zeroes out bits below the current depth level.
+    # Assuming coordinates are aligned such that depth 0 is the finest.
+    # Mask = ~((1 << current_depth) - 1)
+    mask = ~((1 << current_depth) - 1)
+    
+    # Get the origin coordinate corresponding to origin_index
+    # [G] In a hash-based octree, coordinate retrieval might require a lookup
+    # or the origin coordinate is passed alongside the index.
+    # Assuming we have access to the origin coordinate.
+    origin_coord = get_coordinate(origin_index)
+    
+    # Mask both coordinates
+    masked_origin = origin_coord & mask
+    masked_dest = dest_coord & mask
+    
+    # Check for equality
+    if masked_origin == masked_dest:
+        # Common parent found at this depth or above.
+        # Now perform point location from the common ancestor to dest_coord.
+        # [G] Point location typically involves traversing down from the
+        # common ancestor to the leaf.
+        return point_location(index_trace, current_depth, dest_coord)
+    else:
+        # Move up to the parent
+        # Get parent index from trace
+        parent_index = index_trace[current_depth - 1] # Assuming trace is indexed by depth
+        # Recurse with parent's context
+        # [G] The depth decreases as we move up.
+        return find_neighbor(parent_index, dest_coord, index_trace, current_depth - 1)
+
+def point_location(trace, start_depth, target_coord):
+    """
+    Traverses down from the common ancestor to find the leaf at target_coord.
+    """
+    # [G] Implementation details depend on the specific octree structure.
+    # Generally, this involves determining the octant offset at each level
+    # and traversing down the tree.
+    current_index = trace[start_depth]
+    for depth in range(start_depth, -1, -1):
+        # Determine octant offset for target_coord at this depth
+        # [G] This requires extracting bits from target_coord corresponding
+        # to the current depth level.
+        offset = get_octant_offset(target_coord, depth)
+        
+        # Check if child exists
+        if not has_child(current_index, offset):
+            # Handle case where child does not exist (e.g., return null or handle boundary)
+            return None
+        
+        # Move to child
+        current_index = get_child_index(current_index, offset)
+        
+    return current_index
+```
+
+**Parameters:**
+*   `current_depth`: The depth level in the octree where the comparison is performed. Typical values depend on the octree's maximum depth.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Integer coordinates must be handled carefully to ensure correct masking.
+*   **Boundaries:** If the destination coordinate is outside the octree bounds, point location should handle this gracefully.
+*   **Degenerate Input:** If the origin and destination are the same, the algorithm should return the origin index immediately.
+
+## Subtopics
+
+### Neighbor Finding via Reflection
+An algorithm to find adjacent nodes in an octree without using locational codes, utilizing case decomposition for edges/vertices and bitwise operations for optimization [S2, unofficial]. It computes the 'reflection' function for the adjacent neighbor by performing a binary exclusive OR (XOR) of the current location and the direction vector in which the neighbor is sought [S2, unofficial]. It then recursively traverses up the tree to find the deepest common ancestor between the current node and the reflected location [S2, unofficial]. Finally, it performs point location from the deepest common ancestor to find the target neighbor node [S2, unofficial]. The average cost to find an adjacent neighbor at the same depth is O(1) [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The average cost to find an adjacent neighbor at the same depth is O(1) [S2, unofficial]. The general neighbor finding algorithm involves recursion up the tree, which depends on the depth of the octree.
+*   **Memory Complexity:** O(1) additional memory per traversal step if the `index trace[]` array is reused, but the array itself requires O(D) memory where D is the depth of the octree.
+*   **Strengths:** Minimizes memory footprint by omitting parent pointers [S1]. Efficient for non-adjacent neighbors [S1].
+*   **Limitations:** Requires the `index trace[]` array to be maintained during ray traversal [S1].
+*   **When to Use:** When memory is constrained and parent pointers are undesirable [S1].
+*   **When Not to Use:** When random access to parent pointers is needed without maintaining a trace array.
+
+## Background
+Neighbor finding was addressed early on in octree research [S2, unofficial]. Gargantini [Gar82] provided a concise algorithm for finding adjacent nodes in the linear quadtree using Morton’s [Mor66] array-based locational code. Samet [Sam82] proposed a more general scheme for adjacent neighbor-finding using only an original node and a desired direction, with no knowledge of a locational code [S2, unofficial]. The algorithm was later applied to accelerating ray tracing using a pointer octree [Sam89]. Samet [Sam90] conducted rigorous analysis of the neighbor finding technique, decomposing the algorithm into cases for edge, vertex, and aligned neighbors [S2, unofficial]. Frisken and Perry noted that the “reflection” function for adjacent neighbors, implemented by Samet via a switch statement, can be accomplished by a binary exclusive “or” of the current location and the direction in which we seek a neighbor [S2, unofficial]. The method described here, using masking and equality checks, was proposed in [S1] as an alternative to Frisken and Perry’s method.
+
+## Sources
+[S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+[S2] PDF A Survey of Octree Volume Rendering Methods, https://www.sci.utah.edu/~knolla/octsurvey.pdf, fetched 2026-10-29 (unofficial)

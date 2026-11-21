@@ -1,0 +1,252 @@
+--- v001.md
++++ v002.md
+@@ -4,120 +4,117 @@
+ 
+ ## Overview
+-This method defines a trait-based configuration system for voxel mesh generation that specifies block geometry, transparency culling behavior, and lighting values per block type [S1, unofficial]. It solves the problem of rigid, single-boolean transparency flags by allowing distinct rendering paths for opaque, transparent, and fluid blocks [S1, unofficial]. Unlike [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) which treats all non-air blocks uniformly, this system distinguishes between fluids (requiring bespoke shaders) and see-through solids (requiring alpha blending) [S1, unofficial].
++Voxel Block Shape & Culling Configuration is a trait-based system that defines the geometry, transparency culling behavior, and lighting properties for individual block types within a voxel mesh generator. It solves the problem of heterogeneous block rendering by allowing each block ID to specify its own shape (e.g., whole block, slab, slope) and culling mode (opaque, transparent merged, transparent unmerged), rather than applying a single global rule to the entire volume. It differs from [Greedy Meshing](1776-greedy-meshing.md) by focusing on the per-block metadata required to drive the meshing algorithm, and from [Three-Valued Opacity Classification](4414-three-valued-opacity-classification-for-meshing.md) by providing the low-level culling primitives that the classification system may consume.
+ 
+ ## How it works
+-**Inputs:** A block type identifier (e.g., `MyBlock` enum) and the face orientation being processed.
+-**Outputs:** A `CullMode` enum, a `Shape` enum, and a lighting value (`u8` or `f32`).
++The system operates by associating a set of configuration traits with each block type in the volume grid $V$. These traits determine how the block's voxel is converted into mesh primitives and how it interacts with neighbors during face culling.
+ 
+-**Data Structures:**
+-The core configuration is implemented via a trait interface. Key fields include:
+-*   `block`: The specific block type.
+-*   `cull_mode()`: Returns the culling strategy.
+-*   `shape()`: Returns the geometric primitive.
+-*   `light()`: Returns the lighting intensity.
++### Inputs and Outputs
++- **Input**: A discrete volume grid $V$ where each cell $(x,y,z)$ contains a block ID (e.g., `MyBlock::Cobblestone`).
++- **Output**: A set of mesh primitives (vertices, indices) for each visible face, annotated with block-specific lighting and texture coordinates.
+ 
+-**Culling Modes:**
+-1.  `Empty`: The block is air; no geometry is generated.
+-2.  `Opaque`: Standard face culling; shared faces between identical opaque blocks are culled.
+-3.  `TransparentMerged(T)`: Culls shared faces between two transparent blocks if their `TransparentGroup` values are equal. This mode does not replace `PartialEq` for greedy meshing logic [S1, unofficial].
+-4.  `TransparentUnmerged`: No culling of shared faces between transparent blocks; all visible faces are rendered.
++### Data Structures
++The core configuration is defined via a trait interface. In the reference implementation [S1, unofficial], this is implemented as a Rust trait `BlockConfig` with the following methods:
+ 
+-**Shape Geometry:**
+-Blocks are mapped to specific `Shape` variants. Common variants include:
+-*   `WholeBlock`: A standard cube.
+-*   `Cross(CrossInfo)`: Used for thin structures like chains. Defined by an `AlignedFace` (e.g., `PosZ`) and a `stretch` value (e.g., `0`) [S1, unofficial].
++1.  `shape(&self) -> Shape`: Returns the geometric primitive for the block.
++2.  `cull_mode(&self) -> CullMode`: Returns the culling strategy for the block.
++3.  `light(&self, face: Face) -> f32`: Returns the lighting value for a specific face orientation.
+ 
+-**Lighting:**
+-Lighting values are assigned per block and sometimes per face. Values range from `0.0` (Air) to `14.0` (Lamp). For example, `Cactus` lighting varies by face: `11.0` for `PosY`, `12.0` for `NegY`, and `10.0` otherwise [S1, unofficial].
++The `Shape` enum includes variants such as `WholeBlock`, `Cross`, `Slab`, and `Slope`. The `CullMode` enum includes:
++-   `Empty`: The block is air; no geometry is generated.
++-   `Opaque`: Standard face culling; shared faces between two opaque blocks of the same type are culled.
++-   `TransparentMerged(T)`: Shared faces between two transparent blocks are culled if their `TransparentGroup` values (parameter $T$) are equal. This allows merging of transparent surfaces (e.g., glass panes) [S1, unofficial].
++-   `TransparentUnmerged`: Transparent blocks never share faces with neighbors; all exposed faces are rendered individually.
+ 
+-**Pitfalls:**
+-*   Setting `FLUID_ENABLED` to `true` without implementing the corresponding fluid shape logic causes a debug assertion failure rather than silently rendering fluids as cubes [S1, unofficial].
++The `Vertex` structure carries per-vertex data required for shading:
++```rust
++struct Vertex {
++    pos: Vec4<f32>,       // World position
++    uv: Vec2<f32>,        // Texture coordinates
++    normal: Vec3<f32>,    // Face normal
++    ao: f32,              // Ambient occlusion (0.0 = occluded, 1.0 = lit)
++    smooth_light: f32,    // Smooth lighting value
++    block: MyBlock,       // Block ID for render pass filtering
++    atlas_offset: f32,    // Atlas tile offset
++    two_sided: bool,      // Whether the quad is two-sided
++}
++```
+ 
+-**Pseudocode:**
++### Steps
++1.  **Iterate Grid**: Traverse the volume grid $V$ to identify all non-empty blocks.
++2.  **Retrieve Configuration**: For each block at $(x,y,z)$, retrieve its `BlockConfig` implementation.
++3.  **Determine Shape**: Call `shape()` to determine the geometric primitive. If the shape is complex (e.g., `Slope`), generate the specific vertices and indices for that shape [S2, unofficial].
++4.  **Apply Culling**:
++    -   Check the neighbor in each of the 6 directions.
++    -   If the neighbor is empty, the face is exposed.
++    -   If the neighbor is solid, check `cull_mode()`.
++        -   If `Opaque`, cull the face.
++        -   If `TransparentMerged(T)`, cull the face if the neighbor has the same block type and `TransparentGroup` $T$ [S1, unofficial].
++        -   If `TransparentUnmerged`, do not cull; render the face.
++5.  **Compute Lighting**: Call `light(face)` to get the lighting value for the exposed face.
++6.  **Generate Vertices**: Create vertex data using the shape's vertex layout, applying the lighting, UVs, and block ID.
++
++### Formulas
++-   **Culling Condition for TransparentMerged**:
++    $$ \text{Cull} = (B_1.\text{type} == B_2.\text{type}) \land (B_1.\text{TransparentGroup} == B_2.\text{TransparentGroup}) $$
++    where $B_1$ is the current block and $B_2$ is the neighbor [S1, unofficial].
++
++### Parameters
++-   `FLUID_ENABLED`: Boolean flag. If `true`, fluid blocks are processed. If `false`, they are treated as empty or solid depending on implementation [S1, unofficial].
++-   `TransparentGroup`: A value associated with `TransparentMerged` blocks. Identical values allow merging [S1, unofficial].
++
++### Edge Cases and Pitfalls
++-   **Fluid Shape Assertion**: Setting `FLUID_ENABLED` to `true` without implementing the fluid shape logic causes a debug assertion failure rather than silently rendering fluids as cubes [S1, unofficial].
++-   **Tint Fallback**: In slope geometry, if a specific tint is `Vector3.One`, it falls back to another face's tint [S2, unofficial].
++
++### Pseudocode
+ ```python
+-def get_block_config(block_type: Enum) -> BlockConfig:
+-    """
+-    Returns the culling mode, shape, and lighting for a given block type.
+-    """
+-    if block_type == MyBlock.Air:
+-        return BlockConfig(
+-            cull_mode=CullMode.Empty,
+-            shape=Shape.WholeBlock, # Or None, as air generates no mesh
+-            light=0.0
+-        )
++def generate_mesh_block(block_id, pos, grid):
++    config = get_block_config(block_id)
++    shape = config.shape()
++    cull_mode = config.cull_mode()
+     
+-    if block_type in [MyBlock.Cobblestone, MyBlock.Clay, MyBlock.CobbleSlab, MyBlock.Debug, MyBlock.Lamp]:
+-        return BlockConfig(
+-            cull_mode=CullMode.Opaque,
+-            shape=Shape.WholeBlock,
+-            light=get_light_value(block_type)
+-        )
++    vertices = []
+     
+-    if block_type == MyBlock.Glass:
+-        return BlockConfig(
+-            cull_mode=CullMode.TransparentMerged(T=()), # Empty tuple as group ID
+-            shape=Shape.WholeBlock,
+-            light=2.0
+-        )
++    # Iterate over 6 faces
++    for face in [PosX, NegX, PosY, NegY, PosZ, NegZ]:
++        neighbor_pos = pos + face.direction
++        neighbor_id = grid.get(neighbor_pos)
++        
++        # Check if face is exposed
++        if neighbor_id is None or neighbor_id == AIR:
++            is_exposed = True
++        else:
++            neighbor_config = get_block_config(neighbor_id)
++            neighbor_cull = neighbor_config.cull_mode()
++            
++            if cull_mode == Opaque and neighbor_config.shape() == shape:
++                is_exposed = False
++            elif cull_mode == TransparentMerged and neighbor_cull == TransparentMerged:
++                # Check TransparentGroup equality
++                if config.transparent_group == neighbor_config.transparent_group:
++                    is_exposed = False
++                else:
++                    is_exposed = True
++            else:
++                is_exposed = True
++        
++        if is_exposed:
++            # Generate vertices for the shape
++            shape_vertices = get_shape_vertices(shape, face)
++            lighting = config.light(face)
++            
++            for v in shape_vertices:
++                vertices.append(Vertex(
++                    pos=v.pos + pos,
++                    uv=v.uv,
++                    normal=face.normal,
++                    ao=lighting,
++                    smooth_light=lighting,
++                    block=block_id,
++                    atlas_offset=config.atlas_offset,
++                    two_sided=shape.is_two_sided
++                ))
+     
+-    if block_type in [MyBlock.Cactus, MyBlock.SugarCane, MyBlock.Cobweb, MyBlock.Shrub, 
+-                      MyBlock.Ladder, MyBlock.Rail, MyBlock.ChainY, MyBlock.ChainX, 
+-                      MyBlock.ChainZ, MyBlock.Leaves]:
+-        return BlockConfig(
+-            cull_mode=CullMode.TransparentUnmerged,
+-            shape=get_shape_for_block(block_type),
+-            light=get_light_value(block_type)
+-        )
+-    
+-    # Default fallback
+-    return BlockConfig(
+-        cull_mode=CullMode.Opaque,
+-        shape=Shape.WholeBlock,
+-        light=1.0
+-    )
+-
+-def get_shape_for_block(block_type: Enum) -> Shape:
+-    if block_type == MyBlock.ChainY:
+-        return Shape.Cross(CrossInfo(face=AlignedFace.PosY, stretch=0))
+-    elif block_type == MyBlock.ChainX:
+-        return Shape.Cross(CrossInfo(face=AlignedFace.PosX, stretch=0))
+-    elif block_type == MyBlock.ChainZ:
+-        return Shape.Cross(CrossInfo(face=AlignedFace.PosZ, stretch=0))
+-    else:
+-        return Shape.WholeBlock
+-
+-def get_light_value(block_type: Enum, face: Face = None) -> float:
+-    if block_type == MyBlock.Clay:
+-        return 1.0
+-    if block_type == MyBlock.Glass:
+-        return 2.0
+-    if block_type == MyBlock.Leaves:
+-        return 3.0
+-    if block_type == MyBlock.SugarCane:
+-        return 4.0
+-    if block_type == MyBlock.Cobweb:
+-        return 5.0
+-    if block_type == MyBlock.Shrub:
+-        return 6.0
+-    if block_type == MyBlock.Ladder:
+-        return 7.0
+-    if block_type == MyBlock.Rail:
+-        return 8.0
+-    if block_type == MyBlock.Debug:
+-        return 9.0
+-    if block_type == MyBlock.Cactus:
+-        if face == Face.Aligned(AlignedFace.PosY):
+-            return 11.0
+-        elif face == Face.Aligned(AlignedFace.NegY):
+-            return 12.0
+-        else:
+-            return 10.0
+-    if block_type in [MyBlock.ChainY, MyBlock.ChainX, MyBlock.ChainZ]:
+-        return 13.0
+-    if block_type == MyBlock.Lamp:
+-        return 14.0
+-    if block_type == MyBlock.Air:
+-        return 0.0
+-    return 1.0 # Default
++    return vertices
+ ```
+ 
+@@ -125,17 +122,22 @@
+ 
+ ### [Three-Valued Opacity Classification for Meshing](4414-three-valued-opacity-classification-for-meshing.md)
+-A classification system for block IDs into three mutually exclusive layers: 'opaque', 'water', and 'transparentSolid'. It solves the insufficiency of a single boolean 'transparent' flag by distinguishing between fluids (water) requiring bespoke shaders and see-through solids (glass/leaves) requiring alpha blending. Unlike a boolean transparent flag which collapses water and glass/leaves into one category, this three-valued model allows water to use a bespoke shader (ripple, refraction) while glass/leaves use the ordinary block atlas with alpha blending.
++A classification system for block IDs into three mutually exclusive layers ('opaque', 'water', 'transparentSolid') to determine rendering material and buffer assignment. It solves the insufficiency of a single boolean 'transparent' flag by distinguishing between fluids (water) requiring bespoke shaders and see-through solids (glass/leaves) requiring alpha blending. Unlike a boolean transparent flag which collapses water and glass/leaves into one category, this three-valued model allows water to use a bespoke shader (ripple, refraction) while glass/leaves use the ordinary block atlas with alpha blending.
+ 
+ ### Ramp Shape Geometry
+-A shape representing a sloped block face, composed of a slope quad (2 triangles) and two side triangles (left and right) [S2, unofficial]. Instance creation iterates visible faces: if the face is Left, Right, Top, or Front, `drawSlope` is set to `true` and tints are assigned (`tints[0]` for Top/Front, `tints[1]` for Left, `tints[2]` for Right). If a specific tint is `Vector3.One`, it falls back to another face's tint. Instances are added for the slope, left triangle, and right triangle using respective shape IDs and tints. If the face is Back or Bottom, an instance is added using `cubeBackFaceShapeID` or `cubeBottomFaceShapeID` [S2, unofficial]. The slope vertices are: `(0,1,0)` UV[0], `(0,0,1)` UV[1], `(1,1,0)` UV[2], `(1,1,0)` UV[3], `(0,0,1)` UV[4], `(1,0,1)` UV[5]. The left triangle vertices are: `(0,0,1)` UV[0], `(0,1,0)` UV[1], `(0,0,0)` UV[2]. The right triangle vertices are: `(1,0,0)` UV[0], `(1,1,0)` UV[1], `(1,0,1)` UV[2] [S2, unofficial].
++A shape representing a sloped block face, composed of a slope quad (2 triangles) and two side triangles (left and right) [S2, unofficial]. Instance creation iterates visible faces; if the face is Left, Right, Top, or Front, `drawSlope` is set to true and tints are assigned based on face orientation (Top/Front to `tints[0]`, Left to `tints[1]`, Right to `tints[2]`). If a specific tint is `Vector3.One`, it falls back to another face's tint. Slope vertices are defined as 6 vertices: (0,1,0) UV[0], (0,0,1) UV[1], (1,1,0) UV[2], (1,1,0) UV[3], (0,0,1) UV[4], (1,0,1) UV[5]. Left triangle vertices are 3 vertices: (0,0,1) UV[0], (0,1,0) UV[1], (0,0,0) UV[2]. Right triangle vertices are 3 vertices: (1,0,0) UV[0], (1,1,0) UV[1], (1,0,1) UV[2] [S2, unofficial].
+ 
+ ### Fluid Surface Stitching
+-A mesh generation technique where fluid columns share a surface height field with neighbors, stitching surfaces when fluid IDs match [S1, unofficial]. Two adjacent fluid blocks join their surfaces only when their `FluidInfo::id` (u8) values are equal [S1, unofficial].
++A mesh generation technique where fluid columns share a surface height field with neighbors, stitching surfaces when fluid IDs match [S1, unofficial]. Two adjacent fluid blocks join their surfaces only when their `FluidInfo::id` (u8) values match [S1, unofficial].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++-   **Time Complexity**: $O(N)$ where $N$ is the number of voxels, as each voxel is processed once to determine its exposed faces.
++-   **Memory Complexity**: $O(F)$ where $F$ is the number of exposed faces. The configuration data is $O(B)$ where $B$ is the number of unique block types.
++-   **Strengths**: Allows for complex block geometries (slopes, slabs) and fine-grained control over transparency rendering. Efficient culling reduces draw calls.
++-   **Limitations**: Requires per-block configuration overhead. Complex shapes (like slopes) increase vertex count per block. Debug assertions may fail if configuration is incomplete [S1, unofficial].
++-   **When to Use**: When rendering heterogeneous voxel worlds with different block types requiring distinct rendering behaviors (e.g., Minecraft-like games).
++-   **When Not to Use**: For uniform volumes where a single culling mode suffices, or when performance is critical and per-block trait lookups are too expensive.
+ 
+ ## Background
+-This method originates from the `finnbear/voxmesh` repository [S1, unofficial] and the `rarefushion/Cubic-Grid_Voxel_Renderer` project [S2, unofficial]. It is used in voxel-based game engines and terrain renderers to optimize mesh generation by reducing overdraw and supporting complex block geometries like slopes and fluids.
++The trait-based configuration system for voxel mesh generation was introduced in the `finnbear/voxmesh` repository [S1, unofficial]. It addresses the limitations of simple boolean transparency flags by providing a flexible interface for block geometry and culling. The system has been adopted in various voxel rendering projects to support complex block types like slopes and fluids.
+ 
+ ## Sources

@@ -1,0 +1,103 @@
+--- v002.md
++++ v003.md
+@@ -33,5 +33,5 @@
+ **Pseudocode:**
+ ```python
+-def system_level_primitive_sharding(G, cameras, M, rebalance_threshold):
++def system_level_primitive_sharding(G, M, rebalance_threshold):
+     # Step 1: Initial Sharding by Index Parity
+     shards = [[] for _ in range(M)]
+@@ -43,29 +43,38 @@
+ 
+     # Step 2: Tile Partitioning
+-    # Cost-aware tile partitioning to balance rasterization load [S1, unofficial]
+-    # The exact algorithm is not specified in the sources [G]
+-    tile_to_gpu = {t: t % M for t in range(len(cameras[0].tiles))}
++    # Cost-aware tile partitioning to balance rasterization load [G]
++    # The exact algorithm is not specified in the sources.
++    num_tiles = 100  # Not given in the sources.
++    tile_to_gpu = [t % M for t in range(num_tiles)]
+ 
+-    # Step 3 & 4: Projection and All-to-All Communication
+-    local_gaussians = [list(shards[m]) for m in range(M)]
++    # Step 3: Projection
++    # Each GPU projects only the Gaussians in its local shard [S1, unofficial]
++    projected_gaussians = []
+     for m in range(M):
+-        projected = [project_3d_to_2d(g, cameras[m]) for g in shards[m]]
+-        for g in projected:
+-            covered_tiles = get_tile_indices(g)
++        projected_gaussians.append([project_3d_to_2d(g) for g in shards[m]]) # [G] Standard projection
++
++    # Step 4: All-to-All Communication
++    # Route every projected Gaussian to the GPUs owning the tiles it covers [S1, unofficial]
++    local_gaussians = [[] for _ in range(M)]
++    for m in range(M):
++        for g in projected_gaussians[m]:
++            covered_tiles = [t for t in range(num_tiles) if gaussian_overlaps_tile(g, t)] # [G] Standard coverage
+             for t in covered_tiles:
+                 target = tile_to_gpu[t]
+-                if target != m:
+-                    send_to_rank(target, g)
++                if target == m:
++                    local_gaussians[m].append(g)
+                 else:
+-                    local_gaussians[m].append(g)
++                    send_to_rank(target, g) # [G] Standard MPI all-to-all
+     for m in range(M):
+-        local_gaussians[m] += receive_from_rank(m)
++        local_gaussians[m] += receive_from_rank(m) # [G] Standard MPI all-to-all
+ 
+     # Step 5: Compositing
++    # Each GPU composites its assigned tiles using the received Gaussians [S1, unofficial]
+     for m in range(M):
+-        assigned_tiles = [t for t, gpu in tile_to_gpu.items() if gpu == m]
+-        render_tiles(assigned_tiles, local_gaussians[m], cameras[m])
++        assigned_tiles = [t for t, gpu in enumerate(tile_to_gpu) if gpu == m]
++        render_tiles(assigned_tiles, local_gaussians[m]) # [G] Standard splatting rasterization
+ 
+     # Step 6: Rebalancing
++    # Apply index-parity redistribution to rebalance shard sizes if per-GPU skew exceeds a threshold [S1, unofficial]
+     if compute_skew(shards) > rebalance_threshold:
+         shards = redistribute_by_index_parity(shards)
+@@ -73,29 +82,4 @@
+ 
+     return shards, optimizer_states
+-
+-def project_3d_to_2d(gaussian, camera):
+-    return gaussian.project(camera) # [G] Standard projection
+-
+-def get_tile_indices(gaussian):
+-    return [t for t in range(num_tiles) if gaussian.overlaps_tile(t)] # [G] Standard coverage
+-
+-def send_to_rank(target_rank, gaussian):
+-    pass # [G] Standard MPI all-to-all
+-
+-def receive_from_rank(source_rank):
+-    return [] # [G] Standard MPI all-to-all
+-
+-def render_tiles(tiles, gaussians, camera):
+-    pass # [G] Standard splatting rasterization
+-
+-def compute_skew(shards):
+-    sizes = [len(s) for s in shards]
+-    return (max(sizes) - min(sizes)) / (sum(sizes) / len(sizes)) # [G] Standard skew
+-
+-def redistribute_by_index_parity(shards):
+-    return [ [] for _ in range(M) ] # [G] Reassign by index modulo M
+-
+-def redistribute_optimizer_states(optimizer_states):
+-    return [ [] for _ in range(M) ] # [G] Move states with Gaussians
+ ```
+ 
+@@ -107,7 +91,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Per-iteration cost scales near-linearly with GPU count for compute-heavy stages like the backward pass. On the Residence scene with A800 80 GB GPUs, total per-iteration cost drops from 186.9 ms (1 GPU) to 68.6 ms (8 GPUs) [S1, unofficial].
+-*   **Memory Complexity:** Per-rank peak memory scales inversely with $M$. On the Rubble scene, it drops from 17.2 GB (1 GPU) to 2.9 GB (8 GPUs) [S1, unofficial]. The binding limit is the aggregate capacity across all GPUs [S1, unofficial].
+-*   **Strengths:** Eliminates boundary waste and merge steps inherent in spatial block partitioning. Assigns every camera exactly once, preventing duplicate processing. Scales storage and compute linearly with GPU count [S1, unofficial].
++*   **Time Complexity:** Per-iteration cost scales near-linearly with GPU count for compute-heavy stages like the backward pass [S1, unofficial]. On the Residence scene with A800 80 GB GPUs, total per-iteration cost drops from 186.9 ms (1 GPU) to 68.6 ms (8 GPUs) [S1, unofficial].
++*   **Memory Complexity:** Per-rank peak memory scales inversely with $M$ [S1, unofficial]. On the Rubble scene, it drops from 17.2 GB (1 GPU) to 2.9 GB (8 GPUs) [S1, unofficial]. The binding limit is the aggregate capacity across all GPUs [S1, unofficial].
++*   **Strengths:** Eliminates boundary waste and merge steps inherent in spatial block partitioning. Assigns every camera exactly once, preventing duplicate processing [S1, unofficial]. Scales storage and compute linearly with GPU count [S1, unofficial].
+ *   **Limitations:** Requires efficient all-to-all communication. Residual overhead from data loading and optimizer bookkeeping becomes significant as iteration time shrinks [S1, unofficial].
+ *   **When to Use:** Suitable for city-scale scenes with hundreds of millions of primitives that exceed single GPU memory [S1, unofficial].

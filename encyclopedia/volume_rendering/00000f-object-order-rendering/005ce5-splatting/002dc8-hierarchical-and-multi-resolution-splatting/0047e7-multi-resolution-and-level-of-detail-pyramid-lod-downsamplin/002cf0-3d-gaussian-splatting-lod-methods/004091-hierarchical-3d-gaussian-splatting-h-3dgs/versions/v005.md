@@ -1,0 +1,57 @@
+# Hierarchical 3D Gaussian Splatting (H-3DGS)
+
+Also called: H-3DGS, Hierarchical-3DGS, Inria H-3DGS
+
+## Overview
+Hierarchical 3D Gaussian Splatting (H-3DGS) is a Level-of-Detail (LoD) method that organizes 3D Gaussian primitives into a hierarchical structure to enable efficient rendering of large-scale scenes by dynamically selecting appropriate detail levels based on viewing distance [S1, S2, S3, unofficial]. It sets itself apart from sibling methods like [Octree-GS](7341-octree-gs.md) by using a cluster-based octree-like tree structure rather than an explicit anchor-based voxel grid, and from [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md) by employing a unified top-down or bottom-up hierarchy generation rather than independent block-wise training [S1, S2, S3, unofficial].
+
+## Shared principles
+H-3DGS and its siblings share the core principle of spatial partitioning to manage the memory and computational load of 3D Gaussian Splatting (3DGS) in large scenes. The general mechanism involves:
+1.  **Hierarchical Organization:** Primitives (Gaussians) are grouped into nodes of a tree structure (e.g., octree, cluster tree). Each node represents a spatial region and contains a summary or a set of Gaussians.
+2.  **Level-of-Detail (LoD) Selection:** During rendering, the hierarchy is traversed based on the camera's distance to the scene regions. Coarser levels (fewer, larger Gaussians) are used for distant regions, while finer levels (more, smaller Gaussians) are used for nearby regions.
+3.  **Distance-Based Cuts:** The selection of the LoD level is typically determined by a threshold distance. If the camera is closer than the threshold, the children of the current node are processed; otherwise, the current node's Gaussians are rendered, and its children are culled.
+4.  **Memory Efficiency:** By not loading or rendering all Gaussians simultaneously, the method reduces VRAM usage and increases rendering throughput for large scenes [S1, S2, S3, unofficial].
+
+## Subtopics
+
+### [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md)
+CityGaussian, VastGaussian, and DoGaussian are methods for large-scale urban reconstruction that partition scenes into overlapping or disjoint blocks, train independent 3D Gaussian Splatting (3DGS) models per block, and merge them at render time using a Level-of-Detail (LoD) hierarchy. They solve the memory and training bottlenecks of standard 3DGS in city-scale scenes by enabling distributed or block-wise training and streaming. They set themselves apart from sibling methods like [Octree-GS](7341-octree-gs.md) by relying on tile-based training and merging rather than a single unified anchor-based hierarchy, and from [Iterative Gaussian Synopsis](9289-iterative-gaussian-synopsis.md) by using explicit spatial partitioning for training rather than iterative synopsis generation.
+
+### [Octree-GS](7341-octree-gs.md)
+Octree-GS is a Level-of-Detail (LoD) method for 3D Gaussian Splatting that organizes Gaussian primitives into a sparse octree structure to enable consistent real-time rendering across varying viewing distances and scene complexities. It solves the problem of inefficient primitive usage and visual artifacts in large-scale scenes by dynamically selecting appropriate LOD levels based on camera distance, ensuring rendering speed remains stable regardless of trajectory changes. Unlike concurrent methods that require multi-resolution inputs, post-processing, or manual threshold tuning, Octree-GS achieves LoD effects in a single end-to-end training round using an accumulative LOD strategy.
+
+### [Iterative Gaussian Synopsis](9289-iterative-gaussian-synopsis.md)
+Iterative Gaussian Synopsis is a top-down strategy for constructing a hierarchy of Level-of-Detail (LOD) representations for 3D Gaussian Splatting (3DGS). It addresses the challenges of deploying large-scale 3DGS models for progressive and adaptive rendering by deriving coarser levels from a full-fidelity model through adaptive, learnable pruning and downsampling, ensuring coherent simplification without the error accumulation typical of bottom-up training. It sets itself apart from siblings like [Octree-GS](7341-octree-gs.md) and [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md) by using a unified top-down unfolding framework that extracts all LODs from a single optimization, rather than building independent models or using bottom-up enhancement layers.
+
+### Hierarchical 3DGS
+Uses an octree-like tree of clusters; renders only the relevant LoD; achieves 99% reduction at far distances [S2, unofficial]. A cluster-based Level of Detail (LoD) method developed by Inria, capable of rendering large scenes like Mont Saint-Michel interactively [S2, unofficial].
+
+### LODGE
+A level-of-detail framework for large-scale 3D Gaussian Splatting that enables efficient rendering by dynamically selecting appropriate detail levels [S3, unofficial].
+
+### Varying Level of Detail (LoD) Noise
+A technique to prevent overfitting of Gaussians to specific viewing distances by introducing noise into the hierarchy cut distances, ensuring coarser levels are trained occasionally [S1, unofficial].
+For each training iteration, multiply the distances to the SPT (Split Point Tree) centers by a factor calculated as $1 + 5^{\frac{u}{4}}$, where the exponent is a uniformly random variable $u \in (0, 1)$ [S1, unofficial].
+The scaling factor applied to the distance is $1 + 5^{u}$, where $u \in (0, 1)$ is a uniformly random variable. This ensures most iterations train near the highest LoD, but coarser levels are trained occasionally [S1, unofficial].
+The base of the exponent in the noise factor is 5. The random variable $u$ is drawn from a uniform distribution over the open interval (0, 1) [S1, unofficial].
+Without this noise, Gaussians of a specific scale overfit to views from a particular distance, leading to LoD popping artifacts [S1, unofficial].
+
+### Varying Focal Length Adaptation
+A method to account for differing focal lengths in datasets by using a relative distance metric for HSPT cuts, ensuring the required LoD is consistent across cameras with different projections [S1, unofficial].
+Choose a base focal length $f_{base}$. For the current camera with focal length $f$, calculate the relative distance metric $\tilde{d}$ for HSPT cuts as $\tilde{d} = \frac{f}{f_{base}} d$, where $d$ is the actual distance [S1, unofficial].
+The relative distance metric is $\tilde{d} = \frac{f}{f_{base}} d$, where $f$ is the current camera's focal length, $f_{base}$ is the chosen base focal length, and $d$ is the distance to the Gaussian [S1, unofficial].
+Unlike standard methods that use only Euclidean distance, this method scales the cut distance by the ratio of the current focal length to a base focal length. For example, a camera with double the focal length requires the cut distance to be halved to account for the larger projection footprint [S1, unofficial].
+
+### L3GS with Hierarchy
+A variant inspired by Levels of Detail (LoD) that stores splats in a tree structure where each node is represented in greater detail by its children, using non-layered models (“Separate”) with different target sizes [S4].
+Lower-version splats are set as root nodes and higher-version splats as child nodes, sharing the same object ID and highest similarity score [S4].
+Unlike the layered approach, no splats are shared across levels of the tree, requiring replacement of multiple splats and leading to bandwidth inefficiencies, though it allows finer-grained progressive replacement than the coarse-grained per-scene replacement of the original Separate baseline [S4].
+
+## Background
+Hierarchical 3D Gaussian Splatting (H-3DGS) was introduced by Kerbl et al. (the original 3DGS authors) in 2024 as an extension to handle large-scale environments [S1, S2, unofficial]. Prior methods for large scenes typically employed scene partitioning or multi-GPU training [S1, unofficial]. H-3DGS addresses the memory bottlenecks of standard 3DGS by training chunks independently and merging them into a global LoD hierarchy [S1, unofficial]. It is capable of rendering large scenes like Mont Saint-Michel interactively [S2, unofficial]. The method introduces techniques such as varying level of detail noise to prevent overfitting and varying focal length adaptation to handle datasets with differing focal lengths [S1, unofficial].
+
+## Sources
+[S1] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S4] L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery, https://doi.org/10.1145/3680207.3723485, fetched 2026-10-27

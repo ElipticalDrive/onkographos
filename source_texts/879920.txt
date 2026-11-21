@@ -1,0 +1,54 @@
+# C++ CPU Path Tracer -- Parallel Rendering with BVH Acceleration
+
+A C++17 CPU renderer built as a systems and performance engineering project. Implements a tile-based parallel renderer with SAH BVH acceleration, reaching 15.7x speedup across 32 threads. Parses JSON scene descriptions and writes PPM output with support for PBR materials via GGX microfacet BRDFs, Monte Carlo path tracing, and multiple tone mappers.
+
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://isocpp.org/std/the-standard)
+[![CMake](https://img.shields.io/badge/CMake-3.10%2B-green.svg)](https://cmake.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## Sample Renders
+
+| Binary | Phong | Reflection |
+|:---:|:---:|:---:|
+| ![](docs/samples/binary_primitives.png) | ![](docs/samples/phong_scene.png) | ![](docs/samples/mirror_image.png) |
+
+| Refraction | Path Tracing | Texture | BVH |
+|:---:|:---:|:---:|:---:|
+| ![](docs/samples/refract.png) | ![](docs/samples/path_scene.png) | ![](docs/samples/texture.png) | ![](docs/samples/bvh.png) |
+
+## Performance Engineering
+
+Tile-based parallel rendering scales to 15.7x across 32 threads on a hybrid P-core/E-core CPU. The sweet spot is 8 threads (98% parallel efficiency), where the working set fits in cache and all P-cores are saturated without contention.
+
+| Threads | Median Time (s) | Speedup | Parallel Efficiency |
+|--------:|----------------:|--------:|--------------------:|
+| 1       | 37.35           | 1.00x    | --                  |
+| 2       | 20.16           | 1.85x    | 92%                 |
+| 4       | 8.96            | 4.16x    | 104%                |
+| 8       | 4.74            | 7.87x    | 98%                 |
+| 16      | 3.28            | 11.38x   | 71%                 |
+| 32      | 2.38            | 15.69x   | 49%                 |
+
+Measured on path_scene.json (1200x800, 20 SPP, BVH enabled). Full methodology, hardware spec, and reproduction steps in [PERFORMANCE.md](PERFORMANCE.md).
+
+```bash
+# Run the built-in benchmark (3 runs, median timing per thread count)
+cd build
+./ray_tracer ../data/jsons/path_scene.json --benchmark
+```
+
+## Architecture
+
+The render pipeline has a clear data flow with a single synchronization point between the tile scheduler and the PPM writer:
+
+```
+Parser -> Scene Graph -> BVH Build -> Tile Scheduler -> Worker Pool -> Framebuffer -> PPM
+```
+
+Key components:
+
+- **Tile Scheduler**: Divides the framebuffer into 32x32 pixel blocks and dispatches them to the worker pool. Pre-allocates the output vector once, avoiding per-pixel allocations in the hot path.
+- **Worker Pool**: Fixed-size thread pool (`std::thread` + task queue). Thread count configurable via `--threads N`. Each worker pulls tiles and renders them independently.
+- **SAH BVH**: Surface Area Heuristic bounding volume hierarchy. Reduces ray-scene intersection from O(n) to O(log n) for typical scenes. Built once, shared immutably across all worker threads.
+- **FancyBRDF**: PBR material system combining Lambert diffuse with GGX microfacet specular. Configurable roughness and metalness per material.
+- **Per-thread RNG**: `thread_local std::mt19937` avoids contention on the random number generator during Monte Carlo sampling.

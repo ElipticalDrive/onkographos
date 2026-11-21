@@ -1,0 +1,139 @@
+# Category-Level Semantic NeRF
+
+Also called: CLA-NeRF (Category-Level Articulated NeRF)
+
+## Overview
+Category-Level Semantic NeRF extends the standard NeRF framework to predict part segmentation logits in addition to density and color, enabling category-level generalization for articulated objects [S1]. It differs from sibling methods like Panoptic Radiance Field by conditioning the neural field on image features extracted from input views, allowing the model to generalize across instances of the same category rather than optimizing for a single specific object [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of multi-view images $I$ of articulated objects belonging to the same category, relative camera poses, and part segmentation labels for supervision [S1].
+*   **Outputs:** For a 3D location $\mathbf{x}$ and viewing direction $\mathbf{d}$, the model outputs density $\sigma$, color $\mathbf{c}$, and segmentation logits $\mathbf{s}$ [S1].
+
+**Data Structures:**
+*   **Segmentation Logits:** A vector $\mathbf{s} \in \mathbb{R}^{P+1}$, where $P$ is the number of object parts and the extra dimension represents the background [S1].
+*   **Image Feature Map:** $W = E(I)$, where $E$ is an image encoder [S1].
+*   **Projected Coordinates:** $\pi(\mathbf{x})$, the 2D coordinate of 3D point $\mathbf{x}$ projected onto the input image plane [S1].
+
+**Method Steps:**
+1.  **Image Encoding:** Extract a feature map $W$ from the input image $I$ using an image encoder $E$ [S1].
+2.  **Coordinate Projection:** For each sampled 3D point $\mathbf{x}$ along a ray, project it to the input image plane to obtain the coordinate $\pi(\mathbf{x})$ [S1].
+3.  **Neural Field Forward Pass:** Query the MLP backbone $F_\Theta$ with the positional encoding of the 3D point $\gamma(\mathbf{x})$, the viewing direction $\mathbf{d}$, and the augmented feature $W(\pi(\mathbf{x}))$ to predict density, color, and segmentation logits [S1]:
+    $$ (\sigma, \mathbf{c}, \mathbf{s}) = F_\Theta(\gamma(\mathbf{x}), \mathbf{d}, W(\pi(\mathbf{x}))) $$
+    [S1]
+4.  **Volume Rendering of Segmentation:** Compute the rendered segmentation $\hat{\mathbf{S}}(\mathbf{r})$ for a ray $\mathbf{r}$ by summing over $K$ samples, weighted by transmittance and density, similar to RGB rendering [S1]:
+    $$ \hat{\mathbf{S}}(\mathbf{r}) = \sum_{k=1}^{K} \hat{T}_k (1 - \exp(-\sigma_k(t_{k+1} - t_k))) \mathbf{s}_k $$
+    where $\mathbf{s}_k$ is the segmentation logit vector at sample $k$, and $\hat{T}_k$ is the accumulated transmittance [S1]:
+    $$ \hat{T}_k = \exp\left(-\sum_{k' < k} \sigma_{k'}(t_{k'+1} - t_{k'})\right) $$
+    [S1]
+5.  **Probability Conversion:** Convert logits $\hat{\mathbf{S}}(\mathbf{r})$ to probabilities $\hat{p}_i(\mathbf{r})$ using the softmax function [S1]:
+    $$ \hat{p}_i(\mathbf{r}) = \frac{\exp(\hat{S}_i(\mathbf{r}))}{\sum_{j=1}^{P} \exp(\hat{S}_j(\mathbf{r}))} $$
+    [S1]
+6.  **Loss Calculation:** Compute the total loss as a weighted sum of color and segmentation losses [S1].
+7.  **Optimization:** Jointly train the model on a collection of articulated objects from the same category using relative camera poses and part segmentation labels [S1].
+
+**Formulas:**
+*   **Color Loss ($\mathcal{L}_{color}$):** Mean squared error between ground truth color $\mathbf{C}(\mathbf{r})$ and predictions from coarse ($\hat{\mathbf{C}}_c$) and fine ($\hat{\mathbf{C}}_f$) networks [S1]:
+    $$ \mathcal{L}_{color} = \sum_{\mathbf{r} \in \mathcal{R}} \frac{||\hat{\mathbf{C}}_c(\mathbf{r}) - \mathbf{C}(\mathbf{r})||^2 + ||\hat{\mathbf{C}}_f(\mathbf{r}) - \mathbf{C}(\mathbf{r})||^2}{2} $$
+    [S1]
+*   **Segmentation Loss ($\mathcal{L}_{seg}$):** Multi-class cross-entropy loss encouraging consistency between rendered semantic labels and provided labels, computed for both coarse and fine networks [S1]:
+    $$ \mathcal{L}_{seg} = - \sum_{\mathbf{r} \in \mathcal{R}} \sum_{i=1}^{P+1} \left( p_i(\mathbf{r}) \log \hat{p}_i^c(\mathbf{r}) + p_i(\mathbf{r}) \log \hat{p}_i^f(\mathbf{r}) \right) $$
+    where $p_i(\mathbf{r})$ is the ground truth probability of part $i$ [S1].
+*   **Total Loss:**
+    $$ \mathcal{L}_{total} = \mathcal{L}_{color} + \lambda \cdot \mathcal{L}_{seg} $$
+    [S1]
+
+**Parameters:**
+*   $\lambda$: A coefficient modulating the segmentation loss during training [S1]. Typical value: Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def category_level_semantic_nerf_forward(image, camera_poses, points_3d, directions):
+    # 1. Extract image features
+    # E is the image encoder
+    W = image_encoder(image)
+    
+    # 2. Project 3D points to image plane
+    # pi is the projection function based on camera intrinsics and poses
+    projected_coords = project_to_image(points_3d, camera_poses)
+    
+    # 3. Sample feature from image feature map W at projected coordinates
+    # This requires interpolation (e.g., bilinear)
+    features = sample_feature_map(W, projected_coords)
+    
+    # 4. Query the MLP backbone
+    # gamma is positional encoding
+    # F_Theta is the neural network
+    # Inputs: positional encoding of x, viewing direction d, and image feature
+    sigma, color, seg_logits = neural_network(
+        gamma=positional_encoding(points_3d),
+        direction=directions,
+        image_feature=features
+    )
+    
+    return sigma, color, seg_logits
+
+def compute_segmentation_loss(rendered_seg_logits, ground_truth_probs, num_parts):
+    # Convert logits to probabilities using softmax
+    # Note: The denominator sum in the source is over P parts, 
+    # but the logit vector has P+1 dimensions (including background).
+    # Assuming the source formula implies softmax over the relevant classes.
+    rendered_probs = softmax(rendered_seg_logits, axis=-1)
+    
+    loss = 0
+    for i in range(num_parts + 1):
+        # Cross-entropy term
+        # Add epsilon to log to avoid log(0)
+        term = ground_truth_probs[:, i] * log(rendered_probs[:, i] + 1e-8)
+        loss -= sum(term)
+        
+    return loss
+
+def train_step(image, camera_poses, ground_truth_color, ground_truth_seg, lambda_seg):
+    # Cast rays and sample points
+    rays = cast_rays(camera_poses)
+    points_3d, directions = sample_points_along_rays(rays)
+    
+    # Forward pass
+    sigma, color_coarse, color_fine, seg_logits_coarse, seg_logits_fine = \
+        category_level_semantic_nerf_forward(image, camera_poses, points_3d, directions)
+        
+    # Render color (standard volume rendering)
+    rendered_color_coarse = volume_render_color(sigma, color_coarse, rays)
+    rendered_color_fine = volume_render_color(sigma, color_fine, rays)
+    
+    # Render segmentation (volume rendering of logits)
+    rendered_seg_coarse = volume_render_seg(sigma, seg_logits_coarse, rays)
+    rendered_seg_fine = volume_render_seg(sigma, seg_logits_fine, rays)
+    
+    # Compute Color Loss
+    l_color = (mse(rendered_color_coarse, ground_truth_color) + 
+               mse(rendered_color_fine, ground_truth_color)) / 2
+                
+    # Compute Segmentation Loss
+    # ground_truth_seg contains probabilities p_i(r)
+    l_seg_coarse = compute_segmentation_loss(rendered_seg_coarse, ground_truth_seg)
+    l_seg_fine = compute_segmentation_loss(rendered_seg_fine, ground_truth_seg)
+    l_seg = l_seg_coarse + l_seg_fine
+    
+    # Total Loss
+    l_total = l_color + lambda_seg * l_seg
+    
+    return l_total
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training requires joint optimization over a collection of objects, which may be more lengthy than single-object NeRF due to the additional segmentation head and feature conditioning [S1].
+*   **Memory Complexity:** Requires storing the image feature map $W$ and the segmentation logits for each sample, increasing memory usage compared to standard NeRF [S1].
+*   **Strengths:** Enables category-level generalization for articulated objects; predicts part segmentation alongside geometry and appearance [S1].
+*   **Limitations:** Requires part segmentation labels for supervision; optimization can be lengthy [S1].
+*   **When to use:** When the goal is to reconstruct and segment articulated objects from a category (e.g., chairs, tables) given limited views, and part-level understanding is required [S1].
+*   **When not to use:** For single-instance reconstruction without semantic needs, or when category-level generalization is not required [S1].
+
+## Background
+Category-Level Semantic NeRF (CLA-NeRF) was introduced in 2022 by the authors of "CLA-NeRF: Category-Level Articulated Neural Radiance Field" [S1]. It builds upon the NeRF framework and previous works on category-level reconstruction [S1]. The method is used for rendering articulated objects at unseen poses and estimating joint attributes (rotation axis and pivot point) from the predicted segmentation field [S1].
+
+## Sources
+[S1] CLA-NeRF: Category-Level Articulated Neural Radiance Field, https://doi.org/10.1109/icra46639.2022.9812272, fetched 2026-10-29

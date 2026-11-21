@@ -1,0 +1,300 @@
+--- v002.md
++++ v003.md
+@@ -12,8 +12,8 @@
+ 
+ **Data Structures:**
+-1.  **Point Cloud:** A set of 3D points $P$. Each point has a position and an initial feature vector.
+-    *   **Feature Vector:** Size 64.
++1.  **Point Cloud:** A set of 3D points $P$. Each point has a position and an initial feature vector [S1].
++    *   **Feature Vector:** Size 64 [S1].
+     *   **Initialization:**
+-        *   Dimensions 0-3: RGBA color values from the point cloud, rescaled to $[0, 1]$. Original points have $\alpha=1$; randomly added points have $\alpha=0$ [S1].
++        *   Dimensions 0-3: RGBA color values from the point cloud, rescaled to $[0, 1]$ [S1]. Original points have $\alpha=1$; randomly added points have $\alpha=0$ [S1].
+         *   Dimensions 4-63: Uniformly sampled from $[-10^{-4}, 10^{-4}]$ [S1].
+ 2.  **Tetrahedra Field:** A set of non-overlapping tetrahedra $\mathcal{T}$ covering the convex hull of $P$, generated via Delaunay triangulation [S1].
+@@ -21,5 +21,5 @@
+ 4.  **MLP:**
+     *   **Density/Appearance MLP:** 3 layers, hidden size 128, Kaiming uniform initialization [S1].
+-    *   **Color MLP:** 1 linear layer [S1].
++    *   **Color MLP:** Concatenate appearance features with ray direction encoded via Fourier features, pass through a single linear layer to get raw RGB [S1].
+ 
+ **Numbered Steps:**
+@@ -28,5 +28,5 @@
+     *   If the number of points $|P| > 10^6$, subsample to $10^6$ points randomly [S1].
+     *   If $|P| \le 10^6$ (e.g., Blender dataset), add $|P|/2$ random points to prevent edge artifacts [S1].
+-    *   To add a random point: Sample $x_0 \in P$, a random normal $n$, and $\alpha \sim \mathcal{N}(\bar{d}, \bar{d}^2/4)$, where $\bar{d}$ is the average spacing of $P$. Add $x = x_0 + \alpha n$ [S1].
++    *   To add a random point: Sample $x_0 \in P$, a random normal $n$, and $\alpha \sim \mathcal{N}(\bar{d}, \bar{d}^2/4)$, where $\bar{d}$ is the average spacing of $P$ [S1]. Add $x = x_0 + \alpha n$ [S1].
+ 
+ 2.  **Triangulation:**
+@@ -63,5 +63,5 @@
+ 8.  **Sampling:**
+     *   **Coarse Stage:** Use stratified uniform sampling along the ray, limited to the space occupied by tetrahedra [S1].
+-    *   **Fine Stage:** Use density weights from the coarse stage to bias sampling towards potential surfaces. Use the same network as the coarse stage [S1].
++    *   **Fine Stage:** Use density weights from the coarse stage to bias sampling towards potential surfaces [S1]. Use the same network as the coarse stage [S1].
+     *   Merge coarse and fine samples [S1].
+ 
+@@ -71,5 +71,5 @@
+         where $\delta_i = t_i - t_{i-1}$ [S1].
+     *   Normalize weights to $w_i$ and render final color $C$:
+-        $$ \mathbf {C} = \sum _{i=1}^{N} T_i (1 - \exp (\sigma _i \delta _i))\mathbf {c}_i, \quad T_i = \exp (-\sum _{i=1}^{N - 1} \sigma _i \delta _i) $$
++        $$ \mathbf {C} = \sum _{i=1}^{N} T_i (1 - \exp (\sigma _i \delta _i))\mathbf {c}_i, \quad T_i = \exp (-\sum _{j=1}^{i-1} \sigma_j \delta_j) $$
+     *   Backpropagate MSE loss to update features and MLP weights [S1].
+ 
+@@ -85,85 +85,121 @@
+     return 1 / (1 + np.exp(-x))
+ 
+-def compute_barycentric_coords_via_volumes(v1, v2, v3, v4, x):
+-    """
+-    Compute barycentric coordinates of x in tetrahedron (v1, v2, v3, v4)
+-    using volume ratios.
+-    """
+-    def tetra_volume(a, b, c, d):
+-        return np.abs(np.dot(a - d, np.cross(b - d, c - d))) / 6.0
+-    
+-    V_total = tetra_volume(v1, v2, v3, v4)
+-    if V_total == 0:
+-        return np.array([0.25, 0.25, 0.25, 0.25]) # Fallback for degenerate case
+-    
+-    l1 = tetra_volume(x, v2, v3, v4) / V_total
+-    l2 = tetra_volume(v1, x, v3, v4) / V_total
+-    l3 = tetra_volume(v1, v2, x, v4) / V_total
+-    l4 = tetra_volume(v1, v2, v3, x) / V_total
+-    return np.array([l1, l2, l3, l4])
+-
+-def interpolate_features(vertices, features, barycentric_coords):
+-    """
+-    Interpolate feature vectors at vertices using barycentric coordinates.
+-    vertices: (4, 3) array of vertex positions
+-    features: (4, 64) array of vertex feature vectors
+-    barycentric_coords: (4,) array of lambda values
+-    """
+-    return np.dot(barycentric_coords, features)
+-
+-def fourier_encode(direction, freq_bands=10):
+-    """
+-    Simple Fourier encoding of direction vector.
+-    """
+-    scales = 2 ** np.arange(freq_bands)
+-    scaled_direction = np.outer(direction, scales)
+-    encoded = np.concatenate([np.sin(scaled_direction), np.cos(scaled_direction)], axis=-1)
+-    return encoded
++def tetra_volume(a, b, c, d):
++    return np.abs(np.dot(a - d, np.cross(b - d, c - d))) / 6.0
++
++def compute_barycentric_coords(v1, v2, v3, v4, x):
++    V = tetra_volume(v1, v2, v3, v4)
++    if V == 0:
++        return np.array([0.25, 0.25, 0.25, 0.25])
++    return np.array([
++        tetra_volume(x, v2, v3, v4) / V,
++        tetra_volume(v1, x, v3, v4) / V,
++        tetra_volume(v1, v2, x, v4) / V,
++        tetra_volume(v1, v2, v3, x) / V
++    ])
++
++def ray_triangle_intersect(ray_o, ray_d, a, b, c):
++    edge1 = b - a
++    edge2 = c - a
++    h = np.cross(ray_d, edge2)
++    det = np.dot(edge1, h)
++    if abs(det) < 1e-8:
++        return None, None
++    inv_det = 1.0 / det
++    s = ray_o - a
++    u = np.dot(s, h) * inv_det
++    if u < 0 or u > 1:
++        return None, None
++    q = np.cross(s, edge1)
++    v = np.dot(ray_d, q) * inv_det
++    if v < 0 or u + v > 1:
++        return None, None
++    t = np.dot(edge2, q) * inv_det
++    if t > 1e-6:
++        return t, np.array([1.0 - u - v, u, v])
++    return None, None
++
++def ray_tetra_intersect(ray_o, ray_d, v1, v2, v3, v4):
++    faces = [(v1, v2, v3), (v1, v2, v4), (v1, v3, v4), (v2, v3, v4)]
++    ts = []
++    lambdas = []
++    for a, b, c in faces:
++        t, lam = ray_triangle_intersect(ray_o, ray_d, a, b, c)
++        if t is not None:
++            ts.append(t)
++            # Map triangle barycentrics to tet barycentrics (opposite vertex gets 0)
++            if np.allclose([a, b, c], [v1, v2, v3]):
++                tet_lam = np.array([lam[0], lam[1], lam[2], 0.0])
++            elif np.allclose([a, b, c], [v1, v2, v4]):
++                tet_lam = np.array([lam[0], lam[1], 0.0, lam[2]])
++            elif np.allclose([a, b, c], [v1, v3, v4]):
++                tet_lam = np.array([lam[0], 0.0, lam[1], lam[2]])
++            else:
++                tet_lam = np.array([0.0, lam[0], lam[1], lam[2]])
++            lambdas.append(tet_lam)
++    if len(ts) >= 2:
++        idx = np.argsort(ts)
++        return ts[idx[0]], ts[idx[1]], lambdas[idx[0]], lambdas[idx[1]]
++    return None, None, None, None
++
++def inverse_cdf_sample(weights, t_min, t_max, num_samples):
++    cdf = np.cumsum(weights)
++    cdf /= cdf[-1]
++    u = np.random.uniform(0, 1, num_samples)
++    indices = np.searchsorted(cdf, u)
++    t_fine = t_min + (t_max - t_min) * u
++    return np.sort(t_fine)
+ 
+ def tetra_nerf_forward(ray_origin, ray_direction, tetrahedra, vertex_features, 
+                         mlp_density_appearance, mlp_color, num_coarse_samples=64, 
+                         num_fine_samples=48):
+-    """
+-    Forward pass for a single ray.
+-    """
+-    # 1. Find intersected tetrahedra and sort by distance
+-    # This requires an acceleration structure (e.g., OptiX) in practice.
+-    # Here we assume a function `get_intersected_tetra_indices` returns 
+-    # sorted indices of tetrahedra intersected by the ray.
+-    intersected_tetra_indices = get_intersected_tetra_indices(ray_origin, ray_direction, tetrahedra)
++    # 1. Find intersected tetrahedra and compute segments
++    tet_segments = []
++    for idx, tet in enumerate(tetrahedra):
++        v1, v2, v3, v4 = tet
++        t_in, t_out, lam_in, lam_out = ray_tetra_intersect(ray_origin, ray_direction, v1, v2, v3, v4)
++        if t_in is not None:
++            tet_segments.append((idx, t_in, t_out, lam_in, lam_out))
+     
+     # Limit to 512 triangles/tetrahedra as per source
+-    intersected_tetra_indices = intersected_tetra_indices[:512]
+-    
+-    # 2. Coarse Sampling
+-    # Sample points along the ray within the bounding volume of the tetrahedra
+-    # For simplicity, assume we sample uniformly within the min/max extent 
+-    # of the intersected tetrahedra along the ray.
+-    t_min = max(0, (get_min_extent(ray_origin, ray_direction, intersected_tetra_indices)))
+-    t_max = min(max_extent, (get_max_extent(ray_origin, ray_direction, intersected_tetra_indices)))
++    tet_segments = sorted(tet_segments, key=lambda x: x[1])[:512]
++    
++    if not tet_segments:
++        return np.array([0.0, 0.0, 0.0])
++
++    # 2. Coarse Sampling bounds
++    t_min = max(0.0, min(seg[1] for seg in tet_segments))
++    t_max = max(seg[2] for seg in tet_segments)
+     
+     coarse_t = np.linspace(t_min, t_max, num_coarse_samples)
+-    coarse_points = ray_origin + coarse_t[:, None] * ray_direction
+     
+     coarse_sigma = []
+     coarse_c = []
+-    
+-    for t, x in zip(coarse_t, coarse_points):
+-        # Find containing tetrahedron
+-        tet_idx = find_containing_tetrahedron(x, intersected_tetra_indices)
+-        if tet_idx is None:
++    coarse_weights = []
++    
++    for t_q in coarse_t:
++        # Find containing tetrahedron segment
++        tet_idx = -1
++        lam_q = None
++        for i, (idx, t_in, t_out, lam_in, lam_out) in enumerate(tet_segments):
++            if t_in <= t_q <= t_out:
++                tet_idx = idx
++                # Linear interpolation of barycentric coordinates along ray
++                frac = (t_q - t_in) / (t_out - t_in)
++                lam_q = (1.0 - frac) * lam_in + frac * lam_out
++                break
++        
++        if tet_idx == -1:
+             coarse_sigma.append(0.0)
+             coarse_c.append([0.0, 0.0, 0.0])
++            coarse_weights.append(0.0)
+             continue
+             
+         tet = tetrahedra[tet_idx]
+-        verts = np.array([tet.v1, tet.v2, tet.v3, tet.v4])
++        v1, v2, v3, v4 = tet
+         feats = vertex_features[tet_idx] # (4, 64)
+         
+-        # Compute barycentric coords
+-        lambdas = compute_barycentric_coords_via_volumes(*verts, x)
+-        
+         # Interpolate features
+-        f_x = interpolate_features(verts, feats, lambdas)
++        f_x = np.dot(lam_q, feats)
+         
+         # MLP: Density and Appearance
+@@ -172,5 +208,6 @@
+         
+         # MLP: Color
+-        encoded_dir = fourier_encode(ray_direction)
++        # Fourier encoding placeholder for direction
++        encoded_dir = np.concatenate([np.sin(ray_direction * 2**np.arange(10)), np.cos(ray_direction * 2**np.arange(10))])
+         raw_c = mlp_color(np.concatenate([appearance, encoded_dir]))
+         c = sigmoid(raw_c)
+@@ -184,5 +221,4 @@
+     # 3. Compute coarse weights for fine sampling bias
+     deltas = np.diff(np.concatenate([[0], coarse_t]))
+-    # w_i = (1 - exp(-sigma_i * delta_i)) * exp(-sum_{j<i} sigma_j * delta_j)
+     alpha_coarse = 1 - np.exp(-coarse_sigma * deltas)
+     transmittance_coarse = np.exp(-np.cumsum(coarse_sigma * deltas))
+@@ -190,14 +226,20 @@
+     
+     # 4. Fine Sampling
+-    # Sample based on weights_coarse
+-    fine_t = sample_from_distribution(weights_coarse, t_min, t_max, num_fine_samples)
+-    fine_points = ray_origin + fine_t[:, None] * ray_direction
++    fine_t = inverse_cdf_sample(weights_coarse, t_min, t_max, num_fine_samples)
+     
+     fine_sigma = []
+     fine_c = []
+     
+-    for t, x in zip(fine_t, fine_points):
+-        tet_idx = find_containing_tetrahedron(x, intersected_tetra_indices)
+-        if tet_idx is None:
++    for t_q in fine_t:
++        tet_idx = -1
++        lam_q = None
++        for idx, t_in, t_out, lam_in, lam_out in tet_segments:
++            if t_in <= t_q <= t_out:
++                tet_idx = idx
++                frac = (t_q - t_in) / (t_out - t_in)
++                lam_q = (1.0 - frac) * lam_in + frac * lam_out
++                break
++        
++        if tet_idx == -1:
+             fine_sigma.append(0.0)
+             fine_c.append([0.0, 0.0, 0.0])
+@@ -205,14 +247,12 @@
+             
+         tet = tetrahedra[tet_idx]
+-        verts = np.array([tet.v1, tet.v2, tet.v3, tet.v4])
++        v1, v2, v3, v4 = tet
+         feats = vertex_features[tet_idx]
+         
+-        lambdas = compute_barycentric_coords_via_volumes(*verts, x)
+-        f_x = interpolate_features(verts, feats, lambdas)
+-        
++        f_x = np.dot(lam_q, feats)
+         raw_sigma, appearance = mlp_density_appearance(f_x)
+         sigma = softplus(raw_sigma)
+         
+-        encoded_dir = fourier_encode(ray_direction)
++        encoded_dir = np.concatenate([np.sin(ray_direction * 2**np.arange(10)), np.cos(ray_direction * 2**np.arange(10))])
+         raw_c = mlp_color(np.concatenate([appearance, encoded_dir]))
+         c = sigmoid(raw_c)
+@@ -229,5 +269,4 @@
+     all_c = np.concatenate([coarse_c, fine_c])
+     
+-    # Sort by t
+     sort_idx = np.argsort(all_t)
+     all_t = all_t[sort_idx]
+@@ -259,6 +298,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of tetrahedra, vertices, and scene structure. Training speed ranges from 15k to 30k rays per second on a single NVIDIA A100 GPU [S1]. Full training (300k iterations) takes 11–24 hours [S1].
+-*   **Memory Complexity:** Fixed number of parameters. Feature vectors are stored at vertices. The number of parameters stays constant during training, unlike Point-NeRF or Plenoxels which grow complexity [S1].
++*   **Time Complexity:** Depends on the number of tetrahedra, vertices, and scene structure [S1]. Training speed ranges from 15k to 30k rays per second on a single NVIDIA A100 GPU [S1].
++*   **Memory Complexity:** Fixed number of parameters [S1]. Feature vectors are stored at vertices [S1]. The number of parameters stays constant during training, unlike Point-NeRF or Plenoxels which grow complexity [S1].
+ *   **Strengths:** Adaptive resolution (denser near surfaces), continuous representation avoiding empty regions, fixed parameter count [S1].
+ *   **Limitations:** Performance degrades if the fixed triangle intersection limit (512) is insufficient for the scene complexity [S1].

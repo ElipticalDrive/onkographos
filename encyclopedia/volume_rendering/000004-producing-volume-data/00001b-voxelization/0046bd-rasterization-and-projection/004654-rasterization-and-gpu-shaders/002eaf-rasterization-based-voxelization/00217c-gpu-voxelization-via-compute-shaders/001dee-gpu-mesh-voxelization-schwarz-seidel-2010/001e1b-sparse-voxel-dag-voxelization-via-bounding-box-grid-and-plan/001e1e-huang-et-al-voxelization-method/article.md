@@ -1,0 +1,195 @@
+# Huang et al. Voxelization Method
+
+Also called: Huang voxelization
+
+## Overview
+A voxelization algorithm that tests grid cells for overlap with a triangle using spheres at vertices, cylinders on edges, and a plane test for the triangle interior [S1, S2, unofficial]. It is adapted for morton-code-based subgrids, serving as the core rasterization step within the Sparse Voxel DAG Voxelization via Bounding Box Grid and Plane Projections framework [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A list of triangles (vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$), a voxel side length `unitlength`, and a Morton code range `[morton_start, morton_end)` defining the current subgrid partition [S1, S2, unofficial].
+*   **Outputs:** A `voxels` array of size `morton_end - morton_start`, where each entry indicates occupancy (and optionally payload data) [S1, S2, unofficial].
+
+**Data Structures:**
+*   `voxels`: An array of size $N = \text{morton\_end} - \text{morton\_start}$ [S1, S2, unofficial].
+    *   If `BINARY_VOXELIZATION` is defined: stores `bool` or `char` (occupancy) [S1, S2, unofficial].
+    *   If undefined: stores `size_t` indices into a `voxel_data` vector, or a sentinel `EMPTY_VOXEL` [S1, S2, unofficial].
+*   `voxel_data` (non-binary mode only): A vector of `VoxelData` structs containing the Morton index, triangle normal, and averaged vertex colors [S2, unofficial].
+
+**Parameters:**
+*   `unitlength`: Voxel side length in world units [S2, unofficial].
+*   `morton_start`, `morton_end`: 64-bit Morton codes defining the subgrid range [S2, unofficial].
+*   `BINARY_VOXELIZATION`: Compile-time flag determining storage mode [S1, S2, unofficial].
+
+**Steps:**
+
+1.  **Initialization:**
+    *   Compute `unit_div = 1.0 / unitlength` and `radius = unitlength / 2.0` [S1, S2, unofficial].
+    *   Decode `morton_start` and `morton_end - 1` to determine the partition's bounding box in grid coordinates: `p_bbox_grid.min` and `p_bbox_grid.max` [S1, S2, unofficial].
+    *   Initialize the `voxels` array: for $i$ from $0$ to $N-1$, set `voxels[i] = EMPTY_VOXEL` (or `false` in binary mode) [S1, S2, unofficial].
+
+2.  **Triangle Processing Loop:**
+    For each triangle $t$:
+    *   Compute the triangle's world bounding box $t\_bbox\_world$ [S1, S2, unofficial].
+    *   Convert to grid coordinates: $t\_bbox\_grid = \text{floor}(t\_bbox\_world \times \text{unit\_div})$ [S1, S2, unofficial].
+    *   Clamp $t\_bbox\_grid$ to the partition bounding box $p\_bbox\_grid$ to ensure iteration stays within the current subgrid [S1, S2, unofficial].
+
+3.  **Voxel Iteration:**
+    Iterate through all grid cells $(x, y, z)$ within the clamped $t\_bbox\_grid$:
+    *   Compute the Morton index: $idx = \text{morton3D\_64\_encode}(z, y, x)$ [S1, S2, unofficial].
+    *   Compute the local array index: $array\_idx = idx - \text{morton\_start}$ [S1, unofficial].
+    *   If `voxels[array_idx]` is already filled, skip to the next cell [S1, S2, unofficial].
+    *   Compute the voxel center: $\mathbf{p} = \text{vec3}((x + 0.5) \cdot \text{unitlength}, (y + 0.5) \cdot \text{unitlength}, (z + 0.5) \cdot \text{unitlength})$ [S1, S2, unofficial].
+
+4.  **Overlap Tests (Three-Stage):**
+    Construct test primitives:
+    *   Three spheres centered at $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ with radius `radius` [S1, S2, unofficial].
+    *   Three cylinders connecting edges $(\mathbf{v}_0-\mathbf{v}_1), (\mathbf{v}_1-\mathbf{v}_2), (\mathbf{v}_2-\mathbf{v}_0)$ with radius `radius` [S1, S2, unofficial].
+    *   Plane $S$ defined by the triangle vertices [S1, S2, unofficial].
+
+    *   **Test 1 (Vertex Spheres):** If $\mathbf{p}$ is inside any of the three vertex spheres, mark `voxels[array_idx]` as filled. If in non-binary mode, add payload data. Increment filled counter and continue to next cell [S1, S2, unofficial].
+
+    *   **Test 2 (Edge Cylinders):** If $\mathbf{p}$ is inside any of the three edge cylinders, mark `voxels[array_idx]` as filled. Add payload if non-binary. Increment filled counter and continue to next cell [S1, S2, unofficial].
+
+    *   **Test 3 (Plane & Barycentric):**
+        *   Compute $\text{halfunit} = \text{unitlength} / 2.0$ [S1, S2, unofficial].
+        *   Calculate $b_0, b_1, b_2$ as the absolute dot products of the half-unit vectors along the X, Y, and Z axes with the plane normal $\mathbf{n}$:
+            $$b_i = | \mathbf{e}_i \cdot \mathbf{n} | \cdot \text{halfunit}$$
+            where $\mathbf{e}_i$ are the unit vectors for axes X, Y, Z [S1, unofficial].
+        *   Compute $\cos\beta = \frac{\max(b_0, b_1, b_2)}{\text{halfunit} \cdot \|\mathbf{n}\|}$ [S1, unofficial].
+        *   Compute offset $t_c = \frac{\text{unitlength}}{2.0} \cdot \cos\beta$ [S1, unofficial].
+        *   Construct two parallel planes offset by $t_c$ from the triangle plane $S$: Plane($\mathbf{n}, D + t_c$) and Plane($\mathbf{n}, D - t_c$), where $D$ is the plane constant derived from $t$ [S1, unofficial].
+        *   Check if $\mathbf{p}$ lies between these two parallel planes. If not, skip the cell [S1, unofficial].
+        *   If the plane test passes, compute barycentric-like signs $s_1, s_2, s_3$:
+            $$s_1 = (\mathbf{n} \times \mathbf{e}_1) \cdot (\mathbf{p} - \mathbf{v}_0)$$
+            $$s_2 = (\mathbf{n} \times \mathbf{e}_2) \cdot (\mathbf{p} - \mathbf{v}_1)$$
+            $$s_3 = (\mathbf{n} \times \mathbf{e}_3) \cdot (\mathbf{p} - \mathbf{v}_2)$$
+            where $\mathbf{n}$ is the triangle normal, $\mathbf{e}_1 = \mathbf{v}_1-\mathbf{v}_0$, $\mathbf{e}_2 = \mathbf{v}_2-\mathbf{v}_1$, $\mathbf{e}_3 = \mathbf{v}_0-\mathbf{v}_2$ are the edge vectors, $\mathbf{p}$ is the voxel center, and $\mathbf{v}_i$ are the vertices [S1, S2, unofficial].
+        *   If the signs are consistent (i.e., $(s_1 \le 0) == (s_2 \le 0)$ and $(s_2 \le 0) == (s_3 \le 0)$), mark `voxels[array_idx]` as filled. Add payload if non-binary. Increment filled counter [S1, S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_huang(triangles, unitlength, morton_start, morton_end, binary_mode=True):
+    """
+    Voxelize triangles into a Morton-coded subgrid using Huang's method.
+    """
+    n_voxels = morton_end - morton_start
+    EMPTY_VOXEL = -1
+    voxels = [EMPTY_VOXEL] * n_voxels
+    voxel_data = [] if not binary_mode else None
+    
+    unit_div = 1.0 / unitlength
+    radius = unitlength / 2.0
+    halfunit = unitlength / 2.0
+    
+    # Standard 3D Morton encode/decode (simplified 21-bit version)
+    def morton_encode(x, y, z):
+        m = 0
+        for i in range(21):
+            m |= ((x & (1 << i)) << (2*i)) | ((y & (1 << i)) << (2*i+1)) | ((z & (1 << i)) << (2*i+2))
+        return m
+    def morton_decode(m):
+        x = y = z = 0
+        for i in range(21):
+            x |= (m & (1 << (2*i))) << i
+            y |= (m & (1 << (2*i+1))) << i
+            z |= (m & (1 << (2*i+2))) << i
+        return (x, y, z)
+
+    # Decode bounds to get partition grid bbox
+    p_min = morton_decode(morton_start)
+    p_max = morton_decode(morton_end - 1)
+    
+    for t in triangles:
+        # Compute world bbox and convert to grid
+        t_bbox_world_min = min(t.v0, t.v1, t.v2)
+        t_bbox_world_max = max(t.v0, t.v1, t.v2)
+        t_bbox_grid_min = tuple(int(f * unit_div) for f in t_bbox_world_min)
+        t_bbox_grid_max = tuple(int(f * unit_div) for f in t_bbox_world_max)
+        
+        # Clamp to partition
+        t_bbox_grid_min = tuple(max(a, b) for a, b in zip(t_bbox_grid_min, p_min))
+        t_bbox_grid_max = tuple(min(a, b) for a, b in zip(t_bbox_grid_max, p_max))
+        
+        # Construct primitives
+        n = cross(t.v1 - t.v0, t.v2 - t.v0)
+        norm_n = length(n)
+        if norm_n == 0:
+            continue
+        n = n / norm_n
+        D = -dot(n, t.v0)
+        
+        e1 = t.v1 - t.v0
+        e2 = t.v2 - t.v1
+        e3 = t.v0 - t.v2
+        
+        # Plane test bounds
+        b0 = abs(n.x) * halfunit
+        b1 = abs(n.y) * halfunit
+        b2 = abs(n.z) * halfunit
+        max_b = max(b0, b1, b2)
+        cos_beta = max_b / (halfunit * norm_n)
+        tc = halfunit * cos_beta
+        
+        for z in range(t_bbox_grid_min[2], t_bbox_grid_max[2] + 1):
+            for y in range(t_bbox_grid_min[1], t_bbox_grid_max[1] + 1):
+                for x in range(t_bbox_grid_min[0], t_bbox_grid_max[0] + 1):
+                    idx = morton_encode(z, y, x)
+                    array_idx = idx - morton_start
+                    
+                    if voxels[array_idx] != EMPTY_VOXEL:
+                        continue
+                    
+                    p = ((x + 0.5) * unitlength, (y + 0.5) * unitlength, (z + 0.5) * unitlength)
+                    filled = False
+                    
+                    # Test 1: Spheres
+                    for v in (t.v0, t.v1, t.v2):
+                        if length_sq(p - v) <= radius**2:
+                            filled = True
+                            break
+                    
+                    if not filled:
+                        # Test 2: Cylinders
+                        for v_start, v_end in [(t.v0, t.v1), (t.v1, t.v2), (t.v2, t.v0)]:
+                            edge = v_end - v_start
+                            t_vec = p - v_start
+                            proj = dot(t_vec, edge) / length_sq(edge)
+                            proj = max(0.0, min(1.0, proj))
+                            closest = v_start + edge * proj
+                            if length_sq(p - closest) <= radius**2:
+                                filled = True
+                                break
+                    
+                    if not filled:
+                        # Test 3: Plane
+                        dist = dot(p, n) + D
+                        if abs(dist) <= tc:
+                            # Barycentric check
+                            s1 = dot(cross(n, e1), p - t.v0)
+                            s2 = dot(cross(n, e2), p - t.v1)
+                            s3 = dot(cross(n, e3), p - t.v2)
+                            
+                            if (s1 <= 0) == (s2 <= 0) and (s2 <= 0) == (s3 <= 0):
+                                filled = True
+                    
+                    if filled:
+                        voxels[array_idx] = 1 if binary_mode else len(voxel_data)
+                        if not binary_mode:
+                            voxel_data.append((idx, n, average_colors(t)))
+                            
+    return voxels, voxel_data
+```
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The method is described in the context of Out-Of-Core Sparse Voxel Octree (SVO) building [S1, unofficial]. It is part of the pipeline that converts triangle meshes into voxelized structures for rendering and processing. The implementation is found in the `ooc_svo_builder` repository [S1, unofficial] and referenced in work on High Resolution Sparse Voxel DAGs [S2, unofficial].
+
+## Sources
+[S1] Forceflow/ooc_svo_builder, https://github.com/Forceflow/ooc_svo_builder, fetched 2026-10-26 (unofficial)
+[S2] leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, https://github.com/leonzheng2/INF584-High_Resolution_Sparse_Voxel_DAGs, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,255 @@
+--- v001.md
++++ v002.md
+@@ -1,197 +1,82 @@
+ # Neural Radiance Field (NeRF) Representation
+ 
+-Also called: 3D Gaussian Splatting, 3DGS, Gaussian Splatting
++Also called: Neural Radiance Field
+ 
+ ## Overview
+-3D Gaussian Splatting (3DGS) represents a scene explicitly as millions of tiny, colored, semi-transparent 3D Gaussian blobs in 3D space, rendered by projecting them onto the screen and blending, avoiding neural network evaluation for real-time performance [S1, unofficial]. It differs from its parent [NeRF](12484-scene-nerf.md) and siblings [3D Gaussian Splatting optimization](12052-3d-gaussian-splatting-optimization.md) by replacing the implicit neural field query with explicit differentiable rasterization of Gaussians, trading higher memory usage for significantly faster training and rendering speeds [S1, unofficial].
++NeRF represents a 3D scene as a continuous volumetric function that maps 5D coordinates (3D position and 2D viewing direction) to 4D output values (3D color and 1D volume density) using a multilayer perceptron (MLP) [S1, unofficial]. It solves the problem of novel view synthesis by optimizing this implicit representation to match a set of input images with known camera poses, enabling the rendering of photorealistic images from viewpoints not present in the training data [S1, unofficial]. Unlike explicit representations such as [3D Gaussian Splatting](12052-3d-gaussian-splatting.md) which store millions of discrete blobs, NeRF stores the scene implicitly within a neural network, resulting in significantly lower memory usage but requiring ray marching and network evaluation for rendering [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ images with known camera poses (typically obtained via Structure from Motion, e.g., COLMAP) [S1, unofficial].
+-*   **Outputs:** A set of $M$ 3D Gaussians $\mathcal{G} = \{g_1, \dots, g_M\}$, where each Gaussian is defined by parameters optimized to minimize the difference between rendered images and input photos [S1, unofficial].
++*   **Inputs:** A set of $N$ training images $I_n$ with corresponding camera poses $T_n$ (extrinsics) and intrinsics.
++*   **Outputs:** A trained MLP $\mathcal{F}_\Theta$ that approximates the scene function, and rendered images from novel viewpoints.
+ 
+ **Data Structures:**
+-Each Gaussian $i$ stores approximately 59 learnable numbers [S1, unofficial]. The layout is:
+-1.  **Position:** $\mu_i \in \mathbb{R}^3$ (center in 3D space) [S1, unofficial].
+-2.  **Covariance:** Defined by scale $\mathbf{s}_i \in \mathbb{R}^3$ and rotation $\mathbf{R}_i \in SO(3)$. The covariance matrix $\Sigma_i$ is constructed as $\Sigma_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$, where $\mathbf{S}_i$ is a diagonal matrix with entries $\mathbf{s}_i$. This parameterization ensures the shape remains valid (positive semi-definite) [S1, unofficial].
+-3.  **Opacity:** $\alpha_i \in [0, 1]$ (transparency) [S1, unofficial].
+-4.  **Color:** Stored as spherical harmonics coefficients to allow view-dependent color [S1, unofficial].
++The core data structure is a Multilayer Perceptron (MLP).
++*   **Position Network:** Takes a 3D point $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++    *   Input: Concatenation of $\mathbf{x}$ and $\mathbf{d}$.
++    *   Hidden layers: Typically 8 fully connected layers with 256 units each, using ReLU activation.
++    *   Skip connections: Inputs $\mathbf{x}$ are concatenated into hidden layers at indices 4 and 8 to preserve high-frequency details [S1, unofficial].
++    *   Output: Intermediate feature vector $\mathbf{h}$ and volume density $\sigma$.
++*   **Color Network:** Takes the feature vector $\mathbf{h}$ and viewing direction $\mathbf{d}$.
++    *   Input: Concatenation of $\mathbf{h}$ and $\mathbf{d}$.
++    *   Hidden layers: Typically 1 fully connected layer with 128 units, using ReLU activation.
++    *   Output: View-dependent color $\mathbf{c} \in \mathbb{R}^3$ (RGB).
+ 
+-**Numbered Steps:**
++**Position Encoding:**
++To enable the MLP to learn high-frequency details, input coordinates are mapped to higher dimensions using positional encoding $\gamma$. For a coordinate $x$, the encoding is:
++$$ \gamma(x) = \left( \sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x) \right) $$
++where $L$ is the number of frequencies. This is applied to both $\mathbf{x}$ and $\mathbf{d}$ before entering the network [S1, unofficial].
+ 
+-1.  **Initialization:** Start with photos and camera poses from Structure from Motion (e.g., COLMAP) to generate a sparse cloud of 3D points. Each point becomes the starting position of one Gaussian [S1, unofficial].
+-2.  **Projection:** Project every 3D Gaussian onto the camera image. A projected 3D Gaussian results in a 2D Gaussian (soft ellipse) on the screen. Its 2D covariance is computed using the camera transformation and a local linear approximation of the projection [S1, unofficial].
+-3.  **Tiling:** Divide the screen into small tiles of $16 \times 16$ pixels. Assign each Gaussian to the tiles it overlaps [S1, unofficial].
+-4.  **Sorting:** Within each tile, sort the Gaussians by depth from front to back using a very fast GPU sort [S1, unofficial].
+-5.  **Rasterization/Blending:** For each pixel, blend the colors of the sorted Gaussians front-to-back using alpha compositing. The color $C$ at a pixel is computed as:
+-    $$ C = \sum_{i \in \text{sorted}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $c_i$ is the color of the $i$-th Gaussian and $\alpha_i$ is its opacity [S1, unofficial].
+-6.  **Training Loss:** Compare the rendered image with the real training photo using an L1 loss combined with a structural similarity (SSIM) term [S1, unofficial].
+-7.  **Optimization:** Because the rasterizer is differentiable, backpropagate the error to update each Gaussian's position, shape, opacity, and color directly via gradient descent [S1, unofficial].
+-8.  **Adaptive Density Control:**
+-    *   **Cloning:** In regions that are under-reconstructed with missing details, clone small Gaussians [S1, unofficial].
+-    *   **Splitting:** Where a single Gaussian is too large and covers too much detail, split it into two smaller ones [S1, unofficial].
+-    *   **Pruning:** Prune away Gaussians that become almost transparent [S1, unofficial].
++**Rendering (Volume Rendering):**
++To render a pixel, a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is cast from the camera origin $\mathbf{o}$ through the pixel center. The ray is sampled at $K$ points along its length within the scene bounds. The color $C(\mathbf{r})$ is computed via differentiable volume rendering:
++$$ C(\mathbf{r}) = \sum_{i=1}^{K} T_i \left( 1 - \exp(-\sigma_i \delta_i) \right) \mathbf{c}_i $$
++where:
++*   $\sigma_i$ is the volume density at sample point $i$.
++*   $\mathbf{c}_i$ is the color at sample point $i$.
++*   $\delta_i$ is the distance between sample point $i$ and $i+1$.
++*   $T_i$ is the accumulated transmittance up to point $i$:
++    $$ T_i = \exp\left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right) $$
++    $T_i$ represents the probability that the ray travels from the camera to point $i$ without being absorbed or scattered [S1, unofficial].
+ 
+-**Pseudocode:**
+-
+-```python
+-def render_gaussians(gaussians, camera_pose, image_width, image_height):
+-    """
+-    Renders an image from a set of 3D Gaussians using differentiable rasterization.
+-    
+-    Args:
+-        gaussians: List of Gaussian objects, each with:
+-            - mu: (3,) position
+-            - R: (3,3) rotation matrix
+-            - S: (3,) scale vector
+-            - alpha: (1,) opacity
+-            - sh_coeffs: Spherical Harmonics coefficients
+-            - color: (3,) base color (if not using SH)
+-        camera_pose: (4,4) camera-to-world transformation matrix
+-        image_width: int
+-        image_height: int
+-        
+-    Returns:
+-        rendered_image: (H, W, 3) RGB image
+-    """
+-    # 1. Project Gaussians to 2D
+-    projected_gaussians = []
+-    for g in gaussians:
+-        # Compute 3D covariance in world space
+-        S = np.diag(g.S)
+-        Sigma = g.R @ S @ S.T @ g.R.T
+-        
+-        # Project to 2D using camera transformation and local linear approximation
+-        # J is the Jacobian of the projection function
+-        # Sigma_2D = J @ Sigma @ J.T
+-        # This step is simplified here; in practice, it involves camera intrinsics
+-        # and the view matrix derived from camera_pose.
+-        mu_2d, Sigma_2D = project_3d_gaussian_to_2d(g.mu, Sigma, camera_pose)
+-        
+-        projected_gaussians.append({
+-            'mu_2d': mu_2d,
+-            'Sigma_2D': Sigma_2D,
+-            'alpha': g.alpha,
+-            'sh_coeffs': g.sh_coeffs,
+-            'color': g.color,
+-            'depth': g.mu[2] # Simplified depth for sorting
+-        })
+-    
+-    # 2. Tiling
+-    tile_size = 16
+-    tiles = {}
+-    for i, pg in enumerate(projected_gaussians):
+-        # Determine which tiles this Gaussian overlaps
+-        # This involves checking the bounding box of the 2D Gaussian
+-        tile_indices = get_overlapping_tiles(pg['mu_2d'], pg['Sigma_2D'], tile_size, image_width, image_height)
+-        for idx in tile_indices:
+-            if idx not in tiles:
+-                tiles[idx] = []
+-            tiles[idx].append(i)
+-            
+-    # 3. Sorting and Rasterization
+-    rendered_image = np.zeros((image_height, image_width, 3))
+-    
+-    for tile_idx, gaussian_indices in tiles.items():
+-        # Sort Gaussians by depth (front to back)
+-        sorted_indices = sort_by_depth(gaussian_indices, projected_gaussians)
+-        
+-        # Get tile coordinates
+-        y_start, x_start = tile_idx // (image_width // tile_size), tile_idx % (image_width // tile_size)
+-        y_start *= tile_size
+-        x_start *= tile_size
+-        
+-        # Rasterize within tile
+-        for y in range(y_start, min(y_start + tile_size, image_height)):
+-            for x in range(x_start, min(x_start + tile_size, image_width)):
+-                accumulated_alpha = 0.0
+-                accumulated_color = np.zeros(3)
+-                
+-                for idx in sorted_indices:
+-                    pg = projected_gaussians[idx]
+-                    # Compute 2D Gaussian value at (x, y)
+-                    # This involves the Mahalanobis distance using Sigma_2D
+-                    alpha_at_pixel = compute_2d_gaussian_alpha(pg['mu_2d'], pg['Sigma_2D'], x, y)
+-                    alpha_at_pixel *= pg['alpha']
+-                    
+-                    if alpha_at_pixel > 0:
+-                        # Get color from SH or base color
+-                        color = get_color_from_sh(pg['sh_coeffs'], pg['color'], camera_pose)
+-                        
+-                        accumulated_color += color * alpha_at_pixel * (1 - accumulated_alpha)
+-                        accumulated_alpha += alpha_at_pixel * (1 - accumulated_alpha)
+-                        
+-                        if accumulated_alpha > 0.99: # Early ray termination
+-                            break
+-                
+-                rendered_image[y, x] = accumulated_color
+-                
+-    return rendered_image
+-
+-def optimize_gaussians(gaussians, images, camera_poses, learning_rate):
+-    """
+-    Optimizes the Gaussian parameters using gradient descent.
+-    """
+-    for epoch in range(num_epochs):
+-        for image, camera_pose in zip(images, camera_poses):
+-            # Render
+-            rendered = render_gaussians(gaussians, camera_pose, image.shape[1], image.shape[0])
+-            
+-            # Compute Loss (L1 + SSIM)
+-            loss = compute_l1_ssim_loss(rendered, image)
+-            
+-            # Backpropagate
+-            gradients = compute_gradients(loss, gaussians)
+-            
+-            # Update parameters
+-            for g in gaussians:
+-                g.mu -= learning_rate * gradients['mu']
+-                g.R -= learning_rate * gradients['R'] # Simplified; requires rotation manifold handling
+-                g.S -= learning_rate * gradients['S']
+-                g.alpha -= learning_rate * gradients['alpha']
+-                g.sh_coeffs -= learning_rate * gradients['sh_coeffs']
+-                
+-            # Adaptive Density Control
+-            gaussians = adaptive_density_control(gaussians, gradients)
+-            
+-    return gaussians
+-```
++**Training Steps:**
++1.  **Initialization:** Initialize the MLP weights randomly.
++2.  **Sampling:** For each training image, cast rays through each pixel. Sample points along each ray using uniform sampling or stratified sampling.
++3.  **Query:** Pass sample points and viewing directions through the MLP to get $\sigma_i$ and $\mathbf{c}_i$.
++4.  **Rendering:** Compute the rendered pixel color $C(\mathbf{r})$ using the volume rendering equation.
++5.  **Loss Calculation:** Compare the rendered image with the ground truth image $I_{gt}$ using a loss function $L$. The standard loss combines L1 loss and Structural Similarity (SSIM):
++    $$ L = (1 - \alpha) L_{1} + \alpha L_{SSIM} $$
++    where $\alpha$ is a weight (typically 0.2) [S1, unofficial].
++6.  **Optimization:** Backpropagate the loss through the differentiable volume rendering process to update the MLP weights $\Theta$ using an optimizer like Adam [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Tile Size:** $16 \times 16$ pixels [S1, unofficial].
+-*   **Loss Function:** L1 loss combined with Structural Similarity (SSIM) [S1, unofficial].
+-*   **Learnable Values per Gaussian:** Approximately 59 [S1, unofficial].
++*   Number of samples per ray ($K$): Typically 128–256 for uniform sampling, or more for hierarchical sampling.
++*   MLP hidden units: 256 (position network), 128 (color network).
++*   Number of hidden layers: 8 (position), 1 (color).
++*   Position encoding frequencies ($L$): Typically 10.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Floating Artifacts:** Can occur in regions seen by few cameras [S1, unofficial].
+-*   **Needle-like Gaussians:** Degenerate Gaussians can form in under-constrained regions [S1, unofficial].
+-*   **Aliasing:** Occurs when zooming in or out [S1, unofficial].
+-*   **No Clean Mesh:** The blobs do not directly provide a clean surface or mesh [S1, unofficial].
++*   **Precision:** Floating-point precision issues can arise when computing transmittance $T_i$ for very long rays or very small densities, potentially leading to NaNs or artifacts [G].
++*   **Boundaries:** The scene bounds must be carefully defined. Points outside the bounds should be assigned zero density or handled via a bounding box [G].
++*   **Degenerate Input:** If camera poses are inaccurate, the optimization may fail to converge or produce blurry artifacts [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Scene NeRF](12484-scene-nerf.md)
+-Scene NeRF is a method for isolating and rendering the static background of a scene by training a Neural Radiance Field (NeRF) exclusively on pixels identified as background via human segmentation masks. It differs from standard NeRF by explicitly excluding dynamic foreground elements (e.g., humans) from the training data and employing an emptiness regularizer to prevent artifacts in empty space.
++Scene NeRF isolates and renders the static background of a scene by training a NeRF exclusively on pixels identified as background via human segmentation masks. It differs from standard NeRF by explicitly excluding dynamic foreground elements (e.g., humans) from the training data and employing an emptiness regularizer to prevent artifacts in empty space.
+ 
+-### SLAIM
+-SLAIM is a SLAM method that introduces a coarse-to-fine tracking pipeline and improves photometric bundle adjustment for NeRF-based mapping [S2]. It maintains NeRF’s original volume density formulation while introducing a KL regularization over the ray termination distribution [S2]. It addresses the challenge of high-frequency renderings in NeRF hindering image alignment [S2].
+-
+-### SNI-SLAM
+-SNI-SLAM is a dense NeRF-based RGB-D SLAM system for accurate real-time 3D semantic mapping [S2]. It introduces a hierarchical semantic encoding and cross-attention mechanism to enable mutual reinforcement between appearance, geometry, and semantics modalities [S2]. It proposes a novel one-way decoder design to enhance inter-modal information flow without reverse interference [S2].
+-
+-### KN-SLAM
+-KN-SLAM is a NeRF-based SLAM method that integrates local feature correspondences for coarse pose initialization and joint optimization [S2]. It uses global image features and local matches for explicit loop detection [S2]. It performs pose graph optimization and global refinement of the neural map to ensure consistency [S2].
++### [NeRF-OSR](14477-nerf-osr.md)
++NeRF-OSR is a neural radiance field approach for outdoor scene relighting that learns a neural representation of scene geometry, diffuse albedo, and illumination-dependent shadows from a set of images capturing the same site from different viewpoints and at different times, enabling simultaneous editing of both the scene’s lighting and viewpoint. Unlike standard NeRF which learns a Lambertian model under fixed lighting, NeRF-OSR decomposes the scene into spatial occupancy, illumination, shadowing, and diffuse albedo reflectance, trained in a self-supervised manner from outdoor data captured from various viewpoints and at different illuminations. It sets itself apart from siblings like [Scene NeRF](12484-scene-nerf.md) by providing explicit intrinsic decomposition (albedo, geometry, lighting) rather than just view-dependent appearance, allowing for physical relighting and albedo editing.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time drops from many hours (for NeRF) to tens of minutes [S1, unofficial]. Rendering jumps from seconds per image to >100 FPS [S1, unofficial].
+-*   **Memory Complexity:** Memory usage increases from a few megabytes (for NeRF) to hundreds of megabytes (for Gaussian Splatting) [S1, unofficial].
+-*   **Strengths:** Real-time rendering, fast training, explicit representation allows for easy manipulation [S1, unofficial].
+-*   **Limitations:** Floating artifacts, needle-like Gaussians, aliasing, inability to extract a clean mesh [S1, unofficial].
+-*   **When to use:** Virtual reality games, film, robotics, mapping, digital humans, ecommerce, and cultural heritage [S1, unofficial].
+-*   **When not to use:** When memory is extremely constrained or a clean mesh is required directly from the representation [S1, unofficial].
++*   **Time Complexity:** Training is slow, often taking several hours to days, as the MLP must be queried for every sample point on every ray for every training image [S1, unofficial].
++*   **Memory Complexity:** Memory usage is low, typically a few megabytes, as only the MLP weights are stored [S1, unofficial].
++*   **Rendering Speed:** Rendering is slow, taking seconds per image, because it requires evaluating the MLP hundreds of times per pixel and performing volume integration [S1, unofficial].
++*   **Strengths:** High-quality novel view synthesis, implicit representation handles complex geometry and fine details well, view-dependent effects (specularities) are naturally modeled.
++*   **Limitations:** Slow training and rendering, cannot easily extract a clean surface or mesh, prone to floating artifacts and aliasing when zooming in or out, requires accurate camera poses [S1, unofficial].
++*   **When to use:** When high-quality novel views are needed and real-time rendering is not required, or when memory is constrained.
++*   **When not to use:** When real-time rendering is required (use [3D Gaussian Splatting](12052-3d-gaussian-splatting.md) instead), or when a clean mesh is needed.
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbal and colleagues at SIGGRAPH 2023 [S1, unofficial]. It was developed to address the computational bottlenecks of Neural Radiance Fields (NeRF), which require evaluating a neural network at hundreds of points along a ray for each pixel [S1, unofficial]. By representing the scene explicitly as Gaussians, it enables real-time rendering and faster training [S1, unofficial].
++NeRF was introduced by Mildenhall et al. at SIGGRAPH 2020 [S1, unofficial][S2]. It revolutionized the field of novel view synthesis by demonstrating that a simple MLP could learn a high-quality implicit representation of a scene from unstructured images. The method builds on the principles of volume rendering and positional encoding. It is widely used in virtual reality, film, robotics, mapping, digital humans, ecommerce, and cultural heritage [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,853 @@
+GPU-optimized version of the MuJoCo physics simulator, designed for NVIDIA hardware. - differentiability api by thowell · Pull Request #1727 · google-deepmind/mujoco_warp
+
+differentiability api by thowell · Pull Request #1727 · google-deepmind/mujoco_warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+thowell
+commented
+Oct 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Adds mujoco_warp/_src/diff.py, a custom-adjoint dispatch layer that makes MuJoCo Warp safe to use with Warp's reverse-mode autodiff (wp.Tape) and gives analytical adjoints (starting with #1535) a place to register.
+Motivation
+MuJoCo Warp modules compile their kernels with wp.set_module_options({"enable_backward": False}), because naive kernel-by-kernel autodiff through iterative constraint solvers (Newton / CG), Cholesky factorizations, and discrete contact pipelines is numerically unstable and memory-prohibitive.
+As a result, on main, calling mjw.step(m, d) inside with wp.Tape(): records ~100 kernel launches whose adjoints are skipped. tape.backward() completes without an error, but the gradients through step are wrong (e.g., for an Euler slide joint, d.qvel.grad is 0 instead of dt).
+Changes
+Every public function in mujoco_warp is wrapped via _differentiable(globals()):
+Context
+Behavior
+Outside wp.Tape
+Passes straight through (if tape is None: return fn(*args, **kwargs)).
+Inside wp.Tape, no registered rule
+Raises NotImplementedError naming the function instead of silently producing wrong gradients. This includes functions that are not differentiable (e.g., put_model, make_data, reset_data).
+Inside wp.Tape, registered AdjointRule
+Unsupported requires_grad=True fields or arguments raise NotImplementedError. Otherwise the rule's input/output .grad buffers are enabled and either the forward call runs with the tape paused and a custom backward is recorded via tape.record_func (backward=fn), or the tape stays active so @wp.kernel(enable_backward=True) kernels record natively (backward=None).
+This PR registers no adjoint rules; it provides the API that analytical adjoints register into.
+Files
+mujoco_warp/_src/diff.py: register_adjoint, AdjointRule, field indexing, validation, and the wrapper.
+mujoco_warp/_src/diff_test.py: tests (see Testing).
+mujoco_warp/__init__.py: +3 lines, no new public symbols:
+```
+from mujoco_warp._src.diff import differentiable as _differentiable  # with the sorted imports
+...
+_differentiable(globals())  # at the end of the file
+```
+Usage
+Both examples run as-is on this PR. This PR registers no adjoint rules, so register the rules in the second example before running the first. The fwd_kinematics and step backward bodies are placeholders (the analytic VJPs come from the #1535 follow-up), so they contribute zero gradient; the mul_m rule is a complete adjoint.
+Users: standard Warp autodiff
+Users only use standard Warp autodiff (arr.requires_grad = True, with wp.Tape() as tape:, tape.backward(), tape.zero()) and existing mujoco_warp functions.
+```
+import mujoco
+import warp as wp
+import mujoco_warp as mjw
+
+
+@wp.kernel
+def site_target_loss(
+  # In:
+  site_xpos: wp.array2d[wp.vec3],
+  target: wp.vec3,
+  # Out:
+  loss_out: wp.array[float],
+):
+  worldid = wp.tid()
+  err = site_xpos[worldid, 0] - target
+  wp.atomic_add(loss_out, 0, 0.5 * wp.dot(err, err))
+
+
+xml = """
+<mujoco>
+  <option timestep="0.01" integrator="Euler"/>
+  <worldbody>
+    <body name="link" pos="0 0 0">
+      <joint name="hinge" type="hinge" axis="0 1 0" damping="0.1"/>
+      <geom type="capsule" size="0.04" fromto="0 0 0 0 0 -0.5" mass="1.0"/>
+      <site name="tip" pos="0 0 -0.5"/>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+mjm = mujoco.MjModel.from_xml_string(xml)
+mjd = mujoco.MjData(mjm)
+m = mjw.put_model(mjm)
+d = mjw.put_data(mjm, mjd, nworld=32)
+loss = wp.zeros(1, dtype=float, requires_grad=True)
+
+# step() and fwd_kinematics() automatically enable requires_grad=True on the
+# Data fields their rules list (qpos, qvel, site_xpos, ...):
+with wp.Tape() as tape:
+  mjw.step(m, d)
+  mjw.fwd_kinematics(m, d)
+  wp.launch(
+    site_target_loss,
+    dim=d.nworld,
+    inputs=[d.site_xpos, wp.vec3(0.0, 0.0, 0.5)],
+    outputs=[loss],
+  )
+
+tape.backward(loss=loss)
+qpos_grad = d.qpos.grad.numpy()
+tape.zero()
+```
+Under a tape, only functions with a registered rule can be called. Non-differentiable work (model/data creation, resets, host copies, or simulation used as a constant) runs outside the tape; re-entering the same tape resumes recording:
+```
+tape = wp.Tape()
+with tape:
+  wp.launch(policy_kernel, ...)  # differentiable part
+mjw.step(m, d)                   # non-differentiable work outside the tape
+with tape:
+  wp.launch(loss_kernel, ...)    # re-entering the same tape resumes recording
+tape.backward(loss=loss)
+```
+Adjoint authors: diff.register_adjoint
+```
+import warp as wp
+import mujoco_warp as mjw
+from mujoco_warp._src import diff
+from mujoco_warp._src import types
+
+
+@diff.register_adjoint(
+  "fwd_kinematics",
+  in_fields=("qpos",),
+  out_fields=("site_xpos", "xpos", "xquat"),
+  model_fields=("body_mass",),
+)
+def fwd_kinematics_backward(m: types.Model, d: types.Data):
+  """Accumulates cotangents on d.site_xpos.grad, d.xpos.grad, ... into d.qpos.grad."""
+  # Placeholder: an analytic kinematics VJP launches its kernels here.
+
+
+@diff.register_adjoint(
+  "step",
+  in_fields=("qpos", "qvel", "ctrl", "xfrc_applied"),
+  out_fields=(
+    "qpos",
+    "qvel",
+    "qacc",
+    "site_xpos",
+    "efc.pos",
+    "efc.vel",
+    "contact.pos",
+    "contact.frame",
+    "contact.friction",
+  ),
+  model_fields=("body_mass", "body_inertia", "dof_armature", "dof_damping", "geom_friction"),
+  supported=lambda m, d: (
+    () if m.opt.integrator == mjw.IntegratorType.EULER else ("only the Euler integrator is supported",)
+  ),
+)
+def step_backward(m: types.Model, d: types.Data):
+  """Maps post-step cotangents on d.*.grad to pre-step d.*.grad and opt-in m.*.grad."""
+  # Placeholder: an implicit-function-theorem step VJP launches its kernels here.
+
+
+@wp.kernel
+def accumulate(src: wp.array2d[float], dst: wp.array2d[float]):
+  worldid, dofid = wp.tid()
+  dst[worldid, dofid] += src[worldid, dofid]
+
+
+@diff.register_adjoint("mul_m", array_args=("res", "vec"))
+def mul_m_backward(m, d, res, vec, skip=None, M=None):
+  """Accumulates M^T @ res.grad into vec.grad (M is symmetric)."""
+  tmp = wp.zeros_like(vec.grad)
+  mjw.mul_m(m, d, tmp, res.grad, skip, M)  # the tape is paused inside backward
+  wp.launch(accumulate, dim=vec.shape, inputs=[tmp], outputs=[vec.grad])
+
+
+# Native @wp.kernel(enable_backward=True) forward recording (backward=None). Every physics
+# module on main sets enable_backward=False, so this produces gradients only once the
+# kernels energy_pos calls are compiled with enable_backward=True:
+diff.register_adjoint("energy_pos", in_fields=("qpos",), out_fields=("energy",))
+```
+register_adjoint (usable directly or as a decorator) validates the function name against RULES, field paths against _FIELDS, and array_args against the function's signature:
+Parameter
+Target
+Auto-promoted (requires_grad=True)?
+Description
+backward
+Callable[..., None] | None
+—
+Reverse-mode callback invoked with (*args, **kwargs) while the tape is paused during tape.backward(). When None, fn runs with wp.Tape active so @wp.kernel(enable_backward=True) kernels record natively.
+in_fields
+First Data argument
+Yes (arr.size > 0)
+Data fields read as differentiable inputs.
+out_fields
+Last Data argument
+Yes (arr.size > 0)
+Data fields written as differentiable outputs (e.g., on d_out, or d when in-place). Defaults to in_fields.
+model_fields
+Model argument
+No (user opt-in)
+Model arrays that backward can accumulate gradients into when the user sets m.<field>.requires_grad = True.
+render_fields
+RenderContext argument
+Yes (arr.size > 0)
+RenderContext fields read or written by the call (e.g., depth_data for render).
+array_args
+Standalone wp.array args
+Yes (arr.size > 0)
+Parameter names of standalone array arguments (e.g., res and vec in mul_m).
+supported
+Callable[..., Sequence[str] | None]
+—
+Optional check called as rule.supported(*args, **kwargs) (skipped while the arrays' device is capturing a CUDA graph); non-empty reason strings raise NotImplementedError.
+Design notes
+Field indexing (_FIELDS): At import time, _FIELDS indexes all top-level and nested wp.array fields of Model (including opt.*, stat.*), Data (including contact.*, efc.*), and RenderContext. For a registered rule, a requires_grad=True field that is non-float or not listed by that function's rule raises NotImplementedError naming the field; a requires_grad=True standalone array not in array_args raises naming the function.
+Containers are found by type, not parameter name: Model, Data, and RenderContext arguments are identified by type in signature order, independent of keyword order. The first Data is the input and the last is the output; for in-place calls they are the same object. Only array_args are matched by name, since standalone arrays share a type.
+Why in_fields/out_fields are auto-promoted: Enabling .grad on the rule's inputs and outputs chains gradients across multi-function sequences and multi-step rollouts without users enabling requires_grad on intermediate Data fields.
+Why model_fields is opt-in: A rule may support many Model parameters (body_mass, geom_friction, dof_damping, ...). Opt-in avoids allocating .grad buffers and running parameter VJPs when only differentiating state and controls.
+Promoted flags stay set: Warp frees .grad when requires_grad is set to False, so promoted flags are left set to keep gradients readable. Promoted arrays are tracked per function in a weakref.WeakSet and exempt from validation while that rule remains registered; re-registering a rule resets its previously promoted arrays (requires_grad = False) and clears its set.
+Per-rule field validation: _validate(obj, rule) validates Model, Data, and RenderContext fields strictly against the called function's rule.fields[cls] (exempting arrays auto-promoted by an active rule). If a user enables requires_grad = True on a field supported by step (e.g., m.dof_damping) and calls fwd_kinematics (whose rule does not list dof_damping), fwd_kinematics raises NotImplementedError instead of silently contributing zero gradient.
+CUDA graph capture: supported checks (which may synchronize with the host) are skipped while the arrays' device is capturing, so taped forward and backward passes can be captured with wp.ScopedCapture and replayed with wp.capture_launch.
+Warp internals: diff.py reads and pauses the active tape through warp._src.context.runtime.tape (the attribute wp.Tape.__enter__ sets; Warp has no public getter) and uses warp._src.types.type_scalar_type to detect float vector/matrix dtypes (no public equivalent). Both are unchanged in Warp 1.15–1.17; pyproject.toml already requires warp-lang>=1.15, and diff_test.py exercises both, so a Warp change that moves them fails CI.
+Known limitations
+Unregistered functions raise under wp.Tape even when no gradient would flow through them (e.g., get_data_into); call them outside the tape.
+Rules assume the first Data argument is the input and the last is the output.
+Testing
+Added mujoco_warp/_src/diff_test.py (683 parameterized test cases):
+Every public mujoco_warp function is wrapped in diff.RULES, and every one raises NotImplementedError under wp.Tape when unregistered, before reading its arguments or recording launches; _Untaped restores the tape on exceptions.
+Setting requires_grad = True on every wp.array field of Model and Data raises NotImplementedError naming the field when unsupported.
+RenderContext: unsupported rc fields raise, invalid render_fields are rejected at registration, and a render rule with render_fields=("depth_data",) promotes rc.depth_data and receives its seeded gradient in backward.
+@diff.register_adjoint end-to-end across nworld = 1, 2: registration-time validation, per-rule field validation, multi-function composition (step + fwd_kinematics), native @wp.kernel(enable_backward=True) recording (backward=None), out-of-place d_out (d0 -> d1) called with reordered keywords, nested paths (efc.pos, opt.gravity), opt-in model_fields, array_args (mul_m), supported diagnostics, re-registration with fewer array_args resetting promoted arrays, tape.zero(), and CUDA graph capture (wp.ScopedCapture + wp.capture_launch).
+diff_test.py and the examples above pass on Warp 1.15.0 and 1.17.0.
+Full test suite: 2402 passed, 28 skipped.
+Follow-up: integrating #1535
+#1535 implements hybrid analytical/autodiff backward passes for step (via implicit function theorem differentiation through the post-step Newton solver and Euler/implicitfast integrators) and fwd_kinematics (via leaf @wp.kernel(enable_backward=True) VJP kernels).
+Integration plan
+Remove manual tape plumbing from mujoco_warp/_src/forward.py:
+Delete ENABLE_GRAD, _step_backward_hook, _step_backward_registration, _fwd_kinematics_backward_hook, _fwd_kinematics_backward_registration, register_step_backward, register_fwd_kinematics_backward, and the inline try: ... finally: rt.tape = tape blocks (~75 lines removed).
+Keep @wp.func next_position, @wp.func next_velocity, _STEP_STATE_FIELDS, _copy_state(d, d_out) (zeroing dst.grad on copy), and step(m, d, d_out=None). Leave fwd_kinematics in forward.py unmodified.
+Register "step" and "fwd_kinematics" in mujoco_warp/_src/adjoint.py:
+Decorate step_backward and fwd_kinematics_backward with @diff.register_adjoint("step", ...) and @diff.register_adjoint("fwd_kinematics", ...).
+Delete step_backward_arrays, fwd_kinematics_arrays, and smooth_adjoint.prepare_backward, as diff._wrap handles .grad promotion and tape.record_func(..., arrays=arrays) registration automatically (intermediate smooth Data fields used as scratch cotangents should either be listed in "step"'s out_fields or stored on BackwardContext).
+Unify model and signature support checks into supported(*args, **kwargs):
+Combine the three separate support checks (check_analytic_supported, _assert_step_supported, and smooth_adjoint.assert_smooth_supported) together with the out-of-place d_out check (d_out is not None and d_out is not d) into a single supported callback on the "step" rule, removing the id(m) validation cache so runtime mutations to m.opt are always checked.
+Accumulate input gradients in _write_input_adjoints:
+Update _write_input_adjoints in adjoint.py (d.qpos.grad, d.qvel.grad) and the leaf writes in forward_adjoint.py (d.ctrl.grad, d.xfrc_applied.grad) from assignment (=) to additive accumulation (+=) so step_backward composes cleanly when upstream kernels on wp.Tape also depend on pre-step state or shared controls.
+Broader roadmap
+Additional API entry points: Register custom adjoint rules for sub-pipeline functions (forward, fwd_position, fwd_velocity, fwd_actuation, sensor_pos / sensor_vel / sensor_acc, jac, and ray/depth queries via array_args).
+Derived Model constants: Propagate gradients through host-precomputed Model fields (body_subtreemass, body_invweight0, dof_invweight0, geom_rbound) via chain-rule VJP kernels in model_adjoint.py.
+thowell
+marked this pull request as ready for review
+October 6, 2026 00:11
+eric-heiden
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Collaborator
+Thanks, Taylor! This looks great. Having a common layer to register custom adjoints and validate gradient support across the API is a clean approach.
+eric-heiden
+reviewed
+Oct 6, 2026
+View reviewed changes
+Comment thread
+mujoco_warp/_src/diff.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+eric-heiden
+approved these changes
+Oct 6, 2026
+View reviewed changes
+thowell
+force-pushed
+the
+differentiability
+branch
+from
+b088aed to
+5f6b1b1
+Compare
+October 7, 2026 01:38
+thowell
+force-pushed
+the
+differentiability
+branch
+2 times, most recently
+from
+2024057 to
+967ec7b
+Compare
+October 14, 2026 17:28
+thowell
+requested a review
+from quagla
+October 14, 2026 17:28
+thowell
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+updates:
+Behavior changes (diff.py)
+Change
+Previous commit
+updates
+When validation runs
+The forward ran on a scratch tape before field and argument validation, so an invalid call could launch kernels and mutate Data before raising.
+All static checks run before the forward, and supported runs before any gradients are enabled. A rejected call launches nothing and leaves the tape unchanged.
+When gradients are enabled
+requires_grad was enabled on rule arrays after the forward.
+It is enabled before the forward, so native (backward=None) launches and wp.copy see the gradient buffers.
+Input vs. output roles
+In-fields and out-fields were merged and checked by path on every Data argument.
+The first Data is checked against in_fields and the last against out_fields. Allowed arrays are matched by identity, so a Data field passed as an array argument, or arrays shared through dataclasses.replace, work across calls.
+Arrays promoted by an earlier call
+Exempt unless the current call read them before writing them. Only kernel launches were inspected.
+Exempt only if the current call neither reads nor writes them. Both kernel launches and wp.copy are inspected. Overwriting such a field would send this call's output gradient to the earlier rule, so it now raises; rules must list every promoted field they overwrite.
+Standalone array arguments
+Checked only if requires_grad was already set.
+Also rejected when the same array is about to get gradients through another argument role, even on the first call. The error names the argument.
+Native rules (backward=None)
+Accepted kernels compiled with enable_backward=False, which silently gave zero gradients. tape.gradients from the scratch tape were dropped.
+Raise requires a backward rule when any recorded kernel has no adjoint. Launches are appended only after the checks pass, together with the scratch tape's tape.gradients.
+Tape use for custom rules
+A scratch tape recorded about 100 launches for every call.
+The scratch tape is used only for native rules or when there are promoted fields to check. Otherwise the forward runs with the tape paused.
+supported
+Ran on the user's tape, so its launches were recorded and API calls inside it raised. Only a sequence of reasons was accepted.
+Runs with the tape paused. A single string is accepted. It is skipped during CUDA graph capture (wp.get_device().is_capturing replaces _device(bound)).
+Tracking promoted arrays
+Per-rule weak sets. Re-registering a rule reset requires_grad on its arrays, which freed .grad and could crash a pending tape.backward().
+One global weak set. Re-registering keeps the promotions.
+Gradients disabled after recording
+tape.backward() hit CUDA error 700.
+The recorded backward raises RuntimeError("Gradients for '<fn>' were disabled after recording.").
+Registration validation
+Generators were consumed during validation and registered as empty.
+Arguments that are not sequences are rejected.
+Simplifications (diff.py)
+Removed the _Untaped context manager, _call_untaped, _validate, _unsupported, _device, AdjointRule.fields and the per-rule _PROMOTED dictionary. One _call(tape, fn, ...) helper switches the active tape.
+_inputs (read-before-write tracking) became _accessed, a plain union of the arrays read or written. Added _has_adjoint.
+Model/Data/RenderContext arguments are now collected with a single dict comprehension.
+Removed all Any annotations.
+Added a module docstring, AdjointRule attribute docs, a short comment on each validation step, and the contract for backward: accumulate (+=) into input gradients, never change requires_grad, keep scratch gradients in inline allocations, and recompute intermediates from inputs.
+Tests (diff_test.py)
+The suite went from 8 methods to 15 methods with 751 parameterized cases.
+Test
+Cases
+Covers
+test_differentiable
+1
+Every public function is wrapped, keeps its metadata, and starts with no rule. Only public Python functions in a namespace are wrapped.
+test_fields
+1
+_FIELDS covers every float array, including nested ones and the bracket annotations used by the documentation build.
+test_warp_internals
+1
+The Warp internals diff.py relies on: runtime.tape, _is_float, the layout of tape.launches entries (launch, copy, custom function), _has_adjoint and _accessed.
+test_api_function_raises_not_implemented
+73
+Every function without a rule raises under a tape before reading its arguments.
+test_register_adjoint
+1
+All registration forms, plus 14 invalid registrations that leave the existing rule unchanged.
+test_field_requires_grad_raises_not_implemented
+648
+Every Model, Data and RenderContext field with gradients the rule doesn't support raises before any launch (merges the separate Model/Data tests).
+test_container_roles
+11
+Which Model, Data and RenderContext arguments get the model, input, output and render roles, and that extra containers get none.
+test_array_args
+1
+Binding by name, aliasing, empty arrays, unsupported argument roles (including on the first call), Data fields passed as array arguments, re-registration, and the disabled-gradient error.
+test_supported
+1
+Validation runs before supported; sequence and string reasons; supported runs with the tape paused.
+test_auto_promotion
+1
+Integer arrays rejected; which float types and roles get gradients; gradients persist across calls; in-place and shared Data; weak references; rules whose fields are all integer or empty.
+test_promoted_field_dependencies
+1
+Fields promoted by an earlier call: unaccessed or zero-size launches are allowed; reads, writes, copy reads, copy writes and RenderContext reads raise and leave the tape unchanged. A native rule on API kernels raises.
+test_rollout
+6
+3-step in-place, out-of-place and native rollouts for nworld = 1, 2 over two epochs, with exact gradients.
+test_multi_function_composition
+2
+step, forward, fwd_kinematics, sensors and depth render chained on one tape; rejection across rules; recording split into segments; matches untaped results; gradients preserved across later untaped API calls.
+test_finite_difference_jacobian
+2
+Central-difference check of step and a 2-DOF mul_m adjoint with respect to qpos, qvel, body_mass and array arguments.
+test_graph_capture
+1
+Native and custom rules captured in a CUDA graph together with their backward.
+A shared _assert_not_supported(msg, fn, ...) helper makes every rejection also assert that nothing was recorded on the tape.
+thowell
+force-pushed
+the
+differentiability
+branch
+from
+967ec7b to
+a2956e2
+Compare
+October 22, 2026 00:41
+thowell
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@eric-heiden updated this pr a bit, please take another look. thanks!
+thowell
+requested a review
+from eric-heiden
+October 22, 2026 00:53
+etaoxing
+reviewed
+Oct 22, 2026
+View reviewed changes
+etaoxing
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Great to see this come through Taylor, this shared differentiability API layer looks very useful and well-designed!
+Comment thread
+mujoco_warp/_src/diff.py
+Outdated
+Comment on lines
++42
+to
++47
+def _call(tape: wp.Tape | None, fn: Callable, *args, **kwargs):
+"""Calls `fn` with `tape` as the active Warp tape (`None` pauses recording)."""
+prev, wp_context.runtime.tape = wp_context.runtime.tape, tape
+result = fn(*args, **kwargs)
+wp_context.runtime.tape = prev
+return result
+etaoxing
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Restore the tape after an error (mujoco_warp/_src/diff.py:42-47): If a callback raises, _call leaves the wrong tape active. Replace _call with the code below to restore the previous tape on both success and failure. Add a test that catches a callback error inside an active tape block and checks that later launches still reach that tape.
+```
+def _call(tape: wp.Tape | None, fn: Callable, *args, **kwargs):
+  prev = wp_context.runtime.tape
+  wp_context.runtime.tape = tape
+  try:
+    return fn(*args, **kwargs)
+  finally:
+    wp_context.runtime.tape = prev
+```
+Comment thread
+mujoco_warp/_src/diff_test.py
+self._assert_not_supported("'kinematics' requires a backward rule", mjw.kinematics, self.m, self.d)
+@parameterized.product(nworld=(1, 2), mode=("in_place", "out_of_place", "native"))
+def test_rollout(self, nworld: int, mode: str):
+etaoxing
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Test checkpoint replay (mujoco_warp/_src/diff.py:271-277, mujoco_warp/_src/diff_test.py:675-733): The callback keeps references to mutable data, so reused buffers can contain the wrong step's state during backward. The linear rollout test cannot catch this because its gradients do not depend on that state. Use this nonlinear sketch for ordinary replay and CUDA graph capture, then compare its gradients with a full recorded rollout.
+```
+# Assume square(x, y) has a registered custom rule: y = x * x.
+# Its backward adds 2 * x * y.grad to x.grad, then clears y.grad.
+with wp.ScopedDevice("cuda:0"):
+  # Allocate buffers before capture so their addresses stay fixed.
+  x = wp.zeros(1, dtype=float, requires_grad=True)
+  y = wp.zeros_like(x, requires_grad=True)
+  seed = wp.zeros_like(x, requires_grad=False)
+  checkpoints = [wp.empty_like(x, requires_grad=False) for _ in range(2)]
+
+  def checkpointed_replay():
+    # These resets are captured and run on every graph launch.
+    x.fill_(2.0)
+    seed.fill_(1.0)
+    for saved in checkpoints:
+      wp.copy(saved, x)
+      square(x, y)
+      wp.copy(x, y)  # 2 -> 4 -> 16, without recording a full rollout.
+
+    # Enter with no active tape, as #1727's backward callbacks do.
+    for saved in reversed(checkpoints):
+      wp.copy(x, saved)
+      with wp.Tape() as replay:
+        square(x, y)  # Restore and recompute one step on a fresh tape.
+      replay.zero()  # Also captured, so gradients reset on every launch.
+      replay.backward(grads={y: seed})
+      wp.copy(seed, x.grad)
+
+  # Warm up kernels and run support checks before capture.
+  checkpointed_replay()
+  assert seed.numpy()[0] == 32.0  # d(x_initial**4)/dx_initial at 2.
+  wp.synchronize()
+
+  with wp.ScopedCapture() as capture:
+    checkpointed_replay()
+
+  for _ in range(2):
+    wp.capture_launch(capture.graph)
+    assert seed.numpy()[0] == 32.0  # Repeated launches must not accumulate.
+```
+Comment thread
+mujoco_warp/__init__.py
+Outdated
+from mujoco_warp._src.types import Statistic as Statistic
+from mujoco_warp._src.types import TrnType as TrnType
+_differentiable(globals())
+etaoxing
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Clarify automatic wrapping (mujoco_warp/__init__.py:130, mujoco_warp/_src/diff.py:283-287): Use locals() here to emphasize the module scope? At module scope, globals(), locals(), and vars() return the same dictionary, so this is a readability change. Replace the call and add this two-line comment:
+```
+# Wrap all public API functions exported by this module.
+# Internal module bindings stay unchanged; register adjoint rules after this call.
+_differentiable(locals())
+```
+Comment thread
+mujoco_warp/_src/diff_test.py
+# The fwd_kinematics backward adds the mean site_xpos gradient to qpos.grad, and can call
+# API functions because backward functions run untaped:
+@diff.register_adjoint("fwd_kinematics", in_fields=("qpos",), out_fields=("site_xpos",), model_fields=("body_mass",))
+def _fk_bwd(m_arg, d_arg):
+etaoxing
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Test gradients when outputs are overwritten (mujoco_warp/_src/diff_test.py:792-794, mujoco_warp/_src/diff.py:108-114): The _fk_bwd helper uses site_xpos.grad but never clears it. The current composition test does not check whether overwritten output gradients are cleared. Add this separate DiffApiTest method after test_multi_function_composition, before the decorator at mujoco_warp/_src/diff_test.py:848.
+```
+# Insert in DiffApiTest before the decorator at diff_test.py:848.
+# This method uses the existing test helpers.
+def test_overwritten_output(self):
+  def overwrite(x, y):
+    wp.launch(_scale_kernel, dim=x.shape, inputs=[x], outputs=[y])
+
+  def backward(x, y):
+    wp.launch(_axpy_kernel, dim=x.shape, inputs=[2.0, y.grad], outputs=[x.grad])
+    y.grad.zero_()  # The forward replaced y; its old value had no effect.
+
+  overwrite = _register(overwrite, backward, array_args=("x", "y"))
+  x = wp.full((1, 1), 2.0, dtype=float, requires_grad=True)
+  z = wp.full((1, 1), 3.0, dtype=float, requires_grad=True)
+  y = wp.zeros_like(x, requires_grad=True)
+  loss = wp.zeros(1, dtype=float, requires_grad=True)
+  one = wp.ones(1, dtype=float)
+  three = wp.full(1, 3.0, dtype=float)
+
+  with wp.Tape() as tape:
+    overwrite(x, y)  # y = 2*x
+    wp.launch(_weighted_loss_kernel, dim=x.shape, inputs=[y, one], outputs=[loss])
+    overwrite(z, y)  # y = 2*z, overwriting the same buffer
+    wp.launch(_weighted_loss_kernel, dim=x.shape, inputs=[y, three], outputs=[loss])
+    wp.launch(_weighted_loss_kernel, dim=x.shape, inputs=[x, one], outputs=[loss])
+
+  tape.backward(loss=loss)
+  # L = 2*x + 3*(2*z) + x = 3*x + 6*z.
+  np.testing.assert_allclose(loss.numpy(), 24.0)
+  np.testing.assert_allclose(x.grad.numpy(), 3.0)  # Includes the direct x loss.
+  np.testing.assert_allclose(z.grad.numpy(), 6.0)
+  np.testing.assert_allclose(y.grad.numpy(), 0.0)
+  # Without y.grad.zero_(), x.grad would be 9.0 instead of 3.0.
+```
+Comment thread
+mujoco_warp/_src/diff.py
+Outdated
+Comment on lines
++231
+to
++257
+if arr not in _PROMOTED:
+raise NotImplementedError(f"Differentiation of '{name}' with {label} is not supported.")
+foreign.append((label, arr))
+reasons = None if rule.supported is None or wp.get_device().is_capturing else _call(None, rule.supported, *args, **kwargs)
+if reasons:
+msg = reasons if isinstance(reasons, str) else ", ".join(reasons)
+raise NotImplementedError(f"Differentiation of '{name}' is not supported: {msg}.")
+for arr in promote:
+if not arr.requires_grad:
+arr.requires_grad = True
+_PROMOTED.add(arr)
+# The forward runs on a scratch tape, whose launches are checked before native rules append
+# them to `tape`; custom rules record their backward instead:
+fwd_tape = _ScratchTape()
+result = _call(fwd_tape, fn, *args, **kwargs)
+launches = fwd_tape.launches
+# Reading a foreign field would drop its gradient, and writing it would send this call's output
+# gradient to the earlier call:
+accessed = _accessed(launches)
+for label, arr in foreign:
+if id(arr) in accessed:
+raise NotImplementedError(
+f"Differentiation of '{name}' is not supported: it accesses {label}, which an earlier call differentiates."
+etaoxing
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Allow unused gradient fields (mujoco_warp/_src/diff.py:231, mujoco_warp/_src/diff.py:257): Setting d.qvel.requires_grad = True yourself can make fwd_kinematics raise an error, even when it does not use qvel. The same call passes if the wrapper set that flag during an earlier call. Use the existing access check for both cases, including its limits (mujoco_warp/_src/diff.py:101-104) and its timing after forward.
+```
+@@ -231,3 +231,3 @@
+-          if arr not in _PROMOTED:
++          if not _is_float(arr):
+             raise NotImplementedError(f"Differentiation of '{name}' with {label} is not supported.")
+           foreign.append((label, arr))
+@@ -257 +257 @@
+-          f"Differentiation of '{name}' is not supported: it accesses {label}, which an earlier call differentiates."
++          f"Differentiation of '{name}' is not supported: it accesses {label}, which is not declared by this rule."
+```
+Comment thread
+mujoco_warp/__init__.py
+Outdated
+from mujoco_warp._src.types import Statistic as Statistic
+from mujoco_warp._src.types import TrnType as TrnType
+_differentiable(globals())
+etaoxing
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Also is it possible to put _differentiable wrapping inside a mujoco_warp.enable_grad() for the user to call? It would be a helpful backstop for bit determinism of the forward pass vs. forward + enabling backward.
+quagla
+reviewed
+Oct 22, 2026
+View reviewed changes
+quagla
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+both README.md and mujoco/doc/mjwarp/index.rst ("Differentiability" section) should be updated.
+Comment thread
+mujoco_warp/_src/diff.py
+arr.requires_grad = True
+_PROMOTED.add(arr)
+# The forward runs on a scratch tape, whose launches are checked before native rules append
+quagla
+Oct 22, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+In _wrap, when rule.backward is not None and wp.config.verify_autograd_array_access is enabled, running fn on fwd_tape sets _is_read flags on arrays accessed by internal launches/copies, and then fwd_tape is discarded without resetting them (since tape only records record_func(backward, arrays)). Should fwd_tape._reset_array_read_flags() be called before discarding fwd_tape on custom-backward rules (or should custom-backward forwards run with verify_autograd_array_access suppressed for internal scratch launches)?
+Comment thread
+mujoco_warp/_src/diff.py
+raise RuntimeError(f"Gradients for '{name}' were disabled after recording.")
+_call(None, rule.backward, *args, **kwargs)
+tape.record_func(backward=backward, arrays=arrays)
+quagla
+Oct 22, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Worth noting on the foreign access check (diff.py:277-283): because wp.copy(dest, src) only records onto tape.launches when both dest.grad and src.grad are non-None (and .zero_() / .fill_() never record on tape.launches), if a second wrapped API function overwrites or reads an earlier call's promoted field via d..zero_() or wp.copy(d., unpromoted_arr), accessed(launches) won't see d. and won't raise. This is fine if every registered AdjointRule lists all float Data fields its forward mutates via .zero()/wp.copy in out_fields, but it makes the automatic foreign check incomplete for .zero_()/wp.copy mutations.
+thowell
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+thanks for the reviews @etaoxing and @quagla!
+Clarify automatic wrapping (mujoco_warp/__init__.py:130, mujoco_warp/_src/diff.py:283-287): Use locals() here to emphasize the module scope? At module scope, globals(), locals(), and vars() return the same dictionary, so this is a readability change. Replace the call and add this two-line comment:
+```
+# Wrap all public API functions exported by this module.
+# Internal module bindings stay unchanged; register adjoint rules after this call.
+_differentiable(locals())
+```
+Done — updated mujoco_warp/__init__.py to use _differentiable(locals()) with the comment.
+Also is it possible to put _differentiable wrapping inside a mujoco_warp.enable_grad() for the user to call? It would be a helpful backstop for bit determinism of the forward pass vs. forward + enabling backward.
+Wrapping in mujoco_warp/__init__.py does not affect forward bit-determinism: it does not modify kernel definitions or module options, and when no wp.Tape is active (tape is None) the wrapper calls fn(*args, **kwargs) directly. Gating _differentiable behind enable_grad() would reintroduce silent wrong gradients under wp.Tape if a user forgets to call enable_grad().
+Restore the tape after an error (mujoco_warp/_src/diff.py:42-47): If a callback raises, _call leaves the wrong tape active. Replace _call with the code below to restore the previous tape on both success and failure. Add a test that catches a callback error inside an active tape block and checks that later launches still reach that tape.
+We avoid try/finally in _src/ following codebase convention. AdjointRule.supported returns unsupported reason strings (raised by _wrap after _call restores wp_context.runtime.tape) rather than raising inside _call, and forward/backward functions only launch kernels.
+Allow unused gradient fields (mujoco_warp/_src/diff.py:231, mujoco_warp/_src/diff.py:257): Setting d.qvel.requires_grad = True yourself can make fwd_kinematics raise an error, even when it does not use qvel. The same call passes if the wrapper set that flag during an earlier call. Use the existing access check for both cases, including its limits (mujoco_warp/_src/diff.py:101-104) and its timing after forward.
+Done — applied this change so all float container fields outside allowed are checked via foreign + _accessed(launches) and removed _PROMOTED.
+Test checkpoint replay (mujoco_warp/_src/diff.py:271-277, mujoco_warp/_src/diff_test.py:675-733): The callback keeps references to mutable data, so reused buffers can contain the wrong step's state during backward. The linear rollout test cannot catch this because its gradients do not depend on that state. Use this nonlinear sketch for ordinary replay and CUDA graph capture, then compare its gradients with a full recorded rollout.
+Done — added the nonlinear (y = x * x) checkpoint replay test (eager and inside wp.ScopedCapture) to test_graph_capture in mujoco_warp/_src/diff_test.py.
+Test gradients when outputs are overwritten (mujoco_warp/_src/diff_test.py:792-794, mujoco_warp/_src/diff.py:108-114): The _fk_bwd helper uses site_xpos.grad but never clears it. The current composition test does not check whether overwritten output gradients are cleared. Add this separate DiffApiTest method after test_multi_function_composition, before the decorator at mujoco_warp/_src/diff_test.py:848.
+Done — added d_arg.site_xpos.grad.zero_() in _fk_bwd and added test_overwritten_output in mujoco_warp/_src/diff_test.py.
+In _wrap, when rule.backward is not None and wp.config.verify_autograd_array_access is enabled, running fn on fwd_tape sets _is_read flags on arrays accessed by internal launches/copies, and then fwd_tape is discarded without resetting them (since tape only records record_func(backward, arrays)). Should fwd_tape._reset_array_read_flags() be called before discarding fwd_tape on custom-backward rules (or should custom-backward forwards run with verify_autograd_array_access suppressed for internal scratch launches)?
+Done — _call now suppresses wp.config.verify_autograd_array_access when running custom-backward forwards on fwd_tape (verify_access=rule.backward is None), with test coverage in test_overwritten_output.
+Worth noting on the foreign access check (diff.py:277-283): because wp.copy(dest, src) only records onto tape.launches when both dest.grad and src.grad are non-None (and .zero_() / .fill_() never record on tape.launches), if a second wrapped API function overwrites or reads an earlier call's promoted field via d.<field>.zero_() or wp.copy(d.<field>, unpromoted_arr), accessed(launches) won't see d.<field> and won't raise. This is fine if every registered AdjointRule lists all float Data fields its forward mutates via .zero()/wp.copy in out_fields, but it makes the automatic foreign check incomplete for .zero_()/wp.copy mutations.
+Agreed — this requirement is documented in the AdjointRule docstring (diff.py:100-105).
+both README.md and mujoco/doc/mjwarp/index.rst ("Differentiability" section) should be updated.
+We will update README.md and mujoco/doc/mjwarp/index.rst once the analytical adjoints PR (#1535) lands, since this PR only adds the internal dispatch API without user-facing registered rules.
+thowell
+force-pushed
+the
+differentiability
+branch
+from
+c31678e to
+359e214
+Compare
+October 22, 2026 23:58
+etaoxing
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Contributor
+@thowell thanks for the edits!
+Test wrapped forward outputs (mujoco_warp/_src/diff.py:193-196): Agreed that the untaped path calls fn directly. My original thought with enable_grad() was to compare untaped forward before enabling backward support with taped forward afterward, before backward() runs, and expose that before/after comparison easily. Is it possible to test that its forward outputs stay identical? With a tape, the same fn runs with gradient buffers enabled and a scratch tape active.
+The example below checks dispatch; the same check could use real adjoints once available:
+```
+def test_step_forward_unchanged(self):
+  wrapped = mjw.step
+  original = wrapped.__wrapped__
+  fields = ("qpos", "qvel", "qacc")
+
+  def run(fn, taped=False):
+    m = mjw.put_model(self.mjm)
+    d = mjw.make_data(self.mjm)
+    d.qpos.fill_(0.3)
+    d.qvel.fill_(0.2)
+    d.qfrc_applied.fill_(0.1)
+    with wp.Tape() if taped else contextlib.nullcontext():
+      fn(m, d)
+    return tuple(getattr(d, field).numpy().tobytes() for field in fields)
+
+  baseline = run(original)  # Save before registering the rule.
+  diff.register_adjoint(
+    wrapped, lambda *args: None, in_fields=("qpos", "qvel", "qfrc_applied"), out_fields=fields
+  )  # Test rule; backward is never called.
+  for fn in (original, wrapped):
+    for taped in (False, True):
+      with self.subTest(wrapped=fn is wrapped, taped=taped):
+        self.assertEqual(run(fn, taped), baseline)
+```
+Alternatively, maybe a scoped disable_grad() could work while keeping wrapping and the safety checks on by default?
+Restore the tape after an error (mujoco_warp/_src/diff.py:41-50): Returning reasons handles support checks, but wp.launch can still raise. For example, this forward only launches a kernel, but omits its required output argument:
+```
+import warp as wp
+from warp._src import context as wp_context
+from mujoco_warp._src import diff
+
+
+@wp.kernel
+def copy_value(x: wp.array[float], y: wp.array[float]):
+  y[wp.tid()] = x[wp.tid()]
+
+
+def bad_forward(x, y):
+  wp.launch(copy_value, dim=1, inputs=[x])  # Missing y.
+
+
+bad_forward = diff._wrap(bad_forward)
+diff.register_adjoint(bad_forward, lambda x, y: None, array_args=("x", "y"))
+wp.init()
+x = wp.ones(1, requires_grad=True)
+y = wp.zeros(1, requires_grad=True)
+wp.config.verify_autograd_array_access = True
+
+with wp.Tape() as tape:
+  try:
+    bad_forward(x, y)
+  except RuntimeError as error:
+    print(error)  # Passed 1 argument, but the kernel requires 2.
+
+  print(wp_context.runtime.tape is tape)  # False: scratch tape is still active.
+  print(wp.config.verify_autograd_array_access)  # False: verification is still disabled.
+  wp.launch(copy_value, dim=1, inputs=[x], outputs=[y])
+  print(len(tape.launches))  # 0: the valid launch went to the scratch tape.
+```
+ExitStack could restore both settings as the error propagates. With this replacement for _call, the checks above print True, True, and 1:
+```
+import contextlib
+
+
+def _call(tape, fn, *args, verify_access=True, **kwargs):
+  with contextlib.ExitStack() as cleanup:
+    cleanup.callback(setattr, wp_context.runtime, "tape", wp_context.runtime.tape)
+    cleanup.callback(setattr, wp.config, "verify_autograd_array_access", wp.config.verify_autograd_array_access)
+    wp_context.runtime.tape = tape
+    if not verify_access:
+      wp.config.verify_autograd_array_access = False
+    return fn(*args, **kwargs)
+```
+thowell
+added 6 commits
+October 28, 2026 23:59
+differentiability api
+00f5a38
+address pr comments from eric-heiden
+2f8e77e
+updates
+2cd8ad1
+refine differentiability api
+d381dba
+address pr comments from etaoxing and quagla
+b83fb14
+address pr comment from etaoxing
+9d98042
+thowell
+force-pushed
+the
+differentiability
+branch
+from
+359e214 to
+9d98042
+Compare
+October 28, 2026 23:59
+thowell
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@etaoxing thanks for the review comments!
+regarding enable_grad: the thinking is that using the tape scope indicates 'compute derivatives', otherwise derivatives are not computed. is there functionality that tape is providing apart from derivatives that would be enabled via enable_grad?
+implemented the error restoration as recommended.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

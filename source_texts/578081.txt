@@ -1,0 +1,156 @@
+Neuroimaging in PyTorch. Contribute to balbasty/nitorch development by creating an account on GitHub.
+
+register: chunked matmul affine_grid_backward by balbasty · Pull Request #232 · balbasty/nitorch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+balbasty
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+This is the affine_grid_backward item of #158 ("go, chunked").
+The affine chain rule turns the dense gradient and Hessian with respect to the displacement into derivatives with respect to the affine parameters. It did this with about 150 full-volume products and 100 reductions (TorchScript loops over matrix entries): 1.3–2.3 s at 192³, on every affine step and every line-search trial.
+With X = [grid, 1] (one row per voxel):
+the gradient is gradᵀ X;
+each of the dim·(dim+1)/2 unique Hessian blocks is (X ⊙ hess[:, ik])ᵀ X.
+That is a handful of matmuls.
+Memory, the concern raised in #154: voxels are processed in chunks, and the identity grid is built chunk by chunk instead of being materialised. The extra memory is therefore a few chunk-sized buffers instead of an N×3 grid plus full-volume temporaries.
+The interface is unchanged: batch dimensions, a custom grid (which do_affine passes on its 'ms' path), and hess=None returning (g, None). The two TorchScript helpers it replaces had no other users.
+Chunk size
+AFFINE_GRID_BACKWARD_CHUNK can still be set to override it. By default (None) the chunk size depends on the device:
+CPU: max(2¹⁸, 2¹⁶ × threads), capped at 2²⁰. Measured at 192³ (ms, gradient + Hessian):
+threads
+2¹⁴
+2¹⁶
+2¹⁸
+2²⁰
+2²²
+2²³
+1
+1660
+1322
+1267
+1963
+2081
+2109
+2
+1270
+966
+852
+1573
+1546
+1323
+4
+1198
+674
+487
+902
+919
+864
+Small chunks pay the per-chunk overhead. Chunks of 2²⁰ and more are 1.5–2× slower, most likely because the chunk buffers no longer fit in cache. Each chunk is split across threads, so larger thread counts get larger chunks. This was not measured beyond 4 threads.
+CUDA: 2²⁰, not measured. A million voxels per kernel should fill a GPU, and it keeps the chunk buffers to about 100 MB.
+Effect
+192³, 4-thread CPU, gradient + Hessian. Measured on two machines, since the session moved:
+master
+this PR
+time, machine 1
+2.29 s
+0.33 s
+time, machine 2
+2.75 s
+0.52 s
+extra peak memory after warm-up (machine 1)
++27 MB
++4 MB
+Compared with master on 1D, 2D and 3D, with and without batch dimensions, with and without a custom grid, with and without a Hessian: differences are at most 5e-7 relative in float32 and 6e-16 in float64.
+Tests
+nitorch/tests/test_affine_grid_backward.py (new):
+comparison with an explicit einsum reference (dims 1–3, batched, custom grid);
+many small chunks with a remainder vs one chunk;
+gradient only, and hess=None;
+the chunked identity grid matches identity_grid;
+the default chunk size for each device and thread count, and the override.
+Full suite (TS backend, torch 2.15): 2562 passed, 105 skipped. That run was on a master from before Meta: CLI bugs found while writing the documentation #171's merges; the merge with the current master has no conflicts.
+Part of #158.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_014dBjaUGFKHtAQeNPPDHTHh
+claude
+added 2 commits
+November 3, 2026 07:01
+PERF(register): chunked matmul affine_grid_backward
+…
+a426df6
+```
+The affine chain rule reduced the dense gradient/Hessian to the affine
+parameters with ~150 full-volume products and ~100 reductions
+(TorchScript loops over matrix entries): 1.3-2.3 s at 192^3 per
+evaluation, on every affine step and line-search trial.
+
+With `X = [grid, 1]`, the gradient is `grad^T X` and each of the
+`dim*(dim+1)/2` unique Hessian blocks is `(X * hess[:, ik])^T X`: a few
+matmuls. Voxels are processed by chunks of 2^18
+(`AFFINE_GRID_BACKWARD_CHUNK`), and the identity grid is built chunk by
+chunk instead of being materialised, so extra memory is a few
+chunk-sized buffers. Same interface (batch dimensions, custom `grid`,
+`hess=None`).
+
+192^3, 4-thread CPU: 2.29 s -> 0.33 s, extra peak memory +27 -> +4 MB.
+Matches master to 5e-7 (float32) / 6e-16 (float64).
+
+Part of #158.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014dBjaUGFKHtAQeNPPDHTHh
+```
+PERF(register): device- and thread-dependent chunk size in `affine_gr…
+…
+cd76af8
+```
+…id_backward`
+
+`AFFINE_GRID_BACKWARD_CHUNK` now defaults to None (overridable as
+before), and the chunk size is chosen per call:
+- CPU: max(2^18, 2^16 * threads), up to 2^20. 2^18 was optimal with 1
+  to 4 threads at 192^3 (2^14 pays the per-chunk overhead; 2^20 and more
+  were 1.5-2x slower, likely out of cache); each chunk is split across
+  threads, so larger thread counts get larger chunks (not measured
+  beyond 4 threads).
+- CUDA: 2^20 (not measured): enough voxels to fill a GPU, chunk buffers
+  ~100 MB.
+
+Review comment on #232.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014dBjaUGFKHtAQeNPPDHTHh
+```
+This was referenced Nov 3, 2026
+register perf: kernel hot spots (LCC, NMI, exp_backward, affine_grid_backward, FMG)
+#158
+Open
+perf: integration branch of the open #154 PRs (for testing, not for merging)
+#251
+Draft
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

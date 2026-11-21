@@ -1,0 +1,234 @@
+--- v008.md
++++ v009.md
+@@ -4,101 +4,133 @@
+ 
+ ## Overview
+-This method reduces the number of 3D Gaussians copied, stored, sorted, and rendered by merging Gaussians into clusters based on similar attributes, minimizing distant appearance impact without altering the scene creation stage [S1]. It operates within a virtual memory framework where Gaussians are organized into pages; unlike virtual texturing which uses uniform-sized mip levels, this method reduces the Gaussian count with each LOD level, allowing multiple virtual pages to reside within a single physical page [S1]. It is distinguished from sibling methods by its specific use of k-means clustering on multidimensional attribute space and dynamic threshold adjustment to prevent visual popping [S1].
++This method reduces the number of 3D Gaussians copied, stored, sorted, and rendered by merging Gaussians into clusters based on similar attributes, minimizing distant appearance impact without altering scene creation [S1]. It operates on a virtual memory system where Gaussians are organized into pages; unlike virtual texturing where mip levels are uniform-sized pages, this method reduces the Gaussian count with each LOD level, allowing multiple virtual pages to reside within one physical page [S1]. It is distinct from [K-wise moment-matched merging](5440-k-wise-moment-matched-merging-with-l2-optimal-amplitude.md) by using arithmetic averaging and fixed scaling factors rather than L2-optimal moment matching, and from [Hierarchical Gaussian Merging](8358-hierarchical-gaussian-merging.md) by its specific integration with page-based virtual memory management and dynamic thresholding [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $G_i$ organized into pages. Each Gaussian has position $\mathbf{t}_i$, rotation $\mathbf{q}_i$ (or scale/rotation), opacity $\alpha_i$, and spherical harmonic coefficients $c_i$.
+-*   **Output:** A reduced set of merged Gaussians $G'_k$ for each LOD level, and a page table mapping virtual pages to physical LOD levels.
++*   **Input:** A set of 3D Gaussians $G$ assigned to spatial pages. Each Gaussian $G_i$ has position $\mathbf{t}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, and spherical harmonic coefficients $c_i$.
++*   **Output:** A set of merged representative Gaussians $G'$ for each LOD level, and a page table mapping virtual pages to physical memory with associated LOD indices.
+ 
+ **Data Structures:**
+ *   **Page Table:** An array of entries. Each entry contains:
+     *   `page_id`: Identifier for the virtual page.
+-    *   `lod_level`: The current Level of Detail index for this page.
++    *   `lod_level`: Integer index indicating the current detail level (0 = highest detail/raw Gaussians, 1+ = merged).
+     *   `last_use`: Timestamp or frame counter for LRU eviction.
+-    *   `physical_data`: Pointer or handle to the merged Gaussian data in GPU memory.
+-*   **Cluster:** A list of indices $\{i\}$ referring to Gaussians in the same page.
++    *   `physical_address`: Pointer to the GPU memory buffer containing the merged Gaussians for this LOD.
++*   **Gaussian Buffer:** Stores the merged Gaussians. Since the count decreases with LOD, buffers for higher LODs are smaller.
+ 
+-**Parameters:**
+-*   $k$: Number of clusters in k-means. Not given in the sources.
+-*   $scale\_factor$: Fixed multiplier applied to the merged Gaussian's scale to fill gaps. Not given in the sources.
+-*   $memory\_limit$: Threshold for memory usage triggering LOD adjustment. Not given in the sources.
+-*   $threshold\_step$: Initial step size for LOD threshold adjustment. Not given in the sources.
++**Algorithm Steps:**
+ 
+-**Steps:**
++1.  **Clustering:** For each page, identify clusters of Gaussians using the k-means algorithm in a multidimensional attribute space [S1].
++    *   The feature vector for each Gaussian includes position $\mathbf{t}_i$, rotation $\mathbf{q}_i$, and color $c_i$.
++    *   **Priority:** Position attributes are prioritized during clustering to prevent dispersed clusters [S1]. This is implemented by weighting the position components higher in the distance metric used by k-means.
++    *   **Constraint:** Only Gaussians residing on the same page can be merged into a cluster [S1].
+ 
+-1.  **Page Assignment:** Assign Gaussians to pages based on spatial proximity or proxy mesh faces [S1].
+-2.  **Clustering:** For each page, identify clusters of Gaussians using the k-means algorithm. The points in multidimensional space are defined by attributes: position, rotation, and color (spherical harmonics) [S1].
+-    *   *Pitfall:* Prioritize position attributes during clustering to prevent dispersed clusters [S1].
+-3.  **Merging:** Replace each cluster $C_k$ with a single representative Gaussian $G'_k$.
+-    *   Calculate the arithmetic mean for translation, rotation, opacity, and spherical harmonics [S1].
+-    *   *Pitfall:* Merging scales directly causes the resulting Gaussian to be too small. Scale up the merged Gaussian by a fixed factor to fill gaps [S1].
+-4.  **LOD Marking:** Mark page table entries with their current LOD level [S1].
+-5.  **Dynamic Threshold Adjustment:**
+-    *   Monitor GPU memory usage.
+-    *   If usage exceeds $memory\_limit$, move LOD thresholds away from the camera (higher LOD, more detail).
+-    *   If memory is available, move thresholds closer to the camera (lower LOD, less detail) [S1].
+-    *   *Pitfall:* Setting initial thresholds in fixed increments can cause rapid flipping between levels (popping/flickering) if the step size is too large or adaptation is too slow if too small. Dynamically adjust the step size based on previous moves to stabilize [S1].
++2.  **Merging:** Replace each cluster $C_j$ with a single representative Gaussian $G'_j$ [S1].
++    *   **Translation:** Arithmetic mean: $\mathbf{t}'_j = \frac{1}{|C_j|} \sum_{i \in C_j} \mathbf{t}_i$.
++    *   **Rotation:** Arithmetic mean of quaternions (normalized) [S1].
++    *   **Opacity:** Arithmetic mean: $\alpha'_j = \frac{1}{|C_j|} \sum_{i \in C_j} \alpha_i$.
++    *   **Color:** Arithmetic mean of spherical harmonic coefficients [S1].
++    *   **Scale:** Arithmetic mean is **not** used directly. Merging scales directly causes the resulting Gaussian to be too small, creating visual gaps [S1]. Instead, the merged Gaussian is scaled up by a fixed factor $k_{scale}$ to fill gaps. The factor $k_{scale}$ is determined during training using average pixel coverage [S1].
++        *   $\mathbf{s}'_j = k_{scale} \cdot \frac{1}{|C_j|} \sum_{i \in C_j} \mathbf{s}_i$.
++
++3.  **LOD Threshold Management:**
++    *   Assign an initial LOD level to each page based on distance from the camera. Closer pages use LOD 0 (raw Gaussians); further pages use higher LODs (merged Gaussians) [S1].
++    *   **Dynamic Adjustment:** Thresholds move away from the camera when GPU memory usage exceeds a limit, and closer when memory is available [S1].
++    *   **Step Size Adaptation:** To prevent rapid flipping (popping/flickering) between levels, the step size for threshold changes is dynamically adjusted based on previous moves [S1]. If a move caused overshooting (drastic memory change), the step size is reduced; if adaptation is too slow, it is increased [S1].
++
++4.  **Page Table Update:** Mark page table entries with their current LOD level. When a page's LOD changes, the corresponding merged Gaussian buffer is loaded or evicted [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def generate_lod(gaussians, page_table, memory_limit):
++def compute_cluster_mean(gaussians_in_cluster):
+     """
+-    Generates LOD levels for 3DGS by clustering and merging Gaussians.
++    Computes the arithmetic mean of Gaussian attributes.
++    Returns: (mean_t, mean_q, mean_alpha, mean_sh, raw_mean_s)
+     """
+-    for page in page_table:
+-        # Step 2: Clustering
+-        # Extract attributes: position, rotation, color
+-        attributes = extract_attributes(page.gaussians)
++    n = len(gaussians_in_cluster)
++    sum_t = vec3(0, 0, 0)
++    sum_q = vec4(1, 0, 0, 0) # Identity quaternion
++    sum_alpha = 0.0
++    sum_sh = vec3(0, 0, 0) # Assuming 1st order SH for simplicity
++    sum_s = vec3(1, 1, 1)
++    
++    for g in gaussians_in_cluster:
++        sum_t += g.t
++        # Quaternion averaging (simplified: sum and normalize)
++        sum_q += g.q
++        sum_alpha += g.alpha
++        sum_sh += g.sh
++        sum_s += g.s
+         
++    mean_t = sum_t / n
++    mean_q = normalize(sum_q)
++    mean_alpha = sum_alpha / n
++    mean_sh = sum_sh / n
++    raw_mean_s = sum_s / n
++    
++    return mean_t, mean_q, mean_alpha, mean_sh, raw_mean_s
++
++def generate_lod_gaussians(page_gaussians, cluster_count, scale_factor):
++    """
++    Generates merged Gaussians for a single LOD level from a page's Gaussians.
++    """
++    # 1. Clustering
++    # Feature vector: [t_x, t_y, t_z, q_x, q_y, q_z, q_w, c_r, c_g, c_b]
++    # Position weights are higher to prevent dispersion
++    features = []
++    for g in page_gaussians:
++        # Normalize position to match scale of other attributes if necessary
+         # Prioritize position in distance metric
+-        weights = [10.0, 1.0, 1.0] # Example weights prioritizing position [S1]
+-        clusters = k_means(attributes, k=page.target_cluster_count, weights=weights)
++        features.append(g.t * 10.0 + g.q + g.color) # Heuristic weighting
+         
+-        # Step 3: Merging
+-        merged_gaussians = []
+-        for cluster in clusters:
+-            cluster_gaussians = [page.gaussians[i] for i in cluster.indices]
++    clusters = kmeans(features, k=cluster_count)
++    
++    merged_gaussians = []
++    for cluster_indices in clusters:
++        cluster_gs = [page_gaussians[i] for i in cluster_indices]
++        
++        # 2. Merging
++        t, q, alpha, sh, raw_s = compute_cluster_mean(cluster_gs)
++        
++        # Scale up to fill gaps
++        s = raw_s * scale_factor
++        
++        merged_gaussians.append(Gaussian(t, q, s, alpha, sh))
++        
++    return merged_gaussians
++
++def update_lod_thresholds(current_memory_usage, memory_limit, current_thresholds, prev_step_direction):
++    """
++    Dynamically adjusts LOD thresholds based on memory pressure.
++    """
++    new_thresholds = current_thresholds.copy()
++    
++    if current_memory_usage > memory_limit:
++        # Move thresholds away from camera (use lower LOD for closer pages)
++        # Increase distance required for high LOD
++        step = adaptive_step(prev_step_direction, direction='increase')
++        for i in range(len(new_thresholds)):
++            new_thresholds[i] += step
++    else:
++        # Move thresholds closer to camera (use higher LOD for closer pages)
++        step = adaptive_step(prev_step_direction, direction='decrease')
++        for i in range(len(new_thresholds)):
++            new_thresholds[i] = max(0, new_thresholds[i] - step)
+             
+-            # Arithmetic mean for most attributes
+-            new_t = mean([g.t for g in cluster_gaussians])
+-            new_q = mean_quaternions([g.q for g in cluster_gaussians])
+-            new_alpha = mean([g.alpha for g in cluster_gaussians])
+-            new_sh = mean_spherical_harmonics([g.sh for g in cluster_gaussians])
+-            
+-            # Scale adjustment to prevent small merged Gaussians [S1]
+-            new_scale = mean([g.scale for g in cluster_gaussians]) * scale_factor
+-            
+-            merged_gaussians.append(Gaussian(new_t, new_q, new_scale, new_alpha, new_sh))
+-        
+-        page.merged_data = merged_gaussians
+-        page.lod_level = calculate_lod_level(page, memory_limit)
++    return new_thresholds
+ 
+-def adjust_thresholds(page_table, current_memory_usage, memory_limit, prev_step_direction):
++def adaptive_step(prev_direction, direction):
+     """
+-    Dynamically adjusts LOD thresholds to prevent popping/flickering [S1].
++    Adjusts step size to prevent rapid flipping.
+     """
+-    if current_memory_usage > memory_limit:
+-        # Move thresholds away from camera (increase detail)
+-        step = adaptive_step(prev_step_direction, "increase")
+-        for page in page_table:
+-            page.threshold += step
++    # If previous move was in the same direction and caused overshoot, reduce step
++    # If previous move was slow, increase step
++    # Implementation details depend on specific memory monitoring feedback [S1]
++    base_step = 1.0
++    if prev_direction == direction:
++        return base_step * 0.8 # Reduce step if continuing same trend
+     else:
+-        # Move thresholds closer to camera (decrease detail)
+-        step = adaptive_step(prev_step_direction, "decrease")
+-        for page in page_table:
+-            page.threshold -= step
+-            
+-    prev_step_direction = "increase" if current_memory_usage > memory_limit else "decrease"
+-    return prev_step_direction
+-
+-def adaptive_step(prev_direction, current_direction):
+-    """
+-    Adjusts step size based on previous moves to prevent rapid flipping [S1].
+-    """
+-    if prev_direction == current_direction:
+-        return initial_step * 0.5 # Reduce step if continuing in same direction
+-    else:
+-        return initial_step * 2.0 # Increase step if reversing direction
++        return base_step * 1.2 # Increase step if reversing
+ ```
+ 
+@@ -106,16 +138,17 @@
+ 
+ ### Memory-Efficient 3D GS via Pruning and Clustering
+-This variant addresses scalability and memory demands in large-scale scenes by combining strategic pruning of low-impact Gaussians (e.g., volume-based masking) with clustering [S2]. Neighboring Gaussians are represented using properties stored within a "local anchor" obtained via clustering [S2]. It specifically employs a hash-grid for clustering operations [S2].
++This variant combines strategic pruning of low-impact Gaussians (e.g., volume-based masking) with clustering [S2]. Neighboring Gaussians are represented using properties stored within a "local anchor" obtained via clustering [S2]. It specifically employs a hash-grid for clustering to improve efficiency in large-scale scenes [S2]. Unlike the base method which focuses on page-based LOD, this approach explicitly prunes Gaussians before clustering to reduce the initial set size [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Clustering using k-means is $O(N \cdot k \cdot I)$ where $N$ is the number of Gaussians per page, $k$ is the number of clusters, and $I$ is iterations [S1]. Merging is linear $O(N)$ [S1].
+-*   **Memory Complexity:** Reduces GPU memory usage by lowering the number of Gaussians stored in VRAM. The method allows multiple virtual pages within one physical page, optimizing memory footprint [S1].
+-*   **Strengths:** Minimizes distant appearance impact without altering scene creation; dynamic thresholding adapts to available memory [S1].
+-*   **Limitations:** Risk of popping/flickering if thresholds are not adjusted carefully; merging scales requires empirical scaling factors [S1].
+-*   **When to use:** Large-scale scenes with limited GPU memory where real-time rendering is required [S1].
+-*   **When not to use:** Scenes requiring high-fidelity detail at all distances without LOD transitions [S1].
++*   **Time Complexity:** Clustering is $O(N \cdot D \cdot I)$ where $N$ is Gaussians per page, $D$ is dimensionality, and $I$ is k-means iterations. Merging is $O(N)$. LOD threshold updates are $O(P)$ where $P$ is number of pages.
++*   **Memory Complexity:** Reduces GPU memory usage by storing fewer Gaussians for distant pages. The reduction factor depends on the cluster count per LOD level.
++*   **Performance:** Enables real-time rendering (60+ FPS) by reducing sorting and rendering overhead for distant geometry [S1].
++*   **Strengths:** Simple arithmetic averaging is computationally cheap. Dynamic thresholding adapts to varying memory constraints.
++*   **Limitations:** Arithmetic averaging can introduce geometric artifacts if clusters are large or heterogeneous. Fixed scale factor may not be optimal for all scenes. Rapid flipping (popping) can occur if threshold adaptation is poorly tuned [S1].
++*   **When to use:** Large-scale scenes with significant memory constraints where distant geometry does not require high fidelity.
++*   **When not to use:** Scenes requiring high-fidelity distant details or where geometric accuracy is critical (moment matching may be better).
+ 
+ ## Background
+-This method originates from research on virtual memory for 3D Gaussian Splatting [S1]. It was developed to address the high memory demands of 3DGS by streaming Gaussians to GPU memory on demand, eliminating the need for static encoding and allowing dynamic LOD management [S1]. It builds on the principles of virtual texturing but adapts them to the non-uniform nature of Gaussian clusters [S1].
++This method was introduced in "Virtual memory for 3D Gaussian Splatting" [S1]. It addresses the scalability and memory demands of 3DGS in large-scale scenes [S2]. The approach is inspired by virtual texturing techniques used in computer graphics, where mip levels are used to manage memory bandwidth and capacity [S1]. The specific use of k-means clustering with position prioritization and fixed scale adjustment was proposed to minimize distant appearance impact while keeping the implementation simple [S1].
+ 
+ ## Sources

@@ -1,0 +1,68 @@
+# Auto-Relaxed Sphere Tracing
+
+Also called: Automatic Step Size Relaxation in Sphere Tracing
+
+## Overview
+Auto-Relaxed Sphere Tracing is a robust sphere tracing method that automatically scales step sizes based on data from previous iterations, using a scalar hyperparameter similar to the learning rate of gradient descent methods [S1, unofficial]. It sets itself apart from its parent [Uniform Sphere Tracing](4406-uniform-sphere-tracing.md) by replacing fixed or heuristic step rules with an adaptive scaling mechanism that reduces the frequency of invalid, over-relaxed step sizes, thereby minimizing the need for robustness-preserving fallback steps [S1, unofficial]. Compared to [Spectral Tracking](4664-spectral-tracking.md), it offers a smaller performance sensitivity to its hyperparameters while maintaining competitive efficiency [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Ray origin $o$ and direction $d$.
+*   Signed Distance Function (SDF) evaluator $F(x)$.
+*   Scalar hyperparameter $\alpha$ (step size scaling factor).
+*   Maximum iteration count $N_{max}$.
+*   Surface threshold $\epsilon$ (convergence tolerance).
+
+**Outputs:**
+*   Intersection point $x_{hit}$ or null if no intersection is found within $N_{max}$ iterations.
+
+**Data Structures:**
+*   Current position $x_t \in \mathbb{R}^3$.
+*   Previous distance value $d_{prev} = F(x_{t-1})$.
+*   Current distance value $d_{curr} = F(x_t)$.
+*   Step size $s_t \in \mathbb{R}$.
+
+**Algorithm:**
+1.  Initialize $x_0 = o$.
+2.  Evaluate $d_0 = F(x_0)$.
+3.  Set initial step size $s_0 = d_0$ [G]. If $d_0 \le \epsilon$, return $x_0$.
+4.  For $t = 0$ to $N_{max} - 1$:
+    a.  Move along the ray: $x_{next} = x_t + s_t \cdot d$.
+    b.  Evaluate distance: $d_{next} = F(x_{next})$.
+    c.  Check convergence: If $d_{next} \le \epsilon$, return $x_{next}$.
+    d.  Calculate adaptive step size for next iteration:
+        $$ s_{t+1} = \alpha \cdot d_{next} $$
+        [G]: The hyperparameter $\alpha$ acts as a relaxation factor. In standard sphere tracing, $\alpha=1$. Values $<1$ prevent overshooting in complex geometries, while values $>1$ accelerate convergence in empty space, but risk invalid steps if too large.
+    e.  Update state: $x_t \leftarrow x_{next}$, $d_{prev} \leftarrow d_{next}$.
+5.  Return null (failure).
+
+**Parameters:**
+*   $\alpha$: Scalar hyperparameter controlling step size scaling. Typical values depend on geometry complexity; $\alpha=1$ is the baseline for standard sphere tracing. The method is noted to have a smaller effect on performance from $\alpha$ compared to concurrent variants [S1, unofficial].
+*   $\epsilon$: Surface threshold. Not given in the sources.
+*   $N_{max}$: Maximum iteration count. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Over-relaxed step sizes:** The method can generate invalid step sizes if $\alpha$ is too large, causing the ray to jump over the surface. However, it generates significantly fewer of these compared to concurrent variants, reducing the need for fallback steps [S1, unofficial].
+*   **Precision:** Standard floating-point precision issues apply to SDF evaluation and ray marching.
+*   **Degenerate Input:** If $F(x)$ is not a valid SDF (i.e., $|\nabla F| \neq 1$), the step size relaxation may fail to converge or produce incorrect results.
+
+## Subtopics
+
+### Sphere Tracing-based Triggering for SDF
+A triggering strategy for Signed Distance Functions (SDF) that uses the Eikonal equation property to accelerate finding the zero-level set point $x$ [S2]. It initializes an arbitrary point $x_0$ in the implicit field of SDF $F$ and updates the point using the rule $x_{t+1} = x_t - \eta F(x_t) \nabla_{x_t} F$, where $\eta \le 1$ is the step size [S2]. This accelerates standard SGD when far from the surface and provides damping to prevent penetration when close [S2]. It is distinct from Auto-Relaxed Sphere Tracing as it is a gradient-based optimization scheme rather than a ray-marching step size adaptation, though both leverage SDF properties [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of iterations required to converge. The adaptive step size can reduce the number of iterations compared to uniform tracing in many cases, but depends heavily on $\alpha$ [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory, storing only current and previous state variables [S1, unofficial].
+*   **Measured Performance:** Outperforms or performs up to par with the most efficient concurrent sphere tracing methods, depending on iteration count limits [S1, unofficial]. It has a smaller effect on performance from its step-scale hyperparameters than concurrent variants [S1, unofficial].
+*   **Strengths:** Robustness against invalid step sizes; reduced need for fallback logic; efficient convergence for both procedural and discrete SDFs [S1, unofficial].
+*   **Limitations:** Requires tuning of $\alpha$; performance is sensitive to the choice of $\alpha$ in complex scenes, though less so than other adaptive methods [S1, unofficial].
+*   **When to use:** When robustness is critical and fallback steps are expensive; when working with SDFs where standard sphere tracing might overshoot or undershoot.
+*   **When not to use:** When strict determinism without hyperparameter tuning is required; when the SDF does not satisfy the Eikonal equation.
+
+## Background
+The method was proposed by Róbert Bán and Gábor Valasek in May 2023 [S1, unofficial]. It builds on the foundational work of John C. Hart, Daniel Sandin, and Louis Kauffman in ray tracing deterministic 3-D fractals, which established the use of ray tracing for implicit surfaces [S1, unofficial]. The concept of using SDF properties for acceleration is also related to sphere tracing-based triggering strategies described in later works on deep implicit surface networks [S2].
+
+## Sources
+[S1] (PDF) Accelerating Sphere Tracing - ResearchGate, https://www.researchgate.net/publication/329152815_Accelerating_Sphere_Tracing, fetched 2026-11-04 (unofficial)
+[S2] Learning and Meshing From Deep Implicit Surface Networks Using an Efficient Implementation of Analytic Marching, https://doi.org/10.1109/tpami.2021.3135007, fetched 2026-10-26

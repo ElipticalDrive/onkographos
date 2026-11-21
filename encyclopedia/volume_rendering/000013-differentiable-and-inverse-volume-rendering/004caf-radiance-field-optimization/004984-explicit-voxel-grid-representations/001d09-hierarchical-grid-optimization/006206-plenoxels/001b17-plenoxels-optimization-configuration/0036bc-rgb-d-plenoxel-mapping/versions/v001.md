@@ -1,0 +1,42 @@
+# RGB-D Plenoxel Mapping
+
+Also called: RGB-D Plenoxel
+
+## Overview
+A dense mapping algorithm that extends the Plenoxel model to incorporate depth data from an RGB-D sensor, removing geometric ambiguities in gradient-less regions [S1]. Unlike standard NeRF which suffers from geometric ambiguity in outward-facing scenes, this method uses depth sensors to ensure accurate geometry [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** RGB images and corresponding depth maps from an RGB-D sensor; initial voxel grid parameters (opacity $\sigma$ and spherical harmonic coefficients).
+*   **Outputs:** Optimized voxel grid parameters representing the scene geometry and appearance.
+
+**Data Structures:**
+The method builds upon the Plenoxel representation, which uses a voxel grid to store opacity ($\sigma$) and spherical harmonic (SH) coefficients for radiance [S1]. The specific bit-packing or layout of the voxel grid is not detailed in the sources, relying on the standard Plenoxel implementation [S1].
+
+**Steps:**
+1.  **Derive Analytical Derivatives:** Derive the analytical derivative equations for mapping in a voxel-based radiance field based on RGB-D data [S1]. This involves calculating gradients with respect to the voxel parameters using both RGB color loss and depth consistency loss.
+2.  **CUDA Implementation:** Implement the mapping optimization in CUDA to leverage the inherent speed of the Plenoxel model, which is more than two magnitudes faster than the original NeRF algorithm [S1].
+3.  **Optimization:** Perform gradient-based optimization to minimize the difference between rendered RGB/depth and observed RGB-D data [S1].
+
+**Formulas:**
+The sources state that analytical derivative equations are derived for mapping and tracking but do not provide the explicit mathematical formulas [S1].
+
+**Parameters:**
+Typical values for learning rates or optimization steps are not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+Standard NeRF implementations fail in scenes with sparse gradient coverage or outward-facing scenes, leading to invalid view synthesis outside the training pose distribution [S1]. The RGB-D Plenoxel method specifically addresses this by using depth data to resolve ambiguities in these gradient-less regions [S1].
+
+## Subtopics
+
+### Volumetric Dense Image-to-Model Tracking
+A pose optimization algorithm that tracks camera motion by aligning the camera image to the volumetric dense map using radiance field rendering equations [S1]. Unlike sparse tracking which uses a subset of points, dense tracking uses all image and model information for smoother and more accurate trajectories [S1]. It derives analytical derivative equations for tracking in a voxel-based radiance field based on RGB-D data and implements the tracking optimization in CUDA [S1].
+
+## Operating characteristics
+The method leverages the inherent speed of the Plenoxel model, which is more than two magnitudes faster than the original NeRF algorithm [S1]. This efficiency enables a very fast mapping algorithm and a real-time, highly accurate tracking algorithm [S1]. The sources do not provide specific memory complexity or measured performance metrics beyond the relative speed comparison [S1].
+
+## Background
+The method is based on the Plenoxel algorithm, an analytical radiance field representation that uses a voxel grid instead of a neural network [S1]. It was introduced to make radiance field models more applicable for practical tasks like robotics and XR, where standard NeRF struggles with geometric ambiguity [S1]. The work was presented in 2024 [S1].
+
+## Sources
+[S1] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26

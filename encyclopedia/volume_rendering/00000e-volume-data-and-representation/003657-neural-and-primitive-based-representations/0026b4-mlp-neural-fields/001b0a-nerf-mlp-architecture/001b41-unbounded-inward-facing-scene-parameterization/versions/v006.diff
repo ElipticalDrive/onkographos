@@ -1,0 +1,325 @@
+--- v005.md
++++ v006.md
+@@ -4,35 +4,28 @@
+ 
+ ## Overview
+-This method parameterizes unbounded, inward-facing scenes by mapping coordinates from $\mathbb{R}^3$ into a bounded domain (typically a unit sphere or cube), enabling neural radiance fields to allocate model capacity proportional to disparity [S1, S3]. It solves the problem of infinite ray sampling and sparse distant content by compressing the infinite space into a finite volume where points at infinity map to the boundary [S1, S3]. It differs from standard bounded scene representations by explicitly handling the asymptotic behavior of rays, and from forward-facing parameterizations by using spherical or cuboid contraction rather than depth-layer warping [S2, unofficial].
++This method parameterizes unbounded, inward-facing 360-degree scenes by mapping infinite 3D coordinates into a bounded unit sphere (or cuboid), enabling efficient voxel grid allocation and watertight mesh extraction [S1][S2, unofficial][S3]. It sets itself apart from standard NeRF by explicitly warping infinite $t$-space coordinates into a finite $s$-space, ensuring that model capacity is allocated proportional to disparity (inverse distance) for distant content, while maintaining visual fidelity for backgrounds [S1][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** 3D world coordinates $\mathbf{x} \in \mathbb{R}^3$.
+-**Outputs:** Contracted coordinates $\mathbf{x}' \in [-2, 2]^3$ (or bounded cuboid).
+-**Data Structures:** None required for the core contraction function; often used with a voxel grid or occupancy grid [S2, S4, unofficial].
++**Inputs and Outputs:**
++- Input: 3D world coordinates $\mathbf{x} \in \mathbb{R}^3$ (and optionally viewing direction $\mathbf{d}$).
++- Output: Contracted coordinates $\mathbf{x}' \in [-2, 2]^3$ (or bounded cuboid).
++
++**Data Structures:**
++- **Voxel Grid:** A 3D grid allocated in the contracted space. For the standard spherical contraction, a cuboid grid is often used to avoid wasting points [S2, unofficial].
++- **Preprocessing State:** Camera centroid and scaling factor derived from input camera poses.
+ 
+ **Preprocessing (Coordinate Alignment):**
+-Before applying the non-linear contraction, the scene coordinates are often preprocessed to align with the camera distribution [S2, unofficial]:
+-1.  Compute the centroid of all camera positions and shift $\mathbf{x}$ so the centroid is at the origin.
+-2.  Compute the Principal Component Analysis (PCA) of the camera positions.
+-3.  Rotate $\mathbf{x}$ to align the first two PCA directions with the grid's XY axes [S2, unofficial].
+-4.  Scale $\mathbf{x}$ such that the cameras lie near the unit sphere boundary [S2, unofficial].
++Before applying the contraction function, the world coordinates are transformed to align with the camera distribution [S2, unofficial]:
++1. **Rotation:** Rotate the world coordinate system to align the first two Principal Component Analysis (PCA) directions of the camera positions with the grid's XY axes. This improves reconstruction quality [S2, unofficial].
++2. **Shift:** Translate the world coordinates so that the centroid of the camera positions aligns with the origin [S2, unofficial].
++3. **Scaling:** Scale the coordinates such that the cameras' near planes fit within a unit sphere (or unit cube) [S2, unofficial].
+ 
+ **Contraction Function:**
+-The core operation maps $\mathbf{x}$ to $\mathbf{x}'$. The standard Mip-NeRF 360 contraction uses the L2 norm [S1, S3]:
++The core operation maps $\mathbf{x}$ to $\mathbf{x}'$. The standard Mip-NeRF 360 parameterization uses an $L_p$ norm-based scaling factor that preserves the direction of the input vector while compressing its magnitude [S2, unofficial].
++
++The general formula for the contraction function $\operatorname{contract}(\mathbf{x})$ is [S1][S2, unofficial][S3]:
+ 
+ $$
+ \operatorname{contract}(\mathbf{x}) = \begin{cases} 
+-\mathbf{x} & \|\mathbf{x}\| \leq 1 \\ 
+-\left(2 - \frac{1}{\|\mathbf{x}\|}\right)\left(\frac{\mathbf{x}}{\|\mathbf{x}\|}\right) & \|\mathbf{x}\| > 1 
+-\end{cases}
+-$$
+-
+-This maps $\mathbb{R}^3$ to a sphere of radius 2 [S3]. The resolution in the contracted domain is proportional to disparity (inverse distance), allocating significant capacity to content near the origin and proportional capacity to distant content [S1].
+-
+-**Alternative: Lp Norm and Cuboid Contraction:**
+-To avoid wasting grid points (a sphere occupies only ~52% of a cube), an Lp norm variant can be used, often with $p=\infty$ to create a cuboid contracted space [S2, unofficial]:
+-
+-$$
+-\mathbf{x}' = \begin{cases} 
+ \mathbf{x} & \|\mathbf{x}\|_p \leq 1 \\ 
+ \left(1 + b - \frac{b}{\|\mathbf{x}\|_p}\right) \left(\frac{\mathbf{x}}{\|\mathbf{x}\|_p}\right) & \|\mathbf{x}\|_p > 1 
+@@ -40,113 +33,146 @@
+ $$
+ 
+-Here, $b > 0$ is a hyperparameter controlling the proportion of voxel grid points allocated to the background [S2, unofficial]. The voxel grid is allocated with length $2+2b$ centered at the origin [S2, unofficial].
+-
+-**Jacobian for Scale Adjustment (Gaussian Splats):**
+-When contracting isotropic Gaussians, the scale $\sigma_j$ must be adjusted by the local volume change of the contraction [S1]. This is computed using the determinant of the Jacobian $J_C(\mathbf{x}_j)$:
+-
+-$$
+-\operatorname{contract}(\sigma_j) = \sigma_j \left| \det(J_C(\mathbf{x}_j)) \right|^{1/d}
+-$$
+-
+-where $d=3$ [S1]. For the standard L2 contraction, this determinant has a closed-form solution [S1].
++Where:
++- $\|\mathbf{x}\|_p$ is the $L_p$ norm of $\mathbf{x}$.
++- $b > 0$ is a hyperparameter controlling the proportion of voxel grid points allocated to the background [S2, unofficial].
++- If $b=1$ and $p=2$, this reduces to the specific form mapping to a sphere of radius 2 [S1, S3]:
++$$
++\operatorname{contract}(\mathbf{x}) = \begin{cases} 
++\mathbf{x} & \|\mathbf{x}\| \leq 1 \\ 
++\left(2 - \frac{1}{\|\mathbf{x}\|}\right) \left(\frac{\mathbf{x}}{\|\mathbf{x}\|}\right) & \|\mathbf{x}\| > 1 
++\end{cases}
++$$
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+-
+-def contract_l2(x):
+-    """
+-    Standard Mip-NeRF 360 contraction using L2 norm.
+-    Maps R^3 to a sphere of radius 2.
+-    """
+-    norm = math.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+-    if norm <= 1.0:
+-        return x
++def contract_coordinates(x, p=2, b=1.0):
++    """
++    Contracts unbounded 3D coordinates into a bounded space.
++    
++    Args:
++        x: numpy array of shape (N, 3) representing 3D coordinates.
++        p: The norm to use (2 for Euclidean, inf for L-infinity).
++        b: Hyperparameter controlling background voxel proportion.
++           For standard Mip-NeRF 360 spherical contraction, b=1.
++    
++    Returns:
++        x_prime: numpy array of shape (N, 3) representing contracted coordinates.
++    """
++    # Compute the norm of each point
++    if p == float('inf'):
++        # L-infinity norm: max absolute value across dimensions
++        norms = np.max(np.abs(x), axis=1)
+     else:
+-        factor = (2.0 - 1.0 / norm)
+-        return [factor * x[0] / norm, 
+-                factor * x[1] / norm, 
+-                factor * x[2] / norm]
+-
+-def contract_lp(x, p=2, b=0.0):
+-    """
+-    Generalized contraction using Lp norm.
+-    If p=inf, use max norm.
+-    b controls background allocation (0.0 defaults to radius 2 sphere-like behavior for p=2).
+-    """
+-    if p == float('inf'):
+-        norm = max(abs(x[0]), abs(x[1]), abs(x[2]))
+-    else:
+-        norm = (abs(x[0])**p + abs(x[1])**p + abs(x[2])**p)**(1.0/p)
+-        
+-    if norm <= 1.0:
+-        return x
+-    else:
+-        # Factor: (1 + b - b/norm)
+-        factor = (1.0 + b - b / norm)
+-        # Normalize vector
+-        if norm == 0:
+-            return [0.0, 0.0, 0.0] # Guard against division by zero
+-        inv_norm = 1.0 / norm
+-        return [factor * x[0] * inv_norm, 
+-                factor * x[1] * inv_norm, 
+-                factor * x[2] * inv_norm]
+-
+-def contract_jacobian_determinant_factor(x):
+-    """
+-    Computes |det(J_C(x))|^(1/3) for the standard L2 contraction.
+-    Used to adjust isotropic Gaussian scales.
+-    Source [S1] implies a closed form exists.
+-    Derivation:
+-    For x != 0, J_C = (2 - 1/r) * I + (1/r^3) * x x^T ... 
+-    Actually, simpler: The volume scaling factor for radial contraction f(r) is f(r)^2 * f'(r).
+-    Here f(r) = r for r<=1, and (2 - 1/r) for r>1.
+-    f'(r) = 1/r^2 for r>1.
+-    So det = f(r)^2 * f'(r) = (2 - 1/r)^2 * (1/r^2).
+-    We need the cube root (d=3).
+-    """
+-    r = math.sqrt(x[0]**2 + x[1]**2 + x[2]**2)
+-    if r <= 1.0:
+-        return 1.0
+-    else:
+-        f_r = 2.0 - 1.0 / r
+-        f_prime = 1.0 / (r * r)
+-        det = f_r * f_r * f_prime
+-        return det ** (1.0 / 3.0)
++        # L-p norm (typically L2)
++        norms = np.linalg.norm(x, axis=1, ord=p)
++    
++    # Initialize output array
++    x_prime = np.zeros_like(x)
++    
++    # Case 1: Points inside the unit sphere/cube (norm <= 1)
++    # These remain unchanged
++    inside_mask = norms <= 1.0
++    x_prime[inside_mask] = x[inside_mask]
++    
++    # Case 2: Points outside the unit sphere/cube (norm > 1)
++    # These are mapped to the bounded region
++    outside_mask = ~inside_mask
++    if np.any(outside_mask):
++        # Normalize direction
++        directions = x[outside_mask] / norms[outside_mask, np.newaxis]
++        
++        # Compute scaling factor: (1 + b - b / norm)
++        # For standard Mip-NeRF 360 (b=1), this becomes (2 - 1/norm)
++        scale_factors = 1.0 + b - (b / norms[outside_mask])
++        
++        # Apply scaling
++        x_prime[outside_mask] = directions * scale_factors[:, np.newaxis]
++        
++    return x_prime
++
++def preprocess_scene(cameras):
++    """
++    Preprocesses world coordinates based on camera positions.
++    
++    Args:
++        cameras: List of camera poses (position and orientation).
++        
++    Returns:
++        transform_matrix: 4x4 matrix to transform world coordinates.
++    """
++    # 1. Extract camera positions
++    positions = np.array([cam.position for cam in cameras])
++    
++    # 2. Compute centroid
++    centroid = np.mean(positions, axis=0)
++    
++    # 3. Center coordinates
++    centered_positions = positions - centroid
++    
++    # 4. PCA to find principal directions
++    # Compute covariance matrix
++    cov = np.cov(centered_positions.T)
++    # Get eigenvalues and eigenvectors
++    eigenvalues, eigenvectors = np.linalg.eigh(cov)
++    
++    # Sort eigenvectors by eigenvalue (descending)
++    # The first two PCA directions are aligned with XY axis
++    pca_dirs = eigenvectors[:, np.argsort(eigenvalues)[::-1]][:, :2]
++    
++    # Construct rotation matrix to align PCA directions with XY
++    # Note: Implementation detail for aligning specific axes may vary
++    # [G] Assuming standard PCA alignment logic where we rotate the scene
++    # so that the major axes of camera distribution align with grid axes.
++    rotation_matrix = ... # Construct rotation matrix from pca_dirs
++    
++    # 5. Scale cameras to fit near planes in unit sphere
++    # [G] Determine scale factor s such that max distance of near planes is 1.
++    # This requires projecting camera positions onto their viewing directions
++    # and finding the minimum distance. For simplicity, we assume a global
++    # scale factor derived from the extent of camera positions.
++    scale_factor = ... # Computed based on camera near-plane distances
++    
++    # Construct final transformation matrix
++    # T = Scale * Rotation * Translate(-centroid)
++    transform_matrix = np.eye(4)
++    transform_matrix[:3, :3] = scale_factor * rotation_matrix
++    transform_matrix[:3, 3] = -transform_matrix[:3, :3] @ centroid
++    
++    return transform_matrix
+ ```
+ 
+ **Parameters:**
+-*   $d=3$: Dimension of coordinates [S1].
+-*   $b > 0$: Hyperparameter for cuboid contraction background proportion [S2, unofficial].
+-*   Grid Resolution: $320^3$ is typical for unbounded inward scenes [S2, unofficial].
+-*   $\alpha_{init} = 10^{-4}$: Initial alpha value for density [S2, unofficial].
+-*   Voxel step size: 0.5 (in contracted space) [S2, unofficial].
+-*   TV loss weights: $10^{-6}$ (density), $10^{-7}$ (feature) [S2, unofficial].
+-*   Distortion loss weight: $10^{-2}$ [S2, unofficial].
+-
+-**Pitfalls:**
+-*   Using $p=2$ with a cubic voxel grid wastes ~50% of grid points because the sphere is inscribed in the cube [S2, unofficial]. Use $p=\infty$ for cuboid contraction to fill the grid efficiently [S2, unofficial].
+-*   Standard Occupancy Grids (e.g., Instant-NGP) only support bounded scenes; scene contraction is required to extend them to unbounded scenes [S4, unofficial].
+-*   Spherical contraction maps straight rays to curves, complicating ray-AABB intersection tests for empty space skipping [S6].
++- $p$: Norm type. $p=2$ (Euclidean) maps to a sphere; $p=\infty$ maps to a cuboid [S2, unofficial].
++- $b$: Hyperparameter for background proportion. $b>0$ [S2, unofficial].
++- Grid Resolution: Typically $320^3$ for unbounded inward-facing scenes [S2, unofficial].
++- Initial Alpha $\alpha_{init}$: $10^{-4}$ [S2, unofficial].
++- Voxel Step Size: $0.5$ in contracted space [S2, unofficial].
++- TV Loss Weight (Density): $10^{-6}$ [S2, unofficial].
++- TV Loss Weight (Feature): $10^{-7}$ [S2, unofficial].
++- Distortion Loss Weight: $10^{-2}$ [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Norm Selection:** Using $p=2$ (Euclidean norm) wastes approximately 50% of grid points because a sphere occupies only a fraction of a cube. Using $p=\infty$ creates a cuboid contracted space, which is more efficient for voxel grid allocation [S2, unofficial].
++- **Boundedness:** Standard Occupancy Grids (e.g., from Instant-NGP) only support bounded scenes. Scene contraction is required to extend these grids to unbounded scenes [S4, unofficial].
++- **Ray Intersections:** Spherical contraction maps straight lines to curves, making ray-AABB intersections challenging for empty space skipping. Alternative contractions (like Piecewise-Projective) preserve straight lines [S5].
+ 
+ ## Subtopics
+ 
++### [Mip-NeRF 360 Contraction and Skybox Handling](9762-mip-nerf-360-contraction-and-skybox-handling.md)
++This method handles unbounded 360-degree scenes by contracting distant geometry into a bounded unit sphere and using a skybox for the remaining background [9762-mip-nerf-360-contraction-and-skybox-handling.md]. It sets itself apart from standard NeRF by explicitly warping infinite t-space coordinates into a finite s-space to enable efficient voxel grid allocation and watertight mesh extraction, while maintaining visual fidelity for distant backgrounds via a skybox representation.
++
+ ### [Scene Scaling and Contraction](11280-scene-scaling-and-contraction.md)
+-This method preprocesses 3D scene coordinates to enable efficient training of neural radiance fields on unbounded, inward-facing scenes. It solves the problem of infinite ray sampling by first scaling the scene to fit a unit cube, then mapping the entire 3D space into a bounded unit sphere. This allows the neural network to learn a compact representation where points at infinity are mapped to the sphere's surface. It differs from other contraction methods by using a specific L2-norm-based scaling factor that preserves the direction of the input vector while compressing its magnitude. See [Scene Scaling and Contraction](11280-scene-scaling-and-contraction.md).
++This method preprocesses 3D scene coordinates to enable efficient training of neural radiance fields on unbounded, inward-facing scenes [11280-scene-scaling-and-contraction.md]. It solves the problem of infinite ray sampling by first scaling the scene to fit a unit cube, then mapping the entire 3D space into a bounded unit sphere. This allows the neural network to learn a compact representation where points at infinity are mapped to the sphere's surface. It differs from other contraction methods by using a specific L2-norm-based scaling factor that preserves the direction of the input vector while compressing its magnitude.
+ 
+ ### Forward-facing scene parameterization
+-A method to handle unbounded forward-facing scenes by warping the frustum to a bounded volume using a dense voxel grid allocation similar to Multiplane Images (MPIs). It places $D$ RGB-density images at fixed depths and traces rays through them. It differs from inward-facing contraction by using depth-layer sampling rather than spatial coordinate warping. See [Forward-facing scene parameterization](1275-forward-facing-scene-parameterization.md) (Note: No specific article ID provided in prompt for this child, but listed as minor variant. I will link to a hypothetical or generic forward-facing article if available, but the prompt says "Children (for Subtopics): ... Forward-facing scene parameterization" without an ID. I will use a placeholder link or omit if strict. The prompt says "Links to other articles use the file names given below". No file name given for this child. I will create a logical link or leave it as text. Wait, the prompt says "Children (for Subtopics): ... [List]". It does not give IDs for the minor variants. I will write the content and link to a generic forward-facing article or just describe it. Actually, the prompt says "Links to other articles use the file names given below, e.g. [Name](52-name.md)". Since no file name is given for "Forward-facing scene parameterization", I cannot create a valid link. I will describe it in the Subtopics section without a link, or link to the parent if appropriate. However, the instruction says "Subtopics: one entry per child... and its link." I will assume a standard naming convention or leave the link blank if not provided. Let's look at the siblings list. No forward-facing sibling. I will provide the description and a placeholder link or omit the link if strictly forbidden. I will omit the link to avoid hallucination, or link to the parent. Better: I will write the entry and note the lack of ID. *Correction*: The prompt says "Links to other articles use the file names given below". It did not give one for this child. I will write the entry and use a generic link format or just text. I will use `[Forward-facing scene parameterization](forward-facing-scene-parameterization.md)` as a best guess, but the prompt says "use the file names given below". None are given. I will just write the text.)
+-
+-*Self-Correction*: The prompt lists "Minor variants (they have no article of their own: write each one under Subtopics as a '### <Name>' entry carrying ALL of its details below, cited; it may be a short paragraph)". So these are NOT children with articles. They are minor variants described in the notes. I should NOT create links to non-existent articles. I will just describe them.
+-
+-### Forward-facing scene parameterization
+-A method to handle unbounded forward-facing scenes by warping the frustum to a bounded volume using a dense voxel grid allocation similar to Multiplane Images (MPIs) [S2, unofficial]. It places $D=256$ RGB-density images at fixed depths, each with $X \times Z = 384^2$ resolution. Every ray is traced from the first to the $D$-th images with a step size of $s=1.0$ layer, resulting in $2D-1$ sampled points if $s=0.5$ [S2, unofficial]. TV loss weights are $10^{-5}$ (density) and $10^{-6}$ (feature); distortion loss weight is $10^{-2}$ [S2, unofficial].
+-
+-### Mip-NeRF 360 Contraction and Skybox Handling
+-A method to handle unbounded backgrounds in the Mip-NeRF 360 dataset by contracting far objects into a sphere and using a skybox for distant areas [S5]. It warps far objects from original space (t-space) into contracted space (s-space), a sphere with radius 1.2 [S5]. It applies DiffMC on the geometry network within t-space to ensure the mesh is a watertight manifold before contraction, then contracts mesh points back to s-space to compute color [S5]. Distant background outside the $[-4, 4]$ box range is represented using a skybox [S5]. Multi-resolution usage employs higher resolution (340) for foreground and lower resolution (56) for background in t-space [S5].
++A method to handle unbounded forward-facing scenes by warping the frustum to a bounded volume using a dense voxel grid allocation similar to Multiplane Images (MPIs) [S2, unofficial].
++- **Steps:** Place $D$ RGB-density images at fixed depths, each with $X \times Z$ resolution. Trace every ray from the first to the $D$-th images with a step size of $s$ image, resulting in $2D - 1$ sampled points if $s = 0.5$ [S2, unofficial].
++- **Parameters:** Number of depth layers $D=256$. Voxel resolution per layer $XZ=384^2$. Sampling step size $s=1.0$ layer. TV loss weight for density grid is $10^{-5}$. TV loss weight for feature grid is $10^{-6}$. Distortion loss weight is $10^{-2}$ [S2, unofficial].
+ 
+ ### Piecewise-Projective Contraction
+-A contraction function that maps unbounded space into a finite domain while preserving straight lines (piecewise-linear), allowing for efficient ray-AABB intersection tests for empty space skipping [S6]. It consists of seven regions (unit cube + 6 outer regions) [S6]. The $j$-th coordinate is defined as:
++A contraction function that maps unbounded space into a finite domain while preserving straight lines (piecewise-linear), allowing for efficient ray-AABB intersection tests for empty space skipping [S5].
++- **Definition:** It consists of seven regions (unit cube + 6 outer regions) [S5].
++- **Formula:**
+ $$
+ \operatorname{contract}_{\pi}(\mathbf{x})_j = \begin{cases} 
+@@ -156,17 +182,17 @@
+ \end{cases}
+ $$
+-where $\|\mathbf{x}\|_{\infty} = \max_i |x_i|$ [S6]. Unlike spherical contraction, it preserves the unit cube and maps other regions via projective transformations, performing on par with spherical contraction but enabling efficient empty space skipping [S6].
++where $\|\mathbf{x}\|_{\infty} = \max_i |x_i|$ [S5].
++- **Pitfall:** Mip-NeRF 360's spherical contraction maps straight lines to curves, making ray-AABB intersections challenging. MERF's contraction preserves straight lines within regions, with discontinuities only at region boundaries [S5].
++- **Comparison:** Unlike spherical contraction which maps to a radius-2 ball, this contraction preserves the unit cube and maps other regions via projective transformations. It performs on par with spherical contraction but enables efficient empty space skipping [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The contraction function is $O(1)$ per sample. Computing the Jacobian determinant for Gaussian scales adds a few arithmetic operations [S1].
+-*   **Memory Complexity:** Depends on the underlying representation (MLP, Voxel Grid, Occupancy Grid). The contraction itself requires no additional memory [S1][S4, unofficial].
+-*   **Performance:** Enables training on unbounded scenes where standard bounded methods fail or require large bounding boxes [S1][S4, unofficial].
+-*   **Strengths:** Allocates model capacity proportional to disparity, improving quality for distant content [S1]. Compatible with various accelerators like Instant-NGP grids [S4, unofficial].
+-*   **Limitations:** Spherical contraction distorts straight lines, making ray-AABB intersection tests difficult for empty space skipping [S6]. Cuboid contraction ($p=\infty$) is preferred for grid-based methods to avoid wasting voxels [S2, unofficial].
+-*   **When to use:** Unbounded inward-facing scenes (e.g., 360-degree photos) [S2, unofficial].
+-*   **When not to use:** Forward-facing scenes (use depth-layer parameterization) [S2, unofficial]; Real-time rendering requiring efficient empty space skipping with standard AABBs (use piecewise-projective contraction) [S6].
++- **Time Complexity:** The contraction function itself is $O(1)$ per point. The overhead comes from the preprocessing (PCA) which is $O(N_{cameras})$.
++- **Memory Complexity:** The voxel grid size is determined by the contracted space bounds. Using $p=\infty$ (cuboid) is more memory-efficient than $p=2$ (sphere) for the same resolution, as it avoids wasting grid cells in the corners [S2, unofficial].
++- **Measured Performance:** On unbounded inward-facing scenes, a grid resolution of $320^3$ with the specified loss weights yields high-quality results [S2, unofficial].
++- **Strengths:** Enables the use of bounded data structures (like Occupancy Grids) for unbounded scenes. Allocates higher representational capacity to points near the cameras, which is consistent with perspective projection [S1, S3].
++- **Limitations:** Spherical contraction distorts straight lines, complicating ray-AABB intersection tests for empty space skipping [S5]. The choice of norm ($p$) and background parameter ($b$) requires tuning for specific scene geometries [S2, unofficial].
+ 
+ ## Background
+-The scene contraction idea originates from Mip-NeRF 360 [S4, unofficial][S1]. It was introduced to parameterize unbounded scenes with bounded coordinates, mapping $[-\infty, \infty]^d$ to $[-2, 2]^d$ [S1]. It has been adopted by various neural rendering frameworks, including DVGOv2 [S2, unofficial], Zip-NeRF [S1], NerfAcc [S4, unofficial], and MERF [S6], to support unbounded scene reconstruction.
++The scene contraction idea originates from Mip-NeRF 360 [S4, unofficial][S1]. Specifically, it is based on Equation 10 in the Mip-NeRF 360 paper [S4, unofficial]. The method was adapted to warp unbounded 360-degree scenes into a bounded unit sphere volume for voxel grid allocation [S2, unofficial]. It is used in various neural radiance field implementations, including Zip-NeRF [S1], DVGOv2 [S2, unofficial], and NerfAcc [S4, unofficial], to support unbounded scenes with bounded occupancy grids.
+ 
+ ## Sources
+@@ -175,4 +201,3 @@
+ [S3] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26
+ [S4] NerfAcc: A General NeRF Acceleration Toolbox, https://doi.org/10.48550/arxiv.2210.04847, fetched 2026-10-26 (unofficial)
+-[S5] NeuManifold: Neural Watertight Manifold Reconstruction with Efficient and High-Quality Rendering Support, https://doi.org/10.1109/wacv61041.2025.00081, fetched 2026-10-29
+-[S6] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26+[S5] MERF: Memory-Efficient Radiance Fields for Real-time View Synthesis in Unbounded Scenes, https://doi.org/10.1145/3592426, fetched 2026-10-26

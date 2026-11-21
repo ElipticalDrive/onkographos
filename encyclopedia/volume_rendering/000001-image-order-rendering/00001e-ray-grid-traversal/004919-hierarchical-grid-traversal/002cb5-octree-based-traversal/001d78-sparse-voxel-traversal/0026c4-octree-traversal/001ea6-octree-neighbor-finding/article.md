@@ -1,0 +1,132 @@
+# Octree Neighbor Finding
+
+Also called: GetNeighbors, Neighbor Retrieval, forward neighbor retrieval
+
+## Overview
+Octree Neighbor Finding determines the adjacent leaf nodes in six cardinal directions (±X, ±Y, ±Z) for a given node in a Sparse Voxel Octree (SVO) [S1, unofficial][S2]. It solves the problem of traversing between non-contiguous or differently-sized nodes during ray casting or pathfinding by locating the nearest shared ancestor and performing point location to retrieve the neighbor [S1, unofficial][S2][S3, unofficial].
+
+## How it works
+**Inputs:**
+- `current_node`: The index of the starting leaf node [S1, unofficial].
+- `direction`: A vector specifying the target direction (e.g., `+X`, `-Y`) [S1, unofficial].
+- `parent_trace`: An array containing the indices of all parent nodes from the root to `current_node`, provided by the ray traversal algorithm [S3, unofficial].
+- `depth`: The depth level of `current_node` [S1, unofficial].
+
+**Outputs:**
+- `neighbor_index`: The index of the adjacent leaf node, or a sentinel value (`INDEX_NONE`) if no neighbor exists in that direction [S1, unofficial].
+
+**Data Structures:**
+- **Node Struct**: Contains `depth` (7 bits), `is_leaf` (1 bit), `position` (3 floats), and `size` (1 float) [S1, unofficial].
+- **Parent Trace Array**: `trace[]` stores the indices of parent nodes for the current ray cap, allowing upward traversal without storing explicit parent pointers in the node structure [S3, unofficial].
+
+**Algorithm Steps:**
+1. **Validation**: Verify `current_node` is a leaf. If not, return immediately [S1, unofficial].
+2. **Target Position Calculation**: Compute the position just outside the current node in the specified `direction` by moving slightly farther than `HalfSize` [S1, unofficial].
+3. **Upward Traversal (Find Common Ancestor)**: Iterate up the tree using `parent_trace` from the origin node's parent depth down to 0. At each level, check if the target position falls within the spatial bounds of the parent node using `&-masking` of the origin and destination coordinates with the corresponding depth bit, followed by integer equality [S3, unofficial].
+4. **Point Location**: Once the common ancestor is found, perform a standard point-location search from the common ancestor to the `target_pos` to find the leaf at the destination [S3, unofficial].
+5. **Neighbor Collection**: If the search lands on a leaf node, return it. If the search lands on an internal node, the neighbor is one of its children. To find the specific child adjacent to the current node, use `AxisMask` and `AxisBit` to filter by the target axis and collect the four face children [S1, unofficial]. Limit the search depth to the current node's depth to ensure only adjacent leaves of equal or larger size are collected, avoiding all descendants [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+INDEX_NONE = -1
+
+def get_neighbor(origin_idx, direction, parent_trace, node_data, max_depth):
+    # 1. Validation: Verify current_node is a leaf [S1, unofficial]
+    if not (node_data[origin_idx] & 0x80):
+        return INDEX_NONE
+
+    origin_pos = node_data[origin_idx].position
+    origin_size = node_data[origin_idx].size
+    origin_depth = node_data[origin_idx].depth
+
+    # 2. Target position: move slightly farther than HalfSize in direction [S1, unofficial]
+    target_pos = origin_pos + direction * (origin_size * 0.5 + 1e-6)
+
+    # 3. Upward Traversal: Find common ancestor [S3, unofficial]
+    # Begin at the depth of the origin node's parent
+    common_ancestor_idx = parent_trace[origin_depth - 1] if origin_depth > 0 else 0
+    for d in range(origin_depth - 1, -1, -1):
+        depth_bit = 1 << (max_depth - d)
+        if ((target_pos.x & depth_bit) == (origin_pos.x & depth_bit)) and \
+           ((target_pos.y & depth_bit) == (origin_pos.y & depth_bit)) and \
+           ((target_pos.z & depth_bit) == (origin_pos.z & depth_bit)):
+            common_ancestor_idx = parent_trace[d]
+            break
+
+    # 4. Point Location: Find leaf at destination from common ancestor [S3, unofficial]
+    neighbor_idx = common_ancestor_idx
+    start_depth = node_data[common_ancestor_idx].depth
+    for d in range(max_depth - start_depth, -1, -1):
+        shift = d
+        child_idx = ((target_pos.x >> shift) & 1) | \
+                    (((target_pos.y >> shift) & 1) << 1) | \
+                    (((target_pos.z >> shift) & 1) << 2)
+        neighbor_idx = node_data[neighbor_idx].children[child_idx]
+        if neighbor_idx == INDEX_NONE or (node_data[neighbor_idx] & 0x80):
+            break
+
+    # 5. Neighbor Collection: Handle results [S1, unofficial]
+    if neighbor_idx != INDEX_NONE and (node_data[neighbor_idx] & 0x80):
+        # Neighbor is internal. Compute 4 face child indices using AxisMask and AxisBit [S1, unofficial]
+        axis_mask = 0
+        if direction.x != 0: axis_mask = 1
+        elif direction.y != 0: axis_mask = 2
+        else: axis_mask = 4
+
+        # AxisBit: returns AxisMask if Side is -1, returns 0 if Side is +1 [S1, unofficial]
+        side = -1 if (direction.x < 0 or direction.y < 0 or direction.z < 0) else 1
+        axis_bit = axis_mask if side == -1 else 0
+
+        # Filter children on the specific directional face
+        face_children = []
+        for c in range(8):
+            if (c & axis_bit) == axis_bit:
+                face_children.append(c)
+
+        # Traverse down to leaf level, collecting only adjacent leaves [S1, unofficial]
+        for c in face_children:
+            child_idx = node_data[neighbor_idx].children[c]
+            if child_idx == INDEX_NONE:
+                continue
+            if node_data[child_idx] & 0x80:
+                return child_idx
+            neighbor_idx = child_idx
+
+    return neighbor_idx
+```
+
+**Parameters:**
+- `AxisMask`: Bit mask for axis direction. X returns `001`, Y returns `010`, Z returns `100` [S1, unofficial].
+- `AxisBit`: Returns `AxisMask` if `Side` is -1, returns `0` if `Side` is +1 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-Leaf Input**: The algorithm must validate that the input node is a leaf; otherwise, it returns immediately [S1, unofficial].
+- **Depth Limiting**: The search must stop at a leaf or when the depth matches the current node's depth to avoid collecting all descendants of a neighbor [S1, unofficial].
+- **Memory Footprint**: Parent pointers are omitted from nodes to save memory; the `parent_trace` array must be maintained by the caller (ray traversal) [S3, unofficial].
+- **Optimization**: Use static polymorphism via templates for each X, Y, Z dimension to perform only one or two equality tests per iteration [S2].
+
+## Subtopics
+
+### [Neighbor Finding](2198-neighbor-finding.md)
+Determines the next cell in a hierarchical spatial structure by backtracing from a start coordinate to the common ancestor with a destination coordinate, then performing point location. It differs from [Morton Key Vertex Neighbor Iteration](3318-morton-key-vertex-neighbor-iteration.md) by relying on explicit parent-pointer traversal and coordinate bit-masking rather than Morton key arithmetic.
+
+### [Morton Key Vertex Neighbor Iteration](3318-morton-key-vertex-neighbor-iteration.md)
+Identifies and processes the eight corner vertices of leaf nodes in a sparse voxel octree by leveraging the spatial locality of Morton (Z-order) keys. It solves the dual-grid traversal problem by operating on a pre-computed or iterated list of vertex keys, using bitwise arithmetic to resolve adjacency and handle level mismatches without tree traversal recursion.
+
+## Operating characteristics
+- **Time Complexity**: $O(D)$ where $D$ is the depth of the octree, due to the upward traversal and subsequent point location [S3, unofficial].
+- **Memory Complexity**: $O(1)$ auxiliary space per neighbor query, assuming the `parent_trace` array is provided by the traversal context [S3, unofficial].
+- **Strengths**: Efficient for sparse structures where explicit parent pointers are too costly; works with arbitrary node sizes [S3, unofficial].
+- **Limitations**: Requires the `parent_trace` array to be maintained by the caller [S3, unofficial].
+- **When to Use**: When memory footprint is critical (no parent pointers in nodes) or when traversing non-contiguous nodes in an SVO [S3, unofficial].
+- **When Not to Use**: Not given in the sources.
+
+## Background
+The method originates from interactive isosurface ray tracing of large octree volumes [S3, unofficial]. The authors rejected Frisken and Perry's exclusive "or" method for immediate neighbors because it was no cheaper than `&-masking` both source and destination and performing integer equality on the results [S3, unofficial]. To minimize memory footprint, parent pointers were omitted from octree nodes, requiring the ray traversal algorithm to fill an index trace array containing the indices of all parent nodes for a given cap [S3, unofficial].
+
+## Sources
+[S1] UE5 Tutorial | Simple SVO Pathfinder for 3D Pathfinding, https://www.youtube.com/watch?v=QmDbX_gZSLA, fetched 2026-10-27 (unofficial)
+[S2] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://collections.lib.utah.edu/dl_files/1d/58/1d589a03a725c9d894a3866ad32f1386f0613f9d.pdf, fetched 2026-10-28
+[S3] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)

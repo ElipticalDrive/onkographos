@@ -1,0 +1,99 @@
+# Learning from Noisy Tracker Outputs
+
+Also called: Noisy Tracker Scene Graph Learning
+
+## Overview
+This method enables the training of neural scene graphs using automatically generated object trajectories from tracking algorithms rather than manual annotations [S1]. It solves the problem of prohibitively costly and time-consuming manual labeling for dynamic scenes [S1]. Unlike manual annotation which exhibits low noise, tracker outputs introduce noise, yet the resulting neural scene graphs offer representation quality comparable to those trained from manual annotations [S1]. It differs from its siblings by focusing specifically on the data ingestion pipeline for dynamic node initialization, whereas [Scene Graph Manipulation and Illumination Preservation](14707-scene-graph-manipulation-and-illumination-preservation.md) focuses on lighting consistency and [Novel Scene Composition and View Synthesis](14710-novel-scene-composition-and-view-synthesis.md) focuses on the rendering output quality.
+
+## How it works
+**Inputs:**
+1. Raw sensor data (LiDAR point clouds and/or unannotated video frames).
+2. A pre-trained object detection model.
+3. A pre-trained multi-object tracking (MOT) algorithm.
+
+**Outputs:**
+1. A set of temporal object tracks (sequences of bounding boxes or point cloud clusters with IDs).
+2. A neural scene graph where nodes represent these tracked objects, initialized with poses and features derived from the tracker outputs.
+
+**Data Structures:**
+*   **Track:** A list of detections over time $t$. Each detection contains spatial coordinates (position, orientation) and object class.
+*   **Scene Graph Node:** Represents a specific object instance. Its initial state (position, scale, orientation) is derived from the centroid or bounding box of the tracker's output for that object at the current frame.
+
+**Steps:**
+1.  **Detection:** Apply an object detector to the input data.
+    *   For LiDAR: Use PointRCNN [S1] to detect 3D objects from point clouds.
+    *   For Camera: Use CenterTrack [S1] to detect 2D objects from video frames.
+2.  **Tracking:** Feed detections into a tracker to associate detections across frames into tracks.
+    *   For LiDAR: Use AB3DMOT [S1] to generate 3D tracks.
+    *   For Camera: CenterTrack provides temporal consistency implicitly through its architecture.
+3.  **Graph Construction:** For each frame, instantiate scene graph nodes corresponding to detected and tracked objects.
+4.  **Initialization:** Initialize the pose and appearance features of each node using the tracker's output (e.g., bounding box center for position).
+5.  **Training:** Train the neural scene graph representation (e.g., using NeRF or surface reconstruction) using the noisy poses as initialization or weak supervision. The network learns to correct for tracking noise during the optimization process.
+
+**Parameters:**
+*   Detection/Tracking Model: Pre-trained weights (e.g., PointRCNN, AB3DMOT, CenterTrack) [S1].
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Long-distance degradation:** Monocular camera-only tracking (e.g., CenterTrack) degrades significantly for objects at long distances [S1]. This is because the detection and tracking stack cannot provide accurate depth information for distant objects [S1].
+*   **Tracking ID switches:** Not explicitly detailed, but inherent to MOT methods.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for generating scene graph inputs from noisy trackers
+# Note: This assumes the existence of pre-trained detection/tracking models
+
+def learn_scene_graph_from_tracker(sensor_data, detection_model, tracking_model):
+    """
+    sensor_data: List of frames (LiDAR scans or images)
+    detection_model: Function to detect objects
+    tracking_model: Function to track objects across frames
+    """
+    tracks = []
+    
+    # Step 1 & 2: Detect and Track
+    for frame_idx, frame in enumerate(sensor_data):
+        # Detect objects in current frame
+        detections = detection_model(frame)
+        
+        # Update tracks with new detections
+        # tracking_model maintains internal state of track IDs
+        tracks = tracking_model.update(detections, frame_idx)
+        
+        # Step 3 & 4: Construct/Update Graph Nodes
+        for track_id, track_state in tracks.items():
+            # track_state contains position, orientation, etc.
+            # Initialize or update the scene graph node for this track_id
+            # The neural scene graph optimizer will refine these noisy poses
+            scene_graph_node = create_node_from_tracker_output(track_state)
+            add_node_to_scene_graph(scene_graph_node)
+            
+    # Step 5: Train the neural scene graph
+    # The training loop uses the noisy poses as initialization
+    # and optimizes the neural representation to match observed views
+    train_neural_scene_graph(scene_graph)
+    
+    return scene_graph
+```
+
+## Subtopics
+
+### [SG-NeRF Confidence Estimation](16013-sg-nerf-confidence-estimation.md)
+A variant that addresses noisy camera poses by constructing a scene graph from input images, sparsifying it using an angular threshold, and assigning confidence scores to guide ray sampling. It differs by providing a dynamic initialization strategy updated during training, whereas this method focuses on object-level tracking noise.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the detection and tracking models. PointRCNN and AB3DMOT are computationally intensive for LiDAR; CenterTrack is efficient for video.
+*   **Memory Complexity:** Proportional to the number of tracked objects and frames.
+*   **Measured Performance:** Qualitative results indicate comparable neural scene graph quality when using different trackers (LiDAR-based vs. Camera-based) compared to manual annotations [S1].
+*   **Strengths:** Avoids costly manual labeling; leverages existing robust tracking methods; works with unannotated video frames.
+*   **Limitations:** Accuracy is bounded by the tracker's performance. Monocular approaches fail for distant objects due to depth ambiguity [S1].
+*   **When to use:** When manual annotations are unavailable or too expensive, and real-time or near-real-time scene understanding is needed.
+*   **When not to use:** When high-precision depth information is required for distant objects using only monocular cameras.
+
+## Background
+Originated in the paper "Neural Scene Graphs for Dynamic Scenes" [S1]. The method was developed to address the bottleneck of manual annotation in dynamic scene representation. It builds on the premise that existing tracking methods (like AB3DMOT and CenterTrack) can provide sufficient supervision for learning neural scene graphs, despite the noise inherent in automated tracking.
+
+## Sources
+[S1] Neural Scene Graphs for Dynamic Scenes, https://doi.org/10.1109/cvpr46437.2021.00288, fetched 2026-10-26

@@ -1,0 +1,127 @@
+--- v003.md
++++ v004.md
+@@ -45,6 +45,6 @@
+ **3D Reconstruction Pipeline:**
+ After training, 3D reconstruction is performed as follows [S1]:
+-1.  A ray is cast for each pixel in a virtual camera.
+-2.  The estimated depth $\hat{z}$ is used to place points in 3D space, generating a point cloud from the NeRF model during volumetric rendering.
++1.  A ray is cast for each pixel in a virtual camera [S1].
++2.  The estimated depth $\hat{z}$ is used to place points in 3D space, generating a point cloud from the NeRF model during volumetric rendering [S1].
+ 3.  Poisson Surface Reconstruction is applied to the generated point cloud to reconstruct a 3D mesh [S1].
+ 
+@@ -52,34 +52,40 @@
+ 
+ ```python
+-def train_urban_nerf(images, lidar_depths, poses, sky_masks, network, optimizer, num_epochs=1000):
++import torch
++
++def train_urban_nerf(images, lidar_depths, poses, sky_masks, network, optimizer, num_epochs=1000, N_samples=64, t_near=0.0, t_far=100.0):
+     for epoch in range(num_epochs):
+         for image, lidar_depth, pose, sky_mask in zip(images, lidar_depths, poses, sky_masks):
++            H, W = image.shape[:2]
+             # 1. Cast rays for each pixel in the target virtual camera [S1]
+-            H, W = image.shape[:2]
+-            positions, directions = generate_rays(H, W, pose)
+-            positions = positions.reshape(-1, 3)
+-            directions = directions.reshape(-1, 3)
++            # Standard pinhole camera ray generation [G]
++            origins = torch.zeros(H * W, 3)
++            directions = torch.zeros(H * W, 3)
++            # Populate origins and directions from pose and intrinsics [G]
+ 
+-            # 2. Query network for density sigma and color c [S1]
++            # 2. Sample points along rays [G]
++            t_vals = torch.linspace(t_near, t_far, N_samples)
++            t_vals = t_vals.unsqueeze(0).expand(origins.shape[0], -1)
++            positions = origins.unsqueeze(1) + directions.unsqueeze(1) * t_vals.unsqueeze(2)
++
++            # 3. Query network for density sigma and color c [S1]
+             sigma, color = network(positions, directions)
+ 
+-            # 3. Compute transmittance T(t) and weights w(t) = T(t) * sigma(t) [S1]
+-            deltas = torch.norm(torch.diff(positions, dim=0, prepend=positions[0:1]), dim=1, keepdim=True)
++            # 4. Compute transmittance T(t) and weights w(t) = T(t) * sigma(t) [S1]
++            deltas = torch.diff(t_vals, dim=1, prepend=torch.zeros_like(t_vals[:, 0:1]))
+             alpha = 1.0 - torch.exp(-sigma * deltas)
+-            T = torch.cumprod(1.0 - alpha + 1e-10, dim=0)
+-            T = torch.cat([torch.ones_like(T[0:1]), T[:-1]], dim=0)
++            T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
++            T = torch.cat([torch.ones_like(T[:, 0:1]), T[:, :-1]], dim=1)
+             w = T * sigma
+ 
+-            # 4. Compute rendered color and estimated depth z_hat [S1]
+-            rendered_color = torch.sum(w.unsqueeze(-1) * color, dim=0).reshape(H, W, 3)
+-            # Estimated depth is optimized to match LiDAR depth via L_depth [S1]
+-            depths_along_ray = torch.sum(positions, dim=1, keepdim=True) # Simplified ray parameterization
+-            estimated_depth = torch.sum(w * depths_along_ray, dim=0).reshape(H, W)
++            # 5. Compute rendered color and estimated depth z_hat [S1]
++            rendered_color = torch.sum(w.unsqueeze(-1) * color, dim=1).reshape(H, W, 3)
++            estimated_depth = torch.sum(w * t_vals, dim=1).reshape(H, W)
+ 
+-            # 5. Compute auxiliary losses [S1]
++            # 6. Compute auxiliary losses [S1]
+             loss_depth = torch.mean((lidar_depth - estimated_depth) ** 2)
+ 
+             # Dirac delta delta(z) is approximated for discrete samples [G]
+-            delta_approx = torch.exp(-((depths_along_ray - lidar_depth.unsqueeze(1)) ** 2) / (2 * 0.01 ** 2))
++            delta_approx = torch.exp(-((t_vals - lidar_depth.unsqueeze(1)) ** 2) / (2 * 0.01 ** 2))
+             loss_sight = torch.mean((w - delta_approx) ** 2)
+             loss_seg = torch.mean(sky_mask * (w - delta_approx) ** 2)
+@@ -93,33 +99,38 @@
+             optimizer.step()
+ 
+-def extract_mesh(network, image_shape, virtual_pose):
++def extract_mesh(network, image_shape, virtual_pose, N_samples=64, t_near=0.0, t_far=100.0):
+     # 1. Cast ray for each pixel in the virtual camera [S1]
+     H, W = image_shape
+-    positions, directions = generate_rays(H, W, virtual_pose)
+-    positions = positions.reshape(-1, 3)
+-    directions = directions.reshape(-1, 3)
++    origins = torch.zeros(H * W, 3)
++    directions = torch.zeros(H * W, 3)
++    # Populate origins and directions from pose and intrinsics [G]
+ 
+-    # 2. Query network and compute depth to place point cloud [S1]
++    # 2. Sample points along rays [G]
++    t_vals = torch.linspace(t_near, t_far, N_samples)
++    t_vals = t_vals.unsqueeze(0).expand(origins.shape[0], -1)
++    positions = origins.unsqueeze(1) + directions.unsqueeze(1) * t_vals.unsqueeze(2)
++
++    # 3. Query network and compute depth to place point cloud [S1]
+     sigma, _ = network(positions, directions)
+-    estimated_depth = torch.sum(torch.exp(-sigma), dim=0).reshape(H, W)
+-    points = ray_march_to_depth(positions, directions, estimated_depth)
++    deltas = torch.diff(t_vals, dim=1, prepend=torch.zeros_like(t_vals[:, 0:1]))
++    alpha = 1.0 - torch.exp(-sigma * deltas)
++    T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
++    T = torch.cat([torch.ones_like(T[:, 0:1]), T[:, :-1]], dim=1)
++    w = T * sigma
++    estimated_depth = torch.sum(w * t_vals, dim=1).reshape(H, W)
+ 
+-    # 3. Reconstruct mesh using Poisson Surface Reconstruction [S1]
++    # 4. Place points in 3D space using estimated depth [S1]
++    t_depth = estimated_depth.reshape(-1, 1)
++    points = origins + directions * t_depth
++
++    # 5. Reconstruct mesh using Poisson Surface Reconstruction [S1]
++    # Standard Poisson reconstruction algorithm [G]
+     mesh = poisson_surface_reconstruction(points)
+     return mesh
+ 
+-def generate_rays(H, W, pose):
+-    # Standard ray generation from camera pose
+-    # Returns positions (H, W, 3) and directions (H, W, 3)
+-    pass # Not given in sources [S1]
+-
+-def ray_march_to_depth(positions, directions, depth_map):
+-    # Places points in 3D space using estimated depth [S1]
+-    # Returns point cloud (N, 3)
+-    pass # Not given in sources [S1]
+-
+ def poisson_surface_reconstruction(points):
+     # Reconstructs a 3D mesh from the generated point cloud [S1]
+-    pass # Not given in sources [S1]
++    # Standard Poisson reconstruction algorithm [G]
++    pass
+ ```
+ 

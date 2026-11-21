@@ -1,0 +1,53 @@
+--- v001.md
++++ v002.md
+@@ -1,34 +1,34 @@
+ # Volume Rendering Integration and Forward Pass
+ 
+-Also called: Volume Rendering Integration, Alpha Compositing Forward Pass, NeRF Rendering Forward Pass
++Also called: Volume Rendering Integration, Alpha Compositing Forward Pass, NeRF Integration
+ 
+ ## Overview
+-This family defines the differentiable forward pass that synthesizes a 2D image from a continuous 5D radiance field by numerically approximating the volume rendering integral along camera rays [S1, unofficial]. It solves the problem of mapping implicit scene representations (neural networks or dense grids) to pixel colors by integrating predicted volume density and view-dependent color, using probabilistic density functions to determine sample contributions rather than deterministic surface intersections . It sets itself apart from standard ray tracing by relying on alpha compositing to handle transparency and occlusion within a medium, and from [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by focusing specifically on the mathematical integration and compositing mechanics rather than ray generation or adaptive pruning strategies.
++This family defines the differentiable forward pass that synthesizes a 2D pixel color from a continuous 5D radiance field by numerically approximating the volume rendering integral along camera rays [S1, unofficial]. It solves the problem of mapping implicit density and view-dependent radiance into discrete images, serving as the core differentiable operation in NeRF optimization . It sets itself apart from sibling methods by focusing specifically on the integration mechanics (alpha compositing, transmittance calculation, and background handling) rather than network querying [3107-nerf-network-query-with-hashed-embeddings.md] or metric calculation [3079-nerf-evaluation-and-metric-calculation.md].
+ 
+ ## Shared principles
+-All methods in this family compute the final pixel color $\hat{C}(r)$ and optionally depth $\hat{D}(r)$ for a camera ray $r(t) = o + td$ by integrating samples along the ray segment $[t_n, t_f]$ [S1, unofficial]. The core mechanism involves:
+-1.  **Sampling:** Discretizing the ray interval into $N$ samples with positions $t_i$ and 3D coordinates $x_i = o + t_i d$ [S1, unofficial].
+-2.  **Querying:** Obtaining volume density $\sigma_i$ and color $c_i$ (or emission $L_e$) at each sample point [S1, unofficial].
+-3.  **Alpha Compositing:** Converting density and inter-sample distance $\delta_i$ into opacity $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S1, unofficial].
+-4.  **Transmittance:** Computing accumulated transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, representing the probability of the ray reaching sample $i$ without interaction [S1, unofficial].
+-5.  **Weighting:** Calculating sample weights $w_i = \alpha_i T_i$ .
+-6.  **Compositing:** Summing weighted contributions: $\hat{C}(r) = \sum_{i=1}^{N} w_i c_i$ [S1, unofficial].
+-7.  **Background Handling:** Adding the contribution of rays that exit the scene without being fully absorbed, typically assuming a white background: $\hat{C}_{final}(r) = \hat{C}(r) + (1 - \sum w_i) \cdot c_{bg}$ .
++All methods in this family compute the expected color $\hat{C}(r)$ for a ray $r(t) = o + td$ by discretizing the interval $[t_n, t_f]$ into $N$ samples [S1, unofficial]. The core mechanism relies on the volume rendering equation, approximated as a weighted sum of emitted color, where weights are determined by the probability of the ray terminating at each sample [S1, unofficial].
+ 
+-Numerical stability is critical; transmittance is often computed via `cumprod` of $(1 - \alpha_i + \epsilon)$ with `exclusive=True` to prevent gradient NaNs when $\sigma_i \delta_i$ is large or small .
++Key shared components:
++1.  **Sampling:** Rays are discretized into $N$ bins. Samples $t_i$ are drawn from these bins, often using stratified sampling to reduce variance [S1, unofficial].
++2.  **Density to Alpha Conversion:** Volume density $\sigma$ is converted to opacity $\alpha$ using the Beer-Lambert law approximation: $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, where $\delta_i$ is the distance between samples [S1, unofficial].
++3.  **Transmittance:** The accumulated transmittance $T_i$ represents the probability that the ray reaches sample $i$ without being absorbed by previous samples: $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1, unofficial].
++4.  **Weighting:** The weight $w_i$ for each sample is the product of its opacity and the transmittance up to that point: $w_i = \alpha_i T_i$ [S1, unofficial].
++5.  **Compositing:** The final color is the sum of weighted colors: $\hat{C}(r) = \sum_{i=1}^{N} w_i c_i$ [S1, unofficial].
++6.  **Background Handling:** A background term is added for rays that do not fully accumulate opacity, typically assuming a white background: $\hat{C}_{final}(r) = \hat{C}(r) + (1 - \sum w_i) c_{bg}$ .
++7.  **Numerical Stability:** Small epsilon values (e.g., $10^{-10}$) are added to transmittance terms to prevent NaNs during gradient computation .
+ 
+ ## Subtopics
+ 
+ ### [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md)
+-The standard differentiable volume rendering technique introduced by Mildenhall et al., mapping a continuous 5D implicit radiance field to a 2D image using neural network predictions. It uses stratified sampling for coarse networks and potentially density-weighted sampling for fine networks. It is chosen when implementing the original NeRF formulation with MLP-based density/color prediction. It differs from the grid-based integrator by relying on neural network queries for $\sigma$ and $c$.
++The standard NeRF rendering technique using stratified sampling and explicit alpha compositing. It is chosen when implementing the original NeRF formulation, particularly for its handling of view-dependent effects and the specific white background term. It differs from the integrator by using a neural network for queries and fixed stratified sampling [5124-nerf-rendering-alpha-compositing.md].
+ 
+ ### [NeRF-style Volume Rendering Integrator](5964-nerf-style-volume-rendering-integrator.md)
+-A simplified integrator that accumulates emission along a ray through a medium backed by a dense grid rather than a neural network, with no direction-dependent emission. It explicitly handles primal/dual modes for gradient computation in inverse rendering contexts. It is chosen for grid-based inverse rendering or when avoiding the overhead of neural network queries. It differs from standard NeRF by using dense grid storage and explicit mode handling for gradients.
++A simplified integrator that accumulates emission along a ray using a dense grid instead of a neural network, supporting primal/dual mode differentiation. It is chosen for inverse rendering tasks or when using explicit grid representations [5964-nerf-style-volume-rendering-integrator.md]. It differs from standard NeRF rendering by managing ray-marching state explicitly and supporting dual-mode differentiation [5964-nerf-style-volume-rendering-integrator.md].
+ 
+-### NeRF Forward Pass with Alpha Masking and Two-Stage Shading
+-A variant that incorporates alpha masking for empty space culling and NDC (Normalized Device Coordinates) ray simulation [S1, unofficial]. It adjusts distances by ray norm, normalizes view directions, and combines ray validity with an alpha mask to mark rays invalid if they hit empty space [S1, unofficial]. It computes sigma using feature-to-density conversion and applies raw2alpha with distance scaling [S1, unofficial]. Depth is computed as a weighted sum of z_vals, adjusted by background weight and ray direction Z component, and clamped if NDC Euclidean depth simulation is enabled [S1, unofficial]. This variant is chosen when working with NDC coordinate systems or when explicit alpha masks are available to prune empty rays.
++#### NeRF Forward Pass with Alpha Masking and Two-Stage Shading
++This variant incorporates alpha masking and NDC (Normalized Device Coordinates) handling [S1, unofficial]. It sets optimization flags from architecture options [S1, unofficial]. Sampling uses `sample_ray_ndc` if NDC simulation is enabled, otherwise standard sampling [S1, unofficial]. Distances between samples are computed, with the last sample handled with zero distance [S1, unofficial]. If NDC is used, distances are adjusted by ray norm and viewdirs normalized [S1, unofficial]. Viewdirs are expanded to match sample coordinates [S1, unofficial]. If an alpha mask exists, ray validity is combined with the mask to mark rays invalid if they hit empty space [S1, unofficial]. Density is computed for valid rays by normalizing coordinates, computing density features, and converting to sigma via `feature2density` if not component-wise [S1, unofficial]. Sigma is converted to alpha, weight, and background weight using `raw2alpha` with distance scaling [S1, unofficial]. Final RGB is computed by weighting RGB values by alpha weights [S1, unofficial]. Background color (white or random) is added for rays with incomplete opacity [S1, unofficial]. Depth is computed as a weighted sum of z-values, adjusted by background weight and ray direction Z component [S1, unofficial]. Depth is clamped if NDC Euclidean depth simulation is enabled [S1, unofficial].
+ 
+ ## Background
+-The core alpha compositing formulation was introduced by Mildenhall et al. in the original NeRF paper [S1, unofficial]. The technique approximates the volume rendering integral, a standard concept in computer graphics . The specific implementation details regarding stratified sampling, transmittance computation via cumprod, and background handling are widely adopted in subsequent NeRF implementations [S1, unofficial]. The grid-based integrator variant appears in unofficial implementations and tools like Joint-TensoRF [S1, unofficial].
++The volume rendering integral was formalized by Kajiya . The specific NeRF formulation using alpha compositing for differentiable rendering was introduced by Mildenhall et al. in 2020 [S1, unofficial]. This method has become the standard for neural radiance field optimization, enabling end-to-end training of implicit 3D representations .
+ 
+ ## Sources

@@ -1,0 +1,184 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # NeRF Training Loop
+ 
+-Also called: NeRF Training, Neural Radiance Field (NeRF) Training, Neural Radiance Field (NeRF) Training Loop
++Also called: NeRF Training, NeRF Optimization Loop, Neural Radiance Fields Training
+ 
+ ## Overview
+@@ -13,11 +13,11 @@
+ 
+ **Outputs:**
+-- Trained model weights (checkpoint) [S3, unofficial].
+-- Rendered images/videos for evaluation [S3, unofficial].
++- Trained model weights and optimizer state saved as checkpoints [S5].
++- Rendered images/videos for evaluation [S5].
+ 
+ **Data Structures:**
+-- `rays_rgb`: Pre-computed array of shape `[(N-1)*H*W, 3, 3]` (or `[N_rays, 3, 3]` in mini-batch). Axis 0 is flattened pixel index. Axis 1 is channel type (0: ray origin, 1: ray direction, 2: observed RGB). Axis 2 is XYZ/RGB components. Data type is float32 [S1, S6, unofficial].
++- `rays_rgb`: Pre-computed array of shape `[(N-1)*H*W, 3, 3]` (or `[N_rays, 3, 3]` in mini-batch). Axis 0 is flattened pixel index. Axis 1 is channel type (0: ray origin, 1: ray direction, 2: observed RGB). Axis 2 is XYZ/RGB components. Data type is float32 [S4, S7, unofficial].
+ - `camera`: Object containing camera-to-world matrix ($c2w$), intrinsics ($K$), and image dimensions [S1, S3, unofficial].
+-- `optimizer_state`: State for Adam optimizer (momentum buffers) [S3, unofficial].
++- Checkpoint dictionary: Keys are `model` (state_dict), `optimizer` (state_dict), and `epoch` (int) [S6, unofficial].
+ 
+ **Numbered Steps:**
+@@ -26,19 +26,19 @@
+    - Parse command-line arguments and initialize summary writers for logging training and validation metrics [S1, unofficial].
+    - Instantiate the neural network model; if using SIREN, apply specific weight initialization (Uniform distribution scaled by $\omega_0$) [S2, unofficial].
+-   - Initialize the Adam optimizer with learning rate `lr` [S1, S3, unofficial].
+-   - Initialize a learning rate scheduler (`LambdaLR` with decay factor $\gamma$ and step size $s$) [S3, unofficial][S4].
++   - Initialize the Adam optimizer with learning rate `lr` [S1, S6, unofficial].
++   - Initialize a learning rate scheduler (`LambdaLR` with decay factor $\gamma$ and step size $s$) [S5][S6, unofficial].
+    - Load training and validation datasets; compute near/far bounds based on dataset type (LLFF uses bounding depths or NDC with near=0.0 and far=1.0, Blender uses fixed near=2.0 and far=6.0, DeepVoxels uses mean camera distance) [S1, S3, unofficial].
+-   - Create a DataLoader with `batch_size=1`, `shuffle=True`, `num_workers=0`, and `collate_fn=trivial_collate` [S3, unofficial][S4].
++   - Create a DataLoader with `batch_size=1`, `shuffle=True`, `num_workers=0`, and `collate_fn=trivial_collate` [S5].
+    - If `--rvs` is enabled, replace the global render function with the reparameterized volume sampling version [S1, unofficial].
+ 
+ 2. **Training Loop** (for `epoch` from `start_epoch` to `num_epochs`):
+-   - **Data Loading**: Extract `image`, `camera`, and `camera_idx` from the batch; move tensors to CUDA [S3, unofficial][S4].
++   - **Data Loading**: Extract `image`, `camera`, and `camera_idx` from the batch; move tensors to CUDA [S5].
+    - **Ray Sampling**: Sample pixel coordinates $(x, y)$ from the image grid; full-batch implementations cover the entire grid while mini-batch uses a random subset [S2, S3, unofficial]. Generate ray origins and directions using camera intrinsics and poses [S1, S3, unofficial]. Construct ray bundle tensor containing $r_o$, $r_d$, near, far, and optionally viewing directions if `use_viewdirs` is enabled [S1, unofficial].
+    - **Forward Pass**: Sample points along each ray within $[near, far]$ bounds; perturb sampling times if `perturb > 0` [S1, S6, unofficial]. Pass sampled 3D coordinates (and viewing directions) through the neural network to predict volume density ($\sigma$) and color ($c$) [S1, S6, unofficial]. Perform differentiable volume rendering to compute predicted RGB for each ray [S1, S6, unofficial].
+-   - **Loss Calculation**: Compute MSE loss between predicted RGB and ground truth RGB at sampled pixels [S2, S6, unofficial]. If coarse network output exists and `--rvs` is not enabled, add its MSE loss to the total loss [S1, unofficial]. If using volume SDF rendering, add Eikonal loss term: $L_{eikonal} = \lambda_{eikonal} \|\nabla \phi(x) - 1\|^2$ [S3, unofficial][S4]. Compute gradients and Laplacian for visualization *before* the backward pass [S2, unofficial].
+-   - **Backpropagation**: Zero gradients (`optimizer.zero_grad()`), compute gradients (`loss.backward()`), update weights (`optimizer.step()`) [S3, unofficial][S4].
+-   - **Scheduler Step**: Update learning rate via $lr_{new} = lr_{old} \times \gamma^{(epoch / s)}$ [S3, unofficial][S4].
+-   - **Checkpointing**: If `epoch % checkpoint_interval == 0` and `epoch > 0`, save model state, optimizer state, and epoch number [S3, unofficial][S4].
+-   - **Evaluation**: If `epoch % render_interval == 0` and `epoch > 0`, render images using test poses and save to disk [S3, unofficial][S4].
++   - **Loss Calculation**: Compute MSE loss between predicted RGB and ground truth RGB at sampled pixels [S2, S6, unofficial]. If coarse network output exists and `--rvs` is not enabled, add its MSE loss to the total loss [S1, unofficial]. If using volume SDF rendering, add Eikonal loss term: $L_{eikonal} = \lambda_{eikonal} \|\nabla \phi(x) - 1\|^2$ [S5]. Compute gradients and Laplacian for visualization *before* the backward pass [S2, unofficial].
++   - **Backpropagation**: Zero gradients (`optimizer.zero_grad()`), compute gradients (`loss.backward()`), update weights (`optimizer.step()`) [S5].
++   - **Scheduler Step**: Update learning rate via $lr_{new} = lr_{old} \times \gamma^{(epoch / s)}$ [S5][S6, unofficial].
++   - **Checkpointing**: If `epoch % checkpoint_interval == 0` and `epoch > 0`, save model state, optimizer state, and epoch number [S5].
++   - **Evaluation**: If `epoch % render_interval == 0` and `epoch > 0`, render images using test poses and save to disk [S5].
+ 
+ **Pseudocode:**
+@@ -53,6 +53,6 @@
+     if cfg.resume_path:
+         checkpoint = torch.load(cfg.resume_path, weights_only=False)
+-        model.load_state_dict(checkpoint['model_state_dict'])
+-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
++        model.load_state_dict(checkpoint['model'])
++        optimizer.load_state_dict(checkpoint['optimizer'])
+         start_epoch = checkpoint['epoch'] + 1
+ 
+@@ -112,5 +112,4 @@
+ 
+         if epoch % cfg.training.render_interval == 0 and epoch > 0:
+-            # Render evaluation images using test poses
+             render_evaluation(model, val_loader, cfg)
+ 
+@@ -167,6 +166,6 @@
+ def save_checkpoint(model_state, optimizer_state, epoch, path):
+     torch.save({
+-        'model_state_dict': model_state,
+-        'optimizer_state_dict': optimizer_state,
++        'model': model_state,
++        'optimizer': optimizer_state,
+         'epoch': epoch
+     }, path)
+@@ -180,37 +179,45 @@
+ 
+ **Parameters:**
+-- `lr` (float): Learning rate for Adam optimizer [S1, S3, unofficial].
++- `lr` (float): Learning rate for Adam optimizer [S1, S6, unofficial].
+ - `total_steps` (int): Number of optimization steps [S2, unofficial].
+-- `lr_scheduler_gamma` (float): Base for the learning rate decay exponent [S3, unofficial].
+-- `lr_scheduler_step_size` (int): Denominator for the learning rate decay exponent [S3, unofficial].
+-- `perturb` (float): Jitter amount for sampling; $0.0$ for no jitter, $1.0$ for jitter [S1, unofficial].
+-- `raw_noise_std` (float): Standard deviation of noise added to regularize $\sigma_a$ output; default $0.0$, $1e0$ recommended [S1, unofficial].
+-- `multires` (int): Log2 of max frequency for positional encoding of 3D location; default $10$ [S1, unofficial].
+-- `multires_views` (int): Log2 of max frequency for positional encoding of 2D direction; default $4$ [S1, unofficial].
+-- `eikonal_weight` (float): Weight for the Eikonal loss term in volume SDF rendering [S3, unofficial].
+-- `checkpoint_interval` (int): Frequency of checkpoint saving in epochs [S3, unofficial].
+-- `render_interval` (int): Frequency of rendering evaluation in epochs [S3, unofficial].
+-- `num_epochs` (int): Total number of training epochs [S3, unofficial].
+-- `render_factor` (int): Downsampling factor to speed up rendering; set $4$ or $8$ for fast preview, default $0$ [S1, unofficial].
++- `lr_scheduler_gamma` (float): Gamma factor for the LambdaLR scheduler [S5][S6, unofficial].
++- `lr_scheduler_step_size` (int): Step size interval for the LambdaLR scheduler [S5][S6, unofficial].
++- `perturb` (float): Jitter amount for sampling; 0.0 for no jitter, 1.0 for jitter [S1, unofficial].
++- `raw_noise_std` (float): Standard deviation of noise added to regularize $\sigma_a$ output; default 0.0, 1e0 recommended [S1, unofficial].
++- `multires` (int): Log2 of max frequency for positional encoding of 3D location; default 10 [S1, unofficial].
++- `multires_views` (int): Log2 of max frequency for positional encoding of 2D direction; default 4 [S1, unofficial].
++- `eikonal_weight` (float): Weight for the Eikonal loss term in volume SDF rendering [S5].
++- `checkpoint_interval` (int): Frequency of checkpoint saving in epochs [S5].
++- `render_interval` (int): Frequency of rendering evaluation in epochs [S5].
++- `num_epochs` (int): Total number of training epochs [S5].
++- `render_factor` (int): Downsampling factor to speed up rendering; set 4 or 8 for fast preview, default 0 [S1, unofficial].
+ - `dataset_type` (str): Dataset options: llff / blender / deepvoxels; default llff [S1, unofficial].
+ - `use_viewdirs` (bool): Use full 5D input instead of 3D [S1, unofficial].
+ - `samples_union` (bool): Flag for samples union variant [S1, unofficial].
+ - `rvs` (bool): Use reparameterized volume sampling version of the algorithm [S1, unofficial].
+-- `precrop_iters` (int): Number of steps to train on central crops; default $0$ [S1, unofficial].
+-- `precrop_frac` (float): Fraction of image taken for central crops; default $0.5$ [S1, unofficial].
+-- `testskip` (int): Will load $1/N$ images from test/val sets; default $8$ [S1, unofficial].
++- `precrop_iters` (int): Number of steps to train on central crops; default 0 [S1, unofficial].
++- `precrop_frac` (float): Fraction of image taken for central crops; default 0.5 [S1, unofficial].
++- `testskip` (int): Will load 1/N images from test/val sets; default 8 [S1, unofficial].
+ - `shape` (str): DeepVoxels shape options: armchair / cube / greek / vase; default greek [S1, unofficial].
+ - `white_bkgd` (bool): Set to render synthetic data on a white background [S1, unofficial].
+-- `half_res` (bool): Load Blender synthetic data at $400 \times 400$ instead of $800 \times 800$ [S1, unofficial].
+-- `factor` (int): Downsample factor for LLFF images; default $8$ [S1, unofficial].
++- `half_res` (bool): Load Blender synthetic data at 400x400 instead of 800x800 [S1, unofficial].
++- `factor` (int): Downsample factor for LLFF images; default 8 [S1, unofficial].
+ - `no_ndc` (bool): Do not use normalized device coordinates [S1, unofficial].
+ - `lindisp` (bool): Sampling linearly in disparity rather than depth [S1, unofficial].
+ - `spherify` (bool): Set for spherical 360 scenes [S1, unofficial].
+-- `llffhold` (int): Will take every $1/N$ images as LLFF test set; default $8$ [S1, unofficial].
+-- `i_print` (int): Frequency of console printout and metric logging; default $100$ [S1, unofficial].
+-- `i_img` (int): Frequency of TensorBoard image logging; default $500$ [S1, unofficial].
+-- `i_weights` (int): Frequency of weight checkpoint saving; default $10000$ [S1, unofficial].
+-- `i_testset` (int): Frequency of testset saving; default $50000$ [S1, unofficial].
+-- `i_video` (int): Frequency of render_poses video saving; default $50000$ [S1, unofficial].
++- `llffhold` (int): Will take every 1/N images as LLFF test set; default 8 [S1, unofficial].
++- `i_print` (int): Frequency of console printout and metric logging; default 100 [S1, unofficial].
++- `i_img` (int): Frequency of TensorBoard image logging; default 500 [S1, unofficial].
++- `i_weights` (int): Frequency of weight checkpoint saving; default 10000 [S1, unofficial].
++- `i_testset` (int): Frequency of testset saving; default 50000 [S1, unofficial].
++- `i_video` (int): Frequency of render_poses video saving; default 50000 [S1, unofficial].
++- `N_rand` (int): Number of random rays to sample per batch; typical value 1024 or 2048 [S4, S7, unofficial].
++- `use_batching` (bool): Boolean flag determining if random ray batching is enabled [S7, unofficial].
++- `chunk` (int): Maximum number of rays processed per forward pass to limit VRAM usage [S4, unofficial].
++- `steps_til_summary` (int): Frequency of logging and plotting [S2, unofficial].
++- `n_layers_xyz` (int): Number of layers for 3D location MLP; default 6 [S3, unofficial].
++- `n_hidden_neurons_xyz` (int): Hidden neurons for 3D location MLP; default 128 [S3, unofficial].
++- `n_hidden_neurons_dir` (int): Hidden neurons for direction MLP; default 64 [S3, unofficial].
++- `append_xyz` (list): List of layers to append 3D coordinates to; default [3] [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -223,18 +230,15 @@
+ 
+ ### Training Loop Setup
+-Loads image data and transform matrices from paths, moving them to the specified device. Generates the initial grid using `generate_grid` with `gridsize`, `points_distance`, `info_size=4`, and device [S7, unofficial].
++Loads image data and transform matrices from paths, moving them to the specified device. Generates the initial grid using `generate_grid` with `gridsize`, `points_distance`, `info_size=4`, and device [S8, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N \cdot S \cdot D)$ per step, where $N$ is the number of rays sampled, $S$ is the number of samples per ray, and $D$ is the MLP depth/width [S1, S3, unofficial].
+-- **Memory Complexity**: $O(N \cdot S)$ for storing intermediate ray samples and gradients [S3, unofficial].
+-- **Performance**: Training requires multiple epochs and iterations; GPU memory usage is approximately 15.5 GB with default settings [S3, unofficial].
+-- **Scaling**: Memory and compute scale linearly with batch size and ray samples; chunking can control maximum memory usage without affecting final results [S1, unofficial].
+-- **Strengths**: High-quality novel view synthesis; continuous representation allows arbitrary resolution rendering [S3, unofficial].
+-- **Limitations**: Slow training and inference compared to explicit methods; requires careful learning rate tuning for different parameter types [S3, unofficial].
+-- **When to Use**: Not given in the sources.
+-- **When Not to Use**: Not given in the sources.
++- Training requires multiple epochs and iterations [S3, unofficial].
++- Chunking controls maximum memory usage without affecting final results [S1, unofficial].
++- Scaling: Memory and compute scale linearly with batch size and ray samples [G].
++- When to use: Not given in the sources.
++- When not to use: Not given in the sources.
+ 
+ ## Background
+-The NeRF training loop was introduced in "Neural Radiance Fields" by Mildenhall et al. (2020) [S1, S3, unofficial]. It builds on earlier work on coordinate-based neural representations [S2, unofficial]. The method has become a standard baseline for view synthesis and 3D reconstruction [S3, unofficial].
++The training procedure involves iterative optimization of a neural radiance field by sampling random rays per iteration, rendering predicted colors via volume integration, computing MSE loss against ground truth, and updating network weights via gradient descent [S4, unofficial]. It builds on coordinate-based neural representations [S2, unofficial].
+ 
+ ## Sources
+@@ -242,6 +246,7 @@
+ [S2] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26, (unofficial)
+ [S3] omkarchittar/Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26, (unofficial)
+-[S4] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
+-[S5] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26, (unofficial)
+-[S6] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27, (unofficial)
+-[S7] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27, (unofficial)+[S4] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26, (unofficial)
++[S5] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
++[S6] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26, (unofficial)
++[S7] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27, (unofficial)
++[S8] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27, (unofficial)

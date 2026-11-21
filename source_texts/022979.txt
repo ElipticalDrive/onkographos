@@ -1,0 +1,174 @@
+# DiffUS: Differentiable Ultrasound Rendering from Volumetric Imaging
+
+Noe Bertramo, Gabriel Duguey, and Vivek Gopalakrishnan
+
+Massachusetts Institute of Technology, Cambridge, MA, USA {noe\_bert,gduguey,vivekg}@mit.edu
+
+Abstract. Intraoperative ultrasound imaging provides real-time guidance during numerous surgical procedures, but its interpretation is complicated by noise, artifacts, and poor alignment with high-resolution preoperative MRI/CT scans. To bridge the gap between preoperative planning and intraoperative guidance, we present DiffUS, a physics-based, differentiable ultrasound renderer that synthesizes realistic B-mode images from volumetric imaging. DiffUS first converts MRI 3D scans into acoustic impedance volumes using a machine learning approach. Next, we simulate ultrasound beam propagation using ray tracing with coupled reflection-transmission equations. DiffUS formulates wave propagation as a sparse linear system that captures multiple internal reflections. Finally, we reconstruct B-mode images via depth-resolved echo extraction across fan-shaped acquisition geometry, incorporating realistic artifacts including speckle noise and depth-dependent degradation. DiffUS is entirely implemented as differentiable tensor operations in PyTorch, enabling gradient-based optimization for downstream applications such as sliceto-volume registration and volumetric reconstruction. Evaluation on the ReMIND dataset demonstrates DiffUS's ability to generate anatomically accurate ultrasound images from brain MRI data. Our implementation is available at  .
+
+Keywords: Ultrasound · Differential Rendering · Physics Simulation.
+
+# 1 Introduction
+
+Ultrasound (US) imaging is valuable for intraoperative guidance given its speed, safety, and portability. However, US images are plagued by noise, artifacts, and poor contrast, complicating anatomical interpretation in delicate tasks such as tumor resection [17]. Furthermore, the difficulty in aligning intraoperative US and high-resolution preoperative MRI or CT scans forces surgeons to perform a complex mental mapping across modalities with disparate visual characteristics. This disconnect can make it difficult to accurately locate critical anatomical structures, identify residual pathology, and adjust surgical plans in real time. Generating realistic ultrasound images from preoperative volumetric scans could help overcome these challenges by improving spatial alignment between modalities and supporting more effective surgical guidance.
+
+To this end, we propose DiffUS, a physics-based, differentiable ultrasound renderer that models acoustic wave propagation through coupled reflectiontransmission equations. Unlike previous ultrasound simulation methods that rely on random sampling [7], our method employs deterministic ray propagation with sequential processing to capture temporal echo characteristics. Furthermore, our approach formulates wave propagation as a stable linear system solution, enabling efficient computation of multiple internal reflections that is faster than existing approaches [19]. The differentiable nature of our renderer facilitates gradient-based optimization for various downstream applications, including registration and reconstruction tasks.
+
+Our work contributes to the growing field of physics-based medical imaging simulation [2,8,12] by providing an interpretable, computationally efficient framework for ultrasound synthesis. DiffUS rapidly generates realistic ultrasound images towards the ultimate goal of supporting improved surgical outcomes through enhanced multimodal imaging integration.
+
+## 2 Method
+
+DiffUS is a differentiable, physics-based US renderer that synthesizes realistic Bmode images by modeling acoustic wave propagation through volumetric MRI or CT scans.
+
+In the following sections, we detail the fundamental physics principles underlying our simulator (§2.1\), our method for mapping CT/MRI intensities to acoustic impedances (§2.2\), our formulation of wave propagation as a sparse linear system (§2.3\), and the final image formation model (§2.4\).
+
+## 2.1 Physical Principles of Ultrasound Imaging
+
+US imaging captures the propagation of acoustic waves through biological tissues at frequencies ranging from 2-15 MHz. The physics of US is governed by the wave equation, with propagation characteristics determined by acoustic impedance Z = ρc, where ρ denotes tissue density and c the speed of sound. At tissue interfaces, wave behavior follows the reflection and transmission coefficients:
+
+$$R_{1 \rightarrow 2} = \left| \frac{Z_2 - Z_1}{Z_1 + Z_2} \right|, \quad T_{1 \rightarrow 2} = \frac{2Z_2}{Z_2 + Z_1} \quad (1)$$
+
+where R and T represent reflection and transmission coefficients between media with impedances Z1 and Z2. Clinical ultrasound systems operate under several simplifying assumptions [1,13] that we incorporate in DiffUS: (1) acoustic waves propagate along straight-line paths, (2) the speed of sound is constant across soft tissues (c = 1540 m/s), (3) acquisitions represent a single pulse-echo, (4) attenuation is uniform across media, and (5) the contribution of side-lobes is negligible. Under these conditions, the reflecting structure depth is determined by the time-of-flight measurement d = c 2 (t2−t1), where t1 and t2 represent pulse emission and echo reception times, respectively.
+
+
+
+Fig. 1: MLP-based acoustic impedance estimation from MRI T1 intensities. (a) The learned continuous mapping (blue curve) transforms T1 intensities to acoustic impedance values (MRayl). (b) Tissue-specific reference points (markers) used for supervised training.
+
+## 2.2 Generating Acoustic Impedance Volumes
+
+CT and MRI volumes do not directly encode impedance. Instead, the impedance of every voxel must be inferred through indirect relationships to underlying physical or biological properties. Therefore, to model acoustic wave propagation, we convert volumetric medical images into three-dimensional acoustic impedance maps Z(x, y, z), which determine the intensity of both reflected and transmitted signals at tissue interfaces.
+
+CT-based impedance mapping. Voxels in CT are encoded using Hounsfield units (HU), calibrated quantities that reflect the local X-ray attenuation coefficient relative to water [16]. Because X-ray attenuation in biological tissues is dominated by Compton scattering at clinical energies (70–140 kVp), and Compton scattering scales approximately with electron density, HU values provide a strong proxy for physical density [18]. Therefore, we use an existing calibration method that fits a piecewise linear relationship between HU and density across typical biological tissues [18,21]. From this density map ρ(x, y, z), we compute acoustic impedance as Z(x, y, z) = ρ(x, y, z) · c(x, y, z), where c is estimated directly from HU using previously reported regression fits [20]. This gives us a voxel-wise impedance map grounded in physical tissue characteristics.
+
+MRI-based impedance mapping. Unlike CT, MRI intensities do not correspond directly to physical quantities such as density or acoustic impedance. Instead, they reflect a complex combination of tissue-specific properties, including water content, fat concentration, and relaxation times, modulated by the chosen acquisition sequence. This makes impedance reconstruction from MRI fundamentally ill-posed [3]. To approximate impedance, we therefore adopt a supervised learning approach, fitting a multi-layer perceptron (MLP) to paired data consisting of MRI intensities and reference impedance values from literature [4,5,6,14]. While this provides a continuous and flexible estimate of Z(x, y, z) across the volume, it is a heuristic approximation that lacks the physical interpretability of CT-derived methods. The training data and learned mapping are illustrated in Figure 1.
+
+## 2.3 Wave Propagation Model
+
+We model the propagation of the ultrasound beam using a ray tracing approach where each acoustic beam traverses a linear sequence of voxels. At each voxel boundary, wave amplitudes undergo reflection and transmission according to local impedance contrasts. We define forward-traveling amplitude gi and backward-traveling amplitude di at each interface i, i+1, which evolve according to coupled recurrence relations:
+
+| $g_{i+1} = T_{i \rightarrow i+1} \cdot g_i + R_{i+1 \rightarrow i} \cdot d_{i+1}$ | $d_i = R_{i \rightarrow i+1} \cdot g_i + T_{i+1 \rightarrow i} \cdot d_{i+1}$ | $(2)$ |
+|-----------------------------------------------------------------------------------|-------------------------------------------------------------------------------|-------|
+|                                                                                   |                                                                               |       |
+
+These equations capture multiple internal reflections and transmissions throughout the layered medium, providing physically accurate wave amplitude evolution. The coupling logic between incident and reflected waves across a single boundary is illustrated in Figure 2.
+
+We solve these coupled wave equations by formulating a sparse linear system Ax = b for N voxels. We arrange amplitude unknowns as
+
+$$\mathbf{x} = [g_0, d_0, g_1, d_1, \dots, g_N, d_N]^T \quad (3)$$
+
+where boundary conditions impose unit pulse injection (g0 = 1) and far-field termination (dN = 0). These boundary conditions are enforced through the righthand side vector b, which is zero everywhere except at the first entry (b0 = 1) to inject a unit-amplitude forward-traveling wave at the transducer. This choice of b, in combination with the identity rows A0,0 = 1 and A2N+1,2N+1 = 1, ensures that the boundary constraints g0 = 1 and dN = 0 are directly imposed within the linear system. The remaining entries of the matrix A = (Ar,c) enforce the recurrence relations for wave amplitudes at each interface:
+
+|                                                                                                                                                                                                                                                         | $r = 0, c = 0$           |  |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|--|
+|                                                                                                                                                                                                                                                         | $r = 2N + 1, c = 2N + 1$ |  |
+|                                                                                                                                                                                                                                                         | $r = 2i + 1, c = 2i$     |  |
+|                                                                                                                                                                                                                                                         | $r = 2i + 1, c = 2i + 1$ |  |
+| $A_{r,c} = \begin{cases} -T_{i+1 \rightarrow i} & r = 2i + 1, c = 2i + 3 \\ -T_{i \rightarrow i+1} & r = 2i + 2, c = 2i \\ 1 & r = 2i + 2, c = 2i + 2 \\ -R_{i+1 \rightarrow i} & r = 2i + 2, c = 2i + 3 \\ 0 & \text{otherwise} \end{cases} \quad (4)$ |                          |  |
+
+
+
+Fig. 2: Modelling wave propagation in DiffUS. Coupled recursion relations for forward (gi) and backward (di) wave amplitudes across an interface.
+
+for i = 0, . . . , N − 1 and r, c = 0, . . . , 2N + 1. The matrix A is sparse, with each row involving only a small number of neighboring amplitude variables due to the strictly local nature of wave interactions. This results in a fixed-bandwidth structure with at most three non-zero entries per row, leading to O(N) non-zero elements for N voxels. While our current implementation uses a dense solver for simplicity, the sparsity of A permits more efficient factorization, which could be exploited in future work using banded linear solvers to accelerate computation.
+
+## 2.4 Image Formation Model and Artifact Modeling
+
+Ultrasound image synthesis follows a depth-resolved approach. For each beam direction, we progressively solve wave systems at increasing voxel depths k = 1, . . . , N, measuring the returning echo amplitude d (k) 0 at the transducer location at each step. This generates a complete depth profile {d (1) 0 , . . . , d(N) 0 } representing the time-sequence of echoes received by the transducer. B-mode images are constructed by repeating this process across multiple ray directions from the virtual transducer position, creating a fan-shaped acquisition pattern that replicates clinical scanning geometry. Pixel intensities correspond to echo amplitude first differences, while spatial coordinates map to beam angle and depth.
+
+To enhance clinical realism, DiffUS applies two optional post-processing stages that reproduce characteristic ultrasound artifacts. First, speckle can be injected as multiplicative noise with depth-dependent amplitude through a radially oriented term whose strength follows a power-law with depth and a granular term that imitates tissue heterogeneity. Both strength and granularity intensify as the signal-to-noise ratio declines in deeper regions. Second, depth-related blurring is imposed by convolving the image with a Gaussian kernel whose width grows linearly with depth, capturing the lateral resolution loss caused by beam divergence and energy attenuation. The artifact parameters can be adjusted to match different scanners, transducers, or imaging settings.
+
+## 3 Results
+
+## 3.1 Dataset and Experimental Setup
+
+We evaluate the simulation fidelity of DiffUS using the ReMIND dataset [15], a collection of rigidly aligned pairs of preoperative T1-weighted MRI and intraoperative 3D ultrasound (iUS) volumes from brain tumor resections. Specifically, we convert T1 intensities to acoustic impedance via our trained MLP (Section 2.2\) and render synthetic ultrasounds using a fan-beam acquisition with 256 rays and 100-200 depth samples per ray.
+
+## 3.2 Qualitative Assessment of Anatomical Fidelity
+
+Figure 3 compares rendered ultrasound images generated by DiffUS (center) against corresponding tracked iUS acquisitions (right) for two representative cases. The left column depicts the acoustic impedance values predicted by our MLP for each voxel superimposed onto the T1-weighted MRI data, illustrating the transducer geometry and acoustic beam propagation trajectories.
+
+
+
+Fig. 3: Qualitative evaluation on brain MRI data from the ReMIND dataset. (Left) Impedance ray sampling pattern overlaid on preoperative MRI. (Center) Ultrasound image generated by DiffUS. (Right) Corresponding ground truth iUS acquisition. Note that non-rigid deformation between the preoperative MRI volume and iUS images due to brain shift is not accounted for.
+
+Table 1: Ablation study on reconstruction metrics (mean (std), ↑/↓ show direction of improvement). The two highlighted rows show the full pipeline, with and without optional artifacts that improve visualization but hurt metrics.
+
+| Sampling Mapping | Propagating Artifacts | MSE ( ↓ )  | SSIM ( ↑ ) | NCC ( ↑ )  | MAE ( ↓ )  |
+|------------------|-----------------------|------------|------------|------------|------------|
+| ✓                |                       | 0.02(0.01) | 0.65(0.01) | 0.85(0.05) | 0.07(0.02) |
+| ✓ ✓              |                       | 0.15(0.07) | 0.61(0.03) | 0.86(0.04) | 0.22(0.06) |
+| ✓ ✓              | ✓                     | 0.05(0.03) | 0.76(0.06) | 0.93(0.04) | 0.11(0.03) |
+| ✓ ✓              | ✓ ✓                   | 0.03(0.01) | 0.62(0.04) | 0.85(0.09) | 0.08(0.03) |
+| ✓                | ✓                     | 0.03(0.02) | 0.75(0.06) | 0.92(0.05) | 0.08(0.02) |
+| ✓                | ✓ ✓                   | 0.02(0.01) | 0.63(0.02) | 0.81(0.05) | 0.07(0.01) |
+
+These images demonstrate that DiffUS successfully recapitulates the geometry of gross neuroanatomical features and their relative acoustic impedance values. Most strikingly, the ventricles, which appear as hypointense regions in the MRI, consistently appear as hypoechoic areas on the rendered ultrasound images. Additionally, the ventricles in the rendered ultrasounds appear radially warped relative to the MRI volume, validating the transducer geometry implemented in DiffUS. The second row of Figure 3 also demonstrates that the sulcus at the anterior portion of the brain is properly rendered by DiffUS. The sulcus also appears hyperintense relative to the surrounding tissue, albeit with less pronounced contrast compared to the clinical iUS. These similarities in geometry and intensity demonstrate the fidelity of our MRI-to-impedance network and demonstrate that DiffUS accurately maps anatomical information encoded in preoperative MRI volumes to rendered ultrasounds.
+
+## 3.3 Ablation Study
+
+We quantify the contribution of each component of our pipeline through a comprehensive ablation study. We first consider geometrically resampling the MRI to match an iUS acquisition pattern. This baseline mimics the mental alignment a surgeon might attempt between MRI and iUS images. Next, we progressively ablate (i) Impedance Mapping (§2.2\), (ii) Ray Propagation (§2.3\), and (iii) Artifact Modeling (§2.4\). We compare the resulting rendered and real iUS images using Mean Squared Error (MSE), Structural Similarity Index (SSIM), Normalized Cross-Correlation (NCC), and Mean Absolute Error (MAE).
+
+Table 1 shows improvements in similarity when progressively adding physicsbased modules beyond the geometric baseline. While artifact modeling improves visual realism, it can slightly decrease pixel-wise similarity due to added texture not present in the reference ultrasound. A general limitation of these metrics is their reliance on strict pixel alignment between predicted and reference images. This assumption can be violated in practice due to factors such as tissue deformation or brain shift during surgery. To reduce rigid misalignment errors, we apply a phase cross-correlation registration step before metric computation. Nonetheless, perfect alignment cannot be guaranteed and should be considered
+
+
+
+Fig. 4: Detailed images for each ablation configuration and the reference iUS.
+
+when interpreting these values. Figure 4 illustrates qualitative results for the main ablation configurations compared with the post-operative ultrasound slice.
+
+## 3.4 Computational Performance Analysis
+
+We evaluated the computational efficiency of DiffUS on an AMD EPYC 9474F @ 3.6 GHz CPU and an NVIDIA L40S 48GB GPU. For the standard imaging parameters used in our brain experiments (256 acoustic rays and 100 to 200 depth samples per ray), a single 2D fan-shaped slice renders in around one to two seconds for typical depths, as detailed in Tables 2 and 3. Here, depth corresponds to the number of voxels sampled in each ray.
+
+Table 2: Rendering time (seconds) for varying depth samples and ray counts over 100 iterations on CPU.
+
+| Samples | 64   | rays | 128  | rays | 256   | rays |
+|---------|------|------|------|------|-------|------|
+| 32      | 0.04 | s    | 0.05 | s    | 0.06  | s    |
+| 70      | 0.21 | s    | 0.27 | s    | 0.40  | s    |
+| 100     | 0.47 | s    | 0.69 | s    | 1.15  | s    |
+| 200     | 3.20 | s    | 6.00 | s    | 10.50 | s    |
+
+Table 3: Rendering time (seconds) for varying depth samples and ray counts over 100 iterations on GPU.
+
+| Samples | 64   | rays | 128  | rays | 256  | rays |
+|---------|------|------|------|------|------|------|
+| 32      | 0.04 | s    | 0.04 | s    | 0.04 | s    |
+| 70      | 0.20 | s    | 0.21 | s    | 0.21 | s    |
+| 100     | 0.41 | s    | 0.42 | s    | 0.43 | s    |
+| 200     | 1.67 | s    | 1.70 | s    | 1.84 | s    |
+
+## 4 Conclusion
+
+We present DiffUS, a fast, differentiable, and physics-based framework for differentiable ultrasound rendering from preoperative MRI and CT volumes. DiffUS uses a novel formulation of wave propagation as a sparse system of equations to achieve efficient and accurate image synthesis, with downstream applications to many real-time diagnostic and surgical settings. Future application areas include the development of patient-specific networks for ultrasound-to-MRI registration [10,11], or slice-to-volume reconstruction approaches for fetal ultrasound [9,22,23]. To inspire such research in this direction, we have released our open-source implementation at [https://github.com/gduguey/DiffUS.](https://github.com/gduguey/DiffUS)
+
+Acknowledgments. We thank Polina Golland, Reuben Dorent, Sandy Wells and Karimi Davood for their valuable insights on ultrasound imaging, MRI data, and questions related to realignment.
+
+Disclosure of Interests. This work was not supported by a specific grant and the authors have no competing interests to declare that are relevant to the content of this article.
+
+# References
+
+- 1. Aldrich, J.E.: Basic physics of ultrasound imaging. Critical care medicine 35(5), S131–S137 (2007)
+- 2. Billot, B., Greve, D.N., Puonti, O., Thielscher, A., Van Leemput, K., Fischl, B., Dalca, A.V., Iglesias, J.E., et al.: Synthseg: Segmentation of brain mri scans of any contrast and resolution without retraining. Medical image analysis 86, 102789 (2023)
+- 3. Carré, A., Klausner, G., Edjlali, M., Lerousseau, M., Briend-Diop, J., Sun, R., Ammari, S., Reuzé, S., Alvarez Andres, E., Estienne, T., et al.: Standardization of brain mr images across machines and protocols: bridging the gap for mri-based radiomics. Scientific reports 10(1), 12340 (2020)
+- 4. Chan, V., Perlas, A.: Basics of ultrasound imaging. Atlas of ultrasound-guided procedures in interventional pain management pp. 13–19 (2011)
+- 5. Chen, J., Chang, E.Y., Carl, M., Ma, Y., Shao, H., Chen, B., Wu, Z., Du, J.: Measurement of bound and pore water t1 relaxation times in cortical bone using three-dimensional ultrashort echo time cones sequences. Magnetic resonance in medicine 77(6), 2136–2145 (2017)
+- 6. Drew, Z., Haouimi, A., Murphy, A., et al.: T1 values (1.5 t) (2025). [https://doi.](https://doi.org/10.53347/rID-60740) [org/10.53347/rID-60740,](https://doi.org/10.53347/rID-60740) [https://radiopaedia.org/articles/60740,](https://radiopaedia.org/articles/60740) reference article, Radiopaedia.org (Accessed on 25 Jun 2025)
+- 7. Duelmer, F., Azampour, M.F., Navab, N.: Ultraray: Full-path ray tracing for enhancing realism in ultrasound simulation (2025), 
+- 8. Gao, C., Killeen, B.D., Hu, Y., Grupp, R.B., Taylor, R.H., Armand, M., Unberath, M.: Synthetic data accelerates the development of generalizable learning-based algorithms for x-ray image analysis. Nature Machine Intelligence 5(3), 294–308 (2023)
+- 9. Gholipour, A., Estroff, J.A., Warfield, S.K.: Robust super-resolution volume reconstruction from slice acquisitions: application to fetal brain mri. IEEE transactions on medical imaging 29(10), 1739–1758 (2010)
+- 10. Gopalakrishnan, V., Dey, N., Chlorogiannis, D.D., Abumoussa, A., Larson, A.M., Orbach, D.B., Frisken, S., Golland, P.: Rapid patient-specific neural networks for intraoperative x-ray to volume registration. arXiv preprint arXiv:2503.16309 (2025)
+- 11. Gopalakrishnan, V., Dey, N., Golland, P.: Intraoperative 2d/3d image registration via differentiable x-ray rendering. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 11662–11672 (2024)
+- 12. Gopalakrishnan, V., Golland, P.: Fast auto-differentiable digitally reconstructed radiographs for solving inverse problems in intraoperative imaging. In: Workshop on Clinical Image-Based Procedures. pp. 1–11. Springer (2022)
+- 13. Huang, J., Triedman, J.K., Vasilyev, N.V., Suematsu, Y., Cleveland, R.O., Dupont, P.E.: Imaging artifacts of medical instruments in ultrasound-guided interventions. Journal of Ultrasound in Medicine 26(10), 1303–1322 (2007)
+
+- 14. Joarder, Y., Rahman, K.M., Mahi, F.F.: Uplifted tissue characterization and classification of fatty liver disease from ultrasound images. Journal of Image Processing & Pattern Recognition Progress 3 (2020)
+- 15. Juvekar, P., et al.: The brain resection multimodal imaging database (remind). The Cancer Imaging Archive (2023)
+- 16. Levine, Z.H., Peskin, A.P., Holmgren, A.D., Garboczi, E.J.: Preliminary x-ray ct investigation to link hounsfield unit measurements with the international system of units (si). PLoS One 13(12), e0208820 (2018)
+- 17. Machado, I., Toews, M., George, E., Unadkat, P., Essayed, W., Luo, J., Teodoro, P., Carvalho, H., Martins, J., Golland, P., Pieper, S., Frisken, S., Golby, A., Wells III, W., Ou, Y.: Deformable mri-ultrasound registration using correlation-based attribute matching for brain shift correction: Accuracy and generality in multi-site data. NeuroImage 202, 116094 (2019). [https://doi.org/https://doi.org/10.1016/j.neuroimage.2019.116094,](https://doi.org/https://doi.org/10.1016/j.neuroimage.2019.116094) [https://www.](https://www.sciencedirect.com/science/article/pii/S1053811919306858) [sciencedirect.com/science/article/pii/S1053811919306858](https://www.sciencedirect.com/science/article/pii/S1053811919306858)
+- 18. Schneider, U., Pedroni, E., Lomax, A.: The calibration of ct hounsfield units for radiotherapy treatment planning. Physics in Medicine & Biology 41(1), 111 (1996)
+- 19. Treeby, B.E., Wise, E.S., Kuklis, F., Jaros, J., Cox, B.: Nonlinear ultrasound simulation in an axisymmetric coordinate system using a k-space pseudospectral method. The Journal of the Acoustical Society of America 148(4), 2288–2300 (2020)
+- 20. Webb, T.D., Leung, S.A., Rosenberg, J., Ghanouni, P., Dahl, J.J., Pelc, N.J., Pauly, K.B.: Measurements of the relationship between ct hounsfield units and acoustic velocity and how it changes with photon energy and reconstruction method. IEEE transactions on ultrasonics, ferroelectrics, and frequency control 65(7), 1111–1124 (2018)
+- 21. Wein, W., Brunke, S., Khamene, A., Callstrom, M.R., Navab, N.: Automatic ctultrasound registration for diagnostic imaging and image-guided intervention. Medical image analysis 12(5), 577–585 (2008)
+- 22. Xu, J., Moyer, D., Gagoski, B., Iglesias, J.E., Grant, P.E., Golland, P., Adalsteinsson, E.: Nesvor: implicit neural representation for slice-to-volume reconstruction in mri. IEEE transactions on medical imaging 42(6), 1707–1719 (2023)
+- 23. Young, S.I., Balbastre, Y., Fischl, B., Golland, P., Iglesias, J.E.: Fully convolutional slice-to-volume reconstruction for single-stack mri. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 11535– 11545 (2024)

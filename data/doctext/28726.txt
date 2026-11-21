@@ -1,0 +1,1207 @@
+Advancing Structured Priors for Sparse-Voxel Surface Reconstruction
+arXiv:2601.17720v1 [cs.CV] 25 Jan 2026
+Ting-Hsun Chi1
+Chu-Rong Chen1
+Chi-Tun Hsu1
+Hsuan-Ting Lin1
+Sheng-Yu Huang1,2
+Cheng Sun2
+Yu-Chiang Frank Wang1,2
+1
+National Taiwan University 2 NVIDIA
+Ours: Level-of-Detail Initialization
+RGB
+Rendered Depth
+Rendered Normal
+Depth Confidence
+1k Steps
+Pseudo Depth
+Initialization
+2k Steps
+Initialization
+SVRaster
+[Sun et al. 2025]
+Others
+Uniform Initialization
+GeoSVR
+[Li et al. 2025]
+1k Steps
+1k Steps
+2k Steps
+2k Steps
+Figure 1. Our method initializes voxels at plausible regions with the associated levels of detail. With the geometry is refined by direct depth
+supervision, our SVRaster reconstruction better captures detailed 3D geometry. Our initialization-seeded design couples fast convergence
+with high geometric fidelity and strong completeness throughout training.
+Abstract
+Reconstructing accurate surfaces with radiance fields has
+progressed rapidly, yet two promising explicit representations, 3D Gaussian Splatting and sparse-voxel rasterization, exhibit complementary strengths and weaknesses. 3D
+Gaussian Splatting converges quickly and carries useful geometric priors, but surface fidelity is limited by its pointlike parameterization. Sparse-voxel rasterization provides
+continuous opacity fields and crisp geometry, but its typical uniform dense-grid initialization slows convergence and
+underutilizes scene structure. We combine the advantages
+of both by introducing a voxel initialization method that
+places voxels at plausible locations and with appropriate
+levels of detail, yielding a strong starting point for perscene optimization. To further enhance depth consistency
+without blurring edges, we propose refined depth geometry
+supervision that converts multi-view cues into direct per-ray
+depth regularization. Experiments on standard benchmarks
+demonstrate improvements over prior methods in geometric
+accuracy, better fine-structure recovery, and more complete
+surfaces, while maintaining fast convergence.
+1. Introduction
+Surface reconstruction from multi-view images has long
+been a fundamental problem in computer vision, with broad
+applications in robotics, gaming, and AR/VR. Despite extensive prior research, achieving both fast and accurate surface reconstruction remains an ongoing challenge.
+The advent of Neural Radiance Fields (NeRF) [24]
+has brought significant progress to novel view rendering
+and surface reconstruction by learning continuous implicit
+representations through differentiable volumetric rendering
+[21, 37, 39, 46]. However, most NeRF-based methods
+are computationally expensive, limiting their practicality
+in high-resolution or large-scale scenarios. Recently, 3D
+Gaussian Splatting (3DGS) [16] has emerged as a promising alternative that leverages explicit Gaussian primitives
+with differentiable rasterization to achieve real-time, highquality rendering. Its remarkable performance in novel
+view synthesis has encouraged extensions toward surface
+reconstruction [4, 12, 14, 50]. Nevertheless, 3DGS still
+faces inherent limitations: it depends heavily on multiview point cloud initialization, which is often incomplete
+or noisy, and its soft Gaussian formulation lacks explicit
+surface boundaries, leading to geometric ambiguity.
+Motivated by the limitations of 3DGS, recent work has
+revisited sparse voxel-based representations. SVRaster
+[34] replaces Gaussian primitives with a sparse voxel octree
+(SVO) and employs rasterization for real-time rendering,
+mitigating the geometric ambiguity inherent in 3D Gaussian primitives while addressing the inefficiency of traditional voxel-based methods. Despite the advances in renderable representations [16, 24, 34], e.g. NeRF, 3DGS, and
+sparse voxels, surface reconstruction still suffers from the
+lack of explicit geometry constraints, which often hinders
+stable optimization and overall reconstruction accuracy.
+To address this bottleneck, recent studies incorporate
+external priors such as pretrained monocular depth maps,
+geometry diffusion model, and 3D foundation model cues
+to regularize optimization. Numerous 3DGS-based frameworks [4, 8, 42] adopt these priors for initialization or supervision to improve geometry. Sparse voxel-based approaches [19, 34] further show this structured representation, regularized with foundation model generated prior,
+outperforms 3DGS-based methods in geometry accuracy.
+Although sparse-voxel formulations offer a promising
+path toward structured and prior-guided reconstruction, existing approaches largely rely on uniform initialization, resulting in inefficient voxel allocation, slow convergence,
+and limited exploitation of geometric priors.
+In this paper, we propose a sparse voxel reconstruction
+framework with a Voxel Initialization with Level of Details
+algorithm that directly places geometrically valid voxels
+with adaptive, detail-aware resolution guided by multi-view
+geometry cues. To handle uncertainty in pseudo geometry
+priors, we introduce an uncertainty-aware opacity field that
+stabilizes incomplete regions and preserves surface continuity. To avoid overly smooth surfaces, we regularize the
+geometry with Refined Depth for Geometry Supervision in
+per-scene optimization.
+The key contributions of this work are as follows :
+• We design a geometry-guided voxel placement strategy
+that infers both position and resolution from multi-view
+foundation model cues. This adaptive initialization leverages scene structure to form a compact yet accurate voxel
+hierarchy, reducing reliance on dense-grid initialization.
+• We develop a topology-aligned multi-view fusion mechanism that aligns per-view octrees into a globally consistent structure, integrating uncertain or incomplete priors
+through an uncertainty-aware opacity formulation.
+• We propose a lightweight depth-regularization objective
+that refines the reconstructed geometry during per-scene
+training, improving local sharpness and depth consistency
+without sacrificing efficiency.
+• Our method yields more geometrically faithful surfaces
+with fast convergence compared to existing methods,
+bridging efficient initialization and high-fidelity surface
+reconstruction.
+2. Related Work
+2.1. Radiance Fields and Neural Rendering
+A radiance field refers to a function that maps every point in
+3D space to its emitted radiance and volume density. Neural Radiance Fields (NeRF) [24] pioneered the use of neural
+implicit radiance field representations for high-quality 3D
+reconstruction and novel-view synthesis by encoding scene
+attributes with an MLP and rendering via differentiable
+volume integration. Subsequent work improves NeRF by
+introducing anti-aliased and multiscale scene representations [2, 3, 13], and by greatly accelerating training and rendering through multiresolution hash-encoded features [26].
+However, these methods still rely on implicit neural fields
+that require dense per-ray sampling and continuous MLP
+evaluation, making them slow to render, difficult to edit,
+and inefficient to scale.
+3D Gaussian Splatting (3DGS) [16] represents scenes
+using explicit anisotropic Gaussian primitives and renders images via efficient differentiable rasterization, enabling high-quality reconstruction with real-time performance. However, the reliance on depth sorting and the overlap of Gaussians may induce several view-inconsistent rendering problems. Although recent methods attempt to mitigate these issues [25, 30], representations with more stable
+volumetric definitions and inherent ordering remain desirable.
+Sparse voxel structures, which provide well-defined spatial occupancy and natural spatial ordering, have already
+been widely used to represent 3D scenes. While some prior
+works use sparse voxels combined with MLPs to decode radiance or surface features locally [18, 23, 41], others adopt
+more explicit voxel representations [9, 33] to improve training speed. SVRaster [34] integrates sparse voxels with the
+fast rasterization strategy of 3DGS. By adaptively adjusting
+voxel sizes to match scene complexity, SVRaster achieves
+a balance among memory efficiency, rendering quality, and
+runtime performance.
+2.2. Learnable Fields for Surface Reconstruction
+Surface reconstruction from multi-view images has been
+an important task in computer vision. Classical multiview stereo (MVS) methods reconstruct surfaces from calibrated images via modular pipelines of structure-frommotion, depth estimation, and fusion. PatchMatch-based
+methods [11] and COLMAP [31] enabled efficient, high-
+quality reconstructions. As deep learning entered the field,
+MVSNet [44] improved matching through deep cost volumes but retained the multi-stage design.
+Neural implicit methods introduced a new paradigm
+by representing surfaces as continuous fields using MLPs.
+Early works like DeepSDF [29] and IDR [45] demonstrated that signed distance functions could be learned directly from multi-view images via differentiable rendering.
+Later, methods such as UNISURF [28], NeuS [37], and
+VolSDF [47] integrated volume rendering with implicit surfaces to achieve sharper and more accurate reconstructions.
+However, these implicit representations often require expensive optimization, making them slow to train on complex scenes.
+Following the introduction of 3D Gaussian Splatting [16], a new line of surface reconstruction methods
+emerged based on Gaussian primitives. SuGaR [12] aligns
+Gaussians with mesh geometry under regularization. Later
+works integrated neural SDFs or implicit fields to improve
+surface fidelity [5, 48], and alternative formulations such
+as surfel-based representations were proposed to improve
+alignment and geometric sharpness [7, 14]. More recently,
+several methods have incorporated 3D foundation models [17, 36, 38, 43] to guide reconstruction to better results. For example, InstantSplat [8] uses DUSt3R to initialize Gaussians from dense point maps, while Splatt3R [32]
+employs MASt3R [17] to infer Gaussian parameters directly from two unposed images. DepthSplat [42] leverages Depth Anything V2 [43] to supervise depth estimation.
+While these methods benefit from strong geometric priors,
+their performance remains constrained by the need for highquality initialization [4, 6], and by the lack of clearly defined surfaces and edges of 3D Gaussian primitives.
+Voxels offer a more structured and explicit representation of geometry, making them inherently better suited
+for surface reconstruction. For instance, SVRaster [34]
+achieves comparable speed and performance on several
+3D tasks to state-of-the-art Gaussian-based methods, while
+benefiting from a clearer geometric structure. GeoSVR [19]
+takes a step in this direction by combining voxel-based neural fields with geometric supervision from Depth Anything
+V2 [43]. It employs a sparse voxel grid to encode the scene
+and uses foundation model predictions as regularization signals. While it demonstrates improved reconstruction quality, the progressive pruning and subdivision starting from
+uniform voxel grids lead to slow convergence.
+In this work, we address this bottleneck by directly initializing sparse voxels at geometrically meaningful locations using multi-view depth cues, enabling faster convergence, higher fidelity reconstruction, and improved alignment with scene structure from the very beginning.
+3. Preliminaries
+Sparse Voxel Rasterization [34] models a scene as a sparse
+octree of voxels stored in a flat array. A voxel at level ℓ has
+side length sℓ = S/2ℓ and center
+
+
+ci,j,k,ℓ = cscene + sℓ gi,j,k − 0.5·2ℓ ·(1, 1, 1) ,
+gi,j,k = (i+0.5, j+0.5, k+0.5).
+(1)
+Each voxel stores eight corner densities {σm }8m=1 and a
+view-dependent color represented by spherical harmonics
+fSH (d). Inside a voxel, the density is trilinearly interpolated
+as
+σ(u) =
+8
+X
+wm (u) σm ,
+ρ(u) = ELU(σ(u)) + 1,
+m=1
+(2)
+where u ∈ [0, 1]3 and ρ is the non-negative density after
+activation. The surface normal is analytically computed by
+∇x ρ(x)
+.
+∥∇x ρ(x)∥
+n=
+(3)
+Rendering follows front-to-back alpha compositing:
+C=
+X
+Tk αk ck ,
+k
+Tk =
+Y
+(1 − αj ),
+(4)
+j<k
+αk = 1 − exp(−ρk ∆tk ).
+where ρk and ∆tk denote the density and segment length
+of the k-th voxel along a ray. Voxels are sorted using a
+direction-dependent Morton order to ensure correct depth
+ordering across octree levels.
+During optimization, SVRaster alternates between pruning voxels with negligible contribution (Tk αk < τp ) and
+subdivision of high-priority voxels. Parameters of new voxels are initialized by trilinear interpolation of corner densities and direct copying of spherical-harmonic coefficients.
+This adaptive, explicit field enables efficient differentiable
+rendering with coarse-to-fine geometric control.
+4. Method
+Fig. 2 provides an overview of our method, which reconstructs high-quality surfaces from a set of posed images using SVO in a scene-specific setting. The method consists of
+Voxel Initialization with Level of Detail (Sec. 4.1) that constructs an SVO for further per-scene optimization. In the
+per-scene optimization, the SVO geometry is refined with
+Refined Depth for Geometry Supervision (Sec. 4.2).
+Figure 2. Overview of Our Method. Given images {Ii } with cameras {Ci }, our method reconstructs surfaces via per-scene training.
+First, a pretrained model estimates pseudo geometry priors (i.e., cameras {C̃i }, depth {D̃i }, and confidence {κ̃i }), which are utilized to
+build per-image octrees {Vi } with our level-of-detail unprojection. The resulting per-image octrees are fused into a single octree V fusion
+(as an initialized SVO), along with the prediction of the opacity of each fused voxel grid. In the per-scene SVO optimization stage, we
+derive the refined depths for each camera view via advancing the geometry supervision (i.e., LrefD ) from the rendered depths {Di } and the
+associated input images. This geometry-supervision loss, when combined with the original SVRaster training loss, improves the geometric
+accuracy of the reconstructed surface.
+for per-scene optimization.
+4.1.1. Level-of-Detail Unprojection
+Figure 3. Topology-Aligned Octree Fusion. To integrate sparse
+octrees derived from different camera views, the final resolution of
+each voxel is determined by the per-view finest voxels occupying
+the same spatial cell. For example, the rightmost voxel of octree
+A at level 2 is decomposed into multiple level-3 voxels to align
+the structure of octree B. The decomposed voxels inherit properties (e.g. color) from their parent voxel. To obtain the final fused
+octree, we average the colors of the corresponding voxels across
+per-view octrees as the blended voxels (denoted by the purple voxels.
+4.1. Voxel Initialization with Level of Details
+First, we leverage the availability of multiple images covering the scene and employ a pretrained 3D vision foundation
+model to estimate pseudo geometric priors for each view.
+To accurately initialize voxel positions and sizes, we propose a level-of-detail unprojection algorithm and generate
+per-image SVOs (Sec. 4.1.1). The per-image octrees are
+then merged into a single octree using our topology-aligned
+fusion algorithm (Sec. 4.1.2). The opacity of each voxel
+grid point is assigned according to an uncertainty-aware
+opacity field (Sec. 6) to build an SVO as the initialization
+Given N calibrated images {Ii }N
+i=1 with camera parameters
+N
+{Ci }N
+i=1 , we construct corresponding SVOs {Vi }i=1 , where
+each Vi represents a per-view initialization of the scene geometry. We adopt the foundation model VGGT [36] to obtain pseudo depths {D̃i }, confidence maps {κi }, and estimated camera poses {C̃i }, which are aligned to the real
+poses using Umeyama alignment [35]. The resulting similarity transform (Ri , ti , s) provides both rotation and translation alignment, and the global scale s is also applied to D̃i
+for consistent depth scaling.
+To unproject each pixel p = (u, v) in Ii , we use the
+pseudo depth D̃i (u, v) and approximate its 3D footprint by
+sampling the pixel center and four half-offset neighbors:
+
+
+−1 ′ ′
+′ ′
+⊤
+x(·) = R⊤
+(5)
+i D̃i (u , v ) Ki [u , v , 1] − ti ,
+where (u′ , v ′ ) ∈ {(u, v), (u±0.5, v), (u, v±0.5)} and Ki is
+the intrinsic matrix. The spatial footprint of the pixel is approximated by
+Ai,p ≈ (xu+0.5 − xu−0.5 ) × (xv+0.5 − xv−0.5 ) . (6)
+Enforcing level awareness. A pixel covering a larger
+3D footprint corresponds to lower local detail, since its
+color integrates information over a wider surface region. We
+therefore adapt the voxel resolution to the pixel’s effective
+spatial coverage. The level ℓi,p of the voxel corresponding
+to pixel p is selected as the largest level (smallest voxel size)
+whose voxel still covers the footprint,
+ℓi,p = max{ ℓ | s2ℓ ≥ Ai,p },
+sℓ = S/2ℓ .
+ℓ
+(7)
+Pixels with large Ai,p (low detail) are assigned coarser voxels, while those with small Ai,p (high detail) receive finer
+voxels for accurate reconstruction.
+Each pixel color ci,p initializes a voxel vi,p at level ℓi,p
+with zero-degree spherical harmonic coefficient h0i,p following 3DGS [16]. We then check and merge all the voxels Vv′
+that can be included in a coarser voxel v ′ at level ℓ′ if their
+color deviation
+dv′ = max ∥ck − c̄v′ ∥2 ,
+vk ∈Vv′
+X
+1
+ck , (8)
+|Vv′ |
+c̄v′ =
+vk ∈Vv′
+is below a threshold t. To prevent undersampling, we further enforce a minimum occupancy constraint:
+′
+ℓmin (v ) = min ℓk ,
+vk ∈Vv′
+′
+max(ℓmin (v ′ )−ℓ′ ,0)+1
+nreq (v ) = 2
+Conceptually, for every voxel v at level L in any octree,
+we consider its Morton prefix at level L. If there exists another octree that already contains one or more voxels at level
+ℓ ≥ L+1 whose Morton prefixes coincide with that of v, the
+region covered by v has been subdivided more finely in another view. In this case, we recursively subdivide v into its
+eight children at level L+1, inheriting the parent’s attributes
+to initialize the children. This procedure is applied symmetrically across all octrees and levels until no voxel has
+a coarser representation than any other octree in the same
+spatial cell. The alignment ensures that all octrees share a
+compatible hierarchy and any occupied spatial cell is represented by voxels with identical (p, ℓ) across all views that
+cover it.
+Feature aggregation. Once the topology is aligned, we
+fuse the voxel attributes across views by aggregating all
+voxels that correspond to the same spatial cell. Specifically,
+we take the union of all voxels
+V all =
+,
+and
+|Vv′ | ≥ nreq (v ′ ).
+Vi ,
+i=1
+(9)
+and group them by their Morton path and level. For each
+cell (p, ℓ), let
+and perform merging only if
+dv′ < t
+N
+[
+(10)
+This ensures that merges to much coarser levels occur only
+when enough fine voxels support the region. The merging
+process preserves geometric fidelity while reducing redundancy. We construct one SVO for each image, and all the
+octrees share the same world coordinate.
+4.1.2. Topology-Aligned Octree Fusion
+Given the per-view octrees {Vi }N
+i=1 constructed in Sec. 4.1,
+fusion
+we fuse them into a single global octree V
+that serves
+as the initialization for subsequent optimization. Each voxel
+v ∈ Vi is parameterized by an octree level ℓi,k and a
+Morton-encoded path pi,k that uniquely identifies its spatial cell at that level. Our fusion procedure consists of two
+stages: a topology alignment step that builds a common refinement of all octrees, followed by a feature aggregation
+step that averages voxel attributes across views. The fusion
+process is demonstrated in Fig. 3.
+Topology alignment. Different views may allocate voxels at different resolutions in the same spatial region. To
+obtain a consistent topology, we construct the finest common refinement of all per-view octree. Let Lmin and Lmax
+denote the minimum and maximum octree levels appearing
+across all {Vi }. We iterate from level Lmin to Lmax − 1,
+and at each level L we detect regions where some octrees
+are coarser than others.
+Vp,ℓ = { vi,k ∈ V all | (pi,k , ℓi,k ) = (p, ℓ) }
+denote the set of voxels that occupy this cell. Their zerodegree spherical-harmonic coefficients (colors) {h0i,k } and
+higher-degree coefficients {hsh
+i,k } are combined by averaging:
+h̄0p,ℓ =
+1
+|Vp,ℓ |
+X
+h0i,k ,
+vi,k ∈Vp,ℓ
+h̄sh
+p,ℓ =
+1
+|Vp,ℓ |
+X
+hsh
+i,k .
+vi,k ∈Vp,ℓ
+(11)
+The fused octree V fusion is then defined by the set of unique
+cells {(p, ℓ)} and their aggregated attributes {h̄0p,ℓ , h̄sh
+p,ℓ }.
+This multi-view fusion produces a globally consistent,
+multi-resolution octree that integrates per-view detail while
+preserving a compact representation.
+4.1.3. SVO Opacity Prediction
+While the fused octree V fusion provides a globally consistent topology, its occupancy may still be incomplete or
+noisy due to inaccuracies in the estimated depth maps and
+view-dependent reconstruction gaps. To address these issues, we introduce an uncertainty-aware opacity assignment stage that leverages truncated signed distance fusion
+(TSDF) [27] weighted by per-pixel confidence maps.
+TSDF-guided octree completion. We first combine the
+fused octree V fusion with a uniform voxel grid of the same
+spatial extent, forming an augmented voxel grid V g that ensures all spatial regions within the scene bounds are represented. For each grid point xj ∈ V g , we compute a signed
+distance value
+P
+κi (xj ) fi (xj )
+,
+(12)
+F (xj ) = i P
+i κi (xj )
+where fi (xj ) is the signed distance from xj to the surface observed in view i, and κi (xj ) denotes the pixel-wise
+confidence of the pseudo geometry priors. The signed distance values are truncated to [−1, 1] according to the truncation distance dtrunc , following standard TSDF fusion [27].
+This produces an uncertainty-weighted TSDF volume that
+reflects both geometric consistency and observation reliability across views.
+TSDF-to-opacity mapping. To convert the truncated
+signed distance field F (xj ) into voxel opacity values, we
+define a differentiable mapping ϕ : F 7→ α, which controls the opacity transition around the zero-level surface.
+We adopt a parametric sigmoid function
+ϕ(F ) =
+1
+,
+1 + exp(−εF )
+(13)
+where the slope ε is analytically chosen such that a voxel
+located at F = −0.1 attains an opacity ϕ(F ) = p0.1 , typically p0.1 = 0.9. This calibration guarantees a consistent
+surface thickness proportional to the truncation band. The
+calibrated mapping provides an interpretable control over
+the opacity falloff and prevents over-thickening of surfaces.
+Opacity normalization and pruning. The resulting
+opacity values are normalized to [αmin , αmax ] and assigned
+to all voxels in V g , producing the final representation V f .
+Voxels whose maximum opacity across their corner samples
+falls below a threshold τprune are removed:
+Mprune = { v ∈ V f |
+max
+j∈corners(v)
+ϕ(F (xj )) < τprune }.
+(14)
+This pruning step discards low-confidence empty space
+while preserving regions with consistent, high-opacity support. The resulting fused octree V f serves as a complete, continuous volumetric initialization for subsequent
+per-scene SVR optimization.
+4.2. Refined Depth for Geometry Supervision
+We optimize the geometry of the octree from Sec. 4.1 with
+per-scene training. Unlike previous works [4, 19] that regularize the geometry with an indirect, weighted unprojection
+loss, we adopt a local, per-pixel geometry-supervision loss
+that directly regularizes the geometry through depth refinement. We now detail the process below.
+4.2.1. Depth Refinement
+For each training camera C and pixel p, we form a compact set of refined depth candidates anchored at the rendered
+(C)
+depth D̂t (p), its two spatial neighbors, and small multiplicative perturbations:
+ (C)
+(C)
+(C)
+D(p) = D̂t (p), D̂t (p + ex ), D̂t (p + ey )
+ (C)
+nrand
+∪ D̂t (p)(1 + ϵk ) k=1
+.
+
+with ϵk ∼ Unif − 2s , 2s , s ≪ 1.
+Each candidate is backprojected from C and reprojected
+into K nearest views N (C). We score each candidate
+by normalized cross-correlation (NCC) between fixed-size,
+bilinear-sampled patches and take the candidate with highest score as the refined depth Dt⋆ (p) of the pixel p. Then, a
+lightweight cross-view geometric check rejects the refined
+depths whose reprojection error exceeds a small threshold.
+The refinement produces a sparse, high-precision depth map
+Dt⋆ .
+4.2.2. Optimization Objectives
+We supervise the geometry with an ℓ1 loss between the rendered depth and the refined target, LrefD = |Dt − Dt⋆ |. The
+total objective is composed of the photometric loss Lphoto
+from SVRaster, the regularization term Lreg from GeoSVR
+excluding the multi-view geometry loss, and our geometrysupervision loss LrefD :
+L = λphoto Lphoto + λreg Lreg + λrefD LrefD
+(15)
+In this work, we set the weights of λphoto = 0.1, λreg =
+1.0, and λrefD = 0.05, respectively.
+Targets Dt⋆ are refreshed every R iterations so supervision tracks the improving geometry without backpropagating through the discrete selection. With a good octree initialization from Sec. 4.1, the refined depth candidates concentrates near the true surface as the geometry improves
+while the local surfaces still remains sharp.
+5. Experiments
+5.1. Implementation Details
+Our code is implemented with PyTorch and CUDA kernels, built atop the GeoSVR [19] codebase. Unless stated
+otherwise, each model is trained for 20 000 iterations with
+Adam [1]. We use separate learning rates for different parameter groups: density 5×10−2 , zero-degree SH 1×10−2 ,
+and higher-degree SH 2.5×10−4 . Pseudo depth priors are
+generated by VGGT [36], and DepthAnythingV2 [43] provides additional depth cues, following the same usage as in
+GeoSVR. We use 7×7 patches for patch warping and depth
+refinement. The voxel-dropout parameter is set to γ=0.5 on
+DTU. Our octree setup follows SVRaster with the pruning
+Method
+24
+37
+40
+55
+63
+65
+69
+83
+97
+105
+106
+110
+114
+118
+122
+Mean
+Time
+1.14
+1.00
+0.37
+0.38
+0.66
+1.26
+1.37
+0.72
+0.54
+0.88
+0.81
+0.93
+0.35
+0.34
+0.43
+0.49
+0.43
+0.35
+0.36
+0.40
+1.25
+1.10
+0.87
+0.80
+0.87
+0.70
+0.65
+0.54
+0.45
+0.78
+0.72
+0.57
+0.53
+0.41
+0.81
+1.29
+1.48
+1.29
+1.03
+1.23
+1.18
+1.09
+0.97
+0.84
+1.18
+0.70
+0.83
+0.73
+0.55
+0.66
+0.66
+0.52
+0.47
+0.46
+0.66
+1.08
+1.20
+0.74
+0.47
+0.96
+0.42
+0.35
+0.32
+0.29
+0.41
+0.61
+0.49
+0.41
+0.36
+0.57
+0.55
+0.54
+0.43
+0.35
+0.51
+0.86
+0.84
+0.61
+0.51
+0.73
+> 12h
+> 12h
+> 128h
+> 12h
+6h
+2DGS [14]
+GOF [50]
+SVRaster [34]
+GS2Mesh [40]
+VCR-GauS [6]
+MonoGSDF [20]
+PGSR [4]
+GeoSVR [19]
+0.48
+0.50
+0.61
+0.59
+0.55
+0.45
+0.36
+0.32
+0.91
+0.82
+0.74
+0.79
+0.91
+0.65
+0.57
+0.51
+0.39
+0.37
+0.41
+0.70
+0.40
+0.36
+0.38
+0.30
+0.39
+0.37
+0.36
+0.38
+0.43
+0.36
+0.33
+0.33
+1.01
+1.12
+0.93
+0.78
+0.97
+0.94
+0.78
+0.71
+0.83
+0.74
+0.75
+1.00
+0.95
+0.70
+0.58
+0.48
+0.81
+0.73
+0.94
+0.69
+0.84
+0.67
+0.50
+0.42
+1.36
+1.18
+1.33
+1.25
+1.39
+1.27
+1.08
+1.03
+1.27
+1.29
+1.40
+0.96
+1.30
+0.99
+0.63
+0.62
+0.76
+0.68
+0.61
+0.59
+0.90
+0.63
+0.59
+0.56
+0.70
+0.77
+0.63
+0.50
+0.76
+0.49
+0.46
+0.33
+1.40
+0.90
+1.19
+0.68
+0.92
+0.84
+0.54
+0.46
+0.40
+0.42
+0.43
+0.37
+0.44
+0.39
+0.30
+0.30
+0.76
+0.66
+0.57
+0.50
+0.75
+0.53
+0.38
+0.34
+0.52
+0.49
+0.44
+0.46
+0.54
+0.47
+0.34
+0.32
+0.80
+0.74
+0.76
+0.68
+0.80
+0.65
+0.52
+0.47
+0.2h
+1h
+0.1h/0.05h*
+0.3h
+∼1h
+hrs
+0.5h
+0.8h/0.2h*
+Ours
+0.32
+0.50
+0.30
+0.32
+0.69
+0.50
+0.42
+1.00
+0.62
+0.55
+0.33
+0.46
+0.30
+0.32
+0.31
+0.46
+0.4h*
+Implicit
+VolSDF [47]
+NeuS [37]
+Neurangelo [21]
+GeoNeuS [10]
+MonoSDF [49]
+Explicit
+(*) represents training time on RTX 5090.
+Table 1. Qualitative Comparison on the DTU Dataset [15]. Each row represents a baseline method and each column represents a scene in
+the DTU dataset.
+GeoSVR
+Ours
+14
+Chamfer Distance
+12
+10
+8
+6
+4
+2
+Reference
+Ours
+GeoSVR
+Figure 4. Rendered Normals on DTU Dataset. Our method preserves the local details while GeoSVR produces overly smoothed
+results.
+interval increased to 2 000 iterations to encourage finer detail. All experiments are run on a single NVIDIA RTX 5090
+GPU.
+5.2. Surface Reconstruction
+We evaluate on DTU using the standard 15 scans. Images are downsampled ×2, meshes are extracted with TSDF
+(voxel size 0.002), and Chamfer distance (CD) is reported
+per scan and as the mean. These settings match the common
+DTU protocol used in recent surface-reconstruction works.
+Baselines and Timing. We compare to implicit methods
+including VolSDF [47], NeuS [37], Neuralangelo [21],
+Geo-NeuS [10], and MonoSDF [49], and explicit methods including 2DGS [14], GOF [50], SVRaster [34],
+GS2Mesh [40], VCR-GauS [6], MonoGSDF [20],
+0
+1000
+3000
+5000
+7000
+9000
+Training Iteration
+11000
+13000
+Figure 5. Convergence on DTU Dataset. Our method stabilizes
+training and accelerates convergence compared to the baseline.
+Note that, without specific geometry regularization, SVRaster [34]
+is not expected to outperform GeoSVR in terms of convergence.
+PGSR [4], and GeoSVR [19]. For methods we did not
+re-run, we quote the numbers from the authors’ papers.
+For SVRaster and GeoSVR we report both their published
+3090 Ti times and our 5090 re-runs.
+Results and Discussion. Per-scan CD and training times
+are summarized in Tab. 1. Our method attains the lowest mean CD on DTU while remaining efficient. 3DGSbased approaches lack an explicit surface parameterization.
+Consequently, even when regularized with external geometric cues from pretrained models (e.g., GS2Mesh, VCRGauS, MonoGSDF), their reconstructions still trail sparsevoxel methods (GeoSVR and ours). Sparse-voxel baselines (SVRaster, GeoSVR) start from uniform grids. With-
+Method
+CD (↓)
+GeoSVR (base)
+GeoSVR + voxel initialization
+GeoSVR + geometry supervision
+GeoSVR + geometry supervision + voxel initialization (ours)
+0.47
+0.47
+0.48
+0.46
+Table 2. Ablation Study on the DTU Dataset. We adopt GeoSVR
+as our baseline approach as it reconstructs surfaces with better geometry than SVRaster.
+out strong initialization, geometric regularizers tend to bias
+the solution toward overly smooth surfaces (see Fig. 4).
+The voxel initialization with level of detail and refined
+depth for geometry supervision aids the SVO in preserving
+crisp, well-defined surfaces without over-smoothing, yielding consistent gains across scans.
+We discuss the benefits of our method in convergence
+speed on DTU, as shown in Fig. 5. We report the average CD over the first ten scenes. Compared to the baseline, our initialization provides accurate starting point for
+per-scene optimization, stabilizes the training process, and
+allows the optimization to converge in fewer iterations than
+prior sparse-voxel rasterization baselines. In contrast, the
+training process of sparse-voxel baseline that starts with
+a uniform grid is highly unstable at the beginning, which
+leads to large geometry fluctuations as voxels are pruned
+and subdivided.
+5.3. Ablation Studies
+We study the contribution of Voxel Initialization with Level
+of Details (Sec. 4.1) and Refined Depth for Geometry Superivision (Sec. 4.2) with four variants on DTU, keeping
+preprocessing, training schedule, and loss weights fixed.
+Table 2 reports mean Chamfer distance (CD) for all variants.
+Adding Refined Depth for Geometry Supervision
+(GeoSVR + geometry supervision) without Voxel Initialization with Level of Details does not improve the GeoSVR
+baseline. This is expected since our refinement constructs
+depth candidates locally around the current prediction for
+each pixel. When the starting surface is far away from the
+actual surface, the depth candidates cluster near an incorrect depth, NCC becomes less discriminative, and the crossview geometric check prunes many pixels. The resulting
+pseudo-labels are sparse or noisy, so the supervision signal
+is too weak to correct the geometry.
+Adding Voxel Initialization with Level of Details
+(GeoSVR + voxel initialization) without the Refined Depth
+for Geometry Supervision keeps the mean CD unchanged.
+Although our voxel initialization algorithm assigns voxel
+levels by pixel footprint and yields a better-aligned octree,
+the weighting of the indirect supervision of the reprojection loss in GeoSVR is ineffective in refining the geom-
+etry. When alignment and depth cues are still imperfect,
+the masking of GeoSVR reprojection loss drops many pixels and the weighting suppresses gradients where errors are
+large. Gradients therefore remain weak around thin structures and early misalignments. Swapping the initialization
+without an effective supervision in training does not translate into lower CD.
+Enabling both Voxel Initialization with Level of Details and Refined Depth for Geometry Supervision (ours)
+improves the mean CD. With our Voxel Initialization with
+Level of Details, the refined depth candidates are sampled
+around near-correct geometry. The patch NCC scores in the
+depth refinement becomes more discriminative, geometric
+verification retains substantially more pixels, and the resulting refined depths provide direct, dense, voxel-aligned
+supervision. The combination of a good initialization and
+direct depth supervision yields accurate pseudo-labels and
+drives consistent surface improvement.
+In our ablations, both the GeoSVR reprojection loss
+and our refinement can reject many pixels when geometry
+is far from the truth, but they differ fundamentally. The
+GeoSVR term is an indirect image-space penalty with exponential down-weighting and masking. When errors are
+large, weights vanish and gradients point in oblique directions that only weakly correct depth. Our refinement converts multi-view evidence into direct per-ray metric depth
+targets; whenever a label is not masked, the ℓ1 signal is
+strong, well-conditioned, and aligned with the depth axis.
+After our voxel initialization brings the surface into the right
+basin, our refined depth candidates include near-true hypotheses and improves geometry.
+6. Conclusion
+In this work, we present a sparse-voxel framework that
+bridges voxel representation with scene structure for
+high-quality, topology-friendly surface reconstruction. We
+pair a principled octree initialization that allocates capacity
+only where multi-view evidence supports it with a direct
+geometry supervision that updates per-pixel depths, yielding reconstructions that preserve fine detail, maintain high
+completeness, and converge in fewer iterations than prior
+sparse-voxel approaches. On standard benchmarks, this
+design improves geometric accuracy over strong baselines
+while remaining efficient, offering a practical recipe for
+radiance-field surfaces that are easy to optimize and export
+as meshes. Looking ahead, we aim to extend this principle
+to challenging illumination and texture-poor regions via
+uncertainty-aware view selection and multi-scale cues,
+to large-scale scenes through scalable octree expansion,
+and to richer priors (e.g., normals or semantics) that
+further stabilize early training and enhance robustness.
+References
+[1] Kingma DP Ba J Adam et al. A method for stochastic optimization. arXiv preprint arXiv:1412.6980, 1412(6), 2014.
+6
+[2] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields. In Proceedings of the IEEE/CVF international conference on computer vision, pages 5855–5864,
+2021. 2
+[3] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Zip-nerf: Anti-aliased
+grid-based neural radiance fields. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 19697–19705, 2023. 2
+[4] Danpeng Chen, Hai Li, Weicai Ye, Yifan Wang, Weijian Xie,
+Shangjin Zhai, Nan Wang, Haomin Liu, Hujun Bao, and
+Guofeng Zhang. Pgsr: Planar-based gaussian splatting for efficient and high-fidelity surface reconstruction. IEEE Transactions on Visualization and Computer Graphics, 2024. 2,
+3, 6, 7
+[5] Hanlin Chen, Chen Li, and Gim Hee Lee. Neusg: Neural implicit surface reconstruction with 3d gaussian splatting guidance. arXiv preprint arXiv:2312.00846, 2023. 3
+[6] Hanlin Chen, Fangyin Wei, Chen Li, Tianxin Huang, Yunsong Wang, and Gim Hee Lee. Vcr-gaus: View consistent
+depth-normal regularizer for gaussian surface reconstruction.
+Advances in Neural Information Processing Systems, 37:
+139725–139750, 2024. 3, 7
+[7] Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu,
+Huamin Wang, and Weiwei Xu. High-quality surface reconstruction using gaussian surfels. In ACM SIGGRAPH 2024
+conference papers, pages 1–11, 2024. 3
+[8] Zhiwen Fan, Wenyan Cong, Kairun Wen, Kevin Wang,
+Jian Zhang, Xinghao Ding, Danfei Xu, Boris Ivanovic,
+Marco Pavone, Georgios Pavlakos, et al. Instantsplat: Unbounded sparse-view pose-free gaussian splatting in 40 seconds. arXiv preprint arXiv:2403.20309, 2(3):4, 2024. 2, 3
+[9] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 5501–5510, 2022. 2
+[10] Qiancheng Fu, Qingshan Xu, Yew Soon Ong, and Wenbing
+Tao. Geo-neus: Geometry-consistent neural implicit surfaces
+learning for multi-view reconstruction. Advances in Neural
+Information Processing Systems, 35:3403–3416, 2022. 7
+[11] Yasutaka Furukawa and Jean Ponce. Accurate, dense, and
+robust multiview stereopsis. IEEE transactions on pattern
+analysis and machine intelligence, 32(8):1362–1376, 2009.
+2
+[12] Antoine Guédon and Vincent Lepetit. Sugar: Surfacealigned gaussian splatting for efficient 3d mesh reconstruction and high-quality mesh rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5354–5363, 2024. 2, 3
+[13] Wenbo Hu, Yuling Wang, Lin Ma, Bangbang Yang, Lin Gao,
+Xiao Liu, and Yuewen Ma. Tri-miprf: Tri-mip representation for efficient anti-aliasing neural radiance fields. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 19774–19783, 2023. 2
+[14] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH 2024 conference
+papers, pages 1–11, 2024. 2, 3, 7
+[15] Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola,
+and Henrik Aanæs. Large scale multi-view stereopsis evaluation. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 406–413, 2014. 7
+[16] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139–1,
+2023. 1, 2, 3, 5
+[17] Vincent Leroy, Yohann Cabon, and Jérôme Revaud. Grounding image matching in 3d with mast3r. In European Conference on Computer Vision, pages 71–91. Springer, 2024. 3
+[18] Hai Li, Xingrui Yang, Hongjia Zhai, Yuqian Liu, Hujun Bao,
+and Guofeng Zhang. Vox-surf: Voxel-based implicit surface representation. IEEE Transactions on Visualization and
+Computer Graphics, 30(3):1743–1755, 2022. 2
+[19] Jiahe Li, Jiawei Zhang, Youmin Zhang, Xiao Bai, Jin Zheng,
+Xiaohan Yu, and Lin Gu. Geosvr: Taming sparse voxels for
+geometrically accurate surface reconstruction. In The Thirtyninth Annual Conference on Neural Information Processing
+Systems. 2, 3, 6, 7
+[20] Kunyi Li, Michael Niemeyer, Zeyu Chen, Nassir Navab, and
+Federico Tombari. Monogsdf: Exploring monocular geometric cues for gaussian splatting-guided implicit surface reconstruction. arXiv preprint arXiv:2411.16898, 2024. 7
+[21] Zhaoshuo Li, Thomas Müller, Alex Evans, Russell H Taylor, Mathias Unberath, Ming-Yu Liu, and Chen-Hsuan Lin.
+Neuralangelo: High-fidelity neural surface reconstruction. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 8456–8465, 2023. 1,
+7
+[22] Haotong Lin, Sili Chen, Junhao Liew, Donny Y. Chen,
+Zhenyu Li, Guang Shi, Jiashi Feng, and Bingyi Kang. Depth
+anything 3: Recovering the visual space from any views,
+2025. 2
+[23] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural sparse voxel fields. Advances
+in Neural Information Processing Systems, 33:15651–15663,
+2020. 2
+[24] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 1,
+2
+[25] Nicolas Moenne-Loccoz, Ashkan Mirzaei, Or Perel, Riccardo de Lutio, Janick Martinez Esturo, Gavriel State, Sanja
+Fidler, Nicholas Sharp, and Zan Gojcic. 3d gaussian ray tracing: Fast tracing of particle scenes. ACM Transactions on
+Graphics (TOG), 43(6):1–19, 2024. 2
+[26] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM transactions on graphics
+(TOG), 41(4):1–15, 2022. 2
+[27] Richard A Newcombe, Shahram Izadi, Otmar Hilliges,
+David Molyneaux, David Kim, Andrew J Davison, Pushmeet
+Kohi, Jamie Shotton, Steve Hodges, and Andrew Fitzgibbon.
+Kinectfusion: Real-time dense surface mapping and tracking. In 2011 10th IEEE international symposium on mixed
+and augmented reality, pages 127–136. Ieee, 2011. 5, 6
+[28] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+fields for multi-view reconstruction. In Proceedings of
+the IEEE/CVF international conference on computer vision,
+pages 5589–5599, 2021. 3
+[29] Jeong Joon Park, Peter Florence, Julian Straub, Richard
+Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation.
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition, pages 165–174, 2019. 3
+[30] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+Stopthepop: Sorted gaussian splatting for view-consistent
+real-time rendering. ACM Transactions on Graphics (TOG),
+43(4):1–17, 2024. 2
+[31] Johannes L Schönberger, Enliang Zheng, Jan-Michael
+Frahm, and Marc Pollefeys. Pixelwise view selection for
+unstructured multi-view stereo. In European conference on
+computer vision, pages 501–518. Springer, 2016. 2
+[32] Brandon Smart, Chuanxia Zheng, Iro Laina, and Victor Adrian Prisacariu.
+Splatt3r: Zero-shot gaussian
+splatting from uncalibrated image pairs. arXiv preprint
+arXiv:2408.13912, 2024. 3
+[33] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 5459–
+5469, 2022. 2
+[34] Cheng Sun, Jaesung Choe, Charles Loop, Wei-Chiu Ma, and
+Yu-Chiang Frank Wang. Sparse voxels rasterization: Realtime high-fidelity radiance field rendering. In Proceedings
+of the Computer Vision and Pattern Recognition Conference,
+pages 16187–16196, 2025. 2, 3, 7
+[35] Shinji Umeyama. Least-squares estimation of transformation parameters between two point patterns. IEEE Transactions on pattern analysis and machine intelligence, 13(4):
+376–380, 2002. 4
+[36] Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea
+Vedaldi, Christian Rupprecht, and David Novotny. Vggt: Visual geometry grounded transformer. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+5294–5306, 2025. 3, 4, 6
+[37] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+arXiv preprint arXiv:2106.10689, 2021. 1, 3, 7
+[38] Shuzhe Wang, Vincent Leroy, Yohann Cabon, Boris
+Chidlovskii, and Jerome Revaud. Dust3r: Geometric 3d vi-
+sion made easy. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 20697–
+20709, 2024. 3
+[39] Yifan Wang, Di Huang, Weicai Ye, Guofeng Zhang, Wanli
+Ouyang, and Tong He. Neurodin: A two-stage framework
+for high-fidelity neural surface reconstruction. In NeurIPS,
+2024. 1
+[40] Yaniv Wolf, Amit Bracha, and Ron Kimmel. Gs2mesh: Surface reconstruction from gaussian splatting via novel stereo
+views. In European Conference on Computer Vision, pages
+207–224. Springer, 2024. 7
+[41] Tong Wu, Jiaqi Wang, Xingang Pan, Xudong Xu, Christian
+Theobalt, Ziwei Liu, and Dahua Lin. Voxurf: Voxel-based
+efficient and accurate neural surface reconstruction. arXiv
+preprint arXiv:2208.12697, 2022. 2
+[42] Haofei Xu, Songyou Peng, Fangjinhua Wang, Hermann
+Blum, Daniel Barath, Andreas Geiger, and Marc Pollefeys.
+Depthsplat: Connecting gaussian splatting and depth. In
+Proceedings of the Computer Vision and Pattern Recognition
+Conference, pages 16453–16463, 2025. 2, 3
+[43] Lihe Yang, Bingyi Kang, Zilong Huang, Zhen Zhao, Xiaogang Xu, Jiashi Feng, and Hengshuang Zhao. Depth anything v2. Advances in Neural Information Processing Systems, 37:21875–21911, 2024. 3, 6
+[44] Yao Yao, Zixin Luo, Shiwei Li, Tian Fang, and Long Quan.
+Mvsnet: Depth inference for unstructured multi-view stereo.
+In Proceedings of the European conference on computer vision (ECCV), pages 767–783, 2018. 3
+[45] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems, 33:2492–2502, 2020. 3
+[46] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. In NeurIPS, 2021.
+1
+[47] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. Advances in neural information processing systems, 34:4805–4815, 2021. 3,
+7
+[48] Mulin Yu, Tao Lu, Linning Xu, Lihan Jiang, Yuanbo Xiangli,
+and Bo Dai. Gsdf: 3dgs meets sdf for improved neural rendering and reconstruction. Advances in Neural Information
+Processing Systems, 37:129507–129530, 2024. 3
+[49] Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction. Advances in neural information processing systems,
+35:25018–25032, 2022. 7
+[50] Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian
+opacity fields: Efficient adaptive surface reconstruction in
+unbounded scenes. ACM Transactions on Graphics (ToG),
+43(6):1–13, 2024. 2, 7
+Advancing Structured Priors for Sparse-Voxel Surface Reconstruction
+Supplementary Material
+A. Details on TSDF-to-Opacity Mapping
+Setup. Let F (x) be a truncated signed distance field
+(TSDF) with F < 0 inside the surface and F > 0 outside.
+We construct a differentiable mapping ϕ : F 7→ α ∈ [0, 1]
+that controls how opacity rises around the zero level set. We
+demonstrate a sigmoid-like mapping and a logistic mapping
+(shown in Fig. A1) We denote by a > 0 a small offset (e.g.,
+a = 0.1 in normalized TSDF units).
+(a)
+A.1 Sigmoid-Like Mapping
+Point calibration (equal-thickness): choose β so that
+ϕsig (−a) = p (e.g., p = 0.9):
+A.2 Logistic Density Mapping
+Motivated by NeuS [37], we also consider a bell-shaped
+opacity concentrated near F =0:
+ϕbell (F ; s) =
+4 e−sF
+1 + e−sF
+2 ∈ [0, 1],
+(18)
+i.e., the logistic pdf normalized so its peak is 1 at F =0
+(a thin “opacity shell”). We enforce ϕbell (−a) = b (e.g.,
+b=0.5) to match the inside thickness at F = −a. Solving 4u/(1 + u)2√ = b for u = e−s(−a) = esa gives
+u = (2 − b ± 2 1 − b)/b and s = (ln u)/a (pick the
+u > 1 root for s > 0).
+A.3 From α to Stored Grid Values and Pruning
+The mapped opacity of each grid point is rescaled to
+[min opacity, max opacity] and voxels with opacity below a predefined threshold are pruned. Comparing the two mapping functions, ϕbell concentrates opacity
+more tightly than ϕsig and typically produces fewer abovethreshold voxels (thinner band), leading to a sparser octree
+around the surface at the same pruning threshold.
+1 Step
+Normal
+CD: 0.30
+(b)
+(17)
+β sets the transition sharpness so that a voxel just inside the
+surface (F = −a) reaches a prescribed opacity p, yielding
+a consistent “thickness” across scenes.
+Depth
+RGB
+Depth
+Normal
+1 Step
+1
+a
+.
+=⇒ β = −
+1
+1 + exp(a/β)
+ln p − 1
+20k Steps
+p =
+20k Steps
+We map the voxel grids inside the surface to high opacity
+and grids outside the surface to low opacity with a sigmoidlike function parameterized by transition β:
+
+
+1
+F
+.
+=
+(16)
+ϕsig (F ; β) = σ −
+β
+1 + exp Fβ
+RGB
+CD: 0.30
+(c)
+Figure A1. Visualization of TSDF-to-opacity mapping. (a) The
+sigmoid-like function and the logistic density function. Both
+with p = 0.5, which means the opacity before scaling is 0.5 at
+TSDF = −0.1. (b) Visualization of scene-specific reconstruction
+with sigmoid-like TSDF-to-opacity mapping in the voxel initialization. (c) Visualization of scene-specific reconstruction with logistic TSDF-to-opacity mapping in the voxel initialization. Both
+initialization yield the same geometric quality, which results in
+same CD.
+B. Alternative 3D Foundation Models
+Our pipeline is agnostic to the choice of 3D foundation
+model. In practice, we require only three cues per image:
+calibrated cameras Ci = (Ki , Ri , ti ), dense (or reasonably dense) depth D̃i , and an optional confidence map κ̃i .
+Foundation Model
+24
+37
+40
+55
+63
+65
+69
+83
+97
+105
+106
+110
+114
+118
+122
+Mean
+VGGT
+0.32
+0.50
+0.30
+0.32
+0.69
+0.50
+0.42
+1.00
+0.62
+0.55
+0.33
+0.46
+0.30
+0.32
+0.31
+0.46
+Depth Anything 3
+0.32
+0.49
+0.29
+0.32
+0.71
+0.50
+0.43
+1.00
+0.62
+0.55
+0.32
+0.46
+0.30
+0.32
+0.31
+0.46
+Table A1. Quantitative Comparison on Different Foundation Model Priors. Each row represents Chamfer Distance of reconstruction result
+from our method with prior from the corresponding 3D foundation model. Each column represents a scene in the DTU dataset. The results
+show that our method is foundation model-agnostic with similar performance across different foundation model priors.
+Depth
+Normal
+2k Steps
+1k Steps
+1 Step
+RGB
+Figure A2. Replacing the 3D foundation model. Our method
+runs unchanged when swapping VGGT for another 3D foundation model (here, Depth Anything 3). Results remain crisp at
+early iterations and converge rapidly, illustrating that the pipeline
+is foundation-model agnostic.
+Any foundation model that supplies these can be used via
+a thin adapter: we align predictions to our reconstruction
+frame with a global similarity transform (scale s and rigid
+(R, t)), rescale depths Di = s D̃i , and pass (Ci , Di , κi ) to
+our Voxel Initialization with Level of Details (Sec. 4.1). No
+point-map or track outputs are required. When a confidence
+map is unavailable, we use multi-view depth consistency as
+a proxy for voxel initialization.
+To demonstrate this foundation model-agnostic property,
+beyond VGGT we also ran the full pipeline using a different 3D foundation model Depth Anything 3 [22]. Table A1
+compares the geometry accuracy in Chamfer Distance on
+DTU dataset and shows that different foundation model priors achieve the same quantitative results. The qualitative results in Fig. A2 show that our initialization and refinement
+behave consistently—preserving early sharpness and converging quickly—without any changes to losses, schedules,
+or octree settings.
+C. Mesh Visualization
+We reconstruct meshes from our trained sparse voxel octrees using the official TSDF-based mesh extraction method
+provided by the DTU benchmark. The visualization in
+Fig. A3 shows that the resulting meshes are smooth while
+preserving fine detail.
+Figure A3. Qualitative results of the reconstructed mesh.

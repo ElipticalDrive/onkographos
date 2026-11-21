@@ -1,0 +1,91 @@
+ General purpose microscope control repository. Contribute to inductivebias/voxel development by creating an account on GitHub.
+
+Upgrade ome_zarr_writer to OME-NGFF v0.6 with affine shear & streaming deskew by stevenjcook · Pull Request #1 · inductivebias/voxel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stevenjcook
+commented
+Nov 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+Upgrades ome_zarr_writer from OME-NGFF v0.5 to v0.6 (branched from mobi) and adds oblique stage-scan deskewing support, both via native OME-NGFF 0.6 AffineTransform metadata (for zero-copy on-the-fly GPU deskewing in Neuroglancer) and via fast, exact 1D 2-tap linear slice/volume/dataset deskewing into an orthogonal multiscale OME-Zarr 0.6 pyramid.
+Why OME-NGFF v0.6?
+In google/neuroglancer (src/datasource/zarr/ome.ts), Neuroglancer explicitly gates RFC-5 coordinate transformation behavior on version !== "0.4" && version !== "0.5-dev" && version !== "0.5":
+In 0.5, Neuroglancer forces baseTransform = Identity, discarding non-diagonal affine shear/rotation transforms and misaligning downsampled pyramid levels by half a voxel per level (voxel_size * (2^L - 1) / 2).
+In 0.6, Neuroglancer parses coordinateSystems and SequenceTransform (scale $\to$ translation $\to$ affine), surfacing the oblique light-sheet shear (baseTransformWithoutScale) directly as the Neuroglancer layer transform while keeping all pyramid levels (L0..L7) registered via makeAffineRelativeToBaseTransform.
+Our existing Neuroglancer viewer container (55f2fa501f20f79fa8a9cbe1ef00a394ee7e22e1) already supports OME-Zarr 0.6 out of the box with zero changes to Neuroglancer base code.
+Key Changes
+OME-NGFF v0.6 Metadata Schema (omezarr/src/ome_zarr_writer/dataset.py)
+Upgraded OmeMeta.version to Literal["0.6"] = "0.6".
+Added CoordinateSystem, TransformEndpoint, AffineTransform (including AffineTransform.from_shear(shear_xz=..., shear_yz=..., ndim=4)), SequenceTransform, and Omero / OmeroChannel / OmeroWindow.
+Updated Multiscale to emit coordinateSystems: [{"name": "physical", "axes": [...]}] and Dataset to emit SequenceTransform(input={"path": level.path}, output={"name": "physical"}, transformations=[ScaleTransform, TranslationTransform?, AffineTransform?]), while still accepting flat axes and flat [ScaleTransform, ...] lists at construction time for ergonomic backward compatibility.
+Updated Zarr3GroupMeta.multiscale() to include half-voxel center-of-voxel pyramid translations (voxel_size * (f - 1) / 2 for f > 1), optional stage origin, optional shear_xz / shear_yz AffineTransform, and default omero channel display metadata.
+Added OmeZarrDataset.read_metadata(), .voxel_size, .voxel_unit, and .shear_xz helpers.
+Writer & Camera Stack Wiring (omezarr/src/ome_zarr_writer/writer.py, src/vxl/devices/camera/base.py, src/vxl/devices/camera/handle.py)
+Added optional origin: Vec3D | None = None, shear_xz: float = 0.0, shear_yz: float = 0.0, channel_label: str = "channel 0", and channel_color: str = "FFFFFF" to WriterConfig and CameraController.open_stack / CameraHandle.open_stack.
+Fast, Exact 1D 2-Tap Linear Deskewing (omezarr/src/ome_zarr_writer/deskew.py)
+Added Numba-JIT parallel deskew_slice(plane, shift_x, cval=0.0, out=...) that writes directly into preallocated 2D buffers (such as OMEZarrWriter.new_frame()) with zero intermediate frame allocation.
+Added deskew_volume(volume, shear_factor, cval=0.0) for in-memory 3D (Z, Y, X) arrays.
+Added deskew_dataset(source, storage, ...) which streams L0 slabs from an acquired OME-Zarr 0.6 dataset (automatically reading shear_xz from its AffineTransform metadata unless overridden) through OMEZarrWriter to write an orthogonal, sharded multiscale OME-Zarr 0.6 pyramid without materializing the full volume in RAM.
+Local Verification (No lm-1 Hardware Used)
+Unit & streaming pyramid deskew tests (omezarr/tests/test_deskew.py, omezarr/tests/metadata/):
+uv run pytest omezarr/tests/ -k "not s3" $\to$ 118 passed
+Simulated Voxel camera & continuous acquisition tests (tests/slow/test_camera_lifecycle.py, tests/instrument/):
+Added test_simulated_camera_stack_writes_v06_metadata_and_deskews exercising SimulatedCamera + CameraController.open_stack with oblique shear_xz and origin, verifying zarr.json 0.6 metadata on disk, and streaming through deskew_dataset into a multiscale deskewed pyramid.
+Full non-hardware test suite: uv run pytest -k "not s3" $\to$ 969 passed, 13 skipped (hardware)
+Static analysis & formatting:
+uv run ruff check . $\to$ All checks passed
+uv run ruff format --check . $\to$ 436 files formatted
+uv run basedpyright on all touched modules $\to$ 0 errors, 0 warnings
+Hardware Testing Plan on lm-1
+Before merging into mobi and deploying for production runs on lm-1:
+Single-Pass X-Scan Acquisition Smoke Test (lm-1)
+Check out steve-ome-zarr-0.6 on lm-1 (uv sync).
+Run a short X-scan acquisition (e.g., $N = 100\text{--}250$ frames at $\Delta x = 2.0\ \mu\text{m}$ and $0.8\ \mu\text{m}$ with the Teledyne Kinetix camera and Zaber X-stage + NI PCIe-6353 encoder pacing).
+Inspect the generated <channel>.ome.zarr/zarr.json on disk:
+Confirm "version": "0.6", "coordinateSystems" (name: "physical"), "type": "sequence" per pyramid level (0..7), half-voxel pyramid translations on 1..7, and "omero" window/channel metadata.
+Verify in the writer logs (Writer timing for ...) that shared-memory ring allocation, worker pyramid downsampling, and TensorStore shard flushing maintain the same throughput as 0.5 with zero ring backpressure stalls.
+Neuroglancer Live Viewing Verification (colfax-2 / lm-1)
+Point the Neuroglancer viewer (zarr3://http://.../<channel>.ome.zarr) at both:
+A raw oblique stack written with shear_xz = shear_xz_from_angle(28.0) in zarr.json (verifying Neuroglancer's on-the-fly GPU affine shear transform and multi-resolution L0..L7 pyramid alignment when zooming in/out).
+A materialized orthogonal pyramid produced by deskew_dataset(raw_path, Local(target=...)) (verifying physical voxel aspect ratios, zero clipping across the full deskewed $X'$ width, and smooth L0..L7 LOD transitions).
+Multi-Tile Stage Origin & Stitching Registration Check
+Acquire two adjacent $Y$-stepped X-scan strips on lm-1 with stage origin populated (Vec3D(z=..., y=..., x=...)).
+Load both .ome.zarr volumes simultaneously into Neuroglancer and verify that their SequenceTransform translations place both strips at their expected physical stage coordinates in the shared "physical" coordinate system.
+Upgrade ome_zarr_writer to OME-NGFF v0.6 with affine shear & streamin…
+…
+1fe2511
+```
+…g deskew
+```
+stevenjcook
+force-pushed
+the
+steve-ome-zarr-0.6
+branch
+from
+82589fe to
+1fe2511
+Compare
+November 8, 2026 18:56
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,123 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-X-ray projection (also called Forward Projection or aTx) is a volume rendering composition scheme where interpolated samples along a ray are simply summed to produce an image [S1]. It mimics the physical process of X-ray attenuation, where the total signal is the integral of density along the ray path [G]. Unlike alpha blending, which preserves depth cues through opacity accumulation, this method loses depth information, making it suitable for visualizing high-density structures like bones or vessels where relative depth is less critical than total integrated intensity [S1].
++X-ray projection (also called Forward Projection or aTx) is a volume rendering composition scheme where interpolated samples along a ray are simply summed to produce an image [S1]. It mimics the physical process of X-ray attenuation, where the total signal is the integral of density along the ray path [G]. Unlike alpha blending, which preserves depth cues through opacity accumulation, this method loses depth information, making it suitable for visualizing high-density structures like bones or vessels where relative depth is less critical than total integrated intensity [S1]. It builds on the shared compositing principles of [Projection and MIP Techniques](6305-projection-and-mip-techniques.md) but replaces the transmittance-weighted accumulation with a direct linear sum [G].
+ 
+ ## How it works
+@@ -24,5 +24,5 @@
+    a. Compute the 3D world position $\mathbf{p}_k = \mathbf{r}(s_k)$ [G].
+    b. Sample the volume value $v_k = V(\mathbf{p}_k)$ using interpolation (e.g., trilinear) [G].
+-   c. Update the accumulator: $A \leftarrow A + \Delta s \cdot v_k$ [S2, G, unofficial].
++   c. Update the accumulator: $A \leftarrow A + \Delta s \cdot v_k$ [S2, unofficial].
+ 4. Assign the final accumulator value to the pixel: $P_{ij} = A$ [G].
+ 
+@@ -46,5 +46,5 @@
+ def forward_projection(volume, ray_origins, ray_directions, step_size):
+     """
+-    volume: 3D list/tuple or array of shape (D, H, W)
++    volume: 3D array of shape (D, H, W)
+     ray_origins: 2D array of shape (H_out, W_out, 3)
+     ray_directions: 2D array of shape (H_out, W_out, 3)
+@@ -52,7 +52,6 @@
+     """
+     H_out, W_out, _ = ray_origins.shape
+-    projection = [[0.0 for _ in range(W_out)] for _ in range(H_out)]
+     D, H, W = volume.shape
+-    max_dist = 1000.0  # Placeholder for actual bounding box intersection logic
++    projection = [[0.0] * W_out for _ in range(H_out)]
+ 
+     for y in range(H_out):
+@@ -65,14 +64,33 @@
+                 direction = [d / norm for d in direction]
+             else:
+-                direction = [0.0, 0.0, 0.0]
++                continue
+ 
+             accumulator = 0.0
+-            # Iterate along the ray
+-            for s in range(0, int(max_dist / step_size)):
+-                point_x = origin[0] + s * step_size * direction[0]
+-                point_y = origin[1] + s * step_size * direction[1]
+-                point_z = origin[2] + s * step_size * direction[2]
++            # Determine traversal bounds along the ray [G]
++            # Standard ray-box intersection logic [G]
++            min_t = 0.0
++            max_t = float('inf')
++            for dim, size in enumerate([D, H, W]):
++                if abs(direction[dim]) > 1e-8:
++                    t1 = -origin[dim] / direction[dim]
++                    t2 = (size - origin[dim]) / direction[dim]
++                    t_min = min(t1, t2)
++                    t_max = max(t1, t2)
++                    min_t = max(min_t, t_min)
++                    max_t = min(max_t, t_max)
++                else:
++                    if origin[dim] < 0 or origin[dim] >= size:
++                        min_t = max_t  # Force empty range
++            if min_t >= max_t:
++                projection[y][x] = accumulator
++                continue
+ 
+-                # Check if point is within volume bounds
++            num_steps = int((max_t - min_t) / step_size)
++            for step_idx in range(num_steps):
++                t = min_t + step_idx * step_size
++                point_x = origin[0] + t * direction[0]
++                point_y = origin[1] + t * direction[1]
++                point_z = origin[2] + t * direction[2]
++
+                 if 0 <= point_x < D and 0 <= point_y < H and 0 <= point_z < W:
+                     v = trilinear_sample(volume, point_x, point_y, point_z)
+@@ -80,17 +98,31 @@
+ 
+             projection[y][x] = accumulator
+-
+     return projection
+ 
+ def trilinear_sample(volume, x, y, z):
+-    # Standard trilinear interpolation implementation [G]
++    # Standard trilinear interpolation [G]
+     ix, iy, iz = int(x), int(y), int(z)
+     fx, fy, fz = x - ix, y - iy, z - iz
+-    # Clamp indices to volume bounds
++    # Clamp indices
+     ix = max(0, min(ix, volume.shape[0] - 1))
+     iy = max(0, min(iy, volume.shape[1] - 1))
+     iz = max(0, min(iz, volume.shape[2] - 1))
+-    # Nearest-neighbor fallback for brevity; replace with full trilinear blend [G]
+-    return volume[ix][iy][iz]
++    # Fetch 8 neighbors
++    v000 = volume[ix][iy][iz]
++    v100 = volume[min(ix+1, volume.shape[0]-1)][iy][iz]
++    v010 = volume[ix][min(iy+1, volume.shape[1]-1)][iz]
++    v110 = volume[min(ix+1, volume.shape[0]-1)][min(iy+1, volume.shape[1]-1)][iz]
++    v001 = volume[ix][iy][min(iz+1, volume.shape[2]-1)]
++    v101 = volume[min(ix+1, volume.shape[0]-1)][iy][min(iz+1, volume.shape[2]-1)]
++    v011 = volume[ix][min(iy+1, volume.shape[1]-1)][min(iz+1, volume.shape[2]-1)]
++    v111 = volume[min(ix+1, volume.shape[0]-1)][min(iy+1, volume.shape[1]-1)][min(iz+1, volume.shape[2]-1)]
++    # Interpolate
++    c00 = v000 * (1-fx) + v100 * fx
++    c01 = v010 * (1-fx) + v110 * fx
++    c10 = v001 * (1-fx) + v101 * fx
++    c11 = v011 * (1-fx) + v111 * fx
++    r0 = c00 * (1-fy) + c01 * fy
++    r1 = c10 * (1-fy) + c11 * fy
++    return r0 * (1-fz) + r1 * fz
+ ```
+ 
+@@ -110,8 +142,8 @@
+ - **Memory Complexity:** Not given in the sources.
+ - **Performance:** Not given in the sources.
+-- **Strengths:** Simple implementation, fast computation, good for visualizing dense structures.
+-- **Limitations:** No depth information, no transparency effects, sensitive to sampling density.
+-- **When to use:** When depth cues are not required, and the goal is to visualize the total integrated density (e.g., bone visualization in CT).
+-- **When not to use:** When transparency, occlusion, or depth perception is important.
++- **Strengths:** Simple implementation, fast computation, good for visualizing dense structures [S1].
++- **Limitations:** No depth information, no transparency effects, sensitive to sampling density [S1].
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background

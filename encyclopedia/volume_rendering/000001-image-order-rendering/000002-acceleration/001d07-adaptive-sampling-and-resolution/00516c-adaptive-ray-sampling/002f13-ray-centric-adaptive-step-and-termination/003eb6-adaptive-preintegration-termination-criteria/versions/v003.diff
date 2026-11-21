@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -4,96 +4,57 @@
+ 
+ ## Overview
+-Adaptive Preintegration Termination Criteria is a method for determining when to stop subdividing a ray segment during volume rendering, specifically within the context of preintegration. It solves the problem of balancing rendering accuracy against computational cost by recursively splitting intervals only when the estimated error exceeds a threshold. It sets itself apart from standard adaptive sampling [1385-adaptive-sampling.md] by using the difference between two precomputed integral approximations ($C_1$ and $C_2$) as the error metric, rather than just local density or gradient magnitude.
++Adaptive Preintegration Termination Criteria is a method for determining when to stop subdividing a ray segment during volume rendering with preintegration. It solves the problem of balancing rendering accuracy against computational cost by recursively splitting intervals only when the change in the accumulated volume integral exceeds a threshold. It differs from fixed-step preintegration by dynamically adjusting the sampling density based on the local complexity of the scalar field and transfer function, ensuring that isosurfaces and high-frequency details are captured without unnecessary queries.
+ 
+ ## How it works
+-The method operates on a recursive subdivision scheme. It computes two approximations of the volume integral over an interval $[d_i, d_{i+1}]$: $C_1$ (using a coarse step) and $C_2$ (using a finer step or midpoint). The decision to subdivide further is based on the relative difference between these values, adapted by the accumulated opacity.
++The method operates on a ray segment $[d_i, d_{i+1}]$ and recursively subdivides it until the relative error in the preintegrated color approximation falls below a tolerance $\varepsilon$.
+ 
+-**Inputs and Outputs**
+-*   **Inputs:** Preintegration tables (opacity, shading), ray parameters ($d_i, d_{i+1}$), accumulated opacity $\alpha_i$ at the start of the interval, scalar field $f(\mathbf{x})$, and transfer function $T$.
+-*   **Outputs:** Final color contribution for the interval, and a boolean indicating if further subdivision is required.
++**Inputs:**
++*   Ray origin $\mathbf{o}$ and direction $\mathbf{v}$.
++*   Current interval bounds $d_i, d_{i+1}$.
++*   Preintegration tables for opacity $\alpha$ and color $C$.
++*   Scalar field function $f(\mathbf{x})$ and its gradient $\nabla f(\mathbf{x})$.
++*   Tolerance parameter $\varepsilon$.
++*   Bounds for interval length $l_{min}$ and $l_{max}$ [S1, unofficial].
+ 
+-**Data Structures**
+-*   **Preintegration Tables:** Packed tables storing opacity and shading values as a function of step size and density [S1, unofficial].
+-*   **Interval State:** Start distance $d_i$, end distance $d_{i+1}$, accumulated opacity $\alpha_i$.
++**Outputs:**
++*   Accumulated color and opacity for the interval.
++*   Boolean flag indicating if further subdivision is required.
+ 
+-**Algorithm Steps**
+-1.  **Compute Approximations:** Calculate $C_1$ and $C_2$ for the current interval $[d_i, d_{i+1}]$ using the preintegration tables. $C_1$ typically represents the integral over the full interval, while $C_2$ represents the sum of integrals over two sub-intervals (e.g., $[d_i, d_{mid}]$ and $[d_{mid}, d_{i+1}]$).
+-2.  **Calculate Relative Error:** Compute the relative error between the two approximations:
+-    $$ E_{rel} = \frac{|C_1 - C_2|}{|C_2|} $$
+-    where $|C| = \sqrt{C.r^2 + C.g^2 + C.b^2}$ is the Euclidean norm of the color vector [S1, unofficial].
+-3.  **Adapt for Opacity:** Multiply the relative error by the remaining opacity $(1 - \alpha_i)$ to weight the error by the contribution to the final pixel:
+-    $$ E_{adapted} = (1 - \alpha_i) E_{rel} $$
+-4.  **Check Termination:** If $E_{adapted} < \varepsilon$ (a small threshold, e.g., $10^{-3}$), the interval is accepted, and the color $C_1$ (or $C_2$) is returned. Otherwise, the interval is subdivided.
+-5.  **Recursive Subdivision:** Split the interval at the midpoint $d_{mid} = (d_i + d_{i+1})/2$. Crucially, the left sub-interval $[d_i, d_{mid}]$ must be processed first to determine its accumulated opacity $\alpha_{mid}$. This $\alpha_{mid}$ is then used as the starting opacity for processing the right sub-interval $[d_{mid}, d_{i+1}]$ [S1, unofficial].
++**Data Structures:**
++*   **Preintegration Tables:** Packed tables storing precomputed integrals of the transfer function. The specific layout depends on the underlying preintegration scheme (e.g., incremental subrange preintegration [S1, unofficial]), but typically includes entries for opacity $\alpha$ and color components $C.r, C.g, C.b$.
++*   **Scalar Field:** A function $f(\mathbf{x})$ that can be evaluated at any point along the ray, often using Moving Least Squares (MLS) reconstruction [S1, unofficial].
+ 
+-**Pseudocode**
+-```python
+-def adaptive_preintegration_interval(d_start, d_end, alpha_in, preint_tables, epsilon):
+-    """
+-    Recursively subdivides an interval based on preintegration error.
+-    """
+-    # 1. Compute coarse approximation C1 over [d_start, d_end]
+-    C1 = compute_preint_color(d_start, d_end, preint_tables)
+-    
+-    # 2. Compute fine approximation C2 by splitting at midpoint
+-    d_mid = (d_start + d_end) / 2.0
+-    C2_left = compute_preint_color(d_start, d_mid, preint_tables)
+-    C2_right = compute_preint_color(d_mid, d_end, preint_tables)
+-    C2 = C2_left + C2_right
+-    
+-    # 3. Calculate relative error
+-    norm_C2 = sqrt(C2.r**2 + C2.g**2 + C2.b**2)
+-    if norm_C2 == 0:
+-        return C1, alpha_in # No contribution
+-    
+-    diff = sqrt((C1.r - C2.r)**2 + (C1.g - C2.g)**2 + (C1.b - C2.b)**2)
+-    rel_error = diff / norm_C2
+-    
+-    # 4. Adapt error by remaining opacity
+-    remaining_opacity = 1.0 - alpha_in
+-    adapted_error = remaining_opacity * rel_error
+-    
+-    # 5. Check termination
+-    if adapted_error < epsilon:
+-        return C1, alpha_in + compute_opacity(d_start, d_end, preint_tables)
+-    
+-    # 6. Recursive subdivision
+-    # Process left interval first to get alpha_mid
+-    C_left, alpha_mid = adaptive_preintegration_interval(d_start, d_mid, alpha_in, preint_tables, epsilon)
+-    
+-    # Process right interval using alpha_mid
+-    C_right, alpha_out = adaptive_preintegration_interval(d_mid, d_end, alpha_mid, preint_tables, epsilon)
+-    
+-    return C_left + C_right, alpha_out
++**Steps:**
++1.  **Evaluate Interval Endpoints:** Compute the scalar values $f(\mathbf{x}(d_i))$ and $f(\mathbf{x}(d_{i+1}))$ and their gradients $\nabla f(\mathbf{x}(d_i))$ and $\nabla f(\mathbf{x}(d_{i+1}))$ [S1, unofficial].
++2.  **Check Extrema Condition:** Determine if the interval contains a scalar function extremum. Compute the directional derivatives $D_{\mathbf{v}}(f(\mathbf{x}(d_i))) = \nabla f(\mathbf{x}(d_i)) \cdot \mathbf{v}$ and $D_{\mathbf{v}}(f(\mathbf{x}(d_{i+1}))) = \nabla f(\mathbf{x}(d_{i+1})) \cdot \mathbf{v}$ [S1, unofficial]. If $D_{\mathbf{v}}(f(\mathbf{x}(d_i))) D_{\mathbf{v}}(f(\mathbf{x}(d_{i+1}))) < 0$, force subdivision [S1, unofficial].
++3.  **Compute Midpoint Approximation:** If not forced by extrema, calculate the midpoint $d_{i+1/2} = (d_i + d_{i+1}) / 2$. Evaluate the preintegrated color $C_1$ for the full interval $[d_i, d_{i+1}]$ and the preintegrated color $C_2$ for the two sub-intervals $[d_i, d_{i+1/2}]$ and $[d_{i+1/2}, d_{i+1}]$ [S1, unofficial]. Note: The opacity $\alpha_{i+1/2}$ at the midpoint must be computed before subdividing the second half, as it is used in the termination criteria for that segment [S1, unofficial].
++4.  **Calculate Relative Error:** Compute the magnitude of the color vectors $|C| = \sqrt{C.r^2 + C.g^2 + C.b^2}$ [S1, unofficial]. Calculate the relative error approximation:
++    $$ E = \frac{|C_1 - C_2|}{|C_2|} $$
++    [S1, unofficial]
++5.  **Adapt for Opacity:** Multiply the relative error by $(1 - \alpha_i)$, where $\alpha_i$ is the accumulated opacity up to $d_i$, to adapt sampling as opacity increases [S1, unofficial].
++6.  **Check Termination:** The interval is considered converged if:
++    $$ (1 - \alpha_i) \frac{|C_1 - C_2|}{|C_1|} < \varepsilon $$
++    [S1, unofficial]
++    *Note: The source uses $|C_1|$ in the denominator of the final formula (Eq. 17) but $|C_2|$ in the definition of relative error (text). The final termination criteria explicitly uses $|C_1|$ [S1, unofficial].*
++7.  **Recursion:** If the termination criteria is not met and the interval length is greater than $l_{min}$, recursively apply the steps to the sub-intervals $[d_i, d_{i+1/2}]$ and $[d_{i+1/2}, d_{i+1}]$ [S1, unofficial]. If the interval length is less than $l_{min}$, stop subdivision [S1, unofficial].
+ 
+-def compute_preint_color(d_start, d_end, tables):
+-    """
+-    Looks up color in preintegration table based on interval length and density.
+-    Implementation detail: Not given in sources.
+-    """
+-    pass
+-```
+-
+-**Parameters and Typical Values**
+-*   **$\varepsilon$:** Termination threshold. Not given in the sources.
+-*   **$l_{max}, l_{min}$:** Bounds on interval length. Not given in the sources.
+-
+-**Edge Cases and Pitfalls**
+-*   **Non-monotonic Functions:** Standard subdivision may miss isosurfaces near extrema. This is handled by an additional check on derivatives (see Subtopics).
+-*   **Gradient Accuracy:** The extrema check relies on accurate gradient computation. Inaccurate gradients lead to incorrect subdivision decisions [S1, unofficial].
+-*   **Order of Operations:** The left sub-interval must be evaluated before the right to correctly propagate accumulated opacity [S1, unofficial].
++**Pitfalls:**
++*   **Gradient Accuracy:** The accuracy of the extrema-based termination criteria heavily depends on the accuracy of the computed gradient $\nabla f(\mathbf{x})$ [S1, unofficial].
++*   **Non-Monotonic Fields:** If the scalar field is not monotonic and extrema are not detected, isosurfaces near extrema may be missed [S1, unofficial].
++*   **Numerical Precision:** For constant transfer functions and linear scalar fields, $C_1$ and $C_2$ should be equal within numerical errors, making the scheme automatically optimal in these cases [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Extrema-Based Subdivision
+-A variant that forces subdivision at scalar function extrema to ensure isosurfaces are not missed in non-monotonic regions. An interval $[d_i, d_{i+1}]$ is subdivided if the directional derivatives at the endpoints have opposite signs: $D_{\mathbf{v}}(f(\mathbf{x}(d_i))) D_{\mathbf{v}}(f(\mathbf{x}(d_{i+1}))) < 0$, where $D_{\mathbf{v}}(f(\mathbf{x})) = \nabla f(\mathbf{x}) \cdot \mathbf{v}$ [S1, unofficial]. This is efficient in MLS frameworks as gradients are already computed for shading. Accuracy depends heavily on gradient precision [S1, unofficial].
++A subdivision scheme that forces subdivision at scalar function extrema to recover isosurfaces that might be missed if the function is not monotonic over an interval. It uses the sign change of the directional derivative at the interval endpoints to detect extrema. An interval $[d_i, d_{i+1}]$ is subdivided if $D_{\mathbf{v}}(f(\mathbf{x}(d_i))) D_{\mathbf{v}}(f(\mathbf{x}(d_{i+1}))) < 0$, where $D_{\mathbf{v}}(f(\mathbf{x})) = \nabla f(\mathbf{x}) \cdot \mathbf{v}$ [S1, unofficial]. The accuracy of this criteria depends on the accuracy of the computed gradient [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Adaptive; complexity depends on the local complexity of the scalar field and transfer function.
+-*   **Strengths:** Automatically optimal for constant transfer functions and linear scalar fields, as $C_1$ and $C_2$ will be equal within numerical errors [S1, unofficial].
+-*   **Limitations:** Requires precomputed tables and accurate gradient information for the extrema check.
++*   **Complexity:** The number of samples is adaptive. In smooth regions, few samples are taken; in complex regions, many samples are taken. The worst-case complexity is bounded by $l_{min}$, but typically much lower than uniform sampling.
++*   **Performance:** Reduces the total number of volume queries and network evaluations while maintaining visual fidelity [S1, unofficial].
++*   **Strengths:** Automatically optimal for constant transfer functions and linear scalar fields [S1, unofficial]. Efficiently handles high-frequency details via extrema detection.
++*   **Limitations:** Requires accurate gradient computation, which can be costly or inaccurate for noisy data. The recursion depth is limited by $l_{min}$ and $l_{max}$ [S1, unofficial].
+ 
+ ## Background
+-This method is described in the context of Volume MLS Ray Casting [S1, unofficial]. It utilizes preintegration tables to accelerate the compositing step while maintaining adaptivity.
++The method is part of the Volume MLS Ray Casting framework, which uses Moving Least Squares (MLS) for scalar field reconstruction. The adaptive preintegration termination criteria was proposed to improve the efficiency of volume rendering by avoiding unnecessary subdivisions in smooth regions while ensuring accuracy in complex regions. The approach builds on preintegration techniques and extends them with adaptive subdivision based on error estimation and extrema detection [S1, unofficial].
+ 
+ ## Sources

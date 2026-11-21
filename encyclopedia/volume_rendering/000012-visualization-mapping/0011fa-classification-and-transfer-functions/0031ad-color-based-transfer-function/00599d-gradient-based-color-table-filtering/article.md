@@ -1,0 +1,90 @@
+# Gradient-Based Color Table Filtering
+
+
+## Overview
+Gradient-Based Color Table Filtering is a technique for accurately filtering color table-based textures by estimating the noise value range $\delta$ from the local noise gradient [S1]. It addresses the error introduced when noise values and gradients are evaluated on unfiltered noise, which is a common source of inaccuracy in procedural noise rendering [S1]. Unlike Variance-Based Color Table Filtering, which relies on analytical noise variance, this method leverages local gradient estimation to determine the appropriate filtering interval [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A procedural noise function $N(u)$, a 1D color table $C(u)$, and the local gradient of the noise $\nabla N(u)$.
+*   Output: A filtered color value $C_{filtered}$.
+
+**Data Structures:**
+*   The color table $C$ is typically stored as a 1D texture or array, allowing for hardware-accelerated interpolation (e.g., MIP-mapping) [S1].
+
+**Steps:**
+1.  Evaluate the noise value $u = N(x)$ at the current spatial position $x$ [S1].
+2.  Compute the local noise gradient $\nabla N(u)$ at $x$. This can be done via finite differencing or analytically, as most procedural noises are differentiable [S1].
+3.  Estimate the range of noise values $\delta$ over the filter footprint. The size of the interval is computed based on the filter size and the magnitude of the local noise gradient [S1].
+    *   Formula: $\delta \propto \|\nabla N(u)\| \cdot \text{filter\_size}$ [S1].
+    *   Note: The exact proportionality constant depends on the specific filter kernel used (e.g., Gaussian, box) [S1].
+4.  Define the interval $[u - \delta, u + \delta]$ [S1].
+5.  Evaluate the color over this small interval using MIP-mapping on the 1D color table [S1]. This effectively averages the color values across the estimated range of noise values.
+
+**Pitfalls:**
+*   A significant source of error is that the noise value $u$ and the gradient $\nabla N(u)$ are evaluated on the unfiltered noise [S1]. This can lead to inaccuracies, particularly in regions with high-frequency noise or sharp gradients [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_based_color_table_filtering(noise_func, color_table, position, filter_size):
+    # 1. Evaluate noise value
+    u = noise_func(position)
+    
+    # 2. Compute local noise gradient
+    # Using finite differencing with a small epsilon
+    epsilon = 1e-6
+    gradient = compute_gradient(noise_func, position, epsilon)
+    
+    # 3. Estimate range delta
+    # Proportionality constant depends on filter kernel; assume 1.0 for simplicity
+    delta = norm(gradient) * filter_size
+    
+    # 4. Evaluate color over interval [u - delta, u + delta]
+    # Using MIP-mapping or linear interpolation on the color table
+    # This step assumes color_table supports sampling over a range
+    filtered_color = sample_color_table_range(color_table, u, delta)
+    
+    return filtered_color
+
+def compute_gradient(noise_func, position, epsilon):
+    # Central difference approximation for gradient
+    grad = [0.0, 0.0, 0.0]
+    for i in range(3):
+        pos_plus = position.copy()
+        pos_minus = position.copy()
+        pos_plus[i] += epsilon
+        pos_minus[i] -= epsilon
+        grad[i] = (noise_func(pos_plus) - noise_func(pos_minus)) / (2 * epsilon)
+    return grad
+
+def sample_color_table_range(color_table, u, delta):
+    # Sample the color table at u - delta and u + delta and average
+    # Or use MIP-mapping if available
+    c_low = color_table.sample(u - delta)
+    c_high = color_table.sample(u + delta)
+    return (c_low + c_high) / 2.0
+```
+
+## Subtopics
+
+### [Variance-Based Color Table Filtering](16457-variance-based-color-table-filtering.md)
+Estimates $\delta$ from the loss in noise variance due to filtering, using analytical noise variance expressions. Choose when analytical variance is available and gradient estimation is insufficient.
+
+### [Gradient-Aware Color Table Filtering](17190-gradient-aware-color-table-filtering.md)
+A refinement using local noise gradient to improve accuracy. Choose when higher precision is needed and gradient computation is feasible.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the cost of evaluating the noise function and its gradient. Gradient computation via finite differencing requires multiple noise evaluations (e.g., 6 for 3D central differences) [S1].
+*   **Memory Complexity:** Minimal, primarily storing the color table and noise function state [S1].
+*   **Strengths:** Accurate filtering in regions with varying noise frequencies; leverages differentiability of common noise functions [S1].
+*   **Limitations:** Error arises from evaluating gradient on unfiltered noise; requires differentiable noise functions or finite differencing overhead [S1].
+*   **When to use:** When procedural noise is differentiable and high-quality filtering is required [S1].
+*   **When not to use:** When noise is non-differentiable or gradient computation is too expensive [S1].
+
+## Background
+Originated from Hart et al. [HCK99], who refined color table filtering by incorporating local noise gradients [S1]. This approach addresses limitations of earlier methods that did not account for local noise variation [S1]. Lagae et al. [LLDD09a] later proposed a related variance-based approach [S1].
+
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27

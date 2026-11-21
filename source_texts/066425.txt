@@ -1,0 +1,681 @@
+Layer-Structured 3D Scene Inference
+via View Synthesis
+Shubham Tulsiani1(B) , Richard Tucker2 , and Noah Snavely2
+1
+University of California, Berkeley, Berkeley, USA
+shubhtuls@cs.berkeley.edu
+2
+Google, Menlo Park, USA
+Abstract. We present an approach to infer a layer-structured 3D representation of a scene from a single input image. This allows us to infer
+not only the depth of the visible pixels, but also to capture the texture
+and depth for content in the scene that is not directly visible. We overcome the challenge posed by the lack of direct supervision by instead
+leveraging a more naturally available multi-view supervisory signal. Our
+insight is to use view synthesis as a proxy task: we enforce that our representation (inferred from a single image), when rendered from a novel
+perspective, matches the true observed image. We present a learning
+framework that operationalizes this insight using a new, diﬀerentiable
+novel view renderer. We provide qualitative and quantitative validation
+of our approach in two diﬀerent settings, and demonstrate that we can
+learn to capture the hidden aspects of a scene. The project website can
+be found at https://shubhtuls.github.io/lsi/.
+1
+Introduction
+Humans have the ability to perceive beyond what they see, and to imagine the
+structure of the world even when it is not directly visible. Consider the image
+in Fig. 1. While we can clearly see a street scene with objects such as cars and
+trees, we can also reason about the shape and appearance of aspects of the scene
+hidden from view, such as the continuation of the buildings behind the trees, or
+the ground underneath the car.
+While we humans can perceive the full 3D structure of a scene from a single image, scene representations commonly used in computer vision are often
+restricted to modeling the visible aspects, and can be characterized as 2.5D representations [17]. 2.5D representations such as depth maps are straightforward
+to use and learn because there is a one-to-one mapping between the pixels of an
+input image and the output representation. For the same reason, they also fail
+S. Tulsiani—The majority of the work was done while interning at Google.
+Electronic supplementary material The online version of this chapter (https://
+doi.org/10.1007/978-3-030-01234-2 19) contains supplementary material, which is
+available to authorized users.
+c
+ Springer Nature Switzerland AG 2018
+V. Ferrari et al. (Eds.): ECCV 2018, LNCS 11211, pp. 311–327, 2018.
+https://doi.org/10.1007/978-3-030-01234-2_19
+312
+S. Tulsiani et al.
+Fig. 1. Perception beyond the visible. On the left is an image of a street scene.
+While some parts of the scene are occluded, such as the building behind the tree
+highlighted by the red box, humans have no trouble reasoning about the shape and
+appearance of such hidden parts. In this work we go beyond 2.5D shape representations
+and learn to predict layered scene representations from single images that capture
+more complete scenes, including hidden objects. On the right, we show our method’s
+predicted 2-layer texture and shape for the highlighted area: (a, b) show the predicted
+textures for the foreground and background layers respectively, and (c, d) show the
+corresponding predicted inverse depth. Note how both predict structures behind the
+tree, such as the continuation of the building. (Color ﬁgure online)
+to allow for any extrapolation beyond what is immediately visible. In contrast,
+a robot or other agent might wish to predict the appearance of a scene from a
+diﬀerent viewpoint, or reason about which parts of the scene are navigable. Such
+tasks are beyond what can be achieved in 2.5D.
+In this work, we take a step towards reasoning about the 3D structure of
+scenes by learning to predict a layer-based representation from a single image.
+We use a representation known as a layered depth image (LDI), originally developed in the computer graphics community [22]. Unlike a depth map, which stores
+a single depth value per pixel, an LDI represents multiple ordered depths per
+pixel, along with an associated color for each depth, representing the multiple intersections of a ray with scene geometry (foreground objects, background
+behind those objects, etc.) In graphics, LDIs are an attractive representation for
+image-based rendering applications. For our purposes, they are also appealing
+as a 3D scene representation as they maintain the direct relationship between
+input pixels and output layers, while allowing for much more ﬂexible and general
+modeling of scenes.
+A key challenge towards learning to predict such layered representations is
+the lack of available training data. Our approach, depicted in Fig. 2, builds on
+the insight that multiple images of the same scene, but from diﬀerent views,
+can provide us with indirect supervision for learning about the underlying 3D
+structure. In particular, given two views of a scene, there will often be parts of
+the scene that are hidden from one view but visible from the second. We therefore
+use view synthesis as a proxy task: given a single input image, we predict an LDI
+representation and enforce that the novel views rendered using the prediction
+correspond to the observed reality.
+Layer-Structured 3D Scene Inference via View Synthesis
+313
+Fig. 2. Approach overview. We learn a CNN that can predict, from a single input
+image, a layered representation of the scene (an LDI). During training, we leverage
+multi-view supervision using view synthesis as a proxy task, thereby allowing us to
+overcome the lack of direct supervision. While training our prediction CNN, we enforce
+that the predicted representation, when (diﬀerentiably) rendered from a novel view,
+matches the available target image.
+In Sect. 3, we present our learning setup that builds on this insight, and
+describe a training objective that enforces the desired prediction structure. To
+operationalize this learning procedure, we introduce an LDI rendering mechanism based on a new diﬀerentiable forward splatting layer. This layer may also
+be useful for other tasks at the intersection of graphics and learning. We then
+provide qualitative and quantitative validation of our approach in Sect. 4 using
+two settings: (a) analysis using synthetic data with known ground truth 3D, and
+(b) a real outdoor driving dataset.
+2
+Related Work
+Single-View Depth/Surface Normal Prediction. Estimating pixel-wise
+depth and/or surface orientation has been a long-standing task in computer
+vision. Initial attempts treated geometric inference as a part of the inverse
+vision problem, leveraging primarily learning-free optimization methods for inference [4,23]. Over the years, the use of supervised learning has enabled more
+robust approaches [14,21], most recently with CNN-based methods [3,7,28],
+yielding impressive results.
+We also adopt a learning-based approach, but go beyond commonly used
+2.5D representations that only infer shape for the visible pixels. Some recent
+methods, with a similar goal, predict volumetric 3D from a depth image [24], or
+infer amodal aspects of a scene [6]. However, these methods require direct 3D
+supervision and are thus restricted to synthetically generated data. In contrast,
+our approach leverages indirect multi-view supervision that is more naturally
+obtainable, as well as ecologically plausible.
+314
+S. Tulsiani et al.
+Depth Prediction via View Synthesis. The challenge of leveraging indirect
+supervision for inference has been addressed by some recent multi-view supervised approaches. Garg et al. [9] and Godard et al. [12] used stereo images to
+learn a single-view depth prediction system by minimizing the inconsistency
+as measured by pixel-wise reprojection error. Subsequent works [26,33] further
+relax the constraint of having calibrated stereo images, and learn a single-view
+depth model from monocular videos.
+We adopt a similar learning philosophy, i.e. learning using multi-view supervision via view synthesis. However, our layered representation is diﬀerent from
+the per-pixel depth predicted by these approaches, and in this work we address
+the related technical challenges. As we describe in Sect. 3, our novel view rendering process is very diﬀerent from the techniques used by these approaches.
+Multi-view Supervised 3D Object Reconstruction. Learning-based
+approaches for single-view 3D object reconstruction have seen a similar shift in
+the forms of supervision required. Initial CNN-based methods [5,11] predicted
+voxel occupancy representations from a single input image but required full 3D
+supervision during training. Recent approaches have advocated alternate forms
+of supervision, e.g. multi-view foreground masks [19,25,32] or depth [25].
+While these methods go beyond 2.5D predictions and infer full 3D structure, they use volumetric-occupancy-based representations that do not naturally
+extend to general scenes. The layered representations we use are instead closer
+to depth-based representations often used for scenes. Similarly, these methods
+commonly rely on cues like foreground masks from multiple views, which are
+more applicable to isolated objects than to complex scenes. In our scenario, we
+therefore rely only on multiple RGB images as supervision.
+Layered Scene Representations. Various layer-based scene representations
+are popular in the computer vision and graphics communities for reasons of parsimony, eﬃciency and descriptive power. Single-view based [14,15,20] or optical
+ﬂow methods [29] often infer a parsimonious representation of the scene or ﬂow
+by grouping the visible content into layers. While these methods do not reason
+about occlusion, Adelson [1] proposed using a planar layer-based representation
+to capture hidden surfaces and demonstrated that these can be inferred using
+motion [27]. Similarly, Baker et al. [2] proposed a stereo method that represents
+scenes as planar layers. Our work is most directly inspired by Shade et al. [22],
+who introduced the layered depth image (LDI) representation to capture the
+structure of general 3D scenes for use in image-based rendering.
+We aim for a similar representation. However, in contrast to classical
+approaches that require multiple images for inference, we use machine learning
+to predict this representation from a single image at test time. Further, unlike
+previous single-view based methods, our predicted representation also reasons
+about occluded aspects of the scene.
+Layer-Structured 3D Scene Inference via View Synthesis
+3
+315
+Learning LDI Prediction
+Our aim is to predict a 3D representation of a scene that includes not only the
+geometry of what we see, but also aspects of the scene not directly visible. A standard approach to geometric inference is to predict a depth map, which answers,
+for each pixel the question: ‘how far from the camera is the point imaged at this
+pixel?’. In this work, we propose to predict a Layered Depth Image (LDI) [22]
+representation that, in addition to the question above, also answers: ‘what lies
+behind the visible content at this pixel?’.
+As we do not have access to a dataset of paired examples of images with
+their corresponding LDI representations, we therefore exploit indirect forms of
+supervision to learn LDI prediction. We note that since an LDI representation
+of a scene captures both visible and amodal aspects of a scene, it can allow
+us to geometrically synthesize novel views of the same scene, including aspects
+that are hidden to the input view. Our insight is that we can leverage view
+synthesis as a proxy target task. We ﬁrst formally describe our training setup
+and representation, then present our approach based on this insight. We also
+introduce a diﬀerentiable mechanism for rendering an LDI representation from
+novel views via a novel ‘soft z-buﬀering’-based forward splatting layer.
+3.1
+Overview
+Training Data. We leverage multi-view supervision to learn LDI prediction.
+Our training dataset is comprised of multiple scenes, with images from a few
+views available per scene. We assume a known camera transformation between
+the diﬀerent images of the same scene. This form of supervision can easily be
+obtained using a calibrated camera rig, or by any natural agent which has access
+to its egomotion. Equivalently, we can consider the training data to consist of
+numerous source and target image pairs, where the two images in each pair are
+from the same scene and are related by a known transformation.
+Concretely, we denote our training dataset of N image pairs with associated
+n n
+cameras as {(Isn , Itn , Kns , Knt , Rn , tn )}N
+n=1 . Here Is , It represent two (source and
+target) images of the same scene, with camera intrinsics denoted as Kns , Knt
+respectively. The relative camera transformation between the two image frames
+is captured by a rotation Rn and translation tn . We note that the training data
+leveraged does not assume any direct supervision for the scene’s 3D structure.
+Predicted LDI Representation. A Layered Depth Image (LDI) representation (see Fig. 3 for an illustration) represents the 3D structure of a scene using
+layers of depth and color images. An LDI representation with L layers is of the
+l
+l
+form {(I l , Dl )}L
+l=1 . Here (I , D ) represent the texture (i.e., color) image I and
+disparity (inverse depth) image D corresponding to layer l. An important property of the LDI representation is that the structure captured in the layers is
+increasing in depth i.e. for any pixel p, if l1 < l2 , then Dl1 (p) ≥ Dl2 (p) (disparity is monotonically decreasing over layers, or, equivalently, depth is increasing).
+Therefore, the initial layer l = 1 represents the visible content from the camera
+316
+S. Tulsiani et al.
+viewpoint (layers in an LDI do not have an alpha channel or mask). In fact, a
+standard depth map representation can be considered as an LDI with a single
+layer, with I 1 being the observed image.
+Fig. 3. Layered Depth Images (LDIs). Illustration of a layered depth image (LDI)
+for a simple scene. The ﬁrst layer captures the depth (darker indicates closer) and
+texture of the visible points, and the second layer describes the occluded structure.
+In our work, we aim to learn an LDI prediction function f , parametrized
+as a CNN fθ , which, given a single input image I, can infer the corresponding
+LDI representation {(I l , Dl )}L
+l=1 . Intuitively, the ﬁrst layer corresponds to the
+aspects of the scene visible from the camera viewpoint, and the subsequent layers
+capture aspects occluded in the current view. Although in this work we restrict
+ourselves to inferring two layers, the learning procedure presented is equally
+applicable for the more general scenario.
+View Synthesis as Supervision. Given a source image Is , we predict the corresponding LDI representation fθ (Is ) = {(Isl , Dsl )}L
+l=1 . During training, we also
+have access to an image It of the same scene as Is , but from a diﬀerent viewpoint. We write Vs→t ≡ (Ks , Kt , R, t) to denote the camera transform between
+the source frame and the target frame, including intrinsic and extrinsic camera
+parameters. With this transform and our predicted LDI representation, we can
+render a predicted image from the target viewpoint. In particular, using a geometrically deﬁned rendering function R, we can express the novel target view
+rendered from the source image as R(fθ (Is ); Vs→t ).
+We can thus obtain a learning signal for our LDI predictor fθ by enforcing
+similarity between the predicted target view R(fθ (Is ); Vs→t ) and the observed
+target image It . There are two aspects of this learning setup that allow us to
+learn meaningful prediction: (a) the novel view It may contain new scene content
+compared to Is , e.g. disoccluded regions, therefore the LDI fθ (Is ) must capture
+more than the visible structure; and (b) the LDI fθ (Is ) is predicted independently
+of the target view/image It which may be sampled arbitrarily, and hence the
+predicted LDI should be able to explain content from many possible novel views.
+The Need for Forward-Rendering. As noted by Shade et al. when introducing the LDI representation [22], the rendering process for synthesizing a
+novel view given a source LDI requires forward-splatting-based rendering. This
+Layer-Structured 3D Scene Inference via View Synthesis
+317
+requirement leads to a subtle but important diﬀerence in our training procedure
+compared to prior multi-view supervised depth prediction methods [9,12,33]:
+while prior approaches rely on inverse warping for rendering, our representation
+necessitates the use of forward rendering.
+Concretely, prior approaches, given a source image Is , predict a per-pixel
+depth map. Then, given a novel view image, It , they reconstruct the source
+image by ‘looking up’ pixels from It via the predicted depth and camera transform. Therefore, the ‘rendered view’ is the same as the input view for which the
+geometry is inferred, i.e. these methods do not render a novel view, but instead
+re-render the source view. This procedure only enforces that correct geometry is
+learned for pixels visible to both views.
+However, in our scenario, since we explicitly want to predict beyond the
+visible structure, we cannot adopt this approach. Instead, we synthesize novel
+views using our layered representation, thereby allowing us to learn about both
+the visible and the occluded scene structure. This necessitates forward rendering,
+i.e. constructing a target view given the source view texture and geometry, as
+opposed to inverse warping, i.e. reconstructing a source view by using source
+geometry and target frame texture.
+3.2
+Diﬀerentiable Rendering of an LDI
+Given a predicted LDI representation {(Isl , Dsl )} in a source image frame, we want
+to render a novel viewpoint related by a transform Vs→t . We do so by treating
+the LDI as a textured point cloud, with each pixel in each layer corresponding to
+a point. We ﬁrst forward-project each source point onto the target frame, then
+handle occlusions by proposing a ‘soft z-buﬀer’, and ﬁnally render the target
+image by a weighted average of the colors of projected points.
+Forward Projection. Denoting by pls the pixel ps ≡ (xs , ys ) in layer l, we can
+compute its projected position and inverse depth in the target frame coordinates
+using the (predicted) inverse depth dls ≡ Dsl (ps ) and the camera parameters.
+⎡ ⎤
+⎡
+⎤
+xs
+x̄t (pls )
+
+
+
+−1
+⎢ ys ⎥
+⎢ ȳt (pls ) ⎥
+R
+t̂
+K
+0̂
+K
+0̂
+t
+s
+⎢ ⎥
+⎢
+⎥
+(1)
+⎣ 1 ⎦ ∼ 0̂ 1
+0̂ 1
+0̂ 1 ⎣ 1 ⎦
+dls
+d¯t (pls )
+Splatting with soft z-buﬀering. Using the above transformation, we can
+forward splat this point cloud to the target frame. Intuitively, we consider the
+target frame image as an empty canvas. Then, each source point pls adds paint
+onto the canvas, but only at the pixels immediately around its projection. Via
+this process, many source points may contribute to the same target image pixel,
+and we want the closer ones to occlude the further ones. In traditional rendering,
+this can be achieved using a z-buﬀer, with only the closest point contributing to
+the rendering of a pixel.
+However, this process results in a discontinuous and non-diﬀerentiable rendering function that is unsuitable for our framework. Instead, we propose a soft
+318
+S. Tulsiani et al.
+z-buﬀer using a weight w(pt , pls ) that speciﬁes the contribution of pls to the target image pixel pt . Deﬁning B(x0 , x1 ) ≡ max (0, 1 − |x0 − x1 |), we compute the
+weights as:
+w(pt , pls ) = exp
+d¯t (pls )
+τ
+B(x̄t (pls ), xt ) B(ȳt (pls ), yt )
+(2)
+The initial exponential factor, modulated by the temperature τ , enforces higher
+precedence for points closer to the camera. A large value of τ results in ‘softer’ zbuﬀering, whereas a small value yields a rendering process analogous to standard
+z-buﬀering. The latter terms simply represent bilinear interpolation weights and
+ensure that each source point only contributes non-zero weight to target pixels
+in the immediate neighborhood.
+Rendering. Finally, we compute the rendered texture I¯t (pt ) at each target pixel
+pt as a weighted average of the contributions of points that splat to that pixel:
+I¯t (pt ) =
+l
+l
+pls Is w(pt , ps ) + 
+l
+pls w(pt , ps ) + 
+(3)
+The small  in the denominator ensures numerical stability for target pixels
+that correspond to no source point. A similar term in the numerator biases the
+color for such pixels towards white. All operations involved in rendering the
+novel target view are diﬀerentiable, including the forward projection, depthdependent weight computation, and ﬁnal color computation. Hence, we can use
+this rendering via forward splatting process as the diﬀerentiable R(fθ (Is ); Vs→t )
+required in our learning framework.
+3.3
+Network Architecture
+We adopt the DispNet [18] architecture for our LDI prediction CNN shown in
+Fig. 4. Given the input color image, a convolutional encoder processes it to compute spatial features at various resolutions. We then decode these via upconvolutions to get back to the image resolution. Each layer in the decoder also
+receives the features from the corresponding encoder layer via skip connections.
+While we use a single CNN to predict disparities and textures for all LDI layers,
+we ﬁnd it critical to have disjoint prediction branches to infer each LDI layer.
+We hypothesize that this occurs because the foreground layer gets more learning
+signal, and sharing all the prediction weights makes it diﬃcult for the learning
+signals for the background layer to compete. Therefore, the last three decoding
+blocks and ﬁnal prediction blocks are independent for each LDI layer.
+3.4
+Training Objective
+To train our CNN fθ , we use view synthesis as a proxy task: given a source
+image Is , we predict a corresponding LDI and render it from a novel viewpoint.
+As a training objective, we enforce that this rendered image should be similar
+Layer-Structured 3D Scene Inference via View Synthesis
+319
+Input
+Skip-connections
+Convolution
+Upconvolution
+Predicted
+Texture
+Per-layer weights
+and prediction.
+Predicted
+Disparity
+Fig. 4. Overview of our CNN architecture. We take as input an image and predict
+per-layer texture and inverse depth. Our CNN architecture consists of a convolutional
+encoder and decoder with skip-connections. We use disjoint prediction branches for
+inferring the texture and depth for each LDI layer.
+to the observed image from that viewpoint. However, there are some additional
+nuances that we need to consider when formulating our training objective.
+Depth Monotonicity. The layers in our LDI representation are supposed to
+capture content at increasing depths. We therefore enforce that the inverse depth
+across layers at any pixel is non-increasing:
+max(0, Dsl+1 (ps ) − Dsl (ps )).
+Linc (Is ) =
+(4)
+ps ,l
+Consistency with Source. The typical LDI representation enforces that the
+ﬁrst layer’s texture corresponds to the observed source. We additionally enforce
+a similar constraint even for background layers when the predicted geometry is
+close to the foreground layer. We compute a normalized weight for the layers at
+D l (p )
+each pixel, denoted as w(ps , l) ∝ exp sτ s , and deﬁne a weighted penalty for
+deviation from the observed image:
+w(ps , l)Is (ps ) − Isl (ps )1 .
+Lsc (Is ) =
+(5)
+ps ,l
+This loss encourages the predicted texture at each layer to match the source
+texture, while allowing signiﬁcant deviations in case of occlusions, i.e. where the
+background layer is much further than the foreground. In conjunction with Linc ,
+this loss enforces that the predicted representation adheres to the constraints of
+being an LDI.
+Allowing Content Magniﬁcation. The forward-splatting rendering method
+described in Sect. 3.2 computes a novel view image by splatting each source pixel
+onto the target frame. This may result in ‘cracks’ [13]—target pixels that are
+empty because no source pixels splat onto them. For example, if the target image
+contains a close-up view of an object that is faraway in the source image, too
+few source points will splat into that large target region to cover it completely.
+To overcome this, we simply render the target frame at half the input resolution,
+i.e. the output image from the rendering function described in Sect. 3.2 is half
+the size of the input LDI.
+320
+S. Tulsiani et al.
+Ignoring Image Boundaries. While an LDI representation can explain the
+disoccluded content that becomes visible in a novel view, it cannot capture the
+pixels in the target frame that are outside the image boundary in the source
+frame. We would like to ignore such pixels in the view synthesis loss. However,
+we do not have ground-truth to tell us which pixels these are. Instead, we use
+the heuristic of ignoring pixels around the boundary. Denoting as M a binary
+mask that is zero around the image edges, we deﬁne our view synthesis loss as:
+Lvs (Is , It , Vs→t ) = M  It − M  I¯t 1
+where I¯t = R(fθ (Is ); Vs→t ).
+(6)
+As described above, the rendered image I¯t and the target image It are spatially
+smaller than Is .
+Overcoming Depth Precedence. Consider synthesizing pixel pt as described
+in Eq. 3. While the weighted averaging across layers resembles z-buﬀer-based
+rendering, it has the disadvantage of making it harder to learn a layer if there
+is another preceding (and possibly incorrectly predicted) layer in front of it. To
+overcome this, and therefore to speed up the learning of layers independent of
+other layers, we add an additional loss term. Denoting as I¯tl a target image rendered using only layer l, we add an additional ‘min-view synthesis’ loss measuring
+the minimum pixel-wise error across per-layer synthesized views:
+Lm−vs (Is , It , Vs→t ) =
+pt
+min M (pt )It (pt ) − I¯tl (pt )1
+l
+(7)
+In contrast to the loss in Eq. 6, which combines the eﬀects of all layers when measuring the reconstruction error at pt , this loss term simply enforces that at least
+one layer should correctly explain the observed It (pt ). Therefore, a background
+layer can still get a meaningful learning signal even if there is a foreground layer
+incorrectly occluding it. Empirically, we found that this term is crucial to allow
+for learning the background layer.
+Smoothness. We use a depth smoothness prior Lsm which minimizes the L1
+norm of the second-order spatial derivatives of the predicted inverse depths Dsl .
+Our ﬁnal learning objective, combining the various loss terms deﬁned above
+(with diﬀerent weights) is:
+Lfinal = Lvs + Lm−vs + Lsc + Linc + Lsm
+(8)
+Using this learning objective, we can train our LDI prediction CNN fθ using a
+dataset comprised only of paired source and target images of the same scene.
+4
+Experiments
+We consider two diﬀerent scenarios to learn single-view inference of a layerstructured scene representation. We ﬁrst study our approach in a synthetic, but
+nevertheless challenging, setting using procedurally generated data. We then use
+our method to learn from stereo pairs in an outdoor setting.
+Layer-Structured 3D Scene Inference via View Synthesis
+4.1
+321
+Analysis Using Synthetic Data
+In order to examine our method in a controlled setting with full knowledge of
+the underlying 3D scene structure, we create a dataset of procedurally generated
+scenes. We ﬁrst describe the details of the generation process, and then discuss
+the training details and our results.
+Dataset. We generate our synthetic data to have a room-like layout with two
+side ‘walls’, one back ‘wall’, a ‘ceiling’ and a ‘ﬂoor’. We additionally place one to
+three upright segmented objects on the ﬂoor. The ‘room’ box is always at a ﬁxed
+location in the world frame, and is of a ﬁxed size. The segmented foreground
+objects are randomly placed, from left to right, at increasing depths and lie on
+a front-facing planar surface. To obtain the foreground objects, we randomly
+sample from the unoccluded and untruncated object instances in the PASCAL
+VOC dataset [8]. The textures on the room walls are obtained using random
+images from the SUN 2012 dataset [30].
+To sample the source and target views for training our LDI prediction, we
+randomly assign one of them to correspond to the canonical front-facing world
+view. The other view corresponds to a random camera translation with a random
+rotation. We ensure that the transformation can be large enough such that the
+novel views can often image the content behind the foreground object(s) in the
+source view. We show some sample source and target pairs in Fig. 5.
+Note that while the geometry of the scene layout is relatively simple, the
+foreground objects can have diﬀering shapes due their respective segmentation.
+Further, the surface textures are drawn from diverse real images and signiﬁcantly
+Fig. 5. Procedurally generated synthetic data. We show 6 random training samples (top: source image and corresponding inverse depth, bottom: target image with
+corresponding inverse depth). Note that only the color images are used for learning.
+(Color ﬁgure online)
+322
+S. Tulsiani et al.
+add to the complexity, particularly as our aim is to infer both the geometry and
+the texture for the scene layers.
+Training Details. We split the PASCAL VOC objects and the SUN 2012
+images into random subsets corresponding to a train/validation/test split of
+70% − 15% − 15%. We use the corresponding images and objects to generate
+training samples to train our LDI prediction CNN fθ . We train our CNN for
+600k iterations using the ADAM optimizer [16]. Based on the dataset statistics,
+we restrict the maximum inverse depth predicted to correspond to 1 m.
+Results. We visualize the predictions of our learned LDI prediction CNN in
+Fig. 6. We observe that it is able to predict the correct geometry for the foreground layer i.e. per-pixel depth. More interestingly, it can leverage the background layer to successfully infer the geometry of the occluded scene content
+and hallucinate plausible corresponding textures. We observe some interesting
+error modes in the prediction, e.g. incorrect background layer predictions at the
+base of wide objects, or spurious details in the background layer at pixels outside
+the ‘room’. Both these occur because we do not use any direct supervision for
+learning, but instead rely on a view synthesis loss. The ﬁrst error mode occurs
+because we never fully ‘see behind’ the base of wide objects even in novel views.
+Similarly, the spurious details are only present in regions which are consistently
+occluded by the foreground layer and therefore ignored for view synthesis.
+We analyze our learned representation by evaluating how well we can synthesize novel views using it. We report in Table 1 the mean 1 error for view
+synthesis and compare our 2 layer model vs a single layer model also trained
+for the view synthesis task, using the same architecture and hyper-parameters.
+Note that the single layer model can only hope to capture the visible aspects,
+but not the occluded structure. We observe that we perform slightly better than
+the single layer model. Since most of the scene pixels are visible in both, the
+source and target views, a single layer model explains them well. However, we
+see that the error diﬀerence is more signiﬁcant if we restrict our analysis to only
+Fig. 6. Sample LDI prediction results on synthetic data. For each input image
+on the left, we show our method’s predicted 2-layer texture and geometry for the
+highlighted area: (a, b) show the predicted textures for the foreground and background
+layers respectively, and (c, d) depict the corresponding predicted disparity.
+Layer-Structured 3D Scene Inference via View Synthesis
+323
+Fig. 7. Sample LDI prediction results on the KITTI dataset. For each input
+image on the left, we show our method’s predicted 2-layer texture and geometry for the
+highlighted area: (a, b) show the predicted textures for the foreground and background
+layers respectively, and (c, d) depict the corresponding predicted disparity.
+Table 1. View synthesis error on synthetic data. We compare our 2 layer LDI
+prediction CNN against a single layer model that can only capture the visible aspects.
+We report the mean pixel-wise 1 error between the ground-truth novel view and the
+corresponding view rendered using the predicted representations.
+View synthesis error All pixels Dis-occluded pixels
+1 layer model
+0.0398
+0.1439
+2 layer model
+0.0392
+0.1301
+the dis-occluded pixels i.e. pixels in the target image which are not visible in
+the source view. This supports the claim that our predicted LDI representation
+does indeed capture more than the directly visible structure.
+We also report in Table 2 the error in the predicted inverse depth(s) against
+the known ground-truth. We restrict the error computation for the background
+layer to pixels where the depth diﬀers from the foreground layer. Since the one
+layer model only captures the foreground, and does not predict the background
+depths, we measure its error for the background layer using the foreground layer
+predictions. While this is an obviously harsh comparison, as the one layer model,
+by design, cannot capture the hidden depth, the fact that our predicted background layer is ‘closer’ serves to empirically show that our learned model infers
+meaningful geometry for the background layer.
+4.2
+Experiments on KITTI
+We demonstrate the applicability of our framework in a more realistic setting:
+outdoor scenes with images collected using a calibrated stereo camera setup.
+We note that previous methods applied to this setting have been restricted to
+324
+S. Tulsiani et al.
+Table 2. Geometry prediction error on synthetic data. We measure mean pixelwise error in the predicted inverse depth(s) against the ground-truth. (*) As the single
+layer model does not infer background, we evaluate its error for the background layer
+using the foreground depth predictions. This serves to provide an instructive upper
+bound for the error of the LDI model.
+Inverse depth error Foreground layer
+(All pixels)
+Background layer
+(Hidden pixels)
+1 layer model
+0.0092
+0.1307 (*)
+2 layer model
+0.0102
+0.0152
+inferring the depth of the visible pixels, and that it is encouraging that we can
+go beyond this representation.
+Dataset. We use the ‘raw’ sequences from the KITTI dataset [10], restricting
+our data to the 30 sequences from the city category as these more often contain
+interesting occluders e.g. people or traﬃc lights. The multi-view supervision we
+use corresponds to images from calibrated stereo cameras that are 0.5 m apart.
+We use both the left and the right camera images as source images, and treat
+the other as the target view for which the view synthesis loss is minimized. Due
+to the camera setup, the view sampling corresponds to a lateral motion of 0.5 m
+and is more restrictive compared to the synthetic data.
+Training Details. We randomly choose 22 among the 30 city sequences for
+training, and use 4 each for validation and testing. This results in a training set
+of about 6,000 stereo pairs. We use similar hyper-parameters and optimization
+algorithm to the synthetic data scenario, but alter the closest possible depth to
+correspond to 2 m.
+Table 3. View synthesis error on KITTI. We compare our 2 layer LDI prediction
+CNN against a single layer model that can only capture the visible aspects. We report
+the mean pixel-wise view synthesis error when rendering novel views using the predicted
+representations.
+View synthesis error All pixels Dis-occluded pixels
+1 layer model
+0.0583
+0.0813
+2 layer model
+0.0581
+0.0800
+Results. We visualize sample predictions of our learned LDI prediction CNN
+in Fig. 7. We observe that it is able to predict the correct geometry for the
+foreground layer i.e. per-pixel depth. Similar to the synthetic data scenario, we
+observe that it can leverage the background layer to hallucinate plausible geometry and texture of the occluded scene content, although to a lesser extent. We
+hypothesize that the reduction in usage of the background layer is because the
+Layer-Structured 3D Scene Inference via View Synthesis
+325
+view transformation between the source and target views is small compared to
+the scene scale, and we therefore only infer background layer mostly corresponding to (a) thin scene structures smaller than the stereo baseline, or (b) around
+the boundaries of larger objects/structures e.g. cars.
+We do not have the full 3D structure of the scenes to compare our predicted
+LDI against, but we can evaluate the ability of this representation to infer the
+available novel views, and we report these evaluations in Table 3. As we do not
+have the ground-truth for the dis-occluded pixels, we instead use the unmatched
+pixels from an oﬀ-the-shelf stereo matching algorithm [31]. This algorithm, in
+addition to computing disparity, attempts to identify pixels with no correspondence in the other view, thus providing (approximate) dis-occlusion labels (see
+supplementary material for visualizations). Measuring the pixel-wise reconstruction error, we again observe that our two-layer LDI model performs slightly better than a single layer model which only models the foreground. Additionally,
+the diﬀerence is a bit more prominent for the dis-occluded pixels.
+While the above evaluation indicates our ability to capture occluded structure, it is also worth examining the accuracy of the predicted depth. To this end,
+we compared results on our test set against the publicly available model from
+Zhou et al. [33], since we use a similar CNN architecture facilitating a more
+apples-to-apples comparison. We perform comparably, achieving an Absolute
+Relative error of 0.1856, compared to an error of 0.2079 by [33]. While other
+monocular depth estimation approaches can further achieve improved results
+using stronger supervision, better architectures or cycle consistency [12], we note
+that achieving state-of-the-art depth prediction is not our central goal. However,
+we ﬁnd it encouraging that our proposed LDI prediction approach does yield
+somewhat competitive depth prediction results.
+5
+Discussion
+We have presented a learning-based method to infer a layer-structured representation of scenes that can go beyond common 2.5D representations and
+allow for reasoning about occluded structures. There are, however, a number
+of challenges yet to be addressed. As we only rely on multi-view supervision, the
+learned geometry is restricted by the extent of available motion across training
+views. Additionally, it would be interesting to extend our layered representation to include a notion of grouping, incorporate semantics and semantic priors (e.g. ‘roads are ﬂat’). Finally, we are still far from full 3D understanding of
+scenes. However, our work represents a step beyond 2.5D prediction and towards
+full 3D.
+Acknowledgments. We would like to thank Tinghui Zhou and John Flynn for helpful
+discussions and comments. This work was done while ST was an intern at Google.
+326
+S. Tulsiani et al.
+References
+1. Adelson, E.H.: Layered representations for image coding. Technical report (1991)
+2. Baker, S., Szeliski, R., Anandan, P., Szeliski, R.: A layered approach to stereo
+reconstruction. In: CVPR (1998)
+3. Bansal, A., Russell, B., Gupta, A.: Marr revisited: 2D-3D alignment via surface
+normal prediction. In: CVPR (2016)
+4. Barron, J.T., Malik, J.: Shape, illumination, and reﬂectance from shading. TPAMI
+37(8), 1670–1687 (2015)
+5. Choy, C.B., Xu, D., Gwak, J.Y., Chen, K., Savarese, S.: 3D-R2N2: a uniﬁed approach for single and multi-view 3D object reconstruction. In: Leibe, B., Matas, J.,
+Sebe, N., Welling, M. (eds.) ECCV 2016. LNCS, vol. 9912, pp. 628–644. Springer,
+Cham (2016). https://doi.org/10.1007/978-3-319-46484-8 38
+6. Ehsani, K., Mottaghi, R., Farhadi, A.: SeGAN: segmenting and generating the
+invisible. CoRR abs/1703.10239 (2017)
+7. Eigen, D., Fergus, R.: Predicting depth, surface normals and semantic labels with
+a common multi-scale convolutional architecture. In: ICCV (2015)
+8. Everingham, M., Van Gool, L., Williams, C.K.I., Winn, J., Zisserman, A.: The
+PASCAL Visual Object Classes Challenge 2012 (VOC2012) Results. http://www.
+pascal-network.org/challenges/VOC/voc2012/workshop/index.html
+9. Garg, R., Vijay Kumar, B.G., Carneiro, G., Reid, I.: Unsupervised CNN for single
+view depth estimation: geometry to the rescue. In: Leibe, B., Matas, J., Sebe, N.,
+Welling, M. (eds.) ECCV 2016. LNCS, vol. 9912, pp. 740–756. Springer, Cham
+(2016). https://doi.org/10.1007/978-3-319-46484-8 45
+10. Geiger, A., Lenz, P., Stiller, C., Urtasun, R.: Vision meets robotics: the KITTI
+Dataset. IJRR 32(11), 1231–1237 (2013)
+11. Girdhar, R., Fouhey, D.F., Rodriguez, M., Gupta, A.: Learning a predictable and
+generative vector representation for objects. In: Leibe, B., Matas, J., Sebe, N.,
+Welling, M. (eds.) ECCV 2016. LNCS, vol. 9910, pp. 484–499. Springer, Cham
+(2016). https://doi.org/10.1007/978-3-319-46466-4 29
+12. Godard, C., Mac Aodha, O., Brostow, G.J.: Unsupervised monocular depth estimation with left-right consistency. In: CVPR (2017)
+13. Grossman, J.P., Dally, W.J.: Point sample rendering. In: Drettakis, G., Max, N.
+(eds.) Rendering Techniques 1998. Eurographics, pp. 181–192. Springer, Vienna
+(1998). https://doi.org/10.1007/978-3-7091-6453-2 17
+14. Hoiem, D., Efros, A.A., Hebert, M.: Automatic photo pop-up. In: SIGGRAPH
+(2005)
+15. Isola, P., Liu, C.: Scene collaging: analysis and synthesis of natural images with
+semantic layers. In: ICCV (2013)
+16. Kingma, D., Ba, J.: Adam: a method for stochastic optimization. arXiv preprint
+arXiv:1412.6980 (2014)
+17. Marr, D.: Vision: a computational investigation into the human representation and
+processing of visual information (1982)
+18. Mayer, N., et al.: A large dataset to train convolutional networks for disparity,
+optical ﬂow, and scene ﬂow estimation. In: CVPR (2016)
+19. Rezende, D.J., Eslami, S.A., Mohamed, S., Battaglia, P., Jaderberg, M., Heess, N.:
+Unsupervised learning of 3D structure from images. In: NIPS (2016)
+20. Russell, B., Efros, A., Sivic, J., Freeman, B., Zisserman, A.: Segmenting scenes by
+matching image composites. In: NIPS (2009)
+Layer-Structured 3D Scene Inference via View Synthesis
+327
+21. Saxena, A., Sun, M., Ng, A.Y.: Make3D: learning 3D scene structure from a single
+still image. TPAMI 31(5), 824–840 (2009)
+22. Shade, J., Gortler, S., He, L.w., Szeliski, R.: Layered depth images. In: SIGGRAPH
+(1998)
+23. Sinha, P., Adelson, E.: Recovering reﬂectance and illumination in a world of painted
+polyhedra. In: ICCV (1993)
+24. Song, S., Yu, F., Zeng, A., Chang, A.X., Savva, M., Funkhouser, T.: Semantic
+scene completion from a single depth image. In: CVPR (2017)
+25. Tulsiani, S., Zhou, T., Efros, A.A., Malik, J.: Multi-view supervision for single-view
+reconstruction via diﬀerentiable ray consistency. In: CVPR (2017)
+26. Vijayanarasimhan, S., Ricco, S., Schmid, C., Sukthankar, R., Fragkiadaki, K.: SfMNet: learning of structure and motion from video. arXiv preprint arXiv:1704.07804
+(2017)
+27. Wang, J.Y., Adelson, E.H.: Layered representation for motion analysis. In: CVPR
+(1993)
+28. Wang, X., Fouhey, D., Gupta, A.: Designing deep networks for surface normal
+estimation. In: CVPR (2015)
+29. Wulﬀ, J., Sevilla-Lara, L., Black, M.J.: Optical ﬂow in mostly rigid scenes. arXiv
+preprint arXiv:1705.01352 (2017)
+30. Xiao, J., Hays, J., Ehinger, K.A., Oliva, A., Torralba, A.: SUN database: large-scale
+scene recognition from abbey to zoo. In: CVPR (2010)
+31. Yamaguchi, K., McAllester, D., Urtasun, R.: Eﬃcient joint segmentation, occlusion
+labeling, stereo and ﬂow estimation. In: Fleet, D., Pajdla, T., Schiele, B., Tuytelaars, T. (eds.) ECCV 2014. LNCS, vol. 8693, pp. 756–771. Springer, Cham (2014).
+https://doi.org/10.1007/978-3-319-10602-1 49
+32. Yan, X., Yang, J., Yumer, E., Guo, Y., Lee, H.: Perspective transformer nets:
+learning single-view 3D object reconstruction without 3D supervision. In: NIPS
+(2016)
+33. Zhou, T., Brown, M., Snavely, N., Lowe, D.: Unsupervised learning of depth and
+ego-motion from video. In: CVPR (2017)

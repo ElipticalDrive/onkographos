@@ -1,0 +1,100 @@
+# Adaptive Sampling Step with Early Ray Termination
+
+Also called: Pas d'échantillonnage volumique et arrêt précoce
+
+## Overview
+This method optimizes volume rendering performance by reducing sampling density for distant data and terminating ray evaluation once total opacity is reached [S1, unofficial]. It addresses the inefficiency of uniform sampling in large, extended volumes where distant regions require less precision [S1, unofficial]. Unlike its siblings, which often focus on error metrics or interaction latency, this approach relies on geometric distance from the viewpoint and opacity accumulation thresholds [S1, unofficial]. It builds on [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by implementing distance-based step adaptation and brick-level opacity checks [S1, unofficial].
+
+## How it works
+**Inputs:** Ray origin, ray direction, volume data organized in bricks, 3D pre-integrated transfer function texture, viewpoint position, opacity threshold $\alpha_{max}$ (typically 1.0) [S1, unofficial].
+**Outputs:** Final pixel color.
+
+**Data Structures:**
+*   **Brick:** A spatial subdivision of the volume. Contains pre-integrated optical properties (mean color, mean opacity) to allow single-step accumulation if the brick is uniform [S1, unofficial].
+*   **3D Pre-integrated Transfer Function Texture:** A 3D texture storing integrated color and opacity values for varying step sizes, allowing consistent brightness regardless of sampling frequency [S1, unofficial].
+
+**Steps:**
+1.  **Ray Initialization:** Cast a ray from the viewpoint into the volume. Initialize accumulated color $C_{acc} = (0,0,0)$ and accumulated opacity $\alpha_{acc} = 0$ [G].
+2.  **Brick Traversal & Accumulation:** Intersect the ray with the brick hierarchy. For each intersected brick:
+    a.  **Adaptive Step Calculation:** Compute the distance $d$ from the current sample position to the viewpoint. Calculate the sampling step size $\Delta t$ based on $d$. The step size decreases as distance decreases (closer objects are sampled more densely) [S1, unofficial].
+    b.  **Sample Evaluation:** Evaluate the volume at the current position using the adaptive step $\Delta t$. Use the 3D pre-integrated transfer function to map the sampled values to color $C$ and opacity $\alpha$, accounting for the variable step size to maintain constant brightness [S1, unofficial].
+    c.  **Alpha Compositing:** Update accumulated color and opacity using front-to-back compositing:
+        $$ \alpha_{acc} = \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha $$
+        $$ C_{acc} = C_{acc} + (1 - \alpha_{acc}) \cdot C \cdot \alpha $$
+    d.  **Early Termination Check:** After accumulating each brick (not after every sample), check if $\alpha_{acc} \ge \alpha_{max}$ [S1, unofficial]. If true, terminate the ray evaluation early and return $C_{acc}$ [S1, unofficial].
+3.  **Final Output:** If the ray exits the volume without reaching $\alpha_{max}$, return $C_{acc}$ [G].
+
+**Pitfalls:**
+*   **Opacity Inconsistency:** Using a standard transfer function with adaptive step sizes causes inconsistency in opacity accumulation because the transfer function assumes a constant step size [S1, unofficial]. This is mitigated by using a 3D pre-integrated transfer function [S1, unofficial].
+*   **Performance Overhead:** Dynamic tests for early termination impact performance if performed too frequently. The check is performed after each brick accumulation to balance overhead and benefit [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_ray(ray_origin, ray_direction, bricks, tf_texture, viewpoint, alpha_max=1.0):
+    acc_color = (0.0, 0.0, 0.0)
+    acc_alpha = 0.0
+    
+    for brick in bricks:
+        # Standard ray-brick intersection
+        t = intersect_ray_brick(ray_origin, ray_direction, brick)
+        if t is None:
+            continue
+        sample_pos = ray_origin + ray_direction * t
+        
+        # Adaptive step size: decreases as distance to viewpoint decreases
+        dist_to_view = length(sample_pos - viewpoint)
+        step = max(0.01, 1.0 / dist_to_view)
+        
+        # Pre-integrated transfer function evaluation
+        # [G] Standard 3D texture lookup for color and opacity at given step
+        color, alpha = sample_volume_with_tf(sample_pos, step, tf_texture)
+        
+        # Front-to-back compositing
+        weight = (1.0 - acc_alpha) * alpha
+        acc_color = acc_color + color * weight
+        acc_alpha = acc_alpha + weight
+        
+        # Early termination check after each brick accumulation
+        if acc_alpha >= alpha_max:
+            return acc_color
+            
+    return acc_color
+
+def intersect_ray_brick(ray_origin, ray_direction, brick):
+    # Standard slab method for ray-AABB intersection
+    tmin, tmax = -float('inf'), float('inf')
+    for i in range(3):
+        if ray_direction[i] == 0:
+            if ray_origin[i] < brick.min[i] or ray_origin[i] > brick.max[i]:
+                return None
+        else:
+            t1 = (brick.min[i] - ray_origin[i]) / ray_direction[i]
+            t2 = (brick.max[i] - ray_origin[i]) / ray_direction[i]
+            tmin = max(tmin, min(t1, t2))
+            tmax = min(tmax, max(t1, t2))
+    return tmax if tmax >= 0 else None
+
+def sample_volume_with_tf(sample_pos, step, tf_texture):
+    # [G] Standard pre-integrated TF lookup
+    # Returns color and opacity for the given spatial position and step size
+    return tf_texture.sample_at(sample_pos, step)
+```
+
+## Subtopics
+
+### [Adaptive Sampling with Monotonically Decreasing Density Function](5388-adaptive-sampling-with-monotonically-decreasing-density-func.md)
+Uses a monotonically decreasing function of distance to determine sampling density, stabilizing step calculation and preventing aliasing artifacts. Choose when high structural similarity (SSIM > 0.95) is required with reduced execution time.
+
+## Operating characteristics
+*   **Performance:** Provides good performance on GPUs like the G80 due to efficient thread parallelism and reduced texture access overhead for distant data [S1, unofficial].
+*   **Quality:** Maintains constant brightness and better rendering quality compared to uniform linear sampling by using pre-integrated transfer functions [S1, unofficial].
+*   **Limitations:** Requires pre-integrated transfer functions, which increase memory usage and complexity. The method is specific to brick-based volume representations [S1, unofficial].
+*   **Scaling:** Performance improves with distance from the viewpoint as sampling density decreases [S1, unofficial].
+
+## Background
+This method was presented in a thesis/report from INRIA [S1, unofficial]. It addresses the optimization of rendering distant data by decreasing sampling frequency based on distance to the viewpoint, combined with early ray termination [S1, unofficial].
+
+## Sources
+[S1] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

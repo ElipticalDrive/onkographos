@@ -1,0 +1,135 @@
+Summary & Motivation While Expanse's digital tree architecture minimizes key index overhead through expanse-based partitioning and compact tagged edges, storing associated variable-length values can introduce significant overhead: Alloca...
+
+feat(blobmap): hardware-accelerated lightweight value compression & inline slot promotion · Issue #392 · orieg/expanse · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(blobmap): hardware-accelerated lightweight value compression & inline slot promotion #392
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+feat(blobmap): hardware-accelerated lightweight value compression & inline slot promotion#392
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requestperformancePerformance optimizations and kernel accelerationPerformance optimizations and kernel accelerationresearchExploratory research, prototypes, and design investigationsExploratory research, prototypes, and design investigationsrustPull requests that update rust codePull requests that update rust code
+Description
+orieg
+opened on Aug 27, 2026
+Issue body actions
+Summary & Motivation
+While Expanse's digital tree architecture minimizes key index overhead through expanse-based partitioning and compact tagged edges, storing associated variable-length values can introduce significant overhead:
+Allocator & Pointer Overhead: Small payloads (8–16 bytes) that exceed the current 7-byte inline threshold (ValueSlot::Inline*) spill into BlobArena chunks or heap allocations, incurring an 8-byte record header and requiring arena locator management.
+DRAM Cache Latency: Chasing pointers or loading external arena cache lines incurs ~200+ CPU cycles for cold memory accesses.
+Decompression Budget Constraint: Standard block compressors (Zstd, Deflate, Brotli) take hundreds of nanoseconds to microseconds to decompress, completely destroying Judy's 5–15 ns point-lookup latency profile.
+This feature request outlines a hardware-accelerated, sub-nanosecond lightweight value compression subsystem designed to compress 8–16 byte values down to $\le 7$ bytes to promote them to zero-allocation inline value slots, as well as vectorized columnar compression for slab-backed payloads in BlobArena.
+Architectural Invariants & Judy Integrity
+Per docs/ARCHITECTURE.md and docs/design/large-values.md:
+Strict 64-Bit Machine Word Slot: ValueSlot remains exactly 64 bits (u64 on 64-bit targets, u32 on 32-bit targets). No leaf slots are widened (preserving 8 slots per 64-byte cache line).
+Zero Heap Allocation for Compressed Payloads: Any value compressed to $\le 7$ bytes is packed directly into the leaf's ValueSlot without touching the heap or arena allocator.
+Decoupled Columnar Storage: Block-level compression algorithms operate strictly within BlobArena chunks without complecting the digital tree radix index.
+Zero-Overhead Legacy C ABI Parity: Unmanaged *mut Word accesses via classic JudyL symbols remain verbatim.
+Proposed Compression Schemes
+1. In-Register Inline Promoters (Target: $\le 7$ Bytes)
+Null / Leading-Zero Truncation (LZCNT / CLZ & _mm_shuffle_epi8 / VTBL):
+Target: 64-bit integer values, sequential IDs, Unix timestamps, and sparse bitmasks with high zero bytes.
+Compression: leading_zeros() detects redundant zero bytes in 1 cycle.
+Decompression: Single SIMD byte shuffle (PSHUFB on x86, VTBL/TBL on ARM NEON) or scalar shift restores original width in sub-nanosecond time.
+6-Bit Alphanumeric & 4-Bit Nibble Packing (SWAR / Vector Permutes):
+Target: Short ASCII tokens, base64 strings, uppercase/lowercase alphanumeric identifiers (8–9 bytes), and decimal timestamps (10–14 digits).
+Compression: Pack 6-bit codes ($9 \times 6 = 54\text{ bits} \le 7\text{ bytes}$) or 4-bit BCD nibbles into the 56-bit payload area.
+Decompression: Branchless SWAR bit-shifts or parallel table lookup expanding back to ASCII.
+Floating-Point XOR Delta / Chimp-Lite (CLZ + CTZ):
+Target: IEEE 754 f64 floats with repeated high/low bits or base offsets.
+Compression: $\Delta = V \oplus V_{\text{base}}$, truncate common leading/trailing zero bytes.
+2. Vectorized Columnar Slabs (in BlobArena)
+SIMD-BP / FastLanes: Bit-packing numeric columns using AVX2/NEON vector shifts (10–20 GB/s decompression per core).
+FastPFOR / SIMD-PFOR: Vectorized patched frame of reference for clustered integer arrays and posting lists.
+Byte-Aligned LZ4-Lite: Vectorized byte streaming for strings and JSON documents $&gt;32$ bytes without bit-level entropy decoding.
+Quantization Kernels (SQ8 / PQ): Low-precision vector embedding compression using x86 VNNI (_mm256_dpbusd_epi32) and ARM SDOT for in-register vector similarity scoring.
+Hardware ISA Mapping & Citations
+Referenced against docs/HARDWARE.md:
+Capability / Instruction
+Target Architectures
+Usage in Compression
+LZCNT / TZCNT / CLZ / RBIT
+x86-64 (BMI1), AArch64 (base), RV32/64 (+zbb)
+Zero-byte and bit-width detection in 1–2 cycles
+PSHUFB (_mm_shuffle_epi8) / VTBL
+x86-64 (SSSE3/AVX2), AArch64 (NEON)
+1-cycle in-register byte unpacking and ASCII reconstruction
+VPOPCNTDQ / cpop
+x86-64 (AVX-512), RISC-V (+zbb)
+Fast rank/select and sparse exception indexing
+dpbusd (VNNI) / SDOT
+x86-64 (AVX-512 VNNI / AVX2 VNNI), AArch64 (FEAT_DotProd)
+In-register integer dot-products over quantized embeddings
+Experimental Validation & Acceptance Gates
+To validate feasibility without performance or methodology regressions:
+Microarchitectural Latency Gate:
+Inline decompression latency must measure $&lt; 2\text{ ns}$ (or $\le 10$ Callgrind instructions) per lookup.
+Point lookup on compressed inline values must achieve within $5%$ of uncompressed inline lookup throughput.
+Inline Promotion Rate Measurement:
+Measure promotion percentage across canonical datasets:
+Alphanumeric identifiers & base64 tokens (8–10 chars).
+Monotonic and sparse 64-bit integer values / timestamps.
+High-cardinality foreign keys.
+Differential Correctness & Fuzzing:
+Exhaustive proptest round-trip validation (compress(x) -> decompress -> x == original) for all supported data types and edge cases (denormals, all-zeros, max-values, boundary lengths).
+Miri verification for undefined behavior across SIMD and SWAR unpack paths.
+Memory Footprint & DRAM Traffic:
+Track heap and slab memory reduction using TrackingAlloc in comparative benchmarks.
+Activity
+orieg
+added
+enhancementNew feature or requestNew feature or request
+rustPull requests that update rust codePull requests that update rust code
+performancePerformance optimizations and kernel accelerationPerformance optimizations and kernel acceleration
+researchExploratory research, prototypes, and design investigationsExploratory research, prototypes, and design investigations
+on Aug 27, 2026
+orieg
+added 2 commits that reference this issue on Aug 29, 2026
+feat(blobmap): Phase 0 value compression crossover evaluation harness (…
+...
+bfa6aae
+feat(blobmap): hardware-accelerated value compression & inline slot p…
+...
+7b18e28
+orieg commented on Aug 29, 2026
+orieg
+on Aug 29, 2026
+OwnerAuthor
+More actions
+Resolved and landed via #518.
+orieg
+closed this as completedon Aug 29, 2026
+orieg
+added 2 commits that reference this issue on Aug 30, 2026
+fix(slot): compile-time layout assertions & Gate 2 throughput validat…
+...
+289c9a2
+fix(slot): compile-time layout assertions & Gate 2 throughput validat…
+...
+7b147df
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requestperformancePerformance optimizations and kernel accelerationPerformance optimizations and kernel accelerationresearchExploratory research, prototypes, and design investigationsExploratory research, prototypes, and design investigationsrustPull requests that update rust codePull requests that update rust code
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

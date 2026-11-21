@@ -1,0 +1,245 @@
+# Histogram Population (Normal & Equalized)
+
+Also called: intensity distribution visualization, volume histogram generation
+
+## Overview
+Histogram Population generates the underlying intensity distribution data structures required for transfer function generation in volume rendering. It solves the problem of converting raw scalar voxel values into a normalized, visualizable format (line segments) that represents either the raw frequency of intensities (Normal) or their cumulative distribution (Equalized). It differs from its parent [Histogram Equalization](5642-histogram-equalization.md) by focusing on the construction of the histogram geometry itself rather than just the remapping logic, and from [Range Mapping](5650-range-mapping.md) by providing the binned density data necessary for automatic transfer function design.
+
+## How it works
+**Inputs:**
+- Raw volume data array of scalar values.
+- Metadata: `size` (number of voxels), `sampleType` (e.g., `UNSIGNED_CHAR`, `UNSIGNED_SHORT`, `FLOAT_POINT`), `endian` (for non-float types).
+- Parameters: `log` (boolean flag, default `false`).
+
+**Outputs:**
+- A histogram data structure stored as a float array.
+- Size: `counter->range * 4` floats.
+- Layout: Each intensity bin `i` occupies 4 consecutive floats representing a line segment: `[x0, y0, x1, y1]`.
+  - `x0`: Left x-coordinate.
+  - `y0`: Bottom y-coordinate (always `0.0`).
+  - `x1`: Right x-coordinate.
+  - `y1`: Normalized height of the bin.
+
+**Data Structures:**
+- `Counter_t`:
+  - `range`: Number of bins, calculated as `(int)(maxInt - minInt) + 1`.
+  - `count`: Integer array of size `range`, storing raw frequencies for each bin.
+  - `max`: The maximum value in the `count` array.
+  - `minInt`, `maxInt`: The minimum and maximum intensity values found in the volume.
+
+**Steps:**
+
+1. **Data Conversion and Extremes Finding:**
+   Iterate through all `size` voxels. Convert raw binary data to float `current` based on `sampleType`.
+   - If `sampleType == UNSIGNED_CHAR`: `current = data[index]`.
+   - If `sampleType == UNSIGNED_SHORT`:
+     - If `endian == BIG`: `current = data[index*2] * 256 + data[index*2+1]`.
+     - If `endian == LITTLE`: `current = data[index*2] + data[index*2+1] * 256`.
+   - If `sampleType == FLOAT_POINT`: `current = ftemp[index]`.
+   - Track `maxInt` and `minInt` during this pass. [S1, unofficial]
+
+2. **Binning:**
+   Calculate `range = (int)(maxInt - minInt) + 1`. If `range <= 0`, terminate.
+   Initialize `count` array of size `range` to zero.
+   For each voxel intensity `current`:
+   - Compute bin index: `idx = (int)(current - minInt)`.
+   - Increment `count[idx]`.
+   - Track `max` (maximum value in `count`). [S1, unofficial]
+
+3. **Histogram Population (Normal Mode):**
+   For each intensity bin `i` from `0` to `range - 1`:
+   - Calculate `x0`:
+     $$ x_0 = \frac{(i + 1) \times 255}{\text{range} + 1} $$
+   - Set `y0 = 0.0`.
+   - Calculate `y1`:
+     - Let `y = count[i]`.
+     - If `y == 0`, set `y = -1.0` (special marker). [G]
+     - If `log` is false:
+       $$ y_1 = \frac{y}{\text{max}} $$
+     - If `log` is true:
+       $$ y_1 = \frac{\log_{10}(y)}{\log_{10}(\text{max})} $$
+     - Note: If `y` was `-1.0` (zero count), `y1` remains `-1.0`. [S1, unofficial]
+   - Set `x1 = x0`.
+   - Store `[x0, y0, x1, y1]` in the output array at offset `i * 4`.
+
+4. **Histogram Population (Equalized Mode):**
+   Maintain a cumulative counter `curX`, initialized to `0`.
+   For each intensity bin `i` from `0` to `range - 1`:
+   - Calculate `x0`:
+     $$ x_0 = \frac{\text{curX} \times 255}{\text{size}} $$
+   - Set `y0 = 0.0`.
+   - Calculate `y1` (same logic as Normal mode, using `count[i]` and `max`):
+     - Let `y = count[i]`.
+     - If `y == 0`, set `y = -1.0`.
+     - If `log` is false:
+       $$ y_1 = \frac{y}{\text{max}} $$
+     - If `log` is true:
+       $$ y_1 = \frac{\log_{10}(y)}{\log_{10}(\text{max})} $$
+     - If `y` was `-1.0`, `y1` remains `-1.0`. [S1, unofficial]
+   - Set `x1 = x0`.
+   - Store `[x0, y0, x1, y1]` in the output array at offset `i * 4`.
+   - Update `curX += count[i]`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def populate_histogram(raw_data, size, sample_type, endian, log_mode=False):
+    """
+    raw_data: list of bytes or floats
+    size: int
+    sample_type: 'UNSIGNED_CHAR', 'UNSIGNED_SHORT', 'FLOAT_POINT'
+    endian: 'BIG', 'LITTLE'
+    log_mode: bool
+    Returns: list of floats (histogram array)
+    """
+    # Step 1: Convert and find extremes
+    intensities = []
+    max_int = -float('inf')
+    min_int = float('inf')
+    
+    for index in range(size):
+        if sample_type == 'UNSIGNED_CHAR':
+            current = float(raw_data[index])
+        elif sample_type == 'UNSIGNED_SHORT':
+            if endian == 'BIG':
+                current = float(raw_data[index * 2] * 256 + raw_data[index * 2 + 1])
+            else: # LITTLE
+                current = float(raw_data[index * 2] + raw_data[index * 2 + 1] * 256)
+        elif sample_type == 'FLOAT_POINT':
+            current = float(raw_data[index])
+        else:
+            current = 0.0
+            
+        intensities.append(current)
+        if current > max_int:
+            max_int = current
+        if current < min_int:
+            min_int = current
+
+    # Step 2: Binning
+    range_val = int(max_int - min_int) + 1
+    if range_val <= 0:
+        return []
+        
+    counts = [0] * range_val
+    max_count = 0
+    
+    for current in intensities:
+        idx = int(current - min_int)
+        if 0 <= idx < range_val:
+            counts[idx] += 1
+            if counts[idx] > max_count:
+                max_count = counts[idx]
+                
+    # Step 3 & 4: Population
+    histogram = [0.0] * (range_val * 4)
+    cur_x = 0.0
+    
+    for i in range(range_val):
+        # Calculate x coordinates
+        # Normal mode uses (i+1)*255/(range+1)
+        # Equalized mode uses curX*255/size
+        # Note: The source code snippet provided in [S1, unofficial] uses the Normal mode formula 
+        # for the 'if (coord == 0)' branch in the loop, but the text description 
+        # distinguishes Normal vs Equalized by the x0 calculation.
+        # The provided C-like code snippet actually implements the Normal mode formula 
+        # for x0 in the coord==0 branch. 
+        # However, the 'step' note says: "Equalized histogram: ... set x0 = curX*255/size".
+        # We must implement both or distinguish. The source code snippet [S1, unofficial] 
+        # seems to only show one loop structure. Let's assume the caller selects 
+        # the mode. The prompt asks for "Histogram Population (Normal & Equalized)".
+        # The source code snippet [S1, unofficial] calculates x0 as (curIntensity + 1)*255 / (range + 1).
+        # This matches the "Normal histogram" description.
+        # The "Equalized histogram" description says x0 = curX*255/size.
+        
+        # To be complete, we need to know which mode is active. 
+        # The source [S1, unofficial] code snippet does not show a mode switch for x0, 
+        # but the text notes do. We will implement a generic function that takes a mode flag.
+        
+        if not log_mode: 
+            # This block is actually for the y-value calculation in the source snippet.
+            # The source snippet's x0 calculation is fixed to Normal mode style.
+            pass
+
+    # Re-writing based on the explicit "step" notes which define two distinct behaviors.
+    # The source code snippet [S1, unofficial] is ambiguous or incomplete regarding the mode switch 
+    # for x0, but the text notes are explicit.
+    
+    # Let's assume the function is called with a mode.
+    # However, the source code snippet [S1, unofficial] is the only code provided.
+    # It calculates x0 as (curIntensity + 1)*255 / (range + 1).
+    # This is the Normal mode.
+    # The Equalized mode x0 is curX*255/size.
+    
+    # Since the prompt asks for the article on "Histogram Population (Normal & Equalized)",
+    # and the notes describe both, I will provide the logic for both.
+    
+    # The source code snippet [S1, unofficial] is:
+    # if (coord == 0) { histogram[index] = (curIntensity + 1)*255 / float(counter->range + 1); }
+    # This is strictly Normal mode x0.
+    # The text note says: "Equalized histogram: ... set x0 = curX*255/size".
+    
+    # I will write the pseudocode to support both, noting the source discrepancy.
+    
+    result = []
+    
+    # Normal Mode
+    for i in range(range_val):
+        x0 = (i + 1) * 255.0 / (range_val + 1)
+        y0 = 0.0
+        y = counts[i]
+        if y == 0:
+            y1 = -1.0
+        else:
+            if log_mode:
+                y1 = math.log10(y) / math.log10(max_count)
+            else:
+                y1 = y / max_count
+        x1 = x0
+        result.extend([x0, y0, x1, y1])
+        
+    # Equalized Mode
+    cur_x = 0.0
+    for i in range(range_val):
+        x0 = cur_x * 255.0 / size
+        y0 = 0.0
+        y = counts[i]
+        if y == 0:
+            y1 = -1.0
+        else:
+            if log_mode:
+                y1 = math.log10(y) / math.log10(max_count)
+            else:
+                y1 = y / max_count
+        x1 = x0
+        result.extend([x0, y0, x1, y1])
+        cur_x += counts[i]
+        
+    return result
+```
+
+**Parameters:**
+- `log`: Boolean. If `true`, heights are scaled by $\log_{10}(\text{count})/\log_{10}(\text{max})$. If `false`, scaled by $\text{count}/\text{max}$. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+- **Zero-Count Bins:** If `count[i] == 0`, the height `y1` is set to `-1.0`. This likely indicates a gap in the data or requires special rendering logic to handle negative heights. [S1, unofficial]
+- **Range Calculation:** If `maxInt == minInt`, `range` becomes 1. If `maxInt < minInt` (impossible for valid data), `range` is $\le 0$ and the function returns empty. [S1, unofficial]
+- **Precision:** Integer division in C-like source `(curIntensity + 1)*255 / (counter->range + 1)` must be cast to float to avoid truncation. [S1, unofficial]
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for data conversion and binning, where $N$ is the number of voxels. Histogram population is $O(R)$, where $R$ is the range of intensities.
+- **Memory Complexity:** $O(N)$ for storing raw intensities and counts, plus $O(R)$ for the histogram output.
+- **Strengths:** Simple, fast, and provides a direct visualization of the data distribution.
+- **Limitations:** The use of `-1.0` for zero counts is non-standard and may break standard rendering pipelines. The fixed 255 scaling assumes an 8-bit display range, which may not match all input types.
+- **When to use:** When a quick visual inspection of the intensity distribution is needed for transfer function design.
+- **When not to use:** When high precision is required for zero-count bins or when the data range is extremely large (causing sparse bins).
+
+## Background
+Originating from scientific visualization tools for volume rendering, this method is part of the automatic transfer function generation pipeline. It is used to visualize the intensity distribution of a volume dataset, aiding users in selecting appropriate transfer function parameters. The specific implementation details, including the `-1.0` marker for zero counts and the specific binning logic, are derived from open-source scientific visualization projects. [S1, unofficial]
+
+## Sources
+[S1] extrovert7986/Scientific-visualization-Slicing-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Slicing-volume-rendering, fetched 2026-10-26 (unofficial)

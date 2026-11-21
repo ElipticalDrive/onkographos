@@ -1,0 +1,133 @@
+--- v001.md
++++ v002.md
+@@ -2,96 +2,61 @@
+ Also called: S-Subtraction
+ ## Overview
+-Smooth Subtraction provides a differentiable approximation of the boolean difference operation ($A \setminus B$) for two Signed Distance Functions (SDFs) [S1, unofficial]. Unlike the standard CSG difference which uses a sharp minimum function, this method blends the result using a smooth parameter $k$, enabling gradient-based optimization in neural rendering pipelines [S1, unofficial]. It is distinct from hard CSG operations by maintaining $C^1$ continuity at the boundary, which is critical for differentiable rendering but introduces a smoothing artifact controlled by $k$ [S1, unofficial].
++Smooth Subtraction provides a smooth approximation of the boolean difference operation ($A \setminus B$) for two Signed Distance Functions (SDFs) [S2, unofficial]. It blends the subtraction of one shape from another using a smoothing parameter $k$ [S1, unofficial].
+ ## How it works
+ ### Inputs and Outputs
+ - **Inputs**:
+-  - $d_1$: SDF value of the subtracted volume (the "hole" or removed object) at the query point.
+-  - $d_2$: SDF value of the base volume (the object being cut) at the query point.
+-  - $k$: Blending radius or smoothness parameter ($k > 0$).
++  - $d_1$: SDF value of the subtracted volume.
++  - $d_2$: SDF value of the base volume.
++  - $k$: Smoothing factor or blending radius ($k > 0$) [S2, unofficial].
+ - **Output**:
+-  - $d_{sub}$: The smoothed SDF value representing the difference.
+-
++  - $d$: Smoothed SDF value for the difference.
+ ### Data Structures
+-No complex data structures are required; the operation is point-wise and scalar.
+-
++The operation is point-wise and scalar, requiring no auxiliary data structures [G].
+ ### Steps
+-1. Compute the sum of the distances: $s = d_2 + d_1$.
+-2. Compute the blending factor $h$ using the smoothstep-like interpolation:
+-   $$ h = \text{clamp}\left(0.5 - 0.5 \cdot \frac{s}{k}, 0.0, 1.0\right) $$
+-   where $\text{clamp}(v, min, max)$ restricts $v$ to the range $[min, max]$.
+-3. Compute the linear interpolation (mix) between the base SDF $d_2$ and the negated subtracted SDF $-d_1$:
++1. Compute the blending factor $h$ by clamping a linear function of the distance sum:
++   $$ h = \text{clamp}\left(0.5 - 0.5 \frac{d_2 + d_1}{k}, 0.0, 1.0\right) $$
++2. Compute the linear interpolation between $d_2$ and $-d_1$ using $h$:
+    $$ \text{mix}(d_2, -d_1, h) = d_2 \cdot (1 - h) + (-d_1) \cdot h $$
+-4. Compute the final smoothed subtraction value:
+-   $$ d_{sub} = \text{mix}(d_2, -d_1, h) + k \cdot h \cdot (1 - h) $$
+-
++3. Add the smoothstep correction term to the interpolation:
++   $$ d = \text{mix}(d_2, -d_1, h) + k \cdot h \cdot (1.0 - h) $$
+ ### Formula
+-The complete formula is:
+-$$ d_{sub} = \text{mix}(d_2, -d_1, h) + k \cdot h \cdot (1 - h) $$
+-with:
+-$$ h = \text{clamp}\left(0.5 - \frac{d_1 + d_2}{2k}, 0.0, 1.0\right) $$
+-$$ \text{mix}(a, b, t) = a(1 - t) + bt $$
+-
++$$ h = \text{clamp}\left(0.5 - 0.5 \frac{d_2 + d_1}{k}, 0.0, 1.0\right) $$
++$$ d = \text{mix}(d_2, -d_1, h) + k \cdot h \cdot (1.0 - h) $$
++$$ \text{mix}(a, b, t) = a \cdot (1 - t) + b \cdot t $$
++where $\text{clamp}(v, \text{min}, \text{max})$ restricts $v$ to $[\text{min}, \text{max}]$ [G].
+ ### Parameters
+-- **$k$**: The blending radius. Controls the width of the smooth transition zone. Typical values depend on the scale of the scene; it should be small relative to the features of interest to preserve sharpness, but large enough to ensure numerical stability for gradients [S1, unofficial]. Not given in the sources.
+-
++- **$k$**: The smoothing factor or blending radius [S2, unofficial]. Typical values: Not given in the sources.
+ ### Edge Cases and Pitfalls
+-- **Division by Zero**: The formula does not involve division, but the term $\frac{d_1 + d_2}{2k}$ can become large if $k$ is very small. Ensure $k > 0$.
+-- **Gradient Discontinuity**: While the function is $C^1$ continuous, the second derivative is discontinuous at the boundaries of the blend region ($h=0$ and $h=1$). This may affect higher-order optimization methods [S1, unofficial].
+-- **Precision**: When $d_1$ and $d_2$ are large and opposite in sign, cancellation errors may occur in $d_1 + d_2$. Use double precision if necessary [G].
+-
++- **Division by Zero**: $k$ must be strictly positive to prevent division by zero in the $h$ calculation [G].
++- **Precision**: When $d_1$ and $d_2$ are large with opposite signs, cancellation errors may occur in $d_1 + d_2$ [G].
+ ### Pseudocode
+ ```python
+-def smooth_subtraction(d1, d2, k):
+-    """
+-    Compute smooth subtraction of SDF d1 from d2 with smoothness k.
+-    
+-    Args:
+-        d1: SDF of the object to subtract (scalar or array).
+-        d2: SDF of the base object (scalar or array).
+-        k: Blending radius (scalar, must be > 0).
+-        
+-    Returns:
+-        d_sub: Smoothed SDF value.
+-    """
+-    if k <= 0:
+-        raise ValueError("Smoothness parameter k must be positive.")
+-        
+-    # Step 1: Compute sum
+-    s = d2 + d1
+-    
+-    # Step 2: Compute blending factor h
+-    # h = clamp(0.5 - 0.5 * (d1 + d2) / k, 0.0, 1.0)
+-    h = 0.5 - 0.5 * (s / k)
++def smooth_subtraction(d1: float, d2: float, k: float) -> float:
++    if k <= 0.0:
++        raise ValueError("k must be positive.")
++    h = 0.5 - 0.5 * (d2 + d1) / k
+     h = max(0.0, min(1.0, h))
+-    
+-    # Step 3: Compute mix(d2, -d1, h)
+-    # mix(a, b, t) = a * (1 - t) + b * t
+     mix_val = d2 * (1.0 - h) + (-d1) * h
+-    
+-    # Step 4: Compute final result
+-    d_sub = mix_val + k * h * (1.0 - h)
+-    
+-    return d_sub
++    return mix_val + k * h * (1.0 - h)
+ ```
+-
+ ## Subtopics
+ 
+ ### Hard CSG Difference
+-Uses the `min` function for sharp boundaries. Choose when differentiability is not required and exact boolean operations are needed. See [CSG Difference](1238-csg-difference.md).
++Uses the `min` function for sharp boundaries. Choose when differentiability is not required and exact boolean operations are needed. See [CSG Difference](1238-csg-difference.md) [G].
+ 
+ ### Smooth Union
+-Blends two SDFs together using a similar smoothstep approach. Choose when merging objects with rounded intersections is desired. See [Smooth Union](1239-smooth-union.md).
++Blends two SDFs together using a similar smoothstep approach. Choose when merging objects with rounded intersections is desired. See [Smooth Union](1239-smooth-union.md) [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per query point. The operation involves basic arithmetic and clamping.
+-- **Memory Complexity**: $O(1)$ auxiliary memory.
+-- **Strengths**: Differentiable, allowing gradient descent on parameters $d_1, d_2$ or $k$. Smooth boundaries avoid aliasing artifacts in gradient-based optimization.
+-- **Limitations**: The result is an approximation, not a true boolean difference. The smoothing radius $k$ introduces a bias; the resulting surface is not exactly at distance 0 from the original boolean boundary. Performance is identical to hard CSG, but gradient computation requires careful handling of the non-differentiable points at $h=0,1$ if not using automatic differentiation tools [S1, unofficial].
+-- **When to use**: Differentiable rendering, neural implicit surface optimization, or when smooth transitions between objects are visually preferred over sharp corners.
+-- **When not to use**: When exact boolean geometry is required for collision detection or non-differentiable rendering.
+-
++- **Time Complexity**: $O(1)$ per query point [G].
++- **Memory Complexity**: $O(1)$ auxiliary memory [G].
++- **Measured Performance**: Not given in the sources.
++- **Strengths**: Differentiable, allowing gradient descent on parameters [G].
++- **Limitations**: The result is an approximation, not a true boolean difference. The smoothing radius $k$ introduces a bias; the resulting surface is not exactly at distance 0 from the original boolean boundary [G].
++- **When to use**: Differentiable rendering, neural implicit surface optimization, or when smooth transitions between objects are visually preferred over sharp corners [G].
++- **When not to use**: When exact boolean geometry is required for collision detection or non-differentiable rendering [G].
+ ## Background
+-Smooth Subtraction is derived from the need for differentiable constructive solid geometry (CSG) in neural rendering and optimization contexts. It is implemented in PyTorch-based SDF rendering libraries such as Sphere-Tracing-PyTorch3D [S1, unofficial]. The technique generalizes the smooth union operator to the difference operation by negating the subtracted SDF before blending.
+-
++Derived from differentiable constructive solid geometry requirements in neural rendering and optimization contexts [G]. Implemented in PyTorch-based SDF rendering libraries [G].
+ ## Sources
+-[S1] skmhrk1209/Sphere-Tracing-PyTorch3D, https://github.com/skmhrk1209/Sphere-Tracing-PyTorch3D, fetched 2026-10-26 (unofficial)+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
++[S2] skmhrk1209/Sphere-Tracing-PyTorch3D, https://github.com/skmhrk1209/Sphere-Tracing-PyTorch3D, fetched 2026-10-26 (unofficial)

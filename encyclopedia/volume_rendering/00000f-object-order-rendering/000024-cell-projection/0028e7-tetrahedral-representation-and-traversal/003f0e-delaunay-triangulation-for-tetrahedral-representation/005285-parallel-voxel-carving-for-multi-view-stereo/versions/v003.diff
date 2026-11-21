@@ -1,0 +1,181 @@
+--- v002.md
++++ v003.md
+@@ -54,14 +54,14 @@
+ 
+ **Parallelization Strategy:**
+-* The GPU kernel uses $V_W \times V_D$ threads in parallel.
+-* Each thread performs $V_H$ voxel carving operations independently.
++* The GPU kernel uses $V_W \times V_D$ threads in parallel [S1, unofficial].
++* Each thread performs $V_H$ voxel carving operations independently [S1, unofficial].
+ * For a $256^3$ voxel sub-volume, $256^2$ threads run in parallel, with each thread carving 256 voxels along the y-axis. Carving is done along the y-axis to balance workloads, as urban scenes are often flat in this dimension [S1, unofficial].
+ 
+ **Carving Logic (per thread):**
+ For each voxel in its assigned range:
+-1. **Visibility Check:** Determine if the voxel is visible in the current view.
+-2. **Projection:** Project the voxel center into the image plane of the current view.
++1. **Visibility Check:** Determine if the voxel is visible in the current view [S1, unofficial].
++2. **Projection:** Project the voxel center into the image plane of the current view [S1, unofficial].
+ 3. **Photo-Consistency Test:** Retrieve the depth value $d_{map}$ and normal $n_{map}$ from the depth map at the projected pixel. Retrieve the depth value $d_{voxel}$ from the voxel's position relative to the camera. Check if the voxel is photo-inconsistent. A voxel is carved away if it does not match the depth map/image data. Specifically, if the voxel's depth deviates significantly from the depth map's depth, or if the photo-consistency metric fails. Incorrect view-dependent surfaces are carved away when voxel carving is performed with another viewpoint. Correct surfaces remain [S1, unofficial].
+-4. **Update State:** If carved: Mark voxel as "Carved." If not carved: Mark voxel as "Uncarved" (Inner) or "Surface" (if it is on the boundary of the uncarved region).
++4. **Update State:** If carved: Mark voxel as "Carved." If not carved: Mark voxel as "Uncarved" (Inner) or "Surface" (if it is on the boundary of the uncarved region) [S1, unofficial].
+ 5. **Surface Voxel Calculation (for final output):** For voxels identified as surface voxels, compute a weighted average plane among several view-dependent planes intersecting the voxel cube. Shift the voxel to a point on this plane [S1, unofficial].
+ 
+@@ -69,67 +69,20 @@
+ 
+ ```python
+-import math
+-
+-def preprocess_and_generate_depth_maps(images, poses):
+-    # Step 1: Preprocessing
+-    # 1.1 Dense Correspondence: Use gradient-based warping and coarse-to-fine hierarchical matching
+-    correspondences = perform_dense_correspondence(images) # Standard dense matching algorithm
+-    # 1.2 Edge Extraction: Extract matching points on or near edges using an edge detector
+-    edge_points = extract_edge_points(correspondences) # Standard edge detection
+-    # 1.3 3D Point Computation: Compute 3D points from pairwise correspondences
+-    points_3d = triangulate_3d(correspondences, poses) # Standard triangulation
+-    # 1.4 Bundle Adjustment: Refine camera poses and 3D points
+-    poses, points_3d = bundle_adjustment(poses, points_3d) # Standard optimization
+-    # 1.5 Terrain Alignment (if aerial/terrain scene)
+-    # Estimate least squares plane for x-z alignment
+-    plane = estimate_least_squares_plane(points_3d) # Standard least squares fit
+-    transform_matrix = compute_alignment_transform(plane) # Standard matrix construction
+-    # Transform coordinates and projection matrices
+-    points_3d = apply_transform(points_3d, transform_matrix) # Standard affine transform
+-    poses = apply_transform_to_poses(poses, transform_matrix) # Standard pose transform
+-
+-    # Step 2: Depth Map Generation
+-    depth_maps = []
+-    for i, (image, pose) in enumerate(zip(images, poses)):
+-        # 2.1 Semi-Dense Correspondences: Use semi-dense pairs between image i and other views
+-        semi_dense_pairs = get_semi_dense_correspondences(image, poses, points_3d) # Standard sparse matching
+-        # 2.2 Delaunay Triangulation of 2D correspondences
+-        points_2d = project_to_2d(semi_dense_pairs, pose) # Standard projection
+-        mesh = delaunay_triangulation(points_2d) # Standard Delaunay triangulation
+-        # 2.3 View-Dependent Surface: Replace 2D vertices with 3D points
+-        mesh_3d = replace_with_3d(mesh, semi_dense_pairs) # Standard vertex replacement
+-        # 2.4 Normal Computation
+-        for triangle in mesh_3d:
+-            v0, v1, v2 = triangle.vertices
+-            normal = compute_normal(v0, v1, v2) # Standard cross product
+-            # Ensure negative dot product with viewing direction
+-            view_dir = pose.camera_direction
+-            if dot(normal, view_dir) > 0:
+-                normal = -normal
+-            triangle.normal = normal
+-        # 2.5 Mesh Simplification (if noisy)
+-        if is_noisy(semi_dense_pairs):
+-            mesh_3d = simplify_mesh(mesh_3d) # Standard mesh simplification
+-        # 2.6 Project to Depth Map: Project mesh onto image plane to create dense depth map
+-        depth_map = project_mesh_to_depth_map(mesh_3d, image.resolution) # Standard rasterization
+-        depth_maps.append(depth_map)
+-    return poses, depth_maps
+-
+ def parallel_voxel_carving(depth_maps, poses, grid_dims):
+     V_W, V_H, V_D = grid_dims
+-    # Partition volume into sub-volumes
+-    sub_volumes = partition_volume(grid_dims) # Standard grid partitioning
++    # Partition volume into sub-volumes (e.g., 256^3)
++    sub_volumes = partition_volume(grid_dims) # Not given in sources.
+     reconstructed_voxels = []
+ 
+     for sub_vol in sub_volumes:
+-        # GPU Kernel Execution: 256^2 threads for 256^3 sub-volume
++        # GPU Kernel: 256^2 threads for 256^3 sub-volume
+         # Each thread handles V_H voxels along Y-axis
+-        threads = V_W * V_D
++        num_threads = V_W * V_D
+         voxels_per_thread = V_H
+-        voxel_states = {} # Maps voxel_id to "CARVED", "UNCARVED", or "SURFACE"
++        voxel_states = {}
+ 
+-        for thread_id in range(threads):
++        for thread_id in range(num_threads):
+             u = thread_id % V_W
+-            v = thread_id // V_D
++            v = (thread_id // V_W) % V_D
+             weighted_normal = [0.0, 0.0, 0.0]
+             weighted_dist = 0.0
+@@ -138,24 +91,23 @@
+             for h in range(voxels_per_thread):
+                 voxel_id = (u, v, h)
+-                voxel = get_voxel(sub_vol, voxel_id) # Standard grid lookup
++                voxel = get_voxel(sub_vol, voxel_id) # Not given in sources.
+                 is_carved = False
+ 
+                 for view_idx, (depth_map, pose) in enumerate(zip(depth_maps, poses)):
+                     # 3.1 Visibility Check
+-                    if not is_visible(voxel, pose): # Standard frustum/culling check
++                    if not is_visible(voxel, pose): # Not given in sources.
+                         continue
+                     # 3.2 Projection
+-                    proj_u, proj_v = project_voxel_to_image(voxel, pose) # Standard projection
++                    proj_u, proj_v = project_voxel_to_image(voxel, pose) # Not given in sources.
+                     # 3.3 Photo-Consistency Test
+-                    d_map = depth_map.get_depth(proj_u, proj_v)
+-                    n_map = depth_map.get_normal(proj_u, proj_v)
++                    d_map = depth_map[proj_v][proj_u].depth
++                    n_map = depth_map[proj_v][proj_u].normal
+                     d_voxel = distance(voxel.center, pose.camera_origin)
+-                    # Check consistency
+-                    if is_photo_inconsistent(d_map, d_voxel, n_map, voxel):
++                    # Check consistency: carved if depth deviates significantly or photo-consistency fails
++                    if abs(d_map - d_voxel) > 1.0: # Threshold not given in sources [G]
+                         voxel_states[voxel_id] = "CARVED"
+                         is_carved = True
+                         break
+                     else:
+-                        # Accumulate for surface voxel calculation
+                         w = 1.0
+                         weighted_normal = [weighted_normal[k] + w * n_map[k] for k in range(3)]
+@@ -166,5 +118,5 @@
+                     voxel_states[voxel_id] = "UNCARVED"
+                     # 3.4 Surface Voxel Calculation
+-                    if is_boundary(voxel, voxel_states): # Standard neighbor check
++                    if is_boundary(voxel, voxel_states): # Not given in sources.
+                         voxel_states[voxel_id] = "SURFACE"
+                         if weight_sum > 0:
+@@ -176,14 +128,7 @@
+                                 position=voxel.center,
+                                 normal=avg_normal,
+-                                color=interpolate_color(voxel, depth_maps, poses)
++                                color=interpolate_color(voxel, depth_maps, poses) # Not given in sources.
+                             ))
+     return reconstructed_voxels
+-
+-def is_photo_inconsistent(d_map, d_voxel, n_map, voxel):
+-    # Determine if a voxel is photo-inconsistent.
+-    # Simplified logic: if depth difference exceeds threshold or normal mismatch.
+-    depth_diff = abs(d_map - d_voxel)
+-    threshold = 1.0 # Implementation detail not specified in sources
+-    return depth_diff > threshold
+ ```
+ 
+@@ -209,19 +154,19 @@
+ ## Operating characteristics
+ 
+-* **Time Complexity:** Linear with respect to the number of voxels and views, $O(V \cdot N)$, where $V$ is the number of voxels and $N$ is the number of views. Parallelization on GPU makes it effectively linear with respect to the number of threads.
++* **Time Complexity:** Linear with respect to the number of voxels and views, $O(V \cdot N)$, where $V$ is the number of voxels and $N$ is the number of views. Parallelization on GPU makes it effectively linear with respect to the number of threads [S1, unofficial].
+ * **Memory Complexity:** Proportional to the voxel grid size and the number of depth maps. The method uses streaming to handle large volumes, limiting GPU memory usage to sub-volumes ($256^3$ voxels) [S1, unofficial].
+ * **Measured Performance:** Achieves high performance for large-scale reconstruction with synthetic and real urban scenes [S1, unofficial].
+ * **Scaling:** Scalable via partitioning the volume into sub-volumes and using streaming [S1, unofficial].
+ * **Strengths:**
+-  * Effective parallelization on GPU.
+-  * Handles large-scale outdoor scenes.
+-  * Outputs surface voxels with normals and connectivity.
+-  * Robust to noise via semi-dense correspondences.
++  * Effective parallelization on GPU [S1, unofficial].
++  * Handles large-scale outdoor scenes [S1, unofficial].
++  * Outputs surface voxels with normals and connectivity [S1, unofficial].
++  * Robust to noise via semi-dense correspondences [S1, unofficial].
+ * **Limitations:**
+-  * Requires accurate camera poses.
+-  * Struggles with textureless regions without semi-dense matching.
+-  * Volumetric representation can be memory-intensive for very large scenes without streaming.
++  * Requires accurate camera poses [S1, unofficial].
++  * Struggles with textureless regions without semi-dense matching [S1, unofficial].
++  * Volumetric representation can be memory-intensive for very large scenes without streaming [S1, unofficial].
+ * **When to use:** Large-scale scene reconstruction in high-resolution voxel grids, specifically for aerial photographs of outdoor scenes and real urban/outdoor scenes [S1, unofficial].
+-* **When not to use:** When camera poses are unknown or inaccurate, or when real-time performance on small objects is required without GPU acceleration.
++* **When not to use:** When camera poses are unknown or inaccurate, or when real-time performance on small objects is required without GPU acceleration [S1, unofficial].
+ 
+ ## Background

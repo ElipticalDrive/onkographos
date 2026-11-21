@@ -1,0 +1,103 @@
+# Distance Correction Factor for Refracted Paths
+
+Also called: D factor for refracted paths, Distance Correction Factor D for Refracted Paths, Geometric spreading factor for refraction
+
+## Overview
+The Distance Correction Factor ($D$) accounts for geometric spreading and refraction effects in the contribution formula for light paths involving refractive boundaries in participating media [S1]. It ensures visually correct radiance by scaling intensity according to the solid angle subtended by the light source as seen from the scattering point, adjusted for the refractive index, distinguishing it from simple inverse-square distance laws [S1].
+
+## How it works
+**Inputs:**
+*   $\mathbf{L}$: Position of the point light source [S1].
+*   $\mathbf{V}$: Position of the camera sample or volume scattering event [S1].
+*   $\mathbf{P}$: Position of the refraction point on the boundary surface [S1].
+*   $\hat{\omega}_L$: Unit vector from $\mathbf{P}$ to $\mathbf{L}$ ($\frac{\mathbf{L}-\mathbf{P}}{\|\mathbf{L}-\mathbf{P}\|}$) [S1].
+*   $\hat{\omega}_V$: Unit vector from $\mathbf{P}$ to $\mathbf{V}$ ($\frac{\mathbf{V}-\mathbf{P}}{\|\mathbf{V}-\mathbf{P}\|}$) [S1].
+*   $\hat{\mathbf{N}}_g$: Geometric normal at $\mathbf{P}$ [S1].
+*   $\hat{\mathbf{N}}_s$: Shading normal at $\mathbf{P}$ [S1].
+*   $\eta$: Refractive index of the medium relative to the outside [S1].
+*   $I_e$: Point light intensity [S1].
+*   $F$: Fresnel factor at $\mathbf{P}$ [S1].
+*   $A$: Volume attenuation (integral of $\sigma_s$ along the segment) [S1].
+*   $\rho$: Volume scattering phase function (or BRDF $\times$ cosine if $\mathbf{V}$ is a surface) [S1].
+
+**Outputs:**
+*   $D$: The distance correction factor [S1].
+*   Contribution: $\frac{I_e F A \rho}{D}$ [S1].
+
+**Data Structures:**
+*   Vectors $\mathbf{L}, \mathbf{V}, \mathbf{P}$ are 3D floats [S1].
+*   Normals $\hat{\mathbf{N}}_g, \hat{\mathbf{N}}_s$ are unit 3D floats [S1].
+*   Derivatives $\hat{\mathbf{N}}'_s$ are 3D floats representing the change in shading normal with respect to perturbations in $\hat{\omega}_V$ [S1].
+
+**Steps:**
+
+1.  **Check for No Refraction:**
+    If $\eta = 1$, return $D = \|\mathbf{L} - \mathbf{V}\|$ [S1].
+
+2.  **Check for Normal Incidence without Shading Normals:**
+    If $\hat{\omega}_L = \hat{\mathbf{N}}_g = \hat{\mathbf{N}}_s$, return $D = (\|\mathbf{V} - \mathbf{P}\| + \eta \|\mathbf{L} - \mathbf{P}\|)^2$ [S1].
+
+3.  **Special Case: No Shading Normals ($\hat{\mathbf{N}}_s = \hat{\mathbf{N}}_g$):**
+    Compute distances:
+    $$d_V = \|\mathbf{V} - \mathbf{P}\|$$
+    $$d_L = \|\mathbf{L} - \mathbf{P}\|$$
+    Return:
+    $$D = (d_V + \eta d_L) \left( \frac{|\hat{\omega}_L \cdot \hat{\mathbf{N}}_g|}{|\hat{\omega}_L \cdot \hat{\mathbf{N}}_g|} d_V + \frac{|\hat{\omega}_V \cdot \hat{\mathbf{N}}_g|}{|\hat{\omega}_L \cdot \hat{\mathbf{N}}_g|} \eta d_L \right)$$
+    The first fraction simplifies to 1, but is preserved verbatim from the source [S1].
+
+4.  **General Case: With Shading Normals:**
+    Compute derivatives of $\mathbf{L}$ in the plane perpendicular to $\hat{\omega}_L$ with respect to perturbations in $\hat{\omega}_V$ [S1]. Let $\hat{\mathbf{N}}'_s$ be the derivative of $\hat{\mathbf{N}}_s$ [S1].
+    
+    Compute intermediate vectors and scalars:
+    $$d_V = \mathbf{V} - \mathbf{P}$$
+    $$d_L = \mathbf{L} - \mathbf{P}$$
+    
+    Compute $\mathbf{P}'$:
+    $$\mathbf{P}' = d_V \left( \partial_V - \frac{\partial_V \cdot \hat{\mathbf{N}}_g}{\partial_V \cdot \hat{\mathbf{N}}_g} \hat{\omega}_V \right)$$
+    The denominator $\partial_V \cdot \hat{\mathbf{N}}_g / \partial_V \cdot \hat{\mathbf{N}}_g$ equals 1, but is preserved verbatim as in the source [S1].
+    
+    $$\mu = \hat{\omega}_L \cdot \hat{\mathbf{N}}_s + \eta \hat{\omega}_V \cdot \hat{\mathbf{N}}_s$$
+    
+    Compute $\mu'$:
+    $$\mu' = \left( \eta^2 \frac{\partial \omega \cdot \hat{\mathbf{N}}_s}{\partial \omega \cdot \hat{\mathbf{N}}_s} + \eta \right) (\hat{\omega}'_V \cdot \hat{\mathbf{N}}_s + \hat{\omega}_V \cdot \hat{\mathbf{N}}'_s)$$
+    The term $\frac{\partial \omega \cdot \hat{\mathbf{N}}_s}{\partial \omega \cdot \hat{\mathbf{N}}_s}$ is preserved verbatim from the source [S1].
+    
+    Compute $\hat{\omega}'_V$:
+    $$\hat{\omega}'_V = \eta \hat{\omega}'_V + \mu' \hat{\mathbf{N}}_s + \mu \hat{\mathbf{N}}'_s$$
+    The source uses $\hat{\omega}'_V$ on both sides, implying an update or specific notation [S1].
+    
+    Compute $\phi'_L$ (used as $\hat{\omega}'_L$ in subsequent steps):
+    $$\phi'_L = - \eta \phi'_L + \mu' \hat{\mathbf{N}}_s + \mu \hat{\mathbf{N}}'_s$$
+    The source labels this $\phi'_L$ but applies it to the light direction derivative [S1].
+    
+    Compute $\mathbf{L}'$:
+    $$\mathbf{L}' = \mathbf{P}' - (\mathbf{P}' \cdot \hat{\omega}_L) \hat{\omega}_L + d_L \hat{\omega}'_L$$
+    The source layout for this equation is fragmented, but captures the visible formula part [S1].
+    
+    Compute derivatives in two orthogonal directions perpendicular to $\hat{\omega}_V$ to obtain $\mathbf{L}'_\perp$ and $\mathbf{L}'_\parallel$ [S1].
+    
+    Return:
+    $$D = \|\mathbf{L}'_\perp \times \mathbf{L}'_\parallel\|$$
+
+**Parameters:**
+*   $\eta$: Typical value 1.5 for homogeneous media [S1].
+*   $A$: Equals 1 if the medium is clear [S1].
+*   $\rho$: Replaced by BRDF $\times$ cosine of the angle with the surface normal at $\mathbf{V}$ if $\mathbf{V}$ is a surface point [S1].
+*   $I_e$: Replaced by emitted radiance $\times$ cosine of the angle with the surface normal at $\mathbf{L}$ divided by the probability of sampling $\mathbf{L}$ for area lights [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Focal Points/Cusps:** Radiance can grow arbitrarily large near focal points or cusps in volume caustics, leading to spike noise when sampling the volume along eye rays [S1].
+*   **Solution:** Clamp $D$ to a minimum threshold to reduce noise, at the cost of some energy loss [S1].
+*   **Derivatives:** Requires computing derivatives of shading normals $\hat{\mathbf{N}}_s$, which can be computed for triangles with interpolated normals [S1].
+
+## Operating characteristics
+*   **Complexity:** Computing $D$ is described as "not difficult to code" once the equations are known, requiring the computation of shading normal derivatives [S1].
+*   **Performance:** The method computes 512x512 images with 64 samples per pixel in 15.3s for a teapot model (12 boundaries, 4096 other triangles), 13.9s for a cuboctahedron (20 boundaries, 0 other triangles), and 19.2s for an amber model (36 boundaries, 60556 other triangles) [S1].
+*   **Strengths:** Provides visually correct results matching reference solutions for single scattering in refractive media [S1].
+*   **Limitations:** Can produce spike noise near caustic focal points if $D$ is not clamped [S1].
+
+## Background
+The method is part of the technique for accurate single scattering under point lights in refractive media with triangle mesh boundaries, introduced by Walter et al. [S1]. It builds on ray differential techniques from Igehy [1999] to compute the solid angle of the light source as seen from the scattering point through the refractive boundary [S1].
+
+## Sources
+[S1] Single Scattering in Refractive Media with Triangle Mesh Boundaries, https://doi.org/10.1145/1531326.1531398, fetched 2026-10-26

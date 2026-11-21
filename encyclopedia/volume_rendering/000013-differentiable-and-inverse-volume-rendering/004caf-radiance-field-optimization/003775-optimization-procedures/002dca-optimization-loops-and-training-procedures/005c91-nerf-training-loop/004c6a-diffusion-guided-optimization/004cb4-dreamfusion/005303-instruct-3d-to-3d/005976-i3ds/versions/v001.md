@@ -1,0 +1,77 @@
+# I3DS
+Also called: I3DS (Iterative 3D Diffusion Synthesis), Iterative 3D Diffusion Synthesis
+
+## Overview
+I3DS is an iterative framework for super-resolving a Low-Resolution (LR) Neural Radiance Field (NeRF) into a Super-Resolution (SR) NeRF by alternating between 2D image upscaling via diffusion models and 3D NeRF synchronization to ensure view consistency [S1]. It solves the problem of generating high-fidelity, view-consistent 3D geometry and texture from LR inputs without requiring large multi-view image datasets or high-resolution reference images [S1]. Unlike methods that jointly optimize 2D and 3D parameters in a single loop, I3DS segregates the process into distinct upscaling and synchronization stages, allowing it to achieve higher quality than prior-based methods while being significantly faster than diffusion-guided methods like DreamFusion [S1].
+
+## How it works
+**Inputs:**
+*   $\omega_{lr}$: The initial low-resolution NeRF weights.
+*   $I_{lr}$: The set of low-resolution reference images.
+*   $P_{tr}$: The set of training camera poses.
+*   $y_{text}$: A fixed text prompt embedding (e.g., "subject, high resolution, 4K, photo") [S1].
+
+**Outputs:**
+*   $\omega_{sr}$: The super-resolved NeRF weights.
+
+**Data Structures:**
+*   **NeRF ($\omega$):** Represents the radiance field. The implementation uses Instant-NGP as the default backbone [S1].
+*   **Latent Space:** Images are encoded into latent vectors $z$ using a Variational Autoencoder (VAE) [S1].
+*   **Ray Data:** Each ray is defined by origin $r_o$, direction $r_d$, and center color $ctr$ [S1].
+
+**Parameters:**
+*   $max\_stage\_iter$: Total number of I3DS cycles. Default is 4 [S1].
+*   $max\_sync\_iter$: Number of synchronization steps per stage. Not given in the sources.
+*   $batch\_size$: Number of patches processed during upscaling. Default is 16 [S1].
+*   $lr$: Learning rate for all learnable parameters. Default is $1e-2$ [S1].
+*   $patch\_size$: Resolution of random crops in latent space. Default is $128 \times 128$ (corresponding to $512 \times 512$ image pixels) [S1].
+
+**Algorithm:**
+The method iterates through stages. In each stage, it first upscales the rendered images using a Refinement Step Diffusion (RSD) model, then synchronizes the NeRF to these new images.
+
+1.  Initialize $\omega = \omega_{lr}$.
+2.  Loop for $stage\_iter$ from 0 to $max\_stage\_iter$:
+    a. **Upscaling Stage:**
+        i. Render low-resolution images from the current NeRF: $x_0 = \text{RENDER\_IMAGE}(\omega, P_{tr})$ [S1].
+        ii. Interpolate $x_0$ by 4x: $x_0 = \text{INTERPOLATE\_X4}(x_0)$ [S1].
+        iii. Encode the interpolated image into latent space: $z_0 = \text{VAE\_ENCODE}(x_0)$ [S1].
+        iv. Refine the latent $z_0$ using RSD with LR images $I_{lr}$ and text prompt $y_{text}$: $z'_0 = \text{RSD}(z_0, I_{lr}, y_{text})$ [S1].
+        v. Decode the refined latent back to image space: $x'_0 = \text{VAE\_DECODE}(z'_0)$ [S1].
+        vi. Set the training image for synchronization: $I_{tr} = x'_0$ [S1].
+    b. **Synchronization Stage:**
+        i. Loop for $sync\_iter$ from 0 to $max\_sync\_iter$:
+            1. Sample rays from $I_{tr}$ and $P_{tr}$ to get origin $r_o$, direction $r_d$, and center color $ctr$: $r_o, r_d, ctr = \text{SAMPLE\_RAYS}(I_{tr}, P_{tr})$ [S1].
+            2. Render the rays using the current NeRF $\omega$: $\hat{c} = \text{RENDER\_RAYS}(r_o, r_d)$ [S1].
+            3. Perform gradient descent on $\omega$ to minimize the difference between rendered color $\hat{c}$ and center $ctr$: Update $\omega \leftarrow \omega - \eta \nabla_\omega \|\hat{c} - ctr\|^2$ [S1].
+            4. Store old weights (for potential rollback or logging, though not explicitly used in the update step shown): $\omega_{old} \leftarrow \omega$ [S1].
+3.  Return $\omega_{sr} = \omega$ [S1].
+
+**RSD Refinement Details:**
+The RSD step refines the latent $z_0$ to be consistent with LR images $I_{lr}$ while adding high-frequency details guided by diffusion. It is related to Score Distillation Sampling (SDS) but operates on latent residuals [S1].
+*   Input to RSD: Latent $z_0$, text prompt $y_{text}$, noise level $y_{noise\_level}$, min timestep $t_{min}$, max timestep $t_{max}$, LR images $I_{lr}$ [S1].
+*   Output: Refined latent residuals $h_\theta$ [S1].
+*   The RSD objective is derived from the difference of latent vector residuals $z_t$ and $\hat{z}_t$ (the one-step denoised estimate) [S1].
+*   The loss is defined as $L_{RSD} = \|\frac{\partial z_{t-1}}{\partial \theta} - \frac{\partial \hat{z}_{t-1}}{\partial \theta}\|$ [S1].
+*   $\hat{z}_{t-1}$ is obtained directly from the predicted noise $\hat{\epsilon}_\phi(z_t, y, t)$ using the DDPM denoising equation, avoiding re-noising $\hat{z}_0$ [S1].
+*   In practice, RSD is applied to random crops of size $128 \times 128$ in latent space (corresponding to $512 \times 512$ image patches) with a batch size of 16 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on the stability of the VAE encode/decode cycle and the diffusion model's denoising process. [G] Ensure that the VAE latent space normalization matches the diffusion model's expected input distribution.
+*   **Boundaries:** The 4x interpolation step assumes the LR NeRF output is compatible with standard image interpolation. [G] If the NeRF output contains NaNs or extreme values, interpolation may fail; clamp or filter invalid pixels before encoding.
+*   **Degenerate Input:** If $I_{lr}$ is missing or severely degraded, RSD may hallucinate inconsistent details. The method assumes $I_{lr}$ provides a consistent geometric prior.
+
+## Operating characteristics
+*   **Time Complexity:** The optimization time is dominated by the diffusion upscaling and NeRF synchronization steps. I3DS takes approximately 6.00 hours for the reported experiments [S1].
+*   **Memory Complexity:** Uses dynamic ray sampling to increase ray count when the occupancy grid is pruned, optimizing GPU memory usage [S1]. Patch-based processing ($128 \times 128$ latent crops) reduces memory footprint during upscaling [S1].
+*   **Measured Performance:** On the LLFF dataset, I3DS achieves the highest PSNR and SSIM scores among prior-based methods (DiSR-NeRF, IN2N, DreamFusion-SDS, SDx4) [S1]. NIQE scores improve with increasing I3DS cycles, indicating convergence to high-quality details [S1].
+*   **Scaling:** The method scales with the number of stages (default 4) and sync iterations. [G] Increasing stages improves quality but increases time linearly.
+*   **Strengths:** View-consistent super-resolution without high-res reference images; faster than DreamFusion due to segregated stages; high detail generation via diffusion [S1].
+*   **Limitations:** Longer optimization time than NGP, SDx4, NeRF-SR, and IN2N due to RSD optimization [S1]. Relies on the quality of the LR NeRF and LR images.
+*   **When to use:** When super-resolving a NeRF from LR inputs without high-res references is required, and view consistency is critical.
+*   **When not to use:** When computational speed is the primary constraint and high resolution is not needed; use standard NeRF training or simple upsampling instead.
+
+## Background
+I3DS was introduced in the paper "DiSR-NeRF: Diffusion-Guided View-Consistent Super-Resolution NeRF" [S1]. It builds on the Instant-NGP backbone [S1] and utilizes Stable Diffusion for upscaling [S1]. The method was developed to address the limitations of existing NeRF super-resolution methods that either require high-resolution reference images or suffer from view inconsistency. The research was supported by the National Research Foundation, Singapore under its AI Singapore Programmes [S1].
+
+## Sources
+[S1] DiSR-NeRF: Diffusion-Guided View-Consistent Super-Resolution NeRF, https://doi.org/10.1109/cvpr52733.2024.01943, fetched 2026-10-26

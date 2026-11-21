@@ -1,0 +1,75 @@
+# Global Index Map (Vertex)
+## Overview
+The Global Index Map (Vertex) maps a local vertex identifier within a single hypertree to a unique global integer index across the entire hypertree grid object. It solves the problem of aggregating sparse, variable-size hypertree structures into a single contiguous addressing space for visualization and property storage. It is distinguished from the Hypertree Global Index Map, which identifies hypertrees themselves, by operating at the vertex level within a hypertree.
+## How it works
+**Inputs:**
+- $n_{HT}$: The index of the constituting hypertree within the grid.
+- $n_l$: The local vertex index within that hypertree.
+
+**Outputs:**
+- $n_g$: The global vertex index.
+
+**Data Structures:**
+- An array or map storing the cumulative count of vertices for each hypertree in the grid. If implicit, this is computed on the fly.
+
+**Formulas:**
+The global index $n_g$ is defined as an injective function:
+$$ n_g = n_l + \sum_{i=0}^{n_{HT}-1} C_i $$
+Where:
+- $n_l \in [0, C_{n_{HT}}[$ is the local vertex index, with $C_{n_{HT}}$ being the number of cells (vertices) in the hypertree identified by $n_{HT}$.
+- $C_i$ is the number of cells in the hypertree identified by index $i$.
+- $n_g \in [0, C[$ where $C$ is the total number of nodes in the whole hypertree grid.
+
+**Steps:**
+1. Identify the hypertree index $n_{HT}$ for the target vertex.
+2. Retrieve the local vertex index $n_l$ within that hypertree.
+3. Calculate the sum of cell counts $C_i$ for all hypertrees with index $i < n_{HT}$.
+4. Add the sum to $n_l$ to obtain $n_g$.
+
+**Pitfalls:**
+- **Implicit Ordering Assumption:** The formula $n_g = n_l + \sum_{i=0}^{n_{HT}-1} C_i$ assumes that the simulation properties follow the same indexing order as the visualization needs [S1, unofficial].
+- **Mandatory Explicit Map:** In practice, simulation properties are often not ordered the same way as visualization requirements. Therefore, creating an explicit Global Index Map is mandatory if implicit ordering cannot be guaranteed by the simulation output [S1, unofficial].
+- **Consistency:** The indexing scheme applies to all properties; consequently, all properties must be ordered in the same way [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_global_index(n_ht, n_l, hypertree_cell_counts):
+    """
+    Compute the global vertex index ng.
+    
+    Args:
+        n_ht (int): Index of the hypertree.
+        n_l (int): Local vertex index within the hypertree.
+        hypertree_cell_counts (list[int]): List where index i contains C_i, 
+                                           the number of cells in hypertree i.
+                                           Must be sorted by hypertree index.
+    
+    Returns:
+        int: The global vertex index ng.
+    """
+    # Sum the number of cells in all preceding hypertrees
+    preceding_cells = sum(hypertree_cell_counts[:n_ht])
+    
+    # Global index is local index plus offset from preceding hypertrees
+    n_g = n_l + preceding_cells
+    
+    return n_g
+```
+## Subtopics
+
+### Hypertree Global Index Map
+The Hypertree Global Index Map ($n_{HT}$) is an injective function that returns values in $[0, \Pi_E]$ for a hypertree identified by coordinates $(i, j, k) \in \mathbb{N}^3$ [S1, unofficial]. It identifies the constituting hypertree object itself within the grid, rather than a vertex within it. It is used to map spatial coordinates of hypertrees to a linear index for grid-level operations.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ if a precomputed prefix sum array of hypertree cell counts is used. $O(n_{HT})$ if the sum is computed on the fly without precomputation.
+- **Memory Complexity:** $O(\Pi_E)$ to store the cell counts for each hypertree if an explicit map is used. Negligible if implicit.
+- **Strengths:** Provides a unique, contiguous identifier for every vertex in a complex, adaptive mesh structure, enabling efficient random access and property storage.
+- **Limitations:** Requires consistent ordering of simulation data. Implicit calculation can be slow for large grids if not precomputed.
+- **When to use:** When visualizing or analyzing data stored in hypertree grids where vertices need to be referenced globally.
+- **When not to use:** When only hypertree-level identification is needed (use Hypertree Global Index Map instead).
+## Background
+The concept originates from the Efficient visualization and analysis of large-scale, tree-based, adaptive mesh refinement simulations with rectilinear geometry paper [S1, unofficial]. It is part of the Hypertree Grid Object data structure, which supports dimensions $d \in \{1, 2, 3\}$ and branching factor $f \in \mathbb{N}^*$. The global indexing allows for compact description of vertex coordinates based on bounding box information.
+## Sources
+[S1] Efficient visualization and analysis of large-scale, tree-based, adaptive mesh refinement simulations with rectilinear geometry, https://cea.hal.science/cea-03501320v1, fetched 2026-10-26 (unofficial)

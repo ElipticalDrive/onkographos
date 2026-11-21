@@ -1,0 +1,47 @@
+# Vertex Clustering Simplification
+
+Also called: Vertex Clustering
+
+## Overview
+Vertex Clustering is a technique for precomputing static levels of detail (LOD) for large datasets, primarily used in out-of-core visualization systems where memory constraints necessitate simplified representations [S1, unofficial]. It differs from error-driven edge-collapse methods by using a fixed spatial grid to merge vertices, and is used for creating multiresolution representations of isosurfaces [S1, unofficial][S2, unofficial].
+
+## How it works
+Vertex Clustering simplifies a mesh by dividing the object's bounding box into a regular grid of cells and merging all vertices falling within each cell into a single representative vertex.
+**Inputs and Outputs:**
+*   **Input:** A triangular mesh $M = (V, F)$ and a grid resolution parameter. Not given in the sources.
+*   **Output:** A simplified mesh $M' = (V', F')$ with reduced vertex count. Not given in the sources.
+**Data Structures:**
+*   **Grid:** A 3D array or hash map mapping grid coordinates $(i, j, k)$ to a single vertex. Not given in the sources.
+**Numbered Steps:**
+1.  Compute the axis-aligned bounding box of the input mesh. [G]
+2.  Initialize a grid structure with the specified resolution. [G]
+3.  Assign each vertex to a grid cell based on its coordinates. [G]
+4.  Merge vertices within each cell into a single representative vertex. [G]
+5.  Reconstruct faces using the merged vertices, discarding degenerate faces. [G]
+**Formulas:** Not given in the sources.
+**Parameters:**
+*   **Grid Resolution:** Controls the level of detail. Typical values depend on the dataset size and target memory budget. Not given in the sources.
+**Edge Cases and Pitfalls:**
+*   **Boundary Precision:** Vertices exactly on grid boundaries must be handled consistently to avoid gaps or overlaps. [G]
+*   **Topology Preservation:** Standard vertex clustering can alter topology (e.g., merging distinct components). Variants like Selective Clustering address this [S2, unofficial].
+*   **Degenerate Faces:** Many faces may collapse if the grid is too coarse, leading to holes or missing geometry. [G]
+
+## Subtopics
+
+### Selective Clustering
+A topology-preserving vertex clustering algorithm used for creating a multiresolution ICM (Implicit Cell Model) representation [S2, unofficial]. It specifically handles up to four intersection points on a cell edge, ensuring that disconnected surface components are preserved during simplification [S2, unofficial]. Link: [Multiresolution isosurface modeling and rendering](2534-multiresolution-isosurface-modeling-and-rendering.md).
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Suitable for out-of-core processing as it does not require complex priority queues [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Precomputing static LODs for large datasets where memory is limited [S1, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+Vertex Clustering was introduced by Rossignac and Borrel as a method for precomputing static levels of detail [S1, unofficial]. It has been adopted in out-of-core visualization systems to manage memory constraints for large datasets [S1, unofficial]. Variants like Selective Clustering have been developed to preserve topology in isosurface rendering contexts [S2, unofficial].
+
+## Sources
+[S1] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)
+[S2] Multiresolution isosurface modeling and rendering, https://openalex.org/W2534430728, fetched 2026-10-26 (unofficial)

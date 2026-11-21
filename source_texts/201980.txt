@@ -1,0 +1,94 @@
+A WebGPU engine for creative coding. Contribute to Siroko/kansei development by creating an account on GitHub.
+
+feat(ts): jump-flood SDF (AO, soft shadows) and SDF irradiance probes (G-3) by Siroko · Pull Request #199 · Siroko/kansei · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Siroko
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Owner
+Implements report row G-3 (Wave 7): jump-flood SDF (SDF AO, soft shadows) and SDF irradiance probes, from Rust #115 and #119. Builds on G-2 and C-4 (float32-filterable, which the renderer already requests).
+What's in it
+The WGSL is Rust's own, imported with ?raw (jump_flood.wgsl, sdf.wgsl, probe_common/irradiance/update.wgsl). The TS side is a port of gi/sdf.rs, gi/probes.rs and their hooks.
+JumpFloodSdf (src/gi/JumpFloodSdf.ts): seeds from voxelizer surfaces (the static flood reruns only when the statics change; the dynamic flood runs every frame there are dynamic renderables) or from volume opacity. SDF_WGSL gives materials sdfDistance, sdfSoftShadow, sdfSurfaceShadow, sdfLightShape and sdfAo.
+SdfProbes (src/gi/SdfProbes.ts): DDGI-style probes sphere-traced through the field. The grid follows the camera and the ray set gets a random rotation each frame. Materials read them through PROBES_WGSL, using SdfProbes.bindingsWGSL / bindGroupEntries.
+SceneVoxelGi: adds enableSdf / disableSdf / enableProbes / disableProbes, sdf and probes. The renderer updates the field after voxelization, then the injection and mips run, then the probes update around the camera (Rust's order). The renderer passes the eye position in _encodeVoxelGI.
+VoxelInjection: shadows through the field per settings.sdfShadows (off / fallback / always).
+VoxelGIEffect: adds setSdf (sdfAo, the showSdfSlice debug view) and setProbes (the main_probes composite, which skips the per-pixel trace and temporal passes; showProbes debug view).
+ParticleGi.enableSdf: opacity seeds for the particles' SDF sun (settings.cones.sdfSun).
+Fix (G-2 parity): VolumeLayout now does every step in f32, as Rust does. Before this, TS computed in f64, so a 4.6 m box at 96 voxels came out as 104³ (34.3 MiB) where Rust gets 96³ (27.0 MiB). gi-box now matches Rust's dims and memory, and the SDF slice lines up with Rust's. The particle example's volume [96, 72, 48] is unchanged.
+examples/index_gi_box.html:
+Presets off, voxel, indirect, voxels, phone, sdf, slice, probes, probe-view; gi=probes; view=sdf|probes; slice=, sdf_ao=, sdf_shadows=, shadows=map|sdf. Each of these is in the panel too, apart from slice=.
+Direct light can be shadowed through the field using the SDF_WGSL material helper (lamp source radius 0.15, Rust's spot value).
+TS has no SSGI or dragon yet, so the Rust presets built on those are left out, and probes runs the probes without SSGI.
+Checks
+npm run build (tsc && vite build) passes.
+Headless Chrome (chrome-devtools-axi, WebGPU):
+Look-neutral by default. Before (origin/ts-rust-alignment) vs after on index_gi_box lit/indirect/voxels, compared before the layout fix: max per-channel diff 3/255 (temporal noise), no pixel over 8.
+After the layout fix. The default views change only by the 104³ → 96³ voxels, which matches Rust.
+TS vs the Rust gi-box (rebuilt with wasm-pack) at the same settings (gi=voxel&view=sdf, gi=probes&view=probes, gi=probes&view=indirect, sdf_ao=0.8&sdf_shadows=always&shadows=sdf): the SDF slice, probe balls and probe irradiance match closely. Remaining differences come from TS's point light in a fixture standing in for Rust's spot.
+preset=sdf&animate=1: the moving block's SDF shadow follows it, which exercises the dynamic seeds.
+index_voxel_gi_particles: unchanged. ParticleGi.enableSdf with sdfSun runs without errors and sharpens the wall's sun shadow.
+Re-checked every preset after rebasing on L-1 (feat(ts): spot lights, spot shadow atlas with PCSS, clustered light culling (L-1) #194): no console errors.
+GPU time (gi=probes&animate=1, single runs on a shared Mac GPU, so expect tens of percent of noise):
+Pass
+TS
+Rust
+VoxelGI/SdfDynamicFlood
+6.8 ms
+6.0 ms
+VoxelGI/SdfDistance
+0.17 ms
+0.09 ms
+VoxelGI/Probes
+0.34 ms
+0.24 ms
+The static field floods only on change, so a static scene pays only for the probes each frame.
+feat(ts): jump-flood SDF (AO, soft shadows) and SDF irradiance probes…
+…
+816e7e0
+```
+… (G-3)
+
+Port Rust gi::JumpFloodSdf and gi::SdfProbes (#115, #119) to the TS engine on the
+shared WGSL (jump_flood, sdf, probe_*.wgsl via ?raw):
+
+- JumpFloodSdf: surface seeds (static flood on change, dynamic every frame) or
+  opacity seeds; SDF_WGSL material helper (sdfSoftShadow, sdfSurfaceShadow,
+  sdfLightShape, sdfAo).
+- SdfProbes: DDGI-style probes sphere-traced in the field, following the camera;
+  PROBES_WGSL with SdfProbes.bindingsWGSL / bindGroupEntries.
+- SceneVoxelGi.enableSdf / enableProbes (and disable*), run by the renderer after
+  the voxelization (field), the injection and mips (probes around the camera).
+- VoxelInjection shadows through the field (settings.sdfShadows).
+- VoxelGIEffect: setSdf (sdfAo, showSdfSlice), setProbes (main_probes composite,
+  showProbes).
+- ParticleGi.enableSdf (opacity seeds, the particles' SDF sun).
+- VolumeLayout computes in f32 throughout as Rust does: a 4.6 m box at 96 voxels
+  was 104^3 in TS, 96^3 in Rust.
+- index_gi_box: presets sdf, slice, probes, probe-view (and off, voxel, indirect,
+  voxels, phone), gi=probes, view=sdf|probes, slice, sdf_ao, sdf_shadows,
+  shadows=map|sdf.
+```
+Siroko
+merged commit 86c35fb
+into
+ts-rust-alignment
+Oct 8, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,159 @@
+# 3D Filled Circle Kernel Generation
+
+Also called: 3D Binary Sphere Kernel
+
+## Overview
+3D Filled Circle Kernel Generation produces binary occupancy masks or synthetic volume data representing a sphere within a voxel grid [S1, S3, S4, unofficial]. It differs from its sibling [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) by using a radial distance threshold rather than axis-aligned bounds, and from [Voxel Filled Check](1705-voxel-filled-check.md) by explicitly generating the kernel data structure rather than querying an existing one [G]. The method supports two distinct output modes: a static binary occupancy field for general sphere representation [S3, S4, unofficial] and directional entry/exit offset arrays for optimized traversal [S2, unofficial].
+
+## How it works
+**Inputs:**
+1.  `size`: Integer dimension of the cubic kernel grid ($N \times N \times N$). Default: 3 [S3, unofficial].
+2.  `radius`: Floating-point or integer radius of the sphere. Default: 1.0 [S3, unofficial]. For sampling masks, `rad` denotes the radius in voxel units [S2, unofficial]. For world-space generation, `radius` is in world units and `voxel_size` converts it to voxel units [S1, unofficial].
+3.  `direction` (optional): A 3D vector $(dir_x, dir_y, dir_z)$ specifying the traversal direction for sampling mask generation [S2, unofficial].
+4.  `voxel_size` (optional): Size of each voxel in world units (f32) [S1, unofficial].
+5.  `position` (optional): Center of the sphere in voxel grid coordinates (IVec3) [S1, unofficial].
+
+**Outputs:**
+*   **Mode A (Static Binary):** A 3D array of shape $(size, size, size)$ where elements are 1.0 if within the sphere and 0.0 otherwise, with the center element explicitly set to 0 [S3, S4, unofficial].
+*   **Mode B (Sampling Masks):** Two sets of 3D vector offsets: `idx_add` (entering voxels) and `idx_remove` (leaving voxels), stored as `Vec3Array` or `std::vector<osg::Vec3>` [S2, unofficial].
+
+**Data Structures:**
+*   **Binary Kernel:** `float kernel[size][size][size]` or `uint8_t kernel[size][size][size]` [G].
+*   **Sampling Masks:** `idx_remove`/`idx_add` for left->right, `idx_u`/`idx_d` for down->up, `idx_f`/`idx_b` for front->back [S2, unofficial].
+
+**Steps:**
+
+1.  **Initialization:**
+    *   If generating sampling masks: Clear `idx_remove` and `idx_add` arrays [S2, unofficial].
+    *   If generating binary kernel: Initialize a zero-filled volume of shape $(size, size, size)$ [S4, unofficial].
+
+2.  **Coordinate Generation:**
+    *   Create a linear space from $-\lfloor size/2 \rfloor$ to $\lfloor size/2 \rfloor$ [S3, unofficial].
+    *   Generate a 3D meshgrid of coordinates $(x, y, z)$ covering the kernel space [S3, unofficial].
+    *   Calculate the center coordinates: $c_x = c_y = c_z = \lfloor size/2 \rfloor$ [S4, unofficial].
+    *   For world-space generation, compute radius in voxel units as $r = \lceil \text{radius} / \text{voxel\_size} \rceil$ and calculate `left_top_corner` as `position - radius` [S1, unofficial].
+
+3.  **Distance Calculation and Masking:**
+    *   Compute the squared radial distance from the center for each voxel:
+        $$ d^2 = (x - c_x)^2 + (y - c_y)^2 + (z - c_z)^2 $$
+    *   **For Binary Kernel:**
+        *   Set voxel value to 1.0 if $d^2 < (size/4)^2$ [S4, unofficial] or if $d \le radius$ [S3, unofficial].
+        *   Explicitly set the center element $(c_x, c_y, c_z)$ to 0 [S3, S4, unofficial].
+    *   **For Sampling Masks:**
+        *   Iterate through a grid from $-rad$ to $rad$ with a step size of 4 (e.g., $x, y, z \in \{-rad, -rad+4, \dots, rad\}$) [S2, unofficial]. This step size reduces sample count for performance [S2, unofficial].
+        *   Let $pos = (x, y, z)$.
+        *   If `direction` has an x-component ($dir_x \neq 0$):
+            *   If $x == -rad$, add $pos$ to `idx_remove` (leaving face) [S2, unofficial].
+            *   If $x == rad$, add $pos$ to `idx_add` (entering face) [S2, unofficial].
+        *   If `direction` has a z-component ($dir_z \neq 0$):
+            *   If $z == -rad$, add $pos$ to `idx_remove` [S2, unofficial].
+            *   If $z == rad$, add $pos$ to `idx_add` [S2, unofficial].
+        *   *Note:* The sources do not specify handling for the y-component (up/down) in the iteration logic, though storage structures `idx_u`/`idx_d` exist [S2, unofficial].
+
+**Formulas:**
+*   Sphere inclusion: $x^2 + y^2 + z^2 \le r^2$ where $r = \lceil \text{radius} / \text{voxel\_size} \rceil$ [S1, unofficial].
+*   Coordinates are shifted by `left_top_corner` to align with the voxel grid origin [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import List, Tuple, Union
+
+def generate_filled_circle_kernel(
+    size: int = 3,
+    radius: Union[int, float] = 1.0,
+    voxel_size: float = 1.0,
+    position: Tuple[int, int, int] = (0, 0, 0),
+    direction: Tuple[float, float, float] = None
+) -> Union[List[List[List[float]]], Tuple[List[Tuple[int, int, int]], List[Tuple[int, int, int]]]]:
+    """
+    Generates a 3D filled circle (sphere) kernel.
+    
+    Args:
+        size: Dimension of the cubic grid.
+        radius: Radius of the sphere.
+        voxel_size: Size of each voxel in world units.
+        position: Center of the sphere in voxel grid coordinates.
+        direction: Optional (x, y, z) vector for sampling mask generation.
+        
+    Returns:
+        If direction is None: 3D list of floats (binary kernel).
+        If direction is provided: Tuple of (idx_add, idx_remove) lists of (x,y,z) offsets.
+    """
+    if direction is None:
+        # Mode A: Static Binary Kernel (S3, S4)
+        half_size = size // 2
+        kernel = [[[0.0 for _ in range(size)] for _ in range(size)] for _ in range(size)]
+        cx, cy, cz = half_size, half_size, half_size
+        # Use explicit radius if provided, else fallback to size//4 logic from S4
+        threshold_sq = radius ** 2 if radius != 1.0 else (size // 4) ** 2
+        for z in range(size):
+            for y in range(size):
+                for x in range(size):
+                    dx, dy, dz = x - cx, y - cy, z - cz
+                    if dx*dx + dy*dy + dz*dz < threshold_sq:
+                        kernel[z][y][x] = 1.0
+        # Explicitly set center to 0 as per S3 and S4
+        kernel[cx][cy][cz] = 0.0
+        return kernel
+    else:
+        # Mode B: Sampling Masks (S1, S2)
+        idx_add = []
+        idx_remove = []
+        # S1: Compute radius in voxel units
+        rad = math.ceil(radius / voxel_size)
+        left_top_corner = (position[0] - rad, position[1] - rad, position[2] - rad)
+        dir_x, dir_y, dir_z = direction
+        # S2: Iterate with step 4
+        coords = list(range(-rad, rad + 1, 4))
+        for x in coords:
+            for y in coords:
+                for z in coords:
+                    pos = (x, y, z)
+                    if dir_x != 0:
+                        if x == -rad:
+                            idx_remove.append(pos)
+                        elif x == rad:
+                            idx_add.append(pos)
+                    if dir_z != 0:
+                        if z == -rad:
+                            idx_remove.append(pos)
+                        elif z == rad:
+                            idx_add.append(pos)
+        return (idx_add, idx_remove)
+```
+
+## Subtopics
+
+### [3D Gaussian Kernel Generation](2297-3d-gaussian-kernel-generation.md)
+Generates a 3D Gaussian kernel for smoothing operations, with the center element explicitly set to zero. It differs from its parent [3D Filled Circle Kernel Generation](1520-3d-filled-circle-kernel-generation.md) by using a continuous probability density function for weighted smoothing rather than a binary occupancy mask, and from [Sphere Carving](2377-sphere-carving.md) by providing isotropic decay rather than hard geometric boundaries [G].
+
+### [Sphere Carving](2377-sphere-carving.md)
+Sphere Carving is a voxelization post-processing method that removes solid voxels within a spherical radius from a specified center point in a voxel chunk or Sparse Voxel Octree (SVO). It solves the problem of creating destructible terrain or breakable objects by efficiently identifying and nullifying voxels intersecting a spherical volume. It sets itself apart from its parent [3D Filled Circle Kernel Generation](1520-3d-filled-circle-kernel-generation.md) by operating on existing occupancy data to remove voxels rather than generating a static binary kernel, and from [3D Binary Sphere Kernel Generation](4654-3d-binary-sphere-kernel-generation.md) by focusing on the destructive modification of a scene graph rather than kernel synthesis.
+
+### [3D Binary Sphere Kernel Generation](4654-3d-binary-sphere-kernel-generation.md)
+This method procedurally generates a 3D binary scalar field (density texture) representing a sphere centered at the origin of a voxel grid, specifically designed as input for GPU-based Marching Cubes surface extraction. Unlike static voxelization, this implementation features a time-varying radius that oscillates, creating a dynamic volume. It differs from its parent [3D Filled Circle Kernel Generation](1520-3d-filled-circle-kernel-generation.md) by explicitly targeting the `DensityTexture` property of a Marching Cubes component and utilizing a specific oscillating radius formula rather than a static threshold.
+
+### Integer Brush Edit Plans
+Deterministic generation of cell write sets for box and sphere shapes, emitting writes in canonical (z, y, x) order [S5, unofficial]. The sphere brush uses `spall_core`'s fixed-point `contains_cell_centre` predicate over the shape's cell bounding box to determine included cells [S5, unofficial]. The write set and order are byte-stable, guarded by pinned BLAKE3 digests and confirmed by a brute-force reference over a wider box [S5, unofficial]. Both brushes are verified to touch exactly eight bricks when centred on the corner where eight bricks meet [S5, unofficial]. A cell centre exactly on the sphere radius is included in the write set [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N^3)$ for full grid evaluation, where $N$ is the kernel size. For sampling masks, the step-4 iteration reduces complexity to approximately $O((N/4)^3)$ [S2, unofficial].
+*   **Memory Complexity:** $O(N^3)$ for the binary kernel. Sampling masks store only boundary offsets, requiring significantly less memory [S2, unofficial].
+*   **Performance:** The step-4 iteration reduces sample count for performance optimization [S2, unofficial].
+*   **Strengths:** Precomputing offsets optimizes ray casting by avoiding per-ray distance calculations [S2, unofficial].
+*   **Limitations:** The step-4 approximation may miss voxels or introduce boundary inaccuracies [S2, unofficial]. The center element is explicitly set to 0 [S3, S4, unofficial].
+*   **When to use:** Use for optimizing volume rendering ray casting based on direction and radius [S2, unofficial]. Use binary kernels for synthetic volume testing [S4, unofficial].
+
+## Background
+The method originates from implementations in volume occlusion editing and rendering optimization, specifically within the `volume-occlusion-editor` project [S2, unofficial]. The deterministic brush variant is part of the `spall` project's fixture and edit plan system [S5, unofficial]. Static binary kernel generation is used for synthetic volume testing in reconstruction algorithms [S4, unofficial] and Gaussian smoothing operations [S3, unofficial].
+
+## Sources
+[S1] mkmarek/svo-rs, https://github.com/mkmarek/svo-rs, fetched 2026-10-26 (unofficial)
+[S2] MPanknin/volume-occlusion-editor, https://github.com/MPanknin/volume-occlusion-editor, fetched 2026-10-26 (unofficial)
+[S3] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)
+[S4] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)
+[S5] T03 — Fixture worlds, rays, and integer brushes, https://github.com/deranjer/spall/pull/4, fetched 2026-10-25 (unofficial)

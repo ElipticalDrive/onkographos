@@ -1,0 +1,234 @@
+Task Migrate the 34 branch-free scalar float conversion rows into typed post-register-allocation machine records consumed by both assembly and object serializers: f64 -> f32 and f32 -> f64 (2 rows); i8/u8/i16/u16/i32/u32/i64/char -> f32/...
+
+backend: migrate branch-free scalar float conversions to machine records · Issue #7253 · JoNil-Botta/typelisp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+backend: migrate branch-free scalar float conversions to machine records #7253
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+backend: migrate branch-free scalar float conversions to machine records#7253
+Copy link
+Labels
+backendIR, optimizer, codegenIR, optimizer, codegenblockedBlocked by an unresolved dependencyBlocked by an unresolved dependencycompilerCore compiler pipelineCore compiler pipelineoptimizationOptimizer passes and pipelineOptimizer passes and pipelineself-hostingWork toward the self-hosted compilerWork toward the self-hosted compilertestingTests and CITests and CI
+Description
+JoNil
+opened on Sep 1, 2026
+Issue body actions
+Task
+Migrate the 34 branch-free scalar float conversion rows into typed
+post-register-allocation machine records consumed by both assembly and object
+serializers:
+f64 -> f32 and f32 -> f64 (2 rows);
+i8/u8/i16/u16/i32/u32/i64/char -> f32/f64 (16 rows);
+f32/f64 -> i8/u8/i16/u16/i32/u32/i64/char (16 rows).
+The four bidirectional u64/float rows are deliberately separate in #7353 and
+#7354 because they need high-half control flow. The same-precision identities
+f32 -> f32 and f64 -> f64 need only #7301 move/no-op dispositions and are
+accounted for by the final matrix gate #7355, not by conversion opcodes here.
+Findings on current main (ec884aac, 2026-09-02)
+The production selectors still emit exactly six register-form SSE2
+instructions after the real register/scratch plan:
+cvtsd2ss, cvtss2sd, cvtsi2ssq, cvtsi2sdq, cvttss2siq, and
+cvttsd2siq. compiler-backend-object-instr-semantically-supported? still
+rejects every CompilerIrInstr.Cast; there is no partial direct-object path
+to preserve or enable early.
+compiler-backend-emit-float-to-float-cast,
+compiler-backend-emit-int-to-float-cast, and
+compiler-backend-emit-float-to-int-cast select final GP/XMM homes and
+surround the conversion with typed loads/stores. Register and immediate
+sources and spilled destinations are deliberately normalized through
+planned registers. Do not fuse a memory form during migration.
+The opcode records need only three checked semantic shapes:
+precision-to-precision XMM/XMM, normalized signed-qword GP to f32/f64 XMM,
+and f32/f64 XMM to signed-qword GP. Original integer signedness/width belongs
+to the adjacent backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301 typed extension/store record; serializers must never
+recover it from high-level IR. char follows the u8 zero-extension path.
+Unsigned sources through u32 fit in signed i64 after source-typed
+zero-extension, so cvtsi2s{s,d}q is correct. Float-to-integer always uses a
+qword truncating conversion, then the backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301 destination-width store keeps the
+low bits. The x86 indefinite result for NaN/infinity/out-of-range is permitted
+by SPEC section 3.8, but remains defined/no-trap and must match across both
+serializers without host-language conversion or UB.
+compiler-reg-scratch-cast-xmm-needed? and
+compiler-reg-scratch-cast-gp-count remain the authoritative scratch-count
+interface. Their FloatCastValueXmm, FloatCastValueGp, and
+FloatCastScratchGp assignments are already carried to
+compiler-backend-emit-cast; the shared builder consumes those exact homes
+and never scavenges.
+The checked x86 encoding table is compact and target-neutral at selection:
+precision casts use F2/F3 0F 5A /r; integer-to-float uses
+F3/F2 REX.W 0F 2A /r; float-to-integer uses
+F3/F2 REX.W 0F 2C /r. Mandatory prefix precedes REX. Low/high-register
+probes produced, for example, f2 0f 5a c8, f2 45 0f 5a cc,
+f3 48 0f 2a c0, f3 4d 0f 2a cc, f2 48 0f 2c f4, and
+f2 4d 0f 2c fc; encode ModRM direction explicitly because the GP/XMM roles
+reverse between opcode 2A and 2C.
+Current backend unit tests cover representative direct and forced-spill i64
+conversions plus both precision casts and assert planned homes. Source
+coverage is not a 34-row semantic/differential matrix: f32_scalar.tl
+covers one exact precision round trip, u64_float_casts.tl includes a u8
+representative, and overflow_casts.tl is integer-only. The public CLI
+compatibility gate currently permits old stage0 rejection of float casts;
+that is frontend/bootstrap compatibility evidence, not object parity.
+backend: migrate scalar SSE2 expressions to shared machine records #7205 shares the same legacy-SSE mandatory-prefix/REX/ModRM descriptor. The
+first landing issue must expose and reuse one checked table rather than
+creating conversion-private and arithmetic-private encoders.
+Focused open issue and PR searches found no duplicate or claiming PR. No
+priority label exists to propagate.
+Landing shape
+Extend backend: establish the typed machine-program core and migrate one scalar leaf #7055/backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301's machine model with the three checked conversion record
+shapes above. Constructors validate register classes, qword GP width,
+distinct source/destination precision where required, and opcode/type
+compatibility before serialization.
+Replace the six string helpers at the production selection sites with one
+record stream. Preserve instruction order, physical homes, no-op handling,
+and every adjacent backend: migrate full-width scalar integer materialization to shared machine records #7202/backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301 load/store record exactly.
+Serialize that stream back to byte-identical AT&T assembly and through the
+shared x86 encoder into ELF/COFF code bytes. Neither serializer chooses
+precision, signedness, scratch registers, load/store width, or a memory
+fusion.
+Add the full 34-row source matrix plus forced source/destination spill
+combinations. Compare assembly and direct-object execution at opt 0/1/2 on
+Linux and Windows, including exact payload/bit oracles where equality is
+insufficient.
+Delete any overlapping independent object lowering and relax eligibility
+only for complete programs whose needed move/immediate/conversion records
+are all supported. Keep u64 rows and incomplete families fail-closed for
+backend: migrate u64-to-float high-half cast records #7353/backend: migrate float-to-u64 high-half cast records #7354/backend: retire Cast object fallback after full scalar matrix parity #7355.
+Likely files/modules
+machine-program/model, builder, assembly serializer, and x86 encoder from
+backend: establish the typed machine-program core and migrate one scalar leaf #7055
+scalar operands, XMM moves, spills, literals, and data fixups from backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301;
+full-width GP immediates from backend: migrate full-width scalar integer materialization to shared machine records #7202
+src/compiler_backend.tl: the three production conversion selectors,
+assembly adapter, and semantic eligibility gate
+src/compiler_regalloc.tl: float-cast scratch roles and final physical homes
+src/compiler_object.tl, src/compiler_object_asm.tl, ELF/COFF adapters
+src/compiler_backend_tests.tl, a generated numeric-cast integration matrix,
+public direct-object parity scripts, and tests/SPEC_COVERAGE.md
+Acceptance criteria
+Shared records cover exactly the 34 named conversion rows. u64 endpoints,
+same-precision identities, bool, and nonnumeric types are rejected or
+delegated to their named owner before serialization.
+f64 -> f32 rounds to binary32 under the runtime's normal nearest rounding
+mode; f32 -> f64 widens exactly. Tests cover both zero signs, finite
+boundaries, subnormals, infinities, and representative quiet/signaling NaN
+payload classes without promising impossible payload preservation across a
+precision change.
+Integer/char to float uses source-typed sign/zero extension followed by the
+qword conversion. Tests cover every source width, signed boundaries,
+unsigned maxima through u32, i64 precision boundaries, and halfway/tie
+neighbors for both float precisions.
+Float to integer/char truncates toward zero and then applies the target
+width. Tests cover fractional signs, both zero signs, exact boundaries,
+just-in/out-of-range values, infinities, and NaNs. Out-of-range assertions
+prove deterministic no-trap serializer parity without strengthening SPEC
+section 3.8's portable value contract.
+Direct-register and every forced source/destination spill combination consume
+production-planned scratch homes. Conversion records stay register-form and
+the stream contains explicit backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301 loads/stores; no serializer-side
+scavenging, signedness inference, precision choice, or re-lowering is
+allowed.
+Exact ELF/COFF byte goldens cover all six mnemonics, F2/F3 and REX
+ordering, low and extended GP/XMM registers, ModRM direction, and rejected
+illegal class/width/precision combinations.
+Assembly output remains byte-identical for migrated rows. Once a differential
+fixture's remaining families are eligible, assembler fallback is fatal and
+execution/output/trap/bit results match at opt 0/1/2 on Linux and Windows.
+Report record count/bytes and allocations, compiler time/peak RSS, generated
+instruction/code size, and representative conversion runtime before/after.
+Avoid per-instruction heap or String allocation.
+Pass typelisp fmt, focused regalloc/backend/encoder goldens, full
+typelisp test, integration/direct-object differentials, deterministic
+assembly, bootstrap/fixpoint, and Linux/Windows CI without reducing coverage.
+Assumptions / blockers
+Blocked exactly on #7055 (machine-program core), #7202 (full-width integer
+materialization needed by the source-boundary matrix), and #7301 (physical
+GP/XMM moves, spills, float data, and fixups). After all three close, replace
+blocked with ready-for-implementation.
+#7205 is a peer consumer, not a prerequisite; reuse whichever checked
+legacy-SSE descriptor lands first. #7353/#7354 own directional u64 high-half
+control flow, and #7355 owns final 121-row Cast eligibility/fallback retirement.
+Coordinate the shared-core/target-adapter boundary with #5347.
+Split from #7206.
+Activity
+JoNil
+added
+backendIR, optimizer, codegenIR, optimizer, codegen
+compilerCore compiler pipelineCore compiler pipeline
+testingTests and CITests and CI
+optimizationOptimizer passes and pipelineOptimizer passes and pipeline
+self-hostingWork toward the self-hosted compilerWork toward the self-hosted compiler
+blockedBlocked by an unresolved dependencyBlocked by an unresolved dependency
+on Sep 1, 2026
+JoNil commented on Sep 1, 2026
+JoNil
+on Sep 1, 2026
+CollaboratorAuthor
+More actions
+#7205 triage converted this issue's unnamed scalar data dependency into focused
+issue #7301. It owns final GP/XMM register/spill/global operands, exact
+float/sign-mask rodata, and RIP-relative fixups; this issue continues to own
+conversion opcodes and does not wait for broad #7029 or #7205.
+After #7055, #7202, and #7301 land, promote this issue. #7205 and this issue
+should still reuse whichever checked legacy-SSE mandatory-prefix/ModRM opcode
+descriptor lands first; #7301 supplies their common operands/data, not their
+arithmetic/conversion semantics.
+JoNil commented on Sep 1, 2026
+JoNil
+on Sep 1, 2026
+CollaboratorAuthor
+More actions
+Directional #7254 consumers are now #7353 and #7354. Both reuse this issue's checked cvtsi2s{s,d}q / cvtt{s,d}2siq records and shared legacy-SSE descriptor; neither should add cast-private conversion encoders. Final full-matrix eligibility/fallback retirement is #7355, blocked on #7252/#7253/#7353/#7354.
+JoNil commented on Sep 2, 2026
+JoNil
+on Sep 2, 2026
+CollaboratorAuthor
+More actions
+#7355's exact SPEC §3.8 inventory has 121 ordered pairs. The named producers cover 81 integer/char, 34 branch-free conversions, and four directional u64/float rows, leaving the two same-precision identities f32→f32 and f64→f64 to account for explicitly.
+Please hand those two rows to the final gate as checked #7301 XMM move/no-op dispositions: same-home is empty, different-home still copies the precision-matched scalar value. They need no conversion opcode and do not widen this issue's 34 conversion rows, but they must not disappear from eligibility merely because current compiler-backend-float-precision-cast-reg-asm returns an empty suffix for equal types.
+JoNil commented on Sep 2, 2026
+JoNil
+on Sep 2, 2026
+CollaboratorAuthor
+More actions
+Research refreshed against main@ec884aac (2026-09-02).
+The branch-free scope is still exactly 34 ordered rows and the production backend still selects six register-form SSE2 instructions after register allocation. I rewrote the body with the current selector/scratch boundaries, the three semantic machine-record shapes, exact F2/F3 + REX.W + ModRM encoding table (including low/extended-register probe bytes), and the missing source/differential test matrix.
+The migration must preserve explicit #7301 loads/stores around register-form conversions; serializers may not fuse memory forms, infer signedness, or scavenge. #7202 is retained as a direct blocker because full-width integer inputs are part of this issue's boundary matrix. Same-precision float identities are explicitly delegated to #7301/#7355; u64 high-half rows remain #7353/#7354.
+No claiming PR or duplicate owner exists and no priority label needs propagation. Keep blocked until #7055, #7202, and #7301 close, then replace it with ready-for-implementation.
+JoNil commented on Sep 3, 2026
+JoNil
+on Sep 3, 2026
+CollaboratorAuthor
+More actions
+Chooser revalidation at main@72de7fce after #7573:
+The branch-free scope is still exactly 34 rows and still lowers through the same six register-form SSE2 instructions (cvtsd2ss, cvtss2sd, cvtsi2ssq, cvtsi2sdq, cvttss2siq, cvttsd2siq) after the existing physical-home/scratch plan. CompilerIrInstr.Cast remains globally rejected by direct-object semantic eligibility.
+Merged backend: fix high-half float-to-u64 runtime casts #7573 changes only the excluded f32/f64 -> u64 direction: it adds the 2^63 compare/subtract/high-bit control sequence and makes that path always request a disposable XMM. The non-u64 branches still use the prior planned FloatCastValueXmm/FloatCastValueGp roles and the exact qword conversion-plus-typed-store boundary described here. It neither migrates a machine record nor changes this issue's 34-row count.
+backend: fix high-half float-to-u64 runtime casts #7573 therefore supplies later backend: migrate float-to-u64 high-half cast records #7354's corrected semantic baseline; it is not a new prerequisite or implementation overlap for backend: migrate branch-free scalar float conversions to machine records #7253. The issue's out-of-range wording remains consistent with SPEC §3.8: target-out-of-range float conversions are defined/no-trap but their value is unspecified, so tests must assert serializer parity rather than a portable numeric value.
+Direct blockers remain accurate: backend: establish the typed machine-program core and migrate one scalar leaf #7055 is open/ready; backend: migrate full-width scalar integer materialization to shared machine records #7202 and backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301 remain open/blocked on that machine-program foundation. No open PR claims backend: migrate branch-free scalar float conversions to machine records #7253 or those blockers. backend: migrate scalar SSE2 expressions to shared machine records #7205 remains a peer descriptor consumer; backend: migrate u64-to-float high-half cast records #7353/backend: migrate float-to-u64 high-half cast records #7354 remain the two high-half leaves and backend: retire Cast object fallback after full scalar matrix parity #7355 the final matrix gate.
+Keep #7253 blocked without ready-for-implementation until #7055, #7202, and #7301 close. The existing landing shape, encoding table, spill matrix, measurements, and acceptance criteria are actionable; no split, duplicate, or relabel is warranted. No code or tests were run for this research-only pass.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+backendIR, optimizer, codegenIR, optimizer, codegenblockedBlocked by an unresolved dependencyBlocked by an unresolved dependencycompilerCore compiler pipelineCore compiler pipelineoptimizationOptimizer passes and pipelineOptimizer passes and pipelineself-hostingWork toward the self-hosted compilerWork toward the self-hosted compilertestingTests and CITests and CI
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

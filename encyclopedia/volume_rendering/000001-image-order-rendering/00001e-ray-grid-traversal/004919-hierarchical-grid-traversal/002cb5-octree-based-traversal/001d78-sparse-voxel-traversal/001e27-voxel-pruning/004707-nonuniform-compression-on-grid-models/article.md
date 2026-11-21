@@ -1,0 +1,146 @@
+# Nonuniform Compression on Grid Models
+
+Also called: Importance-based Nonuniform Compression
+
+## Overview
+Nonuniform Compression on Grid Models is a storage optimization technique for explicit volume rendering grids that reduces model size by applying different down-sampling scales to volume density and color features, based on the insight that density is more critical for rendering quality than color [S1]. It sets itself apart from uniform compression by asymmetrically compressing attributes and combining low-resolution grids with a sparse set of high-fidelity "important" voxels to preserve high-frequency details [S1]. This method builds on [Voxel Pruning](1693-voxel-pruning.md) by using importance scores to identify which voxels require full resolution storage.
+
+## How it works
+**Inputs:** Original explicit grid model $V = \{V_\sigma, V_c\}$, where $V_\sigma$ is the volume density grid and $V_c$ is the color feature grid.
+**Outputs:** Compressed representation consisting of down-sampled grids $\{\hat{V}_\sigma, \hat{V}_c\}$ and a list of important voxels with their original high-resolution values.
+
+**Data Structures:**
+1.  **Down-sampled Grids:** $\hat{V}_\sigma$ and $\hat{V}_c$ stored at reduced resolutions.
+2.  **Important Voxels List:** A list of tuples containing the 3D coordinates $(x, y, z)$ and the original high-resolution values $(\sigma, c)$ for voxels identified as important.
+
+**Parameters:**
+*   $S_c$: Down-sampling ratio for color features. Typical value: 4 [S1].
+*   $S_\sigma$: Down-sampling ratio for volume density. Typical value: 2 [S1].
+*   Ray set: A large set of rays cast across wide views for importance estimation [S1].
+
+**Steps:**
+
+1.  **Calculate Importance Scores:**
+    For each voxel $v_l$ in the original grid, calculate its importance score $I_l$ by casting a large set of rays and sampling points $x_i$. The score is the sum of contributions from all sampling points influenced by the voxel:
+    $$ I_l = \sum_i \mathbb{1}_{\{x_i \in \iota(v_l)\}} \cdot w_{i,l} \cdot T_i \cdot \alpha_i $$
+    Where:
+    *   $x_i$ is a sampling point on a ray.
+    *   $\mathbb{1}_{\{x_i \in \iota(v_l)\}}$ is an indicator function that is 1 if $x_i$ is within the neighborhood of voxel $v_l$, and 0 otherwise. The neighborhood is defined as $\iota(v_l) = \{v_l + \delta : \delta \in [-1, 1]^3\}$ [S1].
+    *   $w_{i,l}$ is the linear interpolation weight of voxel $v_l$ for point $x_i$, determined by the distance between $x_i$ and the 8 adjacent voxels [S1].
+    *   $T_i$ is the transmittance up to point $x_i$.
+    *   $\alpha_i$ is the opacity at point $x_i$ [S1].
+
+2.  **Identify Important Voxels:**
+    Sort all voxels by their importance scores $I_l$ in decreasing order. Select a subset of voxels with the largest scores to store at full resolution. Empirical analysis shows that approximately 17% of voxels contribute to 83% of the overall importance, and 10% contribute to 66% [S1].
+
+3.  **Compress Grids:**
+    Apply down-sampling operations to the original grids using the specified ratios:
+    $$ \hat{V}_c = \downarrow_{S_c}(V_c) $$
+    $$ \hat{V}_\sigma = \downarrow_{S_\sigma}(V_\sigma) $$
+    Where $\downarrow_S$ denotes the down-sampling operation by factor $S$ [S1].
+
+4.  **Store Compressed Model:**
+    Save the down-sampled grids $\{\hat{V}_\sigma, \hat{V}_c\}$ and the list of important voxels with their original values.
+
+5.  **Decompression (One-time Deployment):**
+    To recover the grid for rendering, up-sample the compressed grids $\{\hat{V}_\sigma, \hat{V}_c\}$ to the original grid size using tri-linear interpolation. Then, replace the values at the coordinates of the stored important voxels with their original high-resolution values to obtain the recovered grid $\{\tilde{V}_\sigma, \tilde{V}_c\}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_importance_scores(original_grid_sigma, original_grid_color, rays):
+    """
+    Calculates importance score for each voxel based on ray sampling.
+    """
+    voxel_count = original_grid_sigma.shape[0] * original_grid_sigma.shape[1] * original_grid_sigma.shape[2]
+    importance_scores = [0.0] * voxel_count
+    
+    # Cast rays and sample points
+    for ray in rays:
+        # Sample points along the ray
+        points = sample_points_along_ray(ray)
+        
+        for point in points:
+            # Calculate transmittance and opacity for this point
+            # This requires traversing the grid to get sigma and alpha
+            sigma_i, alpha_i, transmittance_i = render_point(point, original_grid_sigma, original_grid_color)
+            
+            # Find influencing voxels (neighbors within [-1, 1]^3)
+            influencing_voxels = get_influencing_voxels(point, original_grid_sigma.shape)
+            
+            for voxel_idx in influencing_voxels:
+                # Calculate interpolation weight
+                weight = calculate_interpolation_weight(point, voxel_idx, original_grid_sigma.shape)
+                
+                # Add contribution to importance score
+                importance_scores[voxel_idx] += weight * transmittance_i * alpha_i
+                
+    return importance_scores
+
+def compress_grid(original_grid_sigma, original_grid_color, importance_scores, S_sigma=2, S_color=4, top_k_percent=0.17):
+    """
+    Compresses the grid using nonuniform downsampling and stores important voxels.
+    """
+    # Step 1: Downsample grids
+    # Downsample color features with ratio S_color
+    compressed_color = downsample(original_grid_color, S_color)
+    
+    # Downsample density with ratio S_sigma
+    compressed_sigma = downsample(original_grid_sigma, S_sigma)
+    
+    # Step 2: Identify important voxels
+    # Sort voxels by importance score
+    voxel_indices = list(range(len(importance_scores)))
+    sorted_indices = sorted(voxel_indices, key=lambda i: importance_scores[i], reverse=True)
+    
+    # Select top k percent
+    num_important = int(len(sorted_indices) * top_k_percent)
+    important_voxel_indices = sorted_indices[:num_important]
+    
+    # Store original values for important voxels
+    important_voxels_data = []
+    for idx in important_voxel_indices:
+        coords = index_to_coords(idx, original_grid_sigma.shape)
+        sigma_val = original_grid_sigma[coords]
+        color_val = original_grid_color[coords]
+        important_voxels_data.append({
+            'coords': coords,
+            'sigma': sigma_val,
+            'color': color_val
+        })
+        
+    return compressed_sigma, compressed_color, important_voxels_data
+
+def decompress(compressed_sigma, compressed_color, important_voxels_data, original_shape):
+    """
+    Recovers the grid by upsampling and replacing important voxels.
+    """
+    # Upsample compressed grids to original shape using tri-linear interpolation
+    recovered_sigma = upsample(compressed_sigma, original_shape)
+    recovered_color = upsample(compressed_color, original_shape)
+    
+    # Replace values at important voxel coordinates with original high-res values
+    for voxel_data in important_voxels_data:
+        coords = voxel_data['coords']
+        recovered_sigma[coords] = voxel_data['sigma']
+        recovered_color[coords] = voxel_data['color']
+        
+    return recovered_sigma, recovered_color
+```
+
+## Operating characteristics
+*   **Storage Reduction:** Achieves over 40x reduction in grid model storage compared to original grid models [S1].
+*   **Quality Trade-off:** Maintains competitive rendering quality with less than 0.3dB drop in PSNR compared to uncompressed models [S1].
+*   **Performance:** Enables real-time rendering speeds (e.g., 180 fps) due to reduced memory footprint and bandwidth [S1].
+*   **Strengths:** Significant storage savings with minimal quality loss; simple one-time decompression without runtime overhead.
+*   **Limitations:** Requires an initial pass to calculate importance scores; relies on the assumption that density is more important than color, which may vary by scene.
+*   **When to Use:** When storage or bandwidth is a constraint and real-time rendering is required.
+*   **When Not to Use:** When maximum possible visual fidelity is required without any compression artifacts, or if the scene has high-frequency details in color that are not captured by the importance metric.
+
+## Background
+This method was introduced in the paper "Compact Real-Time Radiance Fields with Neural Codebook" [S1]. It addresses the high storage costs of explicit grid-based neural radiance field representations. The approach leverages the observation that a small percentage of voxels contribute to the majority of rendering importance, allowing for selective high-resolution storage.
+
+## Sources
+[S1] Compact Real-Time Radiance Fields with Neural Codebook, https://doi.org/10.1109/icme55011.2023.00374, fetched 2026-10-26

@@ -1,0 +1,103 @@
+What exists now Currently the VoxelTerrain node is capable of streaming the world pseudo-infinitely (up to floating-point limits). It works pretty well, with either cubic or smooth meshes, but it only works with a sparse grid, which only...
+
+LOD on streaming world · Issue #26 · Zylann/godot_voxel · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+LOD on streaming world #26
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+LOD on streaming world#26
+Copy link
+Labels
+enhancement
+Description
+Zylann
+opened on Apr 30, 2019
+Issue body actions
+What exists now
+Currently the VoxelTerrain node is capable of streaming the world pseudo-infinitely (up to floating-point limits). It works pretty well, with either cubic or smooth meshes, but it only works with a sparse grid, which only renders a single level of detail. Due to this, its view distance is limited, and was originally suited for Minecraft-like games.
+What is needed
+I started researching Level-of-Detail implementation, in order to see much larger terrains, with a new node VoxelLodTerrain (WIP name). It would be specialized on smooth terrain first, as it's more naturally decimable. Think "No Man's Sky" or "Space Engineers" as an ideal use case for this.
+There are pretty tough constraints to deal with, which the current terrain similarly handles:
+Loading voxels at a given LOD is asynchronous, i.e you can't just have the data you need immediately, and anything could happen in between (the player can move around, or edit the world).
+Meshing voxels is asynchronous too, this is all to avoid hiccups and increasing speed
+Neighbors blocks are required for a chunk of voxels to be polygonized properly, or seams quickly appear due to normals not matching
+It should assume infinite world, as the other terrain type already did. The world can't be considered entirely loaded or having bounds, only a part will be present, around the player (a finite world can still be built by providing no data across given boundaries).
+The world can be edited by the player
+How to determine LODs and how to store them
+Note: 1 block = 16x16x16 voxels
+In VoxelTerrain, the blocks to load are determined by a simple cubic region around the player.
+For VoxelLodTerrain, I figured out I would use an octree data structure instead, with a root as big as what the rendering engine can possibly see.
+This octree would be traversed regularly to get which blocks need to be visible at any point, as a goal. Then, the rest of the logic is about asynchronously churning data to approach this goal at decent speed, as the player moves and eventually modifies the world.
+Since an octree has a root of finite size, and I want an infinite world, chances are I will use a sparse grid of octrees later on.
+Data would be stored in multiple sparse grids (VoxelMap), one for each level of detail. This way, any block at any LOD can be accessed horizontally, and it makes it easy to modify the base LOD directly without having to traverse an octree. It basically makes each LODs independent from each other so they can be updated with the same logic.
+Even though this is all about LOD, we may still load much more data than the other type of terrain. Fortunately, voxel data isn't that big on nowadays' machines (16 megabytes for 256x256x256 voxels), and each LOD grid would have the same weight since only their scale change. So you can imagine 8 LODs could take you about 128 megabytes in the very worst case if nothing is compressed.
+I haven't made any attempt at compressing, except for completely uniform blocks (like air). RLE is a good first candidate for this, if that proves to be a problem.
+How to handle seams
+I've seen techniques like in Transvoxel where 3D T-junctions are polygonized depending on neighbors, but for now I'm not worrying too much about the seams themselves. I'm rather considering a much cheaper technique to start with, explained here: https://www.volume-gfx.com/volume-rendering/level-of-detail/marching-squares-skirts/
+How to organize data loading
+One of the main issues I'm trying to solve right now is how to organize the data to accomplish neighboring at all. If I keep the data matching the visuals like it did in VoxelTerrain, I would have to make sure every block in a given LOD needs to be surrounded by other blocks within the same LOD which may not appear visually. Basically, loading extra data, which would overlap with other LODs.
+It would require housekeeping to unload them, because while the octree provides which blocks need to be visible, it doesn't tell what happens to those not used directly for visuals.
+So it's clear I need to consider data doesn't need to match visuals anymore, so a block could be actively loaded, but not have any mesh associated yet. It could even work like VoxelTerrain, only on multiple grids at a time.
+If maintaining this data updated is too expensive for the main thread, it can be spread across frames since we know already VoxelTerrain works well doing that, so like it could go through 8 grids in 8 frames. There is no urge to do them all in one frame.
+How to prevent "loading holes"
+I realized later that if I follow the steps I described so far, the map might end up stabilizing around the location where the player is. However... before that, there is no guarantee that the loading will be seamless. Indeed, temporary "block holes" could be created by the fact each LOD would update at its own rate.
+This is because usually, when an octree is used for LOD, the visuals update immediately when its nodes subdivide or unsubdivide. Here, this is not the case: data and meshes built using this data are produced asynchronously, after a significant delay. It causes the octree and the visuals to always be slightly out of sync, and holes may appear.
+Intuitively, I wondered if there was a way to just prevent the octree from subdividing or unsubdividing based on the following rules:
+A node can subdivide only if all meshes that would replace it are ready.
+A node can unsubdivide only if the mesh that would replace it is ready.
+However, it seems that would complicate its implementation quite a lot, but I haven't tried yet. The octree I drafted so far is generic, maybe it would need a complete specialization instead.
+Then I considered building all meshes in advance, sort of. I could mesh all blocks, just like VoxelTerrain, but for every LOD, and turn them visible or invisible when the octree says so. There would be holes during initial loading, and not after. However, the amount of meshes could have a big hit on memory.
+This would reduce messages from the octree to two simple cases:
+The mesh is available when it needs to be toggled, do it now
+The mesh is not available, just pass then, don't block the octree. But when it gets available, inspect the octree or some cache to know if it should be shown.
+I'm still not decided on the definitive approach for this, so it needs experimentation.
+Editing the world
+I'm not working on this yet, as I'm focusing on the previous topic. All I know for now is that it would either involve replaying edits at all LODs, or have a much dumber process taking higher LODs and computing lower ones from them (like how we generate texture mipmaps). 8-bit distance fields could complicate this as they would inevitably "sharpen" if simply dowscaled, causing jagged results, because they can't represent more than a small distance.
+Reactions are currently unavailable
+Activity
+Zylann
+added
+enhancement
+on Apr 30, 2019
+Zylann commented on May 29, 2019
+Zylann
+on May 29, 2019
+Last edited by Zylann
+OwnerAuthor
+More actions
+I submitted a working LOD terrain by now. I used an octree with on-demand block loading, so queries are frequent, but there is fewer of them than speculative loading. I'll need to write a post explaining the full thing some day. Editing still remains to be figure out. Also, it's not fully streamed yet, as the world is still fixed size (a very large one tho). Will need to use a small grid of octrees.
+👍React with 👍1Reacted by Cory Petkovsek
+Zylann
+closed this as completedon May 29, 2019
+TokisanGames commented on May 30, 2019
+TokisanGames
+on May 30, 2019
+Contributor
+More actions
+Wow, nice work so far! My aging Intel HD4400 can barely handle a high distance (1024) VoxelTerrain w/ opensimplexnoise. But VoxelLODTerrain gives a much farther view, generates faster, and is much smoother to nagivate through!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancement
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

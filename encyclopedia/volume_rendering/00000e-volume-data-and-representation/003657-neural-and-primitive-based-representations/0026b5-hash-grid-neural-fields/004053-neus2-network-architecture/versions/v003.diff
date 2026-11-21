@@ -1,0 +1,147 @@
+--- v002.md
++++ v003.md
+@@ -1,51 +1,117 @@
+ # NeuS2 Network Architecture
++
+ Also called: NeuS2 components
++
+ ## Overview
+-NeuS2 is a neural implicit surface reconstruction method that uses a multi-resolution hash grid to accelerate the evaluation of signed distance fields (SDF) and color, enabling fast learning from multi-view images [S1]. It sets itself apart from its sibling [Neural Volumes with Multi-Resolution Hash Encoding](1497-neural-volumes-with-multi-resolution-hash-encoding.md) by specifically optimizing for surface reconstruction via SDF regularization and unbiased volume rendering, rather than general volumetric density estimation. It builds on [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md) by utilizing the hash encoding mechanism for spatial feature storage.
++NeuS2 is a neural implicit surface reconstruction method that accelerates the original NeuS framework by replacing the coordinate-based MLP with a multi-resolution hash grid encoding [S1]. It solves the problem of slow convergence and high memory usage in standard neural fields by leveraging sparse, learnable feature grids [S1]. It differs from its parent [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md) by specifying a particular lightweight MLP decoder structure (1-layer SDF, 2-layer RGB) and a specific 14-level hash grid configuration, and from [NeuS](10-neural-and-primitive-based-representations.md) by introducing this hash-based acceleration while retaining the unbiased volume rendering formulation [S1].
++
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$.
+-*   **Output:** A signed distance value $f(\mathbf{x})$ and an RGB color vector $\mathbf{c}$.
++*   **Input:** 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$.
++*   **Outputs:** Signed Distance Field (SDF) value $f(\mathbf{x})$ and RGB color $\mathbf{c}(\mathbf{x})$.
+ 
+ **Data Structures:**
+-1.  **Multi-resolution Hash Grid:** Contains 14 levels of resolution. The resolutions range from 16 to 2048 [S1]. Features are stored in hash tables at each level.
+-2.  **SDF Network:** A Multi-Layer Perceptron (MLP) with 1 hidden layer and 64 hidden units [S1].
+-3.  **RGB Network:** A Multi-Layer Perceptron (MLP) with 2 hidden layers and 64 hidden units [S1].
++1.  **Multi-resolution Hash Grid:**
++    *   Consists of 14 levels (resolutions) ranging from $16^3$ to $2048^3$ [S1].
++    *   Each level stores learnable feature vectors. The exact feature dimension is not specified in the provided sources [S1].
++    *   Features are interpolated from the grid based on $\mathbf{x}$ and concatenated [G].
++2.  **SDF Network:**
++    *   A 1-layer Multi-Layer Perceptron (MLP) [S1].
++    *   Hidden units: 64 [S1].
++    *   Input: Concatenated hash features.
++    *   Output: Scalar SDF value $f(\mathbf{x})$.
++3.  **RGB Network:**
++    *   A 2-layer Multi-Layer Perceptron (MLP) [S1].
++    *   Hidden units: 64 [S1].
++    *   Input: Concatenated hash features.
++    *   Output: RGB color vector $\mathbf{c}(\mathbf{x})$.
+ 
+-**Steps:**
+-1.  **Hash Encoding:** For a query point $\mathbf{x}$, features are retrieved from the multi-resolution hash grid. The features from all 14 levels are concatenated [G].
+-2.  **SDF Prediction:** The concatenated features are passed through the SDF network (1-layer MLP, 64 units) to predict the signed distance $f(\mathbf{x})$ [S1].
+-3.  **Color Prediction:** The concatenated features are passed through the RGB network (2-layer MLP, 64 units) to predict the color $\mathbf{c}$ [S1].
+-4.  **Volume Rendering:** To render an image, the SDF is transformed into a volume density field using a logistic distribution [S1]. The density $\sigma$ is computed as:
+-    $$ \sigma = \phi_s(f(\mathbf{x})) $$
+-    where $\phi_s(x) = \frac{s e^{-sx}}{(1 + e^{-sx})^2}$ is the logistic density distribution, $s$ is a learnable parameter, and $\Phi_s(x) = \frac{1}{1 + e^{-sx}}$ is the Sigmoid function [S1].
+-5.  **Unbiased Weighting:** Unbiased weights are constructed for the volume rendering equation along camera rays [S1].
++**Rendering Process:**
++The method uses unbiased volume rendering as defined in NeuS [S1].
++1.  **Density Conversion:** The SDF $f(\mathbf{x})$ is converted to volume density $\sigma$ using a logistic distribution:
++    $$ \sigma = \phi_s(f(\mathbf{x})) = \frac{s e^{-s f(\mathbf{x})}}{(1 + e^{-s f(\mathbf{x})})^2} $$
++    where $s$ is a learnable parameter [S1].
++2.  **Ray Sampling:** For each pixel, $n$ points $\{p(t_i) = o + t_i \mathbf{v} \mid i = 0, \dots, n-1\}$ are sampled along the camera ray, where $o$ is the ray origin and $\mathbf{v}$ is the direction [S1].
++3.  **Rendering:** The color is computed using an unbiased weight function derived from the density [S1].
++
++**Pseudocode:**
++```python
++def query_neus2(x, hash_grid, sdf_mlp, rgb_mlp, s):
++    """
++    Queries the NeuS2 network for SDF and RGB at coordinate x.
++    
++    Args:
++        x: (3,) float tensor, 3D spatial coordinate.
++        hash_grid: Multi-resolution hash grid structure.
++        sdf_mlp: 1-layer MLP (64 hidden units).
++        rgb_mlp: 2-layer MLP (64 hidden units).
++        s: Learnable scalar parameter for density conversion.
++        
++    Returns:
++        sdf: float, Signed Distance Field value.
++        rgb: (3,) float tensor, RGB color.
++    """
++    # 1. Extract and concatenate features from multi-resolution hash grid
++    # The grid has 14 levels, resolutions 16 to 2048.
++    # Interpolation method (e.g., trilinear) is implied by hash grid usage [G].
++    features = hash_grid.interpolate_and_concatenate(x)
++    
++    # 2. Predict SDF
++    # SDF network is 1-layer MLP with 64 hidden units [S1]
++    sdf = sdf_mlp(features)
++    
++    # 3. Predict RGB
++    # RGB network is 2-layer MLP with 64 hidden units [S1]
++    rgb = rgb_mlp(features)
++    
++    return sdf, rgb
++
++def compute_density(sdf, s):
++    """
++    Converts SDF to volume density using logistic distribution [S1].
++    
++    Args:
++        sdf: float, SDF value.
++        s: float, learnable sharpness parameter.
++        
++    Returns:
++        density: float, volume density.
++    """
++    # phi_s(x) = s * exp(-s*x) / (1 + exp(-s*x))^2 [S1]
++    exp_val = torch.exp(-s * sdf)
++    density = (s * exp_val) / torch.pow(1 + exp_val, 2)
++    return density
++```
+ 
+ **Parameters:**
+ *   **Hash Grid Levels:** 14 [S1].
+ *   **Hash Grid Resolutions:** Range from 16 to 2048 [S1].
+-*   **SDF MLP:** 1 hidden layer, 64 units [S1].
+-*   **RGB MLP:** 2 hidden layers, 64 units [S1].
+-*   **Learnable Parameter $s$:** Controls the sharpness of the density transition [S1].
++*   **SDF MLP Hidden Units:** 64 [S1].
++*   **RGB MLP Hidden Units:** 64 [S1].
++*   **Density Parameter $s$:** Learnable [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   The parameter $s$ must be learned; improper initialization may lead to poor surface convergence [S1].
+-*   Training on unbounded backgrounds requires foreground masks to be included in the supervision [S3].
++*   **Precision:** The hash grid interpolation requires careful handling of boundary conditions and floating-point precision for coordinate hashing [G].
++*   **Degenerate Input:** Coordinates far outside the bounding box of the hash grid may require clamping or out-of-bounds handling [G].
+ 
+ ## Subtopics
+ 
+ ### STSR-INR
+-Extends the CoordNet architecture (related to NeuS2's INR approach) with variable-specific latent embeddings via a variational auto-decoder and a modulated dual-network architecture to handle multivariate and ensemble data [S2, unofficial]. It supports non-integer upscaling factors, such as 1.75× spatial and 2.5× temporal, unifying temporal SR, spatial SR, view synthesis, and ambient occlusion prediction within a single compact architecture (~5.7 MB) [S2, unofficial].
++STSR-INR extends the CoordNet architecture (which NeuS2 is related to via hash encoding principles) by adding variable-specific latent embeddings via a variational auto-decoder and a modulated dual-network architecture [S2, unofficial]. It handles multivariate and ensemble data, supporting non-integer upscaling factors such as 1.75× spatial and 2.5× temporal [S2, unofficial]. It is chosen when variable-specific latent embeddings and non-integer upscaling are required for scientific volume data [S2, unofficial].
++
++### Distillation and Fine-tuning Training
++This is a training scheme for NeuMesh, which builds on NeuS2 principles. It involves training a teacher model (NeuS) first, then optimizing codes and decoders using output from the teacher model and images [S3]. This distillation loss supervises the queried color and SDF values [S3]. It is used to accelerate training and improve quality for mesh-based implicit fields [S3].
+ 
+ ## Operating characteristics
+-*   **Training Time:** Training on real scenes takes approximately 3 hours, while synthetic scenes take about 1 hour [S1].
+-*   **Hardware:** Implemented on a single Nvidia RTX3090-24G GPU [S3].
+-*   **Batch Size:** 512 rays per batch [S3].
+-*   **Optimizer:** Adam with an initial learning rate of 0.0005 and a cosine annealing scheduler with 5000 warm-up steps [S3].
+-*   **Strengths:** Fast learning compared to previous neural implicit methods; efficient multi-resolution hash grid allows for detailed reconstruction [S1].
+-*   **Limitations:** Training time on real scenes is longer than on synthetic scenes [S1].
++*   **Time Complexity:** Training time on real scenes is longer than on synthetic scenes, taking approximately 3 hours for real scenes and 1 hour for synthetic scenes [S1].
++*   **Memory Complexity:** The multi-resolution hash grid with 14 levels consumes memory proportional to the sum of features across all resolutions [S1]. The exact memory footprint is not given in the sources [S1].
++*   **Performance:** The method is designed for fast learning compared to standard NeuS [S1].
++*   **Strengths:** Fast convergence, efficient memory usage compared to dense voxel grids [S1].
++*   **Limitations:** Training time on real scenes is still significant (3 hours) [S1].
++*   **When to use:** When fast neural implicit surface reconstruction is needed for multi-view reconstruction [S1].
++*   **When not to use:** When extremely low memory footprint is required without hash grid overhead, or when real-time inference is the primary constraint without hardware acceleration [S1].
+ 
+ ## Background
+-NeuS2 was introduced to address the slow training speeds of previous neural implicit surface reconstruction methods like NeuS [S1]. It leverages multi-resolution hash encoding to accelerate feature lookup, allowing for faster convergence [S1]. The method was presented at ICCV 2023 [S1]. A related distillation and fine-tuning scheme was later applied in NeuMesh, which uses a teacher model (NeuS) to supervise the optimization of codes and decoders [S3].
++NeuS2 was introduced in the paper "NeuS2: Fast Learning of Neural Implicit Surfaces for Multi-view Reconstruction" [S1]. It builds on the original NeuS method [S1]. The method utilizes multi-resolution hash encoding to accelerate the neural field training process [S1].
+ 
+ ## Sources

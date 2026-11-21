@@ -1,0 +1,179 @@
+--- v003.md
++++ v004.md
+@@ -81,22 +81,4 @@
+     lr: float = 0.001
+ ):
+-    """
+-    Implements Feature-Informed Diffusion Evolution (FIDE).
+-    
+-    Args:
+-        renderer: Black-box function f: R^d -> Image
+-        target_image: Target image y*
+-        feature_extractor: Frozen feature extractor E (e.g., DINOv3)
+-        d: Dimensionality of parameter space
+-        k: Population size
+-        N: Number of evolution cycles
+-        sigma_0: Initial standard deviation
+-        epochs: Training epochs per iteration
+-        lr: Learning rate for diffusion model
+-        
+-    Returns:
+-        x_opt: Optimized parameters (mean of final CMA-ES distribution)
+-    """
+-    
+     # 1. Initialize CMA-ES
+     mu = np.zeros(d)
+@@ -104,8 +86,6 @@
+     
+     # 2. Initialize Diffusion Denoiser
+-    # Architecture: Transformer with cross-attention
+-    # Input: Noisy params z, Image features E(y), Covariance Sigma (as timestep proxy)
+-    # Output: Predicted clean params x
+-    denoiser = initialize_denoiser()  # [G] Standard transformer initialization
++    # [G] Standard transformer initialization with cross-attention
++    denoiser = None  # [G] Initialize transformer denoiser
+     
+     # Extract target features once
+@@ -115,104 +95,46 @@
+     for i in range(N):
+         # --- Sampling ---
+-        # Draw k candidates from N(mu, Sigma)
+         candidates = np.random.multivariate_normal(mu, Sigma, size=k)
+         
+         # --- Inverse Prediction (Partial Denoising) ---
+-        # Denoise only the first half of samples to preserve diversity
+         half_k = k // 2
+-        
+-        # Select first half
+         noisy_params = candidates[:half_k]
+         
+         # Condition denoiser on target features and current covariance
+-        # The covariance Sigma acts as the timestep context
+-        denoised_params = denoise_with_diffusion(
+-            denoiser, 
+-            noisy_params, 
+-            target_features, 
+-            Sigma
+-        )
++        # Timestep scalar s is replaced by Sigma; diagonal is used in practice
++        timestep_input = np.sqrt(np.diag(Sigma))
+         
+-        # Replace first half with denoised candidates
+-        candidates[:half_k] = denoised_params
+-        # Remainder candidates remain unchanged
++        # Solve reverse-time ODE with Euler's method (3 steps, schedule [0.3, 0.2, 0.1])
++        schedule = [0.3, 0.2, 0.1]
++        current_params = noisy_params.copy()
++        for step_t in schedule:
++            predicted_clean = denoiser(current_params, target_features, timestep_input)
++            current_params = predicted_clean # Euler step
++            
++        candidates[:half_k] = current_params
++        # Remainder candidates remain unchanged to preserve diversity
+         
+         # --- Evaluation ---
+-        # Render all samples
+         rendered_images = np.array([renderer(x) for x in candidates])
+-        
+-        # Extract visual features for all rendered images
+         rendered_features = np.array([feature_extractor(img) for img in rendered_images])
+         
+         # --- Online Training ---
+-        # Train diffusion network on current dataset
+-        # Dataset: (noisy_params, rendered_features, Sigma) -> clean_params
+-        # Note: In training, noise is sampled using the CMA distribution
+-        train_diffusion_model(
+-            denoiser,
+-            noisy_params, # These are the 'clean' targets for the denoiser if we view it as predicting x from z
+-            rendered_features,
+-            Sigma,
+-            epochs=epochs,
+-            lr=lr
+-        )
+-        
++        # Train diffusion network on current dataset starting from previous weights
++        # Objective: || f_theta^-1(z, f(x), Sigma) - x ||_2^2, where z ~ N(x, Sigma)
++        for epoch in range(epochs):
++            # Generate noisy samples using CMA distribution
++            noisy_train = np.random.multivariate_normal(candidates, Sigma)
++            pred = denoiser(noisy_train, rendered_features, timestep_input)
++            loss = np.mean((pred - candidates) ** 2)
++            # [G] Standard Adam optimizer step
++            # [G] Standard CMA-ES covariance update step based on ranked costs
++            pass  # [G] Update weights and CMA-ES state
++            
+         # --- CMA-ES Update ---
+-        # Evaluate cost using LPIPS loss against target
+         costs = np.array([compute_lpips_loss(img, target_image) for img in rendered_images])
+-        
+-        # Update mu and Sigma based on ranked costs
+-        # [G] Standard CMA-ES covariance update step
++        # [G] Standard CMA-ES covariance update step based on ranked costs
+         mu, Sigma = update_cma_es(mu, Sigma, candidates, costs)
+         
+     return mu
+-
+-def denoise_with_diffusion(denoiser, noisy_params, target_features, Sigma):
+-    """
+-    Generates candidates from the diffusion model by using a CMA sample 
+-    as a starting point and solving the reverse-time ODE with Euler's method.
+-    """
+-    # Schedule for reverse ODE steps
+-    schedule = [0.3, 0.2, 0.1]
+-    
+-    # Start with the noisy parameters (which are samples from CMA)
+-    current_params = noisy_params.copy()
+-    
+-    # Solve reverse-time ODE with Euler's method
+-    for step_t in schedule:
+-        # Predict clean parameters conditioned on target features and timestep
+-        # The timestep is derived from Sigma (diagonal sqrt)
+-        timestep_input = np.sqrt(np.diag(Sigma))
+-        
+-        predicted_clean = denoiser(current_params, target_features, timestep_input)
+-        
+-        # Euler step update
+-        # Note: Exact reverse ODE integration details depend on the specific 
+-        # diffusion formulation (x-prediction vs noise prediction).
+-        # Here we assume the denoiser outputs the prediction of x.
+-        current_params = predicted_clean
+-        
+-    return current_params
+-
+-def train_diffusion_model(denoiser, clean_params, rendered_features, Sigma, epochs, lr):
+-    """
+-    Trains the diffusion network online.
+-    Objective: || f_theta^-1(z, f(x), s) - x ||_2^2
+-    where z ~ N(x, Sigma)
+-    """
+-    # In practice, we generate noisy versions of the clean_params
+-    # using the anisotropic Gaussian from CMA
+-    noisy_params = np.random.multivariate_normal(clean_params, Sigma)
+-    
+-    # Timestep input
+-    timestep_input = np.sqrt(np.diag(Sigma))
+-    
+-    # Compute loss
+-    predicted_params = denoiser(noisy_params, rendered_features, timestep_input)
+-    loss = np.mean((predicted_params - clean_params) ** 2)
+-    
+-    # Update weights using Adam optimizer
+-    # [G] Standard gradient descent step with Adam
+-    update_weights(denoiser, loss, lr)
+ ```
+ 
+@@ -227,11 +149,11 @@
+ *   **Memory Complexity**: Quadratic in the parameter dimension $d$ due to CMA-ES covariance matrix storage and the diffusion model's self-attention mechanism [S1, unofficial].
+ *   **Measured Performance**: On the Beads task (25,000 render calls, 224x224 pixels, LPIPS loss), the method takes 6-13 minutes (depending on epochs) on a desktop computer. This is slower than differentiable baselines like Mitsuba 3 (4.5 minutes) but avoids getting stuck in poor local optima [S1, unofficial].
+-*   **Strengths**: Robust against local minima and strong Monte Carlo noise. Handles non-differentiable black-box renderers. Escapes local minima where gradient-based methods stall [S1, unofficial].
+-*   **Limitations**: Higher overhead than scalar-conditioned methods like DiBO (which takes ~4 hours on the same task but fails to converge). Limited to ~100 parameters [S1, unofficial].
++*   **Strengths**: Robust against local minima and strong Monte Carlo noise. Handles non-differentiable black-box renderers [S1, unofficial]. Escapes local minima where gradient-based methods stall [S1, unofficial].
++*   **Limitations**: Higher overhead than scalar-conditioned methods like DiBO (which takes ~4 hours on the same task but fails to converge) [S1, unofficial]. Limited to ~100 parameters [S1, unofficial].
+ *   **When to Use**: Non-differentiable black-box renderers, ill-posed inverse problems with multiple modes, or when gradient estimation is unstable or unavailable [S1, unofficial].
+ *   **When Not to Use**: Large-scale parameter spaces (>100 dimensions) or when differentiable gradients are available and the problem is well-posed [S1, unofficial].
+ 
+ ## Background
+-Feature-Informed Diffusion Evolution (FIDE) was introduced by Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser [S1, unofficial]. It addresses the limitations of existing black-box optimization methods (like CMA-ES and Bayesian optimization) which rely on scalar fitness values, discarding spatial information present in rendered images. The method builds on the principles of diffusion models for generative modeling and CMA-ES for derivative-free optimization, combining them to solve inverse rendering problems without differentiability requirements [S1, unofficial].
++Feature-Informed Diffusion Evolution (FIDE) was introduced by Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser [S1, unofficial]. It addresses the limitations of existing black-box optimization methods (like CMA-ES and Bayesian optimization) which rely on scalar fitness values, discarding spatial information present in rendered images [S1, unofficial]. The method builds on the principles of diffusion models for generative modeling and CMA-ES for derivative-free optimization, combining them to solve inverse rendering problems without differentiability requirements [S1, unofficial].
+ 
+ ## Sources

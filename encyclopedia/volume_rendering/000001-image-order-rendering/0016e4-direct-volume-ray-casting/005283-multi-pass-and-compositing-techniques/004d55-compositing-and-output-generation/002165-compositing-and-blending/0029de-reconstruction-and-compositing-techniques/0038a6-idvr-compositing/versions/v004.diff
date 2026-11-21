@@ -1,0 +1,148 @@
+--- v003.md
++++ v004.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs:**
+-*   A set of volume objects, each with an associated importance value $I_o$.
+-*   A view direction $\vec{v}$.
+-*   Ray samples $(c_i, \alpha_i)$ for each object intersected by the ray.
++*   A set of volume objects, each with an associated importance value $I_o$ [S1, unofficial].
++*   A view direction $\vec{v}$ [S1, unofficial].
++*   Ray samples $(c_i, \alpha_i)$ for each object intersected by the ray [G].
+ 
+ **Outputs:**
+-*   Final pixel color $C_{final}$ and opacity $\alpha_{final}$ after global compositing.
++*   Final pixel color $C_{final}$ and opacity $\alpha_{final}$ after global compositing [G].
+ 
+ **Data Structures:**
+@@ -21,5 +21,5 @@
+ 
+ 1.  **Create Footprint:**
+-    For the current view direction, determine the visible extent of each object on the screen. This involves projecting the objects or analyzing ray intersections to define which pixels are covered by which objects [S1, unofficial].
++    For the current view direction, determine the visible extent of each object on the screen. Create a footprint of the image for the current view direction, which must be recalculated whenever the view direction changes [S1, unofficial].
+ 
+ 2.  **Assign Sparseness Values:**
+@@ -31,39 +31,34 @@
+     *   Assign all other objects intersecting that ray a sparseness value of $S=1$ (most sparse/transparent) [S1, unofficial].
+     
+-    *Note: The source mentions that simple MImP can result in "cylindrical countersinks" where only the most important object is visible, implying that more complex sparseness assignments may exist but are not detailed in the provided text [S1, unofficial].*
++    *Note: Simple MImP can result in "cylindrical countersink" artifacts where only the most important object is visible and others are completely hidden [S1, unofficial].*
+ 
+ 3.  **Modulate Samples:**
+-    Modify the local sample color $c_i$ and opacity $\alpha_i$ using the assigned sparseness value $S$. The source states that color and opacity values are "modified" but does not provide the exact mathematical formula for this modulation in the provided excerpts [S1, unofficial]. [G] A common interpretation in importance-driven rendering is to scale the opacity: $\alpha'_i = \alpha_i \cdot (1 - S)$. If $S=1$, $\alpha'_i=0$; if $S=0$, $\alpha'_i=\alpha_i$.
++    Modify the local sample color $c_i$ and opacity $\alpha_i$ using the assigned sparseness value $S$. The source states that color and opacity values are "modified" but does not provide the exact mathematical formula for this modulation [S1, unofficial]. [G] A standard implementation scales the opacity linearly: $\alpha'_i = \alpha_i \cdot (1 - S)$. If $S=1$, $\alpha'_i=0$; if $S=0$, $\alpha'_i=\alpha_i$. Color is typically left unchanged or scaled similarly.
+ 
+ 4.  **Global Compositing:**
+-    Perform standard front-to-back compositing using the modified samples $(c'_i, \alpha'_i)$ to produce the final image [S1, unofficial].
++    Perform global compositing: blend the modified color and opacity values (modulated by sparseness) to produce the final image [S1, unofficial]. This follows the standard front-to-back accumulation with explicit transmittance tracking and background compositing [G].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def IDVR_Compositing(objects, view_direction, ray_samples):
++def IDVR_Compositing(objects, view_direction, ray_samples, background_color=(0.0, 0.0, 0.0)):
+     """
+     objects: List of objects, each with an 'importance' attribute.
+     view_direction: Current camera view vector.
+     ray_samples: List of tuples (object_id, color, opacity) for samples along the ray, ordered front-to-back.
+-    
+-    Returns:
+-    final_color, final_opacity
++    background_color: Color to composite over at the end.
++    Returns: final_color, final_opacity
+     """
+     
+     # Step 1: Create Footprint (View-Dependent)
+-    # The footprint maps screen pixels to the dominant object for the current view.
+-    # This requires a global pass over the scene for the current view_direction.
+-    # Not given in the sources: The exact algorithm for footprint creation (e.g., rasterization, projection).
+-    footprint = create_footprint(objects, view_direction)
+-    
++    # Not given in the sources: The exact algorithm for footprint creation.
++    # It must be recalculated whenever the view direction changes.
++    footprint = {} # Structure mapping screen coordinates to object IDs/importance
++
+     # Step 2 & 3: Assign Sparseness and Modulate
+     modified_samples = []
+     
+-    # Identify the maximum importance among all objects in the scene or along the ray?
+-    # The source says "Along a ray, the object with the maximum importance value gets the lowest sparseness value".
+-    # This implies a local comparison along the ray.
+-    
+-    max_importance = -1
++    # Find maximum importance along this ray for MImP
++    max_importance = -1.0
+     for obj_id, c, a in ray_samples:
+         imp = objects[obj_id].importance
+@@ -81,39 +76,43 @@
+             
+         # Step 3: Modulate
+-        # The source does not specify the exact modulation formula.
+-        # [G] Assuming linear opacity scaling based on sparseness.
++        # [G] Linear opacity scaling based on sparseness, as exact formula not in sources.
+         modified_alpha = a * (1.0 - sparseness)
+         modified_color = c
+-        
+         modified_samples.append((modified_color, modified_alpha))
+         
+     # Step 4: Global Compositing
+-    # Standard front-to-back compositing on modified samples
++    # Standard front-to-back compositing with explicit transmittance tracking
+     acc_color = (0.0, 0.0, 0.0)
+-    acc_opacity = 0.0
++    T = 1.0  # Transmittance initialized to 1.0
++    alpha_acc = 0.0
+     
+     for c_mod, a_mod in modified_samples:
+-        if acc_opacity >= 1.0:
++        # Early ray termination: stop if transmittance is negligible
++        if T < 1e-4:
+             break
+             
+-        # Standard compositing equation
+-        weight = (1.0 - acc_opacity) * a_mod
+-        acc_color = acc_color + weight * c_mod
+-        acc_opacity = acc_opacity + weight
++        # Update color and transmittance
++        weight = T * a_mod
++        acc_color = (
++            acc_color[0] + weight * c_mod[0],
++            acc_color[1] + weight * c_mod[1],
++            acc_color[2] + weight * c_mod[2]
++        )
++        T = T * (1.0 - a_mod)
++        alpha_acc = 1.0 - T
+         
+-    return acc_color, acc_opacity
+-
+-def create_footprint(objects, view_direction):
+-    """
+-    Placeholder for the footprint creation step.
+-    The source states: "there first of all needs to be created a footprint of the image...
+-    The footprint must be recalculated whenever the view direction changes".
+-    Not given in the sources: The specific algorithm for footprint generation.
+-    """
+-    pass
++    # Composite over background
++    final_color = (
++        acc_color[0] + T * background_color[0],
++        acc_color[1] + T * background_color[1],
++        acc_color[2] + T * background_color[2]
++    )
++    final_opacity = alpha_acc
++    
++    return final_color, final_opacity
+ ```
+ 
+ ## Operating characteristics
+-*   **Complexity:** The footprint creation step is view-dependent and likely requires a global pass over the scene data, adding overhead compared to standard ray casting [S1, unofficial].
++*   **Complexity:** The footprint creation step is view-dependent and requires a global pass over the scene data, adding overhead compared to standard ray casting [S1, unofficial].
+ *   **Strengths:** It effectively highlights important objects by suppressing less important ones, even if they are occluded or have high density [S1, unofficial].
+ *   **Limitations:** The simple MImP approach can lead to artifacts like "cylindrical countersinks," where only the most important object is visible and others are completely hidden, potentially losing context [S1, unofficial].
+@@ -121,5 +120,5 @@
+ 
+ ## Background
+-IDVR-Compositing was introduced by Thurner et al. in 2005 as part of the Importance-Driven Volume Rendering (IDVR) framework [S1, unofficial]. It is designed to address the visual clutter in volume rendering when multiple objects with different semantic meanings overlap.
++IDVR-Compositing is part of the Importance-Driven Volume Rendering (IDVR) framework [S1, unofficial]. It is designed to address the visual clutter in volume rendering when multiple objects with different semantic meanings overlap [S1, unofficial].
+ 
+ ## Sources

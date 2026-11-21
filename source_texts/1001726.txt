@@ -1,0 +1,184 @@
+Contribute to jamescarruthers/quick_dicom development by creating an account on GitHub.
+
+Add Quick DICOM, a fast GPU-accelerated DICOM viewer by jamescarruthers · Pull Request #1 · jamescarruthers/quick_dicom · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jamescarruthers
+commented
+Oct 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+A small DICOM viewer in Rust. Point it at a folder, or a folder of folders, and it lists every image by patient, study and series. Each series, or each multi-frame file, can be scrubbed, played as a loop, saved as an MP4, measured with rulers, coloured, or turned into a 3D stack.
+How it works
+Scan (scan.rs): walks the tree in parallel and reads each header only up to the pixel data. The list fills in while the scan runs.
+GPU (render.rs, image.wgsl): frames go to the GPU as raw values (R32Float, or RGBA8 for colour). A WGSL shader applies window/level, inversion and the colour map, filters bilinearly, and takes several samples per pixel when zoomed out. It runs on wgpu: Vulkan, Metal, DirectX 12 or OpenGL.
+Loading (loader.rs): worker threads decode frames nearest first into an LRU cache capped at 2 GB, so a loaded series scrubs smoothly. Multi-frame files stay open between frames.
+Decoding (decode.rs): uncompressed and RLE data are read directly, so one frame of a large multi-frame file costs one frame. JPEG and JPEG 2000 go through dicom-pixeldata. Frames also carry their pixel size and slice position.
+Rulers: millimetre rulers along the bottom and right edges, from Pixel Spacing (including enhanced multi-frame groups), the ultrasound calibrated region, or Imager Pixel Spacing, which the ruler labels "at detector".
+Colour maps (colormap.rs, common.wgsl): grey, hot iron and rainbow, applied after the window, on screen and in videos.
+3D (volume.rs, render3d.rs, volume.wgsl): the 3D button builds a volume in the background (half floats, at most 512 px across and 256 slices). The current slice tilts back and the others fan out at their recorded spacing. Slices are drawn far to near into a 16-bit float offscreen image, either blended (dark is clear, bright is solid) or keeping the maximum (MIP), and a final pass puts the result on screen. Drag turns, Ctrl+drag sets the window, the wheel zooms.
+MP4 export (export.rs, mp4.rs): "Save MP4…" or Ctrl+S writes the current series as H.264 on a background thread, with a progress bar and Cancel. Frames are drawn as the viewer draws them (window, level, inversion, smoothing, colour map), without zoom, pan, rulers or overlay text, so no patient details go into the file. Small images are scaled up to at least 512 px on the long side and large ones down to at most 2048. OpenH264 does the encoding, built from bundled source. mp4.rs writes the container itself, with the index before the data so playback can start before the file has loaded.
+--check <folder>: decodes everything without a window and reports which files fail.
+CI: formats, lints, tests and builds on Linux, Windows and macOS (universal binary), and uploads the binaries as artifacts.
+Two dependency problems worked around
+dicom-pixeldata 0.10 decodes 8-bit greyscale RLE one byte out of place: it writes from offset 1, not 0. RLE is now decoded here, and unit tests cover it.
+The pure-Rust openjp2 port passes a null pointer to dealloc when it frees a code block, which Rust's debug UB check catches. The build uses openjpeg-sys instead, which compiles the C OpenJPEG with the cc crate and needs no cmake.
+Testing
+26 unit tests: decoding (signed 12-bit with rescale, MONOCHROME1, frame offsets, planar RGB, YBR, RLE at 8 and 16 bits and multi-frame, downsampling); grouping and sorting; export (output sizes, window and inversion, BT.709 colour, colour maps, letterboxing, MP4 box layout, start-code splitting, and an encode with the real encoder settings); colour maps; half-float conversion and slice shrinking for 3D; ruler lengths and labels.
+Generated synthetic files with pydicom (CT, MR, CR as JPEG 2000, US cine raw and JPEG, XA as RLE, NM, palette, planar RGB, YBR) and compared every decoded frame with pydicom's pixels. All match exactly, apart from lossy JPEG, where the two decoders differ by at most 3 of 255.
+Exported every multi-frame test series. ffprobe reads each as H.264 Constrained Baseline, BT.709 limited range, with the right frame count, rate and duration, and ffmpeg decodes them all without errors. Luma PSNR against the frames fed to the encoder: 47 dB for CT, 51 dB for XA, 52–54 dB for ultrasound, 41 dB for MR and 37 dB for NM, which is pure Poisson noise.
+Ran the GUI under Xvfb with Mesa lavapipe (software Vulkan) and drove it with xdotool: browsing, scrubbing, window/level, zoom, pan, playback, MP4 export and Cancel. For this round, I made a head phantom (skull, brain, ventricles, spiral vessel, lesion) and a vessel phantom (spiral, ball and rod in air), with pixel spacing and slice positions:
+Rulers read 2 cm on the CT, 1 cm on a calibrated ultrasound (0.20 mm pixels), and "1 cm at detector" on a radiograph with Imager Pixel Spacing.
+The 3D button turns the slice into the stack smoothly, rotates on drag, and turns back to the 2D slice. Blend and MIP both work, in grey and in hot iron, and the colour maps work in 2D.
+Release build, 500 CT slices of 512×512 plus a 300-frame 640×480 RGB cine: the scan takes about 0.01 s once the files are in the OS cache, and decoding every frame takes 0.26 s and 0.33 s. In the GUI the first slice shows within 0.7 s of launch. Exporting either series to MP4 takes about 3.6 s.
+CI passes clippy, the unit tests and a release build on Linux, Windows and macOS, and the binaries are attached to the run. Nobody has yet opened the window on Windows or macOS.
+Removes the placeholder file x.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_019DpcwnBoEmgZw63rDSByMx
+claude
+added 4 commits
+October 9, 2026 16:57
+Add Quick DICOM, a GPU-accelerated DICOM viewer
+…
+f10f25a
+```
+Point it at a folder (or a folder of folders): it scans every file in
+parallel, reading headers only, and groups images into patients, studies
+and stacks. Each stack is a series of single-frame images, or one
+multi-frame file, and can be scrubbed with the wheel, keys or slider,
+or played as a loop.
+
+- Rendering: frames upload to the GPU as raw values (R32Float or RGBA8);
+  a WGSL shader does window/level, inversion, bilinear filtering and
+  supersampling when zoomed out. Runs on wgpu (Vulkan, Metal, DX12, GL).
+- Loading: worker threads decode frames nearest-first into an LRU cache
+  bounded by memory, so the series is ready to scrub once loaded.
+- Decoding: uncompressed and RLE data are read directly, so one frame
+  of a large multi-frame file costs one frame. dicom-pixeldata 0.10
+  shifts 8-bit greyscale RLE by a byte, hence the local RLE decoder.
+  JPEG and JPEG 2000 (OpenJPEG via openjpeg-sys) use dicom-pixeldata.
+  The pure-Rust openjp2 port was dropped: it passes a null pointer to
+  dealloc, which the debug UB checks catch.
+- `--check <folder>` decodes everything without a window and reports
+  failures.
+- CI builds and tests on Linux, Windows and macOS (universal binary).
+
+Removes the placeholder file `x`.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019DpcwnBoEmgZw63rDSByMx
+```
+Fix clippy on Rust 1.99; run CI once per PR push
+…
+6f8cabf
+```
+Rust 1.99 adds the chunks_exact_to_as_chunks lint, which -D warnings
+turned into errors in CI. Use as_chunks for the three fixed-size
+chunkings in decode.rs; behaviour is unchanged.
+
+Only run on push for main, so a PR branch push no longer starts two
+identical runs, and move to actions/checkout@v5 (Node 24).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019DpcwnBoEmgZw63rDSByMx
+```
+Save series and loops as MP4 video
+…
+a0a4175
+```
+A "Save MP4…" button (Ctrl+S) writes the current stack as H.264 in an
+MP4 file, on a background thread with a progress bar and Cancel.
+
+- Frames are drawn as the viewer draws them: same window, level,
+  inversion and smoothing, and the same supersampling when shrinking.
+  Zoom and pan are ignored so the whole image is always saved, and
+  overlay text is left out so no patient details go into the file.
+- Small images are scaled up by a whole number to at least 512 px on
+  the long side; large ones are scaled down to at most 2048 px.
+- Encoding uses OpenH264, built from bundled source by its crate (C++,
+  nasm optional). Output is Constrained Baseline, BT.709 limited range,
+  with a keyframe every two seconds.
+- mp4.rs writes the container itself (ftyp, moov, mdat) with the index
+  first, so playback can start before the file has loaded.
+- Frames that fail to decode are written black and counted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019DpcwnBoEmgZw63rDSByMx
+```
+Add rulers, colour maps and a 3D slice-stack view
+…
+726397d
+```
+Rulers: millimetre rulers along the bottom and right edges of the 2D
+view, at the current zoom, from Pixel Spacing (including enhanced
+multi-frame groups), the ultrasound calibrated region, or Imager Pixel
+Spacing (labelled "at detector"). M toggles them; the pixel size also
+shows in the corner.
+
+Colour maps: grey, hot iron and rainbow for greyscale images, applied
+after the window, on screen (common.wgsl) and in MP4 export
+(colormap.rs). C cycles them.
+
+3D: the 3D button (D) turns the series into a stack of its slices. The
+current slice tilts back while the others fan out behind it at their
+recorded spacing. Dark voxels are clear and bright ones solid, so the
+window chooses what shows. Blend draws slices far to near with
+premultiplied "over" blending into a 16-bit float offscreen image; MIP
+keeps the maximum instead and applies colour in the final pass. Drag
+turns, Ctrl+drag sets the window, the wheel zooms. Volumes are built in
+the background as half floats, at most 512 px across and 256 slices.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019DpcwnBoEmgZw63rDSByMx
+```
+jamescarruthers
+marked this pull request as ready for review
+October 9, 2026 18:46
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 9, 2026 18:46
+Hide details
+View details
+jamescarruthers
+merged commit e78398a
+into
+main
+Oct 9, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Copilot
+AI
+reviewed
+Oct 9, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

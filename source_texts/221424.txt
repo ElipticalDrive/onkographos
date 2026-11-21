@@ -1,0 +1,731 @@
+Contribute to dongeronimo/krakatoa_2 development by creating an account on GitHub.
+
+Integrate OpenChisel TSDF reconstruction with GPU compute fusion by dongeronimo · Pull Request #31 · dongeronimo/krakatoa_2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+dongeronimo
+commented
+Mar 23, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR replaces the previous voxelization-based reconstruction pipeline with a production-grade TSDF (Truncated Signed Distance Field) volumetric fusion system. The new pipeline uses OpenChisel for CPU-side chunk management and a GPU compute shader for per-voxel TSDF integration, enabling efficient real-time 3D reconstruction from ARCore depth data.
+Key Changes
+Core Reconstruction Pipeline
+ChiselManager (chisel_bridge/): New wrapper around OpenChisel that manages TSDF integration on a worker thread. Handles frame queueing, mesh extraction, and inter-thread communication via event queues.
+TsdfFusionOp: GPU compute shader operation that fuses depth frames into a 256³ R32_UINT TSDF volume. Each thread processes one voxel, computing signed distance and updating the weighted running average.
+TsdfVolume: Vulkan 3D image resource (256³, R32_UINT) storing packed TSDF distance (int16, biased to [0,65535]) and weight (uint16) per voxel.
+Marching Cubes Integration
+Updated marching_cubes.comp.glsl to read from TSDF volume instead of occupancy grid. Extracts surface geometry at zero-crossings of the signed distance field.
+Modified MarchingCubesOp to work with the new TSDF format and volume dimensions.
+Rendering
+OpaquePhongConfig: New pipeline for rendering reconstructed geometry with fixed material color (no texture). Includes two-sided lighting and proper normal handling for backfaces.
+MutableMesh: Enhanced with configurable max vertex/index counts and pre-allocated ring buffers for streaming geometry updates.
+ARCore Integration
+Added getSensorViewMatrix() to ARSessionManager for retrieving the physical (sensor-oriented) camera pose, required for correct TSDF integration in world space.
+Optional torch/flash mode support for AR in low-light conditions.
+Build System
+Added Eigen (header-only math library) and OpenChisel as FetchContent dependencies in CMakeLists.txt.
+Created chisel_bridge/CMakeLists.txt with aggressive optimizations (-O3) for the ProjectionIntegrator template code.
+Documentation
+Architecture.md: High-level system overview and component descriptions.
+TSDF.md: Explanation of signed distance fields, truncation, and fusion principles.
+OpenChisel.md: Guide to OpenChisel's chunked architecture and key classes.
+ChunkPagingProposal.md: Design proposal for future memory-efficient chunk paging (Tier 1: GPU slab allocator, Tier 2: CPU/RAM, Tier 3: Disk).
+CLAUDE_CODE_READ_THIS_WHEN_YOU_DO_CHUNK_PAGING_PLS.md: Implementation notes for chunk serialization and reload logic.
+Implementation Details
+TSDF Packing: Distance values [-1, 1] are biased to [0, 65535] for storage in uint16. Weight is capped at 200 for stable reconstruction.
+Worker Thread: ChiselManager runs integration and mesh extraction on a dedicated thread, decoupled from the render loop. Latest-wins frame queueing prevents backlog.
+Compute Shader: tsdf_fusion.comp.glsl uses 8×8×4 workgroups for efficient voxel processing. Supports configurable truncation distance and voxel scale.
+Frustum Culling Ready: Architecture prepared for future GPU slab allocator with frustum-based chunk visibility (documented in ChunkPagingProposal.md).
+Testing Notes
+Verify TSDF integration produces correct signed distance values at surface boundaries.
+Confirm mesh extraction via Marching Cubes generates watertight geometry.
+Test with various truncation distances and weight caps for reconstruction quality.
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+claude
+added 30 commits
+March 18, 2026 22:47
+Implement TSDF volumetric reconstruction pipeline
+…
+189e4b0
+```
+Replace the occupancy-based voxelization with a proper TSDF (Truncated
+Signed Distance Function) pipeline for accurate 3D surface reconstruction.
+
+New pipeline: TSDF Fusion → Marching Cubes (2 stages instead of 3).
+The deprojection step is no longer needed — TSDF fusion performs per-voxel
+camera projection directly from the depth buffer.
+
+Key components:
+- TsdfVolume: 256³ R32_UINT 3D image, each voxel packs TSDF distance
+  (biased int16) and weight (uint16) into a single uint32
+- TsdfFusionOp: Per-voxel compute shader that projects each voxel to the
+  camera, reads depth, computes signed distance, and fuses via weighted
+  running average. Includes free-space carving for dynamic scenes.
+- Modified MarchingCubes: Extracts surfaces at TSDF zero-crossings instead
+  of occupancy thresholds. Adds minWeight filter to reject under-observed
+  voxels. Normals derived from TSDF gradient (smooth, not face-based).
+
+Parameters tuned for plush toy scanning at 0.5cm voxel resolution:
+- Scale: 200.0 (0.5cm voxels, covering ±64cm from origin)
+- Truncation distance: 4cm
+- Weight cap: 32 (sliding memory window)
+- Min weight: 2 (requires multiple observations before meshing)
+
+Closes #26
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix TSDF convergence, memory, and performance issues
+…
+87801dc
+```
+Convergence fix:
+- Remove free-space carving entirely. The algorithm was destroying
+  accumulated geometry when the camera moved, since voxels in front of
+  surfaces were being pushed back to free-space every frame.
+- Increase maxWeight from 32 to 200 so geometry persists stably across
+  hundreds of frames instead of being washed out by new observations.
+
+Memory fix:
+- Without carving, observed geometry now accumulates monotonically.
+  Once a surface is seen from multiple angles, it stays permanently.
+- Increase minWeight from 2 to 3 to require more observations before
+  showing geometry (reduces noise from single-frame artifacts).
+
+Performance fixes:
+- Throttle TSDF fusion to every 3rd frame (scene is static, camera
+  moves slowly — fusing every frame was redundant work).
+- Throttle marching cubes to every 5th frame (mesh reused between runs).
+- Increase TSDF fusion workgroup from 4x4x4=64 to 8x8x4=256 threads
+  for better GPU occupancy on Adreno 730.
+- Add early depth range exit (skip voxels > 3m from camera).
+
+Parameter tuning:
+- Truncation distance: 4cm → 6cm (12 voxels at 0.5cm scale, better
+  surface coverage and smoother fusion).
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix TSDF voxel-to-pixel projection: negate Y for image coords
+…
+6a7dbc7
+```
+The v-coordinate projection was using the same sign convention as u,
+but image Y-axis (down) is opposite to ARCore camera Y-axis (up).
+This caused every voxel to read depth from the vertically mirrored
+pixel, producing completely wrong SDF values and chaotic geometry.
+
+Also fix depth image stride handling: repack rows tightly when
+ARCore returns depth data with row padding, so the GPU shader can
+safely index as v*width+u.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add TSDF fusion diagnostic logging
+…
+6de8eeb
+```
+Log intrinsics, depth dimensions, view matrix, depth sample values,
+and world origin projection on the first 5 fusion frames. This will
+help diagnose why the reconstructed mesh doesn't match the real scene.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix depth buffer 1-frame lag and improve diagnostics
+…
+b9fe7b2
+```
+Swap UpdateImage/Advance order so the GPU buffer receives the current
+frame's depth data, not the previous frame's. The old ordering caused
+the TSDF fusion to pair stale depth with the current view matrix,
+producing horizontal drift as the camera moved.
+
+Also improve diagnostics: log the first frame with valid (non-zero)
+depth data in addition to the first 5 frames.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Revert Y-flip in TSDF projection + add two-sided lighting
+…
+d672f4d
+```
+The Y-flip was making the reconstructed mesh appear upside down.
+The deprojection shader uses y_cam = (v-cy)/fy*depth (Y matches image
+direction), and the TSDF projection must be its exact inverse:
+v = fy * y_cam / depth + cy (no negation). The previous Y-flip
+produced recognizable but inverted geometry.
+
+Also add two-sided lighting in the phong fragment shader: flip the
+normal for back-facing fragments so the mesh is visible from both
+sides instead of appearing see-through.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Reduce TSDF to 128³ (8x faster) and tune convergence params
+…
+cf84af9
+```
+- Volume: 256³→128³ (1cm voxels instead of 0.5cm). Still covers
+  1.28m cube which is plenty for a desk object. 8x less work for
+  both fusion and marching cubes.
+- Scale: 200→100 (1 voxel = 1cm)
+- Truncation: 6cm→4cm (tighter band = thinner surface shell)
+- Max weight: 200→32 (new angles actually update the surface
+  instead of being drowned out by early observations)
+- Min weight: 3→2 (show surface after just 2 observations)
+- Fusion throttle: every 3 frames→every frame (affordable at 128³)
+- Mesh rebuild: every 5 frames→every 3 frames (more responsive)
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add opaque phong pipeline for TSDF mesh visualization
+…
+c9362d2
+```
+Replace TransparentPhong with a new OpaquePhong pipeline for the world
+mesh: fixed red material color, depth write enabled, backface culling,
+no texture sampler. Uses the same AR light data (direction, color,
+ambient) as TransparentPhong for consistent Phong shading.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix TSDF rendering: Y-axis projection flip and indirect draw barrier
+…
+b972d78
+```
+Two bugs preventing the reconstruction from showing:
+
+1. TSDF fusion shader: camPos.y from the ARCore view matrix is Y-up,
+   but the deprojection convention has y_cam increasing downward (with
+   image v). Negate Y in the projection to match: v = fy*(-Y)/(-Z)+cy.
+
+2. PrepareIndirectDraw: vkCmdFillBuffer (zeros everything) and
+   vkCmdCopyBuffer (writes indexCount) had a WAW hazard at offset 0
+   with no barrier between them. The fill could execute after the copy,
+   overwriting indexCount with 0 — causing vkCmdDrawIndexedIndirect to
+   always draw nothing. Added a transfer→transfer pipeline barrier.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add OpenChisel and Eigen dependencies to CMake
+…
+b4a8e48
+```
+Integrate OpenChisel (chunked TSDF with spatial hashing and space
+carving) as a static library built from source, bypassing its
+catkin/ROS build system. Eigen 3.4.0 added as required dependency.
+OpenChisel is compiled with -O2 for performance on mobile.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Disable Eigen docs/examples/tests build
+…
+4493147
+```
+Eigen's full CMake tries to build and run examples which fails
+during Android cross-compilation. Disable all non-library targets.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Use FetchContent_Populate for Eigen and OpenChisel
+…
+98110e4
+```
+Eigen is header-only so we just need the source, not its full CMake
+build which tries to find SuperLU/BLAS and build examples. Similarly
+OpenChisel uses catkin which doesn't work outside ROS. Populate both
+manually and point include dirs at the downloaded sources.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Replace GPU TSDF pipeline with OpenChisel CPU reconstruction
+…
+60674a7
+```
+- Add thread_event.h: reusable thread-safe event queue (EventId + void* payload)
+- Add ChiselManager: wraps OpenChisel with a dedicated worker thread
+  - Auto-detects thread count (hardware_concurrency / 2) per device
+  - 2cm voxels, 10cm truncation, space carving enabled
+  - Non-blocking IntegrateFrame (latest-wins) + PollMesh for render thread
+  - Converts ARCore view matrix (world→camera) to OpenChisel pose (camera→world)
+  - Consolidates chunk meshes into interleaved [pos3,normal3,uv2] vertex format
+- Replace GpuMesh with MutableMesh for CPU→GPU mesh upload
+- Preserve all ComputeOperation infrastructure for future use
+- Remove old GPU compute dispatch from render loop (fusion + marching cubes)
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Pre-allocate MutableMesh buffers to avoid per-frame VMA alloc/free
+…
+44dac9a
+```
+Constructor now takes maxNumOfVerts (default 4096). All ring buffer
+slots are allocated once at construction with persistently mapped
+memory. UploadToCurrentSlot() is now just a memcpy — no more
+vmaDestroyBuffer + vmaCreateBuffer on every mesh update.
+
+Buffer sizes:
+- Vertex: maxNumOfVerts * 8 * sizeof(float)  (pos3 + norm3 + uv2)
+- Index:  maxNumOfVerts * 8 * sizeof(uint32_t)
+- World mesh: 500K verts (~15 MB vtx + ~15 MB idx per slot)
+- AR planes: 4K verts default (~128 KB per slot)
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Mark OpenChisel/Eigen include dirs as SYSTEM to suppress -Werror
+…
+362ec07
+```
+OpenChisel has sign-compare warnings (int vs size_t in Chunk.h:108)
+that become errors under our -Werror flag. SYSTEM includes tell the
+compiler to treat these headers as third-party and suppress warnings.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Move world mesh capacity to CMake defines
+…
+eb31443
+```
+Replace static constexpr MC_MAX_VERTICES/MC_MAX_INDICES (unused after
+GpuMesh removal) with WORLD_MESH_MAX_VERTICES=500000 and
+WORLD_MESH_MAX_INDICES=4000000 as compile definitions, matching the
+existing pattern used for MAX_FRAMES_IN_FLIGHT.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+TEMPORARY: enable camera flash/torch for dark room AR
+…
+ae9570f
+```
+Add ArConfig_setFlashMode to the dynamic loader and set
+AR_FLASH_MODE_TORCH during session config so ARCore can track
+in low-light conditions. Remove this once lighting is adequate.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Make ArConfig_setFlashMode optional to fix ARCore init failure
+…
+cec2031
+```
+The symbol may not exist in all ARCore versions. Load it with a
+soft fallback (log + nullptr) instead of the fatal LOAD_ARCORE_FUNC
+macro, and guard the call site with a null check.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix OOM crash: reduce world mesh allocations from ~92MB to ~12MB
+…
+ad16071
+```
+The MutableMesh was allocating 500K verts × 8x index multiplier × 3
+ring slots = ~92MB of persistently mapped Vulkan memory, causing OOM
+on mobile devices.
+
+Changes:
+- Lower WORLD_MESH_MAX_VERTICES from 500K to 200K
+- Lower WORLD_MESH_MAX_INDICES from 4M to 600K (3x verts, not 8x)
+- Accept maxNumOfIndices as a separate constructor parameter instead
+  of hardcoding an 8x multiplier
+
+New total: 200K×32B + 600K×4B = ~8.8MB × 3 slots ≈ 12MB (was ~92MB).
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix build: pass maxNumOfIndices to second MutableMesh call site
+…
+866a66b
+```
+The AR planes constructor at line 626 was passing `name` as the 5th
+argument, which now expects `maxNumOfIndices` (uint32_t) instead.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Reduce Chisel memory usage: coarser voxels, bigger chunks, shorter range
+…
+34c6621
+```
+- Voxel resolution: 2cm → 3cm (3.4× fewer voxels for same volume)
+- Chunk size: 8³ → 16³ (8× fewer chunk objects, less per-chunk overhead)
+- Far plane: 5.0m → 3.5m (limits chunk sprawl in large spaces)
+
+Together these reduce chunk count by ~40× for a typical room,
+addressing the Scudo OOM ("exhausted 256M for size class 262160").
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add chunk pruning to prevent unbounded Chisel memory growth
+…
+135488a
+```
+When chunk count exceeds MAX_CHUNKS (2000), prune the farthest chunks
+from the camera position. This prevents the Scudo OOM where open-ended
+scanning would create unlimited 256KB chunk allocations.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add design doc for future chunk paging (serialize/reload TSDF chunks)
+…
+b3b1288
+```
+Documents the plan to persist evicted chunks to disk instead of
+discarding them, and reload when the camera returns nearby.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add diagnostic logging to TSDF pipeline to debug missing reconstruction
+…
+16e1f64
+```
+Logs at key failure points:
+- When getDepthImage() returns nullptr (depth unavailable)
+- Depth data quality: non-zero pixel count, min/max range in mm
+- Camera intrinsics and scaling factors (first 3 frames)
+- Chunk count before/after IntegrateDepthScan
+- Mesh upload events (vertex/index counts)
+- Camera position per frame
+
+This should reveal whether the problem is: no depth data arriving,
+depth data being all zeros, integration not creating chunks, or
+meshes not reaching the GPU.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix TSDF integration: pass pre-computed centroids to ProjectionIntegr…
+…
+ba7dd20
+```
+…ator
+
+Root cause: ProjectionIntegrator was constructed with an empty centroids
+list. Open Chisel's integrator iterates over these centroids to visit
+each voxel in a chunk during raycast integration. With an empty list,
+zero voxels were ever updated, so all newly created chunks were
+garbage-collected as unused — resulting in 0 chunks, 0 mesh.
+
+Fix: use chisel_->GetChunkManager().GetCentroids() which returns the
+4096 pre-computed voxel center positions for a 16^3 chunk.
+
+Also clamp raw depth values to [0.1m, 3.5m] before building the
+DepthImage. Without this, glitched ARCore depth readings (17-36m)
+cause IntegrateDepthScan to create a frustum spanning thousands of
+chunks, leading to OOM (malloc failure in Chunk::AllocateDistVoxels).
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix world mesh invisible: disable backface culling in OpaquePhong
+…
+677cc13
+```
+The offscreen render pass uses ARCore's OpenGL-convention projection
+matrix (Y-up) without a Y-flip, relying on the compose pass to flip
+UVs when sampling the result. However, this means Vulkan's rasterizer
+sees reversed winding (CCW becomes CW). With VK_CULL_MODE_BACK_BIT
+and VK_FRONT_FACE_COUNTER_CLOCKWISE, all triangles were culled.
+
+Set to VK_CULL_MODE_NONE to match the convention used by all other
+pipelines in the project (transparent_phong, compose, camera_bg).
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix OpaquePhong winding: set CW front-face instead of disabling culling
+…
+b4f9743
+```
+The offscreen pass uses ARCore's OpenGL projection (Y-up) without a
+Y-flip, so Vulkan's rasterizer sees reversed winding (CCW becomes CW).
+Rather than disabling culling (which hides the problem and leaves
+gl_FrontFacing wrong, breaking lighting via the normal-flip in the
+fragment shader), set VK_FRONT_FACE_CLOCKWISE so the rasterizer
+correctly identifies front/back faces. This fixes:
+  - Backface culling (removes actual back faces)
+  - gl_FrontFacing (correct for the fragment shader's N = -N flip)
+  - Phong lighting (normals point the right way)
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix camera pose convention: ARCore (OpenGL) → Open Chisel (CV)
+…
+3d91734
+```
+ARCore's view matrix uses OpenGL convention (forward = -Z, up = +Y).
+Open Chisel uses computer vision convention (forward = +Z, up = -Y).
+When Open Chisel unprojects depth pixels, it sets z_cam = +depth,
+expecting the camera's +Z axis to point forward. With the raw
+OpenGL camera pose, +Z points backward, placing all integrated
+geometry behind the camera (gl_Position.w < 0, fully clipped).
+
+Fix: right-multiply the camera-to-world transform by a Y/Z flip
+matrix so Open Chisel's +Z aligns with the camera's forward direction.
+
+Confirmed via RenderDoc: VS output showed all W values negative
+(-0.18, -0.17, etc.), proving vertices were behind the camera.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Increase TSDF resolution from 3cm to 0.5cm for finer detail
+…
+c848c46
+```
+- Voxel resolution: 0.03m → 0.005m (6x finer)
+- Truncation distance: 0.10m → 0.02m (4x voxel size)
+- Carving distance: 0.10m → 0.02m (match truncation)
+- Mesh vertex budget: 200K → 500K
+- Mesh index budget: 600K → 1.5M
+
+Chunk size stays 16³ (now 8cm per chunk edge). At 0.5cm, each depth
+pixel at 40cm distance covers ~3.7mm, so the voxel size is well
+matched to the input resolution.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Back off to 1cm voxels - 0.5cm was below depth sensor noise floor
+…
+d342c8e
+```
+Phone depth sensors have ~5-15mm noise. At 0.5cm voxels the noise
+dominated, producing an unintelligible flat sheet. 1cm (0.01m) is
+still 3x finer than the original 3cm while staying above noise.
+
+- Voxel resolution: 0.005m → 0.01m (1cm)
+- Truncation: 0.02m → 0.04m (4x voxel size)
+- Carving: 0.02m → 0.04m
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+claude
+and others
+added 14 commits
+March 22, 2026 18:14
+Fix 90° rotation in TSDF reconstruction by undoing display rotation f…
+…
+e1ba438
+```
+…rom view matrix
+
+ArCamera_getViewMatrix returns a display-oriented view matrix (axes aligned
+with the screen), but the depth image and intrinsics from
+ArCamera_getImageIntrinsics are unrotated (sensor coordinates). This mismatch
+caused voxels to be projected to wrong depth image pixels, resulting in a 90°
+rotation of the reconstructed mesh when the phone is in portrait mode.
+
+Apply Rz(displayRotation × 90°) to the view matrix before passing it to
+OpenChisel so it matches the sensor coordinate frame of the depth image.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Fix TSDF rotation: use physical camera pose instead of display-orient…
+…
+f2fabbf
+```
+…ed view matrix
+
+The previous fix tried to undo display rotation with Rz(r*90), but
+gDisplayRotation=0 in portrait mode made it a no-op. The real issue is that
+ArCamera_getViewMatrix is the inverse of getDisplayOrientedPose (axes aligned
+to screen), while the depth image and getImageIntrinsics are in sensor
+coordinates (unrotated).
+
+Instead of trying to reverse-engineer the rotation offset, use
+ArCamera_getPose directly to get the physical (sensor-oriented) camera pose,
+convert it to a view matrix manually, and pass that to OpenChisel. This
+guarantees the view matrix matches the depth image coordinate frame regardless
+of display rotation or sensor mounting orientation.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add documentation and code comments for TSDF reconstruction
+…
+87bdd75
+```
+- docs/TSDF.md: Explains signed distance fields, truncation, volumetric
+  fusion, marching cubes, and coordinate systems
+- docs/OpenChisel.md: Documents the OpenChisel library classes, integration
+  flow, and coordinate convention gotchas (DepthAt row/col order, GL↔CV)
+- docs/Architecture.md: Full app architecture — Android layer, Vulkan
+  renderer, ARCore integration, TSDF pipeline, data flow diagram
+- README.md: Project overview with links to all documentation
+- Added doc comments to ArDepthIntrinsics, getSensorViewMatrix,
+  getDepthImage, getDepthImageData, getCameraIntrinsics, and the
+  intrinsics scaling logic in native-lib.cpp
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Decouple TSDF integration from mesh extraction for faster convergence
+…
+7e2b291
+```
+Integration (IntegrateDepthScan) now runs every frame, while the expensive
+mesh extraction (UpdateMeshes + ConsolidateChunkMeshes) only runs every
+MESH_EVERY_N_INTEGRATIONS (5) frames. This means:
+
+- ~5x more TSDF updates per mesh update → faster surface convergence
+- Carving gets more iterations to actually clear removed geometry
+  (OpenChisel's Carve() only nudges SDF by weight 1.5 per call)
+- Worker thread spends more time integrating, less time meshing
+
+The visual mesh update rate drops from every-processed-frame to every-5th,
+but the TSDF volume itself converges much faster.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Add per-step timing and always-on logging to diagnose slow integration
+…
+2e39eea
+```
+Every ProcessFrame now logs:
+- integrate time (ms) for IntegrateDepthScan
+- mesh extraction time (ms) for UpdateMeshes
+- consolidation time (ms) for ConsolidateChunkMeshes
+- chunk count before/after integration
+
+All frames log (not just every 30th) so we can see if the worker
+is stuck in a slow IntegrateDepthScan call.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Clamp frustum far plane to max observed depth to fix 24s integration
+…
+d59f1b2
+```
+The camera frustum with far=3.5m spans ~12,500 candidate chunks at 1cm
+voxel resolution, causing IntegrateDepthScan to take 24+ seconds per
+frame. Most frames have depth <1m, so the vast majority of chunks are
+wasted work.
+
+Now compute the actual max depth from each frame and set the far plane
+to maxDepth + truncationDist. For a typical frame with max depth 0.5m,
+this reduces the frustum volume by ~340x (0.54³ vs 3.5³).
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Reduce kFarPlane from 3.5m to 1.5m to fix 24s integration time
+…
+06f3b21
+```
+OpenChisel builds its frustum from the actual depth range in the image
+(via GetStats), NOT from camera.SetFarPlane(). So the previous
+effectiveFar clamping was a no-op — the frustum was still sized to the
+max observed depth (up to 2.4m).
+
+The real fix: reduce kFarPlane so depths beyond 1.5m are zeroed BEFORE
+OpenChisel sees them. This directly limits the frustum:
+- At 2.4m max depth: ~2000 frustum chunks → 24s integration
+- At 1.5m max depth: ~600 frustum chunks → ~7s integration
+- At 0.5m max depth: ~150 frustum chunks → ~2s integration
+
+1.5m is reasonable for handheld AR scanning at 1cm voxel resolution.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Use 3cm voxels + 10cm truncation to fix catastrophic integration speed
+…
+f672f23
+```
+OpenChisel CPU integration at 1cm voxels created 221K voxels in the
+frustum (54 chunks × 4096 voxels), taking 23.5s per frame on mobile ARM.
+At 3cm voxels each chunk covers 48cm per side instead of 16cm, reducing
+the frustum chunk count by ~27× and bringing integration under 1s.
+
+Also skip frames with no valid depth data instead of creating a useless
+10cm frustum (the first ~31 frames before ARCore starts streaming depth).
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Switch build type from Debug to RelWithDebInfo for ~50-100x TSDF speedup
+…
+02f0c1e
+```
+The main library was compiled at -O0 (Debug), which means Eigen's
+header-only matrix math (used by OpenChisel's inner loop template
+ProjectionIntegrator::Integrate) ran completely unoptimized — no
+inlining, no NEON/SIMD. This caused ~100μs per voxel instead of <1μs.
+
+RelWithDebInfo gives -O2 -g: full optimization with debug symbols
+for crash stacks. OpenChisel's own target already had -O2, but since
+the integration template is in a header, it compiled at the caller's
+optimization level (-O0).
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Isolate chisel_manager in optimized static lib, keep main lib at Debug
+…
+c5f4cb3
+```
+Create chisel_bridge static library compiled at -O2 -g containing only
+chisel_manager.cpp. OpenChisel's ProjectionIntegrator::Integrate is a
+header template that compiles at the caller's optimization level. At
+-O0 Eigen matrix ops are 50-100x slower (no inlining, no NEON).
+
+This keeps the rest of the project fully debuggable (-O0 -g) while the
+TSDF hot path gets proper optimization.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Move OpenChisel wrapper into chisel_bridge/ subdirectory with own CMake
+…
+35d8d0c
+```
+Refactor: chisel_manager.cpp/.h and thread_event.h now live in
+chisel_bridge/ with a dedicated CMakeLists.txt compiled at -O3 with
+aggressive flags (-ffast-math, -funroll-loops, -ftree-vectorize,
+-ffp-contract=fast, -fomit-frame-pointer).
+
+Main library stays at Debug (-O0 -g) for full debuggability of
+rendering, skinning, navmesh, multiplayer, etc.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Set TSDF voxel resolution to 1cm for high-detail reconstruction
+…
+f27409f
+```
+- voxelResolution: 3cm → 1cm
+- truncationDist/carvingDist: 10cm → 3cm (3× voxel size)
+- MAX_CHUNKS: 2000 → 8000 (1cm chunks are 16cm³, need more)
+- WORLD_MESH_MAX_VERTICES: 500K → 2M, indices 1.5M → 6M
+
+With the chisel_bridge -O3 optimizations, 1cm should now be
+feasible at real-time rates.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+Update docs and add chunk paging system proposal
+…
+0cfe5ae
+```
+- Architecture.md: updated for chisel_bridge/ reorganization, current
+  parameter values (1cm voxels, 3cm truncation, 8000 MAX_CHUNKS, 2M verts),
+  and documented the OOM limitation on room-scale scans.
+- TSDF.md, OpenChisel.md: corrected truncation distance to 3cm.
+- ChunkPagingProposal.md: full design for three-tier paging system
+  (GPU slab allocator + frustum culling, CPU budget with disk paging,
+  background prefetch). Includes slab data structures, memory budgets,
+  eviction policy, implementation order, and MutableMesh impact.
+
+https://claude.ai/code/session_01WD1zg8GWCzWDqEoCTwHpQY
+```
+png and compiled shaders
+a51c275
+dongeronimo
+merged commit 77825be
+into
+dev_world_reconstruction
+Mar 23, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

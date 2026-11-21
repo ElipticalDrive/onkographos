@@ -1,0 +1,142 @@
+--- v005.md
++++ v006.md
+@@ -8,33 +8,18 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D tensor of scene parameters (density $\sigma$ or opacity $\alpha$) with shape $[X, Y, Z, C]$, where $C$ is the channel dimension (e.g., 1 for density, 4 for RGBA).
+-- Output: A scalar loss value $L_{TV}$ and gradients with respect to the input tensor.
+-
+-**Data Structures:**
+-- The scene is represented as a dense or sparse 3D grid. For dense grids, the tensor is contiguous in memory.
+-- Gradients are computed along the three principal axes (x, y, z).
++- Input: A 3D tensor of scene parameters (density $\sigma$ or opacity $\alpha$) with shape $[X, Y, Z, C]$, where $C$ is the channel dimension (e.g., 1 for density, 4 for RGBA) [S3, unofficial].
++- Output: A scalar loss value $L_{TV}$ and gradients with respect to the input tensor [S1, unofficial].
+ 
+ **Parameters:**
+ - $\lambda_{TV}$: The weight of the TV loss. Typical value: $10^{-5}$ [S2].
+-- $\delta$: The transition parameter for Huber loss (if used). Not given in the sources for the standard implementation, but defined in [S7] as controlling the transition between $\ell_2$ and $\ell_1$ segments.
++- $\delta$: The transition parameter for Huber loss, controlling the transition between $\ell_2$ and $\ell_1$ segments [S7].
+ - $V$: The set of voxels included in the loss computation. Can be all voxels or a stochastic subset [S2].
+ 
+ **Steps:**
+-1. **Gradient Computation:** Compute the spatial gradients along the x, y, and z axes. For a tensor $T$, the gradient along x is computed by subtracting adjacent slices:
+-   $$ \Delta_x T = T[:, :-1, :, :] - T[:, 1:, :, :] $$
+-   Analogous operations are performed for y and z axes [S3, unofficial].
++1. **Gradient Computation:** Compute the spatial gradients along the x, y, and z axes by subtracting adjacent slices: $\Delta_x T = T[:, :-1, :, :] - T[:, 1:, :, :]$, and analogously for y and z [S3, unofficial].
+ 2. **Norm Calculation:**
+-   - **Isotropic TV (L2):** Compute the Euclidean norm of the gradient vector at each voxel:
+-     $$ \|\nabla T\|_2 = \sqrt{\Delta_x^2 T + \Delta_y^2 T + \Delta_z^2 T} $$
+-     [S2][S3, unofficial].
+-   - **Anisotropic TV (L1):** Sum the absolute values of the individual gradient components:
+-     $$ \|\nabla T\|_1 = |\Delta_x T| + |\Delta_y T| + |\Delta_z T| $$
+-     [S1, unofficial][S2].
+-   - **Huber Loss:** Use a Huber penalty to reduce sensitivity to large gradients (floaters) while maintaining smoothness:
+-     $$ H(x) = \begin{cases} \frac{1}{2}x^2 & \text{if } |x| \le \delta \\ \delta(|x| - \frac{1}{2}\delta) & \text{if } |x| > \delta \end{cases} $$
+-     [S1, unofficial][S7].
+-3. **Aggregation:** Average the computed norms over the set of voxels $V$:
+-   $$ L_{TV} = \lambda_{TV} \frac{1}{|V|} \sum_{v \in V} \|\nabla T(v)\| $$
+-   [S2].
++   - **Isotropic TV (L2):** Compute the Euclidean norm of the gradient vector at each voxel: $\|\nabla T\|_2 = \sqrt{\Delta_x^2 T + \Delta_y^2 T + \Delta_z^2 T}$ [S2].
++   - **Huber Loss:** Use a Huber penalty to reduce sensitivity to large gradients (floaters) while maintaining smoothness: $H(x) = \begin{cases} \frac{1}{2}x^2 & \text{if } |x| \le \delta \\ \delta(|x| - \frac{1}{2}\delta) & \text{if } |x| > \delta \end{cases}$ [S1, unofficial][S7].
++3. **Aggregation:** Average the computed norms over the set of voxels $V$: $L_{TV} = \lambda_{TV} \frac{1}{|V|} \sum_{v \in V} \|\nabla T(v)\|$ [S2].
+ 4. **Gradient Injection:** To avoid the memory overhead of storing intermediate gradient tensors for backpropagation, the gradients are often computed in a custom CUDA kernel and added directly to the parameter tensors' gradient buffers after the standard backward pass [S1, unofficial].
+ 
+@@ -46,18 +31,19 @@
+     
+     Args:
+-        tensor: torch.Tensor of shape (X, Y, Z, C)
++        tensor: Array of shape (X, Y, Z, C)
+         lambda_tv: float, weight of the TV loss
+         use_huber: bool, whether to use Huber loss instead of L2/L1
+         delta: float, Huber threshold
+-        dense_mode: bool, if True, compute for all voxels; if False, skip (used for efficiency)
++        dense_mode: bool, if True, compute for all voxels; if False, compute only for voxels with non-zero gradients
+         
+     Returns:
+-        loss: torch.Tensor (scalar)
++        loss: scalar
+     """
+     if not dense_mode:
+-        return torch.tensor(0.0)
++        # In practice, compute only for voxels where the gradient magnitude exceeds a threshold
++        # Sources do not provide the exact filtering implementation [G].
++        pass
+ 
+-    # Compute gradients along x, y, z axes
+-    # Gradient x: difference between slice i and i+1
++    # Compute gradients along x, y, z axes using forward differences
+     grad_x = tensor[:, :-1, :, :] - tensor[:, 1:, :, :]
+     grad_y = tensor[:, :, :-1, :] - tensor[:, :, 1:, :]
+@@ -71,44 +57,29 @@
+     if use_huber:
+         # Huber loss on each gradient component
+-        # H(x) = 0.5 * x^2 if |x| <= delta, else delta * (|x| - 0.5 * delta)
+-        abs_grad_x = torch.abs(grad_x)
+-        huber_x = torch.where(abs_grad_x <= delta, 
+-                              0.5 * grad_x_sq, 
+-                              delta * (abs_grad_x - 0.5 * delta))
+-        # Similarly for y and z
+-        abs_grad_y = torch.abs(grad_y)
+-        huber_y = torch.where(abs_grad_y <= delta, 
+-                              0.5 * grad_y_sq, 
+-                              delta * (abs_grad_y - 0.5 * delta))
+-        abs_grad_z = torch.abs(grad_z)
+-        huber_z = torch.where(abs_grad_z <= delta, 
+-                              0.5 * grad_z_sq, 
+-                              delta * (abs_grad_z - 0.5 * delta))
+-        
+-        # Sum Huber losses
++        abs_grad_x = abs(grad_x)
++        huber_x = where(abs_grad_x <= delta, 0.5 * grad_x_sq, delta * (abs_grad_x - 0.5 * delta))
++        abs_grad_y = abs(grad_y)
++        huber_y = where(abs_grad_y <= delta, 0.5 * grad_y_sq, delta * (abs_grad_y - 0.5 * delta))
++        abs_grad_z = abs(grad_z)
++        huber_z = where(abs_grad_z <= delta, 0.5 * grad_z_sq, delta * (abs_grad_z - 0.5 * delta))
+         tv_sum = huber_x + huber_y + huber_z
+     else:
+         # Isotropic L2 norm (Euclidean)
+-        # sqrt(sum of squares)
+-        tv_sum = torch.sqrt(grad_x_sq + grad_y_sq + grad_z_sq + 1e-8) # epsilon for stability
++        tv_sum = sqrt(grad_x_sq + grad_y_sq + grad_z_sq + 1e-8)
+ 
+-    # Average over all voxels
+-    # Note: The number of voxels in the gradient tensor is (X-1)*Y*Z + X*(Y-1)*Z + X*Y*(Z-1)
+-    # However, standard implementations often average over the original voxel count or the gradient count.
+-    # [S2] uses |V| where V is the set of all voxels. We approximate |V| as X*Y*Z.
++    # Average over all voxels in the set V
+     num_voxels = tensor.shape[0] * tensor.shape[1] * tensor.shape[2]
+     loss = lambda_tv * (tv_sum.sum() / num_voxels)
+-    
+     return loss
+ 
+ def add_tv_gradients(model, tv_weight, dense_mode):
+     """
+-    Custom CUDA kernel to add TV gradients directly to model parameters.
+-    This avoids storing intermediate gradient tensors in the autograd graph.
++    Custom kernel to add TV gradients directly to model parameters.
++    Called after model.backward() and before optimizer.step().
++    Sources do not provide the CUDA kernel implementation [G].
+     """
+-    # This function is called after model.backward() and before optimizer.step()
+-    # It computes the gradients of the TV loss w.r.t. the density/opacity grid
++    # Computes gradients of the TV loss w.r.t. the density/opacity grid
+     # and adds them to the .grad attribute of the grid tensor.
+-    pass # Implementation details are in a custom CUDA kernel [S1, unofficial]
++    pass
+ ```
+ 
+@@ -116,5 +87,4 @@
+ - **Computational Cost:** Computing TV loss densely for all grid points is time-consuming [S1, unofficial]. It is recommended to compute it densely only for the first 10,000 iterations and then switch to a sparse mode (computing only for voxels with non-zero gradients) [S1, unofficial].
+ - **Precision:** When computing the L2 norm, add a small epsilon to avoid division by zero or NaN gradients when gradients are zero [S3, unofficial].
+-- **Boundary Conditions:** The gradient computation reduces the tensor size by 1 in each dimension. Ensure that the loss aggregation accounts for the correct number of voxels [S2].
+ 
+ ## Subtopics
+@@ -175,6 +145,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Computing TV loss densely is $O(N)$ where $N$ is the number of voxels, but the constant factor is high due to multiple memory accesses and kernel launches if not fused [S1, unofficial]. Using a fused CUDA kernel reduces overhead [S1, unofficial]. Stochastic evaluation on random segments reduces this to $O(k)$ where $k \ll N$ [S2].
+-- **Memory Complexity:** Standard AD requires storing intermediate gradients, leading to high memory usage [44-radiance-field-optimization.md]. The efficient implementation adds gradients directly to the parameter buffers, keeping memory usage low [S1, unofficial].
++- **Time Complexity:** Computing TV loss densely is $O(N)$ where $N$ is the number of voxels, but the constant factor is high due to multiple memory accesses and kernel launches if not fused [S1, unofficial]. Using a fused CUDA kernel reduces overhead [S1, unofficial]. Stochastic evaluation on random contiguous segments reduces overhead [S2].
++- **Memory Complexity:** Standard AD requires storing intermediate gradients, leading to high memory usage [G]. The efficient implementation adds gradients directly to the parameter buffers, keeping memory usage low [S1, unofficial].
+ - **Performance:** TV regularization is effective at removing floaters and holes in explicit radiance fields [S1, unofficial]. It is particularly useful in the early stages of training (e.g., first 10,000 iterations) to stabilize the optimization [S1, unofficial].
+ - **Strengths:** Prevents overfitting to noise, enforces spatial smoothness, and reduces artifacts in unbounded scenes [S1, unofficial][S2].

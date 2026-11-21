@@ -1,0 +1,105 @@
+--- v002.md
++++ v003.md
+@@ -11,5 +11,5 @@
+ *   **Input Data:** A 3D texture/sampler (`g_srvFlagVolume`) containing activity flags for each cell; a value of `1` indicates an active voxel [S1, unofficial].
+ *   **Constants:** `g_cf3VoxelReso` (total voxel resolution), `g_cf3HalfBrickSize` (half size of a voxel brick), `VOXEL_SIZE` (physical size of a single voxel), `VOXEL_BRICK_RATIO` (ratio dividing the volume into bricks), `VOXEL_NUM_Y` (total voxels in Y), `g_cuFlagVolSliceStep` and `g_cuFlagVolStripStep` (indexing steps), and `cb_mViewProj` (view-projection matrix) [S1, unofficial].
+-*   **Output:** A stream of vertices forming the 6 faces (24 vertices) of a cube for each active voxel, transformed into projection space. The output structure `PS_INPUT` contains `projPos` (SV_POSITION) and `Pos` (TEXCOORD0) [S1, unofficial].
++*   **Output:** A stream of vertices forming the 8 corners of a cube for each active voxel, transformed into projection space [S1, unofficial]. The output structure `PS_INPUT` contains `projPos` (`SV_POSITION`) and `Pos` (`TEXCOORD0`) [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -67,18 +67,7 @@
+ **Pseudocode:**
+ ```python
+-# Constants (provided by shader constant buffer or global state)
+-g_cuFlagVolSliceStep = ...
+-g_cuFlagVolStripStep = ...
+-VOXEL_NUM_Y = ...
+-VOXEL_BRICK_RATIO = ...
+-g_cf3VoxelReso = (res_x, res_y, res_z)
+-VOXEL_SIZE = ...
+-g_cf3HalfBrickSize = (hx, hy, hz)
+-cb_mViewProj = [[...]] # 4x4 matrix
+-
+-# Texture (provided by shader resource view)
+-g_srvFlagVolume = [...] # 3D array
+-
+-def GenerateActiveCellGeometry(primID):
++def GenerateActiveCellGeometry(primID, g_cuFlagVolSliceStep, g_cuFlagVolStripStep, 
++                               VOXEL_NUM_Y, VOXEL_BRICK_RATIO, g_cf3VoxelReso, 
++                               VOXEL_SIZE, g_cf3HalfBrickSize, cb_mViewProj, g_srvFlagVolume):
+     # Step 1: Calculate 3D index from primitive ID
+     idx_z = primID // g_cuFlagVolSliceStep
+@@ -92,22 +81,17 @@
+ 
+     # Step 3: Invert Y-axis index
+-    idx_y = (VOXEL_NUM_Y / VOXEL_BRICK_RATIO) - 1 - idx_y
++    idx_y = (VOXEL_NUM_Y // VOXEL_BRICK_RATIO) - 1 - idx_y
+     u3Idx = (idx_x, idx_y, idx_z)
+ 
+     # Step 4: Calculate world space offset to cell center
+-    # Formula: (u3Idx - g_cf3VoxelReso * 0.5 / VOXEL_BRICK_RATIO + 0.5) * VOXEL_SIZE * VOXEL_BRICK_RATIO
+-    reso_scaled = (g_cf3VoxelReso[0] * 0.5 / VOXEL_BRICK_RATIO,
+-                   g_cf3VoxelReso[1] * 0.5 / VOXEL_BRICK_RATIO,
+-                   g_cf3VoxelReso[2] * 0.5 / VOXEL_BRICK_RATIO)
+-    center_offset_vec = ((u3Idx[0] - reso_scaled[0] + 0.5) * VOXEL_SIZE * VOXEL_BRICK_RATIO,
+-                         (u3Idx[1] - reso_scaled[1] + 0.5) * VOXEL_SIZE * VOXEL_BRICK_RATIO,
+-                         (u3Idx[2] - reso_scaled[2] + 0.5) * VOXEL_SIZE * VOXEL_BRICK_RATIO)
+-    f4CellCenterOffset = (center_offset_vec[0], center_offset_vec[1], center_offset_vec[2], 0.0)
++    reso_scaled = tuple(r * 0.5 / VOXEL_BRICK_RATIO for r in g_cf3VoxelReso)
++    center_offset_vec = tuple((u3Idx[i] - reso_scaled[i] + 0.5) * VOXEL_SIZE * VOXEL_BRICK_RATIO for i in range(3))
++    f4CellCenterOffset = (*center_offset_vec, 0.0)
+ 
+     # Step 5: Define half-size of the cell (solid rendering)
+     half_brick = g_cf3HalfBrickSize
+-    f4HalfCellSize = (half_brick[0] * 1.2, half_brick[1] * 1.2, half_brick[2] * 1.2, 1.0)
++    f4HalfCellSize = tuple(h * 1.2 for h in half_brick) + (1.0,)
+ 
+-    # Step 6: Generate vertices for the 6 faces (24 vertices)
++    # Step 6: Generate vertices for the 8 corners
+     unit_corners = [
+         (-1, -1, -1), (-1, -1, 1), (-1, 1, -1), (-1, 1, 1),
+@@ -118,20 +102,12 @@
+     for corner in unit_corners:
+         # Calculate world position
+-        pos_x = corner[0] * f4HalfCellSize[0] + f4CellCenterOffset[0]
+-        pos_y = corner[1] * f4HalfCellSize[1] + f4CellCenterOffset[1]
+-        pos_z = corner[2] * f4HalfCellSize[2] + f4CellCenterOffset[2]
+-        pos_w = f4CellCenterOffset[3]
+-        output_pos = (pos_x, pos_y, pos_z, pos_w)
++        pos = tuple(corner[i] * f4HalfCellSize[i] + f4CellCenterOffset[i] for i in range(3)) + (f4CellCenterOffset[3],)
+ 
+-        # Transform to projection space (matrix multiplication)
+-        proj_x = sum(output_pos[i] * cb_mViewProj[i][0] for i in range(4))
+-        proj_y = sum(output_pos[i] * cb_mViewProj[i][1] for i in range(4))
+-        proj_z = sum(output_pos[i] * cb_mViewProj[i][2] for i in range(4))
+-        proj_w = sum(output_pos[i] * cb_mViewProj[i][3] for i in range(4))
+-        proj_pos = (proj_x, proj_y, proj_z, proj_w)
++        # Transform to projection space (row vector * matrix)
++        proj = tuple(sum(pos[i] * cb_mViewProj[i][j] for i in range(4)) for j in range(4))
+ 
+         vertex = {
+-            'projPos': proj_pos,
+-            'Pos': output_pos
++            'projPos': proj,
++            'Pos': pos
+         }
+         output_vertices.append(vertex)
+@@ -141,14 +117,14 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** The Y-axis inversion formula assumes a specific coordinate system orientation [S1, unofficial].
++*   **Boundary Conditions:** The Y-axis inversion formula assumes a specific coordinate system orientation where Y is inverted per brick [S1, unofficial].
+ *   **Precision:** Floating-point arithmetic in the offset calculation may introduce small errors, potentially causing gaps or overlaps between adjacent voxel cubes [G].
+ *   **Inactive Voxels:** Primitives corresponding to inactive voxels are discarded, which may result in non-contiguous primitive streams if not handled by the rasterizer or subsequent stages [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of primitives (voxels) in the input stream, as each primitive is processed independently in the geometry shader [S1, unofficial].
+-*   **Memory Complexity:** $O(1)$ per primitive, plus the storage for the flag volume texture [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of primitives (voxels) in the input stream, as each primitive is processed independently in the geometry shader [G].
++*   **Memory Complexity:** $O(1)$ per primitive, plus the storage for the flag volume texture [G].
+ *   **Performance:** Performance depends on the number of active voxels and the complexity of the geometry shader [S1, unofficial]. The use of a flag volume allows for efficient culling of inactive voxels, reducing the number of cubes generated [S1, unofficial].
+ *   **Strengths:** Simple implementation and efficient culling of empty space [S1, unofficial].
+-*   **Limitations:** Generates a large number of vertices (24 per active voxel), which can be expensive for high-resolution volumes [G].
++*   **Limitations:** Generates a large number of vertices (8 per active voxel), which can be expensive for high-resolution volumes [G].
+ *   **When to Use:** Suitable for interactive applications where the volume resolution is moderate and the number of active voxels is sparse [G].
+ *   **When Not to Use:** Not suitable for high-resolution volumes with dense active voxels due to vertex generation overhead [G].

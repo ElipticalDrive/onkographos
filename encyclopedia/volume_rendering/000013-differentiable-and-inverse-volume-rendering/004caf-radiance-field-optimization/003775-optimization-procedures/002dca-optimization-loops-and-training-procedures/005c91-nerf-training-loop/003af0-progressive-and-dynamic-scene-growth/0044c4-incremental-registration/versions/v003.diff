@@ -1,0 +1,256 @@
+--- v002.md
++++ v003.md
+@@ -4,159 +4,122 @@
+ 
+ ## Overview
+-Incremental Registration is a training strategy for joint pose and radiance field optimization that registers camera frames sequentially following their temporal order, leveraging the intuition that adjacent camera poses in video sequences are spatially close [S2]. It solves the non-convex optimization landscape and local minima inherent in simultaneous pose and NeRF optimization by providing a robust initialization for new frames based on previously registered ones, thereby preventing "overlapping registration" errors where incorrect poses mislead the scene regressor [S2]. Unlike global registration methods that optimize all poses simultaneously, this method builds the trajectory incrementally, freezing previously registered parameters to stabilize the optimization [S1, unofficial][S2].
++Incremental Registration is a training strategy for NeRF and radiance field optimization that registers camera poses sequentially following the temporal order of video frames [S2]. It solves the problem of non-convex pose optimization and local minima by leveraging the intuition that adjacent camera motions in videos are smooth, initializing new poses close to previous ones [S2]. Unlike standard joint optimization, it builds the dataset $\mathcal{D}$ iteratively, freezing previously registered parameters to prevent catastrophic forgetting and ensure stability [S1, unofficial][S2].
+ 
+ ## How it works
+-**Inputs:** A sequence of unposed images $\{I_1, I_2, \dots, I_N\}$; a scene regressor $f_{SCR}$ capable of predicting 3D coordinates and features from image pairs; hyperparameters for iteration intervals and freeze durations.
+-**Outputs:** Optimized NeRF parameters $\Theta$, camera poses $\{P_i\}_{i=1}^N$, and the final radiance field.
++**Inputs and Outputs:**
++*   **Input:** A sequence of unposed images $\{I_1, \dots, I_N\}$ and a scene regressor (e.g., NeRF or Gaussian Splatting model) $\Theta$.
++*   **Output:** Optimized radiance field parameters $\Theta$ and camera poses $\{P_1, \dots, P_N\}$.
+ 
+ **Data Structures:**
+-*   **Training Buffer:** A set of registered images and their associated poses.
+-*   **Scene Regressor ($f_{SCR}$):** A neural network (e.g., Transformer-based) that takes two images $(I_{ref}, I_{target})$ and outputs 3D points $\{X\}$ and features $\{G\}$ in a global coordinate frame.
+-*   **Pose Representation:** Camera poses $P_i$ (extrinsics) and intrinsics.
+-
+-**Numbered Steps:**
+-
+-1.  **Seed Initialization:**
+-    *   Select the first two frames $\{I_1, I_2\}$.
+-    *   Jointly optimize NeRF parameters $\Theta$ and poses $\{P_1, P_2\}$ for a specified number of iterations [S2].
+-    *   *Note:* In some implementations (e.g., ZeroGS), a seed image is used to initialize the regressor with fixed identity pose before incremental steps [S1, unofficial].
+-
+-2.  **Incremental Frame Addition:**
+-    *   Iterate through the remaining frames $I_i$ in temporal order.
+-    *   After every $k$ iterations of training the current buffer, add the next frame $I_i$ to the buffer [S2].
+-    *   Initialize the new pose $P_i$ using the previous pose $P_{i-1}$ (i.e., $P_i \approx P_{i-1}$) [S2].
+-
+-3.  **Coarse Camera Pose Estimation (for new batch):**
+-    *   Select a registered reference image $I_{ref}$ that connects to the most unregistered images [S1, unofficial].
+-    *   Pass $I_{ref}$ and the target image $I_{target}$ (the new frame) to the scene regressor to obtain 3D points $\{X_k\}$ and features [S1, unofficial].
+-    *   Establish 2D-3D correspondences $\{(u_k, X_k)\}$ where $u_k$ are pixel coordinates [S1, unofficial].
+-    *   Estimate the initial pose using RANSAC and Perspective-n-Point (PnP) [S1, unofficial].
+-    *   The optimization minimizes the reprojection error:
+-        $$ \min_{X_i, C_k} \sum_{i,k} \rho(\|d_{i,k} \cdot \nu_{i,k} - (X_i - C_k)\|_2) $$
+-        where $C_k$ is the camera center, $d_{i,k}$ is a scaling factor, and $\nu_{i,k}$ is the ray direction [S1, unofficial].
+-    *   Filter outliers using an inlier threshold $s_{inlier}$ (e.g., 5,000 inliers) and reprojection error threshold (e.g., 6 pixels) [S1, unofficial].
+-
+-4.  **Training and Freezing:**
+-    *   Add the newly registered image and its initialized pose to the training buffer.
+-    *   Train the scene regressor and optimize the new pose.
+-    *   **Freeze:** Freeze the learning rates for all previously registered poses $\{P_j\}_{j < i}$ and the NeRF parameters $\Theta$ for a duration of $T_{freeze}$ iterations [S2]. This prevents catastrophic forgetting and stabilizes the growing scene representation [S2].
+-    *   Only optimize the poses registered in the current epoch/batch to improve efficiency [S1, unofficial].
+-
+-5.  **Convergence and Expansion:**
+-    *   Repeat steps 2-4 until all $N$ images are registered.
+-    *   Upon convergence of the incremental phase, expand the buffer or proceed to final refinement [S1, unofficial].
+-
+-6.  **Final Refinement (Optional):**
+-    *   Optimize all camera poses jointly using the photometric loss (Eq. 8 in [S1, unofficial]) to correct accumulated errors [S1, unofficial].
+-    *   Fix the seed image pose and optimize the rest [S1, unofficial].
+-    *   Apply a learning rate decay schedule if not already applied [S2].
++*   **Training Buffer:** A set of registered images and their corresponding poses. Initially contains $\{I_1, I_2\}$ with optimized poses $\{P_1, P_2\}$ [S2].
++*   **Batch Buffer ($I_{buf}$):** A subset of unregistered images selected for the current registration epoch [S1, unofficial].
+ 
+ **Parameters:**
+-*   $k$: Iteration interval for adding new frames.
+-    *   1,000 iterations for CO3D/HO3D datasets [S2].
+-    *   500 iterations for LLFF dataset [S2].
+-*   $T_{freeze}$: Duration to freeze learning rates after registration.
+-    *   100,000 iterations for HO3D and CO3D [S2].
+-    *   30,000 iterations for LLFF [S2].
+-*   $s_{inlier}$: Inlier threshold for RANSAC/PnP. Value: 5,000 [S1, unofficial].
++*   $k$: Iteration interval for adding new frames. Typical values: 1,000 iterations for CO3D/HO3D datasets; 500 iterations for LLFF [S2].
++*   Freeze Duration: Iterations to freeze learning rates after registration. Typical values: 100,000 iterations for HO3D/CO3D; 30,000 for LLFF [S2].
++*   $s_{inlier}$: Inlier threshold for RANSAC. Typical value: 5,000 [S1, unofficial].
+ *   Reprojection Error Threshold: 6 pixels [S1, unofficial].
+-*   Finetuning Iterations:
+-    *   1,000 iterations on LLFF during incremental training [S1, unofficial].
+-    *   1,500 iterations on Mip-NeRF360 during incremental training [S1, unofficial].
+-    *   500 iterations for seed initialization [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Local Minima:** Optimizing poses and NeRF jointly is highly non-convex. Incorrect pose initialization can lead to "overlapping registration," where the model re-registers to an already viewed viewpoint [S2]. Incremental initialization mitigates this by using smooth motion priors [S2].
+-*   **Pose Drift:** Errors accumulate during incremental registration. Final refinement is necessary to correct global consistency [S1, unofficial].
+-*   **Occlusion:** Avoid sampling rays from occluded regions during training [S2].
+-*   **Breaking Point:** Without incremental registration, a rotation difference of ~20 degrees in the trajectory can cause optimization failure [S2].
++**Algorithm Steps:**
++
++1.  **Initialization:** Jointly optimize NeRF parameters $\Theta$ and poses $\{P_1, P_2\}$ using the first two frames $\{I_1, I_2\}$ [S2].
++2.  **Iterative Registration Loop:** Repeat until all $N$ images are registered:
++    a.  **Batch Selection:** Select a batch of unregistered images $I_{buf} = \{I_k\}$ [S1, unofficial].
++    b.  **Reference Selection:** Select a reference image $I_i$ from the registered set that connects to the most unregistered images [S1, unofficial].
++    c.  **Pose Initialization:** For each target image $I_k \in I_{buf}$, initialize its pose $P_k$ using the previous pose $P_{k-1}$ (temporal smoothness) [S2].
++    d.  **Coarse Pose Estimation:**
++        i.  Pass $I_i$ and $I_k$ to the scene regressor to obtain 3D points $\{X_k\}$ in the global coordinate frame [S1, unofficial].
++        ii. Establish 2D-3D correspondences $\{(u_k, X_k)\}$ where $u_k$ are pixel coordinates [S1, unofficial].
++        iii. Use RANSAC and Perspective-n-Point (PnP) to estimate $P_k$. The loss function for optimization is:
++        $$ \rho(\|d_{i,k} \cdot \nu_{i,k} - (X_i - C_k)\|_2) $$
++        where $C_k$ is the camera center, $d_{i,k}$ is a scaling factor, and $\nu_{i,k}$ is the ray direction [S1, unofficial].
++        iv. Accept $I_k$ into the training buffer only if the number of inliers exceeds $s_{inlier}$ [S1, unofficial].
++    e.  **Training:** Add registered images to the training buffer and train the scene regressor $\Theta$ [S1, unofficial].
++    f.  **Freezing:** Freeze learning rates for poses $\{P_i\}$ and $\Theta$ for the specified freeze duration [S2].
++    g.  **Interval Check:** If the current iteration count is a multiple of $k$, add the next frame $I_{i+1}$ and initialize $P_{i+1} \approx P_i$ [S2].
++3.  **Finalization:**
++    a.  Optimize all camera poses using the reprojection loss (Eq. 8 in [S1, unofficial]) to correct accumulated errors [S1, unofficial].
++    b.  Fix the seed image pose and optimize all others [S1, unofficial].
++    c.  Apply a learning rate decay schedule if necessary [S2].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def incremental_registration(images, scene_regressor, k_interval, freeze_duration):
+-    """
+-    images: List of image tensors [I1, I2, ..., IN]
+-    scene_regressor: Function f_SCR(I_ref, I_target) -> (X_3d, G_feat)
+-    k_interval: int, iterations between adding new frames
+-    freeze_duration: int, iterations to freeze old poses/NeRF
+-    """
+-    N = len(images)
+-    registered_poses = []
+-    registered_images = []
+-    
+-    # Step 1: Seed Initialization
+-    # Jointly optimize NeRF and first two poses
+-    theta, poses_12 = optimize_joint(images[0], images[1], scene_regressor)
+-    registered_poses.append(poses_12)
+-    registered_images.append([images[0], images[1]])
++def incremental_registration(images, scene_regressor, k, freeze_duration, s_inlier):
++    # 1. Initialization
++    registered_images = [images[0], images[1]]
++    poses = optimize_poses_jointly(scene_regressor, images[0], images[1])
++    # P1 and P2 are optimized
+     
+     current_iter = 0
++    unregistered = images[2:]
+     
+-    # Step 2: Incremental Loop
+-    for i in range(2, N):
+-        target_image = images[i]
++    while unregistered:
++        # 2. Batch Selection
++        # Select batch from unregistered. 
++        # In practice, select reference from registered that connects to most unregistered [S1, unofficial]
++        batch = select_batch(unregistered, registered_images)
+         
+-        # Select reference image from registered set
+-        # Heuristic: select reference connecting to most unregistered images
+-        ref_image = select_best_reference(registered_images, N, i)
++        for target_img in batch:
++            # 3. Reference Selection
++            ref_img = select_reference(registered_images, unregistered)
++            
++            # 4. Pose Initialization
++            # Initialize P_target using P_prev (temporal smoothness) [S2]
++            prev_pose = poses[-1] 
++            P_target = initialize_pose(prev_pose)
++            
++            # 5. Coarse Pose Estimation
++            # Get 3D points from scene regressor for ref and target
++            X_ref, X_target = scene_regressor.get_3d_points(ref_img, target_img)
++            
++            # Establish 2D-3D correspondences
++            correspondences = get_2d_3d_correspondences(X_ref, X_target)
++            
++            # RANSAC + PnP
++            inliers, P_estimated = ransac_pnp(correspondences, threshold=6.0)
++            
++            # Accept if inlier count > threshold
++            if len(inliers) > s_inlier:
++                registered_images.append(target_img)
++                poses.append(P_estimated)
++                unregistered.remove(target_img)
++            else:
++                # Skip or handle failure [S1, unofficial]
++                pass
+         
+-        # Step 3: Coarse Pose Estimation
+-        # Get 3D points from regressor
+-        X_3d, G_feat = scene_regressor(ref_image, target_image)
++        # 6. Training
++        train_scene_regressor(scene_regressor, registered_images, poses)
+         
+-        # Establish 2D-3D correspondences
+-        # u_k are pixel coordinates of target_image
+-        correspondences = get_2d_3d_pairs(target_image, X_3d)
++        # 7. Freezing
++        if current_iter % freeze_duration == 0:
++            freeze_learning_rates(poses, scene_regressor)
++            
++        current_iter += 1
+         
+-        # RANSAC + PnP to estimate initial pose P_i
+-        # Initialize P_i based on previous pose P_{i-1}
+-        P_prev = registered_poses[-1]
+-        P_i_init = initialize_pose_from_prev(P_prev, correspondences)
+-        
+-        # Step 4: Train and Freeze
+-        # Add new frame to buffer
+-        registered_poses.append(P_i_init)
+-        registered_images.append(target_image)
+-        
+-        # Freeze old parameters
+-        freeze_parameters(registered_poses[:-1], theta, freeze_duration)
+-        
+-        # Optimize new pose and update regressor
+-        theta, P_i = optimize_incremental(
+-            registered_images, 
+-            registered_poses, 
+-            scene_regressor, 
+-            iterations=k_interval
+-        )
+-        
+-        current_iter += k_interval
+-        
+-        # Check for convergence or buffer expansion if necessary
+-        if not check_convergence(registered_images, registered_poses):
+-            break
+-            
+-    # Step 5: Final Refinement
+-    # Optimize all poses jointly to correct drift
+-    theta, all_poses = refine_all_poses(
+-        registered_images, 
+-        registered_poses, 
+-        scene_regressor, 
+-        fix_seed=True
+-    )
+-    
+-    return theta, all_poses
++        # 8. Interval Check for adding next frame (if not batched)
++        if current_iter % k == 0 and unregistered:
++            next_img = unregistered[0]
++            # Initialize pose from previous
++            P_next = initialize_pose(poses[-1])
++            # Add to registration queue/buffer
++            # Note: In ICON, frames are added every k iterations [S2]
++            pass
++
++    # 9. Finalization
++    optimize_all_poses_final(registered_images, poses, scene_regressor)
++    return poses, scene_regressor
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of frames $N$, as each frame is processed once. However, the cost per frame depends on the regression and PnP steps. Freezing old parameters reduces the optimization burden per step [S1, unofficial][S2].
+-*   **Memory Complexity:** Scales linearly with $N$ as the training buffer grows. The scene regressor memory footprint is constant [S1, unofficial][S2].
+-*   **Strengths:** Robust initialization for poses in video sequences; avoids local minima associated with global optimization; efficient as it freezes stable parameters [S2].
+-*   **Limitations:** Requires temporal order or a known sequence; susceptible to drift if early frames are misregistered; not suitable for unordered image collections without a pre-defined graph [S2].
+-*   **When to use:** Video-based reconstruction, datasets with smooth camera motion (e.g., CO3D, HO3D, LLFF) [S2].
+-*   **When not to use:** Unordered image sets, scenes with large baseline jumps (>20 degrees rotation) between adjacent frames without intermediate steps [S2].
++*   **Time Complexity:** Linear with respect to the number of frames $N$, but each registration step involves expensive 3D point estimation and RANSAC. Total training time is significantly higher than standard NeRF due to iterative pose optimization [S2].
++*   **Memory Complexity:** Scales with the number of registered images and the scene regressor size. No significant additional memory overhead compared to standard NeRF, except for storing intermediate 3D points during registration [S1, unofficial].
++*   **Strengths:** Robust to large initial pose errors by leveraging temporal smoothness; avoids local minima associated with joint optimization of all poses and radiance fields simultaneously [S2].
++*   **Limitations:** Requires temporal order of images; performance degrades if camera motion is not smooth or if there are large gaps between frames [S2]. Accumulated errors in poses may require final refinement [S1, unofficial].
++*   **When to use:** Video sequences or ordered image collections where camera motion is smooth [S2].
++*   **When not to use:** Unordered image collections or scenes with rapid, non-smooth camera motion [S2].
+ 
+ ## Background
+-Incremental Registration was introduced in the context of joint pose and radiance field optimization to address the non-convexity of simultaneous optimization [S2]. It builds on the observation that camera motions in videos are smooth, allowing adjacent poses to be initialized from one another [S2]. The method is closely related to BARF (Blending Arbitrary Reference Frames) but differs in its incremental, frame-by-frame addition strategy rather than frequency-based blending [S2]. It is used in datasets like CO3D, HO3D, LLFF, and Mip-NeRF360 [S1, unofficial][S2].
++Incremental Registration was proposed in the ICON (Incremental CONfidence) paper by Wang et al. (2024) [S2]. It addresses the breaking point of 20-degree rotation difference observed in prior work (Wang et al., 2021b) by relying on the intuition that camera motions in videos are smooth [S2]. The method builds on BARF (Blending Arbitrary Reference Frames) settings, using coarse-to-fine positional encoding strategies [S2]. It is used in datasets like CO3D, HO3D, LLFF, and Mip-NeRF360 [S1, unofficial][S2].
+ 
+ ## Sources

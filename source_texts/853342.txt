@@ -1,0 +1,106 @@
+Problem Generated native-16 HLSL uses ordinary float16_t(value) casts for Metal half narrowing. A native cast is not sufficient evidence that the source rounding mode is preserved. The required Windows attention-derivative test now expos...
+
+Preserve source binary16 rounding in native HLSL conversions · Issue #1993 · CrossGL/crosstl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Preserve source binary16 rounding in native HLSL conversions #1993
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Preserve source binary16 rounding in native HLSL conversions#1993
+Copy link
+Labels
+area:runtimeNative loaders, runtimes and execution checksNative loaders, runtimes and execution checksbackend:hlslDirectX HLSLDirectX HLSLbugWrong output, a crash or a regressionWrong output, a crash or a regression
+Description
+NripeshN
+opened on Oct 1, 2026
+Issue body actions
+Problem
+Generated native-16 HLSL uses ordinary float16_t(value) casts for Metal half narrowing. A native cast is not sufficient evidence that the source rounding mode is preserved. The required Windows attention-derivative test now exposes incorrect fractional half outputs; the same original and translated Metal cases pass without changing the reference or tolerance.
+Reproduction and Evidence
+Translator commit: 0f71a622103a272ce5c1eea16afb832a9e9b844d.
+MLX commit: 9c3d35571ac450a8ecf5c17b4d0e3fac52c08bc8.
+Source: mlx/backend/metal/kernels/scaled_dot_product_attention_vjp.metal, entry sdpa_vjp_ds_float16_t.
+Required Windows execution: https://github.com/CrossGL/crosstl/actions/runs/36798802274/job/110168267993
+Retained artifact: mlx-portable-host-directx-1, attention-ds/pytest/.
+Generated HLSL SHA-256: 038e6408ad937175c53d290080cdba460bd98d3326f26c2525813aa3baa5113d.
+Windows DXIL SHA-256: a5969803fc78af6dfe3771e0d4c1d9ab8544a89cc762c221c7a3bdd1408fc5ca.
+The shader computes the probability and derivative in float32, then emits:
+```
+dS[uint(sbase + col)] = float16_t(dsv);
+P[uint(sbase + col)] = float16_t(pv);
+```
+DXIL contains fptrunc float ... to half at both stores. Four fractional float16 configurations fail: causal/noncausal, each with separate and shared score/output allocations. Noncausal derivative output has 285 mismatches out of 945; causal has 37. Examples are 0.06451416015625 instead of 0.0645751953125, and -0.609375 instead of -0.60986328125. Outputs are typically one half-precision step closer to zero. The float32, bfloat16 and dyadic cases passed this execution gate.
+This pattern is consistent with a conversion-rounding mismatch, but a dedicated native narrowing control must isolate it from transcendental error before selecting the implementation. Direct3D's floating-point conversion rules specify round-to-zero for higher-to-lower floating conversion; treating a native HLSL constructor as an exact source conversion needs an explicit contract.
+Required Behavior
+Preserve source-defined binary16 rounding at casts, stores, initializers and helper boundaries without changing buffer strides or replacing the computation. This is a general numeric-conversion requirement, not an MLX-specific rewrite. Keep native storage, minimum-precision types, numeric conversion and bit reinterpretation distinct.
+Acceptance Criteria
+A minimal Metal-to-HLSL native test covers both halfway directions, signs, overflow, subnormals, signed zero, infinities and NaNs, with original Metal controls.
+Generated HLSL compiles with DXC cs_6_2 -enable-16bit-types -WX and executes on the Windows CI device.
+Scalar/vector conversions and side-effecting arguments preserve source semantics and single evaluation; unsupported higher-precision conversions produce diagnostics.
+All 24 maintained attention-derivative configurations pass unchanged, including actual allocation aliasing, guard checks and the existing numerical tolerances.
+No host readback correction, skipped fractional cases or widened tolerances.
+Related: #1801/#1802 made narrowing and arithmetic conversions explicit for compilation. This issue concerns native numerical rounding after those conversions. #1992 covers the separate OpenGL loss of half narrowing.
+Activity
+NripeshN commented on Oct 1, 2026
+NripeshN
+on Oct 1, 2026
+MemberAuthor
+More actions
+Independent decoding of both saved output buffers now isolates the rounding pattern: all 7,560 values across the four failing cases match a round-toward-zero half reference exactly. The nearest-even reference differs in 285 derivative / 304 probability elements per noncausal case and 37 / 48 per causal case. This is unchanged by score/output aliasing. All output guards and padding remain intact. The audit recomputed probabilities and derivatives from the retained input bytes rather than calling the test verifier. The numerical gate remains required and its tolerance is unchanged.
+NripeshN
+added a commit that references this issue on Oct 1, 2026
+Preserve nearest-even binary16 conversions in DirectX
+...
+d4ffbe2
+NripeshN commented on Oct 1, 2026
+NripeshN
+on Oct 1, 2026
+MemberAuthor
+More actions
+Implemented in d4ffbe2 on #1974; native Windows confirmation is pending.
+Scalar/vector binary16 conversion now computes nearest-even representation bits and constructs native half values by bit reinterpretation. Ordinary numeric casts no longer truncate the source value before rounding.
+Initializers, stores, helper boundaries, compound assignments and integer operands use the contract. Binary16 widening explicitly decodes subnormals; numeric casts remain separate from bit reinterpretation. Unsupported double narrowing and shadowed helper dependencies produce diagnostics.
+The required Windows control uses the same 258,052-word corpus as original/generated Metal and OpenGL, plus 54 conversion-boundary and 44 vector outputs. All 24 MLX attention derivative cases and their original tolerances remain unchanged.
+Final local full suite: 20,172 passed, 32,471 platform/opt-in skips with -n auto. All-files pre-commit and support freshness pass. Original/generated Metal and Linux/Mesa controls pass; an independent audit checks 774,450 native values. All eight pinned backward configurations and three derivative entries compile with DXC and checked layouts.
+The regenerated attention DXIL has no fptrunc at the affected stores and retains native two-byte storage. This is compiler evidence, not Windows numerical proof. The preceding Windows run reproduced the failure; the new run must pass before this issue is considered resolved.
+NripeshN commented on Oct 1, 2026
+NripeshN
+on Oct 1, 2026
+MemberAuthor
+More actions
+Native Windows confirmation is now available for d4ffbe2 in #1974: https://github.com/CrossGL/crosstl/actions/runs/36805169862
+The required conversion gate and all 24 unchanged attention-derivative configurations passed. An independent audit of downloaded input/output bytes verifies 258,150 conversion values across three workloads and 45,360 derivative values, including fractional float16 cases, real score/output aliasing, native two-byte strides, odd-count padding and guards. The eight gated-delta configurations also pass with 5,550,720 independently checked gradient values.
+No tolerances were relaxed, no cases dropped, no output corrected on the host and no native storage widened. The Windows workflow later failed before the final host tests because GitHub returned HTTP 500 while CMake downloaded nlohmann/json; that failure does not invalidate the retained numerical results, but the overall workflow is not green. The new PR head replays the build and all required gates. Keeping this issue open pending review and merge.
+NripeshN
+added
+bugWrong output, a crash or a regressionWrong output, a crash or a regression
+backend:hlslDirectX HLSLDirectX HLSL
+area:runtimeNative loaders, runtimes and execution checksNative loaders, runtimes and execution checks
+on Oct 20, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:runtimeNative loaders, runtimes and execution checksNative loaders, runtimes and execution checksbackend:hlslDirectX HLSLDirectX HLSLbugWrong output, a crash or a regressionWrong output, a crash or a regression
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

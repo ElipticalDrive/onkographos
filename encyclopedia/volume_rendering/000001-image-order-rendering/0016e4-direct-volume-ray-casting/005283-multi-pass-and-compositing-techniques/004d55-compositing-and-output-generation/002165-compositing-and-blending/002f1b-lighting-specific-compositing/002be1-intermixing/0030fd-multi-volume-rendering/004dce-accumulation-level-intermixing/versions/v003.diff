@@ -1,0 +1,269 @@
+--- v002.md
++++ v003.md
+@@ -4,119 +4,183 @@
+ 
+ ## Overview
+-Accumulation-level intermixing is a multi-modal rendering technique that resolves the depth ordering artifacts inherent in image-level intermixing by combining ray samples from multiple co-registered volumes at every step along the viewing ray [S1, unofficial]. Unlike image-level compositing, which blends final pixel colors and thus loses spatial precedence, this method preserves the physical depth relationships of the distinct datasets by integrating their optical properties during the ray-marching accumulation process [S1, unofficial].
++Accumulation-level intermixing is a multi-modal volume rendering technique that resolves the depth-ordering artifacts inherent in image-level intermixing by combining ray samples from multiple co-registered volumes at every step along the viewing ray [S1, unofficial]. Unlike image-level intermixing, which blends final pixel colors and thus fails to preserve occlusion relationships, this method integrates individual volume contributions during the ray-casting accumulation loop, ensuring that the relative density and opacity of each dataset correctly influence the final composite [S1, unofficial]. It sits between image-level blending and illumination-model-level intermixing, offering a balance where distinct lighting models can be applied per volume before their optical properties are merged [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Two or more co-registered volume datasets (e.g., CT and MRI) and their associated transfer functions mapping scalar values to color and opacity.
+-**Outputs:** A single composite image where depth ordering is preserved.
++**Inputs and Outputs**
++*   **Inputs:** Two or more co-registered scalar or vector volumes (e.g., CT and MRI) [S1, unofficial]. Each volume provides density/opacity transfer functions and potentially distinct color/opacity mappings [S1, unofficial].
++*   **Outputs:** A single composite image where depth ordering is preserved based on the combined optical properties of the volumes [S1, unofficial].
+ 
+-**Data Structures:**
+-*   **Ray State:** Accumulated color $C_{acc}$ (RGB), accumulated opacity $\alpha_{acc}$ (scalar).
+-*   **Sample State:** Per-volume sample color $c_i$, sample opacity $\alpha_i$.
++**Data Structures**
++*   **Ray Sample:** A structure containing the interpolated density/value from each volume at the current ray position. For two volumes, this is a pair $(v_{CT}, v_{MRI})$ [S1, unofficial].
++*   **Accumulator:** Standard front-to-back or back-to-front accumulation state, maintaining current accumulated color $C_{acc}$ and opacity $\alpha_{acc}$ [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Ray Marching:** For each pixel, cast a ray through the volume space.
+-2.  **Sampling:** At each step $j$ along the ray, sample the scalar value $v_i$ from each volume $i$ (e.g., $v_{CT}, v_{MRI}$).
+-3.  **Transfer Function Lookup:** Compute the color $c_i$ and opacity $\alpha_i$ for each volume's sample using its specific transfer function.
+-    *   *Note:* For multi-channel data, gradients may be computed in perceptual spaces (e.g., $L^*u^*v^*$) to determine opacity [S2, book].
+-4.  **Mixing Function Application:** Combine the per-volume samples $(c_i, \alpha_i)$ into a single effective sample $(c_{mix}, \alpha_{mix})$ using a mixing function.
+-    *   *Intensity Comparison:* In some implementations, color is assigned based on the relative intensity of the datasets (e.g., blue if $CT > MRI$, green if $MRI > CT$) [S2, book].
+-    *   *Inclusive Opacity Mode:* A common mixing strategy for two volumes is the inclusive opacity model, where the combined opacity is derived from the unweighted product of individual opacities:
+-        $$ \alpha_{mix} = 1 - (1 - \alpha_{CT})(1 - \alpha_{MRI}) $$
+-        This is equivalent to the probability that at least one volume contributes to the sample [S2, book].
+-5.  **Accumulation:** Update the ray state using standard volume rendering compositing equations with the mixed sample:
+-    $$ C_{acc} = C_{acc} + c_{mix} \cdot \alpha_{mix} \cdot (1 - \alpha_{acc}) $$
+-    $$ \alpha_{acc} = \alpha_{acc} + \alpha_{mix} \cdot (1 - \alpha_{acc}) $$
+-6.  **Termination:** Repeat until the ray exits the volume or $\alpha_{acc}$ exceeds a threshold.
++**Numbered Steps**
++1.  **Ray Casting Initialization:** For each pixel, cast a ray through the combined bounding volume of the co-registered datasets [S1, unofficial].
++2.  **Sample Extraction:** At each integration step $i$ along the ray, sample the value $v_{CT}$ from the first volume and $v_{MRI}$ from the second volume [S1, unofficial].
++3.  **Per-Volume Property Evaluation:**
++    *   Compute the color $c_{CT}$ and opacity $\alpha_{CT}$ for the CT sample based on $v_{CT}$ [S1, unofficial].
++    *   Compute the color $c_{MRI}$ and opacity $\alpha_{MRI}$ for the MRI sample based on $v_{MRI}$ [S1, unofficial].
++    *   *Note:* The specific color assignment can be data-driven. For example, if rendering CT and MRI together, one might assign blue if $v_{CT} > v_{MRI}$ and green if $v_{MRI} > v_{CT}$ [S2, book].
++4.  **Mixing Function Application:** Combine the per-volume optical properties $(c_{CT}, \alpha_{CT})$ and $(c_{MRI}, \alpha_{MRI})$ into a single effective contribution $(c_{mix}, \alpha_{mix})$ using a mixing function [S1, unofficial].
++    *   Common approach: Inclusive opacity mode, where the combined opacity is calculated as $\alpha_{mix} = 1 - (1 - \alpha_{CT})(1 - \alpha_{MRI})$ [S1, unofficial].
++    *   The combined color is derived from the weighted contribution of each volume's color based on their relative opacities [S1, unofficial].
++5.  **Accumulation:** Update the ray accumulator with the mixed contribution $(c_{mix}, \alpha_{mix})$ using standard volume rendering integration equations [S1, unofficial].
++6.  **Final Color:** After traversing the entire ray, store the accumulated color in the output image [S1, unofficial].
+ 
+-**Pseudocode:**
++**Formulas**
++*   **Inclusive Opacity Mode:** The combined opacity $\alpha_{combined}$ for two volumes is the unweighted product of their individual contributions to the "seen" portion:
++    $$ \alpha_{combined} = 1 - (1 - \alpha_{CT})(1 - \alpha_{MRI}) $$
++    This is equivalent to the probability that at least one volume is opaque at that sample point [S1, unofficial].
++*   **Sample-Level Color Assignment (Conditional):**
++    $$ c_{sample} = \begin{cases} \text{Blue} & \text{if } v_{CT} > v_{MRI} \\ \text{Green} & \text{if } v_{MRI} > v_{CT} \end{cases} $$
++    This specific mapping is used to visually distinguish which dataset dominates the local density [S2, book].
++
++**Parameters**
++*   **Mixing Function:** The specific algebraic combination of opacities. The "inclusive" mode is the standard default for preserving depth order without bias [S1, unofficial].
++*   **Transfer Functions:** Separate transfer functions for each volume to map raw values to $(c, \alpha)$ pairs [S1, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Precision:** Accumulating many small opacity contributions can lead to precision issues if not handled with standard front-to-back alpha blending logic [G].
++*   **Registration Error:** Since samples are taken at the same spatial coordinates, misalignment between volumes results in incorrect mixing and visual artifacts [S1, unofficial].
++*   **Computational Cost:** Requires sampling and evaluating transfer functions for *all* volumes at *every* step, increasing the per-pixel workload linearly with the number of volumes [S1, unofficial].
++
++**Pseudocode**
+ ```python
+ def accumulation_level_intermixing(ray_origin, ray_direction, volumes, transfer_functions):
+-    # Initialize accumulation state
++    """
++    Renders multiple co-registered volumes using accumulation-level intermixing.
++    
++    Args:
++        ray_origin: 3D vector, start of the ray.
++        ray_direction: 3D vector, direction of the ray.
++        volumes: List of Volume objects, each providing sample_value(x, y, z).
++        transfer_functions: List of TransferFunction objects, each mapping value -> (color, opacity).
++        
++    Returns:
++        color: 3D vector, the final pixel color.
++    """
++    # Standard ray casting setup
++    num_steps = 100  # Not given in sources, typical implementation detail [G]
++    step_size = 0.1  # Not given in sources, typical implementation detail [G]
++    
+     acc_color = [0.0, 0.0, 0.0]
+     acc_alpha = 0.0
+     
+-    # Ray marching parameters
+-    step_size = 1.0
+-    num_steps = 100 # Placeholder for actual ray length calculation
+-    
+-    for step in range(num_steps):
+-        # 1. Sample positions
+-        pos = ray_origin + ray_direction * (step * step_size)
++    # Front-to-back accumulation
++    for i in range(num_steps):
++        # Calculate current position
++        pos = ray_origin + ray_direction * (i * step_size)
+         
+-        # 2. Sample volumes and get per-volume properties
++        # Early termination if fully opaque
++        if acc_alpha >= 1.0:
++            break
++            
++        # 1. Sample all volumes at current position
+         samples = []
+         for vol in volumes:
+-            val = vol.sample(pos)
+-            color, alpha = transfer_functions[vol.id].lookup(val)
+-            samples.append({'color': color, 'alpha': alpha, 'value': val})
++            val = vol.sample_value(pos.x, pos.y, pos.z)
++            samples.append(val)
+             
+-        # 3. Mix samples
+-        # Example: Inclusive opacity mode for two volumes (CT, MRI)
+-        if len(samples) == 2:
+-            ct = samples[0]
+-            mri = samples[1]
++        # 2. Evaluate per-volume color and opacity
++        # For this example, assume 2 volumes: CT (index 0) and MRI (index 1)
++        if len(volumes) == 2:
++            val_ct = samples[0]
++            val_mri = samples[1]
+             
+-            # Compute mixed opacity using inclusive model
+-            # alpha_mix = 1 - (1 - alpha_CT) * (1 - alpha_MRI)
+-            alpha_mix = 1.0 - (1.0 - ct['alpha']) * (1.0 - mri['alpha'])
++            # Get base properties from transfer functions
++            c_ct, a_ct = transfer_functions[0].map(val_ct)
++            c_mri, a_mri = transfer_functions[1].map(val_mri)
+             
+-            # Compute mixed color
+-            # Note: Specific color mixing logic (e.g., intensity comparison) 
+-            # is implementation-dependent. Here we assume a weighted average 
+-            # based on the inclusive probability contribution.
+-            # Weight of CT contribution relative to total alpha_mix:
+-            w_ct = (ct['alpha'] * (1.0 - mri['alpha'])) / alpha_mix if alpha_mix > 0 else 0
+-            w_mri = (mri['alpha'] * (1.0 - ct['alpha'])) / alpha_mix if alpha_mix > 0 else 0
++            # 3. Apply mixing function (Inclusive Opacity Mode)
++            # Combined opacity: alpha_mix = 1 - (1 - a_ct) * (1 - a_mri)
++            a_mix = 1.0 - (1.0 - a_ct) * (1.0 - a_mri)
+             
+-            color_mix = [
+-                w_ct * ct['color'][0] + w_mri * mri['color'][0],
+-                w_ct * ct['color'][1] + w_mri * mri['color'][1],
+-                w_ct * ct['color'][2] + w_mri * mri['color'][2]
++            # Combined color: Weighted average based on individual opacities
++            # Contribution of CT: c_ct * a_ct * (1 - a_mri)
++            # Contribution of MRI: c_mri * a_mri * (1 - a_ct)
++            # Note: The denominator for the weighted average is a_mix
++            if a_mix > 0:
++                c_mix = (c_ct * a_ct * (1.0 - a_mri) + c_mri * a_mri * (1.0 - a_ct)) / a_mix
++            else:
++                c_mix = [0.0, 0.0, 0.0]
++                
++            # 4. Accumulate
++            # Standard front-to-back blending:
++            # C_out = C_in + C_contrib * alpha_contrib * (1 - alpha_in)
++            # alpha_out = alpha_in + alpha_contrib * (1 - alpha_in)
++            
++            weight = a_mix * (1.0 - acc_alpha)
++            acc_color = [
++                acc_color[0] + c_mix[0] * weight,
++                acc_color[1] + c_mix[1] * weight,
++                acc_color[2] + c_mix[2] * weight
+             ]
++            acc_alpha += weight
++            
+         else:
+-            # Fallback for other numbers of volumes or specific mixing rules
+-            # Not fully specified in sources [G]
+-            alpha_mix = samples[0]['alpha']
+-            color_mix = samples[0]['color']
++            # General case for N volumes:
++            # Sum contributions of each volume weighted by the transmittance of others
++            total_weight = 0.0
++            weighted_color = [0.0, 0.0, 0.0]
+             
+-        # 4. Accumulate
+-        # Standard front-to-back compositing
+-        contribution = color_mix * alpha_mix * (1.0 - acc_alpha)
+-        acc_color = [
+-            acc_color[0] + contribution[0],
+-            acc_color[1] + contribution[1],
+-            acc_color[2] + contribution[2]
+-        ]
+-        acc_alpha = acc_alpha + alpha_mix * (1.0 - acc_alpha)
+-        
+-        if acc_alpha >= 0.99:
+-            break
++            for j, vol in enumerate(volumes):
++                val = samples[j]
++                c_j, a_j = transfer_functions[j].map(val)
++                
++                # Transmittance of all other volumes
++                transmittance_others = 1.0
++                for k, other_vol in enumerate(volumes):
++                    if j != k:
++                        # We need the opacity of the other volume at this step
++                        # In a strict accumulation loop, we might not have pre-computed 
++                        # the "other" opacity if it depends on the same sample step.
++                        # However, since we are at step i, we have all samples.
++                        val_other = samples[k]
++                        _, a_other = transfer_functions[k].map(val_other)
++                        transmittance_others *= (1.0 - a_other)
++                
++                contribution_weight = a_j * transmittance_others
++                weighted_color[0] += c_j[0] * contribution_weight
++                weighted_color[1] += c_j[1] * contribution_weight
++                weighted_color[2] += c_j[2] * contribution_weight
++                total_weight += contribution_weight
++                
++            if total_weight > 0:
++                c_mix = [c / total_weight for c in weighted_color]
++            else:
++                c_mix = [0.0, 0.0, 0.0]
++                
++            weight = total_weight * (1.0 - acc_alpha)
++            acc_color = [
++                acc_color[0] + c_mix[0] * weight,
++                acc_color[1] + c_mix[1] * weight,
++                acc_color[2] + c_mix[2] * weight
++            ]
++            acc_alpha += weight
+             
+     return acc_color
+ ```
+ 
+-**Parameters:**
+-*   **Mixing Function:** The specific formula used to combine $(c_i, \alpha_i)$. The "inclusive opacity mode" is a standard choice for preserving depth without occlusion [S2, book].
+-*   **Gradient Space:** For multi-channel data, gradients may be computed in $L^*u^*v^*$ space using the second derivative along the gradient direction to compute opacity [S2, book].
+-
+-**Edge Cases:**
+-*   **Zero Opacity:** If both volumes have zero opacity at a step, the mixed opacity is zero, and no color contribution occurs.
+-*   **Degenerate Input:** If volumes are not co-registered, the intermixing will produce spatially misaligned artifacts.
+-
+ ## Subtopics
+ 
+ ### [Illumination model level intermixing](13581-illumination-model-level-intermixing.md)
+-Combines ray samples *before* color/opacity computation, treating combined density as a single physical entity. Chosen when distinct physical properties (e.g., emission vs. attenuation) need to interact physically prior to lighting.
++Illumination model level intermixing combines raw ray samples from distinct volumes *before* computing colors and opacities, applying a unified lighting model to the merged data. It is chosen when a single physical interpretation (e.g., treating one volume as emission and another as attenuation) is desired, unlike accumulation-level intermixing which composites pre-computed lighting results.
++
++### Acquisition Level Intermixing
++Acquisition level intermixing is a framework where multiple spatially aligned volumes are combined into a single vectorial volume at the earliest stage (acquisition level), before the standard rendering pipeline [S3]. It involves 3D/3D registration, forming a vectorial volume where each voxel contains a vector of $n$ elements, and applying statistical multi-dimensional classification (e.g., neighborhood weighted Gaussian mixture model) to derive material properties for rendering [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot V)$, where $N$ is the number of pixels and $V$ is the number of volumes. Each ray step requires sampling and transferring all volumes.
+-*   **Memory Complexity:** $O(V \cdot R)$, where $R$ is the ray length in steps. Requires storing intermediate samples for all volumes per step.
+-*   **Strengths:** Preserves depth ordering of multi-modal data; allows physically motivated mixing (e.g., SPECT emission within CT attenuation) [S1, unofficial].
+-*   **Limitations:** Computationally more expensive than image-level intermixing due to per-step mixing logic; requires precise co-registration.
++*   **Time Complexity:** $O(N \cdot S \cdot V)$, where $N$ is the number of pixels, $S$ is the number of samples per ray, and $V$ is the number of volumes. Each sample requires evaluating transfer functions for all volumes and applying the mixing function [S1, unofficial].
++*   **Memory Complexity:** $O(V \cdot R^3)$ for storing the volumes, plus standard ray-casting buffers. No additional large buffers are required compared to single-volume rendering [S1, unofficial].
++*   **Strengths:** Preserves correct depth ordering and occlusion between different modalities; allows distinct transfer functions and lighting models per volume [S1, unofficial].
++*   **Limitations:** Computationally expensive due to multiple sampling and transfer function evaluations per step; sensitive to registration errors [S1, unofficial].
++*   **When to use:** When visualizing co-registered multi-modal data (e.g., CT/MRI) where the relative density/opacity of each modality must be preserved in the final image [S1, unofficial].
++*   **When not to use:** When performance is critical and depth ordering between modalities is not visually important (use image-level intermixing); or when a unified physical lighting model is required (use illumination-model-level intermixing) [S1, unofficial].
+ 
+ ## Background
+-Originating from multi-modal visualization research, this method addresses the limitations of image-level intermixing where depth ordering is lost [S1, unofficial]. It was notably demonstrated in the context of radiation therapy dose planning and the visualization of the Visible Man's CT and MRI datasets [S2, book]. Cai and Sakas [25] (cited in [S1, unofficial]) applied this to visualize emissive metabolic activities within attenuation volumes.
++Accumulation-level intermixing was introduced as a solution to the depth-ordering limitations of image-level intermixing in multi-modal volume rendering [S1, unofficial]. It is part of the broader family of multi-volume rendering techniques that handle co-registered datasets [S1, unofficial]. The method is particularly relevant in medical imaging, such as visualizing metabolic activities in SPECT volumes within the spatial context of CT attenuation volumes [S1, unofficial].
+ 
+ ## Sources
+-[S1] Overview of Volume Rendering, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+-[S2] Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)+[S1] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
++[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
++[S3] A Multi-Volume Visualization Framework for Spatial Aligned Volumes after 3D/3D Image Registration, https://doi.org/10.1109/ICISE.2009.77, fetched 2026-10-26

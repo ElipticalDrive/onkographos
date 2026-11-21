@@ -1,0 +1,159 @@
+# AReT (Anatomy-Regularized TensoRF)
+
+Also called: AReT NeRF, AReT framework, AReT model, Anatomy-Regularized TensoRF, Prior TensoRF v2, proposed AReT model
+
+## Overview
+AReT is a scene-specific (patient-specific) inverse solver that reconstructs 3D lung nodule volumes from only three orthogonal Digitally Reconstructed Radiographs (DRRs: coronal, sagittal, axial) using a Tensorial Radiance Field (TensoRF) representation [S1, unofficial]. It solves the problem of sparse-view medical reconstruction where standard TensoRF fails due to a density-parameterization dead zone that suppresses gradients [S1, unofficial]. Unlike generative-prior approaches like MedNeRF, AReT is prior-free during training, relying instead on a corrected density initialization and anatomy-aware regularization ($\ell_1$ sparsity and Total Variation smoothness) to enforce physiologically plausible attenuation distributions in the air-dominated thoracic cavity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Three orthogonal DRRs (coronal, sagittal, axial) generated from a patient's ground-truth CT volume via Beer-Lambert forward projection. Camera poses are assigned based on the orthogonal projection directions.
+*   **Outputs:** A reconstructed 3D density field (linear attenuation coefficient $\mu$) and a segmented nodule volume.
+
+**Data Structures:**
+*   **TensoRF Representation:** A VM-rank-16 TensoRF model. The scene is represented by a set of low-rank tensor factors.
+*   **Grid Resolution:** A $64^3$ grid is used for density queries. The voxel spacing is approximately $[3.75, 1.875, 2.1875]$ mm [S1, unofficial].
+*   **Memory:** A $64^3$ VM-rank-16 TensoRF requires approximately 14 GB VRAM (including gradient buffers) on an NVIDIA T4 [S1, unofficial].
+
+**Parameters:**
+*   **Density Shift ($\Delta$):** Set to $0$ (default in standard TensoRF is $-10$). This is critical to prevent gradient suppression [S1, unofficial].
+*   **Scale ($s$):** Set to $1$ (default in standard TensoRF is $25$) [S1, unofficial].
+*   **Regularization Weights:** $\lambda_1 = 1 \times 10^{-4}$ (sparsity), $\lambda_2 = 1 \times 10^{-5}$ (TV smoothness) [S1, unofficial].
+*   **Optimizer:** Adam. Learning rate $0.02$ for grid parameters, $0.002$ for MLP [S1, unofficial].
+*   **Batch Size:** 2048 rays per iteration [S1, unofficial].
+*   **Iterations:** 3000 total iterations [S1, unofficial].
+*   **Alpha Mask Updates:** Deterministic updates at iterations 1500 and 2500 to prune near-empty voxels [S1, unofficial].
+*   **Random Seeds:** `torch.manual_seed(0)` and `numpy.random.seed(0)` [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **CT Preprocessing and HU Calibration:**
+    *   Load DICOM slices and sort by `ImagePositionPatient` Z-coordinate.
+    *   Convert Hounsfield Units (HU) using `RescaleSlope` and `RescaleIntercept`.
+    *   Apply lung-window clipping and linear normalization:
+        $$ v_{norm} = \frac{HU - (-1000)}{400 - (-1000)} $$
+        [S1, unofficial]
+
+2.  **DRR Simulation and Camera Pose Assignment:**
+    *   Generate three orthogonal DRRs (coronal, sagittal, axial) from the normalized CT volume using the Beer-Lambert forward model:
+        $$ I(r) = I_0 \cdot \exp \left( - \int \mu(x) \, dx \right) $$
+        where $\mu(x)$ is approximated by summing normalized HU values along the projection direction [S1, unofficial].
+    *   Assign camera poses corresponding to the orthogonal directions.
+
+3.  **AReT Training:**
+    *   Initialize the TensoRF model with $\Delta = 0$ and $s = 1$.
+    *   For each iteration $i$ from 1 to 3000:
+        *   Sample 2048 rays randomly.
+        *   Render DRRs from the current TensoRF model.
+        *   Compute Photometric Loss ($L_{photo}$): Mean Squared Error (MSE) between rendered DRRs and input DRRs.
+        *   Compute Regularization Losses:
+            *   Sparsity Loss ($L_{sparse}$): $\ell_1$ norm of the density field.
+            *   Smoothness Loss ($L_{TV}$): Total Variation of the density field.
+        *   Compute Total Loss:
+            $$ L = L_{photo} + \lambda_1 L_{sparse} + \lambda_2 L_{TV} $$
+            [S1, unofficial]
+        *   Update TensoRF parameters using Adam optimizer.
+        *   If $i \in \{1500, 2500\}$, update the alpha occupancy mask to prune near-empty voxels [S1, unofficial].
+
+4.  **Volumetric Reconstruction and Nodule Extraction:**
+    *   Query the converged density field on a $64^3$ grid using `getDenseAlpha` [S1, unofficial].
+    *   Perform a percentile threshold sweep on the non-zero density distribution for $p \in \{85, 88, 90, 91, \dots, 99\}$.
+    *   For each threshold:
+        *   Remove connected components with fewer than 10 voxels.
+        *   Apply binary closing with a radius-2 spherical structuring element to fill boundary gaps.
+        *   Identify connected components with equivalent sphere diameters in $[5, 80]$ mm.
+    *   Select the candidate whose equivalent sphere diameter is closest to the LIDC-IDRI annotated diameter for that patient [S1, unofficial].
+    *   Compute physical volume:
+        $$ V = N_{voxels} \times \prod \Delta x_k $$
+        where $\Delta x_k$ are the per-axis voxel spacings [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def train_arect(ct_volume, annotations, patient_id):
+    # 1. Preprocessing
+    ct_normalized = normalize_hu(ct_volume) # Eq. 13
+    
+    # 2. DRR Generation
+    drrs = generate_drrs(ct_normalized) # Coronal, Sagittal, Axial
+    camera_poses = get_orthogonal_poses()
+    
+    # 3. Model Initialization
+    model = TensoRF(rank=16, grid_size=64)
+    model.set_density_params(delta=0, s=1) # Critical fix
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.02)
+    
+    # 4. Training Loop
+    for i in range(1, 3001):
+        rays = sample_rays(2048, camera_poses)
+        rendered_drrs = model.render(rays)
+        
+        l_photo = mse_loss(rendered_drrs, drrs)
+        l_sparse = l1_norm(model.get_density_field())
+        l_tv = total_variation(model.get_density_field())
+        
+        loss = l_photo + 1e-4 * l_sparse + 1e-5 * l_tv
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        
+        if i in [1500, 2500]:
+            model.update_alpha_mask()
+            
+    return model.get_density_field()
+
+def extract_nodule(density_field, annotated_diameter):
+    # 5. Threshold Sweep
+    candidates = []
+    for p in range(85, 100):
+        threshold = np.percentile(density_field[density_field > 0], p)
+        binary_mask = (density_field >= threshold).astype(np.uint8)
+        
+        # Noise removal
+        components = connected_components(binary_mask)
+        valid_components = [c for c in components if c.size >= 10]
+        
+        # Boundary filling
+        filled_components = binary_closing(valid_components, radius=2)
+        
+        # Size filtering
+        for comp in filled_components:
+            diameter = equivalent_sphere_diameter(comp)
+            if 5 <= diameter <= 80:
+                candidates.append((comp, diameter))
+                
+    # 6. Candidate Selection
+    best_candidate = min(candidates, key=lambda x: abs(x[1] - annotated_diameter))
+    return compute_volume(best_candidate[0])
+```
+
+## Subtopics
+
+### TensoRF
+A tensor-based radiance field representation that decomposes the 3D scene into low-rank factors, offering memory efficiency compared to dense grids. AReT uses a VM-rank-16 configuration [S1, unofficial].
+
+### MedNeRF
+A generative-prior-guided NeRF approach that uses a population-level latent code from a GAN. AReT outperforms MedNeRF in sparse-view settings because MedNeRF's diffuse density field and scene-agnostic thresholding degrade patient-specific accuracy [S1, unofficial].
+
+### Classical Sparse-View Methods (FDK, SART)
+Require 20-50 views and produce streak artifacts with only three views. AReT works with three orthogonal projections [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training takes approximately 8 minutes per patient on an NVIDIA T4 GPU [S1, unofficial].
+*   **Memory Complexity:** A $64^3$ VM-rank-16 TensoRF requires ~14 GB VRAM. A $128^3$ grid exceeds the 16 GB VRAM limit of the T4 [S1, unofficial].
+*   **Performance:** On LIDC-IDRI (19 patients, 14 nodules $\ge$ 10 mm), AReT achieves a Pearson correlation $r = 0.983$ ($p < 0.0001$), median absolute volumetric error 11.4%, and systematic bias $-77.3$ mm$^3$ [S1, unofficial].
+*   **Strengths:** Works with only three orthogonal projections; prior-free patient-specific reconstruction; robust to sparse-view overfitting via anatomy-aware regularization.
+*   **Limitations:** Requires simulated DRRs (domain gap with real radiographs); unsuitable for sub-centimeter nodules (< 10 mm) due to resolution limits; relies on annotated diameter for final candidate selection (semi-assisted) [S1, unofficial].
+*   **When to use:** Sparse-view 3D lung nodule volumetry from orthogonal X-ray projections.
+*   **When not to use:** Dense-view reconstruction; sub-centimeter nodule analysis; clinical deployment without addressing the domain gap between simulated and real radiographs [S1, unofficial].
+
+## Background
+AReT was proposed by Suja Palaniswamy et al. in 2026 (arXiv preprint) [S1, unofficial]. It addresses the limitations of existing NeRF adaptations for medical imaging, such as MedNeRF, which require dense views or rely on population priors that degrade patient-specific accuracy. The method identifies a previously unreported failure mode in TensoRF when applied to X-ray attenuation fields: the default density shift of $-10$ suppresses density gradients. By setting $\Delta = 0$ and incorporating thorax-specific regularization, AReT enables stable volumetric reconstruction from ultra-sparse views [S1, unofficial].
+
+## Sources
+[S1] Sparse-View Lung Nodule Volumetry from Digitally Reconstructed Radiographs via AReT: Anatomy-Regularized TensoRF, https://doi.org/10.48550/arxiv.2606.02639, fetched 2026-10-26 (unofficial)

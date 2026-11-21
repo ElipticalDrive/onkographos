@@ -1,0 +1,170 @@
+# Spherical Camera Path Generation
+
+Also called: 360° Orbit Path, Circular Camera Path Setup, Circular Orbit Camera, Spherical Camera Generator
+
+## Overview
+Spherical Camera Path Generation creates a sequence of camera poses arranged in a circular orbit around a central target (typically the origin) for 360° video rendering or volume visualization [S1, S3, unofficial]. It differs from general orbit controls by pre-computing a fixed, smooth trajectory of camera-to-world matrices rather than responding to interactive input [S3, unofficial]. It builds on [Orbit Camera Basis Computation](1749-orbit-camera-basis-computation.md) by automating the generation of the full camera-to-world transformation matrix for each frame in the path [G].
+
+## How it works
+**Inputs:**
+- `radius`: Distance from the origin to the camera center (default 4.0) [S3, unofficial].
+- `n_frames`: Number of frames in the output path (default 120) [S3, unofficial].
+- `tilt` (optional): Pitch angle for downward/upward view (e.g., $-\pi/5$ or $-36^\circ$) [S2, unofficial].
+
+**Outputs:**
+- A list or tensor of shape `[n_frames, 4, 4]` containing camera-to-world (C2W) matrices [S3, unofficial].
+
+**Data Structures:**
+- Each C2W matrix is a $4 \times 4$ homogeneous transformation matrix [G].
+- Layout (OpenGL convention, +z backward):
+  - Column 0: Right vector (`right`) [S3, unofficial].
+  - Column 1: Up vector (`up`) [S3, unofficial].
+  - Column 2: Negative Forward vector (`-forward`) [S3, unofficial].
+  - Column 3: Camera position (`origin`) [S3, unofficial].
+
+**Steps:**
+1. Initialize an empty list `poses`.
+2. For each frame index $i$ from $0$ to $n\_frames - 1$:
+   a. Compute the orbit angle: $\theta_i = \frac{2\pi i}{n\_frames}$ [S3, unofficial].
+   b. Compute the camera position (origin):
+      $$
+      \begin{aligned}
+      cam\_x &= radius \cdot \cos(\theta_i) \\
+      cam\_y &= radius \cdot 0.3 \\
+      cam\_z &= radius \cdot \sin(\theta_i)
+      \end{aligned}
+      $$
+      *Note: Source [S2, unofficial] replaces the fixed offset with a tilt angle $\phi = -\pi/5$, yielding $cam\_y = radius \cdot \sin(\phi)$ [S2, S3, unofficial].*
+   c. Compute the forward vector pointing to the target (origin):
+      $$
+      forward = \frac{origin - target}{\|origin - target\|}
+      $$
+      Since target is $(0,0,0)$, $forward = -origin / \|origin\|$ [S3, unofficial].
+   d. Compute the right vector:
+      $$
+      right = \frac{forward \times up\_world}{\|forward \times up\_world\|}
+      $$
+      where $up\_world = [0, 1, 0]$ [S3, unofficial].
+   e. Compute the true up vector:
+      $$
+      up = right \times forward
+      $$
+   f. Construct the $4 \times 4$ C2W matrix:
+      $$
+      C2W = \begin{bmatrix}
+      right_x & up_x & -forward_x & origin_x \\
+      right_y & up_y & -forward_y & origin_y \\
+      right_z & up_z & -forward_z & origin_z \\
+      0 & 0 & 0 & 1
+      \end{bmatrix}
+      $$
+   g. Apply coordinate system flip if required by the rendering engine (e.g., aligning with specific conventions):
+      $$
+      C2W = \begin{bmatrix}
+      -1 & 0 & 0 & 0 \\
+      0 & 0 & 1 & 0 \\
+      0 & 1 & 0 & 0 \\
+      0 & 0 & 0 & 1
+      \end{bmatrix} \times C2W
+      $$
+      [S2, unofficial].
+   h. Append $C2W$ to `poses`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def generate_spherical_camera_path(radius=4.0, n_frames=120, apply_flip=False):
+    """
+    Generate a list of 4x4 camera-to-world matrices for a circular orbit.
+    
+    Args:
+        radius: Distance from target to camera.
+        n_frames: Number of frames.
+        apply_flip: Whether to apply the coordinate system flip matrix [S2, unofficial].
+        
+    Returns:
+        List of 4x4 numpy arrays.
+    """
+    poses = []
+    up_world = np.array([0.0, 1.0, 0.0])
+    
+    for i in range(n_frames):
+        # 1. Compute angle
+        theta = 2.0 * math.pi * i / n_frames
+        
+        # 2. Compute camera position (origin)
+        cam_x = radius * math.cos(theta)
+        cam_y = radius * 0.3
+        cam_z = radius * math.sin(theta)
+        origin = np.array([cam_x, cam_y, cam_z])
+        
+        # 3. Compute forward vector
+        forward = -origin
+        norm_f = np.linalg.norm(forward)
+        if norm_f == 0:
+            forward = np.array([0.0, 0.0, -1.0]) # Guard against degenerate case [G]
+        else:
+            forward = forward / norm_f
+            
+        # 4. Compute right vector
+        right = np.cross(forward, up_world)
+        norm_r = np.linalg.norm(right)
+        if norm_r == 0:
+            right = np.array([1.0, 0.0, 0.0]) # Guard if forward is parallel to up_world [G]
+        else:
+            right = right / norm_r
+            
+        # 5. Compute up vector
+        up = np.cross(right, forward)
+        
+        # 6. Construct C2W matrix (OpenGL convention: +z backward)
+        # Columns: right, up, -forward, origin
+        c2w = np.eye(4)
+        c2w[:3, 0] = right
+        c2w[:3, 1] = up
+        c2w[:3, 2] = -forward
+        c2w[:3, 3] = origin
+        
+        # 7. Apply coordinate system flip (if needed for specific renderer)
+        if apply_flip:
+            flip_matrix = np.array([
+                [-1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0]
+            ])
+            c2w = flip_matrix @ c2w
+            
+        poses.append(c2w)
+        
+    return poses
+```
+
+**Edge Cases and Pitfalls:**
+- If the camera position coincides with the target, the forward vector is undefined. A guard is required [G].
+- If the forward vector is parallel to the world up vector ($[0,1,0]$), the cross product for the right vector becomes zero. A guard is required [G].
+- Coordinate system conventions vary. Source [S2, unofficial] explicitly applies a flip matrix to align with its rendering convention, while [S3, unofficial] constructs the matrix directly for OpenGL (+z backward). Implementers must check their renderer's convention [S2, S3, unofficial].
+
+## Subtopics
+
+### Circular Sensor Array Initialization
+Generates a set of perspective camera sensors arranged uniformly in a circle around a central point, configured for Mitsuba 3 rendering [S5, unofficial]. It differs from the basic path generation by instantiating full sensor objects with film and FOV parameters rather than just pose matrices [S5, unofficial]. Choose this when integrating with Mitsuba 3's scene graph [S5, unofficial]. It uses the same circular angle calculation $\theta_i = \frac{360.0}{num\_sensors} \cdot i$ but constructs a `perspective` sensor with an `hdrfilm` of size `render_res` x `render_res` and a box filter [S5, unofficial]. Parameters include `num_sensors`, `render_res` (default 256), `fov` (default 45.0), `center` (default [0,0,0]), and `radius` (default 1.3) [S5, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(n\_frames)$, as each frame requires constant-time trigonometric and vector operations [G].
+- **Strengths:** Simple, deterministic, and smooth for 360° orbit videos [S3, unofficial].
+- **Limitations:** Fixed radius and tilt; does not adapt to scene geometry or occlusions [S3, unofficial]. Not suitable for dynamic scenes or interactive control [S3, unofficial].
+
+## Background
+The method is used in neural rendering and volume visualization pipelines for generating training data or visualization videos [S3, unofficial]. It is commonly applied in NeRF (Neural Radiance Fields) workflows to create circular orbit views for evaluating novel view synthesis [S3, unofficial]. The specific coordinate flip matrix is associated with certain rendering conventions in Python-based graphics libraries [S2, unofficial].
+
+## Sources
+[S1] Rintarooo/volume_rendering_plot, https://github.com/Rintarooo/volume_rendering_plot, fetched 2026-10-26 (unofficial)
+[S2] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
+[S3] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
+[S4] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
+[S5] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

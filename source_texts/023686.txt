@@ -1,0 +1,156 @@
+Describe the bug I was trying to voxelize a mesh as shown below using create_from_point_cloud_within_bounds. But when I increase the scale of the mesh (keeping the voxel resolution the same) I need more points to achieve the same density...
+
+Voxelgrid `create_from_point_cloud_within_bounds` behaviour · Issue #2766 · isl-org/Open3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Voxelgrid create_from_point_cloud_within_bounds behaviour #2766
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Voxelgrid create_from_point_cloud_within_bounds behaviour#2766
+Copy link
+Labels
+boundingboxgeometrymesh
+Description
+kfarivar
+opened on Dec 15, 2020
+Issue body actions
+Describe the bug
+I was trying to voxelize a mesh as shown below using create_from_point_cloud_within_bounds. But when I increase the scale of the mesh (keeping the voxel resolution the same) I need more points to achieve the same density in my voxelization. Meaning the voxel grid resolution changes when I change the scale of the points in my point cloud. Which doesn't really make sense !
+As a note I know the "right way" of voxelizing a mesh would be to use create_from_triangle_mesh_within_bounds but that takes a very long time to calculate the voxelization. (>2mins for voxel res 50). and I need a voxel res of 256.
+Further, reading the voxelization code in here. Is there a reason the voxelization is calculated in this way ?
+```
+for (int i = 0; i < (int)input.points_.size(); i++) {
+        ref_coord = (input.points_[i] - min_bound) / voxel_size;
+        voxel_index << int(floor(ref_coord(0))), int(floor(ref_coord(1))),
+                int(floor(ref_coord(2)));
+```
+Since to me it seems for the coordinates of the grid to move to left of decimal point we need to also divide by (max_bound-min_bound). like:
+ref_coord = (input.points_[i] - min_bound) / voxel_size /(max_bound-min_bound) ;
+Why this is not done ?
+I guess floating point precision can be an issue here, but excluding this division is not exactly a solution.
+Including this division resolves the above issue since the scaling factor cancels out from the numerator and denominator.
+It is also weird how the max_bound is actually never used in this method except to check for an error.
+To Reproduce
+```
+# read mesh
+mesh = o3d.io.read_triangle_mesh(file_path)
+# scale back to original
+mesh.scale(scale=2.2, center=(0,0,0))
+        
+# Function to sample points from the mesh, where each point has approximately the same distance to the neighbouring points (blue noise). 
+# Method is based on Yuksel, “Sample Elimination for Generating Poisson Disk Sample Sets”, EUROGRAPHICS, 2015.
+pcd = mesh.sample_points_poisson_disk(samples_from_mesh)
+            
+#voxelize
+voxel_surface = o3d.geometry.VoxelGrid.create_from_point_cloud_within_bounds(
+            pcd,
+            voxel_size=1 / voxel_resolution,
+            min_bound=(-1/2, )*3,
+            max_bound= (1/2,)*3
+)
+```
+Reactions are currently unavailable
+Activity
+theNded
+added
+geometry
+legacy (Open3D 0.x API)
+boundingbox
+mesh
+and removed
+legacy (Open3D 0.x API)
+on Nov 22, 2021
+benjaminum commented on Dec 3, 2021
+benjaminum
+on Dec 3, 2021
+Contributor
+More actions
+To better understand this, does the voxel resolution change or do you observe gaps in the voxelized surface?
+Kin-Zhang commented on Feb 4, 2023
+Kin-Zhang
+on Feb 4, 2023
+More actions
+Agree!
+It is also weird how the max_bound is actually never used in this method except to check for an error.
+The source code max_bound didn't use in the judgment. Which means no matter how you tune max_bound, the voxelize size is still the same.
+```
+std::shared_ptr<VoxelGrid> VoxelGrid::CreateFromPointCloudWithinBounds(
+        const PointCloud &input,
+        double voxel_size,
+        const Eigen::Vector3d &min_bound,
+        const Eigen::Vector3d &max_bound) {
+    auto output = std::make_shared<VoxelGrid>();
+    if (voxel_size <= 0.0) {
+        utility::LogError("voxel_size <= 0.");
+    }
+
+    if (voxel_size * std::numeric_limits<int>::max() <
+        (max_bound - min_bound).maxCoeff()) {
+        utility::LogError("voxel_size is too small.");
+    }
+    output->voxel_size_ = voxel_size;
+    output->origin_ = min_bound;
+    std::unordered_map<Eigen::Vector3i, AvgColorVoxel,
+                       utility::hash_eigen<Eigen::Vector3i>>
+            voxelindex_to_accpoint;
+    Eigen::Vector3d ref_coord;
+    Eigen::Vector3i voxel_index;
+    bool has_colors = input.HasColors();
+    for (int i = 0; i < (int)input.points_.size(); i++) {
+        ref_coord = (input.points_[i] - min_bound) / voxel_size;
+        voxel_index << int(floor(ref_coord(0))), int(floor(ref_coord(1))),
+                int(floor(ref_coord(2)));
+        if (has_colors) {
+            voxelindex_to_accpoint[voxel_index].Add(voxel_index,
+                                                    input.colors_[i]);
+        } else {
+            voxelindex_to_accpoint[voxel_index].Add(voxel_index);
+        }
+    }
+    for (auto accpoint : voxelindex_to_accpoint) {
+        const Eigen::Vector3i &grid_index = accpoint.second.GetVoxelIndex();
+        const Eigen::Vector3d &color =
+                has_colors ? accpoint.second.GetAverageColor()
+                           : Eigen::Vector3d(0, 0, 0);
+        output->AddVoxel(geometry::Voxel(grid_index, color));
+    }
+    utility::LogDebug(
+            "Pointcloud is voxelized from {:d} points to {:d} voxels.",
+            (int)input.points_.size(), (int)output->voxels_.size());
+    return output;
+}
+```
+For my understanding, with the function name create_from_point_cloud_within_bounds, it should be within bounds to limit
+OnlyRightNow
+added a commit that references this issue on Oct 23, 2026
+Skip out-of-bounds points in VoxelGrid.create_from_point_cloud_within…
+...
+This issue will close once commit 7ac9a1d is merged into the 'main' branch.
+7ac9a1d
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+boundingboxgeometrymesh
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

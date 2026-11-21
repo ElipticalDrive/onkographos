@@ -1,0 +1,670 @@
+ArduPlane, ArduCopter, ArduRover, ArduSub source. Contribute to ArduPilot/ardupilot development by creating an account on GitHub.
+
+Derive backend attitude eulers/rot-matrix from quaternion by peterbarker · Pull Request #34564 · ArduPilot/ardupilot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+peterbarker
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Make the AHRS backends publish their attitude as a single quaternion and derive
+the euler angles and rotation matrix from it, instead of each backend supplying
+all three representations independently and applying the board-mounting trim in
+its own way.
+Classification & Testing (check all that apply and add your own)
+Checked by a human programmer
+Non-functional change
+No-binary change
+Infrastructure change (e.g. unit tests, helper scripts)
+Automated test(s) verify changes (e.g. unit test, autotest)
+Tested manually, description below (e.g. SITL)
+Tested on hardware
+Logs attached
+Logs available on request
+Description
+Each AHRS backend used to fill in the roll/pitch/yaw eulers, the rotation matrix
+and the quaternion separately, and applied AHRS_TRIM differently in each
+(quaternion.rotate(-get_trim()) in some paths, a trimmed matrix in others,
+euler subtraction elsewhere). Those forms could disagree. The trimmed rotation
+matrix was exact, but the quaternion's rotate(-trim) treated the trim as an
+axis-angle rotation vector, so with a trim that is non-zero on more than one axis
+the quaternion disagreed with the matrix. The EKF euler angles disagreed with both
+for any non-zero trim, by up to 3.8 deg with a (3,-2,0) deg trim at large
+attitudes.
+This change makes the quaternion the single source of truth:
+A backend fills in Estimates::quaternion and calls
+derive_attitude_from_quaternion(), which fills the euler angles and the
+rotation matrix from that quaternion, so the three representations can never
+disagree.
+AHRS_TRIM (the autopilot-body to vehicle-body mounting offset) is applied by
+composing the backend quaternion with a trim quaternion,
+get_quat_vehicle_body_to_autopilot_body() (= from_euler(trim).inverse()),
+which is exact for simultaneous trim on all three axes. This reproduces the
+historical trimmed rotation matrix
+(R_backend * rotation_vehicle_body_to_autopilot_body) rather than the old
+component-wise euler subtraction.
+EKF2/EKF3 no longer expose getEulerAngles()/getRotationBodyToNED() to
+the AHRS layer; getQuaternionBodyToNED() composes the EKF quaternion with the
+DAL trim quaternion, and the logged NKF1/XKF1 eulers are derived from it.
+AP_DAL carries the trim as a quaternion and rebuilds it from the logged trim
+on replay, so replayed estimators see the same trim as the original flight.
+get_quat_body_to_ned() returns the stored quaternion directly instead of
+reconstructing it from the rotation matrix.
+ExternalAHRS is unchanged in behaviour: it already supplies a vehicle-body
+attitude, so it does not apply the trim composition.
+What changes numerically
+The new values are always the correct ones — they make the published eulers,
+rotation matrix and quaternion mutually consistent, and consistent with DCM.
+Rotation matrix: unchanged for DCM, EKF2 and EKF3 with any trim, and so
+are DCM's euler angles.
+Published quaternion (AP_AHRS::get_quaternion(), ATTITUDE_QUATERNION):
+unchanged for a single-axis trim. With a trim that is non-zero on more than one
+axis it changes for DCM, EKF2, EKF3 and SIM, because the old
+quaternion.rotate(-trim) treated the trim as an axis-angle rotation vector
+rather than as the euler rotation used for the matrices: 0.05 deg for a trim of
+(3,-2,0) deg, 0.38 deg for (5,4,6), 0.87 deg for (10,10,0). SIM's matrix and
+eulers move with it. get_quat_body_to_ned() and the EKF
+getQuaternionBodyToNED() were already derived from the exact matrix, so they
+are unchanged for DCM and the EKFs.
+EKF2/EKF3 logged and returned euler angles: change for any non-zero
+AHRS_TRIM, including a single axis — not only multi-axis trim. For example
+with AHRS_TRIM_Y=5° at 30° bank and level pitch the old EKF output was
+roll 30.09 / pitch -0.67 / yaw +2.5; it is now 30 / 0 / 0. These eulers feed
+the Plane attitude and navigation controllers, and a single-axis AHRS_TRIM_Y
+is common on Plane, so this is behaviour worth noting even though the new
+values are the correct ones.
+Testing
+SITL, all pass on this branch:
+AP_Math unit test QuaternionTest.TrimCompositionMatchesRotationMatrix:
+asserts the quaternion-composition trim gives the same rotation matrix as the
+historical matrix form across a range of attitudes and a trim that is non-zero
+on all three axes.
+test.Plane.AHRSTrimMission: flies a Plane AUTO square circuit (four turns)
+and then the flaps.txt landing, with a 5 deg board pitch mounting offset
+(SIM_BRD_TRIM_Y) corrected by AHRS_TRIM_Y. It then compares the logged ATT
+attitude with SIM truth wherever the bank is 20 deg or more. Mean pitch/yaw
+error over about 385 banked samples is 0.20/0.30 deg on this branch, and
+1.34/3.24 deg with the same test against master's code. The test fails above
+0.75/1.5 deg, so it fails without this PR.
+test.Copter.Replay including its Trim subtest (significant AHRS_TRIM):
+replayed estimators reproduce the trim-dependent outputs of the original
+flight, exercising the AP_DAL trim-quaternion-on-replay path.
+Copter and Plane build cleanly.
+test.QuadPlane.QAUTOTUNE fails in CI on this PR. It is a marginal test rather
+than a behaviour change here. Autotune's position hold yaws the vehicle towards
+its start point once it has drifted more than 5 m
+(AC_AutoTune::get_poshold_attitude_rad), and the level timeout can expire
+during that turn, ending the tune with "AutoTune: Failed to level". In the pair of
+logs examined, the attitude matched SIM truth throughout on both; this branch's
+flight drifted to 5.4 m, where master's peaked at 5.0 m.
+Whether a run crosses that threshold depends on the exact trajectory, which
+rounding-level differences in the binary and harness timing change. Interleaved
+runs of each build (number of runs failing with "Failed to level"):
+build
+--speedup 100 (default), 20 runs
+--speedup 30, 15 runs
+master
+0
+2
+this PR up to "derive backend euler angles and rotation matrix from quaternion" (first commit with a shift)
+15
+3
+this PR
+13
+1
+this PR + #33628's AC_AutoTune commit
+0
+-
+At the default speedup this branch's binary lands on the failing side far more
+often, but at --speedup 30 it fails no more often than master. With
+AHRS_TRIM zero, as in this test, that commit changes the published attitude
+only at rounding level. #33628 fixes the underlying level-timeout race, and
+with it applied the test passes 20/20 on this branch. Merging #33628 first (or
+carrying its commit) would clear this CI failure.
+Still recommended before merge: a hardware flight with a non-zero AHRS_TRIM_Y
+through turns.
+Companion PR #34563 stacks temporary DEBUG instrumentation on top of this one (a
+QVAL log of the divergence between each backend's supplied and
+quaternion-derived attitude) plus data-gathering autotests, so the validation can
+be reviewed separately from this change. On this branch that divergence is 0.000
+deg for every backend (they are derived from the same quaternion); on master the
+same instrumentation shows the pre-change divergence, up to ~12 deg in the EKF
+logged eulers with a large multi-axis trim.
+This PR was AI-assisted (Claude). The human author has reviewed and is
+responsible for the change.
+peterbarker
+added
+the
+AIReview
+label
+Oct 1, 2026
+peterbarker
+added this to Peter's ArduPilot 4.8 Queue
+Oct 1, 2026
+github-actions
+Bot
+added
+CI
+Copter
+EKF
+Python
+labels
+Oct 1, 2026
+github-actions
+Bot
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Global Size Summary (Total Flash delta in bytes)
+Built from 6bbf8f3 rebased onto b032bcb
+Board
+Periph
+tracker
+blimp
+bootloader
+copter
+heli
+iofw
+plane
+rover
+sub
+DrotekP3Pro
+_
+_
+_
+*
+_
+_
+_
+_
+_
+_
+Durandal
+_
+-272
+-264
+_
+-208
+-208
+_
+-176
+-300
+-112
+Hitec-Airspeed
+*
+_
+_
+_
+_
+_
+_
+_
+_
+_
+KakuteF7
+_
+-56
+-48
+_
+-36
++100
+_
+-232
+-48
+-44
+MambaH743v4
+_
+-288
+-336
+_
+-252
+-240
+_
+-224
+-268
+-192
+MatekF405-CAN
+_
+_
+_
+*
+_
+_
+_
+_
+_
+_
+MatekF405
+_
+-56
+-48
+_
+-36
++100
+_
+-232
+-48
+-44
+MatekH743-bdshot
+_
+-284
+-268
+_
+-152
+-196
+_
+-208
+-260
+-312
+Pixhawk1-1M
+_
+-76
+-96
+_
+-84
+-92
+_
+-20
+-112
+-52
+disco
+_
+-368
+-450
+_
+-632
+-568
+_
+-504
+-436
+-494
+f103-GPS
+*
+_
+_
+_
+_
+_
+_
+_
+_
+_
+AP-Review
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Deprecated — see below for the updated review.
+Previous review (2026-10-01)
+Automated review note — AI-generated (Claude), validated against the live diff. Please sanity-check before acting.
+Verdict: COMMENT
+Reviewed at head fe842d96b8.
+Full report: https://firmware.ardupilot.org/Tools/APReview/DevCallReviews/PRReviews/ardupilot/ardupilot/34564/1.html#pr34564
+Thanks, this is a nice cleanup. Having one quaternion as the source of truth for attitude removes the old euler/matrix/quaternion trim inconsistencies. I found no blocking issues at fe842d9. The new TrimCompositionMatchesRotationMatrix test passes, every commit builds copter and replay, and test.Copter.Replay passes including the new Trim subtest. I also confirmed that the Trim subtest fails (about 18.6k mismatches) if the AP_DAL RFRN trim rebuild is removed, so it really does guard that fix.
+A few comments:
+The published and logged EKF eulers change for single-axis trim too, not only multi-axis trim. With just AHRS_TRIM_Y=5deg at 30deg bank and level pitch, the old EKF output was roll 30.09, pitch -0.67, yaw +2.5. Now it is 30/0/0. At 45deg bank, 10deg pitch the old output was 1.5deg off in pitch and 3.6deg off in yaw. The new values are the correct ones, and they now agree with the rotation matrix and with DCM. But ahrs roll/pitch/yaw feed the Plane attitude and nav controllers, and a single-axis AHRS_TRIM_Y is common on Plane. It would be worth saying this explicitly in the description and flying a Plane with a non-zero AHRS_TRIM_Y through turns, in SITL at least and ideally on hardware. Location: https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-d2d8ac26448b4eaef845ccd8fba7291f7f66f4247cf9aecc50ec1de15d25ac07R109
+A minor replay-exactness point, not reproduced. In a live run, start_frame() logs the live AHRS_TRIM parameter into RFRN but copies the quaternion that AP_AHRS cached at the start of update(). Replay rebuilds the quaternion from the logged value. These only differ if something off the main thread, for example a script, changes AHRS_TRIM between the two points, so I don't think it needs changing. Location: https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-9b93c10628938da0dc08557a4c945dd1751bff6ca24e33aa33f39095b8dd2248R89
+Nit: removing the functions left extra blank lines at AP_DAL.h:208-209, AP_NavEKF2.cpp:1143-1144, AP_NavEKF2_Outputs.cpp:83-85 and 107-108, and AP_NavEKF3_Outputs.cpp:125-127 and 147-148. Location: https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-12ee86c8bb613b27d91b4eb50daad0a2ccbaf4a6a2afdd23b1c506e7896654e8R209
+Not exercised in this review: Plane or other-vehicle SITL with non-zero trim, hardware, and ExternalAHRS hardware.
+peterbarker
+force-pushed
+the
+pr-claude-wt/attitude-from-quaternion
+branch
+from
+fe842d9 to
+0fd8419
+Compare
+October 1, 2026 12:07
+github-actions
+Bot
+added
+the
+Plane
+label
+Oct 1, 2026
+AP-Review
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Deprecated — see below for the updated review.
+Previous review (2026-10-01)
+Automated review note — AI-generated (Claude), validated against the live diff. Please sanity-check before acting.
+Verdict: COMMENT
+Reviewed at head 0fd8419475.
+Full report: https://firmware.ardupilot.org/Tools/APReview/DevCallReviews/PRReviews/ardupilot/ardupilot/34564/2.html#pr34564
+Thanks for the follow-up. The head moved from fe842d9 to 0fd8419. The library commits differ only by the blank-line cleanup, and the new Plane test is the only functional addition. The blank-line nit is fixed. The description now covers the single-axis EKF euler change and the Plane impact. The Plane test passes at this head, as do the quaternion gtest and test.Copter.Replay including Trim. No blocking issues.
+test.Plane.AHRSTrimMission can't catch the regression it is meant to guard. Its only check is wait_disarmed(), and it passes the same way on master with just this test cherry-picked. Also, WP5 and the LAND item are both at home, so the slope landing flares as soon as WP5 is reached and touches down about 391m from the LAND point. That makes the 'reaching disarm validates it' comment too strong. The signal is there to check: comparing logged ATT against SIM truth (time-aligned) while banked gave a mean pitch/yaw error of about 0.27/0.35deg with this PR and 1.3/3.3deg on master, both with 5deg trim. An ATTITUDE vs SIM_STATE check during the turns, similar to the existing level trim attitude test, and an approach leg before LAND would make it discriminating. https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3686
+Minor description wording: 'published quaternion and rotation matrix unchanged, except for DCM with multi-axis trim' is reversed. DCM's matrix and eulers already used the exact trim matrix, so they are unchanged. What changes for multi-axis trim is the backend quaternion in DCM, EKF2, EKF3 and SIM, because the old rotate(-trim) is an axis-angle rotation. SIM's matrix and eulers change with it. The differences are small, about 0.05deg for (3,-2,0) and 0.87deg for (10,10,0), and single-axis trim is identical. The new values are the consistent ones; only the text needs fixing. https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-d2d8ac26448b4eaef845ccd8fba7291f7f66f4247cf9aecc50ec1de15d25ac07R108
+The earlier replay-trim timing note is unchanged and still informational only. Not exercised in this review: hardware or ExternalAHRS flight with non-zero trim, and full vehicle suites.
+peterbarker
+force-pushed
+the
+pr-claude-wt/attitude-from-quaternion
+branch
+from
+0fd8419 to
+5701032
+Compare
+October 13, 2026 01:42
+AP-Review
+commented
+Oct 13, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Deprecated — see below for the updated review.
+Previous review (2026-10-13)
+Automated review note — AI-generated (Claude+Codex), validated against the live diff. Please sanity-check before acting.
+Verdict: COMMENT
+Reviewed at head 5701032502.
+Full report: https://firmware.ardupilot.org/Tools/APReview/DevCallReviews/PRReviews/ardupilot/ardupilot/34564/3.html#pr34564
+Re-reviewed at 5701032 (previously 0fd8419). The head moved by a rebase only: a range-diff shows the 13 commits unchanged apart from hunk context in the Plane test commit. Nothing newer is covered. CI had not run at this head when checked (75 of 77 checks queued), so no CI result is used.
+No blocking issues. At this head the quaternion gtest passes 13/13, test.Copter.Replay passes with 0 errors in all 7 subtests, the Plane DCM and ExternalAHRS tests (WindEstimatesTrim, DCMFallback, ForcedDCM, VectorNav, MicroStrain 7, InertialLabs) and the Copter AHRS trim tests pass, and copter, plane and Replay build at every commit that touches libraries/.
+The two points from the last review are unchanged, so here they are again briefly with fresh numbers.
+test.Plane.AHRSTrimMission still passes the same way without this PR. Its only check on the flight is wait_disarmed() (https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3733). Flown here twice each on this head and on a merge-base arduplane under the same test file, it passed 4 of 4 with the same flight each time. One correction to what I said before: WP5 and LAND are not at home. They are uploaded with zero lat/lng (https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3730), because create_simple_relloc_mission only converts non-zero offsets (Tools/autotest/vehicle_test_suite.py:4570), and Plane takes zero lat/lng as the current position (ArduPlane/commands.cpp:31). So LAND starts 0.1 s after WP4 is reached, the flare is announced at 60 m about 400 m from home, the leg home is not flown, and the aircraft glides to touch down 768 m from home. Only two turns reach 20 deg of bank. The signal to assert on is in the log: ATT against SIM truth while banked 20 deg or more had a mean pitch/yaw error of 0.27/0.35 deg at this head and 1.32/3.27 deg at the merge base, within 0.02 deg between the two runs of each. An attitude check in the turns, plus non-zero offsets for the last two items (or fly_home_land_and_disarm()), would make the test fail without the PR and fly the circuit its comment describes.
+Description wording under 'What changes numerically': 'Published quaternion and rotation matrix: unchanged, except for DCM with a trim that is non-zero on more than one axis' is still the wrong way round. The DCM, EKF2 and EKF3 rotation matrix is unchanged for any trim, and so are DCM's eulers. What changes with a multi-axis trim is the quaternion that DCM, EKF2, EKF3 and SIM publish (AP_AHRS::get_quaternion, ATTITUDE_QUATERNION), because the old rotate(-trim) was an axis-angle rotation (https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-d2d8ac26448b4eaef845ccd8fba7291f7f66f4247cf9aecc50ec1de15d25ac07R108): 0.05 deg for (3,-2,0), 0.38 deg for (5,4,6), 0.87 deg for (10,10,0), and nothing for a single-axis trim. SIM's matrix and eulers move with it. get_quat_body_to_ned() and the EKF getQuaternionBodyToNED() came from the exact matrix before, so they are unchanged for DCM and EKF. The commit message of e0d621f already has this right; only the description needs it.
+One thing I only half covered in the first review. I said the new Trim replay subtest guards the AP_DAL rebuild. It does, but the existing GPS subtest does too, since it already sets AHRS_TRIM_X 0.01 and AHRS_TRIM_Y -0.03 (Tools/autotest/arducopter.py:16771). With the two rebuild lines removed, test.Copter.Replay failed here in the GPS subtest with 18469 mismatches before it reached Trim (and Trim run on its own failed with 18705). So Trim adds a larger trim rather than the only cover. No change needed; it is your call whether the extra flight is worth it.
+The replay-trim timing note (https://github.com/ArduPilot/ardupilot/pull/34564/files#diff-9b93c10628938da0dc08557a4c945dd1751bff6ca24e33aa33f39095b8dd2248R89) is unchanged and still informational only.
+Not exercised: hardware flight with a non-zero AHRS_TRIM, ExternalAHRS on real hardware, embedded builds at this head, and full vehicle suites.
+peterbarker
+force-pushed
+the
+pr-claude-wt/attitude-from-quaternion
+branch
+from
+5701032 to
+68ba0d9
+Compare
+October 15, 2026 04:27
+AP-Review
+commented
+Oct 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Deprecated — see below for the updated review.
+Previous review (2026-10-15)
+Automated review note — AI-generated (Claude+Codex), validated against the live diff. Please sanity-check before acting.
+Verdict: COMMENT
+Reviewed at head 68ba0d9f30.
+Full report: https://firmware.ardupilot.org/Tools/APReview/DevCallReviews/PRReviews/ardupilot/ardupilot/34564/4.html#pr34564
+Re-reviewed at 68ba0d9 (previously 5701032). The branch was rebased onto 0922bce and the Plane test commit was rewritten; the other 12 commits are unchanged. Nothing newer is covered.
+No blocking issues. The two points from the last review are fixed. test.Plane.AHRSTrimMission now discriminates: it passes here at 0.15/0.25 deg mean banked pitch/yaw error and fails on the merge base at 1.33/3.24 deg. The 'What changes numerically' wording is now the right way round.
+test.QuadPlane.QAUTOTUNE: reproduced here. It fails 2 of 2 at this head with 'Failed to level' and passes 2 of 2 on the merge base, at the default speedup, run one after another. Earlier runs here showed it passing with AC_AutoTune: don't run level-timeout while yaw target is slewing to desired #33628's AC_AutoTune commit applied. Your description already explains this. Since AC_AutoTune: don't run level-timeout while yaw target is slewing to desired #33628 is still open, the only ask is merge order: land AC_AutoTune: don't run level-timeout while yaw target is slewing to desired #33628 first or carry its commit. Single runs here differ from your speedup table at two points (master passed at 30, this PR passed at 200), which fits a timing-sensitive test, so no change to the table is needed. CI had not reached the QuadPlane jobs when checked.
+Small comment nit in AHRSTrimMission: wait_current_waypoint(4) returns once WP3 is reached, which is after two turns, and fly_home_land_and_disarm() takes over straight away. So '# a square circuit (four turns)' (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3723) and '# all four corners have been turned once WP4 is current' (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3731) overstate the flight, and the (-100,-100) item (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3729) is never flown. The check is unaffected because most banked samples come from the flaps.txt circuit. Either reword the comments and drop that item, or wait for the end of the square.
+The replay-trim timing note (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-9b93c10628938da0dc08557a4c945dd1751bff6ca24e33aa33f39095b8dd2248R89) is unchanged and still informational only.
+Not exercised: a hardware flight with non-zero AHRS_TRIM, ExternalAHRS on real hardware, embedded builds at this head, and full vehicle suites.
+peterbarker
+force-pushed
+the
+pr-claude-wt/attitude-from-quaternion
+branch
+from
+68ba0d9 to
+f88784b
+Compare
+October 15, 2026 07:20
+peterbarker
+added 12 commits
+October 15, 2026 18:53
+AP_DAL: rebuild trim rotation when receiving replayed frame information
+…
+48e3e7f
+```
+The vehicle-body-to-autopilot-body rotation is only set in
+start_frame(), which is not called when replaying, so on Replay the
+rotation remained identity rather than reflecting the AHRS_TRIM of
+the original flight.  Rebuild it from the trim received in the RFRN
+message.
+
+Currently latent: nothing consumes this rotation during replay, but
+any future use of getRotationBodyToNED (or anything else derived from
+this rotation) in EKF-internal code would silently lose trim on
+replay.
+```
+autotest: Copter: add Replay subtest with significant AHRS_TRIM
+…
+4a618da
+```
+Flies the standard replay mission with 3/-2 degrees of trim so that
+any replayed estimator output which depends on the trim rotation
+restored through the DAL is checked against the original flight.
+```
+AP_AHRS: apply trim to backend quaternions using the trim rotation ma…
+…
+e1fc687
+```
+…trix
+
+quat.rotate(-trim) treats the trim parameters as a rotation vector;
+everywhere else trim is applied as the euler rotation matrix
+get_rotation_vehicle_body_to_autopilot_body() - in DCM's body matrix
+and the EKFs' getRotationBodyToNED.  The two conventions differ at
+second order in the trim angles (measured 0.05 degrees of attitude
+with 3/-2 degrees of trim), so each backend's quaternion disagreed
+with the rotation matrix supplied by the same backend.
+
+Apply the same rotation to the quaternion that is applied to the
+matrices, via a quaternion built from the trim euler angles, cached
+alongside the trim rotation matrices.
+```
+AP_AHRS: derive backend euler angles and rotation matrix from quaternion
+…
+dee88c5
+```
+Backends now supply only a quaternion as their attitude estimate; the
+euler angles and rotation matrix in the results are derived from it by
+common code.  This guarantees all attitude representations supplied by
+a backend agree; previously the euler angles disagreed with the
+quaternion by up to 3.8 degrees (EKF2/EKF3, with 3/-2 degrees of trim,
+at high attitude angles) and the rotation matrix by 0.05 degrees.
+
+For DCM the derived matrix is also now exactly orthonormal rather
+than being the renormalized integration matrix.
+```
+AP_DAL: provide vehicle-body trim rotation as a quaternion
+…
+64741f5
+```
+Mirrors the existing rotation-matrix accessor.  In Replay the
+quaternion is reconstructed from the trim logged in RFRN, so existing
+logs replay without change.
+```
+AP_NavEKF2: remove getEulerAngles; derive logged eulers from quaternion
+…
+572fcec
+```
+AP_AHRS no longer consumes euler angles from the EKFs.  The remaining
+internal consumers - NKF1/XKF1 logging and the lane-switch yaw reset
+accounting - now derive euler angles the same way AP_AHRS does:
+compose the attitude quaternion with the trim quaternion and convert,
+so logged eulers are in the same (vehicle-body) frame as ATT and can
+never disagree with the quaternion-derived attitude.
+
+This also replaces the previous euler-component subtraction of trim,
+which was only a first-order approximation; with 3/-2 degrees of trim
+it was wrong by up to 3.8 degrees at high attitude angles.
+```
+AP_NavEKF3: remove getEulerAngles; derive logged eulers from quaternion
+…
+6f31d5c
+```
+AP_AHRS no longer consumes euler angles from the EKFs.  The remaining
+internal consumers - NKF1/XKF1 logging and the lane-switch yaw reset
+accounting - now derive euler angles the same way AP_AHRS does:
+compose the attitude quaternion with the trim quaternion and convert,
+so logged eulers are in the same (vehicle-body) frame as ATT and can
+never disagree with the quaternion-derived attitude.
+
+This also replaces the previous euler-component subtraction of trim,
+which was only a first-order approximation; with 3/-2 degrees of trim
+it was wrong by up to 3.8 degrees at high attitude angles.
+```
+AP_NavEKF2: derive getQuaternionBodyToNED directly from the quaternion
+…
+cfe03ba
+```
+This was the last consumer of getRotationBodyToNED, which took a
+detour through a rotation matrix purely to apply trim; apply the trim
+quaternion instead, as AP_AHRS does, and remove getRotationBodyToNED
+from the cores and frontends.
+```
+AP_NavEKF3: derive getQuaternionBodyToNED directly from the quaternion
+…
+9a5f211
+```
+This was the last consumer of getRotationBodyToNED, which took a
+detour through a rotation matrix purely to apply trim; apply the trim
+quaternion instead, as AP_AHRS does, and remove getRotationBodyToNED
+from the cores and frontends.
+```
+AP_DAL: remove unused vehicle-body trim rotation matrix
+…
+0030ef8
+```
+The EKFs now apply trim via the quaternion form only.
+```
+AP_AHRS: return the stored quaternion from get_quat_body_to_ned
+…
+1e63a04
+```
+The rotation matrix is now derived from the backend quaternion, so
+converting it back to a quaternion was a round trip; return the
+stored quaternion directly.
+```
+AP_Math: test trim composition matches the rotation-matrix form
+…
+01dd73c
+```
+AP_AHRS now applies the board-mounting trim to a backend's attitude by
+composing its quaternion with from_euler(trim).inverse() and deriving the
+rotation matrix from the result, rather than keeping a separately-trimmed
+matrix.  Assert that this yields the same rotation matrix as the previous
+form, R_backend * rotation_vehicle_body_to_autopilot_body, across a range
+of attitudes and a trim that is non-zero on all three axes at once.
+```
+AP-Review
+commented
+Oct 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Deprecated — see below for the updated review.
+Previous review (2026-10-15)
+Automated review note — AI-generated (Claude+Codex), validated against the live diff. Please sanity-check before acting.
+Verdict: COMMENT
+Reviewed at head f88784bfab.
+Full report: https://firmware.ardupilot.org/Tools/APReview/DevCallReviews/PRReviews/ardupilot/ardupilot/34564/5.html#pr34564
+Re-reviewed at f88784b (previously 68ba0d9). Only the Plane AHRSTrimMission commit changed; the other 12 commits are identical. Nothing newer is covered.
+No blocking issues. The new waypoints fix the last point: the square now flies real corner turns, and the test still discriminates. It passes 2/2 here at 0.19/0.30 deg mean banked pitch/yaw error and fails 2/2 against the merge-base libraries at 1.28/3.17 deg. The quaternion gtest passes 13/13.
+One small comment nit remains in AHRSTrimMission. Item 6 becomes current before the turn at item 5 starts. fly_home_land_and_disarm() then loads flaps.txt about 0.7 s later, so the heading is still about 270 deg and the bank only reaches 12.9 deg. The square therefore makes three corner turns, not four. '# a square circuit (four turns)' (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3723) and 'the turns at the four corners (items 2 to 5)' (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3735) overstate it by one. The check itself is fine. Optional: say three corner turns, or wait until item 5's turn is done.
+QAUTOTUNE: in this round it passed 6/6 at this head and 5/6 on the merge base, so it looks marginal on both rather than broken by this PR. Your note about landing #33628 first covers it. CI had not reached it at this head when checked.
+The replay-trim timing note (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-9b93c10628938da0dc08557a4c945dd1751bff6ca24e33aa33f39095b8dd2248R89) is unchanged and still informational only.
+Not exercised: a hardware flight with non-zero AHRS_TRIM, ExternalAHRS on real hardware, embedded builds at this head, and full vehicle suites.
+autotest: Plane: fly turns with a non-zero AHRS_TRIM_Y
+…
+6bbf8f3
+```
+Exercise the trimmed attitude - published by the backends and feeding the
+attitude and navigation controllers - through turns: fly a square AUTO circuit
+and the flaps.txt landing with a board pitch mounting offset corrected by
+AHRS_TRIM_Y, then check the logged ATT against SIM truth while banked 20
+degrees or more.  Applying a single-axis trim correctly matters once banked,
+where it mixes into more than one euler axis.
+```
+peterbarker
+force-pushed
+the
+pr-claude-wt/attitude-from-quaternion
+branch
+from
+f88784b to
+6bbf8f3
+Compare
+October 15, 2026 09:56
+AP-Review
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Automated review note — AI-generated (Claude+Codex), validated against the live diff. Please sanity-check before acting.
+Verdict: ACCEPT
+Reviewed at head 6bbf8f305a.
+Full report: https://firmware.ardupilot.org/Tools/APReview/DevCallReviews/PRReviews/ardupilot/ardupilot/34564/6.html#pr34564
+Re-reviewed at 6bbf8f3 (previously f88784b). Only the Plane AHRSTrimMission commit changed; the other 12 commits are identical. Nothing newer is covered.
+No blocking issues. The previous comment nit is fixed: the new wait_heading(0) (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-df4815fbb326217ce097d5db86c3945dfce9ee5fe915980c9705fa99c8bd4c2cR3739) lets the fourth turn finish (yaw 270 to 349 deg at 53 deg bank) before the landing mission loads, so 'four turns' is now right. AHRSTrimMission passes 2/2 at 0.19/0.30-0.31 deg and fails against the merge-base libraries at 1.35/3.26 deg. The quaternion gtest passes 13/13.
+QAUTOTUNE passed 4/4 here at this head. Your table shows it is environment-dependent, though, so the stated merge order (#33628 first) still stands. That PR was still open when checked.
+The replay-trim timing note (https://github.com/ardupilot/ardupilot/pull/34564/files#diff-9b93c10628938da0dc08557a4c945dd1751bff6ca24e33aa33f39095b8dd2248R89) is unchanged and remains informational only.
+Not exercised: a hardware flight with non-zero AHRS_TRIM, ExternalAHRS on real hardware, embedded builds at this head, full vehicle suites, and CI at this head. Only the primary pass flew SITL; the other two passes made no flight checks.
+peterbarker
+moved this to ReadyForDevCall
+in Peter's ArduPilot 4.8 Queue
+Oct 16, 2026
+peterbarker
+marked this pull request as ready for review
+October 16, 2026 00:44
+peterbarker
+mentioned this pull request
+Oct 16, 2026
+DEBUG: show testing for derive-eulers/matrix-from-quaternion branch
+#34563
+Draft
+4 of 9 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+AIReview
+CI
+Copter
+EKF
+Plane
+Python
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

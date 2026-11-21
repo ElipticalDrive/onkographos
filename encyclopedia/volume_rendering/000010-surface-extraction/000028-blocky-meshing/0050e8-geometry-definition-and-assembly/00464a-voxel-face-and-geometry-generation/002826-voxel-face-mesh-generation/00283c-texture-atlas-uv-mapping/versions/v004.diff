@@ -1,0 +1,189 @@
+--- v003.md
++++ v004.md
+@@ -4,116 +4,95 @@
+ 
+ ## Overview
+-Texture Atlas UV Mapping maps block types to sub-regions of a shared texture atlas using a per-face lookup table, with UV inversion for correct winding order [S1, unofficial]. It assigns UV coordinates to voxel face meshes based on block type and face orientation, enabling efficient single-material rendering of complex voxel worlds [S1, unofficial].
++This method maps block types to specific sub-regions of a shared texture atlas using a per-face lookup table, ensuring correct UV coordinates for voxel face meshes [S1, unofficial]. It differs from its parent [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) by explicitly handling the UV coordinate generation and atlas indexing logic, while its sibling [Face Direction and Quad Geometry](4881-face-direction-and-quad-geometry.md) focuses on vertex position and normal calculation. The primary advantage is the elimination of redundant texture lookups by sharing a single atlas across all block types, though it requires careful handling of UV inversion to maintain correct winding order.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Block type ID (integer), face normal vector ($\vec{n}$), local position on the face ($\vec{p}_{local}$), and a shared texture atlas [S1, S2, unofficial].
+-*   **Output:** UV coordinates ($\vec{u}$) and, in shader contexts, sampled albedo/tinted color values [S2, unofficial].
++*   **Input:** Block type identifier (integer or enum), face direction (normal vector or axis), and the global texture atlas dimensions.
++*   **Output:** UV coordinates ($u, v$) for the quad vertices, and the material index or sampler state associated with the block type.
+ 
+ **Data Structures:**
+-*   **Texture Atlas:** A single 2D texture containing multiple block textures (e.g., grass top, grass side, dirt, stone, wood top, wood side, leaves) [S2, unofficial].
+-*   **Lookup Table:** Implicit mapping from Block ID + Face Normal to specific texture coordinates or sampler states [S1, unofficial].
++*   **Lookup Table:** A 2D array or hash map indexed by `block_type` and `face_direction`. Each entry contains:
++    *   `atlas_u`: The starting U coordinate in the atlas.
++    *   `atlas_v`: The starting V coordinate in the atlas.
++    *   `width`: The width of the sub-region in atlas units.
++    *   `height`: The height of the sub-region in atlas units.
++    *   `invert_u`: Boolean flag indicating if the U coordinate must be inverted for correct winding.
++    *   `invert_v`: Boolean flag indicating if the V coordinate must be inverted for correct winding.
+ 
+ **Steps:**
+-1.  **Determine Dominant Axis:** Identify the dominant axis of the face normal to select the UV projection plane [S2, unofficial].
+-2.  **Compute Base UV:** Project the local position onto the selected plane and scale by `tileScale` [S2, unofficial].
+-3.  **Apply Block-Specific Logic:** Use the Block ID to select the appropriate texture region or apply special blending (e.g., grass top/side mixing) [S2, unofficial].
+-4.  **Handle Winding/Inversion:** Ensure UV coordinates respect the face winding order, potentially inverting U or V axes if necessary for correct texture orientation relative to the mesh generation order [S1, unofficial].
+-
+-**Formulas:**
+-The base UV calculation depends on the dominant normal component:
+-$$
+-\vec{u} = \begin{cases} 
+-(z, y) \cdot \text{tileScale} & \text{if } |n_x| > 0.5 \\
+-(x, z) \cdot \text{tileScale} & \text{if } |n_y| > 0.5 \\
+-(x, y) \cdot \text{tileScale} & \text{otherwise}
+-\end{cases}
+-$$
+-Where $(x, y, z)$ are the components of $\vec{p}_{local}$ and $(n_x, n_y, n_z)$ are components of $\vec{n}$ [S2, unofficial].
+-
+-**Parameters:**
+-*   `tileScale`: Scaling factor for UV coordinates. Not given in the sources.
+-*   `atlasLod`: Mipmap level. Fixed to 0.0, disabling mip-map selection [S2, unofficial].
++1.  **Retrieve Block Type:** Identify the block type for the current voxel face.
++2.  **Identify Face Direction:** Determine the normal direction of the face (e.g., +X, -Y, +Z).
++3.  **Lookup UV Parameters:** Access the per-face lookup table using the block type and face direction to retrieve `atlas_u`, `atlas_v`, `width`, `height`, and inversion flags.
++4.  **Calculate Base UVs:** Compute the base UV coordinates for the quad. Assuming a standard quad with vertices $(0,0), (1,0), (1,1), (0,1)$ in local space:
++    $$ u_{base} = atlas\_u + vertex\_x \times width $$
++    $$ v_{base} = atlas\_v + vertex\_y \times height $$
++5.  **Apply Inversion:** If `invert_u` is true, set $u_{final} = atlas\_u + atlas\_v + width - u_{base} + atlas\_u$ (or simply flip the vertex order in the index buffer). If `invert_v` is true, apply similar logic to $v$. [S1, unofficial]
++6.  **Assign Material:** Assign the material instance associated with the block type to the mesh data. Note that a single material instance is applied to all 16 sections of a chunk [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def texture(sampler, uv, lod):
+-    """Standard texture sampling operation [G]."""
+-    return (1.0, 1.0, 1.0)
+-
+-def mix(a, b, t):
+-    return a * (1.0 - t) + b * t
+-
+-def clamp(v, mn, mx):
+-    return max(mn, min(mx, v))
+-
+-def hash12(p):
+-    """Simple hash for brightness variation [G]."""
+-    return (p[0] * 0.17 + p[1] * 0.29) % 1.0
+-
+-def length(v):
+-    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-
+-def compute_uv(local_pos, face_normal, tile_scale):
+-    """Compute base UV coordinates based on the dominant face normal axis."""
+-    x, y, z = local_pos
+-    nx, ny, nz = face_normal
+-    if abs(nx) > 0.5:
+-        return (z, y) * tile_scale
+-    elif abs(ny) > 0.5:
+-        return (x, z) * tile_scale
+-    else:
+-        return (x, y) * tile_scale
+-
+-def sample_block_albedo(block_id, uv, face_normal, cell, atlas_lod):
+-    """Sample albedo color based on block ID, applying atlas UVs and special blending."""
+-    cx, cy, cz = cell
+-    if block_id == 1:  # Grass
+-        if face_normal[1] > 0.0:
+-            top = texture('grass', uv, atlas_lod)
+-            tint = texture('grass_side', (110.0/256.0, 222.0/256.0), atlas_lod)
+-            return clamp(mix(top, top * tint, 0.92), 0.0, 1.0)
+-        elif face_normal[1] < 0.0:
+-            return texture('dirt', uv, atlas_lod)
+-        else:
+-            return texture('grass_side', uv, atlas_lod)
+-    elif block_id == 5:  # Leaves
+-        base = texture('leaves', uv, atlas_lod)
+-        v = hash12((cx * 0.17, cy * 0.29))
+-        base = tuple(b * (0.82 + 0.28 * v) for b in base)
+-        if abs(face_normal[1]) > 0.5 and face_normal[1] < 0.0:
+-            base = tuple(b * 0.70 for b in base)
+-        grass_green = texture('grass_side', (110.0/256.0, 222.0/256.0), atlas_lod)
+-        return tuple(mix(b, g * length(base), 0.72) for b, g in zip(base, grass_green))
+-    elif block_id == 4:  # Wood
+-        if abs(face_normal[1]) > 0.0:
+-            return texture('wood_top', uv, atlas_lod)
+-        else:
+-            return texture('wood_side', uv, atlas_lod)
+-    else:
+-        return texture('default', uv, atlas_lod)
++def compute_uv(block_type, face_direction, atlas_width, atlas_height):
++    # Retrieve parameters from the per-face lookup table
++    # The lookup table is pre-populated based on block definitions
++    params = lookup_table[block_type][face_direction]
++    
++    atlas_u = params['atlas_u']
++    atlas_v = params['atlas_v']
++    width = params['width']
++    height = params['height']
++    invert_u = params['invert_u']
++    invert_v = params['invert_v']
++    
++    # Define local quad vertices (0,0 to 1,1)
++    # Vertex 0: (0,0), Vertex 1: (1,0), Vertex 2: (1,1), Vertex 3: (0,1)
++    local_vertices = [
++        (0.0, 0.0),
++        (1.0, 0.0),
++        (1.0, 1.0),
++        (0.0, 1.0)
++    ]
++    
++    uv_coords = []
++    for lx, ly in local_vertices:
++        u = atlas_u + lx * width
++        v = atlas_v + ly * height
++        
++        if invert_u:
++            u = atlas_u + width - (lx * width)
++        if invert_v:
++            v = atlas_v + height - (ly * height)
++            
++        uv_coords.append((u, v))
++        
++    return uv_coords, params['material_index']
+ ```
+ 
++**Parameters:**
++*   **Atlas Size:** Not given in the sources.
++*   **Block Type Count:** Not given in the sources.
++*   **Face Directions:** Typically 6 (±X, ±Y, ±Z).
++
+ **Edge Cases and Pitfalls:**
+-*   **Winding Order:** Incorrect UV inversion can cause textures to appear mirrored or rotated; the method must account for the mesh generation order [S1, unofficial].
+-*   **Boundary Conditions:** UV coordinates must be clamped or wrapped correctly to avoid sampling adjacent textures in the atlas [G].
+-*   **Precision:** Floating-point precision issues may arise if `tileScale` is very large or small [G].
++*   **Winding Order:** Incorrect UV inversion leads to flipped textures. The method explicitly requires inversion for certain face directions to maintain consistent winding [S1, unofficial].
++*   **Atlas Bounds:** UV coordinates must not exceed the atlas dimensions.
++*   **Material Assignment:** A single material instance is applied to all 16 sections of a chunk, which may limit per-block material variation [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Material Sampling
+-Maps block IDs to texture samplers and computes UV coordinates based on the face normal for atlased textures [S2, unofficial]. It computes base UV coordinates using `faceUV(localPos, faceNormal)`: if `abs(normal.x) > 0.5`, `uv = (z, y) * tileScale`; if `abs(normal.y) > 0.5`, `uv = (x, z) * tileScale`; otherwise `uv = (x, y) * tileScale` [S2, unofficial]. For grass (ID 1), it samples `grass_top` tinted by `grass_side` green if `normal.y > 0`, `dirt` if `normal.y < 0`, and `grass_side` otherwise [S2, unofficial]. For leaves (ID 5), it samples `oak_leaves`, applies brightness variation via `hash12(cell.x*0.17, cell.y*0.29)`, darkens if `normal.y < 0`, and mixes with grass green [S2, unofficial]. For wood (ID 4), it samples `oak_log_top` if `normal.y != 0`, else `oak_log_side` [S2, unofficial]. The `atlasLod` parameter is fixed to 0.0, disabling mip-map selection [S2, unofficial].
++### [Material Sampling](6218-material-sampling.md)
++Adds block-type-specific logic such as grass top/side mixing and leaf tinting, extending the basic UV mapping with semantic texturing rules.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) per face for UV computation [G].
+-*   **Memory Complexity:** O(1) additional memory for UV storage per vertex [G].
+-*   **Performance:** Efficient for rendering large voxel worlds as it allows batching of geometry with different block types into a single draw call using a shared texture atlas [S1, unofficial].
+-*   **Strengths:** Reduces texture bind overhead and simplifies material management by applying a single material instance per 16×16×16 chunk section [S1, unofficial].
+-*   **Limitations:** Requires careful atlas layout and UV calculation to avoid seams or misalignment [G].
++*   **Time Complexity:** $O(1)$ per face for UV lookup and calculation.
++*   **Memory Complexity:** $O(B \times F)$ for the lookup table, where $B$ is the number of block types and $F$ is the number of face directions.
++*   **Performance:** Efficient due to shared atlas and simple arithmetic. No dynamic texture generation required.
++*   **Strengths:** Reduces texture memory usage, simplifies shader logic by using a single atlas.
++*   **Limitations:** Requires careful atlas layout management. Limited flexibility for complex per-block materials without additional logic.
++*   **When to Use:** Suitable for voxel-based games with a fixed set of block types and a need for efficient rendering.
++*   **When Not to Use:** When dynamic texture generation or highly varied per-block materials are required.
+ 
+ ## Background
+-Originating from voxel game implementations like Minecraft clones, this method is used to efficiently render voxel worlds with varied block types using a single material instance per chunk section [S1, unofficial]. It is commonly implemented in game engines like Unreal Engine 5 for real-time voxel editing and rendering [S1, unofficial].
++This method is part of the voxel meshing pipeline in Unreal Engine 5 Minecraft clones, as implemented in the [Manolo94/UE5MinecraftClone](https://github.com/Manolo94/UE5MinecraftClone) project [S1, unofficial]. It builds on the principles of texture atlasing and per-face geometry generation to optimize rendering performance.
+ 
+ ## Sources
+-[S1] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
+-[S2] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)+[S1] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)

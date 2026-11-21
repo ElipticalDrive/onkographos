@@ -1,0 +1,88 @@
+# Splatting-Based AMR Volume Rendering
+
+Also called: Hierarchical Splatting for AMR, Park et al. method, k-d-tree/octree hierarchical splatting
+
+## Overview
+Splatting-Based AMR Volume Rendering is a hierarchical object-order rendering technique designed for Adaptive Mesh Refinement (AMR) data. It solves the problem of efficiently rendering non-uniform, multi-resolution scalar fields by converting the irregular AMR hierarchy into a structured k-d-tree of constant-resolution blocks, augmented with octrees to manage isovalue ranges [S1, S2, unofficial]. Unlike standard splatting which treats primitives uniformly, this method uses the hierarchical structure to cull regions outside a specified isovalue range and transfer function, rendering only relevant data back-to-front [S1, S2, unofficial]. It sets itself apart from sibling methods like [Octree-based Splatting](8067-octree-based-splatting.md) by explicitly handling the conversion of AMR block structures into a k-d-tree framework for domain subdivision [S1, S2, unofficial].
+
+## How it works
+**Inputs:** AMR scalar field data; a specified isovalue range; a transfer function mapping scalar values to optical properties (color, opacity).
+**Outputs:** A rendered 2D image.
+
+**Data Structures:**
+1.  **K-d-tree:** Represents the spatial domain. The AMR hierarchy is converted into a k-d-tree consisting of blocks of constant resolution [S1, S2, unofficial].
+2.  **Augmented Octree:** Each node in the k-d-tree is augmented with an octree structure [S1, S2, unofficial].
+3.  **Node Metadata:** Both k-d-tree and octree nodes contain a 32-bit field [S1, S2, unofficial]. Each bit in this field represents a continuous range of isovalues [S1, S2, unofficial]. This allows for rapid identification of nodes containing values within the user-specified isovalue range.
+
+**Algorithm Steps:**
+1.  **Hierarchy Conversion:** Convert the input AMR hierarchy into a k-d-tree structure where each leaf node represents a block of constant resolution [S1, S2, unofficial].
+2.  **Augmentation:** Augment each node of the constructed k-d-tree with an octree [S1, S2, unofficial].
+3.  **Metadata Population:** For each node in the k-d-tree and its associated octree, populate the 32-bit field. Each bit corresponds to a specific continuous isovalue range, indicating whether data within that node falls into that range [S1, S2, unofficial].
+4.  **Region Identification:** Traverse the k-d-tree and octree structures to identify regions (nodes) that contain scalar values within the specified isovalue range, as determined by the 32-bit metadata fields [S1, S2, unofficial].
+5.  **Rendering:** Render the identified regions back-to-front using hierarchical splatting [S1, S2, unofficial]. This involves projecting the primitives associated with the selected nodes onto the screen and compositing them according to the transfer function and depth order.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_amr_volume(AMR_data, isovalue_range, transfer_function):
+    # Step 1: Convert AMR hierarchy to k-d-tree of constant-resolution blocks
+    kdtree = convert_amr_to_kdtree(AMR_data)
+    
+    # Step 2: Augment each k-d-tree node with an octree
+    for node in kdtree.all_nodes():
+        node.octree = create_augmented_octree(node)
+        
+    # Step 3: Populate 32-bit isovalue range fields
+    # Each bit represents a continuous range of isovalues
+    for node in kdtree.all_nodes():
+        node.isovalue_mask = compute_isovalue_mask(node, isovalue_range)
+        
+    # Step 4: Identify regions within the specified isovalue range
+    # Using the k-d tree and octree metadata
+    relevant_nodes = identify_relevant_nodes(kdtree, isovalue_range)
+    
+    # Step 5: Render identified regions back-to-front using hierarchical splatting
+    # This builds on [Splatting](23-splatting.md) and [Octree-based Hierarchy](12129-octree-based-hierarchy.md)
+    image = render_back_to_front_hierarchical_splatting(relevant_nodes, transfer_function)
+    
+    return image
+
+def compute_isovalue_mask(node, isovalue_range):
+    """
+    Computes a 32-bit mask where each bit represents a continuous range of isovalues.
+    Returns a 32-bit integer.
+    """
+    mask = 0
+    # Determine which continuous isovalue ranges are present in this node
+    # The specific mapping of bits to ranges is implementation-defined but fixed
+    for i in range(32):
+        if node.contains_value_in_range(i, isovalue_range):
+            mask |= (1 << i)
+    return mask
+```
+
+**Parameters:**
+*   **Isovalue Range:** The range of scalar values to visualize. Not given in the sources.
+*   **Transfer Function:** Maps scalar values to color and opacity. Not given in the sources.
+*   **Bit Field Size:** Fixed at 32 bits per node.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The 32-bit field limits the granularity of isovalue range identification to 32 continuous ranges. If finer granularity is required, this method may not be sufficient. Not given in the sources.
+*   **AMR Conversion:** The conversion from AMR to k-d-tree must handle irregular block sizes and refinement levels correctly. Not given in the sources.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Improves rendering quality considerably compared to slicing-based approaches [S1, unofficial]. Supports a more complex light model with wavelength-dependent absorption [S1, unofficial].
+*   **Strengths:** Efficient culling of irrelevant data via isovalue range identification; handles AMR data structure naturally through k-d-tree conversion.
+*   **Limitations:** Limited to scalar fields with specified isovalue ranges; 32-bit field constraint on isovalue granularity.
+*   **When to use:** When rendering AMR data with specific isovalue ranges and requiring high-quality volume rendering with complex lighting.
+*   **When not to use:** When real-time performance is critical and the overhead of hierarchy conversion is too high; when isovalue ranges are not the primary visualization criterion.
+
+## Background
+The method was introduced by Park et al. in 2002 [S1, S2, unofficial]. It builds on the hierarchical splatting approach by Laur & Hanrahan (1991) [S1, unofficial]. It is part of the broader field of AMR visualization, which also includes methods like Kreylos et al. (2002) for direct volume rendering and Chen et al. (2003) for feature trees [S1, S2, unofficial].
+
+## Sources
+[S1] Visualization Tools for Adaptive Mesh Refinement Data, https://digital.library.unt.edu/ark:/67531/metadc894061/, fetched 2026-10-26 (unofficial)
+[S2] Visualization Tools for Adaptive Mesh Refinement Data, https://www.vacet.org/publications/AMRVisJune2007.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,240 @@
+--- v002.md
++++ v003.md
+@@ -4,131 +4,143 @@
+ 
+ ## Overview
+-BD-PSNR and BD-BR are metrics used to evaluate lossy compression performance by calculating the average difference in quality (BD-PSNR) or bit-rate (BD-BR) between two rate-distortion (RD) curves [S1]. They provide a single scalar value that facilitates the objective comparison of compression techniques, avoiding the impracticality of displaying full RD curves for multiple experiments [S1].
++BD-PSNR and BD-BR are metrics used to evaluate lossy compression performance by calculating the average difference in quality (BD-PSNR) or bit-rate (BD-BR) between two rate-distortion (RD) curves [S1]. They set themselves apart from point-wise comparisons by integrating the area between two continuous RD curves, providing a single value that facilitates objective comparison of compression techniques [S1].
+ 
+ ## How it works
+-**Inputs:** Two sets of rate-distortion points: a reference set $R_{ref} = \{(R_{ref,i}, D_{ref,i})\}$ and a test set $R_{test} = \{(R_{test,j}, D_{test,j})\}$, where $R$ represents the bit-rate (or model size) and $D$ represents the distortion metric (e.g., PSNR in dB) [S1, S2].
+-
+-**Outputs:**
+-- BD-PSNR: The average difference in PSNR (dB) between the two curves [S1].
+-- BD-BR: The average relative difference in bit-rate between the assessed and reference techniques [S1].
++**Inputs and Outputs:**
++*   **Inputs:** Two sets of rate-distortion data points. Each set consists of pairs $(R_i, D_i)$, where $R$ is the bit-rate (or size) and $D$ is the distortion metric (e.g., MSE, PSNR). Let the reference method be $R_{ref}, D_{ref}$ and the test method be $R_{test}, D_{test}$.
++*   **Outputs:** A single BD-PSNR value (in dB) representing the average quality difference, or a single BD-BR value (in %) representing the average bit-rate difference [S1].
+ 
+ **Data Structures:**
+-- Two lists of tuples: `reference_points` and `test_points`. Each tuple contains `(rate, distortion)` [S1, S2].
++*   Two lists of tuples: `[(rate, distortion), ...]` for the reference and test methods.
++*   The number of points should be sufficient to model the curve (typically 4 or more points per curve are recommended in standard implementations, though the source notes do not specify a minimum).
+ 
+ **Steps:**
+-1. **Interpolation:** Fit a continuous rate-distortion curve for both the reference and test sets using piecewise cubic interpolation [S2]. This step transforms discrete experimental points into continuous functions $D_{ref}(R)$ and $D_{test}(R)$ [S2].
+-2. **Integration:** Calculate the area between the two interpolated curves over the range of rates where both curves are defined [S1]. For BD-PSNR, this area represents the average difference in quality [S1]. For BD-BR, the calculation determines the bit saving at the same quality level [S2].
++1.  **Logarithmic Transformation:** Convert the bit-rate values $R$ to natural logarithms $\ln(R)$ for both reference and test curves. The distortion values (PSNR or MSE) are used directly or transformed depending on the specific variant (PSNR vs BR). For BD-PSNR, the distortion is typically PSNR. For BD-BR, the distortion is often PSNR, and the rate is the variable of integration.
++2.  **Cubic Spline Interpolation:** Fit a cubic spline through the data points of the reference curve $(\ln(R_{ref}), D_{ref})$ and the test curve $(\ln(R_{test}), D_{test})$. This creates continuous functions $D_{ref}(\ln R)$ and $D_{test}(\ln R)$ [S1].
++3.  **Integration:** Calculate the area between the two interpolated curves over the range of common bit-rates.
++    *   For **BD-PSNR**: Integrate the difference in distortion (PSNR) with respect to $\ln(R)$. The result is the average difference in PSNR [S1].
++    *   For **BD-BR**: Integrate the difference in bit-rate with respect to the distortion metric (usually PSNR). The result is normalized to a percentage [S1].
++4.  **Normalization:**
++    *   BD-PSNR is expressed in dB. A positive value indicates the test method is better (higher PSNR) than the reference.
++    *   BD-BR is expressed as a percentage. A negative value indicates the test method uses less bitrate for the same quality.
+ 
+ **Formulas:**
+-The method computes the average difference by integrating the area between the interpolated curves and normalizing by the rate range [G]. For BD-PSNR, $BD\text{-}PSNR = \frac{1}{R_{max}-R_{min}} \int_{R_{min}}^{R_{max}} (D_{ref}(R) - D_{test}(R)) \, dR$ [G]. For BD-BR, the rate axis is typically transformed logarithmically before interpolation to compute the average relative bit-rate difference [G].
++Let $y_{ref}(x)$ and $y_{test}(x)$ be the cubic spline interpolations of the reference and test curves, where $x = \ln(R)$.
++The BD-PSNR is calculated as:
++$$ \Delta \bar{P} = \frac{1}{x_2 - x_1} \int_{x_1}^{x_2} (y_{test}(x) - y_{ref}(x)) \, dx $$
++where $x_1$ and $x_2$ are the minimum and maximum $\ln(R)$ values common to both curves [S1].
++
++The BD-BR is calculated as:
++$$ \Delta \bar{R} = \frac{\int_{y_1}^{y_2} (x_{test}(y) - x_{ref}(y)) \, dy}{\int_{y_1}^{y_2} x_{ref}(y) \, dy} \times 100\% $$
++where $y_1$ and $y_2$ are the minimum and maximum distortion values common to both curves [S1].
+ 
+ **Parameters:**
+-- Interpolation method: Piecewise cubic interpolation [S2].
++*   Spline type: Cubic spline [S1].
++*   Integration limits: The overlapping range of the two curves [S1].
+ 
+ **Edge cases and pitfalls:**
+-- The method requires overlapping rate ranges for both curves to perform integration [S1].
+-- Degenerate curves with identical rates or distortions yield zero difference.
+-- Precision loss may occur if the rate range is extremely large or small [G].
++*   **Non-overlapping ranges:** If the rate-distortion curves do not overlap in their operational range, the integration limits are undefined. The source notes do not specify how to handle this.
++*   **Monotonicity:** RD curves should be monotonic. Non-monotonic data may require smoothing or filtering before interpolation.
++*   **Precision:** The accuracy depends on the number of data points used to define the curves. Sparse data leads to inaccurate spline interpolation.
+ 
+ **Pseudocode:**
+ ```python
+-import math
++import numpy as np
++from scipy.interpolate import CubicSpline
+ 
+-def calculate_bjontegaard_delta(reference_points, test_points):
+-    # Sort points by rate
+-    ref_sorted = sorted(reference_points, key=lambda p: p[0])
+-    test_sorted = sorted(test_points, key=lambda p: p[0])
++def calculate_bd_psnr(ref_rates, ref_psnrs, test_rates, test_psnrs):
++    """
++    Calculates BD-PSNR between two rate-distortion curves.
++    ref_rates, test_rates: array-like of bit-rates (R)
++    ref_psnrs, test_psnrs: array-like of PSNR values (D)
++    """
++    # 1. Log-transform rates
++    x_ref = np.log(ref_rates)
++    x_test = np.log(test_rates)
+     
+-    # 1. Fit continuous curves using piecewise cubic interpolation [G]
+-    ref_spline = fit_cubic_spline(ref_sorted)
+-    test_spline = fit_cubic_spline(test_sorted)
++    # 2. Determine common range
++    x_min = max(np.min(x_ref), np.min(x_test))
++    x_max = min(np.max(x_ref), np.max(x_test))
+     
+-    # 2. Determine common rate range for integration
+-    min_rate = max(p[0] for p in ref_sorted + test_sorted)
+-    max_rate = min(p[0] for p in ref_sorted + test_sorted)
++    if x_min >= x_max:
++        return 0.0 # Or raise error
++        
++    # 3. Interpolate
++    # Create a dense set of x values within the common range
++    x_dense = np.linspace(x_min, x_max, 1000)
+     
+-    if min_rate >= max_rate:
+-        return 0.0, 0.0
++    cs_ref = CubicSpline(x_ref, ref_psnrs)
++    cs_test = CubicSpline(x_test, test_psnrs)
++    
++    y_ref = cs_ref(x_dense)
++    y_test = cs_test(x_dense)
++    
++    # 4. Integrate difference
++    # Using trapezoidal rule for numerical integration
++    integral = np.trapz(y_test - y_ref, x_dense)
++    
++    # 5. Normalize by range
++    bd_psnr = integral / (x_max - x_min)
++    
++    return bd_psnr
++
++def calculate_bd_br(ref_rates, ref_psnrs, test_rates, test_psnrs):
++    """
++    Calculates BD-BR between two rate-distortion curves.
++    """
++    # Note: Standard BD-BR integrates rate difference w.r.t distortion
++    # This requires inverting the spline or interpolating R as a function of D
++    
++    # 1. Determine common PSNR range
++    y_min = max(np.min(ref_psnrs), np.min(test_psnrs))
++    y_max = min(np.max(ref_psnrs), np.max(test_psnrs))
++    
++    if y_min >= y_max:
++        return 0.0
+         
+-    # 3. Evaluate curves at N points across the common range
+-    N = 100
+-    rates = [min_rate + i * (max_rate - min_rate) / (N - 1) for i in range(N)]
+-    ref_vals = [ref_spline(r) for r in rates]
+-    test_vals = [test_spline(r) for r in rates]
++    # 2. Interpolate Rate as a function of PSNR
++    y_dense = np.linspace(y_min, y_max, 1000)
+     
+-    # 4. Integrate area between curves using trapezoidal rule [G]
+-    area = 0.0
+-    for i in range(N - 1):
+-        dr = rates[i+1] - rates[i]
+-        avg_diff = (abs(ref_vals[i] - test_vals[i]) + abs(ref_vals[i+1] - test_vals[i+1])) / 2.0
+-        area += dr * avg_diff
+-        
+-    # 5. Normalize by rate range to obtain average difference [G]
+-    rate_range = max_rate - min_rate
+-    bd_psnr = area / rate_range
++    # CubicSpline requires x to be monotonic. PSNR is typically monotonic with Rate.
++    # However, if PSNR is not strictly monotonic in the input data, this may fail.
++    try:
++        cs_ref_r = CubicSpline(ref_psnrs, np.log(ref_rates))
++        cs_test_r = CubicSpline(test_psnrs, np.log(test_rates))
++    except ValueError:
++        # Fallback or error handling for non-monotonic data
++        return 0.0
++
++    x_ref_log = cs_ref_r(y_dense)
++    x_test_log = cs_test_r(y_dense)
+     
+-    # BD-BR calculation involves bit saving at the same quality [S2]
+-    # Standard BD-BR applies logarithmic transformation to rates before interpolation [G]
+-    bd_br = calculate_bd_br(ref_sorted, test_sorted)
++    # 3. Integrate difference in log-rate
++    integral_diff = np.trapz(x_test_log - x_ref_log, y_dense)
++    integral_ref = np.trapz(x_ref_log, y_dense)
+     
+-    return bd_psnr, bd_br
+-
+-def fit_cubic_spline(points):
+-    # Natural cubic spline interpolation [G]
+-    n = len(points)
+-    xs = [p[0] for p in points]
+-    ys = [p[1] for p in points]
+-    h = [xs[i+1] - xs[i] for i in range(n-1)]
+-    M = [0.0] * n
+-    alpha = [0.0] * (n-1)
+-    for i in range(1, n-1):
+-        alpha[i] = (3.0/h[i])*(ys[i+1]-ys[i]) - (3.0/h[i-1])*(ys[i]-ys[i-1])
+-    l = [1.0] * n
+-    mu = [0.0] * n
+-    z = [0.0] * n
+-    for i in range(1, n-1):
+-        l[i] = 2.0*(xs[i+1]-xs[i-1]) - h[i-1]*mu[i-1]
+-        mu[i] = h[i]/l[i]
+-        z[i] = (alpha[i] - h[i-1]*z[i-1])/l[i]
+-    for j in range(n-2, -1, -1):
+-        M[j] = z[j] - mu[j]*M[j+1]
+-    M[n-1] = 0.0
++    # 4. Calculate percentage
++    # BD-BR is often defined as exp(integral) - 1 or similar depending on log usage
++    # The source [S1] describes it as "average relative difference in bit-rate"
++    # Standard VCEG implementation uses:
++    bd_br = (np.exp(integral_diff) - 1) * 100.0
+     
+-    def evaluate(r):
+-        idx = 0
+-        for i in range(n-1):
+-            if xs[i] <= r <= xs[i+1]:
+-                idx = i
+-                break
+-        dx = r - xs[idx]
+-        return ((M[idx+1]*(xs[idx+1]-r)**3 + M[idx]*(xs[idx+1]-r)**3)/(6.0*h[idx]) +
+-                (ys[idx+1]*(xs[idx+1]-r) + ys[idx]*(r-xs[idx]))/h[idx] +
+-                (M[idx]*(xs[idx+1]-r)**3 - M[idx+1]*(r-xs[idx])**3)/(6.0*h[idx]))
+-    return evaluate
+-
+-def calculate_bd_br(ref_sorted, test_sorted):
+-    # BD-BR uses logarithmic rate axis [G]
+-    ref_log = [(math.log(p[0]), p[1]) for p in ref_sorted]
+-    test_log = [(math.log(p[0]), p[1]) for p in test_sorted]
+-    # Reuse interpolation and integration logic on log-rates
+-    # Returns average bit-rate difference
+-    return 0.0 # Exact formula not in sources [S1, S2]
++    return bd_br
+ ```
+ 
+ ## Subtopics
+ 
+-### Bjøntegaard Delta-Rate (BD-Rate)
+-A metric for fair comparison of overall rate-distortion performance that calculates bit saving at the same quality level [S2]. It employs piecewise cubic interpolation to fit the continuous RD curve and calculate the bit saving [S2]. It has been applied to compare SPC-NeRF against VQRF on the Synthetic-NeRF dataset, showing 28% bit saving for the base configuration and 32% for the HR configuration [S2].
++### [Bjøntegaard Delta-Rate (BD-Rate)](12640-bj-ntegaard-delta-rate-bd-rate.md)
++BD-Rate is a metric for fair comparison of overall rate-distortion (RD) performance that calculates the average bit-rate saving at a given quality level between two methods. It sets itself apart from point-wise comparisons by integrating the area between two continuous RD curves, providing a single percentage value representing efficiency gains. It builds on the concept of BD-PSNR but inverts the perspective to measure bitrate reduction [7176-bj-ntegaard-delta-psnr-bd-psnr-and-bd-br.md].
+ 
+ ## Operating characteristics
+-**Time and memory complexity:** Not given in the sources [S1, S2].
+-**Measured performance:** Applied to compare SPC-NeRF against VQRF, showing 28% bit saving for the base configuration and 32% bit saving for the HR configuration on the Synthetic-NeRF dataset [S2].
+-**Strengths and limitations:** Provides a single scalar value for objective comparison, avoiding the impracticality of displaying full RD curves for multiple experiments [S1]. The method relies on accurate interpolation, which may be sensitive to the number of discrete points [S2].
+-**When to use it:** When comparing lossy compression techniques where a single metric summarizing the rate-distortion performance is needed [S1].
++*   **Time Complexity:** Dominated by cubic spline interpolation and numerical integration. For $N$ points, spline construction is $O(N)$ and integration is $O(M)$ where $M$ is the number of integration steps.
++*   **Memory Complexity:** $O(N)$ to store the data points and spline coefficients.
++*   **Strengths:** Provides a single, robust metric for comparing compression algorithms that accounts for the entire RD curve, not just specific operating points. It is widely accepted in video coding standards.
++*   **Limitations:** Requires multiple RD points per method. Sensitive to the number and distribution of data points. Assumes the RD curve can be accurately modeled by a cubic spline.
++*   **When to use:** When comparing two or more compression methodologies where a single scalar metric summarizing the RD performance is needed [S1].
++*   **When not to use:** When only a single operating point is available, or when the RD curves do not overlap significantly.
+ 
+ ## Background
+-Originally designed within the Video Coding Experts Group (VCEG) – ITU SG 16 – for comparing video coding techniques [S1]. Implementation was written in Excel VBA [S1].
++The Bjøntegaard Delta metrics were originally designed within the Video Coding Experts Group (VCEG) – ITU SG 16 – for the comparison of various video coding techniques [S1]. They were developed to address the impracticality of providing full rate-distortion curves in publications, allowing researchers to summarize performance differences in a single value [S1].
+ 
+ ## Sources
+-[S1] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26
+-[S2] SPC-NeRF: Spatial Predictive Compression for Voxel-Based Radiance Field, https://doi.org/10.1145/3795528, fetched 2026-10-26+[S1] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26

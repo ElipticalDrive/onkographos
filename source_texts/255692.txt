@@ -1,0 +1,351 @@
+CLI tool and library for 3D Gaussian splat processing and conversion - Voxel pipeline memory optimizations for large grids by slimbuck · Pull Request #220 · playcanvas/splat-transform
+
+Voxel pipeline memory optimizations for large grids by slimbuck · Pull Request #220 · playcanvas/splat-transform · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+slimbuck
+commented
+Apr 30, 2026
+Copy link
+Copy Markdown
+Member
+Summary
+Reduce peak memory across the voxelizer pipeline (voxelize → fill-floor → carve → octree) so grids that previously OOM'd or hit V8 array-length ceilings now complete.
+Lift two hard ceilings: TypedArray.prototype.sort(comparefn) past FixedArray::kMaxLength (~134M elements) in the octree builder, and regular-array backing-store limits in BlockMaskBuffer.
+Add a live memory probe alongside peak in the CLI's --mem overlay so phase-boundary scratch release is observable.
+User-visible pipeline behavior is unchanged — same outputs, same flags. End-to-end run on a 4.21M-gaussian scene with --voxel-floor-fill --voxel-carve completes cleanly (octree depth 11, 755K interior nodes, 1.61M mixed leaves).
+What changed
+Packed block types in SparseVoxelGrid
+The per-block type previously took 1 byte (blockType: Uint8Array) plus 1 bit in a parallel occupancy: Uint32Array bitfield — 9 bits/block. It's now packed at 2 bits per block in a single Uint32Array (16 blocks per word), eliminating occupancy. Non-empty-block iteration uses the trick nonEmpty = (word & 0x55555555) | ((word >>> 1) & 0x55555555) to derive a per-word mask of non-empty lanes, then walks the set bits via clz32 exactly as the old occupancy field did. ~4.5× reduction on this component. Module-level readBlockType / writeBlockType arrow helpers expose the layout once; call sites in dilation, fill-floor, flood-fill, grid-ops, and filter-cluster all funnel through them.
+In-place reuse flags on sparseDilate3 and sparseOrGrids
+Both accept an opt-in consumeSrc / consumeA flag. When set, the function reuses the input grid's storage as a scratch buffer instead of allocating a fresh full-grid working copy. Adopted in carve (both dilate calls) and fill-floor (trailing dilate + OR). Each adoption saves one full SparseVoxelGrid at peak. The semantics are documented and tested.
+Growable typed-array BlockMaskBuffer
+Migrated from number[] arrays to Float64Array (mortons; 51 bits needed, exceeds Smi range) and Uint32Array (masks). Buffers start at length 0; the first addBlock allocates INITIAL_CAPACITY and subsequent grows double. This raises the per-buffer ceiling well above V8's regular-array limit so very large grids round-trip without RangeError: Invalid array length. clear() releases the underlying buffers so a cleared instance retains no allocations.
+Octree builder rework (sparse-octree.ts)
+Two changes. (1) Sort buffer typed arrays in place instead of allocating SoA copies. Phase 1 used to allocate three parallel arrays sized to totalBlocks (Float64Array + Uint8Array + Int32Array, ~13 bytes/block) and sort them. Phase 1 now sorts the BlockMaskBuffer's existing typed arrays directly. We avoid TypedArray.prototype.sort(comparefn) because V8 routes it through a regular-array path bounded by FixedArray::kMaxLength and throws past it. The solid stream uses native Float64Array.sort() (no comparefn, no fallback path); the mixed stream uses a custom iterative quicksort (sortMixedByMorton) that permutes paired Uint32×2 masks alongside the Float64 keys. buildSparseOctree mutates its input buffer in place — documented in the docstring.
+(2) Dual-stream level 0 representation. Level 0 (leaves) is now two sorted streams — solid mortons and mixed mortons (with paired masks) — instead of one merged SoA. Level 1 is built by a two-pointer merge of the streams; levels 2+ use the existing single-array linear scan. flattenTreeFromLevels walks both streams via dual-stream binary search for level-0 children, using li === -1 as a wave-entry sentinel (ii < nMixed mixed, ii >= nMixed solid). The interiorLevels parameter holds only interior levels (level 0 lives in the streams), making the layout self-documenting.
+Live-memory probe in the CLI
+The CLI now provides a getLiveMemory() callback (heapUsed + external from process.memoryUsage()) alongside the existing getPeakMemory(). The --mem overlay becomes [peak X | live Y], where live drops between phases as scratch buffers GC, while peak remains the monotonic kernel max-RSS. Lets you see at a glance whether each phase actually releases its working set rather than only seeing the high-water mark.
+Test plan
+npm test — 475 pass, 0 fail. Added 9 tests covering: octree round-trip via tree walk, mixed-mask permutation correctness under sortMixedByMorton, solid-only / mixed-only inputs, the BlockMaskBuffer mutation contract, sparseDilate3(consumeSrc) parity + post-call src-emptiness, sparseOrGrids(consumeA) parity + result aliasing.
+npm run lint — clean.
+End-to-end on a 4.21M-gaussian scene (norwegian-filtered.ply) with --voxel-floor-fill --voxel-carve: pipeline completes (~12 min wall, peak 10.4GB), octree depth 11, 755K interior nodes, 1.61M mixed leaves, 27.8MB .bin. The new live overlay confirms scratch state releases between phases.
+Manual sanity check on at least one more scene at a different scale before merge.
+slimbuck
+added 8 commits
+April 29, 2026 18:01
+latest
+6af4a3f
+latest
+f9d2465
+latest
+0a7b8af
+latest
+7578dc4
+latest
+1a280be
+latest
+2ee34fd
+latest
+3497494
+latest
+9dc1499
+slimbuck
+requested a review
+from Copilot
+April 30, 2026 17:04
+slimbuck
+self-assigned this
+Apr 30, 2026
+slimbuck
+added
+the
+enhancement
+New feature or request
+label
+Apr 30, 2026
+Copilot started reviewing on behalf of
+slimbuck
+April 30, 2026 17:04
+View session
+Copilot
+AI
+reviewed
+Apr 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR reduces peak memory in the voxel pipeline by packing SparseVoxelGrid block types, enabling input-buffer reuse in dilation/OR operations, migrating BlockMaskBuffer to growable typed arrays, and reworking sparse octree construction to avoid V8 typed-array comparefn sort limits; it also adds a live-memory probe to the CLI --mem overlay.
+Changes:
+Pack SparseVoxelGrid block types into 2-bit lanes (Uint32Array) and update voxel algorithms/tests to iterate via packed-word masks.
+Add opt-in input reuse (consumeSrc / consumeA) to reduce temporary grid allocations in dilation and grid union steps.
+Refactor octree building to sort/consume BlockMaskBuffer typed arrays in-place using custom sort for mixed blocks, plus add [peak | live] memory reporting.
+Reviewed changes
+Copilot reviewed 17 out of 17 changed files in this pull request and generated 6 comments.
+Show a summary per file
+File
+Description
+test/sparse-octree.test.mjs
+Adds tests for dual-stream leaf encoding and in-place buffer mutation/sorting.
+test/flood-fill-cluster.test.mjs
+Updates tests to use packed block-type accessors/iteration.
+test/dilation-grid-ops.test.mjs
+Adds coverage for consumeSrc/consumeA contracts and aliasing behavior.
+src/lib/writers/sparse-octree.ts
+In-place typed-array sorting, dual-stream leaf representation, and updated flattening logic.
+src/lib/voxel/voxel-query.ts
+Updates mask storage type to Uint32Array.
+src/lib/voxel/sparse-voxel-grid.ts
+Implements packed 2-bit block types and exports readBlockType/writeBlockType.
+src/lib/voxel/grid-ops.ts
+Updates iteration to packed types and adds consumeA optimization to sparseOrGrids.
+src/lib/voxel/flood-fill.ts
+Switches flood-fill to packed types via readBlockType/writeBlockType.
+src/lib/voxel/filter-cluster.ts
+Updates inverted-grid construction and visited-set iteration for packed types.
+src/lib/voxel/fill-floor.ts
+Uses consumeSrc/consumeA to reduce peak allocations in fill-floor.
+src/lib/voxel/fill-exterior.ts
+Updates block-type reads to getBlockType.
+src/lib/voxel/dilation.ts
+Adds consumeSrc to reuse the input grid as scratch; updates scans to packed types.
+src/lib/voxel/carve.ts
+Adopts consumeSrc to reduce peak usage during carve.
+src/lib/voxel/block-mask-buffer.ts
+Migrates to growable typed arrays and releases buffers on clear().
+src/lib/voxel/block-cleanup.ts
+Updates mixed-mask snapshots to Uint32Array-backed storage.
+src/lib/utils/text-renderer.ts
+Adds optional live-memory probe to the --mem overlay rendering.
+src/cli/index.ts
+Implements getLiveMemory() (heapUsed + external) and wires it into TextRenderer.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/lib/writers/sparse-octree.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/writers/sparse-octree.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/writers/sparse-octree.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/voxel/filter-cluster.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/writers/sparse-octree.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/lib/writers/sparse-octree.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+latest
+0c4ba77
+slimbuck
+requested a review
+from Copilot
+April 30, 2026 17:20
+Copilot started reviewing on behalf of
+slimbuck
+April 30, 2026 17:20
+View session
+Copilot
+AI
+reviewed
+Apr 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Optimizes memory usage across the voxelization → navigation processing → octree build pipeline to avoid OOM/TypedArray sorting limits on very large grids, while keeping output behavior unchanged.
+Changes:
+Packs SparseVoxelGrid block types into a 2-bit-per-block Uint32Array and updates algorithms/tests to iterate packed lanes efficiently.
+Makes key voxel ops optionally reuse input storage (sparseDilate3(consumeSrc), sparseOrGrids(consumeA)) and migrates BlockMaskBuffer to growable typed arrays.
+Reworks octree construction to sort in-place without TypedArray.sort(comparefn) and adds dual-stream (solid/mixed) level-0 flattening; CLI overlay now shows live memory alongside peak.
+Reviewed changes
+Copilot reviewed 17 out of 17 changed files in this pull request and generated 1 comment.
+Show a summary per file
+File
+Description
+test/sparse-octree.test.mjs
+Adds coverage for dual-stream octree encoding, mixed-mask permutation correctness, and buffer mutation contract.
+test/flood-fill-cluster.test.mjs
+Updates tests to iterate packed types and use getBlockType() instead of removed occupancy/blockType.
+test/dilation-grid-ops.test.mjs
+Adds tests pinning the consumeSrc/consumeA reuse contracts and aliasing behavior.
+src/lib/writers/sparse-octree.ts
+In-place sorting + dual-stream leaf representation, custom mixed quicksort, and 24-bit offset guards for Laine–Karras encoding.
+src/lib/voxel/voxel-query.ts
+Updates mask typing to Uint32Array to match typed buffer storage.
+src/lib/voxel/sparse-voxel-grid.ts
+Implements packed 2-bit block-type storage (types) with exported read/write helpers and updated scanning logic.
+src/lib/voxel/grid-ops.ts
+Updates empty-grid and OR operations to scan packed types; adds consumeA to avoid cloning when safe.
+src/lib/voxel/flood-fill.ts
+Switches BFS block-type reads/writes to packed helpers (removes occupancy usage).
+src/lib/voxel/filter-cluster.ts
+Updates inverted-grid build and visited iteration to packed types; removes occupancy usage.
+src/lib/voxel/fill-floor.ts
+Uses packed reads and adopts consumeSrc/consumeA to reduce peak allocations in floor-fill.
+src/lib/voxel/fill-exterior.ts
+Updates block-type reads to getBlockType() for packed layout.
+src/lib/voxel/dilation.ts
+Updates active-pair scans to packed types and adds consumeSrc reuse path in sparseDilate3.
+src/lib/voxel/carve.ts
+Adopts consumeSrc=true for dilations to reduce peak memory during carve.
+src/lib/voxel/block-mask-buffer.ts
+Migrates to growable typed arrays (Float64Array mortons, Uint32Array masks) and releases buffers on clear().
+src/lib/voxel/block-cleanup.ts
+Updates mask storage/parameters to Uint32Array to match typed buffer representation.
+src/lib/utils/text-renderer.ts
+Adds optional live-memory probe support in --mem overlay output.
+src/cli/index.ts
+Provides getLiveMemory() (heapUsed + external) to the renderer alongside peak memory.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/lib/writers/sparse-octree.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+latest
+0a7b1da
+slimbuck
+requested a review
+from Copilot
+April 30, 2026 17:33
+Copilot started reviewing on behalf of
+slimbuck
+April 30, 2026 17:34
+View session
+slimbuck
+marked this pull request as ready for review
+April 30, 2026 17:36
+slimbuck
+requested a review
+from a team
+April 30, 2026 17:37
+Hide details
+View details
+slimbuck
+merged commit 7115fa4
+into
+playcanvas:main
+Apr 30, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+slimbuck
+deleted the
+voxel-dev
+branch
+April 30, 2026 17:37
+Copilot
+AI
+reviewed
+Apr 30, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+This PR reduces peak memory usage across the voxelization → navigation-fill/carve → octree pipeline so much larger grids can complete without OOM or V8 array-size ceilings, while preserving output behavior.
+Changes:
+Pack SparseVoxelGrid block types into a 2-bit Uint32Array and update voxel ops/tests to iterate via packed lanes + readBlockType/writeBlockType.
+Add opt-in input-reuse flags to sparseDilate3 and sparseOrGrids, and adopt them in the pipeline to eliminate full-grid scratch allocations.
+Rework octree building to sort BlockMaskBuffer typed arrays in-place (custom mixed sort), introduce dual-stream leaf handling, and add CLI “live” memory to the --mem overlay.
+Reviewed changes
+Copilot reviewed 17 out of 17 changed files in this pull request and generated 1 comment.
+Show a summary per file
+File
+Description
+src/lib/voxel/sparse-voxel-grid.ts
+Packs block types into 2-bit lanes and exports helpers/constants for fast iteration.
+src/lib/voxel/dilation.ts
+Adds consumeSrc to reuse input grid storage as scratch in 3-pass dilation.
+src/lib/voxel/grid-ops.ts
+Adds consumeA to optionally mutate a in-place for union, and updates packed iteration.
+src/lib/voxel/flood-fill.ts
+Migrates flood fill to packed type access via readBlockType/writeBlockType.
+src/lib/voxel/fill-floor.ts
+Uses packed reads and adopts consumeSrc/consumeA to reduce peak memory.
+src/lib/voxel/carve.ts
+Adopts consumeSrc to reduce peak memory in carve dilation steps.
+src/lib/voxel/fill-exterior.ts
+Updates block-type reads to new getBlockType accessors.
+src/lib/voxel/filter-cluster.ts
+Updates inverted-grid construction and packed iteration.
+src/lib/voxel/block-mask-buffer.ts
+Replaces grow-limited JS arrays with growable typed arrays and releases buffers on clear().
+src/lib/voxel/block-cleanup.ts
+Updates mask storage/processing to typed arrays.
+src/lib/voxel/voxel-query.ts
+Updates lookup mask storage type to Uint32Array.
+src/lib/writers/sparse-octree.ts
+In-place typed-array sorting, dual-stream leaves, 24-bit offset guards, and updated flattening logic.
+src/lib/utils/text-renderer.ts
+Adds optional live-memory probe and shows `[peak …
+src/cli/index.ts
+Provides Node live-memory callback (heapUsed + external) to the renderer.
+test/sparse-octree.test.mjs
+Adds dual-stream encoding, mixed-sort permutation, and mutation-contract coverage.
+test/flood-fill-cluster.test.mjs
+Updates tests to iterate packed types and use getBlockType.
+test/dilation-grid-ops.test.mjs
+Adds tests for consumeSrc / consumeA behavior and aliasing contracts.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/lib/writers/sparse-octree.ts
+Comment on lines
+12
+to
+13
+*/
+const SOLID_LEAF_MARKER = 0xFF000000 >>> 0;
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+New feature or request
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

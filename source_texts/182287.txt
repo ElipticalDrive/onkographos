@@ -1,0 +1,540 @@
+The floating point arithmetic format that requires only 16 bits of storage is becoming increasingly popular. Also known as half precision or binary16, the
+
+“Half Precision” 16-bit Floating Point Arithmetic » Cleve’s Corner: Cleve Moler on Mathematics and Computing - MATLAB & Simulink
+Skip to content
+MATLAB Answers
+File Exchange
+Cody
+AI Chat Playground
+Discussions
+Contests
+Blogs
+More
+Communities
+Treasure Hunt
+People
+Community Advisors
+Virtual Badges
+About
+Toggle navigation
+Cleve Moler is the author of the first MATLAB, one of the founders of MathWorks, and is currently Chief Mathematician at the company. He is the author of two books about MATLAB that are available online. He writes here about MATLAB, scientific computing and interesting mathematics.
+Cleve’s Corner: Cleve Moler on Mathematics and Computing
+Scientific computing, math & more
+“Half Precision” 16-bit Floating Point Arithmetic
+Posted by Cleve Moler, May 8, 2017
+84 views (last 30 days) |
+0 Likes |
+5 comments
+The floating point arithmetic format that requires only 16 bits of storage is becoming increasingly popular. Also known as half precision or binary16, the format is useful when memory is a scarce resource.
+Contents
+Background
+Floating point anatomy
+Precision and range
+Floating point integers
+Table
+fp8 and fp16
+Wikipedia test suite
+Matrix operations
+fp16 backslash
+fp16 SVD
+Calculator
+Thanks
+Background
+The IEEE 754 standard, published in 1985, defines formats for floating point numbers that occupy 32 or 64 bits of storage. These formats are known as binary32 and binary64, or more frequently as single and double precision. For many years MATLAB used only double precision and it remains our default format. Single precision has been added gradually over the last several years and is now also fully supported.
+A revision of IEEE 754, published in 2008, defines a floating point format that occupies only 16 bits. Known as binary16, it is primarily intended to reduce storage and memory bandwidth requirements. Since it provides only "half" precision, its use for actual computation is problematic. An interesting discussion of its utility as an image processing format with increased dynamic range is provided by Industrial Light and Magic. Hardware support for half precision is now available on many processors, including the GPU in the Apple iPhone 7. Here is a link to an extensive article about half precision on the NVIDIA GeForce GPU.
+Floating point anatomy
+The format of a floating point number is characterized by two parameters, p, the number of bits in the fraction and q, the number of bits in the exponent. I will consider four precisions, quarter, half, single, and double. The quarter-precision format is something that I just invented for this blog post; it is not standard and actually not very useful.
+The four pairs of characterizing parameters are
+```
+   p = [4, 10, 23, 52];
+```
+```
+   q = [3, 5, 8, 11];
+```
+With these values of p and q, and with one more bit for the sign, the total number of bits in the word, w, is a power of two.
+```
+   w = p + q + 1
+```
+```
+w =
+     8    16    32    64
+```
+Normalized numbers
+Most floating point numbers are normalized, and are expressed as
+$$ x = \pm (1+f)2^e $$
+The fraction $f$ is in the half open interval
+$$ 0 \leq f < 1 $$
+The binary representation of $f$ requires at most p bits. In other words $2^p f$ is an integer in the range
+$$ 0 \leq 2^p f < 2^p $$
+The exponent $e$ is an integer in the range
+$$ -b+1 \leq e \leq b $$
+The quantity $b$ is both the largest exponent and the bias.
+$$ b = 2^{q-1} - 1 $$
+```
+   b = 2.^(q-1)-1
+```
+```
+b =
+           3          15         127        1023
+```
+The fractional part of a normalized number is $1+f$, but only $f$ needs to be stored. That leading $1$ is known as the hidden bit.
+Subnormal
+There are two values of the exponent $e$ for which the biased exponent, $e+b$, reaches the smallest and largest values possible to represent in q bits. The smallest is
+$$ e + b = 0 $$
+The corresponding floating point numbers do not have a hidden leading bit. These are the subnormal or denormal numbers.
+$$ x = \pm f 2^{-b} $$
+Infinity and Not-A-Number
+The largest possible biased exponent is
+$$ e + b = 2^q-1 $$.
+Quantities with this exponent field represent infinities and NaN, or Not-A-Number.
+The percentage of floating point numbers that are exceptional because they are subnormal, infinity or NaN increases as the precision decreases. Exceptional exponents are only $2$ values out of $2^q$. For double precision this is $2/2^{11}$, which is less than a tenth of a percent, but for half precision it is $2/2^5$, which is more than 6 percent. And fully one-fourth of all my toy quarter precision floating point numbers are exceptional.
+Encode the sign bit with s = 0 for nonnegative and s = 1 for negative. And encode the exponent with an offsetting bias, b. Then a floating point number can be packed in w bits with
+```
+  x = [s e+b 2^p*f]
+```
+Precision and range
+epsilon
+If a real number cannot be expressed with a binary expansion requiring at most p bits, it must be approximated by a floating point number that does have such a binary representation. This is roundoff error. The important quantity characterizing precision is machine epsilon, or eps. In MATLAB, eps(x) is the distance from x to the next larger (in absolute value) floating point number. With no argument, eps is simply the difference between 1 and the next larger floating point number.
+```
+    format shortg
+    eps = 2.^(-p)
+```
+```
+eps =
+       0.0625   0.00097656   1.1921e-07   2.2204e-16
+```
+This tells us that double precision is good for about 16 decimal digits of accuracy, single for about 7 decimal digits, half for about 3, and quarter for barely more than one.
+realmax
+If a real number, or the result of an arithmetic operation, is too large to be represented, it overflows and is replaced infinity. The largest floating point number that does not overflow is
+```
+    realmax = 2.^b.*(2-eps)
+```
+```
+realmax =
+         15.5        65504   3.4028e+38  1.7977e+308
+```
+realmin
+Underflow and representation of very small numbers is more complicated. The smallest normalized floating point number is
+```
+    realmin = 2.^(-b+1)
+```
+```
+realmin =
+         0.25   6.1035e-05   1.1755e-38  2.2251e-308
+```
+tiny
+But there are numbers smaller than realmin. IEEE 754 introduced the notion of gradual underflow and denormal numbers. In the 2008 revised standard their name was changed to subnormal.
+Think of roundoff in numbers near underflow. Before 754 floating point numbers had the disconcerting property that x and y could be unequal, but their difference could underflow so x-y becomes 0. With 754 the gap between 0 and realmin is filled with numbers whose spacing is the same as the spacing between realmin and 2*realmin. I like to call this spacing, and the smallest subnormal number, tiny.
+```
+    tiny = realmin.*eps
+```
+```
+tiny =
+     0.015625   5.9605e-08   1.4013e-45  4.9407e-324
+```
+Floating point integers
+flintmax
+It is possible to do integer arithmetic with floating point numbers. I like to call such numbers flints. When we write the numbers $3$ and $3.0$, they are different descriptions of the same integer, but we think of one as fixed point and the other as floating point. The largest flint is flintmax.
+```
+    flintmax = 2./eps
+```
+```
+flintmax =
+           32         2048   1.6777e+07   9.0072e+15
+```
+Technically all the floating point numbers larger than flintmax are integers, but the spacing between them is larger than one, so it is not safe to use them for integer arithmetic. Only integer-valued floating point numbers between 0 and flintmax are allowed to be called flints.
+Table
+Let's collect all these anatomical characteristics together in a new MATLAB table.
+```
+   T = [w; p; q; b; eps; realmax; realmin; tiny; flintmax];
+
+   T = table(T(:,1), T(:,2), T(:,3), T(:,4), ...
+        'variablenames',{'quarter','half','single','double'}, ...
+        'rownames',{'w','p','q','b','eps','realmax','realmin', ...
+                    'tiny','flintmax'});
+   disp(T)
+```
+```
+                quarter        half         single        double   
+                ________    __________    __________    ___________
+    w                  8            16            32             64
+    p                  4            10            23             52
+    q                  3             5             8             11
+    b                  3            15           127           1023
+    eps           0.0625    0.00097656    1.1921e-07     2.2204e-16
+    realmax         15.5         65504    3.4028e+38    1.7977e+308
+    realmin         0.25    6.1035e-05    1.1755e-38    2.2251e-308
+    tiny        0.015625    5.9605e-08    1.4013e-45    4.9407e-324
+    flintmax          32          2048    1.6777e+07     9.0072e+15
+```
+fp8 and fp16
+Version 3.1 of Cleve's Laboratory includes code for objects @fp8 and @fp16 that begin to provide full implementations of quarter-precision and half-precision arithmetic.
+The methods currently provided are
+```
+   methods(fp16)
+```
+```
+
+Methods for class fp16:
+
+abs         eps         isfinite    mrdivide    rem         subsref     
+binary      eq          le          mtimes      round       svd         
+ctranspose  fix         lt          ne          sign        tril        
+diag        fp16        lu          norm        single      triu        
+disp        ge          max         plus        size        uminus      
+display     gt          minus       realmax     subsasgn    
+double      hex         mldivide    realmin     subsindex   
+
+```
+These provide only partial implementations because the arithmetic is not done on the compact forms. We cheat. For each individual scalar operation, the operands are unpacked from their short storage into old fashioned doubles. The operation is then carried out by existing double precision code and the results returned to the shorter formats. This simulates the reduced precision and restricted range, but requires relatively little new code.
+All of the work is done in the constructors @fp8/fp8.m and @fp16/fp16.m and what we might call the "deconstructors" @fp8/double.m and @fp16/double.m. The constructors convert ordinary floating point numbers to reduced precision representations by packing as many of the 32 or 64 bits as will fit into 8 or 16 bit words. The deconstructors do the reverse by unpacking things.
+Once these methods are available, almost everything else is trivial. The code for most operations is like this one for the overloaded addition.
+```
+    type @fp16/plus.m
+```
+```
+
+function z = plus(x,y)
+   z = fp16(double(x) + double(y));
+end
+```
+Wikipedia test suite
+The Wikipedia page about half-precision includes several 16-bit examples with the sign, exponent, and fraction fields separated. I've added a couple more.
+```
+  0 01111 0000000000 = 1
+  0 00101 0000000000 = 2^-10 = eps
+  0 01111 0000000001 = 1+eps = 1.0009765625 (next smallest float after 1)
+  1 10000 0000000000 = -2
+  0 11110 1111111111 = 65504 (max half precision) = 2^15*(2-eps)
+  0 00001 0000000000 = 2^-14 = r ~ 6.10352e-5 (minimum positive normal)
+  0 00000 1111111111 = r*(1-eps) ~ 6.09756e-5 (maximum subnormal)
+  0 00000 0000000001 = r*eps ~ 5.96046e-8 (minimum positive subnormal)
+  0 00000 0000000000 ~ r*eps/2 (underflow to zero)
+  0 00000 0000000000 = 0
+  1 00000 0000000000 = -0
+  0 11111 0000000000 = infinity
+  1 11111 0000000000 = -infinity
+  0 11111 1111111111 = NaN
+  0 01101 0101010101 = 0.333251953125 ~ 1/3
+```
+This provides my test suite for checking fp16 operations on scalars.
+```
+   clear
+   zero = fp16(0);
+   one = fp16(1);
+   eps = eps(one);
+   r = realmin(one);
+
+   tests = {'1','eps','1+eps','-2','2/r*(2-eps)', ...
+            'r','r*(1-eps)','r*eps','r*eps/2', ...
+            'zero','-zero','1/zero','-1/zero','zero/zero','1/3'};
+```
+Let's run the tests.
+```
+   for t = tests(:)'
+       x = eval(t{:});
+       y = fp16(x);
+       z = binary(y);
+       w = double(y);
+       fprintf('  %18s  %04s %19.10g %19.10g    %s\n', ...
+               z,hex(y),double(x),w,t{:})
+   end
+```
+```
+  0 01111 0000000000  3C00                   1                   1    1
+  0 00101 0000000000  1400        0.0009765625        0.0009765625    eps
+  0 01111 0000000001  3C01         1.000976563         1.000976563    1+eps
+  1 10000 0000000000  C000                  -2                  -2    -2
+  0 11110 1111111111  7BFF               65504               65504    2/r*(2-eps)
+  0 00001 0000000000  0400     6.103515625e-05     6.103515625e-05    r
+  0 00000 1111111111  03FF     6.097555161e-05     6.097555161e-05    r*(1-eps)
+  0 00000 0000000001  0001     5.960464478e-08     5.960464478e-08    r*eps
+  0 00000 0000000001  0001     5.960464478e-08     5.960464478e-08    r*eps/2
+  0 00000 0000000000  0000                   0                   0    zero
+  0 00000 0000000000  0000                   0                   0    -zero
+  0 11111 0000000000  7C00                 Inf                 Inf    1/zero
+  1 11111 0000000000  FC00                -Inf                -Inf    -1/zero
+  1 11111 1111111111  FFFF                 NaN                 NaN    zero/zero
+  0 01101 0101010101  3555        0.3333333333        0.3332519531    1/3
+```
+Matrix operations
+Most of the methods in @fp8 and @fp16 handle matrices. The 4-by-4 magic square from Durer's Melancholia II provides my first example.
+```
+   clear
+   format short
+   M = fp16(magic(4))
+```
+```
+ 
+M = 
+ 
+    16     2     3    13
+     5    11    10     8
+     9     7     6    12
+     4    14    15     1
+ 
+```
+Let's see how the packed 16-bit elements look in binary.
+```
+   B = binary(M)
+```
+```
+B = 
+  4×4 string array
+  Columns 1 through 3
+    "0 10011 0000000000"    "0 10000 0000000000"    "0 10000 1000000000"
+    "0 10001 0100000000"    "0 10010 0110000000"    "0 10010 0100000000"
+    "0 10010 0010000000"    "0 10001 1100000000"    "0 10001 1000000000"
+    "0 10001 0000000000"    "0 10010 1100000000"    "0 10010 1110000000"
+  Column 4
+    "0 10010 1010000000"
+    "0 10010 0000000000"
+    "0 10010 1000000000"
+    "0 01111 0000000000"
+```
+Check that the row sums are all equal. This matrix-vector multiply can be done exactly with the flints in the magic square.
+```
+   e = fp16(ones(4,1))
+   Me = M*e
+```
+```
+ 
+e = 
+ 
+     1
+     1
+     1
+     1
+ 
+ 
+Me = 
+ 
+    34
+    34
+    34
+    34
+ 
+```
+fp16 backslash
+I've overloaded mldivide, so I can solve linear systems and compute inverses. The actual computation is done by lutx, a "textbook" function that I wrote years ago, long before this half-precision project. But now the MATLAB object system insures that every individual arithmetic operation is done on unpacked fp16 numbers.
+Let's generate a 5-by-5 matrix with random two-digit integer entries.
+```
+   A = fp16(randi(100,5,5))
+```
+```
+ 
+A = 
+ 
+    76    71    83    44    49
+    75     4    70    39    45
+    40    28    32    77    65
+    66     5    96    80    71
+    18    10     4    19    76
+ 
+```
+I am going to use fp16 backslash to invert A. So I need the identity matrix in half precision.
+```
+   I = fp16(eye(5))
+```
+```
+ 
+I = 
+ 
+     1     0     0     0     0
+     0     1     0     0     0
+     0     0     1     0     0
+     0     0     0     1     0
+     0     0     0     0     1
+ 
+```
+Now the overloaded backslash calls lutx to compute the inverse.
+```
+   X = A\I
+```
+```
+ 
+X = 
+ 
+   -0.0044    0.0346    0.0125   -0.0254   -0.0046
+    0.0140   -0.0116    0.0026   -0.0046   -0.0002
+    0.0071   -0.0176   -0.0200    0.0238    0.0008
+   -0.0060   -0.0020    0.0200    0.0006   -0.0125
+    0.0003   -0.0052   -0.0072    0.0052    0.0174
+ 
+```
+Compute the residual.
+```
+   AX = A*X
+   R = I - AX
+```
+```
+ 
+AX = 
+ 
+    1.0000   -0.0011   -0.0002   -0.0007   -0.0001
+   -0.0001    0.9990   -0.0001   -0.0007   -0.0001
+   -0.0001   -0.0005    1.0000   -0.0003   -0.0002
+   -0.0002   -0.0011   -0.0001    0.9995   -0.0002
+   -0.0000   -0.0001    0.0001   -0.0001    1.0000
+ 
+ 
+R = 
+ 
+         0    0.0011    0.0002    0.0007    0.0001
+    0.0001    0.0010    0.0001    0.0007    0.0001
+    0.0001    0.0005         0    0.0003    0.0002
+    0.0002    0.0011    0.0001    0.0005    0.0002
+    0.0000    0.0001   -0.0001    0.0001         0
+ 
+```
+Both AX and R are what I expect from arithmetic that is accurate to only about three decimal digits.
+Although I get a different random A every time I publish this blog post, I expect that it has a modest condition number.
+```
+   kappa = cond(A)
+```
+```
+kappa =
+   15.7828
+```
+Since A is not badly conditioned, I can invert the computed inverse and expect to get close to the original integer matrix.
+```
+   Z = X\I
+```
+```
+ 
+Z = 
+ 
+   76.1250   71.0000   83.1250   44.1250   49.1250
+   75.1250    4.0234   70.1875   39.1250   45.1250
+   40.0625   28.0000   32.0625   77.0000   65.0625
+   66.1250    5.0234   96.1875   80.1250   71.1250
+   18.0156   10.0000    4.0156   19.0156   76.0000
+ 
+```
+fp16 SVD
+I have just nonchalantly computed cond(A). But cond isn't on the list of overload methods for fp16. I was pleasantly surprised to find that matlab\matfun\cond.m quietly worked on this new datatype. Here is the core of that code.
+```
+   dbtype cond 34:43, dbtype cond 47
+```
+```
+
+34    if p == 2
+35        s = svd(A);
+36        if any(s == 0)   % Handle singular matrix
+37            c = Inf(class(A));
+38        else
+39            c = max(s)./min(s);
+40            if isempty(c)
+41                c = zeros(class(A));
+42            end
+43        end
+
+47    end
+```
+So it is correctly using the singular value decomposition, and I have svd overloaded. The SVD computation is handled by a 433 line M-file, svdtx, that, like lutx, was written before fp16 existed.
+Let's compute the SVD again.
+```
+   [U,S,V] = svd(A)
+```
+```
+ 
+U = 
+ 
+   -0.5210   -0.4841    0.6802   -0.0315    0.1729
+   -0.4260   -0.2449   -0.3572   -0.4561   -0.6504
+   -0.4058    0.4683    0.1633    0.6284   -0.4409
+   -0.5786    0.0268   -0.5620    0.1532    0.5703
+   -0.2174    0.6968    0.2593   -0.6104    0.1658
+ 
+ 
+S = 
+ 
+  267.5000         0         0         0         0
+         0   71.1875         0         0         0
+         0         0   55.5000         0         0
+         0         0         0   37.3750         0
+         0         0         0         0   16.9531
+ 
+ 
+V = 
+ 
+   -0.4858   -0.3108   -0.0175   -0.3306   -0.7471
+   -0.2063   -0.2128    0.9238    0.2195    0.1039
+   -0.5332   -0.5205   -0.2920   -0.0591    0.5967
+   -0.4534    0.2891   -0.2050    0.7993   -0.1742
+   -0.4812    0.7095    0.1384   -0.4478    0.2126
+ 
+```
+Reconstruct A from its half precision SVD. It's not too shabby.
+```
+   USVT = U*S*V'
+```
+```
+ 
+USVT = 
+ 
+   75.9375   71.0000   83.0625   44.0313   49.0000
+   75.0000    4.0117   70.0625   38.9688   45.0000
+   40.0313   28.0469   32.0313   77.0625   65.0625
+   66.0000    4.9688   96.0625   80.0000   71.0000
+   18.0313   10.0234    4.0156   19.0313   76.0000
+ 
+```
+Finally, verify that we've been working all this time with fp16 objects.
+```
+   whos
+```
+```
+  Name       Size            Bytes  Class     Attributes
+
+  A          5x5               226  fp16                
+  AX         5x5               226  fp16                
+  B          4x4              1576  string              
+  I          5x5               226  fp16                
+  M          4x4               208  fp16                
+  Me         4x1               184  fp16                
+  R          5x5               226  fp16                
+  S          5x5               226  fp16                
+  U          5x5               226  fp16                
+  USVT       5x5               226  fp16                
+  V          5x5               226  fp16                
+  X          5x5               226  fp16                
+  Z          5x5               226  fp16                
+  e          4x1               184  fp16                
+  kappa      1x1                 8  double              
+
+```
+Calculator
+I introduced a calculator in my blog post about Roman numerals. Version 3.1 of Cleve's Laboratory also includes a fancier version of the calculator that computes in four different precisions -- quarter, half, single, and double -- and displays the results in four different formats -- decimal, hexadecimal, binary, and Roman.
+I like to demonstrate the calculator by clicking on the keys
+```
+    1 0 0 0 / 8 1 =
+```
+because the decimal expansion is a repeating .123456790.
+Thanks
+Thanks to MathWorkers Ben Tordoff, Steve Eddins, and Kiran Kintali who provided background and pointers to work on half precision.
+Get the MATLAB code
+Published with MATLAB® R2017a
+|
+You are now following this blog post
+You will see updates in your activity feed.
+You may receive emails, depending on your notification preferences.
+Close
+Category:
+Fun,
+Matrices,
+Numerical Analysis,
+Precision,
+Singular Values
+See Also
+Experiments with Variable Format Half Precision
+Blogs
+Precision and realmax
+Blogs
+Quadruple Precision, 128-bit Floating Point Arithmetic
+Blogs
+simpleICP
+DatabaseCell2Mat
+IEEE 754r Half Precision floating point converter
+Comments
+To leave a comment, please click here to sign in to your MathWorks Account or create a new one.

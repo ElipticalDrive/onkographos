@@ -1,0 +1,296 @@
+--- v006.md
++++ v007.md
+@@ -1,138 +1,189 @@
+ # Circle Splat Rendering
+-
+ ## Overview
+-Circle Splat Rendering projects 3D voxels into 2D screen-space quads (splats) to accelerate volume visualization by leveraging the GPU's rasterization pipeline [S1, unofficial]. It differs from [Voxel Splat Rendering](3730-voxel-splat-rendering.md) by explicitly computing a fixed offset based on grid scale and splat size to determine quad dimensions, and from [Tetrahedral Splatting](3181-tetrahedral-splatting.md) by using axis-aligned quads rather than perspective-correct tetrahedra [S1, unofficial].
+-
++Circle Splat Rendering is a volume rendering technique where voxels are projected as 2D quads (splats) in screen space [S1, unofficial]. It differs from other splatting methods by using a fixed offset derived from the splat size parameter and grid scale to determine the quad dimensions, effectively rendering square footprints that approximate circular coverage when viewed from certain angles or when scaled [S1, unofficial].
+ ## How it works
++### Inputs and Outputs
+ **Inputs:**
+-- Voxel position in object space (via `gl_Position` in vertex shader).
+-- Voxel color and normal.
+-- Uniforms: Model-View matrix ($MV$), Projection matrix ($P$), entity scale ($scale$), grid length ($gridLength$), splat size parameter ($splatSize$), and boolean flag $cullInvisibleFaces$.
++- Voxel position in object space (via `gl_Position` from the vertex shader).
++- Voxel color (`vec4 color`).
++- Voxel normal (`vec3 normal`).
++- Uniforms: Model-View matrix (`MV`), Projection matrix (`P`), entity scale (`scale`), grid length (`gridLength`), splat size parameter (`splatSize`), color multiplier (`splatColorMultiplier`), and culling flag (`cullInvisibleFaces`).
+ 
+ **Outputs:**
+-- A triangle strip of four vertices representing a screen-space quad.
+-- Interpolated color and normal for the fragment shader.
++- Screen-space triangle strip representing the voxel's footprint.
++- Interpolated color and normal for fragment shading.
+ 
+-**Data Structures:**
+-- The geometry shader receives a single point per voxel (`layout(points) in`).
+-- It emits a `triangle_strip` with `max_vertices = 4`.
+-- Vertex attributes passed to the fragment shader: `color` (vec4), `normal` (vec3).
++### Data Structures
++The geometry shader operates on a single input point per voxel. The input data structure (`voxelData`) contains:
++- `color`: `vec4` (RGBA).
++- `normal`: `vec3`.
+ 
+-**Steps:**
+-1. **Transform to View Space:** Compute the voxel position in view space:
+-   $$ P_{view} = MV \times P_{obj} $$
+-   where $P_{obj}$ is the input vertex position.
++The output is a `triangle_strip` with a maximum of 4 vertices, forming a single quad.
+ 
+-2. **Transform to Clip Space:** Project the view-space position:
+-   $$ P_{clip} = P \times P_{view} $$
+-   Normalize to normalized device coordinates (NDC):
+-   $$ P_{ndc} = P_{clip} / P_{clip}.w $$
++### Steps
++1.  **Transform to View Space:** Multiply the input voxel's clip-space position by the Model-View matrix to get the view-space position.
++    $$ \mathbf{p}_{view} = MV \cdot \mathbf{p}_{clip\_input} $$
++    *(Note: The source code uses `gl_in[0].gl_Position` which is typically clip-space, but the variable name `voxelPosViewSpace` implies the result of `MV * gl_Position`. Standard OpenGL pipeline passes clip-space to geometry shaders. If `gl_Position` is clip-space, multiplying by `MV` is incorrect for getting view space. However, the source code explicitly does `MV * gl_in[0].gl_Position`. We follow the source code's logic: it assumes `gl_in[0].gl_Position` might be in a space where `MV` converts it to view space, or it is a specific implementation detail where `gl_Position` was pre-transformed. Given `MV` is Model-View, it expects object space. If the vertex shader passed object space, this works. If it passed clip space, this is wrong. We assume the source code's variable naming `voxelPosViewSpace` is the ground truth for the intended result: the position in view space.)*
++    Correction: In standard OpenGL, `gl_Position` in the geometry shader is clip-space. To get view-space, one should multiply by `inverse(MV)`. However, the source code does `MV * gl_in[0].gl_Position`. This suggests either:
++    a) The vertex shader passed object-space position in `gl_Position` (non-standard).
++    b) The variable name is misleading and it's actually calculating something else.
++    c) It's a bug in the source.
++    Given the instruction to implement from the source, we follow the source's calculation: `voxelPosViewSpace = MV * gl_in[0].gl_Position`.
+ 
+-3. **Calculate Voxel Offset:** Determine the physical size of the splat in view space. The offset is derived from the diagonal of a unit square scaled by the grid parameters:
+-   $$ offset = splatSize \times \frac{scale}{gridLength} \times \sqrt{2} $$
+-   where $\sqrt{2} \approx 1.414213$ [S1, unofficial].
++2.  **Transform to Normalized Device Coordinates (NDC):** Project the view-space position to clip space and divide by $w$ to get NDC.
++    $$ \mathbf{p}_{ndc} = \frac{P \cdot \mathbf{p}_{view}}{P \cdot \mathbf{p}_{view}.w} $$
+ 
+-4. **Compute Clip-Space Half-Edge:** To determine the spatial extent in clip space for culling, calculate the position of the right edge midpoint in view space, project it, and normalize:
+-   $$ P_{right\_mid\_view} = (P_{view}.xy + (0.5, 0) \times offset, P_{view}.zw) $$
+-   $$ P_{right\_mid\_clip} = P \times P_{right\_mid\_view} $$
+-   $$ P_{right\_mid\_ndc} = P_{right\_mid\_clip} / P_{right\_mid\_clip}.w $$
+-   The half-edge length in clip space is the Euclidean distance between the center and this midpoint in NDC:
+-   $$ half\_edge = \text{distance}(P_{ndc}, P_{right\_mid\_ndc}) $$
++3.  **Calculate Splat Offset:** Compute the offset size for the quad in view space.
++    $$ \text{voxelOffset} = \text{splatSize} \times \left( \frac{\text{scale}}{\text{gridLength}} \right) \times \sqrt{2} $$
++    Where $\sqrt{2} \approx 1.414213$.
+ 
+-5. **Frustum Culling:** Define a culling border that accounts for the splat's extent:
+-   $$ border = 1 + half\_edge $$
+-   Discard the primitive if the center $P_{ndc}.x$ or $P_{ndc}.y$ falls outside $[-border, border]$ [S1, unofficial].
++4.  **Calculate Clip-Space Half-Edge:** Determine the distance in NDC between the voxel center and the projected right-edge midpoint to establish the footprint size in screen space.
++    - Calculate the right-edge midpoint in view space:
++      $$ \mathbf{p}_{right\_view} = \mathbf{p}_{view}.xy + \text{voxelOffset} \cdot (0.5, 0) $$
++      $$ \mathbf{p}_{right\_view}.zw = \mathbf{p}_{view}.zw $$
++    - Project this point to NDC:
++      $$ \mathbf{p}_{right\_ndc} = \frac{P \cdot \mathbf{p}_{right\_view}}{P \cdot \mathbf{p}_{right\_view}.w} $$
++    - Compute the Euclidean distance in NDC:
++      $$ \text{voxelHalfEdgeLengthClipSpace} = \text{distance}(\mathbf{p}_{ndc}, \mathbf{p}_{right\_ndc}) $$
+ 
+-6. **Back-Face Culling (Optional):** If $cullInvisibleFaces$ is true, compute the view-space normal:
+-   $$ N_{view} = MV \times (N_{obj}, 0) $$
+-   Discard if the dot product of the vector from the camera (origin in view space) to the voxel and the normal is negative:
+-   $$ \text{if } \text{dot}(-P_{view}.xyz, N_{view}.xyz) < 0 \text{, discard} $$
+-   [S1, unofficial].
++5.  **Frustum Culling:** Discard the primitive if the voxel center in NDC is outside the expanded frustum border.
++    $$ \text{voxelFrustumCullingBorder} = 1 + \text{voxelHalfEdgeLengthClipSpace} $$
++    If any of the following are true, discard:
++    - $\mathbf{p}_{ndc}.x < -\text{voxelFrustumCullingBorder}$
++    - $\mathbf{p}_{ndc}.x > \text{voxelFrustumCullingBorder}$
++    - $\mathbf{p}_{ndc}.y < -\text{voxelFrustumCullingBorder}$
++    - $\mathbf{p}_{ndc}.y > \text{voxelFrustumCullingBorder}$
+ 
+-7. **Emit Vertices:** Emit four vertices for a triangle strip. The vertices are defined in view space by offsetting the center by $\pm 0.5 \times offset$ in X and Y, then projected to clip space:
+-   - Bottom-Left: $P_{view}.xy + (-0.5, -0.5) \times offset$
+-   - Bottom-Right: $P_{view}.xy + (0.5, -0.5) \times offset$
+-   - Top-Left: $P_{view}.xy + (-0.5, 0.5) \times offset$
+-   - Top-Right: $P_{view}.xy + (0.5, 0.5) \times offset$
+-   
+-   Each vertex is transformed by $P$ for `gl_Position`, and texture coordinates $(0,0), (1,0), (0,1), (1,1)$ are assigned respectively [S1, unofficial].
++6.  **Back-Face Culling (Optional):** If `cullInvisibleFaces` is true, discard if the voxel is back-facing relative to the camera.
++    - Calculate view-space normal:
++      $$ \mathbf{n}_{view} = MV \cdot (\mathbf{n}, 0) $$
++    - Vector from voxel to camera (origin in view space):
++      $$ \mathbf{v} = (0,0,0) - \mathbf{p}_{view}.xyz $$
++    - If $\mathbf{v} \cdot \mathbf{n}_{view}.xyz < 0$, discard.
+ 
+-**Pseudocode:**
++7.  **Emit Vertices:** Emit four vertices for a triangle strip (quad) in view space, then project to clip space.
++    - **Bottom-Left:**
++      $$ \mathbf{p}_{bl\_view} = \mathbf{p}_{view}.xy + \text{voxelOffset} \cdot (-0.5, -0.5) $$
++      $$ \mathbf{p}_{bl\_view}.zw = \mathbf{p}_{view}.zw $$
++      $$ \mathbf{p}_{bl\_clip} = P \cdot \mathbf{p}_{bl\_view} $$
++      Emit vertex with `gl_Position = \mathbf{p}_{bl\_clip}` and texCoords $(0,0)$.
++    - **Bottom-Right:**
++      $$ \mathbf{p}_{br\_view} = \mathbf{p}_{view}.xy + \text{voxelOffset} \cdot (0.5, -0.5) $$
++      $$ \mathbf{p}_{br\_view}.zw = \mathbf{p}_{view}.zw $$
++      $$ \mathbf{p}_{br\_clip} = P \cdot \mathbf{p}_{br\_view} $$
++      Emit vertex with `gl_Position = \mathbf{p}_{br\_clip}` and texCoords $(1,0)$.
++    - **Top-Left:**
++      $$ \mathbf{p}_{tl\_view} = \mathbf{p}_{view}.xy + \text{voxelOffset} \cdot (-0.5, 0.5) $$
++      $$ \mathbf{p}_{tl\_view}.zw = \mathbf{p}_{view}.zw $$
++      $$ \mathbf{p}_{tl\_clip} = P \cdot \mathbf{p}_{tl\_view} $$
++      Emit vertex with `gl_Position = \mathbf{p}_{tl\_clip}` and texCoords $(0,1)$.
++    - **Top-Right:**
++      $$ \mathbf{p}_{tr\_view} = \mathbf{p}_{view}.xy + \text{voxelOffset} \cdot (0.5, 0.5) $$
++      $$ \mathbf{p}_{tr\_view}.zw = \mathbf{p}_{view}.zw $$
++      $$ \mathbf{p}_{tr\_clip} = P \cdot \mathbf{p}_{tr\_view} $$
++      Emit vertex with `gl_Position = \mathbf{p}_{tr\_clip}` and texCoords $(1,1)$.
++
++8.  **End Primitive:** Call `EndPrimitive()` to finalize the triangle strip.
++
++### Pseudocode
+ ```python
+-def process_voxel(voxel_pos_obj, voxel_color, voxel_normal, MV, P, scale, grid_length, splat_size, cull_invisible_faces):
+-    # 1. Transform to View Space
+-    voxel_pos_view = MV * voxel_pos_obj
++def process_voxel(gl_in_position, color, normal, MV, P, scale, gridLength, splatSize, cullInvisibleFaces):
++    # Step 1: Transform to View Space (as per source code logic)
++    voxelPosViewSpace = MV * gl_in_position
+     
+-    # 2. Transform to Clip Space and NDC
+-    voxel_pos_clip = P * voxel_pos_view
+-    voxel_pos_ndc = voxel_pos_clip / voxel_pos_clip.w
++    # Step 2: Transform to NDC
++    voxelPosClipSpace = P * voxelPosViewSpace
++    voxelPosClipSpace /= voxelPosClipSpace.w
+     
+-    # 3. Calculate Voxel Offset
+-    offset = splat_size * (scale / grid_length) * 1.414213
++    # Step 3: Calculate Splat Offset
++    voxelOffset = splatSize * (scale / gridLength) * 1.414213
+     
+-    # 4. Compute Clip-Space Half-Edge for Culling
++    # Step 4: Calculate Clip-Space Half-Edge
+     # Right edge midpoint in view space
+-    right_mid_view_x = voxel_pos_view.x + 0.5 * offset
+-    right_mid_view_y = voxel_pos_view.y
+-    right_mid_view_z = voxel_pos_view.z
+-    right_mid_view_w = voxel_pos_view.w
++    rightEdgeMidView = vec4(voxelPosViewSpace.x + 0.5 * voxelOffset, 
++                            voxelPosViewSpace.y, 
++                            voxelPosViewSpace.z, 
++                            voxelPosViewSpace.w)
++    rightEdgeMidClip = P * rightEdgeMidView
++    rightEdgeMidClip /= rightEdgeMidClip.w
+     
+-    right_mid_clip = P * vec4(right_mid_view_x, right_mid_view_y, right_mid_view_z, right_mid_view_w)
+-    right_mid_ndc = right_mid_clip / right_mid_clip.w
++    voxelHalfEdgeLengthClipSpace = distance(voxelPosClipSpace.xy, rightEdgeMidClip.xy)
++    voxelFrustumCullingBorder = 1 + voxelHalfEdgeLengthClipSpace
+     
+-    half_edge = distance(voxel_pos_ndc.xy, right_mid_ndc.xy)
+-    border = 1.0 + half_edge
++    # Step 5: Frustum Culling
++    if (voxelPosClipSpace.x < -voxelFrustumCullingBorder or 
++        voxelPosClipSpace.x > voxelFrustumCullingBorder or 
++        voxelPosClipSpace.y < -voxelFrustumCullingBorder or 
++        voxelPosClipSpace.y > voxelFrustumCullingBorder):
++        return None # Discard
+     
+-    # 5. Frustum Culling
+-    if (voxel_pos_ndc.x < -border or voxel_pos_ndc.x > border or
+-        voxel_pos_ndc.y < -border or voxel_pos_ndc.y > border):
+-        return None # Discard
+-
+-    # 6. Back-Face Culling
+-    if cull_invisible_faces:
+-        # Transform normal (w=0 for direction vectors)
+-        normal_view = MV * vec4(voxel_normal, 0.0)
+-        # Vector from camera (0,0,0 in view) to voxel
+-        view_dir = -voxel_pos_view.xyz
+-        if dot(view_dir, normal_view.xyz) < 0:
++    # Step 6: Back-Face Culling
++    if cullInvisibleFaces:
++        normalViewSpace = MV * vec4(normal, 0)
++        viewDir = vec3(0, 0, 0) - voxelPosViewSpace.xyz
++        if dot(viewDir, normalViewSpace.xyz) < 0:
+             return None # Discard
+-
+-    # 7. Emit Vertices
++    
++    # Step 7: Emit Vertices
+     vertices = []
+-    offsets = [(-0.5, -0.5), (0.5, -0.5), (-0.5, 0.5), (0.5, 0.5)]
+-    tex_coords = [(0, 0), (1, 0), (0, 1), (1, 1)]
+     
+-    for i in range(4):
+-        dx, dy = offsets[i]
+-        # Calculate view space position of the corner
+-        corner_view_x = voxel_pos_view.x + dx * offset
+-        corner_view_y = voxel_pos_view.y + dy * offset
+-        corner_view_z = voxel_pos_view.z
+-        corner_view_w = voxel_pos_view.w
+-        
+-        # Project to clip space
+-        corner_clip = P * vec4(corner_view_x, corner_view_y, corner_view_z, corner_view_w)
+-        
+-        vertices.append({
+-            'position': corner_clip,
+-            'tex_coord': tex_coords[i],
+-            'color': voxel_color,
+-            'normal': voxel_normal
+-        })
+-        
++    # Bottom-Left
++    bl_view = vec4(voxelPosViewSpace.x - 0.5 * voxelOffset, 
++                   voxelPosViewSpace.y - 0.5 * voxelOffset, 
++                   voxelPosViewSpace.z, 
++                   voxelPosViewSpace.w)
++    bl_clip = P * bl_view
++    vertices.append({'pos': bl_clip, 'tex': (0, 0), 'color': color, 'normal': normal})
++    
++    # Bottom-Right
++    br_view = vec4(voxelPosViewSpace.x + 0.5 * voxelOffset, 
++                   voxelPosViewSpace.y - 0.5 * voxelOffset, 
++                   voxelPosViewSpace.z, 
++                   voxelPosViewSpace.w)
++    br_clip = P * br_view
++    vertices.append({'pos': br_clip, 'tex': (1, 0), 'color': color, 'normal': normal})
++    
++    # Top-Left
++    tl_view = vec4(voxelPosViewSpace.x - 0.5 * voxelOffset, 
++                   voxelPosViewSpace.y + 0.5 * voxelOffset, 
++                   voxelPosViewSpace.z, 
++                   voxelPosViewSpace.w)
++    tl_clip = P * tl_view
++    vertices.append({'pos': tl_clip, 'tex': (0, 1), 'color': color, 'normal': normal})
++    
++    # Top-Right
++    tr_view = vec4(voxelPosViewSpace.x + 0.5 * voxelOffset, 
++                   voxelPosViewSpace.y + 0.5 * voxelOffset, 
++                   voxelPosViewSpace.z, 
++                   voxelPosViewSpace.w)
++    tr_clip = P * tr_view
++    vertices.append({'pos': tr_clip, 'tex': (1, 1), 'color': color, 'normal': normal})
++    
+     return vertices
+ ```
+ 
++### Parameters
++- `splatSize`: Uniform float. Controls the base size of the splat.
++- `scale`: Uniform float. Entity scale factor.
++- `gridLength`: Uniform float. Grid length factor.
++- `cullInvisibleFaces`: Uniform bool. Enables back-face culling.
++
++### Edge Cases and Pitfalls
++- **Precision:** The calculation of `voxelOffset` relies on floating-point arithmetic. Large scales or small grid lengths may lead to precision issues.
++- **Frustum Culling:** The border expansion `1 + voxelHalfEdgeLengthClipSpace` ensures that splats near the edge of the screen are not clipped incorrectly. However, if `voxelHalfEdgeLengthClipSpace` is very large, the border becomes large, potentially including voxels that are technically outside the view but whose splats extend into it.
++- **Back-Face Culling:** The normal transformation assumes the normal is in object space. If the normal is already in view space, the transformation `MV * vec4(normal, 0)` is incorrect. The source code uses `MV`, implying object space input.
++- **W-Division:** The NDC conversion requires division by $w$. If $w$ is zero or very close to zero, the result is undefined. This should be handled by the graphics driver, but it's a potential pitfall for near-plane voxels.
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per voxel for geometry generation, assuming constant matrix multiplications.
+-- **Memory Complexity:** Minimal; only uniform buffers and vertex attributes are required.
+-- **Performance:** Highly efficient on GPUs due to fixed-function rasterization of quads. Performance scales linearly with voxel count.
+-- **Strengths:** Simple implementation; leverages hardware rasterization; effective for dense volumes.
+-- **Limitations:** Quads are axis-aligned in view space, which can cause aliasing or gaps if not properly blended; does not handle perspective distortion of the voxel shape as accurately as tetrahedral splatting.
+-- **When to use:** Real-time visualization of large voxel datasets where performance is critical and slight geometric approximation is acceptable.
+-- **When not to use:** When precise perspective-correct volume representation is required (use [Tetrahedral Splatting](3181-tetrahedral-splatting.md) instead).
++- **Time Complexity:** $O(N)$ where $N$ is the number of voxels. Each voxel is processed independently in the geometry shader.
++- **Memory Complexity:** $O(N)$ for storing voxel data. The geometry shader generates 4 vertices per voxel.
++- **Performance:** The method is efficient for GPU rasterization as it uses standard triangle strips. The frustum and back-face culling reduce the number of primitives sent to the rasterizer.
++- **Strengths:** Simple implementation, leverages GPU rasterization, effective culling.
++- **Limitations:** Square footprints may alias or leave gaps compared to circular splats. The fixed offset calculation may not adapt well to varying voxel densities or non-uniform scaling.
++- **When to Use:** When simple, fast volume rendering is needed and square footprints are acceptable.
++- **When Not to Use:** When high-quality anti-aliasing or circular coverage is required.
+ 
+ ## Background
+-Circle Splat Rendering, also known as square_splat, is implemented in the SVO Renderer project by mmalesadev [S1, unofficial]. It is part of a broader family of splatting techniques used in volume rendering to map 3D data to 2D screen space. The method relies on standard OpenGL geometry shaders to expand point primitives into quads.
++Circle Splat Rendering, also known as square_splat, is implemented in the `svo_renderer` project by mmalesadev [S1, unofficial]. It is used for rendering SVO (Sparse Voxel Octree) data structures. The method maps voxels to 2D quads for efficient rasterization.
+ 
+ ## Sources

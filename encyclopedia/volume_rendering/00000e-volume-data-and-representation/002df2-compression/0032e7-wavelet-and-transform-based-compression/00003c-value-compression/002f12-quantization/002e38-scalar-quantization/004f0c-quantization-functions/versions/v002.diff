@@ -1,0 +1,256 @@
+--- v001.md
++++ v002.md
+@@ -4,101 +4,119 @@
+ 
+ ## Overview
+-Quantization Functions map floating-point values to discrete integer representations for storage or transmission, serving as the final encoding step in scalar quantization pipelines. Unlike [Uniform Quantization](5855-uniform-quantization.md) which maps directly from float to integer, these functions explicitly handle half-precision conversion and scaling to specific bit-depths (7, 9, or 10 bits) to optimize compression ratios for block-based formats like BC6H. They differ from [Fixed-rate Block-coding (VTC/S3TC)](5727-fixed-rate-block-coding-vtc-s3tc.md) by operating on individual scalar values rather than compressing spatial blocks of texture data.
++Quantization functions map continuous floating-point values to discrete integer representations to enable storage or transmission via standard codecs. This method defines the mathematical mapping and packing strategies required to convert multichannel feature planes into fixed-precision integer canvases compatible with image and video compression standards. It differs from [Scalar Quantization](5726-scalar-quantization.md) by focusing on global or channel-wise normalization for codec compatibility rather than per-block random-access reconstruction, and from [Uniform Quantization](5855-uniform-quantization.md) by explicitly handling multichannel packing strategies and specific codec constraints.
+ 
+ ## How it works
+-**Inputs:** A single 32-bit floating-point value $x$.
+-**Outputs:** A quantized integer $Q$ in the range $[0, 2^b - 1]$, where $b$ is the bit depth (7, 9, or 10).
+ 
+-**Data Structures:**
+-No persistent data structures are required. The operation is stateless and per-voxel.
++### Inputs and Outputs
++*   **Input:** Multichannel floating-point tensor $X$ with dimensions $[C, H, W]$.
++*   **Output:** Quantized integer tensor $X_{01}$ in range $[0, 1]$ (or mapped to codec bit-depth), and packed canvas $Y$ with dimensions $[C_{out}, H', W']$ where $C_{out} \in \{1, 3\}$.
+ 
+-**Parameters:**
+-*   $b \in \{7, 9, 10\}$: The target bit depth.
+-*   $Scale$: A scaling factor determined by $b$.
+-    *   For $b=7$: $Scale = 128$
+-    *   For $b=9$: $Scale = 512$
+-    *   For $b=10$: $Scale = 1024$
++### Data Structures
++*   **Float Tensor:** $X \in \mathbb{R}^{C \times H \times W}$.
++*   **Canvas:** $Y \in \mathbb{Z}^{C_{out} \times H' \times W'}$, where pixel values are integers suitable for standard codecs (e.g., 8-bit or 10-bit).
+ 
+-**Steps:**
+-1.  Convert the input float $x$ to half-precision (16-bit float, `float16`). Let this value be $x_{half}$.
+-2.  Compute the intermediate scaled value: $v = x_{half} \times Scale$.
+-3.  Normalize to the integer range by dividing by the maximum representable magnitude of a signed 16-bit integer, which is $32767$.
+-4.  The quantized integer is:
+-    $$ Q = \left\lfloor \frac{v}{32767} \right\rfloor $$
+-    *Note: The source formula implies a direct mapping where the half-precision value is treated as a normalized coordinate relative to the full 16-bit range, scaled by the specific block factor.*
++### Steps and Formulas
+ 
+-**Pseudocode:**
++1.  **Range Estimation:** Determine the normalization bounds $[\alpha, \beta]$ for each channel.
++    *   **AbsMax:** A fixed range shared by all channels.
++    *   **Channelwise:** Estimate the per-channel central 95% range. Let $\alpha_c$ and $\beta_c$ be the lower and upper bounds for channel $c$.
++
++2.  **Normalization and Quantization:** Map each element $X_{c,h,w}$ to $[0, 1]$ using the estimated bounds.
++    $$
++    X_{01, c, h, w} = \text{clip}\left( \frac{X_{c, h, w} - \alpha_c}{\beta_c - \alpha_c}, 0, 1 \right)
++    $$
++    Where $\text{clip}(v, 0, 1)$ limits the value to the interval $[0, 1]$.
++
++3.  **Dequantization (Reconstruction):** To recover the approximate original value $\widehat{X}$:
++    $$
++    \widehat{X}_{c, h, w} = X_{01, c, h, w} (\beta_c - \alpha_c) + \alpha_c
++    $$
++
++4.  **Packing:** Rearrange the normalized tensor $X_{01}$ into a codec-friendly canvas $Y$ with $C_{out} \in \{1, 3\}$ channels. Three strategies are defined for an input with $C=48$ channels:
++    *   **FlattenGray:** Stacks all channels spatially into a single monochrome canvas. For $C=48$, the layout becomes $[1, 6H, 8W]$. This avoids cross-channel mixing.
++    *   **FlattenRGB:** Groups channels into three equal groups. For $C=48$, each group has 16 channels. The layout becomes $[3, 4H, 4W]$.
++    *   **PixelShuffle:** Rearranges channels into spatial neighborhoods (spatial-to-depth). For $C=48$, the layout also becomes $[3, 4H, 4W]$.
++
++5.  **Density Grid Handling:** For density grids $D$ controlling opacity, tile the grid into a single monochrome canvas and encode as grayscale to avoid mixing across channels.
++
++### Pseudocode
++
+ ```python
+-def quantize_function(x: float, bit_depth: int) -> int:
++def quantize_and_pack(X, strategy='FlattenGray', density_grid=None):
+     """
+-    Quantizes a float32 value to a specific bit depth using half-precision scaling.
++    Quantize multichannel float tensor X and pack into a codec-compatible canvas.
+     
+     Args:
+-        x: Input 32-bit float.
+-        bit_depth: Target bit depth (7, 9, or 10).
++        X: Float tensor of shape [C, H, W].
++        strategy: 'FlattenGray', 'FlattenRGB', or 'PixelShuffle'.
++        density_grid: Optional float tensor for density, handled separately.
+         
+     Returns:
+-        Quantized integer value.
++        Y: Packed integer canvas ready for codec encoding.
++        bounds: List of (alpha, beta) tuples per channel for dequantization.
+     """
+-    # Step 1: Convert to half-precision
+-    # In Python, we simulate float16 conversion. 
+-    # Standard float16 has 1 sign bit, 5 exponent bits, 10 mantissa bits.
+-    # Range is approx -65504 to +65504.
+-    x_half = float_to_float16(x)
++    C, H, W = X.shape
++    bounds = []
++    X_01 = np.zeros_like(X)
+     
+-    # Step 2: Determine Scale
+-    if bit_depth == 7:
+-        scale = 128
+-    elif bit_depth == 9:
+-        scale = 512
+-    elif bit_depth == 10:
+-        scale = 1024
++    # Step 1 & 2: Channelwise Quantization
++    for c in range(C):
++        channel_data = X[c, :, :]
++        # Estimate central 95% range
++        alpha = np.percentile(channel_data, 2.5)
++        beta = np.percentile(channel_data, 97.5)
++        bounds.append((alpha, beta))
++        
++        # Normalize to [0, 1]
++        normalized = (channel_data - alpha) / (beta - alpha)
++        X_01[c, :, :] = np.clip(normalized, 0, 1)
++        
++    # Step 4: Packing
++    if strategy == 'FlattenGray':
++        # Stack all channels spatially: [1, 6H, 8W] for C=48
++        # General formula: reshape [C, H, W] to [1, H * (C//W_factor), W * W_factor]
++        # Assuming C is divisible by appropriate factors for square-ish packing
++        # For general C, flatten channels into spatial dimensions
++        # Example for C=48, H=H, W=W: [1, 6H, 8W] implies 6*8=48
++        # Reshape to [1, 6*H, 8*W]
++        Y = X_01.reshape(1, 6*H, 8*W) # Specific to C=48 example; general case requires dynamic reshaping
++        
++    elif strategy == 'FlattenRGB':
++        # Group into 3 channels of 16 each: [3, 4H, 4W]
++        # Reshape [48, H, W] -> [3, 16, H, W] -> [3, 4H, 4W]
++        Y = X_01.reshape(3, 16, H, W).transpose(0, 1, 2, 3).reshape(3, 4*H, 4*W)
++        
++    elif strategy == 'PixelShuffle':
++        # Spatial-to-depth rearrangement
++        # Similar output dimensions to FlattenRGB but different spatial arrangement
++        # Reshape [48, H, W] -> [3, 16, H, W] -> shuffle spatial dims
++        # Implementation depends on specific shuffle kernel; here assumed to result in [3, 4H, 4W]
++        Y = X_01.reshape(3, 16, H, W).transpose(0, 2, 3, 1).reshape(3, H*4, W*4) # Placeholder for specific shuffle logic
++        
+     else:
+-        raise ValueError("Bit depth must be 7, 9, or 10")
+-        
+-    # Step 3 & 4: Apply formula Q = (Half(x) * Scale) / 32767
+-    # Note: The source formula [S1, unofficial] does not specify rounding mode or clamping.
+-    # Standard implementation usually rounds to nearest integer.
+-    # The denominator 32767 corresponds to the max positive value of a signed 16-bit int.
+-    
+-    numerator = x_half * scale
+-    result = numerator / 32767.0
+-    
+-    # Round to nearest integer
+-    q = round(result)
+-    
+-    # Clamp to valid range for the bit depth
+-    max_val = (1 << bit_depth) - 1
+-    if q < 0:
+-        q = 0
+-    elif q > max_val:
+-        q = max_val
+-        
+-    return q
++        raise ValueError("Unknown strategy")
+ 
+-def float_to_float16(x: float) -> float:
+-    """
+-    Converts a float32 to float16 and back to float32 to simulate the quantization loss.
+-    This is a standard IEEE 754 conversion.
+-    """
+-    import struct
+-    # Pack as float32, unpack as float16 (using half precision struct format)
+-    # Note: Python's struct module doesn't directly support 'e' (half) in all versions,
+-    # but numpy or standard library conversions are assumed for implementation.
+-    # For pure Python without numpy, this is a complex bit-manipulation task.
+-    # We assume a standard IEEE 754 half-precision conversion is available.
+-    import numpy as np
+-    return np.float16(x).astype(np.float32)
++    # Handle Density Grid if provided
++    if density_grid is not None:
++        # Tile density grid into single monochrome canvas
++        # Specific tiling logic depends on grid dimensions
++        pass
++
++    return Y, bounds
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision Loss:** Converting to `float16` introduces significant quantization error for values outside the range $[-65504, 65504]$ or with high precision requirements.
+-*   **Clamping:** The source formula does not explicitly define clamping behavior. Implementers must clamp the final integer to $[0, 2^b - 1]$ to prevent out-of-bounds access during block encoding.
+-*   **Rounding:** The source formula uses division, implying floating-point arithmetic. The final step to an integer requires a defined rounding mode (e.g., round-to-nearest-even).
++### Parameters
++*   **Strategy:** Determines packing layout. 'FlattenGray' minimizes cross-channel mixing but may reduce spatial locality for codecs optimized for RGB. 'FlattenRGB' and 'PixelShuffle' group channels to fit standard 3-channel video codecs.
++*   **Range Estimation Method:** 'Channelwise' uses the central 95% percentile range per channel. 'AbsMax' uses a fixed global range.
++
++### Edge Cases and Pitfalls
++*   **Outliers:** If the central 95% range is heavily skewed by outliers, quantization precision for the majority of the data decreases. [G] Consider using robust statistics or clipping extreme values before range estimation.
++*   **Channel Mixing:** Using 'FlattenRGB' or 'PixelShuffle' mixes information from different feature channels into the same spatial location. This may confuse codecs that assume color correlation between channels. 'FlattenGray' avoids this but may be less efficient for RGB-optimized codecs.
++*   **Density Grid:** Encoding density as grayscale prevents mixing opacity information with color features, which is critical for correct volume rendering reconstruction.
+ 
+ ## Subtopics
+ 
+ ### Amplitude-Only Hologram Quantization
+-A method to generate an amplitude-only hologram $H$ by quantizing the real part of the object wave $O$, normalized between -1 and +1, using a uniform mid-rise quantizer $Q$ with $L$ discrete levels [S2]. It is chosen when energy efficiency is critical for holographic displays, as amplitude-only holograms discard phase information. It differs from standard scalar quantization by using a specific clipping parameter $\Delta$ to balance granular and overload distortions.
++A method to generate an amplitude-only hologram $H$ by quantizing the real part of the object wave $O$, normalized between -1 and +1, using a uniform mid-rise quantizer $Q$ with $L$ discrete levels. It is chosen when energy efficiency is critical for holographic displays. It differs from standard scalar quantization by using a specific clipping parameter $\Delta$ to balance granular and overload distortions. [S2]
+ *   **Formula:**
+     $$
+@@ -110,22 +128,47 @@
+     \end{cases}
+     $$
+-    Where $X$ is the normalized input value ($\Re\{O\}$), $L$ is the number of levels, and $\Delta$ is the clipping value [S2].
+ *   **Parameters:**
+-    *   $L$: Number of discrete quantization levels. Typical value: 256 [S2].
+-    *   $\Delta$: Input quantizer range clipping value. Typical value: 0.4 (compromise between energy efficiency and image quality) [S2].
+-*   **Pitfalls:** Increasing $\Delta$ improves imaging quality (PSNR/SSIM) but decreases energy efficiency. At $\Delta = 0.5$, energy efficiency drops to 1.4% for amplitude holograms [S2].
++    *   $L$: Number of discrete quantization levels. Typical value: 256.
++    *   $\Delta$: Input quantizer range clipping value. Typical value: 0.4. Controls the balance between energy efficiency and image quality.
++*   **Pitfall:** Increasing $\Delta$ improves imaging quality (PSNR/SSIM) but decreases energy efficiency. At $\Delta = 0.5$, energy efficiency drops to 1.4% for amplitude holograms. [S2]
++
++### Bit Depth Conversion with Windowing
++Converting 16-bit input data to 8-bit output during resampling, using a defined intensity window to preserve relevant contrast. It is used in medical imaging (e.g., dry bone scans) where the signal range is well-defined. It differs from general quantization by recording the window (min/max or percentile) in metadata for accurate dequantization. [S3, unofficial]
++*   **Steps:**
++    1.  Perform interpolation in floating-point precision.
++    2.  Map the floating-point result to the output bit depth using the recorded window.
++*   **Comparison:** 8-bit is sufficient for dry bone because the signal range (26k-36k) maps well to 8-bit steps without losing real data, whereas contrast-stained scans retain 16-bit to preserve lower-intensity details. [S3, unofficial]
++*   **Pitfall:** Rounding error for 0-40,000 to 8-bit is ~45 grey levels (RMS), against 1678 grey levels of natural variation in bone. [S3, unofficial]
++
++### Quantization and Packing for Standard Codecs
++Mapping multichannel floating-point feature planes to fixed-precision integer canvases compatible with standard image/video codecs (e.g., JPEG, AV1). It is used in neural radiance field (NeRF) compression. It differs from other methods by explicitly defining packing strategies (FlattenGray, FlattenRGB, PixelShuffle) to adapt multichannel tensors to 1- or 3-channel codec inputs. [S4]
++*   **Formulas:**
++    *   Quantization: $X_{01} = \text{clip}((X - \alpha) / (\beta - \alpha), 0, 1)$.
++    *   Dequantization: $\widehat{X} = X_{01}(\beta - \alpha) + \alpha$.
++*   **Strategies:**
++    *   **AbsMax:** Fixed range $[\alpha, \beta]$ shared by all channels.
++    *   **Channelwise:** Per-channel central 95% range.
++*   **Packing:**
++    *   **FlattenGray:** Stacks channels spatially into $[1, 6H, 8W]$ for $C=48$.
++    *   **FlattenRGB:** Groups channels into three groups of 16, resulting in $[3, 4H, 4W]$.
++    *   **PixelShuffle:** Rearranges channels into spatial neighborhoods, resulting in $[3, 4H, 4W]$. [S4]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per value. The operation involves a single float-to-half conversion, a multiplication, a division, and rounding.
+-*   **Memory Complexity:** $O(1)$. No auxiliary memory is required.
+-*   **Strengths:** Optimizes storage for specific bit-depths (7, 9, 10) used in modern compression formats like BC6H. The half-precision step reduces precision before integer mapping, aligning with hardware capabilities.
+-*   **Limitations:** The explicit conversion to half-precision may introduce artifacts if the input data requires higher precision than float16 can represent. The method is specific to the bit-depths 7, 9, and 10; other depths require different scaling factors not defined in the source.
+-*   **When to use:** When compressing volume data or textures using block-based formats that support 7, 9, or 10-bit scalar quantization (e.g., BC6H).
+-*   **When not to use:** When higher precision is required (use full float32 or 16-bit int without scaling), or when the bit-depth is not 7, 9, or 10.
++
++*   **Time Complexity:** $O(C \cdot H \cdot W)$ for quantization and packing. Range estimation is $O(C \cdot H \cdot W)$ if percentiles are computed per channel.
++*   **Memory Complexity:** $O(C \cdot H \cdot W)$ for the input and output tensors.
++*   **Strengths:** Compatible with standard, highly optimized codecs. Channelwise quantization preserves dynamic range per feature.
++*   **Limitations:** Packing strategies may introduce cross-channel mixing or reduce spatial locality, potentially reducing codec efficiency. Range estimation requires a pass over the data.
++*   **When to Use:** When compressing neural radiance fields or other multichannel volumetric data for streaming via standard video/image codecs.
++*   **When Not to Use:** When random-access decompression is required (use [Scalar Quantization](5726-scalar-quantization.md)) or when the data has extreme outliers that skew the central 95% range.
+ 
+ ## Background
+-The specific quantization functions for 7, 9, and 10-bit depths are associated with real-time BC6H compression on the GPU [S1, unofficial]. BC6H is a block-compression format for 32-bit floating-point HDR textures. The quantization functions map the half-precision intermediate values to the specific integer ranges required by the BC6H encoding scheme. The amplitude-only hologram quantization is described in the context of holographic near-eye displays for AR/VR applications [S2].
++
++Quantization functions for multichannel data have emerged with the rise of neural radiance fields (NeRFs) and their compression. The specific packing strategies (FlattenGray, FlattenRGB, PixelShuffle) and channelwise quantization for codec compatibility were introduced in the context of CATRF (Codec-Adaptive TriPlane Radiance Fields) for volumetric content delivery [S4]. Earlier work in holography used similar quantization principles for amplitude-only holograms [S2], and medical imaging has long used windowing for bit-depth conversion [S3, unofficial]. The specific 7/9/10-bit quantization for half-precision floats is associated with GPU real-time BC6H compression implementations [S1, unofficial].
+ 
+ ## Sources
++
+ [S1] Real-time BC6H compression on GPU, https://github.com/knarkowicz/GPURealTimeBC6H, fetched 2026-10-27 (unofficial)
+-[S2] Holographic Near-eye Display with Real-time Embedded Rendering, https://doi.org/10.1145/3610548.3618179, fetched 2026-10-28+[S2] Holographic Near-eye Display with Real-time Embedded Rendering, https://doi.org/10.1145/3610548.3618179, fetched 2026-10-28
++[S3] Reorient + crop at full resolution: block-wise resampling, interpolation choice, output bit depth, https://github.com/muratmaga/omezarr-converter/issues/1, fetched 2026-10-27 (unofficial)
++[S4] CATRF: Codec-Adaptive TriPlane Radiance Fields for Volumetric Content Delivery, https://doi.org/10.1109/cvprf71909.2026.00048, fetched 2026-10-30

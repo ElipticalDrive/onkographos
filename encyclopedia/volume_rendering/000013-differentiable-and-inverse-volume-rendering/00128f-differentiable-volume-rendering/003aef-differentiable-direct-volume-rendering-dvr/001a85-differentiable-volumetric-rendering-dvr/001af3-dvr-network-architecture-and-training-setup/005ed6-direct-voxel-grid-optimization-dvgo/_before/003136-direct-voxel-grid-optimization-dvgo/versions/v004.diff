@@ -1,0 +1,200 @@
+--- v003.md
++++ v004.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Ray origins $\mathbf{o}$ and directions $\mathbf{d}$, camera parameters (near/far planes), scene bounding box.
+-- **Outputs:** Rendered RGB color and depth for each ray.
++- **Inputs:** Ray origins $\mathbf{o}$ and directions $\mathbf{d}$, camera parameters (near/far planes), scene bounding box [S2, unofficial].
++- **Outputs:** Rendered RGB color and depth for each ray [S2, unofficial].
+ 
+ **Data Structures:**
+@@ -67,5 +67,5 @@
+         $$ \alpha_i = 1 - \exp(-\sigma_i \cdot \delta_i) $$
+         $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \cdot \delta_j\right) $$
+-        where $\delta_i$ is the distance between samples [S2, unofficial].
++        where $\delta_i$ is the step size along the ray [G].
+     b.  Render color:
+         $$ C = \sum_{i=1}^{K} T_i \alpha_i \mathbf{c}_i + T_K \cdot \text{background} $$
+@@ -80,106 +80,80 @@
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
++import numpy as np
+ 
+-class SimpleDVGO(nn.Module):
++def trilinear_interpolate(grid, points):
++    # points: (N, 3) grid coordinates
++    # grid: (Nx, Ny, Nz, C)
++    # Returns: (N, C) interpolated values
++    # Standard trilinear interpolation implementation omitted for brevity [G]
++    pass
++
++class SimpleDVGO:
+     def __init__(self, config):
+-        super().__init__()
+         self.near = config.near
+         self.far = config.far
+         self.num_samples = config.num_samples
+-        self.min = torch.tensor(config.min_corner, dtype=torch.float32)
+-        self.max = torch.tensor(config.max_corner, dtype=torch.float32)
+-        self.shape = torch.tensor(config.shape, dtype=torch.float32)
++        self.min = np.array(config.min_corner, dtype=np.float32)
++        self.max = np.array(config.max_corner, dtype=np.float32)
++        self.shape = np.array(config.shape, dtype=np.float32)
+         self.background = config.background
+         
+         # Initialize t_values
+-        depths = torch.linspace(self.near, self.far, self.num_samples + 1, dtype=torch.float32)
++        depths = np.linspace(self.near, self.far, self.num_samples + 1)
+         self.t_values = 0.5 * (depths[1:] + depths[:-1])
+         
+         # Initialize voxel grids
+-        # density_voxel_grid: shape (Nx, Ny, Nz, 1)
+-        self.density_voxel_grid = nn.Embedding(config.shape[0] * config.shape[1] * config.shape[2], 1)
+-        self.density_voxel_grid.weight.data.fill_(0.001)
+-        
+-        # rgb_voxel_grid: shape (Nx, Ny, Nz, 3)
+-        self.rgb_voxel_grid = nn.Embedding(config.shape[0] * config.shape[1] * config.shape[2], 3)
+-        # Initialize with BLUE (0, 0, 1)
+-        self.rgb_voxel_grid.weight.data.fill_(0.0)
+-        self.rgb_voxel_grid.weight.data[:, 2] = 1.0
++        self.density_grid = np.full((*config.shape, 1), 0.001, dtype=np.float32)
++        self.rgb_grid = np.zeros((*config.shape, 3), dtype=np.float32)
++        self.rgb_grid[..., 2] = 1.0  # BLUE
+         
+         # Optional: RGB MLP for fine stage
+         if config.rgbnet_dim > 0:
+-            self.rgbnet = nn.Sequential(
+-                nn.Linear(config.rgbnet_dim + 3 + 3 * config.viewbase_pe * 2, config.rgbnet_width),
+-                nn.ReLU(),
+-                # ... additional layers ...
+-                nn.Linear(config.rgbnet_width, 3)
+-            )
+-            # Initialize last layer bias to 0
+-            self.rgbnet[-1].bias.data.fill_(0.0)
++            self.rgbnet_dim = config.rgbnet_dim
++            self.rgbnet_depth = config.rgbnet_depth
++            self.rgbnet_width = config.rgbnet_width
++            self.viewbase_pe = config.viewbase_pe
++            self.rgbnet_direct = config.rgbnet_direct
++            self.rgbnet_full_implicit = config.rgbnet_full_implicit
++            # MLP weights initialized elsewhere [G]
+ 
+     def forward(self, rays, training=True):
+-        # rays: (B, 6) where B is batch size, 6 is (ox, oy, oz, dx, dy, dz)
+         origins = rays[:, :3]
+         directions = rays[:, 3:]
+         
+-        # Sample points
+         t_values = self.t_values
+         if training:
+-            n = t_values.size(0)
+-            random_scalar = (torch.rand(n, device=rays.device) - 0.5) / n
++            n = t_values.shape[0]
++            random_scalar = (np.random.rand(n) - 0.5) / n
+             actual_ts = t_values + random_scalar
+         else:
+             actual_ts = t_values
+             
+-        # Expand for batch
+-        actual_ts = actual_ts.unsqueeze(0).expand(origins.size(0), -1)
++        actual_ts = actual_ts[np.newaxis, :]
++        origins = origins[:, np.newaxis, :]
++        directions = directions[:, np.newaxis, :]
+         
+-        # Sample points in scene coordinates
+-        # P = o + t * d
+-        samples = origins.unsqueeze(1) + actual_ts.unsqueeze(2) * directions.unsqueeze(1)
++        samples = origins + actual_ts * directions
+         
+-        # Rescale to grid coordinates
+-        # P_grid = shape * (P - min) / (max - min)
+         rescaled = self.shape * (samples - self.min) / (self.max - self.min)
+         
+-        # Query grids
+-        # Note: nn.Embedding expects integer indices. For continuous interpolation, 
+-        # a custom CUDA kernel or trilinear interpolation on dense tensors is used.
+-        # Here we assume a helper function `trilinear_interpolate` exists or use 
+-        # F.grid_sample if grids are dense tensors.
++        density = trilinear_interpolate(self.density_grid, rescaled)
++        density = np.maximum(density, 0.0)  # ReLU
+         
+-        # Assuming dense tensors for simplicity in pseudocode
+-        density = F.grid_sample(self.density_voxel_grid.weight.data.view(1, 1, *config.shape), 
+-                                rescaled.permute(0, 3, 1, 2).unsqueeze(1), 
+-                                mode='bilinear', padding_mode='zeros').squeeze()
+-        # Apply ReLU
+-        density = F.relu(density)
++        rgb = trilinear_interpolate(self.rgb_grid, rescaled)
++        rgb = np.clip(rgb, 0.0, 1.0)
+         
+-        rgb = F.grid_sample(self.rgb_voxel_grid.weight.data.view(1, 3, *config.shape), 
+-                            rescaled.permute(0, 3, 1, 2).unsqueeze(1), 
+-                            mode='bilinear', padding_mode='zeros').squeeze()
+-        # Clamp RGB
+-        rgb = torch.clamp(rgb, 0.0, 1.0)
++        deltas = np.diff(actual_ts, axis=1)
++        delta_inf = np.ones_like(deltas[:, :1]) * 1e10
++        deltas = np.concatenate([deltas, delta_inf], axis=1)
+         
+-        # Volume Rendering
+-        # Compute deltas
+-        deltas = actual_ts[:, 1:] - actual_ts[:, :-1]
+-        delta_inf = torch.ones_like(deltas[:, :1]) * 1e10
+-        deltas = torch.cat([deltas, delta_inf], dim=1)
++        alpha = 1.0 - np.exp(-density * deltas)
+         
+-        # Compute alpha
+-        alpha = 1.0 - torch.exp(-density * deltas)
++        T = np.cumprod(1.0 - alpha + 1e-10, axis=1)
++        T = np.concatenate([np.ones_like(T[:, :1]), T[:, :-1]], axis=1)
+         
+-        # Compute transmittance
+-        T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
+-        T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+-        
+-        # Render color
+         weights = alpha * T[:, :-1]
+-        color = torch.sum(weights.unsqueeze(2) * rgb, dim=1)
+-        color = color + T[:, -1].unsqueeze(1) * self.background
++        color = np.sum(weights[:, :, np.newaxis] * rgb, axis=1)
++        color = color + T[:, -1, np.newaxis] * self.background
+         
+         return color
+@@ -191,18 +165,26 @@
+ This method adapts the Direct Voxel Grid Optimization (DVGO) architecture by replacing its standard volume rendering integral with a reparameterized estimate based on differentiable ray point sampling. It solves the problem of high computational cost in standard ray marching by allowing the number of radiance samples to be explicitly controlled and minimized, particularly during the coarse training stage. It sets itself apart from standard DVGO by trading off rendering quality (PSNR) for significant training speed improvements in the coarse stage, while maintaining competitive performance in the fine stage only when sample counts are kept low.
+ 
++### DVGO Interval Length Heuristic
++A heuristic in DVGO that sets the interval lengths $d$ in the volume rendering equation to the ratio of the current voxel grid resolution to the base voxel grid resolution, making the model independent of scene size [S3]. Disabling this heuristic by setting interval lengths to true physical distances between sample points causes DVGO to fail to render at high quality, as observed in Table A2 where 'disabled' rows show significantly lower PSNR or 'fail' status [S3]. On the Blender dataset, DVGO with the heuristic ('default') achieves PSNR values such as 34.10 (drums), 25.40 (ficus), and 32.56 (hotdog), whereas disabling it ('disabled') results in failures or much lower scores like 15.74 (fern) and 17.38 (flower) [S3].
++
++### Naive Combination Baseline (DVGO-NeuS)
++A straightforward combination of DVGO and NeuS, replacing the volume rendering in DVGO with the SDF-based volume rendering scheme. It serves as the naive baseline in this work, which can hardly produce satisfactory results [S4, unofficial]. In the baseline model, the color network tends to depend more on the additional under-constrained voxel feature grid input, thus breaking color-geometry dependency. Additionally, due to a high degree of freedom in optimizing a voxel grid, it is hard to maintain a globally coherent shape without additional constraints [S4, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot K)$ where $N$ is the number of rays and $K$ is the number of samples per ray. The voxel grid lookup is $O(1)$ per sample.
+-- **Memory Complexity:** $O(N_x \cdot N_y \cdot N_z)$ for the voxel grids. For a $128^3$ grid with 3 channels, this is approximately $128^3 \times 3 \times 4$ bytes $\approx 24$ MB [S2, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** DVGO is significantly faster than NeRF in both training and inference due to the replacement of MLP queries with grid lookups [S1, unofficial]. It achieves 2-3x speedup with PyTorch CUDA extensions [S1, unofficial].
+ - **Scaling:** Scales linearly with grid resolution. Higher resolutions require more memory but offer better detail. Octree or hash encoding variants can be used for scaling to higher resolutions [S1, unofficial].
+-- **Strengths:** Fast training and inference, simple implementation, efficient memory usage for moderate resolutions.
+-- **Limitations:** Memory usage grows cubically with resolution. May suffer from aliasing artifacts at high resolutions if not properly filtered. Less flexible than MLPs for complex geometries.
+-- **When to Use:** When training speed is critical and the scene can be represented well with a voxel grid. Suitable for forward-facing and bounded scenes.
+-- **When Not to Use:** For very large unbounded scenes where memory is a constraint, or when high-frequency details require very high grid resolutions.
++- **Strengths:** Fast training and inference, simple implementation, efficient memory usage for moderate resolutions [S1, unofficial].
++- **Limitations:** Memory usage grows cubically with resolution. May suffer from aliasing artifacts at high resolutions if not properly filtered. Less flexible than MLPs for complex geometries [G].
++- **When to Use:** When training speed is critical and the scene can be represented well with a voxel grid. Suitable for forward-facing and bounded scenes [G].
++- **When Not to Use:** For very large unbounded scenes where memory is a constraint, or when high-frequency details require very high grid resolutions [G].
+ 
+ ## Background
+-DVGO was introduced by Sun et al. in CVPR 2022 [S1, unofficial]. It builds on the idea of differentiable volume rendering but replaces the neural network representation with direct voxel grids. The method was developed to address the slow training times of NeRF. It is used in various datasets including NeRF Synthetic, NSVF, BlendedMVS, Tanks and Temples, DeepVoxels, and LLFF [S1, unofficial].
++DVGO was introduced by Sun et al. in CVPR 2022 [S1, unofficial]. It builds on the idea of differentiable volume rendering but replaces the neural network representation with direct voxel grids [S1, unofficial]. The method was developed to address the slow training times of NeRF [S1, unofficial]. It is used in various datasets including NeRF Synthetic, NSVF, BlendedMVS, Tanks and Temples, DeepVoxels, and LLFF [S1, unofficial].
+ 
+ ## Sources
+ [S1] DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
+-[S2] 7.6. Neural Radiance Fields for Drones, https://www.roboticsbook.org/S76_drone_learning.html, fetched 2026-10-29 (unofficial)+[S2] 7.6. Neural Radiance Fields for Drones, https://www.roboticsbook.org/S76_drone_learning.html, fetched 2026-10-29 (unofficial)
++[S3] Alpha Invariance: On Inverse Scaling Between Distance and Volume Density in Neural Radiance Fields, https://www.youtube.com/watch?v=YQhBEXC464w, fetched 2026-10-31
++[S4] Voxurf: Voxel-based Efficient and Accurate Neural Surface Reconstruction, https://doi.org/10.48550/arxiv.2208.12697, fetched 2026-10-26 (unofficial)

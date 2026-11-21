@@ -1,0 +1,1483 @@
+Density-preserving Deep Point Cloud Compression
+Yun He1∗
+Xinlin Ren1∗
+Danhang Tang2 Yinda Zhang2 Xiangyang Xue1
+1
+Fudan University 2 Google
+Yanwei Fu1
+Abstract
+Local density of point clouds is crucial for representing local details, but has been overlooked by existing point
+cloud compression methods. To address this, we propose a
+novel deep point cloud compression method that preserves
+local density information. Our method works in an autoencoder fashion: the encoder downsamples the points and
+learns point-wise features, while the decoder upsamples
+the points using these features. Specifically, we propose
+to encode local geometry and density with three embeddings: density embedding, local position embedding and
+ancestor embedding. During the decoding, we explicitly
+predict the upsampling factor for each point, and the directions and scales of the upsampled points. To mitigate
+the clustered points issue in existing methods, we design a
+novel sub-point convolution layer, and an upsampling block
+with adaptive scale. Furthermore, our method can also
+compress point-wise attributes, such as normal. Extensive
+qualitative and quantitative results on SemanticKITTI and
+ShapeNet demonstrate that our method achieves the stateof-the-art rate-distortion trade-off.
+1. Introduction
+Point cloud is one of the most important and widely
+used 3D representation in many applications, such as autonomous driving, robotics and physics simulation [14].
+With the rapid development of 3D scanning technology,
+complex geometry can now be effectively captured as large
+point clouds with fine details. As a consequence, point
+cloud compression becomes crucial for storage and transmission. Particularly, to achieve favorable compression ratio, the community has been focusing on lossy methods and
+pondering the key question: what properties of point clouds
+should be preserved, given limited bitrate budget?
+Besides the global geometry, we argue that local density
+∗ indicates equal contribution.
+Yun He, Xinlin Ren and Xiangyang Xue are with the School of Computer Science, Fudan University.
+Yanwei Fu is with the School of Data Science, Fudan University.
+\
+\
+Ours (Bpp: 1.61)
+GT
+\
+G-PCC (Bpp: 1.66)
+\
+Depoco (Bpp: 1.73)
+Figure 1. We argue that local density is an important characteristic of the point cloud and should be preserved during compression. Existing methods that ignore the local density exhibit artifacts such as uniform distribution (G-PCC [13]) and clustered
+points (Depoco [45]), resulting in worse reconstruction, especially
+when the bitrate is low.
+is an important characteristic and should be preserved as
+much as possible. Firstly, preserving density usually leads
+to less outliers, and thus smaller reconstruction error. Secondly, point clouds captured in practice, e.g. from LiDAR,
+are rarely with uniformly distributed points. Losing local
+density means losing important traits such as scanning resolution and occlusion. Thirdly, point clouds are often processed or simplified to be denser on regions of interest or
+with complex geometry, such as human face, hand, etc. Preserving density during compression means more budget is
+spent on these regions. Last but not the least, if the decompressed point cloud has significantly different density from
+the raw one, downstream applications such as semantic segmentation may be affected.
+Mathematically, a point cloud can be considered as a set,
+often with different cardinality and permutation settings [9],
+which makes it difficult for image/video compression or
+conventional learning-based solutions that assume fixed dimensional and ordered input. A typical strategy of existing lossy methods is to voxelize the points before compres-
+sion [13, 32, 33, 42, 43]. While this allows leveraging conventional methods [8, 25], it obviously loses the local density, and has a precision capped by the voxel size. Recent
+methods [19, 47] utilize PointNet [29] or PointNet++ [30]
+to ignore the cardinality and permutation with max pooling, and preserve density to some extent. However, the decompressed point clouds always lose local details and suffer from clustered points issue, since most of the local geometry has been discarded by max pooling. Depoco [45]
+adopts KPConv [40] to capture more local spatial information than pooling, but clustered points artifact still exists
+due to feature replication, see Fig 1. Alternatively, Zhao et
+al. [52] introduces attention mechanism to handle different
+cardinalities and permutations, though it is not designed for
+compression purpose.
+In this paper, we propose a novel density-preserving
+deep point cloud compression method which yields superior
+rate-distortion trade-off to prior arts, and more importantly
+preserves the local density. Our method has an auto-encoder
+architecture, trained with an entropy encoder end-to-end.
+The contributions of our paper are summarized as follows.
+On the encoder side: three types of feature embeddings are
+designed to capture local geometry distribution and density.
+On the decoder side: to mitigate the clustered points issue,
+we propose 1) the sub-point convolution to promote feature
+diversity during upsampling; 2) learnable number of upsampling points, and scale for their offsets in different regions.
+We conduct extensive experiments and ablation studies
+to justify these contributions. Additionally, we demonstrate
+that our method can be easily extended to jointly compress
+attributes such as normal.
+2. Related Work
+Point Cloud Analysis. Point clouds are typically unstructured, irregular and unordered, which cannot be immediately processed by conventional convolution. To tackle this
+issue, many works [24, 35] first voxelize points and then
+apply 3D convolution, which however could be computationally expensive. Another type of approach directly operates on point clouds, hence termed point-based. For example, PointNet [29] and PointNet++ [30] use max pooling to ignore the order of points. DGCNN [44] proposes
+dynamic graph convolution for non-local feature aggregation. And Point Transformer [52] introduces a purely selfattention [41] based network.
+Point Cloud Compression. Traditional point cloud compression algorithms [11–13, 26, 36, 37] usually rely on octree [25] or KD-tree [6] structures for storage efficiency.
+Inspired by the great success of deep learning technology
+in point cloud analysis [29, 30, 44, 52] and image compression [2, 3], the community begins to focus on the learning
+based point cloud compression. Similarly, lossy methods
+can also be categorized into voxel-based [32, 33, 42, 43] and
+point-based [19, 45, 47]. While sharing the discussed pros
+and cons in point cloud analysis, point-based methods enable preserving local density for taking the raw 3D points as
+inputs. Specifically, Yan et al. [47] integrates PointNet [29]
+into an auto-encoder framework, while Huang et al. [19]
+uses PointNet++ [30] instead. Architecture wise, Wiesmann et al. [45] proposes to downsample the point cloud
+while encoding and upsample during decoding. Moreover,
+the research on deep entropy model [7,18,34] is also active,
+while it is nearly lossless since its loss is only from quantization. In this paper we are focusing on the more lossy
+compression in favor of higher compression ratio.
+Point Cloud Upsampling. Point cloud upsampling aims
+to upsample a sparse point cloud to a dense and uniform
+one. And previous methods always design various feature expansion modules to achieve it. In particular, Yu et
+al. [50] replicates features and transforms them by multibranch MLPs. And some other methods [22,23,49] employ
+folding-based [48] upsampling, which also duplicates features first. Specifically, Wang et al. [49] assigns each duplicated feature a 1D code. Li et al. [22] and Li et al. [23]
+concatenate each replicated feature with a point sampled
+from a 2D grid. However, the upsampled features generated
+from these methods could be too similar to each other due
+to replication, which inevitably results in clustered points.
+3. Methodology
+The proposed density-preserving deep point cloud compression framework is based on a symmetric auto-encoder
+architecture, where the encoder has S downsampling stages
+indexed by 0, 1...S − 1, and the decoder also has S upsampling stages indexed reversely by S − 1, S − 2...0. For stage
+s of the encoder, the input point cloud is notated as Ps and
+the output as Ps+1 . Reversely on the decoder side, the input and output of stage s are P̂s+1 and P̂s respectively, as
+shown in Fig 2. Note that to distinguish from encoding, the
+hat symbol is used for reconstructed point clouds and associated features.
+The input point cloud P0 is first partitioned into smaller
+blocks which will be compressed individually. For simplicity, we use the same notation P0 for a block. Specifically,
+on the encoder side, the input Ps is downsampled to Ps+1
+by a factor fs at each stage s, while local geometry and density are also encoded into features Fs+1 . At the bottleneck,
+features FS are then fed into an end-to-end trained entropy
+encoder for further compression. When decompressing, we
+recover the downsampled point cloud P̂S , along with the
+features F̂S extracted by the entropy decoder. Our upsampling module then utilizes F̂S to upsample P̂S back to the
+reconstructed point cloud P̂0 stage by stage.
+: Downsampled Point Cloud
+: Downsampled Features
+DS
+Block
+DS
+Block
+Entropy
+Encoder
+𝐹෠3 𝑃෠3
+𝑃3 𝐹3
+Stage 0
+𝑃0
+Stage 1
+𝑃1
+Stage 2
+Stage 2
+𝑃2
+US
+Block
+US
+Block
+US
+Block
+…
+DS
+Block
+Adaptive Upsampling Module
+…
+…
+…
+Downsampling Module
+𝑃෠3
+𝑃3
+Stage 1
+𝑃෠2
+Stage 0
+𝑃෠1
+𝑃෠0
+Figure 2. Our pipeline first partitions the point cloud into small blocks. Each block is then downsampled three times while the local density
+and geometry patterns of collapsed points are encoded into features. At the bottleneck, downsampled features are further compressed by an
+entropy encoder. The decoder can then use the features to adaptively upsample the downsampled point cloud back to the original geometry
+and density. The details of downsampling (DS) block and upsampling (US) block are shown in Fig 3 and Fig 5 respectively.
+3.1. Density-preserving Encoder
+Downsampling. At each stage s of the encoder, an input
+point cloud block Ps will be downsampled to Ps+1 by a
+factor of fs using farthest point sampling (FPS), which encourages the sampled points to have a good coverage of the
+point cloud Ps . Please refer to the supplementary section
+for the ablation study of different sampling techniques.
+Feature embedding. As Ps+1 itself does not preserve the
+discarded points distribution of Ps . Simply upsampling
+Ps+1 by 1/fs will end up with a reconstruction with poor
+accuracy and uniform density. To address this, for each
+point p ∈ Ps+1 , we calculate three different embeddings:
+density embedding, local position embedding and ancestor
+embedding, to capture the geometry and density of the discarded points Ps − Ps+1 in a compact form with low entropy.
+First we define the concept of a collapsed points set C(p).
+After the downsampled points set is decided, each discarded
+point is deemed to collapse into its nearest downsampled
+point exclusively. Thus all the points that collapse into a
+downsampled point p form a collapsed points set C(p), and
+we term u = |C(p)| as the downsampling factor of point p.
+The density embedding FD captures the cardinality
+of C(p) by mapping the downsampling factor u to a ddimensional embedding via MLPs. Secondly, the local position embedding captures the distribution of C(p). Specifically, for each pk ∈ C(p), the direction and distance of the
+offset pk − p are calculated as below:
+(\frac {\point _k-\point }{||\point _k-\point ||_2}, ||\point _k-\point ||_2), \point \in \pointcloud _{\stage +1}, \point _k \in \collapsedpointsset (\point )
+(1)
+where the direction (3D) and distance (scalar) are represented by this 4D vector. Consequently, the local point distribution centered at p can be represented by a u × 4 feature,
+which is mapped to a higher dimensional (u × d) space with
+MLPs, before attention mechanism [41] is applied to aggregate them into a d-dimensional embedding FP .
+While the density and position embedding capture the
+local density and geometry at stage s, it is necessary to
+pass along these information from previous stages without
+adding much rate cost. To this end, we employ the point
+transformer layer [52] to aggregate the previous stage features of the collapsed points set C(p) into the representative
+sampled point p, due to its simplicity and effectiveness. We
+term this d-dimensional vector FA as ancestor embedding.
+At last, an MLP fuses these three embeddings
+(FP , FD , FA ) into a new d-dimensional feature Fs+1 for
+the next stage. This process is illustrated in Fig 3.
+Entropy encoding. At the bottleneck, we have a downsampled point cloud PS and per-point features FS . For PS , we
+quantize it to reduce bitrate, based on [4]. And FS are further compressed by an entropy encoder. Following recent
+success in deep image compression [2, 3], we integrate an
+arithmetic encoder into the training process to jointly optimize the entropy of the features. This process is accompanied by a rate loss function that will be introduced later in
+Sec 3.3.
+3.2. Density-recovering Decoder
+Overview. During decoding, symmetrically, we have S upsampling stages. At the bottleneck, we have the downsampled point cloud P̂S and decoded features F̂S extracted by
+the entropy decoder. Recall that during encoding, for each
+Upsampled
+Features
+Input
+Features
+Point
+Transformer
+𝑑𝑖𝑛
+𝑈
+Attention
+Convolution
+Individual
+𝑑𝑜𝑢𝑡
+MLP
+Periodic
+Shuffle
+𝑑𝑖𝑛
+𝑈
+𝑁 × 𝑑𝑖𝑛
+Figure 3. The downsampling block: first a subset of points are
+chosen as samples, and then three types of embeddings are computed and fused into Fs+1 .
+downsampled point p, u discarded points collapse into it.
+This information is not losslessly transmitted but fused into
+the features. During decoding, in order to properly upsample each point, we apply MLPs to predict an upsampling
+factor û ≈ u from the features. Similar to the collapsed
+set C(p) on the encoder, we define the upsampled set of a
+ˆ
+specific point p̂ ∈ P̂s+1 as C(p̂).
+ˆ
+In addition to C(p̂), the feature of each upsampled point
+is also predicted. Therefore the output of each point p̂ at
+upsampling stage s is:
+(\underset {\maxupsamplenumber \times 3}{\upsampledpointsset (\reconstructedpoint )}, \underset {\maxupsamplenumber \times \dimension }{\reconstructedfeature (\reconstructedpoint )}, \upsamplenumber ), \reconstructedpoint \in \reconstructedpointcloud _{\stage +1}, \upsamplenumber \leq \maxupsamplenumber
+Convolution
+Individual
+(2)
+ˆ and F̂(p̂) here have U items, but only the first û
+where C(p̂)
+points and features will be chosen as the final outputs. The
+union of all chosen points is the upsampled point cloud P̂s
+for the next stage, and same goes for F̂s .
+Sub-point convolution. At upsampling stage s, guided by
+the features F̂s+1 , we aim to upsample each point p̂ ∈ P̂s+1
+by the predicted upsampling factor û. Additionally, F̂s+1
+also need to be expanded to û features F̂s for the next
+stage. To achieve so, prior upsampling methods either use
+multi-branch MLPs for feature expansion [45, 50] or apply
+folding-based [48] upsampling modules [22, 23, 49]. Despite efforts of regularization and refinement, they still suffer from the aforementioned clustered points artifact due to
+feature replication. To address this, we propose a novel and
+efficient operator sub-point convolution (Fig 4), inspired by
+the sub-pixel convolution [38].
+Specifically, given the input N × din features F̂s+1 , we
+first divide them into U groups along the channel dimension, such that each group has din /U channels. A convolution layer per group is applied to expand the features to a
+space with dimension N × U dout .
+At last, we use periodic shuffle to reshape the upsampled features to U N × dout . Compared with prior methods [22, 23, 45, 49, 50], sub-point convolution has the following advantages: 1) the clustered points issue is mitigated
+by preventing feature replication; 2) convolution is applied
+𝑑𝑜𝑢𝑡
+𝑈𝑁 × 𝑑𝑜𝑢𝑡
+𝑁 × 𝑈𝑑𝑜𝑢𝑡
+Figure 4. The illustration of sub-point convolution.
+to each group with lower dimension, which significantly reduces the parameters and computations.
+Upsampling block with adaptive scale. Based on the subpoint convolution, we build our upsampling block for points
+and associated features, as depicted in Fig 5. Centering at
+each point p̂ ∈ P̂s+1 , offsets of upsampled points are predicted. Since both downsampling and upsampling happen
+in local regions, the scales of predicted offsets need to be
+constrained. To this end, folding-based methods [22,23,49]
+use predefined small grid sizes. While Wiesmann et al.
+[45] constrains predicted offsets to [-1,1], and then scales
+them with a predefined factor. However, this scaling factor
+may vary significantly across different regions and different
+point clouds. Hence we design a new upsampling module
+with learnable scales.
+Unit Uniform Candidate
+Sphere Sample Directions
+𝑀 ×3
+Sub-point
+Convolution
+Input
+Points
+Duplicate
+
+Weights
+𝑁 ×3
+Sum
+
+𝑈𝑁 × 𝑀
+Duplicate
+Sample with
+FPS
+Find Collapsed Downsample
+Points for Samples Factor u = 2
+𝑈𝑁 × 3
+Raw
+Pointcloud
+Directions
+MLP
+Offsets
+
+Upsampled
+Points
+𝑈𝑁 × 3
+Sub-point
+Convolution
+Input
+Features
+𝑁 ×𝑑
+Scales
+𝑈𝑁 × 1
+Sub-point
+Upsampled
+Convolution
+Features
+𝑈𝑁 × 𝑑
+
+Upsampled
+Features
+𝑈𝑁 × 𝑑
+Duplicate
+Figure 5. The scale-adaptive upsampling block, includes both
+point upsampling and feature upsampling.
+In particular, a pool of M vectors is first sampled from
+a unit sphere and kept fixed as candidate directions for
+both training and inference. During upsampling, weights of
+these candidates are predicted such that the weighted sum
+result is the most probable direction. Some scaling factors, or magnitudes are also predicted from the input features F̂s+1 to have the offsets and thus upsampled points.
+The feature expansion is performed by sub-point convolution within a residual block [15]. Once we obtain the final
+points and features, a refinement layer is added to finetune
+the upsampled points and features. It is essentially an upsampling block with upsampling factor û = 1.
+3.3. Loss Function
+We employ the standard rate-distortion loss function during training for better trade-off.
+\loss = \distortionloss + \rateweight \rateloss ,
+(3)
+where D penalizes distortion and R penalizes bitrate.
+Distortion loss. For distortion (reconstuction error), we
+utilize the symmetric point-to-point Chamfer Distance [18]
+to measure the difference between the reconstructed point
+cloud P̂s and ground truth Ps . Since the decoder has S
+stages, to avoid error accumulation, we compute the distortion loss at each stage and aggregate them as Dcha .
+A density term is also designed to encourage recovering
+local density. At stage s of the decoder, a point p̂ is upsamˆ (see Sec 3.2). We then
+pled to a new chosen points set C(p̂)
+find its nearest counter point p on the encoder side, which
+is collapsed from a set C(p) (see Sec 3.1). Hence we can
+define the density loss Dden as:
+\densityloss = \sum _{s=0}^{\totalstage -1} \sum _{\reconstructedpoint \in \reconstructedpointcloud _{\stage +1}} \frac { \left ||\collapsedpointsset (\point )| - |\upsampledpointsset (\reconstructedpoint )| \right | + \gamma \left |\mean {\collapsedpointsset (\point )} - \mean {\upsampledpointsset (\reconstructedpoint )}\right |}{|\reconstructedpointcloud _{\stage +1}|}
+(4)
+where the first term of numerator calculates the cardinality
+difference between the two sets, the second calculates the
+difference between the mean distances of all points in sets
+to center points p or p̂, and γ is the weight.
+To further facilitate the density estimation, for each stage
+s, we utilize another loss to measure the cardinality difference of ground truth Ps and reconstructed point cloud P̂s :
+\numpointsloss = \sum _{s=0}^{\totalstage -1} \left ||\pointcloud _{\stage }| - |\reconstructedpointcloud _{\stage }|\right |
+(5)
+Finally, the overall distortion loss is as follows:
+\distortionloss = \chamferloss +\weightdensityloss \densityloss + \weightnumpointsloss \numpointsloss
+(6)
+where α and β are the weights of respective terms.
+Rate loss. Since entropy encoding is non-differentiable,
+a differentiable proxy is applied during training. Following [2, 3], we replace the quantization step with an additive
+uniform noise, and estimate the number of bits as the rate
+loss R. During inference, features are properly quantized
+and compressed by a range encoder.
+3.4. Attribute Compression
+Our framework can also compress point cloud attributes
+such as color, normal, etc. As an example, we incorporate
+normal compression into our framework. To avoid extra
+cost of bitrate, we fix the same network architecture and
+hyperparameters. The only difference is the input/output
+dimension has changed from 3D to 6D (position+normal).
+To facilitate this, we employ a simple L2 loss to minimize
+the normal reconstruction error.
+4. Evaluation
+In this section, we evaluate our method by comparing to
+state-of-the-art methods on compression rate, reconstruction accuracy and local density recovering. We then provide ablation studies to justify the design choices. Lastly,
+we demonstrate that additional attributes like normal can be
+also compressed. Please refer to the supplementary section
+for implementation details and parameter settings.
+4.1. Experiment Setup
+Datasets. We conduct our main experiments on SemanticKITTI [5] and ShapeNet [10]. For SemanticKITTI,
+we utilize the training/testing split in [45]. For ShapeNet,
+we obtain the watertight manifold surfaces by [17] and sample points from these meshes based on [16, 28]. All point
+clouds are first normalized to 100m3 cubes and divided
+into non-overlapping blocks of 12m3 and 22m3 for SemanticKITTI and ShapeNet respectively, while each block
+is further normalized to [-1, 1]. For downstream surface
+reconstruction task, we use the RenderPeople [1] dataset.
+Baselines. We compare to both state-of-the-art nonlearning based methods: G-PCC [13], Google Draco [12],
+MPEG Anchor [26]; and learning-based methods: Depeco [45], PCGC [43]. Note that all learning-based methods
+have been retrained on the same datasets as our method.
+Evaluation metrics. Following [7, 18], we adopt the symmetric point-to-point Chamfer Distance (CD) and point-toplane PSNR for geometry accuracy and Bits per Point (Bpp)
+for compression rate. Moreover, we design a new metric to
+measure the local density differences. And all these metrics
+are evaluated on each block. Specifically, for each point
+p, we notate its neighbor points within radius r = 0.15 as
+K(p). Since the cardinalities of ground truth P0 and reconstructed point cloud P̂0 are not necessarily the same, we
+define a symmetric density metric DM as:
+\begin {aligned} DM(\pointcloud _0, \reconstructedpointcloud _0) &= \frac {1}{|\pointcloud _0|} \sum _{p \in \pointcloud _0} \delta (p, \hat {p}) + \frac {1}{|\reconstructedpointcloud _0|} \sum _{\hat {p} \in \reconstructedpointcloud _0} \delta (\hat {p},p),\\ \textrm {where}~ \delta (a, b) &= \frac {\left ||\neighbors (a)| -|\neighbors (b)|\right |}{|\neighbors (a)|} + \mu \frac {\left |\mean {\neighbors (a)} - \mean {\neighbors (b)}\right |}{\mean {\neighbors (a)}} \end {aligned}
+(7)
+where b is the nearest counter point of a, µ is the weight,
+|K(a)| denotes the cardinality of K(a) and K(a) denotes
+the mean distance of all points in K(a) to a.
+GT
+Ours
+Bpp: 4.23 PSNR: 47.98
+Bpp: 1.67 PSNR: 39.65
+Bpp: 4.06 PSNR: 44.00
+Bpp: 1.95 PSNR: 39.77
+Bpp: 4.52 PSNR: 45.29
+Bpp: 1.71 PSNR: 36.78
+Bpp: 4.21 PSNR: 42.87
+Bpp: 2.89 PSNR: 26.50
+Bpp: 4.83 PSNR: 38.32
+Bpp: 1.85 PSNR: 32.32
+Bpp: 4.25 PSNR: 41.31
+Bpp: 2.56 PSNR: 24.61
+Bpp: 4.89 PSNR: 38.65
+Bpp: 1.99 PSNR: 34.79
+Bpp: 4.16 PSNR: 40.93
+Bpp: 2.39 PSNR: 34.34
+Bpp: 4.98 PSNR: 40.01
+Bpp: 1.76 PSNR: 35.52
+Bpp: 4.13 PSNR: 39.12
+Bpp: 2.54 PSNR: 36.02
+Bpp: 4.91 PSNR: 40.22
+Bpp: 1.69 PSNR: 29.44
+Bpp: 4.09 PSNR: 39.97
+PCGC
+Depoco
+MPEG Anchor
+Draco
+G-PCC
+Bpp: 1.94 PSNR: 44.73
+1.00e-07
+0.167
+0.333
+0.500
+0.667
+0.833
+1.00
+Error Colormap
+Figure 6. Qualitative results on SemanticKITTI (the first two columns) and ShapeNet (the last two columns). From top to bottom: Ground
+Truth, Ours, G-PCC [13], Draco [12], MPEG Anchor [26], Depeco [45] and PCGC [43]. We utilize the distance between each point in
+decompressed point clouds and its nearest neighbor in ground truth as the error. And the Bpp and PSNR metrics are averaged by each
+block of the full point clouds. It is obvious that our method successfully achieves both the most accurate geometry and lowest bitrates.
+Figure 7. Quantitative results on SemanticKITTI (the first row) and ShapeNet (the second row). Our method consistently achieves more
+accurate geometry and recovering density across the full range of bitrates.
+4.2. Comparison with SOTA
+We first compare our method with SOTA on the ratedistortion trade-off. In Fig 7, we show the per-block Chamfer Distance, PSNR and density metric of all methods
+against Bits per Point (Bpp). Our method yields more accurate reconstruction consistently across the full spectrum of
+Bpp on both SemanticKITTI and ShapeNet datasets. Note
+the differences are more evident under the density metric.
+Fig 6 shows qualitative results at various bitrates. Draco
+[12] and MPEG Anchor [26] typically need a high Bpp (e.g.
+>4) to achieve a satisfactory reconstruction. Plus they perform poorly at low bitrates due to quantization. Depoco [45]
+often generates clustered points caused by feature replication. PCGC [43] tends to miss a continuous chunk of points,
+because it regards decompression as a binary classification
+process (occupied or not), which has extremely imbalanced
+data due to the intrinsic sparsity of point clouds. Besides, it
+also significantly alters the density. Although G-PCC [13]
+recovers the overall geometry successfully, due to voxelization, it loses local details. Our method achieves the highest
+compression performance in terms of both geometry and local density while spending the lowest bitrates.
+Complexity analysis. Table 1 shows the per-block latency
+and memory footprint of different methods. For G-PCC
+[13], Draco [12] and MPEG Anchor [26], we use the sizes
+of their executable files. For Depoco [45] and PCGC [43],
+Methods
+Enc. time (ms)
+Dec. time (ms)
+Size (MB)
+G-PCC [13]
+Draco [12]
+MPEG Anchor [26]
+Depoco [45]
+PCGC [43]
+180/165
+147/153
+151/142
+32/126
+130/96
+163/152
+147/153
+136/130
+2/2
+24/19
+3.49
+2.49
+27.8
+0.38
+7.73
+Ours
+80/81
+24/31
+0.44
+Table 1. The average per-block encoding time, decoding time and
+model size of different methods on SemanticKITTI/ShapeNet, using a TITAN X GPU.
+we use their checkpoint sizes. Our model is competitive in
+computational efficiency, only second to Depoco [45] but
+achieves a better rate-distortion trade-off.
+4.3. Ablation Study
+For fair comparison, we conduct all the ablation experiments on SemanticKITTI while fixing the Bpp at 2.1.
+Effectiveness of each component. We build a baseline
+model consisting of a point transformer encoder [52], entropy encoder and multi-branch MLPs decoder [50]. The
+proposed components, including dynamic upsampling factor û, local position embedding FP , density embedding
+FD , scale-adaptive upsampling block, sub-point convolution and upsampling refinement layer, are then added incrementally, as shown in Table 2. All the modules contribute
+to the reconstruction quality under a fixed Bpp.
+Components
+Baseline
++û
++FP
++FD
++Adaptive Scale
++Sub-point Conv
++Refinement
+CD (10−2 ) ↓
+PSNR ↑
+DM ↓
+2.61
+2.29
+1.67
+1.32
+0.98
+0.45
+0.36
+38.82
+39.64
+40.96
+41.68
+42.49
+43.73
+44.03
+4.17
+3.23
+3.02
+2.58
+2.31
+2.07
+1.98
+Table 2. The effectiveness of each component in our method.
+Each row a component is added on top of the previous row.
+Effectiveness of our decoder. To show that our decoder,
+consisting of our upsampling block and sub-point convolution, is more effective in leveraging the information provided by the encoder for recovering density, we utilize various point upampling modules from previous works as the
+decoders to jointly train with our encoder, as shown in Table 3. Our decoder significantly outperforms others on all
+the reconstruction quality metrics, indicating that our decoder preserves geometry and local density better.
+CD (10−2 ) ↓
+PSNR ↑
+DM ↓
+Yu et al. [50]
+Wang et al. [49]
+Li et al. [22]
+Li et al. [23]
+Qian et al. [31]
+1.25
+1.03
+0.98
+0.90
+0.81
+41.51
+42.54
+42.57
+42.83
+43.06
+2.60
+2.46
+2.45
+2.32
+2.25
+Ours
+0.36
+44.03
+1.98
+Decoders
+Table 3. The effectiveness of our decoder. In each row, we replace
+our decoder with the decoder from another work.
+Figure 9. Quantitative results of downstream tasks. Left: surface
+reconstruction on RenderPeople; right: semantic segmentation on
+SemanticKITTI.
+MPEG Anchor [26], as shown in Fig 8. Our method consistently outperforms others, especially by a large margin on
+the SemanticKITTI dataset.
+4.5. Impact on Downstream Tasks
+Point cloud compression, as an upstream task, should not
+affect the performance of downstream applications much.
+In this section, we compare the impact of different compression algorithms on two downstream tasks: surface reconstruction and semantic segmentation. Since some methods do not support attribute compression, all methods only
+compress the positions for fair comparison.
+In the surface reconstruction experiments, Poisson reconstruction [20] is run on the full decompressed point
+clouds. Reconstructed meshes are then compared with the
+ground truth with the symmetric point-to-plane Chamfer
+Distance [39]. For semantic segmentation, we train PolarNet [51] on raw point clouds from SemanticKITTI training
+set, and test on the full decompressed point clouds. The
+mean intersection-over-union (IOU) is used as metric, following [18]. As shown in Fig 9, our method consistently
+yields the best rate-distortion trade-off, which reiterates the
+importance of recovering local density. Please refer to the
+supplementary section for qualitative comparisons.
+5. Conclusion
+Figure 8. Quantitative normal compression results. Left: SemanticKITTI; right: ShapeNet. Our method consistently performs
+better than Draco [12], G-PCC [13] and MPEG Anchor [26] across
+the bitrate spectrum.
+4.4. Normal Compression
+Besides positions, we also evaluate the capability of
+compressing attributes, using normals as an example. The
+normals are concatenated with the point locations and fed
+into our model. The decompressed locations and normals
+are then compared with the inputs by per-block F1 score [7].
+As modifying learning based approaches such as PCGC
+[43] and Depoco [45] to have attribute compression is nontrivial, we only compare to Draco [12], G-PCC [13] and
+We introduce a novel deep point cloud compression
+framework that can preserve local density. Not only does
+it yield the best rate-distortion trade-off against prior arts, it
+also recovers local density more accurately under our density metric. Qualitative results show that our algorithm can
+mitigate the two main density issues of other methods: uniformly distributed and clustered points. Complexity wise
+our method is only second to Depoco while with much better accuracy.
+Acknowledgments. This work was supported in part by
+NSFC under Grant (No. 62076067), SMSTM Project
+(2021SHZDZX0103), and Shanghai Research and Innovation Functional Program (17DZ2260900). Danhang Tang,
+Yinda Zhang and Yanwei Fu are the corresponding authours.
+References
+[1] Renderpeople. https://renderpeople.com/free3d-people, 2018. 5
+[2] Johannes Ballé, Valero Laparra, and Eero P Simoncelli.
+End-to-end optimized image compression. arXiv preprint
+arXiv:1611.01704, 2016. 2, 3, 5
+[3] Johannes Ballé, David Minnen, Saurabh Singh, Sung Jin
+Hwang, and Nick Johnston. Variational image compression
+with a scale hyperprior. arXiv preprint arXiv:1802.01436,
+2018. 2, 3, 5
+[4] Jean Bégaint, Fabien Racapé, Simon Feltman, and Akshay
+Pushparaja. Compressai: a pytorch library and evaluation platform for end-to-end compression research. arXiv
+preprint arXiv:2011.03029, 2020. 3, 11
+[5] Jens Behley, Martin Garbade, Andres Milioto, Jan Quenzel, Sven Behnke, Cyrill Stachniss, and Jurgen Gall. Semantickitti: A dataset for semantic scene understanding of
+lidar sequences. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 9297–9307,
+2019. 5
+[6] Jon Louis Bentley. Multidimensional binary search trees
+used for associative searching. Communications of the ACM,
+18(9):509–517, 1975. 2
+[7] Sourav Biswas, Jerry Liu, Kelvin Wong, Shenlong Wang,
+and Raquel Urtasun. Muscle: Multi sweep compression of lidar using deep entropy models. arXiv preprint
+arXiv:2011.07590, 2020. 2, 5, 8, 11
+[8] Andrew Brock, Theodore Lim, James M Ritchie, and
+Nick Weston. Generative and discriminative voxel modeling with convolutional neural networks. arXiv preprint
+arXiv:1608.04236, 2016. 2
+[9] Christian Bueno and Alan Hylton. On the representation
+power of set pooling networks. In Thirty-Fifth Conference
+on Neural Information Processing Systems, 2021. 1
+[10] Angel X Chang, Thomas Funkhouser, Leonidas Guibas,
+Pat Hanrahan, Qixing Huang, Zimo Li, Silvio Savarese,
+Manolis Savva, Shuran Song, Hao Su, et al. Shapenet:
+An information-rich 3d model repository. arXiv preprint
+arXiv:1512.03012, 2015. 5
+[11] Ricardo L De Queiroz and Philip A Chou. Compression of
+3d point clouds using a region-adaptive hierarchical transform. IEEE Transactions on Image Processing, 25(8):3947–
+3956, 2016. 2
+[12] Frank Galligan, Michael Hemmer, Ondrej Stava, Fan Zhang,
+and Jamieson Brettle. Google/draco: a library for compressing and decompressing 3d geometric meshes and point
+clouds. https : / / github . com / google / draco,
+2018. 2, 5, 6, 7, 8, 15
+[13] D Graziosi, O Nakagami, S Kuma, A Zaghetto, T Suzuki,
+and A Tabatabai. An overview of ongoing point cloud compression standardization activities: video-based (v-pcc) and
+geometry-based (g-pcc). APSIPA Transactions on Signal and
+Information Processing, 9, 2020. 1, 2, 5, 6, 7, 8, 15
+[14] Yulan Guo, Hanyun Wang, Qingyong Hu, Hao Liu, Li Liu,
+and Mohammed Bennamoun. Deep learning for 3d point
+clouds: A survey. IEEE transactions on pattern analysis and
+machine intelligence, 2020. 1
+[15] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern
+recognition, pages 770–778, 2016. 4
+[16] Pedro Hermosilla, Tobias Ritschel, Pere-Pau Vázquez, Àlvar
+Vinacua, and Timo Ropinski. Monte carlo convolution for
+learning on non-uniformly sampled point clouds. ACM
+Transactions on Graphics (TOG), 37(6):1–12, 2018. 5
+[17] Jingwei Huang, Hao Su, and Leonidas Guibas. Robust watertight manifold surface generation method for shapenet models. arXiv preprint arXiv:1802.01698, 2018. 5
+[18] Lila Huang, Shenlong Wang, Kelvin Wong, Jerry Liu,
+and Raquel Urtasun. Octsqueeze: Octree-structured entropy model for lidar compression. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 1313–1323, 2020. 2, 5, 8
+[19] Tianxin Huang and Yong Liu. 3d point cloud geometry
+compression on deep learning. In Proceedings of the 27th
+ACM International Conference on Multimedia, pages 890–
+898, 2019. 2
+[20] Michael Kazhdan and Hugues Hoppe. Screened poisson surface reconstruction. ACM Transactions on Graphics (ToG),
+32(3):1–13, 2013. 8, 14, 16
+[21] Diederik P Kingma and Jimmy Ba. Adam: A method for
+stochastic optimization. arXiv preprint arXiv:1412.6980,
+2014. 11
+[22] Ruihui Li, Xianzhi Li, Chi-Wing Fu, Daniel Cohen-Or, and
+Pheng-Ann Heng. Pu-gan: a point cloud upsampling adversarial network. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 7203–7212,
+2019. 2, 4, 8
+[23] Ruihui Li, Xianzhi Li, Pheng-Ann Heng, and Chi-Wing Fu.
+Point cloud upsampling via disentangled refinement. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 344–353, 2021. 2, 4, 8
+[24] Daniel Maturana and Sebastian Scherer. Voxnet: A 3d convolutional neural network for real-time object recognition.
+In 2015 IEEE/RSJ International Conference on Intelligent
+Robots and Systems (IROS), pages 922–928. IEEE, 2015. 2
+[25] Donald Meagher. Geometric modeling using octree encoding. Computer graphics and image processing, 19(2):129–
+147, 1982. 2
+[26] Rufael Mekuria, Kees Blom, and Pablo Cesar. Design, implementation, and evaluation of a point cloud codec for teleimmersive video. IEEE Transactions on Circuits and Systems for Video Technology, 27(4):828–842, 2016. 2, 5, 6, 7,
+8, 15
+[27] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
+James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
+Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. Advances in neural information processing systems, 32:8026–
+8037, 2019. 11
+[28] Jörg Peters and Ulrich Reif. The simplest subdivision
+scheme for smoothing polyhedra. ACM Transactions on
+Graphics (TOG), 16(4):420–431, 1997. 5
+[29] Charles R Qi, Hao Su, Kaichun Mo, and Leonidas J Guibas.
+Pointnet: Deep learning on point sets for 3d classification
+and segmentation. In Proceedings of the IEEE conference
+on computer vision and pattern recognition, pages 652–660,
+2017. 2
+[30] Charles R Qi, Li Yi, Hao Su, and Leonidas J Guibas. Pointnet++: Deep hierarchical feature learning on point sets in a
+metric space. arXiv preprint arXiv:1706.02413, 2017. 2
+[31] Guocheng Qian, Abdulellah Abualshour, Guohao Li, Ali
+Thabet, and Bernard Ghanem. Pu-gcn: Point cloud upsampling using graph convolutional networks. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 11683–11692, 2021. 8
+[32] Maurice Quach, Giuseppe Valenzise, and Frederic Dufaux.
+Learning convolutional transforms for lossy point cloud geometry compression. In 2019 IEEE International Conference on Image Processing (ICIP), pages 4320–4324. IEEE,
+2019. 2
+[33] Maurice Quach, Giuseppe Valenzise, and Frederic Dufaux.
+Improved deep point cloud geometry compression. In 2020
+IEEE 22nd International Workshop on Multimedia Signal
+Processing (MMSP), pages 1–6. IEEE, 2020. 2
+[34] Zizheng Que, Guo Lu, and Dong Xu. Voxelcontext-net: An
+octree based framework for point cloud compression. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 6042–6051, 2021. 2
+[35] Gernot Riegler, Ali Osman Ulusoy, and Andreas Geiger.
+Octnet: Learning deep 3d representations at high resolutions.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pages 3577–3586, 2017. 2
+[36] Radu Bogdan Rusu and Steve Cousins. 3d is here: Point
+cloud library (pcl). In 2011 IEEE international conference
+on robotics and automation, pages 1–4. IEEE, 2011. 2
+[37] Ruwen Schnabel and Reinhard Klein. Octree-based pointcloud compression. In PBG@ SIGGRAPH, pages 111–120,
+2006. 2
+[38] Wenzhe Shi, Jose Caballero, Ferenc Huszár, Johannes Totz,
+Andrew P Aitken, Rob Bishop, Daniel Rueckert, and Zehan
+Wang. Real-time single image and video super-resolution
+using an efficient sub-pixel convolutional neural network. In
+Proceedings of the IEEE conference on computer vision and
+pattern recognition, pages 1874–1883, 2016. 4
+[39] Danhang Tang, Saurabh Singh, Philip A Chou, Christian
+Hane, Mingsong Dou, Sean Fanello, Jonathan Taylor, Philip
+Davidson, Onur G Guleryuz, Yinda Zhang, et al. Deep implicit volume compression. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 1293–1303, 2020. 8, 16
+[40] Hugues Thomas, Charles R Qi, Jean-Emmanuel Deschaud,
+Beatriz Marcotegui, François Goulette, and Leonidas J
+Guibas. Kpconv: Flexible and deformable convolution for
+point clouds. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 6411–6420, 2019. 2
+[41] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia
+Polosukhin. Attention is all you need. In Advances in neural
+information processing systems, pages 5998–6008, 2017. 2,
+3
+[42] Jianqiang Wang, Dandan Ding, Zhu Li, and Zhan Ma. Multiscale point cloud geometry compression. In 2021 Data Compression Conference (DCC), pages 73–82. IEEE, 2021. 2
+[43] Jianqiang Wang, Hao Zhu, Haojie Liu, and Zhan Ma. Lossy
+point cloud geometry compression via end-to-end learning.
+IEEE Transactions on Circuits and Systems for Video Technology, 2021. 2, 5, 6, 7, 8, 15
+[44] Yue Wang, Yongbin Sun, Ziwei Liu, Sanjay E Sarma,
+Michael M Bronstein, and Justin M Solomon. Dynamic
+graph cnn for learning on point clouds. Acm Transactions
+On Graphics (tog), 38(5):1–12, 2019. 2
+[45] Louis Wiesmann, Andres Milioto, Xieyuanli Chen, Cyrill
+Stachniss, and Jens Behley. Deep compression for dense
+point cloud maps. IEEE Robotics and Automation Letters,
+6(2):2060–2067, 2021. 1, 2, 4, 5, 6, 7, 8, 14, 15
+[46] Jianxiong Xiao, Tian Fang, Peng Zhao, Maxime Lhuillier,
+and Long Quan. Image-based street-side city modeling. In
+ACM SIGGRAPH Asia 2009 papers, pages 1–12. 2009. 11
+[47] Wei Yan, Shan Liu, Thomas H Li, Zhu Li, Ge Li, et al.
+Deep autoencoder-based lossy geometry compression for
+point clouds. arXiv preprint arXiv:1905.03691, 2019. 2
+[48] Yaoqing Yang, Chen Feng, Yiru Shen, and Dong Tian. Foldingnet: Point cloud auto-encoder via deep grid deformation.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 206–215, 2018. 2, 4
+[49] Wang Yifan, Shihao Wu, Hui Huang, Daniel Cohen-Or, and
+Olga Sorkine-Hornung. Patch-based progressive 3d point set
+upsampling. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 5958–
+5967, 2019. 2, 4, 8
+[50] Lequan Yu, Xianzhi Li, Chi-Wing Fu, Daniel Cohen-Or, and
+Pheng-Ann Heng. Pu-net: Point cloud upsampling network.
+In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pages 2790–2799, 2018. 2, 4, 7, 8,
+12
+[51] Yang Zhang, Zixiang Zhou, Philip David, Xiangyu Yue, Zerong Xi, Boqing Gong, and Hassan Foroosh. Polarnet: An
+improved grid representation for online lidar point clouds semantic segmentation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+9601–9610, 2020. 8
+[52] Hengshuang Zhao, Li Jiang, Jiaya Jia, Philip HS Torr, and
+Vladlen Koltun. Point transformer. In Proceedings of the
+IEEE/CVF International Conference on Computer Vision,
+pages 16259–16268, 2021. 2, 3, 7, 11, 12
+[53] Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3d:
+A modern library for 3d data processing. arXiv preprint
+arXiv:1801.09847, 2018. 11
+Supplementary Material
+In the supplementary material, we provide additional
+implementation details, ablation studies and qualitative results. Limitation and potential ethic concerns are also discussed.
+1. Implementation Details
+Additional details about hyperparameter settings, detailed network architecture, and diagrams of baselines used
+in ablation study are elucidate in this section. We also formulate the reconstruction metrics used in experiments.
+1.1. Hyperparameters
+In the experiments, we choose the number of stages
+S = 3 and the downsampling factor fs ∈ {1/2, 1/3, 1/4}.
+We set dimension d = 8 for all three embeddings extracted
+by the encoder, and maximum upsampling factor U = 8 in
+the decoder. For distortion loss, we set the weight of density
+loss α = 1e − 4 and cardinality loss β = 5e − 7. Where in
+density loss, the coefficient γ = 50. And the weight µ for
+density metric is setted as 1e−4 and 1e−5 for ShapeNet and
+SemanticKITTI respectively. For normal compression, we
+additionally add a L2 loss between the reconstructed normals and ground truth, and its weight is 1e − 2. To obtain
+the rate-distortion trade-off curves, we vary the coefficient
+of rate loss λ and downsampling factor fs . Moreover, in the
+adaptive scale upsampling block, we use an icosahedron to
+sample uniformly on a unit sphere to get M = 43 candidate
+directions, which include 42 vertices of the icosahedron and
+1 origin, following [46].
+Our model is implemented with PyTorch [27] and CompressAI [4], trained on the NVIDIA TITAN X GPU for
+50 epochs. We use the Adam optimizer [21] with a initial learning rate of 1e-3 and a decay factor of 0.5 every 15
+epochs.
+1.2. Detailed Network Architecture
+The detailed architectures of our encoder and decoder
+are shown in Fig 10 and Fig 11 separately. At stage s of
+the encoder, for each point p ∈ Ps+1 , we first extract local
+position embedding FP and density embedding FD to capture the local geometry and density information of current
+stage. And ancestor embedding FA is also utilized to aggregate features from previous stages by applying point transformer layer [52], based on the collapsed points set C(p).
+However, the cardinality of each point’s collapsed set may
+be different. To achieve parallel process, we first find the
+k-nearest neighbor K(p) in Ps for each downsampled point
+p, and then apply a mask when using attention for feature
+aggregation. Specifically, the mask is defined as below:
+w_k= \begin {cases} MLPs(\feature (\point _k)), & \textrm {if}~ \point _k \in \mathcal {K}(\point )~ \textrm {and}~ \point _k \in \collapsedpointsset (p) \\[2ex] 0, & \textrm {else} \end {cases} \label {eq:mask}
+(8)
+where wk and F(pk ) are the weight and feature of pk . We
+set k = 16, which is much larger than 1/fs , so the collapsed
+set C(p) is guaranteed to be the subset of K(p).
+And in the decoder, we apply sub-point convolution to
+construct the scale-adaptive upsampling block, which promotes the recovering of local geometry patterns and density.
+1.3. Reconstruction Metrics
+We use the symmetric point-to-point Chamfer Distance
+and point-to-plane PSNR to evaluate the geometry accuracy
+of reconstructed point clouds. And now we list their mathematical formulas.
+Given ground truth Ps and reconstructed point cloud P̂s ,
+the calculation of symmetric point-to-point Chamfer Distance is as follow:
+\begin {aligned} CD(\pointcloud _{\stage }, \reconstructedpointcloud _{\stage }) =\frac {1}{|\pointcloud _{\stage }|} \sum _{p \in \pointcloud _{\stage }} \min _{\hat {p} \in \reconstructedpointcloud _{\stage }}\|p-\hat {p}\|_{2}^{2}+ \frac {1}{|\reconstructedpointcloud _{\stage }|} \sum _{\hat {p} \in \reconstructedpointcloud _{\stage }} \min _{p \in \pointcloud _{\stage }}\|\hat {p}-p\|_{2}^{2} \end {aligned}
+(9)
+Following [7], we calculate the symmetric point-to-plane
+PSNR as:
+\begin {aligned} PSNR(\pointcloud _{\stage }, \reconstructedpointcloud _{\stage }) =10 \log _{10} {\frac {3 \sigma ^2}{\max \{ MSE(\pointcloud _{\stage }, \reconstructedpointcloud _{\stage }), MSE(\reconstructedpointcloud _{\stage }, \pointcloud _{\stage }) \}}} \end {aligned}
+(10)
+where σ is the peak constant value, represented by the maximum nearest neighborPdistance in the whole dataset [7].
+M SE(Ps , P̂s ) = |P1s | p∈Ps ((p − p̂) · n̂)2 , where p̂ is p’s
+nearest neighbor in P̂s , and n̂ is the normal of p̂. For each
+p ∈ Ps , we estimate its normal using [53]. And for each
+p̂ ∈ P̂s , we use the normal of its nearest neighbor in Ps as
+n̂.
+While Chamfer Distance and PSNR can only be used
+for position compression, we apply F1 score to measure the
+quality of both reconstructed locations and normals during
+normal compression, based on [7].
+{F}_{1}(\pointcloud _\stage , \reconstructedpointcloud _\stage )=\frac {2 TP}{2TP+FP+FN}
+(11)
+where T P (true positives) represent those reconstructed
+points (p̂, n̂) ∈ P̂s which have a corresponding ground
+truth point (p, n) ∈ Ps that satisfies ||p − p̂||2 ≤ τp and
+||n− n̂||2 ≤ τn ; F P (false positives) indicate the rest reconstructed points; and F N (false negatives) are those ground
+truth points which do not have a corresponding T P . For SemanticKITTI, we set τp = 0.5, τn = 0.5; and for ShapeNet,
+we set τp = 0.05, τn = 0.2.
+Input Block
+Input Block
+𝐵×𝑁 ×3
+Conv1d, 1 × 1, 64
+Local Point
+Distribution
+Downsampling
+Factor
+Input Block
+FPS
+𝐵 × 𝑁/3 × 𝐾 × 4
+Find K-Nearest Neighbor
+𝐵 × 𝑁/3 × 1
+Conv2d, 1 × 1, 64
+Downsampled Block
+Conv2d, 1 × 1, 8
+Conv1d, 1 × 1, 8
+Conv1d, 1 × 1, 8
+Point Transformer
+Layer
+Density Embedding 𝐹 𝐷
+𝐵 × 𝑁/3 × 8
+Conv1d, 1 × 1, 8
+𝐵×𝑁 ×8
+Downsampling Unit
+Conv2d, 1 × 1, 64
+𝐵 × 𝑁/3 × 8
+Mask
+𝐵 × 𝑁/9 × 8
+𝐵 × 𝑁/27 × 8
+Output Block
+Query and Key
+Conv2d, 1 × 1, 64
+Conv1d, 1 × 1, 64
+Value
+𝐵 × 𝑁/3 × 64
+𝐵 × 𝑁/3 × 64
+Position Embedding
+Find K-Nearest Neighbor
+
+𝐵 × 𝑁/3 × 𝐾 × 64
+
+Find K-Nearest Neighbor
+Conv2d, 1 × 1, 64
+Ancestor Embedding 𝐹 𝐴
+
+Conv2d, 1 × 1, 64
+Mask
+
+Conv1d, 1 × 1, 8
+Sum
+Downsampling Unit
+Conv2d, 1 × 1, 64
+𝐵 × 𝑁/3 × 8
+𝐵 × 𝑁/3 × 8
+Conv2d, 1 × 1, 8
+Downsampling Unit
+Conv1d, 1 × 1, 64
+Conv1d, 1 × 1, 64
+𝐵 × 𝑁/3 × 8
+Local Position
+Embedding 𝐹 𝑃
+𝐵 × 𝑁/3 × 8
+Downsampling Unit
+Data
+Point Transformer
+Layer
+Conv1d, 1 × 1, 8
+Output Block
+𝐵 × 𝑁/3 × 8
+Conv, Kernel Size,
+Output Channel
+Conv + GroupNorm + ReLU
+Output Block
+Conv, Kernel Size,
+Output Channel
+Conv
+Figure 10. The detailed architecture of our encoder. The text below each box indicates the feature dimension: batchsize × points number
+× (k-nearest neighbor) × channel. And the stride of all convolution layers is fixed to 1.
+Input Block
+෡2 × 8
+𝐵×𝑁
+Conv2d, 1 × 1, 1
+× maximum factor 𝑈
+෡1 × 8
+𝐵×𝑁
+෡2 × 1
+𝐵×𝑁
+Upsampling Factor 𝑢ො
+Select
+
+Sub-point
+Weights
+Convolution Module
+𝐵 × 𝑅𝑁 × 43
+Sum
+
+𝐵×𝑁 ×3
+Offsets
+
+Upsampled
+Points
+𝐵 × 𝑅𝑁 × 3
+෡2 × 8
+𝐵 × 𝑈𝑁
+Sub-point
+Convolution Module
+Selected Points and
+Features
+Scales
+𝐵 × 𝑅𝑁 × 1
+Sub-point
+Input
+Upsampled
+Features Convolution Module Features
+෡1 × 8
+𝐵×𝑁
+𝐵×𝑁×8
+Refinement
+Upsampling Ratio : 1
+෡0 × 8
+𝐵×𝑁
+
+𝐵 × 𝑅𝑁 × 8
+Upsampled
+Features
+𝐵 × 𝑅𝑁 × 8
+Duplicate
+෡1 × 8
+𝐵×𝑁
+Output Block
+Upsampling Unit
+Data
+43 × 3
+Candidate Points
+and Features
+Sigmoid
+Upsampling Unit
+Upsampling Unit
+Upsampling Ratio : 𝑈
+Duplicate
+Upsampling Unit
+Conv1d, 1 × 1, 64
+Input
+Points
+Duplicate
+𝐵 × 𝑅𝑁 × 3
+𝐵 × 𝑁/27 × 8
+Unit Uniform Candidate
+Sphere Sample Directions
+Directions
+෡2 × 8
+𝐵×𝑁
+Input Block
+Scale-adaptive Upsampling Block
+Output Block
+Upsampling Ratio: R
+Conv, Kernel Size,
+Output Channel
+Conv, Kernel Size,
+Output Channel
+Scale-adaptive Upsampling Block
+Conv + ReLU
+Conv
+Sub-point Conv1d,
+1 × 1, 64
+Sub-point Conv1d,
+1 × 1, 64
+Sub-point Conv1d,
+1 × 1, 𝑑𝑜𝑢𝑡
+Sub-point Convolution Module
+Figure 11. The detailed architecture of our decoder. The text below each box indicates the feature dimension: batchsize × points number
+× (k-nearest neighbor) × channel, where N̂2 ≈ N/9, N̂1 ≈ N/3, N̂0 ≈ N . And the stride of all convolution layers is fixed to 1.
+1.4. Baselines in Ablation Study
+only enable our contributing component once a time.
+In the Table 2 of main paper, we validate the effectiveness of each component in our method. To achieve so,
+we first build a baseline model, which is composed of a
+point transformer encoder [52], entropy encoder and multibranch MLPs decoder [50]. And we utilize a fixed upsampling factor 1/fs for this baseline. Then we add the
+following components incrementally: dynamic upsampling
+factor û, local position embedding FP , density embedding
+FD , scale-adaptive upsampling block, sub-point convolution and upsampling refinement layer. Here we draw the
+detailed structures of each model, as shown in Fig 12. Note
+that for all these models, we adopt the same pipeline, and
+2. Additional Ablation Studies
+In this section, we conduct some more ablation experiments to validate our choices of downsampling methods and
+loss functions. And all these experiments are conducted on
+SemanticKITTI with fixed bpp 2.1, the same as the main
+paper.
+2.1. Downsampling Methods
+At stage s of the encoder, we use FPS to get the downsampled point cloud Ps+1 , which expected to have a good
+coverage of the input Ps . Besides FPS, there are also
+Duplicate
+Input
+Points
+𝑁 ×3
+Point
+Transformer
+Raw
+Pointcloud
+Sample with
+FPS
+MLP
+Input
+Features
+Find Collapsed
+Points for Samples
+Multi-branch
+MLPs
+Upsampled
+Offsets
+
+Upsampled
+Points
+Multi-branch
+MLPs
+Upsampled
+Features
+
+Upsampled
+Features
+𝑁 ×𝑑
+𝑁ൗ × 𝑑
+𝑓𝑠
+Duplicate
+Downsampling Layer
+𝑁ൗ × 3
+𝑓𝑠
+𝑁ൗ × 𝑑
+𝑓𝑠
+Upsampling Block
+Baseline
+Duplicate
+Input
+Points
+𝑁 ×3
+Point
+Transformer
+MLP
+Multi-branch
+MLPs
+Upsampled
+Offsets
+
+Upsampled
+Points
+Multi-branch
+MLPs
+Upsampled
+Features
+
+Upsampled
+Features
+𝑈𝑁 × 3
+Raw
+Pointcloud
+Sample with
+FPS
+Input
+Features
+Find Collapsed
+Points for Samples
+𝑁 ×𝑑
+𝑈𝑁 × 𝑑
+𝑈𝑁 × 𝑑
+Duplicate
+Downsampling Layer
+Upsampling Block
++ Dynamic Upsmapling Factor 𝑢ො
+Duplicate
+Input
+Points
+Point
+Transformer
+𝑁 ×3
+MLP
+Multi-branch
+MLPs
+Upsampled
+Offsets
+
+Upsampled
+Points
+Multi-branch
+MLPs
+Upsampled
+Features
+
+Upsampled
+Features
+𝑈𝑁 × 3
+Attention
+Raw
+Pointcloud
+Sample with
+FPS
+Input
+Features
+Find Collapsed
+Points for Samples
+𝑁 ×𝑑
+𝑈𝑁 × 𝑑
+𝑈𝑁 × 𝑑
+Duplicate
+Downsampling Unit
+Upsampling Block
++ Local Position Embedding 𝐹 𝑃
+Duplicate
+Input
+Points
+Point
+Transformer
+𝑁 ×3
+Attention
+MLP
+Multi-branch
+MLPs
+Upsampled
+Offsets
+
+Upsampled
+Points
+Multi-branch
+MLPs
+Upsampled
+Features
+
+Upsampled
+Features
+𝑈𝑁 × 3
+Input
+Features
+MLP
+Raw
+Pointcloud
+Sample with
+FPS
+𝑁 ×𝑑
+Find Collapsed Downsample
+Points for Samples Factor u = 2
+𝑈𝑁 × 𝑑
+𝑈𝑁 × 𝑑
+Duplicate
+Upsampling Block
+Downsampling Unit
++ Density Embedding 𝐹 𝐷
+Attention
+
+Weights
+
+𝑈𝑁 × 𝑀
+MLP
+𝑁 ×3
+𝑈𝑁 × 3
+Multi-branch
+MLPs
+Sum
+Duplicate
+𝑀 ×3
+Point
+Transformer
+Input
+Points
+Duplicate
+Directions
+Unit Uniform Candidate
+Sphere Sample Directions
+Offsets
+
+Upsampled
+Points
+𝑈𝑁 × 3
+Multi-branch
+MLPs
+Scales
+𝑈𝑁 × 1
+Input
+Features
+MLP
+Raw
+Pointcloud
+Sample with
+FPS
+Find Collapsed Downsample
+Points for Samples Factor u = 2
+Multi-branch
+MLPs
+𝑁 ×𝑑
+Upsampled
+Features
+
+𝑈𝑁 × 𝑑
+Upsampled
+Features
+𝑈𝑁 × 𝑑
+Duplicate
+Upsampling Block
+Downsampling Unit
++Scale-adaptive Upsampling Block
+Attention
+MLP
+Sample with
+FPS
+Find Collapsed Downsample
+Points for Samples Factor u = 2
+Weights
+𝑁 ×3
+
+𝑈𝑁 × 𝑀
+MLP
+Offsets
+
+Upsampled
+Points
+𝑈𝑁 × 3
+Sub-point
+Convolution
+Raw
+Pointcloud
+
+Sum
+Duplicate
+Sub-point
+Convolution
+Input
+Points
+Duplicate
+𝑈𝑁 × 3
+𝑀 ×3
+Directions
+Unit Uniform Candidate
+Sphere Sample Directions
+Point
+Transformer
+Input
+Features
+𝑁 ×𝑑
+Scales
+𝑈𝑁 × 1
+Sub-point
+Upsampled
+Convolution
+Features
+𝑈𝑁 × 𝑑
+
+Upsampled
+Features
+𝑈𝑁 × 𝑑
+Duplicate
+Upsampling Block
+Downsampling Unit
++Sub-point Convolution
+Figure 12. The detailed structures in ablation study (Table 2 of the main paper). Left: alternatives for the downsampling block in the
+encoder; right: alternatives for the scale-adaptive upsampling block in the decoder. For dynamic upsampling factor, we first generate U
+items and then select the first û points and features. While all these baselines do not have the refinement layer in the decoder, our full
+model adds it based on the “+Sub-point Convolution” model.
+two common downsampling methods: random downsampling (RD) and grid downsampling (GD) [45]. And we replace FPS with these two downsampling methods in turn,
+as shown in Table 4. It is obvious that FPS can significantly
+improve the accuracy of reconstruction because it has better
+coverage, both in terms of geometry and local density.
+Downsampling
+Methods
+RD
+GD
+FPS
+CD (10−2 ) ↓
+PSNR ↑
+DM ↓
+1.29
+0.62
+0.36
+41.17
+42.86
+44.03
+3.08
+2.31
+1.98
+Table 4. The effectiveness of different downsampling methods. It
+is clear that FPS delivers the best performance.
+2.2. Loss Functions
+In our framework, we adopt the standard rate-distortion
+loss function for training. And the symmetric point-to-point
+Chamfer Distance Dcha is used as the distortion loss D,
+while the estimated bits number is used as the rate loss R.
+In addition to these two loss functions, we also extend the
+distortion loss by designing the density loss Dden and cardinality loss Dcard to facilitate the recovery of local density.
+For validating the new loss functions Dden and Dcard , we
+remove them degressively, as shown in Table 5.
+Loss Functions
+Full Loss Functions
+-Dcard
+-Dden
+CD (10−2 ) ↓
+PSNR ↑
+DM ↓
+0.36
+0.47
+1.45
+44.03
+43.62
+40.74
+1.98
+2.15
+3.59
+Table 5. The effectiveness of loss functions. Each row a loss function is romoved based on the top of previous row.
+As cardinality loss Dcard is removed, all metrics drop
+slightly. However, once the constrain of local density is absent, the reconstruction quality will drop sharply, indicating
+the effectiveness of our designed density loss.
+3. Additional Qualitative Results
+In this section, we show more qualitative results on
+position compression, normal compression and downstream tasks, which clearly indicate that our densitypreserving compression approach achieves the best performance. Specifically, in Fig 13, we show more qualitative position compression results on SemanticKITTI and
+ShapeNet. In Fig 14, we visualize the normal compression results by employing Poisson reconstruction [20] on
+decompressed points and normals. In Fig 15 and Fig 16,
+we display the qualitative results of two downstream tasks:
+surface reconstruction and semantic segmentation.
+4. Limitation Discussion
+Although our density-preserving deep point cloud compression framework is effective, it also has some limitations.
+For example: 1) The maximum upsampling factor U is predefined before decoding, thus the actual upsampling factor
+û is expected to be less than or equal to U . However, the assumption may be broken in some cases, especially when the
+local area is extremely dense, then our method may not be
+able to recover the local density precisely. 2) As we divide
+the point clouds into small blocks, each block may contain
+various number of points, so they are not easy to perfectly
+parallelized. 3) Other hyperparameters such as the weight
+of loss, the dimension of embedding, etc may be adaptively
+adjusted on different datasets. Moreover, we show some
+failure cases on extremely sparse point clouds in Fig 17. As
+we assume that there exists some data redundancy in the
+local areas of point clouds, so we can compress it while
+achieving tolerable distortion. However, this assumption
+may not hold when the point cloud is very sparse, and even
+the downsampled point cloud cannot describe the underlying geometry any more, hence is hard for reconstruction.
+At last, we discuss the possible ethical issues. In general,
+since our point cloud compression algorithm is agnostic to
+the contents of point clouds, the responsibility of handling
+ethical issues belongs to the point cloud creator. That being said, as compressed point clouds may be intercepted by
+hackers during network transmission, which may result in
+data leakage, common encryption algorithms can be applied
+on the bottleneck point clouds and features to protect user
+privacy.
+GT
+Ours
+Bpp: 5.02 PSNR: 49.30
+Bpp: 0.67 PSNR: 32.91
+Bpp: 2.98 PSNR: 41.90
+Bpp: 2.66 PSNR: 40.04
+Bpp: 5.35 PSNR: 47.23
+Bpp: 0.72 PSNR: 26.45
+Bpp: 3.02 PSNR: 40.12
+Bpp: 3.40 PSNR: 27.81
+Bpp: 5.98 PSNR: 44.19
+Bpp: 1.18 PSNR: 21.71
+Bpp: 3.27 PSNR: 39.28
+Bpp: 3.27 PSNR: 26.96
+Bpp: 6.13 PSNR: 45.16
+Bpp: 1.13 PSNR: 22.36
+Bpp: 3.19 PSNR: 39.15
+Bpp: 2.93 PSNR: 32.10
+Bpp: 5.10 PSNR: 39.75
+Bpp: 1.50 PSNR: 24.98
+Bpp: 3.86 PSNR: 39.96
+Bpp: 2.81 PSNR: 33.05
+Bpp: 6.07 PSNR: 44.72
+Bpp: 0.97 PSNR: 26.37
+Bpp: 3.05 PSNR: 35.70
+PCGC
+Depoco
+MPEG Anchor
+Draco
+G-PCC
+Bpp: 2.42 PSNR: 43.45
+1.00e-07
+0.167
+0.333
+0.500
+0.667
+0.833
+1.00
+Error Colormap
+Figure 13. More qualitative results on SemanticKITTI (the first two coloums) and ShapeNet (the last two coloums). From top to bottom:
+Ground Truth, Ours, G-PCC [13], Draco [12], MPEG Anchor [26], Depeco [45] and PCGC [43]. We utilize the distance between each
+point in decompressed point clouds and its nearest neighbor in ground truth as the error. And the Bpp and PSNR metrics are averaged by
+each block of the full point clouds.
+Figure 14. Qualitative results of normal compression. We apply Poisson reconstruction [20] to generate the mesh based on decompressed
+points and normals. And the Bpp and PSNR metrics are averaged by each block of the full point clouds.
+GT
+Ours
+G-PCC
+Draco
+MPEG Anchor
+Depoco
+PCGC
+Bpp: 6.05 CD: 0.08
+Bpp: 6.13 CD: 0.13
+Bpp: 6.19 CD: 0.29
+Bpp: 6.34 CD: 0.21
+Bpp: 6.27 CD: 0.81
+Bpp: 6.36 CD: 0.55
+Figure 15. Qualitative results on the surface reconstruction downstream task, where CD represents the symmetric point-to-plane Chamfer
+Distance [39] on each full model. It is clear that the mesh reconstructed from our decompressed point cloud contains better surface details
+and more accurate geometry than others, especially on the face.
+Figure 16. Qualitative results on the semantic segmentation downstream task, where IOU denotes the intersection-over-union metric on
+each scan. It is shown that preserving local density not only recovers more accurate geometry, but also benefits downstream task.
+Figure 17. Failure cases on extremely sparse point clouds.

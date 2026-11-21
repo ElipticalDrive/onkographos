@@ -1,0 +1,109 @@
+# SDF Texture Baking for Ray Marching
+Also called: 3D SDF Baking for Cloud Sphere Tracing, Cloud SDF texture baking, Conservative SDF proxy for raymarching
+
+## Overview
+This method optimizes cloud raymarching by baking a low-resolution 3D Signed Distance Field (SDF) texture that acts as a conservative proxy for the analytical cloud SDF [S1, unofficial]. It allows the marching loop to skip empty space conservatively before falling back to analytical evaluations inside active cells [S1, unofficial]. It sets itself apart from its siblings by decoupling the geometric query cost from the frame rate during camera motion, trading bounded spatial precision for significant interactive performance gains [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Analytical cloud SDF function (lofted cloud SDF), dynamic cloud parameters (position, density, shape), camera ray origin and direction.
+*   **Output:** A 3D texture containing the baked SDF values, used to accelerate the raymarching loop in `atmosphere_lowres.comp` [S1, unofficial].
+
+**Data Structures:**
+*   `_cloudSdf3DTexture`: A 3D texture with the following layout:
+    *   **Resolution:** $128 \times 32 \times 128$ (width $\times$ height $\times$ depth) [S1, unofficial].
+    *   **Format:** `GL_R32F` (single-channel 32-bit floating point) [S1, unofficial].
+    *   **Binding:** Texture Unit 45 [S1, unofficial].
+    *   **Wrapping:** `GL_REPEAT` horizontally (X-axis), `GL_CLAMP_TO_EDGE` vertically (Y-axis) [S1, unofficial].
+    *   **Layered Flag:** `GL_TRUE` [S1, unofficial].
+
+**Steps:**
+1.  **Bake SDF:** Create a compute shader (`cloud_3d_sdf_bake.comp`) to analytically bake the lofted cloud SDF into the 3D texture using unadvected coordinates [S1, unofficial].
+2.  **Allocate Texture:** Allocate and manage `_cloudSdf3DTexture` in `AtmosphereManager` with the specified format and bindings [S1, unofficial].
+3.  **Dispatch Bake Shader:** Dispatch the 3D SDF bake shader every frame in `AtmosphereManager::Update` to ensure synchrony with dynamic cloud parameters and solve initialization frame order issues [S1, unofficial].
+4.  **Optimize Raymarching:** In `atmosphere_lowres.comp`, first sample the 3D SDF texture to skip empty space conservatively [S1, unofficial].
+5.  **Fallback Evaluation:** Perform full analytical evaluations only inside active cells (where the SDF indicates presence) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# cloud_3d_sdf_bake.comp
+# Dispatched by AtmosphereManager::Update every frame
+
+# Inputs:
+#   cloud_params: Dynamic cloud parameters (position, density, etc.)
+#   sdf_texture: 3D texture (128x32x128, GL_R32F) bound to Unit 45
+
+# Outputs:
+#   sdf_texture: Updated with baked SDF values
+
+# For each voxel (x, y, z) in the 128x32x128 grid:
+#   1. Convert voxel coordinates to world space (unadvected coordinates)
+#   2. Evaluate analytical lofted cloud SDF at this world position
+#      d = AnalyticalCloudSDF(world_pos, cloud_params)
+#   3. Write d to sdf_texture[x, y, z]
+
+# atmosphere_lowres.comp
+# Raymarching loop optimization
+
+# Inputs:
+#   ray_origin, ray_direction: Camera ray
+#   sdf_texture: 3D texture (128x32x128, GL_R32F) bound to Unit 45
+#   cloud_params: Dynamic cloud parameters
+
+# Outputs:
+#   color: Final pixel color
+
+# t = 0.0
+# while t < max_distance:
+#   1. Sample SDF texture at current ray position
+#      pos = ray_origin + t * ray_direction
+#      d_sdf = texture(sdf_texture, pos).r
+#
+#   2. If d_sdf > threshold (empty space):
+#      t += d_sdf  # Conservative skip
+#      continue
+#
+#   3. If d_sdf <= threshold (active cell):
+#      # Perform full analytical evaluation
+#      d_analytical = AnalyticalCloudSDF(pos, cloud_params)
+#      t += d_analytical
+#      # Accumulate color/transmittance
+#      color += accumulate(pos, d_analytical)
+#
+#   4. If t >= max_distance or transmittance <= epsilon:
+#      break
+```
+
+**Parameters:**
+*   Texture resolution: $128 \times 32 \times 128$ [S1, unofficial].
+*   Texture format: `GL_R32F` [S1, unofficial].
+*   Texture unit binding: Unit 45 [S1, unofficial].
+*   Texture wrapping mode: `GL_REPEAT` horizontally, `GL_CLAMP_TO_EDGE` vertically [S1, unofficial].
+*   Texture layered flag: `GL_TRUE` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Initialization Frame Order:** Dispatching the bake shader every frame solves initialization frame order issues [S1, unofficial].
+*   **Dynamic Parameters:** The bake shader must be dispatched whenever cloud parameters are updated to ensure synchrony [S1, unofficial].
+*   **Conservative Skip:** The SDF texture acts as a conservative proxy, meaning it may overestimate empty space, potentially skipping valid samples if the resolution is too low [S1, unofficial].
+
+## Subtopics
+
+### [Sparse Distance-Field Cache for Interactive Camera Moves](17714-sparse-distance-field-cache-for-interactive-camera-moves.md)
+This method optimizes interactive camera navigation (orbit/dolly) over static fractal surfaces by baking the expensive analytical Distance Estimator (DE) into a sparse 3D brick volume, allowing the renderer to sample precomputed distances instead of re-evaluating the fractal formula every frame. It sets itself apart from standard raymarching by decoupling the geometric query cost from the frame rate during camera motion, trading bounded spatial precision for significant interactive performance gains.
+
+## Operating characteristics
+*   **Time Complexity:** The baking step is $O(N)$ where $N$ is the number of voxels in the 3D texture ($128 \times 32 \times 128 = 524,288$ voxels). The raymarching step is accelerated by skipping empty space, reducing the number of analytical evaluations.
+*   **Memory Complexity:** The 3D texture requires $128 \times 32 \times 128 \times 4$ bytes = 2 MB of VRAM [S1, unofficial].
+*   **Measured Performance:** All unit tests and shader validations passed 100% successfully [S1, unofficial].
+*   **Strengths:** Significant performance gains for interactive camera motion by decoupling geometric query cost from frame rate [S1, unofficial].
+*   **Limitations:** Bounded spatial precision due to low-resolution texture; may skip valid samples if the proxy is not conservative enough [S1, unofficial].
+*   **When to Use:** Interactive cloud rendering with dynamic parameters and camera motion.
+*   **When Not to Use:** High-fidelity offline rendering where precision is critical.
+
+## Background
+This method was introduced by ricecake in a GitHub Pull Request (PR #636) to the `boidsish` repository on July 11, 2026 [S1, unofficial]. It was created to optimize cloud sphere tracing by baking a low-resolution 3D SDF texture [S1, unofficial].
+
+## Sources
+[S1] Optimize cloud sphere tracing with 128x32x128 3D SDF baking, https://github.com/ricecake/boidsish/pull/636, fetched 2026-10-26 (unofficial)

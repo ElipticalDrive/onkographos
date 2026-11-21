@@ -1,0 +1,300 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-SubSplat is a method for high-resolution novel-view synthesis that resolves the trade-off between network computational cost and rendering fidelity in pixel-aligned 3D Gaussian Splatting. It solves the problem of insufficient Gaussian density and artifacts when using low-resolution backbone inputs by introducing a Sub-pixel Gaussian Reparameterizer (SPGR). Unlike prior methods limited by fixed grids or image-space upsamplers, SubSplat subdivides each grid-anchored primary Gaussian into multiple fine-grained sub-pixel primitives, restoring structural density directly from low-resolution features while maintaining stable network latency [S1].
++SubSplat is a method for high-resolution novel-view synthesis that resolves the trade-off between network computational cost and rendering fidelity in pixel-aligned 3D Gaussian Splatting [S1]. It solves the problem of insufficient Gaussian density and artifacts when using low-resolution backbone inputs by introducing a Sub-pixel Gaussian Reparameterizer (SPGR) [S1]. Unlike prior methods limited by fixed grids or image-space upsamplers, SubSplat subdivides each grid-anchored primary Gaussian into multiple fine-grained sub-pixel primitives, restoring structural density directly from low-resolution features while maintaining stable network latency [S1].
+ 
+ ## How it works
+-SubSplat builds on the [AnySplat Pipeline](12847-anysplat-pipeline.md) by refining the Gaussian generation stage. It takes low-resolution multi-view features and primary Gaussian anchors as input, and outputs a set of sub-pixel Gaussians suitable for high-resolution rendering.
++SubSplat builds on the [AnySplat Pipeline](12847-anysplat-pipeline.md) by refining the Gaussian generation stage. It takes low-resolution multi-view features and primary Gaussian anchors as input, and outputs a set of sub-pixel Gaussians suitable for high-resolution rendering [S1].
+ 
+ ### Inputs and Outputs
+@@ -22,5 +22,5 @@
+ *   **Primary Gaussian State:** $\mathbf{a}_p$ contains world-space position $\boldsymbol{\mu}_p$ (3), per-axis scales $\mathbf{s}_p$ (3), unit quaternion $q_p$ (4), and opacity $\alpha_p$ (1) [S1].
+ *   **Embeddings:** Geometry and appearance queries are aligned to a shared embedding dimension $E=128$ [S1].
+-*   **Feature Maps:** Multi-view features $\Phi_{v,\ell}$ are sampled using bilinear interpolation [S1].
++*   **Feature Maps:** Multi-view features $\Phi_{v,\ell}$ are sampled via the deformable attention operator using bilinear weights $g(a, b) = \max(0, 1-|a-b|)$ [S1].
+ 
+ ### Steps
+@@ -48,5 +48,5 @@
+         $$ \Delta \hat{z}_k = \tanh(\Delta z_k) $$
+         $$ \boldsymbol{\mu}_{p,k} = \boldsymbol{\mu}_p + R_{c2w} \begin{bmatrix} z_{\mathrm{sel}}\Delta u_k / f_x \\ z_{\mathrm{sel}}\Delta v_k / f_y \\ 0 \end{bmatrix} + \Delta \hat{z}_k R_{c2w} \begin{bmatrix} 0 \\ 0 \\ 1 \end{bmatrix} $$
+-        where $R_{c2w}$ is the camera-to-world rotation of view $v^*$ [S1].
++        where $R_{c2w}$ is the camera-to-world rotation matrix [S1].
+     *   **Scale:** Refine scales element-wise:
+         $$ \mathbf{s}_{p,k} = \mathbf{s}_p \odot \exp(\Delta \log \mathbf{s}_k) $$
+@@ -82,5 +82,52 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
++
++def axis_angle_to_quaternion(axis_angle):
++    angle = torch.norm(axis_angle, dim=-1, keepdim=True)
++    axis = axis_angle / (angle + 1e-8)
++    half_angle = angle / 2
++    return torch.cat([torch.cos(half_angle), torch.sin(half_angle) * axis], dim=-1)
++
++def quaternion_multiply(q1, q2):
++    w1, x1, y1, z1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
++    w2, x2, y2, z2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
++    return torch.stack([w1*w2 - x1*x2 - y1*y2 - z1*z2,
++                        w1*x2 + x1*w2 + y1*z2 - z1*y2,
++                        w1*y2 - x1*z2 + y1*w2 + z1*x2,
++                        w1*z2 + x1*y2 - y1*x2 + z1*w2], dim=-1)
++
++def quaternion_normalize(q):
++    return q / (torch.norm(q, dim=-1, keepdim=True) + 1e-8)
++
++def quaternion_to_rotation_matrix(q):
++    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
++    R = torch.zeros(*q.shape[:-1], 3, 3, device=q.device)
++    R[..., 0, 0] = 1 - 2*(y**2 + z**2)
++    R[..., 0, 1] = 2*(x*y - w*z)
++    R[..., 0, 2] = 2*(x*z + w*y)
++    R[..., 1, 0] = 2*(x*y + w*z)
++    R[..., 1, 1] = 1 - 2*(x**2 + z**2)
++    R[..., 1, 2] = 2*(y*z - w*x)
++    R[..., 2, 0] = 2*(x*z - w*y)
++    R[..., 2, 1] = 2*(y*z + w*x)
++    R[..., 2, 2] = 1 - 2*(x**2 + y**2)
++    return R
++
++def compute_covariance(s, q):
++    R = quaternion_to_rotation_matrix(q)
++    return R @ torch.diag_embed(s**2) @ R.transpose(-1, -2)
++
++def bilinear_sample(features, coords):
++    x, y = coords[..., 0], coords[..., 1]
++    x0, y0 = torch.floor(x).long(), torch.floor(y).long()
++    x1, y1 = x0 + 1, y0 + 1
++    w00 = (1 - (x - x0)) * (1 - (y - y0))
++    w10 = (x - x0) * (1 - (y - y0))
++    w01 = (1 - (x - x0)) * (y - y0)
++    w11 = (x - x0) * (y - y0)
++    return (w00.unsqueeze(-1).unsqueeze(-1) * features[:, :, y0, x0] +
++            w10.unsqueeze(-1).unsqueeze(-1) * features[:, :, y0, x1] +
++            w01.unsqueeze(-1).unsqueeze(-1) * features[:, :, y1, x0] +
++            w11.unsqueeze(-1).unsqueeze(-1) * features[:, :, y1, x1])
+ 
+ class SubSplatSPGR:
+@@ -88,5 +135,4 @@
+         self.E = E
+         self.K = K
+-        # Geometry MLPs
+         self.phi_x = nn.Linear(3, E)
+         self.phi_s = nn.Linear(3, E)
+@@ -94,150 +140,90 @@
+         self.phi_alpha = nn.Linear(1, E)
+         self.W_g = nn.Linear(E, E)
+-        
+-        # Appearance MLP
+         self.phi_c = nn.Linear(C * D_sh, E)
+-        
+-        # Heads
+-        self.g_theta = nn.Linear(E, K * 9) # 9: du, dv, dz, dlog_s(3), dr(3)
+-        self.h_phi = nn.Linear(E, K * 2)   # 2: l, gamma
+-        
+-        # Deformable Attention (simplified placeholder for logic)
+-        # In implementation, this uses the specific DA operator from GaussianFormer/PixelGaussian
+-        self.da = DeformableAttentionModule()
++        self.g_theta = nn.Linear(E, K * 9)
++        self.h_phi = nn.Linear(E, K * 2)
+ 
+     def encode_geometry(self, mu, s, q, alpha):
+-        # mu: (N, 3), s: (N, 3), q: (N, 4), alpha: (N, 1)
+-        z_x = self.phi_x(mu)
+-        z_s = self.phi_s(s)
+-        z_q = self.phi_q(q)
+-        z_a = self.phi_alpha(alpha)
+-        z_sum = z_x + z_s + z_q + z_a
+-        z_g = self.W_g(z_sum)
+-        return z_g
++        z_sum = self.phi_x(mu) + self.phi_s(s) + self.phi_q(q) + self.phi_alpha(alpha)
++        return self.W_g(z_sum)
+ 
+     def encode_appearance(self, h):
+-        # h: (N, C, D_sh)
+-        h_flat = h.view(h.size(0), -1)
+-        z_a = self.phi_c(h_flat)
+-        return z_a
+-
+-    def deformable_aggregation(self, features, z_query, f_prev, mu, a_p, num_stages):
+-        # features: list of feature maps
+-        # z_query: (N, E)
+-        # f_prev: (N, E)
+-        # mu: (N, 3)
+-        # a_p: primary Gaussian state
++        return self.phi_c(h.view(h.size(0), -1))
++
++    def deformable_aggregation(self, features, z_query, f_prev, mu, extrinsics, fx, fy, num_stages):
+         f_curr = f_prev
+         for _ in range(num_stages):
+-            f_curr = self.da(features, z_query, f_curr, mu, a_p)
++            R_w2c = extrinsics[:, :3, :3]
++            t = extrinsics[:, :3, 3]
++            mu_cam = torch.bmm(R_w2c, (mu - t).unsqueeze(-1)).squeeze(-1)
++            x = mu_cam[..., 0] * fx / mu_cam[..., 2]
++            y = mu_cam[..., 1] * fy / mu_cam[..., 2]
++            phi_feat = bilinear_sample(features, torch.stack([x, y], dim=-1))
++            attn = torch.softmax((f_curr + z_query) * phi_feat, dim=-1)
++            f_curr = (attn * phi_feat).sum(dim=-1)
+         return f_curr
+ 
+-    def select_primary_view(self, mu, extrinsics):
+-        # Project mu to all views, find view with min positive depth
+-        # Returns index v_star
+-        pass
+-
+     def geometry_reparam(self, f_g, mu, s, q, z_sel, fx, fy, R_c2w):
+-        # f_g: (N, E)
+-        offsets = self.g_theta(f_g) # (N, K*9)
+-        offsets = offsets.view(-1, self.K, 9)
+-        
+-        du = offsets[:, :, 0]
+-        dv = offsets[:, :, 1]
+-        dz = offsets[:, :, 2]
+-        dlog_s = offsets[:, :, 3:6]
+-        dr = offsets[:, :, 6:9]
+-        
+-        # Depth bound
++        offsets = self.g_theta(f_g).view(-1, self.K, 9)
++        du, dv, dz = offsets[:, :, 0], offsets[:, :, 1], offsets[:, :, 2]
++        dlog_s, dr = offsets[:, :, 3:6], offsets[:, :, 6:9]
++        
+         dz_hat = torch.tanh(dz)
+-        
+-        # Position
+-        # Back-project offsets
+-        # Assuming z_sel is scalar or broadcastable
+         dx = z_sel * du / fx
+         dy = z_sel * dv / fy
+         
+-        # R_c2w is (3,3)
+-        offset_vec = torch.stack([dx, dy, torch.zeros_like(dx)], dim=-1) # (N, K, 3)
+-        offset_world = torch.bmm(offset_vec, R_c2w.transpose(1, 2)) # (N, K, 3)
+-        
+-        depth_vec = torch.stack([torch.zeros_like(dz_hat), torch.zeros_like(dz_hat), dz_hat], dim=-1) # (N, K, 3)
++        offset_vec = torch.stack([dx, dy, torch.zeros_like(dx)], dim=-1)
++        offset_world = torch.bmm(offset_vec, R_c2w.transpose(1, 2))
++        depth_vec = torch.stack([torch.zeros_like(dz_hat), torch.zeros_like(dz_hat), dz_hat], dim=-1)
+         depth_world = torch.bmm(depth_vec, R_c2w.transpose(1, 2))
+         
+-        mu_p = mu.unsqueeze(1).expand(-1, self.K, -1) # (N, K, 3)
++        mu_p = mu.unsqueeze(1).expand(-1, self.K, -1)
+         mu_new = mu_p + offset_world + depth_world
+         
+-        # Scale
+         s_new = s.unsqueeze(1) * torch.exp(dlog_s)
+-        
+-        # Rotation
+-        # Convert axis-angle dr to quaternion
+         q_res = axis_angle_to_quaternion(dr)
+-        q_new = quaternion_multiply(q.unsqueeze(1), q_res)
+-        q_new = quaternion_normalize(q_new)
+-        
+-        return mu_new, s_new, q_new, dz_hat
+-
+-    def appearance_reparam(self, f_a, f_g, mu, s, q, alpha, h, R_w2c, fx, fy):
+-        # f_a: (N, E)
+-        preds = self.h_phi(f_a) # (N, K*2)
+-        preds = preds.view(-1, self.K, 2)
+-        l = preds[:, :, 0]
+-        gamma = preds[:, :, 1]
+-        
+-        # Compute Covariance for Area Estimation
+-        # R(q_new) diag(s_new^2) R(q_new)^T
+-        # This requires computing covariance for each primitive
+-        # Simplified: assume helper function exists
+-        covs = compute_covariance(s, q) # (N, 3, 3)
+-        covs_new = compute_covariance(s_new, q_new) # (N, K, 3, 3)
+-        
+-        # Compute Jacobian at primary position mu (or mu_new?)
+-        # Source says "at primary position" for A_k approx, but also "evaluated at mu_p,k" in supplementary
+-        # We use mu_p,k as per supplementary details for accuracy
+-        # J = B * R_w2c
+-        # B depends on camera coords of mu_p,k
+-        # This step is complex to implement without full camera projection logic
+-        # Placeholder for Jacobian calculation
+-        areas = estimate_projected_area(covs_new, mu_new, R_w2c, fx, fy)
+-        
+-        # Opacity
+-        w = torch.softmax(l, dim=-1) # (N, K)
++        q_new = quaternion_normalize(quaternion_multiply(q.unsqueeze(1), q_res))
++        
++        return mu_new, s_new, q_new
++
++    def appearance_reparam(self, f_a, mu, s, q, alpha, h, R_w2c, fx, fy):
++        preds = self.h_phi(f_a).view(-1, self.K, 2)
++        l, gamma = preds[:, :, 0], preds[:, :, 1]
++        
++        covs_new = compute_covariance(s.unsqueeze(1), q.unsqueeze(1))
++        
++        mu_cam = torch.bmm(R_w2c, (mu.unsqueeze(1) - 0).unsqueeze(-1)).squeeze(-1)
++        xc, yc, zc = mu_cam[..., 0], mu_cam[..., 1], mu_cam[..., 2]
++        B = torch.stack([fx/zc, torch.zeros_like(zc), -fx*xc/(zc**2),
++                         torch.zeros_like(zc), fy/zc, -fy*yc/(zc**2)], dim=-1).view(-1, self.K, 2, 3)
++        J = torch.bmm(B, R_w2c)
++        areas = torch.sqrt(torch.det(J @ covs_new @ J.transpose(-1, -2)).clamp(min=1e-6))
++        
++        w = torch.softmax(l, dim=-1)
+         eps = 1e-6
+         w_tilde = w / (areas + eps)
+         alpha_new = alpha.unsqueeze(1) * (w_tilde / w_tilde.sum(dim=-1, keepdim=True))
+         
+-        # Color
+         h_new = gamma.unsqueeze(-1).unsqueeze(-1) * h.unsqueeze(1)
+-        
+         return alpha_new, h_new
+ 
+     def forward(self, mu, s, q, alpha, h, features, extrinsics, intrinsics):
+-        # 1. Encode
+         z_g = self.encode_geometry(mu, s, q, alpha)
+         z_a = self.encode_appearance(h)
+         
+-        # 2. Aggregate
+-        f_g = self.deformable_aggregation(features, z_g, torch.zeros_like(z_g), mu, (mu,s,q,alpha), 3)
+-        f_a = self.deformable_aggregation(features, z_a, f_g, mu, (mu,s,q,alpha), 1)
+-        
+-        # 3. Select Primary View
+-        v_star = self.select_primary_view(mu, extrinsics)
+-        # Get R_c2w and R_w2c for v_star
+-        R_c2w = extrinsics[v_star][:3, :3]
+-        R_w2c = R_c2w.transpose(0, 1)
+-        
+-        # Get z_sel (depth of mu in v_star)
+-        # mu_cam = R_w2c @ (mu - t)
+-        # z_sel = mu_cam[:, 2]
+-        z_sel = get_depth(mu, extrinsics[v_star])
+-        
+-        fx, fy = intrinsics[v_star][0, 0], intrinsics[v_star][1, 1]
+-        
+-        # 4. Geometry Reparam
+-        mu_new, s_new, q_new, _ = self.geometry_reparam(f_g, mu, s, q, z_sel, fx, fy, R_c2w)
+-        
+-        # 5. Appearance Reparam
+-        alpha_new, h_new = self.appearance_reparam(f_a, f_g, mu, s, q, alpha, h, R_w2c, fx, fy)
++        fx, fy = intrinsics[..., 0, 0], intrinsics[..., 1, 1]
++        
++        f_g = self.deformable_aggregation(features, z_g, torch.zeros_like(z_g), mu, extrinsics, fx, fy, 3)
++        f_a = self.deformable_aggregation(features, z_a, f_g, mu, extrinsics, fx, fy, 1)
++        
++        mu_cam = torch.bmm(extrinsics[:, :3, :3], (mu - extrinsics[:, :3, 3:4]).squeeze(-1)).squeeze(-1)
++        depths = mu_cam[..., 2]
++        v_star = torch.argmin(depths, dim=-1)
++        R_c2w = extrinsics[v_star, :3, :3]
++        R_w2c = R_c2w.transpose(1, 2)
++        z_sel = depths[v_star]
++        
++        mu_new, s_new, q_new = self.geometry_reparam(f_g, mu, s, q, z_sel, fx, fy, R_c2w)
++        alpha_new, h_new = self.appearance_reparam(f_a, mu, s, q, alpha, h, R_w2c, fx, fy)
+         
+         return mu_new, s_new, q_new, alpha_new, h_new
+@@ -264,5 +250,5 @@
+ 
+ ## Background
+-SubSplat was proposed by Jiun Lee et al. in 2024 [S1]. It addresses the limitations of pixel-aligned Gaussian methods that are constrained by fixed grids or suffer from high computational costs at high resolutions. It builds on the MVSplat backbone and incorporates deformable attention from GaussianFormer and PixelGaussian [S1]. It is used for novel-view synthesis in computer vision, specifically for sparse-view reconstruction [S1].
++SubSplat was proposed by Jiun Lee et al. in 2024 [S1]. It addresses the limitations of pixel-aligned Gaussian methods that are constrained by fixed grids or suffer from high computational costs at high resolutions. It uses the same input structure as MVSplat and incorporates a deformable-attention operator following the formulation used in GaussianFormer and PixelGaussian [S1]. It is used for novel-view synthesis in computer vision, specifically for sparse-view reconstruction [S1].
+ 
+ ## Sources

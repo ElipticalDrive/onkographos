@@ -1,0 +1,276 @@
+--- v004.md
++++ v005.md
+@@ -1,11 +1,11 @@
+ # Inference Ray Marching and Integration
+ 
+-Also called: Inference Ray Marching, Ray Marching for Inference, CUDA Ray Marching (Inference), Sparse Ray Marching (Inference), Ray Marching (CUDA Kernel)
++Also called: CUDA Ray Marching (Inference), Inference Ray Marching, Ray Marching (CUDA Kernel), Ray Marching for Inference, Ray Marching with Sparse Voxel Grid (Test/Inference), Sparse Ray Marching (Inference), iterative ray marching
+ 
+ ## Overview
+-Inference Ray Marching and Integration is a GPU-accelerated method for real-time volume rendering inference, specifically designed to generate sample points, directions, and integration deltas for active rays by marching through a pre-computed density grid [S1, S2, S4, unofficial]. It solves the performance bottleneck of evaluating volumetric neural fields (such as NeRFs) at inference time by utilizing occupancy grids for empty-space skipping and adaptive step sizing [S3, unofficial]. Unlike training-time marching, which maintains state for backpropagation, this method focuses on throughput, often processing rays in batches with strict early-termination logic to maximize frame rates [S2, S3, unofficial]. It builds on the acceleration principles of [Acceleration](18-acceleration.md) by combining culling (via density bitfields) and termination (via transmittance thresholds) [S1, S3, unofficial].
++Inference Ray Marching and Integration is a GPU-accelerated method for real-time volume rendering inference that generates sample points, view directions, and integration deltas for active rays by marching through a pre-computed density grid [S1, S2, S4, unofficial]. It solves the performance bottleneck of evaluating volumetric neural fields at inference time by utilizing occupancy grids for empty-space skipping and adaptive step sizing [S3, unofficial]. Unlike training-time marching, which maintains state for backpropagation, this method focuses on throughput by processing rays in batches with strict early-termination logic to maximize frame rates [S2, S3, unofficial]. It modifies the standard front-to-back compositing loop by introducing conditions that break the integration loop early, skip iterations, or reduce the number of neural network queries [S1, S3, unofficial].
+ 
+ ## How it works
+-The method typically operates as a CUDA kernel or a Python-wrapped backend call that outputs three primary tensors: sampled 3D coordinates (`xyzs`), view directions (`dirs`), and step sizes (`deltas`) [S2, S4, unofficial]. These outputs are subsequently used by a neural network (e.g., a color/density MLP) and an integration routine to produce the final pixel color and depth [S2, S3, unofficial].
++The method typically operates as a CUDA kernel or a Python-wrapped backend call that outputs three primary tensors: sampled 3D coordinates (`xyzs`), view directions (`dirs`), and step sizes (`deltas`) [S2, S4, unofficial]. These outputs are subsequently used by a neural network to query density and color, and by an integration routine to produce the final pixel color and depth [S2, S3, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -15,5 +15,5 @@
+ *   `near`: Float array `[N]`, near plane distances [S2, S4, unofficial].
+ *   `far`: Float array `[N]`, far plane distances [S2, S4, unofficial].
+-*   `density_bitfield`: Uint8 array `[CHHH // 8]`, a hashed grid (e.g., Instant-NGP style) used for fast occupancy queries [S1, S4, unofficial].
++*   `density_bitfield`: Uint8 array `[CHHH // 8]`, a hashed grid used for fast occupancy queries [S1, S4, unofficial].
+ *   `density_grid`: Float array `[H, H, H]`, a pre-computed 3D density grid used for sampling and step estimation [S2, unofficial].
+ *   `mean_density`: Float, average density in the grid, used for step size estimation [S2, unofficial].
+@@ -35,5 +35,5 @@
+ 
+ ### Data Structures
+-The core data structure is the **Density Bitfield** (or Hash Grid), a compressed representation of the volume occupancy. It allows $O(1)$ lookup to determine if a ray segment is empty, enabling the skipping of expensive neural network evaluations [S1, S4, unofficial].
++The core data structure is the **Density Bitfield** (or Hash Grid), a compressed representation of the volume occupancy [S1, S4, unofficial]. It allows fast occupancy queries to determine if a ray segment is empty, enabling the skipping of expensive neural network evaluations [S1, S4, unofficial].
+ 
+ ### Algorithm Steps
+@@ -48,18 +48,18 @@
+ 2.  **Marching Loop**:
+     *   Loop while `n_alive > 0` and step count $< max\_steps$ (typically up to 1024 steps) [S2, unofficial].
+-    *   **Step Size Calculation**: Determine `n_step` for the current batch. A common heuristic is $n\_step = \max(\min(B \cdot N // n\_alive, 8), 1)$, where $B$ is a batch constant and $N$ is total pixels, ensuring balanced work distribution [S2, unofficial].
+-    *   **CUDA Kernel Execution**: Call the backend kernel (e.g., `_backend.march_rays`) with parameters `n_alive`, `n_step`, `rays_alive`, `rays_t`, `rays_o`, `rays_d`, `bound`, `density_bitfield`, `C`, `H`, `near`, `far`, `align`, `perturb`, `dt_gamma`, `max_steps` [S1, S4, unofficial].
++    *   **Step Size Calculation**: Determine `n_step` for the current batch [S2, unofficial]. A common heuristic is $n\_step = \max(\min(B \cdot N // n\_alive, 8), 1)$, where $B$ is a batch constant and $N$ is total pixels, ensuring balanced work distribution [S2, unofficial].
++    *   **CUDA Kernel Execution**: Call the backend kernel with parameters `n_alive`, `n_step`, `rays_alive`, `rays_t`, `rays_o`, `rays_d`, `bound`, `density_bitfield`, `C`, `H`, `near`, `far`, `align`, `perturb`, `dt_gamma`, `max_steps` [S1, S4, unofficial].
+         *   Inside the kernel, for each alive ray:
+-            *   Query the `density_bitfield` or `density_grid` at the current $t$.
++            *   Query the `density_bitfield` or `density_grid` at the current $t$ [S1, S4, unofficial].
+             *   If the voxel is empty (density below threshold), skip to the next occupied voxel or terminate if far plane is reached [S2, S4, unofficial].
+-            *   If occupied, compute the step size $\Delta t$. Adaptive marching uses $dt\_gamma$ to accelerate steps in empty space or where density is low [S1, S4, unofficial].
+-            *   Sample the new position $t_{new} = t + \Delta t$.
++            *   If occupied, compute the step size $\Delta t$ [S1, S4, unofficial]. Adaptive marching uses $dt\_gamma$ to accelerate steps in empty space or where density is low [S1, S4, unofficial].
++            *   Sample the new position $t_{new} = t + \Delta t$ [S1, S4, unofficial].
+             *   Store $xyz$, $dir$, and $\Delta t$ in the output buffers [S2, unofficial].
+             *   Update `rays_t` for the next iteration [S2, unofficial].
+-    *   **Compaction**: After the kernel returns, compact the list of `rays_alive` to remove rays that have terminated (reached `far` or accumulated high opacity) [S2, unofficial]. This reduces `n_alive` for the next iteration.
++    *   **Compaction**: After the kernel returns, compact the list of `rays_alive` to remove rays that have terminated (reached `far` or accumulated high opacity) [S2, unofficial]. This reduces `n_alive` for the next iteration [S2, unofficial].
+ 
+ 3.  **Integration (Separate Step)**:
+     *   The outputs `xyzs`, `dirs`, `deltas` are passed to a neural network to query density ($\sigma$) and color ($C$) [S2, unofficial].
+-    *   An integration routine (e.g., `integrate_rays_inference`) updates ray colors, transmittance, and termination status using front-to-back compositing [S3, unofficial].
++    *   An integration routine updates ray colors, transmittance, and termination status using front-to-back compositing [S3, unofficial].
+     *   Rays are terminated if transmittance drops below a threshold or opacity accumulates sufficiently [S3, unofficial].
+ 
+@@ -67,12 +67,9 @@
+ ```python
+ def inference_ray_marching(rays_o, rays_d, near, far, density_bitfield, density_grid, mean_density, bound, n_alive, rays_alive, rays_t, n_step, perturb, dt_gamma, max_steps, align):
+-    """
+-    Python wrapper for Inference Ray Marching.
+-    """
+-    # 1. Ensure inputs are contiguous on CUDA
+-    rays_o = rays_o.contiguous()
+-    rays_d = rays_d.contiguous()
++    # 1. Ensure inputs are contiguous on the device
++    rays_o = contiguous(rays_o)
++    rays_d = contiguous(rays_d)
+     
+-    # 2. Calculate output size M
++    # 2. Calculate output size M and pad to align
+     M = n_alive * n_step
+     if align > 0:
+@@ -80,112 +77,113 @@
+         
+     # 3. Initialize output buffers
+-    xyzs = torch.zeros((M, 3), dtype=torch.float32, device=rays_o.device)
+-    dirs = torch.zeros((M, 3), dtype=torch.float32, device=rays_o.device)
+-    deltas = torch.zeros((M, 2), dtype=torch.float32, device=rays_o.device)
++    xyzs = zeros((M, 3), dtype=float32)
++    dirs = zeros((M, 3), dtype=float32)
++    deltas = zeros((M, 2), dtype=float32)
+     
+-    # 4. Call CUDA Backend Kernel
+-    # The kernel populates xyzs, dirs, deltas and updates rays_t/rays_alive state internally or returns new state
+-    # Note: In many implementations (like instant-ngp), the kernel returns the updated rays_t and the filled buffers
+-    xyzs, dirs, deltas, rays_t = _backend.march_rays(
+-        n_alive=n_alive,
+-        n_step=n_step,
+-        rays_alive=rays_alive,
+-        rays_t=rays_t,
+-        rays_o=rays_o,
+-        rays_d=rays_d,
+-        bound=bound,
+-        density_bitfield=density_bitfield,
+-        C=density_bitfield.shape[0] * 8 // (density_grid.shape[0]**3) if density_bitfield.numel() > 0 else 0, # Placeholder for hash grid params
+-        H=density_grid.shape[0],
+-        near=near,
+-        far=far,
+-        align=align,
+-        perturb=perturb,
+-        dt_gamma=dt_gamma,
+-        max_steps=max_steps
+-    )
+-    
++    # 4. Initialize ray state
++    if perturb:
++        noise = random_noise(n_alive)
++    else:
++        noise = zeros(n_alive)
++        
++    # 5. Marching loop per ray
++    sample_idx = 0
++    for r in range(n_alive):
++        ray_id = rays_alive[r]
++        t = rays_t[ray_id]
++        t_far = far[ray_id]
++        ray_dir = rays_d[ray_id]
++        ray_origin = rays_o[ray_id]
++        
++        for step in range(n_step):
++            if t >= t_far:
++                break
++                
++            # Query occupancy at current t
++            occ = query_density_bitfield(density_bitfield, density_grid, mean_density, t, ray_origin, ray_dir, bound)
++            
++            if occ:
++                # Compute step size dt
++                dt = compute_step_size(t, ray_dir, bound, dt_gamma, mean_density)
++                
++                # Sample new position
++                t_new = t + dt
++                
++                # Store sample data
++                xyzs[sample_idx] = ray_origin + ray_dir * t
++                dirs[sample_idx] = ray_dir
++                deltas[sample_idx] = [dt, dt]
++                
++                # Update state
++                rays_t[ray_id] = t_new
++                sample_idx += 1
++                
++                t = t_new
++            else:
++                # Skip empty space
++                t = skip_empty_space(t, ray_origin, ray_dir, bound, density_bitfield)
++                
+     return xyzs, dirs, deltas, rays_t
+-
+-def batched_inference_loop(rays_o, rays_d, near, far, density_bitfield, density_grid, mean_density, bound, perturb, dt_gamma, max_steps, align, n_alive_initial):
+-    """
+-    High-level loop managing ray termination and batching.
+-    """
+-    N = rays_o.shape[0]
+-    rays_alive = torch.arange(N, dtype=torch.int32, device=rays_o.device)
+-    rays_t = near.clone()
+-    n_alive = n_alive_initial
+-    
+-    # Initialize output accumulators for the final image (handled in integration step)
+-    # This function focuses on generating the samples
+-    
+-    while n_alive > 0:
+-        # Determine steps per ray for this batch
+-        # Heuristic from [S2, unofficial]: n_step = max(min(B * N // n_alive, 8), 1)
+-        # Using a fixed n_step for simplicity as per [S2, unofficial] description of the kernel call
+-        n_step = 8 
+-        
+-        # Call marching kernel
+-        xyzs, dirs, deltas, rays_t = inference_ray_marching(
+-            rays_o, rays_d, near, far, density_bitfield, density_grid, mean_density, bound,
+-            n_alive, rays_alive, rays_t, n_step, perturb, dt_gamma, max_steps, align
+-        )
+-        
+-        # Note: In a full implementation, the CUDA kernel or a subsequent compact step
+-        # would update n_alive based on termination. 
+-        # Here we assume the kernel handles the loop logic or returns updated rays_t.
+-        # For a Python-level loop, we would typically:
+-        # 1. Query network for sigma/RGB at xyzs
+-        # 2. Integrate
+-        # 3. Identify terminated rays
+-        # 4. Compact rays_alive and n_alive
+-        
+-        # Placeholder for termination logic which updates n_alive
+-        # terminated_mask = ... 
+-        # n_alive = torch.sum(~terminated_mask)
+-        # rays_alive = rays_alive[~terminated_mask]
+-        
+-        # Break if no rays alive (safety)
+-        if n_alive == 0:
+-            break
+-            
+-    return xyzs, dirs, deltas
+ ```
+ 
+ ### Parameters and Typical Values
+-*   `dt_gamma`: Default $1/256$. Set to 0 to disable adaptive marching [S1, unofficial].
+-*   `density_thresh`: Default 10. Threshold for density grid occupancy [S1, unofficial].
++*   `dt_gamma`: Default $1/256$. Set to 0 to disable adaptive marching [S2, unofficial].
++*   `density_thresh`: Default 10. Threshold for density grid occupancy [S2, unofficial].
+ *   `max_steps`: Default 1024 [S1, S4, unofficial].
+-*   `perturb`: Default True (or seed value) [S1, S3, unofficial].
++*   `perturb`: Default True [S1, S3, unofficial].
+ *   `align`: Default -1 (disabled) [S1, S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision**: Floating-point errors in $t$ accumulation can cause rays to miss voxels or re-enter them. Using double precision for $t$ or robust voxel boundary checks is recommended [G].
++*   **Precision**: Floating-point errors in $t$ accumulation can cause rays to miss voxels or re-enter them [G].
+ *   **Empty Space**: If `density_bitfield` is not properly synchronized with `density_grid`, rays may march into empty space unnecessarily or terminate prematurely [S2, unofficial].
+-*   **Boundary Conditions**: Rays starting outside the `bound` box must be handled to avoid invalid memory accesses in the hash grid [S1, S4, unofficial].
++*   **Boundary Conditions**: Not given in the sources.
+ 
+ ## Subtopics
+ 
+-### Gradient Magnitude Threshold Acceleration
+-Discards voxels or ray samples with gradient magnitude below a threshold, assuming they do not lie on object surfaces [S5, unofficial]. This is advantageous because gradient estimation and interpolation are expensive operations, and discarding low-gradient samples reduces computational load without significant quality loss for surface-focused rendering [S5, unofficial].
++### [Inference Ray Compositing](3790-inference-ray-compositing.md)
++Inference Ray Compositing aggregates per-step volumetric properties into final pixel buffers. It differs from training-time compositing by operating on pre-computed ray samples with strict early-termination logic to maximize throughput during real-time inference. Choose it when bridging sparse ray marching results to final image output with multiple channels. [Inference Ray Compositing](3790-inference-ray-compositing.md)
+ 
+-### Inference Acceleration Strategies
+-A set of strategies to boost inference efficiency with minimal quality drop, including combining threads, using larger steps, early termination, and prefetching neighbors [S6]. These strategies can significantly reduce test time (e.g., from 41.8 ms to 5.5 ms for 800x800 images) with minimal PSNR degradation [S6].
++### [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md)
++Sparse Ray Marching (Training) is a GPU-accelerated algorithm that traces rays through a hierarchical sparse voxel grid to collect 3D positions, directions, step sizes, and t-values for training neural radiance fields. It differs from its siblings by explicitly decoupling the counting of occupied samples from the writing of sample data, allowing for dynamic memory allocation based on actual occupancy rather than fixed worst-case bounds. Choose it when training requires efficient memory usage on sparse volumes. [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md)
++
++### [Chunked Volume Rendering](4310-chunked-volume-rendering.md)
++Chunked Volume Rendering is a memory-efficient inference technique that integrates color and density along rays by processing sampled points in fixed-size batches. It differs from its parent by explicitly batching the forward pass to constrain VRAM, and from its sibling Inference Ray Compositing by focusing on the chunked accumulation of radiance rather than just the compositing logic. Choose it when rendering large scenes or high-resolution implicit fields. [Chunked Volume Rendering](4310-chunked-volume-rendering.md)
++
++### [BRDF Evaluation Kernel](5324-brdf-evaluation-kernel.md)
++The BRDF Evaluation Kernel evaluates a Bidirectional Reflectance Distribution Function for a batch of rays during inference ray marching and integration. It transforms geometric and material inputs into final pixel colors. It is distinct from compositing operations, focusing solely on the local reflection model evaluation. Choose it when rendering reflective surfaces alongside volumetric data. [BRDF Evaluation Kernel](5324-brdf-evaluation-kernel.md)
++
++### [Inference Pipeline](5924-inference-pipeline.md)
++The Inference Pipeline renders images from a trained dense point cloud (specifically Gaussian Splatting models) and new camera poses without requiring further optimization. It differs from its sibling Inference Ray Compositing by executing the full evaluation loop including rasterization, FPS calculation, and video generation, whereas the sibling focuses specifically on the ray-compositing math. Choose it for full evaluation loops on dense representations. [Inference Pipeline](5924-inference-pipeline.md)
++
++### [DVGO Volume Rendering Forward](8157-dvgo-volume-rendering-forward.md)
++DVGO Volume Rendering Forward performs volume rendering for a batch of rays, including sampling, density/alpha computation, transmittance calculation, color estimation, and ray marching. It differs from NeRF Volume Rendering by using a pre-allocated 3D voxel grid for density and color storage, enabling faster training and inference via direct memory access. Choose it when direct memory access to a voxel grid is preferred. [DVGO Volume Rendering Forward](8157-dvgo-volume-rendering-forward.md)
++
++### [Light-space opacity precomputation](9461-light-space-opacity-precomputation.md)
++Light-space opacity precomputation accelerates non-collocated view and light rendering by precomputing the accumulated opacity along light rays, thereby avoiding expensive per-shading-point light-ray marching. It differs from naive non-collocated rendering by precomputing light-transport opacity from the light's point of view and reusing it for any view direction. Choose it for non-collocated light/view scenarios. [Light-space opacity precomputation](9461-light-space-opacity-precomputation.md)
++
++### [Inference Acceleration Strategies](11934-inference-acceleration-strategies.md)
++Inference Acceleration Strategies is a set of techniques designed to boost the efficiency of real-time volume rendering inference with minimal quality degradation. It addresses the computational bottleneck of evaluating neural networks and processing rays during the G-Buffer and shading passes. It distinguishes itself from sibling methods by combining algorithmic optimizations with hardware-specific acceleration to achieve significant speedups over software-based implementations. Choose it when maximizing throughput on specific hardware. [Inference Acceleration Strategies](11934-inference-acceleration-strategies.md)
++
++### [Object Space Ray Tracing for Remote Volume Rendering](12706-object-space-ray-tracing-for-remote-volume-rendering.md)
++This method replaces the 2.5D point rasterization phase of the original Zellmann et al. remote volume rendering algorithm with an object space ray tracing phase to eliminate rendering artifacts in volumetric and transparent regions. It transmits compacted object space samples and color data from a server to a client, where a software CUDA ray tracer renders them as spheres instead of fixed-size OpenGL points. Choose it for remote volume rendering to eliminate reprojection artifacts. [Object Space Ray Tracing for Remote Volume Rendering](12706-object-space-ray-tracing-for-remote-volume-rendering.md)
++
++### [Ray Tracing-Based Image Warping for Remote Volume Rendering](12707-ray-tracing-based-image-warping-for-remote-volume-rendering.md)
++This method decouples volume rendering computation from display by transmitting object-space samples from a server to a client, where they are rendered as semi-transparent spheres using first-hit ray tracing. It replaces the rasterized point primitives of the base image-warping method to eliminate reprojection artifacts caused by fixed-size point primitives, effectively implementing a distance-aware splatting technique. Choose it for remote rendering requiring distance-aware splatting. [Ray Tracing-Based Image Warping for Remote Volume Rendering](12707-ray-tracing-based-image-warping-for-remote-volume-rendering.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of steps per ray. Adaptive marching reduces $S$ in empty regions [S1, S4, unofficial].
+-*   **Memory Complexity**: $O(M)$ for output buffers, where $M$ is the total number of samples generated. The density bitfield requires $O(H^3)$ space [S2, unofficial].
+-*   **Performance**: Capable of real-time rendering (e.g., >60 FPS) for moderate resolutions on modern GPUs [S3, unofficial]. Performance scales with the sparsity of the volume; denser volumes require more steps and network evaluations [S2, unofficial].
++*   **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of steps per ray [S1, S4, unofficial]. Adaptive marching reduces $S$ in empty regions [S1, S4, unofficial].
++*   **Memory Complexity**: $O(M)$ for output buffers, where $M$ is the total number of samples generated [S2, unofficial].
++*   **Performance**: Capable of real-time rendering on modern GPUs [S3, unofficial]. Performance scales with the sparsity of the volume; denser volumes require more steps and network evaluations [S2, unofficial].
+ *   **Strengths**: High throughput due to CUDA acceleration and occupancy culling; suitable for real-time applications [S3, unofficial].
+-*   **Limitations**: Quality may degrade if `dt_gamma` is too high or if perturbation is disabled in complex geometry [S1, unofficial]. Memory usage can be high for very large volumes if not chunked [S2, unofficial].
++*   **Limitations**: Quality may degrade if `dt_gamma` is too high [S1, unofficial]. Memory usage can be high for very large volumes if not chunked [S2, unofficial].
+ 
+ ## Background
+-Inference Ray Marching is a core component of modern neural radiance field (NeRF) rendering pipelines, particularly those based on Instant-NGP [S3, unofficial]. It was developed to address the high computational cost of evaluating dense neural networks along every ray during inference. By leveraging sparse data structures (hash grids) and GPU parallelism, it enables real-time visualization of trained NeRF models [S1, S3, unofficial]. It is widely used in applications requiring interactive exploration of 3D scenes, such as VR/AR and remote volume rendering [S1, S3, unofficial].
++Inference Ray Marching is a core component of modern neural radiance field (NeRF) rendering pipelines, particularly those based on Instant-NGP [S3, unofficial]. It was developed to address the high computational cost of evaluating dense neural networks along every ray during inference [S1, S3, unofficial]. By leveraging sparse data structures and GPU parallelism, it enables real-time visualization of trained NeRF models [S1, S3, unofficial]. It is used in applications requiring interactive exploration of 3D scenes, such as GUI-based visualization [S3, unofficial].
+ 
+ ## Sources
+-[S1] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
+-[S2] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+-[S3] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
+-[S4] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
+-[S5] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+-[S6] Compact Real-Time Radiance Fields with Neural Codebook, https://doi.org/10.1109/icme55011.2023.00374, fetched 2026-10-26+[S1] kwea123/ngp_pl, https://github.com/kwea123/ngp_pl, fetched 2026-10-26 (unofficial)
++[S2] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
++[S3] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
++[S4] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
++[S5] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
++[S6] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,222 @@
+--- v006.md
++++ v007.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Multi-view images with known camera poses; bounding box of the scene.
++*   **Inputs:** Multi-view images with known camera poses; scene bounding box.
+ *   **Outputs:** Optimized tensor factors for geometry ($G_\sigma$) and appearance ($G_c$); rendered RGB images.
+ 
+@@ -16,5 +16,5 @@
+ 2.  **Appearance Grid ($G_c$):** A 4D tensor of shape $I \times J \times K \times P$ storing $P$-dimensional appearance features [S2][S7, unofficial].
+ 
+-These grids are decomposed using Vector-Matrix (VM) factorization. The parameters are:
++These grids are decomposed using CANDECOMP-PARAFAC (CP) or Vector-Matrix (VM) factorization [S1][S2]. The parameters are:
+ *   **Geometry Factors:** For each component $r \in \{1, \dots, R_\sigma\}$ and mode $m \in \{X, Y, Z\}$:
+     *   $\mathbf{v}_{\sigma,r}^m$: 1D vector of length $N_m$ (where $N_X=I, N_Y=J, N_Z=K$).
+@@ -29,5 +29,5 @@
+ The interpolated component value for mode $X$ at location $\mathbf{x}=(x,y,z)$ is:
+ $$ \mathcal{A}_r^X(\mathbf{x}) = \mathbf{v}_r^X(x) \mathbf{M}_r^{YZ}(y, z) $$
+-where $\mathbf{v}_r^X(x)$ is linearly interpolated along the X-axis, and $\mathbf{M}_r^{YZ}(y, z)$ is bilinearly interpolated in the YZ plane [S2][S7, unofficial]. Similar formulas apply for modes Y and Z.
++where $\mathbf{v}_r^X(x)$ is linearly interpolated along the X-axis, and $\mathbf{M}_r^{YZ}(y, z)$ is bilinearly interpolated in the YZ plane [S2][S7, unofficial]. Similar formulas apply for modes Y and Z [S2].
+ 
+ The density grid value is the sum of interpolated components:
+@@ -43,4 +43,8 @@
+ where $S$ is a decoding function (MLP or Spherical Harmonics) and $\mathbf{d}$ is the viewing direction [S2][S7, unofficial].
+ 
++Differentiable volume rendering computes pixel color $C$ by marching along a ray, sampling $Q$ points, and accumulating transmittance $\tau_q = \exp(-\sum_{p=1}^{q-1} \sigma_p \Delta_p)$:
++$$ C = \sum_{q=1}^Q \tau_q (1 - \exp(-\sigma_q \Delta_q)) c_q \quad (16) $$
++where $\sigma_q, c_q$ are density and color at sample $q$, and $\Delta_q$ is the ray step size [S2][S7, unofficial].
++
+ **Pseudocode:**
+ 
+@@ -50,63 +54,39 @@
+ 
+ def linear_interp_1d(vec, coord):
+-    """
+-    Linear interpolation of a 1D vector at coordinate coord.
+-    vec: (N,) tensor
+-    coord: (B,) tensor in [0, N-1]
+-    Returns: (B,) tensor
+-    """
+-    # Clamp coordinate to valid range
++    """Linear interpolation of a 1D vector at coordinate coord."""
+     coord = torch.clamp(coord, 0, vec.shape[0] - 1 - 1e-6)
+     i0 = coord.long()
+-    i1 = i0 + 1
++    i1 = torch.clamp(i0 + 1, max=vec.shape[0] - 1)
+     w = coord - i0.float()
+-    
+-    # Handle boundary case where i1 might exceed
+-    if i1[-1] >= vec.shape[0]:
+-        i1 = i0
+-        w = torch.zeros_like(w)
+-        
+-    val0 = vec[i0]
+-    val1 = vec[i1]
+-    return val0 * (1 - w) + val1 * w
++    return vec[i0] * (1 - w) + vec[i1] * w
+ 
+ def bilinear_interp_2d(mat, coord_y, coord_z):
+-    """
+-    Bilinear interpolation of a 2D matrix at coordinates (y, z).
+-    mat: (Ny, Nz) tensor
+-    coord_y, coord_z: (B,) tensors in [0, Ny/Nz-1]
+-    Returns: (B,) tensor
+-    """
++    """Bilinear interpolation of a 2D matrix at coordinates (y, z)."""
+     coord_y = torch.clamp(coord_y, 0, mat.shape[0] - 1 - 1e-6)
+     coord_z = torch.clamp(coord_z, 0, mat.shape[1] - 1 - 1e-6)
+-    
+     j0 = coord_y.long()
+-    j1 = j0 + 1
++    k0 = coord_z.long()
++    j1 = torch.clamp(j0 + 1, max=mat.shape[0] - 1)
++    k1 = torch.clamp(k0 + 1, max=mat.shape[1] - 1)
+     w_y = coord_y - j0.float()
+-    
+-    k0 = coord_z.long()
+-    k1 = k0 + 1
+     w_z = coord_z - k0.float()
+-    
+-    # Handle boundaries
+-    if j1[-1] >= mat.shape[0]:
+-        j1 = j0
+-        w_y = torch.zeros_like(w_y)
+-    if k1[-1] >= mat.shape[1]:
+-        k1 = k0
+-        w_z = torch.zeros_like(w_z)
+-        
+-    # Interpolate along Y
+-    val_y0 = F.linear(mat[:, k0], w_y.unsqueeze(1).repeat(1, mat.shape[1]) + (1-w_y).unsqueeze(1).repeat(1, mat.shape[1])) # Simplified logic below
+-    # Correct bilinear:
+-    # v00 = mat[j0, k0], v01 = mat[j0, k1], v10 = mat[j1, k0], v11 = mat[j1, k1]
+     v00 = mat[j0, k0]
+     v01 = mat[j0, k1]
+     v10 = mat[j1, k0]
+     v11 = mat[j1, k1]
+-    
+     v0 = v00 * (1 - w_y) + v10 * w_y
+     v1 = v01 * (1 - w_y) + v11 * w_y
+     return v0 * (1 - w_z) + v1 * w_z
++
++def evaluate_sh(features, directions):
++    """Standard spherical harmonics evaluation for 3rd order (P=27) [G]."""
++    # Standard SH basis evaluation mapping features and directions to RGB
++    return torch.zeros_like(directions) # Placeholder for standard SH math [G]
++
++def mlp_decoder(features, directions):
++    """2-layer MLP decoder with 128 hidden units and ReLU [S7, unofficial]."""
++    x = F.relu(torch.nn.Linear(27, 128)(features))
++    x = F.relu(torch.nn.Linear(128, 128)(x))
++    return torch.sigmoid(torch.nn.Linear(128, 3)(x))
+ 
+ def evaluate_tensorf(x, d, params):
+@@ -120,68 +100,30 @@
+     v_sigma_X = params['v_sigma_X'] # (N0, R_sigma)
+     M_sigma_YZ = params['M_sigma_YZ'] # (N0, N1, R_sigma)
+-    # ... other factors ...
+-    
++    # ... other geometry factors similarly ...
+     B_mat = params['B'] # (P, 3*R_c)
+     
+-    # 1. Evaluate Density
+-    # Interpolate components for each mode
+-    # A_sigma_r_X = v_sigma_X[x] * M_sigma_YZ[y, z]
+-    # Sum over r and m
+-    
+-    # Implementation detail: Batched evaluation
+-    # For each r, compute A_sigma_r_X, A_sigma_r_Y, A_sigma_r_Z
+-    # Sum them up
+-    
+-    sigma = 0.0
++    sigma = torch.zeros(x.shape[0], device=x.device)
+     for r in range(params['R_sigma']):
+-        # Mode X
+-        vx = linear_interp_1d(v_sigma_X[:, r], x[:, 0]) # (B,)
+-        myz = bilinear_interp_2d(M_sigma_YZ[:, :, r], x[:, 1], x[:, 2]) # (B,)
+-        ax = vx * myz
++        ax = linear_interp_1d(v_sigma_X[:, r], x[:, 0]) * bilinear_interp_2d(M_sigma_YZ[:, :, r], x[:, 1], x[:, 2])
+         sigma += ax
++        # Add modes Y and Z similarly...
+         
+-        # Mode Y and Z similarly...
+-        # ...
+-        
+-    # Apply softplus if required by specific variant, though TensoRF often uses raw sum
+-    # sigma = F.softplus(sigma) # [G] Some implementations apply softplus to ensure positivity
+-    
+-    # 2. Evaluate Appearance
+-    # Compute A_c_r_m for all r, m
+-    # Concatenate into vector of size 3*R_c
+-    # Multiply by B
+-    
++    # Appearance
+     app_features = []
+     for r in range(params['R_c']):
+         # Mode X
+-        vx = linear_interp_1d(v_c_X[:, r], x[:, 0])
+-        myz = bilinear_interp_2d(M_c_YZ[:, :, r], x[:, 1], x[:, 2])
+-        app_features.append(vx * myz)
++        app_features.append(linear_interp_1d(params['v_c_X'][:, r], x[:, 0]) * bilinear_interp_2d(params['M_c_YZ'][:, :, r], x[:, 1], x[:, 2]))
++        # Mode Y
++        app_features.append(linear_interp_1d(params['v_c_Y'][:, r], x[:, 1]) * bilinear_interp_2d(params['M_c_XZ'][:, :, r], x[:, 0], x[:, 2]))
++        # Mode Z
++        app_features.append(linear_interp_1d(params['v_c_Z'][:, r], x[:, 2]) * bilinear_interp_2d(params['M_c_XY'][:, :, r], x[:, 0], x[:, 1]))
+         
+-        # Mode Y
+-        vy = linear_interp_1d(v_c_Y[:, r], x[:, 1])
+-        mxz = bilinear_interp_2d(M_c_XZ[:, :, r], x[:, 0], x[:, 2])
+-        app_features.append(vy * mxz)
+-        
+-        # Mode Z
+-        vz = linear_interp_1d(v_c_Z[:, r], x[:, 2])
+-        mxy = bilinear_interp_2d(M_c_XY[:, :, r], x[:, 0], x[:, 1])
+-        app_features.append(vz * mxy)
+-        
+-    # Concatenate to (B, 3*R_c)
+     app_vec = torch.stack(app_features, dim=1) # (B, 3*R_c)
+-    
+-    # Multiply by B (P, 3*R_c) -> (B, P)
+-    # Note: B is (P, 3*R_c). We need (B, P).
+-    # G_c = B @ app_vec.T -> (P, B). Transpose to (B, P)
+-    # Or app_vec @ B.T
+     G_c = app_vec @ B_mat.T # (B, P)
+     
+-    # 3. Decode Color
+-    # S is either SH or MLP
+     if params['decoder_type'] == 'SH':
+-        color = spherical_harmonics_decode(G_c, d) # (B, 3)
+-    elif params['decoder_type'] == 'MLP':
+-        color = mlp_decoder(G_c, d) # (B, 3)
++        color = evaluate_sh(G_c, d)
++    else:
++        color = mlp_decoder(G_c, d)
+         
+     return sigma, color
+@@ -190,6 +132,6 @@
+ **Parameters:**
+ *   $N_0$: Initial grid resolution. Typical value: 128 [S7, unofficial].
+-*   $R_\sigma, R_c$: Number of components. Typical values: 48, 96, 192, 384 [S7, unofficial].
+ *   $P$: Number of appearance features. Typical value: 27 (3rd-order SH coefficients) [S7, unofficial].
++*   $R_\sigma, R_c$: Number of components. Configuration examples: 48, 96, 192, 384 [S7, unofficial].
+ *   Learning Rate: 0.02 for tensor factors, 0.001 for MLP decoder [S7, unofficial].
+ *   Optimizer: Adam [S7, unofficial].
+@@ -235,13 +177,12 @@
+ **Strengths and Limitations:**
+ *   **Strengths:** Extremely compact model size (CP variant < 4MB), fast reconstruction (< 30 min for most variants), high rendering quality (VM variant outperforms NeRF), standard PyTorch implementation without custom CUDA kernels [S2][S7, unofficial].
+-*   **Limitations:** VM variant requires more memory than CP. Global tensor representation may be inefficient for highly sparse scenes compared to local methods like Strivec [S2].
++*   **Limitations:** VM variant requires more memory than CP.
+ 
+ **When to Use:**
+-*   Use when training speed and model compactness are critical.
+-*   Use when a standard implementation without custom kernels is preferred.
+-*   Do not use for highly sparse scenes where local representations (Strivec) are more appropriate.
++*   Use when training speed and model compactness are critical [S1][S7, unofficial].
++*   Use when a standard implementation without custom kernels is preferred [S5][S7, unofficial].
+ 
+ ## Background
+-TensoRF was introduced by Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su in the paper "Tensorf: Tensorial Radiance Fields" presented at ECCV 2022 [S7, unofficial]. It was developed to address the computational inefficiency and large memory footprint of MLP-based NeRFs and concurrent explicit methods like Plenoxels. The method leverages tensor factorization (CP and VM) to decompose the 4D radiance field into low-rank components, enabling efficient trilinear interpolation and differentiable rendering [S1][S7, unofficial]. It has been widely used as a baseline for subsequent low-rank and tensor-based radiance field research [S1, S4].
++TensoRF was introduced by Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su in the paper "Tensorf: Tensorial Radiance Fields" presented at ECCV 2022 [S7, unofficial]. It was developed to address the computational inefficiency and large memory footprint of MLP-based NeRFs and concurrent explicit methods like Plenoxels [S3, unofficial][S7, unofficial]. The method leverages tensor factorization (CP and VM) to decompose the 4D radiance field into low-rank components, enabling efficient trilinear interpolation and differentiable rendering [S1][S7, unofficial]. It has been widely used as a baseline for subsequent low-rank and tensor-based radiance field research [S1, S4].
+ 
+ ## Sources

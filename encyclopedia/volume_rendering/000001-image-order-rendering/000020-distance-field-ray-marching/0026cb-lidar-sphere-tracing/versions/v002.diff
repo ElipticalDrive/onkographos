@@ -1,0 +1,459 @@
+--- v001.md
++++ v002.md
+@@ -1,94 +1,96 @@
+ # Lidar Sphere Tracing
+ 
+-Also called: Lidar Raycasting, Point Cloud Projection Rendering
++Also called: Lidar Ray Marching, Point Cloud Sphere Tracing
+ 
+ ## Overview
+-Lidar Sphere Tracing is a rendering technique that combines distance-field ray marching with point cloud projection to visualize scene intersections as a sparse Lidar point cloud rather than a continuous surface [S1, unofficial]. It differs from standard sphere tracing by discarding the full volumetric or geometric shading pipeline in favor of storing hit points in a buffer and projecting them onto the framebuffer using a simplified pinhole camera model [S1, unofficial]. This method is chosen when the goal is to simulate Lidar sensor output or visualize sparse depth data, trading visual completeness for the specific aesthetic and data structure of a point cloud.
++Lidar Sphere Tracing is a rendering technique that adapts distance-field ray marching to simulate LiDAR sensor data by detecting surface intersections (Lidar points) from a camera viewpoint and projecting them onto a framebuffer as a sparse point cloud, rather than rendering a continuous geometric or volumetric surface [S1, unofficial]. It differs from standard sphere tracing by discarding the surface shading and normal estimation steps in favor of storing hit positions in a bounded point cloud buffer and rendering them with a specific occlusion-aware color map [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two distinct phases: ray casting to populate a Lidar point cloud buffer, and rendering that buffer to the screen.
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   Camera parameters: center $c$, focal length $f$, viewport dimensions ($w, h$), pixel dimensions ($pw, ph$), and orientation angles ($\alpha_x, \alpha_y$) [S1, unofficial].
+-*   Scene definition: A world object providing a minimum distance function $minDist(p)$ [S1, unofficial].
+-*   Parameters:
+-    *   $max\_spheres$: Maximum iterations per ray (default 100) [S1, unofficial].
+-    *   $sphere\_detect\_size$: Hit threshold (default 0.01) [S1, unofficial].
+-    *   $lidar\_density$: Sampling rate control (default 2) [S1, unofficial].
+-    *   $max\_lidar\_points$: Point cloud buffer capacity (default 1,400,000) [S1, unofficial].
+-
+-**Outputs:**
+-*   Framebuffer: A 1D array of `uint32_t` (ARGB8888) of size $image\_width \times image\_height$ [S1, unofficial].
+-*   Lidar Point Cloud: A deque of 3D points [S1, unofficial].
+-
+-### Data Structures
+-1.  **Framebuffer**: Row-major 1D array. Index for pixel $(x, y)$ is $x + image\_width \times y$ [S1, unofficial].
+-2.  **Lidar Point Cloud**: A double-ended queue (`std::deque<vec3>`) storing 3D coordinates of hit points [S1, unofficial].
+-
+-### Step-by-Step Method
+-
+-#### Phase 1: Lidar Ray Casting
+-1.  **Initialize Viewport Geometry**: Calculate viewport width and height based on field of view (FOV) and aspect ratio:
+-    $$ viewport\_width = 2 \cdot f \cdot \tan(\frac{FOV}{2}) $$
+-    $$ viewport\_height = \frac{viewport\_width}{aspect\_ratio} $$
++**Inputs and Outputs:**
++- **Input:** A Signed Distance Function (SDF) world representation, camera parameters (center, orientation, focal length, resolution), and rendering parameters (`max_spheres`, `sphere_detect_size`, `lidar_density`, `max_lidar_points`).
++- **Output:** A 1D array of `uint32_t` representing an ARGB8888 framebuffer, and a deque of 3D points representing the Lidar scan.
++
++**Data Structures:**
++- **Framebuffer:** A 1D array of size `image_width * image_height`. Memory layout is row-major, indexed by `screen_x + image_width * screen_y`. Format is ARGB8888 (Alpha 8, Red 8, Green 8, Blue 8) [S1, unofficial].
++- **Lidar Point Cloud:** A `std::deque<vec3>` storing 3D hit coordinates. It acts as a circular buffer with a maximum capacity `max_lidar_points` [S1, unofficial].
++
++**Parameters:**
++- `max_spheres`: Maximum iterations per ray. Default: 100 [S1, unofficial].
++- `sphere_detect_size`: Convergence threshold for hit detection. Default: 0.01 [S1, unofficial].
++- `lidar_density`: Sampling rate control. A ray is cast only if `(int)((double)rand() / RAND_MAX * lidar_density) == 1`. Higher values result in sparser clouds. Default: 2 [S1, unofficial].
++- `max_lidar_points`: Maximum capacity of the point cloud buffer. Default: 1,400,000 [S1, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Camera Initialization:**
++    Calculate viewport dimensions based on `fov`, `aspect_ratio`, and `focal_length`:
++    $$ \text{viewport\_width} = 2 \cdot \text{focal\_length} \cdot \tan(\text{fov}/2) $$
++    $$ \text{viewport\_height} = \text{viewport\_width} / \text{aspect\_ratio} $$
+     Calculate pixel dimensions:
+-    $$ pixel\_width = \frac{viewport\_width}{image\_width}, \quad pixel\_height = \frac{viewport\_height}{image\_height} $$
+-    Define the bottom-left corner of the viewport in camera space:
+-    $$ pixel\_00 = c + \left( -\frac{viewport\_width}{2}, -\frac{viewport\_height}{2}, f \right) $$
+-    Define the pixel center offset:
+-    $$ half\_offset = (pixel\_width \cdot 0.5, pixel\_height \cdot 0.5, 0) $$
+-    [S1, unofficial]
+-
+-2.  **Iterate Pixels**: For each pixel $(i, j)$ where $0 \le i < image\_width$ and $0 \le j < image\_height$:
+-    a. **Sampling Check**: Generate a random value. If the condition for sampling is not met (based on $lidar\_density$), skip this pixel [S1, unofficial].
+-    b. **Ray Origin and Direction**:
+-       Calculate the unrotated pixel location:
+-       $$ p_{loc} = pixel\_00 + (i \cdot pixel\_width, j \cdot pixel\_height, 0) + half\_offset $$
+-       Translate relative to camera center:
+-       $$ v = p_{loc} - c $$
+-       Apply rotation to align with camera orientation. Note: The source code applies rotation in the order $rotateX(angle_y)$ then $rotateY(angle_x)$ [S1, unofficial]:
+-       $$ v = rotateX(v, \alpha_y) $$
+-       $$ v = rotateY(v, \alpha_x) $$
+-       Define the ray $r$ with origin $c$ and direction $v$ [S1, unofficial].
+-    c. **Sphere Tracing**:
+-       Initialize $length = 0$ and $steps = 0$ [S1, unofficial].
+-       Loop up to $max\_spheres$:
+-       i. Evaluate distance to nearest object:
+-          $$ d = minDist(r.origin() + r.direction() \cdot length) $$
+-       ii. Increment $steps$ [S1, unofficial].
+-       iii. **Hit Test**: If $d < sphere\_detect\_size$, the ray has hit. Calculate hit point:
+-            $$ hit = r.origin() + r.direction() \cdot length $$
+-            Add $hit$ to the local thread buffer [S1, unofficial]. Break loop.
+-       iv. **Step**: $length \leftarrow length + d$ [S1, unofficial].
+-    d. **Buffer Management**: If the global point cloud size exceeds $max\_lidar\_points$, remove the oldest point (front of deque) [S1, unofficial].
+-
+-#### Phase 2: Rendering to Framebuffer
+-1.  **Iterate Lidar Points**: For each point $P$ in the Lidar point cloud:
+-    a. **Transform to Camera Space**:
+-       $$ v = P - c $$
+-       Apply inverse rotation (negative angles):
+-       $$ v = rotateY(v, -\alpha_x) $$
+-       $$ v = rotateX(v, -\alpha_y) $$
+-       [S1, unofficial]
+-    b. **Depth Check**: If $v.z \le 10^{-6}$, the point is behind or on the camera plane. Skip it [S1, unofficial].
+-    c. **Projection**: Calculate screen coordinates:
+-       $$ x_{img} = \frac{f \cdot v.x}{v.z} $$
+-       $$ y_{img} = \frac{f \cdot v.y}{v.z} $$
+-       $$ screen\_x = \left\lfloor \frac{image\_width}{2} + \frac{x_{img}}{pixel\_width} \right\rfloor $$
+-       $$ screen\_y = \left\lfloor \frac{image\_height}{2} + \frac{y_{img}}{pixel\_height} \right\rfloor $$
+-       [S1, unofficial]
+-    d. **Bounds Check**: If $screen\_x < 0$ or $screen\_x \ge image\_width$ or $screen\_y < 0$ or $screen\_y \ge image\_height$, skip [S1, unofficial].
+-    e. **Color Calculation**:
+-       The source code distinguishes between standard pixels and Lidar points. For Lidar points, the color is explicitly set to red with full alpha: `0xFFFF0000` (ARGB) [S1, unofficial].
+-       *Note: The source code also includes logic for "standard pixels" using occlusion counts, but the primary Lidar rendering step sets the color to red.*
+-       $$ framebuffer[screen\_x + image\_width \cdot screen\_y] = 0xFFFF0000 $$
+-       [S1, unofficial]
+-
+-### Pseudocode
++    $$ \text{pixel\_width} = \text{viewport\_width} / \text{image\_width} $$
++    $$ \text{pixel\_height} = \text{viewport\_height} / \text{image\_height} $$
++    Define the top-left pixel center in camera space (before rotation):
++    $$ \mathbf{p}_{00} = \mathbf{c} + \left( -\frac{\text{viewport\_width}}{2}, -\frac{\text{viewport\_height}}{2}, \text{focal\_length} \right) $$
++    where $\mathbf{c}$ is `camera_center` [S1, unofficial].
++
++2.  **Ray Casting Loop (Lidar Generation):**
++    For each pixel $(i, j)$ in the image grid:
++    a.  **Ray Origin:** $\mathbf{o} = \mathbf{c}$ [S1, unofficial].
++    b.  **Ray Direction:**
++        Calculate the unrotated pixel direction vector:
++        $$ \mathbf{v}_{\text{raw}} = \mathbf{p}_{00} + (i \cdot \text{pixel\_width}, j \cdot \text{pixel\_height}, 0) + \left( \frac{\text{pixel\_width}}{2}, \frac{\text{pixel\_height}}{2}, 0 \right) $$
++        Translate to origin-relative:
++        $$ \mathbf{v}_{\text{trans}} = \mathbf{v}_{\text{raw}} - \mathbf{c} $$
++        Apply camera rotation (Yaw $angle_y$, Pitch $angle_x$):
++        $$ \mathbf{d} = \text{rotateX}(\text{rotateY}(\mathbf{v}_{\text{trans}}, angle_y), angle_x) $$
++        Normalize $\mathbf{d}$ [S1, unofficial].
++    c.  **Sampling Check:**
++        If `(int)((double)rand() / RAND_MAX * lidar_density) != 1`, skip this pixel [S1, unofficial].
++    d.  **Sphere Tracing:**
++        Initialize `length = 0`.
++        Loop `k` from 0 to `max_spheres`:
++        i.  Current position: $\mathbf{p} = \mathbf{o} + \mathbf{d} \cdot \text{length}$ [S1, unofficial].
++        ii. Distance query: $d_{\text{obj}} = \text{world.minDist}(\mathbf{p})$ [S1, unofficial].
++        iii. Hit Test: If $d_{\text{obj}} < \text{sphere\_detect\_size}$, record $\mathbf{p}$ as a Lidar point and break [S1, unofficial].
++        iv. Step: $\text{length} \leftarrow \text{length} + d_{\text{obj}}$ [S1, unofficial].
++    e.  **Buffer Management:**
++        If a hit was recorded, add $\mathbf{p}$ to `lidar_points`. If `lidar_points.size() > max_lidar_points`, remove the oldest point (`pop_front`) [S1, unofficial].
++
++3.  **Projection and Rendering:**
++    For each point $\mathbf{p}$ in `lidar_points`:
++    a.  **Transform to Camera Space:**
++        $$ \mathbf{v} = \mathbf{p} - \mathbf{c} $$
++        $$ \mathbf{v} = \text{rotateY}(\mathbf{v}, -angle_x) $$
++        $$ \mathbf{v} = \text{rotateX}(\mathbf{v}, -angle_y) $$
++        [S1, unofficial].
++    b.  **Depth Check:**
++        If $\mathbf{v}_z \le 10^{-6}$, the point is behind or on the camera plane; skip [S1, unofficial].
++    c.  **Screen Coordinates:**
++        $$ x_{\text{img}} = \frac{\text{focal\_length} \cdot \mathbf{v}_x}{\mathbf{v}_z} $$
++        $$ y_{\text{img}} = \frac{\text{focal\_length} \cdot \mathbf{v}_y}{\mathbf{v}_z} $$
++        $$ \text{screen\_x} = \left\lfloor \frac{\text{image\_width}}{2} + \frac{x_{\text{img}}}{\text{pixel\_width}} \right\rfloor $$
++        $$ \text{screen\_y} = \left\lfloor \frac{\text{image\_height}}{2} + \frac{y_{\text{img}}}{\text{pixel\_height}} \right\rfloor $$
++        [S1, unofficial].
++    d.  **Bounds Check:**
++        If $\text{screen\_x} < 0$ or $\ge \text{image\_width}$ or $\text{screen\_y} < 0$ or $\ge \text{image\_height}$, skip [S1, unofficial].
++    e.  **Color Calculation:**
++        The color depends on whether the point is a primary Lidar hit or an occlusion check.
++        *   **Primary Lidar Hit:** Write color `0xFFFF0000` (Red, Alpha 255) [S1, unofficial].
++        *   **Occlusion Count (Standard Pixels):** If rendering occlusion for a pixel (via `sphereCastOcclusion`), let `step_count` be the number of iterations.
++            If $0x00030303 \cdot \text{step\_count} > 0x00FFFFFF$, set pixel to `0xFF000000` (Black) [S1, unofficial].
++            Otherwise, set pixel to:
++            $$ \text{Color} = 0xFF000000 + 0x00FFFFFF - (0x00030303 \cdot \text{step\_count}) $$
++            This results in a grayscale value that darkens as `step_count` increases [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+ import math
+ import random
++
++def rotate_y(v, angle):
++    c = math.cos(angle)
++    s = math.sin(angle)
++    return (c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2])
+ 
+ def rotate_x(v, angle):
+@@ -97,9 +99,4 @@
+     return (v[0], c * v[1] - s * v[2], s * v[1] + c * v[2])
+ 
+-def rotate_y(v, angle):
+-    c = math.cos(angle)
+-    s = math.sin(angle)
+-    return (c * v[0] + s * v[2], v[1], -s * v[0] + c * v[2])
+-
+ def unit_vector(v):
+     mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+@@ -107,136 +104,154 @@
+     return (v[0]/mag, v[1]/mag, v[2]/mag)
+ 
+-def lidar_sphere_trace(camera, world, framebuffer):
+-    # 1. Initialize Viewport Geometry
++def sphere_trace(ray_origin, ray_dir, world, max_spheres, sphere_detect_size):
++    length = 0.0
++    for _ in range(max_spheres):
++        pos = (ray_origin[0] + ray_dir[0] * length,
++               ray_origin[1] + ray_dir[1] * length,
++               ray_origin[2] + ray_dir[2] * length)
++        dist = world.min_dist(pos)
++        if dist < sphere_detect_size:
++            return pos
++        length += dist
++    return None
++
++def render_lidar(camera, world, framebuffer, image_width, image_height):
++    # Initialize camera parameters
+     fov = camera.fov
+-    f = camera.focal_length
+-    aspect = camera.aspect_ratio
+-    w_img = camera.image_width
+-    h_img = camera.image_height
+-    
+-    viewport_width = 2 * f * math.tan(fov / 2)
+-    viewport_height = viewport_width / aspect
+-    pixel_width = viewport_width / w_img
+-    pixel_height = viewport_height / h_img
+-    
+-    # Bottom-left corner in camera space (z is forward)
+-    pixel_00 = (
+-        camera.center[0] - viewport_width / 2,
+-        camera.center[1] - viewport_height / 2,
+-        camera.center[2] + f
+-    )
++    focal_length = camera.focal_length
++    aspect_ratio = camera.aspect_ratio
++    viewport_width = 2 * focal_length * math.tan(fov / 2)
++    viewport_height = viewport_width / aspect_ratio
++    pixel_width = viewport_width / image_width
++    pixel_height = viewport_height / image_height
++    
++    # Top-left pixel center in camera space (before rotation)
++    p00 = (camera.camera_center[0] - viewport_width / 2,
++           camera.camera_center[1] - viewport_height / 2,
++           camera.camera_center[2] + focal_length)
++    
+     half_offset = (pixel_width * 0.5, pixel_height * 0.5, 0)
+     
+     lidar_points = []
+     
+-    # 2. Ray Casting Phase
+-    for i in range(w_img):
+-        for j in range(h_img):
+-            # Sampling check based on lidar_density
+-            # Note: Source uses (int)((double)rand() / RAND_MAX * lidar_density) != 1
+-            # This implies a probabilistic skip. For deterministic implementation:
+-            if random.random() > (1.0 / camera.lidar_density):
++    # Parallel processing simulation
++    for i in range(image_width):
++        for j in range(image_height):
++            # Sampling check
++            if int((random.random() * camera.lidar_density)) != 1:
+                 continue
+-                
+-            # Calculate pixel location
+-            pixel_loc = (
+-                pixel_00[0] + i * pixel_width + half_offset[0],
+-                pixel_00[1] + j * pixel_height + half_offset[1],
+-                pixel_00[2] + half_offset[2]
+-            )
+-            
+-            # Translate and Rotate
+-            v = (pixel_loc[0] - camera.center[0],
+-                 pixel_loc[1] - camera.center[1],
+-                 pixel_loc[2] - camera.center[2])
+-            
+-            # Apply rotations as per source: rotateX(angle_y) then rotateY(angle_x)
+-            v = rotate_x(v, camera.angle_y)
+-            v = rotate_y(v, camera.angle_x)
+-            
+-            ray_origin = camera.center
+-            ray_dir = unit_vector(v)
+-            
+-            # Sphere Tracing
+-            length = 0.0
+-            hit_point = None
+-            
+-            for _ in range(camera.max_spheres):
+-                # Current position
+-                pos = (
+-                    ray_origin[0] + ray_dir[0] * length,
+-                    ray_origin[1] + ray_dir[1] * length,
+-                    ray_origin[2] + ray_dir[2] * length
+-                )
+-                
+-                dist = world.min_dist(pos)
+-                
+-                if dist < camera.sphere_detect_size:
+-                    hit_point = pos
+-                    break
+-                
+-                length += dist
+-            
+-            if hit_point is not None:
+-                lidar_points.append(hit_point)
+-    
+-    # 3. Buffer Management
+-    if len(lidar_points) > camera.max_lidar_points:
+-        lidar_points = lidar_points[-camera.max_lidar_points:]
+-        
+-    # 4. Rendering Phase
++            
++            # Ray setup
++            pixel_loc = (p00[0] + i * pixel_width + half_offset[0],
++                         p00[1] + j * pixel_height + half_offset[1],
++                         p00[2] + half_offset[2])
++            
++            translated = (pixel_loc[0] - camera.camera_center[0],
++                          pixel_loc[1] - camera.camera_center[1],
++                          pixel_loc[2] - camera.camera_center[2])
++            
++            # Rotate direction
++            rotated_y = rotate_y(translated, camera.angle_y)
++            rotated_x = rotate_x(rotated_y, camera.angle_x)
++            ray_dir = unit_vector(rotated_x)
++            ray_origin = camera.camera_center
++            
++            # Trace
++            hit = sphere_trace(ray_origin, ray_dir, world, 
++                               camera.max_spheres, camera.sphere_detect_size)
++            
++            if hit is not None:
++                lidar_points.append(hit)
++                if len(lidar_points) > camera.max_lidar_points:
++                    lidar_points.pop(0)
++
++    # Render points to framebuffer
+     for point in lidar_points:
+-        # Transform to camera space
+-        v = (point[0] - camera.center[0],
+-             point[1] - camera.center[1],
+-             point[2] - camera.center[2])
+-        
+-        # Inverse rotation
++        # Transform point to camera view
++        v = (point[0] - camera.camera_center[0],
++             point[1] - camera.camera_center[1],
++             point[2] - camera.camera_center[2])
++        
+         v = rotate_y(v, -camera.angle_x)
+         v = rotate_x(v, -camera.angle_y)
+         
+-        # Depth check
+         if v[2] <= 1e-6:
+             continue
+             
+-        # Projection
+-        x_img = (f * v[0]) / v[2]
+-        y_img = (f * v[1]) / v[2]
+-        
+-        screen_x = int(w_img / 2 + x_img / pixel_width)
+-        screen_y = int(h_img / 2 + y_img / pixel_height)
+-        
+-        # Bounds check
+-        if 0 <= screen_x < w_img and 0 <= screen_y < h_img:
+-            # Write Red with Alpha (0xFFFF0000 in ARGB)
+-            framebuffer[screen_x + w_img * screen_y] = 0xFFFF0000
+-
++        x_img = (focal_length * v[0]) / v[2]
++        y_img = (focal_length * v[1]) / v[2]
++        
++        screen_x = int(image_width / 2 + x_img / pixel_width)
++        screen_y = int(image_height / 2 + y_img / pixel_height)
++        
++        if 0 <= screen_x < image_width and 0 <= screen_y < image_height:
++            idx = screen_x + image_width * screen_y
++            # Write Red with Alpha 255
++            framebuffer[idx] = 0xFFFF0000
++
++def render_occlusion(camera, world, framebuffer, image_width, image_height):
++    fov = camera.fov
++    focal_length = camera.focal_length
++    aspect_ratio = camera.aspect_ratio
++    viewport_width = 2 * focal_length * math.tan(fov / 2)
++    viewport_height = viewport_width / aspect_ratio
++    pixel_width = viewport_width / image_width
++    pixel_height = viewport_height / image_height
++    
++    p00 = (camera.camera_center[0] - viewport_width / 2,
++           camera.camera_center[1] - viewport_height / 2,
++           camera.camera_center[2] + focal_length)
++    
++    half_offset = (pixel_width * 0.5, pixel_height * 0.5, 0)
++
++    for i in range(image_width):
++        for j in range(image_height):
++            pixel_loc = (p00[0] + i * pixel_width + half_offset[0],
++                         p00[1] + j * pixel_height + half_offset[1],
++                         p00[2] + half_offset[2])
++            
++            translated = (pixel_loc[0] - camera.camera_center[0],
++                          pixel_loc[1] - camera.camera_center[1],
++                          pixel_loc[2] - camera.camera_center[2])
++            
++            rotated_y = rotate_y(translated, camera.angle_y)
++            rotated_x = rotate_x(rotated_y, camera.angle_x)
++            ray_dir = unit_vector(rotated_x)
++            ray_origin = camera.camera_center
++            
++            # Occlusion step count
++            length = 0.0
++            steps = 0
++            # Initial distance for step 0 logic if needed, but loop handles it
++            # Note: The source code calculates steps inside the loop
++            for k in range(camera.max_spheres):
++                pos = (ray_origin[0] + ray_dir[0] * length,
++                       ray_origin[1] + ray_dir[1] * length,
++                       ray_origin[2] + ray_dir[2] * length)
++                dist = world.min_dist(pos)
++                steps += 1
++                if dist < camera.sphere_detect_size:
++                    break
++                length += dist
++            
++            idx = i + image_width * j
++            # Color calculation
++            term = 0x00030303 * steps
++            if term > 0x00FFFFFF:
++                framebuffer[idx] = 0xFF000000
++            else:
++                framebuffer[idx] = 0xFF000000 + 0x00FFFFFF - term
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Division by Zero**: If the transformed point's z-component is $\le 10^{-6}$, the point is behind the camera. The algorithm skips these points to prevent invalid screen coordinates [S1, unofficial].
+-*   **Buffer Overflow**: The Lidar point cloud is bounded by $max\_lidar\_points$. If exceeded, the oldest points are removed (FIFO) [S1, unofficial].
+-*   **Precision**: The hit threshold $sphere\_detect\_size$ (default 0.01) determines the precision of the surface intersection. Too large a value may cause early hits; too small may require more steps or miss due to floating-point error [S1, unofficial].
+-
+-## Subtopics
+-
+-### SDF Primitive Definitions
+-Defines the basic distance functions (sphere, box, etc.) used by `world.minDist`. Choose this when defining the geometry for the Lidar scene. [S1578-sdf-primitive-definitions.md]
+-
+-### Acceleration and Optimization
+-Techniques to speed up `minDist` queries (e.g., BVH, grid). Choose this when the scene complexity makes naive sphere tracing too slow. [S6222-acceleration-and-optimization.md]
+-
+-### Ray Marching Dither
+-Techniques to reduce aliasing in the point cloud projection. Choose this if the rendered points appear jagged or sparse. [S3269-ray-marching-dither.md]
+-
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot M)$ where $N$ is the number of pixels sampled (determined by $lidar\_density$) and $M$ is the average number of sphere tracing steps per ray [S1, unofficial].
+-*   **Memory Complexity**: $O(P)$ where $P$ is $max\_lidar\_points$ for the point cloud buffer, plus $O(W \cdot H)$ for the framebuffer [S1, unofficial].
+-*   **Performance**: The method is lightweight compared to full volumetric rendering as it avoids shading calculations for non-hit points. However, it is sensitive to $lidar\_density$; low density results in sparse clouds, high density increases computational cost linearly [S1, unofficial].
+-*   **Strengths**: Simple implementation, low memory footprint for the point cloud, direct simulation of Lidar sensor output [S1, unofficial].
+-*   **Limitations**: Does not render occluded surfaces (only the first hit is stored), no shading or lighting effects on the points themselves (fixed color), sparse sampling may miss thin geometry [S1, unofficial].
++- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels sampled (determined by `lidar_density`) and $M$ is the average number of sphere tracing iterations per ray.
++- **Memory Complexity:** $O(P)$, where $P$ is `max_lidar_points`. The framebuffer is $O(W \cdot H)$.
++- **Strengths:** Efficiently visualizes sparse depth data; simple implementation using standard SDF primitives; parallelizable ray casting.
++- **Limitations:** Produces a point cloud rather than a solid surface; occlusion rendering is a separate pass or combined logic that may not accurately represent true depth buffering for all pixels; sparse sampling can lead to visual gaps.
++- **When to use:** Simulating LiDAR sensor output, point cloud visualization, or stylized depth visualization.
++- **When not to use:** When continuous surface rendering, accurate shading, or high-density point coverage is required.
+ 
+ ## Background
+-Lidar Sphere Tracing is an implementation technique found in open-source graphics projects, specifically documented in the `kuvsamja/lidar-sphere-tracing` repository [S1, unofficial]. It adapts the classic sphere tracing algorithm (popularized by Inigo Quilez) to generate a point cloud representation of a scene, mimicking the output of a Lidar sensor. The method was developed as a standalone renderer using C++, SDL2, and OpenMP for parallelization [S1, unofficial].
++Lidar Sphere Tracing is a specific implementation found in open-source educational and hobbyist graphics projects, notably the `kuvsamja/lidar-sphere-tracing` repository [S1, unofficial]. It adapts the classic sphere tracing algorithm (popularized by Turing Award winner Jim Blinn and later refined by Eric Haines and others) to generate point clouds that mimic LiDAR sensor data, projecting these points onto a 2D plane using standard perspective projection matrices [S1, unofficial].
+ 
+ ## Sources

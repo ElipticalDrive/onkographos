@@ -1,0 +1,173 @@
+# BoundedGS
+
+Also called: Bounded Working-Set 3DGS
+
+## Overview
+BoundedGS is a memory-efficient training and rendering method for 3D Gaussian Splatting (3DGS) that bounds GPU memory usage during high-resolution training by separating rasterization and projection backward passes [S1, unofficial]. It replaces full-frame projection with group-based candidate screening, leaf budget management, and compact gradient storage to limit the active working set [S1, unofficial]. Unlike InfiniGS, which uses image blocks and asynchronous optimization, BoundedGS examines the lifetime of rasterization forward and backward caches within a complete view on one GPU [S1, unofficial]. Unlike CLM, which reduces projection input via frustum candidates, BoundedGS combines view-level candidates with load-bounded local rasterization to control the simultaneous residency of Gaussian-tile intersections, pixels, projection state, and parameter gradients [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Global Gaussian parameters $\theta$, camera intrinsics/extrinsics, training image, projection-group grid side length $g$, and rasterization budget $L$ per leaf.
+*   **Outputs:** Updated Gaussian parameters $\theta$, rendered image, and loss value.
+
+**Data Structures:**
+*   **Global Model:** Stores Gaussian positions, rotations, scales, opacities, and spherical harmonics coefficients.
+*   **Candidate Indices:** For each group $j$, an array of Gaussian IDs $C_j$ screened for potential visibility.
+*   **Leaf Layout:** A CPU-cached tree of tile-aligned rectangles $R$. Each leaf tracks its pixel count $p_R$, tile count $t_R$, and intersection count $n_R$.
+*   **Compact Gradients:** Parameter gradients are accumulated only for candidate Gaussians in the current group, indexed by their global IDs, rather than allocating full rows for all $N$ Gaussians.
+
+**Numbered Steps:**
+
+1.  **Group Division:** Divide the image into $g^2$ non-overlapping groups. The standard configuration uses $g=1$ (one group covering the whole image) [S1, unofficial].
+2.  **Candidate Screening:** For each group $j$, build candidate index array $C_j$:
+    a. Read Gaussian position, opacity $\alpha_i$, and maximum scale $s_{i,\max} = |\gamma| \max_k \exp(s_{i,k})$, where $\gamma$ is the global scale modifier and $s_{i,k}$ are log-scale components [S1, unofficial].
+    b. Exclude Gaussians with camera-space depth $z_i \le 0.2$ or activated opacity $\alpha_i \le 1/255$ [S1, unofficial].
+    c. Compute the projection Jacobian $A_i$ using detailed projection focal lengths. Clamp normalized coordinates $x_i/z_i$ and $y_i/z_i$ to $\pm 1.3 \tan(\text{FOV}_x/2)$ and $\pm 1.3 \tan(\text{FOV}_y/2)$ respectively [S1, unofficial].
+    d. Estimate screen covariance bound: $\bar{\Sigma}_{i,2D} = A_i (s_{i,\max}^2 I) A_i^\top + 0.3I$ [S1, unofficial].
+    e. Calculate screen-space rectangle half-widths:
+       $$e_{i,x} = \max(0, \sqrt{2 \log(255\alpha_i) \bar{\Sigma}_{i,2D,xx} + 2})$$
+       $$e_{i,y} = \max(0, \sqrt{2 \log(255\alpha_i) \bar{\Sigma}_{i,2D,yy} + 2})$$
+       The $+2$ inside the square root provides a two-pixel discretization margin [S1, unofficial].
+    f. Include Gaussian $i$ in $C_j$ if the rectangle $[c_{i,x} - e_{i,x}, c_{i,x} + e_{i,x}] \times [c_{i,y} - e_{i,y}, c_{i,y} + e_{i,y}]$ intersects the group's tile-padded bounds. Non-finite projection results retain the Gaussian [S1, unofficial].
+    g. Build $C_j$ using counting and prefix sums over the global model [S1, unofficial].
+3.  **Group Processing (Row-Major Order):** For each group $j$:
+    a. **Projection:** Read original parameter rows at IDs in $C_j$ and project them once. Reuse these projected attributes for all leaves in the group [S1, unofficial].
+    b. **Leaf Subdivision:** Determine leaves covering the group. A leaf is a tile-aligned rectangle $R$. Estimate allocation size $E(R)$:
+       $$E(R) = B_{\text{bin}}(n_R) + B_{\text{image}}(p_R, t_R) + B_{\text{sample}}(b_R, d) + B_{\text{out}}(p_R, d)$$
+       where $d$ indicates inverse depth enablement (main table uses RGB without depth) [S1, unofficial].
+       *   $n_R$: exact Gaussian-tile intersection count.
+       *   $p_R$: pixel count.
+       *   $t_R = \lceil h_R/16 \rceil \lceil w_R/16 \rceil$: tile count.
+       *   $u_R = \min(t_R, n_R)$.
+       *   $b_R = \lfloor (n_R + 31u_R + 31)/32 \rfloor$: upper bound on 32-entry backward buckets [S1, unofficial].
+       *   $B_{\text{bin}}$: two uint32 Gaussian-ID arrays, two uint64 sort-key arrays, CUB radix-sort workspace [S1, unofficial].
+       *   $B_{\text{image}}$: per-pixel alpha/contributor state, per-tile ranges, max contributors, bucket counts, offsets, scan workspace [S1, unofficial].
+       *   $B_{\text{sample}}$: bucket-to-tile indices, transmittance/RGB state for 256 pixels per bucket [S1, unofficial].
+       *   $B_{\text{out}}$: $12p_R$ bytes FP32 RGB output, plus $4p_R$ bytes if depth enabled [S1, unofficial].
+       *   Size queries include 128-byte array alignment and tail padding [S1, unofficial].
+    c. **Budget Splitting:** If $E(R) > L$ and $R$ can be split, bisect along the dimension with more tiles (ties broken horizontally). Children remain disjoint and cover the parent. Stop when $E(R) \le L$ or $R$ is one tile. If a single tile exceeds $L$, record the event and process at minimum granularity [S1, unofficial].
+    d. **Leaf Execution:** For each final leaf $R$:
+       i. Recount intersections under current projection.
+       ii. Perform rasterization (within-tile sorting and compositing) and compute loss $L_R = 0.8 L_{1,R} + 0.2 (1 - \text{SSIM}_R)$ [S1, unofficial].
+       iii. Compute backward pass to get gradients for projected attributes.
+       iv. Accumulate these gradients into the group's compact parameter-gradient storage, indexed by candidate IDs [S1, unofficial].
+       v. Release leaf state (intersections, compositing buffers, loss state) [S1, unofficial].
+    e. **Group Cleanup:** After all leaves, perform projection backward to accumulate parameter gradients from projected attributes. Release group projection and gradient caches [S1, unofficial].
+4.  **Update:** After all groups, compute global regularization (e.g., GNS pruning term during 15K–19K window) once. Combine gradients from all groups. Perform one parameter update using the optimizer (e.g., CUDA Adam) [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bounded_gs_train_step(global_params, camera, image, g, L):
+    # 1. Divide image into g^2 groups
+    groups = create_groups(image.width, image.height, g)
+    
+    # Global gradient accumulator for this view
+    view_gradients = {} 
+    
+    # 2. Process groups in row-major order
+    for group_idx, group_bounds in enumerate(groups):
+        # 2a. Candidate Screening
+        candidates = []
+        for i in range(global_params.num_gaussians):
+            if not is_finite(global_params.pos[i]):
+                candidates.append(i)
+                continue
+            
+            z_i = project_depth(global_params.pos[i], camera)
+            alpha_i = global_params.opacity[i]
+            
+            if z_i <= 0.2 or alpha_i <= 1/255:
+                continue
+                
+            s_max = abs(global_params.global_scale) * max(exp(s) for s in global_params.log_scales[i])
+            A_i = compute_projection_jacobian(camera, global_params.pos[i])
+            
+            # Clamp coordinates
+            x_norm = global_params.pos[i].x / z_i
+            y_norm = global_params.pos[i].y / z_i
+            x_max = 1.3 * tan(camera.fov_x / 2)
+            y_max = 1.3 * tan(camera.fov_y / 2)
+            x_norm = clamp(x_norm, -x_max, x_max)
+            y_norm = clamp(y_norm, -y_max, y_max)
+            
+            # Covariance bound
+            Sigma_bar = A_i @ (s_max**2 * Identity(3)) @ A_i.T + 0.3 * Identity(2)
+            
+            # Rectangle half-widths
+            e_x = max(0, sqrt(2 * log(255 * alpha_i) * Sigma_bar[0,0] + 2))
+            e_y = max(0, sqrt(2 * log(255 * alpha_i) * Sigma_bar[1,1] + 2))
+            
+            # Check intersection with tile-padded bounds
+            if rectangle_intersects_tile_padded_bounds(
+                global_params.pos[i].x, global_params.pos[i].y, e_x, e_y, group_bounds
+            ):
+                candidates.append(i)
+        
+        # 2b. Project Candidates Once
+        projected_attrs = []
+        for i in candidates:
+            projected_attrs.append(project_gaussian(global_params, i, camera))
+            
+        # 2c. Determine Leaves for this Group
+        leaves = determine_leaves(group_bounds, L, projected_attrs, camera)
+        
+        # 2d. Execute Leaves
+        group_gradients = {} # Compact storage: id -> gradient_vector
+        
+        for leaf in leaves:
+            # Recount intersections
+            intersections = find_intersections(leaf, projected_attrs)
+            
+            # Rasterize
+            alpha_map, color_map, contributors = rasterize(leaf, intersections)
+            
+            # Compute Loss
+            loss = compute_loss(color_map, image[leaf.bounds], alpha_map)
+            
+            # Backward: Image -> Projected Attributes
+            grad_proj_attrs = backward_rasterization(leaf, intersections, grad_loss=1.0)
+            
+            # Backward: Projected Attributes -> Parameters (Compact)
+            # Accumulate into group_gradients
+            for i in candidates:
+                if i in contributors:
+                    grad_p = backward_projection(projected_attrs[i], grad_proj_attrs[i])
+                    if i not in group_gradients:
+                        group_gradients[i] = zeros_like(global_params[i])
+                    group_gradients[i] += grad_p
+            
+            # Release leaf state
+            release_leaf_state(leaf)
+            
+        # 2e. Accumulate to View Gradients
+        for i, grad in group_gradients.items():
+            if i not in view_gradients:
+                view_gradients[i] = zeros_like(global_params[i])
+            view_gradients[i] += grad
+            
+        # Release group caches
+        release_group_caches()
+        
+    # 3. Global Regularization and Update
+    if step in [15000, 19000]:
+        reg_loss = compute_gns_regularization(global_params)
+        # Add reg_loss gradients to view_gradients for active set
+        
+    optimizer.step(global_params, view_gradients)
+```
+
+## Operating characteristics
+*   **Memory Complexity:** The rendering working set is bounded and nearly constant with respect to resolution. In a resolution sweep with 6M Gaussians, the working set stays within 1.073–1.077 GiB from 1K to 16K resolution [S1, unofficial]. The peak memory is approximated as $M^{peak}_v \approx \max_t [M_{res}(t) + M_{view}(t) + M_{rast}(t)]$, where $M_{rast}$ is bounded by the leaf budget $L$ [S1, unofficial].
+*   **Performance:** At 11K resolution, a warm pass takes 19.79 seconds versus 21.76 seconds for full-frame execution (~9% faster) [S1, unofficial]. On five native 5K outdoor scenes, full training reduces the mean rendering working set from 9.97 to 1.76 GiB (82.3% reduction) and shortens training time from 36.7 to 33.9 minutes [S1, unofficial].
+*   **Quality:** The largest relative L1 difference over shared settings is $\approx 6.8 \times 10^{-7}$ [S1, unofficial]. Final reconstruction quality is close to the original method [S1, unofficial].
+*   **Strengths:** Bounded GPU memory usage regardless of resolution; no need for multi-GPU synchronization or host offloading for rendering state.
+*   **Limitations:** Requires CPU-assisted structure rebuilding for leaf layout management; potential overhead from candidate screening and leaf subdivision logic.
+
+## Background
+BoundedGS was introduced to address the memory peaks caused by co-resident rasterization, projection, and gradient state in complete-view training of 3D Gaussian Splatting [S1, unofficial]. It identifies that limiting the simultaneously active local state controls the growth of main rendering caches, allowing high-resolution training on single GPUs [S1, unofficial]. The method integrates projection, gradients, and resource management into a single execution flow, retaining full-pixel supervision and one update per view [S1, unofficial].
+
+## Sources
+[S1] BoundedGS: Memory-Efficient High-Resolution Training for 3D Gaussian Splatting, https://arxiv.org/abs/2610.34233v1, fetched 2026-10-26 (unofficial)

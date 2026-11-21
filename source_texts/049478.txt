@@ -1,0 +1,278 @@
+Attached a HTML file for Claude to read, native formatting. Below is paste of page formatting not WYSIYG You've identified a fundamental architectural gap in legacy CAD systems—they were built around 2D drafting primitives, and 3D was la...
+
+[Req] Surface detection. For Claude · Issue #1711 · HakanSeven12/OpenCADStudio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Req] Surface detection. For Claude #1711
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+[Req] Surface detection. For Claude#1711
+Copy link
+Description
+ketonik
+opened on Oct 11, 2026
+Issue body actions
+Attached a HTML file for Claude to read, native formatting.
+Below is paste of page formatting not WYSIYG
+You've identified a fundamental architectural gap in legacy CAD systems—they were built around 2D drafting primitives, and 3D was layered on top without rethinking the core interaction model. Let me address the technical approaches and tooling for retrofitting surface detection into a system like OpenCAD Studio.
+The Core Problem: Ray-Surface Intersection vs. Point-in-Space
+The issue isn't just UI; it's geometric reasoning. Legacy CAD systems treat drawing operations as:
+User clicks → Screen-to-world ray projection → Points/lines created at that ray's z-depth or a fixed plane
+Modern BIM/modeling apps (like Qonic) do:
+User hovers/clicks → Screen-to-world ray projection → Ray-cast against all 3D geometry → Snap to nearest surface intersection → Draw on that surface
+The snapping you linked in Qonic is indeed application-level geometry querying, not kernel-level, but it depends on having a solid geometric kernel that can answer queries like: "What surfaces does this ray intersect, and at what parameter?"
+Programming Approaches for OpenCAD Studio
+1. Ray-Surface Intersection Pipeline
+For a Rust-based CAD system, you need:
+Ray generation: Convert mouse coordinates to world-space ray (viewport unprojection)
+Spatial acceleration: BVH (Bounding Volume Hierarchy) or spatial hashing to quickly cull non-intersecting geometry
+Primitive intersection: Ray vs. triangle mesh, cylinder, NURBS surface, polyhedron
+Hit collection & sorting: Find closest intersection, group by surface/face, return snappable point
+```
+Mouse movement → Generate ray → Query spatial index → Test ray vs. primitives 
+→ Collect hits (t-value, surface normal, face ID) → Sort by distance 
+→ Snap to closest or highlight candidate surfaces
+```
+2. Application vs. Kernel Level
+Kernel level (geometry engine): Provides ray-intersection primitives and spatial indexing
+Application level (Qonic's approach): Uses kernel queries to build UI behaviors—snapping, highlighting, surface placement
+You'd implement surface detection at the application level but depend on a robust kernel. This is cleaner architecturally because:
+The kernel remains geometry-agnostic (just answers "does ray hit?")
+The application decides what to do with that information (snap, highlight, constrain)
+You can swap interaction strategies without touching the kernel
+Rust Crates for OpenCAD Studio
+Here are the most relevant crates to add surface detection and geometric reasoning:
+Crate
+Purpose
+Use Case
+parry3d
+3D geometric queries, ray casting, collision detection
+Primary choice: Ray-triangle mesh intersection, BVH spatial index, shape primitives (cylinder, box, sphere)
+nalgebra
+Linear algebra, 3D vectors, matrices, geometry
+Dependency of parry3d; ray/point math, transformations
+tinyobjloader-rs
+Load OBJ meshes
+Convert 3D primitives to triangle meshes for intersection testing
+rapier3d
+Physics engine, collision queries
+Alternative to parry3d; more feature-rich but heavier
+bevy_render
+(if using Bevy) 3D rendering + spatial queries
+Integrates rendering with raycasting
+rstar
+R-tree spatial indexing
+General spatial queries; lighter than BVH if you prefer tree-based lookup
+uuid
+Face/surface labeling
+Tag faces so snapping returns semantic info (e.g., "cylinder top face")
+Recommended Stack for OpenCAD Studio:
+```
+[dependencies]
+parry3d = "0.15"
+nalgebra = "0.33"
+uuid = { version = "1.0", features = ["v4"] }
+tinyobj = "4.0"
+```
+Implementation Architecture
+Step 1: Model Representation with Face Metadata
+Instead of raw triangle meshes, wrap geometry with semantic IDs:
+```
+struct Face {
+    id: uuid::Uuid,
+    name: String,  // "Cylinder Top", "Box Front", etc.
+    triangles: Vec<(usize, usize, usize)>,  // Triangle indices
+}
+
+struct SolidBody {
+    id: uuid::Uuid,
+    mesh: parry3d::shape::TriMesh,
+    faces: Vec<Face>,
+    local_to_world: Transform,
+}
+```
+Step 2: Ray-Cast Query Engine
+```
+struct GeometryEngine {
+    bodies: Vec<SolidBody>,
+    bvh: parry3d::bvh::BVH,  // Spatial acceleration
+}
+
+impl GeometryEngine {
+    fn ray_cast(&self, ray: &Ray3D) -> Option<RayCastHit> {
+        // Query BVH, test ray vs. all meshes
+        // Return closest hit with face metadata
+    }
+}
+
+struct RayCastHit {
+    t_value: f32,           // Distance along ray
+    point: Vector3<f32>,    // World intersection point
+    normal: Vector3<f32>,   // Surface normal
+    body_id: uuid::Uuid,
+    face_id: uuid::Uuid,    // Which face was hit
+}
+```
+Step 3: Snapping Logic at Application Level
+```
+struct SnapEngine {
+    geometry: GeometryEngine,
+    snap_radius: f32,  // Pixel distance threshold
+    snap_modes: SnapModes,  // Vertex, edge, face
+}
+
+impl SnapEngine {
+    fn find_snap_point(&self, mouse_ray: &Ray3D) -> Option<SnapPoint> {
+        if let Some(hit) = self.geometry.ray_cast(mouse_ray) {
+            // Snap to intersection point on surface
+            Some(SnapPoint {
+                world_pos: hit.point,
+                face_id: hit.face_id,
+                snap_type: SnapType::Surface,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+struct SnapPoint {
+    world_pos: Vector3<f32>,
+    face_id: uuid::Uuid,
+    snap_type: SnapType,
+}
+
+enum SnapType {
+    Vertex,
+    Edge,
+    Surface,
+    Center,
+}
+```
+Step 4: Draw Operation Constraint
+```
+struct DrawingContext {
+    snap_point: Option<SnapPoint>,
+}
+
+fn draw_line(&mut self, end_point: Vector3<f32>) {
+    if let Some(snap) = &self.snap_point {
+        // Line is constrained to surface, use its normal for orientation
+        // E.g., if snapped to cylinder top, line stays on that plane
+    }
+}
+```
+Key Challenges & Solutions
+Challenge
+Solution
+NURBS surfaces (not just meshes)
+Parry3d handles trimeshes well. For NURBS, tesselate to triangle mesh or use separate NURBS ray-intersection library (nurbs)
+Performance (ray-casting every frame)
+Use spatial acceleration (BVH in parry3d). Limit queries to viewport-visible geometry. Cache ray-hits.
+Face identification
+Tag triangles with face UUIDs at construction time; parry3d's TriMesh structure allows custom metadata.
+Boolean operations (CSG)—cylinders from primitives
+Use parry3d::shape::Cylinder directly, or tessellate and track faces.
+Updating geometry dynamically
+Rebuild BVH when geometry changes. For frequent updates, consider a narrowphase update strategy.
+Why This Approach Works for OpenCAD Studio
+OpenCAD Studio is pure Rust + Bevy, which makes this ideal:
+Parry3d is Bevy-compatible and uses the same linear algebra (nalgebra)
+No C++ legacy constraints—you can design ray-casting into the core loop cleanly
+Rust's type system enforces face/body ownership, preventing orphaned geometry references
+Single-threaded simplicity—Bevy's event loop can integrate snapping queries without threading complexity
+The current OpenCAD limitation (lines drawn "in space behind" surfaces) happens because drawing operations don't query geometry—they use fixed-plane or depth-based heuristics. Adding parry3d ray-casting would replace that with surface-aware placement.
+Minimal Example: Ray-Cast + Snap
+```
+use parry3d::shape::{TriMesh, Cylinder};
+use parry3d::math::{Ray, Point};
+use nalgebra::Vector3;
+
+let cylinder = Cylinder::new(1.0, 2.0);  // radius, height
+let ray = Ray::new(
+    Point::new(0.0, 5.0, 0.0),  // From above
+    Vector3::new(0.0, -1.0, 0.0),  // Downward
+);
+
+if let Some((t, normal)) = cylinder.cast_ray_and_get_normal(&ray, true) {
+    let hit_point = ray.point_at(t);
+    println!("Hit cylinder at {:?}, normal: {:?}", hit_point, normal);
+}
+```
+This single query—adding surface detection to OpenCAD Studio—is entirely feasible with parry3d. The real work is integrating it into the drawing pipeline so every draw operation checks snap_point before committing geometry.
+Surface Detection Snapping RUST OCS.html
+Reactions are currently unavailable
+Activity
+github-actions commented on Oct 11, 2026
+github-actionsBot
+on Oct 11, 2026 – with GitHub Actions
+Contributor
+More actions
+Thank you for opening this issue.
+If you support OpenCADStudio on Patreon, send me either your GitHub username or this issue number in a Patreon message. After I verify your support, I will prioritize the issue.
+HakanSeven12 commented on Oct 14, 2026
+HakanSeven12
+on Oct 14, 2026
+Owner
+More actions
+Thanks. The ray-against-geometry part already exists. 3D object snap has NearestFace, FacePerpendicular, FaceCenter, Vertex, EdgeMidpoint and Knot; they cast the cursor ray against solids and meshes through the B-rep kernel, without a separate physics crate. The missing piece from your list is a dynamic UCS: hovering a face would temporarily align the drawing plane to it, so that 2D commands draw on that face. That stays open as the feature request.
+ketonik commented on Oct 14, 2026
+ketonik
+on Oct 14, 2026
+Author
+More actions
+These are some examples of use:
+https://www.youtube.com/shorts/h8Rhwlo58XU
+https://help.qonic.com/documentation/qonic-application/modeling/snapping
+https://www.youtube.com/shorts/SMELr8AIqYU
+Also a requirement is ray casting for navigation, the capability of the mouse pointer locking onto a geometry directly under it as the pivot point for orbiting. Currently OCS locks orbits around random points in space. From what I see it doesn't have any logic, not centre of viewport not on a face, vertex etc, If you can tie the navigational orbit into this that'd be essential for any activity in 3D space.
+Check out the main intro demonstration, Qonic can precisely orbit and navigate an entire city to to a 4cm sprinkler head in a building.
+https://help.qonic.com
+ketonik commented on Oct 15, 2026
+ketonik
+on Oct 15, 2026
+Author
+More actions
+Here's another few project examples, (beside Qonic) using surface detection methods of modelling (the modern way).
+https://hew3d.com SketchUP focus
+https://www.plasticity.xyz Modern 3D CAD, they way 3D it is meant to be.
+AutoCAD way, bolted on 3D really is a painful process, the projects above make the tasks enjoyable.
+HakanSeven12 commented on Oct 15, 2026
+HakanSeven12
+on Oct 15, 2026
+Owner
+More actions
+The dynamic UCS part is in (cccea40). With UCSDETECT on (the default; F6 toggles it), a command's first point on a planar face of a solid sets the UCS to that face for the rest of the command. Start CIRCLE, LINE, RECTANG, etc. on a face of a box and the geometry is drawn in that face's plane. The previous UCS comes back when the command ends. An unsnapped first point lands on the face itself; a snapped point that isn't on the face (e.g. an edge of another face) leaves the UCS alone. The ray-cast snaps you asked about (Nearest/Perpendicular to face, face centre, vertex…) were already there. What's not done is the hover highlight of the face before you click.
+HakanSeven12
+added a commit that references this issue on Oct 15, 2026
+ucs: dynamic UCS on planar solid faces
+...
+cccea40
+HakanSeven12
+closed this as completedon Oct 15, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

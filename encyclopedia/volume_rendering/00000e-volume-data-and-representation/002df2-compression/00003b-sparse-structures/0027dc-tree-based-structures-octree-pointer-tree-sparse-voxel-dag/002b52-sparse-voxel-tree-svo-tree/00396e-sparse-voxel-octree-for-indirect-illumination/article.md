@@ -1,0 +1,117 @@
+# Sparse Voxel Octree for Indirect Illumination
+Also called: Hierarchical Voxel Representation, SVOctree
+
+## Overview
+This method uses a pre-filtered dynamic sparse voxel octree (SVO) on the GPU to efficiently estimate visibility and integrate incoming indirect energy without involving the actual mesh geometry [S1]. It solves the problem of real-time indirect illumination in complex scenes by replacing dense mip-mapped volume grids, which suffer from resolution loss and temporal discontinuities, with a sparse, adaptive hierarchy [S1]. Unlike [KD10], which uses nested regular voxel grids and lacks precision, this approach uses sparse storage and ray tracing to maintain high precision and support specular indirect lighting [S1]. Unlike path-tracing or photon mapping, it always gives smooth results and does not suffer from noise or temporal discontinuities [S1].
+
+## How it works
+**Inputs:** Triangle meshes representing the scene geometry; light source positions and intensities; viewing and lighting configuration parameters.
+**Outputs:** Indirect illumination contribution per pixel or surface point.
+
+**Data Structures:**
+The core data structure is a dynamic sparse voxel octree stored on the GPU [S1].
+*   **Root Node:** Represents the entire scene bounding box.
+*   **Internal Nodes:** Each node represents an eighth of the parent's volume (a child octant).
+*   **Leaf Nodes:** Store filtered scene information. The specific fields are not detailed in the sources, but they contain energy intensity, direction, occlusion, and local normal distribution functions (NDFs) [S1].
+*   **Hierarchy:** The structure allows querying filtered scene information with increasing precision by descending the tree [S1].
+
+**Algorithm Steps:**
+1.  **Voxelization and Octree Building:** Convert triangle meshes into a voxel representation. Build the sparse voxel octree dynamically on the GPU, exploiting the rasterization pipeline for efficiency [S1]. This step handles fully dynamic scenes [S1].
+2.  **Pre-filtering:** Apply a filtering algorithm to the octree. This step aggregates energy and occupancy information, allowing abstraction of details farther away while maintaining precision near the observer [S1]. The sources mention a "real-time mesh voxelization and octree building and filtering algorithm" but do not provide the specific mathematical formulas for the filtering kernel or aggregation logic [S1].
+3.  **Light Integration (Cone Tracing):** Use an approximate voxel cone tracing technique to integrate incoming indirect energy splatted into the structure from light sources [S1]. This involves tracing cones through the octree to estimate visibility and accumulate energy [S1].
+4.  **Radiance Reconstruction:** The stored data (energy intensity and direction) can be convolved with a set of pre-defined BRDFs to reconstruct the radiance response [S1].
+
+**Parameters:**
+*   **Scene Resolution:** Chosen suitable to the viewing and lighting configuration to avoid light undersampling or geometric LOD issues [S1]. The exact resolution values are not specified in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Light Undersampling:** If the scene resolution is too low relative to the lighting configuration, light undersampling may occur [S1].
+*   **Geometric LOD Issues:** Insufficient resolution may lead to loss of geometric detail [S1].
+*   **Temporal Discontinuities:** Unlike [KD10], this method avoids temporal discontinuities due to its sparse storage and precision [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Note: The specific filtering and cone tracing algorithms are described conceptually in [S1]
+# but exact formulas and implementation details are not provided in the source text.
+# The following pseudocode represents the high-level workflow described.
+
+def build_svo(meshes):
+    """
+    Builds a dynamic sparse voxel octree from triangle meshes on the GPU.
+    Exploits the rasterization pipeline.
+    """
+    voxels = voxelize_meshes(meshes)
+    root = create_root_node()
+    build_octree_recursive(root, voxels)
+    return root
+
+def filter_svo(root):
+    """
+    Pre-filters the octree to aggregate energy and occupancy.
+    Specific filtering kernel not defined in sources [S1].
+    """
+    filter_node(root)
+
+def filter_node(node):
+    if node.is_leaf():
+        # Compute filtered energy, direction, occlusion, NDFs
+        # Details not provided in [S1]
+        pass
+    else:
+        for child in node.children:
+            filter_node(child)
+        # Aggregate children's data into parent
+        # Details not provided in [S1]
+        pass
+
+def trace_cone(root, origin, direction, cone_angle):
+    """
+    Approximate voxel cone tracing to estimate visibility and integrate energy.
+    Specific traversal and integration logic not provided in [S1].
+    """
+    accumulated_energy = 0
+    # Traverse octree based on cone intersection
+    # Details not provided in [S1]
+    return accumulated_energy
+
+def compute_indirect_illumination(svo, light_sources, brdf_lut):
+    """
+    Main entry point for indirect illumination.
+    """
+    # 1. Build and filter SVO (assumed done per frame for dynamic scenes)
+    svo = build_svo(scene_meshes)
+    filter_svo(svo)
+    
+    # 2. For each surface point or pixel
+    for point in surface_points:
+        indirect_light = 0
+        for light in light_sources:
+            # Trace cone from point towards light
+            energy = trace_cone(svo, point.position, light.direction, cone_angle)
+            # Convolve with BRDF
+            radiance = convolve_brdf(energy, point.normal, light.color, brdf_lut)
+            indirect_light += radiance
+        point.indirect_color = indirect_light
+```
+
+## Subtopics
+
+### [Sparse Octree Radiance Cache](16429-sparse-octree-radiance-cache.md)
+The Sparse Octree Radiance Cache is a CPU-built hierarchical data structure that replaces dense mip-mapped volume grids for storing aggregated radiance, albedo, alpha, and emission data. It solves the resolution loss inherent in uniform grids, where thin features (e.g., 3-voxel thick objects) are averaged into indistinct smears. Unlike its sibling [Sparse Voxel Octree for Indirect Illumination](8483-sparse-voxel-octree-for-indirect-illumination.md), which focuses on GPU-side geometry visibility, this method provides a sparse, DAG-deduplicated representation optimized for cone-integration semantics on the CPU.
+
+## Operating characteristics
+*   **Time Complexity:** The method achieves real-time frame rates even for highly detailed environments [S1]. The cost is described as "almost geometry-independent" [S1].
+*   **Memory Complexity:** Uses sparse storage, which is more memory-efficient than nested regular voxel grids [S1]. The resolution is limited by memory occupancy in similar approaches like [KD10], implying this method mitigates that constraint through sparsity [S1].
+*   **Measured Performance:** Reaches real-time frame rates for highly detailed environments [S1].
+*   **Strengths:** Always gives smooth results; no noise or temporal discontinuities; supports specular indirect lighting; handles fully dynamic scenes; high precision near the observer; abstracts energy farther away [S1].
+*   **Limitations:** Requires pre-filtering and cone tracing, which may have specific resolution constraints to avoid undersampling [S1].
+*   **When to Use:** Real-time indirect illumination in complex, dynamic scenes where smooth results and specular lighting are required [S1].
+*   **When Not to Use:** When absolute physical accuracy via path-tracing is needed, or when memory constraints prevent storing the SVO [S1].
+
+## Background
+The method was published in the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" [S1]. It derives from the need to produce real-time indirect illumination, building upon the concept of hierarchical voxel representations. It contrasts with earlier approaches like [KD10] which used diffusion processes in regular voxel grids [S1]. The approach relies on dynamic sparse voxel octrees [CNLE09, LK10] and approximate voxel cone tracing [S1].
+
+## Sources
+[S1] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26

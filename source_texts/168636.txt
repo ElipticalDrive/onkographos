@@ -1,0 +1,128 @@
+Polyhedral cells (general convex or non-convex 3D cells with arbitrary face and vertex counts) appear throughout large-scale simulation, particularly in CFD. Some solvers produce them as the dual of a tetrahedral mesh; others use them as transition cells across refinement boundaries; still others build directly on face-based polyhedral connectivity as the native primitive. Several commercial and open source CFD codes have invested in face-based arbitrary polyhedral cells as a first-class primitive, and that investment runs all the way through the pre- and post-processing pipeline because handling polyhedra well at every stage is non-trivial.
+
+Polyhedron Processing Improvements in VTK
+Skip Navigation
+Home
+News
+Blog
+post
+Polyhedron Processing Improvements in VTK
+June 4, 2026
+Jeff Lee and Spiros Tsalikis
+Polyhedral cells (general convex or non-convex 3D cells with arbitrary face and vertex counts) appear throughout large-scale simulation, particularly in CFD. Some solvers produce them as the dual of a tetrahedral mesh; others use them as transition cells across refinement boundaries; still others build directly on face-based polyhedral connectivity as the native primitive. Several commercial and open source CFD codes have invested in face-based arbitrary polyhedral cells as a first-class primitive, and that investment runs all the way through the pre- and post-processing pipeline because handling polyhedra well at every stage is non-trivial.
+VTK has supported polyhedral cells for a long time, but the high-throughput threaded filters that most visualization workflows rely on (contour, plane cut, clip, surface extraction) all fell back to slow serial implementations whenever a polyhedron was encountered. The result was a sharp performance cliff at the boundary between standard cell types and polyhedra, and a corresponding drag on interactive analysis of polyhedral meshes.
+This post describes the work that closes that gap. Across the polyhedron primitive itself and four threaded filters, polyhedral cells in VTK now perform on par with implicit cell types for the most common post-processing operations.
+The Problem
+VTK’s fast threaded filters (vtkContour3DLinearGrid, vtk3DLinearGridPlaneCutter, vtkTableBasedClipDataSet, vtkGeometryFilter) all rely on precomputed case tables: fixed-topology lookup tables that encode exactly how each standard cell type (hexahedron, voxel, tetrahedron, wedge, pyramid) intersects a plane or isosurface. These tables make the filters fast on the implicit cell types, but they fundamentally cannot represent a cell whose face count and vertex count are unknown at compile time. Whenever a polyhedron appeared, the filters silently fell back to older serial implementations: vtkContourGrid, vtkCutter, vtkClipDataSet, and the serial geometry-extraction path.
+The serial fallbacks were not just unthreaded. They were also algorithmically expensive on a per-cell basis (multi-pass triangulate-merge-rebuild patterns), and on non-manifold or degenerate input, they emitted warning streams that serialized on a mutex and dominated wall-clock time. The combination meant polyhedral meshes routinely cost users 100x or more in interactive post-processing.
+Foundations: Making the Polyhedron Primitive Fast
+The starting point is vtkPolyhedron itself. Three primitive operations needed deterministic, single-pass implementations before any downstream filter integration could pay off.
+IsInside via solid angles. The previous implementation cast random rays and counted face intersections, with up to ten retries when a ray happened to graze an edge or vertex. The rewrite uses the Van Oosterom-Strackee solid-angle formula [1], summing oriented solid angles over the polyhedron’s faces in a single deterministic pass. No randomness, no retries, no edge cases.
+GetCentroid via the divergence theorem. The previous decomposition split the polyhedron into pyramids around an interior point, then summed the centroids weighted by pyramid volumes. Several pieces could go wrong: interior-point choice, sliver pyramids, and sign handling. The rewrite applies the divergence theorem on fan-triangulated faces, computing cell volume and weighted centroid in one pass over the face stream.
+Contour and clip via López polygon tracing. Both operations now share a common core, an O(E) algorithm by López et al. [2] (where E is the total number of face edges in the cell) that traces isosurface polygons in a single pass over the face-edge connectivity. The algorithm classifies vertices as inside or outside, finds the edges that cross the surface, assigns a “key face” to each iso-vertex (the face on which the edge transitions from outside to inside), and then traces a closed polygon by walking from key face to key face. Because each iso-vertex has exactly one key face, the trace is a deterministic linear chain that terminates when it returns to the starting vertex. This is dramatically simpler than the previous triangulate-merge-rebuild approach, which was O(F·k²) (F faces times the square of vertices per face) and required multiple passes containing intermediate state that prevented parallelization across cells.
+Face winding as a contract. López tracing requires that polyhedron faces have outward-pointing normals (vertices ordered counter-clockwise viewed from outside). The sign of the solid-angle winding number used in IsInside, and the key-face assignment in the trace, both depend on consistent winding. This is the same kind of structural invariant that implicit cell types like vtkHexahedron and vtkTetra have always relied on, where vertex ordering is fixed by the cell’s parametric coordinate definition; without that invariant, none of the standard cell operations would work either. Polyhedral cells should be held to the same standard. Until this work, VTK did not enforce outward-pointing face windings for polyhedra, and several sources (vtkCellTypeSource, vtkExodusIIReader, vtkMappedUnstructuredGridGenerator) emitted faces wound inward. These have been corrected, and outward face windings are now treated as a precondition for all vtkPolyhedron algorithms.
+Integration into VTK’s Threaded Filters
+With the primitives in good shape, polyhedra could be integrated into VTK’s high-throughput, parallel filters. All four integrations share the same core pattern: a stateless bulk API on vtkPolyhedronContour (ContourCell, CountClip, EmitClip) that operates on raw scalar values and face streams without instantiating vtkPolyhedron objects. Calling code runs a parallel Count pass to size each cell’s contribution to the output, performs a prefix sum to compute per-cell write offsets, then runs a parallel Emit pass to fill pre-allocated output buffers. No locks, no dynamic allocation in the hot path. This count/prefix-sum/emit methodology appears throughout VTK’s high-performance filters and is the fundamental reason polyhedra can now participate in the threaded infrastructure.
+vtkContour3DLinearGrid. Will Schroeder originally developed vtkContour3DLinearGrid as part of Kitware’s ongoing effort to bring threaded, high-performance implementations to VTK’s visualization filters.
+One limitation of the original filter was that it could only generate contours with triangles. Since polyhedra naturally generate polygons, the algorithm was augmented to support polygon contour generation. This was done by parsing the triangular MarchingCubes tables and using vtkPolygonBuilder to derive new MarchingCubes tables that emit polygons instead. The algorithm was extended to use these new tables and to handle cell arrays with arbitrary cell size, while preserving the fast triangle path when triangle generation is requested. This work led to the new GenerateTriangles flag, off by default.
+vtkContour3DLinearGrid was also extended to produce deterministic output with respect to cell order. The thread-local vector of isovertices that stored each cell’s result was replaced with a batch-driven approach (similar to vtkTableBasedClipDataSet), where isovertices are stored in batches of input cells. Output cell order now adheres to input cell order.
+Finally, whenever vtkContour3DLinearGrid processes a polyhedron cell, instead of accessing the MarchingCubes tables, it calls vtkPolyhedronContour::ContourCell, which computes the number of output cells, the size of each output cell (used for polygon generation), and the isovertices.
+vtk3DLinearGridPlaneCutter. Will Schroeder also developed vtk3DLinearGridPlaneCutter as part of the same effort. Plane cutting (slicing in the ParaView world) reduces to contouring: evaluate the plane’s implicit function at every input point to produce a signed-distance scalar field, then extract the zero isosurface. The internals of vtk3DLinearGridPlaneCutter were therefore removed and replaced with a call to vtkContour3DLinearGrid driven by that scalar field, which implicitly added polyhedron plane-cutting support throughout VTK and ParaView.
+vtkTableBasedClipDataSet. vtkTableBasedClipDataSet originated at Lawrence Livermore National Laboratory as part of the VisIt project and was subsequently integrated into VTK. In 2024, Spiros Tsalikis completed a revamp of its implementation using a batch-driven approach that enables multithreaded processing. The first pass counts the size of the output for each batch and as a whole and performs a prefix sum that identifies where each output cell will be written; the second pass uses those locations and writes the output.
+Similarly to the contouring algorithm, whenever vtkTableBasedClipDataSet processes a polyhedron cell, instead of accessing the clip tables, in the first pass it calls vtkPolyhedronContour::CountClip, which counts the number of output cells and faces, the number of connectivity entries, and the isovertices; in the second pass it calls vtkPolyhedronContour::EmitClip, which creates the output clipped cells and faces.
+vtkGeometryFilter. Surface extraction on polyhedra previously instantiated vtkPolyhedron objects per cell and walked their faces through the generic cell API. The integration (VTK commit b730608) replaces this with direct face-stream emission inside the existing threaded geometry-extraction kernel [3], leveraging the same face-based data model that the contour and clip algorithms use. The result is a roughly 6x speedup on polyhedral meshes, bringing surface extraction into line with the other operations.
+Performance
+To assess the performance impact of these improvements, we use a synthetic polyhedral mesh that can be constructed entirely from VTK sources. This keeps the benchmark reproducible: anyone with a VTK or ParaView build can recreate the same input data and run the same filters.
+The mesh is generated by vtkCellTypeSource with the cell type set to VTK_POLYHEDRON, producing a regular grid of all-polyhedra cells at a user-specified resolution. In ParaView, this source is available as the Unstructured Cell Types source in the Sources menu, with Cell Type set to Polyhedron and Blocks Dimensions set to the desired grid dimension D in each direction (so a D=100 mesh has 100³ = 1M cells). The point-data scalar used for contouring is the wavelet field of vtkRTAnalyticSource, evaluated analytically on the polyhedral mesh’s points to produce a smooth, oscillating field with rich isosurface structure. Isovalue for contour is the field midrange; clip plane is y = D/2, which slices the domain in half.
+Two configurations are run for each grid resolution: the released ParaView 6.1.0 binary (pvpython) as the baseline, and a build of VTK master with this work integrated. Both are run on the same 8-core Linux workstation. Each reported number is the arithmetic mean of 5 consecutive Update() calls on the same filter instance after a warmup Update(), measured with time.perf_counter() around the Update() call.
+Filter wall-times: baseline vs current (mean of 5 reps, 8-core Linux)
+GridNum CellsContour GT=ONContour GT=OFFClip y=mid
+100³1.0 M1,477 → 18 ms
+(~82x)1,800 → 16 ms
+(~113x)563 → 39 ms
+(~14x)
+200³8.0 M6,447 → 90 ms
+(~72x)7,874 → 76 ms
+(~104x)4,409 → 309 ms
+(~14x)
+300³27.0 M15,087 → 230 ms
+(~66x)18,797 → 200 ms
+(~94x)15,939 → 1,077 ms
+(~15x)
+400³64.0 M28,492 → 463 ms
+(~62x)35,506 → 435 ms
+(~82x)35,645 → 2,656 ms
+(~13x)
+500³125.0 M47,909 → 761 ms
+(~63x)61,541 → 720 ms
+(~85x)OOM → 5,180 ms
+(∞x)
+Speedups are stable across two orders of magnitude in mesh size: roughly 60-80x for triangulated contour, 80-110x for polygon contour, 13-15x for clip. The baseline Clip filter ran out of memory at 125M cells and never completed; the new code finishes in 5 seconds.
+The input mesh grows as O(D³) while contour output (an iso-surface) grows as O(D²) and clip output (a volumetric subset) grows as O(D³):
+Input mesh and output sizes for contour and clip
+GridInput num cellsContour output num cellsClip output cells
+100³1.0 M167 K500 K
+200³8.0 M673 K4.0 M
+300³27.0 M1.52 M13.5 M
+400³64.0 M2.69 M32.0 M
+500³125.0 M4.21 M62.5 M
+From 100³ to 500³, input cells grow 125x. Contour output cells grow 25x (matching the O(D²) prediction: 5² = 25). Clip output cells grow 125x (matching the O(D³) prediction). The contour timing growth (~42x) sits between the two, reflecting that contour cost has both an input-bounded scan component and an output-bounded emit component. Clip timing grows nearly proportionally to its output, as expected.
+A few additional observations:
+GenerateTriangles=OFF is now faster than GenerateTriangles=ON. The polygon path produces 40% fewer connectivity IDs (one polygon per cell-intersection instead of fanned triangles), and the previous vtkOrientPolyData BFS orientation pass that GT=OFF required has been removed. In the baseline, the ordering is the other way around: GT=OFF is 1.4-1.7x slower than GT=ON.
+Contour scales sublinearly. Contour timing growth (~42x from 100³ to 500³) sits between input growth (125x) and contour-output growth (25x), confirming the prediction above.
+Clip scales close to linearly. Clip output is a volumetric fraction of the input mesh, so the cost scales with the input volume.
+Normals are cheap. With ComputeNormals=ON, the overhead vs ComputeNormals=OFF is +10ms (GT=ON) and ~0ms (GT=OFF) at all scales. The remaining cost is just cell-normal computation and point-normal averaging at merged vertices.
+Threading crossover
+For very small meshes, parallel infrastructure overhead exceeds the work saved. The crossover is approximately 1,000 cells (a 10×10×10 block) for all four filters. Below this, the new implementations are within 20-30% of the serial fallback in absolute time (sub-millisecond), well within interactive response range.
+What’s Next
+These changes have landed in VTK master and will be available in an upcoming release. The per-cell overhead of VTK_POLYHEDRON is now low enough that polyhedral cells are nearly on par with implicit cell types for the most common post-processing operations.
+Two natural follow-ons are on the horizon:
+Voronoi meshes. Scalable, high-performance Voronoi mesh generation is in progress for VTK. Voronoi cells are inherently convex polyhedron, often with high face counts. Cells can also be represented compactly by a generator point, along with neighboring points that produce the cell’s face neighbors (i.e., faces and edges are implicit). And finally, due to the dual Delaunay property, it is relatively easy to transform Voronoi meshes into tetrahedral meshes. The work described here provides the necessary framework through which to efficiently process Voronoi meshes, meaning that VTK will soon support complete, high-performance workflows that encompass mesh generation through visualization.
+GPU acceleration via Viskores. The data layout (vtkCellArray offsets and connectivity arrays) is already compatible with GPU memory models. The remaining work is primarily introducing a two-level indirection topology type in CellSetExplicit and implementing GPU-friendly point deduplication.
+Historically, end-to-end support for face-based arbitrary polyhedral cells has lived primarily in a handful of commercial CFD codes. With this work, VTK joins the set of tools that can handle polyhedral meshes through the full pre/solve/post pipeline at interactive rates, alongside the threading, GPU, and Voronoi work still ahead.
+To discuss how these VTK polyhedron processing improvements could support your visualization or HPC workflow, contact Kitware’s Scientific Computing Team. Our team works with organizations developing large-scale CFD workflows, in situ analysis pipelines, and high-performance post-processing environments to evaluate integration strategies, performance considerations, and scalable open source solutions built around VTK, ParaView, and Catalyst.
+References
+[1] A. Van Oosterom, J. Strackee, “The Solid Angle of a Plane Triangle,” IEEE Transactions on Biomedical Engineering, BME-30(2):125-126, 1983. https://doi.org/10.1109/TBME.1983.325207
+[2] E. López, J. Barreda, L. Boucheron, R. Castilla, J. Cruz, “A new isosurface extraction method on arbitrary grids,” Journal of Computational Physics, 444:110579, 2021. https://doi.org/10.1016/j.jcp.2021.110579
+[3] S. Tsalikis, W. Schroeder, D. Szafir and K. Moreland, “Memory-Aware External Facelist Calculation: A Data-Parallel Atomic Hash Counting Approach,” in IEEE Transactions on Visualization and Computer Graphics, doi: 10.1109/TVCG.2026.3694435.
+[4] S. Tsalikis, W. Schroeder, D. Szafir and K. Moreland, “An Accelerated Clip Algorithm for Unstructured Meshes: A Batch-Driven Approach,” in The 24th Eurographics Symposium on Parallel Graphics and Visualization, doi: 10.2312/pgv.20241130.
+Jeff Lee is a Technical Lead on Kitware’s Scientific Computing Team, focused on Catalyst and in-situ analysis for large-scale HPC simulations. Spiros Tsalikis is a Senior R&D Engineer on Kitware’s Scientific Computing Team. He is responsible for substantial contributions to this work, including the 2024 multithreaded revamp of vtkTableBasedClipDataSet [4], the surface extraction integration in vtkGeometryFilter, and review across the rest.
+Tags:
+3DCFDGPUParaViewVTK
+8 comments to Polyhedron Processing Improvements in VTK
+Great contribution from kitware for the scientific computing community.
+Reply
+Nice job!
+Reply
+What about the following problem, that comes up with the current implementation:
+vtkPolyhedron.cxx:2025 WARN| A cell with a non-manifold triangulation has been encountered. This cell cannot be contoured.
+Will this be gone with the new implementation?
+Reply
+You will no longer see this error message, as we no longer require cell face triangulation in the contour algorithm.
+Reply
+Hi Jeff,
+That works really well. Thank you very much.
+Now I have two more wishes on my list. We usually import our results from an EnsightGold dataset.
+The first suggestion would be an option to automatically convert all primitive cells back to their original type, even if they’re stored as polyhedra, or simply to process each cell internally in the most efficient way, regardless of whether they’re stored as polyhedra, hexahedra, etc.
+The second wish would be an option to automatically partition such a case for parallel post-processing, allowing the user to specify the number of partitions as desired.
+It’s likely that more users would benefit if you provided these features directly rather than if we wrote our own plugin for them.
+Reply
+Thanks Jörn,
+EnSight element types map straight through: hexa8 becomes a VTK hexahedron, and only nfaced becomes a polyhedron. So if you are seeing polyhedra for cells that are really hexes, your export is writing everything as nfaced. Do you know whether the code producing the case can be configured to write native element types instead? Or if you tell us which one it is, we can look into it. Reconstruction of the native types is something we could add but currently we have filters that go the other way like vtkConvertToPolyhedra, or vtkPolyhedronUtilities::Decompose which converts to tets.
+On partitioning: does a case fit in the memory of a single node? The vtkEnSightGoldCombinedReader assigns a whole case file to a rank, so a single case file is read entirely on one rank today. If it fits on one machine, vtkRedistributeDataSetFilter with a chosen number of partitions gets you the rest of the way now. If it does not, the reader itself needs to split the read, and that is the harder problem we would need to work on.
+Reply
+Hi Jeff,
+Our export currently still treats all cells as nfaced, which is the simplest approach for a CFD code that doesn’t internally distinguish between cell types. In the future, we plan to completely overhaul the data export. At that point, we’ll also export the hex8 … as such in this step.
+The problem we encountered in the meantime occurred with a mesh containing 190 million cells, which could not be loaded on one of our partners’ systems with 64 GB of RAM. Paraview required about 100 GB of RAM for this. After I split the polyhedra on my computer and re-exported the file, the memory requirement dropped to 56 GB. That’s why I think it would be a good idea to automatically test all n-faced cells during import to determine the best way to handle them internally.
+I also imported the case directly into EnSight, and it actually required even less RAM there 🙂
+That brings me right to the next point: automatic parallelization.
+For the subsequent volume rendering, PV took about 1 hour per time step. EnSight, with its automatic parallelization—and perhaps for other reasons as well—took me 4 minutes per time step.
+So we’re currently considering how to design the data export so that PV can also run in parallel—without having to specify the number of partitions during the export process.
+After a few hours of discussion with the AI about reader modules, on-the-fly parallelization, and more , even ChatGPT was convinced that this step should be built directly into the program.
+Reply
+I could test this improvement on ParaView6.2, that works well! A clip on hundreds of polyhedra now works whereas it could crash on an earlier version (6.0.1).
+It seems not compatible with the “Apply changes to parameters automatically” button though, am I wrong?
+If the “Apply changes to parameters automatically” button is enabled, if I clip a mesh composed of hundreds of polyhedra and I rotate the clip plane, I will need to apply manually the changes, am I wrong?
+At least I face no crash anymore 🙂
+Reply
+Leave a ReplyCancel reply

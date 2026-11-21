@@ -1,0 +1,163 @@
+# Depth Consistency Loss
+
+
+## Overview
+Depth Consistency Loss (LDC) is a regularization term used in differentiable volume rendering and implicit surface reconstruction to enforce geometric accuracy by aligning the zero level set of the signed distance field (SDF) with ground truth depth observations [S1]. Unlike volume rendering depth losses that constrain all samples along a ray, LDC specifically targets surface points, ensuring that the projected depth of points lying on the reconstructed surface matches the observed depth map [S1]. It is distinct from sibling methods like Monocular Depth Consistency Loss and Optimal Transport Loss by its exclusive focus on the zero-level set constraint via binary masking of invalid projections [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   $s$: A set of surface points $p'_j$ located on the zero level set of the implicit field.
+    *   $D^{GT}_k$: Ground truth depth map for view $k$.
+    *   $K_k, T_k$: Intrinsic matrix and pose (extrinsic matrix) for view $k$.
+    *   $w_j$: Binary mask weights for each point.
+*   **Outputs:**
+    *   $L_{DC}$: Scalar loss value.
+
+**Data Structures**
+*   Points $p'_j$ are typically 3D coordinates $(x, y, z)$.
+*   Depth maps $D^{GT}_k$ are 2D arrays of float values.
+
+**Parameters**
+*   $\epsilon_{max}$: Maximum allowable depth discrepancy threshold. The sources specify a value of $15$ mm [S1].
+*   Interpolation method: Bilinear interpolation is used to sample depth values from the ground truth map [S1].
+
+**Steps**
+1.  For each surface point $p'_j \in s$:
+    a. Project $p'_j$ into the camera coordinate system of view $k$ using the pose $T_k$ and intrinsic matrix $K_k$.
+    b. Compute the projected depth $Z_k(p'_j)$, which is the $z$-coordinate of the point in the camera frame (or the depth along the viewing ray) [S1].
+    c. Map the projected 2D coordinates to the pixel grid of the depth map $D^{GT}_k$.
+    d. Retrieve the ground truth depth $D^{GT}_k(p'_j)$ by bilinearly interpolating the depth map at the projected 2D coordinates [S1].
+    e. Determine the mask weight $w_j$:
+        i. If the projection is outside the image boundaries, set $w_j = 0$.
+        ii. If the absolute difference $|D^{GT}_k(p'_j) - Z_k(p'_j)| > 15$ mm, set $w_j = 0$ (indicating potential invisibility or occlusion) [S1].
+        iii. Otherwise, set $w_j = 1$.
+2.  Compute the squared error for valid points and sum them weighted by $w_j$:
+    $$ L_{DC} = \sum_{p'_j \in s} w_j \times (D^{GT}_k(p'_j) - Z_k(p'_j))^2 $$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def depth_consistency_loss(surface_points, gt_depth_map, intrinsic_matrix, pose_matrix, max_depth_diff_mm=15.0):
+    """
+    Computes the Depth Consistency Loss (LDC).
+    
+    Args:
+        surface_points: Array of shape (N, 3) containing 3D coordinates of points on the zero level set.
+        gt_depth_map: 2D array of shape (H, W) containing ground truth depth values.
+        intrinsic_matrix: 3x3 numpy array K.
+        pose_matrix: 4x4 numpy array T (world-to-camera).
+        max_depth_diff_mm: Threshold in millimeters for masking invalid points.
+        
+    Returns:
+        Scalar loss value.
+    """
+    # Convert max depth diff to meters assuming depth map units are meters
+    # Note: Source [S1] specifies 15mm. Implementation should match unit conventions.
+    max_diff = max_depth_diff_mm / 1000.0 
+    
+    loss = 0.0
+    count = 0
+    
+    # Transform points to camera coordinates
+    # p_cam = K * T * p_world is incorrect. 
+    # Correct: p_cam = T * p_world (extrinsic), then project with K.
+    # Assuming surface_points are in world coordinates.
+    
+    # Homogeneous coordinates
+    ones = np.ones((surface_points.shape[0], 1))
+    points_homogeneous = np.hstack([surface_points, ones])
+    
+    # Apply pose (world to camera)
+    points_cam_homogeneous = pose_matrix @ points_homogeneous.T
+    points_cam = points_cam_homogeneous[:3, :].T
+    
+    # Extract Z depth (assuming Z is forward direction)
+    z_cam = points_cam[:, 2]
+    
+    # Project to 2D pixel coordinates
+    # uv = K @ p_cam
+    uv_homogeneous = intrinsic_matrix @ points_cam.T
+    u = uv_homogeneous[0, :] / uv_homogeneous[2, :]
+    v = uv_homogeneous[1, :] / uv_homogeneous[2, :]
+    
+    # Check bounds and interpolate depth
+    h, w = gt_depth_map.shape
+    
+    for i in range(surface_points.shape[0]):
+        u_val = u[i]
+        v_val = v[i]
+        z_val = z_cam[i]
+        
+        # Check if projection is within image bounds
+        if u_val < 0 or u_val >= w - 1 or v_val < 0 or v_val >= h - 1:
+            continue
+            
+        # Bilinear interpolation of ground truth depth
+        # Floor coordinates
+        u0 = int(np.floor(u_val))
+        v0 = int(np.floor(v_val))
+        u1 = u0 + 1
+        v1 = v0 + 1
+        
+        # Clip to valid indices
+        u0 = max(0, min(u0, w - 2))
+        u1 = max(0, min(u1, w - 2))
+        v0 = max(0, min(v0, h - 2))
+        v1 = max(0, min(v1, h - 2))
+        
+        # Get depth values at corners
+        d00 = gt_depth_map[v0, u0]
+        d01 = gt_depth_map[v0, u1]
+        d10 = gt_depth_map[v1, u0]
+        d11 = gt_depth_map[v1, u1]
+        
+        # Interpolate
+        du = u_val - u0
+        dv = v_val - v0
+        
+        d_gt = (1 - du) * (1 - dv) * d00 + du * (1 - dv) * d01 + \
+               (1 - du) * dv * d10 + du * dv * d11
+               
+        # Calculate difference
+        diff = abs(d_gt - z_val)
+        
+        # Masking: rule out if diff > 15mm
+        if diff > max_diff:
+            continue
+            
+        # Add to loss
+        loss += (d_gt - z_val) ** 2
+        count += 1
+        
+    # Return mean or sum? Source formula is a sum. 
+    # Usually losses are averaged, but we follow the source formula strictly.
+    # Source: LDC = sum(...)
+    return loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Occlusion/Invisibility:** Points on the surface in one view may be occluded in another. The mask $w_j$ handles this by discarding points where the depth difference exceeds 15 mm, preventing the loss from pulling the surface towards incorrect depth values caused by occlusion [S1].
+*   **Precision:** Bilinear interpolation is used for depth sampling. Ensure coordinate systems (world vs. camera) and units (meters vs. millimeters) are consistent between the SDF points and the depth map [S1].
+*   **Zero Level Set Dependency:** LDC only constrains points exactly on the zero level set. If the surface representation is not well-defined or the points are not accurately on the zero level, the loss may be ineffective [S1].
+
+## Subtopics
+
+### Vox-Surf Depth Loss
+A variant of depth supervision that constrains Signed Distance Field (SDF) values along rays based on observed depth $t$, handling points outside, near, and inside the surface differently to improve accuracy [S2]. It defines a "near range" loss $L_{near}$ where points within $t \pm \delta t$ are constrained to have an SDF value of 0 [S2]. For points behind the observed depth ($t > \hat{t} + \delta t$), it assumes the point is inside the surface and applies an outside loss component [S2]. The near loss is calculated as $L_{near} = \sum_k F_\sigma(\Gamma(r(t)))^2_{[0]}$, where $F_\sigma$ is the geometry extractor network, $\Gamma(r(t))$ is the voxel embedding, and $[0]$ denotes the SDF output channel [S2]. The parameter $\delta t$ controls the width of the near range and depends on the confidence of the depth observation [S2]. This method works well even if rays intersect multiple surfaces, provided sufficient observation data exists [S2].
+
+## Operating characteristics
+*   **Complexity:** Time complexity is linear with respect to the number of surface points $|s|$ and the number of views. Memory complexity is dominated by storing the surface points and the ground truth depth maps.
+*   **Performance:** Effective for refining surface geometry in implicit volume rendering. It is computationally cheaper than volumetric depth losses because it only evaluates points on the surface rather than all samples along rays [S1].
+*   **Strengths:** Directly enforces geometric consistency with sensor data; robust to occlusions via masking [S1].
+*   **Limitations:** Relies on accurate identification of surface points (zero level set); sensitive to the quality of ground truth depth maps; the 15mm threshold is a fixed hyperparameter that may not suit all scales [S1].
+*   **When to use:** When high-fidelity surface reconstruction is required and ground truth depth maps are available.
+*   **When not to use:** When depth maps are noisy or unavailable, or when the surface representation is not explicitly defined as a zero level set.
+
+## Background
+Depth Consistency Loss was introduced in the context of sensing surface patches in volume rendering to infer Signed Distance Functions (SDFs) [S1]. It addresses the limitation of standard volume rendering losses (like LDR) that integrate over all ray samples, by focusing specifically on the geometric accuracy of the surface boundary [S1]. The method leverages ground truth depth maps and camera poses to project surface points and enforce consistency, a technique commonly used in multi-view stereo and implicit surface reconstruction pipelines [S1].
+
+## Sources
+[S1] Sensing Surface Patches in Volume Rendering for Inferring Signed Distance Functions, https://doi.org/10.1609/aaai.v39i4.32426, fetched 2026-10-26
+[S2] Vox-Surf: Voxel-Based Implicit Surface Representation, https://doi.org/10.1109/tvcg.2022.3225844, fetched 2026-10-26

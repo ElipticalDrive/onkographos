@@ -1,0 +1,135 @@
+--- v002.md
++++ v003.md
+@@ -36,84 +36,80 @@
+ **Pseudocode:**
+ ```python
+-def compute_block_bounds(volume_data, block_size):
+-    """Compute min and max values for each block."""
++def compute_block_bounds(volume, block_size):
+     bounds = []
+-    nx, ny, nz = len(volume_data[0][0]), len(volume_data[0]), len(volume_data)
++    nx, ny, nz = len(volume[0][0]), len(volume[0]), len(volume)
+     for z in range(0, nz, block_size):
+         for y in range(0, ny, block_size):
+             for x in range(0, nx, block_size):
+-                vals = []
++                min_v, max_v = float('inf'), float('-inf')
+                 for dz in range(block_size):
+                     for dy in range(block_size):
+                         for dx in range(block_size):
+                             if z+dz < nz and y+dy < ny and x+dx < nx:
+-                                vals.append(volume_data[z+dz][y+dy][x+dx])
+-                bounds.append((min(vals), max(vals)))
++                                v = volume[z+dz][y+dy][x+dx]
++                                if v < min_v: min_v = v
++                                if v > max_v: max_v = v
++                bounds.append((min_v, max_v))
+     return bounds
+ 
+-def cull_blocks(block_bounds, isovalue):
+-    """Return True for blocks containing the isovalue."""
+-    return [min_v <= isovalue <= max_v for min_v, max_v in block_bounds]
++def cull_blocks(bounds, isovalue):
++    return [i for i, (min_v, max_v) in enumerate(bounds) if min_v <= isovalue <= max_v]
+ 
+-def render_min_max_culling(volume_data, block_size, isovalue, res_x, res_y):
+-    """Main rendering loop using Min-Max Block Culling."""
+-    block_bounds = compute_block_bounds(volume_data, block_size)
+-    active_flags = cull_blocks(block_bounds, isovalue)
+-    
++def render_min_max_culling(volume, block_size, isovalue, res_x, res_y):
++    bounds = compute_block_bounds(volume, block_size)
++    active_indices = cull_blocks(bounds, isovalue)
+     image = [[0.0, 0.0, 0.0] for _ in range(res_y)]
+     
+-    for i, is_active in enumerate(active_flags):
+-        if not is_active:
+-            continue
+-        # Rasterize active block faces to determine covered pixels
+-        for py in range(res_y):
+-            for px in range(res_x):
+-                # Compute ray origin at front face of block
+-                origin = [px / res_x, py / res_y, 0.0]
+-                direction = [0.0, 0.0, 1.0]
+-                
+-                current_pos = origin
+-                accumulated_opacity = 0.0
+-                full_opacity_reached = False
+-                
+-                # Ray march until back face (z=1.0) or full opacity
+-                step_size = 0.01
+-                while current_pos[2] < 1.0 and not full_opacity_reached:
+-                    # Sample volume
+-                    vx = int(current_pos[0] * len(volume_data[0][0]))
+-                    vy = int(current_pos[1] * len(volume_data[0]))
+-                    vz = int(current_pos[2] * len(volume_data))
+-                    sample_val = volume_data[vz][vy][vx]
++    # Rasterize active blocks to generate coverage mask
++    coverage = [[False] * res_x for _ in range(res_y)]
++    for idx in active_indices:
++        # Determine block screen bounds (simplified projection)
++        bx = (idx % (len(volume[0][0]) // block_size)) * block_size
++        by = ((idx // (len(volume[0][0]) // block_size)) % (len(volume[0]) // block_size)) * block_size
++        bz = (idx // ((len(volume[0][0]) // block_size) * (len(volume[0]) // block_size))) * block_size
++        # Project block to screen coordinates
++        min_px, max_px = int(bx / len(volume[0][0]) * res_x), int((bx + block_size) / len(volume[0][0]) * res_x)
++        min_py, max_py = int(by / len(volume[0]) * res_y), int((by + block_size) / len(volume[0]) * res_y)
++        for py in range(min_py, max_py):
++            for px in range(min_px, max_px):
++                if 0 <= py < res_y and 0 <= px < res_x:
++                    coverage[py][px] = True
+                     
+-                    # Transfer function: alpha = 1 if sample matches isovalue, else 0
+-                    alpha = 1.0 if sample_val == isovalue else 0.0
+-                    
+-                    # Front-to-back compositing
+-                    accumulated_opacity += alpha * (1.0 - accumulated_opacity)
+-                    if accumulated_opacity >= 1.0:
+-                        full_opacity_reached = True
+-                    
+-                    current_pos[2] += step_size
+-                
+-                if full_opacity_reached:
+-                    image[py][px] = [1.0, 1.0, 1.0]
++    for py in range(res_y):
++        for px in range(res_x):
++            if not coverage[py][px]:
++                continue
++            # Start ray at front face (z=0)
++            current_z = 0.0
++            opacity = 0.0
++            step = 1.0 / res_y
++            # Terminate when back face (z=1.0) or full opacity reached
++            while current_z < 1.0 and opacity < 1.0:
++                vz = int(current_z * len(volume))
++                if vz < len(volume):
++                    sample = volume[vz][int(py)][int(px)]
++                    alpha = 1.0 if sample == isovalue else 0.0
++                    opacity += alpha * (1.0 - opacity)
++                current_z += step
++            if opacity >= 1.0:
++                image[py][px] = [1.0, 1.0, 1.0]
+     return image
+ ```
+ 
+ **Parameters:**
+-*   **Block Size:** Not given in the sources. Typical values in volume rendering are powers of 2 (e.g., $8^3$, $16^3$) [G].
++*   **Block Size:** Not given in the sources [G].
+ *   **Isovalue/Transfer Function:** Depends on the dataset [S1, S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Incomplete Skipping:** This method does not skip all empty space. Gaps between cullable bricks or empty regions within brick interiors may still be sampled [S1, S2, unofficial].
++*   **Incomplete Skipping:** This method does not skip all empty space, only the empty blocks culled during the rasterization setup phase [S1, unofficial].
+ *   **Viewpoint Inside Volume:** If the camera is inside the volume, near clipping planes must be used to fill holes in the ray coverage [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [G].
+ *   **Memory Complexity:** Requires storage for min-max values for each block, $O(B)$ [G].
+ *   **Strengths:** Reduces sample count by skipping entire blocks that are transparent [S1, S2, unofficial]. Simple to implement as it relies on standard rasterization [S1, S2, unofficial].
+ *   **Limitations:** Does not skip all empty space; internal block emptiness is not exploited [S1, S2, unofficial].
+ *   **When to Use:** When the volume has large transparent regions that can be grouped into blocks [S1, S2, unofficial].
+-*   **When Not to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources [G].
+ 
+ ## Background

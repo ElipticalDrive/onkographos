@@ -1,0 +1,171 @@
+# Hybrid Rendering for Stress Tensor Fields
+
+Also called: Focus and context visualization
+
+## Overview
+Hybrid Rendering for Stress Tensor Fields is a visualization technique that decouples the display of global context from local detail in stress tensor datasets by combining volume rendering with explicit geometric representations (glyphs and tensorlines) [S1, book]. It solves the problem of visual clutter and occlusion in dense tensor fields by allowing users to interactively select specific features via diagram views, which generates a mask to render those features as high-fidelity geometry while the remaining data is shown as a lower-opacity volume [S1, book]. Unlike pure volume rendering, which obscures internal structures, or pure glyph rendering, which lacks spatial continuity, this method provides both global awareness and local tensor fidelity [S1, book].
+
+## How it works
+The method operates by maintaining two parallel rendering paths: a context path (volume rendering) and a focus path (geometric primitives). The selection of focus regions is driven by user interaction with auxiliary diagram views, such as scatterplots or Mohr diagrams [S1, book].
+
+### Inputs and Outputs
+*   **Input:** A 3D stress tensor field $\mathbf{T}(\mathbf{x})$ defined on a voxel grid; user selections from 2D diagram views (e.g., eigenvalue plots).
+*   **Output:** A composite image showing volume-rendered context and geometric focus elements.
+
+### Data Structures
+1.  **Mask Volume $M(\mathbf{x})$:** A 3D volume of the same resolution as the tensor field. Each voxel stores a binary value:
+    *   $M(\mathbf{x}) = 1$: The voxel belongs to the focus region (selected by user).
+    *   $M(\mathbf{x}) = 0$: The voxel belongs to the context region.
+2.  **Depth Buffer:** A standard depth buffer storing the depth values of the rendered geometric focus elements (glyphs/tensorlines) to handle occlusion against the volume.
+
+### Parameters
+*   **Scalar Invariant for Context:** Typically von Mises stress, chosen by the user [S1, book].
+*   **Opacity Modulation:** Opacity in focus regions is decreased to allow visibility of underlying or overlapping geometry [S1, book].
+*   **Glyph Mapping Parameters:**
+    *   $c$: Determines the slope of the antisymmetric mapping function at the origin [S1, book].
+    *   $\alpha$: Scaling parameter for the mapping function [S1, book].
+    *   Global Scale: Adjusts the size of tensor glyphs [S1, book].
+
+### Steps
+1.  **Mask Generation:**
+    *   The user selects features in a diagram view (e.g., a specific range of shear stress or eigenvalues).
+    *   The system maps these selections to the 3D dataset, updating the mask volume $M(\mathbf{x})$ [S1, book].
+    *   *Note:* In some implementations, shear stress is mapped to transparency for the context view, where low shear stress results in low transparency (high opacity) and high shear stress results in nearly opaque points, effectively filtering out nearly isotropic tensors from the context view [S1, book].
+
+2.  **Focus Rendering (Geometry):**
+    *   **Tensorlines:**
+        *   Randomly place seed points inside voxels where $M(\mathbf{x}) = 1$ [S1, book].
+        *   Integrate the line starting at each seed using a fourth-order Runge-Kutta scheme [S1, book].
+        *   Stop integration when the line enters an isotropic region (where eigenvalues are equal) [S1, book].
+    *   **Tensor Glyphs:**
+        *   For each voxel where $M(\mathbf{x}) = 1$, generate an ellipsoid glyph [S1, book].
+        *   Map the local tensor $\mathbf{T}$ to a positive-definite metric to distinguish between positive and negative eigenvalues using the antisymmetric mapping function [S1, book]:
+            $$ f(\sigma_i, c, \alpha) = \exp(\alpha \arctan(c \cdot \sigma_i)) $$
+            where $\sigma_i$ are the eigenvalues of the tensor [S1, book].
+        *   Scale the glyph using the global scale parameter [S1, book].
+    *   Render these geometric primitives into the scene, updating the depth buffer [S1, book].
+
+3.  **Context Rendering (Volume):**
+    *   Perform standard GPU ray-casting for the volume rendering of the chosen scalar invariant (e.g., von Mises stress) [S1, book].
+    *   **Occlusion Handling:** During volume traversal, check the depth buffer. If a ray intersects a geometric element (glyph or tensorline) rendered in Step 2, stop the volume traversal at that depth to ensure correct intersection and prevent visual overlap [S1, book].
+    *   **Opacity Modulation:** Decrease the opacity of the volume rendering in regions where $M(\mathbf{x}) = 1$ to enhance the visibility of the focus geometry [S1, book].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_render_stress_tensor(tensor_field, user_selections, scalar_invariant_func):
+    """
+    Renders a stress tensor field using hybrid focus+context visualization.
+    
+    Args:
+        tensor_field: 3D array of stress tensors T(x).
+        user_selections: List of criteria selected in diagram views.
+        scalar_invariant_func: Function to compute scalar invariant (e.g., von Mises).
+        
+    Returns:
+        Composite image.
+    """
+    
+    # Step 1: Generate Mask Volume
+    # Initialize mask volume M with zeros
+    M = zeros_like(tensor_field, dtype=bool)
+    
+    # Map user selections to 3D space
+    # This step depends on the specific diagram view logic (e.g., Mohr circle selection)
+    # [G] Implementation detail: The system must invert the projection from 
+    # diagram view coordinates back to tensor eigenvalue space to identify 
+    # corresponding voxels.
+    selected_voxels = map_selections_to_voxels(tensor_field, user_selections)
+    M[selected_voxels] = True
+    
+    # Step 2: Render Focus Geometry (Glyphs and Tensorlines)
+    geometry_depth_buffer = render_focus_geometry(tensor_field, M)
+    
+    # Step 3: Render Context Volume with Occlusion and Opacity Modulation
+    # Initialize color buffer
+    color_buffer = zeros_like(tensor_field[:, :, :, :3], dtype=float)
+    
+    # Ray-casting loop (simplified)
+    for ray in all_rays:
+        t_start, t_end = ray.intersect_volume()
+        t_current = t_start
+        
+        while t_current < t_end:
+            # Check depth buffer for occlusion by focus geometry
+            depth_at_ray = geometry_depth_buffer.get_depth(ray.origin, ray.direction, t_current)
+            if depth_at_ray is not None and depth_at_ray < t_current:
+                # Ray hit geometry, stop volume traversal
+                break
+            
+            # Get voxel at current position
+            voxel = tensor_field.sample(t_current)
+            
+            # Compute scalar invariant for context
+            scalar_val = scalar_invariant_func(voxel)
+            
+            # Determine opacity
+            # Decrease opacity in focus regions to allow analysis of glyphs
+            if M.sample(t_current):
+                opacity = LOW_OPACITY
+            else:
+                opacity = HIGH_OPACITY
+                
+            # [G] Standard volume rendering compositing (e.g., front-to-back)
+            color = compute_color(scalar_val, opacity)
+            color_buffer.composite(ray, t_current, color)
+            
+            t_current += ray_step_size
+            
+    return color_buffer
+
+def render_focus_geometry(tensor_field, M):
+    """
+    Renders tensorlines and glyphs in masked regions.
+    """
+    depth_buffer = DepthBuffer()
+    
+    # Render Tensorlines
+    seeds = random_seeds_in_mask(tensor_field, M)
+    for seed in seeds:
+        line = integrate_tensorline(tensor_field, seed, order=4)
+        # Stop integration if isotropic region is reached
+        if is_isotropic(line.end_point):
+            line.truncate()
+        depth_buffer.render_line(line)
+        
+    # Render Glyphs
+    for voxel in voxels_where(M):
+        tensor = tensor_field[voxel]
+        # Map tensor to positive-definite metric for glyph shape
+        # Using antisymmetric mapping to distinguish positive/negative eigenvalues
+        mapped_tensor = antisymmetric_map(tensor, c=1.0, alpha=1.0)
+        glyph = create_ellipsoid_glyph(mapped_tensor)
+        depth_buffer.render_glyph(glyph)
+        
+    return depth_buffer
+
+def antisymmetric_map(tensor, c, alpha):
+    """
+    Maps tensor eigenvalues to a positive-definite metric.
+    f(sigma_i, c, alpha) = exp(alpha * arctan(c * sigma_i))
+    """
+    eigenvalues = compute_eigenvalues(tensor)
+    mapped_eigenvalues = [exp(alpha * arctan(c * sigma)) for sigma in eigenvalues]
+    return reconstruct_tensor_from_eigenvalues(mapped_eigenvalues, tensor.eigenvectors)
+```
+
+## Operating characteristics
+*   **Time Complexity:** The method adds the cost of generating and rendering geometric primitives (glyphs/tensorlines) to the standard cost of volume rendering. Tensorline integration requires per-seed numerical integration (Runge-Kutta), which can be computationally expensive if many seeds are used. Glyph rendering is generally faster but requires matrix decomposition for each masked voxel.
+*   **Memory Complexity:** Requires storage for the tensor field, the mask volume, and the depth buffer for the geometry. The number of seeds for tensorlines scales with the size of the focus region.
+*   **Strengths:** Provides clear separation of focus and context, allowing detailed analysis of specific stress features (e.g., high shear stress) without losing the global spatial context provided by the volume rendering. The use of diagram views allows for intuitive selection based on physical properties (eigenvalues, invariants).
+*   **Limitations:** The quality of the focus representation depends on the density of seeds (for tensorlines) or the resolution of the glyph placement. Occlusion handling via depth buffering requires careful synchronization between the geometry and volume rendering passes. The method is specific to tensor fields and does not generalize directly to scalar or vector fields without modification.
+*   **When to use:** When analyzing stress tensor fields where both global distribution (context) and local tensor orientation/magnitude (focus) are critical, and when users need to interactively select regions based on tensor properties.
+*   **When not to use:** For scalar fields where volume rendering alone suffices, or when real-time performance is critical and the overhead of geometry rendering and mask updates is prohibitive.
+
+## Background
+This method was introduced in the context of visual analysis of stress tensor fields, specifically in the paper "A Visual Approach to Analysis of Stress Tensor Fields" [S1, book]. It builds on the general concept of Focus+Context visualization, adapting it to the specific challenges of tensor data, such as the need to represent both magnitude and orientation. The approach leverages the structural relationships in tensor data, often visualized through Mohr diagrams or eigenvalue scatterplots, to drive the selection of focus regions. The use of antisymmetric mapping for glyphs allows for the distinction of eigenvalue signs, which is crucial in stress analysis.
+
+## Sources
+[S1] A Visual Approach to Analysis of Stress Tensor Fields, https://doi.org/10.4230/dfu.vol2.sciviz.2011.188, fetched 2026-10-26 (book)

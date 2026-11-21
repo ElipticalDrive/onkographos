@@ -1,0 +1,179 @@
+--- v002.md
++++ v003.md
+@@ -4,100 +4,98 @@
+ 
+ ## Overview
+-The Device Volume Snapshot creates an immutable, compact representation of volume data and metadata optimized for direct consumption by GPU kernels. It solves the problem of passing complex, mutable volume structures to shaders by freezing the state into a lightweight struct containing texture handles and geometric parameters. Unlike mutable builders, snapshots are copy-lightweight via shared internal resources and never modify underlying data once built [S1][S2, unofficial].
++The Device Volume Snapshot creates a compact, immutable snapshot of volume metadata and GPU texture handles, optimized for passing to CUDA kernels [S1][S2, unofficial]. It differs from mutable buffer constructions by enforcing immutability once built, ensuring thread-safe sharing of internal resources across multiple snapshots [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A `Volume::Builder` instance (mutable) or a `Volume::Description` (metadata).
+-*   **Output:** A `DeviceVolume` (or `DeviceScene`) struct containing CUDA texture objects and scalar metadata, ready for device-side access.
++*   **Input:** A `Volume::Builder` containing cells (defined by value) and metadata.
++*   **Output:** A `DeviceVolume` struct (or `DeviceScene` containing it) ready for device-side access.
+ 
+ **Data Structures:**
+-The core output is the `DeviceVolume` struct (often embedded in `DeviceScene`). Its layout is defined as [S2, unofficial]:
+-
+-```cpp
+-struct DeviceVolume {
+-    cudaTextureObject_t field_tex;   // Primary density field
+-    cudaTextureObject_t grad_tex;    // Gradient field (can be 0 if unused)
+-    int3 dim;                      // Volume dimensions (width, height, depth)
+-    float3 voxel_size;             // Physical size per voxel
+-    float3 origin;                 // World-space origin of the volume
+-    float2 value_range;            // Min and max density values
+-    float density_scale;           // Scaling factor for density values
+-};
+-```
++The core data structure is `DeviceVolume` (or embedded in `DeviceScene`). It contains:
++*   `field_tex`: `cudaTextureObject_t` for the primary volume data.
++*   `grad_tex`: `cudaTextureObject_t` for gradients (can be `0` if unused) [S2, unofficial].
++*   `dim`: `int3` representing the voxel grid dimensions [S2, unofficial].
++*   `voxel_size`: `float3` representing the physical size of a single voxel [S2, unofficial].
++*   `origin`: `float3` representing the world-space origin of the volume [S2, unofficial].
++*   `value_range`: `float2` representing the min/max scalar values in the volume [S2, unofficial].
++*   `density_scale`: `float` for density adjustment [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Build Volume:** Use `Volume::Builder` to populate the volume. The builder accepts `Cell` objects by value. Internally, it maintains a local table of unique `Definition` objects (sharing `Data`) and a compact grid of cells that index this table, storing orientations as needed [S1].
+-2.  **Create Texture Objects:** Generate `cudaTextureObject_t` handles for the density (`field_tex`) and optional gradient (`grad_tex`) data. Ensure the texture format matches the source data type (e.g., `R32F`) [S1][S2, unofficial].
+-3.  **Initialize Snapshot:** Construct the `DeviceVolume` struct. Populate `dim`, `voxel_size`, `origin`, `value_range`, and `density_scale` from the `Volume::Description` or computed bounds [S2, unofficial].
+-4.  **Commit/Transfer:** Copy the `DeviceVolume` struct to device memory. This is a lightweight copy because the texture objects are handles to GPU resources, not the data itself [S1][S2, unofficial].
++1.  **Builder Construction:** The `Volume::Builder` accepts `Cell` objects by value. It maintains a local table of unique `Definition` objects (sharing underlying `Data`) and a compact grid of cells that index this table, storing necessary orientation information [S1].
++2.  **Immutability Enforcement:** The `Builder` produces a new `Volume` snapshot via `build()`. The resulting `Volume` is immutable; old volumes are never modified [S1].
++3.  **Device Initialization:** Initialize the `DeviceVolume` struct (or `DeviceScene`) by extracting values from the `Volume::Description` and binding the GPU texture handles (`field_tex`, `grad_tex`) [S2, unofficial].
++4.  **Commit:** Call `commit(cudaStream_t stream)` to finalize the snapshot and ensure data consistency on the device [S2, unofficial].
++
++**Pitfalls:**
++*   **Dangling Pointers:** The public API must not expose `std::span<const Cell>` or raw pointers/indices to the internal compact storage. Internal grid changes or memory reorganization can invalidate such references. Instead, use `cell(position)` which returns values or views reconstructed from the internal table [S1].
++*   **Precision:** Ensure host-side data types are mapped to GPU-compatible texture formats (e.g., `R32F`) to prevent precision loss, adhering to the parent family's format mapping principles [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def create_device_volume_snapshot(volume_builder, stream):
+-    # 1. Build the immutable volume
+-    # The builder deduplicates definitions and stores a compact grid
+-    volume = volume_builder.build()
++# Conceptual implementation of the snapshot creation process
++
++class VolumeBuilder:
++    def __init__(self, dim: int3):
++        self.dim = dim
++        self.definitions = {}  # Map: Definition -> Index
++        self.grid = {}         # Map: (x,y,z) -> (def_index, orientation)
++
++    def set_cell(self, pos: int3, cell: Cell):
++        # Deduplicate definitions
++        if cell.definition not in self.definitions:
++            self.definitions[cell.definition] = len(self.definitions)
++        
++        def_idx = self.definitions[cell.definition]
++        self.grid[pos] = (def_idx, cell.orientation)
++
++    def build(self) -> Volume:
++        # Create immutable Volume from builder state
++        return Volume(self.dim, self.definitions, self.grid)
++
++class Volume:
++    def __init__(self, dim: int3, definitions: dict, grid: dict):
++        self.dim = dim
++        self.definitions = definitions
++        self.grid = grid
++        self.texture_handle = None # Bound later
++
++    def cell(self, pos: int3) -> Cell:
++        # Reconstruct cell by value; do not expose internal indices
++        if pos in self.grid:
++            def_idx, orientation = self.grid[pos]
++            def_obj = list(self.definitions.keys())[def_idx]
++            return Cell(def_obj, orientation)
++        return Cell.empty()
++
++class DeviceVolume:
++    def __init__(self, volume: Volume, field_tex: cudaTextureObject_t, grad_tex: cudaTextureObject_t = 0):
++        self.field_tex = field_tex
++        self.grad_tex = grad_tex
++        self.dim = volume.dim
++        self.voxel_size = volume.get_voxel_size() # [G] Assumed method
++        self.origin = volume.get_origin()         # [G] Assumed method
++        self.value_range = volume.get_value_range() # [G] Assumed method
++        self.density_scale = 1.0                  # [G] Default value
++
++def create_snapshot(volume: Volume, stream: cudaStream_t) -> DeviceVolume:
++    # 1. Bind textures to volume data (handled by parent GPU Memory methods)
++    field_tex = bind_texture(volume.data, volume.dim)
+     
+-    # 2. Extract metadata
+-    dim = volume.extents()
+-    voxel_size = volume.voxel_size()
+-    origin = volume.origin()
+-    value_range = volume.value_range()
+-    density_scale = volume.density_scale()
++    # 2. Initialize DeviceVolume struct
++    snapshot = DeviceVolume(volume, field_tex)
+     
+-    # 3. Create CUDA texture objects
+-    # Assumes volume has methods to get raw data pointers and dimensions
+-    field_tex = create_cuda_texture(
+-        data=volume.get_density_data(),
+-        width=dim.x,
+-        height=dim.y,
+-        depth=dim.z,
+-        format=CUDA_FORMAT_R32F
+-    )
++    # 3. Commit to device memory
++    commit_to_device(snapshot, stream)
+     
+-    grad_tex = 0
+-    if volume.has_gradients():
+-        grad_tex = create_cuda_texture(
+-            data=volume.get_gradient_data(),
+-            width=dim.x,
+-            height=dim.y,
+-            depth=dim.z,
+-            format=CUDA_FORMAT_RG32F
+-        )
+-        
+-    # 4. Construct the snapshot struct
+-    snapshot = DeviceVolume(
+-        field_tex=field_tex,
+-        grad_tex=grad_tex,
+-        dim=dim,
+-        voxel_size=voxel_size,
+-        origin=origin,
+-        value_range=value_range,
+-        density_scale=density_scale
+-    )
+-    
+-    # 5. Copy to device memory
+-    # The struct itself is small; texture objects are handles
+-    device_snapshot_ptr = allocate_device_memory(DeviceVolume)
+-    copy_struct_to_device(device_snapshot_ptr, snapshot, stream)
+-    
+-    return device_snapshot_ptr
++    return snapshot
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Dangling Pointers:** The public API must not expose `std::span<const Cell>` or raw pointers to the internal compact storage. Access must be via `cell(position)` which returns values or views, preventing invalidation when internal grids change [S1].
+-*   **Texture Format Mismatch:** The CUDA texture format must match the source data layout to prevent corruption [S1].
+-*   **Immutable Guarantee:** Once `build()` is called, the `Volume` is immutable. Copying is cheap because it shares the underlying data structures [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Building the snapshot is $O(N)$ where $N$ is the number of voxels, due to deduplication and grid construction. Copying the snapshot struct to the device is $O(1)$ relative to volume size, as it only copies handles and scalars.
+-*   **Memory Complexity:** The snapshot struct itself is small (approx. 64-80 bytes). The bulk of memory is held by the GPU texture objects, which are shared with the original volume data.
+-*   **Strengths:** Lightweight copying, thread-safe (immutable), minimal overhead for passing to kernels.
+-*   **Limitations:** Not suitable for dynamic updates; requires rebuilding the snapshot for any volume change.
+-*   **When to use:** When passing volume data to CUDA kernels for rendering or simulation.
+-*   **When not to use:** When the volume data needs to be modified frequently on the host or device without rebuilding the entire structure.
++*   **Memory:** Immutable storage allows lightweight copying via shared internal resources (reference counting or pointer sharing) [S1].
++*   **Performance:** Access is optimized for read-only kernel execution. Gradient textures are optional, saving memory if not needed [S2, unofficial].
++*   **Limitations:** Cannot be modified after creation. Updates require building a new snapshot [S1].
+ 
+ ## Background
+-The concept originates from the Sparkle Voxel Engine design, specifically the VXL-042 storage specification, which emphasizes immutable volume representations and compact cell storage [S1]. The implementation details for CUDA integration are found in the cuVRender engine, which demonstrates the practical application of this pattern for GPU-accelerated volume rendering [S2, unofficial].
++This method is part of the Sparkle Voxel engine design (VXL-042) and is implemented in CUDA-accelerated volume rendering engines like cuVRender [S1][S2, unofficial]. It addresses the need for efficient, thread-safe volume data transfer from host to device in modern GPU rendering pipelines.
+ 
+ ## Sources

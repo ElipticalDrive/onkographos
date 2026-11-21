@@ -1,0 +1,159 @@
+# SparseOcc
+
+Also called: Uncertainty-based Occupancy Field extraction
+
+## Overview
+SparseOcc is a method for learning neural implicit shape representations from point clouds using binary occupancy fields rather than Signed Distance Fields (SDFs) [S1]. It stabilizes training by avoiding the eikonal equation constraints required by SDFs, making it suitable for sparse or noisy data such as medical CT scans [S1]. It differs from SDF-based methods by optimizing the zero-crossings of a margin uncertainty function via Newton-Raphson iteration, and from other occupancy methods by introducing an entropy-based regularization to guide the field toward minimal entropy in free space and maximal entropy at the surface [S1].
+
+## How it works
+**Inputs:**
+- A point cloud $P$ representing the target shape.
+- A neural network parameterized by $\theta$ that outputs a scalar value for any query point $x \in \mathbb{R}^3$.
+
+**Outputs:**
+- A trained neural occupancy field $U_\theta(x)$.
+- A reconstructed point cloud sampled from the zero-level set of $U_\theta(x)$.
+
+**Data Structures:**
+- The neural network takes a 3D coordinate $x$ as input and outputs a scalar. The specific architecture (e.g., MLP depth, hidden size) is not specified in the sources [S1].
+- The margin uncertainty function $U_\theta(x)$ is defined as the difference between the probability of a point being outside and the probability of it being inside the shape [S1].
+
+**Algorithm Steps:**
+
+1.  **Define Margin Uncertainty:**
+    For a query point $x$, compute the margin uncertainty $U_\theta(x)$ [S1].
+
+2.  **Sample Surface Points:**
+    Obtain samples from the surface of the occupancy function by finding the zeros of $U_\theta(x)$ using Newton-Raphson iteration [S1].
+    
+    The Newton-Raphson update for a query point $q$ to find a surface point $s$ is:
+    $$ s = q - U_\theta(q) \frac{\nabla U_\theta(q)}{\|\nabla U_\theta(q)\|_2} $$
+    where $\nabla U_\theta(q)$ is the gradient of the network output with respect to the input coordinates [S1].
+
+3.  **Construct Training Pairs:**
+    Create a set of pairs $Q = \{(q, p)\}$, where $q$ is a query point sampled around the input point cloud $P$, and $p$ is the closest point in $P$ to $q$ [S1].
+
+4.  **Compute Sampling Loss:**
+    Minimize the distance between the Newton-Raphson sampled points and the input point cloud using the loss $L_{samp}$ [S1]:
+    $$ L_{samp} (\theta, Q) = \mathbb{E}_{(q,p)\sim Q} \left\| q - U_\theta(q) \frac{\nabla U_\theta(q)}{\|\nabla U_\theta(q)\|_2} - p \right\|_2^2 $$
+
+5.  **Compute Entropy Regularization:**
+    Introduce an entropy-based regularization loss $\lambda L_{entr}$ to stabilize training. This loss guides the occupancy field toward minimal entropy almost everywhere in space and maximizes entropy at the input point cloud [S1].
+    
+    The specific formula for $L_{entr}$ is not provided in the sources [S1].
+
+6.  **Optimize:**
+    Minimize the total loss with respect to $\theta$ [S1]:
+    $$ \min_\theta L_{samp} (\theta, Q) + \lambda L_{entr} (\theta, \Omega, P) $$
+    where $\lambda$ is a weighting parameter and $\Omega$ represents the domain [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_gradient(network, x):
+    """
+    Computes the gradient of the network output with respect to input x.
+    Uses automatic differentiation.
+    """
+    x.requires_grad_(True)
+    output = network(x)
+    grad = torch.autograd.grad(
+        output, x, grad_outputs=torch.ones_like(output), create_graph=True
+    )[0]
+    return grad
+
+def newton_raphson_step(network, q, max_iter=10, tol=1e-6):
+    """
+    Performs Newton-Raphson iteration to find the zero of U_theta(q).
+    """
+    x_curr = q
+    for _ in range(max_iter):
+        u_val = network(x_curr)
+        grad = compute_gradient(network, x_curr)
+        grad_norm = torch.norm(grad, p=2)
+        
+        if grad_norm < 1e-8:
+            break
+            
+        # Update step: x_new = x - U(x) * grad / ||grad||
+        x_new = x_curr - u_val * (grad / grad_norm)
+        
+        if torch.norm(x_new - x_curr) < tol:
+            break
+        x_curr = x_new
+        
+    return x_curr
+
+def train_sparseocc(point_cloud, network, num_samples, lambda_entr):
+    """
+    Trains the SparseOcc model.
+    """
+    optimizer = torch.optim.Adam(network.parameters(), lr=1e-3)
+    
+    for epoch in range(num_epochs):
+        optimizer.zero_grad()
+        
+        # Sample query points around the point cloud
+        # Implementation detail: sampling strategy around P is not specified [S1]
+        q_samples = sample_around_point_cloud(point_cloud, num_samples)
+        
+        # Find closest points in P for each q
+        p_samples = find_closest_points(q_samples, point_cloud)
+        
+        # Compute Newton-Raphson sampled points
+        sampled_points = []
+        for q in q_samples:
+            s = newton_raphson_step(network, q)
+            sampled_points.append(s)
+        sampled_points = torch.stack(sampled_points)
+        
+        # Compute Sampling Loss
+        # L_samp = E || q - U(q) * grad / ||grad|| - p ||^2
+        # Note: The formula in the source uses the Newton step result directly.
+        # The term U(q) * grad / ||grad|| is the displacement from q to the surface.
+        # So the surface point is q - displacement.
+        # The loss is distance between this surface point and p.
+        
+        u_vals = network(q_samples)
+        grads = compute_gradient(network, q_samples)
+        grad_norms = torch.norm(grads, p=2, dim=1, keepdim=True)
+        
+        # Avoid division by zero
+        grad_norms = torch.clamp(grad_norms, min=1e-8)
+        
+        surface_points = q_samples - u_vals.unsqueeze(1) * (grads / grad_norms)
+        
+        loss_samp = torch.mean(torch.norm(surface_points - p_samples, p=2, dim=1))
+        
+        # Compute Entropy Regularization Loss
+        # Formula not provided in sources [S1]
+        loss_entr = compute_entropy_regularization(network, q_samples, point_cloud)
+        
+        total_loss = loss_samp + lambda_entr * loss_entr
+        total_loss.backward()
+        optimizer.step()
+```
+
+**Parameters:**
+- $\lambda$: Weight for the entropy regularization term. Value not given in the sources [S1].
+- Newton-Raphson iterations: Not specified, but implied to be iterative until convergence or max steps [S1].
+
+**Edge Cases and Pitfalls:**
+- Gradient vanishing: If $\|\nabla U_\theta(q)\|_2$ is near zero, the Newton-Raphson step becomes unstable. A guard (e.g., clamping or fallback) is required [G].
+- Boundary conditions: The method relies on sampling query points $q$ around the input point cloud $P$. If $q$ is too far from the surface, convergence may fail [S1].
+
+## Operating characteristics
+- **Performance:** On the RibSeg dataset (20 medical scans), SparseOcc achieved a Chamfer-L1 of $1.55 \pm 0.24$, Chamfer-L2 of $1.04 \pm 0.16$, and Hausdorff distance of $12.6 \pm 4.39$ [S1].
+- **Comparison:** SparseOcc outperforms DiGS and NeuralPull in Chamfer-L1 and Chamfer-L2 metrics. However, NeuralPull is superior in Hausdorff Distance [S1].
+- **Strengths:** Stabilizes training without requiring dense ground-truth supervision or satisfying the eikonal equation [S1]. Robust to noise and sparsity inherent in medical imaging data [S1].
+- **Limitations:** Performance in Hausdorff Distance is lower than NeuralPull [S1].
+
+## Background
+SparseOcc, also referred to as RibPull in the context of medical imaging, was introduced by Ouasfi et al. [S1]. It is the first implicit surface reconstruction methodology for medical imaging that leverages occupancy fields to reconstruct complex anatomical structures from CT scans [S1]. The method was designed to handle the challenging thin structures characteristic of skeletal anatomy, such as ribcages [S1].
+
+## Sources
+[S1] RibPull: Implicit Occupancy Fields and Medial Axis Extraction for CT Ribcage Scans, https://hal.science/hal-05395033v1, fetched 2026-10-26

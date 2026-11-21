@@ -1,0 +1,223 @@
+--- v002.md
++++ v003.md
+@@ -74,5 +74,5 @@
+ 
+ ### Pseudocode
+-The implementation uses a fragment program executed $D$ times per iteration step [S1, unofficial]. The following pseudocode describes the logic within the fragment program for a single direction $d$ and the accumulation logic.
++The following pseudocode describes the logic within the fragment program for a single direction $d$ and the accumulation logic [S1, unofficial].
+ 
+ ```python
+@@ -90,163 +90,41 @@
+ 
+ def fragment_program(current_direction_index d, current_iteration n):
+-    # 1. Determine the current outgoing direction w_0 and incoming direction w_d
+-    # Note: In the source, the update is for L_{n+1}(x, w_0) using L_n(x, w_d).
+-    # The fragment program is invoked D times, once for each d.
+-    # w_0 is the direction for which we are computing the new radiance.
+-    # w_d is the current direction in the loop.
+-    
+-    w_0 = get_direction_from_index(d) # Or fixed w_0 depending on shader structure
+-    w_d = get_direction_from_index(d) # The source implies the loop iterates d
++    w_d = get_direction_from_index(d)
+     
+     # Retrieve physical coefficients from Density Texture
+-    # Assuming density rho is stored, kappa_a and kappa_s are derived
+     rho = sample_3d_texture(DensityTexture, current_position)
+-    kappa_a = rho * absorption_coefficient_constant # [G] Constant assumed
+-    kappa_s = rho * scattering_coefficient_constant # [G] Constant assumed
++    kappa_a = rho * absorption_coefficient_constant # [G]
++    kappa_s = rho * scattering_coefficient_constant # [G]
+     kappa_t = kappa_a + kappa_s
+     
+     # Retrieve emission
+-    L_e = sample_emission(current_position, w_0)
++    L_e = sample_emission(current_position, w_d)
+     
+-    # Retrieve previous radiance L_n(x, w_0)
+-    # Note: The source updates L_{n+1}(x, w_0). 
+-    # In a typical GPU implementation, we might read L_n(x, w_0) from a previous pass or texture.
+-    # However, the source describes updating L_{n+1} using L_n.
+-    # Let's assume L_n(x, w_0) is available.
+-    L_n_w0 = sample_radiance(RadianceTexture, current_position, w_0)
++    # Retrieve previous radiance L_n(x, w_d)
++    L_n_wd = sample_radiance(RadianceTexture, current_position, w_d)
+     
+-    # Retrieve the precomputed SVD coefficient for w_0 and term k
+-    # This is done for each k in the summation. 
+-    # The source structure suggests the fragment program handles one d, 
+-    # but the in-scattering sum over k is computed.
+-    # To avoid loops in fragment shaders, the summation over k might be unrolled or handled via multiple passes.
+-    # The source says: "Update L_{n+1} ... with L_n and sum_{d} L_n xi v".
+-    # And "Accumulate L_{n+1} xi v to Temp Outgoing".
+-    
+-    # Calculate the in-scattering contribution for this d
+-    # We need sum_{k=1}^N xi_k u_k(w_0) * [sum_{d'} L_n(x, w_{d'}) xi_k v_k(w_{d'})]
+-    # The term in brackets is stored in OutgoingTexture[k] from the PREVIOUS iteration or accumulated in TempOutgoing.
+-    # The source states: "Outgoing Texture contains the value of sum_{d} L_n(x, w_d) xi_k v_k(w_d)".
+-    
++    # Calculate in-scattering sum using precomputed Outgoing Texture from iteration n
+     in_scattering_sum = 0.0
+     for k in range(1, N + 1):
+-        # Retrieve xi_k * u_k(w_0) from Incident Texture
+-        # Indexing: column k, row corresponding to w_0
+-        u_coeff = sample_2d_texture(IncidentTexture, k, get_direction_index(w_0))
+-        
+-        # Retrieve sum_{d} L_n(x, w_d) xi_k v_k(w_d) from Outgoing Texture
+-        # This value was computed in the previous iteration's loop over d
++        u_coeff = sample_2d_texture(IncidentTexture, k, get_direction_index(w_d))
+         outgoing_sum = sample_3d_texture(OutgoingTexture, current_position, k)
+-        
+         in_scattering_sum += u_coeff * outgoing_sum
+         
+     # Update Radiance
+-    # L_{n+1}(x, w_0) = L_n(x, w_0) + kappa_a * L_e * dx - kappa_t * L_n(x, w_0) * dx + (kappa_s / 4pi) * in_scattering_sum * dx
+-    L_n_plus_1_w0 = L_n_w0 + kappa_a * L_e * dx - kappa_t * L_n_w0 * dx + (kappa_s / (4.0 * 3.14159265)) * in_scattering_sum * dx
++    L_n_plus_1_wd = L_n_wd + kappa_a * L_e * dx - kappa_t * L_n_wd * dx + (kappa_s / (4.0 * 3.14159265)) * in_scattering_sum * dx
+     
+-    # Write L_{n+1}(x, w_0) to Radiance Texture (or a temporary buffer for next iteration)
+-    write_radiance(RadianceTexture, current_position, w_0, L_n_plus_1_w0)
++    # Write L_{n+1}(x, w_d) to Radiance Texture
++    write_radiance(RadianceTexture, current_position, w_d, L_n_plus_1_wd)
+     
+     # Accumulate for the NEXT iteration's Outgoing Texture
+-    # We need to compute sum_{d} L_{n+1}(x, w_d) xi_k v_k(w_d)
+-    # This fragment program is called for each d. So we accumulate into TempOutgoing.
+     for k in range(1, N + 1):
+-        # Retrieve xi_k * v_k(w_d) from Outgoing Texture
+-        # Indexing: column k, row corresponding to w_d
+         v_coeff = sample_2d_texture(OutgoingTexture, k, get_direction_index(w_d))
+-        
+-        # L_{n+1}(x, w_d) is the value we just computed (or if w_d != w_0, we need to handle that)
+-        # The source says: "Accumulate L_{n+1}(x, w_d) xi_k v_k(w_d)".
+-        # If the fragment program is structured such that it updates L_{n+1} for a specific w_0,
+-        # and then accumulates for the current d, there is a dependency.
+-        # The source Figure 5a shows:
+-        # 1. Update L_{n+1}(x, w_0)
+-        # 2. Accumulate L_{n+1}(x, w_d) xi_k v_k(w_d)
+-        # This implies that for the current d, we use the newly computed L_{n+1} if d corresponds to the w_0 being updated,
+-        # or we might need to read L_{n+1} for other directions.
+-        # However, the source says "L_{n+1}(x, w_0) in direction d ... is updated".
+-        # This suggests the fragment program is specialized for a specific w_0, and iterates d.
+-        # But the accumulation step uses L_{n+1}(x, w_d).
+-        # If w_d is the current direction in the loop, and we are updating L_{n+1}(x, w_0),
+-        # then L_{n+1}(x, w_d) is only available if d == 0 (or the specific direction being updated).
+-        # The source text is slightly ambiguous here. 
+-        # "Accumulate L_{n+1}(x, w_d) xi_k v_k(w_d) to Temporary Outgoing Texture".
+-        # If the loop is over d, and we are computing L_{n+1}(x, w_0) for a FIXED w_0,
+-        # then L_{n+1}(x, w_d) for d != w_0 is not yet computed in this pass.
+-        # However, the source says "L_{n+1}(x, w_0) in all D directions has been updated" after d reaches D.
+-        # This implies the fragment program is run D times, each time for a different w_0?
+-        # No, "For each iteration step n, loop through discrete directions d from 1 to D."
+-        # "Update Radiance: ... update L_{n+1}(x, w_0) ... using L_n(x, w_0) and incoming scattering from all directions."
+-        # This implies L_{n+1}(x, w_0) is computed using the FULL sum over d.
+-        # So the fragment program computes L_{n+1}(x, w_0) for ONE w_0, using the pre-computed Outgoing Texture.
+-        # Then, how is the NEW Outgoing Texture for the NEXT iteration computed?
+-        # "Accumulate L_{n+1}(x, w_d) xi_k v_k(w_d)".
+-        # This suggests that after L_{n+1} is fully computed for all directions (which takes D passes?),
+-        # we then compute the new Outgoing Texture.
+-        # But the source says "During each pass of fragment program... L_{n+1} is updated... AND sum is calculated."
+-        # This implies the fragment program does BOTH.
+-        # If the fragment program is invoked for direction d, it updates L_{n+1}(x, w_d)?
+-        # Let's re-read: "L_{n+1}(x, w_0) in direction d ... is updated".
+-        # This phrasing suggests w_0 is the direction associated with the current pass d.
+-        # So, Pass d updates L_{n+1}(x, w_d).
+-        # And it also accumulates L_{n+1}(x, w_d) into TempOutgoing.
+-        
+-        # Revised Logic based on "L_{n+1}(x, w_0) in direction d":
+-        # The fragment program is executed D times.
+-        # In iteration d, we compute L_{n+1}(x, w_d).
+-        # To compute L_{n+1}(x, w_d), we need the in-scattering sum from L_n(x, w_{all}).
+-        # This sum is available in OutgoingTexture (from iteration n).
+-        
+-        # So:
+-        # 1. Identify w_d for this pass.
+-        # 2. Compute L_{n+1}(x, w_d) using OutgoingTexture (which holds sum_{d'} L_n(x, w_{d'}) xi_k v_k(w_{d'})).
+-        # 3. Accumulate L_{n+1}(x, w_d) xi_k v_k(w_d) into TempOutgoingTexture.
+-        
+-        pass # Logic handled below
++        contribution = L_n_plus_1_wd * v_coeff
++        add_to_texture(TempOutgoingTexture, current_position, k, contribution)
+ 
+ def render_iteration(n):
+-    # Initialize TempOutgoingTexture to 0
+     clear_texture(TempOutgoingTexture)
+-    
+-    # Loop over D directions
+     for d in range(1, D + 1):
+-        w_d = get_direction_from_index(d)
+-        
+-        # 1. Compute L_{n+1}(x, w_d)
+-        # Retrieve L_n(x, w_d)
+-        L_n_wd = sample_radiance(RadianceTexture, current_position, w_d)
+-        
+-        # Retrieve coefficients for w_d
+-        # Incident Texture stores xi_k u_k(w_0). Here w_0 = w_d.
+-        # Outgoing Texture stores xi_k v_k(w_i). Here we need the sum over d' of L_n(x, w_{d'}) xi_k v_k(w_{d'}).
+-        # This sum is stored in OutgoingTexture[k] from the previous iteration.
+-        
+-        in_scattering_sum = 0.0
+-        for k in range(1, N + 1):
+-            u_coeff = sample_2d_texture(IncidentTexture, k, get_direction_index(w_d))
+-            outgoing_sum = sample_3d_texture(OutgoingTexture, current_position, k)
+-            in_scattering_sum += u_coeff * outgoing_sum
+-            
+-        rho = sample_3d_texture(DensityTexture, current_position)
+-        kappa_a = rho * absorption_coefficient_constant
+-        kappa_s = rho * scattering_coefficient_constant
+-        kappa_t = kappa_a + kappa_s
+-        L_e = sample_emission(current_position, w_d)
+-        
+-        L_n_plus_1_wd = L_n_wd + kappa_a * L_e * dx - kappa_t * L_n_wd * dx + (kappa_s / (4.0 * 3.14159265)) * in_scattering_sum * dx
+-        
+-        # Write L_{n+1}(x, w_d) to a temporary radiance texture or update in place if careful
+-        write_radiance(RadianceTexture, current_position, w_d, L_n_plus_1_wd)
+-        
+-        # 2. Accumulate for next iteration's Outgoing Texture
+-        for k in range(1, N + 1):
+-            v_coeff = sample_2d_texture(OutgoingTexture, k, get_direction_index(w_d))
+-            # Add L_{n+1}(x, w_d) * xi_k * v_k(w_d) to TempOutgoing
+-            # Note: OutgoingTexture[k] stores xi_k v_k. We need to multiply by L_{n+1}.
+-            contribution = L_n_plus_1_wd * v_coeff
+-            add_to_texture(TempOutgoingTexture, current_position, k, contribution)
+-            
+-    # After D passes, TempOutgoingTexture contains sum_{d} L_{n+1}(x, w_d) xi_k v_k(w_d)
+-    # Swap TempOutgoingTexture with OutgoingTexture
++        fragment_program(d, n)
+     swap_textures(OutgoingTexture, TempOutgoingTexture)
+ ```
+@@ -261,11 +139,11 @@
+ 
+ **Time Complexity:**
+-*   Per iteration: $O(D \cdot N \cdot V)$, where $V$ is the number of voxels.
+-*   The SVD approximation reduces the complexity of the in-scattering integral from $O(D^2)$ to $O(D \cdot N)$ per voxel per iteration, assuming $N \ll D$ [S1, unofficial].
++*   Per iteration: $O(D \cdot N \cdot V)$, where $V$ is the number of voxels [G].
++*   The SVD approximation reduces the complexity of the in-scattering integral from $O(D^2)$ to $O(D \cdot N)$ per voxel per iteration, assuming $N \ll D$ [G].
+ 
+ **Memory Complexity:**
+-*   $O(V \cdot D)$ for the Radiance Texture.
+-*   $O(V \cdot N)$ for the Outgoing and Temporary Outgoing Textures.
+-*   $O(N \cdot D)$ for the Incident and Outgoing Direction Textures (negligible compared to volume textures).
++*   $O(V \cdot D)$ for the Radiance Texture [S1, unofficial].
++*   $O(V \cdot N)$ for the Outgoing and Temporary Outgoing Textures [S1, unofficial].
++*   $O(N \cdot D)$ for the Incident and Outgoing Direction Textures (negligible compared to volume textures) [S1, unofficial].
+ 
+ **Measured Performance:**
+@@ -279,14 +157,14 @@
+ 
+ **When to Use:**
+-*   Use for interactive rendering of multiple scattering in participating media where dynamic scenes are required and high accuracy is not critical.
+-*   Avoid for highly dynamic scenes where convergence cannot be achieved, or when precise physical accuracy of the phase function is required.
++*   Use for interactive rendering of multiple scattering in participating media where dynamic scenes are required and high accuracy is not critical [S1, unofficial].
++*   Avoid for highly dynamic scenes where convergence cannot be achieved, or when precise physical accuracy of the phase function is required [S1, unofficial].
+ 
+ ## Background
+ 
+ **Origin:**
+-The method was proposed by Gong Z., Ren Z., Wang Z., and Peng Q. in 2007 [S1, unofficial]. It is based on the application of Singular Value Decomposition (SVD) to the scattering phase function in the transport equation.
++The method was proposed by Gong Z., Ren Z., Wang Z., and Peng Q. in 2007 [S1, unofficial]. It is based on the application of Singular Value Decomposition (SVD) to the scattering phase function in the transport equation [S1, unofficial].
+ 
+ **History and Development:**
+-Separable decomposition techniques were introduced by Kautz (1999) for BRDF rendering. Wang (2004) and Liu (2004) applied SVD to glossy BRDFs in PRT. Wang (2005) introduced SVD to the approximation of BSSRDFs by separating the Henyey-Greenstein phase function [S1, unofficial]. This method extends these ideas to interactive multiple scattering in participating media.
++Separable decomposition techniques were introduced by Kautz (1999) for BRDF rendering [S1, unofficial]. Wang (2004) and Liu (2004) applied SVD to glossy BRDFs in PRT [S1, unofficial]. Wang (2005) introduced SVD to the approximation of BSSRDFs by separating the Henyey-Greenstein phase function [S1, unofficial]. This method extends these ideas to interactive multiple scattering in participating media [S1, unofficial].
+ 
+ **Usage:**

@@ -1,0 +1,335 @@
+RETIRED ray tracer - superseded by the AiQuokkaWannabe organisation (github.com/ai-quokka-wannabe), the descendant of this idea - feat: volumetric fog foundation — Phase 8 Etape 41 sub-etape 41a by MatejGomboc · Pull Request #103 · MatejGomboc/tron-grid
+
+feat: volumetric fog foundation — Phase 8 Etape 41 sub-etape 41a by MatejGomboc · Pull Request #103 · MatejGomboc/tron-grid · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+This repository was archived by the owner on Aug 16, 2026. It is now read-only.
+Conversation
+MatejGomboc
+commented
+Apr 26, 2026
+Copy link
+Copy Markdown
+Owner
+Description
+First of four planned sub-etapes for Phase 8 Etape 41 (Volumetric Fog + Light Shafts). 41a ships the froxel-grid plumbing and a working composite pipeline with a placeholder height-falloff density. No light injection yet — that's 41b.
+What lands:
+#
+Item
+1
+Allocator::createImage3D — new method for 3D images.
+2
+160 × 90 × 64 froxel grid (rgba16f, 7.4 MB) with logarithmic depth slicing.
+3
+inject_density.slang — height-falloff extinction per froxel; rgb stays zero in 41a.
+4
+volumetric_composite.slang — per-pixel raymarch, accumulates transmittance + scattered radiance per Wronski 2014, composites onto HDR.
+5
+recordFrame sequencing: inject → barrier → composite → barrier → existing bloom chain. The composite runs before bloom so the fog itself participates in bloom.
+6
+Per-frame composite descriptor sets to avoid the in-flight update race.
+Sub-etape plan for full Etape 41:
+41a (this PR): foundation + height-falloff density — fog visible, no light shafts yet.
+41b (next): per-froxel emissive sampling via TLAS shadow rays — light shafts from neon tubes, orb, energy pillar.
+41c: temporal reprojection using motion vectors (Etape 37) — denoise the shafts.
+41d: documentation pass (PBR.md volumetric section, CLAUDE.md status, TODO.md criteria + Journal).
+Canonical references: Wronski 2014 SIGGRAPH "Volumetric Fog" (Frostbite), Hillaire 2015 (Decima Engine). Per-slice integration T_slice = exp(-extinction), L_total += L_slice * T_accum, T_accum *= T_slice.
+Related Issue
+N/A (Phase 8 etape per project plan).
+Type of Change
+Bug fix (non-breaking change that fixes an issue)
+New feature (non-breaking change that adds functionality)
+Breaking change (fix or feature that would cause existing functionality to not work as expected)
+Documentation update
+Refactoring (no functional changes)
+CI/CD changes
+Testing
+I have tested these changes locally
+Builds pass (cmake --preset windows-msvc verified locally; CI will run all presets)
+No Vulkan validation layer errors (initial run had a "single descriptor set + multiple frames in flight" race; fixed by allocating per-frame composite sets, matching the existing bloom / postprocess pattern)
+All 5 unit-test suites pass
+Visual verification: subtle uniform fog increases with depth; sun has a soft halo; glass tower silhouette softens at base; pillar visible through fog at long range
+Code Quality
+Code compiles without warnings
+Code is formatted (clang-format -i on .cpp/.hpp; .slang formatted by hand per STYLE.md)
+British spelling used in comments and documentation
+STYLE.md compliant (parenthesised compound conditionals, no auto, [[nodiscard]] where appropriate)
+Push-constant struct layouts match Slang scalarBlockLayout byte-for-byte (verified by inspection)
+Screenshots / Logs
+Diff: 7 files changed, +661/−4 LoC. Two new shader files (inject_density.slang, volumetric_composite.slang). Allocator + main + CMakeLists + TODO updated.
+Build log shows clean shader compilation + zero validation errors at runtime:
+```
+[5/41] Compiling inject_density.slang -> inject_density.spv (with validation)
+[10/41] Compiling volumetric_composite.slang -> volumetric_composite.spv (with validation)
+...
+[INFO] Volumetric compute pipelines created (inject + composite).
+```
+Additional Notes
+Architectural decisions worth flagging:
+Composite runs before bloom extraction — fog is part of the HDR scene the bloom chain processes, so brightening fog regions naturally bloom. Alternative was post-bloom composite, which would have given a "fog over a sharp scene with halos" look — less physical.
+Per-frame descriptor sets for composite, single set for inject — composite's HDR view changes on resize; inject only references the persistent froxel image. Matches the bloom / postprocess pattern.
+Logarithmic depth slicing — packs more froxels close to the camera where view-space resolution matters most. depth(z) = near * (far/near)^(z/Z_RES) per Frostbite convention.
+Froxel grid transitions UNDEFINED → GENERAL each frame — discards prior content. 41c will switch this to non-discarding GENERAL → GENERAL so temporal reprojection can read the prior frame's froxels.
+Phase 8 acceptance criteria for "Froxel-based volumetric fog with neon light shafts" and "Temporal reprojection for fog noise reduction" stay unchecked — both are satisfied only after 41b/41c land.
+🤖 Generated with Claude Code
+MatejGomboc
+and others
+added 2 commits
+April 26, 2026 12:26
+feat: volumetric fog foundation — Phase 8 Etape 41 sub-etape 41a
+…
+74e0b44
+```
+First of four planned sub-etapes for Etape 41 (volumetric fog + light
+shafts). 41a ships the froxel-grid plumbing and a working composite
+pipeline with a placeholder height-falloff density. No light injection
+yet — that lands in 41b.
+
+- Allocator::createImage3D — new method for 3D images.
+
+- 160 x 90 x 64 froxel grid (rgba16f, 7.4 MB) with logarithmic depth
+  slicing along the view direction (more resolution near the camera).
+  Frustum-aligned x/y tiles match screen-space.
+
+- inject_density.slang — per-froxel compute reconstructs the world-space
+  position of each froxel centre via inv_view_projection and writes a
+  height-falloff extinction coefficient (full strength below
+  FOG_HEIGHT_BASE = 4 m, exponentially attenuated above with 6 m
+  falloff). Scattered radiance stays zero in 41a; 41b will sample
+  emissive geometry per froxel via TLAS shadow rays here.
+
+- volumetric_composite.slang — per-pixel raymarch through the froxel
+  column, accumulates transmittance *= exp(-extinction_per_slice) and
+  per-slice scattered radiance per Wronski 2014 / Frostbite "Adaptive
+  Volumetric Shadow Maps". Composites onto HDR as
+  final = scene * transmittance + scattered.
+
+- recordFrame extension: inject dispatch (writes froxel) → barrier →
+  composite dispatch (RW HDR, R froxel) → barrier → existing bloom
+  chain. The composite runs before bloom extraction so the bloom chain
+  operates on the fogged HDR (the fog itself can bloom).
+
+- Per-frame composite descriptor sets (x MAX_FRAMES_IN_FLIGHT). Caught
+  the classic "single descriptor set + multiple frames in flight" race
+  during build verification: updating a set while a prior frame's
+  command buffer is still pending requires per-frame copies (matches the
+  existing bloom / postprocess pattern).
+
+Visual verification: noticeable haze increasing with depth, sun has a
+soft halo, glass tower silhouette softens at base. Both fog math and
+sequencing match canonical literature; 41b will plug in real lights.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+fix: pedantic review pass on Etape 41a
+…
+1a7aeca
+```
+Three findings from a hyperfocused review of PR #103:
+
+1. CRITICAL: froxelToWorld math bug. The previous code did
+   camera_pos + ray_dir * view_z, but view_z is the linear depth along
+   camera_forward (the slice's depth in view space) while ray_dir is
+   the (non-axis-aligned) direction from camera through the NDC point.
+   Advancing by view_z along ray_dir lands at view-space depth
+   view_z * dot(ray_dir, camera_forward), which is < view_z at corner
+   pixels. For 41a's height-falloff density this only manifests as
+   slightly more fog at corners (the world-y is closer to ground than
+   it should be), but for 41b (per-froxel emissive sampling via shadow
+   rays) the wrong world position would actively miss / mis-target
+   lights. Fix: compute camera_forward in the shader from
+   inv_view_projection (unproject NDC centre, subtract camera_pos,
+   normalise) and advance by t = view_z / dot(ray_dir, camera_forward).
+   ~6 extra ALU ops per froxel; sub-microsecond on the 4090.
+
+2. Defensive: hdr_to_general barrier's dstAccessMask now includes
+   eShaderStorageWrite. The volumetric composite reads AND writes HDR
+   in-place; the prior read-only mask happened to be safe (composite's
+   read precedes its write in program order so the prior color-attach
+   write is transitively visible to the write too) but listing both is
+   self-documenting and matches what a sync-validation tool would
+   recommend.
+
+3. Defensive: static_assert on the C++ push-constant struct sizes for
+   both VolumetricInjectPushConstants (112 bytes) and
+   VolumetricCompositePushConstants (32 bytes). The struct layouts
+   match Slang's std430 byte-for-byte partly by coincidence — Mat4 in
+   the inject struct happens to land at offset 32 (16-byte aligned)
+   because the preceding 8 floats sum to exactly 32. Reordering would
+   silently diverge between C++ (no padding) and std430 (would pad).
+   The asserts catch any future reordering at compile time.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+MatejGomboc
+merged commit da2cf42
+into
+main
+Apr 26, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MatejGomboc
+deleted the
+feat/phase-8-etape-41a-volumetric-foundation
+branch
+April 26, 2026 10:39
+MatejGomboc
+mentioned this pull request
+Apr 26, 2026
+docs: refresh status — Etape 41a volumetric foundation + libs audit closed
+#104
+Merged
+5 of 10 tasks
+MatejGomboc
+added a commit
+that referenced
+this pull request
+Apr 26, 2026
+docs: missed pieces — PBR.md Volumetric Fog body section + VISION.md row
+…
+1bf03e8
+```
+The earlier docs/post-41a-status-refresh commit updated CLAUDE.md +
+README.md + TODO.md but missed two doc files with structured content:
+
+1. docs/PBR.md gained a full "Volumetric Fog" body section (between the
+   existing "Transparency and Refraction" section and References).
+   Covers froxel grid layout (160x90x64, channels, logarithmic depth),
+   the canonical scattering equation + Frostbite recurrence, density
+   injection (height-falloff + the world-position math fix from PR
+   #103), raymarch composite, Vulkan sequencing inside recordFrame,
+   and known limitations + planned 41b / 41c work.
+
+2. docs/VISION.md Rendering Requirements table gained a new row for
+   "Volumetric fog" between the Refraction row (added in Etape 40)
+   and the Light trails row (Phase 11).
+
+3. PBR.md "Last updated" footer bumped to mention Etape 41a.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+MatejGomboc
+added a commit
+that referenced
+this pull request
+Apr 26, 2026
+docs: refresh status — Etape 41a volumetric foundation + libs audit c…
+…
+402963d
+```
+…losed (#104)
+
+* docs: refresh status — Etape 41a volumetric foundation + libs audit closed
+
+Two doc-drift fixes after PRs #100-#103 merged:
+
+1. CLAUDE.md Current Status + README.md Status describe the volumetric
+   fog foundation that landed in PR #103 (160x90x64 froxel grid,
+   height-falloff density injection, Wronski 2014 raymarch composite,
+   inserted before bloom so fog can bloom). Notes that 41b (per-froxel
+   emissive sampling) and 41c (temporal reprojection) are queued.
+
+2. TODO.md "All findings from the 2026-04-26 libs/ audit addressed"
+   ticked — M1, M2, M3 all merged (PRs #100, #101, #102) so the libs
+   audit follow-up sequence is closed.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* docs: missed pieces — PBR.md Volumetric Fog body section + VISION.md row
+
+The earlier docs/post-41a-status-refresh commit updated CLAUDE.md +
+README.md + TODO.md but missed two doc files with structured content:
+
+1. docs/PBR.md gained a full "Volumetric Fog" body section (between the
+   existing "Transparency and Refraction" section and References).
+   Covers froxel grid layout (160x90x64, channels, logarithmic depth),
+   the canonical scattering equation + Frostbite recurrence, density
+   injection (height-falloff + the world-position math fix from PR
+   #103), raymarch composite, Vulkan sequencing inside recordFrame,
+   and known limitations + planned 41b / 41c work.
+
+2. docs/VISION.md Rendering Requirements table gained a new row for
+   "Volumetric fog" between the Refraction row (added in Etape 40)
+   and the Light trails row (Phase 11).
+
+3. PBR.md "Last updated" footer bumped to mention Etape 41a.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+* docs: ARCHITECTURE.md design-decisions row for volumetric scattering
+
+User flagged ARCHITECTURE.md was missed in the prior commits of this PR.
+Added one row to the Key Design Decisions table:
+
+| Volumetric scattering | Frustum-aligned voxel grid (160x90x64
+froxels) + compute shaders | AAA-standard (Frostbite, UE, Unity HDRP);
+decouples cost from screen fillrate; fits naturally with the existing
+ReSTIR / RT compute infrastructure |
+
+Slotted between the existing inline-ray-query row and the descriptor
+model row so the rendering-technique decisions cluster together.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+MatejGomboc
+mentioned this pull request
+Apr 26, 2026
+docs: polish pass — accuracy, drift, lint hygiene across all docs
+#105
+Merged
+8 of 13 tasks
+MatejGomboc
+added a commit
+that referenced
+this pull request
+Apr 26, 2026
+docs: polish pass — accuracy, drift, lint hygiene across all docs (#105)
+…
+5383873
+```
+PBR.md:
+- neonEmissiveColour snippet now matches the actual shader
+  (fmod(floor(abs(...))) — the order is load-bearing for symmetric
+  orange bands across the world origin)
+- Rendering Pipeline overview includes skybox draw, transparent pass,
+  and both volumetric compute steps; fixed post-volumetric layout
+  (HDR stays GENERAL through bloom + tonemap, not READ_ONLY)
+
+VISION.md:
+- Removed orphan single-row "Mortality" table; folded into bullet list
+- AI_INTERFACE.md is no longer "future" — link to the existing spec
+
+ARCHITECTURE.md:
+- Future Architecture section renamed (Beyond Phase 8) and rewritten
+  to reflect what has actually shipped vs what remains
+- Phase numbers corrected: AI off-screen rendering is Phase 11;
+  multiplayer is Backlog (was 9 / 10)
+
+CLAUDE.md, README.md:
+- Fixed "the fog itself bloom" typo from #103/#104
+
+markdownlint-cli2 clean across all 16 tracked Markdown files.
+
+Co-authored-by: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Sign up for free
+to subscribe to this conversation on GitHub.
+Already have an account?
+Sign in.
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

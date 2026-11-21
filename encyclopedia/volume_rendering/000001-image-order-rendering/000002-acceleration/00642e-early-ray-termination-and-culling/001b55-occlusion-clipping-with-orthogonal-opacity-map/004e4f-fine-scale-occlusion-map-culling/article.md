@@ -1,0 +1,94 @@
+# Fine-Scale Occlusion Map Culling
+Also called: Average occlusion map, Fine-Scale Occlusion Map
+## Overview
+Fine-Scale Occlusion Map Culling is a visibility culling technique that determines voxel rasterization eligibility using an occlusion map where each pixel represents the average opacity of a box-neighborhood footprint [S1, unofficial][S2, book]. It provides finer-grained culling than octree-based space skipping by operating on a per-voxel basis rather than per-node, allowing for the retention of high-frequency volume content that hierarchical decomposition might discard [S1, unofficial][S2, book].
+## How it works
+### Inputs and outputs
+- **Input**: A volume dataset, a pre-computed orthogonal opacity map (from [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md)), and the screen-space projection parameters for the current view.
+- **Output**: A boolean mask or rasterization decision for each voxel indicating whether it contributes to the final image.
+
+### Data structures
+- **Occlusion Map**: A 2D grid aligned with the screen. Each cell $(u, v)$ stores a scalar value representing the average opacity of the volume within the footprint associated with that pixel.
+- **Footprint**: A box-shaped neighborhood in screen space corresponding to the projection of a voxel or a group of voxels.
+
+### Steps
+1. **Construct the Average Occlusion Map**:
+   For each pixel in the target resolution, calculate the average opacity of all voxels whose screen-space projections fall within the pixel's footprint. This averaging process smooths the opacity data, creating a coarse representation of occlusion [S1, unofficial][S2, book].
+   
+2. **Index the Map for Voxel Culling**:
+   For each voxel to be rendered, determine its screen-space coordinate $(u_v, v_v)$ [S1, unofficial][S2, book].
+   
+3. **Evaluate Occlusion**:
+   Retrieve the value from the occlusion map at index $(u_v, v_v)$ [S1, unofficial][S2, book].
+   
+4. **Rasterization Decision**:
+   If the retrieved occlusion map value indicates that the footprint is fully opaque (or exceeds a specific threshold), the voxel is culled. Otherwise, the voxel must be rasterized [S1, unofficial][S2, book].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fine_scale_culling(voxel_screen_coords, occlusion_map, threshold=1.0):
+    """
+    Determine if a voxel should be rasterized based on the fine-scale occlusion map.
+    
+    Args:
+        voxel_screen_coords: List of (u, v) tuples representing screen coordinates of voxels.
+        occlusion_map: 2D array where each cell contains the average opacity of its footprint.
+        threshold: Opacity value above which a voxel is considered occluded.
+        
+    Returns:
+        List of booleans indicating whether each voxel should be rasterized.
+    """
+    culling_results = []
+    
+    for u, v in voxel_screen_coords:
+        # Ensure coordinates are within bounds
+        if 0 <= u < occlusion_map.width and 0 <= v < occlusion_map.height:
+            # Index the occlusion map with the voxel's screen-space coordinate
+            avg_opacity = occlusion_map[u][v]
+            
+            # Check if the footprint must be rasterized
+            # If average opacity is below threshold, the voxel is not fully occluded
+            if avg_opacity < threshold:
+                culling_results.append(True)  # Rasterize
+            else:
+                culling_results.append(False) # Cull
+        else:
+            # Out of bounds, typically rasterize or handle as error
+            culling_results.append(True)
+            
+    return culling_results
+```
+
+### Parameters
+- **Threshold**: The opacity value used to decide culling. Not given in the sources.
+- **Footprint Size**: The size of the box-neighborhood averaged per pixel. Not given in the sources.
+
+### Edge cases and pitfalls
+- **Boundary Conditions**: Voxels projecting outside the screen bounds must be handled explicitly [G].
+- **Precision**: Averaging may introduce precision errors if not managed, though specific bit-packing is not detailed [S1, unofficial][S2, book].
+- **Degenerate Input**: If the volume has no opacity, the map will be all zeros, and no culling occurs [G].
+
+## Subtopics
+
+### Orthogonal Opacity Map Creation
+The prerequisite step that generates the base opacity map. It sets up the orthogonal projection used by this method. [Orthogonal Opacity Map Creation](991-orthogonal-opacity-map-creation.md)
+
+### Hidden Volume Removal using Hierarchical Occlusion Maps
+A sibling method that uses hierarchical decomposition (octrees) for culling. Fine-Scale Occlusion Map Culling is chosen when preserving high-frequency content is more important than the large-scale culling efficiency of octrees. [Hidden Volume Removal using Hierarchical Occlusion Maps](2624-hidden-volume-removal-using-hierarchical-occlusion-maps.md)
+
+## Operating characteristics
+- **Time Complexity**: Depends on the number of voxels and the cost of indexing the occlusion map. The sources do not provide a formal complexity class.
+- **Memory Complexity**: Requires storage for the occlusion map. The size depends on the screen resolution and footprint size. Not given in the sources.
+- **Strengths**: Retains volume frequency content better than hierarchical decomposition by using averaging rather than binary culling at node levels [S1, unofficial][S2, book].
+- **Limitations**: May be less efficient for large-scale culling compared to octree-based methods [S1, unofficial].
+- **When to use**: When fine-scale visibility culling is needed without losing high-frequency details, potentially in combination with octree culling [S1, unofficial].
+- **When not to use**: When large-scale culling efficiency is the primary concern and high-frequency detail is less critical [S1, unofficial].
+
+## Background
+The method was described in the context of volume rendering acceleration, offering an alternative to octree-based space skipping. It was proposed to benefit from both large-scale culling (via octrees) and fine-scale culling (via average occlusion maps) [S1, unofficial][S2, book]. The concept is discussed in academic overviews and textbooks on volume visualization [S1, unofficial][S2, book].
+
+## Sources
+[S1] Overview of Volume Rendering, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

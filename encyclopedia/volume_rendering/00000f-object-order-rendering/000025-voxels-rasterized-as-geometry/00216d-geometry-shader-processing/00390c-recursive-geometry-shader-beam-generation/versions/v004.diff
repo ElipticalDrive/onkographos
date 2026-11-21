@@ -1,0 +1,147 @@
+--- v003.md
++++ v004.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A coarse initial grid of beam triangles (typically $16 \times 16$) in light-space [S1].
++*   **Input:** A coarse initial grid of beam triangles in light-space (typically $16 \times 16$) [S1].
+ *   **Output:** Refined beam geometry submitted to the rasterization pipeline, with attributes packed to optimize pipeline hinting [S1].
+ 
+@@ -18,13 +18,6 @@
+ 1.  **Initialization:** Generate a coarse initial grid of beam triangles in light-space. The standard resolution is $16 \times 16$ [S1].
+ 2.  **Primitive Packing:** Pack the vertices of each beam triangle into a single point primitive. This reduces the geometry shader output from 0-12 vertices to 0-4 vertices, hinting to the pipeline that specific attributes belong together and offloading part of the triangle processing to the vertex shader [S1].
+-3.  **Recursive Subdivision Loop:**
+-    *   Execute the geometry shader for a specified number of adaptive subdivision iterations (typically 3-4) [S1].
+-    *   The geometry shader performs beam extrusion separately for reflection and refraction using the same adaptive base grid [S1].
+-    *   If multiple bounces are enabled, perform an additional stream-out pass to determine intersections with the environment. After computing intersections, restart the adaptive beam refinement process [S1].
+-4.  **Surface Caustic Integration (Optional):**
+-    *   Generate an additional G-buffer for the camera view prior to caustic rendering, holding diffuse surface colors and view-space depth [S1].
+-    *   In the caustic fragment shader, sample the camera-view G-buffer.
+-    *   Perform point-in-volume tests on each surface point covered by the beam, intersecting the beam similarly to [Ernst et al. 2005] [S1].
+-    *   Smoothly attenuate the caustic effect using the difference between the screen-space depth of the caustic receiver and the depth value of the beam’s faces to avoid discontinuities [S1].
++3.  **Recursive Subdivision Loop:** Execute the geometry shader for a specified number of adaptive subdivision iterations (typically 3-4) [S1]. The geometry shader performs beam extrusion separately for reflection and refraction using the same adaptive base grid [S1]. If multiple bounces are enabled, perform an additional stream-out pass to determine intersections with the environment. After computing intersections, restart the adaptive beam refinement process [S1].
++4.  **Surface Caustic Integration (Optional):** Generate an additional G-buffer for the camera view prior to caustic rendering, holding diffuse surface colors and view-space depth [S1]. In the caustic fragment shader, sample the camera-view G-buffer [S1]. Perform point-in-volume tests on each surface point covered by the beam, intersecting the beam similarly to [Ernst et al. 2005] [S1]. Smoothly attenuate the caustic effect using the difference between the screen-space depth of the caustic receiver and the depth value of the beam’s faces to avoid discontinuities [S1].
+ 
+ **Parameters:**
+@@ -38,22 +31,19 @@
+ **Pseudocode:**
+ ```python
+-def recursive_beam_generation(coarse_grid, max_iterations):
++def recursive_beam_generation(coarse_grid, max_iterations, enable_multiple_bounces):
+     """
+     Generates caustic beams using recursive geometry shader subdivision.
+-    
+     Args:
+         coarse_grid: Initial 16x16 grid of beam triangles in light-space.
+         max_iterations: Number of adaptive subdivision steps (typically 3-4).
+-        
++        enable_multiple_bounces: Boolean flag for additional stream-out passes.
+     Returns:
+         Refined beam geometry for rasterization.
+     """
+     current_beams = coarse_grid
+-    
+     for iteration in range(max_iterations):
+         # Pack vertices of each beam triangle into a single point primitive
+-        # This hints to the pipeline that attributes belong together,
+-        # reducing geometry shader output from 0-12 to 0-4 vertices.
+-        packed_points = pack_vertices_into_points(current_beams)
++        # Reduces geometry shader output from 0-12 to 0-4 vertices, hinting attribute grouping
++        packed_points = [pack_triangle_vertices(tri) for tri in current_beams]
+         
+         # Execute geometry shader for adaptive subdivision
+@@ -61,7 +51,6 @@
+         refined_beams = geometry_shader_subdivision(packed_points)
+         
+-        # If multiple bounces are enabled, determine intersections with environment
+-        # and restart refinement. For single bounce, proceed to rasterization.
+-        if multiple_bounces_enabled:
++        if enable_multiple_bounces:
++            # Additional stream-out pass to determine intersections with environment
+             intersections = compute_environment_intersections(refined_beams)
+             # Restart refinement based on new intersections
+@@ -69,20 +58,34 @@
+         else:
+             current_beams = refined_beams
+-            
+     return current_beams
+ 
++def pack_triangle_vertices(triangle):
++    # Returns a single point primitive containing all 3 vertices
++    return Point(vertices=triangle.vertices, attributes=triangle.attributes)
++
++def geometry_shader_subdivision(points):
++    # Simulates GS execution: extrudes beams for reflection/refraction
++    # Outputs 0-4 vertices per input point
++    output = []
++    for p in points:
++        # Adaptive subdivision logic based on visual importance
++        subdivided = adaptively_subdivide(p)
++        output.extend(subdivided)
++    return output
++
++def adaptively_subdivide(point):
++    # Standard adaptive refinement step
++    return [refine_vertex(v) for v in point.vertices]
++
++def compute_environment_intersections(beams):
++    # Rasterize beams to find intersections with scene geometry
++    return [intersect_beam_with_scene(b) for b in beams]
++
++def restart_refinement(intersections):
++    # Re-initialize beam generation from intersection points
++    return generate_base_beams(intersections)
++
+ def integrate_surface_caustics(beam_geometry, g_buffer):
+-    """
+-    Integrates surface caustics using G-buffer data.
+-    
+-    Args:
+-        beam_geometry: Refined beam triangles.
+-        g_buffer: Geometry buffer with diffuse colors and view-space depth.
+-        
+-    Returns:
+-        Final caustic color contribution.
+-    """
+     caustic_color = vec3(0.0)
+-    
+     for surface_point in g_buffer:
+         # Perform point-in-volume test on surface point covered by beam
+@@ -90,12 +93,21 @@
+             # Intersect beam with surface point
+             intersection = intersect_beam_and_point(surface_point, beam_geometry)
+-            
+             # Smoothly attenuate caustic effect using depth difference
+             depth_diff = abs(surface_point.z - intersection.beam_face_depth)
+             attenuation = smooth_attenuation(depth_diff)
+-            
+             caustic_color += surface_point.diffuse_color * attenuation
+-            
+     return caustic_color
++
++def is_point_in_beam(point, beams):
++    # Standard point-in-triangle/volume test
++    return any(point_in_triangle(point, tri) for tri in beams)
++
++def intersect_beam_and_point(point, beams):
++    # Ray-triangle intersection for beam and point
++    return ray_triangle_intersect(point, beams)
++
++def smooth_attenuation(depth_diff):
++    # Linear or smoothstep attenuation to avoid discontinuities
++    return max(0.0, 1.0 - depth_diff)
+ ```
+ 
+@@ -106,11 +118,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of adaptive subdivision iterations (typically 3-4) and the number of bounces. Each iteration requires a geometry shader execution and stream-out feedback pass [S1].
++*   **Time Complexity:** Depends on the number of adaptive subdivision iterations (typically 3-4) and the number of bounces [S1]. Each iteration requires a geometry shader execution and stream-out feedback pass [S1].
+ *   **Memory Complexity:** Requires storage for the beam geometry and G-buffers (diffuse colors and view-space depth) [S1].
+ *   **Performance:** Packing vertices into point primitives improves performance by reducing geometry shader output and allowing the vertex shader to handle part of the triangle processing [S1].
+ *   **Strengths:** Adaptive subdivision allows for high-quality caustics with fewer primitives where detail is needed. Integration with G-buffers enables surface caustics [S1].
+ *   **Limitations:** Multiple bounces require additional stream-out passes. Discontinuities must be carefully handled via depth-based attenuation [S1].
+-*   **When to use:** Real-time volume and surface caustics rendering where adaptive detail is beneficial.
+-*   **When not to use:** Scenes with extremely deep bounce chains where the overhead of multiple stream-out passes becomes prohibitive.
+ 
+ ## Background

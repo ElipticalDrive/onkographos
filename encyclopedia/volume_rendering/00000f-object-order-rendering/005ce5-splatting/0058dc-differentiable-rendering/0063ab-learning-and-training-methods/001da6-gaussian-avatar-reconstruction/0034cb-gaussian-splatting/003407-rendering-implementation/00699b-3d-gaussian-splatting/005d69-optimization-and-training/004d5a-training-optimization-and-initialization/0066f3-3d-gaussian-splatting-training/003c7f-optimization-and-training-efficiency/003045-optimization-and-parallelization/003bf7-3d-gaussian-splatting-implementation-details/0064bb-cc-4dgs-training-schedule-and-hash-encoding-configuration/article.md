@@ -1,0 +1,151 @@
+# CC-4DGS Training Schedule and Hash Encoding Configuration
+
+Also called: CC-4DGS implementation details, Canonical Deformation Field (CDF) with Compression (CCA) setup
+
+## Overview
+CC-4DGS is a training and encoding configuration for dynamic Gaussian splatting that replaces learnable XOR-based hash tables with modulation-based universal hash functions, dense hash encoding, and lightweight neural decoders, combined with a three-stage optimization schedule and dynamic-score gating [S1]. It sets itself apart from siblings like [Swift4D](12925-desplat.md) by eliminating large vertex embedding tables in favor of parameterized hash functions and neural decoders, thereby reducing storage overhead while maintaining real-time rendering speeds through feature caching and dynamic separation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view video sequences (e.g., N3DV or Technicolor Light Field data), initial COLMAP point cloud, camera parameters, and hyperparameters for hash encoding and optimization.
+*   **Outputs:** Optimized Gaussian parameters (position, scale, rotation, opacity, SH coefficients), deformation field parameters, and dynamic scores for each Gaussian.
+
+**Data Structures:**
+*   **Multi-resolution Grids:** A set of 4 or 5 hash grids [S1]. The exact number is restricted by GPU memory constraints [S1].
+*   **Hash Function Parameters:**
+    *   `m`: Bucket size, an integer parameter for the hash function [S1].
+    *   `P`: Prime number, an integer parameter used alongside `m` [S1].
+*   **Neural Decoders:** Lightweight neural networks, one per grid level, mapping hash-encoded integers to continuous features [S1].
+*   **Gaussian Attributes:** Standard 3DGS attributes plus a learned scalar dynamic score `d` per Gaussian [S1].
+
+**Hash Encoding Configuration:**
+Unlike conventional approaches that store learnable vertex embeddings in large XOR-based hash tables, CC-4DGS employs modulation-based universal hash functions with dense hash encoding [S1]. The hash function maps spatial coordinates to integer indices using parameters `m` and `P` [S1]. These indices are passed to lightweight neural decoders at each grid level to produce continuous features [S1]. The bucket size `m` must be sufficiently large to limit hash collisions; preliminary tests indicate that smaller `m` values noticeably degrade PSNR [S1]. The prime `P` is used in conjunction with `m` to further limit collisions [S1].
+
+**Dynamic Score Gating:**
+Each Gaussian is assigned a learned dynamic score `d` [S1]. A scalar threshold `ζ` is defined [S1]. Deformation is applied only to Gaussians where `d > ζ` [S1]. This gating mechanism avoids unnecessary computation in static regions, improving training and rendering efficiency [S1].
+
+**Optimization Schedule:**
+The training follows a three-stage schedule [S1]:
+1.  **Stage 1 (Coarse Initialization):** Run 5,000 iterations to establish the initial canonical point cloud and base Gaussian parameters [S1].
+2.  **Stage 2 (Dynamic Score Fitting):** Run 3,000 iterations to fit the per-Gaussian dynamic score `d` [S1].
+3.  **Stage 3 (Main Optimization):** Run 20,000 iterations to jointly optimize the deformation field and the Gaussian set [S1].
+The total iteration count is 28,000 per N3DV scene [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# CC-4DGS Training Configuration and Hash Encoding
+
+# Hyperparameters
+NUM_GRIDS = 4  # Restricted to 4 or 5 due to GPU memory constraints [S1]
+BUCKET_SIZE_M = 1000000  # Example value; must be sufficiently large to limit collisions [S1]
+PRIME_P = 1000003  # Example prime value [S1]
+THETA_ZETA = 0.5  # Threshold for dynamic score [S1]
+ITERATIONS_STAGE1 = 5000
+ITERATIONS_STAGE2 = 3000
+ITERATIONS_STAGE3 = 2000
+
+# Hash Function Definition
+def universal_hash(x, y, z, m, P):
+    """
+    Modulation-based universal hash function.
+    Maps 3D coordinates to an integer index.
+    Uses bucket size m and prime P to limit collisions.
+    """
+    # Implementation detail: Standard universal hashing often involves
+    # modular arithmetic with a prime. The exact formula is not provided
+    # in the sources, but it uses m and P [S1].
+    # Placeholder for the specific modulation-based formula.
+    # A common form might be: ((a*x + b*y + c*z) % P) % m
+    # where a, b, c are random coefficients.
+    # [G] Assuming a standard linear congruential generator style hash
+    # for implementation purposes, as the exact "modulation-based"
+    # formula is not explicitly defined in the text.
+    a, b, c = random_coefficients()
+    index = ((a * x + b * y + c * z) % P) % m
+    return index
+
+# Neural Decoder Definition
+class LightweightDecoder(torch.nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        # Lightweight network to map hash indices to continuous features
+        # [S1]
+        self.network = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, 64),
+            torch.nn.ReLU(),
+            torch.nn.Linear(64, output_dim)
+        )
+
+    def forward(self, hash_index):
+        # Embed hash index to a vector, then pass through network
+        # [S1]
+        # Note: hash_index is an integer. It must be embedded.
+        # [G] Assuming a simple embedding layer or one-hot encoding
+        # followed by linear projection, as "lightweight neural decoder"
+        # is vague.
+        embedded = self.embedding(hash_index)
+        return self.network(embedded)
+
+# Training Loop
+def train_cc_4dgs(scene_data, initial_gaussians):
+    # Initialize Gaussians with COLMAP prior [S1]
+    gaussians = initial_gaussians
+    
+    # Initialize Deformation Field and Decoders
+    # One decoder per grid level [S1]
+    decoders = [LightweightDecoder(input_dim, output_dim) for _ in range(NUM_GRIDS)]
+    
+    # Initialize Dynamic Scores
+    dynamic_scores = torch.zeros(len(gaussians))
+    
+    # Stage 1: Coarse Initialization
+    for i in range(ITERATIONS_STAGE1):
+        # Render and compute loss
+        # Optimize base Gaussian parameters (position, scale, rotation, opacity, SH)
+        # [S1]
+        pass
+        
+    # Stage 2: Dynamic Score Fitting
+    for i in range(ITERATIONS_STAGE2):
+        # Render and compute loss
+        # Optimize dynamic scores d for each Gaussian
+        # [S1]
+        pass
+        
+    # Stage 3: Main Optimization
+    for i in range(ITERATIONS_STAGE3):
+        # Render and compute loss
+        # For each Gaussian:
+        #   if dynamic_score > THETA_ZETA:
+        #       apply deformation field
+        #   else:
+        #       skip deformation
+        # [S1]
+        # Jointly optimize deformation field and Gaussian set
+        # [S1]
+        pass
+        
+    return gaussians, decoders, dynamic_scores
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** Using a bucket size `m` that is too small leads to noticeable PSNR degradation [S1].
+*   **Memory Constraints:** The number of multi-resolution grids is limited to 4 or 5 due to GPU memory limits [S1].
+*   **Static Regions:** Failing to use the dynamic score threshold `ζ` results in unnecessary computation in static areas [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method achieves real-time rendering speeds. On the Technicolor dataset, it reaches 64.7 FPS (CDF) and 64.6 FPS (CDF+CCA) on a single NVIDIA RTX 4090 GPU [S1].
+*   **Memory Complexity:** Storage is significantly reduced. The CDF component alone reduces model size to a few tens of megabytes [S1]. The full CDF+CCA system achieves approximately 30 MB storage on N3DV and 32 MB on Technicolor [S1].
+*   **Performance:**
+    *   **N3DV Dataset:** PSNR in the low 32 dB range, SSIM approximately 0.94 [S1].
+    *   **Technicolor Dataset:** CDF configuration achieves PSNR 33.29 dB, SSIM 0.912, 64.7 FPS [S1]. CDF+CCA achieves PSNR 33.30 dB, SSIM 0.912, 64.6 FPS, ~32 MB storage [S1].
+*   **Strengths:** Superior trade-off among storage efficiency, reconstruction quality, and rendering speed compared to baselines like Swift4D and 4DGS [S1]. Feature caching and dynamic separation maintain real-time performance despite the use of neural decoders [S1].
+*   **Limitations:** The number of grid levels is constrained by GPU memory [S1]. The method requires careful tuning of the hash bucket size `m` to avoid PSNR degradation [S1].
+
+## Background
+CC-4DGS was introduced in the paper "CC-4DGS: Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting" [S1]. It builds on prior work such as 4DGS and Swift4D, aiming to address the high storage costs associated with dynamic Gaussian splatting methods that rely on large hash tables [S1]. The method is evaluated on the Neural 3D Video (N3DV) dataset and the Technicolor Light Field dataset [S1].
+
+## Sources
+[S1] CC-4DGS: Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3721136, fetched 2026-10-27

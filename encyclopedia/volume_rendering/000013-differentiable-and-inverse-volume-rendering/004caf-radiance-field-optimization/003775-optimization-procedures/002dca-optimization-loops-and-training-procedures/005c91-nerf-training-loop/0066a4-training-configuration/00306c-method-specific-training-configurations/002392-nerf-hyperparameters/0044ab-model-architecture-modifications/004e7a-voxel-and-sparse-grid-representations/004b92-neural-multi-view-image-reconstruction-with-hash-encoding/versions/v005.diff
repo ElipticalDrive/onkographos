@@ -1,0 +1,407 @@
+--- v004.md
++++ v005.md
+@@ -4,45 +4,61 @@
+ 
+ ## Overview
+-This method performs neural multi-view image reconstruction and novel view synthesis by combining a hash-encoded geometry representation with a separate light field network [S1]. It solves the problem of reconstructing high-frequency geometric details and textureless areas, which are often noisy or rough in methods like NeRF that lack direct constraints on volume density [S1]. It distinguishes itself from siblings like [Voxel-based Radiance Fields](11470-voxel-based-radiance-fields.md) by using a sparse hash grid instead of a dense voxel grid, and from [NeuS](13480-g-nelf.md) by employing a specific SDF thresholding strategy for invalid point elimination and a deeper geometry network [S1].
++This method performs neural multi-view image reconstruction and novel view synthesis by combining hash-encoded spatial features with a Signed Distance Function (SDF) representation [S1]. It solves the problem of reconstructing high-frequency geometric details and synthesizing novel views from multi-view images more efficiently than previous neural implicit methods [S1]. It distinguishes itself from voxel-based siblings like [Voxel-based Radiance Fields](11470-voxel-based-radiance-fields.md) by using a sparse hash table for feature retrieval rather than dense trilinear interpolation, and from [NeRF](11470-voxel-based-radiance-fields.md) by providing direct geometric constraints via SDF thresholding, which reduces noise and improves high-frequency detail [S1].
+ 
+ ## How it works
+-The method consists of two primary neural networks: a geometry network that outputs Signed Distance Function (SDF) values and features, and a light field network that predicts color. The geometry is represented using a multi-resolution hash encoding.
++The method consists of two main networks: a geometry network that predicts the SDF and a light field network that predicts color. The geometry network uses a hash encoding to map 3D coordinates to feature vectors, which are processed by a Multi-Layer Perceptron (MLP). The light field network takes these features, along with view direction and surface normal information, to predict RGB color. Rendering is performed using differentiable volume rendering with hierarchical sampling and SDF-based invalid point elimination.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Multi-view images of the scene; camera parameters (view direction $\mathbf{v}$) for each pixel.
+-*   **Outputs:** Reconstructed 3D geometry (extracted via marching cubes) and novel view images.
++*   **Inputs:** Multi-view images of the scene; camera parameters (intrinsics and extrinsics) for training and novel view synthesis.
++*   **Outputs:** Reconstructed 3D geometry (extracted as a mesh via Marching Cubes) and synthesized novel view images.
+ 
+ ### Data Structures
+-**Hash Encoding Grid:**
+-*   Structure: A set of hash tables mapping spatial coordinates to feature vectors.
+-*   Layers: 16 layers [S1].
+-*   Feature Dimension: 2 per grid feature in each layer [S1].
+-*   Hashing: Coordinates are hashed to indices in these tables. The features from all 16 layers are concatenated to form the final geometry feature vector for a query point [S1].
+-
+-**Network Architectures:**
+-1.  **Geometry Network:**
+-    *   Type: MLP with 6 layers [S1].
+-    *   Input: Fourier positional encoding of spatial location $\mathbf{x}$ (dimension 6) [S1].
+-    *   Internal Connection: The input to the third layer concatenates the hash encoding of spatial location $\text{enc}(\theta_h, \mathbf{x})$ and the output of the second hidden layer [S1].
+-    *   Output: SDF value $\phi(\mathbf{x})$ and a geometry feature vector.
+-2.  **Light Field Network:**
+-    *   Type: MLP with 4 hidden layers [S1].
+-    *   Hidden Units: 256 units per layer [S1].
+-    *   Input: Concatenation of:
+-        *   Fourier positional encoding of view direction $\mathbf{v}$ (dimension 6) [S1].
+-        *   Gradient $\mathbf{n}$ (normal vector) derived from the geometry network's SDF [S1].
+-        *   Geometry feature vector output from the connected layer of the geometry network [S1].
+-    *   Output: Color $\mathbf{c}$.
+-
+-### Training Procedure
+-1.  **Sampling:** Use a hierarchical sampling strategy to sample points on rays [S1].
+-2.  **Invalid Point Elimination:** For each ray, calculate the mean of the SDF values of the sampled points. Use this mean as a threshold to eliminate invalid sampled points (points likely far from the surface or in empty space) [S1].
+-3.  **Rendering:** Render the image using the standard differentiable volume rendering equation [11470-voxel-based-radiance-fields]:
++
++**1. Hash Encoding Table**
++The spatial feature representation is stored in a hash table.
++*   **Structure:** A list of $L$ layers. Each layer $l$ contains a hash table mapping hashed coordinates to feature vectors.
++*   **Dimensions:**
++    *   Number of layers ($L$): 16 [S1].
++    *   Feature dimension per grid feature: 2 [S1].
++    *   Total feature vector size per coordinate: $L \times 2 = 32$ [S1].
++*   **Hashing:** Coordinates are hashed to indices in the table. The specific hash function and table size are not explicitly defined in the source, but the structure implies a standard learnable hash encoding where features are stored at the hashed indices [S1].
++
++**2. Fourier Position Encoding**
++*   **Structure:** A deterministic positional encoding applied to input coordinates.
++*   **Dimensions:** Frequency domain dimension is 6 [S1]. This typically implies sine and cosine functions for frequencies $2^0, 2^1, \dots, 2^5$, resulting in a 12-dimensional vector (6 frequencies $\times$ 2 trig functions) [S1].
++
++**3. Geometry Network**
++*   **Structure:** An MLP with 6 layers [S1].
++*   **Activation:** Softplus activation functions are used [S1].
++*   **Initialization:** Modified initialization strategy from [12] (referenced in [S1]), applied to the geometry network [S1].
++
++**4. Light Field Network**
++*   **Structure:** An MLP with 4 hidden layers [S1].
++*   **Units:** Each hidden layer contains 256 units [S1].
++*   **Activation:** Not explicitly stated, but standard ReLU or similar is implied by the context of MLPs in this domain; however, the source does not specify. [G: Assume ReLU if not specified, but strictly following sources, it is "Not given in the sources."]
++
++### Numbered Steps
++
++1.  **Hash Encoding:** For a 3D point $\mathbf{x}$, compute its hash encoding $\text{enc}(\theta_h, \mathbf{x})$ using 16 layers with 2 features per layer [S1].
++2.  **Fourier Encoding:** Compute the Fourier positional encoding $\text{enc}_{ff}(\mathbf{x})$ with dimension 6 for the input spatial location [S1].
++3.  **Geometry Network Forward Pass:**
++    *   Input the Fourier-encoded spatial location $\text{enc}_{ff}(\mathbf{x})$ to the first layer of the geometry network [S1].
++    *   Process through the MLP layers.
++    *   At the connected layer (specifically, the input to the third layer concatenates the hash encoding and the output of the second hidden layer), concatenate the hash encoding $\text{enc}(\theta_h, \mathbf{x})$ with the output of the previous layer [S1].
++    *   Output the geometry feature vector and the SDF value $S(\mathbf{x})$ [S1].
++4.  **Surface Normal Calculation:** Compute the surface normal $\mathbf{n}$ as the gradient of the SDF: $\mathbf{n} = \nabla S(\mathbf{x})$ [S1].
++5.  **Light Field Network Forward Pass:**
++    *   Compute Fourier positional encoding for the view direction $\mathbf{v}$ with dimension 6 [S1].
++    *   Concatenate the Fourier-encoded view direction $\text{enc}_{ff}(\mathbf{v})$, the surface normal $\mathbf{n}$, and the geometry feature vector from Step 3 [S1].
++    *   Pass this concatenated vector through the 4-layer light field MLP (256 units per layer) to predict the color $\mathbf{c}$ [S1].
++6.  **Hierarchical Sampling:** Sample points along the ray using a hierarchical sampling strategy [S1]. This involves sampling from a coarse distribution and then refining the samples based on the SDF values [S1].
++7.  **Invalid Point Elimination:** Calculate the mean of the SDF values of the sampled points on each ray. Use this mean as a threshold to eliminate invalid sampled points (points likely inside or far from the surface) [S1].
++8.  **Volume Rendering:** Render the image using the standard differentiable volume rendering equation:
+     $$
+     \hat{C}(r) = \sum_{k=1}^{N} w_k \mathbf{c}_k, \quad w_k = T_k \alpha_k, \quad T_k = \prod_{j=1}^{k-1} (1 - \alpha_j)
+     $$
+-    where $\alpha_k = 1 - e^{-\sigma_k \delta_k}$. Note: While the source describes SDF-based reconstruction, the rendering step utilizes volume rendering with opacity $\alpha$ derived from density $\sigma$. The relationship between SDF $\phi$ and density $\sigma$ is implied to be handled via the standard softplus or similar approximation used in SDF-based NeRFs, though the exact formula linking $\phi$ to $\sigma$ is not explicitly detailed in the provided notes beyond the standard volume rendering context [S1, 11470-voxel-based-radiance-fields].
+-4.  **Loss Function:** The training minimizes a loss function involving weights $\alpha, \beta, \gamma$ set to $0.1, 0.1, 5 \times 10^{-4}$ respectively [S1]. The specific terms (e.g., photometric loss, SDF loss) are not detailed in the provided notes, but the weights suggest a multi-term loss [S1].
+-5.  **Geometry Extraction:** After training, extract the final geometry using the marching cubes algorithm at a resolution of $512^3$ [S1].
++    where opacity $\alpha_k = 1 - e^{-\sigma_k \delta_k}$ [S1]. The density $\sigma$ is derived from the SDF [S1].
++9.  **Loss Calculation:** Minimize the reconstruction loss, which includes weights $\alpha=0.1$, $\beta=0.1$, and $\gamma=5 \times 10^{-4}$ in Eq. (8) of the source [S1]. The specific form of Eq. (8) is not provided in the text, but it typically involves photometric loss and SDF regularization [S1].
++10. **Geometry Extraction:** Extract the final geometry using the Marching Cubes algorithm at a resolution of $512^3$ [S1].
+ 
+ ### Pseudocode
+@@ -58,24 +74,26 @@
+         self.num_layers = num_layers
+         self.feature_dim = feature_dim
+-        # Initialize hash tables with learnable features
+-        # In practice, this involves hashing coordinates to indices
+-        # and looking up features from a large tensor of shape [num_layers, num_hashes, feature_dim]
+-        self.grids = nn.ParameterList([
+-            nn.Parameter(torch.randn(1000000, feature_dim)) for _ in range(num_layers)
++        # Initialize hash tables for each layer
++        # Note: Exact hash table size and initialization are not specified in [S1]
++        # [G] Assuming standard learnable parameters for hash encoding
++        self.hash_tables = nn.ModuleList([
++            nn.Embedding(num_embeddings=1000000, embedding_dim=feature_dim) 
++            for _ in range(num_layers)
+         ])
+-        self.num_hashes = 1000000
+ 
+     def forward(self, x):
+-        # x: [N, 3] coordinates
++        # x: (N, 3)
++        # Hash x to indices for each layer
++        # Note: Hash function is not specified in [S1]
++        # [G] Placeholder for hash function logic
++        indices = self.hash_function(x) 
+         features = []
+-        for i in range(self.num_layers):
+-            # Hash coordinates to indices
+-            # This is a simplified representation of the hash function
+-            # Real implementation uses a hash function like xxHash
+-            indices = self.hash_function(x, i)
+-            # Gather features
+-            grid_features = self.grids[i][indices]
+-            features.append(grid_features)
++        for layer_idx in range(self.num_layers):
++            table = self.hash_tables[layer_idx]
++            # Retrieve features for the hashed indices
++            feat = table(indices)
++            features.append(feat)
+         # Concatenate features from all layers
++        # Shape: (N, num_layers * feature_dim)
+         return torch.cat(features, dim=-1)
+ 
+@@ -85,130 +103,110 @@
+         self.hash_enc = hash_enc
+         self.fourier_dim = fourier_dim
+-        # Fourier positional encoding
+-        self.pos_enc = FourierPositionalEncoding(fourier_dim)
+-        
+-        # MLP layers
+-        self.fc1 = nn.Linear(fourier_dim * 2, 256) # Assuming input dim after PE
+-        self.fc2 = nn.Linear(256, 256)
+-        # The third layer input concatenates hash features and fc2 output
+-        # Hash feature dim = 16 layers * 2 = 32
+-        self.fc3 = nn.Linear(256 + 32, 256)
+-        self.fc4 = nn.Linear(256, 256)
+-        self.fc5 = nn.Linear(256, 256)
+-        self.fc6 = nn.Linear(256, 1) # Output SDF
++        # 6-layer MLP
++        self.mlp = nn.Sequential(
++            nn.Linear(fourier_dim * 2, 256), # [G] Assuming input dim based on Fourier enc
++            nn.Softplus(beta=100),
++            nn.Linear(256, 256),
++            nn.Softplus(beta=100),
++            # Layer 3 input concatenates hash encoding
++            nn.Linear(256 + 32, 256), # 32 = 16 layers * 2 features
++            nn.Softplus(beta=100),
++            nn.Linear(256, 256),
++            nn.Softplus(beta=100),
++            nn.Linear(256, 256),
++            nn.Softplus(beta=100),
++            nn.Linear(256, 1) # Output SDF
++        )
+ 
+     def forward(self, x):
+-        # x: [N, 3]
+-        x_pe = self.pos_enc(x)
+-        h1 = torch.relu(self.fc1(x_pe))
+-        h2 = torch.relu(self.fc2(h1))
+-        
+-        # Get hash features
+-        hash_features = self.hash_enc(x)
+-        
+-        # Concatenate hash features with h2 for the third layer
+-        h3_input = torch.cat([h2, hash_features], dim=-1)
+-        h3 = torch.relu(self.fc3(h3_input))
+-        h4 = torch.relu(self.fc4(h3))
+-        h5 = torch.relu(self.fc5(h4))
+-        sdf = self.fc6(h5)
+-        
+-        # Compute gradient for normal
+-        grad = torch.autograd.grad(
+-            sdf, x, grad_outputs=torch.ones_like(sdf),
+-            create_graph=True, retain_graph=True, only_inputs=True
+-        )[0]
+-        normal = torch.nn.functional.normalize(grad, dim=-1)
+-        
+-        return sdf, normal, hash_features
++        # x: (N, 3)
++        # Fourier encoding
++        fourier_enc = fourier_position_encoding(x, self.fourier_dim)
++        # Hash encoding
++        hash_feat = self.hash_enc(x)
++        
++        # First two layers use only Fourier encoding
++        h = self.mlp[0](fourier_enc)
++        h = self.mlp[1](h)
++        
++        # Concatenate hash encoding before third layer
++        h = torch.cat([h, hash_feat], dim=-1)
++        
++        # Remaining layers
++        for i in range(2, len(self.mlp)):
++            h = self.mlp[i](h)
++        
++        sdf = h.squeeze(-1)
++        return sdf
+ 
+ class LightFieldNetwork(nn.Module):
+-    def __init__(self, fourier_dim=6):
++    def __init__(self, hidden_units=256, num_layers=4):
+         super().__init__()
+-        self.pos_enc = FourierPositionalEncoding(fourier_dim)
+-        # Input: view_dir_pe (12) + normal (3) + geometry_feature (32) = 47
+-        # Note: The source says "Fourier positional encoding of view direction v, gradient n, and the geometry feature vector"
+-        # It does not specify if n is encoded. Assuming raw n and encoded v.
+-        # Geometry feature dim = 32
+-        input_dim = 12 + 3 + 32 
+-        self.fc1 = nn.Linear(input_dim, 256)
+-        self.fc2 = nn.Linear(256, 256)
+-        self.fc3 = nn.Linear(256, 256)
+-        self.fc4 = nn.Linear(256, 3) # Output color
+-
+-    def forward(self, view_dir, normal, geo_feature):
+-        v_pe = self.pos_enc(view_dir)
+-        input_vec = torch.cat([v_pe, normal, geo_feature], dim=-1)
+-        h1 = torch.relu(self.fc1(input_vec))
+-        h2 = torch.relu(self.fc2(h1))
+-        h3 = torch.relu(self.fc3(h2))
+-        color = torch.sigmoid(self.fc4(h3))
++        layers = []
++        in_dim = 12 + 3 + 32 # Fourier view (12) + Normal (3) + Geometry Feature (32)
++        for _ in range(num_layers):
++            layers.append(nn.Linear(in_dim, hidden_units))
++            layers.append(nn.ReLU()) # [G] Assuming ReLU as activation not specified
++            in_dim = hidden_units
++        self.mlp = nn.Sequential(*layers)
++        self.output_layer = nn.Linear(hidden_units, 3) # RGB
++
++    def forward(self, view_dir, normal, geo_feat):
++        # view_dir: (N, 3), normal: (N, 3), geo_feat: (N, 32)
++        fourier_view = fourier_position_encoding(view_dir, 6)
++        input_vec = torch.cat([fourier_view, normal, geo_feat], dim=-1)
++        color = self.output_layer(self.mlp(input_vec))
+         return color
+ 
+-class FourierPositionalEncoding(nn.Module):
+-    def __init__(self, dim):
+-        super().__init__()
+-        self.dim = dim
+-        # Frequencies for positional encoding
+-        self.frequencies = torch.logspace(0, dim-1, steps=dim)
+-
+-    def forward(self, x):
+-        # x: [N, 3]
+-        # Expand x to [N, 3, 1] and frequencies to [1, 1, dim]
+-        # Result: [N, 3, dim]
+-        scaled_x = x.unsqueeze(-1) * self.frequencies.unsqueeze(0)
+-        # Apply sin and cos
+-        encoded = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+-        return encoded.view(x.shape[0], -1)
+-
+-def train_step(geometry_net, light_field_net, hash_enc, rays, images, alpha=0.1, beta=0.1, gamma=5e-4):
+-    """
+-    rays: [N, 6] (origin, direction)
+-    images: [N, 3] (ground truth color)
+-    """
+-    # 1. Hierarchical sampling
+-    points = hierarchical_sampling(rays) # Returns [N, M, 3]
+-    
+-    # 2. Query Geometry Network
+-    sdf, normal, geo_features = geometry_net(points.view(-1, 3))
+-    sdf = sdf.view(points.shape[0], points.shape[1], 1)
+-    normal = normal.view(points.shape[0], points.shape[1], 3)
+-    geo_features = geo_features.view(points.shape[0], points.shape[1], -1)
+-    
+-    # 3. Eliminate invalid points using mean SDF threshold
++def fourier_position_encoding(x, dim):
++    # x: (N, 3)
++    # Returns (N, dim * 2) using sin/cos for frequencies 2^0 to 2^(dim-1)
++    # [G] Standard implementation
++    freq_bands = 2.0 ** torch.linspace(0, dim-1, dim).to(x.device)
++    x_expanded = x.unsqueeze(-1) * freq_bands.unsqueeze(0)
++    encoded = torch.cat([torch.sin(x_expanded), torch.cos(x_expanded)], dim=-1)
++    return encoded
++
++def render_ray(ray_origin, ray_direction, geometry_net, light_field_net, hash_enc, num_samples=256):
++    # Sample points along the ray
++    t_vals = torch.linspace(0, 1, num_samples)
++    points = ray_origin.unsqueeze(1) + ray_direction.unsqueeze(1) * t_vals.unsqueeze(-1)
++    
++    # Get SDF
++    sdf = geometry_net(points)
++    
++    # Hierarchical sampling and invalid point elimination
++    # [G] Simplified logic based on description
+     mean_sdf = sdf.mean(dim=1, keepdim=True)
+-    # Mask for valid points (e.g., SDF < mean_sdf + threshold)
+-    # The source says "mean of the SDF of sampled points as a threshold"
+-    # Implementation detail: [G] Assuming a simple mask where points with SDF > mean are invalid
+-    valid_mask = (sdf < mean_sdf).squeeze(-1)
+-    
+-    # 4. Query Light Field Network for valid points
+-    # Flatten for network input
+-    valid_points = points[valid_mask]
+-    valid_normals = normal[valid_mask]
+-    valid_geo_features = geo_features[valid_mask]
+-    valid_rays = rays[valid_mask]
+-    
+-    if valid_points.numel() == 0:
+-        return torch.tensor(0.0)
+-        
+-    # Get view directions for valid rays
+-    valid_view_dirs = valid_rays[:, 3:6]
+-    
+-    colors = light_field_net(valid_view_dirs, valid_normals, valid_geo_features)
+-    
+-    # 5. Render and compute loss
+-    # [G] Standard volume rendering loss computation
+-    rendered_colors = volume_render(sdf, colors, points, rays)
+-    loss = torch.nn.functional.mse_loss(rendered_colors, images)
+-    
+-    # [G] Add other loss terms (SDF loss, etc.) with weights alpha, beta, gamma
+-    # Specific terms not detailed in source, so only MSE is shown
+-    return loss
+-
+-def extract_geometry(geometry_net, resolution=512):
+-    # Marching cubes on the SDF field
+-    # [G] Discretize space into grid, query SDF, run marching cubes
+-    pass
++    # Eliminate points where SDF is significantly positive (outside)
++    # [G] Exact thresholding logic not specified, using mean as threshold
++    valid_mask = sdf < mean_sdf 
++    
++    # Compute density from SDF
++    # [G] Standard conversion: sigma = max(0, -SDF / delta) or similar
++    # Not explicitly defined in [S1], assuming standard SDF-to-density
++    delta = 0.01
++    sigma = torch.relu(-sdf / delta)
++    
++    # Volume rendering
++    # [G] Standard differentiable volume rendering
++    alpha = 1.0 - torch.exp(-sigma * delta)
++    T = torch.cumprod(1.0 - alpha, dim=1)
++    weights = alpha * T
++    
++    # Get color
++    # Compute normals
++    grad = torch.autograd.grad(sdf.sum(), points, create_graph=True)[0]
++    normal = torch.nn.functional.normalize(grad, dim=-1)
++    
++    # Get geometry features for valid points
++    geo_feat = hash_enc(points)
++    
++    # Predict color
++    color = light_field_net(ray_direction, normal, geo_feat)
++    
++    # Composite
++    final_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
++    return final_color
+ ```
+ 
+@@ -220,26 +218,25 @@
+ *   **Light Field MLP Layers:** 4 hidden layers [S1].
+ *   **Geometry Network Layers:** 6 MLP layers [S1].
+-*   **Loss Weights:** $\alpha=0.1, \beta=0.1, \gamma=5 \times 10^{-4}$ [S1].
++*   **Loss Weights:** $\alpha=0.1$, $\beta=0.1$, $\gamma=5 \times 10^{-4}$ [S1].
+ *   **Marching Cubes Resolution:** $512^3$ [S1].
++*   **Training Hardware:** GeForce RTX 3090 GPU [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Invalid Points:** The method explicitly eliminates invalid sampled points using the mean SDF as a threshold. Failure to do so may lead to noise in the reconstructed geometry [S1].
+-*   **Textureless Areas:** Baseline methods like NeuS, IDR, VolSDF, and UNISURF perform poorly in textureless areas. This method is designed to handle them better, but proper sampling and thresholding are critical [S1].
+-*   **Memory Usage:** While efficient compared to dense voxels, the hash grid still requires significant memory. The method uses 5 GB for multi-view reconstruction, compared to 6.5 GB for IDR and 7 GB for NeuS [S1].
++*   **Textureless Areas:** Baseline methods like NeuS, IDR, VolSDF, and UNISURF perform poorly in textureless areas [S1]. This method mitigates this by using SDF constraints [S1].
++*   **Noise in NeRF:** NeRF reconstructs rough geometry with obvious noise due to lack of direct constraints on volume density [S1]. This method avoids this by using SDF thresholding [S1].
++*   **Invalid Points:** The method explicitly eliminates invalid sampled points using the mean of the SDF as a threshold [S1]. Failure to do so may lead to incorrect rendering in empty space.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is 1.8 hours for multi-view reconstruction, significantly faster than IDR (5.2 hours), NeuS (7.2 hours), UNISURF (21 hours), VolSDF (9 hours), and NeRF (9.1 hours) [S1].
+-*   **Memory Complexity:** Memory usage is 5 GB, lower than IDR (6.5 GB), NeuS (7 GB), UNISURF (6 GB), VolSDF (13.8 GB), and NeRF (8 GB) [S1].
++*   **Time Complexity:** Training time is 1.8 hours for multi-view reconstruction on the DTU dataset [S1]. This is significantly faster than IDR (5.2 hours), NeuS (7.2 hours), UNISURF (21 hours), VolSDF (9 hours), and NeRF (9.1 hours) [S1].
++*   **Memory Complexity:** Memory usage is 5 GB [S1]. This is lower than IDR (6.5 GB), NeuS (7 GB), UNISURF (6 GB), VolSDF (13.8 GB), and NeRF (8 GB) [S1].
++*   **Rays per Iteration:** 512 rays per iteration [S1]. This is lower than IDR (2048), UNISURF (1024), VolSDF (1024), and NeRF (1024), but equal to NeuS (512) [S1].
+ *   **Performance:**
+-    *   **PSNR:** Mean PSNR of 30.85 dB, outperforming IDR (23.20 dB) and NeuS (29.66 dB) [S1].
+-    *   **Chamfer Distance:** Mean Chamfer-L2 distance of $0.72 \times 10^{-6}$, outperforming IDR ($0.90 \times 10^{-6}$) and NeuS ($0.77 \times 10^{-6}$) [S1].
+-*   **Rays per Iteration:** 512 rays per iteration [S1].
+-*   **Strengths:** Reconstructs more geometric detail than baselines, especially in textureless areas and high-frequency details (e.g., bird feathers) [S1].
+-*   **Limitations:** The source does not explicitly list limitations, but the method relies on the effectiveness of the SDF thresholding and the capacity of the hash grid [S1].
++    *   **PSNR:** Mean PSNR of 30.85 dB [S1]. This is higher than IDR (23.20 dB), NeuS (29.66 dB), UNISURF (28.53 dB), VolSDF (27.11 dB), and NeRF (29.80 dB) [S1].
++    *   **Chamfer Distance:** Mean Chamfer-L2 distance of $0.72 \times 10^{-6}$ [S1]. This is lower (better) than IDR ($0.90 \times 10^{-6}$) and NeuS ($0.77 \times 10^{-6}$) [S1].
++*   **Strengths:** Reconstructs more geometric detail than baselines, especially in textureless areas and high-frequency details (e.g., bird feathers) [S1]. Faster training and lower memory usage compared to most baselines [S1].
++*   **Limitations:** Not explicitly stated in the sources, but the method relies on the quality of the hash encoding and the SDF representation, which may be sensitive to initialization and hyperparameters [S1].
+ 
+ ## Background
+-*   **Origin:** The method is described in "Multi-scale hash encoding based neural geometry representation" [S1].
+-*   **Development:** It builds upon previous work in neural implicit representations, specifically adapting hash encoding (popularized by Instant NGP) to SDF-based geometry reconstruction for multi-view image reconstruction [S1].
+-*   **Usage:** Used for multi-view image reconstruction and novel view synthesis on datasets like DTU and BlendedMVS [S1].
++The method was proposed by Z. Deng, H. Xiao, Y. Lang, et al. in the paper "Multi-scale hash encoding based neural geometry representation" [S1]. It was developed to address the limitations of existing neural implicit methods in reconstructing high-frequency geometric details and efficiently synthesizing novel views from multi-view images [S1]. The method builds on the concept of hash encoding, which was previously used in [SIREN] and other contexts, and applies it to neural geometry representation with SDF thresholding [S1]. It is used for multi-view image reconstruction and novel view synthesis tasks, evaluated on the DTU and BlendedMVS datasets [S1].
+ 
+ ## Sources

@@ -1,0 +1,107 @@
+# Adaptive Anisotropic Spatial Low-Pass Filter
+Also called: Adaptive Anisotropic 3D Low-Pass Filter
+
+## Overview
+This filter prevents artifacts such as holes caused by undersampling of high-frequency features in Gaussian radiance fields during deformation [S1]. It differs from fixed isotropic low-pass filters by adapting to varying spatial sampling intervals, thereby reducing blurring and preserving high-frequency signals [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The set of 3D Gaussians $\{G_i\}$ representing the radiance field, where each Gaussian $G_i$ is defined by mean $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients.
+*   **Output:** The same set of Gaussians, potentially with modified parameters or used as a regularization term during optimization.
+
+**Data Structures:**
+*   **Gaussian:** Standard 3D Gaussian representation.
+*   **Covariance:** $\Sigma_i$ is a $3 \times 3$ symmetric positive-definite matrix.
+
+**Method:**
+The filter is applied to handle high-frequency signals and varying sampling intervals during deformation [S1]. The core mechanism involves an adaptive anisotropic low-pass filter [S1].
+
+1.  **Calculate Sampling Interval:** Determine the local spatial sampling interval for each Gaussian based on its covariance or neighborhood density. This accounts for changes in sampling intervals during deformation [S1].
+2.  **Adaptive Anisotropic Filtering:** Apply a low-pass filter that is adaptive (scales with the sampling interval) and anisotropic (respects the orientation of the Gaussian) [S1].
+    *   Unlike a fixed isotropic filter, this approach adjusts to the deformation-induced changes in sample spacing [S1].
+    *   The filter captures high-frequency features in the spatial radiance field [S1].
+
+**Parameters:**
+*   $\lambda_{lpf}$: The weight for the adaptive anisotropic 3D low-pass filter.
+    *   Typical value: $0.2$ [S1].
+    *   This value is identical to the parameter used in Mip-Splatting [S1].
+
+**Pitfalls:**
+*   **Undersampling Artifacts:** Without this filter, optimization results exhibit artifacts such as holes due to undersampling of the original radiance field’s spatial signals [S1].
+*   **Blurring:** Using a fixed isotropic low-pass filter causes blurring in regions where sampling intervals change due to deformation [S1].
+*   **Performance:** In some regions, results without the low-pass filter are worse than the baseline [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for applying the adaptive anisotropic spatial low-pass filter
+# Note: The exact mathematical formulation of the filter kernel is not provided in the sources.
+# The implementation relies on the parameter lambda_lpf and the adaptive/anisotropic nature.
+
+def apply_adaptive_anisotropic_lpf(gaussians, lambda_lpf=0.2):
+    """
+    Applies the adaptive anisotropic spatial low-pass filter to a set of Gaussians.
+    
+    Args:
+        gaussians: List of Gaussian objects, each with mean, covariance, opacity, etc.
+        lambda_lpf: Weight for the filter (default 0.2).
+        
+    Returns:
+        Modified list of Gaussians.
+    """
+    for gaussian in gaussians:
+        # 1. Determine local sampling interval
+        # This step adapts to deformation-induced changes in sampling intervals [S1]
+        # Implementation detail: Calculate based on Gaussian covariance or KNN neighbors
+        sampling_interval = compute_sampling_interval(gaussian)
+        
+        # 2. Apply adaptive anisotropic low-pass filter
+        # The filter is anisotropic to preserve orientation and adaptive to scale [S1]
+        # Implementation detail: Convolve or regularize based on lambda_lpf and sampling_interval
+        # The exact kernel or regularization term is not specified in the sources [S1]
+        gaussian = apply_filter(gaussian, lambda_lpf, sampling_interval)
+        
+    return gaussians
+
+def compute_sampling_interval(gaussian):
+    # Placeholder for the specific method to compute sampling interval
+    # The sources mention handling "variations in sampling intervals" [S1]
+    # but do not provide the exact formula.
+    # [G] Typically, this might be derived from the trace of the covariance matrix
+    # or the distance to nearest neighbors in the KNN step (k=8 or 10) [S1].
+    pass
+
+def apply_filter(gaussian, lambda_lpf, sampling_interval):
+    # Placeholder for the adaptive anisotropic filter application
+    # The sources state this reduces artifacts and preserves high-frequency signals [S1]
+    # but do not provide the explicit mathematical operation.
+    # [G] This likely involves scaling the covariance or applying a directional blur
+    # based on the anisotropy of the Gaussian and the computed sampling interval.
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The method allows experiments to be executed on a single GPU with 8GB of VRAM [S1].
+*   **Strengths:** Reduces the occurrence of artifacts (holes) and better preserves original spatial signals compared to no filter or fixed isotropic filters [S1].
+*   **Limitations:** Requires careful parameter tuning ($\lambda_{lpf}$) and computation of sampling intervals during deformation [S1].
+*   **When to use:** When dealing with deforming Gaussian radiance fields that contain high-frequency features and varying sampling intervals [S1].
+*   **When not to use:** When the scene is static and sampling intervals do not change, a fixed isotropic filter might suffice, though the adaptive version is more robust [S1].
+
+## Background
+*   **Origin:** The method is described in "As-Rigid-As-Possible Deformation of Gaussian Radiance Fields" [S1].
+*   **History:** It was designed to address artifacts in Gaussian radiance fields during deformation, specifically holes caused by undersampling [S1].
+*   **Usage:** Used in the optimization process of Gaussian radiance fields, particularly in conjunction with KNN (k=8 or 10) for deformation [S1].
+
+## Subtopics
+
+### 3D Smoothing Filter
+The parent method that prevents Gaussians from becoming smaller than the maximal sampling frequency induced by training images [9588-3d-smoothing-filter.md].
+
+### Mip-Splatting
+A related method that uses a similar spatial low-pass filter parameter ($\lambda_{lpf} = 0.2$) [S1].
+
+## Sources
+[S1] As-Rigid-As-Possible Deformation of Gaussian Radiance Fields, https://doi.org/10.1109/TVCG.2025.3555404, fetched 2026-10-30

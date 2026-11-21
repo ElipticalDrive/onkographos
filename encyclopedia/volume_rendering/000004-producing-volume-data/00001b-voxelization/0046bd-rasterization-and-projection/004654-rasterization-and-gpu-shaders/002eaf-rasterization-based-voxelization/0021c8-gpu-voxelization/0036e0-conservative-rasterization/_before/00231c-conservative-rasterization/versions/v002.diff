@@ -1,0 +1,325 @@
+--- v001.md
++++ v002.md
+@@ -4,46 +4,38 @@
+ 
+ ## Overview
+-This method prevents holes in voxelized geometry caused by triangles smaller than the voxel grid resolution by rasterizing all fragments that "touch" the triangle [S1, S2, unofficial]. It achieves this by analytically expanding the triangle in clip space before rasterization, ensuring that any voxel potentially intersected by the triangle is covered [S2, unofficial]. Unlike hardware conservative rasterization (limited to NVIDIA) or Multi-Sample Anti-Aliasing (MSAA) activation [S1, unofficial], this geometric approach is hardware-agnostic but computationally more intensive, requiring a geometry shader for the expansion logic [S1, S2, unofficial].
++This method prevents holes in voxelized geometry caused by triangles smaller than the voxel grid resolution by rasterizing all fragments that "touch" the triangle [S1, unofficial]. It achieves this by analytically expanding the triangle in clip space before rasterization, ensuring that any voxel potentially intersected by the triangle is covered [S2, unofficial]. Unlike hardware conservative rasterization (limited to NVIDIA) or Multi-Sample Anti-Aliasing (MSAA) activation [S1, unofficial], this geometric approach is hardware-agnostic but computationally more intensive, requiring a geometry shader for the expansion logic [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A triangle defined by three vertices in clip space (`pos[0..2]`).
++*   **Input:** A triangle defined by three vertices in clip space (`pos[0..2]`). [S2, unofficial]
+ *   **Uniforms:**
+-    *   `halfPixel[3]`: `vec2` array representing half the pixel size in clip space for each of the three possible projection axes.
+-    *   `viewProject[3]`: Array of 3 `mat4` matrices for view-projection transformations.
+-    *   `viewProjectInverse[3]`: Array of 3 `mat4` matrices for inverse view-projection transformations.
++    *   `halfPixel[3]`: `vec2` array representing half the pixel size in clip space for each of the three possible projection axes. [S2, unofficial]
++    *   `viewProject[3]`: Array of 3 `mat4` matrices for view-projection transformations. [S2, unofficial]
++    *   `viewProjectInverse[3]`: Array of 3 `mat4` matrices for inverse view-projection transformations. [S2, unofficial]
+ *   **Outputs:**
+-    *   Fragment Shader: `FragPos` (world space position), `ProjectPos` (clip space position of the expanded vertex), `BoundingBox` (min/max xy in clip space of the original triangle, enlarged).
+-    *   Compute Buffer: Atomic counter updates for voxel occupancy.
++    *   Fragment Shader: `FragPos` (world space position), `ProjectPos` (clip space position of the expanded vertex), `BoundingBox` (min/max xy in clip space of the original triangle, enlarged). [S2, unofficial]
++    *   Compute Buffer: Atomic counter updates for voxel occupancy. [S2, unofficial]
+ 
+ **Data Structures:**
+-*   **Edge Planes:** `vec3 edgePlanes[3]`. Each vector $(A, B, C)$ represents the homogeneous plane equation $Ax + By + Cz = 0$ passing through the origin for each triangle edge.
+-*   **Triangle Plane:** `vec4 trianglePlane`. Represents the plane equation $Ax + By + Cz + D = 0$ containing the original triangle.
+-*   **Intersection Lines:** `vec3 intersection[3]`. Direction vectors for the lines formed by the intersection of offset edge planes.
++*   **Edge Planes:** `vec3 edgePlanes[3]`. Each vector $(A, B, C)$ represents the homogeneous plane equation $Ax + By + Cz = 0$ passing through the origin for each triangle edge. [S2, unofficial]
++*   **Triangle Plane:** `vec4 trianglePlane`. Represents the plane equation $Ax + By + Cz + D = 0$ containing the original triangle. [S2, unofficial]
++*   **Intersection Lines:** `vec3 intersection[3]`. Direction vectors for the lines formed by the intersection of offset edge planes. [S2, unofficial]
+ 
+ **Numbered Steps:**
+ 
+-1.  **Select Projection Axis:** Determine the dominant axis of the triangle's face normal to select the appropriate projection matrix and half-pixel size. Calculate the normal $N = (pos[1] - pos[0]) \times (pos[2] - pos[0])$. Let $n_x, n_y, n_z$ be the absolute components.
+-    *   If $n_x > n_y$ and $n_x > n_z$, index $= 0$ (project onto YZ plane).
+-    *   Else if $n_y > n_x$ and $n_y > n_z$, index $= 1$ (project onto XZ plane).
+-    *   Else, index $= 2$ (project onto XY plane). [S2, unofficial]
+-
++1.  **Select Projection Axis:** Determine the dominant axis of the triangle's face normal to select the appropriate projection matrix and half-pixel size. Calculate the normal $N = (pos[1] - pos[0]) \times (pos[2] - pos[0])$. Let $n_x, n_y, n_z$ be the absolute components. If $n_x > n_y$ and $n_x > n_z$, index $= 0$ (project onto YZ plane). Else if $n_y > n_x$ and $n_y > n_z$, index $= 1$ (project onto XZ plane). Else, index $= 2$ (project onto XY plane). [S2, unofficial]
+ 2.  **Calculate Triangle Plane:** Compute the normal $N$ of the triangle in world space (or the space defined by the projection). Normalize it. Calculate $D = -P_0 \cdot N$. [S2, unofficial]
+     $$ \text{trianglePlane} = (N_x, N_y, N_z, D) $$
+     *Note: The source code uses `pos[0].xyz` which implies the vertices are in world space or the space where the plane equation is valid for the final voxelization step.* [S2, unofficial]
+-
+ 3.  **Fix Winding Order:** To prevent artifacts with back-facing triangles, ensure counter-clockwise winding relative to the view direction. Check the dot product of the triangle normal with the view direction $(0,0,1)$. If $N \cdot (0,0,1) < 0$, swap vertices 1 and 2. [S2, unofficial]
+-
+-4.  **Calculate Homogeneous Edge Planes:** For each edge $i$ (connecting vertex $i$ to $i+1$, wrapping around), compute the plane passing through the origin using the cross product of the homogeneous vertex coordinates (xyw components).
++4.  **Calculate Homogeneous Edge Planes:** For each edge $i$ (connecting vertex $i$ to $i+1$, wrapping around), compute the plane passing through the origin using the cross product of the homogeneous vertex coordinates (xyw components). [S2, unofficial]
+     $$ \text{edgePlanes}[0] = (pos[0].xyw - pos[2].xyw) \times pos[2].xyw $$
+     $$ \text{edgePlanes}[1] = (pos[1].xyw - pos[0].xyw) \times pos[0].xyw $$
+     $$ \text{edgePlanes}[2] = (pos[2].xyw - pos[1].xyw) \times pos[1].xyw $$
+     *Note: In orthographic projection, $w=1$, so this effectively computes the 2D line normal in clip space.* [S2, unofficial]
+-
+-5.  **Dilate Edge Planes:** Offset the homogeneous planes to expand the triangle. Subtract the projection of the half-pixel size onto the plane's normal from the plane's z-component (distance).
++5.  **Dilate Edge Planes:** Offset the homogeneous planes to expand the triangle. Subtract the projection of the half-pixel size onto the plane's normal from the plane's z-component (distance). [S2, unofficial]
+     $$ \text{edgePlanes}[i].z \leftarrow \text{edgePlanes}[i].z - \text{dot}(\text{halfPixel}[\text{index}], |\text{edgePlanes}[i].xy|) $$
+     *Note: $|\text{edgePlanes}[i].xy|$ denotes the absolute value of the x and y components.* [S2, unofficial]
+-
+-6.  **Calculate Intersection Lines:** Compute the direction vector of the intersection line between two offset planes. The direction is the cross product of their normals. Normalize by dividing by the z-component.
++6.  **Calculate Intersection Lines:** Compute the direction vector of the intersection line between two offset planes. The direction is the cross product of their normals. Normalize by dividing by the z-component. [S2, unofficial]
+     $$ \text{intersection}[0] = \text{edgePlanes}[0] \times \text{edgePlanes}[1] $$
+     $$ \text{intersection}[1] = \text{edgePlanes}[1] \times \text{edgePlanes}[2] $$
+@@ -52,21 +44,17 @@
+     $$ \text{intersection}[i].y \leftarrow \text{intersection}[i].y / \text{intersection}[i].z $$
+     *Note: The z-component of the intersection vector is effectively normalized to 1.* [S2, unofficial]
+-
+-7.  **Compute Dilated Vertices:** Calculate the new vertices of the dilated triangle. The x and y coordinates are taken from the intersection line vectors. The z coordinate is solved using the original triangle's plane equation:
++7.  **Compute Dilated Vertices:** Calculate the new vertices of the dilated triangle. The x and y coordinates are taken from the intersection line vectors. The z coordinate is solved using the original triangle's plane equation: [S2, unofficial]
+     $$ z_i = -( \text{intersection}[i].x \cdot \text{trianglePlane}.x + \text{intersection}[i].y \cdot \text{trianglePlane}.y + \text{trianglePlane}.w ) / \text{trianglePlane}.z $$
+     $$ \text{pos}[i].xyz = (\text{intersection}[i].x, \text{intersection}[i].y, z_i) $$
+     *Pitfall: If $\text{trianglePlane}.z == 0$, the triangle is parallel to the view direction, leading to division by zero. The algorithm should return early or handle this degenerate case.* [S2, unofficial]
+-
+-8.  **Transform and Output:** Transform the dilated vertices back to world space using the inverse view-projection matrix. Pass the clip-space positions to the fragment shader.
++8.  **Transform and Output:** Transform the dilated vertices back to world space using the inverse view-projection matrix. Pass the clip-space positions to the fragment shader. [S2, unofficial]
+     $$ \text{voxelPos} = \text{viewProjectInverse}[\text{index}] \times \text{pos}[i] $$
+     $$ \text{FragPos} = \text{voxelPos}.xyz $$
+     $$ \text{ProjectPos} = \text{pos}[i].xyz $$
+     Emit the vertex. [S2, unofficial]
+-
+-9.  **Fragment Shader Culling:** In the fragment shader, discard fragments outside the bounding box of the original triangle (enlarged by half-pixel) to remove artifacts caused by the expansion.
++9.  **Fragment Shader Culling:** In the fragment shader, discard fragments outside the bounding box of the original triangle (enlarged by half-pixel) to remove artifacts caused by the expansion. [S2, unofficial]
+     $$ \text{if } (\text{ProjectPos}.x < \text{BoundingBox}.x \lor \text{ProjectPos}.y < \text{BoundingBox}.y \lor \text{ProjectPos}.x > \text{BoundingBox}.z \lor \text{ProjectPos}.y > \text{BoundingBox}.w) \text{ discard} $$
+     *Note: `BoundingBox` is calculated in the geometry shader as the min/max xy of the original triangle, enlarged by `halfPixel`.* [S2, unofficial]
+-
+-10. **Voxel Counting:** Map the world space position (`FragPos`) to voxel coordinates and atomically increment the count.
++10. **Voxel Counting:** Map the world space position (`FragPos`) to voxel coordinates and atomically increment the count. [S2, unofficial]
+     $$ x = \lfloor (\text{FragPos}.x - \text{boxMin}.x) / \text{step} \rfloor $$
+     $$ y = \lfloor (\text{FragPos}.y - \text{boxMin}.y) / \text{step} \rfloor $$
+@@ -78,15 +66,30 @@
+ 
+ ```python
+-# Geometry Shader Logic (Simplified)
++import math
++
++def cross(v1, v2):
++    return (v1[1]*v2[2] - v1[2]*v2[1], v1[2]*v2[0] - v1[0]*v2[2], v1[0]*v2[1] - v1[1]*v2[0])
++
++def dot(v1, v2):
++    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
++
++def abs_vec(v):
++    return tuple(abs(c) for c in v)
++
++def min_vec(v1, v2):
++    return tuple(min(a, b) for a, b in zip(v1, v2))
++
++def max_vec(v1, v2):
++    return tuple(max(a, b) for a, b in zip(v1, v2))
++
++def normalize(v):
++    length = math.sqrt(dot(v, v))
++    return tuple(c / length for c in v)
+ 
+ def select_projection_axis(pos):
+-    """Selects the dominant axis of the face normal."""
+-    p1 = pos[1].xyz - pos[0].xyz
+-    p2 = pos[2].xyz - pos[0].xyz
++    p1 = (pos[1][0]-pos[0][0], pos[1][1]-pos[0][1], pos[1][2]-pos[0][2])
++    p2 = (pos[2][0]-pos[0][0], pos[2][1]-pos[0][1], pos[2][2]-pos[0][2])
+     face_normal = cross(p1, p2)
+-    n_dx = abs(face_normal.x)
+-    n_dy = abs(face_normal.y)
+-    n_dz = abs(face_normal.z)
+-    
++    n_dx, n_dy, n_dz = abs(face_normal[0]), abs(face_normal[1]), abs(face_normal[2])
+     if n_dx > n_dy and n_dx > n_dz:
+         return 0
+@@ -97,55 +100,39 @@
+ 
+ def calc_aabb(pos, half_pixel):
+-    """Calculates the bounding box of the triangle in clip space, enlarged by half-pixel."""
+-    min_xy = min(pos[0].xy, min(pos[1].xy, pos[2].xy))
+-    max_xy = max(pos[0].xy, max(pos[1].xy, pos[2].xy))
+-    # Enlarge by half-pixel
+-    min_xy -= half_pixel
+-    max_xy += half_pixel
+-    return vec4(min_xy.x, min_xy.y, max_xy.x, max_xy.y)
++    min_xy = min_vec(pos[0][:2], min_vec(pos[1][:2], pos[2][:2]))
++    max_xy = max_vec(pos[0][:2], max_vec(pos[1][:2], pos[2][:2]))
++    min_xy = (min_xy[0] - half_pixel[0], min_xy[1] - half_pixel[1])
++    max_xy = (max_xy[0] + half_pixel[0], max_xy[1] + half_pixel[1])
++    return (min_xy[0], min_xy[1], max_xy[0], max_xy[1])
+ 
+ def conservative_rasterization_expand(pos, half_pixel, view_project_inv, project_index):
+-    """
+-    Expands the triangle in clip space to ensure all touching voxels are covered.
+-    pos: Array of 3 vec4 (clip space vertices)
+-    half_pixel: vec2 (half pixel size in clip space)
+-    view_project_inv: mat4 (inverse view-projection matrix)
+-    project_index: int (0, 1, or 2)
+-    Returns: List of (FragPos, ProjectPos, BoundingBox) for each vertex
+-    """
+-    
+-    # 1. Calculate Triangle Plane in World Space (assuming pos.xyz is world space for plane calc)
+-    # Note: Source code uses pos[0].xyz for plane calculation, implying input might be world space 
+-    # or the geometry shader receives world space vertices. 
+-    # However, gl_Position is clip space. The source code mixes spaces. 
+-    # We follow the source: pos[0].xyz is used for plane normal.
+-    
+-    triangle_normal = normalize(cross(pos[1].xyz - pos[0].xyz, pos[2].xyz - pos[0].xyz))
+-    triangle_plane_w = -dot(pos[0].xyz, triangle_normal)
++    # pos is list of 3 tuples (x, y, z, w)
++    # 1. Calculate Triangle Plane
++    p1 = (pos[1][0]-pos[0][0], pos[1][1]-pos[0][1], pos[1][2]-pos[0][2])
++    p2 = (pos[2][0]-pos[0][0], pos[2][1]-pos[0][1], pos[2][2]-pos[0][2])
++    triangle_normal = normalize(cross(p1, p2))
++    triangle_plane_w = -dot((pos[0][0], pos[0][1], pos[0][2]), triangle_normal)
+     
+     # 2. Fix Winding Order
+-    if dot(triangle_normal, vec3(0.0, 0.0, 1.0)) < 0.0:
+-        temp = pos[2]
+-        pos[2] = pos[1]
+-        pos[1] = temp
++    if dot(triangle_normal, (0.0, 0.0, 1.0)) < 0.0:
++        pos[1], pos[2] = pos[2], pos[1]
+         
+     # Pitfall: Check for degenerate plane
+-    if abs(triangle_normal.z) < 1e-6:
+-        return [] # Return empty to skip processing
+-        
+-    # 3. Calculate Homogeneous Edge Planes (using clip space xyw)
+-    edge_planes = [vec3(0.0)] * 3
+-    edge_planes[0] = cross(pos[0].xyw - pos[2].xyw, pos[2].xyw)
+-    edge_planes[1] = cross(pos[1].xyw - pos[0].xyw, pos[0].xyw)
+-    edge_planes[2] = cross(pos[2].xyw - pos[1].xyw, pos[1].xyw)
++    if abs(triangle_normal[2]) < 1e-6:
++        return []
++        
++    # 3. Calculate Homogeneous Edge Planes
++    edge_planes = [None, None, None]
++    edge_planes[0] = cross((pos[0][0]-pos[2][0], pos[0][1]-pos[2][1], pos[0][3]-pos[2][3]), (pos[2][0], pos[2][1], pos[2][3]))
++    edge_planes[1] = cross((pos[1][0]-pos[0][0], pos[1][1]-pos[0][1], pos[1][3]-pos[0][3]), (pos[0][0], pos[0][1], pos[0][3]))
++    edge_planes[2] = cross((pos[2][0]-pos[1][0], pos[2][1]-pos[1][1], pos[2][3]-pos[1][3]), (pos[1][0], pos[1][1], pos[1][3]))
+     
+     # 4. Dilate Edge Planes
+     for i in range(3):
+-        # Subtract projection of half-pixel onto plane's normal (xy components)
+-        dilate_dist = dot(half_pixel, abs(vec2(edge_planes[i].x, edge_planes[i].y)))
+-        edge_planes[i].z -= dilate_dist
++        dilate_dist = dot(half_pixel, abs_vec((edge_planes[i][0], edge_planes[i][1])))
++        edge_planes[i] = (edge_planes[i][0], edge_planes[i][1], edge_planes[i][2] - dilate_dist)
+         
+     # 5. Calculate Intersection Lines
+-    intersection = [vec3(0.0)] * 3
++    intersection = [None, None, None]
+     intersection[0] = cross(edge_planes[0], edge_planes[1])
+     intersection[1] = cross(edge_planes[1], edge_planes[2])
+@@ -154,76 +141,60 @@
+     # Normalize by z-component
+     for i in range(3):
+-        if abs(intersection[i].z) > 1e-6:
+-            intersection[i].x /= intersection[i].z
+-            intersection[i].y /= intersection[i].z
+-        else:
+-            # Degenerate case, handle appropriately (e.g., keep as is or skip)
+-            pass
++        if abs(intersection[i][2]) > 1e-6:
++            intersection[i] = (intersection[i][0]/intersection[i][2], intersection[i][1]/intersection[i][2], 1.0)
+             
+     # 6. Compute Dilated Vertices
+-    dilated_pos = [vec4(0.0)] * 3
+-    for i in range(3):
+-        # Solve for z using triangle plane equation: Ax + By + Cz + D = 0
+-        # z = -(Ax + By + D) / C
+-        z_val = -(intersection[i].x * triangle_normal.x + intersection[i].y * triangle_normal.y + triangle_plane_w) / triangle_normal.z
+-        dilated_pos[i] = vec4(intersection[i].x, intersection[i].y, z_val, 1.0)
++    dilated_pos = [None, None, None]
++    for i in range(3):
++        z_val = -(intersection[i][0] * triangle_normal[0] + intersection[i][1] * triangle_normal[1] + triangle_plane_w) / triangle_normal[2]
++        dilated_pos[i] = (intersection[i][0], intersection[i][1], z_val, 1.0)
+         
+     # 7. Transform to World Space and Prepare Outputs
+     outputs = []
+-    bounding_box = calc_aabb(pos, half_pixel) # Use original pos for bounding box
+-    
+-    for i in range(3):
+-        # Transform dilated vertex to world space
+-        voxel_pos = view_project_inv * dilated_pos[i]
+-        frag_pos = voxel_pos.xyz
+-        project_pos = dilated_pos[i].xyz # Clip space position for culling
+-        
++    bounding_box = calc_aabb(pos, half_pixel)
++    
++    for i in range(3):
++        # Transform dilated vertex to world space (simplified matrix-vector mult)
++        v = dilated_pos[i]
++        voxel_pos = (
++            view_project_inv[0][0]*v[0] + view_project_inv[0][1]*v[1] + view_project_inv[0][2]*v[2] + view_project_inv[0][3],
++            view_project_inv[1][0]*v[0] + view_project_inv[1][1]*v[1] + view_project_inv[1][2]*v[2] + view_project_inv[1][3],
++            view_project_inv[2][0]*v[0] + view_project_inv[2][1]*v[1] + view_project_inv[2][2]*v[2] + view_project_inv[2][3]
++        )
+         outputs.append({
+-            'FragPos': frag_pos,
+-            'ProjectPos': project_pos,
++            'FragPos': voxel_pos,
++            'ProjectPos': (dilated_pos[i][0], dilated_pos[i][1], dilated_pos[i][2]),
+             'BoundingBox': bounding_box
+         })
+-        
+     return outputs
+ 
+-# Fragment Shader Logic
+ def fragment_shader(FragPos, ProjectPos, BoundingBox, boxMin, step, resolution, cnts):
+-    """
+-    FragPos: vec3 (World space position)
+-    ProjectPos: vec3 (Clip space position)
+-    BoundingBox: vec4 (min_x, min_y, max_x, max_y in clip space)
+-    """
+-    
+-    # Culling
+-    if (ProjectPos.x < BoundingBox.x or 
+-        ProjectPos.y < BoundingBox.y or 
+-        ProjectPos.x > BoundingBox.z or 
+-        ProjectPos.y > BoundingBox.w):
+-        discard()
+-        
+-    # Voxel Index Calculation
+-    x = int((FragPos.x - boxMin.x) / step)
+-    y = int((FragPos.y - boxMin.y) / step)
+-    z = int((FragPos.z - boxMin.z) / step)
+-    
+-    index = y * (resolution.z * resolution.x) + z * resolution.x + x
+-    
+-    # Atomic Add
+-    atomic_add(cnts[index], 1)
+-    
+-    return vec4(0.0, 1.0, 1.0, 1.0) # Color output
++    if (ProjectPos[0] < BoundingBox[0] or ProjectPos[1] < BoundingBox[1] or 
++        ProjectPos[0] > BoundingBox[2] or ProjectPos[1] > BoundingBox[3]):
++        return None
++        
++    x = int((FragPos[0] - boxMin[0]) / step)
++    y = int((FragPos[1] - boxMin[1]) / step)
++    z = int((FragPos[2] - boxMin[2]) / step)
++    
++    index = y * (resolution[2] * resolution[0]) + z * resolution[0] + x
++    
++    # Standard GPU atomic add simulation
++    cnts[index] = cnts.get(index, 0) + 1
++    
++    return (0.0, 1.0, 1.0, 1.0)
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The expansion logic is performed per triangle in the geometry shader. It involves a constant number of vector operations (cross products, dot products, normalizations). The fragment shader performs a constant number of comparisons and an atomic add.
+-*   **Memory Complexity:** Requires storage for the voxel count buffer (`int cnts[]`) and uniform matrices.
+-*   **Performance:** The geometric dilatation approach is slower than hardware conservative rasterization (if available) but faster than other software expansion techniques [S1, unofficial]. MSAA activation is described as "not too expensive" and producing few noticeable artifacts, but the geometric dilatation method is more explicit and controllable [S1, S2, unofficial].
+-*   **Strengths:** Hardware-agnostic (works on any GPU with geometry shaders), prevents holes effectively for small triangles, explicit control over the dilation amount.
+-*   **Limitations:** Requires a geometry shader, which can be a bottleneck on some hardware. Computationally more intensive than simple rasterization. Degenerate cases (triangle parallel to view) must be handled.
+-*   **When to use:** When hardware conservative rasterization is not available (e.g., non-NVIDIA GPUs) and MSAA is insufficient or undesirable. When precise control over voxel coverage is needed.
+-*   **When not to use:** When performance is critical and hardware conservative rasterization is available. When the geometry is large and the overhead of the geometry shader is prohibitive.
++*   **Time Complexity:** The expansion logic is performed per triangle in the geometry shader. It involves a constant number of vector operations (cross products, dot products, normalizations). The fragment shader performs a constant number of comparisons and an atomic add. [S1, S2, unofficial]
++*   **Memory Complexity:** Requires storage for the voxel count buffer (`int cnts[]`) and uniform matrices. [S2, unofficial]
++*   **Performance:** The geometric dilatation approach is slower than hardware conservative rasterization (if available) but faster than other software expansion techniques. MSAA activation is described as "not too expensive" and producing few noticeable artifacts, but the geometric dilatation method is more explicit and controllable. [S1, S2, unofficial]
++*   **Strengths:** Hardware-agnostic (works on any GPU with geometry shaders), prevents holes effectively for small triangles, explicit control over the dilation amount. [S1, S2, unofficial]
++*   **Limitations:** Requires a geometry shader, which can be a bottleneck on some hardware. Computationally more intensive than simple rasterization. Degenerate cases (triangle parallel to view) must be handled. [S2, unofficial]
++*   **When to use:** When hardware conservative rasterization is not available (e.g., non-NVIDIA GPUs) and MSAA is insufficient or undesirable. When precise control over voxel coverage is needed. [S1, S2, unofficial]
++*   **When not to use:** When performance is critical and hardware conservative rasterization is available. When the geometry is large and the overhead of the geometry shader is prohibitive. [S1, S2, unofficial]
+ 
+ ## Background
+-This method is a software implementation of conservative rasterization specifically tailored for GPU voxelization. It was popularized in the context of voxel cone tracing and real-time global illumination [S1, S2, unofficial]. The technique of geometric dilatation in clip space is detailed in "The Basics of GPU Voxelization" and related blog posts [S2, unofficial]. It addresses the limitation of traditional rasterization, which ignores fragments that do not strictly intersect the triangle's interior, leading to holes in the voxel grid for small or thin triangles [S1, unofficial].
++This method is a software implementation of conservative rasterization specifically tailored for GPU voxelization. It is used in voxel cone tracing pipelines to ensure complete surface coverage for light injection and opacity voxelization. [S1, unofficial] The technique of geometric dilatation in clip space is detailed in "The Basics of GPU Voxelization" and related blog posts. [S2, unofficial] It addresses the limitation of traditional rasterization, which ignores fragments that do not strictly intersect the triangle's interior, leading to holes in the voxel grid for small or thin triangles. [S1, unofficial]
+ 
+ ## Sources

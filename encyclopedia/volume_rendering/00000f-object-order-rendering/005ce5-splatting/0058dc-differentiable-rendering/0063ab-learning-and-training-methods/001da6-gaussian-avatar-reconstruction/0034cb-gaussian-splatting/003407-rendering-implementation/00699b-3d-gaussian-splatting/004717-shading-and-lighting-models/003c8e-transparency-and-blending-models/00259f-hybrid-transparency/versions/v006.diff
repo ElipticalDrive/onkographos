@@ -1,0 +1,126 @@
+--- v005.md
++++ v006.md
+@@ -7,12 +7,12 @@
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians defined by mean $\mu \in \mathbb{R}^3$, opacity $o \in \mathbb{R}$, orientation vectors $t_u, t_v, t_w \in \mathbb{R}^3$, and scales $s_u, s_v, s_w \in \mathbb{R}$ [S1]. Camera parameters (view and projection matrices).
+-**Outputs:** Final pixel color $C$ and opacity $\alpha$.
++**Inputs:** A set of 3D Gaussians defined by mean $\mu \in \mathbb{R}^3$, opacity $o \in \mathbb{R}$, orientation vectors $t_u, t_v, t_w \in \mathbb{R}^3$, and scales $s_u, s_v, s_w \in \mathbb{R}$ [S1].
++**Outputs:** Final pixel color and opacity [G].
+ **Parameters:**
+-*   $K$: Number of fragments in the core. Default/Optimal value is 16 [S1, S2].
++*   $K$: Number of fragments in the core. Default and optimal value is 16 [S1, S2].
+ *   $\tau_K$: Minimum alpha threshold for a fragment to be considered for the core. Default value is 0.05 [S1].
+ 
+ **Data Structures:**
+-*   **Core Buffer:** A compact 64-bit data structure per thread storing the top $K$ fragments for a pixel. This reduces register usage and swap operations during insertion sort [S2].
++*   **Core Buffer:** A compact 64-bit data structure per thread storing the top $K$ fragments for a pixel, reducing register usage and swap operations during insertion sort [S2].
+ *   **Tail Accumulators:** Per-pixel accumulators for RGB color and alpha of all non-core fragments [S1].
+ 
+@@ -20,21 +20,17 @@
+ 
+ 1.  **Splat Staging and Bounding Box Computation:**
+-    Compute the screen-space bounding box for each 3D Gaussian. This can be done using plane-fitting to determine exact bounding boxes [S2]. Create unordered per-tile fragment lists. Depth ordering is omitted at this stage as it is resolved during blending [S2].
++    Compute the screen-space bounding box for each 3D Gaussian using plane-fitting to determine exact bounding boxes [S2]. Create unordered per-tile fragment lists, omitting the depth ordering step as hybrid transparency resolves depth ordering during blending [S2].
+ 
+ 2.  **Pixel-Specific Depth Evaluation ($x_{view}$):**
+-    For each splat intersecting a pixel, compute the point of maximum contribution along the pixel's viewing ray in view space, denoted as $x_{view}$ [S1]. This value is used to determine if the splat belongs to the core or the tail. It is computed efficiently using intermediate values from the splat evaluation process [S1].
+-    $$ x_{view} = \text{z-value in view space at point of max contribution} $$
+-    *Note: Using only the view-space depth of the mean is insufficient and causes popping artifacts [S1].*
++    For each splat intersecting a pixel, compute the point of maximum contribution along the pixel's viewing ray in view space, denoted as $x_{view}$ [S1]. This value is used to determine if the splat belongs to the core or the tail [S1]. It is computed efficiently by re-using intermediate values from the splat evaluation process [S1]. Using only the view-space depth of the mean is insufficient and causes popping artifacts [S1].
+ 
+ 3.  **Core Identification and Sorting:**
+-    Identify the splats contributing to the pixel. Sort these splats based on $x_{view}$. Select the first $K$ splats (or fewer if fewer than $K$ splats exist) that also satisfy $\alpha \ge \tau_K$ to form the 'core' [S1].
+-    *   If insertion sort is used for the core, reduce tile size to $8 \times 8$ to mitigate thread divergence [S1].
++    Identify the splats contributing to the pixel [S1]. Sort these splats based on $x_{view}$ [S1]. Select the first $K$ splats (or fewer if fewer than $K$ splats exist) that also satisfy $\alpha \ge \tau_K$ to form the 'core' [S1]. If insertion sort is used for the core, reduce tile size to $8 \times 8$ to mitigate thread divergence [S1].
+ 
+ 4.  **Core Blending:**
+-    Alpha-blend the core fragments in their correct depth order using standard $\alpha$-blending [S1].
+-    Let $C_{core}$ and $\alpha_{core}$ be the accumulated color and opacity of the core.
++    Alpha-blend the core fragments in their correct depth order using standard $\alpha$-blending [S1]. Let $C_{core}$ and $\alpha_{core}$ be the accumulated color and opacity of the core [G].
+     $$ C_{core} = \sum_{i=1}^{K} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+     $$ \alpha_{core} = 1 - \prod_{i=1}^{K} (1 - \alpha_i) $$
+-    where $c_i, \alpha_i$ are the color and opacity of the $i$-th core fragment.
++    where $c_i, \alpha_i$ are the color and opacity of the $i$-th core fragment [G].
+ 
+ 5.  **Tail Accumulation:**
+@@ -42,22 +38,22 @@
+     $$ C_{tail} = \sum_{j=K+1}^{N} c_j $$
+     $$ \alpha_{tail} = \sum_{j=K+1}^{N} \alpha_j $$
+-    *Note: The tail accumulation is order-independent [S1].*
++    The tail accumulation is order-independent [S1].
+ 
+ 6.  **Final Compositing:**
+-    Combine the core and tail. The tail is treated as a single opaque or semi-transparent layer behind the core.
++    Combine the core and tail by compositing the tail behind the core [G].
+     $$ C = C_{core} + C_{tail} (1 - \alpha_{core}) $$
+     $$ \alpha = \alpha_{core} + \alpha_{tail} (1 - \alpha_{core}) $$
+-    *Note: The computation of $T_{tail}$ (transmittance of the tail) is more accurate than average-based formulations [S1].*
++    The computation of the tail transmittance is more accurate than average-based formulations [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def hybrid_transparency_render(gaussians, camera, K=16, tau_K=0.05):
++def hybrid_transparency_render(gaussians, K=16, tau_K=0.05):
+     # Initialize per-pixel accumulators
+-    # Core: List of up to K fragments, sorted by depth
+-    # Tail: Accumulated color (vec3) and alpha (float)
+-    core_buffers = initialize_core_buffers(K)
+-    tail_color = zeros(num_pixels, 3)
+-    tail_alpha = zeros(num_pixels)
++    # Core: List of up to K fragments, sorted by depth (x_view ascending)
++    # Tail: Accumulated color (list of 3 floats) and alpha (float)
++    core_buffers = [[] for _ in range(num_pixels)]
++    tail_color = [[0.0, 0.0, 0.0] for _ in range(num_pixels)]
++    tail_alpha = [0.0] * num_pixels
+ 
+     for gaussian in gaussians:
+@@ -70,5 +66,5 @@
+             for pixel in pixels:
+                 # Compute point of max contribution in view space
+-                x_view = compute_max_contribution_depth(gaussian, pixel, camera)
++                x_view = compute_max_contribution_depth(gaussian, pixel)
+                 
+                 # Evaluate Gaussian at this point
+@@ -76,13 +72,9 @@
+                 color = gaussian.evaluate_color(x_view)
+                 
+-                # Skip if below threshold or too transparent
++                # Skip if below threshold
+                 if alpha < tau_K:
+                     continue
+                 
+                 # Determine if this fragment belongs to Core or Tail
+-                # We need to know if it is among the top K closest fragments.
+-                # In a parallel implementation, this requires atomic operations 
+-                # or a two-pass approach. Here we assume a logical flow.
+-                
+                 is_core_candidate = (alpha >= tau_K)
+                 
+@@ -111,8 +103,8 @@
+ 
+     # Final Compositing
+-    final_color = zeros(num_pixels, 3)
+-    final_alpha = zeros(num_pixels)
++    final_color = [[0.0, 0.0, 0.0] for _ in range(num_pixels)]
++    final_alpha = [0.0] * num_pixels
+     
+-    for pixel in pixels:
++    for pixel in range(num_pixels):
+         core_res = blend_core(core_buffers[pixel])
+         C_core, A_core = core_res.color, core_res.alpha
+@@ -142,5 +134,5 @@
+ def blend_core(buffer):
+     # Standard alpha blending of sorted fragments
+-    acc_color = vec3(0)
++    acc_color = [0.0, 0.0, 0.0]
+     acc_alpha = 0.0
+     for frag in buffer:
+@@ -160,5 +152,5 @@
+ *   **Performance:** Achieves a training speedup of $2.1\times$ and rendering speedup of $1.6\times$ compared to standard 3DGS on average [S1]. It is significantly faster than StopThePop [S1].
+ *   **Strengths:** Eliminates popping artifacts caused by approximate sorting [S1]. Provides temporally stable rendering suitable for VR [S2].
+-*   **Limitations:** Cannot use early stopping based on transmittance threshold by default, which may impact performance in scenes with high depth complexity [S1]. Slightly lower PSNR than standard 3DGS due to the absence of screen-space aliasing filters [S1].
++*   **Limitations:** Cannot use early stopping based on transmittance threshold by default, which may impact performance in scenes with high depth complexity [S1]. Image quality is about equal to standard 3DGS [S1].
+ *   **Edge Cases:**
+     *   $K=0$ (no sorting) causes foreground transparency issues and is invalid [S1].

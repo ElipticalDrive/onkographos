@@ -1,0 +1,131 @@
+# Observed-Only Momentum Updates
+
+Also called: Observed Variable Updates, Sparse Momentum
+
+## Overview
+Observed-Only Momentum Updates is a modification to the Adam optimizer designed to prevent noisy momentum from being applied repeatedly to variables not observed in the current training batch, which impedes convergence in differentiable volume rendering [S1]. It restricts momentum updates and moment estimates to only those variables that receive nonzero gradients in the current iteration [S1]. This distinguishes it from standard Adam, which updates all parameters regardless of observation, and from solvers like CGLS that handle ill-conditioned systems via matrix-free linear algebra rather than stochastic gradient filtering [3285-cgls-solver-conjugate-gradient-least-squares.md].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Current parameter values $\theta$, first moment estimate $m$, second moment estimate $v$, Adam hyperparameters $\beta_1, \beta_2, \epsilon$, and the computed gradient $g$ for the current batch.
+- Output: Updated parameter values $\theta'$, updated moments $m', v'$.
+
+**Data Structures:**
+- Parameters $\theta$: A dense or sparse tensor of learnable variables (e.g., radiance field coefficients, Gaussian attributes).
+- Moments $m, v$: Tensors of the same shape as $\theta$, initialized to zero.
+- Gradient $g$: Tensor of the same shape as $\theta$, containing partial derivatives of the loss with respect to $\theta$.
+
+**Numbered Steps:**
+1. Compute the gradient $g$ for the current batch using differentiable rendering.
+2. Identify the set of observed indices $\mathcal{O} = \{ i \mid g_i \neq 0 \}$.
+3. For each index $i \in \mathcal{O}$:
+   a. Update the first moment estimate: $m_i \leftarrow \beta_1 m_i + (1 - \beta_1) g_i$.
+   b. Update the second moment estimate: $v_i \leftarrow \beta_2 v_i + (1 - \beta_2) g_i^2$.
+   c. Compute bias-corrected estimates: $\hat{m}_i = \frac{m_i}{1 - \beta_1^t}$, $\hat{v}_i = \frac{v_i}{1 - \beta_2^t}$, where $t$ is the current time step.
+   d. Update the parameter: $\theta_i \leftarrow \theta_i - \alpha \frac{\hat{m}_i}{\sqrt{\hat{v}_i} + \epsilon}$.
+4. For each index $j \notin \mathcal{O}$:
+   a. Do not update $m_j$ or $v_j$.
+   b. Do not update $\theta_j$.
+
+**Formulas:**
+- Moment updates (for observed $i$):
+  $$ m_i^{(t)} = \beta_1 m_i^{(t-1)} + (1 - \beta_1) g_i^{(t)} $$
+  $$ v_i^{(t)} = \beta_2 v_i^{(t-1)} + (1 - \beta_2) (g_i^{(t)})^2 $$
+- Parameter update (for observed $i$):
+  $$ \theta_i^{(t)} = \theta_i^{(t-1)} - \alpha \frac{\hat{m}_i^{(t)}}{\sqrt{\hat{v}_i^{(t)}} + \epsilon} $$
+- Where $\alpha$ is the learning rate, $\beta_1, \beta_2$ are exponential decay rates for moment estimates, $\epsilon$ is a small constant for numerical stability, and $t$ is the iteration count.
+
+**Parameters with Typical Values:**
+- $\beta_1$: 0.9 (typical Adam default) [S1].
+- $\beta_2$: 0.999 (typical Adam default) [S1].
+- $\epsilon$: $10^{-8}$ (typical Adam default) [S1].
+- $\alpha$: Depends on the specific training setup; not specified in [S1].
+
+**Edge Cases and Pitfalls:**
+- **Noisy Momentum Accumulation:** Without this method, Adam maintains moment estimates from previous iterations' stochastic noise. If a variable is not observed, its momentum remains fixed with accumulated noise, impeding convergence [S1].
+- **Indirect Gradients:** In differentiable path tracing, gradients for indirectly observed parameters (e.g., lighting contributions from distant surfaces) are extremely noisy due to low sampling probability of long light paths. Observed-Only Momentum helps mitigate this by ignoring updates for variables that only receive these indirect, noisy gradients [S1].
+- **Sparse Updates:** Variables not observed in a batch do not receive updates. This requires careful initialization and potentially longer training schedules to ensure all variables are eventually observed and updated [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def observed_only_momentum_update(theta, m, v, g, alpha, beta1, beta2, epsilon, t):
+    """
+    Perform one step of Observed-Only Momentum Updates.
+    
+    Args:
+        theta: Current parameter values (tensor).
+        m: First moment estimate (tensor).
+        v: Second moment estimate (tensor).
+        g: Gradient for the current batch (tensor).
+        alpha: Learning rate (float).
+        beta1: Exponential decay rate for first moment (float).
+        beta2: Exponential decay rate for second moment (float).
+        epsilon: Small constant for numerical stability (float).
+        t: Current time step (int).
+        
+    Returns:
+        theta: Updated parameter values.
+        m: Updated first moment estimate.
+        v: Updated second moment estimate.
+    """
+    # Create a mask for observed variables (non-zero gradients)
+    observed_mask = (g != 0)
+    
+    # Update moments and parameters only for observed variables
+    # Using boolean indexing to apply updates selectively
+    
+    # Update first moment for observed variables
+    m[observed_mask] = beta1 * m[observed_mask] + (1 - beta1) * g[observed_mask]
+    
+    # Update second moment for observed variables
+    v[observed_mask] = beta2 * v[observed_mask] + (1 - beta2) * (g[observed_mask] ** 2)
+    
+    # Compute bias-corrected estimates for observed variables
+    bias_correction1 = 1 - beta1 ** t
+    bias_correction2 = 1 - beta2 ** t
+    
+    m_hat = m / bias_correction1
+    v_hat = v / bias_correction2
+    
+    # Update parameters for observed variables
+    # theta[observed_mask] -= alpha * (m_hat[observed_mask] / (sqrt(v_hat[observed_mask]) + epsilon))
+    # Note: Standard Adam update formula applied only to observed indices
+    
+    # For simplicity, we can compute the full update and then zero out non-observed updates
+    # However, the core idea is that m and v are NOT updated for non-observed variables.
+    # So we only update theta for observed variables.
+    
+    # Calculate the Adam update step for observed variables
+    adam_step = m_hat[observed_mask] / (v_hat[observed_mask].sqrt() + epsilon)
+    
+    # Apply the update
+    theta[observed_mask] = theta[observed_mask] - alpha * adam_step
+    
+    # Non-observed variables remain unchanged in theta, m, and v
+    
+    return theta, m, v
+```
+
+## Subtopics
+
+### Exponential Momentum Scaling Rule
+A momentum scaling rule proposed to maintain high update cosine similarity and similar update magnitude when switching to larger training batch sizes in 3D Gaussian Splatting training [S2]. Compared to leaving momentum coefficients unchanged, the exponential momentum scaling rule keeps update cosine similarity higher across different training batch sizes [S2]. It is a variant of momentum scaling, distinct from the observed-only filtering of the parent method, and is used in conjunction with Adam-like optimizers in specific 3D Gaussian Splatting contexts [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per iteration, where $N$ is the number of parameters, as it involves element-wise operations and masking. The masking operation may add a small constant overhead but does not change the asymptotic complexity.
+- **Memory Complexity:** $O(N)$ for storing parameters and moments, same as standard Adam.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales with the number of parameters and batch size. The effectiveness depends on the sparsity of observed gradients.
+- **Strengths:** Reduces noise accumulation for unobserved variables, potentially improving convergence in scenes with sparse observations or indirect lighting [S1].
+- **Limitations:** May require more iterations to update all variables if observations are sparse. Not suitable for dense gradient scenarios where all variables are observed every step.
+- **When to use:** When using differentiable rendering with path tracing where indirect gradients are noisy and many variables are not directly observed in each batch [S1].
+- **When not to use:** When gradients are dense and all variables are observed every step, or when computational overhead of masking is prohibitive (though this is minimal).
+
+## Background
+Originated in the context of material and lighting reconstruction for complex indoor scenes using texture-space differentiable rendering [S1]. The method was introduced to address the issue of noisy momentum accumulation in Adam optimizer when applied to differentiable rendering, where not all parameters are observed in every batch due to the nature of light transport [S1]. It is used in differentiable volume rendering and related inverse rendering techniques [S1].
+
+## Sources
+[S1] Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering, https://doi.org/10.2312/sr.20211292, fetched 2026-10-29
+[S2] On Scaling Up 3D Gaussian Splatting Training, https://doi.org/10.1007/978-3-031-91989-3_2, fetched 2026-10-26

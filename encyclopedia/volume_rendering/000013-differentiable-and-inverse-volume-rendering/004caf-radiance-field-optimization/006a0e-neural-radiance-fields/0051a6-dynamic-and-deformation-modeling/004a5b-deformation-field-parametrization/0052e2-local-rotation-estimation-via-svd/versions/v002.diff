@@ -1,0 +1,165 @@
+--- v001.md
++++ v002.md
+@@ -4,101 +4,90 @@
+ 
+ ## Overview
+-Local Rotation Estimation via SVD is a technique used in dynamic neural radiance fields to correct view-dependent rendering artifacts caused by large local rotations during deformation [S1, unofficial]. While deformation MLPs can accurately predict point translations, direct rendering of deformed points without accounting for orientation changes leads to inconsistencies between the deformed space and the canonical space [S1, unofficial]. This method estimates the local rotation for each point using Singular Value Decomposition (SVD), inspired by As-Rigid-As-Possible (ARAP) mesh deformation, and interpolates these rotations to redirect querying rays [S1, unofficial]. It sets itself apart from siblings like [Neural Deformation Field](12724-neural-deformation-field.md) by explicitly modeling the rotational component of deformation to preserve view-dependent appearance, rather than relying solely on positional shifts or implicit feature adjustments.
++Local Rotation Estimation via SVD is a technique used in dynamic neural radiance fields to correct view-dependent rendering artifacts caused by large rigid-body rotations during deformation [S1, unofficial]. It estimates the local rotation for each point in a deformed point cloud using Singular Value Decomposition (SVD), inspired by As-Rigid-As-Possible (ARAP) mesh deformation [S1, unofficial]. This estimated rotation is then interpolated to query view directions to "bend" rays, ensuring consistency between the deformed space and the canonical space representation [S1, unofficial]. It differs from sibling methods like [Neural Deformation Field](12724-neural-deformation-field.md) by explicitly modeling rotational components of the deformation field rather than relying solely on translation or dense deformation vectors, thereby handling complex fine-level deformations without introducing extra complexity into the radiance field model itself [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A set of points in the canonical space $P = \{(\mathbf{x}_i, \mathbf{f}_i, \gamma_i)\}$, where $\mathbf{x}_i$ is the position, $\mathbf{f}_i$ is the neural feature, and $\gamma_i$ is the scale confidence [S1, unofficial].
+-- A deformation field (typically an MLP) that predicts the translation $\Delta \mathbf{x}_i$ for each point to its deformed position $\mathbf{x}'_i = \mathbf{x}_i + \Delta \mathbf{x}_i$ [S1, unofficial].
+-- A query ray $\mathbf{r}$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ in the camera space [S1, unofficial].
++1.  A set of canonical space points $P_{can} = \{(\mathbf{x}_i, \mathbf{f}_i, \gamma_i)\}_{i=1}^N$, where $\mathbf{x}_i$ is position, $\mathbf{f}_i$ is neural feature, and $\gamma_i$ is scale confidence [S1, unofficial].
++2.  A deformed space point cloud $P_{def}$, obtained by applying a deformation MLP to predict translations from canonical to deformed space [S1, unofficial].
++3.  A pre-trained static radiance field model (e.g., PointNeRF) that predicts density $\sigma$ and radiance $\mathbf{r}$ given a query location and view direction [S1, unofficial].
++4.  A query ray defined by origin $\mathbf{o}$ and direction $\mathbf{v}$ in camera space.
+ 
+ **Outputs:**
+-- A corrected ray direction $\mathbf{d}'$ in the canonical space that accounts for the local rotation at the intersection point [S1, unofficial].
+-- The rendered color $\hat{C}(\mathbf{r})$ using the standard emission-absorption model [44-radiance-field-optimization.md].
++1.  Corrected ray direction $\mathbf{v}'$ in canonical space for accurate sampling.
++2.  Rendered color $\hat{C}(\mathbf{r})$ consistent with the deformed pose.
+ 
+ **Data Structures:**
+-- **Point Cloud:** List of tuples $(\mathbf{x}_i, \mathbf{f}_i, \gamma_i)$.
+-- **Rotation Field:** A mapping from point indices to $3 \times 3$ rotation matrices $R_i$.
+-- **Ray:** Origin $\mathbf{o} \in \mathbb{R}^3$, Direction $\mathbf{d} \in \mathbb{R}^3$ (normalized).
++*   **Point Cloud:** List of tuples $(\mathbf{x}, \mathbf{f}, \gamma)$.
++*   **Rotation Matrix:** $3 \times 3$ orthogonal matrix $R$ with determinant $+1$.
+ 
+-**Steps:**
++**Algorithm Steps:**
+ 
+-1. **Deform Points:**
+-   For each point $i$ in the canonical point cloud, compute the deformed position $\mathbf{x}'_i$ using the deformation MLP:
+-   $$ \mathbf{x}'_i = \mathbf{x}_i + \text{MLP}_{\text{def}}(\mathbf{x}_i) $$
+-   [S1, unofficial]
++1.  **Deformation Translation:**
++    For each canonical point $\mathbf{x}_i$, compute its deformed position $\mathbf{x}'_i$ using a deformation MLP $D$:
++    $$ \mathbf{x}'_i = \mathbf{x}_i + D(\mathbf{x}_i) $$
++    [S1, unofficial]
+ 
+-2. **Estimate Local Rotation via SVD:**
+-   For each point $i$, estimate the local rotation matrix $R_i$ that best aligns the local neighborhood in the canonical space to the deformed space. This is done by constructing a covariance matrix from the relative vectors of the point and its neighbors, then applying SVD.
+-   
+-   Let $\mathcal{N}(i)$ be the set of neighbors of point $i$. Construct the matrix $H_i$:
+-   $$ H_i = \sum_{j \in \mathcal{N}(i)} (\mathbf{x}_j - \mathbf{x}_i)(\mathbf{x}'_j - \mathbf{x}'_i)^T $$
+-   [G: Neighbor selection is typically based on k-nearest neighbors or a fixed radius, as implied by the ARAP analogy in [S1, unofficial] and [S2].]
+-   
+-   Perform SVD on $H_i$:
+-   $$ H_i = U_i \Sigma_i V_i^T $$
+-   [S1, unofficial]
+-   
+-   Compute the rotation matrix $R_i$:
+-   $$ R_i = V_i U_i^T $$
+-   [G: If $\det(R_i) = -1$, multiply the last column of $V_i$ by $-1$ to ensure a proper rotation (no reflection). This is a standard SVD rotation extraction step [G].]
+-   [S1, unofficial]
++2.  **Local Rotation Estimation via SVD:**
++    For each point $\mathbf{x}_i$, estimate the local rotation $R_i$ that best aligns the local neighborhood in the canonical space to the deformed space.
++    
++    Let $\mathcal{N}_i$ be the set of $k$ nearest neighbors of $\mathbf{x}_i$ in the canonical space.
++    Construct two matrices $A$ and $B$ of size $3 \times k$:
++    *   Columns of $A$ are vectors from $\mathbf{x}_i$ to its neighbors: $\mathbf{a}_j = \mathbf{x}_{n_j} - \mathbf{x}_i$ for $n_j \in \mathcal{N}_i$.
++    *   Columns of $B$ are vectors from $\mathbf{x}'_i$ to the corresponding deformed neighbors: $\mathbf{b}_j = \mathbf{x}'_{n_j} - \mathbf{x}'_i$.
++    
++    Compute the cross-covariance matrix $H$:
++    $$ H = A B^T = \sum_{j=1}^k (\mathbf{x}_{n_j} - \mathbf{x}_i)(\mathbf{x}'_{n_j} - \mathbf{x}'_i)^T $$
++    
++    Perform Singular Value Decomposition on $H$:
++    $$ H = U \Sigma V^T $$
++    
++    Compute the rotation matrix $R_i$:
++    $$ R_i = V U^T $$
++    
++    *Correction for Reflection:* If $\det(R_i) = -1$, the decomposition yields a reflection. Correct it by setting the last column of $V$ to $-V_{last}$ before computing $R_i$ (i.e., $R_i = V \text{diag}(1, 1, -1) U^T$) [G]. This ensures $R_i$ is a proper rotation matrix ($\det(R_i)=1$).
+ 
+-3. **Interpolate Rotation to Query Ray:**
+-   When a ray $\mathbf{r}$ intersects the deformed geometry, identify the nearest deformed point $\mathbf{x}'_k$ (or a set of nearby points). Interpolate the local rotation matrices $R_k$ to the query location to obtain the global rotation $R_{\text{query}}$ [S1, unofficial].
+-   [G: Interpolation is typically done via weighted averaging of rotation matrices (e.g., using quaternion slerp or matrix logarithm/exponential) to maintain the rotation group structure, though the source notes do not specify the exact interpolation formula. We assume a standard weighted average of the resulting matrices or quaternions derived from them.]
++3.  **Interpolation to Query Direction:**
++    Given a query ray with direction $\mathbf{v}$ in camera space, determine the corresponding direction $\mathbf{v}_{can}$ in canonical space.
++    
++    First, find the intersection point $\mathbf{x}_{hit}$ of the ray with the deformed point cloud or use the nearest deformed point $\mathbf{x}'_k$ to the ray.
++    
++    Interpolate the rotation $R_{query}$ from the estimated local rotations $R_i$ of nearby points. A common approach is inverse-distance weighting based on the distance from the query ray to the canonical points $\mathbf{x}_i$:
++    $$ R_{query} = \frac{\sum_{i \in \mathcal{K}} w_i R_i}{\|\sum_{i \in \mathcal{K}} w_i R_i\|_{F}} $$
++    where $\mathcal{K}$ is a set of $m$ nearest canonical points to the query ray, and $w_i = 1 / \|\mathbf{x}_{hit} - \mathbf{x}_i\|^2 + \epsilon$. The Frobenius norm normalization ensures the result is a valid rotation matrix [G].
+ 
+-4. **Ray Bending (Redirect Ray):**
+-   Transform the query ray direction $\mathbf{d}$ from the deformed space back to the canonical space using the estimated rotation. The ray origin $\mathbf{o}$ is also transformed if necessary, but the primary correction is on the direction to align with the canonical view dependence.
+-   $$ \mathbf{d}_{\text{canonical}} = R_{\text{query}}^T \mathbf{d} $$
+-   [S1, unofficial]
+-   The ray origin $\mathbf{o}$ is transformed to the canonical space position $\mathbf{o}_{\text{canonical}}$ using the inverse deformation or by tracing back from the deformed intersection point.
+-   [G: The source states "redirect the querying ray in the right direction", implying the ray is bent to sample the canonical radiance field correctly. The exact transformation of the origin is implied by the need to query the canonical space.]
++4.  **Ray Bending:**
++    Rotate the query view direction $\mathbf{v}$ using the interpolated rotation $R_{query}$ to obtain the canonical view direction $\mathbf{v}_{can}$:
++    $$ \mathbf{v}_{can} = R_{query} \mathbf{v} $$
++    [S1, unofficial]
+ 
+-5. **Render:**
+-   Use the canonical ray $(\mathbf{o}_{\text{canonical}}, \mathbf{d}_{\text{canonical}})$ to query the pre-trained canonical radiance field for density $\sigma$ and color $\mathbf{c}$, then integrate using the standard volume rendering equation [44-radiance-field-optimization.md].
++5.  **Rendering:**
++    Use the canonical radiance field to sample density $\sigma$ and color $\mathbf{c}$ at points along the ray using $\mathbf{v}_{can}$ and the canonical positions. Compute the final color $\hat{C}(\mathbf{r})$ using the standard volume rendering equation [44-radiance-field-optimization.md].
+ 
+ **Parameters:**
+-- Neighbor selection radius or $k$ for SVD computation: Not given in the sources.
+-- Weighting scheme for interpolation: Not given in the sources.
++*   $k$: Number of neighbors for SVD estimation. Typical value: 6-10 [G].
++*   $m$: Number of neighbors for rotation interpolation. Typical value: 6-10 [G].
++*   $\epsilon$: Small constant for numerical stability. Typical value: $10^{-6}$ [G].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Degenerate Neighbors:** If a point has no neighbors or collinear neighbors, the covariance matrix $H_i$ may be singular. [G: Add a small regularization term $\epsilon I$ to $H_i$ before SVD.]
+-- **Reflection:** SVD can produce a reflection ($\det(R) = -1$). Must check determinant and correct if necessary [G].
+-- **Large Rotations:** The method is specifically designed for large rotations where simple translation-based deformation fails [S1, unofficial].
++*   **Degenerate Neighbors:** If neighbors are collinear or coplanar, $H$ may be rank-deficient, leading to unstable SVD. Add a small regularization term to $H$ or increase $k$ [G].
++*   **Reflection:** As noted, SVD can produce reflections. The determinant check is mandatory [G].
++*   **Boundary Points:** Points on the boundary of the deformed object may have sparse neighbors. Use a larger search radius or fallback to identity rotation [G].
+ 
+ ## Subtopics
+ 
+-### ARAP Mesh Deformation
+-As-Rigid-As-Possible (ARAP) mesh deformation is the foundational technique from which the SVD-based rotation estimation borrows its core idea [S1, unofficial]. It minimizes the distortion energy of a mesh by optimizing local rotations $R_i$ and deformed positions $v'_i$ alternately. The energy function is:
+-$$ E(S^0) = \sum_{i=1}^{n} \sum_{j \in N(i)} w_{ij} \| (v'_i - v'_j) - R_i(v_i - v_j) \|^2 $$
+-where $w_{ij} = \frac{1}{2}(\cot \alpha_{ij} + \cot \beta_{ij})$ is the cotangent weight, and $\alpha_{ij}, \beta_{ij}$ are angles opposite to edge $(i,j)$ [S2]. This method is used when the deformation is guided by a mesh structure rather than a point cloud, providing a rigid-body-like deformation that preserves local geometry [S2]. It is chosen when explicit mesh topology is available and rigidity is desired.
++### [ARAP Mesh Deformation](15866-arap-mesh-deformation.md)
++ARAP Mesh Deformation is a technique for deforming a triangular mesh while preserving local rigidity, minimizing distortion energy by approximating local rotations. It solves the problem of transferring user-specified boundary edits to the interior of a mesh without excessive stretching or shearing. It differs from global rigid transformations by allowing local rotation estimation per vertex, and from linear blend skinning by avoiding skeletal dependencies, relying instead on the mesh connectivity and cotangent weights.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- The SVD computation is performed per point, which is $O(1)$ per point if the number of neighbors is fixed, but requires neighbor search which is $O(N \log N)$ or $O(N)$ with spatial hashing.
+-- Interpolation is $O(1)$ per ray sample.
+-- Memory usage is dominated by storing the point cloud and the deformation MLP, similar to standard NeRFs. The additional storage for rotation matrices is $9 \times N$ floats.
+-[Not given in the sources.]
+-
+-**Measured Performance:**
+-- The method significantly outperforms state-of-the-art methods on fine-level complex deformation for digital humans and other 3D characters [S1, unofficial].
+-- It allows for consistent rendering of deformed scenes without introducing extra complexity into the NeRF model structure itself, unlike methods that add extra information to features [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Handles large rotations effectively; simple to integrate into existing point-based NeRF frameworks; preserves view-dependent appearance [S1, unofficial].
+-- **Limitations:** Relies on the quality of the deformation field; requires neighbor information for SVD, which may be sparse in some point clouds; interpolation of rotations can be non-trivial to implement correctly [S1, unofficial].
+-
+-**When to Use:**
+-- Use when rendering deformed 3D characters or objects with significant local rotations where view-dependent effects are important.
+-- Use when a point-based representation is preferred over mesh-based or voxel-based representations.
+-
+-**When Not to Use:**
+-- Use when deformations are small and rigid, as the rotational correction may be negligible.
+-- Use when computational resources are extremely limited and neighbor search/SVD overhead is prohibitive.
++*   **Time Complexity:** The SVD step is $O(k)$ per point for covariance matrix construction and $O(1)$ for $3 \times 3$ SVD. Interpolation is $O(m)$. Overall, it adds a small constant overhead per ray query compared to pure translation-based deformation.
++*   **Memory Complexity:** Requires storing the deformation MLP and the point cloud. No additional large structures are needed beyond the point features.
++*   **Strengths:** Handles large rotations effectively without modifying the core radiance field architecture. Improves visual consistency for complex deformations (e.g., human motion) [S1, unofficial].
++*   **Limitations:** Requires a well-defined point cloud structure. Performance degrades if the point cloud is sparse or noisy. The interpolation step can introduce artifacts if the rotation field is not smooth [G].
++*   **When to Use:** When deforming scenes with significant rigid-body motion (e.g., articulated characters) where translation-only deformation causes view-dependent artifacts.
++*   **When Not to Use:** For small deformations where translation is sufficient, or for scenes without a clear point cloud representation.
+ 
+ ## Background
+-The method was introduced in "Point-Based Radiance Fields for Controllable Human Motion Synthesis" by Zhang et al. in 2023 [S1, unofficial]. It addresses the limitation of previous point-based NeRF editing methods that only modeled translation, leading to artifacts under large rotations. The approach borrows the SVD-based rotation estimation from ARAP mesh deformation, a technique originally developed for geometry processing [S2]. The work demonstrates that ray-bending using estimated local rotations can significantly improve the visual quality of dynamic NeRFs for human motion synthesis.
++This method was introduced in "Point-Based Radiance Fields for Controllable Human Motion Synthesis" by Zhang et al. (2023) [S1, unofficial]. It builds on the observation that direct rendering of deformed point clouds leads to inconsistencies due to changed viewing directions. By borrowing the SVD-based rotation estimation from ARAP mesh deformation [S1, unofficial], the method provides a simple yet effective "ray-bending" module. It is particularly relevant for dynamic NeRF applications involving digital humans and other 3D characters [S1, unofficial].
+ 
+ ## Sources
+-[S1] Point-Based Radiance Fields for Controllable Human Motion Synthesis, https://doi.org/10.48550/arXiv.2310.03375, fetched 2026-10-29 (unofficial)
+-[S2] NeRF-Editing: Geometry Editing of Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.01781, fetched 2026-10-26+[S1] Point-Based Radiance Fields for Controllable Human Motion Synthesis, https://doi.org/10.48550/arXiv.2310.03375, fetched 2026-10-29 (unofficial)

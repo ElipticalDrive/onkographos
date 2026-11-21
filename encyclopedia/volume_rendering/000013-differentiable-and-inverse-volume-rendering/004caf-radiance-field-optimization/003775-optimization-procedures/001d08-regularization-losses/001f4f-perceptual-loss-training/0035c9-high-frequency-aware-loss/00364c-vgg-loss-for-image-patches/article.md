@@ -1,0 +1,93 @@
+# VGG Loss for Image Patches
+
+Also called: Perceptual Loss (VGG), VGG Loss, VGG feature distance
+
+## Overview
+A perceptual loss computed on image patches using a VGG network, encouraging the generated patches to have similar high-level features as the real patches [S1, unofficial]. It serves as a differentiable proxy for perceptual similarity that truncates the VGG network and computes the Euclidean distance between high-level features produced during model evaluation [S2]. Unlike traditional pixel-wise losses, VGG loss measures perceptual similarity but suffers from loss-induced bias when rendered images contain noise [S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Real image patches, generated (fake) image patches, a pre-trained VGG network (typically VGG-19), and a loss multiplier parameter.
+- **Outputs:** A scalar loss value representing the perceptual distance between the patches.
+
+**Data Structures:**
+- **Patches:** 2D image arrays (e.g., height $H$, width $W$, channels $C$).
+- **VGG Features:** Activation maps from a specific layer of the VGG network. The parent method [High-Frequency Aware Loss](7589-high-frequency-aware-loss.md) specifies using only the first block of VGG-19 (before max-pooling) to preserve high-frequency details [S1, unofficial].
+
+**Steps:**
+1. Extract real and fake patches from the outputs and batch [S1, unofficial].
+2. Slice the patches to include only the first `num_patches` if batch processing is used [S1, unofficial].
+3. Pass both real and fake patches through the truncated VGG network to obtain high-level feature representations [S2].
+4. Compute the Euclidean distance (L2 norm) between the feature maps of the real and fake patches [S2].
+5. Multiply the computed distance by the `vgg_loss_mult` parameter to scale the contribution to the total loss [S1, unofficial].
+
+**Formula:**
+Let $x_{real}$ and $x_{fake}$ be the real and fake patches. Let $\Phi(x)$ be the feature extraction function of the truncated VGG network. The VGG loss $L_{VGG}$ is:
+
+$$ L_{VGG} = \| \Phi(x_{real}) - \Phi(x_{fake}) \|_2^2 $$
+
+The final loss term added to the optimization objective is:
+
+$$ L_{final} = \text{vgg\_loss\_mult} \times L_{VGG} $$
+
+**Parameters:**
+- `vgg_loss_mult`: The multiplier for the VGG loss in the total loss computation [S1, unofficial]. Value not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Noise Sensitivity:** High-level feature propagation makes the loss highly sensitive to noise, which can bias optimization towards suboptimal solutions [S2]. This is particularly problematic in inverse rendering where rendered images may contain Monte Carlo noise [S2].
+- **Boundary Conditions:** When slicing patches, ensure indices do not exceed batch dimensions [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_vgg_loss_for_patches(real_patches, fake_patches, vgg_model, vgg_loss_mult):
+    """
+    Computes the VGG perceptual loss for a batch of image patches.
+    
+    Args:
+        real_patches: Tensor of shape (B, C, H, W) containing real image patches.
+        fake_patches: Tensor of shape (B, C, H, W) containing generated image patches.
+        vgg_model: A pre-trained VGG-19 model, truncated to the first block (before max-pooling).
+        vgg_loss_mult: Scalar multiplier for the loss.
+        
+    Returns:
+        Scalar loss value.
+    """
+    # 1. Extract features from real and fake patches using the truncated VGG model
+    # The parent method specifies using only the first block of VGG-19 [S1, unofficial]
+    features_real = vgg_model(real_patches)
+    features_fake = vgg_model(fake_patches)
+    
+    # 2. Compute Euclidean distance (L2 norm) between feature maps
+    # This is the core definition of VGG loss as a differentiable proxy for perceptual similarity [S2]
+    diff = features_real - features_fake
+    loss = torch.sum(diff ** 2)
+    
+    # 3. Apply multiplier
+    final_loss = vgg_loss_mult * loss
+    
+    return final_loss
+```
+
+## Subtopics
+
+### LPIPS Patch Supervision
+A variant that uses the LPIPS (Learned Perceptual Image Patch Similarity) metric for patch supervision. In each training step, it randomly renders a 300 × 300 image patch and compares it with the ground-truth image patch to compute the LPIPS loss [S3, unofficial]. The total training loss is $L = L_{reg} + \lambda_{LPIPS} L_{LPIPS}$, where $L_{reg} = \lambda_{color} L_{color} + \lambda_{density} L_{density}$ is the regularization loss [S3, unofficial]. The weight $\lambda_{LPIPS}$ is set to 0.025 [S3, unofficial]. Unlike NeRF, which requires multiple network evaluations per ray or small 32×32 patches, this method renders a large 300×300 patch in a single step, enabling efficient large-patch LPIPS supervision [S3, unofficial]. On the light change dataset, ProLiF with large-patch LPIPS achieves higher SSIM and lower LPIPS than NeRF with 32×32 patch supervision or 256×256 up-sampled patch supervision [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the VGG network inference time and the number of patches. Large patches (e.g., 300×300) increase memory usage but reduce the number of forward passes compared to small patches [S3, unofficial].
+- **Memory Complexity:** Proportional to the patch size and batch size. Large patches require more VRAM [S3, unofficial].
+- **Measured Performance:** On the light change dataset, large-patch LPIPS supervision achieves better quality than small-patch (32×32) or up-sampled (256×256) supervision in terms of SSIM and LPIPS [S3, unofficial].
+- **Strengths:** Measures perceptual similarity, robust to noise, intensity changes, and distortions [S3, unofficial]. Preserves high-frequency details when using shallow VGG blocks [S1, unofficial].
+- **Limitations:** Highly sensitive to noise in rendered images, leading to loss-induced bias [S2]. Not compatible with PSNR in varying light conditions [S3, unofficial].
+- **When to use:** When perceptual quality is more important than pixel-wise accuracy, and the rendering pipeline can handle the computational cost of VGG inference.
+- **When not to use:** When the rendered images contain significant noise that biases the optimization [S2].
+
+## Background
+VGG loss was introduced by Johnson et al. [2016] as a way to measure perceptual similarity by truncating the VGG-19 network [Simonyan and Zisserman 2015] and computing the Euclidean distance between high-level features [S2]. It has been widely used in image synthesis and optimization tasks [S2]. In the context of volume rendering, it is used as a regularization loss to improve perceptual quality [S1, unofficial]. The specific application to image patches in large-scale rendering is explored in methods like ProLiF [S3, unofficial].
+
+## Sources
+[S1] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S2] Recursive Control Variates for Inverse Rendering, https://research.nvidia.com/labs/rtr/publication/nicolet2023recursive/, fetched 2026-11-08
+[S3] Progressively-connected Light Field Network for Efficient View Synthesis, https://doi.org/10.48550/arxiv.2207.04465, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,281 @@
+--- v001.md
++++ v002.md
+@@ -1,16 +1,16 @@
+ # Hard Voxelization (Deterministic)
+ 
+-Also called: Voxel Grid Downsampling
++Also called: Point Cloud Voxelization via Histogramming, Voxel Grid Downsampling, Voxelization of unstructured 3D data
+ 
+ ## Overview
+-Hard Voxelization (Deterministic) converts a 3D point cloud into a fixed-size voxel grid by assigning each point to a discrete voxel based on its coordinates and a specified voxel size and range [S2, unofficial]. It handles duplicate points within the same voxel and limits the number of points per voxel and total voxels [S2, unofficial]. Unlike the non-deterministic variant which uses atomic operations for speed at the cost of reproducibility, this method guarantees bit-identical output by using stable sorting and explicit ordering logic [S2, unofficial]. It serves as the foundational step for producing volume data from raw point clouds, building on [Hard Voxelization](5345-hard-voxelization.md).
++Hard Voxelization (Deterministic) converts a 3D point cloud into a fixed-size voxel grid by assigning each point to a discrete voxel based on its coordinates and a specified voxel size and range [S2, unofficial]. It handles duplicate points within the same voxel and limits the number of points per voxel and total voxels [S2, unofficial]. Unlike the non-deterministic variant which uses atomic operations for speed at the cost of reproducibility, this method guarantees bit-identical output by using stable sorting and explicit ordering logic [S2, unofficial]. It builds on [Hard Voxelization](5345-hard-voxelization.md).
+ 
+ ## How it works
+ **Inputs:**
+-- `points`: A tensor of shape $[N, C]$ containing $N$ points with $C$ features (typically $C=3$ for coordinates, or more including intensity/ring) [S2, unofficial].
++- `points`: A tensor/array of shape $[N, C]$ containing $N$ points with $C$ features (typically $C=3$ for coordinates, or more including intensity/ring) [S2, unofficial].
+ - `voxel_size`: A float array of size 3 $[v_x, v_y, v_z]$ defining the physical dimensions of a voxel [S2, unofficial].
+ - `coors_range`: A float array of size 6 $[x_{min}, y_{min}, z_{min}, x_{max}, y_{max}, z_{max}]$ defining the bounding box of the voxel grid [S2, unofficial].
+ - `max_points`: Integer. Maximum number of points allowed in a single voxel [S2, unofficial].
+-- `max_voxels`: Integer. Maximum number of voxels to create. Points falling into voxels beyond this limit are dropped. Typical value is 20000 [S2, unofficial].
++- `max_voxels`: Integer. Maximum number of voxels to create. Points falling into voxels beyond this limit are dropped [S2, unofficial]. Typical value is 20000 [S2, unofficial].
+ 
+ **Outputs:**
+@@ -35,7 +35,7 @@
+ 2.  **Invalid Coordinate Handling:** Identify points outside the `coors_range`. These are mapped to invalid coordinates (e.g., $(-1, -1, -1)$) [S2, unofficial]. Filter out these invalid coordinates from `temp_coors` and decrement all values in `coors_map` by 1 to adjust for the removed entry [S2, unofficial].
+ 
+-3.  **Unique Voxel Identification:** Use a stable unique operation (e.g., `at::unique_dim`) on `temp_coors` to find unique voxel coordinates and generate a mapping from original point indices to unique voxel indices (`coors_map`) [S2, unofficial].
++3.  **Unique Voxel Identification:** Use a stable unique operation on `temp_coors` to find unique voxel coordinates and generate a mapping from original point indices to unique voxel indices (`coors_map`) [S2, unofficial].
+ 
+-4.  **Assignment Order and Counts:** Compute `coors_order` (the order in which unique voxels appear) and `reduce_count` (number of points per voxel) based on `coors_map` [S2, unofficial]. This step ensures deterministic ordering by preserving the original point order within voxels [S1, unofficial].
++4.  **Assignment Order and Counts:** Compute `coors_order` (the order in which unique voxels appear) and `reduce_count` (number of points per voxel) based on `coors_map` [S2, unofficial].
+ 
+ 5.  **Feature Assignment:** Assign point features to the output `voxels` tensor. For each point, use `pts_id` (derived from `coors_map` and `coors_order`) to write point features into the voxels tensor, update `num_points_per_voxel`, and write voxel coordinates to `coors` [S2, unofficial]. If a voxel exceeds `max_points`, subsequent points are ignored [S2, unofficial]. If the total number of voxels exceeds `max_voxels`, excess voxels are ignored [S2, unofficial].
+@@ -46,5 +46,5 @@
+ def hard_voxelize_deterministic(points, voxel_size, coors_range, max_points, max_voxels):
+     """
+-    points: [N, C] tensor
++    points: [N, C] array-like
+     voxel_size: [3] float array [vx, vy, vz]
+     coors_range: [6] float array [xmin, ymin, zmin, xmax, ymax, zmax]
+@@ -53,4 +53,5 @@
+     Returns: voxels [M, max_points, C], coors [M, 3], num_points_per_voxel [M]
+     """
++    import numpy as np
+     N, C = points.shape
+     vx, vy, vz = voxel_size
+@@ -58,13 +59,8 @@
+     
+     # Step 1: Map points to voxel coordinates
+-    # Calculate voxel indices for all points
+-    # Handle points outside range by mapping to -1
+-    coors = torch.zeros((N, 3), dtype=torch.int32)
+-    
+-    # Compute indices
+-    # Note: floor division for positive offsets, careful with negative
+-    coors[:, 0] = torch.floor((points[:, 0] - xmin) / vx).int()
+-    coors[:, 1] = torch.floor((points[:, 1] - ymin) / vy).int()
+-    coors[:, 2] = torch.floor((points[:, 2] - zmin) / vz).int()
++    coors = np.zeros((N, 3), dtype=np.int32)
++    coors[:, 0] = np.floor((points[:, 0] - xmin) / vx).astype(np.int32)
++    coors[:, 1] = np.floor((points[:, 1] - ymin) / vy).astype(np.int32)
++    coors[:, 2] = np.floor((points[:, 2] - zmin) / vz).astype(np.int32)
+     
+     # Mark invalid coordinates
+@@ -77,46 +73,12 @@
+     
+     # Step 2: Find unique voxels and map points to them
+-    # Use stable unique to preserve order
+-    # unique_dim returns unique values and indices mapping original to unique
+-    unique_coors, inverse_indices = torch.unique(coors, dim=0, sorted=True, return_inverse=True)
++    unique_coors, inverse_indices = np.unique(coors, axis=0, return_inverse=True)
+     
+     # Filter out the (-1, -1, -1) entry if present
+-    # Assuming (-1, -1, -1) is the first unique element if it exists
+     if unique_coors[0, 0] == -1:
+         unique_coors = unique_coors[1:]
+-        # Adjust inverse_indices: decrement by 1 for all entries that were mapped to 0
+-        # But wait, inverse_indices maps to the index in unique_coors BEFORE filtering
+-        # So we need to adjust inverse_indices for points that were mapped to 0
+-        # Actually, simpler: just remove points with coors == -1 first?
+-        # The source says: "remove it from temp_coors and decrement all values in coors_map by 1"
+-        # Let's follow the source logic strictly.
++        inverse_indices[inverse_indices == 0] = -1
++        inverse_indices[inverse_indices > 0] -= 1
+         
+-        # Re-do unique on non-invalid points? Or adjust indices.
+-        # Let's assume we filter invalid points first for clarity, 
+-        # but the source implies handling via index adjustment.
+-        pass 
+-        
+-    # Simplified approach matching source logic:
+-    # 1. Get unique coors including -1
+-    # 2. If -1 is present, remove it from unique_coors and adjust inverse_indices
+-    
+-    # Let's implement the adjustment:
+-    has_invalid = (unique_coors[0, 0] == -1)
+-    if has_invalid:
+-        unique_coors = unique_coors[1:]
+-        # Decrement inverse_indices where they were 0
+-        mask_zero = (inverse_indices == 0)
+-        inverse_indices[mask_zero] = -1 # Mark as invalid
+-        # Actually, we want to map invalid points to a special state or drop them.
+-        # The source says "decrement all values in coors_map by 1".
+-        # This implies the mapping array itself is adjusted.
+-        # Let's assume inverse_indices is the coors_map.
+-        # If we remove index 0, all indices > 0 become index-1.
+-        # Indices that were 0 become invalid.
+-        invalid_points_mask = (inverse_indices == 0)
+-        inverse_indices = inverse_indices - 1
+-        inverse_indices[invalid_points_mask] = -1
+-        
+-    # Now inverse_indices maps each point to a unique voxel index (or -1)
+     # Filter out points with inverse_indices == -1
+     valid_point_mask = (inverse_indices >= 0)
+@@ -125,51 +87,4 @@
+     
+     # Step 3: Determine voxel order and counts
+-    # We need to know the order in which voxels are first encountered to ensure determinism
+-    # And count points per voxel
+-    
+-    # Get unique voxel indices in the order they appear in valid_voxel_indices
+-    # This is tricky with torch.unique which sorts.
+-    # The source uses 'deterministic_get_assign_pos' which likely does a scan.
+-    # For a pure Python implementation, we can simulate this:
+-    
+-    # Find the first occurrence of each voxel index to determine 'coors_order'
+-    # And count occurrences for 'reduce_count'
+-    
+-    unique_voxel_ids, counts = torch.unique(valid_voxel_indices, return_counts=True)
+-    
+-    # To get 'coors_order', we need the order of first appearance in valid_voxel_indices
+-    # We can use torch.unique with return_inverse and return_counts, but it sorts.
+-    # The source emphasizes preserving original point order.
+-    # Let's assume we sort the unique_voxel_ids based on their first appearance index.
+-    
+-    first_appearance = torch.zeros_like(unique_voxel_ids)
+-    for idx, vid in enumerate(valid_voxel_indices):
+-        if first_appearance[vid] == 0: # Assuming 0 is not a valid first index? No.
+-            pass
+-            
+-    # Alternative: Use a dictionary or stable sort key
+-    # Create pairs (first_appearance_index, voxel_id)
+-    # But we don't have first_appearance_index easily without loop.
+-    
+-    # Let's use the source's logic: 'coors_order' is computed via kernel.
+-    # In Python, we can approximate:
+-    # 1. Get unique voxel IDs
+-    # 2. Sort them by their first index in valid_voxel_indices
+-    
+-    # Efficient way:
+-    # unique_voxels, _ = torch.unique(valid_voxel_indices, return_inverse=True)
+-    # This returns sorted unique voxels. We need unsorted.
+-    
+-    # Let's just use the sorted unique voxels for the output structure, 
+-    # but the source says 'coors_order' determines the fill order.
+-    # If we output voxels in sorted order, it's deterministic but maybe not 'original order'.
+-    # However, 'deterministic' usually means bit-identical to a reference.
+-    # The reference C++ likely uses a specific order.
+-    # Let's assume the output 'coors' tensor is sorted by voxel index for simplicity,
+-    # or follows the order of first appearance.
+-    
+-    # For the sake of a complete, implementable Python version:
+-    # We will output voxels in the order of first appearance in the point cloud.
+-    
+     # Get unique voxel IDs in order of first appearance
+     seen = set()
+@@ -179,16 +94,9 @@
+             seen.add(vid)
+             ordered_unique_voxels.append(vid)
+-            
+-    ordered_unique_voxels = torch.tensor(ordered_unique_voxels, dtype=torch.int32)
++    ordered_unique_voxels = np.array(ordered_unique_voxels, dtype=np.int32)
+     
+     # Map each point to its position in ordered_unique_voxels
+-    # This is the 'coors_order' mapping? No, this is just the list of voxels.
+-    # We need to map each point to the index in ordered_unique_voxels
+-    # This is equivalent to the 'inverse_indices' if we had built it that way.
+-    
+-    # Let's rebuild inverse_indices to match ordered_unique_voxels
+-    # Create a map from voxel_id to its position in ordered_unique_voxels
+     voxel_to_pos = {vid.item(): i for i, vid in enumerate(ordered_unique_voxels)}
+-    point_to_voxel_pos = torch.tensor([voxel_to_pos[vid.item()] for vid in valid_voxel_indices], dtype=torch.int32)
++    point_to_voxel_pos = np.array([voxel_to_pos[vid.item()] for vid in valid_voxel_indices], dtype=np.int32)
+     
+     # Step 4: Assign features
+@@ -197,51 +105,18 @@
+         M = max_voxels
+         ordered_unique_voxels = ordered_unique_voxels[:M]
+-        # Adjust point_to_voxel_pos for voxels beyond M
+-        # Points in voxels >= M are dropped
+         drop_mask = (point_to_voxel_pos >= M)
+         point_to_voxel_pos[drop_mask] = -1
+-        valid_point_mask = valid_point_mask.clone()
+-        valid_point_mask[drop_mask] = False
++        valid_point_mask = valid_point_mask & ~drop_mask
+         valid_points = points[valid_point_mask]
+         point_to_voxel_pos = point_to_voxel_pos[valid_point_mask]
+         
+-    # Initialize output tensors
+-    voxels = torch.zeros((M, max_points, C), dtype=points.dtype)
+-    coors_out = torch.zeros((M, 3), dtype=torch.int32)
+-    num_points_per_voxel = torch.zeros((M), dtype=torch.int32)
++    voxels = np.zeros((M, max_points, C), dtype=points.dtype)
++    coors_out = np.zeros((M, 3), dtype=np.int32)
++    num_points_per_voxel = np.zeros((M), dtype=np.int32)
+     
+-    # We need the actual voxel coordinates for coors_out
+-    # These are the unique_coors (excluding -1) in the order of first appearance
+-    # We need to map ordered_unique_voxels back to their coordinates
+-    # Since unique_coors was sorted, we need to find the coordinates for each vid in ordered_unique_voxels
+-    # This requires a lookup.
+-    
+-    # Let's assume we have a tensor 'unique_coors_sorted' from earlier
+-    # And we have 'ordered_unique_voxels' which are indices into unique_coors_sorted
+-    # Wait, the source 'unique_coors' are the coordinates themselves.
+-    # 'inverse_indices' maps point to index in unique_coors.
+-    # So ordered_unique_voxels are indices into unique_coors.
+-    
+-    # Re-extract unique_coors_sorted
+-    # We need to re-run unique on the original coors (including -1) to get the sorted list
+-    # Then filter -1
+-    # Then map ordered_unique_voxels (which are indices in the filtered list) to coordinates
+-    
+-    # This is getting complex. Let's simplify:
+-    # The output 'coors' tensor should contain the voxel coordinates.
+-    # The output 'voxels' tensor should contain the point features.
+-    
+-    # Let's assume we have 'sorted_unique_coors' (excluding -1)
+-    # And 'ordered_unique_voxel_indices' (indices into sorted_unique_coors)
+-    
+-    # For the purpose of this article, we assume the existence of a stable unique operation
+-    # that returns both the unique values and the inverse mapping.
+-    
+-    # Final assignment
+     for i in range(len(valid_points)):
+         voxel_idx = point_to_voxel_pos[i]
+         if voxel_idx == -1:
+             continue
+-        # Append to voxels[voxel_idx]
+         count = num_points_per_voxel[voxel_idx]
+         if count < max_points:
+@@ -249,12 +124,13 @@
+             num_points_per_voxel[voxel_idx] += 1
+             
+-    # Fill coors_out
+-    # We need the coordinates for each voxel in ordered_unique_voxels
+-    # This requires a reverse lookup from voxel index to coordinate
+-    # Since we used 'unique_coors' which are the coordinates, and 'inverse_indices' maps to them,
+-    # we can reconstruct the coordinates for the ordered list.
+-    
+-    # This part is implementation-specific. The key is that 'coors' contains the voxel indices.
+-    # The source 'coors' tensor is [M, 3] int32.
++    # Fill coors_out with the actual voxel coordinates
++    # ordered_unique_voxels are indices into unique_coors (excluding -1)
++    # We need to map them back to coordinates. Since unique_coors was sorted,
++    # we can reconstruct the mapping or just store the coordinates directly.
++    # For simplicity, we assume unique_coors is sorted and we can index it.
++    # However, ordered_unique_voxels are indices into the *original* unique_coors array.
++    # We need to map them to the filtered unique_coors.
++    # Let's just use the coordinates directly from the original unique_coors array.
++    coors_out = unique_coors[ordered_unique_voxels]
+     
+     return voxels, coors_out, num_points_per_voxel
+@@ -282,11 +158,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The deterministic version involves sorting and unique operations, which are generally $O(N \log N)$ or $O(N)$ depending on the implementation of the unique operation. The non-deterministic version using atomics can be $O(N)$ but with higher constant factors due to contention.
+-- **Memory Complexity:** $O(N + M \cdot max\_points)$, where $N$ is the number of points and $M$ is the number of voxels.
++- **Time Complexity:** The deterministic version involves sorting and unique operations, which are generally $O(N \log N)$ or $O(N)$ depending on the implementation of the unique operation [G]. The non-deterministic version using atomics can be $O(N)$ but with higher constant factors due to contention [G].
++- **Memory Complexity:** $O(N + M \cdot max\_points)$, where $N$ is the number of points and $M$ is the number of voxels [G].
+ - **Measured Performance:** The parallel CUDA version is significantly faster than the sequential CPU version, with benchmarks showing speedups on the order of 100x for large point clouds [S1, unofficial].
+-- **Strengths:** Deterministic output, handles large point clouds efficiently on GPU, supports multiscale voxelization.
+-- **Limitations:** Memory intensive for high-resolution grids, requires careful handling of boundary conditions and invalid points.
+-- **When to Use:** When reproducible voxelization is required for debugging or benchmarking, or when integrating with deep learning frameworks that require deterministic gradients.
+-- **When Not to Use:** When speed is the primary concern and reproducibility is not needed; use the non-deterministic variant instead.
++- **Strengths:** Deterministic output, handles large point clouds efficiently on GPU, supports multiscale voxelization [G].
++- **Limitations:** Memory intensive for high-resolution grids, requires careful handling of boundary conditions and invalid points [G].
++- **When to Use:** When reproducible voxelization is required for debugging or benchmarking, or when integrating with deep learning frameworks that require deterministic gradients [G].
++- **When Not to Use:** When speed is the primary concern and reproducibility is not needed; use the non-deterministic variant instead [G].
+ 
+ ## Background

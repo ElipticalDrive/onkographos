@@ -1,0 +1,397 @@
+Monte Carlo simulations of light transport in complex 3D media. - Add GPU BVH intersection path for OpenCL propagation by marcandrevigneault · Pull Request #148 · DCC-Lab/PyTissueOptics
+
+Add GPU BVH intersection path for OpenCL propagation by marcandrevigneault · Pull Request #148 · DCC-Lab/PyTissueOptics · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+marcandrevigneault
+commented
+May 21, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds a Bounding Volume Hierarchy (BVH) intersection backend for the OpenCL propagation kernel. The existing flat per-solid AABB path is preserved and still used as the default for small scenes; a cost-based heuristic in CLScene decides which path to use. Measured 2.9×–5.4× end-to-end speedup on sphere-rich scenes (Apple M4 Pro, OpenCL 1.2).
+No behavior change for users who do not opt in: scenes that fall below the heuristic threshold (and any scene with useBVH=False) take exactly the same code path as before this branch.
+What is the BVH and why add one?
+The flat path tests every ray against every solid's bounding box, then — if a hit is plausible — against every triangle of every relevant surface. Cost grows roughly with O(nSolids² + nTriangles) per ray. On a scene with ~1000 triangles each ray pays for all of them.
+A BVH is a binary tree of bounding boxes: each internal node's box encloses both of its children's boxes; each leaf holds a small handful of triangles. A ray descends the tree, skipping any subtree whose box it misses, and only does triangle-level tests at the leaves it reaches. Cost drops to roughly O(log(nTriangles) + leafSize) per ray.
+The CPU FastIntersectionFinder already used the same SpacePartition data structure; this PR makes that structure available on the GPU.
+How the pieces fit together
+End-to-end data flow when BVH is enabled:
+CLScene.__init__ (opencl/CLScene.py:41) processes the scene's triangles into the flat-list buffers (unchanged), then calls _buildBVH which:
+Calls _bvhWorthwhile() (CLScene.py:81) to decide based on solid count vs. polygon count — see Heuristic below.
+Builds a SpacePartition (the same CPU tree used by FastIntersectionFinder) with NoSplitThreeAxesConstructor, maxDepth=20, minLeafSize=6.
+Flattens it into two GPU-friendly buffers via flattenSpacePartition (buffers/treeCL.py:80).
+flattenSpacePartition emits a DFS pre-order array. Each TreeNodeCL entry carries (xMin, yMin, zMin, xMax, yMax, zMax, polygonCount, offset):
+polygonCount > 0 → leaf. offset is the start index in LeafPolygonsCL, which is a flat uint array of triangle IDs.
+polygonCount == 0 → internal node. offset is the index of the right child (or NO_CHILD = 0xFFFFFFFF). Left child is implicitly idx + 1. Triangles that straddle a split plane appear once per leaf they belong to (matching what the no-split CPU constructor does).
+CLPhotons._propagate (opencl/CLPhotons.py:87) passes scene.nNodes, scene.treeNodes, scene.leafPolygons to the propagate kernel.
+propagation.c kernel (opencl/src/propagation.c:247) stuffs those into the Scene struct and forwards to findIntersection.
+findIntersection (opencl/src/intersection.c:498) dispatches:
+scene->nNodes > 0 → _findIntersectionBVH (intersection.c:371)
+otherwise → existing flat per-solid AABB loop (unchanged)
+_findIntersectionBVH does an iterative DFS over the flat node array using a 32-deep private stack (BVH_STACK_SIZE). For each leaf it visits, it calls _testPolygonIntersection on each triangle — the same helper the flat path uses, refactored out for reuse.
+Heuristic
+_bvhWorthwhile() (CLScene.py:81) compares model costs:
+```
+flatCost = nSolids² + nPolys
+bvhCost  = BVH_KERNEL_PENALTY × (log2(nPolys) + BVH_MIN_LEAF_SIZE)
+```
+BVH_KERNEL_PENALTY = 5 accounts for the BVH path being more expensive per operation on the GPU (branchy memory access, private traversal stack). The user can override with CLScene(scene, nWU, useBVH=True/False).
+Why surfaceID was added to TriangleCL
+The flat path's outer loop holds the current surface index in a local variable, so the surface a polygon belongs to is implicit context. BVH leaves contain polygons from any surface in any order, so that context is gone — the polygon test needs the surface lookup during the test (back-catch skip, photon-on-side filter). Storing surfaceID on each triangle is O(1) on the same cache line, vs. O(log nSurfaces) reverse lookup. Costs 4 bytes per triangle.
+See triangles[polygonID].surfaceID use at intersection.c:281.
+New / modified data structures
+File
+Symbol
+Role
+buffers/treeCL.py
+TreeNodeCL, LeafPolygonsCL
+GPU-side flat BVH
+buffers/treeCL.py
+flattenSpacePartition
+DFS pre-order flattener
+buffers/triangleCL.py
+TriangleCLInfo.surfaceID
+per-triangle surface index
+opencl/CLScene.py
+_buildBVH, _bvhWorthwhile
+host-side build + opt-in
+opencl/src/intersection.c
+_findIntersectionBVH
+GPU DFS traversal
+opencl/src/intersection.c
+_testPolygonIntersection
+extracted polygon test (reused by both paths)
+TreeNodeCL uses skipDeclaration=True because the Scene struct references TreeNode even on kernels that don't pass a BVH buffer; the C struct is hand-written in intersection.c:37 to keep the layout authoritative for both kernels.
+Performance
+python -m pytissueoptics.examples.benchmarks.bvh_speedup, N=20 000, Apple M4 Pro, OpenCL 1.2:
+Scene
+Triangles
+Flat (total)
+BVH (total)
+Total speedup
+BVH build
+Propagation-only speedup
+Spherical shells
+972
+18.45 s
+4.15 s
+4.44×
+0.35 s
+4.85×
+Cube + sphere inclusion
+1292
+6.10 s
+1.14 s
+5.37×
+0.43 s
+8.64×
+Two dense spheres
+2560
+3.29 s
+1.15 s
+2.85×
+0.80 s
+9.42×
+BVH construction (Python side) is ~0.3–0.8 s and is included in the totals above. The benchmark prints both numbers so the build amortization is visible.
+Tests
+testCLTree.py — flatten algorithm, topology invariants, empty-tree guard.
+testCLIntersection.py — kernel-level parity: 64 rays through a 3-sphere scene (~960 polygons) on both paths; asserts agreement on hit/miss, position, normal, surfaceID, distanceLeft. Stacked-cuboid case specifically exercises the per-triangle surfaceID lookup.
+testCLPropagateBVH.py — end-to-end: per-solid absorbance matches within 3pp at N=5000.
+testCLPropagationStuckPhotons.py — five regression tests covering two historical failure modes (Fresnel reflection loops, silent photon loss). Each runs on both flat and BVH paths under a 30 s wallclock.
+Risk and opt-out
+Default heuristic is conservative — small scenes stay on the flat path automatically.
+CLScene(..., useBVH=False) forces the legacy path.
+BVH construction time can dominate for small scenes / short runs (see benchmark breakdown). The current heuristic does not model build cost; for very short runs the user may want useBVH=False.
+Test plan
+pytest pytissueoptics/rayscattering/tests/opencl/
+python -m pytissueoptics.examples.benchmarks.bvh_speedup
+Spot-check a non-CL example to confirm CPU path is untouched
+marcandrevigneault
+and others
+added 9 commits
+April 29, 2026 14:59
+Add per-triangle surfaceID to TriangleCL
+…
+675d46b
+```
+Each TriangleCL now carries the index of the SurfaceCL it belongs to.
+The CL kernel previously resolved this implicitly by iterating
+surfaces[s].firstPolygonID..lastPolygonID per solid, which only works
+when polygons are visited as contiguous per-surface ranges. Storing
+the mapping on the triangle itself allows BVH leaf traversal, where
+polygons from different surfaces will be visited in arbitrary order.
+
+intersection.c is refactored to extract _testPolygonIntersection() and
+_resolveBackCatch() helpers from _findClosestPolygonIntersection().
+The per-solid path is unchanged in behavior; the helpers will be
+reused by the upcoming BVH traversal.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Add flat BVH buffers (TreeNodeCL, LeafPolygonsCL)
+…
+4a43c6e
+```
+Introduces a DFS pre-order flattening of the existing scene
+SpacePartition so it can be uploaded to the GPU as two buffers:
+
+  - TreeNodeCL: one entry per node carrying the bbox plus a compact
+    discriminator. polygonCount > 0 marks a leaf (offset is then the
+    start in LeafPolygonsCL); polygonCount == 0 marks an internal node
+    (offset is the right child index, or NO_CHILD if the node only has
+    a left child). Left child of an internal node is always at idx+1.
+
+  - LeafPolygonsCL: flat uint array of triangle (polygon) IDs that
+    leaves index into.
+
+Polygons that span a split plane are emitted once per leaf they appear
+in, matching what the no-split tree constructors do.
+
+These buffers are not yet wired into CLScene or the kernel - that is
+the next chunk. The flatten algorithm and topology invariants are
+covered by tests in testCLTree.py.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Build BVH inside CLScene with cost-based heuristic
+…
+751a7f0
+```
+CLScene now optionally constructs a SpacePartition over scene
+polygons and exposes the flattened tree (treeNodes, leafPolygons,
+nNodes) alongside the existing flat-list buffers. The two paths
+coexist - the kernel selects one based on nNodes (>0 means BVH).
+
+Selection is auto by default and uses a worst-case kernel-cost model
+that depends on both solid count and polygon count:
+
+    flatCost = N_solids^2 + N_polys
+    bvhCost  = K * (log2(N_polys) + minLeafSize)
+    useBVH   = flatCost > bvhCost
+
+K (BVH_KERNEL_PENALTY) charges BVH traversal for branchier memory
+access and the per-WU traversal stack vs. the flat path's tight inner
+loop. With K=5 and minLeafSize=6 the heuristic correctly keeps small
+scenes (single cuboid, layered phantom) on the flat path and switches
+to BVH once either the solid count grows (bubble-sort dominated) or
+any single solid is dense (linear scan dominated).
+
+The decision can be overridden via CLScene(..., useBVH=True/False).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Add BVH traversal kernel with parity tests
+…
+47eed2f
+```
+intersection.c gains _findIntersectionBVH(), an iterative DFS over the
+flat TreeNode array using a 32-deep private-memory stack. The Scene
+struct is extended with nNodes/treeNodes/leafPolygons; findIntersection
+dispatches to the BVH path when nNodes > 0, else to the existing flat
+per-solid AABB path. The flat path is unchanged in behavior.
+
+The TreeNode C struct is hand-written in intersection.c to avoid an
+ordering issue: kernels that don't reference TreeNodeCL would not have
+the auto-generated declaration available, but the Scene struct must
+parse regardless. TreeNodeCL is set to skipDeclaration accordingly,
+and its layout is verified to match.
+
+_testPolygonIntersection learns to skip polygons whose owning solid
+matches an ignoreSolidID (matching the flat path's per-solid skip).
+
+A new test kernel findIntersectionsBVH is added so kernel-level parity
+can be verified in Python: testBVHFindIntersectionMatchesFlatPathOnDenseScene
+fires 64 rays through a 3-sphere scene (~960 polygons) on both paths
+and asserts they agree on hit/miss, polygon ID, and distance.
+
+The production propagate kernel is not yet plumbed to pass the BVH
+buffers; that wiring is the next chunk. Behavior for existing users
+is therefore unchanged in this commit.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Wire BVH into the propagate kernel
+…
+00756b0
+```
+CLPhotons now passes scene.nNodes / scene.treeNodes / scene.leafPolygons
+to the propagate kernel, and the kernel forwards them into the Scene
+struct that findIntersection() reads. When CLScene's heuristic enables
+BVH, end-to-end propagation walks the tree; otherwise nNodes == 0 and
+the existing flat per-solid AABB path is used.
+
+Quick measurement on the spherical-shells scene (4 solids, 972
+triangles, N=5000 photons, Apple M4 Pro):
+
+    flat path: 3.43 s
+    BVH path:  1.41 s
+    speedup:   2.43x
+
+A larger and more rigorous benchmark sweep follows in the next chunk.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Add BVH speedup benchmark and end-to-end regression test
+…
+01da843
+```
+bvh_speedup.py is a runnable benchmark module that measures
+propagate() time on three sphere-rich scenes with the BVH disabled
+and enabled. It also reports the auto-detected node count so the
+user can confirm the heuristic is opting in.
+
+Measured on Apple M4 Pro (16 GPU compute units, OpenCL 1.2),
+N=20000 photons each, with one warmup run per path:
+
+  Spherical shells     (4 solids, 972 tris):   18.23s -> 4.33s   4.21x
+  Cube + sphere incl.  (2 solids, 1292 tris):   6.20s -> 1.20s   5.16x
+  Two dense spheres    (2 solids, 2560 tris):   3.43s -> 1.25s   2.75x
+
+testCLPropagateBVH.py is an end-to-end regression test that runs
+propagate() with both paths on a 3-solid sphere scene and asserts
+the per-solid absorbance agrees within Monte Carlo noise (3pp at
+N=5000 photons). This guards against logic divergence between the
+intersection backends that the kernel-level parity test cannot see
+(stack overflows on real depths, wrong bbox prune, etc.).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Tighten BVH tests and add defensive guards (QA review)
+…
+b40d586
+```
+Three fixes from the BVH self-review:
+
+1. flattenSpacePartition now raises ValueError on an empty partition.
+   An empty root would have been emitted as a leaf with polygonCount=0
+   and offset=0, which the kernel parses as an internal node pointing
+   to a non-existent left child (out-of-bounds read at index 1).
+   CLScene._buildBVH already short-circuits on empty scenes; this is
+   defense-in-depth so the host API can't be misused. Covered by
+   testFlattenRejectsEmptyPartition.
+
+2. testRootLeafTreeProducesSingleLeafNode previously contained a
+   tautology - filtering nodes by `polygonCount > 0 or polygonCount == 0`
+   on a uint field always matches every node. Replaced with the
+   intended `assertEqual(1, len(nodes))`.
+
+3. The findIntersections / findIntersectionsBVH test kernels now take
+   photonSolidID and ignoreSolidID as kernel arguments instead of
+   hard-coding -1 / 0. Three new parity tests exercise the previously
+   dead code paths in the BVH backend:
+
+     - photonSolidID != -1 (photon already inside a solid - the >99%
+       production case; tests the same-solid back-catch and surface
+       environment filter)
+     - ignoreSolidID != 0 (used in propagation to skip the last
+       detector hit; previously dead from a test perspective)
+     - stacked Cuboids (interface polygons split across multiple
+       SurfaceCL entries - exactly where an off-by-one in the new
+       triangles[p].surfaceID lookup would bite)
+
+The parity check itself was thin: it compared exists/distance/
+polygonID only. It now also compares position, normal, surfaceID,
+and distanceLeft. polygonID equality is intentionally relaxed
+because two adjacent triangles sharing an edge can both produce
+equal-distance hits, and the path that visits one first wins;
+surfaceID equality + position equality is the firmer invariant.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Add stuck-photon and escape-photon regression suite
+…
+783ca17
+```
+Prior versions of this codebase have produced two failure modes that
+the existing test suite cannot catch:
+
+  1. Photons stuck in a Fresnel-reflection loop without scattering
+     between bounces - the kernel exits each batch when the per-WU
+     log fills, but the photon's weight is never set to 0, so the
+     CLPhotons orchestrator's `while photonCount < N` loop spins
+     forever waiting for one to die.
+
+  2. Photons silently escaping the simulation domain (or being
+     dropped by a numerical bug) without their energy being
+     accounted for.
+
+testCLPropagationStuckPhotons.py builds the kinds of scene that have
+historically stressed these failure modes - very small geometry,
+very high mu_s, high refractive-index contrast for total internal
+reflection - and runs propagation under a 30s wallclock timeout on
+both the flat and BVH intersection paths. A regression that
+introduces stuck photons will hang and trip the timeout; one that
+silently loses photons will push absorbance below the 80% floor in
+the energy-conservation tests.
+
+Five tests, each covering both useBVH=False and useBVH=True:
+
+  - testSmallSphereHighDiffusionCompletes
+  - testSmallCubeHighDiffusionCompletes (axis-aligned faces stress
+    corner numerics that spheres mask)
+  - testHighIndexContrastTIRCompletes (forward-peaked scattering +
+    n=1.6 produces many TIR events between scatters)
+  - testEnergyConservationSmallSphereHighAbsorbance
+  - testEnergyConservationSmallCubeHighAbsorbance
+
+Measured baseline absorbance on the conservation tests is 93-95%;
+the 80% floor leaves comfortable margin for Monte Carlo noise while
+still catching any regression that loses 10%+ of photons.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+Split BVH benchmark timing into build vs. propagation
+…
+f2386dd
+```
+The previous benchmark reported only end-to-end propagate() time, which
+hides how much of the BVH path's cost is the Python-side SpacePartition
+construction vs. the GPU traversal itself. For small scenes the build
+can be a substantial fraction of total runtime.
+
+_runOnce now times CLScene construction (including BVH build) in
+isolation and returns it alongside the total. _bench reports per-path
+build time, propagation kernel time (total - build), total time, and
+two speedup figures (propagation-only and total including build).
+
+Measured on Apple M4 Pro, N=20000:
+  Spherical shells:    build 0.35s, prop  4.85x, total  4.44x
+  Cube + sphere incl.: build 0.43s, prop  8.64x, total  5.37x
+  Two dense spheres:   build 0.80s, prop  9.42x, total  2.85x
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+codecov
+Bot
+commented
+May 21, 2026
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 97.34513% with 3 lines in your changes missing coverage. Please review.
+Files with missing lines
+Patch %
+Lines
+...issueoptics/rayscattering/opencl/buffers/treeCL.py
+96.05%
+1 Missing and 2 partials ⚠️
+📢 Thoughts on this report? Let us know!
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

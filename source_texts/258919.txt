@@ -1,0 +1,224 @@
+Hi. Thanks for your fantastic work I am trying to reproduce your reconstruction results in encoder and decoder by using 256^3 TSDF and then extracting low, highs using your DWTForward3d function and get the shape low (1, 1, 7, 46, 46, 46...
+
+Extract highs into highs_values, highs_indices · Issue #13 · AutodeskAILab/WaLa · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Extract highs into highs_values, highs_indices #13
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Extract highs into highs_values, highs_indices#13
+Copy link
+Description
+duycd2212
+opened on Dec 17, 2024
+Issue body actions
+Hi. Thanks for your fantastic work
+I am trying to reproduce your reconstruction results in encoder and decoder by using 256^3 TSDF and then extracting low, highs using your DWTForward3d function and get the shape low (1, 1, 7, 46, 46, 46) and highs [(1, 1, 7, 136, 136, 136), (1, 1, 7, 76, 76, 76), (1, 1, 7, 46, 46, 46)]. However, I have an issue extracting the highs into highs_values ([1, 46^3, 63]) and highs_indices ([1, 46^3, 63, 4]) to create a WaveletData object that can be encoded according to your code.
+I have tried using your extract_full_indices() function to get the highs_indices and then used it to get the highs_values, but it didn't work. The result of the reconstruction is shown below.
+Can you give me instructions on how to extract highs_values and highs_indices from highs in your work, or are there any ways that you can encode the low and highs directly?
+I'd be thankful if you give me an example data or preprocessing you are using in training or conditioning that can extract data["low"], data["high_indices"], data["high_values"]
+Thank you
+Activity
+kurtenkera commented on Jan 8, 2025
+kurtenkera
+on Jan 8, 2025
+More actions
+Hi @duycd2212 have you had any luck with fixing this issue? I'm encountering the exact same problem! Perhaps we can work to resolve this together until the authors can help us out!
+duycd2212 commented on Jan 9, 2025
+duycd2212
+on Jan 9, 2025
+Author
+More actions
+Hi @kurtenkera
+I figured it out after observing the output from the diffusion process. The main issue seems to be the preprocessing of the TSDF. You use the mesh_to_sdf library to convert .obj files to SDF, and then you clip the values exactly at (-0.1, 0.1). This range is probably what they use to train the encoder-decoder.
+The extraction of highs_indices and highs_values is essentially the reverse of the step where highs_recon is produced from these values.
+However, despite all of that, the output does not match the quality of those in the paper. I'm struggling to brainstorm additional ideas to replicate their preprocessing. I’m starting to think that the clipping + wavelet preprocessing and encoder-decoder might not be effective enough and could be causing a loss of information.
+kurtenkera commented on Jan 9, 2025
+kurtenkera
+on Jan 9, 2025
+Last edited by kurtenkera
+More actions
+Hi @duycd2212 - nice job getting that far! I have been doing the same pre-processing (i.e. converting .obj files to SDFs via mesh_to_sdf and clipping the values to be within [-0.1, 0.1]). Perhaps you could also try this further step for pre-processing described in the paper Neural Wavelet-domain Diffusion for 3D Shape Generation (Hui et. Al, 2022, https://arxiv.org/pdf/2209.08725):
+In the first step, we scale each shape to fit $[−0.45, +0.45]^3$ and sample an SDF of resolution $256^3$ to implicitly represent the shape. Importantly, we truncate the distance values in the SDF to $[−0.1, +0.1]$, so regions not close to object surface are clipped to a constant.
+I believe you can scale each shape to fit in $[−0.45, +0.45]^3$ by using scale_ratio = 0.9 below:
+```
+from mesh_to_sdf import mesh_to_voxels
+
+resolution = 256 
+voxels = mesh_to_voxels(mesh, resolution, scale_ratio = 0.9)
+```
+Note that the author, Ka-Hei Hui, in that paper I linked is also the first-author in the 'Make-a-Shape' paper which designed the novel wavelet-tree representation, so I think the above pre-processing steps are a good bet!
+Now when you say:
+The extraction of highs_indices and highs_values is essentially the reverse of the step where highs_recon is produced from these values.
+What functions are you suggesting I use? Here is my code so far:
+```
+from src.diffusion_modules.dwt import DWTForward3d, DWTInverse3d
+from src.experiments.utils.wavelet_utils import WaveletData
+import torch
+import numpy as np
+from mesh_to_sdf import mesh_to_voxels
+import trimesh
+
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+mesh_path = 'chair.obj'
+mesh = trimesh.load(mesh_path)
+resolution = 256
+
+# Convert .obj to SDF of shape: 256 x 256 x 256
+voxels_np = mesh_to_voxels(mesh, resolution, scale_ratio = 0.9)
+
+# SDF in PyTorch | shape: [1, 1, 256, 256, 256]
+voxels_torch = torch.from_numpy(voxels_np).unsqueeze(0).unsqueeze(0).float().to(device)
+
+# TSDF in range [-0.1, 0.1]
+clip_value = 0.1
+voxels_torch = torch.clip(voxels_torch, -clip_value, clip_value) 
+
+# Declaring DWT and inverse DWT
+dwt_forward_3d = DWTForward3d(J=3, wave='bior6.8', mode='zero').to(device)
+dwt_inverse_3d = DWTInverse3d(J=3, wave='bior6.8', mode='zero').to(device)
+
+# lows.shape = [1,1,7,46,46,46]
+# highs = list([1,1,7,136,136,136], [1,1,7,76,76,76], [1,1,7,46,46,46]])
+lows, highs = dwt_forward_3d(voxels_torch)
+```
+What functions are you saying I need to use to extract the highs into highs_values with shape = [1, 46^3, 63] and highs_indices ([1, 46^3, 63, 5]) to create a WaveletData object that can be encoded? I see extract_highs_from_values(high_indices, high_values, max_depth, shape_list) in wavelet_utils.py outputs highs_recon? So did you create a new function which tries to reverse-engineer this function to output high_indices and high_values, with highs given as input?
+duycd2212 commented on Jan 11, 2025
+duycd2212
+on Jan 11, 2025
+Author
+More actions
+Thank you, @kurtenkera. Your information is extremely helpful to me. After reviewing the GitHub repository on Neural Wavelet-domain Diffusion for 3D Shape Generation, here is my current preprocessing pipeline:
+.obj file -> Flip -> Convert to manifold watertight object -> TSDF (scale_ratio=0.9 + 0.1 clipping) -> Wavelet
+The result seems to match the paper, but it still does not work well with complex objects.
+Regarding your question about high_indices and high_values: Yes, I use reverse engineering to derive highs_values from highs and highs_indices. I obtained the highs_indices from the extract_full_indices() function (They filtered low and highs as outlined in the paper), followed by some postprocessing.
+I implemented the code myself and am happy to share it with you. Some of the code is hard-coded based on the configs.
+```
+def batch_extract_highs_values(
+output_stage=2,
+max_depth=3,
+shape_list = [[256, 256, 256], [136, 136, 136], [76, 76, 76], [46, 46, 46]],
+device = 'cuda',
+batch_size = 1,
+highs_indices=None,
+highs_recon=None,
+):
+cnt = 0
+highs_values_list = []
+for idx in range(max_depth):
+current_stage = (max_depth - 1) - idx # 2 1 0
+
+    padding_size = (
+        shape_list[-1][0] * (2**current_stage) - shape_list[idx + 1][0]
+    ) // 2 # 8  0
+
+    if current_stage < output_stage:
+        assert highs_indices.size(0) == batch_size
+
+        indices_len = 7 * ((2**current_stage) ** 3) #  56  7
+        high_indices_idx = highs_indices[:, :, cnt : cnt + indices_len] #[1,:,:,0:56] [1,:,:,56:63]
+        high_indices_idx = high_indices_idx.reshape((-1, 5)).long() 
+
+        high_new = highs_recon[idx]
+        high_new = torch.nn.functional.pad(high_new, (padding_size, padding_size, padding_size, padding_size, padding_size, padding_size))
+
+        high_values_idx = high_new[
+            high_indices_idx[:, 0],
+            0,
+            high_indices_idx[:, 1],
+            high_indices_idx[:, 2],
+            high_indices_idx[:, 3],
+            high_indices_idx[:, 4],
+        ]
+        high_values_idx = high_values_idx.view(batch_size, -1, indices_len)
+        highs_values_list.append(high_values_idx)
+        cnt += indices_len
+highs_values = torch.cat(highs_values_list, dim=-1)
+return highs_values
+```
+Thank you once again. If you have any questions or feedback, I would be happy to hear from you.
+kurtenkera commented on Jan 13, 2025
+kurtenkera
+on Jan 13, 2025
+Last edited by kurtenkera
+More actions
+Thank you, @duycd2212, this is helpful!
+Did you have to alter batch_pad or self.highs_indices in the convert_wavelet_volume() method belonging to the WaveletData class?
+When I instantiate a WaveletData object and call the convert_wavelet_volume() function, a bug occurs due to the following:
+```
+### extend batch_size to the indices
+batch_pad = (
+    torch.arange(batch_size, device=self.highs_indices.device)
+    .unsqueeze(1)
+    .repeat((1, self.highs_indices.size(1)))
+    .unsqueeze(2)
+    .long()
+)  # B * P * 1
+
+high_indices_filled = torch.cat(
+    (batch_pad, self.highs_indices), dim=2
+)  # B * P * 4
+```
+The error is due to the fact that batch_pad has shape [1, 46^3, 1] and self.highs_indices has shape [1, 46^3, 63, 4], and so the two tensors cannot be concatenated in high_indices_filled? This is the final hurdle (generating a wavelet-volume tensor of shape [1, 64, 46, 46, 46] from an inputted TSDF) I need to overcome in order to pass TSDFs through the VQ-VAE.
+Also, when you say:
+The result seems to match the paper, but it still does not work well with complex objects.
+Can you show your ground-truth and decoded bird meshes so I can see how they compare?
+kurtenkera commented on Jan 24, 2025
+kurtenkera
+on Jan 24, 2025
+More actions
+Hi @duycd2212, just following up about my questions above?
+NolimitDougie commented on Apr 7, 2025
+NolimitDougie
+on Apr 7, 2025
+More actions
+Hi @duycd2212, just following up about my questions above?
+Any success on extracting the high values?
+kurtenkera commented on Apr 7, 2025
+kurtenkera
+on Apr 7, 2025
+More actions
+I haven't had any success, but I stopped working on this probably around the end of January as I'm working on a different project. I'll return to this after I finish my current project, and I'll let you know when I succeed (I'm confident I'll get it to work)!
+NolimitDougie commented on Apr 7, 2025
+NolimitDougie
+on Apr 7, 2025
+Last edited by NolimitDougie
+More actions
+I haven't had any success, but I stopped working on this probably around the end of January as I'm working on a different project. I'll return to this after I finish my current project, and I'll let you know when I succeed (I'm confident I'll get it to work)!
+Okay I got the high indices but still trying to figure out how to extract the high values from the highs. I'm using there extract_highs_from_values() function to try but not getting any success on it
+TheQY71 commented on Jul 8, 2025
+TheQY71
+on Jul 8, 2025
+More actions
+I haven't had any success, but I stopped working on this probably around the end of January as I'm working on a different project. I'll return to this after I finish my current project, and I'll let you know when I succeed (I'm confident I'll get it to work)!
+Okay I got the high indices but still trying to figure out how to extract the high values from the highs. I'm using there extract_highs_from_values() function to try but not getting any success on it
+Hi, have you resolved this issue? @NolimitDougie
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

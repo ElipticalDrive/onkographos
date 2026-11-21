@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -4,58 +4,110 @@
+ 
+ ## Overview
+-Dynamic Sampling Step Adjustment accelerates ray marching through empty or low-density regions by exponentially increasing the step size, thereby reducing the number of samples required to traverse sparse volumes [S1, unofficial]. It differs from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) and [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a discrete doubling strategy rather than continuous estimation or gradient-based refinement, and from [Gap-Limited Ray Marching](4412-gap-limited-ray-marching.md) by not explicitly calculating geometric gaps [S1, unofficial].
++Dynamic Sampling Step Adjustment accelerates volume rendering by increasing the ray marching step size when traversing empty or low-density regions, thereby reducing the total number of samples required [S1, unofficial]. It solves the inefficiency of uniform step sizes in sparse volumes, such as volumetric clouds or fog, where large portions of the ray contribute negligible opacity [S1, unofficial]. Unlike [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md), which relies on geometric bounds like Signed Distance Fields (SDFs) to guarantee no geometry is missed, this method relies on density thresholds and operates directly on the scalar field values [S1, unofficial]. It differs from [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a discrete doubling strategy rather than continuous gradient-based scaling [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, initial step size $s_0$, initial mip level offset $m_0$, and a volume texture $V$ with mipmaps.
+-**Outputs:** Composed color and opacity for the ray.
++**Inputs:**
++- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
++- Volume texture $V$ with associated mipmaps.
++- Empty density threshold $\tau$ (scalar value below which space is considered empty).
++- Initial step size $\Delta s_0$.
++- Initial mipmap level offset $m_0$ (index into the mipmap chain).
++
++**Outputs:**
++- Composed color and opacity for the pixel.
+ 
+ **Data Structures:**
+-- $V$: Multi-resolution volume texture. Access at mip level $m$ requires scaling coordinates by $2^{-m}$.
+-- $s$: Current step size.
+-- $m$: Current mip level offset.
+-- $N_{empty}$: Counter for consecutive empty samples.
++- Current step size $\Delta s$.
++- Current mipmap offset $m$.
++- Consecutive empty sample counter $k$ (optional, or tracked by state).
+ 
+ **Algorithm:**
+-1. Initialize $s = s_0$, $m = m_0$, and $N_{empty} = 0$.
+-2. March along the ray:
+-   a. Sample the volume at current position $p$ using mip level $m$. Let density be $\rho = V(p, m)$.
+-   b. If $\rho < \epsilon$ (empty threshold):
+-      i. Increment $N_{empty}$.
+-      ii. If $N_{empty} \ge 2$ (consecutive empty samples), double the step size: $s \leftarrow 2s$.
+-      iii. Increase mip offset: $m \leftarrow m + 1$. [S1, unofficial]
+-   c. If $\rho \ge \epsilon$ (non-empty):
+-      i. Step back one step: $p \leftarrow p - s_{prev}$ (where $s_{prev}$ is the step size used in the previous iteration). [S1, unofficial]
+-      ii. Restore step size: $s \leftarrow s_0$. [S1, unofficial]
+-      iii. Restore mip offset: $m \leftarrow m_0$. [S1, unofficial]
+-      iv. Reset $N_{empty} = 0$.
+-   d. Advance position: $p \leftarrow p + s$.
+-3. Composite color using front-to-back blending with the sampled densities.
++The method modifies the standard front-to-back ray marching loop. At each step, the density is sampled. If the density is below the threshold $\tau$, the step size is doubled, and the mipmap level is increased (coarsening the resolution). If the density is non-empty (above $\tau$), the step size is reset, and the ray position is adjusted to ensure the feature is sampled.
++
++1.  Initialize $\Delta s = \Delta s_0$, $m = m_0$, and current position $\mathbf{p} = \mathbf{o}$.
++2.  While the ray is within the volume bounds and opacity $< 1.0$:
++    a. Sample the volume at $\mathbf{p}$ using mipmap level $m_0 + m$. Let the density be $\rho = V(\mathbf{p}, m_0 + m)$.
++    b. If $\rho < \tau$:
++        i. Double the step size: $\Delta s \leftarrow 2 \Delta s$.
++        ii. Increment the mipmap offset: $m \leftarrow m + 1$.
++        iii. Advance the ray: $\mathbf{p} \leftarrow \mathbf{p} + \Delta s \mathbf{d}$.
++    c. Else ($\rho \ge \tau$):
++        i. Step back one step: $\mathbf{p} \leftarrow \mathbf{p} - \Delta s \mathbf{d}$.
++        ii. Reset step size: $\Delta s \leftarrow \Delta s_0$.
++        iii. Reset mipmap offset: $m \leftarrow m_0$.
++        iv. Advance one standard step: $\mathbf{p} \leftarrow \mathbf{p} + \Delta s_0 \mathbf{d}$.
++        v. Perform standard compositing for this sample.
++    d. Perform compositing for the current sample if it was a "standard" step or if the doubling logic dictates accumulation (Note: [S1, unofficial] implies the "step back" logic is to re-sample the feature with higher resolution, implying the doubled step skipped the feature boundary).
++
++**Pseudocode:**
++```python
++def dynamic_step_adjustment_raymarch(ray_origin, ray_direction, volume_texture, threshold, initial_step, initial_mip_offset):
++    p = ray_origin
++    step_size = initial_step
++    mip_offset = initial_mip_offset
++    accumulated_opacity = 0.0
++    accumulated_color = (0.0, 0.0, 0.0)
++    
++    # Pre-calculate inverse direction for bounds check if needed
++    # Assume volume bounds are defined by min/max coordinates
++    
++    while is_inside_volume(p):
++        # Sample at current resolution
++        density = volume_texture.sample(p, mip_offset + initial_mip_offset)
++        
++        if density < threshold:
++            # Empty space: double step and go coarser
++            step_size *= 2.0
++            mip_offset += 1
++            p += step_size * ray_direction
++        else:
++            # Non-empty: step back to re-sample the feature boundary accurately
++            p -= step_size * ray_direction
++            step_size = initial_step
++            mip_offset = initial_mip_offset
++            
++            # Advance one standard step
++            p += step_size * ray_direction
++            
++            # Compositing step (standard front-to-back)
++            alpha = 1.0 - exp(-density * step_size) # Example absorption model
++            color = volume_texture.sample_color(p, mip_offset + initial_mip_offset)
++            
++            contribution = alpha * (1.0 - accumulated_opacity)
++            accumulated_color += contribution * color
++            accumulated_opacity += contribution
++            
++            if accumulated_opacity >= 1.0:
++                break
++                
++    return accumulated_color, accumulated_opacity
++```
+ 
+ **Parameters:**
+-- $\epsilon$: Empty density threshold. Not given in the sources.
+-- $s_0$: Initial step size. Not given in the sources.
+-- $m_0$: Initial mip level. Not given in the sources.
++- $\tau$: Threshold for "empty". Typical value depends on the volume's density range (e.g., 0.01 for normalized density) [S1, unofficial].
++- $\Delta s_0$: Initial step size. Must be small enough to capture the finest details of the volume at the base mipmap level [S1, unofficial].
++- $m_0$: Base mipmap level. Usually 0 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- The optimization provides small performance gains and may cause artifacts in some cases [S1, unofficial].
+-- Stepping back one step upon encountering density requires storing the previous position and step size. [G]
+-- Doubling the step size may skip thin features if the threshold $\epsilon$ is too high or the initial step $s_0$ is too large. [G]
++- **Artifacts:** The method may cause visual artifacts in some cases, particularly if the step doubling skips over thin, high-density features that fall between the coarse samples [S1, unofficial].
++- **Precision:** Large step sizes may lead to precision issues in floating-point position calculations over long rays [S1, unofficial].
++- **Performance:** The performance gains are described as "small" in some contexts, and the overhead of mipmap selection and conditional branching may negate benefits in dense volumes [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Gradient-driven Sampling
+-A sampling strategy that refines step sizes according to the magnitude of the scalar field gradient $|\nabla s|$, which indicates local feature sharpness; smaller steps are taken near high-gradient regions resembling surfaces to capture transitions accurately [S2]. The step size is dynamically adjusted based on the gradient direction and a threshold, bounded by minimum and maximum distances to prevent under- or over-sampling [S2]. This method enhances detail preservation in boundary-heavy volumes, such as CT angiography data, while coarsening traversal in smooth interiors, achieving efficiency gains of 2-3x over uniform sampling without aliasing artifacts [S2].
++Gradient-driven Sampling is a variant that adjusts step sizes based on the magnitude of the scalar field gradient $|\nabla s|$, which indicates local feature sharpness [S2]. It takes smaller steps near high-gradient regions resembling surfaces to capture transitions accurately, and larger steps in smooth interiors [S2]. The step size is dynamically adjusted based on the gradient direction and a threshold, bounded by minimum and maximum distances to prevent under- or over-sampling [S2]. This method achieves efficiency gains of 2-3x over uniform sampling without aliasing artifacts in boundary-heavy volumes like CT angiography data [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduces sample count in empty regions by a factor of 2 per doubling event. Overall speedup is modest.
+-- **Memory Complexity:** Requires storing previous step size and position. No additional memory for the volume itself.
+-- **Performance:** Provides small performance gains [S1, unofficial].
+-- **Strengths:** Simple to implement; effective for sparse volumes.
+-- **Limitations:** May cause artifacts [S1, unofficial]; small performance gains [S1, unofficial].
+-- **When to use:** Sparse volumes with large empty regions.
+-- **When not to use:** Dense volumes or when artifacts are unacceptable.
++- **Time Complexity:** $O(N)$ where $N$ is the number of samples, but $N$ is significantly reduced in empty regions compared to uniform sampling. The reduction factor depends on the sparsity of the volume.
++- **Memory Complexity:** $O(1)$ additional memory per ray, plus the storage for the mipmap chain [S1, unofficial].
++- **Performance:** Provides small performance gains in sparse volumes like volumetric clouds [S1, unofficial]. Gradient-driven variants report 2-3x efficiency gains in boundary-heavy volumes [S2].
++- **Strengths:** Simple to implement; effective for sparse, large-scale volumes like clouds or fog [S1, unofficial].
++- **Limitations:** May cause artifacts if the step doubling skips thin features; gains are small in dense volumes; requires mipmap chain [S1, unofficial].
++- **When to use:** Volumetric clouds, fog, or other sparse volumes where large empty spaces dominate the ray path [S1, unofficial].
++- **When not to use:** Dense volumes with fine, thin details that might be skipped by doubling steps; scenes requiring strict geometric accuracy without post-processing refinement [S1, unofficial].
+ 
+ ## Background
+-This technique is used in real-time volume rendering, such as in cloud rendering pipelines [S1, unofficial]. It is often combined with other optimizations like blue noise dithering and temporal upsampling to mitigate sampling artifacts [S1, unofficial].
++The technique of dynamically adjusting step sizes based on density emptiness is used in real-time volume rendering, particularly for atmospheric effects like clouds [S1, unofficial]. It is often employed in game engines to optimize the rendering of volumetric clouds by skipping empty sky regions [S1, unofficial]. The specific "step back and double" logic is described in the context of implementing volumetric cloud effects in games [S1, unofficial]. Gradient-driven sampling is a broader category of adaptive sampling used in medical imaging and scientific visualization to handle high-frequency details [S2].
+ 
+ ## Sources

@@ -1,0 +1,114 @@
+# Geometric Anisotropy Metrics (Shape Domain)
+Also called: DT-MRI Scalar Metrics, Diffusion Metrics, Westin metrics
+
+## Overview
+Geometric Anisotropy Metrics (also known as Westin metrics) are a set of three scalar values derived from the eigenvalues of a symmetric tensor to characterize its shape within a triangular domain [S1, S2, unofficial]. They measure the "certainty" of the tensor being linear, planar, or spherical, providing orientation-independent shape discrimination [S1, S2, unofficial]. Unlike the parent [Shape Attribute](11699-shape-attribute.md) which is a general operator for segmented volumes, these metrics are specifically defined for diffusion tensors (or symmetric rank-2 tensors) to distinguish between fiber-like, sheet-like, and isotropic structures [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A symmetric $3 \times 3$ tensor $D$ at a specific spatial location.
+*   **Output:** Three scalar values $(c_l, c_p, c_s)$ representing linear, planar, and spherical certainty, respectively.
+
+**Data Structures**
+The input tensor $D$ is a symmetric matrix:
+$$
+D = \begin{bmatrix}
+D_{xx} & D_{xy} & D_{xz} \\
+D_{yx} & D_{yy} & D_{yz} \\
+D_{zx} & D_{zy} & D_{zz}
+\end{bmatrix}
+$$
+where $D_{ij} = D_{ji}$ [S2, unofficial].
+
+**Steps**
+1.  **Eigen Decomposition:** Compute the three eigenvalues $\lambda_1, \lambda_2, \lambda_3$ of the tensor $D$.
+2.  **Sorting:** Sort the eigenvalues in descending order: $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge 0$ [S1, S2, unofficial].
+3.  **Trace Calculation:** Compute the trace of the tensor, which is the sum of the eigenvalues:
+    $$ \text{Trace}(D) = \lambda_1 + \lambda_2 + \lambda_3 = D_{xx} + D_{yy} + D_{zz} $$ [S2, unofficial].
+4.  **Metric Calculation:** Compute the three barycentric coordinates using the sorted eigenvalues and the trace [S1, S2, unofficial]:
+
+    *   **Linear Certainty ($c_l$):**
+        $$ c_l = \frac{\lambda_1 - \lambda_2}{\lambda_1 + \lambda_2 + \lambda_3} $$ [S1, S2, unofficial]
+
+    *   **Planar Certainty ($c_p$):**
+        $$ c_p = \frac{2(\lambda_2 - \lambda_3)}{\lambda_1 + \lambda_2 + \lambda_3} $$ [S1, S2, unofficial]
+
+    *   **Spherical Certainty ($c_s$):**
+        $$ c_s = \frac{3\lambda_3}{\lambda_1 + \lambda_2 + \lambda_3} $$ [S1, S2, unofficial]
+
+**Parameters**
+*   $\lambda_i$: The sorted eigenvalues of the diffusion tensor.
+*   The metrics define a triangular domain where $c_l, c_p, c_s$ act as barycentric coordinates [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Zero Trace:** If the tensor is the zero matrix, the trace is zero, leading to division by zero. In practice, this indicates no diffusion or a degenerate tensor. [G] Guard against division by zero by checking if $\sum \lambda_i < \epsilon$.
+*   **Precision:** For nearly isotropic tensors ($\lambda_1 \approx \lambda_2 \approx \lambda_3$), numerical precision in eigenvalue decomposition can affect the stability of the metrics, particularly $c_s$ which depends on the smallest eigenvalue.
+*   **Boundary Conditions:** The metrics sum to 1: $c_l + c_p + c_s = 1$. The corners of the triangle correspond to pure shapes:
+    *   Linear: $c_l=1, c_p=0, c_s=0$ (when $\lambda_2=\lambda_3=0$).
+    *   Planar: $c_p=1, c_l=0, c_s=0$ (when $\lambda_1=\lambda_2, \lambda_3=0$).
+    *   Spherical: $c_s=1, c_l=0, c_p=0$ (when $\lambda_1=\lambda_2=\lambda_3$).
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def geometric_anisotropy_metrics(tensor: List[List[float]]) -> Tuple[float, float, float]:
+    """
+    Computes the Westin geometric anisotropy metrics (CL, CP, CS) for a 3x3 symmetric tensor.
+    
+    Args:
+        tensor: A 3x3 list of lists representing the symmetric tensor D.
+        
+    Returns:
+        A tuple (c_l, c_p, c_s) representing linear, planar, and spherical certainty.
+    """
+    # Step 1: Extract diagonal elements for trace calculation
+    trace = tensor[0][0] + tensor[1][1] + tensor[2][2]
+    
+    # Guard against zero trace
+    if trace == 0:
+        return (0.0, 0.0, 0.0)
+
+    # Step 2: Compute eigenvalues
+    # Note: In a real implementation, use a robust eigenvalue solver for symmetric 3x3 matrices.
+    # Here we assume a helper function eigenvalues_3x3_symmetric returns sorted values.
+    eigenvalues = eigenvalues_3x3_symmetric(tensor)
+    
+    # eigenvalues_3x3_symmetric returns [lambda_1, lambda_2, lambda_3] sorted descending
+    lambda_1 = eigenvalues[0]
+    lambda_2 = eigenvalues[1]
+    lambda_3 = eigenvalues[2]
+    
+    # Step 3: Calculate metrics
+    c_l = (lambda_1 - lambda_2) / trace
+    c_p = 2.0 * (lambda_2 - lambda_3) / trace
+    c_s = 3.0 * lambda_3 / trace
+    
+    return (c_l, c_p, c_s)
+
+def eigenvalues_3x3_symmetric(tensor: List[List[float]]) -> List[float]:
+    """
+    Computes the eigenvalues of a 3x3 symmetric matrix and returns them sorted descending.
+    This is a placeholder for a standard numerical linear algebra routine.
+    """
+    # Implementation detail: Use characteristic equation or Jacobi iteration.
+    # For the purpose of this article, we assume this function exists and returns
+    # [lambda_1, lambda_2, lambda_3] such that lambda_1 >= lambda_2 >= lambda_3.
+    # [G] Standard numerical method required.
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per voxel, dominated by the eigenvalue decomposition of a $3 \times 3$ matrix.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel.
+*   **Strengths:** Orientation-independent; provides a clear geometric interpretation of tensor shape; useful for classifying fiber, sheet, and isotropic regions in DT-MRI [S1, S2, unofficial].
+*   **Limitations:** Only applicable to symmetric tensors; sensitive to noise in eigenvalue estimation, especially for the smallest eigenvalue $\lambda_3$ [S1, S2, unofficial].
+*   **When to use:** When shape-based classification of diffusion tensors is required, independent of orientation.
+*   **When not to use:** For non-symmetric tensors or when orientation information is critical.
+
+## Background
+The geometric anisotropy metrics were introduced by Westin et al. in 1997 [S1, unofficial]. They are widely used in Diffusion Tensor Magnetic Resonance Imaging (DT-MRI) visualization to reduce tensor data to scalar metrics that describe the shape of diffusion [S2, unofficial]. The metrics form a barycentric coordinate system where the corners represent pure linear, planar, and spherical shapes [S1, S2, unofficial].
+
+## Sources
+[S1] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)
+[S2] PDF Tensor Visualization, http://www.csc.lsu.edu/~karki/courses/SV/19-TensorVis.pdf, fetched 2026-10-28 (unofficial)

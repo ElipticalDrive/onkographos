@@ -1,0 +1,128 @@
+# Entropy Encoding
+
+Also called: Arithmetic Coding, Data Compression and Encoding, Huffman Coding, Lossless Compression, 熵编码
+
+## Overview
+Entropy encoding is a lossless compression method that minimizes storage or transmission costs for a discrete dataset by mapping each data point to a variable-length bit string, which a receiver inverts to recover the exact original data [S2]. It solves the problem of data redundancy by assigning shorter codewords to more frequent symbols and longer codewords to less frequent symbols [S3, S4, S5]. It encompasses methods like Huffman coding and arithmetic coding, which differ in how they map symbol probabilities to bit sequences [S3][S6, unofficial]. It differs from [Variable-Length Coding](7012-variable-length-coding.md), which assigns a fixed bit depth to an entire data block based on its local value range, by assigning codes based on individual symbol frequency [S1, S3].
+
+## How it works
+Entropy encoding operates by analyzing the statistical distribution of input symbols and mapping them to binary codewords [S3]. The two primary implementations are Huffman Coding and Arithmetic Coding [S3][S6, unofficial].
+
+### Inputs and Outputs
+- **Input**: A discrete dataset $X = (x_1, ..., x_N)$ of symbols (e.g., voxel values, coefficients, or codebook indices) [S2, S4].
+- **Output**: A binary bitstream representing the compressed data [S2].
+
+### Data Structures
+- **Huffman Tree**: A binary tree where leaf nodes represent symbols and internal nodes represent merged probability nodes. The path from root to leaf defines the codeword [S3].
+- **Arithmetic Interval**: A real-valued interval $[L, H) \subseteq [0, 1)$ that narrows with each encoded symbol [S3].
+- **Codebook Indices**: In some implementations (e.g., 3D Gaussian Splatting), indices into codebooks are stored as 32-bit unsigned integers before entropy encoding [S1].
+
+### Formulas
+The theoretical limit for compression is defined by Shannon entropy [S2]:
+$$ H = - \sum_{x} p_x(x) \log p_x(x) $$
+where $p_x(x)$ is the underlying probability distribution of symbol $x$ [S2]. This provides the minimum expected number of bits per element [S2].
+
+The bit rate for a dataset $X$ is:
+$$ R(X) = -\frac{1}{N} \sum_{i=1}^N \log p_x(x_i) $$
+where $N$ is the number of elements [S2].
+
+### Steps: Huffman Coding
+1. **Calculate Probabilities**: Determine the frequency of each symbol in the input dataset [S3].
+2. **Sort Probabilities**: Arrange the symbol probabilities in decreasing order [S3].
+3. **Merge Nodes**: Iteratively merge the two nodes with the lowest probabilities into a new parent node. The probability of the parent is the sum of its children. Repeat until only two nodes remain [S3].
+4. **Generate Tree**: Construct the Huffman Tree from the merged nodes. Assign bits (e.g., 0 for left, 1 for right) to branches [S3].
+5. **Encode/Decode**: Traverse the tree to assign variable-length codewords to symbols. Decoding involves traversing the tree based on incoming bits until a leaf node is reached [S3].
+
+### Steps: Arithmetic Coding
+1. **Initialize Interval**: Start with the range of real numbers $[0, 1)$ [S3].
+2. **Subdivide**: Divide the current interval into subranges for each possible symbol, where the size of each subrange is proportional to the symbol's probability [S3].
+3. **Select Subrange**: For the current input symbol, select the subrange corresponding to that symbol [S3].
+4. **Iterate**: Repeat steps 2 and 3 for each subsequent symbol in the input stream, narrowing the interval further [S3].
+5. **Output**: Once all symbols are parsed, output a binary fraction (bit string) that uniquely identifies the final interval [S3].
+
+### Parameters and Edge Cases
+- **Probability Model**: Accurate probability estimation is critical. In deep learning contexts, the probability model $p_{\hat{z}}$ is often learned jointly with the encoder parameters [S2].
+- **Integer Constraints**: Arithmetic coding achieves the non-integer bit length $-\log p_x(x)$ arbitrarily closely on average, whereas Huffman coding must assign integer bit lengths [S2].
+- **Random Access**: Variable-length encoding hinders quick random access reconstruction, which is critical in massively parallel GPU settings [S4, S5]. Decoding requires significantly more computational work than fixed-length methods [S4, S5].
+- **Hybrid Approaches**: To accelerate decoding, fixed-length Huffman coders are sometimes combined with Run-Length Encoding (RLE) [S4, S5].
+
+### Pseudocode: Huffman Encoding
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Node:
+    def __init__(self, symbol=None, probability=0.0, left=None, right=None):
+        self.symbol = symbol
+        self.probability = probability
+        self.left = left
+        self.right = right
+
+def huffman_encode(data, symbol_probabilities):
+    """
+    Encodes data using Huffman coding.
+    data: list of symbols
+    symbol_probabilities: dict mapping symbol -> probability
+    """
+    # Step 1 & 2: Create leaf nodes and sort
+    nodes = []
+    for symbol, prob in symbol_probabilities.items():
+        nodes.append(Node(symbol=symbol, probability=prob))
+    
+    # Step 3: Merge lowest probabilities
+    while len(nodes) > 1:
+        nodes.sort(key=lambda x: x.probability)
+        left = nodes.pop(0)
+        right = nodes.pop(0)
+        merged = Node(probability=left.probability + right.probability, 
+                      left=left, right=right)
+        nodes.append(merged)
+    
+    root = nodes[0]
+    
+    # Generate codewords
+    codewords = {}
+    def generate_codewords(node, current_code):
+        if node.symbol is not None:
+            codewords[node.symbol] = current_code
+            return
+        generate_codewords(node.left, current_code + "0")
+        generate_codewords(node.right, current_code + "1")
+    
+    generate_codewords(root, "")
+    
+    # Encode data
+    bitstream = ""
+    for symbol in data:
+        bitstream += codewords[symbol]
+        
+    return bitstream, codewords
+```
+
+## Subtopics
+
+### [Variable-Length Coding](7012-variable-length-coding.md)
+Variable-Length Coding (VLC) is a lossless compression technique for volume data that reduces storage by encoding voxel values relative to a base value within a data block (brick). It solves the problem of inefficient fixed-width storage when data values in a local region have a small dynamic range. Unlike its parent [Entropy Encoding](5360-entropy-encoding.md), which assigns codes based on symbol frequency, VLC assigns a fixed bit depth $n$ to an entire brick based on its local value range.
+
+### [Entropy Coding Implementation](12628-entropy-coding-implementation.md)
+Entropy coding implementation applies lossless entropy encoding to compress syntax elements derived from volume data representations, such as residuals and reference indexes. It solves the problem of reducing the storage footprint of quantized neural volume models by exploiting statistical redundancies in the data. It differs from [Variable-Length Coding](7012-variable-length-coding.md) by using arithmetic coding or Huffman coding to achieve near-optimal compression ratios based on symbol probabilities, rather than fixed or simple variable-length tables.
+
+### Golomb-Rice Encoding
+Golomb-Rice encoding is an entropy encoder favored over arithmetic and Huffman coding for volume rendering because it has better random access capabilities due to lower computational complexity [S5]. It is particularly useful when quick reconstruction of arbitrary data sequences is required in parallel settings [S4].
+
+## Operating characteristics
+- **Compression Ratio**: Arithmetic coding generally provides better compression than Huffman coding, approaching the Shannon entropy limit more closely [S6, unofficial][S4]. Huffman coding is near-optimal for integer bit lengths but may waste bits if probabilities are not powers of two [S3].
+- **Computational Complexity**: Entropy encoding implies more work during decoding compared to fixed-length or RLE methods [S4, S5]. Arithmetic coding is computationally more expensive than Huffman coding [S6, unofficial].
+- **Random Access**: Variable-length encoding hinders quick random access reconstruction, which is critical in massively parallel GPU settings [S4, S5]. Golomb-Rice encoding is preferred in such contexts for its balance of compression and access speed [S4, S5].
+- **Hardware Support**: Fixed-length Huffman coders are sometimes used to accelerate decoding on hardware that supports parallel bit processing [S5].
+- **Scaling**: Compression effectiveness depends on data coherence. Ordering data (e.g., by Z-order/Morton curve) can exploit spatial coherence to improve the effectiveness of subsequent RLE or entropy encoding [S1].
+
+## Background
+Entropy encoding is a fundamental technique in data compression, rooted in Shannon's source coding theorem [S3]. Huffman coding, developed by David A. Huffman in 1952, is an improvisation of Shannon's source coding method, providing a practical way to assign variable-length codewords based on symbol frequency [S3]. Arithmetic coding, developed later, allows for encoding symbols into fractional bits, achieving compression closer to the theoretical limit [S3]. In the context of volume rendering, entropy encoding is frequently used in compressed Direct Volume Rendering (DVR) systems, often combined with RLE or DPCM (Differential Pulse Code Modulation) to achieve high compression ratios [S5][S6, unofficial]. It is commonly used in conjunction with prediction methods to compress residuals [S6, unofficial].
+
+## Sources
+[S1] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S2] Deep Implicit Volume Compression, https://doi.org/10.1109/cvpr42600.2020.00137, fetched 2026-10-26
+[S3] On a hybrid lossless compression technique for three‐dimensional medical images, https://doi.org/10.1002/acm2.12960, fetched 2026-11-08
+[S4] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S5] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S6] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

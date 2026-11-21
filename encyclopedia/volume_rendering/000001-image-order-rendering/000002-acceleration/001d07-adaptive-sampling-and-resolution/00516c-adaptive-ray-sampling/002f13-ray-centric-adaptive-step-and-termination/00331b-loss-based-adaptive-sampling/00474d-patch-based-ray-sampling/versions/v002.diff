@@ -1,0 +1,86 @@
+--- v001.md
++++ v002.md
+@@ -1,53 +1,50 @@
+ # Patch-based Ray Sampling
+-
+-Also called: Patch-based Rendering
++Also called: DW loss ray sampling, adjacent ray sampling
+ 
+ ## Overview
+-A ray sampling strategy where rays are sampled in contiguous 2D patches to form a local image grid, ensuring the spatial adjacency required for local structure analysis such as Discrete Wavelet Transform (DWT) or blur convolution [S1, unofficial][S2]. It is distinguished from random ray sampling, which captures global structures, by focusing on local pixel interference and high-frequency details [S1, unofficial][S2].
++A ray sampling strategy where rays are sampled in contiguous 2D patches to form a local image grid, ensuring the spatial adjacency required for Discrete Wavelet Transform (DWT) based loss calculation [S1, unofficial]. It is distinguished from random ray sampling by its focus on capturing local high-frequency structures rather than global scene geometry [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Image resolution, patch dimensions, and the specific loss function requiring local adjacency (e.g., $L_{DW}$ or sharpness prior).
+-**Outputs:** A set of ray origins and directions corresponding to a contiguous block of pixels.
++**Inputs and outputs:**
++- Input: A batch of rays intended for a specific loss component (specifically $L_{DW}$).
++- Output: A set of ray origins and directions that form a contiguous $W \times H$ rectangular region in the image plane.
+ 
+-**Data Structures:**
+-*   **Patch:** A 2D square grid of rays.
+-*   **Ray Set:** A list of $(x, y)$ pixel coordinates and their corresponding 3D rays.
++**Data structures:**
++- The rays are organized into a 2D grid structure corresponding to pixel coordinates $(u, v)$ within the patch.
++- Each ray $r_{i,j}$ corresponds to the pixel at row $i$ and column $j$ of the patch.
++
++**Parameters:**
++- Patch size: Typically $192 \times 192$ square patches [S1, unofficial].
++- Ray count per patch: $192 \times 192 = 36,864$ rays [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Define Patch Geometry:** Determine the width $W_p$ and height $H_p$ of the square patch.
+-2.  **Select Patch Location:** Choose a random or deterministic location in the image grid such that the patch fits within the image boundaries.
+-3.  **Generate Rays:** For each pixel $(u, v)$ in the patch grid ($0 \le u < W_p, 0 \le v < H_p$), compute the ray origin and direction using the camera projection matrix.
+-4.  **Render:** Trace all rays in the patch to compute color and density values.
+-5.  **Compute Loss:** Apply the local loss function (e.g., DWT coefficients or blur kernel convolution) on the rendered 2D patch [S1, unofficial][S2].
++1. Select a starting pixel coordinate $(u_0, v_0)$ within the image bounds.
++2. Define the patch dimensions $W \times H$ (e.g., $192 \times 192$) [S1, unofficial].
++3. For each local coordinate $(i, j)$ where $0 \le i < H$ and $0 \le j < W$:
++   - Compute global pixel coordinates: $u = u_0 + j$, $v = v_0 + i$.
++   - Generate the ray $r_{u,v}$ passing through pixel $(u, v)$ from the camera center.
++   - Store $r_{u,v}$ in the patch buffer at index $(i, j)$.
++4. Return the patch buffer containing the $W \times H$ rays [S1, unofficial].
+ 
+-**Parameters:**
+-*   **Patch Size:** $192 \times 192$ pixels, requiring 36,864 rays for DWT loss calculation [S1, unofficial].
+-*   **Sampling Frequency:** DWT loss is calculated every 10 iterations (LLFF) or 150 iterations (NS) [S1, unofficial].
+-
+-**Edge Cases:**
+-*   **Boundary Conditions:** Patches near image edges must be handled to avoid out-of-bounds ray generation. [G] Typically, patches are clipped or shifted to remain fully within the image bounds.
+-*   **Precision:** High-frequency loss functions require accurate ray tracing to avoid aliasing artifacts within the patch [S1, unofficial].
++**Edge cases and pitfalls:**
++- Boundary conditions: The starting coordinate $(u_0, v_0)$ must ensure the entire $W \times H$ patch fits within the image resolution. If the image is smaller than the patch size, the method cannot be applied as defined [S1, unofficial].
++- Loss application: This sampling mode is exclusively used for calculating the DWT loss ($L_{DW}$). Random ray sampling is used for Mean Squared Error loss ($L_{MSE}$) to capture global structures [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Random Patch Sampling
+-A variant used in deblurring NeRF to model defocus blur interference by rendering a group of rays within a close location [S2]. It reduces training time by allowing neighboring pixels to share rays within a patch [S2].
+-*   **Definition:** Selects a group of rays within a close location (a patch) to model the interference of neighboring pixels caused by defocus blur [S2].
+-*   **Formula:** The number of rendered pixels is $(P' + K + 1)^2$, where $P'$ is the width/height of the region to compute intensity and $K$ is the blur kernel size [S2]. The reduction factor for neighboring rays per ray is $K^2 / ((P' + K + 1)^2 / P'^2)$ [S2].
+-*   **Parameters:** In experiments, $P = 22$ (patch size), $P'^2 = 122$ (number of interesting pixels), and $K = 11$ (blur kernel size) [S2].
+-*   **When to choose:** Use when dealing with defocus blur and needing to enforce sharpness priors via local neighborhood analysis [S2].
++### Grid-based Patch Sampling
++A variant where rays are divided into equal-size patches following rigid grid lines determined by a fixed grid size, which are then shuffled and fed into the super-resolution NeRF pipeline [S2]. It is chosen for its simplicity in implementation but suffers from a specific pitfall: the rigid grid cuts ray space strictly, causing variations located between grid boundaries to never be seen by convolutional kernels during training [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Higher per-iteration cost than random sampling due to the large number of rays per patch (e.g., 36,864 rays) [S1, unofficial]. However, random patch sampling can reduce total training time compared to naive full-image blur convolution by sharing neighboring rays [S2].
+-*   **Memory Complexity:** Requires storing the rendered values for the entire patch simultaneously to compute local transforms [S1, unofficial][S2].
+-*   **Strengths:** Captures local structures and high-frequency details effectively [S1, unofficial]. Essential for operations requiring spatial adjacency like DWT or blur convolution [S1, unofficial][S2].
+-*   **Limitations:** Computationally expensive per iteration [S1, unofficial]. Random patch sampling still requires rendering more pixels than the target count due to neighbor inclusion [S2].
+-*   **When to use:** When the loss function depends on local spatial relationships (e.g., DWT, sharpness priors) [S1, unofficial][S2].
+-*   **When not:** When global structure is the primary concern (use random sampling instead) [S1, unofficial].
++- **Time complexity:** Not given in the sources.
++- **Memory complexity:** Requires storing $W \times H$ rays per patch. For a $192 \times 192$ patch, this is 36,864 rays [S1, unofficial].
++- **Performance:** Used in DWTNeRF on LLFF and NeRF-Synthetic datasets with GeForce RTX 4070 Ti Super [S1, unofficial].
++- **Strengths:** Enables the calculation of DWT loss by providing the necessary spatial adjacency of rays [S1, unofficial].
++- **Limitations:** Rigid grid variants (Grid-based Patch Sampling) fail to capture patterns at grid boundaries [S2].
+ 
+ ## Background
+-Originated in the context of Neural Radiance Fields (NeRF) optimization, specifically in DWTNeRF [S1, unofficial] and Sharp-NeRF [S2]. DWTNeRF introduced patch-based sampling to facilitate Discrete Wavelet Transform loss, prioritizing low frequencies early in training [S1, unofficial]. Sharp-NeRF adapted the concept to random patch sampling for deblurring, leveraging sharpness priors [S2].
++Originated in DWTNeRF, which boosts few-shot Neural Radiance Fields via Discrete Wavelet Transform [S1, unofficial]. The method was introduced to address the need for local structure encoding in super-resolution-based NeRF pipelines, contrasting with the global structure focus of random sampling [S1, unofficial]. Grid-based patch sampling was later critiqued and refined by FastSR-NeRF, which proposed random patch sampling to mitigate boundary artifacts [S2].
+ 
+ ## Sources
+ [S1] DWTNeRF: Boosting Few-shot Neural Radiance Fields via Discrete Wavelet Transform, https://arxiv.org/abs/2501.12637v3, fetched 2026-10-27 (unofficial)
+-[S2] Sharp-NeRF: Grid-based Fast Deblurring Neural Radiance Fields using Sharpness Prior, https://doi.org/10.1109/wacv57701.2024.00367, fetched 2026-10-27+[S2] FastSR-NeRF: Improving NeRF Efficiency on Consumer Devices with A Simple Super-Resolution Pipeline, https://doi.org/10.1109/wacv57701.2024.00593, fetched 2026-10-26

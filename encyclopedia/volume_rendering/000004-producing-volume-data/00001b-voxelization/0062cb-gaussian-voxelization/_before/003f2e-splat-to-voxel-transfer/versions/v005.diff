@@ -1,0 +1,123 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Splat-to-Voxel Transfer is a method for converting unstructured 3D Gaussian primitives into a structured, dense voxel grid representation by depositing splat attributes onto grid cells [S1]. It solves the problem of bridging point-based Gaussian representations with grid-based neural processing, enabling the use of voxel transformers for feature fusion and refinement [S1]. Unlike sibling methods that may focus on sparse grid generation or direct format conversion, this method explicitly constructs a coarse-to-fine hierarchy and applies sparsification based on geometric weights to reduce computational load for downstream transformer networks [S1].
++Splat-to-Voxel Transfer converts unstructured 3D Gaussian primitives into a structured, dense voxel grid by depositing splat attributes onto grid cells [S1]. It bridges point-based Gaussian representations with grid-based neural processing, enabling voxel transformers for feature fusion and refinement [S1]. Unlike sibling methods that focus on sparse grid generation or direct format conversion, this method explicitly constructs a coarse-to-fine hierarchy and applies geometric weight-based sparsification to reduce computational load for downstream transformer networks [S1].
+ 
+ ## How it works
+@@ -14,9 +14,9 @@
+ 
+ **Outputs:**
+-- Sparse set of fine-level voxel attributes $E_j$ and corresponding Gaussian parameters $G'_j$ [S1].
++- Sparse set of fine-level voxel attributes $E_j$ and corresponding refined Gaussian parameters $G'_j$ [S1].
+ - Coarse-level voxel features $E^c_i$ used for transformer input [S1].
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A 3D array where each voxel $V_j$ stores an attribute vector $E_j$ and a weight $W_j$.
++- **Voxel Grid:** A 3D array where each voxel $V_j$ stores an attribute vector $E_j$ and a weight $W_j$ [S1].
+ - **Coarse Grid:** A downsampled version of the fine grid, where each coarse voxel $V^c_i$ corresponds to a block $N_i$ of $d \times h \times w$ fine voxels [S1].
+ - **Tokens:** Coarse voxel features reshaped into 1D vectors for transformer input [S1].
+@@ -39,14 +39,14 @@
+     For each voxel $V_j$ in the high-resolution grid:
+     a. Compute the total accumulated weight $W_j$ from all contributing Gaussians $k$:
+-       $$W_j = \sum_{k \in \{M_k\}} w_{jk} \alpha_k$$
+-       where $\alpha_k$ is the opacity of Gaussian $k$ [S1].
++       $$W_j = \sum_{k} w_{jk} \alpha_k$$
++       where $\alpha_k$ is the opacity of Gaussian $k$ [S1]. (Note: The source notation $\sum_{k \in \{M_k\}}$ contains a typo; the sum iterates over all Gaussians $k$ that contribute to voxel $j$.)
+     b. Compute the voxel attribute $E_j$ as the normalized weighted sum of concatenated features and Gaussian parameters:
+-       $$E_j = \frac{1}{W_j} \sum_{k \in \{M_k\}} w_{jk} \alpha_k [F_k; G_k]$$
+-       where $[F_k; G_k]$ denotes the concatenation of the feature vector $F_k$ and Gaussian attributes $G_k$ [S1]. If $W_j = 0$, $E_j$ is undefined or zero-initialized [G].
++       $$E_j = \frac{1}{W_j} \sum_{k} w_{jk} \alpha_k [F_k; G_k]$$
++       where $[F_k; G_k]$ denotes the concatenation of the feature vector $F_k$ and Gaussian attributes $G_k$ [S1]. If $W_j = 0$, $E_j$ is zero-initialized [G].
+ 
+ 3.  **Coarse-to-fine Hierarchy Construction:**
+     a. Downsample the high-resolution voxel grid by factors $[d, h, w]$ to create a low-resolution coarse grid [S1].
+     b. Each coarse voxel $V^c_i$ corresponds to a block $N_i$ of $d \times h \times w$ fine voxels [S1].
+-    c. Compute coarse voxel features $E^c_i$ using a shallow multi-layer perceptron (MLP) on the concatenation of the fine features $E_j$ for all $j \in N_i$ and the set of fine voxel weights [S1]. (Note: The exact MLP architecture and input concatenation details are described as "shallow" and using "concatenation of the fine features and set coarse voxel we..." in [S1], implying aggregation of fine-level data).
++    c. Compute coarse voxel features $E^c_i$ using a shallow multi-layer perceptron (MLP) on the concatenation of the fine features $E_j$ for all $j \in N_i$ and the set of fine voxel weights [S1]. (Note: The exact MLP architecture and input concatenation details are truncated in the source text, so a weighted average aggregation is used as a standard proxy [G].)
+ 
+ 4.  **Voxel Sparsification:**
+@@ -76,9 +76,10 @@
+         coarse_voxels: List of coarse voxel indices and features E^c_i.
+     """
+-    # Initialize high-res grid
+-    # E_j stores concatenated [F_k; G_k] weighted sum
+-    # W_j stores total weight
+-    fine_E = np.zeros((*voxel_grid_shape, gaussians[0]['F'].shape[0] + gaussians[0]['G'].shape[0]))
+-    fine_W = np.zeros((*voxel_grid_shape))
++    if not gaussians:
++        return [], []
++        
++    feat_dim = gaussians[0]['F'].shape[0] + gaussians[0]['G'].shape[0]
++    fine_E = np.zeros(list(voxel_grid_shape) + [feat_dim])
++    fine_W = np.zeros(voxel_grid_shape)
+     
+     # Step 1 & 2: Splat Depositing and Fusion
+@@ -90,5 +91,4 @@
+         
+         # Find 8 adjacent voxels
+-        # Assuming mu is in voxel coordinates, find integer bounds
+         x, y, z = np.floor(mu).astype(int)
+         neighbors = []
+@@ -112,5 +112,5 @@
+             continue
+             
+-        normalized_weights = [w / total_k for w in weights]
++        normalized_weights = [wt / total_k for wt in weights]
+         
+         # Aggregate
+@@ -122,12 +122,10 @@
+             
+     # Normalize attributes
+-    # Avoid division by zero
+     valid_mask = fine_W > 1e-8
+-    fine_E[valid_mask] /= fine_W[valid_mask][:, np.newaxis]
++    fine_E[valid_mask] /= fine_W[valid_mask].reshape(-1, 1)
+     
+     # Step 3: Coarse-to-fine Hierarchy
+-    # Downsample by d, h, w
+     coarse_shape = (voxel_grid_shape[0] // d, voxel_grid_shape[1] // h, voxel_grid_shape[2] // w)
+-    coarse_E = np.zeros((*coarse_shape, fine_E.shape[-1]))
++    coarse_E = np.zeros(list(coarse_shape) + [fine_E.shape[-1]])
+     coarse_W = np.zeros(coarse_shape)
+     
+@@ -135,5 +133,4 @@
+         for j in range(coarse_shape[1]):
+             for k in range(coarse_shape[2]):
+-                # Block of fine voxels
+                 block = fine_E[i*d:(i+1)*d, j*h:(j+1)*h, k*w:(k+1)*w]
+                 block_W = fine_W[i*d:(i+1)*d, j*h:(j+1)*h, k*w:(k+1)*w]
+@@ -144,5 +141,5 @@
+                 total_block_W = np.sum(block_W)
+                 if total_block_W > 1e-8:
+-                    coarse_E[i, j, k] = np.sum(block * block_W[:, :, :, np.newaxis], axis=(0,1,2)) / total_block_W
++                    coarse_E[i, j, k] = np.sum(block * block_W[..., np.newaxis], axis=(0,1,2)) / total_block_W
+                     coarse_W[i, j, k] = total_block_W
+                 else:
+@@ -151,12 +148,9 @@
+                     
+     # Step 4: Voxel Sparsification
+-    # Flatten coarse weights
+     coarse_weights_flat = coarse_W.flatten()
+     num_retain = int(len(coarse_weights_flat) * sparsification_ratio)
+     
+-    # Get indices of top weights
+     top_indices = np.argsort(coarse_weights_flat)[-num_retain:]
+     
+-    # Create sparse representation
+     sparse_fine_voxels = []
+     coarse_voxels = []
+@@ -165,5 +159,4 @@
+         ci, cj, ck = np.unravel_index(idx, coarse_shape)
+         
+-        # Add coarse voxel
+         coarse_voxels.append({
+             'index': (ci, cj, ck),
+@@ -172,5 +165,4 @@
+         })
+         
+-        # Add corresponding fine voxels
+         for di in range(d):
+             for dj in range(h):

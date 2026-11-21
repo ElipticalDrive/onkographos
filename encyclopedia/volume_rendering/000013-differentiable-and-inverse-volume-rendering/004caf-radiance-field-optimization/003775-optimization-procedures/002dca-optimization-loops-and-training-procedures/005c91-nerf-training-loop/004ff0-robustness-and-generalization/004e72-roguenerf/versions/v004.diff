@@ -1,0 +1,618 @@
+--- v003.md
++++ v004.md
+@@ -4,82 +4,102 @@
+ 
+ ## Overview
+-RoGUENeRF is a post-processing enhancer that improves the visual quality, fidelity, and high-frequency texture restoration of rendered NeRF images while maintaining view-consistency and robustness to inaccurate camera calibration [S1]. Unlike sibling methods that rely on adversarial regularization [Aug-NeRF](10294-aug-nerf.md) or model averaging [NeRF Ensemble with Conjoint Pruning](12608-nerf-ensemble-with-conjoint-pruning.md), RoGUENeRF operates by reprojecting training features into the novel view space using geometry-aware alignment and fusion mechanisms [S1]. It is designed to be data-efficient, requiring only small real-world datasets for fine-tuning, whereas alternatives like NeRFLiX require orders of magnitude more simulated data [S1].
++RoGUENeRF is a post-processing enhancer for Neural Radiance Fields (NeRF) that improves the visual quality, fidelity, and high-frequency texture reconstruction of rendered images while maintaining view-consistency and robustness to inaccurate camera calibration [S1]. It distinguishes itself from sibling methods like [Aug-NeRF](10294-aug-nerf.md) and [NeRFLiX](10294-aug-nerf.md) by being a universal, pre-trained enhancer that requires significantly less training data; unlike NeRFLiX, which degrades performance when trained on small real-world datasets, RoGUENeRF improves baseline NeRFs even when fine-tuned on small datasets like LLFF [S1]. It operates by aligning features from neighboring training views to a novel test view using geometry, refining them with non-rigid optical flow, and fusing them via geometry-aware attention [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A trained NeRF model, the set of training images $\{H_i\}_{i=1}^M$, and their known camera poses $\{C_i\}_{i=1}^M$. For a novel test view with camera pose $C_k$, the method requires the rendered RGB image $I_k$, the rendered depth map $D_k$, and the set of nearest neighbor training images.
+-*   **Outputs:** An enhanced RGB image $I_{enhanced}$.
++*   **Inputs:** A trained NeRF model, the set of training images $\{H_i\}_{i=1}^M$ with known camera poses $\{C_i\}_{i=1}^M$, and a novel camera pose $C_k$ for which an image is to be enhanced.
++*   **Outputs:** An enhanced RGB image $I_k^{enhanced}$ and potentially refined features.
+ 
+ **Data Structures:**
+ *   **Camera Pose $C$:** Defined as a concatenation of a rotation matrix $R$ and a translation vector $t$ [S1].
+-*   **Features:** Extracted image features are represented as tensors. The Convolutional Encoder outputs Image Features, a Spatial Attention Mask, and a Camera Attention Mask [S1].
++*   **Nearest Neighbors:** A subset of training indices $N \subset \{1, \dots, M\}$ selected based on angular and positional distance to $C_k$. The method selects the 5 nearest neighbors [S1].
++*   **Feature Tensors:**
++    *   Neighbour Features: Extracted from training images $H_i$ for $i \in N$.
++    *   Test Features: Extracted from the rendered test image $I_k$.
++    *   Depths: $D_i$ for neighbors and $D_k$ for the test view, rendered from the NeRF.
++    *   Camera Poses: $C_i$ for neighbors and $C_k$ for the test view.
++
++**Step-by-Step Procedure:**
++
++1.  **Nearest Neighbour Selection:**
++    For a novel camera pose $C_k = (R_k, t_k)$, compute the distance to each training pose $C_i = (R_i, t_i)$ to find the $K=5$ nearest neighbors.
++    *   Compute angular distance using Euler angles $\pi(R)$:
++        $$ \text{dist}^{i}_{\text{ang}}(R_{k}, R_{i}) = \frac{1}{3} \| \pi(R_{k}) - \pi(R_{i}) \|_{1} $$
++        where $\pi(R_i)$ are the Euler angles of the rotation matrix $R_i$, and $\| \cdot \|_1$ is the L1 norm [S1].
++    *   Compute positional distance:
++        $$ \text{dist}^{i}_{\text{pos}}(t_{k}, t_{i}) = \frac{1}{3} \| t_{k} - t_{i} \|_{1} $$
++    *   Select the 5 indices $i$ with the smallest combined distance (empirically, positional distance is the stronger indicator) [S1].
++
++2.  **Feature Extraction (Convolutional Encoder):**
++    Extract features from the selected neighbor images $H_i$ and the test image $I_k$.
++    *   Input to the encoder: Concatenated tensors of [Neighbour Features, Test Features, Neighbour Depth, Test Depth, Neighbour Cam Pose, Test Cam Pose]. Note: Cam poses are converted to Euler angles before processing [S1].
++    *   The encoder architecture (see *Convolutional Encoder Block* below) outputs:
++        *   Image Features $F_{img}$
++        *   Spatial Attention Mask $M_{spatial}$
++        *   Camera Attention Mask $M_{cam}$
++
++3.  **3D Alignment:**
++    Align the features of the neighboring training images to the coordinate system of the novel test view $C_k$.
++    *   Use the rendered depth maps $D_i$ and $D_k$ and camera poses $C_i, C_k$ to compute the 3D reprojection.
++    *   Apply the Kornia geometry remap function with bilinear interpolation and zero padding to warp the neighbor features to the test view [S1].
++
++4.  **Non-Rigid Refinement (Iterative Optical Flow):**
++    Compensate for inaccuracies in the estimated geometry and alignment.
++    *   Input to the Non-Rigid Refinement Network: [Aligned Neighbour Features, Test Features].
++    *   The network estimates an optical flow field at 8x downsampled resolution.
++    *   Apply bilinear upsampling to the estimated flow field to restore full resolution.
++    *   Warp the aligned Neighbour Features using the PyTorch `grid_sample` function with bilinear interpolation to produce Refined Features [S1].
++    *   This refinement is performed iteratively (32 iterations as per Figure 3 description, though the text mentions "lightweight iterative optical flow network") [S1].
++
++5.  **Geometry-Aware Attention and Fusion:**
++    Regulate the contribution of misaligned regions and fuse the refined features.
++    *   Use the Spatial Attention Mask $M_{spatial}$ and Camera Attention Mask $M_{cam}$ generated in Step 2.
++    *   Apply these masks to regulate the features.
++    *   Fuse the regulated features to produce the final enhanced image features.
++
++6.  **Uformer Processing:**
++    *   Pass the fused image features (64 channels) through a Uformer network.
++    *   The Uformer is modified to accept 64-channel input instead of standard 3-channel RGB.
++    *   Output is the final enhanced image [S1].
++
++7.  **Inference:**
++    *   Perform a single inference pass without Test-Time Augmentation (TTA) [S1].
++
++**Convolutional Encoder Block Architecture:**
++*   **Input:** [Neighbour Features, Test Features, Neighbour Depth, Test Depth, Neighbour Cam Pose, Test Cam Pose]
++*   **Layers:**
++    1.  `conv2d` (k=3, c=64, stride=1, padding=1), Leaky ReLU (slope=0.01)
++    2.  `conv2d` (k=3, c=64, stride=1, padding=1), Leaky ReLU (slope=0.01)
++    3.  `linear` (in=12, out=128), Leaky ReLU (slope=0.01)
++    4.  `linear` (in=128, out=1), Sigmoid
++    5.  `conv2d` (k=3, c=128, stride=1, padding=1), Leaky ReLU (slope=0.01)
++    6.  `conv2d` (k=3, c=64, stride=1, padding=1), Sigmoid
++    7.  `conv2d` (k=1, c=64, stride=1, padding=0)
++*   **Outputs:** Image Features, Spatial Attention Mask, Camera Attention Mask [S1].
++
++**Non-Rigid Refinement Network Architecture:**
++*   **Input:** [Neighbour Features, Test Features]
++*   **Layers:**
++    1.  `conv2d` (k=7, c=64, s=4), ReLU
++    2.  `conv2d` (k=3, c=64, s=1), ReLU
++    3.  `conv2d` (k=3, c=64, s=1) + ReLU (Residual connection implied by "+")
++    4.  `conv2d` (k=3, c=64, s=2), ReLU
++    5.  `conv2d` (k=3, c=64, s=2) + ReLU (Residual connection implied by "+")
++    6.  `conv2d` (k=3, c=64, s=1), ReLU
++    7.  `conv2d` (k=3, c=64, s=1)
++    8.  `conv2d` (k=3, c=128, s=1), ReLU
++    9.  `conv2d` (k=3, c=64, s=1)
++    10. `conv2d` (k=3, c=2, s=1) -> Output: Optical Flow
++*   **Process:**
++    *   Iterate 32 times (as per Figure 3 caption "Iterate 32x") [S1].
++    *   Bilinear upsample optical flow.
++    *   Warp 2D Neighbour Features to get Refined Features [S1].
+ 
+ **Parameters:**
+-*   **Leaky ReLU slope:** 0.01 [S1].
+-*   **Weight initialization:** He initialization [S1].
+-*   **Convolutional padding:** Zero padding [S1].
+-*   **Uformer input channels:** 64 (modified from the original 3-channel RGB) [S1].
+-*   **Nearest Neighbors:** The 5 camera poses with the largest overlap are selected [S1].
+-
+-**Step-by-Step Method:**
+-
+-1.  **Nearest Neighbour Selection:**
+-    Given a novel camera pose $C_k$ and training poses $\{C_i\}_{i=1}^M$, identify the $N=5$ training images with the largest content overlap. Compute the angular distance between rotations and positional distance between translations [S1]:
+-    $$
+-    dist^{i}_{ang}(R_{k}, R_{i}) = \frac {1}{3} \lvert \pi (R_{k}) - \pi (R_{i}) \rvert _{1}
+-    $$
+-    $$
+-    dist^{i}_{pos}(\bm {t}_{k}, \bm {t}_{i}) = \frac {1}{3} \lvert \bm {t}_{k} - \bm {t}_{i} \rvert _{1}
+-    $$
+-    where $\pi(R_i)$ are the Euler angles of the rotation matrix of $C_i$, and $\lvert \cdot \rvert_1$ is the L1 norm. Positional distance is the primary indicator, followed by angular distance [S1].
+-
+-2.  **Feature Extraction:**
+-    Extract features from the selected neighbor images and the test view using the Convolutional Encoder Block (see Architecture below). Inputs to the encoder are: Neighbor Features, Test Features, Neighbor Depth, Test Depth, Neighbor Cam Pose, and Test Cam Pose [S1].
+-
+-3.  **3D Alignment:**
+-    Perform 3D alignment of the neighboring training image features to the novel test view. This is achieved by remapping the neighbor features into the coordinate system of the test view using the rendered depth maps $D_i, D_k$ and camera poses $C_i, C_k$. The remapping uses bilinear interpolation and zero padding [S1].
+-
+-4.  **Non-Rigid Refinement:**
+-    To compensate for geometric inaccuracies, estimate optical flow between the aligned neighbor features and the test features.
+-    *   Estimate optical flow at $8\times$ downsampled resolution.
+-    *   Apply bilinear upsampling to the estimated flow field to restore full resolution.
+-    *   Warp the 2D neighbor features to the test view using the refined flow field via bilinear interpolation [S1].
+-
+-5.  **Geometry-Aware Attention:**
+-    Regulate the contribution of misaligned regions using the Spatial and Camera Attention Masks generated by the Convolutional Encoder. Camera rotations are converted to Euler angles before processing [S1].
+-
+-6.  **Feature Regulation and Fusion:**
+-    Fuse the regulated features using a Uformer network. The Uformer accepts 64-channel image features as input [S1].
+-
+-7.  **Inference:**
+-    Perform a single inference pass without Test-Time Augmentation (TTA) [S1].
+-
+-**Architecture Details:**
+-
+-*   **Convolutional Encoder Block:**
+-    *   **Input:** [Neighbor Features, Test Features, Neighbor Depth, Test Depth, Neighbor Cam Pose, Test Cam Pose] [S1].
+-    *   **Layers:**
+-        1.  `conv2d` k=3, c=64, Leaky ReLU
+-        2.  `conv2d` k=3, c=64, Leaky ReLU
+-        3.  `linear` in=12, out=128, Leaky ReLU
+-        4.  `linear` in=128, out=1, Sigmoid
+-        5.  `conv2d` k=3, c=128, Leaky ReLU
+-        6.  `conv2d` k=3, c=64, Sigmoid
+-        7.  `conv2d` k=1, c=64
+-    *   **Outputs:** Image Features, Spatial Attention Mask, Camera Attention Mask [S1].
+-
+-*   **Non-Rigid Refinement Network:**
+-    *   **Input:** [Neighbor Features, Test Features] [S1].
+-    *   **Layers:**
+-        1.  `conv2d` k=7, c=64, s=4, ReLU
+-        2.  `conv2d` k=3, c=64, ReLU
+-        3.  `conv2d` k=3, c=64, ReLU (Residual connection)
+-        4.  `conv2d` k=3, c=64, s=2, ReLU
+-        5.  `conv2d` k=3, c=64, s=2, ReLU (Residual connection)
+-        6.  `conv2d` k=3, c=64, ReLU
+-        7.  `conv2d` k=3, c=64
+-        8.  `conv2d` k=3, c=128, ReLU
+-        9.  `conv2d` k=3, c=64
+-    *   **Process:** Iterate 32 times. Output is `conv2d` k=3, c=2 (optical flow). The flow is bilinearly upsampled and used to warp neighbor features [S1].
++*   **Leaky ReLU slope:** 0.01 [S1]
++*   **Weight initialization:** He initialization [S1]
++*   **Convolutional padding:** Zero padding [S1]
++*   **Uformer input channels:** 64 (modified from original 3) [S1]
++*   **Optical flow resolution:** Estimated at 8x downsampled, upsampled to full resolution [S1]
+ 
+ **Pseudocode:**
+@@ -89,194 +109,259 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
+-
+-# Standard operations assumed available: conv2d, linear, leaky_relu, sigmoid, relu, grid_sample
+-
+-class RoGUENeRF:
+-    def __init__(self, uformer_model, encoder_model, refinement_model):
+-        self.uformer = uformer_model
+-        self.encoder = encoder_model
+-        self.refinement = refinement_model
+-
+-    def compute_angular_distance(self, R_k, R_i):
+-        """
+-        Computes angular distance between two rotation matrices.
+-        R_k, R_i: torch.Tensor of shape (3, 3)
+-        """
+-        # Convert rotation matrices to Euler angles
+-        # Note: Exact conversion formula depends on convention (e.g., ZYX).
+-        # Assuming standard conversion pi(R) returns a vector of 3 angles.
+-        angles_k = self.rotation_to_euler(R_k)
+-        angles_i = self.rotation_to_euler(R_i)
+-        # L1 norm of difference, divided by 3
+-        dist = torch.mean(torch.abs(angles_k - angles_i))
+-        return dist
+-
+-    def compute_pos_distance(self, t_k, t_i):
+-        """
+-        Computes positional distance between two translation vectors.
+-        t_k, t_i: torch.Tensor of shape (3,)
+-        """
+-        return torch.mean(torch.abs(t_k - t_i))
+-
+-    def select_neighbors(self, C_k, C_train, k=5):
+-        """
+-        Selects k nearest neighbor training poses.
+-        C_k: dict with 'R' (3,3) and 't' (3,)
+-        C_train: list of dicts with 'R' and 't'
+-        """
+-        distances = []
+-        for C_i in C_train:
+-            d_ang = self.compute_angular_distance(C_k['R'], C_i['R'])
+-            d_pos = self.compute_pos_distance(C_k['t'], C_i['t'])
+-            # Empirical weighting not explicitly defined, but pos is stronger indicator.
+-            # We store both for selection logic.
+-            distances.append((d_ang, d_pos, C_i))
+-        
+-        # Sort by positional distance primarily, then angular
+-        # Note: The paper states pos is strongest, followed by angular.
+-        # Implementation: Sort by pos, break ties or use combined metric if needed.
+-        # For simplicity, we sort by pos distance.
+-        distances.sort(key=lambda x: x[1])
+-        return [d[2] for d in distances[:k]]
+-
+-    def forward(self, nerf_model, H_train, C_train, C_k):
+-        """
+-        Main inference pipeline.
+-        H_train: List of training images (RGB)
+-        C_train: List of training camera poses
+-        C_k: Novel camera pose dict {'R': (3,3), 't': (3,)}
+-        """
+-        # 1. Render from NeRF
+-        I_k, D_k = nerf_model.render(C_k)
+-        
+-        # 2. Select Neighbors
+-        neighbors = self.select_neighbors(C_k, C_train)
+-        H_neighbors = [H_train[C_train.index(c)] for c in neighbors]
+-        C_neighbors = neighbors
+-        
+-        # 3. Extract Features via Encoder
+-        # Inputs: Neighbor Features, Test Features, Neighbor Depth, Test Depth, 
+-        #         Neighbor Cam Pose, Test Cam Pose
+-        # Note: H_train are RGB images. Encoder expects features. 
+-        # Assuming H_train are passed as initial features or processed by a base encoder.
+-        # The paper says "Extract features using the convolutional encoder block".
+-        # We assume H_train and I_k are pre-processed into feature tensors F_H and F_I.
+-        # For this pseudocode, we assume H_train and I_k are passed directly as 'features' 
+-        # if the encoder handles RGB, or we assume a preliminary feature extraction step.
+-        # Based on Fig 2, inputs are "Neighbour Features, Test Features...". 
+-        # We assume H_train and I_k are converted to feature tensors F_H, F_I.
+-        
+-        F_H = self.preprocess_features(H_neighbors) # Placeholder for feature extraction if not raw RGB
+-        F_I = self.preprocess_features(I_k)
+-        
+-        # Prepare depth and pose inputs
+-        D_H = [nerf_model.render(c)['depth'] for c in C_neighbors]
+-        
+-        # Encoder Input: [F_H, F_I, D_H, D_k, C_neighbors, C_k]
+-        # Note: C_neighbors and C_k need to be formatted for the encoder.
+-        # Encoder outputs: Image Features, Spatial Attn Mask, Camera Attn Mask
+-        img_features, spatial_mask, camera_mask = self.encoder(
+-            F_H, F_I, D_H, D_k, C_neighbors, C_k
++from kornia.geometry import warp_affine # Assuming Kornia-like API for 3D reprojection
++
++def euler_angles_from_rotation_matrix(R):
++    """
++    Converts a 3x3 rotation matrix to Euler angles.
++    Returns a tensor of shape (3,).
++    """
++    # Implementation details for Euler angle extraction are not explicitly provided in the source.
++    # Standard conversion formulas would be used here.
++    # [G] Placeholder for standard R to Euler conversion.
++    pass
++
++def compute_angular_distance(R_k, R_i):
++    """
++    Computes the angular distance between two camera rotations.
++    """
++    euler_k = euler_angles_from_rotation_matrix(R_k)
++    euler_i = euler_angles_from_rotation_matrix(R_i)
++    return (1/3) * torch.sum(torch.abs(euler_k - euler_i))
++
++def compute_pos_distance(t_k, t_i):
++    """
++    Computes the positional distance between two camera translations.
++    """
++    return (1/3) * torch.sum(torch.abs(t_k - t_i))
++
++def select_neighbors(C_k, C_set, K=5):
++    """
++    Selects K nearest neighbors based on angular and positional distance.
++    C_k: (R_k, t_k)
++    C_set: List of (R_i, t_i)
++    """
++    distances = []
++    for i, (R_i, t_i) in enumerate(C_set):
++        d_ang = compute_angular_distance(C_k.R, R_i)
++        d_pos = compute_pos_distance(C_k.t, t_i)
++        # Empirical weighting not explicitly defined, assuming simple sum or ranking.
++        # Source says "dist_pos is strongest indicator... followed second by dist_ang".
++        # We assume a combined metric for selection.
++        dist = d_pos + d_ang 
++        distances.append((dist, i))
++    
++    distances.sort(key=lambda x: x[0])
++    return [idx for _, idx in distances[:K]]
++
++class ConvolutionalEncoder(nn.Module):
++    def __init__(self):
++        super().__init__()
++        # Layer 1
++        self.conv1 = nn.Conv2d(in_channels=..., out_channels=64, kernel_size=3, padding=1)
++        self.lrelu1 = nn.LeakyReLU(negative_slope=0.01)
++        # Layer 2
++        self.conv2 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1)
++        self.lrelu2 = nn.LeakyReLU(negative_slope=0.01)
++        # Layer 3 (Linear for camera pose processing)
++        self.lin1 = nn.Linear(12, 128)
++        self.lrelu3 = nn.LeakyReLU(negative_slope=0.01)
++        self.lin2 = nn.Linear(128, 1)
++        self.sigmoid1 = nn.Sigmoid()
++        # Layer 4
++        self.conv3 = nn.Conv2d(in_channels=..., out_channels=128, kernel_size=3, padding=1)
++        self.lrelu4 = nn.LeakyReLU(negative_slope=0.01)
++        # Layer 5
++        self.conv4 = nn.Conv2d(in_channels=128, out_channels=64, kernel_size=3, padding=1)
++        self.sigmoid2 = nn.Sigmoid()
++        # Layer 6
++        self.conv5 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=1, padding=0)
++        
++        # He initialization applied to weights
++        self._init_weights()
++
++    def _init_weights(self):
++        for m in self.modules():
++            if isinstance(m, nn.Conv2d) or isinstance(m, nn.Linear):
++                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
++
++    def forward(self, neighbor_features, test_features, neighbor_depth, test_depth, neighbor_cam_poses, test_cam_pose):
++        # Note: Input channel dimensions for conv layers depend on the concatenation of features/depths/poses.
++        # The source specifies the sequence of layers but not the exact input channel count for the first conv.
++        # [G] Assuming standard feature concatenation.
++        
++        x = self.conv1(neighbor_features) # Placeholder for actual input tensor construction
++        x = self.lrelu1(x)
++        x = self.conv2(x)
++        x = self.lrelu2(x)
++        
++        # Camera pose processing
++        # Convert poses to Euler angles (12 dims? Source says linear in12)
++        # [G] Assuming neighbor_cam_poses and test_cam_pose are flattened/concatenated to 12 dims.
++        cam_input = torch.cat([neighbor_cam_poses, test_cam_pose], dim=-1) 
++        cam_feat = self.lin1(cam_input)
++        cam_feat = self.lrelu3(cam_feat)
++        cam_feat = self.lin2(cam_feat)
++        cam_feat = self.sigmoid1(cam_feat)
++        
++        # Continue with conv layers
++        # Note: The source diagram shows camera attention mask and spatial attention mask as outputs.
++        # The exact fusion of cam_feat with spatial features is not detailed in text, 
++        # but Figure 2 implies they are combined.
++        
++        # Simplified forward pass based on layer sequence:
++        # The source lists layers sequentially. We assume feature maps are processed.
++        # Due to ambiguity in how camera features are injected into the conv path,
++        # we follow the layer list strictly.
++        
++        # Re-evaluating Figure 2: It shows inputs going into conv layers.
++        # The linear layers process camera poses. The outputs are masks.
++        
++        # Let's assume the encoder processes the image features primarily, 
++        # and camera poses are used to generate the attention masks.
++        
++        # This pseudocode is a structural approximation due to missing explicit fusion logic in text.
++        pass
++
++class NonRigidRefinement(nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.conv1 = nn.Conv2d(..., 64, kernel_size=7, stride=4)
++        self.relu1 = nn.ReLU()
++        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
++        self.relu2 = nn.ReLU()
++        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
++        self.relu3 = nn.ReLU()
++        self.conv4 = nn.Conv2d(64, 64, kernel_size=3, stride=2)
++        self.relu4 = nn.ReLU()
++        self.conv5 = nn.Conv2d(64, 64, kernel_size=3, stride=2)
++        self.relu5 = nn.ReLU()
++        self.conv6 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
++        self.relu6 = nn.ReLU()
++        self.conv7 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
++        self.conv8 = nn.Conv2d(64, 128, kernel_size=3, stride=1)
++        self.relu8 = nn.ReLU()
++        self.conv9 = nn.Conv2d(128, 64, kernel_size=3, stride=1)
++        self.conv_flow = nn.Conv2d(64, 2, kernel_size=3, stride=1)
++        
++        self._init_weights()
++
++    def _init_weights(self):
++        for m in self.modules():
++            if isinstance(m, nn.Conv2d):
++                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
++
++    def forward(self, neighbor_features, test_features):
++        x = self.relu1(self.conv1(torch.cat([neighbor_features, test_features], dim=1)))
++        x = self.relu2(self.conv2(x))
++        x = self.relu3(self.conv3(x) + x) # Residual
++        x = self.relu4(self.conv4(x))
++        x = self.relu5(self.conv5(x) + x) # Residual
++        x = self.relu6(self.conv6(x))
++        x = self.conv7(x)
++        x = self.relu8(self.conv8(x))
++        x = self.conv9(x)
++        flow = self.conv_flow(x)
++        
++        # Downsample for flow estimation
++        flow_low = F.interpolate(flow, scale_factor=0.125, mode='bilinear', align_corners=False)
++        
++        # Iterate 32 times
++        refined_features = neighbor_features
++        for _ in range(32):
++            # Estimate flow at low res
++            # [G] The source implies the network outputs flow. 
++            # In practice, iterative refinement often updates the flow.
++            # Here we assume the network outputs the final flow or updates it.
++            # Given the "Iterate 32x" label on the output block, 
++            # it likely means the warping/refinement loop runs 32 times 
++            # or the network is applied iteratively.
++            # We assume the network outputs a flow field.
++            pass
++            
++        # Upsample flow
++        flow_full = F.interpolate(flow_low, scale_factor=8, mode='bilinear', align_corners=False)
++        
++        # Warp neighbor features
++        # grid_sample expects flow in (H, W, 2) format
++        flow_grid = flow_full.permute(0, 2, 3, 1)
++        refined = F.grid_sample(refined_features, flow_grid, mode='bilinear', padding_mode='zeros')
++        
++        return refined
++
++def roguenerf_pipeline(nerf_model, training_images, training_poses, test_pose):
++    # 1. Select Neighbors
++    neighbor_indices = select_neighbors(test_pose, training_poses, K=5)
++    
++    # 2. Render Test View
++    test_image, test_depth = nerf_model.render(test_pose)
++    
++    # 3. Extract Features and Align
++    neighbor_features = []
++    neighbor_depths = []
++    neighbor_poses = []
++    
++    for idx in neighbor_indices:
++        # Extract features from training image
++        feat = extract_features(training_images[idx])
++        neighbor_features.append(feat)
++        
++        # Render neighbor depth for alignment
++        n_depth = nerf_model.render_depth(training_poses[idx])
++        neighbor_depths.append(n_depth)
++        neighbor_poses.append(training_poses[idx])
++        
++    # 3D Alignment using Kornia
++    aligned_features = []
++    for i, idx in enumerate(neighbor_indices):
++        # Warp neighbor features to test view using depth and poses
++        aligned_feat = warp_to_test_view(
++            neighbor_features[i], 
++            neighbor_depths[i], 
++            neighbor_poses[i], 
++            test_pose,
++            interpolation='bilinear',
++            padding='zero'
+         )
+-        
+-        # 4. 3D Alignment
+-        # Remap neighbor features to test view using depth and poses
+-        # Using Kornia-like geometry remap with bilinear interpolation and zero padding
+-        aligned_features = []
+-        for i, c in enumerate(C_neighbors):
+-            # Warp F_H[i] to I_k's coordinate system
+-            # Requires inverse projection of D_k and projection of D_H[i]
+-            # Simplified: grid_sample with transformation matrix derived from C_k, C_neighbors[i], D_k, D_H[i]
+-            warped = self.remap_features(F_H[i], D_k, D_H[i], C_k, c)
+-            aligned_features.append(warped)
+-            
+-        # 5. Non-Rigid Refinement
+-        # Estimate optical flow between aligned features and test features
+-        refined_features = []
+-        for aligned_f in aligned_features:
+-            # Downsample for flow estimation
+-            aligned_f_small = F.interpolate(aligned_f, scale_factor=0.125, mode='bilinear')
+-            I_k_small = F.interpolate(F_I, scale_factor=0.125, mode='bilinear')
+-            
+-            # Estimate flow
+-            flow_small = self.refinement(aligned_f_small, I_k_small)
+-            
+-            # Upsample flow
+-            flow = F.interpolate(flow_small, scale_factor=8, mode='bilinear')
+-            
+-            # Warp features
+-            # grid_sample expects flow in (H, W, 2) format
+-            flow_grid = flow.permute(0, 2, 3, 1)
+-            refined_f = F.grid_sample(aligned_f, flow_grid, mode='bilinear', padding_mode='zeros')
+-            refined_features.append(refined_f)
+-            
+-        # 6. Geometry-Aware Attention
+-        # Apply masks to refined features
+-        # Note: Mask dimensions must match feature dimensions
+-        regulated_features = []
+-        for rf in refined_features:
+-            # Apply spatial and camera attention
+-            # Assuming masks are broadcastable or tiled to match feature batch/size
+-            att = spatial_mask * camera_mask
+-            regulated = rf * att
+-            regulated_features.append(regulated)
+-            
+-        # 7. Fusion via Uformer
+-        # Concatenate regulated features and test features? 
+-        # Paper says "Feature Regulation and Fusion, processed by a Uformer"
+-        # Input to Uformer is 64-channel image features.
+-        # We assume the regulated features and test features are combined into a single tensor
+-        # or passed as a sequence.
+-        # Assuming we fuse the aligned/refined features into the test view representation.
+-        
+-        # Construct input tensor for Uformer (64 channels)
+-        # This step aggregates the enhanced information.
+-        fused_input = self.aggregate_features(regulated_features, F_I)
+-        
+-        enhanced_output = self.uformer(fused_input)
+-        
+-        return enhanced_output
+-
+-    def rotation_to_euler(self, R):
+-        # Placeholder for standard R->Euler conversion
+-        # Returns vector of 3 angles
+-        pass
+-
+-    def preprocess_features(self, images):
+-        # Placeholder for converting RGB images to feature tensors
+-        # If encoder takes RGB directly, this might be identity or simple normalization
+-        pass
+-
+-    def remap_features(self, F_src, D_tgt, D_src, C_tgt, C_src):
+-        # Perform 3D reprojection
+-        # 1. Unproject D_src pixels to 3D points using C_src
+-        # 2. Project 3D points to C_tgt image plane
+-        # 3. Sample F_src at projected coordinates
+-        pass
+-
+-    def aggregate_features(self, regulated_features, test_features):
+-        # Combine features for Uformer input
+-        pass
++        aligned_features.append(aligned_feat)
++        
++    # 4. Non-Rigid Refinement
++    refinement_net = NonRigidRefinement()
++    refined_features = refinement_net(aligned_features[0], test_image) # Simplified input
++    
++    # 5. Geometry-Aware Attention
++    encoder = ConvolutionalEncoder()
++    img_feat, spatial_mask, cam_mask = encoder(
++        aligned_features, 
++        test_image, 
++        neighbor_depths, 
++        test_depth, 
++        neighbor_poses, 
++        test_pose
++    )
++    
++    # Apply masks
++    regulated_feat = img_feat * spatial_mask * cam_mask
++    
++    # 6. Uformer
++    uformer = Uformer(input_channels=64)
++    enhanced_image = uformer(regulated_feat)
++    
++    return enhanced_image
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Camera Calibration Errors:** The method is robust to inaccuracies, but extreme errors may degrade the 3D alignment quality [S1].
+-*   **Resolution:** Optical flow is estimated at $8\times$ downsampled resolution. This may lose fine-grained motion details, though bilinear upsampling is used to recover full resolution [S1].
+-*   **Test-Time Augmentation:** The method does not use TTA, which affects comparison fairness with methods like NeRFLiX that do [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Inference is fast. On an NVIDIA V100 GPU at full float32 precision:
+-    *   512x512 resolution: 337ms [S1].
+-    *   1024x1024 resolution: 1346ms [S1].
+-    *   This is approximately 13x faster than NeRFLiX with TTA, 3x faster than NeRFLiX without TTA, and 3x slower than NeRFLiX++ [S1].
++*   **Time Complexity:** The method is fast. On an NVIDIA V100 GPU at full float32 precision, inference for a 512x512 image takes 337ms, and for 1024x1024 it takes 1346ms [S1].
+ *   **Memory Complexity:** Not given in the sources.
+-*   **Data Efficiency:** Highly data-efficient. Can be pre-trained and fine-tuned on small real-world datasets (e.g., LLFF with 262 frames). In contrast, NeRFLiX requires orders of magnitude more simulated data (e.g., Vimeo90K) to achieve similar improvements; training NeRFLiX on only the LLFF dataset degrades performance by 0.6dB PSNR, whereas RoGUENeRF improves it by 0.70dB PSNR [S1].
+-*   **Strengths:** Robust to camera calibration errors, maintains view-consistency, restores high-frequency textures, fast inference without TTA.
+-*   **Limitations:** Requires a trained NeRF model as input. Performance depends on the quality of the initial NeRF depth maps.
+-*   **When to use:** When high-quality novel view synthesis is needed from a small set of training images, and computational efficiency during inference is important.
+-*   **When not to use:** When training data is extremely large and real-time inference is not a priority, or when the initial NeRF model is of very poor quality (e.g., bad depth estimation).
++*   **Measured Performance:**
++    *   At 512x512: RoGUENeRF (337ms) is ~13x faster than NeRFLiX with TTA (4208ms), ~3x faster than NeRFLiX without TTA (1050ms), and ~3x slower than NeRFLiX++ (109ms) [S1].
++    *   At 1024x1024: RoGUENeRF (1346ms) is ~13x faster than NeRFLiX with TTA (18385ms), ~3x faster than NeRFLiX without TTA (4579ms), and ~3x slower than NeRFLiX++ (433ms) [S1].
++*   **Data Efficiency:** RoGUENeRF is highly data-efficient. It can be pre-trained and fine-tuned on small real-world datasets (e.g., LLFF with 262 frames) to improve baseline NeRFs (e.g., TensoRF) by 0.70dB PSNR. In contrast, NeRFLiX requires orders of magnitude more simulated data (Vimeo90K) and degrades performance (-0.60dB) when trained on the same small real-world dataset [S1].
++*   **Strengths:** Robust to camera calibration errors, maintains view-consistency, restores high-frequency textures, fast inference, data-efficient.
++*   **Limitations:** Requires a pre-trained NeRF and training images. Relies on the accuracy of the initial NeRF depth estimates for alignment.
++*   **When to use:** When high-quality texture reconstruction is needed from a small set of training images, or when camera poses are slightly inaccurate.
++*   **When not to use:** When extreme inference speed is required (NeRFLiX++ is faster) or when no training images are available (it is a post-processor).
+ 
+ ## Background
+-RoGUENeRF was introduced by S. Catley-Chandar et al. in the paper "RoGUENeRF: A Robust Geometry-Consistent Universal Enhancer for NeRF" [S1]. It addresses the limitation of standard NeRF optimization, which often leads to overfitting and loss of high-frequency details, especially on small datasets. The method builds on the principle that NeRFs can render depth maps, allowing for geometry-aware feature reprojection from training images to novel views. It is positioned as a universal enhancer that can be applied to various NeRF variants (e.g., TensoRF) [S1].
++RoGUENeRF was introduced by S. Catley-Chandar et al. in the paper "RoGUENeRF: A Robust Geometry-Consistent Universal Enhancer for NeRF" [S1]. It addresses the limitation of NeRFs in rendering high-frequency textures and their sensitivity to camera pose errors. It builds on the idea of using 2D image enhancement techniques (like optical flow and attention) guided by 3D geometric information (depth and poses) [S1].
+ 
+ ## Sources

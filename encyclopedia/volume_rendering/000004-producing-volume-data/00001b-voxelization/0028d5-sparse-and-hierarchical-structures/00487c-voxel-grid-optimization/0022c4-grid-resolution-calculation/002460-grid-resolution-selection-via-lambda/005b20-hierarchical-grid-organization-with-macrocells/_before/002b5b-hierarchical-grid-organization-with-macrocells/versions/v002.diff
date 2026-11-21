@@ -1,0 +1,208 @@
+--- v001.md
++++ v002.md
+@@ -4,131 +4,116 @@
+ 
+ ## Overview
+-This method organizes particle data into a hierarchical grid structure to accelerate ray tracing and volume rendering by enabling efficient spatial culling. It differs from flat grid approaches by introducing a coarser macrocell level that stores parameter ranges, allowing for run-time parameter range culling rather than simple empty/non-empty checks. It builds on [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) for determining grid dimensions.
++This method organizes particle data into a hierarchical grid structure to accelerate ray tracing and volume rendering by enabling efficient spatial culling [S1]. It differs from flat grid approaches by introducing a coarser macrocell level that stores parameter ranges, allowing for run-time parameter range culling rather than simple empty/non-empty checks [S1]. It builds on [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) for determining grid dimensions [S1].
+ 
+ ## How it works
+-**Inputs:**
+-- Total number of particles $N$.
+-- Grid volume $V$.
+-- Grid diagonal components $d_x, d_y, d_z$.
+-- Scalar multiplier $\lambda$.
+-- Particle data: position $(x,y,z)$, radius $r$, and up to four scalar properties $(v_0, v_1, v_2, v_3)$.
++**Inputs:** Total number of particles $N$, grid volume $V$, grid diagonal components $d_x, d_y, d_z$, scalar multiplier $\lambda$, and particle data containing position $(x,y,z)$, radius $r$, and up to four scalar properties $(v_0, v_1, v_2, v_3)$ [S1].
+ 
+-**Outputs:**
+-- A two-level hierarchical grid structure.
+-- Level 0: Fine grid of cells containing particle data.
+-- Level 1: Coarse grid of macrocells containing min/max parameter bounds.
++**Outputs:** A two-level hierarchical grid consisting of a fine grid of cells containing particle data and a coarse grid of macrocells containing min/max parameter bounds [S1].
+ 
+ **Data Structures:**
+-1.  **Particle Data Layout:** Stored in two consecutive 16-byte aligned SIMD variables.
+-    -   Variable 1: Position $(x, y, z)$ and radius $(r)$.
+-    -   Variable 2: Scalar properties $(v_0, v_1, v_2, v_3)$.
+-2.  **Macrocell Data:** Stores the minimum and maximum values of each scalar property ($v_0$ through $v_3$) across all particles contained within that macrocell. This replaces the Boolean empty/non-empty flag used in simpler hierarchies.
+-3.  **Grid Hierarchy:** A two-level hierarchy where each macrocell corresponds to an $M \times M \times M$ block of cells in the underlying fine grid.
++- Particle data is stored in two consecutive 16-byte aligned SIMD variables: Variable 1 holds position $(x, y, z)$ and radius $(r)$, while Variable 2 holds up to four scalar properties $(v_0, v_1, v_2, v_3)$ [S1].
++- Macrocell data stores the minimum and maximum values of each scalar property across all particles contained within that macrocell, replacing the Boolean empty/non-empty flag used in simpler hierarchies [S1].
++- The grid hierarchy is two-level, where each macrocell corresponds to an $M \times M \times M$ block of cells in the underlying fine grid [S1].
+ 
+ **Algorithm Steps:**
+-
+-1.  **Calculate Grid Resolution:**
+-    Determine the number of cells in each dimension using the formula derived from [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md):
+-    $$N_x = d_x \sqrt{\frac{\lambda N}{V}}$$
+-    $$N_y = d_y \sqrt{\frac{\lambda N}{V}}$$
+-    $$N_z = d_z \sqrt{\frac{\lambda N}{V}}$$
+-    Where $N_x, N_y, N_z$ are the grid resolutions, $d$ represents the diagonal of the grid, $V$ is the volume of the grid, $N$ is the total number of particles, and $\lambda$ is a multiplier ensuring the number of cells is a multiple of $N$.
+-
+-2.  **Initialize Hierarchy:**
+-    Create the fine grid with dimensions $N_x \times N_y \times N_z$.
+-    Create the macrocell grid. Each macrocell covers an $M \times M \times M$ block of fine cells. Initialize the min/max bounds for all scalar properties in each macrocell to neutral values (e.g., infinity/negative infinity) before insertion.
+-
+-3.  **Parallel Grid Construction (Sort-Middle):**
+-    Rebuild the grid each frame for time-varying datasets using a sort-middle construction algorithm to avoid synchronization primitives [S1].
+-    1.  Distribute construction tasks for disjoint sections of the grid among all available threads.
+-    2.  Perform a coarse parallel bucket sort of particles by their cell locations.
+-    3.  Each thread inserts particles into its set of buckets.
+-    4.  Each thread inserts particles from its buckets into the appropriate grid cells.
+-    5.  Because regions corresponding to each bucket are disjoint, write conflicts are avoided, and no mutexes or synchronization primitives are necessary [S1].
+-
+-4.  **Update Macrocell Bounds:**
+-    After particles are inserted into the fine grid, iterate through the fine grid cells to update the macrocell bounds. For each macrocell, compute the minimum and maximum values of each scalar property ($v_0, v_1, v_2, v_3$) across all particles contained in its constituent cells.
++1. **Calculate Grid Resolution:** Determine the number of cells in each dimension using the formula:
++   $$N_x = d_x \sqrt{\frac{\lambda N}{V}}, \quad N_y = d_y \sqrt{\frac{\lambda N}{V}}, \quad N_z = d_z \sqrt{\frac{\lambda N}{V}}$$
++   where $N_x, N_y, N_z$ are grid resolutions, $d$ represents the diagonal of the grid, $V$ is the volume of the grid, $N$ is the total number of particles, and $\lambda$ is a multiplier ensuring the number of cells is a multiple of $N$ [S1].
++2. **Initialize Hierarchy:** Create the fine grid with dimensions $N_x \times N_y \times N_z$. Create the macrocell grid where each macrocell covers an $M \times M \times M$ block of fine cells. Initialize the min/max bounds for all scalar properties in each macrocell to neutral values (e.g., infinity/negative infinity) before insertion [G].
++3. **Parallel Grid Construction (Sort-Middle):** Rebuild the grid each frame for time-varying datasets using a sort-middle construction algorithm [S1]. Distribute construction tasks for disjoint sections of the grid among all available threads. Perform a coarse parallel bucket sort of particles by their cell locations. Each thread inserts particles into its set of buckets into the appropriate grid cells. Because regions corresponding to each bucket are disjoint, write conflicts are avoided, and no mutexes or synchronization primitives are necessary [S1].
++4. **Update Macrocell Bounds:** After particles are inserted into the fine grid, compute the minimum and maximum values of each scalar property ($v_0, v_1, v_2, v_3$) across all particles contained in each macrocell's constituent cells to support run-time parameter range culling [S1].
+ 
+ **Pseudocode:**
++```python
++import math
+ 
+-```python
+-def build_hierarchical_grid(particles, grid_volume, grid_diagonal, lambda_mult, m_block_size, num_threads):
++def build_hierarchical_grid(particles, grid_volume, grid_diagonal, lambda_mult, m_block_size, bounding_box):
+     """
+     Builds a two-level hierarchical grid with macrocells.
+-    
+     Args:
+-        particles: List of particle objects with attributes x, y, z, r, v0, v1, v2, v3.
++        particles: List of dicts with keys 'x', 'y', 'z', 'r', 'v0', 'v1', 'v2', 'v3'.
+         grid_volume: Volume V of the grid.
+         grid_diagonal: Tuple (dx, dy, dz) of the grid diagonal.
+         lambda_mult: Multiplier lambda.
+         m_block_size: Size M of the macrocell block (MxMxM).
+-        num_threads: Number of threads for parallel construction.
+-        
++        bounding_box: Tuple ((min_x, max_x), (min_y, max_y), (min_z, max_z)) defining grid extents.
+     Returns:
+-        fine_grid: 3D array of cells.
+-        macro_grid: 3D array of macrocells.
++        fine_grid: 3D list for particle storage.
++        macro_grid: 3D list for macrocell bounds.
+     """
+     N = len(particles)
+     dx, dy, dz = grid_diagonal
+-    
++
+     # Step 1: Calculate Grid Resolution
+-    # Note: In practice, N_x, N_y, N_z should be integers. 
+-    # The source formula yields floats; implementation requires rounding or casting.
+     scale = math.sqrt((lambda_mult * N) / grid_volume)
+     N_x = int(round(dx * scale))
+     N_y = int(round(dy * scale))
+     N_z = int(round(dz * scale))
+-    
++
+     # Initialize fine grid
+-    fine_grid = create_3d_array(N_x, N_y, N_z)
+-    
++    fine_grid = [[[] for _ in range(N_z)] for _ in range(N_y)]
++    for i in range(N_x):
++        fine_grid[i] = [[[] for _ in range(N_z)] for _ in range(N_y)]
++
+     # Initialize macro grid
+-    # Dimensions are ceil(N_x/M), ceil(N_y/M), ceil(N_z/M)
+     M_x = math.ceil(N_x / m_block_size)
+     M_y = math.ceil(N_y / m_block_size)
+-    M_z = math.ceil(N_Z / m_block_size)
+-    macro_grid = create_3d_array(M_x, M_y, M_Z)
+-    
+-    # Step 3: Parallel Grid Construction
+-    # Distribute particles to threads for bucket sort
+-    # This is a simplified representation of the sort-middle algorithm
+-    thread_buckets = distribute_particles_to_threads(particles, fine_grid, num_threads)
+-    
+-    for thread_id in range(num_threads):
+-        # Each thread processes its disjoint section
+-        for particle in thread_buckets[thread_id]:
+-            # Calculate cell coordinates
+-            cx = int(particle.x / (grid_volume[0] / N_x)) # Assuming unit cube scaling for simplicity
+-            cy = int(particle.y / (grid_volume[1] / N_y))
+-            cz = int(particle.z / (grid_volume[2] / N_Z))
+-            
+-            # Insert into fine grid
+-            fine_grid[cx][cy][cz].append(particle)
+-            
+-            # Update macrocell bounds immediately or in a second pass
+-            mx = cx // m_block_size
+-            my = cy // m_block_size
+-            mz = cz // m_block_size
+-            
+-            # Update min/max for each property
+-            macro_grid[mx][my][mz].update_bounds(particle.v0, particle.v1, particle.v2, particle.v3)
+-            
++    M_z = math.ceil(N_z / m_block_size)
++    # Bounds stored as [min, max] for each of the 4 properties
++    macro_grid = [[[[float('inf'), float('-inf')] for _ in range(4)] for _ in range(M_z)] for _ in range(M_y)]
++    for i in range(M_x):
++        macro_grid[i] = [[[[float('inf'), float('-inf')] for _ in range(4)] for _ in range(M_z)] for _ in range(M_y)]
++
++    # Step 3 & 4: Parallel Grid Construction and Macrocell Bounds Update
++    # Distribute construction tasks for disjoint sections of the grid among threads [S1].
++    # Perform a coarse parallel bucket sort of particles by their cell locations [S1].
++    # Each thread inserts particles into its set of buckets into appropriate grid cells [S1].
++    # Because regions corresponding to each bucket are disjoint, write conflicts are avoided [S1].
++    for particle in particles:
++        # Calculate cell coordinates assuming uniform scaling within bounding box [G]
++        bx_min, bx_max = bounding_box[0]
++        by_min, by_max = bounding_box[1]
++        bz_min, bz_max = bounding_box[2]
++        cx = int((particle['x'] - bx_min) / ((bx_max - bx_min) / N_x))
++        cy = int((particle['y'] - by_min) / ((by_max - by_min) / N_y))
++        cz = int((particle['z'] - bz_min) / ((bz_max - bz_min) / N_z))
++
++        # Clamp indices to grid bounds
++        cx = max(0, min(cx, N_x - 1))
++        cy = max(0, min(cy, N_y - 1))
++        cz = max(0, min(cz, N_z - 1))
++
++        # Insert into fine grid
++        fine_grid[cx][cy][cz].append(particle)
++
++        # Update macrocell bounds immediately
++        mx = cx // m_block_size
++        my = cy // m_block_size
++        mz = cz // m_block_size
++
++        for k in range(4):
++            val = particle[f'v{k}']
++            if val < macro_grid[mx][my][mz][k][0]:
++                macro_grid[mx][my][mz][k][0] = val
++            if val > macro_grid[mx][my][mz][k][1]:
++                macro_grid[mx][my][mz][k][1] = val
++
+     return fine_grid, macro_grid
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Write Conflicts:** The sort-middle algorithm ensures disjoint regions for each bucket, eliminating the need for mutexes. If a different construction method is used, synchronization primitives may be required [S1].
+--   **Parameter Range Culling:** The macrocell must store min/max values for *all* scalar properties. If a property is not present for a particle, it should be handled consistently (e.g., ignored in min/max calculation or treated as a specific value) to avoid incorrect culling.
+--   **Grid Resolution:** The formula for $N_x, N_y, N_z$ produces floating-point results. The implementation must decide how to round these values (e.g., floor, ceil, round) to ensure integer grid dimensions. The source states the number of cells should be a multiple of $N$, but the formula itself does not guarantee this without specific rounding or adjustment of $\lambda$.
++- **Write Conflicts:** The sort-middle algorithm ensures disjoint regions for each bucket, eliminating the need for mutexes [S1].
++- **Parameter Range Culling:** The macrocell must store min/max values for all scalar properties. If a property is not present for a particle, it should be handled consistently to avoid incorrect culling [G].
++- **Grid Resolution:** The formula for $N_x, N_y, N_z$ produces floating-point results. The implementation must round these values to ensure integer grid dimensions. The source states the number of cells should be a multiple of $N$, but the formula itself does not guarantee this without specific rounding or adjustment of $\lambda$ [S1].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Grid construction is $O(N)$ using the sort-middle algorithm, where $N$ is the number of particles. The parallel distribution allows for linear scaling with the number of threads.
+--   **Memory Complexity:** $O(N)$ for particle storage plus $O(M_{grid})$ for macrocell storage, where $M_{grid}$ is the number of macrocells. The macrocell storage is significantly smaller than the fine grid.
+--   **Performance:** The hierarchical structure with parameter range culling allows for efficient traversal by quickly discarding regions of the grid that do not contain particles with properties in the range of interest. This is faster than packet/primitive intersection tests, which are linear in the number of rays [S1].
+--   **Strengths:** Efficient parallel construction without synchronization; effective culling using parameter ranges; reduced traversal cost due to hierarchical structure.
+--   **Limitations:** Requires rebuilding the grid each frame for time-varying datasets; the two-level hierarchy may not be optimal for all scene complexities; the resolution formula may require tuning of $\lambda$ for different scenes.
++- **Time Complexity:** Grid construction is $O(N)$ using the sort-middle algorithm, where $N$ is the number of particles [S1].
++- **Memory Complexity:** $O(N)$ for particle storage plus $O(M_{grid})$ for macrocell storage, where $M_{grid}$ is the number of macrocells [S1].
++- **Performance:** The hierarchical structure with parameter range culling allows for efficient traversal by quickly discarding regions of the grid that do not contain particles with properties in the range of interest [S1]. This is faster than packet/primitive intersection tests, which are linear in the number of rays [S1].
++- **Strengths:** Efficient parallel construction without synchronization; effective culling using parameter ranges; reduced traversal cost due to hierarchical structure [S1].
++- **Limitations:** Requires rebuilding the grid each frame for time-varying datasets; the two-level hierarchy may not be optimal for all scene complexities; the resolution formula may require tuning of $\lambda$ for different scenes [S1].
+ 
+ ## Background
+-This method is based on the Coherent Grid Traversal (CGT) algorithm and its extensions for particle visualization. The hierarchical macrocell organization was described by Parker et al. [7] and is leveraged in the work of Thiago et al. [S1]. The sort-middle construction algorithm was described by Ize et al. [8]. The method is used in interactive volume visualization applications and particle rendering.
++This method is based on the Coherent Grid Traversal (CGT) algorithm and its extensions for particle visualization [S1]. The hierarchical macrocell organization was described by Parker et al. [7] and is leveraged in the work of Thiago et al. [S1]. The sort-middle construction algorithm was described by Ize et al. [8] [S1]. The method is used in interactive volume visualization applications [S1].
+ 
+ ## Sources

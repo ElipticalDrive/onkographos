@@ -1,0 +1,93 @@
+# Surfel Parameterization from Mesh Sampling
+
+Also called: Point Cloud Surfel Estimation, Surfel Parameterization
+
+## Overview
+Surfel parameterization from mesh sampling is a method to estimate surfel parameters (tangent vectors and scales) for a point cloud sampled from a triangle mesh, where point positions and face normals are obtained directly from sampling, and remaining parameters are estimated from the local neighborhood structure [S1, S1, unofficial]. It builds on [Surface Point Sampling for SDFs](2708-surface-point-sampling-for-sdfs.md) by providing the geometric basis for rendering sampled points as splats. It differs from [Near-Surface Point Sampling](2910-near-surface-point-sampling.md) and [SDF-guided Sampling](7324-sdf-guided-sampling.md) by focusing on the estimation of local tangent frames and anisotropic scales from the discrete point cloud neighborhood rather than generating the points themselves. It differs from [Bidirectional Projective Sampling](8824-bidirectional-projective-sampling.md) by using local PCA or isotropic heuristics for frame alignment rather than projective geometry from multiple views.
+
+## How it works
+**Inputs:** A triangle mesh.
+**Outputs:** A point cloud where each point has a position, a face normal, two tangent vectors, and two scale parameters (defining the surfel kernel).
+
+**Data Structures:**
+*   **Point Cloud:** A list of points. Each point $i$ stores:
+    *   `pos`: 3D position vector $\mathbf{p}_i \in \mathbb{R}^3$.
+    *   `normal`: 3D face normal vector $\mathbf{n}_i \in \mathbb{R}^3$ (unit length).
+    *   `tangent1`: 3D tangent vector $\mathbf{t}_{i,1} \in \mathbb{R}^3$.
+    *   `tangent2`: 3D tangent vector $\mathbf{t}_{i,2} \in \mathbb{R}^3$.
+    *   `scale1`: Scalar scale $s_{i,1} \in \mathbb{R}^+$.
+    *   `scale2`: Scalar scale $s_{i,2} \in \mathbb{R}^+$.
+*   **Spatial Acceleration Structure:** A spatial index (e.g., KD-tree, octree) built on the sampled points to enable efficient nearest-neighbor queries. The sources note that the same structure is used for optimization initialization and splitting criteria [S1, S1, unofficial].
+
+**Steps:**
+
+1.  **Sample Points and Normals:**
+    Sample points from the triangle mesh. For each sample, record the 3D position $\mathbf{p}_i$ and the face normal $\mathbf{n}_i$. This is done directly from the sampling procedure [S1, S1, unofficial].
+
+2.  **Estimate Tangent Vectors and Scales:**
+    For each point $\mathbf{p}_i$, estimate the tangent frame and scales using one of two strategies: Isotropic Scaling or Anisotropic Scaling.
+
+    **Strategy A: Isotropic Scaling**
+    1.  **Construct Tangent Vectors:** Create an orthonormal basis for the tangent plane using the normal $\mathbf{n}_i$. A standard orthonormal frame construction is used [S1, S1, unofficial].
+        *   Let $\mathbf{n}_i = (n_x, n_y, n_z)$.
+        *   If $|n_z| < 0.9$, choose $\mathbf{a} = (0, 0, 1)$. Else, choose $\mathbf{a} = (1, 0, 0)$.
+        *   $\mathbf{t}_{i,1} = \text{normalize}(\mathbf{a} - (\mathbf{a} \cdot \mathbf{n}_i)\mathbf{n}_i)$.
+        *   $\mathbf{t}_{i,2} = \mathbf{n}_i \times \mathbf{t}_{i,1}$.
+    2.  **Estimate Scale:** Calculate the mean distance to orientation-aware nearest neighbors.
+        *   Query the spatial acceleration structure for the $k$ nearest neighbors of $\mathbf{p}_i$ (where $k$ is a small constant, e.g., 10-20).
+        *   Filter neighbors to ensure their normals are "orientation-aware" (compatible with $\mathbf{n}_i$, typically $\mathbf{n}_j \cdot \mathbf{n}_i > 0$ or similar threshold) [S1, S1, unofficial].
+        *   Compute distances $d_j = ||\mathbf{p}_j - \mathbf{p}_i||$ for compatible neighbors.
+        *   Set $s_{i,1} = s_{i,2} = \text{mean}(d_j)$ [S1, S1, unofficial].
+
+    **Strategy B: Anisotropic Scaling**
+    1.  **Identify Compatible Neighbors:** Query the spatial acceleration structure for the $k$ nearest neighbors of $\mathbf{p}_i$. Filter these neighbors to keep only those with compatible normal orientation (e.g., $\mathbf{n}_j \cdot \mathbf{n}_i > \tau$, where $\tau$ is a threshold like 0.5 or 0.9) [S1, S1, unofficial].
+    2.  **Project to Tangent Plane:** For each compatible neighbor $\mathbf{p}_j$, compute the vector $\mathbf{v}_j = \mathbf{p}_j - \mathbf{p}_i$. Project $\mathbf{v}_j$ onto the tangent plane defined by $\mathbf{n}_i$:
+        $$ \mathbf{v}_{j, \text{proj}} = \mathbf{v}_j - (\mathbf{v}_j \cdot \mathbf{n}_i)\mathbf{n}_i $$
+    3.  **2D PCA:**
+        *   Construct a local 2D coordinate system for the tangent plane. Let $\mathbf{u}_1$ be an arbitrary unit vector orthogonal to $\mathbf{n}_i$ (e.g., via cross product with a world up vector, then orthogonalized). Let $\mathbf{u}_2 = \mathbf{n}_i \times \mathbf{u}_1$.
+        *   For each projected vector $\mathbf{v}_{j, \text{proj}}$, compute coordinates $(x_j, y_j)$:
+            $$ x_j = \mathbf{v}_{j, \text{proj}} \cdot \mathbf{u}_1 $$
+            $$ y_j = \mathbf{v}_{j, \text{proj}} \cdot \mathbf{u}_2 $$
+        *   Compute the $2 \times 2$ covariance matrix $C$ of the points $(x_j, y_j)$:
+            $$ C = \begin{bmatrix} \text{Var}(x) & \text{Cov}(x,y) \\ \text{Cov}(x,y) & \text{Var}(y) \end{bmatrix} $$
+            Where $\text{Var}(x) = \frac{1}{N} \sum (x_j - \bar{x})^2$, etc., and $N$ is the number of compatible neighbors.
+    4.  **Eigendecomposition:**
+        *   Compute the eigenvalues $\lambda_1, \lambda_2$ and eigenvectors $\mathbf{e}_1, \mathbf{e}_2$ of $C$. Assume $\lambda_1 \ge \lambda_2 \ge 0$.
+        *   The eigenvectors $\mathbf{e}_1 = (e_{1x}, e_{1y})$ and $\mathbf{e}_2 = (e_{2x}, e_{2y})$ define the principal directions in the local 2D tangent space.
+    5.  **Define Tangent Vectors and Scales:**
+        *   The tangent vectors in 3D are:
+            $$ \mathbf{t}_{i,1} = e_{1x}\mathbf{u}_1 + e_{1y}\mathbf{u}_2 $$
+            $$ \mathbf{t}_{i,2} = e_{2x}\mathbf{u}_1 + e_{2y}\mathbf{u}_2 $$
+        *   The scales are derived from the eigenvalues. Typically, the scale is proportional to the square root of the eigenvalue (representing the standard deviation of the point distribution along that axis):
+            $$ s_{i,1} = \alpha \sqrt{\lambda_1} $$
+            $$ s_{i,2} = \alpha \sqrt{\lambda_2} $$
+            Where $\alpha$ is a scaling factor (e.g., 1.0 or a constant related to the kernel width). The sources state eigenvalues determine anisotropic scales [S1, S1, unofficial].
+
+**Parameters:**
+*   $k$: Number of nearest neighbors for PCA/isotropic estimation. Not given in the sources.
+*   $\tau$: Normal compatibility threshold. Not given in the sources.
+*   $\alpha$: Scale multiplier for eigenvalues. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Sharp Edges:** Isotropic scaling can produce minor visual artifacts at sharp geometric edges where an isotropic kernel does not conform well to the local surface curvature [S1, S1, unofficial].
+*   **Degenerate Neighbors:** If fewer than 3 compatible neighbors are found for PCA, the covariance matrix is singular. A fallback to isotropic scaling or a default scale is required [G].
+*   **Computational Cost:** Anisotropic scaling has higher computational overhead and memory consumption due to the eigendecomposition and neighbor filtering [S1, S1, unofficial].
+
+## Subtopics
+
+### Local Differential Geometry Computation
+A method to compute curvatures (Gaussian and Mean) and local differential geometry for a visible oriented point $(p, v)$ using only the directional distance field $d(p, v)$ and its derivatives with respect to $p$ [S2]. It constructs a local coordinate system at the surface point $q = p + d(p, v)v$ by choosing two tangent vectors $t_x, t_y \in T_q(S)$ such that $||t_\alpha||_2 = 1$ and $t_x^T t_y = 0$. In practice, this is done by sampling Gaussian vectors and extracting an orthogonal tangent basis [S2]. The surface is reparameterized near $q_0$ via $S(x, y) = q_0 + x t_x + y t_y + f_S(x, y)n_0$, where $x$ and $y$ control position on the tangent plane, or equivalently $p(u) = p_0 + x t_x + y t_y$ where $u = (x, y)$ [S2]. The first-order derivatives of the surface at $u=0$ are $\partial_i S|_{u=0} = t_i + (\nabla_p d(p, v_0) t_i) v_0$, where $i \in \{x, y\}$ [S2]. The metric tensor (first fundamental form) is $g_{ij} = \partial_i S^T \partial_j S = \delta_{ij} + c_i c_j + c_i v_0^T t_j + c_j v_0^T t_i$, where $c_k = \nabla_p d t_k$. In theory, since $\nabla_p d$ is parallel to normal $n$ and orthogonal to tangents, $c_x = c_y = 0$, so $g_{ij} = \delta_{ij}$. In practice, use the theoretical value $g = I_2$ [S2]. The shape tensor (second fundamental form) is $\Pi_{ij} = (t_j^T H_p[d] t_i) n_0^T v_0$, where $H_p[d]$ is the Hessian of $d$ with respect to $p$ at $u=0$, and $n_0$ is the surface normal at $q_0$ [S2]. Gaussian curvature is $C_K = \det(\Pi) / \det(g)$ and Mean curvature is $C_H = \text{tr}(\Pi g^{-1})$ [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Isotropic scaling is $O(k)$ per point for neighbor query and mean calculation, where $k$ is the number of neighbors. Anisotropic scaling is $O(k \log N)$ or $O(k)$ depending on the spatial structure, plus $O(1)$ for 2D PCA (constant size matrix), but with a higher constant factor due to eigendecomposition and projection [S1, S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for the point cloud and spatial structure, where $N$ is the number of points. Anisotropic scaling requires storing neighbor indices and temporary projection arrays [S1, S1, unofficial].
+*   **Performance:** The isotropic variant is computationally efficient and available as a drop-in replacement when performance is critical [S1, S1, unofficial]. The anisotropic variant is used for quality in experiments but incurs higher overhead [S1, S1, unofficial].
+*   **Strengths:** Anisotropic scaling eliminates edge artifacts observed with isotropic kernels by adapting the kernel shape to the local point distribution [S1, S1, unofficial].
+*   **Limitations:** Isotropic scaling produces artifacts at sharp edges. Anisotropic scaling is slower and uses more memory [S1, S1, unofficial].
+
+## Background
+The method originates from the 3DSS (3D Surface Splatting for Inverse Rendering) paper [S1, S1, unofficial]. It is used in inverse rendering pipelines to prepare point clouds for splatting-based rendering and relighting. The local differential geometry computation is described in the context of Probabilistic Directed Distance Fields for Ray-Based Shape Representations [S2].
+
+## Sources
+[S1] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
+[S2] Probabilistic Directed Distance Fields for Ray-Based Shape Representations, https://doi.org/10.1109/tpami.2025.3594225, fetched 2026-10-29

@@ -1,0 +1,96 @@
+--- v002.md
++++ v003.md
+@@ -57,5 +57,4 @@
+     def average(self):
+         return sum(self.v) / 3.0
+-    def __repr__(self): return f"Spectrum({self.v})"
+ 
+ def ratio_tracking(ray_origin, ray_direction, t_max, medium, rng):
+@@ -66,5 +65,5 @@
+     trans_dir_pdf = Spectrum(1.0, 1.0, 1.0)
+     trans_nee_pdf = Spectrum(1.0, 1.0, 1.0)
+-    t_min = 0.0
++    t = 0.0
+     iteration = 0
+     max_null_collisions = 1000
+@@ -73,8 +72,8 @@
+     ShadowEpsilon = 1e-4
+ 
+-    # Determine bounds
++    # 2. Determine Bounds
+     surface_hit = medium.get_surface_intersection(ray_origin, ray_direction)
+     t_max = min(surface_hit, 1.0 - ShadowEpsilon) if surface_hit else 1.0 - ShadowEpsilon
+-    if t_max <= t_min:
++    if t_max <= t:
+         return Spectrum(1.0, 1.0, 1.0)
+ 
+@@ -90,11 +89,11 @@
+         # 4. Sample Distance
+         t_step = -math.log(1.0 - rng.uniform()) / sigma_m.v[channel]
+-        dt = t_max - t_min
++        dt = t_max - t
+ 
+         if t_step < dt:
+             # 5 & 6. Null scattering event
+-            sigma_t = medium.get_extinction(ray_origin + ray_direction * (t_min + t_step))
+-            sigma_a = medium.get_absorption(ray_origin + ray_direction * (t_min + t_step))
+-            sigma_s = medium.get_scattering(ray_origin + ray_direction * (t_min + t_step))
++            sigma_t = medium.get_extinction(ray_origin + ray_direction * (t + t_step))
++            sigma_a = medium.get_absorption(ray_origin + ray_direction * (t + t_step))
++            sigma_s = medium.get_scattering(ray_origin + ray_direction * (t + t_step))
+             sigma_n = Spectrum(max(0.0, sigma_m.v[0] - sigma_t.v[0] - sigma_s.v[0]),
+                                max(0.0, sigma_m.v[1] - sigma_t.v[1] - sigma_s.v[1]),
+@@ -104,7 +103,5 @@
+                              math.exp(-sigma_m.v[1] * t_step),
+                              math.exp(-sigma_m.v[2] * t_step))
+-            pdf = Spectrum(T_maj.v[0] * sigma_m.v[0],
+-                           T_maj.v[1] * sigma_m.v[1],
+-                           T_maj.v[2] * sigma_m.v[2])
++            pdf = T_maj.v[0] * sigma_m.v[0]  # Scalar PDF for sampled channel
+ 
+             # 7. Update Accumulators
+@@ -127,9 +124,9 @@
+             break
+ 
+-        t_min += t_step
++        t += t_step
+         iteration += 1
+ 
+         # 8. Russian Roulette
+-        Tr = T_ray / r_l.average() # Simplified MIS weight calculation per source logic
++        Tr = T_ray / (r_l + r_u).average()
+         if Tr.max_component_value() < termination_threshold:
+             if rng.uniform() < q:
+@@ -140,7 +137,11 @@
+ 
+     # 9. Finalize
+-    T_ray = T_ray * sigma_m / Spectrum(sigma_m.v[0], sigma_m.v[0], sigma_m.v[0])
+-    r_l = r_l * sigma_m / Spectrum(sigma_m.v[0], sigma_m.v[0], sigma_m.v[0])
+-    r_u = r_u * sigma_m / Spectrum(sigma_m.v[0], sigma_m.v[0], sigma_m.v[0])
++    final_dt = t_max - t
++    T_final_maj = Spectrum(math.exp(-sigma_m.v[0] * final_dt),
++                           math.exp(-sigma_m.v[1] * final_dt),
++                           math.exp(-sigma_m.v[2] * final_dt))
++    T_ray = T_ray * T_final_maj / Spectrum(T_final_maj.v[0], T_final_maj.v[0], T_final_maj.v[0])
++    r_l = r_l * T_final_maj / Spectrum(T_final_maj.v[0], T_final_maj.v[0], T_final_maj.v[0])
++    r_u = r_u * T_final_maj / Spectrum(T_final_maj.v[0], T_final_maj.v[0], T_final_maj.v[0])
+ 
+     return T_ray
+@@ -148,6 +149,7 @@
+ 
+ **Edge Cases and Pitfalls:**
++*   **Determine Bounds:** Compute $t_{min}$ and $t_{max}$ for the ray segment within the medium. If no surface intersection is found, $t_{max}$ is determined by the light source distance minus `ShadowEpsilon` [S4].
++*   **Russian Roulette:** Compute test value $Tr = T_{ray} / (r_l + r_u).Average()$. If $Tr.MaxComponentValue() < 0.05$, terminate with probability $q=0.75$ (setting $T_{ray}=0$) or survive with probability $1-q$ (dividing $T_{ray}$ by $1-q$) [S4].
+ *   **Numerical Instability:** Without normalization, transmittance and PDF values can blow up because $\sigma_n$ can be large. Solution: Divide both transmittance and PDF by $\max(\sigma_m)$ whenever a fake particle is hit [S1].
+-*   **Russian Roulette Choice:** If the survival probability were set equal to transmittance, the method would effectively become delta tracking, resulting in a transmittance estimate that is always either 0 or 1, losing the benefits of ratio tracking's continuous estimation [S4].
+ *   **Chromatic Media:** PDFs must be stored as `Spectrum` types to track individual channel probabilities for MIS. The final PDF used for estimation is the average of the channel PDFs [S1].
+ *   **Infinite Loops:** Numerical errors can lead to unbounded loops. A maximum iteration count (`max_null_collisions`) is required [S1].
+@@ -167,6 +169,6 @@
+ *   **Strengths:** Unbiased, low-variance estimator for transmittance in heterogeneous media [S3]. Handles spectral variations and MIS weights efficiently [S4]. Avoids binary visibility issues [S1].
+ *   **Limitations:** Slower than delta tracking in terms of raw throughput due to increased path lengths [S2, unofficial]. Requires careful handling of numerical stability [S1].
+-*   **When to Use:** When low variance is critical and the medium is heterogeneous. When using null-scattering path tracing frameworks [S5, unofficial].
+-*   **When Not to Use:** When performance is paramount and high variance is acceptable (use standard delta tracking). When the medium is homogeneous (analytical transmittance is available).
++*   **When to Use:** When low variance is critical and the medium is heterogeneous [S3, S4]. When using null-scattering path tracing frameworks [S5, unofficial].
++*   **When Not to Use:** When performance is paramount and high variance is acceptable (use standard delta tracking) [S2, unofficial][S4]. When the medium is homogeneous (analytical transmittance is available) [S5, unofficial].
+ 
+ ## Background

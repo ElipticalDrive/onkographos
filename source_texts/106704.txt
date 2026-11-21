@@ -1,0 +1,508 @@
+Richard Geldreich's Blog: 2015
+Thursday, December 17, 2015
+Light Indexed Deferred Rendering
+I can't find this information anywhere on the net, so I'll put it here. I've always been fascinated by the various alternatives to pure deferred shading, so I was really excited when I first encountered a light indexed variant.
+Backstory: Halo Wars
+I tired of the challenges inherent in pure deferred rendering approaches by around 2005, so I purposely used several deferred rendering alternatives on Halo Wars. HW combined X360 specific multi-light forward lighting for precise lighting (or for lights that required dynamic shadowing and/or cookies), along with an approximate voxel-based method for much cheaper, lower priority "bulk" lights.
+In the voxel based approximate approach, one volume texture contained the total incoming light at each voxel's center (irradiance), and the other contained the weighted average of all the light vectors from all the lights that influenced each voxel (with the total weight in alpha). From this data, it was possible to compute approximate exit radiances at any point/normal. This "voxel light buffering" system was very efficient and scalable, so it was also used to illuminate terrain chunks and meshes by most omni/spot lights in the game. As an added bonus, it was easy and cheap to illuminate particles using this approach too.
+We couldn't use multi-light forward on everything because the GPU fillrate cost from each added light was too high, and our object vs. light overlap check (just simple bounding box vs. sphere or cone) was very rough. Especially on terrain chunks, the extra pixel cost was brutal.
+I had the GPU update the voxel textures each frame. Lights became as cheap as super low-res sprites, so we could have hundreds of them. The voxel texture's bounds in worldspace always covered the terrain in the view frustum (up to a certain depth and world height). The resolution was either 64x64x16 or 128x128x16 (from memory).
+I found this approach interesting because it could achieve both diffuse and specular lighting, and because it visually degraded well when more than one light hit a voxel. Anyhow, after Ensemble collapsed I put all this stuff into the back of my mind.
+Source 2
+When I first came to Valve after HW shipped (late 2009), I kept encouraging the graphics programmers to look for another viable alternative to deferred rendering. One day, in early to middle 2010, I came in to work and Shanon Drone showed me his amazing prototype implementation of a voxel based forward rendering variant of what is known as Light Indexed Deferred Lighting. (So what would the name be? Voxed Based Light Indexed Forward Lighting?)
+From what I remember, his approach voxelized in projection space. Each voxel contained an integer index into a list of lights that overlapped with that voxel's worldspace bounding box. The light lists were stored in a separate texture. The CPU (using SIMD instructions) was used to update the voxel texture, and the CPU also filled in the lightlist texture.
+The scene was rendered just like with forward lighting, except the pixel shader fetched from the voxel light index texture, and then iterated over all the lights using a dynamic loop. The light parameters were fetched from the lightlist texture. I don't remember where the # of lights per voxel was stored, it could have been in either texture.
+The new approach was ported and tested on X360, and I remember we switched to packing the light indices (or something - it's been a long time!) into an array of constant registers to make the approach practical at all on X360.
+I have no idea if this is published anywhere, but I remember the day very clearly as an internal breakthrough. It's been many years now, so I doubt anyone will mind me mentioning it.
+Published material on light indexed deferred/forward rendering techniques (or similar variants):
+I'll update this blog post as I run across links:
+By Damian Trebilco:
+Technical Paper on Light Indexed Deferred Lighting - Dec. 2007
+Research into light indexed deferred rendering (Google Code)
+Research into light indexed deferred rendering (github)
+Practical Clustered Shadowing - Avalanche’s solution in Just Cause 3
+Tiled Forward Shading Links
+Forward vs Deferred vs Forward+ Rendering with DirectX 11 - by Jeremiah van Oosten
+Misc:
+Blog Post On Light Indexed Deferred Lighting
+Posted by
+Rich Geldreich
+at
+10:19 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Data Compression in Dungeon Boss
+Dungeon Boss (DB) is a Unity iOS/Android title I helped Boss Fight Entertainment ship this year. I recently wrote a blog post basically containing a brain dump of all the low-level memory related things we learned in the trenches while trying to make the product stable.
+Due to the sheer amount of content and code, DB couldn't have shipped at all on our target devices without aggressively utilizing every built-in Unity compression option we could get our hands on:
+- Audio: We found and modified a custom editor script that allowed DB's sound designer to fine tune the music and FX audio bitrates to the absolutely minimum needed. We gave more bits to music vs. sound effects. (It also helped that DB's sound effects purposely have a classic 8-bit feel.)
+- Meshes: We used Unity's built-in mesh compression feature as aggressively as we could. This caused a few issues on map meshes that we had to work around by hand.
+- Animation: We tuned our FBX Importer compression settings several times to find the best balance between visible artifacts and memory/file savings.
+- Texture compression: At the last minute, we had to switch the majority of our textures to PVRTC 2bpp to free up as much memory headroom as possible. Without doing this DB was too unstable on lower end iOS devices. Quality wise, 2bpp looked amazingly good (much better than I expected).
+- Asset bundles: We disabled Unity 4.6's built-in LZMA asset bundle compression, grouped the assets by type, then we packed the raw type-grouped asset data using a better compressor (LZHAM). Thankfully, there were enough Unity modding tools available, and Unity was flexible enough, that we could do this without having access to the source code of Unity itself.
+Also see this page in the Unity docs for more info on how to examine and reduce file sizes of Unity builds.
+Posted by
+Rich Geldreich
+at
+12:15 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Sunday, December 13, 2015
+Binary delta compression and seed dictionaries as universal OS services
+Some late Saturday night compression ideas:
+Brotli's inclusion of a seed dictionary that helps it gain higher ratios on textual data, and our recent work on offline and real-time binary delta compression (patching), has given me this idea:
+First, Brotli's static dictionary isn't "breaking" any rules at all. What they've done makes a lot of sense. They've tailored their codec for a very common use case (text), a place where it will have a lot of value. The seed dictionary is a legitimate part of the decompressor, except instead of pure executable code they also tacked on some interesting "universal" data to it.
+Which got me thinking, the OS itself should just include a universal seed dictionary, or a set of them for different data types. A small set of seed data, like even just 4-16MB, would be fine for starters. This data can be automatically distributed to clients as part of an OS update or upgrade. It could contain natural language phrases, common x86 opcode sequences, XML, common JPEG quantization tables/markers/headers, common GLSL/HLSL keywords, etc. Once Linux does it, everybody will do it sooner or later.
+Normally, when you want to compress some data for either real-time transmission, or archival purposes, you would use plain non-delta based compression. You can't assume the remote side has your seed dictionary right? But this is a weak if not flawed argument, because the remote side already has a compatible decompressor. They can surely download a little more data to have a good, stable universal seed dictionary too. And if they only download it once (through OS updates), then it's not a big cost.
+Alternately, we can adopt a new codec that has a good built-in selection of universal seed data, and embed that into the OS. But the seed data should be available to OS processes as well, so they can compress/decompress data against it without having to carry around and distribute their own private seed dictionaries.
+Other related thoughts:
+Obviously, static dictionaries don't help in all cases. No harm done, just don't use them in those cases.
+This method can be applied to networking too. The seed dictionary can be made part of the actual protocol. Packets can be delta compressed against app specific or universal seed dictionaries.
+New codecs should just support seed dictionaries as required features. New LZ algorithms should be competitive against bsdiff in binary patching scenarios.
+In the open source world, we need something better than bsdiff, which requires huge amounts of RAM on large files (and is just unreliable). Another interesting area of work would be to figure out the "best" universal seed dictionary to use for a OS service like this.
+Plain lossless data compression and binary delta compression should not be separate concepts or tools: let's unify them. LZ-Sub shows one potential way forward.
+Posted by
+Rich Geldreich
+at
+2:29 AM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Saturday, December 12, 2015
+Crunch texture compression library has moved
+To github here:
+https://github.com/richgel999/crunch
+Posted by
+Rich Geldreich
+at
+7:12 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Friday, December 11, 2015
+Why by-convention read-only shared state is bad
+I'm going to switch topics from my usual stuff to something else I find interesting: multithreading.
+Multithreading Skinning on Age of Empires 3
+Back at Ensemble Studios, I remember working on the multithreaded rendering code in both Age of Empires 3 and Halo Wars. At the time (2003-2004 timeframe), multithreading was a new thing for game engines. Concepts like shared state, producer consumer queues, TLS, semaphores/events, condition variables, job systems, etc. were new things to many game engineers. (And lockfree approaches were considered very advanced, like Area 51 grade stuff.) Age of Empires 3 was a single threaded engine, but we did figure out how to use threading for at least two things I'm aware of: the loading screen, and jobified skinning.
+On Age3, it was easy to thread the SIMD skinning code used to render all skinned meshes, because I analyzed the rendering code and determined that the input data we needed for "jobified" skinning was guaranteed to be stable during the execution of the skinning job. (The team also said it seemed "impossible" to do this, which of course just made me more determined to get this feature working and shipped.)
+The key thing about making it work was this: I sat down and said to the other rendering programmer who owned this code, "do not change this mesh and bone data in between this spot and this spot in your code -- or the multithreaded skinning code will randomly explode!". We then filled in the newly introduced main thread bubble with some totally unrelated work that couldn't possibly modify our mesh/bone data (or so we thought!), and in our little world all was good.
+This approach worked, but it was dangerous and fragile because it introduced a new constraint into the codebase that was hard to understand or even notice by just locally studying the code. If someone would have changed how the mesh renderer worked, or changed the data that our skinning jobs accessed, they could have introduced a whole new class of bugs (such as Heisenbugs) into the system without knowing it. Especially in a large rapidly changing codebase, this approach is a slippery slope.
+We were willing to do it this way in the Age3 codebase because very few people (say 2-3 at most in the entire company) would ever touch this very deep rendering code. I made sure the other programmer who owned the system had a mental model of the new constraint, also made sure there were some comments and little checks in there, and all was good.
+Importantly, Ensemble had extremely low employee turnover, and this low-level engine code rarely changed. Just in case the code exploded in a way I couldn't predict on a customer's machine, I put in a little undocumented command line option that disabled it completely.
+Age3 and Halo Wars made a lot of use of the fork and join model for multithreading. Halo Wars used the fork and join model with a global system, and we allowed multiple threads (particularly the main and render threads) to fork and join independently.
+See those sections where you have multiple tasks stacked up in parallel? Those parts of the computation are going to read some data, and if it's some global state it means you have a potential conflict with the main thread. Anything executed in those parallel sections of the overall computation must follow your newly introduced conventions on which shared state data must remain stable (and when), or disaster ensues.
+Complexity Management
+Looking back now, I realize this approach of allowing global access to shared state that is supposed to be read-only and stable by convention or assumption is not a sustainable practice. Eventually, somebody somewhere is going to introduce a change using only their "local" mental model of the code that doesn’t factor in our previously agreed upon data stability constraint, and they will break the system in a way they don't understand. Bugs will come in, the engine will crash in some way randomly, etc. Imagine the damage to a codebase if this approach was followed by dozens of systems, instead of just one.
+Creating and modifying large scale software is all about complexity management. Our little Age3 threaded skinning change made the engine more complex in ways that were hard to understand, talk about, or reason about. When you are making decisions about how to throw some work onto a helper thread, you need to think about the overall complexity and sustainability of your approaches at a very high level, or your codebase is eventually going to become buggy and practically unchangeable.
+One solution: RCU
+One sustainable engineering solution to this problem is Read Copy Update (RCU, used in the Linux kernel). With RCU, there are simple clear policies to understand, like "you must bump up/down the reference to any RCU object you want to read”, etc. RCU does introduce more complexity, but now it’s a first class engine concept that other programmers can understand and reason about.
+RCU is a good approach for sharing large amounts of data, or large objects. But for little bits of shared state, like a single int or whatever, the overhead is pretty high.
+Another solution: Deep Copy
+The other sustainable approach is to deep copy the global data into a temporary job-specific context structure, so the job won't access the data as shared/global state. The deep copy approach is even simpler, because the job just has its own little stable snapshot of the data which is guaranteed to stay stable during job execution.
+Unfortunately, implementing the deep copy approach can be taxing. What if a low-level helper system used by job code (that previously accessed some global state) doesn’t easily have access to your job context object? You need a way to somehow get this data “down” into deeper systems.
+The two approaches I’m aware of are TLS, or (for lack of a better phrase) “value plumbing”. TLS may be too slow, and is crossing into platform specific land. The other option, value plumbing, means you just pass the value (or a pointer to your job context object) down into any lower level systems that need it. This may involve passing the context pointer or value data down several layers through your callstacks.
+But, you say, this plumbing approach is ugly because of all these newly introduced method variables! But, it is a sustainable approach in the long term, like RCU. Eventually, you can refactor and clean up the plumbing code to make it cleaner if needed, assuming it’s a problem at all. You have traded off some code ugliness for a solution that is reliable in the long term.
+Conclusion
+Sometimes, when doing large scale software engineering, you must make changes to codebases that may seem ugly (like value plumbing) as a tradeoff for higher sustainability and reliability. It can be difficult to make these choices, so some higher level thinking is needed to balance the long term pros and cons of all approaches.
+Posted by
+Rich Geldreich
+at
+10:20 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Thursday, December 10, 2015
+Okumura's "ar002" and reverse engineering the internals of Katz's PKZIP
+Sometime around 1992, still in high school, I upgraded from my ancient 16-bit OS/9 computer to a 80286 DOS machine with a hard drive. I immediately got onto some local BBS's at the blistering speed of 1200 baud and discovered this beautiful little gem of a compression program written in the late 80's by Haruhiko Okumura at Matsusaka University:
+http://oku.edu.mie-u.ac.jp/~okumura/compression/ar002/
+I studied every bit of ar002 intensely, especially the Huffman related code. I was impressed and learned tons of things from ar002. It used a complex (to a teenager) tree-based algorithm to find and insert strings into a sliding dictionary, and I sensed there must be a better way because its compressor felt fairly slow. (How slow? We're talking low single digit kilobytes per second on a 12MHz machine if I remember correctly, or thousands of CPU cycles per input byte!)
+So I started focusing on alternative match finding algorithms, with all experiments done in 8086 real mode assembly for performance because compilers at the time weren't very good. On these old CPU's a human assembly programmer could run circles around C compilers, and every cycle counted.
+Having very few programming related books (let alone very expensive compression books!), I focused instead on whatever was available for free. This was stuff downloaded from BBS's, like the archiving tool PKZIP.EXE. PKZIP held a special place, because it was your gateway into this semi-secretive underground world of data distributed on BBS's by thousands of people. PKZIP's compressor internally used mysterious, patented algorithms that accomplished something almost magical (to me) with data. The very first program you needed to download to do much of anything was PKZIP.EXE. To me, data compression was a key technology in this world.
+Without PKZIP you couldn't do anything with the archives you downloaded, they were just gibberish. After downloading an archive on your system (which took forever using Z-Modem), you would manually unzip it somewhere and play around with whatever awesome goodies were inside the archive.
+Exploring the early data communication networks at 1200 or 2400 baud was actually crazy fun, and this tool and a good terminal program was your gateway into this world. There were other archivers like LHA and ARJ, but PKZIP was king because it had the best practical compression ratio for the time, it was very fast compared to anything else, and it was the most popular.
+This command line tool advertised awesomeness. The help text screamed "FAST!". So of course I became obsessed with cracking this tool's secrets. I wanted to deeply understand how it worked and make my own version that integrated everything I had learned through my early all-assembly compression experiments and studying ar002 (and little bits of LHA, but ar002's source was much more readable).
+I used my favorite debugger of all time, Borland's Turbo Debugger, to single step through PKZIP:
+PKZIP was written by Phil Katz, who was a tortured genius in my book. In my opinion his work at the time is under appreciated. His Deflate format was obviously very good for its time to have survived all the way into the internet era.
+I single stepped through all the compression and decompression routines Phil wrote in this program. It was a mix of C and assembly. PKZIP came with APPNOTE.TXT, which described the datastream format at a high level. Unfortunately, at the time it lacked some key information about how to decode each block's Huffman codelengths (which were themselves Huffman coded!), so you had to use reverse engineering techniques to figure out the rest. Also most importantly, it only covered the raw compressed datastream format, so the algorithms were up to you to figure out.
+The most important thing I learned while studying Phil's code: the entire sliding dictionary was literally moved down in memory every ~4KB of data to compress. (Approximately 4KB - it's been a long time.) I couldn't believe he didn't use a ring buffer approach to eliminate all this data movement. This little realization was key to me: PKZIP spent many CPU cycles just moving memory around!
+PKZIP's match finder, dictionary updater (which used a simple rolling hash), and linked list updater functions were all written in assembly and called from higher-level C code. The assembly code was okay, but as a demoscener I knew it could be improved (or at least equaled) with tighter code and some changes to the match finder and dictionary updating algorithms.
+Phil's core loops would use 32-bit instructions on 386 CPU's, but strangely he turned off/on interrupts constantly around the code sequences using 32-bit instructions. I'm guessing he was trying to work around interrupt handlers or TSR's that borked the high word in 32-bit registers.
+To fully reverse engineer the format, I had to feed in very tiny files into PKZIP's decompressor and single step through the code near the beginning of blocks. If you paid very close attention, you could build a mental model of what the assembly code was doing relative to the datastream format described in APPNOTE.TXT. I remember doing it, and it was slow, difficult work (in an unheated attic on top of things).
+I wrote my own 100% compatible codec in all-assembly using what I thought were better algorithms, and it was more or less competitive against PKZIP. Compression ratio wise, it was very close to Phil's code. I started talking about compression and PKZIP on a Fidonet board somewhere, and this led to the code being sublicensed for use in EllTech Development's "Compression Plus" compression/archiving middleware product.
+For fun, here's the ancient real-mode assembly code to my final Deflate compatible compressor. Somewhere at the core of my brain there is still a biologically-based x86-compatible assembly code optimizer. Here's the core dictionary updating code, which scanned through new input data and updated its hash-based search accelerator:
+```
+;--------------- HASH LOOP
+ALIGN 4
+HDLoopB:
+                ReptCount = 0
+
+                REPT    16
+
+                Mov     dx, [bp+2]
+
+                Shl     bx, cl
+                And     bh, ch
+                Xor     bl, dl
+                Add     bx, bx
+                Mov     ax, bp
+                XChg    ax, [bx+si]
+                Mov     es:[di+ReptCount], ax
+                Inc     bp
+
+                Shl     bx, cl
+                And     bh, ch
+                Xor     bl, dh
+                Add     bx, bx
+                Mov     ax, bp
+                XChg    ax, [bx+si]
+                Mov     es:[di+ReptCount+2], ax
+                Inc     bp
+
+                ReptCount = ReptCount + 4
+
+                ENDM
+
+                Add     di, ReptCount
+
+                Dec     [HDCounter]
+                Jz      HDOdd
+                Jmp     HDLoopB
+```
+As an exercise while learning C I ported the core hash-based LZ algorithms I used from all-assembly. I uploaded two variants to local BBS's as "prog1.c" and "prog2.c". These little educational compression programs were referenced in the paper "A New Approach to Dictionary-Based Lossless Compression" (2004), and the code is still floating around on the web.
+I rewrote my PKZIP-compatible codec in C, using similar techniques, and this code was later purchased by Microsoft (when they bought Ensemble Studios). It was used by Age of Empires 1/2, which sold tens of millions of copies (back when games shipped in boxes this was a big deal). I then optimized this code to scream on the Xbox 360 CPU, and this variant shipped on Halo Wars, Halo 3, and Forza 2. So if you've played any of these games, somewhere in there you where running a very distant variant of the above ancient assembly code.
+Eventually the Deflate compressed bitstream format created by Phil Katz made its way into an internet standard, RFC 1951.
+A few years ago, moonlighting while at Valve, I wrote an entirely new Deflate compatible codec called "miniz" but this time with a zlib compatible API. It lives in a single source code file, and the entire stream-capable decompressor lives in a single C function. I first wrote it in C++, then quickly realized this wasn't so hot of an idea (after feedback from the community) so I ported it to pure C. It's now on Github here. In its lowest compression mode miniz also sports a very fast real-time compressor. miniz's single function decompression function has been successfully compiled and executed on very old processors, like the 65xxx series.
+Conclusion
+I don't think it's well known that the work of compression experts and experimenters in Japan significantly influenced early compression programmers in the US. There's a very interesting early history of Japanese data compression work on Haruhiko Okumura's site here. Back then Japanese and American compression researchers would communicate and share knowledge:
+"At one time a programmer for PK and I were in close contact. We exchanged a lot of ideas. No wonder PKZIP and LHA are so similar."
+I'm guessing he's referring to Phil Katz? (Who else could it have been?)
+Also, I believe Phil Katz deserves more respect for creating Inflate and Deflate. The algorithm obviously works, and the compressed data format is an internet standard so it will basically live forever. These days, Deflate seems relatively simple, but at the time it was anything but simple to workers in this field. Amazingly, good old Deflate still has some legs, as Zopfli and 7-zip's optimizing Deflate-compatible compressors demonstrate.
+Finally, I personally learned a lot from studying the code written by these inspirational early data compression programmers. I'll never get to meet Phil Katz, but perhaps one day I could meet Dr. Okumura and say thanks.
+Posted by
+Rich Geldreich
+at
+11:34 PM
+5 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+The awesomeness that is ClangFormat
+While working on the Linux project at Valve we started using this code formatting tool from the LLVM folks:
+http://clang.llvm.org/docs/ClangFormat.html
+Mike Sartain (now at Rad) recommended we try it. ClangFormat is extremely configurable, and can handle more or less any convention you could want. It's a top notch tool. Here's vogl's .clang-format configuration file to see how easy it is to configure.
+One day on the vogl GL debugger project, I finally got tired of trying to enforce or even worry about the lowest level bits of coding conventions. Things like if there should be a space before/after pointers, space after commas, bracket styles, switch styles, etc.
+I find codebases with too much style diversity increase the mental tax of parsing code, especially for newcomers. Even worse, for both newcomers and old timers: you need to switch styles on the fly as you're modifying code spread throughout various files (to ensure the new code fits in to its local neighbor). After some time in such a codebase, you do eventually build a mental model and internalize each local neighborhood's little style oddities. This adds no real value I can think of, it only subtracts as far as I can tell.
+I have grown immune to most styles now, but switching between X different styles to write locally conforming code seems like an inefficient use of programmer time.
+In codebases like this, trying to tell newcomers to use a single nice and neat company sanctioned style convention isn't practically achievable. A codebase's style diversity tends to increase over time unless you stop it early. Your codebase is stuck in a style vortex.
+So sometimes it makes sense to just blow away the current borked style and do a drive-by ClangFormat on all files and check them back in. Of course this can make diff'ing and 3-way merging harder, but after a while that issue mostly becomes moot as churn occurs. It's a traumatic thing, yes, but doable.
+Next, you can integrate ClangFormat into your checkin process, or into the editor. Require all submitted code to be first passed through ClangFormat. Detecting divergence can be part of the push request process, or something.
+On new codebases, be sure to figure this out early or you'll get stuck in the style diversity vortex.
+Microsoft's old QuickBASIC product from the 80's would auto-format to a standard style as lines were being entered and edited.
+Perhaps in the far future (or a current alternate universe), the local coding style can just be an editor, diff-time, and grep-time only thing. Let's ditch text completely and switch to some sort of parse tree or AST that also preserves human things like comments.
+Then, the editor just loads and converts to text, you edit there, and it converts back to binary for saving and checkin. With this approach, it should be possible to switch to different code views to visualize and edit the code in different ways. (I'm sure this has all been thought of 100 times already, and it ended in tears each time it was tried.)
+As a plus, once the code has been pre-parsed perhaps builds can go a little faster.
+Anyhow, here we are in 2015. We individually have personal super computers, and yet we're still editing text on glass TTY's (or their LCD equivalents). I now have more RAM than the hard drives I owned until 2000 or so. Hardware technology has improved massively, but software technology hasn't caught up yet.
+Posted by
+Rich Geldreich
+at
+12:48 AM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Monday, December 7, 2015
+The future of GPU texture compression
+Google engineers were the first to realize the value of crunch (original site here), my advanced lossy texture compression library and command line toolset for DXTc textures that was recently integrated into Unity 5.x. Here's Brandon Jones at Google describing how crunch can be used in WebGL apps in his article "Saving Bandwidth and Memory with WebGL and Crunch", from the book "HTML5 Game Development Insights".
+While I was writing crunch I was only thinking "this is something useful for console and PC game engines". I had no idea it could be useful for web or WebGL apps. Thinking back, I should have sat down and asked myself "what other software technology, or what other parts of the stack, will need to deal with compressed GPU textures"? (One lesson learned: Learn Javascript!)
+Anyhow, crunch is an example of the new class of compression solutions opened up by collapsing parts of the traditional game data processing tool chain into single, unified solutions.
+So let's go forward and break down some artificial barriers and combine knowledge across a few different problem domains:
+- Game development art asset authoring methods
+- Game engine build pipelines/data preprocessing
+- GPU texture compression
+- Data compression
+- Rate distortion optimization
+The following examples are for DXTc, but they apply to other formats like PVRTC/ETC/etc. too. (Of course, many companies have different takes on the pipelines described here. These are just vanilla, general examples. Id Software's megatexturing and Allegorithmic's tech use very different approaches.)
+The old way
+The previous way of creating DXTc GPU textures was (this example is the Halo Wars model):
+1. Artists save texture or image as an uncompressed file (like .TGA or .PNG) from Photoshop etc.
+2. We call a command line tool which grinds away to compress the image to the highest quality achievable at a fixed bitrate (the lossy GPU texture compression step). Alternately, we can use the GPU to accelerate the process to near-real time. (Both solve the same problem.)
+This is basically a fixed rate lossy texture compressor with a highly constrained standardized output format compatible with GPU texture hardware.
+Now we have a .DDS file, stored somewhere in the game's repo.
+3. To ship a build, the game's asset bundle or archive system losslessly packs the texture, using LZ4, LZO, Deflate, LZX, LZMA, etc. - this data gets shipped to end users
+The Current New Way
+The "current" new way is a little less complex (at the high level) because we delete the lossless compression step in stage 3. Step 2 now borrows a "new" concept from the video compression world, Rate Distortion Optimization (RDO), and applies it to GPU texture compression:
+1. Artists selects a JPEG-style quality level and saves texture or image as an uncompressed file (like .TGA or .PNG) from Photoshop etc.
+2. We call a command line tool called "crunch" that combines lossy clusterized DXTc compression with VQ, followed by an custom optimizing lossless backend coder. Now we have a .CRN file at some quality level, stored somewhere in the game's repo
+3. To ship a build, game's asset bundle or archive system stores the .CRN file uncompressed (because it's already compressed earlier) - this data gets shipped to end users
+The most advanced game engines, such as Unity and some other AAA in-house game engines, do it more or less this way now.
+The Other New Way (that nobody knows about)
+1. Artists hits a "Save" button, and a preview window pops up. Artist can tune various compression options in real-time to find the best balance between lossy compression artifacts and file size. (Why not? It's their art. This is also the standard web way, but with JPEG.) "OK" button saves a .CRN and .PNG file simultaneously.
+2. To ship a build, game's asset bundle or archive system stores the .CRN file uncompressed (because it's already been compressed) - this data gets shipped to end users
+But step #1 seems impossible right? crunch's compression engine is notoriously slow, even on a 20 core Xeon machines. Most teams build .CRN data in the cloud using hundreds to thousands of machines. I jobified the hell out of crunch's compressor, but it's still very slow.
+Internally, the crunch library has a whole "secret" set of methods and classes that enable this way forward. (Interested? Start looking in the repo in this file here.)
+The Demo of real-time crunch compression
+Here's a Windows demo showing crunch-like compression done in real-time. It's approximately 50-100x faster than the command line tool's compression speed. (I still have the source to this demo somewhere, let me know if you would like it released.)
+This demo utilizes the internal classes in crnlib to do all the heavy lifting. All the real code is already public. These classes don't output a .CRN file though, they just output plain .DDS files which are then assumed to be losslessly compressed later. But there's no reason why a fast and simple (non-optimizing) .CRN backend couldn't be tacked on, the core concepts are all the same.
+One of the key techniques used to speed up the compression process in the QDXT code demonstrated in this demo is jobified Tree Structured VQ (TSVQ), described here.
+GPU texture compression tools: What we really want
+The engineers working on GPU texture compression don't always have a full mental model of how texture assets are actually utilized by game makers. Their codecs are typically optimized for either highest possible quality (without taking eons to compress), or they optimize for fastest compression time with minimal to no quality loss (relative to offline compression). These tools ignore the key distribution problems that their customers face completely, and they don't allow artists to control the tradeoff between quality vs. filesize like 25 year old standard formats such as JPEG do.
+Good examples of this class of tools:
+Intel: Fast ISPC Texture Compressor
+NVidia: GPU Accelerated Texture Compression
+libsquish
+These are awesome, high quality GPU texture compression tools/libs, with lots of customers. Unfortunately they solve the wrong problem.
+What we really want, are libraries and tools that give us additional options that help solve the distribution problem, like rate distortion optimization. (As an extra bonus, we want new GPU texture formats compatible with specialized techniques like VQ/clusterization/etc. But now I'm probably asking for too much.)
+The GPU vendors are the best ones to bridge the artificial divides described earlier. This is some very specialized technology, and the GPU format engineers just need to learn more about compression, machine learning, entropy coding, etc. Make sure, when you are designing a new GPU texture format, that you release something like crunch for that format, or it'll be a 2nd class format to your customers.
+Now, the distant future
+Won Chun (then at Google, now at Rad) came up with a great idea a few years back. What the web and game engine worlds could really use is a "Universal Crunch" format. A GPU agnostic "download anywhere" format, that can be quickly transcoded into any other major format, like DXTc, or PVRTC, or ASTC, etc. Such a texture codec would be quite an undertaking, but I've been thinking about it for years and I think it's possible. Some quality tradeoffs would have to be made, of course, but if you like working on GPU texture compression problems, or want to commercialize something in this space, perhaps go in this direction.
+Posted by
+Rich Geldreich
+at
+7:36 PM
+3 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Sunday, December 6, 2015
+Mobile-friendly binary delta compression
+This is basically a quick research report, summarizing what we currently know about binary delta compression. If you have any feedback or ideas, please let us know.
+Binary delta compression (or here) is very important now. So important that I will not be writing a new compressor that doesn't support the concept in some way. When I first started at Unity, Joachim Ante (CTO) and I had several long conversations about this topic. One application is to use delta compression to patch an "old" Unity asset bundle (basically an archive of objects such as textures, animations, meshes, sounds, metadata, etc.), perhaps made with an earlier version of Unity, to a new asset bundle file that can contain new objects, modified objects, deleted objects, and even be in a completely different asset bundle format.
+Okay, but why is this useful?
+One reason asset bundle patching via delta compression is important to Unity developers is because some are still using an old version of Unity (such as v4.6), because their end users have downloadable content stored in asset bundle files that are not directly compatible with newer Unity versions. One brute force solution for Unity devs is to just upgrade to Unity 5.x and re-send all the asset bundles to their end users, and move on until the next time this happens. Mobile download limits, and end user's time, are two important constraints here.
+Basically, game makers can't expect their customers to re-download all new asset bundles every time Unity is significantly upgraded. Unity needs the freedom to change the asset bundle format without significantly impacting developer's ability to upgrade live games. Binary delta compression is one solution.
+Another reason delta compression is important, unrelated to Unity versioning issues: it could allow Unity developers to efficiently upgrade a live game's asset bundles, without requiring end users to redownload them in their entirety.
+There are possibly other useful applications we're thinking about, related to Unity Cloud Build.
+Let's build a prototype
+First, before building anything new in a complex field like this you should study what others have done. There's been some work in this area, but surprisingly not a whole lot. It's a somewhat niche subject that has focused way too much on patching executable files.
+During our discussions, I mentioned that LZHAM already supports a delta compression mode. But this mode is only workable if you've got plenty of RAM to store the entire old and new files at once. That's definitely not gonna fly on mobile, whatever solution we adopt must use around 5-10MB of RAM.
+bsdiff seems to be the best we've got right now in the open source space. (If you know of something better, please let us know!) I've been looking and probing at the code. Unfortunately bsdiff does not scale to large files either because it requires all file data to be in memory at once, so we can't afford to use it as-is on mobile platforms. Critically, bsdiff also crashes on some input pairs, and it slows down massively on some inputs. It's a start but it needs work.
+Some Terminology
+"Unity dev" = local game developer with all data ("old" and "new")
+"End user" = remote user (and the Unity dev's customer), we must transmit something to change their "old" data to "new" data
+Old file - The original data, which both sides (Unity dev and the end user) already have
+New file - The new data the Unity dev wants to send to the end user
+Patch file - The compressed "patch control stream" that Unity dev transmits to end users
+Delta compressor inputs: Old file, New file
+Delta compressor outputs: Patch file
+Delta decompressor inputs: Old file, Patch file
+Delta decompressor outputs: New file
+The whole point of this process is that it can be vastly cheaper to send a compressed patch file than a compressed new file.
+The old and new files are asset bundle files in our use case.
+Bring in deltacomp
+"deltacomp" is our memory efficient patching prototype that leverages minibsdiff, which is basically bsdiff in library form. We now have a usable beachhead we understand in this space, to better learn about the real problems. This is surely not the optimal approach, but it's something.
+Most importantly, deltacomp divides up the problem into small (1-2MB) mobile-friendly blocks in a way that doesn't wreck your compression ratio. The problem of how to decide which "old" file blocks best match "new" file blocks involves computing what we're calling a file "cross correlation" matrix (CCM), which I blogged about here and here.
+We now know that computing the CCM can be done using brute force (insanely slow, even on little ~5MB files), an rsync-style rolling hash (Fabian at Rad's idea), or using a simple probabilistic sampling technique (our current approach). Thankfully the problem is also easily parallelizable, but that can't be your only solution (because not every Unity customer has a 20 core workstation).
+deltacomp's compressor conceptually works like this:
+1. User provides old and new files, either in memory or on disk.
+2. Compute the CCM. Old blocks use a larger block size of 2*X (starting every X bytes, so they overlap), new blocks use a block size of X (to accommodate the expansion or shifting around of data).
+A CCM on an executable file (Unity46.exe) looks like this:
+In current testing, the block size can be from .5MB to 2MB. (Larger than this requires too much temporary RAM during decompression. Smaller than this could require too much file seeking within the old file.)
+3. Now for each new block we need a list of candidate old blocks which match it well. We find these old blocks by scanning through a column in the CCM matrix to find the top X candidate block pairs.
+We can either find 1 candidate, or X candidates, etc.
+4. Now for each candidate pair, preprocess the old/new block data using minidiff, then pack this data using LZHAM. Find the candidate pair that gives you the best ratio, and remember how many bytes it compressed to.
+5. Now just pack the new block (by itself - not patching) using LZHAM. Remember how many bytes it compressed to.
+6. Now we need to decide how to store this new file block in the patch file's compressed data stream. The block modes are:
+- Raw
+- Clone
+- Patch (delta compress)
+So in this step we either output the new file data as-is (raw), not store it at all (clone from the old file), or we apply the minibsdiff patch preprocess to the old/new data and output that.
+The decision on which mode to use depends on the trial LZHAM compressions stages done in steps 4 and 5.
+7. Finally, we now have an array of structs describing how each new block is compressed, along with a big blob of data to compress from step 6 with something like LZMA/LZHAM. Output a header, the control structs, and the compressed data to the patch file. (Optionally, compress the structs too.)
+We use a small sliding dictionary size, like ~4MB, otherwise the memory footprint for mobile decompression is too large.
+This is the basic approach. Alexander Suvorov at Unity found a few improvements:
+1. Allow a new block to be delta compressed against a previously sent new block.
+2. The order of new blocks is a degree of freedom, so try different orderings to see if they improve compression.
+3. This algorithm ignores the cost of seeking on the old file. If the cost is significant, you can favor old file blocks closest to the ones you've already used in step 3.
+Decompression is easy, fast, and low memory. Just iterate through each new file block, decompress that block's data (if any - it could be a cloned block) using streaming decompression, optionally unpatch the decompressed data, and write the new data to disk.
+Current Results
+Properly validating and quantifying the performance of a new codec is tough. Testing a delta compressor is tougher because it's not always easy to find relevant data pairs. We're working with several game developers to get their data for proper evaluation. Here's what we've got right now:
+FRAPS video frames - Portal 2
+1578 frames, 1680x1050, 3 bytes per pixel .TGA, each file = 5292044 bytes
+Each frame's .TGA is delta compressed against the previous frame.
+Total size: 8,350,845,432
+deltacomp2: 1,025,866,924
+bsdiff.exe: 1,140,350,969
+deltacomp2 has a ~10% better avg ratio vs. bsdiff.exe on this data.
+Compressed size of individual frames:
+Compressed size of individual frames, sorted by delta2comp frame size:
+FRAPS video frames - Dota2:
+1807 frames, 2560x1440, 3 bytes per pixel .TGA, each file = 11059244 bytes
+Each frame's .TGA is delta compressed against the previous frame.
+Total size: 19,984,053,908
+deltacomp2: 6,806,289,758
+bsdiff.exe: 7,082,896,772
+deltacomp2 has a ~3.9% better avg ratio vs. bsdiff.exe on this data.
+Compressed size of individual frames:
+Above, the bsdiff sample near 1303 falls to 0 because it crashed on that data pair. bsdiff itself is unreliable, thankfully minibsdiff isn't crashing (but it still has perf. problems).
+Compressed size of individual frames, sorted by delta2comp frame size:
+Firefox v10-v39 installer data
+Test procedure: Unzip each installer archive to separate directory, iterate through all extracted files, sort files by filename and path. Now delta compress each file against its predecessor, i.e. "dict.txt" from v10 is the "old" file for "dict.txt" in v11, etc.
+Total file pairs: 946
+Total "old" file size: 1,549,458,206
+Total "new" file size: 1,570,672,544
+deltacomp2 total compressed size: 563,130,644
+bsdiff.exe total compressed size: 586,356,328
+Overall deltacomp2 was 4% better than bsdiff.exe on this data.
+UIQ2 Turing generator data
+Test consists of delta compressing pairs of very similar, artificially generated test data.
+773 file pairs
+Total "old" file size: 7,613,150,654
+Total "new" file size: 7,613,181,130
+Total deltacomp2 compressed file size: 994,100,836
+Total bsdiff.exe compressed file size: 920,170,669
+Interestingly, deltacomp2's output is ~8% larger than bsdiff.exe's on this artificial test data.
+I'll post more data soon, once we get our hands on real game data that changes over time.
+Next Steps
+The next mini-step is to have another team member try and break the current prototype. We already know that minibsdiff's performance isn't stable enough. On some inputs it can get very slow. We need to either fix this or just rewrite it. We've already switched to libdivsufsort to speed up the suffix array sort.
+The next major step is to dig deeply into Unity's asset bundle and virtual file system code and build a proper asset bundle patching tool.
+Finally, on the algorithm axis, another different approach is to just ditch the preprocessing idea using minibsdiff and implement LZ-Sub.
+Posted by
+Rich Geldreich
+at
+4:17 PM
+4 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Saturday, December 5, 2015
+How to deeply integrate a data compressor into a game engine
+Intro
+We're still in a "path finding into the future" mode here at Unity. We are now thinking about breaking down the "Berlin Wall" between game engines like Unity and the backend data compressor. We have a lot of ideas, and some are obvious things I've already blogged about like CompressQuery(). These next ideas are deeper, and less concrete, but I think they are interesting.
+Below is a technical note from our internal Compression Team Confluence page (internal first to get early feedback on the possibility of deep Unity engine integration). It describes a couple of interesting proposals triggered by several great discussions with Alexander Suvorov, also on the Compression Team. There are no guarantees this stuff will work out, but we need to think and talk about it because it could lead to even better ideas.
+Some ideas on how to deeply integrate a data compressor into a game engine
+Alexander Suvorov and I have been discussing this topic:
+The key question on the Compression Team that we should be answering is: How do we build a data compression engine that Unity can talk to better, so we get higher ratios?
+Right now everybody else spends endless dev time on optimizing the backend compressor itself (entropy coders, LZ virtual machine/instruction set changes etc.), which is a great thing to do but there are other ways of improving ratio too. This is done because the folks writing compressors usually don't control the caller. But this is not true for us, because Alexander and I can change anything in the entire Unity stack (we can change the caller and we can change the data compressor).
+The golden rule in mainstream lossless compression has been: "you cannot change the submission API", for compatibility/simplicity reasons. Basically, "API and Data Format Compatibility=God" for a codec. The coding literature I've seen doesn't go much (if at all) into the API side either, because the agreed assumption is that the caller doesn't typically know much or care about the details inside lossless data compression libraries. It's just a blob of bytes, here you go.
+Since artificial "rules are meant to be broken" (Joachim's observation), there seems to be at least two interesting approaches to breaking down the barrier, that can also be mixed together. Both involve a superset compressor/decompressor API:
+1. Direct Context Control (DCC)
+Let's try allowing the caller to have some control over the compressor's internal coding contexts (or select between statistical models).
+In this API, the caller specifies the upcoming index of the current context to use while streaming data to/from the codec. The context can be as simple as a programmer chosen ID, or a structure member ID - anything the caller wants as long as it's consistent (and as long as they also specify same context ID during decompression) They can say stuff like "context0=DWORD's" and "context1=floats", or they can describe individual bytes within these elements, etc.
+We don't care what the context really means, all we care about is that the caller doesn't lie/is consistent. We don't serialize the context ID's anywhere, this is just info supplied by the caller that they already have. The caller may need to experiment to find the proper way to break down their data into specific context ID's.
+LZHAM alpha uses many more contexts internally, adding them back isn't that bad. Let's let the caller control it, as long as they understand the constraints (compressor and decompressor must always agree on contexts, don't lie, be consistent) we're okay.
+2. Universal Preprocessing
+This benefits from, but doesn't need, DCC. The compressor accepts Granny-style fixup metadata, and we preprocess the data before compression and postprocess the data after compression. We use DCC internally, but it's not strictly required (depends on codec).
+The extra API allows the caller to describe how their data is laid out, by providing exactly the same structure, data member, and array size/pointer markup metadata as Granny's powerful binary fixup metadata system works. (Rad puts little tidbits of info about this technology on changenotes here - look for "fixups".)
+So the plan here is:
+We modify Unity to provide universal binary markup metadata of the important binary data it serializes into files
+It doesn't need to be exact or complete, just describe most/a lot of the data well
+Markup describes structures with offsets to other arrays of structures, basically a Granny-style "data tree". (Granny uses this for byteswapping and offset to pointer remapping.)
+Note Granny's markup metadata is "universal". Serialized data is described as structs pointing to other arrays of structs, and structs can have any arbitrary members, like bytes, words, dword's, offsets/pointers, etc. Like run-time type info type metadata.
+Worst case, you have an array of bytes for any arbitrary data, but you don't get any gains here, you need higher level info.
+See Runtime/Serialize/IterateTypeTree.h in Unity code
+Next, compressor walks the data tree and reserializes it to compressor
+This is a specialized tree sampling algorithm that uses the metadata to walk over each byte of every marked up structure member in the tree.
+Both compressor and decompressor must traverse the tree data in the exact same way.
+So if the entire file is an array of floats, we first emit byte 0's of all floats, then byte 1's, etc. (this is a AOS->SOA style byte swizzle of each unique data type in file). Or other options.
+We also can provide compressor with member byte or whatever specific context ID's
+This could help on images, DXT textures, sound data, arbitrary serialized binary data
+Should be especially easy to integrate into existing auto-serialization systems
+Like data preprocessors used by RAR and other archivers
+Sampling algorithm ideas are in another doc
+Compression/decompression as usual, except we can have DCC calls too (if we want)
+Decompressor deswizzles data during postprocess (just like Granny does when it loads a Granny file and has to byteswap and convert from offsets to pointers)
+Notes And Conclusion
+Now I understand one important reason why tech companies like Apple, Facebook, Google, Microsoft, and Unity hire or internally find data compression specialists. Once you have an internal set of compression specialists those engineers can freely move up/down that company's stack. Once they do that they can achieve superior results by developing a full understanding of the API stack, usage patterns and company-specific datasets. Writing completely custom codecs becomes a doable and profitable thing.
+Idea #1, "direct context control" is very interesting but will take some R&D to figure out the technical details and true feasibility. I've learned that adding more contexts must be done very carefully. Too many contexts and they get too sparse, possibly cause performance problems, memory usage goes up, etc.
+Idea #2 is the "universal preprocessing" idea I've been mulling over in my head for several years. It describes how to more closely couple or blend a binary data serialization system, like the one used by Unity (or Granny, or the Halo Wars engine), with a lossless data compression system like LZHAM.
+We wrote this around the same time Colt McAnlis's interesting blog post, where he mentions his ideas on several unsolved problems in data compression. (I don't quite get point #1 though - need more detail.) This post is closely related to problem #3, maybe a little of #2 as well. It's also related to "compression boosters", that Colt says "are preprocessing algorithms that allow other, existing, compressors to produce better results".
+Basically, if we add a binary metadata description API to the compressor (like the Granny-style "fixup" data used for offset->pointer conversion and byteswapping) this opens up a bunch of interesting possibilities. At least on the types of binary data we deal with all the time: images, GPU textures, meshes, animation, etc.
+Many engines have serialization systems like this, that handle things like byteswapping, offset->pointer conversion, and auto serialization/deserialization to binary or text formats. (Any open source ones? MessagePack solves some similar problems.)
+Colt's point on Kolmogorov complexity is a key related concept to pull inspiration from. We already have the algorithm+input data (the metadata) to serialize or deserialize binary files to/from raw byte arrays. It's just the datatree graph traversal algorithm that I implemented to byteswap/pointerize "Raw" Granny data files on Halo Wars. (For reasons unrelated to this article.)
+We still don't have a program that creates the data in a pure shortest program Kolmogorov sense, of course. Our program has two data inputs (metadata and raw "value" data), so all we've done is expand the total amount of real data to compress (by a small amount due to the metadata, but it's still expansion). But we do have at least one little program that can create and manipulate a new set of compressor input, or give us key type information about the compressor's input. We can use this information to better context model and/or reorganize ("sort" or permute the data) the input data so it leads to higher compression with a backend coder like LZHAM/LZMA.
+The metadata itself can be transmitted in the compressed data stream (just like Granny now does according to its changenotes), or it can be present in the game engine's executable itself. This data will be necessary for deserialization, anyway, so it makes no sense to duplicate it and hurt ratio.
+Unfortunately, one detail not mentioned above is that a datatree can have arrays of objects, which requires "size" fields to be present in the parent objects which point to the array. So it may be necessary for the datatree serializer to compose a separate list of array size fields and supply that information to the compressor (which will also need to be transmitted to the decompressor). Due to object serialization order, the array size fields should always appear before the array data itself, so this may not be a big deal.
+Another possibility is to use a sort to rearrange the input data fed into the compressor, like the BWT transform. The close coupling between the serializer and the compressor gives the compressor a sideband of extra type/context information describing the input data to compress. The per-byte sort key can be context ID's computed by traversing the datatree, on both the compression and decompression side.
+All of these ideas make my head hurt. It's very possible we're missing something key here, but I believe that our major point (deep compressor integration with a game engine's data serializers) has value. The next steps will be to conduct some quick experiments with an existing set of compressors, and see what problems and interesting new opportunities we encounter.
+Posted by
+Rich Geldreich
+at
+12:47 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Thursday, December 3, 2015
+One test showing the performance of miniz vs. zlib
+miniz (was here, now migrating to github here) is my single source file zlib-alternative. It's a complete from scratch reimplementation, and my 5th Deflate/Inflate implementation so far. It has an extremely fast, real-time Deflate-compatible compressor, and for fun the entire decompressor lives in only a single C function. From this post by Tom Alexander:
+miniz vs zlib
+For this final test, we will use the code from the above test which is using read and only a single thread. This should be enough to compare the raw performance of miniz vs zlib by comparing our binary vs zcat.
+TypeTime
+fzcat (modified for test)64.25435829162598
+zcat109.0133900642395
+Conclusions
+So it seems that the benefit of mmap vs read isn't as significant as I expected. THe benefit theoretically could be more significant on a machine with multiple processes reading the same file but I'll leave that as an excercise for the reader.
+miniz turned out to be significantly faster than zlib even when both are used in the same fashion (single threaded and read). Additionally, using the copious amounts of ram available to machines today allowed us to speed everything up even more with threading.
+Posted by
+Rich Geldreich
+at
+4:22 PM
+8 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Wednesday, December 2, 2015
+A graph submission API for lossless data compression
+Earlier today I was talking with John Brooks (CEO of Blue Shift Inc.) about my previous blog post (adding a new CompressQuery()API to lossless compressors). It's an easy API to understand and add to existing compressors, and I know it's useful, but it seems like only the first most basic step.
+For fun, let's try path finding into the future and see if we can add some more API's that expose more possibilities. How about these API's, which enable the caller to explore the solution space more deeply:
+- CompressPush(): Push compressor's internal state
+- CompressPop(): Pop compressor's internal state
+- CompressQuery(): Determine how many bits it would take to compress a blob
+- CompressContinue(): Commit some data generating some compressed output
+Once we have these new API's (push/pop/query, we already have commit) we can use the compressor to explore data graphs in order to compose the smallest compressed output.
+The Current Situation
+Here's what we do with compressors today:
+There are two classes of nodes here that represent different concepts.
+The blue nodes (A, B, C, etc.) represent internal compressor states, and the black nodes represent some data you've given to the compressor. Black nodes represent calls to CompressContinue() with some data to compress. You put in some data by calling CompressContinue(), and the compressor moves from internal states A all the way to F, and at the end you have some compressed data that will recover the data blobs input in nodes G, H, I, etc. at decompression time. Whenever the compressor moves from one blue node to the next it'll hand you some compressed bits.
+Now let's introduce CompressQuery()
+Let's see what possibilities CompressQuery() opens up:
+Now the black nodes represent "trials". In this graph, the compressor starts in state A, and we conduct three trials labeled B, C, and D using the CompressQuery() API to determine the cheapest path to take (i.e. the path with the highest compression ratio). After figuring out how to get into compressor state E in the cheapest way (i.e. the fewest amount of compressed bits), we "commit" the data we want to really compress by calling CompressContinue(), which takes us into state E (and also gives us a blob of compressed data). We repeat the process for trials F, G, H, which gets the compressor into state I, etc. At Y we have fully compressed the input data stream and we're done.
+CompressQuery() is a good, logical first step but it's too shallow. It's just a purely local optimization tool.
+Let's go further: push/pop the compressor state
+Sometimes you're going to want to explore more deeply, into a forest of trials, to find the optimal solution. You're going to need to push the current compressor's state, do some experiments, then pop it to conduct more experiments. This approach could result in higher compression than just purely local optimization.
+Imagine something like this:
+At compressor state A we first push the compressor's internal state. Now conduct three trials (C, D, E), giving us compressor state G, etc. At L we're done, so we pop back to node A and explore the bottom forest. Once we've found the best solution we pop back to A and commit the black nodes with the best results to get the final compressed data.
+Conclusion
+The main point of this post: Lossless data compressors don't need to be opaque black boxes fed fixed, purely linear, data streams. Tightly coupling our data generation code with the backend compressor can enable potentially much higher ratios.
+Posted by
+Rich Geldreich
+at
+7:02 PM
+2 comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Sunday, November 29, 2015
+The Key Missing API in Lossless Data Compressors
+There's a key streaming API missing from every lossless codec I've seen. This is the next API going into lzham_codec_devel (what will be LZHAM v1.1). This API bridges the gap between the lossless and lossy worlds, enables some other interesting use cases, and it should be easy to add to most designs.
+For some background, the (previously) complete set of lossless compression library API's are:
+Blocked:
+CompressMemoryToMemory() - comp buffer in memory to another buffer
+DecompressMemoryToMemory() - decomp buffer in memory to another buffer
+GetCompressBound()- returns max possible comp size given size of data to compress
+Streaming:
+CreateCompressContext() - create new comp context
+DestroyCompressContext() - destroy comp context
+ResetCompressContext() - reset comp context, reusing allocated memory
+CompressContinue() - compress some bytes from input to output buf
+CompressFlush(bool end) - forcibly flush comp, generating output
+CreateDecompressContext() - create new decomp context
+DestroyDecompressContext() - destroy decomp context
+ResetDecompressContext() - reset decomp context, reusing allocated memory
+DecompressContinue() - decompress some bytes from input to output buf
+The missing streaming API is:
+double CompressQuery(comp_ctx *pCtx, const void *pBuf, size_t size)
+This function efficiently computes the compressed size, in fractional bits (and/or integer bytes) of the specified buffer using the current compression context. Importantly, the current compression context (entropy coding state, sliding dictionary, statistical models, etc.) is not modified.
+This API basically gives you an upper bound on how many compressed bits would be added to the output given a particular input. (It's an upper bound, not exact, because the flush imposes a hard artificial LZ phrase boundary on the output.)
+This API can be inefficiently emulated to some degree on streaming compressors that support flushing, except you'll have to settle for only integer byte results, and put up with a full recompress before each query. CompressQuery() is superior because it can give you fractional bit results, it doesn't need to fully update its statistical models, or even fully entropy code the output (it just has to compute how many bits it would output, which codecs like LZMA/LZHAM can do today because they must compute accurate "bit prices" during near-optimal parsing).
+CompressQuery() should be implementable in any lossless compressor, not just LZ based ones. Typically, lossless compression is viewed as some black box that occurs after you've generated some data. With this API you can now intimately interact with the compression engine in order to choose the set of data that leads to higher compression.
+Example ideas of what you can now do with this API:
+1. Rate distortion optimized (RDO) DXTc/PVRTC/etc. compression (i.e. like crunch)
+A typical DXTc block compressor evaluates hundreds to thousands of possible packed block candidates, many of them with very similar or virtually the same PSNR's. A simple RDO DXTc compressor would compute a list of candidate DXTc blocks for each input block, query the backend lossless compressor on each candidate block to determine how many bits would be added to the compressed output, then choose the encoding that strikes the best balance between coded bits and quality. The block compressor then codes (or "commits") this specific block to the compressed output stream by calling CompressContinue(), then continues to the next block and starts the process over again.
+This is just local optimization. A more advanced version would use a dynamic programming approach to look ahead multiple blocks (like LZMA or LZHAM's parsers do) to build a graph so the best combination of blocks can be chosen that best balances compressed bits vs. PSNR.
+I have already done several promising experiments in this area on DXTc textures while writing crunch. Interestingly, this approach is compatible with virtually any block based format.
+2. Universal prediction engine
+Honestly this usage is pretty far out and speculative. Here's one possibility, in the context of a real-time or turn based game:
+Each frame, encode the position of a player character into a C-style POD fixed size data structure (let's call them records). Compress the raw record bytes by calling CompressContinue(). Simple enough.
+Now here's where things get interesting. Let's say we want to try and determine the probability that the character will be at position X on the next frame. Evaluate the next X possible legal gamespace positions the character can be in, and encode these positions into records like usual. Now iterate through each possible legal position's record and call CompressQuery() on each record's serialized struct.
+The return value will be how many fractional bits are needed to encode each structure given the compressor's current context. The more bits needed to encode a record, the higher the record's entropy, and the less likely (or more "surprising") the position is to the compressor. More probable (less surprising) records will require fewer bits.
+Once the codec forms a decent model of the input records it should be able to predict the next position with (hopefully) reasonable certainty. This approach could be quite interesting given a sophisticated enough statistical modeling system and entropy coding backend. (Or not, I haven't tried it yet.)
+3. bsdiff-style preprocessing for delta compression
+bsdiff is a LZ-like approach for creating patch files. It consists of a command stream, a delta byte stream, and a literal byte stream, which can all be separately compressed (as bsdiff.exe does using bzip2). Importantly, there is no single "right" way of encoding a patch stream, i.e. there are many possible ways of generating fully valid patch command streams.
+CompressQuery() can be called while composing the various streams in order to determine the most optimal set of commands/delta bytes/literal bytes to generate, in order to minimize the resulting compressed patch file size.
+4. Optimized PNG-like lossless image compression
+The typical PNG compressor adaptively chooses the filter to use on each scanline which minimizes the sum of absolute errors. A better metric would be, for each filter, to call CompressQuery() to determine how many compressed bits would be output if that filter was selected, and choose the filter that results in the fewest bits.
+5. Basically any data that will be losslessly compressed that has multiple valid or usable encodings (mesh vertex data, curve fitted animation data, VQ data, etc.) could benefit from tightly coupling the data generation process with the backend lossless compressor.
+Posted by
+Rich Geldreich
+at
+4:35 PM
+No comments:
+Email ThisBlogThis!Share to XShare to FacebookShare to Pinterest
+Newer Posts
+Older Posts
+Home
+Subscribe to:
+Posts (Atom)

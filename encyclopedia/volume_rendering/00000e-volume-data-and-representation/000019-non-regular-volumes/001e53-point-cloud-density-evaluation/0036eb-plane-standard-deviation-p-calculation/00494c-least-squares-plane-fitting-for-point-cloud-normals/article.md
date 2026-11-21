@@ -1,0 +1,115 @@
+# Least Squares Plane Fitting for Point Cloud Normals
+
+Also called: Local Surface Fitting for Normals, Normal estimation for point clouds, Point Cloud Normal Estimation via Least Squares
+
+## Overview
+This method estimates the normal vector for each point in a point cloud by fitting a least-squares plane to its local surface neighborhood. It solves the problem of determining surface orientation for non-regular volumes, enabling splats or primitives to align with the underlying object geometry [S1]. It differs from global fitting methods by relying on local neighborhood statistics, and from heuristic methods by providing a mathematically optimal plane fit in the least-squares sense [S1].
+
+## How it works
+**Inputs:** A set of point clusters (or a single point cloud), where each cluster has an estimated resolution $r$.
+**Outputs:** A normal vector $\mathbf{n}_i$ for each point $i$ in the cloud.
+
+**Data Structures:**
+*   **Point Cloud:** A list of points $P = \{p_1, p_2, ..., p_N\}$, where each $p_i \in \mathbb{R}^3$.
+*   **Neighborhood:** A subset of points $N_i \subset P$ within a search radius $R = 3r$ of point $p_i$.
+*   **Covariance Matrix:** A $3 \times 3$ symmetric matrix $C_i$ computed from the coordinates in $N_i$.
+
+**Steps:**
+1.  **Cluster Resolution Estimation:** Determine the resolution $r$ for the cluster containing point $p_i$. If not pre-computed, $r$ may be derived from the average distance to nearest neighbors or voxel size [S1].
+2.  **Neighborhood Search:** Identify all points $p_j$ such that $\|p_j - p_i\| \le 3r$. Let this set be $N_i$ with cardinality $k$.
+3.  **Centroid Calculation:** Compute the centroid $\mathbf{c}_i$ of the neighborhood:
+    $$ \mathbf{c}_i = \frac{1}{k} \sum_{j \in N_i} p_j $$
+4.  **Covariance Matrix Construction:** Compute the $3 \times 3$ covariance matrix $C_i$:
+    $$ C_i = \frac{1}{k} \sum_{j \in N_i} (p_j - \mathbf{c}_i)(p_j - \mathbf{c}_i)^T $$
+    *Note: Some implementations omit the $1/k$ factor as it does not affect the eigenvector direction [G].*
+5.  **Eigenvalue Decomposition:** Perform eigenvalue decomposition on $C_i$ to find eigenvalues $\lambda_0 \le \lambda_1 \le \lambda_2$ and corresponding eigenvectors $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$.
+6.  **Normal Selection:** The normal vector $\mathbf{n}_i$ is the eigenvector corresponding to the smallest eigenvalue $\lambda_0$:
+    $$ \mathbf{n}_i = \mathbf{v}_0 $$
+    *Rationale:* The smallest eigenvalue corresponds to the direction of least variance, which is perpendicular to the best-fitting plane [S1].
+7.  **Orientation Consistency (Optional but Recommended):** To ensure consistent normal orientation across the surface, compare $\mathbf{n}_i$ with the normal of a previously processed neighbor or the vector from the centroid to the point. Flip $\mathbf{n}_i$ if $\mathbf{n}_i \cdot (p_i - \mathbf{c}_i) < 0$ [G].
+
+**Parameters:**
+*   **Search Radius Multiplier:** 3 (i.e., radius $= 3r$) [S1].
+*   **Minimum Neighbors:** Not specified in sources. Implementation should handle cases where $k < 3$ by falling back to a default normal or skipping [G].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Neighborhoods:** If all points in $N_i$ are collinear or coincident, the covariance matrix is singular. The normal is undefined. A guard should check if $\lambda_0 \approx 0$ or if $k < 3$ [G].
+*   **Boundary Effects:** Points on object boundaries may have asymmetric neighborhoods, leading to inaccurate normals. The radius $3r$ may need adjustment for high-curvature regions [S1].
+*   **Precision:** Use double precision for covariance matrix computation to avoid numerical instability in eigenvalue decomposition [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def estimate_normals(points, cluster_resolutions):
+    """
+    points: Nx3 array of point coordinates
+    cluster_resolutions: N array of resolution r for each point's cluster
+    returns: Nx3 array of normal vectors
+    """
+    normals = np.zeros_like(points)
+    N = len(points)
+    
+    for i in range(N):
+        p_i = points[i]
+        r = cluster_resolutions[i]
+        radius = 3.0 * r
+        
+        # Step 2: Neighborhood Search
+        # In practice, use a KDTree for efficiency. Here, brute force for clarity.
+        dists = np.linalg.norm(points - p_i, axis=1)
+        neighbor_indices = np.where(dists <= radius)[0]
+        
+        k = len(neighbor_indices)
+        if k < 3:
+            # Degenerate case: assign a default normal or skip
+            normals[i] = np.array([0.0, 0.0, 1.0])
+            continue
+            
+        neighbors = points[neighbor_indices]
+        
+        # Step 3: Centroid
+        centroid = np.mean(neighbors, axis=0)
+        
+        # Step 4: Covariance Matrix
+        diff = neighbors - centroid
+        C = np.dot(diff.T, diff) / k
+        
+        # Step 5: Eigenvalue Decomposition
+        eigenvalues, eigenvectors = np.linalg.eigh(C)
+        
+        # Step 6: Normal Selection (smallest eigenvalue)
+        # eigh returns eigenvalues in ascending order
+        normal = eigenvectors[:, 0]
+        
+        # Step 7: Orientation Consistency (simple heuristic)
+        # Ensure normal points roughly in the direction of the point from centroid
+        if np.dot(normal, p_i - centroid) < 0:
+            normal = -normal
+            
+        normals[i] = normal
+        
+    return normals
+```
+
+## Subtopics
+
+### Normal Estimation with KdTree and OMP
+This variant uses a KdTree for efficient neighborhood search and OpenMP for parallel processing. It is implemented in the Point Cloud Library (PCL) as `NormalEstimationOMP`. It sets the number of nearest neighbors (`kSearch`) to 20, rather than using a fixed radius [S2, unofficial]. This approach is preferred for large-scale point clouds where search efficiency is critical.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot k \log k)$ or $O(N \cdot k)$ depending on the search structure (KDTree vs. brute force), where $N$ is the number of points and $k$ is the neighborhood size. With KDTree, search is $O(\log N)$ per point.
+*   **Memory Complexity:** $O(N)$ for storing points and normals, plus $O(N)$ for the search structure (KDTree).
+*   **Strengths:** Mathematically robust; provides smooth normal fields; aligns splats with geometry [S1].
+*   **Limitations:** Sensitive to noise and outliers in the neighborhood; requires careful tuning of radius or $k$; computationally expensive for very large clouds without parallelization [S2, unofficial].
+*   **When to Use:** When accurate surface orientation is required for splatting or rendering [S1].
+*   **When Not to Use:** For real-time applications with extremely large point clouds where approximate normals suffice.
+
+## Background
+The method originates from the general problem of local surface fitting in point cloud processing. It is implemented in the Point Cloud Library (PCL) by Rusu and Cousins [S1]. It is widely used in preprocessing steps for rendering techniques like stroke-based splatting to ensure primitives align with the object's geometry [S1].
+
+## Sources
+[S1] Stroke-based splatting: an efficient multi-resolution point cloud visualization technique, https://doi.org/10.1007/s00371-017-1420-7, fetched 2026-10-26
+[S2] zAle711/Point-Cloud-Voxelization-Node, https://github.com/zAle711/Point-Cloud-Voxelization-Node, fetched 2026-10-27 (unofficial)

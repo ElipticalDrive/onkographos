@@ -1,0 +1,490 @@
+--- v003.md
++++ v004.md
+@@ -4,269 +4,249 @@
+ 
+ ## Overview
+-AdR-Gaussian is a rendering acceleration method for 3D Gaussian Splatting that optimizes the rasterization pipeline by moving serial culling operations to the parallel Preprocess stage and balancing computational loads across pixel threads [S1]. It achieves significant speedups without reducing the total number of Gaussians, thereby avoiding the quality degradation associated with pruning-based methods like EAGLES or LightGaussian [S1]. Unlike siblings that rely on hardware-specific optimizations or global Gaussian reduction, AdR-Gaussian focuses on algorithmic efficiency within the standard tile-based rasterizer by using adaptive radii and axis-aligned bounding boxes (AABB) for early culling [S1].
++AdR-Gaussian is a rendering acceleration method for 3D Gaussian Splatting that optimizes the rasterization pipeline by moving serial culling from the Render stage to the parallel Preprocess stage and balancing computational load across pixel threads [S1]. It achieves significant speedups without reducing the total number of Gaussians, thereby avoiding the quality degradation associated with pruning-based methods [S1]. Unlike siblings that reduce Gaussian count, AdR-Gaussian focuses on pipeline efficiency through adaptive radius culling and load balancing [S1].
+ 
+ ## How it works
+-AdR-Gaussian accelerates rendering by reducing the computational cost of the Render stage, which typically accounts for over 50% of the total rasterization time due to serial alpha blending and complex splatting calculations [S1]. The method operates in two phases: Early Culling and Load Balancing [S1].
++The method consists of two phases: Early Culling and Load Balancing. It operates on the standard tile-based rasterization model where the image is divided into $16 \times 16$ tiles [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of 3D Gaussians (defined by center position $\mathbf{X}_0$, 3D covariance matrix $\Sigma$, opacity $\sigma$, and spherical harmonics coefficients for color), camera parameters (view and projection matrices), and a predefined minimum splatting opacity threshold $\alpha_{low}$ [S1].
+-*   **Outputs:** A 2D image where each pixel color is computed via alpha blending of the surviving Gaussians [S1].
++*   **Inputs:** A set of 3D Gaussians, each defined by center position $\mathbf{X}_0$, 3D covariance matrix $\Sigma$, opacity $\sigma$, and spherical harmonics coefficients for color [S1]. Camera parameters for projection [S1].
++*   **Outputs:** Rendered image pixels [S1].
+ 
+ ### Data Structures
+-The method operates on the standard 3DGS rasterization pipeline stages [S1]:
+-1.  **Preprocess:** Parallel Gaussian-level processing.
+-2.  **InclusiveSum / DuplicateWithKeys:** Parallel Gaussian-level processing to determine tile coverage.
+-3.  **SortPairs / IdentifyTileRanges:** Parallel Gaussian-Tile pair processing for depth sorting and range identification.
+-4.  **Render:** Pixel-level parallel processing with serial alpha blending within tiles [S1].
+-
+-The key data modification occurs in the **Preprocess** stage, where the rendering radius for each Gaussian is computed and used to cull irrelevant tiles before the **SortPairs** stage.
++The rasterization pipeline processes Gaussians through six stages [S1]:
++1.  **Preprocess:** Parallel Gaussian-level processing to compute perspective-related data [S1].
++2.  **InclusiveSum:** Parallel Gaussian-level processing to determine tile coverage [S1].
++3.  **DuplicateWithKeys:** Parallel Gaussian-level processing to duplicate Gaussian entries for each covered tile [S1].
++4.  **SortPairs:** Parallel Gaussian-Tile pair sorting by depth [S1].
++5.  **IdentifyTileRanges:** Parallel Gaussian-Tile pair processing to determine start/end indices per tile [S1].
++6.  **Render:** Pixel-level parallel processing with serial alpha blending within each tile [S1].
+ 
+ ### Parameters
+-*   **$\alpha_{low}$**: A predefined minimum splatting opacity constant used to define the lower bound for culling. This value is set in the original 3DGS model [S1].
+-*   **Tile Size**: The screen is divided into $16 \times 16$ pixel tiles [S1].
+-*   **$r_o$**: The original radius based on the 99% confidence interval of the Gaussian projection [S1].
+-
+-### Formulas
+-The splatting opacity $\alpha$ for a Gaussian-Pixel pair is calculated as [S1]:
+-$$ \alpha = \sigma \exp\left(-\frac{1}{2} \mathbf{x}^T \Sigma'^{-1} \mathbf{x}\right) $$
+-where $\sigma$ is the Gaussian opacity, $\mathbf{x}$ is the 2D distance vector from the Gaussian center to the pixel, and $\Sigma'$ is the projected 2D covariance matrix [S1].
+-
+-The condition for early culling is derived from the inequality $\alpha_i \ge \alpha_{low}$, which defines an ellipse in 2D space [S1]:
+-$$ \mathbf{x}^T \Sigma'^{-1} \mathbf{x} \le 2 \ln\left(\frac{\sigma_i}{\alpha_{low}}\right) $$
+-Expanding this into the general quadratic form $Ax^2 + By^2 + Cxy + D \le 0$, the coefficients are [S1]:
+-$$ A = \Sigma'_{YY}, \quad B = \Sigma'_{XX}, \quad C = -2\Sigma'_{XY} $$
+-$$ D = -2 \sqrt{\Sigma'_{XX} \Sigma'_{YY} - \Sigma'_{XY}^2} \ln\left(\frac{\sigma_i}{\alpha_{low}}\right) $$
+-
+-The **Adaptive Radius** $r_{ad}$ is defined as the bounding circle radius of this ellipse [S1]. The **Original Radius** $r_o$ is derived from the 99% confidence interval of the projected Gaussian [S1]. The final culling radius $r$ is [S1]:
+-$$ r = \min(r_{ad}, r_o) $$
+-
+-### Steps
++*   $\alpha_{low}$: A predefined minimum splatting opacity constant used to define the lower bound for culling. This value is set in the original 3DGS model [S1].
++*   Tile Size: $16 \times 16$ pixels [S1].
++
++### Step-by-Step Method
+ 
+ #### Phase 1: Early Culling
+-This phase moves culling from the serial Render stage to the parallel Preprocess stage [S1].
+-
+-1.  **Preprocess Stage (Parallel per Gaussian):**
+-    a. Compute the projected 2D covariance matrix $\Sigma'$ for the Gaussian [S1].
+-    b. Calculate the coefficients $A, B, C, D$ for the ellipse defined by $\alpha_{low}$ using the formulas above [S1].
+-    c. Compute the adaptive radius $r_{ad}$ as the bounding circle radius of this ellipse [S1].
+-    d. Compute the original radius $r_o$ based on the 99% confidence interval [S1].
+-    e. Determine the final radius $r = \min(r_{ad}, r_o)$ [S1].
+-    f. **AABB Culling:** Calculate the maximum x and y coordinates ($x_{max}, y_{max}$) of the ellipse. Set half-width $w = x_{max}$ and half-height $h = y_{max}$. Use the axis-aligned bounding box defined by $w$ and $h$ to cull tiles that do not intersect the Gaussian's effective splatting area [S1].
+-    g. If a tile is not intersected by the AABB, discard the Gaussian-Tile pair. Otherwise, pass the Gaussian to the subsequent pipeline stages [S1].
++This phase moves culling from the serial Render stage to the parallel Preprocess stage [S1]. For each Gaussian, the following steps are performed in parallel [S1]:
++
++1.  **Compute Projected Covariance:** Calculate the projected 2D covariance matrix $\Sigma'$ for the Gaussian based on the camera view [S1].
++2.  **Calculate Adaptive Radius ($r_{ad}$):**
++    *   The adaptive radius is defined as the bounding circle radius of an ellipse constructed by the minimum splatting opacity $\alpha_{low}$ [S1].
++    *   The condition for the ellipse is derived from $\alpha_i \ge \alpha_{low}$, where $\alpha_i = \sigma_i \exp(-\frac{1}{2} \mathbf{x}^T \Sigma'^{-1} \mathbf{x})$ [S1].
++    *   Substituting the opacity formula, the inequality becomes:
++        $$ \mathbf{x}^T \Sigma'^{-1} \mathbf{x} \le 2 \ln\left(\frac{\sigma_i}{\alpha_{low}}\right) $$
++    *   Expanding this into 2D coordinates $(x, y)$ yields the ellipse equation:
++        $$ Ax^2 + By^2 + Cxy + D \le 0 $$
++        where:
++        $$ A = \Sigma'_{YY}, \quad B = \Sigma'_{XX}, \quad C = -2\Sigma'_{XY} $$
++        $$ D = -2 \sqrt{\Sigma'_{XX} \Sigma'_{YY} - \Sigma'_{XY}^2} \ln\left(\frac{\sigma_i}{\alpha_{low}}\right) $$
++    *   The adaptive radius $r_{ad}$ is the radius of the bounding circle of this ellipse [S1].
++3.  **Calculate Original Radius ($r_o$):**
++    *   Calculate the radius based on the 99% confidence interval of the Gaussian [S1].
++4.  **Determine Final Radius ($r$):**
++    *   To ensure the rendering range does not exceed the standard confidence interval, clamp the radius:
++        $$ r = \min(r_{ad}, r_o) $$
++    *   **Pitfall:** If Gaussian opacity is high or $\alpha_{low}$ is low, $r_{ad}$ may exceed $r_o$. The clamping step prevents this [S1].
++5.  **Cull Using Adaptive Radius:**
++    *   Use the circle with radius $r$ to cull Gaussian-Tile pairs. If a tile does not intersect this circle, the Gaussian is discarded for that tile [S1].
++6.  **Cull Using Axis-Aligned Bounding Box (AABB):**
++    *   To improve culling efficiency, especially in minor axis directions, an AABB is computed for the ellipse defined in step 2 [S1].
++    *   Define the ellipse function $F = Ax^2 + By^2 + Cxy + D$ [S1].
++    *   Calculate the maximum x-coordinate ($x_{max}$) and maximum y-coordinate ($y_{max}$) of the ellipse [S1].
++    *   Set the half-width $w = x_{max}$ and half-height $h = y_{max}$ [S1].
++    *   Use the AABB defined by $w$ and $h$ to cull tiles. This provides more accurate culling in minor axis directions than the circular adaptive radius alone [S1].
+ 
+ #### Phase 2: Load Balancing
+-This phase addresses uneven computational loads across pixel threads in the Render stage [S1].
+-
+-1.  **Assess Load:** Quantify the variance of the number of Gaussians required for each pixel after early culling [S1].
+-2.  **Identify Heavy/Light Pixels:** Classify pixels based on the number of remaining Gaussians to be blended [S1].
+-3.  **Adjust Gaussian Count:**
+-    a. For **heavy-load pixels** (high variance/many Gaussians), reduce the number of rendered Gaussians to minimize thread waiting time [S1].
+-    b. For **light-load pixels** (low variance/few Gaussians), increase the number of rendered Gaussians (if possible within the culling bounds) to hedge against quality loss [S1].
+-4.  **Render:** Execute the standard tile-based alpha blending in parallel for all pixels using the balanced set of Gaussians [S1].
++After early culling and before/during rendering, this phase balances the computational load across pixel threads [S1].
++
++1.  **Assess Load:** Quantify the variance of the number of rendered Gaussians required for each pixel [S1].
++2.  **Adjust Gaussian Count:**
++    *   For **heavy-load pixels** (high variance/many Gaussians), reduce the number of rendered Gaussians to minimize thread waiting time [S1].
++    *   For **light-load pixels** (low variance/few Gaussians), increase the number of rendered Gaussians to hedge against rendering quality loss [S1].
++3.  **Render:** Render pixels in parallel using the balanced set of Gaussians [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def ad_r_gaussian_render(gaussians, camera, alpha_low, tile_size=16):
+-    """
+-    Renders the scene using AdR-Gaussian optimization.
+-    
+-    Args:
+-        gaussians: List of Gaussian objects with attributes:
+-                   - center: (x, y, z)
+-                   - cov3d: 3x3 covariance matrix
+-                   - opacity: scalar sigma
+-                   - sh_coeffs: Spherical Harmonics coefficients
+-        camera: Camera object with view and projection matrices.
+-        alpha_low: Minimum splatting opacity threshold for culling.
+-        tile_size: Size of the rasterization tiles (default 16x16).
++# AdR-Gaussian Rendering Pipeline
++# Assumes standard 3DGS Gaussian structure and camera projection
++
++def preprocess_gaussian(gaussian, camera):
++    """
++    Phase 1: Early Culling
++    Computes adaptive radius and AABB for a single Gaussian.
++    Returns: (cull_radius, aabb_half_width, aabb_half_height)
++    """
++    # 1. Project Gaussian to 2D
++    # Compute projected covariance matrix Sigma'
++    Sigma_prime = project_covariance(gaussian.cov_3d, camera.projection_matrix)
++    
++    # 2. Calculate Adaptive Radius (r_ad)
++    # Ellipse parameters from alpha_low condition
++    Sigma_XX = Sigma_prime[0, 0]
++    Sigma_YY = Sigma_prime[1, 1]
++    Sigma_XY = Sigma_prime[0, 1]
++    
++    A = Sigma_YY
++    B = Sigma_XX
++    C = -2 * Sigma_XY
++    D = -2 * sqrt(Sigma_XX * Sigma_YY - Sigma_XY**2) * ln(gaussian.opacity / alpha_low)
++    
++    # Calculate bounding circle radius of the ellipse Ax^2 + By^2 + Cxy + D <= 0
++    # The bounding circle radius is half the maximum extent of the ellipse
++    r_ad = compute_ellipse_bounding_circle_radius(A, B, C, D)
++    
++    # 3. Calculate Original Radius (r_o)
++    # Based on 99% confidence interval
++    r_o = compute_99_percent_confidence_radius(gaussian.cov_3d, camera.projection_matrix)
++    
++    # 4. Determine Final Radius
++    r = min(r_ad, r_o)
++    
++    # 5. Calculate AABB for the ellipse
++    # Find max x and y on the ellipse Ax^2 + By^2 + Cxy + D = 0
++    x_max, y_max = compute_ellipse_extents(A, B, C, D)
++    
++    w = x_max
++    h = y_max
++    
++    return r, w, h
++
++def compute_ellipse_bounding_circle_radius(A, B, C, D):
++    """
++    Computes the radius of the bounding circle of the ellipse Ax^2 + By^2 + Cxy + D <= 0.
++    This is equivalent to half the length of the major axis.
++    """
++    # The eigenvalues of the matrix [[A, C/2], [C/2, B]] determine the axes
++    # Matrix M = [[A, C/2], [C/2, B]]
++    trace = A + B
++    det = A * B - (C/2)**2
++    
++    # Eigenvalues lambda1, lambda2
++    # lambda = (trace +/- sqrt(trace^2 - 4*det)) / 2
++    discriminant = trace**2 - 4 * det
++    if discriminant < 0:
++        return 0.0 # Degenerate case
++    
++    sqrt_disc = sqrt(discriminant)
++    lambda1 = (trace + sqrt_disc) / 2
++    lambda2 = (trace - sqrt_disc) / 2
++    
++    # The ellipse equation is x^T M x <= -D
++    # The semi-axes lengths are sqrt(-D / lambda)
++    # We assume D < 0 for a valid ellipse (since D is negative in the formula)
++    # Major axis corresponds to the smaller eigenvalue
++    if lambda1 < lambda2:
++        lambda_min = lambda1
++    else:
++        lambda_min = lambda2
+         
+-    Returns:
+-        image: Rendered 2D image.
+-    """
+-    
+-    # Stage 1: Preprocess (Parallel per Gaussian)
+-    valid_gaussians = []
+-    
+-    for g in gaussians:
+-        # 1. Project Gaussian to 2D
+-        # Compute projected covariance matrix Sigma' and center in screen space
+-        sigma_prime, center_2d = project_gaussian_to_2d(g, camera)
++    # Radius is half the major axis length
++    # Major axis length = 2 * sqrt(-D / lambda_min)
++    # Radius = sqrt(-D / lambda_min)
++    # Note: D is negative, so -D is positive
++    if lambda_min <= 0:
++        return float('inf') # Invalid ellipse
+         
+-        # 2. Compute Adaptive Radius Parameters
+-        # Extract elements of Sigma'
+-        s_xx = sigma_prime[0, 0]
+-        s_yy = sigma_prime[1, 1]
+-        s_xy = sigma_prime[0, 1]
+-        
+-        # Coefficients for ellipse Ax^2 + By^2 + Cxy + D <= 0
+-        A = s_yy
+-        B = s_xx
+-        C = -2 * s_xy
+-        # D = -2 * sqrt(det(Sigma')) * ln(sigma / alpha_low)
+-        det_sigma = s_xx * s_yy - s_xy**2
+-        D = -2 * math.sqrt(det_sigma) * math.log(g.opacity / alpha_low)
+-        
+-        # 3. Compute Adaptive Radius (r_ad)
+-        # r_ad is the bounding circle radius of the ellipse
+-        # For an ellipse Ax^2 + By^2 + Cxy + D <= 0, the bounding circle radius
+-        # can be approximated or calculated via eigenvalues of the quadratic form.
+-        # Here we assume a helper function exists for this geometric calculation.
+-        r_ad = compute_ellipse_bounding_radius(A, B, C, D)
+-        
+-        # 4. Compute Original Radius (r_o)
+-        # Based on 99% confidence interval of the Gaussian
+-        r_o = compute_99_percent_radius(sigma_prime)
+-        
+-        # 5. Final Radius
+-        r = min(r_ad, r_o)
+-        
+-        # 6. AABB Culling
+-        # Calculate max x and y extents of the ellipse
+-        x_max, y_max = compute_ellipse_max_extents(A, B, C, D)
+-        w = x_max
+-        h = y_max
+-        
+-        # Determine which tiles the AABB intersects
+-        tile_bounds = get_tile_bounds(center_2d, w, h, tile_size)
+-        
+-        # If no tiles intersect, cull this Gaussian entirely
+-        if not tile_bounds:
+-            continue
+-            
+-        # Add Gaussian to valid list with its tile coverage info
+-        valid_gaussians.append({
+-            'gaussian': g,
+-            'center_2d': center_2d,
+-            'sigma_prime': sigma_prime,
+-            'tiles': tile_bounds,
+-            'radius': r
+-        })
+-        
+-    # Stage 2: Standard Rasterization Pipeline (InclusiveSum, SortPairs, etc.)
+-    # These stages are standard 3DGS operations, now operating on fewer Gaussians
+-    tile_gaussians = build_tile_lists(valid_gaussians, image_width, image_height, tile_size)
+-    sorted_gaussians = sort_gaussians_by_depth(tile_gaussians)
+-    
+-    # Stage 3: Load Balancing & Render
+-    # Identify heavy-load pixels and adjust rendering if necessary
+-    # Note: The exact implementation of "increasing" Gaussians for light pixels
+-    # is not fully specified in sources, but typically involves relaxing culling
+-    # or including borderline Gaussians. We assume the primary optimization
+-    # is the reduction for heavy pixels.
+-    
+-    image = render_tiles(sorted_gaussians, camera, tile_size)
+-    
+-    return image
+-
+-def compute_ellipse_bounding_radius(A, B, C, D):
+-    """
+-    Computes the radius of the bounding circle of the ellipse defined by
+-    Ax^2 + By^2 + Cxy + D <= 0.
+-    The ellipse equation can be written as x^T M x <= -D, where M = [[A, C/2], [C/2, B]].
+-    The eigenvalues of M determine the semi-axes lengths.
+-    """
+-    # Matrix M
+-    M = [[A, C/2], [C/2, B]]
+-    
+-    # Compute eigenvalues of M
+-    # det(M - lambda*I) = 0
+-    # lambda^2 - tr(M)lambda + det(M) = 0
+-    tr_M = A + B
+-    det_M = A * B - (C/2)**2
+-    
+-    discriminant = tr_M**2 - 4 * det_M
+-    if discriminant < 0:
+-        return 0 # Degenerate case
+-    
+-    sqrt_disc = math.sqrt(discriminant)
+-    lambda1 = (tr_M + sqrt_disc) / 2
+-    lambda2 = (tr_M - sqrt_disc) / 2
+-    
+-    # Semi-axes lengths a and b are sqrt(-D / lambda)
+-    # Since D is negative, -D is positive.
+-    # We assume lambda > 0 for a valid ellipse.
+-    if lambda1 <= 0 or lambda2 <= 0:
+-        return 0
+-        
+-    a = math.sqrt(-D / lambda1)
+-    b = math.sqrt(-D / lambda2)
+-    
+-    # Bounding circle radius is the maximum semi-axis
+-    return max(a, b)
+-
+-def compute_ellipse_max_extents(A, B, C, D):
+-    """
+-    Computes the maximum x and y coordinates of the ellipse
+-    Ax^2 + By^2 + Cxy + D <= 0.
+-    """
+-    # To find max x, set dy/dx = 0 or use Lagrange multipliers.
+-    # Alternatively, find the extrema of x on the boundary Ax^2 + By^2 + Cxy + D = 0.
+-    # This requires solving for y in terms of x or vice versa.
+-    # For implementation simplicity, we can use numerical optimization or analytical solution.
+-    # Analytical solution for max x:
+-    # The ellipse is centered at (0,0) in local coordinates.
+-    # The max x extent is determined by the rotation and scaling.
+-    # A robust way is to compute the bounding box of the ellipse.
+-    
+-    # Eigen decomposition of M = [[A, C/2], [C/2, B]]
+-    # M = R^T D R
+-    # The semi-axes are a = sqrt(-D/lambda1), b = sqrt(-D/lambda2)
+-    # The rotation angle theta is derived from eigenvectors.
+-    
+-    tr_M = A + B
+-    det_M = A * B - (C/2)**2
+-    discriminant = tr_M**2 - 4 * det_M
+-    sqrt_disc = math.sqrt(discriminant)
+-    
+-    lambda1 = (tr_M + sqrt_disc) / 2
+-    lambda2 = (tr_M - sqrt_disc) / 2
+-    
+-    a = math.sqrt(-D / lambda1)
+-    b = math.sqrt(-D / lambda2)
+-    
+-    # Angle of major axis
+-    # tan(2*theta) = C / (A - B)
+-    if abs(A - B) < 1e-9:
+-        theta = math.pi / 4 if C > 0 else -math.pi / 4
++    radius = sqrt(-D / lambda_min)
++    return radius
++
++def compute_ellipse_extents(A, B, C, D):
++    """
++    Computes the maximum x and y coordinates of the ellipse Ax^2 + By^2 + Cxy + D = 0.
++    """
++    # To find max x, we solve for y in terms of x or use optimization.
++    # Implicit differentiation or Lagrange multipliers can be used.
++    # Alternatively, parameterize the ellipse.
++    # For simplicity, we use the property that the extrema occur where the tangent is vertical/horizontal.
++    # d/dx (Ax^2 + By^2 + Cxy + D) = 0 => 2Ax + Cy + Cx(dy/dx) + 2By(dy/dx) = 0
++    # Vertical tangent (dx=0): 2By + Cx = 0 => y = -Cx / (2B)
++    # Substitute into ellipse equation:
++    # Ax^2 + B(-Cx/2B)^2 + Cx(-Cx/2B) + D = 0
++    # Ax^2 + C^2x^2/(4B) - C^2x^2/(2B) + D = 0
++    # Ax^2 - C^2x^2/(4B) + D = 0
++    # x^2 (A - C^2/(4B)) = -D
++    # x^2 = -D / (A - C^2/(4B))
++    
++    denom_x = A - (C**2) / (4 * B)
++    if abs(denom_x) < 1e-9:
++        x_max = float('inf')
+     else:
+-        theta = 0.5 * math.atan2(C, A - B)
+-        
+-    # The bounding box width and height of a rotated ellipse
+-    # w = 2 * sqrt( (a*cos(theta))^2 + (b*sin(theta))^2 )
+-    # h = 2 * sqrt( (a*sin(theta))^2 + (b*cos(theta))^2 )
+-    # But we need half-width w and half-height h (x_max, y_max)
+-    
+-    # x_max is the maximum x-coordinate on the ellipse
+-    # x_max = sqrt( (a*cos(theta))^2 + (b*sin(theta))^2 )
+-    # y_max = sqrt( (a*sin(theta))^2 + (b*cos(theta))^2 )
+-    
+-    x_max = math.sqrt((a * math.cos(theta))**2 + (b * math.sin(theta))**2)
+-    y_max = math.sqrt((a * math.sin(theta))**2 + (b * math.cos(theta))**2)
+-    
++        x_sq = -D / denom_x
++        if x_sq < 0:
++            x_max = 0.0
++        else:
++            x_max = sqrt(x_sq)
++            
++    # Similarly for max y
++    # Horizontal tangent (dy=0): 2Ax + Cy = 0 => x = -Cy / (2A)
++    # Substitute:
++    # A(-Cy/2A)^2 + By^2 + C(-Cy/2A)y + D = 0
++    # C^2y^2/(4A) + By^2 - C^2y^2/(2A) + D = 0
++    # y^2 (B - C^2/(4A)) = -D
++    # y^2 = -D / (B - C^2/(4A))
++    
++    denom_y = B - (C**2) / (4 * A)
++    if abs(denom_y) < 1e-9:
++        y_max = float('inf')
++    else:
++        y_sq = -D / denom_y
++        if y_sq < 0:
++            y_max = 0.0
++        else:
++            y_max = sqrt(y_sq)
++            
+     return x_max, y_max
++
++def render_tile(tile_gaussians, tile_pixels):
++    """
++    Phase 2: Load Balancing and Rendering
++    Renders a single tile.
++    """
++    # 1. Assess Load
++    # Count number of Gaussians per pixel
++    gaussian_counts = count_gaussians_per_pixel(tile_gaussians, tile_pixels)
++    
++    # 2. Load Balancing
++    # Identify heavy-load and light-load pixels
++    # Reduce Gaussians for heavy-load, increase for light-load
++    # This step modifies the list of Gaussians to be rendered per pixel
++    balanced_gaussians = apply_load_balancing(tile_gaussians, gaussian_counts)
++    
++    # 3. Alpha Compositing
++    # Sort Gaussians by depth (already done in SortPairs stage)
++    # Render pixels in parallel
++    for pixel in tile_pixels:
++        color = 0.0
++        alpha_accum = 0.0
++        for gaussian in balanced_gaussians[pixel]:
++            # Calculate splatting opacity
++            x = pixel.position - gaussian.center_2d
++            alpha = gaussian.opacity * exp(-0.5 * x.T @ inv(gaussian.cov_2d) @ x)
++            
++            # Composite
++            color += gaussian.color * alpha * (1 - alpha_accum)
++            alpha_accum += alpha * (1 - alpha_accum)
++            
++        pixel.color = color
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Radius Clamping:** If the Gaussian opacity $\sigma$ is high or $\alpha_{low}$ is low, the adaptive radius $r_{ad}$ may exceed the original radius $r_o$ (based on the 99% confidence interval). In this case, the final radius $r$ must be clamped to $r_o$ to ensure the rendering range does not exceed the standard confidence interval [S1].
+-*   **Precision:** The calculation of the ellipse coefficients and bounding radius involves square roots and logarithms, which may introduce floating-point precision errors. Care should be taken when checking tile intersections [S1].
+-*   **Degenerate Gaussians:** If the projected covariance matrix is singular or near-singular, the ellipse calculation may fail. Guard against division by zero or invalid square roots [G].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The method reduces the computational cost of the Render stage ($E_p$), which typically accounts for over 50% of the total rasterization cost [S1]. By moving culling to the Preprocess stage, the number of Gaussian-Tile pairs processed in later stages is reduced [S1].
+-*   **Memory Complexity:** No significant additional memory overhead is introduced, as the method operates on the existing Gaussian data structures and tile lists [S1].
+-*   **Performance:** On the Mip-NeRF360 dataset, AdR-Gaussian achieves an average rendering speed of 590 FPS on a single NVIDIA RTX 3090 GPU [S1]. Experiments on three datasets demonstrate an average 310% acceleration in rendering speed while maintaining equivalent or superior rendering quality [S1].
++*   **Time Complexity:** The Render stage ($E_p$) typically takes the largest proportion of computational cost (over 50%) due to serial alpha blending and complex splatting color calculation per Gaussian-Pixel pair [S1]. AdR-Gaussian reduces this by culling low-opacity Gaussians early [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** On the Mip-NeRF360 dataset, the method attains an average 590 FPS rendering speed on a single NVIDIA RTX3090 GPU [S1]. Experiments on three datasets demonstrate an average 310% acceleration in rendering speed [S1].
+ *   **Strengths:**
+-    *   Lossless acceleration: Does not reduce the number of Gaussians, avoiding quality degeneration [S1].
+-    *   Effective culling: Adaptive radius and AABB provide more accurate culling than simple circular bounds, especially in minor axis directions [S1].
+-    *   Load balancing: Reduces thread waiting time by balancing the number of Gaussians per pixel [S1].
++    *   Achieves acceleration without rendering quality loss by moving culling to the Preprocess stage [S1].
++    *   Load balancing minimizes thread waiting time caused by uneven computational costs across pixel threads [S1].
++    *   AABB culling provides more accurate culling in minor axis directions than circular radius alone [S1].
+ *   **Limitations:**
+-    *   Relies on the standard tile-based rasterization pipeline [S1].
+-    *   The load balancing phase requires quantifying pixel loads, which adds a small overhead [S1].
+-*   **When to use:** When high rendering speed is required without sacrificing quality, and the hardware supports parallel processing in the Preprocess stage [S1].
+-*   **When not to use:** If the scene has extremely high variance in Gaussian opacity that cannot be effectively handled by the adaptive radius, or if the overhead of load balancing outweighs the benefits in very simple scenes [S1].
++    *   Relies on the assumption that culling based on $\alpha_{low}$ is sufficient to remove non-contributing Gaussians without visual artifacts [S1].
++    *   Load balancing requires quantifying variance and adjusting Gaussian counts, which adds overhead to the pipeline [S1].
++*   **When to use:** When high rendering speed is required for 3DGS without sacrificing quality, and the hardware supports parallel preprocessing [S1].
++*   **When not to use:** When the scene has very high Gaussian density with low opacity variations, making early culling less effective [S1].
+ 
+ ## Background
+-AdR-Gaussian was proposed by Xinzhe Wang et al. in 2024 at the ACM SIGGRAPH Conference Papers [S1]. It addresses the limitations of existing acceleration methods like EAGLES, GES, LightGaussian, and C3DGS, which reduce the number of Gaussians via densification suppression, learning tendency, or pruning, often sacrificing rendering quality [S1]. AdR-Gaussian focuses on optimizing the rasterization pipeline itself, specifically the culling and load balancing stages, to achieve acceleration without quality loss [S1].
++AdR-Gaussian was proposed to address the issues of avoidable serial Gaussian culling and uneven load distribution in 3D Gaussian Splatting rendering [S1]. It was published in the proceedings of the ACM SIGGRAPH Conference Papers in December 2024 [S1]. The method distinguishes itself from existing approaches like EAGLES, GES, LightGaussian, and C3DGS, which reduce the number of Gaussians via densification suppression, learning tendency, or pruning, by focusing on optimizing the rasterization pipeline itself [S1].
+ 
+ ## Sources

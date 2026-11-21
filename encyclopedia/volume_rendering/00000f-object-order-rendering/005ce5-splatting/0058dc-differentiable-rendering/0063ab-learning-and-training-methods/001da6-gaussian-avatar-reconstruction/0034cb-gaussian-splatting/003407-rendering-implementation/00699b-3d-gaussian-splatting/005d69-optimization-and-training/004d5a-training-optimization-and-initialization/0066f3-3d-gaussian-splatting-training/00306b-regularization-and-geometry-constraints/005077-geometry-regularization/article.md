@@ -1,0 +1,115 @@
+# Geometry Regularization
+
+Also called: Gaussian Flattening, Normal Consistency and Flattening
+
+## Overview
+Geometry regularization improves the structural integrity and smoothness of reconstructed surfaces in 3D Gaussian Splatting by constraining the geometric shape of the Gaussians, distinct from depth supervision which primarily constrains positional accuracy [S1, unofficial]. It addresses the issue of "floaters" and noisy geometry by enforcing two specific constraints: aligning the orientation of rendered depth normals with per-Gaussian normals, and flattening each Gaussian along its smallest axis to better approximate surface surfels [S1, unofficial]. This method is particularly useful for reducing artifacts in complex geometries where standard photometric loss alone leads to ambiguous depth estimates [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Per-Gaussian parameters (position $\mu$, scale $s \in \mathbb{R}^3$, rotation $q$, opacity $\alpha$); rendered depth map $D$; rendered normal map $N_{rendered}$; per-Gaussian normal estimates $N_{gauss}$.
+*   **Outputs:** Gradient updates for Gaussian parameters to minimize geometric inconsistency.
+
+**Data Structures:**
+*   `OptimizationParams`: A configuration struct containing the boolean flag `use_normal_loss` [S1, unofficial].
+*   `Scaling Factor`: Vector $s \in \mathbb{R}^3$ representing the anisotropic scale of each Gaussian [S2, unofficial].
+
+**Steps:**
+1.  **Enable Regularization:** Set `use_normal_loss = true` in the optimization configuration [S1, unofficial].
+2.  **Compute Rendered Normals:** Differentiably render the scene to obtain a normal map $N_{rendered}$ from the depth buffer. This involves computing surface normals from the depth map $D$ using finite differences or analytical derivatives of the projection [S1, unofficial].
+3.  **Normal Consistency Loss:** Calculate the alignment between the rendered normal $N_{rendered}$ at each pixel and the corresponding per-Gaussian normal $N_{gauss}$ derived from the Gaussian's rotation matrix. The loss penalizes misalignment, effectively pinning the surface orientation [S1, unofficial].
+4.  **Flattening Loss:** For each Gaussian, identify the smallest component of the scaling vector $s$. Minimize this component towards zero during optimization. This forces the Gaussian to become a flat disk (surflet) aligned with the surface, reducing volume artifacts [S2, unofficial].
+
+**Formulas:**
+Let $s_i \in \mathbb{R}^3$ be the scaling vector for Gaussian $i$. The flattening loss $\mathcal{L}_{flat}$ for a single Gaussian is:
+$$
+\mathcal{L}_{flat} = \min(s_{i,1}, s_{i,2}, s_{i,3})
+$$
+The total regularization loss combines normal consistency and flattening:
+$$
+\mathcal{L}_{reg} = \lambda_{norm} \mathcal{L}_{norm} + \lambda_{flat} \mathcal{L}_{flat}
+$$
+where $\mathcal{L}_{norm}$ measures the dot product or angular difference between $N_{rendered}$ and $N_{gauss}$, and $\lambda$ are weighting factors [S1, unofficial][S2, unofficial].
+
+**Parameters:**
+*   `use_normal_loss`: Boolean flag to enable the feature [S1, unofficial].
+*   $\lambda_{norm}, \lambda_{flat}$: Weights for normal consistency and flattening terms. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Depth Refitting:** Depth maps must be refitted against a prior point cloud to the correct scale before use. Depth maps that fail this refitting process are discarded and not used for supervision [S1, unofficial].
+*   **Precision:** The minimization of the smallest scale component requires careful handling to prevent numerical instability when scales approach zero [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def geometry_regularization_loss(gaussians, rendered_depth, rendered_normals, params):
+    """
+    Computes geometry regularization loss for 3D Gaussian Splatting.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - scale: s (R3 vector)
+            - rotation: q (quaternion)
+            - position: mu (R3 vector)
+        rendered_depth: Depth map D (H x W)
+        rendered_normals: Normal map N_rendered (H x W x 3)
+        params: OptimizationParams with use_normal_loss (bool)
+        
+    Returns:
+        loss: Scalar tensor representing the regularization loss
+    """
+    if not params.use_normal_loss:
+        return 0.0
+
+    loss = 0.0
+    
+    # Step 1: Flattening Loss
+    # Minimize the smallest component of the scaling factor towards zero
+    for g in gaussians:
+        s = g.scale # s is R3
+        min_scale = min(s[0], s[1], s[2])
+        loss += min_scale
+        
+    # Step 2: Normal Consistency Loss
+    # Align rendered normals with per-Gaussian normals
+    # Note: Exact mapping of pixels to Gaussians and normal derivation 
+    # from rotation matrix is assumed to be handled by the differentiable renderer.
+    # Here we assume rendered_normals and gaussians_normals are aligned.
+    
+    # Calculate per-Gaussian normals from rotation
+    # N_gauss = R(q) * [0, 0, 1] (assuming local Z is normal)
+    # This step requires differentiable access to the Gaussian parameters
+    # and the rendering pipeline to compute gradients w.r.t mu, s, q, alpha.
+    
+    # Compute loss between rendered normal and Gaussian normal
+    # L_norm = 1 - dot(N_rendered, N_gauss)
+    # Sum over all visible pixels/Gaussians
+    
+    # Placeholder for specific normal alignment implementation details
+    # as the exact derivation of N_gauss from q and the pixel-to-Gaussian 
+    # correspondence is renderer-specific.
+    # loss += lambda_norm * normal_consistency_term
+    
+    return loss
+```
+
+## Subtopics
+
+### Scaling Loss for Geometry Modeling
+A specific variant of geometry regularization that focuses exclusively on flattening Gaussian kernels into 3D surfels aligned with the surface. It minimizes the smallest component of the scaling factor $s \in \mathbb{R}^3$ towards zero [S2, unofficial]. This aids in determining Gaussian normals by selecting the shortest scaled edge, effectively defining the surface orientation based on the thinnest dimension of the Gaussian [S2, unofficial]. It is chosen when the primary goal is to enforce planar surface approximations without necessarily enforcing strict normal consistency with rendered depth maps.
+
+## Operating characteristics
+*   **Time Complexity:** Adds overhead proportional to the number of Gaussians for computing scale minima and normal alignment. The depth refitting step adds preprocessing cost [S1, unofficial].
+*   **Memory Complexity:** Requires storage for rendered depth and normal maps, and potentially intermediate buffers for normal consistency calculations [S1, unofficial].
+*   **Strengths:** Significantly reduces "floaters" and improves surface smoothness and geometric coherence [S1, unofficial][S2, unofficial].
+*   **Limitations:** May reduce the number of remaining points if combined with pruning, potentially compromising detail if not balanced with entropy loss [S2, unofficial]. Requires accurate depth refitting; failed refits are discarded, which may reduce supervision signal in sparse regions [S1, unofficial].
+*   **When to use:** When high-quality surface geometry is required, and floaters are a persistent issue.
+*   **When not to use:** When computational resources are extremely limited, or when the scene contains significant non-planar, volumetric details that should not be flattened.
+
+## Background
+Originating from improvements to 3D Gaussian Splatting implementations, this technique was popularized in community-driven optimizations such as those in `GaussianSplatting.jl` and frameworks like `GauStudio` [S1, unofficial][S2, unofficial]. It addresses the limitation of standard photometric loss, which often results in ambiguous geometry, by introducing explicit geometric constraints [S1, unofficial][S2, unofficial]. The concept of flattening Gaussians into surfels is inspired by earlier work on surface reconstruction using Gaussian kernels [S2, unofficial].
+
+## Sources
+[S1] Better Gaussian Splatting in Julia, https://pxl-th.github.io/blog/better-gs-julia/, fetched 2026-10-26 (unofficial)
+[S2] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)

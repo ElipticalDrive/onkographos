@@ -1,0 +1,49 @@
+# Hierarchical Volume Rendering for Cloud Surface
+
+Also called: Least squares volume rendering, Octree volume rendering for surface
+
+## Overview
+This method renders cloud surfaces in regimes where the diffusion approximation is invalid, specifically at cloud edges where single scattering and low-order multiple scattering break directional independence [S1, unofficial]. It solves this by using hierarchical volume rendering with opacities $\rho(X)\sigma_t$ and voxel colors $I_0(X)$, selecting view-dependent octree cubes based on projected area-weighted approximation errors [S1, unofficial]. It is distinguished from standard octree volume rendering by its specific use of least-squares approximations for color and opacity combined with a hardware cell-projection compositing step [S1, unofficial], differing from [Octree-based Volume Rendering with Wavelet Leaves](6683-octree-based-volume-rendering-with-wavelet-leaves.md) in its approximation basis.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Precomputed octree hierarchy of least-squares approximations for color and opacity values at various cube levels, along with the Root Mean Square (RMS) error for each approximation [S1, unofficial].
+*   **Output:** Compositing of selected cubes in back-to-front order using the hardware cell-projection method [S1, unofficial].
+
+**Data Structures:**
+*   **Octree Node:** Contains fields for the least-squares approximation coefficients (for color and opacity), the RMS error of that approximation, and spatial bounds [S1, unofficial].
+*   **Approximation Functions:** Piecewise linear or piecewise constant functions are used within the hierarchy, computed per wavelength band (red, green, blue) [S1, unofficial].
+
+**Steps:**
+1.  **Precomputation:** Compute an octree hierarchy of least-squares approximations to the color and opacity values on various level cubes. Calculate the RMS error for each approximation [S1, unofficial].
+2.  **View-Dependent Selection:** Traverse the octree to select appropriate cubes. The selection is view-dependent and weights the approximation error by the projected area of the cube on the image [S1, unofficial].
+3.  **Compositing:** Composite the selected cubes in back-to-front order using the hardware cell-projection method [S1, unofficial].
+
+**Formulas:**
+*   Opacity: $\rho(X)\sigma_t$, where $\rho(X)$ is density and $\sigma_t$ is the extinction coefficient [S1, unofficial].
+*   Voxel Color: $I_0(X)$, representing the incident radiance solution per wavelength band [S1, unofficial].
+
+**Parameters:**
+*   **Approximation Type:** Piecewise linear or piecewise constant [S1, unofficial].
+*   **Error Weighting:** The selection criterion weights the RMS error by the projected area of the cube on the image plane [S1, unofficial].
+
+**Pitfalls:**
+*   **Precision/Boundaries:** The diffusion approximation (used for the bulk volume solution $I_0$) is invalid at cloud edges where single scattering and low-order multiple scattering are significant [S1, unofficial]. This method is specifically applied to handle these edge cases where the standard approximation fails [S1, unofficial].
+
+## Subtopics
+
+### Iterative PDE and Rendering Loop
+This variant integrates the volume rendering step into an iterative loop with a Partial Differential Equation (PDE) solver [S1, unofficial]. It obtains revised values for $Q_0$ and $Q_1$ by propagating incident radiance from the volume rendering results [S1, unofficial]. The sequence of PDE solution, volume rendering, and ray propagation is iterated until $I_0$ stops changing significantly [S1, unofficial]. It also computes ground illumination and shadowing using hardware volume rendering onto hemicubes placed on a ground sample grid, including diffusely reflecting ground as background [S1, unofficial]. Direct sunlight $I_{sun}(X_e, \omega_{sun})$ is propagated and attenuated separately, saved as $I_{risun}(X_e, \omega_{sun})$ at every voxel, and added separately to $Q_0$ and $Q_1$ [S1, unofficial]. A key pitfall is that the sun's radiance exceeds the dynamic range of the fixed-point frame buffer, so it is not added to the sky background [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Relies on hardware cell-projection for compositing, suggesting GPU acceleration [S1, unofficial].
+*   **Strengths:** Handles cloud edges where diffusion approximation fails; integrates with ground illumination and shadowing [S1, unofficial].
+*   **Limitations:** Requires precomputation of octree hierarchies and RMS errors [S1, unofficial].
+*   **When to use:** Rendering cloud surfaces with significant edge effects or single-scattering dominance [S1, unofficial].
+
+## Background
+Originated in the context of global illumination in clouds, specifically addressing the limitations of the diffusion approximation at cloud boundaries [S1, unofficial]. The method builds on [Schu01] (Schueller, 2001), which was modified to handle color and use piecewise linear or constant functions in the approximation hierarchy [S1, unofficial]. It is part of a broader workflow that includes PDE solutions for radiance transport and final gather ray tracing for single scattering effects [S1, unofficial].
+
+## Sources
+[S1] Diffusion and multiple anisotropic scattering for global illumination in clouds, https://digital.library.unt.edu/ark:/67531/metadc1410406/?q=multiple scattering rendering, fetched 2026-10-29 (unofficial)

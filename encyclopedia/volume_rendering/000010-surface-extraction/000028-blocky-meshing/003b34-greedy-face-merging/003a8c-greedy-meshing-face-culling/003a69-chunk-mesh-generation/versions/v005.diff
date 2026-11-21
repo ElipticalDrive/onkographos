@@ -1,0 +1,116 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Chunk Mesh Generation creates a single vertex buffer for a voxel chunk by iterating through its voxels and generating geometry only for faces exposed to air or transparent blocks [S1, S2, S4, S6, S7, S10, unofficial]. It reduces draw calls by batching all visible faces of a chunk into one mesh, differing from instancing which draws individual block instances [S4, S9, unofficial]. It serves as the foundational geometry step before greedy face merging [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md).
++Chunk Mesh Generation creates a single vertex buffer for a voxel chunk by iterating through its voxels and generating geometry only for faces exposed to air or transparent blocks [S1, S2, S4, S6, S7, S10, unofficial]. It reduces draw calls by batching all visible faces of a chunk into one mesh, differing from instancing which draws individual block instances [S4, S9, unofficial]. It serves as the foundational geometry step before greedy face merging [Greedy Meshing / Face Culling](8783-greedy-meshing-face-culling.md) [G].
+ 
+ ## How it works
+@@ -20,5 +20,5 @@
+ ### Data Structures
+ **PackedVertex (8 bytes):**
+-*   `v0` (uint32): Encoded position. Uses 1/16 fixed-point precision for $x, y, z$.
++*   `v0` (uint32): Encoded position. Uses 1/16 fixed-point precision for $x, y, z$ [S7, unofficial].
+     *   Layout: `pos.x | pos.y | pos.z` packed into bits.
+ *   `v1` (uint32): Encoded attributes.
+@@ -68,9 +68,10 @@
+ ```python
+ def generate_chunk_mesh(chunk_x, chunk_y, chunk_z, width, height, depth,
+-                        block_grid, get_neighbor, leaf_mode, sea_level):
++                        block_grid, get_neighbor, is_transparent, leaf_mode):
+     """
+     Generates a greedy-meshed vertex buffer for a voxel chunk.
+     block_grid: 3D array [x][y][z] of block IDs.
+     get_neighbor(x, y, z, dx, dy, dz): returns block ID or AIR if out of bounds.
++    is_transparent(block_id): returns True if block is transparent for meshing.
+     Returns list of quads: (center_x, center_y, center_z, size_x, size_y, size_z, normal, block_id)
+     """
+@@ -88,44 +89,49 @@
+         # Determine plane dimensions for greedy merge
+         if dx != 0:
+-            p1_size, p2_size = height, depth
++            p1_range, p2_range = range(height), range(depth)
+             p1_iter, p2_iter = 'y', 'z'
+-            iter_size = width
++            iter_range = range(width)
+             iter_iter = 'x'
+         elif dy != 0:
+-            p1_size, p2_size = width, depth
++            p1_range, p2_range = range(width), range(depth)
+             p1_iter, p2_iter = 'x', 'z'
+-            iter_size = height
++            iter_range = range(height)
+             iter_iter = 'y'
+         else:
+-            p1_size, p2_size = width, height
++            p1_range, p2_range = range(width), range(height)
+             p1_iter, p2_iter = 'x', 'y'
+-            iter_size = depth
++            iter_range = range(depth)
+             iter_iter = 'z'
+             
+-        consumed = [[False] * p2_size for _ in range(p1_size)]
++        consumed = [[False] * len(p2_range) for _ in range(len(p1_range))]
+         
+-        for p1 in range(p1_size):
+-            for p2 in range(p2_size):
++        for p1 in p1_range:
++            for p2 in p2_range:
+                 if consumed[p1][p2]:
+                     continue
+                 
+                 # Find start along iter dimension
+-                start = 0
+-                while start < iter_size and not is_face_visible(block_grid, start, p1, p2, dx, dy, dz, get_neighbor):
+-                    start += 1
+-                if start == iter_size:
++                start = None
++                for i in iter_range:
++                    if is_face_visible(block_grid, i, p1, p2, dx, dy, dz, get_neighbor, is_transparent, leaf_mode):
++                        start = i
++                        break
++                if start is None:
+                     continue
+                     
+                 # Find length along iter dimension
+-                length = 0
+-                while start + length < iter_size and is_face_visible(block_grid, start + length, p1, p2, dx, dy, dz, get_neighbor):
+-                    length += 1
+-                    
++                length = 1
++                while start + length < len(iter_range):
++                    if is_face_visible(block_grid, start + length, p1, p2, dx, dy, dz, get_neighbor, is_transparent, leaf_mode):
++                        length += 1
++                    else:
++                        break
++                        
+                 # Find height along p1 dimension
+                 merge_height = 1
+-                while start + merge_height < iter_size:
++                while start + merge_height < len(iter_range):
+                     can_extend = True
+                     for i in range(length):
+-                        if not is_face_visible(block_grid, start + i, p1 + merge_height, p2, dx, dy, dz, get_neighbor):
++                        if not is_face_visible(block_grid, start + i, p1 + merge_height, p2, dx, dy, dz, get_neighbor, is_transparent, leaf_mode):
+                             can_extend = False
+                             break
+@@ -152,13 +158,14 @@
+     return quads
+ 
+-def is_face_visible(block_grid, x, y, z, dx, dy, dz, get_neighbor):
++def is_face_visible(block_grid, x, y, z, dx, dy, dz, get_neighbor, is_transparent, leaf_mode):
+     """Checks if the face in direction (dx, dy, dz) at (x,y,z) is exposed."""
+     neighbor = get_neighbor(x, y, z, dx, dy, dz)
+     if neighbor == 0: # AIR
+         return True
+-    # Simplified transparency check based on evidence
+-    if neighbor == "WATER":
++    # Transparency check based on evidence [S7, S10, unofficial]
++    if is_transparent(neighbor):
+         return True
+-    if neighbor == "LEAVES":
++    # Leaf special case: Fancy mode treats leaves as transparent for meshing [S7, unofficial]
++    if leaf_mode == "Fancy" and is_transparent(neighbor):
+         return True
+     return False

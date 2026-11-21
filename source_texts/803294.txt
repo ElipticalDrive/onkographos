@@ -1,0 +1,96 @@
+Problem Statement Conventional random number generators used for a roulette-style number picker (0–36) are pseudo-random and their randomness source is invisible to the person using them — they have to trust a black box. There's no way f...
+
+Entropy-based roulette number generator (Shibuya livestream) · Issue #1 · MaximeMorotti/Anthropic_generator_roulette · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Entropy-based roulette number generator (Shibuya livestream) #1
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Entropy-based roulette number generator (Shibuya livestream)#1
+Copy link
+Labels
+ready-for-agentSpec is ready for an agent to implementSpec is ready for an agent to implement
+Description
+MaximeMorotti
+opened on Sep 9, 2026
+Issue body actions
+Problem Statement
+Conventional random number generators used for a roulette-style number picker (0–36) are pseudo-random and their randomness source is invisible to the person using them — they have to trust a black box. There's no way for a user to see or reason about where the randomness actually came from.
+Solution
+Generate each roulette number (0–36) from pixels of a public, live video stream of a real-world scene (the Shibuya crossing webcam) instead of a conventional PRNG. Each time a user clicks the button, the system captures a fresh Frame from the live stream, extracts entropy from its pixels, and turns that entropy into a single unbiased number 0–36 — so the randomness is visibly and traceably sourced from something happening in the real world at that moment, rather than a hidden algorithm.
+This is an academic/demo project (not a certified gambling RNG), and the design is deliberately kept as simple as possible throughout.
+User Stories
+As a user, I want to click a single button on a web page, so that I can request a new random roulette number.
+As a user, I want the result of my click to be a single integer between 0 and 36 inclusive, so that it matches a standard single-zero European roulette wheel.
+As a user, I want to see just the raw number (not a color or odd/even label), so that the tool stays focused on generating the number and I can derive color/parity myself if I want it.
+As a user, I want every click to draw from a freshly captured Frame of the live stream, so that no two of my draws (or another user's) can ever be based on the exact same source image.
+As a user, I want the number I get to be free of any predictable bias toward certain values, so that the generator is fair the way a real roulette wheel is expected to be.
+As a user, I want to be told clearly if the generator couldn't get a fresh Frame (e.g. the stream is down), so that I don't mistake a failure for a valid result.
+As a user, I do not want the system to silently swap in a different, non-visible source of randomness when the live stream is unavailable, so that the number I eventually get is always honestly attributable to the Entropy Source.
+As a user, I want the system to retry briefly on a transient failure before giving up, so that a momentary network hiccup doesn't immediately show me an error.
+As a developer maintaining this project, I want the mapping from raw pixel bytes to a final 0–36 output to be a single, pure, testable function, so that its fairness properties can be verified without depending on the live network stream.
+As a developer maintaining this project, I want the LSB-extraction-plus-hashing whitening step to be based on SHA-256 and rejection sampling, so that the output distribution is provably uniform over 0–36 and not vulnerable to modulo bias (per ADR-0001).
+As a developer maintaining this project, I want pixel entropy to be drawn from only the least-significant bit(s) of each color channel, so that the mostly-static street scene's predictable content does not dominate the "randomness."
+As a developer maintaining this project, I want the resolved live-stream URL to be cached and reused across Draws, so that the system isn't re-resolving the YouTube manifest on every single click (which is slower and raises the chance of being rate-limited/blocked).
+As a developer maintaining this project, I want the cached stream URL to be automatically re-resolved only when a Frame fetch against it fails, so that the system recovers from an expired/invalidated URL without manual intervention.
+As a developer maintaining this project, I want no audit trail or logging of Draws or Frames to be kept, so that the system stays simple and doesn't need to manage storage of video data or draw history.
+As a developer maintaining this project, I want the whole system to be a single Python web app with one HTTP endpoint, so that the implementation stays minimal and easy to reason about for an academic project.
+As a developer maintaining this project, I want Frame capture to shell out to yt-dlp (to resolve the stream) and ffmpeg (to grab a single frame), so that I don't need to write a custom video/HLS client.
+As a course reviewer/grader, I want the fairness-critical logic (bias-free mapping to 0–36) to be clearly separated from the network/IO logic (stream capture), so that I can evaluate the correctness of the random-number generation independently of infrastructure concerns.
+Implementation Decisions
+Two-stage architecture: a capture_frame() function performs all I/O — resolving the live stream URL via yt-dlp (cached across calls; a yt-dlp re-resolve happens only after a Frame fetch failure) and grabbing one JPEG/raw Frame via ffmpeg — and returns the Frame's raw bytes. A generate_draw(frame_bytes: bytes) -> int function is pure: it takes those bytes, performs Pixel LSB extraction, Whitening (SHA-256 hash of the extracted LSB bytes, then rejection-sample the hash output modulo 37 to eliminate bias — see ADR-0001), and returns the final 0–36 integer.
+One Frame per Draw: every Draw triggers its own capture_frame() call. Frames are never shared or reused across Draws, and no in-memory ledger of "already-used" byte ranges is needed as a result.
+Pixel LSB extraction: only the least-significant bit(s) of each pixel's R, G, B channel values are used as raw entropy input to Whitening; full pixel values are not used directly.
+Fail-loud policy: if capture_frame() cannot obtain a Frame (stream unreachable, yt-dlp/ffmpeg failure), the system retries briefly and then surfaces a clear error to the user. There is no fallback to os.urandom or any other randomness source.
+No audit trail: Draws are not logged, and no Frame data or hashes are persisted anywhere.
+Single endpoint: one HTTP endpoint (e.g. POST /draw) triggers capture_frame() → generate_draw() and returns the resulting integer; one HTML page with a single button calls it.
+Stack: Python; a minimal web framework (Flask or FastAPI) for the single endpoint and page.
+Output shape: the generator returns only the raw integer 0–36. Color (red/black/green) and parity (odd/even) are explicitly out of scope for this layer — see Out of Scope.
+Testing Decisions
+Good tests here exercise only external behavior: given specific input frame bytes, does generate_draw return a value in [0, 36], and does the distribution over many varied inputs look uniform (no skew toward low or high numbers)? Tests should not assert on internal intermediate values (e.g. the exact extracted LSB byte sequence) beyond what's needed to construct meaningful fixtures.
+Primary tested module: generate_draw(frame_bytes: bytes) -> int — the one seam identified for this spec (confirmed with the user). This is pure and fully testable without any network, subprocess, or yt-dlp/ffmpeg dependency: tests supply raw bytes directly (e.g. small synthetic byte arrays, or bytes from a handful of saved sample images) and assert on the returned integer.
+Suggested coverage for generate_draw: always returns an integer in [0, 36] for arbitrary input byte lengths; a large batch of varied/random inputs produces a roughly uniform distribution across 0–36 (statistical/chi-squared-style check, not exact equality); identical input bytes deterministically produce the identical output (pure function property); very small or edge-case input byte arrays don't crash the rejection-sampling loop.
+capture_frame() (the yt-dlp/ffmpeg I/O boundary) is explicitly not unit tested — confirmed with the user. At most, a manual/smoke check when running the app locally.
+There is no prior art in this repo (no code exists yet); this is the first test suite for the project.
+Out of Scope
+Color (red/black/green) and parity (odd/even) derivation from the number — left to any caller of the generator, not part of this spec.
+American double-zero wheel support (0–36 single-zero only).
+Any audit trail, logging, or persistence of Draws, Frames, or hashes.
+Certified/regulatory-grade fairness guarantees suitable for real-money gambling — this is an academic/demo project.
+Automated/unit testing of the yt-dlp/ffmpeg capture pipeline itself.
+A persistent background process that continuously decodes the stream (rejected in favor of the simpler cached-URL, on-demand-per-click approach).
+Multi-endpoint API design, authentication, rate limiting, or any UI beyond a single button and its result.
+Further Notes
+The Entropy Source (the Shibuya crossing YouTube live stream) is publicly observable, not secret — anyone watching the stream sees the same pixels. It provides unpredictability (nobody can compute the next Frame's exact pixels in advance), not confidentiality. This is a deliberate, documented trade-off (see CONTEXT.md), appropriate for an academic demo but not for any use case requiring secret randomness.
+See ADR-0001 (docs/adr/0001-sha256-rejection-sampling-for-bias-free-mapping.md) for why Whitening uses SHA-256 + rejection sampling rather than plain byte % 37.
+See CONTEXT.md for the full glossary (Draw, Frame, Entropy Source, Pixel LSB extraction, Whitening, Resolved stream URL, Fail-loud policy).
+Activity
+MaximeMorotti
+added
+ready-for-agentSpec is ready for an agent to implementSpec is ready for an agent to implement
+on Sep 9, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+ready-for-agentSpec is ready for an agent to implementSpec is ready for an agent to implement
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

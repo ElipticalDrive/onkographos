@@ -1,0 +1,139 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Iterative solvers reconstruct volumetric data by minimizing the discrepancy between measured sinograms and forward-projected volume estimates through repeated gradient-based updates [S1, unofficial][S2, unofficial]. Unlike direct methods such as [Filtered Back-Projection](2450-back-projection.md) which compute a closed-form solution, iterative solvers handle ill-posed problems, sparse views, and noise more robustly by explicitly optimizing a loss function [S1, unofficial]. They distinguish themselves from general [Differentiable CT Execution Model](3066-differentiable-ct-execution-model.md) approaches by providing specialized, optimized algorithms (like CGNE and Landweber) that exploit the linear structure of the Radon transform for faster convergence than generic optimizers [S1, unofficial].
++Iterative solvers reconstruct volumetric data by minimizing the discrepancy between measured sinograms and forward-projected volume estimates through repeated updates [S1, unofficial]. They are implemented as specialized algorithms (Conjugate Gradient, CGNE, Landweber) that exploit the linear structure of the Radon transform for efficient computation [S1, unofficial]. They distinguish themselves from general [Differentiable CT Execution Model](3066-differentiable-ct-execution-model.md) approaches by providing optimized, mathematically grounded solvers tailored to tomographic inverse problems [S1, unofficial].
+ 
+ ## How it works
+-Iterative solvers operate on the linear system $Ax = b$, where $A$ is the forward projection operator (Radon transform), $x$ is the volume to reconstruct, and $b$ is the measured sinogram [S1, unofficial]. The goal is to find $x$ that minimizes the residual error. The core mechanism relies on the differentiability of the forward operator $\mathcal{P}$ and its adjoint (back-projection) $\mathcal{P}^T$ [G].
++Iterative solvers operate on the linear system $Ax = b$, where $A$ is the forward projection operator (Radon transform), $x$ is the volume to reconstruct, and $b$ is the measured sinogram [S1, unofficial]. The core mechanism relies on the differentiability of the forward operator $\mathcal{P}$ and its adjoint (back-projection) $\mathcal{P}^T$ [G].
+ 
+ ### Inputs and Outputs
+@@ -27,8 +27,8 @@
+ 
+ #### 1. Landweber Iteration
+-Landweber iteration is a gradient descent method applied to the normal equations $A^T A x = A^T b$ [S1, unofficial]. It updates the volume estimate by moving in the direction of the negative gradient of the least-squares error.
++Landweber iteration is an iterative solver for CT reconstruction [S1, unofficial]. It updates the volume estimate by moving in the direction of the back-projected residual.
+ 
+ **Step Size Estimation:**
+-The step size $\alpha$ must be chosen such that $0 < \alpha < \frac{2}{\sigma_{max}^2}$, where $\sigma_{max}$ is the largest singular value of $A$ [S1, unofficial]. In practice, $\alpha$ is estimated using power iteration on the matrix $A^T A$ [S1, unofficial].
++The step size $\alpha$ is estimated using power iteration on the operator $A^T A$, typically scaled by 0.95 to ensure stability [S1, unofficial].
+ 
+ **Update Rule:**
+@@ -37,8 +37,8 @@
+ $$
+ Where:
+-*   $x_k$ is the volume estimate at iteration $k$.
+-*   $\mathcal{P}(x_k)$ is the forward projection (synthetic sinogram).
+-*   $p$ is the measured sinogram.
+-*   $\mathcal{P}^T(\cdot)$ is the back-projection operator.
++*   $x_k$ is the volume estimate at iteration $k$ [G].
++*   $\mathcal{P}(x_k)$ is the forward projection (synthetic sinogram) [G].
++*   $p$ is the measured sinogram [G].
++*   $\mathcal{P}^T(\cdot)$ is the back-projection operator [G].
+ *   $\alpha$ is the step size [S1, unofficial].
+ 
+@@ -60,5 +60,5 @@
+     """
+     x = guess.clone()
+-    for i in range(max_iter):
++    for _ in range(max_iter):
+         # Forward projection: compute synthetic sinogram
+         sino_pred = radon.forward(x)
+@@ -68,7 +68,4 @@
+         
+         # Back-projection of residual to update volume
+-        # Gradient of ||Ax - b||^2 is 2 * A^T(Ax - b)
+-        # Update rule: x = x + alpha * A^T * residual
+-        # Note: Some implementations absorb the factor of 2 into alpha
+         update = radon.backprojection(residual)
+         x = x + alpha * update
+@@ -78,9 +75,9 @@
+ 
+ #### 2. Conjugate Gradient on the Normal Equations (CGNE)
+-CGNE solves the normal equations $A^T A x = A^T b$ using the Conjugate Gradient (CG) method [S1, unofficial]. It converges faster than Landweber for well-conditioned systems by using conjugate directions rather than steepest descent.
++CGNE solves the normal equations $A^T A x = A^T b$ using the Conjugate Gradient method [S1, unofficial].
+ 
+ **Update Rule:**
+-The standard CG algorithm applied to the system $M x = c$ where $M = A^T A$ and $c = A^T b$.
+-1.  Initialize $x_0$, $r_0 = c - M x_0$, $p_0 = r_0$.
++The algorithm applies standard CG to the system $M x = c$ where $M = A^T A$ and $c = A^T b$ [G].
++1.  Initialize $x_0$, $r_0 = c - M x_0$, $p_0 = r_0$ [G].
+ 2.  For $k = 0, 1, \dots$:
+     $$
+@@ -99,5 +96,5 @@
+     p_{k+1} = r_{k+1} + \beta_k p_k
+     $$
+-Where $M p_k = A^T (A p_k)$ requires two projections (forward then back-projection) [S1, unofficial].
++Where $M p_k = A^T (A p_k)$ requires two projections (forward then back-projection) [G].
+ 
+ **Pseudocode (CGNE):**
+@@ -119,7 +116,5 @@
+     
+     # Compute initial residual r = A^T b - A^T A x
+-    # c = A^T b
+     c = radon.backprojection(sino)
+-    # M x = A^T (A x)
+     Ax = radon.forward(x)
+     Mx = radon.backprojection(Ax)
+@@ -127,8 +122,8 @@
+     p = r.clone()
+     
+-    # r^T r
+-    r_dot = torch.dot(r.flatten(), r.flatten())
++    # r^T r (standard dot product)
++    r_dot = sum(r * r)
+     
+-    for i in range(max_iter):
++    for _ in range(max_iter):
+         # Compute M p = A^T (A p)
+         Ap = radon.forward(p)
+@@ -136,5 +131,5 @@
+         
+         # alpha = (r^T r) / (p^T M p)
+-        p_Mp = torch.dot(p.flatten(), Mp.flatten())
++        p_Mp = sum(p * Mp)
+         alpha = r_dot / p_Mp
+         
+@@ -145,8 +140,5 @@
+         r = r - alpha * Mp
+         
+-        # Check convergence (optional, based on norm of r)
+-        # if torch.norm(r) < tolerance: break
+-        
+-        r_dot_new = torch.dot(r.flatten(), r.flatten())
++        r_dot_new = sum(r * r)
+         
+         # beta = (r_new^T r_new) / (r^T r)
+@@ -167,7 +159,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Step Size Selection:** If $\alpha$ is too large in Landweber, the iteration diverges. Power iteration is required to estimate the spectral radius [S1, unofficial].
+-*   **Ill-Conditioning:** CGNE may struggle with ill-conditioned systems (e.g., sparse views) without regularization [S1, unofficial].
+-*   **Precision:** Half-precision (16-bit) storage can provide speedups (>125×) but may introduce numerical instability in iterative solvers; single precision is safer for convergence [S1, unofficial].
++*   **Precision:** Half-precision (16-bit) storage provides speedups of >125× but may introduce numerical instability; single precision is safer for convergence [S1, unofficial].
++*   **Step Size Selection:** If $\alpha$ is too large in Landweber, the iteration diverges [G].
++*   **Ill-Conditioning:** CGNE may struggle with ill-conditioned systems (e.g., sparse views) without regularization [G].
+ 
+ ## Subtopics
+@@ -186,13 +178,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Each iteration requires one forward projection and one back-projection. CGNE requires two projections per iteration (for $A^T A p$). Convergence speed depends on the condition number of the system; CGNE is generally faster than Landweber [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the volume, sinogram, and intermediate vectors (residuals, search directions). Batch processing increases memory linearly with batch size [S1, unofficial].
++*   **Time Complexity:** Each iteration requires one forward projection and one back-projection. CGNE requires two projections per iteration (for $A^T A p$) [G].
++*   **Memory Complexity:** Requires storing the volume, sinogram, and intermediate vectors (residuals, search directions) [G]. Batch processing increases memory linearly with batch size [S1, unofficial].
+ *   **Performance:** On a Tesla V100, TorchRadon's iterative solvers are >40× faster than Astra Toolbox in single precision, and >125× faster in half precision [S1, unofficial].
+ *   **Quality:** In test settings, Landweber achieved an MSE of $1.39 \cdot 10^{-4}$ and CGNE achieved $4.42 \cdot 10^{-5}$, outperforming FBP ($2.22 \cdot 10^{-4}$) [S1, unofficial].
+-*   **Strengths:** Handles sparse views and noise better than FBP; supports regularization; differentiable [S1, unofficial][S2, unofficial].
+-*   **Limitations:** Slower than FBP; requires careful tuning of parameters (step size, iterations); may converge to local minima if non-convex regularizers are used [S1, unofficial][S2, unofficial].
++*   **Strengths:** Handles sparse views and noise better than FBP; supports regularization; differentiable [S2, unofficial][S1, unofficial].
++*   **Limitations:** Not given in the sources.
+ 
+ ## Background
+-Iterative solvers for tomography have a long history in computational mathematics. The Conjugate Gradient method was introduced by Hestenes and Stiefel (1952), and Landweber iteration by Landweber (1951) [S1, unofficial]. In the context of differentiable volume rendering and deep learning, libraries like TorchRadon have implemented these solvers to leverage GPU acceleration and automatic differentiation, enabling their use in end-to-end trainable pipelines [S1, unofficial]. The integration of these solvers allows for hybrid reconstruction methods combining physics-based models with deep learning priors [S2, unofficial].
++Iterative solvers are common algorithms for solving tomography reconstruction problems [S1, unofficial]. In the context of differentiable volume rendering and deep learning, libraries like TorchRadon have implemented these solvers to leverage GPU acceleration and automatic differentiation, enabling their use in end-to-end trainable pipelines [S1, unofficial]. The integration of these solvers allows for hybrid reconstruction methods combining physics-based models with deep learning priors [S2, unofficial].
+ 
+ ## Sources

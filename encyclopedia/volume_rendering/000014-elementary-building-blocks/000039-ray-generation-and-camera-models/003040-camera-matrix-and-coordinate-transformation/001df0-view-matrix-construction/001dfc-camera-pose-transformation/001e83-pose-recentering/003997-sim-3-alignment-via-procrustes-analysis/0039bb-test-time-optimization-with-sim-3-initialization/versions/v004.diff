@@ -1,0 +1,138 @@
+--- v003.md
++++ v004.md
+@@ -4,109 +4,53 @@
+ 
+ ## Overview
+-A testing procedure involving Sim(3) alignment initialization followed by additional test-time optimization to adjust test poses for view synthesis [S1, unofficial]. It initializes poses using Procrustes analysis on camera locations before refining them through gradient-based optimization [S1, unofficial].
++A testing procedure involving Sim(3) alignment initialization followed by additional test-time optimization to adjust test poses for view synthesis [S1, unofficial]. It sets itself apart by using a global rigid-similarity transformation derived from training data to bootstrap test poses, rather than relying on local neighbor proximity or unoptimized estimated poses [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Estimated camera poses for the test set (rotation matrices $R_i$ and translation vectors $t_i$) [S1, unofficial].
+-*   Ground truth camera poses for the training set (used for alignment reference) [S1, unofficial].
+-*   Neural Radiance Field (NeRF) or similar implicit representation [G].
+-*   Optimization hyperparameters (iteration count) [S1, unofficial].
++- Estimated camera poses for training images ($P_{train}$) and ground truth poses for training images ($P_{train}^{gt}$).
++- Estimated camera poses for test images ($P_{test}$).
++- Photometric loss function ($\mathcal{L}_{photo}$) and a NeRF model (or similar implicit representation).
+ 
+ **Outputs:**
+-*   Refined camera poses for the test set [S1, unofficial].
++- Optimized camera poses for test images ($P_{test}^{opt}$).
+ 
+ **Data Structures:**
+-*   Camera Pose: Separate $R_i \in SO(3)$ and $t_i \in \mathbb{R}^3$ [G].
+-*   NeRF Model: MLP mapping 5D coordinates $(x, y, z, \theta, \phi)$ to color and density [G].
++- Camera pose $P_i$ represented as a $4 \times 4$ transformation matrix or a tuple $(R_i, t_i)$ where $R_i \in SO(3)$ and $t_i \in \mathbb{R}^3$.
+ 
+ **Steps:**
+-1. Initialize poses using Sim(3) alignment with Procrustes analysis on camera pose locations [S1, unofficial].
+-2. Perform additional test-time optimization to further adjust the test poses [S1, unofficial].
++1. **Sim(3) Initialization:** Compute a Sim(3) transformation matrix $T_{sim3}$ using Procrustes analysis on the camera pose locations (centers) of the training images. Apply this transformation to the estimated test poses:
++   $$ P_{test}^{init} = T_{sim3} \cdot P_{test} $$
++   This aligns the test poses to the coordinate system of the ground truth training poses [S1, unofficial].
++2. **Test-time Optimization:** Optimize the parameters of $P_{test}^{init}$ by minimizing the photometric loss $\mathcal{L}_{photo}$ between rendered images and ground truth test images. The optimization updates the rotation and translation components of the test poses [S1, unofficial].
+ 
+ **Parameters:**
+-*   Test-optimization iteration count: 100 iterations for methods other than NoPe-NeRF [S1, unofficial].
+-*   Learning rate: Not given in the sources. [S1, unofficial]
++- Test-optimization iteration count: 100 iterations for methods other than NoPe-NeRF [S1, unofficial].
++- Note: In some pipelines (e.g., GNeRF), test-time optimization is interleaved with training, resulting in higher total iteration counts (e.g., ~4230) [S3].
+ 
+ **Pitfalls:**
+-*   Incorrect pose estimations can affect the Sim(3) alignment, causing the initialization to fail [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-import numpy as np
+-
+-def procrustes_analysis(points_est, points_gt):
+-    mu_est = np.mean(points_est, axis=0)
+-    mu_gt = np.mean(points_gt, axis=0)
+-    X = points_est - mu_est
+-    Y = points_gt - mu_gt
+-    H = X.T @ Y
+-    U, _, Vt = np.linalg.svd(H)
+-    R = Vt.T @ U.T
+-    # Ensure proper rotation (no reflection) [G]
+-    if np.linalg.det(R) < 0:
+-        Vt[-1, :] *= -1
+-        R = Vt.T @ U.T
+-    s = np.trace(Y.T @ (R @ X)) / np.sum(X**2)
+-    t = mu_gt - s * (R @ mu_est.T).T
+-    return R, s, t
+-
+-def apply_sim3_transform(poses, R_sim, s_sim, t_sim):
+-    return [(s_sim * (R_sim @ R), s_sim * (R_sim @ t) + t_sim) for R, t in poses]
+-
+-def generate_rays_from_pose(R, t, img_shape):
+-    # Standard pinhole camera ray generation [G]
+-    h, w = img_shape[:2]
+-    u, v = np.meshgrid(np.arange(w), np.arange(h))
+-    # Assume principal point at center and focal length 1 for simplicity [G]
+-    rays = np.stack([u - w/2, v - h/2, np.ones_like(u)], axis=-1)
+-    rays = rays.reshape(-1, 3)
+-    rays = (R.T @ rays.T).T + t
+-    return rays
+-
+-def compute_rendering_loss(pred, target):
+-    return np.mean((pred - target) ** 2)
+-
+-def test_time_optimization_with_sim3_initialization(
+-    test_poses_est, train_poses_gt, nerf_model, gt_images, num_iterations=100, lr=1e-3
+-):
+-    # Step 1: Sim(3) Initialization
+-    centers_est = np.array([t for _, t in test_poses_est])
+-    centers_gt = np.array([t for _, t in train_poses_gt])
+-    R_sim, s_sim, t_sim = procrustes_analysis(centers_est, centers_gt)
+-    test_poses = apply_sim3_transform(test_poses_est, R_sim, s_sim, t_sim)
+-
+-    # Step 2: Test-Time Optimization
+-    for _ in range(num_iterations):
+-        total_loss = 0.0
+-        for i, (R, t) in enumerate(test_poses):
+-            rays = generate_rays_from_pose(R, t, gt_images[i].shape)
+-            pred_colors = nerf_model.forward(rays)
+-            loss = compute_rendering_loss(pred_colors, gt_images[i])
+-            total_loss += loss
+-            # Compute gradients of loss w.r.t. pose parameters [G]
+-            # grad_R, grad_t = autograd(loss, [R, t])
+-            # R -= lr * grad_R
+-            # t -= lr * grad_t
+-            test_poses[i] = (R, t)
+-    return test_poses
+-```
++- Incorrect pose estimations can affect the Sim(3) alignment, causing the initialization to fail or converge to a poor local minimum [S1, unofficial].
++- Procrustes alignment is sensitive to outlier images in the training set, which can cause exaggerated misalignment [S3].
+ 
+ ## Subtopics
+ 
+ ### SAMURAI Initialization
+-Initialization schemes implemented in the SAMURAI method [S2]. The fixed initialization scheme sets all initial view directions to `[Center, Above, Center]` (North pole) [S2]. When optimizing poses in $SO(3)$, the predicted camera locations are overwritten using the formula $t_i = -R_i \times T_i$ [S2]. The manual initialization scheme specifies each view direction with a triplet `[Left/Center/Right, Above/Center/Below, Front/Center/Back]` [S2]. The combination `[Center, Center, Center]` is disallowed, resulting in 26 possible initial directions [S2].
++A variant using specific initialization schemes for direction vectors. Fixed initialization sets all initial directions to [Center, Above, Center] (North pole). When optimizing poses in SO(3), predicted camera locations are overwritten using $t_i = -R_i \times T_i$. Manual initialization allows specifying each view direction with a triplet [Left/Center/Right, Above/Center/Below, Front/Center/Back], excluding [Center, Center, Center], yielding 26 possible initial directions [S2].
++
++### Test-time optimization for view synthesis
++A variant where test-time optimization is interleaved with the training process. It registers test cameras using the Procrustes transformation from training images and optimizes test poses with photometric loss to factor out pose error effects. This approach requires more iterations (typically ~4230, or up to 1000 for scenes with outliers) to converge accurately [S3].
+ 
+ ## Operating characteristics
+-*   Time complexity: Not given in the sources. [S1, unofficial]
+-*   Memory complexity: Not given in the sources. [S1, unofficial]
+-*   Strengths: Provides a robust initialization for test poses when the estimated poses can be aligned precisely to the reference poses [S1, unofficial].
+-*   Limitations: Performance degrades when estimated poses are significantly incorrect, as incorrect pose estimations can affect the Sim(3) alignment and cause the initialization to fail [S1, unofficial]. It may struggle with complex trajectories and reduced frame overlap compared to neighbor-based initialization methods [S1, unofficial].
+-*   When to use: When estimated poses are reasonably accurate and can be aligned via a global similarity transform [S1, unofficial].
+-*   When not to use: When estimated poses are significantly incorrect or when the trajectory has large variations and low overlap that prevent a global Sim(3) alignment from being meaningful [S1, unofficial].
++- **Time Complexity:** Depends on the number of optimization iterations and the cost of rendering per iteration. Standard implementations use 100 iterations [S1, unofficial], while interleaved approaches may use thousands [S3].
++- **Memory Complexity:** Low, as it only stores pose parameters and the existing NeRF model.
++- **Strengths:** Effective when estimated poses can be aligned precisely to ground truth poses [S1, unofficial].
++- **Limitations:** Sensitive to outliers in the training set which degrade the Procrustes alignment [S3]. Struggles with complex trajectories and reduced overlap if neighbor-based initialization is used instead (though this method uses Sim(3), not neighbor) [S1, unofficial].
++- **When to use:** When global alignment of test poses to training poses is feasible and outliers are minimal.
++- **When not to use:** When training data contains significant outliers that distort the Procrustes alignment [S3].
+ 
+ ## Background
+-The method is derived from the BARF (Blending Aliased Reconstructions for Conditional NeRFs) approach [S1, unofficial]. It was introduced in the context of NeRF pose optimization, where test-time optimization is used to refine camera poses for novel view synthesis [S1, unofficial]. The Sim(3) alignment step leverages Procrustes analysis on camera locations to provide a stable starting point for the optimization [S1, unofficial].
++Originated from the BARF (Blending Aliased Reconstructions for Forward Modeling) approach [S1, unofficial]. The Sim(3) alignment approach is derived from the official open-source version of BARF [S1, unofficial]. It is used in evaluating novel view synthesis on datasets like NeRFBuster and Free-Dataset [S1, unofficial].
+ 
+ ## Sources
+ [S1] CT-NeRF: Incremental Optimizing Neural Radiance Field and Poses with Complex Trajectory, https://doi.org/10.48550/arxiv.2404.13896, fetched 2026-10-26 (unofficial)
+-[S2] MELON: NeRF with Unposed Images in SO(3), https://doi.org/10.1109/3dv62453.2024.00084, fetched 2026-10-30+[S2] MELON: NeRF with Unposed Images in SO(3), https://doi.org/10.1109/3dv62453.2024.00084, fetched 2026-10-30
++[S3] LU-NeRF: Scene and Pose Estimation by Synchronizing Local Unposed NeRFs, https://doi.org/10.1109/iccv51070.2023.01679, fetched 2026-10-26

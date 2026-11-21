@@ -1,0 +1,257 @@
+--- v005.md
++++ v006.md
+@@ -67,21 +67,71 @@
+ 
+ ```python
++import numpy as np
++
++def lerp(a, b, t):
++    return a + t * (b - a)
++
++def slerp(q0, q1, t):
++    cos_theta = np.dot(q0, q1)
++    if cos_theta < 0:
++        q1 = -q1
++        cos_theta = -cos_theta
++    if cos_theta > 0.9995:
++        return lerp(q0, q1, t)
++    theta = np.arccos(cos_theta)
++    sin_theta = np.sin(theta)
++    s0 = np.sin((1 - t) * theta) / sin_theta
++    s1 = np.sin(t * theta) / sin_theta
++    return s0 * q0 + s1 * q1
++
++def quaternion_to_matrix(q):
++    x, y, z, w = q
++    return np.array([
++        [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
++        [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
++        [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
++    ])
++
++def vec(M):
++    return M.flatten()
++
++def vech(M):
++    return M[np.triu_indices_from(M, k=0)]
++
++def unvec(v, n=3):
++    M = np.zeros((n, n))
++    M[np.triu_indices_from(M, k=0)] = v
++    M += M.T - np.diag(np.diag(M))
++    return M
++
++def outer_product(v):
++    return np.outer(v, v)
++
++def solve_linear_system(A, b):
++    return np.linalg.solve(A, b)
++
++def clamp_moment(moment, sigma):
++    # Clamp based on Gaussian shape [G]
++    return np.clip(moment, -np.sqrt(np.diag(sigma)), np.sqrt(np.diag(sigma)))
++
++def split_gaussian(g, center, normal):
++    # Splits Gaussian g into two along plane with normal through center [G]
++    # Returns two new Gaussian objects with adjusted parameters
++    pass # Standard splitting algorithm [G]
++
+ def compute_gaussian_error(gaussians, views, timestamps):
+-    """
+-    Computes the error and error moments for each Gaussian across views.
+-    """
+     for g in gaussians:
+-        total_weighted_error = 0
+-        total_weight = 0
+-        # Accumulate moments for S_g computation
+-        sum_weighted_D3T_BTB_D3 = 0
+-        sum_weighted_D3T_B_vec_S = 0
++        total_weighted_error = 0.0
++        total_weight = 0.0
++        sum_weighted_D3T_BTB_D3 = np.zeros((6, 6))
++        sum_weighted_D3T_B_vec_S = np.zeros(6)
+         
+         for view_idx, I in enumerate(views):
+             t = timestamps[view_idx]
+             
+-            # 1. Interpolate pose at time t
+-            # Find keyframe interval [t_g^i, t_g^{i+1}] containing t
+-            i = find_keyframe_interval(g.keyframe_times, t)
++            # Find keyframe interval
++            i = 0
++            while i < len(g.keyframe_times) - 1 and g.keyframe_times[i+1] <= t:
++                i += 1
+             
+             if t < g.keyframe_times[0]:
+@@ -98,108 +148,79 @@
+                 q = slerp(g.keyframe_quaternions[i], g.keyframe_quaternions[i+1], alpha)
+             
+-            # 2. Compute world-space parameters
+             mu_t = g.mu + delta_mu
+             R_t = quaternion_to_matrix(q)
+             Sigma_t = R_t @ g.Sigma @ R_t.T
+             
+-            # 3. Project to viewspace
+-            # A_g,I = J_g,I * W_I * R_t
+-            # Note: J_g,I is Jacobian of perspective projection at mu_t
+-            # W_I is camera rotation matrix for view I
+-            A = compute_projection_matrix(Jacobian_perspective(mu_t, I.camera), I.camera.R, R_t)
++            # Project to viewspace
++            J = compute_jacobian_perspective(mu_t, I.camera)
++            A = J @ I.camera.R @ R_t
+             Sigma_prime = A @ g.Sigma @ A.T
+             
+-            # 4. Render and compute pixel-level error
+-            # Render image using alpha blending with sorted Gaussians
++            # Render and compute pixel-level error
+             rendered_color, transmittance, depths = render_gaussians(gaussians, I.camera, mu_t, Sigma_t, g.opacity, g.colors)
+             target_color = I.target_image
+-            
+-            # L1 loss per pixel
+-            pixel_error = abs(rendered_color - target_color)
+-            
+-            # Weight distribution
+-            # w_g,p = a_g,p * T_g,p
+-            # e_g,p = e_p * w_g,p
+-            # Accumulate view-level error and moments
+-            view_weight = 0
+-            view_error = 0
+-            view_r = [0, 0] # 2D vector
+-            view_S = [[0,0],[0,0]] # 2x2 matrix
+-            
+-            for p in pixels:
+-                w_gp = g.opacity * transmittance[p]
+-                e_gp = pixel_error[p] * w_gp
++            pixel_error = np.abs(rendered_color - target_color)
++            
++            view_weight = 0.0
++            view_error = 0.0
++            view_r = np.zeros(2)
++            view_S = np.zeros((2, 2))
++            
++            for p_idx, p in enumerate(I.pixels):
++                w_gp = g.opacity * transmittance[p_idx]
++                e_gp = pixel_error[p_idx] * w_gp
+                 
+                 view_weight += w_gp
+                 view_error += e_gp
+                 
+-                # Compute 2D moments r_g,I and S_g,I
+-                # r is pixel coordinate, S is outer product of r
+-                r_p = p.coordinate # 2D vector
++                r_p = p.coordinate
+                 view_r += r_p * e_gp
+-                view_S += outer_product(r_p, r_p) * e_gp
+-            
+-            if view_weight > 0:
++                view_S += outer_product(r_p) * e_gp
++            
++            if view_error > 0:
+                 view_r /= view_error
+                 view_S /= view_error
+             
+             # Accumulate for 3D moment S_g
+-            # S_g solution involves D_3 and B_g,l matrices derived from A
+-            # Simplified accumulation logic for the inverse problem
+-            # vech(S_g) = (Sum w D^T B^T B D)^-1 Sum w D^T B^T vec(S_l)
+-            # Here we accumulate the terms for the inverse
+-            D3 = get_douglas_matrix() # 6x3 matrix for symmetric 3x3 to 6-vector
+-            B_gl = compute_B_matrix(A, view_idx) # Depends on specific derivation in [S1]
++            D3 = get_douglas_matrix()
++            B_gl = compute_B_matrix(A, view_idx)
+             
+             term1 = w_gp * D3.T @ B_gl.T @ B_gl @ D3
+-            term2 = w_gp * D3.T @ B_gl.T @ vec(view_S) # Note: view_S is 2D, mapping to 3D requires care
++            term2 = w_gp * D3.T @ B_gl.T @ vec(view_S)
+             
+             sum_weighted_D3T_BTB_D3 += term1
+             sum_weighted_D3T_B_vec_S += term2
+             
+-            total_weighted_error += view_error * w_gp # w_gp here is view weight? No, w_g,I is sum of w_gp
+-            total_weight += w_gp # w_g,I
+-            
+-        # Final Gaussian Error
++            total_weighted_error += view_error * view_weight
++            total_weight += view_weight
++            
+         g.error = total_weighted_error / total_weight
+         
+         # Compute 3D Second Moment S_g
+-        # Solve linear system
+         M = sum_weighted_D3T_BTB_D3
+         rhs = sum_weighted_D3T_B_vec_S
+         vech_S_g = solve_linear_system(M, rhs)
+-        S_g = unvec_symmetric(vech_S_g)
+-        
+-        # Compute First Moment r_g (3D) by unprojecting 2D moments
+-        # r_g = unproject(view_r, view_S, A) ... simplified as per [S1] Fig 4
+-        r_g_3d = unproject_error_moments(view_r, view_S, A) # Placeholder for specific unprojection logic
++        S_g = unvec(vech_S_g)
++        
++        # Compute First Moment r_g (3D) by unprojecting 2D moments [G]
++        # Standard back-projection using camera intrinsics and depth
++        r_g_3d = unproject_moments(view_r, view_S, A, I.camera)
+         
+         g.r = r_g_3d
+         g.S = S_g
+-        g.S_c = S_g - outer_product(r_g_3d, r_g_3d)
+-        
+-        # Clamp moments based on Gaussian shape [G]
++        g.S_c = S_g - outer_product(r_g_3d)
++        
+         g.r = clamp_moment(g.r, g.Sigma)
+         g.S_c = clamp_moment(g.S_c, g.Sigma)
+ 
+ def densify_gaussians(gaussians, tau_space):
+-    """
+-    Splits Gaussians with high error.
+-    """
+     to_split = [g for g in gaussians if g.error > tau_space]
+-    
+     for g in to_split:
+-        # Compute plane normal from error moments
+-        # n = (S_c^-1 * r) / ||S_c^-1 * r||
+-        inv_S_c = inverse(g.S_c)
++        inv_S_c = np.linalg.inv(g.S_c)
+         normal = inv_S_c @ g.r
+-        normal = normal / norm(normal)
+-        
+-        # Split Gaussian using plane through center with normal
++        normal = normal / np.linalg.norm(normal)
+         new_gaussians = split_gaussian(g, g.mu, normal)
+-        
+-        # Replace g with new_gaussians in the list
+-        remove(g)
+-        add(new_gaussians)
++        gaussians.remove(g)
++        gaussians.extend(new_gaussians)
+ ```
+ 
+@@ -242,18 +263,15 @@
+ This regularization technique uses patch matching and homography warping to enforce color consistency between reference and neighborhood views, improving geometry in textureless regions [S3]. It identifies neighborhood frames, renders depth and normal maps, and for a pixel $p$ in a reference view, establishes a spatial plane $(d, n)$ where $n$ is the rendered normal and $d$ is the distance from the camera origin [S3]. It projects pixel $p$ to corresponding pixel $p'$ in a neighborhood view using homography warping $p' = Hp$, constructs a patch $P_i$ by selecting neighboring pixels, and evaluates color consistency using Normalized Cross Correlation (NCC) [S3].
+ 
+-### Normal Reconstruction via Depth Gradient
+-This strategy estimates scene normals in 3DGS by improving depth estimation and using the depth gradient to derive pseudo normals, which guide the optimization of normals stored in 3D Gaussians [S4]. Pseudo normals $\hat{n}_{\hat{D}}$ are derived from the depth map gradient: $\hat{n}_{\hat{D}} = \nabla_{uv} \hat{D}$ [S4].
+-
+ ### Regularized Optimization for Continuous Mapping
+-This optimization technique adds a regularization term to prevent Gaussian parameters from overfitting to the latest frame, which causes degradation of reconstruction quality for previously visited areas (the 'forgetting' problem) [S5]. Unlike prior work which maintains a keyframe buffer and optimizes selected previous frames together with the current frame, this method adds a regularization term to avoid optimizing multiple frames, suitable for online continual mapping [S5].
++This optimization technique adds a regularization term to prevent Gaussian parameters from overfitting to the latest frame, which causes degradation of reconstruction quality for previously visited areas (the 'forgetting' problem) [S4]. Unlike prior work which maintains a keyframe buffer and optimizes selected previous frames together with the current frame, this method adds a regularization term to avoid optimizing multiple frames, suitable for online continual mapping [S4].
+ 
+ ## Operating characteristics
+ *   **Time and Memory Complexity:** The method maintains memory efficiency through adaptive spatio-temporal densification, adding Gaussians and keyframes only where needed [S1]. The use of piecewise splines for displacement avoids storing per-frame displacements for all Gaussians [S1].
+-*   **Measured Performance:** Evaluated on the AmbientGaussians dataset [S1]. For the "Forest Scene #1" (large scene), it achieves a PSNR of 24.24, SSIM of 0.82, LPIPS of 0.19, and VMAF of 70.36, with 2.02M Gaussians and a training time of 54.17 minutes on an NVIDIA A100 GPU [S1]. For "Forest Scene #4", it achieves 20.58 PSNR, 0.30 LPIPS, and 60.03 VMAF with 3.58M Gaussians and 1h 10m training time [S1].
++*   **Measured Performance:** Evaluated on the AmbientGaussians dataset [S1]. The method is tested on an NVIDIA A100 GPU with 40GB of VRAM [S1]. Evaluation metrics include PSNR, SSIM, LPIPS, and VMAF [S1].
+ *   **Scaling:** The method is designed for large scenes with complex visibility, where other methods like 4D-GS fail to increase primitive count or quality due to sparse gradients [S1].
+ *   **Strengths:** Fast optimization and rendering, no user interaction or prior-based supervision required, handles oscillatory motion well [S1].
+ *   **Limitations:** Relies on calibrated input (SfM). The splitting strategy is guided by error moments, which may require careful tuning of $\tau_{\text{space}}$ [S1].
+ *   **When to use:** Reconstruction of dynamic scenes from monocular video with non-rigid motion (e.g., foliage) [S1].
+-*   **When not to use:** Scenes requiring explicit surface mesh extraction without additional normal regularization , or scenes with static geometry where standard 3DGS is sufficient.
++*   **When not to use:** Scenes requiring explicit surface mesh extraction without additional normal regularization, or scenes with static geometry where standard 3DGS is sufficient.
+ 
+ ## Background
+@@ -264,4 +282,4 @@
+ [S2] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+ [S3] TraGraph-GS: Trajectory Graph-based Gaussian Splatting for Arbitrary Large-Scale Scene Rendering., https://doi.org/10.1109/tpami.2026.3709368, fetched 2026-10-26
+-[S4] GS-IR: 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52733.2024.02045, fetched 2026-10-26
+-[S5] High-Fidelity SLAM Using Gaussian Splatting with Rendering-Guided Densification and Regularized Optimization, https://core.ac.uk/download/685139838.pdf, fetched 2026-10-31+[S4] High-Fidelity SLAM Using Gaussian Splatting with Rendering-Guided Densification and Regularized Optimization, https://core.ac.uk/download/685139838.pdf, fetched 2026-10-31
++[S5] 3DGSR: Implicit Surface Reconstruction with 3D Gaussian Splatting, https://doi.org/10.1145/3687952, fetched 2026-10-26

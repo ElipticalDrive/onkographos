@@ -1,0 +1,150 @@
+# INGeo
+
+Also called: Instant-NGP with Geometry Priors
+
+## Overview
+INGeo is a method that accelerates 3D scene reconstruction training by leveraging noisy geometry priors (e.g., from RGB-D sensors or COLMAP) converted into an occupancy grid, aiming for instant reconstruction on edge devices [S1]. It builds on [InstantNGP Network Architecture](5049-instantngp-network-architecture.md) by initializing the occupancy grid with prior geometry and applying density scaling to ensure rays terminate quickly at the surface, addressing the slow convergence of randomly initialized weights [S1].
+
+## How it works
+**Inputs:**
+1. Noisy geometry priors: Point clouds or depth images [S1].
+2. Base Instant-NGP model parameters (hash grid, MLP weights) [S1].
+3. Training hyperparameters (learning rate, iterations) [S1].
+
+**Outputs:**
+1. Trained neural radiance field (density and color) [S1].
+2. Optimized occupancy grid [S1].
+
+**Data Structures:**
+*   **Occupancy Grid:** A 3D tensor (typically sparse or dense hash-based as per Instant-NGP) where each cell indicates the presence of geometry [S1]. The grid is initialized from geometry priors and updated during training [S1].
+*   **Model Weights:** The MLP weights for density and color estimation. In the INGeo initialization strategy, approximately 89% of these weights remain randomly initialized, while the occupancy grid is inherited or pre-computed [S1].
+
+**Steps:**
+
+1.  **Convert Geometry Priors to Occupancy Grid:**
+    *   If the input is a point cloud, perform **point-cloud splatting** to convert points to grid cells. Instead of treating points as infinitesimal, splat each point to all nearby grid cells within a specific radius [S1]. This completes small missing regions caused by sparse priors, at the cost of adding some empty grid cells [S1].
+    *   If the input is depth images, convert them to a 3D occupancy representation [S1].
+    *   This initial grid serves as the starting state for the reconstruction model [S1].
+
+2.  **Initialize Model with Pretrained Occupancy Grid (Optional Bootstrap):**
+    *   To further accelerate, one can inherit an occupancy grid from a pretrained model. Even if 89% of the model weights are randomly initialized, inheriting the grid provides a significant speedup [S1].
+    *   *Note:* Obtaining a high-quality occupancy grid from scratch via boot-strapping (iteratively updating grid and model) can take significant time (e.g., ~30 minutes on a TX2 device for 88% IoU on the Lego scene) [S1]. INGeo aims to bypass this by using priors [S1].
+
+3.  **Apply Density Scaling (Inductive Bias):**
+    *   During training, multiply the initial density prediction $\sigma$ by a scaling factor $k$ (where $k > 1$) [S1].
+    *   Formula: $\sigma_{scaled} = k \cdot \sigma_{model}$ [S1].
+    *   This ensures that rays terminate soon after encountering the object surface identified by the occupancy grid. Without this, randomly initialized low density predictions cause accumulated transmittance to drop slowly, broadcasting color gradients to all sampled points (including occluded ones) and slowing training [S1]. The scaled density makes the rendered image appear more "solid" early in training [S1].
+
+4.  **Continuous Occupancy Grid Update:**
+    *   Geometry priors are inherently sparse and noisy. To address sparsity and errors, do not rely solely on the initial grid [S1].
+    *   Re-evaluate volume density at a certain frequency during training and update the occupancy grid dynamically [S1].
+    *   Combine the initialized occupancy grid with these continuously updated grids to refine the representation [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ingeo_train(geometry_priors, instant_ngp_model, training_config):
+    """
+    Train Instant-NGP with geometry priors.
+    
+    Args:
+        geometry_priors: Point cloud or depth images.
+        instant_ngp_model: Instant-NGP model instance (hash grid, MLP).
+        training_config: Dict with learning_rate, iterations, density_scale_factor, update_freq.
+        
+    Returns:
+        Trained model.
+    """
+    
+    # Step 1: Convert priors to initial occupancy grid
+    # If point cloud, splat to nearby cells within radius
+    initial_occupancy_grid = convert_priors_to_occupancy_grid(geometry_priors)
+    
+    # Initialize model's occupancy grid with the prior
+    instant_ngp_model.occupancy_grid = initial_occupancy_grid
+    
+    # Note: Model weights (MLP) are typically randomly initialized,
+    # except if inheriting from a pretrained model (89% random weights)
+    
+    for iteration in range(training_config.iterations):
+        
+        # Step 2: Sample rays and compute density with scaling
+        rays = sample_rays(training_config)
+        
+        densities = []
+        for ray in rays:
+            # Get base density from MLP
+            base_density = instant_ngp_model.mlp(ray.sample_points)
+            
+            # Apply density scaling factor k
+            # This ensures rays terminate quickly at the surface
+            scaled_density = base_density * training_config.density_scale_factor
+            densities.append(scaled_density)
+            
+        # Perform volume rendering with scaled densities
+        colors = volume_render(rays, densities, instant_ngp_model.color_mlp)
+        
+        # Compute loss and backpropagate
+        loss = compute_loss(colors, training_config.target_images)
+        instant_ngp_model.update_weights(loss)
+        
+        # Step 3: Update occupancy grid periodically
+        if iteration % training_config.update_freq == 0:
+            # Re-evaluate volume density to update grid
+            # This addresses sparsity and errors in initial priors
+            updated_grid = update_occupancy_grid(instant_ngp_model)
+            
+            # Combine initial grid with updated grid
+            # (Specific combination strategy not detailed in sources, 
+            # but implies merging or overwriting with new data)
+            instant_ngp_model.occupancy_grid = combine_grids(
+                initial_occupancy_grid, 
+                updated_grid
+            )
+            
+    return instant_ngp_model
+
+def convert_priors_to_occupancy_grid(priors):
+    """
+    Convert point cloud or depth to occupancy grid.
+    Uses point-cloud splatting for point clouds.
+    """
+    grid = empty_occupancy_grid()
+    
+    if is_point_cloud(priors):
+        for point in priors:
+            # Splat point to nearby cells within radius
+            nearby_cells = get_cells_within_radius(point, radius=1.0) # Radius value not specified in sources
+            for cell in nearby_cells:
+                grid[cell] = 1.0 # Occupied
+    elif is_depth_images(priors):
+        # Convert depth images to 3D occupancy
+        grid = depth_to_occupancy(priors)
+        
+    return grid
+```
+
+**Parameters:**
+*   **Density Scaling Factor ($k$):** A value $> 1$ applied to initial density predictions. Exact value not specified in sources, but experiments show it makes images more "solid" and speeds up training [S1].
+*   **Splatting Radius:** The radius within which point cloud points are splatted to grid cells. Exact value not specified in sources [S1].
+*   **Update Frequency:** How often the occupancy grid is re-evaluated and updated. Exact value not specified in sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Low Initial Density:** Without density scaling, randomly initialized weights produce low density, causing slow transmittance drop and gradient broadcast to occluded points, slowing training [S1].
+*   **Sparse Priors:** Point clouds may have missing regions. Point-cloud splatting helps but may add empty cells [S1].
+*   **Noisy Priors:** Geometry priors from RGB-D or COLMAP are noisy. Continuous grid updates are necessary to correct errors [S1].
+
+## Operating characteristics
+*   **Speedup:** INGeo achieves approximately 2x speedup over standard Instant-NGP on the NeRF Synthetic dataset, reaching an average test PSNR of >30 in half the training iterations [S1].
+*   **Hardware:** Tested on edge devices like NVIDIA TX2. Obtaining an occupancy grid with 88% IoU on the Lego scene takes about 30 minutes using the boot-strapping strategy without priors [S1].
+*   **Memory:** Inherits the memory footprint of Instant-NGP (hash grid + MLP). The occupancy grid is initialized from priors, potentially reducing the need for extensive initial sampling [S1].
+*   **Strengths:** Enables instant reconstruction on edge devices (mobile phones, AR/VR headsets) by leveraging existing geometry priors [S1]. Reduces spatial redundancy and mitigates hash collisions [S1].
+*   **Limitations:** Relies on the availability of noisy geometry priors. Performance depends on the quality of priors; sparse or noisy priors require careful handling (splatting, updates) [S1].
+
+## Background
+INGeo was proposed by Jian Li, Bichen Wu, Albert Pumarola, Peizhao Zhang, Yingyan Lin, and Peter Vajda from Georgia Institute of Technology and Meta Reality Labs [S1]. It was published in 2022 as part of the ECCV proceedings [S1]. The method aims to bridge the gap between high-end GPU reconstruction and instant training on edge devices for AR/VR applications [S1]. It builds on Instant-NGP [9] and addresses limitations of Depth-Supervised NeRF [3] by using occupancy grids rather than depth as training signals [S1].
+
+## Sources
+[S1] INGeo: Accelerating Instant Neural Scene Reconstruction with Noisy Geometry Priors, https://doi.org/10.1007/978-3-031-25066-8_40, fetched 2026-10-26

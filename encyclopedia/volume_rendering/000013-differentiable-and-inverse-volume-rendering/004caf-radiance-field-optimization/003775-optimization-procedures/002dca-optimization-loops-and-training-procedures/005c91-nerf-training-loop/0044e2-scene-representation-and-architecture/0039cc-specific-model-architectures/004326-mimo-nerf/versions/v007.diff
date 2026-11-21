@@ -1,0 +1,89 @@
+--- v006.md
++++ v007.md
+@@ -14,5 +14,5 @@
+ *   **Positional Encoding:** Input positions $\mathbf{x} \in \mathbb{R}^3$ and directions $\mathbf{d} \in \mathbb{S}^2$ are encoded using positional encoding $\gamma(\cdot)$ [Parent, S1]. $\gamma(\mathbf{x})$ is 63-dimensional, $\gamma(\mathbf{d})$ is 27-dimensional [S1].
+ *   **MIMO MLP:**
+-    *   **Density Network:** Takes concatenated encoded positions $\gamma(\mathbf{x}_i), \dots, \gamma(\mathbf{x}_j)$ (total dimension $63 \times N_p$) and applies an 8-layer MLP with ReLU activations, 256 hidden units, and skip connections from input to the 5th layer [S1]. Output is $N_p$ density values $\sigma$ [S1].
++    *   **Density Network:** Takes concatenated encoded positions $\gamma(\mathbf{x}_i), \dots, \gamma(\mathbf{x}_j)$ (total dimension $63 \times N_p$) and applies an 8-layer MLP with ReLU activations, 256 hidden units, and skip connections from input to every 4th layer [S1]. Output is $N_p$ density values $\sigma$ [S1].
+     *   **Color Network:** Takes the output of the last hidden layer of the density network (dimension 256), concatenates with encoded directions $\gamma(\mathbf{d})$ (dimension 27), passes through a 1-layer MLP (ReLU, 128 units), and finally a linear layer to produce $N_p$ RGB colors $\mathbf{c}$ [S1].
+     *   Note: The total parameter count increases because the input dimension of the first layer scales with $N_p$, but the hidden layer size remains constant [S1].
+@@ -34,5 +34,5 @@
+         $$ \mathcal{L}_{\text{alpha 3D}} = \sum_{m_1=1}^{M-1} \sum_{m_2=m_1+1}^M \frac{1}{N} \sum_{i=1}^N \left[ \mu_{m_1}^{m_2} \|\alpha_i^{m_1} - \text{sg}(\alpha_i^{m_2})\|_2^2 + \mu_{m_2}^{m_1} \|\text{sg}(\alpha_i^{m_1}) - \alpha_i^{m_2}\|_2^2 \right] $$
+     *   Asymmetric Weight $\mu$:
+-        $$ \mu_{mj}^{mi} = \frac{\sqrt{m_j} \sqrt{R_{\max}}}{\sqrt{R_{m_i}}} $$
++        $$ \mu_{m_1}^{m_2} = \frac{\sqrt{m_2} \sqrt{R_{\max}}}{\sqrt{R_{m_1}}} $$
+         where $R_{\max} = \max_{m \in \{1, \dots, M\}} R_m$. $R_m$ are scaling factors for reformulated MLPs [S1].
+ 6.  **Optimization:** Train using Adam optimizer with learning rate $5 \times 10^{-4}$ and batch size 1024 rays [S1].
+@@ -47,5 +47,5 @@
+     """
+     x: (..., 3)
+-    Returns: (..., 63)
++    Returns: (..., 3 + 2*L_freq*3)
+     """
+     x = x.unsqueeze(-2)
+@@ -90,5 +90,5 @@
+         for i, layer in enumerate(self.density_layers[:-1]):
+             h = layer(h)
+-            if i == 3: # Skip connection to 5th layer (index 4)
++            if (i + 1) % 4 == 0: # Skip connection to every 4th layer
+                 h = h + x_flat
+             h = F.relu(h)
+@@ -96,5 +96,5 @@
+         densities = self.density_layers[-1](h).view(B, Np, 1) # (B, Np, 1)
+         
+-        gamma_d = positional_encoding(d.unsqueeze(1)).squeeze(1) # (B, 27)
++        gamma_d = positional_encoding(d.unsqueeze(1), L_freq=4).squeeze(1) # (B, 27)
+         color_input = torch.cat([h, gamma_d], dim=-1) # (B, F+27)
+         
+@@ -105,10 +105,39 @@
+         return c, densities
+ 
+-def compute_loss(colors, densities, gt_colors, alpha, lambda_3d=1.0):
++def compute_3d_consistency_loss(c1, c2, a1, a2, R1, R2, R_max):
++    """
++    Computes asymmetric 3D consistency loss between two reformulated networks.
++    c1, c2: (B, Np, 3) colors
++    a1, a2: (B, Np, 1) alphas
++    R1, R2: scaling factors for the respective reformulations
++    R_max: maximum scaling factor across all reformulations
++    """
++    mu_12 = (torch.sqrt(torch.tensor(R2)) * torch.sqrt(R_max)) / torch.sqrt(torch.tensor(R1))
++    mu_21 = (torch.sqrt(torch.tensor(R1)) * torch.sqrt(R_max)) / torch.sqrt(torch.tensor(R2))
++    
++    l_color = mu_12 * F.mse_loss(c1, c2.detach()) + mu_21 * F.mse_loss(c1.detach(), c2)
++    l_alpha = mu_12 * F.mse_loss(a1, a2.detach()) + mu_21 * F.mse_loss(a1.detach(), a2)
++    
++    return (l_color + l_alpha) / 2.0
++
++def compute_loss(colors, densities, gt_colors, alpha, lambda_3d=1.0, reformulations=None):
+     l_pixel = F.mse_loss(colors, gt_colors)
+-    # 3D consistency loss requires multiple reformulated MLPs (M > 1).
+-    # The sources do not give a single-network implementation for L_3D.
+-    # It is computed between predictions from different reformulations as per the formulas.
+-    l_3d = 0.0 # Placeholder for multi-reformulation consistency logic
++    
++    if reformulations is not None:
++        # L_3D is computed between multiple reformulated networks (M > 1)
++        # using the asymmetric weighting formula from the sources.
++        l_3d = 0.0
++        M = len(reformulations)
++        for m1 in range(M):
++            for m2 in range(m1 + 1, M):
++                c1, a1 = reformulations[m1]
++                c2, a2 = reformulations[m2]
++                R1, R2 = reformulations[m1].get('R', 1), reformulations[m2].get('R', 1)
++                R_max = max([r.get('R', 1) for r in reformulations])
++                l_3d += compute_3d_consistency_loss(c1, c2, a1, a2, R1, R2, R_max)
++        l_3d /= (M * (M - 1) / 2)
++    else:
++        l_3d = 0.0 # Placeholder for multi-reformulation consistency logic
++        
+     return l_pixel + lambda_3d * l_3d
+ ```
+@@ -145,5 +174,5 @@
+ 
+ ## Background
+-MIMO-NeRF was introduced in 2023 [S1]. It addresses the high computational cost of standard NeRF by leveraging parallel processing of ray samples [S1]. It builds on the NeRF training loop [Parent] and positional encoding techniques [Parent].
++MIMO-NeRF was introduced in 2023 [S1]. It addresses the high computational cost of standard NeRF by leveraging parallel processing of ray samples [S1]. It builds on the NeRF training loop [Parent] and positional encoding techniques [Parent], modifying the network architecture to accept multiple input positions and produce multiple output colors and densities simultaneously [S1].
+ 
+ ## Sources

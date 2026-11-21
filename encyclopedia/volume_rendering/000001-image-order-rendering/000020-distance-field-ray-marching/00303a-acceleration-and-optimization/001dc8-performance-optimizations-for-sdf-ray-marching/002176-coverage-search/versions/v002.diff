@@ -1,0 +1,185 @@
+--- v001.md
++++ v002.md
+@@ -4,112 +4,104 @@
+ 
+ ## Overview
+-Coverage Search is a distance-field ray marching algorithm designed to determine ray hit or miss status in fewer iterations than standard sphere tracing by using a stack to manage coverage spans along the ray [S1, unofficial]. It sets itself apart from siblings like [Aggressive Ray Marching with SDF](2326-aggressive-ray-marching-with-sdf.md) by explicitly tracking intervals of guaranteed empty or occupied space, allowing it to skip large portions of the ray where the signed distance function (SDF) would otherwise be evaluated repeatedly without progress.
++Coverage Search is a distance-field ray marching algorithm designed to determine ray hit or miss status in fewer iterations than standard sphere tracing by using a stack to manage coverage spans along the ray [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   `RayOrigin`: The starting position of the ray.
+-*   `RayDirection`: The normalized direction vector of the ray.
+-*   `TravelStart`: Estimated start travel distance (e.g., from bounding volume intersection).
+-*   `TravelEnd`: Estimated end travel distance (e.g., from bounding volume intersection).
+-*   `SignedDistanceFunction(p)`: A function returning the signed distance from point `p` to the nearest surface.
+-*   `Position` (output): The 3D position of the hit or the end of the ray.
+-*   Return value: `true` if a hit occurred, `false` otherwise.
++*   `RayOrigin`: The starting position of the ray [S1, unofficial].
++*   `RayDirection`: The normalized direction vector of the ray [S1, unofficial].
++*   `TravelStart`: Estimated start travel distance, typically from ray intersection with a simple bounding volume [S1, unofficial].
++*   `TravelEnd`: Estimated end travel distance, typically from ray intersection with a simple bounding volume [S1, unofficial].
++*   `SignedDistanceFunction(p)`: A scene-dependent function returning the signed distance from point `p` to the nearest surface [S1, unofficial].
++*   `Position` (output): The 3D position of the hit or the end of the ray [S1, unofficial].
++*   Return value: `true` if a hit occurred, `false` otherwise [S1, unofficial].
+ 
+ **Data Structures:**
+ *   `Coverage`: A struct containing:
+-    *   `Low`: Float, the start of the coverage span along the ray parameter.
+-    *   `High`: Float, the end of the coverage span along the ray parameter.
+-    *   `Sign`: Integer, `1` if the span is inside the object (negative distance), `-1` if outside (positive distance), `0` for neutral/initial states.
++    *   `Low`: Float, the start of the coverage span along the ray parameter [S1, unofficial].
++    *   `High`: Float, the end of the coverage span along the ray parameter [S1, unofficial].
++    *   `Sign`: Integer, `1` if the span is outside (positive distance), `-1` if inside (negative distance), `0` for neutral/initial states [S1, unofficial].
+ *   `Stack`: A dynamic array or fixed-size buffer of `Coverage` structs. The source notes a required size of approximately 10 for GLSL implementations [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  Initialize the stack.
+-2.  Calculate the initial pivot point in the middle of the travel bounds.
+-3.  Evaluate the SDF at the pivot.
+-4.  Determine the coverage span of the pivot based on the SDF value.
+-5.  Iterate through the stack, merging or subdividing spans until the ray start is subsumed by a known coverage span.
+-6.  Determine the final hit position based on the sign of the final cursor span.
++1.  Initialize the stack with a neutral span at `TravelEnd` and an initial pivot span [S1, unofficial].
++2.  Calculate the initial pivot point in the middle of the travel bounds [S1, unofficial].
++3.  Evaluate the SDF at the pivot and determine its coverage span [S1, unofficial].
++4.  Iterate through the stack, merging or subdividing spans until the ray start is subsumed by a known coverage span [S1, unofficial].
++5.  Determine the final hit position based on the sign of the final cursor span [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
++def SignedDistanceFunction(p):
++    # Scene-dependent SDF. Defined here as a unit sphere at origin for completeness.
++    return math.sqrt(p[0]**2 + p[1]**2 + p[2]**2) - 1.0
++
++def sign(x):
++    if x > 0: return 1
++    elif x < 0: return -1
++    else: return 0
++
++class Coverage:
++    def __init__(self, Low, High, Sign):
++        self.Low = Low
++        self.High = High
++        self.Sign = Sign
++
+ def CoverageSearch(RayOrigin, RayDirection, TravelStart, TravelEnd):
+-    # 1. Initialize Stack
+-    # The stack manages spans of travel distance.
+-    # Initial push: a neutral span at the end of the ray.
+     Stack = []
+-    Stack.append(Coverage(High=TravelEnd, Low=TravelEnd, Sign=0))
++    # Push neutral span at TravelEnd
++    Stack.append(Coverage(Low=TravelEnd, High=TravelEnd, Sign=0))
+     
+-    # 2. Initial Pivot Calculation
++    # Initial pivot calculation
+     PivotTravel = (TravelStart + TravelEnd) * 0.5
+-    PivotPoint = RayOrigin + RayDirection * PivotTravel
++    PivotPoint = [RayOrigin[i] + RayDirection[i] * PivotTravel for i in range(3)]
+     PivotRadius = SignedDistanceFunction(PivotPoint)
+     
+-    # 3. Push Initial Coverage Span
+-    # The span extends from PivotTravel minus the distance to PivotTravel plus the distance.
+-    # The sign indicates if the pivot is inside (-1) or outside (1) the object.
+-    # Note: sign() returns -1 for negative, 1 for positive, 0 for zero.
+-    InitialSign = 1 if PivotRadius > 0 else (-1 if PivotRadius < 0 else 0)
++    # Push initial coverage span
+     SpanLow = PivotTravel - abs(PivotRadius)
+     SpanHigh = PivotTravel + abs(PivotRadius)
+-    Stack.append(Coverage(High=SpanHigh, Low=SpanLow, Sign=InitialSign))
++    InitialSign = sign(PivotRadius)
++    Stack.append(Coverage(Low=SpanLow, High=SpanHigh, Sign=InitialSign))
+     
+-    # 4. Initialize Cursor
+-    # The cursor tracks the current "frontier" of known coverage starting from TravelStart.
+-    Cursor = Coverage(High=TravelStart, Low=TravelStart, Sign=0)
++    # Initialize Cursor
++    Cursor = Coverage(Low=TravelStart, High=TravelStart, Sign=0)
+     
+-    # 5. Main Loop
+     while len(Stack) > 0:
+         Top = Stack[-1]
+         
+-        # Check if the top of the stack overlaps with the current cursor's known high point.
+-        # If Stack[Top].Low <= Cursor.High, the stack span is reachable/merged.
++        # Check if stack span overlaps with cursor's known high point
+         if Top.Low <= Cursor.High:
+-            # Merge the stack span into the cursor.
+-            # The cursor expands to cover the stack span.
+-            Cursor = Stack.pop()
++            popped = Stack.pop()
++            # Merge popped span into cursor
++            if popped.High > Cursor.High:
++                Cursor.High = popped.High
++            if popped.Sign == -1:
++                Cursor.Sign = -1
+         else:
+-            # The stack span is ahead of the cursor. We need to subdivide.
+-            # Calculate a new pivot between the cursor's high and the stack's low.
++            # Subdivide between cursor high and stack low
+             PivotTravel = (Top.Low + Cursor.High) * 0.5
+-            PivotPoint = RayOrigin + RayDirection * PivotTravel
++            PivotPoint = [RayOrigin[i] + RayDirection[i] * PivotTravel for i in range(3)]
+             PivotRadius = SignedDistanceFunction(PivotPoint)
+             
+-            # Determine the new coverage span for this pivot.
+-            NextSign = 1 if PivotRadius > 0 else (-1 if PivotRadius < 0 else 0)
++            NextSign = sign(PivotRadius)
+             NextLow = PivotTravel - abs(PivotRadius)
+             NextHigh = PivotTravel + abs(PivotRadius)
+-            Next = Coverage(High=NextHigh, Low=NextLow, Sign=NextSign)
++            Next = Coverage(Low=NextLow, High=NextHigh, Sign=NextSign)
+             
+-            # Check for merging conditions.
+-            # If the new span has a different sign than the stack top AND overlaps with it,
+-            # we can potentially merge or adjust the stack top's low bound.
+-            # The condition abs(Stack[Top].Sign + Next.Sign) > 0 implies signs are not opposite (i.e., same sign or one is zero).
+-            # However, the source logic specifically checks if they can be merged/adjusted.
++            # Check merge condition: signs are not opposite (abs(sum) > 0) and spans overlap
+             if abs(Top.Sign + Next.Sign) > 0 and Top.Low <= Next.High:
+-                # Adjust the stack top's low bound to the new span's low.
+-                # This effectively merges the new span into the existing stack top if they are compatible.
+                 Top.Low = Next.Low
+             else:
+-                # Push the new span onto the stack.
+                 Stack.append(Next)
+-    
+-    # 6. Determine Result
+-    # If the final cursor sign is -1 (inside), we hit the object.
+-    # The hit position is at the start of the inside span (Cursor.Low).
+-    # If the cursor sign is not -1, we missed.
++                
++    # Determine result
+     if Cursor.Sign == -1:
+-        # Clamp to TravelStart to ensure we don't go before the start bound.
+         HitTravel = max(TravelStart, Cursor.Low)
+-        Position = RayOrigin + RayDirection * HitTravel
++        Position = [RayOrigin[i] + RayDirection[i] * HitTravel for i in range(3)]
+         return True, Position
+     else:
+-        Position = RayOrigin + RayDirection * TravelEnd
++        Position = [RayOrigin[i] + RayDirection[i] * TravelEnd for i in range(3)]
+         return False, Position
+-
+-class Coverage:
+-    def __init__(self, High, Low, Sign):
+-        self.High = High
+-        self.Low = Low
+-        self.Sign = Sign
+ ```
+ 
+@@ -124,10 +116,8 @@
+ *   **SDF Cost:** The approach is only worthwhile if the `SignedDistanceFunction` is sufficiently expensive to justify the overhead of stack management and branching [S1, unofficial].
+ *   **Discrepancy in Stack Size:** There is an unexplained discrepancy between the required stack size in the GLSL implementation (10) and the initial analysis implementation (4), potentially due to a bug in the GLSL version [S1, unofficial].
+-*   **Precision:** The calculation of `SpanLow` and `SpanHigh` uses `abs(PivotRadius)`. If `PivotRadius` is very small, precision issues may arise, though not explicitly detailed in the source [G].
+ 
+ ## Operating characteristics
+ *   **Performance:** In the ideal case, Coverage Search performs approximately the same number of `SignedDistanceFunction` calls as sphere tracing. However, it results in half as many calls when the average signed distance approaches zero without hitting zero [S1, unofficial].
+-*   **Suitability:** The method is best suited for environments suitable for recursive algorithms and where the SDF is expensive to evaluate [S1, unofficial]. It is less suitable for scenes with simple, cheap SDFs or hardware with strict occupancy limits.
+-*   **Comparison to Siblings:** Unlike [Aggressive Ray Marching with SDF](2326-aggressive-ray-marching-with-sdf.md) which may skip steps based on distance thresholds, Coverage Search explicitly manages intervals. It differs from [SDF-Accelerated Volumetric Ray Marching](3681-sdf-accelerated-volumetric-ray-marching.md) by focusing on hit/miss determination via span coverage rather than volumetric accumulation.
++*   **Suitability:** The method is best suited for environments suitable for recursive algorithms and where the SDF is expensive to evaluate [S1, unofficial]. It is less suitable for scenes with simple, cheap SDFs or hardware with strict occupancy limits [S1, unofficial].
+ 
+ ## Background

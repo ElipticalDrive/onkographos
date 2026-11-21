@@ -1,0 +1,154 @@
+--- v001.md
++++ v002.md
+@@ -4,69 +4,67 @@
+ 
+ ## Overview
+-Canonical Enumeration is the fundamental baseline algorithm for isosurface cell extraction, which identifies grid cells intersecting an isosurface by sequentially visiting every cell in the volume [S1, unofficial]. It serves as the reference point for all other extraction methods, establishing the theoretical lower bound for worst-case time complexity based on isovalue comparisons [S1, unofficial]. Unlike hierarchical or adaptive methods, it performs no spatial pruning, ensuring that every cell is evaluated exactly once regardless of surface density.
++Canonical Enumeration is the fundamental baseline algorithm for isosurface extraction that sequentially visits every cell in a discretized volume to identify those containing the surface. It solves the cell extraction problem by checking if a target isovalue lies within the scalar range of each cell, serving as the reference point against which accelerated hierarchical methods are measured. Unlike [Isosurface Propagation from Seed Cells](6942-isosurface-propagation-from-seed-cells.md), which skips empty regions using hierarchical structures, Canonical Enumeration guarantees no cell is missed but processes all cells regardless of occupancy.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- **Input**: A scalar volume data structure $V$ defined on a regular grid, and a scalar isovalue $t$.
+-- **Output**: A list of "active" cells $C_{i,j,k}$ that contain the isosurface.
++**Inputs and Outputs:**
++*   **Input:** A volume data structure $V$ defined on a regular grid, where each cell $C_{i,j,k}$ has scalar values $V_{i,j,k}$ at its vertices. A scalar isovalue $t \in \mathbb{R}$.
++*   **Output:** A list of "active" cells $C_{i,j,k}$ where the isosurface intersects the cell.
+ 
+-**Data Structures**
+-- **Volume Data**: A 3D array or equivalent structure storing scalar values $V_{i,j,k}$ at grid vertices or cell centers. The exact layout depends on the host implementation (e.g., row-major 3D array), but the algorithm only requires random access to vertex values within a cell.
+-- **Active Cell List**: A dynamic list or buffer storing the indices $(i,j,k)$ of cells where the isosurface is detected.
++**Data Structures:**
++*   **Volume Data:** A 3D array or linearized buffer storing vertex scalar values. No auxiliary structures (like octrees or bounding volume hierarchies) are required [S1, unofficial].
++*   **Variables:** Temporary variables for storing $v_{min}$, $v_{max}$, and the current cell index.
+ 
+-**Algorithm Steps**
+-1. Initialize an empty list `active_cells`.
+-2. Iterate through every cell $C_{i,j,k}$ in the volume grid. The traversal order is typically lexicographic (e.g., $i$, then $j$, then $k$), but any order covering all cells is valid.
+-3. For each cell, retrieve the scalar values at its vertices. Let $V_{i,j,k}$ denote the set of scalar values associated with the vertices of cell $C_{i,j,k}$.
+-4. Compute the minimum and maximum values within the cell:
+-   $$ v_{\min} = \min(V_{i,j,k}) $$
+-   $$ v_{\max} = \max(V_{i,j,k}) $$
+-5. Define the interpolation range interval for the cell as $[v_{\min}, v_{\max})$. The use of a half-open interval is critical to handle boundary cases consistently, particularly when multiple cells share vertices with values exactly equal to the isovalue [S1, unofficial].
+-6. Check if the isovalue $t$ lies within this interval:
+-   $$ t \in [v_{\min}, v_{\max}) $$
+-   This is equivalent to checking:
+-   $$ v_{\min} \le t < v_{\max} $$
+-7. If the condition is true, the cell is "active" and is added to `active_cells`. Otherwise, it is skipped.
+-8. After iterating through all cells, return `active_cells`.
++**Steps:**
++1.  Iterate through every cell $C_{i,j,k}$ in the volume grid.
++2.  For each cell, determine the minimum scalar value $v_{min}$ and maximum scalar value $v_{max}$ among its vertices.
++3.  Evaluate the condition $t \in [v_{min}, v_{max})$.
++4.  If the condition is true, mark $C_{i,j,k}$ as an active cell and proceed to surface triangulation (e.g., Marching Cubes). If false, skip the cell.
+ 
+-**Pseudocode**
++**Formulas:**
++The range of the interpolation function $\hat{f}$ in a cell is defined as:
++$$ \hat{f}(C_{i,j,k}) = [v_{min}, v_{max}] $$
++where:
++$$ v_{min} = \min(V_{i,j,k}) $$
++$$ v_{max} = \max(V_{i,j,k}) $$
++
++The cell extraction condition is:
++$$ t \in [v_{min}, v_{max}) $$
++
++**Parameters:**
++*   **Isovalue ($t$):** The threshold scalar value defining the surface.
++*   **Grid Dimensions:** $N_x, N_y, N_z$ defining the total number of cells $n$.
++
++**Edge Cases and Pitfalls:**
++*   **Interval Boundary:** The sources specify using the half-open interval $[v_{min}, v_{max})$ rather than the closed interval $[v_{min}, v_{max}]$. This choice forces an extraction algorithm to report specific boundary conditions consistently, avoiding ambiguity when $t$ exactly equals $v_{max}$ of one cell and $v_{min}$ of an adjacent cell [S1, unofficial].
++*   **Precision:** Floating-point comparisons for $t \ge v_{min}$ and $t < v_{max}$ must handle precision errors near the boundaries.
++*   **Degenerate Input:** If $v_{min} = v_{max}$, the interval is a single point. If $t = v_{min}$, the cell is active under the half-open rule.
++
++**Pseudocode:**
+ ```python
+-def canonical_enumeration(volume, isovalue):
++def canonical_enumeration(volume_data, isovalue, grid_dims):
+     """
+-    volume: 3D array of scalar values V[i][j][k]
+-    isovalue: float t
+-    Returns: list of (i, j, k) tuples for active cells
++    volume_data: 3D array of scalar values at vertices.
++    grid_dims: Tuple (Nx, Ny, Nz) defining the number of cells.
++    isovalue: The scalar threshold t.
++    Returns: List of active cell indices (i, j, k).
+     """
+     active_cells = []
++    Nx, Ny, Nz = grid_dims
+     
+-    # Determine grid dimensions
+-    # Note: The exact iteration bounds depend on whether V stores vertex values
+-    # or cell values. For standard Marching Cubes, V is vertex data.
+-    # If V is vertex data of size (Nx+1)x(Ny+1)x(Nz+1), cells are Nx x Ny x Nz.
+-    # This implementation assumes V is vertex data.
+-    
+-    Nx, Ny, Nz = volume.shape[0] - 1, volume.shape[1] - 1, volume.shape[2] - 1
+-    
+-    for i in range(Nx):
++    # Iterate over all cells in the volume
++    for k in range(Nz):
+         for j in range(Ny):
+-            for k in range(Nz):
+-                # Retrieve the 8 vertex values for cell (i, j, k)
+-                # Vertices are at (i,j,k), (i+1,j,k), ..., (i+1,j+1,k+1)
+-                v000 = volume[i][j][k]
+-                v100 = volume[i+1][j][k]
+-                v010 = volume[i][j+1][k]
+-                v110 = volume[i+1][j+1][k]
+-                v001 = volume[i][j][k+1]
+-                v101 = volume[i+1][j][k+1]
+-                v011 = volume[i][j+1][k+1]
+-                v111 = volume[i+1][j+1][k+1]
++            for i in range(Nx):
++                # Get vertex values for cell (i, j, k)
++                # Assuming volume_data stores values at vertices, 
++                # cell (i,j,k) involves vertices (i,j,k) to (i+1,j+1,k+1)
++                # This depends on specific data layout; generic access:
++                cell_vertices = get_cell_vertices(volume_data, i, j, k)
+                 
+-                vertex_values = [v000, v100, v010, v110, v001, v101, v011, v111]
++                # Calculate min and max scalar values in the cell
++                vmin = min(cell_vertices)
++                vmax = max(cell_vertices)
+                 
+-                # Compute min and max
+-                vmin = min(vertex_values)
+-                vmax = max(vertex_values)
+-                
+-                # Check half-open interval [vmin, vmax)
++                # Check if isovalue is in the half-open interval [vmin, vmax)
+                 if vmin <= isovalue < vmax:
+                     active_cells.append((i, j, k))
+@@ -75,23 +73,19 @@
+ ```
+ 
+-**Parameters and Edge Cases**
+-- **Isovalue $t$**: A real number.
+-- **Precision**: Floating-point comparisons should be handled carefully. The half-open interval $[v_{\min}, v_{\max})$ ensures that if $t = v_{\max}$ for one cell, it is not considered active in that cell, potentially deferring detection to a neighboring cell where $t$ might be the minimum or interior value, depending on the specific topology and shared vertex handling [S1, unofficial].
+-- **Degenerate Input**: If $v_{\min} = v_{\max}$ (constant value in a cell), the interval is empty or a single point. If $t = v_{\min} = v_{\max}$, the condition $t < v_{\max}$ fails, so the cell is not active. This is consistent with the half-open interval definition.
+-
+ ## Subtopics
+ 
+ ### [Isosurface Propagation from Seed Cells](6942-isosurface-propagation-from-seed-cells.md)
+-A technique that combines geometric decomposition and span space aspects, starting extraction from a set of seed cells and propagating through neighboring cells.
++A geometric decomposition technique that identifies sparse "seed" cells and propagates extraction to neighbors, skipping empty regions. Choose this when the volume is sparse or large, as it offers near-optimal worst-case time complexity by avoiding full enumeration.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(n)$, where $n$ is the number of cells in the volume [S1, unofficial]. This is the lowest possible worst-case extraction time for any method based solely on isovalue comparisons without auxiliary spatial structures.
+-- **Memory Complexity**: $O(1)$ auxiliary space, excluding the output list and input volume storage. No additional data structures (like octrees or bounding volume hierarchies) are required [S1, unofficial].
+-- **Performance**: The method is simple to implement and has low overhead. However, it is inefficient for sparse surfaces where only a small fraction of cells are active, as it performs unnecessary checks on empty cells.
+-- **Strengths**: Predictable performance, minimal memory footprint, easy parallelization (each cell is independent).
+-- **Limitations**: No acceleration for large volumes with sparse isosurfaces. Performance does not scale with surface complexity.
++*   **Time Complexity:** $O(n)$, where $n$ is the total number of cells in the volume data [S1, unofficial]. This is the lowest possible worst-case extraction time for any method based solely on isovalue comparisons without auxiliary spatial structures.
++*   **Memory Complexity:** $O(1)$ auxiliary space. It requires only storage for the original volume data and a small constant amount for variables [S1, unofficial].
++*   **Strengths:** Simplicity of implementation; no preprocessing or auxiliary data structure construction required; optimal worst-case time for unstructured search.
++*   **Limitations:** Inefficient for sparse volumes or large datasets where the surface occupies a tiny fraction of the volume, as it processes every cell regardless of whether it contains the surface.
++*   **When to use:** Small volumes, dense surfaces, or as a baseline for correctness verification.
++*   **When not to use:** Large-scale volumes with sparse surfaces where acceleration via hierarchical subdivision (e.g., octrees) is necessary.
+ 
+ ## Background
+-Canonical Enumeration was introduced in the seminal "Marching Cubes" paper by Lorenson and Cline [S1, unofficial]. It represents the most direct approach to the cell extraction problem, forming the basis for many subsequent optimizations that introduce spatial hierarchies (e.g., octrees) to skip empty regions [S1, unofficial].
++Canonical Enumeration is the elementary method for cell extraction, historically used in the original "Marching Cubes" paper by Lorenson and Cline [S1, unofficial]. It serves as the foundational reference for evaluating the performance of more complex isosurface extraction algorithms, particularly those employing hierarchical spatial subdivisions like octrees [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,112 @@
+# PCA-based TSDF Compression
+Also called: Linear TSDF compression, PCA compression
+## Overview
+This method compresses Truncated Signed Distance Field (TSDF) voxel blocks by projecting them onto a low-dimensional feature space defined by principal component vectors derived from a training dataset [S1]. It differs from its parent, Principal Component Analysis (PCA), by applying the general statistical technique specifically to volumetric TSDF data structures, and from its sibling, Clustered Principal Component Analysis (CPCA), by using a single global basis for all blocks rather than clustering them into local subspaces [S1, 10896-clustered-principal-component-analysis-cpca.md]. The approach preserves important structural information while filtering noise, which stabilizes camera tracking against the compressed model [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A voxel block $p$ unrolled into a vector of dimension $N=4096$ [S1].
+*   **Output:** A compressed descriptor vector $d_p$ of reduced dimensionality, and the ability to reconstruct an approximation $\hat{p}$ [S1].
+*   **Training Data:** A large dataset of sample TSDF reconstructions used to derive the basis [S1].
+
+**Data Structures:**
+*   **Mean Vector ($a_0$):** A vector of size $4096 \times 1$ representing the mean of the training dataset [S1].
+*   **Principal Component Matrix ($A$):** A matrix of size $4096 \times K$, where $K \le 4096$. The columns are the principal components corresponding to the largest singular values [S1]. The full matrix before reduction is $4096 \times 4096$ [S1].
+
+**Steps:**
+1.  **Centering:** Subtract the mean vector $a_0$ from the input voxel block vector $p$ to obtain the centered data matrix $Y_0$ (for a single sample, $Y_0 = p - a_0$) [S1].
+2.  **Basis Derivation (Training Phase):** Compute the Singular Value Decomposition (SVD) of the centered data matrix $Y_0$ from the training set: $[U, \Sigma, V] = \text{svd}(Y_0)$ [S1]. Construct the principal component matrix $A = U\Sigma$ [S1].
+3.  **Basis Reduction:** Sort the singular values in descending order. Select the subset of columns from $A$ corresponding to the largest singular values to form the reduced basis matrix $A$ of size $4096 \times K$ [S1]. The smallest singular values are typically close to zero and their associated columns are removed [S1].
+4.  **Encoding:** Compute the descriptor $d_p$ by projecting the centered input vector onto the reduced basis: $d_p = A^T (p - a_0)$ [S1].
+5.  **Decoding:** Reconstruct the voxel block $\hat{p}$ by mapping the descriptor back to the input space: $\hat{p} = a_0 + A d_p$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def train_pca(tsdf_samples):
+    """
+    tsdf_samples: list of vectors, each of length 4096.
+    Returns: mean_vector (4096,), basis_matrix (4096, K)
+    """
+    # Stack samples into a matrix where each row is a sample
+    Y = np.array(tsdf_samples)
+    
+    # Step 1: Center the data
+    mean_vector = np.mean(Y, axis=0)
+    Y_centered = Y - mean_vector
+    
+    # Step 2: Compute SVD
+    # Note: In practice, eigendecomposition of the covariance matrix is often used for efficiency,
+    # but the source specifies SVD of the data matrix.
+    U, Sigma, Vt = np.linalg.svd(Y_centered, full_matrices=False)
+    
+    # Step 3: Construct principal component matrix A = U * Sigma
+    # Sigma is a 1D array of singular values. We need to broadcast it to match U's columns.
+    A_full = U * Sigma[np.newaxis, :]
+    
+    # Determine K based on a threshold or desired compression ratio.
+    # The source states smallest singular values are close to zero.
+    # For implementation, select top K columns.
+    K = 100 # Example value; Not given in the sources.
+    basis_matrix = A_full[:, :K]
+    
+    return mean_vector, basis_matrix
+
+def encode_pca(voxel_block, mean_vector, basis_matrix):
+    """
+    voxel_block: vector of length 4096
+    Returns: descriptor vector of length K
+    """
+    # Step 1: Center
+    centered_block = voxel_block - mean_vector
+    
+    # Step 4: Project onto basis
+    # d_p = A^T (p - a_0)
+    descriptor = np.dot(basis_matrix.T, centered_block)
+    
+    return descriptor
+
+def decode_pca(descriptor, mean_vector, basis_matrix):
+    """
+    descriptor: vector of length K
+    Returns: reconstructed voxel block vector of length 4096
+    """
+    # Step 5: Map back to input space
+    # p_hat = a_0 + A d_p
+    reconstruction = np.dot(basis_matrix, descriptor) + mean_vector
+    
+    return reconstruction
+```
+
+**Parameters:**
+*   **Input Vector Dimension:** 4096 elements [S1].
+*   **Reduced Dimension ($K$):** Not given in the sources. The source notes that columns related to lower-variance components (small singular values) are removed [S1].
+*   **Singular Value Threshold:** Not given in the sources. The source notes that smallest singular values are typically close to zero [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The source notes that the method filters out noise, which can be beneficial for tracking stability [S1]. However, aggressive reduction (small $K$) may lose fine structural details.
+*   **Boundaries:** The method assumes the input is a fixed-size voxel block of 4096 elements [S1]. Handling blocks of different sizes requires padding or cropping, which is not specified in the source [G].
+*   **Degenerate Input:** If the training data does not cover the variance of the test data, the reconstruction error will be high [G].
+
+## Subtopics
+
+### [SVD-based Cloud Volume Compression](13407-svd-based-cloud-volume-compression.md)
+Uses SVD for compressing cloud volume data. It is a variant that applies similar linear algebra techniques to a different data domain (cloud volumes vs. TSDF). Choose it when working with volumetric cloud data rather than surface distance fields.
+
+## Operating characteristics
+*   **Time Complexity:** Encoding is $O(K \cdot N)$ where $N=4096$ and $K$ is the reduced dimension. Decoding is $O(K \cdot N)$. Training involves SVD which is $O(N^3)$ or $O(N^2 M)$ for $M$ samples [S1].
+*   **Memory Complexity:** Storage requires the mean vector ($N$ floats) and the basis matrix ($N \cdot K$ floats). The compressed data is $K$ floats per block.
+*   **Measured Performance:** The source states the method compares favorably to nonlinear methods based on auto-encoders (AE) in terms of compression [S1]. It allows for more stable camera tracking using the SDF Tracker algorithm [S1].
+*   **Strengths:** Preserves important structures while filtering noise [S1]. Simple linear projection [S1].
+*   **Limitations:** Assumes linear subspace structure [S1]. Global basis may not capture local variations as well as clustered methods [10896-clustered-principal-component-analysis-cpca.md].
+*   **When to use:** When computational simplicity is preferred over non-linear methods and the data exhibits strong linear correlations [S1].
+*   **When not to use:** When the data has complex non-linear structures that a global linear basis cannot capture efficiently [G].
+
+## Background
+The method was proposed in 2017 by researchers addressing the memory cost of volumetric distance fields in robotics applications [S1]. It was introduced as an alternative to existing compression strategies, leveraging unsupervised learning (PCA) to encode TSDF data in a low-dimensional feature space [S1]. The work highlights the utility of this compression for stabilizing camera tracking against the model using the SDF Tracker algorithm [S1].
+
+## Sources
+[S1] Compressed Voxel-Based Mapping Using Unsupervised Learning, https://doi.org/10.3390/robotics6030015, fetched 2026-10-26

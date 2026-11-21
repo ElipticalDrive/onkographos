@@ -1,0 +1,116 @@
+# Partitioned Volume Rendering Derivation
+
+Also called: Distributed Volume Rendering Equations
+
+## Overview
+Partitioned Volume Rendering Derivation provides the mathematical foundation for distributing volumetric rendering across multiple disjoint spatial segments (partitions) along a ray. It solves the problem of correctly accumulating color, transmittance, and auxiliary losses (such as distortion) when a ray traverses multiple independent volume tiles, which may be processed by different compute units. It sets itself apart from standard single-volume ray marching by explicitly decomposing global integrals into sums of local segment integrals weighted by upstream transmittance, enabling parallel prefix-scan accumulation [S1].
+
+## How it works
+The method relies on decomposing the continuous volume rendering integral into discrete segments $[t_k, t_{k+1}]$ defined by the boundaries of spatial partitions.
+
+**Inputs and Outputs**
+*   **Inputs:** Ray origin $o$, direction $d$, and a set of $N$ partition boundaries $t_1, t_2, \dots, t_{N+1}$ along the ray parameter $t$. For each segment $k$, the local density $\sigma(t)$ and color $c(t)$ are available.
+*   **Outputs:** Global accumulated color $C(t_1 \rightarrow t_{N+1})$, global distortion loss $\mathcal{L}_{dist}(t_1 \rightarrow t_{N+1})$, and intermediate terms required for parallel reduction.
+
+**Data Structures**
+The derivation assumes the ray is divided into $N$ segments. Each segment $k$ corresponds to a spatial tile. The key intermediate values computed per segment are:
+*   $A(t_k \rightarrow t_{k+1})$: Accumulated weight (alpha) within the segment.
+*   $D(t_k \rightarrow t_{k+1})$: Accumulated depth-weight within the segment.
+*   $T(t_k \rightarrow t_{k+1})$: Transmittance through the segment.
+
+**Formulas**
+Let $w(t) = T(t_1 \rightarrow t) \sigma(t)$ be the contribution weight at $t$. The standard volume rendering equation for color is:
+$$ C(t_1 \rightarrow t_{N+1}) = \int_{t_1}^{t_{N+1}} w(t) c(t) dt $$
+This is decomposed into a sum over $N$ segments:
+$$ C(t_1 \rightarrow t_{N+1}) = \sum_{k=1}^N T(t_1 \rightarrow t_k) C(t_k \rightarrow t_{k+1}) $$
+where the local segment color is:
+$$ C(t_k \rightarrow t_{k+1}) = \int_{t_k}^{t_{k+1}} T(t_k \rightarrow t) \sigma(t) c(t) dt $$
+Here, $T(t_1 \rightarrow t_k)$ is the transmittance from the ray origin to the start of segment $k$, acting as a weight for the local result [S1].
+
+For distortion loss, we define the accumulated weight $A$ and accumulated depth $D$ over an interval $[t_a, t_b]$ as:
+$$ A(t_a \rightarrow t_b) = \int_{t_a}^{t_b} w(t) dt $$
+$$ D(t_a \rightarrow t_b) = \int_{t_a}^{t_b} w(t) t dt $$
+The global distortion loss is defined as:
+$$ \mathcal{L}_{dist}(t_1 \rightarrow t_{N+1}) = 2 \int_{t_1}^{t_{N+1}} w(t) \left( t - \frac{D(t_1 \rightarrow t_{N+1})}{A(t_1 \rightarrow t_{N+1})} \right) A(t_1 \rightarrow t) dt $$
+(Note: The source defines the loss via the decomposition of $\mathcal{L}_1$ and $\mathcal{L}_2$ terms). The derivation shows this global loss can be computed from local segment losses using an intermediate term $S$:
+$$ S(t_1 \rightarrow t_k) = D(t_k \rightarrow t_{k+1})A(t_1 \rightarrow t_k) - A(t_k \rightarrow t_{k+1})D(t_1 \rightarrow t_k) $$
+The final decomposed distortion loss is:
+$$ \mathcal{L}_{dist}(t_1 \rightarrow t_{N+1}) = 2 \sum_{k=1}^N T(t_1 \rightarrow t_k) S(t_1 \rightarrow t_k) + \sum_{k=1}^N T(t_1 \rightarrow t_k)^2 \mathcal{L}_{dist}(t_k \rightarrow t_{k+1}) $$
+where $\mathcal{L}_{dist}(t_k \rightarrow t_{k+1})$ is the local distortion loss within segment $k$ [S1].
+
+**Parameters**
+*   $N$: The number of segments (partitions) along the ray, corresponding to the number of tiles the ray intersects [S1].
+
+**Pseudocode**
+The following pseudocode computes the global color and distortion loss from pre-computed local segment statistics. It assumes `local_A[k]`, `local_D[k]`, `local_C[k]`, and `local_L_dist[k]` are computed independently for each segment $k \in [0, N-1]$.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def partitioned_rendering(local_segments):
+    """
+    local_segments: list of N dicts, each containing:
+        - 'A': accumulated weight A(t_k -> t_{k+1})
+        - 'D': accumulated depth D(t_k -> t_{k+1})
+        - 'C': local color C(t_k -> t_{k+1})
+        - 'L_dist': local distortion loss L_dist(t_k -> t_{k+1})
+        - 'T_prev': transmittance from ray origin to t_k, T(t_1 -> t_k)
+    """
+    N = len(local_segments)
+    global_color = 0.0
+    global_dist_loss = 0.0
+    
+    # Precompute global A and D for the entire ray to handle edge cases if needed,
+    # though the formula relies on prefix products of T.
+    
+    for k in range(N):
+        seg = local_segments[k]
+        T_prev = seg['T_prev']
+        A_local = seg['A']
+        D_local = seg['D']
+        C_local = seg['C']
+        L_dist_local = seg['L_dist']
+        
+        # 1. Accumulate Color
+        # C_global += T(t_1 -> t_k) * C(t_k -> t_{k+1})
+        global_color += T_prev * C_local
+        
+        # 2. Compute Intermediate Term S
+        # S(t_1 -> t_k) = D(t_k -> t_{k+1}) * A(t_1 -> t_k) - A(t_k -> t_{k+1}) * D(t_1 -> t_k)
+        # Note: A(t_1 -> t_k) and D(t_1 -> t_k) are the accumulated values from segments 0 to k-1.
+        # These must be maintained in a running prefix sum.
+        A_prefix = seg['A_prefix'] # A(t_1 -> t_k)
+        D_prefix = seg['D_prefix'] # D(t_1 -> t_k)
+        
+        S = D_local * A_prefix - A_local * D_prefix
+        
+        # 3. Accumulate Distortion Loss
+        # Term 1: 2 * T(t_1 -> t_k) * S(t_1 -> t_k)
+        term1 = 2.0 * T_prev * S
+        
+        # Term 2: T(t_1 -> t_k)^2 * L_dist(t_k -> t_{k+1})
+        term2 = (T_prev ** 2) * L_dist_local
+        
+        global_dist_loss += term1 + term2
+        
+    return global_color, global_dist_loss
+```
+[G] The pseudocode assumes `A_prefix` and `D_prefix` are provided or computed via a parallel prefix scan (e.g., using NerfAcc [S1]) over the segments. `T_prev` is the product of transmittances of all preceding segments.
+
+## Subtopics
+
+### [Partitioned Volumetric Rendering with RayVolumeIntegral](17112-partitioned-volumetric-rendering-with-rayvolumeintegral.md)
+Performs volumetric rendering over a partition of possible $t$ values in the union of rendering volumes, combining results from disjoint volume integrals and a void model for empty space. It sets itself apart from standard single-volume ray marching by explicitly handling multiple disjoint volume bounds and accumulating transmittance across partitions, ensuring correct alpha compositing when rays traverse empty space between volumes.
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of segments $N$ for the accumulation step, assuming local segment computations are parallelized. The parallel prefix scan for transmittance and accumulated $A/D$ adds a logarithmic factor or linear factor depending on the reduction implementation [S1].
+*   **Memory Complexity:** Requires storing intermediate $A, D, C, L_{dist}$ for each segment. The memory footprint scales with $N$ and the number of rays.
+*   **Strengths:** Enables efficient distribution of rendering work across multiple GPUs by minimizing communication (only per-ray aggregates need reduction) [S1].
+*   **Limitations:** Requires precise spatial partitioning and handling of empty space/void models to ensure correct transmittance accumulation [S1].
+*   **When to use:** Large-scale NeRF training/inference where a single GPU cannot hold the volume or process all rays efficiently.
+
+## Background
+The derivation originates from **NeRF-XL**, which scales NeRFs with multiple GPUs [S1]. It builds on the spatial partitioning scheme described in Appendix A.3, where space is divided recursively using CDF-based splitting to create nearly cubic partitions. The method allows distributed NeRFs to compute global integrals from local segment results, facilitating batched asynchronous send/receive operations and parallel prefix scans [S1].
+
+## Sources
+[S1] NeRF-XL: Scaling NeRFs with Multiple GPUs, https://doi.org/10.1007/978-3-031-73195-2_6, fetched 2026-10-26

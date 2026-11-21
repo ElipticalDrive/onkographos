@@ -1,0 +1,109 @@
+# Trick-GS
+
+Also called: EAGLES, Efficient Accelerated 3D Gaussians with Lightweight Encoding
+
+## Overview
+Trick-GS is a training strategy for 3D Gaussian Splatting that employs progressive resolution scaling to avoid complex loss landscapes and floating artifacts caused by sparse SfM initialization [S1]. It combines coarse-to-fine rendering with significance-based pruning and masking to achieve faster convergence, significantly smaller model size, and reduced memory usage compared to vanilla 3DGS [S2].
+
+## How it works
+Trick-GS modifies the standard training loop by decoupling the optimization target resolution from the final output resolution. It uses a cosine schedule to gradually increase the rendered image scale, allowing Gaussians to converge to good loss minima at a coarse level before refining details [S1]. This process is combined with aggressive pruning of insignificant primitives and SH bands [S2].
+
+**Inputs:**
+*   Sparse SfM point cloud initialization.
+*   Set of training images with known poses.
+*   Total training iterations $T_{total}$ (default 30,000) [S1].
+
+**Outputs:**
+*   Optimized set of 3D Gaussian primitives $\mathcal{G}$ with pruned opacity and masked SH coefficients.
+
+**Data Structures:**
+*   **Gaussian Primitives:** Each primitive $g_i$ retains the standard 3DGS parameterization: mean position $\mu_i \in \mathbb{R}^3$, covariance $\Sigma_i$ (parameterized by scale $S$ and rotation $q$), opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_i$ [S2].
+*   **Masking:** SH bands and primitives are masked based on significance. Primitives with low contribution are removed; SH coefficients with low significance are zeroed out to reduce disk size [S2].
+
+**Parameters:**
+*   **Initial Scale Factor:** $s_{start} = 0.3$ [S1].
+*   **Final Scale Factor:** $s_{end} = 1.0$ [S1].
+*   **Progression Duration:** The scaling schedule is active for the first 70% of total iterations [S1].
+*   **Schedule Type:** Cosine interpolation between $s_{start}$ and $s_{end}$ [S1].
+*   **Opacity Reset Interval:** Every 2,500 iterations [S1].
+*   **Densification Frequency:** Every 175 iterations [S1].
+*   **Pruning Frequency:** Every 5,000 iterations, up to iteration 25,000 [S1].
+*   **Pruning Ratio:** 15% of Gaussians removed per pruning stage [S1].
+*   **SH Degree:** Fixed at 3 [S1].
+
+**Steps:**
+1.  **Initialization:** Initialize Gaussians from SfM points. Set current render scale $s = 0.3$ [S1].
+2.  **Iteration Loop:** For iteration $t = 1$ to $T_{total}$:
+    a.  **Update Scale:** If $t \le 0.7 \times T_{total}$, update $s$ using a cosine schedule from 0.3 to 1.0. If $t > 0.7 \times T_{total}$, set $s = 1.0$ [S1].
+    b.  **Render:** Render training images at resolution scaled by $s$ relative to the original image dimensions [S1].
+    c.  **Optimize:** Compute loss against the scaled ground truth images. Update Gaussian parameters (position, scale, rotation, opacity, SH) via gradient descent [S1].
+    d.  **Densification:** If $t \pmod{175} == 0$, perform cloning and splitting based on gradient magnitude [S1].
+    e.  **Opacity Reset:** If $t \pmod{2500} == 0$, reset opacity values to prevent saturation [S1].
+    f.  **Pruning:** If $t \pmod{5000} == 0$ and $t \le 25000$, remove the 15% of Gaussians with the lowest significance/opacity [S1].
+3.  **Post-Processing:** Apply significance-based masking to SH bands and prune remaining insignificant primitives to minimize disk size [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_trick_gs(gaussians, images, poses, T_total=30000):
+    # Initialize scale factor
+    s = 0.3
+    
+    for t in range(1, T_total + 1):
+        # 1. Update Render Scale
+        if t <= 0.7 * T_total:
+            # Cosine schedule from 0.3 to 1.0 over 70% of iterations
+            progress = t / (0.7 * T_total)
+            s = 0.3 + 0.5 * (1 + math.cos(math.pi * progress))
+        else:
+            s = 1.0
+            
+        # 2. Render at Scaled Resolution
+        # Resize original images to (width * s, height * s)
+        scaled_images = resize_images(images, scale_factor=s)
+        
+        # 3. Forward Pass and Loss Computation
+        rendered_images = render(gaussians, poses, scaled_images)
+        loss = compute_loss(rendered_images, scaled_images)
+        
+        # 4. Backward Pass
+        loss.backward()
+        optimize(gaussians)
+        
+        # 5. Periodic Operations
+        if t % 175 == 0:
+            densify(gaussians) # Cloning and splitting based on gradients
+            
+        if t % 2500 == 0:
+            reset_opacity(gaussians)
+            
+        if t % 5000 == 0 and t <= 25000:
+            prune(gaussians, ratio=0.15) # Remove bottom 15% by significance
+            
+    # 6. Final Compression
+    mask_sh_bands(gaussians)
+    prune_insignificant_primitives(gaussians)
+    
+    return gaussians
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Initialization:** Standard full-resolution training forces Gaussians to fit fine features early, leading to suboptimal optimization and floating artifacts. Trick-GS mitigates this by starting coarse [S1].
+*   **Opacity Saturation:** Without periodic resets, opacity can saturate, preventing further learning. The 2,500-iteration reset interval addresses this [S1].
+*   **Over-Pruning:** Removing too many Gaussians (>15%) can degrade reconstruction quality [S1].
+
+## Operating characteristics
+*   **Training Speed:** Up to 2× faster training compared to vanilla 3DGS [S2].
+*   **Model Size:** Up to 40× smaller disk size due to SH band masking and primitive pruning [S2].
+*   **Rendering Speed:** Up to 2× faster rendering speed [S2].
+*   **Accuracy:** Comparable accuracy to vanilla 3DGS on standard datasets [S2].
+*   **Memory:** Reduced memory footprint due to fewer primitives and quantized/masked SH coefficients [S1].
+*   **Limitations:** The method relies on specific hyperparameter tuning (e.g., 70% progression duration, 15% pruning ratio) which may require adjustment for different scene complexities or time/memory budgets [S1].
+
+## Background
+Trick-GS, also referred to as EAGLES (Efficient Accelerated 3D Gaussians with Lightweight Encoding), was proposed to address the high computational and storage costs of standard 3D Gaussian Splatting, which typically involves millions of primitives [S2]. It builds on the observation that standard training suffers from complex loss landscapes when starting with sparse SfM data at full resolution [S1]. The method integrates progressive training, noise injection, and significance-based pruning to create a resource-efficient variant suitable for constrained devices [S2].
+
+## Sources
+[S1] EAGLES: Efficient Accelerated 3D Gaussians with Lightweight EncodingS, https://doi.org/10.1007/978-3-031-73036-8_4, fetched 2026-10-27
+[S2] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30

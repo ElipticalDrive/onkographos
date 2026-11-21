@@ -1,0 +1,227 @@
+--- v003.md
++++ v004.md
+@@ -4,109 +4,106 @@
+ 
+ ## Overview
+-Voxel Format Generation converts 3D Gaussian Splats into a sparse voxel octree optimized for collision detection and navigation, outputting metadata (`.voxel.json`) and binary data (`.voxel.bin`), while optionally generating a `.collision.glb` mesh. It distinguishes itself from general-purpose voxelization by integrating scene topology analysis (interior vs. exterior) and navigable space carving directly into the generation pipeline, rather than producing a raw density field.
++Voxel Format Generation converts a set of 3D Gaussian primitives into a sparse voxel octree optimized for collision detection and navigation, outputting structured metadata and binary data. It distinguishes itself from general volume rendering methods by focusing on topological integrity (watertightness) and navigable space carving rather than photorealistic appearance, often generating an auxiliary mesh for physics engines.
+ 
+ ## How it works
+-The method processes Gaussian splats through a sequence of filtering, spatial mapping, and topological sealing steps to produce a watertight or navigable collision volume.
++**Inputs and Outputs:**
++*   **Input:** A set of 3D Gaussians $G_k$ (typically in PLY, SPLAT, or KSPLAT format), a seed position $\mathbf{s}$, and configuration parameters.
++*   **Outputs:**
++    *   `.voxel.json`: Metadata describing the octree structure and bounds.
++    *   `.voxel.bin`: Binary representation of the sparse voxel octree.
++    *   `.collision.glb` (optional): A mesh derived from the voxel grid.
+ 
+-### Inputs and Outputs
+-- **Input**: A Gaussian Splat file (PLY, SPLAT, KSPLAT, SOG) or a point cloud.
+-- **Outputs**:
+-  - `.voxel.json`: Metadata containing voxel resolution, opacity cutoff, and octree structure references.
+-  - `.voxel.bin`: Binary representation of the sparse voxel octree.
+-  - `.collision.glb` (optional): A mesh derived from the voxel grid for physics engines.
++**Data Structures:**
++The output is a sparse voxel octree. The binary format stores node types (empty, solid, mixed) and child pointers implicitly or explicitly based on the octree hierarchy. The JSON file contains global bounds, voxel resolution, and the root node's state.
+ 
+-### Data Structures
+-The output relies on a sparse voxel octree. The binary file (`.voxel.bin`) stores the octree nodes, while the JSON file (`.voxel.json`) stores global parameters and potentially the root node index or bounding box. The specific binary layout of the octree nodes (e.g., child pointers, occupancy flags, attribute storage) is not detailed in the sources, but the structure is implied to be a standard sparse octree suitable for efficient traversal [S1].
++**Steps:**
+ 
+-### Parameters
+-- `voxelResolution` (float, default 0.05): Size of each voxel in world units.
+-- `opacityCutoff` (float, default 0.1): Opacity threshold; voxels with aggregated opacity below this value are treated as empty.
+-- `navExteriorRadius` (float): Exterior fill radius in world units. Enables exterior fill. Requires `navSeed`.
+-- `floorFill` (bool, default false): Boolean to fill voxel columns upward from the bottom until hitting a solid voxel. Runs before carving.
+-- `floorFillDilation` (float, default 0): Dilation radius in world units to identify 'interior' XZ columns. Empty XZ areas larger than `2 * floorFillDilation` from any solid column are treated as exterior.
+-- `navCapsule` (object `{height, radius}`): Dimensions for the carve capsule. Height 0 disables carve. Requires `navSeed`.
+-- `seedPos` (vec3): Seed position for voxel fill/carve and cluster filtering. Default: `(0, 0, 0)`.
++1.  **Preprocessing (Filtering):**
++    *   Run `--filter-cluster` using the seed position $\mathbf{s}$. This isolates the central scene cluster and discards stray floaters (Gaussians far from the seed or disconnected components) [S1].
++    *   [G] Ensure the seed position $\mathbf{s}$ lies within the intended navigable or interior volume.
+ 
+-### Steps
+-1.  **Filtering**: Run `--filter-cluster` to isolate the central scene and discard stray floaters. This requires a `--seed-pos` to define the center of interest [S1].
+-2.  **Scene Classification**: Determine if the scene is interior (rooms) or exterior (terrain/objects) to select the appropriate filling strategy [S1].
+-3.  **Voxelization**: Map the Gaussian splats to the sparse voxel grid.
+-    -   For **Interior Scenes**:
+-        -   Apply `--voxel-external-fill` to seal the void around the room interior. This uses `--seed-pos` to verify volume enclosure; if the seed is reachable from outside, the fill is skipped [S1].
+-        -   Apply `--voxel-carve` to hollow out navigable space using a capsule flood fill from the seed [S1].
+-    -   For **Exterior Scenes**:
+-        -   Apply `--voxel-floor-fill` to fill voxel columns upward from the bottom until hitting a solid voxel. This patches XZ areas surrounded by floor within `2 * floorFillDilation` [S1].
+-        -   Optionally apply `--voxel-carve` to create navigable space above the ground [S1].
+-4.  **Mesh Generation (Optional)**: Generate a collision mesh using `--collision-mesh`.
+-    -   `smooth`: Uses marching cubes with lossless coplanar merge for smoother geometry.
+-    -   `faces`: Provides direct watertight boundaries from the voxel data [S1].
++2.  **Voxelization (Splat to Grid):**
++    *   Map each Gaussian $G_k$ to the voxel grid defined by `voxelResolution`.
++    *   For each voxel $V_j$ within the Gaussian's support, compute the weight $w_{jk}$ based on the Gaussian density at the voxel center.
++    *   Aggregate opacity $\alpha_j$ and features for each voxel.
++    *   Apply `opacityCutoff`: Voxels with aggregated opacity below the threshold are marked empty [S1].
+ 
+-### Pseudocode
++3.  **Scene Sealing (Fill Operations):**
++    *   **Interior Scenes:** Use `--voxel-external-fill`. This seals the void surrounding the room interior. It verifies enclosure by checking if the seed $\mathbf{s}$ is reachable from outside; if reachable, fill is skipped [S1].
++    *   **Exterior Scenes:** Use `--voxel-floor-fill`. This fills voxel columns upward from the bottom until hitting a solid voxel. It identifies "interior" XZ columns by dilating solid columns by `floorFillDilation`. Empty XZ areas larger than $2 \times \text{floorFillDilation}$ from any solid column are treated as exterior and not filled [S1].
++
++4.  **Navigation Carving:**
++    *   Use `--voxel-carve` with `navCapsule` dimensions (height $h$, radius $r$).
++    *   Perform a flood fill from the seed $\mathbf{s}$ using the capsule shape to define navigable space.
++    *   Voxels intersecting the capsule path are marked as empty (navigable), while others remain solid or mixed [S1].
++    *   Set height to 0 to disable carving [S1].
++
++5.  **Mesh Generation (Optional):**
++    *   Use `--collision-mesh` to generate `.collision.glb`.
++    *   **Smooth:** Uses marching cubes with lossless coplanar merge for smoother geometry [S1].
++    *   **Faces:** Generates direct watertight voxel-boundary faces [S1].
++
++**Parameters:**
++*   `voxelResolution`: Size of each voxel in world units. Default: 0.05 [S1].
++*   `opacityCutoff`: Opacity threshold for solid voxels. Default: 0.1 [S1].
++*   `navExteriorRadius`: Exterior fill radius in world units. Enables exterior fill. Requires `navSeed` [S1].
++*   `floorFill`: Boolean to fill voxel columns upward from bottom until hitting solid. Default: false [S1].
++*   `floorFillDilation`: Dilation radius in world units to identify 'interior' XZ columns. Default: 0 [S1].
++*   `navCapsule`: Object `{height, radius}` for carve dimensions. Height 0 disables carve. Requires `navSeed` [S1].
++*   `--seed-pos <x,y,z>`: Seed position for voxel fill/carve and filtering. Default: 0,0,0 [S1].
++
++**Pseudocode:**
++
+ ```python
+-def generate_voxel_format(input_splat_path, output_prefix, options):
+-    # 1. Load and Filter
+-    splats = load_splats(input_splat_path)
+-    if options.filter_cluster:
+-        # Isolate central scene based on seed position
+-        splats = filter_cluster(splats, options.seed_pos)
++def generate_voxel_format(gaussians, seed_pos, config):
++    # 1. Filter Cluster
++    # Discard Gaussians not connected to the central cluster around seed_pos
++    filtered_gaussians = filter_cluster(gaussians, seed_pos)
+     
+-    # 2. Voxelization Setup
+-    voxel_size = options.voxel_resolution if options.voxel_resolution else 0.05
+-    opacity_cutoff = options.opacity_cutoff if options.opacity_cutoff else 0.1
++    # 2. Initialize Voxel Grid
++    voxel_size = config.get('voxelResolution', 0.05)
++    opacity_cutoff = config.get('opacityCutoff', 0.1)
++    grid = SparseVoxelOctree(voxel_size)
+     
+-    # Initialize sparse octree
+-    octree = SparseVoxelOctree(voxel_size=voxel_size)
++    # 3. Splat to Voxel
++    for g in filtered_gaussians:
++        support_voxels = get_support_voxels(g, grid)
++        for v in support_voxels:
++            weight = gaussian_density(g, v.center)
++            grid.aggregate(v, g.opacity * weight, g.features * weight)
++            
++    # 4. Threshold
++    for v in grid.all_voxels():
++        if v.aggregated_opacity < opacity_cutoff:
++            v.type = EMPTY
++            
++    # 5. Fill Operations
++    if config.get('voxel_external_fill'):
++        # Seal void around interior
++        if not is_seed_reachable_from_outside(grid, seed_pos):
++            seal_external_void(grid, seed_pos)
++            
++    if config.get('floor_fill'):
++        dilation = config.get('floorFillDilation', 0)
++        fill_floor_columns(grid, dilation)
++        
++    # 6. Carve Navigation
++    if config.get('voxel_carve'):
++        capsule = config.get('navCapsule', {'height': 1.6, 'radius': 0.2})
++        carve_navigable_space(grid, seed_pos, capsule)
++        
++    # 7. Output
++    metadata = grid.to_json()
++    binary_data = grid.to_binary()
+     
+-    # 3. Aggregate Gaussians into Voxels
+-    for gaussian in splats:
+-        # Determine affected voxels based on Gaussian covariance/scale
+-        affected_voxels = get_affected_voxels(gaussian, octree)
+-        for voxel in affected_voxels:
+-            # Weighted aggregation of opacity and color
+-            weight = gaussian.opacity * gaussian_kernel_distance(gaussian.center, voxel.center)
+-            voxel.opacity += weight
+-            voxel.color += gaussian.color * weight
+-            voxel.total_weight += weight
+-
+-    # 4. Normalize and Threshold
+-    for voxel in octree.all_voxels():
+-        if voxel.total_weight > 0:
+-            voxel.opacity = voxel.opacity / voxel.total_weight
+-        if voxel.opacity < opacity_cutoff:
+-            voxel.opacity = 0.0
+-            voxel.color = (0, 0, 0, 0)
+-
+-    # 5. Topological Processing (Fill/Carve)
+-    if options.voxel_external_fill:
+-        # Seal void around interior
+-        # Check if seed is reachable from outside; if so, skip fill
+-        if not is_seed_reachable_from_outside(octree, options.seed_pos):
+-            fill_external_void(octree, options.seed_pos)
++    mesh = None
++    if config.get('collision_mesh'):
++        mode = config.get('collision_mesh', 'smooth')
++        if mode == 'smooth':
++            mesh = marching_cubes(grid, merge_coplanar=True)
++        elif mode == 'faces':
++            mesh = voxel_boundary_faces(grid)
+             
+-    if options.voxel_floor_fill:
+-        # Fill columns upward from bottom
+-        floor_dilation = options.floor_fill_dilation if options.floor_fill_dilation else 0
+-        fill_floor_columns(octree, dilation_radius=2 * floor_dilation)
+-        
+-    if options.voxel_carve:
+-        # Carve navigable space using capsule flood fill
+-        capsule_height = options.nav_capsule.height if options.nav_capsule else 1.6
+-        capsule_radius = options.nav_capsule.radius if options.nav_capsule else 0.2
+-        carve_navigable_space(octree, options.seed_pos, capsule_height, capsule_radius)
+-
+-    # 6. Output
+-    save_voxel_json(octree, output_prefix + ".voxel.json", {
+-        "voxelResolution": voxel_size,
+-        "opacityCutoff": opacity_cutoff
+-    })
+-    save_voxel_bin(octree, output_prefix + ".voxel.bin")
+-    
+-    if options.collision_mesh:
+-        mesh_type = options.collision_mesh_type if options.collision_mesh_type else "smooth"
+-        if mesh_type == "smooth":
+-            mesh = marching_cubes_with_coplanar_merge(octree)
+-        else:
+-            mesh = voxel_boundary_faces(octree)
+-        save_glb(mesh, output_prefix + ".collision.glb")
++    return metadata, binary_data, mesh
+ ```
+ 
+@@ -114,15 +111,17 @@
+ 
+ ### Splat Transform CLI
+-A command-line tool implementation of Voxel Format Generation. It supports various input formats (PLY, SPLAT, KSPLAT, SOG, HTML) and provides specific flags for voxel generation. Key parameters include `--voxel-size` (default 0.05), `--voxel-opacity` (default 0.1), `--voxel-floor-fill` (default size 1.6), `--voxel-carve` (default height 1.6, radius 0.2), and `--collision-mesh` (default 'smooth'). It also supports `--seed-pos` for defining the scene center and navigable space seed [S1].
++A command-line tool interface for Voxel Format Generation. It supports various input formats (PLY, SPLAT, KSPLAT, SOG, HTML) and provides specific flags for voxelization and mesh generation. It allows chaining transformations (scale, translate, rotate) and filtering (NaN removal, opacity thresholding, SH band stripping, decimation) before voxelization. The tool also supports generating standalone HTML viewers and compressed PLY formats. It uses `--seed-pos` to verify volume enclosure for external fill logic, skipping fill if the seed is reachable from outside [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not given in the sources.
+-- **Memory Complexity**: Not given in the sources. The tool uses a memory budget capped at 48 GiB or half the machine's RAM, whichever is lower, for residency policies during decimation and rendering [S1].
+-- **Performance**: Not given in the sources.
+-- **Strengths**: Integrates collision mesh generation directly with voxelization; supports both smooth (marching cubes) and watertight (voxel boundary) mesh outputs; handles both interior and exterior scene topologies automatically.
+-- **Limitations**: Requires a seed position for accurate clustering and carving; performance on degenerate scenes with high overdraw may be impacted (though statistics are available for validation) [S1].
++*   **Time Complexity:** Dominated by the splat-to-voxel mapping and the flood fill for carving. The complexity is proportional to the number of Gaussians times their support size, plus the number of voxels in the octree.
++*   **Memory Complexity:** Proportional to the number of non-empty voxels in the sparse octree. The binary format is compact, storing only necessary nodes.
++*   **Performance:** The tool is designed for efficiency, using a sparse octree to handle large scenes. The `--filter-cluster` step reduces the number of Gaussians processed, improving performance for scenes with stray noise.
++*   **Strengths:** Produces watertight collision meshes suitable for physics engines. Supports both smooth (marching cubes) and blocky (voxel faces) collision geometries. Handles both interior and exterior scenes with specific fill strategies.
++*   **Limitations:** Requires a valid seed position for filtering and carving. The quality of the collision mesh depends on the voxel resolution and the density of the input Gaussians.
++*   **When to use:** When collision detection or navigation meshes are needed from 3D Gaussian Splat data.
++*   **When not to use:** When photorealistic volume rendering is the primary goal, or when the scene lacks a clear navigable space or interior/exterior distinction.
+ 
+ ## Background
+-Voxel Format Generation is part of the `splat-transform` toolchain developed by PlayCanvas. It is designed to bridge the gap between 3D Gaussian Splatting representations and traditional collision detection systems used in game engines and navigation applications. The method was introduced as part of the broader `splat-transform` library, which provides tools for converting, filtering, and transforming Gaussian splat data [S1].
++Originated from the `playcanvas/splat-transform` project, this method was developed to provide a practical pipeline for converting 3D Gaussian Splatting data into formats usable for real-time collision detection and navigation in web-based and game engine contexts. It addresses the gap between high-fidelity Gaussian representations and the discrete, watertight meshes required by physics engines.
+ 
+ ## Sources

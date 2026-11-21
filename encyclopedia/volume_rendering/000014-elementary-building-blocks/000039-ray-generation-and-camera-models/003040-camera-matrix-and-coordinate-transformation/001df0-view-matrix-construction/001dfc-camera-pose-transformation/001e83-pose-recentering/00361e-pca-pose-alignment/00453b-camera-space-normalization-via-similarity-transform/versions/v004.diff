@@ -1,0 +1,375 @@
+--- v003.md
++++ v004.md
+@@ -1,118 +1,133 @@
+ # Camera Space Normalization via Similarity Transform
+ 
+-Also called: dataset normalization
++Also called: Context-based pose normalization, Scale-aligned training, Scene scale normalization, dataset normalization
+ 
+ ## Overview
+-Computes a 4x4 similarity transform matrix $T$ and a scalar scale to normalize camera poses (c2w) and optionally point clouds, aligning the world up axis to the camera's negative Y axis and centering the scene [S1, unofficial]. It establishes a canonical coordinate system based on the average camera orientation, distinct from [PCA Pose Alignment](7626-pca-pose-alignment.md) which aligns principal components of the data distribution [S1, unofficial].
++This method computes a 4x4 similarity transform matrix $T$ and a scalar scale factor to normalize camera poses (c2w) and optionally point clouds, aligning the world up axis to the camera's negative Y axis and centering the scene within a unit volume. It solves the problem of inconsistent scene scales and coordinate frames in neural rendering datasets, ensuring that training inputs are normalized to a canonical range (typically $[-1, 1]^3$) to improve optimization stability and generalization. Unlike [PCA Pose Alignment](7626-pca-pose-alignment.md), which aligns principal components of the data distribution, this method relies on explicit geometric alignment of the camera viewing directions and mean center, often derived solely from context views.
+ 
+ ## How it works
+-**Inputs:**
+-- `c2w`: Array of shape $(N, 4, 4)$ containing camera-to-world matrices [S1, unofficial].
+-- `points`: Optional array of shape $(M, 3)$ containing world-space points [S1, unofficial].
+-- `strict_scaling`: Boolean flag determining the scaling function (`np.max` if `True`, `np.median` otherwise) [S1, unofficial].
+-
+-**Outputs:**
+-- `T`: 4x4 similarity transform matrix [S1, unofficial].
+-- `scale`: Scalar scaling factor [S1, unofficial].
+-- `transformed_c2w`: Normalized camera matrices [S1, unofficial].
+-- `transformed_points`: Normalized points (if provided) [S1, unofficial].
+-
+-**Data Structures:**
+-- `c2w`: $4 \times 4$ homogeneous transformation matrices. Layout:
+-  $$
+-  \begin{bmatrix}
+-  R_{00} & R_{01} & R_{02} & t_x \\
+-  R_{10} & R_{11} & R_{12} & t_y \\
+-  R_{20} & R_{21} & R_{22} & t_z \\
+-  0 & 0 & 0 & 1
+-  \end{bmatrix}
+-  $$
+-  where $R$ is the $3 \times 3$ rotation submatrix and $t$ is the translation vector [S1, unofficial].
+-
+-**Steps:**
+-1. **Extract Translation and Rotation:** Extract $R_i = \text{c2w}[i, :3, :3]$ and $t_i = \text{c2w}[i, :3, 3]$ for all cameras [S1, unofficial].
+-2. **Estimate World Up Axis:** Compute the average camera up vector in world space [S1, unofficial]. The camera up axis in camera space is $[0, -1, 0]$ [S1, unofficial].
+-   $$
+-   \text{ups} = \sum_{i=0}^{N-1} R_i \cdot \begin{bmatrix} 0 \\ -1 \\ 0 \end{bmatrix}, \quad \text{world\_up} = \frac{\text{ups}}{\|\text{ups}\|}
+-   $$
+-3. **Compute Alignment Rotation ($R_{\text{align}}$):** Align `world_up` to the target camera up axis $\text{up\_camspace} = [0, -1, 0]^T$ using Rodrigues' formula [S1, unofficial].
+-   $$
+-   c = \text{up\_camspace} \cdot \text{world\_up}, \quad \text{cross} = \text{world\_up} \times \text{up\_camspace}
+-   $$
+-   Construct the skew-symmetric matrix $K$ from `cross`:
+-   $$
+-   K = \begin{bmatrix}
+-   0 & -k_z & k_y \\
+-   k_z & 0 & -k_x \\
+-   -k_y & k_x & 0
+-   \end{bmatrix}
+-   $$
+-   $$
+-   R_{\text{align}} = I + K + K^2 \cdot \frac{1}{1 + c}
+-   $$
+-4. **Handle Degenerate Case:** If $c \le -1$ (indicating the original data has a Y+ up axis), set $R_{\text{align}}$ to a 180-degree rotation about the X axis [S1, unofficial]:
+-   $$
+-   R_{\text{align}} = \begin{bmatrix}
+-   -1 & 0 & 0 \\
+-   0 & 1 & 0 \\
+-   0 & 0 & 1
+-   \end{bmatrix}
+-   $$
+-5. **Construct Translation Component:** Center the scene by computing a translation vector [G].
+-   $$
+-   \text{translate} = -\text{center}, \quad \text{transform}[:3, 3] = \text{translate}, \quad \text{transform}[:3, :3] = R_{\text{align}}
+-   $$
+-6. **Rescale the Scene:** Compute the scale factor using the norms of the translated camera centers [S1, unofficial].
+-   $$
+-   \text{scale} = \frac{1.0}{\text{scale\_fn}(\|\text{t} + \text{translate}\|)}
+-   $$
+-   where $\text{scale\_fn}$ is `np.max` if `strict_scaling` is `True`, else `np.median` [S1, unofficial]. Multiply the rotation and translation parts of the transform by `scale`:
+-   $$
+-   \text{transform}[:3, :] = \text{transform}[:3, :] \cdot \text{scale}
+-   $$
+-7. **Apply Transform:** Transform all camera matrices and points using $T$ [S1, unofficial].
+-
+-**Pseudocode:**
++
++### Inputs and Outputs
++*   **Inputs**: A set of camera-to-world matrices $C \in \mathbb{R}^{N \times 4 \times 4}$ (where $N$ is the number of context/input views), and optionally a point cloud $P$.
++*   **Outputs**: A similarity transform matrix $T \in \mathbb{R}^{4 \times 4}$ and a scale scalar $s$. The transformed cameras are $C' = T C$ (applied appropriately) and points $P' = T P$.
++
++### Data Structures
++*   **Camera Matrix**: 4x4 homogeneous matrix. The translation vector is $t = C[:, :3, 3]$. The rotation matrix is $R = C[:, :3, :3]$.
++*   **Transform Matrix**: 4x4 matrix. The upper-left 3x3 block is the rotation $R_{align}$. The upper-right 3x1 block is the translation $t_{trans}$. The bottom row is $[0, 0, 0, 1]$.
++
++### Steps
++
++1.  **Extract Translation and Rotation**:
++    For each camera $i$, extract $t_i = C_i[:, :3, 3]$ and $R_i = C_i[:, :3, :3]$.
++
++2.  **Estimate World Up Axis**:
++    Compute the average camera up vector. The camera up vector in world space is $R_i [0, -1, 0]^\top$ (assuming standard OpenGL/Camera coordinate system where Y is up).
++    $$ \text{ups} = \sum_{i=1}^N R_i \begin{bmatrix} 0 \\ -1 \\ 0 \end{bmatrix} $$
++    Normalize to get the world up axis:
++    $$ \text{world\_up} = \frac{\text{ups}}{\|\text{ups}\|} $$
++    [G] If $\|\text{ups}\|$ is near zero, the cameras are degenerate (e.g., all looking straight up/down); handle by defaulting to $[0, 1, 0]$.
++
++3.  **Compute Alignment Rotation ($R_{align}$)**:
++    We want to rotate $\text{world\_up}$ to align with the canonical camera up axis $\text{up\_camspace} = [0, -1, 0]^\top$.
++    Compute the dot product and cross product:
++    $$ c = \text{up\_camspace} \cdot \text{world\_up} $$
++    $$ \text{cross} = \text{world\_up} \times \text{up\_camspace} $$
++    Construct the skew-symmetric matrix $K$ from $\text{cross}$:
++    $$ K = \begin{bmatrix} 0 & -k_z & k_y \\ k_z & 0 & -k_x \\ -k_y & k_x & 0 \end{bmatrix} $$
++    where $\text{cross} = [k_x, k_y, k_z]^\top$.
++    Compute $R_{align}$ using Rodrigues' formula components:
++    $$ R_{align} = I + K + K^2 \frac{1}{1 + c} $$
++    **Pitfall**: If $c \le -1$ (indicating the original data has a Y+ up axis, opposite to the target), $R_{align}$ is set to a 180-degree rotation about the X axis:
++    $$ R_{align} = \begin{bmatrix} -1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{bmatrix} $$
++    [S1, unofficial]
++
++4.  **Compute Translation and Scale**:
++    There are two primary variants for computing the translation and scale, depending on the specific implementation strategy (Context-based vs. Scale-aligned).
++
++    **Variant A: Context-based Normalization (ZipSplat/FineSplat style)**
++    1.  Compute the mean camera center:
++        $$ \bar{c} = \frac{1}{N} \sum_{n=1}^N c_n $$
++    2.  Compute the mean viewing direction $f$ and mean image-down direction $d$:
++        $$ f = \text{normalize}\left(\frac{1}{N} \sum_{n=1}^N R_n e_z\right) $$
++        $$ d = \text{normalize}\left(\frac{1}{N} \sum_{n=1}^N R_n e_y\right) $$
++        Orthogonalize $d$ against $f$ (e.g., Gram-Schmidt): $d \leftarrow d - (d \cdot f)f$.
++    3.  Construct the rotation matrix $\bar{R}$:
++        $$ \bar{R} = \begin{bmatrix} d \times f & d & f \end{bmatrix} $$
++    4.  Compute the scale $s$:
++        $$ s = \max_{m} \| \bar{R}^\top (c_m - \bar{c}) \|_\infty $$
++    5.  The translation for the transform is $-\bar{R}^\top \bar{c}$ (to center at origin). The rotation is $\bar{R}^\top$.
++    6.  The final transform $T$ has rotation $\bar{R}^\top$ and translation $-\bar{R}^\top \bar{c}$. The scale factor is $1/s$.
++    [S2, unofficial]
++
++    **Variant B: Scale-aligned Training (InfiniSplat style)**
++    1.  Back-project predicted depth maps using predicted poses and intrinsics to get 3D points $x_j$ for all input pixels $j \in V_{pts}$.
++    2.  Compute the Mean Radial Distance Normalization scale $s_{norm}$:
++        $$ s_{norm} = \frac{1}{|V_{pts}|} \sum_{j \in V_{pts}} \frac{1}{\|x_j\|^2} \sum_{i} \bar{D}_i $$
++        Where $\bar{D}_i$ is the normalized predicted depth. [S3, unofficial]
++    3.  Divide predicted depths and camera translations by $s_{norm}$.
++    4.  Fit a similarity transform from GT input-camera centers to the normalized predicted camera centers using Umeyama's algorithm. Retain the scale $s_C$.
++    5.  Apply $s_C$ to GT translations.
++    [S3, unofficial]
++
++    **General Implementation Note**:
++    In many general-purpose implementations (like `mrGSplat`), a simpler heuristic is used:
++    1.  Apply $R_{align}$ to all camera centers $t_i$.
++    2.  Compute the new centers $t'_i = R_{align} t_i + t_{trans}$ (where $t_{trans}$ centers the mean).
++    3.  Compute scale:
++        $$ \text{scale} = \frac{1.0}{\text{scale\_fn}(\|t'_i\|)} $$
++        Where $\text{scale\_fn}$ is `np.max` for strict scaling or `np.median` for robust scaling.
++    4.  Multiply the transform's rotation and translation by this scale.
++    [S1, unofficial]
++
++### Pseudocode
++
+ ```python
+ import numpy as np
+ 
+-def similarity_from_cameras(c2w, points=None, strict_scaling=True):
+-    """
+-    Computes a similarity transform to normalize camera poses.
++def camera_space_normalization(c2w_matrices, strict_scaling=True):
++    """
++    Normalizes camera poses to a canonical coordinate system.
+     
+     Args:
+-        c2w: np.ndarray of shape (N, 4, 4)
+-        points: np.ndarray of shape (M, 3) or None
+-        strict_scaling: bool, if True use max norm for scaling, else median
++        c2w_matrices: np.ndarray of shape (N, 4, 4)
++        strict_scaling: bool, if True use max norm, else median.
+         
+     Returns:
+-        T: np.ndarray of shape (4, 4)
+-        scale: float
+-        transformed_c2w: np.ndarray of shape (N, 4, 4)
+-        transformed_points: np.ndarray of shape (M, 3) or None
+-    """
+-    N = c2w.shape[0]
+-    
+-    # 1. Extract R and t
+-    Rs = c2w[:, :3, :3]  # (N, 3, 3)
+-    ts = c2w[:, :3, 3]   # (N, 3)
++        T: np.ndarray of shape (4, 4), the similarity transform.
++    """
++    N = c2w_matrices.shape[0]
++    
++    # 1. Extract translation and rotation
++    # t: (N, 3), R: (N, 3, 3)
++    t = c2w_matrices[:, :3, 3]
++    R = c2w_matrices[:, :3, :3]
+     
+     # 2. Estimate world up axis
+-    cam_up = np.array([0.0, -1.0, 0.0])
+-    ups = np.sum(Rs * cam_up, axis=-1)
+-    world_up = ups / np.linalg.norm(ups)
+-    
+-    # 3. Compute R_align
+-    up_camspace = cam_up
++    # Camera up is [0, -1, 0] in camera space
++    cam_up_local = np.array([0.0, -1.0, 0.0])
++    # World up vectors for each camera
++    world_ups = np.sum(R * cam_up_local[np.newaxis, np.newaxis, :], axis=-1)
++    ups_sum = np.sum(world_ups, axis=0)
++    
++    norm_ups = np.linalg.norm(ups_sum)
++    if norm_ups < 1e-8:
++        world_up = np.array([0.0, 1.0, 0.0]) # Fallback
++    else:
++        world_up = ups_sum / norm_ups
++        
++    # 3. Compute R_align to map world_up to [0, -1, 0]
++    up_camspace = np.array([0.0, -1.0, 0.0])
+     c = np.dot(up_camspace, world_up)
+     cross = np.cross(world_up, up_camspace)
+     
++    # Skew-symmetric matrix K
+     K = np.array([
+-        [0, -cross[2], cross[1]],
+-        [cross[2], 0, -cross[0]],
+-        [-cross[1], cross[0], 0]
++        [0.0, -cross[2], cross[1]],
++        [cross[2], 0.0, -cross[0]],
++        [-cross[1], cross[0], 0.0]
+     ])
+     
+     if c <= -1.0:
++        # 180 degree rotation around X axis
+         R_align = np.array([
+             [-1.0, 0.0, 0.0],
+@@ -121,33 +136,75 @@
+         ])
+     else:
++        # Rodrigues' formula
+         R_align = np.eye(3) + K + (K @ K) * (1.0 / (1.0 + c))
+         
+-    # 4. Construct Transform Matrix
+-    # [G] Center the scene: use points if provided, else camera centers
+-    if points is not None:
+-        center = np.mean(points, axis=0)
+-    else:
+-        center = np.mean(ts, axis=0)
+-        
+-    translate = -center
+-    transform = np.eye(4)
+-    transform[:3, :3] = R_align
+-    transform[:3, 3] = translate
+-    
+-    # 5. Rescale
+-    norms = np.linalg.norm(ts + translate, axis=1)
+-    scale_val = 1.0 / (np.max(norms) if strict_scaling else np.median(norms))
+-    transform[:3, :] *= scale_val
+-    
+-    # 6. Apply to cameras
+-    transformed_c2w = np.einsum('ij,njk->nik', transform, c2w)
+-    
+-    transformed_points = None
+-    if points is not None:
+-        points_h = np.hstack([points, np.ones((points.shape[0], 1))])
+-        transformed_points_h = (transform @ points_h.T).T
+-        transformed_points = transformed_points_h[:, :3]
+-        
+-    return transform, scale_val, transformed_c2w, transformed_points
++    # 4. Center the scene
++    # Apply rotation to centers first to align them
++    t_aligned = (R_align @ t.T).T # (N, 3)
++    
++    # Compute mean of aligned centers
++    mean_center = np.mean(t_aligned, axis=0)
++    
++    # Translation component of the transform: -mean_center
++    translate = -mean_center
++    
++    # Construct the base transform (Rotation + Translation)
++    # T_base * [x; 1] = R_align * x + translate
++    T_base = np.eye(4)
++    T_base[:3, :3] = R_align
++    T_base[:3, 3] = translate
++    
++    # 5. Compute Scale
++    # Calculate distances from origin after alignment and centering
++    # Note: translate is already applied in t_aligned calculation above? 
++    # No, t_aligned is just rotated. We need to center them.
++    t_centered = t_aligned + translate # (N, 3)
++    
++    norms = np.linalg.norm(t_centered, axis=1)
++    
++    if strict_scaling:
++        max_norm = np.max(norms)
++    else:
++        max_norm = np.median(norms)
++        
++    if max_norm < 1e-8:
++        scale = 1.0
++    else:
++        scale = 1.0 / max_norm
++        
++    # 6. Final Transform
++    # Multiply rotation and translation by scale
++    T = T_base.copy()
++    T[:3, :3] *= scale
++    T[:3, 3] *= scale
++    
++    return T
++
++def apply_transform(c2w_matrices, T):
++    """
++    Applies the similarity transform T to a set of camera matrices.
++    """
++    # c2w_new = T @ c2w_old
++    # But c2w is 4x4. T is 4x4.
++    # We only care about the pose, so we transform the 4x4 matrices.
++    # However, usually we only transform the position and orientation.
++    # If T is a similarity transform, it preserves the structure.
++    
++    # Efficiently:
++    # New Rotation = T[:3,:3] @ Old Rotation
++    # New Translation = T[:3,:3] @ Old Translation + T[:3,3]
++    
++    R_old = c2w_matrices[:, :3, :3]
++    t_old = c2w_matrices[:, :3, 3]
++    
++    R_new = np.einsum('ij,njk->nik', T[:3,:3], R_old)
++    t_new = np.einsum('ij,nj->ni', T[:3,:3], t_old) + T[:3,3]
++    
++    c2w_new = np.zeros_like(c2w_matrices)
++    c2w_new[:, :3, :3] = R_new
++    c2w_new[:, :3, 3] = t_new
++    c2w_new[:, 3, 3] = 1.0
++    
++    return c2w_new
+ ```
+ 
+@@ -155,22 +212,28 @@
+ 
+ ### Full Normalization Pipeline
+-Combines camera-based similarity normalization and principal axes alignment to normalize both camera poses and point clouds [S1, unofficial].
+-1. Compute initial similarity transform $T_1$ from cameras using `similarity_from_cameras` [S1, unofficial].
+-2. Transform cameras using $T_1$ [S1, unofficial].
+-3. If points are provided, transform them using $T_1$ [S1, unofficial].
+-4. Compute principal axes transform $T_2$ from points using `align_principle_axes` (see [PCA Pose Alignment](7626-pca-pose-alignment.md)) [S1, unofficial].
+-5. Transform cameras and points using $T_2$ [S1, unofficial].
+-6. Return transformed cameras, points, and combined transform $T_2 @ T_1$ [S1, unofficial].
++Combines camera-based similarity normalization and principal axes alignment. First, a similarity transform $T_1$ is computed from cameras using `similarity_from_cameras`. Cameras and points are transformed by $T_1$. Then, a principal axes transform $T_2$ is computed from the transformed points (using PCA). Cameras and points are transformed by $T_2$. The final transform is $T_2 @ T_1$. This ensures both camera-centric alignment and data-centric principal axis alignment. [S1, unofficial]
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for extracting rotations and computing the average up axis, where $N$ is the number of cameras [G].
+-- **Memory Complexity:** $O(N)$ to store the camera matrices and intermediate vectors [G].
+-- **Strengths:** Robustly aligns the vertical axis of the scene with the camera's up direction, which is crucial for rendering pipelines that assume a specific world orientation [G].
+-- **Limitations:** Relies on the assumption that the camera up vectors are consistent. If cameras are randomly oriented, the average up axis may be ill-defined [G]. The scaling factor choice (`max` vs `median`) affects the final scene size; `strict_scaling` ensures all points fit within a unit radius, while `median` is less sensitive to outliers [G].
+-- **When to use:** When initializing a neural rendering scene from SfM data to ensure consistent orientation and scale before training [G].
++
++*   **Time Complexity**: $O(N)$ for extracting statistics (mean, norms) from $N$ cameras. The matrix operations are constant time ($4 \times 4$).
++*   **Memory Complexity**: $O(N)$ to store the camera matrices and intermediate vectors.
++*   **Strengths**:
++    *   Ensures all scenes are normalized to a similar scale, which is critical for neural network training (e.g., Gaussian Splatting) to converge properly.
++    *   Aligns the coordinate system to a canonical view (Y-up, Z-forward), simplifying downstream processing.
++    *   Robust to global translation and rotation of the input dataset.
++*   **Limitations**:
++    *   Relies on the quality of the input camera poses. If poses are noisy or inconsistent, the "mean" directions may be skewed.
++    *   Does not account for the internal structure of the scene (unlike PCA), which might be better for scenes with strong directional biases.
++    *   The choice of `strict_scaling` vs `median` scaling affects the final volume; strict scaling is sensitive to outliers.
++*   **When to use**: When training neural rendering models that require normalized input scales, or when preparing datasets for multi-scene training.
++*   **When not to use**: When the absolute scale of the scene is physically meaningful and must be preserved (e.g., in photogrammetry for measurement).
+ 
+ ## Background
+-Implemented in [S1, unofficial] to standardize camera poses from Structure-from-Motion (SfM) outputs, which vary in scale, orientation, and centering, into a canonical coordinate system suitable for neural rendering optimization [G].
++
++This method is a standard preprocessing step in modern neural rendering pipelines, particularly those based on 3D Gaussian Splatting. It addresses the issue that raw SfM (Structure from Motion) outputs have arbitrary scales and coordinate systems. The specific implementation details (Rodrigues' alignment, mean centering) are derived from practical implementations in libraries like `mrGSplat` [S1, unofficial] and research papers like FineSplat [S2, unofficial] and InfiniSplat [S3, unofficial]. The "Scale-aligned training" variant specifically addresses the misalignment between predicted depths and GT cameras in feed-forward models.
+ 
+ ## Sources
+-[S1] meshroomHub/mrGSplat, https://github.com/meshroomHub/mrGSplat, fetched 2026-10-27 (unofficial)+
++[S1] meshroomHub/mrGSplat, https://github.com/meshroomHub/mrGSplat, fetched 2026-10-27 (unofficial)
++[S2] FineSplat: Fine Patches, Local Groups, Detailed Splats, https://arxiv.org/abs/2610.25011, fetched 2026-10-09 (unofficial)
++[S3] InfiniSplat v2: Analyzing and Improving Feed-Forward 3DGS from Any Views, https://arxiv.org/abs/2610.20341, fetched 2026-10-09 (unofficial)

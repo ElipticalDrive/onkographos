@@ -1,0 +1,130 @@
+--- v005.md
++++ v006.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ ### Inputs and Outputs
+-*   **Input:** A 3D voxel grid stored in a `std430` buffer (`VoxelBuffer`, binding 1). Voxels with a value $>0$ are solid; $0$ is empty [S1, unofficial].
+-*   **Input:** Chunk feedback data (`ChunkFeedbackBuffer`, binding 7) containing `vertexOffset`, `indexOffset`, `vertexCount`, and `indexCount` for each chunk [S1, unofficial]. The buffer is bound as `readonly std430` [S1, unofficial].
++*   **Input:** A 3D voxel grid stored in a `std430` buffer (`VoxelBuffer`, binding 1) where voxels with a value $>0$ are solid and $0$ is empty [S1, unofficial].
++*   **Input:** Chunk feedback data (`ChunkFeedbackBuffer`, binding 7) containing `vertexOffset`, `indexOffset`, `vertexCount`, and `indexCount` for each chunk, bound as `readonly std430` [S1, unofficial].
+ *   **Output:** A `VertexBuffer` (binding 2, writeonly `std430`) storing generated vertices [S1, unofficial].
+ *   **Output:** An `IndexBuffer` (binding 3, writeonly `std430`) storing generated indices [S1, unofficial].
+ 
+ ### Data Structures
+-**Vertex Layout:** Each vertex consists of 10 floats (40 bytes): `position` (`float3`), `texcoord` (`float2`), and `normal` (`float3`) [S1, unofficial].
+-**Chunk Feedback Layout:** `vertexOffset` (`uint`), `vertexCount` (`uint`), `indexOffset` (`uint`), `indexCount` (`uint`) [S1, unofficial].
+-**Draw Command Layout:** `indexCount` (`uint`), `instanceCount` (`uint`), `firstIndex` (`uint`), `vertexOffset` (`int`), `firstInstance` (`uint`) [S1, unofficial].
++**Vertex Layout:** Each vertex consists of 10 floats (40 bytes) containing `position` (`float3`), `texcoord` (`float2`), and `normal` (`float3`) [S1, unofficial].
++**Chunk Feedback Layout:** `vertexOffset` (`uint`), `vertexCount` (`uint`), `indexOffset` (`uint`), and `indexCount` (`uint`) [S1, unofficial].
++**Draw Command Layout:** `indexCount` (`uint`), `instanceCount` (`uint`), `firstIndex` (`uint`), `vertexOffset` (`int`), and `firstInstance` (`uint`) [S1, unofficial].
+ 
+ ### Algorithm Steps
+@@ -23,7 +23,7 @@
+ 3.  **Face Extraction:** For each of the 6 face directions ($\pm X, \pm Y, \pm Z$):
+     a. Calculate the neighbor's 3D coordinates [S1, unofficial].
+-    b. Check if the neighbor is within bounds $[0, \text{CHUNK\_SIZE})$. If out of bounds, treat as empty (exposed face) [S1, unofficial].
++    b. Check if the neighbor is within bounds $[0, \text{CHUNK\_SIZE})$ [S1, unofficial]. If out of bounds, treat as empty to expose the face [S1, unofficial].
+     c. If the neighbor is empty (value $0$), allocate space for 4 vertices and 6 indices using `atomicAdd` on the shared `sVertexOffset` and `sIndexOffset` [S1, unofficial].
+-    d. Write the 4 vertices to the global `VertexBuffer` at the allocated offset. The vertices are positioned relative to the current voxel's coordinate, with the normal pointing outward from the voxel [S1, unofficial].
++    d. Write the 4 vertices to the global `VertexBuffer` at the allocated offset [S1, unofficial]. The vertices are positioned relative to the current voxel's coordinate, with the normal pointing outward from the voxel [S1, unofficial].
+     e. Write the 6 indices (`0,1,2, 2,3,0`) to the global `IndexBuffer` at the allocated offset [S1, unofficial].
+ 4.  **Feedback Update:** After all threads in the workgroup finish, the updated offsets and counts are written back to the `ChunkFeedbackBuffer` [S1, unofficial].
+@@ -45,7 +45,8 @@
+ ### Pseudocode
+ ```python
+-def gpu_face_extraction_thread(global_voxel_index, chunk_size, voxel_buffer, feedback_buffer):
++def gpu_face_extraction(global_voxel_index, chunk_size, voxel_buffer, feedback_buffer):
+     """
+-    Simulates the logic executed by one thread for one voxel.
++    Simulates the logic executed by one GPU thread for one voxel.
++    Uses Python lists to simulate global buffers and atomic offset tracking.
+     """
+     # Step 2: Convert 1D index to 3D coordinates
+@@ -56,5 +57,5 @@
+     # Check if voxel is solid
+     if voxel_buffer[global_voxel_index] <= 0:
+-        return
++        return [], []
+ 
+     # Load shared offsets (simulated; in GPU these are shared memory variables)
+@@ -71,4 +72,7 @@
+         (0, 0, -1, 0, 0, -1)  # -Z
+     ]
++    
++    new_vertices = []
++    new_indices = []
+     
+     for dx, dy, dz, nx, ny, nz in faces:
+@@ -89,20 +93,18 @@
+             # In GPU: atomicAdd(&sIndexOffset, 6)
+             
+-            # Write 4 vertices
+-            # Vertices are positioned relative to the current voxel's coordinate,
+-            # with the normal pointing outward from the voxel.
+-            # The exact positions form a unit quad on the face plane.
+-            write_vertex(current_vertex_offset, (x + (1 if nx == 1 else 0), y + (1 if ny == 1 else 0), z + (1 if nz == 1 else 0)), (nx, ny, nz))
+-            write_vertex(current_vertex_offset + 1, (x + (1 if nx == 1 else 0), y + (1 if ny == -1 else 0), z + (1 if nz == 1 else 0)), (nx, ny, nz))
+-            write_vertex(current_vertex_offset + 2, (x + (1 if nx == 1 else 0), y + (1 if ny == 1 else 0), z + (1 if nz == -1 else 0)), (nx, ny, nz))
+-            write_vertex(current_vertex_offset + 3, (x + (1 if nx == 1 else 0), y + (1 if ny == -1 else 0), z + (1 if nz == -1 else 0)), (nx, ny, nz))
++            # Write 4 vertices to the face plane
++            # The quad spans the two axes perpendicular to the face normal
++            verts = [
++                (x + (1 if nx == 1 else 0), y + (1 if ny == 1 else 0), z + (1 if nz == 1 else 0)),
++                (x + (1 if nx == 1 else 0), y + (1 if ny == -1 else 0), z + (1 if nz == 1 else 0)),
++                (x + (1 if nx == 1 else 0), y + (1 if ny == 1 else 0), z + (1 if nz == -1 else 0)),
++                (x + (1 if nx == 1 else 0), y + (1 if ny == -1 else 0), z + (1 if nz == -1 else 0))
++            ]
++            for v in verts:
++                new_vertices.append({"position": v, "normal": (nx, ny, nz), "texcoord": (0.0, 0.0)})
+             
+-            # Write 6 indices
+-            write_index(current_index_offset, current_vertex_offset)
+-            write_index(current_index_offset + 1, current_vertex_offset + 1)
+-            write_index(current_index_offset + 2, current_vertex_offset + 2)
+-            write_index(current_index_offset + 3, current_vertex_offset + 2)
+-            write_index(current_index_offset + 4, current_vertex_offset + 3)
+-            write_index(current_index_offset + 5, current_vertex_offset)
++            # Write 6 indices forming two triangles
++            base_idx = len(new_vertices) - 4
++            new_indices.extend([base_idx, base_idx + 1, base_idx + 2, base_idx + 2, base_idx + 3, base_idx])
+             
+             # Update offsets (simulated)
+@@ -115,12 +117,6 @@
+     feedback_buffer.vertex_offset = current_vertex_offset
+     feedback_buffer.index_offset = current_index_offset
+-
+-def write_vertex(offset, position, normal):
+-    """Writes a vertex to the global vertex buffer at the given offset."""
+-    pass
+-
+-def write_index(offset, vertex_idx):
+-    """Writes an index to the global index buffer at the given offset."""
+-    pass
++    
++    return new_vertices, new_indices
+ ```
+ 
+@@ -128,10 +124,10 @@
+ *   **Boundary Check:** The `hasVoxel` function must explicitly check if coordinates are within $[0, \text{CHUNK\_SIZE})$ to prevent out-of-bounds access when checking neighbors at chunk edges [S1, unofficial].
+ *   **Atomic Contention:** Multiple threads writing to the same global buffers require atomic operations (`atomicAdd`) to avoid race conditions and data corruption [S1, unofficial].
+-*   **Translucency:** The basic algorithm assumes opaque voxels. Translucent blocks require extended culling logic to handle visibility correctly [G].
++*   **Translucency:** The basic algorithm assumes opaque voxels. Translucent blocks require extended culling logic to handle visibility correctly [S7, S10, unofficial].
+ 
+ ### Subtopics
+-*   **Voxel Mesh Rendering with Texture Atlas & Per-Vertex Lighting:** Uses the generated mesh for rendering with texture atlases and lighting. [Link](2185-voxel-mesh-rendering-with-texture-atlas-per-vertex-lighting.md)
+-*   **Face Culling Voxel Meshing:** CPU-based face culling method. [Link](2268-face-culling-voxel-meshing.md)
+-*   **Naive Voxel Meshing:** Generates all faces without culling. [Link](2376-naive-voxel-meshing.md)
++*   **Voxel Mesh Rendering with Texture Atlas & Per-Vertex Lighting:** Uses the generated mesh for rendering with texture atlases and lighting [G]. [Link](2185-voxel-mesh-rendering-with-texture-atlas-per-vertex-lighting.md)
++*   **Face Culling Voxel Meshing:** CPU-based face culling method [G]. [Link](2268-face-culling-voxel-meshing.md)
++*   **Naive Voxel Meshing:** Generates all faces without culling [G]. [Link](2376-naive-voxel-meshing.md)
+ 
+ ## Operating characteristics
+@@ -139,6 +135,6 @@
+ *   **Memory Complexity:** $O(F)$ where $F$ is the number of exposed faces, as vertices and indices are stored in global buffers [S1, unofficial].
+ *   **Performance:** The method is highly parallelizable, making it suitable for large voxel chunks (e.g., $80^3$) on modern GPUs [S1, unofficial].
+-*   **Strengths:** Efficient culling of internal faces, parallel processing, simple logic [S1, unofficial].
+-*   **Limitations:** Requires atomic operations for buffer writes, which can cause contention; boundary handling must be consistent across chunks to avoid gaps or double geometry [S1, unofficial].
++*   **Strengths:** Efficient culling of internal faces, parallel processing, and simple logic [S1, unofficial].
++*   **Limitations:** Requires atomic operations for buffer writes, which can cause contention, and boundary handling must be consistent across chunks to avoid gaps or double geometry [S1, unofficial].
+ 
+ ## Background

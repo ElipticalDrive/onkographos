@@ -1,0 +1,194 @@
+--- v003.md
++++ v004.md
+@@ -1,25 +1,24 @@
+ # 3D Gaussian Splatting with Feature Vectors
+ 
+-Also called: Feature-3DGS, LangSplat, Semantic 3DGS
+ 
+ ## Overview
+-This method extends standard 3D Gaussian Splatting by attaching a high-dimensional feature vector $\mathbf{f}_i$ to each Gaussian primitive, enabling the rendering of semantic, visual, or language-aligned feature maps instead of (or in addition to) color. It solves the problem of integrating 2D vision-language models (e.g., CLIP, LSeg) into a 3D representation by alpha-blending these per-Gaussian features to produce a 2D feature map $\mathbf{F}$, which can then be decoded for segmentation or compared against text embeddings for open-vocabulary queries [S1, unofficial]. It differs from sibling methods like [Text Embedding Generation with Directional Views](8239-text-embedding-generation-with-directional-views.md) by encoding features directly into the Gaussian attributes rather than generating them via directional views, and from [LSeg Feature Encoding](12078-lseg-feature-encoding.md) by using the standard alpha-blending rasterization pipeline for feature accumulation rather than specialized encoding heads.
++This method extends standard 3D Gaussian Splatting by attaching a high-dimensional feature vector $\mathbf{f}_i$ to each Gaussian primitive, enabling the rendering of semantic, visual, or language-aligned feature maps instead of (or in addition to) color [S1, unofficial]. It solves the problem of integrating 2D vision-language models (e.g., CLIP, LSeg) into a 3D representation by alpha-blending these per-Gaussian features to produce a 2D feature map $\mathbf{F}$, which can then be decoded for segmentation or compared against text embeddings for open-vocabulary queries [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   A set of $N$ 3D Gaussians, each defined by mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$), opacity $\alpha_i$, and a feature vector $\mathbf{f}_i \in \mathbb{R}^D$.
+-*   Camera parameters (view and projection matrices).
+-*   Image resolution $W \times H$.
++*   A set of $N$ 3D Gaussians, each defined by mean $\boldsymbol{\mu}_i$, covariance $\boldsymbol{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{S}_i$), opacity $\alpha_i$, and a high-dimensional feature vector $\mathbf{f}_i \in \mathbb{R}^D$ [S1, unofficial].
++*   Camera parameters (view and projection matrices) [G].
++*   Image resolution $W \times H$ [G].
+ 
+ **Outputs:**
+-*   A 2D feature map $\mathbf{F} \in \mathbb{R}^{H \times W \times D}$.
++*   A 2D feature map $\mathbf{F} \in \mathbb{R}^{H \times W \times D}$ [G].
+ 
+ **Data Structures:**
+-*   **Gaussian Attributes:** Each Gaussian $i$ stores $\mathbf{f}_i$ as a dense vector of size $D$. In implementations like Feature-3DGS, $D$ is typically 512 or 768 (matching CLIP embedding dimensions).
+-*   **Rasterization Buffer:** A buffer of size $H \times W \times D$ initialized to zero (or appropriate background) to accumulate the blended features.
++*   **Gaussian Attributes:** Each Gaussian $i$ stores $\mathbf{f}_i$ as a dense vector of size $D$ [S1, unofficial].
++*   **Rasterization Buffer:** A buffer of size $H \times W \times D$ initialized to zero to accumulate the blended features [G].
+ 
+ **Steps:**
+-1.  **Projection:** Project each Gaussian $i$ to 2D screen space, computing its 2D covariance matrix $\boldsymbol{\Sigma}'_i$ and center $\mathbf{c}_i$.
+-2.  **Sorting:** For each pixel (or tile), sort the overlapping Gaussians $\mathcal{O}_p$ front-to-back based on their depth $z_i$.
++1.  **Projection:** Project each Gaussian $i$ to 2D screen space, computing its 2D covariance matrix $\boldsymbol{\Sigma}'_i$ and center $\mathbf{c}_i$ [G].
++2.  **Sorting:** For each pixel (or tile), sort the overlapping Gaussians $\mathcal{O}_p$ front-to-back based on their depth $z_i$ [G].
+ 3.  **Feature Blending:** For each pixel $p$, compute the accumulated feature $\mathbf{F}(p)$ using alpha-blending:
+     $$
+@@ -30,89 +29,70 @@
+ 
+ **Parameters:**
+-*   **Feature Dimension $D$:** Not given in the sources. Typical values are 512 or 768 to match CLIP ViT-L/14 embeddings.
+-*   **Opacity $\alpha_i$:** Optimized during training alongside features, or fixed from a base 3DGS model.
++*   **Feature Dimension $D$:** Not given in the sources.
++*   **Opacity $\alpha_i$:** Optimized during training alongside features, or fixed from a base 3DGS model [G].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** Accumulating high-dimensional vectors requires sufficient precision. Standard FP16 may be insufficient for large $D$; FP32 is recommended for the feature accumulation buffer [G].
+-*   **Degenerate Input:** If $\alpha_i \approx 0$, the feature contribution is negligible, but sorting must still be consistent to avoid artifacts.
+-*   **Boundary Conditions:** The product $\prod_{j=1}^{i-1} (1 - \alpha_j)$ becomes 1 when $i=1$ (first Gaussian).
++*   **Degenerate Input:** If $\alpha_i \approx 0$, the feature contribution is negligible, but sorting must still be consistent to avoid artifacts [G].
++*   **Boundary Conditions:** The product $\prod_{j=1}^{i-1} (1 - \alpha_j)$ becomes 1 when $i=1$ (first Gaussian) [G].
+ 
+ **Pseudocode:**
+ ```python
++import numpy as np
++
+ def render_feature_map(gaussians, camera, width, height, feature_dim):
+     """
+     Render a 2D feature map from 3D Gaussians.
+-    
+-    Args:
+-        gaussians: List of Gaussian objects with attributes:
+-            - mean: (3,)
+-            - cov2d: (2, 2) projected covariance
+-            - alpha: scalar opacity
+-            - feature: (feature_dim,) vector f_i
+-            - z_depth: scalar depth for sorting
+-        camera: Camera object with projection and view matrices.
+-        width, height: Image dimensions.
+-        feature_dim: Dimension D of feature vectors.
+-        
+-    Returns:
+-        F: (height, width, feature_dim) feature map.
+     """
+-    # Initialize output buffer
+     F = np.zeros((height, width, feature_dim), dtype=np.float32)
+-    
+-    # Project Gaussians to 2D and collect visible ones
+-    projected_gaussians = []
++    T = np.ones((height, width), dtype=np.float32)  # Transmittance buffer
++
++    # 1. Project and collect visible Gaussians
++    projected = []
+     for g in gaussians:
+-        # Project mean to screen space
+-        center_2d = project_to_screen(g.mean, camera)
+-        # Compute 2D covariance (simplified; actual implementation uses Jacobian)
+-        cov2d = compute_2d_covariance(g.cov3d, camera)
+-        # Check if Gaussian is within bounds and has non-negligible alpha
+-        if is_visible(center_2d, cov2d, g.alpha, width, height):
+-            projected_gaussians.append({
++        # Standard perspective projection
++        h = camera.proj @ np.array([g.mean[0], g.mean[1], g.mean[2], 1.0])
++        center_2d = (h[:2] / h[3])[:2]
++        # Compute 2D covariance via standard 3DGS Jacobian projection [G]
++        cov2d = compute_2d_covariance_jacobian(g.cov3d, camera)
++        if 0 <= center_2d[0] < width and 0 <= center_2d[1] < height and g.alpha > 0:
++            projected.append({
+                 'center': center_2d,
+                 'cov2d': cov2d,
+                 'alpha': g.alpha,
+                 'feature': g.feature,
+-                'z_depth': g.z_depth
++                'z': g.z_depth
+             })
+-    
+-    # Sort Gaussians front-to-back by depth
+-    projected_gaussians.sort(key=lambda g: g['z_depth'])
+-    
+-    # Rasterize
+-    for g in projected_gaussians:
+-        # Determine bounding box of Gaussian in pixel space
+-        bbox = get_bounding_box(g['center'], g['cov2d'])
+-        # Clip to image bounds
+-        bbox = clip_to_image(bbox, width, height)
+-        
+-        for y in range(bbox.y_min, bbox.y_max):
+-            for x in range(bbox.x_min, bbox.x_max):
+-                # Compute 2D Gaussian weight at pixel (x, y)
+-                # w = exp(-0.5 * (p - c)^T Sigma^-1 (p - c))
+-                weight = evaluate_2d_gaussian(x, y, g['center'], g['cov2d'])
+-                
+-                # Alpha contribution
++
++    # 2. Sort front-to-back
++    projected.sort(key=lambda g: g['z'])
++
++    # 3. Rasterize
++    for g in projected:
++        std = np.sqrt(np.diag(g['cov2d']))
++        x_min = max(0, int(g['center'][0] - 3 * std[0]))
++        x_max = min(width, int(g['center'][0] + 3 * std[0]) + 1)
++        y_min = max(0, int(g['center'][1] - 3 * std[1]))
++        y_max = min(height, int(g['center'][1] + 3 * std[1]) + 1)
++
++        for y in range(y_min, y_max):
++            for x in range(x_min, x_max):
++                diff = np.array([x, y]) - g['center']
++                inv_cov = np.linalg.inv(g['cov2d'])
++                weight = np.exp(-0.5 * diff @ inv_cov @ diff)
+                 alpha_contrib = g['alpha'] * weight
+-                
+-                # Skip if negligible
++
+                 if alpha_contrib < 1e-6:
+                     continue
+-                
+-                # Transmittance from previous Gaussians (accumulated in a separate buffer)
+-                # For simplicity, we assume a transmittance buffer T is maintained
+-                # T[y, x] stores product_{j=1}^{i-1} (1 - alpha_j)
+-                transmittance = get_transmittance(T, y, x)
+-                
+-                # Blend feature
+-                # F(p) += f_i * alpha_i * product_{j=1}^{i-1} (1 - alpha_j)
++
++                transmittance = T[y, x]
+                 F[y, x] += g['feature'] * alpha_contrib * transmittance
+-                
+-                # Update transmittance for next Gaussian
+-                new_transmittance = transmittance * (1 - alpha_contrib)
+-                set_transmittance(T, y, x, new_transmittance)
+-                
++                T[y, x] *= (1.0 - alpha_contrib)
++
+     return F
++
++def compute_2d_covariance_jacobian(cov3d, camera):
++    # Standard 3DGS 2D covariance projection using camera Jacobian [G]
++    return cov3d[:2, :2]  # Simplified for pseudocode completeness
+ ```
+ 
+@@ -120,14 +100,14 @@
+ 
+ ### Scale-Aware Semantic Feature Gating
+-A mechanism to modulate rendered semantic features based on scale, using learned or fixed gate vectors derived from sampled scales [S2, unofficial]. It maps the distribution of sampled scales to a Gaussian distribution using `self.q_trans(sampled_scales)`. If `scale_aware_dim <= 0` or `scale_aware_dim >= 32`, gates are computed by passing sampled scales through `self.scale_gate`: `gates = self.scale_gate(sampled_scales.unsqueeze(-1))`. Otherwise, scales are discretized to integers: `int_sampled_scales = ((1 - sampled_scales.squeeze()) * scale_aware_dim).long()`, and pre-computed gates are looked up: `gates = self.fixed_scale_gate[int_sampled_scales].detach()`. The rendered features are repeated for each sampled scale: `feature_with_scale = rendered_features.unsqueeze(0).repeat([sampled_scales.shape[0], 1, 1, 1])`, and multiplied by gate vectors: `feature_with_scale = feature_with_scale * gates.unsqueeze(-1).unsqueeze(-1)` [S2, unofficial].
++A mechanism to modulate rendered semantic features based on scale, using learned or fixed gate vectors derived from sampled scales [S2, unofficial]. It maps the distribution of sampled scales to a Gaussian distribution using `self.q_trans(sampled_scales)` [S2, unofficial]. If `scale_aware_dim <= 0` or `scale_aware_dim >= 32`, gates are computed by passing sampled scales through `self.scale_gate`: `gates = self.scale_gate(sampled_scales.unsqueeze(-1))` [S2, unofficial]. Otherwise, scales are discretized to integers: `int_sampled_scales = ((1 - sampled_scales.squeeze()) * scale_aware_dim).long()`, and pre-computed gates are looked up: `gates = self.fixed_scale_gate[int_sampled_scales].detach()` [S2, unofficial]. The rendered features are repeated for each sampled scale: `feature_with_scale = rendered_features.unsqueeze(0).repeat([sampled_scales.shape[0], 1, 1, 1])`, and multiplied by gate vectors: `feature_with_scale = feature_with_scale * gates.unsqueeze(-1).unsqueeze(-1)` [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot A)$, where $N$ is the number of Gaussians and $A$ is the average number of Gaussians per pixel (or tile). The feature blending adds a factor of $D$ (feature dimension) to the per-pixel computation.
+-*   **Memory Complexity:** $O(N \cdot D)$ to store feature vectors for all Gaussians, plus $O(H \cdot W \cdot D)$ for the feature map buffer.
+-*   **Performance:** Rendering speed is comparable to standard 3DGS, as feature blending is a simple vector addition and multiplication. However, larger $D$ increases memory bandwidth usage.
+-*   **Strengths:** Enables real-time open-vocabulary segmentation and semantic understanding. Leverages the speed of 3DGS rasterization.
+-*   **Limitations:** Requires training or distillation to obtain meaningful feature vectors $\mathbf{f}_i$. High-dimensional features increase memory usage.
+-*   **When to use:** When semantic or language-aligned 3D representations are needed for downstream tasks like segmentation or query-based retrieval.
+-*   **When not to use:** When only photorealistic color rendering is required, as it adds unnecessary complexity and memory overhead.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background

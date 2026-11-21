@@ -1,0 +1,3761 @@
+# Isosurface Generation
+Experimental project for isosurface extraction from SDFs. Features both marching cubes and surface nets generation methods, using the Unity JOBS system.
+This experiment was used to build a much more efficient and faster infinite terrain generator using transvoxel for LODing and brickmaps for storage efficiency.
+
+Built with Unity 6000.2.8f1
+
+## Benchmarks
+Around 0.6 ms per chunk of size 32^3 voxels:
+- Density generation: 0.2 ms
+- Marching Cubes : 0.4 ms
+
+This was tested with a 12th Gen Intel Core I9-12900K, and is dependent on the number and size of shapes in the scene.
+
+## Features
+- Per-shape blending sharpness value.
+- Realtime shape editing, additive & subtractive SDF's.
+- Fast surface painting and chunk regeneration.
+- Smooth normals and vertex de-duplication for optimized meshes.
+- Marching Cubes and Surface Nets meshing methods.
+- Optimized with Unity JOBS and SIMD instructions.
+
+## Materials
+https://developer.nvidia.com/gpugems/gpugems3/part-i-geometry/chapter-1-generating-complex-procedural-terrains-using-gpu
+https://paulbourke.net/geometry/polygonise/
+https://eetumaenpaa.fi/blog/marching-cubes-optimizations-in-unity/#voxelcorners-vs-stackalloc
+https://medium.com/@ryandremer/implementing-surface-nets-in-godot-f48ecd5f29ff
+
+### Assets/FPSCounter.cs
+```
+using UnityEngine;
+
+public class FPSCounter : MonoBehaviour
+{
+    int m_FPS;
+    int m_SmoothedFPS;
+    float m_MeasuredFPSAtTime;
+
+    GUIStyle m_Style;
+
+    Rect m_TextAreaRect;
+
+    const float k_Width = 200;
+    const float k_Height = 24;
+    const float k_Margin = 20;
+
+    void Update()
+    {
+        m_FPS = Mathf.RoundToInt(1f / Time.smoothDeltaTime);
+
+        if (Time.realtimeSinceStartup >= m_MeasuredFPSAtTime + 1)
+        {
+            m_MeasuredFPSAtTime = Time.realtimeSinceStartup;
+            m_SmoothedFPS = m_FPS;
+        }
+    }
+
+    void OnGUI()
+    {
+        if (m_TextAreaRect == null)
+            m_TextAreaRect = new(k_Margin, k_Margin, k_Width, k_Height);
+
+        if (m_Style == null)
+            m_Style = new GUIStyle()
+            {
+                normal = new GUIStyleState()
+                {
+                    textColor = Color.white,
+                },
+                fontSize = 24
+            };
+
+        GUI.Label(m_TextAreaRect, $"{m_SmoothedFPS}, {m_FPS}", m_Style);
+    }
+}
+```
+
+### Assets/FreeCamera.cs
+```
+using UnityEngine;
+
+[RequireComponent(typeof(Camera))]
+public class FreeCamera : MonoBehaviour
+{
+    [Range(1f, 10f)]
+    public float Acceleration = 3.0f;
+
+    [Range(0.1f, 1f)]
+    public float MouseSensitivity = 0.3f;
+
+    Vector3 m_Rotation;
+    Vector3 m_Velocity;
+
+    void OnEnable()
+    {
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible = false;
+
+        m_Rotation = transform.localEulerAngles;
+    }
+
+    void OnDisable()
+    {
+        Cursor.lockState = CursorLockMode.Confined;
+        Cursor.visible = false;
+    }
+
+    void Update()
+    {
+        HandleMove();
+        HandleLook();
+
+        transform.localPosition += m_Velocity;
+        m_Velocity *= 0.95f;
+    }
+
+    void HandleMove()
+    {
+        Vector2 moveInput = new(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
+        bool boostHeld = Input.GetKey(KeyCode.LeftShift);
+        bool descendHeld = Input.GetKey(KeyCode.LeftControl);
+        bool ascendHeld = Input.GetKey(KeyCode.Space);
+
+        Vector3 move = transform.right * moveInput.x + transform.forward * moveInput.y;
+        if (boostHeld) move *= 3;
+        if (ascendHeld) move += Vector3.up;
+        if (descendHeld) move += Vector3.down;
+
+        m_Velocity += Acceleration * Time.deltaTime * move;
+    }
+
+    void HandleLook()
+    {
+        Vector2 lookInput = new(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y"));
+
+        Vector3 mouseMove = new(-lookInput.y, lookInput.x, 0);
+        m_Rotation += MouseSensitivity * mouseMove;
+        m_Rotation.x = Mathf.Clamp(m_Rotation.x, -90, 90);
+
+        transform.localEulerAngles = m_Rotation;
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Chunk.cs
+```
+using IsosurfaceGeneration.Meshing;
+using System.Collections.Generic;
+using Unity.Collections;
+using Unity.Mathematics;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace IsosurfaceGeneration
+{
+    public class Chunk : MonoBehaviour
+    {
+        [SerializeField]
+        MeshFilter m_MeshFilter;
+
+        [SerializeField]
+        MeshRenderer m_MeshRenderer;
+
+        [SerializeField]
+        MeshCollider m_Collider;
+
+        Vector3 m_Bounds;
+
+        public DensityMap DensityMap
+        {
+            get
+            {
+                return m_DensityMap;
+            }
+        }
+
+        public bool ContainsGeometry => m_Mesh.vertices.Length > 2 && m_Mesh.triangles.Length > 2;
+
+        DensityMap m_DensityMap;
+        Mesh m_Mesh;
+
+        const float k_RenderDistance = 128.0f;
+
+        /// <summary>
+        /// Create a new chunk object at the given index.
+        /// </summary>
+        public static Chunk New(int3 chunkIndex, int chunkSize, IcosurfaceGenerationMethod generator)
+        {
+            Chunk newChunk = new GameObject($"{chunkIndex.x}, {chunkIndex.y}, {chunkIndex.z}").AddComponent<Chunk>();
+            newChunk.Initialize(chunkIndex, chunkSize, generator);
+            return newChunk;
+        }
+
+        void Initialize(int3 chunkIndex, int chunkSize, IcosurfaceGenerationMethod generator)
+        {
+            m_DensityMap = new DensityMap(chunkIndex, chunkSize, generator);
+            m_Bounds = new Vector3(chunkSize, chunkSize, chunkSize);
+
+            m_MeshFilter = gameObject.AddComponent<MeshFilter>();
+            m_MeshRenderer = gameObject.AddComponent<MeshRenderer>();
+            m_Collider = gameObject.AddComponent<MeshCollider>();
+
+            m_Mesh = new Mesh();
+
+            m_MeshFilter.sharedMesh = m_Mesh;
+            m_Collider.sharedMesh = m_Mesh;
+
+            gameObject.hideFlags = HideFlags.DontSave | HideFlags.HideInHierarchy;
+        }
+
+        public void Destroy()
+        {
+            m_DensityMap.Dispose();
+            DestroyImmediate(gameObject);
+        }
+
+        /// <summary>
+        /// Assign mesh data from vertices, normals and indices list.
+        /// </summary>
+        public void SetMesh(List<Vector3> vertices, List<Vector3> normals, List<int> triangles)
+        {
+            m_Collider.sharedMesh = null;
+
+            if (vertices.Count > 2)
+            {
+                m_Mesh.SetVertices(vertices);
+                m_Mesh.SetTriangles(triangles, 0, true);
+                m_Mesh.SetNormals(normals);
+
+                // Re-construct physics mesh
+#if UNITY_EDITOR
+                if (Application.isPlaying)
+#endif
+                    m_Collider.sharedMesh = m_Mesh;
+            }
+            else
+            {
+                m_Mesh.Clear();
+            }
+        }
+
+        const MeshUpdateFlags updateFlags =
+              MeshUpdateFlags.DontNotifyMeshUsers |
+              MeshUpdateFlags.DontRecalculateBounds |
+              MeshUpdateFlags.DontResetBoneBounds |
+              MeshUpdateFlags.DontValidateIndices;
+
+        /// <summary>
+        /// Assign mesh data from a marching cubes mesher job.
+        /// </summary>
+        public void SetMesh(MarchingCubesMesherJob mesher)
+        {
+            SetMesh(mesher.vertices.ToArray(Allocator.Temp), mesher.indices.ToArray(Allocator.Temp));
+        }
+
+        /// <summary>
+        /// Assign mesh data from a surface mesh mesher job.
+        /// </summary>
+        public void SetMesh(SurfaceNetsMesherJob mesher)
+        {
+            SetMesh(mesher.vertices.ToArray(Allocator.Temp), mesher.indices.ToArray(Allocator.Temp));
+        }
+
+        void SetMesh(NativeArray<Vertex> vertices, NativeArray<ushort> indices)
+        {
+            m_Collider.sharedMesh = null;
+
+            if (vertices.Length > 2)
+            {
+                m_Mesh.SetVertexBufferParams(vertices.Length, Vertex.Format);
+                m_Mesh.SetIndexBufferParams(indices.Length, IndexFormat.UInt16);
+
+                m_Mesh.SetVertexBufferData(vertices, 0, 0, vertices.Length, 0, updateFlags);
+                m_Mesh.SetIndexBufferData(indices, 0, 0, indices.Length, updateFlags);
+
+                SubMeshDescriptor subMeshDescriptor = new(0, indices.Length, MeshTopology.Triangles);
+                m_Mesh.subMeshCount = 1;
+                m_Mesh.SetSubMesh(0, subMeshDescriptor, updateFlags);
+
+                m_Mesh.bounds = new Bounds(Vector3.zero, m_Bounds * 2.0f);
+
+                // Re-construct physics mesh
+#if UNITY_EDITOR
+                if (Application.isPlaying)
+#endif
+                    m_Collider.sharedMesh = m_Mesh;
+            }
+            else
+            {
+                m_Mesh.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Set the chunk material.
+        /// </summary>
+        public void SetMaterial(Material material)
+        {
+            m_MeshRenderer.sharedMaterial = material;
+        }
+
+        /// <summary>
+        /// Whether or not the chunk is within the camera's view frustum, and within the preset render distance.
+        /// </summary>
+        public bool InViewFrustum(Camera camera)
+        {
+            Vector3 cameraPos = camera.transform.position;
+            Vector3 chunkCentre = transform.position + (m_Bounds / 2.0f);
+
+            if (Vector3.Distance(cameraPos, chunkCentre) > k_RenderDistance)
+                return false;
+
+            Plane[] frustumPlanes = GeometryUtility.CalculateFrustumPlanes(camera);
+            Bounds cutoutBounds = GeometryUtility.CalculateBounds(new Vector3[] { Vector3.zero, m_Bounds * 2.0f }, transform.localToWorldMatrix);
+            return GeometryUtility.TestPlanesAABB(frustumPlanes, cutoutBounds);
+        }
+
+#if UNITY_EDITOR
+        void OnDrawGizmosSelected()
+        {
+            DrawBoundsGizmo();
+        }
+
+        public void DrawBoundsGizmo()
+        {
+            Gizmos.matrix = transform.localToWorldMatrix;
+            Gizmos.color = new Color(1, 1, 1, 0.5f);
+
+            Gizmos.DrawWireCube(m_Bounds / 2.0f, m_Bounds * 0.999f);
+        }
+#endif
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/ChunkViewer.cs
+```
+using Unity.Mathematics;
+using UnityEditor;
+using UnityEngine;
+
+namespace IsosurfaceGeneration.Debugging
+{
+    [ExecuteInEditMode]
+    public class ChunkViewer : MonoBehaviour
+    {
+#if UNITY_EDITOR
+        public Isosurface Surface;
+        GUIStyle m_Style;
+
+        void OnDrawGizmos()
+        {
+            if (!Surface || !Surface.IsGenerated)
+                return;
+
+            if (m_Style == null)
+            {
+                m_Style = new GUIStyle()
+                {
+                    alignment = TextAnchor.UpperLeft,
+                    normal = new GUIStyleState()
+                    {
+                        textColor = Color.white
+                    }
+                };
+            }
+
+            Gizmos.color = new Color(1, 0, 0, 0.5f);
+            Gizmos.DrawSphere(transform.position, 0.1f);
+
+            Surface.ComputeIndices(transform.position, out int3 chunkIndex, out int3 densityIndex);
+            Surface.GetChunk(chunkIndex).DrawBoundsGizmo();
+
+            string label = string.Empty;
+            label += $"Chunk: {chunkIndex.x}, {chunkIndex.y}, {chunkIndex.z}";
+            label += $"\nInterchunk: {densityIndex.x}, {densityIndex.y}, {densityIndex.z}";
+            label += $"\nDensity: {Surface.SampleDensity(transform.position)}";
+
+            Handles.Label(transform.position, label, m_Style);
+        }
+#endif
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/DensityJobs.cs
+```
+using IsosurfaceGeneration.Util;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+
+namespace IsosurfaceGeneration
+{
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct FillDensityJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<float> density;
+        [ReadOnly] public float value;
+
+        public void Execute(int index)
+        {
+            density[index] = value;
+        }
+    }
+
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct RecomputeDensityJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<float> density;
+        [ReadOnly] public int pointsPerAxis;
+        [ReadOnly] public int3 chunkOriginIndex;
+
+        [ReadOnly] public float initialValue;
+        [ReadOnly] public NativeArray<Shape> shapes;
+
+        [ReadOnly] public float3 surfacePosition;
+
+        public void Execute(int index)
+        {
+            density[index] = initialValue;
+
+            for (int i = 0; i < shapes.Length; i++)
+            {
+                AffineTransform localMatrix = shapes[i].matrix;
+                localMatrix.t -= surfacePosition;
+
+                float3 pos = shapes[i].TransformPosition(IndexHelper.Unwrap(index, pointsPerAxis) + chunkOriginIndex, math.inverse(localMatrix));
+                DensityHelpers.ApplyDistanceFunction(density, index, shapes[i].Distance(pos), shapes[i].sharpness, shapes[i].blendMode == BlendMode.Subtractive);
+            }
+        }
+    }
+
+    // Individual shape jobs, much more performant to perform the switch outside of the job.
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct ApplyShereJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<float> density;
+        [ReadOnly] public int pointsPerAxis;
+        [ReadOnly] public int3 chunkOriginIndex;
+
+        [ReadOnly] public Shape shape;
+        [ReadOnly] public AffineTransform localMatrix;
+
+        public void Execute(int index)
+        {
+            float3 pos = shape.TransformPosition(IndexHelper.Unwrap(index, pointsPerAxis) + chunkOriginIndex, localMatrix);
+            float distance = DistanceFunction.Sphere(pos, shape.dimention1);
+            DensityHelpers.ApplyDistanceFunction(density, index, distance, shape.sharpness, shape.blendMode == BlendMode.Subtractive);
+        }
+    }
+
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct ApplySemiSphereJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<float> density;
+        [ReadOnly] public int pointsPerAxis;
+        [ReadOnly] public int3 chunkOriginIndex;
+
+        [ReadOnly] public Shape shape;
+        [ReadOnly] public AffineTransform localMatrix;
+
+        public void Execute(int index)
+        {
+            float3 pos = shape.TransformPosition(IndexHelper.Unwrap(index, pointsPerAxis) + chunkOriginIndex, localMatrix);
+            float distance = DistanceFunction.SemiSphere(pos, shape.dimention1, shape.dimention2);
+            DensityHelpers.ApplyDistanceFunction(density, index, distance, shape.sharpness, shape.blendMode == BlendMode.Subtractive);
+        }
+    }
+
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct ApplyCapsuleJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<float> density;
+        [ReadOnly] public int pointsPerAxis;
+        [ReadOnly] public int3 chunkOriginIndex;
+
+        [ReadOnly] public Shape shape;
+        [ReadOnly] public AffineTransform localMatrix;
+
+        public void Execute(int index)
+        {
+            float3 pos = shape.TransformPosition(IndexHelper.Unwrap(index, pointsPerAxis) + chunkOriginIndex, localMatrix);
+            float distance = DistanceFunction.Capsule(pos, shape.dimention1, shape.dimention2);
+            DensityHelpers.ApplyDistanceFunction(density, index, distance, shape.sharpness, shape.blendMode == BlendMode.Subtractive);
+        }
+    }
+
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct ApplyTorusJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<float> density;
+        [ReadOnly] public int pointsPerAxis;
+        [ReadOnly] public int3 chunkOriginIndex;
+
+        [ReadOnly] public Shape shape;
+        [ReadOnly] public AffineTransform localMatrix;
+
+        public void Execute(int index)
+        {
+            float3 pos = shape.TransformPosition(IndexHelper.Unwrap(index, pointsPerAxis) + chunkOriginIndex, localMatrix);
+            float distance = DistanceFunction.Torus(pos, shape.dimention1, shape.dimention2);
+            DensityHelpers.ApplyDistanceFunction(density, index, distance, shape.sharpness, shape.blendMode == BlendMode.Subtractive);
+        }
+    }
+
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct ApplyCubeJob : IJobParallelFor
+    {
+        [NativeDisableParallelForRestriction] public NativeArray<float> density;
+        [ReadOnly] public int pointsPerAxis;
+        [ReadOnly] public int3 chunkOriginIndex;
+
+        [ReadOnly] public Shape shape;
+        [ReadOnly] public AffineTransform localMatrix;
+
+        public void Execute(int index)
+        {
+            float3 pos = shape.TransformPosition(IndexHelper.Unwrap(index, pointsPerAxis) + chunkOriginIndex, localMatrix);
+            float distance = DistanceFunction.Cube(pos, shape.dimention1, shape.dimention2, shape.dimention3);
+            DensityHelpers.ApplyDistanceFunction(density, index, distance, shape.sharpness, shape.blendMode == BlendMode.Subtractive);
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/DensityMap.cs
+```
+using IsosurfaceGeneration.Util;
+using System;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+
+namespace IsosurfaceGeneration
+{
+    public struct DensityMap : IDisposable
+    {
+        public NativeArray<float> density;
+        public readonly int pointsPerAxis;
+        public readonly int totalPoints => pointsPerAxis * pointsPerAxis * pointsPerAxis;
+
+        // The index cell index where this chunk begins, relative to the whole icosurface.
+        // Chunk Index * Chunk Size
+        int3 chunkOriginIndex;
+
+        const int k_InterloopBatchCount = 32;
+
+        public DensityMap(int3 chunkIndex, int chunkSize, IcosurfaceGenerationMethod generator)
+        {
+            pointsPerAxis = chunkSize + 1;
+
+            // Since we need access to adjacent cells when computing normals, we expand the density map by 1 on each size.
+            // This is not neccessary in the single-threaded methods since we can just fetch adjacent chunks from the isosurface.
+            // However since all data used by JOBS must be blittable, we cannot have a reference to the isosurface so we just recompute the densities on the edge of chunks.
+            if (generator == IcosurfaceGenerationMethod.MarchingCubesJobs || generator == IcosurfaceGenerationMethod.SurfaceNetsJobs)
+                pointsPerAxis += 2;
+
+            density = new NativeArray<float>(pointsPerAxis * pointsPerAxis * pointsPerAxis, Allocator.Persistent);
+            chunkOriginIndex = chunkIndex * chunkSize;
+        }
+
+        public void Dispose()
+        {
+            density.Dispose();
+        }
+
+        /// <summary>
+        /// Recompute this density map with a shape queue. For total regeneration.
+        /// </summary>
+        public void RecomputeDensityMap(float initialValue, NativeArray<Shape> shapes, float3 surfacePosition, DensityGenerationMethod method)
+        {
+            switch (method)
+            {
+                case DensityGenerationMethod.Recompute:
+                    RecomputeDensity(initialValue, shapes, surfacePosition);
+                    break;
+
+                case DensityGenerationMethod.RecomputeJobs:
+                    RecomputeDensity_Jobs(initialValue, shapes, surfacePosition);
+                    break;
+            }
+        }
+
+        public void FillDensityMap(float value, DensityGenerationMethod method)
+        {
+            switch (method)
+            {
+                case DensityGenerationMethod.Recompute:
+                    FillDensity(value);
+                    break;
+
+                case DensityGenerationMethod.RecomputeJobs:
+                    FillDensity_Jobs(value);
+                    break;
+
+                case DensityGenerationMethod.UseShapeVolumesJobs:
+                    FillDensity_Jobs(value);
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Apply a shape to this density map.
+        /// </summary>
+        public void ApplyShape(Shape shape, AffineTransform localMatrix, DensityGenerationMethod method)
+        {
+            switch (method)
+            {
+                case DensityGenerationMethod.Recompute:
+                    ApplyShape(shape, localMatrix);
+                    break;
+
+                case DensityGenerationMethod.RecomputeJobs:
+                    ApplyShape_Jobs(shape, localMatrix);
+                    break;
+
+                case DensityGenerationMethod.UseShapeVolumesJobs:
+                    ApplyShape_Jobs(shape, localMatrix);
+                    break;
+            }
+        }
+
+        #region Single Threaded
+        void FillDensity(float value)
+        {
+            for (int i = 0; i < density.Length; i++)
+                density[i] = value;
+        }
+
+        void RecomputeDensity(float value, NativeArray<Shape> shapeQueue, float3 surfacePosition)
+        {
+            for (int i = 0; i < density.Length; i++)
+            {
+                density[i] = value;
+
+                foreach (Shape shape in shapeQueue)
+                {
+                    AffineTransform localMatrix = shape.matrix;
+                    localMatrix.t -= surfacePosition;
+
+                    float3 pos = shape.TransformPosition(IndexHelper.Unwrap(i, pointsPerAxis) + chunkOriginIndex, math.inverse(localMatrix));
+                    DensityHelpers.ApplyDistanceFunction(density, i, shape.Distance(pos), shape.sharpness, shape.blendMode == BlendMode.Subtractive);
+                }
+            }
+        }
+
+        void ApplyShape(Shape shape, AffineTransform localMatrix)
+        {
+            for (int i = 0; i < density.Length; i++)
+            {
+                float3 pos = shape.TransformPosition(IndexHelper.Unwrap(i, pointsPerAxis) + chunkOriginIndex, localMatrix);
+                DensityHelpers.ApplyDistanceFunction(density, i, shape.Distance(pos), shape.sharpness, shape.blendMode == BlendMode.Subtractive);
+            }
+        }
+        #endregion
+
+        #region Jobs
+        void FillDensity_Jobs(float value)
+        {
+            FillDensityJob fillDensityJob = new()
+            {
+                density = density,
+                value = value
+            };
+
+            fillDensityJob.Schedule(totalPoints, k_InterloopBatchCount).Complete();
+        }
+
+        void RecomputeDensity_Jobs(float initialValue, NativeArray<Shape> shapeQueue, float3 surfacePosition)
+        {
+            RecomputeDensityJob recomputeDensityJob = new()
+            {
+                density = density,
+                pointsPerAxis = pointsPerAxis,
+                chunkOriginIndex = chunkOriginIndex,
+                initialValue = initialValue,
+                shapes = shapeQueue,
+                surfacePosition = surfacePosition
+            };
+
+            recomputeDensityJob.Schedule(totalPoints, k_InterloopBatchCount).Complete();
+        }
+
+        void ApplyShape_Jobs(Shape shape, AffineTransform localMatrix)
+        {
+            switch (shape.shapeID)
+            {
+                case ShapeFunction.Sphere:
+                    ApplyShereJob applyShereJob = new()
+                    {
+                        density = density,
+                        pointsPerAxis = pointsPerAxis,
+                        chunkOriginIndex = chunkOriginIndex,
+                        shape = shape,
+                        localMatrix = localMatrix
+                    };
+                    applyShereJob.Schedule(totalPoints, k_InterloopBatchCount).Complete();
+                    break;
+                case ShapeFunction.SemiSphere:
+                    ApplySemiSphereJob applySemiSphereJob = new()
+                    {
+                        density = density,
+                        pointsPerAxis = pointsPerAxis,
+                        chunkOriginIndex = chunkOriginIndex,
+                        shape = shape,
+                        localMatrix = localMatrix
+                    };
+                    applySemiSphereJob.Schedule(totalPoints, k_InterloopBatchCount).Complete();
+                    break;
+                case ShapeFunction.Capsule:
+                    ApplyCapsuleJob applyCapsuleJob = new()
+                    {
+                        density = density,
+                        pointsPerAxis = pointsPerAxis,
+                        chunkOriginIndex = chunkOriginIndex,
+                        shape = shape,
+                        localMatrix = localMatrix
+                    };
+                    applyCapsuleJob.Schedule(totalPoints, k_InterloopBatchCount).Complete();
+                    break;
+                case ShapeFunction.Torus:
+                    ApplyTorusJob applyTorusJob = new()
+                    {
+                        density = density,
+                        pointsPerAxis = pointsPerAxis,
+                        chunkOriginIndex = chunkOriginIndex,
+                        shape = shape,
+                        localMatrix = localMatrix
+                    };
+                    applyTorusJob.Schedule(totalPoints, k_InterloopBatchCount).Complete();
+                    break;
+                case ShapeFunction.Cube:
+                    ApplyCubeJob applyCubeJob = new()
+                    {
+                        density = density,
+                        pointsPerAxis = pointsPerAxis,
+                        chunkOriginIndex = chunkOriginIndex,
+                        shape = shape,
+                        localMatrix = localMatrix
+                    };
+                    applyCubeJob.Schedule(totalPoints, k_InterloopBatchCount).Complete();
+                    break;
+            }
+        }
+        #endregion
+
+        /// <summary>
+        /// Sample the density map at a given 3D index.
+        /// </summary>
+        public float Sample(int3 index)
+        {
+            return density[IndexHelper.Wrap(index, pointsPerAxis)];
+        }
+    }
+
+    struct DensityHelpers
+    {
+        public static void ApplyDistanceFunction(NativeArray<float> density, int index, float distance, float sharpness, bool subtractive)
+        {
+            // To avoid a branch here, we can use math.select to create a -1 multiplier in subtractive cases.
+            // In this case, we want to use a smooth min function, which can be attained by negating the inputs to smooth max, and then negating the result.
+            float mult = math.select(1.0f, -1.0f, subtractive);
+            density[index] = SmoothMax(-distance, density[index] * mult, sharpness) * mult;
+        }
+
+        static float SmoothMax(float a, float b, float k)
+        {
+            return math.log(math.exp(k * a) + math.exp(k * b)) / k;
+        }
+
+        //static float SmoothMin(float a, float b, float k)
+        //{
+        //    return -SmoothMax(-a, -b, k);
+        //}
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Isosurface.cs
+```
+using IsosurfaceGeneration.Meshing;
+using IsosurfaceGeneration.Util;
+using System;
+using System.Collections.Generic;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace IsosurfaceGeneration
+{
+    [DisallowMultipleComponent]
+    public class Isosurface : MonoBehaviour
+    {
+        #region Properties
+        /// <summary>
+        /// Which algorithm to use when constructing the icosurface. Enable profiling to see how long each method takes.
+        /// </summary>
+        [Tooltip("Which algorithm to use when constructing the icosurface.Enable profiling to see how long each method takes.")]
+        public IcosurfaceGenerationMethod MeshingMethod = IcosurfaceGenerationMethod.MarchingCubesJobs;
+
+        /// <summary>
+        /// Which method to use when computing the underlying densities. Enable profiling to see how long each method takes.
+        /// </summary>
+        [Tooltip("Which method to use when computing the underlying densities. Enable profiling to see how long each method takes.")]
+        public DensityGenerationMethod DensityMethod = DensityGenerationMethod.RecomputeJobs;
+
+        /// <summary>
+        /// Dimentions of the isosurface in chunks. Will be applied upon regenerating chunks.
+        /// </summary>
+        [Tooltip("Dimentions of the isosurface in chunks. Will be applied upon regenerating chunks.")]
+        public int3 Dimentions = new(2, 2, 2);
+
+        /// <summary>
+        /// How many cells contained on each axis within each chunk.
+        /// </summary>
+        [Tooltip("How many cells contained on each axis within each chunk.")]
+        public ChunkCellDimentions ChunkSize = ChunkCellDimentions.Low8;
+
+        /// <summary>
+        /// The density value that the icosurface cuts through. The density functions are designed to accomodate the default value 0.
+        /// </summary>
+        [Range(-10, 10), Tooltip("The density value that the icosurface cuts through. The density functions are designed to accomodate the default value 0.")]
+        public float IsoLevel = 0.0f;
+
+        /// <summary>
+        /// When enabled, the world is filled in by default and subtractive brushes must be used to carve holes.
+        /// </summary>
+        [Tooltip("When enabled, the world is filled in by default and subtractive brushes must be used to carve holes.")]
+        public bool InvertSurface = false;
+
+        /// <summary>
+        /// Apply a material to the surface.
+        /// </summary>
+        [Tooltip("Apply a material to the surface.")]
+        public Material Material;
+
+        /// <summary>
+        /// Enable to see how much time the density and meshing algorithms are taking to compute the surface.
+        /// </summary>
+        [Tooltip("Enable to see how much time the density and meshing algorithms are taking to compute the surface.")]
+        public bool SendLogMessages = false;
+        #endregion
+
+        public bool PropertyChanged {  get; set; }
+
+        public bool IsGenerated => enabled && m_Chunks != null;
+
+        public int ChunkSizeCells => ChunkSize switch
+        {
+            ChunkCellDimentions.Low8 => 8,
+            ChunkCellDimentions.Medium16 => 16,
+            ChunkCellDimentions.High32 => 32,
+            _ => 8
+        };
+
+        int3 m_Dimentions;
+        int m_ChunkSize;
+        Chunk[] m_Chunks;
+
+        double m_DensityTimestamp;
+        double m_MeshTimestamp;
+
+        /// <summary>
+        /// Initialize all chunks, does not apply shapes automatically.
+        /// </summary>
+        public void Generate()
+        {
+            m_ChunkSize = ChunkSizeCells;
+
+            m_Dimentions = Dimentions;
+            m_Chunks = new Chunk[m_Dimentions.x * m_Dimentions.y * m_Dimentions.z];
+
+            for (int i = 0; i < m_Chunks.Length; i++)
+            {
+                int3 chunkIndex = IndexHelper.Unwrap(i, m_Dimentions);
+
+                Chunk newChunk = Chunk.New(chunkIndex, m_ChunkSize, MeshingMethod);
+                newChunk.transform.SetParent(transform);
+                newChunk.transform.localPosition = new Vector3(chunkIndex.x, chunkIndex.y, chunkIndex.z) * m_ChunkSize;
+
+                m_Chunks[i] = newChunk;
+            }
+        }
+
+        /// <summary>
+        /// Destroy all chunks.
+        /// </summary>
+        public void Destroy()
+        {
+            foreach (Chunk chunk in GetComponentsInChildren<Chunk>())
+                chunk.Destroy();
+
+            m_Chunks = null;
+        }
+
+        /// <summary>
+        /// Apply a shape array to all chunks. For total surface regeneration.
+        /// </summary>
+        public void Recompute(NativeArray<Shape> shapeQueue)
+        {
+            BeginProfiler(ref m_DensityTimestamp);
+            float baseDensity = InvertSurface ? 32.0f : -32.0f;
+
+            if (DensityMethod == DensityGenerationMethod.Recompute || DensityMethod == DensityGenerationMethod.RecomputeJobs)
+            {
+                // Loop through all chunks, set initial value and then apply all shapes.
+                for (int i = 0; i < m_Chunks.Length; i++)
+                    m_Chunks[i].DensityMap.RecomputeDensityMap(baseDensity, shapeQueue, (float3)transform.position, DensityMethod);
+
+                EndProfilier(ref m_DensityTimestamp);
+
+                // Update effected chunks
+                m_MeshTimestamp = Time.realtimeSinceStartupAsDouble;
+                for (int i = 0; i < m_Chunks.Length; i++)
+                    UpdateChunk(i);
+                m_MeshTimestamp = Time.realtimeSinceStartupAsDouble - m_MeshTimestamp;
+
+                if (SendLogMessages)
+                    LogTimestamps(m_Chunks.Length);
+            }
+            else
+            {
+                List<int> updateChunks = new();
+
+                // Initialize update chunks list with chunks that already contain geometry
+                for (int i = 0; i < m_Chunks.Length; i++)
+                    if (m_Chunks[i].ContainsGeometry)
+                        updateChunks.Add(i);
+
+                // First fill entire map with value.
+                for (int i = 0; i < m_Chunks.Length; i++)
+                    m_Chunks[i].DensityMap.FillDensityMap(baseDensity, DensityMethod);
+
+                // Then loop through shapes and apply based on bounding volume.
+                for (int i = 0; i < shapeQueue.Length; i++)
+                {
+                    ApplyShapeWithBoundingVolume(shapeQueue[i], out List<int> effectedChunks); // TODO: output effected chunk mask? bitwise || together and only update those chunks.
+
+                    for (int j = 0; j < effectedChunks.Count; j++)
+                        if (!updateChunks.Contains(effectedChunks[j]))
+                            updateChunks.Add(effectedChunks[j]);
+                }
+
+                EndProfilier(ref m_DensityTimestamp);
+
+                // Update effected chunks
+                BeginProfiler(ref m_MeshTimestamp);
+                foreach (int index in updateChunks)
+                    UpdateChunk(index);
+                EndProfilier(ref m_MeshTimestamp);
+
+                if (SendLogMessages)
+                    LogTimestamps(updateChunks.Count);
+            }
+        }
+
+        /// <summary>
+        /// Apply a shape at the given position.
+        /// </summary>
+        public void ApplyShape(Shape shape)
+        {
+            BeginProfiler(ref m_DensityTimestamp);
+            ApplyShapeWithBoundingVolume(shape, out List<int> effectedChunks);
+            EndProfilier(ref m_DensityTimestamp);
+
+            BeginProfiler(ref m_MeshTimestamp);
+            foreach (int index in effectedChunks)
+                UpdateChunk(index);
+            EndProfilier(ref m_MeshTimestamp);
+
+            if (SendLogMessages)
+                LogTimestamps(effectedChunks.Count);
+        }
+
+        void ApplyShapeWithBoundingVolume(Shape shape, out List<int> effectedChunks)
+        {
+            AffineTransform localMatrix = shape.matrix;
+            localMatrix.t -= (float3)transform.position;
+
+            ComputeIndices(PositionToIndex(localMatrix.t), out int3 chunkIndex, out _);
+
+            effectedChunks = new();
+            int3 chunkVolume = shape.ComputeChunkVolume(this);
+            
+            for (int x = 0; x < chunkVolume.x; x++)
+            {
+                for (int y = 0; y < chunkVolume.y; y++)
+                {
+                    for (int z = 0; z < chunkVolume.z; z++)
+                    {
+                        int3 wrappedIndex = new(x, y, z);
+                        wrappedIndex -= chunkVolume / 2;
+                        wrappedIndex += chunkIndex;
+
+                        if (!ChunkInBounds(wrappedIndex))
+                            continue;
+
+                        int index = IndexHelper.Wrap(wrappedIndex, m_Dimentions);
+                        m_Chunks[index].DensityMap.ApplyShape(shape, math.inverse(localMatrix), DensityMethod);
+                        effectedChunks.Add(index);
+                    }
+                }
+            }
+        }
+
+        void UpdateChunk(int index)
+        {
+            DensityMap densityMap = m_Chunks[index].DensityMap;
+            int3 chunkOriginIndex = IndexHelper.Unwrap(index, m_Dimentions) * m_ChunkSize;
+            
+            switch (MeshingMethod)
+            {
+                case IcosurfaceGenerationMethod.MarchingCubes:
+                    GenerateMesh_MarchingCubes(index, densityMap, chunkOriginIndex);
+                    break;
+
+                case IcosurfaceGenerationMethod.MarchingCubesJobs:
+                    GenerateMesh_MarchingCubesJobs(index, densityMap);
+                    break;
+
+                case IcosurfaceGenerationMethod.SurfaceNets:
+                    GenerateMesh_SurfaceNets(index, densityMap, chunkOriginIndex);
+                    break;
+
+                case IcosurfaceGenerationMethod.SurfaceNetsJobs:
+                    GenerateMesh_SurfaceNetsJobs(index, densityMap);
+                    break;
+            };
+
+            m_Chunks[index].SetMaterial(Material);
+        }
+
+        void GenerateMesh_MarchingCubes(int index, DensityMap densityMap, int3 chunkOriginIndex)
+        {
+            List<Vector3> vertices = new();
+            List<Vector3> normals = new();
+            List<int> triangles = new();
+
+            MarchingCubesMesher mesher = new()
+            {
+                surface = this,
+                densityMap = densityMap,
+                chunkOriginIndex = chunkOriginIndex,
+                vertices = vertices,
+                normals = normals,
+                triangles = triangles
+            };
+
+            mesher.Execute();
+            m_Chunks[index].SetMesh(vertices, normals, triangles);
+        }
+
+        void GenerateMesh_MarchingCubesJobs(int index, DensityMap densityMap)
+        {
+            NativeList<Vertex> vertices = new(100, Allocator.Persistent);
+            NativeList<ushort> indices = new(100, Allocator.Persistent);
+            NativeCounter vertexCounter = new(Allocator.Persistent);
+            NativeHashMap<int2, ushort> vertexIndexMap = new (100, Allocator.Persistent);
+
+            int shortenedPPA = densityMap.pointsPerAxis - 3;
+            int numPointsToItterate = shortenedPPA * shortenedPPA * shortenedPPA;
+
+            MarchingCubesMesherJob mesherJob = new()
+            {
+                density = densityMap.density,
+                densityPPA = densityMap.pointsPerAxis,
+                itteratePPA = shortenedPPA,
+                isoLevel = IsoLevel,
+                vertices = vertices,
+                indices = indices,
+                vertexCounter = vertexCounter,
+                vertexIndexMap = vertexIndexMap
+            };
+
+            // Because the density map for each chunk extends beyond the bounds of the marching cubes space, we do not need to loop through all of the voxels.
+            // So rather than having a lengthy returns statement for voxels that are out-of-bounds, we only itterate over the space required by using an index wrapping function.            
+            JobHandle jobHandle = mesherJob.Schedule(numPointsToItterate, default);
+            jobHandle.Complete();
+            
+            m_Chunks[index].SetMesh(mesherJob);
+
+            vertices.Dispose();
+            indices.Dispose();
+            vertexCounter.Dispose();
+            vertexIndexMap.Dispose();
+        }
+
+        void GenerateMesh_SurfaceNets(int index, DensityMap densityMap, int3 chunkOriginIndex)
+        {
+            List<Vector3> vertices = new();
+            List<Vector3> normals = new();
+            List<int> triangles = new();
+
+            SurfaceNetsMesher mesher = new()
+            {
+                surface = this,
+                densityMap = densityMap,
+                chunkOriginIndex = chunkOriginIndex,
+                vertices = vertices,
+                normals = normals,
+                triangles = triangles
+            };
+
+            mesher.Execute();
+            m_Chunks[index].SetMesh(vertices, normals, triangles);
+        }
+
+        void GenerateMesh_SurfaceNetsJobs(int index, DensityMap densityMap)
+        {
+            NativeList<Vertex> vertices = new(100, Allocator.Persistent);
+            NativeList<ushort> indices = new(100, Allocator.Persistent);
+            NativeCounter vertexCounter = new(Allocator.Persistent);
+            NativeHashMap<int3, ushort> vertexIndexMap = new(100, Allocator.Persistent);
+
+            int shortenedPPA = densityMap.pointsPerAxis - 3;
+            int numPointsToItterate = shortenedPPA * shortenedPPA * shortenedPPA;
+
+            SurfaceNetsMesherJob mesherJob = new()
+            {
+                density = densityMap.density,
+                densityPPA = densityMap.pointsPerAxis,
+                itteratePPA = shortenedPPA,
+                isoLevel = IsoLevel,
+                vertices = vertices,
+                indices = indices,
+                vertexCounter = vertexCounter,
+                vertexIndexMap = vertexIndexMap
+            };
+
+            // Because the density map for each chunk extends beyond the bounds of the marching cubes space, we do not need to loop through all of the voxels.
+            // So rather than having a lengthy returns statement for voxels that are out-of-bounds, we only itterate over the space required by using an index wrapping function.            
+            JobHandle jobHandle = mesherJob.Schedule(numPointsToItterate, default);
+            jobHandle.Complete();
+
+            m_Chunks[index].SetMesh(mesherJob);
+
+            vertices.Dispose();
+            indices.Dispose();
+            vertexCounter.Dispose();
+            vertexIndexMap.Dispose();
+        }
+
+        /// <summary>
+        /// Sample the density at a given world space pos.
+        /// </summary>
+        public float SampleDensity(Vector3 positionWS)
+        {
+            return SampleDensity(PositionToIndex(positionWS));
+        }
+
+#if UNITY_EDITOR
+        /// <summary>
+        /// From a world space position, compute the object-space index and then break it down into a chunk index and a cell index within that chunk.
+        /// For debugging.
+        /// </summary>
+        public void ComputeIndices(Vector3 positionWS, out int3 chunkIndex, out int3 densityIndex)
+        {
+            ComputeIndices(PositionToIndex(positionWS), out chunkIndex, out densityIndex);
+        }
+
+        /// <summary>
+        /// Get the chunk at the given index.
+        /// For debugging.
+        /// </summary>
+        public Chunk GetChunk(int3 chunkIndex)
+        {
+            return m_Chunks[IndexHelper.Wrap(chunkIndex, m_Dimentions)];
+        }
+#endif
+
+        public float SampleDensity(int3 index)
+        {
+            ComputeIndices(index, out int3 chunkIndex, out int3 cellIndex);
+            return m_Chunks[IndexHelper.Wrap(chunkIndex, m_Dimentions)].DensityMap.Sample(cellIndex);
+        }
+
+        void ComputeIndices(int3 index, out int3 chunkIndex, out int3 cellIndex)
+        {
+            // Clamp distance to surface bounds.
+            float x = Mathf.Clamp(index.x, 0, (m_Dimentions.x * m_ChunkSize) - 0.001f);
+            float y = Mathf.Clamp(index.y, 0, (m_Dimentions.y * m_ChunkSize) - 0.001f);
+            float z = Mathf.Clamp(index.z, 0, (m_Dimentions.z * m_ChunkSize) - 0.001f);
+
+            // Compute chunk array index.
+            chunkIndex.x = Mathf.FloorToInt(x / m_ChunkSize);
+            chunkIndex.y = Mathf.FloorToInt(y / m_ChunkSize);
+            chunkIndex.z = Mathf.FloorToInt(z / m_ChunkSize);
+
+            // Compute density map index.
+            cellIndex.x = Mathf.FloorToInt(x - (chunkIndex.x * m_ChunkSize));
+            cellIndex.y = Mathf.FloorToInt(y - (chunkIndex.y * m_ChunkSize));
+            cellIndex.z = Mathf.FloorToInt(z - (chunkIndex.z * m_ChunkSize));
+        }
+
+        int3 PositionToIndex(Vector3 positionWS)
+        {
+            int x = Mathf.FloorToInt(positionWS.x);
+            int y = Mathf.FloorToInt(positionWS.y);
+            int z = Mathf.FloorToInt(positionWS.z);
+
+            return new int3(x, y, z);
+        }
+
+        bool ChunkInBounds(int3 index)
+        {
+            return index.x >= 0 && index.x < m_Dimentions.x &&
+                   index.y >= 0 && index.y < m_Dimentions.y &&
+                   index.z >= 0 && index.z < m_Dimentions.z;
+        }
+
+#if UNITY_EDITOR
+        void OnDrawGizmos()
+        {
+            if (m_Chunks == null)
+                return;
+
+            Gizmos.matrix = transform.localToWorldMatrix;
+            Gizmos.color = new Color(1, 1, 1, 0.5f);
+
+            Vector3 size = new Vector3(m_Dimentions.x, m_Dimentions.y, m_Dimentions.z) * m_ChunkSize;
+            Gizmos.DrawWireCube(size / 2, size);
+        }
+
+        void OnValidate()
+        {
+            PropertyChanged = true;
+        }
+#endif
+
+        const float k_Width = 200;
+        const float k_Height = 24;
+        const float k_Margin = 20;
+        Rect m_TextAreaRect;
+        GUIStyle m_Style;
+
+        void OnGUI()
+        {
+            if (m_TextAreaRect == null)
+                m_TextAreaRect = new(k_Margin, k_Margin, k_Width, k_Height);
+
+            m_Style ??= new GUIStyle() {
+                normal = new GUIStyleState() {
+                    textColor = Color.white,
+                },
+                fontSize = 24
+            };
+
+            Rect copyRect = m_TextAreaRect;
+
+            copyRect.y += k_Height;
+            GUI.Label(copyRect, $"Total Chunks: {m_Chunks.Length}", m_Style);
+            copyRect.y += k_Height;
+            GUI.Label(copyRect, $"Total Voxels: {ChunkSizeCells * ChunkSizeCells * ChunkSizeCells * m_Chunks.Length}", m_Style);
+
+            copyRect.y += k_Height;
+            GUI.Label(copyRect, "", m_Style);
+
+            copyRect.y += k_Height;
+            GUI.Label(copyRect, $"Recomputation Time: {ToMilliseconds(m_DensityTimestamp + m_MeshTimestamp)}ms", m_Style);
+            copyRect.y += k_Height;
+            GUI.Label(copyRect, $"d: {ToMilliseconds(m_DensityTimestamp)}ms", m_Style);
+            copyRect.y += k_Height;
+            GUI.Label(copyRect, $"m: {ToMilliseconds(m_MeshTimestamp)}ms", m_Style);
+        }
+
+        void BeginProfiler(ref double timestamp)
+        {
+            timestamp = Time.realtimeSinceStartupAsDouble;
+        }
+
+        void EndProfilier(ref double timestamp)
+        {
+            timestamp = Time.realtimeSinceStartupAsDouble - timestamp;
+        }
+
+        void LogTimestamps(int numChunks)
+        {
+            Debug.Log($"Regenerated {numChunks} chunks in {ToMilliseconds(m_DensityTimestamp + m_MeshTimestamp)} milliseconds. (d: {ToMilliseconds(m_DensityTimestamp)}, m: {ToMilliseconds(m_MeshTimestamp)})");
+        }
+
+        double ToMilliseconds(double time)
+        {
+            double timeMiliseconds = time * 1000.0;
+
+            timeMiliseconds *= 100.0;
+            timeMiliseconds = Math.Round(timeMiliseconds);
+            timeMiliseconds /= 100.0;
+
+            return timeMiliseconds;
+        }
+    }
+
+    public enum IcosurfaceGenerationMethod
+    {
+        MarchingCubes,
+        MarchingCubesJobs,
+        SurfaceNets,
+        SurfaceNetsJobs
+    }
+
+    public enum DensityGenerationMethod
+    {
+        Recompute,
+        RecomputeJobs,
+        UseShapeVolumesJobs
+    }
+
+    public enum ChunkCellDimentions
+    {
+        Low8,
+        Medium16,
+        High32
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Shape.cs
+```
+using IsosurfaceGeneration.Util;
+using Unity.Mathematics;
+
+namespace IsosurfaceGeneration
+{
+    public struct Shape
+    {
+        public AffineTransform matrix;
+        public ShapeFunction shapeID;
+        public BlendMode blendMode;
+        public float sharpness;
+        public float dimention1;
+        public float dimention2;
+        public float dimention3;
+
+        public float Distance(float3 position)
+        {
+            return shapeID switch
+            {
+                ShapeFunction.Sphere => DistanceFunction.Sphere(position, dimention1),
+                ShapeFunction.SemiSphere => DistanceFunction.SemiSphere(position, dimention1, dimention2),
+                ShapeFunction.Capsule => DistanceFunction.Capsule(position, dimention1, dimention2),
+                ShapeFunction.Torus => DistanceFunction.Torus(position, dimention1, dimention2),
+                ShapeFunction.Cube => DistanceFunction.Cube(position, dimention1, dimention2, dimention3),
+                _ => -32,
+            };
+        }
+
+        public float3 TransformPosition(float3 position, AffineTransform localMatrix)
+        {
+            float4 transformedPos = math.mul(localMatrix, new float4(position, 1)); // The input position is in local space, attained via the index of the voxels, so we multiply it by the shape's worldToLocal matrix.
+            return new float3(transformedPos.x, transformedPos.y, transformedPos.z);
+        }
+
+        /// <summary>
+        /// Returns a bounding volume that represents which chunks this shape function will effect.
+        /// This is determined by the shape, size and sharpness of the shape.
+        /// </summary>
+        public int3 ComputeChunkVolume(Isosurface isosurface)
+        {
+            // Note that even on low sharpness values there exists a point where the SDF has a negligable or no effect.
+            // The closer we get to that point the more accurate the terrain will be, but the less performance will be saved.
+            // The minimum bounding volume is a 27 chunk area in situations where the shape is less than the size of one chunk.
+
+            float3 boundsVolume = 0;
+
+            // Base size
+            switch (shapeID)
+            {
+                case ShapeFunction.Sphere:
+                    boundsVolume = dimention1 * 2.0f;
+                    break;
+
+                case ShapeFunction.SemiSphere:
+                    boundsVolume = dimention1 * 2.0f;
+                    break;
+
+                case ShapeFunction.Capsule:
+                case ShapeFunction.Torus:
+                    boundsVolume = (dimention1 + dimention2) * 2.5f;
+                    break;
+
+                case ShapeFunction.Cube:
+                    boundsVolume.x = dimention1 * 2.0f;
+                    boundsVolume.y = dimention2 * 2.0f;
+                    boundsVolume.z = dimention3 * 2.0f;
+                    break;
+            }
+
+            // Sharpness factor
+            boundsVolume *= 2.0f / sharpness;
+
+            // TODO
+            //boundsVolume.w = 1;
+            //boundsVolume = math.mul(math.inverse(matrix), boundsVolume);
+
+            int x = (int)math.ceil(boundsVolume.x / isosurface.ChunkSizeCells);
+            int y = (int)math.ceil(boundsVolume.y / isosurface.ChunkSizeCells);
+            int z = (int)math.ceil(boundsVolume.z / isosurface.ChunkSizeCells);
+
+            x = math.max(3, x + 1);
+            y = math.max(3, y + 1);
+            z = math.max(3, z + 1);
+
+            return new int3(x, y, z);
+        }
+    }
+
+    public enum ShapeFunction
+    {
+        Sphere,
+        SemiSphere,
+        Capsule,
+        Torus,
+        Cube
+    }
+
+    public enum BlendMode
+    {
+        Additive,
+        Subtractive
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Editor/IsosurfaceEditor.cs
+```
+using UnityEditor;
+using UnityEditor.Rendering;
+using UnityEngine;
+
+namespace IsosurfaceGeneration
+{
+    [CustomEditor(typeof(Isosurface))]
+    public class IsosurfaceEditor : Editor
+    {
+        SerializedProperty m_MeshingMethod;
+        SerializedProperty m_DensityMethod;
+        SerializedProperty m_Dimentions;
+        SerializedProperty m_ChunkSize;
+        SerializedProperty m_IsoLevel;
+        SerializedProperty m_InvertSurface;
+        SerializedProperty m_Material;
+        SerializedProperty m_SendLogMessages;
+
+        void OnEnable()
+        {
+            var o = new PropertyFetcher<Isosurface>(serializedObject);
+
+            m_MeshingMethod = o.Find(x => x.MeshingMethod);
+            m_DensityMethod = o.Find(x => x.DensityMethod);
+            m_Dimentions = o.Find(x => x.Dimentions);
+            m_ChunkSize = o.Find(x => x.ChunkSize);
+            m_IsoLevel = o.Find(x => x.IsoLevel);
+            m_InvertSurface = o.Find(x => x.InvertSurface);
+            m_Material = o.Find(x => x.Material);
+            m_SendLogMessages = o.Find(x => x.SendLogMessages);
+        }
+
+        public override void OnInspectorGUI()
+        {
+            serializedObject.Update();
+
+            EditorGUILayout.PropertyField(m_MeshingMethod, new GUIContent("Meshing Method"));
+            EditorGUILayout.PropertyField(m_DensityMethod, new GUIContent("Density Method"));
+            EditorGUILayout.PropertyField(m_Dimentions, new GUIContent("Dimentions"));
+            EditorGUILayout.PropertyField(m_ChunkSize, new GUIContent("Chunk Size"));
+            EditorGUILayout.PropertyField(m_IsoLevel, new GUIContent("Iso Level"));
+            EditorGUILayout.PropertyField(m_InvertSurface, new GUIContent("Invert Surface"));
+            EditorGUILayout.PropertyField(m_Material, new GUIContent("Material"));
+            EditorGUILayout.PropertyField(m_SendLogMessages, new GUIContent("Log Profiling"));
+
+            serializedObject.ApplyModifiedProperties();
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Editor/TorusBoundsHandle.cs
+```
+using UnityEditor;
+using UnityEditor.IMGUI.Controls;
+using UnityEngine;
+
+namespace IsosurfaceGeneration
+{
+    /// <summary>
+    /// A compound handle to edit a torus-shaped bounding volume in the Scene view.
+    /// </summary>
+    public class TorusBoundsHandle : PrimitiveBoundsHandle
+    {
+        /// <summary>
+        /// Returns or specifies the radius of the torus bounding volume.
+        /// </summary>
+        public float radius
+        {
+            get
+            {
+                Vector3 size = GetSize();
+                float num = 0f;
+                for (int i = 0; i < 3; i++)
+                {
+                    if (IsAxisEnabled(i))
+                    {
+                        num = Mathf.Max(num, Mathf.Abs(size[i]));
+                    }
+                }
+
+                return num * 0.5f;
+            }
+            set
+            {
+                SetSize(2f * value * Vector3.one);
+            }
+        }
+
+        /// <summary>
+        /// Create a new instance of the TorusBoundsHandle class.
+        /// </summary>
+        public TorusBoundsHandle()
+        {
+            axes = Axes.X | Axes.Z;
+        }
+
+        /// <summary>
+        /// Draw a wireframe torus for this instance.
+        /// </summary>
+        protected override void DrawWireframe()
+        {
+            Handles.DrawWireDisc(center, Vector3.up, radius);
+        }
+
+        protected override Bounds OnHandleChanged(HandleDirection handle, Bounds boundsOnClick, Bounds newBounds)
+        {
+            Vector3 max = newBounds.max;
+            Vector3 min = newBounds.min;
+            int num = 0;
+            switch (handle)
+            {
+                case HandleDirection.PositiveY:
+                case HandleDirection.NegativeY:
+                    num = 1;
+                    break;
+                case HandleDirection.PositiveZ:
+                case HandleDirection.NegativeZ:
+                    num = 2;
+                    break;
+            }
+
+            float num2 = 0.5f * (max[num] - min[num]);
+            for (int i = 0; i < 3; i++)
+            {
+                if (i != num)
+                {
+                    min[i] = center[i] - num2;
+                    max[i] = center[i] + num2;
+                }
+            }
+
+            return new Bounds((max + min) * 0.5f, max - min);
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Input/ShapeBrush.cs
+```
+using System;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace IsosurfaceGeneration.Input
+{
+    [DisallowMultipleComponent]
+    public class ShapeBrush : MonoBehaviour
+    {
+        /// <summary>
+        /// Which shape function to use when applied to a surface.
+        /// </summary>
+        [Tooltip("Which shape function to use when applied to a surface.")]
+        [SerializeField]
+        ShapeFunction m_ShapeType = ShapeFunction.Sphere;
+
+        /// <summary>
+        /// Whether or not the shape is additive or subtractive.
+        /// </summary>
+        [Tooltip("Whether or not the shape is additive or subtractive.")]
+        [SerializeField]
+        BlendMode m_BlendMode = BlendMode.Additive;
+
+        /// <summary>
+        /// Value used in the smooth min function, which blends shapes together. The higher the value, the sharper the seams between objects will be.
+        /// </summary>
+        [Range(0.1f, 1.0f), Tooltip("Value used in the smooth min function, which blends shapes together. The higher the value, the sharper the seams between objects will be.")]
+        [SerializeField]
+        float m_Sharpness = 0.2f;
+
+        [Min(0)]
+        [SerializeField]
+        float m_Dimention1 = 4.0f;
+
+        [Min(0)]
+        [SerializeField]
+        float m_Dimention2 = 4.0f;
+
+        [Min(0)]
+        [SerializeField]
+        float m_Dimention3 = 4.0f;
+
+        public bool IsDirty
+        {
+            get
+            {
+                return m_IsDirty || transform.hasChanged;
+            }
+            set
+            {
+                m_IsDirty = value;
+                transform.hasChanged = value;
+            }
+        }
+
+        bool m_IsDirty;
+
+        public int OrderInQueue
+        {
+            get
+            {
+                return m_OrderInQueue;
+            }
+            set
+            {
+                m_OrderInQueue = value;
+                UpdateName();
+            }
+        }
+
+        int m_OrderInQueue = -1;
+
+        public void SetType(ShapeFunction type)
+        {
+            m_ShapeType = type;
+        }
+
+        public Shape GetShapeProperties()
+        {
+            AffineTransform matrix = new((float3)transform.position, (quaternion)transform.rotation, (float3)transform.lossyScale);
+            return new Shape()
+            {
+                matrix = matrix,
+                shapeID = m_ShapeType,
+                blendMode = m_BlendMode,
+                sharpness = m_Sharpness,
+                dimention1 = m_Dimention1,
+                dimention2 = m_Dimention2,
+                dimention3 = m_Dimention3,
+            };
+        }
+
+        void UpdateName()
+        {
+            gameObject.name = $"{m_OrderInQueue}: {m_ShapeType} Brush ({m_BlendMode})";
+        }
+
+#if UNITY_EDITOR
+        void OnValidate()
+        {
+            UpdateName();
+            m_IsDirty = true;
+        }
+
+        public void DrawChunkVolume(Isosurface isosurface)
+        {
+            int3 chunkVolume = GetShapeProperties().ComputeChunkVolume(isosurface);
+            isosurface.ComputeIndices(transform.position, out int3 chunkIndex, out int3 densityIndex);
+
+            Vector3 centre = new(chunkIndex.x, chunkIndex.y, chunkIndex.z);
+            centre *= isosurface.ChunkSizeCells;
+
+            Vector3 size = new(chunkVolume.x, chunkVolume.y, chunkVolume.z);
+            size *= isosurface.ChunkSizeCells;
+
+            Gizmos.DrawWireCube(isosurface.transform.TransformPoint(centre), size);
+        }
+#endif
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Input/ShapesInput.cs
+```
+using Unity.Collections;
+using Unity.Mathematics;
+using UnityEditor;
+using UnityEngine;
+
+namespace IsosurfaceGeneration.Input
+{
+    [ExecuteInEditMode]
+    [DisallowMultipleComponent]
+    [RequireComponent(typeof(Isosurface))]
+    public class ShapesInput : MonoBehaviour
+    {
+        [SerializeField]
+        ShapeBrush[] m_ShapeBrushes;
+
+        NativeList<Shape> m_ShapeQueue;
+        int m_NumBrushes = -1;
+
+        Isosurface m_Isosurface;
+        bool m_RecomputeSurface;
+
+        int3 m_CurrentDimentions;
+        ChunkCellDimentions m_CurrentChunkSize;
+        IcosurfaceGenerationMethod m_CurrentMeshingMethod;
+
+        void OnEnable()
+        {
+            m_ShapeQueue = new(10, Allocator.Persistent);
+            m_Isosurface = GetComponent<Isosurface>();
+#if UNITY_EDITOR
+            EditorApplication.update += UpdateSurface;
+#endif
+            ReinitSurface();
+        }
+
+        void OnDisable()
+        {
+#if UNITY_EDITOR
+            EditorApplication.update -= UpdateSurface;
+#endif
+            DestroySurface();
+            m_ShapeQueue.Dispose();
+            m_NumBrushes = -1;
+        }
+
+#if !UNITY_EDITOR
+        void Update()
+        {
+            UpdateSurface();
+        }
+#endif
+
+        void UpdateSurface()
+        {
+            if (m_CurrentMeshingMethod != m_Isosurface.MeshingMethod ||
+                m_Isosurface.Dimentions.x != m_CurrentDimentions.x ||
+                m_Isosurface.Dimentions.y != m_CurrentDimentions.y ||
+                m_Isosurface.Dimentions.z != m_CurrentDimentions.z ||
+                m_Isosurface.ChunkSize != m_CurrentChunkSize)
+                ReinitSurface();
+
+            if (m_Isosurface.PropertyChanged)
+            {
+                m_RecomputeSurface = true;
+                m_Isosurface.PropertyChanged = false;
+            }
+
+            EvaluatePropertyChanged();
+
+            if (m_RecomputeSurface)
+                m_Isosurface.Recompute(m_ShapeQueue.AsArray());
+
+            m_RecomputeSurface = false;
+        }
+
+        void ReinitSurface()
+        {
+            m_Isosurface.Destroy();
+            m_Isosurface.Generate();
+
+            m_CurrentMeshingMethod = m_Isosurface.MeshingMethod;
+            m_CurrentDimentions = m_Isosurface.Dimentions;
+            m_CurrentChunkSize = m_Isosurface.ChunkSize;
+
+            EvaluatePropertyChanged();
+        }
+
+        void DestroySurface()
+        {
+            m_Isosurface.Destroy();
+        }
+
+        void EvaluatePropertyChanged()
+        {
+            m_ShapeQueue.Clear();
+            m_ShapeBrushes = GetComponentsInChildren<ShapeBrush>();
+
+            // Evaluate changes in brushes and build shape queue.
+            for (int i = 0; i < m_ShapeBrushes.Length; i++)
+            {
+                ShapeBrush shaper = m_ShapeBrushes[i];
+
+                // Check queue order.
+                if (shaper.OrderInQueue != i)
+                {
+                    shaper.OrderInQueue = i;
+                    m_RecomputeSurface = true;
+                }
+
+                // Check property changed.
+                if (shaper.IsDirty)
+                {
+                    shaper.IsDirty = false;
+                    m_RecomputeSurface = true;
+                }
+
+                // Add brush to shape queue.
+                m_ShapeQueue.Add(shaper.GetShapeProperties());
+            }
+
+            // Evaluate changes in queue length.
+            if (m_NumBrushes != m_ShapeBrushes.Length)
+            {
+                m_NumBrushes = m_ShapeBrushes.Length;
+                m_RecomputeSurface = true;
+            }
+        }
+
+        public void AddShapeBrush(ShapeFunction type)
+        {
+            ShapeBrush newBrush = new GameObject("New Shape Brush").AddComponent<ShapeBrush>();
+            newBrush.transform.SetParent(transform);
+            newBrush.transform.localPosition = Vector3.zero;
+
+            newBrush.SetType(type);
+
+            EvaluatePropertyChanged();
+        }
+
+        public void ReorderBrushes(int oldIndex, int newIndex)
+        {
+            m_ShapeBrushes[oldIndex].transform.SetSiblingIndex(newIndex);
+        }
+
+        public void DeleteShapeBrush(int index)
+        {
+            // This just never gets called for some reason...?
+            Debug.Log($"Delete element {index}");
+            DestroyImmediate(m_ShapeBrushes[index].gameObject);
+
+            EvaluatePropertyChanged();
+        }
+
+#if UNITY_EDITOR
+        void OnDrawGizmos()
+        {
+            Gizmos.color = new(0, 1, 0, 0.1f);
+
+            foreach (ShapeBrush brush in m_ShapeBrushes)
+            {
+                if (Selection.Contains(brush.gameObject))
+                    brush.DrawChunkVolume(m_Isosurface);
+            }
+        }
+#endif
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Input/SurfacePainter.cs
+```
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace IsosurfaceGeneration.Input
+{
+    [RequireComponent(typeof(Camera))]
+    public class SurfacePainter : MonoBehaviour
+    {
+        public enum InputMode
+        {
+            Mouse,
+            Camera
+        }
+
+        [Header("Shape")]
+        [SerializeField]
+        [Range(1.0f, 32.0f)]
+        float m_Radius = 1.0f;
+
+        [SerializeField]
+        [Range(0.1f, 10.0f)]
+        float m_Sharpness = 2.0f;
+
+        [Header("Input")]
+        [SerializeField]
+        InputMode m_InputMode = InputMode.Mouse;
+
+        [SerializeField]
+        [Range(0.0f, 0.5f)]
+        float m_InputDelay = 0.05f;
+
+        [SerializeField]
+        [Range(0.0f, 500f)]
+        float m_RayLength = 500.0f;
+
+        [Header("Pointer")]
+        [SerializeField]
+        Mesh m_PointerMesh;
+
+        [SerializeField]
+        Material m_PointerMaterial;
+
+        GameObject m_Pointer;
+        float m_LastInputTime;
+
+        const float k_BushSizeScrollSpeed = 75.0f;
+
+        void OnEnable()
+        {
+            m_LastInputTime = float.NegativeInfinity;
+
+            m_Pointer = new GameObject("Paint Pointer");
+            MeshFilter meshFilter = m_Pointer.AddComponent<MeshFilter>();
+            MeshRenderer meshRenderer = m_Pointer.AddComponent<MeshRenderer>();
+            meshFilter.sharedMesh = m_PointerMesh;
+            meshRenderer.sharedMaterial = m_PointerMaterial;
+        }
+
+        void OnDisable()
+        {
+            Destroy(m_Pointer);
+        }
+
+        void Update()
+        {
+            // Try find surface
+            GetSurfaceAtMousePosition(out Isosurface surface, out Vector3 hitPoint);
+
+            // Update pointer
+            m_Pointer.SetActive(surface != null);
+            if (surface != null)
+            {
+                m_Pointer.transform.position = hitPoint;
+                m_Pointer.transform.localScale = 2.0f * m_Radius * Vector3.one;
+            }
+
+            // Radius input
+            if (UnityEngine.Input.GetAxis("Mouse ScrollWheel") < 0.0f)
+                m_Radius += k_BushSizeScrollSpeed * Time.deltaTime;
+
+            if (UnityEngine.Input.GetAxis("Mouse ScrollWheel") > 0.0f)
+                m_Radius -= k_BushSizeScrollSpeed * Time.deltaTime;
+
+            m_Radius = Mathf.Clamp(m_Radius, 1.0f, 32.0f);
+
+            // Shape input
+            if (surface && Time.time > m_LastInputTime + m_InputDelay)
+            {
+                if (UnityEngine.Input.GetMouseButton(0))
+                    ApplyShape(surface, hitPoint, BlendMode.Additive);
+
+                if (UnityEngine.Input.GetMouseButton(1))
+                    ApplyShape(surface, hitPoint, BlendMode.Subtractive);
+            }
+        }
+
+        void ApplyShape(Isosurface surface, Vector3 position, BlendMode blendMode)
+        {
+            AffineTransform matrix = new((float3)position, quaternion.identity, 1.0f);
+            Shape shape = new()
+            {
+                matrix = matrix,
+                shapeID = ShapeFunction.Sphere,
+                blendMode = blendMode,
+                sharpness = m_Sharpness,
+                dimention1 = m_Radius
+            };
+
+            surface.ApplyShape(shape);
+
+            m_LastInputTime = Time.time;
+        }
+
+        void GetSurfaceAtMousePosition(out Isosurface surface, out Vector3 hitPoint)
+        {
+            Ray ray = new();
+            
+            switch (m_InputMode)
+            {
+                case InputMode.Mouse:
+                    ray = Camera.main.ScreenPointToRay(UnityEngine.Input.mousePosition);
+                    break;
+
+                case InputMode.Camera:
+                    ray.origin = transform.position;
+                    ray.direction = transform.forward;
+                    break;
+            }
+            
+            Physics.Raycast(ray, out RaycastHit hitInfo, m_RayLength);
+
+            if (hitInfo.collider)
+            {
+                surface = hitInfo.collider.GetComponentInParent<Isosurface>();
+                hitPoint = hitInfo.point;
+                return;
+            }
+
+            surface = null;
+            hitPoint = Vector3.zero;
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Meshing/MarchingCubes.cs
+```
+using IsosurfaceGeneration.Util;
+using System.Collections;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+using UnityEngine;
+
+// Resources:
+// https://developer.nvidia.com/gpugems/gpugems3/part-i-geometry/chapter-1-generating-complex-procedural-terrains-using-gpu
+// https://github.com/Fobri/Terraxel-Unity
+// https://eetumaenpaa.fi/blog/marching-cubes-optimizations-in-unity/#job-system
+// https://github.com/Eldemarkki/Marching-Cubes-Terrain/tree/master
+
+namespace IsosurfaceGeneration.Meshing
+{
+    #region Single Threaded Mesher
+    public struct MarchingCubesMesher
+    {
+        public Isosurface surface;
+        public DensityMap densityMap;
+        public int3 chunkOriginIndex;
+
+        public List<Vector3> vertices;
+        public List<Vector3> normals;
+        public List<int> triangles;
+
+        int triangleIndex;
+        Dictionary<int2, int> vertexIndexMap;
+
+        public void Execute()
+        {
+            triangleIndex = 0;
+            vertexIndexMap = new();
+
+            // Loop through all cells filling the verticies and indices lists.
+            for (int i = 0; i < densityMap.totalPoints; i++)
+            {
+                int3 unwrappedIndex = IndexHelper.Unwrap(i, densityMap.pointsPerAxis);
+
+                // Stop one point before the end because each cell includes neighbouring points.
+                if (unwrappedIndex.x >= densityMap.pointsPerAxis - 1 ||
+                    unwrappedIndex.y >= densityMap.pointsPerAxis - 1 ||
+                    unwrappedIndex.z >= densityMap.pointsPerAxis - 1)
+                    continue;
+
+                MarchCell(unwrappedIndex);
+            }
+        }
+
+        void MarchCell(int3 index)
+        {
+            // Calculate coordinates of each corner of the current cell.
+            int3[] cornerCoords = new int3[8]
+            {
+                    index + new int3(0, 0, 0),
+                    index + new int3(1, 0, 0),
+                    index + new int3(1, 0, 1),
+                    index + new int3(0, 0, 1),
+                    index + new int3(0, 1, 0),
+                    index + new int3(1, 1, 0),
+                    index + new int3(1, 1, 1),
+                    index + new int3(0, 1, 1)
+            };
+
+            // Calculate unique coord for each cube configuration.
+            // The value is used to look up the edge table, which indicates which edges of the cube the surface passes through.
+            int cubeConfiguration = 0;
+            for (int i = 0; i < 8; i++)
+                if (densityMap.Sample(cornerCoords[i]) > surface.IsoLevel)
+                    cubeConfiguration |= 1 << i;
+
+            // Exit early if there are no intersections, i.e. the cube is full or empty.
+            if (cubeConfiguration == 0 || cubeConfiguration == 0xff)
+                return;
+
+            // Create indices for current cube configuration.
+            int[] edgeIndices = MarchTables.triangulation[cubeConfiguration];
+            for (int i = 0; i < 16; i += 3)
+            {
+                // If edge coord is -1, then no further vertices exist in this configuration.
+                if (edgeIndices[i] == -1)
+                    break;
+
+                // Get indices of the two corner points defining the edge that the surface passes through.
+                // (Do this for each of the three edges we're currently looking at).
+                int edgeIndexA = edgeIndices[i];
+                int a0 = MarchTables.cornerIndexAFromEdge[edgeIndexA];
+                int a1 = MarchTables.cornerIndexBFromEdge[edgeIndexA];
+
+                int edgeIndexB = edgeIndices[i + 1];
+                int b0 = MarchTables.cornerIndexAFromEdge[edgeIndexB];
+                int b1 = MarchTables.cornerIndexBFromEdge[edgeIndexB];
+
+                int edgeIndexC = edgeIndices[i + 2];
+                int c0 = MarchTables.cornerIndexAFromEdge[edgeIndexC];
+                int c1 = MarchTables.cornerIndexBFromEdge[edgeIndexC];
+
+                GetOrMakeVertex(cornerCoords[a0], cornerCoords[a1]);
+                GetOrMakeVertex(cornerCoords[b0], cornerCoords[b1]);
+                GetOrMakeVertex(cornerCoords[c0], cornerCoords[c1]);
+            }
+        }
+
+        void GetOrMakeVertex(int3 coordA, int3 coordB)
+        {
+            // Get density values.
+            float densityA = densityMap.Sample(coordA);
+            float densityB = densityMap.Sample(coordB);
+
+            // Since the cell sizeInWorld is 1, the coord doubles as the position, neat.
+            float3 posA = new(coordA.x, coordA.y, coordA.z);
+            float3 posB = new(coordB.x, coordB.y, coordB.z);
+
+            // Find interpolated position.
+            float t = (surface.IsoLevel - densityA) / (densityB - densityA);
+            float3 position = posA + t * (posB - posA);
+
+            // Normal
+            float3 normalA = CalculateNormal(coordA);
+            float3 normalB = CalculateNormal(coordB);
+            float3 normal = normalA + t * (normalB - normalA);
+
+            // ID (for de-duplication)
+            int indexA = IndexHelper.Wrap(coordA, densityMap.pointsPerAxis);
+            int indexB = IndexHelper.Wrap(coordB, densityMap.pointsPerAxis);
+            int2 id = new(Mathf.Min(indexA, indexB), Mathf.Max(indexA, indexB));
+
+            if (vertexIndexMap.TryGetValue(id, out int sharedVertexIndex))
+            {
+                triangles.Add(sharedVertexIndex);
+            }
+            else
+            {
+                vertexIndexMap.Add(id, triangleIndex);
+                vertices.Add(position);
+                normals.Add(normal);
+                triangles.Add(triangleIndex++);
+            }
+        }
+
+        float3 CalculateNormal(int3 index)
+        {
+            int3 samplePos = chunkOriginIndex + index;
+
+            int3 offsetX = new(1, 0, 0);
+            int3 offsetY = new(0, 1, 0);
+            int3 offsetZ = new(0, 0, 1);
+
+            float dx = surface.SampleDensity(samplePos - offsetX) - surface.SampleDensity(samplePos + offsetX);
+            float dy = surface.SampleDensity(samplePos - offsetY) - surface.SampleDensity(samplePos + offsetY);
+            float dz = surface.SampleDensity(samplePos - offsetZ) - surface.SampleDensity(samplePos + offsetZ);
+
+            return new float3(dx, dy, dz);
+        }
+    }
+    #endregion
+
+    #region Jobs Mesher
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct MarchingCubesMesherJob : IJobFor
+    {
+        [ReadOnly] public NativeArray<float> density;
+        [ReadOnly] public int densityPPA;
+        [ReadOnly] public int itteratePPA;
+        [ReadOnly] public float isoLevel;
+
+        [NativeDisableParallelForRestriction, WriteOnly] public NativeList<Vertex> vertices;
+        [NativeDisableParallelForRestriction, WriteOnly] public NativeList<ushort> indices;
+
+        public NativeCounter vertexCounter;
+        [NativeDisableParallelForRestriction] public NativeHashMap<int2, ushort> vertexIndexMap;
+
+        public void Execute(int index)
+        {
+            // To allow smooth normals on the edges of each chunk, the density map extends beyond the surface space on all axis.
+            // Typically, we would see a branch here to skip cells beyond the mesh space,
+            // however instead I schedule only the number of voxels in the mesh space, and then convert index as so.
+            int3 unwrappedIndex = IndexHelper.Unwrap(index, itteratePPA);
+            index = IndexHelper.Wrap(unwrappedIndex, densityPPA);
+            index += (densityPPA * densityPPA) + densityPPA + 1;
+
+            MarchCell(index);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void MarchCell(int index)
+        {
+            // Calculate coordinates of each corner of the current cell.
+            CellCorners<int> cellCorners = new()
+            {
+                corner1 = index,
+                corner2 = index + 1,
+                corner3 = index + (densityPPA * densityPPA) + 1,
+                corner4 = index + densityPPA * densityPPA,
+                corner5 = index + densityPPA,
+                corner6 = index + densityPPA + 1,
+                corner7 = index + (densityPPA * densityPPA) + densityPPA + 1,
+                corner8 = index + (densityPPA * densityPPA) + densityPPA
+            };
+
+            // Calculate unique coord for each cube configuration.
+            // The value is used to look up the edge table, which indicates which edges of the cube the surface passes through.
+            // We pack the density values into float4's to utilize SIMD.
+            float4 packedDensity1 = new(density[cellCorners[0]], density[cellCorners[1]], density[cellCorners[2]], density[cellCorners[3]]);
+            float4 packedDensity2 = new(density[cellCorners[4]], density[cellCorners[5]], density[cellCorners[6]], density[cellCorners[7]]);
+            int4 p1 = math.select(0, new int4(1, 2, 4, 8), packedDensity1 > isoLevel);
+            int4 p2 = math.select(0, new int4(16, 32, 64, 128), packedDensity2 > isoLevel);
+            byte cubeConfiguration = (byte)(math.csum(p1) | math.csum(p2));
+
+            // Exit early if there are no intersections, i.e. the cube is full or empty.
+            if (cubeConfiguration == 0 || cubeConfiguration == 255)
+                return;
+
+            // Create indices for current cube configuration.
+            int[] edgeIndices = MarchTables.triangulation[cubeConfiguration];
+            for (int i = 0; i < 16; i += 3)
+            {
+                // If edge coord is -1, then no further vertices exist in this configuration.
+                if (edgeIndices[i] == -1)
+                    break;
+
+                // Get indices of the two corner points defining the edge that the surface passes through.
+                // (Do this for each of the three edges we're currently looking at).
+                int edgeIndexA = edgeIndices[i];
+                int a0 = MarchTables.cornerIndexAFromEdge[edgeIndexA];
+                int a1 = MarchTables.cornerIndexBFromEdge[edgeIndexA];
+
+                int edgeIndexB = edgeIndices[i + 1];
+                int b0 = MarchTables.cornerIndexAFromEdge[edgeIndexB];
+                int b1 = MarchTables.cornerIndexBFromEdge[edgeIndexB];
+
+                int edgeIndexC = edgeIndices[i + 2];
+                int c0 = MarchTables.cornerIndexAFromEdge[edgeIndexC];
+                int c1 = MarchTables.cornerIndexBFromEdge[edgeIndexC];
+
+                GetOrMakeVertex(cellCorners[a0], cellCorners[a1]);
+                GetOrMakeVertex(cellCorners[b0], cellCorners[b1]);
+                GetOrMakeVertex(cellCorners[c0], cellCorners[c1]);
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        void GetOrMakeVertex(int indexA, int indexB)
+        {
+            int3 coordA = IndexHelper.Unwrap(indexA, densityPPA);
+            int3 coordB = IndexHelper.Unwrap(indexB, densityPPA);
+            float densityA = density[indexA];
+            float densityB = density[indexB];
+
+            // Since the cell size is 1, the coord doubles as the position, neat.
+            float3 posA = new(coordA.x, coordA.y, coordA.z);
+            float3 posB = new(coordB.x, coordB.y, coordB.z);
+
+            // Find interpolated position.
+            float t = (isoLevel - densityA) / (densityB - densityA);
+            float3 position = posA + t * (posB - posA);
+
+            // Compute normal
+            float3 normalA = CalculateNormal(coordA);
+            float3 normalB = CalculateNormal(coordB);
+            float3 normal = math.normalize(normalA + t * (normalB - normalA));
+
+            // Make vertex ID - for vertex merging.
+            int2 id = new(math.min(indexA, indexB), math.max(indexA, indexB));
+
+            if (vertexIndexMap.TryGetValue(id, out ushort sharedVertexIndex))
+            {
+                indices.Add(sharedVertexIndex);
+            }
+            else
+            {
+                ushort vertexIndex = (ushort)vertexCounter.Count;
+                vertexIndexMap.Add(id, vertexIndex);
+                indices.Add(vertexIndex);
+                vertices.Add(new Vertex(position, normal));
+                vertexCounter.Increment();
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        float3 CalculateNormal(int3 coord)
+        {
+            int3 offsetX = new(1, 0, 0);
+            int3 offsetY = new(0, 1, 0);
+            int3 offsetZ = new(0, 0, 1);
+
+            float3 normal;
+            normal.x = density[IndexHelper.Wrap(coord - offsetX, densityPPA)] - density[IndexHelper.Wrap(coord + offsetX, densityPPA)];
+            normal.y = density[IndexHelper.Wrap(coord - offsetY, densityPPA)] - density[IndexHelper.Wrap(coord + offsetY, densityPPA)];
+            normal.z = density[IndexHelper.Wrap(coord - offsetZ, densityPPA)] - density[IndexHelper.Wrap(coord + offsetZ, densityPPA)];
+
+            return normal;
+        }
+    }
+
+    struct CellCorners<T> : IEnumerable<T>
+    {
+        public T corner1;
+        public T corner2;
+        public T corner3;
+        public T corner4;
+        public T corner5;
+        public T corner6;
+        public T corner7;
+        public T corner8;
+
+        public T this[int index]
+        {
+            get
+            {
+                return index switch
+                {
+                    0 => corner1,
+                    1 => corner2,
+                    2 => corner3,
+                    3 => corner4,
+                    4 => corner5,
+                    5 => corner6,
+                    6 => corner7,
+                    7 => corner8,
+                    _ => throw new System.IndexOutOfRangeException(),
+                };
+            }
+            set
+            {
+                switch (index)
+                {
+                    case 0:
+                        corner1 = value;
+                        break;
+                    case 1:
+                        corner2 = value;
+                        break;
+                    case 2:
+                        corner3 = value;
+                        break;
+                    case 3:
+                        corner4 = value;
+                        break;
+                    case 4:
+                        corner5 = value;
+                        break;
+                    case 5:
+                        corner6 = value;
+                        break;
+                    case 6:
+                        corner7 = value;
+                        break;
+                    case 7:
+                        corner8 = value;
+                        break;
+                    default: throw new System.IndexOutOfRangeException();
+                }
+            }
+        }
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                yield return this[i];
+            }
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+    }
+    #endregion
+
+    #region Tables
+    readonly struct MarchTables
+    {
+        // These two arrays allow for easy lookup of the indices of the two corner points that form an edge.
+        // The edge coord can be obtained from the triangulation table further below.
+        public static readonly int[] cornerIndexAFromEdge = new int[12] { 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3 };
+        public static readonly int[] cornerIndexBFromEdge = new int[12] { 1, 2, 3, 0, 5, 6, 7, 4, 4, 5, 6, 7 };
+
+        // Values from http://paulbourke.net/geometry/polygonise/
+        // Lookup table giving the coord of the edge that each vertex lies on for any cube configuration.
+
+        // The first coord is the cube configuration.
+        // Since a cube has 8 cellCorners, there are 2^8 = 256 possible configurations.
+
+        // The second coord is the vertex coord. No configuration has more than 16 vertices.
+        // An entry of -1 means that there are no further vertices in the configuration.
+        public static readonly int[][] triangulation = new int[256][]
+        {
+            new int[16] { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+            new int[16] { 8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1 },
+            new int[16] { 3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1 },
+            new int[16] { 4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+            new int[16] { 4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1 },
+            new int[16] { 10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1 },
+            new int[16] { 5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1 },
+            new int[16] { 5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1 },
+            new int[16] { 8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1 },
+            new int[16] { 2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+            new int[16] { 2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1 },
+            new int[16] { 11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1 },
+            new int[16] { 5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1 },
+            new int[16] { 11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1 },
+            new int[16] { 11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1 },
+            new int[16] { 2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1 },
+            new int[16] { 6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+            new int[16] { 3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1 },
+            new int[16] { 6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1 },
+            new int[16] { 6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1 },
+            new int[16] { 8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1 },
+            new int[16] { 7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1 },
+            new int[16] { 3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1 },
+            new int[16] { 0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1 },
+            new int[16] { 9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1 },
+            new int[16] { 8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1 },
+            new int[16] { 5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1 },
+            new int[16] { 0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1 },
+            new int[16] { 6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1 },
+            new int[16] { 10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+            new int[16] { 1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1 },
+            new int[16] { 0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1 },
+            new int[16] { 3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1 },
+            new int[16] { 6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1 },
+            new int[16] { 9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1 },
+            new int[16] { 8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1 },
+            new int[16] { 3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1 },
+            new int[16] { 10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1 },
+            new int[16] { 10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+            new int[16] { 2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1 },
+            new int[16] { 7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1 },
+            new int[16] { 2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1 },
+            new int[16] { 1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1 },
+            new int[16] { 11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1 },
+            new int[16] { 8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1 },
+            new int[16] { 0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1 },
+            new int[16] { 7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1 },
+            new int[16] { 7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1 },
+            new int[16] { 10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1 },
+            new int[16] { 0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1 },
+            new int[16] { 7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1 },
+            new int[16] { 6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1 },
+            new int[16] { 4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1 },
+            new int[16] { 10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1 },
+            new int[16] { 8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1 },
+            new int[16] { 1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1 },
+            new int[16] { 10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1 },
+            new int[16] { 10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1 },
+            new int[16] { 7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1 },
+            new int[16] { 3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1 },
+            new int[16] { 7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1 },
+            new int[16] { 3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1 },
+            new int[16] { 6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1 },
+            new int[16] { 9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1 },
+            new int[16] { 1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1 },
+            new int[16] { 4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1 },
+            new int[16] { 7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1 },
+            new int[16] { 6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1 },
+            new int[16] { 0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1 },
+            new int[16] { 6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1 },
+            new int[16] { 0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1 },
+            new int[16] { 11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1 },
+            new int[16] { 6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1 },
+            new int[16] { 5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1 },
+            new int[16] { 9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1 },
+            new int[16] { 1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1 },
+            new int[16] { 10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1 },
+            new int[16] { 0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1 },
+            new int[16] { 11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1 },
+            new int[16] { 9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1 },
+            new int[16] { 7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1 },
+            new int[16] { 2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1 },
+            new int[16] { 9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1 },
+            new int[16] { 9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1 },
+            new int[16] { 1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1 },
+            new int[16] { 0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1 },
+            new int[16] { 10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1 },
+            new int[16] { 2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1 },
+            new int[16] { 0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1 },
+            new int[16] { 0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1 },
+            new int[16] { 9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1 },
+            new int[16] { 5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1 },
+            new int[16] { 5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1 },
+            new int[16] { 8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1 },
+            new int[16] { 9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1 },
+            new int[16] { 1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1 },
+            new int[16] { 3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1 },
+            new int[16] { 4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1 },
+            new int[16] { 9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1 },
+            new int[16] { 11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1 },
+            new int[16] { 2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1 },
+            new int[16] { 9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1 },
+            new int[16] { 3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1 },
+            new int[16] { 1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1 },
+            new int[16] { 4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1 },
+            new int[16] { 0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1 },
+            new int[16] { 1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { 0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+            new int[16] { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 }
+        };
+    }
+    #endregion
+}
+```
+
+### Assets/IsosurfaceGeneration/Meshing/SurfaceNets.cs
+```
+using IsosurfaceGeneration.Util;
+using System.Collections.Generic;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+using UnityEngine;
+
+// Resources:
+// https://medium.com/@ryandremer/implementing-surface-nets-in-godot-f48ecd5f29ff
+// https://github.com/bigos91/fastNaiveSurfaceNets/
+
+namespace IsosurfaceGeneration.Meshing
+{
+    #region Single Thread Mesher
+    public struct SurfaceNetsMesher
+    {
+        public Isosurface surface;
+        public DensityMap densityMap;
+        public int3 chunkOriginIndex;
+
+        public List<Vector3> vertices;
+        public List<Vector3> normals;
+        public List<int> triangles;
+
+        int triangleIndex;
+        Dictionary<int3, int> vertexIndexMap;
+
+        public void Execute()
+        {
+            triangleIndex = 0;
+            vertexIndexMap = new();
+
+            // Loop through all cells filling the verticies and indices lists.
+            for (int i = 0; i < densityMap.totalPoints; i++)
+            {
+                int3 unwrappedIndex = IndexHelper.Unwrap(i, densityMap.pointsPerAxis);
+
+                // Stop one point before the end because each cell includes neighbouring points.
+                if (unwrappedIndex.x >= densityMap.pointsPerAxis - 1 ||
+                    unwrappedIndex.y >= densityMap.pointsPerAxis - 1 ||
+                    unwrappedIndex.z >= densityMap.pointsPerAxis - 1)
+                    continue;
+
+                MarchCell(unwrappedIndex);
+            }
+        }
+
+        void MarchCell(int3 index)
+        {
+            // Check the three neighboring points in each positive Axis.
+            // If the sign of the current point and the neighboring point is different, the voxel intersects the surface.
+            for (int i = 0; i < 3; i++)
+            {
+                float d1 = densityMap.Sample(index);
+                float d2 = densityMap.Sample(index + NetsTables.Axis[i]);
+
+                if (d1 < 0 && d2 >= 0)
+                    MakeQuad(index, i);
+                else if (d1 >= 0 && d2 < 0)
+                    MakeQuad_Reversed(index, i);
+            }
+        }
+
+        void MakeQuad(int3 index, int axisIndex)
+        {
+            int3 point1 = index + NetsTables.QuadPoints[axisIndex][0];
+            int3 point2 = index + NetsTables.QuadPoints[axisIndex][1];
+            int3 point3 = index + NetsTables.QuadPoints[axisIndex][2];
+            int3 point4 = index + NetsTables.QuadPoints[axisIndex][3];
+
+            GetOrMakeVertex(point1);
+            GetOrMakeVertex(point2);
+            GetOrMakeVertex(point3);
+
+            GetOrMakeVertex(point3);
+            GetOrMakeVertex(point4);
+            GetOrMakeVertex(point1);
+        }
+
+        void MakeQuad_Reversed(int3 index, int axisIndex)
+        {
+            int3 point1 = index + NetsTables.QuadPoints[axisIndex][0];
+            int3 point2 = index + NetsTables.QuadPoints[axisIndex][1];
+            int3 point3 = index + NetsTables.QuadPoints[axisIndex][2];
+            int3 point4 = index + NetsTables.QuadPoints[axisIndex][3];
+
+            GetOrMakeVertex(point3);
+            GetOrMakeVertex(point2);
+            GetOrMakeVertex(point1);
+
+            GetOrMakeVertex(point1);
+            GetOrMakeVertex(point4);
+            GetOrMakeVertex(point3);
+        }
+
+        void GetOrMakeVertex(int3 index)
+        {
+            if (vertexIndexMap.TryGetValue(index, out int sharedVertexIndex))
+            {
+                triangles.Add(sharedVertexIndex);
+            }
+            else
+            {
+                vertexIndexMap.Add(index, triangleIndex);
+                vertices.Add(CalculateSurfacePosition(index));
+                normals.Add(CalculateNormal(index));
+                triangles.Add(triangleIndex++);
+            }
+        }
+
+        float3 CalculateSurfacePosition(int3 coord)
+        {
+            float3 position = 0.0f;
+            int surfaceEdgeCount = 0;
+
+            for (int i = 0; i < NetsTables.Edges.Length; i++)
+            {
+                int3[] edgeOffsets = NetsTables.Edges[i];
+
+                float3 positionA = coord + edgeOffsets[0];
+                float3 positionB = coord + edgeOffsets[1];
+
+                float densityA = surface.SampleDensity(chunkOriginIndex + coord + edgeOffsets[0]);
+                float densityB = surface.SampleDensity(chunkOriginIndex + coord + edgeOffsets[1]);
+
+                if (densityA * densityB <= 0)
+                {
+                    position += math.lerp(positionA, positionB, math.abs(densityA) / (math.abs(densityA) + math.abs(densityB)));
+                    surfaceEdgeCount++;
+                }
+            }
+
+            if (surfaceEdgeCount == 0)
+                return (float3)coord + 0.5f;
+
+            return position / surfaceEdgeCount;
+        }
+
+        float3 CalculateNormal(int3 coord)
+        {
+            int3 samplePos = chunkOriginIndex + coord;
+
+            float3 normal;
+            normal.x = surface.SampleDensity(samplePos - NetsTables.Axis[0]) - surface.SampleDensity(samplePos + NetsTables.Axis[0]);
+            normal.y = surface.SampleDensity(samplePos - NetsTables.Axis[1]) - surface.SampleDensity(samplePos + NetsTables.Axis[1]);
+            normal.z = surface.SampleDensity(samplePos - NetsTables.Axis[2]) - surface.SampleDensity(samplePos + NetsTables.Axis[2]);
+
+            return math.normalize(normal);
+        }
+    }
+    #endregion
+
+    #region Jobs Mesher
+    [BurstCompile(CompileSynchronously = true, DisableSafetyChecks = true, FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Low)]
+    public struct SurfaceNetsMesherJob : IJobFor
+    {
+        [ReadOnly] public NativeArray<float> density;
+        [ReadOnly] public int densityPPA;
+        [ReadOnly] public int itteratePPA;
+        [ReadOnly] public float isoLevel;
+
+        [NativeDisableParallelForRestriction, WriteOnly] public NativeList<Vertex> vertices;
+        [NativeDisableParallelForRestriction, WriteOnly] public NativeList<ushort> indices;
+
+        public NativeCounter vertexCounter;
+        [NativeDisableParallelForRestriction] public NativeHashMap<int3, ushort> vertexIndexMap;
+
+        public void Execute(int index)
+        {
+            int3 unwrappedIndex = IndexHelper.Unwrap(index, itteratePPA);
+            index = IndexHelper.Wrap(unwrappedIndex, densityPPA);
+            index += (densityPPA * densityPPA) + densityPPA + 1;
+
+            MarchCell(index);
+        }
+
+        void MarchCell(int index)
+        {
+            CellAxis<int> cellAxis = new()
+            {
+                axis1 = index + 1,
+                axis2 = index + densityPPA,
+                axis3 = index + (densityPPA * densityPPA),
+            };
+
+            // Check the three neighboring points in each positive Axis.
+            // If the sign of the current point and the neighboring point is different, the voxel intersects the surface.
+            for (int i = 0; i < 3; i++)
+            {
+                float d1 = density[index];
+                float d2 = density[cellAxis[i]];
+
+                int3 unwrappedIndex = IndexHelper.Unwrap(index, densityPPA);
+                if (d1 < 0 && d2 >= 0)
+                    MakeQuad(unwrappedIndex, i);
+                else if (d1 >= 0 && d2 < 0)
+                    MakeQuad_Reversed(unwrappedIndex, i);
+            }
+        }
+
+        void MakeQuad(int3 index, int axisIndex)
+        {
+            int3 point1 = index + NetsTables.QuadPoints[axisIndex][0];
+            int3 point2 = index + NetsTables.QuadPoints[axisIndex][1];
+            int3 point3 = index + NetsTables.QuadPoints[axisIndex][2];
+            int3 point4 = index + NetsTables.QuadPoints[axisIndex][3];
+
+            GetOrMakeVertex(point1);
+            GetOrMakeVertex(point2);
+            GetOrMakeVertex(point3);
+
+            GetOrMakeVertex(point3);
+            GetOrMakeVertex(point4);
+            GetOrMakeVertex(point1);
+        }
+
+        void MakeQuad_Reversed(int3 index, int axisIndex)
+        {
+            int3 point1 = index + NetsTables.QuadPoints[axisIndex][0];
+            int3 point2 = index + NetsTables.QuadPoints[axisIndex][1];
+            int3 point3 = index + NetsTables.QuadPoints[axisIndex][2];
+            int3 point4 = index + NetsTables.QuadPoints[axisIndex][3];
+
+            GetOrMakeVertex(point3);
+            GetOrMakeVertex(point2);
+            GetOrMakeVertex(point1);
+
+            GetOrMakeVertex(point1);
+            GetOrMakeVertex(point4);
+            GetOrMakeVertex(point3);
+        }
+
+        void GetOrMakeVertex(int3 index)
+        {
+            if (vertexIndexMap.TryGetValue(index, out ushort sharedVertexIndex))
+            {
+                indices.Add(sharedVertexIndex);
+            }
+            else
+            {
+                ushort vertexIndex = (ushort)vertexCounter.Count;
+                vertexIndexMap.Add(index, vertexIndex);
+                indices.Add(vertexIndex);
+                vertices.Add(new Vertex(CalculateSurfacePosition(index), CalculateNormal(index)));
+                vertexCounter.Increment();
+            }
+        }
+
+        float3 CalculateSurfacePosition(int3 coord)
+        {
+            float3 position = 0;
+            int surfaceEdgeCount = 0;
+
+            for (int i = 0; i < NetsTables.Edges.Length; i++)
+            {
+                int3[] edgeOffsets = NetsTables.Edges[i];
+
+                float3 positionA = coord + edgeOffsets[0];
+                float3 positionB = coord + edgeOffsets[1];
+
+                float densityA = density[IndexHelper.Wrap(coord + edgeOffsets[0], densityPPA)];
+                float densityB = density[IndexHelper.Wrap(coord + edgeOffsets[1], densityPPA)];
+
+                if (densityA * densityB <= 0)
+                {
+                    position += math.lerp(positionA, positionB, math.abs(densityA) / (math.abs(densityA) + math.abs(densityB)));
+                    surfaceEdgeCount++;
+                }
+            }
+
+            if (surfaceEdgeCount == 0)
+                return (float3)coord + 0.5f;
+
+            return position / surfaceEdgeCount;
+        }
+
+        float3 CalculateNormal(int3 coord)
+        {
+            float3 normal;
+            normal.x = density[IndexHelper.Wrap(coord - NetsTables.Axis[0], densityPPA)] - density[IndexHelper.Wrap(coord + NetsTables.Axis[0], densityPPA)];
+            normal.y = density[IndexHelper.Wrap(coord - NetsTables.Axis[1], densityPPA)] - density[IndexHelper.Wrap(coord + NetsTables.Axis[1], densityPPA)];
+            normal.z = density[IndexHelper.Wrap(coord - NetsTables.Axis[2], densityPPA)] - density[IndexHelper.Wrap(coord + NetsTables.Axis[2], densityPPA)];
+
+            return math.normalize(normal);
+        }
+    }
+
+    struct CellAxis<T>
+    {
+        public T axis1;
+        public T axis2;
+        public T axis3;
+
+        public T this[int index]
+        {
+            get
+            {
+                return index switch
+                {
+                    0 => axis1,
+                    1 => axis2,
+                    2 => axis3,
+                    _ => throw new System.IndexOutOfRangeException(),
+                };
+            }
+            set
+            {
+                switch (index)
+                {
+                    case 0:
+                        axis1 = value;
+                        break;
+                    case 1:
+                        axis2 = value;
+                        break;
+                    case 2:
+                        axis3 = value;
+                        break;
+                    default: throw new System.IndexOutOfRangeException();
+                }
+            }
+        }
+    }
+    #endregion
+
+    #region Tables
+    readonly struct NetsTables
+    {
+        // The 12 edges of a cube. Used to interpolate a point onto the estimated surface of the density map.
+        public static readonly int3[][] Edges = new int3[12][]
+        {
+        // Edges on min Z axis
+        new int3[2] { new(0, 0, 0), new(1, 0, 0) },
+        new int3[2] { new(1, 0, 0), new(1, 1, 0) },
+        new int3[2] { new(1, 1, 0), new(0, 1, 0) },
+        new int3[2] { new(0, 1, 0), new(0, 0, 0) },
+
+        // Edges on max Z axis
+        new int3[2] { new(0, 0, 1), new(1, 0, 1) },
+        new int3[2] { new(1, 0, 1), new(1, 1, 1) },
+        new int3[2] { new(1, 1, 1), new(0, 1, 1) },
+        new int3[2] { new(0, 1, 1), new(0, 0, 1) },
+
+        // Edges connecting min Z to max Z
+        new int3[2] { new(0, 0, 0), new(0, 0, 1) },
+        new int3[2] { new(1, 0, 0), new(1, 0, 1) },
+        new int3[2] { new(1, 1, 0), new(1, 1, 1) },
+        new int3[2] { new(0, 1, 0), new(0, 1, 1) }
+        };
+
+        // The 4 relative indexes of the corners of a Quad that is orthogonal to each axis.
+        public static readonly int3[][] QuadPoints = new int3[3][]
+        {
+            new int3[4]
+            {
+                new(0, 0, -1),
+                new(0, -1, -1),
+                new(0, -1, 0),
+                new(0, 0, 0)
+            },
+            new int3[4]
+            {
+                new(0, 0, -1),
+                new(0, 0, 0),
+                new(-1, 0, 0),
+                new(-1, 0, -1)
+            },
+            new int3[4]
+            {
+                new(0, 0, 0),
+                new(0, -1, 0),
+                new(-1, -1, 0),
+                new(-1, 0, 0)
+            }
+        };
+
+        public static readonly int3[] Axis = new int3[3]
+        {
+            new(1, 0, 0),
+            new(0, 1, 0),
+            new(0, 0, 1)
+        };
+    }
+    #endregion
+}
+```
+
+### Assets/IsosurfaceGeneration/Meshing/Vertex.cs
+```
+using System.Runtime.InteropServices;
+using Unity.Mathematics;
+using UnityEngine.Rendering;
+
+namespace IsosurfaceGeneration.Meshing
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Vertex
+    {
+        public float3 position;
+        public float3 normal;
+
+        public Vertex(float3 position, float3 normal)
+        {
+            this.position = position;
+            this.normal = normal;
+        }
+
+        public static readonly VertexAttributeDescriptor[] Format = {
+            new(VertexAttribute.Position, VertexAttributeFormat.Float32),
+            new(VertexAttribute.Normal, VertexAttributeFormat.Float32)
+        };
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Util/DistanceFunction.cs
+```
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace IsosurfaceGeneration.Util
+{
+    // SDF Primatives
+    // See: https://iquilezles.org/articles/distfunctions/
+    public static class DistanceFunction
+    {
+        public static float Sphere(float3 centre, float radius)
+        {
+            return math.length(centre) - radius;
+        }
+
+        public static float SemiSphere(float3 centre, float radius, float h)
+        {
+            float w = math.sqrt(radius * radius - h * h);
+
+            float2 q = new float2(math.length(centre.xz), centre.y);
+            float s = math.max((h - radius) * q.x * q.x + w * w * (h + radius - 2.0f * q.y), h * q.x - w * q.y);
+            return (s < 0.0) ? math.length(q) - radius :
+                   (q.x < w) ? h - q.y :
+                   math.length(q - new float2(w, h));
+        }
+
+        public static float Capsule(float3 centre, float height, float radius)
+        {
+            float3 dir = new(0, height, 0);
+
+            float3 pa = centre - dir;
+            float3 ba = -dir - dir;
+            float h = math.clamp(math.dot(pa, ba) / math.dot(ba, ba), 0.0f, 1.0f);
+            return math.length(pa - ba * h) - radius;
+        }
+
+        public static float Torus(float3 centre, float outerRadius, float innerRadius)
+        {
+            float2 q = new(math.length(centre.xz) - outerRadius, centre.y);
+            return math.length(q) - innerRadius;
+        }
+
+        public static float Cube(float3 centre, float width, float height, float depth)
+        {
+            float3 size = new float3(width, height, depth);
+            float3 q = math.abs(centre) - size;
+            return math.length(math.max(q, 0.0f)) + math.min(math.max(q.x, math.max(q.y, q.z)), 0.0f);
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Util/IndexHelper.cs
+```
+using Unity.Mathematics;
+
+namespace IsosurfaceGeneration.Util
+{
+    public static class IndexHelper
+    {
+        public static int Wrap(int3 index, int3 size)
+        {
+            return (index.z * size.x * size.y) + (index.y * size.x) + index.x;
+        }
+
+        public static int3 Unwrap(int index, int3 size)
+        {
+            /*
+            int x = index % size.x;
+            int y = index / size.x % size.y;
+            int z = index / (size.x * size.y);
+            */
+
+            int z = index / (size.x * size.y);
+            index -= (z * size.x * size.y);
+            int y = index / size.x;
+            int x = index % size.x;
+
+            return new int3(x, y, z);
+        }
+
+        public static int Wrap(int3 index, int size)
+        {
+            return (index.z * size * size) + (index.y * size) + index.x;
+        }
+
+        public static int3 Unwrap(int index, int size)
+        {
+            /*
+            int x = index % size;
+            int y = index / size % size;
+            int z = index / (size * size);
+            */
+
+            // This method uses 1 less modulo
+            int z = index / (size * size);
+            index -= (z * size * size);
+            int y = index / size;
+            int x = index % size;
+
+            return new int3(x, y, z);
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Util/NativeCounter.cs
+```
+using System;
+using System.Threading;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
+
+namespace IsosurfaceGeneration.Util
+{
+    public unsafe struct NativeCounter : IDisposable
+    {
+        readonly Allocator m_Allocator;
+
+        [NativeDisableUnsafePtrRestriction] readonly int* m_Counter;
+
+        public int Count
+        {
+            get => *m_Counter;
+            set => (*m_Counter) = value;
+        }
+
+        public NativeCounter(Allocator allocator)
+        {
+            m_Allocator = allocator;
+            m_Counter = (int*)UnsafeUtility.Malloc(sizeof(int), 4, allocator);
+            Count = 0;
+        }
+
+        public int Increment()
+        {
+            return Interlocked.Increment(ref *m_Counter) - 1;
+        }
+
+        public void Dispose()
+        {
+            UnsafeUtility.Free(m_Counter, m_Allocator);
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Util/SimplexNoise.cs
+```
+using Unity.Mathematics;
+
+// Noise Shader Library for Unity - https://github.com/keijiro/NoiseShader
+//
+// Original work (webgl-noise) Copyright (C) 2011 Ashima Arts.
+// Translation and modification was made by Keijiro Takahashi.
+//
+// This is based on the webgl-noise GLSL shader.
+// For further details of the original shader, please see the
+// following description from the original source code.
+
+// Description : Array and textureless GLSL 2D/3D/4D simplex
+//               noise functions.
+//      Author : Ian McEwan, Ashima Arts.
+//  Maintainer : ijm
+//     Lastmod : 20110822 (ijm)
+//     License : Copyright (C) 2011 Ashima Arts. All rights reserved.
+//               Distributed under the MIT License. See LICENSE file.
+//               https://github.com/ashima/webgl-noise
+
+namespace IsosurfaceGeneration.Util
+{
+    public struct SimplexNoise
+    {
+        static readonly float2 C = new(1.0f / 6.0f, 1.0f / 3.0f);
+
+        static float3 mod289(float3 x)
+        {
+            return x - math.floor(x / 289.0f) * 289.0f;
+        }
+
+        static float4 mod289(float4 x)
+        {
+            return x - math.floor(x / 289.0f) * 289.0f;
+        }
+
+        static float4 permute(float4 x)
+        {
+            return mod289((x * 34.0f + 1.0f) * x);
+        }
+
+        static float4 taylorInvSqrt(float4 r)
+        {
+            return 1.79284291400159f - r * 0.85373472095314f;
+        }
+
+        static float Sample(float3 v)
+        {
+            // First corner
+            float3 i = math.floor(v + math.dot(v, C.yyy));
+            float3 x0 = v - i + math.dot(i, C.xxx);
+
+            // Other corners
+            float3 g = math.step(x0.yzx, x0.xyz);
+            float3 l = 1.0f - g;
+            float3 i1 = math.min(g.xyz, l.zxy);
+            float3 i2 = math.max(g.xyz, l.zxy);
+
+            // x1 = x0 - i1  + 1.0 * C.xxx;
+            // x2 = x0 - i2  + 2.0 * C.xxx;
+            // x3 = x0 - 1.0 + 3.0 * C.xxx;
+            float3 x1 = x0 - i1 + C.xxx;
+            float3 x2 = x0 - i2 + C.yyy;
+            float3 x3 = x0 - 0.5f;
+
+            // Permutations
+            i = mod289(i); // Avoid truncation effects in permutation
+            float4 p = permute(permute(permute(i.z + new float4(0.0f, i1.z, i2.z, 1.0f))
+                                              + i.y + new float4(0.0f, i1.y, i2.y, 1.0f))
+                                              + i.x + new float4(0.0f, i1.x, i2.x, 1.0f));
+
+            // Gradients: 7x7 points over a square, mapped onto an octahedron.
+            // The ring size 17*17 = 289 is close to a multiple of 49 (49*6 = 294)
+            float4 j = p - 49.0f * math.floor(p / 49.0f);
+
+            float4 x_ = math.floor(j / 7.0f);
+            float4 y_ = math.floor(j - 7.0f * x_); // mod(j,N)
+
+            float4 x = (x_ * 2.0f + 0.5f) / 7.0f - 1.0f;
+            float4 y = (y_ * 2.0f + 0.5f) / 7.0f - 1.0f;
+
+            float4 h = 1.0f - math.abs(x) - math.abs(y);
+
+            float4 b0 = new(x.xy, y.xy);
+            float4 b1 = new(x.zw, y.zw);
+
+            float4 s0 = math.floor(b0) * 2.0f + 1.0f;
+            float4 s1 = math.floor(b1) * 2.0f + 1.0f;
+            float4 sh = -math.step(h, 0.0f);
+
+            float4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+            float4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+            float3 g0 = new float3(a0.xy, h.x);
+            float3 g1 = new float3(a0.zw, h.y);
+            float3 g2 = new float3(a1.xy, h.z);
+            float3 g3 = new float3(a1.zw, h.w);
+
+            // Normalise gradients
+            float4 norm = taylorInvSqrt(new float4(math.dot(g0, g0), math.dot(g1, g1), math.dot(g2, g2), math.dot(g3, g3)));
+            g0 *= norm.x;
+            g1 *= norm.y;
+            g2 *= norm.z;
+            g3 *= norm.w;
+
+            // Mix final noise value
+            float4 m = math.max(0.6f - new float4(math.dot(x0, x0), math.dot(x1, x1), math.dot(x2, x2), math.dot(x3, x3)), 0.0f);
+            m *= m;
+            m *= m;
+
+            float4 px = new(math.dot(x0, g0), math.dot(x1, g1), math.dot(x2, g2), math.dot(x3, g3));
+            return 42.0f * math.dot(m, px);
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Input/Editor/ShapeBrushEditor.cs
+```
+using Unity.VisualScripting;
+using UnityEditor;
+using UnityEditor.IMGUI.Controls;
+using UnityEngine;
+
+namespace IsosurfaceGeneration.Input
+{
+    [CanEditMultipleObjects]
+    [CustomEditor(typeof(ShapeBrush), true)]
+    public class ShapeBrushEditor : Editor
+    {
+        SerializedProperty m_ShapeType;
+        SerializedProperty m_BlendMode;
+        SerializedProperty m_Sharpness;
+        SerializedProperty m_Dimention1;
+        SerializedProperty m_Dimention2;
+        SerializedProperty m_Dimention3;
+
+        SphereBoundsHandle m_SphereBoundsHandle;
+        CapsuleBoundsHandle m_CapsuleBoundsHandle;
+        TorusBoundsHandle m_TorusBoundsHandle;
+        BoxBoundsHandle m_BoxBoundsHandle;
+
+        ShapeBrush m_Target;
+
+        void OnEnable()
+        {
+            m_ShapeType = serializedObject.FindProperty("m_ShapeType");
+            m_BlendMode = serializedObject.FindProperty("m_BlendMode");
+            m_Sharpness = serializedObject.FindProperty("m_Sharpness");
+            m_Dimention1 = serializedObject.FindProperty("m_Dimention1");
+            m_Dimention2 = serializedObject.FindProperty("m_Dimention2");
+            m_Dimention3 = serializedObject.FindProperty("m_Dimention3");
+
+            m_Target = (ShapeBrush)target;
+        }
+
+        public override void OnInspectorGUI()
+        {
+            serializedObject.Update();
+
+            EditorGUILayout.PropertyField(m_ShapeType, new GUIContent("Shape"));
+            EditorGUILayout.PropertyField(m_BlendMode, new GUIContent("Blend Mode"));
+            EditorGUILayout.PropertyField(m_Sharpness, new GUIContent("Sharpness"));
+
+            switch ((ShapeFunction)m_ShapeType.enumValueIndex)
+            {
+                case ShapeFunction.Sphere:
+                    EditorGUILayout.PropertyField(m_Dimention1, new GUIContent("Radius"));
+                    break;
+
+                case ShapeFunction.SemiSphere:
+                    EditorGUILayout.PropertyField(m_Dimention1, new GUIContent("Radius"));
+                    m_Dimention2.floatValue = EditorGUILayout.Slider(new GUIContent("Slice"), m_Dimention2.floatValue / m_Dimention1.floatValue, -0.99f, 0.99f) * m_Dimention1.floatValue;
+                    break;
+
+                case ShapeFunction.Capsule:
+                    EditorGUILayout.PropertyField(m_Dimention1, new GUIContent("Height"));
+                    EditorGUILayout.PropertyField(m_Dimention2, new GUIContent("Radius"));
+                    break;
+
+                case ShapeFunction.Torus:
+                    EditorGUILayout.PropertyField(m_Dimention1, new GUIContent("Outer Radius"));
+                    EditorGUILayout.PropertyField(m_Dimention2, new GUIContent("Inner Radius"));
+                    break;
+
+                case ShapeFunction.Cube:
+                    EditorGUILayout.PropertyField(m_Dimention1, new GUIContent("Width"));
+                    EditorGUILayout.PropertyField(m_Dimention2, new GUIContent("Height"));
+                    EditorGUILayout.PropertyField(m_Dimention3, new GUIContent("Depth"));
+                    break;
+            }
+
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        public void DrawListInspector(Rect rect, float lineSpacing)
+        {
+            serializedObject.Update();
+
+            EditorGUI.PropertyField(rect, m_ShapeType, new GUIContent("Shape"));
+            rect.y += lineSpacing;
+
+            EditorGUI.PropertyField(rect, m_BlendMode, new GUIContent("Blend Mode"));
+            rect.y += lineSpacing;
+
+            EditorGUI.PropertyField(rect, m_Sharpness, new GUIContent("Sharpness"));
+            rect.y += lineSpacing;
+
+            switch ((ShapeFunction)m_ShapeType.enumValueIndex)
+            {
+                case ShapeFunction.Sphere:
+                    EditorGUI.PropertyField(rect, m_Dimention1, new GUIContent("Radius"));
+                    rect.y += lineSpacing;
+                    break;
+
+                case ShapeFunction.SemiSphere:
+                    EditorGUI.PropertyField(rect, m_Dimention1, new GUIContent("Radius"));
+                    rect.y += lineSpacing;
+                    m_Dimention2.floatValue = EditorGUI.Slider(rect, new GUIContent("Slice"), m_Dimention2.floatValue / m_Dimention1.floatValue, -0.99f, 0.99f) * m_Dimention1.floatValue;
+                    rect.y += lineSpacing;
+
+                    break;
+
+                case ShapeFunction.Capsule:
+                    EditorGUI.PropertyField(rect, m_Dimention1, new GUIContent("Height"));
+                    rect.y += lineSpacing;
+
+                    EditorGUI.PropertyField(rect, m_Dimention2, new GUIContent("Radius"));
+                    rect.y += lineSpacing;
+                    break;
+
+                case ShapeFunction.Torus:
+                    EditorGUI.PropertyField(rect, m_Dimention1, new GUIContent("Outer Radius"));
+                    rect.y += lineSpacing;
+
+                    EditorGUI.PropertyField(rect, m_Dimention2, new GUIContent("Inner Radius"));
+                    rect.y += lineSpacing;
+                    break;
+
+                case ShapeFunction.Cube:
+                    EditorGUI.PropertyField(rect, m_Dimention1, new GUIContent("Size"));
+                    EditorGUI.PropertyField(rect, m_Dimention2, new GUIContent("Height"));
+                    EditorGUI.PropertyField(rect, m_Dimention3, new GUIContent("Depth"));
+                    rect.y += lineSpacing;
+                    break;
+            }
+
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        void OnSceneGUI()
+        {
+            Handles.matrix = m_Target.transform.localToWorldMatrix;
+            Handles.color = Color.green;
+
+            EditorGUI.BeginChangeCheck();
+
+            switch ((ShapeFunction)m_ShapeType.enumValueIndex)
+            {
+                case ShapeFunction.Sphere:
+                    DrawSphereHandle();
+                    break;
+
+                case ShapeFunction.SemiSphere:
+                    DrawSphereHandle();
+                    break;
+
+                case ShapeFunction.Capsule:
+                    DrawCapsuleHandle();
+                    break;
+
+                case ShapeFunction.Torus:
+                    DrawTorusHandle();
+                    break;
+
+                case ShapeFunction.Cube:
+                    DrawBoxHandle();
+                    break;
+            }
+        }
+
+        void DrawSphereHandle()
+        {
+            m_SphereBoundsHandle ??= new();
+
+            m_SphereBoundsHandle.center = Vector3.zero;
+            m_SphereBoundsHandle.radius = m_Dimention1.floatValue;
+            m_SphereBoundsHandle.DrawHandle();
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(target, "Edited Sphere");
+
+                m_Dimention1.SetUnderlyingValue(m_SphereBoundsHandle.radius);
+                m_Target.IsDirty = true;
+            }
+        }
+
+        void DrawCapsuleHandle()
+        {
+            m_CapsuleBoundsHandle ??= new();
+
+            m_CapsuleBoundsHandle.center = Vector3.zero;
+            m_CapsuleBoundsHandle.height = (m_Dimention1.floatValue + m_Dimention2.floatValue) * 2.0f;
+            m_CapsuleBoundsHandle.radius = m_Dimention2.floatValue;
+            m_CapsuleBoundsHandle.DrawHandle();
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(target, "Edited Capsule");
+
+                m_Dimention1.SetUnderlyingValue((m_CapsuleBoundsHandle.height / 2.0f) - m_CapsuleBoundsHandle.radius);
+                m_Dimention2.SetUnderlyingValue(m_CapsuleBoundsHandle.radius);
+                m_Target.IsDirty = true;
+            }
+        }
+
+        void DrawTorusHandle()
+        {
+            m_TorusBoundsHandle ??= new();
+
+            m_TorusBoundsHandle.center = Vector3.zero;
+            m_TorusBoundsHandle.radius = m_Dimention1.floatValue;
+            m_TorusBoundsHandle.DrawHandle();
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(target, "Edited Torus");
+
+                m_Dimention1.SetUnderlyingValue(m_TorusBoundsHandle.radius);
+                m_Target.IsDirty = true;
+            }
+        }
+
+        void DrawBoxHandle()
+        {
+            m_BoxBoundsHandle ??= new();
+
+            m_BoxBoundsHandle.center = Vector3.zero;
+            Vector3 size = new Vector3(m_Dimention1.floatValue,m_Dimention2.floatValue, m_Dimention3.floatValue) * 2.0f;
+            m_BoxBoundsHandle.size = size;
+            m_BoxBoundsHandle.DrawHandle();
+
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(target, "Edited Cube");
+
+                m_Dimention1.SetUnderlyingValue(m_BoxBoundsHandle.size.x / 2.0f);
+                m_Dimention2.SetUnderlyingValue(m_BoxBoundsHandle.size.y / 2.0f);
+                m_Dimention3.SetUnderlyingValue(m_BoxBoundsHandle.size.z / 2.0f);
+                m_Target.IsDirty = true;
+            }
+        }
+    }
+}
+```
+
+### Assets/IsosurfaceGeneration/Input/Editor/ShapesInputEditor.cs
+```
+using UnityEditor;
+using UnityEditorInternal;
+using UnityEngine;
+
+namespace IsosurfaceGeneration.Input
+{
+    [CustomEditor(typeof(ShapesInput), true)]
+    public class ShapesInputEditor : Editor
+    {
+        static readonly Color k_ProSkinSelectionBgColor = new(0.1725f, 0.3647f, 0.5294f, 1.0f);
+        static readonly Color k_PersonalSkinSelectionBgColor = new(0.2274f, 0.447f, 0.6901f, 1.0f);
+
+        const float k_HeaderHeight = 20.0f;
+        const float k_HeaderXOffset = 15.0f;
+        const float k_MarginReorderIcon = 20.0f;
+        const float k_EnableIconSize = 20.0f;
+
+        float DefaultLineSpacing => EditorGUIUtility.singleLineHeight + EditorGUIUtility.standardVerticalSpacing;
+
+        SerializedProperty m_ShapeBrushes;
+        ReorderableList m_ReorderableList;
+
+        ShapesInput m_Target;
+
+        void OnEnable()
+        {
+            m_Target = (ShapesInput)target;
+
+            m_ShapeBrushes = serializedObject.FindProperty("m_ShapeBrushes");
+            m_ReorderableList = new ReorderableList(serializedObject, m_ShapeBrushes, true, true, true, true);
+
+            m_ReorderableList.drawHeaderCallback += OnDrawReorderListHeader;
+            m_ReorderableList.drawElementCallback += OnDrawReorderListElement;
+            m_ReorderableList.drawElementBackgroundCallback += OnDrawReorderListBg;
+            m_ReorderableList.elementHeightCallback += OnReorderListElementHeight;
+            m_ReorderableList.onAddDropdownCallback += OnReorderListAddDropdown;
+            m_ReorderableList.onReorderCallbackWithDetails += OnReorderList;
+            m_ReorderableList.onDeleteArrayElementCallback += OnDeleteElement;
+        }
+
+        void OnDisable()
+        {
+            m_ReorderableList.drawHeaderCallback -= OnDrawReorderListHeader;
+            m_ReorderableList.drawElementCallback -= OnDrawReorderListElement;
+            m_ReorderableList.drawElementBackgroundCallback -= OnDrawReorderListBg;
+            m_ReorderableList.elementHeightCallback -= OnReorderListElementHeight;
+            m_ReorderableList.onAddDropdownCallback -= OnReorderListAddDropdown;
+            m_ReorderableList.onReorderCallbackWithDetails -= OnReorderList;
+            m_ReorderableList.onDeleteArrayElementCallback -= OnDeleteElement;
+        }
+
+        public override void OnInspectorGUI()
+        {
+            serializedObject.Update();
+            m_ReorderableList.DoLayoutList();
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        void OnDrawReorderListHeader(Rect rect)
+        {
+            EditorGUI.LabelField(rect, "Brushes");
+        }
+
+        void OnDrawReorderListElement(Rect rect, int index, bool isActive, bool isFocused)
+        {
+            if (m_ReorderableList.serializedProperty.arraySize == 0)
+                return;
+
+            SerializedProperty brushProperty = m_ReorderableList.serializedProperty.GetArrayElementAtIndex(index);
+
+            Rect foldoutHeaderRect = rect;
+            foldoutHeaderRect.height = k_HeaderHeight;
+            foldoutHeaderRect.x += k_HeaderXOffset;
+            foldoutHeaderRect.width -= k_HeaderXOffset + k_EnableIconSize;
+
+            Rect toggleRect = foldoutHeaderRect;
+            toggleRect.x = toggleRect.width + 60.0f;
+            toggleRect.width = EditorGUIUtility.singleLineHeight;
+
+            GameObject brushObject = ((Component)brushProperty.objectReferenceValue).gameObject;
+            brushObject.SetActive(EditorGUI.Toggle(toggleRect, brushObject.activeSelf));
+
+            brushProperty.isExpanded = EditorGUI.BeginFoldoutHeaderGroup(foldoutHeaderRect, brushProperty.isExpanded, brushProperty.objectReferenceValue.name);
+            if (brushProperty.isExpanded)
+            {
+                rect.height = EditorGUIUtility.singleLineHeight;
+                rect.y += DefaultLineSpacing;
+
+                GUI.enabled = false;
+                EditorGUI.PropertyField(rect, brushProperty, true);
+                rect.y += DefaultLineSpacing;
+                GUI.enabled = true;
+
+                ShapeBrushEditor brushEditor = (ShapeBrushEditor)CreateEditor(m_ShapeBrushes.GetArrayElementAtIndex(index).objectReferenceValue);
+                brushEditor.DrawListInspector(rect, DefaultLineSpacing);
+            }
+
+            EditorGUI.EndFoldoutHeaderGroup();
+        }
+
+        void OnDrawReorderListBg(Rect rect, int index, bool isActive, bool isFocused)
+        {
+            if (!isFocused || !isActive)
+                return;
+
+            float height = OnReorderListElementHeight(index);
+
+            SerializedProperty brushProperty = m_ReorderableList.serializedProperty.GetArrayElementAtIndex(index);
+
+            // Remove a bit of the line that goes beyond the header label.
+            if (!brushProperty.isExpanded)
+                height -= EditorGUIUtility.standardVerticalSpacing;
+
+            Rect copyRect = rect;
+            copyRect.width = k_MarginReorderIcon;
+            copyRect.height = height;
+
+            // Draw two rects indepently to avoid overlapping the header label.
+            Color color = EditorGUIUtility.isProSkin ? k_ProSkinSelectionBgColor : k_PersonalSkinSelectionBgColor;
+            EditorGUI.DrawRect(copyRect, color);
+
+            float offset = 2.0f;
+            rect.x += k_MarginReorderIcon;
+            rect.width -= k_MarginReorderIcon + offset;
+
+            rect.height = height - k_HeaderHeight + offset;
+            rect.y += k_HeaderHeight - offset;
+
+            EditorGUI.DrawRect(rect, color);
+        }
+
+        float OnReorderListElementHeight(int index)
+        {
+            if (m_ReorderableList.serializedProperty.arraySize == 0)
+                return 0.0f;
+
+            SerializedProperty brushProperty = m_ReorderableList.serializedProperty.GetArrayElementAtIndex(index);
+            if (!brushProperty.isExpanded)
+                return DefaultLineSpacing;
+
+            return DefaultLineSpacing * 7;
+        }
+
+        void OnReorderListAddDropdown(Rect buttonRect, ReorderableList list)
+        {
+            GenericMenu menu = new();
+            menu.AddItem(new GUIContent("Sphere"), false, OnAddItemFromDropdown, ShapeFunction.Sphere);
+
+            menu.ShowAsContext();
+        }
+
+        void OnAddItemFromDropdown(object userData)
+        {
+            m_Target.AddShapeBrush((ShapeFunction)userData);
+        }
+
+        void OnReorderList(ReorderableList list, int oldIndex, int newIndex)
+        {
+            //Debug.Log($"{oldIndex} -> {newIndex}");
+            m_Target.ReorderBrushes(oldIndex, newIndex);
+        }
+
+        void OnDeleteElement(ReorderableList list, int index)
+        {
+            // This just never gets called for some reason...?
+            Debug.Log($"Delete element {index}");
+            m_Target.DeleteShapeBrush(index);
+        }
+    }
+}
+```

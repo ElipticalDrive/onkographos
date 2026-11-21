@@ -1,0 +1,208 @@
+--- v002.md
++++ v003.md
+@@ -1,101 +1,100 @@
+ # Depth Rendering
+ 
++Also called: Depth Map Visualization, Z-Buffer Shading (in specific contexts)
+ 
+ ## Overview
+-Depth Rendering is a visualization technique that maps the number of raymarching steps taken to reach a surface to grayscale intensity, producing a depth map where brightness corresponds to traversal depth [S1, unofficial]. It builds on its parent, Iteration-Based Coloring, but normalizes the step count against the scene's grid length to bound the output intensity to the range $[0, 255]$ [S1, unofficial].
++Depth Rendering is a visualization technique that maps the spatial depth of a hit point to grayscale intensity, providing a direct representation of distance from the camera or image plane [S1, S3, unofficial]. Unlike [Iteration-Based Coloring](1244-iteration-based-coloring.md), which visualizes computational effort (step count), Depth Rendering visualizes geometric position [S1, unofficial]. It differs from [Logarithmic Depth Rendering](#logarithmic-depth-rendering) by using linear normalization of the z-coordinate, and from [Depth Shading](#depth-shading) by typically referring to the raw depth map generation rather than the subsequent intensity shading based on that depth [S1, S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Ray origin and direction for each pixel $(x, y)$, provided by `rc.getRayForPixel(x, y)` [S1, unofficial].
+-- An octree data structure representing the volume, with bounding box length defined by `tree->gridlength` [S1, unofficial].
+-- A `TreeTraverser` object initialized with the tree and the ray [S1, unofficial].
++*   `tree`: A spatial data structure (e.g., Octree) containing voxel data, with defined bounding box bounds `tree->min` and `tree->max` [S1, unofficial].
++*   `rc`: Render context providing ray generation for each pixel, including image dimensions `rc.n_y` (assumed square or handling `rc.n_x` similarly) [S1, unofficial].
++*   `texture_array`: An output buffer of unsigned chars, organized as RGBA (4 bytes per pixel) [S1, unofficial].
+ 
+ **Outputs:**
+-- A 4-channel texture array (`texture_array`) of size `rc.n_y * rc.n_y * 4` (assuming square resolution) [S1, unofficial].
+-- Channels: Red (grayscale intensity), Green (uninitialized or zeroed by caller), Blue (uninitialized or zeroed by caller), and Alpha (set to 1) [S1, unofficial].
++*   `texture_array`: Grayscale image where pixel brightness corresponds to depth [S1, unofficial].
+ 
+ **Data Structures:**
+-- `VoxelData`: Contains `morton` (uint64_t), `color` (vec3), and `normal` (vec3) [S1, unofficial].
+-- `TreeTraverser`: Manages the traversal state, providing `isTerminated()`, `getCurrentNode()`, `step()`, `stepcount`, and `getCurrentPosition()` [S1, unofficial].
++*   `TreeTraverser`: An iterator object initialized with the tree and a ray. It provides:
++    *   `isTerminated()`: Returns true if the ray has exited the tree or hit a surface [S1, unofficial].
++    *   `getCurrentNode()`: Returns the current node in the traversal [S1, unofficial].
++    *   `getCurrentNode()->isLeaf()`: Checks if the current node is a leaf [S1, unofficial].
++    *   `getCurrentNode()->hasData()`: Checks if the leaf node contains valid voxel data [S1, unofficial].
++    *   `step()`: Advances the traverser to the next node/position [S1, unofficial].
++    *   `getCurrentPosition()`: Returns the 3D position `vec3 pos` of the hit point [S1, unofficial].
++    *   `stepcount`: (Optional, used in variant [S1, unofficial]) The number of steps taken.
++
++**Parameters:**
++*   `tree->min[2]`, `tree->max[2]`: The minimum and maximum z-coordinates of the volume bounding box [S1, unofficial].
+ 
+ **Algorithm:**
+-1. Initialize OpenMP parallelization using the number of available CPU cores [S1, unofficial].
+-2. Parallelize the pixel loop over $y$ and $x$ from $0$ to `rc.n_y` [S1, unofficial].
+-3. For each pixel $(x, y)$:
+-   a. Initialize `TreeTraverser t` with the tree and the ray for $(x, y)$ [S1, unofficial].
+-   b. Traverse the tree while `!t.isTerminated()` [S1, unofficial]:
+-      i. If `t.getCurrentNode()->isLeaf()` and `t.getCurrentNode()->hasData()`, break the loop [S1, unofficial].
+-      ii. Otherwise, call `t.step()` [S1, unofficial].
+-   c. Compute the normalized intensity using the traversal step count [S1, unofficial].
+-   d. Write the Red channel and Alpha channel to the texture array [S1, unofficial].
+-
+-**Formula:**
+-$$ I = \frac{\text{stepcount}}{\log_2(\text{gridlength})} \times 255.0 $$
+-where $I$ is the intensity value, $\text{stepcount}$ is the number of traversal steps taken, and $\text{gridlength}$ is the side length of the volume bounding box [S1, unofficial].
+-
+-**Parameters:**
+-- `tree->gridlength`: The side length of the volume bounding box, used for normalization [S1, unofficial].
+-- `rc.n_y`: The vertical resolution of the output image, assumed square for the horizontal resolution [S1, unofficial].
+-
+-**Edge Cases:**
+-- If `gridlength` is less than or equal to 1, $\log_2(\text{gridlength})$ is zero or negative, causing division by zero or inverted intensity; the source does not specify a guard for this case [S1, unofficial].
+-- If the ray does not hit any leaf node with data, `t.isTerminated()` becomes true, and `stepcount` reflects the maximum traversal depth; the source does not specify special handling for missed rays [S1, unofficial].
++1.  Initialize parallel execution environment (e.g., OpenMP threads equal to CPU cores) [S1, unofficial].
++2.  Iterate over each pixel $(x, y)$ in parallel [S1, unofficial].
++3.  Generate the ray for pixel $(x, y)$ using `rc.getRayForPixel(x, y)` [S1, unofficial].
++4.  Initialize `TreeTraverser t` with the tree and the ray [S1, unofficial].
++5.  Traverse the tree:
++    *   While `!t.isTerminated()`:
++        *   If `t.getCurrentNode()->isLeaf()` and `t.getCurrentNode()->hasData()`:
++            *   Break the loop (hit found) [S1, unofficial].
++        *   Else:
++            *   Call `t.step()` [S1, unofficial].
++6.  Retrieve the hit position: `pos = t.getCurrentPosition()` [S1, unofficial].
++7.  Compute the depth factor $f$ by normalizing the absolute z-coordinate of the hit position against the absolute range of the tree's z-bounds:
++    $$ f = \frac{|pos_z|}{|tree\_max_z| - |tree\_min_z|} $$
++    Where $pos_z$ is `pos[2]`, $tree\_max_z$ is `tree->max[2]`, and $tree\_min_z$ is `tree->min[2]` [S1, unofficial].
++8.  Compute grayscale intensity $I$:
++    $$ I = 255 - (255 \times f) $$
++    [S1, unofficial].
++9.  Write to `texture_array` at index $4(x + y \cdot width)$:
++    *   $R = \lfloor I \rfloor$
++    *   $G = \lfloor I \rfloor$
++    *   $B = \lfloor I \rfloor$
++    *   $A = 1$ (or 255, source specifies `(unsigned char) 1`) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-import os
+-
+-def get_num_procs():
+-    """Returns the number of available CPU cores."""
+-    return os.cpu_count()
+-
+-def set_num_threads(n):
+-    """Sets the number of threads for parallel execution."""
+-    pass
+-
+-class TreeTraverser:
+-    def __init__(self, tree, ray):
+-        self.tree = tree
+-        self.ray = ray
+-        self.stepcount = 0
+-        self.terminated = False
+-        self.current_node = None
+-
+-    def isTerminated(self):
+-        return self.terminated
+-
+-    def getCurrentNode(self):
+-        return self.current_node
+-
+-    def step(self):
+-        self.stepcount += 1
+-        # Advance traversal state logic
+-        pass
+-
+-    def getCurrentPosition(self):
+-        return [0.0, 0.0, 0.0]
+-
+ def render_depth(tree, rc, texture_array):
+-    num_threads = get_num_procs()
+-    set_num_threads(num_threads)
+-
++    # Parallel loop over Y
+     for y in range(rc.n_y):
+-        partindex = y * (rc.n_y * 4)
+-        for x in range(rc.n_y):
+-            index = partindex + x * 4
+-            t = TreeTraverser(tree, rc.get_ray_for_pixel(x, y))
+-
+-            while not t.isTerminated():
+-                node = t.getCurrentNode()
++        # Parallel loop over X (or combined parallel for)
++        for x in range(rc.n_y): # Assuming square or rc.n_x == rc.n_y based on source
++            index = (y * rc.n_y + x) * 4
++            
++            # Initialize traverser
++            ray = rc.get_ray_for_pixel(x, y)
++            t = TreeTraverser(tree, ray)
++            
++            # Traverse
++            while not t.is_terminated():
++                node = t.get_current_node()
+                 if node.is_leaf() and node.has_data():
+                     break
+                 t.step()
+-
+-            intensity = (t.stepcount / math.log2(tree.gridlength)) * 255.0
++            
++            # Get hit position
++            pos = t.get_current_position()
++            
++            # Compute depth factor
++            # Note: Source uses abs() on bounds. If bounds are negative, this affects normalization.
++            max_z = abs(tree.max[2])
++            min_z = abs(tree.min[2])
++            denom = max_z - min_z
++            
++            if denom == 0:
++                factor = 0.0
++            else:
++                factor = abs(pos[2]) / denom
++            
++            # Compute grayscale
++            intensity = 255 - (255 * factor)
+             r = int(intensity)
+-
++            g = int(intensity)
++            b = int(intensity)
++            
++            # Write to buffer
+             texture_array[index] = r
+-            texture_array[index + 3] = 1
++            texture_array[index + 1] = g
++            texture_array[index + 2] = b
++            texture_array[index + 3] = 1 # Alpha
+ ```
+ 
+@@ -103,17 +102,21 @@
+ 
+ ### Logarithmic Depth Rendering
+-A visualization technique that renders a depth map by normalizing the logarithmic distance traveled by the ray, where brighter pixels indicate further travel distance [S2, unofficial]. It calculates the distance $d = |p_i - p_0|$ between the hit point $p_i$ and the ray origin $p_0$, computes $\log(d)$, and normalizes this value to the range $[0, 1]$ [S2, unofficial]. The implementation typically involves clamping the distance to avoid $\log(0)$, subtracting the minimum log-distance, dividing by the range, and optionally applying a power function for tonemapping [S2, unofficial].
++A variant that normalizes the logarithm of the distance traveled by the ray rather than the linear z-coordinate [S2, unofficial]. The distance $d = \|p_i - p_0\|$ is computed, then $\log(d)$ is calculated. This value is normalized to $[0, 1]$ using min-max scaling: $\frac{\log(d) - \min(\log)}{\max(\log) - \min(\log)}$ [S2, unofficial]. Brighter pixels indicate further travel distance [S2, unofficial]. This approach handles large depth ranges better than linear mapping [S2, unofficial].
++
++### Depth Shading
++A 2D discrete shading technique that uses a Z-buffer (depth map) to compute intensity, making features far from the image plane appear dark and close features bright [S3, unofficial]. During traversal, the distance to the closest non-empty voxel is stored in a 2D Z-buffer array for each pixel [S3, unofficial]. The output intensity is inversely proportional to this depth value [S3, unofficial]. A key pitfall is that surface orientation is not considered, causing loss of details such as surface discontinuities and object boundaries [S3, unofficial].
+ 
+ ## Operating characteristics
+-- Time and memory complexity: Not given in the sources.
+-- Strengths: Simple to implement; provides immediate visual feedback on traversal depth [S1, unofficial].
+-- Limitations: Sensitive to the choice of grid length for normalization; does not account for occlusion beyond the first hit [S1, unofficial].
+-- When to use: When a quick traversal depth visualization is needed without complex shading [S1, unofficial].
+-- When not to use: When accurate depth perception over large dynamic ranges is required (consider Logarithmic Depth Rendering) [S2, unofficial].
++*   **Time Complexity:** Linear with respect to the number of pixels and the average depth of traversal steps [S1, unofficial]. Parallelization is straightforward across pixels [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for the output texture array, where $N$ is the number of pixels [S1, unofficial].
++*   **Strengths:** Simple to implement; provides immediate visual feedback on object distance and structure [S1, S3, unofficial].
++*   **Limitations:** Linear depth rendering can suffer from precision issues or poor contrast for objects at similar depths if the bounding box is large [S1, unofficial]. Depth Shading loses geometric detail (edges/discontinuities) because it ignores surface normals [S3, unofficial].
++*   **When to use:** When the primary goal is to visualize the spatial extent or depth distribution of a volume rather than its material properties or lighting [S1, S3, unofficial].
+ 
+ ## Background
+-Originated in early CPU-based voxel raycasting implementations, specifically in the `cpu_voxel_raycaster` project by Forceflow [S1, unofficial]. It is used as a debugging and visualization tool for voxel-based rendering pipelines [S1, unofficial].
++Depth rendering is a fundamental technique in volume visualization, often serving as a precursor to more complex shading methods [S3, unofficial]. The concept of using a Z-buffer for discrete shading was described in early volume visualization literature, such as Kaufman's work on principles and advances [S3, unofficial]. The specific implementation using OpenMP and CPU-based octree traversal for depth mapping is documented in the `cpu_voxel_raycaster` project [S1, unofficial].
+ 
+ ## Sources
+ [S1] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)
+-[S2] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)+[S2] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
++[S3] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)

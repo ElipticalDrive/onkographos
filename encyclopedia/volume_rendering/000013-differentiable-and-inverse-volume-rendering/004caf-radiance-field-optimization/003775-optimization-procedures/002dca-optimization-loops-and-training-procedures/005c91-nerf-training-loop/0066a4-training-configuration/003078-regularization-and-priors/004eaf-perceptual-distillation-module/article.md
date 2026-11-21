@@ -1,0 +1,113 @@
+# Perceptual Distillation Module
+
+Also called: Perceptual Loss for Deblurred Radiance Fields
+
+## Overview
+The Perceptual Distillation Module (PDM) is a regularization technique designed for deblurring Neural Radiance Fields (NeRFs) trained on sparse views. It addresses the 3D geometric inconsistency inherent in independently deblurred multi-view images by using pre-deblurred images as a perceptual prior [S1]. Unlike standard photometric losses that may reinforce geometric artifacts, PDM transfers texture information from 2D deblurred priors to the implicit 3D radiance field via feature-space matching [S1]. It is distinct from [Surface Smoothness Regularization](12970-surface-smoothness-regularization.md) (which enforces geometric smoothness) and [Reflectance and Shading Decomposition Priors](4624-reflectance-and-shading-decomposition-priors.md) (which separates intrinsic image properties) by operating on high-level perceptual features rather than pixel values or geometric derivatives [S1].
+
+## How it works
+The module augments the training loss by comparing features extracted from rendered patches against features extracted from pre-deblurred versions of the input blurry images.
+
+**Inputs and Outputs**
+*   **Inputs:** Blurry training images $I$, camera poses, the current NeRF model (MLPs for color and density), a pre-trained image deblurring network $\Theta_D$, and a pre-trained feature extractor $E$.
+*   **Outputs:** A scalar perceptual loss value $\mathcal{L}_{pd}$ used for backpropagation.
+
+**Data Structures**
+*   **Patch Rays ($r_{pd}^{ptc}$):** A set of rays sampled from the training view frustum corresponding to a specific image patch.
+*   **Deblurred Image Patch ($\bar{C}_{ptc}$):** A 2D image patch of size $S_{ptc} \times S_{ptc}$ extracted from the pre-deblurred image $\bar{I}$.
+*   **Rendered Color Patch ($\hat{C}_{ptc}$):** A 2D image patch rendered from the NeRF using rays $r_{pd}^{ptc}$. This rendering is performed *without* the blur kernel to produce "clean" radiance [S1].
+*   **Feature Maps ($\hat{\phi}_{ptc}, \bar{\phi}_{ptc}$):** Multi-channel feature tensors extracted from $\hat{C}_{ptc}$ and $\bar{C}_{ptc}$ respectively.
+
+**Numbered Steps**
+1.  **Generate Pre-deblurred Images:** For each blurry training image $I$, compute the deblurred image $\bar{I}$ using the pre-trained deblurring network $\Theta_D$:
+    $$ \bar{I} = \Theta_D(I) \quad [S1] $$
+2.  **Sample Patch Rays:** On the training views, sample a set of rays $r_{pd}^{ptc}$ that correspond to a square patch of size $S_{ptc} \times S_{ptc}$ in the image plane [S1].
+3.  **Render Clean Patch:** Render the color patch $\hat{C}_{ptc}$ from the sampled rays $r_{pd}^{ptc}$ using the NeRF MLPs. Crucially, this rendering does not apply the blur kernel, producing a "patch radiance" [S1].
+4.  **Extract Features:** Pass both the rendered patch $\hat{C}_{ptc}$ and the corresponding deblurred image patch $\bar{C}_{ptc}$ (extracted from $\bar{I}$) through the shared pre-trained feature extractor $E$:
+    $$ \hat{\phi}_{ptc} = E(\hat{C}_{ptc}) \quad [S1] $$
+    $$ \bar{\phi}_{ptc} = E(\bar{C}_{ptc}) \quad [S1] $$
+5.  **Compute Perceptual Loss:** Calculate the L2 norm between the extracted feature maps:
+    $$ \mathcal{L}_{pd} = ||\hat{\phi}_{ptc} - \bar{\phi}_{ptc}||_2^2 \quad [S1] $$
+
+**Parameters**
+*   **Patch Size ($S_{ptc}$):** The dimension of the square patch. The source specifies $S_{ptc}=8$ for one dimension and implies a total area or second dimension of 64, resulting in $8 \times 8$ patches [S1].
+*   **Perceptual Loss Weight ($\lambda_{pd}$):** The weight applied to $\mathcal{L}_{pd}$ in the total loss function. Set to $0.01$ [S1].
+*   **Deblurring Network ($\Theta_D$):** MPRNet [S1].
+*   **Feature Extractor ($E$):** VGG19 [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def perceptual_distillation_loss(
+    blurry_image: Tensor,
+    rays: List[Ray],
+    nerf_model: NeRFModel,
+    deblurring_net: Module,
+    feature_extractor: Module,
+    patch_size: int = 8,
+    lambda_pd: float = 0.01
+) -> Tensor:
+    """
+    Computes the Perceptual Distillation Loss.
+    
+    Args:
+        blurry_image: Input blurry image tensor (H, W, 3).
+        rays: List of Ray objects corresponding to the patch in the image.
+        nerf_model: The NeRF MLPs (color and density).
+        deblurring_net: Pre-trained MPRNet for deblurring.
+        feature_extractor: Pre-trained VGG19 for feature extraction.
+        patch_size: Size of the square patch (S_ptc).
+        lambda_pd: Weight for the perceptual loss.
+        
+    Returns:
+        Scalar tensor representing the weighted perceptual loss.
+    """
+    # Step 1: Generate deblurred image using pre-trained network
+    # I_bar = Theta_D(I)
+    deblurred_image = deblurring_net(blurry_image)
+    
+    # Step 2 & 3: Render clean patch from NeRF (without blur kernel)
+    # C_hat_ptc is rendered from rays r_pd_ptc
+    # Note: rays must be sampled to correspond to an S_ptc x S_ptc region
+    # in the blurry_image. The NeRF forward pass does not apply blur.
+    rendered_patch = nerf_model.render(rays) # Returns color tensor (S_ptc, S_ptc, 3)
+    
+    # Step 2 (continued): Extract corresponding patch from deblurred image
+    # C_bar_ptc is the patch from I_bar at the same spatial location
+    # Assuming rays provide spatial coordinates or indices to locate the patch
+    deblurred_patch = extract_patch(deblurred_image, rays, patch_size)
+    
+    # Step 4: Extract features using shared pre-trained extractor (VGG19)
+    # phi_hat_ptc = E(C_hat_ptc)
+    # phi_bar_ptc = E(C_bar_ptc)
+    # VGG19 typically expects normalized inputs and returns intermediate layer features
+    rendered_features = feature_extractor(rendered_patch)
+    deblurred_features = feature_extractor(deblurred_patch)
+    
+    # Step 5: Compute L2 loss between features
+    # L_pd = ||phi_hat_ptc - phi_bar_ptc||_2^2
+    perceptual_loss = torch.sum((rendered_features - deblurred_features) ** 2)
+    
+    # Return weighted loss
+    return lambda_pd * perceptual_loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Geometric Inconsistency:** The method relies on the assumption that the 2D deblurred image $\bar{I}$ contains valid texture information consistent with the 3D scene. If $\Theta_D$ hallucinates textures that do not exist in the 3D geometry, the NeRF may learn inconsistent geometry [S1].
+*   **Patch Alignment:** The rays $r_{pd}^{ptc}$ must precisely correspond to the spatial location of $\bar{C}_{ptc}$ in $\bar{I}$. Misalignment leads to incorrect feature matching [S1].
+*   **Feature Normalization:** VGG19 requires specific input normalization (mean/std). Failure to normalize $\hat{C}_{ptc}$ and $\bar{C}_{ptc}$ identically will result in meaningless feature differences [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Adds overhead proportional to the number of patch rays sampled per iteration. Requires two forward passes through $\Theta_D$ (once per image, cached or pre-computed) and two forward passes through $E$ per patch.
+*   **Memory Complexity:** Requires storing the pre-deblurred images $\bar{I}$ or computing them on the fly. The feature extractor $E$ (VGG19) is large, but only features for small patches are computed.
+*   **Strengths:** Effectively transfers high-frequency texture details from 2D priors to 3D fields, mitigating the blurriness and artifacts common in sparse-view deblurring [S1].
+*   **Limitations:** Depends heavily on the quality of the pre-trained deblurring network $\Theta_D$ and the feature extractor $E$. If the deblurring network fails on a specific image, the prior becomes misleading [S1].
+*   **When to use:** Sparse-view deblurring scenarios where geometric consistency is compromised by independent 2D deblurring [S1].
+*   **When not to use:** Dense-view settings where photometric loss alone is sufficient, or when computational budget is extremely limited due to the extra network evaluations [S1].
+
+## Background
+The Perceptual Distillation Module was introduced in the context of **Sparse-DeRF** (Deblurred Neural Radiance Fields From Sparse View) [S1]. It addresses the problem of camera motion blur in sparse view settings, where traditional NeRF optimization fails to recover sharp details due to insufficient angular coverage and blur [S1]. The method is described as a "first attempt" at utilizing pre-deblurred images as an additional prior in deblurring radiance fields [S1]. It builds upon the observation that independently deblurred multi-view images suffer from 3D geometric inconsistency, which can be alleviated by distilling texture information from these 2D priors into the 3D field [S1]. The implementation uses MPRNet for deblurring and VGG19 for feature extraction, standard choices in perceptual loss literature [S1].
+
+## Sources
+[S1] Sparse-DeRF: Deblurred Neural Radiance Fields From Sparse View, https://doi.org/10.1109/tpami.2025.3563398, fetched 2026-10-27

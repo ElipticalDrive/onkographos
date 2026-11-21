@@ -1,0 +1,75 @@
+--- v008.md
++++ v009.md
+@@ -1,44 +1,53 @@
+ # Geometric Priors and Depth Integration
+ 
+-Also called: Geometric Regularization, Depth-Aware NeRF, Surface Priors
++Also called: Geometric Regularization, Depth-Guided Rendering, Hybrid Implicit Representations
+ 
+ ## Overview
+-This family of methods enhances standard Neural Radiance Fields (NeRF) by integrating explicit geometric constraints—such as depth maps, signed distance fields (SDF), or Structure-from-Motion (SfM) features—into the optimization process. While standard NeRF [Link to NeRF] relies solely on photometric consistency to infer geometry, these methods solve the ambiguity inherent in sparse-view or ill-posed reconstruction problems by enforcing metric or structural geometric priors. They differ from siblings like [AdaNeRF](6195-adanerf.md) (which adapts sampling) or [SinNeRF](6199-sinnerf.md) (which uses sinusoidal activations) by explicitly conditioning the radiance field on external geometric signals to ensure topological correctness and metric accuracy.
++This family encompasses methods that enhance neural radiance field optimization by integrating explicit geometric constraints—such as Structure-from-Motion (SfM) features, monocular depth priors, cost volumes, or signed distance fields (SDFs)—into the training loop. While standard NeRF relies solely on photometric consistency, these methods solve the ambiguity of sparse-view reconstruction and the lack of hard geometric boundaries by constraining the 3D structure. They distinguish themselves from siblings like [AdaNeRF](6195-adanerf.md) or [SinNeRF](6199-sinnerf.md) by explicitly modeling geometry beyond implicit density, either through external priors, multi-view consistency losses, or hybrid representations like TSDFs.
+ 
+ ## Shared principles
+-All methods in this family build on the canonical NeRF architecture defined in [Specific Model Architectures](8585-specific-model-architectures.md), which maps 6D coordinates $(\mathbf{x}, \mathbf{d})$ to density $\sigma$ and color $\mathbf{c}$ using coupled MLPs with positional encoding [Parent].
++All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network. This allows the radiance field to be optimized through the volumetric rendering integral.
+ 
+-The core modification lies in the **loss function** and **sampling strategy**:
+-1.  **Geometric Loss Terms:** Unlike standard NeRF which minimizes only photometric error ($L_{rgb}$), these methods add regularization terms derived from geometric priors. Common terms include:
+-    *   **Depth Consistency:** Penalizing the difference between rendered depth and estimated/prior depth (e.g., $L_{depth}$ in [SfMNeRF](8664-sfmnerf.md), $L_{DOF}$ in [DASNeRF](8668-dasnerf.md)).
+-    *   **Surface Constraints:** Using SDFs to enforce zero-crossings at surfaces (e.g., [Neural RGB-D Surface Reconstruction](11352-neural-rgb-d-surface-reconstruction.md)).
+-    *   **Epipolar/Feature Constraints:** Enforcing multi-view consistency of 3D points derived from 2D feature matches (e.g., [SfMNeRF](8664-sfmnerf.md)).
+-2.  **Depth-Guided Sampling:** Many methods replace uniform or hierarchical sampling with depth-guided sampling. By estimating depth (via priors or auxiliary networks), samples are concentrated near surfaces, improving efficiency and detail [DASNeRF](8668-dasnerf.md), [DINER](11354-diner.md).
+-3.  **Hybrid Representations:** Some methods replace the density-based volume rendering with surface-based rendering (TSDF) or use cost volumes to extract geometric features before feeding them to the MLP [GeoNeRF](8710-geonerf.md), [Neural RGB-D Surface Reconstruction](11352-neural-rgb-d-surface-reconstruction.md).
++**Input Representation:**
++Raw coordinates $\mathbf{x}$ and $\mathbf{d}$ are rarely used directly due to the spectral bias of MLPs, which struggle to fit high-frequency details. They are mapped to a higher-dimensional space using positional encoding $\gamma(\cdot)$ [S1][S3]. For a coordinate $\mathbf{x}$, the encoding includes the original value and sinusoidal functions at increasing frequencies:
++$$
++\gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}))
++$$
++where $L$ is the number of frequency bands [S1][S3].
++
++**Network Topology:**
++The canonical implementation uses two coupled Multi-Layer Perceptrons (MLPs): a density network $F_\sigma$ and a color network $F_c$ [S1][S3].
++1.  **Density Network:** Takes the encoded position $\gamma(\mathbf{x})$ as input. It consists of $L$ hidden layers with ReLU activations and skip connections from the input to every 4th layer to preserve low-frequency information [S1][S3]. The output is the density $\sigma$.
++2.  **Color Network:** Takes the encoded position $\gamma(\mathbf{x})$, the raw viewing direction $\mathbf{d}$, and the intermediate feature vector from the density network (usually the output of the last hidden layer before the density head) as input. It predicts the color $\mathbf{c}$ using a final ReLU or sigmoid activation [S1][S3].
++
++**Rendering Integration:**
++During training, rays are sampled at points $\mathbf{x}_i$ along the ray. The MLPs predict $\sigma_i$ and $\mathbf{c}_i$. The pixel color $C(\mathbf{r})$ is computed via volumetric rendering:
++$$
++C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
++$$
++and $\delta_i$ is the distance between samples [S1][S3].
+ 
+ ## Subtopics
+ 
+ ### [SfMNeRF](8664-sfmnerf.md)
+-Integrates Structure-from-Motion (SfM) constraints (matched SIFT features, epipolar geometry) into the NeRF training loop. It uses a pyramidal optimization strategy and explicit 3D position constraints for matched features to reduce geometric ambiguity in sparse views. Choose this when precise multi-view geometric consistency is required without dense depth sensors.
++Integrates SfM constraints (SIFT matches, epipolar geometry) into the training loop. Distinguishes itself by using sparse 2D feature matches rather than dense depth priors, combined with sub-pixel rendering. Choose when sparse views lack texture but have distinct keypoints.
+ 
+ ### [DASNeRF](8668-dasnerf.md)
+-Uses monocular depth priors from DepthAnythingV2 and a dynamic sampling mechanism. It enforces Depth Ordering Fidelity and Structural Consistency. Choose this for sparse-view reconstruction where deep learning-based depth estimation provides strong initial geometric cues.
++Uses monocular depth priors (DepthAnythingV2) with dynamic sampling and depth ordering/structural consistency losses. Distinguishes itself by retaining standard density-based rendering but heavily constraining geometry via relative depth. Choose when high-quality monocular depth estimates are available.
+ 
+ ### [GeoNeRF](8710-geonerf.md)
+-Replaces the standard MLP with a geometric morphology reasoner using 3D cost volumes and Transformers. It extracts view-independent and view-dependent tokens from cascading cost volumes. Choose this when generalizing to new scenes is prioritized over per-scene optimization, leveraging explicit multi-view stereo cues.
++Replaces per-ray MLP evaluation with a global geometric reasoning pipeline using cascaded 3D cost volumes and Transformers. Distinguishes itself by explicit multi-view cost volume construction. Choose for generalizable reconstruction across new scenes.
+ 
+ ### [Neural RGB-D Surface Reconstruction](11352-neural-rgb-d-surface-reconstruction.md)
+-Uses a Truncated Signed Distance Field (TSDF) instead of density for geometry, combined with a radiance field for appearance. It optimizes camera poses and latent codes. Choose this when high-quality, watertight mesh extraction is required and RGB-D input is available.
++Uses a hybrid TSDF for geometry and radiance field for appearance. Distinguishes itself by producing clean triangle meshes and hard boundaries. Choose when metric, watertight meshes are required from RGB-D data.
+ 
+ ### [DINER](11354-diner.md)
+-Conditions the NeRF on depth deviation from estimated depth maps for sparse, high-disparity views. It uses depth-guided sampling and per-view feature maps. Choose this for novel view synthesis from very few (e.g., 4) widely separated views where standard NeRF fails due to lack of correspondence.
++Conditions the radiance field on depth deviations from estimated dense depth maps. Distinguishes itself by depth-guided sampling and feature aggregation from multiple views. Choose for sparse input views with high relative distances.
+ 
+ ### [Volume Rendering Prior (VRPrior)](14662-volume-rendering-prior-vrprior.md)
+-Replaces handcrafted UDF-to-density mappings with a learned neural network $f_w$ that considers spatial context of neighbors. It learns a robust mapping from unsigned distances to alpha-blending weights. Choose this for surface reconstruction from multi-view RGB-D data where accurate surface representation is critical.
++Replaces handcrafted UDF-to-density mappings with a learnable neural network $f_w$ using 3D context from neighbors. Distinguishes itself by learning robust rendering weights from geometric neighborhoods. Choose for generalizing UDF-based reconstruction to unseen scenes.
+ 
+ ## Background
+-The integration of geometric priors into NeRF emerged to address the "slab" artifacts and geometric inaccuracies of standard NeRF, particularly in sparse-view settings. Early work like [SfMNeRF](8664-sfmnerf.md) demonstrated that explicit multi-view constraints could stabilize training. Subsequent works like [DASNeRF](8668-dasnerf.md) and [DINER](11354-diner.md) leveraged advances in monocular depth estimation (e.g., DepthAnythingV2) to provide dense geometric priors without additional hardware. Methods like [Neural RGB-D Surface Reconstruction](11352-neural-rgb-d-surface-reconstruction.md) shifted the representation from density to SDF to enable direct mesh extraction. [GeoNeRF](8710-geonerf.md) and [VRPrior](14662-volume-rendering-prior-vrprior.md) further explored explicit geometric structures (cost volumes, neighbor-based density prediction) to improve generalization and surface fidelity.
++The integration of geometric priors emerged to address the limitations of standard NeRF in sparse-view settings and its tendency to produce semitransparent artifacts without hard boundaries. Early works like [SfMNeRF](8664-sfmnerf.md) introduced multi-view consistency via epipolar constraints. Subsequent methods like [DASNeRF](8668-dasnerf.md) and [DINER](11354-diner.md) leveraged advances in monocular depth estimation to guide sampling and regularization. [GeoNeRF](8710-geonerf.md) shifted towards generalizable models using cost volumes. [Neural RGB-D Surface Reconstruction](11352-neural-rgb-d-surface-reconstruction.md) addressed the need for explicit mesh extraction by combining SDFs with radiance fields. [VRPrior](14662-volume-rendering-prior-vrprior.md) further refined the mapping from implicit geometry to density using learned priors.
+ 
+-## Sources
+-
+-[S1] Provided child article notes for SfMNeRF, DASNeRF, GeoNeRF, Neural RGB-D Surface Reconstruction, DINER, and VRPrior.+## Sources

@@ -1,0 +1,114 @@
+--- v008.md
++++ v009.md
+@@ -16,6 +16,6 @@
+ 
+ **Steps:**
+-1. **Determine Unified Dimensions:** Choose $D_{u,x}, D_{u,y}, D_{u,z}$ such that they are large enough to hold the highest-resolution source texture. The sources assume a cubic dimension $D_u$ [S1, unofficial].
+-2. **Initialize:** Clear $T_{united}$ to zero.
++1. **Determine Unified Dimensions:** Choose $D_{u,x}, D_{u,y}, D_{u,z}$ such that they are large enough to hold the highest-resolution source texture [G]. The sources assume a cubic dimension $D_u$ [S1, unofficial].
++2. **Initialize:** Clear $T_{united}$ to zero [G].
+ 3. **Pack Channels:** For each voxel $(x, y, z)$ in $T_{united}$:
+    a. Calculate normalized coordinates: $u = x / D_{u,x}$, $v = y / D_{u,y}$, $w = z / D_{u,z}$ [S1, unofficial].
+@@ -36,65 +36,49 @@
+ 
+ **Parameters:**
+-- $D_{u,x}, D_{u,y}, D_{u,z}$: Dimensions of the unified texture. Must be $\ge$ max dimension of any source texture. Sources assume a cubic layout [S1, unofficial].
++- $D_{u,x}, D_{u,y}, D_{u,z}$: Dimensions of the unified texture. Must be $\ge$ max dimension of any source texture [G]. Sources assume a cubic layout [S1, unofficial].
+ - Texture Format: RGBA32 (8 bits per channel) is standard [S3].
+ - Sampling Mode: Linear clamping is recommended to handle resolution differences between source textures [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Channel Performance:** A 2-channel volume texture is usually much slower on multiple vendors' GPUs and should be avoided. It is faster to pack into a 3-channel texture with a zero-padded extra channel, or use two 1-channel textures if the padded channel requires too much texture RAM [S2, unofficial].
++- **Channel Performance:** A 2-channel volume texture is usually much slower on multiple vendors' GPUs and should be avoided [S2, unofficial].
+ - **Resolution Mismatch:** Linear sampling across normalized coordinates allows filtering across resolution boundaries, but may blur high-frequency details if the unified texture is significantly larger than a source texture [S1, unofficial].
+ - **Precision Loss:** Storing floating-point values in 8-bit channels causes quantization [S3].
+-- **Channel Limit:** Standard RGBA provides only 4 channels. Separate textures are required for more than 4 channels or different storage types/precisions [S2, unofficial].
++- **Channel Limit:** Standard RGBA provides only 4 channels [S1, unofficial]. Separate textures are required for more than 4 channels or different storage types/precisions [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Self-contained definitions for texture operations
++class Vec4:
++    def __init__(self, r=0.0, g=0.0, b=0.0, a=0.0):
++        self.r, self.g, self.b, self.a = r, g, b, a
++
+ class Texture3D:
+     def __init__(self, width, height, depth):
+-        self.width = width
+-        self.height = height
+-        self.depth = depth
+-        self.data = [[[0.0 for _ in range(depth)] for _ in range(height)] for _ in range(width)]
+-    def sample(self, u, v, w):
+-        # Standard trilinear interpolation with clamp addressing on normalized coordinates [0,1] [G]
+-        ix = int(min(max(u * self.width, 0), self.width - 1))
+-        iy = int(min(max(v * self.height, 0), self.height - 1))
+-        iz = int(min(max(w * self.depth, 0), self.depth - 1))
+-        return Vector3D(self.data[ix][iy][iz])
++        self.width, self.height, self.depth = width, height, depth
++        self.data = [[[Vec4() for _ in range(depth)] for _ in range(height)] for _ in range(width)]
++    def sample_normalized(self, u, v, w):
++        # Clamp addressing on normalized coordinates [0, 1] [G]
++        ix = int(min(max(u * self.width, 0.0), self.width - 1))
++        iy = int(min(max(v * self.height, 0.0), self.height - 1))
++        iz = int(min(max(w * self.depth, 0.0), self.depth - 1))
++        return self.data[ix][iy][iz]
+     def set_pixel(self, x, y, z, value):
+         self.data[x][y][z] = value
+ 
+-class Vector3D:
+-    def __init__(self, val):
+-        self.r = val
+-        self.g = 0.0
+-        self.b = 0.0
+-        self.a = 0.0
+-
+-RGBA32 = "RGBA32" # 8 bits per channel format
+-
+ def pack_textures_to_united(source_textures, unified_size):
+     united_texture = Texture3D(unified_size[0], unified_size[1], unified_size[2])
+-    channels = ['R', 'G', 'B', 'A']
+-
++    # Assumes source_textures is a list of Texture3D objects, max 4 [S1, unofficial]
+     for x in range(unified_size[0]):
+         for y in range(unified_size[1]):
+             for z in range(unified_size[2]):
+-                result = [0.0, 0.0, 0.0, 0.0]
+-                for i, src_tex in enumerate(source_textures):
+-                    if i >= 4:
+-                        break
+-                    u = x / unified_size[0]
+-                    v = y / unified_size[1]
+-                    w = z / unified_size[2]
+-                    sample_val = src_tex.sample(u, v, w)
+-                    val = sample_val.r
+-                    if i == 3:
+-                        val = val / 32.0
+-                    result[i] = val
+-                united_texture.set_pixel(x, y, z, result)
++                u, v, w = x / unified_size[0], y / unified_size[1], z / unified_size[2]
++                r = source_textures[0].sample_normalized(u, v, w).r
++                g = source_textures[1].sample_normalized(u, v, w).r
++                b = source_textures[2].sample_normalized(u, v, w).r
++                a = source_textures[3].sample_normalized(u, v, w).r / 32.0  # Mask normalization [S1, unofficial]
++                united_texture.set_pixel(x, y, z, Vec4(r, g, b, a))
+     return united_texture
+ 
+ def sample_united_texture(united_texture, u, v, w):
+-    sample = united_texture.sample(u, v, w)
++    sample = united_texture.sample_normalized(u, v, w)
+     return sample.r, sample.g, sample.b, sample.a
+ ```
+@@ -106,10 +90,10 @@
+ 
+ ### PBR Material Channel Packing
+-Packs PBR material properties into standard texture formats: BaseColor and Alpha into RGBA, Metallic and Roughness into RGB (R=0, G=Roughness, B=Metallic) [S4, unofficial]. Packing BaseColor/Alpha: `np.concatenate([base_color, alpha], axis=-1)`. Packing Metallic/Roughness: `np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)` [S4, unofficial]. Parameters include `alphaMode: 'OPAQUE'` and `doubleSided: True` if not remesh else False [S4, unofficial].
++Packs PBR material properties into standard texture formats: BaseColor and Alpha into RGBA, Metallic and Roughness into RGB (R=0, G=Roughness, B=Metallic) [S4, unofficial]. Packing BaseColor/Alpha: `np.concatenate([base_color, alpha], axis=-1)` [S4, unofficial]. Packing Metallic/Roughness: `np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)` [S4, unofficial]. Parameters include `alphaMode: 'OPAQUE'` and `doubleSided: True` if not remesh else False [S4, unofficial].
+ 
+ ## Operating characteristics
+ - **Sampling Performance:** Sampling a single multi-channel texture is faster than sampling multiple independent textures due to better cache locality [S2, unofficial].
+-- **Memory Overhead:** Reduces memory overhead by eliminating redundant texture headers and allowing tighter packing. However, if source textures have vastly different resolutions, the unified texture may waste space on lower-resolution channels [S2, unofficial].
+-- **Limitations:** Limited to 4 channels per texture. Linear filtering across resolution boundaries can cause blurring if not managed. Precision loss occurs with 8-bit channels [S3]. 2-channel textures are notably slower on many GPUs [S2, unofficial].
++- **Memory Overhead:** Reduces memory overhead by eliminating redundant texture headers and allowing tighter packing [S2, unofficial]. However, if source textures have vastly different resolutions, the unified texture may waste space on lower-resolution channels [S2, unofficial].
++- **Limitations:** Limited to 4 channels per texture [S1, unofficial]. Linear filtering across resolution boundaries can cause blurring if not managed [S1, unofficial]. Precision loss occurs with 8-bit channels [S3]. 2-channel textures are notably slower on many GPUs [S2, unofficial].
+ 
+ ## Background

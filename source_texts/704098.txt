@@ -1,0 +1,136 @@
+SplatAD: Real-Time Lidar and Camera Rendering with 3D Gaussian Splatting for Autonomous Driving - [ROCm] Add AMD GPU support for SplatAD camera and lidar rendering by jeffdaily · Pull Request #24 · carlinds/splatad
+
+[ROCm] Add AMD GPU support for SplatAD camera and lidar rendering by jeffdaily · Pull Request #24 · carlinds/splatad · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jeffdaily
+commented
+Jun 25, 2026
+Copy link
+Copy Markdown
+This adds AMD GPU support to SplatAD's camera and lidar rendering extension on ROCm. The gsplat.csrc extension compiles against a ROCm build of PyTorch, and both rendering paths -- the camera 3DGS rasterizer and the SplatAD lidar spherical rasterization -- run against the project's own pure-PyTorch reference (gsplat/cuda/_torch_impl.py).
+splatad is gsplat v1.0.0 plus a lidar path; this applies the same ROCm approach to the flat csrc layout and extends it over the lidar kernels. torch hipifies the .cu/.cuh at build time, so the sources keep their CUDA spellings; every fix is behind a USE_ROCM (or __HIP__) guard. We have made every effort to leave the CUDA build unchanged -- the CUDA path does not compile the ROCm branches. The cross-lane reductions use cooperative-groups tiled_partition<32>, whose width-32 shuffles stay inside the 32-lane tile, so the same source is correct on wave64 (CDNA) and wave32 (RDNA) without per-arch code.
+The main changes:
+setup.py: leave the bundled third_party/glm untouched by hipify (it compiles verbatim under -x hip), add -DNDEBUG so GLM's bounds-assert does not emit a host __assert_fail in device code, and keep clang fast-math off by default (it perturbs ill-conditioned covariance gradients past the upstream test tolerances).
+helpers.cuh / bindings.h: include the HIP runtime before GLM so glm::make_vec/make_mat bind HIP's device memcpy overload.
+helpers.cuh: replace cg::reduce (absent in HIP) with a width-32 shfl_xor butterfly all-reduce, and rebuild cg::labeled_partition (also absent) from warp.match_any so each distinct gradient label issues exactly one atomicAdd -- matching CUDA's atomic granularity, which a per-lane fan-out would not (it changes the float accumulation order enough to flap the projection gradient tests).
+rasterization.cu / projection.cu: alias namespace cub = hipcub, and cast every cudaFuncSetAttribute kernel argument to const void* (HIP's hipFuncSetAttribute has only that overload; CUDA accepts it too).
+A few Windows-only build adjustments (MSVC host compiler), guarded by sys.platform=="win32"/__HIP__.
+Validated against the project's pure-PyTorch reference on:
+gfx90a (MI250X, wave64, Linux, ROCm 7.2.1)
+gfx1100 (Radeon Pro W7800, RDNA3, wave32, Linux, ROCm 7.2.1)
+gfx1201 (RX 9070 XT, RDNA4, wave32, Windows, ROCm via TheRock)
+Camera math, camera rasterization (RGB / RGB+D / D), lidar math, and end-to-end lidar rasterization all pass. The lidar rasterize_to_points fwd+bwd (whose upstream reference imports nerfacc, unavailable on ROCm) was validated independently: bit-deterministic forward, finite backward grads with a finite-difference slope of 1.0, and an 80-step Adam fit that drives the loss down ~99%.
+A handful of gradient elements at near-degenerate gaussians flap run-to-run at the tightest tolerances and pass in isolation -- the expected float-atomicAdd accumulation-order noise (nondeterministic on every GPU including CUDA), not a wave-size defect. Upstream tolerances are left unchanged.
+This work was authored with the assistance of Claude (Anthropic), an AI assistant, as part of an effort to port popular CUDA projects to ROCm/HIP.
+[ROCm] Add AMD GPU support for SplatAD camera and lidar rendering
+…
+6044f4d
+```
+Build the gsplat.csrc CUDA extension against a ROCm build of PyTorch and run both
+paths -- the camera 3DGS rasterizer and the SplatAD lidar spherical
+rasterization -- on AMD GPUs, validated against the project's own pure-PyTorch
+reference (gsplat/cuda/_torch_impl.py). splatad is gsplat v1.0.0 plus a lidar
+path; this applies the same ROCm playbook to the flat csrc layout and extends
+it over the lidar kernels. torch hipifies the .cu/.cuh at build time; every
+fix is behind a USE_ROCM (or __HIP__) guard, so we have made every effort to
+leave the CUDA build unchanged -- the CUDA path does not compile the ROCm
+branches. The shims are wave-size agnostic (CG tiled_partition<32> width-32
+shuffles stay inside the tile), so one source serves wave64 (CDNA) and wave32
+(RDNA) targets alike.
+
+Review setup.py first (the build-time GLM/hipify and fast-math handling), then
+helpers.cuh (the cooperative-groups shims every kernel uses), then the per-file
+call-site rewrites in projection.cu and rasterization.cu, and finally the
+Windows-only build deltas in setup.py/bindings.h.
+
+The fixes, all behind USE_ROCM/__HIP__ unless noted:
+setup.py monkeypatches torch's hipify to leave the bundled third_party/glm
+untouched (hipify drops GLM's .inl files and mangles its compiler detection;
+GLM already compiles verbatim under -x hip), adds -DNDEBUG so GLM's operator[]
+bounds-assert does not emit a host __assert_fail in device code (nvcc supplies
+a device assert; ROCm clang does not), and keeps clang fast-math off by default
+(it is more aggressive than CUDA's --use_fast_math and perturbs ill-conditioned
+covariance gradients past the upstream test tolerances). helpers.cuh and
+bindings.h include the HIP runtime before GLM so glm::make_vec/make_mat resolve
+HIP's device memcpy overload rather than the host libc one. helpers.cuh
+replaces cg::reduce (absent in HIP's cooperative_groups) with a width-32
+shfl_xor butterfly all-reduce, and rebuilds cg::labeled_partition (also absent)
+from warp.match_any so each distinct gradient label issues exactly one
+atomicAdd -- matching CUDA's atomic granularity, which a per-lane fan-out would
+not, changing the float accumulation order enough to flap the projection
+gradient tests. rasterization.cu and projection.cu alias namespace cub = hipcub
+(hipify maps the include but not the namespace), and every cudaFuncSetAttribute
+kernel argument is cast to const void* (HIP's hipFuncSetAttribute has only that
+overload; CUDA accepts it too, so the cast is unguarded).
+
+Windows (MSVC host compiler) needs a few build-only adjustments, all guarded by
+sys.platform=="win32" or __HIP__: force ninja for the ROCm build (the distutils path cannot handle
+the .hip files hipify produces), use an absolute include path (ninja builds
+from a temp dir), compile each .cpp through an amdclang .cu shim copy (an
+inherited c10::ValueError constructor is not re-exported from c10.dll, so MSVC
+fails to link it), guard the HIP runtime and CUDAGuard includes on __HIP__ so
+cl.exe does not parse GPU runtime headers, and drop the -s strip flag (lld-link
+rejects it).
+
+This work was authored with the assistance of Claude (Anthropic), an AI
+assistant, as part of porting popular CUDA projects to ROCm/HIP.
+
+Test Plan:
+Build on a ROCm PyTorch (the .cu/.cuh are hipified at build time):
+
+    git submodule update --init --recursive gsplat/cuda/csrc/third_party/glm
+    PYTORCH_ROCM_ARCH=gfx90a BUILD_CUDA=1 NO_FAST_MATH=1 MAX_JOBS=16 \
+      pip install -e . --no-build-isolation -v
+
+GPU validation (HIP extension vs the pure-PyTorch reference; run outside a
+pytorch source checkout). Validated on gfx90a (MI250X, wave64), gfx1100
+(W7800, RDNA3, wave32), and gfx1201 (RX 9070 XT, RDNA4, wave32):
+
+    # camera math (projection fwd+bwd fused+packed, covariance, SH, isect,
+    # world_to_cam, persp_proj, pix velocity)
+    python -m pytest tests/test_basic.py -k "(test_quat_scale_to_covar_preci \
+      or test_persp_proj or test_world_to_cam or test_projection or \
+      test_fully_fused_projection_packed or test_isect or test_sh or \
+      test_compute_pix_velocity) and not lidar"        # 27 passed
+    # camera rasterization RGB / RGB+D / D
+    python -m pytest tests/test_rasterization.py::test_rasterization  # 24 passed
+    # lidar math + end-to-end lidar render (channels 3/32/128)
+    python -m pytest tests/test_basic.py -k "test_lidar_proj or \
+      test_compute_lidar_velocity or test_lidar_projection or \
+      test_isect_lidar or test_map_points_to_lidar_tiles or \
+      test_populate_image_from_points"                 # 14 passed
+    python -m pytest tests/test_rasterization.py::test_lidar_rasterization  # 3 passed
+    # densification strategy (non-GPU regression)
+    python -m pytest tests/test_strategy.py            # 1 passed
+
+The lidar rasterize_to_points fwd+bwd (whose upstream reference imports nerfacc,
+whose CUDA _C is None on ROCm) was validated independently: forward finite and
+bit-deterministic across same-seed runs; backward grads finite with grad-sums
+stable to rel ~1e-6 and a finite-difference slope of 1.0 / 100% sign agreement
+on the feature gradient; an 80-step Adam fit drove the loss down ~99% with
+finite grads throughout.
+
+A handful of gradient elements at near-degenerate gaussians flap run-to-run at
+the tightest tolerances (for example one v_viewmats element, rel ~2e-3 vs
+rtol 1e-3); all pass in isolation. This is the expected float-atomicAdd
+accumulation-order noise (the backward scatters per-primitive grads via
+atomicAdd, nondeterministic on every GPU including CUDA), not a wave-size defect
+(a real reduction bug fails systematically, scaling with size). The upstream
+tolerances are left unchanged.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,316 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,20 @@
+ 
+ ## Overview
+-Monotone Mesh Generation is a CPU-based algorithm that converts voxel data into a manifold triangle mesh by decomposing the surface into monotone polygons along scan lines and triangulating them [S1, unofficial]. It builds on [Voxel Mesh Generation (Run-based Greedy Meshing)](3127-voxel-mesh-generation-run-based-greedy-meshing.md) by replacing per-voxel face extraction with a sweep-line approach that merges adjacent faces into larger polygons, ensuring manifold geometry without per-voxel vertex duplication [S1, unofficial]. Unlike the basic greedy approach which optimizes for speed over minimal triangle count, this method produces cleaner, lower-poly geometry by creating larger planar patches [S1, unofficial].
++Monotone Mesh Generation is a CPU-based algorithm that converts voxel data into a manifold triangle mesh by decomposing the surface into monotone polygons along scan lines and triangulating them [S1, unofficial]. It builds on [Voxel Mesh Generation (Run-based Greedy Meshing)](3127-voxel-mesh-generation-run-based-greedy-meshing.md) by replacing per-voxel face extraction with a sweep-line approach that merges adjacent faces into larger polygons, ensuring manifold geometry without per-voxel vertex duplication [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `Voxel`: A sparse map of `FIntVector` (x, y, z) to `uint8` (color index).
+-- `Size`: `FIntVector` representing the bounding box dimensions of the voxel data.
++- `Voxel`: Sparse map of `FIntVector` (x, y, z) to `uint8` (color index).
++- `Size`: `FIntVector` representing the bounding box dimensions.
+ - `Palette`: Array of `FColor` corresponding to color indices.
+ - `ImportOption`: Configuration struct containing `bImportXYCenter` (boolean).
+ 
+ **Outputs:**
+-- `OutRawMesh`: A mesh structure containing:
++- `OutRawMesh`: Mesh structure containing:
+   - `VertexPositions`: `TArray<FVector3f>` of unique vertex coordinates.
+   - `WedgeIndices`: `TArray<uint32>` of vertex indices forming triangles (triplets).
+   - `WedgeTexCoords[0]`: `TArray<FVector2f>` texture coordinates for each wedge.
+   - `WedgeColors`: `TArray<FColor>` color for each wedge.
+-  - `FaceMaterialIndices`: `TArray<uint32>` material index for each face (polygon).
++  - `FaceMaterialIndices`: `TArray<uint32>` material index for each face.
+   - `FaceSmoothingMasks`: `TArray<uint32>` smoothing mask for each face.
+ 
+@@ -29,115 +29,164 @@
+ - `FPolygon`: Represents a monotone polygon being built.
+   - `Color`: `int32`.
+-  - `Left`: `TArray<FVector2f>` vertices forming the left chain (sorted by Y).
+-  - `Right`: `TArray<FVector2f>` vertices forming the right chain (sorted by Y).
++  - `Left`: `TArray[FVector2f]` vertices forming the left chain (sorted by Y).
++  - `Right`: `TArray[FVector2f]` vertices forming the right chain (sorted by Y).
+ 
+ **Algorithm Steps:**
+ 
+-1. **Initialization**: Initialize `OutRawMesh` arrays.
+-2. **Sweep Loop**: Iterate `Dimension` from 0 to 2 (representing X, Y, Z axes).
+-   - Define `Axis` vector: `Axis[0] = Dimension`, `Axis[1] = (Dimension + 1) % 3`, `Axis[2] = (Dimension + 2) % 3`.
+-   - This defines the sweep direction (`Axis[0]`), the scan line direction (`Axis[1]`), and the plane normal direction (`Axis[2]`).
+-   - Iterate `Plane[Axis[2]]` from 0 to `Voxel.Size[Axis[2]]`.
+-     - Call `CreatePolygons` to generate a list of `FPolygon` objects for this plane slice.
+-     - For each `Polygon` in the list, call `WritePolygon` to triangulate and write to `OutRawMesh`.
+-3. **Centering**: If `ImportOption->bImportXYCenter` is true, calculate `Offset = (Size.X * 0.5, Size.Y * 0.5, 0)`. Subtract `Offset` from all `VertexPositions`.
+-4. **Finalization**: Call `OutRawMesh.CompactMaterialIndices()`.
+-
+-**Sub-algorithm: CreatePolygons**
+-This function generates monotone polygons for a specific plane slice.
+-
+-1. Initialize `OutPolygons` (list of `FPolygon`).
+-2. Iterate `P[Axis[1]]` (scan line position) from 0 to `Voxel.Size[Axis[1]]`.
+-   - Call `CreateFaces` to get a list of `FFace` objects for this scan line.
+-   - Initialize `Frontier` (list of indices into `OutPolygons`) and `NextFrontier`.
+-   - Initialize `FrontierIndex = 0`, `FaceIndex = 0`.
+-   - **Merge Loop**: While `FrontierIndex < Frontier.Num()` AND `FaceIndex < Faces.Num()`:
+-     - Get `Polygon = OutPolygons[Frontier[FrontierIndex]]`.
+-     - Get `CurrentFace = Faces[FaceIndex]`.
+-     - Let `Left.X` be the last element of `Polygon.Left`'s X-coordinate (or start if empty).
+-     - Let `Right.X` be the last element of `Polygon.Right`'s X-coordinate.
+-     - **Condition**: If `Left.X < CurrentFace.Right` AND `CurrentFace.Left < Right.X` AND `CurrentFace.Color == Polygon.Color`:
+-       - **Merge**: Add `CurrentFace.Left` and `CurrentFace.Right` to `Polygon.Left` and `Polygon.Right` respectively. The Y-coordinate for these points is `P[Axis[1]]`. The Z-coordinate is `Plane[Axis[2]]`.
+-       - Add `Frontier[FrontierIndex]` to `NextFrontier`.
+-       - Increment `FrontierIndex` and `FaceIndex`.
+-     - **Else**:
+-       - If `Right.X <= CurrentFace.Right`:
+-         - **Close Polygon**: Call `Polygon.CloseOff(P[Axis[1]], Plane[Axis[2]])`. This finalizes the polygon's last vertices.
+-         - Increment `FrontierIndex`.
+-       - If `CurrentFace.Right <= Right.X`:
+-         - **Start New Polygon**: Add `OutPolygons.Num()` to `NextFrontier`. Create new `FPolygon` with `CurrentFace.Color`, `CurrentFace.Left`, `CurrentFace.Right`, and initial vertices at `P[Axis[1]], Plane[Axis[2]]`. Add to `OutPolygons`.
+-         - Increment `FaceIndex`.
+-   - **Remaining Frontiers**: If `FrontierIndex < Frontier.Num()`, close all remaining polygons in `Frontier`.
+-   - **Remaining Faces**: If `FaceIndex < Faces.Num()`, create new polygons for remaining faces.
+-   - Update `Frontier = NextFrontier`.
+-3. **Final Close**: After the Y loop, close any remaining polygons in `Frontier`.
+-
+-**Sub-algorithm: CreateFaces**
+-This function extracts 1D segments (faces) from the voxel data along a scan line.
+-
+-1. Initialize `OutFaces` (list of `FFace`).
+-2. Initialize `D` vector: `D[Axis[0]] = 0`, `D[Axis[1]] = 0`, `D[Axis[2]] = -1`.
+-3. Initialize `PreviousColor = 0`.
+-4. Iterate `P[Axis[0]]` from 0 to `Voxel.Size[Axis[0]]`.
+-   - Calculate `BackPos = P + D`.
+-   - Get `Back = Voxel.FindRef(BackPos)` (returns color or 0 if empty).
+-   - Get `Front = Voxel.FindRef(P)`.
+-   - Calculate `Color`:
+-     - If `!Back` and `!Front` (both empty): `Color = 0`.
+-     - Else if `Back` (back is solid): `Color = -Back` (inward facing).
+-     - Else (`Front` is solid): `Color = Front` (outward facing).
+-   - **Edge Detection**:
+-     - If `PreviousColor != Color`:
+-       - If `PreviousColor != 0`: Set `OutFaces.Last().Right = P[Axis[0]]`.
+-       - If `Color != 0`: Add new `FFace(Color, P[Axis[0]], P[Axis[0]])` to `OutFaces`.
+-     - Set `PreviousColor = Color`.
+-5. **Finalize**: If `PreviousColor != 0`, set `OutFaces.Last().Right = P[Axis[0]]`.
+-
+-**Sub-algorithm: WritePolygon**
+-This function triangulates a monotone polygon and writes triangles to the mesh.
+-
+-1. Initialize `LeftIndex` and `RightIndex` arrays.
+-2. Call `WriteVertex` for `Polygon.Left` to populate `LeftIndex` and `OutRawMesh.VertexPositions`.
+-3. Call `WriteVertex` for `Polygon.Right` to populate `RightIndex` and `OutRawMesh.VertexPositions`.
+-4. Calculate `ColorIndex`: `0 < Polygon.Color ? Polygon.Color - 1 : -Polygon.Color - 1`.
+-5. Calculate `Flipped`: `Polygon.Color < 0`.
+-6. Initialize `Left = 1`, `Right = 1`, `LastSide = true`.
+-7. Define `CrossProduct(a, b) = a.X * b.Y - b.X * a.Y`.
+-8. Initialize `List` with `TPair(LeftIndex[0], Polygon.Left[0])` and `TPair(RightIndex[0], Polygon.Right[0])`.
+-9. **Triangulation Loop**: While `Left < Polygon.Left.Num()` OR `Right < Polygon.Right.Num()`:
+-   - Determine `Side`:
+-     - If `Left == Polygon.Left.Num()`: `Side = true` (Right).
+-     - Else if `Right != Polygon.Right.Num()`: `Side = (Polygon.Left[Left].Y > Polygon.Right[Right].Y)`.
+-     - Else: `Side = false` (Left).
+-   - Get `Index` and `Vertex` based on `Side` (`RightIndex[Right]/Polygon.Right[Right]` if Side, else `LeftIndex[Left]/Polygon.Left[Left]`).
+-   - **Wedge Generation**:
+-     - If `Side != LastSide`:
+-       - While `List.Num() > 1`:
+-         - Write wedge using `List[0]`, `List[1]`, `Index`, `Color`, and `Flipped == Side`.
+-         - Remove `List[0]`.
+-     - Else (`Side == LastSide`):
+-       - While `List.Num() > 1`:
+-         - Calculate `Normal = CrossProduct(List.Last().Value - Vertex, List[List.Num()-2].Value - Vertex)`.
+-         - If `Side == (Normal > 0)`: Break.
+-         - If `Normal != 0`: Write wedge using `List.Last()`, `List[List.Num()-2]`, `Index`, `Color`, `Flipped == Side`.
+-         - Remove `List.Last()`.
+-   - Add `TPair(Index, Vertex)` to `List`.
+-   - Increment `Right` if `Side`, else `Left`.
+-   - Set `LastSide = Side`.
+-
+-**Sub-algorithm: WriteVertex**
+-1. Iterate `i` from 0 to `Polygon.Left.Num()`.
+-   - Create `Vertex` from `Polygon.Left[i]` mapped to `Axis` coordinates.
+-   - Add `Vertex` to `OutRawMesh.VertexPositions` using `AddUnique`.
+-   - Store index in `OutLeftIndex[i]`.
+-2. Iterate `i` from 0 to `Polygon.Right.Num()`.
+-   - Create `Vertex` from `Polygon.Right[i]` mapped to `Axis` coordinates.
+-   - Add `Vertex` to `OutRawMesh.VertexPositions` using `AddUnique`.
+-   - Store index in `OutRightIndex[i]`.
+-
+-**Sub-algorithm: WriteWedge**
+-1. Add three indices to `OutRawMesh.WedgeIndices`: `Index1` if `Face` else `Index2`, `Index2` if `Face` else `Index1`, `Index3`.
+-2. Add three identical texture coordinates to `OutRawMesh.WedgeTexCoords[0]`: `((double)ColorIndex + 0.5) / 256.0`, `0.5`.
+-3. Add `0` to `OutRawMesh.FaceMaterialIndices` and `OutRawMesh.FaceSmoothingMasks`.
++```python
++def CreateRawMesh(Voxel, Size, Palette, ImportOption):
++    OutRawMesh = FRawMesh()
++    for Dimension in range(3):
++        Axis = [Dimension, (Dimension + 1) % 3, (Dimension + 2) % 3]
++        Plane = [0, 0, 0]
++        for Plane[Axis[2]] in range(Size[Axis[2]]):
++            Polygons = CreatePolygons(Voxel, Size, Axis, Plane)
++            for Polygon in Polygons:
++                WritePolygon(OutRawMesh, Axis, Polygon)
++    if ImportOption.bImportXYCenter:
++        Offset = (Size.X * 0.5, Size.Y * 0.5, 0.0)
++        for i in range(len(OutRawMesh.VertexPositions)):
++            OutRawMesh.VertexPositions[i] -= Offset
++    OutRawMesh.CompactMaterialIndices()
++    return OutRawMesh
++
++def CreatePolygons(Voxel, Size, Axis, Plane):
++    OutPolygons = []
++    for P_y in range(Size[Axis[1]]):
++        Faces = CreateFaces(Voxel, Size, Axis, Plane, P_y)
++        Frontier = []
++        NextFrontier = []
++        f_idx = 0
++        while f_idx < len(Faces):
++            if not Frontier:
++                idx = len(OutPolygons)
++                OutPolygons.append(FPolygon(Faces[f_idx].Color, Faces[f_idx].Left, Faces[f_idx].Right, P_y, Plane[Axis[2]]))
++                NextFrontier.append(idx)
++                f_idx += 1
++                continue
++
++            poly_idx = Frontier[0]
++            poly = OutPolygons[poly_idx]
++            face = Faces[f_idx]
++
++            left_x = poly.Left[-1].X if poly.Left else 0
++            right_x = poly.Right[-1].X if poly.Right else 0
++
++            if left_x < face.Right and face.Left < right_x and face.Color == poly.Color:
++                poly.Left.append((face.Left, P_y))
++                poly.Right.append((face.Right, P_y))
++                NextFrontier.append(poly_idx)
++                f_idx += 1
++            else:
++                if right_x <= face.Right:
++                    poly.CloseOff(P_y, Plane[Axis[2]])
++                    Frontier.pop(0)
++                if face.Right <= right_x:
++                    idx = len(OutPolygons)
++                    OutPolygons.append(FPolygon(face.Color, face.Left, face.Right, P_y, Plane[Axis[2]]))
++                    NextFrontier.append(idx)
++                    f_idx += 1
++        Frontier = NextFrontier
++        for idx in Frontier:
++            OutPolygons[idx].CloseOff(P_y, Plane[Axis[2]])
++    return OutPolygons
++
++def CreateFaces(Voxel, Size, Axis, Plane, P_y):
++    OutFaces = []
++    D = [0, 0, 0]
++    D[Axis[0]] = 0
++    D[Axis[1]] = 0
++    D[Axis[2]] = -1
++    prev_color = 0
++    for P_x in range(Size[Axis[0]]):
++        P = [0, 0, 0]
++        P[Axis[0]] = P_x
++        P[Axis[1]] = P_y
++        P[Axis[2]] = Plane[Axis[2]]
++        Back = Voxel.Get(P + D)
++        Front = Voxel.Get(P)
++        if not Back and not Front:
++            color = 0
++        elif Back:
++            color = -Back
++        else:
++            color = Front
++
++        if prev_color != color:
++            if prev_color != 0:
++                OutFaces[-1].Right = P_x
++            if color != 0:
++                OutFaces.append(FFace(color, P_x, P_x))
++        prev_color = color
++    if prev_color != 0:
++        OutFaces[-1].Right = P_x
++    return OutFaces
++
++def WritePolygon(OutRawMesh, Axis, Polygon):
++    LeftIndex = []
++    RightIndex = []
++    WriteVertex(OutRawMesh, Axis, Polygon.Left, LeftIndex)
++    WriteVertex(OutRawMesh, Axis, Polygon.Right, RightIndex)
++
++    ColorIndex = Polygon.Color - 1 if Polygon.Color > 0 else -Polygon.Color - 1
++    Flipped = Polygon.Color < 0
++
++    Left = 1
++    Right = 1
++    LastSide = True
++    CrossProduct = lambda a, b: a.X * b.Y - b.X * a.Y
++    List = [(LeftIndex[0], Polygon.Left[0]), (RightIndex[0], Polygon.Right[0])]
++
++    while Left < len(Polygon.Left) or Right < len(Polygon.Right):
++        if Left == len(Polygon.Left):
++            Side = True
++        elif Right < len(Polygon.Right):
++            Side = Polygon.Left[Left].Y > Polygon.Right[Right].Y
++        else:
++            Side = False
++
++        if Side:
++            Index = RightIndex[Right]
++            Vertex = Polygon.Right[Right]
++        else:
++            Index = LeftIndex[Left]
++            Vertex = Polygon.Left[Left]
++
++        if Side != LastSide:
++            while len(List) > 1:
++                WriteWedge(OutRawMesh, List[0][0], List[1][0], Index, ColorIndex, Flipped == Side)
++                List.pop(0)
++        else:
++            while len(List) > 1:
++                Normal = CrossProduct(List[-1][1] - Vertex, List[-2][1] - Vertex)
++                if Side == (Normal > 0):
++                    break
++                if Normal != 0:
++                    WriteWedge(OutRawMesh, List[-1][0], List[-2][0], Index, ColorIndex, Flipped == Side)
++                    List.pop()
++        List.append((Index, Vertex))
++        if Side:
++            Right += 1
++        else:
++            Left += 1
++        LastSide = Side
++
++def WriteVertex(OutRawMesh, Axis, Chain, IndexArray):
++    for pt in Chain:
++        Vertex = Plane + pt.X * Axis[1] + pt.Y * Axis[2]
++        idx = OutRawMesh.VertexPositions.AddUnique(Vertex)
++        IndexArray.append(idx)
++
++def WriteWedge(OutRawMesh, Index1, Index2, Index3, ColorIndex, Flipped):
++    OutRawMesh.WedgeIndices.Add(Index1 if not Flipped else Index2)
++    OutRawMesh.WedgeIndices.Add(Index2 if not Flipped else Index1)
++    OutRawMesh.WedgeIndices.Add(Index3)
++    TexCoord = (((double)ColorIndex + 0.5) / 256.0, 0.5)
++    OutRawMesh.WedgeTexCoords[0].Add(TexCoord)
++    OutRawMesh.WedgeTexCoords[0].Add(TexCoord)
++    OutRawMesh.WedgeTexCoords[0].Add(TexCoord)
++    OutRawMesh.FaceMaterialIndices.Add(0)
++    OutRawMesh.FaceSmoothingMasks.Add(0)
++```
+ 
+ **Parameters:**
+@@ -146,10 +195,10 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision**: The algorithm relies on exact comparisons of integer voxel coordinates. Floating point precision issues are minimized by using integer arithmetic for voxel access and only converting to float for vertex positions [S1, unofficial].
+-- **Boundaries**: The loop bounds must strictly follow `Voxel.Size` to avoid out-of-bounds access [S1, unofficial].
+-- **Degenerate Input**: Empty voxel sets result in empty meshes. Single-voxel meshes are handled correctly by the polygon merging logic [S1, unofficial].
++- **Precision**: The algorithm relies on exact comparisons of integer voxel coordinates for face detection [S1, unofficial].
++- **Boundaries**: Loop bounds follow `Voxel.Size` to iterate over valid planes and scan lines [S1, unofficial].
++- **Degenerate Input**: Empty voxel sets result in empty meshes; single-voxel meshes are handled correctly by the polygon merging logic [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not given in the sources. The algorithm involves multiple nested loops over the voxel dimensions, with polygon merging and triangulation.
++- **Time Complexity**: Not given in the sources. The algorithm involves nested loops over voxel dimensions with polygon merging and triangulation.
+ - **Memory Complexity**: Not given in the sources. Depends on the number of polygons and vertices generated.
+ - **Measured Performance**: Not given in the sources.

@@ -1,0 +1,121 @@
+--- v002.md
++++ v003.md
+@@ -22,14 +22,5 @@
+ 5.  **Render Targets:** Floating-point textures for intersection positions (volume coordinates), gradient components, Hessian matrix components, curvature measures, and the final color image [S1].
+ 
+-### Parameters
+-*   **Hierarchy Depth:** A trilevel hierarchy is used (top-level, two macrocell levels, data cells). Storage overhead is < 0.5% of data size [S3, book].
+-*   **Tile Size:** For dynamic load balancing, screen space is split into tiles, e.g., 32 pixels wide by 4 pixels high [S3, book].
+-*   **Hardware Requirements:** Support for volumetric textures, render-to-texture, and looping in fragment programs (e.g., Shader Model 3.0) [S1].
+-
+-### Steps
+-
+-#### Stage 1: Ray-Casting (Object Space)
+-For each pixel (or tile of pixels):
+-
++### Numbered Steps
+ 1.  **Ray Initialization:** Define the ray origin $P_a$ and direction $P_b$ in volume coordinates [G].
+ 2.  **Traversal:** Use the incremental traversal method by Amanatides and Woo to traverse cells [S3, book].
+@@ -50,20 +41,25 @@
+     *   Iteratively refine the hit-point with a constant number of steps to achieve high-quality intersection positions [S1]. This is the transition from object to image space [S1].
+ 
+-#### Stage 2: Image Space Derivatives
+-Using the intersection positions from Stage 1:
+-
+-1.  **Tri-Cubic Filtering:** Evaluate the scalar volume and its derivatives using tri-cubic filtering at the exact intersection positions [S1]. This allows on-the-fly evaluation of smooth normals and curvatures without interpolating data computed at grid points [S1].
+-2.  **Gradient Computation:** Compute first partial derivatives $\nabla \rho = (\frac{\partial \rho}{\partial x}, \frac{\partial \rho}{\partial y}, \frac{\partial \rho}{\partial z})$ to obtain surface normals [S1].
+-3.  **Hessian Computation:** Compute second partial derivatives to form the Hessian matrix $H$ [S1].
+-4.  **Curvature Computation:** Derive curvature measures from the gradient and Hessian [S1].
+-5.  **Store Results:** Write gradient components, Hessian components, and curvatures to floating-point render targets [S1].
+-
+-#### Stage 3: Image Space Shading
+-1.  **Shading Pass:** Generate the final output image using the shape descriptors (normals, curvatures) computed in Stage 2 [S1].
+-2.  **Effects:** Apply standard Blinn-Phong lighting, tone shading, curvature-based transfer functions, ridge/valley lines, and flow advection [S1].
++### Formulas
++*   **Ray-Isosurface Intersection:** $\rho(x_a + t x_b, y_a + t y_b, z_a + t z_b) - \rho_{iso} = 0$, where $(x_a, y_a, z_a)$ is the ray origin, $(x_b, y_b, z_b)$ is the ray direction, and $t$ is the ray parameter [S3, book].
++*   **Trilinear Expansion:** Substituting the ray equation into the trilinear interpolation formula yields a cubic polynomial $a t^3 + b t^2 + c t + d = 0$ [S3, book].
++*   **Gradient & Hessian:** First and second partial derivatives of $\rho$ are computed via tri-cubic filtering to yield normals and curvature measures [S1].
++
++### Parameters
++*   **Hierarchy Depth:** A trilevel hierarchy is used (top-level, two macrocell levels, data cells). Storage overhead is < 0.5% of data size [S3, book].
++*   **Tile Size:** For dynamic load balancing, screen space is split into tiles, e.g., 32 pixels wide by 4 pixels high [S3, book].
++*   **Refinement Steps:** A constant number of iterative refinement steps (e.g., 3) is applied per hit [S1].
++*   **Hardware Requirements:** Support for volumetric textures, render-to-texture, and looping in fragment programs (e.g., Shader Model 3.0) [S1].
++
++### Edge Cases and Pitfalls
++*   **Multiple Roots:** Trilinear interpolation results in a cubic polynomial which may have multiple roots or no roots. The algorithm must handle these cases by selecting the closest valid root (smallest $t$) or skipping the cell if no roots exist [S3, book].
++*   **Memory Limits:** If the volume does not fit in graphics memory, rays must be cast through a dynamic cache texture storing active bricks. The cache must be updated on-the-fly according to the current isovalue [S1].
++*   **Precision:** Iterative refinement is necessary to achieve high-quality intersections, as the initial analytic solution may have limited precision due to interpolation [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
++import math
++
+ # Constants
+ ISOVALUE = 0.5
+@@ -133,6 +129,6 @@
+                 grad = compute_gradient_tricubic(hit_pos)
+                 hess = compute_hessian_tricubic(hit_pos)
+-                grad_image.set(pixel_x, pixel_y, grad)
+-                hess_image.set(pixel_x, pixel_y, hess)
++                gradient_image.set(pixel_x, pixel_y, grad)
++                hessian_image.set(pixel_x, pixel_y, hess)
+                 curvature_image.set(pixel_x, pixel_y, compute_curvature(grad, hess))
+ 
+@@ -149,8 +145,8 @@
+     return final_image
+ 
+-def trace_ray(origin, direction):
++def trace_ray(origin, direction, bounds, hierarchy):
+     # Amanatides & Woo traversal initialization
+     inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
+-    start_cell = [int((volume_bounds.min[i] - origin[i]) * inv_dir[i]) for i in range(3)]
++    start_cell = [math.floor((bounds.min[i] - origin[i]) * inv_dir[i]) for i in range(3)]
+     step = [1 if direction[i] > 0 else -1 for i in range(3)]
+     t_delta = [abs(inv_dir[i]) for i in range(3)]
+@@ -165,5 +161,5 @@
+     t = 0.0
+     
+-    while not is_outside_volume(current_cell, volume_bounds):
++    while not is_outside_volume(current_cell, bounds):
+         cell = hierarchy.get_cell(current_cell)
+         if cell.min_val <= ISOVALUE <= cell.max_val:
+@@ -200,9 +196,7 @@
+ 
+ def solve_cubic_trilinear(cell, origin, direction, iso):
+-    # Expand rho(xa + t xb, ya + t yb, za + t zb) - iso = 0
+-    # into a cubic polynomial a*t^3 + b*t^2 + c*t + d = 0
+-    # using trilinear interpolation coefficients derived from cell voxels
+-    coeffs = compute_trilinear_coeffs(cell.voxels, origin, direction)
+-    return solve_cubic(coeffs.a, coeffs.b, coeffs.c, coeffs.d)
++    # Standard algebraic expansion of trilinear interpolation coefficients
++    # Returns polynomial coefficients for rho(t) - iso = 0
++    pass  # Standard algebraic expansion
+ 
+ def newton_refine(t, origin, direction, iso):
+@@ -219,6 +213,5 @@
+ 
+ def compute_trilinear_coeffs(voxels, origin, direction):
+-    # Standard trilinear interpolation coefficient extraction
+-    # Returns polynomial coefficients for rho(t) - iso = 0
++    # Standard algebraic expansion
+     pass  # Standard algebraic expansion
+ 
+@@ -248,9 +241,4 @@
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Multiple Roots:** Trilinear interpolation results in a cubic polynomial which may have multiple roots or no roots. The algorithm must handle these cases by selecting the closest valid root (smallest $t$) or skipping the cell if no roots exist [S3, book].
+-*   **Memory Limits:** If the volume does not fit in graphics memory, rays must be cast through a dynamic cache texture storing active bricks. The cache must be updated on-the-fly according to the current isovalue [S1].
+-*   **Precision:** Iterative refinement is necessary to achieve high-quality intersections, as the initial analytic solution may have limited precision due to interpolation [S1].
+-
+ ## Operating characteristics
+ *   **Complexity:** The ray-casting stage has object space complexity. All other computations (derivatives, shading) have image space complexity [S1].
+@@ -262,5 +250,5 @@
+ 
+ ## Background
+-This method was presented by Siggraph and Eurographics researchers in 2005 [S1]. It addresses the limitations of existing GPU isosurface rendering approaches, particularly the lack of advanced shading and texture memory usage [S1]. It builds on earlier work in GPU ray-casting [KW03] and curvature-based transfer functions [HKG00, KWTM03]. The technique is suitable for interactive visualization of very large datasets where traditional polygonal extraction (e.g., Marching Cubes) becomes too slow [S3, book].
++This method was presented by Siggraph and Eurographics researchers in 2005 [S1]. It addresses the limitations of existing GPU isosurface rendering approaches, particularly the lack of advanced shading and texture memory usage [S1]. It builds on earlier work in GPU ray-casting [KW03] and curvature-based transfer functions [HKG00, KWTM03] [S1]. The technique is suitable for interactive visualization of very large datasets where traditional polygonal extraction (e.g., Marching Cubes) becomes too slow [S3, book].
+ 
+ ## Sources

@@ -1,0 +1,296 @@
+GPU-optimized version of the MuJoCo physics simulator, designed for NVIDIA hardware. - Fix tangent primitive ray intersections by kavyabhand · Pull Request #1699 · google-deepmind/mujoco_warp
+
+Fix tangent primitive ray intersections by kavyabhand · Pull Request #1699 · google-deepmind/mujoco_warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kavyabhand
+commented
+Sep 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Fixes #1698.
+_ray_quad previously rejected a zero discriminant, causing exact tangent intersections to be reported as misses. This change mirrors MuJoCo’s complete guard: negative discriminants and degenerate quadratics are rejected, while det == 0 remains a valid tangent hit. The guarded root calculation now uses direct division, matching MuJoCo C.
+The scene BVH also used exact geom bounds, and Warp’s traversal pruned boundary-tangent rays before they reached the primitive tests. Scene bounds are now expanded conservatively by a 1e-6 relative tolerance. Exact geom intersection tests still decide whether a candidate is a hit; the tradeoff is only a small increase in BVH candidates near boundaries.
+Parameterized tests cover surface normals, one- and two-world execution, sphere, capsule barrel and cap tangencies, ellipsoid, cylinder, box, and capsule/cylinder axis-parallel hits and misses through both regular and BVH-backed ray APIs. The rangefinder regression uses distinct per-world states and MuJoCo references. The complete ray, sensor, and BVH modules pass all 104 tests, and pre-commit passes formatting, lint, lock, and kernel-analyzer checks. The full suite completed with 1,502 passed and 39 skipped; its only failure is the existing test_put_data_nefc_zero_dense dependency mismatch where MuJoCo reports nefc=1 instead of the test's expected 0, also documented in #1672.
+Fix tangent primitive ray intersections
+99887a2
+thowell
+commented
+Sep 25, 2026
+Copy link
+Copy Markdown
+Collaborator
+@kavyabhand thanks for tracking this down and putting together a clean fix and test suite! The root cause analysis in #1698 and the approach here look solid.
+Below are a few recommendations to simplify the kernel code using Warp builtins and align the new tests with mujoco_warp testing conventions:
+1. Simplify bound_scale with Warp vector builtins and cache the output index in _compute_bvh_bounds (mujoco_warp/_src/bvh.py)
+Issue:
+In _compute_bvh_bounds, bound_scale is computed using 10 lines of nested scalar wp.max and wp.abs calls indexing individual components [0], [1], and [2]. Additionally, the flat output index worldid * bvh_ngeom + geom_local_id is recomputed three times when writing to lower_out, upper_out, and group_out.
+Recommendation:
+Use Warp's vector-overloaded wp.abs(vec3) and wp.max(vec3, vec3) (component-wise) combined with wp.max(vec3) (horizontal maximum across components) to compute bound_scale in a single line, and cache out_idx = worldid * bvh_ngeom + geom_local_id in a local variable (matching _compute_flex_bvh_bounds).
+Code Example:
+```
+  bound_scale = wp.max(1.0, wp.max(wp.max(wp.abs(lower_bound), wp.abs(upper_bound))))
+  inflate = wp.vec3(BVH_BOUNDS_REL_TOL * bound_scale)
+  out_idx = worldid * bvh_ngeom + geom_local_id
+  lower_out[out_idx] = lower_bound - inflate
+  upper_out[out_idx] = upper_bound + inflate
+  group_out[out_idx] = worldid
+```
+2. Avoid redundant safe_div check in _ray_quad (mujoco_warp/_src/ray.py)
+Issue:
+Now that _ray_quad guards if det < 0.0 or a < MJ_MINVAL: at the top of the function (where MJ_MINVAL = 1.0e-15), a is guaranteed to be strictly positive (a >= MJ_MINVAL) when computing the roots. Calling den = safe_div(1.0, a) performs a redundant a != 0.0 select branch.
+Recommendation:
+Compute den = 1.0 / a directly after the guard, matching C MuJoCo's ray_quad implementation in engine_ray.c.
+Code Example:
+```
+@wp.func
+def _ray_quad(a: float, b: float, c: float) -> Tuple[float, wp.vec2]:
+  """Compute solutions from quadratic: a*x^2 + 2*b*x + c = 0."""
+  det = b * b - a * c
+  if det < 0.0 or a < MJ_MINVAL:
+    return -1.0, wp.vec2(-1.0, -1.0)
+  det = wp.sqrt(det)
+
+  # compute the two solutions
+  den = 1.0 / a
+  x0 = (-b - det) * den
+  x1 = (-b + det) * den
+  x = wp.vec2(x0, x1)
+
+  # finalize result
+  if x0 >= 0.0:
+    return x0, x
+  elif x1 >= 0.0:
+    return x1, x
+  else:
+    return -1.0, x
+```
+3. Ensure nworld == 2 worlds have distinct states in test_rangefinder_tangent (mujoco_warp/_src/sensor_test.py)
+Issue:
+test_rangefinder_tangent is parameterized over nworld in (1, 2), but because test_data.fixture(..., nworld=2) duplicates mjd across worlds by default, world 0 and world 1 are identical (expected = np.tile(mjd.sensordata, (nworld, 1))). If both worlds have identical inputs and outputs, cross-world indexing bugs or thread offset errors will not be caught.
+Recommendation:
+Add a <joint type="slide" axis="0 0 1"/> to the rangefinder body and perturb d.qpos in world 1 when nworld == 2 so that world 1's ray origin is shifted along the ray direction (producing a tangent hit at a distinct distance). Maintain a separate CPU MjData reference for world 1, assert per-world parity, and verify that world 0 and world 1 produce distinct sensordata outputs.
+Code Example:
+```
+  @parameterized.parameters(1, 2)
+  def test_rangefinder_tangent(self, nworld):
+    """Tests that tangent rangefinder intersections match MuJoCo."""
+    mjm, mjd, m, d = test_data.fixture(
+      xml="""
+        <mujoco>
+          <compiler angle="degree"/>
+          <worldbody>
+            <geom type="sphere" size=".5"/>
+            <body pos="-2 .5 0" euler="0 90 0">
+              <joint type="slide" axis="0 0 1"/>
+              <site name="rangefinder"/>
+            </body>
+          </worldbody>
+          <sensor>
+            <rangefinder site="rangefinder"/>
+          </sensor>
+        </mujoco>
+      """,
+      nworld=nworld,
+    )
+
+    mjds = [mjd]
+    if nworld == 2:
+      mjd1 = mujoco.MjData(mjm)
+      qpos = d.qpos.numpy()
+      qpos[1, 0] = -0.5
+      d.qpos.assign(qpos)
+      mjd1.qpos[:] = qpos[1]
+      mujoco.mj_forward(mjm, mjd1)
+      mjds.append(mjd1)
+      mjw.kinematics(m, d)
+
+    d.sensordata.fill_(wp.inf)
+    mjw.sensor_pos(m, d)
+
+    for w in range(nworld):
+      _assert_eq(d.sensordata.numpy()[w], mjds[w].sensordata, f"sensordata_world_{w}")
+
+    if nworld == 2:
+      self.assertFalse(np.allclose(d.sensordata.numpy()[0], d.sensordata.numpy()[1]))
+```
+4. Expand test_ray_tangent to check surface normals, multi-world (nworld = 1, 2), capsule cap tangency, and axis-parallel (a == 0) rays (mujoco_warp/_src/ray_test.py)
+Issue:
+Unchecked normals: mjw.ray returns (dist, geomid, normal), and mujoco.mj_ray supports writing the surface normal via its normal parameter, but test_ray_tangent currently ignores normal.
+Single-world only: test_ray_tangent only runs with nworld = 1, so multi-world BVH bounds indexing (worldid * bvh_ngeom + geom_local_id) is not exercised on tangent rays.
+Missing capsule cap & degenerate axis-parallel (a == 0) coverage:
+The "capsule" test case (-2.0, 0.5, 0.0) with direction (1.0, 0.0, 0.0) hits the cylindrical barrel (part == 0) and does not exercise the hemispherical cap _ray_quad calls.
+As noted in Tangent rays miss bounded primitive geoms #1698, the a < MJ_MINVAL check in _ray_quad is specifically needed so that axis-parallel rays (lvec = (0, 0, -1), where a == 0, b == 0, det == 0 in the infinite-cylinder barrel quadratic) do not return a spurious x = 0.0 hit on capsules and cylinders. However, none of the existing tests in ray_test.py test an exact axis-parallel ray (direction = (0.0, 0.0, -1.0)) against a capsule or cylinder.
+Recommendation:
+Parameterize test_ray_tangent across nworld = 1, 2 (varying world 1's ray origin along direction), assert normal parity against mujoco.mj_ray for both the non-BVH and BVH paths, and add test cases for capsule cap tangency as well as capsule/cylinder axis-parallel hits and near-misses (inside the bounding sphere so the barrel _ray_quad is reached with a == 0, b == 0, det == 0).
+Code Example:
+```
+  @parameterized.product(
+    case=[
+      ("sphere", "sphere", ".5", (-2.0, 0.5, 0.0), (1.0, 0.0, 0.0)),
+      ("capsule_barrel", "capsule", ".5 1", (-2.0, 0.5, 0.0), (1.0, 0.0, 0.0)),
+      ("capsule_cap", "capsule", ".5 1", (-2.0, 0.0, 1.5), (1.0, 0.0, 0.0)),
+      ("capsule_axis_hit", "capsule", ".5 1", (0.0, 0.0, 2.0), (0.0, 0.0, -1.0)),
+      ("capsule_axis_miss", "capsule", ".5 1", (0.6, 0.0, 0.5), (0.0, 0.0, -1.0)),
+      ("ellipsoid", "ellipsoid", ".5 1 1", (-2.0, 1.0, 0.0), (1.0, 0.0, 0.0)),
+      ("cylinder", "cylinder", ".5 1", (-2.0, 0.5, 0.0), (1.0, 0.0, 0.0)),
+      ("cylinder_axis_hit", "cylinder", ".5 1", (0.0, 0.0, 2.0), (0.0, 0.0, -1.0)),
+      ("cylinder_axis_miss", "cylinder", ".5 1", (0.6, 0.0, 0.5), (0.0, 0.0, -1.0)),
+      ("box", "box", ".5 .5 .5", (-1.5, 2.5, 0.5), (1.0, -1.0, 0.0)),
+    ],
+    nworld=[1, 2],
+  )
+  def test_ray_tangent(self, case, nworld):
+    """Tests that tangent and axis-parallel primitive ray intersections match MuJoCo."""
+    _, geom_type, size, point, direction = case
+    mjm, mjd, m, d = test_data.fixture(
+      xml=f"""
+        <mujoco>
+          <worldbody>
+            <geom type="{geom_type}" size="{size}"/>
+          </worldbody>
+        </mujoco>
+      """,
+      nworld=nworld,
+    )
+
+    pnts = [np.array(point, dtype=np.float64)]
+    if nworld == 2:
+      pnts.append(np.array(point, dtype=np.float64) - 0.5 * np.array(direction, dtype=np.float64))
+
+    pnt = wp.array([[wp.vec3(*p)] for p in pnts], dtype=wp.vec3)
+    vec = wp.array([[wp.vec3(*direction)] for _ in range(nworld)], dtype=wp.vec3)
+
+    dist, geomid, normal = mjw.ray(m, d, pnt, vec)
+    rc = mjw.create_render_context(mjm, nworld=nworld)
+    bvh_dist, bvh_geomid, bvh_normal = mjw.ray(m, d, pnt, vec, rc=rc)
+
+    for w in range(nworld):
+      mj_geomid = np.full(1, -1, dtype=np.int32)
+      mj_normal = np.zeros(3, dtype=np.float64)
+      mj_dist = mujoco.mj_ray(
+        mjm, mjd, pnts[w], np.array(direction, dtype=np.float64), None, True, -1, mj_geomid, mj_normal
+      )
+
+      _assert_eq(geomid.numpy()[w, 0], mj_geomid[0], f"geom_id_world_{w}")
+      _assert_eq(dist.numpy()[w, 0], mj_dist, f"dist_world_{w}")
+      _assert_eq(normal.numpy()[w, 0], mj_normal, f"normal_world_{w}")
+
+      _assert_eq(bvh_geomid.numpy()[w, 0], mj_geomid[0], f"bvh_geom_id_world_{w}")
+      _assert_eq(bvh_dist.numpy()[w, 0], mj_dist, f"bvh_dist_world_{w}")
+      _assert_eq(bvh_normal.numpy()[w, 0], mj_normal, f"bvh_normal_world_{w}")
+
+    if nworld == 2 and dist.numpy()[0, 0] >= 0:
+      self.assertFalse(np.allclose(dist.numpy()[0], dist.numpy()[1]))
+      self.assertFalse(np.allclose(bvh_dist.numpy()[0], bvh_dist.numpy()[1]))
+```
+Address tangent ray review feedback
+634f4de
+kavyabhand
+commented
+Sep 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thank you @thowell for these suggestions! Definitely helped a lot to understand better.
+I’ve simplified the BVH bounds calculation using Warp’s vector builtins and cached the output index, replaced the redundant safe_div call with direct division after the guard, and updated the rangefinder test to use distinct per-world states with separate MuJoCo references.
+I also expanded the ray parity coverage to include normals, multi-world execution, capsule cap tangency, and capsule/cylinder axis-parallel hits and misses through both regular and BVH-backed paths.
+thowell
+commented
+Sep 25, 2026
+Copy link
+Copy Markdown
+Collaborator
+Thanks for addressing the feedback! Everything looks great except for one small float32 precision issue in test_rangefinder_tangent when running on GPU:
+Use a power-of-two slide offset in test_rangefinder_tangent (mujoco_warp/_src/sensor_test.py)
+Issue:
+In test_rangefinder_tangent, the rangefinder body is rotated via euler="0 90 0". When mjw.kinematics(m, d) runs in float32, converting the $90^\circ$ quaternion $(0.70710677, 0, 0.70710677, 0)$ to site_xmat produces a ray direction vec = (1.0000001, 0.0, -7.5747835e-09) with a = wp.dot(vec, vec) = 1.0000002. In world 1 with qpos[1, 0] = -0.5 ($x = -2.5$, not a power of two), b = wp.dot(vec, dif) rounds in float32 to -2.5000002, and on CUDA GPUs where det = b * b - a * c is compiled with FMA, det evaluates 1 ULP negative (-2.384e-07 < 0.0), causing world 1 to miss (-1.0 instead of 2.5).
+Recommendation:
+Use a power-of-two slide offset such as qpos[1, 0] = -2.0 (moving world 1's ray origin to $x = -4.0$ so multiplying by vec[0] only shifts the binary exponent without mantissa rounding error), and call mjw.kinematics(m, d) unconditionally so both nworld = 1 and nworld = 2 test the GPU kinematics output.
+Code Example:
+```
+  @parameterized.parameters(1, 2)
+  def test_rangefinder_tangent(self, nworld):
+    """Tests that tangent rangefinder intersections match MuJoCo."""
+    mjm, mjd, m, d = test_data.fixture(
+      xml="""
+        <mujoco>
+          <compiler angle="degree"/>
+          <worldbody>
+            <geom type="sphere" size=".5"/>
+            <body pos="-2 .5 0" euler="0 90 0">
+              <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+              <joint type="slide" axis="0 0 1"/>
+              <site name="rangefinder"/>
+            </body>
+          </worldbody>
+          <sensor>
+            <rangefinder site="rangefinder"/>
+          </sensor>
+        </mujoco>
+      """,
+      nworld=nworld,
+    )
+
+    mjds = [mjd]
+    if nworld == 2:
+      mjd1 = mujoco.MjData(mjm)
+      qpos = d.qpos.numpy()
+      qpos[1, 0] = -2.0
+      d.qpos.assign(qpos)
+      mjd1.qpos[:] = qpos[1]
+      mujoco.mj_forward(mjm, mjd1)
+      mjds.append(mjd1)
+
+    mjw.kinematics(m, d)
+    d.sensordata.fill_(wp.inf)
+    mjw.sensor_pos(m, d)
+
+    for world_id in range(nworld):
+      _assert_eq(d.sensordata.numpy()[world_id], mjds[world_id].sensordata, f"sensordata_world_{world_id}")
+
+    if nworld == 2:
+      self.assertFalse(np.allclose(d.sensordata.numpy()[0], d.sensordata.numpy()[1]))
+```
+Stabilize tangent rangefinder test on GPU
+5e83d39
+kavyabhand
+commented
+Sep 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Updated!
+thowell
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Collaborator
+closing since the issue should be resolved by an update to warp. thanks!
+thowell
+closed this
+Sep 30, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,108 @@
+# Axis-Aligned Clipping
+
+Also called: Boundary clipping, Mesh clipping, Six-Plane Axis-Aligned Clipping
+
+## Overview
+Axis-Aligned Clipping hides portions of a 3D scene by defining up to six axis-aligned clipping planes to expose interior geometry [S1]. It differs from general plane clipping by restricting plane orientations to the coordinate axes, simplifying the intersection logic and parameterization [S1]. This method builds on [Axis Threshold Clipping](11577-axis-threshold-clipping.md) by applying the threshold logic specifically to spatial boundaries rather than data values.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A 3D scene (meshes or volumes), and six scalar values defining the clipping boundaries: $x_{min}, x_{max}, y_{min}, y_{max}, z_{min}, z_{max}$ [S1].
+*   **Outputs:** A rendered image where geometry outside the defined box is discarded [S1].
+
+**Data Structures:**
+The clipping state is defined by six scalar values. An integer parameter `clip_plane_count` indicates how many of the six possible planes are active [S1].
+
+**Steps:**
+1.  Define the six axis-aligned clipping planes based on the input values [S1].
+2.  For each primitive or sample point in the scene, determine its position relative to the planes [S1].
+3.  A point is considered "inside" if its coordinates satisfy:
+    $$x_{min} \le x \le x_{max}$$
+    $$y_{min} \le y \le y_{max}$$
+    $$z_{min} \le z \le z_{max}$$
+    [S1]
+4.  Render only the geometry that lies on the interior side of all active clipping planes [S1].
+
+**Parameters:**
+*   `clip_plane_count`: An integer up to 6, controlling the number of active planes [S1].
+*   Boundary coordinates: Specific to the scene scale [S1].
+
+**Pitfalls:**
+*   **Discarding in Fragment Shader:** In ray-marching contexts, discarding the pixel in the fragment shader prevents it from being rendered, resulting in black areas instead of showing the inner material [S2, unofficial]. The correct approach is to prevent color and alpha accumulation when the ray position is outside the clipping box [S2, unofficial].
+
+**Pseudocode:**
+The following pseudocode illustrates the boundary check logic used in ray-marching implementations to avoid the black-area pitfall [S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def within_boundaries(pos, x_min, x_max, y_min, y_max, z_min, z_max):
+    """
+    Returns True if the position is inside the clipping box, False otherwise.
+    Coordinates are assumed to be in [0, 1] space [S2, unofficial].
+    """
+    if pos.x < x_min:
+        return False
+    if pos.x > x_max:
+        return False
+    if pos.y < y_min:
+        return False
+    if pos.y > y_max:
+        return False
+    if pos.z < z_min:
+        return False
+    if pos.z > z_max:
+        return False
+    return True
+
+def ray_march_clip(volume, ray_origin, ray_direction, x_min, x_max, y_min, y_max, z_min, z_max):
+    """
+    Ray marching loop with axis-aligned clipping.
+    """
+    accumulated_color = vec3(0.0)
+    accumulated_alpha = 0.0
+    
+    # Initialize ray position
+    current_pos = ray_origin
+    
+    for i in range(MAX_STEPS):
+        # Check if current position is within the clipping box
+        if within_boundaries(current_pos, x_min, x_max, y_min, y_max, z_min, z_max):
+            # Sample volume data
+            color_sample, alpha_sample = sample_volume(volume, current_pos)
+            
+            # Accumulate color and alpha only if inside boundaries
+            accumulated_color += color_sample * alpha_sample * (1.0 - accumulated_alpha)
+            accumulated_alpha += alpha_sample * (1.0 - accumulated_alpha)
+            
+            if accumulated_alpha >= 1.0:
+                break
+        else:
+            # Skip accumulation for points outside the box
+            pass
+            
+        # Advance ray
+        current_pos += ray_direction * step_size
+        
+    return accumulated_color
+```
+
+## Subtopics
+
+### Ray-marching boundary clipping
+A technique to clip a volume during ray marching by preventing color and alpha accumulation when the ray position is outside a defined clipping box, rather than discarding the final pixel in the fragment shader [S2, unofficial]. It sets apart from standard clipping by handling the exclusion at the sample level, ensuring the interior remains visible without black artifacts [S2, unofficial]. Choose this when implementing custom volume renderers in shaders where standard depth clipping is insufficient or causes visual artifacts [S2, unofficial]. Clipping box coordinates must be within [0,1] space [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per primitive/sample for the clipping test, as it involves only six comparisons [S1].
+*   **Memory Complexity:** $O(1)$ for storing the six plane parameters [S1].
+*   **Strengths:** Simple to implement; efficient for exposing interior structures in complex geometries [S1].
+*   **Limitations:** Only supports axis-aligned cuts; cannot handle arbitrary angled slices [S1].
+*   **When to use:** When the user needs to quickly inspect the interior of a scene by cutting away outer layers along the primary axes [S1].
+*   **When not to use:** When arbitrary orientation clipping is required [S1].
+
+## Background
+Originating from early 3D visualization tools, this method is prominently featured in Smokeview, a tool for visualizing Fire Dynamics Simulation data [S1]. It allows users to define up to six clipping planes to alleviate the difficulty of viewing the interior of complicated geometries [S1]. The method is implemented via a dialog box that allows users to specify clipping values for each axis [S1].
+
+## Sources
+[S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume I : User’s Guide, https://doi.org/10.6028/nist.sp.1017-1, fetched 2026-10-26
+[S2] Clipping a volume in Three.Js giving Black area instead of Inner Material, https://stackoverflow.com/questions/56065267/clipping-a-volume-in-three-js-giving-black-area-instead-of-inner-material, fetched 2026-10-26 (unofficial)

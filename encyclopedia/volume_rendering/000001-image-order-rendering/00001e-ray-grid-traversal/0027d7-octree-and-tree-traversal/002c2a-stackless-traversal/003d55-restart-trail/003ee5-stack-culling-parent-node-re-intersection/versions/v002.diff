@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -2,8 +2,8 @@
+ Also called: Short Stack Culling
+ ## Overview
+-Stack culling is a technique for stackless or short-stack ray traversal that reduces expensive ray-primitive intersection tests by deferring the processing of multiple intersecting children. Instead of pushing all intersecting children onto the stack, the algorithm pushes the parent node itself when multiple children intersect and at least one is a leaf [S1, unofficial]. The parent is re-intersected later to cull children with hit distances greater than the current closest hit [S1, unofficial]. It sets itself apart from standard short-stack traversal by trading a small increase in traversal steps (1-7%) for a reduction in primitive intersections (2-14%), using only 1 bit of extra storage per stack entry instead of storing hit distances for every entry [S1, unofficial].
++Stack culling is a technique for stackless or short-stack ray traversal that reduces expensive ray-primitive intersection tests by deferring the processing of multiple intersecting children. Instead of pushing all intersecting children onto the stack, the algorithm pushes the parent node itself when more than two children intersect and at least one is a leaf [S1, unofficial]. The parent is re-intersected later to cull children with hit distances greater than the current closest hit [S1, unofficial]. It sets itself apart from standard short-stack traversal by trading a small increase in traversal steps (1–10%) for a reduction in primitive intersections (2–14%), using only 1 bit of extra storage per stack entry instead of storing hit distances for every entry [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: Ray, BVH (N-wide), short stack, restart trail.
++*   Input: Ray, N-wide BVH, short stack, restart trail.
+ *   Output: Closest hit distance (for closest-hit) or all hits (for any-hit).
+ 
+@@ -18,17 +18,19 @@
+ 3.  **Restart Handling:** If traversal restarts from the root, remove the first $k$ nodes from $S$ (where $k$ is the count value at the current level in the restart trail) to avoid re-traversing previously processed children [S1, unofficial].
+ 4.  **Stack Culling Decision:**
+-    *   If the number of intersecting children is greater than 2 AND at least one child is a leaf:
++    *   If more than two children intersect and at least one is a leaf:
+         *   Push the **parent node** onto the short stack, tagged as a "parent node" [S1, unofficial].
+         *   Continue traversal with the closest child (first in $S$) [S1, unofficial].
+     *   Otherwise:
+-        *   Push the intersecting children onto the short stack in back-to-front order (excluding the closest child, which is traversed next) [S1, unofficial].
+-        *   Tag the last child pushed as the "last child" to update the restart trail correctly [S1, unofficial].
++        *   Push the remaining intersecting children onto the short stack in back-to-front order [S1, unofficial].
++        *   Tag the last child pushed to update the restart trail correctly [S1, unofficial].
+ 5.  **Stack Pop (Re-intersection):**
+-    *   When popping from the stack, if the node is tagged as a "parent node":
+-        *   Set the current depth to the depth of the parent node [S1, unofficial].
++    *   When popping from the stack, find the `parentLevel` to increment the restart trail and reset lower levels [S1, unofficial].
++    *   If the node is tagged as a "parent node":
++        *   Set the current depth to `parentLevel` [S1, unofficial].
+         *   Re-intersect the parent node's children against the ray [S1, unofficial].
+         *   Use the restart trail to skip children that were already traversed [S1, unofficial].
+         *   Cull any child whose hit distance is greater than the current closest hit distance found so far [S1, unofficial].
+-    *   If the node is not a parent node, proceed with standard traversal [S1, unofficial].
++    *   If the node is not a parent node:
++        *   Set the current level to `parentLevel + 1` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -36,80 +38,75 @@
+ ```python
+ def traverse_ray(ray, bvh, short_stack, restart_trail, max_level):
+-    # Initialize
+     current_node = bvh.root
+     current_level = 0
+-    
++    current_hit = float('inf')
++
+     while True:
+-        # Get children intersections
++        # 1. Intersect children
+         children = current_node.children
+         intersections = []
+         for child in children:
+-            hit_dist = ray_intersect_bvh_box(ray, child.bbox)
+-            if hit_dist is not None:
+-                intersections.append((hit_dist, child))
+-        
+-        # Sort by distance
+-        intersections.sort(key=lambda x: x[0])
+-        
+-        # Apply restart trail to skip already processed children
++            hit = ray_intersect_box(ray, child.bbox)
++            if hit is not None:
++                intersections.append((hit, child))
++        intersections.sort(key=lambda x: x[0])  # Front-to-back order [G]
++
++        # 2. Apply restart trail to skip previously processed children
+         k = restart_trail[current_level]
+-        valid_intersections = intersections[k:]
+-        
+-        if not valid_intersections:
+-            # No new children to process, pop from stack
++        valid = intersections[k:]
++
++        if not valid:
++            # No new children; pop from stack
+             if not short_stack:
+-                return None # No more hits
+-            
+-            node, is_parent, is_last = short_stack.pop()
+-            
++                return current_hit
++
++            node, is_last, is_parent = short_stack.pop()
++
++            # Find parent level to increment trail counter [G]
++            parent_level = find_parent_level(restart_trail, current_level)
++            if parent_level < 0:
++                return current_hit
++
++            restart_trail[parent_level] += 1
++            reset_trail(restart_trail, parent_level + 1, max_level)
++
++            if is_last:
++                restart_trail[parent_level] = len(children) - 1
++
+             if is_parent:
+-                # Re-intersect parent node
+-                current_level = find_parent_level(restart_trail, current_level)
+-                restart_trail[current_level] += 1
+-                reset_trail(restart_trail, current_level + 1, max_level)
+-                
+-                # Re-evaluate children of this parent
+-                # Note: In a real implementation, this might loop back to intersection step
+-                # or directly process the re-intersection results.
+-                # For simplicity, we assume the loop continues to re-evaluate 'node'
+-                current_node = node
+-                continue
++                current_level = parent_level
+             else:
+-                if is_last:
+-                    restart_trail[current_level] = len(children) - 1
+-                current_node = node
+-                current_level += 1
+-                continue
+-        
+-        # Stack Culling Logic
+-        # If > 2 children intersect and at least one is a leaf
+-        if len(valid_intersections) > 2 and any(child.is_leaf for _, child in valid_intersections):
++                current_level = parent_level + 1
++
++            current_node = node
++            continue
++
++        # 3. Stack Culling Decision
++        # Condition: more than two children intersect and at least one is a leaf
++        if len(valid) > 2 and any(child.is_leaf for _, child in valid):
+             # Push parent instead of children
+-            short_stack.append((current_node, is_parent=True, is_last=False))
++            short_stack.append((current_node, is_last=False, is_parent=True))
+             # Continue with closest child
+-            next_dist, next_node = valid_intersections[0]
+-            current_node = next_node
++            current_node = valid[0][1]
+             current_level += 1
+         else:
+-            # Standard short stack push
+-            # Push remaining children in back-to-front order
+-            for dist, child in reversed(valid_intersections[1:]):
+-                is_last = (child == valid_intersections[-1][1])
+-                short_stack.append((child, is_parent=False, is_last=is_last))
+-            
++            # Push remaining children back-to-front
++            for i in range(len(valid) - 1, 0, -1):
++                hit, child = valid[i]
++                is_last = (i == len(valid) - 1)
++                short_stack.append((child, is_last=is_last, is_parent=False))
++
+             # Continue with closest child
+-            next_dist, next_node = valid_intersections[0]
+-            current_node = next_node
++            current_node = valid[0][1]
+             current_level += 1
+-            
+-            # Update restart trail if this is the last child
+-            if next_node == valid_intersections[-1][1]:
++
++            # If closest is last child, set trail to max
++            if current_node is valid[-1][1]:
+                 restart_trail[current_level] = len(children) - 1
+ 
+ def find_parent_level(trail, current_level):
+-    # Find the highest level with a non-max count to determine parent level
+-    # Simplified logic based on [S1, unofficial]
++    # Find highest level with count < N-1 to determine which level to increment [G]
+     for i in range(current_level, -1, -1):
+-        if trail[i] < len(bvh.children_count[i]) - 1:
++        if trail[i] < N - 1:
+             return i
+     return -1
+@@ -127,5 +124,5 @@
+ *   **Front-to-back ordering:** Strictly required for closest-hit searches to ensure culling logic remains consistent with restart trail counters [S1, unofficial]. Not required for any-hit searches [S1, unofficial].
+ *   **Precision:** Re-intersection may introduce slight numerical differences, but the culling logic relies on distance comparisons [S1, unofficial].
+-*   **Degenerate Input:** If all children are leaves, the culling condition (>2 children and at least one leaf) may not trigger, falling back to standard behavior [S1, unofficial].
++*   **Degenerate Input:** If more than two children intersect but none are leaves, the culling condition does not trigger, falling back to standard behavior [S1, unofficial].
+ 
+ ## Subtopics
+@@ -136,6 +133,6 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   Memory: Approximately 3x less than a full stack. With a short stack of 5 entries, storage is less than 44 bytes (root 64 bits, current node 32 bits, restart trail 3x32 bits, current depth 5 bits, stack entries 5x32 bits) [S1, unofficial]. A full stack with max depth 32 requires 136 bytes [S1, unofficial].
+-*   Time: Overhead in traversal steps is 1-10% for closest-hit queries and 0-5% for any-hit queries with a short stack of 5 entries [S1, unofficial]. Quad intersections are reduced by 2-14% [S1, unofficial].
++*   Memory: Approximately 3× less than a full stack. With a short stack of 5 entries, storage is less than 44 bytes (root 64 bits, current node 32 bits, restart trail 3×32 bits, current depth 5 bits, stack entries 5×32 bits) [S1, unofficial]. A full stack with max depth 32 requires 136 bytes [S1, unofficial].
++*   Time: Overhead in traversal steps is 1–10% for closest-hit queries and 0–5% for any-hit queries with a short stack of 5 entries [S1, unofficial]. Quad intersections are reduced by 2–14% [S1, unofficial].
+ 
+ **Measured Performance:**

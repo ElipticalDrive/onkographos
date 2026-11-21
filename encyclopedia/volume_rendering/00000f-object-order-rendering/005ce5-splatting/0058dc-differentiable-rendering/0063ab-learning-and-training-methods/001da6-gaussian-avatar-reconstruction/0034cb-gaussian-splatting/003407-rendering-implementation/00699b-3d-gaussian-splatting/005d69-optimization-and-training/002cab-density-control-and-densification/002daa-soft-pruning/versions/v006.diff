@@ -1,0 +1,137 @@
+--- v005.md
++++ v006.md
+@@ -4,90 +4,80 @@
+ 
+ ## Overview
+-Soft Pruning is a density control method in 3D Gaussian Splatting that removes Gaussians with low training loss contribution to maintain a robust Hessian approximation [S1, S2]. It differs from [Hard Pruning](5591-hard-pruning.md) by executing during the densification stage immediately before opacity resets, rather than after [S1, S2].
++Soft Pruning is a density control method in 3D Gaussian Splatting that removes Gaussians with low contribution to the training loss to maintain a robust Hessian approximation and reduce model size [S1, S2]. It differs from its sibling [Hard Pruning](5591-hard-pruning.md) by occurring *during* the densification stage (specifically before opacity resets) rather than after, allowing subsequent refinement iterations to recover performance [S1, S2].
+ 
+ ## How it works
+-Soft Pruning is integrated into the densification pipeline to remove Gaussians when the L1 loss is small, ensuring stable gradient signals for Hessian-based optimization [S1].
+-
+ **Inputs and Outputs:**
+-*   **Input:** The current set of 3D Gaussians $\{G_i\}$, the current training iteration $t$, the pruning ratio $R$, and the predefined reset iterations [S1].
+-*   **Output:** A reduced set of Gaussians $\{G_i'\}$ after removing the lowest-scoring fraction [S1].
++*   **Input:** The current set of Gaussians $\mathcal{G}$, the accumulated L1 loss $\mathcal{L}_1$ for each Gaussian, and the current training iteration $t$.
++*   **Output:** A reduced set of Gaussians $\mathcal{G}'$ with a specified pruning ratio.
+ 
+ **Data Structures:**
+-*   Each Gaussian $G_i$ retains standard attributes: mean position $\mathbf{p}_i$, covariance matrix $\Sigma_i$ (scale/rotation), opacity $\alpha_i$, and spherical harmonic coefficients [G].
+-*   The pruning decision relies on an "Efficient Pruning Score" [S2], though the exact mathematical formulation is not provided in the sources [S2]. Pruning is triggered when the L1 loss is small [S1].
++*   Each Gaussian $G_i$ stores its accumulated L1 loss $\mathcal{L}_{1,i}$ over the current training phase (since the last opacity reset or start of training).
++*   A global counter or flag tracks the specific iterations designated for pruning.
+ 
+ **Steps:**
+-1.  **Check Pruning Condition:** Determine if the current iteration $t$ matches a predefined opacity reset iteration [S1].
+-2.  **Evaluate Pruning Score:** For each Gaussian $G_i$, compute its pruning score [S2]. Gaussians with low scores (low loss contribution) are identified as candidates for removal [S2].
+-3.  **Apply Pruning Ratio:** Remove the bottom $R$ percent of Gaussians based on the computed scores [S1].
+-4.  **Remove Gaussians:** Delete the selected Gaussians from the scene representation [S1].
+-5.  **Continue Training:** Proceed with the opacity reset and subsequent densification steps (cloning/splitting) as defined in the parent [Density Control and Densification](5337-density-control-and-densification.md) [S1, S2].
+-
+-**Formulas:**
+-Not given in the sources. The pruning score is referred to as an "Efficient Pruning Score" [S2].
++1.  **Check Trigger:** At iterations $t \in \{6000, 9000, 12000\}$, immediately before the opacity reset operation [S1].
++2.  **Calculate Score:** For each Gaussian $G_i$, compute its contribution score based on the accumulated L1 loss $\mathcal{L}_{1,i}$ [S1]. The method assumes that Gaussians with small L1 loss are less significant for the current Hessian approximation [S1].
++3.  **Rank and Select:** Sort all Gaussians by their L1 loss in ascending order. Select the bottom $r$ fraction of Gaussians for removal, where $r$ is the pruning ratio [S1].
++4.  **Remove:** Delete the selected Gaussians from the scene representation [S1].
++5.  **Proceed:** Continue training. The remaining Gaussians are refined in the subsequent iterations [S1].
+ 
+ **Parameters:**
+-*   **Pruning Ratio ($R$):** The fraction of Gaussians to remove. Typical value: 0.8 (80%) [S1].
+-*   **Reset Iterations:** The iterations at which Soft Pruning is applied. Typical values: 6000, 9000, 12000 [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Premature Pruning:** Pruning too early, before the L1 loss converges, may remove Gaussians that are still learning [S1].
+-*   **Opacity Reset Interaction:** Soft Pruning is performed *immediately before* opacity resets to maintain the Hessian approximation [S1].
++*   **Pruning Ratio ($r$):** The fraction of Gaussians to remove. A ratio of 80% (removing 80% of Gaussians) preserves visual fidelity in experiments [S1].
++*   **Trigger Iterations:** Fixed iterations 6000, 9000, and 12000 [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def soft_pruning(gaussians, current_iteration, reset_iterations, pruning_ratio):
++def soft_pruning(gaussians, current_iteration, pruning_ratio=0.8):
+     """
+-    Perform Soft Pruning on the set of Gaussians.
++    Prunes Gaussians with low L1 loss before opacity resets.
+     
+     Args:
+-        gaussians: List of Gaussian objects with attributes:
+-                   - p: mean position
+-                   - alpha: opacity
+-                   - score: accumulated pruning score (e.g., L1 loss or gradient magnitude)
+-        current_iteration: int, current training iteration
+-        reset_iterations: list of int, iterations where opacity resets occur
+-        pruning_ratio: float, fraction of Gaussians to remove (e.g., 0.8)
++        gaussians: List of Gaussian objects, each having an attribute 'l1_loss'.
++        current_iteration: Integer, current training step.
++        pruning_ratio: Float, fraction of Gaussians to remove (e.g., 0.8).
+         
+     Returns:
+-        pruned_gaussians: List of Gaussian objects after pruning
++        List of remaining Gaussian objects.
+     """
+-    # Step 1: Check if pruning is required at this iteration
+-    if current_iteration not in reset_iterations:
++    # Check if pruning is triggered
++    if current_iteration not in [6000, 9000, 12000]:
+         return gaussians
+     
+-    # Step 2: Evaluate pruning score
+-    # [G] The exact "Efficient Pruning Score" formula is not provided in the sources [S2].
+-    # Implementers should rank Gaussians by accumulated L1 loss or gradient magnitude.
+-    # Gaussians with lower scores are pruned.
+-    for g in gaussians:
+-        g.pruning_score = g.score 
++    # Get number of Gaussians to prune
++    num_to_prune = int(len(gaussians) * pruning_ratio)
++    
++    if num_to_prune == 0:
++        return gaussians
+         
+-    # Step 3: Sort Gaussians by pruning score (ascending, so lowest score first)
+-    gaussians.sort(key=lambda g: g.pruning_score)
++    # Sort Gaussians by accumulated L1 loss (ascending)
++    # Gaussians with lower loss are considered less important for Hessian approximation
++    sorted_gaussians = sorted(gaussians, key=lambda g: g.l1_loss)
+     
+-    # Step 4: Calculate number of Gaussians to remove
+-    num_to_remove = int(len(gaussians) * pruning_ratio)
++    # Identify Gaussians to keep (those with higher loss)
++    # The bottom 'num_to_prune' are removed
++    gaussians_to_keep = sorted_gaussians[num_to_prune:]
+     
+-    # Step 5: Remove the bottom R percent
+-    pruned_gaussians = gaussians[num_to_remove:]
+-    
+-    return pruned_gaussians
++    return gaussians_to_keep
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Opacity Reset Interaction:** Pruning must occur *before* the opacity reset to ensure the Hessian approximation remains robust for the remaining Gaussians [S1].
++*   **Loss Accumulation:** The L1 loss must be accumulated correctly since the last reset. If loss is not accumulated properly, the ranking will be incorrect [S1].
++*   **High Pruning Ratio:** While 80% pruning is effective, higher ratios may degrade quality. The sources do not specify a maximum safe ratio beyond the experimental 80% [S1].
+ 
+ ## Subtopics
+ 
+ ### [Hard Pruning](5591-hard-pruning.md)
+-Hard Pruning is a density control method in 3D Gaussian Splatting that reduces model size by a constant ratio at fixed intervals after the densification stage. It differs from Soft Pruning by occurring post-densification rather than during it, relying on subsequent refinement iterations to recover performance.
++Occurs after the densification stage, relying on refinement iterations to recover performance.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The pruning step is performed only at fixed iterations (e.g., 6000, 9000, 12000), so the amortized cost per iteration is low [S1].
+-*   **Memory Complexity:** Together with Hard Pruning, the modalities reduce the Gaussian count by approximately 90% [S2].
+-*   **Performance:** Improves rendering and training speed by reducing the number of primitives [S2]. Visual fidelity is preserved even with high pruning ratios (80%) [S1].
+-*   **Strengths:** Maintains Hessian approximation quality by pruning when loss is low [S1]. Integrates seamlessly into the existing densification pipeline [S2].
+-*   **Limitations:** Requires careful timing relative to opacity resets [S1]. The specific "Efficient Pruning Score" formula is not detailed, which may require empirical tuning [S2].
++*   **Time Complexity:** Sorting Gaussians by loss takes $O(N \log N)$, where $N$ is the number of Gaussians. Selection is $O(N)$.
++*   **Memory Complexity:** $O(N)$ to store the list and sort it.
++*   **Performance:** Reduces the number of Gaussians by approximately 90% when combined with Hard Pruning, increasing rendering and training speed [S2].
++*   **Strengths:** Maintains visual fidelity even with high pruning ratios (80%) [S1]. Integrates seamlessly into the standard 3D-GS training pipeline [S2].
++*   **Limitations:** Requires specific iteration checkpoints (6000, 9000, 12000) [S1]. Effectiveness depends on the L1 loss converging quickly [S2].
+ 
+ ## Background
+-Soft Pruning was introduced in the "Speedy-Splat" paper [S1, S2]. It was developed to address the need for faster training and rendering in 3D Gaussian Splatting by reducing the number of Gaussians without sacrificing quality [S2]. The method leverages the observation that L1 loss converges quickly and remains low after iteration 6000, allowing for aggressive pruning [S1].
++Soft Pruning was introduced in the "Speedy-Splat" paper [S1, S2]. It was developed to address the need for faster rendering and training speeds by reducing the number of primitives without significant quality loss. The method leverages the observation that L1 loss becomes small after iteration 6000, except after opacity resets [S1].
+ 
+ ## Sources

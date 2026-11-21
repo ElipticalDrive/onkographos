@@ -1,0 +1,262 @@
+--- v003.md
++++ v004.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-NeRV is a differentiable inverse rendering method that reconstructs a 3D scene representation from images under unconstrained, known lighting, enabling view synthesis and relighting with indirect illumination [S1]. It extends the standard emission-absorption NeRF model by representing the scene as a 3D field of oriented particles that absorb and reflect light, parameterized by neural networks [S1]. Unlike its sibling [Neural Radiance Fields](44-radiance-field-optimization.md) which only models direct emission, or [Neural Reflectance Fields](6755-neural-radiosity.md) which is limited to single-point-light direct illumination, NeRV supports arbitrary environment lighting and one-bounce global illumination [S1]. It achieves this tractability by introducing a learned "neural visibility field" that approximates visibility and surface termination depths, reducing the complexity of light transport simulation from quadratic/cubic to linear/double-spherical integral [S1].
++NeRV is a differentiable inverse rendering method that reconstructs a 3D scene representation from images under unconstrained, known lighting, enabling view synthesis and relighting with indirect illumination [S1]. It extends the standard emission-absorption NeRF model by representing the scene as a 3D field of oriented particles that absorb and reflect light emitted by external sources, parameterized by neural networks [S1]. Unlike [Neural Radiance Fields](44-radiance-field-optimization.md) which only models direct emission, or [Neural Reflectance Fields](6755-neural-radiosity.md) which is limited to single-point-light direct illumination, NeRV supports arbitrary environment lighting and one-bounce global illumination [S1]. It achieves tractability by introducing a learned neural visibility field that approximates visibility and surface termination depths, reducing light transport simulation complexity from quadratic/cubic to linear/double-spherical integral [S1].
+ 
+ ## How it works
+-**Inputs:** A set of images of a scene illuminated by unconstrained known lighting, along with known camera poses [S1].
++**Inputs:** A set of images of a scene illuminated by unconstrained known lighting, and known camera poses [S1].
+ **Outputs:** A 3D representation that can be rendered from novel viewpoints under arbitrary lighting conditions, including indirect illumination effects [S1].
+ 
+@@ -23,5 +23,5 @@
+ 
+ **Surface Normal:**
+-The surface normal $\mathbf{n}$ is not an output of the MLP but is computed as the negative normalized gradient of the density $\sigma$ with respect to position $\mathbf{x}$, using automatic differentiation [S1]:
++The surface normal $\mathbf{n}$ is not an MLP output but is computed as the negative normalized gradient of the density $\sigma$ with respect to position $\mathbf{x}$, using automatic differentiation [S1]:
+ $$
+ \mathbf{n}(\mathbf{x}) = -\frac{\nabla_\mathbf{x} \sigma(\mathbf{x})}{\|\nabla_\mathbf{x} \sigma(\mathbf{x})\|}
+@@ -47,5 +47,4 @@
+     V(\mathbf{x}(t), \mathbf{c}) = \exp\left(-\int_0^t \sigma(\mathbf{x}(s)) \, ds\right)
+     $$
+-    Replacing the true visibility line integral with the neural visibility approximation reduces the direct lighting complexity from quadratic to linear in samples per ray [S1].
+ 
+ 2.  **Indirect Lighting ($L_{\text{indirect}}$):**
+@@ -54,5 +53,5 @@
+     L_{\text{indirect}} = \int_S L(\mathbf{x}(t_0), -\boldsymbol{\omega}_i) R(\mathbf{x}(t_0), \boldsymbol{\omega}_i, \boldsymbol{\omega}_o) \, d\boldsymbol{\omega}_i
+     $$
+-    Here, $L(\mathbf{x}(t_0), -\boldsymbol{\omega}_i)$ is the incident radiance at the surface point, which NeRV approximates with one-bounce indirect illumination [S1]. The termination depth $t_0$ is derived from the camera ray sampling of $\sigma$, not the visibility MLP's prediction for the camera direction, to ensure consistency with the sampled density [S1]. This reduces indirect lighting complexity from cubic to a double spherical integral [S1].
++    Here, $L(\mathbf{x}(t_0), -\boldsymbol{\omega}_i)$ is the incident radiance at the surface point, which for one-bounce indirect illumination is approximated using the neural visibility field and environment map [S1]. The termination depth $t_0$ is derived from the camera ray sampling of $\sigma$, not the visibility MLP's prediction for the camera direction, to ensure consistency with the sampled density [S1].
+ 
+ **Training Procedure:**
+@@ -65,91 +64,125 @@
+ 
+ ```python
+-def render_nev(ray_origin, ray_dir, env_map, shape_mlp, reflectance_mlp, visibility_mlp, N, L):
++import math
++import random
++
++def stratified_sample(lower, upper, num_samples):
++    """Returns num_samples evenly spaced points with stratified jitter in [lower, upper]."""
++    step = (upper - lower) / num_samples
++    points = []
++    for i in range(num_samples):
++        points.append(lower + (i + random.random()) * step)
++    return points
++
++def sample_sphere(num_samples):
++    """Returns num_samples uniformly distributed unit vectors on a sphere."""
++    directions = []
++    for _ in range(num_samples):
++        theta = random.uniform(0, 2 * math.pi)
++        cos_phi = random.uniform(-1, 1)
++        sin_phi = math.sqrt(1 - cos_phi**2)
++        directions.append((sin_phi * math.cos(theta), sin_phi * math.sin(theta), cos_phi))
++    return directions
++
++def microfacet_brdf(normal, wi, wo, albedo, roughness):
++    """Evaluates a standard microfacet BRDF. Returns reflectance value [G]."""
++    # Simplified diffuse approximation for implementation completeness
++    return albedo / math.pi
++
++def compute_normal(shape_mlp, x):
++    """Computes the negative normalized gradient of density using finite differences."""
++    eps = 1e-5
++    grad = [0.0, 0.0, 0.0]
++    sigma = shape_mlp(x)
++    for i in range(3):
++        x_plus = list(x)
++        x_plus[i] += eps
++        sigma_plus = shape_mlp(x_plus)
++        grad[i] = (sigma_plus - sigma) / eps
++    norm = math.sqrt(sum(g**2 for g in grad))
++    if norm < 1e-8:
++        return [0.0, 0.0, 1.0]
++    return [-g / norm for g in grad]
++
++def render_nev(c, wo, env_map, shape_mlp, reflectance_mlp, visibility_mlp, N_ray, N_light):
+     """
+     Renders a single pixel using NeRV.
+-    
+     Args:
+-        ray_origin: 3D vector c
+-        ray_dir: 3D vector omega_o
++        c: 3D vector camera origin
++        wo: 3D vector camera direction
+         env_map: Function E(x, omega) returning radiance from direction omega at x
+         shape_mlp: MLP_theta returning sigma(x)
+         reflectance_mlp: MLP_psi returning (albedo a, roughness gamma)
+         visibility_mlp: MLP_phi returning (V_tilde, t_tilde)
+-        N: number of samples along camera ray
+-        L: number of samples for light integration
+-        
++        N_ray: Number of samples along camera ray
++        N_light: Number of samples for light integration
+     Returns:
+         color: 3D vector (R, G, B)
+     """
+     # 1. Sample points along camera ray
+-    t = stratified_sample(0.0, 10.0, N)
+-    x = [ray_origin + t[i] * ray_dir for i in range(N)]
++    t_vals = stratified_sample(0.0, 10.0, N_ray)
++    x_pts = [(c[0] + t * wo[0], c[1] + t * wo[1], c[2] + t * wo[2]) for t in t_vals]
+ 
+     # 2. Evaluate density and compute transmittance/alpha
+-    sigmas = [shape_mlp(xi) for xi in x]
+-    deltas = [t[i+1] - t[i] for i in range(N-1)] + [1e-8]
+-    alpha = [1.0 - math.exp(-sigmas[i] * deltas[i]) for i in range(N)]
+-    transmittance = [1.0]
+-    for i in range(N-1):
+-        transmittance.append(transmittance[-1] * math.exp(-sigmas[i] * deltas[i]))
+-
+-    # 3. Direct lighting integral (discretized approximation of Eq 9)
++    sigmas = [shape_mlp(x) for x in x_pts]
++    deltas = [t_vals[i+1] - t_vals[i] for i in range(N_ray - 1)]
++    deltas.insert(0, 1e-10)
++
++    alphas = [1.0 - math.exp(-s * d) for s, d in zip(sigmas, deltas)]
++    transmittances = [1.0]
++    for a in alphas[:-1]:
++        transmittances.append(transmittances[-1] * (1.0 - a))
++
++    # 3. Direct Lighting Integral
+     direct_color = [0.0, 0.0, 0.0]
+-    light_dirs = sample_sphere(L)
+-    for i in range(N):
+-        if sigmas[i] < 1e-5: continue
+-        xi = x[i]
+-        albedo, roughness = reflectance_mlp(xi)
+-        normal = compute_normal(shape_mlp, xi)
+-        direct_light_sum = [0.0, 0.0, 0.0]
++    light_dirs = sample_sphere(N_light)
++
++    for i in range(N_ray):
++        if alphas[i] < 1e-5:
++            continue
++        x_i = x_pts[i]
++        sigma_i = sigmas[i]
++        T_i = transmittances[i]
++        alpha_i = alphas[i]
++
++        a_mat, gamma = reflectance_mlp(x_i)
++        n = compute_normal(shape_mlp, x_i)
++
++        light_sum = [0.0, 0.0, 0.0]
+         for wi in light_dirs:
+-            V_tilde, _ = visibility_mlp(xi, wi)
+-            E = env_map(xi, [-wi[0], -wi[1], -wi[2]])
+-            R = microfacet_brdf(normal, wi, ray_dir, albedo, roughness)
+-            direct_light_sum = [direct_light_sum[j] + V_tilde * E[j] * R[j] for j in range(3)]
+-        direct_light_avg = [s / L for s in direct_light_sum]
+-        direct_color = [direct_color[j] + transmittance[i] * alpha[i] * direct_light_avg[j] for j in range(3)]
+-
+-    # 4. Indirect lighting (one-bounce approximation at expected termination depth)
+-    total_alpha = sum(alpha)
+-    if total_alpha > 1e-5:
+-        t0 = sum(t[i] * alpha[i] for i in range(N)) / total_alpha
+-        x_surf = ray_origin + t0 * ray_dir
+-        albedo_s, roughness_s = reflectance_mlp(x_surf)
+-        normal_s = compute_normal(shape_mlp, x_surf)
+-        indirect_light_sum = [0.0, 0.0, 0.0]
++            V_tilde, _ = visibility_mlp(x_i, wi)
++            E_val = env_map(x_i, (-wi[0], -wi[1], -wi[2]))
++            R_val = microfacet_brdf(n, wi, wo, a_mat, gamma)
++            for k in range(3):
++                light_sum[k] += V_tilde * E_val[k] * R_val[k]
++
++        light_avg = [s / N_light for s in light_sum]
++        for k in range(3):
++            direct_color[k] += T_i * alpha_i * light_avg[k]
++
++    # 4. Indirect Lighting (One-bounce approximation at expected termination depth)
++    num_t0 = sum(t * a for t, a in zip(t_vals, alphas))
++    den_t0 = sum(alphas)
++    if den_t0 > 1e-8:
++        t0 = num_t0 / den_t0
++        x_surf = (c[0] + t0 * wo[0], c[1] + t0 * wo[1], c[2] + t0 * wo[2])
++
++        a_s, gamma_s = reflectance_mlp(x_surf)
++        n_s = compute_normal(shape_mlp, x_surf)
++
++        indirect_color = [0.0, 0.0, 0.0]
+         for wi in light_dirs:
+             V_tilde, _ = visibility_mlp(x_surf, wi)
+-            E = env_map(x_surf, [-wi[0], -wi[1], -wi[2]])
+-            R = microfacet_brdf(normal_s, wi, ray_dir, albedo_s, roughness_s)
+-            L_incident = [V_tilde * E[j] for j in range(3)]
+-            indirect_light_sum = [indirect_light_sum[j] + L_incident[j] * R[j] for j in range(3)]
+-        indirect_color = [s / L for s in indirect_light_sum]
++            E_val = env_map(x_surf, (-wi[0], -wi[1], -wi[2]))
++            R_val = microfacet_brdf(n_s, wi, wo, a_s, gamma_s)
++            L_inc = [V_tilde * E_val[k] for k in range(3)]
++            for k in range(3):
++                indirect_color[k] += L_inc[k] * R_val[k]
++
++        indirect_color = [s / N_light for s in indirect_color]
+     else:
+         indirect_color = [0.0, 0.0, 0.0]
+ 
+-    return [direct_color[j] + indirect_color[j] for j in range(3)]
+-
+-def stratified_sample(min_val, max_val, num_samples):
+-    step = (max_val - min_val) / num_samples
+-    return [min_val + i * step + random.uniform(0, step) for i in range(num_samples)]
+-
+-def sample_sphere(num_samples):
+-    return [(math.sin(theta)*math.cos(phi), math.sin(theta)*math.sin(phi), math.cos(theta))
+-            for theta, phi in [(math.acos(1-2*u), 2*math.pi*v) for u, v in [(random.random(), random.random()) for _ in range(num_samples)]]]
+-
+-def microfacet_brdf(normal, wi, wo, albedo, roughness):
+-    dot = max(0.0, sum(n*w for n, w in zip(normal, wi)))
+-    return [albedo[j] * dot / math.pi for j in range(3)]
+-
+-def compute_normal(shape_mlp, x):
+-    eps = 1e-5
+-    grad = [0.0, 0.0, 0.0]
+-    for d in range(3):
+-        x_plus = x.copy(); x_plus[d] += eps
+-        x_minus = x.copy(); x_minus[d] -= eps
+-        grad[d] = (shape_mlp(x_plus) - shape_mlp(x_minus)) / (2 * eps)
+-    norm = math.sqrt(sum(g*g for g in grad))
+-    return [-g/norm for g in grad]
++    return [direct_color[k] + indirect_color[k] for k in range(3)]
+ ```
+ 
+@@ -157,25 +190,11 @@
+ 
+ ### [NeRV Evaluation Variants](10273-nerv-evaluation-variants.md)
+-Inference-time strategies that trade rendering speed for shadow fidelity or material generality, addressing the base method's soft shadows and diffuse-only assumption. NeRV with Neural Visibility Fields (NVF) uses the same visibility approximations learned during training at test time, while NeRV with Test-time Tracing (Trace) replaces the learned visibility with brute-force ray tracing to estimate visibility to point light sources for sharper shadows. Both variants reuse the same trained model. A third approach defers ray queries to diffuse intersections to enable rendering for non-diffuse materials, accepting sampling-related noise as a trade-off.
++Inference-time strategies that trade rendering speed for shadow fidelity or material generality, addressing the base method's soft shadows and diffuse-only assumption.
+ 
+ ## Operating characteristics
+-**Time Complexity:**
+--   **Direct Lighting:** Reduced from quadratic to linear $O(n \cdot l)$ in samples per ray by using neural visibility approximations instead of line integrals [S1]. Specifically, replacing the visibility line integral (which would be $O(n)$ per light direction) with a single MLP query ($O(1)$) reduces the cost per ray-light pair from $O(n)$ to $O(1)$, making the total direct lighting cost $O(n \cdot l)$ where $n$ is camera ray samples and $l$ is light samples [S1].
+--   **Indirect Lighting:** Reduced from cubic to a double spherical integral $O(l \cdot d)$ at a single point [S1].
+-
+-**Memory Complexity:**
+--   Requires storing the weights of three MLPs ($\theta, \psi, \phi$) [S1].
+--   Does not require storing intermediate visibility data structures (like BVHs or distance transforms) which are prohibitively expensive to rebuild after each training iteration because the geometry changes constantly during optimization [S1].
+-
+-**Strengths:**
+--   Supports arbitrary environment lighting and one-bounce indirect illumination [S1].
+--   Tractable optimization with dynamic geometry changes because visibility is learned via MLPs rather than rebuilt discrete structures [S1].
+--   Enables relighting and view synthesis simultaneously [S1].
+-
+-**Limitations:**
+--   Produces soft shadows due to the learned visibility approximation [S1].
+--   Assumes diffuse surfaces in the base formulation (though variants exist) [S1].
+--   Indirect lighting is limited to one-bounce approximation [S1].
+--   Brute-force light transport simulation through NeRF's volumetric representation is intractable for environment lights or global illumination without this approximation [S1].
++**Time Complexity:** Direct lighting complexity is reduced from quadratic to linear in samples per ray by using neural visibility approximations instead of line integrals [S1]. Indirect lighting complexity is reduced from cubic to a double spherical integral by using hard surface approximations at expected termination depths [S1].
++**Memory Complexity:** The method requires storing the weights of three MLPs ($\theta, \psi, \phi$) [S1]. It does not require storing intermediate visibility data structures like BVHs or distance transforms, which are prohibitively expensive to rebuild after each training iteration because the geometry changes constantly during optimization [S1].
++**Strengths:** The method supports training with arbitrary environment lighting and one-bounce indirect illumination [S1]. It enables tractable optimization with dynamic geometry changes because visibility is learned via MLPs rather than rebuilt discrete structures [S1]. It simultaneously enables relighting and view synthesis [S1].
++**Limitations:** The learned visibility approximation produces soft shadows [S1]. The base formulation assumes diffuse surfaces, though variants exist to handle non-diffuse materials [S1]. Indirect lighting is limited to a one-bounce approximation [S1]. Brute-force light transport simulation through NeRF's volumetric representation is intractable for environment light sources or global illumination without this approximation [S1].
+ 
+ ## Background
+@@ -183,3 +202,4 @@
+ 
+ ## Sources
++
+ [S1] NeRV: Neural Reflectance and Visibility Fields for Relighting and View Synthesis, https://doi.org/10.1109/cvpr46437.2021.00741, fetched 2026-10-26

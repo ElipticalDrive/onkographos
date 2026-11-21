@@ -1,0 +1,339 @@
+--- v003.md
++++ v004.md
+@@ -4,177 +4,197 @@
+ 
+ ## Overview
+-Differentiable Primitive Assembly (DPA) models 3D shapes as an assembly of quadric primitives using differentiable intersection and union operations, trained with image-space losses only without 3D supervision [S1]. It differs from its sibling [Viewing Direction Gaussian Splatting](14273-viewing-direction-gaussian-splatting.md) by representing geometry via implicit quadric surfaces grouped into convexes, rather than explicit anisotropic Gaussians [S1].
++Differentiable Primitive Assembly (DPA) models 3D shapes as an assembly of learnable quadric primitives, utilizing differentiable intersection and union operations to construct the final geometry [S1]. It solves the problem of 3D shape abstraction from sparse views by replacing global continuous functions with a discrete set of primitives, trained exclusively with image-space losses without requiring 3D ground truth supervision [S1]. Unlike Gaussian Splatting which projects 2D ellipsoids, DPA evaluates implicit signed distances in 3D space and combines them via soft boolean operations, allowing for complex topologies like holes and thin structures [S1].
+ 
+ ## How it works
+-**Inputs:** Fused image features $f$ (from a shared MLP/feature network), query points $\mathbf{x}_i$ sampled along camera rays.
+-**Outputs:** Primitive parameters, selection matrix, occupancy field, rendered color $C_b$, and mask $M_c$.
++**Inputs and Outputs:**
++*   **Inputs:** Fused image features $f$ (from multiple views), query points $\mathbf{x}_i$ sampled along camera rays.
++*   **Outputs:** Primitive parameters, selection matrix, occupancy field, and rendered pixel colors $C_b$ and masks $M_c$.
+ 
+ **Data Structures:**
+-1.  **Primitive Parameters Matrix $P$**: Shape $\mathbb{R}^{P \times 7}$. Each row contains $(a, b, c, d, e, f, g)$. The first three parameters $(a, b, c)$ are enforced to be non-negative [S1].
+-2.  **Selection Matrix $T$**: Shape $\mathbb{R}^{P \times C}$. Entries are floating-point in $[0, 1]$ during training, ideally binary. Each column selects primitives for one convex [S1].
+-3.  **Weight Vector $w$**: Shape $\mathbb{R}^C$. Learnable weights close to 1 [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Query Matrix Construction**: For $N$ query points, construct matrix $Q \in \mathbb{R}^{N \times 7}$ where the $i$-th row is $(x_i^2, y_i^2, z_i^2, x_i, y_i, z_i, 1)$ [S1].
+-2.  **Distance Estimation**: Compute $D = QP^\top \in \mathbb{R}^{N \times P}$. $D_{i,p}$ is the approximate signed distance between point $i$ and primitive $p$. $D_{i,p} < 0$ if inside, $> 0$ if outside [S1].
+-3.  **Convex Occupancy**: Compute $O = \text{ReLU}(D)T \in \mathbb{R}^{N \times C}$. $O_{i,c} = 0$ if point $i$ is inside convex $c$, $> 0$ if outside [S1].
+-4.  **Exact Occupancy**: Compute $a^*_i = \min_{1 \le c \le C} O_{i,c}$. $a^*_i = 0$ if inside, $> 0$ if outside [S1].
+-5.  **Soft Occupancy**: Compute $a^+_i = \mathcal{L}(\sum_{c=1}^C w_c \mathcal{L}(1 - O_{i,c}))$, where $\mathcal{L}(\cdot)$ clips input to $[0, 1]$. $a^+_i \approx 1$ if inside, $< 1$ if outside [S1].
+-6.  **Opacity Assignment**:
+-    *   Phase 1: $\alpha_i = a^+_i$ [S1].
+-    *   Phases 2 & 3: $\alpha_i = \exp(-10 a^*_i)$ [S1].
+-7.  **Differentiable Rendering**:
+-    *   Color: $C_b = \sum_{i=1}^R t_i \alpha_i c_{b,i}$, where $t_i = \prod_{k=1}^{i-1} (1 - \alpha_k)$ [S1].
+-    *   Mask: $M_c = \sum_{i \in \Omega} t_i \alpha_i$ [S1].
+-8.  **Loss Computation**:
+-    *   Photo/Mask Loss: $\mathcal{L}_{ph} = \frac{1}{B} \sum_{j=1}^B ||\hat{C}_j - C_j||_2^2 + \frac{1}{B} \sum_{j=1}^B ||\hat{M}_j - M_j||_2^2$ [S1].
+-    *   Selection Loss: $\mathcal{L}_T = \sum_{i,j} \max(-T_{i,j}, 0) + \max(T_{i,j} - 1, 0)$ [S1].
+-    *   Weight Loss: $\mathcal{L}_w = \sum_j |w_j - 1|$ [S1].
+-    *   Overlapping Loss: $\mathcal{L}_{over} = \sum_{i \in \Omega} \max(h_i, 1.9)$, where $h_i = \sum_{c=1}^C \exp(-10 O_{i,c})$ and $\Omega = \{i | a^*_i < 0.01\}$ [S1].
+-9.  **Silhouette-aware Sampling**: Sample 256 pixels randomly and 1,000 pixels around contours (obtained via morphological closing + Gaussian noise on mask) [S1].
+-10. **Primitive Dropout (Phase 3 only)**: Iterate rows of binary $T$. Set $p$-th row to zero, compute new occupancy $b^*$. Quantify variation $v = K \sum_{i=1}^P \mathbb{1}(\text{XOR}(b^*_i < 0.1, a^*_i < 0.1))$. If $v \approx 0$, keep zero; else restore. Apply every 400 iterations [S1].
+-
+-**Pseudocode:**
++1.  **Primitive Parameters Matrix $\mathbf{P}$:** Shape $\mathbb{R}^{P \times 7}$. Each row $p$ contains $(a, b, c, d, e, f, g)$. The first three parameters $(a, b, c)$ are constrained to be non-negative to ensure convexity [S1].
++2.  **Selection Matrix $\mathbf{T}$:** Shape $\mathbb{R}^{P \times C}$. Ideally binary, but takes floating-point values in $[0, 1]$ during training. Each column $c$ selects a subset of primitives to form one convex shape [S1].
++3.  **Weight Vector $\mathbf{w}$:** Shape $\mathbb{R}^{C}$. Learnable weights for the soft union operation, initialized close to 1 [S1].
++
++**Parameters:**
++*   $P = 4,096$: Number of primitives [S1].
++*   $C = 256$: Number of convexes [S1].
++*   Optimizer: Adam, learning rate $0.0001$ [S1].
++*   Batch size: 4 object instances [S1].
++
++**Steps:**
++
++1.  **Primitive Parameterization:**
++    Define a quadric primitive equation for a query point $(x, y, z)$:
++    $$ |a|x^2 + |b|y^2 + |c|z^2 + dx + ey + fz + g = 0 $$
++    where $(a, b, c, d, e, f, g)$ are the parameters from matrix $\mathbf{P}$ [S1].
++
++2.  **Distance Estimation:**
++    Construct a query matrix $\mathbf{Q}$ where the $i$-th row is $(x_i^2, y_i^2, z_i^2, x_i, y_i, z_i, 1)$ for $N$ query points [S1].
++    Compute the distance matrix $\mathbf{D} = \mathbf{Q}\mathbf{P}^\top$. The entry $D_{i,p}$ is the approximate signed distance between point $i$ and primitive $p$. $D_{i,p} < 0$ indicates the point is inside the primitive [S1].
++
++3.  **Primitive Intersection (Convex Construction):**
++    Compute the convex occupancy matrix $\mathbf{O} = \text{ReLU}(\mathbf{D})\mathbf{T}$.
++    $$ O_{i,c} = \sum_{p=1}^P \text{ReLU}(D_{i,p}) T_{p,c} $$
++    $O_{i,c} = 0$ if point $i$ is inside convex $c$, and $O_{i,c} > 0$ if outside [S1].
++
++4.  **Union of Convexes (Occupancy):**
++    Compute the exact occupancy $\mathbf{a}^*$ using min-pooling (union):
++    $$ a^*_i = \min_{1 \leq c \leq C} O_{i,c} $$
++    $$ a^*_i = \begin{cases} 0 & \text{inside} \\ > 0 & \text{outside} \end{cases} $$
++    For gradient flow during training, use the soft approximation $\mathbf{a}^+$:
++    $$ a^+_i = \mathcal{L} \left( \sum_{c=1}^C w_c \mathcal{L} (1 - O_{i,c}) \right) $$
++    where $\mathcal{L}(\cdot)$ clips input to $[0, 1]$. $a^+_i \approx 1$ if inside, $< 1$ if outside [S1].
++
++5.  **Differentiable Rendering:**
++    For each pixel, accumulate color and mask along the ray with $R$ sampled points:
++    $$ C_b = \sum_{i=1}^R t_i \alpha_i c_{b,i} $$
++    $$ M_c = \sum_{i \in \Omega} t_i \alpha_i $$
++    where $t_i = \prod_{k=1}^{i-1} (1 - \alpha_k)$ is the transmittance, $\alpha_i$ is the opacity (derived from occupancy), and $c_{b,i}$ is the color predicted by an MLP [S1].
++
++6.  **Loss Computation:**
++    *   **Photo/Mask Loss ($\mathcal{L}_{ph}$):**
++        $$ \mathcal{L}_{ph} = \frac{1}{B} \sum_{j=1}^B ||\hat{C}_j - C_j||_2^2 + \frac{1}{B} \sum_{j=1}^B ||\hat{M}_j - M_j||_2^2 $$
++        where $B$ is the number of pixels in the batch [S1].
++    *   **Selection Matrix Loss ($\mathcal{L}_T$):**
++        $$ \mathcal{L}_T = \sum_{i,j} \max(-T_{i,j}, 0) + \max(T_{i,j} - 1, 0) $$
++        Constrains $\mathbf{T}$ entries to $[0, 1]$ [S1].
++    *   **Weight Loss ($\mathcal{L}_w$):**
++        $$ \mathcal{L}_w = \sum_j |w_j - 1| $$
++        Keeps weights close to 1 [S1].
++    *   **Overlapping Loss ($\mathcal{L}_{over}$):**
++        $$ h_i = \sum_{c=1}^C \exp(-10 O_{i,c}) $$
++        $$ \mathcal{L}_{over} = \sum_{i \in \Omega} \max(h_i, 1.9) $$
++        where $\Omega$ is the set of points inside the shape ($a^*_i < 0.01$). Penalizes excessive overlap between convexes [S1].
++
++7.  **Training Phases:**
++    *   **Pretraining:** Minimize $\mathcal{L} = \mathcal{L}_{ph} + \mathcal{L}_T + \mathcal{L}_w$. Opacity $\alpha = a^+$. Optimize network, $\mathbf{T}$, and $\mathbf{w}$ [S1].
++    *   **Test-Time Adaptation (TTA) Phase 1:** Use test images as GT. Loss $\mathcal{L}_{ph} + \mathcal{L}_T + \mathcal{L}_w$. Opacity $\alpha = a^+$. Optimize network, $\mathbf{T}$, $\mathbf{w}$ [S1].
++    *   **TTA Phase 2:** Use exact occupancy $a^*$. Loss $\mathcal{L}_{ph} + \mathcal{L}_T$. Opacity $\alpha = \exp(-10a^*)$. Optimize network, $\mathbf{T}$ [S1].
++    *   **TTA Phase 3:** Binarize $\mathbf{T}$ with threshold 0.01 and freeze it. Loss $\mathcal{L}_{ph} + \mathcal{L}_{over}$. Opacity $\alpha = \exp(-10a^*)$. Optimize network only [S1].
++
++8.  **Silhouette-Aware Sampling:**
++    Sample 256 pixels randomly across raster space and 1,000 pixels around object contours. Contours are obtained by morphological closing on the mask image plus Gaussian noise [S1].
++
++9.  **Primitive Dropout (Phase 3):**
++    Iterate through each row $p$ of binary $\mathbf{T}$. Set row $p$ to zero, compute new occupancy $b^*$, and quantify variation:
++    $$ v = K \sum_{i=1}^P \mathbb{1}(\text{XOR}(b^*_i < 0.1, a^*_i < 0.1)) $$
++    where $K = 40,960$ is the number of sampled points. If $v \approx 0$, keep row zero; else restore. Apply every 400 iterations [S1].
+ 
+ ```python
+-import numpy as np
++import torch
++import torch.nn.functional as F
+ 
+ def compute_quadric_distance(query_points, primitive_params):
+     """
+-    query_points: (N, 3)
+-    primitive_params: (P, 7) -> (a, b, c, d, e, f, g)
+-    Returns: D (N, P)
++    query_points: (N, 3) tensor of (x, y, z)
++    primitive_params: (P, 7) tensor of (a, b, c, d, e, f, g)
++    Returns: (N, P) distance matrix D
+     """
+     # Q: (N, 7)
+     x, y, z = query_points[:, 0], query_points[:, 1], query_points[:, 2]
+-    Q = np.column_stack([x**2, y**2, z**2, x, y, z, np.ones(N)])
+-    # D = Q @ P^T
+-    D = Q @ primitive_params.T
++    Q = torch.stack([x**2, y**2, z**2, x, y, z, torch.ones_like(x)], dim=1)
++    
++    # P: (P, 7)
++    # D = Q @ P.T -> (N, P)
++    D = torch.matmul(Q, primitive_params.T)
+     return D
+ 
+ def compute_convex_occupancy(D, T):
+     """
+-    D: (N, P)
+-    T: (P, C)
+-    Returns: O (N, C)
+-    """
+-    # O = ReLU(D) @ T
+-    O = np.maximum(D, 0) @ T
++    D: (N, P) distance matrix
++    T: (P, C) selection matrix
++    Returns: (N, C) convex occupancy O
++    """
++    # ReLU(D) -> (N, P)
++    relu_D = F.relu(D)
++    # O = ReLU(D) @ T -> (N, C)
++    O = torch.matmul(relu_D, T)
+     return O
+ 
+ def compute_exact_occupancy(O):
+     """
+-    O: (N, C)
+-    Returns: a_star (N,)
+-    """
+-    a_star = np.min(O, axis=1)
++    O: (N, C) convex occupancy
++    Returns: (N,) exact occupancy a_star
++    """
++    # a_star = min(O) over C
++    a_star = torch.min(O, dim=1)[0]
+     return a_star
+ 
+ def compute_soft_occupancy(O, w):
+     """
+-    O: (N, C)
+-    w: (C,)
+-    Returns: a_plus (N,)
+-    """
+-    # L(x) = clip(x, 0, 1)
+-    clipped = np.clip(1 - O, 0, 1)
+-    # sum_c w_c * L(1 - O_ic)
+-    weighted_sum = clipped @ w
+-    a_plus = np.clip(weighted_sum, 0, 1)
++    O: (N, C) convex occupancy
++    w: (C,) weight vector
++    Returns: (N,) soft occupancy a_plus
++    """
++    # L(1 - O) clips to [0, 1]
++    clipped = torch.clamp(1 - O, 0, 1)
++    # weighted sum
++    weighted_sum = torch.sum(w * clipped, dim=1)
++    # final clip
++    a_plus = torch.clamp(weighted_sum, 0, 1)
+     return a_plus
+ 
+-def render_ray(points_along_ray, opacities, colors):
+-    """
+-    points_along_ray: (R,) - sorted by depth
+-    opacities: (R,)
+-    colors: (R, 3)
+-    Returns: color (3,), mask (1,)
+-    """
+-    R = len(points_along_ray)
+-    transmittance = np.ones(R + 1)
+-    for i in range(R - 1, -1, -1):
+-        transmittance[i] = transmittance[i+1] * (1 - opacities[i])
+-    
+-    color = np.zeros(3)
+-    mask = 0.0
+-    for i in range(R):
+-        t_i = transmittance[i]
+-        alpha_i = opacities[i]
+-        color += t_i * alpha_i * colors[i]
+-        mask += t_i * alpha_i
++def render_ray(points_along_ray, colors_along_ray, occupancy_values, opacity_func):
++    """
++    points_along_ray: (R,) indices or not needed if sorted by depth
++    colors_along_ray: (R, 3)
++    occupancy_values: (R,) alpha input
++    opacity_func: function to convert occupancy to alpha
++    Returns: color, mask, transmittance history
++    """
++    alpha = opacity_func(occupancy_values)
++    # Clamp alpha to avoid NaN gradients
++    alpha = torch.clamp(alpha, 0, 0.999)
++    
++    transmittance = torch.ones_like(alpha)
++    for i in range(1, len(alpha)):
++        transmittance[i] = transmittance[i-1] * (1 - alpha[i-1])
+         
++    # Color accumulation
++    # C = sum(t_i * alpha_i * c_i)
++    # Note: t_i in formula is product of (1-alpha) for k < i
++    # In loop above, transmittance[i] is t_i
++    weights = transmittance * alpha
++    color = torch.sum(weights.unsqueeze(1) * colors_along_ray, dim=0)
++    
++    # Mask accumulation
++    mask = torch.sum(weights)
++    
+     return color, mask
+ 
+-def compute_overlapping_loss(O, a_star):
+-    """
+-    O: (N, C)
+-    a_star: (N,)
+-    Returns: L_over (scalar)
+-    """
+-    # Omega: points inside shape
+-    mask_inside = a_star < 0.01
+-    if not np.any(mask_inside):
+-        return 0.0
+-    
+-    # h_i = sum_c exp(-10 * O_ic)
+-    h = np.sum(np.exp(-10 * O), axis=1)
+-    
+-    # L_over = sum_{i in Omega} max(h_i, 1.9)
+-    h_inside = h[mask_inside]
+-    L_over = np.sum(np.maximum(h_inside, 1.9))
+-    return L_over
+-
+-def primitive_dropout_check(T, primitive_params, query_points, K=40960):
+-    """
+-    T: (P, C) binary
+-    Returns: T_pruned (P, C)
+-    """
+-    P, C = T.shape
+-    # Sample K points around shape (simplified: use existing query points or resample)
+-    # For implementation, assume we have a set of K points 'sampled_points'
+-    # D_new = compute_quadric_distance(sampled_points, primitive_params)
+-    # O_new = compute_convex_occupancy(D_new, T_pruned_candidate)
+-    # a_star_new = compute_exact_occupancy(O_new)
+-    # v = K * sum(XOR(a_star_new < 0.1, a_star_old < 0.1))
+-    # If v close to 0, keep row zero.
+-    pass # Logic depends on specific sampling strategy not fully detailed in source for general case
++def loss_ph(pred_color, gt_color, pred_mask, gt_mask):
++    return F.mse_loss(pred_color, gt_color) + F.mse_loss(pred_mask, gt_mask)
++
++def loss_T(T):
++    # max(-T, 0) + max(T-1, 0)
++    return torch.sum(torch.clamp(-T, min=0)) + torch.sum(torch.clamp(T - 1, min=0))
++
++def loss_overlapping(O, a_star):
++    # Omega: points inside shape (a_star < 0.01)
++    inside_mask = a_star < 0.01
++    if not torch.any(inside_mask):
++        return torch.tensor(0.0)
++    
++    # h_i = sum(exp(-10 * O_i,c))
++    h = torch.sum(torch.exp(-10 * O), dim=1)
++    
++    # Only penalize points inside shape
++    h_inside = h[inside_mask]
++    
++    # max(h_i, 1.9)
++    penalty = torch.clamp(h_inside - 1.9, min=0)
++    return torch.sum(penalty)
+ ```
+ 
+-**Parameters:**
+-*   $P = 4,096$ (Number of primitives) [S1].
+-*   $C = 256$ (Number of convexes) [S1].
+-*   Optimizer: Adam, LR $0.0001$ [S1].
+-*   Batch size: 4 object instances [S1].
+-*   Hardware: 4 NVIDIA Tesla V100 GPUs [S1].
+-*   Point Sampling for $\mathcal{L}_{over}$: 40,960 points surrounding the shape [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Complex Topologies**: Random pixel sampling struggles with thin structures or holes; silhouette-aware sampling is required [S1].
+-*   **Redundant Primitives**: Primitive dropout is needed to remove redundant primitives (up to 29%) [S1].
+-*   **Generalization**: Pretrained models may underperform on novel shapes deviating from training data; test-time adaptation is necessary [S1].
+-
+-## Subtopics
+-
+-### Test-Time Adaptation
+-A three-phase refinement process for instance-specific shapes. Phase 1 uses soft occupancy and all losses. Phase 2 switches to exact occupancy and removes weight loss. Phase 3 binarizes $T$, freezes it, and adds overlapping loss [S1].
+-
+-### Silhouette-Aware Sampling
+-Adaptive pixel sampling allocating more pixels to object contours to handle complex topologies [S1].
+-
+-### Primitive Dropout
+-A regularization technique to remove redundant primitives by checking if removing a primitive significantly alters the shape [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Not given in the sources.
+-*   **Measured Performance**: Trained on sparse-view images. Achieves compact primitive assembly with up to 29% redundant primitives removed [S1].
+-*   **Strengths**: Differentiable intersection/union allows training with image-space losses only. Handles complex structures via silhouette-aware sampling and dropout [S1].
+-*   **Limitations**: Requires test-time adaptation for novel shapes. Struggles with random sampling on complex topologies [S1].
+-*   **When to Use**: When 3D supervision is unavailable and sparse-view input is provided. When compact, structured representation is desired [S1].
+-*   **When Not to Use**: When dense multi-view input is available and explicit geometry is preferred over implicit assembly [S1].
++*   **Time Complexity:** Dominated by the matrix multiplications $\mathbf{Q}\mathbf{P}^\top$ ($O(N \cdot P)$) and $\text{ReLU}(\mathbf{D})\mathbf{T}$ ($O(N \cdot P \cdot C)$). With $N$ query points, $P=4096$, and $C=256$, this is computationally heavier than simple Gaussian splatting per point but allows for complex CSG-like structures.
++*   **Memory Complexity:** Requires storing $\mathbf{P}$ ($P \times 7$), $\mathbf{T}$ ($P \times C$), and intermediate matrices $\mathbf{D}$ ($N \times P$) and $\mathbf{O}$ ($N \times C$) during forward pass.
++*   **Strengths:** Capable of representing complex topologies (holes, thin structures) better than simple point clouds or Gaussians. Differentiable CSG operations allow for end-to-end training from images only.
++*   **Limitations:** Requires careful tuning of the multi-phase test-time adaptation. The soft approximation of occupancy can lead to "blobby" artifacts if not regularized. Redundant primitives may persist without dropout.
++*   **When to use:** When sparse-view 3D reconstruction requires explicit geometric abstraction with complex topology, and 3D ground truth is unavailable.
++*   **When not to use:** For real-time rendering of simple scenes where Gaussian Splatting is sufficient, or when dense multi-view input is available and neural radiance fields are preferred.
+ 
+ ## Background
+-DPA-Net was introduced in 2024 by the authors of "DPA-Net: Structured 3D Abstraction from Sparse Views via Differentiable Primitive Assembly" [S1]. It builds on CAPRI-Net [S1] and adopts intersection/union operations from [6, 55]. It is used for 3D shape abstraction from sparse views [S1].
++DPA was introduced in the DPA-Net paper, inspired by CAPRI-Net and other works on differentiable CSG [S1]. It addresses the limitations of NeRF variants in abstracting complex 3D structures by explicitly modeling primitives. The method was developed to improve generalization to novel shapes via test-time adaptation [S1].
+ 
+ ## Sources

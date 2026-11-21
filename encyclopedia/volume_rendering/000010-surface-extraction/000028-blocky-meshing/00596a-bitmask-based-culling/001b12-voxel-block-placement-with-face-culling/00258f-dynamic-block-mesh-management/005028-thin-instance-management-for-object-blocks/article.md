@@ -1,0 +1,241 @@
+# Thin Instance Management for Object Blocks
+
+Also called: InstanceManager, ObjectMesher
+
+## Overview
+Thin Instance Management for Object Blocks manages a pool of thin instances per voxel block ID to render static object meshes efficiently, handling instance addition, removal, matrix updates, buffer resizing, and world rebasing [S1, unofficial]. It builds on [Dynamic Block Mesh Management](3574-dynamic-block-mesh-management.md) by providing the specific data structures and update logic required to translate block-level changes into GPU-friendly instance buffers.
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Block state changes (set/clear), world rebasing deltas, and instance transformation data (local coordinates, optional custom transforms).
+*   **Output:** A contiguous `Float32Array` buffer containing 4x4 transformation matrices, updated instance counts, and visibility flags for the rendering mesh.
+
+**Data Structures**
+The manager maintains three primary structures [S1, unofficial]:
+1.  **Instance Buffer:** A `Float32Array` of size `capacity * 16`. Each instance occupies 16 consecutive floats representing a 4x4 transformation matrix. Instance index $i$ maps to buffer offset $i \ll 4$ (i.e., $16 \times i$).
+2.  **Key-to-Index Map (`keyToIndex`):** Maps string location keys (e.g., `"i,j,k"`) to their current integer index in the instance buffer.
+3.  **Index-to-Key Map (`locToKey`):** Maps integer instance indices back to their string location keys.
+
+**Numbered Steps**
+
+1.  **Initialization:** Initialize the chunk storage.
+    ```javascript
+    chunk._objectBlocks = {}
+    ```
+
+2.  **Block Set/Clear Handling:** When a block at a specific location changes state:
+    *   If the old block ID was valid (`oldID > 0`), remove the existing instance: `oldMgr.removeInstance(chunk, key)`.
+    *   If the new block ID is valid (`blockID > 0`):
+        *   Call a custom mesh handler if one is present.
+        *   Add the new instance: `mgr.addInstance(chunk, key, i, j, k, xform, rebaseOffset)`.
+
+3.  **World Rebasing:** When the world origin shifts:
+    *   Update the global `rebaseOffset` by the delta.
+    *   Iterate through all managers. For each instance, subtract the delta from the matrix translation components located at buffer indices `ix + 12`, `ix + 13`, and `ix + 14` (corresponding to the 4th column of the 4x4 matrix).
+    *   Mark the buffer as dirty.
+
+4.  **Adding an Instance:**
+    *   **Buffer Expansion:** If `count >= capacity`, expand the buffer. The new capacity is `max(8, capacity * 2)`.
+    *   **Matrix Calculation:**
+        *   **Case A (Custom Transform):** If a custom transform exists, calculate the world matrix. The translation component is derived from: `chunk.pos - rebaseVec + localPos`. The matrix is computed and copied as 16 floats.
+        *   **Case B (Default):** If no custom transform exists, set the translation to `chunk.pos - rebaseVec + localPos + 0.5` on the x and z axes. Copy an identity matrix with this translation.
+    *   **Mapping Update:** Update `keyToIndex` and `locToKey` to reflect the new instance's position in the buffer.
+
+5.  **Updating the Mesh:**
+    *   If the buffer is marked dirty:
+        *   Set `mesh.thinInstanceCount = count`.
+        *   Call `mesh.thinInstanceBufferUpdated('matrix')`.
+        *   Set visibility based on the current count.
+
+6.  **Buffer Resizing Logic:**
+    *   **Expand:** Triggered when `count >= capacity`. New capacity: `max(8, capacity * 2)`.
+    *   **Contract:** Triggered when `count < capacity * 0.4` AND `capacity >= 100`.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class ThinInstanceManager:
+    def __init__(self):
+        self.buffer = None  # Float32Array
+        self.capacity = 0
+        self.count = 0
+        self.key_to_index = {}  # Map: str -> int
+        self.loc_to_key = {}    # Map: int -> str
+        self.dirty = False
+        self.rebase_offset = [0, 0, 0]
+
+    def add_instance(self, chunk, key, i, j, k, xform, rebase_vec):
+        # 1. Ensure buffer has space
+        if self.count >= self.capacity:
+            self._resize_buffer()
+
+        # 2. Calculate transformation matrix
+        # Local position derived from block coordinates i, j, k
+        local_pos = [i, j, k]
+        
+        # Determine translation base
+        # chunk.pos is the world position of the chunk
+        # rebase_vec is the current rebase offset
+        base_translation = [
+            chunk.pos[0] - rebase_vec[0] + local_pos[0],
+            chunk.pos[1] - rebase_vec[1] + local_pos[1],
+            chunk.pos[2] - rebase_vec[2] + local_pos[2]
+        ]
+
+        if xform is not None:
+            # Custom transform provided
+            # Compute world matrix from xform and base_translation
+            matrix = self._compute_world_matrix(xform, base_translation)
+        else:
+            # Default identity matrix with translation
+            # Add 0.5 to x and z for centering within the voxel
+            base_translation[0] += 0.5
+            base_translation[2] += 0.5
+            matrix = self._identity_matrix_with_translation(base_translation)
+
+        # 3. Store matrix in buffer
+        # Instance index is the current count before increment
+        idx = self.count
+        offset = idx << 4  # idx * 16
+        
+        # Copy 16 floats into buffer at offset
+        for f in range(16):
+            self.buffer[offset + f] = matrix[f]
+
+        # 4. Update mappings
+        self.key_to_index[key] = idx
+        self.loc_to_key[idx] = key
+        self.count += 1
+        self.dirty = True
+
+    def remove_instance(self, chunk, key):
+        if key not in self.key_to_index:
+            return
+
+        # 1. Get index of instance to remove
+        idx = self.key_to_index[key]
+        
+        # 2. Swap with tail instance to maintain contiguous layout
+        tail_idx = self.count - 1
+        
+        if idx != tail_idx:
+            # Get the key of the tail instance
+            tail_key = self.loc_to_key[tail_idx]
+            
+            # Copy tail's matrix to the removed instance's slot
+            src_offset = tail_idx << 4
+            dst_offset = idx << 4
+            
+            for f in range(16):
+                self.buffer[dst_offset + f] = self.buffer[src_offset + f]
+            
+            # Update mappings for the moved instance
+            self.key_to_index[tail_key] = idx
+            self.loc_to_key[idx] = tail_key
+            
+        # 3. Remove the tail entry
+        del self.loc_to_key[tail_idx]
+        del self.key_to_index[key]
+        
+        self.count -= 1
+        self.dirty = True
+
+        # 4. Check for contraction
+        if self.count < self.capacity * 0.4 and self.capacity >= 100:
+            self._resize_buffer()
+
+    def update_matrices(self, delta):
+        """Called during world rebasing"""
+        # Subtract delta from translation components of all instances
+        for idx in range(self.count):
+            offset = idx << 4
+            # Translation components are at indices 12, 13, 14 of the 4x4 matrix
+            self.buffer[offset + 12] -= delta[0]
+            self.buffer[offset + 13] -= delta[1]
+            self.buffer[offset + 14] -= delta[2]
+        
+        self.dirty = True
+
+    def apply_to_mesh(self, mesh):
+        if not self.dirty:
+            return
+        
+        mesh.thinInstanceCount = self.count
+        mesh.thinInstanceBufferUpdated('matrix')
+        
+        # Set visibility based on count
+        if self.count == 0:
+            mesh.visible = False
+        else:
+            mesh.visible = True
+            
+        self.dirty = False
+
+    def _resize_buffer(self):
+        if self.count < self.capacity * 0.4 and self.capacity >= 100:
+            # Contract
+            new_capacity = self.capacity // 2
+            if new_capacity < 8:
+                new_capacity = 8
+            self._shrink_buffer(new_capacity)
+        else:
+            # Expand
+            new_capacity = max(8, self.capacity * 2)
+            self._grow_buffer(new_capacity)
+
+    def _grow_buffer(self, new_capacity):
+        # Create new larger buffer
+        new_buffer = Float32Array(new_capacity * 16)
+        if self.buffer:
+            # Copy existing data
+            for i in range(self.count * 16):
+                new_buffer[i] = self.buffer[i]
+        self.buffer = new_buffer
+        self.capacity = new_capacity
+
+    def _shrink_buffer(self, new_capacity):
+        # Create new smaller buffer
+        new_buffer = Float32Array(new_capacity * 16)
+        # Copy only used data
+        for i in range(self.count * 16):
+            new_buffer[i] = self.buffer[i]
+        self.buffer = new_buffer
+        self.capacity = new_capacity
+
+    def _identity_matrix_with_translation(self, translation):
+        # Returns a 4x4 matrix as a flat array of 16 floats
+        # [1, 0, 0, 0,
+        #  0, 1, 0, 0,
+        #  0, 0, 1, 0,
+        #  tx, ty, tz, 1]
+        return [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            translation[0], translation[1], translation[2], 1
+        ]
+
+    def _compute_world_matrix(self, xform, base_translation):
+        # Placeholder for custom transform logic
+        # Combines xform (rotation/scale) with base_translation
+        # Implementation details depend on specific xform structure
+        # [G] Assuming xform is a 4x4 matrix or similar structure
+        # that needs to be multiplied by a translation matrix
+        pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Adding/removing instances is $O(1)$ amortized for buffer access, but $O(N)$ for buffer resizing where $N$ is the new capacity. Rebasing is $O(M)$ where $M$ is the number of instances.
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of active instances, storing 16 floats per instance plus mapping overhead.
+*   **Strengths:** Efficiently handles dynamic changes in voxel blocks without rebuilding the entire mesh. The swap-with-tail removal strategy keeps the buffer contiguous, which is critical for GPU thin instance rendering.
+*   **Limitations:** Buffer resizing can cause stalls if not managed carefully. The contraction threshold (40% usage) prevents frequent resizing but may leave memory unused.
+*   **When to use:** Ideal for voxel-based engines where static objects (trees, rocks, buildings) are added/removed frequently within chunked worlds.
+*   **When not to use:** Not suitable for highly dynamic meshes where vertices change, or for scenes with very few instances where the overhead of the manager outweighs the benefits.
+
+## Background
+This method originates from the NOA (Noa) voxel engine framework, developed by fenomas [S1, unofficial]. It is part of the engine's rendering pipeline, specifically designed to optimize the display of static objects within a voxel world by leveraging GPU thin instancing. The approach addresses the performance bottleneck of rendering many individual static meshes by batching them into a single draw call with per-instance transformation matrices.
+
+## Sources
+[S1] fenomas/noa, https://github.com/fenomas/noa, fetched 2026-10-26 (unofficial)

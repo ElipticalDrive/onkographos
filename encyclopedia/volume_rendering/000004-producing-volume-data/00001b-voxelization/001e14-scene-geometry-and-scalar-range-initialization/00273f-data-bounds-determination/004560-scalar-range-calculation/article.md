@@ -1,0 +1,100 @@
+# Scalar Range Calculation
+
+Also called: Global Scalar Range Computation, Union of Point and Cell Ranges
+
+## Overview
+Scalar Range Calculation determines the global minimum and maximum values for scalar fields in a volume dataset to establish the normalization range for visualization transfer functions [S1, unofficial]. It aggregates extremal values from both point and cell data structures, distinguishing itself from [Local Density Bounds via Sliding Window](12750-local-density-bounds-via-sliding-window.md) by computing a static global range rather than local adaptive bounds, and from [Data Bounds Determination](3997-data-bounds-determination.md) by focusing on scalar extents rather than spatial coordinates [S1, unofficial].
+
+## How it works
+**Inputs:** A mesh object containing `pointScalars` (array of point-based scalar values), `cellScalars` (array of cell-based scalar values), and optionally a legacy `scalars` vector [S1, unofficial]. An optional `scalarName` parameter restricts calculation to a specific field [S1, unofficial].
+
+**Outputs:** A global scalar range defined by `scalarMin` and `scalarMax` [S1, unofficial].
+
+**Data Structures:**
+- `point_ranges`: Dictionary mapping field names to `(min, max)` tuples from point data [S1, unofficial].
+- `cell_ranges`: Dictionary mapping field names to `(min, max)` tuples from cell data [S1, unofficial].
+
+**Steps:**
+1. Initialize `point_ranges` and `cell_ranges` as empty dictionaries.
+2. Iterate over `mesh.attributes.pointScalars`. For each field, compute its minimum and maximum, storing the pair in `point_ranges` under the field name [S1, unofficial].
+3. Iterate over `mesh.attributes.cellScalars`. For each field, compute its minimum and maximum, storing the pair in `cell_ranges` under the field name [S1, unofficial].
+4. If `scalarName` is specified:
+   - Retrieve `R_p = point_ranges.get(scalarName)` and `R_c = cell_ranges.get(scalarName)` [S1, unofficial].
+   - If both exist: `scalarMin = min(R_p.min, R_c.min)`, `scalarMax = max(R_p.max, R_c.max)` [S1, unofficial].
+   - If only `R_p` exists: `scalarMin = R_p.min`, `scalarMax = R_p.max` [S1, unofficial].
+   - If only `R_c` exists: `scalarMin = R_c.min`, `scalarMax = R_c.max` [S1, unofficial].
+   - If neither exists: raise an error or return undefined [S1, unofficial].
+5. If `scalarName` is not specified:
+   - Collect all minimums from `point_ranges` and `cell_ranges` [S1, unofficial].
+   - `scalarMin = min(all_minimums)`, `scalarMax = max(all_maximums)` [S1, unofficial].
+6. If `pointScalars` is absent, use the range of the legacy `mesh.scalars` vector [S1, unofficial].
+
+**Formulas:**
+- Union of point and cell ranges for a field: $R_{\text{union}} = [\min(R_p^{\min}, R_c^{\min}), \max(R_p^{\max}, R_c^{\max})]$ where $R_p$ and $R_c$ are the point and cell ranges [S1, unofficial].
+- Global range across all fields: $R_{\text{global}} = [\min_{f \in \text{fields}} R_f^{\min}, \max_{f \in \text{fields}} R_f^{\max}]$ [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_scalar_range(mesh, scalar_name=None):
+    point_ranges = {}
+    cell_ranges = {}
+
+    if hasattr(mesh, 'attributes') and hasattr(mesh.attributes, 'pointScalars'):
+        for name, values in mesh.attributes.pointScalars.items():
+            point_ranges[name] = (min(values), max(values))
+
+    if hasattr(mesh, 'attributes') and hasattr(mesh.attributes, 'cellScalars'):
+        for name, values in mesh.attributes.cellScalars.items():
+            cell_ranges[name] = (min(values), max(values))
+
+    if not point_ranges:
+        if hasattr(mesh, 'scalars') and mesh.scalars is not None:
+            return (min(mesh.scalars), max(mesh.scalars))
+        else:
+            raise ValueError("No scalar data available")
+
+    if scalar_name is not None:
+        p_range = point_ranges.get(scalar_name)
+        c_range = cell_ranges.get(scalar_name)
+        if p_range is not None and c_range is not None:
+            return (min(p_range[0], c_range[0]), max(p_range[1], c_range[1]))
+        elif p_range is not None:
+            return p_range
+        elif c_range is not None:
+            return c_range
+        else:
+            raise ValueError(f"Scalar '{scalar_name}' not found in point or cell data")
+    else:
+        all_mins = [r[0] for r in point_ranges.values()] + [r[0] for r in cell_ranges.values()]
+        all_maxs = [r[1] for r in point_ranges.values()] + [r[1] for r in cell_ranges.values()]
+        return (min(all_mins), max(all_maxs))
+```
+
+**Parameters:**
+- `scalar_name`: Optional string. If provided, restricts calculation to this field. If omitted, calculates the union of all fields [S1, unofficial].
+
+**Edge Cases:**
+- **No Scalar Data:** If neither point nor cell scalars exist, and legacy `mesh.scalars` is absent, the method raises an error [S1, unofficial].
+- **Legacy Fallback:** If `pointScalars` is empty but `mesh.scalars` exists, the legacy vector is used [S1, unofficial].
+- **Missing Field:** If `scalar_name` is specified but not found in either point or cell data, an error is raised [S1, unofficial].
+
+## Subtopics
+
+### [MinMaxVoxel](13073-minmaxvoxel.md)
+Computes the scalar value range for AMR trees by iterating over active leaf nodes. It is chosen when working with hierarchical AMR data structures where a global range is needed for transfer function mapping. It differs from spatial bounding box calculations by focusing on scalar values rather than coordinates.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the total number of point and cell scalar values, $O(N_p + N_c)$, where $N_p$ is the number of point scalars and $N_c$ is the number of cell scalars [G].
+- **Memory Complexity:** $O(F)$ auxiliary space where $F$ is the number of scalar fields to store intermediate ranges, or $O(1)$ if computed in a single streaming pass [G].
+- **Strengths:** Simple, deterministic, and provides a consistent global range for all visualization components [S1, unofficial].
+- **Limitations:** Does not account for local variations or density; may be dominated by outliers if present [G].
+- **When to Use:** When a global normalization is required for consistent color mapping across the entire volume [S1, unofficial].
+- **When Not to Use:** When local features are more important than global extremes, or when dealing with very large datasets where a sliding window approach is more memory-efficient [G].
+
+## Background
+This method is part of the data processing pipeline in volume rendering systems, specifically within the context of non-regular volumes and AMR data structures [S1, unofficial]. It originates from implementations in scientific visualization libraries such as SciRender, which handle CFD mesh data [S1, unofficial]. The approach of unifying point and cell ranges ensures that both vertex-based and element-based scalar fields are considered in the visualization pipeline [S1, unofficial].
+
+## Sources
+[S1] thermeng/SciRender, https://github.com/thermeng/SciRender, fetched 2026-10-26 (unofficial)

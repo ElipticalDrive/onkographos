@@ -1,0 +1,266 @@
+--- v001.md
++++ v002.md
+@@ -1,59 +1,62 @@
+ # Mr-Voxel Volume Rendering
+ 
+-Also called: VolumeIntegrator::Li
++Also called: VolumeIntegrator::Li, Mr-Voxel Volume Integrator
+ 
+ ## Overview
+-Mr-Voxel Volume Rendering is a direct volume ray casting technique implemented in the `VolumeIntegrator::Li` function that performs ray marching through a single volume region, accumulating emitted light and computing transmittance and scattering contributions from a single light source [S1, unofficial]. It is distinguished from its siblings by its specific implementation within the Mr-Voxel library's integrator, which combines an accelerated voxel data structure with a ray marching loop that handles single-volume, single-light scenarios with Russian Roulette termination [S1, unofficial]. Unlike [Procedural Volumetric Cloud Rendering](3480-procedural-volumetric-cloud-rendering.md) which often relies on procedural noise for density, or [Ray-marched Volumetric Fog](4248-ray-marched-volumetric-fog.md) which may use simplified scattering models, this method explicitly computes optical depth and direct lighting transmittance per step for a defined volume object [S1, unofficial].
++Mr-Voxel Volume Rendering is a direct volume ray casting method implemented within the Mr-Voxel library's `VolumeIntegrator` class. It solves the problem of computing the radiance contribution of a single light source through a single homogeneous or heterogeneous volume region by marching along a ray and accumulating emitted and scattered light [S1, unofficial]. It is distinguished from its siblings by its specific implementation of Russian Roulette for transmittance termination and its reliance on a pre-computed optical depth (`tau`) function for transmittance updates, rather than integrating extinction coefficients directly per step [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray `ray` (origin, direction, $t_0$, $t_1$), a scene object `mScene` providing access to volumes and lights, and a transmittance pointer `T`.
+-*   **Output:** A `Spectrum` representing the accumulated radiance $L_v$, and the updated transmittance `*T`.
++*   **Input:** A viewing ray `ray`, a scene graph containing a list of volumes (assumed to be a single volume `volumes[0]` for this implementation) and a list of light sources (assumed to be a single light `lights[0]`).
++*   **Output:** A `Spectrum` representing the accumulated radiance `Lv` and an update to the transmittance `*T` (passed by reference).
+ 
+ **Data Structures:**
+-*   `VolumeIntegrator`: Contains member `mStepSize` (float/double) defining the base step size for ray marching [S1, unofficial].
+-*   `Scene`: Provides `getVolumeCount()`, `getVolumes()` (array of volume objects), and `getLightSources()` (array of light objects) [S1, unofficial].
+-*   `Volume`: Provides methods `tau(ray, length, ...)` for optical depth, `Lve(p)` for emitted radiance, and `sigma_s(p)` for scattering coefficient [S1, unofficial].
+-*   `Ray`: Has method `intersect(shadRay, &surface)` to check for occlusions [S1, unofficial].
++*   `VolumeIntegrator`: Contains the method `Li(Ray ray, Spectrum *T)`.
++*   `Scene`: Provides access to `getVolumeCount()`, `getVolumes()`, and `getLightSources()`.
++*   `Volume`: Provides methods `tau(Ray, double, int)` for optical depth, `Lve(Point)` for emitted radiance, and `sigma_s(Point)` for scattering coefficient.
++*   `Ray`: Defined by origin and direction; supports evaluation `ray(t)` to get position.
++*   `Spectrum`: Represents color/radiance values.
+ 
+ **Parameters:**
+-*   `mStepSize`: The base step size for ray marching. Typical value not specified in sources, but used to calculate `numSamples` [S1, unofficial].
+-*   Russian Roulette probability: Fixed at 0.5 [S1, unofficial].
+-*   Transmittance threshold: $10^{-3}$ [S1, unofficial].
++*   `mStepSize`: The nominal step size for ray marching. Typical value: Not given in the sources.
+ 
+ **Algorithm Steps:**
+-1.  **Calculate Samples:** Compute the number of steps `numSamples` based on the ray segment length $(t_1 - t_0)$ and `mStepSize`. If `numSamples` is 0, set it to 1 [S1, unofficial].
+-    $$ \text{numSamples} = \max\left(1, \left\lfloor \frac{t_1 - t_0}{\text{mStepSize}} \right\rfloor \right) $$
+-2.  **Calculate Step Length:** Compute the actual step length `step` to ensure the ray covers exactly from $t_0$ to $t_1$ [S1, unofficial].
++1.  **Determine Sample Count:** Calculate the number of samples `numSamples` based on the ray segment length `(t1 - t0)` and `mStepSize`.
++    $$ \text{numSamples} = \left\lfloor \frac{t_1 - t_0}{\text{mStepSize}} \right\rfloor $$
++    If `numSamples` is 0, set it to 1 [S1, unofficial].
++2.  **Calculate Actual Step:** Compute the precise step length `step` to ensure the ray covers the exact interval `[t0, t1]`.
+     $$ \text{step} = \frac{t_1 - t_0}{\text{numSamples}} $$
+-3.  **Random Offset:** Apply a random offset to the starting position $t_0$ to reduce banding artifacts [S1, unofficial].
+-    $$ t_0 \leftarrow t_0 + \text{step} \times \frac{\text{rand()}}{\text{RAND\_MAX}} $$
+-4.  **Initialize Accumulators:** Set accumulated radiance $L_v = 0$ and transmittance $T_r = 1$ [S1, unofficial].
+-5.  **Ray Marching Loop:** Iterate $i$ from 0 to `numSamples`:
+-    a.  **Update Positions:** Let $p_{prev}$ be the current position. Update current position $p = \text{ray}(t_0 + i \times \text{step})$. Create a short ray `tRay` from $p_{prev}$ to $p$ with length `step` [S1, unofficial].
+-    b.  **Optical Depth:** Compute the optical depth (tau) for the step. The source specifies calling `volumes[0]->tau(tRay, 0.5 * step, 0)` [S1, unofficial].
+-    c.  **Update Transmittance:** Multiply current transmittance by the exponential of the negative optical depth [S1, unofficial].
+-        $$ T_r \leftarrow T_r \times e^{-\tau} $$
+-    d.  **Accumulate Emission:** Add the emitted radiance at point $p$ to $L_v$ [S1, unofficial].
+-        $$ L_v \leftarrow L_v + L_{ve}(p) $$
+-    e.  **Scattering Check:** Get the scattering coefficient $\sigma_s = \text{volumes}[0].\sigma_s(p)$. If $\sigma_s$ is not black (zero), proceed to compute lighting [S1, unofficial].
+-    f.  **Light Direction:** Compute the normalized direction $\omega_L$ from point $p$ to the light source position [S1, unofficial].
+-    g.  **Shadow Ray:** Create a shadow ray `shadRay` from $p$ in direction $\omega_L$. Check if it intersects a surface closer than the light distance. The condition for being unshadowed is: no intersection, or intersection distance $t_{surf}$ is greater than the distance to the light [S1, unofficial].
+-        $$ \text{unshadowed} = (\neg \text{mScene}.\text{intersect}(\text{shadRay}, \text{surface})) \lor (\text{surface}.t > \|p - \omega_L\|) $$
+-    h.  **Light Transmittance:** If unshadowed, compute the light transmittance $l_T$ through the volume. The source specifies calling `volumes[0]->tau(shadRay, mStepSize * 2, 0.0)` [S1, unofficial].
+-        $$ l_T = e^{-\tau_{light}} $$
+-    i.  **Direct Lighting:** Compute the direct lighting contribution $L_d$ using the light's color and the light transmittance. Add to accumulated radiance, scaled by scattering coefficient and current transmittance [S1, unofficial].
+-        $$ L_d = l_T \times \text{lights}[0].\text{color} $$
+-        $$ L_v \leftarrow L_v + L_d \times \sigma_s \times T_r $$
+-    j.  **Russian Roulette:** If $T_r < 10^{-3}$, perform Russian Roulette. With probability 0.5, break the loop. Otherwise, continue and scale $T_r$ by $1/0.5$ (i.e., $T_r \leftarrow T_r / 0.5$) [S1, unofficial].
++3.  **Random Offset:** Apply a random offset to the starting position `t0` to reduce aliasing.
++    $$ t_0 \leftarrow t_0 + \left( \frac{\text{rand()}}{\text{RAND\_MAX}} \right) \times \text{step} $$
++4.  **Initialize Accumulators:** Set accumulated radiance `Lv = 0` and transmittance `Tr = 1` [S1, unofficial].
++5.  **Ray Marching Loop:** Iterate `i` from 0 to `numSamples - 1`:
++    a.  **Update Positions:** Store previous position `pPrev` and compute current position `p = ray(t0)`.
++    b.  **Create Step Ray:** Define a short ray `tRay` from `pPrev` to `p` with length `step` [S1, unofficial].
++    c.  **Compute Optical Depth:** Calculate the optical depth `stepTau` for the step using the volume's `tau` function. The implementation uses a fixed evaluation point of `0.5 * step` and a flag `0`.
++        $$ \text{stepTau} = \text{volumes}[0] \to \text{tau}(tRay, 0.5 \times \text{step}, 0) $$
++    d.  **Update Transmittance:** Multiply the current transmittance by the exponential of the negative optical depth.
++        $$ T_r \leftarrow T_r \times e^{-\text{stepTau}} $$
++    e.  **Accumulate Emission:** Add the emitted radiance at point `p` to `Lv`.
++        $$ L_v \leftarrow L_v + \text{volumes}[0] \to L_{ve}(p) $$
++    f.  **Check Scattering:** Get the scattering coefficient `ss = volumes[0]->sigma_s(p)`. If `ss` is effectively black (zero), skip lighting calculations for this step [S1, unofficial].
++    g.  **Lighting Contribution:**
++        i.  Compute light direction `wL` from `p` to the light source position, normalized.
++        ii. Create a shadow ray `shadRay` from `p` in direction `wL`.
++        iii. Check for occlusion. The light is unshadowed if the shadow ray does not intersect a surface closer than the light distance.
++        $$ \text{unshadowed} = \neg (\text{mScene} \to \text{intersect}(shadRay, \&surface)) \lor (surface.t > \|p - wL\|) $$
++        iv. If unshadowed, compute light transmittance `lTr` through the volume. The implementation uses a fixed step size of `mStepSize * 2` and flag `0.0`.
++        $$ lTr = e^{-\text{volumes}[0] \to \text{tau}(shadRay, \text{mStepSize} \times 2, 0.0)} $$
++        v.  Compute direct lighting `Ld` and add to `Lv`.
++        $$ L_d = lTr \times \text{lights}[0] \to \text{color} $$
++        $$ L_v \leftarrow L_v + L_d \times ss \times T_r $$
++    h.  **Russian Roulette:** If `Tr < 1e-3`, perform Russian Roulette. With probability 0.5, break the loop. Otherwise, continue and scale `Tr` by 2 (i.e., `Tr = Tr / 0.5`) [S1, unofficial].
++    i.  **Advance Ray:** Increment `t0` by `step` [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def VolumeIntegrator_Li(ray, scene, T_out):
++def Li(ray, T):
+     # Access scene data
+-    volumes = scene.getVolumes()
+-    lights = scene.getLightSources()
+-    mStepSize = scene.getIntegrator().mStepSize
++    volumes = ray.scene.getVolumes()
++    lights = ray.scene.getLightSources()
+     
+     # Assume single volume and single light as per implementation notes
+@@ -61,112 +64,89 @@
+     light = lights[0]
+     
+-    # 1. Calculate number of samples
+-    t0 = ray.t0
+-    t1 = ray.t1
+-    numSamples = int((t1 - t0) / mStepSize)
+-    if numSamples == 0:
+-        numSamples = 1
++    # 1. Determine sample count
++    t0 = ray.origin
++    t1 = ray.end # Or intersection distance
++    num_samples = int((t1 - t0) / ray.scene.mStepSize)
++    if num_samples == 0:
++        num_samples = 1
+         
+-    # 2. Calculate actual step length
+-    step = (t1 - t0) / numSamples
++    # 2. Calculate actual step
++    step = (t1 - t0) / num_samples
+     
+-    # 3. Apply random offset to starting position
+-    random_val = rand() / RAND_MAX
+-    t0 += random_val * step
++    # 3. Random offset
++    t0 += (random() / RAND_MAX) * step
+     
+-    # 4. Initialize accumulators
++    # 4. Initialize
+     Lv = Spectrum(0, 0, 0)
+     Tr = 1.0
+     
+-    # 5. Ray marching loop
+-    for i in range(numSamples):
+-        # Update positions
+-        p_prev = ray(t0 + (i - 1) * step) if i > 0 else ray(t0) # Note: logic in source implies p_prev updates to current p, then p updates. 
+-        # Source says: "update pPrev to current p, update p to ray(t0)". 
+-        # This phrasing is ambiguous. Standard ray marching: p_prev is start of step, p is end.
+-        # Let's interpret: p_prev is position at start of step i. p is position at end of step i.
+-        # The source says: "update pPrev to current p, update p to ray(t0)". 
+-        # This likely means: p_prev = p; p = ray(t0 + i*step). 
+-        # But t0 was modified by offset. Let's assume t_current = t0 + i*step.
++    # 5. Loop
++    for i in range(num_samples):
++        p_prev = ray(t0)
++        t0 += step
++        p = ray(t0)
+         
+-        t_current = t0 + i * step
+-        p_prev = ray(t_current - step) if i > 0 else ray(t0) # Approximation for first step
+-        p = ray(t_current)
+-        
+-        # Create short ray for optical depth calculation
+-        # Source: tRay from pPrev to p with length step
++        # Create short ray for tau calculation
+         tRay = Ray(p_prev, p - p_prev)
+         
+-        # Compute optical depth (tau)
+-        # Source: volumes[0]->tau(tRay, 0.5 * step, 0)
+-        tau = volume.tau(tRay, 0.5 * step, 0)
++        # Compute optical depth
++        step_tau = volume.tau(tRay, 0.5 * step, 0)
+         
+         # Update transmittance
+-        Tr = Tr * exp(-tau)
++        Tr *= exp(-step_tau)
+         
+-        # Accumulate emitted light
+-        Lve = volume.Lve(p)
+-        Lv = Lv + Lve
++        # Accumulate emission
++        Lv += volume.Lve(p)
+         
+-        # Get scattering coefficient
++        # Check scattering
+         ss = volume.sigma_s(p)
+-        
+-        # Check if scattering is non-zero
+-        if not ss.is_black():
+-            # Compute light direction
++        if ss != Spectrum(0, 0, 0):
++            # Light direction
+             wL = normalize(light.position - p)
+             
+-            # Create shadow ray
++            # Shadow ray
+             shadRay = Ray(p, wL)
++            surface = Surface()
++            intersects = ray.scene.intersect(shadRay, surface)
++            light_dist = length(light.position - p)
+             
+-            # Check intersection
+-            surface = Surface()
+-            intersected = scene.intersect(shadRay, surface)
+-            
+-            # Distance to light
+-            dist_to_light = length(light.position - p)
+-            
+-            # Check if unshadowed
+-            # Source: !mScene->intersect(shadRay, &surface) || (surface.t > (p-wL).length())
+-            # Note: (p-wL).length() is effectively dist_to_light if wL is normalized and points to light
+-            unshadowed = (not intersected) or (surface.t > dist_to_light)
++            # Check occlusion
++            unshadowed = (not intersects) or (surface.t > light_dist)
+             
+             if unshadowed:
+-                # Compute light transmittance
+-                # Source: volumes[0]->tau(shadRay, mStepSize * 2, 0.0)
+-                tau_light = volume.tau(shadRay, mStepSize * 2, 0.0)
+-                lTr = exp(-tau_light)
++                # Light transmittance
++                lTr = exp(-volume.tau(shadRay, ray.scene.mStepSize * 2, 0.0))
+                 
+-                # Compute direct lighting contribution
++                # Direct lighting
+                 Ld = lTr * light.color
+-                Lv = Lv + Ld * ss * Tr
++                Lv += Ld * ss * Tr
+         
+         # Russian Roulette
+         if Tr < 1e-3:
+-            if rand() < 0.5:
++            if random() < 0.5:
+                 break
+             else:
+-                Tr = Tr / 0.5
++                Tr /= 0.5
+                 
+-    T_out = Tr
++    T.value = Tr
+     return Lv
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Samples:** If the ray segment is shorter than `mStepSize`, `numSamples` is forced to 1 to prevent division by zero or empty loops [S1, unofficial].
+-*   **Single Volume/Light Assumption:** The implementation explicitly accesses `volumes[0]` and `lights[0]`. It does not support multiple volumes or lights in the current form, with a TODO noting that aggregators are needed for multiple volumes [S1, unofficial].
+-*   **Precision:** Transmittance can drop below $10^{-3}$, triggering Russian Roulette to prevent unnecessary computation [S1, unofficial].
+-*   **Optical Depth Calculation:** The source uses `0.5 * step` for the volume tau calculation in the main loop and `mStepSize * 2` for the shadow ray. These specific values are implementation details that may affect accuracy [S1, unofficial].
++*   **Zero Samples:** If the ray segment is shorter than `mStepSize`, `numSamples` becomes 0. The code explicitly sets it to 1 to prevent division by zero or empty loops [S1, unofficial].
++*   **Single Volume/Light Assumption:** The implementation hardcodes `volumes[0]` and `lights[0]`. It does not support multiple volumes or lights in the current form, requiring future aggregators [S1, unofficial].
++*   **Precision:** The use of `float` for random number generation and intermediate calculations may introduce precision artifacts in transmittance accumulation.
++*   **Tau Function Dependency:** The correctness of the transmittance update relies entirely on the `Volume::tau` method correctly integrating extinction along the segment. The fixed evaluation points (`0.5 * step`, `mStepSize * 2`) suggest approximations that may vary in accuracy depending on volume heterogeneity.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples `numSamples`, which is proportional to the ray length divided by `mStepSize` [S1, unofficial].
+-*   **Memory Complexity:** Constant, as it only stores a few accumulators and temporary rays per step [S1, unofficial].
+-*   **Strengths:** Simple implementation for single-volume, single-light scenarios; uses Russian Roulette for efficiency; combines voxel acceleration with ray marching [S1, unofficial].
+-*   **Limitations:** Limited to single volume and single light; does not handle multiple scattering; specific tau calculation parameters (0.5*step, mStepSize*2) are hardcoded and may not be optimal for all scenes [S1, unofficial].
+-*   **When to Use:** Suitable for simple volumetric effects in a controlled environment where performance is prioritized over physical accuracy for complex lighting [S1, unofficial].
+-*   **When Not to Use:** For scenes with multiple light sources, multiple volumes, or requiring high-fidelity multi-scattering [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of samples `numSamples`, which is proportional to the ray length divided by `mStepSize`. $O(L / \text{mStepSize})$.
++*   **Memory Complexity:** Constant $O(1)$ auxiliary memory, as it accumulates radiance and transmittance in scalar variables.
++*   **Strengths:** Simple implementation; uses Russian Roulette to handle deep transmittance efficiently; decouples volume data from rendering logic via the `Volume` interface.
++*   **Limitations:** Limited to single volume and single light scenarios in this implementation; relies on pre-computed or approximated `tau` values which may be expensive or inaccurate if not cached; no support for multiple scattering (single scattering only, implied by the direct lighting calculation).
++*   **When to Use:** Suitable for real-time or interactive rendering where single-scattering approximation is acceptable and scene complexity is limited to single volume regions.
++*   **When Not to Use:** Scenes with multiple overlapping volumes, complex lighting setups, or high-fidelity requirements needing multiple scattering.
+ 
+ ## Background
+-Mr-Voxel is a combination of an accelerated voxel data-structure and volume rendering library, developed by C. Gibson [S1, unofficial]. The volume rendering component is part of the author's graphics graduate thesis, which culminated in research and design surrounding voxel data structures [S1, unofficial]. The lighting equations used are derived or loosely based on the volume rendering sections of "Physically Based Rendering, 2nd edition" by Matt Pharr [S1, unofficial]. The long-term goal involves including importance-sampled light caches for all polygonal, implicit, and volume objects [S1, unofficial].
++Mr-Voxel is a volume rendering library and accelerated voxel data structure developed by C. Gibson as part of his graphics graduate thesis [S1, unofficial]. The volume rendering components, including the `VolumeIntegrator::Li` method, are derived or loosely based on the volume rendering sections of "Physically Based Rendering, 2nd edition" by Matt Pharr [S1, unofficial]. The project aims to integrate importance-sampled light caches for polygonal, implicit, and volume objects.
+ 
+ ## Sources

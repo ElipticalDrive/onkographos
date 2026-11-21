@@ -1,0 +1,283 @@
+# Coarse-to-fine Centroidal Voronoi Tesselation (CVT)
+Also called: CVT densification, SDF-aware implicit CVT optimization
+
+## Overview
+Coarse-to-fine Centroidal Voronoi Tesselation (CVT) is a method for densifying continuous Signed Distance Function (SDF) discretization near a surface by simultaneously optimizing SDF values and their discretization sites [S1, unofficial]. It solves the challenge of generating high-quality 3D reconstructions with millions of sites without the computational prohibitions of explicit Voronoi diagram computation [S1, unofficial]. Unlike its sibling method DMTet, which relies on a known true SDF, this approach adapts locally to the optimized SDF field, ensuring vertices are uniformly distributed to reduce sampling artifacts [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A 3D region of interest (bounding box).
+*   Camera centers for the scene.
+*   Initial coarse grid resolution (e.g., $16 \times 16 \times 16$) [S1, unofficial].
+
+**Outputs:**
+*   Optimized SDF values and feature values at discretization sites.
+*   A refined tetrahedral Delaunay mesh.
+*   Optimized color network parameters [S1, unofficial].
+
+**Data Structures:**
+*   **Sites:** A list of 3D points representing the discretization.
+*   **KD-Tree:** Maintained for each level of discretization to compute K-nearest neighbors (KNN) for gradient propagation and smoothing [S1, unofficial].
+*   **Delaunay Tetrahedra:** Computed after CVT optimization to define the dual mesh for ray-marching [S1, unofficial].
+
+**Parameters:**
+*   Initial grid resolution: $16 \times 16 \times 16$ [S1, unofficial].
+*   SDF upsampling threshold: $1.5 \times$ edge length [S1, unofficial].
+*   KNN re-estimation frequency: Every 100 iterations [S1, unofficial].
+*   Number of neighbors for bisector estimation ($N$): 24 [S1, unofficial].
+*   Number of orthogonal directions per site: 3 [S1, unofficial].
+*   Total CVT optimization iterations: 300 [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Create a coarse uniform grid of sites within the bounding box (e.g., $16 \times 16 \times 16$) [S1, unofficial].
+    *   Add the center of each camera as complementary sites to the CVT to accelerate ray-marching [S1, unofficial].
+    *   Initialize SDF values, feature values, and color network parameters [S1, unofficial].
+
+2.  **Coarse CVT Optimization:**
+    *   Minimize the CVT energy to move sites to the center of their cells [S1, unofficial].
+    *   This establishes the initial uniform distribution [S1, unofficial].
+
+3.  **Iterative Densification Loop:**
+    *   Repeat until the expected level of detail is reached:
+        a.  **Optimization:** Optimize color network parameters, SDF values, and feature values within the current CVT configuration [S1, unofficial].
+        b.  **Upsampling:**
+            i.  Identify surface-crossing edges in the dual of the CVT (the associated tetrahedral Delaunay mesh) [S1, unofficial].
+            ii. Add a new point at the center of each identified surface-crossing edge [S1, unofficial].
+            iii. Identify edges where the SDF value at one endpoint is smaller than $1.5 \times$ the edge length [S1, unofficial].
+            iv. Add a new point at the center of these edges as well [S1, unofficial].
+        c.  **Implicit CVT Optimization:**
+            i.  Re-estimate K-nearest neighbors (KNN) for each site every 100 iterations [S1, unofficial].
+            ii. Minimize the approximate CVT loss ($L_{CVT}$) for 300 iterations using the Adam optimizer [S1, unofficial].
+            iii. The loss minimization ensures vertices are locally uniformly distributed [S1, unofficial].
+        d.  **Mesh Update:**
+            i.  Compute the Delaunay tetrahedra for the new set of sites [S1, unofficial].
+            ii. Restart SDF and feature optimization on the new mesh [S1, unofficial].
+
+**Implicit CVT Loss Calculation:**
+To avoid explicit Voronoi cell computation, the method uses differences between distances to neighboring bisectors [S1, unofficial].
+
+1.  For each site $s_i$:
+    a.  Randomly sample two angles $(\Theta, \Phi)$. These angles must be different for each site and change at each iteration [S1, unofficial].
+    b.  Rotate the standard Cartesian basis $\{e_0, e_1, e_2\}$ using $(\Theta, \Phi)$ to obtain $\{e_j(\Theta, \Phi)\}$ for $j=0,1,2$ [S1, unofficial].
+    c.  For each of the 3 rotated directions $j$:
+        i.  Find the $N=24$ nearest neighbors $N(s_i)$ of $s_i$ using the KD-tree [S1, unofficial].
+        ii. Calculate the distance to the closest bisector in direction $r$:
+            $$ d(s_i, r) = \min_{s_j \in N(s_i)} (\|s_i - b(s_i, s_j, r)\|^2) $$
+            where $b(s_i, s_j, r)$ is the distance from $s_i$ to its bisector with neighbor $s_j$ in direction $r$ [S1, unofficial].
+        iii. **Edge Case (Opposite Signs):** If the SDF values of $s_i$ and $s_j$ have opposite signs, move the bisector plane to lie on the 0 crossing (aligning with the middle of dual tetrahedra) [S1, unofficial].
+    d.  Sum the squared differences between distances to opposite bisectors:
+        $$ L_{CVT} = \frac{1}{2} \sum_{i} \sum_{j=0,1,2} (d(s_i, e_j(\Theta, \Phi)) - d(s_i, -e_j(\Theta, \Phi)))^2 $$
+        where $e_j(\Theta, \Phi)$ is the rotated cartesian basis and $d()$ is the distance to the bisector [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+def rotate_basis(theta, phi):
+    """
+    Rotates the standard Cartesian basis [x, y, z] using angles theta and phi.
+    Returns a tensor of shape (3, 3) where rows are the new basis vectors.
+    Implementation detail: Standard rotation matrix construction.
+    """
+    # Placeholder for specific rotation logic based on theta/phi
+    # Typically involves constructing rotation matrices R_z(theta) and R_y(phi)
+    # and multiplying them with the identity matrix.
+    pass
+
+def compute_bisector_distance(s_i, s_j, r, sdf_i, sdf_j):
+    """
+    Computes the distance from s_i to the bisector with s_j in direction r.
+    If SDF signs are opposite, the bisector is moved to the 0-crossing.
+    """
+    # Vector from s_i to s_j
+    vec = s_j - s_i
+    
+    # Project vector onto direction r to get scalar distance component
+    # Note: The source defines b(s_i, s_j, r) as the distance from s_i to the bisector.
+    # Geometrically, the bisector is the plane perpendicular to (s_j - s_i) passing through the midpoint.
+    # However, the source specifies "in direction r". 
+    # We interpret this as finding the intersection of the ray s_i + t*r with the bisector plane.
+    
+    mid_point = (s_i + s_j) / 2.0
+    normal = s_j - s_i
+    
+    # Ray: P(t) = s_i + t * r
+    # Plane: (P - mid_point) . normal = 0
+    # (s_i + t*r - mid_point) . normal = 0
+    # t * (r . normal) = (mid_point - s_i) . normal
+    # t = ((mid_point - s_i) . normal) / (r . normal)
+    
+    denom = torch.dot(r, normal)
+    if torch.abs(denom) < 1e-8:
+        # Direction r is parallel to the normal (bisector plane). 
+        # Distance is effectively infinite or undefined in this projection.
+        return float('inf')
+        
+    t = torch.dot(mid_point - s_i, normal) / denom
+    
+    # Intersection point
+    intersection = s_i + t * r
+    
+    # Distance from s_i to intersection
+    dist_sq = torch.sum((intersection - s_i)**2)
+    
+    # Edge case: Opposite SDF signs
+    if (sdf_i > 0 and sdf_j < 0) or (sdf_i < 0 and sdf_j > 0):
+        # Move bisector plane to lie on the 0 crossing.
+        # This implies the bisector is no longer the geometric perpendicular bisector 
+        # but aligned with the zero level set of the interpolated SDF.
+        # For linear interpolation, the zero crossing is at t = |s_i| / (|s_i| + |s_j|) along the segment s_i->s_j.
+        # However, the loss function uses direction r. 
+        # The source states: "move the bisector plane so that it lies on the 0 crossing".
+        # This likely modifies the 'mid_point' or 'normal' used in the plane equation.
+        # A common interpretation in SDF contexts is that the effective boundary is the 0-isosurface.
+        # If we assume the bisector plane is redefined to pass through the 0-crossing point on the segment s_i-s_j:
+        total_dist = torch.norm(s_j - s_i)
+        t_cross = torch.abs(sdf_i) / (torch.abs(sdf_i) + torch.abs(sdf_j))
+        zero_crossing = s_i + t_cross * (s_j - s_i)
+        
+        # Re-calculate intersection with the plane defined by zero_crossing and normal (s_j - s_i)
+        # Or potentially the normal is adjusted? The source says "move the bisector plane".
+        # Assuming the plane normal remains (s_j - s_i) but the point on the plane is the zero crossing.
+        new_mid_point = zero_crossing
+        t_new = torch.dot(new_mid_point - s_i, normal) / denom
+        intersection_new = s_i + t_new * r
+        dist_sq_new = torch.sum((intersection_new - s_i)**2)
+        return dist_sq_new
+        
+    return dist_sq
+
+def compute_lcvt_loss(sites, sdf_values, kd_tree, theta, phi):
+    """
+    Computes the L_CVT loss for a batch of sites.
+    """
+    loss = 0.0
+    N_neighbors = 24
+    
+    # Rotate basis
+    basis = rotate_basis(theta, phi) # Shape (3, 3)
+    
+    for i, s_i in enumerate(sites):
+        sdf_i = sdf_values[i]
+        
+        # Get KNN
+        # Note: In practice, this uses the KD-tree. 
+        # Here we assume a function that returns indices and distances.
+        neighbor_indices = kd_tree.query(s_i, k=N_neighbors + 1)[1][1:] # Exclude self
+        neighbors = sites[neighbor_indices]
+        sdf_neighbors = sdf_values[neighbor_indices]
+        
+        for j in range(3):
+            r = basis[j]
+            neg_r = -r
+            
+            # Compute d(s_i, r)
+            # d(s_i, r) = min_{s_j in N(s_i)} (||s_i - b(s_i, s_j, r)||^2)
+            dists_pos = []
+            dists_neg = []
+            
+            for k, s_j in enumerate(neighbors):
+                sdf_j = sdf_neighbors[k]
+                
+                # Distance in positive direction r
+                d_pos = compute_bisector_distance(s_i, s_j, r, sdf_i, sdf_j)
+                dists_pos.append(d_pos)
+                
+                # Distance in negative direction -r
+                d_neg = compute_bisector_distance(s_i, s_j, neg_r, sdf_i, sdf_j)
+                dists_neg.append(d_neg)
+                
+            d_r = min(dists_pos)
+            d_neg_r = min(dists_neg)
+            
+            diff = d_r - d_neg_r
+            loss += diff**2
+            
+    loss = loss / 2.0
+    return loss
+
+def coarse_to_fine_cvt(bounding_box, cameras, initial_res=16, max_iterations=300):
+    """
+    Main loop for Coarse-to-Fine CVT densification.
+    """
+    # 1. Initialization
+    sites = generate_uniform_grid(bounding_box, initial_res)
+    sites = sites + [camera.center for camera in cameras] # Add camera centers
+    sdf_values = initialize_sdf(sites)
+    features = initialize_features(sites)
+    kd_tree = build_kd_tree(sites)
+    
+    # 2. Coarse CVT Optimization
+    # Minimize CVT energy to move sites to center of cells
+    # (Simplified: assume a standard Lloyd's algorithm step or similar)
+    sites = optimize_cvt_sites(sites, kd_tree)
+    
+    # 3. Iterative Densification
+    for iteration in range(max_iterations):
+        # Optimize network parameters
+        optimize_color_network(sites, features, sdf_values)
+        
+        # Upsampling
+        tetrahedra = compute_delaunay_tetrahedra(sites)
+        new_sites = []
+        
+        for edge in tetrahedra.edges:
+            s1, s2 = edge.endpoints
+            edge_length = torch.norm(s1 - s2)
+            sdf1 = sdf_values[s1.index]
+            sdf2 = sdf_values[s2.index]
+            
+            # Surface crossing edge
+            if (sdf1 > 0 and sdf2 < 0) or (sdf1 < 0 and sdf2 > 0):
+                new_sites.append((s1 + s2) / 2.0)
+            
+            # SDF threshold edge
+            if abs(sdf1) < 1.5 * edge_length or abs(sdf2) < 1.5 * edge_length:
+                new_sites.append((s1 + s2) / 2.0)
+                
+        sites = sites + new_sites
+        
+        # Rebuild KD-tree occasionally
+        if iteration % 100 == 0:
+            kd_tree = build_kd_tree(sites)
+            
+        # Implicit CVT Optimization
+        for cvt_iter in range(300):
+            # Random angles for each site
+            thetas = torch.rand(len(sites)) * 2 * np.pi
+            phis = torch.rand(len(sites)) * np.pi
+            
+            # Compute Loss
+            lcvt_loss = compute_lcvt_loss(sites, sdf_values, kd_tree, thetas, phis)
+            
+            # Backpropagate and update sites
+            lcvt_loss.backward()
+            optimizer.step()
+            
+        # Update Mesh
+        tetrahedra = compute_delaunay_tetrahedra(sites)
+        
+    return sites, sdf_values, features, tetrahedra
+```
+
+## Operating characteristics
+*   **Time Complexity:** Traditional CVT optimization with millions of sites takes ~5 minutes for Voronoi diagram computation and ~2.5 hours for 30 iterations [S1, unofficial]. The approximated CVT takes ~1 second per iteration, allowing 300 iterations in ~5 minutes [S1, unofficial].
+*   **Memory Complexity:** Requires maintaining a KD-tree for each level of discretization and storing SDF values, features, and network parameters for all sites [S1, unofficial].
+*   **Strengths:** Significant computational benefits over explicit Voronoi computation; adapts locally to the optimized SDF field; reduces sampling artifacts by ensuring uniform vertex distribution [S1, unofficial].
+*   **Limitations:** Does not know the true SDF (unlike DMTet); relies on approximation which may not perfectly match true Voronoi centroids [S1, unofficial].
+*   **When to use:** When high-quality 3D reconstruction with millions of sites is required, and explicit Voronoi computation is too slow [S1, unofficial].
+*   **When not to use:** When the true SDF is known and can be used for exact densification (e.g., DMTet scenarios) [S1, unofficial].
+
+## Background
+*   **Origin:** Proposed in "VortSDF: 3D Modeling with Centroidal Voronoi Tesselation on Signed Distance Fields" (WACV 2025) [S1, unofficial].
+*   **History:** Inspired by previous work on CVT optimization [S1, unofficial]. The method addresses the limitations of DMTet [28] by handling unknown SDFs [S1, unofficial].
+*   **Usage:** Used in differentiable rendering strategies for volumetric reconstruction, specifically for efficient sampling of points along pixel viewing lines in non-uniform tetrahedral grids [S1, unofficial].
+
+## Sources
+[S1] WACV 2025 Open Access Repository, https://openaccess.thecvf.com/content/WACV2025/html/Thomas_VortSDF_3D_Modeling_with_Centroidal_Voronoi_Tesselation_on_Signed_Distance_WACV_2025_paper.html, fetched 2026-10-30 (unofficial)

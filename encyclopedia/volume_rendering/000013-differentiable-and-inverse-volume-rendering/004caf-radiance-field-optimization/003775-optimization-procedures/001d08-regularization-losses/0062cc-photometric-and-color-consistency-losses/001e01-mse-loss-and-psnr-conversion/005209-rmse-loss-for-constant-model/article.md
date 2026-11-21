@@ -1,0 +1,140 @@
+# RMSE Loss for Constant Model
+
+Also called: RMSE for Constant Model
+
+## Overview
+Calculates the Root Mean Squared Error (RMSE) between observed intensity values and a predicted constant intensity model parameterized by density ($\sigma$) and step size ($q$) [S1, unofficial]. It serves as a photometric consistency loss in differentiable volume rendering, specifically fitting a constant radiance assumption along a ray [S1, unofficial]. Unlike the parent [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md) which operates on raw RGB predictions, this method explicitly models the physical integration of a constant source over a ray segment [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `intensity`: A list or array of observed intensity values $I_k$ for $k=0 \dots N-1$.
+- `sigma`: The volume density $\sigma$ (scalar).
+- `q`: The step size or integration parameter $q$ (scalar).
+- `ds`: The distance step between samples (scalar).
+
+**Outputs:**
+- `rmse`: The Root Mean Squared Error (scalar).
+
+**Data Structures:**
+- `intensity`: Array of floats.
+- `squared`: Accumulator for squared errors (float).
+
+**Steps:**
+1. **Validation**: Check if `intensity` is empty or `ds <= 0`. If invalid, return infinity [S1, unofficial].
+2. **Initialization**: Set `squared = 0`.
+3. **Iteration**: For each sample index $k$ from $0$ to `intensity.size() - 1`:
+   a. Calculate the predicted intensity for the constant model. The source notes imply a function `constant_intensity(intensity.front(), sigma, q, k * ds)` [S1, unofficial]. In a standard constant volume rendering model with density $\sigma$ and step size $ds$, the transmittance at distance $t$ is $T(t) = e^{-\sigma t}$. The expected intensity at sample $k$ (distance $t_k = k \cdot ds$) given a constant source intensity $I_0$ (here taken as `intensity.front()`) is:
+      $$ I_{pred}(k) = I_0 \cdot (1 - e^{-\sigma \cdot ds}) \cdot \sum_{j=0}^{k-1} e^{-\sigma \cdot j \cdot ds} + I_0 \cdot e^{-\sigma \cdot k \cdot ds} $$
+      However, the source notes specifically reference `constant_intensity(intensity.front(), sigma, q, k * ds)`. Without the explicit formula for `constant_intensity` in the provided text, we assume it computes the theoretical constant-radiance accumulation. A common simplification for constant $\sigma$ and constant radiance $c$ is $I(t) = c(1 - e^{-\sigma t})$. If `q` represents the total length or a scaling factor, the implementation must follow the specific `constant_intensity` logic. Given the ambiguity, the pseudocode below uses a placeholder comment for the specific physics model, but the structure is strictly as defined in [S1, unofficial].
+   b. Calculate error: $error = I_{pred} - intensity[k]$.
+   c. Update accumulator: `squared += error^2`.
+4. **Finalize**: Return $\sqrt{\frac{squared}{N}}$, where $N$ is `intensity.size()` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rmse_loss_constant_model(intensity, sigma, q, ds):
+    """
+    Calculates RMSE between observed intensities and a constant intensity model.
+    
+    Args:
+        intensity (list[float]): Observed intensity values.
+        sigma (float): Volume density.
+        q (float): Integration parameter/step scaling.
+        ds (float): Distance step between samples.
+        
+    Returns:
+        float: RMSE value.
+    """
+    # Step 1: Validate inputs
+    if not intensity or ds <= 0:
+        return float('inf')
+    
+    n = len(intensity)
+    squared = 0.0
+    
+    # Step 2 & 3: Iterate and accumulate squared errors
+    for k in range(n):
+        # Calculate predicted intensity for the constant model.
+        # The source [S1, unofficial] specifies: constant_intensity(intensity.front(), sigma, q, k * ds)
+        # intensity.front() is intensity[0].
+        # Note: The exact mathematical definition of constant_intensity is not provided in the source text.
+        # [G] Assuming a standard constant radiance c along a ray with density sigma:
+        # I_pred(t) = c * (1 - exp(-sigma * t)) where t = k * ds.
+        # However, 'q' is passed. If q is a step count or scaling, it must be incorporated.
+        # Given the note "constant_intensity(intensity.front(), sigma, q, k * ds)", 
+        # we implement a generic call that must be defined by the specific physics model.
+        # For the purpose of this article, we assume the function exists or is defined as:
+        # I_pred = intensity[0] * (1 - math.exp(-sigma * (k * ds))) 
+        # if q is not used in the exponent. If q is the step size, ds might be redundant or q=ds.
+        # We stick to the structure:
+        
+        t = k * ds
+        # [G] Placeholder for the specific constant_intensity implementation referenced in [S1, unofficial].
+        # In many constant-volume contexts, if the source is constant I_0, the accumulated intensity 
+        # at depth t is I_0 * (1 - exp(-sigma * t)).
+        predicted = intensity[0] * (1 - math.exp(-sigma * t))
+        
+        error = predicted - intensity[k]
+        squared += error * error
+        
+    # Step 4: Return RMSE
+    return math.sqrt(squared / n)
+```
+
+**Parameters:**
+- `sigma`: Volume density. Typical values depend on the scene scale [S1, unofficial].
+- `q`: Integration parameter. Value not explicitly defined in the source notes beyond being passed to the model function [S1, unofficial].
+- `ds`: Distance step. Must be $> 0$ [S1, unofficial].
+
+**Edge Cases:**
+- Empty `intensity` list: Returns infinity [S1, unofficial].
+- Non-positive `ds`: Returns infinity [S1, unofficial].
+
+## Subtopics
+
+### Depth RMSE and L1 Calculation
+Computes the error between rasterized depth and ground truth depth, optionally masking by silhouette and valid depth masks depending on training state [S2, unofficial]. It is used in Gaussian Splatting-based SLAM/NeRF optimization (SplaTAM) [S2, unofficial].
+
+**Definition:**
+Calculates RMSE and L1 error for depth maps, applying masks for silhouette presence and valid depth ranges [S2, unofficial].
+
+**Steps:**
+1. Compute squared difference between rasterized depth $D_{rast}$ and ground truth depth $D_{gt}$, multiplied by presence silhouette mask $M_{sil}$ [S2, unofficial].
+2. Multiply result by valid depth mask $M_{valid}$ to exclude invalid pixels (e.g., depth $\le 0$) [S2, unofficial].
+3. Compute RMSE by summing the masked squared differences and dividing by the sum of the valid depth mask [S2, unofficial].
+4. Compute L1 error similarly using absolute difference [S2, unofficial].
+
+**Formula:**
+For the case where `mapping_iters==0` and `not add_new_gaussians`:
+$$ rmse = \frac{\sum_{i,j} \sqrt{((D_{rast} - D_{gt}) \cdot M_{sil})^2} \cdot M_{valid}}{\sum_{i,j} M_{valid}} $$
+Where:
+- $D_{rast}$: Rasterized depth.
+- $D_{gt}$: Ground truth depth.
+- $M_{sil}$: Presence silhouette mask.
+- $M_{valid}$: Valid depth mask, defined as $(curr\_data['depth'] > 0)$ [S2, unofficial].
+
+**Parameters:**
+- `mapping_iters`: Number of mapping iterations. If 0, silhouette mask is applied to depth error [S2, unofficial].
+- `add_new_gaussians`: Boolean flag. If false, silhouette mask is applied to depth error [S2, unofficial].
+
+**Pitfalls:**
+- Invalid depth values ($\le 0$) are excluded by multiplying by `valid_depth_mask` [S2, unofficial]. Failure to apply this mask leads to incorrect error calculations for pixels with no valid depth observation.
+
+## Operating characteristics
+**Time Complexity:** $O(N)$, where $N$ is the number of intensity samples [S1, unofficial].
+**Memory Complexity:** $O(1)$ auxiliary space, excluding input storage [S1, unofficial].
+**Strengths:** Simple to implement; provides a direct metric for constant-radiance assumption validity [S1, unofficial].
+**Limitations:** Assumes constant radiance along the ray, which may not hold for complex scenes [S1, unofficial]. Sensitive to invalid depth or empty inputs [S1, unofficial].
+**When to use:** When optimizing for scenes or ray segments where constant radiance is a valid approximation, or as a baseline loss component [S1, unofficial].
+**When not to use:** For scenes with high dynamic range or complex lighting variations where constant intensity is a poor model [S1, unofficial].
+
+## Background
+Originated in the context of HPC foundational demos and differentiable volume rendering optimization [S1, unofficial]. The depth variant is part of the SplaTAM framework for Gaussian Splatting-based SLAM [S2, unofficial].
+
+## Sources
+[S1] wyh1309/hpc_foundational_demos, https://github.com/wyh1309/hpc_foundational_demos, fetched 2026-10-26 (unofficial)
+[S2] spla-tam/SplaTAM, https://github.com/spla-tam/SplaTAM, fetched 2026-10-27 (unofficial)

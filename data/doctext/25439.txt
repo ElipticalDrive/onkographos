@@ -1,0 +1,989 @@
+# TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid
+
+Seonghun Oh1\* [,](https://orcid.org/0009-0003-1578-9446) Youngjung Uh1 [,](https://orcid.org/0000-0001-8173-3334) and Jin-Hwa Kim2,3[†](https://orcid.org/0000-0002-0423-0415)
+
+1 Yonsei University, Republic of Korea
+
+2 NAVER AI Lab, Republic of Korea
+
+3 Seoul National University, Republic of Korea
+
+{rendell,yj.uh}@yonsei.ac.kr, j1nhwa.kim@navercorp.com
+
+Abstract. Extracting an explicit surface that exactly matches the zerolevel set of a neural signed distance function (SDF) remains challenging. Sampling-based isosurfacing methods such as Marching Cubes introduce discretization error. In contrast, continuous piecewise affine (CPWA) analytic approaches typically require plain ReLU MLPs, which limits the ability to learn high-frequency SDFs in practice. We present TetraSDF, an analytic isosurface extraction framework for SDFs that retains the expressiveness of grid-based encoders while enabling exact zero-level set extraction, by representing the SDF with a ReLU MLP composed with a multi-resolution tetrahedral positional encoder. Our positional encoder's barycentric interpolation preserves a global CPWA structure, allowing us to track ReLU linear regions within an encoder-induced polyhedral complex. We further introduce a fixed analytic input preconditioner derived from the encoder's metric to reduce directional bias, thereby stabilizing training. Across multiple benchmarks, TetraSDF matches or surpasses existing grid-based encoders in SDF reconstruction accuracy, while faithfully recovering the network's zero-level set as a triangle mesh.
+
+## 1 Introduction
+
+Extracting explicit isosurfaces (e.g., triangle meshes) from learned SDFs is a standard step in neural implicit surface pipelines. Learned SDFs are widely used for distance- and collision-based queries, while many downstream tools and pipelines consume explicit surface representations, making isosurface extraction a common interface step. Ensuring that the extracted surface matches the SDF's zero-level set helps preserve geometric consistency. As a result, downstream objectives defined on the surface, such as normal alignment to field-derived normals or collision checking against the extracted surface, remain faithful to the network's isosurface representation.
+
+Classical methods such as Marching Cubes [25], Marching Tetrahedra [45], and Dual Contouring [16] discretize the implicit field defining the isosurface, inevitably losing geometric fidelity due to their resolution-dependent sampling.
+
+\*Work done during an internship at NAVER AI Lab. †Corresponding author. Project page: 
+
+The resulting mismatch between the extracted mesh and the network's isosurface cannot be eliminated at finite sampling resolution, and reducing the mismatch inflates triangle budgets and may introduce staircase artifacts. Analytic Marching [23] later addressed this issue by interpreting ReLU-based MLPs as continuous piecewise affine (CPWA) functions [15,27,31,37], allowing exact isosurface extraction from the network's zero-level set. However, its complexity scales poorly with network expressiveness, making it impractical. Subsequent work refines this with an edge subdivision [1] that leverages the sign vectors to identify the parent cells of boundary vertices without iterating all cells, improving both precision and efficiency.
+
+Although these analytic methods yield explicit isosurfaces that exactly match the networks' zero-level sets, they are limited to ReLU MLPs where CPWA analysis applies. Such networks are prone to spectral bias [32,42], making it difficult to learn complex SDFs. TropicalNeRF [18] attempts to retain the expressiveness of grid-based positional encoders while enabling analytic extraction via a piecewise trilinear interpretation. However, for grid-based encoders using trilinear interpolation [4,28], its analytic guarantee relies on enforcing an eikonal constraint within each trilinear cell, which is difficult to satisfy uniformly, and thus uses a diagonal-plane intersection heuristic; consequently, the extracted isosurface is not guaranteed to exactly match the network's zero-level set in general.
+
+To overcome the precision loss caused by non-affine interpolation while still avoiding spectral bias, we introduce a network architecture that combines a multi-resolution tetrahedral positional encoder with a ReLU MLP, exploiting the affine nature of barycentric interpolation. This design preserves the benefits of grid-based positional encoders for learning high-frequency SDFs, while ensuring that the overall mapping remains CPWA and thus amenable to analytic isosurface extraction. Notice that, unlike axis-aligned cuboids, the tetrahedral encoder partitions space into polyhedral cells, which are then further subdivided by the folded hyperplanes of the ReLU MLP.
+
+Building on this observation, we propose a novel analytic isosurface extraction framework for networks employing our multi-resolution tetrahedral positional encoder with a ReLU MLP. While the positional encoder enhances the shape expressiveness, the extracted isosurface still exactly matches the network's zerolevel set due to the CPWA nature of the overall mapping. The encoder is designed to support efficient cell indexing and neighbor identification, which are essential for analytic traversal of the polyhedral structure.
+
+Furthermore, we extend the edge subdivision algorithm to operate jointly on encoder-induced polyhedral cells and ReLU MLP linear regions, enabling exact CPWA analysis under positional encoding. We also introduce an analytic input preconditioner for the multi-resolution tetrahedral encoder that mitigates directional bias induced by the encoder's grid geometry, improving optimization conditioning during training. In summary, our contributions are as follows:
+
+- We propose TetraSDF, a framework that bridges expressive SDF learning and exact analytic isosurface extraction by preserving a global CPWA structure via barycentric interpolation in a tetrahedral positional encoder.
+
+- We propose a tensorized scheme for constructing and handling the resulting polyhedral structures, enabling an efficient GPU implementation.
+- We characterize directional bias induced by the encoder's geometry via its metric and derive an input preconditioner to mitigate it, improving SDF learning accuracy.
+
+## 2 Related Work
+
+#### 2.1 Isosurface Extraction from Neural Implicit Fields
+
+In neural implicit representations, shapes are modeled as continuous scalar fields parameterized by neural networks [26, 29]. Classical isosurface extraction methods such as Marching Cubes and its variants [16,25,45] convert these fields into meshes via sampling. However, the resulting surfaces suffer from discretization error, and reducing this error requires dense sampling, which rapidly increases mesh complexity. Recent finite-sample surface reconstruction and adaptive isosurfacing methods further improve explicit surface recovery from sampled or queried fields [21,33,36]. While effective, these methods still recover surfaces from finite or adaptive field evaluations, rather than directly from the continuous neural field represented by the trained network itself. To improve fidelity or enable learning-based extraction, several works integrate neural networks with isosurface extraction or differentiable mesh parameterizations [5, 6, 11, 38, 39]. These approaches can produce higher-quality meshes and support end-to-end training, but still rely on discrete sampling or surrogate volumetric parameterizations as the basis for mesh extraction. Analytic meshing methods instead exploit the CPWA structure of ReLU MLPs [1,23,41] or piecewise trilinear formulations [18] to more directly characterize the network's zero-level sets, avoiding reliance on sampling. However, in practice, the former are restricted to plain MLPs with limited ability to represent complex SDFs, while the latter relies on geometric heuristics that can degrade precision.
+
+#### 2.2 Positional Encoding Methods
+
+Learning high-frequency geometric details in neural implicit functions is often hindered by spectral bias [32, 42]. To mitigate this effect, positional encoding schemes have been proposed to map input coordinates into higher-dimensional feature spaces with rich frequency content [40, 42] to overcome spectral bias. Beyond frequency-based methods, grid-based positional encoders have become dominant for large-scale 3D scenes, where learnable features are stored in spatial grids and interpolated at query points [4, 10, 24, 28]. Among grid-based approaches, Tetra-NeRF [22] employs an adaptive tetrahedral representation and PermutoSDF [34] leverages a permutohedral lattice; both use barycentric-style interpolation of features within simplex cells. However, the data-dependent tetrahedralization in Tetra-NeRF and the higher-dimensional embedding in PermutoSDF make explicit cell and neighbor indexing less straightforward for analytic extraction.
+
+#### 2.3 Preconditioning
+
+Preconditioning is a classical technique from numerical linear algebra [12, 35] that improves the convergence of iterative solvers by transforming ill-conditioned systems into better-conditioned forms. This concept has been widely adopted in deep learning to stabilize training and accelerate convergence through gradient or parameter preconditioning via adaptive per-parameter scaling [14,19,44]. ZCA whitening [46] similarly normalizes the covariance of input features to promote more isotropic learning behavior in the data space. Recent works further explore preconditioning in structured domains such as implicit neural fields and camera parameter spaces [7, 30]. In the same spirit, we derive a fixed analytic input preconditioner that whitens the encoder-induced metric, thereby removing the directional bias introduced by the encoder's geometric structure.
+
+
+
+Fig. 1: A schematic 2D illustration of sampling-based and analytic isosurface extraction for CPWA functions, such as ReLU MLPs. Sampling-based extraction approximates the network's zero-level set from finitely sampled field values, whereas analytic extraction recovers the zero-level set by exploiting the CPWA structure. Black denotes the network's zero-level set, and green denotes the extracted surface.
+
+## 3 Preliminary
+
+## 3.1 Definitions
+
+Definition 1 (Tetrahedral networks). A tetrahedral network f = ν (M) ◦ τ is the composition of a multi-resolution tetrahedral positional encoder τ and a M-layer ReLU network ν (M) . ν (M) is defined as follows:
+
+$$\nu^{(M)} = \rho^{(M)} \circ \sigma^{(M-1)} \circ \rho^{(M-1)} \circ \dots \circ \sigma^{(1)} \circ \rho^{(1)}. \quad (1)$$
+
+Here, σ(x) = max(x, 0) and ρ (i) (x) = W(i)x + b (i) .
+
+Remark 1 (Piecewise affine property of tetrahedral networks). The encoder τ maps an input x ∈ R 3 to a feature vector by performing barycentric interpolation at each level of the multi-resolution tetrahedral positional encoder and concatenating the resulting feature vectors. Since barycentric interpolation is affine, the interpolated feature vector at each level is affine in x within the containing tetrahedron. Moreover, because the concatenation of affine functions is affine, the output of τ remains affine on such regions (for detailed proofs, see Appendix A.1\). Consequently, τ defines a piecewise affine mapping over the input domain. The ReLU network ν is also piecewise affine in its input, so its composition, the tetrahedral network f is piecewise affine w.r.t. x.
+
+Definition 2 (Sign vectors). Let \nu ^{(m)}\_k denote the k-th neuron in the mth layer of an M-layer ReLU network \nu ^{(M)} , and let \nu ^{(m)}\_k(\mathbf {x}) denote its preactivation value at input \protect \mathbf {x}. The sign vector associated with x at that neuron is defined as:
+
+$$\mathbf{s}_k^{(m)}(\mathbf{x}) = [\gamma_1^{(1)}(\mathbf{x}), \gamma_2^{(1)}(\mathbf{x}), \dots, \gamma_k^{(m)}(\mathbf{x})], \quad (2)$$
+
+where each scalar entry γ (i) j (x) is defined using a small positive constant ϵs as:
+
+$$\gamma_j^{(i)}(\mathbf{x}) = \begin{cases} +1, & \text{if } \nu_j^{(i)}(\mathbf{x}) > \epsilon_s, \\ 0, & \text{if } |\nu_j^{(i)}(\mathbf{x})| \leq \epsilon_s, \\ -1, & \text{if } \nu_j^{(i)}(\mathbf{x}) < -\epsilon_s. \end{cases} \quad (3)$$
+
+Here, γ (i) j (x) = 0 indicates that x lies on the decision boundary H (i) j = {x | ν (i) j (x) = 0}. The values +1 and −1 correspond to the two half-spaces, i.e., the two linear regions on either side of this boundary.
+
+#### 3.2 Edge Subdivision
+
+Through successive ReLUs, each decision boundary H (m) k becomes a folded hyperplane [1,13] in the input space. Starting from an initial skeleton with vertices V and edges E (e.g., a cube bounding the scene), we sequentially process all boundaries H (m) k in increasing order of (m, k), updating V and E at each step. For each boundary H (m) k , every intersected edge is subdivided. A sign change of γ (m) k at the two endpoints indicates that the edge crosses H (m) k and that its vertices lie in different linear regions. For an edge (x0, x1) satisfying γ (m) k (x0) γ (m) k (x1) < 0, let ν (m) k (x0) = d0 and ν (m) k (x1) = d1. Then, the intersection is computed as:
+
+| $\hat{\mathbf{x}}_{0,1} = (1 - w)\mathbf{x}_0 + w\mathbf{x}_1, \quad w =  d_0 / d_0 - d_1 .$ | (4) |
+|----------------------------------------------------------------------------------------------|-----|
+|----------------------------------------------------------------------------------------------|-----|
+
+The intersection point xˆ0,1, satisfying γ (m) k (xˆ0,1) = 0, is added to V, and the corresponding edge in E is split into two edges, (x0, xˆ0,1) and (xˆ0,1, x1).
+
+The tricky part, however, is that, when a folded hyperplane subdivides linear regions (convex polyhedra), the induced intersection polygon determines which new edges must be added to E (see Fig. 2c). To handle this consistently without explicitly enumerating all linear regions, we employ the sign vectors [1] defined in Definition 2. A candidate edge formed by two previously computed intersection
+
+
+
+Fig. 2: Overview of TetraSDF. A preconditioned input x is mapped by the multiresolution tetrahedral positional encoder to interpolated features within its containing polyhedral cell Cx (Secs. 4.1 and 4.2\). These cells form the encoder-induced polyhedral complex (the initial skeleton), from which we start edge subdivision (Sec. 4.3\). We then perform grid-aware edge subdivision that jointly tracks polyhedral cells and ReLU MLP linear regions to obtain the candidate vertex and edge sets (V, E) (Secs. 4.4 and 4.5\), and finally extract mesh faces from (V, E) to obtain the final mesh (Sec. 4.6\). In (a)–(c), we zoom into a single edge subdivision iteration for a neuron.
+
+points is considered valid only when the following conditions are satisfied: First, their sign vectors must match on all nonzero entries, ensuring that both points belong to the same linear region. Notice that a zero entry is treated as a wildcard that can agree with either −1 or +1 (for the details, see Sec. 3.3\). Second, if a vertex pair shares at least two zero entries in their sign vectors, the pair is connected, since both vertices lie on the same pair of hyperplanes. For a highlevel intuition and a step-by-step summary, see Appendix A.7.
+
+Notice that, when integrated with our multi-resolution tetrahedral positional encoder (Sec. 4.1\), we augment the sign vector by appending the grid-based region indicator (Sec. 4.4\) to maintain consistency, while the rest of the procedure remains unchanged.
+
+#### 3.3 Perturbation with Sign Vectors
+
+Perturbing each zero entry in a sign vector to both +1 and −1 generates the sign vectors of all neighboring parent linear regions. This provides a systematic way to explore local adjacency relationships between regions. We later combine this perturbation scheme with the grid-based region indicators introduced in Sec. 4.5, enabling efficient adjacency tracking across the tetrahedral network structure.
+
+## 4 Method
+
+We introduce the design of the multi-resolution tetrahedral positional encoder \tau and its input preconditioner. The subsequent sections describe our mesh extraction pipeline, which consists of 1) constructing the initial skeleton, 2) performing grid-aware edge subdivision, and 3) reconstructing the surface.
+
+#### 4.1 Multi-resolution Tetrahedral Positional Encoder
+
+Grid-based positional encoders are a common approach to mitigate spectral bias for ReLU MLPs, but a widely used design choice based on trilinear interpolation [4, 28] breaks the CPWA structure and hinders analytic extraction. Our multi-resolution tetrahedral encoder replaces it with barycentric interpolation, preserving high-frequency modeling while keeping the overall mapping CPWA.
+
+Definition 3 (Multi-resolution tetrahedral grid). Let L ∈ N be the number of resolution levels, and Nmin and Nmax be the minimum and maximum grid resolutions, respectively, where Nmin < Nmax. Then, the geometric progression ratio γ is defined as follows [28]:
+
+
+$$\gamma := \exp\left(\frac{\ln N_{\max} - \ln N_{\min}}{L - 1}\right), \quad (5)$$
+
+while the ℓ-level resolution Nℓ is defined as follows:
+
+$$N_\ell := \lfloor N_{\min} \gamma^\ell \rfloor, \quad \ell \in \{0, 1, \dots, L-1\}. \quad (6)$$
+
+At each level ℓ, the unit cube S ∈ [0, 1]3 is uniformly subdivided into N3 ℓ cube cells, each of which is further decomposed into six congruent tetrahedra following the tetrahedral convention [3] in Fig. 3. We further discuss the design rationale in Appendix A.6.1.
+
+Definition 4 (Tetrahedral positional encoder). For a query point x ∈ S, let T (ℓ) (x) be any4 tetrahedron at level ℓ that contains x, and V (T (ℓ) (x)) be its set of four vertices. Each vertex v ∈ V (T (ℓ) (x)) is mapped to the index i = h(v) for the hash table via the spatial hash function h [43]. The entry of index i corresponds to the learnable feature vector H (ℓ) i ∈ R d . The barycentric weight5 of x with respect to v is denoted by w (ℓ) v (x). Then, the tetrahedral positional encoder τ : R 3 → R dL is defined as:
+
+$$\tau(\mathbf{x}) := \bigoplus_{\ell=0}^{L-1} \left( \sum_{v \in V(\mathcal{T}^{(\ell)}(\mathbf{x}))} w_v^{(\ell)}(\mathbf{x}) H_i^{(\ell)} \right), \quad (7)$$
+
+where ⊕ denotes concatenation over all resolution levels.
+
+Definition 5 (Polyhedral cells). For x ∈ S and each level ℓ, the choice of T (ℓ) (x) determines which feature vectors are selected at that level. We define the polyhedral cell of x as the maximal region on which this combination of selected feature vectors across all levels remains constant:
+
+$$\mathcal{C}_{\mathbf{x}} := \bigcap_{\ell=0}^{L-1} \mathcal{T}^{(\ell)}(\mathbf{x}). \quad (8)$$
+
+4 Singular cases where x lies on the boundaries are negligible, as they are handled implicitly by our interpolation scheme.
+
+5 Barycentric coordinates specify a point with respect to the vertices of a simplex by expressing the point as a convex combination of the vertices, x = P P i wivi with i wi = 1 and wi ≥ 0. The tuple (w0, . . . , wn) is called the barycentric coordinates of x, and each coefficient wi is the barycentric weight associated with the vertex vi.
+
+
+
+Fig. 3: At each level, each cube cell is decomposed into six congruent tetrahedra.
+
+where TL−1 ℓ=0 denotes the geometric intersection over all resolution levels ℓ of xcontaining tetrahedra. The collection of all cells over x ∈ S can be written as C := S x∈S Cx, which forms a polyhedral complex that partitions S. On each cell Cx, the encoder τ is affine. Polyhedral cell boundaries are where τ switches affine regions, forming fixed partitions that further refine the regions by the subsequent ReLU network. Unlike the adaptive partitions learned by the ReLU layers, those of the tetrahedral positional encoder are determined by hyperparameters and remain fixed during training.
+
+## 4.2 Input Preconditioning
+
+In our positional encoder, the barycentric coordinates w(x) = [w1(x), w2(x), w3(x)]⊤ with w0(x) = 1 − P3 i=1 wi(x) are an affine mapping of the input x inside each tetrahedron T (see Appendix A.1\). Hence, there exist a constant matrix JT ∈ R 3×3 and vector bT such that
+
+| $\mathbf{w}(\mathbf{x}) = \mathbf{J}_{\mathcal{T}}\mathbf{x} + \mathbf{b}_{\mathcal{T}}$ , | and | $\mathbf{d}\mathbf{w} = \mathbf{J}_{\mathcal{T}} \mathbf{d}\mathbf{x}$ . | (9) |
+|--------------------------------------------------------------------------------------------|-----|--------------------------------------------------------------------------|-----|
+|--------------------------------------------------------------------------------------------|-----|--------------------------------------------------------------------------|-----|
+
+The Jacobian JT describes how barycentric weights vary w.r.t. spatial displacements, and therefore controls the direction-dependent sensitivity of feature updates during backpropagation. Anisotropy in JT leads to uneven effective learning rates along different directions. For the six-tetrahedra subdivision used in our encoder (Fig. 3\), the average local metric M = 6 P T J ⊤ T JT is inherently anisotropic: directions orthogonal to the cube body diagonal are disproportionately amplified. To mitigate this geometric bias, we introduce a global linear preconditioner A∗ and feed x ′ = A∗x into the encoder. This transformation isotropizes the average metric and reduces each local condition number from 16.39 to 5.05. For simplicity, we reuse x to denote the preconditioned coordinates hereafter. The explicit form and derivation of A∗ are given in Appendix A.2.
+
+## 4.3 Initial Skeleton Extraction from the Encoder
+
+Naively enumerating all Cx is prohibitive at multi-resolution scales, so we propose a tensorized algorithm that exploits shared plane normals with level-dependent offsets to extract the vertices and edges of C as an initial skeleton. Since cell vertices are the intersections of tetrahedra across resolutions, we exploit the grid's regularity by representing C as a union of parallel-plane sets. The slopes of the tetrahedral subdivisions are constant across resolution levels, their normals are shared, while their offsets vary. Thus, multiple planes can be compactly represented as sharing a single normal but differing in offset. We denote the set of unique normals as N = {n0, n1, . . . , ni , . . . }, and, for each normal ni , define the associated offsets across all resolution levels as d (i) = [ d (i) 0 , d(i) 1 , . . . ] ⊤.
+
+Vertices are extracted as intersections of three or more planes with linearly independent normals, and edges as intersections of two or more non-parallel planes. Note that the tetrahedral subdivision in Fig. 3 involves only six fixed plane normals, while their offsets vary across resolution levels. By grouping a small set of shared normals with their corresponding offsets, the extraction process can be efficiently implemented using parallel tensor operations. For the detailed algorithm, refer to Appendix A.4.
+
+## 4.4 Encoding Regions and Boundaries
+
+Sign vectors allow us to identify the linear region of a preconditioned input x within the ReLU network ν (M) and to determine whether x lies on a decision boundary. However, the encoder τ further refines these regions according to the boundary of Cx. To correctly represent regions under the full tetrahedral network f = ν (M) ◦ τ , we therefore require a more specialized indicator that also encodes the position of x within the grid structure induced by τ .
+
+Barycentric masks The barycentric coordinates of x in the tetrahedron T (ℓ) (x) at level ℓ are defined as:
+
+$$\mathbf{w}^{(\ell)}(\mathbf{x}) = [w_0^{(\ell)}(\mathbf{x}), w_1^{(\ell)}(\mathbf{x}), w_2^{(\ell)}(\mathbf{x}), w_3^{(\ell)}(\mathbf{x})].$$
+
+Then, we define the barycentric mask at level ℓ as:
+
+$$\mathbf{m}^{(\ell)}(\mathbf{x}) = [m_0^{(\ell)}(\mathbf{x}), m_1^{(\ell)}(\mathbf{x}), m_2^{(\ell)}(\mathbf{x}), m_3^{(\ell)}(\mathbf{x})],$$
+
+where
+
+$$m_i^{(\ell)}(\mathbf{x}) = \begin{cases} 1, & w_i^{(\ell)}(\mathbf{x}) > \epsilon_b, \\ 0, & w_i^{(\ell)}(\mathbf{x}) \leq \epsilon_b, \end{cases} \quad i \in \{0, 1, 2, 3\}, \quad (10)$$
+
+and ϵb > 0 is a small threshold. A zero entry indicates that x lies on the boundary of T (ℓ) (x). Accordingly, a single zero indicates that x lies on a face of the tetrahedron, two zeros indicate that it lies on an edge, and three zeros indicate that it lies on a vertex. The barycentric masks of x across all levels are concatenated to form:
+
+$$\mathbf{m}(\mathbf{x}) = \bigoplus_{\ell=0}^{L-1} \mathbf{m}^{(\ell)}(\mathbf{x}) \in \{0, 1\}^{4L}. \quad (11)$$
+
+Recall that Cx is defined by the geometric intersection of the x-containing tetrahedra T (ℓ) (x); thus the barycentric mask indicates on which boundary of the Cx the point lies.
+
+Region indicators To uniquely locate x within the C, we introduce an additional spatial encoding, referred to as the region indicator. For a given level ℓ ∈ {0, . . . , L − 1} with resolution Nℓ, the grid anchor of a point x is defined as: a (ℓ) (x) := Nℓx , where ⌊·⌋ denotes the componentwise floor operator. This anchor corresponds to the cube's lexicographically smallest vertex (the "v0" corner in Fig. 3\). Each cube at level ℓ is subdivided into six congruent tetrahedra. The tetra offset t (ℓ) (x) ∈ {0, 1, 2, 3, 4, 5} indicates which of these tetrahedra anchored at a (ℓ) (x) contains x, according to the subdivision scheme shown in Fig. 3c. We then define the tetra index at level ℓ as: r (ℓ) (x) := [ a (ℓ) (x), t(ℓ) (x) ] ∈ Z 4 . The region indicator is obtained by concatenating all levelwise tetra indices:
+
+$$\mathbf{r}(\mathbf{x}) := \bigoplus_{\ell=0}^{L-1} \mathbf{r}^{(\ell)}(\mathbf{x}) \in \mathbb{Z}^{4L}. \quad (12)$$
+
+This region indicator encodes the intersection of the tetrahedra containing x across all levels, serving as a unique spatial index of the cell Cx within the C.
+
+#### 4.5 Identifying Neighboring Cells on the Grid
+
+First, for the grid part, we use both the region indicator r(x) ∈ Z 4L and the barycentric mask m(x) ∈ {0, 1} 4L to identify neighboring cells when the point x lies on the boundary of its current cell Cx. For each resolution level ℓ, we consider the corresponding r (ℓ) (x) and m(ℓ) (x).
+
+If one or more entries of m(ℓ) (x) are zero, then x lies on the corresponding boundary of T (ℓ) (x). To enumerate all neighboring cells, we perturb the tetra index r (ℓ) (x) according to the zero pattern in m(ℓ) (x). For each level ℓ, we precompute a lookup table of neighbor configurations (see Appendix A.8\). Each entry in this table consists of an anchor displacement ∆i ∈ Z 3 and a tetra offset ti ∈ {0, . . . , 5}, corresponding to face, edge, or vertex adjacency. The pair (∆0, t0) = ([0, 0, 0], t(ℓ) (x)) represents T (ℓ) (x) itself, while the remaining entries specify neighboring tetrahedra. The tetra index of the i-th neighbor at level ℓ is then given by r (ℓ) i (x) = a (ℓ) (x) + ∆i , ti .
+
+To obtain the complete set of neighboring polyhedral cells, the levelwise tetra indices r (ℓ) i (x) are concatenated across all levels for every possible combination of neighbors. This expansion yields Ngrid = K0K1 . . . KL−1 region indicators where Kℓ denotes the number of neighboring tetrahedra including itself. The region indicator corresponding to the n-th neighboring cell for Cx is:
+
+$$\mathbf{r}_n(\mathbf{x}) = \mathbf{r}_p^{(0)}(\mathbf{x}) \oplus \mathbf{r}_q^{(1)}(\mathbf{x}) \oplus \cdots \oplus \mathbf{r}_r^{(L-1)}(\mathbf{x}) \quad (13)$$
+
+where each r (ℓ) j (x) denotes the tetra index of the j-th neighboring tetrahedron at level ℓ. The collection of all such indices defines the set of grid-based neighboring regions:
+
+$$A_{\text{grid}}(\mathbf{x}) = \{ \mathbf{r}_0(\mathbf{x}), \mathbf{r}_1(\mathbf{x}), \dots, \mathbf{r}_{N_{\text{grid}}-1}(\mathbf{x}) \}. \quad (14)$$
+
+Second, for the ReLU MLP part, we follow the same procedure described for ν (m) k in Sec. 3.2. The sign-vector s (m) k (x) is perturbed at its zero entries, producing all adjacent regions of ReLU MLP around the boundary on which x lies. The set of perturbed sign-vectors is denoted by:
+
+$$\mathcal{A}_{\text{relu}}(\mathbf{x}) = \{ \mathbf{s}_{(k,0)}^{(m)}(\mathbf{x}), \dots, \mathbf{s}_{(k,N_{\text{relu}}-1)}^{(m)}(\mathbf{x}) \}, \quad (15)$$
+
+where s (m) (k,i) (x) denotes the sign-vector of the i-th adjacent region, including the one containing x itself. Here, Nrelu = 2n0 , with n0 denoting the number of zero entries in s (m) k (x).
+
+Finally, we combine the grid-based and ReLU-based neighbor sets to obtain the complete set of parent regions adjacent to the query point x: A(x) = ri(x) ⊕ s (m) (k,j) (x) } where ri(x) ∈ Agrid(x) and s (m) (k,j) (x) ∈ Arelu(x). For two query points xa and xb, comparing A(xa) and A(xb) provides a test for region equivalence: if they share a common element, two points lie within or on the boundary of the same region.
+
+#### 4.6 Face Extraction
+
+After the edge subdivision (Sec. 3.2\) using the sign vectors (Definition 2\) and the region indicator (Sec. 4.4\), we obtain the candidate vertex set V and the edge set E. We then select the zero-level subsets from these as follows: V ∗ = {x ∈ V | |f(x)| ≤ ϵf }, E ∗ = {(xa, xb) ∈ E | xa, xb ∈ V∗}, where ϵf is a small threshold used to extract the zero-level set of f. The final triangle mesh is obtained through a straightforward procedure that connects adjacent vertices according to their local connectivity [18].
+
+## 5 Experiments
+
+Datasets We evaluate on three datasets: the Stanford 3D Scanning Repository with 5 meshes [8], ABC with 100 randomly selected meshes [20], and Thingi10K with 500 randomly selected closed meshes [47]. We follow the preprocessing of DeepSDF normalization [29]. For each ground-truth mesh, we sample 500K SDF query points, drawing the majority from a narrow band around the surface and the remainder uniformly within the bounding volume.
+
+Settings We use a multi-resolution tetrahedral positional encoder with L = 4 levels and feature dimension d = 2 per level, followed by a ReLU MLP with three hidden layers of width 12 each. We consider three resolution settings: Small (Nmin, Nmax) = (2, 32), Medium (4, 64), and Large (8, 128). We train networks for 10 epochs using an ℓ1 SDF loss and an eikonal regularizer with weight λeik = 5×10−3 . All experiments use a single NVIDIA V100 GPU; training a network for each SDF takes about 1 minute.
+
+Baselines We consider both network architectures for SDF learning and meshing algorithms for isosurface extraction. For network architectures, we use gridbased positional encoders—HashGrid [28] and PermutoGrid [34]—each followed by a ReLU MLP with the same depth, width, and resolution settings. We also include a plain ReLU MLP configured as in Analytic Marching (AM) [23], with ten
+
+
+
+Fig. 4: Qualitative comparison on Thingi10K corresponding to Tab. 1.
+
+hidden layers of width 90. Unless otherwise noted, meshes for these networks are extracted using Marching Cubes at 5123 resolution. We apply the corresponding analytic methods: the AM extractor to the plain ReLU MLP and Tropical-NeRF [18] to the HashGrid. In both cases, meshes are extracted from the same corresponding trained networks used for SDF evaluation. For sampling-based methods, we compare against the Marching Cubes (MC), Marching Tetrahedra (MT), and Dual Contouring (DC). We use publicly released implementations for HashGrid, PermutoGrid, AM, and TropicalNeRF.
+
+Evaluation metrics We measure geometric accuracy with Chamfer Distance (CD), computed from 106 surface samples between the extracted mesh and the ground-truth (GT) mesh. We also assess self-consistency—agreement between the extracted mesh and the network's isosurface—using three additional metrics. For Surface-sampled SDF (SSDF) and Angular Difference (AD), we uniformly sample 106 points on the surface of the extracted mesh and query the network: SSDF is the mean absolute SDF value predicted by the network, while AD is the mean absolute angle between the mesh normals and the network-derived normals. Vertex-sampled SDF (VSDF) is SSDF computed at the extracted mesh's vertices. In all three metrics, zero indicates perfect self-consistency, i.e., the extracted mesh exactly matches the network's zero-level set.
+
+#### 5.1 Ground-truth Accuracy
+
+We report CD to ground-truth meshes across network baselines in Tab. 1 under the Large resolution setting. Our method attains the lowest CD on Thingi10K and ABC among all baselines and surpasses all analytic-extraction methods across datasets. Fig. 4 provides qualitative comparisons on Thingi10K for Tab. 1. A plain ReLU MLP shows limited ability to represent complex SDFs. Moreover, HashGrid may smooth high-curvature regions because of the implicit smoothing of trilinear interpolation, whereas our method better preserves sharp features. We also compare analytic isosurface extraction baselines under different resolution settings on the Stanford dataset in Tab. 2 and Fig. A1, reporting CD (×10−6 ) against ground-truth meshes. As the resolution decreases, TropicalNeRF's accuracy degrades markedly, suggesting that its geometric heuristics
+
+Table 1: CD (×10−6 ) to ground-truth meshes on Thingi10K, ABC, Stanford at (Large) resolution setting.
+
+| Method       | Stanford | ABC  | Thingi10K |
+|--------------|----------|------|-----------|
+| ReLU MLP     | 5480     | 4584 | 3779      |
+| AM           | 5475     | 4570 | 3775      |
+| PermutoGrid  | 3644     | 3104 | 2897      |
+| HashGrid     | 1659     | 1854 | 1763      |
+| TropicalNeRF | 1737     | 1866 | 1809      |
+| Ours         | 1718     | 1758 | 1722      |
+
+Table 2: CD (×10−6 ) to ground-truth meshes on Stanford with analytic extraction baselines across resolutions.
+
+| R | Method   | Bunny | Dragon | Happy | Arma. | Lucy | Avg. |
+|---|----------|-------|--------|-------|-------|------|------|
+| – | AM       | 3628  | 6021   | 6839  | 4577  | 6309 | 5475 |
+| S | Tropical | 4093  | 5674   | 7187  | 3671  | 6208 | 5367 |
+|   | Ours     | 2810  | 4160   | 4889  | 3794  | 5398 | 4210 |
+| M | Tropical | 2201  | 2606   | 2984  | 2506  | 3555 | 2770 |
+|   | Ours     | 2024  | 2483   | 2362  | 2300  | 3141 | 2462 |
+| L | Tropical | 1842  | 1726   | 1792  | 1611  | 1714 | 1737 |
+|   | Ours     | 1817  | 1732   | 1779  | 1581  | 1681 | 1718 |
+
+Table 3: GT mesh-sampled SDF MAE (×10−3 , ↓). We sample 106 points uniformly on the GT mesh surface, query the network, and report the mean absolute SDF value.
+
+| Method      | Stanford | Small ABC | Thingi10K | Stanford | Medium ABC | Thingi10K | Stanford | Large ABC | Thingi10K |
+|-------------|----------|-----------|-----------|----------|------------|-----------|----------|-----------|-----------|
+| PermutoGrid | 7.62     | 4.54      | 5.36      | 4.34     | 2.66       | 3.05      | 2.24     | 1.53      | 1.50      |
+| HashGrid    | 3.24     | 2.19      | 2.67      | 1.36     | 1.21       | 1.12      | 0.53     | 0.61      | 0.50      |
+| Ours        | 2.82     | 1.74      | 1.79      | 1.39     | 1.12       | 1.06      | 0.62     | 0.61      | 0.49      |
+
+struggle with the inherent nonlinearity of trilinear interpolation, whereas our method avoids these issues due to our CPWA structure and analytic extraction. The qualitative results in Fig. A1 show that—even under the Small setting—our method remains visually reasonable.
+
+To decouple representation fidelity from extraction faithfulness, we report GT-mesh-sampled SDF mean absolute error (MAE) in Tab. 3, which evaluates the learned field independently of the extractor. Our GT-mesh SDF MAE is comparable to or better than grid-based encoder baselines across datasets and settings, indicating that our encoder design does not sacrifice SDF fitting fidelity while enabling exact isosurface recovery. Tab. 6 reports the quantitative effect of the input preconditioner A∗ on Thingi10K, with CD (×10−6 ) measured against the ground-truth mesh under the Large resolution setting, and Fig. 6 shows qualitative results on the Stanford Bunny. Both indicate improved SDF accuracy for our network with A∗ . Applying our encoder-derived A∗ reduces CD for our method but worsens it for HashGrid, suggesting that A∗ is tailored to our encoder rather than a generic preconditioner. Under matched capacity—same levels, per-level table size, and resolution—the total number of learnable features is identical to HashGrid. See Appendix A.6.2 for further analysis.
+
+## 5.2 Self-consistency with the Network's Isosurface
+
+We evaluate self-consistency in Tab. 4 using SSDF (×10−6 ), VSDF (×10−6 ), and AD (°). Analytic baselines are measured on their own trained networks with their corresponding extractors, whereas MC256, MC512, and MC1024 are applied to our trained network. Both AM and our method achieve both SSDF and VSDF on the order of 10−8 , and AD rounds to 0.00. These values are near machine precision, yielding ∼ 103× stronger self-consistency than MC1024. By contrast,
+
+Table 4: Self-consistency of different meshing methods on Thingi10K, ABC, and Stanford: SSDF and VSDF (×10−6 ) and AD (◦ ) between each extracted mesh and its SDF network. Marching Cubes at each resolution is applied to our trained network.
+
+| Method       | SSDF  | Thingi10K ↓ VSDF | ↓ AD | ↓ SSDF | ABC ↓ VSDF | ↓ AD | ↓ SSDF | Stanford ↓ VSDF | ↓ AD ↓ |
+|--------------|-------|------------------|------|--------|------------|------|--------|-----------------|--------|
+| MC256        | 217.0 | 98.0             | 5.44 | 218.1  | 101.8      | 5.70 | 289.3  | 128.3           | 8.91   |
+| MC512        | 65.2  | 27.0             | 3.10 | 66.7   | 29.2       | 3.23 | 100.1  | 40.2            | 5.81   |
+| MC1024       | 17.6  | 7.79             | 1.68 | 18.9   | 8.26       | 1.72 | 20.5   | 6.00            | 2.19   |
+| AM           | 0.020 | 0.020            | 0.00 | 0.021  | 0.022      | 0.00 | 0.025  | 0.024           | 0.00   |
+| TropicalNeRF | 144.1 | 8.7              | 3.45 | 136.1  | 12.3       | 3.64 | 189.0  | 13.4            | 4.80   |
+| Ours         | 0.078 | 0.082            | 0.00 | 0.077  | 0.080      | 0.00 | 0.076  | 0.078           | 0.00   |
+
+TropicalNeRF shows lower self-consistency, consistent with the limits of its geometric heuristics for handling trilinear interpolation. The small discrepancy between AM and our method stems from running our encoder in single precision and reflects machine-precision effects, including tie-breaking at tetrahedral grid boundaries and barycentric weight evaluation.
+
+A broader comparison with widely used sampling-based extractors is given in Tab. 5 and Fig. 5. Tab. 5 reports CD (\times 10^{-6} ) for MC, MT, and DC across multiple grid resolutions and across our network's different resolution settings with all meshes extracted from our trained network. For each method, we compare against a high-resolution pseudo ground-truth—MC1024 for MC, MT512 for MT, and DC1024 for DC—chosen to closely approximate the network's isosurface. In Tab. 5, our method achieves stronger consistency with fewer vertices across extractor resolutions and network settings, except for DC512 in the Small setting. This exception is consistent with DC's use of network normals, whereas MC and MT use only SDF values. Still, DC's slight edge comes at the cost of roughly 30\times more vertices than ours. As shown in Fig. 5, sampling-based methods often need a large number of triangles to improve self-consistency, while discrete sampling itself introduces staircase artifacts. In contrast, ours achieves better self-consistency at a fixed, low triangle budget with 10×–20× fewer vertices, and avoids over-fragmentation and staircase artifacts. For runtime and memory, and for additional comparisons with adaptive sampling-based extractors and AM applied to larger ReLU MLPs, see Appendix A.5.
+
+## 6 Conclusion
+
+We introduced TetraSDF, an analytic isosurface extraction framework that preserves the CPWA structure of learned SDFs through a multi-resolution tetrahedral positional encoder with barycentric interpolation. This encoder generates an explicitly indexed polyhedral complex, enabling analytic extraction via region indicators, barycentric masks, and a grid-aware edge subdivision scheme that jointly tracks polyhedral cells and ReLU linear regions. We further introduced a closed-form input preconditioner derived from the encoder-induced
+
+Table 5: CD (×10−6 ) on the Stanford dataset for sampling-based extractors applied to our trained network under different resolution schedules, compared against pseudo ground-truth per method.
+
+| Method | V       | Small ↓ CD | ↓  V    | Medium ↓ CD | ↓       | Large  V  ↓ CD ↓ |
+|--------|---------|------------|---------|-------------|---------|------------------|
+| MC128  | 24,768  | 1734       | 24,735  | 1821        | 25,646  | 1871             |
+| MC256  | 101,337 | 1355       | 103,444 | 1380        | 105,227 | 1418             |
+| MC512  | 409,321 | 1290       | 418,464 | 1308        | 426,394 | 1323             |
+| Ours   | 29,557  | 1286       | 73,851  | 1301        | 280,929 | 1316             |
+| MT128  | 96,890  | 1677       | 88,928  | 1740        | 90,116  | 1806             |
+| MT256  | 396,516 | 1397       | 364,464 | 1363        | 370,935 | 1387             |
+| Ours   | 29,557  | 1368       | 73,851  | 1314        | 280,929 | 1332             |
+| DC128  | 41,461  | 2099       | 41,794  | 1524        | 42,048  | 1735             |
+| DC256  | 167,873 | 1351       | 169,164 | 1352        | 170,670 | 1437             |
+| DC512  | 676,567 | 1329       | 682,080 | 1334        | 688,562 | 1341             |
+| Ours   | 29,557  | 1348       | 73,851  | 1331        | 280,929 | 1336             |
+
+Table 6: CD (×10−6 ) with/without A∗ on Thingi10K; ∆ = CDw/o − CDw/ (positive is better).
+
+|  | Method   | $w/q \ A^$ | $w/\ A^$ | $\Delta \uparrow$ |
+|--|----------|-------------|-----------|-------------------|
+|  | HashGrid | 1763        | 1993      | −230              |
+|  | Ours     | 1856        | 1722      | 134        |
+
+
+
+Fig. 5: Qualitative comparison under the Small setting. Sampling-based methods often over-fragment triangles with surface artifacts, while our method avoids both by construction.
+
+
+
+
+
+Fig. 6: Qualitative effect of the input preconditioner A∗ on the Stanford Bunny. The preconditioner improves the network's SDF accuracy, especially in high-curvature regions (e.g., the ears).
+
+metric to reduce directional bias and improve training stability. Across multiple benchmarks, we match or surpass grid-based encoder baselines in SDF accuracy while producing highly self-consistent meshes faithful to the learned isosurfaces, enabled by an efficient, GPU-parallel tensorized formulation.
+
+Future work includes integrating TetraSDF into end-to-end neural reconstruction pipelines. In such settings, our field-faithful isosurface extraction could provide a consistent mesh-based supervision signal via field–mesh agreement under compact triangle budgets, without resolution-driven over-fragmentation.
+
+## 7 Acknowledgements
+
+The NAVER Smart Machine Learning (NSML) platform [17] was used for the experiments. This work was supported by NAVER (Neural 3D Representation and Asset Generation for Web Rendering) and the National Research Foundation of Korea (RS-2026-25497603: Fundamentals of Online 4D Reconstruction with Semantic Viewpoint Control and Generative Priors for Proactive Content Consumption).
+
+## References
+
+- 1. Berzins, A.: Polyhedral complex extraction from ReLU networks using edge subdivision. In: International Conference on Machine Learning (ICML). pp. 2234–2244. PMLR (2023)
+- 2. Boyd, S., Vandenberghe, L.: Convex Optimization. Cambridge University Press, Cambridge, UK (2004)
+- 3. Burstedde, C., Holke, J.: A tetrahedral space-filling curve for nonconforming adaptive meshes. SIAM Journal on Scientific Computing 38(5), C471–C503 (2016)
+- 4. Chen, A., Xu, Z., Geiger, A., Yu, J., Su, H.: TensoRF: Tensorial radiance fields. In: European Conference on Computer Vision (ECCV). pp. 333–350. Springer (2022)
+- 5. Chen, Z., Tagliasacchi, A., Funkhouser, T., Zhang, H.: Neural dual contouring. ACM Trans. Graph. 41(4), 104:1–104:13 (2022). [https://doi.org/10.1145/](https://doi.org/10.1145/3528223.3530108) [3528223.3530108](https://doi.org/10.1145/3528223.3530108)
+- 6. Chen, Z., Zhang, H.: Neural marching cubes. ACM Trans. Graph. 40(6), 1–15 (2021). 
+- 7. Chng, S.F., Saratchandran, H., Lucey, S.: Preconditioners for the stochastic training of neural fields. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 27222–27232 (2025)
+- 8. Curless, B., Levoy, M.: A volumetric method for building complex models from range images. In: Proceedings of the 23rd Annual Conference on Computer Graphics and Interactive Techniques (SIGGRAPH). pp. 303–312 (1996). [https:](https://doi.org/10.1145/237170.237269) [//doi.org/10.1145/237170.237269](https://doi.org/10.1145/237170.237269)
+- 9. Fabri, A., Pion, S.: CGAL: The computational geometry algorithms library. In: Proceedings of the 17th ACM SIGSPATIAL International Conference on Advances in Geographic Information Systems. pp. 538–539. GIS '09, Association for Computing Machinery, New York, NY, USA (2009). [https://doi.org/10.1145/1653771.](https://doi.org/10.1145/1653771.1653865) [1653865](https://doi.org/10.1145/1653771.1653865)
+- 10. Fridovich-Keil, S., Meanti, G., Warburg, F.R., Recht, B., Kanazawa, A.: K-Planes: Explicit radiance fields in space, time, and appearance. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 12479–12488 (2023)
+- 11. Gao, J., Chen, W., Xiang, T., Tsang, C.F., Jacobson, A., McGuire, M., Fidler, S.: Learning deformable tetrahedral meshes for 3D reconstruction. In: Advances in Neural Information Processing Systems (NeurIPS) (2020)
+- 12. Greenbaum, A.: Iterative Methods for Solving Linear Systems. SIAM (1997)
+- 13. Grigsby, J.E., Lindsey, K.: On transversality of bent hyperplane arrangements and the topological expressiveness of ReLU neural networks. SIAM Journal on Applied Algebra and Geometry 6(2), 216–242 (2022)
+- 14. Gupta, V., Koren, T., Singer, Y.: Shampoo: Preconditioned stochastic tensor optimization. In: International Conference on Machine Learning (ICML) (2018)
+- 15. Hanin, B., Rolnick, D.: Complexity of linear regions in deep networks. In: Proceedings of the 36th International Conference on Machine Learning (ICML) (2019)
+- 16. Ju, T., Losasso, F., Schaefer, S., Warren, J.: Dual contouring of hermite data. In: Proceedings of SIGGRAPH (2002)
+- 17. Kim, H., Kim, M., Seo, D., Kim, J., Park, H., Park, S., Jo, H., Kim, K., Yang, Y., Kim, Y., et al.: NSML: Meet the MLaaS platform with a real-world case study. arXiv preprint arXiv:1810.09957 (2018)
+- 18. Kim, J.H.: Polyhedral complex derivation from piecewise trilinear networks. In: Advances in Neural Information Processing Systems (NeurIPS). vol. 37 (2024)
+
+- 19. Kingma, D.P., Ba, J.: Adam: A method for stochastic optimization. In: International Conference on Learning Representations (ICLR) (2015)
+- 20. Koch, S., Matveev, A., Jiang, Z., Williams, F., Artemov, A., Burnaev, E., Alexa, M., Zorin, D., Panozzo, D.: ABC: A big CAD model dataset for geometric deep learning. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2019)
+- 21. Kohlbrenner, M., Alexa, M.: Isosurface extraction for signed distance functions using power diagrams. Computer Graphics Forum 44(2), e70037 (2025). [https:](https://doi.org/10.1111/cgf.70037) [//doi.org/10.1111/cgf.70037](https://doi.org/10.1111/cgf.70037)
+- 22. Kulhanek, J., Sattler, T.: Tetra-NeRF: Representing neural radiance fields using tetrahedra. In: Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV). pp. 18458–18469 (2023)
+- 23. Lei, J., Jia, K.: Analytic marching: An analytic meshing solution from deep implicit surface networks. In: International Conference on Machine Learning (ICML) (2020)
+- 24. Liu, L., Gu, J., Zaw Lin, K., Chua, T.S., Theobalt, C.: Neural sparse voxel fields. Advances in Neural Information Processing Systems (NeurIPS) 33, 15651–15663 (2020)
+- 25. Lorensen, W.E., Cline, H.E.: Marching cubes: A high resolution 3D surface construction algorithm. ACM SIGGRAPH Computer Graphics 21(4), 163–169 (1987)
+- 26. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy networks: Learning 3D reconstruction in function space. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 4460–4470 (2019)
+- 27. Montúfar, G.F., Pascanu, R., Cho, K., Bengio, Y.: On the number of linear regions of deep neural networks. In: Advances in Neural Information Processing Systems (NeurIPS) (2014)
+- 28. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph. 41(4), 102:1–102:15 (2022). 
+- 29. Park, J.J., Florence, P., Straub, J., Newcombe, R., Lovegrove, S.: DeepSDF: Learning continuous signed distance functions for shape representation. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 165–174 (2019)
+- 30. Park, K., Henzler, P., Mildenhall, B., Barron, J.T., Martin-Brualla, R.: CamP: Camera preconditioning for neural radiance fields. ACM Trans. Graph. 42(6) (2023). 
+- 31. Raghu, M., Poole, B., Kleinberg, J., Ganguli, S., Sohl-Dickstein, J.: On the expressive power of deep neural networks. In: Proceedings of the 34th International Conference on Machine Learning (ICML) (2017)
+- 32. Rahaman, N., Baratin, A., Arpit, D., Draxler, F., Lin, M., Hamprecht, F., Bengio, Y., Courville, A.: On the spectral bias of neural networks. In: International Conference on Machine Learning (ICML). pp. 5301–5310. PMLR (2019)
+- 33. Ren, D., Shi, H., Zheng, J., Cai, J.: McGrids: Monte Carlo-driven adaptive grids for iso-surface extraction. In: European Conference on Computer Vision (ECCV). pp. 127–144. Springer (2024). [https://doi.org/10.1007/978-3-031-72998-0\\_8](https://doi.org/10.1007/978-3-031-72998-0_8)
+- 34. Rosu, R.A., Behnke, S.: PermutoSDF: Fast multi-view reconstruction with implicit surfaces using permutohedral lattices. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2023)
+- 35. Saad, Y.: Iterative Methods for Sparse Linear Systems. SIAM (2003)
+
+- 36. Sellán, S., Batty, C., Stein, O.: Reach for the spheres: Tangency-aware surface reconstruction of SDFs. In: SIGGRAPH Asia 2023 Conference Papers (2023). 
+- 37. Serra, T., Tjandraatmadja, C., Ramalingam, S.: Bounding and counting linear regions of deep neural networks. In: Proceedings of the 35th International Conference on Machine Learning (ICML) (2018)
+- 38. Shen, T., Gao, J., Yin, K., Liu, M.Y., Fidler, S.: Deep marching tetrahedra: a hybrid representation for high-resolution 3D shape synthesis. In: Advances in Neural Information Processing Systems (NeurIPS) (2021)
+- 39. Shen, T., Munkberg, J., Hasselgren, J., Yin, K., Wang, Z., Chen, W., Gojcic, Z., Fidler, S., Sharp, N., Gao, J.: Flexible isosurface extraction for gradient-based mesh optimization. ACM Trans. Graph. 42(4) (2023). [https://doi.org/10.1145/](https://doi.org/10.1145/3592430) [3592430](https://doi.org/10.1145/3592430)
+- 40. Sitzmann, V., Martel, J., Bergman, A., Lindell, D., Wetzstein, G.: Implicit neural representations with periodic activation functions. Advances in Neural Information Processing Systems (NeurIPS) 33, 7462–7473 (2020)
+- 41. Stippel, C., Mujkanovic, F., Leimkühler, T., Hermosilla, P.: Marching neurons: Accurate surface extraction for neural implicit shapes. ACM Trans. Graph. 44(6), 222:1–222:12 (2025). 
+- 42. Tancik, M., Srinivasan, P.P., Mildenhall, B., Fridovich-Keil, S., Raghavan, N., Singhal, U., Ramamoorthi, R., Barron, J.T., Ng, R.: Fourier features let networks learn high frequency functions in low dimensional domains. In: Advances in Neural Information Processing Systems (NeurIPS) (2020)
+- 43. Teschner, M., Heidelberger, B., Müller, M., Pomerantes, D., Gross, M.H.: Optimized spatial hashing for collision detection of deformable objects. In: Vision, Modeling, and Visualization (VMV). vol. 3, pp. 47–54 (2003)
+- 44. Tieleman, T., Hinton, G.: Lecture 6.5 - RMSProp: Divide the gradient by a running average of its recent magnitude (2012)
+- 45. Treece, G.M., Prager, R.W., Gee, A.H.: Regularised marching tetrahedra: Improved iso-surface extraction. Computers & Graphics 23(4), 583–598 (1999)
+- 46. Zeiler, M.D., Fergus, R.: Visualizing and understanding convolutional networks. In: European Conference on Computer Vision (ECCV) (2014)
+- 47. Zhou, Q., Jacobson, A.: Thingi10K: A dataset of 10,000 3D-printing models. arXiv preprint arXiv:1605.04797 (2016)
+
+## Supplementary Material
+
+## A.1 Theoretical Proofs
+
+In this section, we prove that barycentric interpolation within a tetrahedron is an affine transformation of the input, which we use to show that tetrahedral networks are piecewise affine in Sec. 3.1. This section reproduces standard properties of barycentric interpolation and the resulting affine mapping in our notation for completeness.
+
+Theorem 1 (Affine property of barycentric interpolation within a tetrahedron). Let g : R 3 → R d be a function that encodes a point x into a feature vector g(x). For any point x ∈ R 3 , g(x) is obtained via barycentric interpolation using the feature vectors that represent the four vertices of a tetrahedron:
+
+$$\mathbf{g}(\mathbf{v}_0), \mathbf{g}(\mathbf{v}_1), \mathbf{g}(\mathbf{v}_2), \text{ and } \mathbf{g}(\mathbf{v}_3).$$
+
+Then, g(x) is an affine transformation of the input x, which can be expressed as:
+
+| $\mathbf{g}(\mathbf{x}) = \mathbf{A}\mathbf{x} + \mathbf{b}, \quad \mathbf{A} \in \mathbb{R}^{d \times 3}, \quad \mathbf{b} \in \mathbb{R}^d, \quad (16)$ |
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+where A is a linear transformation matrix, and b is a translation vector.
+
+Proof. Let w = (w0, w1, w2, w3) be the barycentric coordinates of a point x for the tetrahedron defined by its coordinates of vertices v0, v1, v2, v3 ∈ R 3 . Each barycentric coefficient wi ∈ R satisfies the constraint: w0 + w1 + w2 + w3 = 1. First, we express the function g in terms of the barycentric interpolation:
+
+$$\mathbf{g}(\mathbf{x}) = w_0\mathbf{g}(\mathbf{v}_0) + w_1\mathbf{g}(\mathbf{v}_1) + w_2\mathbf{g}(\mathbf{v}_2) + w_3\mathbf{g}(\mathbf{v}_3). \quad (17)$$
+
+Using the barycentric constraint:
+
+$$w_0 = 1 - (w_1 + w_2 + w_3), \quad (18)$$
+
+we substitute this into the equation:
+
+$$\mathbf{g}(\mathbf{x}) = (1 - w_1 - w_2 - w_3)\mathbf{g}(\mathbf{v}_0) + w_1\mathbf{g}(\mathbf{v}_1) + w_2\mathbf{g}(\mathbf{v}_2) + w_3\mathbf{g}(\mathbf{v}_3). \quad (19)$$
+
+Rearranging the equation, we obtain:
+
+$$\mathbf{g}(\mathbf{x}) = \mathbf{g}(\mathbf{v}_0) + (\mathbf{g}(\mathbf{v}_1) - \mathbf{g}(\mathbf{v}_0))w_1 + (\mathbf{g}(\mathbf{v}_2) - \mathbf{g}(\mathbf{v}_0))w_2 + (\mathbf{g}(\mathbf{v}_3) - \mathbf{g}(\mathbf{v}_0))w_3. \quad (20)$$
+
+Defining the matrix G as:
+
+
+$$\mathbf{G} = [\mathbf{g}(\mathbf{v}_1) - \mathbf{g}(\mathbf{v}_0), \mathbf{g}(\mathbf{v}_2) - \mathbf{g}(\mathbf{v}_0), \mathbf{g}(\mathbf{v}_3) - \mathbf{g}(\mathbf{v}_0)] \in \mathbb{R}^{d \times 3}, \quad (21)$$
+
+we can write:
+
+$$\mathbf{g}(\mathbf{x}) = \mathbf{g}(\mathbf{v}_0) + \mathbf{G} \begin{bmatrix} w_1 \\ w_2 \\ w_3 \end{bmatrix}. \quad (22)$$
+
+Similarly, the point x itself can be expressed in barycentric form as
+
+$$\mathbf{x} = w_1\mathbf{v}_0 + w_1\mathbf{v}_1 + w_2\mathbf{v}_2 + w_3\mathbf{v}_3, \quad (23)$$
+
+which, using the same elimination of w0 and grouping terms relative to v0, yields
+
+$$\mathbf{x} = \mathbf{v}_0 + \mathbf{C} \begin{bmatrix} w_1 \\ w_2 \\ w_3 \end{bmatrix}, \quad (24)$$
+
+where C = [v1 − v0, v2 − v0, v3 − v0] ∈ R 3×3 .
+
+If the vectors \{ \mathbf {v}\_1 - \mathbf {v}\_0, {v}\_2 - \mathbf {v}\_0, \mathbf {v}\_3 - \mathbf {v}\_0 \} are linearly independent, i.e., the four vertices v0, v1, v2, and v3 do not lie on the same plane and no three vertices are collinear, then the matrix \mathbf {C} is invertible.
+
+Thus, the barycentric coordinates of \mathbf {x} can be computed as:
+
+
+$$\begin{bmatrix} w_1 \\ w_2 \\ w_3 \end{bmatrix} = \mathbf{C}^{-1}(\mathbf{x} - \mathbf{v}_0). \quad (25)$$
+
+Substituting Eq. \(25\) into Eq. \(22\):
+
+$$\mathbf{g}(\mathbf{x}) = \mathbf{g}(\mathbf{v}_0) + \mathbf{G}\mathbf{C}^{-1}(\mathbf{x} - \mathbf{v}_0). \quad (26)$$
+
+Rewriting this:
+
+
+$$\mathbf{g}(\mathbf{x}) = \mathbf{G}\mathbf{C}^{-1}\mathbf{x} + (\mathbf{g}(\mathbf{v}_0) - \mathbf{G}\mathbf{C}^{-1}\mathbf{v}_0). \quad (27)$$
+
+Thus, g(x) is an affine transformation with:
+
+| $\mathbf{A} = \mathbf{G}\mathbf{C}^{-1}, \quad \mathbf{b} = \mathbf{g}(\mathbf{v}_0) - \mathbf{G}\mathbf{C}^{-1}\mathbf{v}_0.$ | (28) |
+|--------------------------------------------------------------------------------------------------------------------------------|------|
+|--------------------------------------------------------------------------------------------------------------------------------|------|
+
+with corresponding A and b in Eq. \(16\), which completes the proof.
+
+Lemma 1 (Affine property of levelwise feature concatenation). In a region where the feature vector selection is fixed, the levelwise concatenation of the barycentrically interpolated feature vector is also an affine transformation of the input x.
+
+Proof. For each resolution level ℓ ∈ {0, . . . , L − 1}, let
+
+$$\mathbf{g}^{(\ell)}(\mathbf{x}) = \mathbf{A}^{(\ell)}\mathbf{x} + \mathbf{b}^{(\ell)} \in \mathbb{R}^d \quad (29)$$
+
+denote the barycentric feature interpolation within the tetrahedron containing x at level ℓ by Eq. \(27\). Define the concatenated feature vector z(x) as:
+
+$$\mathbf{z}(\mathbf{x}) = \bigoplus_{\ell=0}^{L-1} \mathbf{g}^{(\ell)}(\mathbf{x}) = [\mathbf{g}^{(0)}(\mathbf{x})^\top, \dots, \mathbf{g}^{(L-1)}(\mathbf{x})^\top]^\top \in \mathbb{R}^{dL}, \quad (30)$$
+
+where ⊕ denotes concatenation over all resolution levels. In a region where the feature selection is fixed across all levels, we have
+
+$$\mathbf{z}(\mathbf{x}) = \begin{bmatrix} \mathbf{A}^{(0)} \\ \vdots \\ \mathbf{A}^{(L-1)} \end{bmatrix} \mathbf{x} + \begin{bmatrix} \mathbf{b}^{(0)} \\ \vdots \\ \mathbf{b}^{(L-1)} \end{bmatrix} = \mathbf{A}' \mathbf{x} + \mathbf{b}' \quad (31)$$
+
+for suitable A′ and b ′ . Thus, z(x) is an affine transformation of the input x, which completes the proof.
+
+## A.2 Input Preconditioning
+
+Our global input preconditioner mitigates the geometric anisotropy introduced by the tetrahedral encoder by mapping x to A∗x. Since the learnable features are interpolated using barycentric coefficients that are derived from an affine function of the input x inside each tetrahedron from Eq. \(25\), the mapping from input to barycentric coordinates should not favor specific directions. Although the encoder is multi-resolution, each resolution level is a scaled and translated copy of the same tetrahedral tiling, and the resulting features from each level are only concatenated (ref. Lemma 1\). Therefore, it suffices to analyze the encoderinduced metric on a single canonical unit cube and its six tetrahedra; the same preconditioner applies globally to all cells and levels.
+
+Encoder-induced local metric Consider a tetrahedron T from the subdivision of the cube shown in Figure 3; for convenience, we treat it as a unit cube with ordered vertices (v0, v1, v2, v3). Define
+
+$$C_{\mathcal{T}} = \left[ \mathbf{v}_1 - \mathbf{v}_0, \mathbf{v}_2 - \mathbf{v}_0, \mathbf{v}_3 - \mathbf{v}_0 \right] \in \mathbb{R}^{3 \times 3}, \quad \mathbf{w} = [w_1, w_2, w_3]^T. \quad (32)$$
+
+Here, v0 is the grid anchor of Fig. 3 (the lexicographically smallest cube corner), consistent with a (ℓ) (x) in Sec. 4.4. Inside T , Eq. \(25\) yields x = v0 +CT w, and differentiation gives dw = C −1 T dx. Measuring the squared norm of dw gives:
+
+$$\|dw\|^2 = \|\mathbf{C}_{\mathcal{T}}^{-1} dx\|^2 = dx^{\top} \mathbf{C}_{\mathcal{T}}^{-1} \mathbf{C}_{\mathcal{T}}^{-1} dx, \quad \mathbf{M}_{\mathcal{T}} := \mathbf{C}_{\mathcal{T}}^{-1} \mathbf{C}_{\mathcal{T}}^{-1}. \quad (33)$$
+
+This encoder-induced local metric quantifies how sensitively barycentric coordinates respond to infinitesimal displacements in x. Our tetrahedral encoder is obtained by regularly tiling space with scaled and translated copies of a canonical unit cube subdivided into six congruent tetrahedra (see Fig. 3\). Let T ∈ {S0, . . . , S5} denote these tetrahedra and let MT be their local metrics from Eq. \(33\). Their simple average represents the average encoder-induced anisotropy within one canonical cube cell:
+
+
+$$\mathbf{M} = \frac{1}{6} \sum_{\mathcal{T} \in \{S_0, \dots, S_5\}} \mathbf{M}_{\mathcal{T}} = \frac{1}{3} \begin{bmatrix} 5 & -2 & -2 \\ -2 & 5 & -2 \\ -2 & -2 & 5 \end{bmatrix}. \quad (34)$$
+
+The cube-averaged metric M is invariant under permutations of the coordinate axes. Equivalently, averaging M over all axis permutations leaves it unchanged. Let P(0) , . . . , P(5) be the six 3 × 3 permutation matrices
+
+| $\mathbf{P}^{(0)} = \begin{bmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 1 \end{bmatrix}$ , $\mathbf{P}^{(1)} = \begin{bmatrix} 1 & 0 & 0 \\ 1 & 0 & 0 \\ 0 & 0 & 1 \end{bmatrix}$ , $\mathbf{P}^{(2)} = \begin{bmatrix} 1 & 0 & 0 \\ 0 & 0 & 1 \\ 0 & 1 & 0 \end{bmatrix}$ , |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| $\mathbf{P}^{(3)} = \begin{bmatrix} 0 & 0 & 1 \\ 1 & 0 & 0 \\ 0 & 1 & 0 \end{bmatrix}$ , $\mathbf{P}^{(4)} = \begin{bmatrix} 0 & 1 & 0 \\ 0 & 0 & 1 \\ 1 & 0 & 0 \end{bmatrix}$ , $\mathbf{P}^{(5)} = \begin{bmatrix} 0 & 0 & 1 \\ 0 & 1 & 0 \\ 1 & 0 & 0 \end{bmatrix}$ . |
+
+We then define:
+
+
+
+| $\mathbf{M}_{\text{sym}} = \frac{1}{6} \sum_{k=0}^5 \mathbf{P}^{(k)} \mathbf{M} \mathbf{P}^{(k)\top} = \frac{1}{3} \begin{bmatrix} 5 & -2 & -2 \\ -2 & 5 & -2 \\ -2 & -2 & 5 \end{bmatrix}.$ | (35) |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------|
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------|
+
+Thus, Msym = M; we retain the notation Msym to emphasize its invariance under axis relabeling. It has eigenvalues 1 3 , 7 3 , 7 3 , with u∥ = √ 1 3 (1, 1, 1)⊤ as eigenvector for 1 3 , and the eigenspace for 7 3 given by {u ∈ R 3 | u ⊤u∥ = 0}. Hence the spectral condition number, defined as the ratio of the largest to the smallest eigenvalue, is
+
+$$\kappa(\mathbf{M}_{\text{sym}}) = \frac{\lambda_{\text{max}}}{\lambda_{\text{min}}} = 7. \quad (36)$$
+
+Thus, with respect to this average metric, the encoder-induced geometry attenuates motion along the body diagonal and amplifies any transverse direction by a factor √ 7 in magnitude, on average over canonical cube cells.
+
+Global linear preconditioner We start by expressing the global preconditioner as an affine map in homogeneous coordinates:
+
+$$\tilde{\mathbf{y}} = \mathbf{T}\tilde{\mathbf{x}}, \quad \mathbf{T} = \begin{bmatrix} \mathbf{A}^* & \mathbf{t} \\ \mathbf{0}^\top & \mathbf{1} \end{bmatrix}, \quad \tilde{\mathbf{x}} = \begin{bmatrix} \mathbf{x} \\ \mathbf{1} \end{bmatrix}, \quad \tilde{\mathbf{y}} = \begin{bmatrix} \mathbf{y} \\ \mathbf{1} \end{bmatrix}. \quad (37)$$
+
+where A∗ ∈ R 3×3 is invertible and t ∈ R 3 is an arbitrary translation vector. Then, inside a tetrahedron T , we have w(y) = C −1 T (y − v0) with y = A∗x + t, and hence, as a function of x,
+
+$$\mathbf{w}(\mathbf{x}) = \mathbf{C}_T^{-1}(\mathbf{A}^* \mathbf{x} + \mathbf{t} - \mathbf{v}_0). \quad (38)$$
+
+Differentiating with respect to x gives:
+
+$$d\mathbf{w} = \mathbf{C}_T^{-1}\mathbf{A}^* d\mathbf{x}, \quad \|d\mathbf{w}\|^2 = d\mathbf{x}^\top \mathbf{A}^{\top} \mathbf{M}_T \mathbf{A}^ d\mathbf{x}, \quad (39)$$
+
+where MT is the original local metric from Eq. \(33\). Here the translation t cancels in the differential and does not affect the metric. Thus the linear map A∗ genuinely changes the encoder-induced geometry in the input space. We now average these preconditioned local metrics over the canonical cube and over all axis permutations. Using the permutation matrices P(k) and the definition of Msym from Eq. \(34\) and Eq. \(35\), we obtain
+
+$$\frac{1}{36} \sum_{k=0}^5 \sum_{T \in \{S_0, \dots, S_5\}} \mathbf{A}^{\top} \mathbf{P}^{(k)} \mathbf{M}_T \mathbf{P}^{(k)\top} \mathbf{A}^ = \mathbf{A}^{\top} \mathbf{M}_{\text{sym}} \mathbf{A}^. \quad (40)$$
+
+Thus, the effective average metric seen from the input space is A∗⊤MsymA∗ . We choose A∗ to isotropize this average and enforce volume preservation to avoid global rescaling:
+
+
+
+| $\mathbf{A}^{\top}\mathbf{I}_{M_{\text{ym}}}\mathbf{A}^ = c\mathbf{I}$ | $\det(\mathbf{A}^*) = 1$ | (41) |
+|--------------------------------------------------------------------------|--------------------------|------|
+|--------------------------------------------------------------------------|--------------------------|------|
+
+Under these conditions, the preconditioned average encoder-induced metric is isotropic and has unit condition number κ(A∗⊤MsymA∗ ) = 1:
+
+$$dx^\top \mathbf{A}^{\top} \mathbf{M}_{\text{sym}} \mathbf{A}^ dx = c \|dx\|^2. \quad (42)$$
+
+Thus, with respect to the symmetrized cube-average metric, all directions in the preconditioned input space are treated equally; on average over canonical cells, the encoder no longer imposes a preferred direction on infinitesimal displacements.
+
+Eq. \(41\) determines A∗ only up to right multiplication by a rotation. Choosing the symmetric positive-definite solution gives A∗ = √ cM−1/2 sym , where the volume-preserving constraint det(A∗ ) = 1 yields c = det(Msym) 1/3 = 72/3/3. Thus, the closed-form preconditioner is:
+
+$$\mathbf{A}^* = \frac{7^{1/3}}{3} \begin{bmatrix} 1 + \frac{2}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} \\ 1 - \frac{1}{\sqrt{7}} & 1 + \frac{2}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} \\ 1 - \frac{1}{\sqrt{7}} & 1 - \frac{1}{\sqrt{7}} & 1 + \frac{2}{\sqrt{7}} \end{bmatrix}. \quad (43)$$
+
+which satisfies det(A∗ ) = 1 and A∗⊤MsymA∗ = c I with c = 72/3/3. Numerically, we use
+
+| $\mathbf{A}^* \approx$ | [1.11965708 0.39663705 0.39663705 ] | . | (44) |
+|------------------------|-------------------------------------|---|------|
+|                        | 0.39663705 1.11965708 0.39663705    |   |      |
+|                        | 0.39663705 0.39663705 1.11965708    |   |      |
+
+To quantify the effect of this preconditioner, Tab. A1 reports spectral condition numbers κ(·) of the encoder-induced metrics on the canonical cube before and after applying A∗ .
+
+Table A1: Condition numbers of encoder-induced metrics on the canonical unit cube with the tetrahedral subdivision shown in Fig. 3, before and after applying the global preconditioner A∗ .
+
+|   | Case |   | κ  | ( M ) | κ ( A | ∗⊤ MA ∗ ) |
+|---|------|---|----|-------|-------|-----------|
+| M | sym  |   | 7  | 00    | 1     | 00        |
+| M | S    | 0 | 16 | 39    | 5     | 05        |
+| M | S    | 1 | 16 | 39    | 5     | 05        |
+| M | S    | 2 | 16 | 39    | 5     | 05        |
+| M | S    | 3 | 16 | 39    | 5     | 05        |
+| M | S    | 4 | 16 | 39    | 5     | 05        |
+| M | S    | 5 | 16 | 39    | 5     | 05        |
+
+## A.3 Polyhedral Cells
+
+Recall from Definition 3 that the multi-resolution tetrahedral encoder partitions the bounded domain S ⊂ R 3 into x-containing tetrahedra T (ℓ) (x) at each resolution level ℓ ∈ {0, 1, . . . , L − 1}. For x ∈ S, we define the encoder-induced polyhedral cell of x as:
+
+$$\mathcal{C}_{\mathbf{x}} := \bigcap_{\ell=0}^{L-1} \mathcal{T}^{(\ell)}(\mathbf{x}). \quad (45)$$
+
+Lemma 2 (Convexity of polyhedral cells). For any x ∈ S, the polyhedral cell Cx is a convex polyhedron.
+
+Proof. Each tetrahedron T (ℓ) (x) can be written as the intersection of four halfspaces of the form
+
+$$\mathcal{T} = \{\mathbf{y} \in \mathbb{R}^3 \mid \mathbf{a}_j^\top \mathbf{y} \leq b_j, j \in \{0, 1, 2, 3\}, b_j \in \mathbb{R}\}, \quad (46)$$
+
+and half-spaces are convex by definition. Hence each T (ℓ) (x) is convex. Because the intersection of convex sets remains convex [2], the cell Cx is also convex.
+
+Remark 2 (restated). Notice that the encoder τ is piecewise affine and continuous over S. When L = 1, τ is affine with respect to x within each tetrahedron, while for L > 1, τ is affine with respect to x within each cell Cx. In the special case where the geometric progression ratio
+
+$$\gamma := \exp\left(\frac{\ln N_{\max} - \ln N_{\min}}{L - 1}\right) \quad (47)$$
+
+satisfies γ ∈ N and γ ≥ 2, every cell Cx is a tetrahedron at the finest level.
+
+## A.4 Implementation Details of Initial Skeleton Extraction
+
+In the initial skeleton extraction step, our goal is to extract all vertices and edges of C from the multi-resolution tetrahedral grid. This section provides the detailed algorithmic construction described in Sec. 4.3.
+
+#### A.4.1 Grid Representation as a Union of Parallel-plane Sets
+
+We exploit the inherent regularity of the multi-resolution tetrahedral grid to represent C using a union of parallel-plane sets. As the slopes of tetrahedral subdivision are constant across levels, their normal set is identical while their offsets differ across levels. Thus, multiple planes can be compactly represented as sharing a single normal but varying in their offsets. We denote these unique normals as:
+
+$$\mathcal{N} = \{\mathbf{n}_0, \mathbf{n}_1, \dots, \mathbf{n}_i, \dots\}. \quad (48)$$
+
+For each ni , the associated offsets across all resolution levels are defined as a vector as follows:
+
+$$\mathbf{d}^{(i)} = [d_0^{(i)}, d_1^{(i)}, \dots]^\top. \quad (49)$$
+
+This representation makes it easier to extract the vertices and edges of C. Moreover, the formulation scales efficiently to large numbers of vertices and edges.
+
+## A.4.2 Vertex Extraction
+
+A vertex of C is the intersection of at least three planes whose normals are linearly independent. We define the set of such normal triplets by:
+
+$$\mathcal{T}^{(ijk)} := \{\{\mathbf{n}_i, \mathbf{n}_j, \mathbf{n}_k\} \in [\mathcal{M}]^3 \mid \det[\mathbf{n}_i \ \mathbf{n}_j \ \mathbf{n}_k] \neq 0\}, \quad (50)$$
+
+where [N ] k denotes the set of all k-element subsets of N . For each triplet, we define the normal matrix as:
+
+$$\mathbf{N}^{(ijk)} := [\mathbf{n}_i \ \mathbf{n}_j \ \mathbf{n}_k] \in \mathbb{R}^{3 \times 3}, \quad (51)$$
+
+and the corresponding offset matrix is given by:
+
+$$\mathbf{D}^{(ijk)} = \begin{bmatrix} (\mathbf{d}^{(i)} \otimes \mathbf{1}_{|\mathbf{d}^{(j)}|} \otimes \mathbf{1}_{|\mathbf{d}^{(k)}|})^\top \\ (\mathbf{1}_{|\mathbf{d}^{(i)}|} \otimes \mathbf{d}^{(j)} \otimes \mathbf{1}_{|\mathbf{d}^{(k)}|})^\top \\ (\mathbf{1}_{|\mathbf{d}^{(i)}|} \otimes \mathbf{1}_{|\mathbf{d}^{(j)}|} \otimes \mathbf{d}^{(k)})^\top \end{bmatrix} \in \mathbb{R}^{3 \times (|\mathbf{d}^{(i)}||\mathbf{d}^{(j)}||\mathbf{d}^{(k)}|)}, \quad (52)$$
+
+where 1|d| denotes the column vector of ones of length |d| and ⊗ denotes the Kronecker product, which can be viewed as the tensor product collapsed into a vector in our case.
+
+Thus, the vertices for the chosen normal triplet T (ijk) are the solution of linear equation:
+
+$$\mathbf{D}^{(ijk)\top} \mathbf{X}^{(ijk)} = \mathbf{D}^{(ijk)} \quad (53)$$
+
+which can be obtained by:
+
+$$\mathbf{X}^{(ijk)} = \mathbf{N}^{(ijk)-\top} \mathbf{D}^{(ijk)}. \quad (54)$$
+
+Notice that each column of X(ijk) corresponds to a vertex. By collecting these columns over all triplets of T yields the candidate vertex set Xall. Since planes are unbounded, some candidate vertices may fall outside the bounded domain S. We therefore define the final extracted vertex set as:
+
+$$\mathcal{V} := \mathcal{X}_{\text{all}} \cap \mathcal{S}. \quad (55)$$
+
+Note that the computation can be efficiently parallelized over triplets via tensor broadcasting.
+
+## A.4.3 Edge Extraction
+
+An edge of C is the intersection of at least two non-parallel planes. Similarly, we define the set of normal pairs describing the two planes as follows:
+
+$$\mathcal{P} := \{\{\mathbf{n}_i, \mathbf{n}_j\} \in [\mathcal{M}]^2 \mid \mathbf{n}_i \times \mathbf{n}_j \neq \mathbf{0}\}. \quad (56)$$
+
+For each {ni , nj} ∈ P, we define uij := ni×nj ||ni×nj || as the unit direction vector of the line of intersection between the two planes. Note that the offsets of the planes are not required for this.
+
+Given the above normals ni and nj together with their offsets d (i) n and d (j) m and the previously extracted vertex set V, the endpoints of the edges are required to satisfy:
+
+$$\mathcal{V}_{nm}^{(ij)} := \{\mathbf{v} \in \mathcal{V} \mid \mathbf{n}_i^\top \mathbf{v} = d_n^{(i)}, \quad \mathbf{n}_j^\top \mathbf{v} = d_m^{(j)}\}. \quad (57)$$
+
+However, generating edges directly from V (ij) mn may result in overlaps. To avoid this, we order them by the projection of each vertex onto uij :
+
+$$t_{mn}^{(ij)}(\mathbf{v}) := \mathbf{u}_i^\top_j \mathbf{v}, \quad \mathbf{v} \in \mathcal{V}_{mn}^{(ij)}. \quad (58)$$
+
+This scalar projection represents the distance from the origin. The sequence obtained by sorting V (ij) mn in ascending tij order is as follows:
+
+$$\tilde{\mathcal{V}}_{mn}^{(ij)} = [\mathbf{v}_0, \dots, \mathbf{v}_\ell, \mathbf{v}_{\ell+1}, \dots]. \quad (59)$$
+
+The non-overlapping local edge set is then obtained by connecting consecutive vertices in Ve(i,j) mn :
+
+$$\mathcal{E}_{(m)}^j := \{\{\mathbf{v}_\ell, \mathbf{v}_{\ell+1}\} \mid \mathbf{v}_\ell, \mathbf{v}_{\ell+1} \in \tilde{\mathcal{V}}_{(m)}^j, 0 \leq \ell < |\tilde{\mathcal{V}}_{(m)}^j| - 1\}. \quad (60)$$
+
+The whole edge set E is obtained by taking the union of E (ij) mn over all normal pair and offset pair combinations. Since the vertex set V is already defined within the bounded domain, no additional post-processing is required to be within S. Once again, this computation can be parallelized efficiently using tensor broadcasting.
+
+## A.5 Additional Results
+
+## A.5.1 Runtime
+
+We report runtime on the Stanford dataset across resolution settings. Tab. A2 reports the runtime for initial skeleton extraction and the end-to-end total runtime, which includes skeleton extraction. It also lists the initial-skeleton sizes |V| and |E|, and the peak GPU memory. The results show that our method extracts the large vertex and edge sets of the initial skeleton—encoder-induced polyhedral complex—efficiently while keeping the total runtime reasonable. When the encoder's levels and resolutions are fixed, the initial skeleton can be cached and reused. For reference, MC and DC implementations of CGAL [9] at 512^3 resolution take 0.94s and 5.87s on average over the Stanford dataset, respectively.
+
+Table A2: Runtime decomposed into initial skeleton extraction and total runtime, with peak GPU memory, for each resolution setting R on the Stanford dataset. When the encoder settings are fixed, the initial skeleton can be cached and reused.
+
+| R      |   |   | Initial  V | Total (s) (GB)  E  Time (s) |
+|--------|---|---|------------|-----------------------------|
+| Small  | 4 | 4 | × 10       | 5                           |
+|        |   |   |            | 1 6 × 10 6                  |
+|        |   |   |            | 0.24 1.83 0.99              |
+| Medium | 4 | 4 | × 10       | 6                           |
+|        |   |   |            | 1 6 × 10 7                  |
+|        |   |   |            | 0.33 1.42 1.53              |
+| Large  | 3 | 5 | × 10       | 7                           |
+|        |   |   |            | 1 3 × 10 8                  |
+|        |   |   |            | 1.99 4.56 8.01              |
+
+#### A.5.2 Runtime and Capacity Comparison with Analytic Marching
+
+We further compare Analytic Marching (AM) applied to ReLU MLPs with different numbers of hidden layers and widths. The AM setting used in the main paper is AM-H10/W90, which denotes a ReLU MLP with 10 hidden layers of width 90. As shown in Tab. A3, the AM baseline in the main paper has runtime comparable to Ours-Large but much higher CD, and larger ReLU MLP variants do not close the gap. Ours-Medium is both faster and more accurate than AM-H20/W200 despite having fewer parameters, suggesting that the gain comes from the tetrahedral encoder improving the learned SDF while preserving analytic isosurfacing. Note that ours runtime includes initial skeleton extraction.
+
+## A.5.3 Comparison with Adaptive Sampling-based Extraction
+
+We also evaluate adaptive sampling-based extractors on our trained network (Large), including CGAL [9] implementations of octree Marching Cubes (OctMC) and octree Dual Contouring (OctDC), and McGrids [33] with its official default
+
+Table A3: Runtime and capacity comparison with Analytic Marching (AM) on the Stanford dataset. CD is reported in units of 10−6 . Note that ours runtime includes initial skeleton extraction.
+
+| Method      | Params | CD ↓ | Time (s) ↓ |
+|-------------|--------|------|------------|
+| AM-H10/W90  | 74K    | 5475 | 4.21       |
+| AM-H15/W150 | 318K   | 4389 | 3.82       |
+| AM-H20/W200 | 765K   | 5062 | 5.10       |
+| Ours-Medium | 588K   | 2462 | 1.42       |
+| Ours-Large  | 4.5M   | 1718 | 4.56       |
+
+settings. We use the Stanford dataset for this comparison. As shown in Tab. A4, OctMC, OctDC, and McGrids require substantially more vertices and runtime than Ours while producing worse self-consistency with the same trained network. At depth 12, octree-based extraction became impractical on the Stanford dataset; Bunny alone produced 71M leaves, indicating that octree adaptivity does not prevent near-surface explosion on these curved shapes.
+
+Table A4: Adaptive sampling-based extractor comparison on the same trained network. SSDF and VSDF are reported in units of 10−6 .
+
+| Method  | SSDF  | ↓ VSDF | ↓ AD( ◦ | ) ↓  V  ↓ | Time (s) ↓ |
+|---------|-------|--------|---------|-----------|------------|
+| OctMC   | 8.85  | 3.28   | 1.92    | 6.76M     | 124.2      |
+| OctDC   | 6.66  | 5.18   | 1.76    | 13.49M    | 139.3      |
+| McGrids | 332.2 | 16.5   | 3.13    | 3.73M     | 69.6       |
+| Ours    | 0.076 | 0.078  | 0.00    | 0.28M     | 4.56       |
+
+## A.5.4 Qualitative Comparison across Resolution Settings
+
+Fig. A1 shows the qualitative effect of the three resolution settings (Small, Medium, Large) on the Stanford Dragon, complementing the quantitative results in Tab. 2. As the resolution decreases, TropicalNeRF loses fine details much more rapidly than our method. Our method still produces visually plausible meshes even under the Small setting.
+
+
+
+Fig. A1: Qualitative results on the Stanford Dragon across resolution settings: Small (left), Medium (middle), and Large (right).
+
+## A.6 Further Discussions
+
+## A.6.1 Design Choice for Our Tetrahedral Grid
+
+Our tetrahedral grid is designed to satisfy two practical requirements for both analytic extraction and training stability:
+
+- Efficient Analytic Traversal: given a query point x, we should be able to identify its containing tetrahedron and retrieve a compact neighborhood under a single canonical local pattern repeated throughout space, enabling fixed-size lookup tables with minimal case distinctions.
+- Uniform Vertex Valence: since features are stored at grid vertices and accessed by interpolation, vertices should have uniform valence (i.e., the same number of incident tetrahedra) to avoid systematically uneven update frequency and gradient variance across vertices.
+
+Our congruent 6-tet cube subdivision satisfies these requirements by design. Moreover, the remaining directional bias induced by the grid anisotropy is addressed by our global preconditioner A∗ (Sec. 4.2\), which improves conditioning while preserving the same indexing and neighbor structure.
+
+In contrast, a 5-tet decomposition is non-congruent and often requires multiple local patterns across the grid, increasing case distinctions for point-totetrahedron indexing and complicating compact neighbor lookup across cell boundaries. A 12-tet decomposition with a Steiner center vertex introduces multiple vertex types with different valence, which can lead to uneven feature-hit counts and larger traversal neighborhoods.
+
+#### A.6.2 Applying A∗ to HashGrid
+
+As noted in Sec. 5.1 and Tab. 6, applying our encoder-derived A∗ improves our model's accuracy but does not improve HashGrid's accuracy, indicating that A∗ is not a generic preconditioner. Here we briefly explain why a global linear preconditioner is not expected to provide directional gains for HashGrid's withincell trilinear interpolation.
+
+Following Sec. A.2, consider a canonical unit cube with the standard trilinear interpolation weights for its 8 corner vertices. Let a0(t) = 1 − t and a1(t) = t be two linear functions on t ∈ [0, 1]; then the weight for corner (i, j, k) ∈ {0, 1} 3 is
+
+| $w_{ijk}(x, y, z) = a_i(x) a_j(y) a_k(z),$ | $(x, y, z) \in [0, 1]^3.$ | (61) |
+|--------------------------------------------|---------------------------|------|
+|--------------------------------------------|---------------------------|------|
+
+Let x = (x, y, z) ⊤ and let w(x) ∈ R 8 stack the eight weights {wijk}. Differentiation gives dw = J dx. We define the cube-average metric Mtri ∈ R 3×3 as the canonical-cube average of J ⊤J. By cube symmetries, Mtri = αI for some α > 0. Under the same volume-preserving isotropization condition used in Sec. A.2, we enforce A⊤MtriA = cI together with det(A) = 1. Since Mtri = αI, this implies A⊤A = I and thus we can take A = I. Therefore, a global linear preconditioner is not expected to provide directional gains for HashGrid.
+
+## A.6.3 Limitations
+
+Triangle regularity6 can be important for downstream geometry processing tasks such as deformation-based surface editing, but it often trades off with the exact agreement with the learned zero-level set. Sampling-based isosurface extraction (e.g., MC, MT, and DC) approximates the zero-level set under a discrete grid, incurring discretization error but yielding meshes whose triangle regularity is largely determined by the sampling scheme. In contrast, analytic isosurface extraction (e.g., AM, TropicalNeRF, and ours) prioritizes exact agreement with the learned zero-level set. In Tab. A5, we report the fraction of faces with θmin < 5 ◦ . When required, triangle regularity can be improved via standard post-processing, at the cost of deviating from the learned zero-level set.
+
+6 Here, triangle regularity refers to avoiding skinny triangles, e.g., larger minimum angles.
+
+Table A5: Fraction of faces with minimum angle below 5 for field-faithful analytic isosurface extractors on the Stanford dataset. θmin denotes the per-face minimum angle. Values are averaged over the Stanford shapes; TropicalNeRF and ours use the Large resolution setting (Sec. 5\).
+
+| Method       | % { θ min < 5 |
+|--------------|---------------|
+|              | ◦ }           |
+| AM           | 10.05         |
+| TropicalNeRF | 10.94         |
+| Ours         | 11.83         |
+
+## A.7 Edge Subdivision Intuition
+
+In this section, we briefly recap the edge subdivision scheme from prior work [1] (Sec. 3.2\) and provide intuition for readers who are less familiar with this topic; our grid-aware extensions are described in Sec. 4.4 and Sec. 4.5.
+
+## Notation
+
+- V, E: current vertex and edge sets.
+- x ∈ V: a vertex position in R 3 .
+- m indexes ReLU layers and k indexes neurons within layer m.
+- di = ν
+- (m) k (xi): pre-activation at xi .
+- H
+- (m) k := {x | ν
+- (m) k
+- (x) = 0}: decision boundary (folded hyperplane) in the input space induced by neuron (m, k).
+- xˆ: an intersection point created by subdividing an edge crossing H
+- (m) k .
+- γ
+- (m) k
+- (x) ∈ {−1, 0, +1}: sign of ν
+- (m) k
+- (x) with threshold ϵs for numerical stability.
+- s
+- (m) k
+- (x) = [γ
+- (1) 1 (x), . . . , γ
+- (m) k (x)]: sign vector of x up to neuron (m, k).
+- ConnectIntersections(S): connects intersection points on H
+- (m) k into edges by tracking adjacent regions via sign-vector perturbation (Secs. 3.2 and 3.3\).
+
+Intuition Edge subdivision incrementally constructs a 1-skeleton (vertices and edges) of the ReLU-induced polyhedral complex in the input space by sequentially processing neuron boundaries in the order of (m, k). Processing one neuron (m, k) via its boundary H (m) k , we (i) add intersection points where edges cross H (m) k , and (ii) connect intersection points that lie on the same face of a linear region.
+
+Input: vertices V, edges E, neuron (m, k) (pre-activation ν (m) k (·)), threshold ϵs Output: updated (V, E)
+
+1: S ← ∅ \triangleright (xˆ, s (m) k (xˆ)) on H (m) k 2: Eold ← E \triangleright snapshot 3: for all (x0, x1) ∈ Eold do 4: γ0 ← γ (m) k (x0), γ1 ← γ (m) k (x1) 5: if γ0γ1 < 0 then 6: d0 ← ν (m) k (x0), d1 ← ν (m) k (x1) 7: w ← |d0|/|d0 − d1| 8: xˆ ← (1 − w)x0 + wx1 9: V ← V ∪ {xˆ} 10: E ← (E \ {(x0, x1)}) ∪ {(x0, xˆ),(xˆ, x1)} 11: S ← S ∪ {(xˆ, s (m) k (xˆ))} 12: end if 13: end for 14: E ← E ∪ ConnectIntersections(S) 15: return (V, E)
+
+Remark In TetraSDF, region tracking must account for both ReLU MLP linear regions and encoder-induced polyhedral cells. We therefore replace the pure sign-vector test with the augmented indicator r(x) ⊕ s (m) k (x) to specify which region x lies in, and use barycentric masks m(x) to check whether x lies on a cell boundary and to determine which boundary it lies on (Secs. 4.4 and 4.5\). This yields our grid-aware edge subdivision and preserves the same high-level subdivision rule.
+
+## A.8 Neighbor Configuration Lookup Tables for the Tetrahedral Grid
+
+We report the lookup tables of neighbor configurations used in Sec. 4.5 for the tetrahedral grid in Fig. 3, divided into face, edge, and vertex neighbors. Each tetrahedron T has ordered vertices (v0, v1, v2, v3). We fix the local face and edge indices as follows: face index f ∈ {0, 1, 2, 3} refers to the face opposite vertex vf (e.g., f = 0 corresponds to the face {v1, v2, v3}), and edge index e ∈ {0, . . . , 5} refers to
+
+---
+
+$$e_0 = \{v_0, v_1\}, \ e_1 = \{v_0, v_2\}, \ e_2 = \{v_0, v_3\}, \ e_3 = \{v_1, v_2\}, \ e_4 = \{v_1, v_3\}, \ e_5 = \{v_2, v_3\}, \quad (62)$$
+
+For each configuration, the neighbor index i runs over {0, 1, . . . }, where i = 0 denotes the self configuration (∆0=(0, 0, 0), t0=t). In the face and edge neighbor tables, we list only the non-trivial neighbors with indices i ≥ 1 and do not explicitly include the i = 0 row. For the vertex neighbor table, the lookup is defined per cube corner; for a given cube corner c and tetra offset t, one of these rows may coincide with the self configuration.
+
+Table A6: Face neighbor lookup table. For each tetra offset t ∈ {0, . . . , 5} and local face index f ∈ {0, . . . , 3}, we list the neighbor index i ≥ 1, the anchor displacement ∆i = (∆x,i, ∆y,i, ∆z,i) ∈ Z 3 , and the neighbor tetra offset ti. In the table, the columns ∆x, ∆y, ∆z give the components of ∆i for each row i. These entries correspond to the configurations (∆i, ti) used in Sec. 4.5. The self configuration (i=0, ∆0=(0, 0, 0), t0=t) is omitted.
+
+| Input | f | i | ∆ x | ∆ y | ∆ z | t i | Input | f | i | ∆ x | ∆ y | ∆ z | t i |
+|-------|---|---|-----|-----|-----|-----|-------|---|---|-----|-----|-----|-----|
+| t =0  | 0 | 1 | 1   | 0   | 0   | 4   | t =3  | 0 | 1 | 0   | 1   | 0   | 5   |
+|       | 1 | 1 | 0   | 0   | 0   | 5   |       | 1 | 1 | 0   | 0   | 0   | 4   |
+|       | 2 | 1 | 0   | 0   | 0   | 1   |       | 2 | 1 | 0   | 0   | 0   | 2   |
+|       | 3 | 1 | 0   | − 1 | 0   | 2   |       | 3 | 1 | − 1 | 0   | 0   | 1   |
+| t =1  | 0 | 1 | 1   | 0   | 0   | 3   | t =4  | 0 | 1 | 0   | 0   | 1   | 2   |
+|       | 1 | 1 | 0   | 0   | 0   | 2   |       | 1 | 1 | 0   | 0   | 0   | 3   |
+|       | 2 | 1 | 0   | 0   | 0   | 0   |       | 2 | 1 | 0   | 0   | 0   | 5   |
+|       | 3 | 1 | 0   | 0   | − 1 | 5   |       | 3 | 1 | − 1 | 0   | 0   | 0   |
+| t =2  | 0 | 1 | 0   | 1   | 0   | 0   | t =5  | 0 | 1 | 0   | 0   | 1   | 1   |
+|       | 1 | 1 | 0   | 0   | 0   | 1   |       | 1 | 1 | 0   | 0   | 0   | 0   |
+|       | 2 | 1 | 0   | 0   | 0   | 3   |       | 2 | 1 | 0   | 0   | 0   | 4   |
+|       | 3 | 1 | 0   | 0   | − 1 | 4   |       | 3 | 1 | 0   | − 1 | 0   | 3   |
+
+Table A7: Edge neighbor lookup tables for tetra offsets t = 0–5. For each input edge (t, e) and neighbor index i ≥ 1, we list the anchor displacement ∆i = (∆x,i, ∆y,i, ∆z,i) and the neighbor tetra offset ti. In the table, the columns ∆x, ∆y, ∆z give the components of ∆i for each row i. These entries correspond to the configurations (∆i, ti) used in Sec. 4.5. The self configuration (i=0, ∆0=(0, 0, 0), t0=t) is omitted.
+
+| Input t =0 , e =0 | i 1 | ∆ x 0 | ∆ y − 1 | ∆ z − 1 | t i 3 | Input t =1 , e =0 | i 1 | ∆ x 0 | ∆ y − 1 | ∆ z − 1 | t i 3 | Input t =2 , e =0 | i 1 | ∆ x − 1 | ∆ y 0 | ∆ z − 1 | t i 0 |
+|-------------------|-----|-------|---------|---------|-------|-------------------|-----|-------|---------|---------|-------|-------------------|-----|---------|-------|---------|-------|
+|                   | 2   | 0     | − 1     | − 1     | 4     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 3   | 0     | 0       | − 1     | 5     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 4   | 0     | − 1     | 0       | 2     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 5   | 0     | 0       | 0       | 1     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+| t =0 , e =1       | 1   | 0     | − 1     | 0       | 2     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 2   | 0     | − 1     | 0       | 3     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 3   | 0     | 0       | 0       | 5     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+| t =0 , e =2       | 1   | 0     | 0       | 0       | 1     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 2   | 0     | 0       | 0       | 2     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 3   | 0     | 0       | 0       | 3     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 4   | 0     | 0       | 0       | 4     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 5   | 0     | 0       | 0       | 5     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+| t =0 , e =3       | 1   | 0     | − 1     | 0       | 1     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 2   | 0     | − 1     | 0       | 2     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 3   | 1     | − 1     | 0       | 3     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 4   | 1     | 0       | 0       | 4     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 5   | 1     | 0       | 0       | 5     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+| t =0 , e =4       | 1   | 0     | 0       | 0       | 1     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 2   | 1     | 0       | 0       | 3     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 3   | 1     | 0       | 0       | 4     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+| t =0 , e =5       | 1   | 0     | 0       | 0       | 5     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 2   | 1     | 0       | 0       | 4     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 3   | 0     | 0       | 1       | 1     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 4   | 1     | 0       | 1       | 2     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   | 5   | 1     | 0       | 1       | 3     |                   |     |       |         |         |       |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 2   | 0     | − 1     | − 1     | 4     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 3   | 0     | 0       | − 1     | 5     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 4   | 0     | − 1     | 0       | 2     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 5   | 0     | 0       | 0       | 0     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       | t =1 , e =1       | 1   | 0     | 0       | − 1     | 4     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 2   | 0     | 0       | − 1     | 5     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 3   | 0     | 0       | 0       | 2     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       | t =1 , e =2       | 1   | 0     | 0       | 0       | 0     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 2   | 0     | 0       | 0       | 2     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 3   | 0     | 0       | 0       | 3     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 4   | 0     | 0       | 0       | 4     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 5   | 0     | 0       | 0       | 5     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       | t =1 , e =3       | 1   | 0     | 0       | − 1     | 0     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 2   | 0     | 0       | − 1     | 5     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 3   | 1     | 0       | − 1     | 4     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 4   | 1     | 0       | 0       | 2     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 5   | 1     | 0       | 0       | 3     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       | t =1 , e =4       | 1   | 0     | 0       | 0       | 0     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 2   | 1     | 0       | 0       | 3     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 3   | 1     | 0       | 0       | 4     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       | t =1 , e =5       | 1   | 0     | 0       | 0       | 2     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 2   | 1     | 0       | 0       | 3     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 3   | 0     | 1       | 0       | 0     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 4   | 1     | 1       | 0       | 4     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   | 5   | 1     | 1       | 0       | 5     |                   |     |         |       |         |       |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 2   | − 1     | 0     | − 1     | 5     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 3   | 0       | 0     | − 1     | 4     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 4   | − 1     | 0     | 0       | 1     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 5   | 0       | 0     | 0       | 3     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       | t =2 , e =1       | 1   | 0       | 0     | − 1     | 4     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 2   | 0       | 0     | − 1     | 5     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 3   | 0       | 0     | 0       | 1     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       | t =2 , e =2       | 1   | 0       | 0     | 0       | 0     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 2   | 0       | 0     | 0       | 1     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 3   | 0       | 0     | 0       | 3     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 4   | 0       | 0     | 0       | 4     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 5   | 0       | 0     | 0       | 5     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       | t =2 , e =3       | 1   | 0       | 0     | − 1     | 3     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 2   | 0       | 0     | − 1     | 4     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 3   | 0       | 1     | − 1     | 5     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 4   | 0       | 1     | 0       | 0     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 5   | 0       | 1     | 0       | 1     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       | t =2 , e =4       | 1   | 0       | 0     | 0       | 3     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 2   | 0       | 1     | 0       | 0     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 3   | 0       | 1     | 0       | 5     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       | t =2 , e =5       | 1   | 0       | 0     | 0       | 1     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 2   | 1       | 0     | 0       | 3     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 3   | 0       | 1     | 0       | 0     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 4   | 1       | 1     | 0       | 4     |
+|                   |     |       |         |         |       |                   |     |       |         |         |       |                   | 5   | 1       | 1     | 0       | 5     |
+
+| Input t =3 , e =0 | i 1 | ∆ x − 1 | ∆ y 0 | ∆ z − 1 | t i 0 | Input t =4 , e =0 | i 1 | ∆ x − 1 | ∆ y − 1 | ∆ z 0 | t i 1 | Input t =5 , e =0 | i 1 | ∆ x − 1 | ∆ y − 1 | ∆ z 0 | t i 1 |
+|-------------------|-----|---------|-------|---------|-------|-------------------|-----|---------|---------|-------|-------|-------------------|-----|---------|---------|-------|-------|
+|                   | 2   | − 1     | 0     | − 1     | 5     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 3   | 0       | 0     | − 1     | 4     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 4   | − 1     | 0     | 0       | 1     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 5   | 0       | 0     | 0       | 2     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+| t =3 , e =1       | 1   | − 1     | 0     | 0       | 0     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 2   | − 1     | 0     | 0       | 1     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 3   | 0       | 0     | 0       | 4     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+| t =3 , e =2       | 1   | 0       | 0     | 0       | 0     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 2   | 0       | 0     | 0       | 1     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 3   | 0       | 0     | 0       | 2     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 4   | 0       | 0     | 0       | 4     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 5   | 0       | 0     | 0       | 5     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+| t =3 , e =3       | 1   | − 1     | 0     | 0       | 1     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 2   | − 1     | 0     | 0       | 2     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 3   | − 1     | 1     | 0       | 0     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 4   | 0       | 1     | 0       | 4     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 5   | 0       | 1     | 0       | 5     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+| t =3 , e =4       | 1   | 0       | 0     | 0       | 2     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 2   | 0       | 1     | 0       | 0     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 3   | 0       | 1     | 0       | 5     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+| t =3 , e =5       | 1   | 0       | 0     | 0       | 4     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 2   | 0       | 1     | 0       | 5     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 3   | 0       | 0     | 1       | 2     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 4   | 0       | 1     | 1       | 0     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   | 5   | 0       | 1     | 1       | 1     |                   |     |         |         |       |       |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 2   | − 1     | − 1     | 0     | 2     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 3   | 0       | − 1     | 0     | 3     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 4   | − 1     | 0       | 0     | 0     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 5   | 0       | 0       | 0     | 5     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       | t =4 , e =1       | 1   | − 1     | 0       | 0     | 0     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 2   | − 1     | 0       | 0     | 1     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 3   | 0       | 0       | 0     | 3     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       | t =4 , e =2       | 1   | 0       | 0       | 0     | 0     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 2   | 0       | 0       | 0     | 1     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 3   | 0       | 0       | 0     | 2     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 4   | 0       | 0       | 0     | 3     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 5   | 0       | 0       | 0     | 5     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       | t =4 , e =3       | 1   | − 1     | 0       | 0     | 0     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 2   | − 1     | 0       | 0     | 5     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 3   | − 1     | 0       | 1     | 1     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 4   | 0       | 0       | 1     | 2     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 5   | 0       | 0       | 1     | 3     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       | t =4 , e =4       | 1   | 0       | 0       | 0     | 5     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 2   | 0       | 0       | 1     | 1     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 3   | 0       | 0       | 1     | 2     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       | t =4 , e =5       | 1   | 0       | 0       | 0     | 3     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 2   | 0       | 1       | 0     | 5     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 3   | 0       | 0       | 1     | 2     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 4   | 0       | 1       | 1     | 0     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   | 5   | 0       | 1       | 1     | 1     |                   |     |         |         |       |       |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 2   | − 1     | − 1     | 0     | 2     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 3   | 0       | − 1     | 0     | 3     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 4   | − 1     | 0       | 0     | 0     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 5   | 0       | 0       | 0     | 4     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       | t =5 , e =1       | 1   | 0       | − 1     | 0     | 2     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 2   | 0       | − 1     | 0     | 3     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 3   | 0       | 0       | 0     | 0     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       | t =5 , e =2       | 1   | 0       | 0       | 0     | 0     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 2   | 0       | 0       | 0     | 1     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 3   | 0       | 0       | 0     | 2     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 4   | 0       | 0       | 0     | 3     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 5   | 0       | 0       | 0     | 4     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       | t =5 , e =3       | 1   | 0       | − 1     | 0     | 3     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 2   | 0       | − 1     | 0     | 4     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 3   | 0       | − 1     | 1     | 2     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 4   | 0       | 0       | 1     | 0     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 5   | 0       | 0       | 1     | 1     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       | t =5 , e =4       | 1   | 0       | 0       | 0     | 4     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 2   | 0       | 0       | 1     | 1     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 3   | 0       | 0       | 1     | 2     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       | t =5 , e =5       | 1   | 0       | 0       | 0     | 0     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 2   | 1       | 0       | 0     | 4     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 3   | 0       | 0       | 1     | 1     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 4   | 1       | 0       | 1     | 2     |
+|                   |     |         |       |         |       |                   |     |         |         |       |       |                   | 5   | 1       | 0       | 1     | 3     |
+
+Table A8: Vertex neighbor lookup table around cube corner (0, 0, 0). For each neighbor index i, we list the anchor displacement ∆i = (∆x,i, ∆y,i, ∆z,i) and the neighbor tetra offset ti. These entries correspond to the configurations (∆i, ti) used in Sec. 4.5. For a general cube corner c = (cx, cy, cz) ∈ {0, 1} 3 , we obtain the corresponding offsets by replacing ∆i ← ∆i + c. Row index ranges (e.g., 1–6) indicate consecutive neighbor indices that share the same (∆i, ti) configuration. Note that, unlike the face and edge tables, this vertex table is defined per cube corner for convenience, since the vertices of each tetrahedron can be mapped to a cube corner. For a specific cube corner c and tetra offset t, one of these rows may coincide with the self configuration (∆0=(0, 0, 0), t0=t).
+
+| i 1–6 | ∆ | x − 1 | ∆ y − 1 |   | ∆ z − 1 | 0 | t i – 5 |
+|-------|---|-------|---------|---|---------|---|---------|
+| 7–8   | − | 1     | − 1     | 0 |         | 1 | , 2     |
+| 9–10  | − | 1     | 0       | − | 1       | 0 | , 5     |
+| 11–12 | − | 1     | 0       | 0 |         | 0 | , 1     |
+| 13–14 | 0 |       | − 1     | − | 1       | 3 | , 4     |
+| 15–16 | 0 |       | − 1     | 0 |         | 2 | , 3     |
+| 17–18 | 0 |       | 0       | − | 1       | 4 | , 5     |
+| 19–24 | 0 |       | 0       | 0 |         | 0 | – 5     |

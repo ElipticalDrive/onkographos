@@ -1,0 +1,245 @@
+Open-source nonlinear mixed-effects (NLME) modeling engine for population PK/PD and pharmacometrics, with FOCEI, SAEM, analytical PK, and ODE models. - bug: the outer, mixture and SAEM/VI finite differences still step a small θ by an absolute eps by roninsightrx · Pull Request #2398 · FeRx-NLME/ferx-core
+
+bug: the outer, mixture and SAEM/VI finite differences still step a small θ by an absolute eps by roninsightrx · Pull Request #2398 · FeRx-NLME/ferx-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+roninsightrx
+commented
+Oct 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Closes #2187
+Routed the reconverged FD outer gradients (central_diff_packed), mixture_gradient_fd, and the SAEM/VI θ forward differences in fixed_eta_gradient through #2147's |θ₀| step floor (new fd_theta_step_floor/theta_fd_step for the natural-θ sites), so a small θ is stepped relatively while unit-floor coordinates keep their step bit for bit. Added Tier-1 rescaling tests per route (each fails under the old step), a docs note and a changelog fragment.
+🤖 Implemented by Claude Code and reviewed by Codex, orchestrated by nightshift. Review rounds are posted as comments below.
+fix(estimation): the outer, mixture and SAEM/VI finite differences st…
+…
+b6fcce5
+```
+…ep a small θ relatively [closes #2187]
+
+#2147 floored the covariance step's FD steps at |θ₀| on a small identity-packed θ;
+three gradient sites still stepped such a θ by an absolute eps in its own units.
+
+- central_diff_packed (reconverged, reporting and per-subject reconverged FD
+  gradients, IOV salvage included) takes the fd_step_floors slice and steps by
+  fd_step(1e-4, x, floor).
+- mixture_gradient_fd steps by 1e-5·floor.
+- The five θ forward differences of fixed_eta_gradient (SAEM M-step gradient and
+  Fisher information, VI ELBO gradient) go through theta_fd_step, with the new
+  scalar fd_theta_step_floor (|θ₀| for 0 < |θ₀| < 1, any packing).
+
+Every coordinate with floor 1 keeps its step bit for bit. Tier-1 tests rescale
+V = TVV_S / k and assert k·∂/∂TVV_S at k = 1e-4 against k = 1 on each route;
+each fails under the pre-fix step (1.1e-1 / 4.7e-1 outer, 2.8e-3 mixture,
+1.0e-2 – 3.2e-1 SAEM/VI).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+roninsightrx
+commented
+Oct 25, 2026
+View reviewed changes
+roninsightrx
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🤖 Codex review, round 1: 🔁 changes requested
+The relative-step changes are otherwise routed through the intended outer and fixed-eta paths, but the mixture fallback leaves the requested and correctness-critical bound handling unresolved. Tests could not be run because the workspace is read-only and Cargo could not create its build lock.
+Severity
+Location
+Finding
+major
+src/estimation/mixture.rs:624
+mixture_gradient_fd still evaluates x ± h without clamping to the packed bounds. At a finite parameter bound, one probe is therefore outside the optimizer's feasible domain; it can produce NaN for domain-sensitive models or return a symmetric derivative that is not the feasible one-sided derivative. The stated rationale only addresses crossing zero, not crossing arbitrary declared bounds. Clamp both probes and divide by the actual clamped span, as central_diff_packed does. A boundary regression test is also needed.
+The coder agent is addressing these findings.
+carldelfin
+commented
+Oct 26, 2026
+Copy link
+Copy Markdown
+Contributor
+This duplicates #2275, which has been open for #2187 since 2026-10-21. It covers the same three groups of sites, uses the same fd_theta_step_floor / theta_fd_step helpers and has the same rescaling tests. #2275 had a first review round, and the fixes for it are now pushed (comment on #2275).
+One finding from that review also applies here. mixture_gradient_fd steps by 1e-5 * floor[i]. That step does not grow with |x|, so a coordinate declared at 1e-3 and estimated at 0.3 is differenced with a step of 1e-8, a relative step of 3e-8. #2275 now uses fd_step(1e-5, x[i], floor[i]) where floor[i] < 1. Its test differences at 1e5·θ₀, and that point fails under 1e-5 * floor[i]: a gap of 6.4e-8 / 1.8e-7 against a bound of 1e-9.
+@TeunP, I suggest closing this one in favour of #2275. If you'd rather keep this one, the mixture step above should change.
+carldelfin
+mentioned this pull request
+Oct 26, 2026
+fix(estimation): step a small θ relative to its declared θ₀ in the outer, mixture, SAEM and VI finite differences [closes #2187]
+#2275
+Closed
+12 of 31 tasks
+fix(estimation): the mixture FD gradient clamps its probes to the pac…
+…
+6f845c4
+```
+…ked box (#2187 review)
+
+`mixture_gradient_fd` evaluated `x ± h` unclamped, so on a bound one probe sat
+outside the box the optimizer searches — NaN or the guard for a domain-limited
+model. Clamp both probes to `compute_bounds(init_params)` and divide by the
+clamped span, as `central_diff_packed` does; a FIX coordinate's pinned box
+leaves its gradient at 0.
+
+New Tier-1 test puts an identity-packed θ on its upper bound, 1e-6 short of a
+domain edge: clamped, 1.3e-6 relative to a backward-difference reference;
+unclamped, 1.6e26 (the 1.6e21 guard over h).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+roninsightrx
+commented
+Oct 26, 2026
+View reviewed changes
+roninsightrx
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🤖 Codex review, round 2: ✅ approved
+No correctness, regression, security, or material test-coverage problems found. The focused helper tests passed; model-loading tests could not run because the read-only sandbox denied temporary-file creation.
+roninsightrx
+marked this pull request as ready for review
+October 26, 2026 22:32
+fix(vi): report the estimate packed_estimate unpacks to (#2187 CI)
+…
+d5ff2a6
+```
+The packed-estimate guard test pinned VI as Stale: its closed-form Omega,
+written as a matrix, sat one ULP off L*L^T of its own packed factor. That
+held only at some stopping points; this PR's relative theta step moved
+VI's on warfarin and the row flipped to Usable, failing CI.
+
+VI now reports unpack(pack(final_params)) and evaluates the ELBO, EBEs,
+OFV and covariance step there, so the guard holds wherever it stops. Under
+a FIX it keeps the declared values bit for bit (existing contract) and a
+reloaded fit takes the fallback. The guard row now expects Usable; a new
+sweep over 12 stopping points x 2 Omega shapes fails at 20/24 without the
+round trip.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+roninsightrx
+commented
+Oct 27, 2026
+View reviewed changes
+roninsightrx
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🤖 Codex review, round 3: 🔁 changes requested
+The intended FD routes and bound clamping are otherwise wired consistently. Focused tests could not be executed because the read-only workspace prevented Cargo from creating its build lock.
+Severity
+Location
+Finding
+major
+src/estimation/outer_optimizer.rs:6897
+The new scale-relative step can fall below the existing absolute 1e-16 span cutoff. At the declared start, an identity-packed θ below roughly 2.5e-13 therefore skips this stencil and returns an exact zero gradient, even when a rescaled model such as V = TVV_S / k has a live derivative. mixture_gradient_fd has the same problem at src/estimation/mixture.rs:634 for θ below roughly 5e-12. This leaves the reported scale-dependence bug present at smaller supported scales; test whether the probes actually collapse (xp == xm) instead of comparing their dimensionful span to an absolute constant.
+The coder agent is addressing these findings.
+codecov
+Bot
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 99.22481% with 1 line in your changes missing coverage. Please review.
+Files with missing lines
+Patch %
+Lines
+src/estimation/mixture.rs
+98.73%
+1 Missing ⚠️
+📢 Thoughts on this report? Let us know!
+fix(estimation): skip an FD coordinate only when its probes collapse (#…
+…
+7abc1e6
+```
+…2187 review r3)
+
+central_diff_packed and mixture_gradient_fd skipped a coordinate whose
+probe span was under an absolute 1e-16. With the relative step of this
+PR that span is in the theta's own units, so a theta declared below
+~1e-12 (outer) / ~1e-11 (mixture) read an exact zero gradient even with
+a live derivative -- the scale dependence #2187 removes, at a smaller
+scale. Both now skip only when xp <= xm (a box pinned to x, i.e. a FIX).
+
+Tests: central_diff_packed at theta = 1e-14 recovers a slope of 1e14 to
+7e-14 relative and still skips a collapsed box without evaluating it;
+the mixture rescaling test also runs at k = 1e-14 (4.1e-9 relative).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+roninsightrx
+commented
+Oct 27, 2026
+View reviewed changes
+roninsightrx
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🤖 Codex review, round 4: ✅ approved
+The implementation appears correct and addresses the requested FD scaling and mixture bound clamping. Available prebuilt targeted tests passed for fixed-η, outer-gradient, helper, and VI behavior. Mixture tests could not run because the read-only sandbox denied temporary-file creation; a fresh Cargo run was likewise blocked by its build lock.
+Severity
+Location
+Finding
+minor
+src/estimation/fixed_eta_gradient.rs:779
+The new scaled-θ test never exercises this non-Fisher branch. Both Gaussian and Fisher call obs_nll_subject_grad_fisher, making fisher_ok true and using the separate difference at line 825. Reverting this call to the old absolute step would therefore leave the regression suite green, despite this being the ordinary SAEM/VI gradient route. Add a scaled case through obs_nll_subject_grad.
+minor
+src/estimation/outer_optimizer.rs:7295
+The scaled identity-θ tests cover the population, reporting, and non-IOV subject callers, but not this IOV salvage caller. Existing IOV parity fixtures use ordinary-scale/log-packed parameters, so replacing this caller's floors with unit floors would not be detected. Add the planned small identity-packed IOV regression to pin the caller wiring.
+Hide details
+View details
+roninsightrx
+merged commit c0116e6
+into
+main
+Oct 27, 2026
+24 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+roninsightrx
+deleted the
+nightshift/2187-bug-the-outer-mixture-and-saem-vi-finite
+branch
+October 27, 2026 03:16
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

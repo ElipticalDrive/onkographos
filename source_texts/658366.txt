@@ -1,0 +1,147 @@
+🧊 High-performance, lightweight 3D ray tracing engine in C#. - Phase 1–2: MediumInterface plumbing + Disney clean break by fiorenzobrioni · Pull Request #87 · fiorenzobrioni/3d-ray
+
+Phase 1–2: MediumInterface plumbing + Disney clean break by fiorenzobrioni · Pull Request #87 · fiorenzobrioni/3d-ray · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fiorenzobrioni
+commented
+May 26, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Implements the structural foundation for per-entity participating media binding and removes the legacy Hanrahan-Krueger "fake SSS" approximation from Disney BSDF in preparation for physically-based Random Walk subsurface scattering (Phase 3).
+This is a two-phase commit:
+Phase 1: MediumInterface plumbing — value structs for medium binding, per-entity medium stack routing, and YAML schema for medium libraries.
+Phase 2: Disney clean break — removal of subsurface, subsurface_color, and flatness parameters; automated migration of 23 YAML scene files.
+Key Changes
+Phase 1 — MediumInterface & Medium Stack
+NEW MediumInterface.cs — value struct {Interior, Exterior} identifying participating media on both sides of a surface.
+NEW MediumStack.cs — fixed-capacity (8), zero-alloc ref-struct stack for tracking nested refractive media through path tracing. Supports push/pop with overflow detection (drops oldest + warning).
+NEW MediumBoundHittable.cs — wrapper that stamps every hit with a MediumInterface, enabling per-entity medium binding without modifying primitive geometry.
+MODIFY HitRecord.cs — added MediumInterface MediumIface field to carry binding information through the renderer.
+MODIFY SceneData.cs — added List<MediumData>? Mediums for scene-level medium library and InteriorMedium/ExteriorMedium fields on EntityData.
+MODIFY SceneLoader.cs:
+Refactored BuildGlobalMedium → BuildMedium(MediumData) for reusable medium construction.
+Build medium library from mediums: YAML block before entity creation.
+Resolve per-entity medium bindings and wrap with MediumBoundHittable if binding present.
+Warn on duplicate IDs and unresolved references.
+MODIFY Renderer.cs — thread ref MediumStack mediums through TraceRay, ShadeSurface, and ShadeSampleBounce. Active medium = mediums.Top ?? _globalMedium. Copy-on-write stack at transmission events.
+NEW MediumStackTests.cs (9 tests) — validate push/pop balance, overflow behavior, null handling, and value-copy semantics.
+NEW MediumBoundHittableTests.cs — verify medium interface routing on wrapped hits.
+Backward compatibility: Legacy currentAbsorption and BsdfSample.NextSegmentAbsorption remain functional; existing scenes (e.g., cristallo.yaml) render identically.
+Phase 2 — Disney Clean Break
+MODIFY DisneyBsdf.cs:
+Removed properties: Subsurface, SubsurfaceColor, Flatness.
+Removed constructor parameters: subsurface, subsurfaceColor, flatness.
+Removed helper: ResolveSubsurfaceColor.
+Updated DiffTrans documentation: back-hemisphere tint is now baseColor (Cycles-style); dedicated subsurface_color knob removed in favor of per-entity Random Walk SSS via MediumInterface.
+Diffuse lobe is now pure Lambert + Burley retro-reflection; no Hanrahan-Krueger flat blend.
+NEW src/Tools/MigrateFakeSss/Program.cs — standalone migration tool that strips legacy fake-SSS YAML fields:
+Scalar fields (subsurface, subsurface_color, subsurface_radius, flatness) → single-line removal.
+Block fields (subsurface_texture, subsurface_color_texture, flatness_texture) → header + indented children removed.
+https://claude.ai/code/session_01K8GEtT4xmukXx83JF4apFD
+claude
+added 2 commits
+May 26, 2026 10:34
+feat(volumetrics): MediumInterface plumbing (Phase 1)
+…
+3c7d8d4
+```
+Lay the renderer-side infrastructure for per-entity participating media,
+prerequisite for Random Walk SSS. Behavior-preserving — existing scenes
+keep the legacy currentAbsorption / NextSegmentAbsorption path; the new
+medium stack only fires when a YAML entity declares interior_medium.
+
+- MediumInterface (Interior, Exterior) value struct.
+- MediumStack: InlineArray8-backed zero-alloc value stack with copy-on-write
+  semantics for refractive transitions.
+- MediumBoundHittable wrapper stamps rec.MediumIface on every hit.
+- HitRecord.MediumIface field.
+- BsdfSample.Transition enum (None|Enter|Exit) alongside legacy absorption.
+- DisneyBsdf emits Transition on refraction front/back face.
+- SceneData: new mediums: library + entity interior_medium / exterior_medium
+  bindings. SceneLoader.BuildGlobalMedium refactored into BuildMedium
+  reusable for the library; duplicate-id warning; vacuum fallback on
+  unknown id.
+- Renderer threads ref MediumStack through TraceRay / ShadeSurface /
+  ShadeSampleBounce; activeMedium = mediums.Top ?? _globalMedium routes
+  the volumetric path; ComputeDirectLightingMedium takes the medium as
+  parameter.
+- Tests: MediumStackTests (push/pop/overflow/value-copy) +
+  MediumBoundHittableTests (hit/miss routing). 9 new, 473 total green.
+- Plan tracked in docs/plans/mediuminterface-and-random-walk-sss.md so
+  follow-up phases find it.
+```
+feat(materials): Disney clean break — remove fake-SSS knobs (Phase 2)
+…
+de8d481
+```
+The Hanrahan-Krueger "flat blend" approximation that used to ride on the
+Disney diffuse lobe via `subsurface`, `subsurface_color`, `flatness`,
+`subsurface_radius` is gone. SSS is now a per-entity volumetric
+phenomenon driven by `interior_medium`; Phase 3 ships the Random Walk
+integrator that consumes it.
+
+DisneyBsdf:
+- Removed `Subsurface`, `SubsurfaceColor`, `Flatness` properties + ctor
+  parameters + ShadingParams fields + EvalParams binding.
+- Removed `ResolveSubsurfaceColor`. The diffuse lobe is now pure Lambert
+  + Burley 2012 retro-reflection Fresnel in all three entry points
+  (Evaluate, EvaluateDirect, ScatterDiffuse). The `diff_trans` (Disney
+  2015 foliage) lobe is retained and now tints from `baseColor`
+  (Cycles-style).
+
+SceneLoader:
+- Stops binding the removed parameters at Disney construction.
+- Emits a consolidated `Warn` when YAML carries any legacy field
+  (`subsurface*`, `flatness*`, `subsurface_radius`). The fields stay on
+  `MaterialData` (parsed but ignored) so legacy scenes still load.
+
+Migration:
+- New tool `src/Tools/MigrateFakeSss/` (not in solution). Line-based
+  stripper for the seven legacy keys (scalar + block forms),
+  `--dry-run` preview, in-place rewrite. Run on `scenes/`: 23 YAML
+  files cleaned, 491 lines removed across material libraries and
+  showcase scenes.
+
+Tests:
+- Removed two specs targeting deleted behaviour
+  (Flatness_FullyFlat_MatchesSubsurfaceFullyOn,
+  SubsurfaceColor_OverridesBaseColorInFlatLobe).
+- Updated DiffTrans backhemisphere test to expect baseColor tint.
+- 471 / 471 green.
+
+Smoke renders: cristallo.yaml (no legacy field — invariato),
+tempio-romano.yaml (marmo migrato — Lambert come atteso fino a Phase 3).
+```
+Hide details
+View details
+fiorenzobrioni
+merged commit 349b041
+into
+main
+May 26, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+fiorenzobrioni
+deleted the
+claude/stoic-albattani-KmUJb
+branch
+June 6, 2026 15:01
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,232 @@
+--- v002.md
++++ v003.md
+@@ -1,115 +1,140 @@
+ # Packed Vertex Attribute Encoding
+ 
+-Also called: 32-bit vertex packing, PackedVertex, Vertex compression
++Also called: 32-bit vertex packing, Fast Decompression, Packed Vertex Packing with Ambient AO, PackedVertex, Vertex compression, Vertex decompression
+ 
+ ## Overview
+-Packed Vertex Attribute Encoding is a compression scheme for vertex attributes in hardware-accelerated volume splatting that reduces memory usage by packing volume texture coordinates and Gaussian texture coordinates into 32-bit integers per vertex [S1, unofficial]. It sets itself apart from sibling methods by specifically targeting the attribute storage of proxy geometry in EWA splatting, decoupling coordinate components into fixed-width bit fields to achieve high compression ratios while allowing fast decompression via lookup tables [S1, unofficial].
++Packed Vertex Attribute Encoding is a compression scheme for vertex attributes in hardware-accelerated volume splatting that reduces memory usage by packing volume texture coordinates and Gaussian texture coordinates into 32-bit integers per vertex [S1, unofficial]. It sets itself apart from floating-point attribute storage by using discrete bit-fields for metadata, allowing four vertices of a quad to share compact AO data within a single byte [S2, unofficial]. This method is distinct from standard float formats by achieving significant size reduction, e.g., from 40 bytes to 12 bytes per vertex in some implementations [S4, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Volume texture coordinates ($tx, ty$) and Gaussian texture coordinate components ($fx, fy$) for a single vertex [S1, unofficial].
+-*   **Output:** A single 32-bit unsigned integer (`uint32_t`) containing the packed attributes [S1, unofficial].
++**Inputs:**
++- Volume texture coordinates ($tx, ty$) for each vertex.
++- Gaussian texture coordinate components ($fx, fy$).
++- Vertex attributes: normal index, texture index, UV corner index, width, height, ambient occlusion (AO), and color (R, G, B).
++
++**Outputs:**
++- A single 32-bit unsigned integer (`uint32_t`) per vertex containing all attributes.
+ 
+ **Data Structures:**
+-The packed data is stored in a 32-bit unsigned integer [S1, unofficial]. The bit layout consists of six fields with fixed widths totaling 32 bits: $mx$ (7 bits), $ix$ (8 bits), $my$ (7 bits), $iy$ (8 bits), $fx$ (1 bit), and $fy$ (1 bit) [S1, unofficial]. The exact bit ordering (LSB to MSB) is not specified in the sources [S1, unofficial].
++The packed vertex is a `uint32_t`. The bit layout depends on the specific variant (Volume Splatting vs. General Mesh).
+ 
+-**Formulas:**
+-The volume texture coordinates $tx$ and $ty$ are decomposed into integer components:
+-$$ tx = mx \times 256 + ix $$
+-$$ ty = my \times 256 + iy $$
+-Where:
+-*   $mx = \lfloor tx / 256 \rfloor$
+-*   $ix = tx \pmod{256}$
+-*   $my = \lfloor ty / 256 \rfloor$
+-*   $iy = ty \pmod{256}$ [S1, unofficial]
++*Variant 1: Volume Splatting (S1)*
++- Bits 0-7 (8 bits): $ix$ ($tx \mod 256$)
++- Bits 8-14 (7 bits): $mx$ ($\lfloor tx / 256 \rfloor$)
++- Bits 15-22 (8 bits): $iy$ ($ty \mod 256$)
++- Bits 23-29 (7 bits): $my$ ($\lfloor ty / 256 \rfloor$)
++- Bit 30 (1 bit): $fx$
++- Bit 31 (1 bit): $fy$
+ 
+-The Gaussian components $fx$ and $fy$ are binary values (0 or 1) [S1, unofficial].
++*Variant 2: General Mesh with AO/Color (S2)*
++- Bits 0-2 (3 bits): `normal_idx`
++- Bits 3-10 (8 bits): `tex_index`
++- Bits 11-12 (2 bits): `corner_idx`
++- Bits 13-16 (4 bits): `width - 1` (saturated)
++- Bits 17-20 (4 bits): `height - 1` (saturated)
++- Bits 21-22 (2 bits): `ao` (clamped to max 3)
++- Bits 23-25 (3 bits): `red` (clamped 0-1, scaled by 7)
++- Bits 26-28 (3 bits): `green` (clamped 0-1, scaled by 7)
++- Bits 29-31 (3 bits): `blue` (clamped 0-1, scaled by 7)
++
++*Variant 3: Position/Normal/UV (S3)*
++- Bits 0-5 (6 bits): x
++- Bits 6-11 (6 bits): y
++- Bits 12-17 (6 bits): z
++- Bits 18-20 (3 bits): `normalIndex`
++- Bits 21-22 (2 bits): `uvIndex`
++- Bits 23-31: Unused
+ 
+ **Parameters:**
+-*   $mx, my$: Stored using 7 bits each, allowing volume slices up to $2^{15} \times 2^{15}$ voxels [S1, unofficial].
+-*   $ix, iy$: Stored using 8 bits each [S1, unofficial].
+-*   $fx, fy$: Stored using 1 bit each [S1, unofficial].
++- $mx, my$: 7 bits, allowing volume slices up to $2^{15} \times 2^{15}$ voxels [S1, unofficial].
++- $ix, iy$: 8 bits [S1, unofficial].
++- $fx, fy$: 1 bit each, binary values (0 or 1) [S1, unofficial].
++- Color: 3 bits per channel (R, G, B), 8 discrete levels (0-7) [S2, unofficial].
++- AO: 2 bits, 4 discrete levels (0-3) [S2, unofficial].
++- Width/Height: 4 bits each, storing values 0-15 corresponding to input widths/heights 1-16 [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Decompose Coordinates:** For each vertex, calculate $mx, ix, my, iy$ from the integer volume texture coordinates $tx, ty$ using the formulas above [S1, unofficial].
+-2.  **Validate Gaussian Components:** Ensure $fx$ and $fy$ are binary (0 or 1) [S1, unofficial].
+-3.  **Pack Bits:** Construct the 32-bit integer by shifting and masking the components into the defined bit fields [S1, unofficial].
+-4.  **Store:** Write the resulting 32-bit integer to the vertex buffer [S1, unofficial].
+ 
+-**Decoding:**
+-1.  **Extract:** Retrieve the 32-bit integer from the vertex buffer [S1, unofficial].
+-2.  **Unpack:** Extract $ix, mx, iy, my, fx, fy$ using bitwise operations and masks corresponding to their bit widths [S1, unofficial].
+-3.  **Reconstruct:** Calculate $tx = mx \times 256 + ix$ and $ty = my \times 256 + iy$ [S1, unofficial].
+-4.  **Lookup:** Fast decompression can be implemented using a small lookup table, as used in Direct3D implementations [S1, unofficial].
++1. **Encode Volume Splatting Attributes (S1):**
++   For each vertex, decompose volume texture coordinates $tx$ and $ty$:
++   $$ ix = tx \mod 256 $$
++   $$ mx = \lfloor tx / 256 \rfloor $$
++   $$ iy = ty \mod 256 $$
++   $$ my = \lfloor ty / 256 \rfloor $$
++   Pack into `uint32_t`:
++   ```python
++   packed = (fy << 31) | (fx << 30) | (my << 23) | (iy << 15) | (mx << 8) | ix
++   ```
+ 
+-**Pseudocode:**
+-```python
+-def pack_vertex_attributes(tx: int, ty: int, fx: int, fy: int) -> int:
+-    """
+-    Packs volume texture coordinates (tx, ty) and Gaussian coordinates (fx, fy)
+-    into a single 32-bit integer according to the specified bit widths.
+-    Note: Exact bit ordering is not specified in the source [S1, unofficial]. This implementation
+-    packs fields contiguously from LSB to MSB: ix, mx, iy, my, fx, fy.
+-    """
+-    # Decompose tx and ty
+-    mx = tx // 256
+-    ix = tx % 256
+-    my = ty // 256
+-    iy = ty % 256
+-    
+-    # Validate inputs
+-    assert 0 <= mx < 128, "mx must fit in 7 bits"
+-    assert 0 <= ix < 256, "ix must fit in 8 bits"
+-    assert 0 <= my < 128, "my must fit in 7 bits"
+-    assert 0 <= iy < 256, "iy must fit in 8 bits"
+-    assert fx in (0, 1), "fx must be 0 or 1"
+-    assert fy in (0, 1), "fy must be 0 or 1"
+-    
+-    # Pack into 32-bit integer (LSB-first ordering)
+-    packed = 0
+-    packed |= (ix & 0xFF) << 0
+-    packed |= (mx & 0x7F) << 8
+-    packed |= (iy & 0xFF) << 15
+-    packed |= (my & 0x7F) << 23
+-    packed |= (fx & 0x1) << 30
+-    packed |= (fy & 0x1) << 31
+-    
+-    return packed
++2. **Encode General Mesh Attributes (S2):**
++   - `normal_idx`: Mask with `0x7`.
++   - `tex_index`: Mask with `0xFF`.
++   - `corner_idx`: Mask with `0x3`.
++   - `width_field`: `min(width - 1, 15)`, cast to u32, mask with `0xF`.
++   - `height_field`: `min(height - 1, 15)`, cast to u32, mask with `0xF`.
++   - `ao_field`: `min(clamp(ao, 0.0, 1.0) * 3, 3)`, cast to u32, mask with `0x3`.
++   - `r_field`: `min(clamp(color[0], 0.0, 1.0) * 7, 7)`, cast to u32, mask with `0x7`.
++   - `g_field`: `min(clamp(color[1], 0.0, 1.0) * 7, 7)`, cast to u32, mask with `0x7`.
++   - `b_field`: `min(clamp(color[2], 0.0, 1.0) * 7, 7)`, cast to u32, mask with `0x7`.
++   - Combine:
++   ```python
++   packed = (b_field << 29) | (g_field << 26) | (r_field << 23) | \
++            (ao_field << 21) | (height_field << 17) | (width_field << 13) | \
++            (corner_idx << 11) | (tex_index << 3) | normal_idx
++   ```
+ 
+-def unpack_vertex_attributes(packed: int) -> tuple:
+-    """
+-    Unpacks a 32-bit integer into volume texture coordinates (tx, ty) 
+-    and Gaussian coordinates (fx, fy).
+-    """
+-    ix = (packed >> 0) & 0xFF
+-    mx = (packed >> 8) & 0x7F
+-    iy = (packed >> 15) & 0xFF
+-    my = (packed >> 23) & 0x7F
+-    fx = (packed >> 30) & 0x1
+-    fy = (packed >> 31) & 0x1
+-    
+-    tx = mx * 256 + ix
+-    ty = my * 256 + iy
+-    
+-    return (tx, ty, fx, fy)
+-```
++3. **Encode Position/Normal/UV (S3):**
++   - Mask x, y, z with `0x3F`.
++   - Mask `normalIndex` with `0x7`.
++   - Mask `uvIndex` with `0x3`.
++   - Combine:
++   ```python
++   packed = (uvIndex << 21) | (normalIndex << 18) | (z << 12) | (y << 6) | x
++   ```
++
++4. **Decompression (S1, S2, S3):**
++   - **Volume Splatting:** Extract $mx, my, fx, fy$ using a small lookup table [S1, unofficial]. The lookup table is stored in constant registers and accessed via an address register in the vertex shader [S1, unofficial]. Recover $tx = mx \times 256 + ix$ and $ty = my \times 256 + iy$ [S1, unofficial].
++   - **General Mesh:**
++   ```python
++   normal_idx = packed & 0x7
++     tex_index = (packed >> 3) & 0xFF
++     corner_idx = (packed >> 11) & 0x3
++     width = ((packed >> 13) & 0xF) + 1
++     height = ((packed >> 17) & 0xF) + 1
++     ao = ((packed >> 21) & 0x3) / 3.0
++     r = ((packed >> 23) & 0x7) / 7.0
++     g = ((packed >> 26) & 0x7) / 7.0
++     b = ((packed >> 29) & 0x7) / 7.0
++   ```
++   - **Position/Normal/UV:**
++   ```python
++   x = packed & 0x3F
++   y = (packed >> 6) & 0x3F
++   z = (packed >> 12) & 0x3F
++   normalIndex = (packed >> 18) & 0x7
++   uvIndex = (packed >> 21) & 0x3
++   ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The decomposition assumes integer coordinates. If floating-point coordinates are used, they must be scaled and rounded to integers before packing [S1, unofficial].
+-*   **Boundaries:** $mx$ and $my$ are limited to 7 bits, restricting volume slices to $2^{15} \times 2^{15}$ voxels [S1, unofficial].
+-*   **Degenerate Input:** $fx$ and $fy$ must be binary. Non-binary values will corrupt the packing [S1, unofficial].
++- **Precision Loss:** Color and AO are quantized. 3-bit color allows only 8 levels; 2-bit AO allows 4 levels [S2, unofficial].
++- **Boundary Conditions:** Width and height are stored as `value - 1`. Input width/height must be in [1, 16]. Values outside this range must be saturated/clamped [S2, unofficial].
++- **Lookup Table Dependency:** Volume splatting decompression relies on a lookup table for $mx, my, fx, fy$ [S1, unofficial]. The size and content of this table are not explicitly defined in the sources, but it is stored in constant registers [S1, unofficial].
++
++## Subtopics
++
++### [Packed Quad Vertex Format](5062-packed-quad-vertex-format.md)
++Packed Quad Vertex Format is a GPU-ready vertex structure designed to minimize memory bandwidth and VRAM usage during procedural mesh generation and hardware-accelerated volume splatting. It achieves this by packing vertex normals, texture coordinates, ambient occlusion (AO) data, and color metadata into a single 32-bit integer field per vertex, alongside a 3-component position vector. This method is distinct from floating-point attribute storage by using discrete bit-fields for metadata, allowing four vertices of a quad to share compact AO data within a single byte.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding is $O(1)$ per vertex. Decoding is $O(1)$ per vertex, potentially optimized with a lookup table [S1, unofficial].
+-*   **Memory Complexity:** Reduces vertex memory from 16 bytes (4 floats) to 4 bytes (1 uint32) per vertex [S1, unofficial].
+-*   **Measured Performance:** For a $256^3$ volume dataset, vertex memory is reduced from 2048M bytes to 12M bytes, a compression ratio of 171:1 [S1, unofficial].
+-*   **Strengths:** High compression ratio, fast decompression, suitable for hardware-accelerated rendering [S1, unofficial].
+-*   **Limitations:** Limited volume size ($2^{15} \times 2^{15}$), fixed Gaussian coordinate resolution (binary) [S1, unofficial].
+-*   **When to Use:** Hardware-accelerated volume splatting with proxy geometry where memory bandwidth is a bottleneck [S1, unofficial].
+-*   **When Not to Use:** Volumes larger than $2^{15} \times 2^{15}$ slices, or when higher precision for Gaussian coordinates is required [S1, unofficial].
++- **Memory Usage:** Reduces vertex memory significantly. For a $256^3$ volume dataset, vertex memory is reduced from 2048M bytes to 12M bytes (compression ratio 171:1) [S1, unofficial]. In general mesh contexts, vertex format size is reduced from 40 bytes to 12 bytes per vertex [S4, unofficial].
++- **Performance:** Decompression and recovery of texture coordinates require only a few operations in programmable vertex shaders [S1, unofficial]. The use of lookup tables allows efficient hardware acceleration [S1, unofficial].
++- **Scalability:** Supports volume slices up to $2^{15} \times 2^{15}$ voxels [S1, unofficial].
++- **Limitations:** Low precision for color (3-bit/channel) and AO (2-bit) [S2, unofficial]. Limited width/height range (1-16) in the general mesh variant [S2, unofficial].
+ 
+ ## Background
+-Packed Vertex Attribute Encoding was introduced in the context of hardware-accelerated adaptive EWA volume splatting [S1, unofficial]. It was developed to address the memory bottleneck of storing vertex attributes for proxy geometry in volume rendering [S1, unofficial]. The method allows the volume texture data and packed proxy geometry information to be pre-loaded in the local memory of graphics hardware for interactive rendering [S1, unofficial].
++Originated in the context of hardware-accelerated adaptive EWA volume splatting [S1, unofficial]. The method was developed to enable interactive rendering of large volume datasets by pre-loading vertex data into local graphics hardware memory [S1, unofficial]. It is used in volume rendering pipelines where memory bandwidth is a bottleneck [S1, unofficial].
+ 
+ ## Sources
+-[S1] Hardwareaccelerated adaptive ewa volume splatting, https://core.ac.uk/works/16783031, fetched 2026-10-28 (unofficial)+[S1] Hardwareaccelerated adaptive ewa volume splatting, https://core.ac.uk/works/16783031, fetched 2026-10-28 (unofficial)
++[S2] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)
++[S3] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)
++[S4] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,486 @@
+Mitsuba 3: A Retargetable Forward and Inverse Renderer - Sample matching for extinction gradients (review branch) by AuroraRyan0301 · Pull Request #1 · AuroraRyan0301/mitsuba3
+
+Sample matching for extinction gradients (review branch) by AuroraRyan0301 · Pull Request #1 · AuroraRyan0301/mitsuba3 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+AuroraRyan0301
+commented
+Aug 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Review branch, not a merge request. This exists so the changes and the
+evidence behind them can be read in one place before anything is proposed
+upstream.
+Description
+Sample matching for extinction gradients in volumetric inverse rendering, as
+a new integrator plugin, plus the medium-side machinery it needs.
+Ruihan Yu, Yu-Chen Wang, Jingwang Ling, Feng Xu, Shuang Zhao.
+Sample Matching for Joint Extinction Gradient Estimation in Differentiable
+Volume Rendering. ACM Transactions on Graphics 45(4), 2026.
+paper
+· supplementary
+· project page
+· doi:10.1145/3811329
+Differentiating volumetric transport with respect to the extinction
+coefficient produces two contributions of opposite sign: a scattering
+term, because denser media scatter more light toward the camera, and a
+transmittance term, because denser media attenuate everything passing
+through. Existing estimators evaluate the two at unrelated points, so their
+negative correlation does nothing for you. This integrator evaluates both at
+shared locations along each path segment, which turns that correlation
+into a variance reduction.
+New plugin
+prbvolpath_sm — sample-matching volumetric PRB. Primal rendering is
+identical to prbvolpath; all of the new machinery runs in the adjoint pass.
+segment_slots selects between two estimators:
+value
+behaviour
+also registered as
+max_depth + 1 (default)
+every completed segment gets a record slot and is sampled
+prbvolpath_sm_quad
+1
+one weighted reservoir per lane; the retained segment stands in for the whole path, scaled by the inverse selection probability
+prbvolpath_sm_linear
+Segment j of a lane goes to slot min(j, segment_slots - 1). The first
+segment_slots - 1 are always kept; everything from there on shares one
+reserved row per lane and is resolved by a weighted reservoir. Both halves
+are unbiased on their own, so the estimator is unbiased at every slot count —
+the count only moves the split between segments sampled exactly and segments
+pooled into one. Nothing is ever dropped.
+Two megakernels, not one. In the adjoint pass the path tracing and the
+dr.backward that follows it run as two separate megakernels. The reason is
+OptiX: the gradient sampling on a segment traces rays of its own, and every
+trace inside a loop saves and restores whatever is still alive across the
+iteration. Keeping a segment's record in loop state — named variables or
+dr.alloc_local, measured identical — cost +2.5 KiB/thread of continuation
+spills and +45% adjoint time on the bunny, and nothing at all under analytic
+intersection. So the path loop does no gradient sampling. It writes one small
+record per segment with a masked scatter, the values die at the end of the
+iteration, and the second kernel reads them back and does the sampling there,
+one lane per record. Only one scalar stays in loop state: the reservoir's
+running weight.
+Spectral and RGB. Both are supported, including an extinction that varies
+across channels. Deferred record fields are generated from the variant's
+spectrum size, and each record carries the path's wavelengths so the second
+kernel evaluates the medium at the right ones.
+What was tried and dropped: reconnection (paper Sec. 5.1, Eq. 32-34). The
+the gradient samples on a segment can reuse the path's own continuation
+instead of tracing a fresh sub-path each, which is much cheaper. It was implemented and
+verified unbiased by finite differences. It is not in this branch: at equal
+iteration count its variance is worse than tracing the sub-paths. The shift
+mapping connects two points with different visibility, so the reuse weight
+carries a transmittance ratio that ranged over 1e-9 to 356 in
+measurements, and only 4.8% of the samples could reuse at all. The archived branch
+keeps the measurements.
+Changes to existing code
+Medium: a majorant supergrid, on by default
+(majorant_resolution_factor 8, majorant_factor 1.2), traversed with a
+DDA. Empty and thin regions are crossed in far fewer null collisions
+instead of paying for the densest voxel in the volume. homogeneous
+rejects the parameter explicitly, since it cannot honour it.
+Medium::sample_real_interaction: consumes null collisions in one
+fused C++ walk instead of iterating them in Python. With a supergrid the
+DDA traversal and the null-collision walk share a single loop.
+heterogeneous takes either parameterization. The scattering
+coefficient can be given as an albedo volume or as sigma_s directly;
+the two are mutually exclusive and the plugin says so. This follows the DRT
+implementation, which pairs albedo with sigma_t to decouple the two and
+keep optimization gradients stable — with sigma_s given independently the
+derivative involves sigma_s / sigma_t and goes unstable as the extinction
+goes to zero.
+The integrators always query sigma_s; what is differentiable is a
+separate matter, handled the way the rest of Mitsuba handles it. traverse
+exposes whichever of the two the scene gave — never both — alongside
+sigma_t, each marked ParamFlags::Differentiable, and scale marked
+NonDifferentiable. That declares what may carry a gradient; nothing does
+until the caller enables one, exactly as Mesh declares vertex_positions
+differentiable and faces not. So the query surface is fixed and the
+parameterization you optimize is a scene-authoring choice.
+Medium::get_albedo: a direct albedo lookup, no production caller in
+this branch. It is a cheaper and better-conditioned query than rebuilding
+sigma_s / sigma_t, which is 0/0 wherever the extinction vanishes.
+prbvolpath.py is untouched.
+Testing
+Numbers below are on an A40 under CUDA/OptiX unless stated. The variant
+matrix is at the end of this section.
+Single-channel extinction
+This is the case the method is about; the three-channel one below is a
+capability this branch adds.
+Gradient mean and variance against DRT
+Per-voxel statistics at equal iteration count, against the differential delta
+tracking implementation this work builds on (volpathsimple, max depth 64,
+subsampling off — its quadratic setting, so it is compared against a slot per
+segment like for like).
+Bunny cloud, 768x576, uniform white environment, 8 spp, N = 512 adjoint
+renders with identical seeds, gradient_samples_per_segment 4, at a checkpoint from a
+real training run. Central slice along each axis.
+Every row integrates to the same value, and to the forward finite-difference
+truth for this scene, -1.1829e+08:
+estimator
+integrated gradient
+DRT reference, max depth 64 (quadratic)
+-1.1830e+08
+sample matching, one record slot per lane (linear)
+-1.1828e+08
+sample matching, four record slots (linear, large constant)
+-1.1829e+08
+sample matching, a slot per segment (quadratic)
+-1.1828e+08
+estimator
+variance, occupied voxels
+variance, all voxels
+vs DRT
+DRT reference, max depth 64 (quadratic)
+136.5
+318.9
+1.00x
+sample matching, one record slot per lane (linear)
+61.8
+91.5
+0.29x
+sample matching, four record slots (linear, large constant)
+46.4
+81.4
+0.26x
+sample matching, a slot per segment (quadratic)
+45.4
+80.9
+0.25x
+Variance drops to a quarter, and most of that is empty space: over occupied
+voxels the reference is at 136.5 against 45.4, but counting empty ones it is
+at 318.9 against 80.9. The first row of the variance figure shows it — the
+reference is hot everywhere around the bunny, the sample-matching rows are
+not. Four slots already capture nearly all of the gain; going from four to a
+slot per segment moves the variance by 1%.
+Inverse rendering
+Bunny cloud, 63 training views, pixel batching (batch 32768), 1024/16 spp,
+Adam at 6e-3, coarse-to-fine 64^3 -> 128^3 -> 256^3, Russian roulette off, L1
+loss, 8000 iterations. PSNR on a held-out view, measured by re-rendering the
+optimized volume with prbvolpath so the metric does not depend on the
+estimator that produced it.
+integrator
+complexity in path length
+gradient_samples_per_segment
+PSNR
+prbvolpath
+linear
+—
+24.84 dB
+prbvolpath_sm_quad
+quadratic
+4
+38.58 dB
+prbvolpath_sm_linear
+linear
+4
+35.87 dB
+prbvolpath plateaus rather than converging slowly: 24.03 dB at iteration
+4000, 24.77 dB at 8000.
+Three-channel extinction
+The extinction varies across channels here. All channels share one majorant
+and one accept/reject coin, so this is the path the correction described
+above applies to; a gray grid makes that correction identically 1.
+Gradients against finite differences
+Central differences, directional derivative along a fixed perturbation:
+integrator
+gradient_samples_per_segment
+RGB, rel. error
+spectral, rel. error
+prbvolpath
+—
+0.0121
+0.0350
+prbvolpath_sm_quad
+1 (default)
+0.0124
+0.0166
+prbvolpath_sm_quad
+4
+0.0125
+0.0180
+prbvolpath_sm_linear
+1 (default)
+0.0118
+0.0174
+Inverse rendering
+Same configuration as above, with a three-channel extinction grid:
+integrator
+complexity
+gradient_samples_per_segment
+4000 iterations
+8000 iterations
+prbvolpath
+linear
+—
+24.84 dB
+23.45 dB
+prbvolpath_sm_quad
+quadratic
+4
+34.86 dB
+35.02 dB
+prbvolpath_sm_linear
+linear
+4
+31.70 dB
+31.97 dB
+Lower than the single-channel numbers because the reference volume is gray:
+three channels give the optimizer two redundant degrees of freedom.
+Stress groups, cost and unit tests
+Stress groups
+46 PASS, 1 WARN. gones — the projection <g,1> over a grid with carved
+zero-density voxels, against forward finite differences — gives 0.999 for
+both configurations. gradfull is 30/30 across boundary x emitter x
+{sigma, albedo}. media is 13/13. The single WARN is prbvolpath itself at
+ratio 2.265 in that projection; its detached estimator is biased in
+zero-density regions, which is why it is a documented control there and not a
+reference.
+Cost
+One full training step, all implementations timed in the same process, on an
+A40 through OptiX. The medium boundary is a real mesh with a null BSDF, so
+every ray goes through optixTrace; there is no analytic bounding-box
+shortcut anywhere in this measurement.
+A step is two launches, one wavefront each, no splitting:
+launch
+lanes
+primal
+32768 pixels x 1024 spp = 33 554 432
+adjoint
+32768 pixels x 16 spp = 524 288
+GPU utilization is sampled with nvidia-smi at 5 Hz over each timing window:
+integrator
+gradient_samples_per_segment
+s / iteration
+vs prbvolpath
+SM utilization
+prbvolpath
+—
+1.239
+1.00x
+99.0%
+prbvolpath_sm_quad
+1 (default)
+0.501
+0.40x
+93.0%
+prbvolpath_sm_quad
+4
+0.676
+0.55x
+93.6%
+prbvolpath_sm_linear
+1 (default)
+0.490
+0.40x
+92.8%
+prbvolpath_sm_linear
+4
+0.659
+0.53x
+92.1%
+Every row keeps the GPU busy, so the gap is not an occupancy effect: sample
+matching runs at slightly lower utilization than prbvolpath and is still
+2.5x faster per step.
+Raising gradient_samples_per_segment from 1 to 4 costs about 35%. The
+variance figures above are at 4; at 1 the plugin is still well under
+prbvolpath.
+Memory is where the two slot counts part company. Each configuration was
+measured in its own process, against an idle window taken after the scene and
+the references are loaded but before any integrator has run:
+integrator
+device memory
+above idle
+prbvolpath
+3693 MiB
+2434 MiB
+prbvolpath_sm_quad
+8301 MiB
+7042 MiB
+prbvolpath_sm_linear
+3725 MiB
+2466 MiB
+The append region is sized by slot count times wavefront, so a slot per
+segment costs about 4.6 GB more than prbvolpath at this wavefront, while
+one slot per lane costs 32 MiB more. gradient_samples_per_segment does not
+enter into it -- 1 and 4 give the same figure.
+Sample matching is faster per step here because it consumes null collisions
+inside one fused C++ walk, where prbvolpath spends one symbolic-loop
+iteration on each of them and pays an optixTrace for every one. That is
+visible without any of the gradient machinery: rendering the same frame at 64
+spp with no AD graph at all, prbvolpath takes 104.5 s and this plugin
+72.1 s, running the identical estimator in primal mode.
+The same measurement shows the gradient sampling never runs in the primal
+pass: 72.09 s at gradient_samples_per_segment 1 against 72.16 s at 4.
+On a smaller microbenchmark that stresses the gradient sampling instead, it
+is 1.2-1.55x slower in RGB and 0.74-0.82x in spectral variants.
+Unit tests
+330 pass (src/media/tests, src/integrators/tests). What each one holds:
+test
+checks
+RGB
+spectral
+test01_primal_matches_prbvolpath
+primal output matches prbvolpath
+yes
+—
+test02_gradients_match_prbvolpath
+extinction gradients match prbvolpath, all three configurations
+yes
+—
+test03_medium_get_albedo
+get_albedo agrees with sigma_s / sigma_t for both built-in media
+yes
+—
+test04_primal_matches_prbvolpath_spectral
+primal, three-channel extinction
+—
+yes
+test05_gradients_match_prbvolpath_spectral
+gradients, three-channel extinction
+—
+yes
+test06_gradients_colored_extinction
+gradients when sigma_t varies across channels
+yes
+—
+test01_primal_parity (supergrid)
+supergrid renders match the global majorant, several safety factors
+yes
+—
+test02_gradient_parity (supergrid)
+supergrid gradients match the global majorant
+yes
+—
+test03_homogeneous_rejects_supergrid
+homogeneous refuses the parameter it cannot honour
+yes
+—
+test04_bounds_extinction_rgb
+the supergrid bound holds above sigma_t everywhere
+yes
+—
+test05_bounds_extinction_spectral
+same, where three channels are stored as sRGB model coefficients
+—
+yes
+Each gradient test runs all three configurations: a slot per segment, a slot
+per segment with four gradient samples, and the one-slot reservoir.
+Variants
+The same selection, src/media/tests and src/integrators/tests, was run on
+both backends. Identical result on each:
+backend
+variants exercised
+tests
+CUDA/OptiX
+cuda_ad_rgb, cuda_ad_spectral
+330 pass
+LLVM
+llvm_ad_rgb, llvm_ad_spectral
+330 pass
+scalar
+scalar_rgb, scalar_spectral
+builds; the integrator needs a vectorized AD variant, so nothing to run
+The gones stress group was also re-run on llvm_ad_rgb, since it is the
+projection that catches gradients lost in empty voxels. It reproduces the
+CUDA result, including the documented prbvolpath control:
+cell
+LLVM
+CUDA
+a slot per segment
+1.001 PASS
+0.999 PASS
+one slot per lane
+1.001 PASS
+0.999 PASS
+prbvolpath control
+2.268 WARN
+2.265 WARN
+Checklist
+My code follows the style guidelines of this project
+My changes generate no new warnings
+My code also compiles for cuda_* and llvm_* variants
+I have commented my code
+I have made corresponding changes to the documentation
+I have added tests that prove my fix is effective or that my feature works
+I cleaned the commit history and removed any "Merge" commits
+I give permission that the Mitsuba 3 project may redistribute my contributions under the terms of its license
+AuroraRyan0301
+force-pushed
+the
+sample-matching-pr
+branch
+6 times, most recently
+from
+4b1d38f to
+e667d40
+Compare
+August 20, 2026 23:06
+AuroraRyan0301
+force-pushed
+the
+sample-matching-pr
+branch
+3 times, most recently
+from
+679d021 to
+e09a216
+Compare
+September 15, 2026 17:27
+AuroraRyan0301
+force-pushed
+the
+sample-matching-pr
+branch
+3 times, most recently
+from
+adb3d1a to
+ad44b8d
+Compare
+September 28, 2026 09:02
+AuroraRyan0301
+added 2 commits
+September 29, 2026 01:19
+Add prbvolpath_sm: sample matching for extinction gradients
+…
+8afc280
+```
+prbvolpath_sm merges the transmittance and scattering terms of the DRTE
+to reduce the variance of the extinction grid's gradient in the
+optimization. Primal rendering stays the same as prbvolpath. The adjoint
+pass runs as two kernels: the replay loop writes one record per segment
+and a second kernel traces the gradient samples of the recorded segments.
+```
+Document prbvolpath_sm
+550cc2b
+AuroraRyan0301
+force-pushed
+the
+sample-matching-pr
+branch
+from
+ad44b8d to
+550cc2b
+Compare
+September 29, 2026 06:19
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

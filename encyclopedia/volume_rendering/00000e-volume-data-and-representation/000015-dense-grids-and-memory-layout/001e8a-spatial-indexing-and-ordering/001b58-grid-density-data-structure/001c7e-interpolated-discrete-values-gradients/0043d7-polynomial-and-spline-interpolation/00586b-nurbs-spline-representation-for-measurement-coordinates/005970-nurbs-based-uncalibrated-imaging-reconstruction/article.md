@@ -1,0 +1,174 @@
+# NURBS-based Uncalibrated Imaging Reconstruction
+
+Also called: Spline method, NURBS representation
+
+## Overview
+NURBS-based Uncalibrated Imaging Reconstruction is a method for reconstructing volumetric data (specifically CT) from projections with uncertain or uncalibrated measurement coordinates (view angles, tilt angles, detector positions) by modeling these coordinates as a NURBS surface [S1, unofficial]. It differs from implicit neural representations by using fixed-degree spline basis functions with optimized control points, which allows for the explicit enforcement of physical consistency conditions (such as Radon transform symmetries) that neural networks approximate implicitly [S1, unofficial]. It is typically paired with a U-Net reconstruction network $G_\mu(\cdot)$ that maps the NURBS-interpolated coordinates to image space [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Projection measurements $p$.
+*   Initial estimates of measurement coordinates (view angles $\theta$, tilt angles, detector locations $t$).
+*   Ground truth volumes (for training) or iterative optimization targets.
+
+**Outputs:**
+*   Reconstructed volume.
+*   Optimized NURBS control points defining the measurement coordinate mapping.
+
+**Data Structures:**
+*   **NURBS Surface:** Defined by control points $P_{j,k}$ and basis functions. For 2D CT, the surface maps $(\theta, t)$ to a correction or coordinate value. For 3D CT, it maps $(\theta, t_x, t_y)$.
+*   **Control Points:** $P_{j,k}$ where $j$ indexes the view angle dimension and $k$ indexes the detector dimension.
+*   **Weights:** In 3D CT, weights are fixed to 1.0, reducing the NURBS to a B-spline [S1, unofficial].
+
+**Parameters:**
+*   **NURBS Degree (2D):** 18 along the learned measurement coordinate dimension; 2 along the non-learned dimension [S1, unofficial].
+*   **NURBS Degree (3D):** 15 along the tilt angle dimension; 2 along the two detector location dimensions [S1, unofficial].
+*   **Regularization ($\lambda$):** 0.6 when splines are used (vs 0.1 for implicit neural) [S1, unofficial].
+*   **Learning Rates:**
+    *   Neural network parameters: $1 \times 10^{-3}$ (2D/3D implicit), $5 \times 10^{-3}$ (3D spline) [S1, unofficial].
+    *   Input coordinates (control points): $1 \times 10^{-4}$ [S1, unofficial].
+*   **Batch Size:** 128 for 2D U-Net; 16 for 3D U-Net [S1, unofficial].
+*   **Epochs:** 100 [S1, unofficial].
+
+**Steps:**
+
+1.  **Initialize NURBS Control Points:**
+    Create initial control points for the NURBS surface based on the observed measurement coordinates. Let $J$ be the number of view angles and $K$ be the number of detectors.
+    
+2.  **Enforce Consistency Conditions (2D CT):**
+    If view angle uncertainty exists, create additional control points to satisfy Radon transform consistency conditions [S1, unofficial]:
+    $$ r_\phi([\theta + \pi, t]^T) = r_\phi([\theta, -t]^T) $$
+    $$ r_\phi([\theta - \pi, t]^T) = r_\phi([\theta, -t]^T) $$
+    where $-t$ refers to the $t$-th last detector [S1, unofficial].
+    
+    For $1 \le j \le d_\Theta$ (where $d_\Theta$ is the degree in the view angle dimension), and for $J - d_\Theta < j \le J$, create new control points $P_{j+J-1,k}$ and $P_{j-J-1,k}$ using the consistency condition to ensure sufficient control points around $0$ and $\pi$ radians [S1, unofficial]:
+    $$ P_{j+J-1,k} = [\theta_j + \pi, t_k, y([\theta_{e_j}, -t_{e_k}]^T)]^T $$
+    $$ P_{j-J-1,k} = [\theta_j - \pi, t_k, y([\theta_{e_j}, -t_{e_k}]^T)]^T $$
+    where $y$ is the target value derived from the consistency condition, and $e_j, e_k$ are indices [S1, unofficial].
+    
+    Total additional control points created: $2 d_\Theta K$ [S1, unofficial].
+
+3.  **Fix Weights (3D CT):**
+    For 3D CT imaging, fix all basis function weights to 1.0. This converts the NURBS surface into a B-spline surface [S1, unofficial].
+
+4.  **Train Reconstruction Network:**
+    Train a U-Net $G_\mu(\cdot)$ to reconstruct the volume from projections using the NURBS-interpolated coordinates.
+    *   **Loss:** Mean-squared error (MSE) [S1, unofficial].
+    *   **Optimizer:** Adam [S1, unofficial].
+    *   **U-Net Architecture:**
+        *   2D: 1 input channel, 1 output channel, 16 features in the first layer [S1, unofficial].
+        *   3D: 1 input channel, 1 output channel, 16 features in the first layer, depth of four blocks [S1, unofficial].
+    *   **Data Augmentation (3D):** Random horizontal flips, random vertical flips, and random rotations by 90, 180, or 270 degrees [S1, unofficial].
+
+5.  **Optimize Control Points:**
+    Jointly optimize the NURBS control points (input coordinates) and network weights $\mu$ using the specified learning rates. The regularization parameter $\lambda = 0.6$ is applied to the spline-based solution [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_nurbs_reconstruction(projections, initial_coords, is_3d, is_2d):
+    # Initialize U-Net
+    if is_2d:
+        unet = UNet2D(input_channels=1, output_channels=1, first_layer_features=16)
+        batch_size = 128
+    else:
+        unet = UNet3D(input_channels=1, output_channels=1, first_layer_features=16, depth=4)
+        batch_size = 16
+        
+    # Initialize NURBS Control Points
+    # J: number of view angles, K: number of detectors
+    # d_theta: degree in view angle dimension (18 for 2D, 15 for 3D)
+    # d_det: degree in detector dimension (2 for both)
+    
+    control_points = initialize_control_points(initial_coords)
+    
+    if is_2d and has_view_angle_uncertainty:
+        d_theta = 18
+        # Create additional control points for consistency
+        # For J - d_theta < j <= J
+        for j in range(J - d_theta, J + 1):
+            for k in range(K):
+                # Calculate consistency target y
+                # r_phi([theta + pi, t]) = r_phi([theta, -t])
+                # -t refers to the t-th last detector
+                theta_j = initial_coords.theta[j]
+                t_k = initial_coords.detector[k]
+                
+                # Get corresponding point from consistency condition
+                # y is the value at [theta_ej, -tek]
+                y_val = get_consistency_value(theta_j, t_k, initial_coords)
+                
+                # Create new control points
+                # P_{j+J-1, k} and P_{j-J-1, k}
+                cp_plus = [theta_j + pi, t_k, y_val]
+                cp_minus = [theta_j - pi, t_k, y_val]
+                
+                control_points.append(cp_plus)
+                control_points.append(cp_minus)
+                
+    if is_3d:
+        # Fix weights to 1.0 (B-spline)
+        set_nurbs_weights(control_points, weight=1.0)
+        
+    # Optimizers
+    lr_nn = 5e-3 if is_3d else 1e-3
+    lr_coords = 1e-4
+    optimizer_nn = Adam(unet.parameters(), lr=lr_nn)
+    optimizer_coords = Adam(control_points.parameters(), lr=lr_coords)
+    
+    # Training Loop
+    for epoch in range(100):
+        for batch in get_batches(projections, batch_size):
+            if is_3d:
+                batch = apply_augmentation(batch) # Horizontal/vertical flips, rotations
+            
+            # Interpolate coordinates using NURBS
+            coords = interpolate_nurbs(control_points, batch.input_coords)
+            
+            # Reconstruct volume
+            volume = unet(coords, batch.projections)
+            
+            # Compute Loss
+            loss = mse_loss(volume, batch.ground_truth)
+            
+            # Add regularization if using splines
+            if is_3d:
+                loss += 0.6 * spline_regularization(control_points)
+            
+            # Backpropagate
+            optimizer_nn.zero_grad()
+            optimizer_coords.zero_grad()
+            loss.backward()
+            optimizer_nn.step()
+            optimizer_coords.step()
+            
+    return unet, control_points
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Accuracy:** Without additional control points, NURBS basis functions may lack sufficient support around $0$ and $\pi$ radians, leading to inaccuracies in the interval $[0, \pi]$ [S1, unofficial].
+*   **Weight Optimization:** In 3D CT, optimizing weights is not performed; they are fixed to 1.0 [S1, unofficial].
+*   **Regularization:** The regularization parameter $\lambda$ differs significantly between implicit neural ($\lambda=0.1$) and spline methods ($\lambda=0.6$) [S1, unofficial].
+
+## Subtopics
+
+### Implicit Neural Representation
+Uses a neural network to map coordinates to values without explicit basis functions. Chosen when flexibility in modeling complex coordinate distortions is prioritized over explicit physical consistency enforcement. See [Implicit Neural Representation](16137-implicit-neural-representation.md).
+
+### Polynomial and Spline Interpolation
+The foundational interpolation technique. NURBS is a specific, weighted generalization of B-splines. See [Polynomial and Spline Interpolation](16135-polynomial-and-spline-interpolation.md).
+
+## Operating characteristics
+*   **Time Complexity:** Training time is dominated by the U-Net forward/backward passes and the NURBS evaluation. The number of control points scales with $J \times K$ plus $2 d_\Theta K$ additional points for 2D consistency [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of control points and the U-Net parameters. The additional control points for consistency increase memory usage by $2 d_\Theta K$ points [S1, unofficial].
+*   **Performance:** In experiments, the Spline method achieved reconstruction SNRs comparable to or better than Implicit Neural and Baseline methods under varying measurement noise and coordinate uncertainty SNRs (e.g., 19.5 dB vs 19.4 dB for 2D CT with Angle: 20, Measurement: 25) [S1, unofficial].
+*   **Strengths:** Explicitly enforces physical consistency conditions (Radon transform symmetries) which improves accuracy in the $[0, \pi]$ interval [S1, unofficial].
+*   **Limitations:** Requires careful selection of NURBS degrees (18 for 2D learned dimension, 15 for 3D tilt) and additional control point management [S1, unofficial].
+
+## Background
+The method is described in "Differentiable Uncalibrated Imaging" (2022) [S1, unofficial]. It builds upon the concept of representing uncertain measurement coordinates as NURBS surfaces, as detailed in the parent article [NURBS Spline Representation for Measurement Coordinates](16136-nurbs-spline-representation-for-measurement-coordinates.md). The approach was developed to address the challenges of uncalibrated imaging where view angles and detector positions are not precisely known, leveraging the flexibility of splines combined with the reconstruction power of deep learning U-Nets.
+
+## Sources
+[S1] Differentiable Uncalibrated Imaging, https://doi.org/10.48550/arXiv.2211.10525, fetched 2026-10-26 (unofficial)

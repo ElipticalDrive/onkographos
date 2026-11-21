@@ -1,0 +1,81 @@
+# Pinned Memory Data Transfer
+
+Also called: cudaMallocHost, Page-locked Host Memory Transfer, Pinned Memory Optimization
+
+## Overview
+Pinned Memory Data Transfer uses page-locked host memory allocated via `cudaMallocHost` or `cudaHostAlloc` to enable direct DMA transfers between the CPU and GPU, improving host-to-device and device-to-host throughput [S1, unofficial]. In legacy CUDA versions prior to 7.x, it served as the explicit mechanism for fast data movement before the introduction of CUDA-managed unified memory [S2, unofficial].
+
+## How it works
+**Inputs:** Host-side data buffer (e.g., mesh vertices); transfer size in bytes [G].
+**Outputs:** Device-side buffer populated with data; host-side pinned memory handle [G].
+
+**Data Structures:**
+1. **Host Pinned Buffer:** Allocated via `cudaHostAlloc` or `cudaMallocHost`. Layout is contiguous in virtual memory [S2, G, unofficial].
+2. **Device Buffer:** Allocated via `cudaMalloc`. Layout is contiguous in device global memory [S2, G, unofficial].
+3. **Transfer Descriptor:** Not strictly required if using `cudaMemcpyDefault`, but logically represents the source pointer, destination pointer, and byte count [G].
+
+**Steps:**
+1. **Allocate Pinned Host Memory:** Request page-locked memory from the CUDA runtime. This memory is not swappable by the OS [G].
+2. **Populate Host Data:** Copy or generate the source data into the pinned host buffer [S2, unofficial].
+3. **Allocate Device Memory:** Reserve space in GPU global memory [S2, unofficial].
+4. **Execute Transfer:** Initiate the DMA transfer from the pinned host buffer to the device buffer using `cudaMemcpyDefault` [S2, unofficial].
+
+**Formulas:**
+*   Memory Constraint: Pinned memory consumes physical RAM that cannot be paged to disk [G].
+
+**Parameters:**
+*   `cudaHostAllocDefault`: Standard flag for pinned memory allocation [G].
+*   `cudaMemcpyDefault`: Transfer kind flag used to initiate the DMA operation [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Exhaustion:** Excessive use of pinned memory can starve the host OS of pageable memory, leading to system instability or thrashing [G].
+*   **Alignment:** Data should be aligned to cache line boundaries (typically 64 bytes) for optimal DMA performance [G].
+*   **Legacy vs. Modern:** In CUDA < 7.x, explicit pinned memory was the primary method for fast transfers. CUDA 7.x introduced unified memory as an alternative [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def allocate_pinned_memory(n): return [0] * n  # cudaHostAlloc
+def allocate_device_memory(n): return [0] * n  # cudaMalloc
+def free_pinned_memory(p): pass  # cudaFreeHost
+def free_device_memory(p): pass  # cudaFree
+def memcpy(dst, src, n): dst[:] = src[:]  # cudaMemcpy
+
+# Step 1: Allocate pinned host memory
+h_data = allocate_pinned_memory(size_bytes)
+
+# Step 2: Populate host data
+memcpy(h_data, source_buffer, size_bytes)
+
+# Step 3: Allocate device memory
+d_data = allocate_device_memory(size_bytes)
+
+# Step 4: Execute transfer
+memcpy(d_data, h_data, size_bytes)  # cudaMemcpyDefault
+
+# Cleanup
+free_pinned_memory(h_data)
+free_device_memory(d_data)
+```
+
+## Subtopics
+
+### CUDA Unified Memory
+Introduced in CUDA 7.x, it provides a transparent memory management system that automatically pages data between host and device [S2, unofficial].
+
+### Zero-Copy Memory
+Allows the GPU to access host memory directly without copying. It is useful for small, irregular accesses but suffers from lower bandwidth than pinned memory transfers due to PCIe latency [G].
+
+## Operating characteristics
+*   **Throughput:** Improves host-to-device and device-to-host transfer rates compared to pageable memory [S1, unofficial].
+*   **Latency:** Setup latency is low, but the actual transfer is limited by PCIe bandwidth [G].
+*   **Memory Cost:** Consumes physical RAM that cannot be paged to disk [G].
+*   **Use Case:** Suitable for transferring structured data like triangle meshes to the GPU for processing [S2, unofficial].
+
+## Background
+The technique was the primary method for explicit fast data movement in CUDA versions prior to 7.x, before the introduction of CUDA-managed unified memory [S2, unofficial]. It remains relevant in legacy codebases and specific high-performance computing workflows where explicit control over host memory locking is required [S1, S2, unofficial].
+
+## Sources
+[S1] wyh1309/hpc_foundational_demos, https://github.com/wyh1309/hpc_foundational_demos, fetched 2026-10-26 (unofficial)
+[S2] GitHub - Forceflow/cuda_voxelizer: CUDA Voxelizer to convert polygon ..., https://github.com/Forceflow/cuda_voxelizer, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,104 @@
+--- v004.md
++++ v005.md
+@@ -1,5 +1,5 @@
+ # Differentiable Marching Cubes
+ 
+-Also called: DiffMC, Flexible Isosurface Extraction for Gradient-Based Mesh Optimization
++Also called: DiffMC (Differentiable Marching Cubes), Flexible Isosurface Extraction for Gradient-Based Mesh Optimization
+ 
+ ## Overview
+@@ -19,5 +19,4 @@
+ **Data Structures:**
+ The method relies on lookup tables and tensors defined as follows [S1, unofficial]:
+-
+ *   `dmc_table`: `torch.long`, shape $(256, \dots)$, encodes edges associated with each dual vertex in 256 MC configurations.
+ *   `num_vd_table`: `torch.long`, shape $(256,)$, holds the number of dual vertices per MC configuration.
+@@ -26,5 +25,5 @@
+ *   `quad_split_1`: `torch.long`, indices `[0, 1, 2, 0, 2, 3]` for splitting a quad along one diagonal.
+ *   `quad_split_2`: `torch.long`, indices `[0, 1, 3, 3, 1, 2]` for splitting a quad along the other diagonal.
+-*   `quad_split_train`: `torch.long`, indices `[0, 1, 1, 2, 2, 3, 3, 0]` for splitting a quad into four triangles during training.
++*   `quad_split_train`: `torch.long`, indices `[0, 1, 1, 2, 2, 3, 3, 0]` for splitting a quad into four triangles during training by connecting all edges to their midpoints.
+ *   `cube_corners`: `torch.float`, shape $(8, 3)$, unit cube corners: $(0,0,0), (1,0,0), (0,1,0), (1,1,0), (0,0,1), (1,0,1), (0,1,1), (1,1,1)$.
+ *   `cube_corners_idx`: `torch.long`, shape $(8,)$, values $2^0 \dots 2^7$, used to retrieve case ID from vertex occupancy.
+@@ -43,11 +42,6 @@
+ 
+ **Algorithm Steps:**
+-
+ 1.  **Initialization:** Load DMC tables into PyTorch tensors on the target device (default 'cuda'). Initialize `qef_reg_scale` to $10^{-3}$ and `weight_scale` to 0.99 [S1, unofficial].
+-2.  **Voxel Grid Construction:**
+-    *   Generate unit vertices and cube connectivity indices using the FlexiCubes constructor for resolution `cells` [S1, unofficial].
+-    *   Vertices are centered at the origin with dimension length 1. Round vertices to $10^{-5}$ precision to merge duplicates.
+-    *   Return unique vertices shifted by $-0.5$ and cube corner indices [S1, unofficial].
+-    *   Map unit vertices to world coordinates using grid lower/upper bounds: $\mathbf{x}_{world} = \mathbf{x}_{unit} \times (\mathbf{upper} - \mathbf{lower}) + \mathbf{lower}$ [S1, unofficial].
++2.  **Voxel Grid Construction:** Generate unit vertices and cube connectivity indices using the FlexiCubes constructor for resolution `cells` [S1, unofficial]. Vertices are centered at the origin with dimension length 1. Round vertices to $10^{-5}$ precision to merge duplicates, then return unique vertices shifted by $-0.5$ and cube corner indices [S1, unofficial]. Map unit vertices to world coordinates using grid lower/upper bounds: $\mathbf{x}_{world} = \mathbf{x}_{unit} \times (\mathbf{upper} - \mathbf{lower}) + \mathbf{lower}$ [S1, unofficial].
+ 3.  **Scalar Field Evaluation:** Evaluate $\phi$ at the grid vertex positions to obtain the SDF values $\mathbf{s}_n$ [S1, unofficial][S2].
+ 4.  **Surface Cube Identification:** Identify cubes intersecting the isosurface based on $\mathbf{s}_n$ and cube vertex indices $\mathbf{cube}_{fx8}$ [S1, unofficial].
+@@ -56,12 +50,8 @@
+ 7.  **Case ID Calculation:** Determine the Marching Cubes configuration ID for each surface cube based on vertex occupancy [S1, unofficial].
+ 8.  **Surface Edge Identification:** Identify edges intersecting the isosurface, returning surface edges, index mapping, edge counts, and mask [S1, unofficial].
+-9.  **Dual Vertex Computation:**
+-    *   If `grad_func` is provided (non-differentiable mode): Solve a Quadratic Error Function (QEF) for dual vertex positioning, similar to Manifold Dual Contouring, using a smart splitting strategy [S1, unofficial].
+-    *   If `grad_func` is not provided (differentiable mode): Use the original differentiable FlexiCubes algorithm [S1, unofficial].
+-    *   Compute dual vertex positions $\mathbf{v}_d$, regularizer $L_{dev}$, gamma values $\mathbf{v}_d\_\gamma$, and index mapping $\mathbf{v}_d\_\text{idx\_map}$ [S1, unofficial].
++9.  **Dual Vertex Computation:** If `grad_func` is provided (non-differentiable mode): Solve a Quadratic Error Function (QEF) for dual vertex positioning, similar to Manifold Dual Contouring, using a smart splitting strategy [S1, unofficial]. If `grad_func` is not provided (differentiable mode): Use the original differentiable FlexiCubes algorithm [S1, unofficial]. Compute dual vertex positions $\mathbf{v}_d$, regularizer $L_{dev}$, gamma values $\mathbf{v}_d\_\gamma$, and index mapping $\mathbf{v}_d\_\text{idx\_map}$ [S1, unofficial].
+ 10. **Triangulation:** Convert dual vertices and edges into final mesh vertices and faces using the quad split tables [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import torch
+@@ -77,6 +67,6 @@
+     # 2. Voxel Grid Construction
+     unit_vertices, cubes = construct_voxel_grid(cells)
+-    unit_vertices = torch.round(unit_vertices * 1e5) / 1e5
+-    unit_vertices = torch.unique(unit_vertices - 0.5, dim=0)
++    # Round to 1e-5 precision to merge duplicates, shift by -0.5
++    unit_vertices = torch.unique(torch.round(unit_vertices * 1e5) / 1e5, dim=0) - 0.5
+     lower = torch.tensor([-0.5, -0.5, -0.5], dtype=torch.float32, device=device)
+     upper = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float32, device=device)
+@@ -98,4 +88,5 @@
+         gamma_f = nn.Parameter(torch.ones(num_cubes, device=device) * weight_scale)
+         optimizer = optim.Adam([beta_fx12, alpha_fx8, gamma_f], lr=learning_rate)
++        deform = nn.Parameter(torch.zeros(num_cubes, 3, device=device))
+     
+     # 6. Optimization Loop
+@@ -128,5 +119,5 @@
+ 
+ def construct_voxel_grid(cells):
+-    coords = torch.linspace(-0.5, 0.5, cells + 1)
++    coords = torch.linspace(0, 1, cells + 1)
+     X, Y, Z = torch.meshgrid(coords, coords, coords, indexing='ij')
+     unit_vertices = torch.stack([X, Y, Z], dim=-1).reshape(-1, 3)
+@@ -154,5 +145,4 @@
+     # If grad_func is provided, solve QEF for dual vertex positioning (non-differentiable) [S1, unofficial]
+     # Otherwise, use original differentiable FlexiCubes algorithm [S1, unofficial]
+-    # Compute dual vertex positions vd, regularizer L_dev, gamma values vd_gamma, and index mapping vd_idx_map
+     if grad_func is not None:
+         vd, L_dev, vd_gamma, vd_idx_map = compute_vd_qef(grid_verts, cubes[surf_cubes], surf_edges, sdf, case_ids, beta_fx12, alpha_fx8, gamma_f, idx_map, grad_func)
+@@ -169,19 +159,22 @@
+     return edge_intersects.nonzero(as_tuple=False), None, None, None
+ 
+-# Sources do not give implementation details for these steps [S1, unofficial]
++# Sources do not give implementation details for this step [S1, unofficial]
+ def normalize_weights(beta_fx12, alpha_fx8, gamma_f, surf_cubes): pass
++# Sources do not give implementation details for this step [S1, unofficial]
+ def compute_vd_qef(grid_verts, cube_verts, surf_edges, sdf, case_ids, beta_fx12, alpha_fx8, gamma_f, idx_map, grad_func): pass
++# Sources do not give implementation details for this step [S1, unofficial]
+ def compute_vd_flexicubes(grid_verts, cube_verts, surf_edges, sdf, case_ids, beta_fx12, alpha_fx8, gamma_f, idx_map): pass
++# Sources do not give implementation details for this step [S1, unofficial]
+ def triangulate(vd, surf_edges, case_ids, vd_idx_map): pass
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial][S2].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2].
+ *   **Measured Performance:** Rendering quality (PSNR) improves with DiffMC resolution, plateauing around 400. At resolution 256, PSNR is 31.19; at 400, PSNR is 31.54 [S2].
+ *   **Strengths:** Generates smoother surfaces than DMTet, mitigating artifacts from density field non-linearity [S2]. Supports multiple fitting modes (`learn`, `gradient`) [S1, unofficial].
+ *   **Limitations:** The `learn` mode requires careful tuning of learning rate and iterations. The `gradient` mode is non-differentiable with respect to the scalar field, limiting its use in end-to-end differentiable pipelines that require gradients through the meshing step [S1, unofficial].
+ *   **When to use:** When smooth mesh extraction from SDFs or density fields is required, especially in neural rendering pipelines [S2].
+-*   **When not to use:** When differentiability through the meshing step is strictly required and the `gradient` mode's non-differentiability is a blocker (use `learn` mode with care, or other differentiable methods). When computational resources are limited and high resolution is not needed (lower resolutions may introduce artifacts).
++*   **When not to use:** When differentiability through the meshing step is strictly required and the `gradient` mode's non-differentiability is a blocker [S1, unofficial]. When computational resources are limited and high resolution is not needed (lower resolutions may introduce artifacts) [G].
+ 
+ ## Background

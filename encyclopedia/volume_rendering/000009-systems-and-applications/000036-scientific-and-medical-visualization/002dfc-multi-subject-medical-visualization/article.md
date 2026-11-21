@@ -1,0 +1,19 @@
+# Multi-Subject Medical Visualization
+
+
+## Overview
+Multi-Subject Medical Visualization is the visualization of datasets including measurements and imaging for more than one subject at a time [S1, unofficial]. It addresses the analysis of medical cohort studies where diverse data types are acquired to diagnose or predict clinical outcomes, distinguishing itself from its sibling [Mixed Modality Visualization](5716-mixed-modality-visualization.md) by focusing on multiple subjects rather than heterogeneous data types, while coupling information and scientific visualization to extract patterns affecting subgroups of the whole collection [S1, unofficial].
+
+## Shared principles
+The family relies on creating a highly interactive coupled view visualization interface [S1, unofficial]. This interface integrates both information and scientific visualization techniques [S1, unofficial]. The goal is to allow users to extract and analyze certain patterns that affect subgroups of the whole collection [S1, unofficial].
+
+## Subtopics
+
+### [Mixed Modality Visualization](5716-mixed-modality-visualization.md)
+Mixed Modality Visualization is the visualization of mixed modality data, including imaging, genetics, and blood measurements, acquired from a group of subjects. It addresses the analysis of complex medical cohort studies where diverse data types must be integrated to diagnose or predict clinical outcomes. It is distinguished from its sibling [Multi-Subject Medical Visualization](5715-multi-subject-medical-visualization.md) by its specific focus on integrating heterogeneous data types (imaging, genetics, blood) rather than just multiple subjects, though it relies on the same coupled view interface principles.
+
+## Background
+Medical visualization has started to work on the problem of working with multi-subject data [S1, unofficial]. These datasets include measurements and imaging for more than one subject at a time [S1, unofficial]. The aim of the referenced work is to be able to extract and analyze certain patterns that affect subgroups of the whole collection [S1, unofficial]. LifeLines2 is an early information visualization system to visualize and compare multiple patient histories or electronic medical records [S1, unofficial]. Work has been done on the interactive visualization of multi-subject and mixed modality datasets acquired by medical cohort studies [S1, unofficial]. In these studies, mixed modality data, including imaging, genetics, and blood measurements, is acquired from a group of subjects in order to be analyzed for diagnosing or predicting the clinical outcome of that group [S1, unofficial]. It was demonstrated by Stenwijk to create a highly interactive coupled view visualization interface, integrating both information and scientific visualization techniques [S1, unofficial].
+
+## Sources
+[S1] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

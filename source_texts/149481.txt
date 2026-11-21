@@ -1,0 +1,625 @@
+c# - 3D Texture Only interpolates on Y-Axis - Game Development Stack Exchange
+3D Texture Only interpolates on Y-Axis
+Ask Question
+Asked
+7 years, 10 months ago
+Modified
+7 years, 10 months ago
+Viewed
+140 times
+Report this ad
+This question shows research effort; it is useful and clear
+1
+This question does not show any research effort; it is unclear or not useful
+Save this question.
+Show activity on this post.
+I'm having trouble wrapping my brain around what actually is the issue here, but the sampler I'm using in my volume renderer is only interpolating the 3D texture along the Y axis.
+I roughly followed (and borrowed a lot of code from) this tutorial, but I'm using SlimDX and WPF: http://graphicsrunner.blogspot.com/2009/01/volume-rendering-101.html
+Here's an example, showing voxel artifacts on the X and Z axes, which are evidently not being interpolated, or being done incorrectly:
+It's somewhat hard to tell, but the Y-axis samples are seemingly being interpolated correctly:
+Disabling interpolation in the sampler causes artifacts to appear on the Y-axis, as shown below. So I at least know it's partially working.
+I tried writing a manual trilinear interpolation routine, but I get the same results with built-in sampling and my own code.
+To get a better idea of what might be the problem, I tried coloring pixels based on the fraction of the coordinate in grid space, to see why the linear interpolation wasn't working. The Y-axis should have 30 white-> black fades, because the radar dataset I'm volume rendering has 30 vertical layers. It did:
+Using the same approach on the Z-axis, I get nonsense:
+My best guess is that I'm somehow initializing the 3D texture incorrectly, causing the shader to act unexpectedly.
+Here's relevant code, starting at ingestion of data:
+```
+// Read data file and get physical sizes
+Data = new GURUGridFile(@"E:\GURU2 Test Data\GoshenDual\Finished\30_DOW7_(X)_20090605_220006.ggf");
+double DataX = Data.CellSize[0] * Data.Dimensions[0];
+double DataY = Data.CellSize[1] * Data.Dimensions[1];
+double DataZ = Data.CellSize[2] * Data.Dimensions[2];
+double MaxSize = Math.Max(DataX, Math.Max(DataY, DataZ));
+
+// Send geometry sizes to the renderer
+DataX /= MaxSize;
+DataY /= MaxSize;
+DataZ /= MaxSize;
+Renderer.XSize = (float)DataX;
+Renderer.YSize = (float)DataY;
+Renderer.ZSize = (float)DataZ;
+
+// Grab data and read into a 3D array
+int ProductCode = Data.LayerProducts[0].ToList().IndexOf("A_DZ");
+float[,,] RadarData = new float[Data.Dimensions[0], Data.Dimensions[1], Data.Dimensions[2]];
+for (int x = 0; x < Data.Dimensions[0]; x++)
+    for (int y = 0; y < Data.Dimensions[1]; y++)
+        for (int z = 0; z < Data.Dimensions[2]; z++)
+            RadarData[x, y, z] = Data.Data[z][ProductCode][x, y];
+
+// Calculate and assign the step size for raycasting
+// Z and Y axes are flipped here to come in line with D3D coordinates
+int DataSize = Math.Max(RadarData.GetLength(0), Math.Max(RadarData.GetLength(1), RadarData.GetLength(2)));
+int mWidth = RadarData.GetLength(0);
+int mHeight = RadarData.GetLength(2);
+int mDepth = RadarData.GetLength(1);
+float mStepScale = 1.0F;
+float maxSize = (float)Math.Max(mWidth, Math.Max(mHeight, mDepth));
+SlimDX.Vector3 stepSize = new SlimDX.Vector3(   1.0f / (mWidth * (maxSize / mWidth)),
+                                                1.0f / (mHeight * (maxSize / mHeight)),
+                                                1.0f / (mDepth * (maxSize / mDepth)));
+
+// Make render engine
+VolumeRenderer = new VolumeRenderEngine(false, Renderer.device);
+VolumeRenderer.Data = VolumeRenderTest.Rendering.TextureObject3D.FromData(RadarData);
+VolumeRenderer.StepSize = stepSize * mStepScale;
+VolumeRenderer.Iterations = (int)(maxSize * (1.0f / mStepScale) * 2.0F);
+
+Renderer.Initialize();
+SetupSlimDX();
+
+this.VolumeRenderer.DataWidth = Data.Dimensions[0];
+this.VolumeRenderer.DataHeight = Data.Dimensions[2];
+this.VolumeRenderer.DataDepth = Data.Dimensions[1];
+```
+Here's my code to generate the 3D texture, wrapped in a helper class to make working with it more convenient. This is where I think my problem is, maybe?
+```
+public static TextureObject3D FromData(float[,,] Data)
+{
+    Texture3DDescription texDesc = new Texture3DDescription()
+    {
+        BindFlags = SlimDX.Direct3D11.BindFlags.ShaderResource,
+        CpuAccessFlags = SlimDX.Direct3D11.CpuAccessFlags.None,
+        Format = SlimDX.DXGI.Format.R32_Float,
+        MipLevels = 1,
+        OptionFlags = SlimDX.Direct3D11.ResourceOptionFlags.None,
+        Usage = SlimDX.Direct3D11.ResourceUsage.Default,
+        Width = Data.GetLength(0),
+        Height = Data.GetLength(2),
+        Depth = Data.GetLength(1)
+    };
+
+    // Flatten data
+    int i = 0;
+    float[] FlatData = new float[Data.GetLength(0) * Data.GetLength(1) * Data.GetLength(2)];
+    for (int y = 0; y < Data.GetLength(1); y++)
+        for (int z = 0; z < Data.GetLength(2); z++)
+            for (int x = 0; x < Data.GetLength(0); x++)
+                FlatData[i++] = Data[x, y, z];
+
+
+    DataStream TextureStream = new DataStream(FlatData, true, true);
+    DataBox TextureBox = new DataBox(texDesc.Width * 4, texDesc.Width * texDesc.Height * 4, TextureStream);
+    Texture3D valTex = new Texture3D(Renderer.device, texDesc, TextureBox);
+
+    var viewDesc = new SlimDX.Direct3D11.ShaderResourceViewDescription()
+    {
+        Format = texDesc.Format,
+        Dimension = SlimDX.Direct3D11.ShaderResourceViewDimension.Texture3D,
+        MipLevels = texDesc.MipLevels,
+        MostDetailedMip = 0,
+        ArraySize = 1,
+        CubeCount = 1,
+        ElementCount = 1
+    };
+    ShaderResourceView valTexSRV = new ShaderResourceView(Renderer.device, valTex, viewDesc);
+
+    TextureObject3D tex = new TextureObject3D();
+    tex.Device = Renderer.device;
+
+    tex.Size = TextureStream.Length;
+    tex.TextureStream = TextureStream;
+    tex.TextureBox = TextureBox;
+    tex.Texture = valTex;
+    tex.TextureSRV = valTexSRV;
+
+    return tex;
+}
+```
+This is the code from the render engine where values are assigned to the effect and instructions are sent to the GPU:
+```
+private void RenderVolume()
+{
+    // Rasterizer states
+    RasterizerStateDescription RSD_Front = new RasterizerStateDescription();
+    RSD_Front.FillMode = SlimDX.Direct3D11.FillMode.Solid;
+    RSD_Front.CullMode = CullMode.Back;
+    RSD_Front.IsFrontCounterclockwise = false;
+
+    RasterizerStateDescription RSD_Rear = new RasterizerStateDescription();
+    RSD_Rear.FillMode = SlimDX.Direct3D11.FillMode.Solid;
+    RSD_Rear.CullMode = CullMode.Front;
+    RSD_Rear.IsFrontCounterclockwise = false;
+
+    RasterizerState RS_OLD = Device.ImmediateContext.Rasterizer.State;
+    RasterizerState RS_FRONT = RasterizerState.FromDescription(Renderer.device, RSD_Front);
+    RasterizerState RS_REAR = RasterizerState.FromDescription(Renderer.device, RSD_Rear);
+
+    // Calculate world view matrix
+    Matrix wvp = _world * _view * _proj;
+
+    RenderTargetView NullRTV = null;
+
+    // First we need to render to the rear texture
+    SetupBlend(false);
+    PrepareRTV(RearTextureView);
+    SetBuffers();
+    Device.ImmediateContext.Rasterizer.State = RS_REAR;
+    Renderer.RayCasting101FX_WVP.SetMatrix(wvp);
+    Renderer.RayCasting101FX_ScaleFactor.Set(ScaleFactor);
+    ExecuteTechnique(Renderer.RayCasting101FX_RenderPosition);
+    Device.ImmediateContext.Flush();
+    Device.ImmediateContext.OutputMerger.SetTargets(NullRTV);
+
+    // Now we draw to the front texture
+    SetupBlend(false);
+    PrepareRTV(FrontTextureView);
+    SetBuffers();
+    Device.ImmediateConte﻿xt.Rasterizer.State = RS_FRONT;
+    Renderer.RayCasting101FX_WVP.SetMatrix(wvp);
+    Renderer.RayCasting101FX_ScaleFactor.Set(ScaleFactor);
+    ExecuteTechnique(Renderer.RayCasting101FX_RenderPosition);
+    Device.ImmediateContext.Flush();
+    Device.ImmediateContext.OutputMerger.SetTargets(NullRTV);
+
+
+    SetupBlend(false);
+
+    //Set Render Target View
+    Device.ImmediateContext.OutputMerger.SetTargets(SampleRenderView);
+
+    // Set Viewport
+    Device.ImmediateContext.Rasterizer.SetViewports(new Viewport(0, 0, WindowWidth, WindowHeight, 0.0f, 1.0f));
+
+    // Clear screen
+    Device.ImmediateContext.ClearRenderTargetView(SampleRenderView, new Color4(1.0F, 0.0F, 0.0F, 0.0F));
+
+    if (Wireframe)
+    {
+        RenderWireframeBack();
+        Device.ImmediateContext.Rasterizer.State = RS_FRONT;
+    }
+
+    SetBuffers();
+
+    // Assign effect variables
+    Renderer.RayCasting101FX_WVP.SetMatrix(wvp);
+    Renderer.RayCasting101FX_ScaleFactor.Set(ScaleFactor);
+    Renderer.RayCasting101FX_Back.SetResource(new ShaderResourceView(Renderer.device, RearTexture));// RearTextureSRV);
+    Renderer.RayCasting101FX_Front.SetResource(new ShaderResourceView(Renderer.device, FrontTexture));//FrontTextureSRV);
+    Renderer.RayCasting101FX_Volume.SetResource(new ShaderResourceView(Renderer.device, Data.Texture));
+    Renderer.RayCasting101FX_StepSize.Set(StepSize);
+    Renderer.RayCasting101FX_Iterations.Set(Iterations);
+
+    Renderer.RayCasting101FX_Width.Set(DataWidth);
+    Renderer.RayCasting101FX_Height.Set(DataHeight);
+    Renderer.RayCasting101FX_Depth.Set(DataDepth);
+
+    // Run effect
+    ExecuteTechnique(Renderer.RayCasting101FX_RayCastSimple);
+
+    if (Wireframe)
+    {
+        RenderWireframeFront();
+        Device.ImmediateContext.Rasterizer.State = RS_FRONT;
+    }
+
+    Device.ImmediateContext.Flush();
+
+    CanvasInvalid = false;
+
+    sw.Stop();
+
+    this.LastFrame = sw.ElapsedTicks / 10000.0;
+}
+
+
+private void PrepareRTV(RenderTargetView rtv)
+{
+    //Set Depth Stencil and Render Target View
+    Device.ImmediateContext.OutputMerger.SetTargets(rtv);
+
+    // Set Viewport
+    Device.ImmediateContext.Rasterizer.SetViewports(new Viewport(0, 0, WindowWidth, WindowHeight, 0.0f, 1.0f));
+
+    // Clear render target
+    Device.ImmediateContext.ClearRenderTargetView(rtv, new Color4(1.0F, 0.0F, 0.0F, 0.0F));
+}
+
+private void SetBuffers()
+{
+    // Setup buffer info
+    Device.ImmediateContext.InputAssembler.InputLayout = Renderer.RayCastVBLayout;
+    Device.ImmediateContext.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
+    Device.ImmediateContext.InputAssembler.SetVertexBuffers(0, new VertexBufferBinding(Renderer.VertexBuffer, Renderer.VertexPC.Stride, 0));
+    Device.ImmediateContext.InputAssembler.SetIndexBuffer(Renderer.IndexBuffer, Format.R32_UInt, 0);
+}
+
+private void ExecuteTechnique(EffectTechnique T)
+{
+    for (int p = 0; p < T.Description.PassCount; p++)
+    {
+        T.GetPassByIndex(p).Apply(Device.ImmediateContext);
+        Device.ImmediateContext.DrawIndexed(36, 0, 0);
+    }
+}
+```
+Finally, here's the shader in its entirety. Taken from the blog post above and modified somewhat.
+```
+float4x4 World;
+float4x4 WorldViewProj;
+float4x4 WorldInvTrans;
+
+float3 StepSize;
+int Iterations;
+
+int Side;
+
+float4 ScaleFactor;
+
+int Width;
+int Height;
+int Depth;
+
+Texture2D<float3> Front;
+Texture2D<float3> Back;
+Texture3D<float1> Volume;
+
+SamplerState FrontSS = sampler_state
+{
+    Texture = <Front>;
+    Filter = MIN_MAG_MIP_POINT;
+
+    AddressU = Border; // border sampling in U
+    AddressV = Border; // border sampling in V
+    BorderColor = float4(0, 0, 0, 0); // outside of border should be black
+};
+
+SamplerState BackSS = sampler_state
+{
+    Texture = <Back>;
+    Filter = MIN_MAG_MIP_POINT;
+
+    AddressU = Border; // border sampling in U
+    AddressV = Border; // border sampling in V
+    BorderColor = float4(0, 0, 0, 0); // outside of border should be black
+};
+
+
+SamplerState VolumeSS = sampler_state
+{
+    Texture = <Volume>;
+    Filter = MIN_MAG_MIP_LINEAR;
+
+
+    AddressU = Border; // border sampling in U
+    AddressV = Border; // border sampling in V
+    AddressW = Border; // border sampling in W
+    BorderColor = float4(0, 0, 0, 0); // outside of border should be black
+};
+
+
+struct VertexShaderInput
+{
+    float3 Position : POSITION;
+    float4 texC     : COLOR;
+};
+
+struct VertexShaderOutput
+{
+    float4 Position     : SV_POSITION;
+    float3 texC         : TEXCOORD0;
+    float4 pos          : TEXCOORD1;
+};
+
+VertexShaderOutput PositionVS(VertexShaderInput input)
+{
+    VertexShaderOutput output;
+
+    output.Position = float4(input.Position, 1.0);
+    output.Position = mul(output.Position * ScaleFactor, WorldViewProj);
+
+    output.texC = input.texC.xyz;
+    output.pos = output.Position;
+
+    return output;
+}
+
+float4 PositionPS(VertexShaderOutput input) : SV_TARGET // : COLOR0
+{
+    return float4(input.texC, 1.0f);
+}
+
+float4 WireFramePS(VertexShaderOutput input) : SV_TARGET // : COLOR0
+{
+    return float4(1.0f, .5f, 0.0f, .85f);
+}
+
+//draws the front or back positions, or the ray direction through the volume
+float4 DirectionPS(VertexShaderOutput input) : SV_TARGET // : COLOR0
+{
+    float2 texC = input.pos.xy /= input.pos.w;
+    texC.x =  0.5f * texC.x + 0.5f;
+    texC.y = -0.5f * texC.y + 0.5f;
+
+    float3 front = Front.Sample(FrontSS, texC).rgb;// tex2D(FrontS, texC).rgb;
+    float3 back = Back.Sample(BackSS, texC).rgb; // tex2D(BackS, texC).rgb;
+
+    if(Side == 0)
+    {
+        float4 res = float4(front, 1.0f);
+        return res;
+
+    }
+    if(Side == 1)
+    {
+        float4 res = float4(back, 1.0f);
+        return res;
+    }
+
+    return float4(abs(back - front), 1.0f);
+}
+
+float TrilinearSample(float3 pos)
+{
+    float X = pos.x * Width;
+    float Y = pos.y * Height;
+    float Z = pos.z * Depth;
+
+    float iX = floor(X);
+    float iY = floor(Y);
+    float iZ = floor(Z);
+
+    float iXn = iX + 1;
+    float iYn = iY + 1;
+    float iZn = iZ + 1;
+
+    float XD = X - iX;
+    float YD = Y - iY;
+    float ZD = Z - iZ;
+
+    float LL = lerp(Volume[float3(iX, iY, iZ)], Volume[float3(iX, iY, iZn)], ZD);
+    float LR = lerp(Volume[float3(iXn, iY, iZ)], Volume[float3(iXn, iY, iZn)], ZD);
+
+    float UL = lerp(Volume[float3(iX, iYn, iZ)], Volume[float3(iX, iYn, iZn)], ZD);
+    float UR = lerp(Volume[float3(iXn, iYn, iZ)], Volume[float3(iXn, iYn, iZn)], ZD);
+
+    float L = lerp(LL, UL, YD);
+    float R = lerp(LR, UR, YD);
+
+    //return ZD;
+
+    return lerp(L, R, XD);
+
+    return 0.0F;
+}
+
+float4 RayCastSimplePS(VertexShaderOutput input) : SV_TARGET // : COLOR0
+{ 
+    //calculate projective texture coordinates
+    //used to project the front and back position textures onto the cube
+    float2 texC = input.pos.xy /= input.pos.w;
+    texC.x =  0.5f* texC.x + 0.5f;
+    texC.y = -0.5f* texC.y + 0.5f;
+
+    float3 front = Front.Sample(FrontSS, texC).rgb; // tex2D(FrontS, texC).xyz;
+    float3 back = Back.Sample(BackSS, texC).rgb; // tex2D(BackS, texC).xyz;
+
+    float3 dir = normalize(back - front);
+    float4 pos = float4(front, 0);
+
+    float4 dst = float4(0, 0, 0, 0);
+    float4 src = 0;
+
+    float value = 0;
+
+    //Iterations = 1500;
+
+    float3 Step = dir * StepSize; // / (float)Iterations;
+    float3 TotalStep = float3(0, 0, 0);
+
+    value = Volume.Sample(VolumeSS, pos.xyz).r;
+
+    int i = 0;
+    for(i = 0; i < Iterations; i++)
+    {
+        pos.w = 0;
+        //value = Volume.SampleLevel(VolumeSS, pos.xyz, 0);
+        value = TrilinearSample(pos.xyz); // tex3Dlod(VolumeS, pos).r;
+
+        // Radar reflectivity related threshold values
+        if (value < 40)
+            value = 40;
+        if (value > 60)
+            value = 60;
+
+        value = (value - 40.0) / 20.0;
+
+        src =  (float4)(value);
+        src.a /= (Iterations / 50.0);
+
+        //Front to back blending
+        // dst.rgb = dst.rgb + (1 - dst.a) * src.a * src.rgb
+        // dst.a   = dst.a   + (1 - dst.a) * src.a      
+        src.rgb *= src.a;
+        dst = (1.0f - dst.a) * src + dst;
+
+        //break from the loop when alpha gets high enough
+        if (dst.a >= .95f)
+            break;
+
+        //advance the current position
+        pos.xyz += Step;
+        TotalStep += Step;
+
+        //break if the position is greater than <1, 1, 1>
+        if (pos.x > 1.0f || pos.y > 1.0f || pos.z > 1.0f || pos.x < 0.0f || pos.y < 0.0f || pos.z < 0.0f)
+            break;
+    }
+
+    return dst;
+}
+
+
+technique11 RenderPosition
+{
+    pass Pass1
+    {
+        SetVertexShader(CompileShader(vs_4_0, PositionVS()));
+        SetGeometryShader(NULL);
+        SetPixelShader(CompileShader(ps_4_0, PositionPS()));
+        //VertexShader = compile vs_2_0 PositionVS();
+        //PixelShader = compile ps_2_0 PositionPS();
+    }
+}
+
+technique11 RayCastDirection
+{
+    pass Pass1
+    {
+        SetVertexShader(CompileShader(vs_4_0, PositionVS()));
+        SetGeometryShader(NULL);
+        SetPixelShader(CompileShader(ps_4_0, DirectionPS()));
+        //VertexShader = compile vs_2_0 PositionVS();
+        //PixelShader = compile ps_2_0 DirectionPS();
+    }
+}
+
+technique11 RayCastSimple
+{
+    pass Pass1
+    {
+        SetVertexShader(CompileShader(vs_4_0, PositionVS()));
+        SetGeometryShader(NULL);
+        SetPixelShader(CompileShader(ps_4_0, RayCastSimplePS()));
+        //VertexShader = compile vs_3_0 PositionVS();
+        //PixelShader = compile ps_3_0 RayCastSimplePS();
+    }
+}
+
+technique11 WireFrame
+{
+    pass Pass1
+    {
+        SetVertexShader(CompileShader(vs_4_0, PositionVS()));
+        SetGeometryShader(NULL);
+        SetPixelShader(CompileShader(ps_4_0, WireFramePS()));
+        //VertexShader = compile vs_2_0 PositionVS();
+        //PixelShader = compile ps_2_0 WireFramePS();
+    }
+}
+```
+Any insight is appreciated. At this point I'm just guessing at possible issues and seeing what changes. Mostly just breaking things though.
+c#
+directx11
+slimdx
+Share
+Share a link to this question
+Copy linkCC BY-SA 4.0
+Short permalink to this question
+Follow
+Follow this question to receive notifications
+asked Dec 15, 2018 at 19:01
+Trevor
+2133 bronze badges
+Add a comment
+|
+1 Answer 1
+Sorted by:
+Reset to default
+Highest score (default)
+Date modified (newest first)
+Date created (oldest first)
+This answer is useful
+1
+This answer is not useful
+Save this answer.
+Loading when this answer was accepted…
+Show activity on this post.
+I figured it out. It had absolutely nothing to do with the Texture3D, sampler, or anything else that I was wanting to blame.
+Upon zooming in really far, I noticed that it probably wasn't the 3D texture's fault - it looked like the ray directions were being somehow miscalculated. The pixelated areas are looking slightly different directions from each other, causing tight gradients to get broken up.
+It turns out issue was the textures I was drawing the front/rear faces of the geometry to. They were initialized as B8G8R8A8_UNorm. As soon as I changed them to R32G32B32A32_Float it worked. It was just insufficient precision all along.
+Now it works properly:
+Live and learn!
+Share
+Share a link to this answer
+Copy linkCC BY-SA 4.0
+Short permalink to this answer
+Follow
+Follow this answer to receive notifications
+answered Dec 16, 2018 at 22:51
+Trevor
+2133 bronze badges
+Add a comment
+|
+You must log in to answer this question.
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+c#
+directx11
+slimdx
+See similar questions with these tags.
+The Overflow Blog
+Elevators, toasters, and the birth of Java
+A JSON schema Is not an AI governance layer
+Featured on Meta
+We’ve reworked automatic question deletion. Let’s talk about why
+How can we improve duplicate handling?
+Related
+4
+Per-vertex position/normal and per-index texture coordinate
+0
+E_FAIL: An undetermined error occurred (-2147467259) when loading a cube texture
+0
+Accessing and changing texture data in SlimDX
+2
+Game only runs at 60fps in windowed mode with a 120hz monitor?
+3
+Vector3.MoveTowards on y axis only
+0
+Only subtract velocity on one axis
+3
+How to completely stop the camera from clipping into the ground
+0
+Extrude only vertices where the assigned texture is transparent?
+0
+Texture blends into one single color
+Hot Network Questions
+Question about Jason's age in the show Crystal Lake
+What is the mechanism behind this phish that gives me a code to enter after I log into M365, and what is the end goal?
+PSE Advent Calendar 2026 (Day 25): Merry Christmas?
+Archive vs repository
+Ramifications of Exponential Time Hypothesis disproof and ECDLP
+Why doesn’t Windows 11 windows line up between identical monitors?
+Statistical Feasibility of Comparing Treatments in a Small Clinical Dataset
+Is emergence as a phenomenon just something we project onto reality?
+-ta and its aspect
+Why would I ever comply instead of bargain when being attacked by pirates?
+Is there a reason why BMS controllers can't easily implement charge current limiting?
+Does Hilbert's Foundations of Geometry hold a privileged position among the foundations of geometry?
+Can a planet simultaneously occult two planets at the same time?
+Maximum sum in a Latin 5x5 Minesweeper grid
+Auxiliary Circle of Ellipse, Focal radii as diameter of circle property
+Subscripts before a brace in equation
+attaching cement board to a plaster and lath wall
+Are there any Greek manuscripts that support the many translations that translate gune as “bride” in Rev 19:7?
+Would Fredo have been executed if he left Cuba with Michael?
+Questions about two parallel circuits connected by a wire
+What's the harmonic function of the VI-VII-v-i progression in minor?
+How can I check an Android APK's CPU architecture before installing it in Waydroid on Ubuntu?
+How should ongoing submissions affected by the ETH refutation be evaluated?
+What makes math results publishable?
+Question feed
+lang-cs

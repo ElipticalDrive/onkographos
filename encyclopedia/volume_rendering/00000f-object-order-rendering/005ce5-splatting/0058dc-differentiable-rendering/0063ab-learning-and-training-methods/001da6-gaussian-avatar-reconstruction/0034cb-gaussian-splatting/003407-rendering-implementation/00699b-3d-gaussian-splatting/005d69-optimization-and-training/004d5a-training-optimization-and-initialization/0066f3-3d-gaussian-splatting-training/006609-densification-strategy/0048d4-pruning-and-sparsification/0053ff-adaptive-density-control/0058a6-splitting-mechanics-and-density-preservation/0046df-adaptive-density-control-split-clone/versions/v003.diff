@@ -1,0 +1,118 @@
+--- v002.md
++++ v003.md
+@@ -1,77 +1,61 @@
+ # Adaptive Density Control (Split & Clone)
+ 
+-Also called: Clone, Splitting Mechanics and Density Preservation
++Also called: Clone, Split, ADC
+ 
+ ## Overview
+-Adaptive Density Control (ADC) is a densification strategy used during the optimization of 3D Gaussian Splatting (3DGS) to adjust the local density of Gaussians to match scene complexity [S1, unofficial]. It solves the problem of insufficient Gaussian coverage by either duplicating ("Cloning") small Gaussians that fail to reconstruct fine details or splitting ("Splitting") large Gaussians that over-cover regions [S1, unofficial]. It is distinguished from its siblings by its dual-mode approach: [3DGS Adaptive Density Control](7847-3dgs-adaptive-density-control.md) uses the standard split-and-clone mechanism, while [Density-preserving Gaussian splitting](9290-density-preserving-gaussian-splitting.md) focuses on preserving integrated density during the split operation.
++Adaptive Density Control (ADC) is a densification strategy used during the optimization of 3D Gaussian Splatting to adjust the local density of Gaussians to match scene complexity [S1, S2, unofficial]. It solves the problem of insufficient representation in complex regions (under-densification) by either duplicating or subdividing Gaussians based on their coverage relative to the target reconstruction region [S1, unofficial]. It is distinguished from its siblings by its dual-mode approach: it explicitly clones Gaussians that are too small to cover a region and splits those that are too large, whereas variants like [Density-preserving Gaussian splitting](9290-density-preserving-gaussian-splitting.md) or [3DGS Adaptive Density Control](7847-3dgs-adaptive-density-control.md) may drop the clone operation or use different sampling strategies [S2, unofficial].
+ 
+ ## How it works
+-ADC operates during the training iterations, evaluating each Gaussian's coverage relative to the target reconstruction region (often defined by the scene extent or point cloud bounds) [S1, unofficial].
+-
+-**Inputs:**
+-- Parent Gaussian $g_{mother}$ with mean $\mu_{mother}$, scale $\sigma_{mother}$, opacity $o_{mother}$, rotation $R_{mother}$, and spherical harmonic coefficients $C_{mother}$.
+-- Scene extent or bounding box defining the target reconstruction region.
+-
+-**Outputs:**
+-- Two child Gaussians $g_{child,1}$ and $g_{child,2}$ (if splitting).
+-- One child Gaussian $g_{child}$ (if cloning).
++**Inputs and Outputs:**
++*   **Input:** A set of 3D Gaussians $\{G_i\}$, each defined by mean $\mu_i$, covariance $\Sigma_i$ (or scale $\sigma_i$ and rotation $R_i$), opacity $\alpha_i$, and spherical harmonic coefficients $c_i$. A binary mask indicating which Gaussians are marked for densification.
++*   **Output:** An updated set of Gaussians where marked Gaussians are replaced by either two children (Split) or two identical copies (Clone).
+ 
+ **Data Structures:**
+-Each Gaussian is defined by:
+-- $\mu \in \mathbb{R}^3$: Mean position.
+-- $\sigma \in \mathbb{R}^3$: Scale vector (diagonal of covariance).
+-- $o \in \mathbb{R}$: Opacity.
+-- $R \in SO(3)$: Rotation matrix.
+-- $C$: Spherical Harmonic coefficients.
++Each Gaussian $G$ stores:
++*   $\mu \in \mathbb{R}^3$: Mean position.
++*   $\sigma \in \mathbb{R}^3$: Scale vector (diagonal of covariance).
++*   $q \in \mathbb{R}^4$: Rotation quaternion.
++*   $\alpha \in \mathbb{R}$: Opacity.
++*   $c \in \mathbb{R}^k$: SH coefficients.
+ 
+ **Steps:**
+-
+-1. **Evaluate Coverage:** Determine if $g_{mother}$ is "Under-Reconstruction" (too small for the detail it should cover) or "Over-Reconstruction" (too large) [S1, unofficial]. This is typically done by comparing the Gaussian's screen-space radius or world-space scale against a threshold derived from the scene extent [S2, unofficial].
+-
+-2. **Branch Decision:**
+-   - **If Under-Reconstruction (Clone):** Duplicate the parent Gaussian in place.
+-     - $\mu_{child,1} = \mu_{mother}$
+-     - $\sigma_{child,1} = \sigma_{mother}$
+-     - $o_{child,1} = o_{mother}$
+-     - $R_{child,1} = R_{mother}$
+-     - $C_{child,1} = C_{mother}$
+-     - [G] Note: Some implementations adjust opacity slightly to account for the duplication, but the standard clone is an exact copy [S2, unofficial].
+-   - **If Over-Reconstruction (Split):** Replace the parent with two children.
+-     - **Axis Selection:** Identify the principal axis with the largest scale value $\sigma_{max}$ and its corresponding unit vector $\mathbf{u}$ in the parent's local coordinate system [Parent].
+-     - **Mean Shift:** Calculate separation distance $\Delta = \alpha \sigma_{max}$, where $\alpha$ is a constant (e.g., 0.5 or 1.0, not specified in sources) [Parent].
+-       - $\mu_{child,1} = \mu_{mother} + \Delta \mathbf{u}$
+-       - $\mu_{child,2} = \mu_{mother} - \Delta \mathbf{u}$
+-     - **Density Preservation:** Compute new scales and opacities to maintain integrated density.
+-       - $\sigma_{child,1} = \sigma_{child,2} = \text{SplitAdaptation}(\sigma_{mother})$
+-       - $o_{child,1} = o_{child,2} = \text{SplitAdaptation}(o_{mother})$
+-       - [G] Standard 3DGS approximates this by dividing opacity by $\sqrt{2}$ and scaling covariance eigenvalues by a factor (often $1/\sqrt{2}$ or similar) to preserve volume [Parent].
+-     - **Inheritance:** Copy rotation and SH coefficients.
+-       - $R_{child,1} = R_{child,2} = R_{mother}$
+-       - $C_{child,1} = C_{child,2} = C_{mother}$
+-
+-3. **Pruning:** After densification, remove Gaussians with opacity below a threshold (e.g., 0.005) or excessive size [S2, unofficial].
++1.  **Evaluate Coverage:** For each Gaussian marked for densification, compare its spatial extent (coverage) against the target reconstruction region or scene extent [S1, S2, unofficial].
++2.  **Classify:**
++    *   If the Gaussian is **too small** (Under-Reconstruction), mark it for **Clone** [S1, unofficial].
++    *   If the Gaussian is **too large** (Over-Reconstruction), mark it for **Split** [S1, unofficial].
++3.  **Execute Clone:**
++    *   Create two new Gaussians $G_{c1}, G_{c2}$ identical to the parent $G_p$ in all attributes ($\mu, \sigma, q, \alpha, c$) [S1, unofficial].
++    *   [G] In some implementations, slight perturbations may be added to means to prevent exact overlap, but the core definition is duplication [S2, unofficial].
++4.  **Execute Split:**
++    *   Follow the **Splitting Mechanics and Density Preservation** [Parent] protocol:
++        *   Identify the principal axis with the largest scale $\sigma_{max}$.
++        *   Shift the means of the two children along this axis by $\Delta = \alpha_{shift} \cdot \sigma_{max}$ (where $\alpha_{shift}$ is a constant, typically 0.5 or similar, though exact value not given in sources [Parent]).
++        *   Copy rotation and SH coefficients from parent to children [Parent].
++        *   Adapt scales and opacities to preserve density [Parent].
++    *   [S2, unofficial] Note: Some variants sample child positions from the parent's distribution rather than deterministic shifts, but the standard ADC definition relies on the split mechanics described in the parent article.
+ 
+ **Parameters:**
+-- Opacity prune threshold: 0.005 [S2, unofficial].
+-- Opacity reset: 0.01 every 3000 iterations (optional, for floater removal) [S2, unofficial].
++*   **Thresholds:** The criteria for "too small" vs "too large" are relative to the scene extent or local detail size [S1, S2, unofficial]. Exact numerical thresholds are not given in the sources.
++*   **Opacity Reset:** To clear floaters, opacities may be reset to near zero (e.g., 0.01) every 3000 iterations [S2, unofficial].
+ 
+-**Edge Cases:**
+-- **Cloning Bias:** Cloning can introduce opacity bias, leading to large floater clusters if the scene extent is not well-matched to the detail size [S2, unofficial].
+-- **Thin Structures:** Removing cloning breaks thin structures (e.g., bicycle spokes) [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Opacity Bias:** Cloning introduces an opacity bias because two identical Gaussians with opacity $\alpha$ effectively contribute more density than one, potentially leading to over-reconstruction [S2, unofficial].
++*   **Floater Clusters:** Excessive cloning on scenes where the scene extent is not well-matched to the size of detail can cause large clusters of floating artifacts [S2, unofficial].
++*   **Thin Structures:** Removing cloning breaks thin structures (e.g., bicycle spokes), causing them to appear fragmented [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Split-Only Densification
+-A variant that drops the clone operation entirely, using only splitting [S2, unofficial]. If a Gaussian is marked for densification and is large, it is split into two downscaled children sampled from the parent's distribution. If it is small, it applies a geometrically more meaningful split procedure (e.g., from Deng et al.) instead of cloning [S2, unofficial]. This approach avoids the opacity bias and floater clusters associated with cloning but requires careful handling of small Gaussians [S2, unofficial].
++A variant that drops the clone operation entirely, using only splitting [S2, unofficial]. If a Gaussian is marked for densification and is large, it is split into two downscaled children sampled from the parent's distribution [S2, unofficial]. If it is small, it applies a geometrically more meaningful split procedure (e.g., from Deng et al.) rather than cloning [S2, unofficial]. This approach avoids the opacity bias and floater clusters associated with cloning but requires careful handling of small Gaussians [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear in the number of Gaussians per iteration, as each Gaussian is evaluated and potentially replaced by one or two children.
+-- **Memory Complexity:** Increases as the number of Gaussians grows. Cloning doubles the count for under-reconstructed regions; splitting doubles it for over-reconstructed regions.
+-- **Performance:** On the Average-30K dataset, full ADC achieves PSNR 26.05. Removing splitting drops PSNR to 23.90, while removing cloning drops it to 25.91 [S1, unofficial]. This indicates splitting has a larger impact on overall quality, particularly background reconstruction, while cloning is critical for thin structures [S1, unofficial].
+-- **Strengths:** Adapts Gaussian density to local detail, improving reconstruction fidelity.
+-- **Limitations:** Cloning can cause floater artifacts if not managed; splitting can be computationally expensive if over-applied.
++*   **Time Complexity:** Linear with respect to the number of marked Gaussians. Cloning is $O(1)$ per Gaussian; Splitting is $O(1)$ but involves more arithmetic for scale/rotation adaptation.
++*   **Memory Complexity:** Increases the total number of Gaussians, doubling the count for cloned/split items.
++*   **Performance:** On the Average-30K dataset, the full method achieves a PSNR of 26.05 [S1, unofficial]. Removing Split drops PSNR to 23.90, while removing Clone drops it to 25.91 [S1, unofficial]. This indicates Split has a larger impact on overall image quality, particularly background coherence, while Clone is critical for thin structures [S1, unofficial].
++*   **Strengths:** Effectively handles both under-densified (small detail) and over-densified (blurry) regions [S1, unofficial].
++*   **Limitations:** Cloning can introduce opacity bias and floaters if scene extent estimation is poor [S2, unofficial].
+ 
+ ## Background
+-Adaptive Density Control was introduced in the original 3D Gaussian Splatting paper [S1, unofficial]. It is a core component of the training optimization loop, allowing the model to dynamically adjust its representation capacity. The method builds on the principle that a fixed number of Gaussians is insufficient for complex scenes, necessitating densification strategies [S1, unofficial].
++The method was introduced in the original 3D Gaussian Splatting paper (Kerbl et al., 2023) as "Adaptive Density Control" [S1, unofficial]. It is a core component of the training optimization loop, allowing the static set of initial Gaussians to adapt to the geometric and textural complexity of the scene during differentiable rendering optimization [S1, unofficial].
+ 
+ ## Sources

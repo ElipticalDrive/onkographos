@@ -1,0 +1,316 @@
+python - Matplotlib render all internal voxels (with alpha) - Stack Overflow
+By using our site, you acknowledge that you have read and understand our Cookie Policy, Privacy Policy, and our Terms of Service.
+Matplotlib render all internal voxels (with alpha)
+Ask Question
+3
+2
+I want to render a volume in matplotlib. The volume is a simple 7x7x7 cube, and I want to be able to see all internal voxels (even though I know it will look like a mess).
+I've been able to render voxels with transparency, but any voxel not on the surface seems to never be drawn.
+Each 7x7 slice of the volume should look like this:
+I've thrown together a MWE
+The following code creates a 5x5x5 volume with a red,green,blue,yellow, and cyan 5x5 layers. The alpha of each layer is set to .5, so the whole thing should be see-through.
+Then I chang the colors of all non-surface voxels to black with alpha 1, so if they were showing we should be able to see a black box in the center.
+Rendering it by itself produces the figure on the left, but if we remove the fill from the cyan layer, we can see that the black box does indeed exist, it is just not being shown because it is 100% occluded even though those occluding voxels have alpha less than 1.
+```
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # NOQA
+
+spatial_axes = [5, 5, 5]
+filled = np.ones(spatial_axes, dtype=np.bool)
+
+colors = np.empty(spatial_axes + [4], dtype=np.float32)
+alpha = .5
+colors[0] = [1, 0, 0, alpha]
+colors[1] = [0, 1, 0, alpha]
+colors[2] = [0, 0, 1, alpha]
+colors[3] = [1, 1, 0, alpha]
+colors[4] = [0, 1, 1, alpha]
+
+# set all internal colors to black with alpha=1
+colors[1:-1, 1:-1, 1:-1, 0:3] = 0
+colors[1:-1, 1:-1, 1:-1, 3] = 1
+
+fig = plt.figure()
+
+ax = fig.add_subplot('111', projection='3d')
+ax.voxels(filled, facecolors=colors, edgecolors='k')
+
+fig = plt.figure()
+ax = fig.add_subplot('111', projection='3d')
+filled[-1] = False
+ax.voxels(filled, facecolors=colors, edgecolors='k')
+```
+Is there any way to render all occluded voxels?
+python matplotlib
+share|improve this question
+asked Feb 7 '18 at 20:25
+ErotemicErotemic
+1,72733 gold badges1919 silver badges5050 bronze badges
+1
+Did you look at the official example? It doesn't seem to have this problem, due to some small offsets between the voxels.
+– ImportanceOfBeingErnest
+Feb 7 '18 at 20:33
+1
+In general, this issue is still being discussed: github.com/matplotlib/matplotlib/issues/9745
+– ImportanceOfBeingErnest
+Feb 7 '18 at 20:37
+1
+Also, you may always just plot all voxels as in this question or this one.
+– ImportanceOfBeingErnest
+Feb 7 '18 at 20:45
+Ah, I guess you can see them all in the official example, on first glance it looked like you could not. The other answers also look promising. Thanks.
+– Erotemic
+Feb 7 '18 at 21:04
+add a comment |
+1 Answer
+1
+active
+oldest
+votes
+2
+To turn my comments above into an answer:
+You may always just plot all voxels as in
+Representing voxels with matplotlib
+3D discrete heatmap in matplotlib
+The official example solves this problem by offsettingt the faces of the voxels by a bit, such they are all drawn.
+This matplotlib issue discusses the missing faces on internal cubes. There is a pull request which has some issues still and it hence not merged yet.
+Despite the small issues, you may monkey patch the current status of the pull request into your code:
+```
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D, art3d  # NOQA
+from matplotlib.cbook import _backports
+from collections import defaultdict
+import types
+
+def voxels(self, *args, **kwargs):
+
+    if len(args) >= 3:
+        # underscores indicate position only
+        def voxels(__x, __y, __z, filled, **kwargs):
+            return (__x, __y, __z), filled, kwargs
+    else:
+        def voxels(filled, **kwargs):
+            return None, filled, kwargs
+
+    xyz, filled, kwargs = voxels(*args, **kwargs)
+
+    # check dimensions
+    if filled.ndim != 3:
+        raise ValueError("Argument filled must be 3-dimensional")
+    size = np.array(filled.shape, dtype=np.intp)
+
+    # check xyz coordinates, which are one larger than the filled shape
+    coord_shape = tuple(size + 1)
+    if xyz is None:
+        x, y, z = np.indices(coord_shape)
+    else:
+        x, y, z = (_backports.broadcast_to(c, coord_shape) for c in xyz)
+
+    def _broadcast_color_arg(color, name):
+        if np.ndim(color) in (0, 1):
+            # single color, like "red" or [1, 0, 0]
+            return _backports.broadcast_to(
+                color, filled.shape + np.shape(color))
+        elif np.ndim(color) in (3, 4):
+            # 3D array of strings, or 4D array with last axis rgb
+            if np.shape(color)[:3] != filled.shape:
+                raise ValueError(
+                    "When multidimensional, {} must match the shape of "
+                    "filled".format(name))
+            return color
+        else:
+            raise ValueError("Invalid {} argument".format(name))
+
+    # intercept the facecolors, handling defaults and broacasting
+    facecolors = kwargs.pop('facecolors', None)
+    if facecolors is None:
+        facecolors = self._get_patches_for_fill.get_next_color()
+    facecolors = _broadcast_color_arg(facecolors, 'facecolors')
+
+    # broadcast but no default on edgecolors
+    edgecolors = kwargs.pop('edgecolors', None)
+    edgecolors = _broadcast_color_arg(edgecolors, 'edgecolors')
+
+    # include possibly occluded internal faces or not
+    internal_faces = kwargs.pop('internal_faces', False)
+
+    # always scale to the full array, even if the data is only in the center
+    self.auto_scale_xyz(x, y, z)
+
+    # points lying on corners of a square
+    square = np.array([
+        [0, 0, 0],
+        [0, 1, 0],
+        [1, 1, 0],
+        [1, 0, 0]
+    ], dtype=np.intp)
+
+    voxel_faces = defaultdict(list)
+
+    def permutation_matrices(n):
+        """ Generator of cyclic permutation matices """
+        mat = np.eye(n, dtype=np.intp)
+        for i in range(n):
+            yield mat
+            mat = np.roll(mat, 1, axis=0)
+
+    for permute in permutation_matrices(3):
+        pc, qc, rc = permute.T.dot(size)
+        pinds = np.arange(pc)
+        qinds = np.arange(qc)
+        rinds = np.arange(rc)
+
+        square_rot = square.dot(permute.T)
+
+        for p in pinds:
+            for q in qinds:
+                p0 = permute.dot([p, q, 0])
+                i0 = tuple(p0)
+                if filled[i0]:
+                    voxel_faces[i0].append(p0 + square_rot)
+
+                # draw middle faces
+                for r1, r2 in zip(rinds[:-1], rinds[1:]):
+                    p1 = permute.dot([p, q, r1])
+                    p2 = permute.dot([p, q, r2])
+                    i1 = tuple(p1)
+                    i2 = tuple(p2)
+                    if filled[i1] and (internal_faces or not filled[i2]):
+                        voxel_faces[i1].append(p2 + square_rot)
+                    elif (internal_faces or not filled[i1]) and filled[i2]:
+                        voxel_faces[i2].append(p2 + square_rot)
+
+                # draw upper faces
+                pk = permute.dot([p, q, rc-1])
+                pk2 = permute.dot([p, q, rc])
+                ik = tuple(pk)
+                if filled[ik]:
+                    voxel_faces[ik].append(pk2 + square_rot)
+
+    # iterate over the faces, and generate a Poly3DCollection for each voxel
+    polygons = {}
+    for coord, faces_inds in voxel_faces.items():
+        # convert indices into 3D positions
+        if xyz is None:
+            faces = faces_inds
+        else:
+            faces = []
+            for face_inds in faces_inds:
+                ind = face_inds[:, 0], face_inds[:, 1], face_inds[:, 2]
+                face = np.empty(face_inds.shape)
+                face[:, 0] = x[ind]
+                face[:, 1] = y[ind]
+                face[:, 2] = z[ind]
+                faces.append(face)
+
+        poly = art3d.Poly3DCollection(faces,
+            facecolors=facecolors[coord],
+            edgecolors=edgecolors[coord],
+            **kwargs
+        )
+        self.add_collection3d(poly)
+        polygons[coord] = poly
+
+    return polygons
+
+
+
+spatial_axes = [5, 5, 5]
+filled = np.ones(spatial_axes, dtype=np.bool)
+
+colors = np.empty(spatial_axes + [4], dtype=np.float32)
+alpha = .5
+colors[0] = [1, 0, 0, alpha]
+colors[1] = [0, 1, 0, alpha]
+colors[2] = [0, 0, 1, alpha]
+colors[3] = [1, 1, 0, alpha]
+colors[4] = [0, 1, 1, alpha]
+
+# set all internal colors to black with alpha=1
+colors[1:-1, 1:-1, 1:-1, 0:3] = 0
+colors[1:-1, 1:-1, 1:-1, 3] = 1
+
+fig = plt.figure()
+
+ax = fig.add_subplot('111', projection='3d')
+ax.voxels = types.MethodType(voxels, ax)
+ax.voxels(filled, facecolors=colors, edgecolors='k',internal_faces=True)
+
+fig = plt.figure()
+ax = fig.add_subplot('111', projection='3d')
+ax.voxels = types.MethodType(voxels, ax)
+filled[-1] = False
+ax.voxels(filled, facecolors=colors, edgecolors='k',internal_faces=True)
+
+plt.show()
+```
+share|improve this answer
+answered Feb 7 '18 at 21:42
+ImportanceOfBeingErnestImportanceOfBeingErnest
+157k1515 gold badges197197 silver badges284284 bronze badges
+add a comment |
+Not the answer you're looking for? Browse other questions tagged python matplotlib or ask your own question.
+asked
+1 year, 5 months ago
+viewed
+1,313 times
+active
+1 year, 5 months ago
+Blog
+Google got Looker. Salesforce bought Tableau. But open source tools are…
+What a very bad day at work taught me about building Stack Overflow’s community
+Featured on Meta
+Custom Filters release announcement
+Unicorn Meta Zoo #5: Interview with Cesar M
+UX research time! July 2019 and how people are learning and teaching code
+Linked
+9
+3D discrete heatmap in matplotlib
+5
+Representing voxels with matplotlib
+Related
+1
+Lines do not render on an offscreen frame buffer with a completely black texture
+5
+Efficient way to plotting multiple images with many patches in matplotlib?
+2
+How to directly set alpha channel value for matplotlib figure background colour
+1
+Batch matplotlib scripts don't save axes
+3
+Basic 3D voxel grid in Mayavi
+1
+Checking if point inside a cone - values and as a result plot (with matplotlib) inaccurate
+1
+Python: matplotlib/pandas - Plotting a dataframe as a table in a subplot
+1
+Verification of 3D Fractal Slice-Rendering Method
+Hot Network Questions
+Are there foods that astronauts are explicitly never allowed to eat?
+What is the name for the average of the largest and the smallest values in a given data set?
+Demographic consequences of closed loop reincarnation
+What would be the safest way to drop thousands of small, hard objects from a typical, high wing, GA airplane?
+Company looks for long-term employees, but I know I won't be interested in staying long
+A spacecraft is travelling at X units per hour. But relative to what exactly? Does it depend on orbit? How?
+How to belay quickly ascending top-rope climbers?
+What's a German word for »Sandbagger«?
+Inside Out and Back to Front
+How many opportunity attacks can you make per turn before becoming exhausted?
+How should I interpret a promising preprint that was never published in a peer-reviewed journal?
+Adding repository via terminal results in "add-apt: command not found" error
+Align the contents of a numerical matrix when you have minus signs
+Does unblocking power bar outlets through short extension cords increase fire risk?
+What is a Romeo Word™?
+Draw parts of a split rectangle in a dashed/dotted style
+Are there any satellites in geosynchronous but not geostationary orbits?
+How can I help our ranger feel special about her beast companion?
+"This used to be my phone number"
+How important are the Author's mood and feelings for writing a story?
+How to tell readers that I know my story is factually incorrect?
+Why could my DDQN get significantly worse after beating the game repeatedly?
+"Je suis petite, moi?", purpose of the "moi"?
+Integration using partial fraction is wrong
+more hot questions
+Question feed
+lang-py

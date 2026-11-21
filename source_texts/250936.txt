@@ -1,0 +1,282 @@
+Feature: Render a Preview Video of the Trained Gaussian Splat Context splatter-server is a GPU-accelerated compute node running on the Real World Web. It has the /splatter/colmap/v1 capability and receives training jobs from DMS (Domain ...
+
+[Bounty | 50 USD] Generate preview a video as additional output artifacts for the splatter node · Issue #6 · aukilabs/splatter-server · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Bounty | 50 USD] Generate preview a video as additional output artifacts for the splatter node #6
+New issue
+Copy link
+New issue
+Copy link
+Open
+#20
+#14
+Open
+[Bounty | 50 USD] Generate preview a video as additional output artifacts for the splatter node#6
+#20
+#14
+Copy link
+Description
+arshak93
+opened on Feb 13, 2026
+Issue body actions
+Feature: Render a Preview Video of the Trained Gaussian Splat
+Context
+splatter-server is a GPU-accelerated compute node running on the Real World Web. It has the /splatter/colmap/v1 capability and receives training jobs from DMS (Domain Management Service). When a job arrives, the Rust server downloads input assets from DDS (Domain Data Service), runs a Python-based training pipeline, and uploads the resulting .splat file back to the domain.
+Current Pipeline
+The training pipeline (run.py) executes the following steps in order:
+Step
+Tool / Script
+Description
+1
+extract_mp4.py
+Extracts individual JPEG frames from input Frames.mp4 video recordings
+2
+ns-process-data
+Converts COLMAP binary data (cameras.bin, images.bin, points3D.bin) into nerfstudio format
+3
+ns-train splatfacto
+Trains a 3D Gaussian Splatting model using nerfstudio's splatfacto method
+4
+ns-export gaussian-splat
+Exports the trained model as a .ply point cloud
+5
+rotate_ply.py
+Applies a coordinate-system transformation (rotation) to the exported PLY
+6
+convert_ply2splat.py
+Converts the rotated .ply to the final .splat binary format
+Inputs
+The job receives a CID pointing to a refined manifest JSON containing dataIDs that reference:
+Video recordings — dmt_recording_*.mp4 files (one or more MP4 videos of the scene)
+COLMAP binaries — pre-computed SfM data (cameras.bin, images.bin, points3D.bin, frames.bin, rigs.bin)
+```
+{job_root_path}/
+├── datasets/
+│   └── {dataset}/
+│       └── Frames.mp4
+└── refined/
+    └── global/
+        └── refined_sfm_combined/
+            ├── cameras.bin
+            ├── images.bin
+            └── points3D.bin
+```
+Current Outputs
+```
+{job_root_path}/
+└── refined/
+    ├── nerfstudio-data/          # converted nerfstudio dataset
+    └── splatter/
+        ├── splat.ply             # raw exported Gaussian Splat
+        ├── splat_rot.ply         # coordinate-transformed splat
+        ├── splat_rot.splat       # final .splat file (uploaded to domain as "splat_data")
+        └── splatfacto/
+            └── config.yml        # nerfstudio model config + checkpoint
+```
+Only splat_rot.splat is uploaded back to the domain as a splat_data artifact. There is currently no visual preview — neither image nor video — of the trained result.
+Feature Request
+Goal
+After training completes, render a short preview video of the trained Gaussian Splat and include it in the pipeline output. The video should be uploaded to the domain alongside the .splat file so that users and downstream services can visually assess training quality and spatial coverage without loading the full splat in an interactive viewer.
+Proposed Approach
+Insert a new step after training and export (after Step 4 or after Step 6) that renders a preview video:
+Use nerfstudio's built-in rendering — ns-render supports rendering along camera paths from a trained model checkpoint. Since the splatfacto config and checkpoint are already on disk at {job_root_path}/refined/splatter/splatfacto/config.yml, the renderer can be invoked directly.
+Generate an orbital camera path around the splat — The preview video should give a complete overview of the trained scene:
+Compute the bounding box (or centroid + extent) of the splat's point cloud from the exported splat.ply.
+Generate a 360° orbit (or 270° arc) camera path that circles around the centroid at an elevated angle (~30–45° above the horizontal plane), with a radius large enough to frame the full scene.
+The orbit should be smooth, with the camera always looking at the centroid.
+Target duration: 5–10 seconds at 30 fps (150–300 frames). Keep it short to limit GPU render time and file size.
+Use nerfstudio's camera-path JSON format or programmatically construct the path as a sequence of Cameras poses.
+Encode the video — ns-render outputs individual frames to a directory. Encode them into an MP4 using ffmpeg (already available in the nerfstudio Docker image):
+```
+ffmpeg -y -framerate 30 -i {frames_dir}/%05d.png \
+  -c:v libx264 -pix_fmt yuv420p -crf 23 \
+  -movflags +faststart \
+  {job_root_path}/refined/splatter/preview.mp4
+```
+Use -crf 23 for a good quality/size balance and -movflags +faststart for web-friendly streaming.
+Save the preview video — Write the encoded video to the output directory:
+```
+{job_root_path}/refined/splatter/preview.mp4
+```
+Upload the preview — In the Rust runner (runner/src/lib.rs), after uploading splat_rot.splat, upload the preview video as an additional domain artifact (e.g., with data_type: "splat_preview_video" and name refined_splat_preview_video{suffix}).
+Clean up intermediate frames — Delete the temporary rendered frame images after encoding to avoid bloating the task workspace.
+Expected Changes
+run.py — Add a new pipeline step that:
+Computes the splat bounding box / centroid from splat.ply.
+Generates an orbital camera-path JSON.
+Invokes ns-render to render frames along that path.
+Encodes frames into preview.mp4 via ffmpeg.
+Cleans up temporary frame images.
+runner/src/lib.rs — After the existing put_domain_artifact call for the .splat file, add another upload for the preview video. Include the preview video path in the final progress JSON payload.
+README.md — Update the "Output Files" section to document the new preview.mp4 artifact.
+Updated Output Structure
+```
+{job_root_path}/
+└── refined/
+    └── splatter/
+        ├── splat.ply
+        ├── splat_rot.ply
+        ├── splat_rot.splat           # uploaded as "splat_data"
+        ├── preview.mp4               # NEW — uploaded as "splat_preview_video"
+        └── splatfacto/
+            └── config.yml
+```
+Performance Considerations
+Rendering 150–300 frames of a Gaussian Splat is fast on GPU (typically a few minutes), but should be profiled to ensure it doesn't significantly extend total job time.
+The resulting MP4 at 1080p with CRF 23 should be in the range of 2–10 MB — acceptable for upload.
+If render time is a concern, reduce resolution to 720p or lower the frame count (e.g., 90 frames = 3 seconds).
+Acceptance Criteria
+After a successful training run, a preview video (MP4) is rendered from the trained Gaussian Splat model.
+The camera follows a smooth orbital path around the splat at an elevated angle (~30–45°), looking at the scene centroid, covering at least 270° of rotation.
+The video is 5–10 seconds long at 30 fps, encoded as H.264 MP4 with web-friendly flags.
+The preview video is saved to {job_root_path}/refined/splatter/preview.mp4.
+The preview video is uploaded to the domain as an artifact with a distinguishable name and data_type (e.g., splat_preview_video).
+The final progress JSON emitted by the runner includes the preview video artifact path/name.
+Temporary rendered frames are cleaned up after encoding.
+The pipeline does not fail the entire job if preview video rendering or encoding fails — this should be best-effort with a warning log.
+README and output documentation are updated to reflect the new artifact.
+Activity
+CelebrityPunks
+added a commit that references this issue on Mar 13, 2026
+feat: render orbital preview video after Gaussian Splat training
+...
+This issue will close once commit 3f776b9 is merged into the 'develop' branch.
+3f776b9
+justinleeyang commented on Mar 14, 2026
+justinleeyang
+on Mar 14, 2026
+More actions
+I can take this bounty as well. Plan: generate an orbital camera path from splat bounds, render frames via ns-render, encode preview.mp4 with ffmpeg, upload artifact, and document outputs. Please confirm any runtime constraints and acceptable duration/resolution.
+justinleeyang commented on Mar 15, 2026
+justinleeyang
+on Mar 15, 2026
+More actions
+I opened PR #16 with preview renders (top/angle images + orbit video) and runner uploads. Feedback welcome.
+justinleeyang commented on Mar 20, 2026
+justinleeyang
+on Mar 20, 2026
+More actions
+I can take bounty #6. I will start with a scoped implementation plan and confirm any required runtime constraints.
+If this bounty is still unclaimed, I can start immediately. Please confirm claim status and acceptance criteria.
+justinleeyang commented on Mar 20, 2026
+justinleeyang
+on Mar 20, 2026
+More actions
+Quick follow-up on #6: I am still actively working on this. Please let me know if you want me to narrow scope to a smaller first PR.
+justinleeyang commented on Mar 20, 2026
+justinleeyang
+on Mar 20, 2026
+More actions
+Quick follow-up on #6: I am still actively working on this. Please let me know if you want me to narrow scope to a smaller first PR.
+justinleeyang commented on Mar 20, 2026
+justinleeyang
+on Mar 20, 2026
+More actions
+Quick follow-up on #6: I am still actively working on this. Please let me know if you want me to narrow scope to a smaller first PR.
+justinleeyang commented on Mar 20, 2026
+justinleeyang
+on Mar 20, 2026
+More actions
+Quick follow-up on #6: I am still actively working on this. Please let me know if you want me to narrow scope to a smaller first PR.
+justinleeyang commented on Mar 21, 2026
+justinleeyang
+on Mar 21, 2026
+More actions
+Quick follow-up on #6: I am still actively working on this. Please let me know if you want me to narrow scope to a smaller first PR.
+justinleeyang commented on Mar 21, 2026
+justinleeyang
+on Mar 21, 2026
+More actions
+No maintainer response yet on #6, I will switch to another open bounty for now and can resume this issue anytime when feedback arrives.
+HuiNeng6
+added a commit that references this issue on Mar 24, 2026
+feat: add preview video rendering for Gaussian Splat
+...
+This issue will close once commit 9b8025f is merged into the 'develop' branch.
+9b8025f
+HuiNeng6 commented on Mar 25, 2026
+HuiNeng6
+on Mar 25, 2026
+More actions
+👋 Hi! I've submitted a solution for this bounty in PR #20 which implements:
+Orbital preview video generation
+Configurable video duration and FPS
+Integration with the training pipeline
+Combined solution for both Issue #5 and #6 ( total bounty).
+Would appreciate a review when you have time! 🙏
+HuiNeng6 commented on Mar 25, 2026
+HuiNeng6
+on Mar 25, 2026
+More actions
+🔔 Priority Claim for Preview Video Bounty
+I have submitted PR #20 with a comprehensive solution for both Issue #5 and Issue #6.
+My Submission
+PR [Bounty] Add preview images and video rendering for Gaussian Splat #20: Preview images + video rendering (803 lines added)
+Combined Bounty Value: USD ( + )
+Why My PR Stands Out
+Complete Video Implementation:
+✅ 360° orbital camera path at 35° elevation
+✅ Smooth 5-second video at 30fps (150 frames)
+✅ Camera always looking at scene centroid
+✅ ffmpeg encoding with web-friendly flags
+✅ H.264 codec with CRF 23 for quality/size balance
+✅ -movflags +faststart\ for web streaming
+✅ Proper cleanup of intermediate frames
+✅ Best-effort rendering (non-fatal pipeline)
+Additional Value:
+Also includes preview images from Issue [Bounty | 50 USD] Generate preview images as additional output artifacts for the splatter node #5
+Single unified solution for both bounties
+Complete README documentation
+I respectfully request the maintainer to evaluate all submissions fairly based on code completeness, feature coverage, and integration quality.
+Thank you! 🙏
+zhaog100 commented on Mar 25, 2026
+zhaog100
+on Mar 25, 2026
+More actions
+/attempt
+alexanderxfgl-bit commented on Apr 22, 2026
+alexanderxfgl-bit
+on Apr 22, 2026
+More actions
+/attempt
+zhaog100 commented on May 16, 2026
+zhaog100
+on May 16, 2026
+More actions
+Claiming this bounty. I will work on the preview video generation feature and submit a PR.
+zhaog100
+added a commit that references this issue on May 16, 2026
+feat: Add preview image and video generation for splatter node
+...
+This issue will close once commit 5923af5 is merged into the 'develop' branch.
+5923af5
+zhaog100 commented on May 19, 2026
+zhaog100
+on May 19, 2026
+More actions
+Claiming this bounty
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

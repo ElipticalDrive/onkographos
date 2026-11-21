@@ -1,0 +1,55 @@
+# 3D Gaussian Splatting —— 无 GPU 环境的 CPU 复现
+
+复现 Kerbl et al., *3D Gaussian Splatting for Real-Time Radiance Field Rendering*
+(SIGGRAPH 2023)，官方代码 [`graphdeco-inria/gaussian-splatting`](https://github.com/graphdeco-inria/gaussian-splatting)。
+
+**本机没有 NVIDIA GPU**（只有 Intel UHD 核显，无 nvcc，`torch.cuda.is_available() == False`），
+因此官方 CUDA 光栅器**物理上无法编译也无法运行**。本复现的做法是：
+
+> **官方 `train.py` / `render.py` / `metrics.py` 一个字节都不改**，
+> 只把两个算法性的 CUDA 扩展替换为纯 PyTorch CPU 实现，
+> 并用一个启动期 shim 把与算法无关的 `device="cuda"` 调用重定向到 CPU。
+
+验证：`git -C gaussian-splatting status --porcelain` 输出为空。
+
+---
+
+## 结果
+
+**渲染图（左：本复现，右：真值）—— 浅蓝色木质平板卡车清晰可辨：**
+
+![渲染 vs 真值](notes/montage_train_15000.png)
+
+主模型（**train 划分**，iteration 15000，245×136）：
+
+| 指标（245×136，iteration 15000，train 划分 251 视图） | K=256（交付口径） | K=1024（更忠实口径） |
+|---|---|---|
+| PSNR | **17.63** | **17.85** |
+| SSIM | **0.594** | **0.637** |
+| LPIPS | **0.414** | **0.351** |
+| 高斯数量 | 87,475 | 同一检查点 |
+| 训练耗时 | ≈3.4 h（CPU，8 线程） | 仅重渲染：2.1 min |
+
+> 两列之差的原因见下面的《一处更正》。
+
+**但 train 划分是乐观偏置的上界，不能拿去和论文比。** 与论文同口径的是独立留出
+协议（`--eval`，每 8 张留 1 张；**官方默认致密化参数**；7000 次迭代；245×136）。
+下表同时给出两个渲染口径——`K_MAX=1024` 是消除 tile 截断后的更忠实口径
+（原因见下面的"一处更正"）：
+
+| 划分 | 视图 | K_MAX | PSNR↑ | SSIM↑ | LPIPS↓ |
+|---|---|---|---|---|---|
+| train | 219 | 256 | 16.0572 | 0.5645 | 0.4368 |
+| **test（留出）** | **32** | 256 | **15.2789** | **0.5235** | **0.4639** |
+| *train − test 间隙* | | *256* | *−0.778 dB* | *−0.041* | *+0.027* |
+| train | 219 | 1024 | 16.0359 | 0.5951 | 0.3807 |
+| **test（留出）** | **32** | **1024** | **15.3970** | **0.5674** | **0.3991** |
+| *train − test 间隙* | | *1024* | *−0.639 dB* | *−0.028* | *+0.018* |
+
+论文 Table 1 的 Tanks&Temples 平均值为 PSNR 23.14 / SSIM 0.841 / LPIPS 0.183
+（30K 迭代，RTX 3090，约 27 分钟）。与留出集相差约 **7.7 dB**。
+
+**这 7.7 dB 归给容量，不归给泛化。** 同一次运行内 train 与 test 只差
+0.64–0.78 dB：模型在**没见过的**相机上和见过的相机上几乎一样吃力——这是
+**欠拟合**的特征，而不是过拟合。根因是"无 GPU"导致的模型容量与迭代预算压缩，
+而非算法简化——完整分析见 [`notes/results.md`](notes/results.md) 第 2.2 节。

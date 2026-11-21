@@ -1,0 +1,273 @@
+opengl - How to handle incorrect index calculation for discretized ray tracing? - Stack Overflow
+Collectives™ on Stack Overflow
+Find centralized, trusted content and collaborate around the technologies you use most.
+Learn more about Collectives
+Teams
+Q&A for work
+Connect and share knowledge within a single location that is structured and easy to search.
+Learn more about Teams
+How to handle incorrect index calculation for discretized ray tracing?
+Ask Question
+Asked
+7 years, 8 months ago
+Modified
+7 years, 7 months ago
+Viewed
+210 times
+3
+The situation si as follows. I am trying to implement a linear voxel search in a glsl shader for efficient voxel ray tracing. In toehr words, I have a 3D texture and I am ray tracing on it but I am trying to ray trace such that I only ever check voxels intersected by the ray once.
+To this effect I have written a program with the following results:
+Not efficient but correct:
+The above image was obtained by adding a small epsilon ray multiple times and sampling from the texture on each iteration. Which produces the correct results but it's very inefficient.
+That would look like:
+```
+loop{
+     start += direction*0.01;
+     sample(start);
+}
+```
+To make it efficient I decided to instead implement the following lookup function:
+```
+float bound(float val)
+{
+    if(val >= 0)
+        return voxel_size;
+    return 0;
+}
+
+float planeIntersection(vec3 ray, vec3 origin, vec3 n, vec3 q)
+{
+    n = normalize(n);
+    if(dot(ray,n)!=0)
+        return (dot(q,n)-dot(n,origin))/dot(ray,n);
+
+    return -1;
+}
+
+vec3 get_voxel(vec3 start, vec3 direction)
+{
+    direction = normalize(direction);
+
+    vec3 discretized_pos = ivec3((start*1.f/(voxel_size))) * voxel_size;
+
+    vec3 n_x = vec3(sign(direction.x), 0,0);
+    vec3 n_y = vec3(0, sign(direction.y),0);    
+    vec3 n_z = vec3(0, 0,sign(direction.z));
+
+    float bound_x, bound_y, bound_z;
+
+    bound_x = bound(direction.x);
+    bound_y = bound(direction.y);
+    bound_z = bound(direction.z);
+
+    float t_x, t_y, t_z;
+
+    t_x = planeIntersection(direction, start, n_x, 
+        discretized_pos+vec3(bound_x,0,0));
+
+    t_y = planeIntersection(direction, start, n_y, 
+        discretized_pos+vec3(0,bound_y,0));
+
+    t_z = planeIntersection(direction, start, n_z, 
+        discretized_pos+vec3(0,0,bound_z));
+
+    if(t_x < 0)
+        t_x = 1.f/0.f;
+    if(t_y < 0)
+        t_y = 1.f/0.f;
+    if(t_z < 0)
+        t_z = 1.f/0.f;
+
+    float t = min(t_x, t_y);
+    t = min(t, t_z);
+
+    return start + direction*t;
+}
+```
+Which produces the following result:
+Notice the triangle aliasing on the left side of some surfaces.
+It seems this aliasing occurs because some coordinates are not being set to their correct voxel.
+For example modifying the truncation part as follows:
+```
+vec3 discretized_pos = ivec3((start*1.f/(voxel_size)) - vec3(0.1)) * voxel_size;
+```
+Creates:
+So it has fixed the issue for some surfaces and caused it for others.
+I wanted to know if there is a way in which I can correct this truncation so that this error does not happen.
+Update:
+I have narrowed down the issue a bit. Observe the following image:
+The numbers represent the order in which I expect the boxes to be visited.
+As you can see for some of the points the sampling of the fifth box seems to be ommitted.
+The following is the sampling code:
+```
+vec4 grabVoxel(vec3 pos)
+{
+
+    pos *= 1.f/base_voxel_size;
+
+    pos.x /= (width-1);
+    pos.y /= (depth-1);
+    pos.z /= (height-1);
+    vec4 voxelVal = texture(voxel_map, pos);
+
+    return voxelVal;
+}
+```
+opengl
+glsl
+textures
+raytracing
+Share
+Improve this question
+Follow
+edited Mar 12, 2018 at 19:59
+asked Mar 10, 2018 at 22:09
+Makogan
+9,9611313 gold badges6969 silver badges171171 bronze badges
+Add a comment
+|
+1 Answer 1
+Sorted by:
+Reset to default
+Highest score (default)
+Trending (recent votes count more)
+Date modified (newest first)
+Date created (oldest first)
+3
+yep that was the +/- rounding I was talking about in my comments somewhere in your previous questions related to this. What you need to do is having step equal to grid size in one of the axises (and test 3 times once for |dx|=1 then for |dy|=1 and lastly |dz|=1).
+Also you should create a debug draw 2D slice through your map to actually see where the hits for a single specific test ray occurred. Now based on direction of ray in each axis you set the rounding rules separately. Without this you are just blindly patching one case and corrupting other two ...
+Now actually Look at this (I linked it to your before but you clearly did not):
+Wolf and Doom ray casting techniques
+especially pay attention to:
+On the right It shows you how to compute the ray step (your epsilon). You simply scale the ray direction so one of the coordinate is +/-1. For simplicity start with 2D slice through your map. The red dot is ray start position. Green is ray step vector for vertical grid lines hits and red is for horizontal grid lines hits (z will be analogically the same).
+Now you should add the 2D overview of your map through some height slice that is visible (like on the image on the left) add a dot or marker to each intersection detected but distinguish between x,y and z hits by color. Do this for single ray only (I use the center of view ray). Fist handle view when you look at X+ directions than X- and when done move to Y,Z ...
+In my GLSL volumetric 3D back raytracer I also linked you before look at these lines:
+```
+if (dir.x<0.0) { p+=dir*(((floor(p.x*n)-_zero)*_n)-ray_pos.x)/dir.x; nnor=vec3(+1.0,0.0,0.0); }
+if (dir.x>0.0) { p+=dir*((( ceil(p.x*n)+_zero)*_n)-ray_pos.x)/dir.x; nnor=vec3(-1.0,0.0,0.0); }
+
+if (dir.y<0.0) { p+=dir*(((floor(p.y*n)-_zero)*_n)-ray_pos.y)/dir.y; nnor=vec3(0.0,+1.0,0.0); }
+if (dir.y>0.0) { p+=dir*((( ceil(p.y*n)+_zero)*_n)-ray_pos.y)/dir.y; nnor=vec3(0.0,-1.0,0.0); }
+
+if (dir.z<0.0) { p+=dir*(((floor(p.z*n)-_zero)*_n)-ray_pos.z)/dir.z; nnor=vec3(0.0,0.0,+1.0); }
+if (dir.z>0.0) { p+=dir*((( ceil(p.z*n)+_zero)*_n)-ray_pos.z)/dir.z; nnor=vec3(0.0,0.0,-1.0); }
+```
+they are how I did this. As you can see I use different rounding/flooring rule for each of the 6 cases. This way you handle case without corrupting the other. The rounding rule depends on a lot of stuff like how is your coordinate system offseted to (0,0,0) and more so it might be different in your code but the if conditions should be the same. Also as you can see I am handling this by offsetting the ray start position a bit instead of having these conditions inside the ray traversal loop castray.
+That macro cast ray and look for intersections with grid and on top of that actually zsorts the intersections and use the first valid one (that is what l,ll are for and no other conditions or combination of ray results are needed). So my way of deal with this is cast ray for each type of intersection (x,y,z) starting on the first intersection with the grid for the same axis. You need to take into account the starting offset so the l,ll resembles the intersection distance to real start of ray not to offseted one ...
+Also a good idea is to do this on CPU side first and when 100% working port to GLSL as in GLSL is very hard to debug things like this.
+Share
+Improve this answer
+Follow
+edited Mar 11, 2018 at 11:23
+answered Mar 11, 2018 at 9:16
+Spektre
+52.2k1212 gold badges125125 silver badges412412 bronze badges
+Sign up to request clarification or add additional context in comments.
+7 Comments
+Add a comment
+Makogan
+Makogan Over a year ago
+I have tried through all methods to debug this and I have no idea what's wrong. I cannot truly implement a vertical slice the way you did it because of multiple reasons, so instead I tested the algorithm in isolation and I got exactly what I expected (the lines connecitng the dots I expected), however when I attempt to use the algorithm in the shader I get the described artifacts. I ams lowly going mad :p
+2018-03-12T04:08:02.59Z+00:00
+0
+Reply
+Copy link
+Spektre
+Spektre Over a year ago
+@Makogan you need to test by moving the camera around some test object otherwise you could miss some edge cases. If the results in GLSL are different than you got accuracy problem. It might be many things like clamping is not GL_CLAMP_TO_EDGE or float is not enough (try double if that improves things) . What does 1.f/0.f; mean? it is division by zero and that would do got knows what as shaders do not crash like CPU code. Yes decoding in GLSL can drive you crazy that is why I usually do a C++ code (identical to shader code) and when working just use it as shader.
+2018-03-12T07:12:21.25Z+00:00
+0
+Reply
+Copy link
+Spektre
+Spektre Over a year ago
+@Makogan for that purpose I wrote a vector math lib with (d/i)vec(2,3,4) copying the behavior from GLSL. It was crazy piece of template coding to get the getters/setters and template recursions right but it works :) the only difference between CPU and Shader is texture access that one is handled by #define and debug renders too so I even do not have to change anything in the code. Without this I was going in circles for some of mine projects. I still believe without the 2D slice overview you will not get this working as you do not see what is really happening in full 3D render.
+2018-03-12T07:18:48.17Z+00:00
+0
+Reply
+Copy link
+Spektre
+Spektre Over a year ago
+@Makogan At least all my ray casters (WOLF,DOOM,mesh,volumetric) would not be debugged without it. Because even if some part of your scene look OK does not mean it is. How ever you can combine ray tracing with polygonal rendering. At least try to render grid lines with some coordinates and use smaller texture map with specific object (box, sphere) and check if the voxels are at right coordinates (not shifted by half or full grid cell)
+2018-03-12T07:21:53.373Z+00:00
+0
+Reply
+Copy link
+Spektre
+Spektre Over a year ago
+@Makogan another option is extract middle horizontal line from your depth buffer (I would use linear depth buffer for this purpose) and render the slice on CPU side from it
+2018-03-12T07:26:25.093Z+00:00
+0
+Reply
+Copy link
+Add a comment | Show 2 more comments
+Start asking to get answers
+Find the answer to your question by asking.
+Ask question
+Explore related questions
+opengl
+glsl
+textures
+raytracing
+See similar questions with these tags.
+The Overflow Blog
+Vibe coding needs a spec, too
+What’s new at Stack Overflow: November 2025
+Featured on Meta
+Community Asks Sprint Announcement - October/November 2025
+We’re releasing our proactive anti-spam measure network-wide
+Opinion-based questions alpha experiment on Stack Overflow
+Linked
+12
+Ray Casting with different height size
+8
+How to correctly linearize depth in OpenGL ES in iOS?
+Related
+42
+How to do ray tracing in modern OpenGL?
+7
+A few questions about ray tracing with opengl
+1
+Doubts in RayTracing with GLSL
+10
+Raytracing in OpenGL via compute shader
+4
+Why is this GLSL shader so slow?
+19
+What is causing the artifacts in my raytracer?
+2
+Ray Tracing with GLSL
+6
+Ray tracing - refraction bug
+1
+opengl ray tracing and mesh
+3
+GLSL artefacts when ray marching
+Hot Network Questions
+How and why does grep match this pattern (containing newline)?
+What is "lane math" when building interchanges?
+Does the presence of the definite article "the" young woman in Isaiah 7:14 indicate the woman is known to both Isaiah and Ahaz?
+Crime series about a mysterious hero offering problem-solving services in exchange for future favors
+Do regression coefficients imply anything about the relationship *between* the predictors?
+Why are we allowed to classify indeterminate limits with a specific form without proving it formally?
+How to fix IK limbs after mirroring and joining a rigged mesh?
+Is the Cloud of Daggers spell's teleport a movement?
+Dystopian book, girl escapes at the end but the boy gets caught
+What does the verb "recode" mean in the context of scientific studies? Context below
+Which sets are "persistently measurable"
+Rotation of electric field vector or polarization
+ICVS 490 curve date vs swap settlement date
+Band of marshy areas floating on ocean at equator: possible?
+Number sign/hash (#) not allowed in environment defined with listings
+What is this chunky single speed chain?
+What does "rantin' sideways" mean?
+Programatically set Entries field on Asset
+Question about the history of the definition of the second in SI
+Why do some sites ask me to share my device's identity to them?
+Short story identification — aliens pick one human to decide Earth's fate; framed by two reporters in a bar
+Trying to update, got "The following unofficial packages are currently installed." Why do I even have those?
+Word for any person who doesn't oppose any group among staff members
+Merge by distance at center?
+more hot questions
+Question feed
+lang-c

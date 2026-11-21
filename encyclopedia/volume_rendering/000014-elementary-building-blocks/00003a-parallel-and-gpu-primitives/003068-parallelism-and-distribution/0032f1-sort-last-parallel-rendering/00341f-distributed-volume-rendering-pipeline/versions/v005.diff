@@ -1,0 +1,232 @@
+--- v004.md
++++ v005.md
+@@ -10,5 +10,5 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Raw volume data (stored on a parallel file system or distributed storage), transfer functions, and viewing transformation matrices [S1][S3].
++*   **Inputs:** Raw volume data stored on a parallel file system, transfer functions, and viewing transformation matrices [S1][S3].
+ *   **Outputs:** A final composited image displayed on a client device or stored to disk [S1][S2, unofficial].
+ 
+@@ -16,5 +16,5 @@
+ *   **Spatial Encoding:** For time-varying data with static mesh structures, a one-time preprocessing step generates a spatial octree encoding of the raw data [S1]. Each block of elements is associated with a subtree of the global octree [S1].
+ *   **Resource List:** A dynamic list of available computing resources managed via ZCN, tracking hardware metrics such as available/used video memory and CUDA compute capability [S2, unofficial].
+-*   **Image Portions:** Partially composited images held by each node after the compositing phase, which are sent back to the host [S3].
++*   **Image Portions:** Partially composited images held by each node after the compositing phase, which are sent back to the host for final assembly [S3].
+ 
+ ### Parameters
+@@ -24,104 +24,116 @@
+ ### Steps
+ 1.  **Initialization and Resource Discovery:**
+-    The resource manager monitors socket connections and uses Zero Configuration Networking (ZCN) to dynamically discover and add idle resources to the active resource list [S2, unofficial]. If a connection breaks, the client is notified, and the resource is removed from the list [S2, unofficial].
++    The resource manager monitors socket connections and uses Zero Configuration Networking (ZCN) to dynamically discover and add idle resources to the active resource list [S2, unofficial]. If a connection breaks, the client is notified, and the resource is removed from the list without affecting the management subsystem [S2, unofficial].
+ 
+ 2.  **Data Distribution (Sequential):**
+-    *   Input processors read data files from the parallel file system storage device [S1].
+-    *   Input processors prepare raw data for rendering (e.g., quantization from 32-bit to smaller types) [S1].
+-    *   Using the precomputed octree and workload estimation, input processors partition the data and distribute data blocks to rendering processors [S1].
+-    *   Non-blocking send and receive are used for block distribution [S1].
+-    *   *Alternative (Host-Node Model):* The host broadcasts data-space partitioning information and the portion of data to each node [S3]. The host also broadcasts transfer functions and transform matrices [S3].
++    Input processors read data files from the parallel file system storage device [S1]. Input processors prepare raw data for rendering calculations, such as quantization from 32-bit to smaller types [S1]. Using the precomputed octree and workload estimation, input processors partition the data and distribute data blocks to rendering processors using non-blocking send and receive operations [S1]. In the host-node model, the host broadcasts data-space partitioning information and the portion of data to each node [S3]. The host also broadcasts transfer functions and transform matrices to all nodes [S3].
+ 
+ 3.  **Rendering (Parallel):**
+-    *   Rendering processors (or nodes) receive their local data blocks [S1][S3].
+-    *   Nodes update their local transfer functions and transform matrices [S3].
+-    *   Each node executes its own copy of the renderer [S3].
+-    *   *Architecture Detail:* If a single resource is assigned, an elementary renderer is used. If multiple resources are assigned, a parallel brick renderer is instantiated, configured for sort-last parallel Multi-GPU or distributed memory rendering [S2, unofficial].
+-    *   The renderer superimposes a k-d tree search structure and threading logic on top of elementary renderers to handle parallelism [S2, unofficial].
++    Rendering processors (or nodes) receive their local data blocks [S1][S3]. Nodes update their local transfer functions and transform matrices [S3]. Each node executes its own copy of the renderer [S3]. If a single resource is assigned, an elementary renderer is used. If multiple resources are assigned, a parallel brick renderer is instantiated, configured for sort-last parallel Multi-GPU or distributed memory rendering [S2, unofficial]. The renderer superimposes a k-d tree search structure and threading logic on top of elementary renderers to handle parallelism [S2, unofficial].
+ 
+ 4.  **Compositing (Parallel):**
+-    *   Nodes synchronize after rendering and before compositing [S3].
+-    *   Rendering processors deliver their rendered images to output processors (or other nodes) [S1].
+-    *   A parallel compositing method (e.g., binary-swap) combines the independently rendered results [S3].
+-    *   *Single Resource Mode:* If only one resource is assigned, this stage is omitted, and execution proceeds directly to display [S2, unofficial].
++    Nodes synchronize after rendering and before entering the compositing phase [S3]. Rendering processors deliver their rendered images to output processors or other nodes [S1]. A parallel compositing method, specifically a binary-swap algorithm, combines the independently rendered results [S3]. If only one resource is assigned, this stage is omitted, and execution proceeds directly to display [S2, unofficial].
+ 
+ 5.  **Display (Sequential):**
+-    *   Output processors send the final images to a display or storage device [S1].
+-    *   *Host-Node Model:* Once compositing is finished, each node holds a portion of the image and sends it back to the host for display [S3]. The host performs an I/O servicing loop to receive these portions [S3].
+-    *   The display phase determines how the image is presented, accommodating varying requirements such as high-frame-rate VR head tracking or low-frame-rate HPC monitoring [S2, unofficial].
++    Output processors send the final images to a display or storage device [S1]. In the host-node model, once compositing is finished, each node holds a portion of the image and sends it back to the host for display [S3]. The host performs an I/O servicing loop to receive these portions [S3]. The display phase determines how the image is presented, accommodating varying requirements such as high-frame-rate VR head tracking or low-frame-rate HPC monitoring [S2, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-# Distributed Volume Rendering Pipeline Implementation
+-# Based on [S1][S2, unofficial][S3]
++def run_pipeline(resources, data_path, transfer_function, transform_matrix):
++    # 1. Resource Discovery via ZCN
++    active_resources = discover_resources_via_zcn()
++    if not active_resources:
++        return None
+ 
+-def run_pipeline():
+-    # 1. Resource Management (ZCN)
+-    resource_manager = ZCNResourceManager()
+-    resources = resource_manager.discover_and_add_resources()
+-    
+-    # 2. Data Distribution (Sequential on Host/Input Processor)
+-    # Check if data is time-varying with static mesh
+-    if is_time_varying_static_mesh():
+-        octree = preprocess_data_to_octree(raw_data)
++    # 2. Data Distribution (Sequential)
++    # Check for static mesh to apply one-time octree preprocessing [S1]
++    if is_static_mesh(data_path):
++        octree = precompute_octree(data_path)
+     else:
+         octree = None
+-        
+-    # Partition data based on octree/workload estimation
+-    data_partitions = partition_data(raw_data, octree, resources)
+-    
+-    # 3. Rendering (Parallel on Nodes)
+-    # Broadcast control data
+-    broadcast_transfer_functions()
+-    broadcast_transform_matrices()
+-    
+-    # Launch parallel rendering tasks
+-    render_tasks = []
+-    for node in resources:
+-        # Send partition and control data
+-        send_data(node, data_partitions[node])
+-        
+-        # Node executes renderer
+-        task = node.execute_renderer(
+-            data=data_partitions[node],
+-            transfer_function=local_transfer_function,
+-            transform_matrix=local_transform_matrix
+-        )
+-        render_tasks.append(task)
+-        
+-    # Synchronize after rendering
+-    wait_for_all(render_tasks)
+-    
++
++    # Partition data using octree subtrees and workload estimation [S1]
++    partitions = partition_data(data_path, octree, active_resources)
++
++    # Broadcast control parameters to all nodes [S3]
++    broadcast_params(active_resources, transfer_function, transform_matrix)
++
++    # 3. Rendering (Parallel)
++    render_futures = []
++    for node in active_resources:
++        # Send data partition and control parameters [S3]
++        send_partition(node, partitions[node])
++        # Execute renderer on node [S3]
++        future = node.execute_renderer()
++        render_futures.append(future)
++
++    # Synchronize after rendering [S3]
++    synchronize(render_futures)
++
+     # 4. Compositing (Parallel or Omitted)
+-    if len(resources) > 1:
+-        # Parallel compositing (e.g., binary-swap)
+-        composited_images = parallel_composite(render_tasks)
+-        
+-        # Send portions back to host for final assembly/display
+-        for node, image_portion in zip(resources, composited_images):
+-            send_image_to_host(node, image_portion)
++    if len(active_resources) > 1:
++        # Collect rendered images and perform binary-swap compositing [S3]
++        rendered_images = [f.result() for f in render_futures]
++        image_portions = binary_swap_composite(rendered_images)
++        # Send portions back to host [S3]
++        for node, portion in zip(active_resources, image_portions):
++            send_image_to_host(node, portion)
+     else:
+-        # Single resource: skip compositing
+-        final_image = render_tasks[0].result
+-        
+-    # 5. Display (Sequential on Host/Output Processor)
+-    if len(resources) > 1:
+-        # Host receives portions and assembles
+-        final_image = host_assemble_images()
+-        
++        # Single resource: skip compositing, proceed to display [S2, unofficial]
++        final_image = render_futures[0].result()
++        display_image(final_image)
++        return
++
++    # 5. Display (Sequential)
++    # Host performs I/O servicing loop to receive portions [S3]
++    final_image = host_assemble_images(active_resources)
+     display_image(final_image)
+ 
+-def preprocess_data_to_octree(data):
+-    # One-time preprocessing for static mesh
+-    return build_octree(data)
++# Helper definitions to ensure self-containment
++def discover_resources_via_zcn():
++    # Uses Zero Configuration Networking to dynamically add idle resources
++    # and removes unavailable ones on socket break [S2, unofficial]
++    return []
+ 
+-def partition_data(data, octree, resources):
+-    # Use octree subtrees and workload estimation
+-    return distribute_blocks(data, octree, resources)
++def is_static_mesh(data_path):
++    # Returns True if mesh structure does not change across time steps [S1]
++    return True
+ 
+-def parallel_composite(render_results):
+-    # Binary-swap compositing algorithm
+-    # Keeps all processors busy, decreasing image size
+-    return binary_swap_compositing(render_results)
++def precompute_octree(data_path):
++    # Generates spatial octree encoding for static mesh data [S1]
++    return None
++
++def partition_data(data_path, octree, resources):
++    # Distributes data blocks using octree subtrees and workload estimation [S1]
++    return {r: None for r in resources}
++
++def broadcast_params(resources, tf, tm):
++    # Host broadcasts transfer function and transform matrices to nodes [S3]
++    pass
++
++def send_partition(node, data):
++    # Sends data-space partitioning information and data portion to node [S3]
++    pass
++
++def synchronize(futures):
++    # Waits for all rendering tasks to complete before compositing [S3]
++    for f in futures:
++        f.result()
++
++def binary_swap_composite(images):
++    # Parallel binary-swap compositing that keeps processors busy [S3]
++    return [None] * len(images)
++
++def send_image_to_host(node, image):
++    # Sends composited image portion back to host for display [S3]
++    pass
++
++def host_assemble_images(resources):
++    # Host I/O loop receives and assembles image portions [S3]
++    return None
++
++def display_image(image):
++    # Displays final image or handles VR/monitoring requirements [S2, unofficial]
++    pass
+ ```
+ 
+@@ -130,5 +142,5 @@
+ *   **Load Balancing:** Datasets with many empty voxels (e.g., head, vessel) cause load imbalance and non-linear speedup, whereas dense datasets (e.g., vorticity) exhibit nearly linear speedup [S3].
+ *   **Communication Costs:** On heterogeneous shared workstations, communication costs are highly variable due to Ethernet sharing, which can degrade performance [S3]. Communication dominates compositing costs on workstations (~97% of compositing time) [S3].
+-*   **Small Image Overhead:** Rendering small images (e.g., 64x64) exhibits less speedup due to overhead costs associated with rendering and compositing steps [S3].
++*   **Small Image Overhead:** Rendering small images (e.g., 64×64) exhibits less speedup due to overhead costs associated with rendering and compositing steps [S3].
+ *   **Resource Unavailability:** The system is tolerant to resource failure; if a socket connection breaks, the client is notified, and the resource is removed from the list without affecting the management subsystem [S2, unofficial].
+ 
+@@ -141,9 +153,9 @@
+ *   **Time Complexity:** Rendering time dominates the overall process [S3]. Communication costs dominate compositing costs on workstations (~97% of compositing time) [S3].
+ *   **Memory Complexity:** Nodes must store their portion of the data in local memory [S3]. The architecture allows nodes to store the whole dataset in main memory if data parallelism is abandoned, though the default is data parallelism [S2, unofficial].
+-*   **Performance:** On CM-5, nearly linear speedup was achieved for dense datasets (vorticity) across various image sizes, except for small images (64x64) where overhead reduced speedup [S3]. Speedup for compositing was lower (1.46 from 32 to 512 nodes) due to communication overhead [S3].
++*   **Performance:** On CM-5, nearly linear speedup was achieved for dense datasets (vorticity) across various image sizes, except for small images (64×64) where overhead reduced speedup [S3]. Speedup for compositing was lower (1.46 from 32 to 512 nodes) due to communication overhead [S3].
+ *   **Strengths:** Hides I/O costs, supports interactive framerates, scales to heterogeneous hardware (from workstations to Multi-GPU clusters), and allows dynamic resource addition via ZCN [S1][S2, unofficial].
+ *   **Limitations:** Not efficient until pipeline is full; sensitive to load imbalance from sparse data; communication costs can be high on shared networks; resource management is handcrafted and lacks generality for non-direct volume rendering methods [S1][S2, unofficial][S3].
+ *   **When to Use:** Interactive visualization of large, time-varying volume data on distributed HPC systems or clusters with heterogeneous hardware [S1][S2, unofficial].
+-*   **When Not to Use:** When data is sparse and load balancing is difficult, or when the system lacks a parallel file system for efficient data distribution [S1][S3].
++*   **When Not to Use:** Not suitable when the storage infrastructure lacks a parallel file system, as input processors require it for efficient data retrieval [S1]. Performance degrades on datasets with many empty voxels due to load imbalance [S3].
+ 
+ ## Background

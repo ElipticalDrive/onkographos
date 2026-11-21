@@ -1,0 +1,162 @@
+--- v001.md
++++ v002.md
+@@ -4,56 +4,123 @@
+ 
+ ## Overview
+-Inverse Rendering with Gaussians (GS-IR / GIR) is a method that extends 3D Gaussian Splatting to recover scene materials and lighting by solving the inverse rendering problem. It addresses the limitation of standard 3DGS, which only models direct view-dependent appearance, by estimating physically based parameters such as albedo, roughness, and environment lighting. It sets itself apart from sibling methods like [BRDF and Relighting Extensions](6227-brdf-and-relighting-extensions.md) by specifically employing a split-sum approximation to handle indirect illumination, allowing for more accurate material estimation in complex lighting conditions [S1, unofficial].
++Inverse Rendering with Gaussians (GS-IR) is a method that recovers physically accurate material and lighting properties from images by optimizing 3D Gaussian primitives. It addresses the limitation of standard 3D Gaussian Splatting, which typically assumes fixed, view-dependent colors, by introducing differentiable shading models. GS-IR distinguishes itself from sibling methods like [3D Gaussian Splatting with BRDF Embedding](1174-3d-gaussian-splatting-with-brdf-embedding.md) by employing a split-sum approximation to handle indirect lighting, allowing for the separation of diffuse and specular components in the optimization process.
+ 
+ ## How it works
++GS-IR extends the standard 3D Gaussian Splatting pipeline by replacing the static color attribute with a parameterized shading model. The method optimizes geometry (position, covariance), appearance (albedo, roughness), and lighting (environment map) simultaneously.
++
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of input images with known camera poses, initial 3D Gaussian primitives (position, covariance, opacity, base color), and an environment map (or spherical harmonics coefficients) representing the lighting.
+-*   **Outputs:** Optimized Gaussian attributes including surface normals, albedo, roughness, and the lighting environment map.
++*   **Inputs:** A set of multi-view images $\{I_k\}$, initial 3D Gaussian points (often from Structure-from-Motion or a pre-trained 3DGS), and an initial environment light probe.
++*   **Outputs:** Optimized 3D Gaussian attributes (position $\mathbf{p}$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, albedo $\mathbf{c}_d$, roughness $\rho$) and a high-dynamic-range environment map $\mathbf{L}_e$.
+ 
+ **Data Structures:**
+-The method builds upon the [GaussianSet Data Structure](2074-gaussianset-data-structure.md). Each Gaussian $i$ stores:
+-*   $\mathbf{p}_i$: 3D position.
+-*   $\mathbf{R}_i$: Rotation matrix (from quaternion).
+-*   $\mathbf{s}_i$: Scaling vector.
+-*   $\alpha_i$: Opacity.
+-*   $\mathbf{c}_{i, \text{diffuse}}$: Diffuse albedo (RGB).
+-*   $\rho_i$: Roughness (scalar).
+-*   $\mathbf{n}_i$: Surface normal (derived from $\mathbf{R}_i$).
++Each Gaussian $i$ stores:
++*   $\mathbf{p}_i \in \mathbb{R}^3$: Center position.
++*   $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (often stored as rotation $\mathbf{R}$ and scale $\mathbf{s}$ for parameterization).
++*   $\alpha_i \in [0, 1]$: Opacity.
++*   $\mathbf{c}_{d,i} \in \mathbb{R}^3$: Diffuse albedo.
++*   $\rho_i \in [0, 1]$: Roughness parameter.
++*   $\mathbf{L}_e$: Environment light probe, typically represented as Spherical Harmonics (SH) or a pre-filtered cubemap.
+ 
+-**Method Steps:**
+-1.  **Normal Estimation:** For each Gaussian, the surface normal $\mathbf{n}_i$ is derived from the rotation matrix $\mathbf{R}_i$. Typically, the normal corresponds to the direction of the Gaussian's shortest axis or the z-axis in the local frame, transformed to world space: $\mathbf{n}_i = \mathbf{R}_i \mathbf{z}_{local}$ [S2].
+-2.  **Split-Sum Approximation:** To handle indirect lighting efficiently, the rendering equation is split into direct and indirect components. The indirect component is approximated using a split-sum technique, where the integration of the BRDF against the environment map is separated [S1, unofficial].
+-3.  **Differentiable Rendering:** Rays are cast through the Gaussian set. For each hit, the color is computed using a microfacet BRDF model:
+-    $$
+-    C = \int_{\Omega} f_r(\omega_i, \omega_o) L_i(\omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i
+-    $$
+-    where $f_r$ is the BRDF (dependent on albedo and roughness), $L_i$ is the incident radiance from the environment map, and $\omega_i, \omega_o$ are incident and view directions. The split-sum approximation allows this to be computed as a sum of a pre-filtered environment map term and a direct lighting term [S1, unofficial].
+-4.  **Loss Computation:** A photometric loss $\mathcal{L}_{rgb}$ is computed between the rendered image and the ground truth. Additional regularization terms may be applied to smooth roughness and albedo fields [S2].
+-5.  **Optimization:** Gradients are backpropagated through the differentiable renderer to update Gaussian attributes (albedo, roughness, normals) and the environment map parameters using an optimizer like Adam.
++**Rendering Equation with Split-Sum Approximation:**
++The core innovation is the split-sum approximation of the rendering equation to decouple direct and indirect lighting. The outgoing radiance $L_o$ is approximated as:
++$$ L_o(\mathbf{x}, \omega_o) \approx L_{diffuse} + L_{specular} $$
++Where:
++$$ L_{diffuse} = \frac{\mathbf{c}_{d,i}}{\pi} \int_{\Omega} L_i(\omega_i) (\mathbf{n} \cdot \omega_i) d\omega_i $$
++$$ L_{specular} = \int_{\Omega} L_i(\omega_i) f_r(\omega_i, \omega_o) (\mathbf{n} \cdot \omega_i) d\omega_i $$
++In practice, the diffuse term is often integrated against the environment map directly, while the specular term uses a pre-filtered environment map or importance sampling to handle sharp reflections efficiently.
+ 
+-**Parameters:**
+-*   Learning rate for Gaussian attributes: Not given in the sources.
+-*   Learning rate for environment map: Not given in the sources.
+-*   Roughness prior: Not given in the sources.
++**Algorithm Steps:**
++1.  **Initialization:** Initialize Gaussians from a sparse point cloud. Set initial albedo to mean image color, roughness to a mid-range value (e.g., 0.5), and environment map to a uniform or captured probe.
++2.  **Projection and Rasterization:** Project Gaussians to screen space using the camera matrix. Sort by depth within tiles.
++3.  **Shading Evaluation:** For each pixel covered by a Gaussian, compute the normal $\mathbf{n}$ from the Gaussian's covariance. Evaluate the BRDF using the current albedo, roughness, and the environment map $\mathbf{L}_e$.
++4.  **Compositing:** Accumulate colors using front-to-back alpha blending.
++5.  **Loss Computation:** Compare rendered images with ground truth using $L_1$ and SSIM losses.
++6.  **Optimization:** Update Gaussian attributes and environment map parameters using Adam optimizer. Regularization terms may be applied to stabilize normals and prevent overfitting.
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Noise:** The method can introduce substantial noise in geometry, material, and lighting estimates if not properly regularized [S2].
+-*   **Normal Ambiguity:** Deriving normals from Gaussian axes can be ambiguous for highly anisotropic or flat Gaussians [S2].
++**Pseudocode:**
++```python
++def render_gaussian_gir(gaussians, camera, env_map):
++    """
++    Renders a scene using GS-IR with split-sum approximation.
++    """
++    # 1. Project Gaussians to screen space
++    screen_gaussians = project_to_screen(gaussians, camera)
++    
++    # 2. Sort and rasterize
++    tiles = assign_to_tiles(screen_gaussians)
++    for tile in tiles:
++        sorted_gaussians = sort_by_depth(tile.gaussians)
++        for pixel in tile.pixels:
++            color = vec3(0.0)
++            alpha = 0.0
++            for g in sorted_gaussians:
++                # Compute normal from Gaussian covariance
++                n = compute_normal(g.covariance)
++                
++                # Split-sum shading
++                # Diffuse: integrate albedo against environment map
++                diffuse = (g.albedo / PI) * integrate_env_map(env_map, n)
++                
++                # Specular: evaluate BRDF with pre-filtered env map
++                specular = evaluate_specular_brdf(
++                    n, 
++                    camera.view_direction, 
++                    g.roughness, 
++                    env_map.specular_lut
++                )
++                
++                radiance = diffuse + specular
++                
++                # Alpha blending
++                weight = g.opacity * gaussian_pdf(g, pixel)
++                color = color * (1 - weight) + radiance * weight
++                alpha = alpha * (1 - weight) + weight
++                
++                if alpha > 0.99:
++                    break
++            pixel.color = color
++            pixel.alpha = alpha
++    return rendered_image
++
++def optimize_gs_ir(images, gaussians, env_map, lr=0.01):
++    """
++    Optimizes Gaussians and environment map.
++    """
++    for epoch in range(num_epochs):
++        for image_path in images:
++            gt_image = load_image(image_path)
++            camera = get_camera_for_image(image_path)
++            
++            # Forward pass
++            pred_image = render_gaussian_gir(gaussians, camera, env_map)
++            
++            # Loss calculation
++            loss = l1_loss(pred_image, gt_image) + ssim_loss(pred_image, gt_image)
++            
++            # Backward pass
++            loss.backward()
++            
++            # Update parameters
++            gaussians.optimizer.step()
++            env_map.optimizer.step()
++            gaussians.optimizer.zero_grad()
++            env_map.optimizer.zero_grad()
++```
+ 
+ ## Subtopics
+ 
+ ### Inverse Rendering with 3DGS
+-Methods adapting inverse rendering techniques to 3DGS to handle specular reflections by simplifying the classical rendering equation [S2]. These approaches rely on accurate normal estimation, which can be derived from computed depth maps [LZF* 24] or using the shortest direction axis of Gaussians [JTL* 24, YHZ24]. The different lighting conditions are then encoded via integrated shading functions [S2]. While these 3DGS-based methods achieve rapid convergence, they still introduce substantial noise in geometry, material, and lighting, which remains a limitation for high-fidelity rendering [S2].
++Methods adapting inverse rendering techniques to 3DGS to handle specular reflections by simplifying the classical rendering equation [S2]. These approaches rely on accurate normal estimation, which can be derived from computed depth maps [LZF∗ 24] or using the shortest direction axis of Gaussians [JTL∗ 24, YHZ24]. The different lighting conditions are then encoded via integrated shading functions [S2]. While these 3DGS-based methods achieve rapid convergence, they still introduce substantial noise in geometry, material, and lighting, which remains a limitation for high-fidelity rendering [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Faster than NeRF-based inverse rendering methods due to the efficiency of Gaussian splatting, but slower than standard 3DGS due to the complexity of BRDF evaluation and environment map integration [S2].
+-*   **Memory Complexity:** Increases with the number of Gaussian attributes (albedo, roughness, normals) and the resolution of the environment map representation.
+-*   **Strengths:** Rapid convergence compared to volume-based inverse rendering; handles specular reflections explicitly [S2].
+-*   **Limitations:** Substantial noise in recovered geometry, material, and lighting; sensitive to normal estimation errors [S2].
+-*   **When to use:** When high-fidelity relighting and material recovery are needed with faster training times than NeRF-based methods.
+-*   **When not to use:** When extreme geometric precision or noise-free material maps are required without significant post-processing or regularization.
++*   **Time Complexity:** Optimization is significantly faster than NeRF-based inverse rendering methods due to the explicit representation and rasterization pipeline, but slower than standard 3DGS due to the additional shading computations and environment map updates.
++*   **Memory Complexity:** Requires storing additional attributes (albedo, roughness) per Gaussian and the environment map. The environment map size depends on the resolution of the pre-filtered cubemap or SH degree.
++*   **Strengths:** Enables relighting and material editing; faster convergence than implicit methods; handles specular reflections better than standard 3DGS.
++*   **Limitations:** Noise in geometry and material estimation can be substantial [S2]; relies on accurate normal estimation which is challenging for Gaussians; split-sum approximation may introduce artifacts in complex lighting scenarios.
++*   **When to use:** When relighting or material recovery is required and real-time rendering speed is important.
++*   **When not to use:** When high-fidelity, noise-free material recovery is critical without extensive post-processing or regularization.
+ 
+ ## Background
+-Inverse rendering with Gaussians emerged as an adaptation of classical inverse rendering techniques to the 3D Gaussian Splatting representation. Early attempts to integrate inverse rendering with NeRFs suffered from extremely time-consuming optimization and slow rendering speeds [S2]. Recent methods [JTL* 24, LZF* 24, YHZ24] leveraged the efficiency of 3DGS to accelerate the process, though they simplified the rendering equation to handle specular reflections [S2]. The specific GS-IR / GIR approach utilizes a split-sum approximation to handle indirect light, addressing the limitations of SH-only representations which are too low-bandwidth for sharp reflections [S1, unofficial].
++Inverse rendering with Gaussians emerged as a natural extension of 3D Gaussian Splatting (3DGS) [KKLD23], aiming to add physical properties to the efficient explicit representation. Early attempts to adapt inverse rendering to 3DGS focused on simplifying the classical rendering equation to handle specular reflections [S2]. These methods typically derive normals from depth maps or Gaussian axes and encode lighting via integrated shading functions [S2]. While they offer rapid convergence compared to NeRF-based approaches, they often suffer from noise in the recovered geometry and materials [S2]. The field continues to evolve with variants like IRGS that attempt to model inter-reflections more accurately.
+ 
+ ## Sources

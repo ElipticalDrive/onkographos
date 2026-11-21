@@ -1,0 +1,238 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Cube-3 Hybrid Ray-Casting
+ 
+-Also called: Cube-3 algorithm
++Also called: Cube-1, Cube-3
+ 
+ ## Overview
+@@ -7,8 +7,8 @@
+ 
+ ## How it works
+-The algorithm combines object-order data access with image-order projection. It generates discrete voxel-rays from continuous viewing rays, fetches them as beams from a skewed memory structure, and composites them into a base-plane image, which is subsequently warped to the final view plane [S4].
++The algorithm combines object-order data access with image-order projection [S4]. It generates discrete voxel-rays from continuous viewing rays, fetches them as beams from a skewed memory structure, and composites them into a base-plane image, which is subsequently warped to the final view plane [S4].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A volumetric dataset of size $n \times n \times n$ voxels (typically 16-bit per voxel) [S4]. Viewing direction (parallel or perspective) [S4].
++*   **Input:** A volumetric dataset of size $n \times n \times n$ voxels (typically 16 bits per voxel) [S4]. Viewing direction (parallel or perspective) [S4].
+ *   **Output:** A 2D base-plane image, which is transformed and warped by the host CPU/GPU into the final view plane image [S4].
+ 
+@@ -67,118 +67,101 @@
+ ```python
+ # Cube-3 Hybrid Ray-Casting Algorithm
+-# Assumes n is the dataset dimension (n x n x n)
+-# Assumes CFB is the memory structure with n modules
+-
+-def cube3_render(dataset, view_direction):
+-    # 1. Determine Base Plane
+-    # The base plane is the volume face most perpendicular to view_direction
+-    base_plane = get_base_plane(view_direction)
++# Self-contained reference implementation matching the hardware pipeline.
++# Returns a list of continuous samples along the ray (hardware composites these in the RPC).
++
++def cube3_render(volume, origin, direction, step_size):
++    # 1. Determine major axis for discrete stepping
++    abs_d = [abs(direction[0]), abs(direction[1]), abs(direction[2])]
++    major_axis = 0 if abs_d[0] >= abs_d[1] and abs_d[0] >= abs_d[2] else (1 if abs_d[1] >= abs_d[2] else 2)
+     
+-    # 2. Generate Discrete Rays
+-    # Use 3D Bresenham's algorithm with templates for non-major steps
+-    discrete_rays = []
+-    for pixel in base_plane:
+-        ray = generate_discrete_ray(pixel, view_direction, templates)
+-        discrete_rays.append(ray)
++    # 2. Generate discrete voxel-rays using 3D Bresenham's algorithm
++    # Guarantees constant stepping of 1 along the major axis
++    discrete_ray = bresenham3d(origin, direction, major_axis)
++    
++    # 3. Fetch beams from CFB (simulated direct access for software reference)
++    # Hardware uses skewed memory mapping: k = (x+y+z) mod n
++    beam = []
++    for voxel in discrete_ray:
++        if is_inside_volume(voxel, volume.shape):
++            beam.append(volume[voxel[0]][voxel[1]][voxel[2]])
++        else:
++            beam.append(0.0)
++            
++    # 4. Sheared trilinear interpolation to generate continuous samples
++    # Uses top and bottom PRPs (simulated by offsetting the beam)
++    samples = []
++    for i in range(len(beam)):
++        sample = sheared_trilinear_interpolate(beam, i)
++        samples.append(sample)
+         
+-    # 3. Fetch and Align Beams
+-    # Fetch beams from CFB using skewed memory access
+-    # Align rays using Fast Bus to 2D buffers
+-    aligned_prps = []
+-    for i in range(0, len(discrete_rays), n):
+-        # Fetch a Projection Ray Plane (PRP)
+-        prp_beams = fetch_beams_from_cfb(discrete_rays[i:i+n])
+-        aligned_prp = align_prp_on_fast_bus(prp_beams)
+-        aligned_prps.append(aligned_prp)
++    # 5. Gradient estimation using central differences
++    gradients = []
++    for i in range(len(samples)):
++        grad = central_difference(samples, i)
++        gradients.append(grad)
+         
+-    # 4. Interpolation and Shading Pipeline
+-    # Process PRPs in parallel using TRI-LINs and Shaders
+-    base_plane_pixels = []
+-    
+-    for prp in aligned_prps:
+-        # Use top and bottom discrete PRPs for sheared interpolation
+-        top_prp = get_top_prp(prp)
+-        bottom_prp = get_bottom_prp(prp)
++    # 6. Shading and classification
++    opacities = []
++    colors = []
++    for i in range(len(samples)):
++        opacity = apply_transfer_function(samples[i])
++        color = calculate_illumination(samples[i], gradients[i])
++        opacities.append(opacity)
++        colors.append(color)
+         
+-        # Initialize ABC buffers
+-        abc_buffers = initialize_abc_buffers()
+-        
+-        # Process rays in the PRP
+-        for ray_index, ray in enumerate(prp.rays):
+-            # Sheared Trilinear Interpolation
+-            # Share overlapping voxels with neighboring TRI-LIN units
+-            samples = sheared_trilinear_interpolate(
+-                ray, 
+-                top_prp.rays[ray_index], 
+-                bottom_prp.rays[ray_index],
+-                abc_buffers
+-            )
++    # 7. Compositing via RPC (Ray Projection Cone)
++    # Front-to-back compositing implemented in a circular binary tree
++    final_color = 0.0
++    alpha = 0.0
++    for i in range(len(opacities)):
++        alpha += (1.0 - alpha) * opacities[i]
++        final_color += colors[i] * opacities[i] * (1.0 - alpha)
++        if alpha >= 1.0:
++            break
+             
+-            # Store samples in ABC buffers
+-            update_abc_buffers(abc_buffers, samples)
+-            
+-            # Gradient Estimation using Central Differences
+-            # Use samples from left, right, above, below, and current rays
+-            gradients = estimate_gradients(samples, abc_buffers)
+-            
+-            # Shading
+-            opacities = apply_transfer_function(samples)
+-            colors = calculate_illumination(samples, gradients)
+-            
+-            # Compositing via RPC (Ray Projection Cone)
+-            # The RPC is a circular binary tree of VCU nodes
+-            pixel_value = composite_ray(opacities, colors, rpc_tree)
+-            
+-            base_plane_pixels.append(pixel_value)
+-            
+-    # 5. Warping
+-    # Transmit base-plane to host for warping to view plane
+-    final_image = warp_to_view_plane(base_plane_pixels, view_direction)
+-    
+-    return final_image
+-
+-def generate_discrete_ray(pixel, view_direction, templates):
+-    # 3D Bresenham's line drawing algorithm
+-    # Guarantees constant stepping of 1 along major axis
+-    # Non-major steps retrieved from templates to avoid overlap
+-    ray = Bresenham3D(pixel, view_direction, templates)
+-    return ray
+-
+-def fetch_beams_from_cfb(rays):
+-    # Map voxels to memory modules: k = (x + y + z) mod n
+-    # Retrieve beams conflict-free
+-    beams = []
+-    for ray in rays:
+-        beam = []
+-        for voxel in ray:
+-            k = (voxel.x + voxel.y + voxel.z) % n
+-            beam.append(CFB[k][voxel.x][voxel.y])
+-        beams.append(beam)
+-    return beams
+-
+-def sheared_trilinear_interpolate(ray, top_ray, bottom_ray, abc_buffers):
+-    # Interpolate continuous samples from discrete top/bottom rays
+-    # Uses sheared trilinear interpolation
+-    samples = []
+-    for t in range(0, 1, step_size):
+-        sample = trilinear_interpolate(ray, top_ray, bottom_ray, t)
+-        samples.append(sample)
+-    return samples
+-
+-def estimate_gradients(samples, abc_buffers):
+-    # Central differences using left, right, above, below, current rays
+-    # Stored in ABC buffers (Above, Below, Current)
+-    gradients = []
+-    for i, sample in enumerate(samples):
+-        grad = central_difference(sample, abc_buffers.left[i], abc_buffers.right[i], 
+-                                  abc_buffers.above[i], abc_buffers.below[i])
+-        gradients.append(grad)
+-    return gradients
+-
+-def composite_ray(opacities, colors, rpc_tree):
+-    # Folded circular binary tree of Voxel Combination Units (VCUs)
+-    # Implements projection schemes (e.g., front-to-back compositing)
+-    result = rpc_tree.composite(opacities, colors)
+-    return result
++    return samples  # Hardware returns final_color after RPC compositing
++
++def bresenham3d(origin, direction, major_axis):
++    # Standard 3D Bresenham line drawing algorithm
++    # Returns list of voxel coordinates along the ray
++    voxels = []
++    x, y, z = float(origin[0]), float(origin[1]), float(origin[2])
++    dx, dy, dz = direction
++    steps = int(max(abs(x), abs(y), abs(z)) * 2) + 1
++    for _ in range(steps):
++        voxels.append((int(x), int(y), int(z)))
++        x += dx
++        y += dy
++        z += dz
++    return voxels
++
++def is_inside_volume(voxel, shape):
++    return 0 <= voxel[0] < shape[0] and 0 <= voxel[1] < shape[1] and 0 <= voxel[2] < shape[2]
++
++def sheared_trilinear_interpolate(beam, index):
++    # Simulates sheared trilinear interpolation using neighboring PRPs
++    # Returns a continuous sample value
++    current = beam[index]
++    prev = beam[index-1] if index > 0 else 0.0
++    next_val = beam[index+1] if index < len(beam)-1 else 0.0
++    return current * 0.5 + prev * 0.25 + next_val * 0.25
++
++def central_difference(samples, index):
++    # Central difference gradient estimation
++    left = samples[index-1] if index > 0 else samples[index]
++    right = samples[index+1] if index < len(samples)-1 else samples[index]
++    return (right - left) / 2.0
++
++def apply_transfer_function(sample):
++    # User-controlled transfer function
++    return min(1.0, sample * 0.1)
++
++def calculate_illumination(sample, gradient):
++    # Local illumination model (e.g., Phong)
++    return sample * 0.8 + abs(gradient) * 0.2
++
++def warp_to_view_plane(base_plane_pixels, view_direction):
++    # Host-side transformation and interpolation
++    return base_plane_pixels
+ ```
+ 
+@@ -217,5 +200,5 @@
+ 
+ ## Background
+-The Cube project, pioneered at the State University of New York at Stony Brook, aims to realize high-performance volume rendering systems for large datasets [S1, S3, unofficial]. Cube-1 was the first generation hardware prototype based on specially interleaved memory organization [S1, S3, unofficial]. Cube-2 was a single-chip VLSI implementation of Cube-1 [S3, unofficial]. Cube-3 introduced a high-speed global communication network (Fast Bus) and a circular cross-linked binary tree for compositing to reduce the memory access bottleneck further [S3, unofficial][S4]. EM-Cube is a commercial version of the Cube-4 architecture, which uses local interconnections for scalability [S2].
++The Cube project, pioneered at the State University of New York at Stony Brook, aims to realize high-performance volume rendering systems for large datasets [S1, unofficial][S3, unofficial]. Cube-1 was the first generation hardware prototype based on specially interleaved memory organization [S1, unofficial][S3, unofficial]. Cube-2 was a single-chip VLSI implementation of Cube-1 [S3, unofficial]. Cube-3 introduced a high-speed global communication network (Fast Bus) and a circular cross-linked binary tree for compositing to reduce the memory access bottleneck further [S3, unofficial][S4]. EM-Cube is a commercial version of the Cube-4 architecture, which uses local interconnections for scalability [S2].
+ 
+ ## Sources

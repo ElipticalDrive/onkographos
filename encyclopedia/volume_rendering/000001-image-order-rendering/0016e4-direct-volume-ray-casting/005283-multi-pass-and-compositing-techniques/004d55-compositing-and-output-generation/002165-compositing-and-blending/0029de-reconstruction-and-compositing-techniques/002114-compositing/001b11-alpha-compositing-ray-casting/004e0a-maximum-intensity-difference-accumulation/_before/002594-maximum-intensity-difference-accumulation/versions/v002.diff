@@ -1,0 +1,178 @@
+--- v001.md
++++ v002.md
+@@ -1,13 +1,10 @@
+ # Maximum Intensity Difference Accumulation
+-
+-
+ ## Overview
+ Maximum Intensity Difference Accumulation (MIDA) is a compositing technique that combines Direct Volume Rendering (DVR) and Maximum Intensity Projection (MIP) by modulating accumulated color and transparency based on the difference between the current maximum scalar intensity and the incoming sample's scalar intensity [S2]. It sets itself apart from standard [Back-to-Front Compositing](2078-back-to-front-compositing.md) by dynamically reducing the contribution of previously accumulated pixels when a higher-intensity feature is encountered, ensuring that high-intensity structures are not occluded [S2].
+-
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray traversing a volume. For each sample $i$ along the ray: scalar intensity $s_i$, color $c_i$ (RGB), and opacity $\alpha_i$. Step size $\Delta d$.
++*   **Input:** A ray traversing a volume. For each sample $i$ along the ray: scalar intensity $s_i$, color $c_i$ (RGB), and opacity $\alpha_i$.
+ *   **Output:** Final accumulated color $C_{out}$ and opacity $\alpha_{out}$.
+-*   **State:** Running maximum scalar intensity $s_{acc}$ (initialized to $-\infty$ or minimum possible value).
++*   **State:** Running maximum scalar intensity $s_{acc}$ (initialized to the minimum possible scalar value in the dataset).
+ 
+ **Data Structures:**
+@@ -19,5 +16,5 @@
+ 
+ 1.  **Initialization:**
+-    *   Set $s_{acc} \leftarrow -\infty$ (or the minimum scalar value in the dataset).
++    *   Set $s_{acc} \leftarrow s_{min}$ (the minimum scalar value in the dataset) [G].
+     *   Set $C_{dst} \leftarrow (0, 0, 0)$.
+     *   Set $\alpha_{dst} \leftarrow 0$.
+@@ -26,48 +23,28 @@
+     For each sample $i$ along the ray:
+     
+-    a.  **Step Size Correction (Optional/Contextual):**
+-        If the implementation requires correcting input alpha for varying step sizes as per specific source implementations, apply:
+-        $$ \alpha_{src} = 1.0 - (1.0 - \alpha_i)^{\Delta d \cdot 200.0} $$
+-        [S1, unofficial]. Note: Standard compositing assumes constant step size or pre-corrected alphas. If not specified, $\alpha_{src} = \alpha_i$.
+-        
+-    b.  **Modulation Factor Calculation:**
++    a.  **Modulation Factor Calculation:**
+         Calculate the modulation factor $\beta$ based on the difference between the incoming scalar intensity $s_i$ and the current maximum $s_{acc}$:
+         $$ \beta = \begin{cases} 1 - (s_i - s_{acc}) & \text{if } s_i > s_{acc} \\ 1 & \text{otherwise} \end{cases} $$
+-        [S2].
++        [S3].
+         
+-        *Note on Implementation Variance:* One source [S1, unofficial] describes a slightly different logic involving a `delta_i` variable:
+-        1. If $s_i > s_{acc}$, set $\delta_i = s_i - s_{acc}$ and update $s_{acc} = s_i$.
+-        2. Set $\beta = 1.0 - \delta_i$.
+-        3. Otherwise, $\beta = 1.0$.
+-        This is mathematically equivalent to the case $s_i > s_{acc}$ in [S2] if $s_{acc}$ is updated *after* calculating $\beta$ but *before* the next step, or if the "current maximum" in [S2] refers to the maximum *before* the current sample. However, [S2] explicitly states $s_{acc}$ is the "current maximum scalar intensity" and the condition is $s_i > s_{acc}$. If $s_i > s_{acc}$, then $s_i$ becomes the new maximum. The term $(s_i - s_{acc})$ represents the difference.
+-        
+-        *Pitfall:* The author of [S1, unofficial] expresses uncertainty about the correctness of the implementation regarding $s_{acc}$ and the definition of 'current maximum along the direction' [S1, unofficial]. Implementers should verify if $s_{acc}$ should be updated before or after calculating $\beta$. The standard interpretation of "difference from current maximum" implies comparing against the maximum of *previous* samples. If $s_i$ is the new maximum, the difference is positive. If $\beta$ becomes negative or zero, it effectively kills the accumulated color, which might be intended to prevent occlusion but can cause artifacts if $s_i - s_{acc} \ge 1$.
+-        
+-        *Assumption for Robustness:* Clamp $\beta$ to $[0, 1]$ if necessary, though the sources do not explicitly state this. If $s_i - s_{acc} > 1$, $\beta$ becomes negative.
+-
+-    c.  **Modulate Accumulated State:**
++    b.  **Modulate Accumulated State:**
+         Apply $\beta$ to the currently accumulated color and opacity:
+         $$ C_{dst} \leftarrow \beta \cdot C_{dst} $$
+         $$ \alpha_{dst} \leftarrow \beta \cdot \alpha_{dst} $$
+-        [S2].
+-
+-    d.  **Standard Compositing:**
+-        Composite the current sample $(c_i, \alpha_{src})$ onto the modulated accumulator $(C_{dst}, \alpha_{dst})$:
++        [S3].
++        
++    c.  **Standard Compositing:**
++        Composite the current sample $(c_i, \alpha_i)$ onto the modulated accumulator $(C_{dst}, \alpha_{dst})$:
+         $$ C_{dst} \leftarrow C_{dst} + (1 - \alpha_{dst}) \cdot c_i $$
+-        $$ \alpha_{dst} \leftarrow \alpha_{dst} + (1 - \alpha_{dst}) \cdot \alpha_{src} $$
+-        [S2].
++        $$ \alpha_{dst} \leftarrow \alpha_{dst} + (1 - \alpha_{dst}) \cdot \alpha_i $$
++        [S3].
+         
+-        *Note:* Source [S1, unofficial] uses a slightly different compositing order/formula:
+-        $$ C_{out} = \beta_i \cdot C_{out} + (1 - \beta_i \cdot C_{out}.a) \cdot c_i $$
+-        This appears to combine modulation and compositing into one step, but it is inconsistent with the standard front-to-back equation structure described in [S2]. The [S2] formulation is more standard and explicit. We follow [S2] for the core algorithm.
+-
+-    e.  **Update Maximum:**
+-        If $s_i > s_{acc}$, update $s_{acc} \leftarrow s_i$.
+-        [S1, unofficial][S2].
++    d.  **Update Maximum:**
++        If $s_i > s_{acc}$, update $s_{acc} \leftarrow s_i$ [S2].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def mida_composite(samples, step_size):
++def mida_composite(samples, s_min):
+     """
+     samples: list of tuples (s_i, c_i, alpha_i)
+@@ -75,37 +52,23 @@
+     c_i: color (r, g, b)
+     alpha_i: opacity
+-    step_size: float, distance between samples
++    s_min: minimum scalar value in the dataset
+     """
+     # Initialize state
+-    s_acc = -float('inf')
++    s_acc = s_min
+     c_dst = (0.0, 0.0, 0.0)
+     alpha_dst = 0.0
+     
+     for s_i, c_i, alpha_i in samples:
+-        # Step 1: Correct alpha for step size if necessary
+-        # Note: This specific correction is from [S1, unofficial]
+-        # Standard practice may vary. If not needed, alpha_src = alpha_i
+-        alpha_src = 1.0 - (1.0 - alpha_i) ** (step_size * 200.0)
+-        
+-        # Step 2: Calculate modulation factor beta
++        # Step 1: Calculate modulation factor beta
+         if s_i > s_acc:
+             beta = 1.0 - (s_i - s_acc)
+-            # Update s_acc for the next sample
+-            s_acc = s_i
+         else:
+             beta = 1.0
+             
+-        # Clamp beta to [0, 1] to prevent negative contributions
+-        # This is a safeguard not explicitly in sources but implied by physical meaning
+-        beta = max(0.0, min(1.0, beta))
+-        
+-        # Step 3: Modulate accumulated color and transparency
++        # Step 2: Modulate accumulated color and transparency
+         c_dst = (beta * c_dst[0], beta * c_dst[1], beta * c_dst[2])
+         alpha_dst = beta * alpha_dst
+         
+-        # Step 4: Standard front-to-back compositing
+-        # c_dst <- c_dst + (1 - alpha_dst) * c_src
+-        # alpha_dst <- alpha_dst + (1 - alpha_dst) * alpha_src
+-        
++        # Step 3: Standard front-to-back compositing
+         one_minus_alpha_dst = 1.0 - alpha_dst
+         c_dst = (
+@@ -114,30 +77,34 @@
+             c_dst[2] + one_minus_alpha_dst * c_i[2]
+         )
+-        alpha_dst = alpha_dst + one_minus_alpha_dst * alpha_src
++        alpha_dst = alpha_dst + one_minus_alpha_dst * alpha_i
+         
++        # Step 4: Update maximum scalar intensity
++        if s_i > s_acc:
++            s_acc = s_i
++            
+     return c_dst, alpha_dst
+ ```
+ 
+ **Parameters:**
+-*   **Step Size Correction Factor:** 200.0 [S1, unofficial]. This value is specific to the implementation in [S1, unofficial] and may need adjustment for different resolutions or transfer functions.
+-*   **Scalar Intensity Range:** The formula assumes scalar intensities are normalized or scaled such that differences are meaningful. If $s_i - s_{acc} > 1$, $\beta$ becomes negative. Sources do not specify normalization. [G] Implementers should ensure scalar values are normalized to $[0, 1]$ or that the difference is scaled appropriately.
++*   **Scalar Intensity Range:** A range of mapped data intensity values (defined by minimum and maximum) can be specified to filter which volumetric features contribute to the final image [S2].
++*   **Color Modulation:** The obtained gray-scale values can be modulated by a user-specified color value to result in more realistic visualizations [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Negative Beta:** If $s_i - s_{acc} > 1$, $\beta < 0$. This can cause color inversion or artifacts. Clamping $\beta$ to $[0, 1]$ is recommended [G].
+-*   **Definition of "Current Maximum":** There is ambiguity in whether $s_{acc}$ is updated before or after calculating $\beta$. [S1, unofficial] updates it after, while [S2] implies it is the maximum *before* the current sample. The pseudocode above follows the logic that $\beta$ is calculated based on the difference from the *previous* maximum, and then the maximum is updated.
+-*   **Uncertainty in Implementation:** The author of [S1, unofficial] expresses uncertainty about the correctness of the implementation [S1, unofficial].
++*   **Negative Beta:** If $s_i - s_{acc} > 1$, $\beta$ becomes negative, which can cause color inversion or artifacts [G]. Implementers should clamp $\beta$ to $[0, 1]$ if necessary.
++*   **Definition of "Current Maximum":** $s_{acc}$ tracks the maximum of *previous* samples along the ray. It is updated after $\beta$ is calculated to ensure the modulation factor compares against the true prior maximum [S2].
++*   **Step Size Correction:** One source suggests correcting input alpha for varying step sizes using `alpha_src = 1.0 - (1.0 - alpha_i) ** (step_size * 200.0)` [S1, unofficial]. This factor is implementation-specific and may require adjustment for different resolutions or transfer functions.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. Same as standard compositing.
+-*   **Memory Complexity:** $O(1)$ per ray, storing only $s_{acc}$, $C_{dst}$, and $\alpha_{dst}$.
+-*   **Strengths:** Enhances visibility of high-intensity features by reducing occlusion from lower-intensity features behind them. Combines benefits of DVR and MIP [S2].
+-*   **Limitations:** Sensitive to the scalar intensity range and normalization. Can produce artifacts if the difference $s_i - s_{acc}$ is large. The step size correction factor is arbitrary [S1, unofficial].
+-*   **When to Use:** When high-intensity features (e.g., bones, contrast agents) are of primary interest and should not be occluded by lower-intensity structures.
+-*   **When Not to Use:** When low-intensity features are important, or when the scalar values do not correlate with importance.
++*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples, matching standard compositing [G].
++*   **Memory Complexity:** $O(1)$ per ray, storing only $s_{acc}$, $C_{dst}$, and $\alpha_{dst}$ [G].
++*   **Strengths:** Enhances visibility of high-intensity features by reducing occlusion from lower-intensity features behind them, combining the benefits of DVR and MIP [S2]. It allows users to control visualization with a single set of GUI slider controls defining an intensity range, eliminating the need for complex transfer function specification [S2].
++*   **Limitations:** Sensitive to the scalar intensity range and normalization. Can produce artifacts if the difference $s_i - s_{acc}$ is large or unclamped. The step size correction factor is arbitrary and implementation-dependent [S1, unofficial].
++*   **When to Use:** When high-intensity features (e.g., bones, contrast agents) are of primary interest and should not be occluded by lower-intensity structures [S2].
++*   **When Not to Use:** When low-intensity features are important, or when the scalar values do not correlate with feature importance [S2].
+ 
+ ## Background
+-MIDA was introduced by Bruckner et al. in 2009 [BG09] [S2]. It was extended for rendering multichannel data and applied to visualization in neurobiology research [BSG∗09] [S2]. It is part of the family of importance-driven volume rendering techniques.
+-
++MIDA was introduced by Bruckner et al. in 2009 [S3]. It was extended for rendering multichannel data and applied to visualization in neurobiology research [S3]. It is part of the family of importance-driven volume rendering techniques [S3].
+ ## Sources
+ [S1] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
+-[S2] Fast Volumetric Data Exploration with Importance-Based Accumulated Transparency Modulation, https://doi.org/10.2312/vg/vg10/061-068, fetched 2026-10-26+[S2] Context-Preserving Volumetric Data Set Exploration Using a 3D Painting Metaphor, https://doi.org/10.1007/978-3-642-33179-4_33, fetched 2026-10-27
++[S3] Fast Volumetric Data Exploration with Importance-Based Accumulated Transparency Modulation, https://doi.org/10.2312/vg/vg10/061-068, fetched 2026-10-26

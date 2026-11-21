@@ -1,0 +1,288 @@
+OpenMC Monte Carlo Code. Contribute to openmc-dev/openmc development by creating an account on GitHub.
+
+Search regions outside of many objects with a bounding box tree by GuySten · Pull Request #4167 · openmc-dev/openmc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+GuySten
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Contributor
+Description
+This PR is stacked on the distance-caching PR (#4166), which is stacked on #4160. Only the last commit is new.
+A cell that is the space outside of many objects, such as the water around rods or the matrix around TRISO particles, has a region that is the intersection of many children, one per object. Finding whether it contains a point, or where a ray leaves it, evaluates every child. This is why a flat model is much slower than the same model built with a lattice.
+With this PR, when enough children of the root intersection are false only inside finite boxes, those children are put in a bounding volume hierarchy, built top-down with the binned surface area heuristic. Only two kinds of children are then evaluated:
+for a point, the children whose boxes contain it;
+for a ray, the children whose boxes the ray enters before the nearest boundary found so far.
+The tree is used when at least 32 children have finite boxes and a point is in at most an eighth of the boxes on average, as estimated from their volumes. Other regions are evaluated as before. A region that is an intersection of half-spaces, such as the space outside of many spheres, is searched the same way.
+Two more details:
+Working space: the surfaces of each child are stored consecutively, so a child is searched with working space for its own surfaces only. This keeps the tree effective in event-based mode, where the working space per particle is limited.
+Plane walls: children without finite boxes that are single half-spaces, such as the walls of a vessel made of many planes, are searched together in one pass over their surfaces, as for a simple region.
+Results are unchanged apart from roundoff. The distance to a boundary reached after virtual crossings of other children is now added up over fewer steps. On the one model where this showed, the tally differs by 1.7e-16 relative and the particle histories are the same.
+Results
+Transport time, single thread, median of interleaved runs, compared with the distance-caching PR (#4166).
+Model
+Caching PR
+This PR
+Ratio
+Randomly placed finite rods
+404 s
+0.44 s
+0.0011
+400 finite steel rods in a water tank
+3.32 s
+0.36 s
+0.11
+Flat TRISO (particles placed directly in the matrix)
+214 s
+87 s
+0.41
+10 cm slice of a flat TRISO compact
+397 s
+295 s
+0.74
+17 other models (ATR, FNG, PWR, shields, SCDR, lattice models, ...), 5 runs each
+0.96–1.05
+Adversarial models checked against develop:
+Ring of 360 sectors cut by planes through the axis: cell boxes overlap heavily, so the rule keeps the linear search. Within noise.
+500-plane polygonal vessel holding 40 spheres: 0.87 s vs 0.90 s on develop. Before the plane walls were searched in one pass, this model was 2.4 times slower.
+Testing
+test_box_tree.cpp: tree queries against brute force, including rays that miss every box.
+test_region.cpp: 20,000 random rays in a region outside of 40 finite rods. Each boundary found is checked to be where the ray leaves the region. The same boundaries are found with full working space, with working space for one child only, and with none.
+test_region_child_boxes.py: cells found and boundaries crossed in models with spheres and rods, compared with Python's evaluation of the regions.
+The full test suite passes locally. The only errors are tests that need ENDF data or dlopen, which fail the same way on develop.
+Checklist
+I have performed a self-review of my own code
+I have run clang-format (version 18) on any C++ source files (if applicable)
+I have followed the style guidelines for Python source files (if applicable)
+I have made corresponding changes to the documentation (if applicable)
+I have added tests that prove my fix is effective or that my feature works (if applicable)
+claude
+added 8 commits
+October 2, 2026 23:12
+Represent cell regions as expression trees
+…
+630c14f
+```
+Regions were stored as infix token streams including parenthesis and
+operator tokens. Evaluating a complex region scanned the tokens while
+tracking parenthesis depth, precedence was enforced by inserting
+parentheses, and bounding boxes required converting the expression to
+postfix on every call.
+
+Region specifications are now parsed with a recursive descent parser
+into an expression tree of intersections and unions with half-spaces as
+leaves. Nested operators of the same type are merged, so the depth of
+the tree is the number of alternations between intersection and union.
+The tree is stored in pre-order with the index of the end of each
+subtree and of the parent of each node, so contains_complex evaluates it
+in a single loop without recursion, skipping the rest of a subtree as
+soon as its value is known. The half-spaces of a region are also stored
+as a contiguous list, which is all a simple region needs and is used for
+distance calculations.
+
+Complements are removed while parsing by applying De Morgan's laws to
+the tree. Previously complement operators were removed by flipping the
+operators in the token stream before precedence was enforced, so the
+complement of an expression mixing intersection and union without inner
+parentheses, such as ~(1 2 | 3), was interpreted as -1 | (-2 -3) instead
+of (-1 | -2) -3. Expressions written by the Python API are fully
+parenthesized and were not affected. A test comparing cell lookup
+against the Python region parser for random expressions is added.
+
+Region strings written to the summary file are generated from the tree.
+They are equivalent to the previous strings, but redundant parentheses
+are no longer kept. n_surfaces now returns the number of half-spaces
+rather than the number of tokens including operators.
+
+Results are identical for the tested models. Transport time is
+unchanged for lattice and simple geometries, and reduced by 16% for a
+water tank containing 400 rods, where the water region is the tank minus
+the rods.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+Remove code left unused by the region expression tree
+…
+80f73af
+```
+CSGCell::find_left_parenthesis searched token streams and had no
+callers, the cell ID argument of Region::bounding_box was only used for
+error messages when converting the expression to postfix, and the
+<set> and <sstream> includes are no longer used in cell.cpp.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+Update C++ region tests for expression tree output
+…
+e38ad1b
+```
+Region::str() is now generated from the expression tree, in which nested
+operators of the same type are merged and redundant parentheses are not
+kept, so the expected string for the issue openmc-dev#3685 case changes from
+" ( ( -1 2 ( -3 4 ) ) | ( -5 6 ) )" to the equivalent
+" ( -1 2 -3 4 ) | ( -5 6 )". Add cases checking that complements of
+mixed expressions are applied after grouping.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+Keep complex-region data out of line in Region
+…
+f3d451e
+```
+A simple region needs only its half-spaces, so the expression tree of a
+complex region is moved behind a pointer. This keeps Region, and the cells
+holding it, small for the common case of simple cells.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+Cache surface distances and senses when tracking in complex regions
+…
+bd0bfad
+```
+The distance to the boundary of a complex region is found by stepping
+from one surface crossing to the next along the ray until crossing a
+surface changes whether the ray is in the region. Every step recomputed
+the distance to and the sense with respect to every half-space of the
+region, so a call with k virtual crossings cost (k + 1) N distance and up
+to (k + 2) N sense evaluations for N half-spaces, counting surfaces that
+appear several times in the expression once per appearance.
+
+The half-spaces in the expression tree of a complex region now refer to
+a list of the distinct surfaces of the region. Distances and senses are
+evaluated once per distinct surface per call and updated as the ray
+moves: distances to the other surfaces decrease by the distance moved,
+and only the surfaces at the new position are evaluated again. The
+updated distances are only used to select the next candidate surface;
+the distance to the candidate is recomputed from the current position,
+so the result is the same as before apart from the choice among surfaces
+at exactly the same distance. Membership is evaluated from the cached
+senses with the same tree evaluation as contains_complex.
+
+The cached distances and senses are kept in working space owned by each
+particle, next to its boundary information, and sized once for the region
+with the most surfaces, so that no memory is allocated during transport.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+Limit the working space for complex regions in event-based mode
+…
+bc3261c
+```
+Each particle keeps working space for finding boundaries in complex
+regions, sized for the region with the most surfaces. In event-based mode
+up to max_particles_in_flight particles exist at once, so a region with
+thousands of surfaces could need gigabytes. The total size of the working
+space of the particles in flight is now limited to 256 MB, and regions
+with more surfaces than it then holds are searched as before, without it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+Give working space for complex regions only to particles
+…
+a29a471
+```
+The working space for finding boundaries in complex regions was sized in
+the constructor of every geometry state, including the temporary ones used
+only to locate a point, such as when checking whether a sampled source site
+is in the source's domain. With a complex region of thousands of surfaces,
+each of these allocated and zeroed tens of kilobytes; a fixed source
+constrained to a small cell ran 7 times slower than before. The working
+space is now sized when a particle is constructed. Other geometry states
+have none, and search complex regions without it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+Search regions outside of many objects with a bounding box tree
+…
+2ca508d
+```
+A region that is the intersection of many children, such as the water
+around rods or the matrix around TRISO particles, was evaluated by testing
+every child, both to determine whether it contains a point and to find the
+distance to its boundary. When enough of the children are false only
+within finite boxes, the children with boxes are now put in a bounding
+volume hierarchy, and only the children whose boxes contain the point, or
+whose boxes the ray enters before the nearest boundary found so far, are
+evaluated. A region that is an intersection of half-spaces, such as the
+space outside of many spheres, is searched the same way.
+
+The tree is used when at least 32 children have finite boxes and a point
+is in at most an eighth of the boxes on average, as estimated from their
+volumes. Children without finite boxes that are single half-spaces, such
+as the walls of a vessel made of many planes, are searched together in
+one pass over their surfaces, as in a simple region. Other regions are
+evaluated as before. Results are unchanged apart from roundoff in the
+distance to a boundary reached after virtual crossings.
+
+The surfaces of each child are stored consecutively, so that a child is
+searched with working space for its own surfaces only. In event-based
+mode, where the working space of each particle may be too small for all
+of the surfaces of the region, the children are still searched with it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014RN7JroEkrbkLKVHbMDap9
+```
+GuySten
+added
+Performance
+Geometry
+labels
+Oct 4, 2026
+This was referenced Oct 4, 2026
+Search universes with many cells with a bounding box tree
+#4168
+Draft
+Make distribcell setup scale with the number of universes
+#4164
+Open
+Merge remote-tracking branch 'upstream/develop' into claude/region-bo…
+…
+6400828
+```
+…x-tree
+```
+coderabbitai
+Bot
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Important
+Draft PR not reviewed
+Draft PRs are not automatically reviewed by default.
+Trigger a manual review
+To automatically review draft PRs, update your CodeRabbit configuration:
+```
+reviews:
+  auto_review:
+    drafts: true
+```
+Autofix · Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts
+Comment @coderabbitai help to get the list of available commands.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+Geometry
+Performance
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

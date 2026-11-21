@@ -1,0 +1,157 @@
+# Occlusion Caching
+
+Also called: Baked Volumetric Shadows, Baking Occlusion
+
+## Overview
+Occlusion caching is a performance optimization for static volumetric lighting that pre-calculates shadow and ambient occlusion data into volume textures, avoiding expensive per-frame camera renders [S2, unofficial]. It sets itself apart from real-time ray marching by trading runtime compute for a one-time or event-driven baking cost, leveraging the static nature of most cloud volumes and occluders [S2, unofficial].
+
+## How it works
+The method consists of two phases: a baking stage where occlusion data is captured and compressed, and a decomposition stage where this data is interpolated at runtime.
+
+### Inputs and Outputs
+*   **Inputs:** Static light position/orientation, static occluder geometry, camera parameters for capture.
+*   **Outputs:** Occlusion volumes $V_{occl}$ containing spherical harmonic (SH) coefficients, and runtime interpolation weights.
+
+### Data Structures
+*   **Occlusion Volumes ($V_{occl}$):** A grid of volumetric cells. Each cell $v_i^{occl}$ stores principal components of occlusion as SH coefficients $f_o^i$.
+*   **Depth Cubemaps ($\{\hat{D}_p^i\}_{p=1}^6$):** Six depth maps per volume cell, captured from six non-overlapping 90-degree FoV cameras.
+*   **Occlusion Cubemaps ($\{\hat{O}_p^i\}_{p=1}^6$):** Derived from depth cubemaps, representing the occlusion state.
+
+### Steps
+
+1.  **Baking Stage (Capture):**
+    For each volume cell $v_i^{occl}$:
+    1.  Set up six cameras with 90-degree Field of View (FoV), arranged non-overlappingly around the cell center [S1].
+    2.  Perform six render passes to obtain depth cubemaps $\{\hat{D}_p^i\}_{p=1}^6$ [S1].
+    3.  Convert depth cubemaps $\{\hat{D}_p^i\}_{p=1}^6$ into occlusion cubemaps $\{\hat{O}_p^i\}_{p=1}^6$ [S1].
+    4.  Compute the principal components of the occlusion data and store them as SH coefficients $f_o^i$ for the cell [S1].
+
+2.  **Decomposition Stage (Runtime Interpolation):**
+    For a surface point $x$ with normal $n$:
+    1.  Identify the eight nearest occlusion volumes $\{v_k\}_{k=1}^8$ to $x$. Let $p_k$ be the position vector of volume $v_k$ and $f_k^o$ be its SH coefficients [S1].
+    2.  Calculate standard trilinear interpolation weights $\{w_k\}_{k=1}^8$ based on the relative position of $x$ within the grid [S1].
+    3.  Apply **Masked Trilinear Interpolation** to compute modified weights $\tilde{w}_k$:
+        $$
+        \tilde{w}_k = 
+        \begin{cases} 
+        0 & \text{if } (p_k - x) \cdot n \le 0 \\
+        w_k & \text{if } (p_k - x) \cdot n > 0 
+        \end{cases}
+        $$
+        This mask ensures that only occlusion from the upper hemisphere defined by $n$ contributes to the ambient occlusion integral [S1].
+    4.  Normalize the weights:
+        $$
+        \hat{w}_k = \frac{\tilde{w}_k}{\sum_{j=1}^8 \tilde{w}_j}
+        $$
+    5.  Interpolate the SH coefficients to obtain the final occlusion coefficients $f_x^o$:
+        $$
+        f_x^o = \sum_{k=1}^8 \hat{w}_k f_k^o
+        $$
+        [S1]
+
+### Parameters
+*   **Bake Interval:** Controls caching behavior.
+    *   *On Start:* Captures once at startup; re-captures if light moves or rotates (unless Ignore Rotation is enabled) [S2, unofficial].
+    *   *Every Frame:* Continuous capture for dynamic occluders [S2, unofficial].
+*   **Shadow Resolution:** Resolution of the capture cubemaps (e.g., 512x512) [S2, unofficial].
+*   **Ignore Rotation:** Boolean flag. If enabled, rotating the light does not trigger re-capture; the map is reprojected [S2, unofficial].
+*   **Auto Toggle Distance:** Distance threshold beyond which occlusion is disabled for far lights [S2, unofficial].
+*   **Check Time Interval:** Frequency of Auto Toggle distance checks. Default: 1 second [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Dynamic Occluders:** If occluders move independently of the light (e.g., a fan), "On Start" baking will produce stale shadows. Use "Every Frame" or event-driven updates [S2, unofficial].
+*   **Rotation:** Without "Ignore Rotation," rotating a static light triggers a full re-capture, increasing cost. Enable this flag for lights with attached occluders (e.g., lamp cages) [S2, unofficial].
+*   **Visibility:** Capture can be suspended when the light volume is not visible to any camera to save resources [S2, unofficial].
+*   **Point Light Orientation:** For "Point Light Half Sphere To Camera" mode, re-capture only occurs if the camera direction changes by more than 45 degrees [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Setup (C#-like logic translated to Python-like pseudocode)
+class VolumetricLight:
+    def __init__(self):
+        self.enable_shadows = False
+        self.shadow_bake_interval = "OnStart" # or "EveryFrame"
+        self.shadow_resolution = 512
+        self.ignore_rotation = False
+        self.auto_toggle_distance = 100.0
+        self.check_time_interval = 1.0
+        self.occlusion_volumes = {} # Map of cell_id -> SH_coefficients
+
+    def update_material_properties(self):
+        """Apply settings to the rendering pipeline."""
+        pass
+
+    def schedule_shadow_capture(self):
+        """Trigger a manual re-capture of occlusion data."""
+        self._perform_bake()
+
+    def _perform_bake(self):
+        """
+        Baking stage:
+        1. For each volume cell v_i:
+           a. Render 6 depth cubemaps from 90-degree FoV cameras.
+           b. Convert to occlusion cubemaps.
+           c. Compute SH coefficients f_o^i.
+           d. Store in occlusion_volumes.
+        """
+        for cell_id, cell_center in self.get_volume_cells():
+            depth_cubemaps = render_six_cubemaps(cell_center, fov=90)
+            occlusion_cubemaps = convert_depth_to_occlusion(depth_cubemaps)
+            sh_coeffs = compute_sh_coefficients(occlusion_cubemaps)
+            self.occlusion_volumes[cell_id] = sh_coeffs
+
+    def get_occlusion_at_point(self, point_x, normal_n):
+        """
+        Decomposition stage:
+        1. Find 8 nearest volumes.
+        2. Compute masked trilinear weights.
+        3. Interpolate SH coefficients.
+        """
+        nearest_volumes = self.find_8_nearest_volumes(point_x)
+        total_weight = 0.0
+        interpolated_sh = [0.0] * 15 # Assuming 4th order SH (15 coeffs)
+
+        for vol in nearest_volumes:
+            p_k = vol.position
+            f_k = vol.sh_coefficients
+            w_k = compute_trilinear_weight(point_x, p_k)
+            
+            # Masked Trilinear Interpolation
+            if dot(p_k - point_x, normal_n) <= 0:
+                w_tilde_k = 0.0
+            else:
+                w_tilde_k = w_k
+            
+            total_weight += w_tilde_k
+            for i in range(len(interpolated_sh)):
+                interpolated_sh[i] += w_tilde_k * f_k[i]
+
+        if total_weight > 0:
+            for i in range(len(interpolated_sh)):
+                interpolated_sh[i] /= total_weight
+        
+        return interpolated_sh
+```
+
+## Subtopics
+
+### Masked-Trilinear Interpolation for AO
+A variant of the interpolation step used in the decomposition phase. Standard trilinear interpolation weights $\{w_k\}$ are modified to $\{\tilde{w}_k\}$ by zeroing out contributions from volumes where the vector from the sample point to the volume center has a non-positive dot product with the surface normal ($ (p_k - x) \cdot n \le 0 $). This ensures that ambient occlusion is only calculated from the upper hemisphere relative to the surface normal, preventing incorrect shadowing from below [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Baking is $O(N \cdot F)$ where $N$ is the number of volume cells and $F$ is the number of frames captured. Runtime interpolation is $O(1)$ per sample, involving only 8 nearest neighbor lookups and linear interpolation [S1][S2, unofficial].
+*   **Memory Complexity:** $O(N \cdot C)$ where $C$ is the number of SH coefficients per cell. Additional memory for depth cubemaps during baking [S1].
+*   **Performance:** Eliminates per-frame shadow ray marching for static lights, significantly reducing GPU load [S2, unofficial].
+*   **Strengths:** Ideal for static scenes with static occluders (windows, street lamps) [S2, unofficial]. Event-driven updates handle occasional changes (doors opening) efficiently [S2, unofficial].
+*   **Limitations:** Not suitable for highly dynamic scenes with moving occluders unless "Every Frame" baking is used, which negates performance gains. Reprojection errors may occur if "Ignore Rotation" is used with complex occluder geometries [S2, unofficial].
+*   **When to Use:** Static volumetric lights with static or slowly moving occluders.
+*   **When Not to Use:** Real-time dynamic occlusion requirements without acceptable latency for re-baking.
+
+## Background
+Occlusion caching in volumetric rendering was introduced to address the high computational cost of real-time shadow calculation for volumetric lights. The technique leverages the fact that many volumetric lights and their occluders are static in typical scenes. The method of using SH coefficients to store occlusion data and masked trilinear interpolation for decomposition is detailed in the GS-IR paper [S1]. The Unity URP implementation provides practical settings and runtime behaviors for game engines [S2, unofficial].
+
+## Sources
+[S1] GS-IR: 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52733.2024.02045, fetched 2026-10-26
+[S2] Volumetric Lighting in Unity URP: Shadows, Translucency ..., https://kronnect.com/company/blog/volumetric-lighting-unity-urp-guide/, fetched 2026-10-28 (unofficial)

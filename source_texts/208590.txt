@@ -1,0 +1,191 @@
+This is a simple project for volume rendering of DICOM data in Unity. - Implement 2D Transfer Function with gradient magnitude by Martincel · Pull Request #3 · Martincel/UnityDICOMVolumeRendering
+
+Implement 2D Transfer Function with gradient magnitude by Martincel · Pull Request #3 · Martincel/UnityDICOMVolumeRendering · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Martincel
+commented
+May 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Upgrades the volume renderer from a 1D to a 2D transfer function, adding gradient magnitude as a second dimension for distinguishing tissue boundaries from interiors.
+Problem with 1D TF
+Soft tissue, muscle, blood and organs all share the same density range (t ≈ 0.25–0.27, ~2% of the full scale). A 1D transfer function cannot differentiate them because it only maps density → colour+alpha.
+Solution: 2D Transfer Function
+The second dimension is gradient magnitude — how fast density changes around a voxel:
+Low gradient (≈ 0) = voxel is inside a homogeneous region (organ interior)
+High gradient (≈ 1) = voxel is on a tissue boundary/surface
+Changes
+VolumeRendering-Basic.shader
+Added _GradStep property (default 0.01) — step size for central-difference gradient estimation
+Per raymarching step: compute gradient magnitude via central differences in all 3 axes (6 extra texture samples)
+transferFunction(density, gradMag) now samples the transfer texture at float2(density, gradMag) instead of float2(density, 0)
+Fixed _Intensity range from 0–1 to 0–10 (old max of 1.0 was too dim for most scenes)
+VolumeRenderingWithTransferFunction.cs
+Transfer texture resized from 100×1 to 100×64 (X = density, Y = gradient magnitude)
+New Inspector slider Gradient Influence (0–1):
+0 → all rows of the 2D texture are identical → backward-compatible 1D TF behaviour
+1 → row alpha scales with Y (gradient magnitude) → surface-only rendering
+How to test
+Open the project in Unity (auto-recompile)
+On the VolumeRenderingWithTransferFunction component, enable Update Texture In Every Frame
+Ensure Intensity ≥ 1.0 and Iteration ≥ 50 on the material
+Slide Gradient Influence from 0 → 1 and observe tissue boundary extraction
+Tune Gradient Step on the material if edges look too sharp or too soft
+Reviewer notes
+gradientInfluence = 0 is the default, so existing scenes are unaffected on first open
+The 6 extra texture samples per raymarching step add GPU cost; reduce _Iteration if performance drops
+Next step candidates: pre-computed gradient texture in DicomImporter (faster), or a 2D TF editor widget
+Martincel
+and others
+added 8 commits
+May 29, 2026 22:45
+Implement 2D Transfer Function with gradient magnitude
+…
+6658d37
+```
+Shader (VolumeRendering-Basic.shader):
+- Add _GradStep property (default 0.01) for central difference step size
+- Compute gradient magnitude per raystep via central differences in 3D texture
+- Transfer function now samples 2D texture: X=density, Y=gradient magnitude
+- Fix _Intensity range to 0-10 (was 0-1, too low for visible rendering)
+
+VolumeRenderingWithTransferFunction.cs:
+- Transfer texture changed from 1D (100x1) to 2D (100x64)
+- Add gradientInfluence slider (0-1): 0 = identical to 1D TF (backward
+  compatible), 1 = surface-only rendering (alpha scales with gradient magnitude)
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Add _GradScale to amplify gradient magnitude signal
+…
+b663acf
+```
+CT data has small per-voxel density differences (~0.01-0.05) so raw
+gradient magnitude rarely exceeds 0.1-0.2, meaning the 2D TF Y axis
+was never sampled past the bottom rows. _GradScale (default 5.0) stretches
+the signal to use the full 0-1 range of the transfer texture.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Add CT preset 2D settings and visual TF editor
+…
+a40852f
+```
+VolumeRenderingWithTransferFunction.cs:
+- Apply2DSettings() sets gradientInfluence + _GradScale + _Intensity per
+  preset when "Apply CT Preset" is called (e.g. SoftTissue: influence=0.8,
+  scale=8; BloodVessels: influence=0.9, scale=10; MIP: influence=0)
+- Public API for editor: GetTransferTexture(), PaintTF(), RebuildFromGradient()
+- TFWidth/TFHeight are now public constants
+- Texture filterMode set to Bilinear for smoother preview
+
+VolumeRenderingEditor.cs (new):
+- Custom Inspector for VolumeRenderingWithTransferFunction
+- Shows 100x64 TF texture as a large interactive preview with axis labels
+  (X = density: air → bone, Y = gradient magnitude: interior → surface)
+- Left-click/drag on preview paints pixels with selected color and radius
+- "Rebuild from Gradient" button resets manual paint to gradient-based TF
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix 2D TF editor: paintLock prevents UpdateTexture overwriting paint
+…
+8511c0b
+```
+VolumeRenderingWithTransferFunction.cs:
+- Add paintLock bool (non-serialized): set true by PaintTF(), cleared by
+  RebuildFromGradient(). UpdateTexture() is a no-op while paintLock=true,
+  so Update()/updateTextureInEveryFrame can no longer overwrite manual paint.
+- RebuildFromGradient() now clears paintLock before rebuilding.
+
+VolumeRenderingEditor.cs:
+- Remove Undo.RecordObject (texture_ is not serialized, undo doesn't work)
+- Remove GUIUtility.RotateAroundPivot vertical label (caused layout issues)
+- Simplify event handling: single HandlePaint() with clear rect/UV mapping
+- Use MouseCursor.Crosshair instead of CustomCursor
+- Simpler axis labels as plain text rows
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix TF editor mouse handling with GetControlID
+…
+5b4c776
+```
+Use GUIUtility.GetControlID + GetTypeForControl instead of raw
+Event.current.type checks. This is the correct Unity pattern for
+interactive editor controls: GetControlID registers the control,
+hotControl tracks drag ownership across frames, and GetTypeForControl
+filters events correctly per control.
+
+Also auto-initializes texture_ if null (e.g. after domain reload)
+by calling RebuildFromGradient() before drawing.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix CS0117: replace MouseCursor.Crosshair with MouseCursor.Arrow
+…
+1341984
+```
+Crosshair does not exist in Unity's MouseCursor enum.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix DicomCodecException: add JPEG fallback via Unity LoadImage
+…
+ad71573
+```
+fo-dicom 5.x does not ship a JPEG Baseline decoder for Unity. When
+RenderImage() throws DicomCodecException, Path B extracts the raw
+JPEG bytes from DicomPixelData and decodes them with Unity's built-in
+Texture2D.LoadImage(), which supports JPEG natively.
+
+DICOM JPEG Baseline stores a valid JPEG stream directly in the pixel
+data fragment, so LoadImage() works without any additional processing.
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Fix Converter: handle empty path, size warning, better error messages
+…
+10018ec
+```
+- Check for empty path (user cancelled Save dialog) before CreateAsset
+- Wrap CreateAsset in try-catch with helpful message
+- Warn if estimated Texture3D size > 200 MB
+- Null check per-texture in the loop
+- Descriptive error messages with actual dimensions on mismatch
+
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>
+```
+Martincel
+merged commit 26d7195
+into
+main
+May 31, 2026
+Martincel
+deleted the
+feature/2d-transfer-function
+branch
+October 16, 2026 11:44
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

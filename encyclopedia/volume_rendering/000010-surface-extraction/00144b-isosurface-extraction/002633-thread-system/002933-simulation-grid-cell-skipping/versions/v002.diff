@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,20 @@
+ 
+ ## Overview
+-Simulation Grid Cell Skipping is an optimization technique for surface extraction that accelerates iteration over voxel columns by skipping over empty and fully occupied simulation grid cells, processing only partially filled cells [S1]. It sets itself apart from standard voxel traversal by leveraging the coarse-grained status of simulation grid cells (empty, full, or partial) to bypass large volumes of uniform data, building on the THREAD System's ray-marching framework [3743-thread-system.md].
++Simulation Grid Cell Skipping is an optimization technique for surface extraction that accelerates iteration over voxel columns by skipping over empty and fully occupied simulation grid cells, processing only partially filled cells [S1]. It differs from standard voxel traversal by leveraging coarse-grained cell status to bypass uniform regions, building on the THREAD System's ray-marching framework [3743-thread-system.md].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A simulation grid where each cell is classified as empty, full, or partially filled; a view ray for each voxel column; the current extraction state.
+-- Output: A list of relevant voxels within partially filled cells for surface extraction; updated ray-marching state.
++- Input: A simulation grid with cell status (empty, full, or partial); view rays for each voxel column [S1].
++- Output: A list of voxels within partially filled cells for surface extraction [S1].
+ 
+ **Data Structures:**
+-- Simulation Grid: A regular 3D grid. Each cell stores a status flag: `EMPTY`, `FULL`, or `PARTIAL`.
+-- Voxel Column: A sequence of voxels along a view ray.
+-- Packed Machine Words: Bits representing voxel occupancy or cell status, processed in chunks for efficiency.
++- Simulation Grid: A regular 3D grid where each cell stores a status flag: `EMPTY`, `FULL`, or `PARTIAL` [S1].
++- Voxel Column: A sequence of voxels along a view ray [S1].
++- Packed Machine Words: Bits representing voxel occupancy or cell status, processed in chunks for efficiency [S1].
+ 
+ **Numbered Steps:**
+-1. For each voxel column, initialize a ray marcher along the view ray corresponding to that column.
++1. For each voxel column, initialize a ray marcher along the view ray corresponding to that column [S1].
+ 2. Iterate over packed machine words rather than single bits, using bit counting intrinsics to quickly determine the next relevant bits to be considered [S1].
+-3. March along the view ray through the simulation grid.
++3. March along the view ray through the simulation grid [S1].
+ 4. Keep marching through full or empty simulation grid cells until encountering a succession of partially filled cells [S1].
+ 5. Interrupt ray marching to iterate over the corresponding voxels when partially filled cells are encountered [S1].
+@@ -26,5 +26,5 @@
+ **Formulas:**
+ - Cell Status Determination: During simulation, determine if a cell is empty, full, or partial based on particle presence [S1].
+-- Ray Marching Step: Advance ray by cell extent ratio, keeping $\alpha$ constant throughout the perspective grid (logarithmic depth partitioning) [S1].
++- Ray Marching Step: Advance ray by cell extent ratio, keeping $\alpha$ constant throughout the perspective grid using logarithmic depth partitioning [S1].
+ 
+ **Parameters:**
+@@ -39,61 +39,39 @@
+ ```python
+ def simulate_grid_cell_skipping(simulation_grid, voxel_columns):
+-    """
+-    Accelerates surface extraction by skipping empty/full cells.
+-    
+-    Args:
+-        simulation_grid: 3D array of cell statuses (EMPTY, FULL, PARTIAL)
+-        voxel_columns: List of view rays, one per voxel column
+-        
+-    Returns:
+-        List of voxels to process for surface extraction
+-    """
+     voxels_to_process = []
+-    
+     for ray in voxel_columns:
+-        # Initialize ray marcher
+-        current_pos = ray.origin
+-        direction = ray.direction
+-        
+-        while current_pos is within simulation_grid_bounds:
+-            # Get current simulation grid cell
+-            cell = get_cell_at_position(simulation_grid, current_pos)
+-            
+-            # Check if cell has partially filled neighbors
+-            has_partial_neighbor = check_neighbors_for_partial(cell, simulation_grid)
+-            
+-            if cell.status == EMPTY or cell.status == FULL:
+-                # Skip if no partial neighbors (inner cell)
+-                if not has_partial_neighbor:
+-                    # Advance ray by cell extent
+-                    current_pos = advance_ray_by_cell(current_pos, direction, cell.extent)
+-                    continue
+-                else:
+-                    # Must process this cell as it borders partial cells
+-                    pass
+-            
+-            # If PARTIAL or (EMPTY/FULL with partial neighbors), process voxels
+-            voxels = iterate_over_voxels_in_cell(cell, ray)
++        current_cell = ray.start_cell
++        while current_cell is not None:
++            has_partial_neighbor = any(
++                simulation_grid[n].status == PARTIAL for n in get_26_neighbors(current_cell)
++            )
++            if current_cell.status in (EMPTY, FULL) and not has_partial_neighbor:
++                current_cell = advance_ray_to_next_cell(current_cell, ray.direction, simulation_grid)
++                continue
++            voxels = iterate_voxels_in_cell(current_cell, ray)
+             voxels_to_process.extend(voxels)
+-            
+-            # Advance ray to next cell
+-            current_pos = advance_ray_by_cell(current_pos, direction, cell.extent)
+-            
++            current_cell = advance_ray_to_next_cell(current_cell, ray.direction, simulation_grid)
+     return voxels_to_process
+ 
+-def check_neighbors_for_partial(cell, simulation_grid):
+-    """Check if any neighbor of the cell is PARTIAL."""
+-    neighbors = get_26_neighbors(cell.position)
+-    for neighbor_pos in neighbors:
+-        if simulation_grid[neighbor_pos].status == PARTIAL:
+-            return True
+-    return False
++def get_26_neighbors(cell):
++    return [(cell.x + dx, cell.y + dy, cell.z + dz)
++            for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
++            if not (dx == 0 and dy == 0 and dz == 0)]
+ 
+-def iterate_over_voxels_in_cell(cell, ray):
+-    """Iterate over voxels in a cell along the ray."""
++def advance_ray_to_next_cell(current_cell, direction, simulation_grid):
++    next_pos = (current_cell.x + direction.x * current_cell.extent,
++                current_cell.y + direction.y * current_cell.extent,
++                current_cell.z + direction.z * current_cell.extent)
++    if not (0 <= next_pos[0] < simulation_grid.width and
++            0 <= next_pos[1] < simulation_grid.height and
++            0 <= next_pos[2] < simulation_grid.depth):
++        return None
++    return simulation_grid[next_pos[0], next_pos[1], next_pos[2]]
++
++def iterate_voxels_in_cell(cell, ray):
++    # Iterate over packed machine words rather than single bits,
++    # using bit counting intrinsics to quickly determine the next relevant bits
+     voxels = []
+-    # Use bit counting intrinsics for packed words
+-    # This is a placeholder for the actual bit-packing logic
+-    # which depends on the specific hardware and data layout
++    # Implementation depends on specific hardware bit-packing layout
+     # Not given in the sources.
+     return voxels
+@@ -106,15 +84,15 @@
+ 
+ ## Operating characteristics
+-- Time Complexity: $O(N)$ where $N$ is the number of voxels, but with a reduced constant factor due to skipping empty/full cells.
+-- Memory Complexity: $O(1)$ additional memory per voxel column for ray marching state.
++- Time Complexity: Not given in the sources.
++- Memory Complexity: Not given in the sources.
+ - Measured Performance: Not given in the sources.
+-- Scaling: Scales well with simulation grid size, as larger uniform regions are skipped more effectively.
+-- Strengths: Significant speedup for simulations with large empty or full regions.
+-- Limitations: Overhead of checking neighbor status; less effective for highly fragmented partial regions.
++- Scaling: Not given in the sources.
++- Strengths: Not given in the sources.
++- Limitations: Not given in the sources.
+ - When to Use: SPH simulations with regular grids and distinct empty/full/partial regions [S1].
+-- When Not to Use: Simulations with highly uniform partial filling or where neighbor checks are too costly.
++- When Not to Use: Not given in the sources.
+ 
+ ## Background
+-Originated in the context of Memory-Efficient On-The-Fly Voxelization of Particle Data [S1]. It leverages the regular grid structure used in SPH simulations for neighbor search [S1].
++Not given in the sources.
+ 
+ ## Sources

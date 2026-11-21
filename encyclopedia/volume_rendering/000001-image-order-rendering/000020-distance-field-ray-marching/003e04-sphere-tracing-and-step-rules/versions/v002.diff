@@ -1,0 +1,89 @@
+--- v001.md
++++ v002.md
+@@ -1,56 +1,53 @@
+ # Sphere Tracing and Step Rules
+ 
+-Also called: Ray marching with SDFs, Distance field ray marching (core mechanism)
++Also called: Distance-field ray marching, SDF ray marching
+ 
+ ## Overview
+-Sphere tracing is an image-order rendering algorithm for implicit surfaces defined by Signed Distance Functions (SDFs) that finds the intersection between a camera ray and geometry without explicit meshes [6223-sphere-tracing-with-sdfs.md]. It sets itself apart from [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by using exact geometric distance bounds rather than probabilistic density accumulation, and from [Terrain Raymarching](1357-terrain-raymarching.md) by supporting arbitrary 3D topology rather than height-field constraints [6223-sphere-tracing-with-sdfs.md]. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md).
++Sphere tracing is a geometric method for rendering implicit surfaces defined by Signed Distance Functions (SDFs) by iteratively advancing a ray along its direction vector, stepping by the distance to the nearest surface [S1, S2, S6, unofficial]. It solves the problem of finding surface intersections without explicit polygonal meshes, leveraging the mathematical property that no geometry exists within the distance returned by the SDF [S8, S27, S49, unofficial]. It sets itself apart from sibling methods by relying on analytic distance bounds for traversal rather than hierarchical acceleration structures like BVHs [6223-sphere-tracing-with-sdfs.md] or multi-resolution image coherence [4615-coarse-to-fine-sphere-tracing.md].
+ 
+ ## Shared principles
+-The method operates on the principle that a Signed Distance Function (SDF) $f(\mathbf{p})$ returns the shortest Euclidean distance from a query point $\mathbf{p} \in \mathbb{R}^3$ to the nearest surface of the scene geometry [S2, S5, S6, S12, unofficial]. The sign of the result indicates the point's position relative to the surface:
+-- $f(\mathbf{p}) < 0$: The point is inside the primitive.
+-- $f(\mathbf{p}) = 0$: The point lies exactly on the surface.
+-- $f(\mathbf{p}) > 0$: The point is outside the primitive.
++The method relies on the mathematical property of the Signed Distance Function (SDF). An SDF $f(\mathbf{p})$ maps a 3D point $\mathbf{p}$ to the shortest Euclidean distance to the nearest surface of the scene geometry [S2, S5, unofficial]. The sign indicates position: $f(\mathbf{p}) < 0$ inside, $f(\mathbf{p}) = 0$ on the surface, and $f(\mathbf{p}) > 0$ outside [S2, S5, S9643].
+ 
+-The core algorithm iteratively advances a ray $r(t) = \mathbf{o} + t\mathbf{d}$ along its direction $\mathbf{d}$ by querying the SDF at the current position $\mathbf{p}_i$. The step size $\Delta t$ is set to the distance value returned by the SDF: $\Delta t = f(\mathbf{p}_i)$ [S2, S7, S14, unofficial][S26][S33, S48, unofficial]. This step size is "safe" because, by the definition of the distance field, no geometry exists closer than $f(\mathbf{p}_i)$ to $\mathbf{p}_i$; thus, the ray cannot overshoot or penetrate a surface [S8, S27, S49, unofficial]. The position is updated as $\mathbf{p}_{i+1} = \mathbf{p}_i + f(\mathbf{p}_i)\mathbf{d}$ [S14, S33, unofficial].
++The core algorithm, often called sphere tracing, proceeds as follows for each pixel:
++1.  **Ray Definition**: A ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction vector [G].
++2.  **Initialization**: The accumulated distance $t$ is initialized to 0 (or a near-plane value) [S1, S3, unofficial].
++3.  **Marching Loop**:
++    *   Evaluate the scene SDF at the current ray position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to get the distance $d = f(\mathbf{p})$ [S1, S34, unofficial].
++    *   **Termination Check**: If $d < \epsilon$ (a small convergence threshold, e.g., $0.001$), the ray has hit the surface [S1, S39, unofficial]. If $t > t_{max}$ (maximum ray distance), the ray has escaped [S1, S34, unofficial].
++    *   **Step**: Advance the ray by the distance $d$: $t \leftarrow t + d$ [S1, S33, unofficial]. This step is "safe" because the SDF guarantees no geometry exists within distance $d$ of $\mathbf{p}$ [S50, unofficial].
++4.  **Shading**: Upon hit, the surface normal $\mathbf{n}$ is estimated, typically via finite differences of the SDF: $\mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|}$ [S2055, S4619]. Lighting is then computed [S1].
+ 
+-The loop terminates when one of the following conditions is met:
+-1.  **Surface Hit:** The distance value $f(\mathbf{p}_i)$ falls below a small convergence threshold $\epsilon$ (e.g., $0.001$), indicating the ray is sufficiently close to the surface [S1, S2, S14, S34, S39, unofficial].
+-2.  **Escape:** The accumulated distance $t$ exceeds a maximum travel distance $t_{max}$, indicating the ray has exited the scene or bounding volume without hitting geometry [S1, S2, S34, unofficial].
+-3.  **Max Steps:** A predefined maximum number of iterations is reached, preventing infinite loops in case of non-convergence [S1, S2, S39, unofficial].
+-
+-Scene composition is achieved by combining primitive SDFs using Boolean operations. The union of two shapes with SDFs $f_1$ and $f_2$ is $\min(f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S1, S38, unofficial]. The intersection is $\max(f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S38, unofficial]. Subtraction (difference) is $\max(-f_1(\mathbf{p}), f_2(\mathbf{p}))$ [S38, unofficial]. Smooth blending between shapes can be achieved using smooth minimum functions, such as Inigo Quilez's `smoothMin(a, b, k)`: $h = \text{clamp}(k - |a-b|, 0, k) / k$; $\text{result} = \min(a,b) - h \cdot h \cdot k / 6$ [S9, S24, unofficial].
+-
+-Transformations are applied to the query point before evaluation. Translation by vector $\mathbf{t}$ uses $f'(\mathbf{p}) = f(\mathbf{p} - \mathbf{t})$ [S35, unofficial]. Scaling by factor $s$ uses $f'(\mathbf{p}) = s \cdot f(\mathbf{p}/s)$ [S35, unofficial]. Domain repetition (tiling) is achieved by taking the modulo of the point coordinates: $f'(\mathbf{p}) = f(\mathbf{p} \pmod 1)$ [S35, unofficial].
+-
+-Surface normals $\mathbf{n}$ at the hit point $\mathbf{p}$ are estimated via the gradient of the SDF: $\mathbf{n} = \frac{\nabla f(\mathbf{p})}{\|\nabla f(\mathbf{p})\|}$ [S1, S10, unofficial]. Since analytical gradients are often unavailable or expensive, they are typically approximated using central finite differences with a small offset $\epsilon$ (e.g., $0.001$):
+-$$ \nabla f(\mathbf{p}) \approx \begin{bmatrix} f(\mathbf{p} + \epsilon \hat{x}) - f(\mathbf{p} - \epsilon \hat{x}) \\ f(\mathbf{p} + \epsilon \hat{y}) - f(\mathbf{p} - \epsilon \hat{y}) \\ f(\mathbf{p} + \epsilon \hat{z}) - f(\mathbf{p} - \epsilon \hat{z}) \end{bmatrix} $$
+-[S1, S35, S39, S45, S46, unofficial].
++Scene composition is achieved by combining primitive SDFs using Boolean operations: Union is $\min(d_1, d_2)$, Intersection is $\max(d_1, d_2)$, and Subtraction is $\max(-d_1, d_2)$ [S35, S38, unofficial]. Transformations (rotation, translation, scaling) are applied to the query point $\mathbf{p}$ before evaluation or to the SDF function itself [S3850].
+ 
+ ## Subtopics
+ 
+ ### [FBM Sphere Tracing with BVH Acceleration](1728-fbm-sphere-tracing-with-bvh-acceleration.md)
+-This method accelerates the sphere tracing of isosurfaces defined by Fractal Brownian Motion (FBM) noise by computing valid Sphere Distance Bounds (SDB) and adaptive step sizes using a Bounding Volume Hierarchy (BVH) derived from the FBM structure itself. Unlike naive sphere tracing which evaluates the full FBM sum at every step, this approach reduces the average evaluation cost in empty space from $O(N)$ to $O(k)$, where $k \ll N$ is the number of octaves required to prove emptiness. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md) by replacing explicit spatial acceleration structures with a procedural hierarchy that allows for early termination of octave summation and tighter step size estimation.
++Accelerates sphere tracing of Fractal Brownian Motion (FBM) isosurfaces by computing valid Sphere Distance Bounds (SDB) and adaptive step sizes using a dynamic Bounding Volume Hierarchy (BVH) derived from the FBM structure. It reduces average evaluation cost in empty space from $O(N)$ to $O(k)$ by progressively evaluating octaves while bounding the remaining potential contribution. Choose this for complex noise-based geometry where standard sphere tracing is too slow due to high-frequency details.
+ 
+ ### [Step Size and Termination Rules](4132-step-size-and-termination-rules.md)
+-This family defines the logic for determining the distance $\Delta t$ advanced along a ray and the conditions under which the marching loop terminates. It solves the trade-off between rendering accuracy (avoiding missed geometry or aliasing) and computational efficiency (reducing sample counts in empty regions) [Parent]. It sets itself apart from sibling methods by providing the fundamental traversal mechanics that [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md) (fixed intervals), [Sphere Tracing](1674-sphere-tracing.md) (SDF-bounded steps), and [Step Size Optimization](2054-step-size-optimization.md) (context-aware steps) implement.
++Defines the logic for determining the incremental distance $\Delta t$ and the conditions for halting the marching loop. It focuses on balancing performance against fidelity by preventing infinite loops and avoiding overshooting. Choose this when you need to customize convergence criteria or handle non-SDF volumetric data where step sizes are not strictly bounded by distance.
++
++### [Coarse-to-Fine Sphere Tracing](4615-coarse-to-fine-sphere-tracing.md)
++Accelerates rendering by initiating the trace at a lower image resolution and progressively refining it. It exploits spatial coherence, allowing neighboring rays to skip redundant computations. Choose this for scenes with high spatial coherence where standard sphere tracing performs many redundant samples at full resolution.
+ 
+ ### [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md)
+-Sphere Tracing is an image-order rendering algorithm for implicit surfaces defined by Signed Distance Functions (SDFs). It solves the problem of finding the intersection between a camera ray and complex, continuous geometry without requiring explicit polygonal meshes or bounding volume hierarchies. It sets itself apart from its sibling [Ray-marching on 3D Gaussians](1036-ray-marching-on-3d-gaussians.md) by using exact geometric distance bounds rather than probabilistic density accumulation, and from [Terrain Raymarching](1357-terrain-raymarching.md) by supporting arbitrary 3D topology rather than height-field constraints. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md).
++The standard implementation for rendering analytic SDFs. It constructs the image directly from equations, allowing for complex, continuous geometry without explicit meshes. Choose this for basic implicit surface rendering where no acceleration structures or multi-resolution strategies are required.
++
++### [Bidirectional Sphere Tracing](7433-bidirectional-sphere-tracing.md)
++A robust surface extraction technique that mitigates convergence failures when rays miss surface edges or intersect non-orthogonally. It uses forward and backward iterations to narrow the possible range of surface positions, then refines the zero-level set. Choose this for scenes with thin features or complex topology where standard sphere tracing may fail to converge.
++
++### [Relaxed Sphere Tracing](9463-relaxed-sphere-tracing.md)
++An acceleration technique that increases the step size beyond the conservative SDF value using a relaxation factor $\omega$. It reverts to the standard safe step if the new sample indicates the ray has jumped over the surface. Choose this when you need faster convergence on smooth surfaces and can tolerate occasional conservative fallbacks.
++
++### Triangle Inequality Enhancement for Sphere Tracing
++An optimization to eliminate unnecessary distance computations for collections of objects by using the triangle inequality to bound the distance to an object based on previous evaluations and ray traversal [S1]. It is particularly effective for large assortments of objects [S1]. However, if all primitives are nearly equidistant from the eye, the triangle inequality does not significantly reduce unnecessary distance evaluations until sphere tracing has traversed much of each ray [S1]. For 9 spheres/plane, it reduced execution time from 2:53 to 1:19 (46% relative time) [S1]. For the zeno logo, it reduced execution time from 26:29 to 19:23 (73% relative time) [S1]. When combined with convexity, it enhances ordinary sphere tracing by 60% [S1].
+ 
+ ### Chunked Sphere Tracing
+-Processes rays in batches to manage memory or compute limits.
+-- [S1, unofficial] Get total number of rays N from ray_bundle.origins.shape[0].
+-- [S1, unofficial] Initialize empty list chunk_colors.
+-- [S1, unofficial] Loop over chunks: for chunk_start in range(0, N, self._chunk_size).
+-- [S1, unofficial] Slice ray_bundle for current chunk: cur_ray_bundle = ray_bundle[chunk_start : chunk_start + self._chunk_size].
+-- [S1, unofficial] Call parent forward method: cur_color = super().forward(sampler, implicit_fn, cur_ray_bundle).
+-- [S1, unofficial] Append color to list: chunk_colors.append(cur_color).
+-- [S1, unofficial] Concatenate all chunk colors along dimension 0: color = torch.cat(chunk_colors, dim=0).
+-- [S1, unofficial] Return concatenated color.
+-- [S1, unofficial] chunk_size: maximum number of rays processed in a single forward pass.
++A memory management technique for processing large numbers of rays by dividing them into chunks. The algorithm gets the total number of rays $N$ from `ray_bundle.origins.shape[0]` [S2, unofficial]. It initializes an empty list `chunk_colors` [S2, unofficial]. It loops over chunks: `for chunk_start in range(0, N, self._chunk_size)` [S2, unofficial]. It slices the ray bundle for the current chunk: `cur_ray_bundle = ray_bundle[chunk_start : chunk_start + self._chunk_size]` [S2, unofficial]. It calls the parent forward method: `cur_color = super().forward(sampler, implicit_fn, cur_ray_bundle)` [S2, unofficial]. It appends the color to the list: `chunk_colors.append(cur_color)` [S2, unofficial]. Finally, it concatenates all chunk colors along dimension 0: `color = torch.cat(chunk_colors, dim=0)` [S2, unofficial]. The key parameter is `chunk_size`, which defines the maximum number of rays processed in a single forward pass [S2, unofficial].
+ 
+ ## Background
+-Origin: The core sphere tracing algorithm was introduced by Turner Whitted in 1980 [S1, unofficial]. It is widely used in real-time graphics for rendering complex implicit surfaces, such as those generated by Fractal Brownian Motion (FBM) or neural networks, where explicit mesh generation is prohibitive [6223-sphere-tracing-with-sdfs.md].
++Sphere tracing was introduced by Turner Whitted in the context of ray tracing, but the specific geometric method for antialiased ray tracing of implicit surfaces using signed distance bounds was formalized by John C. Hart et al. in 1986 [S1]. The method was developed to provide a competitive alternative to standard ray tracing for implicit surfaces, particularly excelling at rendering sophisticated geometric modeling operations [S1]. Early implementations focused on basic sphere tracing, with subsequent enhancements like convexity and triangle inequality optimizations improving performance for complex scenes [S1]. The technique has since become a foundational method in procedural geometry rendering and is widely used in real-time graphics, particularly in shader-based rendering and implicit surface visualization [S2, unofficial].
+ 
+ ## Sources
+-[S1] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)+[S1] Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces, https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
++[S2] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)

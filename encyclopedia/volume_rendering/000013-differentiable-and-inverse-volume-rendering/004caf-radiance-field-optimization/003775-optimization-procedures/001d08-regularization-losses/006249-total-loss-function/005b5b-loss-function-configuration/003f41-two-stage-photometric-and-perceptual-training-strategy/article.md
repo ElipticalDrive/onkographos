@@ -1,0 +1,106 @@
+# Two-Stage Photometric and Perceptual Training Strategy
+
+Also called: Multi-view and Voxel Transformer Joint Fine-tuning, SplatVoxel Two-Stage Training
+
+## Overview
+This strategy optimizes feed-forward radiance field networks (specifically SplatVoxel) by decoupling the learning of multi-view consistency from fine-grained voxel attribute refinement. It addresses the instability of jointly training multi-view and voxel transformers by first establishing a robust multi-view backbone before fine-tuning the full system. It differs from standard single-stage optimization by using distinct perceptual weighting factors for the two transformer branches to balance structural consistency and photometric accuracy.
+
+## How it works
+**Inputs:** Multi-view static scene images (e.g., from DL3DV [35]), ground-truth target images $\hat{I}$, and pre-trained VGG features for perceptual loss.
+**Outputs:** Trained multi-view Transformer, trained Voxel Transformer, and predicted Gaussian primitives.
+
+**Data Structures:**
+*   **Multi-view Transformer:** Backbone network processing input views.
+*   **Voxel Transformer:** Network processing sparse voxel grids.
+*   **Gaussian Primitives:** Predicted attributes $\mathbf{G}'_j$ derived from fine-level voxel attributes $\mathbf{E}_j$ and transformer latents $\mathbf{O}_j$ via an MLP [S1].
+
+**Loss Function:**
+The total loss combines Mean Squared Error (MSE) and Learned Perceptual Image Patch Similarity (LPIPS) [85]:
+$$
+\mathcal{L} = \mathcal{L}_{\text{MSE}}(\hat{I}, I) + \lambda \mathcal{L}_{\text{LPIPS}}(\hat{I}, I)
+$$
+where $I$ is the rendered image from predicted Gaussian primitives, $\hat{I}$ is the ground-truth image, and $\lambda$ is the LPIPS weighting factor.
+
+**Parameters:**
+*   **Batch size:** 128 [S1].
+*   **Total iterations:** 300,000 [S1].
+*   **LPIPS weight ($\lambda$):**
+    *   Multi-view Transformer: $\lambda = 0.5$ [S1].
+    *   Voxel Transformer: $\lambda = 4.0$ [S1].
+
+**Algorithm Steps:**
+1.  **Stage 1 (Multi-view Backbone Training):**
+    *   Initialize the multi-view Transformer backbone.
+    *   Train for 200,000 iterations.
+    *   Compute loss using the rendered images from the multi-view transformer branch.
+    *   Update multi-view Transformer weights only.
+2.  **Stage 2 (Joint Fine-tuning):**
+    *   Initialize the Voxel Transformer.
+    *   Jointly fine-tune both the multi-view and voxel Transformers.
+    *   Train for an additional 100,000 iterations.
+    *   Compute loss using rendered images from both branches (or the combined output, as the strategy applies to the "SplatVoxel feed-forward networks" [S1]).
+    *   Update weights for both transformers.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_splatvoxel_two_stage(dataset, batch_size=128, stage1_iters=200000, stage2_iters=100000):
+    # Initialize networks
+    multi_view_transformer = MultiViewTransformer()
+    voxel_transformer = VoxelTransformer()
+    
+    # Stage 1: Train multi-view backbone
+    for iteration in range(stage1_iters):
+        batch = dataset.sample(batch_size)
+        # Render using multi-view transformer
+        rendered_images = render_multi_view(multi_view_transformer, batch.views)
+        # Compute loss with lambda=0.5
+        loss = compute_photometric_perceptual_loss(rendered_images, batch.gt_images, lambda_val=0.5)
+        # Update multi-view transformer
+        multi_view_transformer.backward(loss)
+        multi_view_transformer.step()
+        
+    # Stage 2: Joint fine-tuning
+    for iteration in range(stage2_iters):
+        batch = dataset.sample(batch_size)
+        
+        # Render using multi-view transformer
+        mv_images = render_multi_view(multi_view_transformer, batch.views)
+        # Render using voxel transformer (or combined output)
+        # Note: SplatVoxel predicts Gaussian primitives from voxel attributes [S1]
+        voxel_images = render_voxel(voxel_transformer, batch.views)
+        
+        # Compute losses with distinct lambdas
+        # The source implies the strategy applies to the whole network, 
+        # but specifies lambda for each transformer. 
+        # Implementation detail: Apply respective lambda to respective branch losses.
+        loss_mv = compute_photometric_perceptual_loss(mv_images, batch.gt_images, lambda_val=0.5)
+        loss_voxel = compute_photometric_perceptual_loss(voxel_images, batch.gt_images, lambda_val=4.0)
+        
+        total_loss = loss_mv + loss_voxel
+        
+        # Update both networks
+        multi_view_transformer.backward(total_loss)
+        multi_view_transformer.step()
+        voxel_transformer.backward(total_loss)
+        voxel_transformer.step()
+```
+
+## Subtopics
+
+### Two-Stage Feature and Density Grid Training
+A variant used in StyleRF [S2]. Stage 1 trains a feature grid and 2D CNN decoder simultaneously using RGB images and bilinearly up-sampled VGG ReLU3_1 features, while a density grid is pre-trained on RGB images. Stage 2 freezes the feature grid and trains a style transfer module (SICT/DST) and fine-tunes the CNN decoder on 256x256 patches. The loss function is $L_{grid} = \sum_{r \in R} ||\hat{F}(r) - F(r)||^2 + \sum_{r \in R} ||\hat{I}_R - I_R||^2 + \sum_{l \in l_p} ||F^l(\hat{I}_R) - F^l(I_R)||^2$, where $R$ is rays, $F$ is features, $I$ is RGB images, and $l_p$ is the set of VGG layers for perceptual loss [S2].
+
+## Operating characteristics
+*   **Complexity:** The two-stage approach increases total training time (300K iterations) compared to single-stage methods but improves convergence stability for complex feed-forward architectures.
+*   **Performance:** Enables cross-dataset generalization (e.g., on DL3DV) [S1].
+*   **Strengths:** Decouples multi-view consistency learning from fine-grained detail learning. The high LPIPS weight (4.0) for the voxel transformer emphasizes perceptual quality for fine details.
+*   **Limitations:** Requires careful tuning of separate $\lambda$ values for different network components.
+
+## Background
+Originated in the SplatVoxel paper [S1] for feed-forward 3D Gaussian Splatting. It builds on the need for efficient training of transformer-based radiance fields. The variant in StyleRF [S2] adapts this two-stage philosophy to neural radiance fields with style transfer.
+
+## Sources
+[S1] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27
+[S2] StyleRF: Zero-Shot 3D Style Transfer of Neural Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00806, fetched 2026-10-26

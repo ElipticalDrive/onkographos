@@ -1,0 +1,60 @@
+# Diffuse ABSDF Factorization
+
+Also called: Diffuse Aggregation
+
+## Overview
+Diffuse ABSDF (Aggregated Bidirectional Scattering Distribution Function) Factorization is a method for approximating the diffuse component of light transport in participating media by separating the integration over material parameters from the integration over geometry and orientation. It solves the problem of efficiently evaluating the diffuse scattering term in path tracing by reducing the double integral into a product of a parameter expectation term and a geometric convolution term [S1, unofficial]. It sets itself apart from sibling methods like Specular ABSDF Factorization by focusing specifically on the diffuse lobe, which allows for the use of Spherical Gaussian (SG) approximations for the cosine-weighted normal distribution, whereas specular components often require different handling or remain unaggregated in simplified models [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Joint probability density function (PDF) of material parameters $p(\beta_c, \beta_m)$, where $\beta_c$ is the color absorption coefficient and $\beta_m$ is the mean free path parameter (or similar scattering parameter); shading normal distribution $p_N(n)$; incoming direction $\omega_i$; outgoing direction $\omega_o$.
+*   **Outputs:** The aggregated diffuse scattering coefficient or integral value.
+
+**Data Structures:**
+*   **Material Parameters:** $\beta_c, \beta_m \in [0, 1]$.
+*   **Normal Distribution:** $p_N(n)$ defined on the hemisphere $S^2$.
+*   **Spherical Gaussian (SG):** Defined by amplitude $c$, concentration $\kappa$, and axis $\omega_h$.
+
+**Steps:**
+1.  **Split the Integral:** Decompose the joint PDF $p_Y(\gamma)$ into a product of marginal PDFs for material parameters and normals: $p_Y(\gamma) \approx p(\beta_c, \beta_m) p_N(n)$ [S1, unofficial].
+2.  **Evaluate Parameter Integral:** Compute the expectation term for the material parameters. The integral over the unit square $[0,1]^2$ is simplified using linearity of expectation:
+    $$ \int_{[0,1]^2} (1 - \beta_m) \beta_c p(\beta_c, \beta_m) d\beta_c d\beta_m = E[\beta_c] - E[\beta_m \beta_c] $$
+    This requires calculating the first moment of $\beta_c$ and the second-order mixed moment of $\beta_m$ and $\beta_c$ [S1, unofficial].
+3.  **Approximate Geometric Integral:** Approximate the clamped dot product function $\langle n \cdot \omega_i \rangle \langle n \cdot \omega_o \rangle$ using a Spherical Gaussian (SG) product. Following Wang et al. [2009], the product of two clamped cosines is approximated by a single SG:
+    $$ \langle n \cdot \omega_i \rangle \langle n \cdot \omega_o \rangle \approx c \cdot SG(\omega_h; n, \kappa) $$
+    where $c$ is the amplitude and $\kappa$ is the concentration of the resulting SG, and $\omega_h$ is the half-vector between $\omega_i$ and $\omega_o$ [S1, unofficial].
+4.  **Convolve with Normal Distribution:** The remaining integral becomes a convolution between the approximated SG and the normal distribution $p_N(n)$:
+    $$ \int_{S^2} c \cdot SG(\omega_h; n, \kappa) p_N(n) dn $$
+    This convolution is solved using standard SG convolution techniques (e.g., as described in Wang et al. [2009] or referenced in [S1, unofficial]), resulting in a closed-form or efficiently computable value.
+
+**Parameters:**
+*   **SG Approximation:** The specific values for $c$ and $\kappa$ depend on the angle between $\omega_i$ and $\omega_o$. Exact formulas are provided in Wang et al. [2009] [S1, unofficial].
+*   **Normal Distribution:** Typically modeled as a GGX or similar distribution for rough surfaces, or a delta function for smooth surfaces [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Orientation-Varying Parameters:** The basic factorization assumes orientation-independent parameters. If parameters vary with orientation, the splitting assumption $p_Y(\gamma) \approx p(\beta_c, \beta_m) p_N(n)$ breaks down, requiring more complex handling as noted in §5.4 of [S1, unofficial].
+*   **SG Approximation Error:** The SG approximation of the clamped dot product product introduces error, especially at grazing angles or high roughness. The accuracy depends on the number of SGs used if a multi-Gaussian expansion is employed [S1, unofficial].
+*   **Degenerate Normals:** If the normal distribution is a delta function (perfectly smooth), the convolution simplifies to evaluating the SG at the single normal direction [S1, unofficial].
+
+## Subtopics
+
+### Cosine Term Calculation for Asymmetric BSDF
+This variant addresses the calculation of the correct cosine term in the path space measurement equation when the BSDF is not symmetric with respect to the geometric normal, such as in photon tracing or when using shading normals that differ from geometric normals [S2, unofficial]. It prevents light leaks by checking the alignment of directions with normals.
+*   **Step:** Calculate dot products: $wi\_ns = wi \cdot n_s$, $wi\_ng = wi \cdot n_g$, $wo\_ns = wo \cdot n_s$, $wo\_ng = wo \cdot n_g$.
+*   **Guard:** If $wi\_ng \cdot wi\_ns \le 0$ or $wo\_ng \cdot wo\_ns \le 0$, return 0 to prevent light leaks [S2, unofficial].
+*   **Logic:** If transport direction is FROM_CAMERA, return $|wi\_ns|$. If transport direction is FROM_LIGHT, return $\frac{|n_s \cdot \omega_o| \cdot |n_g \cdot \omega_i|}{|n_g \cdot \omega_o|}$ [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The method reduces the complexity of the diffuse scattering evaluation from a high-dimensional integral to a few moment calculations and a closed-form SG convolution. The cost is dominated by the evaluation of the SG convolution, which is $O(1)$ if a single SG is used, or $O(K)$ if $K$ SGs are used for higher accuracy [S1, unofficial].
+*   **Memory Complexity:** Minimal additional memory is required beyond storing the moments of the material parameters and the SG parameters [S1, unofficial].
+*   **Strengths:** Efficient evaluation of diffuse scattering in participating media; allows for LOD rendering by aggregating material properties [S1, unofficial].
+*   **Limitations:** Approximation error from SG fitting; assumes orientation-independent parameters for the basic form [S1, unofficial].
+*   **When to Use:** When efficient diffuse scattering in participating media is needed, especially in LOD rendering or real-time applications where full Monte Carlo integration is too expensive [S1, unofficial].
+*   **When Not to Use:** When high accuracy is required for grazing angles or highly anisotropic materials without proper SG expansion [S1, unofficial].
+
+## Background
+Diffuse ABSDF Factorization originates from the work on Efficient Scene Appearance Aggregation for Level-of-Detail Rendering [S1, unofficial]. It builds on the concept of aggregating material properties to simplify light transport calculations. The use of Spherical Gaussians for approximating BRDF terms is based on the work of Wang et al. [2009] [S1, unofficial]. The method is part of a broader effort to make path tracing more efficient for production rendering, as seen in related works on production volume rendering [Fong et al. 2017] and path traced subsurface scattering [Wrenninge et al. 2017].
+
+## Sources
+[S1] Efficient Scene Appearance Aggregation for Level-of-Detail Rendering, https://core.ac.uk/works/391729893, fetched 2026-11-01 (unofficial)
+[S2] GitHub - yumcyaWiz/volpt: Volumetric path tracer written in C++, https://github.com/yumcyaWiz/volpt, fetched 2026-10-27 (unofficial)

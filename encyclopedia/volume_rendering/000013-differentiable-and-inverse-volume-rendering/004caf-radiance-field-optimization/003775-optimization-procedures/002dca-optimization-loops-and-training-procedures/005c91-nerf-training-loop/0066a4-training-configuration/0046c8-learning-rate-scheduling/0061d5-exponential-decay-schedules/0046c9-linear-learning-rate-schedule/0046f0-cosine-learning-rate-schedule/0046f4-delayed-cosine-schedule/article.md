@@ -1,0 +1,98 @@
+# Delayed Cosine Schedule
+
+Also called: DelayedSchedule
+
+## Overview
+A schedule wrapper that delays the start of a base learning rate schedule using a sinusoidal rate multiplier. It sets apart from standard cosine schedules by introducing a warm-up phase where the learning rate is suppressed, easing into the base schedule's trajectory. This prevents early instability in radiance-field optimization by avoiding large gradient updates during the initial training steps.
+
+## How it works
+The method computes a delay multiplier that transitions from a minimum value to 1.0 over a specified number of steps, then multiplies this by the output of a base schedule.
+
+**Inputs:**
+- `step`: Current optimization step (integer).
+- `base_schedule`: A callable or object implementing a standard learning rate schedule (e.g., Cosine Schedule).
+- `delay_steps`: Number of steps over which the delay rate transitions from `delay_mult` to 1.0.
+- `delay_mult`: The minimum multiplier applied to the learning rate during the delay period (typically $0 < \text{delay\_mult} < 1$).
+
+**Outputs:**
+- `learning_rate`: The final scaled learning rate value.
+
+**Data Structures:**
+No complex data structures are required. The implementation relies on scalar arithmetic operations.
+
+**Steps:**
+1. Calculate the normalized step progress for the delay phase: $t = \text{clip}(\frac{\text{step}}{\text{delay\_steps}}, 0, 1)$.
+2. Compute the delay multiplier using a sinusoidal interpolation:
+   $$ \text{delay\_rate} = \text{delay\_mult} + (1 - \text{delay\_mult}) \times \sin\left(\frac{\pi}{2} \times t\right) $$
+   Note: $\sin(\frac{\pi}{2} \times t)$ is equivalent to $\sin(0.5 \times \pi \times t)$.
+3. Retrieve the base learning rate from the underlying schedule: $\text{base\_lr} = \text{base\_schedule}(\text{step})$.
+4. Return the product: $\text{learning\_rate} = \text{delay\_rate} \times \text{base\_lr}$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def delayed_cosine_schedule(step, base_schedule, delay_steps, delay_mult):
+    """
+    Computes the learning rate using a delayed cosine schedule.
+    
+    Args:
+        step (int): Current optimization step.
+        base_schedule (callable): Function that returns the base learning rate for a given step.
+        delay_steps (int): Number of steps for the delay transition.
+        delay_mult (float): Minimum multiplier during the delay phase.
+        
+    Returns:
+        float: The scaled learning rate.
+    """
+    # Step 1: Clip normalized step to [0, 1]
+    # If delay_steps is 0, avoid division by zero; treat as no delay
+    if delay_steps <= 0:
+        delay_rate = 1.0
+    else:
+        # Calculate normalized progress within the delay window
+        t = step / delay_steps
+        # Clip t to [0, 1] to handle steps beyond delay_steps or negative steps
+        t = max(0.0, min(1.0, t))
+        
+        # Step 2: Compute delay_rate using sinusoidal interpolation
+        # Formula: delay_mult + (1 - delay_mult) * sin(0.5 * pi * t)
+        delay_rate = delay_mult + (1.0 - delay_mult) * math.sin(0.5 * math.pi * t)
+        
+    # Step 3: Get base learning rate
+    base_lr = base_schedule(step)
+    
+    # Step 4: Return scaled learning rate
+    return delay_rate * base_lr
+```
+
+**Parameters with Typical Values:**
+- `delay_mult`: Often set to a small value like 0.1 or 0.01 to significantly suppress early learning rates [S1, S2, unofficial].
+- `delay_steps`: Typically a small fraction of total training steps, e.g., 100-1000 steps, depending on the total duration [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If `delay_steps` is 0, the calculation in Step 1 must be guarded. The sources indicate that if `delay_steps <= 0`, the delay rate should be set to 1.0, effectively disabling the delay [S2, unofficial].
+- **Negative Steps:** Ensure `step` is non-negative. If negative, clip `t` to 0 [S2, unofficial].
+- **Precision:** Use standard floating-point arithmetic. The sine function is well-behaved in the $[0, \pi/2]$ range.
+
+## Subtopics
+
+### Learning Rate Schedule with Delay
+A variant implementation found in FastGS that combines a delay multiplier with a log-linear interpolation for the base schedule. It differs from the standard Delayed Cosine Schedule by using `log_lerp` (log-linear interpolation between `lr_init` and `lr_final`) as the base schedule instead of a cosine curve. It explicitly handles cases where `lr_init` and `lr_final` are 0.0 by returning 0.0 to disable the parameter [S2, unofficial]. The delay rate calculation is identical to the standard definition: $\text{delay\_rate} = \text{lr\_delay\_mult} + (1 - \text{lr\_delay\_mult}) \times \sin(0.5 \times \pi \times \text{clip}(\text{step} / \text{lr\_delay\_steps}, 0, 1))$ if `lr_delay_steps > 0`, otherwise 1.0 [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per step, involving a few arithmetic operations and one sine evaluation.
+- **Memory Complexity:** $O(1)$, requiring only scalar storage for parameters.
+- **Strengths:** Stabilizes early training in NeRF optimization by preventing large initial updates. The sinusoidal transition is smooth, avoiding discontinuities in the learning rate derivative.
+- **Limitations:** Adds hyperparameters (`delay_steps`, `delay_mult`) that require tuning. If `delay_steps` is too large, the model may converge slowly. If `delay_mult` is too low, the initial learning rate may be too small to make progress.
+- **When to Use:** Recommended for radiance-field optimization where early instability is observed. Particularly useful in differentiable volume rendering pipelines [S1, S2, unofficial].
+- **When Not to Use:** Not necessary for simple models or when training is already stable. Adds complexity to the training loop configuration.
+
+## Background
+The Delayed Cosine Schedule originates from the NeRFies project, which focuses on dynamic neural radiance fields [S1, unofficial]. It was introduced to handle the optimization challenges associated with deformable scenes, where early large updates could destabilize the deformation field. The variant using log-linear interpolation is found in FastGS, a library for fast Gaussian Splatting, indicating its broader applicability to differentiable rendering techniques [S2, unofficial].
+
+## Sources
+[S1] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+[S2] fastgs/FastGS, https://github.com/fastgs/FastGS, fetched 2026-10-27 (unofficial)

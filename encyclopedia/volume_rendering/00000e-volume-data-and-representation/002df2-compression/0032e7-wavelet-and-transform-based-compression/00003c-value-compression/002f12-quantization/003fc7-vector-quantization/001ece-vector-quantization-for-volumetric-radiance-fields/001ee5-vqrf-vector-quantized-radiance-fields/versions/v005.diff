@@ -1,0 +1,171 @@
+--- v004.md
++++ v005.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-VQRF is a compression framework for volumetric radiance fields (such as DVGO, Plenoxels, and TensoRF) that reduces model size to approximately 1 MB by combining adaptive voxel pruning, learnable vector quantization, and weight quantization [S1]. It achieves a superior PSNR-size trade-off compared to uncompressed baselines and their direct vector-quantized variants (VQ-DVGO, VQ-Plenoxels, VQ-TensoRF) [S1].
++VQRF is a compression framework for volumetric radiance fields (DVGO, Plenoxels, TensoRF) that reduces model size to approximately 1 MB by combining adaptive voxel pruning, learnable vector quantization, and weight quantization [S1]. It achieves a superior PSNR-size trade-off compared to uncompressed baselines and their direct vector-quantized variants (VQ-DVGO, VQ-Plenoxels, VQ-TensoRF) [S1].
+ 
+ ## How it works
+@@ -9,25 +9,25 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** An uncompressed volumetric radiance field model (e.g., DVGO, Plenoxels, or TensoRF) trained on a dataset [S1].
+-*   **Output:** A zip-compressed model with significantly reduced storage size (reaching ~1 MB) while maintaining high rendering quality (PSNR, SSIM) [S1].
++*   **Input:** An uncompressed volumetric radiance field model (DVGO, Plenoxels, or TensoRF) trained on a dataset [S1].
++*   **Output:** A compressed model with significantly reduced zip-compressed storage size while maintaining high rendering quality (PSNR, SSIM) [S1].
+ 
+ **Data Structures:**
+-1.  **Voxel Grid:** Spatial representation of the radiance field; voxels store feature vectors, density, and opacity [G].
+-2.  **Codebook:** Learnable lookup table of size $K$ containing $K$ code vectors [S1, G].
+-3.  **Indices:** Mapping from active voxels to codebook indices, replacing full feature vectors [S1, G].
+-4.  **Weights:** Neural network parameters (e.g., in TensoRF or MLP components) subject to quantization [S1].
++1.  **Voxel Grid:** The spatial representation of the radiance field, where low-importance voxels are removed during pruning [S1].
++2.  **Codebook:** A learnable lookup table of size $K$ containing $K$ code vectors [S1].
++3.  **Indices:** A mapping from active voxels to codebook indices, substituting individual voxel features with a single code vector to reduce storage from individual voxel storage to codebook storage plus mapping indices [S1].
++4.  **Weights:** Neural network parameters (e.g., in TensoRF or MLP-based components) quantized to lower precision [S1].
+ 
+ **Parameters:**
+-*   **Pruning parameter $\beta_p$:** Controls voxel pruning; larger values yield better rendering quality but increase model size. Default: 0.6 [S1].
+-*   **Keeping parameter $\beta_k$:** Controls the keeping quantile during pruning; smaller values degrade visual performance but improve compression ratio. Default: 0.001 [S1].
+-*   **Codebook size $K$:** Hyperparameter for vector quantization; model size and PSNR increase simultaneously with $K$. Tested sizes: 16, 64, 256, 1024, 4096, 16384. Sizes $>4096$ yield minimal PSNR improvement with disproportionate storage cost. Default/Best trade-off: 4096 [S1].
++*   **Pruning parameter $\beta_p$:** Controls voxel pruning aggressiveness. Larger $\beta_p$ yields better quality but larger size. Default: 0.6 [S1].
++*   **Keeping parameter $\beta_k$:** Controls the keeping quantile during pruning. Smaller $\beta_k$ improves compression but degrades visual performance. Default: 0.001 [S1].
++*   **Codebook size $K$:** Number of entries in the vector quantization codebook. Model size and PSNR increase simultaneously as $K$ increases. Tested sizes: 16, 64, 256, 1024, 4096, 16384. Sizes $>4096$ yield minimal PSNR improvement with disproportionate storage cost. Default/Best trade-off: 4096 [S1].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Baseline:** Start with a fully trained, uncompressed volumetric radiance field model [S1].
+-2.  **Voxel Pruning:** Remove voxels based on $\beta_p$ and $\beta_k$, achieving ~5× compression with negligible PSNR drop [S1].
+-3.  **Vector Quantization:** Replace individual voxel feature vectors with indices into a shared codebook of size $K$, achieving another ~5× reduction but decreasing PSNR by ~0.5 dB [S1].
+-4.  **Joint Finetuning:** Retrain the model (updating codebook and remaining parameters) to recover rendering performance without increasing model size [S1].
+-5.  **Weight Quantization:** Apply quantization to model weights to reach the final ~1 MB size [S1].
++2.  **Voxel Pruning:** Remove voxels deemed unimportant based on $\beta_p$ and $\beta_k$. This achieves ~5x compression with negligible PSNR drop [S1].
++3.  **Vector Quantization:** Replace individual voxel feature vectors with indices into a shared codebook of size $K$. This achieves another ~5x reduction but decreases PSNR by ~0.5 dB [S1].
++4.  **Joint Finetuning:** Retrain the model (updating both the codebook and the remaining parameters) to recover rendering performance lost in step 3, without increasing model size [S1].
++5.  **Weight Quantization:** Apply quantization to the model weights to reach the final ~1 MB size [S1].
+ 
+ **Pseudocode:**
+@@ -35,73 +35,70 @@
+ ```python
+ import math
++import random
+ 
+-def VQRF_Compress(baseline_voxels, dataset, beta_p=0.6, beta_k=0.001, codebook_size=4096, epochs=1000, lr=1e-3):
+-    # Step 1: Baseline provided as list of voxel dicts with 'feature', 'density', 'opacity'
+-    voxels = baseline_voxels
++class Voxel:
++    def __init__(self, feature=None, index=None, density=0.0):
++        self.feature = feature
++        self.index = index
++        self.density = density
++
++class Model:
++    def __init__(self, voxels, codebook=None, weights=None):
++        self.voxels = voxels
++        self.codebook = codebook
++        self.weights = weights
++
++def VQRF_Compress(baseline_model, dataset, beta_p=0.6, beta_k=0.001, codebook_size=4096):
++    # Step 1: Baseline is provided
++    model = baseline_model
+ 
+     # Step 2: Voxel Pruning
+-    # Compute importance score for each voxel [G]
+-    for v in voxels:
+-        v['importance'] = math.sqrt(sum(x**2 for x in v['feature']))
+-
+-    # Sort voxels by importance descending
+-    voxels.sort(key=lambda v: v['importance'], reverse=True)
+-
+-    # Determine threshold using beta_k (quantile) and beta_p (quality scaling) [G]
+-    keep_count = max(1, int(len(voxels) * beta_k))
+-    threshold = voxels[keep_count - 1]['importance'] if keep_count < len(voxels) else 0.0
+-    threshold *= (1.0 + beta_p)
+-
+-    # Filter voxels above threshold
+-    pruned_voxels = [v for v in voxels if v['importance'] > threshold]
++    # Sources do not specify the exact importance metric [G]
++    importance = [sum(v.feature[i]**2 for i in range(len(v.feature))) for v in model.voxels]
++    # Determine threshold based on keeping quantile beta_k
++    threshold = sorted(importance, reverse=True)[int(len(importance) * beta_k)]
++    # Filter voxels with importance >= threshold
++    active_voxels = [v for v, imp in zip(model.voxels, importance) if imp >= threshold]
++    pruned_model = Model(active_voxels)
+ 
+     # Step 3: Vector Quantization
+-    # Initialize codebook with first K voxels' features [G]
+-    feature_dim = len(pruned_voxels[0]['feature'])
+-    codebook = [list(pruned_voxels[i]['feature']) for i in range(min(codebook_size, len(pruned_voxels)))]
+-    while len(codebook) < codebook_size:
+-        codebook.append([0.0] * feature_dim)
+-
+-    # Map voxels to nearest codebook indices (Euclidean distance)
++    # Initialize codebook with random vectors matching feature dimension
++    feature_dim = len(pruned_model.voxels[0].feature)
++    codebook = [[random.uniform(-1, 1) for _ in range(feature_dim)] for _ in range(codebook_size)]
++    # Map each voxel to nearest codebook index using squared Euclidean distance
+     quantized_voxels = []
+-    for v in pruned_voxels:
+-        best_idx = min(range(codebook_size), key=lambda i: sum((a - b)**2 for a, b in zip(v['feature'], codebook[i])))
+-        quantized_voxels.append({'index': best_idx, 'density': v['density'], 'opacity': v['opacity']})
++    for v in pruned_model.voxels:
++        dists = [sum((v.feature[i] - codebook[c][i])**2 for i in range(feature_dim)) for c in range(codebook_size)]
++        idx = dists.index(min(dists))
++        quantized_voxels.append(Voxel(index=idx, density=v.density))
++    quantized_model = Model(quantized_voxels, codebook=codebook)
+ 
+     # Step 4: Joint Finetuning
+-    # Update codebook and voxel parameters to recover rendering quality [G]
+-    for epoch in range(epochs):
++    # Optimize codebook and model parameters to recover PSNR
++    for epoch in range(1000): # Epoch count not specified in sources [G]
+         for batch in dataset:
+-            loss = compute_rendering_loss(quantized_voxels, codebook, batch)
+-            update_parameters(quantized_voxels, codebook, loss, lr)
++            loss = compute_rendering_loss(quantized_model, batch)
++            # Standard optimizer step [G]
++    finetuned_model = quantized_model
+ 
+     # Step 5: Weight Quantization
+-    # Quantize parameters to 8-bit integers for storage [G]
+-    compressed_codebook = [quantize_8bit(c) for c in codebook]
+-    compressed_voxels = [{'index': v['index'], 'density': quantize_8bit(v['density']), 'opacity': quantize_8bit(v['opacity'])} for v in quantized_voxels]
++    # Quantize network weights to lower precision
++    compressed_model = Model(finetuned_model.voxels, codebook=finetuned_model.codebook, weights=quantize_weights(finetuned_model.weights))
++    return compressed_model
+ 
+-    return {'codebook': compressed_codebook, 'voxels': compressed_voxels}
++def compute_rendering_loss(model, batch):
++    # Standard MSE between rendered images and ground truth [G]
++    return sum((render(model, ray) - gt)**2 for ray, gt in batch)
+ 
+-def compute_rendering_loss(voxels, codebook, batch):
+-    # Standard mean squared error between rendered and target images [G]
+-    return sum((batch['target'][i] - render_image(voxels, codebook, batch['rays'][i]))**2 for i in range(len(batch['rays'])))
+-
+-def render_image(voxels, codebook, rays):
+-    # Standard volume rendering integral [G]
+-    return 0.0
+-
+-def update_parameters(voxels, codebook, loss, lr):
+-    # Standard gradient descent update step [G]
+-    for v in voxels:
+-        codebook[v['index']] = [c - lr * 0.01 for c in codebook[v['index']]]
+-    return loss
+-
+-def quantize_8bit(value):
+-    return max(0, min(255, int(value * 255)))
++def quantize_weights(weights, bits=8):
++    # Uniform quantization to specified bit depth [G]
++    min_val, max_val = min(weights), max(weights)
++    scale = (max_val - min_val) / (2**bits - 1)
++    return [round((w - min_val) / scale) for w in weights]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Codebook Size:** Choosing a codebook size larger than 4096 yields minimal PSNR improvement but significantly increases storage, making it inefficient [S1].
+-*   **Pruning Parameters:** Incorrect tuning of $\beta_p$ and $\beta_k$ can lead to either excessive quality loss or insufficient compression. The default values (0.6 and 0.001) provide a balanced trade-off [S1].
++*   **Pruning Parameters:** Incorrect tuning of $\beta_p$ and $\beta_k$ can lead to either excessive quality loss or insufficient compression [S1].
+ *   **Performance Drop:** Vector quantization alone causes a ~0.5 dB PSNR drop, which must be recovered via joint finetuning [S1].
+ 

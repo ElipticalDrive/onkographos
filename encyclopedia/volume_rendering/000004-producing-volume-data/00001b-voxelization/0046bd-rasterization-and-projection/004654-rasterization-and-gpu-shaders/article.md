@@ -1,0 +1,63 @@
+# Rasterization and GPU Shaders
+
+Also called: GPU-based Voxelization, Shader-based Voxelization
+
+## Overview
+This family converts triangle meshes into discrete volumetric representations (voxels) by leveraging GPU hardware rasterization pipelines or programmable shaders, rather than CPU-based geometric intersection tests [G]. It solves the problem of real-time or high-throughput voxelization for volume rendering and fluid simulation by mapping 2D rasterization concepts or explicit geometry generation to 3D grid occupancy [S1, S2, unofficial]. It differs from sibling methods like [Voxel Carving](1213-voxel-carving.md) or [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) by utilizing the graphics pipeline's fragment processing or stream output to determine voxel inclusion and generate output geometry [S1, unofficial][S3].
+
+## Shared principles
+All methods in this family map a conceptual or physical source into a discrete or analytic volumetric representation suitable for rendering [G]. The core mechanism involves:
+1. **Domain Definition**: Establishing a spatial domain, typically a 3D grid with resolution $(N_x, N_y, N_z)$ and bounding box, or an infinite analytic space [G].
+2. **Value Assignment**: Determining the value (density, distance, color) for each point in the domain based on the source method (geometric intersection, function evaluation, or physical state) [G].
+3. **Storage/Access**: Either storing the result in a discrete array (voxelization, simulation) or providing an interface to compute it on-the-fly (procedural) [G].
+
+## Subtopics
+
+### [Rasterization-based Voxelization](908-rasterization-based-voxelization.md)
+A technique that converts a triangle mesh into a discrete volumetric representation by projecting the geometry onto a 3D grid using hardware rasterization principles or hash-based spatial mapping. It solves the problem of generating surface-level voxel data (shell voxelization) for volume rendering or voxel art, differing from CPU-based geometric intersection methods by leveraging efficient spatial hashing or GPU fragment shaders to determine voxel occupancy. Unlike [3D Grid Rasterization](903-3d-grid-rasterization.md) which outputs a dense or sparse occupancy grid, this method often generates explicit cube mesh geometry or point clouds from the occupied voxels.
+
+### [Mesh-to-Voxel Geometry Shader](2800-mesh-to-voxel-geometry-shader.md)
+A real-time technique that converts mesh geometry into discrete voxel-like cubes by iterating over integer grid positions within a triangle's bounding box and emitting cube geometry for positions close to the triangle plane. Unlike rasterization-based voxelization which fills pixels, this method explicitly generates cube geometry for every grid cell intersecting the triangle, resulting in significantly higher vertex and triangle counts.
+
+### [Scanline and Geometric Primitives](10941-scanline-and-geometric-primitives.md)
+This family defines methods for converting continuous geometric primitives (points, lines, planes, triangles) into discrete volumetric representations (voxel grids) suitable for volume rendering. It solves the problem of accurately representing sharp geometric boundaries within a scalar field without the aliasing artifacts inherent in binary voxelization. It sets itself apart from sibling methods like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by focusing on analytic slab definitions, optimal scanline criteria, and priority-based clipping rather than GPU rasterization pipelines or geometry shaders.
+
+### [Mesh Rasterization and Triangle Intersection](11783-mesh-rasterization-and-triangle-intersection.md)
+This family converts continuous triangle meshes into discrete volumetric representations (voxel grids) by determining the occupancy of grid cells relative to triangle geometry. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by explicitly separating surface shell generation (via AABB-triangle intersection) from volume filling (via scanlines) to ensure watertight interiors, and from [Mesh-to-Voxel Geometry Shader](2800-mesh-to-voxel-geometry-shader.md) by relying on CPU-side geometric tests rather than GPU shader pipelines for topological correctness.
+
+### [LPV Voxelization Sampling](15815-lpv-voxelization-sampling.md)
+LPV Voxelization Sampling is a method to improve the simulation of direct illumination from area light sources within the Light Propagation Volumes (LPV) technique by voxelizing the area light source geometry into a voxel volume matching the LPV grid resolution. It generates one Virtual Point Light (VPL) sample for each LPV cell that intersects the light source triangles, providing an optimal distribution of samples that covers all necessary cells, unlike dense sampling which may under-sample or over-sample. This approach reduces the number of VPLs processed per frame compared to dense sampling strategies, offering performance advantages while maintaining plausible lighting.
+
+### Instanced Voxelization
+#### definition
+A technique to draw all voxelization slices in a single draw call using instancing [S1, unofficial].
+#### step
+Use instancing to draw all slices in a single draw call. Use the instance ID to specify the target slice [S1, unofficial].
+
+### Rasterization-based Voxelization Shader
+#### definition
+A fragment shader that rasterizes geometry into a 3D grid volume by mapping clip-space coordinates to grid indices and writing a value to a structured buffer [S2, unofficial].
+#### step
+Extract clip-space position: `float3 xyz = i.vertex.xyz;` [S2, unofficial]. Handle reversed Z if applicable: `#if defined(UNITY_REVERSED_Z) xyz.z = 1 - xyz.z; #endif` [S2, unofficial]. Scale and clamp to grid resolution: `xyz.z *= _CVCT_GridResolutionI * 0.99999;` [S2, unofficial]. Convert to integer grid coordinates: `int3 pos = int3(xyz);` [S2, unofficial]. Calculate flat index: `int index = dot(pos, int3(1, _CVCT_GridResolutionI, _CVCT_GridResolutionI * _CVCT_GridResolutionI));` [S2, unofficial]. Write to buffer: `_CVCT_gv[index] = 1;` [S2, unofficial].
+#### parameter
+`_CVCT_GridResolutionI`: integer resolution of the grid, used for coordinate scaling and indexing [S2, unofficial].
+#### layout
+`_CVCT_gv`: `RWStructuredBuffer<int>` storing grid values [S2, unofficial].
+#### pitfall
+Coordinate mapping: The shader multiplies Z by 0.99999 to ensure $0 \le pos.z < GridResolution$, preventing out-of-bounds writes due to floating-point precision errors at the boundary [S2, unofficial].
+
+### Rasterization
+#### definition
+Algorithmic paradigm that warps and projects 3D scene elements onto a 2D imaging plane via algebraic transformations, then converts the 2D vector form to a discretized image buffer [S3].
+#### step
+Perform algebraic transformations to warp and project 3D scene elements onto a 2D imaging plane [S3]. Convert the now-2D vector form of the scene elements to a discretized representation on an image buffer [S3].
+#### comparison
+Favored in high-performance applications like video games for easy GPU parallelization, but implementing physically-based rendering (PBR) numerical methods atop it is markedly harder or impossible compared to ray-tracing [S3].
+
+## Background
+The use of GPU shaders for voxelization emerged with the availability of stream output and geometry shaders in the mid-2000s. Blythe (2006) described stream output as a mechanism to cache transformed vertices, allowing deforming meshes (like skinned characters) to be voxelized without recomputing transformations for each slice [S1, unofficial]. This approach was adopted in real-time fluid simulation to voxelize obstacles at every frame using low-poly meshes to minimize performance cost [S1, unofficial]. The technique evolved to include instancing for drawing multiple slices in a single draw call [S1, unofficial]. Later implementations, such as those in Cascaded Voxel Cone Tracing, utilized fragment shaders with structured buffers to write directly to voxel grids, handling reversed-Z architectures and precision issues via coordinate scaling [S2, unofficial].
+
+## Sources
+[S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S2] arigo/CascatedVoxelConeTracing, https://github.com/arigo/CascatedVoxelConeTracing, fetched 2026-10-26 (unofficial)
+[S3] Differentiable visual computing for inverse problems and machine learning, https://doi.org/10.1038/s42256-023-00743-0, fetched 2026-10-27

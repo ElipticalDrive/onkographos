@@ -1,0 +1,173 @@
+A game engine on vcad, phyz and tang: one CAD document, one physics, one Scalar - stratified camera rays and adaptive sampling in the cpu integrator by ecto · Pull Request #16 · ecto/kosm
+
+stratified camera rays and adaptive sampling in the cpu integrator by ecto · Pull Request #16 · ecto/kosm · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ecto
+commented
+Sep 6, 2026
+Copy link
+Copy Markdown
+Owner
+Stacked on #13 (claude/render-offline) — this branch is based on it, so review that first and merge it before this.
+vcad #825 added a Halton camera point set and adaptive sampling to vcad's own copy of the CPU integrator. That copy is gone: vcad #864 delegates to kosm_render::pathtrace, and vcad-render --no-adaptive has been a no-op ever since. This ports both to kosm.
+Halton camera rays
+Pixel jitter and lens position come from a 4D Halton set (bases 2, 3, 5, 7) instead of four fresh uniforms, rotated per pixel by a Cranley-Patterson offset drawn from the pixel's existing PCG. The set is the same for every pixel; the rotation keeps each pixel's stratification while decorrelating neighbours, so residual error looks like noise rather than a pattern locked to the pixel grid. Drawing the offsets from the per-pixel PCG is what keeps the render deterministic for a seed and independent of tiling.
+Halton rather than Hammersley because Hammersley's first dimension is s / N, which needs the final sample count up front — adaptive sampling does not have it.
+The uniforms still go through PixelFilter::warp, so the plain mean is still the filtered estimate and the reconstruction-filter tests are untouched.
+Adaptive sampling
+PathTraceOptions::adaptive: bool (default true, matching vcad main). Samples are traced in batches of 16; between batches a pixel stops once the 95% confidence half-width on its own running luminance mean falls under 0.10 * (mean + 0.02), and never before 32 samples. spp becomes a ceiling.
+A pixel that stops early keeps the unbiased mean of the samples it actually took — the estimate is unchanged, only its precision. That is what lets the CPU-vs-GPU parity tests keep passing.
+Tests
+radical_inverse_matches_hand_computed_values
+camera_point_set_covers_every_stratum
+the_halton_camera_set_beats_random_jitter_on_a_flat_edge — RMSE on pixel-footprint coverage of a randomly placed silhouette, 16 spp: halton 0.04425, random 0.08367. (The comparison needs more than one sample per pixel: with a per-pixel CP rotation, a single Halton draw is exactly a uniform draw, so the two sets only separate above 1 spp.)
+adaptive_is_inert_below_the_sample_floor — bit-identical film at spp = 32
+adaptive_matches_the_fixed_count_mean_for_fewer_samples — mean luminance fixed 0.156214 over 147456 samples, adaptive 0.155634 over 19040
+cargo test --release -p kosm-render --features gpu and the same with -- --ignored are both green, GPU parity included.
+🤖 Generated with Claude Code
+ecto
+and others
+added 5 commits
+September 6, 2026 09:58
+the renderer takes an explicit camera basis, an rng seed and a backdr…
+…
+3c7ee32
+```
+…op mode
+
+Four ports from vcad's copy of the tracer, kept generic:
+
+`GpuCamera::from_basis` sets `right` and `basis_mode`, and the shader's new
+`camera_basis()` stands where every derivation of the screen frame stood:
+primary rays, the refine pass, the depth unprojection, the screen projection,
+and ReSTIR's reprojection — which now carries the previous pass's `right` and
+basis mode too, so a mirrored camera reprojects through the basis it was
+rendered from. A left-handed basis cannot be reconstructed from a look-at plus
+an up hint, so re-deriving one flips the image left-for-right.
+
+`GpuRenderState::seed` folds `seed * 2654435761` into the sample key — into
+the white-noise hash, and into the blue-noise sampler's two Owen scramble
+keys, both as an explicit `salt` argument so `sampler.wgsl` stays free of the
+render state. Zero reproduces every earlier sequence bit for bit.
+
+`background_mode` says what a camera ray that hits nothing returns: the themed
+backdrop (today's behaviour), the lighting environment, or black. The last two
+are the CPU integrator's `show_background` on and off. The main pass now
+overwrites the accumulated alpha with 1.0 only when refinement is enabled —
+it is the refine pass's sample-count marker, and clobbering it otherwise threw
+away the coverage estimate a transparent render is built from.
+
+`gpu::MAX_TRAVERSAL_DEPTH` and `validate_tree_depth` give a client's geometry
+module a gate to run before upload: a WGSL traversal stack silently drops the
+pushes it cannot hold, so an over-deep tree becomes a message instead of
+missing geometry.
+
+`RayTracePipeline::render_offline` (native only) uploads the scene once as a
+`ResidentScene` and dispatches `spp` samples against it, rewriting only the
+render-state uniform between them, then reads back the f32 accumulation buffer
+as linear HDR. `OfflineResult::to_film` hands that to the CPU `Film` so the
+caller's exposure/ACES/sRGB path is the CPU one.
+
+`GpuCamera::new` and every `GpuRenderState` constructor keep their old
+defaults, so the browser path is unchanged.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+the offline path is pinned against the cpu integrator
+…
+dc9bcfe
+```
+`tests/gpu_offline.rs`, over the built-in analytic geometry so no client crate
+is involved: a lit sphere on a ground plane, rendered both ways.
+
+  * the offline mean luminance is within 10% of the CPU integrator's over the
+    same scene, rig and gradient — a tolerance on the mean, since the two
+    tracers differ in precision, RNG and sample pattern;
+  * the same seed gives byte-identical output and a different seed does not,
+    while both agree on the mean to 5%;
+  * 64 spp is at least 30% smoother than 1 spp, by mean neighbour difference;
+  * an explicit right-handed basis renders what the derived one renders, and a
+    mirrored one swaps the two halves of the frame;
+  * `BACKGROUND_BLACK` leaves a miss black with zero coverage while the covered
+    centre keeps its alpha, and `BACKGROUND_ENVIRONMENT` puts radiance there;
+  * `to_film` carries the radiance and leaves the guide planes zeroed.
+
+Plus a hostside unit test, needing no device, that `validate_tree_depth`
+accepts a 64-deep chain and refuses a 65-deep one.
+
+`tests/gpu_sampler.rs` passes the new `salt` argument as 0, which is the
+sequence it was already pinning.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'origin/main' into claude/render-offline
+7013766
+render: a mesh hands out its vertex normals
+…
+135f3a6
+```
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+the cpu integrator stratifies its camera rays and stops on converged …
+…
+c1e0cd2
+```
+…pixels
+
+Camera jitter and lens position now come from a 4D Halton set (bases 2, 3,
+5, 7) rotated per pixel by a Cranley-Patterson offset drawn from the pixel's
+own PCG, so the point set covers the pixel footprint evenly without the
+shared structure showing as a pattern, and the render stays deterministic
+for a seed. The uniforms still pass through the reconstruction filter's
+warp, so the mean is still the filtered estimate.
+
+PathTraceOptions gains `adaptive` (default true): samples are traced in
+batches of 16 and a pixel stops once the 95% confidence half-width on its
+own luminance mean falls under a relative tolerance with an absolute floor,
+never before 32 samples. A pixel that stops keeps the unbiased mean of the
+samples it took, so spp becomes a ceiling rather than a count and the
+estimate is unchanged.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+ecto
+merged commit e3807cb
+into
+main
+Sep 6, 2026
+ecto
+added a commit
+to muni-works/vcad
+that referenced
+this pull request
+Sep 6, 2026
+--no-adaptive reaches the integrator again
+…
+a875161
+```
+kosm-render grew an `adaptive` knob (ecto/kosm#16), so the flag that has
+been inert since the CPU tracer moved out of this repo forwards to it once
+more: `PhotorealOptions::adaptive` goes straight into `PathTraceOptions`,
+and `--spp` is a ceiling again rather than an exact count.
+
+plate.vcad at --spp 128, 4096x4096: 1:18 adaptive, 1:31 with --no-adaptive,
+mean luma 185.198 against 185.279.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

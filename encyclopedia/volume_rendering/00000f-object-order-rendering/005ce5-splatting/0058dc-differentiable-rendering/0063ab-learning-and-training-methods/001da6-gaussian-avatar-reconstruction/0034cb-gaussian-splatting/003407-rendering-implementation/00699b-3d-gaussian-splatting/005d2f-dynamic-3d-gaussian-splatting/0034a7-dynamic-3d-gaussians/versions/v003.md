@@ -1,0 +1,41 @@
+# Dynamic 3D Gaussians
+
+
+## Overview
+Dynamic 3D Gaussians performs tracking by persistent dynamic view synthesis, linking the motion of each Gaussian to the movement of a corresponding 3D point in the scene [S1, unofficial]. It extends static 3D Gaussian Splatting to handle dynamic scenes by explicitly defining a tracking mechanism that differs from its parent [Dynamic 3D Gaussian Splatting](5703-dynamic-3d-gaussian-splatting.md) and from [GaussianFlow](6149-gaussianflow.md) by relying on persistent synthesis rather than flow-based deformation fields [S1, unofficial].
+
+## How it works
+**Inputs:** Multi-view video frames $\{I_t\}$ for $t \in [0, T]$ and camera poses $\{C_t\}$ [S2]. Initial static 3D Gaussians $\mathcal{G}_0$ [G].
+**Outputs:** Time-varying Gaussian parameters $\mathcal{G}_t$ for all $t$ and rendered dynamic views [S2].
+**Data Structures:**
+- **Gaussian Primitive:** A struct containing $\boldsymbol{\mu} \in \mathbb{R}^3$ (position), $q \in \mathbb{R}^4$ (normalized quaternion), $s \in \mathbb{R}^3$ (scale), $\alpha \in \mathbb{R}$ (opacity), $c \in \mathbb{R}^K$ (spherical harmonic coefficients) [G].
+- **Anchor Points:** A sparse subset of Gaussians selected via farthest point sampling (FPS) [S2].
+- **Embedded Deformation Graph (EDG):** A graph connecting each Gaussian to its $K$ nearest anchor points, with blend weights $w_{ij}$ computed based on spatial distances [S2].
+**Numbered Steps:**
+1. **2D Projection:** For a Gaussian at frame $t'$, compute its 2D projections $\{p_i^{t'} \mid i = 1 \dots N\}$ across $N$ input views [S2].
+2. **2D Tracking:** Run a pre-trained 2D point tracking model on $\{p_i^{t'}\}$ to obtain corresponding 2D pixel positions $\{p_i^t\}$ in frame $t$ [S2].
+3. **Triangulation:** Recover the 3D position $\boldsymbol{\mu}_i^t$ by finding the point closest to the $N$ camera rays originating from $\{p_i^t\}$ [S2].
+4. **Motion Propagation:** Select anchor points via FPS [S2]. Connect each Gaussian to its $K$ nearest anchor points [S2]. Compute blend weights $w_{ij}$ based on spatial distances [S2]. Update $\boldsymbol{\mu}_i^t$ by interpolating the motion of the anchor points using the EDG [S2].
+5. **Keyframe Management:** Maintain primitives only from a set of past keyframes. Smoothly adjust contributions as older keyframes are replaced by newer ones to ensure seamless temporal transitions [S2].
+**Formulas:** $\{p_i^{t'} \mid i = 1 \dots N\}$: 2D projections at frame $t'$ across $N$ views. $\{p_i^t\}$: 2D pixel positions at frame $t$. $\boldsymbol{\mu}_i^t$: 3D position at frame $t$. $K$: number of nearest anchor points. $w_{ij}$: blend weights based on spatial distance [S2].
+**Parameters:** $K$: Number of nearest anchor points for EDG [S2]. $N$: Number of input views [S2]. Tracking Model: Pre-trained 2D point tracking model [S2].
+**Edge Cases:** Not given in the sources.
+
+## Subtopics
+
+### 3D Warping
+A method to estimate the 3D position of a Gaussian primitive at a current frame $t$ from its position at a previous frame $t'$ using 2D point tracking and triangulation [S2]. It sets itself apart by explicitly using a pre-trained 2D point tracker and EDG for motion propagation, rather than learning deformation fields directly [S2]. Choose this when you have multi-view video and want to leverage existing 2D tracking models for robust motion estimation [S2].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Real-time 4DGS achieves interactive frame rates by fusing static background Gaussians with a small, fast-updating set of dynamic foreground Gaussians [S1, unofficial].
+- **Strengths:** Persistent dynamic view synthesis; leverages 2D tracking and EDG for motion propagation; seamless temporal transitions via keyframe management [S1, unofficial][S2].
+- **Limitations:** Not given in the sources.
+
+## Background
+Dynamic 3D Gaussians performs tracking by persistent dynamic view synthesis, linking Gaussian motion to 3D point motion [S1, unofficial]. It builds on [3D Gaussian Splatting](52-3d-gaussian-splatting.md) and [Dynamic 3D Gaussian Splatting](5703-dynamic-3d-gaussian-splatting.md) [G]. The 3D Warping variant uses a pre-trained 2D point tracking model and embedded deformation graph for motion propagation [S2]. It is used in applications requiring real-time 4D reconstruction and dynamic view synthesis [S1, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27

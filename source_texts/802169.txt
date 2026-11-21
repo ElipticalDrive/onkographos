@@ -1,0 +1,339 @@
+Contribute to care-ecosystem/care_radiology development by creating an account on GitHub.
+
+Exploration on DICOM image compression for uploaded files · Issue #105 · care-ecosystem/care_radiology · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Exploration on DICOM image compression for uploaded files #105
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Task
+#108
+Closed
+Exploration on DICOM image compression for uploaded files#105
+Task
+#108
+Copy link
+Assignees
+Labels
+explorationExplorationExploration
+Description
+pranavrutagi-egov
+opened on Aug 6, 2026
+Issue body actions
+No description provided.
+Activity
+pranavrutagi-egov
+self-assigned this
+on Aug 6, 2026
+pranavrutagi-egov
+added the
+Task
+issue type on Aug 6, 2026
+pranavrutagi-egov
+added
+explorationExplorationExploration
+on Aug 6, 2026
+pranavrutagi-egov commented on Aug 10, 2026
+pranavrutagi-egov
+on Aug 10, 2026
+Author
+More actions
+DICOM Storage Compression — Proposed Approach
+Problem
+DICOM files uploaded via /upload, /upload-dicom-external (care_radiology/api/dicom.py) are forwarded as-is to DCM4CHEE (services/dicom_service.py) with no compression, growing PACS storage unbounded.
+Approaches Considered
+1: DCM4CHEE Compression Rule (dcmArchiveCompressionRule, LDAP)
+Aspect
+Detail
+Component Changed
+docker/dcm4che/*.ldif config only
+Effort
+Low — one LDIF entry + ldapmodify
+Data Safety
+Lossless (JPEG-LS/JPEG2000-Lossless) — no pixel data loss
+Notes
+No app code touched; DCM4CHEE handles transcoding natively
+2: Client-side transcode before upload
+Aspect
+Detail
+Component Changed
+services/dicom_service.py (new pydicom/gdcm dependency)
+Effort
+Medium-High — new dependency, edge-case handling (multi-frame, palette color, YBR)
+Data Safety
+Depends on implementation quality
+Notes
+Reimplements what DCM4CHEE already does; higher bug surface on the upload path
+3: Object-store level compression (gzip at S3/minio layer)
+Aspect
+Detail
+Component Changed
+Infra (bucketconfig.ldif storage backend)
+Effort
+Low
+Data Safety
+N/A
+Notes
+Doesn't meaningfully shrink pixel data; may break DCM4CHEE's range-read streaming
+4: Strip "unnecessary" tags/overlay/curve data
+Aspect
+Detail
+Component Changed
+Client-side or DCM4CHEE attribute coercion
+Effort
+Medium
+Data Safety
+Risky — no safe generic tag list; private tags may be used by viewers
+Notes
+Tags are <1% of file size; doesn't address the actual storage driver (pixel data)
+Recommended: Approach 1 — DCM4CHEE Compression Rule (JPEG-LS Lossless)
+Where to change
+docker/dcm4che/ — add a new LDIF (e.g. compressionrule.ldif) defining a dcmArchiveCompressionRule under the Archive Device, alongside the existing bucketconfig.ldif.
+docker/dcm4che/Makefile — add an apply target (mirrors the existing ldap-setup target that already applies bucketconfig.ldif via ldapmodify).
+No changes to care_radiology/api/dicom.py or services/dicom_service.py — the upload API contract and code path are untouched.
+Example config
+```
+dn: cn=JPEG-LS Lossless,dicomDeviceName=dcm4chee-arc,cn=Devices,cn=DICOM Configuration,dc=dcm4che,dc=org
+objectClass: dcmArchiveCompressionRule
+cn: JPEG-LS Lossless
+dicomTransferSyntax: 1.2.840.10008.1.2.4.80
+dcmImageWriteParam: maxPixelValueError=0.0
+```
+How it works
+DCM4CHEE compresses on receipt (dcmCompressionDelay absent = synchronous on ingest) or can be deferred to off-peak hours via dcmCompressionSchedule/dcmCompressionThreads if ingest latency becomes a concern.
+maxPixelValueError=0.0 pins it to lossless — guarantees no diagnostic data loss.
+Verified compatible with the OHIF v3.9.2 image already in use (docker-compose.radiology.yaml) — its bundled Cornerstone3D stack ships @cornerstonejs/codec-charls (JPEG-LS decoder), so no viewer-side changes needed.
+Rules apply going forward only — existing stored studies are unaffected unless separately reprocessed.
+jagankumar-egov commented on Aug 25, 2026
+jagankumar-egov
+on Aug 25, 2026
+More actions
+@pranavrutagi-egov Please check both approaches:
+Approach 1: Adding the LDAP configuration.
+Approach 3: Applying gzip compression at the S3 level.
+Also, please check how this is supported by different cloud providers such as AWS and GCP, and compare the file sizes and improvements before vs. after the change. GCP, for example, supports storing gzip-compressed objects and serving them with appropriate Content-Encoding metadata.
+For the testing, please verify:
+Functionality remains intact end-to-end.
+Whether the improvement is only in storage size or also affects download/serving performance.
+Whether there is any impact on viewer/image quality.
+Behaviour with larger images vs. smaller images.
+File size comparison before and after compression.
+Any difference in loading/viewing time before and after the change.
+Check whether compression introduces any issues with image rendering, downloads, or other existing workflows.
+Please share the comparison and your recommendation based on the results.
+👍React with 👍1Reacted by Pranav Rustagi
+pranavrutagi-egov commented on Aug 28, 2026
+pranavrutagi-egov
+on Aug 28, 2026
+Last edited by pranavrutagi-egov
+Author
+More actions
+Approach 1 — DCM4CHEE LDAP Compression Rule
+What was tried
+1. The core compression rule
+A new LDAP object (dcmArchiveCompressionRule) was added, telling DCM4CHEE to re-encode incoming DICOM pixel data using JPEG-LS Lossless (transfer syntax 1.2.840.10008.1.2.4.80) instead of storing it uncompressed.
+```
+dn: cn=JPEG-LS Lossless,dicomDeviceName=dcm4chee-arc,cn=Devices,cn=DICOM Configuration,dc=dcm4che,dc=org
+changetype: add
+objectClass: dcmArchiveCompressionRule
+cn: JPEG-LS Lossless
+dicomTransferSyntax: 1.2.840.10008.1.2.4.80
+dcmImageWriteParam: maxPixelValueError=0.0
+```
+maxPixelValueError=0.0 is what pins this to lossless — no pixel value is ever allowed to change during compression. No modality/property scoping was added, so this applies to everything DCM4CHEE ingests.
+2. Synchronous compression — first test
+A corpus of test files (small/medium image, a multi-frame study, an already-compressed control file, and a large 72MB file) was uploaded with the rule active. Result: compression worked, but the large file's upload took 5.8 seconds instead of the uncompressed baseline of 1.4 seconds — DCM4CHEE spent real time compressing the file before confirming the upload succeeded.
+3. Deferred compression — fixing the latency
+Two more settings were added so compression happens after upload, not during it:
+dcmCompressionDelay (on the rule entry) — how long to wait before a file becomes eligible for compression.
+dcmCompressionPollingInterval (on the archive device entry) — how often a background job checks for eligible files.
+Re-testing with these active showed the large file's upload time returning to baseline (1.56s), confirmed uncompressed immediately after upload, then confirmed compressed (to the identical size as the synchronous run) once the delay passed. Pixel data was re-verified bit-identical after this delayed path too.
+4. Lossless verification
+For every file that got compressed, its pixel data was decoded and a SHA-256 hash compared against the original, pre-compression file. This was done for the small file, the multi-frame file, and the large file — all matched exactly, both under synchronous and deferred compression.
+5. Downstream behavior — retrieval and export
+A compressed file was retrieved via the standard DICOM web retrieval API (WADO-RS) without requesting any specific format: DCM4CHEE handed back a normal uncompressed file. Only when explicitly requesting the original (JPEG-LS) format did it return the compressed bytes.
+A compressed study was sent to an external system via DICOM's native transfer protocol (C-MOVE), to a real destination (Orthanc): this succeeded with zero errors, and the destination received an uncompressed copy too — same automatic conversion as above. Pixel data was verified bit-identical there as well.
+This means anything downstream — viewers, other PACS systems, exports — gets standard DICOM by default and never has to deal with the compressed format at all, unless it specifically asks for it.
+6. Effect on existing data
+The rule was turned off, a file was uploaded (stayed uncompressed, as expected), the rule was turned back on, and after waiting, that same file was confirmed still untouched — while a separate new upload made afterward did get compressed. Whether DCM4CHEE has any way to retroactively compress already-stored studies was also checked: it does not — a new rule only ever applies to newly arriving data.
+7. Compatibility with different data types
+A binary segmentation mask (SEG object — a DICOM file type that stores a highlighted region of interest, like an outlined organ or tumor, as a mask overlay rather than a normal image) could not be compressed by JPEG-LS at all — DCM4CHEE safely left it uncompressed rather than corrupting it.
+An already-compressed control file was correctly left untouched (not re-compressed).
+A multi-frame study (10 frames) compressed and decompressed correctly, with all frames intact and pixel-identical.
+8. Visual confirmation in the viewer
+Every test study was opened in the OHIF viewer: the compressed multi-frame study rendered with all frames navigable, the large compressed file rendered (taking ~6 seconds to display), and the small compressed files, the untouched control file, and the uncompressed SEG file all displayed exactly as expected.
+Results
+File type
+Size before
+Size after
+Reduction
+Lossless verified?
+Small CT image
+39,206 B
+20,634 B
+47.4%
+Yes
+Segmentation (SEG)
+102,630 B
+102,616 B
+~0% (incompatible format, not compressed)
+N/A
+Multi-frame MR (10 frames)
+84,256 B
+37,634 B
+55.3%
+Yes
+Already-compressed control
+3,308 B
+3,294 B
+~0% (correctly untouched)
+N/A
+Large file (72MB)
+72,006,508 B
+57,784,712 B
+19.8%
+Yes
+Ingest time on the large file: 1.4s baseline → 5.8s with synchronous compression → 1.56s with deferred compression (cost eliminated).
+What needs to be added, where
+docker/dcm4che/compressionrule.ldif (new file)
+The compression rule LDIF shown in step 1 above.
+Deferred-compression settings (applied via ldapmodify, not yet folded into a checked-in file):
+dcmCompressionDelay on the rule entry (cn=JPEG-LS Lossless,...)
+dcmCompressionPollingInterval on the archive device entry (dicomDeviceName=dcm4chee-arc,...)
+Both need real values sized to production ingest volume — the ones used for testing (30 seconds delay, 10 second poll) were chosen to make the test finish quickly, not for production. Production values should be based on: how long a full study typically takes to arrive (delay must outlast that), and expected throughput (thread count and polling frequency need to keep pace, or a backlog builds up).
+arc (DCM4CHEE) restart required after applying the rule or changing these settings — it only reads this configuration at startup, not live.
+No application code changes anywhere — this entire approach is infrastructure/config only.
+pranavrutagi-egov commented on Aug 28, 2026
+pranavrutagi-egov
+on Aug 28, 2026
+Author
+More actions
+Approach 3 — Gzip at S3/Minio Level
+What was tried
+1. Feasibility check on DCM4CHEE's storage configuration
+Before attempting any implementation, DCM4CHEE's storage backend configuration (the settings controlling how it talks to the S3-compatible object store) was checked for any option to compress data on write — something equivalent to a "store as gzip" flag.
+No such option exists. The storage config only exposes settings for authentication, bucket name, and connection handling — nothing related to compression or Content-Encoding. This means DCM4CHEE has no built-in way to write gzip-compressed objects to storage at all.
+2. What building this would actually require
+Since DCM4CHEE can't do this natively, achieving gzip compression would mean inserting a separate proxy layer between DCM4CHEE and the object store (or using a cloud-specific feature like AWS S3 Object Lambda) that intercepts writes and compresses them on the way in, and decompresses on the way out. This is a new infrastructure component, not a configuration change — a meaningfully bigger and riskier undertaking than Approach 1's single config file.
+3. Checking whether it would even work once built
+Even assuming that proxy layer existed, a second problem was identified: DICOM viewers and PACS systems (including DCM4CHEE itself) don't download a whole image file at once — they fetch individual frames using HTTP byte-range requests (asking for just part of a file). Cloud storage that supports gzip (see below) does not support byte-range requests on a gzip-compressed object by default — it returns the entire file regardless of what range was asked for.
+This means that even if gzip-at-storage-level were built, retrieving a single frame from a large multi-frame study would require downloading and decompressing the entire file every time — the opposite of the intended performance improvement, and potentially much slower for large studies than not compressing at all.
+A workaround exists (the requesting client can ask for the raw gzip stream instead of triggering decompression), but that shifts the burden onto DCM4CHEE's own storage-access code, which would need to understand how to decompress just part of a gzip stream — something it has no built-in support for.
+4. Cloud provider comparison
+Since the original ask specifically included checking AWS and GCP:
+Provider
+Can store gzip-compressed objects?
+What happens on a byte-range request?
+GCP (Cloud Storage)
+Yes — objects can be stored gzip-compressed with a Content-Encoding: gzip tag, and are automatically decompressed when served
+Returns the whole object, ignoring the requested range, unless the client explicitly opts out of automatic decompression (see the workaround above)
+AWS (S3)
+No — S3 has no concept of automatic compression/decompression. Whatever bytes are uploaded are what come back on download; Content-Encoding is just a label for the client to interpret
+Not applicable, since there's no server-side compression happening in the first place
+5. Measuring the compression ceiling anyway
+Even though building this out was ruled out, a standard gzip -9 compression pass was run directly on the same test files used for Approach 1, purely to see what kind of size reduction gzip would offer if it were usable — a ceiling number, not a real test of the archive.
+Results
+File type
+Size before
+Size after gzip -9
+Reduction
+Small CT image
+39,206 B
+24,605 B
+37.2%
+Segmentation (SEG)
+102,630 B
+3,658 B
+96.4%
+Multi-frame MR (10 frames)
+84,256 B
+53,050 B
+37.0%
+Already-compressed control
+3,308 B
+1,671 B
+49.5% (mostly file-header overhead, not a real compression win — this file's actual image data is already compressed)
+Large file (72MB)
+72,006,508 B
+61,713,704 B
+14.3%
+Notably, gzip compressed the segmentation file (SEG) dramatically — 96.4% — because that file type stores a simple region-outline mask with a lot of repeated/blank data, which generic compression handles very well. This is the one file type that Approach 1's JPEG-LS method could not compress at all. On every other file — real image data — gzip performed noticeably worse than JPEG-LS (see Approach 1's results for direct comparison).
+No archive-level testing (upload, retrieval, viewer checks, retrieval timing) was performed for this approach, since it was ruled out before reaching that stage.
+What would need to be added, where (if pursued anyway)
+A new proxy/interception layer between DCM4CHEE and the object store, capable of compressing data on write and handling byte-range requests against compressed data on read — not something that exists in this codebase or DCM4CHEE's configuration options today. This would likely mean standing up and maintaining a new service, not editing a config file.
+A decision on which cloud provider's compression feature to depend on, since AWS and GCP behave differently (see comparison table above) — this would tie the storage layer to a specific provider's capabilities rather than staying provider-agnostic.
+A resolution to the byte-range problem before this is viable at all — either accepting the retrieval-speed penalty on large/multi-frame studies, or building custom logic in DCM4CHEE's storage-access code to handle partial decompression, which does not exist today.
+pranavrutagi-egov commented on Aug 28, 2026
+pranavrutagi-egov
+on Aug 28, 2026
+Author
+More actions
+Comparison & Recommendation
+Side-by-side
+Approach 1 (JPEG-LS via DCM4CHEE)
+Approach 3 (gzip at storage level)
+Feasible today?
+Yes — implemented and tested
+No — ruled out before implementation
+Native support
+Built into DCM4CHEE
+Not supported; would need a new proxy layer
+Compression on real image data
+47–55%
+37% (worse, and unusable as-is)
+Compression on segmentation (SEG) files
+0% — format incompatible
+96.4% — the one case gzip wins
+Lossless
+Yes, verified by hash
+N/A, never built
+Effect on retrieval speed
+None — transcodes transparently
+Would likely make large studies slower (byte-range conflict)
+Effect on ingest speed
+Solved via deferred compression
+N/A
+Retroactive on existing data
+No — new data only
+N/A
+Implementation effort
+Low — one config file
+Medium–High — new infrastructure, still broken after
+Recommendation
+Adopt Approach 1. It is implemented and validated end-to-end: lossless (hash-verified), transparent to viewers and external systems, and its main cost (ingest latency on large files) is resolved with deferred compression.
+Approach 3 is ruled out at the design stage. DCM4CHEE has no way to write gzip-compressed data to storage, and a custom workaround would conflict with how DICOM systems retrieve image frames (via byte-range requests), which cloud gzip storage does not support well. Gzip does compress segmentation files better than JPEG-LS, but this does not change the outcome, since there is no working way to use it.
+Some other checks (if needed)
+Load-testing. Testing so far compressed one file at a time. The background compression settings (how long to wait before compressing, how often to check for new files) need to be sized against actual expected daily volume, not the test defaults — otherwise a backlog of uncompressed files can build up faster than it clears.
+Segmentation (and similar) coverage gap. Since these files silently stay uncompressed, there should be a way to notice how much of the real data volume falls into this category, rather than assuming it's negligible.
+Existing data is not automatically compressed. Turning this on only affects new incoming studies. If shrinking already-stored data matters, that needs its own separate plan — it means re-processing existing files, not just flipping a setting.
+Compliance sign-off. Since this is lossless, no diagnostic image data changes — but formal confirmation that a lossless-compression policy is acceptable for stored patient imaging should still be obtained before rollout, if not already done.
+pranavrutagi-egov
+linked a pull request that will close this issueAdd compression rule for JPEG-LS Lossless to LDAP configuration #108on Sep 2, 2026
+jagankumar-egov
+closed this as completedin #108on Sep 3, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+pranavrutagi-egov
+Labels
+explorationExplorationExploration
+Type
+Task
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,242 @@
+Interactive data visualizations and plotting in Julia - constructive solid geometry / SDF based volume algorithm by ffreyer · Pull Request #5516 · MakieOrg/Makie.jl
+
+constructive solid geometry / SDF based volume algorithm by ffreyer · Pull Request #5516 · MakieOrg/Makie.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ffreyer
+commented
+Feb 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Description
+I got (re-)inspired to play around with a signed distance field based raymarch algorithm by a gamedev video on youtube. With that you can compose various 3D shapes with operations like union, difference/subtraction, intersection, xor as well as smooth variants of the former. You can also modify shapes, e.g. by applying rounding, bending or twisting.
+Here's a gear as an example:
+```
+sdf_tree = CSG.diff(
+    CSG.intersect(
+        CSG.smooth_union(
+            CSG.Cylinder(0.2, 0.7, color = :lightgray),
+            CSG.union(
+                map(1:4) do n
+                    CSG.Rect(
+                        Vec3f(0.1, 0.07, 0.2),
+                        color = :lightgray,
+                        translation = 0.8 * Vec3f(cos(n * pi/8 - pi/16), sin(n * pi/8 - pi/16), 0),
+                        rotation = qrotation(Vec3f(0, 0, 1), -n * pi/8 + pi/16),
+                    )
+                end...,
+                mirror = (true, true, false)
+            ),
+            smooth = 0.02
+        ),
+        CSG.Cylinder(0.1, 1, color = :orange)
+    ),
+    CSG.Cylinder(0.2, 0.4),
+)
+
+csgplot(-1..1, -1..1, -1..1, sdf_tree)
+```
+The code is currently quite messy because it contains leftovers multiple prototypes.
+The first is an attempt to compute signed distance fields on the GPU directly, by encoding the operations on CPU and then decoding and processing them on the GPU. I got this to work, but it was very expensive on GPU. (I'd guess this is a combination of needing a lot of branching to determine what each operation is (e.g. if (operation == op_translation) ...) running for multiple operations that need to be evaluated multiple times as the raymarching gets evaluated.) This is currently still available as sdfscatter().
+The second prototype moved the SDF generation to the CPU, evaluating distances once and storing them in a 3D array. That array is then passed to volume where the distances are used in ray marching. On the GPU side, this is should be faster and higher quality than the other volume algorithms. The conversion for this is currently disabled.
+The third and current prototype builds on the second. Loosely following the gamedev video, I implemented a Brickmap to compress the signed distance data. This typically compresses the data by a factor of 10-100, which can then be used for more quality. From that point on, I added another compressing procedure for colors and tried optimizing the initial SDF generation.
+Some stats for the example above:
+32 operations total, evaluated in an effective 512^3 grid in a -1..1 box
+dense array:
+512^3 * 2 byte for each distance: 256MB
+512^3 * 3 byte RGB color: 384MB (not implemented)
+total 640MB
+time: 19.3s (unoptimized)
+Brickmap: (memory rounded)
+1.5MB brick indices (73^3 * 4 byte)
+7.6MB 10MB distances in bricks (14716 14716/19683 bricks ¹, each 8^3 * 1 byte, depends on the amount of surface area)
+0.06MB index remapping for colors (14716 14716/16384 * 4 byte indices ¹, one per brick)
+4.0MB color (2312 2312/2744 bricks ¹, each 8^3 * 3 byte, depends on the number of mixed color bricks)
+¹ these are dynamically resizing arrays with n_used / n_available elements
+total: 13.2MB 15.5MB
+time: 2.2s 0.77s 0.60s 0.28s (with optimizations to skip empty regions and locally irrelevant SDF nodes)
+TODO:
+localized edits (don't regenerate everything on change, just what's needed)
+extend ShaderAbstractions.Sampler update functions Add more update options for Sampler SimonDanisch/ShaderAbstractions.jl#31
+allow prefix operations in merge nodes (union, diff, etc)
+more Optimizations...
+consider always adding position data to shapes to reduce number of translation operations (is this actually worth it, or do translation happen at other points to allow other operations to acts on the centered shape?)
+consider eliminating unneeded SDF nodes based on a SDF sample rather than and bounding boxes
+broadcast each sdf operation over a brick instead of broadcasting the tree as whole (i.e. evaluate if command.id == ... once per brick instead of once per brick element)
+consider reusing brick indices for coarse distance sampling
+2D shapes for extrusion (etc)
+maybe add rotational symmetry operation
+improve user interface
+add methods for each shape and merge command in clean module/namespace
+clean up old prototypes/unused code
+delete sdfplot, volume extension (use different parent plot instead) and related code
+consider replacing operation enum with Symbols
+documentation
+tests
+Note that this pr requires JuliaGeometry/GeometryBasics.jl#276, SimonDanisch/ShaderAbstractions.jl#31
+I should also note that Inigo Quilez articles are very helpful for this pr, especially the one on 3D signed distance functions. Almost all the operations and shape functions come from there.
+Type of change
+New feature (non-breaking change which adds functionality)
+Checklist
+Added an entry in CHANGELOG.md (for new features and breaking changes)
+Added or changed relevant sections in the documentation
+Added unit tests for new algorithms, conversion methods, etc.
+Added reference image tests for new plotting functions, recipes, visual options, etc.
+ffreyer
+added 27 commits
+January 17, 2026 05:03
+prototyping
+fb50d60
+prototype 2
+6c891f1
+optimize a bit
+228eae3
+prototype sdf volume shader + CPU sdf evaluation
+1f6ec6b
+fix orthographic volume
+8d04c9e
+prototype brickmap
+2c66636
+swap order of arguments in rotate_bbox
+90cca86
+fix order of definitions
+4332d4b
+reorganize code
+225404b
+optimize, add bounding boxes
+c6a33a2
+fix Pyramid
+a2ac981
+optimize a bit
+…
+cb19ca9
+```
+only skipping reset commands really changes anything here...
+```
+partially consider smoothing in union bounding boxes
+03dc8f9
+try to improve compute pipeline error printing
+c5016ec
+include colors badly
+b29e704
+rework merging to fold-strategy, fix color interpolation
+6a23cb9
+rework colors to handle full color detail
+372ba19
+fix subtraction
+d782fc0
+merge color + sdf gen so we don't do work twice
+0765fff
+small optimizations
+…
+a432443
+```
+~11% faster in 512^3 test scene
+```
+fix smooth merges
+8987228
+compute more accurate bboxes and use them to skip node evaluations
+…
+3ca21ae
+```
+2.25s -> 0.6s
+```
+fix orthographic volume from inside volume box
+0e9c89a
+some more small optimizations
+132fb87
+tweak show for compute graph
+edb2390
+small fixes
+1c2c986
+fix performance issues with splatting/unknown array length
+e4780f0
+github-project-automation
+Bot
+added this to PR review
+Feb 2, 2026
+github-project-automation
+Bot
+moved this to Work in progress
+in PR review
+Feb 2, 2026
+MakieBot
+commented
+Feb 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Benchmark Results
+SHA: 491348b0fffb5f7a6851307d8f247bcca95264f1
+Warning
+These results are subject to substantial noise because GitHub's CI runs on shared machines that are not ideally suited for benchmarking.
+ffreyer
+added 10 commits
+February 4, 2026 14:28
+move prefix, postfix commands into dedicated functions
+f9dfe0e
+use broadcasting with cached position, sdf, color buffers
+c9bf0d1
+allow prefixes in merge nodes
+de3076c
+fix update erroring?
+abfb809
+fix empty node handling for trimmed trees
+800949e
+process input in new plot type
+808997f
+prototype diffing (in tree, brickmap)
+52ed753
+prototype in-place updates
+966cb5d
+reduce number of copys
+63d6278
+remove some old code
+cdd0beb
+ffreyer
+mentioned this pull request
+Feb 8, 2026
+Add more update options for Sampler
+SimonDanisch/ShaderAbstractions.jl#31
+Merged
+ffreyer
+added 5 commits
+February 8, 2026 17:11
+remove old sdfplot code from GLMakie
+917d66b
+fix leftover Brickmap
+84521d9
+simplify enum to Symbol, move code, cleanup unused code
+6b57bd6
+add sdf based discard, avoid temp trees
+dd77c6b
+add KernelAbstractions version
+491348b
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

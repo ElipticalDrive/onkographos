@@ -1,0 +1,38 @@
+# Hardware-Assisted Projection
+## Overview
+Hardware-Assisted Projection is a family of volume rendering techniques that project 3D geometric primitives (tetrahedra, polyhedra, or hexahedra) onto the 2D image plane to leverage the graphics pipeline's rasterization and blending hardware [S1, book]. It solves the performance bottleneck of software-based raycasting by replacing irregular memory access with global back-to-front sorting and hardware-accelerated compositing [S1, book]. Unlike sibling methods that may use local sorting, additive accumulation, or specific decomposition strategies, this family is defined by the reliance on explicit depth sorting of cells to ensure correct alpha blending via the Porter-Duff "over" operator, or additive accumulation in absorption-only regimes [S1, book].
+## Shared principles
+The family shares the core mechanism of projecting 3D cells into screen space and using hardware rasterization to compute optical properties per pixel.
+
+1.  **Sorting**: Cells must be sorted in back-to-front order relative to the viewpoint to ensure correct compositing [S1, book]. This is necessary because the compositing step assumes a pile of cells being viewed from beneath, where cells are removed from the top (back) and composited [S1, book].
+2.  **Projection**: 3D vertices are projected to 2D screen space. For arbitrary polyhedra, the projection may be subdivided into regions where optical thickness varies linearly [S1, book].
+3.  **Integration**: The volume rendering integral is approximated along the viewing ray segment passing through the cell. The differential equation for intensity $I(s)$ along a ray with extinction coefficient $\tau(s)$ is [S1, book]:
+    $$ \frac{dI(s)}{ds} = -\tau(s)I(s) $$
+    Integrating along a ray segment of length $l$ yields [S1, book]:
+    $$ I(l) = I(0) \exp\left(-\int_0^l \tau(s) \, ds\right) $$
+    Transparency is defined as [S1, book]:
+    $$ T = \exp\left(-\int_0^l \tau(s) \, ds\right) $$
+4.  **Hardware Compositing**: The resulting color and opacity values are composited using hardware blending operations in back-to-front order [S1, book]. To avoid Mach bands caused by linear interpolation of transparency (a nonlinear function of thickness), texture mapping is often used for exponential lookup [S1, book].
+## Subtopics
+
+### [Hardware-Assisted Polyhedron Projection](1453-hardware-assisted-polyhedron-projection.md)
+A technique for volume rendering arbitrary unstructured grids composed of convex polyhedral cells by projecting 3D cells to 2D screen space and using hardware polygon rendering pipelines for scan conversion and compositing. It solves the problem of efficiently rendering complex, non-uniform meshes by avoiding the irregular memory access patterns of raycasting, instead relying on global back-to-front sorting of cells and hardware-accelerated interpolation. Unlike sibling methods that may use local sorting or additive accumulation, this method requires explicit depth sorting of all cells to ensure correct alpha blending.
+
+### [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md)
+Hardware-Assisted Projected Tetrahedra (HAPT) is a highly efficient, single-pass GPU volume rendering method for unstructured tetrahedral meshes. It builds on [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) by replacing software-based projection and sorting with dedicated graphics hardware primitives, specifically leveraging the Geometry Shader for decomposition and the Fragment Shader for ray integration. Unlike its sibling [Hardware-Assisted Polyhedron Projection](1453-hardware-assisted-polyhedron-projection.md) which handles general convex polyhedra, HAPT is specialized for tetrahedra, allowing it to stream data efficiently without auxiliary graph structures. It solves the performance bottleneck of previous PT variants (like PTINT) by eliminating the need to read data back from the GPU or rely on complex basis graphs.
+
+### [Röttger 3D Texture Mapping](7896-r-ttger-3d-texture-mapping.md)
+Röttger 3D Texture Mapping is an extension of the projected tetrahedra algorithm that enables hardware-accelerated rendering of volumetric data with arbitrary transfer functions. It solves the artifact problem inherent in linear opacity interpolation by using a pre-integrated texture lookup to compute the exact transmittance along a ray segment. Unlike siblings that rely on linear approximations or unsorted hexahedra, this method requires back-to-front sorting of tetrahedra but provides accurate results for non-linear transfer functions by approximating a 3D lookup table with 2D texture hardware.
+
+### [Absorption-Only Radiography via Unsorted Hexahedron Projection](10255-absorption-only-radiography-via-unsorted-hexahedron-projecti.md)
+This method simulates X-ray radiographs for curvilinear hexahedral meshes by accumulating optical thickness additively, thereby eliminating the need for a global back-to-front visibility sort. It differs from standard polyhedron projection methods, which require sorting to correctly apply the Porter-Duff "over" operator for alpha compositing, by exploiting the commutative property of addition in the absorption-only regime ($J_\nu = 0$).
+
+### Pre-sorted Tetrahedral Rendering
+- **Sorting**: Sort the cells before they are split into tetrahedra [S1, book].
+- **Acceleration**: Utilize 2D texture mapping hardware to accelerate opacity interpolation and provide correct per-pixel opacity values to avoid artifacts [S1, book].
+- **Pitfall**: Can only handle linear transfer functions without artifacts [S1, book].
+
+## Background
+The concept of hardware-assisted projection for volume rendering originated with the need to accelerate unstructured grid visualization. Stein et al. [312] sorted cells before splitting them into tetrahedra and utilized 2D texture mapping hardware to accelerate opacity interpolation [S1, book]. Röttger et al. [272] introduced preintegrated volume rendering to allow for arbitrary transfer functions, creating a 3D texture map approximated using two-dimensional texture mapping [S1, book]. The method is primarily used in scientific visualization for unstructured meshes where regular grid-based raycasting is inefficient [S1, book].
+## Sources
+[S1] Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

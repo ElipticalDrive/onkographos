@@ -1,0 +1,10 @@
+-> Just look at the code and understand the flow its initial part (pixel to ray is similar to the assignment).
+-> initial process of ray casting have already implemeted. (class Ray)
+-> render-engine send out the initial rays.
+-> transform function takes the points and find cubic spline. using this i have created two transform functions color and alpha (opacity) these can be customized for the user.
+-> For volume i have created "class Volume". it read the "volume_file.ctscan" and also compute gradient (also can used the already computed gradient for fast computation).
+-> currently do the nearest neighbour only (needs to implement voxel intersection).
+-> for rending technique : average has been implemented (X-Ray).
+-> first intersection : currently doing ray to axis aligned rectangle rather than ray-AABB.
+-> currently using 1D Transfer function. (needs to implement to use gradient for the opacity)
+-> you can look at img.png for the currente output.

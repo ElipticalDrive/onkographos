@@ -1,0 +1,52 @@
+# Ray-AABB Intersection (Slab/Min-Max)
+
+Also called: Slab Method, Slab/Min-Max
+
+## Overview
+The Slab/Min-Max method determines if a ray intersects an Axis-Aligned Bounding Box (AABB) by computing the entry ($t_{near}$) and exit ($t_{far}$) distances along the ray parameter $t$. It treats the box as the intersection of three pairs of parallel planes (slabs) [Parent]. It sets itself apart from [Ray-box intersection](776-ray-box-intersection.md) by explicitly providing the scalar interval $[t_{min}, t_{max}]$ required for subsequent volume sampling or traversal, rather than just a boolean hit test.
+
+## Shared principles
+The method relies on the parametric ray equation $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin and $\mathbf{d}$ is the direction. An AABB is defined by $\mathbf{min} = (x_{min}, y_{min}, z_{min})$ and $\mathbf{max} = (x_{max}, y_{max}, z_{max})$.
+
+For each axis $i \in \{x, y, z\}$, the intersection with the two planes $x_i = min_i$ and $x_i = max_i$ is found by solving for $t$:
+$$
+t_{1,i} = \frac{min_i - o_i}{d_i}, \quad t_{2,i} = \frac{max_i - o_i}{d_i}
+$$
+To handle division by zero when $d_i = 0$, implementations often replace $d_i$ with a small epsilon $\epsilon$ or use precomputed inverse directions $inv_d_i = 1/d_i$ [S2, unofficial][S1, unofficial].
+
+The intersection interval for axis $i$ is $[t_{near,i}, t_{far,i}]$ where:
+$$
+t_{near,i} = \min(t_{1,i}, t_{2,i}), \quad t_{far,i} = \max(t_{1,i}, t_{2,i})
+$$
+The global entry and exit times for the box are the maximum of the nears and minimum of the fars across all axes:
+$$
+t_{min} = \max(t_{near,x}, t_{near,y}, t_{near,z})
+$$
+$$
+t_{max} = \min(t_{far,x}, t_{far,y}, t_{far,z})
+$$
+A ray intersects the box if $t_{min} \le t_{max}$ and $t_{max} \ge 0$ (for forward rays) [S2, unofficial].
+
+## Subtopics
+
+### [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md)
+Computes the intersection interval and generates discretized 3D sample points for volume rendering. It differs from the parent by adding discretization logic and point generation.
+
+### [Ray-Cube Intersection](2466-ray-cube-intersection.md)
+Computes precise entry/exit coordinates and face indices for a cube. It differs from the parent by explicitly calculating the 3D intersection coordinates and geometric face index for traversal initialization.
+
+### [Branchless Ray/AABB Intersection with NaN Handling](3297-branchless-ray-aabb-intersection-with-nan-handling.md)
+A branchless variant using nested min/max operations to suppress IEEE 754 NaNs caused by zero direction components or boundary origins. It sets itself apart by ensuring robustness in BVH traversal without conditional branches.
+
+### Ray-Bounding Box Intersection
+**definition**
+A bounding box is used to determine ray entry and exit from the volumetric dataset, accelerating calculation by skipping rays that miss the volume and enabling 'cutting' the volume to look inside [S1, unofficial].
+
+**pitfall**
+When looking inside a hollow object (like the Stanford Bunny), the gradient at the start of the ray may be 0 if the ray starts 'inside the material' because gradient calculation uses data before the ray start [S1, unofficial].
+
+## Background
+The slab method is a standard primitive intersection test in computer graphics. It is widely used in volume rendering to cull rays that do not pass through the volume of interest and to define the sampling interval [S1, unofficial]. The specific handling of NaNs for branchless execution is a later optimization for GPU/BVH traversal [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)

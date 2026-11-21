@@ -1,0 +1,134 @@
+# Voxel Association
+
+Also called: Neighboring-Voxel Search
+
+## Overview
+Voxel Association is a mechanism for applying spatial regularizers (e.g., Eikonal, smoothness, Laplacian) to multi-resolution sparse voxel structures by reasoning on a single conceptual finest lattice [S1, unofficial]. It solves the problem of spatial coupling in sparse voxel grids, which possess hard boundaries and lack the built-in spatial continuity of implicit neural fields or Gaussian primitives [S1, unofficial]. Unlike hashmap-based approaches that assume a uniform grid, Voxel Association maintains a conceptual finest grid to enable consistent neighborhood queries across different Levels of Detail (LoD) while storing only occupied cells [S1, unofficial].
+
+## How it works
+**Inputs:** A query point $q$ in 3D space; the current multi-resolution sparse voxel hierarchy (SVRaster) [S1, unofficial].
+**Outputs:** The index $v$ of the sparse voxel occupying the dense cell containing $q$, and access to its 6-connected neighbors [S1, unofficial].
+
+**Data Structures:**
+The method relies on three lightweight data structures linking the conceptual finest grid to the sparse voxels [S1, unofficial]:
+
+1.  **Occupancy Bitmask (A):** A bitmask of length $G^3$, where $G = 2^L$ is the resolution of the finest lattice level $L$. The entry at linearized index $\text{idx}(x, y, z) = x \cdot G^2 + y \cdot G + z$ is set to `true` if the corresponding cell $c(x, y, z)$ is occupied by an active voxel, and `false` otherwise [S1, unofficial].
+2.  **Index Table (B):** A sorted lookup table of length $M$ (where $M \ll G^3$) storing the linearized indices $\text{idx}$ of all occupied grid cells in ascending order [S1, unofficial].
+3.  **Grid→Voxel Map (C):** A lookup table of length $M$, aligned with Index Table (B), that maps each occupied grid cell index to the index $v$ of the enclosing sparse voxel [S1, unofficial].
+
+**Definitions:**
+*   **Conceptual Finest Lattice:** A dense grid at resolution $G = 2^L$, indexed by $d_L = (i, j, k) \in \{0, \dots, G-1\}^3$ [S1, unofficial].
+*   **Cell:** A unit cube volume $c(i, j, k)$ associated with dense coordinate $d_L$, covering the continuous region $\{(x, y, z) \in \mathbb{R}^3 \mid i \le x \le i+1, j \le y \le j+1, k \le z \le k+1\}$ [S1, unofficial].
+
+**Algorithm: Neighboring-Voxel Search (NVS)**
+Given a query point $q$, the function $\text{NVS}(q)$ returns the voxel index $v$ and facilitates neighbor access via the following steps [S1, unofficial]:
+
+1.  **Locate Cell:** Determine the containing grid cell $c(x, y, z)$ for $q$ and compute its linearized dense index $\text{idx} = x \cdot G^2 + y \cdot G + z$.
+2.  **Identify Neighbors:** Compute the linearized indices for the six face-adjacent neighbors: $(x\pm1, y, z)$, $(x, y\pm1, z)$, and $(x, y, z\pm1)$.
+3.  **Check Occupancy:** For each neighbor index $\text{idx}_n$, check the Occupancy Bitmask (A). If $\text{A}[\text{idx}_n]$ is `true`, the neighbor is active. This is an $O(1)$ bitwise access [S1, unofficial].
+4.  **Find Index Position:** If active, perform a binary search on the sorted Index Table (B) to find the position $i$ where $\text{B}[i] == \text{idx}_n$. This takes $O(\log M)$ time [S1, unofficial].
+5.  **Retrieve Voxel:** Access the Grid→Voxel Map (C) at position $i$ to retrieve the voxel index $v = \text{C}[i]$. This is an $O(1)$ operation [S1, unofficial].
+
+The lookup is simplified as $v = \text{NVS}[\text{idx}]$, where $\text{idx}$ is the dense cell index [S1, unofficial].
+
+**Hierarchy Updates:**
+When the LoD hierarchy changes (e.g., voxel subdivision), the data structures are rebuilt in parallel [S1, unofficial]:
+1.  Each thread group processes a single active voxel, iterating over its covered fine-grid cells to compute their linearized indices [S1, unofficial].
+2.  These indices are marked in the Occupancy Bitmask (A) [S1, unofficial].
+3.  Corresponding entries are added to temporary unsorted buffers for Index Table (B) and Grid→Voxel Map (C) [S1, unofficial].
+4.  Index Table (B) is sorted, and the same permutation is applied to Grid→Voxel Map (C) to maintain alignment [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_association_lookup(query_point, G, A, B, C):
+    """
+    Performs Neighboring-Voxel Search for a query point.
+    
+    Args:
+        query_point: tuple (x, y, z) representing the continuous coordinate.
+        G: Resolution of the finest lattice (G = 2^L).
+        A: Occupancy bitmask (list of booleans or bitset) of length G^3.
+        B: Sorted Index Table (list of ints) of length M.
+        C: Grid->Voxel Map (list of ints) of length M.
+        
+    Returns:
+        voxel_index: The index of the sparse voxel occupying the cell.
+        neighbors: List of voxel indices for the 6 face-adjacent occupied neighbors.
+    """
+    # 1. Locate Cell
+    # Assuming query_point is within bounds [0, G-1]
+    x, y, z = query_point
+    idx = x * G**2 + y * G + z
+    
+    # 2. Identify Neighbors
+    neighbor_coords = [
+        (x + 1, y, z), (x - 1, y, z),
+        (x, y + 1, z), (x, y - 1, z),
+        (x, y, z + 1), (x, y, z - 1)
+    ]
+    
+    neighbors = []
+    
+    for nx, ny, nz in neighbor_coords:
+        # Boundary check for neighbor coordinates
+        if not (0 <= nx < G and 0 <= ny < G and 0 <= nz < G):
+            continue
+            
+        n_idx = nx * G**2 + ny * G + nz
+        
+        # 3. Check Occupancy
+        if A[n_idx]:
+            # 4. Find Index Position (Binary Search)
+            # Standard binary search for n_idx in B
+            i = binary_search(B, n_idx)
+            
+            # 5. Retrieve Voxel
+            if i is not None:
+                voxel_idx = C[i]
+                neighbors.append(voxel_idx)
+                
+    # Retrieve the voxel for the query cell itself
+    # Note: The query cell is assumed to be occupied by definition of the query context
+    # or handled separately. If strictly following NVS for neighbors, 
+    # the primary return is often the neighbor list or the specific voxel for idx.
+    # Here we return the voxel for the query cell as well.
+    query_i = binary_search(B, idx)
+    query_voxel = C[query_i] if query_i is not None else None
+    
+    return query_voxel, neighbors
+
+def binary_search(sorted_list, target):
+    """
+    Returns the index of target in sorted_list, or None if not found.
+    """
+    low = 0
+    high = len(sorted_list) - 1
+    
+    while low <= high:
+        mid = (low + high) // 2
+        mid_val = sorted_list[mid]
+        
+        if mid_val == target:
+            return mid
+        elif mid_val < target:
+            low = mid + 1
+        else:
+            high = mid - 1
+            
+    return None
+```
+
+## Operating characteristics
+*   **Time Complexity:** Occupancy lookup is $O(1)$ per neighbor. Index lookup via binary search is $O(\log M)$, where $M$ is the number of occupied grids. Voxel retrieval is $O(1)$ [S1, unofficial].
+*   **Memory Complexity:** Memory scales with $M$ (the number of occupied cells), not $G^3$. The bitmask requires $G^3$ bits, while tables (B) and (C) require $M$ entries each [S1, unofficial].
+*   **Strengths:** Enables fine-grid behavior and consistent spatial regularization on multi-resolution sparse voxels without storing per-cell data for the entire $G^3$ lattice [S1, unofficial].
+*   **Limitations:** Requires rebuilding data structures when the LoD hierarchy changes, although this is parallelized [S1, unofficial].
+*   **When to use:** When applying spatial regularizers (Eikonal, smoothness) to sparse voxel structures that lack built-in spatial coupling [S1, unofficial].
+
+## Background
+Voxel Association was introduced in SVRecon (Sparse Voxel Rasterization for Surface Reconstruction) [S1, unofficial]. It addresses the challenge of applying spatial regularizers to SVRaster’s multi-resolution sparse voxel structure, which differs from hashmap-based approaches that assume a uniform grid [S1, unofficial]. The method allows reasoning on a single conceptual finest lattice to maintain coherent voxel structure across hierarchical levels [S1, unofficial].
+
+## Sources
+[S1] SVRecon: Sparse Voxel Rasterization for Surface Reconstruction, https://doi.org/10.48550/arxiv.2511.17364, fetched 2026-10-26 (unofficial)

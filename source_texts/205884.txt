@@ -1,0 +1,183 @@
+Industrial-grade foundation, unlimited application. - feat(cf-design): Phase 4 — Mesh Quality + Performance (Sessions 19–23) by bigmark222 · Pull Request #119 · via-balaena/CortenForge
+
+feat(cf-design): Phase 4 — Mesh Quality + Performance (Sessions 19–23) by bigmark222 · Pull Request #119 · via-balaena/CortenForge · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+bigmark222
+commented
+Mar 18, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Session 19: Analytic gradient computation — reverse-mode AD on FieldNode expression tree, gradients for all 30+ node types
+Session 20: Manifold dual contouring — SVD-based QEF solver with cell-clamping, sharp feature preservation (edges, corners)
+Session 21: Octree-adaptive DC — interval arithmetic pruning, 10x+ cell reduction vs uniform grid
+Session 22: SIMD batch evaluation (4-point per tree walk) + rayon parallel octree construction and cell processing
+Session 23: Garland-Heckbert QEM edge collapse, tolerance-driven meshing (Solid::mesh_to_tolerance), 3MF round-trip via mesh-io, sparse Phase 2 face generation optimization
+Key results
+656 tests pass (+ 14 doctests), up from 530 at Phase 3 end
+50mm sphere at 0.1mm tolerance meshes in 1.4s (release) — well under 5s target
+All meshed parts are manifold, watertight, with sharp feature preservation
+5,746 lines across 9 files (7 new files, 2 modified)
+New public API
+Solid::gradient(point) — analytic field gradient
+Solid::mesh_dc(tolerance) — uniform dual contouring
+Solid::mesh_adaptive(tolerance) — octree-adaptive DC
+Solid::mesh_adaptive_par(tolerance) — parallel adaptive DC
+Solid::mesh_to_tolerance(max_deviation) — tolerance-driven meshing
+Solid::mesh_simplified(tolerance, target_faces) — mesh + QEM simplification
+Test plan
+cargo test -p cf-design — 656 passed, 2 ignored, 0 failed
+cargo clippy -p cf-design --all-targets --all-features -- -D warnings — clean
+Performance benchmark (release): 50mm sphere at 0.1mm in 1.4s < 5s limit
+3MF round-trip: sphere and composed shape through save/load
+All existing 530+ tests still pass (no regressions)
+🤖 Generated with Claude Code
+bigmark222
+and others
+added 6 commits
+March 17, 2026 19:26
+feat(cf-design): Session 19 — analytic gradient computation
+…
+55d6563
+```
+Add FieldNode::gradient() with analytic derivatives for all 37 variants.
+Recursive traversal matches the evaluate.rs pattern. Chain rule through
+booleans (smooth ops use h·∇a + (1-h)·∇b), transforms (Jᵀ·∇child for
+Twist/Bend/Rotate), and domain ops. LogSpiral includes a candidate-set
+correction term for the theta-dependent discrete search. UserFn falls
+back to central finite differences.
+
+- gradient.rs: ~1050 lines, 37 variant handlers + duplicated helpers
+- Solid::gradient() public API in solid.rs
+- 37 new tests (analytic vs FD, component-wise ≤1e-4)
+- 567 total tests pass, clippy clean
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+```
+feat(cf-design): Session 20 — manifold dual contouring + QEF
+…
+e3e488f
+```
+Add dual contouring mesher as a drop-in alternative to marching cubes.
+DC places one vertex per sign-changing cell via QEF minimization of
+hermite data (edge-crossing positions + analytic gradients), preserving
+sharp features (edges, corners) that MC rounds off.
+
+- dual_contouring.rs: mesh_field_dc() with interval pruning, QEF solver
+  (SVD of 3×3 AᵀA with mass-point bias + cell clamping), quad-to-tri
+  face generation from sign-changing grid edges
+- Solid::mesh_dc(tolerance): public API parallel to Solid::mesh()
+- 8 tests: manifold/winding checks, sharp corner preservation vs MC,
+  flat face coplanarity, boolean pin-hole, sphere regression, pruning
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+```
+feat(cf-design): Session 21 — octree-adaptive dual contouring
+…
+f10156b
+```
+Add adaptive mesher that uses octree subdivision to prune
+interior/exterior regions hierarchically, achieving 10x+ cell
+reduction vs the uniform grid while preserving QEF sharp features.
+
+- adaptive_dc.rs: power-of-2-aligned octree builds surface-crossing
+  leaf set on a regular grid, reusing standard DC face generation
+- Solid::mesh_adaptive(tolerance) public API
+- 8 new tests (cell reduction, volume, topology, sharp corners, CSG)
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+```
+feat(cf-design): Session 22 — SIMD batch evaluation + rayon parallel …
+…
+e3c84dd
+```
+…meshing
+
+Add batched evaluation (4 points per tree walk) and rayon-parallelized
+adaptive dual contouring. The batch evaluator carries [f64; 4] through
+every FieldNode variant, eliminating 3/4 of dispatch overhead and enabling
+LLVM auto-vectorization. The parallel mesher uses rayon for both octree
+construction (top 3 levels) and Phase 1 cell processing.
+
+New files:
+- evaluate_batch.rs: evaluate_batch + gradient_batch for all 31 variants
+
+Modified:
+- adaptive_dc.rs: mesh_field_adaptive_par + build_octree_par
+- solid.rs: Solid::mesh_adaptive_par(tolerance)
+- Cargo.toml: rayon dependency
+
+59 new tests (642 total). Clippy clean.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+```
+feat(cf-design): Session 23 — QEM simplification + tolerance meshing …
+…
+748cc6e
+```
+…+ 3MF
+
+Garland-Heckbert quadric error metric edge collapse (simplify.rs):
+- simplify_mesh: reduce face count to target while preserving manifold topology
+- simplify_mesh_tolerance: collapse edges until deviation exceeds threshold
+- Link condition check prevents non-manifold collapses
+- Boundary edge preservation, union-find vertex tracking, lazy-deletion heap
+
+Tolerance-driven meshing (solid.rs):
+- Solid::mesh_to_tolerance(max_deviation): adaptive DC at derived resolution,
+  optional QEM simplification for meshes under 50K faces
+- Solid::mesh_simplified(tolerance, target_faces): mesh then simplify
+
+3MF integration (Cargo.toml, solid.rs tests):
+- mesh-io + tempfile added as dev-dependencies
+- Round-trip tests: sphere and composed shape through 3MF save/load
+
+Performance: sparse Phase 2 face generation in adaptive_dc.rs — iterates
+corner cache entries instead of full grid volume. 5.8x speedup for fine
+resolutions (50mm sphere at 0.1mm: 7.9s → 1.37s in release).
+
+656 tests pass (14 new). Clippy clean.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+```
+docs(cf-design): mark Phase 4 complete in CF_DESIGN_SPEC.md
+…
+2569636
+```
+Sessions 19–23 all marked COMPLETE. Status line updated to Phase 4.
+Phase 3 header also retroactively marked COMPLETE.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+bigmark222
+merged commit b59a31c
+into
+main
+Mar 18, 2026
+14 of 16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+bigmark222
+deleted the
+cf-design-phase4
+branch
+March 18, 2026 04:02
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,163 @@
+# In-place Sparse NanoVDB SDF Reading
+
+Also called: Sparse NanoVDB SDF, readSparseSignedDistanceFieldNVDB
+
+## Overview
+This method reads sparse NanoVDB signed distance fields (SDFs) in their native sparse tree structure without densifying them into a full voxel grid, allowing memory usage to scale with surface geometry rather than the bounding box volume [S1, unofficial]. It differs from dense readers by maintaining the grid's sparse form and querying active voxels directly, while providing configurable interpolation strategies to ensure gradient continuity for physics simulations [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A byte buffer containing a NanoVDB file, a `band_clamp` value (float), and a `scale` factor (float).
+*   **Output:** A `SignedDistanceField` object capable of returning distance and gradient values for arbitrary 3D points within the grid's domain.
+
+**Data Structures**
+*   **SignedDistanceFieldLayer:** A structure containing a `NanoVDB::FloatGrid` and its associated `band_clamp` value. The layered constructor currently accepts exactly one layer [S1, unofficial].
+*   **Cereal Archive Format:** Version 1. Stores interpolation settings. A sparse field is stored as its grid/layer. Unversioned archives are rejected [S1, unofficial].
+
+**Validation and Loading**
+1.  **Version Check:** Ensure the grid is NanoVDB major version 32. Reject other versions [S1, unofficial].
+2.  **Type Check:** Ensure the grid is not a fog (density) volume. Reject if it is [S1, unofficial].
+3.  **Buffer Integrity:** Ensure every node array is contained within the provided buffer. Reject if data is missing [S1, unofficial].
+4.  **Decompression:** Decompress the buffer if necessary. The grid and tree headers must be parsed from the *decompressed* data, not the compressed bytes. The grid buffer is authoritative [S1, unofficial].
+5.  **Storage:** Store the grid once as its uncompressed grid buffer. Do not densify the data into a full voxel grid [S1, unofficial].
+
+**Domain Computation**
+1.  Compute the domain as the grid's exact active bounds.
+2.  Derive these bounds from the leaf masks and record them in the stored grid's root box [S1, unofficial].
+
+**Query Logic**
+1.  **Active Voxel Check:** A read is answered only where every voxel required for the interpolation kernel is active. An inactive voxel holds the grid's background value, which is not a valid distance [S1, unofficial].
+2.  **No Data Handling:** Where the grid has no data (outside the active bounds or in inactive regions), return the `band_clamp` value. If `band_clamp` is 0, return infinity. The sign of the returned value is determined by the value the grid stores in that region: for level sets, interior tiles store `-background`, so points deep inside an object still read as inside (negative distance) [S1, unofficial].
+
+**Interpolation Configuration**
+1.  **Distance Interpolation:** Use `setInterpolation()` to choose between:
+    *   **Trilinear:** Default. Results are unchanged from standard implementations.
+    *   **Tricubic Catmull-Rom:** Passes through samples and provides a continuous gradient, preventing contact direction jumps at cell faces [S1, unofficial].
+2.  **Gradient Interpolation:** Use `setGradientInterpolation()` to read the direction with a method independent of the distance interpolation. For example, use trilinear distance (which never overshoots samples) with tricubic direction (which is continuous and suits gradient-based optimizers) [S1, unofficial].
+3.  **Joint Query:** Use `getDistanceAndGradient()` to return both distance and gradient from a single lookup operation [S1, unofficial].
+
+**I/O Interface**
+1.  Use `readSparseSignedDistanceFieldNVDB(bytes, band_clamps, scale)` to read a NanoVDB file as a sparse field.
+2.  The `band_clamp` is passed as a parameter to the reader, not stored in the file. This allows the clamp to be adjusted per-use or per-scene without modifying the source asset [S1, unofficial].
+
+**Pitfalls and Edge Cases**
+*   **Blosc Compression:** If Blosc is not compiled into the build, BLOSC-compressed files must be rejected. Older readers failed to compile Blosc and incorrectly reported success for undecoded data [S1, unofficial].
+*   **Header Parsing Order:** Parsing headers from compressed bytes leads to corruption. Always parse after decompression [S1, unofficial].
+*   **Name Terminator Misalignment:** Do not skip name terminators manually. The upstream `libnanovdb` already counts the terminator in the name size. Skipping it misaligns every subsequent field. Use the upstream reader without local patches [S1, unofficial].
+*   **Legacy Files:** NanoVDB files written with legacy NanoVDB0 magic or non-standard name layouts (e.g., by older Tesseract versions) are rejected [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def read_sparse_signed_distance_field_nvdb(bytes: bytes, band_clamp: float, scale: float) -> SignedDistanceField:
+    """
+    Reads a sparse NanoVDB SDF in place.
+    
+    Args:
+        bytes: The raw bytes of the NanoVDB file.
+        band_clamp: The distance at which narrow-band values saturate.
+        scale: The scale factor for the grid.
+        
+    Returns:
+        A SignedDistanceField object.
+        
+    Raises:
+        ValueError: If validation fails.
+    """
+    # 1. Validation
+    # Check NanoVDB major version 32
+    if not is_nanovdb_version_32(bytes):
+        raise ValueError("Only NanoVDB major version 32 is supported")
+    
+    # Check not a fog volume
+    if is_fog_volume(bytes):
+        raise ValueError("Fog/density volumes are not supported")
+    
+    # 2. Decompression and Header Parsing
+    # Decompress if Blosc is available; reject if Blosc is missing and file is compressed
+    decompressed_bytes = decompress_if_needed(bytes)
+    
+    # Parse headers from decompressed data, not compressed bytes
+    grid_header = parse_grid_header(decompressed_bytes)
+    tree_header = parse_tree_header(decompressed_bytes)
+    
+    # Ensure every node array is inside the buffer
+    if not all_node_arrays_in_buffer(decompressed_bytes, grid_header, tree_header):
+        raise ValueError("Node arrays are not fully contained in the buffer")
+    
+    # 3. Construct Sparse Field
+    # Create SignedDistanceFieldLayer from the FloatGrid and band_clamp
+    # The layered constructor takes exactly one layer
+    layer = SignedDistanceFieldLayer(
+        grid=FloatGrid.from_buffer(decompressed_bytes),
+        band_clamp=band_clamp
+    )
+    
+    # 4. Configure Interpolation
+    sdf = SignedDistanceField(layers=[layer], scale=scale)
+    
+    # Default to trilinear for distance
+    sdf.set_interpolation(InterpolationMode.TRILINEAR)
+    
+    # Default to trilinear for gradient, but allow override
+    sdf.set_gradient_interpolation(InterpolationMode.TRILINEAR)
+    
+    # 5. Domain Computation
+    # Compute domain from leaf masks and root box
+    domain = compute_active_bounds_from_leaf_masks(layer.grid)
+    sdf.set_domain(domain)
+    
+    return sdf
+
+def query_distance_and_gradient(sdf: SignedDistanceField, point: Vec3) -> Tuple[float, Vec3]:
+    """
+    Queries the distance and gradient at a point.
+    
+    Args:
+        sdf: The sparse signed distance field.
+        point: The 3D point to query.
+        
+    Returns:
+        A tuple of (distance, gradient).
+    """
+    # Check if point is within domain
+    if not sdf.is_in_domain(point):
+        # Return band clamp signed by the value the grid stores there
+        # For level sets, interior tiles store -background
+        background_value = sdf.get_background_value()
+        if background_value < 0:
+            return (-sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+        else:
+            return (sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+    
+    # Check if all required voxels are active
+    if not sdf.are_all_voxels_active(point, sdf.get_interpolation_mode()):
+        # Inactive voxel holds background value, which is not a distance
+        # Return band clamp signed appropriately
+        background_value = sdf.get_background_value()
+        if background_value < 0:
+            return (-sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+        else:
+            return (sdf.band_clamp if sdf.band_clamp > 0 else float('inf'), Vec3(0, 0, 0))
+    
+    # Perform joint query
+    return sdf.get_distance_and_gradient(point)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Loading is faster than dense reading. For a 474x470x144 sample field, sparse loading takes 0.11s compared to 0.40s for dense loading [S1, unofficial].
+*   **Memory Complexity:** Memory usage follows the surface geometry. For the same 474x470x144 field, sparse reading uses 149 MB compared to 257 MB for dense reading [S1, unofficial].
+*   **Accuracy:** Dense and sparse readings agree to $5 \times 10^{-14}$ mm over 200,000 points near the surface [S1, unofficial].
+*   **Gradient Continuity:** Trilinear interpolation causes contact directions to jump 9.6 times per 10 mm walk (2 mm off the surface) at cell faces. Tricubic interpolation and trilinear distance with tricubic direction do not jump at all [S1, unofficial].
+*   **Strengths:** Significant memory savings for sparse data; faster loading; continuous gradients with tricubic interpolation; flexible distance/gradient interpolation split.
+*   **Limitations:** Requires NanoVDB major version 32; rejects fog volumes; requires Blosc for compressed files; legacy NanoVDB0 files are rejected; band clamp must be provided externally.
+*   **When to use:** When memory is constrained, when the SDF is sparse (narrow band), or when gradient continuity is critical for physics simulations (e.g., collision detection).
+*   **When not to use:** When dense access patterns are required, when the grid is not a signed distance field, or when using legacy NanoVDB files.
+
+## Background
+This method was introduced in the Tesseract project to replace the dense `readSignedDistanceFieldNVDB` reader, which expanded sparse files into full boxes of doubles and refused boxes over 256 M voxels [S1, unofficial]. It leverages `libnanovdb` and `tinyvdb` for low-level parsing, correcting previous bugs in local patches such as Blosc handling, header parsing order, and name terminator misalignment [S1, unofficial]. It is used in Bullet and FCL collision detection backends to query SDFs in place [S1, unofficial].
+
+## Sources
+[S1] Read sparse NanoVDB signed distance fields in place, https://github.com/tekton-dynamics/tesseract/pull/1, fetched 2026-10-28 (unofficial)

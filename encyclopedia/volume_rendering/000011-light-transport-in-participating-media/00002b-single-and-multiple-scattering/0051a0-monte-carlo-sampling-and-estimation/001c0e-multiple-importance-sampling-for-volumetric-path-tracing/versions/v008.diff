@@ -1,0 +1,145 @@
+--- v007.md
++++ v008.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Current path vertex position $p$, incoming direction $\omega_i$, path throughput $\beta$, rescaled path probabilities $r_p$ (for unidirectional sampling up to $p$), and scene data (medium, lights, geometry).
+-*   **Output:** Estimated direct lighting contribution $\hat{L}$ at vertex $p$.
++*   **Input:** Current path vertex position $p$, incoming direction $\omega_i$, path throughput $\beta$, rescaled path probabilities $r_p$ (for unidirectional sampling up to $p$), and scene data (medium, lights, geometry) [S3].
++*   **Output:** Estimated direct lighting contribution $\hat{L}$ at vertex $p$ [S3].
+ 
+ **Data Structures:**
+@@ -19,15 +19,11 @@
+ **Numbered Steps:**
+ 1.  **Initialize Rescaled Probabilities:**
+-    Initialize $r_l = 1.0$ (light sampling) and $r_u = 1.0$ (unidirectional/scattering sampling) [S3]. The input $r_p$ represents the rescaled path probability for unidirectional sampling up to the current vertex, interpreted as rescaled using $1/p_{l, \lambda_1}$ [S3].
++    Initialize $r_l = 1.0$ and $r_u = 1.0$ before updating them with the light and scattering PDFs [S3]. The input $r_p$ represents the rescaled path probability for unidirectional sampling up to the current vertex, interpreted as rescaled using $1/p_{l, \lambda_1}$ [S3].
+ 
+ 2.  **Sample Light Source:**
+-    Use `Light::SampleLi` to sample a point on the light source. Consume two 2D sample dimensions. Pass `true` for `allowIncompletePDF` to enable MIS [S3].
+-    *   If no valid sample, zero radiance, or zero PDF, return 0 [S3].
+-    *   Compute the light PDF: $p_{light} = p_{selection} \times p_{point}$, where $p_{selection}$ is the light selection probability (PMF) and $p_{point}$ is the point sampling PDF [S3].
++    Use `Light::SampleLi` to sample a point on the light source [S3]. Consume two 2D sample dimensions. Pass `true` for `allowIncompletePDF` to enable MIS [S3]. If no valid sample, zero radiance, or zero PDF, return 0 [S3]. Compute the light PDF: $p_{light} = p_{selection} \times p_{point}$, where $p_{selection}$ is the light selection probability (PMF) and $p_{point}$ is the point sampling PDF [S3].
+ 
+ 3.  **Evaluate Scattering Function:**
+-    Evaluate the phase function (for volume) or BSDF (for surface) at the vertex for the direction to the sampled light point [S3].
+-    *   Let $\hat{f}$ be the value. Note: $\hat{f}$ includes the cosine factor for surface scattering but does **not** include the scattering coefficient $\sigma_s$ for volumetric scattering, as $\sigma_s$ is already accounted for in $\beta$ [S3].
+-    *   Let $p_{scatter}$ be the PDF of the scattering function (phase function or BSDF) [S3].
++    Evaluate the phase function (for volume) or BSDF (for surface) at the vertex for the direction to the sampled light point [S3]. Let $\hat{f}$ be the value. Note: $\hat{f}$ includes the cosine factor for surface scattering but does **not** include the scattering coefficient $\sigma_s$ for volumetric scattering, as $\sigma_s$ is already accounted for in $\beta$ [S3]. Let $p_{scatter}$ be the PDF of the scattering function (phase function or BSDF) [S3].
+ 
+ 4.  **Compute Transmittance and Geometry Terms:**
+@@ -41,8 +37,8 @@
+ 
+ 6.  **Compute MIS Weights and Return Estimate:**
+-    *   **Delta Lights:** If the light is a delta distribution (e.g., point light), sampling the BSDF/phase function cannot intersect it. Use only the light sampling weight. Return:
++    *   **Delta Lights:** If the light is a delta distribution (e.g., point light), sampling the BSDF/phase function cannot intersect it [S3]. Use only the light sampling weight. Return:
+         $$ \hat{L} = \frac{\beta \cdot \hat{f} \cdot T_{ray} \cdot L_s}{r_l.\text{Average}()} $$
+         where $L_s$ is the light radiance and $r_l.\text{Average}()$ is the average of per-wavelength $r_l$ values [S3].
+-    *   **Non-Delta Lights (Area Lights):** Use both strategies. Return:
++    *   **Non-Delta Lights (Area Lights):** Use both strategies [S3]. Return:
+         $$ \hat{L} = \frac{\beta \cdot \hat{f} \cdot T_{ray} \cdot L_s}{(r_l + r_u).\text{Average}()} $$
+         where $(r_l + r_u).\text{Average}()$ is the average of the sum of per-wavelength $r_l$ and $r_u$ values [S3].
+@@ -50,18 +46,29 @@
+ **Pseudocode:**
+ ```python
++class SampledSpectrum:
++    def __init__(self, r, g, b):
++        self.r, self.g, self.b = r, g, b
++    def average(self):
++        return (self.r + self.g + self.b) / 3.0
++    def __mul__(self, other):
++        return SampledSpectrum(self.r * other, self.g * other, self.b * other)
++    def __truediv__(self, other):
++        return SampledSpectrum(self.r / other, self.g / other, self.b / other)
++    def __add__(self, other):
++        return SampledSpectrum(self.r + other.r, self.g + other.g, self.b + other.b)
++
++def abs_dot(v, n):
++    return abs(v.x * n.x + v.y * n.y + v.z * n.z)
++
++def trace_transmittance(origin, target):
++    # Computes transmittance along the ray segment from origin to target
++    return 1.0
++
+ def sample_ld(intr, beta, r_p, light_sampler, sampler, lambda_val):
+-    """
+-    intr: Interaction (surface or volume)
+-    beta: Path throughput
+-    r_p: Rescaled path probability for unidirectional sampling up to intr
+-    light_sampler: Object with Sample(ctx, u) -> SampledLight
+-    sampler: Sampler object
+-    lambda_val: Current wavelength
+-    """
+     # 1. Sample Light Source
+     u = sampler.get_1d()
+     sampled_light_opt = light_sampler.sample(intr.context, u)
+     if not sampled_light_opt:
+-        return SampledSpectrum(0.0)
++        return SampledSpectrum(0.0, 0.0, 0.0)
+     
+     sampled_light = sampled_light_opt.value
+@@ -71,5 +78,5 @@
+     ls_opt = light.sample_li(intr.context, u_light, lambda_val, allow_incomplete_pdf=True)
+     if not ls_opt or not ls_opt.L or ls_opt.pdf == 0:
+-        return SampledSpectrum(0.0)
++        return SampledSpectrum(0.0, 0.0, 0.0)
+     
+     ls = ls_opt.value
+@@ -89,24 +96,22 @@
+         scatter_pdf = phase.pdf(wo, wi)
+         
+-    if not f_hat:
+-        return SampledSpectrum(0.0)
++    if not f_hat.r and not f_hat.g and not f_hat.b:
++        return SampledSpectrum(0.0, 0.0, 0.0)
+         
+     # 3. Trace Shadow Ray and Compute Transmittance
+-    # T_ray is computed by tracing ray from intr to ls.pLight
+-    T_ray = compute_transmittance(intr, ls.pLight)
+-    if not T_ray:
+-        return SampledSpectrum(0.0)
++    T_ray = trace_transmittance(intr.position, ls.pLight)
++    if T_ray.average() == 0:
++        return SampledSpectrum(0.0, 0.0, 0.0)
+         
+     # 4. Update Rescaled Path Probabilities
+-    r_l = r_p * light_pdf
+-    r_u = r_p * scatter_pdf
++    r_l = 1.0
++    r_u = 1.0
++    r_l *= r_p * light_pdf
++    r_u *= r_p * scatter_pdf
+     
+     # 5. Return Estimate
+-    # Check if delta light
+     if light.is_delta():
+-        # Only light sampling is applicable
+         return beta * f_hat * T_ray * ls.L / r_l.average()
+     else:
+-        # MIS with both strategies
+         return beta * f_hat * T_ray * ls.L / (r_l + r_u).average()
+ ```
+@@ -117,4 +122,5 @@
+ *   **Chromatic Media:** For delta lights, MIS still applies per-wavelength PDFs to reduce variance in chromatic media [S3].
+ *   **$\hat{f}$ Definition:** $\hat{f}$ does not include $\sigma_s$ for volume scattering [S3].
++*   **PDF Accumulation:** When evaluating the PDF for one strategy, the PDF of the other must also be accumulated [S2].
+ 
+ ## Subtopics
+@@ -141,5 +147,5 @@
+ 
+ ### Multiple Importance Sampling for Phase Function and Next Event Estimation
+-Combines phase function sampling with NEE by accumulating PDFs for ratio tracking and free-flight sampling [S2]. When evaluating the PDF for one, the PDF of the other must also be accumulated. The path throughput is updated as:
++Combines phase function sampling with NEE by accumulating PDFs for ratio tracking and free-flight sampling [S2]. When evaluating the PDF for one, the PDF of the other must also be accumulated [S2]. The path throughput is updated as:
+ $$ \text{current\_path\_throughput} *= \frac{\text{transmittance}}{\text{avg}(\text{trans\_dir\_pdf})} $$
+ [S2].
+@@ -153,9 +159,7 @@
+ *   **Strengths:** Significantly reduces variance in scenes with small lights or dense volumes where phase function sampling rarely hits lights [S1, S3]. Handles index-matching surfaces correctly [S1].
+ *   **Limitations:** Requires careful implementation of PDF caching across index-matching surfaces [S1]. For delta lights, MIS degenerates to single-strategy weighting [S3].
+-*   **When to Use:** Scenes with small light sources, dense participating media, or index-matching boundaries [S1, S3].
+-*   **When Not to Use:** Simple scenes with large area lights where phase function sampling is sufficient, or when computational budget is extremely tight and variance is acceptable [S3].
+ 
+ ## Background
+-Originated from the need to reduce variance in volumetric path tracing, particularly when dealing with index-matching surfaces and small light sources [S1, S2]. The method was detailed in homework assignments for CSE 272 at UCSD and in the "Physically Based Rendering" (PBRT) book, Chapter 14.2 [S1, S2, S3]. It builds on the principles of MIS introduced in surface path tracing [S3].
++Originated from the need to reduce variance in volumetric path tracing, particularly when dealing with index-matching surfaces and small light sources [S1, S2]. The method was detailed in homework assignments for CSE 272 at UCSD [S1, S2] and in the "Physically Based Rendering" (PBRT) book, Chapter 14.2 [S3]. It builds on the principles of MIS introduced in surface path tracing [S3].
+ 
+ ## Sources

@@ -1,0 +1,238 @@
+--- v002.md
++++ v003.md
+@@ -4,79 +4,178 @@
+ 
+ ## Overview
+-Procedural instancing for voxel blocks replaces baked mesh geometry with a compact instance record per voxel, resolving position, color, and occlusion in the vertex shader using a shared cube template [S1, unofficial]. It separates block data (position, texture, shape, rotation, tint) into an instance buffer and geometry data (vertices) into a vertex buffer, applying transformations in the vertex shader [S3, unofficial]. The technique uses procedural instancing to render voxel blocks as individual instances where position and clip distance are determined by a structured buffer [S2, unofficial]. It builds on [Buffer-Based Instancing (SSBO/Instance Buffers)](6501-buffer-based-instancing-ssbo-instance-buffers.md) by replacing per-voxel mesh generation with a single shared primitive and GPU-driven attribute resolution.
++Procedural Instancing for Voxel Blocks is a rendering technique that replaces baked mesh geometry with a compact instance record per voxel, resolving position, color, and occlusion in the vertex shader using a shared cube template [S1, S3, unofficial]. It differs from standard instancing by computing transformations, visibility culling, and texture selection procedurally within the shader based on a dense, bit-packed instance buffer, allowing for significant memory reduction and cache efficiency compared to pre-baked geometries [S1, S3, unofficial].
+ 
+ ## How it works
+-**Inputs:** Occupancy data (flat grid index, face mask, orbit byte), texture atlas, shared 24-vertex cube template.
+-**Outputs:** Rasterized image of the voxel scene.
++**Inputs and Outputs:**
++*   **Input:** A list of occupied voxel coordinates and their properties (texture index, tint, orientation).
++*   **Output:** Rasterized fragments representing the visible faces of the voxel blocks.
+ 
+ **Data Structures:**
+-1. **Instance Buffer:** A GPU-accessible buffer (e.g., `StructuredBuffer` in HLSL or `std430` buffer in GLSL) storing per-instance attributes [S2, S3, unofficial]. The GLSL `std430` layout occupies 32 bytes: `posX`, `posY`, `posZ` (float, 4 bytes each), `textureIndex` (int, 4 bytes), `shapeRotation` (uint, 4 bytes), `tintR`, `tintG`, `tintB` (float, 4 bytes each) [S3, unofficial]. The `shapeRotation` uint packs two ushorts: the lower 16 bits represent the `shape` index, and the upper 16 bits represent the `rotation` index [S3, unofficial]. The Unity implementation uses a `StructuredBuffer<float4>` where the `w` component stores a clip parameter [S2, unofficial]. A compact 6-byte layout exists per occupied voxel: flat grid index (integer), six-bit surviving-face mask (uint8), orbit byte (uint8) [S1, unofficial].
+-2. **Vertex Buffer:** A static buffer containing a 24-vertex cube template (4 vertices per face × 6 faces) [S1, S3, unofficial]. Each vertex stores position and UV coordinates [S3, unofficial].
+-3. **Uniforms:** `view` (mat4, 64 bytes), `projection` (mat4, 64 bytes), `chunkPos` (vec3, 12 bytes), `verticesPerShape` (int, 4 bytes) [S3, unofficial].
++The method relies on two primary buffers and one uniform structure.
++
++1.  **Instance Buffer (SSBO/StructuredBuffer):** Stores per-voxel data.
++    *   *Layout A (Compact, S1):* 6 bytes per occupied voxel.
++        *   `grid_index`: Integer (flat grid index).
++        *   `face_mask`: 6-bit uint8 (surviving-face mask).
++        *   `orbit_byte`: uint8 (orbit/hue data).
++    *   *Layout B (Detailed, S3):* 32 bytes per instance (`ShapeInstance` struct, `std430` alignment).
++        *   `posX`, `posY`, `posZ`: `float` (4 bytes each, total 12 bytes).
++        *   `textureIndex`: `int` (4 bytes).
++        *   `shapeRotation`: `uint` (4 bytes). Composed of two `ushort`s:
++            *   Lower 16 bits (`& 0xFFFF`): `shape` index.
++            *   Upper 16 bits (`>> 16`): `rotation` index (0-23).
++        *   `tintR`, `tintG`, `tintB`: `float` (4 bytes each, total 12 bytes).
++    *   *Layout C (Unity, S2):* `StructuredBuffer<float4> _Positions`.
++        *   Each `float4` contains `x, y, z` (position) and `w` (clip parameter).
++
++2.  **Vertex Buffer (Geometry):**
++    *   A shared template of a unit cube.
++    *   *Vertices:* 24 vertices (6 faces × 4 vertices).
++    *   *Layout (S3):* `ShapeVertex` struct, 32 bytes per vertex.
++        *   `position`: `vec3` (12 bytes).
++        *   `_pad0`: `float` (4 bytes).
++        *   `uv`: `vec2` (8 bytes).
++        *   `_pad2`, `_pad1`: `float` (4 bytes each).
++
++3.  **Uniforms (S3):**
++    *   `view`: `mat4` (64 bytes).
++    *   `projection`: `mat4` (64 bytes).
++    *   `chunkPos`: `vec3` (12 bytes).
++    *   `verticesPerShape`: `int` (4 bytes).
+ 
+ **Numbered Steps:**
+-1. Populate the instance buffer with records for each occupied voxel containing position, texture index, shape/rotation, and tint color [S2, S3, unofficial].
+-2. Issue a single instanced draw call using the shared 24-vertex cube template, with instance count equal to the number of occupied voxels [S1, S3, unofficial].
+-3. Vertex Shader Execution:
+-   - Calculate vertex index: `index = gl_VertexID + (shapeRotation & 0xFFFF) * verticesPerShape` [S3, unofficial].
+-   - Retrieve base rotation matrix: `R = RotationMatrixArray[shapeRotation >> 16]` [S3, unofficial].
+-   - Transform vertex: `v_centered = v_local - 0.5`, `v_rotated = R * v_centered`, `v_translated = v_rotated + 0.5 + P_instance + P_chunk` [S3, unofficial].
+-   - Convert to clip space: `v_clip = Projection * View * v_translated` [S3, unofficial]. Apply clip parameter: `v_clip.w = -1.0 + w_component` or move hidden face corners outside the clip volume [S1, S2, unofficial].
+-   - Output UV coordinates, texture index, and tint color [S3, unofficial].
+-4. Fragment Shader Execution: Sample the texture atlas using interpolated UV coordinates and texture index, then apply the tint color to the sampled albedo [S3, unofficial].
++
++1.  **Instance Generation:**
++    *   For each occupied voxel, generate an instance record.
++    *   If using Layout A (S1), calculate the 6-bit face mask based on neighbor occlusion.
++    *   If using Layout B (S3), determine `shape` and `rotation` indices. `rotation` is calculated as `(int)up * 4 + forward` [S3, unofficial].
++
++2.  **Buffer Upload:**
++    *   Upload the instance records to the GPU SSBO/StructuredBuffer.
++    *   Upload the shared 24-vertex cube template to the vertex buffer.
++
++3.  **Vertex Shader Execution (Per Instance):**
++    *   **Step 1: Index Calculation.**
++        *   Calculate the vertex index within the shape's vertex buffer:
++            $$ Index = gl\_VertexID + (shapeRotation \ \& \ 0xFFFF) \times verticesPerShape $$
++            [S3, unofficial]
++        *   Fetch the `ShapeVertex` using this index.
++    *   **Step 2: Rotation Matrix Retrieval.**
++        *   Retrieve the base rotation matrix from a precomputed array `_87` (or equivalent) using the upper 16 bits of `shapeRotation`:
++            $$ RotationIndex = shapeRotation \ >> \ 16u $$
++            [S3, unofficial]
++        *   This matrix represents one of 24 possible orientations for the cube faces.
++    *   **Step 3: Position Transformation.**
++        *   Transform the local vertex position:
++            $$ LocalPos = ShapeVertices[Index].position - vec3(0.5) $$
++            $$ RotatedPos = RotationMatrix \times LocalPos $$
++            $$ TranslatedPos = RotatedPos + vec3(0.5) $$
++            $$ WorldPos = TranslatedPos + Instance.Position + ChunkPosition $$
++            [S3, unofficial]
++        *   *Alternative (Unity S2):* Construct a translation matrix `_Matrix` from the position `float4` and multiply the input vertex.
++    *   **Step 4: Visibility Culling (Clip Distance).**
++        *   Determine if the face is hidden.
++        *   If hidden, move the vertex corners outside the clip volume (e.g., set clip distance to -1.0 or push vertices to infinity) [S1, S2, unofficial].
++        *   *Note:* This submits whole cubes and discards hidden faces in the vertex shader, rather than not drawing them [S1, unofficial].
++    *   **Step 5: Output Varyings.**
++        *   Output UV coordinates from the vertex buffer.
++        *   Output texture index and tint color from the instance buffer.
++    *   **Step 6: Clip Space Conversion.**
++        *   Convert `WorldPos` to homogeneous coordinates ($w=1.0$).
++        *   Transform by View and Projection matrices:
++            $$ ClipPos = Projection \times View \times float4(WorldPos, 1.0) $$
++            [S3, unofficial]
++
++4.  **Fragment Shader Execution:**
++    *   Sample the texture using the texture index and UVs.
++    *   Apply tint color.
++    *   Apply clipping if `_Clip` value is set (Unity specific) [S2, unofficial].
++
++5.  **Draw Call:**
++    *   Issue a single draw call (e.g., `glDrawArraysInstanced` or `glDrawElementsInstanced`) with an instance count equal to the total number of potential instances [S1, S2, S3, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def vertex_shader(gl_VertexID, gl_InstanceID):
+-    # Retrieve instance data
+-    instance = instance_buffer[gl_InstanceID]
+-    shape_idx = instance.shapeRotation & 0xFFFF
+-    rot_idx = instance.shapeRotation >> 16
++# Vertex Shader Logic (GLSL-like)
++
++# Uniforms
++uniform mat4 view;
++uniform mat4 projection;
++uniform vec3 chunkPos;
++uniform int verticesPerShape;
++uniform mat4 rotation_matrices[24]; # Precomputed _87 array
++
++# Buffers
++layout(std430) buffer ShapeInstancesBuffer {
++    ShapeInstance instances[];
++};
++
++layout(std430) buffer ShapeVerticesBuffer {
++    ShapeVertex vertices[];
++};
++
++struct ShapeInstance {
++    float posX, posY, posZ;
++    int textureIndex;
++    uint shapeRotation; # Lower 16: shape, Upper 16: rotation
++    float tintR, tintG, tintB;
++};
++
++struct ShapeVertex {
++    vec3 position;
++    vec2 uv;
++    # Padding fields omitted for brevity
++};
++
++void main() {
++    uint instanceID = gl_InstanceID;
++    uint vertexID = gl_VertexID;
+     
+-    # Retrieve base vertex
+-    v_local = vertex_buffer[gl_VertexID + shape_idx * verticesPerShape]
++    # Fetch Instance Data
++    ShapeInstance instance = instances[instanceID];
+     
+-    # Apply rotation and translation
+-    R = rotation_matrix_array[rot_idx]
+-    v_centered = v_local.position - 0.5
+-    v_rotated = R @ v_centered
+-    v_translated = v_rotated + 0.5 + instance.position + chunkPos
++    # Step 1: Calculate Vertex Index
++    uint shapeIndex = instance.shapeRotation & 0xFFFFu;
++    uint rotationIndex = instance.shapeRotation >> 16u;
++    uint vertexIndex = vertexID + shapeIndex * verticesPerShape;
+     
+-    # Convert to clip space
+-    v_clip = projection @ (view @ vec4(v_translated, 1.0))
++    # Fetch Vertex Data
++    ShapeVertex vert = vertices[vertexIndex];
+     
+-    # Handle clipping/occlusion
+-    if instance.clip_param is not None:
+-        v_clip.w = -1.0 + instance.clip_param
+-        
+-    return v_clip, v_local.uv, instance.textureIndex, instance.tint
++    # Step 2 & 3: Transform Position
++    vec3 localPos = vert.position - vec3(0.5);
++    vec3 rotatedPos = rotation_matrices[rotationIndex] * vec4(localPos, 1.0).xyz;
++    vec3 translatedPos = rotatedPos + vec3(0.5);
++    vec3 worldPos = translatedPos + vec3(instance.posX, instance.posY, instance.posZ) + chunkPos;
++    
++    # Step 4: Visibility Culling
++    # If face is hidden (determined by face mask or neighbor check), push outside clip volume
++    # Simplified: Assume instance data includes a 'isHidden' flag or we check neighbors
++    # Here we assume standard clip space transformation first
++    vec4 clipPos = projection * view * vec4(worldPos, 1.0);
++    
++    # If hidden, move corners outside
++    # Example: clipPos.xyz = vec3(1000.0); # Push to infinity
++    
++    # Step 5: Output Varyings
++    gl_Position = clipPos;
++    FragUV = vert.uv;
++    FragTextureIndex = instance.textureIndex;
++    FragTint = vec3(instance.tintR, instance.tintG, instance.tintB);
++}
+ ```
+ 
+-**Formulas:**
+-- Vertex Index: $v_{index} = gl\_VertexID + (shapeRotation \ \& \ 0xFFFF) \times verticesPerShape$ [S3, unofficial].
+-- Rotation Matrix Lookup: $R = \text{RotationMatrixArray}[shapeRotation \gg 16]$ [S3, unofficial].
+-- Position Transformation: $v_{centered} = v_{local} - 0.5$, $v_{rotated} = R \times v_{centered}$, $v_{translated} = v_{rotated} + 0.5 + P_{instance} + P_{chunk}$ [S3, unofficial].
+-- Clip Space Conversion: $v_{clip} = Projection \times View \times v_{translated}$ [S3, unofficial].
+-- Clip Distance Adjustment: $v_{clip}.w = -1.0 + w_{component}$ [S2, unofficial].
+-
+-**Parameters:**
+-- `verticesPerShape`: Uniform integer specifying the number of vertices per shape (typically 24 for a cube) [S3, unofficial].
+-- `chunkPos`: Uniform `vec3` for chunk-based positioning [S3, unofficial].
+-- `view`, `projection`: Uniform matrices for camera transformation [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- Hidden faces are submitted as whole cubes and culled by moving corners outside the clip volume in the vertex shader, increasing vertex work by 2.0× to 3.3× for zero-gap layouts [S1, unofficial].
+-- GPU float32 arithmetic drift is bounded to under $10^{-7}$ of the unit box, which is less than half a step of an 8-bit channel, ensuring visual correctness [S1, unofficial].
+-- Row-major vs column-major matrix storage requires a workaround (e.g., `spvWorkaroundRowMajor`) to ensure correct transformation [S3, unofficial].
+-- Axis center tables must remain `Float64Array` on the CPU to prevent precision drift, converting to `f32` only for GPU copy [S1, unofficial].
+-
+ ## Operating characteristics
+-- **Memory Usage:** 6 bytes per voxel versus over 1 kilobyte for six baked quads [S1, unofficial]. At resolution R=64, specimen memory reduces from 42.0 MB to 649 KB [S1, unofficial].
+-- **Performance:** Geometry build speed is 1.9–4.6× faster than pre-branch core methods, and whole build speed is 1.3–1.8× faster [S1, unofficial]. Maintains interactive frame rates of approximately 60 FPS at high voxel densities [S2, unofficial].
+-- **Cache Efficiency:** Cache capacity increases from 6 specimens to about 394 specimens at R=64 before exhausting `CACHE_BYTES` [S1, unofficial].
+-- **Limitations:** Increased vertex work for dense, zero-gap layouts due to submitting whole cubes and culling in the shader [S1, unofficial].
++*   **Memory Efficiency:** Significantly reduces memory usage compared to baked meshes. At resolution R=64, specimen memory reduced from 42.0 MB to 649 KB (19-65× smaller) [S1, unofficial]. Worker message size reduced from 42.3 MB to 457 KB (92× reduction) [S1, unofficial].
++*   **Cache Capacity:** Increased cache capacity at R=64 from 6 specimens to about 394 specimens before exhausting `CACHE_BYTES` [S1, unofficial].
++*   **Performance:** Geometry build speed is 1.9–4.6× faster than pre-branch core; whole build speed is 1.3–1.8× faster [S1, unofficial]. Maintains interactive frame rates of approximately 60 FPS at high voxel densities [S2, unofficial].
++*   **Vertex Work Overhead:** Submits whole cubes and discards hidden faces in the vertex shader. For zero-gap layouts, this increases vertex work by 2.0× to 3.3× compared to culling faces before submission [S1, unofficial]. This is considered acceptable as it is vertex work only and no fragments are processed for hidden faces [S1, unofficial].
++*   **Precision:** GPU f32 arithmetic drift is bounded to under 1e-7 of the unit box, which is less than half a step of an 8-bit channel, ensuring visual correctness [S1, unofficial]. Axis centre table is kept as `Float64Array` on CPU to prevent precision drift [S1, unofficial].
+ 
+ ## Background
+-This technique is used in the block-showroom project by lardratboy [S1, unofficial] and the GalensUnified Cubic Grid Renderer [S3, unofficial]. It leverages GPU instancing capabilities to render large numbers of voxel blocks efficiently by minimizing data transfer and draw calls [S3, unofficial]. The method separates block data into an instance buffer and geometry data into a vertex buffer, applying transformations in the vertex shader [S3, unofficial].
++*   **Origin:** This method is used in the `block-showroom` project by lardratboy, specifically in `src/scene/instancing.js` and `lattice/recipe.js` [S1, unofficial]. It was implemented as part of a switch from baked mesh geometry to procedural instancing to improve memory efficiency and build speed [S1, unofficial].
++*   **Development:** The technique was developed to replace derived wire/points/centres geometries and their byte accounting, allowing four render modes to become four indexings of the same instance attributes [S1, unofficial]. It eliminates the need for `THREE` imports in `lattice/recipe.js` [S1, unofficial].
++*   **Usage:** Used in voxel rendering applications where memory footprint and build speed are critical, such as in block-based games or voxel editors [S1, S3, unofficial].
+ 
+ ## Sources

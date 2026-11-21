@@ -1,0 +1,349 @@
+--- v002.md
++++ v003.md
+@@ -1,123 +1,240 @@
+ # Tile-based Rasteriser
+ 
+-Also called: 3DGS GPU Rasterization, Radix Sort Binning, Tile-Based Rasterization, Tile-based Rasterization with Radix Sort, Tile-based Rasterizer, Tile-based sorting rasterizer
++Also called: 3DGS GPU Rasterization, Radix Sort Binning, Tile-based Rasterizer, Tile-based sorting rasterizer
+ 
+ ## Overview
+-The Tile-based Rasteriser is the GPU-optimized sorting and compositing component of the 3D Gaussian Splatting pipeline that assigns projected 2D Gaussian splats to image tiles and sorts them by depth using a single global radix sort [S1, S2, unofficial]. It solves the performance bottleneck of per-pixel depth sorting for millions of splats by grouping work into tiles, enabling real-time rendering and efficient backpropagation [S1, S2, unofficial]. Unlike non-tiled approaches that sort per pixel or per tile independently, it uses a unified 64-bit key to bin and sort all (splat, tile) pairs in one pass [S2, unofficial].
++The tile-based rasteriser is a GPU-optimized rendering component that sorts projected 2D Gaussian splats once per frame to serve both forward rendering and backpropagation [S1, unofficial][S2, unofficial]. It solves the performance bottleneck of per-pixel sorting by dividing the image into tiles and using a single global radix sort to achieve per-tile depth ordering [S2, unofficial]. Unlike sibling methods that may perform redundant depth sorting or evaluate splats against irrelevant pixels, this method ensures that each tile is processed by one GPU thread block walking a single sorted list, enabling real-time performance for millions of splats [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- List of $N$ projected 2D Gaussian splats, each defined by center $(x_i, y_i)$, 2D covariance matrix $\Sigma'_i$, color $c_i$, opacity $\alpha_i$, and depth $Z_c$ [S1, S2, unofficial].
+-- Image resolution $(W, H)$ and tile dimensions $16 \times 16$ pixels [S1, S2, unofficial].
+-
+-**Outputs:**
+-- A sorted list of (splat, tile) pairs, ordered by tile ID and then by depth $Z_c$ within each tile [S1, S2, unofficial].
+-- The final rendered image and gradients for training [S1, unofficial].
+-
+-**Data Structures:**
+-- **Splat List:** Array of $N$ splats. Each splat stores its projected 2D parameters: position $(x_i, y_i)$, covariance $\Sigma'_i$, color $c_i$, opacity $\alpha_i$, and depth $Z_c$ [S1, S2, unofficial].
+-- **Tile Grid:** Implicit grid of tiles covering the image, with tile dimensions $T_w \times T_h = 16 \times 16$ pixels [S1, S2, unofficial].
+-- **Sort Key:** A 64-bit integer key for each (splat, tile) pair, packing the tile ID into the high bits and the splat's depth $Z_c$ into the low bits [S2, unofficial].
+-- **Sorted Pairs:** Array of (splat_index, tile_id, depth) tuples, ordered by the Sort Key [S2, unofficial].
+-
+-**Steps:**
+-1. **Tile Assignment:** Assign each Gaussian to every tile its projected 2D splat touches [S1, unofficial]. If a splat straddles tile boundaries, it is duplicated into each relevant tile [S1, S2, unofficial].
+-2. **Key Packing:** For each (splat, tile) pair, pack the tile ID into the high bits and the splat's depth $Z_c$ into the low bits of a 64-bit integer key [S2, unofficial].
+-3. **Global Radix Sort:** Perform one GPU radix sort over all (splat, tile) pairs [S1, S2, unofficial]. This simultaneously bins splats by tile ID (contiguity) and sorts them by depth within each tile [S2, unofficial].
+-4. **Tile Processing:** Each tile is processed by one GPU thread block that walks the sorted list [S1, unofficial].
+-5. **Compositing:** For each pixel in a tile, run the front-to-back compositing loop using the tile's sorted list of splats, evaluating per-pixel alpha $\alpha_i(\mathbf{x})$ and breaking early when transmittance $T < \epsilon$ [S2, unofficial].
+-6. **Backpropagation:** Reuse the same sorted lists for training, allowing gradients to flow to position, shape, opacity, and color without additional sorting [S1, unofficial].
+-
+-**Pseudocode:**
++The method operates on a list of $N$ projected 2D Gaussian splats, each defined by center $(x_i, y_i)$, 2D covariance matrix $\Sigma'_i$, color $c_i$, opacity $\alpha_i$, and depth $Z_c$ [S1, unofficial][S2, unofficial]. The image is divided into a grid of tiles with dimensions $T_w \times T_h$ (typically $16 \times 16$ pixels) [S1, G, unofficial][S2, unofficial].
++
++The core mechanism involves three phases:
++
++1.  **Tile Assignment:** Each Gaussian is assigned to every tile its projected 2D splat touches. If a splat straddles tile boundaries, it is duplicated into each relevant tile [S1, unofficial][S2, unofficial]. This creates one work item per (Gaussian, tile) pair.
++2.  **Key Packing:** For each (splat, tile) pair, a 64-bit integer sort key is constructed. The tile ID is packed into the high bits, and the splat's depth $Z_c$ is packed into the low bits [S2, unofficial]. Specifically, the key is formed as:
++    $$ \text{key} = (\text{tile\_id} \ll 32) \mid (\text{uint32\_t})Z_c $$
++    where `tile_id` is the 1D tile index ($y \times \text{grid\_width} + x$) and $Z_c$ is cast to a 32-bit unsigned integer [S1, unofficial][S2, unofficial].
++3.  **Global Radix Sort:** A single GPU radix sort is performed over all (splat, tile) pairs [S1, unofficial][S2, unofficial]. This simultaneously bins splats by tile ID (ensuring contiguity) and sorts them by depth within each tile [S2, unofficial].
++
++After sorting, each tile is processed by one GPU thread block that walks the sorted list [S1, unofficial]. For each pixel in a tile, front-to-back compositing is performed using the tile's sorted list of splats, evaluating per-pixel alpha $\alpha_i(\mathbf{x})$ and breaking early when transmittance $T < \epsilon$ [S2, unofficial]. The same sorted lists are reused for backpropagation, allowing gradients to flow to position, shape, opacity, and color without additional sorting [S1, unofficial].
++
++### Pseudocode
++
+ ```python
+-import math
+-
+-def tile_based_rasterization(splats, image_width, image_height, tile_width=16, tile_height=16, epsilon=1e-3):
+-    num_tiles_x = (image_width + tile_width - 1) // tile_width
+-    num_tiles_y = (image_height + tile_height - 1) // tile_height
+-    
+-    # Step 1 & 2: Tile Assignment and Pair Generation
+-    pairs = []
++def tile_based_rasterization(splats, image_width, image_height, tile_size=16):
++    """
++    Performs tile-based rasterization for 3D Gaussian Splatting.
++    
++    Args:
++        splats: List of N splats, each with attributes:
++            - center: (x, y) in screen space
++            - cov2d: 2x2 covariance matrix
++            - color: RGB color
++            - opacity: scalar alpha
++            - depth: Z_c (view space depth)
++        image_width: Width of the image in pixels
++        image_height: Height of the image in pixels
++        tile_size: Size of tiles in pixels (default 16)
++        
++    Returns:
++        rendered_image: H x W x 3 image
++    """
++    # 1. Tile Assignment
++    # Calculate grid dimensions
++    tile_width = (image_width + tile_size - 1) // tile_size
++    tile_height = (image_height + tile_size - 1) // tile_size
++    
++    work_items = [] # List of (splat_index, tile_id, depth)
++    
+     for i, splat in enumerate(splats):
+-        # Determine tile coordinates overlapping the splat's 2D projection [G]
+-        tile_min_x = max(0, int((splat['x'] - 2 * splat['sigma_x']) / tile_width))
+-        tile_max_x = min(num_tiles_x - 1, int((splat['x'] + 2 * splat['sigma_x']) / tile_width))
+-        tile_min_y = max(0, int((splat['y'] - 2 * splat['sigma_y']) / tile_height))
+-        tile_max_y = min(num_tiles_y - 1, int((splat['y'] + 2 * splat['sigma_y']) / tile_height))
+-        
+-        for ty in range(tile_min_y, tile_max_y + 1):
+-            for tx in range(tile_min_x, tile_max_x + 1):
+-                tile_id = ty * num_tiles_x + tx
+-                pairs.append((i, tile_id, splat['Zc']))
++        # Determine bounding box of the 2D Gaussian splat
++        # Approximate using 3-sigma ellipse bounds or AABB of the ellipse
++        # For implementation simplicity, assume we have a function to get tile coverage
++        covered_tiles = get_tiles_covered_by_splat(splat, image_width, image_height, tile_size)
++        
++        for tile_id in covered_tiles:
++            # Duplicate splat info for each tile it touches
++            work_items.append({
++                'splat_index': i,
++                'tile_id': tile_id,
++                'depth': splat.depth
++            })
++            
++    if not work_items:
++        return np.zeros((image_height, image_width, 3))
++
++    # 2. Key Packing
++    # Create 64-bit keys: high 32 bits = tile_id, low 32 bits = depth (cast to uint32)
++    keys = []
++    for item in work_items:
++        # Ensure tile_id fits in 32 bits (max tiles ~10^6 for 4K image)
++        # Ensure depth is cast to uint32
++        key = ((item['tile_id'] << 32) | (item['depth'] & 0xFFFFFFFF))
++        keys.append(key)
++        
++    # 3. Global Radix Sort
++    # Sort keys and retrieve original indices
++    # Note: In practice, use a GPU radix sort library (e.g., CUB, Thrust)
++    sorted_indices = radix_sort(keys)
++    
++    # Reorder work items based on sorted indices
++    sorted_work_items = [work_items[i] for i in sorted_indices]
++    
++    # 4. Process Tiles
++    # Initialize image with background (usually black or clear color)
++    rendered_image = np.zeros((image_height, image_width, 3))
++    
++    # Group work items by tile_id
++    # Since the list is sorted by key, items with the same tile_id are contiguous
++    current_tile_id = -1
++    current_tile_items = []
++    
++    for item in sorted_work_items:
++        if item['tile_id'] != current_tile_id:
++            # Process previous tile if exists
++            if current_tile_id != -1:
++                render_tile(rendered_image, current_tile_id, current_tile_items, 
++                            splats, tile_size, image_width, image_height)
++            current_tile_id = item['tile_id']
++            current_tile_items = []
++        current_tile_items.append(item)
++        
++    # Process last tile
++    if current_tile_id != -1:
++        render_tile(rendered_image, current_tile_id, current_tile_items, 
++                    splats, tile_size, image_width, image_height)
++                    
++    return rendered_image
++
++def render_tile(image, tile_id, tile_items, splats, tile_size, img_w, img_h):
++    """
++    Renders a single tile using front-to-back compositing.
++    """
++    # Decode tile coordinates
++    tile_x = tile_id % ((img_w + tile_size - 1) // tile_size)
++    tile_y = tile_id // ((img_w + tile_size - 1) // tile_size)
++    
++    # Pixel coordinates for this tile
++    x_start = tile_x * tile_size
++    y_start = tile_y * tile_size
++    x_end = min(x_start + tile_size, img_w)
++    y_end = min(y_start + tile_size, img_h)
++    
++    # Initialize transmittance for each pixel in the tile
++    # T[y][x] = 1.0 initially
++    transmittance = np.ones((y_end - y_start, x_end - x_start))
++    
++    # Initialize color buffer
++    color_buffer = np.zeros((y_end - y_start, x_end - x_start, 3))
++    
++    # Walk through sorted splats for this tile
++    for item in tile_items:
++        splat = splats[item['splat_index']]
++        
++        # Evaluate splat over the pixels in this tile
++        # For each pixel (px, py) in the tile's pixel range:
++        for dy in range(y_end - y_start):
++            for dx in range(x_end - x_start):
++                px = x_start + dx
++                py = y_start + dy
+                 
+-    # Step 3: Key Packing and Global Radix Sort
+-    # Pack tile_id into high bits and depth into low bits [S2, unofficial]
+-    keys = [(tile_id << 32) | depth for i, tile_id, depth in pairs]
+-    sorted_indices = sorted(range(len(keys)), key=lambda k: keys[k])
+-    sorted_pairs = [pairs[i] for i in sorted_indices]
+-    
+-    # Step 4 & 5: Tile Processing and Compositing
+-    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
+-    for tile_id in range(num_tiles_x * num_tiles_y):
+-        ty = tile_id // num_tiles_x
+-        tx = tile_id % num_tiles_x
+-        y_start, y_end = ty * tile_height, min((ty + 1) * tile_height, image_height)
+-        x_start, x_end = tx * tile_width, min((tx + 1) * tile_width, image_width)
+-        
+-        # Extract contiguous segment for this tile from sorted list
+-        tile_segment = []
+-        for idx, (splat_idx, t_id, depth) in enumerate(sorted_pairs):
+-            if t_id == tile_id:
+-                tile_segment.append((splat_idx, depth))
+-            elif t_id > tile_id:
+-                break
++                # Check if pixel is within the splat's influence
++                # Compute alpha at pixel location
++                alpha = evaluate_gaussian_alpha(splat, px, py)
+                 
+-        for y in range(y_start, y_end):
+-            for x in range(x_start, x_end):
+-                transmittance = 1.0
+-                color = [0.0, 0.0, 0.0]
+-                for splat_idx, _ in tile_segment:
+-                    splat = splats[splat_idx]
+-                    alpha = compute_gaussian_alpha(splat, x, y)
+-                    if alpha > 0:
+-                        color[0] += splat['color'][0] * alpha * transmittance
+-                        color[1] += splat['color'][1] * alpha * transmittance
+-                        color[2] += splat['color'][2] * alpha * transmittance
+-                        transmittance *= (1.0 - alpha)
+-                    if transmittance < epsilon:
+-                        break
+-                image[y][x] = color
+-    return image
+-
+-def compute_gaussian_alpha(splat, x, y):
+-    # Standard 2D Gaussian evaluation at pixel coordinates [G]
+-    dx = x - splat['x']
+-    dy = y - splat['y']
+-    inv_det = 1.0 / (splat['sigma_xx'] * splat['sigma_yy'] - splat['sigma_xy']**2)
+-    exponent = -0.5 * inv_det * (splat['sigma_yy'] * dx**2 - 2 * splat['sigma_xy'] * dx * dy + splat['sigma_xx'] * dy**2)
+-    return splat['opacity'] * max(0.0, math.exp(exponent))
++                if alpha > 0.0:
++                    # Front-to-back compositing
++                    # C_out = C_in + alpha * c * T
++                    # T_out = T_in * (1 - alpha)
++                    
++                    # Current transmittance at this pixel
++                    T = transmittance[dy, dx]
++                    
++                    if T < 1e-4: # Early termination threshold
++                        continue
++                        
++                    # Update color and transmittance
++                    color_buffer[dy, dx] += alpha * splat.color * T
++                    transmittance[dy, dx] *= (1.0 - alpha)
++                    
++                    # Early termination for this pixel if effectively opaque
++                    if transmittance[dy, dx] < 1e-4:
++                        # Can skip further splats for this pixel? 
++                        # In a full implementation, we might track which pixels are done.
++                        # For simplicity, we continue but check T at start of next splat.
++                        pass
++
++    # Write back to image
++    for dy in range(y_end - y_start):
++        for dx in range(x_end - x_start):
++            px = x_start + dx
++            py = y_start + dy
++            image[py, px] = color_buffer[dy, dx]
++
++def get_tiles_covered_by_splat(splat, img_w, img_h, tile_size):
++    """
++    Determines which tiles a 2D Gaussian splat overlaps.
++    This is a placeholder for the actual geometric intersection test.
++    """
++    # Approximate: use bounding box of the splat
++    # In practice, use the 2D covariance matrix to determine the ellipse bounds
++    # For simplicity, assume we have the bounding box in screen space
++    x_min, y_min, x_max, y_max = get_splat_bbox(splat)
++    
++    tiles = []
++    tile_x_start = max(0, x_min // tile_size)
++    tile_x_end = min((img_w + tile_size - 1) // tile_size, (x_max // tile_size) + 1)
++    tile_y_start = max(0, y_min // tile_size)
++    tile_y_end = min((img_h + tile_size - 1) // tile_size, (y_max // tile_size) + 1)
++    
++    for ty in range(tile_y_start, tile_y_end):
++        for tx in range(tile_x_start, tile_x_end):
++            tile_id = ty * ((img_w + tile_size - 1) // tile_size) + tx
++            tiles.append(tile_id)
++            
++    return tiles
++
++def evaluate_gaussian_alpha(splat, px, py):
++    """
++    Evaluates the alpha value of a 2D Gaussian at pixel (px, py).
++    """
++    # Compute distance from center
++    dx = px - splat.center[0]
++    dy = py - splat.center[1]
++    
++    # Use 2D covariance matrix Sigma'
++    # alpha = opacity * exp(-0.5 * [dx, dy] * Sigma'^-1 * [dx, dy]^T)
++    # This is a placeholder for the actual Gaussian evaluation
++    return splat.opacity * np.exp(-0.5 * quadratic_form(dx, dy, splat.cov2d))
++
++def quadratic_form(dx, dy, cov2d):
++    """
++    Computes [dx, dy] * cov2d^-1 * [dx, dy]^T
++    """
++    # Inverse of 2x2 matrix
++    det = cov2d[0,0] * cov2d[1,1] - cov2d[0,1] * cov2d[1,0]
++    if det == 0:
++        return 0.0
++    inv_det = 1.0 / det
++    inv_cov = np.array([
++        [cov2d[1,1] * inv_det, -cov2d[0,1] * inv_det],
++        [-cov2d[1,0] * inv_det, cov2d[0,0] * inv_det]
++    ])
++    
++    return dx * (inv_cov[0,0] * dx + inv_cov[0,1] * dy) + \
++           dy * (inv_cov[1,0] * dx + inv_cov[1,1] * dy)
+ ```
+ 
+-**Parameters:**
+-- Tile size: $16 \times 16$ pixels [S1, S2, unofficial].
+-- Early termination threshold: $\epsilon$ (implementation-defined, typically small) [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- Sorting per pixel is too slow for millions of splats; tile-based sorting with a single global radix sort is required for real-time performance [S1, unofficial].
+-- A splat straddling tile boundaries must be duplicated into each relevant tile [S1, S2, unofficial].
+-- Precision issues in depth sorting may affect compositing order; ensure depth values are packed correctly into the sort key [S2, unofficial].
+-
+ ## Operating characteristics
+-- **Time Complexity:** One O(n) radix sort over all (splat, tile) pairs, where n is the number of (splat, tile) pairs [S2, unofficial]. This replaces thousands of per-tile sorts [S2, unofficial].
+-- **Memory Complexity:** O(n) for storing the (splat, tile) pairs and sorted indices [S2, unofficial].
+-- **Measured Performance:** On the Mip-NeRF360 benchmark, the method reaches 27.21 dB PSNR and 0.214 LPIPS at 134 fps, rendering roughly three orders of magnitude faster than previous quality leaders [S1, unofficial].
+-- **Scaling:** The method scales well with the number of splats due to the single global sort [S1, S2, unofficial].
+-- **Strengths:** Real-time performance, efficient use of GPU parallelism, shared sorting for rendering and training [S1, S2, unofficial].
+-- **Limitations:** Memory overhead for duplicating splats across tiles [S1, S2, unofficial].
+-- **When to Use:** Real-time rendering and training of 3D Gaussian Splatting [S1, unofficial].
+-- **When Not to Use:** Scenes with very few splats where the overhead of tile management outweighs the benefits [S2, unofficial].
++- **Time Complexity:** One $O(n)$ radix sort over all (splat, tile) pairs replaces thousands of per-tile sorts [S2, unofficial]. The sorting complexity is linear with respect to the number of (splat, tile) pairs.
++- **Memory Complexity:** Requires storage for the work items and sorted keys. The number of work items is proportional to the number of splats times the average number of tiles each splat overlaps (typically small, e.g., ~4 for a $30 \times 30$ pixel splat) [S2, unofficial].
++- **Measured Performance:** On the Mip-NeRF360 benchmark, the method reaches 27.21 dB PSNR and 0.214 LPIPS at 134 fps, surpassing previous quality leaders in perceptual similarity while rendering roughly three orders of magnitude faster [S1, unofficial].
++- **Strengths:** Real-time performance for millions of splats; single sort serves both rendering and training; efficient use of GPU parallelism via tile-based processing.
++- **Limitations:** Sorting per pixel is too slow for millions of splats; tile-based sorting is required for real-time performance [S1, unofficial].
++- **When to use:** When real-time rendering and training of 3D Gaussian Splatting is required.
++- **When not to use:** If the scene has very few splats where the overhead of sorting might outweigh the benefits, or if the hardware does not support efficient radix sort operations.
+ 
+ ## Background
+-The Tile-based Rasteriser was introduced as part of the 3D Gaussian Splatting pipeline by Kerbl et al. in 2023 [S1, unofficial]. It was designed to address the performance bottleneck of sorting millions of splats for real-time rendering and training [S1, unofficial]. The method leverages GPU-optimized radix sorting to achieve efficient per-tile depth ordering [S2, unofficial]. It is used in the 3D Gaussian Splatting rendering pipeline for novel-view synthesis [S1, unofficial].
++The tile-based rasteriser was introduced as part of the 3D Gaussian Splatting pipeline, which includes anisotropic 3D Gaussians projected to 2D elliptical splats on the image plane (EWA projection), sorted by depth and alpha-blended front to back [S1, unofficial]. The method was developed to enable real-time rendering and training of 3D Gaussian Splatting, addressing the bottleneck of per-pixel sorting. It is used in novel-view synthesis for virtual and augmented reality, digital twins, robotics simulation, and film production [S1, unofficial].
+ 
+ ## Sources

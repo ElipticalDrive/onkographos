@@ -1,0 +1,2969 @@
+Private Inference Network on Idle Macs. Contribute to Layr-Labs/d-inference development by creating an account on GitHub.
+
+Enforce a 90% unified-memory cap + purge KV on unload by anupsv · Pull Request #363 · Layr-Labs/d-inference · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+anupsv
+commented
+Jun 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Enforce a 90% unified-memory cap; purge KV on unload
+A single invariant, enforced for any number of co-resident models:
+```
+Σ(resident model weights) + KV cache + activations  ≤  0.90 × physical unified memory
+```
+Everything derives from it — what loads, what gets evicted, how much memory KV may use, and when KV is freed. No model special-casing (Gemma-4 / GPT-OSS are just the validation targets).
+Why
+Previously four independent, soft ceilings overlapped and disagreed: an MLX memoryLimit (physical−6 GiB, which MLX doesn't even enforce — its allocator overcommits), a load gate holding back a flat 4 GiB, a per-request KV budget at (free−4 GiB) × 0.7, and a per-scheduler budget at free−4 GiB−physical/10. Net effect: KV was effectively capped near 63% of free RAM on big boxes (under-utilizing them) while nothing guaranteed a hard ceiling, and on small boxes models that fit were refused. KV cache also outlived the model that produced it (leaked in RAM and on SSD across a swap).
+What changed (4 phases, each separately reviewed)
+UnifiedMemoryCap — pure-policy foundation. hardCapBytes = min(0.90×physical, physical−2 GiB floor); kvBudgetBytes = cap − Σweights − activationReserve − ramPrefix; liveKVHeadroomBytes (runtime gate); loadReserveBytes/loadHeadroomBytes (load gate); loadIsServeable (post-load guard). (Cap is enforced via live MLX counters — a measured-weight ledger was prototyped then removed as unused.)
+Routed all three KV budgets through the cap and dropped the redundant 0.7 discount + competing reserves, so the per-request gate, the per-scheduler budget, and the load gate share one ceiling.
+Load gate + doctor honor the cap via loadReserveBytes = max(configReserve, physical−cap) — so a load can't push past 90%, and the operator-facing fit check matches the runtime gate. LRU-idle eviction already funnels through this gate, so "load if it fits, else evict LRU idle, else reject" falls out for any N models.
+Purge KV from RAM + SSD on every unload (incl. clean shutdown) + a startup sweep for the jetsam-crash case. Restart warmth is intentionally OFF — nothing outlives the loaded model.
+Activation reserve
+Default 3 GiB floor (env DARKBLOOM_ACTIVATION_RESERVE_GB), justified by measurement on an M5 Max: a 4-concurrent ~3000-token long-prefill burst on Gemma-4-26B-qat-4bit moved RSS only ~9 MB above the resident-weight baseline (MoE activates few experts; MLX fuses attention; intermediates churn through the count-bounded buffer cache). Cap fraction is env DARKBLOOM_MEM_CAP_FRACTION.
+Review found & fixed two real bugs
+Live KV headroom skipped the 2 GiB OS floor → on <20 GiB multi-model boxes KV could grow to 0.90×physical and starve the OS. Fixed by routing live headroom through hardCapBytes (floor binds ≤20 GiB, no-op above).
+Engine-tier saveBlock race: a save past its entry closed guard could race purgeDir's dir removal — writeSync's atomic writer recreates the dir and lands a block that (warmth off) nothing reclaims. Fixed with a post-write closed re-check that deletes the just-written file. Regression test verified to fail without the fix and pass with it.
+Validation
+Full swift build + full swift test: 870 tests / 60 suites, 0 failures. Release build clean.
+~30 new unit tests (cap arithmetic incl. saturation/floor/env edge cases, ledger, budget routing, load-gate, doctor parity, KV purge/startup-sweep/race) — all green; existing KV-cache suite (drain, cross-owner, accountant) stays green.
+Scope: provider-swift only — coordinator and console-ui untouched.
+Not yet done (follow-ups)
+Not yet built/run on a real provider box; the activation-reserve constant can be re-measured on the fixed binary at real scale.
+Need help on this PR? Tag /codesmith with what you need. Autofix is disabled.
+anupsv
+added 5 commits
+June 15, 2026 17:41
+Add UnifiedMemoryCap + ResidentModelLedger (90%-cap policy foundation)
+…
+0560548
+```
+Phase 1 of the unified-memory budget policy: one invariant for any number of
+co-resident models —
+
+    Σ(resident model weights) + KV cache + activations ≤ capFraction × physical
+
+with capFraction defaulting to 0.90. These two types are the foundation; they
+are pure/standalone and not yet wired into the load/admission/KV paths (later
+phases), so this change is behavior-neutral.
+
+- UnifiedMemoryCap: pure-policy enum. hardCapBytes = min(fraction×physical,
+  physical−minReserve) so it never exceeds physical and always leaves the OS at
+  least 2 GiB (floor binds at/below 20 GiB on the 0.90 default). kvBudgetBytes =
+  cap − Σweights − activationReserve − ramPrefixAllowance, clamped ≥ 0 — the
+  general budget that rises when a model unloads and shrinks when one loads.
+  canAdmit gates loading an Nth model while preserving minimum KV headroom. Env
+  overrides DARKBLOOM_MEM_CAP_FRACTION and DARKBLOOM_ACTIVATION_RESERVE_GB,
+  validated the same trap-avoiding way as MLXMemoryGuard. Activation reserve
+  default is a conservative 3 GiB floor (measured: MoE activations move RSS only
+  ~MBs under concurrent long-prefill, so a small floor suffices).
+- ResidentModelLedger: process-wide actor tracking MEASURED resident weight
+  bytes per model and their saturating sum across all co-resident models (each
+  scheduler only knows its own weights). record overwrites (reload re-measures,
+  no double count); remove on unload; totalResidentWeightBytes(excluding:) for
+  the load gate's replacement math.
+
+Tests: 22 cases — cap arithmetic incl. the min-reserve floor and saturation/
+no-trap paths on extreme inputs, env edge cases (negative/NaN/inf/junk/huge/0),
+KV-budget subtraction and clamp-to-zero, N-model admit/reject, and ledger
+sum/remove/overwrite/exclude/overflow.
+```
+Route the KV budgets through UnifiedMemoryCap (drop competing reserves)
+…
+bbfa3eb
+```
+Phase 2: the three places that sized KV memory each used a different,
+independently-tuned ceiling — GlobalKVCacheBudget's (free − 4GB) × 0.7, the
+per-scheduler tokenBudgetMax's (free − 4GB − physical/10), and
+applyPostLoadBudgets' (physical − weights − 4GB − physical/10). They could
+disagree, and the stacked 0.7 discount made the effective ceiling ~63% of free
+rather than the intended 90%. All three now derive from UnifiedMemoryCap so
+there is a single policy:
+
+- GlobalKVCacheBudget.availableReservationBytes → UnifiedMemoryCap
+  .liveKVHeadroomBytes(mlxUsed, systemAvailable): bytes still committable to KV
+  under the 90% cap given current MLX usage (which already reflects every
+  co-resident model's weights + KV), clamped to OS-free RAM, net of the
+  activation reserve. The 0.7 safetyFactor and separate reserveBytes are gone;
+  the actor now takes capFraction / activationReserveBytes overrides (nil =
+  UnifiedMemoryCap defaults).
+- tokenBudgetMax (live, per-scheduler) → same liveKVHeadroomBytes helper, so the
+  per-scheduler budget and the shared reservation gate share one ceiling.
+- applyPostLoadBudgets (static, per-model) → UnifiedMemoryCap.kvBudgetBytes with
+  this model's measured weights; cross-model headroom stays live via the two
+  gates above.
+
+Adds liveKVHeadroomBytes to UnifiedMemoryCap (cap×fraction − mlxUsed, no
+absolute floor — that floor is a load-time concern). Updates both budget
+construction sites (ProviderLoop, StandaloneServer) and the budget tests to the
+new API (reserveBytes/safetyFactor → capFraction/activationReserveBytes; the
+arithmetic maps 1:1). Behavior shift is intentional and bounded: KV may now use
+up to the 90% cap minus weights+activations, instead of 63% of free.
+
+Tests: 54 across UnifiedMemoryCap / GlobalKVCacheBudget / BatchSchedulerBudget /
+ResidentModelLedger, incl. new liveKVHeadroomBytes cases (cap−mlxUsed−activation,
+OS clamp, zero-at-cap, no-floor-vs-hardCap).
+```
+Apply the hardCap floor to live KV headroom (close the small-box OOM …
+…
+5cf0d51
+```
+…gap)
+
+Review caught a real edge case: liveKVHeadroomBytes used raw capFraction×physical
+with NO absolute floor, on the theory that the load gate enforces the 2 GiB OS
+floor before any model loads. But KV GROWS during serving — after load — so on a
+<20 GiB multi-model host the live gate could let aggregate KV creep up to
+0.90×physical, leaving the OS under 2 GiB (jetsam risk). Example: 8 GiB host,
+2 GiB resident weights, 3 GiB activation reserve — pre-fix live headroom was
+7.2−2−3 = 2.2 GiB (total commit 7.2 GiB, OS < 1 GiB).
+
+Fix: liveKVHeadroomBytes now uses the same hardCapBytes ceiling (incl. the
+min(fraction×phys, phys−2GiB) floor) as the load gate, so the floor holds as KV
+grows. Above ~20 GiB the floor never binds and behavior is unchanged; below it
+the live gate now keeps ≥2 GiB for the OS.
+
+Test fallout (correct, not regressions): the synthetic budget tests used sub-2GiB
+toy totals (1000, 200_000 B) that the absolute floor now correctly collapses to a
+0 cap. Rescaled their memory figures into the realistic >2 GiB regime they model,
+keeping the binding constraint on systemAvailable / mlxUsed / capFraction as each
+test intends. Updated the liveKVHeadroom floor test to assert the floor DOES bind
+(the over-admission case Codex flagged) instead of the old "no floor" claim. Also
+refreshed now-stale 0.7-safety-factor references in ModelLoadAdmission doc
+comments (the runtime safety is the 90% cap + activation reserve since Phase 2).
+```
+Make the model-load gate + doctor honor the 90% cap
+…
+f42e8f9
+```
+Phase 3 (enforcement): the free-memory load gate held back only the configured
+reserve (4 GiB), so on a big box it would keep loading models until ~4 GiB
+remained — well past the 90% unified cap. Add UnifiedMemoryCap.loadReserveBytes
+= max(configReserve, physical − hardCap) and use it as the gate's reserve in
+both load paths (ProviderLoop.availableMemoryGb, StandaloneServer) and in the
+operator-facing fit check (ModelFitDiagnostic.usableInferenceGb), so the doctor
+verdict can't drift from what the daemon enforces.
+
+This is the whole enforcement story for loading: the gate already reads live
+MLX active+cache (which reflects EVERY co-resident model's weights + KV in real
+time, per Phase 2), and LRU-idle eviction (evictUntilAvailable) + the slot cap
+funnel through this same cap-aware gate. So "load both if they fit, else evict
+LRU idle until the new one fits, else reject" falls out for any N models with no
+per-model bookkeeping — the cap-implied reserve is the only thing that was
+missing. (ResidentModelLedger from Phase 1 stays available for telemetry but is
+deliberately NOT wired into enforcement: the live counters already account
+Σweights, so a parallel ledger would be redundant and could drift.)
+
+On boxes ≤20 GiB the 2 GiB hardCap floor dominates and the reserve equals the
+old config value (behavior unchanged); above that the 10% cap reserve binds.
+
+Tests: loadReserveBytes (cap-implied vs config vs zero-config) + a doctor test
+pinning the 90%-cap usable figure on 128/64 GiB boxes (115.2 / 57.6, not
+124 / 60) while 32 GiB stays config-bound at 28.
+```
+Purge KV from RAM + SSD on unload, sweep stale KV at startup
+…
+b345778
+```
+Phase 4 (swap teardown): KV cache no longer outlives the model that produced it.
+Restart warmth is intentionally OFF — every unload (model swap, idle eviction,
+clean shutdown) frees the outgoing model's KV from BOTH RAM and disk, and a
+startup sweep handles the one case a clean unload can't: a jetsam SIGKILL (the
+invisible OOM) that kills the process mid-serve.
+
+- PrefixCacheManager.purgeOnUnload(): drain in-flight writes, clear the RAM tier,
+  delete the kv/<modelKey> dir, deregister from the accountant. Replaces the
+  warmth-preserving flushIndexNow + deregisterFromAccountant on the unload path.
+- EncryptedPrefixCachePersistence: purgeDir() latches `closed` then deletes the
+  dir. Because saveBlock is synchronous on the engine step loop and
+  EngineCore.stop() does NOT fence an already-dispatched step, a saveBlock that
+  passed its entry guard can still be mid-write when purgeDir runs — writeSync's
+  atomic writer would re-create the just-deleted dir and land the block, which
+  (with warmth off) nothing would reclaim. Fixed with a POST-WRITE `closed`
+  re-check in saveBlock: if the owner closed during the write, delete the file
+  just written and skip the usage push. (Caught in review; regression test below
+  fails without it.)
+- BatchScheduler.stopCurrentEngine wired to call the purges instead of the
+  warmth-preserving teardown.
+- GlobalDiskAccountant gains sweepOnInit (synchronous, in init, before any owner
+  registers so it can't race live files); ProviderLoop + StandaloneServer pass
+  true. Tests default false so they don't wipe fixtures.
+
+loadModel still awaits stopCurrentEngine fully before constructing the next
+manager, so no same-modelKey reload races the purge; the old cross-owner
+preservation guards (which existed only for restart warmth) are moot on the
+unload path.
+
+Tests: startup sweep wipes stale dirs (default-off preserves them); engine
+purgeDir + checkpoint purgeOnUnload each delete the kv/<modelKey> dir and are
+idempotent; and engineTierSaveBlockRacingPurgeLeavesNoFile drives a saveBlock
+racing purgeDir via a before-write test seam — verified to FAIL without the
+post-write bail (the block survives) and PASS with it. Full KV-cache suite
+(drain, cross-owner, accountant) stays green.
+```
+anupsv
+had a problem deploying
+to
+benchmarks
+June 16, 2026 03:16 — with
+GitHub Actions
+Failure
+vercel
+Bot
+commented
+Jun 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated (UTC)
+d-inference
+Ready
+Preview
+Jun 16, 2026 11:14pm
+d-inference-console-ui-dev
+Ready
+Preview
+Jun 16, 2026 11:14pm
+d-inference-landing
+Ready
+Preview
+Jun 16, 2026 11:14pm
+vercel
+Bot
+deployed
+to
+Preview – d-inference
+June 16, 2026 03:16
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference-console-ui-dev
+June 16, 2026 03:16
+View deployment
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+github-actions
+Bot
+commented
+Jun 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+This PR refactors unified-memory admission and KV-cache lifecycle management; it is security-neutral-to-positive across the relevant threat boundaries, with one new attack-surface item requiring a targeted fix.
+Trust Boundaries Touched
+TB-002 — Coordinator ↔ Provider WebSocket (provider-side resource exhaustion affects routing availability)
+TB-003 — Provider operator vs. process (KV-cache purge-on-unload affects what survives a model swap)
+TB-007 — Provider inference engine (primary boundary; all changed files live here)
+Threat Analysis
+T-007 — Provider serves manipulated model outputs
+(BatchScheduler.swift, GlobalKVCacheBudget.swift, ModelLoadAdmission.swift, UnifiedMemoryCap.swift, MultiModelBatchSchedulerEngine.swift, BatchScheduler+Telemetry.swift)
+ℹ️ Neutral. The changes consolidate memory-admission policy; they do not alter binary-hash or weight-hash advertisement, coordinator enforcement logic, or the routing gate. WeightHasher is not touched. The consolidated cap math (90% unified-memory ceiling) is tighter and less likely to admit a model that then OOMs, which marginally reduces the malicious-provider-can-exhaust-resources surface, but does not change whether weight hashes are enforced fail-open (SEC-007 remains open).
+T-028 — Residual inference data in GPU memory
+(BatchScheduler.swift lines ~2006–2026, PrefixCacheManager.swift purgeOnUnload, EncryptedPrefixCachePersistence.swift purgeDir)
+✅ Strengthens mitigation. The old stopCurrentEngine path only flushed the index and deregistered the accountant — KV data persisted on disk across unloads. The new purgeOnUnload path (PrefixCacheManager.swift:1317–1344) clears the in-RAM tier (ram.clear(modelHash:)) and deletes the on-disk kv/<modelKey> directory before returning. This closes the window where a previously-loaded model's KV (from tenant A) could be read off-disk by a subsequent model load. CPU-side residual buffer risk is reduced; the GPU-side limitation (Metal buffers not explicitly zeroed) remains open as documented.
+T-041 — Cross-tenant prefix-cache sharing / TTFT timing oracle
+(EncryptedPrefixCachePersistence.swift purgeDir, PrefixCacheManager.swift purgeOnUnload)
+✅ Strengthens mitigation. The purge-on-unload path now actively deletes kv/<modelKey> at every clean unload, limiting the on-disk prefix-hash oracle lifetime to the model's loaded lifetime rather than until the next startup sweep. This does not address the live TTFT timing channel (SEC-035, accepted risk), and the tokenPrefixHash in plaintext AAD is still not HMAC'd — but the window for the disk-observer leak (#2 from T-041 description) is substantially narrowed.
+The post-write isClosed() re-check in EncryptedPrefixCachePersistence.swift:148–159 is correct: it handles the race where purgeDir() fires while a saveBlock is mid-write (the atomic writer re-creates the directory), then cleans up the just-written file. The #if DEBUG test seam (_beforeWriteHookForTest, lines 84–96) is correctly guarded and exports no production surface.
+T-008 — Provider sends plaintext SSE chunks on encryption failure
+(ProviderLoop.swift)
+ℹ️ Neutral. The diff modifies model-load and memory-reservation paths in ProviderLoop.swift; the encryption failure / plaintext-fallback path (SEC-016) is not touched.
+T-009 — Swift provider excluded from private-request routing (SEC-017)
+(ProviderLoop.swift)
+ℹ️ Neutral. Privacy-capability flags and routing-gate logic are not changed.
+T-010 — In-flight inference cancellation
+(ProviderLoop.swift)
+ℹ️ Neutral. Cancellation wiring in the generation loop is not modified.
+T-034 — Provider runs modified code while advertising a trusted identity
+(ProviderLoop.swift — APNs attestation path)
+ℹ️ Neutral. The APNs challenge-response path is not touched by this PR.
+New Attack Surface — VLM Memory Reservation DoS (not covered by existing threats)
+MultiModelBatchSchedulerEngine.swift:200–265 and VLMRequestInference.swift:152–209
+projectedDecodeBytes and projectedKVTokens are consumer-supplied estimates derived from request fields (messages[].content, maxTokens). An authenticated consumer can craft a VLM request that maximises both — many imageURL parts each projecting visionTokensPerImage = 1024 soft tokens, a large max_tokens, and messages inflating the text estimate — to peg a large reserveVisionRequest against the shared GlobalKVCacheBudget for the duration of the stream.
+The downstream effects:
+Resource starvation for other consumers on the same provider. reserveVisionRequest holds the reservation until stream end (or cancellation via onTermination). A slow or never-consumed stream (no reads from the SSE consumer) can hold the reservation open for the requestTimeout window, starving concurrent admissions. This maps to ADV-002 targeting provider throughput, which is currently not covered by an existing threat in TB-007.
+Projection vs. reality gap. visionTokensPerImage = 1024 is documented as "4× Gemma's fixed 256" — but the actual soft-token count is model-dependent and could be much lower. Over-reservation is the safe direction for OOM prevention, but it amplifies the DoS leverage: a single valid image that actually costs 256 vision tokens reserves 1024 × kvBytesPerToken, leaving 4× less headroom for other requests than necessary.
+Recommended fix: enforce an absolute ceiling on the total reservation a single VLM request may claim (e.g. min(projectedBytes, hardCapBytes × 0.5)), and consider integrating VLM reservations into the existing per-account rate limiter or a per-connection semaphore so a single consumer cannot hold more than N concurrent VLM reservations. This does not require a new threat entry — it fits naturally under T-002 (unbounded request body / resource exhaustion) extended to the provider side.
+Open Findings Resolved
+None explicitly closed by this PR. The purgeOnUnload improvement partially mitigates the disk-observer sub-case of SEC-035 (T-041), but SEC-035 remains formally open because the TTFT timing channel and the plaintext tokenPrefixHash in on-disk metadata are not addressed.
+🔐 Threat model: docs/threat-model.yaml · Updates on each push to this PR
+Address review: load gate honors activation reserve; clear cache on s…
+…
+19d011c
+```
+…tandalone evict
+
+Three cross-phase issues caught by a whole-PR review:
+
+1. Load admission could accept a model the runtime KV gate then rejects. The load
+   gate's flat 2 GiB headroom was LESS than the 3 GiB activation reserve the
+   runtime KV budget carves out, so a near-cap model could load yet have zero
+   serveable KV (GlobalKVCacheBudget rejects every request). Added
+   UnifiedMemoryCap.loadHeadroomBytes = activationReserve + minimumLoadKV (1 GiB)
+   and routed the load gate (ProviderLoop, StandaloneServer) + the doctor
+   (ModelFitDiagnostic) through it, so a model that passes the gate can serve.
+2. StandaloneServer LRU eviction didn't MLX.Memory.clearCache(), so freed weights
+   lingered in GPU.cacheMemory — which availableMemoryGb / GlobalKVCacheBudget now
+   count as used — and the next load's gate / a surviving model's KV budget
+   wouldn't see the freed memory. Added the clear (mirrors ProviderLoop.unloadModel).
+3. ResidentModelLedger doc claimed it was the cross-model source of truth, but it
+   is deliberately NOT wired into enforcement (live MLX counters account Σweights
+   since loads are serialized). Doc now says so, so it isn't treated as
+   load-bearing.
+
+Tests: loadHeadroomBytes (≥ activation reserve; admit-implies-serveable-KV) and
+updated ModelFitDiagnostic numbers for the cap-aware headroom (a too-tight box
+now correctly FAILS the fit check instead of "passing" then rejecting every
+request at runtime).
+```
+anupsv
+had a problem deploying
+to
+benchmarks
+June 16, 2026 03:41 — with
+GitHub Actions
+Failure
+vercel
+Bot
+deployed
+to
+Preview – d-inference-landing
+June 16, 2026 03:41
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference-console-ui-dev
+June 16, 2026 03:41
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference
+June 16, 2026 03:41
+View deployment
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+Address re-review: clearCache on all standalone unload paths; fix led…
+…
+4b9e31f
+```
+…ger docs
+
+Follow-ups from the Codex re-review of the prior fix:
+- StandaloneServer now calls MLX.Memory.clearCache() on EVERY unload path, not
+  just LRU eviction: added it to stopAndWait() and the post-load cancellation
+  cleanup, so freed weights are always returned to the OS where the new live
+  budgets (availableMemoryGb / GlobalKVCacheBudget, which count GPU.cacheMemory)
+  can see them.
+- ResidentModelLedger: removed two stale doc comments that still claimed the
+  load gate / load-admission uses it — they contradicted the type-level "NOT
+  wired into enforcement" note. Behavior unchanged.
+
+Known follow-up (NOT in this PR): the load gate sizes on estimatedMemoryGb
+(on-disk × 1.2) while the runtime KV budget uses measured live MLX usage, so if
+the estimate under-counts a model can load yet have its requests rejected by the
+runtime KV gate. Pre-existing and NOT an OOM (GlobalKVCacheBudget.reserve still
+rejects safely at zero headroom — worst case is a loaded-but-unserveable model).
+The proper fix is a post-load measured-headroom guard (unload + clearCache +
+reject if KV would be unserveable), tracked separately.
+```
+anupsv
+had a problem deploying
+to
+benchmarks
+June 16, 2026 04:09 — with
+GitHub Actions
+Failure
+vercel
+Bot
+deployed
+to
+Preview – d-inference-landing
+June 16, 2026 04:09
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference
+June 16, 2026 04:09
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference-console-ui-dev
+June 16, 2026 04:09
+View deployment
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+Drop stale load-gate wording from a ResidentModelLedger test comment
+…
+7be0602
+```
+Final doc-hygiene nit from the Codex re-review: the excluding-helper test still
+described it as load-gate-oriented. The ledger is telemetry-only / not wired
+into enforcement (live MLX counters account Σweights); comment now matches the
+source docs. Comment-only, no behavior change.
+```
+anupsv
+had a problem deploying
+to
+benchmarks
+June 16, 2026 04:14 — with
+GitHub Actions
+Failure
+vercel
+Bot
+deployed
+to
+Preview – d-inference-landing
+June 16, 2026 04:15
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference
+June 16, 2026 04:15
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference-console-ui-dev
+June 16, 2026 04:15
+View deployment
+This comment was marked as outdated.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+anupsv
+had a problem deploying
+to
+benchmarks
+June 16, 2026 04:36 — with
+GitHub Actions
+Failure
+vercel
+Bot
+deployed
+to
+Preview – d-inference-landing
+June 16, 2026 22:28
+View deployment
+anupsv
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Local Codex review (gpt-5.5, xhigh) — findings addressed (commit 785160d)
+Ran a full local Codex review of the PR. It confirmed the architecture is sound — clean verdicts on reservation atomicity (actor check-then-insert, no await between read and insert), release-path coverage on all VLM exits, KV purge-on-unload (RAM + SSD + startup sweep + saveBlock closed-recheck), and evict/clearCache ordering. Four findings; here's the disposition:
+Fixed:
+(High) Vision-path KV reservation under-counted. It reserved only kvBytesPerToken × maxOutputTokens, omitting prompt + image/video soft tokens — a single image expands to hundreds of vision tokens that all occupy KV → false-admit. Now reserves the full span via projectedKVTokens (prompt text utf8/3 + 1024/image + 4096/video, clamped to the context window, + output), mirroring the batched path's promptTokens + maxTokens. Conservative upper bound (1024 vs Gemma-4's real 256 soft tokens/image).
+(Medium) Degenerate env values silently weakened the cap. DARKBLOOM_MEM_CAP_FRACTION≤0 made the cap 0 (rejected every request); DARKBLOOM_ACTIVATION_RESERVE_GB=0 removed the 3 GiB floor. Both env resolvers now treat ≤0/non-finite as unset→default (operators can raise but not silently disable); explicit programmatic values still clamp.
+Evaluated, no change needed:
+(High, refuted) dataFromDataURI decodes before reservation. It already rejects from the computed base64 length before allocating, bounded by maxMediaDecodedBytes (25 MiB) + the WS frame cap — bounded, not an unreserved over-commit.
+(Medium, known limitation) pre-load vs post-load enforcement. The load gate uses an estimate; a post-load measured-headroom guard unloads if it under-estimated. True preemptive enforcement during the load itself needs an allocator ceiling — tracked separately.
+Both fixes verified by an independent reviewer; 60 VLM-cap + UnifiedMemoryCap + budget tests green, 90-test provider regression slice green.
+vercel
+Bot
+deployed
+to
+Preview – d-inference-console-ui-dev
+June 16, 2026 22:29
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference
+June 16, 2026 22:29
+View deployment
+ethenotethan
+requested changes
+Jun 16, 2026
+View reviewed changes
+ethenotethan
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated Code Review — Layr-Labs/d-inference#
+Verdict: REQUEST_CHANGES
+Security — 1 finding(s)
+🔵 [INFO] provider-swift/Sources/ProviderCore/KVCache/EncryptedPrefixCachePersistence.swift:91-95 — Test-only debug hook in production code
+Suggestion: Move debug hook to test-only extension or use conditional compilation to ensure it's never present in release builds
+Performance — 6 finding(s) (5 blocking)
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift:46-48 — SystemMemory.availableBytes() called twice in measuredLiveKVHeadroomBytes
+Suggestion: Cache the result of SystemMemory.availableBytes() in a local variable and reuse it in both UnifiedMemoryCap.liveKVHeadroomBytes calls
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift:225 — Redundant contextLength() call in vision request processing
+Suggestion: Cache the result of await scheduler.contextLength() in a variable since it's used in projectedKVTokens calculation
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:635-658 — Repeated message iteration in projectedDecodeBytes
+Suggestion: Consider combining the media processing loops in projectedDecodeBytes and projectedKVTokens to avoid iterating through messages multiple times
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:125-150 — Duplicate message iteration in projectedKVTokens
+Suggestion: Cache message processing results or combine with projectedDecodeBytes iteration to avoid redundant work
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/ProviderLoop.swift:2717-2719 — MLX.Memory.clearCache() called twice in post-load guard
+Suggestion: Remove the redundant clearCache call since it's already called before the headroom check
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Server/StandaloneServer.swift:565-567 — MLX.Memory.clearCache() called twice in post-load sequence
+Suggestion: Remove the redundant clearCache call since it's already called before the headroom measurement
+Type_diligence — 1 finding(s)
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:95 — Function parameter uses bare any type instead of specific protocol
+Suggestion: Replace any with a more specific protocol type or use generics if the function needs to work with multiple types
+Additive_complexity — 5 finding(s) (2 blocking)
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift:1-255 — 255-line pure policy enum with 15+ static methods could be simpler
+Suggestion: Consider splitting into focused types (CapPolicy, LoadGate, RuntimeBudget) or using a struct with computed properties instead of a large enum with many static methods
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:584-658 — projectedDecodeBytes duplicates validation logic from validateMedia
+Suggestion: Extract shared pixel counting and capping logic into helper methods to avoid maintaining the same constraints in two places
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift:42-78 — measuredLiveKVHeadroomBytes duplicates MLX usage calculation from tokenBudgetMax
+Suggestion: Extract MLX usage calculation (UInt64(max(0, MLX.GPU.activeMemory)) + UInt64(max(0, MLX.GPU.cacheMemory))) into a shared helper method
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift:215-280 — Vision request memory reservation logic embedded in HTTP request handling
+Suggestion: Move VLM memory reservation logic into a dedicated VisionRequestManager or similar abstraction to separate transport concerns from memory management
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift:1507-1563 — Vision request reservation has many parameters and complex overflow handling
+Suggestion: Simplify by using a VisionRequestReservation value object that encapsulates the byte calculations and overflow logic
+13 finding(s) total, 7 blocking. Verdict: REQUEST_CHANGES.
+🤖 Automated review by Centaur · DAR-186
+Comment thread
+provider-swift/Sources/ProviderCore/KVCache/EncryptedPrefixCachePersistence.swift
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+Comment on lines
++635
+to
++658
+addImagePixels(imagePixelCount(data) ?? maxImagePixels)
+} else {
+addImagePixels(maxImagePixels)
+}
+case .videoURL:
+hasVideo = true
+case .text, .unsupported:
+continue
+}
+}
+}
+// Clamp images to the request-wide aggregate cap, then add the video
+// aggregate once. Both mirror validateMedia's ceilings exactly.
+var pixels = min(imagePixels, UInt64(max(0, maxRequestImagePixels)))
+if hasVideo {
+let (s, o) = pixels.addingReportingOverflow(UInt64(max(0, maxRequestVideoFramePixels)))
+pixels = o ? .max : s
+}
+// RGBA (4 bytes/px) x decode overhead. Saturating.
+let (rgba, o1) = pixels.multipliedReportingOverflow(by: 4)
+let bytes = o1 ? UInt64.max : rgba
+let (total, o2) = bytes.multipliedReportingOverflow(by: UInt64(decodeOverheadFactor))
+return o2 ? UInt64.max : total
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] ⚡ Repeated message iteration in projectedDecodeBytes
+💡 Suggestion: Consider combining the media processing loops in projectedDecodeBytes and projectedKVTokens to avoid iterating through messages multiple times
+📊 Score: 3×4 = 12 · Category: Repeated work
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+Comment on lines
++125
+to
++150
+/// (which reserves `promptTokenCount + maxTokens`), so without this the cap
+/// would charge only the output tokens and badly under-count — a single image
+/// expands to hundreds of vision tokens that all occupy KV.
+///
+/// Prompt + vision is clamped to `contextLength` when known: the model can't
+/// attend beyond its context window, so the cache never holds more than that
+/// many input tokens. Output tokens are added on top (the generation extends
+/// past the prompt up to `maxOutputTokens`), mirroring the batched path's
+/// `promptTokenCount + maxTokens`. Saturating; never traps.
+static func projectedKVTokens(
+_ request: OpenAIChatCompletionRequest,
+defaultMaxTokens: Int,
+contextLength: Int
+) -> Int {
+var promptTokens = 0
+func add(_ n: Int) {
+let (s, o) = promptTokens.addingReportingOverflow(max(0, n))
+promptTokens = o ? Int.max : s
+}
+for message in request.messages {
+switch message.content {
+case .text(let s):
+add(s.utf8.count / textCharsPerToken)
+case .parts(let parts):
+for part in parts {
+switch part {
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] ⚡ Duplicate message iteration in projectedKVTokens
+💡 Suggestion: Cache message processing results or combine with projectedDecodeBytes iteration to avoid redundant work
+📊 Score: 2×4 = 8 · Category: Repeated work
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+@@ -95,11 +95,81 @@ public enum VLMRequestInference {
+/// effect on image/video (VLM) requests, matching the text/batched engine.
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🏷️ Function parameter uses bare any type instead of specific protocol
+💡 Suggestion: Replace any with a more specific protocol type or use generics if the function needs to work with multiple types
+📊 Score: 2×2 = 4 · Category: bare_interface
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift
+Comment on lines
++1
+to
++255
+import Foundation
+/// Single source of truth for the provider's unified-memory budget.
+///
+/// The invariant the whole provider enforces is:
+///
+/// Σ(resident model weights) + KV cache + activations ≤ hardCapBytes
+///
+/// where `hardCapBytes` is a fixed fraction (default 90%) of physical unified
+/// memory. Everything else — which models may be co-resident, when one is
+/// evicted, and how much memory KV cache may use — is derived from this one
+/// number. The policy is general: it makes no assumption about WHICH models are
+/// loaded or HOW MANY; it works for one model, two, or N.
+///
+/// This type is PURE POLICY: it reads no MLX globals and mutates nothing, so it
+/// is fully unit-testable and safe to call from any context. Enforcement (load
+/// admission, the KV reservation budget) consults these figures; MLX's own
+/// `memoryLimit` is a soft guideline that cannot enforce the cap on its own
+/// (the Metal allocator frees cache and then allocates past the byte limit
+/// anyway — only the resource COUNT limit throws), so the cap lives here in the
+/// admission layer, not in an MLX setting. See ``MLXMemoryGuard`` for the soft
+/// MLX ceiling we still pin as defense-in-depth.
+public enum UnifiedMemoryCap {
+/// Fraction of physical unified memory the provider may use for EVERYTHING
+/// (weights + KV + activations). The remaining `1 − fraction` is left for
+/// macOS and non-MLX processes. Default 0.90.
+public static let defaultCapFraction: Double = 0.90
+/// Absolute floor on the reserve held back for the OS, so a small box never
+/// hands almost all of RAM to the provider. The percentage reserve and this
+/// floor cross over at `minReserve / (1 − fraction)` — with the 0.90 default
+/// that is 2 GiB / 0.10 = 20 GiB: above 20 GiB the 10% fraction reserve
+/// dominates and this floor never binds; at/below it, this floor protects the
+/// OS (e.g. an 8 GiB box gets a 6 GiB cap, not 7.2 GiB).
+static let minimumReserveBytes: UInt64 = 2 * 1024 * 1024 * 1024 // 2 GiB
+/// Default activation/working-memory reserve carved out INSIDE the cap.
+///
+/// Measured on M5 Max (Gemma-4-26B-qat-4bit + GPT-OSS-20B, both MoE): a
+/// 4-concurrent ~3000-token long-prefill burst moved RSS by only ~9 MB over
+/// the resident-weight baseline — MoE activates few experts, MLX fuses
+/// attention, and intermediates churn through the (count-bounded) buffer
+/// cache rather than growing the live set. So activations are small in
+/// practice; this is a conservative SAFETY FLOOR, not a per-batch estimate.
+static let defaultActivationReserveBytes: UInt64 = 3 * 1024 * 1024 * 1024 // 3 GiB
+/// Minimum KV headroom (bytes) a freshly-loaded model must have under the cap
+/// to be worth loading — a model that loads but can serve no KV is useless.
+/// Small (1 GiB): the load gate only needs to guarantee the model can serve
+/// at least a modest request; concurrency beyond that is sized at runtime.
+static let minimumLoadKVBytes: UInt64 = 1 * 1024 * 1024 * 1024 // 1 GiB
+/// The post-load guard decision, as a pure function so it's unit-testable
+/// (the BatchScheduler accessor that feeds it reads real MLX globals). A
+/// freshly-loaded model is serveable iff its MEASURED live KV headroom (taken
+/// AFTER trimming the cold-load buffer cache) is at least the minimum
+/// serveable KV. Below that, the caller unloads + rejects rather than keep a
+/// model whose every request the KV gate would reject.
+public static func loadIsServeable(measuredLiveKVHeadroomBytes: UInt64) -> Bool {
+measuredLiveKVHeadroomBytes >= minimumLoadKVBytes
+}
+/// Headroom (bytes) the model-LOAD gate must require ABOVE the weights, so a
+/// model that passes the gate can actually serve. The runtime KV path carves
+/// out the activation reserve and then needs some KV room; the load gate must
+/// reserve at least that much too, or it admits a model `GlobalKVCacheBudget`
+/// then rejects every request for (the load gate's old flat 2 GiB one-request
+/// headroom was LESS than the 3 GiB activation reserve, so a near-cap model
+/// loaded with zero serveable KV). Returns
+/// `activationReserve + minimumLoadKV`.
+public static func loadHeadroomBytes(
+activationReserveBytes: UInt64? = nil
+) -> UInt64 {
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+return saturatingAdd(activations, minimumLoadKVBytes)
+}
+// MARK: - Cap
+/// The hard cap in bytes: `min(fraction × physical, physical − minReserve)`.
+/// Never exceeds physical and always leaves at least `minimumReserveBytes`.
+public static func hardCapBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+capFraction: Double? = nil
+) -> UInt64 {
+let fraction = resolvedCapFraction(explicit: capFraction)
+let byFraction = scale(physicalBytes, by: fraction)
+// Never leave less than the absolute OS floor.
+let byFloor = physicalBytes > minimumReserveBytes
+? physicalBytes - minimumReserveBytes
+: 0
+return min(byFraction, byFloor)
+}
+/// Bytes available for KV cache after subtracting all resident model weights,
+/// the activation reserve, and any RAM-resident prefix-cache allowance, from
+/// the hard cap. Clamps to 0 — never returns a negative budget.
+///
+/// This is the core of the policy: `cap − Σweights − activations − ramPrefix`.
+/// It is recomputed whenever a model loads or unloads, so it rises as models
+/// leave and shrinks as they join, with no special-casing of model count.
+public static func kvBudgetBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+residentWeightBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+ramPrefixAllowanceBytes: UInt64 = 0,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+let claimed = saturatingAdd(residentWeightBytes, activations, ramPrefixAllowanceBytes)
+return cap > claimed ? cap - claimed : 0
+}
+/// Live KV headroom in bytes: how many more bytes may be committed to KV
+/// *right now* without crossing the cap, given current MLX usage, clamped to
+/// real OS-free RAM and net of the activation reserve.
+///
+/// This is the runtime counterpart to ``kvBudgetBytes``: instead of
+/// subtracting a known Σweights, it subtracts `mlxUsedBytes` (MLX active +
+/// cache), which already reflects every co-resident model's weights AND its
+/// live/cached KV — so it is inherently multi-model with no per-model
+/// bookkeeping. The single per-request reservation gate and the per-scheduler
+/// live token budget both derive from this, which is what keeps them
+/// consistent (no competing reserve constants).
+///
+/// Uses the same ``hardCapBytes`` ceiling — including its 2 GiB absolute OS
+/// floor — as the load gate, so the floor is honored as KV GROWS during
+/// serving (the load gate only guarantees it at load time; KV expands after).
+/// On boxes above ~20 GiB the floor never binds and this equals
+/// `capFraction × physical − mlxUsed`. Cross-process safety additionally
+/// comes from the `systemAvailableBytes` clamp.
+public static func liveKVHeadroomBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+mlxUsedBytes: UInt64,
+systemAvailableBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let underCap = cap > mlxUsedBytes ? cap - mlxUsedBytes : 0
+let realFree = min(underCap, systemAvailableBytes)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+return realFree > activations ? realFree - activations : 0
+}
+/// Whether a new model of `candidateWeightBytes` may be admitted while
+/// `currentResidentWeightBytes` are already resident, leaving at least
+/// `minimumKVBytes` of KV headroom under the cap (a model that loads with no
+/// room to serve any KV is useless). Pure check; eviction is the caller's job.
+public static func canAdmit(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+currentResidentWeightBytes: UInt64,
+candidateWeightBytes: UInt64,
+minimumKVBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+ramPrefixAllowanceBytes: UInt64 = 0,
+capFraction: Double? = nil
+) -> Bool {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+let need = saturatingAdd(
+currentResidentWeightBytes, candidateWeightBytes,
+activations, ramPrefixAllowanceBytes, minimumKVBytes)
+return need <= cap
+}
+/// Effective reserve (bytes) the model-LOAD gate must hold back below total
+/// physical memory so that loading never pushes usage past the cap.
+///
+/// The load gate works in "free memory" terms (`total − used − reserve`), so
+/// to honor the cap its reserve must be at least `physical − hardCap` (the
+/// 10% / 2 GiB-floor the cap leaves the OS). It is also never LESS than the
+/// operator's configured reserve — whichever is more conservative wins. This
+/// is what makes the existing free-memory load gate enforce the 90% cap
+/// without a separate code path: hold back `max(configReserve, physical −
+/// hardCap)`.
+public static func loadReserveBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+configReserveBytes: UInt64,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let capImpliedReserve = physicalBytes > cap ? physicalBytes - cap : 0
+return max(configReserveBytes, capImpliedReserve)
+}
+// MARK: - Resolution (explicit → env → default)
+/// Cap fraction from explicit value, env `DARKBLOOM_MEM_CAP_FRACTION`
+/// (0–1), or the 0.90 default. A `<= 0` or non-finite env value is treated as
+/// UNSET (→ default), not clamped to 0: a degenerate `0` fraction would make
+/// `hardCapBytes == 0` and reject every request, silently bricking the
+/// provider from a single bad env var. An explicit programmatic value (tests)
+/// is still clamped as given. Values `> 1` clamp to 1.0.
+static func resolvedCapFraction(
+explicit: Double?,
+env: [String: String] = ProcessInfo.processInfo.environment
+) -> Double {
+if let explicit { return clampFraction(explicit) }
+if let raw = env["DARKBLOOM_MEM_CAP_FRACTION"], let v = Double(raw),
+v.isFinite, v > 0 {
+return clampFraction(v)
+}
+return defaultCapFraction
+}
+/// Activation reserve from explicit bytes, env
+/// `DARKBLOOM_ACTIVATION_RESERVE_GB` (GB), or the default floor. A `<= 0` or
+/// non-finite env value is treated as UNSET (→ the 3 GiB default floor): a
+/// `0` reserve would remove the activation headroom the cap exists to
+/// guarantee, so an operator can RAISE the reserve but not silently disable it
+/// via env. An explicit programmatic value (tests) is honored as given.
+static func resolvedActivationReserveBytes(
+explicit: UInt64? = nil,
+env: [String: String] = ProcessInfo.processInfo.environment
+) -> UInt64 {
+if let explicit { return explicit }
+if let raw = env["DARKBLOOM_ACTIVATION_RESERVE_GB"], let gb = Double(raw),
+gb.isFinite, gb > 0 {
+let scaled = gb * 1_073_741_824
+return scaled >= uint64MaxAsDouble ? UInt64.max : UInt64(scaled)
+}
+return defaultActivationReserveBytes
+}
+// MARK: - Helpers
+/// `Double(UInt64.max)` (exactly 2^64) — the saturation threshold so a
+/// `>= uint64MaxAsDouble` test catches every value that would trap on
+/// `UInt64(_:)` conversion. Mirrors ``MLXMemoryGuard``.
+static let uint64MaxAsDouble = Double(UInt64.max)
+private static func clampFraction(_ v: Double) -> Double {
+guard v.isFinite else { return defaultCapFraction }
+return min(1.0, max(0.0, v))
+}
+/// Multiply a byte count by a 0–1 fraction without overflow or a trapping
+/// Double round-trip.
+private static func scale(_ bytes: UInt64, by fraction: Double) -> UInt64 {
+let scaled = Double(bytes) * fraction
+if !scaled.isFinite || scaled <= 0 { return 0 }
+return scaled >= uint64MaxAsDouble ? UInt64.max : UInt64(scaled)
+}
+private static func saturatingAdd(_ values: UInt64...) -> UInt64 {
+var total: UInt64 = 0
+for v in values {
+let (sum, overflow) = total.addingReportingOverflow(v)
+total = overflow ? UInt64.max : sum
+}
+return total
+}
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] 🧩 255-line pure policy enum with 15+ static methods could be simpler
+💡 Suggestion: Consider splitting into focused types (CapPolicy, LoadGate, RuntimeBudget) or using a struct with computed properties instead of a large enum with many static methods
+📊 Score: 3×4 = 12 · Category: over-abstraction
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+Comment on lines
++584
+to
++658
+/// Decode-overhead multiplier over the raw RGBA raster (W*H*4). `CIImage`
+/// rasterization + the intermediate Swift `Data` in `MediaProcessing
+/// .asMLXArray` + the resampled MLX pixel-values tensor coexist briefly, so
+/// peak transient RAM is a few times the final raster. 4x is a conservative
+/// upper bound measured against the decode-bomb repro (16000^2 -> ~1.78 GB
+/// peak for a 256 MP = 1 GB raster ~= 1.7x; 4x leaves generous margin).
+static let decodeOverheadFactor = 4
+/// Projected PEAK unified-memory bytes the media decode of `request` will
+/// transiently consume, so the caller can RESERVE it against the 90% cap
+/// (GlobalKVCacheBudget) before rasterizing — these CIImage/Data buffers are
+/// NOT MLX arrays and are otherwise invisible to the cap. Estimated from
+/// HEADER pixel counts (no decode); when a header is unreadable the per-image
+/// cap is used as the worst case the media caps still admit.
+///
+/// The estimate is clamped to the SAME ceilings `validateMedia` enforces, so
+/// it can never exceed what a maximally-large *valid* request consumes:
+/// • image pixels are summed but clamped to the aggregate image cap
+/// (`maxRequestImagePixels`) — a single oversized image, or many
+/// unreadable-header images, can't project past the request-wide image
+/// ceiling validation guarantees;
+/// • videos are charged the aggregate per-request video-frame cap ONCE if
+/// any video is present — NOT per video. `validateMedia` bounds the SUM
+/// of all videos' frame pixels by `maxRequestVideoFramePixels`, so
+/// charging it per-video would over-reserve by the video count and could
+/// falsely 503 a valid multi-video request.
+/// Consequently an oversized/invalid request projects no more than a max
+/// valid one: on a saturated box both get a retryable 503 (and the invalid
+/// one resolves to its deterministic 400 once capacity frees), rather than
+/// the invalid request being singled out for a permanent 503.
+/// Saturating; never traps. Returns 0 for a request with no media.
+public static func projectedDecodeBytes(
+_ request: OpenAIChatCompletionRequest,
+maxImagePixels: Int = Self.maxImagePixels,
+maxRequestImagePixels: Int = Self.maxRequestImagePixels,
+maxRequestVideoFramePixels: Int = Self.maxRequestVideoFramePixels
+) -> UInt64 {
+var imagePixels: UInt64 = 0
+var hasVideo = false
+func addImagePixels(_ p: Int) {
+let (s, o) = imagePixels.addingReportingOverflow(UInt64(max(0, p)))
+imagePixels = o ? .max : s
+}
+for message in request.messages {
+guard case .parts(let parts) = message.content else { continue }
+for part in parts {
+switch part {
+case .imageURL(let uri):
+// Header read is O(header), ~0 RSS; fall back to the per-image
+// cap (the worst case the existing caps admit) if unreadable.
+if let data = try? dataFromDataURI(uri) {
+addImagePixels(imagePixelCount(data) ?? maxImagePixels)
+} else {
+addImagePixels(maxImagePixels)
+}
+case .videoURL:
+hasVideo = true
+case .text, .unsupported:
+continue
+}
+}
+}
+// Clamp images to the request-wide aggregate cap, then add the video
+// aggregate once. Both mirror validateMedia's ceilings exactly.
+var pixels = min(imagePixels, UInt64(max(0, maxRequestImagePixels)))
+if hasVideo {
+let (s, o) = pixels.addingReportingOverflow(UInt64(max(0, maxRequestVideoFramePixels)))
+pixels = o ? .max : s
+}
+// RGBA (4 bytes/px) x decode overhead. Saturating.
+let (rgba, o1) = pixels.multipliedReportingOverflow(by: 4)
+let bytes = o1 ? UInt64.max : rgba
+let (total, o2) = bytes.multipliedReportingOverflow(by: UInt64(decodeOverheadFactor))
+return o2 ? UInt64.max : total
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 projectedDecodeBytes duplicates validation logic from validateMedia
+💡 Suggestion: Extract shared pixel counting and capping logic into helper methods to avoid maintaining the same constraints in two places
+📊 Score: 2×3 = 6 · Category: duplicate logic
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift
+Comment on lines
++1507
+to
++1563
+/// Reserve unified memory for a VLM (vision-path) request against the shared
+/// 90% cap, via the process-wide GlobalKVCacheBudget this scheduler holds. A
+/// vision request bypasses the batched `submitTokenized` reservation entirely
+/// — it streams through `container.generate` directly — so without this it
+/// commits TWO kinds of memory the cap would otherwise track only reactively:
+///
+/// 1. `mediaDecodeBytes` — the transient CIImage rasters + Swift `Data` pixel
+/// buffers from media decode. These are NOT MLXArrays, so they are
+/// invisible to the cap's live MLX counters (the original blind spot).
+/// 2. The generation KV cache — `kvBytesPerToken × maxOutputTokens`. This IS
+/// MLXArray-backed (eventually visible to the live counters), but the
+/// vision path's decode loop runs in a detached task with no per-request
+/// reservation, so N concurrent media requests can grow KV simultaneously
+/// against headroom none of them reserved — a transient over-commit the
+/// cap would otherwise catch only on the NEXT admission. Reserving it up
+/// front makes the vision path share the same preemptive 90% gate the
+/// batched path gets from `reserveKVForRequest`.
+///
+/// Both are charged to ONE reservation id and released together when the
+/// stream ends (decode buffers are actually freed after `prepare`, so holding
+/// them for the whole stream is conservative — never an under-reservation).
+/// Returns true if it fits (and was reserved) or budgeting is disabled
+/// (nil budget, legacy "always proceed"); false if it would exceed the cap,
+/// in which case the caller surfaces a retryable 503. Pair with
+/// `releaseVisionRequest`. Saturating; never traps.
+public func reserveVisionRequest(
+requestId: String, mediaDecodeBytes: UInt64, kvTokens: Int
+) async -> Bool {
+guard let kvBudget else { return true }
+// KV bytes = kvBytesPerToken × the FULL token span the cache will hold:
+// prompt text + image/video soft tokens + generated output (the caller
+// computes that conservative total). Reserving only the output tokens
+// would badly under-count — a single image expands to hundreds of vision
+// tokens, all of which occupy KV.
+var genKVBytes: UInt64 = 0
+if kvBytesPerToken > 0, kvTokens > 0 {
+let (b, overflow) = UInt64(kvBytesPerToken)
+.multipliedReportingOverflow(by: UInt64(kvTokens))
+genKVBytes = overflow ? .max : b
+}
+let (total, overflow) = mediaDecodeBytes.addingReportingOverflow(genKVBytes)
+let bytes = overflow ? UInt64.max : total
+return await kvBudget.reserveBytes(requestID: requestId, bytes: bytes)
+}
+/// The model's configured context window (`max_position_embeddings`), or 0 if
+/// unknown. The KV cache can never hold more than this many prompt+vision
+/// tokens, so the vision-path reservation clamps its prompt+vision estimate to
+/// it (output tokens are added on top, matching the batched path's
+/// `promptTokenCount + maxTokens`).
+public func contextLength() -> Int { maxContextLength }
+/// Release a prior `reserveVisionRequest` reservation. Safe/no-op if unknown
+/// or budgeting is disabled.
+public func releaseVisionRequest(requestId: String) async {
+await kvBudget?.release(requestID: requestId)
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 Vision request reservation has many parameters and complex overflow handling
+💡 Suggestion: Simplify by using a VisionRequestReservation value object that encapsulates the byte calculations and overflow logic
+📊 Score: 2×3 = 6 · Category: over-configuration
+Gajesh2007
+and others
+added 2 commits
+June 16, 2026 15:39
+fix(memory): reserve loading model's footprint during load (serve-whi…
+…
+720668a
+```
+…le-load OOM)
+
+Closes the one residual byte-cap gap in the unified-memory cap: while model B is
+loading, its weights are not yet in MLX active/cache, so a concurrent KV
+reservation on an already-loaded model A computed its headroom blind to B's
+incoming weights and could grant KV that, plus the load, transiently blew the
+90% cap (an OOM on the normal serve-while-load path; the post-load guard only
+reacts AFTER the spike).
+
+GlobalKVCacheBudget gains reservePendingLoad(requestID:bytes:) — an unconditional
+reservation (the load is already gate-admitted) that makes the in-flight weights
+visible to reserve/reserveBytes (which subtract Σreservations from live headroom).
+ensureModelLoaded reserves the weight estimate after the load gate passes,
+releases it once the weights are resident (handed off to mlxUsed) right after
+scheduler.loadModel, and also releases on every failure path in the catch
+(release is idempotent). It reserves only the weights, so concurrent KV that
+still fits underneath is admitted; only over-committing reservations are rejected
+(retryable 429). Adds a regression test.
+
+Co-authored-by: anupsv <6407789+anupsv@users.noreply.github.com>
+```
+Merge remote-tracking branch 'origin/feat/unified-memory-cap' into tm…
+…
+478fa1e
+```
+…p/363-merge
+```
+Gajesh2007
+had a problem deploying
+to
+benchmarks
+June 16, 2026 22:45 — with
+GitHub Actions
+Failure
+vercel
+Bot
+deployed
+to
+Preview – d-inference-landing
+June 16, 2026 22:45
+View deployment
+Gajesh2007
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Member
+Did a full review + got this merge-ready against current master (after #372/#373/#374/#376 + the coordinator PRs landed). Validated by building the integrated tree and running the cap/purge/checkpoint suites.
+1. Merged master in; resolved the one conflict (BatchScheduler.stopCurrentEngine). It was complementary to #374: kept #374's capturePipeline?.shutdown() (the Metal resource-count leak fix) and adopted this PR's purgeOnUnload() (which subsumes the old flushIndexNow+deregisterFromAccountant). #374's CheckpointCapturePipeline tests still pass, so the leak fix is preserved.
+2. Fixed the one HIGH residual gap from review — the serve-while-load OOM race (720668a5). While model B loads, its weights aren't yet in MLX active/cache, so a concurrent KV reservation on already-loaded model A could grant headroom that, plus B's incoming weights, transiently blew the 90% cap (the post-load guard only reacts after the spike). GlobalKVCacheBudget now has reservePendingLoad; ensureModelLoaded reserves the weight footprint after the load gate, releases it once weights are resident (handed off to mlxUsed), and on every failure path. Independently verified leak-safe (released on all exits, idempotent, no double-count, correct handoff) + regression test added.
+3. The VLM prefill-KV + env-brick findings are handled by your 785160de ("Size vision-path KV by full token span; don't let env brick the cap") — that landed exactly the two medium/low items my review flagged, so I left them to you and merged your commit in.
+Review verdict: the design is sound — the decisive property is that every runtime gate clamps to real OS-free RAM (SystemMemory.availableBytes), re-read per reservation. The purge path was reviewed adversarially and is leak-free (the saveBlock-vs-purge race is provably closed).
+Remaining low-severity follow-ups (non-blocking): UnifiedMemoryCap.canAdmit is dead code (tested but never called — delete or wire in); kvRoot is per-user so a 2nd same-user provider process would wipe the first's KV on startup; SystemMemory.availableBytes can over-report under pressure (inactive dirty pages); a sub-second accountant over-count between removeItem and deregister; and an integration test for the Q6 reserve/release across ensureModelLoaded's throw paths would harden against future regressions.
+Build + cap/purge/checkpoint suites green on the integrated tree.
+vercel
+Bot
+deployed
+to
+Preview – d-inference-console-ui-dev
+June 16, 2026 22:45
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference
+June 16, 2026 22:45
+View deployment
+ethenotethan
+requested changes
+Jun 16, 2026
+View reviewed changes
+ethenotethan
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated Code Review — Layr-Labs/d-inference#
+Verdict: REQUEST_CHANGES
+Security — ✅ No issues found
+Performance — 8 finding(s) (5 blocking)
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift:47-56 — Repeated MLX memory queries and SystemMemory.availableBytes() calls in tokenBudgetMax
+Suggestion: Cache MLX.GPU.activeMemory, MLX.GPU.cacheMemory, and SystemMemory.availableBytes() results at the start of the method to avoid redundant system calls
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift:64-67 — Duplicate MLX memory queries in measuredLiveKVHeadroomBytes
+Suggestion: Extract MLX memory reading into a shared helper method or cache the values when both tokenBudgetMax and measuredLiveKVHeadroomBytes are called in sequence
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift:1521-1577 — String concatenation in reserveVisionRequest without pre-allocation
+Suggestion: Use String(format:) or StringBuilder pattern for the requestId generation instead of string interpolation with UUID prefix operations
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/GlobalKVCacheBudget.swift:128-158 — Repeated computation of UnifiedMemoryCap.liveKVHeadroomBytes in availableReservationBytes
+Suggestion: Cache the result of liveKVHeadroomBytes computation since it's called frequently and involves multiple calculations
+🔴 [CRITICAL] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:534-581 — Nested loops over messages and parts in projectedDecodeBytes without early termination
+Suggestion: Add early termination when aggregate caps are reached, and consider caching message parsing results if this method is called multiple times for the same request
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:125-165 — Duplicate message iteration in projectedKVTokens after projectedDecodeBytes
+Suggestion: Combine the message parsing logic or cache the parsed results to avoid iterating over the same message structure multiple times
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift:216-228 — Multiple calls to VLMRequestInference methods that re-parse the same request
+Suggestion: Parse the request once and pass the results to avoid redundant message iteration in projectedDecodeBytes and projectedKVTokens
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/ProviderLoop.swift:2711-2720 — MLX.Memory.clearCache() called multiple times in error handling paths
+Suggestion: Consolidate cache clearing into a single cleanup function to avoid redundant cache operations
+Type_diligence — 1 finding(s)
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:95 — Function parameter uses bare any instead of specific protocol
+Suggestion: Replace any with a specific protocol type like Sendable or create a dedicated protocol for the expected behavior
+Additive_complexity — 5 finding(s) (1 blocking)
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift:1-255 — 255-line pure policy enum with 15+ static methods could be simpler
+Suggestion: Consider splitting into focused types (CapPolicy, LoadGate, KVBudget) or using a struct with computed properties instead of a large enum with only static methods
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:584-658 — projectedDecodeBytes duplicates validation logic from validateMedia
+Suggestion: Extract shared pixel counting/capping logic into a helper function used by both projectedDecodeBytes and validateMedia
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift:1520-1577 — Vision request reservation logic in BatchScheduler mixes concerns
+Suggestion: Move VLM-specific reservation logic to VLMRequestInference or a dedicated VLMReservationManager to keep BatchScheduler focused on batch scheduling
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift:202-271 — Vision reservation/release pattern repeated 4 times with identical error handling
+Suggestion: Extract a helper method like withVisionReservation(requestId, bytes, kvTokens) { ... } that handles the reserve/release lifecycle and error cleanup
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/GlobalKVCacheBudget.swift:64-97 — Three similar reservation methods (reserve, reserveBytes, reservePendingLoad) with overlapping logic
+Suggestion: Consolidate into a single reserveInternal method with a reservation type enum, or use a common ReservationRequest struct
+14 finding(s) total, 6 blocking. Verdict: REQUEST_CHANGES.
+🤖 Automated review by Centaur · DAR-186
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift
+Comment on lines
++1521
+to
++1577
+/// Reserve unified memory for a VLM (vision-path) request against the shared
+/// 90% cap, via the process-wide GlobalKVCacheBudget this scheduler holds. A
+/// vision request bypasses the batched `submitTokenized` reservation entirely
+/// — it streams through `container.generate` directly — so without this it
+/// commits TWO kinds of memory the cap would otherwise track only reactively:
+///
+/// 1. `mediaDecodeBytes` — the transient CIImage rasters + Swift `Data` pixel
+/// buffers from media decode. These are NOT MLXArrays, so they are
+/// invisible to the cap's live MLX counters (the original blind spot).
+/// 2. The generation KV cache — `kvBytesPerToken × maxOutputTokens`. This IS
+/// MLXArray-backed (eventually visible to the live counters), but the
+/// vision path's decode loop runs in a detached task with no per-request
+/// reservation, so N concurrent media requests can grow KV simultaneously
+/// against headroom none of them reserved — a transient over-commit the
+/// cap would otherwise catch only on the NEXT admission. Reserving it up
+/// front makes the vision path share the same preemptive 90% gate the
+/// batched path gets from `reserveKVForRequest`.
+///
+/// Both are charged to ONE reservation id and released together when the
+/// stream ends (decode buffers are actually freed after `prepare`, so holding
+/// them for the whole stream is conservative — never an under-reservation).
+/// Returns true if it fits (and was reserved) or budgeting is disabled
+/// (nil budget, legacy "always proceed"); false if it would exceed the cap,
+/// in which case the caller surfaces a retryable 503. Pair with
+/// `releaseVisionRequest`. Saturating; never traps.
+public func reserveVisionRequest(
+requestId: String, mediaDecodeBytes: UInt64, kvTokens: Int
+) async -> Bool {
+guard let kvBudget else { return true }
+// KV bytes = kvBytesPerToken × the FULL token span the cache will hold:
+// prompt text + image/video soft tokens + generated output (the caller
+// computes that conservative total). Reserving only the output tokens
+// would badly under-count — a single image expands to hundreds of vision
+// tokens, all of which occupy KV.
+var genKVBytes: UInt64 = 0
+if kvBytesPerToken > 0, kvTokens > 0 {
+let (b, overflow) = UInt64(kvBytesPerToken)
+.multipliedReportingOverflow(by: UInt64(kvTokens))
+genKVBytes = overflow ? .max : b
+}
+let (total, overflow) = mediaDecodeBytes.addingReportingOverflow(genKVBytes)
+let bytes = overflow ? UInt64.max : total
+return await kvBudget.reserveBytes(requestID: requestId, bytes: bytes)
+}
+/// The model's configured context window (`max_position_embeddings`), or 0 if
+/// unknown. The KV cache can never hold more than this many prompt+vision
+/// tokens, so the vision-path reservation clamps its prompt+vision estimate to
+/// it (output tokens are added on top, matching the batched path's
+/// `promptTokenCount + maxTokens`).
+public func contextLength() -> Int { maxContextLength }
+/// Release a prior `reserveVisionRequest` reservation. Safe/no-op if unknown
+/// or budgeting is disabled.
+public func releaseVisionRequest(requestId: String) async {
+await kvBudget?.release(requestID: requestId)
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] ⚡ String concatenation in reserveVisionRequest without pre-allocation
+💡 Suggestion: Use String(format:) or StringBuilder pattern for the requestId generation instead of string interpolation with UUID prefix operations
+📊 Score: 2×3 = 6 · Category: unbounded_allocations
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/GlobalKVCacheBudget.swift
+Comment on lines
+128
+to
+158
+@@ -113,8 +158,4 @@ public actor GlobalKVCacheBudget {
+return total
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] ⚡ Repeated computation of UnifiedMemoryCap.liveKVHeadroomBytes in availableReservationBytes
+💡 Suggestion: Cache the result of liveKVHeadroomBytes computation since it's called frequently and involves multiple calculations
+📊 Score: 3×4 = 12 · Category: repeated_work
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+Comment on lines
++125
+to
++165
+/// (which reserves `promptTokenCount + maxTokens`), so without this the cap
+/// would charge only the output tokens and badly under-count — a single image
+/// expands to hundreds of vision tokens that all occupy KV.
+///
+/// Prompt + vision is clamped to `contextLength` when known: the model can't
+/// attend beyond its context window, so the cache never holds more than that
+/// many input tokens. Output tokens are added on top (the generation extends
+/// past the prompt up to `maxOutputTokens`), mirroring the batched path's
+/// `promptTokenCount + maxTokens`. Saturating; never traps.
+static func projectedKVTokens(
+_ request: OpenAIChatCompletionRequest,
+defaultMaxTokens: Int,
+contextLength: Int
+) -> Int {
+var promptTokens = 0
+func add(_ n: Int) {
+let (s, o) = promptTokens.addingReportingOverflow(max(0, n))
+promptTokens = o ? Int.max : s
+}
+for message in request.messages {
+switch message.content {
+case .text(let s):
+add(s.utf8.count / textCharsPerToken)
+case .parts(let parts):
+for part in parts {
+switch part {
+case .text(let s): add(s.utf8.count / textCharsPerToken)
+case .imageURL: add(visionTokensPerImage)
+case .videoURL: add(visionTokensPerVideo)
+case .unsupported: continue
+}
+}
+case .null:
+continue
+}
+}
+// The KV cache can't hold more input tokens than the context window.
+if contextLength > 0 { promptTokens = min(promptTokens, contextLength) }
+let maxOutput = max(0, resolveMaxOutputTokens(for: request, defaultMaxTokens: defaultMaxTokens))
+let (total, overflow) = promptTokens.addingReportingOverflow(maxOutput)
+return overflow ? Int.max : total
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] ⚡ Duplicate message iteration in projectedKVTokens after projectedDecodeBytes
+💡 Suggestion: Combine the message parsing logic or cache the parsed results to avoid iterating over the same message structure multiple times
+📊 Score: 3×3 = 9 · Category: repeated_work
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift
+Comment on lines
++1
+to
++255
+import Foundation
+/// Single source of truth for the provider's unified-memory budget.
+///
+/// The invariant the whole provider enforces is:
+///
+/// Σ(resident model weights) + KV cache + activations ≤ hardCapBytes
+///
+/// where `hardCapBytes` is a fixed fraction (default 90%) of physical unified
+/// memory. Everything else — which models may be co-resident, when one is
+/// evicted, and how much memory KV cache may use — is derived from this one
+/// number. The policy is general: it makes no assumption about WHICH models are
+/// loaded or HOW MANY; it works for one model, two, or N.
+///
+/// This type is PURE POLICY: it reads no MLX globals and mutates nothing, so it
+/// is fully unit-testable and safe to call from any context. Enforcement (load
+/// admission, the KV reservation budget) consults these figures; MLX's own
+/// `memoryLimit` is a soft guideline that cannot enforce the cap on its own
+/// (the Metal allocator frees cache and then allocates past the byte limit
+/// anyway — only the resource COUNT limit throws), so the cap lives here in the
+/// admission layer, not in an MLX setting. See ``MLXMemoryGuard`` for the soft
+/// MLX ceiling we still pin as defense-in-depth.
+public enum UnifiedMemoryCap {
+/// Fraction of physical unified memory the provider may use for EVERYTHING
+/// (weights + KV + activations). The remaining `1 − fraction` is left for
+/// macOS and non-MLX processes. Default 0.90.
+public static let defaultCapFraction: Double = 0.90
+/// Absolute floor on the reserve held back for the OS, so a small box never
+/// hands almost all of RAM to the provider. The percentage reserve and this
+/// floor cross over at `minReserve / (1 − fraction)` — with the 0.90 default
+/// that is 2 GiB / 0.10 = 20 GiB: above 20 GiB the 10% fraction reserve
+/// dominates and this floor never binds; at/below it, this floor protects the
+/// OS (e.g. an 8 GiB box gets a 6 GiB cap, not 7.2 GiB).
+static let minimumReserveBytes: UInt64 = 2 * 1024 * 1024 * 1024 // 2 GiB
+/// Default activation/working-memory reserve carved out INSIDE the cap.
+///
+/// Measured on M5 Max (Gemma-4-26B-qat-4bit + GPT-OSS-20B, both MoE): a
+/// 4-concurrent ~3000-token long-prefill burst moved RSS by only ~9 MB over
+/// the resident-weight baseline — MoE activates few experts, MLX fuses
+/// attention, and intermediates churn through the (count-bounded) buffer
+/// cache rather than growing the live set. So activations are small in
+/// practice; this is a conservative SAFETY FLOOR, not a per-batch estimate.
+static let defaultActivationReserveBytes: UInt64 = 3 * 1024 * 1024 * 1024 // 3 GiB
+/// Minimum KV headroom (bytes) a freshly-loaded model must have under the cap
+/// to be worth loading — a model that loads but can serve no KV is useless.
+/// Small (1 GiB): the load gate only needs to guarantee the model can serve
+/// at least a modest request; concurrency beyond that is sized at runtime.
+static let minimumLoadKVBytes: UInt64 = 1 * 1024 * 1024 * 1024 // 1 GiB
+/// The post-load guard decision, as a pure function so it's unit-testable
+/// (the BatchScheduler accessor that feeds it reads real MLX globals). A
+/// freshly-loaded model is serveable iff its MEASURED live KV headroom (taken
+/// AFTER trimming the cold-load buffer cache) is at least the minimum
+/// serveable KV. Below that, the caller unloads + rejects rather than keep a
+/// model whose every request the KV gate would reject.
+public static func loadIsServeable(measuredLiveKVHeadroomBytes: UInt64) -> Bool {
+measuredLiveKVHeadroomBytes >= minimumLoadKVBytes
+}
+/// Headroom (bytes) the model-LOAD gate must require ABOVE the weights, so a
+/// model that passes the gate can actually serve. The runtime KV path carves
+/// out the activation reserve and then needs some KV room; the load gate must
+/// reserve at least that much too, or it admits a model `GlobalKVCacheBudget`
+/// then rejects every request for (the load gate's old flat 2 GiB one-request
+/// headroom was LESS than the 3 GiB activation reserve, so a near-cap model
+/// loaded with zero serveable KV). Returns
+/// `activationReserve + minimumLoadKV`.
+public static func loadHeadroomBytes(
+activationReserveBytes: UInt64? = nil
+) -> UInt64 {
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+return saturatingAdd(activations, minimumLoadKVBytes)
+}
+// MARK: - Cap
+/// The hard cap in bytes: `min(fraction × physical, physical − minReserve)`.
+/// Never exceeds physical and always leaves at least `minimumReserveBytes`.
+public static func hardCapBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+capFraction: Double? = nil
+) -> UInt64 {
+let fraction = resolvedCapFraction(explicit: capFraction)
+let byFraction = scale(physicalBytes, by: fraction)
+// Never leave less than the absolute OS floor.
+let byFloor = physicalBytes > minimumReserveBytes
+? physicalBytes - minimumReserveBytes
+: 0
+return min(byFraction, byFloor)
+}
+/// Bytes available for KV cache after subtracting all resident model weights,
+/// the activation reserve, and any RAM-resident prefix-cache allowance, from
+/// the hard cap. Clamps to 0 — never returns a negative budget.
+///
+/// This is the core of the policy: `cap − Σweights − activations − ramPrefix`.
+/// It is recomputed whenever a model loads or unloads, so it rises as models
+/// leave and shrinks as they join, with no special-casing of model count.
+public static func kvBudgetBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+residentWeightBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+ramPrefixAllowanceBytes: UInt64 = 0,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+let claimed = saturatingAdd(residentWeightBytes, activations, ramPrefixAllowanceBytes)
+return cap > claimed ? cap - claimed : 0
+}
+/// Live KV headroom in bytes: how many more bytes may be committed to KV
+/// *right now* without crossing the cap, given current MLX usage, clamped to
+/// real OS-free RAM and net of the activation reserve.
+///
+/// This is the runtime counterpart to ``kvBudgetBytes``: instead of
+/// subtracting a known Σweights, it subtracts `mlxUsedBytes` (MLX active +
+/// cache), which already reflects every co-resident model's weights AND its
+/// live/cached KV — so it is inherently multi-model with no per-model
+/// bookkeeping. The single per-request reservation gate and the per-scheduler
+/// live token budget both derive from this, which is what keeps them
+/// consistent (no competing reserve constants).
+///
+/// Uses the same ``hardCapBytes`` ceiling — including its 2 GiB absolute OS
+/// floor — as the load gate, so the floor is honored as KV GROWS during
+/// serving (the load gate only guarantees it at load time; KV expands after).
+/// On boxes above ~20 GiB the floor never binds and this equals
+/// `capFraction × physical − mlxUsed`. Cross-process safety additionally
+/// comes from the `systemAvailableBytes` clamp.
+public static func liveKVHeadroomBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+mlxUsedBytes: UInt64,
+systemAvailableBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let underCap = cap > mlxUsedBytes ? cap - mlxUsedBytes : 0
+let realFree = min(underCap, systemAvailableBytes)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+return realFree > activations ? realFree - activations : 0
+}
+/// Whether a new model of `candidateWeightBytes` may be admitted while
+/// `currentResidentWeightBytes` are already resident, leaving at least
+/// `minimumKVBytes` of KV headroom under the cap (a model that loads with no
+/// room to serve any KV is useless). Pure check; eviction is the caller's job.
+public static func canAdmit(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+currentResidentWeightBytes: UInt64,
+candidateWeightBytes: UInt64,
+minimumKVBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+ramPrefixAllowanceBytes: UInt64 = 0,
+capFraction: Double? = nil
+) -> Bool {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+let need = saturatingAdd(
+currentResidentWeightBytes, candidateWeightBytes,
+activations, ramPrefixAllowanceBytes, minimumKVBytes)
+return need <= cap
+}
+/// Effective reserve (bytes) the model-LOAD gate must hold back below total
+/// physical memory so that loading never pushes usage past the cap.
+///
+/// The load gate works in "free memory" terms (`total − used − reserve`), so
+/// to honor the cap its reserve must be at least `physical − hardCap` (the
+/// 10% / 2 GiB-floor the cap leaves the OS). It is also never LESS than the
+/// operator's configured reserve — whichever is more conservative wins. This
+/// is what makes the existing free-memory load gate enforce the 90% cap
+/// without a separate code path: hold back `max(configReserve, physical −
+/// hardCap)`.
+public static func loadReserveBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+configReserveBytes: UInt64,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let capImpliedReserve = physicalBytes > cap ? physicalBytes - cap : 0
+return max(configReserveBytes, capImpliedReserve)
+}
+// MARK: - Resolution (explicit → env → default)
+/// Cap fraction from explicit value, env `DARKBLOOM_MEM_CAP_FRACTION`
+/// (0–1), or the 0.90 default. A `<= 0` or non-finite env value is treated as
+/// UNSET (→ default), not clamped to 0: a degenerate `0` fraction would make
+/// `hardCapBytes == 0` and reject every request, silently bricking the
+/// provider from a single bad env var. An explicit programmatic value (tests)
+/// is still clamped as given. Values `> 1` clamp to 1.0.
+static func resolvedCapFraction(
+explicit: Double?,
+env: [String: String] = ProcessInfo.processInfo.environment
+) -> Double {
+if let explicit { return clampFraction(explicit) }
+if let raw = env["DARKBLOOM_MEM_CAP_FRACTION"], let v = Double(raw),
+v.isFinite, v > 0 {
+return clampFraction(v)
+}
+return defaultCapFraction
+}
+/// Activation reserve from explicit bytes, env
+/// `DARKBLOOM_ACTIVATION_RESERVE_GB` (GB), or the default floor. A `<= 0` or
+/// non-finite env value is treated as UNSET (→ the 3 GiB default floor): a
+/// `0` reserve would remove the activation headroom the cap exists to
+/// guarantee, so an operator can RAISE the reserve but not silently disable it
+/// via env. An explicit programmatic value (tests) is honored as given.
+static func resolvedActivationReserveBytes(
+explicit: UInt64? = nil,
+env: [String: String] = ProcessInfo.processInfo.environment
+) -> UInt64 {
+if let explicit { return explicit }
+if let raw = env["DARKBLOOM_ACTIVATION_RESERVE_GB"], let gb = Double(raw),
+gb.isFinite, gb > 0 {
+let scaled = gb * 1_073_741_824
+return scaled >= uint64MaxAsDouble ? UInt64.max : UInt64(scaled)
+}
+return defaultActivationReserveBytes
+}
+// MARK: - Helpers
+/// `Double(UInt64.max)` (exactly 2^64) — the saturation threshold so a
+/// `>= uint64MaxAsDouble` test catches every value that would trap on
+/// `UInt64(_:)` conversion. Mirrors ``MLXMemoryGuard``.
+static let uint64MaxAsDouble = Double(UInt64.max)
+private static func clampFraction(_ v: Double) -> Double {
+guard v.isFinite else { return defaultCapFraction }
+return min(1.0, max(0.0, v))
+}
+/// Multiply a byte count by a 0–1 fraction without overflow or a trapping
+/// Double round-trip.
+private static func scale(_ bytes: UInt64, by fraction: Double) -> UInt64 {
+let scaled = Double(bytes) * fraction
+if !scaled.isFinite || scaled <= 0 { return 0 }
+return scaled >= uint64MaxAsDouble ? UInt64.max : UInt64(scaled)
+}
+private static func saturatingAdd(_ values: UInt64...) -> UInt64 {
+var total: UInt64 = 0
+for v in values {
+let (sum, overflow) = total.addingReportingOverflow(v)
+total = overflow ? UInt64.max : sum
+}
+return total
+}
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 255-line pure policy enum with 15+ static methods could be simpler
+💡 Suggestion: Consider splitting into focused types (CapPolicy, LoadGate, KVBudget) or using a struct with computed properties instead of a large enum with only static methods
+📊 Score: 3×2 = 6 · Category: over-abstraction
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+Comment on lines
++584
+to
++658
+/// Decode-overhead multiplier over the raw RGBA raster (W*H*4). `CIImage`
+/// rasterization + the intermediate Swift `Data` in `MediaProcessing
+/// .asMLXArray` + the resampled MLX pixel-values tensor coexist briefly, so
+/// peak transient RAM is a few times the final raster. 4x is a conservative
+/// upper bound measured against the decode-bomb repro (16000^2 -> ~1.78 GB
+/// peak for a 256 MP = 1 GB raster ~= 1.7x; 4x leaves generous margin).
+static let decodeOverheadFactor = 4
+/// Projected PEAK unified-memory bytes the media decode of `request` will
+/// transiently consume, so the caller can RESERVE it against the 90% cap
+/// (GlobalKVCacheBudget) before rasterizing — these CIImage/Data buffers are
+/// NOT MLX arrays and are otherwise invisible to the cap. Estimated from
+/// HEADER pixel counts (no decode); when a header is unreadable the per-image
+/// cap is used as the worst case the media caps still admit.
+///
+/// The estimate is clamped to the SAME ceilings `validateMedia` enforces, so
+/// it can never exceed what a maximally-large *valid* request consumes:
+/// • image pixels are summed but clamped to the aggregate image cap
+/// (`maxRequestImagePixels`) — a single oversized image, or many
+/// unreadable-header images, can't project past the request-wide image
+/// ceiling validation guarantees;
+/// • videos are charged the aggregate per-request video-frame cap ONCE if
+/// any video is present — NOT per video. `validateMedia` bounds the SUM
+/// of all videos' frame pixels by `maxRequestVideoFramePixels`, so
+/// charging it per-video would over-reserve by the video count and could
+/// falsely 503 a valid multi-video request.
+/// Consequently an oversized/invalid request projects no more than a max
+/// valid one: on a saturated box both get a retryable 503 (and the invalid
+/// one resolves to its deterministic 400 once capacity frees), rather than
+/// the invalid request being singled out for a permanent 503.
+/// Saturating; never traps. Returns 0 for a request with no media.
+public static func projectedDecodeBytes(
+_ request: OpenAIChatCompletionRequest,
+maxImagePixels: Int = Self.maxImagePixels,
+maxRequestImagePixels: Int = Self.maxRequestImagePixels,
+maxRequestVideoFramePixels: Int = Self.maxRequestVideoFramePixels
+) -> UInt64 {
+var imagePixels: UInt64 = 0
+var hasVideo = false
+func addImagePixels(_ p: Int) {
+let (s, o) = imagePixels.addingReportingOverflow(UInt64(max(0, p)))
+imagePixels = o ? .max : s
+}
+for message in request.messages {
+guard case .parts(let parts) = message.content else { continue }
+for part in parts {
+switch part {
+case .imageURL(let uri):
+// Header read is O(header), ~0 RSS; fall back to the per-image
+// cap (the worst case the existing caps admit) if unreadable.
+if let data = try? dataFromDataURI(uri) {
+addImagePixels(imagePixelCount(data) ?? maxImagePixels)
+} else {
+addImagePixels(maxImagePixels)
+}
+case .videoURL:
+hasVideo = true
+case .text, .unsupported:
+continue
+}
+}
+}
+// Clamp images to the request-wide aggregate cap, then add the video
+// aggregate once. Both mirror validateMedia's ceilings exactly.
+var pixels = min(imagePixels, UInt64(max(0, maxRequestImagePixels)))
+if hasVideo {
+let (s, o) = pixels.addingReportingOverflow(UInt64(max(0, maxRequestVideoFramePixels)))
+pixels = o ? .max : s
+}
+// RGBA (4 bytes/px) x decode overhead. Saturating.
+let (rgba, o1) = pixels.multipliedReportingOverflow(by: 4)
+let bytes = o1 ? UInt64.max : rgba
+let (total, o2) = bytes.multipliedReportingOverflow(by: UInt64(decodeOverheadFactor))
+return o2 ? UInt64.max : total
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 projectedDecodeBytes duplicates validation logic from validateMedia
+💡 Suggestion: Extract shared pixel counting/capping logic into a helper function used by both projectedDecodeBytes and validateMedia
+📊 Score: 2×3 = 6 · Category: duplicate logic
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift
+Comment on lines
+1520
+to
++1577
+/// Reserve unified memory for a VLM (vision-path) request against the shared
+/// 90% cap, via the process-wide GlobalKVCacheBudget this scheduler holds. A
+/// vision request bypasses the batched `submitTokenized` reservation entirely
+/// — it streams through `container.generate` directly — so without this it
+/// commits TWO kinds of memory the cap would otherwise track only reactively:
+///
+/// 1. `mediaDecodeBytes` — the transient CIImage rasters + Swift `Data` pixel
+/// buffers from media decode. These are NOT MLXArrays, so they are
+/// invisible to the cap's live MLX counters (the original blind spot).
+/// 2. The generation KV cache — `kvBytesPerToken × maxOutputTokens`. This IS
+/// MLXArray-backed (eventually visible to the live counters), but the
+/// vision path's decode loop runs in a detached task with no per-request
+/// reservation, so N concurrent media requests can grow KV simultaneously
+/// against headroom none of them reserved — a transient over-commit the
+/// cap would otherwise catch only on the NEXT admission. Reserving it up
+/// front makes the vision path share the same preemptive 90% gate the
+/// batched path gets from `reserveKVForRequest`.
+///
+/// Both are charged to ONE reservation id and released together when the
+/// stream ends (decode buffers are actually freed after `prepare`, so holding
+/// them for the whole stream is conservative — never an under-reservation).
+/// Returns true if it fits (and was reserved) or budgeting is disabled
+/// (nil budget, legacy "always proceed"); false if it would exceed the cap,
+/// in which case the caller surfaces a retryable 503. Pair with
+/// `releaseVisionRequest`. Saturating; never traps.
+public func reserveVisionRequest(
+requestId: String, mediaDecodeBytes: UInt64, kvTokens: Int
+) async -> Bool {
+guard let kvBudget else { return true }
+// KV bytes = kvBytesPerToken × the FULL token span the cache will hold:
+// prompt text + image/video soft tokens + generated output (the caller
+// computes that conservative total). Reserving only the output tokens
+// would badly under-count — a single image expands to hundreds of vision
+// tokens, all of which occupy KV.
+var genKVBytes: UInt64 = 0
+if kvBytesPerToken > 0, kvTokens > 0 {
+let (b, overflow) = UInt64(kvBytesPerToken)
+.multipliedReportingOverflow(by: UInt64(kvTokens))
+genKVBytes = overflow ? .max : b
+}
+let (total, overflow) = mediaDecodeBytes.addingReportingOverflow(genKVBytes)
+let bytes = overflow ? UInt64.max : total
+return await kvBudget.reserveBytes(requestID: requestId, bytes: bytes)
+}
+/// The model's configured context window (`max_position_embeddings`), or 0 if
+/// unknown. The KV cache can never hold more than this many prompt+vision
+/// tokens, so the vision-path reservation clamps its prompt+vision estimate to
+/// it (output tokens are added on top, matching the batched path's
+/// `promptTokenCount + maxTokens`).
+public func contextLength() -> Int { maxContextLength }
+/// Release a prior `reserveVisionRequest` reservation. Safe/no-op if unknown
+/// or budgeting is disabled.
+public func releaseVisionRequest(requestId: String) async {
+await kvBudget?.release(requestID: requestId)
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 Vision request reservation logic in BatchScheduler mixes concerns
+💡 Suggestion: Move VLM-specific reservation logic to VLMRequestInference or a dedicated VLMReservationManager to keep BatchScheduler focused on batch scheduling
+📊 Score: 2×2 = 4 · Category: misplaced responsibility
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift
+Comment on lines
+202
+to
+271
+// the generation task would let the HTTP layer commit a 200 first.)
+// Reserve this vision request's unified memory against the 90% cap
+// BEFORE rasterizing. The vision path bypasses the batched
+// `submitTokenized` reservation, so it commits two kinds of memory the
+// cap would otherwise track only reactively: (1) the media-decode RAM
+// — CIImage rasters + Swift Data pixel buffers, which are NOT MLX
+// arrays and so are invisible to the cap's live MLX counters; (2) the
+// generation KV cache (kvBytesPerToken × maxOutputTokens), which IS
+// MLXArray-backed but grows in a detached decode task with no
+// per-request reservation, so N concurrent media requests can
+// over-commit it against unreserved headroom. Reserving both up front
+// gives the vision path the same preemptive gate the batched path has;
+// if it won't fit we reject with a retryable error instead of OOMing.
+// Released on every exit.
+let mediaReqId = "vlm-\(UUID().uuidString.prefix(12))"
+let projectedBytes = VLMRequestInference.projectedDecodeBytes(request)
+// Full KV-token span the vision cache will hold: prompt text + image/
+// video soft tokens + generated output (clamped to the context). The
+// vision path bypasses the batched KV reservation, so charging only the
+// output tokens would under-count the prompt + vision tokens that also
+// occupy KV.
+let kvTokens = VLMRequestInference.projectedKVTokens(
+request, defaultMaxTokens: defaultMaxTokens,
+contextLength: await scheduler.contextLength())
+let mediaReserved = await scheduler.reserveVisionRequest(
+requestId: mediaReqId, mediaDecodeBytes: projectedBytes,
+kvTokens: kvTokens)
+if !mediaReserved {
+await releaseBox.fire()
+let mib = projectedBytes / (1024 * 1024)
+throw MultiModelBatchSchedulerEngineError.tokenBudgetExhausted(
+"insufficient global kv cache headroom for vision request "
++ "(media decode ~\(mib) MiB + generation KV) — retry after capacity frees")
+}
+do {
+try await VLMRequestInference.validateMedia(request)
+} catch {
+await scheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+throw error
+}
+let vlmStream = VLMRequestInference.stream(
+container: container, request: request, defaultMaxTokens: defaultMaxTokens)
+// Capture the scheduler so the stream task can release the media
+// reservation; `scheduler` is Sendable (an actor reference).
+let mediaReleaseScheduler = scheduler
+return AsyncThrowingStream { continuation in
+let task = Task {
+do {
+for try await event in vlmStream {
+if Task.isCancelled { break }
+continuation.yield(event)
+}
+await mediaReleaseScheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+continuation.finish()
+} catch {
+await mediaReleaseScheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+continuation.finish(throwing: error)
+}
+}
+continuation.onTermination = { @Sendable _ in
+task.cancel()
+Task { await releaseBox.fire() }
+Task {
+await mediaReleaseScheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+}
+}
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] 🧩 Vision reservation/release pattern repeated 4 times with identical error handling
+💡 Suggestion: Extract a helper method like withVisionReservation(requestId, bytes, kvTokens) { ... } that handles the reserve/release lifecycle and error cleanup
+📊 Score: 3×4 = 12 · Category: duplicate logic
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/GlobalKVCacheBudget.swift
+Comment on lines
++64
+to
++97
+/// Reserve an arbitrary BYTE amount against the same live cap headroom KV
+/// uses. For non-KV unified-memory consumers that the cap would otherwise be
+/// blind to — notably VLM media decode (CIImage rasters + Swift Data pixel
+/// buffers live in the same unified RAM as MLX arrays but are NOT counted by
+/// MLX.GPU.active/cache). Reserving here makes those bytes share the 90% cap:
+/// the decode is admitted only if it fits alongside resident weights + KV +
+/// activations, and rejected (caller surfaces 429/retry) otherwise. Returns
+/// false if it won't fit or the id is already reserved. Pair with `release`.
+public func reserveBytes(requestID: String, bytes: UInt64) -> Bool {
+guard bytes > 0 else { return false }
+guard reservations[requestID] == nil else { return false }
+if bytes > availableReservationBytes() { return false }
+reservations[requestID] = bytes
+return true
+}
+/// Reserve a loading model's WEIGHT footprint for the duration of its load,
+/// unconditionally. A model's weights are not yet visible in MLX active/cache
+/// while `loadModelContainer` is still allocating them, so a KV reservation
+/// granted on an ALREADY-loaded model during that window would compute its
+/// headroom blind to the incoming weights and could push total usage past the
+/// cap — a transient OOM on the normal serve-while-load path. Reserving the
+/// footprint here makes those in-flight weights visible to `reserve` /
+/// `reserveBytes`, so concurrent KV can only claim `headroom − weights`.
+///
+/// Unconditional (never fails): the load gate has already admitted the model,
+/// so this is bookkeeping for the load that WILL happen, not a second gate.
+/// It reserves only the weight estimate, so concurrent KV that still fits
+/// underneath is admitted; only reservations that would over-commit are
+/// rejected (caller surfaces 429/retry). Released once the weights are
+/// resident (and thus reflected in `mlxUsed`). Pair with `release`.
+public func reservePendingLoad(requestID: String, bytes: UInt64) {
+guard bytes > 0 else { return }
+reservations[requestID] = bytes
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 Three similar reservation methods (reserve, reserveBytes, reservePendingLoad) with overlapping logic
+💡 Suggestion: Consolidate into a single reserveInternal method with a reservation type enum, or use a common ReservationRequest struct
+📊 Score: 2×3 = 6 · Category: over-abstraction
+chatgpt-codex-connector
+Bot
+reviewed
+Jun 16, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 478fa1ec8a
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+provider-swift/Sources/ProviderCore/Server/StandaloneServer.swift
+Comment on lines
+541
+to
++545
+requiredGb: ModelLoadAdmission.requiredToLoadGb(
+weightsGb: modelInfo.estimatedMemoryGb,
+headroomGb: ModelLoadAdmission.defaultLoadHeadroomGb)
+// Cap-aware: activation reserve + min serveable KV, so a model
+// that loads can actually serve (matches the runtime KV gate).
+headroomGb: Double(UnifiedMemoryCap.loadHeadroomBytes()) / (1024.0 * 1024.0 * 1024.0))
+chatgpt-codex-connector
+Bot
+Jun 16, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reserve standalone loads in the KV budget while loading
+In standalone/local mode, this cap-aware admission is followed by loadContainer/buildLoadedScheduler awaits without mirroring ProviderLoop's new kvBudget.reservePendingLoad bookkeeping. Because the actor is reentrant and acquireModel returns immediately for already-loaded models during those awaits, a request on a resident model can reserve KV against headroom that does not include the incoming model's weights until MLX counters update, so serve-while-load can still overcommit the 90% cap in standalone mode.
+Useful? React with 👍 / 👎.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+case .parts(let parts):
+for part in parts {
+switch part {
+case .text(let s): add(s.utf8.count / textCharsPerToken)
+chatgpt-codex-connector
+Bot
+Jun 16, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Round up VLM text-token estimates
+For multimodal requests with many short text parts, this floors each fragment independently, so 1–2 byte fragments contribute zero prompt tokens. The new vision reservation then covers only the vision/output portion while the actual prompt text still creates KV during container.generate, letting such requests pass the cap gate with an under-sized reservation; use a ceiling estimate or concatenate text before dividing.
+Useful? React with 👍 / 👎.
+Comment thread
+provider-swift/Sources/ProviderCore/ProviderLoop.swift
+pendingLoadGiB.isFinite && pendingLoadGiB > 0
+? (pendingLoadGiB >= Double(UInt64.max) ? .max : UInt64(pendingLoadGiB))
+: 0
+await kvBudget.reservePendingLoad(requestID: pendingLoadID, bytes: pendingLoadBytes)
+chatgpt-codex-connector
+Bot
+Jun 16, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Don't fast-reject requests for the model already loading
+Once this pending-load reservation is inserted, availableMemoryGb() subtracts the loading model's weights. A second request for the same cold model can arrive while loadModelContainer is still awaiting; fastAdmissionReject sees no modelSlots[modelId] yet and no modelsLoading exemption, so it can conclude there isn't enough memory to load the model and return a 503/reroute even though the first load is in progress and ensureModelLoaded would just wait for it to finish.
+Useful? React with 👍 / 👎.
+fix(memory): honor operator memory_reserve_gb in the live KV gate (Co…
+…
+023460f
+```
+…dex P2)
+
+The runtime GlobalKVCacheBudget derived its ceiling from the 90% cap only, so a
+configured memory_reserve_gb larger than the cap's implied reserve (physical-cap)
+was honored by the load gate (loadReserveBytes = max(configReserve, physical-cap))
+but NOT at runtime: long generations could grow KV up to the cap and consume the
+memory the operator reserved, reintroducing the OS-pressure/OOM the reserve
+prevents (notably on 24-32 GB Macs where the 4 GiB default exceeds the cap's 10%).
+
+liveKVHeadroomBytes now takes configReserveBytes and uses an effective cap of
+min(hardCap, physical - configReserve); GlobalKVCacheBudget carries it and the
+ProviderLoop budget is built with the operator reserve, so the load gate and the
+live gate hold back the same memory. No-op when configReserve <= physical - cap.
+Adds a regression test.
+
+Co-authored-by: anupsv <6407789+anupsv@users.noreply.github.com>
+```
+Gajesh2007
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Member
+Looked at both Codex P2s:
+1. memory_reserve_gb ignored by the live KV gate — FIXED (023460fd). Real gap: the load gate held back max(configReserve, physical−cap) but the runtime GlobalKVCacheBudget used the bare 90% cap, so after a model loaded, long generations could grow KV into the operator's reserve (e.g. the 4 GiB default on a 24–32 GB Mac, which exceeds the cap's ~10%). liveKVHeadroomBytes now takes configReserveBytes and uses an effective cap of min(hardCap, physical − configReserve); the budget is constructed with the operator reserve so load gate and live gate hold back the same memory. Regression test added. No-op when configReserve ≤ physical − cap.
+2. Prefix-cache RAM under the cap — already enforced at runtime; static budget is planning-only. PrefixCacheRAM holds live MLXArrays, so retained prefix KV IS in Memory.active+cache (mlxUsed). The live gate (GlobalKVCacheBudget.availableReservationBytes → liveKVHeadroomBytes(mlxUsed)) therefore already subtracts prefix KV before admitting any active reservation — so weights + active KV + prefix KV + activations can't exceed the cap at the enforcement layer. The flagged kvBudgetBytes call only sizes the static dynamicTokenBudgetMax (per-scheduler planning), which the live gate backstops; its comment already says cross-consumer headroom is handled live. So this isn't a hard OOM gap. The clean improvement (so planning matches enforcement and prefix retention is itself gated) is to gate the prefix store on the live headroom rather than its own physical/8 budget — I'd suggest that as a follow-up rather than statically reserving physical/8 (which would cut active-KV concurrency on small boxes). Happy to do it if you want it in this PR.
+Gajesh2007
+had a problem deploying
+to
+benchmarks
+June 16, 2026 23:14 — with
+GitHub Actions
+Failure
+vercel
+Bot
+deployed
+to
+Preview – d-inference-landing
+June 16, 2026 23:14
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference-console-ui-dev
+June 16, 2026 23:14
+View deployment
+vercel
+Bot
+deployed
+to
+Preview – d-inference
+June 16, 2026 23:14
+View deployment
+ethenotethan
+requested changes
+Jun 16, 2026
+View reviewed changes
+ethenotethan
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated Code Review — Layr-Labs/d-inference#
+Verdict: REQUEST_CHANGES
+Security — 2 finding(s)
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift:207-225 — Environment variable parsing lacks bounds checking for activation reserve
+Suggestion: Add explicit bounds checking for DARKBLOOM_ACTIVATION_RESERVE_GB to prevent potential integer overflow or excessive memory allocation
+🔵 [INFO] provider-swift/Sources/ProviderCore/KVCache/EncryptedPrefixCachePersistence.swift:91-96 — DEBUG-only test hook could be exploited in debug builds
+Suggestion: Consider removing the test hook or adding additional safety checks to prevent misuse in debug environments
+Performance — 6 finding(s) (3 blocking)
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift:47-54 — Redundant MLX memory queries in tokenBudgetMax computed on every call
+Suggestion: Cache MLX.GPU.activeMemory and MLX.GPU.cacheMemory values or compute once per request batch rather than on every tokenBudgetMax access
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift:65-69 — Duplicate MLX memory queries in measuredLiveKVHeadroomBytes
+Suggestion: Share MLX memory readings between tokenBudgetMax and measuredLiveKVHeadroomBytes when called in sequence
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift:1488-1500 — Integer division in hot path without pre-computed reciprocal
+Suggestion: Pre-compute reciprocal of kvBytesPerToken if it's stable, or cache the division result when kvBytesPerToken doesn't change frequently
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/GlobalKVCacheBudget.swift:139-156 — Complex UnifiedMemoryCap calculation repeated on every reservation
+Suggestion: Cache UnifiedMemoryCap.liveKVHeadroomBytes result for a short duration or until memory state changes significantly
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:625-657 — Repeated string processing and arithmetic in projectedDecodeBytes
+Suggestion: Cache intermediate calculations like pixel counts and use more efficient string processing for data URI parsing
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift:210-230 — Multiple calls to scheduler.contextLength() and projectedKVTokens calculations
+Suggestion: Cache contextLength result and compute projectedKVTokens once rather than potentially multiple times in error paths
+Type_diligence — 1 finding(s)
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:95 — Function returns any type instead of specific type
+Suggestion: Consider returning a more specific type than any if the return type is known at compile time
+Additive_complexity — 5 finding(s) (1 blocking)
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift:1-265 — 265-line pure policy enum with 15+ static methods could be simpler
+Suggestion: Consider splitting into focused types (CapPolicy, LoadGate, KVBudget) or using a struct with computed properties instead of a large enum with only static methods
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift:514-658 — projectedDecodeBytes duplicates validation logic from validateMedia
+Suggestion: Extract shared pixel counting and capping logic into helper methods to avoid maintaining the same constraints in two places
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift:1520-1577 — Vision request reservation logic in BatchScheduler mixes concerns
+Suggestion: Move VLM-specific reservation logic to VLMRequestInference or create a dedicated VisionMemoryManager to separate concerns
+🔵 [INFO] provider-swift/Sources/ProviderCore/Inference/GlobalKVCacheBudget.swift:74-137 — Three similar reservation methods with overlapping validation
+Suggestion: Consolidate reserveBytes, reservePendingLoad, and reserve into a single parameterized method to reduce code duplication
+🟡 [MEDIUM] provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift:202-272 — Vision request handling adds 70 lines of reservation/cleanup logic to stream creation
+Suggestion: Extract vision reservation handling into a separate helper class to reduce the complexity of the stream creation method
+14 finding(s) total, 4 blocking. Verdict: REQUEST_CHANGES.
+🤖 Automated review by Centaur · DAR-186
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift
+Comment on lines
++207
+to
++225
+explicit: Double?,
+env: [String: String] = ProcessInfo.processInfo.environment
+) -> Double {
+if let explicit { return clampFraction(explicit) }
+if let raw = env["DARKBLOOM_MEM_CAP_FRACTION"], let v = Double(raw),
+v.isFinite, v > 0 {
+return clampFraction(v)
+}
+return defaultCapFraction
+}
+/// Activation reserve from explicit bytes, env
+/// `DARKBLOOM_ACTIVATION_RESERVE_GB` (GB), or the default floor. A `<= 0` or
+/// non-finite env value is treated as UNSET (→ the 3 GiB default floor): a
+/// `0` reserve would remove the activation headroom the cap exists to
+/// guarantee, so an operator can RAISE the reserve but not silently disable it
+/// via env. An explicit programmatic value (tests) is honored as given.
+static func resolvedActivationReserveBytes(
+explicit: UInt64? = nil,
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🔒 Environment variable parsing lacks bounds checking for activation reserve
+💡 Suggestion: Add explicit bounds checking for DARKBLOOM_ACTIVATION_RESERVE_GB to prevent potential integer overflow or excessive memory allocation
+📊 Score: 2×3 = 6 · Category: missing-input-validation
+Comment thread
+provider-swift/Sources/ProviderCore/KVCache/EncryptedPrefixCachePersistence.swift
+Comment on lines
++91
+to
++96
+/// letting a test simulate an unload (`purgeDir()` → closed + removeItem(dir))
+/// racing this in-flight write. The subsequent writeSync then re-creates the
+/// dir and lands the file (the exact production race), and the post-write
+/// `closed` re-check must clean it up. Mirrors the checkpoint tier's seam.
+var _beforeWriteHookForTest: (@Sendable () -> Void)?
+#endif
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🔒 DEBUG-only test hook could be exploited in debug builds
+💡 Suggestion: Consider removing the test hook or adding additional safety checks to prevent misuse in debug environments
+📊 Score: 3×2 = 6 · Category: missing-input-validation
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift
+Comment on lines
++47
+to
+54
+let mlxUsed = UInt64(max(0, MLX.GPU.activeMemory)) + UInt64(max(0, MLX.GPU.cacheMemory))
+let headroomBytes = UnifiedMemoryCap.liveKVHeadroomBytes(
+mlxUsedBytes: mlxUsed,
+systemAvailableBytes: SystemMemory.availableBytes() ?? .max)
+let availableHeadroom = Int(min(headroomBytes, UInt64(Int.max)))
+let liveBudget = activeTokenBudgetUsed + (availableHeadroom / kvBytesPerToken)
+return max(1024, min(staticBudget, liveBudget))
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] ⚡ Redundant MLX memory queries in tokenBudgetMax computed on every call
+💡 Suggestion: Cache MLX.GPU.activeMemory and MLX.GPU.cacheMemory values or compute once per request batch rather than on every tokenBudgetMax access
+📊 Score: 3×4 = 12 · Category: Repeated work
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift
+Comment on lines
++65
+to
++69
+return UnifiedMemoryCap.liveKVHeadroomBytes(
+mlxUsedBytes: mlxUsed,
+systemAvailableBytes: SystemMemory.availableBytes() ?? .max)
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] ⚡ Duplicate MLX memory queries in measuredLiveKVHeadroomBytes
+💡 Suggestion: Share MLX memory readings between tokenBudgetMax and measuredLiveKVHeadroomBytes when called in sequence
+📊 Score: 2×4 = 8 · Category: Repeated work
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift
+Comment on lines
++1488
+to
+1500
+// Static upper-bound budget from the unified 90% cap minus THIS model's
+// measured resident weights (snapshot.bytes) and the activation reserve.
+// Only the per-model clamp; cross-model headroom (other resident models'
+// weights/KV) is handled live by tokenBudgetMax / the shared
+// GlobalKVCacheBudget, which read process-global MLX usage.
+let availableForKV = UnifiedMemoryCap.kvBudgetBytes(
+residentWeightBytes: UInt64(max(0, snapshot.bytes)))
+if availableForKV > 0 && kvBytesPerToken > 0 {
+self.dynamicTokenBudgetMax = max(availableForKV / kvBytesPerToken, 1024)
+let availInt = Int(min(availableForKV, UInt64(Int.max)))
+self.dynamicTokenBudgetMax = max(availInt / kvBytesPerToken, 1024)
+} else {
+self.dynamicTokenBudgetMax = 1024
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] ⚡ Integer division in hot path without pre-computed reciprocal
+💡 Suggestion: Pre-compute reciprocal of kvBytesPerToken if it's stable, or cache the division result when kvBytesPerToken doesn't change frequently
+📊 Score: 2×3 = 6 · Category: Inefficient data structures
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift
+Comment on lines
++210
+to
++230
+// MLXArray-backed but grows in a detached decode task with no
+// per-request reservation, so N concurrent media requests can
+// over-commit it against unreserved headroom. Reserving both up front
+// gives the vision path the same preemptive gate the batched path has;
+// if it won't fit we reject with a retryable error instead of OOMing.
+// Released on every exit.
+let mediaReqId = "vlm-\(UUID().uuidString.prefix(12))"
+let projectedBytes = VLMRequestInference.projectedDecodeBytes(request)
+// Full KV-token span the vision cache will hold: prompt text + image/
+// video soft tokens + generated output (clamped to the context). The
+// vision path bypasses the batched KV reservation, so charging only the
+// output tokens would under-count the prompt + vision tokens that also
+// occupy KV.
+let kvTokens = VLMRequestInference.projectedKVTokens(
+request, defaultMaxTokens: defaultMaxTokens,
+contextLength: await scheduler.contextLength())
+let mediaReserved = await scheduler.reserveVisionRequest(
+requestId: mediaReqId, mediaDecodeBytes: projectedBytes,
+kvTokens: kvTokens)
+if !mediaReserved {
+await releaseBox.fire()
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] ⚡ Multiple calls to scheduler.contextLength() and projectedKVTokens calculations
+💡 Suggestion: Cache contextLength result and compute projectedKVTokens once rather than potentially multiple times in error paths
+📊 Score: 2×3 = 6 · Category: Repeated work
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+@@ -95,11 +95,81 @@ public enum VLMRequestInference {
+/// effect on image/video (VLM) requests, matching the text/batched engine.
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🏷️ Function returns any type instead of specific type
+💡 Suggestion: Consider returning a more specific type than any if the return type is known at compile time
+📊 Score: 2×1 = 2 · Category: bare_interface
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/UnifiedMemoryCap.swift
+Comment on lines
++1
+to
++265
+import Foundation
+/// Single source of truth for the provider's unified-memory budget.
+///
+/// The invariant the whole provider enforces is:
+///
+/// Σ(resident model weights) + KV cache + activations ≤ hardCapBytes
+///
+/// where `hardCapBytes` is a fixed fraction (default 90%) of physical unified
+/// memory. Everything else — which models may be co-resident, when one is
+/// evicted, and how much memory KV cache may use — is derived from this one
+/// number. The policy is general: it makes no assumption about WHICH models are
+/// loaded or HOW MANY; it works for one model, two, or N.
+///
+/// This type is PURE POLICY: it reads no MLX globals and mutates nothing, so it
+/// is fully unit-testable and safe to call from any context. Enforcement (load
+/// admission, the KV reservation budget) consults these figures; MLX's own
+/// `memoryLimit` is a soft guideline that cannot enforce the cap on its own
+/// (the Metal allocator frees cache and then allocates past the byte limit
+/// anyway — only the resource COUNT limit throws), so the cap lives here in the
+/// admission layer, not in an MLX setting. See ``MLXMemoryGuard`` for the soft
+/// MLX ceiling we still pin as defense-in-depth.
+public enum UnifiedMemoryCap {
+/// Fraction of physical unified memory the provider may use for EVERYTHING
+/// (weights + KV + activations). The remaining `1 − fraction` is left for
+/// macOS and non-MLX processes. Default 0.90.
+public static let defaultCapFraction: Double = 0.90
+/// Absolute floor on the reserve held back for the OS, so a small box never
+/// hands almost all of RAM to the provider. The percentage reserve and this
+/// floor cross over at `minReserve / (1 − fraction)` — with the 0.90 default
+/// that is 2 GiB / 0.10 = 20 GiB: above 20 GiB the 10% fraction reserve
+/// dominates and this floor never binds; at/below it, this floor protects the
+/// OS (e.g. an 8 GiB box gets a 6 GiB cap, not 7.2 GiB).
+static let minimumReserveBytes: UInt64 = 2 * 1024 * 1024 * 1024 // 2 GiB
+/// Default activation/working-memory reserve carved out INSIDE the cap.
+///
+/// Measured on M5 Max (Gemma-4-26B-qat-4bit + GPT-OSS-20B, both MoE): a
+/// 4-concurrent ~3000-token long-prefill burst moved RSS by only ~9 MB over
+/// the resident-weight baseline — MoE activates few experts, MLX fuses
+/// attention, and intermediates churn through the (count-bounded) buffer
+/// cache rather than growing the live set. So activations are small in
+/// practice; this is a conservative SAFETY FLOOR, not a per-batch estimate.
+static let defaultActivationReserveBytes: UInt64 = 3 * 1024 * 1024 * 1024 // 3 GiB
+/// Minimum KV headroom (bytes) a freshly-loaded model must have under the cap
+/// to be worth loading — a model that loads but can serve no KV is useless.
+/// Small (1 GiB): the load gate only needs to guarantee the model can serve
+/// at least a modest request; concurrency beyond that is sized at runtime.
+static let minimumLoadKVBytes: UInt64 = 1 * 1024 * 1024 * 1024 // 1 GiB
+/// The post-load guard decision, as a pure function so it's unit-testable
+/// (the BatchScheduler accessor that feeds it reads real MLX globals). A
+/// freshly-loaded model is serveable iff its MEASURED live KV headroom (taken
+/// AFTER trimming the cold-load buffer cache) is at least the minimum
+/// serveable KV. Below that, the caller unloads + rejects rather than keep a
+/// model whose every request the KV gate would reject.
+public static func loadIsServeable(measuredLiveKVHeadroomBytes: UInt64) -> Bool {
+measuredLiveKVHeadroomBytes >= minimumLoadKVBytes
+}
+/// Headroom (bytes) the model-LOAD gate must require ABOVE the weights, so a
+/// model that passes the gate can actually serve. The runtime KV path carves
+/// out the activation reserve and then needs some KV room; the load gate must
+/// reserve at least that much too, or it admits a model `GlobalKVCacheBudget`
+/// then rejects every request for (the load gate's old flat 2 GiB one-request
+/// headroom was LESS than the 3 GiB activation reserve, so a near-cap model
+/// loaded with zero serveable KV). Returns
+/// `activationReserve + minimumLoadKV`.
+public static func loadHeadroomBytes(
+activationReserveBytes: UInt64? = nil
+) -> UInt64 {
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+return saturatingAdd(activations, minimumLoadKVBytes)
+}
+// MARK: - Cap
+/// The hard cap in bytes: `min(fraction × physical, physical − minReserve)`.
+/// Never exceeds physical and always leaves at least `minimumReserveBytes`.
+public static func hardCapBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+capFraction: Double? = nil
+) -> UInt64 {
+let fraction = resolvedCapFraction(explicit: capFraction)
+let byFraction = scale(physicalBytes, by: fraction)
+// Never leave less than the absolute OS floor.
+let byFloor = physicalBytes > minimumReserveBytes
+? physicalBytes - minimumReserveBytes
+: 0
+return min(byFraction, byFloor)
+}
+/// Bytes available for KV cache after subtracting all resident model weights,
+/// the activation reserve, and any RAM-resident prefix-cache allowance, from
+/// the hard cap. Clamps to 0 — never returns a negative budget.
+///
+/// This is the core of the policy: `cap − Σweights − activations − ramPrefix`.
+/// It is recomputed whenever a model loads or unloads, so it rises as models
+/// leave and shrinks as they join, with no special-casing of model count.
+public static func kvBudgetBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+residentWeightBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+ramPrefixAllowanceBytes: UInt64 = 0,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+let claimed = saturatingAdd(residentWeightBytes, activations, ramPrefixAllowanceBytes)
+return cap > claimed ? cap - claimed : 0
+}
+/// Live KV headroom in bytes: how many more bytes may be committed to KV
+/// *right now* without crossing the cap, given current MLX usage, clamped to
+/// real OS-free RAM and net of the activation reserve.
+///
+/// This is the runtime counterpart to ``kvBudgetBytes``: instead of
+/// subtracting a known Σweights, it subtracts `mlxUsedBytes` (MLX active +
+/// cache), which already reflects every co-resident model's weights AND its
+/// live/cached KV — so it is inherently multi-model with no per-model
+/// bookkeeping. The single per-request reservation gate and the per-scheduler
+/// live token budget both derive from this, which is what keeps them
+/// consistent (no competing reserve constants).
+///
+/// Uses the same ``hardCapBytes`` ceiling — including its 2 GiB absolute OS
+/// floor — as the load gate, so the floor is honored as KV GROWS during
+/// serving (the load gate only guarantees it at load time; KV expands after).
+/// On boxes above ~20 GiB the floor never binds and this equals
+/// `capFraction × physical − mlxUsed`. Cross-process safety additionally
+/// comes from the `systemAvailableBytes` clamp.
+public static func liveKVHeadroomBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+mlxUsedBytes: UInt64,
+systemAvailableBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+configReserveBytes: UInt64 = 0,
+capFraction: Double? = nil
+) -> UInt64 {
+// Honor an operator-configured reserve (`memory_reserve_gb`) that is
+// larger than the cap's own implied OS reserve (`physical − cap`), so the
+// runtime KV gate holds back the SAME memory the load gate does
+// (`loadReserveBytes = max(configReserve, physical − cap)`). Without this,
+// serving could grow KV up to the 90% cap and consume memory the operator
+// explicitly reserved, reintroducing the OS-pressure/OOM the reserve
+// exists to prevent. No-op when `configReserve ≤ physical − cap`.
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let reserveFloor = physicalBytes > configReserveBytes ? physicalBytes - configReserveBytes : 0
+let effectiveCap = min(cap, reserveFloor)
+let underCap = effectiveCap > mlxUsedBytes ? effectiveCap - mlxUsedBytes : 0
+let realFree = min(underCap, systemAvailableBytes)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+return realFree > activations ? realFree - activations : 0
+}
+/// Whether a new model of `candidateWeightBytes` may be admitted while
+/// `currentResidentWeightBytes` are already resident, leaving at least
+/// `minimumKVBytes` of KV headroom under the cap (a model that loads with no
+/// room to serve any KV is useless). Pure check; eviction is the caller's job.
+public static func canAdmit(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+currentResidentWeightBytes: UInt64,
+candidateWeightBytes: UInt64,
+minimumKVBytes: UInt64,
+activationReserveBytes: UInt64? = nil,
+ramPrefixAllowanceBytes: UInt64 = 0,
+capFraction: Double? = nil
+) -> Bool {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let activations = activationReserveBytes ?? resolvedActivationReserveBytes()
+let need = saturatingAdd(
+currentResidentWeightBytes, candidateWeightBytes,
+activations, ramPrefixAllowanceBytes, minimumKVBytes)
+return need <= cap
+}
+/// Effective reserve (bytes) the model-LOAD gate must hold back below total
+/// physical memory so that loading never pushes usage past the cap.
+///
+/// The load gate works in "free memory" terms (`total − used − reserve`), so
+/// to honor the cap its reserve must be at least `physical − hardCap` (the
+/// 10% / 2 GiB-floor the cap leaves the OS). It is also never LESS than the
+/// operator's configured reserve — whichever is more conservative wins. This
+/// is what makes the existing free-memory load gate enforce the 90% cap
+/// without a separate code path: hold back `max(configReserve, physical −
+/// hardCap)`.
+public static func loadReserveBytes(
+physicalBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
+configReserveBytes: UInt64,
+capFraction: Double? = nil
+) -> UInt64 {
+let cap = hardCapBytes(physicalBytes: physicalBytes, capFraction: capFraction)
+let capImpliedReserve = physicalBytes > cap ? physicalBytes - cap : 0
+return max(configReserveBytes, capImpliedReserve)
+}
+// MARK: - Resolution (explicit → env → default)
+/// Cap fraction from explicit value, env `DARKBLOOM_MEM_CAP_FRACTION`
+/// (0–1), or the 0.90 default. A `<= 0` or non-finite env value is treated as
+/// UNSET (→ default), not clamped to 0: a degenerate `0` fraction would make
+/// `hardCapBytes == 0` and reject every request, silently bricking the
+/// provider from a single bad env var. An explicit programmatic value (tests)
+/// is still clamped as given. Values `> 1` clamp to 1.0.
+static func resolvedCapFraction(
+explicit: Double?,
+env: [String: String] = ProcessInfo.processInfo.environment
+) -> Double {
+if let explicit { return clampFraction(explicit) }
+if let raw = env["DARKBLOOM_MEM_CAP_FRACTION"], let v = Double(raw),
+v.isFinite, v > 0 {
+return clampFraction(v)
+}
+return defaultCapFraction
+}
+/// Activation reserve from explicit bytes, env
+/// `DARKBLOOM_ACTIVATION_RESERVE_GB` (GB), or the default floor. A `<= 0` or
+/// non-finite env value is treated as UNSET (→ the 3 GiB default floor): a
+/// `0` reserve would remove the activation headroom the cap exists to
+/// guarantee, so an operator can RAISE the reserve but not silently disable it
+/// via env. An explicit programmatic value (tests) is honored as given.
+static func resolvedActivationReserveBytes(
+explicit: UInt64? = nil,
+env: [String: String] = ProcessInfo.processInfo.environment
+) -> UInt64 {
+if let explicit { return explicit }
+if let raw = env["DARKBLOOM_ACTIVATION_RESERVE_GB"], let gb = Double(raw),
+gb.isFinite, gb > 0 {
+let scaled = gb * 1_073_741_824
+return scaled >= uint64MaxAsDouble ? UInt64.max : UInt64(scaled)
+}
+return defaultActivationReserveBytes
+}
+// MARK: - Helpers
+/// `Double(UInt64.max)` (exactly 2^64) — the saturation threshold so a
+/// `>= uint64MaxAsDouble` test catches every value that would trap on
+/// `UInt64(_:)` conversion. Mirrors ``MLXMemoryGuard``.
+static let uint64MaxAsDouble = Double(UInt64.max)
+private static func clampFraction(_ v: Double) -> Double {
+guard v.isFinite else { return defaultCapFraction }
+return min(1.0, max(0.0, v))
+}
+/// Multiply a byte count by a 0–1 fraction without overflow or a trapping
+/// Double round-trip.
+private static func scale(_ bytes: UInt64, by fraction: Double) -> UInt64 {
+let scaled = Double(bytes) * fraction
+if !scaled.isFinite || scaled <= 0 { return 0 }
+return scaled >= uint64MaxAsDouble ? UInt64.max : UInt64(scaled)
+}
+private static func saturatingAdd(_ values: UInt64...) -> UInt64 {
+var total: UInt64 = 0
+for v in values {
+let (sum, overflow) = total.addingReportingOverflow(v)
+total = overflow ? UInt64.max : sum
+}
+return total
+}
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 265-line pure policy enum with 15+ static methods could be simpler
+💡 Suggestion: Consider splitting into focused types (CapPolicy, LoadGate, KVBudget) or using a struct with computed properties instead of a large enum with only static methods
+📊 Score: 3×2 = 6 · Category: over-abstraction
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler.swift
+Comment on lines
+1520
+to
++1577
+/// Reserve unified memory for a VLM (vision-path) request against the shared
+/// 90% cap, via the process-wide GlobalKVCacheBudget this scheduler holds. A
+/// vision request bypasses the batched `submitTokenized` reservation entirely
+/// — it streams through `container.generate` directly — so without this it
+/// commits TWO kinds of memory the cap would otherwise track only reactively:
+///
+/// 1. `mediaDecodeBytes` — the transient CIImage rasters + Swift `Data` pixel
+/// buffers from media decode. These are NOT MLXArrays, so they are
+/// invisible to the cap's live MLX counters (the original blind spot).
+/// 2. The generation KV cache — `kvBytesPerToken × maxOutputTokens`. This IS
+/// MLXArray-backed (eventually visible to the live counters), but the
+/// vision path's decode loop runs in a detached task with no per-request
+/// reservation, so N concurrent media requests can grow KV simultaneously
+/// against headroom none of them reserved — a transient over-commit the
+/// cap would otherwise catch only on the NEXT admission. Reserving it up
+/// front makes the vision path share the same preemptive 90% gate the
+/// batched path gets from `reserveKVForRequest`.
+///
+/// Both are charged to ONE reservation id and released together when the
+/// stream ends (decode buffers are actually freed after `prepare`, so holding
+/// them for the whole stream is conservative — never an under-reservation).
+/// Returns true if it fits (and was reserved) or budgeting is disabled
+/// (nil budget, legacy "always proceed"); false if it would exceed the cap,
+/// in which case the caller surfaces a retryable 503. Pair with
+/// `releaseVisionRequest`. Saturating; never traps.
+public func reserveVisionRequest(
+requestId: String, mediaDecodeBytes: UInt64, kvTokens: Int
+) async -> Bool {
+guard let kvBudget else { return true }
+// KV bytes = kvBytesPerToken × the FULL token span the cache will hold:
+// prompt text + image/video soft tokens + generated output (the caller
+// computes that conservative total). Reserving only the output tokens
+// would badly under-count — a single image expands to hundreds of vision
+// tokens, all of which occupy KV.
+var genKVBytes: UInt64 = 0
+if kvBytesPerToken > 0, kvTokens > 0 {
+let (b, overflow) = UInt64(kvBytesPerToken)
+.multipliedReportingOverflow(by: UInt64(kvTokens))
+genKVBytes = overflow ? .max : b
+}
+let (total, overflow) = mediaDecodeBytes.addingReportingOverflow(genKVBytes)
+let bytes = overflow ? UInt64.max : total
+return await kvBudget.reserveBytes(requestID: requestId, bytes: bytes)
+}
+/// The model's configured context window (`max_position_embeddings`), or 0 if
+/// unknown. The KV cache can never hold more than this many prompt+vision
+/// tokens, so the vision-path reservation clamps its prompt+vision estimate to
+/// it (output tokens are added on top, matching the batched path's
+/// `promptTokenCount + maxTokens`).
+public func contextLength() -> Int { maxContextLength }
+/// Release a prior `reserveVisionRequest` reservation. Safe/no-op if unknown
+/// or budgeting is disabled.
+public func releaseVisionRequest(requestId: String) async {
+await kvBudget?.release(requestID: requestId)
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 [INFO] 🧩 Vision request reservation logic in BatchScheduler mixes concerns
+💡 Suggestion: Move VLM-specific reservation logic to VLMRequestInference or create a dedicated VisionMemoryManager to separate concerns
+📊 Score: 2×2 = 4 · Category: misplaced responsibility
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift
+Comment on lines
+202
+to
+272
+// the generation task would let the HTTP layer commit a 200 first.)
+// Reserve this vision request's unified memory against the 90% cap
+// BEFORE rasterizing. The vision path bypasses the batched
+// `submitTokenized` reservation, so it commits two kinds of memory the
+// cap would otherwise track only reactively: (1) the media-decode RAM
+// — CIImage rasters + Swift Data pixel buffers, which are NOT MLX
+// arrays and so are invisible to the cap's live MLX counters; (2) the
+// generation KV cache (kvBytesPerToken × maxOutputTokens), which IS
+// MLXArray-backed but grows in a detached decode task with no
+// per-request reservation, so N concurrent media requests can
+// over-commit it against unreserved headroom. Reserving both up front
+// gives the vision path the same preemptive gate the batched path has;
+// if it won't fit we reject with a retryable error instead of OOMing.
+// Released on every exit.
+let mediaReqId = "vlm-\(UUID().uuidString.prefix(12))"
+let projectedBytes = VLMRequestInference.projectedDecodeBytes(request)
+// Full KV-token span the vision cache will hold: prompt text + image/
+// video soft tokens + generated output (clamped to the context). The
+// vision path bypasses the batched KV reservation, so charging only the
+// output tokens would under-count the prompt + vision tokens that also
+// occupy KV.
+let kvTokens = VLMRequestInference.projectedKVTokens(
+request, defaultMaxTokens: defaultMaxTokens,
+contextLength: await scheduler.contextLength())
+let mediaReserved = await scheduler.reserveVisionRequest(
+requestId: mediaReqId, mediaDecodeBytes: projectedBytes,
+kvTokens: kvTokens)
+if !mediaReserved {
+await releaseBox.fire()
+let mib = projectedBytes / (1024 * 1024)
+throw MultiModelBatchSchedulerEngineError.tokenBudgetExhausted(
+"insufficient global kv cache headroom for vision request "
++ "(media decode ~\(mib) MiB + generation KV) — retry after capacity frees")
+}
+do {
+try await VLMRequestInference.validateMedia(request)
+} catch {
+await scheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+throw error
+}
+let vlmStream = VLMRequestInference.stream(
+container: container, request: request, defaultMaxTokens: defaultMaxTokens)
+// Capture the scheduler so the stream task can release the media
+// reservation; `scheduler` is Sendable (an actor reference).
+let mediaReleaseScheduler = scheduler
+return AsyncThrowingStream { continuation in
+let task = Task {
+do {
+for try await event in vlmStream {
+if Task.isCancelled { break }
+continuation.yield(event)
+}
+await mediaReleaseScheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+continuation.finish()
+} catch {
+await mediaReleaseScheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+continuation.finish(throwing: error)
+}
+}
+continuation.onTermination = { @Sendable _ in
+task.cancel()
+Task { await releaseBox.fire() }
+Task {
+await mediaReleaseScheduler.releaseVisionRequest(requestId: mediaReqId)
+await releaseBox.fire()
+}
+}
+}
+}
+ethenotethan
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 [MEDIUM] 🧩 Vision request handling adds 70 lines of reservation/cleanup logic to stream creation
+💡 Suggestion: Extract vision reservation handling into a separate helper class to reduce the complexity of the stream creation method
+📊 Score: 3×4 = 12 · Category: additive complexity
+chatgpt-codex-connector
+Bot
+reviewed
+Jun 16, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 023460fd73
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/BatchScheduler+Telemetry.swift
+Comment on lines
++65
+to
++67
+return UnifiedMemoryCap.liveKVHeadroomBytes(
+mlxUsedBytes: mlxUsed,
+systemAvailableBytes: SystemMemory.availableBytes() ?? .max)
+chatgpt-codex-connector
+Bot
+Jun 16, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Apply configured reserve to scheduler headroom
+When operators set memory_reserve_gb above the cap-implied reserve, the load gate and GlobalKVCacheBudget now honor that smaller effective cap, but this scheduler-side headroom path still calls liveKVHeadroomBytes with the default configReserveBytes: 0. Fresh evidence is that ProviderLoop passes the configured reserve only into GlobalKVCacheBudget, while the new post-load guard uses this accessor; if a model's measured residency exceeds its estimate, it can pass hasServeableKVHeadroom() under the bare 90% cap even though it has less than the minimum KV under the operator reserve, leaving the model advertised but every request rejected later by the global KV gate.
+Useful? React with 👍 / 👎.
+Comment thread
+provider-swift/Sources/ProviderCore/ProviderLoop.swift
+pendingLoadGiB.isFinite && pendingLoadGiB > 0
+? (pendingLoadGiB >= Double(UInt64.max) ? .max : UInt64(pendingLoadGiB))
+: 0
+await kvBudget.reservePendingLoad(requestID: pendingLoadID, bytes: pendingLoadBytes)
+chatgpt-codex-connector
+Bot
+Jun 16, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Close the load-gate race before reserving pending weights
+When an already-loaded model accepts a request while a different cold model has just passed evictUntilAvailable, that request can win the kvBudget actor and reserve KV before this pending-load reservation is recorded. Because reservePendingLoad is unconditional, it then adds the incoming weights on top of reservations the load gate did not subtract, so the load can still overcommit the new 90% cap; make the pending-load claim conditional/atomic with the current KV reservations or re-check capacity after it is installed before starting the load.
+Useful? React with 👍 / 👎.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/MultiModelBatchSchedulerEngine.swift
+task.cancel()
+Task { await releaseBox.fire() }
+Task {
+await mediaReleaseScheduler.releaseVisionRequest(requestId: mediaReqId)
+chatgpt-codex-connector
+Bot
+Jun 16, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Keep VLM reservations until cancellation finishes
+If the client disconnects while the VLM task is still in media decode, container.prepare, or generation, task.cancel() is only cooperative, but this termination handler releases the cap reservation immediately. The CIImage/Data buffers or KV can remain live until the underlying task actually unwinds, allowing a second request to reserve the same headroom and exceed the cap; cancellation should only signal the task, with the reservation released from the task's own cleanup path after the VLM stream exits.
+Useful? React with 👍 / 👎.
+Comment thread
+provider-swift/Sources/ProviderCore/Inference/VLMRequestInference.swift
+// aggregate once. Both mirror validateMedia's ceilings exactly.
+var pixels = min(imagePixels, UInt64(max(0, maxRequestImagePixels)))
+if hasVideo {
+let (s, o) = pixels.addingReportingOverflow(UInt64(max(0, maxRequestVideoFramePixels)))
+chatgpt-codex-connector
+Bot
+Jun 16, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Size video decode reservations from actual metadata
+For any request that contains a video, this charges the full request-wide video-frame cap before validation, which is 384 MP by default and becomes about 6 GiB after RGBA and the 4x decode factor, before adding KV. A small valid clip on a VLM with only a few GiB of headroom can therefore be rejected as out of capacity even though validateMedia would later measure the actual frame size and the request would fit; use the same metadata preflight as validation, or another bounded per-video estimate, instead of always reserving the maximum valid video.
+Useful? React with 👍 / 👎.
+Hide details
+View details
+Gajesh2007
+merged commit d4fc6b7
+into
+master
+Jun 16, 2026
+78 of 80 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Gajesh2007
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Member
+Merged. Core unified-memory cap (load gate + live KV gate + Q6 serve-while-load reservation + operator-reserve + KV purge) is in and CI-green. Tracking the remaining Codex P2s as fast-follows — none are new OOM crashes:
+StandaloneServer load — mirror the reservePendingLoad Q6 fix in the --local load path (serve-while-load race in standalone mode).
+Post-load guard reserve — thread configReserveBytes into BatchScheduler+Telemetry's liveKVHeadroomBytes calls so hasServeableKVHeadroom matches the live gate (else a model can be advertised then have every request rejected when an operator reserve is set).
+Fast-reject during load — exempt modelsLoading in fastAdmissionReject so a 2nd request for the model currently loading waits instead of being rerouted (minor availability blip introduced by the pending-load reservation).
+Gate→reserve micro-window — make the pending-load claim atomic with the capacity check (currently backstopped by the post-load guard).
+VLM (anupsv's 785160de) — round up text-token estimate; release the VLM reservation from the task's own cleanup (not the cancellation handler); size video-decode reservation from a metadata preflight instead of the 384 MP max.
+Prefix cache — already enforced at runtime (prefix KV is live MLXArrays counted in mlxUsed); the cleaner improvement is to gate the prefix store on live headroom rather than its own physical/8 budget.
+Will open a fast-follow PR for these.
+Gajesh2007
+added a commit
+that referenced
+this pull request
+Jun 16, 2026
+chore(release): provider v0.6.12
+…
+84dff73
+```
+Memory & reliability hardening:
+- 90% unified-memory cap + KV purge on unload + serve-while-load reservation (#363)
+- bounded checkpoint-capture pipeline, stops the Metal 499000 resource leak (#374)
+- resumable 4-bit model downloads + restart-safe detection (#372)
+- default-on [rsrc] resource telemetry in reports (#373 / mlx-swift-lm#42)
+- don't log raw request-parse errors — prompt-fragment privacy (#376)
+
+Coordinator LatestProviderVersion bump is intentionally deferred until the signed
+0.6.12 bundle is published (prod uses the in-memory store, so the hardcoded
+fallback is authoritative after a redeploy).
+```
+anupsv
+commented
+Jun 16, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Second local Codex review (gpt-5.5, xhigh) — 3 more fixes (commit 0031a8e)
+Ran another full Codex pass on the current PR. Clean verdicts again on reservation atomicity, KV purge-on-unload (RAM+SSD+startup sweep+closed-recheck), and projectedKVTokens adding output after the context clamp. Six findings; disposition:
+Fixed (commit 0031a8e, rebased on the latest branch):
+(High) Post-load guard ignored outstanding reservations. hasServeableKVHeadroom() checked measured headroom ≥ min, but measured headroom reads raw MLX active+cache and excludes KV already reserved in GlobalKVCacheBudget for in-flight requests. A model whose real residency exceeded the load estimate could pass while stealing promised headroom. Now requires measured ≥ minimumLoadKVBytes + outstandingReservedBytes.
+(Medium) onTermination released the VLM reservation too early — it freed the budget while the cancelled decode task was still tearing down MLXArrays. Now onTermination only cancels; the producer task releases on its own unwind (the moment memory is actually freed). Every exit still releases exactly once.
+(Medium) Short text parts charged 0 KV — projectedKVTokens used floor division (utf8/3), so a 1–2 byte part charged 0. New textTokenEstimate uses ceil + min-1 for non-empty text.
+Evaluated, no change (already handled or known tradeoff):
+(High) Pre-load admission window (no global reservation held during the async load) — this is exactly what the parallel commit 720668a ("reserve loading model's footprint during load") on this branch now addresses; my work rebased cleanly on top of it.
+(High, refuted again) dataFromDataURI materializes payload before reservation — already rejected from the computed base64 length before allocating, capped at 25 MiB + the WS frame cap.
+(Low) media bytes held for whole stream — conservative (never under-reserves); acknowledged tradeoff.
+Verified by an independent reviewer (full leak-path/deadlock/boundary trace). Rebased on the latest branch head; build green; 71 VLM-cap + UnifiedMemoryCap + budget + GlobalKVCacheBudget tests pass.
+anupsv
+mentioned this pull request
+Jun 17, 2026
+Metal [metal::malloc] Resource limit (499000) still crashes provider on 0.6.12 — count-aware trim doesn't bound LIVE buffers (two co-resident models)
+#384
+Closed
+joshconverse
+mentioned this pull request
+Aug 25, 2026
+ci(security): add CodeQL advanced setup
+#729
+Closed
+4 tasks
+jonathan308
+added a commit
+that referenced
+this pull request
+Oct 24, 2026
+Merge standard balanced (4-bit) checkpoints for GLM-5.3-Flash and Nem…
+…
+29f2f8d
+```
+…otron 3.5 Super (601a97d) into provider 0.10.2 features
+
+GLM-5.3-Flash and Nemotron 3.5 Super now default to the 4-bit balanced SSD checkpoint profile; #1587's BF16 layout remains the native fallback. Resolves the libs/mlx-swift-lm pin to the 0.10.2 SDK set bc4e5f57 (main + #360 + #357 + #359 + #362 + #363).
+```
+jonathan308
+mentioned this pull request
+Oct 24, 2026
+Provider 0.10.2 features: Super/GLM prefix caching, logprobs, GLM OpenRouter reasoning fields
+#1592
+Merged
+Hide environments
+Show environments
+This branch had an error being deployed
+1 failed and 3 active
+deployments
+Preview – d-inference
+—
+023460fd
+Deployed
+Jun 16, 2026 by
+vercel[bot]
+View deployment
+Preview – d-inference-console-ui-dev
+—
+023460fd
+Deployed
+Jun 16, 2026 by
+vercel[bot]
+View deployment
+Preview – d-inference-landing
+—
+023460fd
+Deployed
+Jun 16, 2026 by
+vercel[bot]
+View deployment
+benchmarks
+—
+023460fd
+Deployed
+Jun 16, 2026 by
+Gajesh2007
+via E2E Benchmarks #1061
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

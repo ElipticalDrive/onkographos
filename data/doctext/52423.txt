@@ -1,0 +1,3930 @@
+# Accelerated Volume Renderer
+This is an open-source implementation of [Accelerated Volume Rendering with Chebyshev Distance Maps](https://dl.acm.org/citation.cfm?id=3365164).
+Please consider citing this work if you use it:
+```
+@inproceedings{DeakinAcceleratedvolumerendering2019,
+  address = {{Brisbane, QLD, Australia}},
+  series = {{{SA}} '19},
+  title = {Accelerated Volume Rendering with {{Chebyshev}} Distance Maps},
+  isbn = {978-1-4503-6945-9},
+  booktitle = {{{SIGGRAPH Asia}} 2019 {{Technical Briefs}}},
+  publisher = {{ACM}},
+  url = {http://doi.acm.org/10.1145/3355088.3365164},
+  doi = {10.1145/3355088.3365164},
+  author = {Deakin, Lachlan and Knackstedt, Mark},
+  year = {2019},
+  keywords = {volume rendering,empty space skipping,distance map,ray casting},
+  pages = {25--28},
+}
+```
+
+![image_snake](docs/image.jpg) ![image_beetle](docs/image2.jpg)
+
+## Features
+* Ray casting volume renderer with efficient empty space skipping
+  * Gradient map precomputed (compute shader)
+  * Simple sliders to manipulate a linear 2D Transfer Function (TF) texture
+  * Occupancy map update on TF change used for empty space skipping (compute shader)
+  * Occupancy map to distance map for faster ray casting (comptue shader)
+* The viewpoint may enter the volume
+  * The volume is clipped at some distance from the camera and the vertices of the box-plane intersection are computed in a vertex shader
+* Volumes are clipped by the depth buffer
+* Runs in a single subpass with two draw calls per volume
+
+## Dependencies
+* [Vulkan-Samples](https://github.com/KhronosGroup/Vulkan-Samples)
+* Some assets from [Vulkan-Samples-Assets](https://github.com/KhronosGroup/Vulkan-Samples-Assets)
+* Boost
+
+## Building
+1. `git clone --recurse-submodules <this repository>`
+1. Boost is needed to assist with IO (for now). I recommend grabbing it through [vcpkg](https://github.com/microsoft/vcpkg) or just use the system package on linux
+1. The first release includes "assets.zip" which includes the minimum required assets and some volumetric images.
+1. Put any other volumetric images in the newly copied assets folder.
+1. Do a regular cmake build (perhaps using the toolchain file from vcpkg)
+
+## Running
+```usage
+  vrender.exe <binary_volumetric_image>
+```
+
+Make sure the `assets` and `shaders` folders are in the working directory.
+Volumetric images need to be in the `assets` folder.
+
+~~Multiple volumetric images can be loaded by supplying multiple arguments.~~ Could not get this working with current `Vulkan-Samples` arguments parser.
+
+The stag beetle image will be loaded if no arguments are supplied.
+
+### Volumetric image format
+Volumetric images must be densely packed binary files with no header and any extension.
+For a volume file `volume.xyz` there should be an accompanying header file `file.xyz.header` structured like so
+```
+1024 1024 795 # extents
+0.0003 0.0003 0.0007 # voxel size
+0.0 255.0 # normalisation range
+uint8_t big # data type and endianness (big or little)
+1 0 0 90 # rotation axis and angle (degrees)
+```
+ > This is not a standard format and is just a placeholder
+
+Volumetric images are always converted to uint8_t and normalised from 0-255 based on the normalisation range specified in the header.
+
+### Parameters
+This example has a number of parameters which can be modified at runtime
+* **ESS**: choose between the two empty space skipping (ESS) methods described in the paper (or none), useful to compare performance
+* **ERT**: early ray termination, rays terminate when an opacity limit is reached
+* **Sampling**: controls the density of voxel samples along rays
+* **Clip distance**: controls the distance from the camera where volumes are clipped by a plane
+* **Alpha**: all voxel opacities are multiplied by this number
+* **Intensity**: Intensity range which maps alpha to [0-1]
+* **Gradient**: Gradient range which maps alpha to [0-1] (multiplied with intensity alpha)
+* **Test**: output the entry/exit coordinates for the rays or the number of the combined number of texture samples of the volume and distance map
+  ** try changing the empty space skipping method or early ray termination and see how this changes
+
+## License
+See [LICENSE](LICENSE).
+This example uses [Vulkan-Samples](https://github.com/KhronosGroup/Vulkan-Samples) which has many third-party dependencies, each of which may have independent licensing.
+
+## Limitations/TODO
+* The depth testing functionality is a bit hacky. 
+  * Modifications to Vulkan-Samples are required to use a depth image as both an input attachment and depth stencil attachment simultaneously. Current behaviour:
+    * If sponza scene hidden, volumes write to depth image
+    * If sponza scene visible, volumes read from depth image and are clipped accordingly
+* Pull requests are welcomed
+
+### scripts/benchmark.py
+```
+#!/usr/bin/env python3
+
+import subprocess
+import re
+import pandas as pd
+
+app = "C:/dev/VkVolume/out/build/x64-Release/src/vrender.exe"
+cwd = "C:/dev/VkVolume"
+
+width = 1200
+height = 1200
+frames = 1000
+
+params = ["fn", "image", "imin", "imax", "gmin", "gmax"]
+
+#images = [
+#          ["present_492x492x442.uint16", "present", 0.071, 1.0, 0.0, 0.0]
+#         # ,["present_492x492x442.uint16", "present", 0.306, 1.0, 0.0, 0.0]
+#         ,["present_492x492x442.uint16", "present", 0.071, 1.0, 0.06, 0.1]
+#         ,["stag_beetle_832x832x494.uint16", "beetle", 0.086, 1.0, 0.0, 0.0]
+#         ,["stag_beetle_832x832x494.uint16", "beetle", 0.086, 1.0, 0.1, 0.3]
+#         # ,["kingsnake_1024x1024x795.uint8", "snake", 0.099, 1.0, 0.0, 0.0]
+#         ,["kingsnake_1024x1024x795.uint8", "snake", 0.4, 0.8, 0.0, 0.0]
+#         ,["kingsnake_1024x1024x795.uint8", "snake", 0.2, 0.8, 0.06, 0.12]
+#         ]
+
+images = [
+          ["present_492x492x442.uint16", "present", 0.071, 1.0, 0.0, 0.0]
+         ,["present_492x492x442.uint16", "present", 0.071, 1.0, 0.06, 0.1]
+         ,["stag_beetle_832x832x494.uint16", "beetle", 0.086, 1.0, 0.0, 0.0]
+         ,["stag_beetle_832x832x494.uint16", "beetle", 0.086, 1.0, 0.1, 0.3]
+         ,["kingsnake_1024x1024x795.uint8", "snake", 0.4, 0.8, 0.0, 0.0]
+         ,["kingsnake_1024x1024x795.uint8", "snake", 0.2, 0.8, 0.06, 0.12]
+         ]
+
+images = [{ p: i for p, i in zip(params, image) } for image in images] # Convert to dict
+
+def get_timing(image, b, skipmode):
+    output = "FAIL"
+    try:
+        output = subprocess.Popen(
+            [app,
+             "--width={}".format(width),
+             "--height={}".format(height),
+             "--benchmark={}".format(frames),
+             "--imin={}".format(image["imin"]),
+             "--imax={}".format(image["imax"]),
+             "--gmin={}".format(image["gmin"]),
+             "--gmax={}".format(image["gmax"]),
+             "--blocksize={}".format(b),
+             "--skipmode={}".format(skipmode),
+             image["fn"]],
+            cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE).communicate()[0].decode('utf-8')
+        m = re.search(r"ran [\d]+ frames, averaged ([\d\.]+) fps", output)
+        framerate = m.group(1)
+        m = re.search(r"Updated occupancy/distance map in ([\d\.]+)ms", output)
+        distance_map_time_ms = m.group(1)
+        m = re.search(r"Occupied voxels: ([\d\.]+)%", output)
+        occupied_voxel_percent = m.group(1)
+        return (framerate, distance_map_time_ms, occupied_voxel_percent)
+    except:
+        print(output)
+        return None
+
+def benchmark_block_sizes(skipmode, bs):
+    results = []
+    for image in images:
+        print(image)
+        for b in bs:
+            if (skipmode != 0 or b == bs[0]):
+                result = get_timing(image, b, skipmode)
+            if result:
+                (framerate, distance_map_time_ms, occupied_voxel_percent) = result
+                image.update({
+                        "skipmode": int(skipmode),
+                        "blocksize": int(b),
+                        "occupancy": float(occupied_voxel_percent),
+                        "framerate": float(framerate),
+                        "update": float(distance_map_time_ms)
+                    })
+                print("\t", skipmode, b, framerate, distance_map_time_ms, occupied_voxel_percent)
+                results.append(image.copy())
+    
+    columns = ["image", "skipmode", "blocksize", "occupancy", "framerate", "update", "imin", "imax", "gmin", "gmax"]
+    df = pd.DataFrame(results, columns=columns)
+    print(df.to_string())
+    df.to_csv("benchmark_results_{}.csv".format(skipmode), index=False)
+
+# Block size benchmarking, was just run once
+for skipmode in [0, 1, 2, 3]:
+  bs = [2, 3, 4, 5, 6]
+  benchmark_block_sizes(skipmode, bs)
+```
+
+### shaders/base.frag
+```
+#version 320 es
+/* Copyright (c) 2019, Arm Limited and Contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+precision highp float;
+
+#ifdef HAS_BASE_COLOR_TEXTURE
+layout (set=0, binding=0) uniform sampler2D base_color_texture;
+#endif
+
+layout (location = 0) in vec4 in_pos;
+layout (location = 1) in vec2 in_uv;
+layout (location = 2) in vec3 in_normal;
+
+layout (location = 0) out vec4 o_color;
+
+layout(set = 0, binding = 1) uniform GlobalUniform {
+    mat4 model;
+    mat4 view_proj;
+    vec4 light_pos;
+    vec4 light_color;
+} global_uniform;
+
+// Push constants are much quicker than uniforms
+// but they come with a limitation in the size of data.
+// The standard requires at least 128 bytes
+layout(push_constant, std430) uniform PBRMaterialUniform {
+    vec4 base_color_factor;
+    float metallic_factor;
+    float roughness_factor;
+} pbr_material_uniform;
+
+void main(void)
+{
+    vec3 normal = normalize(in_normal);
+
+    vec3 world_to_light = global_uniform.light_pos.xyz - in_pos.xyz;
+
+    float dist = length(world_to_light) * 0.0001;
+
+    float atten = 1.0 - smoothstep(0.5 * global_uniform.light_pos.w, global_uniform.light_pos.w, dist);
+
+    world_to_light = normalize(world_to_light);
+
+    float ndotl = clamp(dot(normal, world_to_light), 0.0, 1.0);
+
+    vec4 base_color = vec4(1.0, 0.0, 0.0, 1.0);
+
+#ifdef HAS_BASE_COLOR_TEXTURE
+    base_color = texture(base_color_texture, in_uv);
+#else
+    base_color = pbr_material_uniform.base_color_factor;    
+#endif
+
+    vec4 ambient_color = vec4(0.2, 0.2, 0.2, 1.0) * base_color;
+
+    o_color = ambient_color + ndotl * atten * global_uniform.light_color * base_color;
+}
+```
+
+### shaders/base.vert
+```
+#version 320 es
+/* Copyright (c) 2019, Arm Limited and Contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+precision highp float;
+
+layout(location = 0) in vec3 position;
+layout(location = 1) in vec2 texcoord_0;
+layout(location = 2) in vec3 normal;
+
+layout(set = 0, binding = 1) uniform GlobalUniform {
+    mat4 model;
+    mat4 view_proj;
+    vec4 light_pos;
+    vec4 light_color;
+} global_uniform;
+
+layout (location = 0) out vec4 o_pos;
+layout (location = 1) out vec2 o_uv;
+layout (location = 2) out vec3 o_normal;
+
+void main(void)
+{
+    o_pos = global_uniform.model * vec4(position, 1.0);
+
+    o_uv = texcoord_0;
+
+    o_normal = mat3(global_uniform.model) * normal;
+
+    gl_Position = global_uniform.view_proj * o_pos;
+}
+```
+
+### shaders/distance_map.comp
+```
+#version 460
+/* Copyright (c) 2019, Lachlan Deakin
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+layout (local_size_x = 8, local_size_y = 8) in;
+
+layout (binding = 0, r8ui) uniform uimage3D dist;
+layout (binding = 1, r8ui) uniform uimage3D dist_swap; // occupancy_map on stage 0
+
+layout(push_constant, std430) uniform PushConsts {
+    uint stage;
+};
+
+// Based on [Saito and Toriwaki, 1994]
+//    "New algorithms for euclidean distance transformation of an n-dimensional digitized picture with applications"
+//    with modifications:
+//      * runs on a GPU, uses a 3D swap image rather than a 1D buffer
+//      * compute Chebyshev distance rather than Euclidean distance
+//      * specific optimisations related to Chebyshev/GPU and sample reduction
+//      * expects empty regions to have value 255 and occupied 0 in occupancy map
+
+// call as:
+//  pushConsts(0)
+//  dispatch(rndUp(height, 8), rndUp(depth, 8));
+//  pushConsts(1)
+//  dispatch(rndUp(width, 8), rndUp(depth, 8));
+//  pushConsts(2)
+//  dispatch(rndUp(width, 8), rndUp(height, 8));
+
+void main() {
+    ivec3 pos;
+    if (stage == 0) {
+      pos = ivec3(0, gl_GlobalInvocationID.x, gl_GlobalInvocationID.y);
+    } else if (stage == 1) {
+      pos = ivec3(gl_GlobalInvocationID.x, 0, gl_GlobalInvocationID.y);
+    } else {
+      pos = ivec3(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, 0);
+    }
+
+    const ivec3 dim = imageSize(dist);
+    if(any(greaterThanEqual(pos, dim))) return;
+
+    if (stage == 0) { // "Transformation 1"
+        // Forward
+        uint gi1jk = imageLoad(dist_swap, pos).x; // occupancy_to_max_dist
+        for (pos.x = 1; pos.x < dim.x; ++pos.x) {
+          uint gijk = min(gi1jk + 1, imageLoad(dist_swap, pos).x); // occupancy_to_max_dist
+          imageStore(dist, pos, uvec4(gijk));
+          gi1jk = gijk;
+        }
+
+        // Backward
+        for (pos.x = dim.x - 2; pos.x >= 0; --pos.x) {
+          uint gijk = min(gi1jk + 1, imageLoad(dist, pos).x);
+          imageStore(dist, pos, uvec4(gijk));
+          gi1jk = gijk;
+        }
+    } else if (stage == 1) { // "Transformation 2"
+	      for (pos.y = 0; pos.y < dim.y; ++pos.y) {
+		      uint D = imageLoad(dist, pos).x;
+		
+		      // Zig-zag out from pos in search of minimum D
+		      for (int n = 1; n < D; ++n) {
+			      if (pos.y >= n) {
+				      uint D_n = imageLoad(dist,
+					      ivec3(pos.x, pos.y - n, pos.z)).x;
+				      D = min(D, max(n, D_n));
+			      }
+			      if ((pos.y + n) < dim.y && n < D) { // note early exit
+				      uint D_n = imageLoad(dist,
+					      ivec3(pos.x, pos.y + n, pos.z)).x;
+				      D = min(D, max(n, D_n));
+			      }
+		      }
+		      imageStore(dist_swap, pos, uvec4(D));	
+	      }
+    } else if (stage == 2) { // "Transformation 3"
+        // same as transformation 2 but on the z axis
+        for (pos.z = 0; pos.z < dim.z; ++pos.z) {
+          uint gijk = imageLoad(dist_swap, pos).x;
+          uint m_min = gijk;
+          for (int n = 1; n < m_min; ++n) {
+            if (pos.z >= n) {
+              const uint gijnk = imageLoad(dist_swap, ivec3(pos.x, pos.y, pos.z - n)).x;
+              m_min = min(m_min, max(n, gijnk));
+            }
+            if ((pos.z + n) < dim.z && n < m_min) { // note early exit possible
+              const uint gijnk = imageLoad(dist_swap, ivec3(pos.x, pos.y, pos.z + n)).x;
+              m_min = min(m_min, max(n, gijnk));
+            }
+          }
+          imageStore(dist, pos, uvec4(m_min));
+        }
+    }
+}
+```
+
+### shaders/distance_map_anisotropic.comp
+```
+#version 460
+/* Copyright (c) 2019, Lachlan Deakin
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+layout (local_size_x = 8, local_size_y = 8) in;
+
+layout (binding = 0, r8ui) uniform uimage3D dist;
+layout (binding = 1, r8ui) uniform uimage3D dist_swap; // occupancy_map on stage 0
+
+layout(push_constant, std430) uniform PushConsts {
+    uint stage;
+    int dir;
+};
+
+// Adapted from distance_map.comp, see there for more information
+
+void main() {
+    ivec3 pos;
+    if (stage == 0) {
+      pos = ivec3(0, gl_GlobalInvocationID.x, gl_GlobalInvocationID.y);
+    } else if (stage == 1) {
+      pos = ivec3(gl_GlobalInvocationID.x, 0, gl_GlobalInvocationID.y);
+    } else {
+      pos = ivec3(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, 0);
+    }
+
+    const ivec3 dim = imageSize(dist);
+    if(any(greaterThanEqual(pos, dim))) return;
+
+    if (stage == 0) { // "Transformation 1"
+        int start = dir > 0 ? dim.x - 1 : 0;
+        int end = dir > 0 ? -1 : dim.x;
+        pos.x = start.x;
+        uint gi1jk = imageLoad(dist_swap, pos).x;
+        for (pos.x = start; pos.x != end; pos.x -= dir) {
+          uint gijk = min(gi1jk + 1, imageLoad(dist_swap, pos).x);
+          imageStore(dist, pos, uvec4(gijk));
+          gi1jk = gijk;
+        }
+
+    } else if (stage == 1) { // "Transformation 2"
+        for (int y = 0; y < dim.y; ++y) {
+          ivec3 p = ivec3(pos.x, y, pos.z);
+          uint gijk = imageLoad(dist, p).x;
+          uint m_min = gijk;
+          for (int n = 1; n < m_min && n < 255; ++n) {
+            int y_test = y + dir * n;
+            if (y_test < 0 || y_test >= dim.y) {
+              break;
+            } else {
+              const uint gijnk = imageLoad(dist, ivec3(pos.x, y_test, pos.z)).x;
+              const uint m = max(n, gijnk);
+              if (m < m_min)
+                m_min = m;
+            }
+          }
+          imageStore(dist_swap, p, uvec4(m_min));
+        }
+    } else if (stage == 2) { // "Transformation 3"
+      for (int z = 0; z < dim.z; ++z) {
+        ivec3 p = ivec3(pos.x, pos.y, z);
+        uint gijk = imageLoad(dist_swap, p).x;
+        uint m_min = gijk;
+        for (int n = 1; n < m_min && n < 255; ++n) {
+          int z_test = z + dir * n;
+          if (z_test < 0 || z_test >= dim.z) {
+            break;
+          } else {
+            const uint gijnk = imageLoad(dist_swap, ivec3(pos.x, pos.y, z_test)).x;
+            const uint m = max(n, gijnk);
+            if (m < m_min)
+              m_min = m;
+          }
+        }
+        imageStore(dist, p, uvec4(m_min));
+      }
+    }
+}
+```
+
+### shaders/get_gradient_compute.glsl
+```
+#if defined(GRADIENT_MAP_SET) && defined(GRADIENT_MAP_BINDING)
+layout (set = GRADIENT_MAP_SET, binding = GRADIENT_MAP_BINDING, r8) uniform image3D gradient_map;
+#endif
+
+float get_gradient(ivec3 pos, ivec3 dim1) {
+  if (!transfer_function_uniform.use_gradient) {
+    return 1.0f;
+  } else {
+#ifdef PRECOMPUTED_GRADIENT
+    return imageLoad(gradient_map, pos).x;
+#else
+    // Gradient on-the-fly using tetrahedron technique http://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
+    ivec2 k = ivec2(1,-1);
+    vec3 gradientDir = 0.25f * (
+      k.xyy * imageLoad(volume, clamp(pos + k.xyy, ivec3(0), dim1)).x +
+      k.yyx * imageLoad(volume, clamp(pos + k.yyx, ivec3(0), dim1)).x +
+      k.yxy * imageLoad(volume, clamp(pos + k.yxy, ivec3(0), dim1)).x +
+      k.xxx * imageLoad(volume, clamp(pos + k.xxx, ivec3(0), dim1)).x);
+    float gradient = clamp(length(gradientDir) * transfer_function_uniform.grad_magnitude_modifier, 0, 1);
+    return gradient;
+#endif
+  }
+}
+```
+
+### shaders/gradient_map.comp
+```
+#version 460
+/* Copyright (c) 2019, Lachlan Deakin
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#extension GL_GOOGLE_include_directive : enable
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout (set = 0, binding = 0, r8) uniform image3D volume; // r8 = float unorm
+
+#define TRANSFER_FUNCTION_SET 0
+#define TRANSFER_FUNCTION_BINDING_UNIFORM 1
+#define TRANSFER_FUNCTION_BINDING_TEXTURE 2
+#include "transfer_function.glsl"
+
+#define GRADIENT_MAP_SET 0
+#define GRADIENT_MAP_BINDING 3
+#undef PRECOMPUTED_GRADIENT
+#include "get_gradient_compute.glsl"
+
+void main() {
+  const ivec3 dim = imageSize(gradient_map);
+  if(any(greaterThanEqual(gl_GlobalInvocationID, dim))) return;
+
+  float gradient = get_gradient(ivec3(gl_GlobalInvocationID), dim - 1);
+  imageStore(gradient_map, ivec3(gl_GlobalInvocationID), vec4(gradient));
+}
+```
+
+### shaders/imgui.frag
+```
+#version 320 es
+/* Copyright (c) 2016, Sascha Willems
+ * Copyright (c) 2019, Arm Limited and Contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+precision mediump float;
+
+layout (binding = 0) uniform sampler2D fontSampler;
+
+layout (location = 0) in vec2 inUV;
+layout (location = 1) in vec4 inColor;
+
+layout (location = 0) out vec4 outColor;
+
+void main()
+{
+	outColor = inColor * texture(fontSampler, inUV);
+}
+```
+
+### shaders/imgui.vert
+```
+#version 320 es
+/* Copyright (c) 2016, Sascha Willems
+ * Copyright (c) 2019, Arm Limited and Contributors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+precision mediump float;
+
+layout (location = 0) in vec2 inPos;
+layout (location = 1) in vec2 inUV;
+layout (location = 2) in vec4 inColor;
+
+layout (push_constant) uniform PushConstants {
+	mat4 transform;
+} pushConstants;
+
+layout (location = 0) out vec2 outUV;
+layout (location = 1) out vec4 outColor;
+
+out gl_PerVertex
+{
+	vec4 gl_Position;
+};
+
+void main()
+{
+	outUV = inUV;
+	outColor = inColor;
+	gl_Position = pushConstants.transform * vec4(inPos.xy, 0.0, 1.0);
+}
+```
+
+### shaders/occupancy_map.comp
+```
+#version 460
+/* Copyright (c) 2019, Lachlan Deakin
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#extension GL_GOOGLE_include_directive : enable
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout (set = 0, binding = 0, r8) uniform image3D volume; // r8 = float unorm
+
+#define TRANSFER_FUNCTION_SET 0
+#define TRANSFER_FUNCTION_BINDING_UNIFORM 1
+#define TRANSFER_FUNCTION_BINDING_TEXTURE 2
+#include "transfer_function.glsl"
+
+#ifdef PRECOMPUTED_GRADIENT
+#define GRADIENT_MAP_SET 0
+#define GRADIENT_MAP_BINDING 3
+#endif
+#include "get_gradient_compute.glsl"
+
+layout (set = 0, binding = 4, r8ui) uniform uimage3D occupancy_map;
+
+layout(push_constant) uniform PushConsts {
+    ivec4 block_size;
+};
+
+const uint OCCUPIED = 0;
+const uint EMPTY = 255;
+
+void main() {
+  const ivec3 dim_occ = imageSize(occupancy_map);
+  if(any(greaterThanEqual(gl_GlobalInvocationID, dim_occ))) return;
+
+  ivec3 dim_vol = imageSize(volume);
+
+  // Get block extents
+  ivec3 start = ivec3(gl_GlobalInvocationID * block_size.xyz);
+  ivec3 end = min(start + block_size.xyz, dim_vol);
+  
+  ivec3 dim_vol1 = imageSize(volume) - 1;
+
+  ivec3 pos;
+  for (pos.z = start.z; pos.z < end.z; ++pos.z)
+    for (pos.y = start.y; pos.y < end.y; ++pos.y)
+      for (pos.x = start.x; pos.x < end.x; ++pos.x) {
+        float intensity = imageLoad(volume, pos).x;
+        float gradient = get_gradient(pos, dim_vol1);
+        float alpha = get_color(intensity, gradient).a;
+        if (alpha > 0.0f) {
+          // Set region as occupied
+          imageStore(occupancy_map, ivec3(gl_GlobalInvocationID), ivec4(OCCUPIED));
+          return;
+        }
+      }
+
+  // Set region as empty
+  imageStore(occupancy_map, ivec3(gl_GlobalInvocationID), ivec4(EMPTY));
+}
+```
+
+### shaders/occupied_voxel_count.comp
+```
+#version 460
+
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_ARB_gpu_shader_int64: enable
+#extension GL_KHR_shader_subgroup_basic: enable
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout (set = 0, binding = 0, r8) uniform image3D volume; // r8 = float unorm
+
+#define TRANSFER_FUNCTION_SET 0
+#define TRANSFER_FUNCTION_BINDING_UNIFORM 1
+// #define TRANSFER_FUNCTION_BINDING_TEXTURE 2
+#include "transfer_function.glsl"
+
+#ifdef PRECOMPUTED_GRADIENT
+#define GRADIENT_MAP_SET 0
+#define GRADIENT_MAP_BINDING 3
+#endif
+#include "get_gradient_compute.glsl"
+
+layout (set = 0, binding = 4, std430) buffer countBuffer
+{
+    uint64_t count[];
+};
+
+void main() {
+  const ivec3 dim = imageSize(volume);
+  
+  // Get the opacity
+  float alpha;
+  if(any(greaterThanEqual(gl_GlobalInvocationID, dim))) {
+    alpha = 0.0f;
+  } else {
+    ivec3 pos = ivec3(gl_GlobalInvocationID);
+    float intensity = imageLoad(volume, pos).x;
+    float gradient = get_gradient(pos, dim - 1);
+    alpha = get_color(intensity, gradient).a;
+  }
+
+  // Sum the number of non-empty voxels in the current subgroup
+  const uint sum_subgroup = subgroupAdd(alpha > 0.0f ? 1 : 0);
+
+  if (subgroupElect()) {
+    // Work group index (1D)
+    const uint wIdx =
+      gl_WorkGroupID.z * gl_NumWorkGroups.y * gl_NumWorkGroups.x +
+      gl_WorkGroupID.y * gl_NumWorkGroups.x +
+      gl_WorkGroupID.x;
+
+    // Sub group index among all invocations
+    const uint subgroupIdx = wIdx * gl_NumSubgroups + gl_SubgroupID;
+    count[subgroupIdx] = uint64_t(sum_subgroup);
+  }
+}
+```
+
+### shaders/occupied_voxel_count_reduce.comp
+```
+#version 460
+
+#extension GL_ARB_separate_shader_objects : enable
+#extension GL_ARB_shading_language_420pack : enable
+#extension GL_ARB_gpu_shader_int64: enable
+#extension GL_KHR_shader_subgroup_basic: enable
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+#extension GL_EXT_shader_subgroup_extended_types_int64: enable
+
+layout (local_size_x = SUBGROUP_SIZE) in;
+
+layout (set = 0, binding = 0, std430) buffer data
+{
+    uint64_t count[];
+};
+
+layout(push_constant) uniform PushConsts {
+    uint64_t bufferSize;
+    uint stride;
+};
+
+void main() {
+    const uint sampleIdx = gl_GlobalInvocationID.x * stride;
+    const uint64_t sum = uint64_t(subgroupAdd(sampleIdx < bufferSize ? count[sampleIdx] : 0));
+    if (subgroupElect()) {
+      count[sampleIdx] = sum;
+    }
+}
+```
+
+### shaders/transfer_function.glsl
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+layout(set = TRANSFER_FUNCTION_SET, binding = TRANSFER_FUNCTION_BINDING_UNIFORM) uniform TransferFunctionUniform {
+  float sampling_factor;
+  float voxel_alpha_factor;
+  float grad_magnitude_modifier;
+  bool use_gradient;
+#ifndef TRANSFER_FUNCTION_BINDING_TEXTURE
+  float intensity_min;
+  float intensity_range_inv;
+  float gradient_min;
+  float gradient_range_inv;
+#endif
+} transfer_function_uniform;
+
+#ifdef TRANSFER_FUNCTION_BINDING_TEXTURE
+layout (set = TRANSFER_FUNCTION_SET, binding = TRANSFER_FUNCTION_BINDING_TEXTURE) uniform sampler2D transfer_function;  // rgba
+#endif
+
+vec4 get_color(float intensity, float gradient) {
+#ifdef TRANSFER_FUNCTION_BINDING_TEXTURE
+  // Map intensity and gradient to colour with transfer function
+  vec4 color = texture(transfer_function, vec2(intensity, gradient));
+#else
+  // Map intensity and gradient to colour with simple 2D grayscale equation
+  float alphaIntensity = clamp((intensity - transfer_function_uniform.intensity_min) * transfer_function_uniform.intensity_range_inv, 0, 1);
+  float alphaGradient = clamp((gradient - transfer_function_uniform.gradient_min) * transfer_function_uniform.gradient_range_inv, 0, 1);
+  vec4 color = vec4(alphaIntensity * alphaGradient);
+#endif
+  return color;
+}
+```
+
+### shaders/volume_render.frag
+```
+#version 460
+/* Copyright (c) 2019, Lachlan Deakin
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#extension GL_GOOGLE_include_directive : enable
+
+#define REVERSE_DEPTH
+
+precision highp float;
+
+#ifdef DEPTH_ATTACHMENT
+layout (input_attachment_index = 0, binding = 0) uniform subpassInput i_depth;
+#endif
+
+layout(location = 0) in vec4 position; // gl_Position
+layout(location = 1) in vec3 ray_entry;
+
+layout(set = 0, binding = 1) uniform CameraUniform {
+    mat4 view;
+    mat4 proj;
+    mat4 view_proj_inv;
+    mat4 model;
+    mat4 model_inv;
+} camera_uniform;
+
+layout(set = 0, binding = 2) uniform RayCastUniform {
+    vec4 plane;
+    vec4 plane_tex;
+    vec4 cam_pos_tex;
+    vec4 block_size;
+    int front_index;
+} ray_cast_uniform;
+
+layout (set = 0, binding = 5) uniform mediump sampler3D volume;
+
+#define TRANSFER_FUNCTION_SET 0
+#define TRANSFER_FUNCTION_BINDING_UNIFORM 3
+#define TRANSFER_FUNCTION_BINDING_TEXTURE 4
+#include "transfer_function.glsl"
+
+#ifdef PRECOMPUTED_GRADIENT
+layout (set = 0, binding = 6) uniform mediump sampler3D gradient;
+#endif
+#ifdef ANISOTROPIC_DISTANCE
+layout (set = 0, binding = 7) uniform mediump usampler3D distance_map[8];
+#else
+layout (set = 0, binding = 7) uniform mediump usampler3D distance_map[1];
+#endif
+
+layout(location = 0) out vec4 out_color;
+#ifdef REVERSE_DEPTH
+layout(depth_less) out float gl_FragDepth;
+#else
+layout(depth_greater) out float gl_FragDepth;
+#endif
+
+vec3 ray_caster_get_back(const in vec3 front, const in vec3 dir) {
+  // Use AABB ray-box intersection (simplified due to unit cube [0-1]) to get intersection with back
+  vec3 dir_inv = 1.0f / dir;
+  vec3 tMin = -front * dir_inv;
+  vec3 tMax = (1.0f - front) * dir_inv;
+  vec3 t1 = min(tMin, tMax);
+  vec3 t2 = max(tMin, tMax);
+  float tNear = max(max(t1.x, t1.y), t1.z);
+  float tFar = min(min(t2.x, t2.y), t2.z);
+
+  // Return the back intersection
+  return tFar * dir + front;
+}
+
+float get_gradient(vec3 pos, vec3 dim_inv) {
+  if (transfer_function_uniform.use_gradient) {
+#ifdef PRECOMPUTED_GRADIENT
+    // Sample gradient
+    float gradient = texture(gradient, pos).x;
+#else
+    // Gradient on-the-fly using tetrahedron technique http://iquilezles.org/www/articles/normalsSDF/normalsSDF.htm
+    ivec2 k = ivec2(1,-1);
+    vec3 gradientDir = (k.xyy * texture(volume, pos + dim_inv * k.xyy).x +
+                        k.yyx * texture(volume, pos + dim_inv * k.yyx).x +
+                        k.yxy * texture(volume, pos + dim_inv * k.yxy).x +
+                        k.xxx * texture(volume, pos + dim_inv * k.xxx).x) * 0.25f;
+    float gradient = clamp(length(gradientDir) * transfer_function_uniform.grad_magnitude_modifier, 0, 1);
+#endif
+    return gradient;
+  } else {
+    return 1.0f;
+  }
+}
+
+#ifdef ANISOTROPIC_DISTANCE
+int distance_map_idx;
+#endif
+
+//int skip(vec3 u, ivec3 u_i, vec3 step_dist_texel_inv) {
+//}
+
+//bool sample_and_blend(vec3 pos, float sampling_factor_inv, vec3 dim_inv) {
+//
+//  return hasAlpha;
+//}
+
+void main()
+{
+  // Initialise
+  out_color = vec4(0);
+
+#ifdef DEPTH_ATTACHMENT
+  // Read depth
+  float frag_depth = subpassLoad(i_depth).x;
+  
+  // Manual z-test of front face
+  float frag_depth_front = position.z / position.w;
+#ifdef REVERSE_DEPTH
+  if (frag_depth > frag_depth_front) {
+#else
+  if (frag_depth < frag_depth_front) {
+#endif
+    discard; // front face is behind the sponza scene
+  } else {
+    gl_FragDepth = frag_depth; // set equal depth
+  }
+#else
+  // Set frag depth to max distance
+  #ifdef REVERSE_DEPTH
+  gl_FragDepth = 0.0f;
+  #else
+  gl_FragDepth = 1.0f; 
+  #endif
+#endif
+
+  // Get ray exit
+  vec3 ray_dir = normalize(ray_entry - ray_cast_uniform.cam_pos_tex.xyz);
+  vec3 ray_exit = ray_caster_get_back(ray_entry, ray_dir);
+  float ray_distance = distance(ray_entry, ray_exit);
+
+#ifdef DEPTH_ATTACHMENT
+  // Calculate where ray intersects with the depth buffer in texture coordinates
+  vec4 clip_at_depth = vec4(position.xyz * frag_depth / frag_depth_front, position.w);
+  vec4 pos_at_depth = camera_uniform.view_proj_inv * clip_at_depth;
+  pos_at_depth /= pos_at_depth.w;
+  vec3 ray_intersect_depth_buffer = (camera_uniform.model_inv * pos_at_depth).xyz + 0.5f;
+
+  // If the depth buffer exit is in front of the normal back intersection, use it instead
+  //  This ensures that rays stop sampling at the depth already in the depth buffer
+  float ray_distance_depth_buffer = distance(ray_entry, ray_intersect_depth_buffer);
+  if (ray_distance_depth_buffer < ray_distance) {
+    ray_exit = ray_intersect_depth_buffer;
+    ray_distance = ray_distance_depth_buffer;
+  }
+#endif
+
+  // Tests
+#ifdef SHOW_RAY_ENTRY
+  out_color = vec4(ray_entry, 1.0f); return;
+#endif
+#ifdef SHOW_RAY_EXIT
+  out_color = vec4(ray_exit, 1.0f); return;
+#endif
+
+  // Determine number of samples
+  ivec3 dim = textureSize(volume, 0);
+  int dim_max = max(max(dim.x, dim.y), dim.z);
+  int n_steps = int(ceil(float(dim_max) * ray_distance * transfer_function_uniform.sampling_factor));
+  vec3 step_volume = ray_dir * ray_distance / (float(n_steps) - 1.0f);
+  float sampling_factor_inv = 1.0f / transfer_function_uniform.sampling_factor;
+
+  // This test fixes a performance regression if view is oriented with edge/s of the volume
+  // perhaps due to precision issues with the bounding box intersection
+  vec3 early_exit_test = ray_entry + step_volume;
+  if (any(lessThanEqual(early_exit_test, vec3(0))) || any(greaterThanEqual(early_exit_test, vec3(1)))) {
+    return;
+  }
+
+#ifndef DISABLE_SKIP
+  // Empty space skipping
+  ivec3 dim_distance_map = textureSize(distance_map[0], 0);
+  vec3 volume_to_distance_map_u = vec3(dim) / (vec3(ray_cast_uniform.block_size));
+  ivec3 dim_distance_map_1 = dim_distance_map - 1;
+  vec3 step_dist_texel = step_volume * vec3(dim) / vec3(ray_cast_uniform.block_size);
+  vec3 step_dist_texel_inv = 1.0f / step_dist_texel;
+  int i_min = 0; // furthest sampled step + 1
+  ivec3 u_last_alpha = ivec3(0);
+#endif
+
+#ifdef SHOW_NUM_SAMPLES
+  int num_volume_samples = 0;
+  int num_distance_samples = 0;
+  int num_empty_samples = 0;
+#endif
+
+  // Precompute some constants
+  vec3 dim_inv = 1.0f / vec3(dim);
+#ifdef ANISOTROPIC_DISTANCE
+  distance_map_idx = (ray_dir.z < 0 ? 1 : 0) + (ray_dir.y < 0 ? 2 : 0) + (ray_dir.x < 0 ? 4 : 0);
+#endif
+
+  // Step through volume
+  bool voxel_occupied = true;
+  int i_first_hit = n_steps; // assume ray goes through
+  for (int i = 0; i < n_steps;) {
+    vec3 pos = ray_entry + float(i) * step_volume;
+    
+    #ifndef DISABLE_SKIP
+    // Get occupancy/distance map texel coordinate
+    vec3 u = volume_to_distance_map_u * pos;
+    ivec3 u_i = clamp(ivec3(u), ivec3(0), dim_distance_map_1);
+
+    // Check if space skipping structure should be examined
+    if (!voxel_occupied && any(notEqual(u_i, u_last_alpha))) {
+      #ifdef SHOW_NUM_SAMPLES
+      ++num_distance_samples;
+      #endif
+
+      #ifdef ANISOTROPIC_DISTANCE
+      uint dist = texelFetch(distance_map[distance_map_idx], u_i, 0).x;
+    #else
+      uint dist = texelFetch(distance_map[0], u_i, 0).x;
+    #endif
+      vec3 r = clamp(u_i - u, -1.0, 0.0);
+      int i_delta;
+      if (dist > 0u) {
+    #ifdef BLOCK_SKIP
+        // Skip with "block empty space skipping"
+        vec3 i_delta_xyz = (step(0.0f, step_dist_texel_inv) + r) * step_dist_texel_inv;
+    #else
+        // Skip with "chebyshev empty space skipping"
+        vec3 i_delta_xyz = (step(0.0f, -step_dist_texel_inv) + sign(step_dist_texel_inv) * float(dist) + r) * step_dist_texel_inv;
+    #endif
+        i_delta = max(1, int(ceil(min(min(i_delta_xyz.x, i_delta_xyz.y), i_delta_xyz.z))));
+        
+        // Skip ray forward
+        i += i_delta;
+      } else {
+    #ifdef SHOW_OCCUPANCY
+        out_color = vec4(vec3(ray_distance * float(i) / float(n_steps)), 1.0f); return;
+    #endif
+        // Step backwards
+        i_delta = -int(ceil(transfer_function_uniform.sampling_factor));
+        // NOTE: The ray is stepped backwards as sample positions just outside of occupied blocks may have some opacity (due to linear sampling of the volume)
+        // The artefacts are quite subtle, so this could be optional. For correctness, this is enabled, but obviously causes a slight performance drop.
+        // The ray won't ever step back further than the last sampled voxel or make the same back step twice
+        
+        // Stop skipping and move ray a little bit backwards
+        voxel_occupied = true;
+        u_last_alpha = u_i;
+        i = max(i + i_delta, i_min);
+      }
+    }
+    else
+    #endif
+    {
+      #ifdef SHOW_NUM_SAMPLES
+      ++num_volume_samples;
+      #endif
+
+      // Map to colour and opacity with a transfer function
+      float intensity = texture(volume, pos).x;
+      float gradient = get_gradient(pos, dim_inv);
+      vec4 color = get_color(intensity, gradient);
+
+      voxel_occupied = color.a > 0.0f;
+      if (voxel_occupied) {
+        #ifndef DISABLE_SKIP
+        u_last_alpha = u_i;
+        #endif
+
+        // Correct opacity given sampling factor and multiply colour by alpha
+        color.a = clamp(transfer_function_uniform.voxel_alpha_factor * (1.0f - pow(1.0f - color.a, sampling_factor_inv)), 0.0f, 1.0f);  // opacity correction formula
+        color.xyz *= color.a;
+
+        // Blend
+        out_color = out_color + (1.0f - out_color.a) * color;
+
+        if (color.a > 0.0f) {
+          i_first_hit = i;
+        }
+
+        if (out_color.a > 0.99f) {
+          #ifndef DISABLE_EARLY_RAY_TERMINATION
+          // Early ray termination
+          out_color.a = 1.0f;
+          break;
+          #endif
+        }
+      } else {
+        #ifdef SHOW_NUM_SAMPLES
+        ++num_empty_samples;
+        #endif
+      }
+      
+      ++i; // move the ray forward
+      #ifndef DISABLE_SKIP
+      i_min = i;
+      #endif
+    }
+
+  }
+
+  // Write the depth
+  if (out_color.a > 0.0f && i_first_hit < n_steps) {
+    // FIXME: This can be optimised... eg. tex -> proj transform
+    vec3 penetration_tex = ray_entry + step_volume * i_first_hit;
+    vec3 penetration_model = penetration_tex - 0.5f;
+    vec4 penetration_proj = camera_uniform.proj * camera_uniform.view * camera_uniform.model * vec4(penetration_model, 1.0f);
+    gl_FragDepth = penetration_proj.z / penetration_proj.w;
+  }
+
+#ifdef SHOW_NUM_SAMPLES
+  uint n_steps_max = uint(ceil(vec3(dim_max) * sqrt(3.0f)) * transfer_function_uniform.sampling_factor);
+//  out_color = vec4(
+//    float(num_volume_samples) / float(n_steps_max),
+//    float(num_distance_samples) / float(n_steps_max),
+//    float(num_empty_samples) / float(n_steps_max),
+//    1.0f
+//  );
+  out_color = vec4(
+    vec3(float(num_volume_samples + num_distance_samples) / float(n_steps_max)),
+    1.0f
+  );
+#endif
+}
+```
+
+### shaders/volume_render_clipped.vert
+```
+#version 450
+/* Copyright (c) 2019, Lachlan Deakin
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#extension GL_EXT_clip_cull_distance: enable
+
+precision highp float;
+
+layout(location = 0) in vec3 position;
+
+layout(set = 0, binding = 1) uniform CameraUniform {
+    mat4 view;
+    mat4 proj;
+    mat4 view_proj_inv;
+    mat4 model;
+    mat4 model_inv;
+} camera_uniform;
+
+layout(set = 0, binding = 2) uniform RayCastUniform {
+    vec4 plane;
+    vec4 plane_tex;
+    vec4 cam_pos_tex;
+    vec4 block_size;
+    int front_index;
+} ray_cast_uniform;
+
+layout(location = 0) out vec4 position_out;
+layout(location = 1) out vec3 ray_entry;
+
+out gl_PerVertex 
+{
+    vec4 gl_Position;
+    float gl_ClipDistance[1];
+};
+
+void main()
+{
+    // Convert to world space
+    vec4 position_world = camera_uniform.model * vec4(position, 1.0f);
+
+    // Distance to clip plane
+    gl_ClipDistance[0] = dot(ray_cast_uniform.plane, position_world);
+
+    // Ray entry (in texel coordinates)
+    ray_entry = position + 0.5f;
+
+    // Output (projection space)
+    position_out = camera_uniform.proj * camera_uniform.view * position_world;
+    gl_Position = position_out;
+
+}
+```
+
+### shaders/volume_render_plane_intersection.vert
+```
+#version 320 es
+/* Copyright (c) 2019, Lachlan Deakin
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 the "License";
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+precision highp float;
+
+layout(set = 0, binding = 1) uniform CameraUniform {
+    mat4 view;
+    mat4 proj;
+    mat4 view_proj_inv;
+    mat4 model;
+    mat4 model_inv;
+} camera_uniform;
+
+layout(set = 0, binding = 2) uniform RayCastUniform {
+    vec4 plane;
+    vec4 plane_tex;
+    vec4 cam_pos_tex;
+    vec4 block_size;
+    int front_index;
+} ray_cast_uniform;
+
+layout(location = 0) out vec4 position_out;
+layout(location = 1) out vec3 ray_entry;
+
+// A Vertex Program for Efficient Box-Plane Intersection
+// Christof Rezk Salama and Andreas Kolb, 2005
+
+// Coordinate system
+//         x
+//        /
+//  z -- O
+//       |
+//       y
+
+//    Standard cube   ->       Authors layout (Salama&Kolb)
+//      5 ------- 1            4 ------- 1
+//     /         /|           /         /|
+//    /         / |          /         / |
+//   /         /  |         /         /  |
+//  4 ------- 0   |        3 ------- 0   |  <-- closest = 0
+//  |   7 ----|-- 3   ->   |   7 ----|-- 5
+//  |  /      |  /         |  /      |  /
+//  | /       | /          | /       | /
+//  |/        |/           |/        |/
+//  6 ------- 2            6 ------- 2
+
+// Vertices of the authors cube layout on a unit cube, comments show standard cube layout
+vec4 cube_vertices[8] = vec4[](
+    vec4(0.0f, 0.0f, 0.0f, 1), // 0
+    vec4(1.0f, 0.0f, 0.0f, 1), // 1
+    vec4(0.0f, 1.0f, 0.0f, 1), // 2
+    vec4(0.0f, 0.0f, 1.0f, 1), // 4
+    vec4(1.0f, 0.0f, 1.0f, 1), // 5
+    vec4(1.0f, 1.0f, 0.0f, 1), // 3
+    vec4(0.0f, 1.0f, 1.0f, 1), // 6
+    vec4(1.0f, 1.0f, 1.0f, 1)  // 7
+);
+
+// The mapping from standard cube to authors layout
+const int index_map_standard_to_author[] = int[](0, 1, 2, 5, 3, 4, 6, 7);
+
+// This holds the "vertex sequence" which varies depending on which vertex is furthest behind the clipping plane.
+// It was written by swapping the 0th and nth vertices, and looking at where all vertices are moved.
+// The ambigous swap for vertex 7 has vertex 4 at +x. This is all done with the authors cube layout.
+int vertex_sequence[8*8] = int[](
+    0, 1, 2, 3, 4, 5, 6, 7,
+    1, 0, 4, 5, 2, 3, 7, 6,
+    2, 6, 0, 5, 7, 3, 1, 4,
+    3, 6, 4, 0, 2, 7, 1, 5,
+    4, 3, 7, 1, 0, 6, 5, 2,
+    5, 2, 1, 7, 6, 0, 4, 3,
+    6, 7, 3, 2, 5, 4, 0, 1,
+    7, 4, 6, 5, 1, 3, 2, 0
+);
+
+// This defines the intersection tests P0 -> P6 outlined in section 4 of (Salama & Kolb, 2005) 
+int _V[6 * 4 * 2] = int[](
+    0, 1, 1, 4, 4, 7, 4, 7, // P0
+    1, 5, 0, 1, 1, 4, 4, 7, // P1
+    0, 2, 2, 5, 5, 7, 5, 7, // P2
+    2, 6, 0, 2, 2, 5, 5, 7, // P3
+    0, 3, 3, 6, 6, 7, 6, 7, // P4
+    3, 4, 0, 3, 3, 6, 6, 7  // P5
+);
+
+void main()
+{
+    int sequence_index = index_map_standard_to_author[ray_cast_uniform.front_index] * 8;
+    vec3 pos_tex = vec3(1.0 / 0.0f); // set to nan by default
+    for (int e = 0; e < 4; ++e)
+    {
+        int vidx1 = vertex_sequence[sequence_index + _V[(int(gl_VertexIndex) * 4 + e) * 2]];
+        int vidx2 = vertex_sequence[sequence_index + _V[(int(gl_VertexIndex) * 4 + e) * 2 + 1]];
+
+        vec3 vecV1 = vec3(cube_vertices[vidx1]);
+        vec3 vecV2 = vec3(cube_vertices[vidx2]);
+        vec3 vecDir = vecV2 - vecV1;
+
+        float denom = dot(vecDir, ray_cast_uniform.plane_tex.xyz);
+        float lambda = denom != 0.0f ? (-ray_cast_uniform.plane_tex.w - dot(vecV1, ray_cast_uniform.plane_tex.xyz)) / denom : -1.0;
+
+        if (lambda >= 0.0f && lambda <= 1.0f)
+        {
+            pos_tex = vecV1 + lambda * vecDir;
+            break;
+        }
+    }
+
+    // Ray entry (in texel coordinates)
+    ray_entry = pos_tex;
+
+    // Output (projection space)
+    position_out = camera_uniform.proj * camera_uniform.view * camera_uniform.model * vec4(pos_tex - 0.5f, 1.0f);
+    gl_Position = position_out;
+}
+```
+
+### src/compute_distance_map.cpp
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "compute_distance_map.h"
+
+#include "common/vk_common.h"
+#include "platform/filesystem.h"
+#include "rendering/render_context.h"
+
+auto rndUp = [](int x, int y) { return (x + y - 1) / y; };
+
+ComputeDistanceMap::ComputeDistanceMap(vkb::RenderContext &render_context) :
+    render_context(render_context),
+    compute_shader_occupancy("occupancy_map.comp"),
+    compute_shader_distance("distance_map.comp"),
+    compute_shader_distance_anisotropic("distance_map_anisotropic.comp")
+{
+	vkb::ShaderVariant variant;
+	variant.add_define("PRECOMPUTED_GRADIENT");
+
+	// Build all shaders upfront
+	auto &resource_cache = render_context.get_device().get_resource_cache();
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_occupancy);
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_occupancy, variant);
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_distance);
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_distance_anisotropic);
+
+	// Memory barriers
+	memory_barrier_to_compute.old_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+	memory_barrier_to_compute.new_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_to_compute.src_access_mask = 0;
+	memory_barrier_to_compute.dst_access_mask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_to_compute.src_stage_mask  = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+	memory_barrier_to_compute.dst_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+	memory_barrier_write_to_read.old_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_write_to_read.new_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_write_to_read.src_access_mask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_write_to_read.dst_access_mask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_write_to_read.src_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	memory_barrier_write_to_read.dst_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+	memory_barrier_compute_to_fragment.old_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_compute_to_fragment.new_layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	memory_barrier_compute_to_fragment.src_access_mask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_compute_to_fragment.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_compute_to_fragment.src_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	memory_barrier_compute_to_fragment.dst_stage_mask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+}
+
+void ComputeDistanceMap::compute(vkb::CommandBuffer &command_buffer, Volume &volume, vkb::BufferAllocation &transfer_function_uniform, VolumeRenderSubpass::SkippingType skipping_type)
+{
+	bool anisotropic     = skipping_type == VolumeRenderSubpass::SkippingType::AnisotropicDistance;
+	int  n_distance_maps = anisotropic ? 8 : 1;
+	volume.set_number_of_distance_maps(render_context, n_distance_maps);
+
+	// Occupancy
+	auto &occupancy_map = volume.get_distance_map(n_distance_maps - 1);
+	command_buffer.image_memory_barrier(*occupancy_map.image_view, memory_barrier_to_compute);
+	command_buffer.image_memory_barrier(*volume.get_volume().image_view, memory_barrier_to_compute);
+	if (volume.options.use_precomputed_gradient)
+	{
+		command_buffer.image_memory_barrier(*volume.get_gradient().image_view, memory_barrier_to_compute);
+	}
+	computeOccupancy(command_buffer, volume, occupancy_map, transfer_function_uniform);
+	if (volume.options.use_precomputed_gradient)
+	{
+		command_buffer.image_memory_barrier(*volume.get_gradient().image_view, memory_barrier_compute_to_fragment);
+	}
+
+	// Distance map
+	command_buffer.image_memory_barrier(*volume.get_volume().image_view, memory_barrier_to_compute);
+	command_buffer.image_memory_barrier(*volume.get_distance_map_swap().image_view, memory_barrier_to_compute);
+	if (skipping_type == VolumeRenderSubpass::SkippingType::AnisotropicDistance)
+	{
+		computeDistanceAnisotropic(command_buffer, volume);
+	}
+	else if (skipping_type == VolumeRenderSubpass::SkippingType::Distance)
+	{
+		computeDistance(command_buffer, volume);
+	}
+	else
+	{
+		command_buffer.image_memory_barrier(*occupancy_map.image_view, memory_barrier_compute_to_fragment);
+	}
+	command_buffer.image_memory_barrier(*volume.get_volume().image_view, memory_barrier_compute_to_fragment);
+}
+
+void ComputeDistanceMap::computeOccupancy(vkb::CommandBuffer &command_buffer, const Volume &volume, const Volume::Image &occupancy_map,
+                                          vkb::BufferAllocation &transfer_function_uniform)
+{
+	auto &volume_tex = volume.get_volume();
+	// Compute block size
+	auto       extent        = occupancy_map.image->get_extent();
+	auto       volume_extent = volume_tex.image->get_extent();
+	glm::ivec3 block_size(
+	    rndUp(volume_extent.width, extent.width),
+	    rndUp(volume_extent.height, extent.height),
+	    rndUp(volume_extent.depth, extent.depth));
+
+	vkb::ShaderVariant variant;
+	if (volume.options.use_precomputed_gradient)
+	{
+		variant.add_define("PRECOMPUTED_GRADIENT");
+	}
+
+	auto &resource_cache  = command_buffer.get_device().get_resource_cache();
+	auto &shader_module   = resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_occupancy, variant);
+	auto &pipeline_layout = resource_cache.request_pipeline_layout({&shader_module});
+
+	// Bind pipeline layout and images
+	command_buffer.bind_pipeline_layout(pipeline_layout);
+	command_buffer.bind_input(*volume_tex.image_view, 0, 0, 0);
+	command_buffer.bind_buffer(transfer_function_uniform.get_buffer(), transfer_function_uniform.get_offset(), transfer_function_uniform.get_size(), 0, 1, 0);
+	command_buffer.bind_image(*volume.get_transfer_function().image_view, *volume.get_transfer_function().sampler, 0, 2, 0);
+	if (volume.options.use_precomputed_gradient)
+	{
+		command_buffer.bind_input(*volume.get_gradient().image_view, 0, 3, 0);
+	}
+	command_buffer.bind_input(*occupancy_map.image_view, 0, 4, 0);
+
+	command_buffer.push_constants(glm::ivec4(block_size, 0));
+	command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.height, 8), rndUp(extent.depth, 8));
+
+	command_buffer.image_memory_barrier(*occupancy_map.image_view, memory_barrier_write_to_read);
+}
+
+void ComputeDistanceMap::computeDistance(vkb::CommandBuffer &command_buffer, const Volume &volume)
+{
+	auto &resource_cache  = command_buffer.get_device().get_resource_cache();
+	auto &shader_module   = resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_distance);
+	auto &pipeline_layout = resource_cache.request_pipeline_layout({&shader_module});
+
+	auto &distance = volume.get_distance_map();        // also the occupancy map, done in-place
+	auto &swap     = volume.get_distance_map_swap();
+
+	command_buffer.image_memory_barrier(*distance.image_view, memory_barrier_to_compute);
+
+	// Bind pipeline layout and images
+	auto extent = distance.image->get_extent();
+	command_buffer.bind_pipeline_layout(pipeline_layout);
+	command_buffer.bind_input(*distance.image_view, 0, 0, 0);
+	command_buffer.bind_input(*distance.image_view, 0, 1, 0);
+
+	// Dispatch 1st stage
+	command_buffer.push_constants<uint32_t>(0);
+	command_buffer.dispatch(rndUp(extent.height, 8), rndUp(extent.depth, 8), 1);
+	command_buffer.image_memory_barrier(*distance.image_view, memory_barrier_write_to_read);
+
+	// Dispatch 2nd stage
+	command_buffer.bind_input(*swap.image_view, 0, 1, 0);
+	command_buffer.push_constants<uint32_t>(1);
+	command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.depth, 8), 1);
+	command_buffer.image_memory_barrier(*swap.image_view, memory_barrier_write_to_read);
+
+	// Dispatch 3rd stage
+	command_buffer.push_constants<uint32_t>(2);
+	command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.height, 8), 1);
+
+	command_buffer.image_memory_barrier(*distance.image_view, memory_barrier_compute_to_fragment);
+}
+
+void ComputeDistanceMap::computeDistanceAnisotropic(vkb::CommandBuffer &command_buffer, const Volume &volume)
+{
+	auto &resource_cache  = command_buffer.get_device().get_resource_cache();
+	auto &shader_module   = resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_distance_anisotropic);
+	auto &pipeline_layout = resource_cache.request_pipeline_layout({&shader_module});
+
+	auto &occupancy_map = volume.get_distance_map(7);
+	auto &swap          = volume.get_distance_map_swap();
+	auto  extent        = occupancy_map.image->get_extent();
+
+	command_buffer.bind_pipeline_layout(pipeline_layout);
+
+	for (int i = 0; i < 8; ++i)
+	{
+		auto &distance = volume.get_distance_map(i);
+		command_buffer.image_memory_barrier(*distance.image_view, memory_barrier_to_compute);
+	}
+
+	struct PushConstants
+	{
+		uint32_t stage;
+		int32_t  direction;
+	};
+
+	auto stage1 = [&](size_t distance_map_idx, int32_t direction) {
+		auto &distance = volume.get_distance_map(distance_map_idx);
+		command_buffer.push_constants<PushConstants>({0, direction});
+		command_buffer.bind_input(*distance.image_view, 0, 0, 0);
+		command_buffer.bind_input(*occupancy_map.image_view, 0, 1, 0);
+		command_buffer.dispatch(rndUp(extent.height, 8), rndUp(extent.depth, 8), 1);
+		command_buffer.image_memory_barrier(*volume.get_distance_map(distance_map_idx).image_view, memory_barrier_write_to_read);
+	};
+
+	auto stage2 = [&](size_t distance_map_idx, int32_t direction) {
+		auto &distance = volume.get_distance_map(distance_map_idx);
+		command_buffer.push_constants<PushConstants>({1, direction});
+		command_buffer.bind_input(*distance.image_view, 0, 0, 0);
+		command_buffer.bind_input(*swap.image_view, 0, 1, 0);
+		command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.depth, 8), 1);
+		command_buffer.image_memory_barrier(*swap.image_view, memory_barrier_write_to_read);
+	};
+
+	auto stage3 = [&](size_t distance_map_idx, int32_t direction) {
+		auto &distance = volume.get_distance_map(distance_map_idx);
+		command_buffer.image_memory_barrier(*distance.image_view, memory_barrier_to_compute);
+		command_buffer.push_constants<PushConstants>({2, direction});
+		command_buffer.bind_input(*distance.image_view, 0, 0, 0);
+		command_buffer.bind_input(*swap.image_view, 0, 1, 0);
+		command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.height, 8), 1);
+		command_buffer.image_memory_barrier(*volume.get_distance_map(distance_map_idx).image_view, memory_barrier_write_to_read);
+	};
+
+	//+++ 3 s 0
+	//++- ^ ^ 1
+	//+-+ ^ s 2
+	//+-- ^ ^ 3
+	//-++ 7 s 4
+	//-+- ^ ^ 5
+	//--+ ^ s 6
+	//--- ^ ^ 7
+
+	stage1(3, 1);
+	stage2(3, 1);
+	stage3(0, 1);         // write
+	stage3(1, -1);        // write
+	stage2(3, -1);
+	stage3(2, 1);         // write
+	stage3(3, -1);        // write
+
+	stage1(7, -1);
+	stage2(7, 1);
+	stage3(4, 1);         // write
+	stage3(5, -1);        // write
+	stage2(7, -1);
+	stage3(6, 1);         // write
+	stage3(7, -1);        // write
+
+	//for (int i = 0; i < 8; ++i)
+	//{
+	//	auto &distance_map_i = volume.get_distance_map(i);
+
+	//	// Bind images
+	//	command_buffer.bind_input(*distance_map_i.image_view, 0, 0, 0);
+	//	command_buffer.bind_input(*occupancy_map.image_view, 0, 1, 0);
+
+	//	// Assign direction
+	//	glm::vec3 direction((i / 1) % 2 == 0 ? 1.0f : -1.0f,
+	//	                    (i / 2) % 2 == 0 ? 1.0f : -1.0f,
+	//	                    (i / 4) % 2 == 0 ? 1.0f : -1.0f);
+	//	command_buffer.push_constants<glm::vec3>(sizeof(glm::vec4), direction);
+
+	//	// Dispatch 1st stage
+	//	command_buffer.push_constants<uint32_t>(0, 0);
+	//	command_buffer.dispatch(rndUp(extent.height, 8), rndUp(extent.depth, 8), 1);
+	//	command_buffer.image_memory_barrier(*distance_map_i.image_view, memory_barrier_write_to_read);
+
+	//	// Dispatch 2nd stage
+	//	command_buffer.bind_input(*swap.image_view, 0, 1, 0);
+	//	command_buffer.push_constants<uint32_t>(0, 1);
+	//	command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.depth, 8), 1);
+	//	command_buffer.image_memory_barrier(*swap.image_view, memory_barrier_write_to_read);
+
+	//	// Dispatch 3rd stage
+	//	command_buffer.push_constants<uint32_t>(0, 2);
+	//	command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.height, 8), 1);
+	//	command_buffer.image_memory_barrier(*distance_map_i.image_view, memory_barrier_write_to_read);
+	//}
+
+	for (int i = 0; i < 8; ++i)
+	{
+		auto &distance = volume.get_distance_map(i);
+		command_buffer.image_memory_barrier(*distance.image_view, memory_barrier_compute_to_fragment);
+	}
+}
+```
+
+### src/compute_distance_map.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+#include "core/shader_module.h"
+
+#include "volume_component.h"
+#include "volume_render_subpass.h"
+
+namespace vkb
+{
+class RenderContext;
+class CommandBuffer;
+}        // namespace vkb
+
+class ComputeDistanceMap
+{
+  public:
+	ComputeDistanceMap(vkb::RenderContext &render_context);
+
+	virtual ~ComputeDistanceMap() = default;
+
+	void compute(vkb::CommandBuffer &command_buffer, Volume &volume, vkb::BufferAllocation &transfer_function_uniform, VolumeRenderSubpass::SkippingType skipping_type);
+
+  private:
+	void computeOccupancy(vkb::CommandBuffer &command_buffer, const Volume &volume, const Volume::Image &occupancy_map, vkb::BufferAllocation &transfer_function_uniform);
+	void computeDistance(vkb::CommandBuffer &command_buffer, const Volume &volume);
+	void computeDistanceAnisotropic(vkb::CommandBuffer &command_buffer, const Volume &volume);
+
+	vkb::RenderContext &render_context;
+
+	vkb::ShaderSource compute_shader_occupancy, compute_shader_distance, compute_shader_distance_anisotropic;
+
+	vkb::ImageMemoryBarrier memory_barrier_to_compute{};
+	vkb::ImageMemoryBarrier memory_barrier_write_to_read{};
+	vkb::ImageMemoryBarrier memory_barrier_compute_to_fragment{};
+};
+```
+
+### src/compute_gradient_map.cpp
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "compute_gradient_map.h"
+
+#include "common/vk_common.h"
+#include "platform/filesystem.h"
+#include "rendering/render_context.h"
+
+auto rndUp = [](int x, int y) { return (x + y - 1) / y; };
+
+ComputeGradientMap::ComputeGradientMap(vkb::RenderContext &render_context) :
+    render_context(render_context),
+    compute_shader("gradient_map.comp")
+{
+	// Build all shaders upfront
+	auto &resource_cache = render_context.get_device().get_resource_cache();
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader);
+
+	// Memory barriers
+	memory_barrier_to_compute.old_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+	memory_barrier_to_compute.new_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_to_compute.src_access_mask = 0;
+	memory_barrier_to_compute.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_to_compute.src_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	memory_barrier_to_compute.dst_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+	memory_barrier_write_to_read.old_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_write_to_read.new_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_write_to_read.src_access_mask = VK_ACCESS_SHADER_WRITE_BIT;
+	memory_barrier_write_to_read.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_write_to_read.src_stage_mask  = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+	memory_barrier_write_to_read.dst_stage_mask  = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+	memory_barrier_compute_to_fragment.old_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_compute_to_fragment.new_layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	memory_barrier_compute_to_fragment.src_access_mask = VK_ACCESS_SHADER_WRITE_BIT;
+	memory_barrier_compute_to_fragment.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_compute_to_fragment.src_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	memory_barrier_compute_to_fragment.dst_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+}
+
+void ComputeGradientMap::compute(vkb::CommandBuffer &command_buffer, Volume &volume, vkb::BufferAllocation &transfer_function_uniform)
+{
+	// Set layout
+	auto &volume_tex   = volume.get_volume();
+	auto &gradient_tex = volume.get_gradient();
+	command_buffer.image_memory_barrier(*volume_tex.image_view, memory_barrier_to_compute);
+	command_buffer.image_memory_barrier(*gradient_tex.image_view, memory_barrier_to_compute);
+
+	auto &resource_cache  = command_buffer.get_device().get_resource_cache();
+	auto &shader_module   = resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader);
+	auto &pipeline_layout = resource_cache.request_pipeline_layout({&shader_module});
+
+	// Bind pipeline layout and images
+	command_buffer.bind_pipeline_layout(pipeline_layout);
+	command_buffer.bind_input(*volume_tex.image_view, 0, 0, 0);
+	command_buffer.bind_buffer(transfer_function_uniform.get_buffer(), transfer_function_uniform.get_offset(), transfer_function_uniform.get_size(), 0, 1, 0);
+	//command_buffer.bind_input(*transfer_function.image_view, 0, 2, 0);        // Transfer function texture, need variant TRANSFER_FUNCTION_TEXTURE
+	command_buffer.bind_input(*gradient_tex.image_view, 0, 3, 0);
+	auto extent = volume_tex.image->get_extent();
+	command_buffer.dispatch(rndUp(extent.width, 8), rndUp(extent.height, 8), rndUp(extent.depth, 8));
+
+	// Reset layout
+	command_buffer.image_memory_barrier(*volume_tex.image_view, memory_barrier_compute_to_fragment);
+	command_buffer.image_memory_barrier(*gradient_tex.image_view, memory_barrier_compute_to_fragment);
+}
+```
+
+### src/compute_gradient_map.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+#include "core/shader_module.h"
+
+#include "volume_component.h"
+#include "volume_render_subpass.h"
+
+namespace vkb
+{
+class RenderContext;
+class CommandBuffer;
+}        // namespace vkb
+
+class ComputeGradientMap
+{
+  public:
+	ComputeGradientMap(vkb::RenderContext &render_context);
+
+	virtual ~ComputeGradientMap() = default;
+
+	void compute(vkb::CommandBuffer &command_buffer, Volume &volume, vkb::BufferAllocation &transfer_function_uniform);
+
+  private:
+	vkb::RenderContext &render_context;
+
+	vkb::ShaderSource compute_shader;
+
+	vkb::ImageMemoryBarrier memory_barrier_to_compute{};
+	vkb::ImageMemoryBarrier memory_barrier_write_to_read{};
+	vkb::ImageMemoryBarrier memory_barrier_compute_to_fragment{};
+};
+```
+
+### src/compute_occupied_voxel_count.cpp
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "compute_occupied_voxel_count.h"
+
+#include "common/vk_common.h"
+#include "platform/filesystem.h"
+#include "rendering/render_context.h"
+
+#include "transfer_function.h"
+
+auto rndUp = [](int x, int y) { return (x + y - 1) / y; };
+
+ComputeOccupiedVoxelCount::ComputeOccupiedVoxelCount(vkb::RenderContext &render_context) :
+    render_context(render_context),
+    compute_shader("occupied_voxel_count.comp"),
+    compute_shader_reduce("occupied_voxel_count_reduce.comp")
+{
+	// Get subgroup size
+	VkPhysicalDeviceSubgroupProperties subgroup_properties{};
+	subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+	VkPhysicalDeviceProperties2 properties{};
+	properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+	properties.pNext = &subgroup_properties;
+	vkGetPhysicalDeviceProperties2(render_context.get_device().get_gpu().get_handle(), &properties);
+	subgroup_size = subgroup_properties.subgroupSize;
+
+	// Build all shaders upfront
+	vkb::ShaderVariant variant;
+	variant.add_define("PRECOMPUTED_GRADIENT");
+	auto &resource_cache = render_context.get_device().get_resource_cache();
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader);
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader, variant);
+
+	variant_reduce.add_define("SUBGROUP_SIZE " + std::to_string(subgroup_size));
+	resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_reduce, variant_reduce);
+
+	memory_barrier_compute.old_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+	memory_barrier_compute.new_layout      = VK_IMAGE_LAYOUT_GENERAL;
+	memory_barrier_compute.src_access_mask = VK_ACCESS_SHADER_WRITE_BIT;
+	memory_barrier_compute.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_compute.src_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	memory_barrier_compute.dst_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+	memory_barrier_shader_read_only_optimal.old_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+	memory_barrier_shader_read_only_optimal.new_layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	memory_barrier_shader_read_only_optimal.src_access_mask = VK_ACCESS_SHADER_WRITE_BIT;
+	memory_barrier_shader_read_only_optimal.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+	memory_barrier_shader_read_only_optimal.src_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	memory_barrier_shader_read_only_optimal.dst_stage_mask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+}
+
+vkb::core::Buffer ComputeOccupiedVoxelCount::initialise_buffer(vkb::Device &device, Volume &volume)
+{
+	const VkExtent3D   extent = volume.get_volume().image->get_extent();
+	const glm::uvec3   dispatchSize(rndUp(extent.width, 8), rndUp(extent.height, 8), rndUp(extent.depth, 8));
+	const VkDeviceSize nElements =
+	    static_cast<VkDeviceSize>(dispatchSize.x) * static_cast<VkDeviceSize>(dispatchSize.y) *
+	    static_cast<VkDeviceSize>(dispatchSize.z) * static_cast<VkDeviceSize>(8 * 8 * 8 / subgroup_size);
+	const VkDeviceSize bufferSize = sizeof(uint64_t) * nElements;
+	vkb::core::Buffer  buffer(device, bufferSize,
+                             VkBufferUsageFlagBits::VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VmaMemoryUsage::VMA_MEMORY_USAGE_GPU_TO_CPU);
+	return buffer;
+}
+
+void ComputeOccupiedVoxelCount::compute(vkb::CommandBuffer &command_buffer, Volume &volume, vkb::BufferAllocation &buffer, vkb::BufferAllocation &transfer_function_uniform)
+{
+	auto &resource_cache = command_buffer.get_device().get_resource_cache();
+
+	// Set layout
+	command_buffer.image_memory_barrier(*volume.get_volume().image_view, memory_barrier_compute);
+
+	// Run the count
+	{
+		vkb::ShaderVariant variant;
+		if (volume.options.use_precomputed_gradient)
+		{
+			variant.add_define("PRECOMPUTED_GRADIENT");
+		}
+
+		auto &shader_module = resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader, variant);
+		shader_module.set_resource_mode("countBuffer", vkb::ShaderResourceMode::Dynamic);
+		auto &pipeline_layout = resource_cache.request_pipeline_layout({&shader_module});
+		command_buffer.bind_pipeline_layout(pipeline_layout);
+		command_buffer.bind_input(*volume.get_volume().image_view, 0, 0, 0);
+		command_buffer.bind_buffer(transfer_function_uniform.get_buffer(), transfer_function_uniform.get_offset(), transfer_function_uniform.get_size(), 0, 1, 0);
+		// transfer function texture
+		if (volume.options.use_precomputed_gradient)
+		{
+			command_buffer.image_memory_barrier(*volume.get_gradient().image_view, memory_barrier_compute);
+			command_buffer.bind_input(*volume.get_gradient().image_view, 0, 3, 0);
+		}
+		command_buffer.bind_buffer(buffer.get_buffer(), buffer.get_offset(), buffer.get_size(), 0, 4, 0);
+		const VkExtent3D extent = volume.get_volume().image->get_extent();
+		const glm::uvec3 dispatchSize(rndUp(extent.width, 8), rndUp(extent.height, 8), rndUp(extent.depth, 8));
+		command_buffer.dispatch(dispatchSize.x, dispatchSize.y, dispatchSize.z);
+		command_buffer.image_memory_barrier(*volume.get_volume().image_view, memory_barrier_shader_read_only_optimal);
+		if (volume.options.use_precomputed_gradient)
+		{
+			command_buffer.image_memory_barrier(*volume.get_gradient().image_view, memory_barrier_shader_read_only_optimal);
+		}
+	}
+
+	// Run the reduce operations
+	{
+		auto &shader_module   = resource_cache.request_shader_module(VK_SHADER_STAGE_COMPUTE_BIT, compute_shader_reduce, variant_reduce);
+		auto &pipeline_layout = resource_cache.request_pipeline_layout({&shader_module});
+		command_buffer.bind_pipeline_layout(pipeline_layout);
+		command_buffer.bind_buffer(buffer.get_buffer(), buffer.get_offset(), buffer.get_size(), 0, 0, 0);
+
+		uint32_t                 stride        = 1;
+		vkb::BufferMemoryBarrier barrier;
+		barrier.src_access_mask = barrier.dst_access_mask =
+		    VkAccessFlagBits::VK_ACCESS_SHADER_READ_BIT | VkAccessFlagBits::VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.src_stage_mask = barrier.dst_stage_mask =
+		    VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+		auto         rndUp64   = [](uint64_t x, uint64_t y) { return (x + y - 1) / y; };
+		const size_t nElements = buffer.get_size() / sizeof(uint64_t);
+		while (stride < nElements)
+		{
+			struct PushConstants
+			{
+				uint64_t n_elements;
+				uint32_t stride;
+			} pc = {static_cast<uint64_t>(nElements), stride};
+			command_buffer.push_constants(pc);
+			command_buffer.dispatch(static_cast<uint32_t>(rndUp64(nElements, static_cast<uint64_t>(subgroup_size) * static_cast<uint64_t>(stride))), 1, 1);
+			command_buffer.buffer_memory_barrier(buffer.get_buffer(), buffer.get_offset(), buffer.get_size(), barrier);
+			stride *= subgroup_size;
+		}
+	}
+}
+
+uint64_t ComputeOccupiedVoxelCount::get_result(vkb::BufferAllocation &buffer) const
+{
+	buffer.get_buffer().flush();        // FIXME: Needed?
+	auto     data  = buffer.get_buffer().map() + buffer.get_offset();
+	uint64_t count = reinterpret_cast<const uint64_t *>(data)[0];
+	buffer.get_buffer().unmap();
+	return count;
+}
+```
+
+### src/compute_occupied_voxel_count.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+#include "core/shader_module.h"
+
+#include "volume_component.h"
+#include "volume_render_subpass.h"
+
+namespace vkb
+{
+class RenderContext;
+class CommandBuffer;
+}        // namespace vkb
+
+class ComputeOccupiedVoxelCount
+{
+  public:
+	ComputeOccupiedVoxelCount(vkb::RenderContext &render_context);
+
+	virtual ~ComputeOccupiedVoxelCount() = default;
+
+	vkb::core::Buffer initialise_buffer(vkb::Device &device, Volume &volume);
+	void              compute(vkb::CommandBuffer &command_buffer, Volume &volume, vkb::BufferAllocation &buffer, vkb::BufferAllocation &transfer_function_uniform);
+	uint64_t          get_result(vkb::BufferAllocation &buffer) const;
+
+  private:
+	vkb::RenderContext &render_context;
+
+	vkb::ShaderSource compute_shader, compute_shader_reduce;
+
+	vkb::ImageMemoryBarrier memory_barrier_compute, memory_barrier_shader_read_only_optimal{};
+
+	uint32_t           subgroup_size;
+	vkb::ShaderVariant variant_reduce;
+};
+```
+
+### src/load_volume.cpp
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "load_volume.h"
+
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+
+#include <boost/endian/conversion.hpp>
+
+#include <glm/gtx/transform.hpp>
+
+#undef min
+#undef max
+
+LoadVolume::Header LoadVolume::load_header(std::string filename_header)
+{
+	std::ifstream file(filename_header);
+	if (!file.is_open())
+	{
+		throw std::runtime_error("Failed to open header file");
+	}
+
+	Header      header;
+	std::string line;
+
+	// Example header file
+	/*
+832 832 494 # extents
+0.001 0.001 0.001 # voxel size
+400.0 2538.0 # normalisation range
+uint16_t little # data type and endianness (big or little)
+1 0 0 90 # rotation axis and angle (degrees)
+  */
+
+	// FIXME: Error/sanity checking
+
+	// Extent
+	std::getline(file, line);
+	std::istringstream ss(line);
+	ss >> header.extent.width >> header.extent.height >> header.extent.depth;
+
+	// Voxel size
+	std::getline(file, line);
+	ss = std::istringstream(line);
+	ss >> header.voxel_size.x >> header.voxel_size.y >> header.voxel_size.z;
+
+	// Normalisation range
+	std::getline(file, line);
+	ss = std::istringstream(line);
+	ss >> header.normalisation_range.x >> header.normalisation_range.y;
+
+	// Data type and endianness
+	std::getline(file, line);
+	ss = std::istringstream(line);
+	ss >> header.type >> header.endianness;
+
+	// Angle axis image rotation, angle in degrees
+	std::getline(file, line);
+	ss = std::istringstream(line);
+	glm::vec4 angle_axis;
+	ss >> angle_axis.x >> angle_axis.y >> angle_axis.z >> angle_axis.w;
+
+	// Compute image transformation
+	glm::vec3 physical_size = header.voxel_size * glm::vec3(header.extent.width, header.extent.height, header.extent.depth);
+	header.image_transform  = glm::rotate(glm::radians(angle_axis.w), glm::vec3(angle_axis.xyz)) * glm::scale(physical_size);
+
+	return header;
+}
+
+std::vector<uint8_t> LoadVolume::load_data(std::string filename_data, const Header &header)
+{
+	if (header.type == "uint8_t")
+	{
+		return load_data_impl<uint8_t>(filename_data, header);
+	}
+	else if (header.type == "int8_t")
+	{
+		return load_data_impl<int8_t>(filename_data, header);
+	}
+	else if (header.type == "uint16_t")
+	{
+		return load_data_impl<uint16_t>(filename_data, header);
+	}
+	else if (header.type == "int16_t")
+	{
+		return load_data_impl<int16_t>(filename_data, header);
+	}
+	else
+	{
+		throw std::runtime_error("unsupported image data type");
+	}
+}
+
+template <typename T>
+std::vector<uint8_t> LoadVolume::load_data_impl(std::string filename_data, const Header &header)
+{
+	size_t         n_voxels = static_cast<size_t>(header.extent.width) * static_cast<size_t>(header.extent.height) * static_cast<size_t>(header.extent.depth);
+	std::vector<T> image_data(n_voxels);
+	size_t         file_size = image_data.size() * sizeof(T);
+
+	// Load volume into memory
+	std::ifstream file(filename_data, std::ios::binary);
+	if (!file.is_open())
+	{
+		throw std::runtime_error("Failed to open data file");
+	}
+	// Get file size
+	file.seekg(0, std::ios::end);
+	size_t file_size_actual = file.tellg();
+	if (file_size_actual != file_size)
+	{
+		throw std::runtime_error("File size does not match expected size for the given image format/dimensions");
+	}
+	file.seekg(0, std::ios::beg);
+
+	// Read into memory
+	size_t byte_pos   = 0;
+	size_t bytes_left = file_size;
+	while (bytes_left > 0)
+	{
+		size_t bytes_read = std::min(bytes_left, size_t(1e8));        // 1e8 = 100MB
+		file.read(reinterpret_cast<char *>(image_data.data()) + byte_pos, bytes_read);
+		if (!file)
+		{
+			throw std::runtime_error("File error");
+		}
+		byte_pos += bytes_read;
+		bytes_left -= bytes_read;
+	}
+	file.clear();
+
+	// Change to machine endianness
+	bool big_endian = header.endianness == "big";
+	for (T &i : image_data)
+	{
+		if (big_endian)
+		{
+			boost::endian::big_to_native_inplace(i);
+		}
+		else
+		{
+			boost::endian::little_to_native_inplace(i);
+		}
+	}
+
+	// Convert to uint8_t
+	auto                 min = header.normalisation_range.x;
+	auto                 max = header.normalisation_range.y;
+	std::vector<uint8_t> volume_data(n_voxels);
+	std::transform(image_data.begin(), image_data.end(), volume_data.begin(),
+	               [min, max](T v) -> uint8_t { return static_cast<uint8_t>(std::numeric_limits<uint8_t>::max() * std::max(0.0f, std::min(1.0f, (static_cast<float>(v) - min) / (max - min)))); });
+
+	return volume_data;
+}
+```
+
+### src/load_volume.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+#include <string>
+#include <vector>
+
+#include <glm/glm.hpp>
+#include <vulkan/vulkan.h>
+
+class LoadVolume
+{
+  public:
+	struct Header
+	{
+		VkExtent3D  extent;
+		glm::vec3   voxel_size;
+		glm::vec2   normalisation_range;
+		std::string type;
+		std::string endianness;
+		glm::mat4   image_transform;
+		glm::vec2   tf_range;
+		float       alpha_factor;
+	};
+
+	static Header               load_header(std::string filename_header);
+	static std::vector<uint8_t> load_data(std::string filename_data, const Header &header);
+
+  private:
+	template <typename T>
+	static std::vector<uint8_t> load_data_impl(std::string filename_data, const Header &header);
+};
+```
+
+### src/main.cpp
+```
+/* Copyright (c) 2019, Arm Limited and Contributors
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "common/logging.h"
+#include "platform/platform.h"
+#include "plugins/plugins.h"
+
+#include "volume_render.h"
+
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+#	include "platform/windows/windows_platform.h"
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                     PSTR lpCmdLine, INT nCmdShow)
+{
+	vkb::WindowsPlatform platform{hInstance, hPrevInstance,
+	                              lpCmdLine, nCmdShow};
+#elif defined(VK_USE_PLATFORM_DISPLAY_KHR)
+#	include "platform/linux/linux_d2d_platform.h"
+int main(int argc, char *argv[])
+{
+	vkb::LinuxD2DPlatform platform{argc, argv};
+#else
+#	include "platform/linux/linux_platform.h"
+int main(int argc, char *argv[])
+{
+	vkb::LinuxPlatform platform{argc, argv};
+#endif
+
+	apps::AppInfo app_info = {"volume_render",
+	                          create_volume_render};
+	platform.request_application(&app_info);
+
+	// Setup custom plugins for this example... Vulkan-samples needs an easier way of adding custom args to a sample
+	auto                       plugins_default      = plugins::get_all();
+	auto                       volume_render_plugin = std::make_unique<VolumeRenderPlugin>();
+	std::vector<vkb::Plugin *> plugins;
+	plugins.emplace_back(volume_render_plugin.get());
+	for (auto &plugin : plugins_default)
+	{
+		if (plugin->get_name() != "Apps" && plugin->get_name() != "Batch Mode")
+		{
+			plugins.emplace_back(plugin);
+		}
+	}
+
+	auto code = platform.initialize(plugins);
+	if (code == vkb::ExitCode::Success)
+	{
+		platform.main_loop();
+	}
+	platform.terminate(code);
+}
+```
+
+### src/transfer_function.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+struct TransferFunctionUniform
+{
+	float sampling_factor;
+	float voxel_alpha_factor;
+	float grad_magnitude_modifier;
+  VkBool32 use_gradient;
+#ifndef TRANSFER_FUNCTION_TEXTURE
+  float intensity_min;
+  float intensity_range_inv;
+  float gradient_min;
+  float gradient_range_inv;
+#endif
+};
+```
+
+### src/volume_component.cpp
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "volume_component.h"
+
+#include "load_volume.h"
+
+using namespace vkb;
+
+Volume::Volume(const std::string &name) :
+    Component{name},
+    image_transform(glm::mat4(1.0f))
+{}
+
+void Volume::upload_texture_with_staging(CommandBuffer &    command_buffer,
+                                         vkb::core::Buffer &stage_buffer,
+                                         const core::Image &image, const core::ImageView &image_view)
+{
+	{
+		// Prepare for transfer
+		ImageMemoryBarrier memory_barrier{};
+		memory_barrier.old_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+		memory_barrier.new_layout      = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		memory_barrier.src_access_mask = 0;
+		memory_barrier.dst_access_mask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		memory_barrier.src_stage_mask  = VK_PIPELINE_STAGE_HOST_BIT;
+		memory_barrier.dst_stage_mask  = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+		command_buffer.image_memory_barrier(image_view, memory_barrier);
+	}
+
+	// Copy
+	VkBufferImageCopy buffer_copy_region{};
+	buffer_copy_region.imageSubresource.layerCount = image_view.get_subresource_range().layerCount;
+	buffer_copy_region.imageSubresource.aspectMask = image_view.get_subresource_range().aspectMask;
+	buffer_copy_region.imageExtent                 = image.get_extent();
+
+	command_buffer.copy_buffer_to_image(stage_buffer, image, {buffer_copy_region});
+}
+
+bool Volume::load_from_file(vkb::RenderContext &render_context, std::string filename, uint32_t distance_map_block_size /* = 4 */)
+{
+	using namespace vkb;
+
+	auto                 header      = LoadVolume::load_header(filename + ".header");
+	std::vector<uint8_t> volume_data = LoadVolume::load_data(filename, header);
+	size_t               data_size   = volume_data.size() * sizeof(uint8_t);
+	auto &               extent      = header.extent;
+	set_image_transform(header.image_transform);
+
+	auto &device = render_context.get_device();
+
+	// Create transfer function
+	VkExtent3D tf_extent         = {256, 256, 1};
+	transfer_function.image      = std::make_unique<core::Image>(device, tf_extent, VK_FORMAT_R8G8B8A8_UNORM,
+                                                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                                            VMA_MEMORY_USAGE_GPU_ONLY);
+	transfer_function.image_view = std::make_unique<core::ImageView>(*transfer_function.image, VK_IMAGE_VIEW_TYPE_2D);
+	transfer_function_staging    = std::make_unique<core::Buffer>(device, 256 * 256 * sizeof(glm::u8vec4), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, 0);
+
+	// Create volume image and upload
+	volume.image      = std::make_unique<core::Image>(device, extent, VK_FORMAT_R8_UNORM,
+                                                 VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                                 VMA_MEMORY_USAGE_GPU_ONLY);
+	volume.image_view = std::make_unique<core::ImageView>(*volume.image, VK_IMAGE_VIEW_TYPE_3D);
+
+	if (options.use_precomputed_gradient)
+	{
+		gradient.image      = std::make_unique<core::Image>(device, extent, VK_FORMAT_R8_UNORM,
+                                                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                                       VMA_MEMORY_USAGE_GPU_ONLY);
+		gradient.image_view = std::make_unique<core::ImageView>(*gradient.image, VK_IMAGE_VIEW_TYPE_3D);
+	}
+
+	// Create swap image (populated later with compute shader)
+	// Distance maps are created with a call to set_number_of_distance_maps()
+	auto       rndUp             = [](uint32_t x, uint32_t y) { return (x + y - 1) / y; };
+	VkExtent3D extent_occupancy  = {rndUp(extent.width, distance_map_block_size), rndUp(extent.height, distance_map_block_size), rndUp(extent.depth, distance_map_block_size)};
+	distance_map_swap.image      = std::make_unique<core::Image>(device, extent_occupancy, VK_FORMAT_R8_UINT,
+                                                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+                                                            VMA_MEMORY_USAGE_GPU_ONLY);
+	distance_map_swap.image_view = std::make_unique<core::ImageView>(*distance_map_swap.image, VK_IMAGE_VIEW_TYPE_3D);
+
+	// Upload volume image
+	{
+		auto &    command_buffer = device.request_command_buffer();
+		FencePool fence_pool{device};
+		command_buffer.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+		// Upload data into the vulkan image memory
+		core::Buffer stage_buffer{command_buffer.get_device(), data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY, 0};
+		stage_buffer.update({volume_data.data(), volume_data.data() + data_size});
+		upload_texture_with_staging(command_buffer, stage_buffer, *volume.image, *volume.image_view);
+
+		{
+			// Prepare volume and gradient for fragment shader
+			ImageMemoryBarrier memory_barrier{};
+			memory_barrier.old_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+			memory_barrier.new_layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			memory_barrier.src_access_mask = 0;
+			memory_barrier.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+			memory_barrier.src_stage_mask  = VK_PIPELINE_STAGE_TRANSFER_BIT;
+			memory_barrier.dst_stage_mask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+			command_buffer.image_memory_barrier(*volume.image_view, memory_barrier);
+			if (options.use_precomputed_gradient)
+			{
+				command_buffer.image_memory_barrier(*gradient.image_view, memory_barrier);
+			}
+			command_buffer.image_memory_barrier(*transfer_function.image_view, memory_barrier);
+		}
+
+		// End recording
+		command_buffer.end();
+		auto &queue = device.get_queue_by_flags(VK_QUEUE_GRAPHICS_BIT, 0);
+		queue.submit(command_buffer, device.request_fence());
+
+		// Wait for the command buffer to finish its work before destroying the staging buffer
+		device.get_fence_pool().wait();
+		device.get_fence_pool().reset();
+		device.get_command_pool().reset_pool();
+	}
+
+	// Create samplers
+	VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+	sampler_info.maxAnisotropy = 1.0f;
+	sampler_info.magFilter     = VK_FILTER_LINEAR;
+	sampler_info.minFilter     = VK_FILTER_LINEAR;
+	sampler_info.mipmapMode    = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	sampler_info.addressModeU  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sampler_info.addressModeV  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sampler_info.addressModeW  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	volume.sampler             = std::make_unique<core::Sampler>(device, sampler_info);
+	gradient.sampler           = std::make_unique<core::Sampler>(device, sampler_info);
+	sampler_info.magFilter     = VK_FILTER_NEAREST;
+	sampler_info.minFilter     = VK_FILTER_NEAREST;
+	transfer_function.sampler  = std::make_unique<core::Sampler>(device, sampler_info);
+	return true;
+}
+
+void Volume::set_number_of_distance_maps(vkb::RenderContext &render_context, size_t n)
+{
+	if (n <= distance_maps.size())
+	{
+		return;
+	}
+
+	distance_maps.resize(n);
+
+	auto &device = render_context.get_device();
+
+	// Create samplers
+	VkSamplerCreateInfo sampler_info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+	sampler_info.maxAnisotropy = 1.0f;
+	sampler_info.magFilter     = VK_FILTER_NEAREST;
+	sampler_info.minFilter     = VK_FILTER_NEAREST;
+	sampler_info.mipmapMode    = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	sampler_info.addressModeU  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sampler_info.addressModeV  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	sampler_info.addressModeW  = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+
+	for (auto &distance_map : distance_maps)
+	{
+		distance_map.image      = std::make_unique<core::Image>(device, distance_map_swap.image->get_extent(), distance_map_swap.image->get_format(),
+                                                           VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+                                                           VMA_MEMORY_USAGE_GPU_ONLY);
+		distance_map.image_view = std::make_unique<core::ImageView>(*distance_map.image, VK_IMAGE_VIEW_TYPE_3D);
+		distance_map.sampler    = std::make_unique<core::Sampler>(device, sampler_info);
+	}
+}
+
+void Volume::set_image_transform(const glm::mat4 &mat)
+{
+	image_transform = mat;
+}
+
+std::type_index Volume::get_type()
+{
+	return typeid(Volume);
+}
+
+const Volume::Image &Volume::get_volume() const
+{
+	return volume;
+}
+
+const Volume::Image &Volume::get_gradient() const
+{
+	return gradient;
+}
+
+const Volume::Image &Volume::get_transfer_function() const
+{
+	return transfer_function;
+}
+
+const Volume::Image &Volume::get_distance_map(size_t idx /* = 0 */) const
+{
+	return distance_maps.at(idx);
+}
+
+const Volume::Image &Volume::get_distance_map_swap() const
+{
+	return distance_map_swap;
+}
+
+glm::mat4 &Volume::get_image_transform()
+{
+	return image_transform;
+}
+
+TransferFunctionUniform Volume::get_transfer_function_uniform()
+{
+	TransferFunctionUniform transfer_function_uniform;
+	transfer_function_uniform.sampling_factor         = options.sampling_factor;
+	transfer_function_uniform.voxel_alpha_factor      = options.voxel_alpha_factor;
+	transfer_function_uniform.grad_magnitude_modifier = 1.0f;
+	transfer_function_uniform.use_gradient            = options.gradient_max != options.gradient_min;
+#ifndef TRANSFER_FUNCTION_TEXTURE
+	transfer_function_uniform.intensity_min       = options.intensity_min;
+	transfer_function_uniform.intensity_range_inv = 1.0f / (options.intensity_max - options.intensity_min);
+	transfer_function_uniform.gradient_min        = options.gradient_min;
+	transfer_function_uniform.gradient_range_inv  = 1.0f / (options.gradient_max - options.gradient_min);
+#endif
+	return transfer_function_uniform;
+}
+
+void Volume::update_transfer_function_texture(vkb::CommandBuffer &command_buffer)
+{
+	// Update the transfer function texture
+
+	std::vector<glm::u8vec4> tex(256 * 256);        // FIXME: Allocate once
+	auto                     clamp = [](float x, float min, float max) {
+        return std::min(std::max(x, min), max);
+	};
+	float  i_inv        = 1.0f / (options.intensity_max - options.intensity_min);
+	float  g_inv        = 1.0f / (options.gradient_max - options.gradient_min);
+	bool   use_gradient = options.gradient_max != options.gradient_min;
+	size_t idx          = 0;
+	for (float g = 0; g < 256; ++g)
+		for (float i = 0; i < 256; ++i, idx++)
+		{
+			float   alpha_i = clamp(((i / 255.0f) - options.intensity_min) * i_inv, 0.0f, 1.0f);
+			float   alpha_g = use_gradient ? clamp(((g / 255.0f) - options.gradient_min) * g_inv, 0.0f, 1.0f) : 1.0f;
+			uint8_t alpha   = static_cast<uint8_t>(clamp(alpha_i * alpha_g * 255, 0, 255));
+			tex.at(idx)     = glm::u8vec4(alpha);
+		}
+	transfer_function_staging->update(reinterpret_cast<const uint8_t *>(tex.data()), tex.size() * sizeof(glm::u8vec4));
+	upload_texture_with_staging(command_buffer, *transfer_function_staging,
+	                            *get_transfer_function().image, *get_transfer_function().image_view);
+
+	{
+		// Prepare transfer function for fragment shader
+		ImageMemoryBarrier memory_barrier{};
+		memory_barrier.old_layout      = VK_IMAGE_LAYOUT_UNDEFINED;
+		memory_barrier.new_layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		memory_barrier.src_access_mask = 0;
+		memory_barrier.dst_access_mask = VK_ACCESS_SHADER_READ_BIT;
+		memory_barrier.src_stage_mask  = VK_PIPELINE_STAGE_TRANSFER_BIT;
+		memory_barrier.dst_stage_mask  = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+		command_buffer.image_memory_barrier(*get_transfer_function().image_view, memory_barrier);
+	}
+}
+
+void Volume::set_node(vkb::sg::Node &node)
+{
+	this->node = &node;
+}
+
+vkb::sg::Node *Volume::get_node() const
+{
+	return node;
+}
+```
+
+### src/volume_component.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+#include <glm/glm.hpp>
+
+#include "core/image.h"
+#include "core/image_view.h"
+#include "core/sampler.h"
+#include "rendering/render_context.h"
+#include "scene_graph/component.h"
+#include "scene_graph/node.h"
+
+#include "transfer_function.h"
+
+class Volume : public vkb::sg::Component
+{
+  public:
+	Volume(const std::string &name);
+	virtual ~Volume() = default;
+
+	bool load_from_file(vkb::RenderContext &render_context, std::string filename, uint32_t distance_map_block_size = 4);
+
+	void set_image_transform(const glm::mat4 &mat);
+
+	void set_number_of_distance_maps(vkb::RenderContext &render_context, size_t n);
+
+	virtual std::type_index get_type() override;
+
+	struct Options
+	{
+		float sampling_factor          = 1.0f;
+		float voxel_alpha_factor       = 1.0f;
+		bool  use_precomputed_gradient = true;
+
+		// Parameters defining simple grayscale 2D transfer function
+		float intensity_min = 0.0f;
+		float intensity_max = 1.0f;
+		float gradient_min  = 0.0f;
+		float gradient_max  = 1.0f;
+	} options;
+
+	struct Image
+	{
+		std::unique_ptr<vkb::core::Image>     image;
+		std::unique_ptr<vkb::core::ImageView> image_view;
+		std::unique_ptr<vkb::core::Sampler>   sampler;
+	};
+
+	const Image &get_volume() const;
+	const Image &get_gradient() const;
+	const Image &get_transfer_function() const;
+	const Image &get_distance_map(size_t idx = 0) const;
+	const Image &get_distance_map_swap() const;
+
+	glm::mat4 &get_image_transform();
+
+	TransferFunctionUniform get_transfer_function_uniform();
+
+	void update_transfer_function_texture(vkb::CommandBuffer &command_buffer);
+
+	void           set_node(vkb::sg::Node &node);
+	vkb::sg::Node *get_node() const;
+
+	void upload_texture_with_staging(vkb::CommandBuffer &    command_buffer,
+	                                 vkb::core::Buffer &     stage_buffer,
+	                                 const vkb::core::Image &image, const vkb::core::ImageView &image_view);
+
+  private:
+	vkb::sg::Node *node;
+
+	Image                              volume, gradient, transfer_function;
+	std::unique_ptr<vkb::core::Buffer> transfer_function_staging;
+	std::vector<Image>                 distance_maps;
+	Image                              distance_map_swap;
+
+	glm::mat4 image_transform;
+};
+```
+
+### src/volume_render.cpp
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "volume_render.h"
+
+#include "benchmark_mode/benchmark_mode.h"
+#include "common/vk_initializers.h"
+#include "glsl_compiler.h"
+#include "gltf_loader.h"
+#include "gui.h"
+#include "platform/filesystem.h"
+#include "platform/parser.h"
+#include "platform/parsers/CLI11.h"
+#include "platform/platform.h"
+#include "rendering/render_context.h"
+#include "rendering/render_pipeline.h"
+#include "rendering/subpasses/forward_subpass.h"
+#include "scene_graph/components/perspective_camera.h"
+
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+#	include "platform/android/android_platform.h"
+#endif
+
+VKBP_DISABLE_WARNINGS()
+#include <glm/gtx/matrix_decompose.hpp>
+#include <spdlog/sinks/basic_file_sink.h>
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+#	include <spdlog/sinks/msvc_sink.h>
+#endif
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+VKBP_ENABLE_WARNINGS()
+
+#include "volume_render_subpass.h"
+
+using namespace vkb;
+
+VolumeRenderPlugin::VolumeRenderPlugin() :
+    VolumeRenderPluginTags("VolumeRender",
+                           "VolumeRender input options",
+                           {}, {&cmd})
+{
+}
+
+bool VolumeRenderPlugin::is_active(const vkb::CommandParser &parser)
+{
+	return true;        // FORCE ACTIVE
+	                    //return parser.contains(&cmd);
+}
+
+void VolumeRenderPlugin::init(const vkb::CommandParser &parser)
+{
+	imin     = parser.contains(&imin_flag) ? parser.as<float>(&imin_flag) : 0.1f;
+	imax     = parser.contains(&imax_flag) ? parser.as<float>(&imax_flag) : 1.0f;
+	gmin     = parser.contains(&gmin_flag) ? parser.as<float>(&gmin_flag) : 0.0f;
+	gmax     = parser.contains(&gmax_flag) ? parser.as<float>(&gmax_flag) : 0.2f;
+	skipmode = VolumeRenderSubpass::SkippingType::Distance;
+	if (parser.contains(&skipmode_flag))
+	{
+		uint32_t skipmode_read = parser.as<uint32_t>(&skipmode_flag);
+		if (skipmode_read <= 3)
+		{
+			skipmode = static_cast<VolumeRenderSubpass::SkippingType>(skipmode_read);
+		}
+	}
+	blocksize     = parser.contains(&blocksize_flag) ? parser.as<uint32_t>(&blocksize_flag) : 4;
+	gradient_test = parser.contains(&gradient_test_flag);
+	datasets      = {parser.contains(&dataset_flag) ? parser.as<std::string>(&dataset_flag) : "stag_beetle_832x832x494.uint16"};
+	// FIXME: vkb::FlagType::ManyValues didn't seem to be working, switch to single dataset only for now
+}
+
+VolumeRender::VolumeRender() :
+    camera(nullptr),
+    render_sponza_scene(false),
+    spin_volumes(false)
+{
+	//set_usage(
+	//    R"(Volume renderer.
+	//Usage:
+	//   vulkan_samples -h | --help
+	//	vulkan_samples [--imin=<arg>] [--imax=<arg>] [--gmin=<arg>] [--gmax=<arg>] [--benchmark=<frames>] [--width=<arg>] [--height=<arg>] [--skipmode=<arg>] [--blocksize=<arg>] [--gradient_test] <binary_volume_image>...)"
+	//    "\n");
+}
+
+bool VolumeRender::prepare(vkb::Platform &platform)
+{
+	if (!Application::prepare(platform))
+	{
+		return false;
+	}
+
+	auto &plugin = *platform.get_plugin<VolumeRenderPlugin>();
+
+	//std::string name        = "Volume renderer.";
+	//std::string description = R"(Volume renderer.
+	//Usage:
+	//   vulkan_samples -h | --help
+	//	vulkan_samples [--imin=<arg>] [--imax=<arg>] [--gmin=<arg>] [--gmax=<arg>] [--benchmark=<frames>] [--width=<arg>] [--height=<arg>] [--skipmode=<arg>] [--blocksize=<arg>] [--gradient_test] <binary_volume_image>...)"
+	//                          "\n";
+	//vkb::CLI11CommandParser parser(name, description, platform.get_arguments());
+
+	// Override logging
+	std::vector<spdlog::sink_ptr> sinks;
+	sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+	sinks.push_back(std::make_shared<spdlog::sinks::msvc_sink_mt>());
+#endif
+	//sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>("log.txt", true));
+	auto logger = std::make_shared<spdlog::logger>("logger", sinks.begin(), sinks.end());
+	logger->set_pattern(LOGGER_FORMAT);
+	spdlog::set_default_logger(logger);
+
+	get_debug_info().insert<field::MinMax, float>("fps", fps);
+	get_debug_info().insert<field::MinMax, float>("frame_time", frame_time);
+
+	LOGI("Initializing context");
+
+	bool     headless    = platform.get_window().get_window_mode() == Window::Mode::Headless;
+	uint32_t api_version = VK_API_VERSION_1_1;
+	vkb::GLSLCompiler::set_target_environment(glslang::EShTargetSpv, glslang::EShTargetSpv_1_3);
+
+	// Creating the vulkan instance
+	add_instance_extension(platform.get_surface_extension());
+	instance = std::make_unique<Instance>(get_name(), get_instance_extensions(), get_validation_layers(), headless, api_version);
+
+	// Getting a valid vulkan surface from the platform
+	surface = platform.get_window().create_surface(*instance);
+
+	auto &gpu = instance->get_suitable_gpu(surface);
+	//gpu.set_high_priority_graphics_queue_enable(true);
+
+	// Get supported features from the physical device, and requested features from the sample
+	request_gpu_features(gpu);
+
+	// Creating vulkan device, specifying the swapchain extension always
+	auto requested_device_extensions = get_device_extensions();
+	if (!headless || instance->is_enabled(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME))
+	{
+		add_device_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+	}
+
+	device = std::make_unique<vkb::Device>(gpu, surface, get_device_extensions());
+
+	// Preparing render context for rendering
+	create_render_context(platform);
+	prepare_render_context();
+
+	// Prepare compute
+	compute_distance_map         = std::make_unique<ComputeDistanceMap>(*render_context);
+	compute_gradient_map         = std::make_unique<ComputeGradientMap>(*render_context);
+	compute_occupied_voxel_count = std::make_unique<ComputeOccupiedVoxelCount>(*render_context);
+
+	// Load scene and camera
+	load_scene("scenes/sponza/Sponza01.gltf");        // default scene
+	auto &camera_node = add_free_camera(*scene, "main_camera", get_render_context().get_surface_extent());
+	//auto &camera_node = add_orbit_camera("main_camera");
+	camera = &camera_node.get_component<vkb::sg::Camera>();
+
+	// Get input volumetric image filenames
+
+	// Set volume rendering options
+	volume_render_options.skipping_type = plugin.skipmode;
+	if (platform.using_plugin<::plugins::BenchmarkMode>())
+	{
+		volume_render_options.clip_distance         = 1.0f;
+		volume_render_options.early_ray_termination = false;
+		volume_render_options.test                  = VolumeRenderSubpass::Test::NumTextureSamples;
+		// TEST: Set camera to orthographic
+	}
+
+	// Load all of the volumes
+	for (auto volume_fn : plugin.datasets)
+	{
+		auto volume = std::make_unique<Volume>(volume_fn);
+
+		// Set transfer function and update distance map
+		volume->options.intensity_min            = plugin.imin;
+		volume->options.intensity_max            = plugin.imax;
+		volume->options.gradient_min             = plugin.gmin;
+		volume->options.gradient_max             = plugin.gmax;
+		volume->options.use_precomputed_gradient = !plugin.gradient_test;
+
+		// Load from disk and prep textures
+		volume->load_from_file(*render_context, vkb::fs::path::get(vkb::fs::path::Assets, volume_fn), plugin.blocksize);
+
+		auto &device = render_context->get_device();
+
+		// Compute gradient
+		if (volume->options.use_precomputed_gradient)
+		{
+			auto                  transfer_function_uniform = volume->get_transfer_function_uniform();
+			vkb::core::Buffer     b_tf_uniform(device, sizeof(transfer_function_uniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU);
+			vkb::BufferAllocation a_tf_uniform(b_tf_uniform, b_tf_uniform.get_size(), 0);
+			b_tf_uniform.update(&transfer_function_uniform, sizeof(transfer_function_uniform));
+
+			const auto start          = std::chrono::system_clock::now();
+			auto &     command_buffer = compute_start();
+			compute_gradient_map->compute(command_buffer, *volume, a_tf_uniform);
+			compute_submit(command_buffer);
+			const std::chrono::duration<float, std::milli> dur = std::chrono::system_clock::now() - start;
+			LOGI("Updated gradient map in {}ms", dur.count());
+		}
+
+		update_transfer_function(*volume);
+
+		// Add volume component to scene
+		auto node = std::make_unique<vkb::sg::Node>(123, volume_fn);
+		node->set_component(*volume);
+		float scale_factor = 1.0f;
+		if (platform.using_plugin<::plugins::BenchmarkMode>())
+		{
+			// Set scale to take up entire viewport
+			glm::vec3 translation, scale, skew;
+			glm::vec4 perspective;
+			glm::quat rotation;
+			glm::decompose(volume->get_image_transform(), scale, rotation, translation, skew, perspective);
+			scale = glm::abs(rotation * glm::vec4(scale, 0.0f));
+			// scale *= sqrt(3.0f);        // fits in view with arbitrary rotation
+			node->get_transform().set_scale(glm::vec3(100.0f * scale_factor) / scale);
+		}
+		else
+		{
+			node->get_transform().set_scale(glm::vec3(100.0f * scale_factor));
+		}
+		volume->set_node(*node);
+		scene->add_node(std::move(node));
+		scene->add_component(std::move(volume));
+	}
+
+	// Init render pipeline
+	init_render_pipeline();
+
+	// Add a GUI with the stats you want to monitor
+	//stats = std::make_unique<vkb::Stats>(std::set<vkb::StatIndex>{vkb::StatIndex::frame_times});
+	stats = std::make_unique<vkb::Stats>(*render_context);
+	stats->request_stats({vkb::StatIndex::frame_times});
+	gui = std::make_unique<vkb::Gui>(*this, platform.get_window(), stats.get());
+
+	return true;
+}
+
+void VolumeRender::update(float delta_time)
+{
+	if (spin_volumes)
+	{
+		auto volumes = scene->get_components<Volume>();
+		for (auto volume : volumes)
+		{
+			// Spin volumes
+			auto &transform = volume->get_node()->get_transform();
+			auto  rotation  = transform.get_rotation();
+			transform.set_rotation(glm::rotate(rotation, glm::radians(90.0f) * delta_time, glm::vec3(0, 1, 0)));
+		}
+	}
+
+	VulkanSample::update(delta_time);
+}
+
+/**
+* @return Load store info to clear all and store only the swapchain
+*/
+std::vector<vkb::LoadStoreInfo> get_clear_all_store_swapchain()
+{
+	// Clear every attachment and store only swapchain
+	std::vector<vkb::LoadStoreInfo> load_store{2};
+
+	// Swapchain
+	load_store[0].load_op  = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	load_store[0].store_op = VK_ATTACHMENT_STORE_OP_STORE;
+
+	// Depth
+	load_store[1].load_op  = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	load_store[1].store_op = VK_ATTACHMENT_STORE_OP_STORE;
+
+	return load_store;
+}
+
+vkb::CommandBuffer &VolumeRender::compute_start()
+{
+	render_context->begin_frame();
+	auto &queue          = render_context->get_device().get_queue_by_flags(VK_QUEUE_COMPUTE_BIT, 0);
+	auto &command_buffer = render_context->get_active_frame().request_command_buffer(queue);
+	command_buffer.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+	return command_buffer;
+}
+
+void VolumeRender::compute_submit(vkb::CommandBuffer &command_buffer)
+{
+	command_buffer.end();
+
+	auto &device = render_context->get_device();
+
+	auto &queue = device.get_queue_by_flags(VK_QUEUE_COMPUTE_BIT, 0);
+
+	const VkSemaphore signal_semaphores[] = {
+	    render_context->request_semaphore(),
+	};
+
+	auto info                 = vkb::initializers::submit_info();
+	info.pSignalSemaphores    = signal_semaphores;
+	info.signalSemaphoreCount = 1;
+	//info.pWaitSemaphores      = wait_semaphores;
+	info.waitSemaphoreCount = 0;
+	//info.pWaitDstStageMask    = wait_stages;
+	info.commandBufferCount = 1;
+	info.pCommandBuffers    = &command_buffer.get_handle();
+
+	auto fence = render_context->get_active_frame().request_fence();
+	queue.submit({info}, fence);
+	VK_CHECK(vkWaitForFences(device.get_handle(), 1, &fence, VK_TRUE, UINT64_MAX));
+
+	render_context->end_frame(signal_semaphores[0]);
+}
+
+void VolumeRender::init_render_pipeline()
+{
+	// Render pipeline
+	auto render_pipeline = vkb::RenderPipeline();
+
+	if (render_sponza_scene)
+	{
+		// Standard scene subpass
+		vkb::ShaderSource vert_shader("base.vert");
+		vkb::ShaderSource frag_shader("base.frag");
+		auto              scene_subpass = std::make_unique<vkb::ForwardSubpass>(*render_context, std::move(vert_shader), std::move(frag_shader), *scene, *camera);
+		render_pipeline.add_subpass(std::move(scene_subpass));
+	}
+
+	// Add volume renderer subpass
+	volume_render_options.depth_attachment = render_sponza_scene;
+	auto volume_subpass                    = std::make_unique<VolumeRenderSubpass>(*render_context, *scene, *camera, volume_render_options);
+	if (volume_render_options.depth_attachment)
+	{
+		volume_subpass->set_input_attachments({1});
+		// FIXME: Ideally depth would be an input and an output here, but Vulkan-Samples would need a few modifications for depth to be VK_IMAGE_LAYOUT_GENERAL and for correct memory barriers
+	}
+	render_pipeline.add_subpass(std::move(volume_subpass));
+
+	render_pipeline.set_load_store(get_clear_all_store_swapchain());
+
+	set_render_pipeline(std::move(render_pipeline));
+}
+
+void VolumeRender::request_gpu_features(vkb::PhysicalDevice &gpu)
+{
+	gpu.get_mutable_requested_features().shaderClipDistance = gpu.get_features().shaderClipDistance;
+	gpu.get_mutable_requested_features().shaderInt64        = gpu.get_features().shaderInt64;
+	gpu.get_mutable_requested_features().shaderFloat64      = gpu.get_features().shaderFloat64;
+}
+
+void VolumeRender::prepare_render_context()
+{
+	get_render_context().prepare(1, [this](vkb::core::Image &&swapchain_image) { return create_render_target(std::move(swapchain_image)); });
+}
+
+std::unique_ptr<vkb::RenderTarget> VolumeRender::create_render_target(vkb::core::Image &&swapchain_image)
+{
+	auto &device = swapchain_image.get_device();
+	auto &extent = swapchain_image.get_extent();
+
+	vkb::core::Image depth_image{device,
+	                             extent,
+	                             VK_FORMAT_D32_SFLOAT,
+	                             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT,
+	                             VMA_MEMORY_USAGE_GPU_ONLY};
+
+	std::vector<vkb::core::Image> images;
+
+	// Attachment 0
+	images.push_back(std::move(swapchain_image));
+
+	// Attachment 1
+	images.push_back(std::move(depth_image));
+
+	return std::make_unique<vkb::RenderTarget>(std::move(images));
+}
+
+void VolumeRender::update_transfer_function(Volume &volume)
+{
+	auto                  transfer_function_uniform = volume.get_transfer_function_uniform();
+	vkb::core::Buffer     b_tf_uniform(render_context->get_device(), sizeof(transfer_function_uniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VmaMemoryUsage::VMA_MEMORY_USAGE_CPU_TO_GPU);
+	vkb::BufferAllocation a_tf_uniform(b_tf_uniform, b_tf_uniform.get_size(), 0);
+	b_tf_uniform.update(&transfer_function_uniform, sizeof(transfer_function_uniform));
+
+	if (platform->using_plugin<::plugins::BenchmarkMode>())
+	{
+		// Get buffer for computing number of occupied voxels
+		vkb::core::Buffer     buffer_occupied_voxel_count = compute_occupied_voxel_count->initialise_buffer(render_context->get_device(), volume);
+		vkb::BufferAllocation a_buffer_occupied_voxel_count(buffer_occupied_voxel_count, buffer_occupied_voxel_count.get_size(), 0);
+
+		// Update transfer function and compute number of occupied voxels
+		const auto start = std::chrono::system_clock::now();
+		{
+			auto &command_buffer = compute_start();
+			volume.update_transfer_function_texture(command_buffer);
+			compute_occupied_voxel_count->compute(command_buffer, volume, a_buffer_occupied_voxel_count, a_tf_uniform);
+			compute_submit(command_buffer);
+		}
+		uint64_t                                       n_occupied_voxels       = compute_occupied_voxel_count->get_result(a_buffer_occupied_voxel_count);
+		auto                                           extent                  = volume.get_volume().image->get_extent();
+		size_t                                         n_voxels                = static_cast<size_t>(extent.width) * static_cast<size_t>(extent.height) * static_cast<size_t>(extent.depth);
+		float                                          percent_occupied_voxels = 100.0f * static_cast<float>(n_occupied_voxels) / static_cast<float>(n_voxels);
+		const std::chrono::duration<float, std::milli> dur                     = std::chrono::system_clock::now() - start;
+		LOGI("Occupied voxels: {}% in {}ms", percent_occupied_voxels, dur.count());
+
+		// Update occupancy map
+		const auto start2 = std::chrono::system_clock::now();
+		int        runs   = 5;
+		for (int i = 0; i < runs; ++i)
+		{
+			auto &command_buffer = compute_start();
+			compute_distance_map->compute(command_buffer, volume, a_tf_uniform, volume_render_options.skipping_type);
+			compute_submit(command_buffer);
+		}
+		const std::chrono::duration<float, std::milli> dur2 = std::chrono::system_clock::now() - start2;
+		LOGI("Updated occupancy/distance map in {}ms", dur2.count() / static_cast<float>(runs));
+	}
+	else
+	{
+		{
+			auto &command_buffer = compute_start();
+			volume.update_transfer_function_texture(command_buffer);
+			compute_submit(command_buffer);
+		}
+		{
+			auto &command_buffer = compute_start();
+			compute_distance_map->compute(command_buffer, volume, a_tf_uniform, volume_render_options.skipping_type);
+			compute_submit(command_buffer);
+		}
+	}
+}
+
+void VolumeRender::draw_gui()
+{
+	auto volumes = scene->get_components<Volume>();
+	gui->show_options_window(
+	    /* body = */ [this, &volumes]() {
+		    auto gap = []() {
+			    ImGui::SameLine();
+			    ImGui::Dummy(ImVec2(20.0f, 0.0f));
+			    ImGui::SameLine();
+		    };
+
+		    for (auto volume : volumes)
+		    {
+			    ImGui::PushID(volume->get_name().c_str());
+			    ImGui::Text("%s", volume->get_name().c_str());
+			    gap();
+			    auto &transform   = volume->get_node()->get_transform();
+			    auto  translation = transform.get_translation();
+			    ImGui::PushItemWidth(ImGui::GetWindowSize().x * 0.15f);
+			    if (ImGui::DragFloat3("XYZ", &translation.x, 0.1f))
+			    {
+				    transform.set_translation(translation);
+			    }
+			    ImGui::PopItemWidth();
+			    gap();
+			    ImGui::PushItemWidth(ImGui::GetWindowSize().x * 0.1f);
+			    ImGui::SliderFloat("Sampling", &volume->options.sampling_factor, 0.5f, 3.0f, "%.3f", 2.0f);
+			    gap();
+			    ImGui::SliderFloat("Alpha", &volume->options.voxel_alpha_factor, 0.0f, 2.0f, "%.3f", 2.0f);
+			    ImGui::PopItemWidth();
+
+			    // Transfer function
+			    ImGui::Text(" Transfer func:");
+			    gap();
+			    bool tf_changed = false;
+			    ImGui::PushItemWidth(ImGui::GetWindowSize().x * 0.14f);
+			    tf_changed |= ImGui::SliderFloat("##Intensity min", &volume->options.intensity_min, 0.0f, volume->options.intensity_max);
+			    ImGui::SameLine();
+			    tf_changed |= ImGui::SliderFloat("Intensity", &volume->options.intensity_max, volume->options.intensity_min, 1.0f);
+			    gap();
+			    tf_changed |= ImGui::SliderFloat("##Gradient min", &volume->options.gradient_min, 0.0f, volume->options.gradient_max);
+			    ImGui::SameLine();
+			    tf_changed |= ImGui::SliderFloat("Gradient", &volume->options.gradient_max, volume->options.gradient_min, 1.0f);
+			    ImGui::PopItemWidth();
+
+			    if (tf_changed)
+			    {
+				    update_transfer_function(*volume);
+			    }
+			    ImGui::PopID();
+		    }
+
+		    // Shared volume rendering options
+		    bool changed = false;
+		    ImGui::Text("ESS method:");
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("Distance (Anisotropic)", reinterpret_cast<int *>(&volume_render_options.skipping_type), static_cast<int>(VolumeRenderSubpass::SkippingType::AnisotropicDistance));
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("Distance", reinterpret_cast<int *>(&volume_render_options.skipping_type), static_cast<int>(VolumeRenderSubpass::SkippingType::Distance));
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("Block", reinterpret_cast<int *>(&volume_render_options.skipping_type), static_cast<int>(VolumeRenderSubpass::SkippingType::Block));
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("None##skipping", reinterpret_cast<int *>(&volume_render_options.skipping_type), static_cast<int>(VolumeRenderSubpass::SkippingType::None));
+		    gap();
+
+		    if (changed)
+		    {
+			    for (auto volume : volumes)
+			    {
+				    update_transfer_function(*volume);
+			    }
+		    }
+
+		    changed |= ImGui::Checkbox("ERT", &volume_render_options.early_ray_termination);
+		    gap();
+		    ImGui::PushItemWidth(ImGui::GetWindowSize().x * 0.1f);
+		    changed |= ImGui::SliderFloat("Clip dist", &volume_render_options.clip_distance, 5.0f, 500.0f, "%.3f", 2.0f);
+		    ImGui::PopItemWidth();
+
+		    // Tests
+		    changed |= ImGui::Checkbox("Render sponza scene", &render_sponza_scene);
+		    gap();
+		    ImGui::Checkbox("Spin volumes", &spin_volumes);
+		    gap();
+		    ImGui::Text("Test:");
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("None##test", reinterpret_cast<int *>(&volume_render_options.test), static_cast<int>(VolumeRenderSubpass::Test::None));
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("Entry", reinterpret_cast<int *>(&volume_render_options.test), static_cast<int>(VolumeRenderSubpass::Test::RayEntry));
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("Exit", reinterpret_cast<int *>(&volume_render_options.test), static_cast<int>(VolumeRenderSubpass::Test::RayExit));
+		    ImGui::SameLine();
+		    changed |= ImGui::RadioButton("NumSamples", reinterpret_cast<int *>(&volume_render_options.test), static_cast<int>(VolumeRenderSubpass::Test::NumTextureSamples));
+
+		    if (changed)
+		    {
+			    init_render_pipeline();
+		    }
+	    },
+	    /* lines = */ static_cast<uint32_t>(2 + 2 * volumes.size()));
+}
+
+std::unique_ptr<vkb::VulkanSample> create_volume_render()
+{
+	return std::make_unique<VolumeRender>();
+}
+```
+
+### src/volume_render.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+#include "vulkan_sample.h"
+
+#include "scene_graph/components/camera.h"
+
+#include "compute_distance_map.h"
+#include "compute_gradient_map.h"
+#include "compute_occupied_voxel_count.h"
+#include "volume_render_subpass.h"
+
+#include "platform/plugins/plugin_base.h"
+
+class VolumeRenderPlugin;
+
+using VolumeRenderPluginTags = vkb::PluginBase<VolumeRenderPlugin, vkb::tags::Passive>;
+
+class VolumeRenderPlugin : public VolumeRenderPluginTags
+{
+  public:
+	VolumeRenderPlugin();
+
+	virtual ~VolumeRenderPlugin() = default;
+
+	virtual bool is_active(const vkb::CommandParser &parser) override;
+
+	virtual void init(const vkb::CommandParser &parser) override;
+
+	vkb::FlagCommand imin_flag{vkb::FlagType::OneValue, "imin", "", "Intensity minimum"};
+	vkb::FlagCommand imax_flag{vkb::FlagType::OneValue, "imax", "", "Intensity maximum"};
+	vkb::FlagCommand gmin_flag{vkb::FlagType::OneValue, "gmin", "", "Gradient minimum"};
+	vkb::FlagCommand gmax_flag{vkb::FlagType::OneValue, "gmax", "", "Gradient maximum"};
+	vkb::FlagCommand skipmode_flag{vkb::FlagType::OneValue, "skipmode", "", "Skipping mode 0=None, 1=Block 2=Distance 3=DistanceAnisotropic"};
+	vkb::FlagCommand blocksize_flag{vkb::FlagType::OneValue, "blocksize", "", "Block size edge length"};
+	vkb::FlagCommand gradient_test_flag{vkb::FlagType::FlagOnly, "gradient_test", "", "Gradient test"};
+	//vkb::FlagCommand datasets_flag{vkb::FlagType::ManyValues, "datasets", "D", "Dataset filesnames"};
+	vkb::PositionalCommand dataset_flag{"dataset", "Dataset filename"};
+
+	vkb::CommandGroup cmd{"Volume Render Options", {&imin_flag, &imax_flag, &gmin_flag, &gmax_flag, &skipmode_flag, &blocksize_flag, &gradient_test_flag, &dataset_flag}};
+
+	float                             imin, imax, gmin, gmax;
+	VolumeRenderSubpass::SkippingType skipmode;
+	int                               blocksize;
+	bool                              gradient_test;
+	std::vector<std::string>          datasets;
+};
+
+class VolumeRender : public vkb::VulkanSample
+{
+  public:
+	VolumeRender();
+	virtual ~VolumeRender() = default;
+
+	virtual bool prepare(vkb::Platform &platform) override;
+
+	virtual void update(float delta_time) override;
+
+	virtual void request_gpu_features(vkb::PhysicalDevice &gpu) override;
+
+  private:
+	virtual void                       prepare_render_context() override;
+	std::unique_ptr<vkb::RenderTarget> create_render_target(vkb::core::Image &&swapchain_image);
+
+	void VolumeRender::update_transfer_function(Volume &volume);
+
+	vkb::CommandBuffer &compute_start();
+	void                compute_submit(vkb::CommandBuffer &command_buffer);
+
+	void init_render_pipeline();
+
+	virtual void draw_gui() override;
+
+	vkb::sg::Camera *camera;
+
+	std::unique_ptr<ComputeDistanceMap>        compute_distance_map;
+	std::unique_ptr<ComputeGradientMap>        compute_gradient_map;
+	std::unique_ptr<ComputeOccupiedVoxelCount> compute_occupied_voxel_count;
+
+	// Options
+	VolumeRenderSubpass::Options volume_render_options;
+	bool                         render_sponza_scene;
+	bool                         spin_volumes;
+};
+
+std::unique_ptr<vkb::VulkanSample> create_volume_render();
+```
+
+### src/volume_render_subpass.cpp
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#include "volume_render_subpass.h"
+
+#include <glm/gtc/matrix_inverse.hpp>
+
+#include "platform/filesystem.h"
+#include "scene_graph/node.h"
+
+using namespace vkb;
+
+template <typename T>
+core::Buffer stage_buffer(vkb::CommandBuffer &command_buffer, const std::vector<T> &data, vkb::core::Buffer &buffer_dst)
+{
+	core::Buffer stage_buffer{command_buffer.get_device(),
+	                          data.size() * sizeof(T),
+	                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+	                          VMA_MEMORY_USAGE_CPU_ONLY};
+
+	stage_buffer.update(reinterpret_cast<const uint8_t *>(data.data()), stage_buffer.get_size());
+	command_buffer.copy_buffer(stage_buffer, buffer_dst, stage_buffer.get_size());
+
+	return stage_buffer;
+}
+
+template <typename T>
+T rndUp(T a, T b)
+{
+	return (a + b - 1) / b;
+}
+
+VolumeRenderSubpass::VolumeRenderSubpass(RenderContext &render_context, sg::Scene &scene, sg::Camera &cam, Options options) :
+    Subpass{render_context,
+            {"volume_render_clipped.vert"},
+            {"volume_render.frag"}},
+    vertex_source_plane_intersection("volume_render_plane_intersection.vert"),
+    camera{cam},
+    volumes{scene.get_components<Volume>()},
+    options(options)
+{
+	// FIXME: use_precomputed_gradients is set per volume... but should be a global option
+	if (volumes.front()->options.use_precomputed_gradient)
+	{
+		shader_variant.add_define("PRECOMPUTED_GRADIENT");
+	}
+	if (options.skipping_type == SkippingType::AnisotropicDistance)
+	{
+		shader_variant.add_define("ANISOTROPIC_DISTANCE");
+	}
+	else if (options.skipping_type == SkippingType::Block)
+	{
+		shader_variant.add_define("BLOCK_SKIP");
+	}
+	else if (options.skipping_type == SkippingType::None)
+	{
+		shader_variant.add_define("DISABLE_SKIP");
+	}
+	if (!options.early_ray_termination)
+	{
+		shader_variant.add_define("DISABLE_EARLY_RAY_TERMINATION");
+	}
+	if (options.depth_attachment)
+	{
+		shader_variant.add_define("DEPTH_ATTACHMENT");
+	}
+	if (options.test == Test::RayEntry)
+	{
+		shader_variant.add_define("SHOW_RAY_ENTRY");
+	}
+	if (options.test == Test::RayExit)
+	{
+		shader_variant.add_define("SHOW_RAY_EXIT");
+	}
+	if (options.test == Test::NumTextureSamples)
+	{
+		shader_variant.add_define("SHOW_NUM_SAMPLES");
+	}
+}
+
+void VolumeRenderSubpass::prepare()
+{
+	// Build all shaders upfront
+	auto &resource_cache = render_context.get_device().get_resource_cache();
+	resource_cache.request_shader_module(VK_SHADER_STAGE_VERTEX_BIT, get_vertex_shader(), shader_variant);
+	resource_cache.request_shader_module(VK_SHADER_STAGE_VERTEX_BIT, vertex_source_plane_intersection, shader_variant);
+	resource_cache.request_shader_module(VK_SHADER_STAGE_FRAGMENT_BIT, get_fragment_shader(), shader_variant);
+
+	auto &device = render_context.get_device();
+
+	// Create vertex and index buffers
+	auto &command_buffer = device.request_command_buffer();
+	command_buffer.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+	std::vector<core::Buffer> transient_buffers;
+
+	{
+		auto vertices = std::vector<glm::vec3>({{-0.5f, -0.5f, -0.5f},
+		                                        {-0.5f, -0.5f, 0.5f},
+		                                        {-0.5f, 0.5f, -0.5f},
+		                                        {-0.5f, 0.5f, 0.5f},
+		                                        {0.5f, -0.5f, -0.5f},
+		                                        {0.5f, -0.5f, 0.5f},
+		                                        {0.5f, 0.5f, -0.5f},
+		                                        {0.5f, 0.5f, 0.5f}});
+		vertex_buffer = std::make_unique<core::Buffer>(device,
+		                                               vertices.size() * sizeof(glm::vec3),
+		                                               VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+		                                               VMA_MEMORY_USAGE_GPU_ONLY);
+		transient_buffers.push_back(stage_buffer(command_buffer, vertices, *vertex_buffer));
+	}
+
+	{
+		std::vector<uint32_t> indices = {3, 0, 1, 7, 2, 3, 5, 6, 7, 1, 4, 5, 2, 4, 0, 7, 1, 5,
+		                                 3, 2, 0, 7, 6, 2, 5, 4, 6, 1, 0, 4, 2, 6, 4, 7, 3, 1};
+		index_count                   = static_cast<uint32_t>(indices.size());
+		index_buffer                  = std::make_unique<core::Buffer>(device,
+                                                      indices.size() * sizeof(uint32_t),
+                                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                                      VMA_MEMORY_USAGE_GPU_ONLY);
+		transient_buffers.push_back(stage_buffer(command_buffer, indices, *index_buffer));
+	}
+
+	{
+		std::vector<uint32_t> indices   = {0, 2, 1, 0, 5, 2, 4, 2, 5, 2, 4, 3};
+		index_count_plane_intersection  = static_cast<uint32_t>(indices.size());
+		index_buffer_plane_intersection = std::make_unique<core::Buffer>(device,
+		                                                                 indices.size() * sizeof(uint32_t),
+		                                                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+		                                                                 VMA_MEMORY_USAGE_GPU_ONLY);
+		transient_buffers.push_back(stage_buffer(command_buffer, indices, *index_buffer_plane_intersection));
+	}
+
+	command_buffer.end();
+
+	auto &queue = device.get_queue_by_flags(VK_QUEUE_GRAPHICS_BIT, 0);
+	queue.submit(command_buffer, device.request_fence());
+
+	device.get_fence_pool().wait();
+	device.get_fence_pool().reset();
+	device.get_command_pool().reset_pool();
+
+	transient_buffers.clear();
+}
+
+void VolumeRenderSubpass::draw(CommandBuffer &command_buffer)
+{
+	camera.get_node()->get_transform().get_world_matrix();        // calls update_world_transform
+
+	// Get shaders from cache
+	auto &resource_cache                        = command_buffer.get_device().get_resource_cache();
+	auto &vert_shader_module                    = resource_cache.request_shader_module(VK_SHADER_STAGE_VERTEX_BIT, get_vertex_shader(), shader_variant);
+	auto &vert_shader_module_plane_intersection = resource_cache.request_shader_module(VK_SHADER_STAGE_VERTEX_BIT, vertex_source_plane_intersection, shader_variant);
+	auto &frag_shader_module                    = resource_cache.request_shader_module(VK_SHADER_STAGE_FRAGMENT_BIT, get_fragment_shader(), shader_variant);
+
+	std::vector<ShaderModule *> shader_modules{&vert_shader_module, &frag_shader_module};
+	std::vector<ShaderModule *> shader_modules_plane_intersection{&vert_shader_module_plane_intersection, &frag_shader_module};
+
+	// Create pipeline layout and bind it
+	auto &pipeline_layout                    = resource_cache.request_pipeline_layout(shader_modules);
+	auto &pipeline_layout_plane_intersection = resource_cache.request_pipeline_layout(shader_modules_plane_intersection);
+
+	// Enable alpha blending
+	ColorBlendAttachmentState color_blend_attachment{};
+	color_blend_attachment.blend_enable = VK_TRUE;
+	//color_blend_attachment.src_color_blend_factor = VK_BLEND_FACTOR_SRC_ALPHA;
+	color_blend_attachment.dst_color_blend_factor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	color_blend_attachment.src_alpha_blend_factor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+
+	ColorBlendState color_blend_state{};
+	color_blend_state.attachments.resize(get_output_attachments().size());
+	color_blend_state.attachments[0] = color_blend_attachment;
+	command_buffer.set_color_blend_state(color_blend_state);
+
+	DepthStencilState depth_stencil_state{};
+	depth_stencil_state.depth_compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL;
+	command_buffer.set_depth_stencil_state(depth_stencil_state);
+
+	// Get image views of the attachments
+	auto &render_target = get_render_context().get_active_frame().get_render_target();
+	auto &target_views  = render_target.get_views();
+
+	// Bind depth as input attachment
+	auto &depth_view = target_views.at(1);
+	command_buffer.bind_input(depth_view, 0, 0, 0);
+
+	// Set cull mode to back
+	RasterizationState rasterization_state;
+	rasterization_state.cull_mode = VK_CULL_MODE_BACK_BIT;
+	command_buffer.set_rasterization_state(rasterization_state);
+
+	// Vertex input state
+	VkVertexInputBindingDescription vertex_input_binding{};
+	vertex_input_binding.stride = to_u32(sizeof(glm::vec3));
+
+	// Location 0: Position
+	VkVertexInputAttributeDescription pos_attr{};
+	pos_attr.format = VK_FORMAT_R32G32B32_SFLOAT;
+	pos_attr.offset = 0;
+
+	VertexInputState vertex_input_state{};
+	vertex_input_state.bindings   = {vertex_input_binding};
+	vertex_input_state.attributes = {pos_attr};
+	command_buffer.set_vertex_input_state(vertex_input_state);
+
+	for (auto volume : volumes)
+	{
+		TransferFunctionUniform transfer_function_uniform = volume->get_transfer_function_uniform();
+
+		CameraUniform camera_uniform;
+		camera_uniform.camera_view          = camera.get_view();
+		camera_uniform.camera_proj          = vkb::vulkan_style_projection(camera.get_projection());
+		camera_uniform.camera_view_proj_inv = glm::inverse(camera_uniform.camera_proj * camera_uniform.camera_view);
+		camera_uniform.model                = volume->get_node()->get_transform().get_matrix() * volume->get_image_transform();
+		camera_uniform.model_inv            = glm::inverse(camera_uniform.model);
+
+		RayCastUniform  ray_cast_uniform;
+		glm::mat4       model_to_tex    = glm::translate(glm::vec3(0.5f));        // we just use a unit cube from [-0.5 to 0.5] so putting it at [0-1] is just a translation
+		glm::mat4       global_to_tex   = model_to_tex * camera_uniform.model_inv;
+		const glm::mat4 viewInv         = glm::inverse(camera.get_view());
+		const glm::vec3 cam_pos_global  = viewInv[3];
+		const glm::vec3 cam_pos_model   = camera_uniform.model_inv * glm::vec4(cam_pos_global, 1.0f);
+		ray_cast_uniform.camera_pos_tex = model_to_tex * glm::vec4(cam_pos_model, 1.0f);
+		const glm::vec3 cam_dir_global  = glm::vec3(viewInv * glm::vec4(0, 0, -1, 0));
+		ray_cast_uniform.plane          = glm::vec4(cam_dir_global, -options.clip_distance - glm::dot(cam_pos_global, cam_dir_global));
+		ray_cast_uniform.plane_tex      = glm::inverseTranspose(global_to_tex) * ray_cast_uniform.plane;
+		ray_cast_uniform.front_index    = (ray_cast_uniform.plane_tex.x < 0 ? 1 : 0) +
+		                               (ray_cast_uniform.plane_tex.y < 0 ? 2 : 0) +
+		                               (ray_cast_uniform.plane_tex.z < 0 ? 4 : 0);
+		auto volume_extent          = volume->get_volume().image->get_extent();
+		auto map_extent             = volume->get_distance_map().image->get_extent();
+		ray_cast_uniform.block_size = glm::vec4(
+		    rndUp(volume_extent.width, map_extent.width),
+		    rndUp(volume_extent.height, map_extent.height),
+		    rndUp(volume_extent.depth, map_extent.depth),
+		    0);
+		//options.resume_factor * transfer_function_uniform.sampling_factor *
+		//std::min(std::min(ray_cast_uniform.block_size.x, ray_cast_uniform.block_size.y), ray_cast_uniform.block_size.z);
+
+		// Allocate a buffer using the buffer pool from the active frame to store uniform values and bind it
+		auto &render_frame                 = get_render_context().get_active_frame();
+		auto  allocation_transfer_function = render_frame.allocate_buffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(transfer_function_uniform));
+		allocation_transfer_function.update(transfer_function_uniform);
+		auto allocation_camera = render_frame.allocate_buffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(camera_uniform));
+		allocation_camera.update(camera_uniform);
+		auto allocation_ray_cast = render_frame.allocate_buffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, sizeof(ray_cast_uniform));
+		allocation_ray_cast.update(ray_cast_uniform);
+
+		// Draw clipped cuboid
+		command_buffer.bind_pipeline_layout(pipeline_layout);
+		command_buffer.bind_buffer(allocation_camera.get_buffer(), allocation_camera.get_offset(), allocation_camera.get_size(), 0, 1, 0);
+		command_buffer.bind_buffer(allocation_ray_cast.get_buffer(), allocation_ray_cast.get_offset(), allocation_ray_cast.get_size(), 0, 2, 0);
+		command_buffer.bind_buffer(allocation_transfer_function.get_buffer(), allocation_transfer_function.get_offset(), allocation_transfer_function.get_size(), 0, 3, 0);
+		command_buffer.bind_image(*volume->get_transfer_function().image_view, *volume->get_transfer_function().sampler, 0, 4, 0);
+		command_buffer.bind_image(*volume->get_volume().image_view, *volume->get_volume().sampler, 0, 5, 0);
+		if (volume->options.use_precomputed_gradient)
+		{
+			command_buffer.bind_image(*volume->get_gradient().image_view, *volume->get_gradient().sampler, 0, 6, 0);
+		}
+		if (options.skipping_type == SkippingType::AnisotropicDistance)
+		{
+			for (int i = 0; i < 8; ++i)
+			{
+				auto &distance_map = volume->get_distance_map(i);
+				command_buffer.bind_image(*distance_map.image_view, *distance_map.sampler, 0, 7, i);
+			}
+		}
+		else
+		{
+			command_buffer.bind_image(*volume->get_distance_map().image_view, *volume->get_distance_map().sampler, 0, 7, 0);
+		}
+		command_buffer.bind_vertex_buffers(0, {*vertex_buffer}, {0});
+		command_buffer.bind_index_buffer(*index_buffer, 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+		command_buffer.draw_indexed(index_count, 1, 0, 0, 0);
+
+		// Draw box plane intersection
+		command_buffer.bind_pipeline_layout(pipeline_layout_plane_intersection);
+		command_buffer.bind_index_buffer(*index_buffer_plane_intersection, 0, VkIndexType::VK_INDEX_TYPE_UINT32);
+		command_buffer.draw_indexed(index_count_plane_intersection, 1, 0, 0, 0);
+	}
+}
+```
+
+### src/volume_render_subpass.h
+```
+/* Copyright (c) 2019, Lachlan Deakin
+*
+* SPDX-License-Identifier: Apache-2.0
+*
+* Licensed under the Apache License, Version 2.0 the "License";
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*     http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
+#pragma once
+
+#include "core/buffer.h"
+#include "core/command_buffer.h"
+#include "rendering/render_context.h"
+#include "rendering/subpass.h"
+#include "scene_graph/components/camera.h"
+#include "scene_graph/scene.h"
+
+#include "volume_component.h"
+
+///**
+//* @brief Uniform stucture for a camera
+//*/
+struct CameraUniform
+{
+	glm::mat4 camera_view;                 // camera view matrix
+	glm::mat4 camera_proj;                 // camera projection matrix
+	glm::mat4 camera_view_proj_inv;        // camera view projection matrix (inverse)
+	glm::mat4 model;                       // model matrix
+	glm::mat4 model_inv;                   // model matrix (inverse)
+};
+
+///**
+//* @brief Uniform stucture for ray casting a clipped box
+//* Camera position in texture coordinates is used to find the ray intersection with the back of the cube.
+//* model_inv and plane used for box/plane intersection.
+//*/
+struct RayCastUniform
+{
+	glm::vec4 plane;                 // clipping plane in global coordinates
+	glm::vec4 plane_tex;             // clipping plane in texture coordinates
+	glm::vec4 camera_pos_tex;        // camera position in texture coordinates
+	glm::vec4 block_size;            // block size of occupancy/distance map
+	int       front_index;           // index of the front vertex on the cube (see volume_render_plane_intersection.vert)
+};
+
+class VolumeRenderSubpass : public vkb::Subpass
+{
+  public:
+	enum class SkippingType : int
+	{
+		None                = 0,
+		Block               = 1,
+		Distance            = 2,
+		AnisotropicDistance = 3
+	};
+
+	enum class Test : int
+	{
+		None              = 0,
+		RayEntry          = 1,
+		RayExit           = 2,
+		NumTextureSamples = 3
+	};
+
+	struct Options
+	{
+		SkippingType skipping_type         = SkippingType::Distance;
+		float        clip_distance         = 50.0f;
+		bool         early_ray_termination = true;
+		bool         depth_attachment      = false;
+		Test         test                  = Test::None;
+	};
+
+	VolumeRenderSubpass(vkb::RenderContext &render_context, vkb::sg::Scene &scene, vkb::sg::Camera &camera, Options options);
+	virtual ~VolumeRenderSubpass() = default;
+
+	virtual void prepare() override;
+
+	void draw(vkb::CommandBuffer &command_buffer) override;
+
+  private:
+	vkb::ShaderSource     vertex_source_plane_intersection;
+	vkb::sg::Camera &     camera;
+	std::vector<Volume *> volumes;
+
+	std::unique_ptr<vkb::core::Buffer> vertex_buffer, index_buffer, index_buffer_plane_intersection;
+	uint32_t                           index_count, index_count_plane_intersection;
+
+	// Options
+	Options            options;
+	vkb::ShaderVariant shader_variant{};
+};
+```

@@ -1,0 +1,291 @@
+# Decentralized Federated NeRF
+
+Also called: DecentNeRF, Decentralized Neural Radiance Fields from Crowdsourced Images
+
+## Overview
+DecentNeRF is a decentralized framework for learning global 3D scene representations from crowd-sourced images by distributing training computation to users and aggregating only global radiance field models to minimize server compute and personal data leakage [S1]. The method solves the problem of achieving photorealistic 3D reconstruction of global scene content while preventing the server from reconstructing transient personal content (e.g., users, objects) present in crowdsourced images taken at different times [S1]. It sets itself apart from centralized approaches like NeRF-W by distributing training to users and from standard federated NeRFs (e.g., FedNeRF) by employing a personal/global MLP decomposition, learned weighted averaging, and secure multi-party computation (SMPC) to protect privacy [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $K$ users, each possessing a local dataset of images with known camera poses (pitch $\theta$, yaw $\phi$) and 3D spatial coordinates $\mathbf{x} = (x, y, z)$ [S1].
+*   **Outputs:** A globally aggregated global MLP weights $\mathbf{G}$ held by the server, and locally held personal MLP weights $\mathbf{P}_k$ for each user $k$ [S1].
+
+**Data Structures:**
+Each user $k$ maintains two Multi-Layer Perceptrons (MLPs):
+1.  **Global MLP ($\Phi_{global}$):** Weights denoted $\mathbf{g}_k$. Captures static, shared scene content.
+2.  **Personal MLP ($\Phi_{personal}$):** Weights denoted $\mathbf{p}_k$. Captures transient, user-specific content [S1].
+
+Each MLP takes a 5D input vector: spatial coordinate $\mathbf{x}$ and viewing direction parameters $\theta, \phi$. It outputs scalar density $\sigma$ and RGB color vector $\mathbf{c} = (r, g, b)$ [S1].
+
+**Parameters:**
+*   $\alpha_k$: A per-user weighting factor (scalar) used for learned federation. Initialized randomly or uniformly. Updated via gradient descent [S1].
+*   $L_k$: The loss function for user $k$, typically Mean Squared Error (MSE) between rendered and ground truth RGB [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Server initializes global MLP weights $\mathbf{G}^{(0)}$ (shared structure).
+    *   Each user $k$ initializes local global weights $\mathbf{g}_k^{(0)}$ and personal weights $\mathbf{p}_k^{(0)}$ [S1].
+    *   Each user initializes $\alpha_k^{(0)}$ [S1].
+
+2.  **Local Training (User $k$, Round $m$):**
+    *   For each training step, sample a ray from local images.
+    *   Compute density $\sigma_g, \mathbf{c}_g$ from $\Phi_{global}(\mathbf{x}, \mathbf{d})$ with weights $\mathbf{g}_k$.
+    *   Compute density $\sigma_p, \mathbf{c}_p$ from $\Phi_{personal}(\mathbf{x}, \mathbf{d})$ with weights $\mathbf{p}_k$.
+    *   Render the final image $I_{rendered}$ by alpha-compositing the outputs of both MLPs along the ray [S1].
+    *   Compute loss $L_k$ against ground truth image $I_{GT}$ [S1].
+    *   Update $\mathbf{g}_k$ and $\mathbf{p}_k$ using gradient descent on $L_k$ [S1].
+    *   Compute gradient of loss with respect to global weights: $\nabla_{\mathbf{g}} L_k = \frac{\partial L_k}{\partial \mathbf{g}_k}$ [S1].
+    *   Update $\alpha_k$ based on the gradient update rule (see Pseudocode) [S1].
+
+3.  **Secure Aggregation (Server, Round $m$):**
+    *   Receive obfuscated weights $\tilde{\mathbf{g}}_k^{(m)}$ and obfuscated gradients $\tilde{\nabla}_{\mathbf{g}} L_k^{(m-1)}$ from all users [S1].
+    *   Compute the weighted average of the global weights using SMPC:
+        $$ \mathbf{G}^{(m)} = \text{SMPC\_WeightedAvg}(\{ \tilde{\mathbf{g}}_k^{(m)} \}, \{ \alpha_k^{(m)} \}) $$
+        The SMPC protocol ensures the server cannot recover individual $\mathbf{g}_k$ values [S1].
+    *   Compute the weighted average of the previous round's gradients using SMPC:
+        $$ \overline{\nabla}_{\mathbf{g}} L^{(m-1)} = \text{SMPC\_WeightedAvg}(\{ \tilde{\nabla}_{\mathbf{g}} L_k^{(m-1)} \}, \{ \alpha_k^{(m)} \}) $$
+    *   Distribute $\mathbf{G}^{(m)}$ and $\overline{\nabla}_{\mathbf{g}} L^{(m-1)}$ back to all users [S1].
+
+4.  **User Update (User $k$, Round $m$):**
+    *   Receive $\mathbf{G}^{(m)}$ and $\overline{\nabla}_{\mathbf{g}} L^{(m-1)}$ from the server.
+    *   Update local global weights: $\mathbf{g}_k^{(m)} \leftarrow \mathbf{G}^{(m)}$ [S1].
+    *   Update $\alpha_k$ using the received aggregated gradient (see Pseudocode) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Assume standard NeRF MLPs: GlobalMLP and PersonalMLP
+# Assume VolumeRendering function that alpha-composites global and personal outputs
+
+class DecentNeRFUser:
+    def __init__(self, user_id, num_users, global_mlp, personal_mlp, lr=0.001):
+        self.user_id = user_id
+        self.num_users = num_users
+        self.global_mlp = global_mlp
+        self.personal_mlp = personal_mlp
+        self.lr = lr
+        
+        # Per-user weighting factor for learned federation
+        self.alpha_k = torch.tensor(1.0 / num_users, requires_grad=True)
+        
+        # Optimizers for weights and alpha
+        self.optimizer_weights = optim.Adam(list(self.global_mlp.parameters()) + list(self.personal_mlp.parameters()), lr=lr)
+        self.optimizer_alpha = optim.Adam([self.alpha_k], lr=lr)
+        
+        self.prev_global_grad = None
+
+    def local_step(self, rays, gt_images):
+        """
+        Performs local training for one batch.
+        rays: tensor of shape (N, 5) -> (x, y, z, theta, phi)
+        gt_images: tensor of shape (N, 3) -> RGB ground truth
+        """
+        self.optimizer_weights.zero_grad()
+        self.optimizer_alpha.zero_grad()
+        
+        # 1. Forward pass through Global MLP
+        # Output: sigma_g, color_g
+        sigma_g, color_g = self.global_mlp(rays)
+        
+        # 2. Forward pass through Personal MLP
+        # Output: sigma_p, color_p
+        sigma_p, color_p = self.personal_mlp(rays)
+        
+        # 3. Render image by alpha-compositing both contributions
+        # Note: Standard NeRF volume rendering integrates sigma and color.
+        # Here, we composite the final colors from both fields.
+        # Simplified composite: Weighted sum of colors based on opacity, 
+        # or separate integration. The paper states "alpha-composite of the output images".
+        # Let's assume separate rendering for G and P, then composite.
+        
+        img_global = volume_render_ray(rays, sigma_g, color_g)
+        img_personal = volume_render_ray(rays, sigma_p, color_p)
+        
+        # Composite: The paper implies they are combined. 
+        # A common approach in such decompositions is to treat them as additive or 
+        # composite based on visibility. For implementation from text:
+        # "The final rendered image is an alpha-composite of the output images from both..."
+        # We assume a simple additive combination for color if not specified, 
+        # or standard alpha blending if opacities are derived. 
+        # Given "alpha-composite", we treat them as two layers.
+        # Layer 1: Global. Layer 2: Personal.
+        # Final Color = Color_G * (1 - Alpha_P) + Color_P * Alpha_P ? 
+        # Or simply sum if they represent distinct components. 
+        # The paper says "decomposes... into personal and global". 
+        # Let's use a standard composite where Personal is on top of Global.
+        
+        alpha_p = 1.0 - torch.exp(-sigma_p) # Approximation of opacity from density
+        alpha_g = 1.0 - torch.exp(-sigma_g)
+        
+        # Composite: Global is background, Personal is foreground
+        # C_final = C_g * (1 - alpha_p) + C_p * alpha_p
+        # This is a simplification of the volume rendering equation for two fields.
+        final_color = img_global * (1 - alpha_p) + img_personal * alpha_p
+        
+        # 4. Compute Loss
+        loss = torch.mean((final_color - gt_images) ** 2)
+        
+        # 5. Backward pass for weights
+        loss.backward()
+        
+        # 6. Compute gradient for alpha update
+        # The paper mentions updating alpha based on equation (2) and gradients.
+        # Equation (2) is not explicitly provided in the text, but standard learned 
+        # weighting in FL often involves minimizing the loss with respect to the weight.
+        # We compute gradient of loss w.r.t alpha_k.
+        # Note: alpha_k is a scalar multiplier for the weight aggregation, 
+        # but locally it might influence the contribution. 
+        # The text says: "compute_grads() ... calculates the update step described in equation (2) 
+        # and then updates alpha_k accordingly."
+        # And "send_grads() ... communicates local gradients ... similar to send_wts".
+        # We assume the gradient used for alpha is related to the sensitivity of the loss 
+        # to the global model's contribution.
+        
+        # To make this self-contained and valid Python, we approximate the gradient 
+        # for alpha as the norm of the global weights gradient, scaled by alpha, 
+        # or simply the loss gradient if alpha modulates the loss.
+        # However, the text says alpha is used for *obfuscation* and *aggregation*.
+        # "Each user obfuscates its local weights (multiplies with alpha_k)".
+        # So locally, the user might not use alpha in the forward pass, 
+        # but uses it to scale the *sent* weights.
+        # The update of alpha is likely based on the gradient of the loss w.r.t 
+        # the aggregated global model.
+        
+        # Let's store the global weight gradient for the server.
+        global_grad = torch.zeros_like(list(self.global_mlp.parameters())[0]) # Placeholder for vector
+        # In reality, we need the full gradient vector.
+        global_grad_vec = torch.cat([p.grad.view(-1) for p in self.global_mlp.parameters()])
+        
+        # Update alpha based on gradient magnitude (heuristic for learned federation)
+        # The paper says "learned implicitly to maximize visual fidelity".
+        # We assume a gradient step on alpha using the loss gradient w.r.t alpha.
+        # Since alpha is not in the forward pass, we approximate:
+        # dL/d_alpha approx || grad_global || * alpha
+        grad_alpha = torch.norm(global_grad_vec) * self.alpha_k
+        
+        # Update alpha
+        self.alpha_k.grad = grad_alpha
+        self.optimizer_alpha.step()
+        
+        # Update weights
+        self.optimizer_weights.step()
+        
+        # Store previous global gradient for the next round's aggregation
+        self.prev_global_grad = global_grad_vec.detach()
+        
+        return loss.item()
+
+    def send_wts(self):
+        """
+        Obfuscates and sends global weights and previous gradients to server.
+        Uses additively homomorphic encryption or random masking.
+        """
+        # Flatten global weights
+        wts_vec = torch.cat([p.view(-1) for p in self.global_mlp.parameters()])
+        
+        # Obfuscation: Multiply by alpha_k and add random mask
+        # Mask must be known to users for SMPC reconstruction, or generated via protocol.
+        # For this pseudocode, we simulate the obfuscated value.
+        # In SMPC, users generate random masks r_k such that sum(r_k) = 0.
+        # Obfuscated weight = alpha_k * wts_k + r_k
+        # Here we just show the multiplication by alpha_k as the primary scaling factor.
+        obfuscated_wts = self.alpha_k * wts_vec
+        
+        # Obfuscate previous gradients similarly
+        if self.prev_global_grad is not None:
+            obfuscated_grads = self.alpha_k * self.prev_global_grad
+        else:
+            obfuscated_grads = torch.zeros_like(wts_vec)
+            
+        return obfuscated_wts, obfuscated_grads
+
+    def receive_update(self, global_wts_agg, grad_agg):
+        """
+        Receives aggregated global weights and gradients from server.
+        """
+        # Update local global weights to the aggregated global model
+        # Reshape and assign
+        params = list(self.global_mlp.parameters())
+        offset = 0
+        for p in params:
+            size = p.numel()
+            p.data = global_wts_agg[offset:offset+size].view(p.shape)
+            offset += size
+            
+        # Store aggregated gradient for next round's obfuscation
+        self.prev_global_grad = grad_agg
+
+class DecentNeRFServer:
+    def __init__(self, num_users):
+        self.num_users = num_users
+        self.global_mlp = None # Will be initialized from first round or pre-trained
+        
+    def aggregate(self, obfuscated_wts_list, obfuscated_grads_list, alphas):
+        """
+        Securely aggregates weights and gradients.
+        In a real SMPC implementation, this happens in a secure enclave or via protocol.
+        Here we simulate the weighted average.
+        """
+        # Weighted Average of Weights
+        # sum(alpha_k * wts_k) / sum(alpha_k)
+        total_wts = torch.zeros_like(obfuscated_wts_list[0])
+        total_alpha = torch.tensor(0.0)
+        
+        for i in range(self.num_users):
+            total_wts += obfuscated_wts_list[i]
+            total_alpha += alphas[i]
+            
+        aggregated_wts = total_wts / total_alpha
+        
+        # Weighted Average of Gradients
+        total_grads = torch.zeros_like(obfuscated_grads_list[0])
+        for i in range(self.num_users):
+            total_grads += obfuscated_grads_list[i]
+            
+        aggregated_grads = total_grads / total_alpha # Or sum, depending on normalization
+        
+        return aggregated_wts, aggregated_grads
+
+def volume_render_ray(rays, sigma, color):
+    """
+    Simplified volume rendering for a single ray batch.
+    rays: (N, 5)
+    sigma: (N, 1)
+    color: (N, 3)
+    """
+    # Standard NeRF volume rendering integration
+    # This is a placeholder for the actual integration loop
+    # Assuming uniform sampling along ray
+    N = rays.shape[0]
+    # T = 1 - exp(-sigma * delta)
+    # C = sum(T * exp(-sum(sigma * delta)) * color)
+    # For simplicity, we return the color as if it were the final pixel value
+    # In a real implementation, this would involve a loop over samples.
+    return color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Initial Rounds:** During initial federation rounds, users' global MLPs contain personal content. The server's averaging prevents faithful reconstruction of this personal content, but the server still sees a mix. Secure aggregation minimizes the risk of recovering individual personal content during this phase [S1].
+*   **No Overlap:** If two users have no overlapping views (entirely separate scene areas), the server's ability to reconstruct personal content increases considerably because the averaging does not cancel out unique personal features [S1].
+*   **Standard Averaging:** Using standard Federated Averaging (FedAvg) instead of learned weighted averaging results in suboptimal visual fidelity for global scene reconstruction, especially when users have different data distributions (e.g., varying occlusion levels) [S1].
+
+## Operating characteristics
+*   **Server Compute:** DecentNeRF reduces server compute cost by a factor of $\sim 10^4$ compared to centralized approaches [S1].
+*   **FLOPs:** DecentNeRF requires $\sim 0.6$B FLOPs for the server-side aggregation and $\approx 5$B FLOPs total for the scene on the Phototourism dataset, compared to $\approx 200$T FLOPs for NeRF-W (centralized) and $\sim 0.6$B FLOPs for FedNeRF (server-side, but lower quality) [S1].
+*   **Performance:** On the Phototourism dataset, DecentNeRF achieves PSNR 24.62, SSIM 0.8802, LPIPS 0.2571 [S1].
+*   **Privacy:** Personal content reconstruction by the server is reduced by 10 dB compared to FedNeRF [S1]. In the first round, server-rendered global image PSNR is 14.2 dB and personal content PSNR is 14.9 dB. In the final round, global image PSNR is 27.2 dB and personal content PSNR is 9.3 dB [S1].
+*   **Strengths:** Photorealistic global reconstruction, minimal server compute, strong privacy protection against honest-but-curious servers.
+*   **Limitations:** Requires known camera poses (assumed accurate); assumes sufficient view overlap between users; vulnerable if users have no overlapping views.
+
+## Background
+DecentNeRF was introduced by Z. Tasneem et al. in the paper "DecentNeRFs: Decentralized Neural Radiance Fields from Crowdsourced Images" [S1]. It is the first work to analyze the decentralization aspects of radiance fields for real-world crowd-sourced images, addressing the limitations of NeRF-W (which requires centralizing all personal images) and existing federated NeRF methods (which do not handle personal content or use secure aggregation) [S1]. It is used for decentralized NeRF training on crowdsourced datasets including the Novel Blender Dataset and Phototourism Dataset (Brandenburg Gate, Trevi Fountain, Sacre Couer) [S1].
+
+## Sources
+[S1] DecentNeRFs: Decentralized Neural Radiance Fields from Crowdsourced Images, https://link.springer.com/chapter/10.1007/978-3-031-73202-7_9, fetched 2026-10-30

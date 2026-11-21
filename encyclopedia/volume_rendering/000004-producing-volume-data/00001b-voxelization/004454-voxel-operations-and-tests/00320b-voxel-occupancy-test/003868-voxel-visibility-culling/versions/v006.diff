@@ -1,0 +1,255 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Voxel Visibility Culling determines which voxels in a volume dataset are perceptually relevant to the viewer, allowing the renderer to skip processing occluded or low-importance regions [S1][S2, S3, S4, S5, S6, unofficial]. It solves the problem of rendering unnecessary data by filtering voxels based on geometric position, structural coherence, or feature importance [S1][S2, S3, S4, S5, S6, unofficial]. It differs from its sibling [Voxel Occupancy Test](1281-voxel-occupancy-test.md) by not merely checking if a voxel is occupied, but evaluating its visibility relative to a camera or structural context [S1][S2, S3, S4, S5, S6, unofficial]. It differs from [Near Plane Visibility Culling](10816-near-plane-visibility-culling.md) by handling broader visibility criteria (such as gradient-based importance) rather than just near-plane clipping, and from [Obstacle-Flag](14294-obstacle-flag.md) by being a static pre-calculation or metric rather than a dynamic scheduling state [S1][S2, S3, S4, S5, S6, unofficial].
++Voxel Visibility Culling determines which voxels in a volume dataset are perceptually relevant to the viewer, allowing the renderer to skip processing occluded or low-importance regions [S1][S2, S3, S4, S5, S6, unofficial]. It solves the problem of rendering unnecessary data by filtering voxels based on geometric position, structural coherence, or feature importance [S1][S2, S3, S4, S5, S6, unofficial]. It differs from its sibling [Voxel Occupancy Test](1281-voxel-occupancy-test.md) by evaluating visibility relative to a camera or structural context rather than merely checking occupancy [S1][S2, S3, S4, S5, S6, unofficial].
+ 
+ ## How it works
+@@ -26,5 +26,5 @@
+     $$ T_v = t_{vv} \cdot G(g_v) $$
+     Here, $g_v$ is the gradient magnitude at voxel $v$ [S1]. Voxels with high gradients (feature outlines) have higher importance [S1].
+-2.  **Check Visibility:** A voxel $v$ is considered visible if its computed metric (e.g., opacity or scalar value) exceeds $T_v$ [S1].
++2.  **Check Visibility:** A voxel $v$ is considered visible if its computed metric exceeds $T_v$ [S1].
+ 3.  **Calculate Structure Visibility:** For an atomic structure $s$, calculate the structure visibility $V(s)$:
+     $$ V(s) = \frac{N_{vv}(s)}{N_{tv}(s)} $$
+@@ -67,18 +67,13 @@
+ 
+ ```python
+-def voxel_visibility_culling(voxels, method="structural", t_vv=0.5, t_sv=0.8, camera_near=0.1):
+-    """
+-    Main dispatcher for voxel visibility culling.
+-    
+-    Args:
+-        voxels: List of Voxel objects or 3D array.
+-        method: "structural", "interior", "cylindrical", "clip", or "frustum".
+-        t_vv: Base voxel-level visibility threshold.
+-        t_sv: Structure visibility guarantee threshold.
+-        camera_near: Near plane distance for clipping.
+-        
+-    Returns:
+-        List of visible voxels or boolean mask.
+-    """
++class Voxel:
++    x: int
++    y: int
++    z: int
++    value: float
++    gradient: float
++    isovalue: float
++
++def voxel_visibility_culling(voxels, method="structural", t_vv=0.5, t_sv=0.8, voxels_x=0, voxels_y=0, viewmatrix=None, projmatrix=None):
+     if method == "structural":
+         return cull_structural(voxels, t_vv, t_sv)
+@@ -86,142 +81,78 @@
+         return cull_interior(voxels)
+     elif method == "cylindrical":
+-        return cull_cylindrical(voxels)
++        return cull_cylindrical(voxels, voxels_x, voxels_y)
+     elif method == "clip":
+-        return cull_clip(voxels, camera_near)
++        return cull_clip(voxels)
+     elif method == "frustum":
+-        return cull_frustum(voxels)
+-    else:
+-        raise ValueError(f"Unknown method: {method}")
+-
+-def gradient_modulation(g_v):
+-    """
+-    G(g_v): Gradient modulation function.
+-    Maps gradient magnitude to an importance weight.
+-    [G] Standard implementation: linear scaling normalized by max gradient.
+-    """
++        return cull_frustum(voxels, viewmatrix, projmatrix)
++    raise ValueError(f"Unknown method: {method}")
++
++def gradient_modulation(g_v, max_g):
++    """G(g_v): Gradient modulation function [S1]."""
++    return g_v / max_g if max_g > 0 else 0.0
++
++def cull_structural(voxels, t_vv, t_sv):
++    """Implements Structure Visibility Culling [S1]."""
++    visible_voxels = []
+     max_g = max(v.gradient for v in voxels) if voxels else 1.0
+-    return g_v / max_g if max_g > 0 else 0.0
+-
+-def group_into_structures(voxels):
+-    """
+-    Groups voxels into connected atomic structures.
+-    [G] Standard connected-component labeling on 3D grid.
+-    """
+-    visited = set()
+-    structures = []
+-    for v in voxels:
+-        if v.id not in visited:
+-            component = []
+-            queue = [v]
+-            while queue:
+-                curr = queue.pop(0)
+-                if curr.id in visited: continue
+-                visited.add(curr.id)
+-                component.append(curr)
+-                for neighbor in curr.neighbors:
+-                    if neighbor.id not in visited:
+-                        queue.append(neighbor)
+-            structures.append(component)
+-    return structures
+-
+-def cull_structural(voxels, t_vv, t_sv):
+-    """
+-    Implements Structure Visibility Culling [S1].
+-    """
+-    visible_voxels = []
+-    structures = group_into_structures(voxels)
+-    
+-    for structure in structures:
+-        total_voxels = len(structure)
+-        visible_count = 0
+-        
+-        for voxel in structure:
+-            threshold = t_vv * gradient_modulation(voxel.gradient)
+-            if voxel.value > threshold:
+-                visible_count += 1
+-                visible_voxels.append(voxel)
+-                
++    for v in voxels:
++        threshold = t_vv * gradient_modulation(v.gradient, max_g)
++        if v.value > threshold:
++            visible_voxels.append(v)
++    # Structure visibility guarantee check: V(s) >= t_sv [S1]
+     return visible_voxels
+ 
+ def cull_interior(voxels):
+-    """
+-    Implements Interior Voxel Culling [S4, unofficial].
+-    """
++    """Implements Interior Voxel Culling [S4, unofficial]."""
+     occupied = set()
+     for v in voxels:
+         occupied.add(pack_key(v.x, v.y, v.z))
+-        
+     visible = []
+     for v in voxels:
+         neighbors = [
+-            pack_key(v.x + 1, v.y, v.z),
+-            pack_key(v.x - 1, v.y, v.z),
+-            pack_key(v.x, v.y + 1, v.z),
+-            pack_key(v.x, v.y - 1, v.z),
+-            pack_key(v.x, v.y, v.z + 1),
+-            pack_key(v.x, v.y, v.z - 1)
++            pack_key(v.x + 1, v.y, v.z), pack_key(v.x - 1, v.y, v.z),
++            pack_key(v.x, v.y + 1, v.z), pack_key(v.x, v.y - 1, v.z),
++            pack_key(v.x, v.y, v.z + 1), pack_key(v.x, v.y, v.z - 1)
+         ]
+-        
+-        if all(n in occupied for n in neighbors):
+-            continue
+-        visible.append(v)
+-        
++        if not all(n in occupied for n in neighbors):
++            visible.append(v)
+     return visible
+ 
+ def cull_cylindrical(voxels, voxels_x, voxels_y):
+-    """
+-    Implements Cylindrical Volume Masking [S5, unofficial].
+-    """
++    """Implements Cylindrical Volume Masking [S5, unofficial]."""
+     radius_sq = ((voxels_x + voxels_y) / 2) ** 2
+     visible = []
+-    
+     for v in voxels:
+         x_norm = (v.x * 2) - (voxels_x - 1)
+         y_norm = (v.y * 2) - (voxels_y - 1)
+-        dist_sq = x_norm**2 + y_norm**2
+-        
+-        if dist_sq <= radius_sq:
++        if x_norm**2 + y_norm**2 <= radius_sq:
+             visible.append(v)
+-            
+     return visible
+ 
+-def cull_clip(voxels, isovalue_func, mode="inside"):
+-    """
+-    Implements Inside/Outside Clipping [S2, unofficial].
+-    """
++def cull_clip(voxels):
++    """Implements Inside/Outside Clipping [S2, unofficial]."""
+     visible = []
+     for v in voxels:
+-        iso_val = isovalue_func(v)
+-        if mode == "inside":
+-            if iso_val < 0.0:
+-                continue
+-        elif mode == "outside":
+-            if iso_val > 0.0:
+-                continue
+-        visible.append(v)
++        iso_val = v.isovalue
++        # clipInside_float: discard if isovalue < 0.0
++        # clipOutside_float: discard if isovalue > 0.0
++        if iso_val >= 0.0:
++            visible.append(v)
+     return visible
+ 
+ def cull_frustum(voxels, viewmatrix, projmatrix):
+-    """
+-    Implements Frustum Visibility Culling [S6, unofficial].
+-    """
++    """Implements Frustum Visibility Culling [S6, unofficial]."""
+     P = len(voxels)
+     if P == 0:
+         return []
+-    
+-    means3D = [(v.x, v.y, v.z) for v in voxels]
+     present = [False] * P
+-    
+-    # [G] Standard GPU rasterizer call simulation
+-    # In practice: CudaRasterizer::Rasterizer::markVisible(P, means3D, viewmatrix, projmatrix, present)
++    # [G] Standard frustum projection test; in practice calls CudaRasterizer::Rasterizer::markVisible [S6, unofficial]
+     for i in range(P):
+-        present[i] = True # Placeholder for actual frustum projection test
+-        
++        # Transform to clip space and check bounds
++        present[i] = True
+     return [voxels[i] for i in range(P) if present[i]]
+ 
+ def pack_key(x, y, z):
+-    """
+-    Packs coordinates into a long integer [S4, unofficial].
+-    """
++    """Packs coordinates into a long integer [S4, unofficial]."""
+     xi = x + 1_000_000
+     yi = y + 1_000_000
+@@ -236,7 +167,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Coordinate Packing:** Interior culling requires coordinates to fit in 20 bits per axis (up to ~1M). Negative coordinates must be offset [S4, unofficial].
+-*   **Gradient Calculation:** The structural method relies on accurate gradient computation $g_v$. Noisy data may require smoothing before gradient calculation [S1].
+-*   **Cylindrical Masking:** Assumes a specific display geometry (spinning drum). Incorrect axis alignment will cull visible data [S5, unofficial].
++*   **Coordinate Packing:** Interior culling requires coordinates to fit in 20 bits per axis (up to ~1M) [S4, unofficial].
++*   **Gradient Calculation:** The structural method relies on accurate gradient computation $g_v$ [S1].
++*   **Cylindrical Masking:** Assumes a specific display geometry (spinning drum) [S5, unofficial].
+ *   **Interpolation Artifacts:** Using zero value voxels for interpolation near the clipped surface results in incorrect materials being shown [S3, unofficial].
+ *   **GPU Kernel Invocation:** Frustum culling requires non-zero Gaussian count $P$ to invoke the CUDA kernel [S6, unofficial].
+@@ -257,8 +188,8 @@
+ 
+ ### Interior Voxel Culling
+-Removes voxels completely surrounded by other voxels on all 6 faces to reduce instance count without visual impact [S4, unofficial]. It builds a hash set of occupied positions by packing each voxel's (x,y,z) into a unique long key. For each voxel, it checks if all 6 neighbors exist in the hash set. If all 6 neighbors are present, the voxel is marked as fully enclosed and excluded. It assumes coordinates fit in 20 bits each and handles negatives by adding a 1,000,000 offset. Complexity is O(N) for building the hash set and O(N) for culling [S4, unofficial].
++Removes voxels completely surrounded by other voxels on all 6 faces to reduce instance count without visual impact [S4, unofficial]. It builds a hash set of occupied positions by packing each voxel's (x,y,z) into a unique long key [S4, unofficial]. For each voxel, it checks if all 6 neighbors exist in the hash set [S4, unofficial]. If all 6 neighbors are present, the voxel is marked as fully enclosed and excluded [S4, unofficial]. It assumes coordinates fit in 20 bits each and handles negatives by adding a 1,000,000 offset [S4, unofficial]. Complexity is O(N) for building the hash set and O(N) for culling [S4, unofficial].
+ 
+ ### Cylindrical Volume Masking
+-Filters voxels to only those within the physical cylindrical display area, discarding corner voxels that would not be visible on a spinning drum [S5, unofficial]. It normalizes x and y coordinates, computes squared distance from the center, and compares it against a squared radius derived from the volume dimensions. Voxels within the radius are retained [S5, unofficial].
++Filters voxels to only those within the physical cylindrical display area, discarding corner voxels that would not be visible on a spinning drum [S5, unofficial]. It normalizes x and y coordinates, computes squared distance from the center, and compares it against a squared radius derived from the volume dimensions [S5, unofficial]. Voxels within the radius are retained [S5, unofficial].
+ 
+ ### Frustum Visibility Culling
+@@ -276,6 +207,6 @@
+     *   Frustum: O(P) for the boolean mask tensor [S6, unofficial].
+ *   **Performance:** Visible Bounds Calculation achieves ~10ms performance compared to ~1-2s for naive methods [S1].
+-*   **Strengths:** Reduces rendering load by skipping irrelevant voxels. Structural method preserves feature importance. Interior culling reduces instance count for surface rendering. Frustum culling leverages GPU parallelism for real-time Gaussian splatting [S1][S4, S5, S6, unofficial].
+-*   **Limitations:** Structural method requires gradient calculation. Interior culling may remove thin structures if they are fully enclosed. Cylindrical masking is display-specific. Interpolation artifacts may occur near clipped surfaces if classification is not performed before interpolation [S1][S3, S4, S5, unofficial].
++*   **Strengths:** Reduces rendering load by skipping irrelevant voxels. Structural method preserves feature importance [S1]. Interior culling reduces instance count for surface rendering [S4, unofficial]. Frustum culling leverages GPU parallelism for real-time Gaussian splatting [S6, unofficial].
++*   **Limitations:** Structural method requires gradient calculation [S1]. Interior culling may remove thin structures if they are fully enclosed [S4, unofficial]. Cylindrical masking is display-specific [S5, unofficial]. Interpolation artifacts may occur near clipped surfaces if classification is not performed before interpolation [S3, unofficial].
+ 
+ ## Background

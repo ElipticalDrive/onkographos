@@ -1,0 +1,135 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Mixture Graph is a data structure for compressing, rendering, and querying segmentation histograms derived from volumetric segment ID data [S1]. It solves the problem of efficiently handling the high dimensionality and storage requirements of hierarchical histograms by factorizing normalized mixture vectors into a directed acyclic graph (DAG) of linear interpolations [S1]. Unlike traditional paletted textures where the palette is static, the Mixture Graph’s palette stores mixtures of multiple colors and is updated efficiently in parallel, allowing for pre-filtered anti-aliasing and interactive rendering [S1, S6].
++The Mixture Graph is a data structure for compressing, rendering, and querying segmentation histograms derived from volumetric segment ID data [S1]. It solves the problem of efficiently handling the high dimensionality and storage requirements of hierarchical histograms by factorizing normalized mixture vectors into a directed acyclic graph (DAG) of linear interpolations [S1]. Unlike traditional paletted textures where the palette is static, the Mixture Graph’s palette stores mixtures of multiple colors and is updated efficiently in parallel, allowing for pre-filtered anti-aliasing and interactive rendering [S1].
+ 
+ ## How it works
+@@ -15,7 +15,7 @@
+ ### Data Structures
+ The binary representation consists of the following components [S1]:
+-1.  **Voxel Data:** One mixture ID per voxel, stored in an SSBO.
+-2.  **Mixture Descriptions:** Node weights and standard deviations stored in an SSBO.
+-3.  **Quantizer Codebook:** Scalar quantizer codebook stored in an SSBO.
++1.  **Voxel Data:** One mixture ID per voxel, stored in an SSBO [S1].
++2.  **Mixture Descriptions:** Node weights and standard deviations stored in an SSBO [S1].
++3.  **Quantizer Codebook:** Scalar quantizer codebook stored in an SSBO [S1].
+ 4.  **Index Structures:** Node offsets and bit allocation counts stored as shader uniform constants [S1].
+ 5.  **Color Lookup Table:** A separate SSBO holding one `vec4` color entry per node [S1].
+@@ -54,59 +54,58 @@
+ 
+ ```python
+-# 1. Mipmap Construction
+-def build_mipmap(segment_ids, domain_size):
++def build_mipmap(segment_ids, domain_dims):
++    # segment_ids: list of integers representing segment IDs per voxel at level 0
++    # domain_dims: tuple (Dx, Dy, Dz)
+     levels = []
+-    # Level 0
+-    level_0 = [unit_vector(sid) for sid in segment_ids]
++    # Level 0: unit vectors e_{S(i,j,k)}
++    max_id = max(segment_ids) + 1
++    level_0 = [[1.0 if sid == i else 0.0 for i in range(max_id)] for sid in segment_ids]
+     levels.append(level_0)
+-    
++
+     current_level = level_0
+-    for l in range(1, max_levels):
++    for l in range(1, 30):
++        dim_l = tuple(max(1, (d + (1 << l) - 1) // (1 << l)) for d in domain_dims)
++        if dim_l == (1, 1, 1):
++            break
+         next_level = []
+-        # Determine N based on borders and resolution
+-        for i, j, k in domain_size[l]:
+-            children = []
+-            for u in range(2*i, 2*i+2):
+-                for v in range(2*j, 2*j+2):
+-                    for w in range(2*k, 2*k+2):
+-                        if is_valid(u, v, w, l-1):
+-                            children.append(current_level[get_index(u,v,w)])
+-            N = len(children)
+-            mixture = sum(children) / N
+-            next_level.append(mixture)
++        for i in range(dim_l[0]):
++            for j in range(dim_l[1]):
++                for k in range(dim_l[2]):
++                    children = []
++                    for u in range(2*i, 2*i+2):
++                        for v in range(2*j, 2*j+2):
++                            for w in range(2*k, 2*k+2):
++                                if u < len(current_level) and v < len(current_level[0]) and w < len(current_level[0][0]):
++                                    children.append(current_level[u][v][w])
++                    N = len(children)
++                    mixture = [sum(c[idx] for c in children) / N for idx in range(max_id)]
++                    next_level.append(mixture)
+         levels.append(next_level)
+         current_level = next_level
+     return levels
+ 
+-# 2. Factorization (Simplified Greedy)
+ def factorize_mixture(mixture_vector):
+     nodes = []
+     current_m = mixture_vector.copy()
+-    while norm_l0(current_m) > 0:
+-        # Select two indices with non-zero values
+-        i, j = select_best_pair(current_m)
+-        # Create interpolation lambda
+-        # lambda = (current_m[i] * e_i + current_m[j] * e_j) / (current_m[i] + current_m[j])
+-        # Weight w = current_m[i] + current_m[j]
++    while sum(current_m) > 1e-9:
++        indices = [i for i, v in enumerate(current_m) if v > 1e-9]
++        if len(indices) < 2:
++            break
++        i, j = indices[0], indices[1]
+         w = current_m[i] + current_m[j]
+         nodes.append((i, j, w))
+-        # Update mixture
+-        current_m[i] = 0
+-        current_m[j] = 0
++        current_m[i] = 0.0
++        current_m[j] = 0.0
+     return nodes
+ 
+-# 3. Rendering (Shader Logic Concept)
+ def render_voxel(voxel_id, node_offsets, bit_allocations, color_lut):
+-    # Retrieve node ID from raw data
+-    node_id = get_node_id(voxel_id)
+-    
+-    # Retrieve weights and predecessors from DAG
+-    pred1, pred2, weight = get_node_data(node_id)
+-    
++    # Retrieve node ID from raw data buffer using bit addressing
++    node_id = (voxel_id >> node_offsets) & ((1 << bit_allocations) - 1)
++    # Retrieve predecessors and quantized weight from DAG node data
++    pred1, pred2, weight = node_data[node_id]
+     # Interpolate colors
+     color1 = color_lut[pred1]
+     color2 = color_lut[pred2]
+-    final_color = lerp(color1, color2, weight)
+-    
++    final_color = tuple(c1 * (1 - weight) + c2 * weight for c1, c2 in zip(color1, color2))
+     return final_color
+ ```
+@@ -124,8 +123,8 @@
+ 
+ ### Normalized Histogram Mipmap
+-A hierarchical segmentation histogram $H$ constructed from a volume of segment IDs $S$. It stores mixtures (convex combinations of segment IDs) at multiple resolution levels. It uses the traditional average-of-eight mipmap filter, but other low-pass filters can be used if they can be normalized to a mixture [S1].
++A hierarchical segmentation histogram $H$ constructed from a volume of segment IDs $S$ [S1]. It stores mixtures (convex combinations of segment IDs) at multiple resolution levels [S1]. It uses the traditional average-of-eight mipmap filter, but other low-pass filters can be used if they can be normalized to a mixture [S1].
+ 
+ ### Mixture Lookup Table for Range Queries
+-A lookup table assembled on the CPU for range queries. Each node stores two sparse vectors over $\mathbb{R}^\infty$: the expected value $\mu$ and its variance $\delta\mu$. Build time depends on the number of nodes, topological depth, initial number of segments, and number of non-zero entries. For example, the Neocortex lookup table size is around 251MB [S1].
++A lookup table assembled on the CPU for range queries [S1]. Each node stores two sparse vectors over $\mathbb{R}^\infty$: the expected value $\mu$ and its variance $\delta\mu$ [S1]. Build time depends on the number of nodes, topological depth, initial number of segments, and number of non-zero entries [S1]. For example, the Neocortex lookup table size is around 251MB [S1].
+ 
+ ## Operating characteristics
+@@ -133,6 +132,6 @@
+ *   **Memory:** The Neocortex dataset (2048 × 2048 × 300) results in a lookup table of 251MB [S1].
+ *   **Build Time:** Mixture lookup table build times are 68ms for Hippocampus, 389ms for Neocortex, and 171ms for Polymer [S1].
+-*   **Strengths:** Enables pre-filtered anti-aliasing, efficient transfer function propagation, and interactive frame rates. Supports fast, approximate queries of partial histograms [S1].
+-*   **Limitations:** Requires manual computation of mip level and interpolation in the shader. Address computations require `uint64` support [S1].
++*   **Strengths:** Enables pre-filtered anti-aliasing, efficient transfer function propagation, and interactive frame rates [S1]. Supports fast, approximate queries of partial histograms [S1].
++*   **Limitations:** Requires manual computation of mip level and interpolation in the shader [S1]. Address computations require `uint64` support [S1]. Unlike sparse coding which uses orthogonal matching pursuit optimization, the Mixture Graph performs a greedy factorization of the computations necessary to compute a palette [S1].
+ 
+ ## Background

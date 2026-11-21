@@ -1,0 +1,77 @@
+# Intersection over Union (IoU)
+Also called: Jaccard Index
+
+## Overview
+Intersection over Union (IoU) measures the alignment between predicted and ground-truth masks by computing the ratio of their intersection to their union [S1, unofficial]. It is distinct from sibling metrics like Uniform Sampling Evaluation because it operates on binary segmentation masks rather than continuous point clouds or meshes, making it sensitive to spatial overlap errors such as floaters or missing geometry [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Counts of True Positives ($tp$), False Positives ($fp$), True Negatives ($tn$), and False Negatives ($fn$) derived from comparing thresholded predictions against ground-truth masks [S1, unofficial].
+- **Output:** A scalar value $IoU \in [0, 1]$, where 1 indicates perfect overlap.
+
+**Data Structures:**
+- The method relies on four integer counters: $tp, fp, tn, fn$. These are typically aggregated across a dataset (e.g., averaged across test images) [S1, unofficial].
+
+**Steps:**
+1. Generate a predicted mask and a ground-truth mask. In the context of volume rendering evaluation, these are often derived by thresholding rendered depth maps at 0.5 after min-max normalization [S1, unofficial].
+2. Classify each voxel or pixel into one of four categories:
+   - $tp$: Predicted as occupied, ground-truth is occupied.
+   - $fp$: Predicted as occupied, ground-truth is empty.
+   - $tn$: Predicted as empty, ground-truth is empty.
+   - $fn$: Predicted as empty, ground-truth is occupied.
+3. Compute the IoU using the formula:
+   $$ IoU = \frac{tp}{tp + fp + fn} $$
+   Note that $tn$ is excluded from the denominator because IoU focuses on the occupied space alignment [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_iou(tp: int, fp: int, fn: int) -> float:
+    """
+    Compute Intersection over Union from confusion matrix counts.
+    
+    Args:
+        tp: True positives count.
+        fp: False positives count.
+        fn: False negatives count.
+        
+    Returns:
+        IoU score between 0.0 and 1.0.
+    """
+    denominator = tp + fp + fn
+    if denominator == 0:
+        # Edge case: No occupied voxels in either prediction or ground truth.
+        # Conventionally returns 1.0 for perfect agreement on empty space, 
+        # or 0.0 depending on specific implementation requirements.
+        # [G] Standard convention in many segmentation tasks is 1.0 if both are empty.
+        return 1.0
+    return tp / denominator
+```
+
+**Parameters:**
+- Threshold: 0.5 is used for binarizing depth maps into masks [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Empty Sets:** If both prediction and ground truth are empty ($tp=0, fp=0, fn=0$), the denominator is zero. The behavior must be defined by the implementation (commonly 1.0) [G].
+- **Precision:** IoU does not distinguish between different sources of error (e.g., it treats a single large missing chunk the same as many small holes if the overlap ratio is identical) [S1, unofficial].
+
+## Subtopics
+
+### Jaccard Index Evaluation
+A metric used to evaluate voxel segmentation quality by computing the Jaccard index between target and predicted voxel grids [S2, unofficial]. It is mathematically identical to IoU. It is chosen when working directly with voxel grids rather than projected masks. Implementation involves computing the intersection and union of `target.voxel` and `pred.voxel` based on `cfg.num_classes` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels or pixels in the mask, as it requires a single pass to count $tp, fp, fn$.
+- **Memory Complexity:** $O(1)$ auxiliary space if counts are accumulated, or $O(N)$ if masks are stored in memory.
+- **Strengths:** Simple to compute; intuitive interpretation of spatial overlap; robust to scale if masks are normalized [S1, unofficial].
+- **Limitations:** Insensitive to the magnitude of error (e.g., a slight boundary shift vs. a large hole may have similar IoU if the overlap ratio is similar); ignores true negatives, which can be misleading in highly imbalanced scenes [S1, unofficial].
+- **When to use:** When evaluating binary segmentation quality of rendered depth maps or voxel grids [S1, S2, unofficial].
+- **When not to use:** When detailed error analysis (e.g., distinguishing between floaters and missing geometry) is required; use TPR/FPR alongside IoU [S1, unofficial].
+
+## Background
+IoU originated in computer vision for object detection and segmentation evaluation. In the context of volume rendering and neural view synthesis, it has been adopted to assess the geometric accuracy of implicit and primitive-based representations by comparing thresholded rendered depth maps against ground-truth masks [S1, unofficial]. It is a standard metric in space robotics and NVS (Neural View Synthesis) benchmarks [S1, unofficial].
+
+## Sources
+[S1] On the Geometric Accuracy of Implicit and Primitive-based Representations Derived from View Rendering Constraints, https://doi.org/10.48550/arXiv.2509.10241, fetched 2026-10-30 (unofficial)
+[S2] cvlab-epfl/voxel2mesh, https://github.com/cvlab-epfl/voxel2mesh, fetched 2026-10-27 (unofficial)

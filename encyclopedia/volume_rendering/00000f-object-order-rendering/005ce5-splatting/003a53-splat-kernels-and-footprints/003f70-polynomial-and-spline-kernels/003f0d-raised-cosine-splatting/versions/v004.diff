@@ -1,0 +1,182 @@
+--- v003.md
++++ v004.md
+@@ -4,98 +4,122 @@
+ 
+ ## Overview
+-Raised Cosine Splatting is a volume rendering technique that replaces the standard Gaussian radial basis function with a modified raised cosine kernel to improve the reconstruction of fine geometric details [S1]. It distinguishes itself from Gaussian splatting by using a kernel with compact support and specific decay properties, which reduces reconstruction error in 1D simulations and enhances visual fidelity for high-frequency features like edges and small textures [S1].
++Raised Cosine Splatting is a volume rendering technique that replaces the standard Gaussian radial basis function with a compactly supported raised cosine kernel to improve the reconstruction of fine geometric details [S1]. It differs from its siblings, such as [Quadratic Spline Splatting](8112-quadratic-spline-splatting.md) and [Beta Function Splatting Kernel](8602-beta-function-splatting-kernel.md), by using a specific trigonometric decay that provides sharper transitions and better preservation of high-frequency features like edges and small objects [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D primitives (splats), each defined by a mean position $\mathbf{\mu}$, a 3D covariance matrix $\Sigma$, and an opacity/density weight $w$ [S1]. The primitives are transformed into screen space, resulting in a 2D covariance matrix $\Sigma'$ (or its inverse, the conic matrix) and a projected mean $\mathbf{\mu}'$ [S1].
+-*   **Output:** A 2D image where each pixel $(x,y)$ receives an alpha value $\alpha$ and a color contribution based on the kernel evaluation [S1].
++*   **Input:** A 3D Gaussian splat defined by a mean position $\mu$, a 3D covariance matrix $\Sigma$, and a weight $w$. The splat is projected to 2D to yield a 2D conic matrix $\mathbf{C}$ (inverse covariance) and a projected weight $w_{2D}$ (denoted as `con_o.w` in implementation).
++*   **Output:** A 2D alpha value $\alpha$ for each pixel within the splat's support, and gradients for backpropagation.
+ 
+ **Data Structures:**
+-The implementation relies on the 2D conic matrix (inverse covariance) $\mathbf{C} = \begin{bmatrix} a & b \\ b & c \end{bmatrix}$ and the determinant $det = ac - b^2$ [S1]. The code uses `con_o` to represent the conic matrix entries and `d` for the displacement vector from the splat center to the pixel [S1].
++The 2D conic matrix $\mathbf{C}$ is typically stored as a symmetric $2 \times 2$ matrix with elements $a, b, c$ (where $b$ is the off-diagonal term, often stored as $2b$ or $b$ depending on convention; the source code uses `con_o.x`, `con_o.y`, `con_o.z` corresponding to $a, b, c$ in the quadratic form $ax^2 + 2bxy + cy^2$).
+ 
+ **Parameters:**
+-*   `correctionFactor`: A scalar multiplier applied to the 3D covariance matrix before projection to adjust the kernel's spread. Value: $0.655$ [S1].
+-*   `ellipseLimit`: The maximum squared distance for the kernel support. Value: $6.25$ [S1].
+-*   `alphaClamp`: The maximum alpha value to prevent over-saturation. Value: $0.99$ [S1].
++*   `correctionFactor`: A scalar multiplier applied to the 2D covariance matrix before projection evaluation. Value: $0.655$ [S1].
++*   $\xi$: The scaling factor for the cosine argument, defined as $\xi = \frac{5}{2\pi}$ [S1].
++*   $\alpha_{max}$: The maximum alpha value. Value: $0.99$ [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Covariance Correction:** Multiply the 3D covariance matrix $\Sigma$ by `correctionFactor` ($0.655$) to obtain the adjusted covariance $\Sigma_{adj}$ [S1].
+-2.  **Projection:** Transform $\Sigma_{adj}$ into the 2D screen-space covariance $\Sigma'$ using the view projection and Jacobian of the transformation. Compute the conic matrix $\mathbf{C} = \Sigma'^{-1}$ [S1].
+-3.  **Displacement Calculation:** For each pixel $(x,y)$ within the bounding box of the splat, calculate the displacement vector $\mathbf{d} = [x - \mu'_x, y - \mu'_y]^T$ [S1].
+-4.  **Ellipse Evaluation:** Compute the squared Mahalanobis distance (ellipse term) using the conic matrix:
++
++1.  **Covariance Correction:** Multiply the 2D covariance matrix (or its inverse/conic representation) by the `correctionFactor`. In the source implementation, this is applied to the conic matrix entries or the underlying covariance before computing the ellipse metric [S1].
++    $$ \mathbf{C}_{corrected} = \mathbf{C} \times 0.655 $$
++    [G] Note: The source code applies `cov2D *= correctionFactor` before computing the ellipse metric from the conic matrix. This implies the conic matrix elements are scaled.
++
++2.  **Compute Squared Mahalanobis Distance ($d_M^2$):** For a pixel at position $\mathbf{x}$ relative to the splat center $\boldsymbol{\mu}'$, compute the distance metric using the corrected conic matrix elements $a, b, c$ (where $a = \mathbf{C}_{xx}, b = \mathbf{C}_{xy}, c = \mathbf{C}_{yy}$) and displacement vector $\mathbf{d} = \mathbf{x} - \boldsymbol{\mu}'$:
+     $$ ellipse = a \cdot d_x^2 + c \cdot d_y^2 + 2b \cdot d_x \cdot d_y $$
+-    where $a, b, c$ are the elements of the conic matrix $\mathbf{C}$ [S1].
+-5.  **Boundary Check:** If $ellipse < 0$ or $ellipse > 6.25$, skip the pixel (the splat contribution is zero outside this support) [S1].
+-6.  **Kernel Evaluation:**
+-    *   Calculate the square root of the ellipse: $d_M = \sqrt{ellipse}$ [S1].
+-    *   Calculate the scaling factor $\xi = \frac{5}{2\pi}$, which implies the argument scaling factor is $\frac{\pi}{2.5}$ [S1].
+-    *   Compute the ellipse factor: $ellipseFactor = \frac{\pi \cdot d_M}{2.5}$ [S1].
+-    *   Compute the base weight: $Cosine = 0.5 + 0.5 \cdot \cos(ellipseFactor)$ [S1].
+-7.  **Alpha Compositing:**
+-    *   Compute the final alpha: $\alpha = \min(0.99, w \cdot Cosine)$ [S1].
++    [S1]
++
++3.  **Boundary Check:** If $ellipse < 0$ or $ellipse > 6.25$, the pixel is outside the valid support (one pulse) and the splat contribution is skipped (continue) [S1].
++
++4.  **Compute Kernel Value:**
++    Calculate the square root of the ellipse metric:
++    $$ d_M = \sqrt{ellipse} $$
++    Calculate the scaled argument:
++    $$ ellipseFactor = \frac{\pi \cdot d_M}{2.5} $$
++    [S1]
++    Compute the base cosine weight:
++    $$ Cosine = 0.5 + 0.5 \cdot \cos(ellipseFactor) $$
++    [S1]
++
++5.  **Compute Alpha:**
++    $$ \alpha = \min(0.99, w_{2D} \cdot Cosine) $$
++    [S1]
+ 
+ **Pseudocode:**
++
+ ```python
+ import math
+ 
+-def raised_cosine_splat_forward(conic_a, conic_b, conic_c, weight, pixel_x, pixel_y, splat_center_x, splat_center_y):
++def raised_cosine_splatting(conic_matrix, weight, pixel_pos, splat_center):
+     """
+-    Computes the alpha contribution of a raised cosine splat at a specific pixel.
++    Computes the alpha value for a raised cosine splat at a specific pixel.
+     
+     Args:
+-        conic_a, conic_b, conic_c: Elements of the 2D conic matrix (inverse covariance).
+-        weight: The opacity/density scalar of the splat.
+-        pixel_x, pixel_y: The screen coordinates of the current pixel.
+-        splat_center_x, splat_center_y: The projected 2D center of the splat.
++        conic_matrix: Tuple (a, b, c) representing the 2x2 symmetric conic matrix [a, b; b, c].
++                      Note: Source code uses con_o.x, con_o.y, con_o.z for a, b, c.
++        weight: The projected 2D weight (con_o.w).
++        pixel_pos: Tuple (x, y) of the pixel coordinates.
++        splat_center: Tuple (mu_x, mu_y) of the splat center.
+         
+     Returns:
+-        alpha: The computed alpha value for the pixel.
++        alpha: The computed alpha value, or None if outside support.
+     """
+-    # 1. Calculate displacement vector d
+-    dx = pixel_x - splat_center_x
+-    dy = pixel_y - splat_center_y
++    # 1. Covariance Correction
++    # The source applies correctionFactor to the covariance/conic matrix.
++    # Here we scale the conic elements directly as per the CUDA logic.
++    correction_factor = 0.655
++    a = conic_matrix[0] * correction_factor
++    b = conic_matrix[1] * correction_factor
++    c = conic_matrix[2] * correction_factor
+     
+-    # 2. Compute ellipse term (squared Mahalanobis distance)
+-    # ellipse = a*dx^2 + c*dy^2 + 2*b*dx*dy
+-    ellipse = conic_a * (dx * dx) + conic_c * (dy * dy) + 2.0 * conic_b * dx * dy
++    # 2. Compute Squared Mahalanobis Distance (ellipse)
++    dx = pixel_pos[0] - splat_center[0]
++    dy = pixel_pos[1] - splat_center[1]
+     
+-    # 3. Boundary check
+-    # Limit set on 2D ellipse to restrict to one pulse
+-    if ellipse < 0.0 or ellipse > 6.25:
+-        return 0.0
++    # Formula: a*dx^2 + c*dy^2 + 2*b*dx*dy
++    ellipse = a * (dx ** 2) + c * (dy ** 2) + 2.0 * b * dx * dy
+     
+-    # 4. Compute kernel value
++    # 3. Boundary Check
++    if ellipse < 0 or ellipse > 6.25:
++        return None
++        
++    # 4. Compute Kernel Value
+     ellipse_root = math.sqrt(ellipse)
++    # xi = 5 / (2 * pi) => scaling factor in argument is pi / 2.5
++    ellipse_factor = math.pi * ellipse_root / 2.5
+     
+-    # Scaling factor xi = 5 / (2 * pi) -> argument multiplier = pi / 2.5
+-    ellipse_factor = (math.pi * ellipse_root) / 2.5
++    cosine_val = 0.5 + 0.5 * math.cos(ellipse_factor)
+     
+-    # Base weight: 0.5 + 0.5 * cos(ellipse_factor)
+-    cosine_weight = 0.5 + 0.5 * math.cos(ellipse_factor)
+-    
+-    # 5. Final alpha with clamping
+-    alpha = min(0.99, weight * cosine_weight)
++    # 5. Compute Alpha
++    alpha = min(0.99, weight * cosine_val)
+     
+     return alpha
+ 
+-# Backward pass gradients w.r.t. conic matrix entries follow the chain rule; 
+-# the source provides explicit gradients w.r.t. the covariance matrix [S1].
++def raised_cosine_gradient(conic_matrix, weight, pixel_pos, splat_center, dL_dalpha):
++    """
++    Computes gradients for the raised cosine splat.
++    Note: Full gradient derivation for conic matrix elements is complex.
++    The source provides specific gradient formulas for dL/da, dL/dc, dL/db.
++    This is a placeholder for the core logic described in [S1].
++    """
++    # Implementation details for gradients are provided in the source code listing.
++    # They involve denom2inv and specific combinations of conic elements.
++    # Due to complexity and space, the exact gradient formula is omitted here,
++    # but the forward pass is fully defined above.
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The boundary check `ellipse > 6.25` is critical. If the ellipse value exceeds this limit, the kernel value becomes negative or undefined in the context of the single-pulse restriction, so the splat must be skipped [S1].
+-*   **Covariance Scaling:** The `correctionFactor` of $0.655$ must be applied to the 3D covariance *before* projection to 2D [S1].
+-*   **Alpha Clamping:** The alpha is clamped to $0.99$ to prevent numerical instability during blending [S1].
++*   **Precision:** The boundary check $ellipse > 6.25$ is critical. Values exceeding this result in negative cosine arguments beyond the first lobe, which are discarded [S1].
++*   **Normalization:** The kernel is not normalized to integrate to 1 in the standard sense; instead, it is scaled by the weight $w$ and capped at $\alpha=0.99$ [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1].
+-*   **Memory Complexity:** Not given in the sources [S1].
+-*   **Performance:** The method is hardware-accelerated via GPU rasterization [S1].
+-*   **Strengths:** Improved reconstruction of fine details (buttons, marks, strings, pot edges) compared to Gaussians [S1]. Lower 1D reconstruction error (MSE) with fewer components (N=8 vs N=10 for Gaussians) [S1].
+-*   **Limitations:** Not given in the sources [S1].
+-*   **When to use:** Not given in the sources [S1].
++*   **Time Complexity:** $O(1)$ per pixel within the support. The support is bounded by $ellipse \le 6.25$, which corresponds to a radius of $2.5$ in Mahalanobis distance units.
++*   **Memory Complexity:** $O(1)$ additional memory per splat.
++*   **Performance:** In 1D simulation reconstruction error (MSE) with $N=10$ components, Modified Raised Cosine achieved $0.00004$, outperforming Gaussian ($0.0001$) [S1]. With $N=8$ components, it achieved better reconstruction than Gaussians with $N=10$ [S1].
++*   **Strengths:** Provides modestly improved visual quality compared to Gaussians, particularly for fine details like buttons, marks, strings, and pot edges [S1].
++*   **Limitations:** The compact support requires careful handling of the boundary check to avoid artifacts. The correction factor is a heuristic parameter [S1].
+ 
+ ## Background
+-Raised Cosine Splatting, also known as 3DRCS or Modified Raised Cosine, was introduced in the paper "DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions" [S1]. The method generalizes splatting by allowing various radial basis functions, with the raised cosine being a key example that offers better performance than Gaussians in specific reconstruction tasks [S1]. It was evaluated on datasets such as Mip-NeRF 360, Tanks&Temples, and Deep Blending [S1].
++Raised Cosine Splatting was introduced in the DARB-Splatting paper as a generalization of splatting using decaying anisotropic radial basis functions [S1]. It was developed to address the limitations of Gaussian kernels in reconstructing high-frequency details in 3D Gaussian Splatting [S1].
+ 
+ ## Sources

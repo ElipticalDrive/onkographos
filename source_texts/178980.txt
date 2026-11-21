@@ -1,0 +1,366 @@
+The latest in the series of tech art / rendering problems I've been working on is finding a good solution to rendering water. Specifically, rendering narrow, fast-moving particle-based streams of water. Over the past week, I think I've gotten some good results, so I'm going to write it up here. I don't really like voxelized…
+
+Screen-space Water Rendering – devfault
+The latest in the series of tech art / rendering problems I’ve been working on is finding a good solution to rendering water. Specifically, rendering narrow, fast-moving particle-based streams of water. Over the past week, I think I’ve gotten some good results, so I’m going to write it up here.
+I don’t really like voxelized / marching cubes approaches to water rendering (see, for example, Blender’s fluid simulation rendering). When the water volume is on a similar scale to the underlying grid used to render, the motion is noticeably discrete. This can be addressed by increasing the grid resolution, but for a narrow stream over relatively long distances this simply isn’t practical in realtime without serious compromises in runtime and memory usage. (There is some precedent using sparse octree structures in voxel rendering, which improves this. I’m not sure how well that works for dynamic systems, and in any case it’s more complexity than I want to deal with.)
+The first alternative I looked at was Müller’s “Screen Space Meshes”. This involves rendering the water particles to a depth buffer, smoothing it, identifying connected patches of similar depth, and then building a mesh from the result using marching squares. This is probably *more* feasible now than it was in 2007 (as you can reasonably build the mesh in a compute shader), but still more complexity and cost than I’d like.
+Finally, I stumbled upon Simon Green’s 2010 GDC presentation, “Screen Space Fluid Rendering For Games”. This begins the same way Screen Space Meshes does: render particles to a depth buffer and smooth it. But rather than build a mesh, use the resulting buffer to shade and composite the liquid over the main scene (by explicitly writing depth.) This was what I decided to implement.
+Setup
+The past few projects in Unity have taught me not to fight its rendering conventions. So, the fluid buffers are rendered by a second camera, with lower camera depth so that it renders before the main scene. Any fluid system lives on a separate render layer; primary camera excludes the fluid layer, while the second camera only renders the fluid. Both cameras are then parented to an empty object to keep them aligned.
+This setup means I can render pretty much anything to the fluid layer, and it should work as expected. In the context of my demo scene, this means that multiple streams and splashes from subemitters can merge together. This should also allow for mixing in other water systems, like heightfield-based volumes, which will then be rendered consistently. (I have not tested this yet.)
+The water source in my test scene is a standard particle system. No actual fluid simulation is being performed. This in turn means that particles overlap in a not-quite-physical way, but the final shading looks acceptable in practice.
+Fluid Buffer Rendering
+The first step in this technique is rendering the base fluid buffer. This is an offscreen buffer that contains (at this point in my implementation): fluid thickness, screen-space motion vector, and a noise value. We also render a depth buffer, explicitly writing depth from the fragment shader to turn each particle quad into a spherical (well, ellipsoidal) blob.
+The depth and thickness calculations are straightforward:
+```
+frag_out o;
+
+float3 N;
+N.xy = i.uv*2.0 - 1.0;
+float r2 = dot(N.xy, N.xy);
+if (r2 > 1.0) discard;
+
+N.z = sqrt(1.0 - r2);
+
+float4 pixel_pos = float4(i.view_pos + N * i.size, 1.0);
+float4 clip_pos = mul(UNITY_MATRIX_P, pixel_pos);
+float depth = clip_pos.z / clip_pos.w;
+
+o.depth = depth;
+
+float thick = N.z * i.size * 2;
+```
+(The depth calculation can be simplified, of course; we only need z and w from the clip position.)
+We’ll come back to the fragment shader for motion vectors and noise in a bit.
+The vertex shader is where the fun starts, and where I diverge from Green’s technique. The goal of this project is rendering high-speed streams of water; this is possible with spherical particles, but takes an inordinate number of them to produce a continuous stream. Instead, I stretch the particle quads based on velocity, which in turn stretches the depth blobs to be elliptical, not spherical. (Since the depth calculation is based on UV, which is unchanged, this Just Works.)
+Experienced Unity developers may be wondering why I’m not using the built-in Stretched Billboard mode provided by Unity’s particle system. Stretched Billboard stretches unconditionally along the velocity vector in world space. In general this is fine, however it causes a very noticeable problem when the velocity vector is aligned to (or very close to) the camera’s forward vector. The billboard stretches *into* the screen, very clearly highlighting its 2D nature.
+Instead, I use a camera-facing billboard and project the velocity vector onto the plane of the particle, using that to stretch the quad. If the velocity vector is perpendicular to the plane (into or out of the screen), the particle stays unstretched and spherical, exactly as it should, while velocity across the screen causes the particle to stretch in that direction, as expected.
+Long explanation aside, it’s quite a simple function:
+```
+float3 ComputeStretchedVertex(float3 p_world, float3 c_world, float3 vdir_world, float stretch_amount)
+{
+    float3 center_offset = p_world - c_world;
+    float3 stretch_offset = dot(center_offset, vdir_world) * vdir_world;
+
+    return p_world + stretch_offset * lerp(0.25f, 3.0f, stretch_amount);
+}
+```
+In order to calculate the screenspace motion vector, we actually compute two sets of vertex positions:
+```
+float3 vp1 = ComputeStretchedVertex(
+    vertex_wp,
+    center_wp, 
+    velocity_dir_w, rand);
+float3 vp0 = ComputeStretchedVertex(
+    vertex_wp - velocity_w * unity_DeltaTime.x,
+    center_wp - velocity_w * unity_DeltaTime.x,
+    velocity_dir_w, rand);
+
+o.motion_0 = mul(_LastVP, float4(vp0, 1.0));
+o.motion_1 = mul(_CurrVP, float4(vp1, 1.0));
+```
+Note that, since we are calculating motion vectors in the main pass, rather than the motion vector pass, Unity will not provide the previous or non-jittered current view-projection for you. I attached a simple script to the relevant particle systems to fix this:
+```
+public class ScreenspaceLiquidRenderer : MonoBehaviour 
+{
+    public Camera LiquidCamera;
+
+    private ParticleSystemRenderer m_ParticleRenderer;
+    private bool m_First;
+    private Matrix4x4 m_PreviousVP;
+
+    void Start()
+    {
+        m_ParticleRenderer = GetComponent();
+        m_First = true;
+    }
+
+    void OnWillRenderObject()
+    {
+        Matrix4x4 current_vp = LiquidCamera.nonJitteredProjectionMatrix * LiquidCamera.worldToCameraMatrix;
+        if (m_First)
+        {
+            m_PreviousVP = current_vp;
+            m_First = false;
+        }
+        m_ParticleRenderer.material.SetMatrix("_LastVP", GL.GetGPUProjectionMatrix(m_PreviousVP, true));
+        m_ParticleRenderer.material.SetMatrix("_CurrVP", GL.GetGPUProjectionMatrix(current_vp, true));
+        m_PreviousVP = current_vp;
+    }
+}
+```
+I cache the previous matrix manually because Camera.previousViewProjectionMatrix gives incorrect results.
+¯\_(ツ)_/¯
+(This method also breaks render batching; it may make more sense in practice to set global matrix constants instead of per-material.)
+Back in the fragment shader, we use these projected positions to calculate screenspace motion vectors:
+```
+float3 hp0 = i.motion_0.xyz / i.motion_0.w;
+float3 hp1 = i.motion_1.xyz / i.motion_1.w;
+
+float2 vp0 = (hp0.xy + 1) / 2;
+float2 vp1 = (hp1.xy + 1) / 2;
+
+#if UNITY_UV_STARTS_AT_TOP
+vp0.y = 1.0 - vp0.y;
+vp1.y = 1.0 - vp1.y;
+#endif
+
+float2 vel = vp1 - vp0;
+```
+(The motion vector calculations are taken almost verbatim from https://github.com/keijiro/ParticleMotionVector/blob/master/Assets/ParticleMotionVector/Shaders/Motion.cginc)
+Finally, the last value in the fluid buffer is noise. I use a per-particle stable random value to select one of four noises (packed into a single texture). This is then scaled by the speed and one minus the particle size (so faster and smaller particles are noiser). This noise value is used in the shading pass to distort normals and add a layer of foam. Green’s presentation uses 3-channel white noise, while a followup paper (“Screen Space Fluid Rendering with Curvature Flow”) suggests octaves of Perlin noise. I use Voronoi/cellular noise at various scales:
+Blending Problems (And Workarounds)
+Here is where the first problems with my implementation emerge. In order to calculate thickness correctly, particles are blended additively. Because blending affects all the outputs, this means the noise and motion vectors are also additively blended. Additive noise is fine; additive motion vectors are *not*, and left as-is produce ridiculous results for TAA and motion blur. To counteract this, I multiply the motion vectors by thickness when rendering the fluid buffer, and divide by total thickness in the shading pass. This produces a weighted average motion vector for all overlapping particles; not exactly what we want (produces some weirdness where streams cross each other), but acceptable.
+A more difficult problem is depth; in order to render the depth buffer correctly, we need both depth writes and depth tests active. This can cause problems if our particles are unsorted (as differences in rendering order can cause particles behind others to have their output culled). So, we tell Unity’s particle system to keep particles ordered by depth, then cross our fingers and hope systems render by depth as well. There *will* be cases when systems overlap (i.e, two streams of particles intersecting) that will not be handled correctly, which will result in a lower thickness than expected. This doesn’t seem to happen very often in practice, and doesn’t make a huge difference in appearance when it does.
+The proper approach would likely be rendering the depth and color buffers completely separately — at the cost of now having to render two passes. Something to investigate when tuning this.
+Depth Smoothing
+Finally, the meat of Green’s technique. We’ve rendered a bunch of spherical blobs to the depth buffer, but water is not “blobby” in reality. So now, we take this approximation and blur it to more closely match how we expect the surface of a liquid to look.
+The naive approach is to apply a Gaussian blur to the entire depth buffer. This produces weird results — it smooths distant points more than close ones, and blurs over silhouette edges. Instead, we can vary the radius of the blur by depth, and use a bilateral blur to preserve edges.
+There’s just one problem: these adjustments make the blur non-separable. A separable blur can be performed in two passes, blurring horizontally and then vertically. A non-separable blur is performed in a single pass, blurring both horizontally and vertically at the same time. The distinction is important because separable blurs scale linearly (O(w) + O(h)), while non-separable blurs scale quadratically (O(w*h)). Large non-separable blurs quickly become impractical.
+As mature, responsible engineers, we do the obvious thing: plug our ears, pretend the bilateral blur *is* separable, and implement it with separate horizontal and vertical passes anyway.
+Green demonstrates in his presentation that, while this *does* generate artifacts in the result (particularly when reconstructing normals), the final shading hides them well. With the narrower streams of water I’m generating, these artifacts seem to be even less common, and don’t have much effect on the result.
+Shading
+At last, the fluid buffer is done. Now for the second half of the effect: shading and compositing with the main image.
+Here we run into a number of Unity’s rendering limitations. I choose to light the water with the sun light and skybox only; supporting additional lights requires either multiple passes (expensive!) or building a GPU-side light lookup structure (expensive and somewhat complicated). In addition, since Unity does not expose access to shadow maps, and directional lights use screenspace shadows (based on the depth buffer rendered by opaque geometry), we don’t actually have access to shadow information for the sun light. It’s possible to attach a command buffer to the sun light to build us a screenspace shadow map specifically for the water, but I haven’t yet.
+The final shading pass is driven via script, and uses a command buffer to dispatch the actual draw calls. This is *required*, as the motion vector texture (used for TAA and motion blur) cannot actually be bound for direct rendering using Graphics.SetRenderTarget(). In a script attached to the main camera:
+```
+void Start() 
+{
+    //...
+    
+    m_QuadMesh = new Mesh();
+    m_QuadMesh.subMeshCount = 1;
+    m_QuadMesh.vertices = new Vector3[] { 
+        new Vector3(0, 0, 0.1f),
+        new Vector3(1, 0, 0.1f),
+        new Vector3(1, 1, 0.1f),
+        new Vector3(0, 1, 0.1f),
+    };
+    m_QuadMesh.uv = new Vector2[] {
+        new Vector2(0, 0),
+        new Vector2(1, 0),
+        new Vector2(1, 1),
+        new Vector2(0, 1),
+    };
+    m_QuadMesh.triangles = new int[] {
+        0, 1, 2, 0, 2, 3,
+    };
+    m_QuadMesh.UploadMeshData(false);
+
+    m_CommandBuffer = new CommandBuffer();
+    m_CommandBuffer.Clear();
+    m_CommandBuffer.SetProjectionMatrix(
+        GL.GetGPUProjectionMatrix(
+            Matrix4x4.Ortho(0, 1, 0, 1, -1, 100), false));
+    
+    m_CommandBuffer.SetRenderTarget(
+        BuiltinRenderTextureType.CameraTarget, 
+        BuiltinRenderTextureType.CameraTarget);
+    m_CommandBuffer.DrawMesh(
+        m_QuadMesh, Matrix4x4.identity, m_Mat, 0, 
+        m_Mat.FindPass("LIQUIDCOMPOSITE"));
+
+    m_CommandBuffer.SetRenderTarget(
+        BuiltinRenderTextureType.MotionVectors, 
+        BuiltinRenderTextureType.Depth);
+    m_CommandBuffer.DrawMesh(
+        m_QuadMesh, Matrix4x4.identity, m_Mat, 0, 
+        m_Mat.FindPass("MOTION"));   
+}
+```
+The color and motion vector buffers cannot be rendered simultaneously with MRT, for reasons I have not been able to determine. They also require different depth buffer bindings. We write depth to *both* of these depth buffers, incidentally, so that TAA reprojection works properly.
+Ah, the joys of a black-box engine.
+Each frame, we kick off the composite render from OnPostRender():
+```
+RenderTexture GenerateRefractionTexture()
+{
+    RenderTexture result = RenderTexture.GetTemporary(m_MainCamera.activeTexture.descriptor);
+    Graphics.Blit(m_MainCamera.activeTexture, result);
+    return result;
+}
+
+void OnPostRender()
+{
+    if (ScreenspaceLiquidCamera && ScreenspaceLiquidCamera.IsReady())
+    {
+        RenderTexture refraction_texture = GenerateRefractionTexture();
+
+        m_Mat.SetTexture("_MainTex", ScreenspaceLiquidCamera.GetColorBuffer());
+        m_Mat.SetVector("_MainTex_TexelSize", ScreenspaceLiquidCamera.GetTexelSize());
+        m_Mat.SetTexture("_LiquidRefractTexture", refraction_texture);
+        m_Mat.SetTexture("_MainDepth", ScreenspaceLiquidCamera.GetDepthBuffer());
+        m_Mat.SetMatrix("_DepthViewFromClip", ScreenspaceLiquidCamera.GetProjection().inverse);
+        if (SunLight)
+        {
+            m_Mat.SetVector("_SunDir", transform.InverseTransformVector(-SunLight.transform.forward));
+            m_Mat.SetColor("_SunColor", SunLight.color * SunLight.intensity);
+        }
+        else
+        {
+            m_Mat.SetVector("_SunDir", transform.InverseTransformVector(new Vector3(0, 1, 0)));
+            m_Mat.SetColor("_SunColor", Color.white);
+        }
+        m_Mat.SetTexture("_ReflectionProbe", ReflectionProbe.defaultTexture);
+        m_Mat.SetVector("_ReflectionProbe_HDR", ReflectionProbe.defaultTextureHDRDecodeValues);
+
+        Graphics.ExecuteCommandBuffer(m_CommandBuffer);
+
+        RenderTexture.ReleaseTemporary(refraction_texture);
+    }
+}
+```
+That’s the end of the CPU’s involvement, it’s all shaders from here on.
+Let’s start with the motion vector pass. Here’s the entire shader:
+```
+#include "UnityCG.cginc"
+
+sampler2D _MainDepth;
+sampler2D _MainTex;
+
+struct appdata
+{
+    float4 vertex : POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+struct v2f
+{
+    float2 uv : TEXCOORD0;
+    float4 vertex : SV_POSITION;
+};
+
+v2f vert(appdata v)
+{
+    v2f o;
+    o.vertex = mul(UNITY_MATRIX_P, v.vertex);
+    o.uv = v.uv;
+    return o;
+}
+
+struct frag_out
+{
+    float4 color : SV_Target;
+    float depth : SV_Depth;
+};
+
+frag_out frag(v2f i)
+{
+    frag_out o;
+
+    float4 fluid = tex2D(_MainTex, i.uv);
+    if (fluid.a == 0) discard;
+    o.depth = tex2D(_MainDepth, i.uv).r;
+
+    float2 vel = fluid.gb / fluid.a;
+
+    o.color = float4(vel, 0, 1);
+    return o;
+}
+```
+Screenspace velocity is stored in the green and blue channels of the fluid buffer. Since we scaled velocity by thickness when rendering the buffer, we divide the total thickness (in the alpha channel) back out, to produce the weighted average velocity.
+It’s worth noting that, for larger volumes of water, we may want a different approach to dealing with the velocity buffer. Since we render without blending, motion vectors for anything *behind* the water are lost, breaking TAA and motion blur for those objects. This isn’t an issue for thin streams of water, but may be for something like a pool or lake, where we want TAA or motion blur for objects clearly visible through the surface.
+The main shading pass is more interesting. Our first order of business, after masking with the fluid thickness, is reconstructing the view-space position and normal.
+```
+float3 ViewPosition(float2 uv)
+{
+    float clip_z = tex2D(_MainDepth, uv).r;
+    float clip_x = uv.x * 2.0 - 1.0;
+    float clip_y = 1.0 - uv.y * 2.0;
+
+    float4 clip_p = float4(clip_x, clip_y, clip_z, 1.0);
+    float4 view_p = mul(_DepthViewFromClip, clip_p);
+    return (view_p.xyz / view_p.w);
+}
+
+float3 ReconstructNormal(float2 uv, float3 vp11)
+{
+    float3 vp12 = ViewPosition(uv + _MainTex_TexelSize.xy * float2(0, 1));
+    float3 vp10 = ViewPosition(uv + _MainTex_TexelSize.xy * float2(0, -1));
+    float3 vp21 = ViewPosition(uv + _MainTex_TexelSize.xy * float2(1, 0));
+    float3 vp01 = ViewPosition(uv + _MainTex_TexelSize.xy * float2(-1, 0));
+
+    float3 dvpdx0 = vp11 - vp12;
+    float3 dvpdx1 = vp10 - vp11;
+
+    float3 dvpdy0 = vp11 - vp21;
+    float3 dvpdy1 = vp01 - vp11;
+
+    // Pick the closest
+    float3 dvpdx = dot(dvpdx0, dvpdx0) > dot(dvpdx1, dvpdx1) ? dvpdx1 : dvpdx0;
+    float3 dvpdy = dot(dvpdy0, dvpdy0) > dot(dvpdy1, dvpdy1) ? dvpdy1 : dvpdy0;
+
+    return normalize(cross(dvpdy, dvpdx));
+}
+```
+This is the expensive way to do view position reconstruction: take the clip-space position, and unproject it.
+Once we have a way to reconstruct positions, normals are easy: calculate position for the adjacent points in the depth buffer, and build a tangent basis from there. In order to deal with silhouette edges, we sample in both directions, and pick the closer point in view space to use for normal reconstruction. This works *surprisingly well*, only failing with very thin objects.
+It does mean we do five separate unprojections per pixel (the current point and its four neighbors). There is a cheaper way; this post is getting quite long as it is so I’ll leave that for another day.
+The resulting normals:
+I distort this calculated normal with the derivatives of the fluid buffer’s noise value, scaled by a strength parameter and normalized by dividing out thickness (for the same reason as velocity):
+```
+N.xy += NoiseDerivatives(i.uv, fluid.r) * (_NoiseStrength / fluid.a);
+N = normalize(N);
+```
+Finally, it’s time for some actual shading. The water shading has three main parts: specular reflection, specular refraction, and foam.
+The reflection term is standard GGX, lifted wholesale from Unity’s standard shader. (With one correction: using the proper F0 for water of 2%.)
+Refraction is more interesting. Correct refraction requires raytracing (or raymarching, for a close estimate). Fortunately, refraction is less intuitive than reflection, and being incorrect is not as noticeable. So, we offset the UV sample for the refraction texture by the x and y of the normal, scaled by thickness and a strength parameter:
+```
+float aspect = _MainTex_TexelSize.y * _MainTex_TexelSize.z;
+float2 refract_uv = (i.grab_pos.xy + N.xy * float2(1, -aspect) * fluid.a * _RefractionMultiplier) / i.grab_pos.w;
+float4 refract_color = tex2D(_LiquidRefractTexture, refract_uv);
+```
+(Note the aspect correction; not necessarily *needed* — again, this is just an approximation — but simple enough to add.)
+This refracted light passes through the liquid, and so some of it gets absorbed:
+```
+float3 water_color = _AbsorptionColor.rgb * _AbsorptionIntensity;
+refract_color.rgb *= exp(-water_color * fluid.a);
+```
+Note that _AbsorptionColor is defined exactly backwards from what you may expect: the values for each channel indicate how much of it is *absorbed*, not how much is let through. So, an _AbsorptionColor of (1, 0, 0) results in teal, not red.
+The reflection and refraction are blended with Fresnel:
+```
+float spec_blend = lerp(0.02, 1.0, pow(1.0 - ldoth, 5));
+float4 clear_color = lerp(refract_color, spec, spec_blend);
+```
+Up to this point I’ve (mostly) played by the rules and used physically-based shading.
+While it’s decent, there’s a problem with this water. It’s a bit hard to see:
+Let’s add some foam to fix that.
+Foam appears when water is turbulent, and air mixes into the water forming bubbles. These bubbles cause a variety of reflections and refractions, which on the whole create a diffuse appearance. I’m going to model this with a wrapped diffuse term:
+```
+float3 foam_color = _SunColor * saturate((dot(N, L)*0.25f + 0.25f));
+```
+This gets added to the final color using an ad-hoc term based on the fluid noise and a softer Fresnel term:
+```
+float foam_blend = saturate(fluid.r * _NoiseStrength) * lerp(0.05f, 0.5f, pow(1.0f - ndotv, 3));
+clear_color.rgb += foam_color * saturate(foam_blend);
+```
+The wrapped diffuse has been normalized to be energy conserving, so that’s acceptable as an approximation of scattering. Blending the foam color additively is… less so. It’s a pretty blatant violation of energy conservation.
+But it looks good, and it makes the stream more visible:
+Further Work and Improvements
+There are a number of things that can be improved upon here.
+– Multiple colors. Currently, the absorption is calculated only in the final shading pass, and uses a constant color and intensity for all liquid on the screen. Supporting different colors is possible, but requires a second color buffer and solving the absorption integral piecewise per-particle as we render the base fluid buffer. This is potentially expensive.
+– Complete lighting. With access to a GPU-side light lookup structure (either built manually or by tying into Unity’s new HD render pipeline), we could properly light the water with arbitrary numbers of lights, and proper ambient.
+– Better refraction. By using blurred mipmaps of the background texture, we can better simulate the wider refraction lobe for rough surfaces. In practice this isn’t very helpful for small streams of water, but may be for larger volumes.
+Given the chance I will continue tweaking this into oblivion, however for now I am calling it complete.
+Share this:
+Share on X (Opens in new window)
+X
+Share on Facebook (Opens in new window)
+Facebook
+Like Loading...
+Related
+Leave a Reply Cancel reply
+Comment
+Reblog
+Subscribe
+Subscribed
+devfault
+Have a WordPress.com account? Log in now.
+devfault
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+%d
+Create your own website, free on WordPress.com.Create your own website.
+Start free

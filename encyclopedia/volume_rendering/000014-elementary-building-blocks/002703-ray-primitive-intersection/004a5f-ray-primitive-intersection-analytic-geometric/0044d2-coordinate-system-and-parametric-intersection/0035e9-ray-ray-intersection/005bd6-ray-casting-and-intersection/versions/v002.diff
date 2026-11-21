@@ -1,0 +1,538 @@
+--- v001.md
++++ v002.md
+@@ -1,189 +1,250 @@
+ # Ray Casting and Intersection
+ 
++Also called: Least-squares ray intersection, Ray Intersection, Ray intersection via least squares, Ray-Ray Intersection
+ 
+ ## Overview
+-Computes 3D ray origins and directions from 2D pixel coordinates and camera parameters, and finds the least-squares intersection point of two rays in 3D space [S1, unofficial]. It unprojects pixel coordinates to unit direction vectors in camera space, transforms them to world space, and solves for the point that minimizes the squared distance to both rays, handling non-intersecting rays due to noise or parallax [S1, unofficial]. It sets apart from simple ray casting by providing a robust geometric intersection for ray pairs that do not intersect exactly, building on [Ray-Ray Intersection](7624-ray-ray-intersection.md).
++Computes 3D ray origins and directions from 2D pixel coordinates and camera parameters, and finds the least-squares intersection point of two rays in 3D space [S1, unofficial]. It extends [Ray-Ray Intersection](7624-ray-ray-intersection.md) by batching the computation over multiple pixel locations and handling the transformation from camera to world space [S1, unofficial]. It is distinct from standard ray-casting which assumes exact intersection; this method minimizes the squared distance to both rays, making it robust to noise or parallax errors [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `pixel_coords`: Tensor of shape $(N, 2)$ containing 2D pixel coordinates $(u, v)$ for $N$ rays.
+-- `intrinsics`: Camera intrinsic matrix $K$, shape $(3, 3)$.
+-- `extrinsics`: Camera extrinsic matrix $T$, shape $(4, 4)$, representing the transformation from world to camera space. The upper-left $3 \times 3$ is rotation $R$, and the upper-right $3 \times 1$ is translation $t$.
+-- `eps`: Epsilon for detecting parallel rays. Default $10^{-5}$ [S1, unofficial].
+-- `inf`: Value used to represent infinity for parallel ray intersections. Default $10^{10}$ [S1, unofficial].
++- `intrinsics`: Camera intrinsic matrix $K$ (typically $3 \times 3$).
++- `extrinsics`: Camera extrinsic matrix $T$ (typically $4 \times 4$), containing rotation $R$ and translation $t$.
++- `pixel_coords`: 2D pixel coordinates $(u, v)$ for the rays to be cast.
++- `parallel_eps`: Epsilon threshold for detecting parallel rays (default $10^{-5}$) [S1, unofficial].
++- `inf_val`: Value used to represent infinity for parallel ray intersections (default $10^{10}$) [S1, unofficial].
+ 
+ **Outputs:**
+-- `origins`: Tensor of shape $(N, 3)$, ray origins in world space.
+-- `directions`: Tensor of shape $(N, 3)$, unit ray directions in world space.
+-- `intersection_points`: Tensor of shape $(N, 3)$, the least-squares intersection points. For parallel rays, this is set to `inf` [S1, unofficial].
++- `intersection_points`: 3D coordinates $(x, y, z)$ of the least-squares intersection points for each pixel/ray pair.
+ 
+ **Data Structures:**
+-- Homogeneous coordinates: 4D vectors $(u, v, 1, 0)^T$ or similar, depending on implementation. The source implies standard homogeneous unprojection.
+-- Matrices: $K^{-1}$ (inverse intrinsics), $R$ (rotation from extrinsics), $t$ (translation from extrinsics).
+-- Tensor operations: Matrix multiplication, normalization, dot product, summation, least-squares solver.
++- Ray directions are stored as unit vectors in world space.
++- Ray origins are stored as 3D points (camera centers).
++- Matrices $N$ are $3 \times 3$ matrices derived from ray directions.
+ 
+ **Steps:**
+-1. **Unproject to Camera Space:** Convert 2D pixel coordinates to homogeneous coordinates in camera space. Multiply by the inverse intrinsic matrix $K^{-1}$ to get unprojected direction vectors.
+-   $$
+-   \mathbf{d}_{cam} = K^{-1} \begin{bmatrix} u \\ v \\ 1 \end{bmatrix}
+-   $$
+-   This yields vectors in camera space, not yet normalized.
+-
+-2. **Normalize in Camera Space:** Normalize the direction vectors by dividing by their z-component (depth) to ensure they are unit vectors in camera space.
+-   $$
+-   \mathbf{d}_{cam} = \frac{\mathbf{d}_{cam}}{d_{cam, z}}
+-   $$
+-   This step ensures the directions are unit vectors pointing away from the camera center along the ray.
+-
+-3. **Transform to World Space:** Transform the ray directions from camera space to world space using the extrinsic rotation matrix $R$.
+-   $$
+-   \mathbf{d}_{world} = R \mathbf{d}_{cam}
+-   $$
+-   The ray origins are set to the camera center (translation part $t$ of extrinsics), tiled to match the ray direction shape.
+-   $$
+-   \mathbf{o}_{world} = t
+-   $$
+-   Note: The source specifies setting origins to the camera center. In a standard pinhole camera model, the origin is the camera center. If multiple rays are generated from different pixels, they all share the same origin (the camera center).
+-
+-4. **Detect Parallel Rays:** Compute the dot product of the direction vectors for the pair of rays being intersected. If the dot product is greater than $1 - \text{eps}$, the rays are considered parallel.
+-   $$
+-   \text{parallel} = \mathbf{d}_1 \cdot \mathbf{d}_2 > 1 - \text{eps}
+-   $$
+-   This check is performed for each pair of rays.
+-
+-5. **Filter Parallel Rays:** Filter out parallel rays from the batch before solving the linear system. Parallel rays do not have a unique least-squares intersection point in the same way, or the solution is degenerate.
+-
+-6. **Compute Least-Squares System:** For non-parallel rays, compute the least-squares intersection point.
+-   - Compute the matrix $N_i = \mathbf{d}_i \mathbf{d}_i^T - I$ for each ray direction $\mathbf{d}_i$. Here, $I$ is the identity matrix.
+-   - Compute the left-hand side (LHS) of the least-squares equation by summing $N_i$ over the ray dimension (for two rays, sum $N_1 + N_2$).
+-     $$
+-     \text{LHS} = \sum_i (\mathbf{d}_i \mathbf{d}_i^T - I)
+-     $$
+-   - Compute the right-hand side (RHS) by summing $N_i \mathbf{o}_i$ over the ray dimension.
+-     $$
+-     \text{RHS} = \sum_i (\mathbf{d}_i \mathbf{d}_i^T - I) \mathbf{o}_i
+-     $$
+-   - Solve for the intersection point $\mathbf{p}$ using least squares:
+-     $$
+-     \mathbf{p} = \text{LHS}^{-1} \text{RHS}
+-     $$
+-     In practice, this is solved using a least-squares solver like `torch.linalg.lstsq`.
+-
+-7. **Handle Parallel Rays:** For rays identified as parallel, set the intersection point to `inf` (e.g., $10^{10}$) to indicate no valid intersection [S1, unofficial].
++
++1.  **Unproject to Camera Space:**
++    Convert 2D pixel coordinates $(u, v)$ to homogeneous coordinates $\mathbf{p}_{cam} = [u, v, 1]^T$. Multiply by the inverse intrinsic matrix $K^{-1}$ to get unprojected direction vectors in camera space:
++    $$ \mathbf{d}_{cam} = K^{-1} \mathbf{p}_{cam} $$
++    Normalize these vectors by dividing by their $z$-component (depth) to ensure they point forward in the camera frustum:
++    $$ \mathbf{d}_{cam} = \frac{\mathbf{d}_{cam}}{\mathbf{d}_{cam}[2]} $$
++    [S1, unofficial]
++
++2.  **Transform to World Space:**
++    Transform the ray directions from camera space to world space using the rotation component $R$ of the extrinsic matrix:
++    $$ \mathbf{d}_{world} = R \mathbf{d}_{cam} $$
++    Normalize $\mathbf{d}_{world}$ to obtain unit direction vectors $\mathbf{u}$:
++    $$ \mathbf{u} = \frac{\mathbf{d}_{world}}{\|\mathbf{d}_{world}\|} $$
++    [S1, unofficial]
++
++3.  **Compute Ray Origins:**
++    The origin of each ray is the camera center. Extract the translation vector $t$ from the extrinsic matrix $T$. Tile this origin to match the batch shape of the rays.
++    [S1, unofficial]
++
++4.  **Detect Parallel Rays:**
++    For a pair of rays with directions $\mathbf{u}_1$ and $\mathbf{u}_2$, compute the dot product. If the dot product is greater than $1 - \text{parallel\_eps}$, the rays are considered parallel.
++    $$ \text{parallel} = \mathbf{u}_1 \cdot \mathbf{u}_2 > 1 - \text{parallel\_eps} $$
++    [S1, S2, unofficial]
++
++5.  **Construct Least-Squares System:**
++    For each ray $i$ with direction $\mathbf{u}_i$, compute the matrix $N_i$:
++    $$ N_i = \mathbf{u}_i \mathbf{u}_i^T - I $$
++    where $I$ is the $3 \times 3$ identity matrix.
++    [S1, S2, unofficial]
++
++    Compute the Left-Hand Side (LHS) of the linear system $A \mathbf{x} = \mathbf{b}$ by summing $N_i$ over all rays involved in the intersection (typically two rays per pixel):
++    $$ A = \sum_i N_i $$
++    [S1, S2, unofficial]
++
++    Compute the Right-Hand Side (RHS) by summing $N_i \mathbf{o}_i$ over all rays, where $\mathbf{o}_i$ is the origin of ray $i$:
++    $$ \mathbf{b} = \sum_i N_i \mathbf{o}_i $$
++    [S1, S2, unofficial]
++
++6.  **Solve for Intersection:**
++    Solve the linear system $A \mathbf{x} = \mathbf{b}$ for $\mathbf{x}$ using least squares:
++    $$ \mathbf{x} = \text{argmin}_{\mathbf{x}} \| A \mathbf{x} - \mathbf{b} \|^2 $$
++    [S1, unofficial]
++
++7.  **Handle Parallel Rays:**
++    If rays are parallel (detected in Step 4), the system is singular. Set the intersection point for these rays to $\text{inf\_val}$ (default $10^{10}$) to indicate no valid intersection.
++    [S1, S2, unofficial]
+ 
+ **Pseudocode:**
++
+ ```python
+ import torch
+ import torch.linalg
+ 
+-def ray_casting_and_intersection(pixel_coords, intrinsics, extrinsics, eps=1e-5, inf=1e10):
+-    """
+-    Computes 3D ray origins, directions, and least-squares intersection points.
++def ray_casting_and_intersection(
++    intrinsics: torch.Tensor,
++    extrinsics: torch.Tensor,
++    pixel_coords: torch.Tensor,
++    parallel_eps: float = 1e-5,
++    inf_val: float = 1e10
++) -> torch.Tensor:
++    """
++    Computes the least-squares intersection of rays cast from pixel coordinates.
+     
+     Args:
+-        pixel_coords: Tensor of shape (N, 2) containing 2D pixel coordinates.
+-        intrinsics: Tensor of shape (3, 3) containing camera intrinsic matrix K.
+-        extrinsics: Tensor of shape (4, 4) containing camera extrinsic matrix T.
+-        eps: Epsilon for detecting parallel rays.
+-        inf: Value for parallel ray intersections.
++        intrinsics: (B, 3, 3) Camera intrinsic matrices.
++        extrinsics: (B, 4, 4) Camera extrinsic matrices.
++        pixel_coords: (B, 2) Pixel coordinates (u, v).
++        parallel_eps: Epsilon for parallel ray detection.
++        inf_val: Value for parallel ray results.
+         
+     Returns:
+-        origins: Tensor of shape (N, 3), ray origins in world space.
+-        directions: Tensor of shape (N, 3), unit ray directions in world space.
+-        intersection_points: Tensor of shape (N, 3), least-squares intersection points.
+-    """
+-    # Step 1: Unproject to Camera Space
+-    # Convert 2D pixel coordinates to homogeneous coordinates
+-    # Assuming pixel_coords is (N, 2), create (N, 3) homogeneous coordinates
+-    homogeneous_coords = torch.cat([pixel_coords, torch.ones_like(pixel_coords[:, :1])], dim=1) # (N, 3)
++        intersection_points: (B, 3) 3D intersection points.
++    """
++    B = pixel_coords.shape[0]
++    
++    # Step 1: Unproject to camera space
++    # Convert pixel coords to homogeneous [u, v, 1]
++    ones = torch.ones(B, 1, device=pixel_coords.device)
++    p_cam = torch.cat([pixel_coords, ones], dim=1)  # (B, 3)
+     
+     # Multiply by inverse intrinsics
+-    K_inv = torch.inverse(intrinsics) # (3, 3)
+-    d_cam = torch.matmul(homogeneous_coords, K_inv.T) # (N, 3)
+-    
+-    # Step 2: Normalize in Camera Space
+-    # Divide by z-component to get unit vectors
+-    d_cam_z = d_cam[:, 2:3] # (N, 1)
+-    d_cam = d_cam / d_cam_z # (N, 3)
+-    
+-    # Step 3: Transform to World Space
+-    # Extract rotation and translation from extrinsics
+-    R = extrinsics[:3, :3] # (3, 3)
+-    t = extrinsics[:3, 3] # (3,)
+-    
+-    # Transform directions
+-    d_world = torch.matmul(d_cam, R.T) # (N, 3)
+-    
+-    # Set origins to camera center
+-    origins = t.unsqueeze(0).expand(d_world.shape[0], -1) # (N, 3)
+-    
+-    # Step 4: Detect Parallel Rays (for pairs)
++    K_inv = torch.inverse(intrinsics)  # (B, 3, 3)
++    d_cam = torch.bmm(K_inv, p_cam.unsqueeze(2)).squeeze(2)  # (B, 3)
++    
++    # Normalize by z-component
++    d_cam_z = d_cam[:, 2:3]  # (B, 1)
++    d_cam = d_cam / d_cam_z  # (B, 3)
++    
++    # Step 2: Transform to world space
++    R = extrinsics[:, :3, :3]  # (B, 3, 3)
++    d_world = torch.bmm(R, d_cam.unsqueeze(2)).squeeze(2)  # (B, 3)
++    
++    # Normalize to unit vectors
++    norms = torch.norm(d_world, dim=1, keepdim=True)  # (B, 1)
++    u = d_world / norms  # (B, 3)
++    
++    # Step 3: Compute origins (camera centers)
++    t = extrinsics[:, :3, 3]  # (B, 3)
++    origins = t  # (B, 3)
++    
++    # Step 4: Detect parallel rays
+     # Assuming we are intersecting ray i with ray j. 
+-    # The source implies a batch of rays, and we find intersection for pairs.
+-    # Let's assume we are intersecting ray 0 with ray 1 for each pair in a batch of pairs.
+-    # Or, more generally, for each ray i, we might intersect it with a reference ray.
+-    # The source mentions "summing n over the ray dimension", implying a system for multiple rays.
+-    # However, "intersect_rays" usually implies two rays. Let's assume we are intersecting two rays at a time.
+-    # If N is even, we pair (0,1), (2,3), etc.
+-    
+-    # Let's assume the input is a batch of ray pairs, so pixel_coords is (M, 2, 2) where M is number of pairs.
+-    # But the source says "pixel_coords" is (N, 2). Let's assume N is even and we pair them.
+-    
+-    if pixel_coords.shape[0] % 2 != 0:
+-        raise ValueError("Number of rays must be even for pairing.")
++    # In a typical batched setup for stereo/NeRF, we might have two rays per pixel.
++    # However, the source notes imply a general "two rays" context for the least squares.
++    # If the input is a single ray per pixel, this function likely expects pairs or 
++    # is used in a context where rays are paired. 
++    # Based on S1/S2, it seems to handle a batch of ray pairs or a single ray 
++    # intersecting with itself (which is degenerate). 
++    # Let's assume the input `pixel_coords` defines two rays per batch item 
++    # or the function is called for pairs. 
++    # The notes describe `directions_x` and `directions_y`, implying two sets of rays.
++    
++    # Re-reading S1/S2: "Computes 3D ray origins and directions... and finds the least-squares intersection point of two rays"
++    # This implies the function takes two rays as input. 
++    # Let's adjust inputs to accept two rays per batch item.
++    
++    # If the function signature is fixed to single rays, it might be part of a larger loop.
++    # But the notes say "intersect_rays" and "get_world_rays".
++    # Let's assume the standard case: two rays are provided.
++    
++    # If the input is just one ray per pixel, we cannot compute intersection.
++    # The source S1 mentions "view_sampler.sample" which returns context and target views.
++    # This function likely computes intersection between a context ray and a target ray.
++    
++    # Let's assume inputs are:
++    # directions_1: (B, 3)
++    # origins_1: (B, 3)
++    # directions_2: (B, 3)
++    # origins_2: (B, 3)
++    
++    # Since the prompt asks for "Ray Casting and Intersection" based on S1/S2,
++    # and S1 mentions "intersect_rays", I will write the function to take two rays.
++    
++    # However, the "Inputs" section in the prompt's structure asks for "pixel coordinates".
++    # This suggests the function generates rays from pixels.
++    # If it intersects two rays, it likely needs two sets of pixels or cameras.
++    
++    # Let's stick to the most general interpretation from S1/S2:
++    # It computes intersection for a batch of ray pairs.
++    # The "pixel_coords" might be for one ray, and another set is implied or passed separately.
++    # Given the ambiguity, I will write the core least-squares solver for two rays,
++    # assuming they are passed as directions and origins.
++    
++    # If the function must take pixel coords, it likely takes two sets.
++    # Let's assume `pixel_coords` is for ray 1, and we need ray 2.
++    # This is complex. Let's look at S2: `intersect_rays` takes `directions_x`, `directions_y`.
++    
++    # I will write the function to take two rays (directions and origins) directly,
++    # as the "casting" part is just coordinate transformation.
++    
++    # Let's redefine inputs for the pseudocode to match the "How it works" steps precisely.
++    # Inputs: directions_1, origins_1, directions_2, origins_2
++    
++    # But the prompt says "Inputs: ... pixel_coords".
++    # I will assume the function takes two sets of pixel coordinates and two sets of cameras.
++    
++    # To keep it simple and aligned with S1/S2's `intersect_rays`:
++    # I will write a helper that takes two rays.
++    
++    pass
++
++def intersect_rays(
++    directions_1: torch.Tensor,
++    origins_1: torch.Tensor,
++    directions_2: torch.Tensor,
++    origins_2: torch.Tensor,
++    parallel_eps: float = 1e-5,
++    inf_val: float = 1e10
++) -> torch.Tensor:
++    """
++    Computes the least-squares intersection of two rays.
++    
++    Args:
++        directions_1: (B, 3) Unit direction vectors of ray 1.
++        origins_1: (B, 3) Origins of ray 1.
++        directions_2: (B, 3) Unit direction vectors of ray 2.
++        origins_2: (B, 3) Origins of ray 2.
++        parallel_eps: Epsilon for parallel ray detection.
++        inf_val: Value for parallel ray results.
+         
+-    M = pixel_coords.shape[0] // 2
+-    d_world_reshaped = d_world.view(M, 2, 3) # (M, 2, 3)
+-    origins_reshaped = origins.view(M, 2, 3) # (M, 2, 3)
+-    
+-    d1 = d_world_reshaped[:, 0, :] # (M, 3)
+-    d2 = d_world_reshaped[:, 1, :] # (M, 3)
+-    o1 = origins_reshaped[:, 0, :] # (M, 3)
+-    o2 = origins_reshaped[:, 1, :] # (M, 3)
+-    
+-    # Dot product
+-    dot_products = torch.sum(d1 * d2, dim=1) # (M,)
+-    parallel_mask = dot_products > (1 - eps) # (M,)
+-    
+-    # Step 5: Filter Parallel Rays
+-    # We will solve for non-parallel rays and set parallel rays to inf.
+-    
+-    # Step 6: Compute Least-Squares System
+-    # Compute N_i = d_i d_i^T - I for each ray
+-    # d1 is (M, 3), d2 is (M, 3)
+-    # N1 = d1 @ d1.T - I, but d1 is (M, 3), so d1 @ d1.T is (M, 3, 3)
+-    # We need to do this for each ray in the pair.
+-    
+-    # N1 = d1.unsqueeze(2) @ d1.unsqueeze(1) - torch.eye(3) # (M, 3, 3)
+-    # N2 = d2.unsqueeze(2) @ d2.unsqueeze(1) - torch.eye(3) # (M, 3, 3)
+-    
+-    # More efficient:
+-    N1 = torch.bmm(d1.unsqueeze(2), d1.unsqueeze(1)) - torch.eye(3).unsqueeze(0).expand(M, -1, -1) # (M, 3, 3)
+-    N2 = torch.bmm(d2.unsqueeze(2), d2.unsqueeze(1)) - torch.eye(3).unsqueeze(0).expand(M, -1, -1) # (M, 3, 3)
+-    
+-    # LHS = N1 + N2
+-    LHS = N1 + N2 # (M, 3, 3)
+-    
+-    # RHS = N1 @ o1 + N2 @ o2
+-    RHS = torch.bmm(N1, o1.unsqueeze(2)).squeeze(2) + torch.bmm(N2, o2.unsqueeze(2)).squeeze(2) # (M, 3)
+-    
+-    # Solve for p
+-    # p = LHS^{-1} RHS
++    Returns:
++        intersection_points: (B, 3) 3D intersection points.
++    """
++    B = directions_1.shape[0]
++    
++    # Step 4: Detect parallel rays
++    dot_products = torch.sum(directions_1 * directions_2, dim=1)  # (B,)
++    is_parallel = dot_products > (1.0 - parallel_eps)  # (B,)
++    
++    # Step 5: Construct Least-Squares System
++    # N_i = u_i u_i^T - I
++    # For ray 1
++    u1 = directions_1.unsqueeze(2)  # (B, 3, 1)
++    u1_T = directions_1.unsqueeze(1)  # (B, 1, 3)
++    N1 = torch.bmm(u1, u1_T) - torch.eye(3, device=directions_1.device).unsqueeze(0)  # (B, 3, 3)
++    
++    # For ray 2
++    u2 = directions_2.unsqueeze(2)  # (B, 3, 1)
++    u2_T = directions_2.unsqueeze(1)  # (B, 1, 3)
++    N2 = torch.bmm(u2, u2_T) - torch.eye(3, device=directions_2.device).unsqueeze(0)  # (B, 3, 3)
++    
++    # LHS: A = N1 + N2
++    A = N1 + N2  # (B, 3, 3)
++    
++    # RHS: b = N1 * o1 + N2 * o2
++    b1 = torch.bmm(N1, origins_1.unsqueeze(2)).squeeze(2)  # (B, 3)
++    b2 = torch.bmm(N2, origins_2.unsqueeze(2)).squeeze(2)  # (B, 3)
++    b = b1 + b2  # (B, 3)
++    
++    # Step 6: Solve for intersection
+     # Use lstsq
+-    # result = torch.linalg.lstsq(LHS, RHS).solution
+-    # However, lstsq expects (M, 3, 3) and (M, 3, 1) or (M, 3)
+-    # Let's use torch.linalg.solve if LHS is invertible, but lstsq is more robust.
+-    
+-    # For non-parallel rays, solve
+-    # We need to handle the batched solve.
+-    
+-    # Initialize intersection points with inf
+-    intersection_points = torch.full((M, 3), inf, device=d1.device)
++    # result = torch.linalg.lstsq(A, b).solution
++    # Note: lstsq might fail for singular matrices. We handle parallel rays separately.
++    
++    # Filter out parallel rays for solving
++    non_parallel_mask = ~is_parallel  # (B,)
++    
++    # Initialize result with inf_val
++    result = torch.full((B, 3), inf_val, device=directions_1.device)
+     
+     # Solve for non-parallel rays
+-    non_parallel_mask = ~parallel_mask
+-    if torch.any(non_parallel_mask):
+-        LHS_np = LHS[non_parallel_mask] # (K, 3, 3) where K is number of non-parallel pairs
+-        RHS_np = RHS[non_parallel_mask] # (K, 3)
++    if non_parallel_mask.any():
++        A_np = A[non_parallel_mask]  # (K, 3, 3)
++        b_np = b[non_parallel_mask]  # (K, 3)
+         
+         # Solve least squares
+@@ -191,43 +252,96 @@
+         # We only need the solution
+         try:
+-            solution = torch.linalg.lstsq(LHS_np, RHS_np).solution # (K, 3)
+-            intersection_points[non_parallel_mask] = solution
+-        except Exception as e:
+-            # If solve fails, keep inf
++            sol = torch.linalg.lstsq(A_np, b_np).solution  # (K, 3)
++            result[non_parallel_mask] = sol
++        except RuntimeError:
++            # If lstsq fails (e.g., due to numerical issues), keep inf_val
+             pass
+             
+-    # Reshape back to (N, 3) if needed, but here we return per pair
+-    # The source says "intersection_points" is (N, 3). If N is number of rays, and we pair them,
+-    # then we have M pairs. The output should probably be per ray or per pair.
+-    # The source says "intersection point of two rays", so it's per pair.
+-    # Let's assume the output is per pair, so (M, 3).
+-    # But the source says "intersection_points" is (N, 3). This is ambiguous.
+-    # Let's assume N is the number of pairs for the intersection output.
+-    
+-    return origins, d_world, intersection_points
++    return result
++
++def ray_casting_and_intersection(
++    intrinsics_1: torch.Tensor,
++    extrinsics_1: torch.Tensor,
++    intrinsics_2: torch.Tensor,
++    extrinsics_2: torch.Tensor,
++    pixel_coords_1: torch.Tensor,
++    pixel_coords_2: torch.Tensor,
++    parallel_eps: float = 1e-5,
++    inf_val: float = 1e10
++) -> torch.Tensor:
++    """
++    Main function: Casts rays from pixels and computes their intersection.
++    
++    Args:
++        intrinsics_1: (B, 3, 3)
++        extrinsics_1: (B, 4, 4)
++        intrinsics_2: (B, 3, 3)
++        extrinsics_2: (B, 4, 4)
++        pixel_coords_1: (B, 2)
++        pixel_coords_2: (B, 2)
++        parallel_eps: Epsilon for parallel ray detection.
++        inf_val: Value for parallel ray results.
++        
++    Returns:
++        intersection_points: (B, 3)
++    """
++    # Cast rays for camera 1
++    rays_1 = _cast_rays(intrinsics_1, extrinsics_1, pixel_coords_1)
++    
++    # Cast rays for camera 2
++    rays_2 = _cast_rays(intrinsics_2, extrinsics_2, pixel_coords_2)
++    
++    # Intersect
++    return intersect_rays(
++        rays_1['directions'],
++        rays_1['origins'],
++        rays_2['directions'],
++        rays_2['origins'],
++        parallel_eps,
++        inf_val
++    )
++
++def _cast_rays(intrinsics: torch.Tensor, extrinsics: torch.Tensor, pixel_coords: torch.Tensor) -> dict:
++    B = pixel_coords.shape[0]
++    
++    # Step 1: Unproject to camera space
++    ones = torch.ones(B, 1, device=pixel_coords.device)
++    p_cam = torch.cat([pixel_coords, ones], dim=1)  # (B, 3)
++    
++    K_inv = torch.inverse(intrinsics)  # (B, 3, 3)
++    d_cam = torch.bmm(K_inv, p_cam.unsqueeze(2)).squeeze(2)  # (B, 3)
++    
++    # Normalize by z-component
++    d_cam_z = d_cam[:, 2:3]  # (B, 1)
++    d_cam = d_cam / d_cam_z  # (B, 3)
++    
++    # Step 2: Transform to world space
++    R = extrinsics[:, :3, :3]  # (B, 3, 3)
++    d_world = torch.bmm(R, d_cam.unsqueeze(2)).squeeze(2)  # (B, 3)
++    
++    # Normalize to unit vectors
++    norms = torch.norm(d_world, dim=1, keepdim=True)  # (B, 1)
++    u = d_world / norms  # (B, 3)
++    
++    # Step 3: Compute origins
++    t = extrinsics[:, :3, 3]  # (B, 3)
++    origins = t  # (B, 3)
++    
++    return {'directions': u, 'origins': origins}
+ ```
+ 
+-**Parameters:**
+-- `eps`: Epsilon for detecting parallel rays. Default $10^{-5}$ [S1, unofficial].
+-- `inf`: Value used to represent infinity for parallel ray intersections. Default $10^{10}$ [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Parallel Rays:** If rays are parallel, the least-squares system is singular or ill-conditioned. The method detects this using the dot product threshold and sets the intersection to `inf` [S1, unofficial].
+-- **Precision:** Numerical stability of the least-squares solver should be considered, especially for nearly parallel rays.
+-- **Boundary Conditions:** The method assumes valid camera parameters. Invalid intrinsics or extrinsics will lead to incorrect ray directions or origins.
+-
+ ## Operating characteristics
+-- **Time Complexity:** The unprojection and transformation steps are $O(N)$ for $N$ rays. The least-squares solve is $O(1)$ per pair of rays (since the system is $3 \times 3$). Overall, $O(N)$.
+-- **Memory Complexity:** $O(N)$ to store ray origins, directions, and intersection points.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales linearly with the number of rays.
+-- **Strengths:** Robust to non-intersecting rays due to noise or parallax. Provides a unique least-squares solution.
+-- **Limitations:** Degenerate for parallel rays. Requires valid camera parameters.
+-- **When to Use:** When rays do not intersect exactly, e.g., in multi-view geometry with noise or parallax.
+-- **When Not to Use:** When rays are guaranteed to intersect exactly, or when parallel rays are common and a different handling is required.
++- **Time Complexity:** $O(B)$ where $B$ is the batch size, dominated by matrix multiplications and the least-squares solve. The solve is $O(1)$ per batch item since the system is $3 \times 3$.
++- **Memory Complexity:** $O(B)$ for storing directions, origins, and intermediate matrices.
++- **Performance:** Efficient on GPU due to batched operations. The use of `torch.linalg.lstsq` is optimized for CUDA.
++- **Strengths:** Robust to noise and parallax errors. Handles non-intersecting rays gracefully.
++- **Limitations:** Fails for parallel rays (returns infinity). Numerical stability depends on the condition number of the matrix $A$.
++- **When to use:** Stereo matching, multi-view geometry, NeRF training where rays from different views need to intersect.
++- **When not to use:** When exact intersection is guaranteed and performance is critical (simple geometric intersection is faster).
+ 
+ ## Background
+-Origin: The method is part of the `depthsplat` library [S1, unofficial]. It is used in computer vision tasks involving multi-view geometry, such as depth estimation and 3D reconstruction.
++Originated in the context of multi-view stereo and neural radiance fields (NeRF) to handle the discrepancy between rays from different cameras that do not intersect exactly due to calibration errors or scene depth variations [S1, S2, unofficial]. The method is commonly used in libraries like `depthsplat` and `VoLoDSplat` for efficient ray intersection computation [S1, S2, unofficial].
+ 
+ ## Sources
+-[S1] cvg/depthsplat, https://github.com/cvg/depthsplat, fetched 2026-10-27 (unofficial)+[S1] cvg/depthsplat, https://github.com/cvg/depthsplat, fetched 2026-10-27 (unofficial)
++[S2] pulangk97/VoLoDSplat, https://github.com/pulangk97/VoLoDSplat, fetched 2026-10-27 (unofficial)

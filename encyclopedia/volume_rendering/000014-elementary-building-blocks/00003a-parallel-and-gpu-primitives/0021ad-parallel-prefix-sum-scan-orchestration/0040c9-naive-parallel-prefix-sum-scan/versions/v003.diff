@@ -1,0 +1,99 @@
+--- v002.md
++++ v003.md
+@@ -9,5 +9,5 @@
+ **Inputs and Outputs:**
+ - Input: An array of $n$ integers `idata` on the host.
+-- Output: An array of $n$ integers `odata` on the host containing the exclusive prefix sum.
++- Output: An array of $n$ integers `odata` on the host containing the exclusive prefix sum [S1, unofficial][S2, unofficial].
+ 
+ **Data Structures:**
+@@ -25,7 +25,7 @@
+    - The kernel parameter `offset` is $2^{d-1}$ [S1, unofficial].
+    - Inside the kernel for each thread with global index `id`:
+-     - Read `data[id]` into a local buffer.
++     - Copy `data[id]` to a local buffer `buffer[id]`.
+      - Synchronize threads within the block.
+-     - If `threadIdx.x >= offset`, update the value: `buffer[id] = data[id - offset] + data[id]`.
++     - If `threadIdx.x >= offset`, update the value: `buffer[id] = data[id - offset] + data[id]` [S2, unofficial].
+      - Synchronize threads.
+      - Write `buffer[id]` back to `data[id]`.
+@@ -33,5 +33,5 @@
+    - Swap `dev_data1` and `dev_data2` pointers after each kernel launch to double-buffer results [S3].
+ 3. **Post-Processing (Exclusive Scan):**
+-   - The result in `dev_data1` is an inclusive scan. Convert to exclusive scan:
++   - The result in `dev_data1` is an inclusive scan [S1, unofficial]. Convert to exclusive scan:
+      - Set `odata[0] = 0`.
+      - Copy `dev_data1[1...n-1]` to `odata[1...n-1]` [S1, unofficial].
+@@ -54,36 +54,45 @@
+     return lg
+ 
+-def kernNaiveScan_thread_logic(id, tx, offset, data_src, data_dst):
+-    """Thread-local logic executed by kernNaiveScan."""
+-    if id < len(data_src):
+-        data_dst[id] = data_src[id]
+-        # __syncthreads()
+-        if tx >= offset:
+-            data_dst[id] = data_src[id - offset] + data_src[id]
+-        # __syncthreads()
+-        data_src[id] = data_dst[id]
+-        # __syncthreads()
++def kernNaiveScan(data, buffer, n, block_size):
++    """Kernel logic for a single thread."""
++    id = blockIdx.x * block_size + threadIdx.x
++    tx = threadIdx.x
++    if id < n:
++        log2n = ilog2ceil(min(n, block_size))
++        for d in range(1, log2n + 1):
++            offset = 1 << (d - 1)
++            buffer[id] = data[id]
++            # __syncthreads()
++            if tx >= offset:
++                buffer[id] = data[id - offset] + data[id]
++            # __syncthreads()
++            data[id] = buffer[id]
++            # __syncthreads()
+ 
+ def naive_scan(n, idata, block_size):
+     # 1. Allocation and Initialization
+-    dev_data1 = list(idata)  # Simulates host-to-device copy
++    dev_data1 = list(idata)
+     dev_data2 = [0] * n
+-
++    
++    # 2. Iterative Kernel Launches (simulated)
+     log2n = ilog2ceil(min(n, block_size))
+-
+-    # 2. Iterative Kernel Launches
++    blocks_per_grid = (n + block_size - 1) // block_size
++    
+     for d in range(1, log2n + 1):
+         offset = 1 << (d - 1)
+-        blocks_per_grid = (n + block_size - 1) // block_size
+-
+-        # Simulate kernel launch across all threads
+         for b in range(blocks_per_grid):
+             for t in range(block_size):
+                 id = b * block_size + t
+-                kernNaiveScan_thread_logic(id, t, offset, dev_data1, dev_data2)
+-
++                if id < n:
++                    dev_data2[id] = dev_data1[id]
++                    # __syncthreads()
++                    if t >= offset:
++                        dev_data2[id] = dev_data1[id - offset] + dev_data1[id]
++                    # __syncthreads()
++                    dev_data1[id] = dev_data2[id]
++                    # __syncthreads()
+         # Swap buffers for next iteration
+         dev_data1, dev_data2 = dev_data2, dev_data1
+-
++        
+     # 3. Convert Inclusive to Exclusive
+     odata = [0] * n
+@@ -96,5 +105,5 @@
+ 
+ ### [Work-Efficient Scan](10349-work-efficient-scan.md)
+-A parallel algorithm to compute the inclusive prefix sum of an array using a two-phase approach (upsweep/reduction and downsweep) to achieve work efficiency ($O(n)$ work, $O(\log n)$ depth). It builds on [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md) by replacing the iterative $O(n \log n)$ work with a binary tree reduction, eliminating race conditions through in-place updates and synchronization.
++A parallel algorithm that computes the inclusive prefix sum of an array in $O(n)$ total work and $O(\log n)$ parallel depth, significantly improving upon the $O(n \log n)$ work complexity of naive parallel scan. It achieves this efficiency by decomposing the computation into an upsweep (reduction) phase and a downsweep (scan) phase, operating on a binary tree structure. Unlike the Kogge-Stone algorithm, which is inherently inclusive and computes all prefix sums simultaneously via fixed-distance dependencies, the Work-Efficient Scan explicitly constructs exclusive intermediate values before converting them to inclusive results, making it suitable for operations where the current element must not influence its own prefix result during intermediate steps.
+ 
+ ### Naive GPU Parallel Scan

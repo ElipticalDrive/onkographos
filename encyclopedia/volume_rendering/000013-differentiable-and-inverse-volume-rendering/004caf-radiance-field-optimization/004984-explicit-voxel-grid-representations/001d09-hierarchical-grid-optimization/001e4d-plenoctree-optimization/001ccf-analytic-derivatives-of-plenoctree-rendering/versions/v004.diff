@@ -1,0 +1,171 @@
+--- v003.md
++++ v004.md
+@@ -3,106 +3,104 @@
+ 
+ ## Overview
+-This method computes the analytic gradients of the NeRF piecewise constant volume rendering equation with respect to density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters, enabling direct optimization of PlenOctrees [S1, unofficial]. It solves the problem of backpropagating the rendering loss through the volumetric integration process without numerical differentiation. It is distinguished from [PlenOctree Conversion](1359-plenoctree-conversion.md) (which focuses on compression and format) and [PlenOctree Fine-tuning](1465-plenoctree-fine-tuning.md) (which describes the high-level training loop) by providing the specific mathematical derivatives required for the optimizer [S1, unofficial].
++This method computes the analytic gradients of the NeRF piecewise constant volume rendering equation with respect to density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters, enabling direct optimization of PlenOctrees [S1, unofficial]. It differs from numerical differentiation by providing exact, efficient gradients required for stochastic gradient descent (SGD) during the fine-tuning phase of PlenOctree optimization [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** A fixed ray with origin and direction; segment endpoints $\{t_i\}_{i=0}^N$; segment densities $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$; segment colors $\mathbf{c} = (c_0, \dots, c_{N-1})$; background color $c_N$; segment lengths $\delta_i = t_{i+1} - t_i$.
+-- **Outputs:** Gradients $\frac{\partial \hat{C}}{\partial \sigma_i}$ and $\frac{\partial \hat{C}}{\partial c_i}$ for the rendered color $\hat{C}$.
++- **Input:** A fixed ray with origin and direction, divided into $N$ consecutive segments with endpoints $\{t_i\}_{i=0}^N$. Segment lengths are $\delta_i = t_{i+1} - t_i$. Constant densities $\boldsymbol{\sigma} = (\sigma_0, \dots, \sigma_{N-1})$ and colors $\mathbf{c} = (c_0, \dots, c_N)$, where $c_N$ is the background color.
++- **Output:** Gradients $\frac{\partial \hat{C}}{\partial \sigma_i}$ and $\frac{\partial \hat{c}_i}$ for each segment $i$.
+ 
+ **Data Structures:**
+-- **Segment Arrays:** Densities $\sigma$ and colors $c$ are stored as arrays of size $N$ (for segments) and $1$ (for background).
+-- **Transmittance Array:** $T$ is an array of size $N+1$, where $T_i$ represents accumulated transmittance from $t_0$ to $t_i$.
++- **Accumulated Transmittance ($T_i$):** Precomputed for $i=0 \dots N$.
++- **Segment Weights ($w_i$):** Precomputed for $i=0 \dots N$.
+ 
+-**Definitions:**
++**Formulas:**
+ 1.  **Accumulated Transmittance:**
+     $$T_i(\boldsymbol{\sigma}) := \prod_{j=0}^{i-1} \exp(-\delta_j \sigma_j)$$
+-    where $T_0 = 1$. $T_i$ models absorption from $t_0$ to $t_i$ [S1, unofficial].
+-2.  **Segment Weights:**
++    where $T_0 = 1$. $T_i$ represents the transmittance from $t_0$ to $t_i$ [S1, unofficial].
++
++2.  **Rendered Color:**
++    $$\hat{C}(\boldsymbol{\sigma}, \mathbf{c}) = \sum_{i=0}^N w_i(\boldsymbol{\sigma}) c_i$$
++    where segment weights are:
+     $$w_i(\boldsymbol{\sigma}) = T_i(\boldsymbol{\sigma}) (1 - \exp(-\sigma_i \delta_i)) = T_i(\boldsymbol{\sigma}) - T_{i+1}(\boldsymbol{\sigma}) \quad \text{for } i < N$$
+     $$w_N(\boldsymbol{\sigma}) = T_N(\boldsymbol{\sigma})$$
+-3.  **Rendered Color:**
+-    $$\hat{C}(\boldsymbol{\sigma}, \mathbf{c}) = \sum_{i=0}^N w_i(\boldsymbol{\sigma}) c_i$$
++    [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Compute Transmittance:** Calculate $T_i$ for all $i \in [0, N]$.
+-    $$T_0 = 1$$
+-    $$T_{i+1} = T_i \cdot \exp(-\sigma_i \delta_i) \quad \text{for } i = 0 \dots N-1$$
+-2.  **Compute Weights:** Calculate $w_i$ for all $i \in [0, N]$ using the transmittance values.
+-    $$w_i = T_i - T_{i+1} \quad \text{for } i = 0 \dots N-1$$
+-    $$w_N = T_N$$
+-3.  **Compute Color Gradients:**
+-    $$\frac{\partial \hat{C}}{\partial c_i} = w_i \quad \text{for } i = 0 \dots N$$
+-4.  **Compute Density Gradients:**
+-    The derivative with respect to $\sigma_i$ is given by:
+-    $$\frac{\partial \hat{C}}{\partial \sigma_i} = \delta_i \left[ c_i T_{i+1}(\boldsymbol{\sigma}) - \sum_{k=i+1}^N c_k w_k(\boldsymbol{\sigma}) \right]$$
+-    
+-    *Derivation Note:* The general form is $\frac{\partial \hat{C}}{\partial \sigma_i} = c_N \frac{\partial T_N}{\partial \sigma_i} + \sum_{k=0}^{N-1} c_k \left( \frac{\partial T_k}{\partial \sigma_i} - \frac{\partial T_{k+1}}{\partial \sigma_i} \right)$. Since $\frac{\partial T_k}{\partial \sigma_i} = -\delta_i T_k \mathbf{1}_{k>i}$, terms where $k \le i$ vanish. The simplified formula above is derived by grouping terms [S1, unofficial].
++3.  **Color Derivative:**
++    $$\frac{\partial \hat{C}}{\partial c_i}(\boldsymbol{\sigma}, \mathbf{c}) = w_i(\boldsymbol{\sigma})$$
++    [S1, unofficial].
++
++4.  **Density Derivative:**
++    The derivative with respect to $\sigma_i$ is:
++    $$\frac{\partial \hat{C}}{\partial \sigma_i}(\boldsymbol{\sigma}, \mathbf{c}) = \delta_i \left[ c_i T_{i+1}(\boldsymbol{\sigma}) - \sum_{k=i+1}^N c_k w_k(\boldsymbol{\sigma}) \right]$$
++    [S1, unofficial].
++    *Derivation Note:* This simplifies from the general form $\frac{\partial \hat{C}}{\partial \sigma_i} = c_N \frac{\partial T_N}{\partial \sigma_i} + \sum_{k=0}^{N-1} c_k \left( \frac{\partial T_k}{\partial \sigma_i} - \frac{\partial T_{k+1}}{\partial \sigma_i} \right)$ using $\frac{\partial T_k}{\partial \sigma_i} = -\delta_i T_k(\boldsymbol{\sigma}) \mathbf{1}_{k>i}$ [S1, unofficial].
++
++**Spherical Harmonics (SH) Handling:**
++When colors $\mathbf{c}$ are represented by Spherical Harmonics coefficients, the chain rule is applied. Since SH basis function values are constant across the ray, the derivative with respect to SH coefficients is computed by multiplying the gradient with respect to color $\mathbf{c}$ by the SH basis values [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_gradients(sigma, delta, c, c_bg):
++def compute_gradients(N, deltas, sigmas, colors, background_color):
+     """
+-    sigma: array of N densities (sigma_0 ... sigma_{N-1})
+-    delta: array of N segment lengths (delta_0 ... delta_{N-1})
+-    c: array of N segment colors (c_0 ... c_{N-1})
+-    c_bg: background color (c_N)
+-    Returns: grad_sigma (N,), grad_c (N+1,)
++    Computes gradients for NeRF volume rendering.
++    N: Number of segments.
++    deltas: Array of length N, segment lengths delta_i.
++    sigmas: Array of length N, densities sigma_i.
++    colors: Array of length N+1, colors c_0 to c_N (c_N is background).
++    background_color: Scalar intensity (typically 1.0) for background light.
++    Returns: grad_sigmas (N,), grad_colors (N+1,)
+     """
+-    N = len(sigma)
+-    
+-    # 1. Compute Transmittance T[0...N]
++    # 1. Compute Transmittance T_i
++    # T_i is product from j=0 to i-1 of exp(-delta_j * sigma_j)
++    # T_0 = 1
+     T = [0.0] * (N + 1)
+     T[0] = 1.0
+-    for i in range(N):
+-        T[i+1] = T[i] * math.exp(-sigma[i] * delta[i])
+-        
+-    # 2. Compute Weights w[0...N]
++    for i in range(1, N + 1):
++        T[i] = T[i-1] * math.exp(-deltas[i-1] * sigmas[i-1])
++
++    # 2. Compute Weights w_i
++    # w_i = T_i - T_{i+1} for i < N
++    # w_N = T_N
+     w = [0.0] * (N + 1)
+     for i in range(N):
+         w[i] = T[i] - T[i+1]
+     w[N] = T[N]
+-    
++
+     # 3. Compute Color Gradients
+-    grad_c = list(w) # w[0]...w[N-1] for segments, w[N] for background
+-    
++    # dC/dc_i = w_i
++    grad_colors = list(w)
++
+     # 4. Compute Density Gradients
+-    grad_sigma = [0.0] * N
++    # dC/dsigma_i = delta_i * [ c_i * T_{i+1} - sum_{k=i+1}^N c_k * w_k ]
++    grad_sigmas = [0.0] * N
+     for i in range(N):
+         # Term 1: c_i * T_{i+1}
+-        term1 = c[i] * T[i+1]
++        term1 = colors[i] * T[i+1]
+         
+         # Term 2: sum_{k=i+1}^N c_k * w_k
+-        # Note: c_N is c_bg, w_N is T[N]
+         sum_term = 0.0
+-        for k in range(i+1, N):
+-            sum_term += c[k] * w[k]
+-        sum_term += c_bg * w[N]
+-        
+-        grad_sigma[i] = delta[i] * (term1 - sum_term)
+-        
+-    return grad_sigma, grad_c
++        for k in range(i+1, N+1):
++            sum_term += colors[k] * w[k]
++            
++        grad_sigmas[i] = deltas[i] * (term1 - sum_term)
++
++    return grad_sigmas, grad_colors
+ ```
+-
+-**Spherical Harmonics (SH):**
+-If colors are represented by SH coefficients, the chain rule is applied. Since SH basis function values are constant across the ray, the derivative with respect to the SH coefficients is computed by multiplying the color gradient by the SH basis values [S1, unofficial].
+-
+-**Edge Cases:**
+-- **Zero Density:** If $\sigma_i = 0$, the term $(1 - \exp(-\sigma_i \delta_i))$ becomes 0, and the weight $w_i$ becomes 0. The gradient formula remains valid as limits are continuous.
+-- **Background:** $c_N$ is typically treated as a hyperparameter or optimized separately. If optimized, its gradient is $w_N$.
+ 
+ ## Subtopics
+ 
+ ### Differentiating Pixel Intensities
+-This variant extends the ray-level derivatives to full image differentiation. Pixel intensity $I$ is modeled as the inner product between radiance $L$ and a reconstruction kernel $K$ over the pixel footprint $P$: $I = \int_{[0,1)^2} L(x(u), \omega(u)) K(u) du$. When $K$ is independent of scene parameters $\pi$ and continuous in $u$, the derivative $\dot{I}$ includes a boundary term accounting for discontinuities in $L$ along the pixel boundary $\partial[0,1)^2$: $\dot{I} = \int_{[0,1)^2} \dot{L}(x(u), \omega(u)) K(u) du + \int_{\partial[0,1)^2} \langle n, \dot{x}(u) \rangle \Delta L(x(u), \omega(u)) K(u) d\ell(u)$, where $n$ is the normal and $\dot{x}$ is the change rate of the boundary curves [S2, unofficial].
++This variant extends the derivative computation to the pixel level, modeling pixel intensity $I$ as the inner product between radiance $L$ and a reconstruction kernel $K$ over the pixel footprint $P$. The differentiated intensity $\hat{I}$ includes a boundary integral term accounting for discontinuities in $L$ along the boundary of the pixel domain $\partial[0,1)^2$, which is necessary when camera parameters depend on scene parameters [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ per ray, where $N$ is the number of segments. The transmittance and weight calculations are linear. The density gradient calculation involves a nested loop if implemented naively ($O(N^2)$), but can be optimized to $O(N)$ by maintaining a running sum of $c_k w_k$ from $N$ down to $0$.
+-- **Memory Complexity:** $O(N)$ for storing transmittance, weights, and gradients.
+-- **Strengths:** Provides exact gradients, enabling stable and efficient optimization of PlenOctree parameters using SGD. Avoids the noise and computational cost of numerical differentiation.
+-- **Limitations:** Assumes piecewise constant density and color within segments. Does not account for pixel footprint effects or camera parameter dependencies in the basic ray formulation (see Subtopics for extensions) [S1, unofficial][S2, unofficial].
+-- **When to Use:** When optimizing PlenOctree densities and colors directly against a loss function. Not suitable for differentiating camera poses or complex pixel filtering without the extensions in [Differentiating Pixel Intensities](#differentiating-pixel-intensities).
++- **Time Complexity:** $O(N)$ per ray for precomputing transmittance and weights, and $O(N)$ for computing gradients. The density derivative summation is $O(N^2)$ if implemented naively, but can be optimized to $O(N)$ by maintaining a running sum of $c_k w_k$ from $N$ down to $0$.
++- **Memory Complexity:** $O(N)$ to store $T_i$, $w_i$, and intermediate sums.
++- **Strengths:** Provides exact gradients, enabling stable and efficient convergence during PlenOctree fine-tuning. Handles SH colors naturally via the chain rule.
++- **Limitations:** Assumes piecewise constant density and color within segments. Requires careful handling of numerical stability for very small or large $\sigma_i \delta_i$ values (e.g., using `expm1` for small arguments) [G].
++- **When to use:** When optimizing PlenOctree parameters directly using gradient-based methods like SGD.
++- **When not to use:** When using differentiable rendering techniques that require pixel-space derivatives with complex camera models or non-constant kernels [S2, unofficial].
+ 
+ ## Background
+-The method originates from the PlenOctrees paper, which introduced efficient real-time rendering of Neural Radiance Fields by compressing NeRFs into octrees [S1, unofficial]. The analytic derivatives were derived to allow direct optimization of the PlenOctree structure on original training images, improving image quality over the converted model. The derivation builds on the NeRF volume rendering equation [S1, unofficial]. The extension to pixel intensities is part of the broader differential radiative transfer theory, which handles the differentiation of rendered images with respect to scene parameters, including camera motion and pixel filtering [S2, unofficial].
++The method was introduced in the context of PlenOctrees for real-time rendering of Neural Radiance Fields (NeRFs) [S1, unofficial]. It builds on the NeRF volume rendering formulation [S1, unofficial] and provides the necessary gradients for optimizing the octree structure's density and color attributes directly, rather than relying on numerical approximations. The approach is detailed in Appendix B.3 of the PlenOctrees paper [S1, unofficial].
+ 
+ ## Sources

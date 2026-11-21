@@ -1,0 +1,105 @@
+# Local Least Squares Gradient Estimation
+
+Also called: Gradient Estimation via Local Least Squares, Gram Matrix Gradient Estimation, Tetrahedral Least Squares Gradient
+
+## Overview
+Local Least Squares Gradient Estimation computes the gradient of a Signed Distance Field (SDF) at a query point by fitting a local linear plane to the SDF values at the vertices of a surrounding tetrahedron [S1]. The method minimizes the residual error across all four vertices simultaneously to produce a robust gradient estimate [S1].
+
+## How it works
+**Inputs:**
+*   A tetrahedron $\mathcal{T}_j$ with vertices $\mathbf{s}_A, \mathbf{s}_B, \mathbf{s}_C, \mathbf{s}_D$ enclosing the query point [S1].
+*   The SDF values $\phi_A, \phi_B, \phi_C, \phi_D$ at these vertices [S1].
+
+**Outputs:**
+*   The estimated gradient vector $\nabla \phi^{(j)}$ [S1].
+
+**Data Structures:**
+*   $\Delta \mathbf{S}_j$: A $4 \times 3$ matrix where each row $i$ is the vector $(\mathbf{s}_i - \bar{\mathbf{s}}_j)$ [S1].
+*   $\Delta \Phi_j$: A $4 \times 1$ vector where each element $i$ is $(\phi_i - \bar{\phi}_j)$ [S1].
+*   $\mathbf{G}_j$: A $3 \times 3$ symmetric matrix (the local Gram matrix) [S1].
+*   $\mathbf{W}_j$: A $3 \times 4$ matrix, the precomputed weight matrix $\mathbf{G}_j^{-1} \Delta \mathbf{S}_j^\top$ [S1].
+
+**Steps:**
+1.  Compute the centroid of the tetrahedron vertices:
+    $$ \bar{\mathbf{s}}_j = \frac{1}{4} \sum_{i \in \{A,B,C,D\}} \mathbf{s}_i $$
+2.  Compute the mean SDF value:
+    $$ \bar{\phi}_j = \frac{1}{4} \sum_{i \in \{A,B,C,D\}} \phi_i $$
+3.  Construct the centered coordinate matrix $\Delta \mathbf{S}_j$ and centered SDF vector $\Delta \Phi_j$:
+    $$ \Delta \mathbf{S}_j = \begin{bmatrix} (\mathbf{s}_A - \bar{\mathbf{s}}_j)^\top \\ (\mathbf{s}_B - \bar{\mathbf{s}}_j)^\top \\ (\mathbf{s}_C - \bar{\mathbf{s}}_j)^\top \\ (\mathbf{s}_D - \bar{\mathbf{s}}_j)^\top \end{bmatrix}, \quad \Delta \Phi_j = \begin{bmatrix} \phi_A - \bar{\phi}_j \\ \phi_B - \bar{\phi}_j \\ \phi_C - \bar{\phi}_j \\ \phi_D - \bar{\phi}_j \end{bmatrix} $$
+4.  Compute the local Gram matrix $\mathbf{G}_j$:
+    $$ \mathbf{G}_j = \Delta \mathbf{S}_j^\top \Delta \mathbf{S}_j $$
+5.  Solve for the gradient by inverting $\mathbf{G}_j$ and multiplying by the centered data:
+    $$ \nabla \phi^{(j)} = \mathbf{G}_j^{-1} \Delta \mathbf{S}_j^\top \Delta \Phi_j $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_least_squares_gradient(vertices, sdf_values):
+    # vertices: list of 4 tuples/lists of 3 floats (s_A, s_B, s_C, s_D)
+    # sdf_values: list of 4 floats (phi_A, phi_B, phi_C, phi_D)
+    # Returns: tuple of 3 floats (gradient vector)
+
+    # 1. Compute centroid and mean SDF
+    s_centroid = tuple(sum(v[k] for v in vertices) / 4.0 for k in range(3))
+    phi_mean = sum(sdf_values) / 4.0
+
+    # 2. Construct centered coordinate matrix Delta_S (4x3) and centered SDF vector Delta_Phi (4,)
+    delta_s = []
+    delta_phi = []
+    for i in range(4):
+        delta_s.append(tuple(vertices[i][k] - s_centroid[k] for k in range(3)))
+        delta_phi.append(sdf_values[i] - phi_mean)
+
+    # 3. Compute Gram matrix G = Delta_S^T * Delta_S (3x3)
+    G = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    for r in range(3):
+        for c in range(3):
+            G[r][c] = sum(delta_s[i][r] * delta_s[i][c] for i in range(4))
+
+    # 4. Compute right-hand side rhs = Delta_S^T * Delta_Phi (3,)
+    rhs = [0.0, 0.0, 0.0]
+    for r in range(3):
+        rhs[r] = sum(delta_s[i][r] * delta_phi[i] for i in range(4))
+
+    # 5. Solve G * gradient = rhs using 3x3 linear solver
+    gradient = solve_3x3(G, rhs)
+    return gradient
+
+def solve_3x3(A, b):
+    # Solves Ax = b for 3x3 matrix A and 3-vector b using Cramer's rule
+    det = (A[0][0] * (A[1][1]*A[2][2] - A[1][2]*A[2][1])
+         - A[0][1] * (A[1][0]*A[2][2] - A[1][2]*A[2][0])
+         + A[0][2] * (A[1][0]*A[2][1] - A[1][1]*A[2][0]))
+    if det == 0.0:
+        raise ValueError("Matrix is singular")
+    inv_det = 1.0 / det
+    x = [0.0, 0.0, 0.0]
+    for i in range(3):
+        # Replace column i with b
+        A_col = [row[:] for row in A]
+        for j in range(3):
+            A_col[j][i] = b[j]
+        det_i = (A_col[0][0] * (A_col[1][1]*A_col[2][2] - A_col[1][2]*A_col[2][1])
+               - A_col[0][1] * (A_col[1][0]*A_col[2][2] - A_col[1][2]*A_col[2][0])
+               + A_col[0][2] * (A_col[1][0]*A_col[2][1] - A_col[1][1]*A_col[2][0]))
+        x[i] = det_i * inv_det
+    return tuple(x)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Tetrahedra:** If the four vertices are coplanar or coincident, $\mathbf{G}_j$ becomes singular and non-invertible [S1]. A fallback to standard finite differences or a regularization term (e.g., $\lambda I$ added to $\mathbf{G}_j$) is required [G].
+*   **Precision:** The inversion of $\mathbf{G}_j$ can be sensitive to ill-conditioning if the tetrahedron is very flat. Using a linear solver instead of explicit inversion is preferred for stability [G]. The source notes that applying robust projection consistently in all cases provides the most stable and accurate results [S1]. SDF regularization is also noted as critical for removing small floats [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+
+## Background
+The method is presented in the DCCVT paper [S1]. It addresses instabilities that can occur with standard gradient estimates during optimization [S1]. Applying robust projection consistently provides stable results [S1]. SDF regularization is noted as critical for removing small floats [S1].
+
+## Sources
+[S1] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26

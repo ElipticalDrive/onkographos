@@ -1,0 +1,99 @@
+# Voxel Generation via 2D Slice Texture
+Also called: 2D Slice Texture Voxel Generation
+
+## Overview
+This method generates billions of explicit voxels without using 3D textures or compression by treating a single large 2D texture as a column of 2D slices [S1, unofficial]. It solves the memory bottleneck of storing full 3D volumes by rendering voxel data to a bitmap (chunk/page) and discarding it immediately after use [S1, unofficial]. It differs from sibling methods by explicitly generating every voxel in a shader rather than sampling implicit data, and by reusing a single 2D texture buffer for multiple chunks to minimize VRAM allocation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 2D texture representing a column of slices, 2D texture coordinates ($u, v$), world bounds ($worldMin, worldMax$), and the voxel pitch (voxels per chunk side).
+*   **Output:** 3D world coordinates for each voxel in the current chunk, which are then used to generate voxel data (density, color, etc.) and render depth/normals to screen.
+
+**Data Structures:**
+*   **Slice Texture:** A 2D texture with dimensions $128 \times 16384$ (width $\times$ height) [S1, unofficial]. The width (128) represents the slice thickness/width, and the height (16384) is the maximum texture width supported by most modern graphics cards [S1, unofficial]. This texture is treated as a column of slices [S1, unofficial].
+
+**Parameters:**
+*   $volumePitch$: Number of voxels per chunk side [S1, unofficial].
+*   $worldMin, worldMax$: Minimum and maximum coordinates defining the chunk's world space bounds [S1, unofficial].
+*   Texture dimensions: $128 \times 16384$ [S1, unofficial].
+
+**Steps:**
+1.  **Run Voxel Generation Shader:** Execute the shader on the 2D slice texture [S1, unofficial].
+2.  **Map 2D Coordinates to 3D:** For each point on the 2D slice texture, determine the corresponding 3D point clamped in the 0-1 range [S1, unofficial].
+    *   The $x$ coordinate is derived directly from the 2D texture's $x$ coordinate.
+    *   The $z$ coordinate (slice number) is derived from the 2D texture's $y$ coordinate.
+    *   The $y$ coordinate (distance from top of slice) is derived from the 2D texture's $y$ coordinate.
+3.  **Calculate World Coordinates:** Convert the normalized 3D coordinates to world space using linear interpolation (mix) between $worldMin$ and $worldMax$ [S1, unofficial].
+4.  **Generate Voxel Data:** Use the calculated world coordinates to generate voxel properties (e.g., density, material) [S1, unofficial].
+5.  **Render Chunk:** Render the generated voxel data to the screen by shooting a ray from the front of the chunk to the back [S1, unofficial]. The volume cube is isometric, shaped like an imperfect hexagon with sides having a 0.5 slope [S1, unofficial].
+6.  **Render Auxiliary Data:** Render depth, normals, and texture information to a 2D texture for each chunk [S1, unofficial].
+7.  **Composite:** Render chunks to screen in back-to-front order [S1, unofficial].
+8.  **Reuse Memory:** Reuse textures for closer chunks as older ones fall out of distance [S1, unofficial].
+
+**Pseudocode:**
+The following GLSL-like pseudocode maps 2D texture coordinates to 3D voxel coordinates within a chunk.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```glsl
+// Helper for integer modulo
+int intMod(int lhs, int rhs) {
+    return lhs - ((lhs / rhs) * rhs);
+}
+
+void main() {
+    // Input: 2D texture coordinates (0.0 to 1.0)
+    vec2 xyCoordsIn = vec2(TexCoord0);
+    
+    // Output: 3D normalized coordinates (0.0 to 1.0)
+    vec3 xyzCoordsOut = vec3(0.0);
+    
+    // Parameters
+    int iVolumePitch = int(volumePitch);
+    
+    // Calculate integer position in the 2D texture column
+    // yPos represents the linear index along the height of the 2D texture
+    int yPos = int(volumePitch * volumePitch * xyCoordsIn.y);
+    
+    // Map 2D coordinates to 3D coordinates
+    // x remains the same
+    xyzCoordsOut.x = xyCoordsIn.x;
+    
+    // y is the offset within the current slice (row within the slice)
+    // intMod(yPos, iVolumePitch) gives the row index within the slice
+    xyzCoordsOut.y = float(intMod(yPos, iVolumePitch)) / float(volumePitch);
+    
+    // z is the slice number (column index in the 2D texture column)
+    // yPos / iVolumePitch gives the slice index
+    xyzCoordsOut.z = float(yPos / iVolumePitch) / float(volumePitch);
+    
+    // Convert normalized 3D coordinates to world space
+    vec3 worldPosInVoxels = vec3(
+        mix(worldMin.x, worldMax.x, xyzCoordsOut.x),
+        mix(worldMin.y, worldMax.y, xyzCoordsOut.y),
+        mix(worldMin.z, worldMax.z, xyzCoordsOut.z)
+    );
+    
+    // Use worldPosInVoxels to generate voxel data (e.g., density, color)
+    // ...
+}
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on integer arithmetic for coordinate mapping to avoid floating-point errors in slice indexing [S1, unofficial].
+*   **Collision Detection:** Although voxel data is discarded, collision detection is still possible by using the rendered depth values within the shader or on the CPU side [S1, unofficial].
+*   **Rendering Artifacts:** Grass rendered in screen space may exhibit artifacts, though these can be mitigated [S1, unofficial].
+
+## Operating characteristics
+*   **Memory Efficiency:** By discarding voxel data after rendering and reusing a single 2D texture buffer, this method significantly reduces VRAM usage compared to storing full 3D textures [S1, unofficial].
+*   **Performance:** The method allows for the generation of billions of voxels in real-time, leveraging the parallel processing power of the GPU [S1, unofficial].
+*   **Scalability:** The texture size can be changed in real-time, allowing for dynamic adjustment based on hardware capabilities [S1, unofficial].
+*   **Limitations:** The method is specific to isometric rendering with a 0.5 slope hexagonal shape, which may not be suitable for all camera angles or rendering styles [S1, unofficial].
+*   **When to Use:** Ideal for real-time voxel-based rendering where memory is constrained and explicit voxel generation is required [S1, unofficial].
+*   **When Not to Use:** Not suitable for non-isometric rendering or when implicit volume representation is preferred [S1, unofficial].
+
+## Background
+This technique was developed by the author of Voxel Quest as part of a 3-year timeline project [S1, unofficial]. It was designed to avoid the use of 3D textures and compression, allowing for explicit generation of every voxel [S1, unofficial]. The method leverages the maximum texture width supported by modern graphics cards (16384) to store a large number of slices in a single 2D texture [S1, unofficial].
+
+## Sources
+[S1] How Does It Work?, https://www.voxelquest.com/news/how-does-it-work, fetched 2026-10-29 (unofficial)

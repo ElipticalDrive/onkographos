@@ -1,0 +1,173 @@
+--- v003.md
++++ v004.md
+@@ -4,85 +4,96 @@
+ 
+ ## Overview
+-This method defines a composite objective function for the joint optimization of a pose estimation network (specifically an Implicit Neural Network, INN) and a generalized 3D Gaussian or NeRF rendering network in dynamic scene reconstruction [S1]. It solves the ambiguity in skinning weight prediction and canonical-to-deformed mapping by enforcing geometric consistency in the skeleton space alongside photometric rendering accuracy [S1]. It distinguishes itself from static multi-task learning by employing a dynamic weighting strategy that shifts focus from pose-related constraints to appearance reconstruction as training progresses [S1].
++This method defines a composite objective function for the joint optimization of a Template-Free NeRF (TFS-NeRF), an Implicit Neural Network (INN) for spatial transformation, and a skinning weight prediction network. It solves the ambiguity in deforming canonical points to view space by simultaneously enforcing photometric reconstruction, geometric consistency, and physical plausibility of skinning weights. It distinguishes itself from standard NeRF optimization by explicitly constraining the INN and skinning networks through pose, cycle, and skinning-specific losses, rather than relying solely on image reconstruction [S1].
+ 
+ ## How it works
+-The method optimizes a total loss $L_{tot}$ composed of five distinct terms: photometric reconstruction, pose consistency, skinning weight regularization, INN cycle consistency, and geometric consistency. The optimization targets the parameters of the INN (mapping between view and canonical spaces) and the skinning weight prediction network, while simultaneously updating the radiance field or Gaussian splatting parameters.
++The method optimizes three coupled components: the NeRF for volume rendering, the INN for mapping between view and canonical spaces, and a skinning weight predictor. The total loss is the weighted sum of five terms: reconstruction, pose, skinning weight, cycle consistency, and geometric consistency [S1].
+ 
+ **Inputs:**
+-*   Input images $I$ and corresponding camera poses $P$.
++*   Input images and camera poses.
+ *   Canonical skeleton joints $J_{p0}$ and posed skeleton joints $J_p$.
+-*   Points sampled around bones in canonical space $X_{J_{p0}}$ and deformed space $X_{J_p}$.
+-*   View space points $x_v$.
++*   Points sampled around bones in canonical space $X_{J_{p0}}$ and deformed space $X_{J_p}$ [S1].
+ 
+ **Outputs:**
+-*   Scalar total loss $L_{tot}$.
+-*   Gradients with respect to INN parameters, skinning weight network parameters, and rendering network parameters.
++*   Rendered RGB $\hat{C}(r)$ and density $\alpha$ for rays $r$.
++*   Transformed points $x'_c$ and canonical points $x_c$.
++*   Predicted skinning weights $\hat{w}$ [S1].
+ 
+-**Loss Components:**
++**Data Structures:**
++*   $H(\cdot, J_p)$: INN function mapping canonical points to deformed space conditioned by pose $J_p$.
++*   $H^{-1}(\cdot, J_{p0})$: INN inverse function mapping view points to canonical space conditioned by canonical pose $J_{p0}$ [S1].
++*   $G_{x_c \to w}(J_{p0})$: Skinning weight prediction network outputting weights for canonical joints [S1].
+ 
+-1.  **Reconstruction Loss ($L_{rgb}$):** Minimizes the difference between rendered RGB $\hat{C}(r)$ and input pixel RGB $C(r)$ along rays $r \in R$ [S1].
++**Formulas:**
++1.  **Reconstruction Loss ($L_{rgb}$):** Minimizes the difference between rendered and input RGB.
+     $$ L_{rgb} = \sum_{r \in R} ||\hat{C}(r) - C(r)|| $$
++    Where $R$ is the set of rays, $\hat{C}(r)$ is the rendered color, and $C(r)$ is the input pixel color [S1].
+ 
+-2.  **Pose Loss ($L_{pose}$):** Ensures the INN correctly transforms points from the deformed skeleton space to the canonical skeleton space. Let $G_{v \to c}$ be the INN transformation [S1].
+-    $$ L_{pose} = \sum_{p \in P} ||X_{J_{p0}} - G_{v \to c}(X_{J_p})|| $$
+-    Where $P$ is the total number of points sampled around bones from each skeleton [S1].
++2.  **Pose Loss ($L_{pose}$):** Ensures the INN correctly transforms deformed points to canonical points.
++    $$ L_{pose} = \sum_{p \in P} ||X_{J_{p0}} - G_{v \to c}^{INN}(X_{J_p})|| $$
++    Where $P$ is the total number of points sampled around bones, $X_{J_p}$ are points in deformed space, and $G_{v \to c}^{INN}$ is the INN transformation [S1]. Note: The source text labels this $L_{pose}$ but uses $G_{v \to c}^{INN}$ in the formula, while the summary notes label the INN transformation $H$. We treat $G_{v \to c}^{INN}$ as the INN mapping from view/deformed to canonical.
+ 
+-3.  **Skinning Weight Loss ($L_W$):** Constrains the predicted skinning weight $\hat{w}$ for canonical joints to be a one-hot vector (1 for the respective joint, 0 for others) [S1].
++3.  **Skinning Weight Loss ($L_W$):** Constrains predicted skinning weights to be one-hot vectors.
+     $$ L_W = ||G_{x_c \to w}(J_{p0}) - \hat{w}||_2^2 $$
++    Where $\hat{w}$ is the target one-hot vector (1 for the respective joint, 0 for others) [S1].
+ 
+-4.  **Cycle Consistency Loss ($L_{INN}$):** Enforces that transforming a view point to canonical space and back to deformed space (conditioned on the pose) recovers the original view point [S1]. Let $H$ be the INN transformation from canonical to deformed space conditioned by $J_p$, and $H^{-1}$ transform view to canonical conditioned by $J_{p0}$ [S1].
++4.  **Cycle Consistency Loss ($L_{INN}$):** Ensures invertibility of the INN transformation.
+     $$ L_{INN} = ||H(H^{-1}(x_v, J_{p0}), J_p) - x_v||_2^2 $$
++    Where $x_v$ is a point in view space, $H^{-1}$ maps view to canonical, and $H$ maps canonical to deformed [S1].
+ 
+-5.  **Consistency Loss ($L_{Consis}$):** Minimizes the L2 distance between the INN-transformed point $x'_c$ and the skinning-weight-conditioned canonical point $x_c$ [S1].
++5.  **Consistency Loss ($L_{Consis}$):** Minimizes distance between INN-transformed points and skinning-weight-conditioned points.
+     $$ L_{Consis} = ||x'_c - x_c||_2^2 $$
++    Where $x'_c$ is the point transformed by INN and $x_c$ is the point conditioned by skinning weights [S1].
+ 
+ **Total Loss:**
+-The total loss is the weighted sum of these components. The weights $\lambda_k$ are dynamic, exponentially shifting focus from pose/consistency losses to $L_{rgb}$ as training progresses [S1].
+-$$ L_{tot} = \lambda_{rgb} L_{rgb} + \lambda_{pose} L_{pose} + \lambda_{W} L_{W} + \lambda_{INN} L_{INN} + \lambda_{Consis} L_{Consis} $$
++$$ L_{tot} = \lambda_{rgb} L_{rgb} + \lambda_{pose} L_{pose} + \lambda_W L_W + \lambda_{INN} L_{INN} + \lambda_{Consis} L_{Consis} $$
++Weights $\lambda_k$ are hyperparameters [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_joint_training_loss(rendered_rgb, input_rgb, 
+-                                inn_transform, skinning_net, 
+-                                canonical_joints, posed_joints,
+-                                points_deformed, points_canonical,
+-                                view_points, skinning_weights_target,
+-                                weights_rgb, weights_pose, weights_w, 
+-                                weights_inn, weights_cons):
++def compute_joint_loss(rendered_rgb, input_rgb, inn_model, skinning_net, 
++                       canonical_joints, posed_joints, points_deformed, points_canonical):
+     """
+-    Computes the joint training loss for dynamic NeRF/Gaussian optimization.
++    Computes the joint training loss for TFS-NeRF.
+     """
+-    # 1. Photometric Reconstruction Loss
+-    # Sum of L2 distances between rendered and input RGB along rays
+-    loss_rgb = sum(norm(rendered_rgb[r] - input_rgb[r]) for r in rays)
+-    
++    # 1. Reconstruction Loss
++    # L_rgb = sum(||C_hat(r) - C(r)||)
++    loss_rgb = sum(abs(rendered_rgb - input_rgb))
++
+     # 2. Pose Loss
+-    # Transform deformed points to canonical space using INN and compare to ground truth canonical points
+-    transformed_deformed = inn_transform.transform_deformed_to_canonical(points_deformed, posed_joints)
+-    loss_pose = sum(norm(points_canonical[p] - transformed_deformed[p]) for p in points_deformed)
+-    
++    # Transform deformed points to canonical using INN
++    # G_v->c^INN(X_Jp)
++    points_canonical_predicted = inn_model.transform_to_canonical(points_deformed, posed_joints)
++    # L_pose = sum(||X_Jp0 - G_v->c^INN(X_Jp)||)
++    loss_pose = sum(abs(points_canonical - points_canonical_predicted))
++
+     # 3. Skinning Weight Loss
+-    # Ensure predicted weights are one-hot vectors for canonical joints
++    # Predict weights for canonical joints
++    # G_xc->w(J_p0)
+     predicted_weights = skinning_net.predict_weights(canonical_joints)
+-    loss_w = norm(predicted_weights - skinning_weights_target) ** 2
+-    
+-    # 4. INN Cycle Consistency Loss
+-    # View -> Canonical -> Deformed should equal View
+-    canonical_points = inn_transform.transform_view_to_canonical(view_points, canonical_joints)
+-    deformed_points_back = inn_transform.transform_canonical_to_deformed(canonical_points, posed_joints)
+-    loss_inn = norm(deformed_points_back - view_points) ** 2
+-    
++    # Target is one-hot vector w_hat
++    # L_W = ||G_xc->w(J_p0) - w_hat||_2^2
++    loss_skinning = sum((predicted_weights - target_one_hot) ** 2)
++
++    # 4. Cycle Consistency Loss
++    # Transform view point x_v to canonical, then back to deformed
++    # H(H^-1(x_v, J_p0), J_p)
++    points_canonical_from_view = inn_model.transform_to_canonical(points_view, canonical_joints)
++    points_deformed_from_canonical = inn_model.transform_to_deformed(points_canonical_from_view, posed_joints)
++    # L_INN = ||H(H^-1(x_v, J_p0), J_p) - x_v||_2^2
++    loss_cycle = sum((points_deformed_from_canonical - points_view) ** 2)
++
+     # 5. Consistency Loss
+-    # Compare INN-transformed point with skinning-weight-conditioned canonical point
+-    # Note: x'_c is INN transformed, x_c is skinning-weight conditioned
+-    # Implementation detail: x_c is derived from skinning weights and canonical geometry
+-    loss_cons = norm(inn_transformed_point - skinning_conditioned_canonical_point) ** 2
+-    
+-    # Aggregate with dynamic weights
+-    total_loss = (weights_rgb * loss_rgb + 
+-                  weights_pose * loss_pose + 
+-                  weights_w * loss_w + 
+-                  weights_inn * loss_inn + 
+-                  weights_cons * loss_cons)
++    # Compare INN-transformed point x'_c and skinning-weight-conditioned point x_c
++    # L_Consis = ||x'_c - x_c||_2^2
++    # Note: x'_c and x_c definitions in source imply specific conditioning.
++    # Assuming x'_c is INN output and x_c is skinning output for same canonical point.
++    loss_consistency = sum((points_inn_transformed - points_skinning_conditioned) ** 2)
++
++    # Total Loss
++    total_loss = (lambda_rgb * loss_rgb + 
++                  lambda_pose * loss_pose + 
++                  lambda_W * loss_skinning + 
++                  lambda_INN * loss_cycle + 
++                  lambda_Consis * loss_consistency)
+     
+     return total_loss
+@@ -92,14 +103,14 @@
+ 
+ ### [Joint Training Strategy](17557-joint-training-strategy.md)
+-Enables simultaneous optimization of pose estimation and rendering by combining photometric, depth, and RGB losses. Distinguishes itself by using dynamic weight coefficients that exponentially shift focus from pose constraints to appearance reconstruction as training progresses.
++Enables simultaneous optimization of pose estimation and 3D Gaussian rendering with dynamic weight shifting.
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method requires sampling points around bones and performing multiple INN transformations per ray/point, increasing computational overhead compared to static NeRF [S1].
+-*   **Strengths:** Resolves ambiguities in skinning weight prediction and canonical mapping that arise from lack of direct supervision [S1]. Accelerates learning via shape initialization [S1].
+-*   **Limitations:** Requires careful tuning of dynamic weight schedules to balance geometric and photometric objectives [S1].
+-*   **When to use:** Dynamic scene reconstruction where explicit skeleton or bone structure is available or estimable [S1].
++*   **Complexity:** Adds overhead of computing INN transformations and skinning weights for every training step, in addition to standard NeRF ray marching.
++*   **Performance:** Requires sufficient supervision on skeleton space to prevent incorrect combinations of canonical points and skinning weights [S1].
++*   **Strengths:** Resolves ambiguities in LBS by constraining skinning weights and INN jointly.
++*   **Limitations:** Relies on accurate sampling of points around bones; sensitive to weight hyperparameters [S1].
+ 
+ ## Background
+-Originated in TFS-NeRF (Template-Free NeRF for Semantic 3D Reconstruction of Dynamic Scene) [S1]. The method addresses the issue that incorrect combinations of canonical points and skinning weights can satisfy forward Linear Blend Skinning (LBS) equations without direct supervision [S1]. It builds on shape loss principles from Guo et al. [S1].
++Originated in TFS-NeRF (Template-Free NeRF for Semantic 3D Reconstruction of Dynamic Scene) [S1]. The method addresses the lack of direct supervision for skinning weight prediction and INN by introducing multiple geometric and consistency constraints [S1].
+ 
+ ## Sources

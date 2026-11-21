@@ -1,0 +1,436 @@
+Pure managed C# tensor library for .NET: hand-written AVX2/AVX-512 SIMD kernels, autodiff and optional CUDA, HIP, OpenCL, Metal, Vulkan and WebGPU backends. Measured benchmarks against TorchSharp, ML.NET, TensorFlow.NET, NumSharp and MathNet are in the README. - Batch-vectorized float FFT (beats dense BLAS) + fix 3 GPU FFT bugs by ooples · Pull Request #811 · ooples/AiDotNet.Tensors
+
+Batch-vectorized float FFT (beats dense BLAS) + fix 3 GPU FFT bugs by ooples · Pull Request #811 · ooples/AiDotNet.Tensors · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ooples
+commented
+Jul 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+A float-native, batch-vectorized CPU FFT that is 28× faster than the previous per-row double FFT on batched float workloads, plus GPU FFT correctness fixes on the two backends that had them (CUDA + HIP) and CPU normalization/cache-safety fixes.
+CPU: FftBatchFloat
+The generic TransformComplex1D ran one length-N FFT per row in double (per-element float↔double conversion, a per-row double[2N] scratch, per-call twiddle/bit-reversal tables). The new kernel vectorizes across the batch (SIMD lanes = batch elements, so butterflies need no cross-lane shuffle), with an LRU-bounded twiddle/bit-reversal cache and pooled SoA scratch, entirely in float. TransformComplex1D routes the float + power-of-two path to it and keeps the double path as fallback.
+Apples-to-apples [rows=2048, E=512]: 253 ms → 9 ms (28×) and 49 MB → 8 MB alloc/call vs the old per-row double FFT — both are O(N·logN) FFTs; the win is float + batch-SIMD + no per-call reallocation. Forward + ifft(fft(x)) round-trip match a double reference at E=16…1024.
+(An earlier draft headlined "2.2–2.8× vs two dense-DFT BLAS matmuls." That comparison was dropped: a dense DFT is O(N²), so it isn't a like-for-like baseline against an O(N·logN) FFT and the number was misleading. The 28× above is the real, same-algorithm comparison.)
+CPU correctness fixes (review)
+Unknown FftNorm values now throw instead of silently falling back to scale 1f (the generic FftKernels.ScaleFor throws, so this fast path must too — otherwise scaling would depend on element type / transform length).
+The twiddle/bit-reversal table cache is now a byte-bounded LRU (64 MB) that shares the direction-independent bit-reversal permutation between the forward and inverse entries, instead of retaining three arrays per distinct n for the process lifetime.
+GPU fixes — CUDA + HIP (the two backends that had these bugs)
+Three DIT-FFT bugs existed on the CUDA path; auditing all six backends showed HIP shared two of them (via its near-identical kernels), while OpenCL / Metal / Vulkan / WebGPU were already correct through different designs (flat global-id batch indexing, one-workgroup-per-batch, explicit 1/n scaling, bit_reverse_rows for 2D). The bugs are not uniform across backends — each backend's kernel + launch convention was checked as a pair.
+Batched-butterfly batch index. CUDA's batched_fft_butterfly read the batch from blockIdx.z (always 0, gridDimZ==1) while it was launched with batch as gridDimY → every row transformed row 0 → non-deterministic garbage. Fixed on CUDA. HIP does not have this bug — its butterfly reads blockIdx.z and its launch passes batch as gridZ (internally consistent), so it was left unchanged.
+Batched inverse scale. Scaled by 1/(batch·n) instead of 1/n. Fixed on CUDA and HIP: scale_inverse now takes explicit (count, scale) and the 1D / batched / 2D launches pass 1/n, 1/n, 1/(h·w) respectively.
+2D FFT bit-reversal. CUDA's FFT2D did no bit-reversal (DIT requires it) and its row/col butterflies dropped threadIdx.y. HIP's FFT2D was worse — an empty stub loop that did no bit-reversal at all, so both rows and columns ran DIT on un-permuted data. Fixed on both: added fft_rows_bit_reverse / fft_cols_bit_reverse kernels and launch them before the row/column butterflies.
+Verification
+CPU FFT suite green (265 passed / 2 skipped, net10.0); builds on net10.0 + net471. CUDA fixes validated on NVIDIA hardware (the three GPU-FFT parity tests that were failing now pass). HIP kernel changes are mirrored from the tested CUDA reference and compile-verified, but not runtime-tested here (no AMD GPU on the dev box) — they should be validated on the AMD/CI GPU lane. No public API changes (the kernels are internal).
+🤖 Generated with Claude Code
+Summary by CodeRabbit
+Performance Improvements
+Accelerated batched single-precision FFT processing on supported CPU workloads.
+Improved handling of FFT input padding and output sizing.
+Bug Fixes
+Corrected CUDA 2D FFT row and column processing.
+Added required bit-reversal steps for 2D GPU transforms.
+Fixed inverse-transform scaling across 1D, batched, and 2D operations.
+Corrected batch indexing in CUDA FFT processing.
+Add batch-vectorized float FFT (beats dense BLAS) + fix 3 GPU FFT bugs
+…
+8081bc0
+```
+CPU: new FftBatchFloat — float-native, batch-vectorized radix-2 FFT that
+vectorizes SIMD across the batch (not within a transform), with cached
+twiddle/bit-reversal tables and pooled scratch. TransformComplex1D routes
+the float + pow2 path to it, falling back to the generic double path
+otherwise. On [2048, 512-complex]: 253ms -> 9ms (28x), 49MB -> 8MB
+allocated/call, and 2.2-2.8x faster than two dense BLAS DFT matmuls.
+
+GPU (all pre-existing bugs, surfaced once correctness was checked):
+- batched_fft_butterfly read the batch index from blockIdx.z (always 0,
+  since gridDimZ==1) instead of blockIdx.y — so every batch row transformed
+  row 0 in place: races -> non-deterministic garbage for ALL 1D batched
+  FFTs. Fixed z -> y to match batched_bit_reverse and the launch.
+- BatchedFFT inverse scaled by 1/(batch*n) instead of 1/n. scale_inverse now
+  takes an explicit (count, scale); all three callers (1D / batched / 2D)
+  updated so each states its own element count and per-transform factor.
+- FFT2D performed no bit-reversal (DIT requires it) and its row/col
+  butterflies read row=blockIdx.y ignoring threadIdx.y (blockDim.y==16 ->
+  16x redundant race, only height/16 rows computed). Added
+  fft_rows/cols_bit_reverse kernels and folded threadIdx.y into the index.
+
+Verified: AiDotNet.Tensors FFT suite 267/267 (net10) + 256/256 (net471) —
+the three GPU-FFT parity/consistency tests that were red now pass; CPU and
+GPU forward + ifft(fft(x)) round-trip match a double reference at E=16..1024.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+Jul 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Warning
+Review limit reached
+You’ve reached a temporary PR review limit under our Fair Usage Limits Policy.
+Your recent review volume is higher than typical usage, so adaptive limits are currently applied.
+Next review available in: 35 minutes
+Enable usage-based reviews in Billing to review now. Otherwise, wait until the next included review is available.
+You're only billed for reviews past your plan's rate limits ($0.25/file).
+How can I continue?
+After more reviews become available, a review can be triggered using the @coderabbitai review command as a PR comment. Alternatively, push new commits to this PR.
+To avoid repeated limits, reduce automatic review volume by pausing incremental auto-reviews earlier, using label-based review opt-in, excluding WIP or generated PR titles, or requesting reviews manually when the PR is ready. If your team needs uninterrupted high-volume reviews, an organization admin can enable usage-based reviews.
+How do review limits work?
+CodeRabbit enforces per-developer PR review limits for each organization. Most developers receive the normal plan review availability.
+For paid Pro and Pro+ PR reviews, CodeRabbit uses adaptive limits for sustained high-volume activity. When a developer's recent PR review activity reaches the 95th percentile or higher among CodeRabbit users, additional reviews become available more gradually as earlier reviews age out of the rolling window.
+Please refer docs for additional details.
+Review details
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: ASSERTIVE
+Plan: Pro
+Run ID: 0e3cafb2-1648-4f83-b4e5-c99826757da3
+📥 Commits
+Reviewing files that changed from the base of the PR and between 8081bc0 and eb029c5.
+📒 Files selected for processing (3)
+src/AiDotNet.Tensors/Engines/DirectGpu/HIP/HipBackend.cs
+src/AiDotNet.Tensors/Engines/DirectGpu/HIP/Kernels/HipFFTKernels.cs
+src/AiDotNet.Tensors/LinearAlgebra/Fft/FftBatchFloat.cs
+Walkthrough
+The changes add a SIMD-parallel float batch FFT implementation and integrate it into CPU transforms. CUDA FFT execution gains 2D row and column bit reversal, corrected indexing, explicit inverse scaling, and kernel registration.
+Changes
+CPU float batch FFT
+Layer / File(s)
+Summary
+SIMD batch transform implementation
+src/AiDotNet.Tensors/LinearAlgebra/Fft/FftBatchFloat.cs
+FftBatchFloat caches FFT tables, processes batch chunks in parallel with SIMD radix-2 stages, handles padding or cropping, and writes normalized output.
+Float fast-path integration
+src/AiDotNet.Tensors/LinearAlgebra/Fft/Fft.cs
+TransformComplex1D attempts the float batch implementation before using the existing generic CPU path.
+CUDA FFT updates
+Layer / File(s)
+Summary
+CUDA kernel contracts and indexing
+src/AiDotNet.Tensors/Engines/DirectGpu/CUDA/Kernels/CudaFFTKernels.cs
+Adds 2D bit-reversal kernels, corrects row, column, and batch indexing, changes inverse scaling to explicit scale input, and registers the new kernels.
+CUDA launch and scaling integration
+src/AiDotNet.Tensors/Engines/DirectGpu/CUDA/CudaBackend.cs
+Launches row and column bit reversal before butterfly stages and passes explicit inverse scales for 1D, batched, and 2D transforms.
+Estimated code review effort: 4 (Complex) | ~45 minutes
+Sequence Diagram(s)
+Float batch FFT
+```
+sequenceDiagram
+  participant TransformComplex1D
+  participant FftBatchFloat
+  participant FFTTables
+  participant SIMDChunks
+  TransformComplex1D->>FftBatchFloat: TryTransform(...)
+  FftBatchFloat->>FFTTables: GetTables(...)
+  FftBatchFloat->>SIMDChunks: Process batch chunks
+  SIMDChunks-->>FftBatchFloat: Normalized output
+  FftBatchFloat-->>TransformComplex1D: Return success
+```
+Loading
+CUDA 2D FFT
+```
+sequenceDiagram
+  participant CudaBackend
+  participant RowBitReverse
+  participant RowButterfly
+  participant ColBitReverse
+  participant ColButterfly
+  CudaBackend->>RowBitReverse: Launch row bit reversal
+  RowBitReverse->>RowButterfly: Provide reordered rows
+  CudaBackend->>ColBitReverse: Launch column bit reversal
+  ColBitReverse->>ColButterfly: Provide reordered columns
+```
+Loading
+Poem
+Floats march in vectors bright,
+Twiddles cached through day and night.
+Rows reverse, then columns turn,
+CUDA scales where kernels burn.
+FFTs hum in ordered flight.
+🚥 Pre-merge checks | ✅ 5
+✅ Passed checks (5 passed)
+Check name
+Status
+Explanation
+Docstring Coverage
+✅ Passed
+No functions found in the changed files to evaluate docstring coverage. Skipping docstring coverage check.
+Linked Issues check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title accurately summarizes the two main changes: a batch-vectorized float FFT and three GPU FFT bug fixes.
+✨ Finishing Touches
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch feat/fft-batch-float-kernel
+Comment @coderabbitai help to get the list of available commands.
+coderabbitai
+Bot
+requested changes
+Jul 18, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 4
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@src/AiDotNet.Tensors/Engines/DirectGpu/CUDA/Kernels/CudaFFTKernels.cs`:
+- Around line 233-281: Port fft_rows_bit_reverse and fft_cols_bit_reverse, along
+with the associated FFT2D launch and row-indexing correction, to the HIP, Metal,
+OpenCL, Vulkan, and WebGPU backends so their DIT transforms operate on
+bit-reversed data consistently with CUDA. Alternatively, create and reference a
+documented tracked follow-up issue for each backend covering both kernels and
+the FFT2D correctness fix.
+- Around line 355-365: Update the HIP scale_inverse kernel and its HipBackend
+call sites to use the CUDA-aligned four-argument contract with separate count
+and scale values, ensuring batched inverse FFTs scale each transform by
+1/transformLength rather than 1/(batch*transformLength). Apply the change
+consistently across the HIP implementation.
+
+In `@src/AiDotNet.Tensors/LinearAlgebra/Fft/FftBatchFloat.cs`:
+- Around line 38-74: Update the FFT table caching around GetTables to use a
+byte-bounded eviction cache rather than retaining every transform size for the
+process lifetime. Separate or reuse direction-independent bit-reversal tables so
+forward and inverse entries share the same brev array, while preserving distinct
+twiddle tables per direction; track each entry’s approximate array memory, evict
+entries as needed before insertion, and ensure cache access remains synchronized
+through _cacheLock.
+- Around line 94-100: Update the normalization switch in the FFT batch scaling
+path to reject unknown FftNorm values with ArgumentOutOfRangeException, matching
+FftKernels.ScaleFor instead of defaulting to scale 1f. Preserve the existing
+Backward, Forward, and Ortho scaling formulas.
+```
+🪄 Autofix (Beta)
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: ASSERTIVE
+Plan: Pro
+Run ID: 3a3c2b5a-7ed4-40db-9d00-2610e563534b
+📥 Commits
+Reviewing files that changed from the base of the PR and between f714418 and 8081bc0.
+📒 Files selected for processing (4)
+src/AiDotNet.Tensors/Engines/DirectGpu/CUDA/CudaBackend.cs
+src/AiDotNet.Tensors/Engines/DirectGpu/CUDA/Kernels/CudaFFTKernels.cs
+src/AiDotNet.Tensors/LinearAlgebra/Fft/Fft.cs
+src/AiDotNet.Tensors/LinearAlgebra/Fft/FftBatchFloat.cs
+Comment thread
+src/AiDotNet.Tensors/Engines/DirectGpu/CUDA/Kernels/CudaFFTKernels.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/AiDotNet.Tensors/Engines/DirectGpu/CUDA/Kernels/CudaFFTKernels.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/AiDotNet.Tensors/LinearAlgebra/Fft/FftBatchFloat.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/AiDotNet.Tensors/LinearAlgebra/Fft/FftBatchFloat.cs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+codecov
+Bot
+commented
+Jul 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 82.69231% with 27 lines in your changes missing coverage. Please review.
+✅ Project coverage is 41.90%. Comparing base (c369ab4) to head (eb029c5).
+⚠️ Report is 2 commits behind head on main.
+Files with missing lines
+Patch %
+Lines
+...iDotNet.Tensors/LinearAlgebra/Fft/FftBatchFloat.cs
+82.11%
+19 Missing and 8 partials ⚠️
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##             main     #811      +/-   ##
+==========================================
+- Coverage   41.94%   41.90%   -0.04%     
+==========================================
+  Files         572      581       +9     
+  Lines      136251   137096     +845     
+  Branches    31155    31354     +199     
+==========================================
++ Hits        57149    57454     +305     
+- Misses      71223    71692     +469     
+- Partials     7879     7950      +71     
+```
+Flag
+Coverage Δ
+unittests
+41.90% <82.69%> (-0.04%)
+⬇️
+Flags with carried forward coverage won't be shown. Click here to find out more.
+☔ View full report in Codecov by Harness.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+📦 JS Bundle Analysis: Save yourself from yourself by tracking and limiting bundle sizes in JS merges.
+fix(fft): CPU norm/cache correctness + port GPU FFT fixes to HIP
+…
+eb029c5
+```
+CPU (FftBatchFloat):
+- Reject unknown FftNorm (was silently scale 1f, diverging from FftKernels.ScaleFor
+  which throws) so normalization can't depend on dtype/length.
+- Replace the unbounded twiddle/bit-reversal table cache with a byte-bounded LRU (64 MB)
+  that shares the direction-independent bit-reversal permutation between forward/inverse.
+
+HIP (the only other backend that shared the CUDA bugs; OpenCL/Metal/Vulkan/WebGpu were
+already correct via their own designs — flat-global-id / workgroup-per-batch / 1/n scaling):
+- Bug #2: batched inverse scaled by 1/(batch*n); scale_inverse now takes explicit
+  (count, scale) and the 1D/batched/2D launches pass 1/n, 1/n, 1/(h*w) respectively.
+- Bug #3: FFT2D did NO bit-reversal (an empty stub loop) -> DIT butterflies ran on
+  un-permuted data (2D garbage). Added fft_rows_bit_reverse / fft_cols_bit_reverse
+  kernels and launch them before the row/col butterflies.
+- Bug #1 (batched butterfly batch-index) is NOT present on HIP: its butterfly reads
+  blockIdx.z and the launch passes batch as gridZ (consistent) — left unchanged.
+
+CPU FFT suite 265/267 (2 skipped); builds net10.0 + net471. HIP kernel changes are
+mirrored from the CUDA reference and compile-verified (no AMD GPU here for runtime test).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+approved these changes
+Jul 18, 2026
+View reviewed changes
+Hide details
+View details
+ooples
+merged commit cf136ad
+into
+main
+Jul 18, 2026
+6 of 8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ooples
+deleted the
+feat/fft-batch-float-kernel
+branch
+July 18, 2026 23:50
+ooples
+mentioned this pull request
+Jul 19, 2026
+feat: batch-vectorized float FFT + CUDA/HIP FFT correctness fixes (#811)
+#812
+Merged
+ooples
+added a commit
+that referenced
+this pull request
+Jul 19, 2026
+feat: batch-vectorized float FFT + CUDA/HIP FFT correctness fixes (#811…
+…
+77320ef
+```
+…) (#812)
+
+Cut a release for the work merged in #811, which release-please skipped because that
+PR was squash-merged with a non-conventional title ("Batch-vectorized float FFT ...")
+so no conventional commit reached main. The code is already on main; this conventional
+commit lets release-please open the release PR.
+
+Release-As: 0.117.0
+
+Co-authored-by: franklinic <franklin@ivorycloud.com>
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+```
+ooples
+mentioned this pull request
+Jul 19, 2026
+chore(main): release 0.117.0
+#814
+Merged
+This was referenced Jul 20, 2026
+deps: Bump AiDotNet.Native.CLBlast from 0.114.0 to 0.118.0
+ooples/AiDotNet#1905
+Merged
+deps: Bump AiDotNet.Native.OneDNN from 0.114.0 to 0.118.0
+ooples/AiDotNet#1906
+Merged
+deps: Bump AiDotNet.Native.OpenBLAS from 0.114.0 to 0.118.0
+ooples/AiDotNet#1907
+Merged
+deps: Bump AiDotNet.Tensors from 0.114.0 to 0.118.0
+ooples/AiDotNet#1908
+Merged
+coderabbitai
+Bot
+mentioned this pull request
+Aug 1, 2026
+feat(engine): broadcast implicitly on the element-wise operators
+#919
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

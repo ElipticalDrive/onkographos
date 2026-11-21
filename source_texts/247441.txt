@@ -1,0 +1,391 @@
+Spatial analysis and visualisation with WebGPU. Contribute to xinaesthete/tgpu-htj2k development by creating an account on GitHub.
+
+Implicit CSG geometry: plane-native BSP mesher, noise op, and hybrid mesh/raymarch render by xinaesthete · Pull Request #20 · xinaesthete/tgpu-htj2k · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xinaesthete
+commented
+Jul 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What
+Builds out the implicit (SDF/CSG) geometry-kind into a full clean-meshed-CSG + hybrid-render pipeline, and captures the design thinking behind it in ADRs. Re-derives CSGLib architectural-geometry lineage (Stephen Todd's BigRoof heritage) as composable ops over one typed IR.
+The whole thing lowers from a single SDF IR, so the CPU golden and the GPU/WGSL paths agree by construction (the repo's ADR-0003 discipline). 306 tests pass.
+Highlights
+Plane-native BSP mesher (src/geometry/bsp.ts) — exact meshed CSG for the polyhedral subset:
+Boundary-by-classification against the exact SDF golden; exact plane∩plane vertices, minimal clean faces (a hip roof is 16 tris vs ~4,700 for grid dual-contouring).
+Coincident-face handling via canonical-plane evaluation (shared walls, the L/T junctions "just work").
+Coplanar-adjacent merge + feature-edge extraction (mergeCoplanar / brepEdges) → clean architectural line-work.
+Octree localisation for many-mass scenes (differentially tested identical to the global pass).
+Per-face provenance (primId → planeId) — the ADR-0012 pick-to-feature hook.
+Value-noise displace op (src/geometry/implicit.ts) — organic fbm displacement; bit-exact hash CPU↔WGSL (GPU parity to 1e-3); animated in the raymarch via a per-frame time uniform.
+Hybrid decomposition (src/geometry/hybrid.ts) — split a model into what the BSP can mesh and what it can't:
+boundsSdf reports a node's solid extent, honestly ±∞ for a bare half-space.
+nonPlanarRegions is "where the BSP won't work" — nothing (planar), finite boxes (local growths), or unbounded (a displaced/blended half-space).
+planarSkeleton pulls out the plane-only sub-model to mesh.
+Playground — three interactive views (mesh, raymarch, hybrid), WebGPU + TypeGPU + three.js:
+Mesh view: grid-DC vs plane-BSP mesher toggle, coplanar-merge toggle, feature-edge wireframe; hip/L/T houses + a 16-house village (exercises the octree).
+Hybrid view: one model (house.smoothUnion(growth)) auto-split — house BSP-meshed, growth raymarched confined to its reported region box, composited by shared depth so the growth blends into the roof. Shared shading node so mesh and raymarch are one material. Toggles for the meshed house, raw-triangulation wireframe overlay, and the non-planar region box.
+Docs / ADRs
+ADR-0012 — geometry provenance & pick-to-feature editing.
+ADR-0013 — hybrid strategy dispatch & Progen-scale parallelism (building/mass units, octree-as-dispatcher, the mesh↔raymarch vs mesh↔mesh seam asymmetry, Rust-relevance-tracks-the-algorithm, and — corrected mid-review — that real PBR + positional lights on the raymarch is viable and shadow-casting is a general procedural-geometry contract, not a raymarch special case).
+ADR-0014 — the procedural-geometry render contract (surface → depth/distance/gbuffer/lit roles; three.js as one binding, a renderer-owned G-buffer as the non-three.js path).
+Interactive surface-nets/dual-contouring explainer (docs/explainers/).
+Reviewer notes
+Scope of the BSP: polyhedral CSG only; curved/smooth ops (sphere/smoothUnion/displace) are rejected with a routing hint and go to grid-DC or raymarch.
+Known first-cut limitation in the hybrid view: the BSP meshes the entire planar skeleton and the raymarch region is an overlay on top (depth-composited), not a spatial partition — so the roof is triangulated under the growth too. Seam-free but double-renders the region; a true partition (subtract the region box from the skeleton) is noted as a follow-up.
+Pre-existing failures: the 6 failing test files (test/decode, parser, packet, etc.) are the HTJ2K codec tests that need the unbuilt openjph-wasm / Rust wasm package — unrelated to this branch. All 306 runnable tests pass.
+Toolchain: Node + pnpm + vitest (not Bun); pnpm test runs CPU + GPU suites.
+🤖 Generated with Claude Code
+xinaesthete
+and others
+added 16 commits
+July 15, 2026 22:42
+feat(geometry): implicit (SDF/CSG) kind with mesh + raymarch views
+…
+440bee8
+```
+Add the `implicit` geometry-kind: signed-distance CSG (union/intersect/
+subtract/smoothUnion, domain transforms) with two rendering bridges —
+grid dual-contouring to triangles (smooth default, opt-in QEF sharpen)
+and exact per-pixel sphere-tracing. Both consume the SAME ops via one
+WGSL codegen (`sdSceneWgsl`, constants baked or `P[]`-uniform), keeping
+geometry in our WGSL and confining TSL to presentation/depth.
+
+Playground: three.js mesh view (`geometry.html`) and a hybrid raymarch
+pass (`raymarch.html`) that shares the depth buffer with real meshes.
+Shared example catalogue in `geometryShapes.ts` re-derives BigRoof's
+eave→roof-plane method (Stephen Todd / quickhouse lineage): hip, cross-
+wing T-junction, and an L-shape built as two complete hip masses unioned
+— the coplanar inner hips are absorbed by the union (`min`) into a clean
+valley, no protruding gables and no dissolved (unbounded) walls.
+
+Docs: ADR-0012 (provenance as IR address, feature = ParamSpec selection,
+pick-to-feature editing) and an interactive surface-nets/dual-contouring
+explainer.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(geometry): plane-native BSP boundary evaluator (clean meshed CSG)
+…
+b689dec
+```
+Add `evaluateBrep`/`brepToMesh`: the exact `implicit → mesh` bridge for the
+polyhedral subset (CSGLib/quickhouse lineage). Each primitive's faces are
+seeded, clipped to their primitive, split by every other primitive's planes,
+and kept iff the fragment separates inside from outside — boundary-by-
+classification with the exact CPU SDF (`evalSdf`) as the in/out oracle. Output
+is exact plane∩plane vertices and minimal flat facets (the "clean lines" the
+grid staircases away), with per-face/per-triangle provenance (primId → plane),
+the ADR-0012 hook.
+
+CPU by design: irregular convex-polygon clipping over tens–hundreds of faces,
+the opposite of the parallel per-pixel job. The image-space form of this
+boolean already lives on the GPU (raymarch `sdScene`); this yields the
+orthogonal artefact — a mesh with topology.
+
+Scope (first slice): box/plane, union/intersect/subtract, translate/scale.
+Non-polyhedral (sphere/smoothUnion) and exactly-coincident faces (shared
+walls, L/T junctions) throw with a routing hint rather than emit wrong
+geometry — coincident-face merging over a canonical-plane registry is the
+next slice. Mesh view gains a mesher toggle (grid DC vs plane BSP) that falls
+back to the grid with the decline reason when the BSP declines.
+
+Verified against the golden: brep faces lie on the SDF zero-set and orient
+outward (bsp.test.ts, 7 tests).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(geometry): coincident-face handling in the BSP evaluator
+…
+ba61ffc
+```
+Evaluate each CANONICAL geometric plane once instead of per-primitive, so
+coincident faces (shared walls, the L/T junctions) stop being a special
+case. Coincident planes merge into one canonical plane carrying each owner's
+orientation; the plane's whole boundary is computed from a single seed, so
+nothing is doubled. The exact-SDF classifier already resolves the rest: the
+±ε offset crosses every coincident plane at once, so a union's back-to-back
+shared wall (opposite normals) classifies as interior and drops, while an
+intersection's shared cap (same normal) collapses to the one surviving face.
+Provenance picks the owner whose orientation agrees and whose solid contains
+the fragment centroid.
+
+Removes the earlier throw-on-coincidence guard. The L-shaped and cross-wing
+houses now mesh exactly with the plane BSP (verified in the mesh view: L =
+46 tris, T = 124 tris, clean valleys, no z-fighting).
+
+Tests: adjacent-box union drops the shared wall; A ∩ A collapses to one box;
+an L of two roofed arms meshes with no duplicated triangles (bsp.test.ts, 9).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(geometry): coplanar-adjacent merge + feature edges in the BSP
+…
+5d3dacb
+```
+Add `mergeCoplanar` and `brepEdges`. After per-plane evaluation still emits a
+separate face wherever a crossing plane split the seed (a fused solid's shared
+top in two pieces, plus every fan diagonal), fuse each plane's coplanar,
+co-oriented fragments back into their maximal outlines by directed-edge
+cancellation: interior edges appear as opposite-directed pairs (the arrangement
+has no T-junctions), so cancelling them leaves the region's outer loop (CCW) and
+any hole loops (CW). Collinear vertices are dropped so an edge split where two
+fragments abutted collapses back to one. The convex fragments are retained as
+`parts`, so triangulation stays a trivial per-part fan — no non-convex/holed
+re-meshing. `brepEdges` walks the merged outlines (deduping edges shared between
+planes) to give clean feature-edge line-work.
+
+Mesh view: the BSP path now merges, reports the merged face count, and renders
+feature edges (not triangle-wireframe) when Wireframe is on — the L reads as
+clean line-work (ridges/hips/valley/eaves), no diagonals.
+
+Tests (bsp.test.ts, 14): box → 6 faces / 12 edges; two abutting boxes fuse to
+one box (6 faces, 12 edges); a corner notch stays one non-convex face; a
+poke-through tool recovers a face with a hole; the flush-arms L merges and stays
+valid with no duplicate triangles.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(playground): toggle for the BSP coplanar merge
+…
+a760ab6
+```
+`mergeCoplanar` is already a separate, composable pass; expose the choice in the
+mesh view with a "Merge coplanar faces" checkbox (BSP-only, greyed for the grid).
+Off shows the raw per-plane fragments (every crossing-plane split edge visible);
+on fuses them to maximal outlines. The stat reports the face count either way
+(the L: 29 raw → 13 merged), making the merge's effect legible.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(geometry): octree localisation for the BSP evaluator
+…
+b249188
+```
+Localise boundary evaluation through a space octree once a scene has more than
+`octreeMaxMasses` union operands (default 8). Lowering now tags each prim with a
+`massId` (a union starts a fresh bounded region per side; intersect/subtract keep
+it) and computes each mass's AABB from its additive box extents. The octree
+subdivides the scene until each leaf overlaps few masses; within a leaf a face is
+split and classified only against that leaf's masses, so distant houses never
+interact and the work drops from O(masses²) toward O(masses).
+
+Correctness is unconditional: classification stays the exact global SDF (foreign
+planes crossing a leaf outside their mass create no real boundary there, so
+per-leaf splitting is still exact), and leaf boxes are clipped half-open so a
+face on an octree seam is emitted by exactly one leaf. `mergeCoplanar` stitches
+the per-leaf fragments back. Small scenes (≤ threshold masses, all current
+shapes) take the unchanged global pass.
+
+Playground gains a "Village (4×4 houses)" shape (16 masses → octree path; meshes
+to 144 clean faces).
+
+Tests (bsp.test.ts, 17): forced-octree result is byte-identical to the global
+pass on a 2×2 village; a 3×3 village meshes to 81 valid faces with no duplicate
+triangles; the default threshold keeps small scenes on the global pass.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+docs(adr): ADR-0013 hybrid strategy dispatch & Progen parallelism
+…
+bdc48e1
+```
+Capture the design intent for composing the three implicit lowerings (grid-DC,
+plane-BSP, raymarch) at scale and for ornament that breaks the BSP:
+
+- two nesting units — building (embarrassingly parallel, concatenate; the worker
+  payload) and mass (intra-building octree localisation);
+- per-building raymarch proxies reusing the structure/value split (one pipeline
+  per model, instanced), with overdraw as the residual limit;
+- octree as a strategy dispatcher: leaf strategy = f(live op-kinds), subdivide to
+  isolate ornament;
+- the seam asymmetry — BSP↔raymarch composites via depth (free), BSP↔grid-DC is a
+  topological crack — so ornament routes to raymarch and grid-DC stays a per-object
+  choice;
+- tags (policy) vs analytic recognition (correctness) as layers;
+- Rust relevance tracks the algorithm: ruled out under grid-DC, implicitly
+  reopened by the BSP choice, gated by the language-agnostic differential tests.
+  Not an immediate priority.
+
+Status: proposed / exploratory (design intent, not yet implemented).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(geometry): value-noise displace op for the implicit kind
+…
+8607630
+```
+Add a `displace` SDF node — `child + amp·fbm(freq·p)` — a hash-lattice value
+noise (4-octave fbm) that lumps a field into an organic surface. The hash is
+pure u32 integer arithmetic, bit-identical between the CPU golden and the WGSL
+in SDF_PREAMBLE, so the only CPU/GPU divergence is f32-vs-f64 interpolation
+(GPU parity holds to 1e-3). It breaks the exact distance property, so it is a
+display op: the raymarch under-relaxes and animates it by drifting the noise
+domain through a per-frame `uNoiseTime` global (0 = the static golden the CPU
+and parity harness see); the grid mesher can still tessellate it.
+
+The plane BSP rejects it alongside sphere/smoothUnion (non-polyhedral).
+
+Tests: bounded fbm, amp-0 no-op, determinism, canonical param order (CPU);
+displaced-sphere field parity (GPU).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(geometry): hybrid decomposition — where the plane BSP won't work
+…
+1b95454
+```
+Add `hybrid.ts`: split an implicit model into the part the plane BSP can mesh
+and the part it can't, so a scene can mesh the planar bulk and raymarch the
+organic remainder (ADR-0013's "segregate, don't throw").
+
+- `boundsSdf(node)` — AABB of the solid, honestly ±∞ for a bare half-space
+  (an intersection clamps it back); non-planar nodes widen it by their reach
+  (displace by amp, smoothUnion by k). The extent a node declares.
+- `isPlanar` / `planarSkeleton` — the plane-only sub-model to mesh.
+- `nonPlanarRegions(node)` — THE region where the BSP won't work, whose range
+  is the whole point: nothing (planar), finite boxes (local growths), or
+  unbounded (a displaced/blended half-space — no box to hide behind). Boxes
+  merge, so one growth is one region and any unbounded region absorbs the list.
+
+Tests (10): tight/unbounded extents, planar/non-planar classification,
+skeleton extraction, and the three region outcomes incl. the infinite cases.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(playground): render the hybrid decomposition (house + noise growth)
+…
+dc05168
+```
+Rework the raymarch view into the ADR-0013 hybrid: one model — a plane house
+`smoothUnion`'d with a noise-displaced growth — split by `nonPlanarRegions`.
+The planar skeleton is BSP-meshed and lit as three.js PBR; each non-planar
+region is raymarched confined to its reported box (a ray-box slab bounds the
+march) and shaded to match the house, so the growth blends into the roof across
+the smooth-union seam and the two renderers read as one object through the
+shared depth buffer. A polygon offset lets the raymarch win inside the box; the
+noise animates via the per-frame time uniform. Toggles show the meshed house
+and the non-planar region box (the decomposition made visible).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+fix(playground): shade mesh and raymarch with one node, so they match
+…
+e9c9321
+```
+The house (MeshStandardMaterial) and the raymarched growth (hand-approximated
+lighting) rendered as visibly different materials — different shading model,
+different tone-mapping path. Give the house a MeshBasicNodeMaterial and shade
+both surfaces with a single shared `shade(normal)` node (same albedo, key light
++ hemisphere, same output path). Our lights are directional, so shading needs
+only the normal — the mesh feeds its geometry normal, the raymarch its gradient
+normal — and the two now read as one continuous material across the seam.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+docs(adr): ADR-0013 — real PBR + positional lights on the raymarch is…
+…
+42cf099
+```
+… viable
+
+Correct an earlier implication that the shared hand-shade was needed because
+the lights are directional. It isn't: the sphere-trace has the exact world hit
+position, which is what positional lighting needs. Record the two routes (custom
+lighting node; deferred G-buffer) and the one genuinely harder part (shadow
+casting from raymarched geometry).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+docs(adr): ADR-0013 — shadow-casting is a general procedural-geometry…
+…
+b2c7f3d
+```
+… contract
+
+Generalise the shadow note: casting isn't raymarch-specific but the contract
+that procedural geometry contributes a depth pass for shadow cameras
+(customDepthMaterial / customDistanceMaterial), uniform across horn (share the
+vertex transform), terrain (already done in psychogeo), and raymarch (share the
+march) — author the surface once, consumed by lit/depth/distance materials.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+docs(adr): ADR-0014 procedural geometry render contract
+…
+cdf123a
+```
+Sketch the contract that lets procedural geometry (horn/terrain meshes,
+raymarch) take part in depth, distance, and G-buffer passes, not just lit
+colour. The seam is a surface program — author the surface once (a vertex
+transform, or the march) plus material; depth/distance/gbuffer/lit are generic
+functions of it. three.js binds the roles via customDepthMaterial /
+customDistanceMaterial (the near-term forward path); a renderer-owned deferred
+G-buffer is the same contract read differently — it unifies mesh/raymarch by
+construction, hosts our own custom lighting (many lights, traits, provenance as
+a G-buffer channel), and is renderer-agnostic WebGPU, so three.js becomes
+optional presentation. Generalises the ADR-0013 shadow note.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat(playground): raw-triangulation wireframe overlay on the hybrid demo
+…
+b0a9518
+```
+Add a wireframe overlay toggle to the raymarch/hybrid view. It shows the meshed
+house's actual triangulation (THREE.WireframeGeometry — every triangle, fan
+diagonals and all), the technical-artist view rather than the clean feature
+edges. Dark navy for contrast against the cream surface; depth-tested, so the
+raymarched growth (which has no triangulation) occludes the triangles behind it
+— making legible where the meshed skeleton hands off to the raymarched region.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+style: biome format raymarchMain imports
+…
+1c456f0
+```
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Repository owner
+deleted a comment from
+cursor Bot
+Jul 16, 2026
+xinaesthete
+merged commit 19bf087
+into
+main
+Jul 16, 2026
+xinaesthete
+deleted the
+claude/geometry-typegpu-integration-48f8a3
+branch
+July 16, 2026 14:46
+xinaesthete
+mentioned this pull request
+Jul 20, 2026
+Design: channel axis + label facets, TopACT gate, and Tier-2 resident edges (ADR-0015/0016/0017)
+#21
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

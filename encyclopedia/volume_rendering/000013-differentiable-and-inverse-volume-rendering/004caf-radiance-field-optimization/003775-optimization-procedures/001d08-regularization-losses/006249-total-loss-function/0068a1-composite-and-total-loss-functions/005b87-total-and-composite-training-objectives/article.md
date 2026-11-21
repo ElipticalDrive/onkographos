@@ -1,0 +1,40 @@
+# Total and Composite Training Objectives
+
+Also called: Composite Loss, Multi-Task Loss, Aggregated Objective
+
+## Overview
+Total and Composite Training Objectives define the mathematical framework for aggregating multiple supervision signals into a single scalar value for optimizing differentiable volume rendering representations. They solve the problem of balancing photometric fidelity, geometric consistency, semantic alignment, and regularization constraints during end-to-end training. What sets this family apart from its siblings is that it serves as the structural definition for how individual loss components (such as those defined in [Opacity Loss](4203-opacity-loss.md) or [Total Variation Loss](7047-total-variation-loss.md)) are combined, weighted, and scheduled, rather than defining the specific metric for a single signal.
+
+## Shared principles
+The core mechanism of all methods in this family is the weighted summation of individual loss components $\mathcal{L}_k$ to form a total loss $L_{tot}$:
+
+$$ L_{tot} = \sum_{k} \lambda_k \mathcal{L}_k $$
+
+Where:
+*   $\mathcal{L}_k$ represents a specific loss term (e.g., photometric, geometric, semantic, regularization).
+*   $\lambda_k$ is a scalar hyperparameter controlling the contribution of term $k$.
+
+The specific instantiation of this formula varies based on the representation (e.g., Gaussian Splatting, Voxel Grids, Implicit Neural Fields), the training stage (e.g., initialization, refinement, dynamic growth), and the scale of supervision. The components $\mathcal{L}_k$ are computed per-pixel or per-voxel and then aggregated (summed or averaged) before weighting.
+
+## Subtopics
+
+### [Overall Training Loss](10621-overall-training-loss.md)
+The overall training loss is the composite objective function used to optimize differentiable volume rendering representations by aggregating multiple supervision signals into a single scalar value. It solves the problem of balancing photometric fidelity, geometric consistency, semantic alignment, and regularization constraints during end-to-end training. What sets this method apart from its siblings is its role as the final aggregation layer in the optimization procedure, where specific loss components (rendering, depth, semantic, regularization) are weighted and summed according to the chosen representation and training stage.
+
+### [Multi-scale Joint Training Loss](13064-multi-scale-joint-training-loss.md)
+Multi-scale joint training loss is a composite objective function used in the refinement stage of radiance field optimization to balance low-frequency structural consistency with high-frequency detail fidelity. It addresses the problem of noise interference and detail loss during iterative refinement or dynamic network growth by simultaneously optimizing outputs from multiple network stages or scales. Unlike single-scale losses, it aggregates errors across all active outlets, ensuring that coarse structures are preserved while fine details are sharpened.
+
+### [Joint Training Losses](16752-joint-training-losses.md)
+This method defines a composite objective function for the joint optimization of a Template-Free NeRF (TFS-NeRF), an Implicit Neural Network (INN) for spatial transformation, and a skinning weight prediction network. It solves the ambiguity in dynamic scene reconstruction where incorrect combinations of canonical points and skinning weights can satisfy forward Linear Blend Skinning (LBS) equations. It distinguishes itself by explicitly constraining the INN and skinning networks through pose, cycle consistency, and skinning weight losses, rather than relying solely on photometric reconstruction.
+
+### Total Loss Function for Neural Scene Reconstruction
+*   **Definition**: The total loss function combines seven components to train the neural scene reconstruction model: RGB loss ($L_c$), normal loss ($L_n$), depth loss ($L_d$), Eikonal loss ($L_e$), smooth loss ($L_s$), SRDF-SDF consistency loss ($L_{con}$), and visibility loss ($L_{vis}$) [S1].
+*   **Step**: Compute 2.5D depth and normal maps using volume rendering with the density function $\sigma_{SRDF}$ to exploit geometric cues and support training [S1].
+*   **Formula**: $\mathcal {L} = \mathcal {L}_c + \lambda _n \mathcal {L}_n + \lambda _d \mathcal {L}_d + \lambda _e \mathcal {L}_e + \lambda _s \mathcal {L}_s + \lambda _{con} \mathcal {L}_{con} + \lambda _{vis} \mathcal {L}_{vis}$, where $\lambda_{(\cdot)}$ are the loss weights [S1].
+*   **Parameters**: $\lambda_n, \lambda_d, \lambda_e, \lambda_s, \lambda_{con}, \lambda_{vis}$: Loss weights for normal, depth, Eikonal, smooth, consistency, and visibility losses respectively. Typical values are not specified in this text [S1].
+
+## Background
+The concept of composite training objectives in neural rendering evolved from the need to stabilize the training of implicit neural representations and explicit Gaussian splats, which are often under-constrained by photometric data alone. Early works like MonoSDF introduced geometric priors (depth, normals) into the loss function to guide SDF learning [S1]. As methods diversified into Gaussian Splatting and dynamic scene reconstruction, the loss formulation expanded to include semantic consistency, cycle consistency for deformation, and multi-scale refinement terms. The current family of objectives reflects a modular approach, allowing researchers to mix and match photometric, geometric, semantic, and regularization terms based on the specific requirements of the scene representation and available supervision signals.
+
+## Sources
+[S1] Ray-Distance Volume Rendering for Neural Scene Reconstruction, https://doi.org/10.1007/978-3-031-72630-9_22, fetched 2026-10-26

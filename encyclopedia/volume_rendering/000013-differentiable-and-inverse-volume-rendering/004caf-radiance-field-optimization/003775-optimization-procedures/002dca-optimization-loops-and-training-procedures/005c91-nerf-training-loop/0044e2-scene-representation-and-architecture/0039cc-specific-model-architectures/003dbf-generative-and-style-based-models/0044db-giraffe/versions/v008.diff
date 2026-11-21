@@ -1,0 +1,98 @@
+--- v007.md
++++ v008.md
+@@ -1,5 +1,5 @@
+ # GIRAFFE
+ 
+-Also called: Compositional Generative Neural Feature Fields, GIRAFFE Scene Composition
++Also called: Compositional Generational Neural Feature Fields, GIRAFFE Scene Composition
+ 
+ ## Overview
+@@ -36,5 +36,5 @@
+     *   **Input:** Feature image $\mathbf{I}_V \in \mathbb{R}^{H_V \times W_V \times M_f}$ (resolution $16 \times 16$) [S1].
+     *   **Output:** RGB image $\hat{\mathbf{I}} \in \mathbb{R}^{H \times W \times 3}$ (resolution $64 \times 64$ or $256 \times 256$) [S1].
+-    *   **Architecture:** 2D CNN with leaky ReLU [S1]. Combines nearest neighbor upsampling with $3 \times 3$ convolutions. Maps feature image to RGB at every spatial resolution via $3 \times 3$ conv, adds to previous output via bilinear upsampling (skip connections) [S1]. Final layer applies sigmoid [S1].
++    *   **Architecture:** 2D CNN with leaky ReLU [S1]. Combines nearest neighbor upsampling with $3 \times 3$ convolutions [S1]. Maps feature image to RGB at every spatial resolution via $3 \times 3$ conv, adds to previous output via bilinear upsampling (skip connections) [S1]. Final layer applies sigmoid [S1].
+ 3.  **Discriminator ($D_\phi$):**
+     *   **Architecture:** CNN with leaky ReLU [S1].
+@@ -50,9 +50,10 @@
+ *   Discriminator LR: $5 \times 10^{-4}$ [S1].
+ *   EMA decay: 0.999 for generator weights [S1].
++*   GAN Objective: $\mathcal{V}(\theta, \phi) = \mathbb{E}[f(D_\phi(G_\theta(\{\mathbf{z}_s^i, \mathbf{z}_a^i, \mathbf{T}_i\}_i, \xi))] + \mathbb{E}[f(-D_\phi(\mathbf{I})) - \lambda \|\nabla_\phi(\mathbf{I})\|^2]$, where $f(t) = -\log(1 + \exp(-t))$ [S1].
+ 
+ ### Steps
+ 
+ 1.  **Sample Inputs:** Sample $N \sim p_N$, latent codes $\mathbf{z}_s^i, \mathbf{z}_a^i \sim \mathcal{N}(0, I)$, camera pose $\xi \sim p_\xi$, and transformations $\mathbf{T}_i \sim p_T$ for $i=1 \dots N$ [S1].
+-2.  **Define Background Transformation:** For the background entity ($i=N$), fix scale $\mathbf{s}_N$ and translation $\mathbf{t}_N$ to span the entire scene and center it at the origin. Other objects have learnable $\mathbf{s}_i, \mathbf{t}_i, \mathbf{R}_i$ [S1].
++2.  **Define Background Transformation:** For the background entity ($i=N$), fix scale $\mathbf{s}_N$ and translation $\mathbf{t}_N$ to span the entire scene and center it at the origin [S1]. Other objects have learnable $\mathbf{s}_i, \mathbf{t}_i, \mathbf{R}_i$ [S1].
+ 3.  **Transform Coordinates:** For each entity $i$, define the transformation from object to scene space:
+     $$
+@@ -60,5 +61,5 @@
+     $$
+     where $\mathbf{x}$ is a 3D point [S1].
+-4.  **Evaluate Feature Fields:** For each pixel in the camera view, cast a ray $\mathbf{d}$ and sample $N_s$ points $\mathbf{x}_j$ along the ray. For each sample point $\mathbf{x}_j$ and entity $i$:
++4.  **Evaluate Feature Fields:** For each pixel in the camera view, cast a ray $\mathbf{d}$ and sample $N_s$ points $\mathbf{x}_j$ along the ray [S1]. For each sample point $\mathbf{x}_j$ and entity $i$:
+     *   Compute canonical coordinates: $\mathbf{x}_{\text{canon}} = k_i^{-1}(\mathbf{x}_j)$, $\mathbf{d}_{\text{canon}} = k_i^{-1}(\mathbf{d})$ [S1].
+     *   Apply positional encoding $\gamma(\cdot)$ [S1].
+@@ -97,7 +98,7 @@
+ 
+ def positional_encoding(x, L):
+-    """Standard sinusoidal positional encoding: gamma(x) = (sin(2^0 pi x), cos(2^0 pi x), ..., sin(2^{L-1} pi x), cos(2^{L-1} pi x))"""
+-    freq_bands = torch.linspace(0, L-1, L, device=x.device)
+-    scaled = freq_bands.view(1, 1, -1) * torch.pi * x.unsqueeze(-1)
++    """Sinusoidal positional encoding: gamma(x) = (sin(2^0 pi x), cos(2^0 pi x), ..., sin(2^{L-1} pi x), cos(2^{L-1} pi x))"""
++    freq_bands = torch.arange(L, device=x.device, dtype=x.dtype)
++    scaled = (2.0 ** freq_bands).view(1, 1, -1) * torch.pi * x.unsqueeze(-1)
+     return torch.cat([torch.sin(scaled), torch.cos(scaled)], dim=-1)
+ 
+@@ -158,10 +159,10 @@
+     def inverse_transform(self, x_scene, s, t, R):
+         # k_inv(x) = S^{-1} R^T (x - t)
+-        x_centered = x_scene - t.unsqueeze(0)
++        x_centered = x_scene - t.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+         x_rotated = torch.matmul(x_centered, R)
+-        return x_rotated / s.unsqueeze(0)
++        return x_rotated / s.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+ 
+     def forward(self, ray_origins, ray_directions, N, z_s, z_a, T_list):
+-        # ray_origins: (B, H, W, 3), ray_directions: (B, H, W, 3)
++        # ray_origins: (B, H, W, N_s, 3), ray_directions: (B, H, W, N_s, 3)
+         # N: (B,), z_s: (B, max_N, latent), z_a: (B, max_N, latent)
+         # T_list: list of dicts with s, t, R for each entity
+@@ -182,6 +183,8 @@
+             mlp = self.bg_field if is_bg else self.feature_field
+ 
++            # Position transforms both x and d, but d should not be translated
+             x_canon = self.inverse_transform(ray_origins, s, t, R)
+-            d_canon = self.inverse_transform(ray_directions, s, t, R)
++            # Directions are only rotated and scaled, not translated
++            d_canon = torch.matmul(ray_directions, R) / s.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+ 
+             x_enc = positional_encoding(x_canon, self.L_x)
+@@ -198,9 +201,9 @@
+ 
+         # Volume Render
+-        delta = torch.norm(ray_origins[:, 1:] - ray_origins[:, :-1], dim=-1, keepdim=True)
+-        delta = torch.cat([delta, delta[:, -1:]], dim=1) # Pad last delta
++        delta = torch.norm(ray_origins[:, :, :, 1:] - ray_origins[:, :, :, :-1], dim=-1, keepdim=True)
++        delta = torch.cat([delta, delta[:, :, :, -1:]], dim=3) # Pad last delta
+         alpha = 1 - torch.exp(-sigma_total * delta)
+-        tau = torch.cat([torch.ones_like(alpha[:, :1]), torch.cumprod(1 - alpha[:, :-1], dim=1)], dim=1)
+-        f_rendered = torch.sum(tau * alpha * f_composed, dim=1, keepdim=True) # (B, 1, 1, M_f)
++        tau = torch.cat([torch.ones_like(alpha[:, :, :, :1]), torch.cumprod(1 - alpha[:, :, :, :-1], dim=3)], dim=3)
++        f_rendered = torch.sum(tau * alpha * f_composed, dim=3, keepdim=True) # (B, H, W, M_f)
+ 
+         # Reshape for 2D renderer (assume input grid is 16x16)
+@@ -211,5 +214,5 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Zero Density:** If $\sigma_j = 0$ for all entities at a sample point, the composition operator divides by zero. A small epsilon is added to the denominator [G].
++*   **Zero Density:** If $\sigma_j = 0$ for all entities at a sample point, the composition operator divides by zero [S1]. A small epsilon is added to the denominator [G].
+ *   **Background Transformation:** The background entity's scale and translation are fixed to span the scene [S1]. Incorrect initialization or updates to these parameters can cause the background to disappear or dominate the scene [S1].
+ *   **Resolution Mismatch:** The feature image is rendered at $16 \times 16$ and upsampled [S1]. If the neural renderer is not properly trained, artifacts may appear during upsampling [S1].
+@@ -218,5 +221,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Rendering time is proportional to $N \cdot N_s \cdot 16 \cdot 16$ for the volume rendering step, plus the cost of the 2D neural renderer for upsampling to the final resolution [S1].
+-*   **Memory Complexity:** Memory usage is dominated by the MLP weights and the feature map. The feature map is small ($16 \times 16 \times M_f$), reducing memory compared to full-resolution RGB rendering [S1].
++*   **Memory Complexity:** Memory usage is dominated by the MLP weights and the feature map [S1]. The feature map is small ($16 \times 16 \times M_f$), reducing memory compared to full-resolution RGB rendering [S1].
+ *   **Performance:** GIRAFFE achieves high-quality image synthesis on datasets like Chairs, Cats, and CelebA [S1]. It allows for disentangled control of object pose, shape, and appearance [S1].
+ *   **Strengths:** Explicit scene composition, control over individual entities, efficient rendering via low-resolution feature maps [S1].

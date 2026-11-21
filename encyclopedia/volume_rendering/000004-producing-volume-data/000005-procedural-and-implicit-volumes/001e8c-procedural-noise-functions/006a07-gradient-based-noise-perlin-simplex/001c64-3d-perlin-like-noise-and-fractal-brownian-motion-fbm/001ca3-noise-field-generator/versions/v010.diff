@@ -1,0 +1,227 @@
+--- v009.md
++++ v010.md
+@@ -4,131 +4,129 @@
+ 
+ ## Overview
+-The Noise Field Generator produces a 3D scalar field for volumetric rendering by summing multiple octaves of gradient-based noise (typically Simplex or Perlin) with varying frequencies and amplitudes, often combined with a linear vertical gradient [S2, unofficial][S3][S4, unofficial]. It solves the problem of generating realistic, multi-scale organic structures (such as clouds or terrain) in procedural volumes [S3][S5, unofficial]. It is distinguished from [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by its specific implementation of layered Simplex noise with vertical gradient offsets for volumetric density, and from [Global Cloud Cover with Curl Noise](1711-global-cloud-cover-with-curl-noise.md) by its reliance on scalar summation rather than divergence-free vector fields [S2, unofficial][S3].
++The Noise Field Generator creates a 3D scalar field for volumetric rendering by summing multiple octaves of layered Simplex noise, offset by a linear vertical gradient. It solves the problem of generating organic, multi-scale density distributions (such as soft clouds or terrain) without requiring pre-baked texture data. It distinguishes itself from its parent, [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md), by explicitly incorporating a vertical gradient bias and specific Simplex noise variants into the layering process, rather than relying solely on generic hash-based Perlin noise.
+ 
+ ## How it works
+ **Inputs:**
+-- `Dims`: 3D integer vector defining the voxel grid dimensions $(D_x, D_y, D_z)$ [S2, unofficial].
+-- `Scale`: Spatial scaling factor for the noise field [S2, unofficial].
+-- `Time`: Optional float for animating the noise field [S2, S4, unofficial].
+-- `Octaves`: Integer count of noise layers (typically 4–6) [S3][S4, S5, unofficial].
+-- `Gain`: Amplitude multiplier per octave (typically 0.5) [S3][S5, unofficial].
+-- `Lacunarity`: Frequency multiplier per octave (typically 2.0 or varying 2.01–2.03) [S3][S4, S5, unofficial].
+-- `Seed`: Integer for noise initialization (e.g., 123456) [S1, unofficial].
+-
+-**Outputs:**
+-- `Voxels`: A flat 1D array or structured buffer of floats, indexed by $id.x + D_x \cdot (id.y + D_y \cdot id.z)$, representing the scalar density field [S1, S2, unofficial].
++- `Dims`: 3D integer vector defining the voxel grid dimensions $(D_x, D_y, D_z)$.
++- `Scale`: Scalar spatial frequency multiplier for the noise field.
++- `Time`: Scalar time offset for animated noise.
++- `Voxels`: Output buffer (e.g., `RWStructuredBuffer<float>`) of size $D_x \times D_y \times D_z$.
+ 
+ **Data Structures:**
+-- The output is a contiguous memory buffer of floating-point values [S2, unofficial]. In GPU implementations, this is typically an `RWStructuredBuffer<float>` [S2, unofficial].
+-- Thread groups are typically sized $[8, 8, 8]$ for parallel voxel generation [S2, unofficial].
++- The output is a flat 1D array representing the 3D grid. The index for a voxel at $(x, y, z)$ is calculated as:
++  $$ \text{index} = x + D_x \times (y + D_y \times z) $$
++- Thread groups are processed in blocks of $[8, 8, 8]$ threads.
+ 
+ **Algorithm:**
+-The generator iterates over every voxel in the grid [S1, unofficial]. For each voxel, it computes a centered world position, initializes a value accumulator with a vertical gradient, and then sums the contributions of $N$ octaves of noise [S2, unofficial]. Each octave scales the input coordinates by the lacunarity and multiplies the noise output by the gain [S3]. To prevent axis-aligned artifacts, the coordinate space is rotated or the lacunarity is varied between octaves [S3].
+-
+-**Formulas:**
+-1.  **Centered Position:**
+-    $$ p = \text{Scale} \cdot (id + 0.5 - \frac{\text{Dims}}{2}) $$
+-    where $id$ is the integer voxel coordinate [S2, unofficial].
+-
+-2.  **Vertical Gradient Initialization:**
++1.  **Thread Identification:** Each thread computes its global 3D coordinate `id` $(x, y, z)$ based on its group ID and local thread ID.
++2.  **Position Calculation:** Compute the centered world position `p` for the voxel:
++    $$ p = \text{Scale} \times \left( \text{id} + 0.5 - \frac{\text{Dims}}{2} \right) $$
++    This centers the noise field around the origin $(0,0,0)$.
++3.  **Gradient Initialization:** Initialize the scalar `value` with a vertical gradient. The gradient typically biases the noise towards the negative Y-axis (or positive, depending on coordinate system convention), often used to simulate gravity or density stratification in clouds:
+     $$ \text{value} = -p.y $$
+-    This biases the noise field vertically, useful for cloud layers [S2, unofficial].
+-
+-3.  **FBM Accumulation:**
+-    $$ \text{value} \leftarrow \text{value} + \sum_{i=0}^{\text{Octaves}-1} \text{Gain}^i \cdot \text{Noise}(q_i) $$
+-    where $q_i$ is the transformed coordinate for octave $i$ [S3].
++4.  **Octave Summation:** Add multiple octaves of Simplex noise. Each octave uses a different frequency scaling, spatial offset, and amplitude.
++    -   **First Octave:**
++        $$ \text{value} \leftarrow \text{value} + \text{SimplexNoise}(p \times 0.83 + \mathbf{v}_1 \times \text{Time}) \times 0.5 $$
++        Where $\mathbf{v}_1 = (-0.37, -0.12, 0)$.
++    -   **Second Octave:**
++        $$ \text{value} \leftarrow \text{value} + \text{SimplexNoise}(p \times 0.72 + \mathbf{v}_2 \times \text{Time}) \times 0.5 $$
++        Where $\mathbf{v}_2 = (0.21, 0.07, 0)$.
++    -   *Note:* Sources indicate a 2-octave structure for this specific "SimplexNoise3D" variant [S2, unofficial]. Other FBM implementations may loop for more octaves [S3][S4, unofficial].
++5.  **Output:** Write the computed `value` to the `Voxels` buffer at the calculated index.
+ 
+ **Pseudocode:**
+-The following implementation combines the gradient initialization from [S2, unofficial] with the rotation-based FBM from [S3] and the time-offset variation from [S4, unofficial].
++```python
++# Compute Shader Kernel
++def noise_field_generator_kernel(id: int3, Dims: int3, Scale: float, Time: float, Voxels: array):
++    # 1. Calculate centered world position
++    # id is the global thread ID (x, y, z)
++    p_x = Scale * (id.x + 0.5 - Dims.x / 2.0)
++    p_y = Scale * (id.y + 0.5 - Dims.y / 2.0)
++    p_z = Scale * (id.z + 0.5 - Dims.z / 2.0)
++    p = (p_x, p_y, p_z)
++    
++    # 2. Initialize with vertical gradient
++    value = -p.y
++    
++    # 3. Add First Octave of Simplex Noise
++    # Offset vector v1 = (-0.37, -0.12, 0)
++    offset1 = (-0.37 * Time, -0.12 * Time, 0.0)
++    freq1 = 0.83
++    sample1 = simplex_noise_3d((p.x * freq1 + offset1.x, 
++                                p.y * freq1 + offset1.y, 
++                                p.z * freq1 + offset1.z))
++    value += sample1 * 0.5
++    
++    # 4. Add Second Octave of Simplex Noise
++    # Offset vector v2 = (0.21, 0.07, 0)
++    offset2 = (0.21 * Time, 0.07 * Time, 0.0)
++    freq2 = 0.72
++    sample2 = simplex_noise_3d((p.x * freq2 + offset2.x, 
++                                p.y * freq2 + offset2.y, 
++                                p.z * freq2 + offset2.z))
++    value += sample2 * 0.5
++    
++    # 5. Write to output buffer
++    # Flat index calculation: x + Dx * (y + Dy * z)
++    index = id.x + Dims.x * (id.y + Dims.y * id.z)
++    Voxels[index] = value
+ 
+-```python
+-def generate_noise_field(Dims, Scale, Time, Octaves, Gain, UseRotation=True):
+-    """
+-    Generates a 3D scalar field using layered noise with vertical gradient.
+-    """
+-    Dx, Dy, Dz = Dims
+-    voxels = [0.0] * (Dx * Dy * Dz)
+-    
+-    # Precompute constants
+-    m_a, m_b, m_c, m_d = 1.6, 1.2, -1.2, 1.6  # Rotation+scale matrix from [S3]
+-    time_vec = (0.5 * Time, -0.1 * Time, -0.5 * Time)  # Derived from [S4, unofficial]: 0.5 * vec3(1.0, -0.2, -1.0)
+-    base_scale = 0.5
+-    base_factor = 2.02
+-    factor_increment = 0.21
+-
+-    for id_z in range(Dz):
+-        for id_y in range(Dy):
+-            for id_x in range(Dx):
+-                # 1. Compute centered world position [S2, unofficial]
+-                p = (Scale * (id_x + 0.5 - Dx / 2.0),
+-                     Scale * (id_y + 0.5 - Dy / 2.0),
+-                     Scale * (id_z + 0.5 - Dz / 2.0))
+-
+-                # 2. Initialize value with vertical gradient [S2, unofficial]
+-                value = -p[1]
+-
+-                # 3. FBM accumulation
+-                q = (p[0] + time_vec[0], p[1] + time_vec[1], p[2] + time_vec[2])
+-                current_scale = base_scale
+-                current_factor = base_factor
+-
+-                for i in range(Octaves):
+-                    # Sample base noise (implementation not specified in sources [G])
+-                    n = noise_3d(q[0], q[1], q[2])
+-                    value += current_scale * n
+-
+-                    # Update coordinate for next octave
+-                    if UseRotation:
+-                        # Apply 2D rotation+scale to x,y, scale z independently [S3][S4, unofficial]
+-                        new_x = m_a * q[0] + m_b * q[1]
+-                        new_y = m_c * q[0] + m_d * q[1]
+-                        q = (new_x * current_factor, new_y * current_factor, q[2] * current_factor)
+-                    else:
+-                        q = (q[0] * current_factor, q[1] * current_factor, q[2] * current_factor)
+-
+-                    # Update amplitude and lacunarity
+-                    current_scale *= Gain
+-                    if not UseRotation:
+-                        current_factor += factor_increment  # Varying lacunarity [S4, unofficial]
+-
+-                # 4. Write to output buffer [S2, unofficial]
+-                idx = id_x + Dx * (id_y + Dy * id_z)
+-                voxels[idx] = value
+-    return voxels
++# Helper: Simplex Noise 3D
++# Returns a value in range [-1, 1] or [0, 1] depending on implementation.
++# Standard Simplex Noise uses gradient vectors at grid corners and trilinear interpolation.
++def simplex_noise_3d(p: tuple):
++    # Implementation details of Simplex Noise 3D are assumed to be available 
++    # from the parent article [1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md].
++    # It involves:
++    # 1. Finding the simplex cell containing p.
++    # 2. Computing contributions from the 4 corners of the cell.
++    # 3. Summing contributions weighted by distance factors.
++    pass
+ ```
+ 
++**Parameters:**
++- `Scale`: Spatial scaling factor. Typical values depend on the desired world units; [S2, unofficial] uses a generic `Scale` variable.
++- `Time`: Animation speed. Multiplies the spatial offset vectors.
++- `Octaves`: The number of noise layers. The specific "SimplexNoise3D" variant in [S2, unofficial] uses 2 octaves. General FBM implementations use 4–6 octaves [S3][S4, unofficial].
++- `Gain`: Amplitude multiplier per octave. In [S2, unofficial], both octaves use a gain of 0.5. In standard FBM [S3], Gain is typically 0.5.
++- `Lacunarity`: Frequency multiplier per octave. In [S2, unofficial], frequencies are hardcoded (0.83, 0.72). In standard FBM [S3], Lacunarity is typically ~2.0.
++
+ **Edge Cases and Pitfalls:**
+-- **Axis-Aligned Artifacts:** Without inter-octave rotation or varying lacunarity, the noise exhibits visible grid-aligned patterns [S3]. Using a rotation matrix with determinant 2.0 (e.g., `mat2(1.6, 1.2, -1.2, 1.6)`) or varying lacunarity (2.02, 2.03) breaks self-similarity [S3].
+-- **Precision:** Hash functions using `sin` can be precision-sensitive on some platforms; sin-free hashes (using fract/dot mixing) are more stable [S3].
+-- **Boundary Conditions:** The centered position calculation $id + 0.5 - Dims/2$ ensures the field is centered at the origin, which is critical for consistent lighting and gradient alignment [S2, unofficial].
++- **Precision:** Using `float` for position calculations may lead to precision loss at large world coordinates. Centering the grid around the origin (as done in Step 2) mitigates this.
++- **Boundary Artifacts:** Without inter-octave rotation or varying lacunarity, axis-aligned artifacts may appear [S3]. The specific Simplex variant in [S2, unofficial] avoids this by using distinct spatial offsets for each octave.
++- **Gradient Direction:** The vertical gradient `-p.y` assumes Y is up. If Z is up, the gradient should be `-p.z`.
+ 
+ ## Subtopics
+ 
+ ### [FBM Combinations](3962-fbm-combinations.md)
+-FBM Combinations integrates Fractal Brownian Motion noise fields with rendering and geometric techniques to produce complex volumetric and surface effects [3962-fbm-combinations.md]. It is distinguished from [Terrain Heightmap Generation via Noise](4214-terrain-heightmap-generation-via-noise.md) by its focus on volumetric density and lighting integration rather than pure heightfield displacement, and from [Domain Warped FBM](4493-domain-warped-fbm.md) by its reliance on standard layered sampling rather than recursive coordinate distortion.
++Integrates Fractal Brownian Motion noise fields with rendering techniques such as raymarching, lighting models, and color mapping. It focuses on deriving density, normals, and color from layered noise samples for use in raymarched scenes, building on the raw noise generation of the Noise Field Generator by applying intersection and shading logic.
+ 
+ ### [Terrain Heightmap Generation via Noise](4214-terrain-heightmap-generation-via-noise.md)
+-This method generates a terrain heightmap by converting 2D world coordinates into a single height value using scaled fractal noise, remapped to a specific vertical range. It differs from its parent [Noise Field Generator](1302-noise-field-generator.md) by operating directly on 2D world coordinates rather than sampling a 3D scalar field.
++Generates a 2D terrain heightmap by sampling a 3D scalar noise field at a fixed vertical coordinate (e.g., $z=0$). It projects the layered noise onto the X-Y plane to produce continuous elevation data, differing from the full 3D volume generation by ignoring the vertical gradient offset and returning a single scalar height per X/Y coordinate.
+ 
+ ### [Domain Warped FBM](4493-domain-warped-fbm.md)
+-Domain Warped FBM is a procedural noise technique where the output of a noise function is fed back as a coordinate offset to distort the sampling domain, creating organic, fluid-like patterns. It differs from standard FBM by introducing non-linear spatial distortion that mimics turbulent flow, whereas standard FBM simply layers noise at different scales.
++A technique where the output of a noise function is fed back as a coordinate offset to distort the sampling domain, creating organic, fluid-like patterns. It differs from standard FBM by introducing non-linear spatial distortion that mimics turbulent flow, using the noise amplitude itself to drive the displacement.
++
++### [Turbulence](17000-turbulence.md)
++A noise basis function that creates the visual impression of Brownian motion by summing the absolute values of noise at decreasing frequencies. It differs from standard FBM by applying the absolute value operator to each octave, introducing discontinuities in the gradient and creating a "carved" or fragmented appearance.
+ 
+ ### Absolute Noise Sum
+-A fractal noise technique similar to fBm but uses the absolute value of the noise function at each octave, resulting in a range of 0.0 to 1.0 and creating 'cloudy' or 'rough' textures [S6, unofficial]. It sums `abs(inoise(p*freq))*amp` for each octave, with an initial amplitude of 1.0 (vs 0.5 for fBm) [S6, unofficial].
++A fractal noise variant that sums the absolute values of Perlin noise octaves. It results in a range of 0.0 to 1.0 and creates "cloudy" or "rough" textures. It differs from standard FBM by using an initial amplitude of 1.0 and the `abs()` function on each octave sample [S6, unofficial].
+ 
+ ### Ocean Wave Octave
+-A specialized FBM variant for water surfaces [S3]. It computes wave components using `sea_octave`, which mixes `abs(sin(uv))` and `abs(cos(uv))` to create peaked crests, and sums bidirectional propagation shifted by `SEA_TIME` [S3].
++A specialized noise function for simulating ocean waves. It computes wave components by adding noise to UV coordinates, calculating sine/cosine components (`wv`, `swv`), and mixing them with a "choppy" factor. It supports bidirectional propagation by summing results for time-shifted UVs [S3].
+ 
+ ### Bounded Perlin Noise Texture
+-A texture class that maps 3D points to RGB colors using Perlin noise, scaled and bounded within a specific region defined by `min_bound_` and `max_bound_` [S7, unofficial]. It stores `scale_`, `min_bound_`, `max_bound_`, and a `Perlin` instance `noise_` [S7, unofficial].
++A texture class that maps 3D points to RGB colors using Perlin noise, scaled and bounded within a specific region. It stores color, min/max bounds, scale, and a Perlin noise instance, blending the noise result with a base color [S7, unofficial].
+ 
+ ## Operating characteristics
+-- FBM is more computationally intensive than single-layer noise because it samples many waves, but produces more realistic and stunning results [S5, unofficial].
+-- Performance can be optimized by reducing octave count for distant objects or using texture sampling instead of mathematical hash functions [S3].
+-- Strengths include generating natural-looking, multi-scale detail suitable for clouds, terrain, and organic volumes [S3][S5, unofficial].
+-- Limitations include high computational cost for high-resolution volumes with many octaves, and axis-aligned artifacts if not properly randomized [S3].
++- **Time Complexity:** $O(N \times O)$, where $N$ is the number of voxels and $O$ is the number of octaves. Each voxel requires $O$ noise evaluations.
++- **Memory Complexity:** $O(N)$ for the output voxel grid.
++- **Performance:** More computationally intensive than single-layer noise due to multiple noise samples per voxel [S5, unofficial]. Performance can be optimized by reducing the octave count for distant objects or using LOD [S3].
++- **Strengths:** Produces realistic, organic, multi-scale details suitable for clouds and terrain. The vertical gradient adds physical plausibility to density distributions.
++- **Limitations:** Requires significant computation for high-resolution volumes. The specific Simplex variant in [S2, unofficial] is limited to 2 octaves, which may lack fine detail compared to higher-octave FBM.
+ 
+ ## Background
+-The Noise Field Generator is based on Fractal Brownian Motion (FBM), a technique for generating pseudo-random fractal noise by summing multiple octaves of a base noise function [S3]. The specific implementation using layered Simplex noise with vertical gradients is used in GPU-based marching cubes and volumetric raymarching for real-time cloud and terrain generation [S2, S4, unofficial]. The use of rotation matrices to break axis-aligned artifacts was popularized in shader development communities [S3].
++The Noise Field Generator is a specific implementation of procedural noise generation for volumetric data, often used in real-time graphics and GPU-based terrain/cloud generation. It builds on the principles of Fractal Brownian Motion (FBM) and Simplex Noise. The specific variant with vertical gradient and layered Simplex noise is documented in GPU-based marching cubes and volumetric raymarching tutorials [S2, S4, unofficial]. The concept of FBM was popularized by Ken Perlin and others for procedural texture synthesis [S3][S5, unofficial].
+ 
+ ## Sources

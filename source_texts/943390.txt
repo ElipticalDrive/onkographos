@@ -1,0 +1,310 @@
+Hello team! 
+A broad question for you: 
+We are trying to simulate radio wave propagation in a virtual 3D environment. 
+I would like to create a transmitter that would send rays in 360 degrees (all directions) and also a …
+
+Visual representation of ray propagation using ray tracing - OptiX - NVIDIA Developer Forums
+Visual representation of ray propagation using ray tracing
+Gaming and Visualization Technologies
+Visualization
+OptiX
+qwhiddz
+October 8, 2021, 8:06am
+1
+Hello team!
+A broad question for you:
+We are trying to simulate radio wave propagation in a virtual 3D environment.
+I would like to create a transmitter that would send rays in 360 degrees (all directions) and also a spherical receiver. All rays that hit the receiver (direct hits and hits through bounces from objects using triangular mesh) I would like to visualize. Furthermore I would like to simulate ray attenuation when it passes through materials (ie walls) if possible.
+I saw your documentation and the picture below is what caught my eye, it does the visualization part at least and from reading similar posts it is possible to do the receiver/transmitter. However I cannot find the name of what makes the rays visible:
+I have checked the OptiX samples and cannot seem to find anything similar to this.
+Another example of what I’m looking for:
+Are there any examples of this?
+Thanks!
+Electromagnetic wave simulation using OptiX
+Unknown intersection information in "__closesthit__" funtion
+droettger
+October 8, 2021, 10:00am
+2
+That old OptiX SDK 3.9.x collision example was using ray tracing to determine the visibility between two points in space and just produced a binary visibility matrix.
+The visualization of that was pure rasterization with OpenGL. Means the rays you see in the first image were actually OpenGL GL_LINES primitives. Probably the same in the second image.
+What you’re asking for is very much possible with OptiX, since it’s a general purpose ray-casting SDK.
+That has actually been done by multiple developers and presented in the past.
+The second image you found is from this GTC 2014 presentation on simulation of car-to-car communication.
+The simulation of such a transmitter/receiver setup is pretty much the same as direct lighting calculations in a path tracer.
+Assume your transmitters are the cameras and the receivers the lights. Then instead of finding hits of the receiver with a brute force algorithm shooting rays randomly into the scene (which will be really bad when the receivers are small or impossible to hit when they are assumed to be points) you connect each surface hit point of the rays shot from the transmitter to the receivers to see if there is anything blocking the visibility and store the result in some data “connection” structure when not
+Then you continue the current ray from its hit point with some distribution (scattering with reflection or transmission, diffraction, absorption, whatever your material handling requires.)
+That will generate new rays and you can track whatever state you require along a ray path through the scene on your custom per-ray payload structure in OptiX and then store into some result output buffer.
+This simulation can be run as a progressive path tracer.
+I’ve explained a pseudo algorithm of something like that here before:
+https://forums.developer.nvidia.com/t/sphere-intersection-with-ray-distance-dependent-radius/60405/6
+(Ignore my idea of a “cone angle” there. That also works with full hemispherical distributions.
+It should be rather straightforward to implement. The only complication is the material behavior for the ray distributions and how the resulting connection paths should be stored.)
+Please use OptiX 7 when starting new developments. The resulting application will be be faster and more flexible.
+When implementing visibility rays, please have a look at this post which explains the fastest way with OptiX 7:
+https://forums.developer.nvidia.com/t/anyhit-program-as-shadow-ray-with-optix-7-2/181312/2
+OptiX 7 supports curve primitives with linear, quadratic, and cubic splines, so it would be possible to visualize the rays in a ray traced renderer as well with linear curves, but since these are rather thin, that separate visualization renderer would need to be a little more sophisticated than just rendering lines in rasterization APIs like OpenGL, Vulkan or DirectX.
+qwhiddz
+October 8, 2021, 11:07am
+3
+Hi again!
+As always, thanks a lot for the fast and thorough answer, your explanation makes sense and is understandable even for beginners as myself. I have seen in similar threads that you recommend to work through the SDK samples to achieve better understanding of the engine, which is something I plan to do. If I understand you correctly, you would recommend some extra time for the optixRaycasting sample?
+Oh also, our plan is to integrate our optix project into a flexible 3D-environment in order to easily create different environments such as an office with the help of programs, eg Unreal Engine or Unity. A post from 2017 mentioned that optix is not compatible with Unreal Engine, is that still the case and if so, are there any other softwares that you would recommend?
+Thanks!
+droettger
+October 8, 2021, 1:04pm
+4
+If I understand you correctly, you would recommend some extra time for the optixRaycasting sample?
+Not at all. That’s definitely not an example I would recommend to look at first.
+This is special in the way that it’s showing how to do only ray-triangle intersections with the high-level OptiX API.
+Means everything else like ray generation and shading calculations happen inside native CUDA code.
+That is a so called wavefront approach. You put a number of rays you want to shoot into the scene into a buffer, you launch a ray query with the dimension of that buffer, then the OptiX ray generation program reads the rays from that buffer (one per launch index), calls optixTrace with it, and the closest hit and (optional) miss programs report some data back to the per-ray payload, which is then written to the same dimension hit result buffer, which you then evaluate with a native CUDA kernel (outside the OptiX launch), which does the “shading” calculations and then generates potential continuation rays, and repeat that until there are no more rays to be shot.
+This is effectively what the old discontinued OptiX Prime low-level ray-triangle intersection API did. OptiX Prime is not accelerated on RTX cards, that’s why the optixRaycasting example exists as an alternative, which actually offers more flexibility.
+Still this wavefront approach has the drawback that it’s very memory access intensive. It’s usually faster to calculate the rays inside the ray generation program than to write to and read from a global memory buffer. The more the GPU can handle in registers the better.
+Also this would require a launch for each set of new ray segments in a path tracer. And you would be responsible for handling the scheduling when some rays terminated early.
+It’s much faster to iterate over the whole path while staying inside the ray generation program in a single launch and let OptiX handle the scheduling internally.
+Long story short, I would recommend looking at all other OptiX SDK and open-source examples you find linked in the sticky posts of this sub-forum first, to understand how the whole ray tracing pipeline with raygen, exception, intersection (built-in for triangles (in hardware) and curves), anyhit, closesthit, miss and maybe direct and continuation callables play together. When done correctly, this is going to be the faster solution.
+Actually read the OptiX 7 Programming Guide first. https://raytracing-docs.nvidia.com/
+Oh also, our plan is to integrate our optix project into a flexible 3D-environment in order to easily create different environments such as an office with the help of programs, eg Unreal Engine or Unity.
+A post from 2017 mentioned that optix is not compatible with Unreal Engine, is that still the case and if so, are there any other softwares that you would recommend?
+The OptiX API knows nothing about application frameworks, windowing systems, scene file formats, UI, controllers, etc.
+Related post about what OptiX is and isn’t: https://forums.developer.nvidia.com/t/how-to-develop-user-defined-rendering-in-optix/185374/2
+It’s your responsibility to build the necessary acceleration structures from whatever geometrical descriptions you have.
+It’s also your responsibility to implement everything related to shooting rays and handling potential material behaviors inside the respective domain programs.
+If or how that is possible inside these game engines you cite is outside my expertise. It’s some years ago since I touched the Unreal engine and that thing is huge. I don’t know how difficult it would be to integrate some simulation module like that into it. Mind that these are using graphics APIs like Direct12/DXR or Vulkan (not sure about Vulkan Raytracing). You would use CUDA and OptiX. Sounds problematic to me.
+For a start you might want to look at some of the OptiX SDK examples which can load OBJ and (not all) glTF model files .
+My more advanced OptiX 7 examples use ASSIMP to load mesh geometry (not points, not lines, not really materials) from any supported file format.
+What I’m saying is, that it would be simpler to start with some standalone OptiX application which can generate or load some scene data and develop the required algorithms with that first, before trying to delve into full blown game engines which work completely differently and might not even allow what you’re describing.
+Follow all links in this post. The one to the OptiX 7.2 Release contains links to more examples:
+https://forums.developer.nvidia.com/t/optix-7-3-release/175373
+https://forums.developer.nvidia.com/t/optix-advanced-samples-on-github/48410/6
+m001
+October 11, 2021, 7:06pm
+5
+When you have worked through all the samples @droettger suggested to understand the basics of OptiX and have some knowledge of DirectX11 / Unity, here you can try a way to move buffer/texture data (in your case the tracked radio wave hitpoints buffer data)
+from OptiX to Unity or back:
+NOTE: the posting shows how to move data from Unity to OptiX, you would need the other direction for the results;
+From that found hitpoint data then you simply create the rasterizer primitves to run draw calls for those lines within your scene.
+droettger
+October 12, 2021, 6:47am
+6
+With the intention to use Unreal or Unity as the world builder for the simulation, the main problem is that there is no simulation possible without having the scene’s 3D geometry and transformation hierarchy inside OptiX acceleration structures in the first place.
+I would expect that data to exist in some scene graph representation on the host in any application at one point.
+CUDA interop would only be required if the data is held in the graphics API’s device buffers and then it depends on the formatting and alignment if that data could be reused inside CUDA/OptiX directly.
+With all such interop ideas, you need to consider that the memory and lifetime management happens on the game engine’s side since that is the owner of the data. Registering resources and doing some work on them while the game engine might do things asynchronously is deemed to fail. Such mechanisms require intricate knowledge of the game engine’s internals.
+An independent copy of the data would be more robust but then you could also just save the scene into a loadable file format and get it from there as a start. That’s complicated enough for an OptiX beginner.
+m001
+October 12, 2021, 7:26pm
+7
+True, of course the 3D geometry could be loaded twice (as an independent copy), in the game engine and in OptiX; but for the radio wave propagation simulation, that 3D data I did not intend to suggest that to be registered/mapped.
+Instead (as I wrote above) for speed register/mapping the hitpoint results written to an OptiX (CUDA) buffer would be faster, than using the CPU memory, because then it directly can be read from the game engine on the device.
+Of course registering resources can be tricky. But if the resource is only setup for this purpose and you have some atomic (inter)locks or semaphores in the game engine in place, that can work safely. From my experience I only found memory limits could be problematic with registering/mapping. Even registering the resource for each frame and then unregister can work in those cases and might improve speed (when memory is an issue).
+However, its true of course it depends on how experienced you are on DirectX11 and OptiX.
+I simply wanted to point out that its possible.
+For integrating such a complex operation into a flexible 3D-environment it may take some time to get that done. And dependent on the goal a standalone OptiX application can be certainly the easier path to go.
+qwhiddz
+October 14, 2021, 2:26pm
+8
+Hello again!
+An update for you:
+We decided to use the base of optixWhitted as a template for our project since it contained a lot of physics we wanted from the start, such as fresnel-schlick and beers law. We are playing around with the scene at the moment by creating new spheres and tweaking the placements of things just to get a feel for it.
+Now we are trying to change/add properties to the rays coming from the light source, how can one do this?. For example we would like to add a new variable “freq” in order to represent signal strength and make the strength of the ray dynamic by something like new_ray_strength = freq * material_attenuation so that the signal is weaker once it has passed through an object depending on both the materials attenuation and the frequency of the ray.
+Thanks!
+droettger
+October 14, 2021, 3:31pm
+9
+If you want to track any parameter along the ray, you need to put it into the per-ray payload which you pass on via the optixTrace calls.
+The overloads of optixTrace support a limited number of 8 unsigned int payload registers.
+These can be filled with any data you like and could, for example, be reinterpreted as float with the CUDA float_as_uint() and uint_as_float() functions.
+https://raytracing-docs.nvidia.com/optix7/guide/index.html#basic_concepts_and_definitions#ray-payload
+https://raytracing-docs.nvidia.com/optix7/guide/index.html#device_side_functions#trace
+If you need more per ray payload memory than fits in 8 unsigned int registers, which is the case for most applications, you define your own custom payload structure, instance that inside the ray generation program in local memory, and split the 64-bit pointer to that local structure into two of the available payload registers.
+The OptiX SDK examples show that. Look for the packPointer and unpackPointer functions inside the example code.
+Also look at the optixPathTracer example inside the SDK.
+My OptiX 7 examples are implementing path tracers and the same mechanism but I aliased the single payload pointer with an uint2 in a union to prevent any shift operations used in the pack/unpack implementation.
+The compiler is pretty clever and generates only move instructions in both cases though.
+Find the implementation of that here. Uses cases can be found inside the raygen and closesthit pogram.
+https://github.com/NVIDIA/OptiX_Apps/blob/master/apps/intro_runtime/shaders/per_ray_data.h
+Note that CUDA variable types have specific alignment requirements. You can avoid automatic padding by the compiler in your device structures when ordering the field properly.
+Read these posts:
+https://forums.developer.nvidia.com/t/directx-optix-single-geometry-buffer-or-multiple/39351/3
+https://forums.developer.nvidia.com/t/rtbuffer-indexing/167440/13
+qwhiddz
+October 22, 2021, 7:46am
+10
+Hi!
+For our purpose, do you think that our idea of using and modifying a copy of one of your samples is a good idea and if so, which one can you recommend for us. Or do you think it is better to start from scratch?
+Thanks
+droettger
+October 22, 2021, 9:57am
+11
+Let’s describe how I would approach that.
+I would have no difficulties taking one of my more advanced OptiX 7 examples (rtigo3 or nvlink_shared) apart and replace the current full global illumination renderer with the required OptiX domain programs doing that receiver/transmitter simulation.
+The benefit of that would be that you have a ready-to-use CMake based OptiX application framework not using anything from the OptiX 7 SDK except its API headers. You can start from scratch with that, but running.
+nvlink_shared is the newer application which contains a simple arena allocator which simplifies the CUDA memory handling, though that example is targeted at multi-GPU use cases and could need adjustments to run optimally on single-GPU as well. That’s just a matter of not doing the compositing step when there is only one active device. But you’re not rendering images anyway.
+The rtigo3 program shows single- and multi-GPU rendering mechanism with different OpenGL interop modes meant to demonstrate how to program interactive applications.
+But both contain a benchmark mode which is completely independent of any windowing or GUI framework. Means it’s also possible to completely remove the OpenGL, GLEW, GLFW, and ImGUI parts to make either run offscreen on any CUDA capable device without display capabilities. (I did that for either of these examples before.)
+I would keep the application framework as it is, keep everything related to generating simple objects at runtime and loading mesh data from scene file formats supported by ASSIMP into the simple host-side scene graph, and probably start off with the simplest render mode which is single-GPU. Means the system and scene descriptions would work the same way.
+If there is no need to render any images with the raytracing, a lot of the code can simply go away. For example the whole Rasterizer and OpenGL part.
+On the other hand it would be possible to change that to actually rasterize the scene and visualize the result of your ray traced simulation. That’s not too hard given that the scene data is in that simple host-side scene graph which could be traversed by a rasterizer similarly to how the ray tracer traverses it to build the GAS and IAS data once.
+Then I would implement some code placing the transmitters and receivers definitions into the scene description. That is probably best handled in a separate description file to make it independent of the current scene. Means that could be reloaded without restarting the application, or run as batch process for many different configurations.
+Then the transmitter/receiver definitions need to be made available via buffer pointers inside the global launch parameters to be able to access them for sampling. Like the CameraDefinition and LightDefinition arrays in the current examples.
+Then I would re-implement the ray generation and closesthit programs and the transmitter/receiver visibility tests.
+Mind that this means replacing all existing material and camera handling and the rendering of the images as well.
+I would just need to know how the ray distributions work for the simulation (reflection, refraction, diffraction, attenuation, etc.) and how to store the resulting data.
+So getting a framework which allows implementing this with my existing OptiX application frameworks would foremost be removal of existing source code to the bare minimum.
+Some of the things the renderer uses today, like tangents to be able to render anisotropic glossy materials would probably not be required either, so there are a lot of small changes possible.
+I would also change the shader binding table layout from one entry per instance to one entry per material and use the instance ID for the indirection to the per instance data (vertex attributes and material properties) while the instance sbtOffset selects the resp. closest hit programs. (That is, no more use of direct callable programs for the different materials. That should be faster overall.)
+So yes, I would think you could start with one of my OptiX 7 examples and change all the things to your liking.
+To get a 3D scene into that standalone program would be just a matter of having it in some format which ASSIMP can load, e.g. even OBJ would be a potential start.
+I think adding such simulation framework directly into any of the game engines you listed would be a lot more complex.
+Though if you know exactly how to access all scene resources in such a game engine, that would be the next step.
+It should be much simpler implementing, debugging, and optimizing the simulation in a standalone application first.
+layser
+November 11, 2021, 3:50pm
+12
+Hello!
+I am not quite sure how to make the transmitter work as I would like. I want to shoot my own custom rays with OptixTrace from a custom coordinate in the scene where the transmitter would be placed and maybe by visualizing the rays with light see the rays being emitted from the custom coordinate. OptixTrace seems to be using the camera somehow so that when I am experimenting with the direction of the rays from my own OptixTrace call it messes up the camera and the scene looks weird. I do not want these rays I am trying to generate from the transmitter to have anything to do with the camera. I think I am also confused about how to set the ray direction correctly within OptixTrace. Could you be more specific regarding how to shoot rays from a transmitter at a custom coordinate within the scene.
+Thank you!
+dhart
+November 11, 2021, 4:42pm
+13
+Hi @layser,
+The ray origin and direction you pass to optixTrace() is completely under your control, and not something OptiX knows about other than the arguments you pass in. OptiX does not have any notion of a “camera” per-se, that is something you can write in order to generate rays. In the OptiX SDK samples, the camera is part of the “sutil” library, not part of the OptiX API. In your own application, you might have your own camera code, or no camera at all and you can just generate unique rays in your raygen program any way you see fit.
+The idea of cameras and light sources is analogous to the more general idea of receivers and transmitters, respectively. Whether you trace rays that originate from a receiver or a transmitter is up to you; there are simulation algorithms for going in either direction (or both). So you can shoot rays from a transmitter, and they will never have anything to do with a camera unless your code is making some kind of association. In order to generate rays from a transmitter, you would set the ray origin to be at the transmitter’s position, if it’s a point, or perhaps by sampling a point on the transmitter’s surface or volume. You can set the ray direction to be in whatever direction you need- it might be to form an “image” of some sort, or you might be sampling surfaces in your scene, or you might need a certain directional distribution. All of this is your responsibility, and OptiX knows nothing about what your transmitters and receivers look like. OptiX only processes whatever rays you pass in to optixTrace().
+BTW, this is a separate topic from the above thread. We can continue this discussion here, but please in the future start new threads for new questions. New threads are encouraged and welcome.
+–
+David.
+layser
+November 16, 2021, 3:49pm
+14
+Hello again @dhart,
+Thank you for your reply, forgot to mention that me and OP are working on the same project together so that is why I posted it here.
+After your suggestion we started modifying the rtigo3 sample and wrote our own function in the raygen program called “integrator_radiowaves” where we specify origin and direction to what we want, we also pass a custom payload “frequency”, below is an outtake from our function:
+trace i vår funk929×157 22.9 KB
+and here is where we call our function, directly below where the call to the original integrator function is:
+We tested our function and played around with the direction of our rays to make sure that our rays triggered the hit programs, which they did, however if we want to do something with our rays in one of the hit programs, for example change color by modifying prd->radiance we cannot see anything change. That is because in the picture above “radiance” gets its value from the integrator function and radiance is later passed to the outputbuffer which renders what we can see as can be seen below right?
+So we would like our rays to visually change the scene in addition to what we can already see in the original rtigo3 sample, can we somehow add our own “layer” to the outputbuffer where our changes can be visual or could we maybe create another raygen program and show the result from both?
+I feel like I did not do a great job of explaining myself so please ask if anything is unclear
+Thanks!
+droettger
+November 16, 2021, 5:02pm
+15
+or could we maybe create another raygen program and show the result from both?
+Yes, it doesn’t really make sense to merge the simulation and the rendering of the image together into one ray generation program.
+I would expect that the image synthesis and the simulation should have decoupled launch dimensions.
+The radiance integrator in that program is implementing a uni-directional path tracer with direct lighting (next event estimation) and multiple importance sampling between light and BSDFs. The primary rays are mapped to a pinhole camera. That all needs to be changed for your simulation pipeline.
+What you’re doing with that integrator_radiowaves() is shooting a single hardcoded ray for all launch indices into the scene with the same radiance ray type, so that would use the same SBT entries and calculate something in the existing closest hit programs.
+Spatially that has nothing to do with the pinhole camera rays’ launch indices of the radiance integrator.
+So how would you like the rendered image to change depending on your simulation rays? These two parts do not interact with each other.
+BTW, if you have the frequency as field inside the PRD, there shouldn’t be a need to have it as additional payload register on the optixTrace call. Since you’re sending the PDR pointer on the first two payload registers anyway, you can access that frequency field in all called programs. At least there is no good reason visible in the code excerpts for doing it.
+I explained that the simulation algorithm could be derived from the renderer architecture because the transmitter and receiver can be handled like camera projections generating the primary rays and the receivers as lights (or vice versa if that is simpler).
+That simulation needs to happen first to be able to include its results inside the rendering in any way, like with the OpenGL rendering in the images of the initial post.
+Handling that inside the same launch doesn’t make much sense to me.
+Means you need to create a second OptixPipeline with new ray generation, closest hit and miss programs you need for the simulation. You wouldn’t shoot “radiance” rays either.
+That is a path tracer with next event estimation as well, that’s why most of the concepts from the current architecture can be reused. But the ray generation needs to calculate the rays shot from your transmitter and connect them with the receivers and bounce around on surface hits with some distribution matching your simulation behavior. means you need to implement a material system which represents the behavior of your rays at your frequency which mimics the real world behavior. (That’s the most complicated task.)
+It’s not like these simulation paths would affect the renderer paths, unless you’re adding some geometry for these paths. and that obviously requires to run the simulation completely first. That is a separate progressive Monte Carlo algorithm which requires many OptiX launches to produce the output data.
+In the end you’d need to store the resulting connecting paths into some data structures which could then be used in a visualization algorithm to show them inside the 3D scene, like by rendering the whole scene with OpenGL and adding the connecting paths as line primitives.
+That is not going to happen easily inside that existing path tracer.
+That could render linear curves if you wanted, but that requires some changes to the host side scene graph and the pipeline to handle curve primitives. I have done that in the past.
+Again, please don’t try to bolt that simulation onto that renderer code. That are two completely different things.
+Instead derive the simulation code from the existing algorithmic structure of the renderer pipeline.
+It needs to be stripped down to an empty template because all programs, the material handling and the resulting output need to be changed. Means you need a second OptixPipeline and separate optixLaunch calls for the simulation and the renderer.
+Decide what output you require first, then plan up from there what structures you require to get to that result.
+dhart
+November 16, 2021, 8:45pm
+16
+I’m not sure why writing to the payload isn’t working for you. Do you want to post the relevant parts of your hit program that reads the payload pointer and writes to your payload struct? If you write to your payload struct in memory, then the values will be written. I would assume the most likely reason that the change might not appear to be made is if some other part of the code is overwriting the value later. One option is to use printf() before and after optixTrace() to confirm the value changed. Restrict the print to a single pixel to prevent too much output.
+Note with OptiX 7.4 you might consider passing all your payload values directly, rather than passing the struct pointer. If so, you then write to the payload using optixSetPayload_<n>() functions in your shader program instead of an assignment like prd->radiance = 1.f.
+In your code sample, is there a reason to pass the local frequency variable separately? It should be available in your hit program as prd->frequency.
+–
+David.
+esteban.egea
+November 18, 2021, 8:28am
+17
+Hi all,
+it seems that you want to do something similar to what we did. You can take a look at our approach. I mentioned it on a previous post:
+Our radio propagation simulator can be used as a Unity plugin. As mentioned here, simulation is separated from rendering. The code is using Optix 6.5, though. We are not really interesting in rendering, just simulation, so the plugin is not very efficient. We use Unity mainly to create the 3D scene that it is later loaded to the simulator. It can render the propagation paths (the method should be definitively changed) but it is enough for us because we use it just for debugging. Anyway, all of this may be useful to you to get started in your project.
+layser
+November 18, 2021, 3:19pm
+18
+Hello again!
+We are currently in the process of creating a new pipeline as previously suggested. We have created a new initpipeline function and created our own modules for raygen/closest hit programs etc, the rest of the pipeline is pretty much a copy of the original pipeline for now. For starters we tested the new pipeline to make sure that the right raygen program started, which it did. The problem we are running into right now is that only the last initpipeline call is happening. For example in the picture below, it seems like only the original pipeline is run:
+We suspect that this is because we need a new SBT for our new pipeline. Is there something else/more required in order for both pipelines to work?
+Thanks everyone for your previous answers!
+droettger
+November 18, 2021, 4:05pm
+19
+Ok, so instead of copying the whole program and changing it to do only the simulation, you’ve duplicated the initPipeline() function and replaced the code in there with your own OptiX programs and build a second OptixPipeline.
+That initPipeline() also initializes that shader binding table (SBT) part which are NOT the hit records.
+That final part happens later inside the void Device::createHitGroupRecords() function which is called after the scene has been built, because that is when it’s known which instance needs what additional SBT data with the vertex attributes and indices and material and light index.
+You would need a separate SBT for your new pipeline and add the hit record initialization accordingly.
+Then you would need to call optixLaunch() with your new OptixPipeline and matching SBT to run the simulation obviously.
+That would also need a different launch parameter block with the necessary information about your transmitter and receiver information and the output buffer which should receive your resulting connecting path of the simulation somehow. (That’s a whole different topic.)
+The SBT I’m using has an entry per instance because that made storing the vertex attribute and index pointers and material index and light index data straightforward.
+As said before, today I would recommend to build the SBT with the number of materials and put the per-instance data structs into a separate buffer which is indexed by the instanceId. That would result in a smaller SBT. Maybe something for later.
+layser
+November 19, 2021, 5:10pm
+20
+Yes, we duplicated the initPipeline() and made our own version of it.
+I do not quite understand though why we should rewrite the material system. The one already existing should be sufficient since, in our case, we just want all materials to have the same properties, just different values on the properties. Like permittivity, permeability etc. And these values later on control how the rays will interact with the objects.
+We have now created our own sbt which we use when we call optixLaunch() and also created new Raygeneration, closest hit, any hit and miss programs. When we start the optix sample and our rays using OptixTrace() inside our own Raygeneration program does not hit an object, then the sample boots up fine. But when our rays intersects with an object, then it does not boot up and we get the message “illegal instruction”.
+You mentioned hit records in your previous reply, we suspect this might be the problem. How do you mean we should initialize these? We have added the following code related to hit records in the void Device::createHitGroupRecords() function:
+Screenshot from 2021-11-19 18-05-20900×59 16.4 KB
+Kind regards!
+next page →
+Related topics
+Topic
+Replies
+Views
+Activity
+Ray tracing by Optix help and guide
+OptiX
+3
+2624
+July 6, 2021
+Application to other frequencies of electromagnetic waves
+OptiX
+1
+1292
+August 17, 2020
+OptiX basic visualization problem
+OptiX
+7
+809
+March 15, 2024
+Radiation Physics problems
+OptiX
+12
+4536
+April 25, 2017
+How CUDA works within Optix
+OptiX
+cuda
+20
+1230
+March 25, 2025
+Exploring the sample optixTriangle program
+OptiX
+4
+2004
+April 12, 2023
+optixTriangle: how to shoot rays to specific set of co-ordinates?
+OptiX
+9
+743
+June 20, 2024
+How can I make a renderer from Optix?
+OptiX
+47
+7281
+March 11, 2018
+Electromagnetic wave simulation using OptiX
+OptiX
+6
+2035
+August 15, 2022
+Comparing Optix performance to CUDA
+OptiX
+19
+6859
+January 12, 2021

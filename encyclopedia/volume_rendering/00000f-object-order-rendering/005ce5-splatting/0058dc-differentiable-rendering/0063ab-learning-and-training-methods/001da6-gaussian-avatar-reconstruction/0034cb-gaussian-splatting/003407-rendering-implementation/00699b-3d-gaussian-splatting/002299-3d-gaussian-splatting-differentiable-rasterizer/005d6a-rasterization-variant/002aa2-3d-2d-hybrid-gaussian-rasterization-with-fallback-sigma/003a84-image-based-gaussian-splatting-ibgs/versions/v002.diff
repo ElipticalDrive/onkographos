@@ -1,0 +1,331 @@
+--- v001.md
++++ v002.md
+@@ -7,13 +7,13 @@
+ 
+ ## How it works
+-IBGS decomposes the final pixel color into a base color rendered via standard 3DGS volume rendering and a learned residual derived from multi-view features. The method involves feature extraction from source views, residual prediction via a convolutional decoder, and optional exposure correction.
++IBGS decomposes the final pixel color into a base color rendered via standard 3DGS volume rendering and a learned residual derived from multi-view features [S1]. The method involves feature extraction from source views, residual prediction via a convolutional decoder, and optional exposure correction [S1].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   3D Gaussian primitives (centers $\mu_i$, covariances $\Sigma_i$, opacities $o_i$, spherical harmonics coefficients $h_i$, and normal vectors $n_i$).
+-    *   Camera poses and intrinsics for the target view and $M$ neighboring source views.
+-    *   Source images $C^m_{real}$ for $m \in \{1, \dots, M\}$.
++    *   3D Gaussian primitives (centers $\mu_i$, covariances $\Sigma_i$, opacities $o_i$, spherical harmonics coefficients $h_i$, and normal vectors $n_i$) [S1].
++    *   Camera poses and intrinsics for the target view and $M$ neighboring source views [S1].
++    *   Source images $C^m_{real}$ for $m \in \{1, \dots, M\}$ [S1].
+ *   **Outputs:**
+-    *   Final rendered image $C_{final} \in \mathbb{R}^{H \times W \times 3}$.
++    *   Final rendered image $C_{final} \in \mathbb{R}^{H \times W \times 3}$ [S1].
+ 
+ ### Data Structures
+@@ -21,5 +21,5 @@
+ *   **Feature Map:** $F \in \mathbb{R}^{H \times W \times 32}$, containing aggregated multi-view features per pixel [S1].
+ *   **Base Image:** $C \in \mathbb{R}^{H \times W \times 3}$, the result of standard 3DGS rasterization [S1].
+-*   **Ray Direction Map:** $D \in \mathbb{R} \times W \times 3$, containing camera ray directions for each pixel [S1].
++*   **Ray Direction Map:** $D \in \mathbb{R}^{H \times W \times 3}$, containing camera ray directions for each pixel [S1].
+ *   **Residual Map:** $\Delta C \in \mathbb{R}^{H \times W \times 3}$, predicted by the decoder [S1].
+ 
+@@ -32,5 +32,5 @@
+ *   $\beta$: Weight for L1 vs SSIM in loss. Value: 0.8 [S1].
+ *   $\gamma$: Weight balancing base image loss vs final image loss. Initial: 1, decreased to 0.5 in last 20,000 iterations [S1].
+-*   $\lambda_1, \lambda_2$: Loss weights for photometric and normal consistency. Value: 0.3 and 0.03 respectively (after iteration 7,000) [S1].
++*   $\lambda_1, \lambda_2$: Loss weights for photometric and normal consistency. Value: 0 for first 7,000 iterations, then 0.3 and 0.03 respectively [S1].
+ *   Opacity prune threshold: 0.05 [S1].
+ 
+@@ -38,5 +38,5 @@
+ 
+ 1.  **Base Color Rendering:** Compute the base color $c(p)$ for each pixel $p$ using standard 3DGS volume rendering [S1]:
+-    $$ c(p) = \sum_{i=1}^{K_{total}} w_i c_i $$
++    $$ c(p) = \sum_{i} w_i c_i $$
+     where $w_i = \alpha_i T_i$, $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$, $\alpha_i = o_i G_{2D}^i(p)$, and $c_i = \Psi_l(h_i, v_i)$ is the color of Gaussian $i$ evaluated at ray direction $v_i$ using SH degree $l$ [S1].
+ 
+@@ -78,12 +78,61 @@
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
++import numpy as np
++
++def project_to_image_plane(intersections, view_pose, view_intrinsics):
++    """Project 3D intersection points to 2D image coordinates of a source view."""
++    # Transform to camera space: X_c = R * (X_w - t)
++    X_c = view_pose.R @ intersections.T + view_pose.t
++    # Project: u = K * X_c / Z
++    coords = view_intrinsics.K @ X_c
++    coords = coords[:2, :] / coords[2, :]
++    return coords.T  # Shape: (N, 2)
++
++def bilinear_interpolate(image, coords):
++    """Bilinearly sample color from image at given (H, W, 2) coordinates."""
++    h, w, _ = image.shape
++    u = np.clip(coords[:, 0], 0, w - 1)
++    v = np.clip(coords[:, 1], 0, h - 1)
++    u0, v0 = np.floor(u).astype(int), np.floor(v).astype(int)
++    u1, v1 = u0 + 1, v0 + 1
++    w_u, w_v = u - u0, v - v0
++    # Interpolate
++    val = (1 - w_u) * (1 - w_v) * image[v0, u0] + \
++          w_u * (1 - w_v) * image[v0, u1] + \
++          (1 - w_u) * w_v * image[v1, u0] + \
++          w_u * w_v * image[v1, u1]
++    return val  # Shape: (N, 3)
++
++def select_median_indices(transmittance, K):
++    """Select K indices per pixel where transmittance is closest to 0.5."""
++    # transmittance shape: (H, W, N)
++    diff = np.abs(transmittance - 0.5)
++    # Get indices of K smallest differences
++    indices = np.argpartition(diff, K, axis=-1)[:, :, :K]
++    return indices  # Shape: (H, W, K)
++
++def filter_visibility(candidate_views, gaussians, camera, tau):
++    """Filter S candidate views to M visible views based on depth threshold tau."""
++    # Compute depth error for each candidate view against target view geometry
++    # Keep views where max depth error < tau
++    visible = []
++    for m in candidate_views:
++        depth_err = compute_depth_error(gaussians, camera, m)
++        if depth_err.max() < tau:
++            visible.append(m)
++    return visible[:3]  # M=3
++
++def compute_camera_feature(view_idx, ray_dirs):
++    """Compute 4D camera feature from view pose and ray directions."""
++    # Placeholder for view-specific pose encoding; returns dummy 4D feature per evidence
++    return np.zeros_like(ray_dirs)[:, :, :4]
++
++def apply_exposure(image, A_star):
++    """Apply affine exposure correction matrix A* to image."""
++    # A_star is 3x3 or 4x4 affine matrix; apply to each pixel
++    return (A_star[:3, :3] @ image.reshape(-1, 3).T + A_star[:3, 3]).T.reshape(image.shape)
+ 
+ class IBGS:
+-    def __init__(self, gaussians, source_views, K=4, M=3, S=4, tau=0.001, l=2):
+-        self.gaussians = gaussians
+-        self.source_views = source_views
++    def __init__(self, K=4, M=3, S=4, tau=0.001, l=2):
+         self.K = K
+         self.M = M
+@@ -92,151 +141,84 @@
+         self.l = l
+         # Encoder: 2 linear layers, 32 output dim, ReLU
+-        self.encoder = nn.Sequential(
+-            nn.Linear(7, 32), # 3 (color) + 4 (camera)
+-            nn.ReLU(),
+-            nn.Linear(32, 32),
+-            nn.ReLU()
+-        )
+-        # Decoder: 9-layer CNN, 3x3 kernels, input channels: 3 (C) + 3 (D) + 32 (F) = 38
+-        self.decoder = nn.Sequential(
+-            nn.Conv2d(38, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+-            nn.Conv2d(32, 3, 3, padding=1)
+-        )
+-
+-    def render_base(self, camera):
+-        """Standard 3DGS rasterization."""
+-        # Returns C (H,W,3) and T (H,W,K) for transmittance calculation
+-        # Note: Implementation details of 3DGS rasterizer are assumed from parent article
+-        pass
+-
+-    def get_median_intersections(self, ray_origins, ray_dirs, gaussians, K):
+-        """
+-        Find K intersection points where accumulated transmittance is closest to 0.5.
+-        Returns indices of these Gaussians.
+-        """
+-        # 1. Compute intersections x_i(p) for all Gaussians
+-        # x_i(p) = o + (n_i^T (mu_i - o)) / (n_i^T d) * d
+-        # 2. Compute transmittance T_i for each Gaussian along the ray
+-        # 3. Select K indices where |T_i - 0.5| is minimized
+-        pass
+-
+-    def warp_to_source_views(self, intersections, source_view_indices):
+-        """
+-        Project intersections to source views and interpolate colors.
+-        Returns warped_colors: (H, W, M, K, 3)
+-        """
+-        warped = []
+-        for m in source_view_indices:
+-            # Project intersection points to source view m
+-            coords = project_to_image_plane(intersections, self.source_views[m].pose, self.source_views[m].intrinsics)
+-            # Bilinear interpolation from source image C^m_real
+-            colors = bilinear_interpolate(self.source_views[m].image, coords)
+-            warped.append(colors) # Shape: (H, W, K, 3)
+-        return torch.stack(warped, dim=2) # (H, W, M, K, 3)
+-
+-    def extract_features(self, base_color, warped_colors, ray_dirs, source_view_indices):
+-        """
+-        Extract multi-view features.
+-        Returns F: (H, W, 32)
+-        """
+-        H, W, M, K, _ = warped_colors.shape
++        self.encoder_W1 = np.random.randn(7, 32)
++        self.encoder_b1 = np.zeros(32)
++        self.encoder_W2 = np.random.randn(32, 32)
++        self.encoder_b2 = np.zeros(32)
++        # Decoder: 9-layer CNN, 3x3 kernels, input channels: 38, output: 3
++        self.decoder_weights = [np.random.randn(32, 38, 3, 3) if i == 0 else np.random.randn(32, 32, 3, 3) for i in range(9)]
++        self.decoder_bias = [np.zeros(32) for _ in range(9)]
++        self.decoder_out_W = np.random.randn(3, 32, 3, 3)
++        self.decoder_out_b = np.zeros(3)
++
++    def encoder_forward(self, x):
++        # x: (H, W, 7)
++        x = np.tanh(x @ self.encoder_W1 + self.encoder_b1)
++        x = np.tanh(x @ self.encoder_W2 + self.encoder_b2)
++        return x  # (H, W, 32)
++
++    def decoder_forward(self, x):
++        # x: (H, W, 38) -> (H, 38, W, H) for conv
++        x = np.transpose(x, (0, 2, 1))
++        for i in range(9):
++            x = np.tanh(np.conv2d(x, self.decoder_weights[i], padding=1) + self.decoder_bias[i])
++        x = np.conv2d(x, self.decoder_out_W, padding=1) + self.decoder_out_b
++        x = np.transpose(x, (0, 2, 3, 1))
++        return x  # (H, W, 3)
++
++    def render(self, gaussians, camera, source_views):
++        # 1. Base render (standard 3DGS rasterization assumed from parent article)
++        C, transmittance, weights, ray_dirs = standard_3dgs_rasterize(gaussians, camera, self.l)
++        
++        # 2. Median intersection selection
++        median_indices = select_median_indices(transmittance, self.K)
++        
++        # 3. Warp to source views
++        candidate_views = select_closest_views(camera, source_views, self.S)
++        visible_views = filter_visibility(candidate_views, gaussians, camera, self.tau)
++        
++        warped_colors = []
++        for m in visible_views:
++            coords = project_to_image_plane(gaussians[median_indices], source_views[m].pose, source_views[m].intrinsics)
++            colors = bilinear_interpolate(source_views[m].image, coords)
++            warped_colors.append(colors)
++        warped_colors = np.stack(warped_colors, axis=2)  # (H, W, M, K, 3)
++        
++        # 4. Feature extraction
+         features = []
+-        
+-        for m in range(M):
+-            # Weighted average warped color
+-            # w_k are the blending weights from base rendering
+-            weights = self.get_blending_weights() # From base render step
+-            avg_warped = torch.sum(warped_colors[:, :, m, :, :] * weights.unsqueeze(-1), dim=3) / torch.sum(weights, dim=3).unsqueeze(-1)
++        for m in range(self.M):
++            avg_warped = np.sum(warped_colors[:, :, m, :, :] * weights[:, median_indices].reshape(weights.shape[0], weights.shape[1], self.K, 1), axis=3) / \
++                         np.sum(weights[:, median_indices], axis=3).reshape(weights.shape[0], weights.shape[1], 1)
++            delta_c = avg_warped - C
++            delta_d = compute_camera_feature(m, ray_dirs)
++            f_m = self.encoder_forward(np.concatenate([delta_c, delta_d], axis=-1))
++            features.append(f_m)
++        F = np.max(np.stack(features, axis=2), axis=2)  # (H, W, 32)
++        
++        # 5. Exposure correction (optional)
++        if exposure_correction_enabled:
++            A_star = estimate_exposure(camera, source_views)
++            C = apply_exposure(C, A_star)
+             
+-            # Appearance feature
+-            delta_c = avg_warped - base_color # (H, W, 3)
+-            
+-            # Camera feature (placeholder for actual pose-derived feature)
+-            delta_d = self.get_camera_feature(m, ray_dirs) # (H, W, 4)
+-            
+-            # Concatenate and encode
+-            input_feat = torch.cat([delta_c, delta_d], dim=-1) # (H, W, 7)
+-            f_m = self.encoder(input_feat) # (H, W, 32)
+-            features.append(f_m)
+-        
+-        # Max pooling over M views
+-        F = torch.max(torch.stack(features, dim=2), dim=2)[0] # (H, W, 32)
+-        return F
+-
+-    def forward(self, camera, gt_image=None):
+-        # 1. Base Render
+-        C, transmittance = self.render_base(camera)
+-        
+-        # 2. Median Intersections
+-        ray_origins, ray_dirs = camera.get_rays()
+-        median_indices = self.get_median_intersections(ray_origins, ray_dirs, self.gaussians, self.K)
+-        
+-        # 3. Warp
+-        # Select S closest views, then filter to M visible views
+-        candidate_views = self.select_candidates(camera, self.S)
+-        visible_views = self.filter_visibility(candidate_views, self.tau)
+-        
+-        # Get intersection points for median indices
+-        intersections = self.get_intersection_points(ray_origins, ray_dirs, self.gaussians, median_indices)
+-        
+-        warped_colors = self.warp_to_source_views(intersections, visible_views)
+-        
+-        # 4. Features
+-        F = self.extract_features(C, warped_colors, ray_dirs, visible_views)
+-        
+-        # 5. Exposure Correction (Optional)
+-        # If enabled, C = A * C
+-        # C, F updated accordingly
+-        
+-        # 6. Residual Prediction
+-        # D: (H, W, 3), F: (H, W, 32), C: (H, W, 3)
+-        # Stack for CNN input: (H, W, 38) -> (H, 38, W) for Conv2d
+-        input_tensor = torch.cat([C, ray_dirs, F], dim=-1).permute(0, 3, 1, 2)
+-        delta_C = self.decoder(input_tensor).permute(0, 2, 3, 1)
+-        
+-        # 7. Final Image
++        # 6. Residual prediction
++        D_map = ray_dirs
++        input_tensor = np.concatenate([C, D_map, F], axis=-1)
++        delta_C = self.decoder_forward(input_tensor)
++        
++        # 7. Final rendering
+         C_final = C + delta_C
+-        
+         return C_final, C, delta_C
+-
+-    def compute_loss(self, C_final, C, warped_colors, gt_image, normal_map):
+-        # L_rgb
+-        L_base = self.composite_loss(C, gt_image)
+-        L_final = self.composite_loss(C_final, gt_image)
+-        L_rgb = 1.0 * L_base + 0.0 * L_final # Gamma schedule handled in training loop
+-        
+-        # L_photo
+-        L_photo = torch.mean(torch.abs(warped_colors - gt_image.unsqueeze(1))) # Simplified
+-        
+-        # L_normal
+-        L_normal = self.normal_consistency_loss(normal_map)
+-        
+-        return L_rgb + 0.3 * L_photo + 0.03 * L_normal
+-
+-    def composite_loss(self, pred, gt):
+-        beta = 0.8
+-        l1 = torch.mean(torch.abs(pred - gt))
+-        ssim = 1.0 - self.compute_ssim(pred, gt)
+-        return beta * l1 + (1 - beta) * ssim
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the standard 3DGS rasterization and the lightweight 9-layer CNN decoder. The feature extraction involves projecting $K$ points to $M$ views, which is negligible compared to rasterization for typical $K=4, M=3$ [S1].
+-*   **Memory Complexity:** Storage footprint is identical to standard 3DGS (Gaussians + SH coefficients). The neural network weights are small and not stored per-Gaussian [S1].
++*   **Time Complexity:** Dominated by the standard 3DGS rasterization and the lightweight 9-layer CNN decoder [S1]. The feature extraction involves projecting $K$ points to $M$ views, which is negligible compared to rasterization for typical $K=4, M=3$ [S1].
++*   **Memory Complexity:** Storage footprint is identical to standard 3DGS (Gaussians + SH coefficients) [S1]. The neural network weights are small and not stored per-Gaussian [S1].
+ *   **Performance:** Significantly outperforms prior Gaussian Splatting approaches in rendering quality (PSNR, SSIM) on benchmarks like Tanks and Temples, Deep Blending, and Mip-NeRF360, without increasing storage [S1].
+ *   **Strengths:** Captures high-frequency details and view-dependent effects (specular highlights, reflections) that low-degree SH ($l \le 3$) misses, without the storage overhead of per-Gaussian textures [S1].
+-*   **Limitations:** Requires access to neighboring training images for feature extraction. Performance depends on the quality of multi-view correspondences. Exposure inconsistency between source views can introduce noise if not corrected [S1].
+-*   **When to use:** When high-fidelity novel view synthesis is required, especially for scenes with complex lighting or fine textures, and storage is constrained.
+-*   **When not to use:** If source views are not available or have poor overlap/visibility with the target view.
++*   **Limitations:** Requires access to neighboring training images for feature extraction [S1]. Performance depends on the quality of multi-view correspondences [S1]. Auto-exposure settings in cameras can cause inconsistent brightness across views, introducing noise into Gaussian optimization if uncorrected [S1].
++*   **When to use:** When high-fidelity novel view synthesis is required, especially for scenes with complex lighting or fine textures, and storage is constrained [S1].
++*   **When not to use:** If source views are not available or have poor overlap/visibility with the target view [S1].
+ 
+ ## Background
+-IBGS was proposed by Hoang Chuong Nguyen, Wei Mao, Jose M. Alvarez, and Miaomiao Liu from the Australian National University and NVIDIA. It was published on arXiv in November 2025 [S1]. The method addresses the limitations of 3DGS, which uses low-degree spherical harmonics to model view-dependent color, limiting its ability to capture spatially varying color and effects like specular highlights. Previous attempts to augment Gaussians with texture maps either struggled with complex scenes (global maps) or introduced high storage overhead (per-Gaussian maps) [S1]. IBGS leverages image-based rendering principles to "borrow" pixels from source views, modeling the residual color to supplement the base 3DGS rendering [S1].
++IBGS was proposed by Hoang Chuong Nguyen, Wei Mao, Jose M. Alvarez, and Miaomiao Liu from the Australian National University and NVIDIA [S1]. It was published on arXiv in November 2025 [S1]. The method addresses the limitations of 3DGS, which uses low-degree spherical harmonics to model view-dependent color, limiting its ability to capture spatially varying color and effects like specular highlights [S1]. Previous attempts to augment Gaussians with texture maps either struggled with complex scenes (global maps) or introduced high storage overhead (per-Gaussian maps) [S1]. IBGS leverages image-based rendering principles to "borrow" pixels from source views, modeling the residual color to supplement the base 3DGS rendering [S1].
+ 
+ ## Sources

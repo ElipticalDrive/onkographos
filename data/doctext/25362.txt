@@ -1,0 +1,2543 @@
+This is a fluid simulation program. The smoke is simulated using Euler method (grid-based method), and rendered with volume ray casting. See [this video](https://www.youtube.com/watch?v=7UAFDXSXJu4&feature=youtu.be).
+
+
+1. Prerequisites:
+	
+		opengl
+		glew
+		glfw
+		Eigen
+
+
+2. How to run:
+		
+		1. make
+		2. ./main
+
+3. Controll:
+
+		Mouse:
+		
+			1. Change angle of view with mouse left key, and zoom with middle key.
+			2. Select the Light and drag to change light position.
+
+		Keyboard:
+		
+			1. R to reset the scene.
+			2. S to switch between rendering and none rendering mode.
+			3. W to toggle slices outline on/off.
+			4. ESC to quit.
+
+4. Screenshots:
+
+	![ScreenShot](https://raw.githubusercontent.com/nevermoe/SmokeSimulation/master/screenshots/screenshot1.png)
+ 	![ScreenShot](https://raw.githubusercontent.com/nevermoe/SmokeSimulation/master/screenshots/screenshot2.png)
+ 	![ScreenShot](https://raw.githubusercontent.com/nevermoe/SmokeSimulation/master/screenshots/no_rendering.png)
+ 	![ScreenShot](https://raw.githubusercontent.com/nevermoe/SmokeSimulation/master/screenshots/drawframe.png)
+
+### arcball.cpp
+```
+#include "core.h"
+#include "arcball.h"
+
+/**
+ * \ingroup GLVisualization
+ * Default constructor, it sets the _ballRadius to 600
+ **/
+Arcball::Arcball()
+{
+	_ballRadius = 600;
+	_isRotating = false;
+	_isDragging = false;
+	_zoomRate = 0.3;
+	_winX = _winY = 0;
+	Reset();
+}
+
+/**
+ * \ingroup GLVisualization
+ * Set _winX and _winY of the current windows, it's needed every time you resize the window
+ * \param w _winX of the rendering window
+ * \param h _winY of the rendering window
+ **/
+void Arcball::SetWidthHeight(int w, int h)
+{  
+	_winX = w;
+	_winY = h;
+	_ballRadius = std::min((int)(w/2), (int)(h/2));
+}
+
+/**
+ * \ingroup GLVisualization
+ * Set the radius of the ball (a typical radius for a 1024x768 window is 600
+ * \param newRadius The radius of the spherical dragging area
+ **/
+void Arcball::SetRadius(float newRadius)
+{  
+	_ballRadius = newRadius;
+}
+
+void Arcball::StartDragging(int x, int y)
+{
+	_startDragX = x;
+	_startDragY = y;
+	_isDragging = true;
+	_upDir = Eigen::Vector3f(0.0, 1.0, 0.0);
+
+	GLdouble mvMatrix[16];
+	glGetDoublev(GL_MODELVIEW_MATRIX, mvMatrix);
+	_viewDir[0] = -mvMatrix[2];
+	_viewDir[1] = -mvMatrix[6];
+	_viewDir[2] = -mvMatrix[10];
+#if 0
+	_upDir[0] = mvMatrix[1];
+	_upDir[1] = mvMatrix[5];
+	_upDir[2] = mvMatrix[9];
+	_rightDir[0] = mvMatrix[0];
+	_rightDir[1] = mvMatrix[4];
+	_rightDir[2] = mvMatrix[8];
+#else
+	_upDir = Eigen::Vector3f(0.0, 1.0, 0.0);
+	_rightDir = _viewDir.cross(_upDir);
+#endif
+}
+
+Eigen::Vector3f Arcball::UpdateDragging(int nx, int ny)
+{
+	_dragRate = 0.003 * _winX/1024;
+	Eigen::Vector3f offset;
+#if 1
+	offset[0] = _dragRate * _rightDir[0] * (nx - _startDragX);
+	offset[1] = _dragRate * _upDir[1] * (_startDragY - ny);
+	offset[2] = _dragRate * _rightDir[2]*(nx-_startDragX) + _upDir[2]* (_startDragY-ny);
+#else
+	_viewDir.normalize();
+	offset[0] = _dragRate * _viewDir[0] * (nx - _startDragX);
+	offset[1] = _dragRate * _rightDir[0] * (_startDragY - ny);
+	offset[2] = _dragRate * _upDir[0]*(nx-_startDragX) + _upDir[0]* (_startDragY-ny);
+#endif
+
+	_startDragX = nx;
+	_startDragY = ny;
+	return offset;
+}
+
+void Arcball::StopDragging()
+{
+	_isDragging = false;
+}
+
+void Arcball::StartZooming(int x, int y)
+{
+	//store original transform matrix
+	glGetFloatv(GL_MODELVIEW_MATRIX, _startMatrix);
+
+	_startZoomX = x;
+	_startZoomY = y;
+	_isZooming = true;
+}
+
+void Arcball::UpdateZooming(int x, int y)
+{
+	if (_isZooming) {
+		glMatrixMode(GL_MODELVIEW);
+		glLoadIdentity();
+		glTranslatef(0.0f, 0.0f, _zoomRate * (x - _startZoomX) );
+	}
+	ApplyRotationMatrix();
+}
+
+void Arcball::StopZooming()
+{
+	_isZooming = false;
+}
+
+/**
+ * \ingroup GLVisualization
+ * Start the rotation. Use this method in association with the left click.
+ * Here you must give directly the coordinates of the mouse as the glut functions extract. This method supposes that the 0,0 is in the upper-left part of the screen
+ * \param _x Horizontal position of the mouse (0,0) = upperleft corner (w,h) = lower right
+ * \param _y Vertical position of the mouse (0,0) = upperleft corner (w,h) = lower right
+ *
+ **/
+void Arcball::StartRotation(int _x, int _y)
+{
+	int x = ( (_x)-(_winX/2) );
+	int y = ((_winY/2)-_y);
+
+	//store original transform matrix
+	glGetFloatv(GL_MODELVIEW_MATRIX, _startMatrix);
+
+	_startRotationVector = ConvertXY(x,y);
+	_startRotationVector.normalize();
+
+	_currentRotationVector=  _startRotationVector;
+	_isRotating = true;
+
+}
+
+/**
+ * \ingroup GLVisualization
+ * Update the rotation. Use this method in association with the drag event.
+ * Here you must give directly the coordinates of the mouse as the glut functions extract. This method supposes that the 0,0 is in the upper-left part of the screen
+ * \param _x Horizontal position of the mouse (0,0) = upperleft corner (w,h) = lower right
+ * \param _y Vertical position of the mouse (0,0) = upperleft corner (w,h) = lower right
+ **/
+void Arcball::UpdateRotation(int _x, int _y)
+{  
+	int x = ( (_x)-(_winX/2) );
+	int y = ((_winY/2)-_y);
+
+	_currentRotationVector = ConvertXY(x,y);
+
+	_currentRotationVector.normalize();
+
+	//Fixed by MY
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	ApplyRotationMatrix();
+}
+
+/**
+ * \ingroup GLVisualization
+ * Apply the computed rotation matrix
+ * This method must be invoked inside the \code glutDisplayFunc() \endcode
+ *
+ **/
+void Arcball::ApplyRotationMatrix()
+{  
+	//recover original matrix
+	glMultMatrixf(_startMatrix);
+
+	if (_isRotating) { 
+		// Do some rotation according to start and current rotation vectors
+		//cerr << _currentRotationVector.transpose() << " " << _startRotationVector.transpose() << endl;
+		if ( ( _currentRotationVector - _startRotationVector).norm() > 1E-6 )	{
+			Eigen::Vector3d rotationAxis = _currentRotationVector.cross(_startRotationVector);
+			rotationAxis.normalize();
+
+			//FIXED by MY
+			Eigen::Matrix3d sm;
+			for(int i = 0 ; i < 3 ; i++)
+				for(int j = 0 ; j < 3 ; j++)
+					sm(i,j) = (double)_startMatrix[4*i+j];
+			rotationAxis = sm * rotationAxis;
+
+			double val = _currentRotationVector.dot(_startRotationVector);
+			val > (1-1E-10) ? val=1.0 : val=val ;
+			double rotationAngle = acos(val) * 180.0f/(float)M_PI;
+
+			// rotate around the current position
+			glRotatef(rotationAngle * 2, -rotationAxis.x(),  -rotationAxis.y(),-rotationAxis.z());
+		}
+	}
+}
+
+/**
+ * \ingroup GLVisualization
+ * Stop the current rotation and prepare for a new click-then-drag event
+ *
+ **/
+void Arcball::StopRotation()
+{
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	ApplyRotationMatrix();
+	_isRotating = false;
+}
+
+
+Eigen::Vector3d Arcball::ConvertXY(int x, int y)
+{
+
+	int d = x*x+y*y;
+	float radiusSquared = _ballRadius * _ballRadius;
+	if (d > radiusSquared) {
+		return Eigen::Vector3d((float)x,(float)y, 0 );
+	}
+	else {  
+		return Eigen::Vector3d((float)x,(float)y, sqrt(radiusSquared - d));
+	}
+}
+
+/**
+ * \ingroup GLVisualization
+ * Reset the current transformation to the identity
+ **/
+void Arcball::Reset()
+{  
+	// reset matrix
+	memset(_startMatrix, 0, sizeof(_startMatrix));
+	_startMatrix[0] = 1;
+	_startMatrix[1] =0;
+	_startMatrix[2] = 0;
+	_startMatrix[3] = 0;
+	_startMatrix[4] = 0;
+	_startMatrix[5] =1;
+	_startMatrix[6] = 0;
+	_startMatrix[7] = 0;
+	_startMatrix[8] = 0;
+	_startMatrix[9] =0;
+	_startMatrix[10] = 1;
+	_startMatrix[11] = 0;
+	_startMatrix[12] = 0;
+	_startMatrix[13] =0;
+	_startMatrix[14] = 0;
+	_startMatrix[15] = 1;
+
+	_startZoomX = _startZoomY = 0;
+}
+```
+
+### arcball.h
+```
+#ifndef _ARCBALL_H
+#define _ARCBALL_H
+
+/*
+ * \class Arcball
+ * \ingroup GLVisualization
+ * \brief Arcball is a method to manipulate and rotate objects in 3D intuitively.
+ *
+ * The motivation behind the trackball (aka arcball) is to provide an intuitive user interface for complex 3D
+ * object rotation via a simple, virtual sphere - the screen space analogy to the familiar input device bearing
+ * the same name.
+ *
+ * The sphere is a good choice for a virtual trackball because it makes a good enclosure for most any object;
+ * and its surface is smooth and continuous, which is important in the generation of smooth rotations in response
+ * to smooth mouse movements.
+ * Any smooth, continuous shape, however, could be used, so long as points on its surface can be generated
+ *  in a consistent way.
+ * The algorithm for accomplishing this, needs to perform the following steps (not neseccarily in order).
+ *
+ *
+ *
+ *
+ * \b ArcBall Algorithm made easy
+ *  - Detect the left-button of the mouse being depressed.
+ *  - Keep track of the last known mouse position.
+ *  - Treat the mouse position as the projection of a point on the hemi-sphere down to the image plane (along the z-axis), and determine that point on the hemi-sphere.
+ *  - Detect the mouse movement
+ *  - Determine the great circle connecting the old mouse-hemi-sphere point to the current mouse-hemi-sphere point.
+ *  - Calculate the normal to this plane. This will be the axis about which to rotate.
+ *  - Set the OpenGL state to modify the MODELVIEW matrix.
+ *  - Read off the current matrix, since we want this operation to be the last transformation, not the first, and OpenGL does things LIFO.
+ *  - Reset the model-view matrix to the identity
+ *  - Rotate about the axis
+ *  - Multiply the resulting matrix by the saved matrix.
+ *  - Force a redraw of the scene.
+ *
+ * An example of the code for using successfully this class is the following:
+ * First set the radius of the arcball by using the appropriate method when you call the handle to the GLUT resize method (this is usually accomplished with a
+ * \code
+ * void handleResize(int w, int h)
+ * \endcode
+ * function in GLUT (if you are using Qt or other, please refer to the relative API ).
+ * An example of a \code handleResize(int w, int h) \endcode function is the following:
+ * \code
+ * void handleResize(int w, int h)
+ * {
+ *   arcball.setWidthHeight(w, h);
+ *   glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+ *   glViewport(0, 0, w, h);
+ *
+ *   glMatrixMode(GL_PROJECTION);
+ *   glLoadIdentity();
+ *   gluPerspective(viewAngle, (float)w / (float)w, zNear, zFar );
+ *
+ *   glMatrixMode(GL_MODELVIEW);
+ * }
+ * \endcode
+ *
+ *
+ These are the two functions (GLUT) that control the mouse events:
+ * \code
+ * void mouseFunc(int state, int button, int _x , int _y)
+ * {
+ *   if ( button == GLUT_LEFT_BUTTON )
+ *       arcball.startRotation(_x,_y);
+ *   else
+ *       arcball.stopRotation();
+ *
+ *
+ *   glutPostRedisplay();
+ * }
+ *
+ * void mouseDrag(int _x, int _y)
+ * {
+*
+*   arcball.updateRotation(_x,_y);
+*   glutPostRedisplay();
+* }
+*
+* \endcode
+*
+*/
+
+
+
+#include "core.h"
+
+typedef float GLMatrix[16];
+
+class Arcball
+{
+private:
+
+	//window size
+	int _winX, _winY;
+
+	//for zooming
+	float _zoomRate;
+	float _startZoomX, _startZoomY;
+
+	//for dragging (points in 3d scenes)
+	float _dragRate;
+	float _startDragX, _startDragY;
+
+	Eigen::Vector3f _viewDir;
+	Eigen::Vector3f _upDir;
+	Eigen::Vector3f _rightDir;
+
+	GLMatrix _startMatrix;
+	Eigen::Vector3d _startRotationVector;
+	Eigen::Vector3d _currentRotationVector;
+
+
+	bool _isZooming;
+	bool _isRotating;
+	bool _isDragging;
+	float _ballRadius;
+
+	//tool functions
+	Eigen::Vector3d ConvertXY(int x, int y);
+	void ApplyRotationMatrix();
+public:
+	Arcball();
+
+	void SetWidthHeight(int w, int h);
+	void SetRadius(float newRadius);
+
+	//rotation
+	void StartRotation(int x, int y);
+	void UpdateRotation(int x, int y);
+	void StopRotation();
+
+	//zooming
+	void StartZooming(int x, int y);
+	void UpdateZooming(int x, int y);
+	void StopZooming();
+
+	//dragging
+	void StartDragging(int x, int y);
+	Eigen::Vector3f UpdateDragging(int x, int y);
+	void StopDragging();
+
+
+	void Reset();
+};
+
+
+#endif
+```
+
+### camera.cpp
+```
+#include "core.h"
+#include "camera.h"
+
+Camera::Camera(GLFWwindow* windowHandle) {
+#ifdef DEBUG_LEVEL
+	std::cout << __FILE__ << " " << __FUNCTION__ << std::endl;
+#endif
+	_windowHandle = windowHandle;
+
+	//SetLight();
+	Reset();
+}
+
+void Camera::SetLight()
+{
+	//set light
+	static const GLfloat light_position[] = {2.0f, 1.0f, 10.0f, 1.0f};
+	static const GLfloat light_ambient[]  = {0.2f, 0.2f, 0.2f, 1.0f};
+	static const GLfloat light_diffuse[]  = {1.0f, 1.0f, 0.0f, 1.0f};
+	static const GLfloat light_specular[] = {1.0f, 0.0f, 1.0f, 1.0f};
+
+	glLightfv(GL_LIGHT0, GL_POSITION, light_position);
+	glLightfv(GL_LIGHT0, GL_AMBIENT,  light_ambient);
+	glLightfv(GL_LIGHT0, GL_DIFFUSE,  light_diffuse);
+	glLightfv(GL_LIGHT0, GL_SPECULAR, light_specular);
+
+
+	/*
+	const static GLfloat mat_diffuse[] = {1.0f, 0.0f, 0.0f, 1.0f};
+	const static GLfloat green_color[] = {0.0f, 1.0f, 0.0f, 0.3333f};
+	const static GLfloat blue_color[] = {0.0f, 0.0f, 1.0f, 0.5f};
+
+	
+	GLfloat mat_shininess = 30.0;
+	static const GLfloat mat_specular[] = {0.0f, 1.0f, 0.0f, 1.0f};
+	static const GLfloat mat_emission[] = {0.0f, 0.0f, 0.0f, 1.0f};
+
+	glMaterialfv(GL_FRONT, GL_AMBIENT_AND_DIFFUSE, mat_diffuse);
+	glMaterialfv(GL_FRONT, GL_SPECULAR,  mat_specular);
+	glMaterialfv(GL_FRONT, GL_EMISSION,  mat_emission);
+	glMaterialf (GL_FRONT, GL_SHININESS, mat_shininess);
+	*/
+
+
+	glEnable(GL_LIGHTING);
+	glEnable(GL_LIGHT0);
+}
+
+void Camera::RegisterParentWindow(GLFWwindow* windowHandle)
+{
+	_windowHandle = windowHandle;
+}
+
+void Camera::Reset()
+{
+
+	glfwGetWindowSize(_windowHandle, &_winX, &_winY);
+	_FOV = 60.0f;
+	_aspect = (GLfloat)_winX / _winY;
+	_nearClip = 0.1f;
+	_farClip = 100.0f;
+
+#if 1
+	glEnable(GL_DEPTH_TEST);
+#else
+	glDisable(GL_DEPTH_TEST);
+#endif
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+
+	// Set perspective projection
+	gluPerspective(_FOV, _aspect, _nearClip, _farClip);
+
+	glViewport(0, 0, _winX, _winY);
+
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+}
+
+void Camera::SetAspect(GLfloat aspect)		
+{
+	_aspect = aspect;
+}
+```
+
+### camera.h
+```
+#ifndef _CAMERA_H
+#define _CAMERA_H
+
+#include "core.h"
+
+class Camera {
+public:
+	Camera(GLFWwindow* windowHandle);
+
+	void Reset();
+	void SetLight();
+	void RegisterParentWindow(GLFWwindow* windowHandle);
+
+	
+	// Access functions
+	void SetAspect(GLfloat aspect);
+
+private:
+	// Perspective controls
+	GLfloat _FOV;		// Field of View Angle
+	GLfloat _aspect;	// Aspect Ratio
+	GLfloat _nearClip;	// Near clipping plane distance
+	GLfloat _farClip;	// Far clipping plane distance
+	int _winX;
+	int _winY;
+
+
+	GLFWwindow* _windowHandle;
+};
+
+/*
+The Camera class provides a simple means to controlling the 3D camera. It could
+be extended to support more interactive controls. Ultimately. the camera sets the
+GL projection and viewing matrices.
+*/
+
+#endif
+```
+
+### controller.cpp
+```
+#include "core.h"
+#include "controller.h"
+
+extern Controller* g_controller;
+
+//set callback functions
+static void error_callback(int error, const char* description)
+{
+    fputs(description, stderr);
+}
+
+static void resize(GLFWwindow *window, int x,int y)
+{
+	::g_controller->Resize(window, x, y);
+}
+
+static void keyboard(GLFWwindow * window, int key, int scancode,int action, int mods)		
+{
+	::g_controller->Keyboard(window, key, scancode, action, mods);
+}
+
+static void mousebutton(GLFWwindow *window,int button,int action,int mods)	
+{
+	::g_controller->MouseButton(window, button, action, mods);
+}
+
+static void mousemotion(GLFWwindow *window, double x, double y)
+{
+	::g_controller->MouseMotion(window, x, y);
+}
+
+static void mousescroll(GLFWwindow *window, double x, double y)
+{
+	::g_controller->MouseScroll(window, x, y);
+}
+
+void Controller::RegisterObject(Object* object)
+{
+	object->RegisterParentWindow(_windowHandle);
+	object->Reset();
+	_objects[_objectNo++] = object;
+	_activeObj++;
+}
+
+
+Controller::Controller(int argc,char **argv, const char *windowName) 
+{
+	_windowName = windowName;
+
+	//for timer
+	_elapsedTime = 0;
+	_numOfFrame = 0;
+	_fps = 0;
+
+	_winX = 1280;
+	_winY = 960;
+
+	_activeObj = -1;
+	_objectNo = 0;
+	_maxObjectNo = 100;
+	_objects = new Object*[_maxObjectNo];
+
+	_isCtrlPressed = _isLeftKeyPressed = _isMiddleKeyPressed = _isRightKeyPressed = false;
+	_isLightOn = true;
+	_prevCursorX = _prevCursorY = 0;
+
+	// Initialize components
+	if (!glfwInit()) {
+		std::cerr << "glfwInit() failed!" << std::endl;
+		exit(-1);
+	}
+
+	// Create the window
+	_windowHandle = glfwCreateWindow(_winX, _winY, windowName, NULL, NULL);
+	if (!_windowHandle) {
+		std::cerr << "Create Window failed"  << std::endl;
+		exit(-1);
+	}
+	glfwMakeContextCurrent(_windowHandle);
+	glfwSetWindowPos(_windowHandle, 0, 0);
+
+	// Background color
+	glClearColor( 0., 0., 0., 1. );
+
+	// Callbacks
+	glfwSetErrorCallback(error_callback);
+	glfwSetMouseButtonCallback(_windowHandle, mousebutton);
+	glfwSetScrollCallback(_windowHandle, mousescroll);
+	glfwSetCursorPosCallback(_windowHandle, mousemotion);
+	glfwSetKeyCallback(_windowHandle, keyboard);
+	glfwSetWindowSizeCallback(_windowHandle, resize);
+
+	if(glewInit() != GLEW_OK) {
+		std::cerr << "glewInit() failed!" << std::endl;
+		exit(-1);
+	}
+
+	//InitCamera();
+}
+
+void Controller::InitCamera()
+{
+	_camera = new Camera(_windowHandle);
+}
+
+void Controller::BeginLoop()
+{
+	while (!glfwWindowShouldClose(_windowHandle))
+    {
+        /* Render here */
+		::g_controller->Render();
+
+        /* Swap front and back buffers */
+        glfwSwapBuffers(_windowHandle);
+
+        /* Poll for and process events */
+        glfwPollEvents();
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+Controller::~Controller() {
+	glFinish();
+	glfwDestroyWindow(_windowHandle);
+	glfwTerminate();
+}
+
+void Controller::Reset() {
+#ifdef DEBUG_LEVEL
+	std::cout << __FILE__ << " " << __FUNCTION__ << std::endl;
+#endif
+	_camera->Reset();
+
+	for(int i = 0 ; i < _objectNo ; i++)
+		_objects[i]->Reset();
+}
+
+void Controller::_ComputeFPS()
+{
+	_numOfFrame++;
+	_elapsedTime += _timer.StopTimer();
+	_timer.StartTimer();
+	if(_elapsedTime > 1) {
+		_fps = _numOfFrame / _elapsedTime;
+		//std::cout << _fps  << " "<< _numOfFrame << std::endl;
+		_elapsedTime = 0;
+		_numOfFrame = 0;
+	}
+	
+	//clear stringstream buffer
+	_titleInfo.str("");
+	_titleInfo << _windowName;
+	_titleInfo << "     FPS: ";
+	_titleInfo << std::setprecision(4) << _fps;
+	_titleInfo.width(2);
+}
+
+void Controller::Render() {
+
+	//compute fps and display 
+	_ComputeFPS();
+	glfwSetWindowTitle(_windowHandle, _titleInfo.str().c_str() );
+
+
+	//Begin drawing scene
+	_camera->Reset();
+	for(int i = 0 ; i < _objectNo ; i++) {
+		_objects[i]->SimulateStep();
+		_objects[i]->Show();
+	}
+
+
+	//Finish drawing scene
+	//glFinish();
+}
+
+int Controller::GetActiveObject(int mx, int my)
+{
+	//FIXME: do some judgement;
+	return _activeObj;
+}
+
+void Controller::Quit() {
+	glFinish();
+	glfwDestroyWindow(_windowHandle);
+	exit(0);
+}
+
+
+void Controller::Resize(GLFWwindow *window, int x, int y) {
+	_winX = x;
+	_winY = y;
+	
+	for(int i = 0 ; i < _objectNo ; i++)
+		_objects[i]->Resize(window, x, y);
+}
+
+void Controller::Keyboard(GLFWwindow * window, int key, int scancode, int action, int mods)
+{
+	if (action == GLFW_PRESS) {
+		switch(key) {
+			case GLFW_KEY_ESCAPE:		// Escape
+				Quit();
+				break;
+			case GLFW_KEY_R:			//reset
+				Reset();
+				break;
+			case GLFW_KEY_LEFT_CONTROL:
+				_isCtrlPressed = true;
+				break;
+		}
+	}
+	else if(action == GLFW_RELEASE)
+		switch (key) {
+			case GLFW_KEY_LEFT_CONTROL:
+				_isCtrlPressed = false;
+				break;
+		}
+
+	//route message to active object
+	_objects[_activeObj]->Keyboard(window, key, scancode, action, mods);
+}
+
+
+void Controller::MouseButton(GLFWwindow *window, int button,int action,int mods) 
+{
+	//get active object and then transfer the message to the object
+	if(action == GLFW_PRESS) {
+		glfwGetCursorPos(window, &_prevCursorX, &_prevCursorY);
+	}
+	_activeObj = GetActiveObject(_prevCursorX, _prevCursorY);
+	_objects[_activeObj]->MouseButton(window, button, action, mods);
+}
+
+
+void Controller::MouseMotion(GLFWwindow *window, double nx, double ny) 
+{
+	_objects[_activeObj]->MouseMotion(window, nx, ny);
+}
+
+void Controller::MouseScroll(GLFWwindow *window, double nx, double ny)
+{
+	_objects[_activeObj]->MouseScroll(window, nx, ny);
+}
+```
+
+### controller.h
+```
+#ifndef _CONTROLLER_H 
+#define _CONTROLLER_H
+
+#include "core.h"
+#include "object.h"
+#include "arcball.h"
+#include "camera.h"
+#include "timer.h"
+
+class Controller {
+public:
+	Controller(int argc,char **argv, const char *windowName);
+	~Controller();
+
+	void BeginLoop();
+	void RegisterObject(Object* object);
+
+	void Reset();
+	void Render();
+	void InitCamera();
+
+	int GetActiveObject(int mx, int my);
+
+	void Quit();
+
+	// Event handlers
+	void Resize(GLFWwindow *window, int x, int y);
+	void Keyboard(GLFWwindow * window, int key, int scancode,int action, int mods);
+	void MouseButton(GLFWwindow *window, int btn, int action, int mods);
+	void MouseMotion(GLFWwindow *window, double x, double y);
+	void MouseScroll(GLFWwindow *window, double x, double y);
+
+private:
+	// Window management
+	std::string _windowName;
+	std::stringstream _titleInfo;
+	GLFWwindow *_windowHandle;
+	int _winX, _winY;
+
+	// Input
+	bool _isLeftKeyPressed, _isCtrlPressed, _isRightKeyPressed, _isMiddleKeyPressed;
+	bool _isLightOn;
+	
+	double _prevCursorX, _prevCursorY;
+
+	Object** _objects;
+	int _objectNo;
+	int _maxObjectNo;
+	int _activeObj;
+
+	Camera* _camera;
+
+	void _ComputeFPS();
+	Timer _timer;
+	double _elapsedTime;
+	int _numOfFrame;
+	double _fps;
+};
+
+#endif
+```
+
+### core.h
+```
+#ifndef _CORE_H
+#define _CORE_H
+
+#define PI 3.14159
+#define INF (1<<31)
+//#define DEBUG_LEVEL
+
+#include <cmath>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <ctype.h>
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <algorithm>
+#include <map>
+#include <string>
+#include <sstream>
+#include <iomanip>
+
+
+
+#include <Eigen/Dense>
+#include <Eigen/Sparse>
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
+#include <Eigen/SparseCholesky>
+#include <Eigen/SparseQR>
+#include <Eigen/SparseLU>
+#include <Eigen/IterativeLinearSolvers>
+#include <GL/glew.h>
+#define GLFW_INCLUDE_GLU
+#include <GLFW/glfw3.h>
+
+#include <GL/gl.h>
+#include <GL/glu.h>
+
+#include "event_listener.h"
+
+//#include <OpenMesh/Core/IO/MeshIO.hh>
+//#include <OpenMesh/Core/Mesh/PolyMesh_ArrayKernelT.hh>
+//#include <OpenMesh/Core/Mesh/TriMesh_ArrayKernelT.hh>
+//#include <glm/glm.hpp>
+
+#endif
+```
+
+### event_listener.h
+```
+class EventListener {
+public:
+	virtual void MouseButton(GLFWwindow *window, int button,int action,int mods) = 0;
+	virtual void MouseMotion(GLFWwindow *window, double nx, double ny) = 0;
+	virtual void Keyboard(GLFWwindow * window, int key, int scancode, int action, int mods)	= 0;
+	virtual void Resize(GLFWwindow *window, int x, int y) = 0;
+};
+```
+
+### fluid.cpp
+```
+#include "fluid.h"
+
+Fluid::Fluid()
+{
+	diffusion = 0.00001f;
+	viscosity = 0.000000f;
+	buoyancy  = 4.0f;
+	vc_eps    = 5.0f;
+	_dt = DT;
+	_isLightSelected = false;
+	_isRendering = true;
+	_isDrawSliceOutline = false;
+
+	for (int i=0; i<10; i++)
+		ClearBuffer(_buffers[i]);
+
+	int i=0;
+	_density=_buffers[i++]; _densityTmp=_buffers[i++];
+	_velX=_buffers[i++]; _velXTmp=_buffers[i++];
+	_velY=_buffers[i++]; _velYTmp=_buffers[i++];
+	_velZ=_buffers[i++]; _velZTmp=_buffers[i++];
+
+	ClearSources();
+
+	_lightPos[0] = -1.2f;
+	_lightPos[1] = 0.2f;
+	_lightPos[2] = 1.2f;
+	_renderer = new Renderer(_density, RES);
+	_renderer->SetLightPostion(_lightPos);
+}
+
+const float* Fluid::GetDensity()
+{
+	return _density;
+}
+
+bool Fluid::LightSelected(double mouseX, double mouseY)
+{
+	GLdouble mvMatrix[16], projMatrix[16];
+	GLint viewportMatrix[4];
+	double objX = 0, objY = 0, objZ = 0;
+	glGetDoublev(GL_MODELVIEW_MATRIX, mvMatrix);
+	glGetDoublev(GL_PROJECTION_MATRIX, projMatrix);
+	glGetIntegerv(GL_VIEWPORT, viewportMatrix);
+
+	//point on 'near' plane
+	gluUnProject(mouseX, _winY-mouseY, 0.0,  mvMatrix,  projMatrix,
+			viewportMatrix, &objX, &objY, &objZ);
+	Eigen::Vector3f ptNear(objX,objY, objZ); 
+
+	//point on 'far' plane
+	gluUnProject(mouseX, _winY-mouseY, 1.0,  mvMatrix,  projMatrix,
+			viewportMatrix, &objX, &objY, &objZ);
+	Eigen::Vector3f ptFar(objX,objY, objZ); 
+
+#if 1
+	//calculate distance between point and line
+	Eigen::Vector3f crossProduct = (_lightPos-ptNear).cross(_lightPos-ptFar);
+	float dist = crossProduct.norm() /
+		(ptFar-ptNear).norm();
+#else
+	//another method: calculate distance between point and line
+	Eigen::Vector3f lineDir = (ptFar-ptNear);
+	lineDir.normalize();
+	Eigen::Vector3f pointDir = (_lightPos-ptNear);
+	float t = pointDir.dot(lineDir);
+	Eigen::Vector3f projection = ptNear + (lineDir * t);
+	float dist = (projection-_lightPos).norm();
+#endif
+	if (dist < 0.1)
+		return true;
+
+	return false;
+}
+
+void Fluid::MouseButton(GLFWwindow *window, int button,int action,int mods) 
+{
+	double mouseX, mouseY;
+	if(button == GLFW_MOUSE_BUTTON_LEFT) {
+		::glfwGetCursorPos(window, &mouseX, &mouseY);
+		if(action == GLFW_PRESS) {
+			_isLeftKeyPressed = true;
+
+			if (LightSelected(mouseX, mouseY)) {
+				std::cout << "light selected" << std::endl;
+				_isLightSelected = true;
+				_arcball.StartDragging(mouseX, mouseY);
+			}
+			_arcball.StartRotation(mouseX, mouseY);
+		}
+		else if(action == GLFW_RELEASE) {
+			_isLeftKeyPressed = false;
+			_isLightSelected = false;
+			_arcball.StopRotation();
+			_arcball.StopDragging();
+		}
+	}
+	else if(button == GLFW_MOUSE_BUTTON_MIDDLE) {
+		_isMiddleKeyPressed = (action == GLFW_PRESS);
+	}
+	else if(button == GLFW_MOUSE_BUTTON_RIGHT) {
+#if 0
+		if (action == GLFW_PRESS) {
+			_isRightKeyPressed = true;
+			::glfwGetCursorPos(window, &mouseX, &mouseY);
+			_arcball.StartZooming(mouseX, mouseY);
+		}
+		else if(action ==GLFW_RELEASE) {
+			_isRightKeyPressed = false;
+			_arcball.StopZooming();
+		}
+#endif
+	}
+}
+
+void Fluid::MouseMotion(GLFWwindow *window, double nx, double ny) 
+{
+	if(_isLeftKeyPressed && _isCtrlPressed) {
+	}
+	else if(_isLeftKeyPressed && _isLightSelected) {
+		_lightPos += _arcball.UpdateDragging(nx, ny);
+		_renderer->SetLightPostion(_lightPos);
+	}
+	else if(_isLeftKeyPressed) {
+		_arcball.UpdateRotation(nx, ny);
+	}
+#if 0
+	else if(_isRightKeyPressed) {
+		_arcball.UpdateZooming(nx, ny);
+	}
+#endif
+}
+
+void Fluid::Keyboard(GLFWwindow * window, int key, int scancode, int action, int mods)
+{
+	if (action == GLFW_PRESS) {
+		switch(key) {
+			case GLFW_KEY_S:		// Rendering on/off
+				_isRendering = !_isRendering;
+				_renderer->SetRendering(_isRendering);
+				break;
+			case GLFW_KEY_W:		//wireframe on/off
+				_isDrawSliceOutline = !_isDrawSliceOutline;
+				_renderer->SetSliceOutline(_isDrawSliceOutline);
+				break;
+		}
+	}
+}
+
+Fluid::~Fluid()
+{
+}
+
+#define BOUNDARY
+#undef BOUNDARY
+void Fluid::EnforceBoundary(int b, float* quantity)
+{
+#ifdef BOUNDARY
+	int i, j;
+	for (i=1; i<=N; i++)
+	{
+		for (j=1; j<=N; j++) {
+			quantity[_I(0,i,j)]    = (b==1) ? -quantity[_I(1,i,j)] : quantity[_I(1,i,j)];
+			quantity[_I(N+1,i,j)]  = (b==1) ? -quantity[_I(N,i,j)] : quantity[_I(N,i,j)];
+			quantity[_I(i,0,j)]    = (b==2) ? -quantity[_I(i,1,j)] : quantity[_I(i,1,j)];
+			quantity[_I(i,N+1,j)]  = (b==2) ? -quantity[_I(i,N,j)] : quantity[_I(i,N,j)];
+			quantity[_I(i,j,0)]    = (b==3) ? -quantity[_I(i,j,1)] : quantity[_I(i,j,1)];
+			quantity[_I(i,j,N+1)]  = (b==3) ? -quantity[_I(i,j,N)] : quantity[_I(i,j,N)];
+		}
+	}
+
+	quantity[_I(0,0,0)]       = (quantity[_I(1,0,0)]    + quantity[_I(0,1,0)]     + quantity[_I(0,0,1)])    / 3;
+	quantity[_I(0,N+1,0)]     = (quantity[_I(1,N+1,0)]  + quantity[_I(0,N,0)]     + quantity[_I(0,N+1,1)])  / 3;
+	quantity[_I(N+1,0,0)]     = (quantity[_I(N,0,0)]    + quantity[_I(N+1,1,0)]   + quantity[_I(N+1,0,1)])  / 3;
+	quantity[_I(N+1,N+1,0)]   = (quantity[_I(N,N+1,0)]  + quantity[_I(N+1,N,0)]   + quantity[_I(N+1,N+1,1)])/ 3;
+	quantity[_I(0,0,N+1)]     = (quantity[_I(1,0,N+1)]  + quantity[_I(0,1,N+1)]   + quantity[_I(0,0,N)])    / 3;
+	quantity[_I(0,N+1,N+1)]   = (quantity[_I(1,N+1,N+1)]+ quantity[_I(0,N,N+1)]   + quantity[_I(0,N+1,N)])  / 3;
+	quantity[_I(N+1,0,N+1)]   = (quantity[_I(N,0,N+1)]  + quantity[_I(N+1,1,N+1)] + quantity[_I(N+1,0,N)])  / 3;
+	quantity[_I(N+1,N+1,N+1)] = (quantity[_I(N,N+1,N+1)]+ quantity[_I(N+1,N,N+1)] + quantity[_I(N+1,N+1,N)])/ 3;
+#endif
+}
+
+void Fluid::AddSource(float* src, float *dst)
+{
+	int i;
+
+	for (i=0; i<SIZE; i++)
+		dst[i] += src[i]*_dt;
+}
+
+void Fluid::AddBuoyancy()
+{
+	int i;
+
+	for (i=0; i<SIZE; i++)
+		_velY[i] += _density[i]*buoyancy*_dt;//FIXME
+}
+
+inline void Fluid::Diffuse(int b, float* velTmp, float* vel, float diff)
+{
+	int l;
+	float a=_dt*diff*N*N*N;
+	for (l=0; l<20; l++) 
+	{
+		FOR_ALL_CELL {
+			vel[_I(i,j,k)] = (velTmp[_I(i,j,k)] + a*(
+						vel[_I(i-1,j,k)]+vel[_I(i+1,j,k)]+
+						vel[_I(i,j-1,k)]+vel[_I(i,j+1,k)]+
+						vel[_I(i,j,k-1)]+vel[_I(i,j,k+1)]))/(1+6*a);
+		} END_FOR
+		EnforceBoundary(b,vel);
+	}
+}
+
+inline void Fluid::Advect(int b, float* quantityTmp, float* quantity, float* velX, float* velY, float* velZ)
+{
+	int i0, j0, k0, i1, j1, k1;
+	float sx0, sx1, sy0, sy1, sz0, sz1, v0, v1;
+	float xx, yy, zz, dt0;
+	dt0 = _dt*N;
+	FOR_ALL_CELL {
+		xx = i - dt0*velX[_I(i,j,k)];
+		yy = j - dt0*velY[_I(i,j,k)];
+		zz = k - dt0*velZ[_I(i,j,k)];
+		if (xx<0.5) xx=0.5f; if (xx>N+0.5) xx=N+0.5f; i0=(int)xx; i1=i0+1;
+		if (yy<0.5) yy=0.5f; if (yy>N+0.5) yy=N+0.5f; j0=(int)yy; j1=j0+1;
+		if (zz<0.5) zz=0.5f; if (zz>N+0.5) zz=N+0.5f; k0=(int)zz; k1=k0+1;
+		sx1 = xx-i0; sx0 = 1-sx1;
+		sy1 = yy-j0; sy0 = 1-sy1;
+		sz1 = zz-k0; sz0 = 1-sz1;
+		v0 = sx0 * ( sy0*quantityTmp[_I(i0,j0,k0)] + sy1*quantityTmp[_I(i0,j1,k0)] ) +
+			sx1 * ( sy0*quantityTmp[_I(i1,j0,k0)] + sy1*quantityTmp[_I(i1,j1,k0)] );
+		v1 = sx0 * ( sy0*quantityTmp[_I(i0,j0,k1)] + sy1*quantityTmp[_I(i0,j1,k1)] ) +
+			sx1 * ( sy0*quantityTmp[_I(i1,j0,k1)] + sy1*quantityTmp[_I(i1,j1,k1)] );
+		quantity[_I(i,j,k)] = sz0*v0 + sz1*v1;
+	} END_FOR
+	EnforceBoundary(b,_density);
+}
+
+void Fluid::Project(void)
+{
+	float* p = _velXTmp;	
+	float* div = _velYTmp;	// temporary buffers, use old velocity buffers
+	int l;
+	float h;
+	h = 1.0f/N;
+	FOR_ALL_CELL {
+		div[_I(i,j,k)] = -h*(
+				_velX[_I(i+1,j,k)]-_velX[_I(i-1,j,k)]+
+				_velY[_I(i,j+1,k)]-_velY[_I(i,j-1,k)]+
+				_velZ[_I(i,j,k+1)]-_velZ[_I(i,j,k-1)])/3;
+		p[_I(i,j,k)] = 0;
+	} END_FOR
+	EnforceBoundary(0,div); EnforceBoundary(0,p);
+	for (l=0; l<20; l++) 
+	{
+		FOR_ALL_CELL {
+			p[_I(i,j,k)] = (div[_I(i,j,k)]+
+					p[_I(i-1,j,k)]+p[_I(i+1,j,k)]+
+					p[_I(i,j-1,k)]+p[_I(i,j+1,k)]+
+					p[_I(i,j,k-1)]+p[_I(i,j,k+1)])/6;
+		} END_FOR
+		EnforceBoundary(0,p);
+	}
+	FOR_ALL_CELL {
+		_velX[_I(i,j,k)] -= (p[_I(i+1,j,k)]-p[_I(i-1,j,k)])/3/h;
+		_velY[_I(i,j,k)] -= (p[_I(i,j+1,k)]-p[_I(i,j-1,k)])/3/h;
+		_velZ[_I(i,j,k)] -= (p[_I(i,j,k+1)]-p[_I(i,j,k-1)])/3/h;
+	} END_FOR
+	EnforceBoundary(1,_velX); EnforceBoundary(2,_velY);
+}
+
+void Fluid::VorticityConfinement()
+{
+	int ijk;
+	//temp buffers
+	float *curlX = _velXTmp, *curlY = _velYTmp, *curlZ=_velZTmp, *curl=_densityTmp;
+	float dt0 = _dt * vc_eps;
+
+	FOR_ALL_CELL {
+		ijk = _I(i,j,k);
+		// curlx = dw/dy - dv/dz
+		curlX[ijk] = (_velZ[_I(i,j+1,k)] - _velZ[_I(i,j-1,k)]) * 0.5f -
+			(_velY[_I(i,j,k+1)] - _velY[_I(i,j,k-1)]) * 0.5f;
+
+		// curly = du/dz - dw/dx
+		curlY[ijk] = (_velX[_I(i,j,k+1)] - _velX[_I(i,j,k-1)]) * 0.5f -
+			(_velZ[_I(i+1,j,k)] - _velZ[_I(i-1,j,k)]) * 0.5f;
+
+		// curlz = dv/dx - du/dy
+		curlZ[ijk] = (_velY[_I(i+1,j,k)] - _velY[_I(i-1,j,k)]) * 0.5f -
+			(_velX[_I(i,j+1,k)] - _velX[_I(i,j-1,k)]) * 0.5f;
+
+		// curl = |curl|
+		curl[ijk] = sqrtf(curlX[ijk]*curlX[ijk] +
+				curlY[ijk]*curlY[ijk] +
+				curlZ[ijk]*curlZ[ijk]);
+	} END_FOR
+
+	FOR_ALL_CELL {
+		ijk = _I(i,j,k);
+		float nX = (curl[_I(i+1,j,k)] - curl[_I(i-1,j,k)]) * 0.5f;
+		float nY = (curl[_I(i,j+1,k)] - curl[_I(i,j-1,k)]) * 0.5f;
+		float nZ = (curl[_I(i,j,k+1)] - curl[_I(i,j,k-1)]) * 0.5f;
+		float len1 = 1.0f/(sqrtf(nX*nX+nY*nY+nZ*nZ)+0.0000001f);
+		nX *= len1;
+		nY *= len1;
+		nZ *= len1;
+		_velX[ijk] += (nY*curlZ[ijk] - nZ*curlY[ijk]) * dt0;
+		_velY[ijk] += (nZ*curlX[ijk] - nX*curlZ[ijk]) * dt0;
+		_velZ[ijk] += (nX*curlY[ijk] - nY*curlX[ijk]) * dt0;
+	} END_FOR
+}
+
+#define DIFFUSE
+#define ADVECT
+
+void Fluid::VelocityStep()
+{
+#if 1
+	AddSource(su, _velX);
+	AddSource(sv, _velY);
+	AddSource(sw, _velZ);
+#endif
+	AddBuoyancy();
+	VorticityConfinement();
+
+#ifdef DIFFUSE
+	std::swap(_velXTmp, _velX); std::swap(_velYTmp, _velY); std::swap(_velZTmp, _velZ);
+	Diffuse(1, _velXTmp, _velX, viscosity);
+	Diffuse(2, _velYTmp, _velY, viscosity);
+	Diffuse(3, _velZTmp, _velZ, viscosity);
+	Project();
+#endif
+#ifdef ADVECT
+	std::swap(_velXTmp, _velX); std::swap(_velYTmp, _velY); std::swap(_velZTmp, _velZ);
+	Advect(1, _velXTmp, _velX, _velXTmp, _velYTmp, _velZTmp);
+	Advect(2, _velYTmp, _velY, _velXTmp, _velYTmp, _velZTmp);
+	Advect(3, _velZTmp, _velZ, _velXTmp, _velYTmp, _velZTmp);
+	Project();
+#endif
+}
+
+void Fluid::DensityStep()
+{
+#if 1
+	AddSource(sd, _density);
+#endif
+#ifdef DIFFUSE
+	std::swap(_densityTmp, _density);
+	Diffuse(0, _densityTmp, _density, diffusion);
+#endif
+#ifdef ADVECT
+	std::swap(_densityTmp, _density);
+	Advect(0, _densityTmp, _density, _velX, _velY, _velZ);
+
+#if 1
+	//decrease density
+	FOR_ALL_CELL {
+		_density[_I(k,j,i)] -= 0.001;
+		if(_density[_I(k,j,i)] < 0)
+			_density[_I(k,j,i)] = 0;
+	} END_FOR
+#endif
+
+#endif
+}
+
+void Fluid::GenerateSmoke()
+{
+	const int centerY = RES/4;
+	const int centerZ = RES/2;
+	float dens = (rand()%1000)/1000.0f;
+	for (int i = 1 ; i <= N ; i++) {
+		for (int j = 1 ; j <= N ; j++) {
+			if (hypot(i-centerY, j-centerZ) < RES/10) {
+				this->_density[_I(5,i,j)] = dens;
+				this->_velX[_I(5,i,j)] = 2.0f;
+			}
+		}
+	}
+
+}
+
+void Fluid::SimulateStep()
+{
+	GenerateSmoke();
+
+	VelocityStep();
+	DensityStep();
+
+}
+
+
+void Fluid::Show()
+{
+	_renderer->FillTexture();
+	_renderer->Render();
+/*	
+	else {	//without rendering
+		Cube();
+		glBegin(GL_POINTS);
+		FOR_ALL_CELL {
+			if(!ALMOST_EQUAL(_density[_I(i,j,k)], 0) ) {
+				glVertex3f(((float)i/N-0.5)*2, ((float)j/N-0.5)*2, ((float)k/N-0.5)*2 );
+			}
+		} END_FOR
+		glEnd();
+
+		glPointSize(13.0f);
+		glBegin(GL_POINTS);
+		glColor4f(0.0f, 1.0f, 1.0f, 1.0f);
+		glVertex3f(_lightPos[0], _lightPos[1], _lightPos[2]);
+		glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+		glEnd();
+		glPointSize(1.0f);
+	}
+	*/
+}
+
+
+void Fluid::ClearBuffer(float* buf)
+{
+	for (int i=0; i<SIZE; i++) {
+		buf[i] = 0.0f;
+	}
+}
+
+void Fluid::ClearSources(void)
+{
+	for (int i=0; i<SIZE; i++) {
+		sd[i] = su[i] = sv[i] = sw[i] = 0.0f;
+	}
+}
+```
+
+### fluid.h
+```
+#ifndef _FLUID_H
+#define _FLUID_H
+
+#include "core.h"
+#include "object.h"
+#include "renderer.h"
+
+#define DT  0.1				// time step
+#define RES 40			    // box resolution
+#define N ((RES)-2)			// valid simulation area
+#define SIZE ((RES)*(RES)*(RES))
+
+#undef _I
+#define _I(x,y,z) (((x)*(RES)*(RES))+((y)*(RES))+(z))	//FIXME
+
+#undef FOR_ALL_CELL
+#define FOR_ALL_CELL for (int i=1; i<=(N); i++) {\
+	for (int j=1; j<=(N); j++) {\
+		for (int k=1; k<=(N); k++) {
+
+#undef END_FOR
+#define END_FOR }}}
+
+#define ALMOST_EQUAL(a, b) ((fabs(a-b)<0.00001f)?true:false)
+
+class Renderer;
+
+class Fluid: public Object
+{
+protected:
+	float _buffers[10][SIZE];
+	float *_density, *_densityTmp;			// density
+	float *_velX, *_velXTmp;			// velocity in x direction
+	float *_velY, *_velYTmp;			// velocity in y direction
+	float *_velZ, *_velZTmp;			// velocity in z direction
+	float _dt;
+
+
+	//for rendering
+	Renderer * _renderer;				//register a renderer
+	Eigen::Vector3f _lightPos;
+	bool _isLightSelected;
+	bool _isRendering;
+	bool _isDrawSliceOutline;
+
+protected:
+	// simulation methods
+	// beware: i changed stam's implementation from a destiation, source ordering
+	// of the parameters to source, destiation
+	void AddSource(float* src, float *dst);
+	void AddBuoyancy();
+	void EnforceBoundary(int b, float* quantity);
+	void Diffuse(int b, float* velTmp, float* vel, float diff);
+	void Advect(int b, float* quantityTmp, float* quantity, float* velX, float* velY, float* velZ);
+	void Project();
+	void VorticityConfinement();
+
+	void VelocityStep();
+	void DensityStep();
+
+	// utility methods
+	void ClearBuffer(float* buf);
+	void ClearSources(void);
+
+	void GenerateSmoke();
+
+	virtual void MouseButton(GLFWwindow *window, int button,int action,int mods);
+	virtual void MouseMotion(GLFWwindow *window, double nx, double ny);
+	virtual void Keyboard(GLFWwindow * window, int key, int scancode, int action, int mods);
+	bool LightSelected(double mouseX, double mouseY);
+
+public:
+	float sd[SIZE], su[SIZE], sv[SIZE], sw[SIZE], sT[SIZE];	// sources for density and velocities
+	float diffusion, viscosity, buoyancy, vc_eps;
+
+	Fluid(void);
+	~Fluid(void);
+
+	virtual void SimulateStep();
+	virtual void Show();
+	const float* GetDensity();
+};
+
+#endif
+```
+
+### main.cpp
+```
+#include "core.h"
+#include "controller.h"
+#include "fluid.h"
+
+#define WINDOW_NAME		 "Smoke3D"
+
+//#define VERTEX_PROG_NAME1   "backface.vert"
+//#define FRAGMENT_PROG_NAME1 "backface.frag"
+//#define VERTEX_PROG_NAME2   "raycasting.vert"
+//#define FRAGMENT_PROG_NAME2 "raycasting.frag"
+
+Controller* g_controller = NULL;
+
+int main(int argc, char **argv) {
+	::g_controller = new Controller(argc, argv, WINDOW_NAME);
+	Object* object = new Fluid;
+
+#if 0
+	//enable shader
+	object->RegisterShader(VERTEX_PROG_NAME1, GL_VERTEX_SHADER);
+	object->RegisterShader(FRAGMENT_PROG_NAME1, GL_FRAGMENT_SHADER);
+	object->RegisterShader(VERTEX_PROG_NAME2, GL_VERTEX_SHADER);
+	object->RegisterShader(FRAGMENT_PROG_NAME2, GL_FRAGMENT_SHADER);
+	object->EnableShader();
+#endif
+
+	::g_controller->InitCamera();
+	::g_controller->RegisterObject(object);
+	::g_controller->BeginLoop();
+	return 0;
+}
+```
+
+### object.cpp
+```
+#include "core.h"
+#include "object.h"
+
+Object::Object() 
+{
+#ifdef DEBUG_LEVEL
+	std::cout << __FILE__ << " " << __FUNCTION__ << std::endl;
+#endif
+	//Reset();
+	_shaderProg = 0;
+	memset(_hShaders, 0, sizeof(_hShaders) );
+	_shaderNum = 0;
+
+	//for rendering
+	_stepSize = 0.001f;
+}
+
+Object::~Object()
+{
+}
+
+
+int Object::LoadShaderFile(const char* fileName, GLuint shader)
+{
+	std::fstream file;
+	GLint compiled;
+	int size = 0;
+	char* buffer = NULL;
+
+	file.open(fileName, std::ios::in | std::ios::binary);
+	if(!file) {
+		std::cerr << "Open file " << fileName << " failed!" << std::endl;
+		return -1;
+	}
+
+	//get file size and allocate memory
+	file.seekg(0, std::ios::end);
+	size = file.tellg();
+	file.seekg(0, std::ios::beg);
+	buffer = new char[size];
+
+	file.read(buffer, size);
+	//load to shader 
+	glShaderSource(shader, 1, (const GLchar **)&buffer, &size);
+
+	delete []buffer;
+	file.close();
+
+	return 0;
+}
+
+void Object::EnableShader()
+{
+	CreateShaderProgram();
+}
+
+void Object::RebindShader(GLuint hVertexShader, GLuint hfragShader)
+{
+
+	GLint testVal;
+	GLsizei maxCount = 2;
+	GLsizei count;
+	GLuint shaders[maxCount];
+
+	//get exists shaders
+    glGetAttachedShaders(_shaderProg, maxCount, &count, shaders);
+	//and detach then
+	for (int i = 0; i < count; i++) {
+		glDetachShader(_shaderProg, shaders[i]);
+	}
+
+    // Bind index 0 to the shader input variable "VerPos"
+    glBindAttribLocation(_shaderProg, 0, "VerPos");
+    // Bind index 1 to the shader input variable "VerClr"
+    glBindAttribLocation(_shaderProg, 1, "VerClr");
+
+	glAttachShader(_shaderProg, hVertexShader);
+	glAttachShader(_shaderProg, hfragShader);
+	
+	// Attempt to link
+	glLinkProgram(_shaderProg);
+
+	// Make sure link worked too
+	glGetProgramiv(_shaderProg, GL_LINK_STATUS, &testVal);
+	if(testVal == GL_FALSE) {
+		char infoLog[1024];
+		glGetProgramInfoLog(_shaderProg, 1024, NULL, infoLog);
+		std::cerr << "The program " << _shaderProg
+			<< " failed to link with the following error:" << std::endl
+			<< infoLog << std::endl;
+		glDeleteProgram(_shaderProg);
+		exit(-1);
+	}
+
+    glUseProgram(_shaderProg);
+}
+
+void Object::CreateShaderProgram()
+{
+	GLint testVal;
+	GLuint hReturn;
+
+	// Create the final program object, and attach the shaders
+	hReturn = glCreateProgram();
+
+	// All done, return our ready to use shader program
+	_shaderProg = hReturn;
+}
+
+
+void Object::RegisterShader(const char* progName, GLenum shaderType)
+{
+	// Temporary Shader objects
+	GLuint hShader;
+	GLuint hReturn = 0;
+	GLint testVal;
+	
+	// Create shader objects
+	hShader = glCreateShader(shaderType);
+	
+	// Load, If fail clean up and return null
+	if(LoadShaderFile(progName, hShader) < 0) {
+		glDeleteShader(hShader);
+		std::cerr << "The shader at " << progName 
+			<< " could not be found." << std::endl;
+		exit(-1);
+	}
+
+	// Compile 
+	glCompileShader(hShader);
+	// Check for errors in shader
+	glGetShaderiv(hShader, GL_COMPILE_STATUS, &testVal);
+	if(testVal == GL_FALSE) {
+		char infoLog[1024];
+		glGetShaderInfoLog(hShader, 1024, NULL, infoLog);
+		std::cerr << "The shader at " << progName 
+			<< " failed to compile with the following error:" << std::endl
+			<< infoLog << std::endl;
+		glDeleteShader(hShader);
+		exit(-1);
+	}
+	// Check for errors in shader
+	glGetShaderiv(hShader, GL_COMPILE_STATUS, &testVal);
+	if(testVal == GL_FALSE) {
+		char infoLog[1024];
+		glGetShaderInfoLog(hShader, 1024, NULL, infoLog);
+		std::cerr << "The shader at " << progName 
+			<< " failed to compile with the following error:" << std::endl
+			<< infoLog << std::endl;
+		glDeleteShader(hShader);
+		exit(-1);
+	}
+
+	_hShaders[_shaderNum++] = hShader;
+
+
+#if 0
+	// Now, we need to bind the attribute names to their specific locations
+	// List of attributes
+	va_list attributeList;
+	va_start(attributeList, fragmentProgName);
+	// Iterate over this argument list
+	char *szNextArg;
+	int iArgCount = va_arg(attributeList, int);
+	// Number of attributes
+	for(int i = 0; i < iArgCount; i++)
+	{
+		int index = va_arg(attributeList, int);
+		szNextArg = va_arg(attributeList, char*);
+		glBindAttribLocation(hReturn, index, szNextArg);
+	}
+	va_end(attributeList);
+#endif
+}
+
+void Object::RegisterParentWindow(GLFWwindow* windowHandle)
+{
+	_windowHandle = windowHandle;
+}
+
+void Object::Resize(GLFWwindow* windowHandle, int x, int y)
+{
+	_arcball.SetWidthHeight(x, y);
+}
+
+void Object::MouseButton(GLFWwindow *window, int button,int action,int mods) 
+{
+	double mouseX, mouseY;
+
+	if(button == GLFW_MOUSE_BUTTON_LEFT) {
+		::glfwGetCursorPos(window, &mouseX, &mouseY);
+		if(action == GLFW_PRESS) {
+			_isLeftKeyPressed = true;
+			_arcball.StartRotation(mouseX, mouseY);
+		}
+		else if(action == GLFW_RELEASE) {
+			_isLeftKeyPressed = false;
+			_arcball.StopRotation();
+		}
+	}
+	else if(button == GLFW_MOUSE_BUTTON_MIDDLE) {
+		_isMiddleKeyPressed = (action == GLFW_PRESS);
+	}
+	else if(button == GLFW_MOUSE_BUTTON_RIGHT) {
+#if 0
+		if (action == GLFW_PRESS) {
+			_isRightKeyPressed = true;
+			::glfwGetCursorPos(window, &mouseX, &mouseY);
+			_arcball.StartZooming(mouseX, mouseY);
+		}
+		else if(action ==GLFW_RELEASE) {
+			_isRightKeyPressed = false;
+			_arcball.StopZooming();
+		}
+#endif
+	}
+}
+
+void Object::MouseMotion(GLFWwindow *window, double nx, double ny) 
+{
+	if(_isLeftKeyPressed && _isCtrlPressed) {
+	}
+	else if(_isLeftKeyPressed) {
+		_arcball.UpdateRotation(nx, ny);
+	}
+#if 0
+	else if(_isRightKeyPressed) {
+		_arcball.UpdateZooming(nx, ny);
+	}
+#endif
+}
+
+void Object::MouseScroll(GLFWwindow *window, double nx, double ny)
+{
+	_arcball.StartZooming(0, 0);
+	_arcball.UpdateZooming(-ny, nx);
+	_arcball.StopZooming();
+}
+
+void Object::ComputeNormal(GLfloat v[3][3], GLfloat normal[]) 
+{ 
+	float v1[3],v2[3];
+	static const int x = 0;
+	static const int y = 1;
+	static const int z = 2;
+
+	// Calculate two vectors from the three points
+	v1[x] = v[0][x] - v[1][x];
+	v1[y] = v[0][y] - v[1][y];
+	v1[z] = v[0][z] - v[1][z];
+
+	v2[x] = v[1][x] - v[2][x];
+	v2[y] = v[1][y] - v[2][y];
+	v2[z] = v[1][z] - v[2][z];
+
+	// Take the cross product of the two vectors to get
+	// the normal vector which will be stored in out
+	normal[x] = v1[y]*v2[z] - v1[z]*v2[y];
+	normal[y] = v1[z]*v2[x] - v1[x]*v2[z];
+	normal[z] = v1[x]*v2[y] - v1[y]*v2[x];
+
+	// Normalize the vector (shorten length to one)
+}
+
+void Object::Reset() {
+#ifdef DEBUG_LEVEL
+	std::cout << __FILE__ << " " << __FUNCTION__ << std::endl;
+#endif
+	int width, height;
+	glfwGetWindowSize(_windowHandle, &width, &height);
+	_winX = width;
+	_winY = height;
+	_arcball.SetWidthHeight(width, height);
+
+#if 1
+	_depth = 3.8;
+	_rotX = 10;
+	_rotY = -20;
+
+
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+
+	glTranslatef(0, 0, -_depth);
+	glRotatef(_rotX, 1, 0, 0);
+	glRotatef(_rotY, 0, 1, 0);
+#endif
+}
+
+bool Object::LoadFile(char* fileName)
+{
+	_file.open(fileName);
+	if (!_file) {
+		std::cout << "Open file: " << fileName << " failed!" << std::endl;
+		return false;
+	}
+	std::cout << "Open file: " << fileName << " succeed!" << std::endl;
+
+	return true;
+}
+
+//this is a test function, just draw a cube
+void Object::Cube() { 
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	GLfloat vertices[][3] = { { -1.0f, -1.0f, -1.0f },
+		{ 1.0f, -1.0f, -1.0f}, { 1.0f, 1.0f, -1.0f },
+		{ -1.0f, 1.0f, -1.0f }, { -1.0f, -1.0f, 1.0f },
+		{ 1.0f, -1.0f, 1.0f }, { 1.0f, 1.0f, 1.0f },
+		{ -1.0f, 1.0f, 1.0f } };              // Vertices
+	int faces[][4] = { { 1, 2, 6, 5 }, { 2, 3, 7, 6 }, { 4, 5, 6, 7 },
+		{ 0, 4, 7, 3 }, { 0, 1, 5, 4 }, { 0, 3, 2, 1 } };
+
+	GLfloat colors[][3] = { { 0.0f, 1.0f, 1.0f }, { 1.0f, 0.0f, 1.0f },
+		{ 1.0f, 1.0f, 0.0f }, { 0.0f, 0.5f, 0.5f },
+		{ 0.5f, 0.0f, 0.5f }, { 0.5f, 0.5f, 0.0f } };
+
+	//glBegin(GL_QUADS);  
+	for (int i = 0; i < 6; i++) {
+		//glColor3fv(colors[i]);
+		
+		Eigen::Vector3f nm;
+		Eigen::Vector3f v0(vertices[faces[i][0]][0], vertices[faces[i][0]][1], vertices[faces[i][0]][2]);
+		Eigen::Vector3f v1(vertices[faces[i][1]][0], vertices[faces[i][1]][1], vertices[faces[i][1]][2]);
+		Eigen::Vector3f v2(vertices[faces[i][2]][0], vertices[faces[i][2]][1], vertices[faces[i][2]][2]);
+		Eigen::Vector3f l1 = v1-v0;
+		Eigen::Vector3f l2 = v2-v0;
+		nm = l1.cross(l2);
+		nm.normalize();
+
+		glNormal3f(nm(0),nm(1),nm(2));
+		glBegin(GL_LINE_STRIP);
+		for (int j = 0; j < 4; j++)
+			glVertex3fv(vertices[faces[i][j]]);
+		glEnd();
+	}
+	//glEnd();
+}
+
+void Object::Show() 
+{
+	Cube();
+}
+```
+
+### object.h
+```
+#ifndef DRAWER_H 
+#define DRAWER_H
+
+#include "core.h"
+#include "arcball.h"
+
+////////////////////////////////////////////////////////////////////////////////
+
+class Object: public EventListener{
+public:
+	Object();
+	~Object();
+
+	void RegisterShader(const char* vertexProgName, GLenum shaderType);
+	int LoadShaderFile(const char* fileName, GLuint shader);
+	void RebindShader(GLuint hVertexShader, GLuint hfragShader);
+	void CreateShaderProgram();
+	void EnableShader();
+
+	void rcSetUinforms();
+
+
+	void ComputeNormal(GLfloat v[3][3], GLfloat normal[]);
+
+	void Cube();
+
+	virtual void SimulateStep() {};
+	virtual void Show();
+	virtual bool LoadFile(char* fileName);
+	virtual void ComputeVertexNormal() {}
+	virtual void Reset();
+
+
+	virtual void MouseButton(GLFWwindow *window, int button,int action,int mods);
+	virtual void MouseMotion(GLFWwindow *window, double nx, double ny);
+	virtual void MouseScroll(GLFWwindow *window, double nx, double ny);
+	virtual void Keyboard(GLFWwindow * window, int key, int scancode, int action, int mods) {}
+	virtual void Resize(GLFWwindow *window, int x, int y);
+
+	void RegisterParentWindow(GLFWwindow* windowHandle);
+
+	//for rendering
+	GLuint initTFF1DTex(const char* filename);
+	GLuint initFace2DTex(GLuint bfTexWidth, GLuint bfTexHeight);
+	GLuint initVol3DTex(const char* filename, GLuint w, GLuint h, GLuint d);
+	void checkFramebufferStatus();
+	void initFrameBuffer(GLuint texObj, GLuint texWidth, GLuint texHeight);
+	void render(GLenum cullFace);
+
+protected:
+	std::fstream _file;
+
+	GLfloat _rotX;
+	GLfloat _rotY;
+	GLfloat _depth;
+
+	//for event handling
+	bool _isLeftKeyPressed, _isCtrlPressed, _isRightKeyPressed, _isMiddleKeyPressed;
+
+	Arcball _arcball;
+
+	GLFWwindow* _windowHandle;
+	int _winX, _winY;
+
+	GLuint _shaderProg;	 //shader
+	GLuint _hShaders[10]; //support upto 10 shaders;
+	int _shaderNum;			//current number of shaders
+
+	//for rendering
+	float _stepSize;
+	GLuint _vao;
+	GLuint _frameBuffer;
+	// transfer function
+	GLuint _tffTexObj;
+	GLuint _bfTexObj;
+	GLuint _volTexObj;
+
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
+#endif
+```
+
+### renderer.cpp
+```
+#include "renderer.h"
+
+Renderer::Renderer(float* volumeData, int RES)
+{
+	_textureData = NULL;
+	_isDrawSliceOutline = false;
+	_isRendering = true;
+
+	_RES = RES;
+	_N = _RES - 2;
+	_SIZE = _RES*_RES*_RES;
+	_volumeData = volumeData;
+
+	// cube vertices
+	GLfloat cv[][3] = {
+		{1.0f, 1.0f, 1.0f}, {-1.0f, 1.0f, 1.0f}, {-1.0f, -1.0f, 1.0f}, {1.0f, -1.0f, 1.0f},
+		{1.0f, 1.0f, -1.0f}, {-1.0f, 1.0f, -1.0f}, {-1.0f, -1.0f, -1.0f}, {1.0f, -1.0f, -1.0f}
+	};
+
+	// cube edges have the form edges[n][0][xyz] + t*edges[n][1][xyz]
+	GLfloat ce[12][2][3] = {
+		{{1.0f, 1.0f, -1.0f}, {0.0f, 0.0f, 1.0f}},
+		{{-1.0f, 1.0f, -1.0f}, {0.0f, 0.0f, 1.0f}},
+		{{-1.0f, -1.0f, -1.0f}, {0.0f, 0.0f, 1.0f}},
+		{{1.0f, -1.0f, -1.0f}, {0.0f, 0.0f, 1.0f}},
+
+		{{1.0f, -1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},
+		{{-1.0f, -1.0f, 1.0f}, {0.0f, 1.0f, 0.0f}},
+		{{-1.0f, -1.0f, -1.0f}, {0.0f, 1.0f, 0.0f}},
+		{{1.0f, -1.0f, -1.0f}, {0.0f, 1.0f, 0.0f}},
+
+		{{-1.0f, 1.0f, 1.0f}, {1.0f, 0.0f, 0.0f}},
+		{{-1.0f, -1.0f, 1.0f}, {1.0f, 0.0f, 0.0f}},
+		{{-1.0f, -1.0f, -1.0f}, {1.0f, 0.0f, 0.0f}},
+		{{-1.0f, 1.0f, -1.0f}, {1.0f, 0.0f, 0.0f}}
+	};
+
+	memcpy(_cubeVertices, cv, sizeof(_cubeVertices) );
+	memcpy(_cubeEdges, ce, sizeof(_cubeEdges) );
+
+	InitGL();
+}
+
+Renderer::~Renderer()
+{
+	if (_textureData)
+		free(_textureData);
+}
+
+void Renderer::SetLightPostion(Eigen::Vector3f &pos)
+{
+	_lightPos = pos;
+	_lightDir = -_lightPos;
+
+	GenerateRayTemplate(_RES);
+}
+
+void Renderer::InitGL()
+{
+	glEnable(GL_TEXTURE_3D);
+	glDisable(GL_DEPTH_TEST);
+	glCullFace(GL_FRONT);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+
+	glGenTextures(2, &_hTexture);
+
+	glActiveTextureARB(GL_TEXTURE0_ARB);
+	glBindTexture(GL_TEXTURE_3D, _hTexture);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S,GL_CLAMP);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T,GL_CLAMP);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R,GL_CLAMP);
+
+}
+
+void Renderer::Render(void)
+{
+	GLdouble mvMatrix[16];
+	glGetDoublev(GL_MODELVIEW_MATRIX, mvMatrix);
+
+	glDisable(GL_DEPTH_TEST);	//Important in this rendering
+
+	DrawCube();
+	DrawLight();
+	if(_isRendering) {
+		//core rendering parts
+		DrawSlices(mvMatrix);
+	}
+	else 
+		DrawVolumeData();
+
+	glEnable(GL_DEPTH_TEST);
+}
+
+void Renderer::DrawLight()
+{
+	
+	glPushAttrib(GL_POINT_BIT | GL_CURRENT_BIT);	//save current state
+	//draw light
+	glPointSize(13.0f);
+	glBegin(GL_POINTS);
+	glColor4f(0.0f, 1.0f, 1.0f, 1.0f);
+	glVertex3f(_lightPos[0], _lightPos[1], _lightPos[2]);
+	glEnd();
+	glPopAttrib();		//restore painting state
+}
+
+void Renderer::DrawVolumeData()
+{
+	glBegin(GL_POINTS);
+	FOR_ALL_CELL {
+		if(!ALMOST_EQUAL(_volumeData[_I(i,j,k)], 0) ) {
+			glVertex3f(((float)i/_N-0.5)*2, ((float)j/_N-0.5)*2, ((float)k/_N-0.5)*2 );
+		}
+	} END_FOR
+	glEnd();
+
+	glPointSize(13.0f);
+	glBegin(GL_POINTS);
+	glColor4f(0.0f, 1.0f, 1.0f, 1.0f);
+	glVertex3f(_lightPos[0], _lightPos[1], _lightPos[2]);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glEnd();
+	glPointSize(1.0f);
+
+}
+
+
+void Renderer::SetRendering(bool isRendering)
+{
+	_isRendering = isRendering;
+}
+
+void Renderer::SetSliceOutline(bool isDrawSliceOutline)
+{
+	_isDrawSliceOutline = isDrawSliceOutline;
+}
+
+
+void Renderer::DrawCube(void)
+{
+	glDisable(GL_TEXTURE_3D);
+	glDisable(GL_FRAGMENT_PROGRAM_ARB);
+
+	glEnable(GL_CULL_FACE);
+	float coeff = 0.5;
+	glColor4f(0.9f*coeff, 0.8f*coeff, 0.4f*coeff, 1.0f);
+	GLfloat (*cv)[3] = _cubeVertices;
+
+	glBegin(GL_POLYGON);
+	glVertex3fv(cv[0]); glVertex3fv(cv[1]); glVertex3fv(cv[2]); glVertex3fv(cv[3]);
+	glEnd();
+	glBegin(GL_POLYGON);
+	glVertex3fv(cv[0]); glVertex3fv(cv[4]); glVertex3fv(cv[5]); glVertex3fv(cv[1]);
+	glEnd();
+	glBegin(GL_POLYGON);
+	glVertex3fv(cv[0]); glVertex3fv(cv[3]); glVertex3fv(cv[7]); glVertex3fv(cv[4]);
+	glEnd();
+
+	glBegin(GL_POLYGON);
+	glVertex3fv(cv[7]); glVertex3fv(cv[6]); glVertex3fv(cv[5]); glVertex3fv(cv[4]);
+	glEnd();
+	glBegin(GL_POLYGON);
+	glVertex3fv(cv[2]); glVertex3fv(cv[6]); glVertex3fv(cv[7]); glVertex3fv(cv[3]);
+	glEnd();
+	glBegin(GL_POLYGON);
+	glVertex3fv(cv[1]); glVertex3fv(cv[5]); glVertex3fv(cv[6]); glVertex3fv(cv[2]);
+	glEnd();
+
+	glDisable(GL_CULL_FACE);
+
+	glBegin(GL_LINES);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glVertex3fv(cv[0]); glVertex3fv(cv[1]);
+	glVertex3fv(cv[1]); glVertex3fv(cv[2]);
+	glVertex3fv(cv[2]); glVertex3fv(cv[3]);
+	glVertex3fv(cv[3]); glVertex3fv(cv[0]);
+
+	glVertex3fv(cv[4]); glVertex3fv(cv[5]);
+	glVertex3fv(cv[5]); glVertex3fv(cv[6]);
+	glVertex3fv(cv[6]); glVertex3fv(cv[7]);
+	glVertex3fv(cv[7]); glVertex3fv(cv[4]);
+
+	glVertex3fv(cv[0]); glVertex3fv(cv[4]);
+	glVertex3fv(cv[1]); glVertex3fv(cv[5]);
+	glVertex3fv(cv[2]); glVertex3fv(cv[6]);
+	glVertex3fv(cv[3]); glVertex3fv(cv[7]);
+	glEnd();
+
+}
+
+class Convexcomp
+{
+	private:
+		const Eigen::Vector3f &p0, &up;
+	public:
+		Convexcomp(const Eigen::Vector3f& p0, const Eigen::Vector3f& up) : p0(p0), up(up) {}
+
+		bool operator()(const Eigen::Vector3f& a, const Eigen::Vector3f& b) const
+		{
+			Eigen::Vector3f va = a-p0, vb = b-p0;
+			//return dot(up, cross(va, vb)) >= 0;
+			return up.dot(va.cross(vb)) >= 0;
+		}
+};
+
+void Renderer::DrawSlices(GLdouble mvMatrix[16])
+{
+	int i;
+	Eigen::Vector3f viewdir(-mvMatrix[2], -mvMatrix[6], -mvMatrix[10]);	//FIXME
+
+	viewdir.normalize();
+	// find cube vertex that is closest to the viewer
+	GLfloat (*cv)[3] = _cubeVertices;
+	for (i=0; i<8; i++) {
+		float x = cv[i][0] + viewdir[0];
+		float y = cv[i][1] + viewdir[1];
+		float z = cv[i][2] + viewdir[2];
+		if ((x>=-1.0f)&&(x<=1.0f)
+				&&(y>=-1.0f)&&(y<=1.0f)
+				&&(z>=-1.0f)&&(z<=1.0f))
+		{
+			break;
+		}
+	}
+	assert(i != 8);
+
+	// our slices are defined by the plane equation A*x + B*y +C*z + D = 0
+	// (a,b,c), the plane normal, are given by viewdir
+	// d is the parameter along the view direction. the first d is given by
+	// inserting previously found vertex into the plane equation
+	float d0 = -(viewdir[0]*cv[i][0] + viewdir[1]*cv[i][1] + viewdir[2]*cv[i][2]);
+	float dStep = 2*d0/SLICE_NUM;
+	int n = 0;
+	for (float d = -d0; d < d0; d += dStep) {
+		// IntersectEdges returns the intersection points of all cube edges with
+		// the given plane that lie within the cube
+		std::vector<Eigen::Vector3f> pt = IntersectEdges(viewdir[0], viewdir[1], viewdir[2], d);
+
+		if (pt.size() > 2) {
+			// sort points to get a convex polygon
+			std::sort(pt.begin()+1, pt.end(), Convexcomp(pt[0], viewdir));
+
+			glEnable(GL_TEXTURE_3D);
+			glBegin(GL_POLYGON);
+			for (i=0; i<pt.size(); i++){
+				glColor3f(1.0, 1.0, 1.0);
+				glTexCoord3d((pt[i][0]+1.0)/2.0, (pt[i][1]+1)/2.0, (pt[i][2]+1.0)/2.0);//FIXME
+				glVertex3f(pt[i][0], pt[i][1], pt[i][2]);
+			}
+			glEnd();
+
+			if (_isDrawSliceOutline)
+			{
+				glDisable(GL_TEXTURE_3D);
+				glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+				glBegin(GL_POLYGON);
+				for (i=0; i<pt.size(); i++) {
+					glColor3f(0.0, 0.0, 1.0);
+					glVertex3f(pt[i][0], pt[i][1], pt[i][2]);
+				}
+				glEnd();
+				glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+			}
+		}
+		n++;
+	}
+
+	glDisable(GL_TEXTURE_3D);
+}
+
+std::vector<Eigen::Vector3f> Renderer::IntersectEdges(float A, float B, float C, float D)
+{
+	float t;
+	Eigen::Vector3f p;
+	std::vector<Eigen::Vector3f> res;
+	GLfloat (*edges)[2][3] = _cubeEdges;
+	
+
+	for (int i=0; i<12; i++) {
+		t = -(A*edges[i][0][0] + B*edges[i][0][1] + C*edges[i][0][2] + D)
+			/ (A*edges[i][1][0] + B*edges[i][1][1] + C*edges[i][1][2]);
+		if ((t>0)&&(t<2)) {
+			p[0] = edges[i][0][0] + edges[i][1][0]*t;
+			p[1] = edges[i][0][1] + edges[i][1][1]*t;
+			p[2] = edges[i][0][2] + edges[i][1][2]*t;
+			res.push_back(p);
+		}
+	}
+
+	return res;
+}
+
+
+void Renderer::FillTexture()
+{
+	if (_textureData == NULL) {
+		_textureData = new unsigned char[_SIZE*4];
+	}
+	memset(_textureData, 0, _SIZE*4);
+
+	const float *density = _volumeData;
+	unsigned char* intensity = new unsigned char[_SIZE];
+	memset(intensity, 0, _SIZE);
+	CastLight(_RES, density, intensity);
+
+#if 1
+	//FIXME: It is important to beware that texture coordinate
+	//is in reverse order  of the simulation coordinate
+	for (int i = 0 ; i < _RES ; i++) {
+		for (int j = 0 ; j < _RES ; j++) {
+			for (int k = 0 ; k < _RES ; k++) {
+				//unsigned char c = 200;
+				int texIndex = i*_RES*_RES + j*_RES + k;	/*reverse order*/
+				int densIndex = k*_RES*_RES + j*_RES + i;
+				unsigned char c = intensity[densIndex];
+				_textureData[texIndex*4] = c;
+				_textureData[texIndex*4+1] = c;
+				_textureData[texIndex*4+2] = c;
+				_textureData[texIndex*4+3] = (density[densIndex]>0.1f) ? 
+					255 : (unsigned char) (density[densIndex]*2550.0f);
+			}
+		}
+	}
+#else
+	for (int i=0; i<_SIZE; i++) {
+		unsigned char c = intensity[i];
+		//unsigned char c = 200;
+		_textureData[(i<<2)] = c;
+		_textureData[(i<<2)+1] = c;
+		_textureData[(i<<2)+2] = c;
+		_textureData[(i<<2)+3] = (density[i]>0.1f) ? 255 : (unsigned char) (density[i]*2550.0f);
+	}
+#endif
+
+	delete []intensity;
+
+	glActiveTextureARB(GL_TEXTURE0_ARB);
+	glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, _RES, _RES, _RES, 0, GL_RGBA, GL_UNSIGNED_BYTE, _textureData);
+}
+
+void Renderer::GenerateRayTemplate(int edgeLen)
+{
+	_rayTemplate[0][0] = _rayTemplate[0][2] = _rayTemplate[0][2] = 0;
+	float fx = 0.0f, fy = 0.0f, fz = 0.0f;
+	int x = 0, y = 0, z = 0;
+	float lx = _lightDir[0] + 0.000001f, ly = _lightDir[1] + 0.000001f, lz = _lightDir[2] + 0.000001f;
+	int xinc = (lx > 0) ? 1 : -1;
+	int yinc = (ly > 0) ? 1 : -1;
+	int zinc = (lz > 0) ? 1 : -1;
+	float tx, ty, tz;
+	int i = 1;
+	int len = 0;
+	int maxlen = 3*edgeLen*edgeLen;
+	while (len <= maxlen)
+	{
+		// fx + t*lx = (x+1)   ->   t = (x+1-fx)/lx
+		tx = (x+xinc-fx)/lx;
+		ty = (y+yinc-fy)/ly;
+		tz = (z+zinc-fz)/lz;
+
+		if ((tx<=ty)&&(tx<=tz)) {
+			_rayTemplate[i][0] = _rayTemplate[i-1][0] + xinc;
+			x =+ xinc;
+			fx = x;
+
+			if (ALMOST_EQUAL(ty,tx)) {
+				_rayTemplate[i][1] = _rayTemplate[i-1][1] + yinc;
+				y += yinc;
+				fy = y;
+			} else {
+				_rayTemplate[i][1] = _rayTemplate[i-1][1];
+				fy += tx*ly;
+			}
+
+			if (ALMOST_EQUAL(tz,tx)) {
+				_rayTemplate[i][2] = _rayTemplate[i-1][2] + zinc;
+				z += zinc;
+				fz = z;
+			} else {
+				_rayTemplate[i][2] = _rayTemplate[i-1][2];
+				fz += tx*lz;
+			}
+		} else if ((ty<tx)&&(ty<=tz)) {
+			_rayTemplate[i][0] = _rayTemplate[i-1][0];
+			fx += ty*lx;
+
+			_rayTemplate[i][1] = _rayTemplate[i-1][1] + yinc;
+			y += yinc;
+			fy = y;
+
+			if (ALMOST_EQUAL(tz,ty)) {
+				_rayTemplate[i][2] = _rayTemplate[i-1][2] + zinc;
+				z += zinc;
+				fz = z;
+			} else {
+				_rayTemplate[i][2] = _rayTemplate[i-1][2];
+				fz += ty*lz;
+			}
+		} else {
+			assert((tz<tx)&&(tz<ty));
+			_rayTemplate[i][0] = _rayTemplate[i-1][0];
+			fx += tz*lx;
+			_rayTemplate[i][1] = _rayTemplate[i-1][1];
+			fy += tz*ly;
+			_rayTemplate[i][2] = _rayTemplate[i-1][2] + zinc;
+			z += zinc;
+			fz = z;
+		}
+
+		len = _rayTemplate[i][0]*_rayTemplate[i][0]
+			+ _rayTemplate[i][1]*_rayTemplate[i][1]
+			+ _rayTemplate[i][2]*_rayTemplate[i][2];
+		i++;
+	}
+}
+
+#define DECAY 0.06f
+void Renderer::CastLight(int n /*edgelen*/, const float* dens, unsigned char* intensity)
+{
+
+	int i,j;
+	int sx = (_lightDir[0]>0) ? 0 : n-1;
+	int sy = (_lightDir[1]>0) ? 0 : n-1;
+	int sz = (_lightDir[2]>0) ? 0 : n-1;
+
+	float decay = 1.0f/(n*DECAY);
+
+	for (i=0; i<n; i++)
+		for (j=0; j<n; j++) {
+			if (!ALMOST_EQUAL(_lightDir[0], 0) )
+				LightRay(sx, i, j, n, decay, dens, intensity);
+			if (!ALMOST_EQUAL(_lightDir[1], 0) )
+				LightRay(i, sy, j, n, decay, dens, intensity);
+			if (!ALMOST_EQUAL(_lightDir[2], 0) )
+				LightRay(i, j, sz, n, decay, dens, intensity);
+		}
+}
+
+
+#define AMBIENT 100
+inline void Renderer::LightRay(int x, int y, int z, int n, float decay, const float* dens, unsigned char* intensity)
+{
+	int xx = x, yy = y, zz = z, i = 0;
+	int offset;
+
+	int l = 200;
+	float d;
+
+	do {
+		offset = ((xx*n) + yy)*n + zz;//FIXME
+		if (intensity[offset] > 0)
+			intensity[offset] = (unsigned char) ((intensity[offset] + l)*0.5f);
+		else
+			intensity[offset] = (unsigned char) l;
+		d = dens[offset]*255.0f;
+		if (l > AMBIENT) {
+			l -= d*decay;
+			if (l < AMBIENT)
+				l = AMBIENT;
+		}
+
+		i++;
+		xx = x + _rayTemplate[i][0];
+		yy = y + _rayTemplate[i][1];
+		zz = z + _rayTemplate[i][2];
+	} while ((xx>=0)&&(xx<n)&&(yy>=0)&&(yy<n)&&(zz>=0)&&(zz<n));
+}
+```
+
+### renderer.h
+```
+#ifndef _RENDERER_H
+#define _RENDERER_H
+
+#include "core.h"
+
+#ifndef ALMOST_EQUAL
+#define ALMOST_EQUAL(a, b) ((fabs(a-b)<0.00001f)?true:false)
+#endif
+
+#ifndef _I
+#define _I(x,y,z) (((x)*(_RES)*(_RES))+((y)*(_RES))+(z))	//FIXME
+#endif
+
+#ifndef FOR_ALL_CELL
+#define FOR_ALL_CELL for (int i=1; i<=(_N); i++) {\
+	for (int j=1; j<=(_N); j++) {\
+		for (int k=1; k<=(_N); k++) {
+#define END_FOR }}}
+#endif
+
+#define SLICE_NUM			64.0f
+
+
+class Renderer
+{
+private:
+
+	// texture data
+	unsigned char* _textureData;
+	// texture handle
+	unsigned int _hTexture;				
+	//lighting infomations
+	Eigen::Vector3f _lightDir;
+	Eigen::Vector3f _lightPos;
+	int _rayTemplate[4096][3];
+	float *_volumeData;
+
+	GLfloat _cubeVertices[8][3];
+	GLfloat _cubeEdges[12][2][3];
+
+	// draw the slices. mvMatrix must be the MODELVIEW_MATRIX
+	void DrawSlices(GLdouble mvMatrix[16]);
+
+	// intersect a plane with the cube, helper function for DrawSlices()
+	// plane equation is Ax + By + Cz + D = 0
+	std::vector<Eigen::Vector3f> IntersectEdges(float A, float B, float C, float D);
+
+	void GenerateRayTemplate(int edgeLen);
+	void CastLight(int edgelen, const float* dens, unsigned char* intensity);
+	inline void LightRay(int x, int y, int z, int n, float decay, 
+			const float* dens, unsigned char* intensity);
+
+
+	void InitGL();
+
+	// if _isDrawSliceOutline==true, the outline of the slices will be drawn as well
+	bool _isDrawSliceOutline;
+	bool _isRendering;
+
+	int _SIZE;		//size of volume data
+	int _N;			//
+	int _RES;		//
+public:
+	Renderer(float* volumeData, int RES);
+	~Renderer();
+	void SetLightPostion(Eigen::Vector3f &pos);
+	void SetRendering(bool isRendering);
+	void SetSliceOutline(bool isDrawSliceOutline);
+
+
+	void FillTexture();		// generate texture from smoke density 
+	void Render();					// draw the volume
+	// draw the outline of the cube
+	void DrawCube();
+	void DrawLight();
+	void DrawVolumeData();
+
+};
+
+
+#endif
+```
+
+### timer.cpp
+```
+#include "core.h"
+#include "timer.h"
+
+
+Timer::Timer()
+{
+	_startTime = _stopTime = _elapsedTime = 0;
+}
+
+void Timer::StartTimer()
+{
+	_startTime = glfwGetTime();
+}
+
+double Timer::StopTimer()
+{
+	_stopTime = glfwGetTime();
+	return (_stopTime - _startTime);
+}
+```
+
+### timer.h
+```
+#ifndef _TIMER_H
+#define _TIMER_H
+
+#include "core.h"
+
+class Timer {
+public:
+	Timer();
+	void StartTimer();
+	double StopTimer();
+private:
+	double _startTime;
+	double _stopTime;
+	double _elapsedTime;
+};
+
+#endif
+```

@@ -1,0 +1,101 @@
+--- v004.md
++++ v005.md
+@@ -1,5 +1,4 @@
+ # Woodcock Tracking with Variable Majorants
+ 
+-Also called: Variable Majorant Delta Tracking, Coarse Grid Majorant Tracking
+ 
+ ## Overview
+@@ -8,14 +7,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A volume dataset (scalar field), a ray (origin, direction, current distance $t$), a transfer function mapping scalar values to color/density, and a majorant structure (global or regional).
+-- **Output:** The accumulated color contribution from the first real interaction or the background color if the ray exits the volume.
++- **Input:** A volume dataset (scalar field), a ray (origin, direction, current distance $t$), a transfer function mapping scalar values to color/density, and a majorant structure (global or regional) [S1, S2, unofficial].
++- **Output:** The accumulated color contribution from the first real interaction or the background color if the ray exits the volume [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Volume:** A data structure supporting point sampling `volume.sample(position)` returning a scalar value.
+-- **Transfer Function:** A function `transferFunction.mapColor(scalar)` returning a struct containing `density` (extinction coefficient $\sigma_t$) and other optical properties.
+-- **Majorant Grid:** A 3D grid of macrocells. Each cell stores a precomputed maximum density value ($\sigma_{t,max}$) for that region. The grid size is typically $32 \times 32 \times 32$ [S2, unofficial].
++- **Volume:** A data structure supporting point sampling `volume.sample(position)` returning a scalar value [S1, unofficial].
++- **Transfer Function:** A function `transferFunction.mapColor(scalar)` returning a struct containing `density` (extinction coefficient $\sigma_t$) and other optical properties [S1, unofficial].
++- **Majorant Grid:** A 3D grid of macrocells. Each cell stores a precomputed maximum density value ($\sigma_{t,max}$) for that region, which is used to calculate the majorant extinction coefficient [S2, unofficial]. The grid size is typically $32 \times 32 \times 32$ [S2, unofficial].
+ 
+ **Steps:**
+-1. **Initialization:** Determine the majorant $\sigma_{maj}$ for the current region containing the ray's origin. If the ray crosses a region boundary, update $\sigma_{maj}$ to the precomputed maximum density of the new region [S2, unofficial].
++1. **Initialization:** Determine the majorant $\sigma_{maj}$ for the current region containing the ray's origin. If the ray crosses a region boundary, update $\sigma_{maj}$ by calculating the majorant extinction coefficient from the precomputed maximum density of the new region [S2, unofficial].
+ 2. **Free Path Sampling:** Sample the distance to the next collision using the exponential distribution with the current majorant:
+    $$ t_{step} = -\frac{\ln(1 - r)}{\sigma_{maj}} $$
+@@ -51,5 +50,5 @@
+     Args:
+         volume: Object with method sample(position) -> scalar.
+-        ray: Object with attributes origin, dir, t (current distance).
++        ray: Object with attributes origin, dir, t (current distance, initialized to 0.0).
+         majorant_grid: 3D grid where get_max_density(region_id) returns sigma_t,max.
+         transfer_function: Object with method mapColor(scalar) -> {density, ...}.
+@@ -59,16 +58,37 @@
+         Color contribution from the first real interaction.
+     """
+-    # Helper to find region ID based on ray position
+-    def get_region_id(position):
+-        # Implementation depends on grid layout; returns index into majorant_grid
+-        pass
++    # Standard uniform random number generator [G]
++    def rand():
++        import random
++        return random.random()
+ 
++    # Helper to compute grid region index from world coordinates [G]
++    def get_region_id(position, grid_bounds, grid_resolution):
++        # Assumes grid_bounds = (min_x, min_y, min_z, max_x, max_y, max_z)
++        # and grid_resolution = (nx, ny, nz)
++        dx = (grid_bounds[3] - grid_bounds[0]) / grid_resolution[0]
++        dy = (grid_bounds[4] - grid_bounds[1]) / grid_resolution[1]
++        dz = (grid_bounds[5] - grid_bounds[2]) / grid_resolution[2]
++        ix = int((position[0] - grid_bounds[0]) / dx)
++        iy = int((position[1] - grid_bounds[1]) / dy)
++        iz = int((position[2] - grid_bounds[2]) / dz)
++        # Clamp to grid bounds to avoid out-of-bounds access
++        ix = max(0, min(ix, grid_resolution[0] - 1))
++        iy = max(0, min(iy, grid_resolution[1] - 1))
++        iz = max(0, min(iz, grid_resolution[2] - 1))
++        return iz * grid_resolution[1] * grid_resolution[0] + iy * grid_resolution[0] + ix
++
++    # Initialize ray distance if not set [G]
++    if ray.t is None:
++        ray.t = 0.0
++        
+     # Initialize majorant based on starting region
+-    current_region_id = get_region_id(ray.origin)
++    current_region_id = get_region_id(ray.origin, majorant_grid.bounds, majorant_grid.resolution)
+     sigma_maj = majorant_grid.get_max_density(current_region_id)
+     
+     while volume.contains(ray.origin + ray.dir * ray.t):
+         # 1. Sample free path
+-        r = random.uniform(0, 1)
++        r = rand()
++        if r == 1.0: r = 0.999999  # Avoid log(0) [G]
+         t_step = -log(1 - r) / sigma_maj
+         
+@@ -78,5 +98,5 @@
+         
+         # 3. Check if ray crossed a region boundary
+-        new_region_id = get_region_id(pos)
++        new_region_id = get_region_id(pos, majorant_grid.bounds, majorant_grid.resolution)
+         if new_region_id != current_region_id:
+             current_region_id = new_region_id
+@@ -89,5 +109,5 @@
+         
+         # 5. Null-collision test
+-        r_test = random.uniform(0, 1)
++        r_test = rand()
+         if sigma_t >= r_test * sigma_maj:
+             # Real collision
+@@ -101,5 +121,5 @@
+ 
+ ### Region Subdivision
+-A technique to reduce null collisions in sparse volumes by subdividing the volume into smaller regions, each with its own majorant extinction coefficient [S2, unofficial]. It sets itself apart by explicitly managing the majorant update logic at region boundaries, whereas other variants might use continuous functions or hierarchical structures. It is chosen when the volume has large empty spaces or distinct density clusters, such as clouds or the Stanford Bunny model [S2, unofficial]. The grid size of $32 \times 32 \times 32$ is a typical compromise [S2, unofficial].
++A technique to reduce null collisions in sparse volumes by subdividing the volume into smaller regions, each with its own majorant extinction coefficient [S2, unofficial]. It sets itself apart by explicitly managing the majorant update logic at region boundaries, whereas other variants might use continuous functions or hierarchical structures [S2, unofficial]. It is chosen when the volume has large empty spaces or distinct density clusters, such as clouds or the Stanford Bunny model [S2, unofficial]. The grid size of $32 \times 32 \times 32$ is a typical compromise [S2, unofficial].
+ 
+ ### Weighted Tracking

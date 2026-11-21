@@ -1,0 +1,152 @@
+Opens, browses, compares and extracts the Data.p4k Archives of Star Citizen. - Decode volume and array textures per image, R16G16_FLOAT and R32_UINT by greluc · Pull Request #594 · p4kx-org/p4kx
+
+Decode volume and array textures per image, R16G16_FLOAT and R32_UINT by greluc · Pull Request #594 · p4kx-org/p4kx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+greluc
+commented
+Oct 25, 2026
+Copy link
+Copy Markdown
+Collaborator
+Closes #257
+Why
+A DDS mip holds one image per cubemap face, array element and volume slice. Only plain textures and single cubemaps had a PNG; volumes and arrays and two formats were counted as unsupported. The decisions are in ADR-0113.
+One PNG per image: <name>_layerN for an array element, a cubemap face's name for a face, <name>_sliceN for a volume slice (in that order, padded to the width of the last number). A cubemap array writes per element and face, or one cross per element with --cross. A volume's slices are those of the exported mip, as the depth halves per mip.
+The preview shows one image, so the GUI and Texture::decode_preview tile the images on one sheet (smallest square number of columns, a cubemap stays a cross). DdsHeader::preview_size gives the size without decoding, so the mip selector and the pixel cap judge the sheet. The facts bar gets a Layers fact. A layer selector would need a second request axis through the decoding thread for few, small images.
+Untrusted headers: more than 2048 slices or array elements (the Direct3D 11 limits) and a volume that is also a cubemap or an array are InvalidHeader, so a header names at most 12,288 images (file names, sheet). Every image's data is still read from the Archive and checked against the header's size (TailMismatch/TruncatedPart), so no allocation follows a header's claim alone; the sheet's size is the sum of the decoded images.
+Array alpha tail mismatch: the cause is the test, not the merge. A tail in A8_UNORM keeps its value in the alpha channel of the decoded tail and merge_alpha takes it from there; the real-Archive test compared the red channel. Verified on TECH-PREVIEW: all 91 array and volume textures with an alpha tail merge per image once the test picks the channel by the tail's format.
+Acceptance criteria
+Array textures decode per layer and export as one PNG per layer, in the GUI preview and in the Extraction. Mip::decode_surfaces, Texture::png_to_file_as, the Extraction's write_images; the preview tiles the layers (decode_preview, TextureInfo). Tests: images::an_array_mip_holds_one_image_per_element_from_its_part_or_the_header, texture_conversion::layers::an_array_is_exported_as_one_png_per_element, texture_preview::an_array_previews_its_elements_on_a_sheet, image_preview_layers::an_array_is_shown_as_a_sheet_and_the_layers_are_counted.
+Volume textures decode per slice and export as one PNG per slice. read_mip no longer refuses volumes. Tests: images::a_volume_mip_holds_one_image_per_slice_and_the_slices_halve_per_level, images::every_slice_of_a_volume_decodes_to_an_image_of_the_mips_size, layers::a_volume_is_exported_as_one_png_per_slice, layers::a_volume_halves_its_slices_per_mip, texture_preview::a_volume_previews_its_slices_on_a_sheet, image_preview_layers::a_volume_is_shown_as_a_sheet_of_its_slices_in_german.
+Array alpha tail mismatch found and fixed in the test, which no longer skips arrays and volumes (cubemap_alpha::real_alpha_tails_are_found_merged_and_decoded_into_alpha also checks every array or volume with a tail). Synthetic: layers::the_alpha_tail_of_an_array_is_merged_per_element.
+R16G16_FLOAT (red, green) and R32_UINT (grey, scaled by u32::MAX like the other unsigned integer formats) decode. Tests: images::r16g16_float_decodes_to_red_and_green, images::r32_uint_is_scaled_by_its_largest_value.
+Synthetic tests per new case (above, plus images::sheets_are_the_smallest_square_that_holds_the_images, images::the_preview_of_a_texture_is_its_mip_cross_or_sheet, images::images_are_tiled_row_by_row_with_transparent_cells_left_over, the header limits images::a_header_with_a_depth_or_array_size_beyond_the_limits_is_invalid, images::a_volume_that_is_also_a_cubemap_or_an_array_is_invalid, images::an_array_header_larger_than_its_data_is_a_mismatch_not_an_allocation, the cubemap array layers::a_cubemap_array_is_exported_as_faces_or_as_one_cross_per_element, and the file names in texture_names). The real-Archive survey counts drop:
+Channel
+Several images, not decoded
+Format without decoder
+LIVE before
+86
+28
+LIVE after
+0 (all 86 decoded and exported one PNG per image: 81 volumes, 5 arrays)
+0
+TECH-PREVIEW after
+0 (all 461 decoded and exported: 81 volumes, 380 arrays)
+0 (R32_UINT decodes)
+The survey (texture_survey.rs) now decodes and exports every such texture instead of sampling them, and asserts it. No cubemap array exists in any Channel; that path is covered synthetically.
+GUI: no new colour, size or component; the facts bar reuses FactsStrip with one more fact (new Fluent keys image-layers in de-DE and en-GB). Verified with a headless wgpu render of an array texture: the facts bar reads LAYERS 5 and the five elements are tiled in three columns and two rows.
+Notes
+Changelog fragment changelog.d/257.md; no catalog change and no new dependency.
+The p4kx model texture test used R32_UINT as its "format without a decoder"; it now uses R11G11B10_FLOAT.
+Item::output_paths, which detects two textures of one run writing the same file, still lists <stem>.<ext> and the face names only. An array a.dds and an unrelated a_layer0.dds in one run would both write a_layer0.png without being flagged; not handled here.
+🤖 Generated with Claude Code
+Decode volume and array textures per image and add R16G16_FLOAT and R…
+…
+80032e6
+```
+…32_UINT
+
+A DDS mip holds one image per cubemap face, array element and volume slice. Only plain
+textures and single cubemaps had a PNG; the 86 volumes and arrays of every Channel (461 on
+TECH-PREVIEW) and the 28 R16G16_FLOAT textures were counted as unsupported.
+
+- p4kx-texture: read_mip no longer refuses volumes; Mip::surfaces counts the slices of the mip
+  (the depth halves per level). DdsHeader gains slices, images, preview_units and preview_size;
+  sheet_columns and tile lay the images of an array, volume or several cubemaps out on one sheet.
+  A header is refused above 2048 slices or array elements and when a volume is also a cubemap or
+  an array, so an untrusted header names at most 12,288 images; the data of every image is still
+  read from the Archive.
+- p4kx-texture: R16G16_FLOAT decodes to red and green, R32_UINT to grey scaled by u32::MAX like
+  the other unsigned integer formats.
+- p4kx-extraction: png_to_file_as, exr_to_file_as and the Extraction write one file per image,
+  _layerN, a cubemap face's name and _sliceN in that order, padded to the width of the last;
+  decode_preview tiles the images on a sheet.
+- p4kx-gui: the image preview measures the sheet and the facts bar names the layers.
+- The array alpha tail mismatch was the real-Archive test: a tail in A8_UNORM keeps its value in
+  the alpha channel and merge_alpha takes it from there, while the test compared the red channel.
+  The test picks the channel by the tail's format and no longer skips volumes and arrays.
+
+ADR-0113 records the decisions. On LIVE the survey decodes and exports all 86 volumes and
+arrays (before: none) and no format is left without a decoder (before: 28); on TECH-PREVIEW all
+461 and the R32_UINT texture.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Signed-off-by: Lucas Greuloch (greluc) <lucas.greuloch@gmail.com>
+```
+greluc
+added this to the
+v0.4.0 milestone
+Oct 25, 2026
+greluc
+and others
+added 3 commits
+October 25, 2026 11:35
+Claim the image names of a texture as a prefix and check the EXR imag…
+…
+d6a2e41
+```
+…e count
+
+A texture now claims `<stem>_*` in the collision check of an Extraction, so an array `a.dds`
+and a texture `a_layer0.dds` are not written in parallel to the same file. The collision check
+learns prefix claims, answered with sorted sets.
+
+exr_to_file_as checks that the decoded images match the file names, like the PNG path. New
+synthetic tests cover a BC6H array and volume and a cubemap array with Faces and Cross to EXR,
+and the collision. Nits: the preview_units doc, the A8 comparison by format in the real-Archive
+test and the wrapped line in cli-json.md.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Signed-off-by: Lucas Greuloch (greluc) <lucas.greuloch@gmail.com>
+```
+Narrow the image claim of a texture to the names a multi-image textur…
+…
+39778e7
+```
+…e writes
+
+The claim `<stem>_*` made `a.dds` collide with `a_ddna.dds` and `a_spec.dds`, which the game
+ships side by side, so those textures were written serially. A texture now claims only
+`<stem>_layer…`, `_slice…`, `_face…` and the six cubemap face names, so `a.dds` and
+`a_ddna.dds` stay independent while `a.dds` and `a_layer0.dds` still collide.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Signed-off-by: Lucas Greuloch (greluc) <lucas.greuloch@gmail.com>
+```
+Merge branch 'main' of https://github.com/p4kx-org/p4kx into t257-vol…
+…
+8c18e8e
+```
+…ume-array-textures
+```
+Hide details
+View details
+greluc
+merged commit bb4575a
+into
+main
+Oct 25, 2026
+18 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+greluc
+deleted the
+t257-volume-array-textures
+branch
+October 25, 2026 11:06
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

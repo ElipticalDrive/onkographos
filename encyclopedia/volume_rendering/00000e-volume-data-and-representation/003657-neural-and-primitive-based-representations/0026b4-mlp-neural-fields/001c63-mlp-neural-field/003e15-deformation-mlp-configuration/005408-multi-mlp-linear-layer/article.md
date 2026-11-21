@@ -1,0 +1,111 @@
+# Multi-MLP Linear Layer
+
+Also called: ECNR Linear Layer
+
+## Overview
+The Multi-MLP Linear Layer is a specialized linear transformation module designed to enable the parallel training of multiple independent Multi-Layer Perceptrons (MLPs) within a single computational graph. It solves the problem of efficiently managing distinct weight and bias parameters for different MLP instances by using 3D tensors indexed by an MLP identifier. Unlike conventional linear layers that use 2D matrices for a single MLP, this method allows batch processing of multiple MLPs simultaneously, leveraging hardware parallelism without complex control flow. It is a core component of the Efficient Compressive Neural Representation (ECNR) framework [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A tensor of shape $(m, N, F_{in})$, where $m$ is the number of MLPs, $N$ is the number of voxels (or data points) processed per MLP, and $F_{in}$ is the input feature dimension [S1].
+- **Indices:** An array of length $m$ containing integer indices in the range $[0, m-1]$, specifying which MLP's parameters to use for each row in the input batch [S1].
+- **Output:** A tensor of shape $(m, N, F_{out})$, where $F_{out}$ is the output feature dimension [S1].
+
+**Data Structures:**
+The layer maintains two learnable parameters stored as 3D tensors:
+1.  **Weight Tensor ($W$):** Shape $(m, F_{in}, F_{out})$. The first dimension indexes the MLP ID. The second and third dimensions correspond to the standard weight matrix dimensions [S1].
+2.  **Bias Tensor ($B$):** Shape $(m, 1, F_{out})$. The first dimension indexes the MLP ID. The second dimension is 1 to allow broadcasting across the $N$ voxels [S1].
+
+**Parameters:**
+- $m$: Number of MLPs [S1].
+- $F_{in}$: Input feature dimension [S1].
+- $F_{out}$: Output feature dimension [S1].
+- $N$: Number of voxels in one block [S1].
+
+**Algorithm:**
+1.  **Initialization:** Initialize $W$ with shape $(m, F_{in}, F_{out})$ and $B$ with shape $(m, 1, F_{out})$. [S1]
+2.  **Parameter Selection:** Given an input tensor $X$ of shape $(m, N, F_{in})$ and an indices array $I$ of length $m$, select the specific weight and bias tensors for each MLP. Let $W_{sel}$ be the selected weights and $B_{sel}$ be the selected biases. The selection is performed by indexing the first dimension of $W$ and $B$ with $I$. [S1]
+3.  **Matrix Multiplication:** Compute the batch matrix multiplication of the input $X$ and the selected weights $W_{sel}$. The operation is $Y = X \times W_{sel}$. In PyTorch, this is achieved using `bmm`, which handles the batch dimension $m$ and the voxel dimension $N$ in parallel. The result $Y$ has shape $(m, N, F_{out})$. [S1]
+4.  **Bias Addition:** Add the selected biases $B_{sel}$ to the result $Y$. Due to broadcasting, $B_{sel}$ (shape $(m, 1, F_{out})$) is added to each of the $N$ rows in $Y$. [S1]
+5.  **Return:** Return the final output tensor $Y$. [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class ECNRLinearLayer(nn.Module):
+    def __init__(self, Fin, Fout, m):
+        """
+        Initialize the Multi-MLP Linear Layer.
+        
+        Args:
+            Fin (int): Input feature dimension.
+            Fout (int): Output feature dimension.
+            m (int): Number of MLPs.
+        """
+        super(ECNRLinearLayer, self).__init__()
+        # Initialize weight tensor of shape (m, Fin, Fout)
+        self.weight = nn.Parameter(torch.empty(m, Fin, Fout))
+        # Initialize bias tensor of shape (m, 1, Fout)
+        self.bias = nn.Parameter(torch.empty(m, 1, Fout))
+        
+        # Initialize parameters [G]
+        nn.init.kaiming_uniform_(self.weight, a=0)
+        nn.init.zeros_(self.bias)
+
+    def forward(self, input_tensor, mlp_indices):
+        """
+        Forward pass for multiple MLPs.
+        
+        Args:
+            input_tensor (torch.Tensor): Input tensor of shape (m, N, Fin).
+            mlp_indices (torch.Tensor): Indices tensor of shape (m,) with values in [0, m-1].
+            
+        Returns:
+            torch.Tensor: Output tensor of shape (m, N, Fout).
+        """
+        # Select weights and biases for the specified MLPs
+        # mlp_indices selects along the first dimension (m)
+        # The ellipsis (...) selects all elements in the remaining dimensions
+        selected_weights = self.weight[mlp_indices, :, :]
+        selected_bias = self.bias[mlp_indices, :, :]
+        
+        # Perform batch matrix multiplication
+        # input_tensor shape: (m, N, Fin)
+        # selected_weights shape: (m, Fin, Fout)
+        # Output shape: (m, N, Fout)
+        output = torch.bmm(input_tensor, selected_weights)
+        
+        # Add bias
+        # selected_bias shape: (m, 1, Fout)
+        # Broadcasting adds bias to all N voxels
+        output = output + selected_bias
+        
+        return output
+```
+
+**Edge Cases and Pitfalls:**
+- **Index Bounds:** The `mlp_indices` must contain only valid integers in the range $[0, m-1]$. Out-of-bounds indices will raise an error or produce undefined behavior depending on the framework [S1].
+- **Dimension Mismatch:** The input tensor's first dimension must match the length of `mlp_indices` and the batch size expected by the `bmm` operation. The second dimension of the input ($N$) must match the second dimension of the weight tensor ($F_{in}$) for matrix multiplication to be valid [S1].
+- **Precision:** Standard floating-point precision is used. No specific numerical stability techniques are mentioned in the source [S1].
+
+## Subtopics
+
+### [HyperNetwork Conditioning](12585-hypernetwork-conditioning.md)
+A method that generates MLP parameters dynamically using a hypernetwork, contrasting with the static parameter storage of the Multi-MLP Linear Layer. Choose this when parameter sharing or conditioning on external inputs is required.
+
+## Operating characteristics
+- **Time Complexity:** The complexity is dominated by the batch matrix multiplication. For $m$ MLPs, $N$ voxels, and feature dimensions $F_{in}$ and $F_{out}$, the complexity is $O(m \cdot N \cdot F_{in} \cdot F_{out})$. The parallel execution on GPU allows this to be efficient compared to sequential MLP evaluation [S1].
+- **Memory Complexity:** The memory footprint is $O(m \cdot F_{in} \cdot F_{out})$ for weights and $O(m \cdot F_{out})$ for biases, independent of $N$. This is significantly more memory-efficient than storing $m$ separate 2D weight matrices if $N$ is large, as the structure is fixed [S1].
+- **Performance:** The method leverages PyTorch's `bmm` for parallel training, avoiding complex coding overhead. It is suitable for scenarios requiring simultaneous optimization of multiple neural fields, such as time-varying volumetric datasets [S1].
+- **Strengths:** Parallel training, memory efficiency for multiple MLPs, simple implementation.
+- **Limitations:** Requires all MLPs to have the same architecture ($F_{in}, F_{out}$). Not suitable for dynamic number of MLPs without reinitialization.
+
+## Background
+The Multi-MLP Linear Layer was introduced in the Efficient Compressive Neural Representation (ECNR) framework for time-varying volumetric datasets. It was proposed to enable efficient parallel training of multiple MLPs, each representing a different temporal state or spatial block of the volume. The method was detailed in the implementation appendix of the ECNR paper, highlighting its role in achieving compression and rendering efficiency for large-scale volumetric data [S1].
+
+## Sources
+[S1] ECNR: Efficient Compressive Neural Representation of Time-Varying Volumetric Datasets, https://doi.org/10.1109/pacificvis60374.2024.00017, fetched 2026-10-26

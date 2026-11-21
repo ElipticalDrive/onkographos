@@ -1,0 +1,205 @@
+--- v004.md
++++ v005.md
+@@ -4,77 +4,48 @@
+ 
+ ## Overview
+-Voxel Occupancy Boundary Detection identifies voxels in a 3D occupancy grid that lie on the interface between occupied and unoccupied space, producing a boundary mask used by Boolean Voxel Meshing to generate triangular geometry [S1, S2, unofficial]. It differs from sibling methods by operating directly on the raw boolean grid to flag boundary voxels via neighborhood checks, whereas [Octree Traversal for Surface Extraction](2113-octree-traversal-for-surface-extraction.md) traverses hierarchical structures, and [VoxelGrid Mesh Generation](2714-voxelgrid-mesh-generation.md) or [Greedy Triangle Meshing](15263-greedy-triangle-meshing.md) focus on immediate mesh assembly rather than explicit boundary flagging.
++Voxel Occupancy Boundary Detection identifies voxels in a 3D occupancy grid that lie on the interface between occupied and unoccupied space, producing a boundary mask used by Boolean Voxel Meshing [971-boolean-voxel-meshing.md] to generate triangular geometry [S2, unofficial]. It operates directly on the raw boolean grid to flag boundary voxels via neighborhood checks [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `grid`: A 3D boolean occupancy grid of shape $(D_x, D_y, D_z)$, where `True` indicates occupied and `False` indicates empty.
+-- `boundarySize`: An integer radius (in voxels) defining the width of the boundary region around the surface [S1, unofficial].
++- `grid`: A 3D boolean occupancy grid of shape $(D_x, D_y, D_z)$, where `True` indicates occupied and `False` indicates empty [S2, unofficial].
++- `boundarySize`: An integer radius (in voxels) from the surface to mark as boundary [S1, unofficial].
+ 
+ **Outputs:**
+-- `boundary_mask`: A 3D boolean grid of the same shape as `grid`, where `True` indicates a voxel is part of the detected boundary.
++- `boundary_mask`: A 3D boolean grid of the same shape as `grid`, where `True` indicates a voxel is part of the detected boundary [S2, unofficial].
+ 
+ **Data Structures:**
+-- The grid is stored as a contiguous array or tensor. For GPU implementations, it is bound as a Shader Storage Buffer Object (SSBO) [S1, unofficial].
++- The grid is stored as a contiguous array or tensor. For GPU implementations, it is bound as a Shader Storage Buffer Object (SSBO) [S1, unofficial]. Uniforms include `boundarySize`, `gridDims`, and `numCells` [S1, unofficial].
+ 
+ **Steps:**
++1. **Compute Occupied Voxels:** A voxel is strictly occupied if all 8 of its corner neighbors are occupied. For a voxel at $(x,y,z)$, this requires checking indices $(x+i, y+j, z+k)$ for $i,j,k \in \{0, 1\}$.
++2. **Compute Unoccupied Voxels:** A voxel is strictly unoccupied if all 8 of its corner neighbors are empty. This is the negation of the logical OR of the 8 neighbors.
++3. **Determine Boundary Voxels:** A voxel is on the boundary if it is neither strictly occupied nor strictly unoccupied. This is calculated as the logical AND of the negations of the occupied and unoccupied masks.
++4. **Expand Boundary (Optional):** If `boundarySize` > 1, the initial boundary mask is dilated. The neighborhood size is adjusted to be odd if even. Bounds are clamped to the grid dimensions. If any voxel in the neighborhood is empty, the current voxel is marked as boundary [S1, unofficial].
+ 
+-1. **Compute Occupied Voxels:**
+-   A voxel is considered "strictly occupied" if all 8 of its corner neighbors are occupied. This requires checking the 8 adjacent cells in the grid. Let $O(x,y,z)$ be the occupancy value at $(x,y,z)$. The occupied mask $M_{occ}$ is computed as:
+-   $$
+-   M_{occ}[x,y,z] = O[x,y,z] \land O[x+1,y,z] \land O[x,y+1,z] \land O[x,y,z+1] \land O[x+1,y+1,z] \land O[x+1,y,z+1] \land O[x,y+1,z+1] \land O[x+1,y+1,z+1]
+-   $$
+-   This logic applies to all valid interior indices where the 8 neighbors exist [S2, unofficial].
+-
+-2. **Compute Unoccupied Voxels:**
+-   A voxel is considered "strictly unoccupied" if all 8 of its corner neighbors are empty. Using De Morgan's laws, this is equivalent to the negation of the OR of the neighbors:
+-   $$
+-   M_{unocc}[x,y,z] = \neg (O[x,y,z] \lor O[x+1,y,z] \lor O[x,y+1,z] \lor O[x,y,z+1] \lor O[x+1,y+1,z] \lor O[x+1,y,z+1] \lor O[x,y+1,z+1] \lor O[x+1,y+1,z+1])
+-   $$
+-   This logic applies to all valid interior indices [S2, unofficial].
+-
+-3. **Determine Boundary Voxels:**
+-   A voxel is on the boundary if it is neither strictly occupied nor strictly unoccupied. This is calculated as:
+-   $$
+-   M_{boundary}[x,y,z] = \neg M_{occ}[x,y,z] \land \neg M_{unocc}[x,y,z]
+-   $$
+-   This identifies voxels where the corner neighborhood is mixed [S2, unofficial].
+-
+-4. **Expand Boundary (Optional):**
+-   If `boundarySize` > 1, the initial boundary mask is dilated by a radius of `boundarySize` voxels. This involves checking a neighborhood of size $(2 \cdot boundarySize + 1)^3$ around each voxel. If any voxel in this neighborhood is in $M_{boundary}$, the current voxel is marked as boundary [S1, unofficial].
++**Formulas:**
++Let $O[x,y,z]$ be the occupancy value at $(x,y,z)$. The masks are computed for valid interior indices where all 8 neighbors exist [S2, unofficial]:
++$$
++M_{occ}[x,y,z] = \bigwedge_{i,j,k \in \{0,1\}} O[x+i, y+j, z+k]
++$$
++$$
++M_{unocc}[x,y,z] = \neg \left( \bigvee_{i,j,k \in \{0,1\}} O[x+i, y+j, z+k] \right)
++$$
++$$
++M_{boundary}[x,y,z] = \neg M_{occ}[x,y,z] \land \neg M_{unocc}[x,y,z]
++$$
+ 
+ **Pseudocode:**
+ ```python
++import numpy as np
++
+ def voxel_occupancy_boundary_detection(grid, boundary_size=1):
+-    """
+-    Detects boundary voxels in a 3D boolean occupancy grid.
+-    
+-    Args:
+-        grid: 3D numpy array of booleans (True=occupied, False=empty).
+-        boundary_size: Integer radius for boundary expansion.
+-        
+-    Returns:
+-        boundary_mask: 3D numpy array of booleans.
+-    """
++    # grid: 3D numpy array of booleans (True=occupied, False=empty)
++    # boundary_size: integer radius for boundary expansion
++    # Returns: boundary_mask: 3D numpy array of booleans
++
+     # Pad grid to handle boundary conditions for neighbor checks
+-    # Padding of 1 is sufficient for the 8-corner check
+     padded = np.pad(grid, pad_width=1, mode='constant', constant_values=False)
+-    
+-    # Compute strictly occupied mask
+-    # Check all 8 corners relative to the center of the 2x2x2 block
+-    # Note: The source logic implies checking the 8 voxels surrounding a 
+-    # conceptual point, but applied to voxel centers, it checks the 8 
+-    # neighbors of the voxel at (i,j,k) shifted by indices.
+-    # Based on S2: occ[..., :-1, :-1, :-1] & ... & occ[..., 1:, 1:, 1:]
+-    # This corresponds to checking the 8 neighbors of the voxel at index i,j,k
+-    # within the padded grid.
+-    
++
+     # Extract 8 neighbors for each voxel in the original grid dimensions
+-    # The slicing logic in S2:
+-    # occ[..., :-1, :-1, :-1] -> neighbor at (i, j, k)
+-    # occ[..., :-1, :-1, 1:]  -> neighbor at (i, j, k+1)
+-    # ...
+-    # occ[..., 1:, 1:, 1:]    -> neighbor at (i+1, j+1, k+1)
+-    
+-    # We apply this to the padded grid to get the mask for the original grid size
+     n1 = padded[:-1, :-1, :-1]
+     n2 = padded[:-1, :-1, 1:]
+@@ -85,42 +56,20 @@
+     n7 = padded[1:, 1:, :-1]
+     n8 = padded[1:, 1:, 1:]
+-    
++
+     occupied = n1 & n2 & n3 & n4 & n5 & n6 & n7 & n8
+     unoccupied = ~(n1 | n2 | n3 | n4 | n5 | n6 | n7 | n8)
+-    
+     boundary = ~occupied & ~unoccupied
+-    
+-    # Expand boundary if necessary
++
+     if boundary_size > 1:
+-        # Dilate the boundary mask
+-        # Simple dilation using max pooling or iterative neighbor check
+-        # For arbitrary radius, we check if any voxel in the neighborhood is True
++        # Adjust neighborhood size to be odd if even
++        neighborhood_size = 2 * boundary_size + 1
++        if neighborhood_size % 2 == 0:
++            neighborhood_size += 1
++        radius = neighborhood_size // 2
++
+         expanded_boundary = np.zeros_like(grid, dtype=bool)
+-        radius = boundary_size
+-        # Iterate over the neighborhood
+-        for dx in range(-radius, radius + 1):
+-            for dy in range(-radius, radius + 1):
+-                for dz in range(-radius, radius + 1):
+-                    # Shift the boundary mask
+-                    # Handle slicing carefully to stay within bounds
+-                    if dx >= 0 and dy >= 0 and dz >= 0:
+-                        s1 = boundary[:grid.shape[0]-dx, :grid.shape[1]-dy, :grid.shape[2]-dz]
+-                        s2 = expanded_boundary[dx:, dy:, dz:]
+-                        s2 |= s1
+-                    elif dx < 0 and dy < 0 and dz < 0:
+-                        s1 = boundary[-dx:, -dy:, -dz:]
+-                        s2 = expanded_boundary[:grid.shape[0]+dx, :grid.shape[1]+dy, :grid.shape[2]+dz]
+-                        s2 |= s1
+-                    # General case requires more complex slicing logic or convolution
+-                    # For simplicity, we assume a standard dilation kernel
+-                    pass
+-        
+-        # More robust dilation using scipy or manual loop for small radius
+-        # Since S1 mentions "neighborhoodSize", we implement a generic neighborhood check
+-        final_boundary = np.zeros_like(grid, dtype=bool)
+         for x in range(grid.shape[0]):
+             for y in range(grid.shape[1]):
+                 for z in range(grid.shape[2]):
+-                    # Check neighborhood
+                     min_x = max(0, x - radius)
+                     max_x = min(grid.shape[0], x + radius + 1)
+@@ -129,9 +78,10 @@
+                     min_z = max(0, z - radius)
+                     max_z = min(grid.shape[2], z + radius + 1)
+-                    
+-                    if np.any(boundary[min_x:max_x, min_y:max_y, min_z:max_z]):
+-                        final_boundary[x, y, z] = True
+-        boundary = final_boundary
+-        
++
++                    # Check if any voxel in the neighborhood is empty
++                    if np.any(~grid[min_x:max_x, min_y:max_y, min_z:max_z]):
++                        expanded_boundary[x, y, z] = True
++        boundary = expanded_boundary
++
+     return boundary
+ ```
+@@ -141,7 +91,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Grid Boundaries:** The 8-neighbor check fails at the grid edges. Padding or clamping is required [S1, S2, unofficial].
+-- **Precision:** Boolean logic is exact, but floating-point occupancy grids must be thresholded before conversion [S2, unofficial].
+-- **Degenerate Input:** A completely empty or completely filled grid results in an empty boundary mask [S2, unofficial].
++- **Grid Boundaries:** The 8-neighbor check requires padding or clamping to valid indices [S1, unofficial].
++- **Degenerate Input:** A completely empty or completely filled grid results in an empty boundary mask, as all voxels will be classified as strictly unoccupied or strictly occupied respectively [S2, unofficial].
++- **Precision:** Boolean logic is exact, but floating-point occupancy grids must be thresholded before conversion [G].
+ 
+ ## Subtopics
+@@ -151,9 +101,9 @@
+ 
+ ### Grid Boundary Detection
+-Grid Boundary Detection determines if a voxel at $(x,y,z)$ is on the boundary of an occupied region by checking if any voxel in its neighborhood is empty [S1, unofficial]. If the neighborhood size is even, it is incremented by 1 to ensure symmetric dimensions [S1, unofficial]. The algorithm calculates min/max bounds clamped to grid dimensions and iterates through the neighborhood, returning true if any voxel is empty [S1, unofficial]. This is a simpler, neighborhood-based alternative to the 8-corner logic [S1, unofficial].
++Grid Boundary Detection determines if a voxel at $(x,y,z)$ is on the boundary of an occupied region by checking if any voxel in its neighborhood is empty [S1, unofficial]. If the neighborhood size is even, it is incremented by 1 to ensure symmetric dimensions [S1, unofficial]. The algorithm calculates min/max bounds clamped to grid dimensions and iterates through the neighborhood, returning true if any voxel is empty [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed once with a constant number of neighbor checks [S1, S2, unofficial].
+-- **Memory Complexity:** $O(N)$ for storing the input grid and output boundary mask [S1, unofficial].
++- **Time Complexity:** $O(N \cdot R^3)$ where $N$ is the number of voxels and $R$ is the neighborhood radius, as each voxel is processed once with a constant number of neighbor checks [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for storing the input grid and output boundary mask [G].
+ - **Performance:** GPU implementations using compute shaders can process large grids efficiently by parallelizing the neighbor checks [S1, unofficial].
+ - **Strengths:** Simple, exact boolean logic; no interpolation required; suitable for binary volumes [S2, unofficial].
+@@ -163,5 +113,5 @@
+ 
+ ## Background
+-Voxel Occupancy Boundary Detection is a fundamental step in boolean voxel meshing, originating from the need to efficiently convert voxel grids to meshes [S1, unofficial]. It relies on the topological property that boundary voxels are those with mixed neighborhoods [S2, unofficial]. The method is widely used in GPU-based voxel processing pipelines, such as those in VoxelFragmentML [S1, unofficial], and differentiable volumetric rendering frameworks [S2, unofficial]. Binary cell classification variants are used in octree-based surface extraction for massive binary volumes [S3, unofficial].
++Voxel Occupancy Boundary Detection relies on the topological property that boundary voxels are those with mixed neighborhoods [S2, unofficial]. The method is implemented in GPU-based voxel processing pipelines, such as those in VoxelFragmentML [S1, unofficial], and differentiable volumetric rendering frameworks [S2, unofficial]. Binary cell classification variants are used in octree-based surface extraction for massive binary volumes [S3, unofficial].
+ 
+ ## Sources

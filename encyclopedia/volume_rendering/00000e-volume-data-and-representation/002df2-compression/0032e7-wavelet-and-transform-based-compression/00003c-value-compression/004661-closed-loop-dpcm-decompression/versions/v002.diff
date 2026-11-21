@@ -1,0 +1,127 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,10 @@
+ 
+ ## Overview
+-Closed-loop DPCM decompression reconstructs seismic trace blocks from compressed payloads using a feedback mechanism where the decoder's reconstructed values drive the prediction for subsequent samples [S1, unofficial]. Unlike open-loop methods that rely on stored quantization parameters or legacy delta streams, this method dynamically tracks the reconstruction state to ensure bit-exact recovery [S1, unofficial]. It is distinguished by its explicit check for a "closed-loop" flag in the payload, falling back to a legacy decoder if the format is incompatible [S1, unofficial].
++Closed-loop DPCM decompression reconstructs seismic trace data from compressed payloads by applying inverse quantization and delta decoding within a closed-loop feedback structure [S1, unofficial]. It solves the problem of accurately recovering amplitude values from quantized differential codes while maintaining backward compatibility with legacy formats [S1, unofficial]. It is distinguished from open-loop DPCM by its use of a feedback loop where the reconstructed value, rather than the original error, is used as the prediction base for the next sample, ensuring that quantization errors do not accumulate unbounded drift relative to the decoder's internal state [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A `CompressedTraceBlock` object containing a payload, metadata (trace ID, sample count, min/max values), and a bit depth indicator.
+-**Outputs:** A `TraceBlock` object containing the reconstructed trace ID and an array of normalized floating-point samples.
++**Inputs and Outputs:**
++*   **Input:** A `CompressedTraceBlock` object containing a payload, metadata (trace ID, samples per trace, min/max values), and a flag indicating closed-loop support.
++*   **Output:** A `TraceBlock` object containing the reconstructed trace ID and an array of normalized floating-point samples.
+ 
+ **Data Structures:**
+@@ -16,18 +17,18 @@
+ 
+ **Steps:**
+-1.  **Format Verification:** Check if the payload is encoded using the closed-loop scheme. If `ClosedLoopQuantizer.isClosedLoop(cb.payload())` returns false, invoke the legacy decompression routine and terminate [S1, unofficial].
+-2.  **Initialization:**
++1.  **Format Verification:** Check if the payload is encoded using the closed-loop format. If `ClosedLoopQuantizer.isClosedLoop(cb.payload())` returns false, the method falls back to legacy decompression [S1, unofficial].
++2.  **Parameter Extraction:**
+     *   Retrieve the number of samples per trace: $n = cb.samplesPerTrace()$.
+-    *   Determine the number of bits used for quantization: $bits = ClosedLoopQuantizer.storedBits(cb.payload())$.
++    *   Determine the bit depth used for quantization: $bits = ClosedLoopQuantizer.storedBits(cb.payload())$.
+     *   Calculate the inverse quantization scale factor: $inv = \frac{1.0}{ClosedLoopQuantizer.maxQ(bits)}$.
++3.  **Quantized Value Unpacking:** Unpack the raw payload into a sequence of quantized integer values $q[0 \dots n-1]$ using `ClosedLoopQuantizer.unpack(cb.payload(), n)` [S1, unofficial].
++4.  **Closed-Loop Reconstruction:**
+     *   Initialize the previous reconstructed value: $prev = 0.0$.
+-3.  **Reconstruction Loop:** For each sample index $i$ from $0$ to $n-1$:
+-    *   Unpack the quantized residual value $q[i]$ from the payload using `ClosedLoopQuantizer.unpack(cb.payload(), n)`.
+-    *   Reconstruct the current normalized value using the closed-loop feedback:
+-        $$ prev = ClosedLoopQuantizer.reconstruct(prev, q[i], inv) $$
+-    *   Store the result: $norm[i] = prev$.
+-4.  **Denormalization:** Convert the normalized values $norm$ back to the original data scale using the trace's minimum and maximum bounds:
+-    $$ v_{final} = Preprocessing.denormalizeFromMinusOneToOne(norm, cb.min(), cb.max()) $$
+-5.  **Return:** Construct and return a new `TraceBlock` with the original `traceId` and the denormalized samples.
++    *   For each sample index $i$ from $0$ to $n-1$:
++        *   Reconstruct the current normalized value using the previous reconstructed value and the current quantized delta: $prev = ClosedLoopQuantizer.reconstruct(prev, q[i], inv)$.
++        *   Store the result: $norm[i] = prev$.
++    *   *Note:* The `reconstruct` function typically performs $prev + (q[i] \times inv)$, effectively adding the scaled quantized difference to the previous reconstructed sample [S1, unofficial].
++5.  **Denormalization:** Convert the normalized values from the range $[-1, 1]$ to the original physical scale using the trace's minimum and maximum bounds: $samples[i] = Preprocessing.denormalizeFromMinusOneToOne(norm[i], cb.min(), cb.max())$ [S1, unofficial].
++6.  **Return:** Construct and return a new `TraceBlock` with the original `traceId` and the computed `samples` array.
+ 
+ **Pseudocode:**
+@@ -38,53 +39,51 @@
+         return decompress_legacy(cb)
+ 
+-    # Step 2: Initialization
+-    n = cb.samplesPerTrace()
++    # Step 2: Extract parameters
++    n = cb.samplesPerTrace
+     bits = ClosedLoopQuantizer.storedBits(cb.payload)
+     inv = 1.0 / ClosedLoopQuantizer.maxQ(bits)
++    
++    # Step 3: Unpack quantized values
++    q = ClosedLoopQuantizer.unpack(cb.payload, n)
++    
++    # Step 4: Closed-loop reconstruction
+     prev = 0.0
+-    norm = [0.0] * n
+-
+-    # Step 3: Reconstruction Loop
++    norm = []
+     for i in range(n):
+-        # Unpack quantized value q[i]
+-        q_i = ClosedLoopQuantizer.unpack(cb.payload, n, i)
++        # Reconstruct uses the previous reconstructed value as the base
++        prev = ClosedLoopQuantizer.reconstruct(prev, q[i], inv)
++        norm.append(prev)
+         
+-        # Closed-loop reconstruction
+-        # Note: The exact internal logic of reconstruct() is encapsulated in the helper.
+-        # It typically performs: prev = prev + (q_i * inv) or similar delta addition.
+-        prev = ClosedLoopQuantizer.reconstruct(prev, q_i, inv)
+-        norm[i] = prev
+-
+-    # Step 4: Denormalization
+-    # Assuming denormalizeFromMinusOneToOne maps [-1, 1] to [min, max]
+-    # v = min + (norm + 1) * (max - min) / 2
++    # Step 5: Denormalize
+     samples = Preprocessing.denormalizeFromMinusOneToOne(norm, cb.min, cb.max)
+-
+-    # Step 5: Return
++    
++    # Step 6: Return
+     return TraceBlock(traceId=cb.traceId, samples=samples)
+ ```
+ 
+ **Parameters:**
+-*   $bits$: The bit depth used for quantization, extracted from the payload header. Typical values depend on the compression profile but are explicitly stored in the closed-loop format [S1, unofficial].
++*   $n$: Samples per trace. Typical values depend on the seismic survey (e.g., 1000–4000 samples).
++*   $bits$: Stored bit depth. Determined by the encoder.
++*   $inv$: Inverse quantization step size.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Legacy Compatibility:** If the payload lacks the closed-loop flag, the method must not attempt to parse it as closed-loop data, as it may be a legacy zlib stream or open-loop delta [S1, unofficial].
+-*   **Precision:** The use of floating-point `inv` and accumulation in `prev` requires careful handling of precision errors, though the closed-loop nature ensures the decoder follows the exact same path as the encoder [S1, unofficial].
++*   **Legacy Fallback:** If the payload is not marked as closed-loop, the method must not attempt closed-loop decoding, as it will produce incorrect results [S1, unofficial].
++*   **Initialization:** The initial $prev$ value is set to 0.0. This assumes the first sample's delta is relative to zero or that the first value is stored as an absolute value in the first delta [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Legacy Decompression
+-Decompresses payloads written before the closed-loop revision, supporting raw zlib streams, open-loop delta encoding, and 16-bit quantization [S1, unofficial]. It is retained for backward compatibility with `.sdc` v2 files [S1, unofficial]. The process involves inflating the payload, converting bytes to shorts, decoding deltas using `LinearQuantizer`, delta-decoding the normalized values, and denormalizing [S1, unofficial]. A critical pitfall is that files written with fewer than 16 bits by the legacy version cannot be decoded correctly because the bit depth was never stored in the file format [S1, unofficial].
++Decompresses payloads written before the closed-loop revision, supporting raw zlib streams, open-loop delta encoding, and 16-bit quantization [S1, unofficial]. It is used for backward compatibility with `.sdc` v2 files [S1, unofficial]. The process involves inflating the zlib payload, converting bytes to shorts, decoding deltas using `LinearQuantizer`, applying delta decoding via `Preprocessing.deltaDecode`, and denormalizing [S1, unofficial]. A critical pitfall is that files written with fewer than 16 bits by the legacy version cannot be decoded correctly because the bit depth was never stored in the header [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples $n$ in the trace block, as each sample requires one unpack and one reconstruction step [S1, unofficial].
+-*   **Memory Complexity:** Linear with respect to $n$ for storing the normalized and final sample arrays [S1, unofficial].
+-*   **Strengths:** Ensures bit-exact reconstruction by mirroring the encoder's state; handles variable bit depths explicitly [S1, unofficial].
+-*   **Limitations:** Requires the payload to be correctly flagged; incompatible with legacy formats without a fallback mechanism [S1, unofficial].
+-*   **When to use:** When decompressing modern `.sdc` files that support closed-loop quantization [S1, unofficial].
+-*   **When not to use:** When processing legacy `.sdc` v2 files or payloads not marked as closed-loop [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of samples $n$, $O(n)$, due to the single pass required for unpacking and reconstruction.
++*   **Memory Complexity:** $O(n)$ to store the output samples array.
++*   **Strengths:** Provides accurate reconstruction for quantized data by preventing error accumulation through the closed-loop mechanism. Maintains compatibility with older file formats.
++*   **Limitations:** Requires the bit depth to be correctly stored and parsed. Legacy files with non-standard bit depths (<16 bits) are prone to decoding errors [S1, unofficial].
++*   **When to use:** When decompressing modern `.sdc` files that support closed-loop quantization.
++*   **When not to use:** When dealing with legacy `.sdc` v2 files that do not have the closed-loop flag set; the legacy decoder must be used instead.
+ 
+ ## Background
+-This method is part of the SeismicDataCompressor project, an unofficial implementation for compressing seismic data [S1, unofficial]. It represents an evolution from earlier delta-encoding schemes to a closed-loop approach that improves reconstruction fidelity by explicitly managing quantization bits and feedback states [S1, unofficial].
++This method is part of the SeismicDataCompressor project, an unofficial implementation for compressing and decompressing seismic data [S1, unofficial]. It was developed to improve upon legacy open-loop DPCM methods by ensuring that quantization errors do not drift during reconstruction [S1, unofficial]. The closed-loop approach is a standard technique in differential pulse-code modulation (DPCM) to maintain synchronization between encoder and decoder states in the presence of quantization [S1, unofficial].
+ 
+ ## Sources

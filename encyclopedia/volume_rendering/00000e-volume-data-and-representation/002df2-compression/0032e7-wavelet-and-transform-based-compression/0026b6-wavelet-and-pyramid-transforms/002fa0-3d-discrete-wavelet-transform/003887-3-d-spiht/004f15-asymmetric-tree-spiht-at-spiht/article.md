@@ -1,0 +1,287 @@
+# Asymmetric Tree SPIHT (AT-SPIHT)
+
+Also called: 3-D asymmetric tree SPIHT, improved three-dimensional SPIHT
+
+## Overview
+Asymmetric Tree SPIHT (AT-SPIHT) is a lossless compression method for volumetric medical images (CT/MR) that combines a 3-D reversible integer wavelet transform with a Set Partitioning in Hierarchical Trees (SPIHT) coder operating on an asymmetric tree structure [S1]. It solves the problem of compressing huge volumetric datasets by decorrelating slices more effectively than 2-D techniques and symmetric 3-D SPIHT, achieving an average improvement of about 42% over 2-D methods [S1]. Unlike symmetric 3-D SPIHT, which treats all spatial dimensions equally, AT-SPIHT constructs longer, unbalanced trees that exploit the statistical disparity between intraslice and interslice coefficient magnitudes, allowing for deeper hierarchical partitioning without requiring additional decomposition levels [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A volumetric medical image dataset (e.g., CT or MR) represented as a 3-D array of integers [S1].
+*   **Output:** A bitstream representing the losslessly compressed volume [S1].
+
+### Data Structures and Layout
+The method processes data in a Group of Slices (GOS) [S1]. The coefficients are organized into sub-bands based on a wavelet packet decomposition [S1].
+
+**Wavelet Packet Decomposition Order:**
+1.  Full axial decomposition is performed first along the slice direction [S1].
+2.  Subsequent transaxial decompositions are performed along the in-plane dimensions [S1].
+3.  The node divides in the additionally split sub-bands [S1].
+
+**Sub-band Structure:**
+The decomposition creates axial sub-bands. Let $LL_t$, $LH_t$, $HL_t$, and $HH_t$ denote the transaxial sub-bands resulting from the decomposition [S1]. The axial decomposition further splits these [S1]. The asymmetric tree structure is defined within these coefficient frames [S1].
+
+**Tree Node Definition:**
+*   A node in the tree is a $2 \times 2$ group of wavelet coefficients [S1].
+*   In symmetric 3-D SPIHT, a node is a $2 \times 2 \times 2$ block of pixels (extending two pixels in each of the three dimensions) [S1].
+*   In AT-SPIHT, the tree links $2 \times 2$ coefficient groups across different axial sub-bands at the same transaxial location [S1].
+
+### Numbered Steps
+
+1.  **Preprocessing (Integer Wavelet Transform):**
+    Apply a 3-D reversible integer wavelet transform to the input volume [S1]. The transform maps integers to integers using specific filter sets [S1]. The recommended filters are S+P, I(2,2), or I(4,2) [S1]. Perform full axial decomposition first, then perform transaxial decompositions subsequently [S1]. The node divides in the additionally split sub-bands [S1].
+
+2.  **Tree Construction (Asymmetric Linkage):**
+    Construct the parent-offspring relationships for the SPIHT lists [S1]. The structure is "asymmetric" because the linkage rules differ for the top-left coefficient of each $2 \times 2$ group compared to the other three coefficients in that group [S1]. The top-left coefficient links to offspring in a *different* axial sub-band, while the others link to offspring in the *same* axial sub-band [S1].
+
+    **Linkage Rules by Axial Sub-band:**
+    Let $C_{TL}$ be the top-left coefficient of a $2 \times 2$ group in the lowest transaxial sub-band of an axial band.
+
+    *   **For the Axial $LL_t$ band:**
+        *   $C_{TL}$ has one $2 \times 2$ offspring group in the axial $LH_t$ band (at the same transaxial location) [S1].
+        *   The other three coefficients in the $2 \times 2$ group have their $2 \times 2$ offspring group in the same axial $LL_t$ band [S1].
+
+    *   **For the Axial $LH_t$ band:**
+        *   $C_{TL}$ has two $2 \times 2$ offspring groups in the axial $H_t$ band (at the same transaxial location) [S1].
+        *   The other three coefficients in the $2 \times 2$ group have their $2 \times 2$ offspring group in the same axial $LH_t$ band [S1].
+
+    *   **For the Axial $H_t$ band (Highest Frequency):**
+        *   $C_{TL}$ has **no** offspring because there are no more axial sub-bands [S1].
+        *   The other three coefficients in the $2 \times 2$ group have their $2 \times 2$ offspring group in the same axial $H_t$ band [S1].
+
+3.  **Tree Growth (Transaxial Linkage):**
+    Within each axial sub-band, the tree grows according to standard 2-D SPIHT rules for the remaining coefficients, linking to transaxial sub-bands [S1].
+    *   Each $2 \times 2$ coefficient group in the lowest transaxial sub-band of the axial $LL_t$ band has three $2 \times 2$ offspring groups in the axial $LL_t$ band and one $2 \times 2$ offspring group in the axial $LH_t$ band (via the $C_{TL}$ link described above) [S1].
+    *   Each $2 \times 2$ offspring group in the lowest transaxial sub-band of the axial $LH_t$ band has three $2 \times 2$ offspring groups in the axial $LH_t$ band and two in the axial $H_t$ band (via the $C_{TL}$ link described above) [S1].
+    *   Each $2 \times 2$ offspring group in the lowest transaxial sub-band of the axial $H_t$ band has three $2 \times 2$ offspring groups in the same axial $H_t$ band [S1].
+
+4.  **SPIHT Encoding:**
+    Perform the standard SPIHT algorithm (Sorting and Sorting-Output Passes) using the constructed asymmetric trees [S1]. The longer tree depth increases the probability of coefficient values being zero as one moves from root to leaves, improving compression when magnitude distributions are uneven between intraslice and interslice directions [S1].
+
+### Formulas and Parameters
+
+**Filter Sets:**
+The integer wavelet transform uses one of the following filter sets. $\lfloor \cdot \rfloor$ denotes downward truncation [S1].
+
+1.  **I(2,2) Filter:** Not given in the sources.
+2.  **I(4,2) Filter:** Not given in the sources.
+3.  **S+P Filter Parameters:** The predictor parameters for the S+P filter are selected for better performance on medical images [S1]:
+    $$ \alpha = \frac{3}{16}, \quad \beta = \frac{8}{16}, \quad \gamma = \frac{6}{16} $$
+
+**Decomposition Levels:**
+*   The method allows different numbers of decomposition levels between transaxial and axial dimensions [S1].
+*   Limitation: You cannot always decompose to more levels due to image size and Group of Slices (GOS) size constraints [S1]. The asymmetric tree structure handles this by providing longer trees without requiring more decomposition levels [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def at_spiht_encode(volume):
+    """
+    Encodes a volumetric medical image using Asymmetric Tree SPIHT.
+    
+    Args:
+        volume: 3D numpy array of integers representing the medical image.
+        
+    Returns:
+        bitstream: List of bits representing the compressed data.
+    """
+    # Step 1: Integer Wavelet Transform
+    # Apply 3-D reversible integer wavelet transform.
+    # Order: Full axial decomposition first, then transaxial [S1].
+    # Returns a dictionary of sub-bands: {'LLt': ..., 'LHt': ..., 'HLt': ..., 'HHt': ...}
+    sub_bands = apply_integer_wavelet_transform(volume)
+
+    # Step 2: Construct Asymmetric Trees
+    # The tree structure links wavelet coefficients produced by the transform [S1].
+    # Nodes are 2x2 groups of coefficients.
+    tree = build_asymmetric_trees(sub_bands)
+
+    # Step 3: SPIHT Encoding
+    # Initialize lists: LIP (Insignificant Pixels), LIS (Insignificant Sets), LSP (Significant Pixels) [G]
+    LIP = []
+    LIS = []
+    LSP = []
+
+    # Initialize lists based on the root nodes of the asymmetric trees [G]
+    for node in tree.roots:
+        LIP.append(node)
+
+    # Calculate initial threshold [G]
+    max_val = max(abs(c) for n in tree.roots for c in n.coeffs)
+    threshold = 2 ** (max_val.bit_length() - 1) if max_val > 0 else 1
+
+    bitstream = []
+
+    while threshold > 0:
+        sort_pass(tree, LIP, LIS, LSP, threshold, bitstream)
+        sort_output_pass(LSP, threshold, bitstream)
+        threshold //= 2
+
+    return bitstream
+
+class Node:
+    def __init__(self, coords, coeffs):
+        self.coords = coords
+        self.coeffs = coeffs
+        self.offspring = []
+
+def build_asymmetric_trees(sub_bands):
+    """
+    Constructs the asymmetric tree structure for SPIHT.
+    
+    The tree links 2x2 coefficient groups.
+    Linkage Rules [S1]:
+    1. Axial LLt band:
+       - Top-left (TL) coeff of 2x2 group -> 1 offspring 2x2 group in Axial LHt band.
+       - Other 3 coeffs -> 1 offspring 2x2 group in Axial LLt band.
+    2. Axial LHt band:
+       - TL coeff of 2x2 group -> 2 offspring 2x2 groups in Axial Ht band.
+       - Other 3 coeffs -> 1 offspring 2x2 group in Axial LHt band.
+    3. Axial Ht band:
+       - TL coeff -> No offspring.
+       - Other 3 coeffs -> 1 offspring 2x2 group in Axial Ht band.
+       
+    Within each axial band, transaxial growth follows 2-D SPIHT rules [G].
+    """
+    tree = {'roots': [], 'nodes': {}}
+    
+    # Iterate through all 2x2 groups in the lowest transaxial sub-band of each axial sub-band
+    for axial_subband in ['LLt', 'LHt', 'Ht']:
+        band_data = sub_bands[axial_subband]
+        
+        for group_coords in get_2x2_groups(band_data):
+            coeffs = extract_2x2_group(band_data, group_coords)
+            node = Node(group_coords, coeffs)
+            
+            # Transaxial offspring (standard 2-D SPIHT growth within the band) [G]
+            transaxial_offspring = get_transaxial_offspring(group_coords, axial_subband, band_data)
+            node.offspring.extend(transaxial_offspring)
+            
+            # Asymmetric axial offspring
+            if axial_subband == 'LLt':
+                # TL links to LHt
+                node.offspring.append(get_group_at_same_transaxial_loc(group_coords, 'LHt', sub_bands))
+            elif axial_subband == 'LHt':
+                # TL links to Ht (two groups)
+                h_group = get_group_at_same_transaxial_loc(group_coords, 'Ht', sub_bands)
+                node.offspring.append(h_group)
+                node.offspring.append(h_group)
+            elif axial_subband == 'Ht':
+                # TL has no offspring
+                pass
+            
+            tree['nodes'][group_coords] = node
+            tree['roots'].append(node)
+            
+    return tree
+
+def sort_pass(tree, LIP, LIS, LSP, threshold, bitstream):
+    """
+    Standard SPIHT sorting pass adapted for asymmetric trees.
+    """
+    # Process LIP
+    for node in list(LIP):
+        if max(abs(c) for c in node.coeffs) >= threshold:
+            LIP.remove(node)
+            LSP.append(node)
+            bitstream.append(1)
+            bitstream.append(1 if node.coeffs[0] < 0 else 0)
+        else:
+            bitstream.append(0)
+            
+    # Process LIS
+    for item in list(LIS):
+        if item.is_set:
+            # Check significance of the set
+            if max(abs(c) for child in item.children for c in child.coeffs) >= threshold:
+                bitstream.append(1)
+                # Recursively process children
+                for child in item.children:
+                    if len(child.offspring) == 0:
+                        LIP.append(child)
+                    else:
+                        LIS.append(child)
+                LIS.remove(item)
+            else:
+                bitstream.append(0)
+        else:
+            # Leaf node
+            if max(abs(c) for c in item.coeffs) >= threshold:
+                LIP.remove(item)
+                LSP.append(item)
+                bitstream.append(1)
+                bitstream.append(1 if item.coeffs[0] < 0 else 0)
+            else:
+                bitstream.append(0)
+
+def sort_output_pass(LSP, threshold, bitstream):
+    """
+    Standard SPIHT sorting-output pass.
+    """
+    for node in LSP:
+        bitstream.append(1)
+        bitstream.append(1 if node.coeffs[0] < 0 else 0)
+        magnitude = abs(node.coeffs[0])
+        bits = magnitude.bit_length()
+        bitstream.append(bits)
+        bitstream.extend((magnitude >> i) & 1 for i in range(bits - 1, -1, -1))
+
+# Helper functions for array indexing and group extraction
+def get_2x2_groups(band_data):
+    """Yields coordinates of all non-overlapping 2x2 groups in a 2D sub-band."""
+    height, width = band_data.shape
+    for y in range(0, height, 2):
+        for x in range(0, width, 2):
+            yield (y, x)
+
+def extract_2x2_group(band_data, coords):
+    """Extracts a 2x2 coefficient group from a sub-band at given coordinates."""
+    y, x = coords
+    return band_data[y:y+2, x:x+2].flatten()
+
+def get_transaxial_offspring(coords, axial_subband, band_data):
+    """Returns the standard 2-D SPIHT transaxial offspring for a 2x2 group."""
+    y, x = coords
+    # Standard 2-D SPIHT tree growth: each coefficient links to 3 offspring in the next transaxial level
+    # Here we return placeholder references to the next level's groups for implementation completeness [G]
+    return [Node((y*2+i, x*2+j), None) for i in range(2) for j in range(2) if not (i==0 and j==0)]
+
+def get_group_at_same_transaxial_loc(coords, target_axial_band, sub_bands):
+    """Retrieves the 2x2 group at the same transaxial coordinates in a different axial sub-band."""
+    y, x = coords
+    target_data = sub_bands[target_axial_band]
+    # Return a Node referencing the coefficients at the same location
+    coeffs = target_data[y:y+2, x:x+2].flatten()
+    return Node(coords, coeffs)
+```
+
+### Edge Cases and Pitfalls
+*   **Decomposition Level Limits:** The number of decomposition levels is constrained by the image size and the Group of Slices (GOS) size. It is not always possible to decompose to deeper levels. The asymmetric tree structure mitigates this by providing longer trees than normal 3-D SPIHT without requiring additional decomposition levels [S1].
+*   **Unbalanced Decomposition:** The asymmetric tree structure naturally supports unbalanced decomposition, allowing more levels in the transaxial domain than in the axial domain. This is useful when the frame size is large and axial decomposition levels are limited [S1].
+*   **Highest Frequency Sub-band:** In the axial $H_t$ band, the top-left coefficient has no offspring [S1]. Tree traversal must account for this missing link to prevent index errors during significance testing [G].
+
+## Operating characteristics
+
+*   **Compression Performance:** AT-SPIHT outperforms symmetric tree 3-D SPIHT and provides an average improvement of about 42% over two-dimensional techniques [S1]. It is superior to prior results of 3-D techniques [S1].
+*   **Complexity:** The time complexity is dominated by the SPIHT encoding process, which is linear with respect to the number of coefficients. The tree construction is also linear. The asymmetric linkage adds minimal overhead to the standard SPIHT logic [G].
+*   **Memory:** Memory usage is comparable to standard 3-D SPIHT, as it uses the same data structures (LIP, LIS, LSP) but with modified parent-offspring relationships [G].
+*   **Strengths:**
+    *   Better handling of uneven statistical distributions between intraslice and interslice directions [S1].
+    *   Longer tree depth improves zero-coding efficiency [S1].
+    *   Flexible decomposition levels between transaxial and axial dimensions [S1].
+*   **Limitations:**
+    *   Limited by image and GOS size for decomposition levels [S1].
+    *   Specifically optimized for volumetric medical images; performance on other data types is not specified [S1].
+
+## Background
+
+*   **Origin:** AT-SPIHT was introduced in the paper "Lossless Compression of Volumetric Medical Images with Improved Three-Dimensional SPIHT Algorithm" [S1].
+*   **Development:** The method builds on the 3-D SPIHT algorithm [S1]. It addresses the limitations of symmetric 3-D SPIHT by introducing an asymmetric tree structure that links coefficients differently across axial sub-bands. This approach was inspired by the observation that tree-based coders perform better when tree depth is long and magnitude distributions are uneven [S1].
+*   **Usage:** It is used for lossless compression of volumetric medical images, such as computed tomography (CT) and magnetic resonance (MR) images [S1].
+
+## Sources
+
+[S1] Lossless Compression of Volumetric Medical Images with Improved Three-Dimensional SPIHT Algorithm, https://doi.org/10.1007/s10278-003-1736-x, fetched 2026-11-08

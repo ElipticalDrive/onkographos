@@ -1,0 +1,131 @@
+# PCGS (Progressive Compression of 3D Gaussian Splatting)
+Also called: Progressive Compression of 3D Gaussian Splatting
+
+## Overview
+PCGS is a progressive compression framework for 3D Gaussian Splatting (3DGS) that jointly and adaptively controls both the quantity and quality of anchor primitives to enable effective progressivity for on-demand applications [S1]. Unlike single-rate compression methods or progressive methods that only adjust quantity, PCGS allows incremental bitstreams to refine fidelity by decoding additional anchors and progressively refining existing ones [S1]. It builds on [CompGS](18575-compgs.md) via the Scaffold-GS representation and improves upon [HAC++](link-to-hacpp) by introducing a quantization context model that exploits correlations across progressive levels [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A trained 3DGS scene represented by Scaffold-GS anchors.
+- A set of progressive levels $s \in \{1, \dots, S\}$.
+- Trade-off parameters $\lambda_s$ for each level $s$.
+
+**Outputs:**
+- A progressive bitstream consisting of a header and incremental payloads for each level $s$.
+- The header contains shared components: MLPs, anchor locations $x_a$, hash grid $H$, and masks $m_g$.
+- Incremental payloads contain quantized attributes for newly decoded anchors and refined values for previously decoded anchors.
+
+### Data Structures
+**Anchor Representation (Scaffold-GS):**
+Each anchor $i$ consists of:
+- Location: $x_a^{[i]} \in \mathbb{R}^3$.
+- Anchor Feature: $f^{[i]} \in \mathbb{R}^{D_a}$.
+- Scaling: $l^{[i]} \in \mathbb{R}^6$.
+- Learnable Offsets: $o^{[i]} \in \mathbb{R}^{3 \times K}$.
+
+**Masks:**
+- Base masking feature: $f_{base}$ (learnable).
+- Level-specific masking feature: $f_{sm}$ (learnable).
+- Anchor-level mask at level $s$: $m_{as}^{[i]}$.
+- Gaussian-level mask at level $s$: $m_{gs}^{[i]}$.
+- Global mask $m_g$ from which $m_{as}$ is derived.
+
+**Hash Grid:**
+- Binary hash grid $H$ used to capture correlations among anchors.
+- Hash feature $f_h$ obtained via interpolation from $H$.
+
+**Entropy Model Parameters:**
+- Quantization step size (predicted by hash feature).
+- Gaussian distribution parameters (mean and variance) for newly decoded anchors.
+- Trinomial distribution parameters for refining previously decoded anchors.
+
+### Numbered Steps
+
+**1. Training Phase:**
+1. Initialize Scaffold-GS anchors and parameters (MLPs, $x_a$, $H$, $f_{base}$, $f_{sm}$).
+2. For each iteration:
+   a. Randomly sample a progressive level $s$ from the set of levels.
+   b. Retrieve the corresponding trade-off parameter $\lambda_s$.
+   c. Compute the anchor-level mask $m_{as}^{[i]}$ and Gaussian-level mask $m_{gs}^{[i]}$ for each anchor $i$ using $f_{base}$ and $f_{sm}$.
+   d. Determine the state of each anchor:
+      - If $m_{as}^{[i]} = 0$: Anchor remains undecoded.
+      - If $m_{as}^{[i]}$ transitions from 0 to 1: Anchor is newly decoded.
+      - If $m_{as}^{[i]} = 1$ and was decoded in a previous level: Anchor is refined.
+   e. Encode attributes:
+      - For newly decoded anchors: Use Gaussian distribution entropy modeling.
+      - For refined anchors: Use progressive quantization with trinomial distribution entropy modeling.
+   f. Compute loss:
+      $$ \text{Loss} = L_{Scaffold} + \lambda_s \frac{1}{N_a (D_a + 6 + 3K)} (L_{entropy} + L_{hash}) $$
+      where $L_{Scaffold}$ is the reconstruction loss, $L_{entropy}$ is the entropy rate, and $L_{hash}$ is the hash grid regularization [S1].
+   g. Update parameters using gradient descent.
+3. Train for 40k iterations for full optimization, or 30k for fair comparison with standard protocols [S1].
+
+**2. Encoding Phase (Progressive Bitstream Generation):**
+1. **Header Encoding:**
+   a. Encode anchor locations $x_a$ using GPCC (Group Prediction and Context-based Coding) [S1]. All valid anchor locations are encoded together in the header to reduce bit consumption, rather than incrementally [S1].
+   b. Encode shared MLPs, hash grid $H$, and global masks $m_g$.
+2. **Level $s=1$ Encoding:**
+   a. Identify anchors with $m_{as}^{[i]} = 1$.
+   b. Quantize attributes ($f, l, o$) for these anchors.
+   c. Encode quantized values using Gaussian distribution entropy modeling.
+3. **Level $s \ge 2$ Encoding:**
+   a. Identify newly decoded anchors ($m_{as}^{[i]}$ transitions 0 to 1). Quantize and encode their attributes using Gaussian distribution entropy modeling.
+   b. Identify refined anchors (previously decoded). Apply progressive quantization (trit-plane division) to refine their attributes.
+   c. Encode the refinement residuals using trinomial distribution entropy modeling, exploiting correlations with previous quantization levels [S1].
+
+**3. Decoding Phase:**
+1. **Header Decoding:**
+   a. Decode MLPs, anchor locations $x_a$, hash grid $H$, and masks $m_g$.
+2. **Level $s=1$ Decoding:**
+   a. Decode attributes for valid anchors using Gaussian distribution entropy modeling.
+3. **Level $s \ge 2$ Decoding:**
+   a. Refine already decoded anchors using progressive quantization and trinomial distribution probability estimation.
+   b. Decode newly introduced anchors and Gaussian offsets via Gaussian distribution.
+4. **Rendering:**
+   a. Reconstruct Gaussians from anchors using Scaffold-GS MLPs.
+   b. Render using $\alpha$-composed blending:
+      $$ C = \sum_i c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+      where $C \in \mathbb{R}^3$ is the pixel color, $c_i$ is view-dependent color, and $\alpha_i$ is opacity after 2D projection [S1].
+
+### Formulas
+- **Gaussian Function:**
+  $$ G(x) = \exp \left( - \frac{1}{2} (x - x_g)^\top \Sigma^{-1} (x - x_g) \right) $$
+  where $x \in \mathbb{R}^3$ is a random 3D location, $x_g \in \mathbb{R}^3$ is the Gaussian mean, and $\Sigma = R S S^\top R^\top$ is the covariance matrix with scaling $S \in \mathbb{R}^{3 \times 3}$ and rotation $R \in \mathbb{R}^{3 \times 3}$ [S1].
+
+- **Rendering Equation:**
+  $$ C = \sum_i c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+  where $\alpha \in \mathbb{R}$ is opacity and $c \in \mathbb{R}^3$ is view-dependent color [S1].
+
+- **Training Loss:**
+  $$ \text{Loss} = L_{Scaffold} + \lambda_s \frac{1}{N_a (D_a + 6 + 3K)} (L_{entropy} + L_{hash}) $$
+  where $\lambda_s$ balances Rate-Distortion at level $s$ [S1].
+
+### Parameters
+- $\lambda_s$: Trade-off parameter for level $s$, varying to balance R-D performance [S1].
+- Training Iterations: 40k for sufficient optimization covering all rates; 30k for fair comparison with standard protocols [S1].
+- $N_a$: Number of anchors.
+- $D_a$: Dimension of anchor feature.
+- $K$: Dimension of offset matrix [S1].
+
+### Edge Cases and Pitfalls
+- **Anchor Location Encoding:** Anchor locations are encoded using GPCC, which relies on mutual information among anchors. Encoding all valid anchor locations together in the header is required to reduce bit consumption; incremental encoding increases bit usage [S1].
+- **Probability Estimation:** Replacing the trinomial distribution with a Gaussian distribution for previously decoded anchors leads to inaccurate probability estimation because it fails to exploit quantization context across levels [S1].
+- **Loss Design:** Using accumulated entropy from all previous and current levels as rate regularization causes fidelity degradation. Incorporating fidelity at previous levels into optimization worsens performance by introducing excessive complexity [S1].
+- **Progressive Masking:** Masks must be monotonically non-decreasing across levels to ensure smooth progression [S1].
+
+## Operating characteristics
+- **Time Complexity:** Training is performed in a single session for all levels, requiring 30k-40k iterations, compared to 60k iterations per rate for methods like HEMGS [S1].
+- **Memory Complexity:** Depends on the number of anchors and the size of the hash grid. Progressive compression allows variable memory usage based on the decoded level.
+- **Measured Performance:** On Mip-NeRF360, PCGS (40k) achieves 28.0 dB PSNR at ~10 MB, compared to GoDe (30k+30k) at 27.8 dB and HEMGS (60k) at 26.9 dB [S1].
+- **Scaling:** PCGS scales well with progressive levels, allowing adaptive bitstreams for dynamic bandwidth and storage constraints [S1].
+- **Strengths:** Joint optimization of quantity and quality; effective progressivity; comparable performance to single-rate methods; efficient entropy coding using trinomial distribution.
+- **Limitations:** Requires careful tuning of $\lambda_s$; complexity in entropy modeling due to trinomial distribution.
+- **When to Use:** On-demand applications with dynamic bandwidth/storage constraints; scenarios requiring progressive refinement of 3DGS scenes.
+- **When Not to Use:** Single-rate compression requirements where progressivity is not needed; scenarios with strict latency constraints where decoding all levels is prohibitive.
+
+## Background
+PCGS was proposed in 2025 by the authors of the paper "PCGS: Progressive Compression of 3D Gaussian Splatting" [S1]. It builds on Scaffold-GS [S1] and improves upon HAC++ [S1] by introducing progressive compression capabilities. The method addresses the lack of progressivity in existing 3DGS compression techniques, which waste resources in on-demand applications [S1].
+
+## Sources
+[S1] PCGS: Progressive Compression of 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2503.08511, fetched 2026-10-26

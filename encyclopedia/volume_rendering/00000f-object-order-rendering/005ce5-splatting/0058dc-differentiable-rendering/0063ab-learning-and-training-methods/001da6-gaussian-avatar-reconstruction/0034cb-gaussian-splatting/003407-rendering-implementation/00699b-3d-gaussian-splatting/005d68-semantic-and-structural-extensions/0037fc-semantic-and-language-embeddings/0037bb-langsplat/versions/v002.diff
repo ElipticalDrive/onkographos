@@ -1,0 +1,87 @@
+--- v001.md
++++ v002.md
+@@ -4,60 +4,54 @@
+ 
+ ## Overview
+-LangSplat pioneers real-time open-vocabulary semantic segmentation by rendering high-dimensional feature maps from 3D Gaussians and comparing them against text embeddings from CLIP [S1, unofficial][S2]. It differs from sibling methods by enabling direct alignment of 3D scene features with natural language queries without requiring per-pixel ground-truth segmentation labels during training, relying instead on distilling 2D vision-language model features into the 3D representation [S1, unofficial].
++LangSplat pioneers real-time open-vocabulary semantic segmentation by rendering high-dimensional feature maps from 3D Gaussians and comparing them against text embeddings from CLIP [S1, unofficial]. It differs from sibling methods by explicitly leveraging the speed of the 3DGS rasterizer to distill 2D vision-model features into a 3D representation, enabling direct comparison with text queries without intermediate decoding heads for segmentation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $\mathcal{G}$, each with position, covariance, opacity $\alpha_i$, and a learned feature vector $\mathbf{f}_i$. A text query (e.g., "apple") encoded into a text feature vector $\mathbf{t}$.
+-*   **Output:** A semantic segmentation mask or a set of semantic scores for each Gaussian.
++*   **Inputs:** A set of 3D Gaussians $\{g_i\}$, each with a semantic feature vector $\mathbf{f}_i \in \mathbb{R}^D$; a text query encoded into a feature vector $\mathbf{t} \in \mathbb{R}^D$ using a CLIP text encoder.
++*   **Outputs:** A rendered 2D feature map $\mathbf{F}(p)$ per pixel $p$, and semantic scores indicating the match between the rendered features and the text query.
+ 
+ **Data Structures:**
+-*   **Gaussian Feature Vector $\mathbf{f}_i$:** A high-dimensional vector (typically 512 dimensions in the base implementation, or 128 if using a speed-up module with upsampling) [S2].
+-*   **Text Feature Vector $\mathbf{t}$:** A 512-dimensional vector obtained from the CLIP ViT-L/16 or ViT-B/32 text encoder [S2].
++*   **Gaussian:** Each Gaussian $i$ stores a semantic feature vector $\mathbf{f}_i$. In the LSeg variant, the feature dimension $D$ is 512 [S2].
++*   **Text Embedding:** Text labels are encoded into vectors $\mathbf{t}_c \in \mathbb{R}^{512}$ for $C$ categories [S2].
+ 
+-**Rendering Process:**
+-1.  **Rasterization:** For each pixel $p$, compute the accumulated feature vector $\mathbf{F}(p)$ using differentiable alpha-blending [S1, unofficial][S2]:
++**Algorithm:**
++1.  **Rasterization:** For each pixel $p$, compute the accumulated feature vector $\mathbf{F}(p)$ by alpha-blending the semantic features of all overlapping Gaussians $\mathcal{O}_p$, sorted front-to-back:
+     $$
+     \mathbf{F}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{f}_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j)
+     $$
+-    where $\mathcal{O}_p$ is the set of Gaussians overlapping pixel $p$, sorted front-to-back [S1, unofficial][S2].
+-2.  **Feature Reshaping:** Reshape the rendered feature map from shape $(C, H, W)$ to $(H \times W, C)$ to obtain the image feature matrix, where $C$ is the feature dimension (e.g., 512) and $H, W$ are image height and width [S2].
+-
+-**Semantic Scoring and Segmentation:**
+-1.  **Text Encoding:** Encode the text query using a CLIP text encoder (ViT-B/32 or ViT-L/16) to obtain text features $\mathbf{t}_k \in \mathbb{R}^{512}$ for each category $k \in \{1, \dots, N_{cat}\}$ [S2].
+-2.  **Similarity Calculation:** Compute the inner product between the image feature $\mathbf{F}(p)$ and the text feature $\mathbf{t}_k$ [S2].
+-3.  **Softmax Normalization:** Apply a softmax function to the inner product results to obtain semantic scores [S2]:
++    where $\alpha_i$ is the opacity of Gaussian $i$ [S1, unofficial].
++2.  **Feature Reshaping (LSeg Variant):** Reshape the rendered feature map from shape $(D, H, W)$ to $(H \times W, D)$ to obtain the image feature matrix [S2].
++3.  **Text Encoding:** Encode text labels using a CLIP text encoder (e.g., ViT-B/32 or ViT-L/16) to obtain text feature vectors $\mathbf{t}_c$ for each category $c \in \{1, \dots, C\}$ [S2].
++4.  **Semantic Scoring:** Calculate the inner product between the image feature and text features, then apply softmax to obtain semantic scores $S \in \mathbb{R}^{N \times C}$, where $N$ is the number of pixels or Gaussians and $C$ is the number of categories [S2].
+     $$
+-    S_{p,k} = \frac{\exp(\mathbf{F}(p) \cdot \mathbf{t}_k)}{\sum_{j=1}^{N_{cat}} \exp(\mathbf{F}(p) \cdot \mathbf{t}_j)}
++    S_{i,c} = \text{softmax}(\mathbf{f}_i \cdot \mathbf{t}_c)
+     $$
+-    where $S_{p,k}$ is the score for pixel $p$ and category $k$ [S2].
+-4.  **Selection:** Apply binary thresholding or soft selection based on the scores to determine the semantic label for each pixel or Gaussian [S2].
++5.  **Selection:** Apply binary thresholding on the score vector for a queried category $l$ to select Gaussians or pixels: if $S_{i,l} \geq \theta$, the element is selected [S2].
+ 
+ **Parameters:**
+-*   **Feature Dimension:** 512 for standard rendering; 128 if using the Speed-up Module with subsequent upsampling [S2].
+-*   **Optimizer:** Adam with learning rate $1 \times 10^{-3}$ for the main network; $1 \times 10^{-4}$ for the feature decoder network in the Speed-up Module [S2].
++*   **Feature Dimension:** 512 for LSeg ground truth features [S2].
+ *   **Text Encoder:** CLIP ViT-B/32 or ViT-L/16 [S2].
++*   **Optimizer:** Adam with learning rate $10^{-3}$ for feature rendering, $10^{-4}$ for the speed-up module [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The feature dimension choice (512 vs 128) involves a trade-off between accuracy and rendering speed [S2].
+-*   **Boundary Conditions:** The product term in alpha-blending requires careful handling of the first Gaussian in the sorted list (transmittance is 1) [S1, unofficial][S2].
++*   **Precision:** The inner product calculation assumes normalized or compatible feature spaces between the rendered features and text embeddings [S2].
++*   **Resolution:** Ground truth features from LSeg image encoder are prepared at size $360 \times 480$ [S2].
+ 
+ ## Subtopics
+ 
+ ### LSeg Feature Processing
+-Preparation of ground-truth features using CLIP ViT-L/16 image encoder (size 360x480, dim 512) and ViT-L/16 text encoder [S2]. During inference, the rendered feature (shape 512, 360, 480) is reshaped to (360x480, 512) for matrix multiplication with text features (shape C, 512) to align pixel-level features with text queries [S2].
++Preparation of ground-truth features using CLIP ViT-L/16 image encoder (size $360 \times 480$, dim 512) and ViT-L/16 text encoder [S2]. During inference, the rendered feature is reshaped from $(512, 360, 480)$ to $(360 \times 480, 512)$ to get the image feature [S2]. Matrix multiplication aligns pixel-level features with text query features of shape $(C, 512)$ [S2].
+ 
+ ### Language-Guided Semantic Scoring
+-Calculation of semantic scores for each 3D Gaussian by comparing its semantic feature with text features from a CLIP encoder [S2]. Text labels are encoded using CLIP’s ViT-B/32 text encoder to obtain text features $t_i \in \mathbb{R}^{512}$ for $C$ categories [S2]. Scores $S \in \mathbb{R}^{N \times C}$ are obtained via softmax of the inner product, where $N$ is the number of Gaussians [S2].
++Calculation of semantic scores for each 3D Gaussian by comparing its semantic feature with text features from a CLIP encoder [S2]. Text labels are encoded using CLIP’s ViT-B/32 text encoder to obtain text features $\mathbf{t}_i \in \mathbb{R}^{512}$ for $C$ categories [S2]. The inner product between the text feature and the 3D Gaussian's semantic feature is calculated, and a softmax function is applied to obtain semantic scores [S2]. Scores $S \in \mathbb{R}^{N \times C}$ are obtained via softmax of the inner product, where $N$ is the number of Gaussians and $C$ is the number of categories [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Real-time rendering is enabled by the efficiency of the 3DGS rasterizer [S1, unofficial]. The additional cost comes from the feature dimension and the text embedding comparison, which is performed per-pixel or per-Gaussian [S2].
+-*   **Memory Complexity:** Depends on the feature dimension (512 or 128) stored per Gaussian [S2].
+-*   **Strengths:** Enables open-vocabulary semantic segmentation in real time without per-pixel ground-truth labels during training [S1, unofficial].
+-*   **Limitations:** Performance is limited by the capability of the teacher encoders (CLIP) [S2].
+-*   **When to use:** When real-time open-vocabulary semantic understanding of a 3D scene is required.
+-*   **When not to use:** When high-precision pixel-level segmentation without language priors is needed, or when computational resources are extremely limited and feature dimension reduction is not acceptable.
++*   **Time Complexity:** Real-time performance is enabled by the efficient 3DGS rasterizer [S1, unofficial].
++*   **Memory Complexity:** Depends on the feature dimension $D$ (e.g., 512) stored per Gaussian [S2].
++*   **Strengths:** Enables open-vocabulary semantic segmentation in real time [S1, unofficial].
++*   **Limitations:** Performance is bounded by the capability of the teacher encoders (CLIP) [S2].
+ 
+ ## Background
+-LangSplat (also known as Feature 3DGS) was introduced by [S2] to distill 2D vision-model features into a 3D representation. It builds on the speed of the 3DGS rasterizer to enable real-time semantic tasks [S1, unofficial]. The method was further expanded by Language Embedded 3D Gaussians for full scene understanding [S1, unofficial].
++LangSplat (also known as Feature 3DGS) was introduced to pioneer the direction of distilling 2D vision-model features into a 3D representation using the speed of the 3DGS rasterizer [S1, unofficial]. It builds on the principle of adding a high-dimensional feature vector to each Gaussian for rendering via alpha-blending [S1, unofficial].
+ 
+ ## Sources

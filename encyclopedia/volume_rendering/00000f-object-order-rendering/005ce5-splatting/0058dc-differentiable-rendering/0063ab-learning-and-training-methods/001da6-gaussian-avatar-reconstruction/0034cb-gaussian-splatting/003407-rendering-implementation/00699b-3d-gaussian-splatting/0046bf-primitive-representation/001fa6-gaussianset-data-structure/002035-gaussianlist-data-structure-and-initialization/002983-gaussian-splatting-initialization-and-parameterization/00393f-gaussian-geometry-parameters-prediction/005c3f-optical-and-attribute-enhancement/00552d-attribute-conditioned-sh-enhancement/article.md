@@ -1,0 +1,94 @@
+# Attribute-Conditioned SH Enhancement
+
+Also called: Gaussian-aware SH offset prediction, Static SH offset baking
+
+## Overview
+The Attribute-Conditioned SH Enhancement module recovers high-frequency visual details lost during the compression of 3D Gaussian radiance fields into low-order Spherical Harmonics (SH) [S1]. Unlike dynamic neural view-dependent enhancement methods that incur rendering overhead, this method predicts view-independent SH offsets ($\Delta_c$) based on intrinsic Gaussian attributes and statically bakes them into the Gaussian parameters prior to inference, introducing zero additional computational cost during rendering [S1]. It complements low-order SH representations by capturing complex specular details and structural variations that standard compression misses [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Intrinsic Gaussian attributes for each primitive: position ($\mathbf{p}$), scale ($\mathbf{s}$), rotation ($\mathbf{r}$), and opacity ($\alpha$) [S1].
+*   **Output:** A view-independent SH offset vector $\Delta_c$ for each Gaussian [S1].
+
+**Data Structures**
+The enhancement module is implemented as a Multi-Layer Perceptron (MLP) [S1].
+*   **Architecture:** 4 layers with ReLU activation [S1].
+*   **Hidden Neurons:** The layer sizes are $(128, 64, 32, 12)$ respectively [S1].
+*   **Parameterization:** The MLP maps the concatenated intrinsic attributes to the offset $\Delta_c$ [S1].
+
+**Steps**
+1.  **Attribute Extraction:** For each Gaussian primitive, extract the intrinsic attributes: position, scale, rotation, and opacity [S1].
+2.  **Offset Prediction:** Pass the concatenated intrinsic attributes through the 4-layer MLP to predict the SH offset $\Delta_c$ [S1].
+3.  **Static Baking:** Add the predicted offset $\Delta_c$ to the base SH coefficients of the Gaussian [S1]. This step occurs once during the training phase or pre-inference setup [S1].
+4.  **Rendering:** During inference, render the Gaussians using the baked SH coefficients without invoking the MLP [S1].
+
+**Formulas**
+Let $\mathbf{c}_{base}$ be the base low-order SH coefficients and $\Delta_c$ be the predicted offset. The final SH coefficients $\mathbf{c}_{final}$ used for rendering are:
+$$ \mathbf{c}_{final} = \mathbf{c}_{base} + \Delta_c $$
+where $\Delta_c = \text{MLP}(\mathbf{p}, \mathbf{s}, \mathbf{r}, \alpha)$ [S1].
+
+**Parameters**
+*   **MLP Layers:** 4 [S1].
+*   **Hidden Neurons:** 128, 64, 32, 12 [S1].
+*   **Activation:** ReLU [S1].
+
+**Edge Cases and Pitfalls**
+*   **Inference Overhead:** Adding view-dependent modeling during inference increases computational overhead [S1]. This method avoids this by baking offsets statically [S1].
+*   **Quality Degradation:** Removing the SH offset degrades reconstruction quality while maintaining similar efficiency, indicating it is essential for capturing high-frequency details [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class AttributeConditionedSHEnhancement:
+    def __init__(self, input_dim=4, hidden_dims=[128, 64, 32, 12]):
+        # Initialize 4-layer MLP with ReLU activation
+        # Input dim corresponds to concatenated attributes: position, scale, rotation, opacity
+        # Note: Exact input dimensionality depends on how attributes are flattened/encoded.
+        # Based on [S1], the MLP takes intrinsic Gaussian attributes.
+        self.mlp = MLP(layers=[input_dim] + hidden_dims, activation='relu')
+
+    def predict_offset(self, attributes):
+        """
+        Predicts the SH offset delta_c based on intrinsic Gaussian attributes.
+        
+        Args:
+            attributes: Tensor of shape (N, D) containing intrinsic attributes 
+                        (position, scale, rotation, opacity) for N Gaussians.
+        
+        Returns:
+            delta_c: Tensor of shape (N, K) representing the SH offset.
+        """
+        delta_c = self.mlp(attributes)
+        return delta_c
+
+    def bake_offsets(self, base_sh_coeffs, attributes):
+        """
+        Statically bakes the predicted SH offsets into the Gaussian parameters.
+        
+        Args:
+            base_sh_coeffs: Tensor of shape (N, K) containing the base low-order SH coefficients.
+            attributes: Tensor of shape (N, D) containing intrinsic Gaussian attributes.
+        
+        Returns:
+            final_sh_coeffs: Tensor of shape (N, K) with baked offsets.
+        """
+        delta_c = self.predict_offset(attributes)
+        final_sh_coeffs = base_sh_coeffs + delta_c
+        return final_sh_coeffs
+```
+
+## Operating characteristics
+*   **Time Complexity:** Zero additional computational overhead during rendering, as the MLP is only used once during the baking phase [S1].
+*   **Memory Complexity:** Adds the memory footprint of the MLP parameters (4 layers with sizes 128, 64, 32, 12) to the training phase, but no extra memory is required during inference beyond the baked SH coefficients [S1].
+*   **Performance:** On the Mip-NeRF 360 dataset, the method achieves competitive PSNR (e.g., 27.02) with low storage costs (3.5 MB) and high FPS (139) on mobile hardware [S1].
+*   **Strengths:** Recovers high-frequency details lost in SH compression without increasing rendering latency; suitable for resource-constrained edge devices [S1].
+*   **Limitations:** The offsets are view-independent, so they may not capture all view-dependent effects as effectively as dynamic neural methods, though they offer a better trade-off for efficiency [S1].
+*   **When to use:** When rendering efficiency is critical (e.g., mobile devices) and high-frequency detail recovery is needed without the cost of dynamic neural networks [S1].
+*   **When not to use:** When maximum possible view-dependent fidelity is required and computational resources are abundant [S1].
+
+## Background
+The method was introduced in the Flux-GS paper by Du et al. [S1]. It addresses the limitations of previous mobile-oriented methods like Mobile-GS, which used neural view-dependent enhancement strategies that hindered rendering efficiency [S1]. Flux-GS proposes this static baking approach to achieve real-time rendering on resource-constrained hardware while maintaining competitive fidelity [S1].
+
+## Sources
+[S1] Monte Carlo Energy Aggregation for Mobile 3D Gaussian Splatting, https://doi.org/10.1007/978-3-032-37167-6_17, fetched 2026-10-29

@@ -1,0 +1,139 @@
+# Gradient-based Pre-computed Shading
+
+Also called: ComputeShading, Diffuse Shading Baseline, Precomputed Lambertian Shading, View-independent voxel shading
+
+## Overview
+Gradient-based Pre-computed Shading is a preprocessing technique that computes shaded colors for each voxel using a view-independent Lambertian shading model, allowing for faster rendering by avoiding per-ray normal computation [S1, S2, unofficial]. It differs from on-the-fly gradient estimation by trading memory for performance, storing the shading result in an additional 3D texture, which implicitly applies a low-pass filter to gradients [S3].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A scalar volume data grid $CT$ of dimensions $COLS \times ROWS \times SLCS$ (width, height, depth) [S2, unofficial].
+- Input: A light direction vector $\hat{L}$ [S2, unofficial].
+- Input: A diffuse reflectivity coefficient $k_d$ and incident light intensity $I_p$ [S2, unofficial].
+- Input: An epsilon threshold $\epsilon$ for gradient magnitude [S2, unofficial].
+- Output: A shading volume $SHADING$ of the same dimensions as $CT$, storing unsigned char values [S2, unofficial].
+
+**Data Structures:**
+- $CT[z][y][x]$: Float array representing the scalar field at voxel $(x, y, z)$.
+- $SHADING[z][y][x]$: Unsigned char array storing the precomputed shading value.
+
+**Steps:**
+1. Iterate over the volume grid for $z$ from $1$ to $SLCS-2$, $y$ from $1$ to $ROWS-2$, and $x$ from $1$ to $COLS-2$, skipping boundary layers [S2, unofficial].
+2. Compute partial derivatives using central finite differences [S1, S2, unofficial]:
+   $$d_x = \frac{CT[z][y][x+1] - CT[z][y][x-1]}{2.0}$$
+   $$d_y = \frac{CT[z][y+1][x] - CT[z][y-1][x]}{2.0}$$
+   $$d_z = \frac{CT[z+1][y][x] - CT[z-1][y][x]}{2.0}$$
+3. Compute the gradient magnitude $D$ [S2, unofficial]:
+   $$D = \sqrt{d_x^2 + d_y^2 + d_z^2}$$
+4. If $D < \epsilon$, set $SHADING[z][y][x] = 0$ [S2, unofficial].
+5. Otherwise, compute the normalized normal vector $N = (d_x/D, d_y/D, d_z/D)$ and the diffuse shading value [S2, unofficial]:
+   $$S = I_p \cdot k_d \cdot (N \cdot \hat{L})$$
+   where $\hat{L} = \frac{L}{\|L\|}$ [S2, unofficial].
+6. Store $S$ in $SHADING[z][y][x]$ as an unsigned char [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_precomputed_shading(CT: Volume3D, L: Vector3, kd: float, Ip: float, epsilon: float) -> Volume3D:
+    """
+    Pre-compute shading for a volume using view-independent Lambertian shading.
+    
+    Args:
+        CT: 3D array of scalar values (float).
+        L: Light direction vector (Vector3).
+        kd: Diffuse reflectivity coefficient.
+        Ip: Incident light intensity.
+        epsilon: Threshold for gradient magnitude to avoid division by zero.
+        
+    Returns:
+        SHADING: 3D array of unsigned char values.
+    """
+    COLS, ROWS, SLCS = CT.dimensions()
+    SHADING = Volume3D(COLS, ROWS, SLCS, dtype=uint8)
+    
+    # Normalize light direction
+    L_norm = L / length(L)
+    
+    for z in range(1, SLCS - 1):
+        for y in range(1, ROWS - 1):
+            for x in range(1, COLS - 1):
+                # Compute partial derivatives using central differences
+                dx = (CT[z][y][x+1] - CT[z][y][x-1]) / 2.0
+                dy = (CT[z][y+1][x] - CT[z][y-1][x]) / 2.0
+                dz = (CT[z+1][y][x] - CT[z-1][y][x]) / 2.0
+                
+                # Compute gradient magnitude
+                D_sq = dx*dx + dy*dy + dz*dz
+                D = sqrt(D_sq)
+                
+                if D < epsilon:
+                    SHADING[z][y][x] = 0
+                else:
+                    # Compute normalized normal vector
+                    nx = dx / D
+                    ny = dy / D
+                    nz = dz / D
+                    
+                    # Compute diffuse shading value
+                    # N dot L_norm
+                    dot_product = nx * L_norm.x + ny * L_norm.y + nz * L_norm.z
+                    shading_value = Ip * kd * dot_product
+                    
+                    # Clamp and convert to unsigned char
+                    # Note: Source [S2, unofficial] casts directly, implying clamping or saturation arithmetic
+                    SHADING[z][y][x] = clamp(shading_value, 0.0, 255.0)
+    
+    return SHADING
+```
+
+**Parameters:**
+- $\epsilon$: A pre-specified epsilon value to prevent division by zero or noise amplification in flat regions. The source code uses a value of $7.25$ [S2, unofficial].
+- $k_d$: Diffuse reflectivity coefficient. Not given in the sources.
+- $I_p$: Incident light intensity. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Boundary layers are skipped to avoid out-of-bounds access when computing central differences [S2, unofficial].
+- If the gradient magnitude $D$ is less than $\epsilon$, the shading is set to 0 to avoid division by zero or noise amplification [S2, unofficial].
+- The method implicitly applies a low-pass filter to the gradients because the precomputed shading is accessed via trilinearly interpolated texture fetches during rendering, ignoring high-frequency details introduced by transfer function application [S3]. This can cause rendering artifacts on regular structures (e.g., solid/transparent materials, CT scans) [S3].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time Complexity: $O(N)$ where $N$ is the number of voxels, as each voxel is processed once during preprocessing [S2, unofficial].
+- Memory Complexity: $O(N)$ for the additional shading volume [S3].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Not given in the sources.
+
+**Strengths and Limitations:**
+- Strengths: Faster rendering by avoiding per-ray normal computation [S2, unofficial].
+- Limitations: Rendering artifacts on regular structures due to low-pass filtering of gradients [S3]. Ignores high-frequency details from transfer function application [S3].
+
+**When to Use:**
+- Use when rendering performance is critical and the volume data does not have high-frequency details that are crucial for visualization [S3].
+- Use when a view-independent shading model is acceptable [S1, unofficial].
+
+**When Not to Use:**
+- Do not use when high-frequency details are important, as the precomputed shading may filter them out [S3].
+- Do not use when view-dependent shading is required [S1, unofficial].
+
+## Background
+**Origin:**
+- The method is described in [S1, unofficial] as a preprocessing step for volume rendering, using a view-independent Lambertian shading model.
+- An implementation is provided in [S2, unofficial] as part of a volume rendering project.
+- [S3] discusses the method in the context of directional occlusion shading, noting its limitations regarding high-frequency details.
+
+**History and Development:**
+- Not given in the sources.
+
+**Where it is used:**
+- Medical data visualization [S1, unofficial].
+- General volume rendering [S2, unofficial][S3].
+
+## Sources
+[S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S2] kkhese/Volume-Rendering, https://github.com/kkhese/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S3] A Directional Occlusion Shading Model for Interactive Direct Volume ..., https://cgl.ethz.ch/teaching/scivis_common/Literature/Schott2009.pdf, fetched 2026-10-29

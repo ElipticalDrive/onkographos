@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -10,11 +10,11 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Per-Gaussian feature vectors for Scale, Rotation, and Appearance.
+-*   Pre-computed K-means cluster indices for each Gaussian (fixed from prior clustering).
+-*   Hyperparameters: Sub-vector lengths ($L$), codebook sizes ($C$), and precision format.
++*   Per-Gaussian feature vectors for Scale, Rotation, and Appearance [S1].
++*   Pre-computed K-means cluster indices for each Gaussian (fixed from prior clustering) [S1].
++*   Hyperparameters: Sub-vector lengths ($L$), codebook sizes ($C$), learning rate, and iteration count [S1].
+ 
+ **Outputs:**
+-*   Optimized codebook vectors for each feature type.
+-*   Quantized feature representations stored as cluster indices and codebook lookups.
++*   Optimized codebook vectors for each feature type [S1].
++*   Quantized feature representations stored as cluster indices and codebook lookups [S1].
+ 
+ ### Data Structures
+@@ -42,68 +42,49 @@
+ ### Pseudocode
+ ```python
+-# Assume Gaussians have features: scale (3D), rotation (4D quaternion), appearance (D=3D)
+-# K-means indices are pre-computed and fixed: scale_idx, rot_idx, app_idx
++# Pre-computed K-means indices are fixed for all Gaussians: scale_idx, rot_idx, app_idx
++# Codebooks are initialized with 16-FP precision [S1].
++# Appearance view-dependent features are initialized as zero vectors, static features use SH DC coefficients [S1].
+ 
+ def initialize_codebooks(feature_type, length, num_codes):
+     """Initialize codebook vectors for a specific feature type."""
+-    # Codebook shape: (num_codes, length)
+-    # Initialization strategy depends on feature type
+     if feature_type == "appearance":
+         # Static features initialized from SH DC coefficients
+         # View-dependent features initialized as zero vectors
+-        codebook = zeros((num_codes, length))
++        codebook = [[0.0] * length for _ in range(num_codes)]
+     else:
+         # Standard initialization for scale and rotation
+-        codebook = random_normal((num_codes, length))
++        codebook = [[0.0] * length for _ in range(num_codes)]
+     return codebook
+ 
+-def svq_forward(features, codebook, indices):
+-    """
+-    Quantize features using SVQ.
+-    features: Tensor of shape (N, feature_dim)
+-    codebook: Tensor of shape (num_codes, sub_vector_length)
+-    indices: Tensor of shape (N,) containing pre-computed K-means cluster indices
+-    """
+-    # Retrieve the codebook vector corresponding to the fixed index
+-    # Note: In SVQ, the index points to a specific codebook entry
+-    quantized_features = codebook[indices]
+-    return quantized_features
++def svq_train(features, codebook, indices, learning_rate, iterations):
++    """Optimize codebook vectors while keeping cluster indices fixed."""
++    for _ in range(iterations):
++        # Forward pass: retrieve quantized features using fixed indices
++        quantized = [codebook[i] for i in indices]
++        # Compute reconstruction loss (MSE)
++        loss = sum((f - q)**2 for f, q in zip(features, quantized)) / len(features)
++        # Compute gradients w.r.t. codebook entries
++        grad = [-2 * (f - q) / len(features) for f, q in zip(features, quantized)]
++        codebook_grad = [grad[i] for i in indices]
++        # Update codebook vectors only (gradient descent) [G]
++        for k in range(len(codebook)):
++            if k in indices:
++                codebook[k] = [c - learning_rate * g for c, g in zip(codebook[k], codebook_grad[indices.index(k)])]
++    return codebook
+ 
+-def svq_backward_loss(features, quantized_features, codebook, indices):
+-    """
+-    Compute loss to optimize codebook vectors.
+-    """
+-    # Reconstruction loss between original features and quantized features
+-    loss = mse_loss(features, quantized_features)
+-    
+-    # Gradient flows only to codebook entries at the fixed indices
+-    # The indices themselves are not updated
+-    return loss
+-
+-# Training Loop (Final Phase)
+-# 1. Perform K-means clustering once on Scale, Rotation, Appearance
+-# 2. Fix indices
++# Training loop for each feature type (standard training: 1K iterations)
+ scale_codebook = initialize_codebooks("scale", length=1, num_codes=64)
+ rot_codebook = initialize_codebooks("rotation", length=2, num_codes=512)
+ app_codebook = initialize_codebooks("appearance", length=2, num_codes=1024)
+ 
+-for iteration in range(final_training_iterations):
+-    # Forward pass
+-    scale_quant = svq_forward(scale_features, scale_codebook, scale_indices)
+-    rot_quant = svq_forward(rot_features, rot_codebook, rot_indices)
+-    app_quant = svq_forward(app_features, app_codebook, app_indices)
+-    
+-    # Compute loss
+-    loss = svq_backward_loss(scale_features, scale_quant, scale_codebook, scale_indices)
+-    loss += svq_backward_loss(rot_features, rot_quant, rot_codebook, rot_indices)
+-    loss += svq_backward_loss(app_features, app_quant, app_codebook, app_indices)
+-    
+-    # Update codebooks only
+-    update_codebooks(scale_codebook, rot_codebook, app_codebook, loss)
++scale_codebook = svq_train(scale_features, scale_codebook, scale_idx, lr, 1000)
++rot_codebook = svq_train(rot_features, rot_codebook, rot_idx, lr, 1000)
++app_codebook = svq_train(app_features, app_codebook, app_idx, lr, 1000)
++# Note: For Zip-NeRF dataset, iterations = 10000 [S1].
+ ```
+ 
+ ### Parameters
+ *   **$D=3$**: Dimensionality of the appearance features vector [S1].
+-*   **$\tau$**: Importance score threshold that determines the final model storage size and variant selection (XS to XL) [S1]. Typical values: 0.96, 0.98, 0.99, 0.999 [S1].
++*   **$\tau$**: Importance score threshold that determines the final model storage size and variant selection (XS to XL) [S1]. Typical values: 0.96, 0.98, 0.99, 0.999, and 0.999 [S1].
+ *   **Bit Allocations**:
+     *   Scale: $2^6$ codes [S1].

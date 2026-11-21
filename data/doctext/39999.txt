@@ -1,0 +1,2194 @@
+# FlashDRR
+Fast differentiable DRR raycasting and volume rendering for PyTorch.
+
+[![PyPI](https://img.shields.io/pypi/v/flashdrr.svg)](https://pypi.org/project/flashdrr/)
+[![Documentation](https://img.shields.io/badge/docs-pcarnah.github.io%2Fflashdrr-blue.svg)](https://pcarnah.github.io/flashdrr/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+Full API reference, and guides available at
+<https://pcarnah.github.io/flashdrr/>.
+
+`FlashDRR` provides fast, differentiable raycasters that turn CT volumes into
+synthesized X‑ray projections (Digitally Reconstructed Radiographs, DRR) while
+keeping gradients flowing through both the volume and the camera parameters.
+It is designed for deep-learning workloads such as 2D/3D registration,
+pose estimation, and synthetic‑image generation from medical volumes.
+
+## Features
+* **Differentiable DRR raycasting** — `flashdrr.rendering.VolumeRaycaster`
+  renders physically‑based DRRs using the Beer‑Lambert law with fully
+  differentiable ray sampling, and can return the raw integrated attenuation
+  `tau` (`return_tau=True`) instead of the `1 - exp(-tau)` image.
+* **Fast Triton‑fused renderer** — `flashdrr.rendering.FusedVolumeRenderer`
+  runs a CUDA kernel for near‑instant, backprop‑free (or autograd-aware)
+  projection at high resolution.
+* **C‑arm / camera helpers** — sample realistic C‑arm views
+  (`carm_to_camera_params`, `get_random_carm_views`) and build VTK‑compatible
+  camera matrices in RAS space (`get_vtk_view_mat`).
+* **Transfer functions** — map CT Hounsfield units to density/attenuation via
+  `flashdrr.rendering.piecewise_linear_channelwise`.
+* **Lightweight volume utilities** — `flashdrr.utils` provides dimension
+  helpers (`make_nd`), HU normalization, and voxel‑scale handling.
+
+## Benchmark
+
+The following trends summarize head-to-head measurements of
+`VolumeRaycaster` (PyTorch `grid_sample` based) against the Triton-fused
+`FusedVolumeRenderer` across resolutions, ray-sample counts, and volume
+sizes. All tests performed using an RTX 5070Ti 16GB.
+
+<a href="benchmarks/plots/benchmark_analysis.svg">
+  <img src="benchmarks/plots/benchmark_analysis.svg"
+       alt="Benchmark comparison of the PyTorch-loop VolumeRaycaster against the Triton-fused FusedVolumeRenderer. Left: peak GPU memory (MiB, log scale) versus ray-sample count across resolutions from 128x128 to 2048x2048, showing linear growth for the PyTorch backend (peaking at ~24.8 GB at 2048x2048, 256 samples) and a near-flat profile below ~430 MiB for Triton. Middle: per-iteration latency (ms, log scale) versus resolution, showing super-linear degradation for the PyTorch backend beyond 1024x1024 (3,690 ms at 2048x2048) and roughly linear scaling for Triton (11.8 ms at 2048x2048, a ~314x speedup). Right: train vs eval memory and latency at 1024x1024 with 256 samples, where Triton uses 92.9 MiB eval / 115.2 MiB train versus 6,254.9 / 6,247.2 MiB for PyTorch, and 4.21 ms eval / 23.50 ms train versus 55.9 / 75.37 ms for PyTorch."
+       width="900">
+</a>
+
+### Key Performance Trends
+
+1. **Memory Scaling: Linear Allocation vs. Near-Constant Footprint**
+   * **Without Triton:** Peak VRAM scales directly with total samples
+     ($\text{Rays} \times \text{Samples/Ray}$). At $2048 \times 2048$
+     resolution with 256 ray samples, peak memory hits 24.8 GB in
+     evaluation mode, leading to out-of-memory (OOM) failures at
+     $\geq 384$ samples.
+   * **With Triton:** Fused rendering kernels avoid materializing
+     intermediate ray-sample tensors in HBM. Memory footprint remains
+     below 430 MiB across all tested configurations — a 99.5% memory
+     reduction at high workloads.
+   * **Volume Size Impact:** Scaling volume grid resolution from
+     $128^3$ to $256^3$ adds a fixed baseline memory overhead
+     (~100–300 MiB) for tensor storage, but Triton's intermediate
+     sample memory remains invariant to volume size.
+
+2. **Time Scaling: Sub-Linear Latency vs. Memory-Wall Thrashing**
+   * **Extreme Acceleration:** At $2048 \times 2048$ resolution
+     (256 samples, eval), Triton reduces iteration time from
+     1,804.32 ms to 9.16 ms — a $197\times$ speedup.
+   * **Non-Linear Degradation without Triton:** Beyond
+     $1024 \times 1024$, standard PyTorch execution time degrades
+     super-linearly due to memory bandwidth limits and cache
+     thrashing. Triton maintains predictable linear scaling
+     proportional to total rays rendered.
+
+3. **Train vs. Eval Dynamics**
+   * **Memory Overhead:** Without Triton, evaluation and training both
+      consume massive memory ($\approx 12.4$ GB at $1024\times 1024$ with
+      512 samples). With Triton, training memory increases only slightly
+      over evaluation (121.6 MiB train vs 110.7 MiB eval) due to lightweight
+      gradient buffer retention.
+     * **Backward Pass Latency:** Training mode adds a larger relative
+       compute penalty in Triton than in standard PyTorch (~$3.05\times$ overhead vs ~$1.31\times$
+       at $1024\times 1024$, 512 samples). This stems
+       from executing backward gradient kernels for custom operators,
+       though Triton train step time (15.4 ms) remains dramatically
+       faster than non-Triton eval time (82.0 ms).
+
+### Configuration snapshot (1024×1024, 512 samples)
+
+| Configuration (1024×1024, 512 samples) | Triton OFF | Triton ON | Improvement         |
+|----------------------------------------|-----------:| ---: |---------------------|
+| Eval Memory (MiB)                      |   12,386.7 | 110.7  | $111.9\times$ less  |
+| Train Memory (MiB)                     |   12,409.6 | 115.2 | $102.1\times$ less  |
+| Eval Latency (ms/iter)                 |      82.00 | 5.05  | $16.2\times$ faster |
+| Train Latency (ms/iter)                |     107.34 | 15.40 | $7.0\times$ faster  |
+
+## Installation Instructions
+The project is available via PyPI.
+
+```
+
+pip install flashdrr
+
+```
+
+To get the latest master:
+```
+pip install git+https://github.com/pcarnah/flashdrr.git@master#egg=flashdrr
+```
+
+### CUDA builds
+PyTorch ships separate wheels per CUDA version. By default `pip install
+flashdrr` pulls the CPU build of `torch`. To select a CUDA build, install the
+corresponding extra and point pip at the matching PyTorch index, for example:
+
+```bash
+pip install flashdrr[cu128] --extra-index-url https://download.pytorch.org/whl/cu128
+pip install flashdrr[cu130] --extra-index-url https://download.pytorch.org/whl/cu130
+```
+
+The Triton-fused renderer requires a working Triton installation (the
+`triton-windows` fork is used automatically on Windows).
+
+### Using uv
+[uv](https://docs.astral.sh/uv/) is supported. CUDA build
+selection uses the same `cu128` / `cu130` / `cpu` extras as with pip — pick
+one and the matching PyTorch index is
+selected automatically via `[tool.uv.sources]`:
+
+```bash
+uv sync --extra cu128
+uv sync --extra cu130
+uv sync --extra cpu
+```
+
+Dev-only tooling (e.g. `pytest`) lives in PEP 735 dependency groups, which
+must not share names with the CUDA extras — add them with `--group`:
+
+```bash
+uv sync --extra cu130 --group test
+```
+
+The optional `data` extra (NIfTI file support) is just another extra
+and combines with a CUDA extra:
+
+```bash
+uv sync --extra cu128 --extra data
+```
+
+## Quick example
+The snippet below mirrors the end-to-end `__main__` in
+`flashdrr/rendering/raycast.py`: it loads a CT volume with MONAI, derives the
+RAS↔IJK affine, builds a C-arm view matrix with `get_vtk_view_mat`, and
+renders a DRR with `VolumeRaycaster`. Two attenuation pipelines are shown
+from the same loaded volume — a hand-made 5-keypoint transfer function
+mapping HU → attenuation coefficients via `piecewise_linear_channelwise`,
+and a simple linear HU → μ map.
+
+```python
+import torch
+from monai.transforms import Compose, LoadImage, EnsureChannelFirst, Spacing, ScaleIntensityRange, EnsureType
+
+import flashdrr.rendering as R
+
+# ---------- 1. Load CT volume and build the RAS<->IJK affine ----------
+load_tf = Compose([
+    LoadImage(),
+    EnsureChannelFirst(),
+    Spacing([2.5, 2.5, 3.0]),
+    ScaleIntensityRange(-3024, 3024, 0, 1, clip=True),
+    EnsureType(),
+])
+vol = load_tf('CTChest.nii.gz').unsqueeze(0)                    # (1, 1, D, H, W), MetaTensor in HU
+ijk2ras = vol.meta['affine']                                    # (4, 4) IJK -> RAS
+ras2ijk = torch.linalg.inv(ijk2ras)
+vol = vol.cuda()
+
+# ---------- 2. Build a C-arm view matrix in RAS ----------
+center_ijk = torch.ones(4, dtype=torch.float64)
+center_ijk[:3] = torch.as_tensor(vol.shape[2:]) // 2
+center_ras = (ijk2ras @ center_ijk)[:3].float().cuda()
+view_mat = R.get_vtk_view_mat(
+    cam_pos=(0.0, 1000.0, -130.0),                              # source 1 m in front of the volume
+    cam_focal=tuple(center_ras.tolist()),
+    cam_viewup=(0.0, 0.0, 1.0),
+    device='cuda',
+).unsqueeze(0)                                                 # (1, 4, 4)
+
+raycaster = R.VolumeRaycaster(ray_samples=384, resolution=(1024, 1024)).cuda().eval()
+
+# ---------- 3a. Hand-made HU -> attenuation transfer function ----------
+# Each keypoint is (HU, attenuation); below -200 HU is air (mu=0),
+# soft tissue ramps gently, bone saturates to high attenuation.
+tf = torch.tensor([
+    [-3500, 0.00],   # air
+    [ -200, 0.00],   # lung / soft-tissue boundary
+    [  200, 0.05],   # soft tissue
+    [ 1535, 0.50],   # cortical bone
+    [ 3071, 0.65],   # dense bone / metal
+]).cuda()
+tf[:, 0] = (tf[:, 0] + 3500) / 7000                            # normalize HU to [0, 1]
+xp = tf[:, 0].unsqueeze(0)                                     # (1, K)
+yp = tf[:, -1].unsqueeze(0)                                    # (1, K)
+mu_tf = R.piecewise_linear_channelwise(vol, xp, yp)            # (1, 1, D, H, W)
+
+drr_tf = raycaster(mu_tf, view_mat=view_mat, ras2ijk=ras2ijk.float().cuda())
+
+# ---------- 3b. Linear HU -> mu map ----------
+hu = vol * (3024 - (-3524)) + (-3524)
+mu_lin = torch.clamp(0.05 * (1.0 + hu / 800.0), min=0.0)       # (1, 1, D, H, W)
+
+drr_lin = raycaster(mu_lin, view_mat=view_mat, ras2ijk=ras2ijk.float().cuda())
+```
+
+Pass `triton=True` to `raycaster(...)` to switch to the fused
+CUDA/Triton kernel.
+
+## Optional dependencies
+* `nibabel` — required only for loading Nifti format data for tests and example scripts
+  (`flashdrr[data]`).
+
+## Attribution
+If you use this software in your research, please cite it using the "Cite this repository" button or the provided CITATION.cff.
+
+### flashdrr/__init__.py
+```
+__version__ = '0.6.0'
+```
+
+### flashdrr/rendering/__init__.py
+```
+"""Differentiable volume rendering for PyTorch.
+
+The package exposes two renderers and a handful of camera / geometry helpers:
+
+* :class:`VolumeRaycaster` - the main Python-loop differentiable raycaster
+  (optionally with the :class:`DepthAwareScatter` and :class:`ASPP` building
+  blocks for scatter-based DRR rendering).
+* :class:`FusedVolumeRenderer` - a Triton-fused forward kernel for fast
+  backprop-free rendering on CUDA.
+
+The camera helpers (:func:`get_vtk_view_mat`, :func:`carm_to_camera_params`,
+:func:`get_random_carm_views`, ...) are the same ones the renderers use
+internally and are re-exported for downstream code.
+"""
+
+from .raycast import (
+    ASPP,
+    DepthAwareScatter,
+    VolumeRaycaster,
+    carm_to_camera_params,
+    get_random_carm_views,
+    get_vtk_view_mat,
+    piecewise_linear_channelwise,
+)
+from .triton_raycast import FusedVolumeRenderer
+
+__all__ = [
+    'ASPP',
+    'DepthAwareScatter',
+    'FusedVolumeRenderer',
+    'VolumeRaycaster',
+    'carm_to_camera_params',
+    'get_random_carm_views',
+    'get_vtk_view_mat',
+    'piecewise_linear_channelwise',
+]
+```
+
+### flashdrr/rendering/raycast.py
+```
+# Initially adapted from torchvtk (https://github.com/torchvtk/torchvtk/). Rendering engine completely re-written since.
+
+"""
+Differentiable volume rendering for 2D X-ray projection (DRR) synthesis.
+
+This module provides:
+
+* Camera utilities for sampling and building C-arm view matrices in RAS
+  space (:func:`get_random_carm_views`, :func:`carm_to_camera_params`,
+  :func:`get_vtk_view_mat`).
+* A per-channel piecewise-linear transfer function
+  (:func:`piecewise_linear_channelwise`).
+* Building blocks :class:`ASPP` and :class:`DepthAwareScatter` (prototype).
+* :class:`VolumeRaycaster`, the main differentiable raycaster that ties
+  these together. It dispatches between a tiled Python-loop backend and a
+  fused CUDA/Triton backend (:class:`flashdrr.rendering.FusedVolumeRenderer`).
+"""
+
+import math
+from timeit import default_timer as timer
+from typing import Tuple, Optional
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import torch.utils.checkpoint as cp
+from torch import nn
+
+from flashdrr.rendering.triton_raycast import FusedVolumeRenderer
+from flashdrr.utils import make_2d
+
+__all__ = ['get_vtk_view_mat', 'get_random_carm_views', 'carm_to_camera_params',
+           'VolumeRaycaster']
+
+@torch.compiler.disable
+def get_random_carm_views(n_views, sid_range, ap_range, lat_range, si_range, center):
+    """
+    Randomly sample C-arm view matrices by uniform sampling of the underlying
+    geometric parameters.
+
+    For each of ``n_views`` samples, source-to-image distance (SID), AP angle,
+    lateral angle, and table SI translation are drawn uniformly from the
+    corresponding ranges, converted to a camera (position, focal, up) tuple
+    via :func:`carm_to_camera_params`, and assembled into a 4x4 camera-to-
+    world view matrix via :func:`get_vtk_view_mat`. The matrices are stacked
+    along a new leading dimension.
+
+    Parameters:
+    -----------
+    n_views : int
+        Number of view matrices to sample.
+    sid_range : tuple of 2 floats
+        (min_sid, max_sid) in mm. Typical range: (900, 1200)
+    ap_range : tuple of 2 floats
+        (min_ap, max_ap) in degrees. Typical range: (-40, 40) for cranial/caudal
+    lat_range : tuple of 2 floats
+        (min_lat, max_lat) in degrees. Typical range: (-90, 90) for LAO/RAO
+    si_range : tuple of 2 floats
+        (min_si, max_si) in mm. Typical range: (-100, 100) for table translation
+    center : tuple or list of 3 floats
+        Volume center in RAS coordinates (mm), passed to
+        :func:`carm_to_camera_params`.
+
+    Returns:
+    --------
+    views : torch.Tensor (n_views, 4, 4)
+        Stacked camera-to-world view matrices in RAS space, on CPU.
+
+    Notes:
+    ------
+    Distribution choice rationale:
+
+    * SID: uniform is appropriate — mechanical constraint, no preferred distance.
+    * AP angle: uniform is reasonable for training, though clinical use shows
+      bias toward AP (0°), cranial (15-30°), and steep cranial (>30°).
+    * Lateral angle: uniform works, but clinical practice favors AP (0°),
+      RAO 30°, and LAO 30-45° views.
+    * Table SI: uniform is appropriate — depends on anatomy region of interest.
+
+    For more realistic clinical distributions, consider adding bias toward
+    common views (0°, ±30°, ±45°) or using a mixture of uniforms/peaked
+    distributions.
+    """
+    import random
+
+    views = []
+    for _ in range(n_views):
+        sid = random.uniform(sid_range[0], sid_range[1])
+        ap_angle = random.uniform(ap_range[0], ap_range[1])
+        lat_angle = random.uniform(lat_range[0], lat_range[1])
+        table_si = random.uniform(si_range[0], si_range[1])
+
+        pos, focal, up = carm_to_camera_params(sid, ap_angle, lat_angle, center, table_si)
+        views.append(get_vtk_view_mat(pos, focal, up))
+
+    views = torch.stack(views)
+
+    return views
+
+@torch.compiler.disable
+def carm_to_camera_params(sid, ap_angle, lat_angle, center_ras, table_si=0.0):
+    """
+    Convert C-arm position parameters to camera parameters.
+
+    Parameters:
+    -----------
+    sid : float
+        Source-to-Image Distance in mm (distance from X-ray source to detector)
+    ap_angle : float
+        Anteroposterior (AP) angle in degrees
+        - 0° = AP view (source in front, looking posterior)
+        - Positive = caudal angulation (source tilts inferiorly)
+        - Negative = cranial angulation (source tilts superiorly)
+    lat_angle : float
+        Lateral angle in degrees
+        - 0° = AP view
+        - Positive = RAO (source moves to patient's right)
+        - Negative = LAO (source moves to patient's left)
+    center_ras : tuple or list of 3 floats
+        Center point of the CT scan in RAS coordinates (mm)
+        RAS = Right, Anterior, Superior
+    table_si : float, optional
+        Table translation in superior-inferior direction in mm (default: 0.0)
+        - Positive = table moves superior (head up)
+        - Negative = table moves inferior (head down)
+
+    Returns:
+    --------
+    cam_pos : numpy array (3,)
+        Camera/source position in RAS coordinates
+    look_at : numpy array (3,)
+        Look-at point (focal point) in RAS coordinates
+    look_up : numpy array (3,)
+        Up vector for camera orientation
+    """
+
+    # Convert angles to radians
+    ap_rad = np.deg2rad(ap_angle)
+    lat_rad = np.deg2rad(lat_angle)
+
+    # Center point with table translation
+    # Table moves in superior-inferior direction (Z-axis in RAS)
+    center = np.array(center_ras) + np.array([0, 0, table_si])
+
+    # Initial source position at SID distance along negative Y axis (anterior)
+    source_local = np.array([0, -sid, 0])
+
+    # Rotation around Z-axis (superior) for lateral angulation
+    R_lat = np.array([
+        [np.cos(lat_rad), -np.sin(lat_rad), 0],
+        [np.sin(lat_rad), np.cos(lat_rad), 0],
+        [0, 0, 1]
+    ])
+
+    # Rotation around X-axis (right) for cranial/caudal angulation
+    R_ap = np.array([
+        [1, 0, 0],
+        [0, np.cos(ap_rad), -np.sin(ap_rad)],
+        [0, np.sin(ap_rad), np.cos(ap_rad)]
+    ])
+
+    # Apply rotations: first lateral, then AP
+    R_total = R_ap @ R_lat
+    source_rotated = R_total @ source_local
+
+    # Camera position in world coordinates
+    cam_pos = source_rotated + center
+
+    # Look-at point is the center
+    look_at = center
+
+    # Up vector: start with superior direction and apply same rotations
+    up_local = np.array([0, 0, 1])
+    look_up = R_total @ up_local
+
+    return cam_pos, look_at, look_up
+
+@torch.compiler.disable
+def get_vtk_view_mat(cam_pos: Tuple[float],  # (3,) camera center in RAS
+                     cam_focal: Tuple[float],  # (3,) camera focal point in RAS
+                     cam_viewup: Tuple[float],  # (3,) view-up vector in RAS)
+                     device: str = 'cpu'):
+    """
+    Build a VTK-compatible camera-to-world view matrix (4x4) from camera position,
+    focal point, and view-up direction in RAS coordinates.
+
+    The resulting matrix maps camera-space points to world (RAS) space. The
+    top-left 3x3 block has the camera axes as its columns, ordered
+    ``[right, up, forward]``; the fourth column is the camera position
+    ``cam_pos``; the bottom row is ``[0, 0, 0, 1]``. ``forward`` points
+    from ``cam_pos`` toward ``cam_focal``.
+
+    Args:
+        cam_pos: Camera/source position in RAS (mm), shape (3,).
+        cam_focal: Camera focal (look-at) point in RAS (mm), shape (3,).
+        cam_viewup: World-space up direction in RAS, shape (3,). Need not be unit length.
+        device: Device on which to allocate the returned tensor. Defaults to ``'cpu'``.
+
+    Returns:
+        torch.Tensor: (4, 4) camera-to-world view matrix as described above.
+    """
+    cam_pos = torch.as_tensor(cam_pos, dtype=torch.float32)
+    cam_focal = torch.as_tensor(cam_focal, dtype=torch.float32)
+    cam_viewup = torch.as_tensor(cam_viewup, dtype=torch.float32)
+
+    # Construct VTK-compatible camera axes
+    forward = torch.nn.functional.normalize(cam_focal - cam_pos, dim=0)  # +Z axis (direction of projection in VTK)
+    right = torch.nn.functional.normalize(torch.linalg.cross(forward, cam_viewup), dim=0)
+    up = torch.linalg.cross(right, forward)  # True up direction
+
+    # View matrix (camera-to-world)
+    view_mat = torch.zeros(4, 4, device=device)
+    view_mat[:3, 0] = right
+    view_mat[:3, 1] = up
+    view_mat[:3, 2] = forward
+    view_mat[:3, 3] = cam_pos
+    view_mat[3, 3] = 1.0
+
+    return view_mat
+
+
+def piecewise_linear_channelwise(x, xp, yp):
+    """
+    Apply a per-channel piecewise linear function to input x.
+    Handles extrapolation beyond xp bounds by extending the first/last segment.
+
+    Args:
+        x (Tensor): Input (B, C, H, W) or (B, C, D, H, W)
+        xp (Tensor): (C, K) sorted x keypoints per channel
+        yp (Tensor): (C, K) y values per channel at keypoints
+
+    Returns:
+        Tensor: Output of same shape as x
+    """
+    if xp.ndim != 2 or yp.ndim != 2 or xp.shape != yp.shape:
+        print(xp.shape, yp.shape)
+        raise ValueError("xp and yp must have shape (C, K)")
+    B, C = x.shape[:2]
+    x_flat = x.view(B, C, -1)  # (B, C, N)
+
+    K = xp.shape[1]
+    xp = xp.unsqueeze(0).expand(B, -1, -1)  # (B, C, K)
+    yp = yp.unsqueeze(0).expand(B, -1, -1)
+
+    x_unsq = x_flat.unsqueeze(-1)  # (B, C, N, 1)
+    xp_left = xp.unsqueeze(2)[:, :, :, :-1]  # (B, C, 1, K-1)
+    xp_right = xp.unsqueeze(2)[:, :, :, 1:]
+
+    # Mask to identify correct segment
+    mask = (x_unsq >= xp_left) & (x_unsq < xp_right)
+
+    # If no valid segment (i.e. x >= xp[-1]), assign to last segment
+    none_selected = ~mask.any(dim=-1)
+    idx = mask.float().argmax(dim=-1)  # (B, C, N)
+    idx[none_selected] = K - 2  # assign last interval
+
+    # Safe gather
+    gather_idx = idx.unsqueeze(-1)
+    xp_l = torch.gather(xp, 2, idx)
+    xp_r = torch.gather(xp, 2, idx + 1)
+    yp_l = torch.gather(yp, 2, idx)
+    yp_r = torch.gather(yp, 2, idx + 1)
+
+    # Linear interpolation
+    denom = xp_r - xp_l
+    denom = torch.where(denom == 0, torch.ones_like(denom), denom)  # avoid div0
+    xval = x_flat
+    yval = yp_l + (yp_r - yp_l) * ((xval - xp_l) / denom)
+
+    return yval.view_as(x)
+
+
+class ASPP(nn.Module):
+    """Atrous Spatial Pyramid Pooling (ASPP) module.
+
+    Applies parallel 2D atrous (dilated) convolutions with multiple dilation
+    rates, concatenates their ReLU-activated outputs, and projects the
+    concatenated feature map back to ``out_ch`` channels with a 1x1 conv.
+
+    Args:
+        in_ch: Number of input channels.
+        out_ch: Number of output channels for each branch and the final projection.
+        rates: Tuple of dilation rates for the parallel ``Conv2d`` branches.
+            Each branch uses a 3x3 kernel with padding equal to its dilation.
+    """
+
+    def __init__(self, in_ch, out_ch, rates=(1, 2, 4, 8)):
+        super().__init__()
+        self.branches = nn.ModuleList([
+            nn.Conv2d(in_ch, out_ch, 3, padding=r, dilation=r) for r in rates
+        ])
+        self.proj = nn.Conv2d(out_ch * len(rates), out_ch, 1)
+
+        # init
+        for m in self.branches:
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+            nn.init.zeros_(m.bias)
+        nn.init.kaiming_normal_(self.proj.weight, nonlinearity="relu")
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x):
+        """
+        Run the ASPP branches and project to ``out_ch`` channels.
+
+        Args:
+            x: Input feature map of shape ``(B, in_ch, H, W)``.
+
+        Returns:
+            torch.Tensor: Output feature map of shape ``(B, out_ch, H, W)``.
+        """
+        feats = [F.relu(branch(x)) for branch in self.branches]
+        return self.proj(torch.cat(feats, dim=1))
+
+
+class DepthAwareScatter(nn.Module):
+    """Prototype depth-aware scatter estimator for DRR rendering.
+
+    .. warning::
+        **Prototype, not fully functional.** This module is an experimental
+        design and is not yet validated end-to-end. The scattering model,
+        gating, and integration with the main raycaster are subject to
+        change. Do not rely on its outputs for production use.
+
+    Given per-sample attenuation ``mu`` along each ray, it computes a
+    Beer-Lambert primary transmission, accumulates a depth-dependent scatter
+    source, mixes it with an ASPP-conditioned gate, and adds a bounded
+    scatter contribution to the primary image.
+
+    Args:
+        in_ch: Number of scatter channels (``C``) in the input volume.
+        base_ch: Hidden channel width of the conditioning/ASPP branch.
+        alpha_max: Upper bound on the learned scatter gating weight applied
+            to the scatter map before it is added to the primary image.
+    """
+
+    def __init__(self, in_ch, base_ch=32, alpha_max=0.4):
+        super().__init__()
+        self.alpha_max = alpha_max
+
+        # depth mixing: causal 1D conv over D
+        self.depth_conv = nn.Conv1d(in_ch, in_ch, kernel_size=5, padding=4, dilation=2)
+        nn.init.kaiming_normal_(self.depth_conv.weight, nonlinearity="relu")
+        nn.init.zeros_(self.depth_conv.bias)
+
+        # conditioning features → ASPP
+        self.enc = nn.Conv2d(in_ch * 2, base_ch, 1)
+        self.aspp = ASPP(base_ch, base_ch)
+        self.alpha_head = nn.Conv2d(base_ch, 1, 1)
+        nn.init.kaiming_normal_(self.alpha_head.weight, nonlinearity="relu")
+        nn.init.constant_(self.alpha_head.bias, -3.0)  # α ≈ 0 at init
+
+        # lateral scatter mixing
+        self.scatter_conv = nn.Conv2d(in_ch + base_ch, 1, 3, padding=1)
+        nn.init.kaiming_normal_(self.scatter_conv.weight, nonlinearity="relu")  # no scatter initially
+        nn.init.zeros_(self.scatter_conv.bias)
+
+    def forward(self, mu, dz=1.0):
+        """
+        Estimate primary and scatter contributions along rays.
+
+        Args:
+            mu: Per-sample attenuation, shape ``(B, C, D, H, W)`` where ``D`` is
+                the number of samples along each ray.
+            dz: Scalar sample spacing along the ray (same units as volume
+                voxel sizes, e.g. mm). Defaults to ``1.0``.
+
+        Returns:
+            Tuple of:
+
+            * **I_out** (``(B, C, H, W)``): Primary transmission plus the
+              bounded, gated scatter map.
+            * **I_primary** (``(B, C, H, W)``): Beer-Lambert primary
+              transmission at the exit of the ray (pre-scatter).
+            * **scatter_map** (``(B, 1, H, W)``): Learned per-pixel scatter
+              contribution before the alpha gate.
+            * **alpha** (``(B, 1, H, W)``): Per-pixel gating weight in
+              ``[0, alpha_max]`` applied to ``scatter_map``.
+        """
+        # mu: [B,C,D,H,W], I0 = 1
+        B, C, D, H, W = mu.shape
+
+        # integrate attenuation
+        tau_z = torch.cumsum(mu * dz, dim=2)  # [B,C,D,H,W]
+        I_z = torch.exp(-tau_z)  # [B,C,D,H,W]
+        I_primary = I_z[:, :, -1]  # [B,C,H,W]
+
+        # scatter source per depth
+        S_z = mu * dz * I_z  # [B,C,D,H,W]
+
+        # depth-aware weighting (causal conv along D)
+        # reshape to [B*H*W, C, D]
+        S_z_perm = S_z.permute(0, 3, 4, 1, 2).contiguous()  # [B,H,W,C,D]
+        S_z_flat = S_z_perm.view(-1, C, D)  # [B*H*W, C, D]
+        S_w = self.depth_conv(S_z_flat)  # [B*H*W, C, D]
+        S_w = S_w.view(B, H, W, C, D).permute(0, 3, 4, 1, 2)  # [B,C,D,H,W]
+        S = S_w.sum(dim=2)  # [B,C,H,W]
+
+        # conditioning features
+        tau_exit = tau_z[:, :, -1]  # [B,C,H,W]
+        feats = torch.cat([I_primary, tau_exit], dim=1)  # [B,2C,H,W]
+        F0 = F.relu(self.enc(feats))  # [B,base,H,W]
+
+        # ASPP context
+        F_aspp = self.aspp(F0)  # [B,base,H,W]
+
+        # scatter map
+        scatter_in = torch.cat([S, F_aspp], dim=1)  # [B,C+base,H,W]
+        scatter_map = F.relu(self.scatter_conv(scatter_in))  # [B,1,H,W]
+
+        # alpha gate
+        alpha = torch.sigmoid(self.alpha_head(F_aspp)) * self.alpha_max
+
+        # output
+        I_out = I_primary + alpha * scatter_map
+        return I_out, I_primary, scatter_map, alpha
+
+
+# %%
+class VolumeRaycaster(nn.Module):
+    """
+    Differentiable C-arm volume raycaster for digitally reconstructed
+    radiographs (DRRs).
+
+    Given a 3D attenuation volume in IJK space and one or more camera view
+    matrices in RAS space, ``VolumeRaycaster`` samples along each camera
+    ray, integrates the attenuation using either Beer-Lambert or alpha
+    compositing, and produces a 2D projection per view. Rendering is
+    differentiable with respect to the input volume and view matrices.
+
+    Two backends are supported:
+
+    * A tiled Python-loop renderer using ``torch.grid_sample`` (default).
+    * A fused CUDA/Triton renderer (``flashdrr.rendering.FusedVolumeRenderer``),
+      selected per-call via ``forward(..., triton=True)``.
+
+    A lightweight, prototype depth-aware scatter model
+    (:class:`DepthAwareScatter`) can be attached for the last
+    ``scatter`` channels of the volume.
+    """
+
+    def __init__(
+            self,
+            density_factor: float = 100.0,
+            ray_samples: int = 256,
+            resolution: Tuple[int, int] = (224, 224),
+            use_checkpointing: bool = False,
+            use_beer_lambert: bool = True,
+            scatter: Optional[int] = None,  # or int | None if Python 3.10+
+            i0: Optional[float] = None,
+            fov: Optional[float] = 20.0,
+            return_tau: Optional[bool] = False
+    ) -> None:
+        """
+        Initialize the raycaster.
+
+        Args:
+            density_factor: Scalar multiplier applied to volume intensities
+                before integration. Used by the alpha-compositing branch of
+                the Python-loop backend and passed to the Triton backend.
+            ray_samples: Number of samples taken along each camera ray.
+            resolution: Output image size as ``(width, height)`` or a single
+                int for a square image.
+            use_checkpointing: If True, use ``torch.utils.checkpoint`` to
+                trade compute for memory in the Python-loop backend (training
+                only).
+            use_beer_lambert: If True, integrate via the Beer-Lambert law
+                and return ``1 - exp(-int(mu * dz))``. If False, use
+                front-to-back alpha compositing (over operator).
+            scatter: If not ``None``, treat the last ``scatter`` channels of
+                the volume as scatter channels and process them with
+                :class:`DepthAwareScatter` (prototype; not fully functional);
+                the remaining channels are rendered with Beer-Lambert as
+                primary. Only has an effect when ``use_beer_lambert`` is
+                True.
+            i0: Mean photon count at the source for the Gaussian-Poisson
+                surrogate noise model. If ``None``, no noise is added.
+            fov: Vertical field of view in degrees used to build the per-pixel
+                ray directions.
+            return_tau: If True, return the integrated attenuation ``tau``
+                (the line integral ``sum(mu * dz)``) instead of the default
+                attenuation image ``1 - exp(-tau)``. ``tau`` is not clamped
+                to ``[0, 1]``, which makes it suitable for targets or losses
+                defined in log-attenuation space. Only affects the
+                Beer-Lambert branch with ``scatter=None``; the alpha
+                compositing branch and the scatter branch ignore it.
+        """
+        super().__init__()
+        self.density_factor = density_factor
+        self.ray_samples = ray_samples
+        self.use_checkpointing = use_checkpointing
+        self.use_beer_lambert = use_beer_lambert
+        self.scatter = None
+        self.i0 = i0
+        self.return_tau = return_tau
+        if isinstance(resolution, tuple):
+            self.w, self.h = resolution
+        else:
+            self.w, self.h = resolution, resolution
+
+        # Z = torch.linspace(-1, 1, ray_samples)
+        # W = torch.linspace(-1, 1, self.w)
+        # H = torch.linspace(-1, 1, self.h)
+        # self.samples = self.get_coord_grid(Z, H, W, perspective=True)
+        self.register_buffer('dirs_cam', torch.empty(self.h, self.w, 3), persistent=False)
+        self.triton_raycaster = FusedVolumeRenderer(self.ray_samples, self.density_factor, self.apply_poisson)
+
+        if scatter is not None:
+            self.scatter_channels = scatter
+            self.scatter = DepthAwareScatter(scatter)
+
+        self.set_fov(fov)
+
+    def set_fov(self, fov: float) -> None:
+        """
+        Configure the camera's vertical field of view and refresh the
+        per-pixel ray direction buffer ``self.dirs_cam``.
+
+        The buffer is built on CPU in the image plane, normalized, then
+        moved to the module's current device.
+
+        Args:
+            fov: Vertical field of view in degrees.
+        """
+        # Get the current device from the buffer
+        device = self.dirs_cam.device
+
+        # Do computation on CPU
+        y, x = torch.meshgrid(
+            torch.linspace(-1, 1, self.h),  # vertical: -1 (bottom) to 1 (top)
+            torch.linspace(-1, 1, self.w),  # horizontal: -1 (left) to 1 (right)
+            indexing='ij'
+        )
+
+        # Vertical FOV in radians
+        fov_y = np.deg2rad(fov)
+        aspect = self.w / self.h
+        # Compute direction vectors in camera coordinates
+        px = x * np.tan(fov_y / 2) * aspect
+        py = y * np.tan(fov_y / 2)
+        pz = torch.ones_like(px)
+        dirs_cam = torch.stack([px, -py, pz], dim=-1)  # shape: (H, W, 3)
+
+        # Normalize directions and move to device once at the end
+        dirs_cam = F.normalize(dirs_cam, dim=-1).to(device)
+        self.dirs_cam = dirs_cam
+
+    @staticmethod
+    def compute_clipping_distances(camera_matrix, volume_shape, ijk2ras, margin=30.0):
+        """
+        Compute near and far clipping distances for ray sampling based on camera matrix
+        and volume bounds in IJK space.
+
+        Parameters:
+        -----------
+        camera_matrix : torch.Tensor (B, 4, 4) or (4, 4)
+            Batched or single 4x4 camera view matrix in RAS space
+            Can be world-to-camera or camera-to-world (will be auto-detected)
+        volume_shape : tuple of 3 ints
+            Volume dimensions in IJK space (I, J, K)
+        ijk2ras : torch.Tensor (4, 4)
+            Transformation matrix from IJK to RAS coordinates
+        margin : float, optional
+            Safety margin to add to near/far distances in mm (default: 30.0).
+            Positive values expand the clipping range.
+
+        Returns:
+        --------
+        near : torch.Tensor (B,) or float
+            Near clipping distance in mm (distance from camera to closest volume point)
+        far : torch.Tensor (B,) or float
+            Far clipping distance in mm (distance from camera to farthest volume point)
+        """
+
+        if not isinstance(camera_matrix, torch.Tensor):
+            camera_matrix = torch.tensor(camera_matrix, dtype=torch.float32)
+        if not isinstance(ijk2ras, torch.Tensor):
+            ijk2ras = torch.tensor(ijk2ras, dtype=torch.float32)
+
+        # Handle both batched and single camera matrices
+        is_batched = camera_matrix.ndim == 3
+        if not is_batched:
+            camera_matrix = camera_matrix.unsqueeze(0)
+
+        batch_size = camera_matrix.shape[0]
+        device = camera_matrix.device
+
+        ijk2ras = ijk2ras.to(dtype=camera_matrix.dtype, device=device)
+
+        # Extract camera position from matrix
+        # Check if this is camera-to-world (large translation) or world-to-camera (small translation)
+        test_pos = camera_matrix[:, :3, 3]  # (B, 3)
+        translation_norm = torch.norm(test_pos, dim=1)  # (B,)
+
+        # For matrices with small translation, assume world-to-camera and invert
+        needs_invert = translation_norm < 1.0
+
+        cam_to_world_all = torch.inverse(camera_matrix)  # (B, 4, 4), batched invert — no loop needed
+
+        pos_if_inv = cam_to_world_all[:, :3, 3]
+        dir_if_inv = cam_to_world_all[:, :3, 2]
+        pos_if_noninv = camera_matrix[:, :3, 3]
+        dir_if_noninv = camera_matrix[:, :3, 2]
+
+        mask = needs_invert.view(-1, 1)  # (B, 1), still a tensor — no Python branching
+        cam_pos_ras = torch.where(mask, pos_if_inv, pos_if_noninv)
+        view_dir = torch.where(mask, dir_if_inv, dir_if_noninv)
+
+        # Normalize view directions
+        view_dir = view_dir / torch.norm(view_dir, dim=1, keepdim=True)
+
+        # Generate all 8 corners of the volume bounding box in IJK space
+        I, J, K = volume_shape
+        corners_ijk = torch.tensor([
+            [0, 0, 0],
+            [I - 1, 0, 0],
+            [0, J - 1, 0],
+            [I - 1, J - 1, 0],
+            [0, 0, K - 1],
+            [I - 1, 0, K - 1],
+            [0, J - 1, K - 1],
+            [I - 1, J - 1, K - 1]
+        ], dtype=camera_matrix.dtype, device=device)  # (8, 3)
+
+        # Transform corners to RAS space
+        corners_homog = torch.cat([corners_ijk, torch.ones(8, 1, device=device)], dim=1)  # (8, 4)
+        corners_ras = (ijk2ras @ corners_homog.T).T[:, :3]  # (8, 3)
+
+        # Compute distances from camera to each corner projected along view direction
+        # Broadcast: cam_pos_ras (B, 1, 3), corners_ras (1, 8, 3)
+        to_corners = corners_ras.unsqueeze(0) - cam_pos_ras.unsqueeze(1)  # (B, 8, 3)
+        distances = torch.sum(to_corners * view_dir.unsqueeze(1), dim=2)  # (B, 8)
+
+        # Near is the minimum distance, far is the maximum distance
+        near = torch.min(distances, dim=1).values - margin  # (B,)
+        far = torch.max(distances, dim=1).values + margin  # (B,)
+
+        # Ensure near is positive
+        near = torch.clamp(near, min=0.1)
+
+        # Return scalar if input was not batched
+        if not is_batched:
+            return near.item(), far.item()
+
+        return near, far
+
+    def apply_poisson(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Add a differentiable Gaussian approximation of Poisson noise to a
+        transmission map or tau.
+
+        If ``self.i0`` is ``None``, the input is returned unchanged (no
+        noise is added). Otherwise, noise is applied in the photon-count
+        domain. For transmission input, Gaussian noise with standard deviation
+        ``sqrt(transmission / i0)`` is added and the result is clamped to
+        ``[0, 1]``. For tau input (``self.return_tau`` is True), counts
+        ``i0 * exp(-x)`` are perturbed by Gaussian noise of standard deviation
+        ``sqrt(counts)``, clamped to at least one count, and converted back to
+        tau; the noise is then added through a straight-through estimator so
+        gradients still flow. This is a smooth surrogate for shot/Poisson
+        noise and is fully differentiable.
+
+        Args:
+            x: Transmission values (post-primary, pre-noise) in ``[0, 1]``,
+                or unbounded tau in log space when ``self.return_tau`` is
+                True. Any shape is supported.
+
+        Returns:
+            torch.Tensor: Noisy transmission (clamped to ``[0, 1]``) or noisy
+            tau, matching the mode selected by ``self.return_tau`` and the
+            shape of ``x``. Returns the input unchanged when ``i0`` is
+            ``None``.
+        """
+        if self.i0 is None:
+            return x
+
+        # Differentiable Gaussian approximation of Poisson
+        if self.return_tau:
+            with torch.no_grad():
+                expected_counts = self.i0 * torch.exp(-x)
+                std = torch.sqrt(expected_counts)
+                noisy_counts = (
+                    expected_counts + std * torch.randn_like(x)
+                ).clamp_min(1.0)
+                noisy_tau = -torch.log(noisy_counts / self.i0)
+
+            return x + (noisy_tau - x).detach()
+        else:
+            transmission = torch.clamp(x, min=1e-8)
+            std = torch.sqrt(transmission / self.i0)
+            epsilon = torch.randn_like(transmission)
+            noisy_transmission = transmission + std * epsilon
+            return torch.clamp(noisy_transmission, 0, 1)
+
+    def forward(self, vol: torch.Tensor, view_mat: torch.Tensor, ras2ijk: torch.Tensor,
+                tile_h: int = 256, tile_w: int = 256, triton: bool = False) -> torch.Tensor:
+        """
+        Render one or more views of a (batched) 3D attenuation volume.
+
+        Args:
+            vol: Attenuation volume of shape ``(B, C, D, H, W)`` in IJK
+                voxel space. The affine ``ras2ijk`` is what makes the volume
+                RAS-aligned at runtime.
+            view_mat: Camera-to-world view matrices in RAS, shape
+                ``(B, 4, 4)`` or ``(N, 4, 4)`` where ``N = B * views_per_vol``.
+                As a special case, ``N == 1`` is broadcast to ``B``. The
+                clipping-distance computation also accepts world-to-camera
+                matrices and auto-inverts them.
+            ras2ijk: 4x4 affine mapping RAS to IJK coordinates.
+            tile_h: Tile height used by the Python-loop backend to bound
+                peak memory. Ignored if the image is smaller than
+                ``(2*tile_h, 2*tile_w)``.
+            tile_w: Tile width used by the Python-loop backend. See
+                ``tile_h``.
+            triton: If True, use the fused CUDA/Triton renderer
+                (:class:`flashdrr.rendering.FusedVolumeRenderer`); otherwise
+                use the tiled Python-loop renderer.
+
+        Returns:
+            torch.Tensor: Rendered projections of shape ``(N, C, H, W)``.
+            These are attenuation images in ``[0, 1)`` by default, or the
+            integrated attenuation ``tau`` when the raycaster was constructed
+            with ``return_tau=True`` (see the constructor for the exact
+            scope of that mode).
+        """
+        with torch.autocast(device_type='cuda', enabled=False):
+
+            bs = vol.shape[0]
+            N = view_mat.shape[0]
+
+            if N < bs:
+                raise ValueError(f"view_mat has {N} entries but batch size is {bs}")
+            if N > bs and N % bs != 0:
+                raise ValueError(f"N ({N}) must be a multiple of batch size ({bs})")
+
+            # Expand density to match number of views
+            views_per_vol = N // bs
+            density = vol.permute(0, 1, 4, 3, 2)  # (B, C, W, H, D)
+            if views_per_vol > 1:
+                density = density.repeat_interleave(views_per_vol, dim=0)  # (N, C, W, H, D)
+
+            # N==1 broadcast: expand view_mat to bs
+            if N == 1:
+                view_mat = view_mat.expand(bs, -1, -1)
+
+            near, far = self.compute_clipping_distances(view_mat, vol.shape[2:], torch.inverse(ras2ijk))
+
+            use_tiling = self.h >= 2 * tile_h or self.w >= 2 * tile_w
+            _tile_h = tile_h if use_tiling else None
+            _tile_w = tile_w if use_tiling else None
+
+            vol_shape = torch.as_tensor(vol.shape[2:], device=vol.device, dtype=torch.float32)
+            if triton:
+                render_fn = lambda d, v, n, f: self.triton_raycaster(d, v, n, f, ras2ijk, vol_shape, self.dirs_cam, self.return_tau)
+            else:
+                render_fn = torch.vmap(
+                    lambda d, v, n, f: self._render_single(d, v, n, f, ras2ijk, vol_shape, _tile_h, _tile_w),
+                    in_dims=(0, 0, 0, 0),
+                    randomness='different',  # required if apply_poisson uses torch.randn_like
+                )
+
+            return render_fn(density, view_mat, near, far)  # (N, C, H, W)
+
+    def _render_single(
+            self,
+            density: torch.Tensor,  # (C, W, H, D) — single volume, vmapped over batch
+            view_single: torch.Tensor,  # (4, 4)
+            near: torch.Tensor,  # scalar
+            far: torch.Tensor,  # scalar
+            ras2ijk: torch.Tensor,  # (4, 4) shared constant
+            vol_shape: torch.Tensor,  # (3,) shared constant
+            tile_h: int,
+            tile_w: int,
+    ) -> torch.Tensor:
+        """Render a single (volume, view) pair. Vmapped over batch dim.
+        Returns (C, H, W).
+        """
+        # density = density.contiguous()
+
+        step_size = 0.1 * (far - near) / self.ray_samples
+
+        # --- Ray generation (no loop, no B dim) ---
+        cam2world = view_single[:3, :3]
+        cam_pos = view_single[:3, 3]
+
+        device = view_single.device if isinstance(view_single, torch.Tensor) else "cpu"
+        ras2ijk = ras2ijk.to(device, dtype=torch.float32)
+
+        dirs_world = torch.einsum('ij,hwj->hwi', cam2world, self.dirs_cam)  # (H, W, 3)
+
+        R = ras2ijk[:3, :3]
+        t = ras2ijk[:3, 3]
+
+        scale = 2.0 / (vol_shape - 1)  # (3,)
+
+        dirs_ijk = dirs_world @ R.T  # (H, W, 3) @ (3, 3) — small, not (D,H,W,3)
+        origin_ijk = cam_pos @ R.T + t  # (3,) — scalar op
+
+        depths = near + (far - near) * torch.linspace(0, 1, self.ray_samples, device=density.device)  # (D,)
+
+        ijk = scale * (origin_ijk + dirs_ijk.unsqueeze(0) * depths[:, None, None, None]) - 1
+
+        # (D, H, W, 3) — no loop, fits in memory per-item
+        # samples = cam_pos + dirs_world.unsqueeze(0) * depths[:, None, None, None]
+        # ijk = ((2 * (samples @ R.T + t)) / (vol_shape - 1)) - 1  # (D, H, W, 3)
+
+        # grid_sample expects (C, W, H, D) input and (1, D, H, W, 3) grid
+        density_b = density.unsqueeze(0)  # (1, C, W, H, D)
+
+        def render_tile(coords_tile):
+            # coords_tile: (1, D, h, w, 3)
+            dens_tile = F.grid_sample(density_b, coords_tile, align_corners=False)  # (1, C, D, h, w)
+
+            if self.use_beer_lambert:
+                if self.scatter:
+                    I_out_no_scatter = 1.0 - self.apply_poisson(
+                        torch.exp(-torch.sum(dens_tile[:, :-self.scatter_channels] * step_size, dim=2))
+                    )
+                    I_out, _, _, _ = self.scatter(dens_tile[:, -self.scatter_channels:], step_size)
+                    return torch.cat([I_out_no_scatter, 1.0 - I_out], dim=1).squeeze(0)  # (C, h, w)
+                else:
+                    tau = torch.sum(dens_tile * step_size, dim=2)
+                    if self.return_tau:
+                        return self.apply_poisson(tau).squeeze(0)
+                    else:
+                        return (1.0 - self.apply_poisson(torch.exp(-tau))).squeeze(0)
+            else:
+                d = self.density_factor * dens_tile / self.ray_samples
+                transmission = torch.cumprod(1.0 - d, dim=2)
+                weight = d * transmission
+                w_sum = weight.sum(dim=2)
+                alpha = 1.0 - torch.prod(1.0 - d, dim=2)
+                return (weight.sum(dim=2) / (w_sum + 1e-6) * alpha).squeeze(0)  # (C, h, w)
+
+        if tile_h is None or (self.h < 2 * tile_h and self.w < 2 * tile_w):
+            # No tiling — single call
+            grid = ijk.permute(0, 1, 2, 3).unsqueeze(0)  # (1, D, H, W, 3)
+            if self.use_checkpointing and self.training:
+                out = cp.checkpoint(render_tile, grid, use_reentrant=False)
+            else:
+                out = render_tile(grid)
+        else:
+            # Tile over H and W
+            row_outputs = []
+            for h_start in range(0, self.h, tile_h):
+                h_end = min(h_start + tile_h, self.h)
+                col_outputs = []
+                for w_start in range(0, self.w, tile_w):
+                    w_end = min(w_start + tile_w, self.w)
+                    grid = ijk[:, h_start:h_end, w_start:w_end, :].unsqueeze(0)  # (1, D, h, w, 3)
+                    if self.use_checkpointing and self.training:
+                        tile_out = cp.checkpoint(render_tile, grid, use_reentrant=False)
+                    else:
+                        tile_out = render_tile(grid)
+                    col_outputs.append(tile_out)
+                row_outputs.append(torch.cat(col_outputs, dim=-1))
+            out = torch.cat(row_outputs, dim=-2)  # (C, H, W)
+
+        return out
+
+
+if __name__ == '__main__':
+    from monai.transforms import LoadImage, EnsureType, EnsureChannelFirst, Compose, Spacing, \
+        ScaleIntensityRange
+    from matplotlib import pyplot as plt
+    from torch.profiler import profile, record_function, ProfilerActivity
+    from torch.autograd import gradcheck
+
+    import torch._inductor.config as cfg
+
+    cfg.cpp.vec_isa_ok = False
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    load_tf = Compose([
+        LoadImage(),
+        EnsureChannelFirst(),
+        Spacing([2.5, 2.5, 3.0]),
+        # CenterSpatialCrop([152,152,140]),
+        ScaleIntensityRange(-3024, 3024, 0, 1, clip=True),
+        EnsureType(),
+        # RandAffine(1, translate_range=((0, 0), (0, 0), (-15, 15)), padding_mode='zeros'),
+    ])
+    vol = load_tf('CTChest.nii.gz').unsqueeze(0)
+    # vol.requires_grad_(True)
+
+    tf = [torch.tensor([
+        [-3500, 0.0],
+        [-200, 0.0],
+        [200, 0.05],
+        [1535, 0.5],
+        [3071, 0.65],
+    ]).cuda()]
+    tf[0][:, 0] = (tf[0][:, 0] + 3500) / 7000
+
+    xp = tf[0][:, 0]
+    yp = tf[0][:, -1]
+    a = piecewise_linear_channelwise(vol.cuda(), xp.unsqueeze(0), yp.unsqueeze(0))
+
+    vol = vol.cuda()
+    hu = vol * (3024 - (-3524)) + (-3524)
+    mu = torch.clamp(0.05 * (1.0 + hu / 800.0), min=0.0)
+
+    ijk2ras = vol.meta['affine']
+    ras2ijk = torch.inverse(ijk2ras)
+
+    print(ijk2ras, ras2ijk)
+
+    center = torch.ones(4).double()
+    center[:3] = torch.as_tensor(vol.shape[2:]) // 2
+    center = ijk2ras @ center
+    print(center[:3])
+
+    ren = VolumeRaycaster(scatter=None, resolution=(1024, 1024), i0=None, ray_samples=384, return_tau=True).cuda().eval()
+    # ren = torch.compile(ren)
+    # vol = torch.rand(8, 1, 128, 128, 128).cuda()
+    # vol.requires_grad_(True)
+
+    view_mat = get_vtk_view_mat((0., 1000, -130.),
+                                center[:3],
+                                (0.0, 0.0, 1.), device='cuda').unsqueeze(0)
+
+    # view_mat = get_vtk_view_mat((825.512239409456, -13.179125178309306, -150.8782530984467),
+    #                             (0.7339149949892914, -69.45105638432082, -184.52283569821498),
+    #                             (-0.0018398770598324777, -0.0012575743709173355, 0.9999975166764699))
+    # print(view_mat.inverse())
+
+    view_mat = view_mat.repeat(1, 1, 1)
+
+    start = timer()
+    out = ren(a.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk)
+    torch.cuda.synchronize()
+    end = timer()
+    print(out.shape, end - start)
+
+    plt.figure()
+    plt.imshow(out[0, 0].detach().cpu().numpy(), cmap='gray')
+    plt.show()
+
+    start = timer()
+    out = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk)
+    torch.cuda.synchronize()
+    end = timer()
+    print(out.shape, end - start)
+
+    plt.figure()
+    plt.imshow(out[0, 0].detach().cpu().numpy(), cmap='gray')
+    plt.show()
+
+    start = timer()
+    out = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk)
+    torch.cuda.synchronize()
+    end = timer()
+    print(out.shape, end - start)
+
+    for _ in range(10):
+        with torch.no_grad():
+            ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk)
+    torch.cuda.synchronize()
+
+    with torch.no_grad():
+        out_triton = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+        out_old = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False)
+        print(f'Old and Triton match: {torch.allclose(out_old, out_triton, atol=1e-4)}')
+        print(f'Old and Triton Max: {(out_old - out_triton).abs().max()}, Mean: {(out_old - out_triton).abs().mean()}')
+        fig, ax = plt.subplots(1, 3)
+        ax[0].imshow(out_old[0, 0].detach().cpu().numpy(), cmap='gray')
+        ax[1].imshow(out_triton[0, 0].detach().cpu().numpy(), cmap='gray')
+        im = ax[2].imshow((out_old - out_triton)[0, 0].detach().cpu().numpy(), cmap='coolwarm')
+        cbar = fig.colorbar(im, ax=ax[2])
+        plt.show()
+
+    mu_prof = mu.expand(1, 8, -1, -1, -1)
+
+    ren.eval()
+    with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,  # True adds overhead, only enable for deep dives
+    ) as prof:
+        for _ in range(10):  # enough iterations to smooth noise
+            with record_function("vmap_forward"):
+                with torch.no_grad():
+                    out = ren.forward(mu_prof, view_mat=view_mat, ras2ijk=ras2ijk)
+            torch.cuda.synchronize()  # must sync or CUDA ops appear instant
+    print(prof.key_averages().table(
+        sort_by="cuda_time_total",
+        row_limit=20,
+    ))
+
+    # start = timer()
+    # out.sum().backward()
+    # torch.cuda.synchronize()
+    # end = timer()
+    # print(end-start)
+
+    print(torch.cuda.memory_summary())
+
+    # plt.figure()
+    # plt.imshow(out[0,0].detach().cpu().numpy(), cmap='gray')
+    # plt.show()
+    #
+    # plt.figure()
+    # plt.imshow(out2[0,0].detach().cpu().numpy(), cmap='gray')
+    # plt.show()
+
+    # plt.figure()
+    # plt.imshow(out[0,-1].detach().cpu().numpy() - out[0,0].detach().cpu().numpy(), cmap='gray')
+    # plt.show()
+    # print(torch.abs(out[0,-1] - out[0,0]).max())
+
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.reset_accumulated_memory_stats()
+
+    # ren = VolumeRaycaster(scatter=None, ray_samples=512, resolution=(1024,1024), i0=1e2).cuda().eval()
+
+    print("############ Triton Version ############")
+
+    start = timer()
+    out = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+    torch.cuda.synchronize()
+    end = timer()
+    torch.cuda.synchronize()
+    end = timer()
+    print(out.shape, end - start)
+
+    with torch.no_grad():
+        _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+        _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+        start = timer()
+        out = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+        torch.cuda.synchronize()
+        end = timer()
+        print(out.shape, end - start)
+
+    plt.figure()
+    plt.imshow(out[0, 0].detach().cpu().numpy(), cmap='gray')
+    plt.show()
+
+    for _ in range(10):
+        with torch.no_grad():
+            ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+    torch.cuda.synchronize()
+
+    ren.eval()
+    with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,  # True adds overhead, only enable for deep dives
+    ) as prof:
+        for _ in range(10):  # enough iterations to smooth noise
+            with record_function("triton_forward"):
+                with torch.no_grad():
+                    out = ren.forward(mu_prof, view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+            torch.cuda.synchronize()  # must sync or CUDA ops appear instant
+    print(prof.key_averages().table(
+        sort_by="cuda_time_total",
+        row_limit=20,
+    ))
+
+    # start = timer()
+    # out.sum().backward()
+    # torch.cuda.synchronize()
+    # end = timer()
+    # print(end-start)
+
+    print(torch.cuda.memory_summary())
+
+    ren.cuda().compile()
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda"):
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False)
+
+            start = timer()
+            out_triton = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True).float()
+            torch.cuda.synchronize()
+            end = timer()
+            print("Triton fp16", end - start)
+
+            start = timer()
+            out_old = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False).float()
+            torch.cuda.synchronize()
+            end = timer()
+            print("Orig fp16", end - start)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True)
+
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False)
+            _ = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False)
+
+            start = timer()
+            out_triton_bf16 = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True).float()
+            torch.cuda.synchronize()
+            end = timer()
+            print("Triton bf16", end - start)
+
+            start = timer()
+            out_old_bf16 = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False).float()
+            torch.cuda.synchronize()
+            end = timer()
+            print("Orig bf16", end - start)
+
+        print(f'Old and Triton match fp16: {torch.allclose(out_old, out_triton, atol=1e-4)}')
+        print(
+            f'Old and Triton Max fp16: {(out_old - out_triton).abs().max()}, Mean: {(out_old - out_triton).abs().mean()}')
+
+        out_triton_fp32 = ren(mu.expand(1, 1, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True).float()
+        out_old_fp32 = ren(mu.expand(1, 8, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=False).float()
+
+        print(f'Old match fp32/fp16: {torch.allclose(out_old, out_old_fp32, atol=1e-4)}')
+        print(f'Triton match fp32/fp16: {torch.allclose(out_triton_fp32, out_triton, atol=1e-4)}')
+
+        print(
+            f'Triton Max fp16/32: {(out_triton_fp32 - out_triton).abs().max()}, Mean: {(out_triton_fp32 - out_triton).abs().mean()}')
+
+        print(f'Triton match fp32/bf16: {torch.allclose(out_triton_fp32, out_triton_bf16, atol=1e-4)}')
+        print(
+            f'Triton Max bf16/32: {(out_triton_fp32 - out_triton_bf16).abs().max()}, Mean: {(out_triton_fp32 - out_triton_bf16).abs().mean()}')
+
+
+
+
+    ren = VolumeRaycaster(scatter=None, resolution=(512, 512), i0=None).cuda()
+
+    torch.manual_seed(0)
+    mu = torch.randn(2, 8, 24, 16, device='cuda', dtype=torch.float64, requires_grad=True)
+
+    # isolate the triton Function; gradcheck the full expanded graph in a second pass if you want
+    ok = gradcheck(
+        lambda m: ren(
+            m.expand(1, 2, -1, -1, -1),
+            view_mat=view_mat, ras2ijk=ras2ijk, triton=True,
+        ),
+        (mu,),
+        eps=1e-6,
+        atol=1e-4,  # looser than the fp64 default 1e-5 to absorb kernel fp noise
+        rtol=1e-3,
+        nondet_tol=1e-6,  # tl.atomic_add is order-nondeterministic
+        fast_mode=True,
+    )
+    print("gradcheck passed:", ok)
+
+    ren.compile()
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        _ = ren(mu.expand(1, 2, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True,)
+        _ = ren(mu.expand(1, 2, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True,)
+        out = ren(mu.expand(1, 2, -1, -1, -1), view_mat=view_mat, ras2ijk=ras2ijk, triton=True,)
+
+        out.mean().backward()
+```
+
+### flashdrr/rendering/triton_raycast.py
+```
+import torch
+
+try:
+    import triton
+    import triton.language as tl
+
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+
+if HAS_TRITON:
+
+    # ==========================================================================
+    # FORWARD KERNEL
+    # ==========================================================================
+    @triton.autotune(
+        configs=[
+            triton.Config({'BLOCK_H': 4, 'BLOCK_W': 4}),
+            triton.Config({'BLOCK_H': 4, 'BLOCK_W': 8}),
+            triton.Config({'BLOCK_H': 8, 'BLOCK_W': 4}),
+            triton.Config({'BLOCK_H': 8, 'BLOCK_W': 8}),
+            triton.Config({'BLOCK_H': 8, 'BLOCK_W': 16}),
+        ],
+        key=['H', 'W']
+    )
+    @triton.jit
+    def _fwd_kernel(
+            density_ptr,
+            out_ptr,
+            dirs_ptr,
+            origin_ptr,
+            depths_ptr,
+            scale_ptr,
+            t_ptr,
+
+            B,
+            C,
+            W,
+            H,
+            D,
+
+            stride_db,
+            stride_dc,
+            stride_dd,
+            stride_dh,
+            stride_dw,
+
+            stride_sb,
+            stride_sh,
+            stride_sw,
+
+            stride_vb,
+            stride_v_row,
+
+            ACC_DTYPE: tl.constexpr,   # tl.float32 or tl.float64 — accumulation/compute precision
+            BLOCK_H: tl.constexpr,
+            BLOCK_W: tl.constexpr,
+    ):
+
+        pid_h = tl.program_id(0)
+        pid_w = tl.program_id(1)
+        pid_b = tl.program_id(2)
+
+        h_offs = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+        w_offs = pid_w * BLOCK_W + tl.arange(0, BLOCK_W)
+
+        h_mask = h_offs < H
+        w_mask = w_offs < W
+        hw_mask = h_mask[:, None] & w_mask[None, :]
+
+        # ----------------------------------------------------------------------
+        # Load ray directions
+        #
+        # dirs_ptr/origin_ptr/depths_ptr/scale_ptr are produced on the Python
+        # side already cast to ACC_DTYPE (they're tiny — cam params / a
+        # handful of scalars — so upcasting them costs ~nothing but keeps the
+        # position math at full compute precision). density_ptr is left in
+        # its native storage dtype and only cast to ACC_DTYPE per-element
+        # after loading, since that's the tensor that's actually large.
+        # ----------------------------------------------------------------------
+        b_dirs_offset = pid_b * stride_sb
+
+        dir_base = (
+                b_dirs_offset
+                + h_offs[:, None] * stride_sh
+                + w_offs[None, :] * stride_sw
+        )
+
+        dir_x = tl.load(dirs_ptr + dir_base + 0, mask=hw_mask, other=0.0)
+        dir_y = tl.load(dirs_ptr + dir_base + 1, mask=hw_mask, other=0.0)
+        dir_z = tl.load(dirs_ptr + dir_base + 2, mask=hw_mask, other=0.0)
+
+        # ----------------------------------------------------------------------
+        # Camera origin / scaling
+        # ----------------------------------------------------------------------
+        b_view_offset = pid_b * stride_vb
+
+        orig_x = tl.load(origin_ptr + b_view_offset + 0 * stride_v_row)
+        orig_y = tl.load(origin_ptr + b_view_offset + 1 * stride_v_row)
+        orig_z = tl.load(origin_ptr + b_view_offset + 2 * stride_v_row)
+
+        sc_x = tl.load(scale_ptr + b_view_offset + 0 * stride_v_row)
+        sc_y = tl.load(scale_ptr + b_view_offset + 1 * stride_v_row)
+        sc_z = tl.load(scale_ptr + b_view_offset + 2 * stride_v_row)
+
+        W_max = tl.load(t_ptr + 0).to(tl.int32)
+        H_max = tl.load(t_ptr + 1).to(tl.int32)
+        D_max = tl.load(t_ptr + 2).to(tl.int32)
+
+        Wf = W_max.to(ACC_DTYPE)
+        Hf = H_max.to(ACC_DTYPE)
+        Df = D_max.to(ACC_DTYPE)
+
+        base_b_density = pid_b * stride_db
+        b_depths_ptr = depths_ptr + pid_b * D
+
+        # ----------------------------------------------------------------------
+        # Loop over channels
+        # ----------------------------------------------------------------------
+        for c in range(C):
+
+            accum_density = tl.zeros((BLOCK_H, BLOCK_W), dtype=ACC_DTYPE)
+
+            base_c = base_b_density + c * stride_dc
+
+            # ------------------------------------------------------------------
+            # Single-step ray marching
+            # ------------------------------------------------------------------
+            for d in range(D):
+                depth = tl.load(b_depths_ptr + d)
+
+                # --------------------------------------------------------------
+                # Compute positions
+                # --------------------------------------------------------------
+                ix = (orig_x + dir_x * depth) * (Wf / (Wf - 1)) - 0.5
+                iy = (orig_y + dir_y * depth) * (Hf / (Hf - 1)) - 0.5
+                iz = (orig_z + dir_z * depth) * (Df / (Df - 1)) - 0.5
+
+                ix0 = tl.floor(ix).to(tl.int32)
+                iy0 = tl.floor(iy).to(tl.int32)
+                iz0 = tl.floor(iz).to(tl.int32)
+
+                ix1 = ix0 + 1
+                iy1 = iy0 + 1
+                iz1 = iz0 + 1
+
+                # --------------------------------------------------------------
+                # Per-axis, per-corner validity (matches grid_sample zeros
+                # padding exactly: each of the 8 corners is independently
+                # in- or out-of-bounds, not gated by the floor corner alone)
+                # --------------------------------------------------------------
+                x0_valid = (ix0 >= 0) & (ix0 < W_max)
+                x1_valid = (ix1 >= 0) & (ix1 < W_max)
+                y0_valid = (iy0 >= 0) & (iy0 < H_max)
+                y1_valid = (iy1 >= 0) & (iy1 < H_max)
+                z0_valid = (iz0 >= 0) & (iz0 < D_max)
+                z1_valid = (iz1 >= 0) & (iz1 < D_max)
+
+                m000 = hw_mask & x0_valid & y0_valid & z0_valid
+                m001 = hw_mask & x0_valid & y0_valid & z1_valid
+                m010 = hw_mask & x0_valid & y1_valid & z0_valid
+                m011 = hw_mask & x0_valid & y1_valid & z1_valid
+                m100 = hw_mask & x1_valid & y0_valid & z0_valid
+                m101 = hw_mask & x1_valid & y0_valid & z1_valid
+                m110 = hw_mask & x1_valid & y1_valid & z0_valid
+                m111 = hw_mask & x1_valid & y1_valid & z1_valid
+
+                # --------------------------------------------------------------
+                # Weights
+                # --------------------------------------------------------------
+                wx1 = ix - ix0.to(ACC_DTYPE)
+                wy1 = iy - iy0.to(ACC_DTYPE)
+                wz1 = iz - iz0.to(ACC_DTYPE)
+
+                wx0 = 1.0 - wx1
+                wy0 = 1.0 - wy1
+                wz0 = 1.0 - wz1
+
+                # --------------------------------------------------------------
+                # Base pointers
+                #
+                # NOTE: each corner is now clamped defensively before use.
+                # tl.where is needed because Triton still computes the pointer
+                # address for masked-off lanes before the load's mask gates
+                # the memory access — an unclamped OOB index (e.g. ix0 == -1)
+                # can produce a pointer that wraps outside the tensor's
+                # allocation entirely, which is UB even when mask=False.
+                # Clamping keeps the address always in-bounds; the mask is
+                # what actually zeros the *value*.
+                # --------------------------------------------------------------
+                ix0c = tl.minimum(tl.maximum(ix0, 0), W_max - 1)
+                ix1c = tl.minimum(tl.maximum(ix1, 0), W_max - 1)
+                iy0c = tl.minimum(tl.maximum(iy0, 0), H_max - 1)
+                iy1c = tl.minimum(tl.maximum(iy1, 0), H_max - 1)
+                iz0c = tl.minimum(tl.maximum(iz0, 0), D_max - 1)
+                iz1c = tl.minimum(tl.maximum(iz1, 0), D_max - 1)
+
+                ptr_y0x0z0 = density_ptr + base_c + iy0c * stride_dh + ix0c * stride_dw + iz0c * stride_dd
+                ptr_y0x0z1 = density_ptr + base_c + iy0c * stride_dh + ix0c * stride_dw + iz1c * stride_dd
+                ptr_y1x0z0 = density_ptr + base_c + iy1c * stride_dh + ix0c * stride_dw + iz0c * stride_dd
+                ptr_y1x0z1 = density_ptr + base_c + iy1c * stride_dh + ix0c * stride_dw + iz1c * stride_dd
+                ptr_y0x1z0 = density_ptr + base_c + iy0c * stride_dh + ix1c * stride_dw + iz0c * stride_dd
+                ptr_y0x1z1 = density_ptr + base_c + iy0c * stride_dh + ix1c * stride_dw + iz1c * stride_dd
+                ptr_y1x1z0 = density_ptr + base_c + iy1c * stride_dh + ix1c * stride_dw + iz0c * stride_dd
+                ptr_y1x1z1 = density_ptr + base_c + iy1c * stride_dh + ix1c * stride_dw + iz1c * stride_dd
+
+                # --------------------------------------------------------------
+                # Loads — mask determines the zero-padding, clamped index
+                # just keeps the address itself safe
+                # --------------------------------------------------------------
+                # Loaded in density's native (compact) storage dtype, then
+                # upcast to ACC_DTYPE for the interpolation math below —
+                # this is the only place native-dtype memory traffic happens.
+                v000 = tl.load(ptr_y0x0z0, mask=m000, other=0.0).to(ACC_DTYPE)
+                v001 = tl.load(ptr_y0x0z1, mask=m001, other=0.0).to(ACC_DTYPE)
+                v010 = tl.load(ptr_y1x0z0, mask=m010, other=0.0).to(ACC_DTYPE)
+                v011 = tl.load(ptr_y1x0z1, mask=m011, other=0.0).to(ACC_DTYPE)
+
+                v100 = tl.load(ptr_y0x1z0, mask=m100, other=0.0).to(ACC_DTYPE)
+                v101 = tl.load(ptr_y0x1z1, mask=m101, other=0.0).to(ACC_DTYPE)
+                v110 = tl.load(ptr_y1x1z0, mask=m110, other=0.0).to(ACC_DTYPE)
+                v111 = tl.load(ptr_y1x1z1, mask=m111, other=0.0).to(ACC_DTYPE)
+
+                interp = (
+                        v000 * wx0 * wy0 * wz0 +
+                        v001 * wx0 * wy0 * wz1 +
+                        v010 * wx0 * wy1 * wz0 +
+                        v011 * wx0 * wy1 * wz1 +
+                        v100 * wx1 * wy0 * wz0 +
+                        v101 * wx1 * wy0 * wz1 +
+                        v110 * wx1 * wy1 * wz0 +
+                        v111 * wx1 * wy1 * wz1
+                )
+
+                accum_density += interp
+
+            # ------------------------------------------------------------------
+            # Store output
+            # ------------------------------------------------------------------
+            out_idx = (
+                    pid_b * (C * H * W)
+                    + c * (H * W)
+                    + h_offs[:, None] * W
+                    + w_offs[None, :]
+            )
+
+            tl.store(out_ptr + out_idx, accum_density, mask=hw_mask)
+
+
+    # ==========================================================================
+    # BACKWARD KERNEL
+    # ==========================================================================
+    #
+    # NOTE:
+    # Backward remains expensive due to atomics.
+    #
+    # Biggest future optimization:
+    #   voxel-space accumulation tiles
+    #
+    # ==========================================================================
+    @triton.autotune(
+        configs=[
+            triton.Config({'BLOCK_H': 4, 'BLOCK_W': 4}),
+            triton.Config({'BLOCK_H': 4, 'BLOCK_W': 8}),
+            triton.Config({'BLOCK_H': 8, 'BLOCK_W': 4}),
+            triton.Config({'BLOCK_H': 8, 'BLOCK_W': 8}),
+            triton.Config({'BLOCK_H': 8, 'BLOCK_W': 16}),
+            # smaller blocks worth including explicitly here since backward's
+            # bottleneck is atomic contention, not memory bandwidth — the
+            # optimum may sit at a different point than forward's
+            triton.Config({'BLOCK_H': 2, 'BLOCK_W': 2}),
+            triton.Config({'BLOCK_H': 2, 'BLOCK_W': 4}),
+        ],
+        key=['H', 'W']
+    )
+    @triton.jit
+    def _bwd_kernel(
+            grad_out_ptr,
+            grad_density_ptr,
+            dirs_ptr,
+            origin_ptr,
+            depths_ptr,
+            scale_ptr,            # unused; kept for signature parity
+            t_ptr,
+
+            B, C, H, W, D,        # D = R_dim = depths.shape[1]
+
+            stride_db,
+            stride_dc,
+            stride_dd,            # same order as forward
+            stride_dh,
+            stride_dw,
+
+            stride_sb,
+            stride_sh,
+            stride_sw,
+
+            stride_vb,
+            stride_v_row,
+
+            ACC_DTYPE: tl.constexpr,   # tl.float32 or tl.float64 — accumulation/compute precision
+            BLOCK_H: tl.constexpr,
+            BLOCK_W: tl.constexpr,
+    ):
+
+        pid_h = tl.program_id(0)
+        pid_w = tl.program_id(1)
+        pid_b = tl.program_id(2)
+
+        h_offs = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+        w_offs = pid_w * BLOCK_W + tl.arange(0, BLOCK_W)
+
+        h_mask = h_offs < H
+        w_mask = w_offs < W
+        hw_mask = h_mask[:, None] & w_mask[None, :]
+
+        b_dirs_offset = pid_b * stride_sb
+        dir_base = (
+                b_dirs_offset
+                + h_offs[:, None] * stride_sh
+                + w_offs[None, :] * stride_sw
+        )
+
+        dir_x = tl.load(dirs_ptr + dir_base + 0, mask=hw_mask, other=0.0)
+        dir_y = tl.load(dirs_ptr + dir_base + 1, mask=hw_mask, other=0.0)
+        dir_z = tl.load(dirs_ptr + dir_base + 2, mask=hw_mask, other=0.0)
+
+        b_view_offset = pid_b * stride_vb
+
+        orig_x = tl.load(origin_ptr + b_view_offset + 0 * stride_v_row)
+        orig_y = tl.load(origin_ptr + b_view_offset + 1 * stride_v_row)
+        orig_z = tl.load(origin_ptr + b_view_offset + 2 * stride_v_row)
+
+        W_max = tl.load(t_ptr + 0).to(tl.int32)
+        H_max = tl.load(t_ptr + 1).to(tl.int32)
+        D_max = tl.load(t_ptr + 2).to(tl.int32)
+
+        Wf = W_max.to(ACC_DTYPE)
+        Hf = H_max.to(ACC_DTYPE)
+        Df = D_max.to(ACC_DTYPE)
+
+        base_b_density = pid_b * stride_db
+        b_depths_ptr = depths_ptr + pid_b * D   # D == R_dim now
+
+        for c in range(C):
+
+            grad_out_idx = (
+                    pid_b * (C * H * W)
+                    + c * (H * W)
+                    + h_offs[:, None] * W
+                    + w_offs[None, :]
+            )
+
+            g = tl.load(grad_out_ptr + grad_out_idx, mask=hw_mask, other=0.0).to(ACC_DTYPE)
+
+            base_c = base_b_density + c * stride_dc
+
+            for d in range(D):
+                depth = tl.load(b_depths_ptr + d)
+
+                ix = (orig_x + dir_x * depth) * (Wf / (Wf - 1)) - 0.5
+                iy = (orig_y + dir_y * depth) * (Hf / (Hf - 1)) - 0.5
+                iz = (orig_z + dir_z * depth) * (Df / (Df - 1)) - 0.5
+
+                ix0 = tl.floor(ix).to(tl.int32)
+                iy0 = tl.floor(iy).to(tl.int32)
+                iz0 = tl.floor(iz).to(tl.int32)
+
+                ix1 = ix0 + 1
+                iy1 = iy0 + 1
+                iz1 = iz0 + 1
+
+                x0_valid = (ix0 >= 0) & (ix0 < W_max)
+                x1_valid = (ix1 >= 0) & (ix1 < W_max)
+                y0_valid = (iy0 >= 0) & (iy0 < H_max)
+                y1_valid = (iy1 >= 0) & (iy1 < H_max)
+                z0_valid = (iz0 >= 0) & (iz0 < D_max)
+                z1_valid = (iz1 >= 0) & (iz1 < D_max)
+
+                m000 = hw_mask & x0_valid & y0_valid & z0_valid
+                m001 = hw_mask & x0_valid & y0_valid & z1_valid
+                m010 = hw_mask & x0_valid & y1_valid & z0_valid
+                m011 = hw_mask & x0_valid & y1_valid & z1_valid
+                m100 = hw_mask & x1_valid & y0_valid & z0_valid
+                m101 = hw_mask & x1_valid & y0_valid & z1_valid
+                m110 = hw_mask & x1_valid & y1_valid & z0_valid
+                m111 = hw_mask & x1_valid & y1_valid & z1_valid
+
+                wx1 = ix - ix0.to(ACC_DTYPE)
+                wy1 = iy - iy0.to(ACC_DTYPE)
+                wz1 = iz - iz0.to(ACC_DTYPE)
+
+                wx0 = 1.0 - wx1
+                wy0 = 1.0 - wy1
+                wz0 = 1.0 - wz1
+
+                ix0c = tl.minimum(tl.maximum(ix0, 0), W_max - 1)
+                ix1c = tl.minimum(tl.maximum(ix1, 0), W_max - 1)
+                iy0c = tl.minimum(tl.maximum(iy0, 0), H_max - 1)
+                iy1c = tl.minimum(tl.maximum(iy1, 0), H_max - 1)
+                iz0c = tl.minimum(tl.maximum(iz0, 0), D_max - 1)
+                iz1c = tl.minimum(tl.maximum(iz1, 0), D_max - 1)
+
+                ptr_y0x0z0 = grad_density_ptr + base_c + iy0c * stride_dh + ix0c * stride_dw + iz0c * stride_dd
+                ptr_y0x0z1 = grad_density_ptr + base_c + iy0c * stride_dh + ix0c * stride_dw + iz1c * stride_dd
+                ptr_y1x0z0 = grad_density_ptr + base_c + iy1c * stride_dh + ix0c * stride_dw + iz0c * stride_dd
+                ptr_y1x0z1 = grad_density_ptr + base_c + iy1c * stride_dh + ix0c * stride_dw + iz1c * stride_dd
+                ptr_y0x1z0 = grad_density_ptr + base_c + iy0c * stride_dh + ix1c * stride_dw + iz0c * stride_dd
+                ptr_y0x1z1 = grad_density_ptr + base_c + iy0c * stride_dh + ix1c * stride_dw + iz1c * stride_dd
+                ptr_y1x1z0 = grad_density_ptr + base_c + iy1c * stride_dh + ix1c * stride_dw + iz0c * stride_dd
+                ptr_y1x1z1 = grad_density_ptr + base_c + iy1c * stride_dh + ix1c * stride_dw + iz1c * stride_dd
+
+                tl.atomic_add(ptr_y0x0z0, g * wx0 * wy0 * wz0, mask=m000)
+                tl.atomic_add(ptr_y0x0z1, g * wx0 * wy0 * wz1, mask=m001)
+                tl.atomic_add(ptr_y1x0z0, g * wx0 * wy1 * wz0, mask=m010)
+                tl.atomic_add(ptr_y1x0z1, g * wx0 * wy1 * wz1, mask=m011)
+
+                tl.atomic_add(ptr_y0x1z0, g * wx1 * wy0 * wz0, mask=m100)
+                tl.atomic_add(ptr_y0x1z1, g * wx1 * wy0 * wz1, mask=m101)
+                tl.atomic_add(ptr_y1x1z0, g * wx1 * wy1 * wz0, mask=m110)
+                tl.atomic_add(ptr_y1x1z1, g * wx1 * wy1 * wz1, mask=m111)
+
+def _acc_dtype_for(t: torch.Tensor) -> torch.dtype:
+    """Precision to accumulate/compute in.
+
+    fp64 input -> fp64 accumulation (needed for gradcheck-grade precision).
+    fp16/bf16/fp32 input -> fp32 accumulation. Summing across `ray_samples`
+    (often hundreds) of trilinear-interpolated terms in fp16/bf16 loses
+    real accuracy (10/7 mantissa bits), so we always upcast at least to
+    fp32 for the math while leaving the density tensor itself in its
+    native (smaller) storage dtype to keep memory traffic/footprint low.
+    """
+    return torch.float64 if t.dtype == torch.float64 else torch.float32
+
+
+def _tl_dtype(torch_dtype: torch.dtype):
+    return tl.float64 if torch_dtype == torch.float64 else tl.float32
+
+
+# ==============================================================================
+# PYTORCH AUTOGRAD WRAPPER
+# ==============================================================================
+class _FusedVolumeRenderFunction(torch.autograd.Function):
+
+    @staticmethod
+    def forward(
+            ctx,
+            density,
+            dirs_ijk,
+            origin_ijk,
+            depths,
+            scale,
+            vol_shape
+    ):
+        # Accumulation precision is driven by the density tensor's dtype;
+        # the small auxiliary tensors (ray dirs/origin/depths/scale/shape)
+        # are upcast to match so all position/weight math happens at full
+        # compute precision without materializing a second copy of the
+        # (large) density volume.
+        acc_dtype = _acc_dtype_for(density)
+        tl_acc_dtype = _tl_dtype(acc_dtype)
+
+        dirs_ijk = dirs_ijk.to(acc_dtype)
+        origin_ijk = origin_ijk.to(acc_dtype)
+        depths = depths.to(acc_dtype)
+        scale = scale.to(acc_dtype)
+        vol_shape = vol_shape.to(acc_dtype)
+
+        ctx.save_for_backward(
+            density,
+            dirs_ijk,
+            origin_ijk,
+            depths,
+            scale,
+            vol_shape
+        )
+        ctx.acc_dtype = acc_dtype
+
+        B, C, W, H, D_dim = density.shape
+        _, H_out, W_out, _ = dirs_ijk.shape
+        R_dim = depths.shape[1]
+
+        # Output carries the accumulation precision (fp32, or fp64 to match
+        # a fp64 density input) rather than the density's own storage dtype,
+        # so the trilinear-sum result isn't truncated before the caller has
+        # a chance to use it. The output tensor is comparatively tiny
+        # (B,C,H,W) vs. the density volume, so this costs little memory.
+        out = torch.empty(
+            (B, C, H_out, W_out),
+            device=density.device,
+            dtype=acc_dtype
+        )
+
+        grid = lambda meta: (
+            triton.cdiv(H_out, meta["BLOCK_H"]),
+            triton.cdiv(W_out, meta["BLOCK_W"]),
+            B
+        )
+
+        _fwd_kernel[grid](
+            density,
+            out,
+            dirs_ijk,
+            origin_ijk,
+            depths,
+            scale,
+            vol_shape,
+
+            B,
+            C,
+            H_out,
+            W_out,
+            R_dim,
+
+            *density.stride(),
+            *dirs_ijk.stride()[:3],
+            origin_ijk.stride(0),
+            origin_ijk.stride(1),
+
+            ACC_DTYPE=tl_acc_dtype,
+
+            # BLOCK_H=8,
+            # BLOCK_W=8,
+        )
+
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        density, dirs_ijk, origin_ijk, depths, scale, vol_shape = ctx.saved_tensors
+        acc_dtype = ctx.acc_dtype
+        tl_acc_dtype = _tl_dtype(acc_dtype)
+
+        B, C, W, H, D_dim = density.shape
+        _, H_out, W_out, _ = dirs_ijk.shape
+
+        # Accumulate gradients in acc_dtype via atomic_add (fp16/bf16 atomics
+        # are poorly supported and would silently truncate every add), then
+        # cast down to density's native dtype once at the very end — a
+        # single rounding step instead of one per ray sample.
+        grad_density_acc = torch.zeros(density.shape, device=density.device, dtype=acc_dtype)
+
+        grad_output = grad_output.contiguous()
+        if grad_output.dtype != acc_dtype:
+            grad_output = grad_output.to(acc_dtype)
+
+        grid = lambda meta: (
+            triton.cdiv(H_out, meta["BLOCK_H"]),
+            triton.cdiv(W_out, meta["BLOCK_W"]),
+            B
+        )
+
+        R_dim = depths.shape[1]
+        _bwd_kernel[grid](
+            grad_output,
+            grad_density_acc,
+            dirs_ijk, origin_ijk, depths, scale, vol_shape,
+            B, C, H_out, W_out, R_dim,  # was D_dim
+            *density.stride(),
+            *dirs_ijk.stride()[:3],
+            origin_ijk.stride(0),
+            origin_ijk.stride(1),
+            ACC_DTYPE=tl_acc_dtype,
+            # BLOCK_H=4, BLOCK_W=4,
+        )
+
+        grad_density = grad_density_acc.to(density.dtype)
+
+        return grad_density, None, None, None, None, None
+
+
+# ==============================================================================
+# USER MODULE
+# ==============================================================================
+class FusedVolumeRenderer(torch.nn.Module):
+
+    def __init__(
+            self,
+            ray_samples: int,
+            density_factor: float = 1.0,
+            apply_poisson_fn=None
+    ):
+        super().__init__()
+
+        self.ray_samples = ray_samples
+        self.density_factor = density_factor
+
+        self.apply_poisson = (
+            apply_poisson_fn
+            if apply_poisson_fn is not None
+            else lambda x: x
+        )
+
+    @torch.compiler.disable
+    def forward(
+            self,
+            density: torch.Tensor,
+            view_mat: torch.Tensor,
+            near: torch.Tensor,
+            far: torch.Tensor,
+            ras2ijk: torch.Tensor,
+            vol_shape: torch.Tensor,
+            dirs_cam: torch.Tensor,
+            return_tau: bool = False
+    ) -> torch.Tensor:
+        """Render a batch of volumes from a batch of views with the fused kernel.
+
+        Args:
+            density: Attenuation volume in ``(B, C, W, H, D)`` order.
+            view_mat: Camera-to-world view matrices, shape ``(B, 4, 4)``.
+            near: Near clipping distances, shape ``(B,)``.
+            far: Far clipping distances, shape ``(B,)``.
+            ras2ijk: 4x4 affine mapping RAS to IJK coordinates.
+            vol_shape: Spatial volume shape ``(D, H, W)``.
+            dirs_cam: Per-pixel camera-space ray directions, ``(H, W, 3)``.
+            return_tau: If True, return the integrated attenuation ``tau``
+                (optionally with Poisson noise applied in the count domain)
+                instead of the default ``1 - exp(-tau)`` attenuation image.
+
+        Returns:
+            torch.Tensor: ``(B, C, H, W)`` projection in the caller's dtype,
+            either the ``1 - exp(-tau)`` attenuation image or the
+            corresponding ``tau`` values.
+        """
+        if not HAS_TRITON:
+            raise ModuleNotFoundError("Requires triton.")
+
+        with torch.autocast(device_type='cuda', enabled=False):
+            B = density.shape[0]
+            device = density.device
+
+            orig_dtype = density.dtype
+            # fp64 density (e.g. gradcheck) -> fp64 compute throughout the ray
+            # setup math; everything else (fp16/bf16/fp32) computes in fp32.
+            # These are all small tensors (camera params, per-ray directions),
+            # so upcasting them is essentially free — the memory- and
+            # bandwidth-heavy tensor is `density`, which stays in its native
+            # dtype and is only upcast per-sample inside the kernel.
+            compute_dtype = torch.float64 if orig_dtype == torch.float64 else torch.float32
+
+            view_mat = view_mat.to(compute_dtype)
+            near = near.to(compute_dtype)
+            far = far.to(compute_dtype)
+            ras2ijk = ras2ijk.to(device, dtype=compute_dtype)
+            vol_shape = vol_shape.to(device, dtype=compute_dtype)
+            dirs_cam = dirs_cam.to(compute_dtype)
+
+            cam2world = view_mat[:, :3, :3]
+            cam_pos = view_mat[:, :3, 3]
+
+            R = ras2ijk[:3, :3]
+            t = ras2ijk[:3, 3]
+
+
+            dirs_world = torch.einsum(
+                'bij,hwj->bhwi',
+                cam2world,
+                dirs_cam
+            )
+
+            dirs_ijk = torch.einsum('bhwi,ji->bhwj', dirs_world, R)
+
+            origin_ijk = torch.einsum('bi,ji->bj', cam_pos, R) + t
+
+            scale = (
+                    2.0 / (vol_shape - 1)
+            ).view(1, 1, 1, 1, 3)
+
+            t_vals = torch.linspace(0, 1, self.ray_samples, device=device, dtype=compute_dtype)[None, :]
+            depths = near[:, None] + (far - near)[:, None] * t_vals
+
+            # What should be correct ijk coordinate math. Want to compute within kernel to avoid materializing large tensor
+            #ijk = scale * origin_ijk[:, None, None, None, :] + dirs_ijk.unsqueeze(1) * depths[:, :, None, None, None] - 1
+
+            fused_sum = _FusedVolumeRenderFunction.apply(
+                density,
+                dirs_ijk,
+                origin_ijk,
+                depths,
+                scale,
+                vol_shape
+            )  # returned in compute_dtype (see _acc_dtype_for)
+
+            step_size = (
+                    0.1
+                    * (far - near)
+                    / self.ray_samples
+            ).view(B, 1, 1, 1)
+
+            tau = fused_sum * step_size
+
+            if return_tau:
+                return self.apply_poisson(tau).to(orig_dtype)
+
+            scaled_extinction = torch.exp(-tau)
+
+            out = 1.0 - self.apply_poisson(scaled_extinction)
+
+            # Restore the caller's dtype at the boundary — internal math stayed
+            # at compute_dtype for accuracy, but callers shouldn't be surprised
+            # by a fp16 volume producing an fp32 render.
+            return out.to(orig_dtype)
+```
+
+### flashdrr/utils/__init__.py
+```
+from .volume_utils import make_nd, make_2d, make_3d, make_4d, make_5d
+from .volume_utils import normalize_hounsfield, normalize_voxel_scale
+```
+
+### flashdrr/utils/volume_utils.py
+```
+import torch
+import torch.nn.functional as F
+import numpy as np
+
+__all__ = ['make_nd', 'make_2d', 'make_3d', 'make_4d', 'make_5d',
+    'normalize_hounsfield', 'normalize_voxel_scale']
+
+def make_nd(t, n):
+    '''  Prepends singleton dimensions to `t` until n-dimensional '''
+    if n < t.ndim:
+        raise Exception(f'make_nd cannot reduce cardinality. Your Tensor.ndim={t.ndim} > n={n}.')
+    elif n == t.ndim: 
+        return t
+    else:
+        nons = [None]*(n-t.ndim)
+        return t[nons]
+
+def make_2d(t): return make_nd(t, 2)
+def make_3d(t): return make_nd(t, 3)
+
+def make_4d(t):
+    '''  Prepends singleton dimensions to `t` until 4D '''
+    return make_nd(t, 4)
+
+def make_5d(t):
+    '''  Prepends singleton dimensions to `t` until 5D '''
+    return make_nd(t, 5)
+
+def normalize_hounsfield(vol, dtype=None):
+    ''' Normalizes `vol` by 4095 and clamps to [0,1]. `dtype=None` defaults to 32-bit float'''
+    if   isinstance(dtype, torch.dtype): vol = torch.tensor(vol, dtype=dtype)
+    elif np.issctype(dtype):             vol = np.array(    vol, dtype=dtype)
+    elif dtype is None:
+        vol = vol.float() if torch.is_tensor(vol) else np.array(vol).astype(np.float32)
+    if   torch.is_tensor(vol):
+        return torch.clamp(vol / 4095.0, 0.0, 1.0)
+    elif isinstance(vol, np.ndarray):
+        return np.clip(vol / 4095.0, 0.0, 1.0)
+    else: raise Exception(f'vol (type={type(vol)}) is neither torch.tensor, nor np.ndarray')
+
+def normalize_voxel_scale(vol, vox_scl):
+    assert torch.is_tensor(vol)
+    vox_scl = torch.tensor(vox_scl)
+    assert vox_scl.shape == torch.Size([3])
+    new_shape = torch.Size((torch.tensor(vol.shape) * vox_scl).round().long())
+    return F.interpolate(make_5d(vol), size=new_shape, align_corners=True, mode='trilinear')
+```

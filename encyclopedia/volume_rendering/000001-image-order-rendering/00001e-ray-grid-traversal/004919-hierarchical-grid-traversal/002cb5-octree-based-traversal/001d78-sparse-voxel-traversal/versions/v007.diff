@@ -1,0 +1,221 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Sparse Voxel Traversal is a hierarchical ray-intersection method that accelerates volume rendering by recursively traversing a sparse voxel octree (SVO) to find intersections with leaf nodes or branches, skipping empty regions to reduce sampling cost [S1][S2, S4, unofficial]. It solves the performance bottleneck of dense voxel traversal by allowing the ray to take larger steps through empty space, significantly reducing the total number of intersection tests and node visits required to reach active data [S1]. Unlike [Voxel Grid Raycasting](2218-voxel-grid-raycasting.md) which steps through every voxel boundary in a uniform grid, this method uses hierarchical spatial subdivision to find non-empty space faster [S1]. It is distinguished from its siblings by its explicit use of regular 2x2x2 subdivision and mid-plane sorting logic for interior nodes, whereas other methods may focus purely on traversal optimization or specific data structures like hash grids [S1][S2, unofficial].
++Sparse Voxel Traversal is a hierarchical ray-intersection method that accelerates volume rendering by recursively traversing a sparse voxel octree (SVO) to find intersections with leaf nodes or branches, skipping empty regions to reduce sampling cost [S1][S2, unofficial]. It solves the performance bottleneck of dense voxel traversal by allowing the ray to take larger steps through empty space, significantly reducing the total number of intersection tests and node visits required to reach active data [S1]. Unlike [Voxel Grid Raycasting](2218-voxel-grid-raycasting.md) which steps through every voxel boundary in a uniform grid, this method uses hierarchical spatial subdivision to find non-empty space faster [S1].
+ 
+ ## How it works
+@@ -51,27 +51,26 @@
+ 
+ ```python
+-def cast_ray(node, origin, direction, bounds, entry):
+-    """
+-    Recursively traverse the sparse voxel tree.
+-    node: TreeBody (Empty, Leaf, or Branch)
+-    origin: [f32, f32, f32]
+-    direction: [f32, f32, f32]
+-    bounds: VoxelBounds
+-    entry: Optional[Entry]
+-    """
+-    if node is Empty:
++def cast_ray(node, origin, direction, bounds, entry, act):
++    """
++    node: 'Empty', 'Leaf', or 'Branch'
++    bounds: dict {'x': int, 'y': int, 'z': int, 'lg_size': int}
++    entry: dict {'side': int, 'toi': float} or None
++    act: callable(bounds, leaf_data) -> result or None
++    """
++    if node == 'Empty':
+         pass # Fall through to exit calculation
+-    elif node is Leaf:
++    elif node == 'Leaf':
+         result = act(bounds, node.data)
+         if result is not None:
+-            return Ok(result)
++            return result
+         # Fall through to exit calculation
+-    elif node is Branch:
++    elif node == 'Branch':
++        voxel_size = 2 ** bounds['lg_size']
+         mid = [
+-            (bounds.x + 0.5) * bounds.size(),
+-            (bounds.y + 0.5) * bounds.size(),
+-            (bounds.z + 0.5) * bounds.size()
++            (bounds['x'] + 0.5) * voxel_size,
++            (bounds['y'] + 0.5) * voxel_size,
++            (bounds['z'] + 0.5) * voxel_size
+         ]
+-        entry_toi = entry.toi if entry else 0.0
++        entry_toi = entry['toi'] if entry else 0.0
+         intersect = [
+             origin[0] + entry_toi * direction[0],
+@@ -80,5 +79,4 @@
+         ]
+         
+-        # Determine child coordinates
+         coords = [
+             1 if intersect[0] >= mid[0] else 0,
+@@ -87,22 +85,21 @@
+         ]
+         
+-        # Update bounds for child
+-        new_bounds = VoxelBounds(
+-            x=(bounds.x << 1) + coords[0],
+-            y=(bounds.y << 1) + coords[1],
+-            z=(bounds.z << 1) + coords[2],
+-            lg_size=bounds.lg_size - 1
+-        )
+-        
+-        return cast_ray(node.child, origin, direction, new_bounds, entry)
++        new_bounds = {
++            'x': (bounds['x'] << 1) + coords[0],
++            'y': (bounds['y'] << 1) + coords[1],
++            'z': (bounds['z'] << 1) + coords[2],
++            'lg_size': bounds['lg_size'] - 1
++        }
++        
++        return cast_ray(node.child, origin, direction, new_bounds, entry, act)
+ 
+     # Calculate Exit
+-    sides = [bounds.x, bounds.y, bounds.z, bounds.x + 1, bounds.y + 1, bounds.z + 1]
++    sides = [bounds['x'], bounds['y'], bounds['z'], bounds['x'] + 1, bounds['y'] + 1, bounds['z'] + 1]
+     min_exit = None
+-    min_toi = infinity
++    min_toi = float('inf')
+ 
+     for side_idx, bound_val in enumerate(sides):
+         dim = side_idx % 3
+-        bound_world = bound_val * bounds.size()
++        bound_world = bound_val * (2 ** bounds['lg_size'])
+         
+         if direction[dim] == 0.0:
+@@ -111,29 +108,26 @@
+         toi = (bound_world - origin[dim]) / direction[dim]
+         
+-        # Check validity against entry
+         if entry is None:
+             if toi < 0.0:
+                 continue
+         else:
+-            if toi < entry.toi:
++            if toi < entry['toi']:
+                 continue
+                 
+         if toi < min_toi:
+             min_toi = toi
+-            min_exit = Exit(side=side_idx, toi=TOI(toi))
++            min_exit = {'side': side_idx, 'toi': toi}
+ 
+     if min_exit is None:
+-        # Should not happen if ray is inside bounds, but handle gracefully
+-        return Err(Exit(side=0, toi=TOI(0.0)))
+-        
+-    return Err(min_exit)
+-
+-def traverse_tree(root, origin, direction):
+-    """
+-    Main traversal loop handling backtracking.
+-    """
+-    # Initial bounds setup assumed
++        return {'side': 0, 'toi': 0.0} # Fallback
++        
++    return min_exit
++
++def traverse_tree(root, origin, direction, act):
++    """
++    root: Tree object with .get(coords) and .lg_size attributes
++    """
+     current_coords = [0, 0, 0]
+-    current_bounds = compute_initial_bounds(root)
++    current_bounds = {'x': 0, 'y': 0, 'z': 0, 'lg_size': root.lg_size}
+     entry = None
+     
+@@ -141,30 +135,29 @@
+         node = root.get(current_coords[0], current_coords[1], current_coords[2])
+         
+-        result = cast_ray(node, origin, direction, current_bounds, entry)
+-        
+-        if result.is_ok():
+-            return result.value
+-        
+-        exit = result.error()
+-        dim = exit.side % 3
+-        
+-        # Backtrack logic
++        result = cast_ray(node, origin, direction, current_bounds, entry, act)
++        
++        # If act returns a non-dict, we found a hit
++        if result is not None and not isinstance(result, dict):
++            return result
++        
++        exit_info = result
++        dim = exit_info['side'] % 3
++        
+         if direction[dim] < 0.0:
+             if current_coords[dim] == 0:
+-                return Err(exit) # Exited tree
++                return None # Exited tree
+             current_coords[dim] = 0
+         else:
+             if current_coords[dim] == 1:
+-                return Err(exit) # Exited tree
++                return None # Exited tree
+             current_coords[dim] = 1
+             
+-        entry = Entry.from_exit(exit)
+-        # Update bounds for the new coordinate? 
+-        # In recursive implementation, bounds are passed down. 
+-        # In iterative, bounds must be tracked or recomputed.
+-        # For this pseudocode, we assume recursive structure or 
+-        # that bounds are managed via the coordinate system relative to root.
+-        # Simplified: re-calculate bounds based on coords and root size
+-        current_bounds = compute_bounds_for_coords(current_coords, root.lg_size)
++        entry = {'side': (exit_info['side'] + 3) % 6, 'toi': exit_info['toi']}
++        current_bounds = {
++            'x': (current_bounds['x'] << 1) + current_coords[0],
++            'y': (current_bounds['y'] << 1) + current_coords[1],
++            'z': (current_bounds['z'] << 1) + current_coords[2],
++            'lg_size': current_bounds['lg_size'] - 1
++        }
+ ```
+ 
+@@ -211,24 +204,21 @@
+ 
+ ### Sparse Ray Marching for RTAO
+-A variant of sparse ray marching used for Ray Traced Ambient Occlusion. It marches from a surface point in a hemisphere direction, counting occlusions up to a radius limit [S5, unofficial]. It starts at the floor of the ray origin, initializes local position and distance to 0, and loops up to $3 \times \text{uniforms.grid\_ext}$ times [S5, unofficial]. It checks voxel occupancy using `voxel_masks`; if occupied, it returns true (occlusion found) [S5, unofficial]. It loads the voxel AADF and calculates the exit plane, then calculates side distance and $t$, adding $t$ to the accumulated distance [S5, unofficial]. If distance $> t_{max}$, it returns false (no occlusion found within range) [S5, unofficial]. It advances the ray position, updating `ipos` and `local_pos` [S5, unofficial]. Unlike the main sparse ray march, this version does not use the hierarchical chunk/brick structure. It only checks `voxel_masks` and `voxel_aadf`. It also accumulates distance and stops at $t_{max}$ [S5, unofficial]. Parameter: $t_{max}$ (maximum distance to march) [S5, unofficial].
++A variant of sparse ray marching used for Ray Traced Ambient Occlusion [S6, unofficial]. It marches from a surface point in a hemisphere direction, counting occlusions up to a radius limit [S6, unofficial]. It starts at the floor of the ray origin, initializes local position and distance to 0, and loops up to $3 \times \text{uniforms.grid\_ext}$ times [S6, unofficial]. It checks voxel occupancy using `voxel_masks`; if occupied, it returns true (occlusion found) [S6, unofficial]. It loads the voxel AADF and calculates the exit plane, then calculates side distance and $t$, adding $t$ to the accumulated distance [S6, unofficial]. If distance $> t_{max}$, it returns false (no occlusion found within range) [S6, unofficial]. It advances the ray position, updating `ipos` and `local_pos` [S6, unofficial]. Unlike the main sparse ray march, this version does not use the hierarchical chunk/brick structure [S6, unofficial]. It only checks `voxel_masks` and `voxel_aadf` [S6, unofficial]. It also accumulates distance and stops at $t_{max}$ [S6, unofficial]. Parameter: $t_{max}$ (maximum distance to march) [S6, unofficial].
+ 
+ ### Robust Interval Arithmetic Ray Traversal
+-A ray traversal method that uses interval arithmetic with correct rounding modes to guarantee that no octant is missed during traversal, solving precision errors that occur when subdivision levels approach floating-point limits [S6]. It performs ray traversal using interval arithmetic with correct rounding modes (using SSE2 instructions) to determine the order of sub-octants [S6]. Precision is 30 bits (NL=30), with resolution at Octree level 9 (512^3 resolution) [S6]. When subdivision levels approach the limits of floating-point precision, standard traversals mismatch. This is handled by using 128-bit precision binary floating-point arithmetic for verification and interval arithmetic with correct rounding modes for the actual algorithm [S6]. Unlike Gargantini's method which only partially eliminates errors and requires restricted conditions, this method guarantees correctness for all cases with minimal performance impact [S6].
++A ray traversal method that uses interval arithmetic with correct rounding modes to guarantee that no octant is missed during traversal, solving precision errors that occur when subdivision levels approach floating-point limits [S7]. It performs ray traversal using interval arithmetic with correct rounding modes (using SSE2 instructions) to determine the order of sub-octants [S7]. Precision is 30 bits (NL=30), with resolution at Octree level 9 (512^3 resolution) [S7]. When subdivision levels approach the limits of floating-point precision, standard traversals mismatch [S7]. This is handled by using 128-bit precision binary floating-point arithmetic for verification and interval arithmetic with correct rounding modes for the actual algorithm [S7]. Unlike Gargantini's method which only partially eliminates errors and requires restricted conditions, this method guarantees correctness for all cases with minimal performance impact [S7].
+ 
+ ### Hybrid Ray Tracing and Path Tracing
+-A hybrid rendering technique using the CGC data structure where cell rasterisation handles primary rays and path tracing handles secondary rays for global illumination [S7]. Using the CGC data structure for ray tracing or path tracing of isosurfaces, leveraging pre-computed cluster bounds for hierarchical traversal [S7]. It uses cell rasterisation for primary rays and path tracing for secondary rays [S7]. It traverses and tests blocks, clusters, metacells, and individual voxals hierarchically using the pre-computed cluster bound stored in the last metacell of each cluster [S7]. For shadow and ambient occlusion rays, it fetches only metacell data [S7]. For additional bounces in path tracing, it fetches grid cell data to compute a normal at each intersection point [S7]. Primary rays can be either traced or rasterised (hybrid approach) [S7]. Parameter: Path tracing bounces: 3 [S7].
++A hybrid rendering technique using the CGC data structure where cell rasterisation handles primary rays and path tracing handles secondary rays for global illumination [S8]. Using the CGC data structure for ray tracing or path tracing of isosurfaces, leveraging pre-computed cluster bounds for hierarchical traversal [S8]. It uses cell rasterisation for primary rays and path tracing for secondary rays [S8]. It traverses and tests blocks, clusters, metacells, and individual voxals hierarchically using the pre-computed cluster bound stored in the last metacell of each cluster [S8]. For shadow and ambient occlusion rays, it fetches only metacell data [S8]. For additional bounces in path tracing, it fetches grid cell data to compute a normal at each intersection point [S8]. Primary rays can be either traced or rasterised (hybrid approach) [S8]. Parameter: Path tracing bounces: 3 [S8].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(\log N)$ for tree traversal in the best case (skipping empty space), where $N$ is the number of voxels. In the worst case (dense volume), it approaches $O(V)$ where $V$ is the number of visited voxels, but typically significantly less than dense traversal due to empty space skipping [S1][S2, unofficial].
+-*   **Memory Complexity:** Proportional to the number of non-empty nodes in the octree. The 5-4-3 structure uses compact bitmasks and child pointers, reducing overhead compared to full pointers [S3, unofficial].
+-*   **Measured Performance:** In tests with 512^3 resolution and NL=30, interval arithmetic traversal with SSE2 showed similar performance to Gargantini's algorithm, with slight overhead for rounding modes [S6]. OpenVDB's intersector is optimized for multi-threading by amortizing bounding box computation via copy constructors [S1].
+-*   **Scaling:** Scales well with sparsity. Performance degrades gracefully as volume density increases, but remains superior to dense grid traversal for sparse data [S1][S2, unofficial].
++*   **Measured Performance:** In tests with 512^3 resolution and NL=30, interval arithmetic traversal with SSE2 showed similar performance to Gargantini's algorithm, with slight overhead for rounding modes [S7]. OpenVDB's intersector is optimized for multi-threading by amortizing bounding box computation via copy constructors [S1].
+ *   **Strengths:** Efficient empty space skipping, flexible node levels, thread-safe via copy constructor, supports various data structures (OpenVDB, bit-SVO, custom) [S1][S2, S3, unofficial].
+-*   **Limitations:** Overhead of tree traversal for very dense volumes; precision issues at high subdivision levels without interval arithmetic [S6]; requires careful handling of index vs world space [S1].
++*   **Limitations:** Overhead of tree traversal for very dense volumes; precision issues at high subdivision levels without interval arithmetic [S7]; requires careful handling of index vs world space [S1].
+ *   **When to Use:** Sparse volumetric data, large scenes with significant empty space, when memory efficiency is important [S1][S2, unofficial].
+-*   **When Not to Use:** Dense, uniform volumes where the overhead of tree traversal outweighs the benefits of empty space skipping; when high-precision traversal at extreme subdivision levels is required without interval arithmetic [S6].
++*   **When Not to Use:** Dense, uniform volumes where the overhead of tree traversal outweighs the benefits of empty space skipping; when high-precision traversal at extreme subdivision levels is required without interval arithmetic [S7].
+ 
+ ## Background
+-Sparse Voxel Traversal originated with the development of Sparse Voxel Octrees (SVOs) for efficient rendering of large-scale scenes. Key papers include "Sparse Voxel Octrees" by Laine and Karras (2010) and "Efficient Sparse Voxel Octrees" by Laine et al. (2014) [S1][S2, unofficial]. The method has been widely adopted in production renderers and libraries such as OpenVDB (used in film VFX) and various real-time rendering engines [S1, S7]. It evolved from earlier octree-based ray tracing methods to handle the specific challenges of volumetric data, including interpolation, density accumulation, and efficient empty space skipping [S1][S2, unofficial]. Recent developments include integration with neural rendering (e.g., NSVF, SPC Tracer) and robust interval arithmetic for precision-critical applications [S4, unofficial][S6].
++Key papers include "Sparse Voxel Octrees" by Laine and Karras (2010) and "Efficient Sparse Voxel Octrees" by Laine et al. (2014) [S1][S2, unofficial]. The method has been widely adopted in production renderers and libraries such as OpenVDB (used in film VFX) and various real-time rendering engines [S1, S7]. It evolved from earlier octree-based ray tracing methods to handle the specific challenges of volumetric data, including interpolation, density accumulation, and efficient empty space skipping [S1][S2, unofficial]. Recent developments include integration with neural rendering (e.g., NSVF, SPC Tracer) and robust interval arithmetic for precision-critical applications [S4, unofficial][S7].
+ 
+ ## Sources
+@@ -238,4 +228,4 @@
+ [S4] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)
+ [S5] Nelarius/vxray, https://github.com/Nelarius/vxray, fetched 2026-10-24 (unofficial)
+-[S6] Arbitrary 3D Resolution Discrete Ray Tracing of Implicit Surfaces, https://doi.org/10.1007/978-3-540-31965-8_38, fetched 2026-10-24
++[S6] Arbitrary 3D Resolution Discrete Ray Tracing of Implicit Surfaces, https://doi.org/10.1007/978-3-540-31965-8_38, fetched 2026-10-24 (unofficial)
+ [S7] Clustered Grid Cell Data Structure for Isosurface Rendering, https://doi.org/10.24132/jwscg.2020.28.2, fetched 2026-10-26

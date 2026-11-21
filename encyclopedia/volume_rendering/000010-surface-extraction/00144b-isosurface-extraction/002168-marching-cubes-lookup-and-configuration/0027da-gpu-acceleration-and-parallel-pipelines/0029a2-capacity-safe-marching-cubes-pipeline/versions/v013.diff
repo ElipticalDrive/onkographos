@@ -1,0 +1,366 @@
+--- v012.md
++++ v013.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A GPU-based isosurface extraction method that avoids buffer overflow by determining the exact vertex count before geometry generation, using a two-pass approach: first computing counts/offsets, then allocating exact buffers and generating triangles [S1]. It sets itself apart from naive parallel Marching Cubes by avoiding buffer overflow and dynamic memory allocation during geometry generation through a two-pass counting and compaction strategy, building on the [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md).
++A GPU-based isosurface extraction method that avoids buffer overflow by determining the exact vertex count before geometry generation, using a two-pass approach: first computing counts/offsets, then allocating exact buffers and generating triangles [S1]. It sets itself apart from naive parallel Marching Cubes by avoiding buffer overflow and dynamic memory allocation during geometry generation through a two-pass counting and compaction strategy, building on [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md). Unlike fixed-capacity baselines that reserve static buffers, this method determines the exact vertex count before generation, ensuring stability and preventing buffer overflow without excessive static reservation [S1].
+ 
+ ## How it works
+@@ -10,137 +10,259 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar field $V$ of resolution $N_x \times N_y \times N_z$. Scalar values are normalized to the range $[0, 1]$ using the dataset's minimum and maximum values [S1]. An isovalue $\tau \in [0, 1]$ is specified [S1].
+-*   **Output:** A set of vertices and normals forming the isosurface, stored in a GPU Vertex Buffer Object (VBO) [S1].
++*   **Input:** A 3D scalar field $V$ defined on a grid of resolution $N_x \times N_y \times N_z$. The scalar values are normalized to the range $[0, 1]$ using the minimum and maximum values of the dataset [S1]. An isovalue $\tau$ is specified within this normalized range [S1].
++*   **Output:** A set of vertices and normals representing the isosurface, stored in a Vertex Buffer Object (VBO) [S1].
+ 
+ **Data Structures:**
+-1.  **Cell Classification Array:** A 1D array of size $N_x N_y N_z$, where each element stores the 8-bit case index $C$ for the corresponding voxel. $C$ is computed based on the sign of $V(v_i) - \tau$ at the 8 vertices $v_i$ of the voxel, matching the standard LUT vertex ordering [10327-lookup-table-and-ambiguity-handling].
+-2.  **Count/Offset Buffers:** Intermediate buffers used during the prefix-sum phase to store per-block or per-thread counts and final offsets [S1].
+-3.  **Exact VBO:** A vertex buffer allocated with size $V_{count} \times \text{sizeof(Vertex)}$, where $V_{count}$ is the exact number of generated vertices [S1].
++1.  **Edge Intersection Table (`edgeTable`):** An array of 256 integers (or shorts). Each entry is a 12-bit bitmask. Bit $k$ ($0 \le k \le 11$) is set to 1 if the isosurface intersects the $k$-th edge of the cube, and 0 otherwise. The standard edge numbering convention is:
++    *   Bottom face ($z=0$): $e_0=(0,1), e_1=(1,2), e_2=(2,3), e_3=(3,0)$
++    *   Top face ($z=1$): $e_4=(4,5), e_5=(5,6), e_6=(6,7), e_7=(7,4)$
++    *   Vertical edges: $e_8=(0,4), e_9=(1,5), e_{10}=(2,6), e_{11}=(3,7)$ [10327-lookup-table-and-ambiguity-handling]
++2.  **Triangle Connection Table (`triangleTable`):** A 2D array of size $256 \times 16$.
++    *   Rows are indexed by the case index $C \in [0, 255]$.
++    *   Columns store integer indices. Indices $0–11$ refer to the 12 cube edges.
++    *   Indices are grouped in triplets $(a, b, c)$ to form triangles.
++    *   The sequence is terminated by the value `-1`.
++    *   The maximum number of triangles per voxel is 5, requiring 15 indices plus 1 terminator [10327-lookup-table-and-ambiguity-handling].
++
++**Case Index Calculation:** For each voxel, the 8-bit case index $C$ is determined by the scalar field values $V$ at the 8 vertices $v_i$ ($i=0..7$). If $V(v_i) < \tau$ (or $> \tau$, depending on convention), bit $i$ of $C$ is set to 1; otherwise 0. The bit assignment must strictly match the vertex ordering assumed by the LUT generation [10327-lookup-table-and-ambiguity-handling].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Cell Classification:**
+-    For each voxel $(i, j, k)$ in the grid:
+-    *   Read the scalar values $V_0, \dots, V_7$ at the 8 corners.
+-    *   Compute the case index $C$:
+-        $$ C = \sum_{m=0}^{7} b_m 2^m $$
+-        where $b_m = 1$ if $V_m < \tau$ (or $> \tau$, depending on convention), else $0$ [10327-lookup-table-and-ambiguity-handling].
+-    *   Store $C$ in the classification array.
+-
+-2.  **Prefix-Sum Computation (Counting Pass):**
+-    *   Determine the number of triangles $T(C)$ for each case index $C$ using the `triangleTable` from [10327-lookup-table-and-ambiguity-handling]. Note that each triangle consists of 3 vertices.
+-    *   Compute the total number of vertices $V_{total}$ required:
+-        $$ V_{total} = \sum_{\text{all voxels}} T(C_{voxel}) \times 3 $$
+-    *   This is typically implemented on the GPU using an exclusive prefix sum (scan) over the triangle counts of active voxels to determine the write offset for each voxel's output [S1].
++    For each voxel in the grid, compute the case index $C$ based on the scalar values at its 8 corners relative to the isovalue $\tau$. Determine if the voxel is "active" (i.e., $C \neq 0$ and $C \neq 255$) and calculate the number of triangles $T_v$ generated by this voxel using the `triangleTable`. The number of triangles is the count of non-terminating triplets in the row $C$ of `triangleTable`.
++
++2.  **Prefix-Sum Computation:**
++    Compute an exclusive prefix sum (scan) of the triangle counts $T_v$ for all active voxels. This produces an offset array where each entry indicates the starting index in the output buffer for the triangles generated by the corresponding voxel. This step determines the exact total number of vertices required, as each triangle consists of 3 vertices. Let $N_{total}$ be the total number of triangles. The required vertex buffer size is $3 \times N_{total}$ vertices.
+ 
+ 3.  **Exact VBO Allocation:**
+-    *   Allocate a vertex buffer of size exactly $V_{total}$ vertices [S1]. This prevents the buffer overflow issues seen in fixed-capacity baselines [S1].
+-
+-4.  **Triangle Generation (Rendering Pass):**
+-    *   Launch a kernel where each thread/block processes a voxel.
+-    *   Using the case index $C$, lookup the edge intersections from `edgeTable` [10327-lookup-table-and-ambiguity-handling].
+-    *   Interpolate the intersection points on the cube edges to determine vertex positions.
+-    *   Compute vertex normals (e.g., via gradient of the scalar field or averaging adjacent face normals) [S1].
+-    *   Write the generated vertices to the VBO at the offset determined by the prefix sum [S1].
++    Allocate a Vertex Buffer Object (VBO) and a Normal Buffer Object with exact sizes derived from the prefix sum. The size is $3 \times N_{total}$ vertices. This prevents buffer overflow and avoids the need for large static reservations [S1].
++
++4.  **Triangle Generation:**
++    For each active voxel, use the case index $C$ to look up the intersected edges in `edgeTable`. Interpolate the intersection points on the edges using the scalar values at the vertices. Use `triangleTable` to determine the connectivity of the triangles. Write the vertex positions and normals to the pre-allocated buffers at the offsets computed in Step 2.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Kernel 1: Classification and Counting
+-def classify_and_count_kernel(grid, isovalue, case_indices, triangle_counts):
+-    idx = get_global_thread_id()
+-    if idx >= grid.num_voxels:
++def capacity_safe_marching_cubes(volume, isovalue, resolution):
++    """
++    volume: 3D array of scalar values, normalized to [0, 1]
++    isovalue: float in [0, 1]
++    resolution: tuple (Nx, Ny, Nz)
++    """
++    Nx, Ny, Nz = resolution
++    
++    # Step 1: Cell Classification
++    # Compute case index and triangle count for each voxel
++    # Initialize arrays to store triangle counts per voxel
++    triangle_counts = zeros(Nx * Ny * Nz, dtype=int32)
++    
++    for z in range(Nz - 1):
++        for y in range(Ny - 1):
++            for x in range(Nx - 1):
++                # Get scalar values at 8 corners
++                v = [
++                    volume[x, y, z], volume[x+1, y, z], volume[x+1, y+1, z], volume[x, y+1, z],
++                    volume[x, y, z+1], volume[x+1, y, z+1], volume[x+1, y+1, z+1], volume[x, y+1, z+1]
++                ]
++                
++                # Compute case index C
++                C = 0
++                for i in range(8):
++                    if v[i] < isovalue: # Convention: below isosurface is inside
++                        C |= (1 << i)
++                
++                # If voxel is active (not fully inside or outside)
++                if C != 0 and C != 255:
++                    # Count triangles from triangleTable
++                    # triangleTable[C] is a list of 16 integers, terminated by -1
++                    row = triangleTable[C]
++                    t_count = 0
++                    idx = 0
++                    while row[idx] != -1:
++                        t_count += 1
++                        idx += 3
++                    triangle_counts[z * Nx * Ny + y * Nx + x] = t_count
++                else:
++                    triangle_counts[z * Nx * Ny + y * Nx + x] = 0
++
++    # Step 2: Prefix-Sum Computation
++    # Compute exclusive prefix sum to get offsets
++    offsets = exclusive_scan(triangle_counts)
++    total_triangles = sum(triangle_counts)
++    total_vertices = 3 * total_triangles
++    
++    # Step 3: Exact VBO Allocation
++    # Allocate buffers on GPU
++    vbo_positions = allocate_buffer(total_vertices * 3) # 3 floats per vertex
++    vbo_normals = allocate_buffer(total_vertices * 3)
++    
++    # Step 4: Triangle Generation
++    # Launch kernel to generate triangles
++    # Each thread block handles a subset of voxels
++    launch_kernel_generate_triangles(volume, isovalue, offsets, triangle_counts, 
++                                     vbo_positions, vbo_normals, resolution)
++    
++    return vbo_positions, vbo_normals
++
++def exclusive_scan(arr):
++    """
++    Compute exclusive prefix sum.
++    result[i] = sum(arr[0]...arr[i-1])
++    """
++    n = len(arr)
++    result = zeros(n, dtype=arr.dtype)
++    if n == 0:
++        return result
++    current_sum = 0
++    for i in range(n):
++        result[i] = current_sum
++        current_sum += arr[i]
++    return result
++
++def launch_kernel_generate_triangles(volume, isovalue, offsets, triangle_counts, 
++                                     vbo_positions, vbo_normals, resolution):
++    """
++    GPU kernel to generate triangles.
++    """
++    # Pseudocode for kernel logic
++    # Each thread processes one voxel
++    voxel_idx = thread_id()
++    if voxel_idx >= len(triangle_counts):
+         return
+     
+-    # Read voxel values
+-    values = read_voxel_corners(grid, idx)
++    t_count = triangle_counts[voxel_idx]
++    if t_count == 0:
++        return
++    
++    offset = offsets[voxel_idx]
++    
++    # Get voxel coordinates
++    Nx, Ny, Nz = resolution
++    z = voxel_idx // (Nx * Ny)
++    y = (voxel_idx % (Nx * Ny)) // Nx
++    x = voxel_idx % Nx
++    
++    # Get scalar values at 8 corners
++    v = [
++        volume[x, y, z], volume[x+1, y, z], volume[x+1, y+1, z], volume[x, y+1, z],
++        volume[x, y, z+1], volume[x+1, y, z+1], volume[x+1, y+1, z+1], volume[x, y+1, z+1]
++    ]
+     
+     # Compute case index C
+     C = 0
+     for i in range(8):
+-        if values[i] < isovalue: # Convention dependent
++        if v[i] < isovalue:
+             C |= (1 << i)
+     
+-    case_indices[idx] = C
+-    
+-    # Get triangle count for this case
+-    # triangleTable is from [10327-lookup-table-and-ambiguity-handling]
+-    num_tris = count_triangles_in_case(C) 
+-    triangle_counts[idx] = num_tris
+-
+-# Kernel 2: Prefix Sum (Exclusive Scan)
+-def prefix_sum_kernel(counts, offsets):
+-    # Implementation of exclusive scan on GPU
+-    # Result: offsets[i] = sum(counts[0]...counts[i-1])
+-    pass
+-
+-# Kernel 3: Geometry Generation
+-def generate_geometry_kernel(grid, isovalue, case_indices, offsets, vertex_buffer):
+-    idx = get_global_thread_id()
+-    if idx >= grid.num_voxels:
+-        return
+-    
+-    C = case_indices[idx]
+-    if C == 0: # No intersection
+-        return
+-        
+-    # Get base offset for this voxel's output
+-    base_offset = offsets[idx]
+-    
+-    # Lookup edges and generate triangles
+-    # triangleTable from [10327-lookup-table-and-ambiguity-handling]
+-    edges = get_intersected_edges(C)
+-    triangles = get_triangles_from_case(C)
+-    
+-    write_idx = base_offset
+-    for tri in triangles:
+-        v0, v1, v2 = tri
+-        p0 = interpolate_vertex(grid, idx, edges[v0], isovalue)
+-        p1 = interpolate_vertex(grid, idx, edges[v1], isovalue)
+-        p2 = interpolate_vertex(grid, idx, edges[v2], isovalue)
+-        
+-        # Compute normal [S1]
+-        n0 = compute_normal(grid, idx, p0)
+-        n1 = compute_normal(grid, idx, p1)
+-        n2 = compute_normal(grid, idx, p2)
++    # Look up edges and triangles
++    edge_mask = edgeTable[C]
++    tri_row = triangleTable[C]
++    
++    # Intersect edges to get points
++    points = []
++    for e in range(12):
++        if (edge_mask >> e) & 1:
++            # Interpolate on edge e
++            p = interpolate_edge(v, e, isovalue)
++            points.append(p)
++    
++    # Generate triangles
++    idx = 0
++    tri_idx = 0
++    while tri_row[idx] != -1:
++        e1 = tri_row[idx]
++        e2 = tri_row[idx+1]
++        e3 = tri_row[idx+2]
++        
++        p1 = points[e1]
++        p2 = points[e2]
++        p3 = points[e3]
++        
++        # Compute normal
++        n = cross(p2 - p1, p3 - p1)
++        n = normalize(n)
+         
+         # Write to VBO
+-        write_vertex(vertex_buffer, write_idx, p0, n0)
+-        write_vertex(vertex_buffer, write_idx + 1, p1, n1)
+-        write_vertex(vertex_buffer, write_idx + 2, p2, n2)
+-        
+-        write_idx += 3
+-
+-def interpolate_vertex(grid, voxel_idx, edge_idx, isovalue):
+-    # Linear interpolation along the specific edge of the voxel
+-    # Edge indices 0-11 defined in [10327-lookup-table-and-ambiguity-handling]
+-    pass
+-
+-def compute_normal(grid, voxel_idx, point):
+-    # Gradient-based or averaged normal calculation [S1]
+-    pass
++        base = offset + tri_idx * 3
++        vbo_positions[base * 3] = p1.x
++        vbo_positions[base * 3 + 1] = p1.y
++        vbo_positions[base * 3 + 2] = p1.z
++        vbo_normals[base * 3] = n.x
++        vbo_normals[base * 3 + 1] = n.y
++        vbo_normals[base * 3 + 2] = n.z
++        
++        vbo_positions[(base + 1) * 3] = p2.x
++        vbo_positions[(base + 1) * 3 + 1] = p2.y
++        vbo_positions[(base + 1) * 3 + 2] = p2.z
++        vbo_normals[(base + 1) * 3] = n.x
++        vbo_normals[(base + 1) * 3 + 1] = n.y
++        vbo_normals[(base + 1) * 3 + 2] = n.z
++        
++        vbo_positions[(base + 2) * 3] = p3.x
++        vbo_positions[(base + 2) * 3 + 1] = p3.y
++        vbo_positions[(base + 2) * 3 + 2] = p3.z
++        vbo_normals[(base + 2) * 3] = n.x
++        vbo_normals[(base + 2) * 3 + 1] = n.y
++        vbo_normals[(base + 2) * 3 + 2] = n.z
++        
++        tri_idx += 1
++        idx += 3
++
++def interpolate_edge(v, edge_idx, isovalue):
++    """
++    Interpolate intersection point on edge.
++    Edge indices: 0-3 bottom, 4-7 top, 8-11 vertical
++    Vertices: 0-3 bottom, 4-7 top
++    """
++    if edge_idx < 4: # Bottom face
++        v0 = v[edge_idx]
++        v1 = v[(edge_idx + 1) % 4]
++    elif edge_idx < 8: # Top face
++        v0 = v[edge_idx]
++        v1 = v[(edge_idx + 1) % 4 + 4]
++    else: # Vertical edges
++        v0 = v[edge_idx - 8]
++        v1 = v[edge_idx - 8 + 4]
++    
++    # Linear interpolation
++    t = (isovalue - v0) / (v1 - v0)
++    # Coordinates would be interpolated similarly
++    # For simplicity, assume v contains coordinates or we map indices to coords
++    # In reality, v is scalar values, we need vertex positions
++    # This is a simplification for pseudocode
++    return v0 + t * (v1 - v0) # Placeholder for actual coordinate interpolation
+ ```
+ 
+ **Parameters:**
+-*   **Isovalue ($\tau$):** Specified in the normalized scalar range $[0, 1]$ [S1]. Typical tested values are 0.35, 0.50, and 0.65 [S1].
++*   **Isovalues ($\tau$):** Specified in the normalized scalar range $[0, 1]$. Typical tested values are 0.35, 0.50, and 0.65 [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Buffer Overflow:** Using a fixed-capacity single-pass output buffer causes failure at high resolutions (e.g., $512^3$) because the generated output exceeds available buffer capacity, resulting in overwritten or missing vertex data and incomplete geometry [S1].
+-*   **Ambiguity:** Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous. The standard LUT uses a fixed triangulation, which can cause cracks if adjacent voxels resolve the ambiguity differently [10327-lookup-table-and-ambiguity-handling]. This method does not inherently resolve ambiguity but relies on the standard LUT configuration.
++*   **Ambiguity:** Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous. The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [10327-lookup-table-and-ambiguity-handling]. The capacity-safe pipeline does not inherently resolve this; it relies on the underlying Marching Cubes implementation.
+ 
+ ## Subtopics
+ 
++### [GPU Marching Cubes with Scan-Based Compaction](6632-gpu-marching-cubes-with-scan-based-compaction.md)
++A GPU-accelerated Marching Cubes pipeline that classifies voxels, uses exclusive prefix sums to count active voxels and required vertices, compacts the voxel index array to remove empty voxels, and extracts the isosurface only for active voxels. It sets itself apart from naive parallel Marching Cubes by avoiding buffer overflow and dynamic memory allocation during geometry generation through a two-pass counting and compaction strategy, building on the [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md).
++
++### [GPU-accelerated Marching Cubes Pipeline](14714-gpu-accelerated-marching-cubes-pipeline.md)
++This method is a six-stage hybrid CPU-GPU pipeline for isosurface extraction that maximizes performance by balancing memory hierarchy usage and parallelizing the Marching Cubes algorithm. It differs from sibling methods like [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md) by offloading the spatial traversal and active cell identification to the CPU using pre-constructed spatial data structures, while the GPU handles the exact buffer allocation and triangle generation in parallel. Unlike [GPU Marching Cubes with Scan-Based Compaction](6632-gpu-marching-cubes-with-scan-based-compaction.md), which typically handles all active cells on the GPU, this approach reduces GPU memory pressure and bandwidth by transferring only the necessary active cell indices from CPU to GPU.
++
+ ## Operating characteristics
+-*   **Time Complexity:** The method involves a linear pass over all voxels for classification and counting, followed by a linear pass for generation. The complexity is $O(N)$ where $N$ is the number of voxels.
++*   **Time Complexity:** The method involves a linear pass over all voxels for classification and prefix sum, followed by a linear pass for triangle generation. The complexity is $O(N)$ where $N$ is the number of voxels.
+ *   **Memory Complexity:** Peak VRAM usage includes the input scalar volume, intermediate count and offset buffers, and the generated position and normal buffers [S1].
+ *   **Measured Performance:**
+-    *   Hardware: NVIDIA RTX 3090 GPU, 24 GB VRAM [S1].
+-    *   At $128^3$ resolution, isovalue 0.35: 1.28 million vertices, 5.8 ms extraction, 221.4 FPS, 1.9 GB VRAM [S1].
+-    *   At $512^3$ resolution, isovalue 0.35: 42.81 million vertices, 44.7 ms extraction, 28.6 FPS, 10.9 GB VRAM [S1].
+-*   **Strengths:** Stability at high resolutions; no buffer overflow; exact memory allocation avoids excessive static reservation [S1].
+-*   **Limitations:** Requires two passes (counting and generation); peak memory usage scales with output size [S1].
++    *   At $512^3$ resolution with isovalue 0.35, the method generates 42.81 million vertices in 44.7 ms with 10.9 GB peak VRAM usage, rendering at 28.6 FPS [S1].
++    *   At $128^3$ resolution with isovalue 0.35, the method generates 1.28 million vertices in 5.8 ms with 1.9 GB peak VRAM usage, rendering at 221.4 FPS [S1].
++    *   At $128^3$ resolution with isovalue 0.50, the method generates 0.94 million vertices in 4.9 ms with 1.7 GB peak VRAM usage, rendering at 264.7 FPS [S1].
++    *   At $128^3$ resolution with isovalue 0.65, the method generates 0.61 million vertices in 4.1 ms with 1.6 GB peak VRAM usage, rendering at 312.5 FPS [S1].
++*   **Scaling:** Increasing the grid resolution increases both the number of processed cells and the amount of generated geometry [S1].
++*   **Strengths:** Ensures stability and prevents buffer overflow without excessive static reservation [S1]. Remains stable at high resolutions where fixed-capacity methods fail [S1].
++*   **Limitations:** Requires two passes over the data (classification and generation), which may introduce overhead for very small datasets. The prefix sum computation can be a bottleneck if not optimized.
++*   **When to use:** When extracting isosurfaces from large volumes where the number of triangles is unknown or variable, and buffer overflow is a concern.
++*   **When not to use:** When the number of triangles is small and known in advance, or when memory bandwidth is extremely limited and the overhead of the prefix sum is prohibitive.
+ 
+ ## Background
+-The method was proposed in the context of visualizing 3D plasma simulation data, specifically electromagnetic potential fields [S1]. It addresses the limitations of fixed-capacity GPU Marching Cubes implementations which fail at high resolutions due to buffer overflow [S1]. The approach is part of a "Proposed Framework" for GPU-based isosurface extraction [S1].
++The method was proposed in the context of visualizing 3D plasma simulation data, specifically for examining morphological changes and identifying regions of interest in simulated plasma fields [S1]. It was evaluated on a workstation equipped with an AMD Ryzen Threadripper PRO 3955WX CPU, 256 GB of system memory, and an NVIDIA RTX 3090 GPU with 24 GB of VRAM [S1]. The evaluation focused on geometric continuity, extraction time, rendering performance, and GPU memory usage [S1].
+ 
+ ## Sources

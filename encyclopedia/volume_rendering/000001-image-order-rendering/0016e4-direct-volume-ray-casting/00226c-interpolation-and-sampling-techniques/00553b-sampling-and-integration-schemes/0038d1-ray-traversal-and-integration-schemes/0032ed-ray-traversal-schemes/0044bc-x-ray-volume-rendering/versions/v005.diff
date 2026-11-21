@@ -1,0 +1,218 @@
+--- v004.md
++++ v005.md
+@@ -4,138 +4,108 @@
+ 
+ ## Overview
+-X-Ray Volume Rendering is a volume rendering technique that computes the final color by linearly accumulating or averaging sampled voxel intensities along a ray, simulating a transmission view (like a CT scan) where opacity and alpha compositing are ignored [S1, S2, unofficial]. Unlike standard ray casting which uses front-to-back alpha blending to simulate opaque/translucent surfaces, X-Ray rendering sums the raw color values, resulting in a transparent/transmissive appearance where internal structures are visible as a superposition of densities [S1, S2, unofficial]. It differs from its sibling [Pixel Intensity Evaluation with Scene Aggregates](10890-pixel-intensity-evaluation-with-scene-aggregates.md) by specifically targeting the linear integration of voxel values rather than general scene aggregates.
++X-Ray Volume Rendering is a direct volume rendering technique that simulates a transmission view (such as a CT scan or radiograph) by linearly accumulating or averaging voxel intensity values along a ray, rather than using alpha compositing for opacity [S1, S2, unofficial]. Unlike standard ray casting which blends colors based on transparency, this method ignores alpha for the final accumulation logic, resulting in a transparent/transmissive appearance where the final color represents the mean or sum of densities encountered [S2, unofficial]. It differs from its sibling [Pixel Intensity Evaluation with Scene Aggregates](10890-pixel-intensity-evaluation-with-scene-aggregates.md) by operating on volumetric data via ray traversal rather than scene aggregates [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D texture (volume) containing RGBA voxel data, camera parameters defining the ray origin $x_0$ and direction $u$, and rendering parameters including `MAX_STEPS` (or `SAMPLES`), `alphaCorrection`, and `alphaScaleFactor` [S1, S2, unofficial][S3].
+-*   **Output:** A single color value (RGB) per pixel representing the averaged intensity along the ray [S1, S2, unofficial].
++The method approximates the X-ray projection of a voxelized function $\phi$ by summing the intersection lengths of rays with voxels weighted by voxel values, effectively computing the sparse matrix-vector product $X_C \phi$ without explicitly forming the matrix [S3].
+ 
+-**Data Structures:**
+-*   **Voxel Grid:** A uniform grid of $N = n_1 \times n_2 \times n_3$ voxels covering the volume bounding box $[a_1, b_1] \times [a_2, b_2] \times [a_3, b_3]$ with side length $h$ [S3].
+-*   **Ray:** Defined by origin $x_0$ and direction $u$ [S3].
+-*   **Accumulators:** `accumulatedColor` (RGB vector, initialized to 0) and `accumulatedAlpha` (scalar, initialized to 0) [S1, unofficial]. Note: `accumulatedAlpha` is computed but not used for the final color in X-Ray mode [S1, unofficial].
++### Inputs and Outputs
++*   **Input**: A 3D volume texture (or grid) of size $n_1 \times n_2 \times n_3$, where each voxel $k$ has a value $\phi_k$ (typically RGBA, though only RGB is accumulated for color in average mode) [S1, unofficial][S3]. Camera parameters $C = (x_0, Q, K, m)$ defining the ray origin $x_0$ and direction $u$ [S3].
++*   **Output**: A 2D image where each pixel $(i_1, i_2)$ contains the accumulated intensity $X[\phi](x_0, u)$ [S3].
+ 
+-**Parameters:**
+-*   `MAX_STEPS` / `SAMPLES`: The number of discrete samples taken along the ray within the volume [S1, S2, unofficial].
++### Data Structures
++*   **Volume Grid**: Discretized parallelepiped $[a_1, b_1] \times [a_2, b_2] \times [a_3, b_3]$ into $N = n_1 \times n_2 \times n_3$ uniform voxels of side $h$ [S3].
++*   **Basis Functions**: $\psi_k$ is the characteristic function of voxel $k$ (value 1 inside, 0 otherwise) [S3].
++*   **Ray**: Defined by origin $x_0$ and direction $u$, $L(x_0, u) = \{ (x_1, x_2, x_3) : \lambda \ge 0 \}$ [S3].
++
++### Parameters
++*   `MAX_STEPS` (or `SAMPLES`): The number of discrete steps along the ray [S1, S2, unofficial].
+ *   `alphaCorrection`: A multiplier applied to the sampled alpha value [S1, unofficial].
+-*   `alphaScaleFactor`: A multiplier applied to `alphaSample` to make the final color invariant to step size [S1, unofficial].
++*   `alphaScaleFactor`: A multiplier applied to alpha to make the result invariant to step size [S1, unofficial].
++*   `rayLength`: The total length of the ray segment traversing the volume [S1, unofficial].
+ 
+-**Algorithm:**
+-The method can be implemented as a fixed-step ray marcher. While theoretically equivalent to computing the intersection lengths of rays with voxels weighted by voxel values (the X-ray transform $X[\phi]$) [S3], the practical implementation often uses a fixed number of samples [S1, S2, unofficial].
++### Algorithm Steps
++1.  **Ray-Volume Intersection**: Calculate the front intersection parameter $t_0$ and back intersection parameter $t_1$ of the ray with the volume's Axis-Aligned Bounding Box (AABB) [S1, S2, unofficial]. If no intersection, output background color.
++2.  **Initialization**: Initialize `accumulatedColor` to $(0,0,0)$ and `accumulatedAlpha` to $0.0$ [S1, S2, unofficial].
++3.  **Step Size Calculation**: Compute `sampleLength` as $(t_1 - t_0) / \text{SAMPLES}$ [S2, unofficial].
++4.  **Traversal Loop**: Iterate $i$ from $0$ to $\text{SAMPLES}-1$ (or while `accumulatedLength` < `rayLength`) [S1, S2, unofficial]:
++    a.  **Sampling**: Retrieve the interpolated color $c$ (RGBA) at the current ray position using trilinear interpolation or nearest neighbor [S1, S2, unofficial].
++    b.  **Alpha Processing (Unused for Color)**:
++        i.  Calculate `alphaSample` = $c.a \times \text{alphaCorrection}$ [S1, unofficial].
++        ii. Modulate by remaining transparency: `alphaSample` *= $(1.0 - \text{accumulatedAlpha})$ [S1, unofficial].
++        iii. Scale: `alphaSample` *= `alphaScaleFactor` [S1, unofficial].
++        iv. Update `accumulatedAlpha` += `alphaSample` [S1, unofficial].
++        *Note: This alpha logic is retained from standard ray casting but is not used in the final color output for X-Ray mode, potentially wasting computation [S1, unofficial].*
++    c.  **Color Accumulation**:
++        i.  Add the RGB components of $c$ to `accumulatedColor`. In the "Average" variant, divide by `MAX_STEPS` at each step or at the end [S1, S2, unofficial].
++        ii. Formula: $\text{accumulatedColor} = \text{accumulatedColor} + \frac{c_{rgb}}{\text{MAX\_STEPS}}$ [S1, unofficial].
++    d.  **Advance**: Update ray position by `deltaDirection` and `accumulatedLength` by `deltaDirectionLength` [S1, unofficial].
++5.  **Termination**: Break if `accumulatedLength` >= `rayLength` or `accumulatedAlpha` >= $1.0$ [S1, unofficial].
++6.  **Final Output**: If the ray hit the volume, divide the accumulated color by `SAMPLES` (if not done incrementally) to get the average [S2, unofficial]. Output `accumulatedColor` as the fragment color [S1, unofficial].
+ 
+-1.  Initialize `accumulatedColor` to $(0, 0, 0)$ and `accumulatedAlpha` to $0.0$ [S1, S2, unofficial].
+-2.  Calculate the front intersection parameter $t_0$ and back intersection parameter $t_1$ of the ray with the volume's Axis-Aligned Bounding Box (AABB) [S2, unofficial].
+-3.  Compute the step size `sampleLength` as $(t_1 - t_0) / \text{SAMPLES}$ [S2, unofficial].
+-4.  Iterate $i$ from $0$ to $\text{SAMPLES} - 1$:
+-    a.  Sample the 3D texture at the current ray position to get `colorSample` (RGBA) [S1, S2, unofficial].
+-    b.  Calculate `alphaSample` as `colorSample.a` $\times$ `alphaCorrection` [S1, unofficial].
+-    c.  Modulate `alphaSample` by the remaining transparency: `alphaSample` $\times= (1.0 - \text{accumulatedAlpha})$ [S1, unofficial].
+-    d.  Scale `alphaSample` by `alphaScaleFactor` [S1, unofficial].
+-    e.  **Accumulate Color:** Update `accumulatedColor` by adding `colorSample` divided by `MAX_STEPS` (or `SAMPLES`) [S1, S2, unofficial].
+-        $$ \text{accumulatedColor} \leftarrow \text{accumulatedColor} + \frac{\text{colorSample}}{\text{MAX\_STEPS}} $$
+-    f.  **Accumulate Alpha (Unused for Output):** Update `accumulatedAlpha` by adding `alphaSample` [S1, unofficial].
+-    g.  Advance the ray position by `deltaDirection` (or `sampleLength` in direction $u$) [S1, S2, unofficial].
+-    h.  Check termination: If `accumulatedLength` $\ge$ `rayLength` or `accumulatedAlpha` $\ge 1.0$, break the loop [S1, unofficial].
+-5.  If the ray hit the volume, the final color is `accumulatedColor` [S2, unofficial].
++### Mathematical Formulation
++The X-ray evaluation is defined as [S3]:
++$$
++X[\phi](x_0, u) = \sum_{k=1}^{N} \phi_k X[\psi_k](x_0, u)
++$$
++where $X[\psi_k](x_0, u)$ is the intersection length of the ray with voxel $k$ [S3]. In the discrete sampling approximation (Average Rendering), this is approximated by the mean of sampled values [S2, unofficial].
+ 
+-**Pseudocode:**
++### Pseudocode
+ ```python
+-def x_ray_render(ray_origin, ray_direction, volume_texture, bounds_min, bounds_max, samples, alpha_correction, alpha_scale_factor):
+-    """
+-    Renders a single pixel using X-Ray volume rendering.
+-    
+-    Args:
+-        ray_origin: vec3, origin of the ray.
+-        ray_direction: vec3, normalized direction of the ray.
+-        volume_texture: 3D texture object, supports trilinear interpolation.
+-        bounds_min: vec3, minimum corner of the volume AABB.
+-        bounds_max: vec3, maximum corner of the volume AABB.
+-        samples: int, number of steps (MAX_STEPS).
+-        alpha_correction: float, multiplier for alpha.
+-        alpha_scale_factor: float, multiplier for alpha invariance.
+-        
+-    Returns:
+-        vec3, the final averaged color.
+-    """
+-    # 1. Initialize accumulators
++def x_ray_rendering(ray_origin, ray_direction, volume_texture, max_steps, ray_length):
++    # 1. Ray-AABB Intersection
++    t0, t1 = intersect_aabb(ray_origin, ray_direction, volume_bounds)
++    if t1 < t0:
++        return background_color
++
++    # 2. Initialization
+     accumulated_color = vec3(0.0, 0.0, 0.0)
+     accumulated_alpha = 0.0
+-    accumulated_length = 0.0
++    sample_length = (t1 - t0) / max_steps
++    current_pos = ray_origin + ray_direction * t0
+     
+-    # 2. Calculate ray-AABB intersection
+-    # Compute t_min and t_max for the AABB
+-    inv_dir = vec3(1.0) / ray_direction
+-    t_min = (bounds_min - ray_origin) * inv_dir
+-    t_max = (bounds_max - ray_origin) * inv_dir
+-    
+-    t0 = max(max(t_min.x, t_min.y), t_min.z)
+-    t1 = min(min(t_max.x, t_max.y), t_max.z)
+-    
+-    # If ray misses volume or starts inside and bounds are invalid
+-    if t0 > t1:
+-        return vec3(0.0, 0.0, 0.0)
++    # 3. Loop
++    for i in range(max_steps):
++        # Sample voxel
++        color_sample = volume_texture.sample(current_pos) # Returns RGBA
+         
+-    # Ensure we start at the entry point if the ray origin is outside
+-    start_t = max(t0, 0.0)
+-    end_t = t1
+-    
+-    # 3. Compute step size
+-    ray_length = end_t - start_t
+-    if ray_length <= 0.0:
+-        return vec3(0.0, 0.0, 0.0)
+-        
+-    step_size = ray_length / samples
+-    delta_direction = ray_direction * step_size
+-    
+-    # 4. Ray marching loop
+-    current_pos = ray_origin + ray_direction * start_t
+-    
+-    for i in range(samples):
+-        # a. Sample texture
+-        # Note: current_pos must be clamped or handled if it falls outside the texture coordinates
+-        color_sample = volume_texture.sample(current_pos) # Returns vec4 (RGBA)
+-        
+-        # b. Calculate alpha sample (retained from original ray casting logic)
++        # Alpha processing (retained from standard ray casting, unused for final color)
+         alpha_sample = color_sample.a * alpha_correction
+-        
+-        # c. Modulate by remaining transparency
+         alpha_sample *= (1.0 - accumulated_alpha)
+-        
+-        # d. Scale alpha for invariance
+         alpha_sample *= alpha_scale_factor
+-        
+-        # e. Accumulate color (X-Ray specific: divide by total steps)
+-        accumulated_color += color_sample.rgb / float(samples)
+-        
+-        # f. Accumulate alpha (not used for final color output in X-Ray mode)
+         accumulated_alpha += alpha_sample
+         
+-        # g. Advance ray
+-        current_pos += delta_direction
+-        accumulated_length += step_size
++        # Color accumulation (Average X-Ray)
++        accumulated_color += color_sample.rgb / max_steps
+         
+-        # h. Termination check
+-        if accumulated_length >= ray_length or accumulated_alpha >= 1.0:
++        # Advance
++        current_pos += ray_direction * sample_length
++        
++        # Early exit check
++        if accumulated_alpha >= 1.0:
+             break
+-            
++
++    # 4. Output
+     return accumulated_color
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Unused Alpha Computation:** The alpha accumulation logic (steps 3-4 and 7 in the source algorithm) is retained from the original Ray Casting method but is not used in the final color output for X-Ray mode, potentially wasting computation [S1, unofficial].
+-*   **Precision:** Dividing by `MAX_STEPS` at each step or at the end is critical for averaging. If `MAX_STEPS` is very large, floating-point precision errors in accumulation may occur.
+-*   **Boundary Conditions:** If the ray origin is inside the volume, $t_0$ should be 0 or handled appropriately to avoid sampling outside the valid range if the texture coordinates are normalized [G].
+-*   **Degenerate Input:** If `samples` is 0, division by zero occurs. If the volume is empty or the ray misses, return black [G].
++### Edge Cases and Pitfalls
++*   **Unused Alpha Computation**: The alpha accumulation logic (steps 3-4 and 7 in the source code) is retained from the original Ray Casting method but is not used in the final color output for X-Ray mode, potentially wasting computation [S1, unofficial].
++*   **Precision**: Dividing by `MAX_STEPS` at each step or at the end requires careful handling of floating-point precision to avoid accumulation errors over large volumes [S1, unofficial].
++*   **Boundary Conditions**: If the ray does not intersect the volume, the method must handle the null case explicitly [S1, unofficial].
++
++### Subtopics
++*   **Linear Accumulation**: Sums voxel values directly. Chosen when density is additive and opacity is ignored [S1, unofficial].
++*   **Average Volume Rendering**: Divides the sum by the number of steps. Chosen for a normalized "transmission" look [S2, unofficial].
++*   **Sparse Matrix-Vector Product**: The mathematical abstraction of this rendering, treating the volume as a sparse matrix $X_C$ [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(S)$ per pixel, where $S$ is the number of samples (steps) [S1, S2, unofficial]. The theoretical exact X-ray transform is $O(k n_k)$ where $k n_k$ is the number of crossed voxels, bounded by $\sqrt{n_1^2 + n_2^2 + n_3^2}$ [S3]. The fixed-step implementation is simpler but may be less accurate for sparse volumes compared to voxel-intersection methods.
+-*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel, plus the storage for the 3D texture [S1, S2, unofficial].
+-*   **Strengths:** Computationally simple; simulates the look of X-rays/CT scans; ignores opacity, allowing all internal structures to contribute to the final image [S1, S2, unofficial].
+-*   **Limitations:** Does not simulate occlusion or depth cues inherent in alpha compositing; results can be visually cluttered if many structures overlap; fixed-step sampling may alias thin structures if step size is too large [S1, S2, unofficial].
+-*   **When to use:** When a transmission-style view is desired, such as in medical imaging visualization or when the user wants to see through the volume without occlusion [S1, S2, unofficial].
+-*   **When not to use:** When realistic surface rendering, depth perception, or occlusion is required [S1, unofficial].
++*   **Time Complexity**: $O(k_n k)$, where $k_n$ is the number of crossed voxels and $k$ is a constant factor related to the number of diagonal voxels ($\sqrt{n_1^2 + n_2^2 + n_3^2}$ is an upper bound) [S3]. In discrete sampling, it is $O(\text{SAMPLES})$ per pixel [S1, unofficial].
++*   **Memory Complexity**: $O(N)$ for the volume data, where $N = n_1 \times n_2 \times n_3$ [S3].
++*   **Performance**: Efficient for large volumes as it avoids explicit matrix formation [S3].
++*   **Strengths**: Simulates X-ray/CT appearance; computationally simpler than alpha compositing [S1, S2, unofficial].
++*   **Limitations**: Ignores opacity/transparency effects; alpha calculation is wasted if not used [S1, unofficial].
+ 
+ ## Background
+-X-Ray Volume Rendering originates from the need to efficiently compute the X-ray projection (forward projection) of a voxelized function $\phi$, which is mathematically equivalent to a sparse matrix-vector product $X_C \rho$ without explicitly forming the huge sparse matrix $X_C$ [S3]. The technique was adapted from standard ray casting methods, where the accumulation step was modified from alpha compositing to linear averaging [S1, unofficial]. It is commonly used in medical imaging and scientific visualization to provide a quick, unoccluded view of volumetric data [S2, unofficial][S3].
++Originating from the need to efficiently compute the X-ray projection of voxelized functions without forming huge sparse matrices, this method is based on the work of [S3] (Flexible algebraic technique for multiview reconstruction). It is also known as "Average Volume Rendering" in implementations like [S2, unofficial] and is a modification of standard ray casting code [S1, unofficial].
+ 
+ ## Sources

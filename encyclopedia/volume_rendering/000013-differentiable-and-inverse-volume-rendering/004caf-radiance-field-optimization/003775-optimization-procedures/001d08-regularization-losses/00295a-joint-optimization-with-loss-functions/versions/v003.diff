@@ -1,0 +1,269 @@
+--- v002.md
++++ v003.md
+@@ -4,197 +4,87 @@
+ 
+ ## Overview
+-This method defines a composite objective function for the joint optimization of 3D surface splatting (surfel) parameters and a learnable HDR environment map in inverse rendering tasks [S1, unofficial]. It solves the problem of unstable geometry and lighting estimation by combining photometric fidelity with geometric priors, specifically depth consolidation and normal consistency [S1, unofficial]. It is distinguished from sibling regularization methods by its explicit coupling of surfel primitives (positions, orientations, scales, material properties) with global lighting parameters, and its use of layer-wise depth consolidation to prevent multi-layer compositing artifacts [S1, unofficial].
++This method defines a composite objective function for the joint optimization of 3D surface splat (surfel) parameters and an HDR environment map in inverse rendering. It solves the problem of unstable geometry and lighting estimation by combining photometric fidelity with geometric regularization terms that enforce depth consolidation and normal consistency. It is distinguished from sibling methods by its specific focus on multi-layer surfel compositing constraints (inter- and intra-layer depth penalties) and its joint update of material properties alongside the lighting environment [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Rendered image $\hat{\mathbf{I}}$, ground-truth image $\mathbf{I}^*$, ground-truth silhouette mask $\mathbf{M}^*$ (optional), surfel parameters (positions $\mathbf{c}$, quaternions $\mathbf{q}$, log-scales $\log \mathbf{s}$, albedo $\rho$, metallic $\mu$, roughness $\eta$), and environment map coefficients.
+-*   **Outputs:** Scalar total loss $\mathcal{L}$ and gradients for all learnable parameters.
++**Inputs and Outputs**
++*   **Inputs:** Rendered image $\hat{\mathbf{I}}$, ground-truth image $\mathbf{I}^*$, ground-truth silhouette mask $\mathbf{M}^*$, surfel parameters (positions $\mathbf{c}$, quaternions $\mathbf{q}$, log-scales, albedo, metallic, roughness), and current HDR environment map.
++*   **Outputs:** Scalar total loss $\mathcal{L}$ and gradients $\nabla_\theta \mathcal{L}$ with respect to all parameters $\theta$.
+ 
+-**Data Structures:**
+-*   **Surfel Parameters:** Stored in contiguous arrays or tensors. Positions $\mathbf{c} \in \mathbb{R}^3$, quaternions $\mathbf{q} \in \mathbb{R}^4$ (normalized), log-scales $\log \mathbf{s} \in \mathbb{R}^2$ (for 2D splat extents), material properties $\rho, \mu, \eta \in \mathbb{R}$.
+-*   **Layer Data:** For each pixel $p$, a list of $K$ composited layers. Each layer $i$ stores compositing weight $w_i$, mean depth $z_i$, and depth variance $\sigma_i^2$.
+-*   **Neighbor Index:** A spatial data structure (e.g., KD-Tree or Grid) mapping surfel indices to their nearest neighbors $\mathcal{N}_i$ with compatible normal orientation. This structure is rebuilt periodically and cached [S1, unofficial].
++**Data Structures**
++*   **Surfel Attributes:** Each surfel $i$ stores position $\mathbf{c}_i$, normal $\mathbf{n}_i$, compositing weight $w_i$, mean depth $z_i$, and depth variance $\sigma_i^2$.
++*   **Neighbor Index:** A spatial data structure (e.g., KD-tree or grid) mapping surfels to their nearest neighbors $\mathcal{N}_i$ with compatible normal orientations. This structure is rebuilt periodically and cached between optimization steps [S1, unofficial].
+ 
+-**Formulas:**
+-The total loss is a weighted sum of four terms [S1, unofficial]:
++**Loss Components**
++
++1.  **Photometric Loss ($\mathcal{L}_{\text{photo}}$):** Combines L1 reconstruction and Structural Similarity (SSIM). For HDR targets, both $\hat{\mathbf{I}}$ and $\mathbf{I}^*$ are transformed to log-space and sRGB before loss computation to prevent gradient dominance by bright pixels [S1, unofficial].
++    $$
++    \mathcal{L}_{\text{photo}} = (1 - \lambda_{\text{ssim}}) \|\hat{\mathbf{I}} - \mathbf{I}^*\|_1 + \lambda_{\text{ssim}} (1 - \text{SSIM}(\hat{\mathbf{I}}, \mathbf{I}^*))
++    $$
++    where $\lambda_{\text{ssim}}$ is the SSIM weighting factor.
++
++2.  **Silhouette Loss ($\mathcal{L}_{\text{sil}}$):** Supervises total accumulated coverage using the residual transmittance $\bar{T}_{K+1}$ (where $K$ is the number of layers). It uses a soft Intersection-over-Union (IoU) metric. This term is disabled once adaptive density control begins [S1, unofficial].
++    $$
++    \mathcal{L}_{\text{sil}} = \text{IoU}(1 - \bar{T}_{K+1}, \mathbf{M}^*)
++    $$
++
++3.  **Depth Consolidation Loss ($\mathcal{L}_{\text{cons}}$):** Penalizes spurious depth distributions across the $K$ composited surface layers at each pixel $p \in \mathcal{P}$. It consists of two terms:
++    *   **Inter-layer term ($\mathcal{L}_{\text{inter-c}}$):** Penalizes weight allocation across distant layers, driving contributions to a single surface layer.
++        $$
++        \mathcal{L}_{\text{inter-c}} = \sum_{i < j} w_i w_j |z_i - z_j|
++        $$
++    *   **Intra-layer term ($\mathcal{L}_{\text{intra-c}}$):** Penalizes depth spread within each layer, encouraging coplanarity.
++        $$
++        \mathcal{L}_{\text{intra-c}} = \sum_i w_i^2 \sigma_i^2
++        $$
++    The total consolidation loss is the mean over all pixels:
++    $$
++    \mathcal{L}_{\text{cons}} = \frac{1}{|\mathcal{P}|} \sum_{p \in \mathcal{P}} (\mathcal{L}_{\text{inter-c}} + \mathcal{L}_{\text{intra-c}})
++    $$
++
++4.  **Normal Consistency Loss ($\mathcal{L}_{\text{nc}}$):** Penalizes angular deviation between a surfel's normal and its orientation-aware nearest neighbors in 3D space.
++    $$
++    \mathcal{L}_{\text{nc}} = \frac{\sum_i \sum_{j \in \mathcal{N}_i} w_{ij} (1 - \mathbf{n}_i \cdot \mathbf{n}_j)}{\sum_i \sum_{j \in \mathcal{N}_i} w_{ij}}
++    $$
++    where $w_{ij} = \exp(-\|\mathbf{c}_i - \mathbf{c}_j\|^2 / 2\sigma^2)$ are distance-dependent weights, and $\sigma$ is derived from local intersample spacing [S1, unofficial].
++
++**Total Loss**
++The final objective is a weighted sum:
+ $$
+ \mathcal{L} = \mathcal{L}_{\text{photo}} + \lambda_{\text{sil}} \mathcal{L}_{\text{sil}} + \lambda_{\text{cons}} \mathcal{L}_{\text{cons}} + \lambda_{\text{nc}} \mathcal{L}_{\text{nc}}
+ $$
++where $\lambda_{\text{sil}}, \lambda_{\text{cons}}, \lambda_{\text{nc}}$ are scalar hyperparameters [S1, unofficial].
+ 
+-1.  **Photometric Loss ($\mathcal{L}_{\text{photo}}$):** Combines L1 reconstruction and SSIM. For HDR targets, both $\hat{\mathbf{I}}$ and $\mathbf{I}^*$ are transformed to log-space and sRGB before loss computation to compress dynamic range [S1, unofficial].
+-    $$
+-    \mathcal{L}_{\text{photo}} = (1 - \lambda_{\text{ssim}}) \|\hat{\mathbf{I}} - \mathbf{I}^*\|_1 + \lambda_{\text{ssim}} (1 - \text{SSIM}(\hat{\mathbf{I}}, \mathbf{I}^*))
+-    $$
+-    where $\lambda_{\text{ssim}}$ is the weighting factor.
++**Optimization Steps**
++1.  **Initialize:** Set surfel parameters (positions, tangents/quaternions, log-space scales, albedo, metallic, roughness) and HDR environment map. Initialize Adam optimizer [S1, unofficial].
++2.  **Render:** Compute $\hat{\mathbf{I}}$ and intermediate compositing values ($w_i, z_i, \sigma_i^2, \bar{T}_{K+1}$) for the current view.
++3.  **Preprocess:** If HDR, apply log-space and sRGB transfer to $\hat{\mathbf{I}}$ and $\mathbf{I}^*$.
++4.  **Compute Losses:**
++    *   Calculate $\mathcal{L}_{\text{photo}}$ using L1 and SSIM.
++    *   If foreground masks are available and adaptive density control is not active, calculate $\mathcal{L}_{\text{sil}}$.
++    *   Calculate $\mathcal{L}_{\text{cons}}$ by summing inter- and intra-layer penalties for all pixels.
++    *   Update neighbor indices if periodic rebuild threshold is met. Calculate $\mathcal{L}_{\text{nc}}$ using cached neighbors.
++5.  **Aggregate:** Compute $\mathcal{L}$ using the weighted sum formula.
++6.  **Backpropagate:** Compute gradients $\nabla_\theta \mathcal{L}$ for all parameters $\theta$.
++7.  **Update:** Apply Adam optimizer step to update $\theta$ [S1, unofficial].
+ 
+-2.  **Silhouette Loss ($\mathcal{L}_{\text{sil}}$):** Supervises total accumulated coverage using soft IoU. It is disabled once adaptive density control begins [S1, unofficial].
+-    $$
+-    \mathcal{L}_{\text{sil}} = \text{IoU}(1 - \bar{T}_{K+1}, \mathbf{M}^*)
+-    $$
+-    where $\bar{T}_{K+1}$ is the residual transmittance (silhouette mask) and $\mathbf{M}^*$ is the ground-truth mask.
++**Parameters**
++*   $\lambda_{\text{ssim}}$: SSIM weight. Value not given in the sources.
++*   $\lambda_{\text{sil}}, \lambda_{\text{cons}}, \lambda_{\text{nc}}$: Scalar weights for respective losses. Values not given in the sources.
++*   $\sigma$: Bandwidth for normal consistency weights, derived from local intersample spacing. Value not given in the sources.
+ 
+-3.  **Depth Consolidation Loss ($\mathcal{L}_{\text{cons}}$):** Enforces geometric thinness by penalizing weight allocation across distant layers (inter-layer) and depth spread within layers (intra-layer) [S1, unofficial].
+-    $$
+-    \mathcal{L}_{\text{cons}} = \frac{1}{|\mathcal{P}|} \sum_{p \in \mathcal{P}} (\mathcal{L}_{\text{inter-c}} + \mathcal{L}_{\text{intra-c}})
+-    $$
+-    $$
+-    \mathcal{L}_{\text{inter-c}} = \sum_{i < j} w_i w_j |z_i - z_j|
+-    $$
+-    $$
+-    \mathcal{L}_{\text{intra-c}} = \sum_i w_i^2 \sigma_i^2
+-    $$
+-    where sums run over $K$ layers at pixel $p$, $w_i$ is the compositing weight, $z_i$ is mean depth, and $\sigma_i^2$ is depth variance of layer $i$.
+-
+-4.  **Normal Consistency Loss ($\mathcal{L}_{\text{nc}}$):** Penalizes angular deviation between a surfel's geometric normal and its orientation-aware nearest neighbors in 3D [S1, unofficial].
+-    $$
+-    \mathcal{L}_{\text{nc}} = \frac{\sum_i \sum_{j \in \mathcal{N}_i} w_{ij} (1 - \mathbf{n}_i \cdot \mathbf{n}_j)}{\sum_i \sum_{j \in \mathcal{N}_i} w_{ij}}
+-    $$
+-    where $\mathcal{N}_i$ are nearest neighbors with compatible normal orientation, $\mathbf{n}_i, \mathbf{n}_j$ are normals, and $w_{ij} = \exp(-\|\mathbf{c}_i - \mathbf{c}_j\|^2 / 2\sigma^2)$ are distance-dependent weights with $\sigma$ derived from local intersample spacing.
+-
+-**Parameters:**
+-*   $\lambda_{\text{ssim}}$: SSIM weight. Not given in the sources.
+-*   $\lambda_{\text{sil}}$: Silhouette loss weight. Not given in the sources.
+-*   $\lambda_{\text{cons}}$: Consolidation loss weight. Not given in the sources.
+-*   $\lambda_{\text{nc}}$: Normal consistency loss weight. Not given in the sources.
+-*   $\sigma$: Bandwidth for normal consistency weight decay. Derived from local intersample spacing [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def compute_joint_loss(surfels, env_map, gt_image, gt_mask, 
+-                       lambda_ssim, lambda_sil, lambda_cons, lambda_nc, 
+-                       use_silhouette, rebuild_knn_interval, current_step):
+-    """
+-    Computes the total joint optimization loss for 3D surface splatting.
+-    
+-    Args:
+-        surfels: Object containing positions (c), quaternions (q), log-scales, 
+-                 material properties (rho, mu, eta), and layer data (w, z, sigma2) per pixel.
+-        env_map: Learnable HDR environment map parameters.
+-        gt_image: Ground-truth image (HDR).
+-        gt_mask: Ground-truth silhouette mask (optional).
+-        lambda_ssim: Weight for SSIM component.
+-        lambda_sil: Weight for silhouette loss.
+-        lambda_cons: Weight for depth consolidation loss.
+-        lambda_nc: Weight for normal consistency loss.
+-        use_silhouette: Boolean flag to enable silhouette loss.
+-        rebuild_knn_interval: Frequency (in steps) to rebuild the KNN structure.
+-        current_step: Current optimization step index.
+-        
+-    Returns:
+-        total_loss: Scalar tensor.
+-    """
+-    
+-    # 1. Render Image
+-    # Render current surfels and env_map to get predicted image I_hat
+-    # Apply tone mapping and gamma correction to I_hat
+-    I_hat = render_and_tone_map(surfels, env_map)
+-    
+-    # 2. Photometric Loss
+-    # For HDR, transform both images to log-space and sRGB
+-    I_hat_log_srgb = transform_hdr_to_log_srgb(I_hat)
+-    I_gt_log_srgb = transform_hdr_to_log_srgb(gt_image)
+-    
+-    l1_loss = l1_norm(I_hat_log_srgb - I_gt_log_srgb)
+-    ssim_loss = 1.0 - structural_similarity(I_hat_log_srgb, I_gt_log_srgb)
+-    l_photo = (1.0 - lambda_ssim) * l1_loss + lambda_ssim * ssim_loss
+-    
+-    total_loss = l_photo
+-    
+-    # 3. Silhouette Loss (Conditional)
+-    if use_silhouette and gt_mask is not None:
+-        # Get residual transmittance (silhouette mask) from rendering
+-        # T_bar_K_plus_1 is the accumulated transmittance after K layers
+-        T_residual = get_residual_transmittance(surfels)
+-        silhouette_pred = 1.0 - T_residual
+-        
+-        # Soft IoU loss
+-        l_sil = soft_iou_loss(silhouette_pred, gt_mask)
+-        total_loss += lambda_sil * l_sil
+-        
+-    # 4. Depth Consolidation Loss
+-    # Compute inter-layer and intra-layer penalties for all pixels
+-    l_inter = 0.0
+-    l_intra = 0.0
+-    pixel_count = 0
+-    
+-    for pixel in surfels.pixels:
+-        layers = pixel.layers # List of (w_i, z_i, sigma2_i)
+-        if len(layers) == 0:
+-            continue
+-            
+-        # Inter-layer: sum over all pairs i < j
+-        for i in range(len(layers)):
+-            for j in range(i + 1, len(layers)):
+-                w_i, z_i, _ = layers[i]
+-                w_j, z_j, _ = layers[j]
+-                l_inter += w_i * w_j * abs(z_i - z_j)
+-                
+-        # Intra-layer: sum over all layers
+-        for i in range(len(layers)):
+-            w_i, _, sigma2_i = layers[i]
+-            l_intra += (w_i ** 2) * sigma2_i
+-            
+-        pixel_count += 1
+-        
+-    if pixel_count > 0:
+-        l_cons = (l_inter + l_intra) / pixel_count
+-        total_loss += lambda_cons * l_cons
+-    else:
+-        l_cons = torch.tensor(0.0, device=surfels.positions.device)
+-        
+-    # 5. Normal Consistency Loss
+-    # Rebuild KNN structure periodically
+-    if current_step % rebuild_knn_interval == 0:
+-        rebuild_knn_structure(surfels)
+-        
+-    # Get neighbors for each surfel
+-    l_nc_num = 0.0
+-    l_nc_den = 0.0
+-    
+-    for surfel in surfels:
+-        neighbors = get_neighbors(surfel) # Returns list of neighbor surfels with compatible normals
+-        if not neighbors:
+-            continue
+-            
+-        for neighbor in neighbors:
+-            # Distance-dependent weight
+-            dist_sq = squared_distance(surfel.c, neighbor.c)
+-            sigma = get_local_spacing(surfel) # Derived from local intersample spacing
+-            w_ij = exp(-dist_sq / (2.0 * sigma ** 2))
+-            
+-            # Normal dot product
+-            n_i = get_normal(surfel)
+-            n_j = get_normal(neighbor)
+-            dot_product = dot(n_i, n_j)
+-            
+-            l_nc_num += w_ij * (1.0 - dot_product)
+-            l_nc_den += w_ij
+-            
+-    if l_nc_den > 0:
+-        l_nc = l_nc_num / l_nc_den
+-        total_loss += lambda_nc * l_nc
+-    else:
+-        l_nc = torch.tensor(0.0, device=surfels.positions.device)
+-        
+-    return total_loss
+-```
+-
+-**Edge Cases and Pitfalls:**
+-*   **HDR Gradient Dominance:** Without log-space/sRGB transformation, the brightest pixels dominate gradients. This is handled by the transformation step in $\mathcal{L}_{\text{photo}}$ [S1, unofficial].
+-*   **Multi-layer Artifacts:** Without $\mathcal{L}_{\text{cons}}$, the optimizer may distribute surfels across spurious depth layers. The inter-layer term drives consolidation into a single surface layer [S1, unofficial].
+-*   **Oversmoothing:** Screen-space normal regularizers can oversmooth geometry. This method uses 3D geometric normals and KNN consistency to avoid this [S1, unofficial].
+-*   **Silhouette Loss Timing:** $\mathcal{L}_{\text{sil}}$ should be disabled once adaptive density control begins, as the photometric loss and densification mechanism take over coverage enforcement [S1, unofficial].
+-*   **KNN Cost:** Computing nearest neighbors is expensive. The spatial data structure is rebuilt periodically and cached to amortize cost [S1, unofficial].
++**Edge Cases and Pitfalls**
++*   **Gradient Dominance:** In HDR training, bright pixels can dominate gradients. Mitigation: Apply log-space and sRGB transfer to both rendered and ground-truth images before loss computation [S1, unofficial].
++*   **Early Training Coverage:** Silhouette loss provides strong coverage signals early on but must be disabled when adaptive density control (densification) begins, as photometric loss and densification take over [S1, unofficial].
++*   **Computational Cost:** Neighbor index computation is expensive. Mitigation: Rebuild the spatial data structure periodically and cache it between updates [S1, unofficial].
++*   **Oversmoothing:** Screen-space normal regularizers can oversmooth geometry. This method uses 3D geometric normal consistency instead to avoid this [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by rendering and KNN neighbor queries. KNN structure rebuild is periodic, not per-step.
+-*   **Memory Complexity:** Requires storing surfel parameters, layer data per pixel, and the KNN spatial structure.
+-*   **Strengths:** Joint optimization of geometry and lighting improves inverse rendering stability. Depth consolidation prevents multi-layer artifacts. Normal consistency enforces geometric smoothness in 3D.
+-*   **Limitations:** Requires careful tuning of multiple loss weights ($\lambda$). Silhouette loss is only useful when masks are available and early in training.
+-*   **When to use:** Object-level inverse rendering where geometry and lighting need to be recovered simultaneously from multi-view images.
+-*   **When not to use:** When only novel view synthesis is needed without lighting estimation, or when computational resources are extremely limited and periodic KNN rebuilds are prohibitive.
++*   **Complexity:** The photometric and consolidation losses are $O(N)$ with respect to pixels and layers. The normal consistency loss is $O(N \cdot k)$ where $k$ is the number of neighbors, amortized by periodic spatial structure rebuilds.
++*   **Strengths:** Enforces geometric thinness and smoothness directly in 3D, preventing spurious depth layers and normal artifacts common in pure photometric optimization. Jointly optimizes lighting and geometry.
++*   **Limitations:** Requires careful scheduling of loss terms (e.g., disabling silhouette loss). Computationally heavier due to neighbor lookups and multi-layer depth statistics.
++*   **When to use:** Object-level inverse rendering where high-fidelity geometry and relighting are required, and ground-truth masks or multi-view consistency is available.
+ 
+ ## Background
+-This method originates from the 3DSS (3D Surface Splatting for Inverse Rendering) framework [S1, unofficial]. It builds on scattered-data approximation frameworks [Wendland 2004] and integrates concepts from depth consolidation [Barron et al. 2022; Huang et al. 2024] and HDR training techniques [Munkberg et al. 2022]. It is used for object-level inverse rendering, assessing geometry reconstruction, novel view synthesis, and novel scene relighting.
++This method originates from the 3DSS (3D Surface Splatting for Inverse Rendering) framework. It builds on scattered-data approximation principles [Wendland 2004] and integrates depth consolidation ideas from [Barron et al. 2022; Huang et al. 2024] adapted for surface layers. It was developed to address the lack of geometric priors in multi-layer compositing and the oversmoothing issues of screen-space normal regularizers [S1, unofficial].
+ 
+ ## Sources

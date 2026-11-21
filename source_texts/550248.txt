@@ -1,0 +1,165 @@
+英文版：Issue #12 环境 gaussian-splat-renderer-for-lam@0.0.9-alpha.2 使用 LAM Chatting Avatar 流程导出的数字人资源（offset.ply、skin.glb 和 animation.glb） 状态驱动的骨骼动画以及 52 个 ARKit BlendShape 问题现象 当状态动画包含头部或颈部旋转时，整个 Gaussian 数字人都会一起旋转，包括半身数字人中可见的颈部、肩部和身体区域。 关闭 ...
+
+[改进建议] 增加可选的全局运动稳定，避免整个数字人随头部旋转 · Issue #13 · aigc3d/LAM_WebRender · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[改进建议] 增加可选的全局运动稳定，避免整个数字人随头部旋转 #13
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[改进建议] 增加可选的全局运动稳定，避免整个数字人随头部旋转#13
+Copy link
+Description
+liuzhao1225
+opened on Jul 22, 2026
+Issue body actions
+英文版：Issue #12
+环境
+gaussian-splat-renderer-for-lam@0.0.9-alpha.2
+使用 LAM Chatting Avatar 流程导出的数字人资源（offset.ply、skin.glb 和 animation.glb）
+状态驱动的骨骼动画以及 52 个 ARKit BlendShape
+问题现象
+当状态动画包含头部或颈部旋转时，整个 Gaussian 数字人都会一起旋转，包括半身数字人中可见的颈部、肩部和身体区域。
+关闭 Gaussian 的骨骼变换后，整个数字人跟随旋转的问题会消失，但刚性的头部运动也会全部消失。52 个 ARKit BlendShape 仍然可以正常工作。这说明骨骼运动与面部 BlendShape 变形是两条相互独立的处理路径，也与 Issue #4 中的说明一致。
+原因分析
+在已发布的 renderer 模块中，顶点着色器将 head 骨骼矩阵以 1.0 的权重应用到了每一个 Gaussian 点：
+```
+vec4 skinned = vec4(0.0);
+
+if (headBoneIndex >= 0.0) {
+    mat4 boneMat = getBoneMatrix0(headBoneIndex);
+    skinned += boneMat * skinVertex * 1.0;
+}
+
+// 当前基于各顶点权重的蒙皮代码被注释掉了。
+transformed = skinned.xyz;
+```
+因此，头部旋转实际上会成为整个 Gaussian 点云的刚体变换。
+建议的最小可选方案
+增加一个可选的全局运动稳定步骤：
+在静止或中性帧，选取少量位置最低的 Gaussian 中心点作为基准锚点并记录位置。
+每一帧先完整执行现有的 BlendShape 和骨骼变换。
+使用 Horn/Kabsch 方法求一个最佳刚体变换，使当前锚点尽可能对齐静止帧的基准锚点。
+将同一个补偿矩阵应用到所有 Gaussian 点。
+该方案不使用蒙版、高度混合，也不区分头部和身体区域，而是在现有变形流程之后，对全部点统一应用一次全局补偿。
+建议该功能默认关闭，因为开启后会有意抵消整体的刚性头部旋转，但局部的 52 BlendShape 面部动作仍然会保留。可考虑将 API 命名为 globalMotionStabilization。
+原型验证结果
+使用最低的 24 个点作为锚点：
+状态动画播放时，颈部、肩部和身体区域在视觉上保持稳定。
+ARKit 面部动作仍然正常。
+锚点对齐 RMS 误差约为 9.12e-4（模型坐标空间）。
+最大锚点误差约为 1.60e-3（模型坐标空间）。
+关于贡献代码的问题
+目前公开的 LAM_WebRender 仓库看起来主要包含 demo 集成，而 renderer 的具体实现是通过 npm 包发布的。
+想请教：
+gaussian-splat-renderer-for-lam 的源码仓库是否公开？
+是否接受一个可选的 globalMotionStabilization 实现？
+如果准备 Pull Request，应当提交到哪个仓库和分支？
+确认正确的 renderer 源码位置后，我可以继续准备 PR。
+Activity
+liuzhao1225 commented on Jul 22, 2026
+liuzhao1225
+on Jul 22, 2026
+Author
+More actions
+原型具体代码改动
+由于公开仓库中没有 renderer 源码，目前验证通过的版本是在调用方完成的原型实现。
+1. 为 Gaussian shader 增加一个全局稳定矩阵
+新增一个默认值为单位矩阵的 uniform：
+```
+uniform mat4 gaussianStabilizationMatrix;
+```
+保留原有的头部骨骼变换，然后对每一个 Gaussian 点统一应用补偿矩阵：
+```
+vec4 skinned = skinVertex;
+
+if (headBoneIndex >= 0.0) {
+    mat4 headBoneMatrix = getBoneMatrix0(headBoneIndex);
+    skinned = headBoneMatrix * skinVertex;
+}
+
+// 整个 Gaussian 点云只使用一个矩阵，不使用蒙版或区域划分。
+skinned = gaussianStabilizationMatrix * skinned;
+transformed = skinned.xyz;
+```
+原有的 BlendShape 计算保持不变。
+2. 只在初始化时记录一次静止锚点
+等 Gaussian 纹理加载完成后，从原始中心点数组中选取 Y 坐标最低的 24 个点，并记录为静止参考点：
+```
+const anchors = selectLowestGaussianAnchors(
+    splatMesh.splatDataTextures.baseData.centers,
+    splatMesh.gaussianSplatCount,
+    24,
+);
+
+const headBoneIndex = skeleton.bones.findIndex(
+    (bone) => bone.name === "head",
+);
+```
+这些位置在当前数字人实例的生命周期内保持不变。
+3. 每帧求解并上传一个刚体补偿矩阵
+每次完成 renderer 原有更新后，读取当前 head bone 矩阵，按照 renderer 的方式变换静止锚点，再使用 Horn 四元数方法求解“当前位置到静止位置”的最佳刚体对齐矩阵：
+```
+const matrixOffset = headBoneIndex * 16;
+const headBoneMatrix = skeleton.boneMatrices.subarray(
+    matrixOffset,
+    matrixOffset + 16,
+);
+
+const currentAnchors = anchors.map(
+    (anchor) => transformPoint(headBoneMatrix, anchor),
+);
+
+const alignmentMatrix = fitRigidAlignment(
+    currentAnchors,
+    anchors,
+);
+
+splatMesh.material.uniforms
+    .gaussianStabilizationMatrix.value
+    .fromArray(alignmentMatrix);
+```
+原型中的接入位置如下：
+```
+const originalUpdate = viewer.update.bind(viewer);
+
+viewer.update = (...args) => {
+    originalUpdate(...args);
+    updateGaussianStabilization(viewer);
+};
+```
+4. 增加运行时构建校验
+构建校验会确认：
+最终 bundle 中存在 gaussianStabilizationMatrix * skinned。
+补偿矩阵全局应用，没有使用蒙版。
+原有 Gaussian BlendShape 表情路径仍然保留。
+原来无条件使用 head bone 的语句不再是最终变换。
+上游正式实现建议
+当前原型通过 Vite 构建时修改 npm 产物，并覆盖 viewer.update，只是因为这里没有公开 renderer 源码。正式 PR 应将该功能直接放入 renderer 内部，做成默认关闭的公开选项，使用可复用的 TypedArray 和临时矩阵避免每帧分配，并在切换数字人资源时重新初始化静止锚点。
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

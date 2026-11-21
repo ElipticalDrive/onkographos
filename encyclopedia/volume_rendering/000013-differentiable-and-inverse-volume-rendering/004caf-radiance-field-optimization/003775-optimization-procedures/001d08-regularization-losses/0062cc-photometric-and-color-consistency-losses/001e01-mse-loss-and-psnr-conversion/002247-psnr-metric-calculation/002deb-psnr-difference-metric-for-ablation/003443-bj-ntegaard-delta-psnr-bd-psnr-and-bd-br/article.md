@@ -1,0 +1,148 @@
+# Bjøntegaard Delta PSNR (BD-PSNR) and BD-BR
+
+Also called: BD-BR, BD-PSNR, Bjøntegaard Delta
+
+## Overview
+BD-PSNR and BD-BR are metrics used to evaluate lossy compression performance by calculating the average difference in quality (BD-PSNR) or bit-rate (BD-BR) between two rate-distortion (RD) curves [S1]. They set themselves apart from point-wise comparisons by integrating the area between two continuous RD curves, providing a single value that facilitates objective comparison of compression techniques [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Two sets of rate-distortion data points. Each set consists of pairs $(R_i, D_i)$, where $R$ is the bit-rate (or size) and $D$ is the distortion metric (e.g., MSE, PSNR). Let the reference method be $R_{ref}, D_{ref}$ and the test method be $R_{test}, D_{test}$.
+*   **Outputs:** A single BD-PSNR value (in dB) representing the average quality difference, or a single BD-BR value (in %) representing the average bit-rate difference [S1].
+
+**Data Structures:**
+*   Two lists of tuples: `[(rate, distortion), ...]` for the reference and test methods.
+*   The number of points should be sufficient to model the curve (typically 4 or more points per curve are recommended in standard implementations, though the source notes do not specify a minimum).
+
+**Steps:**
+1.  **Logarithmic Transformation:** Convert the bit-rate values $R$ to natural logarithms $\ln(R)$ for both reference and test curves. The distortion values (PSNR or MSE) are used directly or transformed depending on the specific variant (PSNR vs BR). For BD-PSNR, the distortion is typically PSNR. For BD-BR, the distortion is often PSNR, and the rate is the variable of integration.
+2.  **Cubic Spline Interpolation:** Fit a cubic spline through the data points of the reference curve $(\ln(R_{ref}), D_{ref})$ and the test curve $(\ln(R_{test}), D_{test})$. This creates continuous functions $D_{ref}(\ln R)$ and $D_{test}(\ln R)$ [S1].
+3.  **Integration:** Calculate the area between the two interpolated curves over the range of common bit-rates.
+    *   For **BD-PSNR**: Integrate the difference in distortion (PSNR) with respect to $\ln(R)$. The result is the average difference in PSNR [S1].
+    *   For **BD-BR**: Integrate the difference in bit-rate with respect to the distortion metric (usually PSNR). The result is normalized to a percentage [S1].
+4.  **Normalization:**
+    *   BD-PSNR is expressed in dB. A positive value indicates the test method is better (higher PSNR) than the reference.
+    *   BD-BR is expressed as a percentage. A negative value indicates the test method uses less bitrate for the same quality.
+
+**Formulas:**
+Let $y_{ref}(x)$ and $y_{test}(x)$ be the cubic spline interpolations of the reference and test curves, where $x = \ln(R)$.
+The BD-PSNR is calculated as:
+$$ \Delta \bar{P} = \frac{1}{x_2 - x_1} \int_{x_1}^{x_2} (y_{test}(x) - y_{ref}(x)) \, dx $$
+where $x_1$ and $x_2$ are the minimum and maximum $\ln(R)$ values common to both curves [S1].
+
+The BD-BR is calculated as:
+$$ \Delta \bar{R} = \frac{\int_{y_1}^{y_2} (x_{test}(y) - x_{ref}(y)) \, dy}{\int_{y_1}^{y_2} x_{ref}(y) \, dy} \times 100\% $$
+where $y_1$ and $y_2$ are the minimum and maximum distortion values common to both curves [S1].
+
+**Parameters:**
+*   Spline type: Cubic spline [S1].
+*   Integration limits: The overlapping range of the two curves [S1].
+
+**Edge cases and pitfalls:**
+*   **Non-overlapping ranges:** If the rate-distortion curves do not overlap in their operational range, the integration limits are undefined. The source notes do not specify how to handle this.
+*   **Monotonicity:** RD curves should be monotonic. Non-monotonic data may require smoothing or filtering before interpolation.
+*   **Precision:** The accuracy depends on the number of data points used to define the curves. Sparse data leads to inaccurate spline interpolation.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.interpolate import CubicSpline
+
+def calculate_bd_psnr(ref_rates, ref_psnrs, test_rates, test_psnrs):
+    """
+    Calculates BD-PSNR between two rate-distortion curves.
+    ref_rates, test_rates: array-like of bit-rates (R)
+    ref_psnrs, test_psnrs: array-like of PSNR values (D)
+    """
+    # 1. Log-transform rates
+    x_ref = np.log(ref_rates)
+    x_test = np.log(test_rates)
+    
+    # 2. Determine common range
+    x_min = max(np.min(x_ref), np.min(x_test))
+    x_max = min(np.max(x_ref), np.max(x_test))
+    
+    if x_min >= x_max:
+        return 0.0 # Or raise error
+        
+    # 3. Interpolate
+    # Create a dense set of x values within the common range
+    x_dense = np.linspace(x_min, x_max, 1000)
+    
+    cs_ref = CubicSpline(x_ref, ref_psnrs)
+    cs_test = CubicSpline(x_test, test_psnrs)
+    
+    y_ref = cs_ref(x_dense)
+    y_test = cs_test(x_dense)
+    
+    # 4. Integrate difference
+    # Using trapezoidal rule for numerical integration
+    integral = np.trapz(y_test - y_ref, x_dense)
+    
+    # 5. Normalize by range
+    bd_psnr = integral / (x_max - x_min)
+    
+    return bd_psnr
+
+def calculate_bd_br(ref_rates, ref_psnrs, test_rates, test_psnrs):
+    """
+    Calculates BD-BR between two rate-distortion curves.
+    """
+    # Note: Standard BD-BR integrates rate difference w.r.t distortion
+    # This requires inverting the spline or interpolating R as a function of D
+    
+    # 1. Determine common PSNR range
+    y_min = max(np.min(ref_psnrs), np.min(test_psnrs))
+    y_max = min(np.max(ref_psnrs), np.max(test_psnrs))
+    
+    if y_min >= y_max:
+        return 0.0
+        
+    # 2. Interpolate Rate as a function of PSNR
+    y_dense = np.linspace(y_min, y_max, 1000)
+    
+    # CubicSpline requires x to be monotonic. PSNR is typically monotonic with Rate.
+    # However, if PSNR is not strictly monotonic in the input data, this may fail.
+    try:
+        cs_ref_r = CubicSpline(ref_psnrs, np.log(ref_rates))
+        cs_test_r = CubicSpline(test_psnrs, np.log(test_rates))
+    except ValueError:
+        # Fallback or error handling for non-monotonic data
+        return 0.0
+
+    x_ref_log = cs_ref_r(y_dense)
+    x_test_log = cs_test_r(y_dense)
+    
+    # 3. Integrate difference in log-rate
+    integral_diff = np.trapz(x_test_log - x_ref_log, y_dense)
+    integral_ref = np.trapz(x_ref_log, y_dense)
+    
+    # 4. Calculate percentage
+    # BD-BR is often defined as exp(integral) - 1 or similar depending on log usage
+    # The source [S1] describes it as "average relative difference in bit-rate"
+    # Standard VCEG implementation uses:
+    bd_br = (np.exp(integral_diff) - 1) * 100.0
+    
+    return bd_br
+```
+
+## Subtopics
+
+### [Bjøntegaard Delta-Rate (BD-Rate)](12640-bj-ntegaard-delta-rate-bd-rate.md)
+BD-Rate is a metric for fair comparison of overall rate-distortion (RD) performance that calculates the average bit-rate saving at a given quality level between two methods. It sets itself apart from point-wise comparisons by integrating the area between two continuous RD curves, providing a single percentage value representing efficiency gains. It builds on the concept of BD-PSNR but inverts the perspective to measure bitrate reduction [7176-bj-ntegaard-delta-psnr-bd-psnr-and-bd-br.md].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by cubic spline interpolation and numerical integration. For $N$ points, spline construction is $O(N)$ and integration is $O(M)$ where $M$ is the number of integration steps.
+*   **Memory Complexity:** $O(N)$ to store the data points and spline coefficients.
+*   **Strengths:** Provides a single, robust metric for comparing compression algorithms that accounts for the entire RD curve, not just specific operating points. It is widely accepted in video coding standards.
+*   **Limitations:** Requires multiple RD points per method. Sensitive to the number and distribution of data points. Assumes the RD curve can be accurately modeled by a cubic spline.
+*   **When to use:** When comparing two or more compression methodologies where a single scalar metric summarizing the RD performance is needed [S1].
+*   **When not to use:** When only a single operating point is available, or when the RD curves do not overlap significantly.
+
+## Background
+The Bjøntegaard Delta metrics were originally designed within the Video Coding Experts Group (VCEG) – ITU SG 16 – for the comparison of various video coding techniques [S1]. They were developed to address the impracticality of providing full rate-distortion curves in publications, allowing researchers to summarize performance differences in a single value [S1].
+
+## Sources
+[S1] Wavelet based volumetric medical image compression, https://doi.org/10.1016/j.image.2014.12.007, fetched 2026-10-26

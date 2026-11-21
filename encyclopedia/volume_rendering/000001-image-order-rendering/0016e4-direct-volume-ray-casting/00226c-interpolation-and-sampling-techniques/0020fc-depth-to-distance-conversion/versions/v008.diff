@@ -1,0 +1,108 @@
+--- v007.md
++++ v008.md
+@@ -4,18 +4,18 @@
+ 
+ ## Overview
+-Depth to Distance Conversion transforms sampled depth values ($z\_vals$) along a camera ray into the physical segment lengths ($dists$) between consecutive samples. This conversion is necessary because uniform sampling in depth space does not correspond to uniform physical spacing in 3D space, particularly under perspective projection. It accounts for the geometric relationship between the ray direction and the viewing angle, ensuring that volume rendering integration weights samples correctly by their true spatial extent. Unlike [NDC Points to Distance](2500-ndc-points-to-distance.md), which operates in Normalized Device Coordinates, this method operates directly on camera-space depth values.
++Depth to Distance Conversion transforms sampled depth values ($z\_vals$) along a camera ray into the physical segment lengths ($dists$) between consecutive samples [S4, unofficial]. This conversion is necessary because uniform sampling in depth space does not correspond to uniform physical spacing in 3D space under perspective projection [S1, unofficial][S3, unofficial]. It accounts for the geometric relationship between the ray direction and the viewing angle [S1, unofficial][S3, unofficial]. Unlike [NDC Points to Distance](2500-ndc-points-to-distance.md), which operates in Normalized Device Coordinates, this method operates directly on camera-space depth values [S1, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** `z_vals`, a tensor of shape $(N_{rays}, N_{samples})$ containing the depth values (distance from camera center along the ray axis) for each sample point along each ray.
+-*   **Output:** `dists`, a tensor of shape $(N_{rays}, N_{samples})$ containing the physical distance between consecutive samples.
++*   **Input:** `z_vals`, a tensor of shape $(N_{rays}, N_{samples})$ containing the depth values for each sample point along each ray [S2, unofficial].
++*   **Output:** `dists`, a tensor of shape $(N_{rays}, N_{samples})$ containing the physical distance between consecutive samples [S2, unofficial].
+ 
+ **Data Structures:**
+-The input `z_vals` is typically a contiguous array or tensor where `z_vals[i, j]` represents the depth of the $j$-th sample along the $i$-th ray. The values are assumed to be sorted in increasing order of depth (from near to far).
++The input `z_vals` is a contiguous tensor where `z_vals[i, j]` represents the depth of the $j$-th sample along the $i$-th ray [S2, unofficial]. The values are assumed to be sorted in increasing order of depth (near to far) [G].
+ 
+ **Steps:**
+-1.  **Compute Raw Differences:** Calculate the difference between consecutive depth values to get the raw segment lengths. For a ray with samples $z_0, z_1, \dots, z_{N-1}$, the raw distance between sample $j$ and $j+1$ is $z_{j+1} - z_j$.
+-2.  **Handle Boundary:** Append a large constant value to the end of the distance array to represent the segment after the last sample. This prevents indexing errors and ensures the output tensor has the same shape as the input `z_vals`.
+-3.  **Cosine Scaling:** Scale the raw distances by the cosine of the angle between the ray direction and the viewing direction (or the normal of the depth plane, depending on the coordinate system convention). This step corrects for the perspective projection effect where depth intervals do not linearly map to Euclidean distances along the ray.
++1.  **Compute Raw Differences:** Calculate the difference between consecutive depth values to get the raw segment lengths [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. For a ray with samples $z_0, z_1, \dots, z_{N-1}$, the raw distance between sample $j$ and $j+1$ is $z_{j+1} - z_j$ [S1, unofficial].
++2.  **Handle Boundary:** Append a large constant value ($10^{10}$) to the end of the distance array to represent the segment after the last sample [S2, unofficial][S3, unofficial][S4, unofficial]. This ensures the output tensor has the same shape as the input `z_vals` [S2, unofficial].
++3.  **Cosine Scaling:** Scale the raw distances by the cosine of the angle between the ray direction and the viewing direction [S1, unofficial][S3, unofficial]. This step corrects for the perspective projection effect where depth intervals do not linearly map to Euclidean distances along the ray [S1, unofficial][S3, unofficial].
+ 
+ **Formulas:**
+@@ -23,9 +23,8 @@
+ The raw distance $d'_{i,j}$ between sample $j$ and $j+1$ is:
+ $$ d'_{i,j} = z_{i,j+1} - z_{i,j} $$
+-For the last sample $j = N_{samples}-1$, the distance is set to a large constant $C$ (e.g., $10^{10}$).
+-
+-The final distance $d_{i,j}$ is scaled by $\cos \theta_i$, where $\theta_i$ is the angle between the ray direction $\mathbf{d}_i$ and the viewing direction (or the axis along which depth is measured). In many implementations, if the ray direction is normalized and the depth is measured along the camera's z-axis, this factor accounts for the projection geometry.
++For the last sample $j = N_{samples}-1$, the distance is set to a large constant $C = 10^{10}$ [S2, unofficial][S3, unofficial][S4, unofficial].
++The final distance $d_{i,j}$ is scaled by $\cos \theta_i$, where $\theta_i$ is the angle between the ray direction $\mathbf{d}_i$ and the viewing direction (or the axis along which depth is measured) [S1, unofficial][S3, unofficial]:
+ $$ d_{i,j} = d'_{i,j} \cdot \cos \theta_i $$
+-Note: In some specific implementations (like [S1, unofficial]), the cosine term might be pre-computed or derived from the ray direction components. If the rays are parallel to the viewing axis (orthographic), $\cos \theta = 1$. For perspective rays, this factor varies.
++If the rays are parallel to the viewing axis (orthographic), $\cos \theta = 1$ [G]. For perspective rays, this factor varies [G].
+ 
+ **Pseudocode:**
+@@ -40,5 +39,5 @@
+         z_vals: Tensor of shape (N_rays, N_samples) containing depth values.
+         cos_angle: Tensor of shape (N_rays,) or (N_rays, 1) containing the cosine of the angle 
+-                   between the ray and the viewing direction/normal.
++                   between the ray and the viewing direction.
+     
+     Returns:
+@@ -46,24 +45,14 @@
+     """
+     # Step 1: Compute raw differences between consecutive samples
+-    # dists_raw[i, j] = z_vals[i, j+1] - z_vals[i, j]
+     dists_raw = z_vals[..., 1:] - z_vals[..., :-1]
+     
+-    # Step 2: Append a large constant to the last segment
+-    # The last segment is arbitrary but needs a value to match shape
+-    # Using 1e10 as a large constant to effectively ignore the last segment's contribution 
+-    # or to prevent division by zero in subsequent steps if used.
++    # Step 2: Append a large constant to the last segment to match input shape
+     large_constant = torch.tensor(1e10, device=z_vals.device, dtype=z_vals.dtype)
+-    # Expand large_constant to match the batch dimensions
+-    # dists_raw shape: (N_rays, N_samples - 1)
+-    # We want to append a value of shape (N_rays, 1)
+     last_segment = large_constant * torch.ones_like(dists_raw[..., :1])
+     dists = torch.cat([dists_raw, last_segment], dim=-1)
+     
+     # Step 3: Scale by cosine of the angle
+-    # cos_angle should be broadcastable to (N_rays, 1)
+-    # If cos_angle is (N_rays,), unsqueeze to (N_rays, 1)
+     if cos_angle.dim() == 1:
+         cos_angle = cos_angle.unsqueeze(-1)
+-    
+     dists = dists * cos_angle
+     
+@@ -72,10 +61,10 @@
+ 
+ **Parameters:**
+-*   `large_constant`: Typically $10^{10}$. This value is chosen to be sufficiently large to not interfere with normal rendering but finite to avoid numerical overflow. [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]
++*   `large_constant`: $10^{10}$ [S2, unofficial][S3, unofficial][S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Shape Mismatch:** Ensure `cos_angle` is broadcastable to the last dimension of `dists`. If `cos_angle` is per-ray, it must be unsqueezed.
+-*   **Last Segment:** The last segment's distance is arbitrary since there is no next sample. The large constant is a convention to maintain tensor shape. In volume rendering, the weight for the last segment is often negligible or handled separately.
+-*   **Cosine Angle Definition:** The exact definition of $\cos \theta$ depends on the coordinate system. In some contexts, it is the dot product of the ray direction and the camera's forward vector. In others, it might be related to the Jacobian of the coordinate transformation. Ensure consistency with the rest of the rendering pipeline. [S1, unofficial][S3, unofficial]
++*   **Shape Mismatch:** Ensure `cos_angle` is broadcastable to the last dimension of `dists`. If `cos_angle` is per-ray, it must be unsqueezed to shape $(N_{rays}, 1)$ [G].
++*   **Last Segment:** The last segment's distance is arbitrary since there is no next sample. The large constant is a convention to maintain tensor shape [S2, unofficial][S3, unofficial][S4, unofficial].
++*   **Cosine Angle Definition:** The exact definition of $\cos \theta$ depends on the coordinate system. In many implementations, if the ray direction is normalized and the depth is measured along the camera's z-axis, this factor accounts for the projection geometry [G].
+ 
+ ## Subtopics
+@@ -85,12 +74,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_{rays} \cdot N_{samples})$. The operation involves simple subtraction and multiplication, which are linear in the number of samples.
+-*   **Memory Complexity:** $O(N_{rays} \cdot N_{samples})$ for the output tensor `dists`.
+-*   **Strengths:** Simple, efficient, and numerically stable. It correctly accounts for perspective projection effects when combined with the cosine scaling.
+-*   **Limitations:** Assumes that the depth values are sorted and correspond to samples along a single ray. It does not handle non-linear depth mappings or complex coordinate transformations beyond the cosine scaling.
+-*   **When to Use:** When using depth-based sampling in volume rendering or neural radiance fields (NeRF) where samples are generated in camera space. It is a standard preprocessing step before volume rendering integration.
++*   **Time Complexity:** $O(N_{rays} \cdot N_{samples})$. The operation involves simple subtraction and multiplication, which are linear in the number of samples [G].
++*   **Memory Complexity:** $O(N_{rays} \cdot N_{samples})$ for the output tensor `dists` [G].
++*   **Strengths:** Simple, efficient, and numerically stable. It correctly accounts for perspective projection effects when combined with the cosine scaling [G].
++*   **Limitations:** Assumes that the depth values are sorted and correspond to samples along a single ray. It does not handle non-linear depth mappings or complex coordinate transformations beyond the cosine scaling [G].
++*   **When to Use:** When using depth-based sampling in volume rendering or neural radiance fields where samples are generated in camera space [G].
+ 
+ ## Background
+-This method is a fundamental component in volume rendering pipelines, particularly in neural radiance fields (NeRF) and related techniques. It ensures that the integration of volume density and color along a ray is performed with respect to the true physical distance, rather than the arbitrary depth parameter. The cosine scaling accounts for the fact that depth values are typically measured along the camera's optical axis, while the ray direction may vary. This technique is widely used in implementations such as PointNeRF [S1, unofficial], CNC [S2, unofficial], TensoRF [S3, unofficial], and Collaborative Neural Radiance Fields [S4, unofficial].
++Not given in the sources.
+ 
+ ## Sources

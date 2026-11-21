@@ -1,0 +1,168 @@
+# I2-SDF
+
+Also called: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs
+
+## Overview
+I2-SDF is a neural implicit framework for jointly reconstructing the geometry, material, and incident radiance of complex indoor scenes from multi-view images [S1]. It distinguishes itself from standard NeRF approaches by modeling geometry as a Signed Distance Field (SDF) and decomposing the radiance field into spatially-varying material and emission components via surface-based, differentiable Monte Carlo raytracing [S1]. This decomposition enables physically based scene relighting and editing, which standard volume rendering cannot achieve directly [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images of an indoor scene. Optional geometry priors such as depth maps and surface normals [S1].
+*   **Outputs:** Neural fields for geometry ($F_d$), radiance ($F_c$), material ($F_a, F_\rho$), and emission ($F_e, L[\cdot]$); rendered novel views; decomposed intrinsic maps (albedo, roughness, emission) [S1].
+
+**Data Structures:**
+The method uses four Multi-Layer Perceptrons (MLPs) to represent implicit fields [S1]:
+1.  $F_d$: Maps 3D position $\mathbf{x}$ to SDF value $d(\mathbf{x})$ and its gradient (normal).
+2.  $F_c$: Maps 3D position $\mathbf{x}$ and view direction $\mathbf{v}$ to radiance $\hat{c}$.
+3.  $F_a, F_\rho$: Map $\mathbf{x}$ to material parameters (e.g., albedo, roughness).
+4.  $F_e$: Maps $\mathbf{x}$ to emitter semantic probability (identifying light sources) [S1].
+
+**SDF to Density Transformation:**
+The SDF value $d(\mathbf{x})$ is converted to volume density $\sigma(\mathbf{x})$ using a learnable sparsity parameter $\beta$ [S1, 18170-i2-sdf.md]:
+
+$$
+\sigma(\mathbf{x}) = 
+\begin{cases} 
+\frac{1}{\beta}(1 - \exp(d(\mathbf{x})/\beta)) & \text{if } d(\mathbf{x}) < 0 \\
+\frac{1}{2\beta}\exp(-d(\mathbf{x})/2\beta) & \text{if } d(\mathbf{x}) \ge 0 
+\end{cases}
+$$
+
+**Rendering:**
+To render a pixel, a ray $\mathbf{r}$ is cast from camera origin $\mathbf{o}$ along direction $\mathbf{v}$. $M$ points $\mathbf{x}_{ir} = \mathbf{o} + t_i \mathbf{v}$ are sampled. The color $\hat{C}(\mathbf{r})$ is computed via numerical integration [S1]:
+
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^{M} T_{ri} \alpha_{ri} \hat{c}_{ir}
+$$
+
+where:
+*   $\hat{c}_{ir} = F_c(\mathbf{x}_{ir}, \mathbf{v})$ is the predicted radiance.
+*   $\alpha_{ri} = 1 - \exp(-\sigma_{ri} \delta_{ri})$ is the opacity, with $\sigma_{ri} = \sigma(\mathbf{x}_{ir})$ and $\delta_{ri}$ the distance to the next sample.
+*   $T_{ri} = \prod_{j=1}^{i-1} (1 - \alpha_{rj})$ is the accumulated transmittance [S1].
+
+**Training Strategy:**
+I2-SDF employs a two-stage training scheme to resolve ambiguities between geometry, material, and lighting [S1]:
+
+1.  **Stage 1 (Geometry & Radiance):** Train $F_d$, $F_c$, and the emitter semantic field $F_e$. The network learns the SDF and the total incident radiance (lighting + material) [S1].
+2.  **Stage 2 (Material & Emission):** Train the material fields ($F_a, F_\rho$) and the emission field $L[\cdot]$. During this stage, $F_d$, $F_c$, and $F_e$ are fixed and detached from gradient descent [S1]. The radiance field is decomposed using surface-based, differentiable Monte Carlo raytracing [S1].
+
+**Adaptive Sampling and Loss:**
+To handle fine-grained small objects, I2-SDF introduces an error-guided adaptive sampling scheme and a "bubble loss" [S1]. Standard uniform sampling often fails to capture high-frequency details of small objects because low-frequency large objects converge faster [S1]. The adaptive scheme concentrates samples where rendering error is high, and the bubble loss penalizes deviations from the expected SDF structure near small surfaces [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_ray(ray_origin, ray_direction, camera_params, model, stage):
+    """
+    Renders a single ray using I2-SDF.
+    stage: 'geometry' for Stage 1, 'material' for Stage 2.
+    """
+    # 1. Sample points along the ray
+    # In practice, I2-SDF uses error-guided adaptive sampling.
+    # For simplicity, we assume M samples are selected.
+    t_values = get_adaptive_samples(ray_origin, ray_direction, model, stage)
+    points = ray_origin + t_values[:, None] * ray_direction
+    
+    # 2. Query Geometry and Radiance Fields
+    # F_d predicts SDF and potentially normal
+    sdf_values, normals = model.F_d(points)
+    
+    # Transform SDF to density using learnable beta
+    beta = model.beta
+    density = compute_density(sdf_values, beta)
+    
+    # F_c predicts radiance based on position and view direction
+    radiance = model.F_c(points, ray_direction)
+    
+    # 3. Volume Rendering Integration
+    # Calculate opacity alpha from density and step size delta
+    # delta is the distance between consecutive samples
+    deltas = np.diff(t_values, prepend=0)
+    opacity = 1.0 - np.exp(-density * deltas)
+    
+    # Calculate transmittance T
+    # T_i = product(1 - alpha_j) for j < i
+    transmittance = np.cumprod(1.0 - opacity)
+    # Shift transmittance for the first sample (T_0 = 1)
+    transmittance = np.roll(transmittance, 1)
+    transmittance[0] = 1.0
+    
+    # Weighted sum of radiance
+    weights = transmittance * opacity
+    color = np.sum(weights[:, None] * radiance, axis=0)
+    
+    return color, density, opacity
+
+def compute_density(sdf, beta):
+    """
+    Converts SDF to volume density using the piecewise exponential function.
+    """
+    density = np.zeros_like(sdf)
+    mask_neg = sdf < 0
+    mask_pos = ~mask_neg
+    
+    # For d(x) < 0: sigma = (1/beta) * (1 - exp(d(x)/beta))
+    density[mask_neg] = (1.0 / beta) * (1.0 - np.exp(sdf[mask_neg] / beta))
+    
+    # For d(x) >= 0: sigma = (1/(2*beta)) * exp(-d(x)/(2*beta))
+    density[mask_pos] = (1.0 / (2.0 * beta)) * np.exp(-sdf[mask_pos] / (2.0 * beta))
+    
+    return density
+
+def train_stage_1(model, images, depths, normals):
+    """
+    Stage 1: Train Geometry (F_d), Radiance (F_c), and Emitter Semantic (F_e).
+    """
+    for image, depth, normal in zip(images, depths, normals):
+        # Render image using current model
+        rendered_image = render_image(image.camera_params, model, stage='geometry')
+        
+        # Compute loss against ground truth image
+        loss_rgb = mse_loss(rendered_image, image.rgb)
+        
+        # Compute SDF loss against depth/normal priors if available
+        loss_sdf = compute_sdf_loss(model.F_d, depth, normal)
+        
+        # Compute emitter semantic loss
+        loss_emitter = compute_emitter_loss(model.F_e, image)
+        
+        total_loss = loss_rgb + loss_sdf + loss_emitter
+        model.update_gradients(total_loss)
+
+def train_stage_2(model, images):
+    """
+    Stage 2: Train Material (F_a, F_rho) and Emission (L).
+    F_d, F_c, F_e are frozen.
+    """
+    for image in images:
+        # Decompose radiance using Monte Carlo raytracing on the fixed SDF
+        # This step separates material and emission from the total radiance
+        material_map, emission_map = decompose_radiance_monte_carlo(
+            image.camera_params, 
+            model.F_d, 
+            model.F_c, 
+            model.F_e
+        )
+        
+        # Train material and emission fields to match the decomposed targets
+        # and the original image
+        loss_material = train_material_fields(model.F_a, model.F_rho, material_map)
+        loss_emission = train_emission_field(model.L, emission_map)
+        
+        total_loss = loss_material + loss_emission
+        model.update_gradients(total_loss)
+```
+
+## Operating characteristics
+*   **Complexity:** Training is iterative and requires multiple passes over the dataset. Stage 1 is similar to NeRF but with SDF regularization. Stage 2 involves Monte Carlo raytracing, which is computationally more expensive per sample than direct volume rendering but allows for physically based decomposition [S1].
+*   **Strengths:** Superior reconstruction quality for complex indoor scenes with fine-grained small objects due to adaptive sampling and bubble loss [S1]. Enables intrinsic decomposition (relighting, editing) which standard NeRF lacks [S1].
+*   **Limitations:** Requires a two-stage training process, increasing implementation complexity [S1]. The decomposition relies on the accuracy of the SDF and emitter semantics; errors in Stage 1 propagate to Stage 2 [S1].
+*   **When to use:** When the goal is not just novel view synthesis but also scene editing, relighting, or when the scene contains many small, high-frequency details that standard NeRF struggles to reconstruct [S1].
+
+## Background
+I2-SDF was introduced in 2023 by Jingen Zhu et al. [S1]. It builds upon the success of Neural Radiance Fields (NeRF) [18] and neural SDF representations [43] but addresses their limitations in handling complex indoor scenes and intrinsic decomposition. The method was developed to enable physically based scene editing and relighting, which are difficult with standard volume rendering approaches [S1].
+
+## Sources
+[S1] I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01

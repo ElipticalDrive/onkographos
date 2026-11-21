@@ -1,0 +1,110 @@
+--- v002.md
++++ v003.md
+@@ -14,10 +14,10 @@
+    Compute the screen space coordinates $p_{uv}$ of a 3D point $P_{xyz}$ via matrix multiplication [S1, unofficial]. This step is differentiable with respect to the point positions [S1, unofficial].
+    $$
+-   \begin{bmatrix} u \\ v \\ w \end{bmatrix} = M \cdot \begin{bmatrix} x \\ y \\ z \\ 1 \end{bmatrix}
++   \begin{bmatrix} u_{clip} \\ v_{clip} \\ w_{clip} \end{bmatrix} = M \cdot \begin{bmatrix} x \\ y \\ z \\ 1 \end{bmatrix}
+    $$
+    $$
+-   u = \frac{u}{w}, \quad v = \frac{v}{w}
++   u = \frac{u_{clip}}{w_{clip}}, \quad v = \frac{v_{clip}}{w_{clip}}
+    $$
+-   where $M$ is the transformation matrix [G].
++   where $M$ is the camera transformation matrix [G].
+ 
+ 2. **Compute Influence:**
+@@ -34,42 +34,49 @@
+ 
+ ```python
+-def render_point_cloud(points, camera_matrix, image_width, image_height):
++def render_point_cloud(points, camera_matrix, image_width, image_height, sigma=1.0, radius=3.0):
+     """
+-    Render a point cloud using weighted sum aggregation.
++    Render a point cloud using weighted sum aggregation with truncated Gaussian influence.
+     points: List of dicts with 'pos' (vec3), 'color' (vec3)
+     camera_matrix: 4x4 transformation matrix
+     """
+-    # Initialize image buffer
+-    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
++    image = [[(0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
++    z_buffer = [[float('inf') for _ in range(image_width)] for _ in range(image_height)]
+ 
+     def mat_vec_mul(M, v):
+-        """Standard 4x4 matrix-vector multiplication."""
+         return [sum(M[r][c] * v[c] for c in range(4)) for r in range(4)]
+ 
+-    projected = []
+-    # Step 1: Project points to screen space
++    def truncated_gaussian(dist):
++        if dist > radius:
++            return 0.0
++        return (1.0 / (2.0 * 3.14159 * sigma**2)) * (2.71828 ** (-dist**2 / (2.0 * sigma**2)))
++
+     for p in points:
+         p_homo = [p['pos'][0], p['pos'][1], p['pos'][2], 1.0]
+         proj = mat_vec_mul(camera_matrix, p_homo)
+-        if proj[3] == 0:
++        if proj[3] <= 0.0:
+             continue
+         u = proj[0] / proj[3]
+         v = proj[1] / proj[3]
+         z = proj[2] / proj[3]
+-        if 0 <= u < image_width and 0 <= v < image_height:
+-            projected.append({'u': u, 'v': v, 'z': z, 'color': p['color']})
++        if not (0 <= u < image_width and 0 <= v < image_height):
++            continue
+ 
+-    # Step 2 & 3: Aggregate
+-    for pp in projected:
+-        u, v, z, color = pp['u'], pp['v'], pp['z'], pp['color']
+-        # [G] Simple normalized influence for demonstration; sources mention truncated Gaussian or distance-based kernels
+-        influence = 1.0
+-        y_idx, x_idx = int(v), int(u)
+-        image[y_idx][x_idx] = [
+-            image[y_idx][x_idx][0] + influence * color[0],
+-            image[y_idx][x_idx][1] + influence * color[1],
+-            image[y_idx][x_idx][2] + influence * color[2]
+-        ]
++        for dy in range(-int(radius), int(radius) + 1):
++            for dx in range(-int(radius), int(radius) + 1):
++                y_idx = int(v) + dy
++                x_idx = int(u) + dx
++                if 0 <= y_idx < image_height and 0 <= x_idx < image_width:
++                    dist = (dx**2 + dy**2)**0.5
++                    I = truncated_gaussian(dist)
++                    if I > 0:
++                        if z < z_buffer[y_idx][x_idx]:
++                            z_buffer[y_idx][x_idx] = z
++                            image[y_idx][x_idx] = (
++                                image[y_idx][x_idx][0] + I * p['color'][0],
++                                image[y_idx][x_idx][1] + I * p['color'][1],
++                                image[y_idx][x_idx][2] + I * p['color'][2]
++                            )
+     return image
++# Note: Sources describe alternative aggregation strategies (closest point, K-nearest, distance-weighted) but do not provide pseudocode for them [S1, unofficial].
+ ```
+ 
+@@ -83,16 +90,16 @@
+ 
+ ### Voxel-based Point Rendering
+-Generates 3D voxels from the point cloud and renders them using a voxel-based method [S1, unofficial]. Chosen when voxel-based acceleration structures are preferred over direct splatting. See [Voxel Rendering](52-voxel-rendering.md).
++Generates 3D voxels from the point cloud and renders them using a voxel-based method [S1, unofficial]. See [Voxel Rendering](52-voxel-rendering.md).
+ 
+ ### Depth Image Rendering
+-Converts depth to a point cloud and projects it to a virtual camera view, serving as a special case of point cloud rendering [S1, unofficial]. Used in self-supervised learning of monocular depth estimation. See [Depth Rendering](52-depth-rendering.md).
++Converts depth to a point cloud and projects it to a virtual camera view, serving as a special case of point cloud rendering [S1, unofficial]. Used in self-supervised learning of monocular depth estimation [S1, unofficial]. See [Depth Rendering](52-depth-rendering.md).
+ 
+ ## Operating characteristics
+-* **Time Complexity:** Not given in the sources.
+-* **Memory Complexity:** Not given in the sources.
++* **Time Complexity:** Not given in the sources. [G]
++* **Memory Complexity:** Not given in the sources. [G]
+ * **Strengths:** Differentiable with respect to point positions and attributes, enabling optimization in neural networks [S1, unofficial].
+-* **Limitations:** Sparse images if influence is small. Occlusion handling is non-trivial with simple blending. Quality-convergence trade-off with influence size [S1, unofficial].
++* **Limitations:** Sparse images if influence is small. Occlusion handling is non-trivial with simple blending [S1, unofficial]. Quality-convergence trade-off with influence size [S1, unofficial].
+ * **When to use:** Differentiable rendering tasks, neural implicit representations, and scenarios with reduced 3D supervision [S1, unofficial].
+-* **When not to use:** Not given in the sources.
++* **When not to use:** Not given in the sources. [G]
+ 
+ ## Background

@@ -1,0 +1,60 @@
+# Adaptive Best View Selection
+
+Also called: Adaptive Best View Search (algorithm variant)
+
+## Overview
+Adaptive Best View Selection is an algorithm designed to efficiently identify the viewpoint that maximizes the Multi-Scale Entropy metric for a volume model, avoiding the computational cost of brute-force exhaustive search [S1]. It builds on [Multi-Scale Entropy for View Quality](17037-multi-scale-entropy-for-view-quality.md) by restricting the search to a bounding sphere and using an adaptive subdivision strategy to focus computation only on regions where high-quality views are likely to exist, aiming to complete within the dataset loading time [S1].
+
+## How it works
+**Inputs:**
+1. A classified volume model defined by a Transfer Function (TF) mapping density values to opacity and color [S1].
+2. A Region of Interest (ROI) within the volume [S1].
+3. A bounding sphere enclosing the ROI [S1].
+
+**Outputs:**
+1. The optimal viewpoint (camera position and orientation) on the bounding sphere that yields the highest Multi-Scale Entropy [S1].
+2. Optionally, an exploration path connecting representative views [S1].
+
+**Data Structures:**
+*   **Spherical Mesh:** A mesh representing the search space on the bounding sphere. The algorithm adaptively subdivides this mesh.
+*   **Quality Estimator:** A Lipschitz-continuous function estimating the potential maximum entropy value within a mesh cell based on its vertices [S1].
+
+**Steps:**
+1.  **Initialization:** Define the bounding sphere around the ROI. Initialize the search with a coarse spherical mesh (e.g., an icosahedron or cube projection) [S1].
+2.  **Evaluation:** For each vertex of the current mesh, render the volume at the corresponding viewpoint using the TF and ROI. Compute the Multi-Scale Entropy for each rendered image [S1].
+    *   *Rendering Resolution:* Use a reduced viewport resolution (e.g., $256 \times 256$) for entropy computation to ensure speed, as this resolution yields identical best-view selections to higher resolutions ($512 \times 512$) [S1].
+3.  **Selection:** Identify the vertex with the highest computed entropy value as the current best candidate [S1].
+4.  **Adaptive Subdivision:**
+    *   For each mesh cell (triangle) adjacent to the current best vertex, evaluate the quality estimator.
+    *   If the estimator indicates that the maximum possible entropy in that cell could exceed the current best value, subdivide the cell (e.g., split edges and retriangulate) [S1].
+    *   Cells where the estimated maximum is lower than the current best are not subdivided, saving computational effort [S1].
+5.  **Iteration:** Repeat steps 2-4 until a stopping criterion is met (e.g., maximum subdivision depth, time limit, or convergence of the best view) [S1].
+6.  **Refinement:** The final best view can be re-rendered at full resolution ($512 \times 512$) for high-quality display [S1].
+
+**Parameters:**
+*   **Viewport Resolution for Search:** $256 \times 256$ pixels [S1].
+*   **Viewport Resolution for Final Render:** $512 \times 512$ pixels [S1].
+*   **Stopping Criterion:** Not explicitly defined in the sources, but implied to be time-based (comparable to loading time) or convergence-based [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Transfer Function Sensitivity:** The selected view depends heavily on the TF. Users may need to modify the TF to refine inspection, which requires re-running the selection [S1].
+*   **Dataset Dimension:** Performance timings depend on dataset dimension, number of analyzed views, and the TF (which determines the number of processed voxels) [S1].
+
+## Subtopics
+
+### [Adaptive Best View Search](17455-adaptive-best-view-search.md)
+An algorithm that efficiently selects the viewpoint with the highest Multi-Scale Entropy value on a bounding sphere, avoiding brute-force search by adaptively subdividing a spherical mesh based on a Lipschitz-continuous quality estimator.
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than brute-force exhaustive search. Brute-force analysis of a dense set of views takes roughly half a minute on a QuadCore PC with 8GB memory and GF 8800 card [S1]. The adaptive method aims to complete within the dataset loading time (several seconds) [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Fast execution time comparable to dataset loading; effective at finding high-quality views without evaluating all possible viewpoints [S1].
+*   **Limitations:** Performance depends on dataset size, number of views analyzed, and the complexity of the Transfer Function [S1]. The quality of the result depends on the initial mesh and the Lipschitz constant of the entropy metric [S1].
+*   **When to Use:** When rapid previsualization of volume models is required, and the user needs to find the most informative view quickly [S1].
+*   **When Not to Use:** When exhaustive global optimization is required, or when the entropy metric is not Lipschitz-continuous, making the adaptive subdivision unreliable [S1].
+
+## Background
+The method was proposed by P.-P. Vázquez, E. Monclús, and I. Navazo in the paper "Representative Views and Paths for Volume Models" [S1]. It addresses the need for efficient view selection in volume rendering, particularly for medical examples, where users need to find adequate views quickly [S1]. The work builds upon the concept of using Multi-Scale Entropy as a quality metric for volume images [S1].
+
+## Sources
+[S1] Representative Views and Paths for Volume Models, https://doi.org/10.1007/978-3-540-85412-8_10, fetched 2026-10-26

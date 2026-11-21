@@ -1,0 +1,268 @@
+--- v012.md
++++ v013.md
+@@ -4,100 +4,145 @@
+ 
+ ## Overview
+-This method leverages 3D texture mapping hardware to perform reconstruction and resampling of volumetric data in a ray-parallel fashion [S2, unofficial][S4]. It solves the performance bottleneck of CPU-driven ray casting by offloading the trilinear interpolation and accumulation steps to the GPU's texture engine [S1]. Unlike [Direct volume ray casting](19-direct-volume-ray-casting.md), which computes rays sequentially on the CPU, this approach embeds resampling polygons in the 3D texture, allowing the hardware to sample the volume along these planes [S2, unofficial]. It differs from [Shear-Warp](link-to-shear-warp) by performing trilinear interpolation followed by classification without a final warp step, resulting in higher image quality for perspective projections [S1].
++This method leverages 3D texture mapping hardware to perform reconstruction and resampling of volumetric data in a ray-parallel fashion [S2, unofficial][S4]. It solves the performance bottleneck of software-based ray casting by offloading the computationally intensive trilinear interpolation and texture sampling to the graphics pipeline, allowing for interactive rendering of large datasets [S2, unofficial][S4]. Unlike [Shear-Warp](5616-hardware-accelerated-volume-rendering.md), which performs classification before bilinear resampling and requires a final warp step, the Planar Texture Resampling variant of this method performs trilinear interpolation followed by classification and requires no final warp, resulting in higher image quality and consistent performance for perspective projections [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset stored in 3D texture memory; camera/view matrices; resampling polygons (either object-space or image-space aligned); exposure value (0.0–1.0) [S2, unofficial].
+-*   **Output:** A 2D image in the frame buffer, where each pixel contains the accumulated color and opacity [S1][S2, unofficial].
++### Inputs and Outputs
++**Inputs:**
++*   Scalar volume data $V$ stored in 3D texture memory [S1][S2, unofficial].
++*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) defining the view [S2, unofficial].
++*   Transfer function mapping scalar values to color and opacity [S1][S2, unofficial].
++*   Resampling polygons defining the sampling planes [S2, unofficial].
+ 
+-**Data Structures:**
+-*   **3D Texture:** The volume data is loaded into 3D texture memory. For high-performance engines like the SGI Reality Engine, memory is 8-way interleaved to allow fetching any tri-linear cell (8 adjacent voxels) in one memory access [S1]. A voxel with address $a = [zyx]$ is stored in memory module $k$ at index $i$ as follows [S1]:
+-    $$k = (x \bmod 2) + 2 (y \bmod 2) + 4 (z \bmod 2)$$
+-    $$i = \lfloor x/2 \rfloor + 2 \lfloor y/2 \rfloor + 4 \lfloor z/2 \rfloor$$
+-*   **Resampling Polygons:** Planar polygons embedded in the texture. Two alignment strategies exist [S2, unofficial]:
+-    1.  **Object-Space:** Polygons are defined within the volume coordinates. They must be reoriented in the plane most parallel to the view-plane as the viewpoint changes, requiring explicit creation for six view orientation cases [S2, unofficial][Westover91].
+-    2.  **Image-Space:** Polygons are defined in image-space, transformed by the inverse viewing matrix into object-space, and clipped to the volume boundaries to ensure valid texture coordinates [S2, unofficial].
++**Outputs:**
++*   Final image in the frame buffer, composited from the resampled texture slices [S1][S2, unofficial].
+ 
+-**Steps:**
+-1.  **Load Volume:** Load volume data into 3D texture memory. If the volume exceeds the texture memory limit (e.g., 1M 12-bit points on RealityEngine), split it into slabs and render them in succession [S2, unofficial].
+-2.  **Configure Texture:** Enable 3D texturing. Set the global texture environment mode to `GL_MODULATE` [S3, unofficial]. Bind the 3D texture object [S3, unofficial].
+-3.  **Setup Texture Matrix:** Switch the matrix mode to `GL_TEXTURE`. Apply a translation of $(0.5, 0.5, 0.5)$ to the texture matrix to correct for texture coordinate centering [S3, unofficial]. Reset to identity if necessary [S3, unofficial].
+-4.  **Render Resampling Polygons:** Switch matrix mode back to `GL_MODELVIEW`. For each resampling polygon (slice):
+-    *   Define vertices $(x_i, y_i, z_i)$ for $i=0..3$.
+-    *   Set the 3D texture coordinate for each vertex to $(x_i, y_i, z_i)$ and the vertex position to $(x_i, y_i, z_i)$ [S3, unofficial].
+-    *   The hardware performs trilinear interpolation of the volume data at each point on the polygon [S2, unofficial].
+-5.  **Scale and Accumulate:**
+-    *   Scale each resampled value by the 'exposure' value (0 to 1) to prevent overflow in the 12-bit frame buffer [S2, unofficial].
+-    *   Sum the scaled resampled values at each pixel. Clamp the sum if it exceeds the 12-bit range [S2, unofficial].
+-    *   Apply spacing factors ($d$) to the summation results. Since $d$ varies per pixel due to perspective, use an additional full-screen polygon with a 2D texture containing the $d$ values for each pixel [S2, unofficial].
+-6.  **Final Compositing:** Combine resampled values to produce final pixel color. Options include [S2, unofficial]:
+-    *   **Direct Summation:** For simple density visualization.
+-    *   **Radiographs:** Compute the exponential of the summed attenuation integral: $\text{pixel intensity} = 1.0 - \exp(-\sum u_i d)$. Use a lookup table if not done directly [S2, unofficial].
+-    *   **Opacity-Based Rendering:** Use two 8-bit texture components (raw data and precomputed shading coefficient). Use resampled data as indices into an opacity lookup table. Multiply sample opacity by the shading coefficient (function of original data gradient) to produce shaded features [S2, unofficial].
+-7.  **Cleanup:** Unbind the 3D texture and disable 3D texturing [S3, unofficial].
++### Data Structures
++**3D Texture Memory:**
++*   The volume is stored as a 3D texture object.
++*   **Memory Layout:** High-performance engines (e.g., SGI Reality Engine) use 8-way interleaved texture memory to allow fetching any tri-linear cell (8 adjacent voxels) in one memory access [S1].
++*   **Addressing:** For a voxel with address $a = [zyx]$ in an 8-way interleaved system, the memory module number $k$ and index $i$ within the module are calculated as [S1]:
++    $$
++    k = (x \bmod 2) + 2 (y \bmod 2) + 4 (z \bmod 2)
++    $$
++    $$
++    i = \lfloor x/2 \rfloor + 2 \lfloor y/2 \rfloor + 4 \lfloor z/2 \rfloor
++    $$
++*   **Capacity Limit:** The RealityEngine texture memory is limited to 1,000,000 (1M) 12-bit data points [S2, unofficial]. Larger volumes must be split into slabs [S2, unofficial].
+ 
+-**Pseudocode:**
++**Resampling Polygons:**
++*   Planar polygons embedded in the texture space.
++*   Two alignment strategies exist:
++    1.  **Object-Space:** Polygons are defined within the volume and reoriented in the plane most parallel to the view-plane as the viewpoint changes [S2, unofficial].
++    2.  **Image-Space:** Polygons are defined in image-space, transformed by the inverse viewing matrix into object-space, and clipped to volume boundaries [S2, unofficial].
++
++### Parameters
++*   **Interpolation:** Tri-linear interpolation is used by the texture engine to resample texture data [S1][S2, unofficial].
++*   **Exposure:** A user-controlled scaling factor applied to resampled values to prevent overflow in the 12-bit frame buffer. Range: 0 to 1 [S2, unofficial].
++*   **Spacing Factor ($d$):** The distance between sample values along the ray. $d$ is constant for all samples behind a pixel but varies from pixel to pixel due to perspective [S2, unofficial].
++*   **Typical Data Size:** Interactive performance is achieved with volumes up to $512 \times 512 \times 512$ voxels [S4].
++
++### Steps
++1.  **Load Volume:** Load volume data into 3D texture memory. If the volume exceeds 1M 12-bit points, split into slabs and load them successively [S2, unofficial].
++2.  **Define Polygons:** Define resampling polygons using either Object-Space or Image-Space alignment [S2, unofficial].
++    *   *Object-Space:* Examine the view matrix to explicitly create polygons for the six cases arising from view orientation [S2, unofficial].
++    *   *Image-Space:* Transform polygons by the inverse viewing matrix into object-space and clip them to volume boundaries [S2, unofficial].
++3.  **Configure Texture Engine:**
++    *   Set global texture environment mode to `GL_MODULATE` [S3, unofficial].
++    *   Enable 3D texturing [S3, unofficial].
++    *   Bind the specific 3D texture object identified by `texid` [S3, unofficial].
++    *   Switch matrix mode to `GL_TEXTURE` [S3, unofficial].
++    *   Reset texture matrix to identity [S3, unofficial].
++    *   Apply a translation of $(0.5, 0.5, 0.5)$ to the texture matrix to align voxel centers with texture coordinates [S3, unofficial].
++    *   Switch matrix mode back to `GL_MODELVIEW` [S3, unofficial].
++4.  **Render Polygons:**
++    *   Begin rendering a quad using `GL_QUADS` [S3, unofficial].
++    *   For each vertex $i$ (0 to 3), set the 3D texture coordinate to $(x_i, y_i, z_i)$ and set the vertex position to $(x_i, y_i, z_i)$ [S3, unofficial].
++    *   The 3D texture hardware performs trilinear interpolation of the volume data at each point on the polygon [S2, unofficial].
++    *   End rendering the quad [S3, unofficial].
++5.  **Post-Processing (Spacing and Summation):**
++    *   Scale each resampled value by the 'exposure' value (0 to 1) [S2, unofficial].
++    *   Sum the scaled resampled values at each pixel [S2, unofficial].
++    *   Apply spacing factors ($d$) to the summation results. This is done by using an additional full-screen polygon with a 2D texture corresponding to the $d$ values required for each pixel [S2, unofficial].
++    *   Clamp the sum if it exceeds the 12-bit range [S2, unofficial].
++6.  **Compositing/Combination:**
++    *   Combine resampled values to produce final pixel color. Options include:
++        *   **Direct Summation:** For radiographs or density visualization [S2, unofficial].
++        *   **Exponential Computation:** For radiographs, compute $1.0 - \exp(-\sum u_i d)$ using a lookup table if not done directly [S2, unofficial].
++        *   **Compositing:** For opacity-based rendering, use two 8-bit texture components (raw data and precomputed shading coefficient). Use resampled data component values as indices into an opacity lookup table. Multiply sample opacity by the shading coefficient to produce shaded features [S2, unofficial].
++7.  **Cleanup:**
++    *   Unbind the 3D texture by binding texture ID 0 [S3, unofficial].
++    *   Disable 3D texturing [S3, unofficial].
++
++### Pseudocode
+ ```python
+-def render_volume_3d_texturing(volume_data, camera_matrix, exposure, render_mode):
+-    # 1. Load volume into 3D texture memory
+-    tex_id = create_3d_texture(volume_data)
+-    bind_texture(tex_id)
++def render_3d_texture_volume(volume_data, camera, polygons, transfer_function):
++    """
++    Renders a volume using 3D texture hardware.
++    volume_data: 3D array of scalar values.
++    camera: Object with origin, direction, and view matrix.
++    polygons: List of polygon definitions (vertices in object or image space).
++    transfer_function: Function mapping scalar -> (color, opacity).
++    """
+     
+-    # 2. Configure texture environment
+-    set_texture_env_mode(GL_MODULATE)
+-    enable_texture_3d()
++    # 1. Load Volume into 3D Texture Memory
++    # Handle slabbing if volume > 1M points
++    slabs = split_into_slabs(volume_data, max_size=1000000)
+     
+-    # 3. Setup texture matrix for coordinate correction
+-    switch_matrix_mode(GL_TEXTURE)
+-    load_identity()
+-    translate(0.5, 0.5, 0.5)
+-    
+-    # 4. Define resampling polygons (Object-Space or Image-Space)
+-    # For Object-Space: Reorient polygons based on view matrix
+-    # For Image-Space: Transform by inverse view matrix and clip to volume bounds
+-    polygons = generate_resampling_polygons(camera_matrix, volume_bounds)
+-    
+-    switch_matrix_mode(GL_MODELVIEW)
+-    
+-    for poly in polygons:
+-        begin_polygon()
+-        for i in range(4):
+-            # Vertex position and texture coordinate are identical for resampling
+-            set_vertex(poly.vertices[i])
+-            set_texture_coord_3d(poly.vertices[i])
+-        end_polygon()
++    for slab in slabs:
++        load_texture_3d(slab)
+         
+-    # 5. Apply spacing factors (d) via full-screen quad if perspective
+-    if perspective_projection:
+-        d_texture = create_spacing_texture(camera_matrix, image_resolution)
+-        bind_texture(d_texture)
+-        begin_fullscreen_quad()
+-        for i in range(4):
+-            set_vertex(screen_corners[i])
+-            set_texture_coord_2d(d_texture_coords[i])
+-        end_fullscreen_quad()
+-        unbind_texture(d_texture)
++        # 2. Configure Texture Engine
++        set_texture_env_mode(GL_MODULATE)
++        enable_texture_3d()
++        bind_texture_3d(texid)
+         
+-    # 6. Final Compositing based on mode
+-    if render_mode == RADIographs:
+-        # Exponential of summed attenuation
+-        apply_radiograph_lookup_table()
+-    elif render_mode == OPACITY_BASED:
+-        # Use precomputed shading coefficient
+-        apply_shading_coefficient()
++        # Texture matrix setup for voxel center alignment
++        push_matrix(GL_TEXTURE)
++        load_identity(GL_TEXTURE)
++        translate(0.5, 0.5, 0.5)
++        pop_matrix(GL_TEXTURE)
+         
+-    # 7. Cleanup
+-    unbind_texture(tex_id)
++        # 3. Render Resampling Polygons
++        for poly in polygons:
++            # Transform polygon vertices if using Image-Space alignment
++            if poly.alignment == IMAGE_SPACE:
++                transform_vertices_by_inverse_view(poly, camera.view_matrix)
++                clip_polygons_to_volume(poly, volume_bounds)
++            
++            # Render the polygon
++            begin_render(GL_QUADS)
++            for vertex in poly.vertices:
++                # Set texture coordinates to vertex position (Object-Space)
++                # or transformed position (Image-Space)
++                tex_coord = vertex.position 
++                set_tex_coord_3f(tex_coord.x, tex_coord.y, tex_coord.z)
++                set_vertex_3d(vertex.position.x, vertex.position.y, vertex.position.z)
++            end_render()
++            
++        # 4. Apply Spacing and Compositing
++        # Note: In hardware, this often involves additional passes or 
++        # specific fragment shader logic if available. 
++        # For legacy RealityEngine, this is handled by the accumulation 
++        # and the spacing polygon pass described in the text.
++        
++        # Apply spacing factor d via full-screen quad with 2D texture
++        render_spacing_polygon(camera, volume_bounds)
++        
++        # Compositing into Frame Buffer
++        # The hardware accumulates results. For opacity-based rendering,
++        # the texture components (raw data, shading) are used to index
++        # opacity LUTs and multiply by shading coefficients.
++        composite_into_frame_buffer()
++        
++        # 5. Cleanup for next slab
++        unbind_texture_3d()
++        
++    pop_matrix(GL_TEXTURE)
+     disable_texture_3d()
+ ```
+ 
+-**Parameters:**
+-*   **Exposure:** User-controlled scaling factor (0.0 to 1.0) applied to resampled values to prevent overflow [S2, unofficial].
+-*   **Interpolation:** Tri-linear interpolation is used by the texture engine [S1].
+-*   **Memory Interleaving:** 8-way interleaved texture memory allows fetching any tri-linear cell in one memory access [S1].
+-
+-**Edge Cases and Pitfalls:**
++### Edge Cases and Pitfalls
++*   **Gradient Estimation:** Hardware does not directly support estimation of gradients or per-sample illumination. Gradients must be pre-computed and stored in an additional volume or computed on-the-fly using multi-pass methods, which greatly reduce achievable frame rate [S1]. An alternative is to use a shading approximation by pairwise subtracting coplanar texture slices, one shifted in direction of the light source [S1].
+ *   **Overflow:** The RealityEngine has a maximum precision of 12 bits per frame buffer and texture component. Summation can overflow this limit. Solution: Scale samples by 'exposure' value and clamp [S2, unofficial].
+-*   **Gradient Estimation:** Hardware does not directly support estimation of gradients or per-sample illumination. Gradients must be pre-computed and stored in an additional volume or computed on-the-fly using multi-pass methods, which greatly reduce achievable frame rate [S1]. An alternative is shading approximation by pairwise subtracting coplanar texture slices [S1].
+ *   **Image-Space Clipping:** Image-space polygons must be clipped to volume boundaries to ensure valid texture coordinates. This requires transforming to object-space, clipping, and then rendering [S2, unofficial].
+ *   **Slab Rendering:** When using image-space method with slabs, polygons must be rendered multiple times, clipped to the currently loaded volume slab each time [S2, unofficial].
+@@ -106,25 +151,25 @@
+ 
+ ### [Planes Method](3027-planes-method.md)
+-The Planes Method is a hardware-accelerated volume rendering technique that leverages 3D texture mapping hardware to resample volumetric data into planes coplanar with rays ending in a row of pixels, then performs shading and front-to-back compositing on the CPU. It solves the problem of view-dependent shading and interactive classification in texture-mapped rendering by offloading the computationally intensive Phong shading and compositing logic to the processor, allowing for optimization techniques like early ray termination and low-opacity skipping. Unlike [Shear-Warp](link-to-shear-warp), which performs classification before bilinear resampling and requires a final warp step, the Planes method performs trilinear interpolation followed by classification and requires no final warp, resulting in higher image quality and consistent performance for perspective projections.
++The Planes Method is a hardware-accelerated volume rendering technique that leverages 3D texture mapping hardware to resample volumetric data into planes coplanar with rays ending in a row of pixels, then performs shading and front-to-back compositing on the CPU. It solves the problem of view-dependent shading and interactive classification in texture-mapped rendering by offloading the computationally intensive Phong shading and compositing logic to the processor, allowing for optimization techniques like early ray termination and low-opacity skipping. Unlike [Shear-Warp](5616-hardware-accelerated-volume-rendering.md), which performs classification before bilinear resampling and requires a final warp step, the Planes method performs trilinear interpolation followed by classification and requires no final warp, resulting in higher image quality and consistent performance for perspective projections.
+ 
+ ### BVH-accelerated 3D Texture Volume Rendering
+-A method to accelerate 3D texture-based volume rendering using hierarchical bounding volumes (BVH) to skip rendering of empty or occluded sub-volumes during tree traversal [S5, abstract only, unofficial]. It realizes post-classification 3D texture volume rendering using GPU fragment shaders. The original volume data is divided based on space position layer by layer according to the height of the BVH tree. In each layer, volumes corresponding to BVH tree nodes are subdivided into eight sub-volumes along three orthogonal coordinate axes. Bounding volumes are established for the sub-volumes and correlative information is stored in the corresponding BVH tree nodes. When rendering the volume by traversing the BVH tree, information of BVH tree nodes is read to judge whether the corresponding sub-volume should be rendered or jumped [S5, abstract only, unofficial].
++A method to accelerate 3D texture-based volume rendering using hierarchical bounding volumes (BVH) to skip rendering of empty or occluded sub-volumes during tree traversal [S5, abstract only, unofficial]. It realizes post-classification 3D texture volume rendering using GPU fragment shaders [S5, abstract only, unofficial]. The original volume data is divided based on space position layer by layer according to the height of the BVH tree. In each layer, volumes corresponding to BVH tree nodes are subdivided into eight sub-volumes along three orthogonal coordinate axes. Bounding volumes are established for the sub-volumes and correlative information is stored in the corresponding BVH tree nodes. When rendering the volume by traversing the BVH tree, information of BVH tree nodes is read to judge whether the corresponding sub-volume should be rendered or jumped [S5, abstract only, unofficial]. The method obtains good accelerating effects when combined with 3D texture volume rendering based on GPU [S5, abstract only, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Performance is linear with respect to the number of pixels processed. Doubling screen pixels or resampling polygons halves the frame rate [S2, unofficial].
+-*   **Memory Complexity:** Limited by texture memory capacity. The RealityEngine has a limit of 1M 12-bit data points. Larger volumes require splitting into slabs, with a reload time of ~0.1 seconds per slab [S2, unofficial].
++*   **Memory Complexity:** Limited by the 3D texture memory capacity (1M 12-bit points on RealityEngine) [S2, unofficial]. Larger volumes require slab loading, adding overhead (~0.1 seconds per slab reload) [S2, unofficial].
+ *   **Measured Performance:**
+-    *   SGI Reality Engine 2 with two Rasters Managers (RMs) renders a 256x256x32 volume at 12 frames per second [S1].
+-    *   SGI Reality Engine 2 with four RMs renders a 512x512x64 dataset at 10 frames per second [S1].
+-    *   128x128x64 volume rendered into 512x512 window at 10 frames/second using 128 object-space polygons. Processing rate: 10 million voxels/second. Measured: ~160 million pixel operations/second (each op: trilinear interpolation, multiplication, summation/composite) [S2, unofficial].
+-    *   256x256x64 volume rendered into 512x512 window at 2.5 frames/second using 256 resampling polygons. Requires four 256x256x16 texture slabs. Slab load time: <0.1 seconds/slab [S2, unofficial].
+-    *   Can render volume data about 512 x 512 x 512 voxels in size several times a second, achieving results very close in quality to software ray casting [S4].
+-*   **Strengths:** High performance for interactive visualization; leverages existing 3D graphics hardware; simple implementation [S2, unofficial].
+-*   **Limitations:** Limited by texture memory size; no direct hardware support for gradient estimation or per-sample illumination; quality vs. speed trade-off depends on number of resampling polygons [S1][S2, unofficial].
+-*   **When to use:** Interactive visualization of medical or scientific data on hardware with 3D texturing support (e.g., SGI RealityEngine, PixelFlow) [S2, unofficial].
+-*   **When not to use:** When high-precision gradient-based lighting is required without pre-computation; when volume size exceeds texture memory and slab reloading latency is unacceptable [S1][S2, unofficial].
++    *   SGI Reality Engine 2 with two Rasters Managers (RMs) renders a $256 \times 256 \times 32$ volume at 12 frames per second [S1].
++    *   SGI Reality Engine 2 with four RMs renders a $512 \times 512 \times 64$ dataset at 10 frames per second [S1].
++    *   A $128 \times 128 \times 64$ volume rendered into a $512 \times 512$ window at 10 frames/second using 128 object-space polygons. Processing rate: 10 million voxels/second. Measured: ~160 million pixel operations/second (each op: trilinear interpolation, multiplication, summation/composite) [S2, unofficial].
++    *   A $256 \times 256 \times 64$ volume rendered into a $512 \times 512$ window at 2.5 frames/second using 256 resampling polygons. Requires four $256 \times 256 \times 16$ texture slabs [S2, unofficial].
++    *   Can render volume data about $512 \times 512 \times 512$ voxels in size several times a second, achieving results very close in quality to software ray casting [S4].
++*   **Strengths:** High performance for large volumes; leverages existing 3D graphics hardware; supports both radiographs and opacity-based rendering [S2, unofficial][S4].
++*   **Limitations:** Limited by texture memory size; gradient estimation is difficult and reduces frame rate; quality vs. speed trade-off requires tuning the number of resampling polygons [S1][S2, unofficial].
++*   **When to use:** When interactive rendering of large scalar volumes is required on hardware with 3D texturing capabilities, and when pre-computed shading or simple lighting models are acceptable.
++*   **When not to use:** When complex, view-dependent lighting with per-sample gradient estimation is required, or when the volume exceeds available texture memory and slab loading overhead is prohibitive.
+ 
+ ## Background
+-This method was developed in the mid-1990s, notably by Cullip and Neumann at the University of North Carolina at Chapel Hill, and implemented on Silicon Graphics RealityEngine workstations [S2, unofficial]. It builds on the concept of planar texture resampling [CCF94] and leverages the 3D texturing capabilities of early 3D graphics accelerators [S1]. The technique was also proposed for the PixelFlow graphics system to overcome lighting and volume size limitations of the RealityEngine [S2, unofficial]. It is used in the production of digitally reconstructed radiographs and opacity-based volume rendered images [S2, unofficial].
++This method was developed in the mid-1990s, notably by Cullip and Neumann at the University of North Carolina at Chapel Hill, and implemented on Silicon Graphics RealityEngine workstations [S2, unofficial]. It builds on the concept of planar texture resampling [CCF94] and leverages the 3D texturing capabilities of early 3D graphics accelerators [S4]. It was proposed for the PixelFlow graphics system to overcome lighting and volume size limitations of the RealityEngine [S2, unofficial].
+ 
+ ## Sources

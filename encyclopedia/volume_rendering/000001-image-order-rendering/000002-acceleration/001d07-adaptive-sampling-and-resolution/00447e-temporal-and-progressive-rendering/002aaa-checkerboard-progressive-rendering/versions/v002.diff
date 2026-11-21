@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -1,93 +1,116 @@
+ # Checkerboard Progressive Rendering
++Also called: Checkerboard sampling
++## Overview
++Checkerboard Progressive Rendering reduces per-frame compute by tracing only half the pixels each frame while blending results over time [S1, unofficial]. It solves the problem of maintaining interactive frame rates during user interaction by computing only a subset of rays, then progressively filling in the remaining pixels with actual values once interaction ceases [S2, book]. It sets itself apart from its sibling [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by using temporal blending of partial frames rather than spatial resolution stages, and from [Random Pixel Subsampling](1668-random-pixel-subsampling.md) by using a deterministic spatial pattern rather than stochastic sampling.
++## How it works
++**Inputs and outputs:**
++- Input: Previous frame’s color buffer $C_{prev}$, current frame’s partial render buffer $C_{curr}$, and a checkerboard mask $M$.
++- Output: Blended color buffer $C_{out}$.
+ 
+-Also called: Checkerboard sampling
+-
+-## Overview
+-Checkerboard Progressive Rendering reduces per-frame compute by tracing only half the pixels each frame while blending results over time [S1, unofficial]. It alternates which pixels are freshly traced, allowing the image to converge progressively without full recomputation [S1, unofficial]. This method distinguishes itself from full-screen adaptive techniques by using a fixed, deterministic spatial pattern (checkerboard) rather than error-driven or random sampling masks [S1, unofficial][S2, unofficial].
+-
+-## How it works
+-**Inputs and Outputs:**
+-- Input: Previous frame’s color buffer $C_{prev}$, current frame’s partial render buffer $C_{curr}$, and a frame counter $f$.
+-- Output: Blended color buffer $C_{out}$ for display.
+-
+-**Data Structures:**
+-- $C_{prev}$: A 2D array of color values (e.g., `float3` or `vec3`) with dimensions $W \times H$.
+-- $C_{curr}$: A 2D array of color values, initialized to zero or transparent for each frame.
+-- $f$: Integer frame index, starting at 0.
++**Data structures:**
++- $C_{prev}$: 2D array of color values (e.g., `float3` per pixel).
++- $C_{curr}$: 2D array of color values, initialized to zero or previous values for non-traced pixels.
++- $M$: 2D boolean mask where $M_{i,j} = 1$ if pixel $(i,j)$ is to be traced in the current frame, $0$ otherwise. The mask alternates between two states: $M_{even}$ (checkerboard pattern starting with top-left) and $M_{odd}$ (inverted pattern).
+ 
+ **Steps:**
+-1. Determine the active pixel set for the current frame $f$. A pixel at screen coordinates $(x, y)$ is active if $(x + y + f) \pmod 2 == 0$. This creates a checkerboard pattern that shifts every frame [S1, unofficial].
+-2. For each active pixel $(x, y)$:
+-   a. Trace the ray through the volume using the standard volume rendering integral [S1, unofficial].
+-   b. Compute the color contribution $C_{trace}(x, y)$ using the shading function (e.g., `shadeOpaqueSphere` or `shadeVoxel` depending on material transparency) [S1, unofficial].
+-   c. Store $C_{trace}(x, y)$ in $C_{curr}(x, y)$.
+-3. For each inactive pixel $(x, y)$:
+-   a. Copy the previous frame’s result to the current buffer: $C_{curr}(x, y) = C_{prev}(x, y)$ [S1, unofficial].
+-4. Blend the buffers to produce the output. A simple average or weighted blend is used. If $B$ is the blend factor (e.g., 0.5 for equal weighting), then:
+-   $$ C_{out}(x, y) = B \cdot C_{curr}(x, y) + (1 - B) \cdot C_{prev}(x, y) $$
+-   [S1, unofficial]. Note: In some implementations, the "carry forward" step (Step 3) effectively acts as the blend if $C_{curr}$ is not cleared, but explicit blending is safer for convergence [S1, unofficial].
+-5. Update $C_{prev} = C_{out}$ for the next frame.
+-6. Increment $f$.
++1. Initialize $C_{prev}$ to black or the first frame’s full render.
++2. For each frame $f$:
++   a. Determine mask $M_f$ based on frame parity ($f \mod 2$).
++   b. For each pixel $(i,j)$:
++      i. If $M_f[i,j] == 1$: Trace the ray and compute color $C_{trace}[i,j]$.
++      ii. Else: $C_{trace}[i,j] = C_{prev}[i,j]$ (carry forward previous result).
++   c. Blend $C_{trace}$ into $C_{prev}$ to produce $C_{out}$.
++   d. Update $C_{prev} = C_{out}$ for the next frame.
++
++**Formulas:**
++The blending step is typically a simple average or weighted blend. A common implementation is:
++$$ C_{out}[i,j] = \alpha \cdot C_{trace}[i,j] + (1 - \alpha) \cdot C_{prev}[i,j] $$
++where $\alpha$ is a blending factor. For simple averaging over time, $\alpha$ might be $1/N$ where $N$ is the number of frames, but for progressive convergence, a fixed $\alpha$ (e.g., 0.5) or adaptive $\alpha$ is used. In the simplest case of alternating full updates:
++$$ C_{out}[i,j] = \begin{cases} C_{trace}[i,j] & \text{if } M_f[i,j] == 1 \\ C_{prev}[i,j] & \text{if } M_f[i,j] == 0 \end{cases} $$
++However, to avoid flickering, a blend is often applied:
++$$ C_{out}[i,j] = 0.5 \cdot C_{trace}[i,j] + 0.5 \cdot C_{prev}[i,j] $$
+ 
+ **Parameters:**
+-- Blend factor $B$: Typically 0.5, but can be tuned for convergence speed vs. latency [S1, unofficial].
+-- Frame counter $f$: Resets periodically or wraps around to prevent overflow [G].
++- Blending factor $\alpha$: Typically 0.5 for simple averaging [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Accumulating errors over many frames can lead to bias if the blend factor is not handled correctly. Russian roulette termination may be needed for long paths to remove bias [S2, unofficial].
+-- **Boundaries:** Ensure the checkerboard pattern covers all pixels. The condition $(x + y + f) \pmod 2 == 0$ ensures exactly half the pixels are active.
+-- **Degenerate Input:** If the scene is static, the method converges to the full solution. If the scene changes rapidly, the blending may cause ghosting.
++**Edge cases and pitfalls:**
++- Flickering: If blending is not used, rapid alternation can cause visible flickering.
++- Convergence: Convergence is slow for static scenes if $\alpha$ is too small.
++- Motion: If the camera or scene moves, the checkerboard pattern may cause aliasing artifacts if not handled with temporal supersampling or motion vectors.
+ 
+ **Pseudocode:**
+ ```python
+-def checkerboard_progressive_render(frame_buffer, width, height, trace_ray, blend_factor=0.5):
+-    # Initialize previous frame buffer if not present
+-    if not hasattr(checkerboard_progressive_render, 'prev_buffer'):
+-        checkerboard_progressive_render.prev_buffer = np.zeros((height, width, 3))
+-        checkerboard_progressive_render.frame_count = 0
++def checkerboard_progressive_rendering(scene, camera, num_frames):
++    # Initialize previous frame buffer
++    prev_buffer = zeros_like(scene.resolution)
+     
+-    curr_buffer = np.zeros((height, width, 3))
+-    f = checkerboard_progressive_render.frame_count
++    for frame in range(num_frames):
++        # Determine checkerboard mask based on frame parity
++        if frame % 2 == 0:
++            mask = get_checkerboard_mask_even(scene.resolution)
++        else:
++            mask = get_checkerboard_mask_odd(scene.resolution)
++        
++        # Create current frame buffer
++        curr_buffer = zeros_like(scene.resolution)
++        
++        # Trace rays for masked pixels
++        for i, j in pixels_where(mask):
++            ray = camera.generate_ray(i, j)
++            color = trace_ray(scene, ray)
++            curr_buffer[i, j] = color
++        
++        # For non-traced pixels, carry forward previous result
++        for i, j in pixels_where_not(mask):
++            curr_buffer[i, j] = prev_buffer[i, j]
++        
++        # Blend current and previous buffers
++        # Simple averaging blend
++        alpha = 0.5
++        out_buffer = alpha * curr_buffer + (1 - alpha) * prev_buffer
++        
++        # Update previous buffer
++        prev_buffer = out_buffer
++        
++        # Display or store out_buffer
++        display(out_buffer)
+     
+-    for y in range(height):
+-        for x in range(width):
+-            # Determine if pixel is active in this frame
+-            if (x + y + f) % 2 == 0:
+-                # Trace ray for active pixel
+-                color = trace_ray(x, y)
+-                curr_buffer[y, x] = color
+-            else:
+-                # Carry forward previous frame's result
+-                curr_buffer[y, x] = checkerboard_progressive_render.prev_buffer[y, x]
+-    
+-    # Blend current and previous buffers
+-    out_buffer = blend_factor * curr_buffer + (1 - blend_factor) * checkerboard_progressive_render.prev_buffer
+-    
+-    # Update previous buffer for next frame
+-    checkerboard_progressive_render.prev_buffer = out_buffer
+-    checkerboard_progressive_render.frame_count += 1
+-    
+-    return out_buffer
++    return prev_buffer
++
++def get_checkerboard_mask_even(resolution):
++    mask = zeros(resolution, dtype=bool)
++    for i in range(resolution[0]):
++        for j in range(resolution[1]):
++            if (i + j) % 2 == 0:
++                mask[i, j] = True
++    return mask
++
++def get_checkerboard_mask_odd(resolution):
++    mask = zeros(resolution, dtype=bool)
++    for i in range(resolution[0]):
++        for j in range(resolution[1]):
++            if (i + j) % 2 == 1:
++                mask[i, j] = True
++    return mask
++
++def pixels_where(mask):
++    return [(i, j) for i, j in zip(*np.where(mask))]
++
++def pixels_where_not(mask):
++    return [(i, j) for i, j in zip(*np.where(~mask))]
+ ```
+-
+ ## Subtopics
+-
+-### Progressive Ray Tracing
+-A technique for producing lower quality images which are then improved with time [S2, unofficial]. It is a broader category that includes checkerboard sampling. The main drawback is that high-frequency details tend to get lost [S2, unofficial]. Russian roulette termination helps remove bias at the cost of adding noise [S2, unofficial].
+-
+ ## Operating characteristics
+-- **Time Complexity:** $O(W \cdot H / 2)$ per frame, as only half the pixels are traced [S1, unofficial].
+-- **Memory Complexity:** $O(W \cdot H)$ for storing the previous frame buffer [S1, unofficial].
+-- **Measured Performance:** Reduces per-frame compute by 50% [S1, unofficial].
+-- **Scaling:** Scales linearly with resolution. Convergence speed depends on the blend factor and scene dynamics.
+-- **Strengths:** Low latency, reduced compute, simple implementation.
+-- **Limitations:** High-frequency details may be lost; ghosting in dynamic scenes; bias if not handled correctly [S2, unofficial].
+-- **When to Use:** Static or slowly changing scenes where reduced compute is critical.
+-- **When Not to Use:** Rapidly changing scenes or when high-frequency detail is essential.
+-
++- **Time complexity:** $O(N/2)$ per frame, where $N$ is the total number of pixels, since only half the pixels are traced each frame.
++- **Memory complexity:** $O(N)$ for storing the previous frame buffer.
++- **Measured performance:** Reduces per-frame compute by half [S1, unofficial].
++- **Scaling:** Scales linearly with resolution, but convergence time increases with resolution.
++- **Strengths:** Interactive frame rates during interaction, simple implementation.
++- **Limitations:** Flickering if blending is not used, slow convergence for static scenes, aliasing artifacts with motion.
++- **When to use:** Interactive applications where frame rate is critical.
++- **When not to use:** Offline rendering where quality is paramount, or scenes with high motion.
+ ## Background
+-Originated in the context of progressive rendering techniques for ray tracing [S2, unofficial]. It is a specific instance of progressive ray tracing [S2, unofficial]. The method is used in voxel ray tracers and other volume rendering applications where compute resources are limited [S1, unofficial].
+-
++Originated in the context of progressive ray tracing for interactive applications [S2, book]. Popularized in real-time ray tracing demos and games [S1, unofficial].
+ ## Sources
+ [S1] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)
+-[S2] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)+[S2] Ray Tracing Gems, https://link.springer.com/book/10.1007/978-1-4842-5574-2, fetched 2026-10-24 (book)

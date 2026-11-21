@@ -1,0 +1,164 @@
+Describe the project you are working on A volumetric sky renderer using ray marching. An efficient way to implement this is by computing both the sky and the clouds in compute shaders that output to one or multiple look-up textures (repr...
+
+Give `Resource`s/`RefCounted`s a proper way to react to `NOTIFICATION_PREDELETE` · Issue #11774 · godotengine/godot-proposals · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Give Resources/RefCounteds a proper way to react to NOTIFICATION_PREDELETE #11774
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Give Resources/RefCounteds a proper way to react to NOTIFICATION_PREDELETE#11774
+Copy link
+Labels
+topic:core
+Description
+vbettaque
+opened on Feb 14, 2025
+Issue body actions
+Describe the project you are working on
+A volumetric sky renderer using ray marching. An efficient way to implement this is by computing both the sky and the clouds in compute shaders that output to one or multiple look-up textures (represented by TextureRD2Ds), which are then combined and sent to a sky shader for rendering. This is necessary because Godot's sky shader does not allow for certain performance tricks like staggered rendering using interpolation. An example on how it can be done is found here.
+Describe the problem or limitation you are having in your project
+Godot's philosophy of composition implies that abstract Nodes and Resources should have as little cross-dependence as possible. It is therefore reasonable to have all the code relevant for setting up and running a compute shader be local to the TextureRD (e.g. TextureRD2D) that it is supposed to output to.
+However, working with compute shaders requires that the user correctly frees all the relevant RIDs at the end of the TextureRD's lifetime to avoid memory leaks. But while Resources can initialize these RIDs through RenderingDevice at the beginning (e.g. using _ready() ), they can't free them at the end because listening to NOTIFICATION_PREDELETE does not work for any objects inheriting from RefCounted. While this behavior was initially reported as a bug, judging from the comments by @reduz et al. it seemed to be intentional or at least WONTFIX at the time.
+But a lot of time has passed since that report and TextureRD is now a thing, which means that any such Resource has to be permanently associated with a Node object that manually frees the RIDs on its behalf. This ultimately unnecessary cross-dependence does not only contradict Godot's aforementioned philosophy, but it is also highly error-prone, especially since Node-Resource relationships can often change during refactoring.
+Describe the feature / enhancement and how it helps to overcome the problem or limitation
+The aforementioned "bug" should be fixed, and the usage of NOTIFICATION_PREDELETE to define a destructor should be better documented (especially in the context of TextureRD). This would solve the aforementioned issues and inform people new to using TextureRDs about the practice.
+Describe how your proposal will work, with code, pseudo-code, mock-ups, and/or diagrams
+N/A
+If this enhancement will not be used often, can it be worked around with a few lines of script?
+Yes, but doing so would violate Godot's core principles and could easily lead to memory leaks in large codebases.
+Is there a reason why this should be core and not an add-on in the asset library?
+The proposal depends on fixing a "bug" in core.
+Addendum: It should be noted that one can work around this "bug", e.g. by not invoking any functions defined in the custom Resource/RefCounted (accessing user-defined variables is fine though). However this is undefined behavior and not guaranteed to be possible indefinitely.
+👍React with 👍14Reacted by Tomasz Chabora, James Dimick, Alfonso J. Ramos, ydeltastar, Zireael07, val, Marius Hanl, Luo Zhihao, outfrost, Timo Schwarzer and 4 more
+👀React with 👀2Reacted by James Dimick and Sairam M
+Activity
+dalexeev
+added
+topic:core
+on Feb 15, 2025
+ydeltastar commented on Feb 16, 2025
+ydeltastar
+on Feb 16, 2025
+Last edited by ydeltastar
+More actions
+However, working with compute shaders requires that the user correctly frees all the relevant RIDs at the end of the TextureRD's lifetime to avoid memory leaks.
+Are you sure this is needed? These high-level types like Texture2DRD are intended to wrap and automatically manage server resources. It should handle initialization and cleanup on its own; otherwise there is no point in using it instead of a server API like RenderingDevice.texture_create(). Looking at Texture2DRD's source, it frees its RenderingServer texture which should also free the actual RenderingDevice texture. If it is not the case, it is a memory leak bug that should be addressed apart from the proposal.
+theraot commented on Feb 17, 2025
+theraot
+on Feb 17, 2025
+Last edited by theraot
+More actions
+If we had a higher level API for compute shaders that would automatically manage resources, then I'd say this is not needed. Given the precedents, that is likely how this would be resolved.
+I've also wished for some kind of notification that I could use after an object has been freed to release associated resources. Now thinking about it... Perhaps we can have a RefCounted monitor another: If we add a RefCounted in the metadata of another, and that is the only reference to it, and it has an script listening for NOTIFICATION_PREDELETE, that could be a way to react to the deletion.
+I know this is not about Nodes (which are not RefCounted) but this proposal reminds me of these:
+Emit a freeing signal when queue_free is called on a Node #7441
+Add a Node destructor callback function #707
+Addendum: I have posted a proof of concept at #7441 (comment) - I made using a Node, but it shouldn't be hard to adapt.
+vbettaque commented on Feb 18, 2025
+vbettaque
+on Feb 18, 2025
+Author
+More actions
+However, working with compute shaders requires that the user correctly frees all the relevant RIDs at the end of the TextureRD's lifetime to avoid memory leaks.
+Are you sure this is needed? These high-level types like Texture2DRD are intended to wrap and automatically manage server resources. It should handle initialization and cleanup on its own; otherwise there is no point in using it instead of a server API like RenderingDevice.texture_create(). Looking at Texture2DRD's source, it frees its RenderingServer texture which should also free the actual RenderingDevice texture. If it is not the case, it is a memory leak bug that should be addressed apart from the proposal.
+It does seem to free the texture itself, but it does not affect e.g. the shader and pipeline instances that are needed to run the compute process (although I think the latter gets freed when the former is). I don't think Godot has a way of detecting those, so you would have to take care of them manually.
+👍React with 👍2Reacted by Luo Zhihao and ydeltastar
+fr0nkk commented on May 25, 2025
+fr0nkk
+on May 25, 2025
+Last edited by fr0nkk
+More actions
+I also ran into this problem in Godot 4.3.
+Here is a workaround to be able to use class functions and even RenderingServer.call_on_render_thread from within _notification, exploiting the fact that variables are still accessible. Note that this is probably unsafe and not guaranteed to work in future versions.
+```
+extends Resource
+
+class_name SomeClass
+
+var deconstructor1_callable : Callable
+var deconstructor2_callable : Callable
+var some_var : int = 1
+
+func _init() -> void:
+	deconstructor1_callable = deconstructor1
+	deconstructor2_callable = deconstructor2
+
+func deconstructor1():
+	print("Deconstruct! some_var = ", some_var)
+
+func deconstructor2():
+	print("Deconstruct on render thread! some_var = ", some_var)
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE:
+		deconstructor1_callable.call()
+		RenderingServer.call_on_render_thread(deconstructor2_callable)
+```
+If you need to call a class function from a deconstructor, you need to also make a callable variable for this function and .call() it.
+👍React with 👍1Reacted by Zireael07
+Zylann commented on Jun 14, 2025
+Zylann
+on Jun 14, 2025
+Last edited by Zylann
+More actions
+I ran into this again today while writing a CompositorEffect. The documentation even used it, but without a method, luckily avoiding the issue. But now my experiment is scaling up and I want to use a method. But can't. So I'm repeating code in frustration.
+I believe this is a problem more generatal than rendering stuff. I might even say should be available to any Object. This not the first time I wanted to use a "destructor", I've done it plenty of times in other projects. Not being able to use a method is extremely annoying.
+I consider this a bug, but if a proper destructor pattern is possible then that would be great.
+Wesmer commented on Jul 11, 2025
+Wesmer
+on Jul 11, 2025
+More actions
+I love that this problem keeps bringing me back to Godot.... Anyway, I'll take this as an opportunity to repost my workaround.
+I think saving the self-pointer and calling unreference() is much easier than saving function pointers and calling them via the rendering server. Two years ago this code saved me some projects. I don't know if the wokrarround is still bug free in the newer versions, but my old projects still seem to work in Godot 4.4.1, so ...
+```
+class_name Delete_ME
+extends RefCounted
+
+var __THIS: Delete_ME
+var drink = "water"
+
+## utility func in another file ....
+static func SELF_AND_UNREF(self_: RefCounted) -> RefCounted:
+	self_.unreference()
+	return self_
+## .....
+
+func _init() -> void:
+	__THIS = SELF_AND_UNREF(self);
+
+func _notification(what: int) -> void:
+	print(what, self)
+	if what == NOTIFICATION_PREDELETE:
+		print(__THIS.drink) # Prints "water"
+		__THIS.drink_more() # Prints "more water"
+
+func drink_more() -> void:
+	print("more " + __THIS.drink) 
+```
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+topic:core
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

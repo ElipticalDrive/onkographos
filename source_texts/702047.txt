@@ -1,0 +1,257 @@
+Terrain renderer based on SRTM DEMs. Contribute to dkogan/horizonator development by creating an account on GitHub.
+
+render: slope shading, with smooth per-vertex normals by thannart · Pull Request #11 · dkogan/horizonator · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+thannart
+commented
+Sep 14, 2026
+Copy link
+Copy Markdown
+Adds directional slope shading: terrain is darkened/lightened based on its surface orientation relative to a light direction (horizonator_set_sun(), new --shading/--sun-azimuth/--sun-elevation flags, same on/off pattern as horizonator_set_curvature()). Normals are estimated per-vertex on the CPU by finite differences over the DEM, uploaded as a second vertex attribute, and interpolated by the rasterizer -- so shading is continuous across triangle edges (smooth/Gouraud-style), not faceted like a flat per-triangle normal would be. Off by default, unchanged legacy rendering. Builds on #4-#10.
+thannart
+and others
+added 8 commits
+September 3, 2026 21:48
+standalone: add --viewer-height to add observer height above DEM ground
+…
+1cdcf37
+```
+Lets you account for the fact that the viewer isn't standing at ground
+level (e.g. an apartment floor), by reusing horizonator_move() to
+reposition the camera at ground_elevation + viewer_height after the
+usual auto-selected ground elevation is computed.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+vertex.glsl: add optional Earth curvature and atmospheric refraction …
+…
+2d8ab61
+```
+…correction
+
+The renderer worked entirely in the tangent plane at the viewer, ignoring
+Earth's curvature. This is a good approximation at short range, but at
+the 100-150km distances relevant for viewing the Alps from Lyon, a
+distant peak's apparent elevation angle can be off by more than a
+kilometer of apparent height.
+
+Add the standard geodetic "curvature and refraction" correction:
+  drop = (1-k) * distance^2 / (2*Rearth)
+subtracted from each vertex's apparent height, where k is the
+atmospheric refraction coefficient (k=0.13, the Gaussian refraction
+coefficient used by udeuschle.de, is the default).
+
+New horizonator_set_curvature() API, and --curvature / --refraction-k
+flags on standalone. Off by default, so existing behavior is unchanged
+unless --curvature is explicitly requested; this lets the flat-plane and
+curved renders be compared directly.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+horizonator_init: optionally restrict the mesh to the azimuth wedge i…
+…
+349e49e
+```
+…n use
+
+The renderer always built a mesh covering the full 360-degree circle of
+loaded DEM data, even for a render that only ever looks at a narrow
+azimuth wedge (e.g. a fixed 110-degree panorama). Most of that geometry
+was never visible and cost triangle-generation/vertex-shader time every
+frame for nothing.
+
+horizonator_init() takes 3 new parameters: restrict_mesh_azimuth,
+mesh_az_deg0, mesh_az_deg1. When set, only cells within that azimuth
+range (plus a 5-degree margin, plus a small radius always meshed near
+the viewer where per-cell azimuth changes too fast to test reliably)
+are triangulated; the rest of the loaded square is skipped in the index
+buffer. Vertex generation, DEM sampling and the shaders are untouched.
+
+standalone (a single fixed-wedge render per invocation) enables this by
+default, since the meshed wedge always matches the rendered wedge
+exactly -- verified pixel-identical output on 3 different az/height
+combinations, 36-44% faster wall-clock render time. Pass
+--no-restrict-mesh-azimuth to fall back to the old full-circle mesh.
+
+The interactive horizonator tool and the Python bindings pass
+restrict_mesh_azimuth=false, since they let the viewer pan around after
+the data is loaded, potentially outside whatever wedge was meshed at
+init time.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+horizonator_project: apply the same curvature/refraction correction a…
+…
+97e167c
+```
+…s the render
+
+horizonator_project() (used by annotator.c to predict where a named POI
+should land on screen) computed the apparent elevation from a raw
+lat/lon/ele difference, with no Earth-curvature/refraction correction.
+When a render was made with horizonator_set_curvature() enabled, the
+actual terrain in that render sits lower than this flat-plane
+projection predicts -- by over a kilometer of apparent height at
+100+km. annotator.c's occlusion/matching search (a small pixel-radius,
+range-difference fuzz match) can't bridge that gap, so with
+--curvature, no POIs were ever found: every one looked occluded.
+
+horizonator_project() now takes curvature_enabled/refraction_k and
+applies the same drop = (1-k)*d^2/(2*Rearth) subtracted from the
+apparent height, matching vertex.glsl. annotate() takes and forwards
+the same two values, which must match whatever was passed to
+horizonator_set_curvature() for the render being annotated.
+horizonator_unproject() needs no equivalent change: it derives lat/lon
+from the already-rendered (already curvature-corrected, if enabled)
+range image, not from an independently-computed real-world height.
+
+Also fixes query-peaks-from-osm.py, which the Overpass API was
+rejecting (HTTP 406) or timing out on: switch to https, add an
+identifying User-Agent and an explicit query timeout.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+annotate: max labelling distance follows zfar instead of a hardcoded …
+…
+1747baa
+```
+…100km
+
+MAX_MARKER_DIST was a #define fixed at 100000.0, independent of the
+render's own --zfar. Any POI farther than 100km was silently never
+labelled, even if it was actually rendered and clearly visible (e.g.
+Mont Blanc, 158km from Lyon, with a --zfar of 150km+).
+
+annotate() now takes max_marker_dist_m explicitly; standalone passes
+zfar, since there's no point labelling something farther than what was
+actually rendered.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+render: white background, grayscale terrain, and ridge-line outlines
+…
+28c0e78
+```
+Switches the default look from the original blue-background/red-distance
+color-coding to a udeuschle.de-style drawn panorama: a white background,
+near terrain in dark gray fading to light gray/white far away, and the
+crest of each visible ridge/mountain-range layer outlined in a dark gray
+line.
+
+- horizonator-lib.c: glClearColor() to white instead of blue
+- vertex.glsl: rgb is now a grayscale value (GRAY_NEAR..GRAY_FAR by
+  distance) on all 3 channels, instead of red-only
+- standalone.c: new draw_ridge_outlines(), a CPU-side post-process on the
+  already-available range image. Darkens a pixel to --ridge-line-gray
+  wherever it sits at a depth discontinuity of more than
+  --ridge-line-threshold meters from the pixel above it (terrain against
+  the sky, or one surface abruptly replaced by a much nearer/farther one
+  behind a gap). Deliberately uses an absolute meters threshold, not a
+  fraction of distance: at the bottom of the frame (grazing, near-horizontal
+  sightlines) a fixed threshold naturally produces more, finer ridgelets
+  than near the horizon, matching what a real drawn panorama looks like up
+  close. --no-ridge-lines disables this.
+
+Also rewrites standalone --help and the corresponding README section into
+a single, organized reference for every rendering option and how it
+affects the output (field of view, curvature/refraction, color/ridge
+lines, peak labels, viewer position, performance, data sources).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+annotator: extract find_visible_pois(), add --list-visible-peaks
+…
+99a98af
+```
+The peak-visibility-matching logic (project each POI, then scan the
+rendered range image to confirm it isn't occluded) was inlined in
+annotate(), entangled with the PDF/SVG drawing code -- there was no way
+to get just the list of visible peaks without generating a full
+annotated render.
+
+Extracts that logic into find_visible_pois(), a new function in
+annotator.c/.h that annotate() now calls internally (no behavior
+change, no more duplicated code). standalone gets a new
+--list-visible-peaks OUT.txt option, independent of --image, that
+writes the visible peaks (name, lat, lon, ele_m, range_m) as a plain
+tab-separated file.
+
+Also fixes a latent NULL-dereference: strlen(filename_image) was called
+unconditionally, before checking filename_image for NULL. This was
+never reached with a NULL filename_image before (every prior path
+through this code already required --image), but --list-visible-peaks
+without --image hits it directly.
+
+cluster-visible-peaks.py is a companion script: reads that output,
+drops peaks with no letters in their name (OSM-nameless fallback
+entries, e.g. "1583.0"), and groups the rest into geographic clusters
+("massifs" -- OSM doesn't reliably tag this for this area, so these are
+unnamed, distance-ordered groups, not real massif names).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+render: slope shading, with smooth per-vertex normals
+…
+fda7837
+```
+Adds directional slope shading: terrain is darkened/lightened based on
+how its surface faces relative to a light direction, giving the relief
+a 3D appearance beyond the existing pure distance-based grayscale.
+
+Normals are estimated per-vertex, on the CPU, by finite differences
+over the 4 DEM neighbors of each grid point (horizonator-lib.c, in the
+existing vertex-buffer-filling loop -- no extra DEM reads, the samples
+are already being fetched there). They're uploaded as a second vertex
+attribute (a new float VBO; the existing position VBO stays untouched,
+compact GLshorts) and interpolated by the rasterizer across each
+triangle. This means shading is continuous across the edge between two
+triangles sharing a vertex, unlike a flat per-triangle normal, which
+would show a visible facet at every triangle boundary.
+
+Lighting itself (dot(normal,sun_dir), with a 0.5 ambient floor so a
+slope facing away from the sun dims rather than goes black) happens in
+fragment.glsl, using the interpolated per-fragment normal;
+geometry.glsl just passes normals through unchanged, one per vertex,
+alongside the existing rgb/tex passthrough.
+
+horizonator_set_sun(ctx, shading_enabled, sun_az_deg, sun_el_deg) is a
+new public function, following the same on/off + uniforms pattern as
+horizonator_set_curvature(): shading is off by default (unchanged
+legacy rendering) via a shading_scale uniform (0.0/1.0), same trick as
+curvature_scale. standalone gets matching --shading/--sun-azimuth/
+--sun-elevation flags.
+
+Memory cost: +12 bytes/vertex (a float3 normal) for the *entire* loaded
+grid (Nvertices = (2*radius_cells)^2, independent of the azimuth-wedge
+mesh restriction, which only shrinks the triangle/index buffer, not the
+vertex buffer) -- e.g. +~250MB at a 150km zfar. This is a one-time
+allocation per render (standalone is single-shot: one init, one
+render, exit), not a repeated one, so it doesn't compound the way the
+known horizonator_deinit() leak does across repeated init/deinit
+cycles in one process. Tested at the 150km/4000x550 reference crop
+with no crash and stable memory.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+thannart
+mentioned this pull request
+Sep 14, 2026
+render: atmospheric perspective (blue-gray tint far away)
+#12
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

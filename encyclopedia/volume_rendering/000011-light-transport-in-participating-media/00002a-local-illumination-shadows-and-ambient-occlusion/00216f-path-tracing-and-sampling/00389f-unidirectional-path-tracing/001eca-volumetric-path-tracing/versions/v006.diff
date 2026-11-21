@@ -1,0 +1,180 @@
+--- v005.md
++++ v006.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs:**
+-*   A camera ray $r = (o, d)$ with origin $o$ and normalized direction $d$.
++*   A camera ray $r = (o, d)$ with origin $o$ and normalized direction $d$ [S2, unofficial][S4].
+ *   A scene containing a single participating medium with a convex bounding volume and a `null` BSDF at its boundary [S3, unofficial][S4].
+ *   Infinite light sources (e.g., environment maps or constant lights) [S3, unofficial][S4].
+-*   A maximum path depth `maxDepth`.
+-*   A sampler providing uniform random numbers.
++*   A maximum path depth `maxDepth` [S4].
++*   A sampler providing uniform random numbers [S4].
+ 
+ **Outputs:**
+-*   The estimated radiance $L$ along the ray.
++*   The estimated radiance $L$ along the ray [S4].
+ 
+ **Data Structures:**
+@@ -43,5 +43,5 @@
+             [S4]
+         vi. Select the event mode using discrete sampling with probabilities $\{p_{Absorb}, p_{Scatter}, p_{Null}\}$ based on $u_{mode}$ [S4].
+-        vii. **If Absorb:** Add emission from the medium at $p$ to $L$: $L += \beta \cdot \sigma_a \cdot L_e(p, \omega)$ (where $L_e$ is medium emission, often 0). Terminate the path [S4].
++        vii. **If Absorb:** Add emission from the medium at $p$ to $L$: $L += \beta \cdot L_e(p, \omega)$ (where $L_e$ is medium emission, often 0). Terminate the path [S4].
+         viii. **If Scatter:**
+             *   If $depth \ge maxDepth$, terminate the path [S4].
+@@ -64,97 +64,80 @@
+ **Pseudocode:**
+ ```python
+-def volumetric_path_tracing(ray, scene, sampler, max_depth):
++import math
++import random
++
++def volumetric_path_tracing(ray_o, ray_d, scene, sampler, max_depth):
+     L = 0.0
+     beta = 1.0
+     depth = 0
+-    
+-    # Terminate secondary wavelengths for simplicity
+-    lambda_sample = sampler.get_primary_wavelength()
+-    
++    # Normalize direction
++    inv_len = 1.0 / math.sqrt(sum(c*c for c in ray_d))
++    ray_d = [c * inv_len for c in ray_d]
++
+     while depth < max_depth:
+-        # 1. Find intersection
+-        si = scene.intersect(ray)
+-        t_max = si.t_hit if si else ray.t_max
+-        
++        si = scene.intersect(ray_o, ray_d)
++        t_max = si.t_hit if si else float('inf')
+         scattered = False
+         terminated = False
+-        
+-        # 2. Delta Tracking if in medium
+-        if ray.in_medium:
+-            # Initialize RNG
++
++        if scene.is_in_medium(ray_o, ray_d):
++            # Initialize RNG from hashed sampler values
+             hash0 = hash(sampler.get_1d())
+             hash1 = hash(sampler.get_1d())
+-            rng = RNG(hash0, hash1)
+-            
++            rng = random.Random(hash0 ^ hash1)
+             u = sampler.get_1d()
+             u_mode = sampler.get_1d()
+-            
+-            # Sample distance using majorant
+-            # SampleT_maj returns (p, sigma_maj, T_maj)
+-            p, sigma_maj, T_maj = sample_t_maj(ray, t_max, u, rng, lambda_sample)
+-            
+-            # Get medium properties at p
+-            mp = scene.get_medium_properties(p)
+-            sigma_a = mp.sigma_a
+-            sigma_s = mp.sigma_s
+-            sigma_t = mp.sigma_t
+-            
+-            # Compute probabilities
+-            p_absorb = sigma_a / sigma_maj
+-            p_scatter = sigma_s / sigma_maj
+-            p_null = max(0.0, 1.0 - p_absorb - p_scatter)
+-            
+-            # Select mode
+-            mode = sample_discrete([p_absorb, p_scatter, p_null], u_mode)
+-            
+-            if mode == 0: # Absorb
+-                L += beta * mp.emission
+-                terminated = True
+-            elif mode == 1: # Scatter
+-                if depth >= max_depth:
++
++            # Delta tracking loop
++            while True:
++                sigma_maj = scene.get_majorant(ray_o, ray_d, 0.0)
++                t = -math.log(1.0 - rng.random()) / sigma_maj
++                if t >= t_max:
++                    t = t_max
++                    break
++                mp = scene.get_medium_properties(ray_o, ray_d, t)
++                sigma_t = mp.sigma_a + mp.sigma_s
++                p_absorb = mp.sigma_a / sigma_maj
++                p_scatter = mp.sigma_s / sigma_maj
++                p_null = max(0.0, 1.0 - p_absorb - p_scatter)
++
++                if u_mode < p_absorb:
++                    L += beta * mp.emission
+                     terminated = True
+-                else:
++                    break
++                elif u_mode < p_absorb + p_scatter:
+                     depth += 1
+-                    # Sample phase function
+-                    u_phase = (rng.uniform(), rng.uniform())
+-                    ps = mp.phase.sample(-ray.d, u_phase)
++                    u1, u2 = rng.random(), rng.random()
++                    ps = mp.phase.sample(-ray_d, u1, u2)
+                     if not ps:
+                         terminated = True
+                     else:
+-                        # Update throughput
+-                        beta *= ps.p / ps.pdf
+-                        # Update ray
+-                        ray.o = p
+-                        ray.d = ps.wi
++                        beta *= ps.p / p_scatter
++                        ray_o = [ray_o[i] + ray_d[i] * t for i in range(3)]
++                        ray_d = ps.wi
+                         scattered = True
+-            else: # Null
+-                u_mode = rng.uniform()
+-                # Continue delta tracking (loop continues)
+-                continue
+-        
++                    break
++                else:
++                    u_mode = rng.random()
++                    continue
++
+         if terminated:
+             return L
+-            
+         if scattered:
+             continue
+-            
+-        # 3. Surface Interaction
++
+         if si:
+-            bsdf = si.get_bsdf(ray, lambda_sample)
++            bsdf = si.get_bsdf(ray_d)
+             if bsdf and bsdf.has_sample():
+-                # Error: SimpleVolPathIntegrator doesn't support surface scattering
+-                raise Error("Surface scattering not supported")
++                raise ValueError("SimpleVolPathIntegrator doesn't support surface scattering.")
+             else:
+-                # Skip intersection or null BSDF
+-                si.skip_intersection(ray, si.t_hit)
+-                
+-        # 4. Emission
++                si.skip_intersection(ray_o, ray_d, si.t_hit)
++
+         if si:
+-            L += beta * si.intr.le(-ray.d, lambda_sample)
++            L += beta * si.intr.le(-ray_d)
+         else:
+             for light in scene.infinite_lights:
+-                L += beta * light.le(ray, lambda_sample)
++                L += beta * light.le(ray_o, ray_d)
+             return L
+-            
+     return L
+ ```
+@@ -182,5 +165,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Linear in the number of path vertices, but delta tracking can be inefficient if the majorant $\sigma_{maj}$ is much larger than the actual $\sigma_t$, leading to many null scattering events [S4].
+-*   **Memory Complexity:** Low, as it does not require storing complex scene structures for volume acceleration (assuming convex bounding volume) [S3, unofficial][S4].
++*   **Memory Complexity:** Low, as it avoids spatial acceleration structures for the volume itself [S4].
+ *   **Performance:** High variance (MSE) compared to light-sampling integrators like [VolPathIntegrator] because it does not sample lights directly [S4]. Requires many samples per pixel (e.g., 256–512) for reasonable noise reduction [S1, unofficial][S4].
+ *   **Strengths:** Simple implementation, robust for homogeneous and heterogeneous media within convex bounds, good for ground-truth generation [S4].

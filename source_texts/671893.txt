@@ -1,0 +1,89 @@
+High-performance client fork. Compile-time patches, no Harmony. Same gameplay, faster frames. - perf(client): breadth-first chunk visibility culling (#72) by Zaldaryon · Pull Request #79 · StratumServer/Optimum
+
+perf(client): breadth-first chunk visibility culling (#72) by Zaldaryon · Pull Request #79 · StratumServer/Optimum · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Zaldaryon
+commented
+Sep 15, 2026
+Copy link
+Copy Markdown
+Collaborator
+What this does
+ChunkCuller.CullInvisibleChunks decides which chunks are visible by casting up to three sub-rays from the camera to every view-distance shell position and marching them chunk by chunk. That cost grows with shell positions times rays times march length, so it scales badly as view distance rises. This replaces the walk with a breadth-first flood over the same per-chunk face-connectivity graph (the "cave culling" technique from Minecraft and Sodium), which is linear in loaded chunks and visits them front to back.
+The behaviour is gated by OptimumConfig.BfsChunkVisibility (default on). When it is off, the original vanilla raycast runs unchanged.
+Correctness
+The flood reuses the existing ClientChunk traversability bitmask (the same data the raycast reads), so it consumes Vintage Story's own opacity model rather than inventing one. A chunk is culled only when every path of mutually-open faces from the camera to it is blocked, which is the conservative criterion: if no open-face path exists, no straight sightline can reach it either. To stay safe against the classic flood false-negative (MC-70850, where a biased single incoming direction hides a chunk that is actually visible), reachability is tested across all incoming faces, not just the one the flood arrived from. The camera chunk and its immediate neighbourhood are always marked visible, the first ring mirrors the vanilla num2 > 1 pass-through, and the flood is bounded by view distance so it cannot run into never-loaded space. In testing the visible chunk set matched the raycast.
+Measured cost
+Measured in a running client on Linux, piloted through the same fixed-seed world, occlusion culling on:
+View distance
+Raycast walk
+BFS walk
+256
+~12.7 ms per recompute
+~2.4 ms per recompute
+1024
+~90 ms per recompute
+~19.7 ms per recompute
+The visibility walk gets roughly five times cheaper, and the gap widens with view distance because the raycast's cost is superlinear while the BFS stays close to linear. The walk recomputes only when the camera crosses into a new chunk, so this is CPU work removed from the chunkculling thread, largest on high-view-distance and CPU-bound setups.
+Tests
+Optimum.Tests/BfsChunkVisibilityTests.cs covers open-field visibility, a solid wall culling only what is fully occluded behind it, the never-over-cull invariant against a brute-force reachability oracle, the frustum-last and occlusion-off paths, the camera-chunk-always-visible case, the first-ring exemption, and a patch-contract test that pins the inlined walk in the ChunkCuller patch to the unit-tested reference so the two cannot drift. Local gates: dotnet build clean, full Optimum.Tests suite green, make check-patches reports 0 conflicts, make check-compat reports 0 cast divergence against the vanilla donor. The IL patcher transplants the walk and its helpers with 0 self-reference errors, and the patched client boots and runs in world with no exceptions or missing-chunk artifacts.
+Fixes #72
+perf(client): breadth-first chunk visibility culling (#72)
+…
+573ed94
+```
+Replace ChunkCuller's per-shell raycast visibility walk with a breadth-first
+flood over the same per-chunk face-connectivity graph, the technique Minecraft
+cave culling and Sodium use. Gated by OptimumConfig.BfsChunkVisibility (default
+on), with the vanilla raycast kept as the fallback.
+
+The raycast marches up to three sub-rays per view-distance shell position and
+its cost grows with shell positions times rays times march length. The BFS is
+linear in loaded chunks and visits them front to back. Reachability reuses the
+existing ClientChunk traversability bitmask through an all-incoming-faces test
+that avoids the MC-70850 see-through-chunk bug, keeps the vanilla first-ring
+pass-through, seeds the camera neighbourhood, and bounds the flood by view
+distance so it cannot run off into unloaded space.
+
+Measured in a running client at view distance 256: the visibility walk drops
+from about 12.7 ms to about 2.4 ms per recompute. At view distance 1024 the
+raycast rises to about 90 ms while the BFS stays near 20 ms, so the advantage
+grows with view distance. The visible chunk set matches the raycast.
+
+Adds BfsChunkVisibilityTests (correctness, first-ring, MC-70850 safety, and a
+patch-contract test pinning the inlined walk to the reference), a diagnostics
+counter, and an optional in-client walk-timing log.
+```
+Zaldaryon
+merged commit 01be301
+into
+main
+Sep 15, 2026
+This was referenced Sep 15, 2026
+[Feature] Hierarchical Chunk and Sub-Chunk Visibility Culling
+#72
+Closed
+docs: update README feature list and remove broken docs links
+#113
+Merged
+Zaldaryon
+deleted the
+feat/issue-72-bfs-chunk-visibility
+branch
+September 29, 2026 00:28
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

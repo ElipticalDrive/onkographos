@@ -1,0 +1,312 @@
+--- v006.md
++++ v007.md
+@@ -4,37 +4,55 @@
+ 
+ ## Overview
+-This method implements the runtime evaluation of a Signed Distance Field (SDF) defined on a 3D voxel grid, providing both the scalar distance value and its spatial gradient (normal) at arbitrary query points [S2, unofficial]. It solves the problem of efficiently querying implicit geometry for ray marching or differentiable rendering pipelines by supporting configurable interpolation orders [S1, unofficial][S2, unofficial]. It differs from [Batched SDF Inference](2329-batched-sdf-inference.md) by operating on single arbitrary points rather than fixed batches, and from [DeepSDF Neural Network](3051-deepsdf-neural-network.md) by using explicit grid-based storage rather than neural network inference [S2, unofficial].
++This method implements the runtime evaluation of Signed Distance Function (SDF) values and their spatial gradients for procedural or grid-based implicit surfaces, serving as the core query interface for ray marching and differentiable rendering pipelines. It distinguishes itself from raw primitive definitions by providing a unified handler that supports both analytical derivatives (for cubic interpolation) and numerical approximations (for linear interpolation), ensuring consistent gradient flow for optimization tasks [S2, unofficial]. Unlike [Batched SDF Inference](2329-batched-sdf-inference.md) which optimizes throughput for dense grids, this implementation focuses on the correctness and differentiability of individual point queries [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D voxel grid representing the SDF, typically stored in `.sdf`, `.npy`, or `.vol` formats [S2, unofficial]. The grid is defined by a resolution $R \times R \times R$ and contains scalar distance values [S2, unofficial]. A query point $p = (x, y, z)$ in 3D space [G].
+-*   **Output:** The signed distance value $d = f(p)$ and the gradient vector $\nabla f(p) = (\frac{\partial d}{\partial x}, \frac{\partial d}{\partial y}, \frac{\partial d}{\partial z})$ [S2, unofficial].
++**Inputs:**
++1.  **SDF Data Source:** A 3D voxel grid representing the distance field, loaded from `.sdf`, `.npy`, or `.vol` files [S2, unofficial].
++2.  **Query Point:** A 3D coordinate $p = (x, y, z)$ in world space [S2, unofficial].
++3.  **Interpolation Mode:** A string parameter `SDF_MODE` specifying either `'linear'` or `'cubic'` interpolation [S2, unofficial].
++4.  **Finite Difference Step:** A scalar `epsilon` (default $10^{-5}$) used for gradient approximation in linear mode [S2, unofficial].
++
++**Outputs:**
++1.  **Distance Value:** A scalar $d = f(p)$ representing the signed distance from $p$ to the surface [S2, unofficial].
++2.  **Gradient Vector:** A 3D vector $\nabla d = (\frac{\partial d}{\partial x}, \frac{\partial d}{\partial y}, \frac{\partial d}{\partial z})$ representing the direction of maximum increase of the distance field [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **SDF Grid:** A 3D array of floating-point values. In implementation [S2, unofficial], this is wrapped in a texture object (e.g., `mi.Texture3f`) with acceleration disabled (`use_accel=False`) to allow direct coordinate-based sampling. The shape is $(R, R, R, 1)$ [S2, unofficial].
+-*   **Configuration:** A string parameter `SDF_MODE` determining the interpolation method: `'linear'` or `'cubic'` [S2, unofficial].
+-*   **Parameters:**
+-    *   `epsilon` ($\epsilon$): The step size for finite difference gradient computation when in linear mode. Default value: $10^{-5}$ [S2, unofficial].
++*   **SDF Grid:** A 3D tensor of shape $(res, res, res, 1)$ storing distance values. In C++ implementations, this may be wrapped in a texture object with acceleration disabled (`use_accel=False`) to allow direct sampling [S2, unofficial].
++*   **Query Handler:** An object (e.g., `SDFQueryHandler`) that encapsulates the SDF name, resolution, and interpolation mode, providing methods for value and gradient evaluation [S1, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Initialization and Validation:**
+-    *   Validate the SDF identifier/name using `is_valid_sdf_name(name)` [S1, unofficial]. If invalid, raise `std::runtime_error("unknown SDF '...'")` [S1, unofficial].
+-    *   Load raw grid data from `.sdf`, `.npy`, or `.vol` files [S2, unofficial].
+-    *   Parse the first element as resolution $R$ [S2, unofficial].
+-    *   Construct `mi.TensorXf` with shape $(R, R, R, 1)$ and wrap in `mi.Texture3f` with `use_accel=False` [S2, unofficial].
++    *   Validate the SDF name using a helper function `is_valid_sdf_name(name)`. If invalid, raise an error `std::runtime_error("unknown SDF '..." + name + "')` [S1, unofficial].
++    *   Load the SDF data from the specified file format. For `.sdf` or `.npy` files, parse the first element as the resolution `res` and the remaining data as the grid values. Construct the 3D tensor with shape `(res, res, res, 1)` [S2, unofficial].
+ 
+-2.  **Value Evaluation $f(p)$:**
+-    *   Given query point $p$, determine interpolation mode via `SDF_MODE` [S2, unofficial].
+-    *   **If `'linear'`:** Evaluate using `self.grid.eval(p)[0]` [S2, unofficial].
+-    *   **If `'cubic'`:** Evaluate using `self.grid.eval_cubic(p)[0]` [S2, unofficial].
++2.  **Value Evaluation $d = f(p)$:**
++    *   Map the query point $p$ from the input coordinate system (e.g., `Vector3`) to the internal representation (e.g., `glm::vec3`) [S1, unofficial].
++    *   If `SDF_MODE` is `'linear'`:
++        *   Perform trilinear interpolation on the grid at point $p$.
++        *   Formula: $d = \text{grid.eval}(p)[0]$ [S2, unofficial].
++    *   If `SDF_MODE` is `'cubic'`:
++        *   Perform tricubic interpolation on the grid at point $p$.
++        *   Formula: $d = \text{grid.eval\_cubic}(p)[0]$ [S2, unofficial].
+ 
+-3.  **Gradient Evaluation $\nabla f(p)$:**
+-    *   **If `'linear'`:** Compute gradient using central finite differences with $\epsilon = 10^{-5}$ for dx, dy, dz components [S2, unofficial].
+-    *   **If `'cubic'`:** Use `self.grid.eval_cubic_grad(p)[1][0]` [S2, unofficial].
++3.  **Gradient Evaluation $\nabla d$:**
++    *   If `SDF_MODE` is `'linear'`:
++        *   Compute the gradient using central finite differences with step size $\epsilon = 10^{-5}$ [S2, unofficial].
++        *   Let $e_x = (\epsilon, 0, 0)$, $e_y = (0, \epsilon, 0)$, $e_z = (0, 0, \epsilon)$.
++        *   $\frac{\partial d}{\partial x} \approx \frac{f(p + e_x) - f(p - e_x)}{2\epsilon}$
++        *   $\frac{\partial d}{\partial y} \approx \frac{f(p + e_y) - f(p - e_y)}{2\epsilon}$
++        *   $\frac{\partial d}{\partial z} \approx \frac{f(p + e_z) - f(p - e_z)}{2\epsilon}$
++        *   $\nabla d = (\frac{\partial d}{\partial x}, \frac{\partial d}{\partial y}, \frac{\partial d}{\partial z})$ [S2, unofficial].
++    *   If `SDF_MODE` is `'cubic'`:
++        *   Retrieve the analytical gradient directly from the interpolation kernel.
++        *   Formula: $\nabla d = \text{grid.eval\_cubic\_grad}(p)[1][0]$ [S2, unofficial].
+ 
+-4.  **Normal and Directional Derivative:**
+-    *   To compute surface normal $n$ at point $q$, normalize the gradient [S2, unofficial].
+-    *   To compute directional derivative along direction $d$, calculate the dot product $\nabla f(q) \cdot d$ [S2, unofficial].
++4.  **Normal Computation (Optional):**
++    *   To compute the surface normal $n$ at point $q$:
++        *   Evaluate $\nabla d$ at $q$.
++        *   Normalize the gradient: $n = \frac{\nabla d}{\|\nabla d\|}$ [S1, unofficial].
++    *   To compute the directional derivative in direction $d$:
++        *   Normalize $\nabla d$.
++        *   Compute dot product: $D = \nabla d \cdot d$ [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -43,148 +61,122 @@
+ import numpy as np
+ 
+-class SDFEvaluator:
+-    def __init__(self, grid_data, resolution, mode='linear', epsilon=1e-5):
++class SDFQueryHandler:
++    def __init__(self, sdf_name, epsilon=1e-5):
++        if not is_valid_sdf_name(sdf_name):
++            raise RuntimeError(f"unknown SDF '{sdf_name}'")
++        self.sdf_name = sdf_name
++        self.epsilon = epsilon
++        self.grid = load_sdf_grid(sdf_name) # Returns 3D array of shape (res, res, res)
++        self.mode = 'linear' # Default, can be set to 'cubic'
++
++    def evaluate_value(self, p):
+         """
+-        Initialize SDF evaluator.
+-        
+-        Args:
+-            grid_data: 1D array of SDF values.
+-            resolution: Integer R, grid size is R x R x R.
+-            mode: 'linear' or 'cubic'.
+-            epsilon: Step size for finite differences.
+-        """
+-        self.resolution = resolution
+-        self.mode = mode
+-        self.epsilon = epsilon
+-        # Source [S2, unofficial] stores data as (res, res, res, 1) in texture,
+-        # but logical access is 3D. We reshape to (R, R, R).
+-        self.grid = grid_data.reshape(resolution, resolution, resolution)
+-
+-    def _linear_interp(self, p):
+-        """
+-        Evaluate SDF value at point p using linear interpolation.
+-        p is assumed to be in grid coordinates [0, R-1].
+-        """
+-        x, y, z = p
+-        # Clamp to grid bounds [0, resolution-1]
+-        x = np.clip(x, 0, self.resolution - 1)
+-        y = np.clip(y, 0, self.resolution - 1)
+-        z = np.clip(z, 0, self.resolution - 1)
+-
+-        ix, iy, iz = np.floor([x, y, z]).astype(int)
+-        fx, fy, fz = x - ix, y - iy, z - iz
+-
+-        ix_next = np.clip(ix + 1, 0, self.resolution - 1)
+-        iy_next = np.clip(iy + 1, 0, self.resolution - 1)
+-        iz_next = np.clip(iz + 1, 0, self.resolution - 1)
+-
+-        # Fetch 8 corners
+-        v000 = self.grid[ix, iy, iz]
+-        v100 = self.grid[ix_next, iy, iz]
+-        v010 = self.grid[ix, iy_next, iz]
+-        v110 = self.grid[ix_next, iy_next, iz]
+-        v001 = self.grid[ix, iy, iz_next]
+-        v101 = self.grid[ix_next, iy, iz_next]
+-        v011 = self.grid[ix, iy_next, iz_next]
+-        v111 = self.grid[ix_next, iy_next, iz_next]
+-
+-        # Trilinear interpolation
+-        v00 = v000 * (1 - fx) + v100 * fx
+-        v01 = v010 * (1 - fx) + v110 * fx
+-        v10 = v001 * (1 - fx) + v101 * fx
+-        v11 = v011 * (1 - fx) + v111 * fx
+-
+-        v0 = v00 * (1 - fy) + v01 * fy
+-        v1 = v10 * (1 - fy) + v11 * fy
+-
+-        return v0 * (1 - fz) + v1 * fz
+-
+-    def evaluate(self, p):
+-        """
+-        Evaluate SDF value and gradient at point p.
+-        
+-        Args:
+-            p: numpy array [x, y, z] in grid coordinates.
+-            
+-        Returns:
+-            d: float, signed distance.
+-            grad: numpy array [dx, dy, dz], gradient.
++        Evaluate SDF value at point p.
++        p: tuple (x, y, z)
+         """
+         if self.mode == 'linear':
+-            d = self._linear_interp(p)
+-            # Central finite differences for gradient [S2, unofficial]
+-            p_xp = p + np.array([self.epsilon, 0, 0])
+-            p_xm = p - np.array([self.epsilon, 0, 0])
+-            p_yp = p + np.array([0, self.epsilon, 0])
+-            p_ym = p - np.array([0, self.epsilon, 0])
+-            p_zp = p + np.array([0, 0, self.epsilon])
+-            p_zm = p - np.array([0, 0, self.epsilon])
+-
+-            dx = (self._linear_interp(p_xp) - self._linear_interp(p_xm)) / (2 * self.epsilon)
+-            dy = (self._linear_interp(p_yp) - self._linear_interp(p_ym)) / (2 * self.epsilon)
+-            dz = (self._linear_interp(p_zp) - self._linear_interp(p_zm)) / (2 * self.epsilon)
+-            grad = np.array([dx, dy, dz])
++            # Trilinear interpolation
++            return self.grid.eval(p)[0]
+         elif self.mode == 'cubic':
+-            # Source [S2, unofficial] uses self.grid.eval_cubic(p)[0] and self.grid.eval_cubic_grad(p)[1][0].
+-            # Library bindings required for cubic kernel evaluation.
+-            d = self._linear_interp(p) # Fallback for standalone execution
+-            grad = np.zeros(3) # Fallback for standalone execution
++            # Tricubic interpolation
++            return self.grid.eval_cubic(p)[0]
+         else:
+             raise ValueError(f"Unknown SDF mode: {self.mode}")
+-        return d, grad
++
++    def evaluate_gradient(self, p):
++        """
++        Evaluate SDF gradient at point p.
++        p: tuple (x, y, z)
++        Returns: tuple (dx, dy, dz)
++        """
++        if self.mode == 'linear':
++            # Central finite differences
++            dx = (self.evaluate_value((p[0] + self.epsilon, p[1], p[2])) - 
++                  self.evaluate_value((p[0] - self.epsilon, p[1], p[2]))) / (2 * self.epsilon)
++            dy = (self.evaluate_value((p[0], p[1] + self.epsilon, p[2])) - 
++                  self.evaluate_value((p[0], p[1] - self.epsilon, p[2]))) / (2 * self.epsilon)
++            dz = (self.evaluate_value((p[0], p[1], p[2] + self.epsilon)) - 
++                  self.evaluate_value((p[0], p[1], p[2] - self.epsilon))) / (2 * self.epsilon)
++            return (dx, dy, dz)
++        elif self.mode == 'cubic':
++            # Analytical gradient from cubic interpolation
++            return self.grid.eval_cubic_grad(p)[1][0]
++        else:
++            raise ValueError(f"Unknown SDF mode: {self.mode}")
+ 
+     def query_normal(self, q):
+         """
+-        Compute the normalized normal vector at point q.
++        Compute the surface normal at point q.
++        q: tuple (x, y, z)
++        Returns: normalized gradient vector
+         """
+-        _, grad = self.evaluate(q)
+-        norm = np.linalg.norm(grad)
+-        if norm < 1e-8:
+-            return np.array([0.0, 0.0, 0.0])
+-        return grad / norm
++        grad = self.evaluate_gradient(q)
++        norm = np.sqrt(grad[0]**2 + grad[1]**2 + grad[2]**2)
++        if norm == 0:
++            return (0, 0, 0) # Degenerate case
++        return (grad[0]/norm, grad[1]/norm, grad[2]/norm)
++
++    def query_directional_derivative(self, q, direction):
++        """
++        Compute the directional derivative of the SDF at q in the given direction.
++        q: tuple (x, y, z)
++        direction: tuple (dx, dy, dz)
++        """
++        grad = self.evaluate_gradient(q)
++        # Normalize gradient
++        norm = np.sqrt(grad[0]**2 + grad[1]**2 + grad[2]**2)
++        if norm == 0:
++            return 0.0
++        grad_normalized = (grad[0]/norm, grad[1]/norm, grad[2]/norm)
++        # Dot product
++        return grad_normalized[0]*direction[0] + grad_normalized[1]*direction[1] + grad_normalized[2]*direction[2]
+ ```
+ 
++**Parameters:**
++*   `SDF_MODE`: String, `'linear'` or `'cubic'`. `'cubic'` provides smoother geometry and theoretically more robust gradients but is significantly slower [S2, unofficial].
++*   `epsilon`: Float, default $10^{-5}$. Step size for finite difference gradient calculation in linear mode [S2, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Points outside grid bounds are clamped to `[0, R-1]` [G].
+-*   **Precision:** Finite differences in linear mode use $\epsilon = 10^{-5}$ [S2, unofficial].
+-*   **Cubic Performance:** Cubic interpolation provides smoother geometry and is theoretically more robust, but is significantly slower than linear interpolation [S2, unofficial].
++*   **Precision:** In linear mode, the choice of `epsilon` affects gradient accuracy. Too small leads to numerical noise; too large leads to approximation error [S2, unofficial].
++*   **Boundaries:** Queries outside the grid bounds require clamping or extrapolation logic, not explicitly detailed in the sources [G].
++*   **Degenerate Input:** If the gradient magnitude is zero (e.g., at a local extremum or far from the surface), normal computation may fail or return a zero vector [G].
+ 
+ ## Subtopics
+ 
+ ### [Batched SDF Inference](2329-batched-sdf-inference.md)
+-Evaluates SDF values for large sets of samples in chunks to optimize GPU throughput via vectorized operations. Choose when processing many points simultaneously.
++Evaluates SDF values for large sets of samples in chunks to optimize GPU memory throughput. Choose when processing dense grids for rendering, not for individual ray queries.
+ 
+ ### [SDF Validity Check with Relaxation](2399-sdf-validity-check-with-relaxation.md)
+-Filters SDF samples to distinguish valid near-surface values from noise using a relaxation threshold. Choose when ray marching through ambiguous regions to prevent artifacts.
++Classifies samples into positive, negative, and valid near-zero categories using a relaxation threshold. Choose when ray marching requires explicit identification of the zero-level set to avoid ambiguity.
+ 
+ ### [SDF Training with Eikonal Loss](2553-sdf-training-with-eikonal-loss.md)
+-Optimizes a neural implicit SDF using Eikonal constraints. Choose when training neural networks for SDFs.
++Optimizes neural SDFs by enforcing unit gradient magnitude. Choose when training implicit surfaces from point clouds, as it ensures topological consistency.
+ 
+ ### [DeepSDF Neural Network](3051-deepsdf-neural-network.md)
+-Maps latent codes and coordinates to SDF values using an MLP. Choose for continuous implicit surface reconstruction from sparse data.
++A neural network architecture for SDF prediction using latent codes. Choose when representing complex shapes with learned latent representations rather than fixed grids.
+ 
+ ### [SDF Optimization via Finite Differences](3086-sdf-optimization-via-finite-differences.md)
+-Optimizes SDF values and deformation weights using mesh-based loss gradients. Choose when analytical gradients are unavailable.
++Optimizes SDF values and weights by minimizing mesh difference using finite difference gradients. Choose when optimizing explicit grid-based SDFs against reference meshes.
+ 
+ ### [Mandelbulb SDF Evaluation](4108-mandelbulb-sdf-evaluation.md)
+-Computes SDF for Mandelbulb fractals. Choose for rendering fractal geometry.
++Computes SDF for fractal surfaces using iterative derivative estimation. Choose when rendering non-algebraic fractal geometry.
+ 
+ ### [SDF and Material Optimization Pipeline](4458-sdf-and-material-optimization-pipeline.md)
+-Jointly optimizes voxelized SDF and material volumes. Choose for inverse rendering with material optimization.
++Jointly optimizes voxelized SDF and material volumes. Choose when rendering and optimizing appearance and geometry simultaneously.
+ 
+ ### [Augmented SDF](4725-augmented-sdf.md)
+-Accelerates queries using bounding volumes. Choose for performance optimization on complex scenes.
++Embeds a bounding volume to accelerate queries for points far from the surface. Choose when performance is critical and objects have well-defined bounding volumes.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear interpolation is $O(1)$ per query with a constant factor proportional to 8 neighbors and 6 finite difference evaluations [G]. Cubic interpolation is $O(1)$ per query with a higher constant factor due to the cubic kernel [G].
+-*   **Memory Complexity:** $O(R^3)$ for storing the SDF grid [G].
+-*   **Performance:** Linear interpolation is significantly faster than cubic interpolation [S2, unofficial]. Cubic interpolation provides smoother geometry and is theoretically more robust for gradient-based optimization [S2, unofficial].
+-*   **Strengths:** Supports arbitrary query points; provides analytical or high-accuracy numerical gradients; flexible interpolation modes [G].
+-*   **Limitations:** Memory usage scales cubically with resolution; cubic interpolation is slow; linear interpolation gradients are noisy due to finite differences [G].
+-*   **When to Use:** When explicit grid-based SDFs are required for differentiable rendering or ray marching, and the scene geometry fits within memory constraints [S1, unofficial][S2, unofficial].
+-*   **When Not to Use:** For very high-resolution scenes where memory is a bottleneck (consider [DeepSDF Neural Network](3051-deepsdf-neural-network.md) or [Augmented SDF](4725-augmented-sdf.md)); when real-time performance is critical and linear interpolation is insufficient (consider [Batched SDF Inference](2329-batched-sdf-inference.md) for throughput) [G].
++*   **Time Complexity:** $O(1)$ per query for value evaluation. Gradient evaluation is $O(1)$ for cubic mode (analytical) and $O(1)$ for linear mode (requires 6 additional value evaluations) [S2, unofficial].
++*   **Memory Complexity:** $O(res^3)$ to store the SDF grid [S2, unofficial].
++*   **Performance:** Cubic interpolation is significantly slower than linear interpolation due to the complexity of the derivative calculations [S2, unofficial].
++*   **Strengths:** Provides consistent gradient information for differentiable rendering; supports both analytical and numerical gradients [S2, unofficial].
++*   **Limitations:** Cubic mode is computationally expensive; linear mode gradients are approximate and sensitive to `epsilon` [S2, unofficial].
++*   **When to Use:** When differentiable SDF queries are required for rendering or optimization [S2, unofficial].
++*   **When Not to Use:** When performance is critical and approximate gradients are acceptable (use linear mode) or when the SDF is defined by simple primitives (use analytical primitives directly) [S2, unofficial].
+ 
+ ## Background
+-The method originates from implementations of differentiable rendering with Signed Distance Fields, specifically as described in "A Simple Approach to Differentiable Rendering of SDFs" by Wang et al. (SIGGRAPH Asia 2024) [S2, unofficial]. It is also used in subgrid ray marching pipelines for efficient intersection queries [S1, unofficial]. The approach leverages standard voxel grid interpolation techniques adapted for gradient computation, enabling the use of SDFs in optimization-based rendering pipelines [S2, unofficial].
++The method originates from differentiable rendering frameworks that support Signed Distance Fields, such as the "Relaxed Boundary" approach for differentiable rendering of SDFs [S2, unofficial]. It was developed to provide a robust interface for evaluating SDFs and their gradients in the context of inverse rendering and optimization [S2, unofficial]. The implementation is part of a broader ecosystem of SDF-based rendering tools, including subgrid marching for mesh processing [S1, unofficial].
+ 
+ ## Sources

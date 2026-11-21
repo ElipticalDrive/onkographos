@@ -1,0 +1,300 @@
+--- v004.md
++++ v005.md
+@@ -4,148 +4,183 @@
+ 
+ ## Overview
+-Performance Optimizations for SDF Ray Marching refers to a collection of techniques designed to reduce the computational cost of rendering Signed Distance Field (SDF) scenes in real-time. It solves the problem of high sample counts and expensive SDF evaluations required for high-resolution or complex geometry. It is distinguished from sibling methods like [Beam Optimization](932-beam-optimization.md) and [Block Culling](5431-block-culling.md) by focusing on per-ray and per-pixel efficiency gains (such as step size adaptation, resolution scaling, and early-outs) rather than global spatial culling or beam-based traversal. It builds on [Acceleration and Optimization](6222-acceleration-and-optimization.md) by applying specific heuristics to the sphere tracing loop.
++This article details specific algorithmic and hardware-level optimizations to reduce the computational cost of Signed Distance Field (SDF) ray marching, focusing on reducing redundant evaluations, minimizing arithmetic intensity, and leveraging spatial coherence. It complements [Acceleration and Optimization](6222-acceleration-and-optimization.md) by providing concrete implementation techniques for bounding volumes, level-of-detail management, and instruction-level parallelism. Unlike [Beam Optimization](932-beam-optimization.md) which focuses on ray coherence, or [Block Culling](5431-block-culling.md) which uses hierarchical structures, these methods primarily target the efficiency of the per-pixel ray march loop and SDF evaluation itself.
+ 
+ ## How it works
+-The method consists of several independent optimizations that can be applied to the standard sphere tracing algorithm.
++The optimizations are categorized into bounding/culling strategies, resolution/LOD management, arithmetic optimizations, and symmetry exploitation.
+ 
+ ### Inputs and Outputs
+-- **Inputs:** Scene SDF function $S(p)$, camera parameters, resolution, and optimization flags.
+-- **Outputs:** Rendered image with preserved visual fidelity at higher frame rates.
++*   **Inputs:** Scene SDF primitives, camera parameters, ray origin/direction, texture coordinates (for procedural textures), and optimization flags (e.g., `USE_HALF_RES`, `USE_BVH`).
++*   **Outputs:** Final pixel color, depth buffer, and optionally baked auxiliary textures (shadows, AO).
+ 
+ ### Data Structures
+-No new complex data structures are required for the core optimizations described below. They rely on standard variables:
+-- `ray_origin`: `vec3`
+-- `ray_direction`: `vec3` (normalized)
+-- `t`: `float` (current ray distance)
+-- `d`: `float` (SDF value at current position)
+-- `MAX_STEPS`: `int`
+-- `EPSILON`: `float`
++*   **Bounding Volume:** A simple sphere defined by center $C$ and radius $R$. Used to enclose expensive sub-scenes.
++*   **Baked Textures:** 3D textures storing pre-computed shadow and ambient occlusion values. Resolution is typically low (e.g., matching the cloud volume resolution).
+ 
+-### Steps
++### Step-by-Step Methods
+ 
+ #### 1. Early-Out Bounding Volumes
+-Surround expensive sub-scenes or complex geometry with a fast, cheap bounding volume SDF (typically a sphere). Before evaluating the expensive SDF, check the bounding volume. If the distance to the bounding volume is greater than the current ray step size, skip the expensive evaluation for that step.
++To skip expensive SDF evaluations for distant or irrelevant geometry, surround complex sub-scenes with a fast bounding sphere SDF check.
++1.  Define a bounding sphere for a group of primitives with center $C$ and radius $R$.
++2.  At the start of the ray march or before evaluating the sub-scene, compute the distance from the current ray position $P$ to $C$: $d_{bound} = \|P - C\|$.
++3.  Compare $d_{bound}$ with the current remaining distance to the surface or the current SDF value $d_{sdf}$ at $P$.
++4.  If $d_{bound} > d_{sdf}$ (or a threshold related to the current step size), the ray is too far from the bounding volume to intersect the contained geometry within the current precision or step budget. Skip the evaluation of the contained primitives [S1, unofficial][S2, unofficial].
+ 
+-**Formula:**
+-Let $B(p)$ be the bounding sphere SDF centered at $C$ with radius $R$.
+-$$ B(p) = \|p - C\| - R $$
+-If $B(ray\_origin + t \cdot ray\_direction) > d_{step}$, skip the detailed SDF evaluation for this step.
++#### 2. Level of Detail (LOD) and Resolution Scaling
++Adjust precision and step counts based on distance to maintain performance without perceptible quality loss.
++1.  Calculate the distance from the camera to the current ray position $P$: $dist = \|P - O\|$, where $O$ is the camera origin.
++2.  **Step Count Reduction:** For $dist > 10$ scene units, reduce the maximum number of steps ($MAX\_STEPS$) [S1, unofficial].
++3.  **Epsilon Increase:** Increase the hit threshold ($EPSILON$) for distant geometry to terminate the march earlier [S1, unofficial].
++4.  **Resolution Scaling:** Render the scene at half the target resolution (e.g., $W/2 \times H/2$) and upscale using bilinear or nearest-neighbor filtering. This is cited as the most effective single optimization for real-time SDF rendering at larger resolutions [S1, unofficial][S2, unofficial].
+ 
+-**Pseudocode:**
++#### 3. Over-Relaxation
++Accelerate convergence in open scenes by taking steps larger than the strict SDF lower bound.
++1.  Compute the standard sphere tracing step: $d = sdf(P)$.
++2.  Apply a relaxation factor $\alpha \in [1.1, 1.6]$.
++3.  Update ray position: $P_{new} = P + \alpha \cdot d$.
++4.  **Pitfall:** This risks artifacts near concave edges or thin geometry where the SDF lower bound is tight. It is suitable for open scenes but requires careful tuning [S1, unofficial].
++
++#### 4. Symmetry Optimization
++Reduce the number of SDF primitive evaluations by exploiting geometric symmetry.
++1.  Identify symmetric axes in the scene geometry (e.g., rotational symmetry of gears).
++2.  Map the current ray position $P$ into the fundamental domain of the symmetry group.
++3.  Evaluate the SDF only for the unique primitives in the fundamental domain.
++4.  Example: For a gear with 18 pieces and 12 teeth, evaluate only 4 pieces and 1 tooth, then map the result back to the full geometry [S5, unofficial].
++
++#### 5. Ray Differentials for Filtering and Antialiasing
++Use ray differentials to estimate the pixel footprint intersection for proper texture filtering and edge antialiasing.
++1.  Compute ray differentials $\frac{\partial P}{\partial u}$ and $\frac{\partial P}{\partial v}$ with respect to screen coordinates.
++2.  **Texture Filtering:** Use differentials to determine the appropriate mip level or sample weights for procedural textures during ray marching [S5, unofficial].
++3.  **Antialiasing:** Estimate the coverage of the pixel frustum against the geometry at near-intersections. Composite partial coverage front-to-back to smooth screen-space edges without pixelization [S5, unofficial].
++
++### Pseudocode: Combined Optimization Loop
++
+ ```python
+-def ray_march_with_bounding_volume(ray_origin, ray_direction, max_steps, epsilon):
++def ray_march_optimized(ray_origin, ray_dir, scene_sdf, camera):
++    # 1. Resolution Scaling (Optional, handled outside loop usually)
++    # If half-res, map uv to half-resolution coordinates
++    
++    max_steps = 100
++    epsilon = 0.001
+     t = 0.0
++    color = vec3(0.0)
++    
+     for i in range(max_steps):
+-        pos = ray_origin + t * ray_direction
++        # Current position
++        p = ray_origin + ray_dir * t
+         
+-        # Check bounding volume first
+-        dist_to_center = length(pos - bounding_center)
+-        dist_bounding = dist_to_center - bounding_radius
++        # 2. Distance Check for LOD
++        dist_to_cam = length(p - camera.pos)
+         
+-        if dist_bounding > d_step: # d_step is the previous SDF value or a heuristic step
+-            # Skip expensive SDF evaluation, assume empty or use a coarse approximation
+-            # Note: In strict sphere tracing, we must ensure we don't overshoot.
+-            # A safe early-out usually implies the bounding volume itself defines the step.
+-            # If the bounding volume is a sphere, the step is dist_bounding.
+-            t += dist_bounding
+-            continue
++        # Adjust parameters based on distance
++        if dist_to_cam > 10.0:
++            current_epsilon = epsilon * 10.0
++            current_max_steps = max_steps // 2
++        else:
++            current_epsilon = epsilon
++            current_max_steps = max_steps
+             
+-        # Evaluate expensive SDF
+-        d = evaluate_expensive_sdf(pos)
++        if i > current_max_steps:
++            break
++            
++        # 3. SDF Evaluation with Bounding Volume Early-Out
++        # Assume scene_sdf has a list of bounding volumes
++        d = scene_sdf.evaluate(p)
+         
+-        if d < epsilon:
+-            return hit(pos, d)
++        # Check bounding volumes if available
++        for bv in scene_sdf.bounding_volumes:
++            d_bound = length(p - bv.center) - bv.radius
++            if d_bound > d:
++                # Skip this bounding volume's contents
++                continue
++            # Evaluate contained primitives if not skipped
++            d_sub = scene_sdf.evaluate_subscene(p, bv)
++            d = min(d, d_sub)
+             
+-        if t > max_distance:
+-            return miss()
++        # 4. Over-Relaxation (Optional)
++        # relaxation_factor = 1.2
++        # t += d * relaxation_factor
++        t += d  # Standard sphere tracing
++        
++        # 5. Hit Detection
++        if d < current_epsilon:
++            # Compute normal
++            normal = compute_normal(scene_sdf, p)
++            # Lighting calculation...
++            color = compute_lighting(p, normal, ray_dir)
++            break
+             
+-        t += d
+-    return miss()
++        # 6. Ray Differentials for Antialiasing (Optional)
++        # If near intersection, compute coverage and blend
++        if d < 0.1:
++            coverage = compute_coverage(ray_origin, ray_dir, p, d)
++            color = mix(color, compute_lighting(p, normal, ray_dir), coverage)
++            
++    return color
+ ```
+-*[G] Note: Standard sphere tracing requires $t += d$. If using a bounding volume early-out, the step size must be conservative. If the bounding volume is a sphere, $d_{step} = B(pos)$ is a valid lower bound for the distance to the inner geometry, allowing safe advancement.* [S1, unofficial]
+-
+-#### 2. Level of Detail (LOD) for Distance
+-Adjust `MAX_STEPS` and `EPSILON` based on the distance of the geometry from the camera. For distant geometry, the visual difference between a coarse and fine trace is imperceptible.
+-
+-**Parameters:**
+-- Reduce `MAX_STEPS` for distant objects.
+-- Increase `EPSILON` (e.g., from $10^{-4}$ to $10^{-2}$) for distant objects.
+-- Threshold: Differences are imperceptible beyond 10 scene units. [S1, unofficial]
+-
+-**Pseudocode:**
+-```python
+-def get_lod_params(distance):
+-    if distance > 10.0:
+-        return max_steps=32, epsilon=0.01
+-    else:
+-        return max_steps=64, epsilon=0.0001
+-```
+-[S1, unofficial]
+-
+-#### 3. Resolution Scaling
+-Render the scene at half the target resolution (e.g., 50% width and height) and upscale the result using a fast bilinear or bicubic filter. This is described as the "most effective single optimisation for real-time SDF rendering at larger resolutions." [S1, unofficial]
+-
+-**Pseudocode:**
+-```python
+-# In the fragment shader or post-process
+-if use_half_res:
+-    uv = gl_FragCoord.xy / vec2(screen_width * 0.5, screen_height * 0.5)
+-    # Perform ray march at lower res
+-    color = ray_march(uv)
+-    # Upscale in post-process or via texture sampling
+-    final_color = texture(upscaler_texture, uv)
+-else:
+-    uv = gl_FragCoord.xy / vec2(screen_width, screen_height)
+-    final_color = ray_march(uv)
+-```
+-[S1, unofficial]
+-
+-#### 4. Over-Relaxation
+-Multiply the step size $d$ by a constant factor $k$ where $1.1 \le k \le 1.6$. This allows the ray to "jump" further, reducing the number of iterations.
+-
+-**Risk:** This risks artifacts near concave edges or thin geometry, as the ray may overshoot the surface. It is best suited for open scenes or convex objects. [S1, unofficial]
+-
+-**Formula:**
+-$$ t_{new} = t_{old} + d \cdot k $$
+-where $k \in [1.1, 1.6]$. [S1, unofficial]
+-
+-### Edge Cases and Pitfalls
+-- **Over-Relaxation Artifacts:** Using $k > 1.0$ can cause the ray to skip over thin geometry or miss concave details, leading to visual holes or incorrect normals. [S1, unofficial]
+-- **Bounding Volume Precision:** If the bounding volume is not tight, the early-out may skip valid geometry. If it is too tight, the overhead of checking it may negate the benefit.
+-- **LOD Pop-in:** Abrupt changes in `MAX_STEPS` or `EPSILON` can cause visible popping. Smooth interpolation of these parameters with distance is recommended. [G]
+ 
+ ## Subtopics
+ 
++### [Subsurface Scattering Approximation via Local Thickness](1946-subsurface-scattering-approximation-via-local-thickness.md)
++This method approximates subsurface scattering by computing the local thickness of a surface along random inward hemispherical directions, then using the thickness to modulate a simplified subsurface scattering lighting term. It differs from sibling methods like [Aggressive Ray Marching with SDF](2326-aggressive-ray-marching-with-sdf.md) and [SDF-Accelerated Volumetric Ray Marching](3681-sdf-accelerated-volumetric-ray-marching.md) by performing a per-pixel thickness probe rather than global acceleration or volumetric integration.
++
++### [Coverage Search](2534-coverage-search.md)
++Coverage Search is a distance-field ray marching algorithm designed to determine ray hit or miss status in fewer iterations than standard sphere tracing by using a stack to manage coverage spans along the ray.
++
++### [SDF-Accelerated Volumetric Ray Marching](3681-sdf-accelerated-volumetric-ray-marching.md)
++SDF-Accelerated Volumetric Ray Marching is a technique to accelerate volumetric ray marching by using a Signed Distance Field (SDF) to skip large empty spaces. The SDF stores the distance to the nearest surface of the volume, allowing the ray to advance by that distance in empty space without missing intersections. Unlike uniform sampling, this method spends samples only where clouds exist, avoiding expensive calculations for empty space. It solves the problem of wasting GPU cycles calculating zero-value samples in sparse cloud volumes, which previously led to 'soft, undefined volumes' or 'horrible banding/noisy output' if sample counts were low.
++
++### [Adaptive SDF Ray Marching with Cell Acceleration](3714-adaptive-sdf-ray-marching-with-cell-acceleration.md)
++This method renders signed distance field (SDF) scenes by marching a ray through the field using an acceleration structure to skip empty space, adaptive step sizing, and sign-change detection for surface refinement. It differs from standard sphere tracing by integrating a spatial acceleration structure that provides lower bounds on distance, allowing larger steps in empty regions while maintaining precision near surfaces.
++
++### [SDF Ray Marching with Eikonal Correction](4598-sdf-ray-marching-with-eikonal-correction.md)
++This method marches a ray through a Signed Distance Field (SDF) to find surface intersections while applying a correction factor to counteract distance elongation along non-cardinal directions caused by the Eikonal equation. It sets itself apart from standard SDF ray marching by explicitly scaling step sizes based on ray direction to prevent overshooting and jitter.
++
++### [Ray Marching with SDFs and Soft Accumulation](5001-ray-marching-with-sdfs-and-soft-accumulation.md)
++A rendering technique for hair-thin geometry (such as jellyfish tentacles) that prevents flickering by replacing hard surface intersection with soft accumulation. Instead of stopping at the first hit, each ray march step adds a contribution based on the distance to the surface, fading in smoothly via an exponential falloff. This sets it apart from standard SDF ray marching, which typically terminates on hard intersection, and from [Aggressive Ray Marching with SDF](2326-aggressive-ray-marching-with-sdf.md), which focuses on step size optimization rather than anti-aliasing thin strands.
++
++### [SDF Texture Baking for Ray Marching](10616-sdf-texture-baking-for-ray-marching.md)
++This method optimizes cloud raymarching by baking a low-resolution 3D Signed Distance Field (SDF) texture that acts as a conservative proxy for the analytical cloud SDF. It allows the marching loop to skip empty space conservatively before falling back to analytical evaluations inside active cells. Unlike sibling methods that modify the ray step size or accumulation logic directly, this approach offloads the distance estimation to a pre-computed texture lookup, reducing the computational cost of the analytical SDF evaluation during the main rendering pass.
++
++### [Squared Distance Field Optimization](13350-squared-distance-field-optimization.md)
++A technique to avoid the computational cost of square root operations in Signed Distance Field (SDF) raymarching by using squared distances for sphere comparisons, leveraging the monotonicity of the squaring function.
++
+ ### Pre-marched Shadow and Ambient Occlusion Baking
+-A technique to improve visual fidelity and performance by pre-calculating shadow and ambient occlusion data into the volume texture, leveraging the static nature of the cloud volume [S3, unofficial]. It differs from standard runtime ray marching by baking lighting data into a 3D texture, allowing runtime shadow lookup with a single `tex3D` call [S3, unofficial].
+-- **Baking Shadow:** Pre-march a shadow ray through the volume. Due to low volume resolution (e.g., 4 shadow samples per cloud sample), this can be done in real-time, allowing dynamic time-of-day changes [S3, unofficial].
+-- **Baking Ambient Occlusion:** Pre-march ambient occlusion into the volume texture to add shading without runtime cost [S3, unofficial].
+-- **Runtime Lookup:** Use the baked shadow texture to get volumetric cloud shadows with a single `tex3D` lookup, matching the cloud geometry perfectly [S3, unofficial].
++A technique to improve visual fidelity and performance by pre-calculating shadow and ambient occlusion data into the volume texture, leveraging the static nature of the cloud volume [S3, unofficial].
++*   **Baking Shadow:** Pre-march a shadow ray through the volume. Can be done in real-time due to low volume resolution (e.g., 4 shadow samples per cloud sample). Allows dynamic time-of-day changes [S3, unofficial].
++*   **Baking Ambient Occlusion:** Pre-march ambient occlusion into the volume texture to add shading without runtime cost [S3, unofficial].
++*   **Runtime Shadow Lookup:** Use the baked shadow texture to get volumetric cloud shadows with a single `tex3D` lookup, matching the cloud geometry perfectly [S3, unofficial].
+ 
+ ### MMX Tri-linear Interpolation
+-Using MMX instruction set extensions to exploit instruction-level parallelism for tri-linear interpolation, executing multiple low-resolution fixed-point operations in parallel [S4]. It differs from standard floating-point interpolation by using integer arithmetic and specific MMX instructions (PMULHW, PMULLW, PMADDWD, PSUBW) to perform tri-linear interpolation in only 37 instructions [S4].
+-- **Performance:** On Pentium processors, MMX provides 60-80% faster performance. On Pentium-II, it provides 0% improvement and may worsen performance due to pipeline stalls [S4].
+-- **Pitfall:** Performance on Pentium-II does not improve and may worsen compared to the non-MMX version [S4].
++Using MMX instruction set extensions to exploit instruction-level parallelism for tri-linear interpolation, executing multiple low-resolution fixed-point operations in parallel [S4].
++*   **Step:** Use four MMX instructions: `PMULHW`, `PMULLW`, `PMADDWD`, and `PSUBW` to create a tri-linear interpolation version taking only 37 instructions [S4].
++*   **Pitfall:** Performance on Pentium-II does not improve and may worsen compared to non-MMX version [S4].
++*   **Performance:** On Pentium-II, MMX provides 0% performance improvement over non-MMX integer version; on Pentium, it provides 60-80% faster performance [S4].
+ 
+ ### Symmetry Optimization for SDF Evaluation
+-Evaluate only a subset of primitives based on object symmetry to reduce computational cost [S5, unofficial]. For example, evaluate only 4 gear pieces instead of 18, and within each gear, evaluate only a single tooth/dent instead of 12 [S5, unofficial]. It is used in the 'Sphere Gears' Shadertoy example (2019) as an optimization exercise [S5, unofficial].
++Evaluate only a subset of primitives based on object symmetry to reduce computational cost. For example, evaluate only 4 gear pieces instead of 18, and within each gear, evaluate only a single tooth/dent instead of 12 [S5, unofficial]. Used in the 'Sphere Gears' Shadertoy example (2019) as an optimization exercise [S5, unofficial].
+ 
+ ### Ray Differentials for Texture Filtering
+-A technique using ray differentials to do proper texture filtering in a raymarching context [S5, unofficial]. It ensures that procedural textures sampled during ray marching are filtered correctly to avoid aliasing, similar to how rasterization handles texture filtering. It is used in the 'Arlo' Shadertoy example (2015) for procedural modeling [S5, unofficial].
++A technique using ray differentials to do proper texture filtering in a raymarching context [S5, unofficial]. Used in the 'Arlo' Shadertoy example (2015) for procedural modeling [S5, unofficial].
++
++### Ray Differentials for Antialiasing
++A technique to antialias screen-space edges of raymarched distance fields by estimating how much of the pixel footprint (pixel frustum) intersects the geometry using ray differentials [S5, unofficial].
++*   **Step:** Compute partial coverage per near-intersection and composite them front to back to give a correct smooth image without edge pixelization [S5, unofficial].
++*   **Usage:** Used in the 'Antialias, sort of' Shadertoy example (2014) [S5, unofficial].
++
++### Wave Surfing Optimisations
++An optimization technique to reduce computation time in the rendering loop when the landscape is flat, by reducing time spent in interpolation between drawing operations [S6, unofficial].
++*   **Step:** Execute a technique in O(n) complexity that takes nearly constant steps through the height map [S6, unofficial].
++*   **Pitfall:** The rendering loop performs very badly if the landscape is completely flat, because every single column of voxels is higher than the previous and must be drawn [S6, unofficial].
++*   **Comparison:** A hierarchical visibility scheme (e.g., quadtree) is proposed as an ideal alternative to achieve O(logn) discard of invisible voxels, whereas the described O(n) technique takes nearly constant steps [S6, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The optimizations reduce the average number of SDF evaluations per pixel. Early-outs and LOD reduce the constant factor in the loop. Resolution scaling reduces the total pixel count by 4x (for half resolution).
+-- **Memory Complexity:** Pre-marched baking (S3, unofficial) increases memory usage by storing shadow and AO textures. MMX optimization (S4) has no additional memory cost.
+-- **Measured Performance:**
+-    - Replacing floating-point with integer arithmetic yields 4 to 6 times faster performance on older hardware (Pentium-II) [S4].
+-    - Hand-coded address generation for tri-linear interpolation improves performance by up to 15% [S4].
+-    - Rendering at half resolution is described as the "most effective single optimisation" for real-time SDF rendering at larger resolutions [S1, unofficial].
+-- **Strengths:** Significant frame rate improvements, especially on older hardware or for complex procedural SDFs.
+-- **Limitations:** Over-relaxation introduces artifacts. Baking requires static scenes. MMX is obsolete on modern GPUs.
+-- **When to use:** Real-time rendering of complex SDF scenes, VR applications, or hardware with limited ALU throughput.
+-- **When not to use:** When visual precision is critical (avoid over-relaxation), or when the scene is dynamic and baking is not feasible.
++*   **Time Complexity:** Varies by optimization. Bounding volume early-outs reduce average case complexity by skipping sub-scenes. LOD reduces steps for distant objects. MMX optimization reduces instruction count for interpolation. Symmetry reduces primitive evaluations by a factor related to the symmetry order.
++*   **Memory Complexity:** Baked textures (shadow/AO) increase memory usage proportional to the volume resolution. Half-resolution rendering reduces memory bandwidth usage for color/depth buffers.
++*   **Measured Performance:** On a 300-MHz Pentium-II, replacing floating-point with integer arithmetic yielded 4-6x speedup. MMX provided 0% improvement on Pentium-II but 60-80% on Pentium. Hand-coded address generation improved performance by up to 15% [S4].
++*   **Strengths:** Significant FPS gains in real-time applications. Effective for static scenes (baking) and symmetric objects.
++*   **Limitations:** Over-relaxation causes artifacts. Baking is limited to static scenes. MMX is obsolete on modern GPUs. Half-resolution can introduce aliasing if not upscaled properly.
+ 
+ ## Background
+-The techniques described originate from various sources in the ray marching community. Early-out bounding volumes and LOD strategies are discussed in [S1, unofficial] and [S2, unofficial]. The use of MMX for volume rendering was detailed in "I/O-Conscious Volume Rendering" [S4]. Symmetry and ray differentials were popularized by Inigo Quilez in his articles and Shadertoy examples [S5, unofficial]. Pre-marched baking for volumetric clouds was described in [S3, unofficial].
++The techniques described originate from various sources in real-time graphics, including Shadertoy examples (2014-2019) by artists like Inigo Quilez and others, blog posts on volumetric cloud rendering, and academic papers on I/O-conscious volume rendering for older hardware (Pentium era) [S1, unofficial][S2, unofficial][S3, unofficial][S4][S5, unofficial][S6, unofficial]. The core principles of bounding volume early-outs and LOD are widely adopted in modern SDF renderers to maintain real-time frame rates.
+ 
+ ## Sources
+@@ -154,3 +189,4 @@
+ [S3] Rendering volumetric clouds using signed distance fields, https://blog.uhawkvr.com/rendering/rendering-volumetric-clouds-using-signed-distance-fields/, fetched 2026-10-26 (unofficial)
+ [S4] I/O-Conscious Volume Rendering, https://doi.org/10.2312/vissym/vissym01/263-272, fetched 2026-10-26
+-[S5] Raymarching Distance Fields, https://iquilezles.org/articles/raymarchingdf/, fetched 2026-10-27 (unofficial)+[S5] Raymarching Distance Fields, https://iquilezles.org/articles/raymarchingdf/, fetched 2026-10-27 (unofficial)
++[S6] flipcode - Realtime Voxel Landscape Engines, https://www.flipcode.com/archives/Realtime_Voxel_Landscape_Engines-Part_4_Level_of_Detail_and_Optimisation.shtml, fetched 2026-10-30 (unofficial)

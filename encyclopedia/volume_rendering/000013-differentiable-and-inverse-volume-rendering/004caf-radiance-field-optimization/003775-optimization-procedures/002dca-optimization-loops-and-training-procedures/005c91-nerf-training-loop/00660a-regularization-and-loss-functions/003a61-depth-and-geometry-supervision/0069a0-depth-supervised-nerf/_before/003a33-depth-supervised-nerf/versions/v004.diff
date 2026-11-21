@@ -1,0 +1,377 @@
+--- v003.md
++++ v004.md
+@@ -4,177 +4,220 @@
+ 
+ ## Overview
+-Depth-Supervised NeRF (DS-NeRF) is a training procedure that accelerates Neural Radiance Field optimization and improves quality with sparse input views by incorporating geometric constraints from sparse 3D keypoints [S1]. Unlike standard NeRF, which relies solely on photometric consistency, DS-NeRF minimizes the Kullback-Leibler (KL) divergence between the rendered ray termination distribution and a probabilistic depth prior derived from Structure-from-Motion (SfM) [S1]. This approach is distinct from [Guided Optimization of NeRF](7496-guided-optimization-of-nerf.md), which adapts sampling intervals, and [Single-view NeRF Training with Depth Map](8679-single-view-nerf-training-with-depth-map.md), which typically uses dense depth maps; DS-NeRF specifically leverages sparse, noisy keypoints and their uncertainty estimates [S1].
++Depth-Supervised NeRF (DS-NeRF) is a training procedure that accelerates Neural Radiance Field optimization and improves quality under sparse-view conditions by incorporating depth supervision from sparse 3D keypoints generated during Structure-from-Motion (SfM) preprocessing [S1]. Unlike standard NeRF, which relies solely on photometric consistency, DS-NeRF enforces geometric constraints by minimizing the Kullback-Leibler (KL) divergence between the rendered ray termination distribution and a probabilistic depth prior derived from SfM keypoints [S1]. This method is distinct from [Guided Optimization of NeRF](7496-guided-optimization-of-nerf.md) because it does not adjust sampling bounds but instead directly supervises the density field's output distribution, and it differs from [Single-view NeRF Training with Depth Map](8679-single-view-nerf-training-with-depth-map.md) by utilizing sparse, uncertainty-weighted keypoints rather than dense depth maps or category-specific priors [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ input images $\{I_j\}$ with known camera poses $\{P_j\}$ (estimated via SfM); sparse 3D keypoints $\{X\}$ and their visibility flags $\{X_j\}$ from the SfM solver; ground truth RGB colors $C(r)$ for rays $r$.
+-*   **Outputs:** Optimized NeRF network parameters $\theta$ defining the radiance field $F_\theta: (\mathbf{x}, \mathbf{d}) \rightarrow (c, \sigma)$; rendered novel views.
++*   **Inputs:** A set of $N$ input images $\{I_j\}$ with known camera poses $\{P_j\}$ (estimated via SfM); sparse 3D keypoints $\{X\}$ and their visibility flags from the SfM solver; image resolution.
++*   **Outputs:** A trained NeRF model (MLPs for density $\sigma$ and color $c$) capable of novel view synthesis.
+ 
+ **Data Structures:**
+-*   **Keypoint Data:** A list of 3D points $x_i \in \mathbb{R}^3$. For each keypoint $x_i$, store the reprojection error $\hat{\sigma}_i$ (variance) computed as the average reprojection error across all views where $x_i$ was detected [S1].
+-*   **Camera Data:** For each view $j$, the projection matrix $P_j$ and the subset of visible keypoints $X_j \subset X$ [S1].
++*   **Keypoint Cloud:** A list of 3D points $x_i \in \mathbb{R}^3$.
++*   **Visibility Map:** For each camera $j$, a subset $X_j \subset X$ of keypoints visible from that view.
++*   **Depth Uncertainty:** For each keypoint $x_i$, a scalar $\hat{\sigma}_i$ representing the average reprojection error.
++
++**Numbered Steps:**
++
++1.  **SfM Preprocessing:** Run an SfM solver (e.g., COLMAP) on the input images to estimate camera parameters $P_j$ and generate a sparse 3D point cloud $X$ [S1][S2, unofficial].
++2.  **Depth Estimation:** For each training image $I_j$ with camera $P_j$, identify visible keypoints $X_j$. For each keypoint $x_i \in X_j$, compute the projected depth $D_{ij}$ by projecting $x_i$ with $P_j$ and taking the re-projected z-value [S1].
++3.  **Uncertainty Calculation:** Compute the depth uncertainty $\hat{\sigma}_i$ for each keypoint $x_i$ as the average reprojection error across all views where the keypoint was detected [S1].
++4.  **Ray Generation:**
++    *   Allocate a portion of the total training rays to "keypoint rays" [S1].
++    *   For each keypoint ray, calculate the ray origin in local camera coordinates from the image coordinates of the detected keypoint, setting the camera axis coordinate to -1 [S1].
++    *   Shoot this ray into the scene using the standard NeRF sampling procedure between near bound $t_n$ and far bound $t_f$ [S1].
++5.  **Rendering:** Render the color $\hat{C}$ and the ray termination distribution $h_{ij}(t)$ for the generated rays [S1].
++    *   The ray termination distribution is defined as $h(t) = T(t)\sigma(t)$, where $T(t) = \exp(-\int_0^t \sigma(s)ds)$ is the transmittance [S1].
++    *   $h(t)$ is treated as a probability distribution over the ray distance $t$ [S1].
++6.  **Loss Computation:**
++    *   **Color Loss:** Compute the standard photometric loss between rendered color $\hat{C}$ and ground truth color $C$ [S1]:
++        $$ L_{Color} = \mathbb{E}_{r \in R(P)} \|\hat{C}(r) - C(r)\|^2 $$
++    *   **Depth Loss:** Model the true depth of the first surface as a random variable $D_{ij}$ normally distributed around the estimated depth $D_{ij}$ with variance $\hat{\sigma}_i^2$: $D_{ij} \sim \mathcal{N}(D_{ij}, \hat{\sigma}_i^2)$ [S1].
++    *   Minimize the KL divergence between the rendered distribution $h_{ij}(t)$ and the noisy depth distribution [S1]:
++        $$ L_{Depth} = \mathbb{E}_{x_i \in X_j} \left[ -\log h(t) \exp\left(-\frac{(t - D_{ij})^2}{2\hat{\sigma}_i^2}\right) \right] $$
++    *   In discrete sampling terms with samples $t_k$ and spacing $\Delta t_k$:
++        $$ L_{Depth} \approx \mathbb{E}_{x_i \in X_j} \sum_k -\log h_k \exp\left(-\frac{(t_k - D_{ij})^2}{2\hat{\sigma}_i^2}\right) \Delta t_k $$
++    *   *Note:* Some implementations use Mean Squared Error (MSE) loss for depth, but KL divergence yields slightly improved PSNR [S2, unofficial].
++7.  **Optimization:** Minimize the combined loss $L = L_{Color} + \lambda L_{Depth}$ using gradient descent [S1].
++    *   To optimize efficiency, exploit the continuity of image coordinates to interpolate RGB supervision for rays corresponding to detected keypoints, allowing simultaneous RGB and depth supervision in a single ray marching step [S1].
++
++**Formulas:**
++*   **Ray Termination Distribution:**
++    $$ h(t) = T(t)\sigma(t) = \exp\left[-\int_0^t \sigma(s)ds\right]\sigma(t) $$
++    This is a valid probability distribution because $\int_0^\infty h(t)dt = 1$, assuming $\sigma(s) \ge 0$ and $\int_0^\infty \sigma(s)ds = \infty$ (opaque wall at $t_f$) [S1].
++*   **Depth Alignment (Evaluation Only):**
++    To evaluate depth error against dense MVS maps, align rendered depth $\hat{D}$ with MVS depth $DMVS$ using scale $a$ and shift $b$:
++    $$ \min_{a,b} \sum_{p \in P} (a \cdot DSfM(p) - b - DMVS(p))^2 $$
++    $$ Err(D) = a \hat{D} - b - DMVS $$
++    Where $P$ is the set of detected and visible keypoints [S1].
+ 
+ **Parameters:**
+-*   **Near/Far Bounds:** $t_n, t_f$. The scene is bounded by these planes. $t_f$ is treated as an opaque wall to ensure $\int_0^\infty \sigma(s)ds = \infty$, making the termination distribution a valid probability distribution [S1].
+-*   **Ray Allocation:** A fraction of training rays per iteration are designated as "keypoint rays" for simultaneous RGB and depth supervision [S1].
+-*   **Activation:** $\sigma(t)$ must be non-negative, typically implemented via ReLU or Softplus [S1].
+-*   **Iterations:** Typical training ranges from 10k to 100k iterations [S2, unofficial].
+-
+-**Method Steps:**
+-
+-1.  **SfM Preprocessing:** Run an SfM solver (e.g., COLMAP) on the input images to estimate camera poses $P_j$ and generate sparse 3D keypoints $X$ [S1].
+-2.  **Depth Estimation:** For each image $I_j$ with camera $P_j$, identify visible keypoints $X_j$. For each $x_i \in X_j$, compute the projected depth $D_{ij}$ by projecting $x_i$ with $P_j$ and taking the re-projected z-value [S1].
+-3.  **Uncertainty Calculation:** Compute the depth uncertainty $\hat{\sigma}_i$ for each keypoint $x_i$ as the average reprojection error across all views where it was detected [S1].
+-4.  **Ray Generation:**
+-    *   For a subset of training rays, generate rays originating from the camera center with directions corresponding to the image coordinates of detected keypoints. In local camera coordinates, the ray direction is derived from the keypoint's 2D image coordinates and $-1$ in the camera axis [S1].
+-    *   For the remaining rays, generate standard random rays through the image grid [S1].
+-5.  **Rendering:**
+-    *   For each ray, sample points along the segment $[t_n, t_f]$.
+-    *   Query the NeRF network $F_\theta$ to obtain density $\sigma(t)$ and color $c(t)$ at each sample point [S1].
+-    *   Compute the ray termination distribution $h_{ij}(t)$:
+-        $$ h(t) = T(t)\sigma(t) = \exp\left[-\int_0^t \sigma(s)ds\right]\sigma(t) $$
+-        where $T(t)$ is the transmittance [S1].
+-    *   Render the color $\hat{C}$ as the expectation under $h(t)$:
+-        $$ \hat{C} = \int_0^\infty h(t)c(t)dt \approx \sum_k h(t_k)c(t_k)\Delta t_k $$
+-    *   Render the depth $\hat{D}$ as the expected termination distance:
+-        $$ \hat{D} = \int_0^\infty t h(t)dt \approx \sum_k t_k h(t_k)\Delta t_k $$
+-6.  **Loss Computation:**
+-    *   **Color Loss:** Compute the Mean Squared Error (MSE) between rendered color $\hat{C}$ and ground truth $C(r)$ for all rays [S1].
+-    *   **Depth Loss:** For rays corresponding to keypoints, compute the KL divergence between the rendered distribution $h_{ij}(t)$ and the noisy depth distribution $N(D_{ij}, \hat{\sigma}_i)$. The loss is approximated as:
+-        $$ L_{Depth} = \mathbb{E}_{x_i \in X_j} \left[ -\log h(t) \exp\left(-\frac{(t - D_{ij})^2}{2\hat{\sigma}_i^2}\right) \right] \approx \sum_k -\log h(t_k) \exp\left(-\frac{(t_k - D_{ij})^2}{2\hat{\sigma}_i^2}\right)\Delta t_k $$
+-        Alternatively, a simple MSE loss between rendered depth and $D_{ij}$ can be used, though KL divergence yields slightly better results [S2, unofficial].
+-    *   **Interpolation:** Since keypoints are discrete, interpolate RGB supervision values for the rays corresponding to detected keypoints to allow simultaneous supervision in a single ray marching step [S1].
+-7.  **Optimization:** Minimize the combined loss $L = L_{Color} + \lambda L_{Depth}$ with respect to $\theta$ [S1].
++*   **Near/Far Bounds ($t_n, t_f$):** The scene is bounded by these clipping planes. $t_f$ is often treated as an opaque wall to ensure the distribution sums to one [S1].
++*   **Density Activation:** $\sigma(s)$ must be non-negative, typically implemented using ReLU or softplus [S1].
++*   **Training Iterations:** Typically $O(10k - 100k)$ [S2, unofficial].
++*   **Ray Allocation:** A portion of rays is dedicated to keypoint rays; the rest are random pixels [S1].
++*   **COLMAP Settings:** Default configuration is used; output is used only during training [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Poor SfM:** Optimization fails if SfM produces inaccurate depth estimates or poor camera poses [S1].
++*   **Gaussian Assumption:** The method assumes keypoint uncertainty is Gaussian, which may not hold for depth from non-SfM sources [S1].
++*   **Dense Depth:** Dense MVS depth is used *only* for evaluation, not for training or testing [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import torch
++import torch.nn as nn
+ import numpy as np
+ 
+-def compute_transmittance_and_density(sigma_samples, deltas):
+-    """
+-    Compute transmittance T(t) and termination distribution h(t) from density samples.
+-    sigma_samples: array of shape (N,) representing sigma(t_k)
+-    deltas: array of shape (N,) representing delta_t_k
+-    Returns:
+-        h: array of shape (N,) representing h(t_k)
+-        T: array of shape (N,) representing T(t_k) (optional, for debugging)
+-    """
+-    # Compute accumulated sigma
+-    # alpha_k = 1 - exp(-sigma_k * delta_k)
+-    # T_k = product_{j<k} (1 - alpha_j)
+-    # h_k = T_k * alpha_k
+-    
+-    # Using log-space for stability if needed, but direct computation is standard for small N
+-    alphas = 1.0 - np.exp(-sigma_samples * deltas)
+-    
+-    # Cumulative product of (1 - alpha)
+-    # T_0 = 1.0
+-    # T_k = T_{k-1} * (1 - alpha_{k-1})
+-    one_minus_alphas = 1.0 - alphas
+-    T_cumprod = np.ones_like(deltas)
+-    T_cumprod[1:] = np.cumprod(one_minus_alphas[:-1])
+-    
+-    h = T_cumprod * alphas
+-    return h
+-
+-def depth_supervised_nerf_step(rays, keypoints, camera_poses, nerf_model, t_n, t_f, num_samples, lambda_depth):
+-    """
+-    Single training step for DS-NeRF.
+-    rays: list of ray origins and directions for all training rays
+-    keypoints: dict mapping view_index -> list of (keypoint_3d, reprojection_error)
+-    camera_poses: dict mapping view_index -> projection matrix P_j
+-    nerf_model: function F_theta(x, d) -> (sigma, color)
+-    t_n, t_f: near and far clipping planes
+-    num_samples: number of samples per ray
+-    lambda_depth: weight for depth loss
+-    """
+-    total_loss = 0.0
+-    color_loss = 0.0
+-    depth_loss = 0.0
+-    
+-    # Separate rays into keypoint rays and standard rays
+-    keypoint_rays = []
+-    standard_rays = []
+-    
+-    for view_idx, ray in enumerate(rays):
+-        # Check if this ray corresponds to a keypoint
+-        # In practice, rays are generated based on keypoint image coordinates
+-        if view_idx in keypoints:
+-            keypoint_rays.append((view_idx, ray))
+-        else:
+-            standard_rays.append(ray)
+-            
+-    # Process standard rays (Color Loss only)
+-    for ray in standard_rays:
+-        origins, directions = ray
++class DSNeRF:
++    def __init__(self, keypoint_cloud, visibility_map, reprojection_errors, 
++                 near_bound=0.2, far_bound=6.0, num_samples=192):
++        """
++        keypoint_cloud: List of 3D points X (N, 3)
++        visibility_map: Dict mapping camera_id to list of visible keypoint indices
++        reprojection_errors: Dict mapping keypoint_index to average reprojection error sigma_hat
++        """
++        self.keypoint_cloud = keypoint_cloud
++        self.visibility_map = visibility_map
++        self.reprojection_errors = reprojection_errors
++        self.near_bound = near_bound
++        self.far_bound = far_bound
++        self.num_samples = num_samples
++        self.nerf_model = NeRFModel() # Standard NeRF MLPs
++
++    def get_ray_directions(self, image_coords, camera_pose):
++        """
++        Calculate ray directions from image coordinates and camera pose.
++        image_coords: (H, W, 2) or (K, 2) for keypoints
++        camera_pose: (4, 4) transformation matrix from world to camera
++        """
++        # Convert image coordinates to camera space directions
++        # Assuming standard pinhole camera model
++        # This is a placeholder for the specific projection math
++        # In local camera coordinates, direction is derived from pixel coords
++        # and the -1 camera axis constraint mentioned in [S1]
++        pass 
++
++    def render_ray(self, origin, direction):
++        """
++        Standard NeRF ray marching.
++        Returns: color, density_samples, transmittance_samples
++        """
+         # Sample points along ray
+-        t_vals = np.linspace(t_n, t_f, num_samples)
+-        points = origins + t_vals[:, np.newaxis] * directions
+-        
+-        # Query NeRF
+-        sigma, color = nerf_model(points, directions)
+-        
+-        # Compute weights
+-        deltas = t_vals[1:] - t_vals[:-1]
+-        deltas = np.append(deltas, 1e-10) # Handle last delta
+-        
+-        # Compute h(t)
+-        h = compute_transmittance_and_density(sigma, deltas)
+-        
+-        # Render color
+-        rendered_color = np.sum(h[:, np.newaxis] * color[:-1], axis=0) # Use color at sample points
+-        
+-        # Ground truth color (interpolated from image)
+-        gt_color = get_gt_color(ray) # Helper to get GT color from image
+-        
+-        color_loss += np.mean((rendered_color - gt_color) ** 2)
+-        
+-    # Process keypoint rays (Color + Depth Loss)
+-    for view_idx, ray in keypoint_rays:
+-        origins, directions = ray
+-        t_vals = np.linspace(t_n, t_f, num_samples)
+-        points = origins + t_vals[:, np.newaxis] * directions
+-        
+-        sigma, color = nerf_model(points, directions)
+-        deltas = t_vals[1:] - t_vals[:-1]
+-        deltas = np.append(deltas, 1e-10)
+-        
+-        h = compute_transmittance_and_density(sigma, deltas)
+-        
+-        # Render color
+-        rendered_color = np.sum(h[:, np.newaxis] * color[:-1], axis=0)
+-        gt_color = get_gt_color(ray)
+-        color_loss += np.mean((rendered_color - gt_color) ** 2)
+-        
+-        # Depth Loss
+-        # Get keypoint data for this view
+-        kp_data = keypoints[view_idx]
+-        for kp_3d, sigma_hat in kp_data:
+-            # Project keypoint to get depth D_ij
+-            # D_ij is the z-coordinate of the keypoint in camera frame
+-            # Assuming ray direction points towards keypoint
+-            D_ij = get_keypoint_depth(kp_3d, view_idx, camera_poses)
+-            
+-            # Compute KL divergence approximation
+-            # L_depth = -sum(h_k * exp(-(t_k - D_ij)^2 / (2 * sigma_hat^2)))
+-            exponent = -((t_vals[:-1] - D_ij) ** 2) / (2 * sigma_hat ** 2)
+-            depth_term = np.exp(exponent)
+-            l_depth = -np.sum(h * depth_term)
+-            depth_loss += l_depth
+-            
+-    total_loss = color_loss + lambda_depth * depth_loss
+-    return total_loss, color_loss, depth_loss
++        t_vals = torch.linspace(self.near_bound, self.far_bound, self.num_samples)
++        points = origin.unsqueeze(1) + direction.unsqueeze(1) * t_vals.unsqueeze(0)
++        
++        # Query NeRF for density and color
++        sigma, color = self.nerf_model(points)
++        
++        # Compute transmittance and termination distribution h(t)
++        # alpha = 1 - exp(-sigma * delta_t)
++        # T(t) = product(1 - alpha)
++        # h(t) = T(t) * alpha (or T(t) * sigma * delta_t depending on normalization)
++        # [S1] defines h(t) = T(t) * sigma(t) as the probability distribution
++        # Note: Implementation must ensure h(t) integrates to 1
++        
++        alpha = 1.0 - torch.exp(-torch.relu(sigma) * (t_vals[1] - t_vals[0]))
++        transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha], dim=1), dim=1)[:, :-1]
++        h_t = transmittance * alpha # Unnormalized weight, needs normalization if treated as PDF directly
++        
++        # Normalize h_t to be a proper PDF over the sampled domain
++        h_t = h_t / (h_t.sum(dim=1, keepdim=True) + 1e-8)
++        
++        color_rendered = (h_t.unsqueeze(-1) * color).sum(dim=1)
++        return color_rendered, h_t, t_vals
++
++    def compute_depth_loss(self, h_t, t_vals, keypoint_depth, sigma_hat):
++        """
++        Compute KL divergence loss between rendered distribution h_t and 
++        Gaussian prior N(keypoint_depth, sigma_hat^2).
++        """
++        # Gaussian PDF evaluated at t_vals
++        # N(t; mu, sigma) = 1/(sqrt(2*pi)*sigma) * exp(-(t-mu)^2 / (2*sigma^2))
++        gaussian_pdf = torch.exp(-0.5 * ((t_vals - keypoint_depth) / sigma_hat)**2) / (sigma_hat * torch.sqrt(2 * torch.pi))
++        
++        # KL divergence: KL(P || Q) = sum P log(P/Q)
++        # Here P is Gaussian, Q is h_t
++        # L = sum P(t) * log(P(t) / Q(t))
++        # Equivalent to minimizing: - sum Q(t) * log(P(t)) + const (as per [S1] derivation)
++        # [S1] formula: L_Depth = E[-log h(t) exp(-(t-D)^2/2sigma^2)]
++        
++        log_gaussian = -0.5 * ((t_vals - keypoint_depth) / sigma_hat)**2 - torch.log(sigma_hat) - 0.5 * torch.log(2 * torch.pi)
++        
++        # Loss is expectation over h_t of the negative log likelihood of the Gaussian
++        loss = -torch.sum(h_t * log_gaussian, dim=1)
++        
++        return loss.mean()
++
++    def train_step(self, camera_id, image, gt_color, keypoint_indices):
++        """
++        Single training iteration.
++        """
++        camera_pose = get_camera_pose(camera_id)
++        
++        # 1. Generate random rays for color supervision
++        random_rays = generate_random_rays(image.shape, camera_pose)
++        color_random, _, _ = self.render_ray(random_rays.origins, random_rays.directions)
++        loss_color_random = nn.MSELoss()(color_random, gt_color[random_rays.coords])
++        
++        # 2. Generate keypoint rays for depth supervision
++        keypoint_rays = []
++        keypoint_depths = []
++        keypoint_sigmas = []
++        
++        for kp_idx in keypoint_indices:
++            # Get 2D image coordinate of keypoint
++            kp_2d = project_keypoint_to_image(self.keypoint_cloud[kp_idx], camera_pose)
++            
++            # Generate ray from keypoint 2D coord
++            ray_origin, ray_dir = generate_ray_from_coord(kp_2d, camera_pose)
++            keypoint_rays.append((ray_origin, ray_dir))
++            
++            # Get depth and uncertainty
++            depth = self.keypoint_cloud[kp_idx].z # Or projected z as per [S1]
++            sigma_hat = self.reprojection_errors[kp_idx]
++            keypoint_depths.append(depth)
++            keypoint_sigmas.append(sigma_hat)
++            
++        if not keypoint_rays:
++            return loss_color_random
++            
++        keypoint_rays = torch.stack(keypoint_rays)
++        origins = keypoint_rays[:, 0]
++        directions = keypoint_rays[:, 1]
++        
++        # Render keypoint rays
++        colors_kp, h_t, t_vals = self.render_ray(origins, directions)
++        
++        # Interpolate RGB supervision for these rays (continuous image coords)
++        gt_color_kp = interpolate_color(image, keypoint_rays.coords)
++        loss_color_kp = nn.MSELoss()(colors_kp, gt_color_kp)
++        
++        # Compute Depth Loss
++        keypoint_depths = torch.tensor(keypoint_depths).to(origins.device)
++        keypoint_sigmas = torch.tensor(keypoint_sigmas).to(origins.device)
++        loss_depth = self.compute_depth_loss(h_t, t_vals, keypoint_depths, keypoint_sigmas)
++        
++        # Combine losses
++        total_loss = loss_color_random + loss_color_kp + loss_depth
++        
++        # Backpropagate
++        total_loss.backward()
++        return total_loss
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training iterations are comparable in wall-clock time to standard NeRF. On an RTX A5000, a DS-NeRF iteration takes ~362.4 ms vs ~359.8 ms for standard NeRF [S1].
+-*   **Convergence Speed:** DS-NeRF reaches target test PSNR in 2-3x fewer training iterations than standard NeRF [S1]. In a 5-view setup, it achieves peak PSNR approximately 13 hours faster [S1].
+-*   **Memory Complexity:** Requires storing sparse 3D keypoints and their uncertainties, which is negligible compared to the NeRF network weights [S1].
+-*   **Strengths:** Significantly reduces the number of input views required for high-quality synthesis (e.g., improving PSNR from 13.5 to 20.2 with very few views) [S1]. It is compatible with other NeRF methods (e.g., PixelNeRF, metaNeRF) and does not rely on domain-specific priors [S1].
+-*   **Limitations:** Performance is dependent on the quality of the SfM reconstruction. Poor depth estimates or inaccurate depth measurements can cause optimization failure [S1]. The method assumes Gaussian uncertainty for keypoints, which may not hold for non-SfM depth sources [S1]. Dense MVS depth is not used during training [S1].
++*   **Time Complexity:** Training time per iteration is comparable to standard NeRF. On a single RTX A5000, DS-NeRF takes ~362.4 ms/iter vs ~359.8 ms/iter for standard NeRF [S1].
++*   **Speedup:** DS-NeRF accelerates training by 2-3x in terms of iterations required to reach a target PSNR [S1]. In a 5-view setup, it achieves peak PSNR ~13 hours faster [S1].
++*   **Memory Complexity:** No significant additional memory overhead compared to standard NeRF, as it reuses SfM data structures and interpolates RGB values [S1].
++*   **Scaling:** Performance gains are magnified with fewer input views. With 2 views, standard NeRF often fails while DS-NeRF succeeds [S1].
++*   **Strengths:** Reduces overfitting in sparse-view settings; requires no additional training data or category-specific priors; compatible with other NeRF methods [S1].
++*   **Limitations:** Relies entirely on the quality of SfM keypoints; fails if SfM is poor; assumes Gaussian uncertainty [S1].
++*   **When to Use:** Sparse-view scenarios (2-10 views); scenes where SfM succeeds; when training speed is critical [S1].
++*   **When Not to Use:** Dense-view scenarios where standard NeRF converges well; scenes with poor SfM reconstruction; when dense depth maps are available (other methods may be more appropriate) [S1].
+ 
+ ## Background
+-DS-NeRF was introduced to address the failure mode of NeRF when given insufficient input views, where the model fits incorrect geometries due to lack of constraints on empty space and opaque surfaces [S1]. The method leverages the "free" depth supervision provided by sparse 3D point clouds generated during standard SfM preprocessing (e.g., COLMAP) [S1]. It was demonstrated on datasets including DTU, Redwood, and NeRF Real with 2, 5, or 10 input views [S1]. The approach is distinct from methods using data-driven priors (like PixelNeRF) as it requires no additional training on other scenes and generalizes to any scene where SfM succeeds [S1].
++*   **Origin:** Introduced by [S1] (Chen et al., CVPR 2022) as "Depth-supervised NeRF: Fewer Views and Faster Training for Free".
++*   **History:** Standard NeRF [15] required many views and long training times. DS-NeRF leveraged the "free" 3D keypoints from SfM (COLMAP) to add geometric supervision.
++*   **Usage:** Implemented on DTU, Redwood, and NeRF Real datasets [S1]. Compatible with depth from scanned sensors and RGB-D outputs [S1].
+ 
+ ## Sources

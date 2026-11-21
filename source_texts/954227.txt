@@ -1,0 +1,103 @@
+# NGP Metaheuristics
+
+A comparative study of metaheuristic optimization algorithms applied to
+hyperparameter tuning for [NVIDIA Instant-NGP](https://github.com/NVlabs/instant-ngp).
+Instead of manually tuning encoding/network/optimizer settings by hand,
+this project treats hyperparameter search as a black-box optimization
+problem and compares how different search strategies perform on it.
+
+This is a from-scratch rebuild (previous attempt used only a GA; this
+version compares five algorithms) built and tested on Arch Linux against
+an Instant-NGP checkout with a working `pyngp` Python binding.
+
+## Why
+
+Instant-NGP has several hyperparameters that affect rendering quality,
+training speed, and GPU memory use in ways that interact non-trivially
+(hash grid size vs. resolution vs. learning rate, etc.). Rather than
+manual trial-and-error, this project searches for good configurations
+automatically and asks a more interesting question along the way:
+**does "smart" search actually beat random guessing here, given how
+noisy and expensive each evaluation is?**
+
+## Architecture
+
+```
+ngp_metaheuristics/
+├── core/
+│   ├── search_space.py   # single source of truth: which hyperparameters
+│   │                     # are tunable, their bounds, type, log-scale flag
+│   ├── genome.py         # converts between "value space" (raw units, used
+│   │                     # by GA) and "unit space" [0,1]^9 (used by DE/PSO/
+│   │                     # CMA-ES so every dimension gets comparable step
+│   │                     # sizes); also applies a genome onto a base config
+│   ├── eval_pipeline.py  # train -> save snapshot -> render one frame ->
+│   │                     # compute PSNR, by calling instant-ngp/scripts/run.py
+│   │                     # by path. Never modifies the instant-ngp checkout.
+│   └── fitness.py        # shared evaluator every optimizer calls: hard-fails
+│                         # on OOM/NaN/crash (fixed penalty, not silently
+│                         # continuing), soft penalty for exceeding a VRAM
+│                         # budget, times every evaluation
+├── optimizers/
+│   ├── genetic_algorithm.py       # elitism + uniform crossover + mutation
+│   ├── differential_evolution.py  # DE/rand/1/bin
+│   ├── particle_swarm.py          # inertia-weight PSO with velocity reflection
+│   ├── cma_es.py                  # wraps the `cma` PyPI package
+│   └── random_search.py           # no search logic -- pure baseline control
+└── analysis/
+    └── runs/              # CSV logs + best-found configs per algorithm
+```
+
+**Design principle:** the search space, genome encoding, and fitness
+function are shared infrastructure. Every optimizer only differs in
+*how it picks the next candidates to evaluate* -- which keeps the
+comparison fair.
+
+## Search space
+
+| Parameter | Type | Range | Notes |
+|---|---|---|---|
+| `n_levels` | int | 8–18 | HashGrid encoding levels |
+| `n_features_per_level` | categorical | {2, 4, 8} | |
+| `log2_hashmap_size` | int | 15–22 | biggest lever for quality/VRAM tradeoff |
+| `base_resolution` | int | 4–32 | |
+| `per_level_scale` | float | 1.26–2.0 | |
+| `n_neurons` | categorical | {16, 32, 64, 128} | fully-fused MLP width |
+| `n_hidden_layers` | int | 1–3 | |
+| `learning_rate` | float (log) | 1e-4–5e-2 | Adam |
+| `l2_reg` | float (log) | 1e-8–1e-4 | Adam |
+
+Scene-correctness parameters (e.g. `aabb_scale`) are deliberately **not**
+included -- those should be fixed correctly per-dataset, not evolved,
+since a wrong value degrades every candidate equally rather than
+representing a real quality/efficiency tradeoff.
+
+## Setup
+
+```bash
+# In the same conda env that has a working `pyngp` import:
+pip install --break-system-packages numpy Pillow nvidia-ml-py cma
+```
+
+`nvidia-ml-py` (pynvml) is optional -- VRAM tracking is skipped
+gracefully if it's not installed. `cma` is only required for
+`optimizers/cma_es.py`.
+
+## Usage
+
+All optimizers share the same core CLI arguments:
+
+```bash
+python3 experiment_runner.py \
+  --ngp_dir ../instant-ngp \
+  --scene ../instant-ngp/data/nerf/fox \
+  --base ../instant-ngp/configs/nerf/base.json \
+  --out_dir results/fox \
+  --pop_size 8 --generations 8
+```
+
+
+Each run writes a CSV log (`<algorithm>_log.csv`) with per-evaluation
+fitness, success/failure status, VRAM peak, and elapsed time, plus
+`best_<algorithm>_config.json` / `best_<algorithm>_genome.json` for the
+best candidate found.

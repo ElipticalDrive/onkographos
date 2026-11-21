@@ -1,0 +1,231 @@
+--- v001.md
++++ v002.md
+@@ -4,133 +4,131 @@
+ 
+ ## Overview
+-Voxel Gradient Calculation is a pre-processing step in volume rendering that computes spatial derivatives of the scalar field to detect edges and modulate visual properties. It solves the problem of visual clutter in homogeneous regions by suppressing opacity where gradients are low, while providing surface normals for shading calculations. It differs from its parent, [Sobel-based Gradient Estimation](9967-sobel-based-gradient-estimation.md), by focusing on the application of these gradients for opacity modulation and shading rather than the specific convolution kernel implementation, and from its sibling, [Sobel Operator](1416-sobel-operator.md), by treating the gradient as a volumetric attribute rather than a 2D image processing tool.
++Voxel gradient calculation is a pre-processing step in volume rendering that detects edges within volumetric data to compute spatial gradients [S1, unofficial]. It solves the problem of visualizing homogeneous regions by using gradient magnitude to modulate voxel opacity, effectively hiding uniform areas while highlighting boundaries [S1, unofficial]. What sets this method apart from its siblings, such as the generic [Sobel Operator](1416-sobel-operator.md), is its specific application to opacity modulation and shading direction in ray-casting pipelines, rather than just edge detection for image processing [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A 3D scalar volume $V$ of dimensions $W \times H \times D$.
+-**Outputs:** A 3D gradient vector field $\nabla V$ and a 3D scalar magnitude field $|\nabla V|$.
++**Inputs and Outputs:**
++*   **Input:** A 3D volume dataset $V$ of scalar or color values.
++*   **Output:** A gradient field $\nabla V$ containing vector gradients $(\nabla V_x, \nabla V_y, \nabla V_z)$ and a scalar gradient magnitude $|\nabla V|$ for each voxel.
+ 
+ **Data Structures:**
+-*   `volume_data`: 3D array of floats, shape $(W, H, D)$.
+-*   `gradients`: 3D array of vectors (or 4D array), shape $(W, H, D, 3)$, storing $(\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z})$.
+-*   `magnitudes`: 3D array of floats, shape $(W, H, D)$.
++*   **Volume Grid:** A 3D array where each element stores the scalar density or color component at integer coordinates $(x, y, z)$.
++*   **Gradient Buffer:** A 3D array of vectors, same dimensions as the volume, storing the computed gradient components.
++*   **Magnitude Buffer:** A 3D array of floats, same dimensions as the volume, storing $|\nabla V|$.
+ 
+ **Steps:**
+-1.  **Compute Gradients:** Apply the Sobel operator to `volume_data` to compute the partial derivatives in the $x$, $y$, and $z$ directions. The Sobel operator detects edges by convolving the volume with specific kernels [S1, unofficial].
+-2.  **Calculate Magnitude:** For each voxel, compute the Euclidean norm of the gradient vector:
+-    $$ |\nabla V| = \sqrt{ \left(\frac{\partial V}{\partial x}\right)^2 + \left(\frac{\partial V}{\partial y}\right)^2 + \left(\frac{\partial V}{\partial z}\right)^2 } $$
+-3.  **Modulate Opacity:** Multiply the original voxel opacity $\alpha$ by the gradient magnitude (or a function of it) to hide homogeneous regions. Voxels with low gradient magnitude (smooth areas) become transparent [S1, unofficial].
+-4.  **Extract Direction for Shading:** Use the normalized gradient vector $\mathbf{n} = \frac{\nabla V}{|\nabla V|}$ as the surface normal for lighting calculations (e.g., Lambertian, Phong, or Blinn-Phong models) [S1, unofficial].
++1.  **Compute Gradients:** Apply a finite difference stencil (typically Sobel or central difference) to the volume data to estimate the partial derivatives in the x, y, and z directions [S1, unofficial][S3].
++2.  **Calculate Magnitude:** Compute the Euclidean norm of the gradient vector for each voxel:
++    $$ |\nabla V| = \sqrt{(\nabla V_x)^2 + (\nabla V_y)^2 + (\nabla V_z)^2} $$
++3.  **Modulate Opacity:** Multiply the base voxel opacity $\alpha$ by a function of the gradient magnitude to hide homogeneous regions. High magnitude (edges) retains opacity; low magnitude (homogeneous) reduces opacity [S1, unofficial].
++4.  **Shading:** Use the gradient direction vector $\nabla V$ as the surface normal for lighting calculations (e.g., Phong or Blinn-Phong models) to enhance the perception of 3D structure [S1, unofficial].
++
++**Formulas:**
++For a scalar volume $I$, the central difference gradient at voxel $(x,y,z)$ is defined as [S3]:
++$$ \nabla(I) = (I_{gx}, I_{gy}, I_{gz}) $$
++where:
++$$ I_{gx} = I(x-1,y,z) - I(x+1,y,z) $$
++$$ I_{gy} = I(x,y-1,z) - I(x,y+1,z) $$
++$$ I_{gz} = I(x,y,z-1) - I(x,y,z+1) $$
++
++The normalized gradient magnitude is [S3]:
++$$ g_{GRAY} = \frac{|\nabla(I)|}{|\nabla(I)|_{max}} $$
++
++**Parameters:**
++*   **Stencil Type:** Sobel or Central Difference. Sobel is preferred for noise robustness in edge detection [S1, unofficial].
++*   **Sigma (for variants):** $\sigma=1.0$ for Gaussian smoothing in two-level computation [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Boundary Conditions:** Voxels at the volume boundary lack neighbors for central differences. [G] Zero-padding or clamping to the nearest neighbor value is required.
++*   **Noise:** High-frequency noise in the volume data creates spurious high gradients, leading to "salt-and-pepper" opacity artifacts. Smoothing (e.g., Gaussian) is often required before gradient calculation [S2, unofficial].
++*   **Homogeneous Regions:** If the gradient magnitude is near zero, opacity modulation may make the region completely invisible, potentially losing context if the base opacity is not carefully tuned.
+ 
+ **Pseudocode:**
+ ```python
+-import numpy as np
+-
+-def compute_voxel_gradients(volume_data):
++def compute_voxel_gradients(volume: Array3D) -> Tuple[Array3D, Array3D]:
+     """
+     Computes gradient vectors and magnitudes for a 3D volume.
+-    Uses central differences as implied by standard gradient computation 
+-    in this context [S2, unofficial], though the primary source [S1, unofficial] specifies Sobel.
+-    Note: [S1, unofficial] explicitly states "Sobel operator is used... to pre-compute gradients".
+-    We implement Sobel convolution for x, y, z axes.
++    Uses central differences. Handles boundaries by clamping.
+     """
+-    # Define Sobel kernels for 3D
+-    # Sobel X
+-    sobel_x = np.array([
+-        [[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]],
+-        [[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]],
+-        [[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]]
+-    ])
+-    # Sobel Y
+-    sobel_y = np.array([
+-        [[[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+-         [[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+-         [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]]
+-    ])
+-    # Sobel Z
+-    sobel_z = np.array([
+-        [[[-1, -2, -1], [-2, -4, -2], [-1, -2, -1]],
+-         [[ 0,  0,  0], [ 0,  0,  0], [ 0,  0,  0]],
+-         [[ 1,  2,  1], [ 2,  4,  2], [ 1,  2,  1]]]
+-    ])
+-
+-    # Pad volume to handle boundaries
+-    padded = np.pad(volume_data, 1, mode='edge')
++    dims = volume.shape
++    height, width, depth = dims
+     
+-    # Convolve to get partial derivatives
+-    # Note: Standard scipy.signal.convolve3d or manual implementation required.
+-    # Here we assume a generic convolution function `conv3d`
+-    dx = conv3d(padded, sobel_x)
+-    dy = conv3d(padded, sobel_y)
+-    dz = conv3d(padded, sobel_z)
++    # Initialize gradient buffers
++    # Each voxel stores (gx, gy, gz)
++    gradients = np.zeros((height, width, depth, 3))
++    magnitudes = np.zeros((height, width, depth))
+     
+-    # Remove padding
+-    dx = dx[1:-1, 1:-1, 1:-1]
+-    dy = dy[1:-1, 1:-1, 1:-1]
+-    dz = dz[1:-1, 1:-1, 1:-1]
+-    
+-    # Stack gradients
+-    gradients = np.stack((dx, dy, dz), axis=-1)
+-    
+-    # Compute magnitude
+-    magnitudes = np.linalg.norm(gradients, axis=-1)
+-    
++    for z in range(depth):
++        for y in range(height):
++            for x in range(width):
++                # Get current value
++                val = volume[x, y, z]
++                
++                # Compute partial derivatives with boundary checks
++                # X direction
++                x_prev = volume[max(0, x-1), y, z]
++                x_next = volume[min(width-1, x+1), y, z]
++                gx = x_prev - x_next
++                
++                # Y direction
++                y_prev = volume[x, max(0, y-1), z]
++                y_next = volume[x, min(height-1, y+1), z]
++                gy = y_prev - y_next
++                
++                # Z direction
++                z_prev = volume[x, y, max(0, z-1)]
++                z_next = volume[x, y, min(depth-1, z+1)]
++                gz = z_prev - z_next
++                
++                gradients[x, y, z] = [gx, gy, gz]
++                
++                # Compute magnitude
++                mag = np.sqrt(gx**2 + gy**2 + gz**2)
++                magnitudes[x, y, z] = mag
++                
+     return gradients, magnitudes
+ 
+-def modulate_opacity(volume_data, magnitudes, alpha_map):
++def modulate_opacity(base_opacity: Array3D, gradient_magnitude: Array3D, max_mag: float) -> Array3D:
+     """
+-    Modulates voxel opacity based on gradient magnitude.
+-    Homogeneous regions (low magnitude) become invisible [S1, unofficial].
++    Modulates opacity based on gradient magnitude.
++    Homogeneous regions (low mag) become transparent.
+     """
+-    # Normalize magnitude to [0, 1] for scaling
+-    max_mag = np.max(magnitudes)
+-    if max_mag == 0:
+-        return np.zeros_like(volume_data)
++    # Normalize magnitude to [0, 1]
++    normalized_mag = gradient_magnitude / max_mag
+     
+-    normalized_mag = magnitudes / max_mag
++    # Simple linear modulation: alpha_final = alpha_base * (1 - normalized_mag) 
++    # OR alpha_final = alpha_base * normalized_mag depending on intent.
++    # Based on [S1, unofficial], gradient magnitude makes homogeneous regions invisible.
++    # This implies high gradient -> high opacity, low gradient -> low opacity.
++    # So we multiply base opacity by a factor derived from magnitude.
+     
+-    # Apply opacity modulation
+-    # The exact function is not specified, but "multiply voxel opacity" is stated [S1, unofficial]
+-    # Assuming alpha_map provides base opacity
+-    modulated_alpha = alpha_map * normalized_mag
++    # Assuming base_opacity is already scaled, we use magnitude as a multiplier
++    # to suppress homogeneous areas.
++    final_opacity = base_opacity * normalized_mag
+     
+-    return modulated_alpha
+-
+-def get_shading_normal(gradients):
+-    """
+-    Returns normalized gradient vectors for shading [S1, unofficial].
+-    """
+-    magnitudes = np.linalg.norm(gradients, axis=-1, keepdims=True)
+-    # Avoid division by zero
+-    magnitudes = np.where(magnitudes == 0, 1, magnitudes)
+-    normals = gradients / magnitudes
+-    return normals
++    return final_opacity
+ ```
+-
+-**Parameters:**
+-*   Sobel Kernel Size: $3 \times 3 \times 3$ (standard) [S1, unofficial].
+-*   Opacity Modulation Function: Not explicitly defined, but described as multiplication [S1, unofficial].
+-
+-**Edge Cases:**
+-*   **Zero Magnitude:** In perfectly homogeneous regions, the gradient is zero. Division by zero in normalization must be handled [G].
+-*   **Boundary Conditions:** Edge voxels require padding or special kernel handling to avoid artifacts [G].
+ 
+ ## Subtopics
+ 
+ ### Two-Level Gradient Computation
+-Decomposes volume gradients into a smooth base component for large structures and a sharp detail component for fine features by combining Gaussian smoothing with residual extraction [S2, unofficial]. It is chosen when an artist needs to separate coarse anatomical structures from fine textures. Steps: 1. Apply Gaussian smoothing ($\sigma=1.0$) to the volume: `smoothed_volume = ndimage.gaussian_filter(volume_data, sigma=1.0)` [S2, unofficial]. 2. Compute base gradients using central differences on the smoothed volume: `base_gradients = np.gradient(smoothed_volume)` [S2, unofficial]. 3. Extract fine details by subtracting the smoothed volume from the original: `sharpened_volume = volume_data - smoothed_volume` [S2, unofficial]. 4. Compute detail gradients using central differences on the residual: `detail_gradients = np.gradient(sharpened_volume)` [S2, unofficial].
++Decomposes volume gradients into a smooth base component for large structures and a sharp detail component for fine features by combining Gaussian smoothing with residual extraction [S2, unofficial]. It is chosen when the volume contains both large smooth structures and fine noisy details that need separate handling. Steps: 1. Apply Gaussian smoothing ($\sigma=1.0$) to the volume [S2, unofficial]. 2. Compute base gradients using central differences on the smoothed volume [S2, unofficial]. 3. Extract fine details by subtracting the smoothed volume from the original [S2, unofficial]. 4. Compute detail gradients using central differences on the residual [S2, unofficial].
++
++### Gradient-based Feature Detectors
++Feature detectors that compute gradients from image data (grayscale or color channels) to highlight internal structures and surfaces [S3]. It is chosen when color information is critical for distinguishing tissue types or materials. It supports color spaces like RGB, L*u*v*, YCbCr, HSV, and YIQ, with L*u*v* being preferred for perceptual linearity [S3]. It computes Color Distance Gradient Magnitude (CDGM) and Color Distance Gradient Dot Product (CDGDP) [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(W \cdot H \cdot D)$ for the convolution, as each voxel is processed with a constant-size kernel.
+-*   **Memory Complexity:** $O(W \cdot H \cdot D)$ to store the gradient vector field and magnitude field.
+-*   **Performance:** Pre-computation adds an initial cost but accelerates ray casting by allowing simple opacity lookups instead of on-the-fly derivative calculations.
+-*   **Strengths:** Effectively hides homogeneous noise; provides accurate normals for shading.
+-*   **Limitations:** Sobel operators are sensitive to noise; may require pre-smoothing.
+-*   **When to use:** When visual clarity in smooth regions is desired and shading accuracy is important.
+-*   **When not to use:** In highly noisy data without pre-filtering, or when memory bandwidth is the primary bottleneck and gradients are not needed for shading.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed once with a constant-size stencil.
++*   **Memory Complexity:** $O(N)$ for storing the gradient vectors and magnitudes.
++*   **Performance:** Pre-computation adds an initial cost but accelerates rendering by allowing simple opacity lookups and normal-based shading during ray-casting [S1, unofficial].
++*   **Strengths:** Effectively hides homogeneous regions, reducing visual clutter and improving the perception of internal structures through shading [S1, unofficial].
++*   **Limitations:** Sensitive to noise; requires pre-smoothing for noisy data. Boundary effects can cause artifacts if not handled correctly.
++*   **When to use:** When the volume has distinct boundaries and homogeneous interiors, and shading is desired.
++*   **When not to use:** For highly noisy data without smoothing, or when the volume is entirely homogeneous.
+ 
+ ## Background
+-Originated in volumetric ray casting techniques to improve visual quality by distinguishing edges from smooth interiors. The method is described in the context of a volumetric ray casting system that uses Sobel operators for edge detection, opacity modulation, and shading [S1, unofficial]. It is implemented in projects such as `rokcej/volumetric-ray-casting` [S1, unofficial].
++The method originates from early volume rendering techniques that sought to improve the visual clarity of volumetric data by leveraging spatial derivatives [S1, unofficial]. The use of Sobel operators for edge detection in volumes was adapted from 2D image processing [S1, unofficial]. Gradient-based opacity modulation was introduced to address the "foggy" appearance of homogeneous regions in standard ray-casting [S1, unofficial]. Gradient-based feature detectors for color data were developed to enhance segmentation and visualization of medical and cryo-imaging data, particularly using perceptually uniform color spaces like L*u*v* [S3].
+ 
+ ## Sources
+ [S1] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
+-[S2] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)+[S2] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)
++[S3] Enhanced volume rendering techniques for high-resolution color cryo-imaging data, https://doi.org/10.1117/12.813756, fetched 2026-11-08

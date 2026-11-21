@@ -1,0 +1,252 @@
+Volumetric Light Transport
+15.3 Volumetric Light Transport
+These sampling building blocks make it possible to implement various light
+transport algorithms in participating media. We can now implement the
+fragments in the EstimateDirect() function from
+Section 14.3.1 that handle the cases related to
+participating media.
+First, after a light has been sampled, if the interaction is a scattering
+event in participating media, it’s necessary to compute the value of the
+phase function for the outgoing direction and the incident illumination
+direction as well as the value of the PDF for sampling that direction for
+multiple importance sampling. Because we assume that phase functions are
+sampled perfectly, these values are the same.
+<<Evaluate phase function for light sampling strategy>>=
+const MediumInteraction &mi = (const MediumInteraction &)it;
+Float p = mi.phase->p(mi.wo, wi);
+f = Spectrum(p);
+scatteringPdf = p;
+The direct lighting calculation needs to take a sample from the phase
+function’s distribution. Sample_p() provides this capability; as
+described earlier, the value it returns gives both the phase function’s
+value and the PDF’s.
+<<Sample scattered direction for medium interactions>>=
+const MediumInteraction &mi = (const MediumInteraction &)it;
+Float p = mi.phase->Sample_p(mi.wo, &wi, uScattering);
+f = Spectrum(p);
+scatteringPdf = p;
+15.3.1 Path Tracing
+The VolPathIntegrator is a
+SamplerIntegrator that accounts for scattering and attenuation from
+participating media as well as scattering from surfaces. It is defined in the
+files integrators/volpath.h and
+integrators/volpath.cpp and has a
+general structure that is very similar to the PathIntegrator, so here we
+will only discuss the differences between those two classes. See
+Figures 15.4 and 15.5 for images
+rendered with this integrator that show off the importance of accounting for
+multiple scattering in participating media.
+Figure 15.4: Volumetric Path Tracing.
+(1) Heterogeneous smoke data set rendered with direct lighting only.
+(2) Rendered with path tracing with a maximum depth of 5.
+(3) Path tracing with a maximum depth of 25.
+For this medium, which has an albedo of
+rho equals 0.7
+, multiple scattering has
+a significant effect on the final result. For (3), 1024 samples per pixel
+were required for this noise-free result.
+As a SamplerIntegrator, the VolPathIntegrator’s
+main responsibility is to implement the
+Li() method. The general structure of its implementation is very
+similar to that of PathIntegrator::Li(), though with a few small
+changes related to participating media.
+<<VolPathIntegrator Method Definitions>>=
+Spectrum VolPathIntegrator::Li(const RayDifferential &r,
+const Scene &scene, Sampler &sampler, MemoryArena &arena,
+int depth) const {
+Spectrum L(0.f), beta(1.f);
+RayDifferential ray(r);
+bool specularBounce = false;
+for (int bounces = 0; ; ++bounces) {
+<<Intersect ray with scene and store intersection in isect>>
+SurfaceInteraction isect;
+bool foundIntersection = scene.Intersect(ray, &isect);
+<<Sample the participating medium, if present>>
+MediumInteraction mi;
+if (ray.medium)
+beta *= ray.medium->Sample(ray, sampler, arena, &mi);
+if (beta.IsBlack())
+break;
+<<Handle an interaction with a medium or a surface>>
+if (mi.IsValid()) {
+<<Handle scattering at point in medium for volumetric path tracer>>
+L += beta * UniformSampleOneLight(mi, scene, arena, sampler, true);
+Vector3f wo = -ray.d, wi;
+mi.phase->Sample_p(wo, &wi, sampler.Get2D());
+ray = mi.SpawnRay(wi);
+} else {
+<<Handle scattering at point on surface for volumetric path tracer>>
+<<Possibly add emitted light at intersection>>
+if (bounces == 0 || specularBounce) {
+<<Add emitted light at path vertex or from the environment>>
+if (foundIntersection)
+L += beta * isect.Le(-ray.d);
+else
+for (const auto &light : scene.lights)
+L += beta * light->Le(ray);
+}
+<<Terminate path if ray escaped or maxDepth was reached>>
+if (!foundIntersection || bounces >= maxDepth)
+break;
+<<Compute scattering functions and skip over medium boundaries>>
+isect.ComputeScatteringFunctions(ray, arena, true);
+if (!isect.bsdf) {
+ray = isect.SpawnRay(ray.d);
+bounces--;
+continue;
+}
+<<Sample illumination from lights to find attenuated path contribution>>
+L += beta * UniformSampleOneLight(isect, scene, arena, sampler, true);
+<<Sample BSDF to get new path direction>>
+Vector3f wo = -ray.d, wi;
+Float pdf;
+BxDFType flags;
+Spectrum f = isect.bsdf->Sample_f(wo, &wi, sampler.Get2D(),
+&pdf, BSDF_ALL, &flags);
+if (f.IsBlack() || pdf == 0.f)
+break;
+beta *= f * AbsDot(wi, isect.shading.n) / pdf;
+specularBounce = (flags & BSDF_SPECULAR) != 0;
+ray = isect.SpawnRay(wi);
+<<Account for attenuated subsurface scattering, if applicable>>
+if (isect.bssrdf && (flags & BSDF_TRANSMISSION)) {
+<<Importance sample the BSSRDF>>
+SurfaceInteraction pi;
+Spectrum S = isect.bssrdf->Sample_S(scene, sampler.Get1D(),
+sampler.Get2D(), arena, &pi, &pdf);
+if (S.IsBlack() || pdf == 0)
+break;
+beta *= S / pdf;
+<<Account for the attenuated direct subsurface scattering component>>
+L += beta * UniformSampleOneLight(pi, scene, arena, sampler, true);
+<<Account for the indirect subsurface scattering component>>
+Spectrum f = pi.bsdf->Sample_f(pi.wo, &wi, sampler.Get2D(), &pdf,
+BSDF_ALL, &flags);
+if (f.IsBlack() || pdf == 0)
+break;
+beta *= f * AbsDot(wi, pi.shading.n) / pdf;
+specularBounce = (flags & BSDF_SPECULAR) != 0;
+ray = pi.SpawnRay(wi);
+}
+}
+<<Possibly terminate the path with Russian roulette>>
+if (bounces > 3) {
+Float q = std::max((Float).05, 1 - beta.y());
+if (sampler.Get1D() < q)
+break;
+beta /= 1 - q;
+}
+}
+return L;
+}
+At each step in sampling the scattering path, the ray is first intersected with
+the surfaces in the scene to find the closest surface intersection, if any.
+Next, participating media are accounted for with a call to the
+Medium::Sample() method, which initializes the provided
+MediumInteraction if a medium interaction should be the next vertex in
+the path. In either case, Sample() also returns a factor accounting for
+the beam transmittance and sampling PDF to either the surface or medium
+interaction.
+<<Sample the participating medium, if present>>=
+MediumInteraction mi;
+if (ray.medium)
+beta *= ray.medium->Sample(ray, sampler, arena, &mi);
+if (beta.IsBlack())
+break;
+Figure 15.5: Homogeneous Volumetric Scattering in Liquid.
+Scattering in the liquid is modeled with participating media and
+rendered with the VolPathIntegrator. (Scene courtesy “guismo”
+from blendswap.com.)
+In scenes with very dense scattering media, the effort spent on first
+finding surface intersections will often be wasted, as
+Medium::Sample() will usually generate a medium interaction instead.
+For such scenes, a more efficient implementation would be to first sample a
+medium interaction, updating the ray’s tMax value accordingly before
+intersecting the ray with primitives in the scene. In turn, surface
+intersection tests would be much more efficient, as the ray to be tested
+would often be fairly short. (Further investigating and addressing this
+issue is left for Exercise 15.5.)
+Depending on whether the sampled interaction for this ray is within
+participating media or at a point on a surface, one of two fragments
+handles computing the direct illumination at the point and sampling the
+next direction.
+<<Handle an interaction with a medium or a surface>>=
+if (mi.IsValid()) {
+<<Handle scattering at point in medium for volumetric path tracer>>
+L += beta * UniformSampleOneLight(mi, scene, arena, sampler, true);
+Vector3f wo = -ray.d, wi;
+mi.phase->Sample_p(wo, &wi, sampler.Get2D());
+ray = mi.SpawnRay(wi);
+} else {
+<<Handle scattering at point on surface for volumetric path tracer>>
+<<Possibly add emitted light at intersection>>
+if (bounces == 0 || specularBounce) {
+<<Add emitted light at path vertex or from the environment>>
+if (foundIntersection)
+L += beta * isect.Le(-ray.d);
+else
+for (const auto &light : scene.lights)
+L += beta * light->Le(ray);
+}
+<<Terminate path if ray escaped or maxDepth was reached>>
+if (!foundIntersection || bounces >= maxDepth)
+break;
+<<Compute scattering functions and skip over medium boundaries>>
+isect.ComputeScatteringFunctions(ray, arena, true);
+if (!isect.bsdf) {
+ray = isect.SpawnRay(ray.d);
+bounces--;
+continue;
+}
+<<Sample illumination from lights to find attenuated path contribution>>
+L += beta * UniformSampleOneLight(isect, scene, arena, sampler, true);
+<<Sample BSDF to get new path direction>>
+Vector3f wo = -ray.d, wi;
+Float pdf;
+BxDFType flags;
+Spectrum f = isect.bsdf->Sample_f(wo, &wi, sampler.Get2D(),
+&pdf, BSDF_ALL, &flags);
+if (f.IsBlack() || pdf == 0.f)
+break;
+beta *= f * AbsDot(wi, isect.shading.n) / pdf;
+specularBounce = (flags & BSDF_SPECULAR) != 0;
+ray = isect.SpawnRay(wi);
+<<Account for attenuated subsurface scattering, if applicable>>
+if (isect.bssrdf && (flags & BSDF_TRANSMISSION)) {
+<<Importance sample the BSSRDF>>
+SurfaceInteraction pi;
+Spectrum S = isect.bssrdf->Sample_S(scene, sampler.Get1D(),
+sampler.Get2D(), arena, &pi, &pdf);
+if (S.IsBlack() || pdf == 0)
+break;
+beta *= S / pdf;
+<<Account for the attenuated direct subsurface scattering component>>
+L += beta * UniformSampleOneLight(pi, scene, arena, sampler, true);
+<<Account for the indirect subsurface scattering component>>
+Spectrum f = pi.bsdf->Sample_f(pi.wo, &wi, sampler.Get2D(), &pdf,
+BSDF_ALL, &flags);
+if (f.IsBlack() || pdf == 0)
+break;
+beta *= f * AbsDot(wi, pi.shading.n) / pdf;
+specularBounce = (flags & BSDF_SPECULAR) != 0;
+ray = pi.SpawnRay(wi);
+}
+}
+Thanks to the fragments defined earlier in this section, the
+UniformSampleOneLight() function already supports estimating direct
+illumination at points in participating media, so we just need to pass the
+MediumInteraction for the sampled interaction to it. The direction
+for the ray leaving the medium interaction is then easily found with a call
+to Sample_p().
+<<Handle scattering at point in medium for volumetric path tracer>>=
+L += beta * UniformSampleOneLight(mi, scene, arena, sampler, true);
+Vector3f wo = -ray.d, wi;
+mi.phase->Sample_p(wo, &wi, sampler.Get2D());
+ray = mi.SpawnRay(wi);
+For scattering from surfaces, the computation performed is almost exactly
+the same as the regular PathIntegrator, except that attenuation of
+radiance from light sources to surface intersection points is incorporated
+by calling VisibilityTester::Tr() instead of
+VisibilityTester::Unoccluded() when sampling direct
+illumination. Because these differences are minor, we won’t
+include the corresponding code here.

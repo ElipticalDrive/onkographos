@@ -1,0 +1,181 @@
+--- v009.md
++++ v010.md
+@@ -1,14 +1,14 @@
+ # Safe Raymarching Step Size
+ 
+-Also called: Conservative stepping, Grid Step Size, Ray Marching with SDF-guided Step Size, TensorBase Step Size Calculation
++Also called: Conservative stepping, Distance-Aided Ray Marching, Grid Step Size, Ray Marching with SDF-guided Step Size, TensorBase Step Size Calculation
+ 
+ ## Overview
+-Safe Raymarching Step Size is a method for determining the increment $\Delta t$ along a ray $r(t) = \mathbf{o} + t\mathbf{d}$ to ensure the marching process does not overshoot or penetrate implicit surfaces defined by Signed Distance Fields (SDFs) [S2, S3, unofficial]. It solves the problem of geometric artifacts caused by step sizes exceeding the local distance to the surface, particularly when the SDF is distorted by operations like domain repetition or boolean combinations [S1, unofficial]. It sets itself apart from standard sphere tracing by explicitly incorporating clamping, configurable aggressiveness ratios, and robust termination masks to handle edge cases such as immediate surface hits or boundary escapes [S2, unofficial].
++Safe Raymarching Step Size determines the increment $\Delta t$ along a ray $r(t) = \mathbf{o} + t\mathbf{d}$ to ensure marching does not overshoot or penetrate implicit surfaces defined by Signed Distance Fields (SDFs) [S2, unofficial]. It solves geometric artifacts caused by step sizes exceeding the local distance to the surface, particularly when the SDF is distorted by operations like domain repetition or boolean combinations [S1, unofficial]. It sets itself apart from standard sphere tracing by explicitly incorporating clamping, configurable aggressiveness ratios, and robust termination masks to handle edge cases such as immediate surface hits or boundary escapes [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ - Ray origin $\mathbf{o}$ and normalized direction $\mathbf{d}$ [Parent].
+-- Scene bounding box (AABB) defined by $\mathbf{min}$ and $\mathbf{max}$ [S3, unofficial].
+-- Grid resolution $N_{grid}$ (voxel count per axis) [S3, unofficial].
++- Scene bounding box (AABB) defined by $\mathbf{min}$ and $\mathbf{max}$ [S4, unofficial].
++- Grid resolution $N_{grid}$ (voxel count per axis) [S4, unofficial].
+ - SDF evaluation function $f(\mathbf{p})$ [S2, unofficial].
+ - Parameters:
+@@ -25,19 +25,19 @@
+ 
+ **Data Structures:**
+-- `marching_zdepth`: Tensor of shape $(N_{rays})$, initialized to $0$ [S2, unofficial].
++- `marching_zdepth`: Array of shape $(N_{rays})$, initialized to $0$ [S2, unofficial].
+ - `sdf_list`, `points_list`, `marching_zdepth_list`: Lists to accumulate results [S2, unofficial].
+-- `valid_mask_max_marching_zdepth`: Boolean tensor [S2, unofficial].
+-- `valid_mask_ray_marching`: Boolean tensor [S2, unofficial].
+-- `valid_mask_first_query`: Boolean tensor [S2, unofficial] [G].
++- `valid_mask_max_marching_zdepth`: Boolean array for boundary checks [S2, unofficial].
++- `valid_mask_ray_marching`: Boolean array for surface hit checks [S2, unofficial].
++- `valid_mask_first_query`: Boolean array for initial query checks [S2, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Calculate Grid Step Size (Grid-based variant only):**
+-    If using a grid-based approach [S3, unofficial]:
+-    - Calculate inverse AABB size: $\mathbf{inv\_size} = \frac{1}{\mathbf{max} - \mathbf{min}}$.
+-    - Calculate unit size per grid cell: $\mathbf{unit\_size} = \mathbf{inv\_size} / N_{grid}$.
+-    - Calculate diagonal length of AABB: $L_{diag} = \|\mathbf{max} - \mathbf{min}\|$.
+-    - Calculate step size: $\Delta t_{grid} = \text{mean}(\mathbf{unit\_size}) \times \text{step\_ratio}$ [S3, unofficial].
+-    - Calculate number of samples: $N_{samples} = \lceil L_{diag} / \Delta t_{grid} \rceil + 1$ [S3, unofficial].
++    If using a grid-based approach [S4, unofficial]:
++    - Calculate inverse AABB size: $\mathbf{inv\_size} = \frac{1}{\mathbf{max} - \mathbf{min}}$ [S4, unofficial].
++    - Calculate unit size per grid cell: $\mathbf{unit\_size} = \mathbf{inv\_size} / N_{grid}$ [S4, unofficial].
++    - Calculate diagonal length of AABB: $L_{diag} = \|\mathbf{max} - \mathbf{min}\|$ [S4, unofficial].
++    - Calculate step size: $\Delta t_{grid} = \text{mean}(\mathbf{unit\_size}) \times \text{step\_ratio}$ [S4, unofficial].
++    - Calculate number of samples: $N_{samples} = \lceil L_{diag} / \Delta t_{grid} \rceil + 1$ [S4, unofficial].
+     - *Note: In SDF-based variants, $\Delta t$ is derived from the SDF value itself, not the grid [S2, unofficial].*
+ 
+@@ -73,5 +73,5 @@
+         - `valid_mask_ray_marching` = $(f_{min} \le \text{threshold})$ [S2, unofficial].
+     c.  **First Query Check (Edge Case):**
+-        - If the first SDF query $f_0 \le \text{threshold}$, the ray starts inside or on the surface.
++        - If the first SDF query $f_0 \le \text{threshold}$, the ray starts inside or on the surface [S2, unofficial].
+         - `valid_mask_first_query` = $(f_0 > \text{threshold})$ [S2, unofficial].
+         - *Pitfall:* This mask filters out immediate hits to prevent incorrect rendering logic, requiring special handling for rays starting inside geometry [S2, unofficial].
+@@ -86,7 +86,9 @@
+ 
+ ```python
+-def safe_raymarching_step_size(o, d, f, aabb_min, aabb_max, grid_size, 
+-                               clamp_dist=0.1, ray_marching_ratio=1.5, 
+-                               threshold=5e-5, march_step=100):
++import math
++
++def safe_raymarching_step_size(o, d, f, aabb_min, aabb_max, grid_size,
++                               clamp_dist=0.1, ray_marching_ratio=1.5,
++                               threshold=5e-5, march_step=100, init_zdepth=0.0):
+     """
+     o: (N, 3) ray origins
+@@ -96,60 +98,55 @@
+     grid_size: int, resolution per axis
+     """
+-    N = o.shape[0]
+-    marching_zdepth = torch.zeros(N)
++    N = len(o)
++    marching_zdepth = [0.0] * N
+     sdf_list = []
+     points_list = []
+     zdepth_list = []
+-    
++
+     # Precompute max bound for escape check
+-    # Assuming maxbound is derived from AABB intersection or camera bounds
+-    # Simplified: use AABB diagonal as max possible depth for simplicity if not provided
+-    diag_len = torch.norm(aabb_max - aabb_min)
+-    maxbound_zdepth = diag_len 
+-    
++    diag_len = math.sqrt(sum((aabb_max[j] - aabb_min[j])**2 for j in range(3)))
++    maxbound_zdepth = diag_len
++
+     for i in range(march_step):
+         # 1. Sample Points
+-        current_depth = marching_zdepth
+-        points = o + current_depth.unsqueeze(1) * d
+-        
++        current_depth = [init_zdepth + marching_zdepth[k] for k in range(N)]
++        points = [[o[k][j] + current_depth[k] * d[k][j] for j in range(3)] for k in range(N)]
++
+         # 2. Evaluate SDF
+         sdf_raw = f(points)
+-        
++
+         # 3. Clamp SDF
+-        sdf_clamped = torch.clamp(sdf_raw, -clamp_dist, clamp_dist)
+-        
++        sdf_clamped = [max(-clamp_dist, min(clamp_dist, s)) for s in sdf_raw]
++
+         # 4. Update Depth
+-        step = sdf_clamped * ray_marching_ratio
+-        marching_zdepth = marching_zdepth + step
+-        
++        step = [s * ray_marching_ratio for s in sdf_clamped]
++        marching_zdepth = [marching_zdepth[k] + step[k] for k in range(N)]
++
+         # 5. Store Data
+         points_list.append(points)
+         zdepth_list.append(current_depth)
+         sdf_list.append(sdf_raw)
+-        
+-        # Early exit optimization (optional, based on sibling methods)
+-        # If all rays have hit or escaped, break
+-        
++
+     # 6. Compute Masks
+     # Max bound check
+     final_depth = marching_zdepth
+-    valid_max_bound = final_depth < maxbound_zdepth
+-    
++    valid_max_bound = [final_depth[k] < maxbound_zdepth for k in range(N)]
++
+     # Surface hit check: min SDF across all steps <= threshold
+-    sdf_tensor = torch.stack(sdf_list, dim=0) # (march_step, N)
+-    min_sdf = torch.min(sdf_tensor, dim=0).values
+-    valid_hit = min_sdf <= threshold
+-    
++    min_sdf = [min(sdf_list[i][k] for i in range(march_step)) for k in range(N)]
++    valid_hit = [min_sdf[k] <= threshold for k in range(N)]
++
+     # First query check: first SDF > threshold (to filter out immediate hits)
+-    first_sdf = sdf_tensor[0]
+-    valid_first = first_sdf > threshold
+-    
++    first_sdf = sdf_list[0]
++    valid_first = [first_sdf[k] > threshold for k in range(N)]
++
+     # Combine
+-    valid_mask = valid_max_bound & valid_hit & valid_first
+-    
++    valid_mask = [valid_max_bound[k] and valid_hit[k] and valid_first[k] for k in range(N)]
++
+     # Concatenate lists
+-    points_tensor = torch.stack(points_list, dim=0)
+-    zdepth_tensor = torch.stack(zdepth_list, dim=0)
+-    
++    points_tensor = points_list
++    zdepth_tensor = zdepth_list
++    sdf_tensor = sdf_list
++
+     return sdf_tensor, zdepth_tensor, points_tensor, valid_mask
+ ```
+@@ -173,14 +170,15 @@
+ - **Memory Complexity:** $O(N_{rays} \times N_{steps})$ to store intermediate SDF and position data for backpropagation or rendering [S2, unofficial].
+ - **Performance:** Parallel implementations (`ray_marching_trivial`) process all rays in a single loop, while recursive variants (`ray_marching_recursive`) only process unfinished rays, optimizing for early hits [S2, unofficial].
+-- **Strengths:** Robust against overshooting in distorted SDFs; handles edge cases like immediate surface hits via masks [S1, S2, unofficial].
++- **Strengths:** Robust against overshooting in distorted SDFs; handles edge cases like immediate surface hits via masks [S1, unofficial][S2, unofficial].
+ - **Limitations:** Conservative step sizes (low `ray_marching_ratio`) increase iteration counts; clamping may reduce accuracy near the surface [S2, unofficial].
+-- **When to Use:** When rendering distorted SDFs or neural implicit surfaces where standard sphere tracing may overshoot [S1, S2, unofficial].
++- **When to Use:** When rendering distorted SDFs or neural implicit surfaces where standard sphere tracing may overshoot [S1, unofficial][S2, unofficial].
+ - **When Not to Use:** When high performance is critical and the SDF is well-behaved (Lipschitz constant $\lambda=1$), standard sphere tracing is more efficient [S1, unofficial].
+ 
+ ## Background
+-Safe Raymarching Step Size originated from the need to render distorted Signed Distance Fields, such as those created by domain repetition or boolean operations, which can cause artifacts if the step size exceeds the local distance [S1, unofficial]. The method was formalized in implementations like the DIST-Renderer, which introduced clamping and ratio-based step control to stabilize differentiable rendering [S2, unofficial]. It is also referenced in collaborative neural radiance field implementations for novel view synthesis, where grid-based step sizes are calculated from AABB dimensions [S3, unofficial].
++Safe Raymarching Step Size originated from the need to render distorted Signed Distance Fields, such as those created by domain repetition or boolean operations, which can cause artifacts if the step size exceeds the local distance [S1, unofficial]. The method was formalized in implementations like the SDFRenderer, which introduced clamping and ratio-based step control to stabilize differentiable rendering [S2, unofficial]. It is also referenced in collaborative neural radiance field implementations for novel view synthesis, where grid-based step sizes are calculated from AABB dimensions [S4, unofficial].
+ 
+ ## Sources
+ [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
+ [S2] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)
+-[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)+[S3] http://www.hugi.scene.org/online/hugi37/hugi%2037%20-%20coding%20adok%20on%20ray%20casting,%20ray%20tracing,%20ray%20marching%20and%20the%20like.htm, http://www.hugi.scene.org/online/hugi37/hugi%2037%20-%20coding%20adok%20on%20ray%20casting,%20ray%20tracing,%20ray%20marching%20and%20the%20like.htm, fetched 2026-10-26 (unofficial)
++[S4] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

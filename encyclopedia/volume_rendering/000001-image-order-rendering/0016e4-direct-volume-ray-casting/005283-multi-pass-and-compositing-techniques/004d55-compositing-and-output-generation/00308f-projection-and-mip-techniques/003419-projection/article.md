@@ -1,0 +1,82 @@
+# Projection
+
+Also called: Direct Volume Rendering via Projection, Orthographic Projection (Summation), Summation Projection, Summed Reprojection, Summed projection, Total Intensity Projection, Voxel Projection
+
+## Overview
+Projection is a direct volume rendering technique that visualizes the total accumulated intensity of a 3D volume along a specific axis by summing voxel values [S1, unofficial][S2, unofficial]. It solves the problem of compressing volumetric data into a 2D representation where the brightness of each pixel corresponds to the integral of the scalar field along the viewing ray [S1, unofficial]. Unlike [Maximum Intensity Projection](902-maximum-intensity-projection.md), which highlights the highest density structures, projection preserves the global distribution of intensity but significantly reduces image contrast due to the cumulative effect of background activity [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume $V$ represented as a discrete grid of voxels. In standard medical imaging contexts, this is often a numpy array of shape $(D_x, D_y, D_z)$ [S1, unofficial].
+*   **Output:** A 2D image $I$ of dimensions $(D_y, D_z)$ (assuming projection along the X-axis) [S1, unofficial].
+
+**Data Structures:**
+The input volume is stored as a 3D array where each element $V(x, y, z)$ holds a scalar intensity value. The output is a 2D accumulator array initialized to zero.
+
+**Algorithm Steps:**
+1.  Initialize a 2D output array `vr` with zeros, matching the dimensions of the volume perpendicular to the projection axis. For projection along the X-axis (first dimension), the shape is `(img_np.shape[1], img_np.shape[2])` [S1, unofficial].
+2.  Iterate through each slice index $i$ along the projection axis (X-axis) [S1, unofficial]:
+    $$ \text{for } i \in \text{range}(D_x): $$
+3.  Extract the 2D slice at index $i$:
+    $$ \text{slice}_i = V[i, :, :] $$
+4.  Add the slice values to the corresponding positions in the output accumulator:
+    $$ \text{vr}[y, z] \leftarrow \text{vr}[y, z] + \text{slice}_i[y, z] \quad \forall y \in [0, D_y), z \in [0, D_z) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def projection(volume):
+    """
+    Computes the orthographic projection (summation) of a 3D volume along the first axis.
+    
+    Args:
+        volume: numpy.ndarray of shape (D_x, D_y, D_z).
+        
+    Returns:
+        numpy.ndarray of shape (D_y, D_z) containing the summed intensities.
+    """
+    # Initialize output array with zeros matching the Y and Z dimensions
+    vr = np.zeros((volume.shape[1], volume.shape[2]))
+    
+    # Iterate through each slice along the X-axis (first dimension)
+    for i in range(volume.shape[0]):
+        # Extract the 2D slice at index i
+        img_slice = volume[i, :, :]
+        
+        # Add the slice to the accumulator
+        vr += img_slice
+        
+    return vr
+```
+
+**Parameters and Edge Cases:**
+*   **Axis Selection:** The projection direction is determined by which axis is iterated over. Summing along X produces a coronal-like view (if Y is vertical, Z is horizontal); summing along Y produces a sagittal-like view; summing along Z produces an axial-like view [S1, unofficial].
+*   **Precision:** Since the operation is a summation, the output values can exceed the range of the input voxel types (e.g., 8-bit or 16-bit). The accumulator should use a higher precision type (e.g., float32 or float64) to prevent overflow and maintain dynamic range [S1, unofficial].
+*   **Background:** Unlike compositing methods, there is no explicit background color or opacity model. The result is purely additive [S3, unofficial].
+
+## Subtopics
+
+### [Cylinder Projection](12798-cylinder-projection.md)
+A viewpoint-independent technique for visualizing 3D vector fields on surfaces, projecting vectors radially away from a rotational axis to preserve the z-component. It is distinct from scalar volume projection as it handles vector fields and specific rotational motions.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** $O(N)$, where $N$ is the total number of voxels in the volume. Each voxel is visited exactly once.
+*   **Memory:** $O(D_y \times D_z)$ for the output image, plus the input volume storage. No additional per-ray buffers are required.
+
+**Performance and Scaling:**
+*   The method is extremely fast and highly parallelizable, as each output pixel is independent of others. It scales linearly with volume size.
+*   Measured performance on standard medical CT volumes (e.g., 360x360x330) is instantaneous on modern CPUs [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement; computationally inexpensive; reduces image noise by averaging out high-frequency variations [S3, unofficial].
+*   **Limitations:** Produces images with inferior contrast compared to slice display and Maximum Intensity Projection [S3, unofficial]. It suffers from "cumulative background activity," where structures far from the viewing plane interfere with the assessment of closer structures, potentially obscuring lesions [S3, unofficial]. It is noisier than maximum activity projection in terms of structural clarity [S3, unofficial].
+
+## Background
+The projection method, specifically referred to as "summed reprojection" or "raw projection," has been used in nuclear medicine and CT imaging for decades. It is often contrasted with Maximum Activity Projection in clinical studies evaluating lesion contrast in SPECT and CT images [S3, unofficial]. The technique is a fundamental building block in volume rendering pipelines, often serving as a baseline or preprocessing step for more complex compositing methods.
+
+## Sources
+[S1] mneela/Volume-Rendering, https://github.com/mneela/Volume-Rendering, fetched 2026-10-27 (unofficial)
+[S2] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
+[S3] "Volume rendering in three-dimensional display of SPECT images", http://jnm.snmjournals.org/cgi/pmidlookup?view=long&pmid=2384811, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,111 @@
+# Fast Paint Texture
+
+Also called: Fast Paint Texturing, Hertzmann’s fast paint texture
+
+## Overview
+Fast Paint Texture is a stylization technique that simulates 3D paint undulations and overlap shadows on 2D strokes by generating a height field from stroke height maps and overlap counts, rendered via Phong shading, thereby avoiding the computational cost of 3D mesh generation [S1]. It sets itself apart from sibling methods like [Interactive Volume Illustration](5272-interactive-volume-illustration-hatching.md) by explicitly modeling paint layer accumulation through a 2D height field rather than relying solely on surface normals or simple shading [S1].
+
+## How it works
+**Inputs:** A list of strokes, where each stroke has an associated color, opacity map, and height map [S1]. The background is initialized to $(0,0,0,1)$ [S1].
+**Outputs:** A final RGB image with simulated paint depth and lighting [S1].
+
+**Data Structures:**
+1. **Color Buffer:** Stores the RGB components of the base stroke colors [S1]. Initialized to $(0,0,0)$.
+2. **Overlap Weight Buffer:** Stores the red component of the color buffer after the Overlap Pass, representing the count of overlapping strokes [S1]. Initialized to $0$.
+3. **Height Buffer:** Stores the red component of the color buffer after the Height Pass, representing the height map value of the last drawn stroke [S1]. Initialized to $0$.
+
+**Steps:**
+
+1. **Color Pass:** Draw each stroke colored and textured with an opacity map. Save the RGB components in the Color Buffer [S1]. Stroke color is set to $(1,1,1,\alpha)$ [S1]. Background is $(0,0,0,1)$ [S1]. This pass records the base color information [S1].
+
+2. **Overlap Pass:** Draw each stroke white and textured with the same opacity maps used in the Color Pass. Alpha blend with transparency $0 < \alpha \le 1$ to count overlapping strokes. Save the red component of the color buffer in the Overlap Weight Buffer [S1]. The red component $R_{i,k}$ at pixel $p_i$ after drawing stroke $k$ is calculated as:
+   $$R_{i,k} = \begin{cases} 0 & \text{if } k = 0 \\ \alpha + R_{i,k-1}(1 - \alpha) & \text{if } k > 0 \end{cases}$$
+   This compactly defines the count of overlapping strokes [S1].
+
+3. **Height Pass:** Draw each stroke white and textured with the height map paired with the opacity map. Each pixel $p_i$ contains the grey value (height value) of the last stroke drawn at $p_i$. Save the red component of the color buffer in the Height Buffer [S1]. This pass records the local texture height of the most recent stroke [S1].
+
+4. **Height Field Calculation:** For each pixel $p_i$, compute the final height value $h(p_i)$ as the sum of the stroke’s height map value at $p_i$ plus a weight representing the number of strokes overlapping at $p_i$ [S1].
+   $$h(p_i) = \text{height\_map}(p_i) + \text{overlap\_weight}(p_i)$$
+   Calculate per-pixel normals using directional derivatives of the height field [S1].
+
+5. **Final Rendering:** For each pixel $p_i$, combine the stroke’s diffuse color components (from Color Pass) and the surface normal (from Height Pass) using the Phong model to obtain the final RGB color value [S1]. The diffuse component for the red channel is:
+   $$C_i^R = I_a R_k^a O_i^R d_R + f_{att} I_p^R O_i^R d_R (N_i \cdot L) + \dots$$
+   Similar calculations are performed for Green and Blue channels [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fast_paint_texture(strokes, width, height):
+    # Initialize buffers
+    color_buffer = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
+    overlap_buffer = [[0.0 for _ in range(width)] for _ in range(height)]
+    height_buffer = [[0.0 for _ in range(width)] for _ in range(height)]
+
+    # Pass 1: Color Pass
+    for stroke in strokes:
+        for y in range(height):
+            for x in range(width):
+                if stroke.opacity_map[y, x] > 0:
+                    color_buffer[y][x] = (1.0, 1.0, 1.0)
+
+    # Pass 2: Overlap Pass
+    for stroke in strokes:
+        for y in range(height):
+            for x in range(width):
+                if stroke.opacity_map[y, x] > 0:
+                    alpha = stroke.alpha
+                    overlap_buffer[y][x] = alpha + overlap_buffer[y][x] * (1.0 - alpha)
+
+    # Pass 3: Height Pass
+    for stroke in strokes:
+        for y in range(height):
+            for x in range(width):
+                if stroke.opacity_map[y, x] > 0:
+                    height_buffer[y][x] = stroke.height_map[y, x]
+
+    # Height Field Calculation
+    final_height = [[height_buffer[y][x] + overlap_buffer[y][x] for x in range(width)] for y in range(height)]
+
+    # Compute per-pixel normals using directional derivatives [G]
+    normals = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
+    for y in range(1, height - 1):
+        for x in range(1, width - 1):
+            dx = final_height[y][x+1] - final_height[y][x-1]
+            dy = final_height[y+1][x] - final_height[y-1][x]
+            length = (dx*dx + dy*dy + 1.0)**0.5
+            normals[y][x] = (-dy/length, -dx/length, 1.0/length)
+
+    # Final Rendering with Phong shading [G]
+    final_image = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
+    for y in range(height):
+        for x in range(width):
+            base_color = color_buffer[y][x]
+            normal = normals[y][x]
+            Ia, ka, Ip, kd = 0.2, 0.5, 1.0, 0.8
+            light_dir = (0.0, 0.0, 1.0)
+            dot = normal[0]*light_dir[0] + normal[1]*light_dir[1] + normal[2]*light_dir[2]
+            factor = ka + kd * max(0.0, dot)
+            final_image[y][x] = (base_color[0]*factor, base_color[1]*factor, base_color[2]*factor)
+
+    return final_image
+```
+
+**Parameters:**
+*   **Alpha ($\alpha$):** Transparency value used in blending passes. Range: $0 < \alpha \le 1$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Stroke Orientation Approximation:** Bézier curves approximate, not interpolate, control points. The curve may not pass through control points B and C but is pulled in their direction. Curved strokes are only drawn where the underlying data attribute mapped to orientation varies rapidly [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of strokes and image resolution, as it requires three passes over the stroke list and one pass over the image for shading [G].
+*   **Memory Complexity:** Requires storage for three buffers (Color, Overlap, Height) of size proportional to the image resolution [G].
+*   **Strengths:** Avoids rendering expensive 3D mesh models of strokes while producing similar visual results (shadows/undulations) by using a 2D height field and lighting [S1].
+*   **Limitations:** Relies on the assumption that stroke overlap can be approximated by alpha blending, which may not perfectly represent physical paint accumulation in all cases [G].
+
+## Background
+Fast Paint Texture was introduced by Hertzmann in 2002 as a method to simulate the visual properties of paint on a canvas, specifically undulations and overlap shadows, without the computational overhead of 3D geometry [S1]. It is widely used in non-photorealistic volume rendering, particularly within the Visual Complexity (VC) algorithm, to create embossed strokes that enhance the perception of depth and texture in volumetric data [S1].
+
+## Sources
+[S1] Engaging viewers through nonphotorealistic visualizations, https://doi.org/10.1145/1274871.1274886, fetched 2026-10-28

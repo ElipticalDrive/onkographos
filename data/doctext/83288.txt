@@ -1,0 +1,1630 @@
+# splat
+
+This project is a Rust implementation of a Gaussian Splatting Viewer, inspired by the OpenGL shader code found [here](https://github.com/limacv/GaussianSplattingViewer).
+
+
+![splat renderer screenshot](/notes/screenshot.png)
+
+
+The project was first prototyped in a Jupyter notebook to validate the approach and algorithms. After the prototype was successful, the project was then implemented in Rust using the `euc` software rendering crate.
+
+## Getting Started
+
+To get a local copy up and running, follow these simple steps.
+
+### Prerequisites
+
+- Rust: You can download Rust from [the official website](https://www.rust-lang.org/tools/install).
+- Some pre-trained 3D Gaussian splat models. Some examples:
+    - https://media.reshot.ai/models/plush_sledge/output.zip
+    - https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/pretrained/models.zip  - 13GB
+
+### Installation
+
+1. Clone the repo
+   ```sh
+   git clone https://github.com/your_username_/Project-Name.git
+   ```
+2. Build and Run the project
+    ```sh
+    cargo run --release splat
+    ```
+
+### License
+Distributed under the MIT License. See LICENSE for more information.
+
+### notes/util.py
+```
+# Adapted from the version at https://github.com/limacv/GaussianSplattingViewer/blob/main/util.py
+from OpenGL.GL import *
+import OpenGL.GL.shaders as shaders
+import numpy as np
+import glm
+import ctypes
+
+class Camera:
+    def __init__(self, h, w, position=(0.0, 0.0, 3.0), target=(0.0, 0.0, 0.0)):
+        self.znear = 0.01
+        self.zfar = 100
+        self.h = h
+        self.w = w
+        self.fovy = np.pi / 2.0
+        self.position = np.array(position)
+        self.target = np.array(target)
+        self.up = np.array([0.0, -1.0, 0.0])
+        self.yaw = -np.pi / 2
+        self.pitch = 0
+
+        self.is_pose_dirty = True
+        self.is_intrin_dirty = True
+
+        self.last_x = 640
+        self.last_y = 360
+        self.first_mouse = True
+
+        self.is_leftmouse_pressed = False
+        self.is_rightmouse_pressed = False
+
+        self.rot_sensitivity = 0.02
+        self.trans_sensitivity = 0.01
+        self.zoom_sensitivity = 0.08
+        self.roll_sensitivity = 0.03
+
+    def _global_rot_mat(self):
+        x = np.array([1, 0, 0])
+        z = np.cross(x, self.up)
+        z = z / np.linalg.norm(z)
+        x = np.cross(self.up, z)
+        return np.stack([x, self.up, z], axis=-1)
+
+    def get_view_matrix(self):
+        return np.array(glm.lookAt(self.position, self.target, self.up))
+
+    def get_projection_matrix(self):
+        project_mat = glm.perspective(
+            self.fovy,
+            self.w / self.h,
+            self.znear,
+            self.zfar
+        )
+        return np.array(project_mat).astype(np.float32)
+
+    def get_htanfovxy_focal(self):
+        htany = np.tan(self.fovy / 2)
+        htanx = htany / self.h * self.w
+        focal = self.h / (2 * htany)
+        return [htanx, htany, focal]
+
+    def get_focal(self):
+        return self.h / (2 * np.tan(self.fovy / 2))
+
+    def get_htanfovxy(self):
+        htany = np.tan(self.fovy / 2)
+        htanx = htany / self.h * self.w
+        return [htanx, htany]
+
+    def world_to_cam(self, points):
+        view_mat = self.get_view_matrix()
+
+        # if points is 3xN, add a fourth row of ones
+        if points.shape[0] == 3:
+            # If there is only one point, just add a fourth vallue of 1
+            if len(points.shape) == 1:
+                points = np.append(points, 1.0)
+            else:
+                points = np.concatenate([points, np.ones((1, points.shape[1]))], axis=0)
+
+        return np.matmul(view_mat, points)
+
+    def cam_to_world(self, points):
+        view_mat = self.get_view_matrix()
+        return np.matmul(view_mat.T, points)
+
+    def cam_to_ndc(self, points):
+        proj_mat = self.get_projection_matrix()
+        points_ndc = proj_mat @ points
+        if len(points_ndc.shape) == 1:
+            points_ndc = points_ndc / points_ndc[3]
+        else:
+            points_ndc = points_ndc / points_ndc[3, :]
+        return points_ndc
+
+    def ndc_to_cam(self, points):
+        proj_mat = self.get_projection_matrix()
+        return np.linalg.inv(proj_mat) @ points
+
+    def ndc_to_pixel(self, points_ndc, screen_width=None, screen_height=None):
+        # Use camera plane size if screen size not specified
+        if screen_width is None:
+            screen_width = self.w
+        if screen_height is None:
+            screen_height = self.h
+
+        width_half = screen_width / 2
+        height_half = screen_height / 2
+
+        if len(points_ndc.shape) == 1:
+            # It is a single point, so just return the pixel coordinates
+            return np.array([(points_ndc[0] + 1) * width_half, (1.0 - points_ndc[1]) * height_half])
+        else:
+            return np.array([(point[0] * width_half + width_half, - point[1] * height_half + height_half)
+                for point in points_ndc])
+
+    def update_resolution(self, height, width):
+        self.h = height
+        self.w = width
+        self.is_intrin_dirty = True
+```
+
+### notes/util_gau.py
+```
+# Adapted from the version at https://github.com/limacv/GaussianSplattingViewer/blob/main/util_gau.py
+import numpy as np
+from plyfile import PlyData
+from dataclasses import dataclass
+
+@dataclass
+class GaussianData:
+    xyz: np.ndarray
+    rot: np.ndarray
+    scale: np.ndarray
+    opacity: np.ndarray
+    sh: np.ndarray
+    def flat(self) -> np.ndarray:
+        ret = np.concatenate([self.xyz, self.rot, self.scale, self.opacity, self.sh], axis=-1)
+        return np.ascontiguousarray(ret)
+
+    def __len__(self):
+        return len(self.xyz)
+
+    @property
+    def sh_dim(self):
+        return self.sh.shape[-1]
+
+
+def naive_gaussian():
+    gau_xyz = np.array([
+        0, 0, 0,
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+    ]).astype(np.float32).reshape(-1, 3)
+    gau_rot = np.array([
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+        1, 0, 0, 0,
+        1, 0, 0, 0
+    ]).astype(np.float32).reshape(-1, 4)
+    gau_s = np.array([
+        0.03, 0.03, 0.03,
+        0.2, 0.03, 0.03,
+        0.03, 0.2, 0.03,
+        0.03, 0.03, 0.2
+    ]).astype(np.float32).reshape(-1, 3)
+    gau_c = np.array([
+        1, 0, 1,
+        1, 0, 0,
+        0, 1, 0,
+        0, 0, 1,
+    ]).astype(np.float32).reshape(-1, 3)
+    gau_c = (gau_c - 0.5) / 0.28209
+    gau_a = np.array([
+        1, 1, 1, 1
+    ]).astype(np.float32).reshape(-1, 1)
+    return GaussianData(
+        gau_xyz,
+        gau_rot,
+        gau_s,
+        gau_a,
+        gau_c
+    )
+
+
+def load_ply(path):
+    max_sh_degree = 3
+    plydata = PlyData.read(path)
+    xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
+                    np.asarray(plydata.elements[0]["y"]),
+                    np.asarray(plydata.elements[0]["z"])),  axis=1)
+    opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+    features_dc = np.zeros((xyz.shape[0], 3, 1))
+    features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+    features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+    features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+    extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
+    extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
+    assert len(extra_f_names)==3 * (max_sh_degree + 1) ** 2 - 3
+    features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
+    for idx, attr_name in enumerate(extra_f_names):
+        features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
+    # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+    features_extra = features_extra.reshape((features_extra.shape[0], 3, (max_sh_degree + 1) ** 2 - 1))
+    features_extra = np.transpose(features_extra, [0, 2, 1])
+
+    scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
+    scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
+    scales = np.zeros((xyz.shape[0], len(scale_names)))
+    for idx, attr_name in enumerate(scale_names):
+        scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+    rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
+    rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
+    rots = np.zeros((xyz.shape[0], len(rot_names)))
+    for idx, attr_name in enumerate(rot_names):
+        rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+    # pass activate function
+    xyz = xyz.astype(np.float32)
+    rots = rots / np.linalg.norm(rots, axis=-1, keepdims=True)
+    rots = rots.astype(np.float32)
+    scales = np.exp(scales)
+    scales = scales.astype(np.float32)
+    opacities = 1/(1 + np.exp(- opacities))  # sigmoid
+    opacities = opacities.astype(np.float32)
+    shs = np.concatenate([features_dc.reshape(-1, 3),
+                        features_extra.reshape(len(features_dc), -1)], axis=-1).astype(np.float32)
+    shs = shs.astype(np.float32)
+    return GaussianData(xyz, rots, scales, opacities, shs)
+
+if __name__ == "__main__":
+    gs = load_ply("C:\\Users\\MSI_NB\\Downloads\\viewers\\models\\train\\point_cloud\\iteration_7000\\point_cloud.ply")
+    a = gs.flat()
+    print(a.shape)
+```
+
+### src/camera.rs
+```
+use nalgebra as na;
+use nalgebra_glm as glm;
+#[derive(Clone, Debug)]
+pub struct Camera {
+    znear: f32,
+    zfar: f32,
+    pub h: f32,
+    pub w: f32,
+    fovy: f32,
+    pub position: na::Vector3<f32>,
+    target: na::Vector3<f32>,
+    up: na::Vector3<f32>,
+    yaw: f32,
+    pitch: f32,
+    pub is_pose_dirty: bool,
+    is_intrin_dirty: bool,
+    view_matrix: na::Matrix4<f32>,
+    projection_matrix: na::Matrix4<f32>,
+}
+
+impl Camera {
+    pub fn new(h: f32, w: f32, start_position: Option<na::Vector3<f32>>) -> Self {
+        Self {
+            znear: 0.01,
+            zfar: 100.0,
+            h,
+            w,
+            fovy: std::f32::consts::PI / 2.0,
+            position: start_position.unwrap_or(na::Vector3::new(0.0, 0.0, 3.0)),
+            target: na::Vector3::new(0.0, 0.0, 0.0),
+            up: na::Vector3::new(0.0, -1.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            is_pose_dirty: true,
+            is_intrin_dirty: true,
+            view_matrix: na::Matrix4::identity(),
+            projection_matrix: na::Matrix4::identity(),
+        }
+    }
+
+    pub fn compute_matrices(&mut self)
+    {
+        // Ref: https://asliceofrendering.com/camera/2019/11/30/ArcballCamera/
+        // Get position and target as homogeneous coordinates
+        let position = glm::vec4(self.position.x, self.position.y, self.position.z, 1.0);
+        let pivot = glm::vec4(self.target.x, self.target.y, self.target.z, 1.0);
+
+        // Extra step to handle the problem when the camera direction is the same as the up vector
+        let viewdir = glm::normalize(&(self.position - &self.target));
+        let cos_angle = viewdir.dot(&self.up);
+        if cos_angle * self.pitch.signum() > 0.99f32
+        {
+            self.pitch = 0.0;
+        }
+
+        // step 2: Rotate the camera around the pivot point on the first axis.
+        let rotation_x = glm::rotation(self.yaw, &self.up);
+        let position = (rotation_x * (position - pivot)) + pivot;
+
+        // step 3: Rotate the camera around the pivot point on the second axis.
+        let right = glm::cross(&self.up, &self.position);
+        let rotation_y = glm::rotation(self.pitch, &right);
+        let final_position = (rotation_y * (position - pivot)) + pivot;
+
+        self.view_matrix = glm::look_at(&final_position.xyz(), &self.target, &self.up);
+
+        self.projection_matrix = glm::perspective(self.w / self.h, self.fovy, self.znear, self.zfar);
+    }
+
+    pub fn get_view_matrix(&self) -> &na::Matrix4<f32> {
+        return &self.view_matrix;
+    }
+
+    pub fn update_resolution(&mut self, height: f32, width: f32) {
+        self.h = height;
+        self.w = width;
+        self.is_intrin_dirty = true;
+    }
+
+    pub fn get_project_matrix(&self) -> &na::Matrix4<f32> {
+        return &self.projection_matrix;
+    }
+
+    pub fn get_htanfovxy_focal(&self) -> na::Vector3<f32> {
+        let htany = (self.fovy / 2.0).tan();
+        let htanx = htany / self.h * self.w;
+        let focal = self.h / (2.0 * htany);
+        na::Vector3::new(htanx, htany, focal)
+    }
+
+    pub fn get_focal(&self) -> f32 {
+        self.h / (2.0 * (self.fovy / 2.0).tan())
+    }
+    pub fn update_pitch_angle(&mut self, delta: f32) {
+        self.pitch += delta;
+        self.is_pose_dirty = true;
+    }
+    pub fn update_yaw_angle(&mut self, delta: f32) {
+        self.yaw += delta;
+        self.is_pose_dirty = true;
+    }
+
+    pub fn update_camera_pose(&mut self) {
+        // let camera_x = na::Vector3::x_axis();    // Pitch axis
+        // let camera_y = na::Vector3::y_axis();    // Yaw axis
+
+        // // Camera's Z axis is facing in the -self.position direction in the world frame
+        // let transform_c2w = na::Rotation::<f32, 3>::rotation_between(&-self.position, &na::Vector3::z()).unwrap_or(na::Rotation3::identity());
+        // let pitch_axis = transform_c2w * camera_x;
+        // let yaw_axis = transform_c2w * camera_y;
+
+        // let pitch_rotation = na::Rotation3::from_axis_angle(&pitch_axis, self.pitch);
+        // let yaw_rotation = na::Rotation3::from_axis_angle(&yaw_axis, self.yaw);
+
+        // let rotation = yaw_rotation * pitch_rotation;
+
+        // self.position = rotation * self.position;
+
+        // self.yaw = 0.0;
+        // self.pitch =0.0;
+        self.compute_matrices();
+        // println!("positon: {}", self.position);
+        // println!("view_matrix: {}", self.view_matrix.fixed_slice::<1,4>(0,0));
+
+        self.is_pose_dirty = false;
+    }
+}
+```
+
+### src/gaussians.rs
+```
+use std::ops::MulAssign;
+
+use nalgebra as na;
+use na::{UnitQuaternion, Vector3, Matrix3, Vector4, Vector2, OMatrix, VectorView};
+use ply_rs::ply::{Property, PropertyAccess};
+
+use crate::camera::Camera;
+
+type Matrix48xX<T> = OMatrix<T, na::U48, na::Dyn>;
+
+const SH_C0: f32 = 0.28209479177387814f32;
+const SH_C1: f32 = 0.4886025119029199f32;
+
+const SH_C2_0: f32 = 1.0925484305920792f32;
+const SH_C2_1: f32 = -1.0925484305920792f32;
+const SH_C2_2: f32 = 0.31539156525252005f32;
+const SH_C2_3: f32 = -1.0925484305920792f32;
+const SH_C2_4: f32 = 0.5462742152960396f32;
+
+const SH_C3_0: f32 = -0.5900435899266435f32;
+const SH_C3_1: f32 = 2.890611442640554f32;
+const SH_C3_2: f32 = -0.4570457994644658f32;
+const SH_C3_3: f32 = 0.3731763325901154f32;
+const SH_C3_4: f32 = -0.4570457994644658f32;
+const SH_C3_5: f32 = 1.445305721320277f32;
+const SH_C3_6: f32 = -0.5900435899266435f32;
+
+const HALF: na::Vector3<f32> = na::Vector3::new(0.5, 0.5, 0.5);
+
+#[derive(Clone, Debug)]
+pub struct Gaussian {
+    pub position: na::Vector3<f32>,  // x, y, z
+    pub scale: na::Vector3<f32>,    // scale_0, scale_1, scale_2
+    pub opacity: f32,               // opacity
+    pub rotation: na::Quaternion<f32>,  // rot_0, rot_1, rot_2, rot_3
+    pub sh: na::SVector<f32, 48>,   // f_dc_0..3 and f_rest_0 ... f_rest_44
+    pub cov3d: na::Matrix3<f32>,
+}
+
+#[inline]
+pub fn eval_spherical_harmonics(sh: &VectorView<f32, na::U48>, sh_dim: usize, dir: &Vector3<f32>) -> Vector3<f32>
+{
+    let c0 = sh.fixed_rows::<3>(0);
+    let mut color = SH_C0 * c0;
+
+    if sh_dim > 3
+    {
+        // Add the first order spherical harmonics
+        let c1 = sh.fixed_view::<3,1>(3,0);
+        let c2 = sh.fixed_view::<3,1>(6,0);
+        let c3 = sh.fixed_view::<3,1>(9,0);
+
+        // Get a 3x3 view into the elements 3..12 of sh
+
+        let x = dir[0];
+        let y = dir[1];
+        let z = dir[2];
+
+        color = color - SH_C1 * y * c1 + SH_C1 * z * c2 - SH_C1 * x * c3;
+
+        if sh_dim > 12
+        {
+            let c4 = sh.fixed_view::<3,1>(12,0);
+            let c5 = sh.fixed_view::<3,1>(15,0);
+            let c6 = sh.fixed_view::<3,1>(18,0);
+            let c7 = sh.fixed_view::<3,1>(21,0);
+            let c8 = sh.fixed_view::<3,1>(24,0);
+
+            let (xx, yy, zz) = (x * x, y * y, z * z);
+            let (xy, yz, xz) = (x * y, y * z, x * z);
+            color = color +	SH_C2_0 * xy * c4 +
+            SH_C2_1 * yz * c5 +
+            SH_C2_2 * (2.0f32 * zz - xx - yy) * c6 +
+            SH_C2_3 * xz * c7 +
+            SH_C2_4 * (xx - yy) * c8;
+
+            if sh_dim > 27 {
+                let c9 =  sh.fixed_view::<3,1>(27,0);
+                let c10 = sh.fixed_view::<3,1>(30, 0);
+                let c11 = sh.fixed_view::<3,1>(33, 0);
+                let c12 = sh.fixed_view::<3,1>(36, 0);
+                let c13 = sh.fixed_view::<3,1>(39, 0);
+                let c14 = sh.fixed_view::<3,1>(42, 0);
+                let c15 = sh.fixed_view::<3,1>(45, 0);
+
+                color = color +
+                SH_C3_0 * y * (3.0f32 * xx - yy) * c9 +
+                SH_C3_1 * xy * z * c10 +
+                SH_C3_2 * y * (4.0f32 * zz - xx - yy) * c11 +
+                SH_C3_3 * z * (2.0f32 * zz - 3.0f32 * xx - 3.0f32 * yy) * c12 +
+                SH_C3_4 * x * (4.0f32 * zz - xx - yy) * c13 +
+                SH_C3_5 * z * (xx - yy) * c14 +
+                SH_C3_6 * x * (xx - 3.0f32 * yy) * c15;
+            }
+        }
+    }
+    color += HALF;
+    color
+}
+impl Gaussian {
+    pub fn compute_cov3d(&mut self)
+    {
+        let rotation = UnitQuaternion::from_quaternion(self.rotation).to_rotation_matrix();        // square the scales and make a diagonal matrix
+        // square the scales and make a diagonal matrix
+        let scale = na::Matrix3::new(
+            self.scale[0] * self.scale[0], 0.0, 0.0,
+            0.0, self.scale[1] * self.scale[1], 0.0,
+            0.0, 0.0, self.scale[2] * self.scale[2],
+        );
+        // compute the covariance matrix
+        let covariance = rotation * scale * rotation.transpose();
+        self.cov3d = covariance;
+    }
+    pub fn project_cov3d_to_screen(&self, camera: &Camera) -> na::Matrix2<f32>
+    {
+        let viewmatrix = camera.get_view_matrix();
+
+        // Project the Gaussian center to the camera space
+        let pos_w = na::Vector4::new(self.position[0], self.position[1], self.position[2], 1.0);
+
+        let pos_cam = viewmatrix * pos_w;
+
+        // Compute the focal length and the tangent of the fov
+        let htanfovxy = camera.get_htanfovxy_focal();
+        let tan_fovx = htanfovxy[0];
+        let tan_fovy = htanfovxy[1];
+        let focal = htanfovxy[2];
+        let focal_x = focal;
+        let focal_y = focal;
+
+        // Compute the tangent of the Gaussian center
+        let mut t = pos_cam.clone();
+        let limx = 1.3 * tan_fovx;
+        let limy = 1.3 * tan_fovy;
+
+        let txtz = pos_cam.x/pos_cam.z;
+        let tytz = pos_cam.y/pos_cam.z;
+
+        t.x = limx.min((-limx).max(txtz)) * pos_cam.z;
+        t.y = limy.min((-limy).max(tytz)) * pos_cam.z;
+
+        // Compute the Jacobian
+        let J = na::Matrix3::new(
+            focal_x / t.z, 0.0, -(focal_x * t.x) / (t.z * t.z),
+            0.0, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+            0.0, 0.0, 0.0
+        );
+
+        let W = viewmatrix.fixed_view::<3, 3>(0, 0).transpose();
+        let T = W * J;
+        let mut cov = T.transpose() * self.cov3d.transpose() * T;
+
+        // Apply low-pass filter: every Gaussian should be at least
+        // one pixel wide/high. Discard 3rd row and column.
+        let mut cov2d = cov.fixed_view_mut::<2,2>(0,0);
+        cov2d[(0, 0)] += 0.01;
+        cov2d[(1, 1)] += 0.01;
+
+        // Convert into vector to return, along with position in screen space
+        cov2d.into()
+    }
+
+    pub fn color(&self, sh_dim: usize, dir: &na::Vector3<f32>) -> (na::Vector3<f32>, f32)
+    {
+        // Compute color from the spherical harmonics for the given direction
+        // The coefficients are laid out as:
+        // C0_R, C0_B, C0_G, C1_R, C1_B, C1_G ...
+        let color = eval_spherical_harmonics(&self.sh.as_view(), sh_dim, dir);
+        (color, self.opacity)
+    }
+
+    pub fn projected_covariance_of_ellipsoid(&self, camera: &Camera) -> Matrix3<f32> {
+        let view_matrix = camera.get_view_matrix(); // world -> camera converter
+        let camera_matrix = view_matrix.try_inverse().unwrap();
+        let camera_matrix = camera_matrix.fixed_view::<3,3>(0,0); // camera -> world converter
+
+        let mut transform = Matrix3::from(UnitQuaternion::from_quaternion(self.rotation).to_rotation_matrix());
+        transform.row_mut(0).mul_assign(self.scale[0]);
+        transform.row_mut(1).mul_assign(self.scale[1]);
+        transform.row_mut(2).mul_assign(self.scale[2]);
+
+        let translation = Vector4::new(self.position[0], self.position[1], self.position[2], 1.0);
+        // 3D Covariance
+        let mut view_pos = view_matrix * translation;
+        view_pos[0] = (view_pos[0] / view_pos[2]).clamp(-1.0, 1.0) * view_pos[2];
+        view_pos[1] = (view_pos[1] / view_pos[2]).clamp(-1.0, 1.0) * view_pos[2];
+
+        let J = Matrix3::<f32>::new(
+            1.0 / view_pos[2], 0.0, -view_pos[0] / (view_pos[2] * view_pos[2]),
+            0.0, 1.0 / view_pos[2], -view_pos[1] / (view_pos[2] * view_pos[2]),
+            0.0, 0.0, 0.0,
+        );
+        let T = transform.transpose() * camera_matrix * J;
+        let covariance_matrix = T.transpose() * T;
+
+        return covariance_matrix;
+    }
+
+    pub fn extract_scale_of_covariance(&self, cov: &Matrix3<f32>) -> Vector2<f32>
+    {
+        let a = (cov[(0,0)] - cov[(1,1)]) * (cov[(0,0)] - cov[(1,1)]);
+        let b = (a + 4.0 * cov[(0,1)] * cov[(0,1)]).sqrt();
+        let semi_major_axis = ((cov[(0,0)] + cov[(1,1)] + b) * 0.5).sqrt();
+        let semi_minor_axis = ((cov[(0,0)] + cov[(1,1)] - b) * 0.5).sqrt();
+        return Vector2::new(semi_major_axis, semi_minor_axis);
+    }
+
+    pub fn extract_rotation_of_ellipse(&self, cov: &Matrix3<f32>) -> Vector2<f32> {
+        /*
+            phi = atan(2.0 * cov[(0,1)] / (cov[(0,0)] - cov[(1,1)])) / 2
+            k = cos(phi)
+            j = sin(phi)
+            Insert angle phi into cos() and then apply the half-angle identity to get:
+        */
+        let a = (cov[(0,0)] - cov[(1,1)]) * (cov[(0,0)] - cov[(1,1)]);
+        let b = a + 4.0 * cov[(0,1)] * cov[(0,1)];
+        let c = 0.5 * (a / b).sqrt();
+        let mut j = (0.5 - c).sqrt();
+        let mut k = -(0.5 + c).sqrt() * (cov[(0,1)]).signum() * (cov[(0,0)] - cov[(1,1)]).signum();
+        if cov[(0,1)] < 0.0 || cov[(0,0)] - cov[(1,1)] < 0.0 {
+            k = -k;
+            j = -j;
+        }
+        if cov[(0,0)] - cov[(1,1)] < 0.0 {
+            let t = j;
+            j = -k;
+            k = t;
+        }
+        return Vector2::new(j, k);
+    }
+    pub fn extract_translation_of_ellipse(&self, cov: &Matrix3<f32>) -> Vector2<f32> {
+        /*
+            The center of the ellipse is at the extremum (minimum / maximum) of the implicit curve.
+            So, take the partial derivative in x and y, which is: (2.0 * cov[(0,0)] * x + M.x.y * y + cov[(0,2)], M.x.y * x + 2.0 * cov[(1,1)] * y + cov[(1,2)])
+            And the roots of that partial derivative are the position of the extremum, thus the translation of the ellipse.
+        */
+        let discriminant = cov[(0,0)] * cov[(1,1)] - cov[(0,1)] * cov[(0,1)];
+        let inverse_discriminant = 1.0 / discriminant;
+        return Vector2::new(
+            cov[(0,1)] * cov[(1,2)] - cov[(1,1)] * cov[(0,2)],
+            cov[(0,1)] * cov[(0,2)] - cov[(0,0)] * cov[(1,2)],
+        ) * inverse_discriminant;
+    }
+}
+
+impl PropertyAccess for Gaussian {
+    fn new() -> Self {
+        Self {
+            position: na::Vector3::new(0.0, 0.0, 0.0),
+            scale: na::Vector3::new(0.0, 0.0, 0.0),
+            opacity: 0.0,
+            rotation: na::Quaternion::identity(),
+            sh: na::SVector::<f32, 48>::zeros(),
+            cov3d: na::Matrix3::<f32>::zeros(),
+        }
+    }
+    // Set properties from the PLY file
+    fn set_property(&mut self, property_name: String, property: Property)
+    {
+        //Assign values based on property name
+        match (property_name.as_ref(), property) {
+            ("x", Property::Float(v)) => self.position[0] = v,
+            ("y", Property::Float(v)) => self.position[1] = v,
+            ("z", Property::Float(v)) => self.position[2] = v,
+            ("scale_0", Property::Float(v)) => self.scale[0] = v.exp(),
+            ("scale_1", Property::Float(v)) => self.scale[1] = v.exp(),
+            ("scale_2", Property::Float(v)) => self.scale[2] = v.exp(),
+            ("opacity", Property::Float(v)) => self.opacity = 1.0 / (1.0 + (-v).exp()),
+            ("rot_0", Property::Float(v)) => self.rotation[3] = v,
+            ("rot_1", Property::Float(v)) => self.rotation[0] = v,
+            ("rot_2", Property::Float(v)) => self.rotation[1] = v,
+            ("rot_3", Property::Float(v)) => self.rotation[2] = v,
+            ("f_dc_0", Property::Float(v)) => self.sh[0] = v,
+            ("f_dc_1", Property::Float(v)) => self.sh[1] = v,
+            ("f_dc_2", Property::Float(v)) => self.sh[2] = v,
+            (s, Property::Float(v)) if s.starts_with("f_rest_") => {
+                let index = s[7..].parse::<usize>().unwrap();
+                self.sh[3+index] = v;
+            }
+            _ => {}
+        }
+    }
+}
+
+// Convert positions into a 4xN with the last row being 1.0
+pub fn get_positions(gaussians: &Vec<Gaussian>) -> na::Matrix4xX<f32> {
+    let mut positions = na::Matrix4xX::zeros(gaussians.len());
+    for (i, g) in gaussians.iter().enumerate() {
+        positions[(0, i)] = g.position[0];
+        positions[(1, i)] = g.position[1];
+        positions[(2, i)] = g.position[2];
+        positions[(3, i)] = 1.0;
+    }
+    positions
+}
+
+pub fn sort_gaussians(gaussians: &Vec<Gaussian>, view: &na::Matrix4<f32>) -> Vec<usize> {
+    // Project positions into the camera space
+    let positions = view * get_positions(gaussians);
+
+    // Sort by depth and get indices of columns
+    let mut indices: Vec<usize> = (0..gaussians.len()).collect();
+    indices.sort_by(|a, b| positions[(2, *a)].partial_cmp(&positions[(2, *b)]).unwrap_or(std::cmp::Ordering::Equal));
+
+    indices
+}
+
+pub fn sort_gaussians_by_depth(positions_w: &na::Matrix4xX<f32>, view: &na::Matrix4<f32>) -> Vec<usize> {
+    // Project positions into the camera space
+    let positions = view * positions_w;
+
+    // Sort by depth and get indices of columns
+    let mut indices: Vec<usize> = (0..positions_w.shape().1).collect();
+    indices.sort_by(|a, b| positions[(2, *a)].partial_cmp(&positions[(2, *b)]).unwrap_or(std::cmp::Ordering::Equal));
+
+    indices
+}
+
+pub fn naive_gaussians() -> Vec<Gaussian>
+{
+    // Generates 4 gaussians used for testing
+    let mut output = Vec::new();
+
+    let mut g = Gaussian::new();
+    g.position = Vector3::new(0.0, 0.0, 0.0);
+    g.scale = Vector3::new(0.03, 0.03, 0.03);
+    g.opacity = 1.0;
+    g.rotation = na::Quaternion::new(1.0, 0.0, 0.0, 0.0);
+    let mut color = Vector3::new(1.0, 0.0, 1.0);
+    color = (color - HALF) / 0.28209;
+    g.sh[0] = color[0];
+    g.sh[1] = color[1];
+    g.sh[2] = color[2];
+    output.push(g);
+
+    let mut g = Gaussian::new();
+    g.position = Vector3::new(1.0, 0.0, 0.0);
+    g.scale = Vector3::new(0.2, 0.03, 0.03,);
+    g.opacity = 1.0;
+    g.rotation = na::Quaternion::new(1.0, 0.0, 0.0, 0.0);
+    let mut color = Vector3::new(1.0, 0.0, 0.0);
+    color = (color - HALF) / 0.28209;
+    g.sh[0] = color[0];
+    g.sh[1] = color[1];
+    g.sh[2] = color[2];
+    output.push(g);
+
+    let mut g = Gaussian::new();
+    g.position = Vector3::new(0.0, 1.0, 0.0);
+    g.scale = Vector3::new(0.03, 0.2, 0.03);
+    g.opacity = 1.0;
+    g.rotation = na::Quaternion::new(1.0, 0.0, 0.0, 0.0);
+    let mut color = Vector3::new(0.0, 1.0, 0.0);
+    color = (color - HALF) / 0.28209;
+    g.sh[0] = color[0];
+    g.sh[1] = color[1];
+    g.sh[2] = color[2];
+    output.push(g);
+
+    let mut g = Gaussian::new();
+    g.position = Vector3::new(0.0, 0.0, 1.0);
+    g.scale = Vector3::new(0.03, 0.03, 0.2);
+    g.opacity = 1.0;
+    g.rotation = na::Quaternion::new(1.0, 0.0, 0.0, 0.0);
+    let mut color = Vector3::new(0.0, 0.0, 1.0);
+    color = (color - HALF) / 0.28209;
+    g.sh[0] = color[0];
+    g.sh[1] = color[1];
+    g.sh[2] = color[2];
+    output.push(g);
+
+    output
+
+}
+pub fn load_from_ply(filename: &str) -> Vec<Gaussian>
+{
+    let mut gaussians = Vec::new();
+    let file = std::fs::File::open(filename).unwrap();
+    let mut file = std::io::BufReader::new(file);
+    let gaus_parser = ply_rs::parser::Parser::<Gaussian>::new();
+    let header = gaus_parser.read_header(&mut file).unwrap();
+
+    // Depending on the header, read the data into our structs..
+    for (_ignore_key, element) in &header.elements {
+        // we could also just parse them in sequence, but the file format might change
+        match element.name.as_ref() {
+            "vertex" => {
+                gaussians = gaus_parser.read_payload_for_element(&mut file, &element, &header).unwrap();
+            },
+            _ => panic!("Unexpected element!"),
+        }
+    }
+
+    // Find average position of all gaussians and subtract it from all positions
+    let mut avg_pos = Vector3::new(0.0, 0.0, 0.0);
+    for g in gaussians.iter() {
+        avg_pos += g.position;
+    }
+    avg_pos /= gaussians.len() as f32;
+    for g in gaussians.iter_mut() {
+        g.position -= avg_pos;
+    }
+    gaussians
+
+}
+
+
+pub struct GaussianList {
+    pub positions: na::Matrix4xX<f32>,
+    pub scales: na::Matrix3xX<f32>,
+    pub opacities: na::DVector<f32>,
+    pub rotations: na::Matrix4xX<f32>,
+    pub sh: Matrix48xX<f32>,
+    pub num_gaussians: usize,
+    cov3d: na::Matrix3xX<f32>,
+}
+
+impl GaussianList{
+    pub fn from_vec(gaussians: Vec<Gaussian>) -> Self
+    {
+        let num_gaussians = gaussians.len();
+        // Make position 4D by adding a 1.0 to the end of each position vector
+        let positions = na::Matrix4xX::from_iterator(num_gaussians, gaussians.iter().flat_map(|g| g.position.iter().cloned().chain([1.0])));
+        let scales = na::Matrix3xX::from_iterator(num_gaussians, gaussians.iter().flat_map(|g| g.scale.iter().cloned()));
+        let opacities = na::DVector::from_iterator(num_gaussians, gaussians.iter().map(|g| g.opacity));
+        let rotations = na::Matrix4xX::from_iterator(num_gaussians, gaussians.iter().flat_map(|g| g.rotation.as_vector().iter().cloned()));
+        let sh = Matrix48xX::from_iterator(num_gaussians, gaussians.iter().flat_map(|g| g.sh.iter().cloned()));
+        let cov3d = na::Matrix3xX::zeros(num_gaussians*3);
+        let mut out = Self {
+            positions,
+            scales,
+            opacities,
+            rotations,
+            sh,
+            num_gaussians,
+            cov3d,
+        };
+        out.compute_cov3d();
+        out
+    }
+
+    pub fn naive_gaussians() -> Self {
+        let gaussians = naive_gaussians();
+        Self::from_vec(gaussians)
+    }
+    pub fn compute_cov3d(&mut self)
+    {
+        // Iterate over all gaussians and compute the covariance matrix
+        for i in 0..self.num_gaussians
+        {
+            let rotation = UnitQuaternion::from_quaternion(na::Quaternion::from_vector(self.rotations.column(i).into())).to_rotation_matrix();
+            // square the scales and make a diagonal matrix
+            let scale = na::Matrix3::new(
+                self.scales[(0, i)] * self.scales[(0, i)], 0.0, 0.0,
+                0.0, self.scales[(1, i)] * self.scales[(1, i)], 0.0,
+                0.0, 0.0, self.scales[(2, i)] * self.scales[(2, i)],
+            );
+            // compute the covariance matrix
+            let covariance = rotation * scale * rotation.transpose();
+            self.cov3d.fixed_view_mut::<3,3>(0, i*3).copy_from(&covariance);
+        }
+    }
+
+    pub fn sort(&self, camera: &Camera) -> Vec<usize>
+    {
+        // Converts positions to camera space and sorts by depth
+        let positions = camera.get_view_matrix() * &self.positions;
+        let mut indices: Vec<usize> = (0..self.num_gaussians).collect();
+        indices.sort_by(|a, b| positions[(2, *a)].partial_cmp(&positions[(2, *b)]).unwrap());
+        indices
+    }
+
+    pub fn project_cov3d_to_screen(&self, idx: usize, camera: &Camera) -> na::Matrix2<f32>
+    {
+        let position = self.positions.column(idx);
+        let viewmatrix = camera.get_view_matrix();
+
+        // Project the Gaussian center to the camera space
+        let pos_w = na::Vector4::new(position[0], position[1], position[2], 1.0);
+
+        let pos_cam = viewmatrix * pos_w;
+
+        // Compute the focal length and the tangent of the fov
+        let htanfovxy = camera.get_htanfovxy_focal();
+        let tan_fovx = htanfovxy[0];
+        let tan_fovy = htanfovxy[1];
+        let focal = htanfovxy[2];
+        let focal_x = focal;
+        let focal_y = focal;
+
+        // Compute the tangent of the Gaussian center
+        let mut t = pos_cam.clone();
+        let limx = 1.3 * tan_fovx;
+        let limy = 1.3 * tan_fovy;
+
+        let txtz = pos_cam.x/pos_cam.z;
+        let tytz = pos_cam.y/pos_cam.z;
+
+        t.x = limx.min((-limx).max(txtz)) * pos_cam.z;
+        t.y = limy.min((-limy).max(tytz)) * pos_cam.z;
+
+        // Compute the Jacobian
+        let J = na::Matrix3::new(
+            focal_x / t.z, 0.0, -(focal_x * t.x) / (t.z * t.z),
+            0.0, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+            0.0, 0.0, 0.0
+        );
+
+        let W = viewmatrix.fixed_view::<3, 3>(0, 0).transpose();
+        let T = W * J;
+        let cov3d = self.cov3d.fixed_view::<3,3>(0, 3*idx);
+        let mut cov = T.transpose() * cov3d.transpose() * T;
+
+        // Apply low-pass filter: every Gaussian should be at least
+        // one pixel wide/high. Discard 3rd row and column.
+        let mut cov2d = cov.fixed_view_mut::<2,2>(0,0);
+        cov2d[(0, 0)] += 0.3;
+        cov2d[(1, 1)] += 0.3;
+
+        // Convert into vector to return, along with position in screen space
+        cov2d.into()
+    }
+
+    pub fn color(&self, idx: usize, sh_dim: usize, direction: &Vector3<f32>) -> (Vector3<f32>, f32) {
+        // Compute color from the spherical harmonics for the given direction
+        // The coefficients are laid out as:
+        // C0_R, C0_B, C0_G, C1_R, C1_B, C1_G ...
+        let color = eval_spherical_harmonics(&self.sh.column(idx).as_view(), sh_dim, direction);
+        (color, self.opacities[idx])
+    }
+}
+```
+
+### src/lib.rs
+```
+pub mod camera;
+pub mod gaussians;
+pub mod pipelines;
+```
+
+### src/main.rs
+```
+use std::f32::consts::PI;
+
+use euc::buffer::Buffer2d;
+use nalgebra as na;
+use splat::{gaussians::{self, GaussianList}, camera::Camera, pipelines::GaussianSplatPipeline02};
+use na::Vector3;
+use splat::pipelines::GaussianSplatPipeline01;
+
+const W: usize = 800;
+const H: usize = 600;
+// const CAMERA_POSITION: [f32; 3] = [-0.57651054f32, 2.99040512f32, -0.03924271f32];
+// const CAMERA_POSITION: [f32; 3] = [0.0, 1.9991251, 0.05583868];
+const CAMERA_POSITION: [f32; 3] = [0.0, 0.0, 5.0];
+
+fn main() {
+    let mut color: euc::Buffer<u32, 2> = Buffer2d::fill([W, H], 0);
+
+    println!("Loading gaussians from ply file");
+    let mut gaussians = gaussians::load_from_ply("notes/point_cloud.ply");
+    // let mut gaussians = gaussians::naive_gaussians();
+
+    // Compute cov3d for each gaussian
+    println!("Computing cov3d for each gaussian");
+    for gaussian in gaussians.iter_mut() {
+        gaussian.compute_cov3d();
+    }
+
+    let camera_pos = Vector3::from_column_slice(&CAMERA_POSITION);
+    let camera = Camera::new(H as f32, W as f32, Some(camera_pos));
+
+    let mut pipeline = GaussianSplatPipeline01 {
+        gaussians: gaussians.to_vec(),
+        camera,
+    };
+    // let mut pipeline = GaussianSplatPipeline02 {
+    //     gaussians: GaussianList::from_vec(gaussians.to_vec()),
+    //     camera,
+    // };
+    // pipeline.camera.is_pose_dirty = true;
+
+    let mut win = minifb::Window::new("Splat", W, H, minifb::WindowOptions::default()).unwrap();
+    while win.is_open() && !win.is_key_down(minifb::Key::Escape) {
+        win.get_keys().iter().for_each(|key|{
+            match key {
+                minifb::Key::Up => {
+                    // Pitch down
+                    pipeline.camera.update_pitch_angle(-10.0* PI/180.0);
+                },
+                minifb::Key::Down => {
+                    // Pitch up
+                    pipeline.camera.update_pitch_angle(10.0* PI/180.0);
+                },
+                minifb::Key::Left => {
+                    // Yaw left
+                    pipeline.camera.update_yaw_angle(-10.0* PI/180.0);
+                },
+                minifb::Key::Right => {
+                    // Yaw right
+                    pipeline.camera.update_yaw_angle(10.0* PI/180.0);
+                },
+                minifb::Key::R =>
+                {
+                    pipeline.camera.position = Vector3::from_column_slice(&CAMERA_POSITION);
+                    pipeline.camera.is_pose_dirty = true;
+                }
+                _ => {}
+            }
+        });
+        if pipeline.camera.is_pose_dirty {
+            // Time the rendering
+            let now = std::time::Instant::now();
+            pipeline.camera.update_camera_pose();
+            color = Buffer2d::fill([W, H], 0);
+            pipeline.render_to_buffer(&mut color);
+            let elapsed = now.elapsed();
+            pipeline.camera.is_pose_dirty = false;
+            println!("Rendering took {} ms", elapsed.as_millis());
+        }
+        win.update_with_buffer(color.raw(), W, H).unwrap();
+    }
+}
+```
+
+### src/pipelines.rs
+```
+use nalgebra as na;
+use euc::{Pipeline, TriangleList, Empty};
+use na::{Vector2, Vector3, Vector4, SVector, VectorView3};
+use crate::{gaussians::{Gaussian, self, GaussianList}, camera::Camera};
+
+
+const VERTICES: &[Vector2<f32>] = &[
+    Vector2::new(-1.,  1.),
+    Vector2::new(-1.,  -1.),
+    Vector2::new(1., -1.),
+    Vector2::new(1., 1.),
+];
+
+const INDICES: &[usize] = &[0, 1, 2, 0, 2, 3];
+
+#[inline]
+fn gaussian_vertex_shader(vert: &Vector2<f32>, g_position_w: &Vector3<f32>, cov2d: &na::Matrix2<f32>, camera: &Camera) -> (Vector4<f32>, Vector3<f32>, Vector2<f32>)
+{
+    // Create conic, coordxy, gl_position for passing to fragment shader
+    let mut gl_position = Vector4::zeros();
+
+    let cov2d_inv =  cov2d.try_inverse().unwrap();
+    let conic = Vector3::new(cov2d_inv[(0,0)], cov2d_inv[(0, 1)], cov2d_inv[(1, 1)]);
+
+    // compute 3-sigma bounding box size
+    // Divide out the camera width and height to get in NDC
+    let bboxsize_cam = Vector2::new(3.0 * cov2d[(0,0)].sqrt(), 3.0 * cov2d[(1,1)].sqrt());
+
+    // Divide out camera plane size to get bounding box size in NDC
+    let wh = Vector2::new(camera.w, camera.h);
+    let bboxsize_ndc = bboxsize_cam.component_div(&wh) * 2.0;
+
+    // Coordxy value (used to evaluate gaussian, also in camera space coordinates)
+    let coordxy = vert.component_mul(&bboxsize_cam);
+
+    // compute g_pos_screen and gl_position
+    let view_matrix = camera.get_view_matrix();
+    let projection_matrix = camera.get_project_matrix();
+    let position4 = Vector4::new(g_position_w[0], g_position_w[1], g_position_w[2], 1.0);
+    let g_pos_view = view_matrix * position4;
+
+    let mut g_pos_screen = projection_matrix * g_pos_view;
+    g_pos_screen = g_pos_screen / g_pos_screen[3];
+
+    gl_position[0] = vert[0] * bboxsize_ndc[0] + g_pos_screen[0];
+    gl_position[1] = vert[1] * bboxsize_ndc[1] + g_pos_screen[1];
+    gl_position[2] = g_pos_screen[2];
+    gl_position[3] = g_pos_screen[3];
+
+    (gl_position, conic, coordxy)
+}
+
+
+pub struct GaussianSplatPipeline01 {
+    pub gaussians: Vec<Gaussian>,
+    pub camera: Camera,
+}
+
+#[derive(Clone, Debug)]
+pub struct VertexInstance {
+    pub vert_idx: usize,
+    pub gaussian_idx: usize,
+}
+
+impl GaussianSplatPipeline01{
+    pub fn render_to_buffer(&self, color: &mut euc::Buffer<u32, 2>)
+    {
+        // Create vector of VertexInstances from combining vertices and gaussians
+        let mut vertex_instances = Vec::new();
+        let sorted_gaussians = gaussians::sort_gaussians(&self.gaussians, &self.camera.get_view_matrix());
+        for g_idx in sorted_gaussians.iter() {
+            // For each instance, push all the vertices
+            for vert_idx in INDICES {
+                vertex_instances.push(VertexInstance {
+                    vert_idx: *vert_idx,
+                    gaussian_idx: *g_idx,
+                });
+            }
+        }
+        self.render(
+            vertex_instances,
+            color,
+            &mut Empty::default(),
+        );
+
+    }
+}
+
+impl<'r> Pipeline<'r> for GaussianSplatPipeline01 {
+    type Vertex = VertexInstance;
+    type VertexData = SVector<f32, 9>; // color, alpha, conic, coordxy
+    type Primitives = TriangleList;
+    type Fragment = Vector4<f32>;
+    type Pixel = u32;
+
+    fn vertex(&self, vert_inst: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
+        let gaussian = &self.gaussians[vert_inst.gaussian_idx];
+        let world_position = &gaussian.position;
+        let ray_direction = (world_position - self.camera.position).normalize();
+        let (color, alpha) = gaussian.color(15, &ray_direction);
+
+        let cov2d = gaussian.project_cov3d_to_screen(&self.camera);
+        let (gl_position, conic, coordxy) = gaussian_vertex_shader(
+            &VERTICES[vert_inst.vert_idx],
+            world_position,
+            &cov2d,
+            &self.camera,
+        );
+        // Placeholder outputs for now
+        let vertex_data = SVector::<f32, 9>::from_row_slice(
+            &[
+            color[0],
+            color[1],
+            color[2],
+            alpha,
+            conic[0],
+            conic[1],
+            conic[2],
+            coordxy[0],
+            coordxy[1],
+            ]
+        );
+
+        ([gl_position[0], gl_position[1], gl_position[2], gl_position[3]], vertex_data)
+    }
+
+    fn fragment(&self, vert_output: Self::VertexData) -> Self::Fragment {
+        let color_rgb  = vert_output.fixed_view::<3,1>(0,0);
+        let alpha = vert_output[3];
+        let conic = vert_output.fixed_view::<3,1>(4,0);
+        let coordxy = vert_output.fixed_view::<2,1>(7,0);
+
+        // let power = -0.5 * (conic.x * coordxy.x * coordxy.x + conic.z * coordxy.y * coordxy.y) - conic.y * coordxy.x * coordxy.y;
+        let power = -0.5 * (conic[0] * coordxy[0] * coordxy[0] + conic[2] * coordxy[1] * coordxy[1]) - conic[1] * coordxy[0] * coordxy[1];
+        if power > 0.0
+        {
+            return Self::Fragment::zeros();
+        }
+        let alpha = 0.99f32.min(alpha * power.exp());
+        if alpha < 1.0 / 255.0
+        {
+            return Self::Fragment::zeros();
+        }
+        Vector4::new(color_rgb[0], color_rgb[1], color_rgb[2], alpha)
+    }
+
+    fn blend(&self, old_color: Self::Pixel, new_color: Self::Fragment) -> Self::Pixel {
+        // Do alpha blending and return blended color
+        // old color also has alpha in highest byte
+        let old_alpha = (old_color >> 24) & 0xff;
+        let old_color = Vector4::new(
+            ((old_color >> 16) & 0xff) as f32 / 255.0,
+            ((old_color >> 8) & 0xff) as f32 / 255.0,
+            (old_color & 0xff) as f32 / 255.0,
+            old_alpha as f32 / 255.0,
+        );
+        let alpha = new_color[3];
+        let blended_color = (1.0 - alpha) * old_color + alpha * new_color;
+        let r = (blended_color[0] * 255.0) as u8;
+        let g = (blended_color[1] * 255.0) as u8;
+        let b = (blended_color[2] * 255.0) as u8;
+        u32::from_le_bytes([
+            b,
+            g,
+            r,
+            (alpha * 255.0) as u8,
+        ])
+    }
+}
+
+// Gaussian splat pipeline for GaussianList type
+pub struct GaussianSplatPipeline02 {
+    pub gaussians: GaussianList,
+    pub camera: Camera,
+}
+
+impl<'r> Pipeline<'r> for GaussianSplatPipeline02 {
+    type Vertex = VertexInstance;
+    type VertexData = SVector<f32, 9>; // color, alpha, conic, coordxy
+    type Primitives = TriangleList;
+    type Fragment = Vector4<f32>;
+    type Pixel = u32;
+
+    fn vertex(&self, vertex: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
+        let g_idx = vertex.gaussian_idx;
+        let world_position = self.gaussians.positions.fixed_view::<3,1>(0,g_idx);
+
+        let ray_direction = (world_position - self.camera.position).normalize();
+        let (color, alpha) = self.gaussians.color(g_idx, 15, &ray_direction);
+
+        let cov2d = self.gaussians.project_cov3d_to_screen(g_idx, &self.camera);
+        let (gl_position, conic, coordxy) = gaussian_vertex_shader(
+            &VERTICES[vertex.vert_idx],
+            &world_position.into(),
+            &cov2d,
+            &self.camera,
+        );
+        let vertex_data = SVector::<f32, 9>::from_row_slice(
+            &[
+            color[0],
+            color[1],
+            color[2],
+            alpha,
+            conic[0],
+            conic[1],
+            conic[2],
+            coordxy[0],
+            coordxy[1],
+            ]
+        );
+        ([gl_position[0], gl_position[1], gl_position[2], gl_position[3]], vertex_data)
+
+    }
+
+    fn fragment(&self, vert_output: Self::VertexData) -> Self::Fragment {
+        let color_rgb  = Vector3::new(vert_output[0], vert_output[1], vert_output[2]);
+        let alpha = vert_output[3];
+        let conic = Vector3::new(vert_output[4], vert_output[5], vert_output[6]);
+        let coordxy = Vector2::new(vert_output[7], vert_output[8]);
+
+        // let power = -0.5 * (conic.x * coordxy.x * coordxy.x + conic.z * coordxy.y * coordxy.y) - conic.y * coordxy.x * coordxy.y;
+        let power = -0.5 * (conic[0] * coordxy[0] * coordxy[0] + conic[2] * coordxy[1] * coordxy[1]) - conic[1] * coordxy[0] * coordxy[1];
+        if power > 0.0
+        {
+            return Self::Fragment::zeros();
+        }
+        let alpha = 0.99f32.min(alpha * power.exp());
+        if alpha < 1.0 / 255.0
+        {
+            return Self::Fragment::zeros();
+        }
+        Vector4::new(color_rgb[0], color_rgb[1], color_rgb[2], alpha)
+    }
+
+    fn blend(&self, old_color: Self::Pixel, new_color: Self::Fragment) -> Self::Pixel {
+        // Do alpha blending and return blended color
+        // old color also has alpha in highest byte
+        let old_alpha = (old_color >> 24) & 0xff;
+        let old_color = Vector4::new(
+            ((old_color >> 16) & 0xff) as f32 / 255.0,
+            ((old_color >> 8) & 0xff) as f32 / 255.0,
+            (old_color & 0xff) as f32 / 255.0,
+            old_alpha as f32 / 255.0,
+        );
+        let alpha = new_color[3];
+        let blended_color = (1.0 - alpha) * old_color + alpha * new_color;
+        let r = (blended_color[0] * 255.0) as u8;
+        let g = (blended_color[1] * 255.0) as u8;
+        let b = (blended_color[2] * 255.0) as u8;
+        u32::from_le_bytes([
+            b,
+            g,
+            r,
+            (alpha * 255.0) as u8,
+        ])
+    }
+}
+
+impl GaussianSplatPipeline02{
+    pub fn render_to_buffer(&self, color: &mut euc::Buffer<u32, 2>)
+    {
+        // Create vector of VertexInstances from combining vertices and gaussians
+        let mut vertex_instances = Vec::new();
+        let sorted_gaussians = self.gaussians.sort(&self.camera);
+        for g_idx in sorted_gaussians.iter() {
+            // For each instance, push all the vertices
+            for vert_idx in INDICES {
+                vertex_instances.push(VertexInstance {
+                    vert_idx: *vert_idx,
+                    gaussian_idx: *g_idx,
+                });
+            }
+        }
+        self.render(
+            vertex_instances,
+            color,
+            &mut Empty::default(),
+        );
+
+    }
+}
+```
+
+### src/bin/00_ply_load.rs
+```
+/// trims and existing ply file to extract out the first three splats
+use std::env;
+
+
+use ply_rs as ply;
+use ply_rs::ply::{ Ply, DefaultElement };
+use ply_rs::writer::Writer;
+
+fn extract_three_points(ply: &Ply<DefaultElement>) -> Ply<DefaultElement>
+{
+      // Copy the first three splats into a vector and then write into a new PLY file
+    let (_, points) = ply.payload.front().unwrap();
+    let mut output_points = Vec::new();
+    for (i, splat) in points.iter().enumerate()
+    {
+        if i > 2
+        {
+            break;
+        }
+        output_points.push(splat.clone());
+    }
+    // Append the splats to the new PLY file
+    let mut output_ply = Ply::<DefaultElement>::new();
+    output_ply.payload.insert("vertex".to_string(), output_points);
+    // Set header to match the original
+    output_ply.header = ply.header.clone();
+    output_ply
+}
+
+fn main()
+{
+    // Load input and output file names from the command line
+    // Show error message with usage if not enough arguments
+
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3
+    {
+        println!("Usage: trim <input_file> <output_file>");
+        return;
+    }
+
+    let input_file_name = &args[1];
+    let output_file_name = &args[2];
+
+    let mut file = std::fs::File::open(input_file_name).unwrap();
+
+    let p = ply::parser::Parser::<ply::ply::DefaultElement>::new();
+
+    // use the parser: read the entire file
+    let ply = p.read_ply(&mut file);
+
+    // make sure it did work
+    assert!(ply.is_ok());
+    let ply = ply.unwrap();
+
+    let mut output_ply = extract_three_points(&ply);
+
+    // set up a writer
+    let mut outfile = std::fs::File::create(output_file_name).unwrap();
+    let w = Writer::new();
+    let written = w.write_ply(&mut outfile, &mut output_ply).unwrap();
+    println!("Wrote {} bytes", written);
+}
+```
+
+### src/bin/01_naive_gaussian.rs
+```
+use euc::Buffer2d;
+use nalgebra::Vector3;
+use splat::{gaussians, camera::Camera};
+use splat::pipelines::GaussianSplatPipeline01;
+
+const W: usize = 1280;
+const H: usize = 720;
+
+fn main() {
+    let mut color: euc::Buffer<u32, 2> = Buffer2d::fill([W, H], 0);
+
+    println!("Loading gaussians from ply file");
+    let mut gaussians = gaussians::naive_gaussians();
+
+    // Compute cov3d for each gaussian
+    println!("Computing cov3d for each gaussian");
+    for gaussian in gaussians.iter_mut() {
+        gaussian.compute_cov3d();
+    }
+
+    let camera_pos = Vector3::new(-0.57651054, 2.99040512, -0.03924271);
+    let camera = Camera::new(H as f32, W as f32, Some(camera_pos));
+
+    let pipeline = GaussianSplatPipeline01 {
+        gaussians: gaussians.to_vec(),
+        camera,
+    };
+
+    println!("Rendering");
+    pipeline.render_to_buffer(
+        &mut color,
+    );
+
+    let mut win = minifb::Window::new("Splat", W, H, minifb::WindowOptions::default()).unwrap();
+    while win.is_open() {
+        win.update_with_buffer(color.raw(), W, H).unwrap();
+    }
+}
+```
+
+### src/bin/02_ply_demo.rs
+```
+use euc::buffer::Buffer2d;
+use nalgebra as na;
+use splat::{gaussians, camera::Camera};
+use na:: Vector3;
+use splat::pipelines::GaussianSplatPipeline01;
+
+const W: usize = 1280;
+const H: usize = 720;
+
+fn main() {
+    let mut color: euc::Buffer<u32, 2> = Buffer2d::fill([W, H], 0);
+
+    println!("Loading gaussians from ply file");
+    let mut gaussians = gaussians::load_from_ply("notes/point_cloud.ply");
+
+    // Compute cov3d for each gaussian
+    println!("Computing cov3d for each gaussian");
+    for gaussian in gaussians.iter_mut() {
+        gaussian.compute_cov3d();
+    }
+
+    let camera_pos = Vector3::new(-0.57651054, 2.99040512, -0.03924271);
+    let camera = Camera::new(H as f32, W as f32, Some(camera_pos));
+
+    let pipeline = GaussianSplatPipeline01 {
+        gaussians: gaussians.to_vec(),
+        camera,
+    };
+
+    println!("Rendering");
+    pipeline.render_to_buffer(
+        &mut color,
+    );
+
+    let mut win = minifb::Window::new("Splat", W, H, minifb::WindowOptions::default()).unwrap();
+    while win.is_open() {
+        win.update_with_buffer(color.raw(), W, H).unwrap();
+        // win.update_with_buffer(color.raw(), W, H).unwrap();
+    }
+}
+```
+
+### src/bin/attempt03.rs
+```
+// Attempt using shaer from https://github.com/Lichtso/splatter
+// use euc::{buffer::Buffer2d, rasterizer, Pipeline, TriangleList, Empty};
+// use nalgebra as na;
+// use splat::{gaussians::{Gaussian, self}, camera::Camera};
+// use na::{Vector2, Vector3, Vector4, Matrix3, Matrix4, Matrix3x2, RowVector3, Vector6};
+
+// struct Triangle {
+//     pub vertices: Vec<Vector2<f32>>,
+//     pub gaussians: Vec<Gaussian>,
+//     pub camera: Camera,
+// }
+
+// #[derive(Clone, Debug)]
+// pub struct VertexInstance {
+//     pub vert_idx: usize,
+//     pub gaussian_idx: usize,
+// }
+
+// pub struct VertexOutput {
+//     pub gl_position: Vector4<f32>,
+// }
+
+// impl<'r> Pipeline<'r> for Triangle {
+//     type Vertex = VertexInstance;
+//     type VertexData = Vector6<f32>; // color, alpha, texcoord
+//     type Primitives = TriangleList;
+//     type Fragment = Vector4<f32>;
+//     type Pixel = u32;
+
+//     fn vertex(&self, vert_inst: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
+//         let gaussian = &self.gaussians[vert_inst.gaussian_idx];
+//         let world_position: na::Matrix<f32, na::Const<3>, na::Const<1>, na::ArrayStorage<f32, 3, 1>> = gaussian.position;
+//         let ray_direction = (world_position - self.camera.position).normalize();
+
+//         let (color, alpha) = gaussian.color(15, &ray_direction);
+
+//         let covariance = gaussian.projected_covariance_of_ellipsoid(&self.camera);
+//         let semi_axes = gaussian.extract_scale_of_covariance(&covariance);
+
+
+//         let rotation = gaussian.extract_rotation_of_ellipse(&covariance);
+//         let translation = gaussian.extract_translation_of_ellipse(&covariance);
+
+//         const ELLIPSE_SIZE_BIAS: f32 = 0.2f32;
+//         let mut transformation = Matrix3x2::<f32>::zeros();
+//         let transform_row0 = Vector2::new(rotation[1], -rotation[0]) * (ELLIPSE_SIZE_BIAS + semi_axes[0]);
+//         let transform_row1 = Vector2::new(rotation[0], rotation[1]) * (ELLIPSE_SIZE_BIAS + semi_axes[1]);
+//         transformation.set_row(0, &transform_row0.transpose());
+//         transformation.set_row(1, &transform_row1.transpose());
+//         transformation.set_row(2, &translation.transpose());
+
+//         let T = Matrix3::from_rows(
+//             &[
+//                 RowVector3::new(transformation[(0,0)], transformation[(0,1)], 0.0),
+//                 RowVector3::new(transformation[(1,0)], transformation[(1,1)], 0.0),
+//                 RowVector3::new(transformation[(2,0)], transformation[(2,1)], 1.0)
+//             ]
+//         );
+
+//         let field_of_view_y = std::f32::consts::PI * 0.5;
+//         let view_height = (field_of_view_y * 0.5).tan();
+//         let view_width = (512 as f32 / 512 as f32) / view_height;
+//         let view_size =  Vector2::new(view_width, view_height);
+
+//         let vert_pos = self.vertices[vert_inst.vert_idx];
+//         let v3 = T * Vector3::new(vert_pos[0], vert_pos[1], 1.0);
+//         let v2 = v3.fixed_rows::<2>(0).component_div(&view_size);
+
+//         let gl_texcoord = vert_pos;
+//         let gl_position = Vector4::new(v2[0], v2[1], 0.0, 1.0);
+
+//         ([gl_position[0], gl_position[1], gl_position[2], gl_position[3]], Vector6::new(color[0], color[1], color[2], alpha, gl_texcoord[0], gl_texcoord[1]))
+//     }
+
+//     fn fragment(&self, col_texcoord: Self::VertexData) -> Self::Fragment {
+//         // println!("Fragment: {:?}", col);
+//         let color = Vector4::new(col_texcoord[0], col_texcoord[1], col_texcoord[2], col_texcoord[3]);
+//         let gl_texcoord = Vector2::new(col_texcoord[4], col_texcoord[5]);
+//         let power = gl_texcoord.dot(&gl_texcoord);
+//         let alpha = color[3] * (-0.5 * power).exp();
+//         if alpha < 1.0/255.0 {
+//             // Return black with zero alpha
+//             Vector4::new(0.0, 0.0, 0.0, 0.0)
+//         }else{
+//             let color = Vector4::new(color[0]*alpha, color[1]*alpha, color[2]*alpha, alpha);
+//             color
+//         }
+//     }
+
+//     fn blend(&self, old_color: Self::Pixel, new_color: Self::Fragment) -> Self::Pixel {
+//         // Do alpha blending and return blended color
+//         // old color also has alpha in highest byte
+//         let old_alpha = (old_color >> 24) & 0xff;
+//         let old_color = Vector4::new(
+//             ((old_color >> 16) & 0xff) as f32 / 255.0,
+//             ((old_color >> 8) & 0xff) as f32 / 255.0,
+//             (old_color & 0xff) as f32 / 255.0,
+//             old_alpha as f32 / 255.0,
+//         );
+//         let alpha = new_color[3];
+//         let blended_color = (1.0 - alpha) * old_color + alpha * new_color;
+//         // println!("Blended color: {:?}", blended_color);
+//         let r = (blended_color[0] * 255.0) as u32;
+//         let g = (blended_color[1] * 255.0) as u32;
+//         let b = (blended_color[2] * 255.0) as u32;
+//         (r << 16) | (g << 8) | b
+//     }
+// }
+
+// const W: usize = 640;
+// const H: usize = 480;
+
+// fn main() {
+//     let [w, h] = [640, 480];
+//     let mut color = Buffer2d::fill([w, h], 0);
+//     const VERTICES: &[Vector2<f32>] = &[
+//         Vector2::new(-1.,  1.),
+//         Vector2::new(-1.,  -1.),
+//         Vector2::new(1., -1.),
+//         Vector2::new(1., 1.),
+//     ];
+
+//     const INDICES: &[usize] = &[0, 1, 2, 0, 2, 3];
+
+//     let gaussians = gaussians::load_from_ply("simple2.ply");
+//     let camera = Camera::new(w as f32, h as f32);
+//     let sorted_gaussians = gaussians::sort_gaussians(&gaussians, &camera.get_view_matrix());
+//     // Create vector of VertexInstances from combining vertices and gaussians
+//     let mut vertex_instances = Vec::new();
+//     for g_idx in sorted_gaussians.iter() {
+//         // For each instance, push all the vertices
+//         for vert_idx in INDICES {
+//             vertex_instances.push(VertexInstance {
+//                 vert_idx: *vert_idx,
+//                 gaussian_idx: *g_idx,
+//             });
+//         }
+//     }
+
+//     Triangle{
+//         vertices: VERTICES.to_vec(),
+//         gaussians: gaussians.to_vec(),
+//         camera,
+//     }.render(
+//         vertex_instances,
+//         &mut color,
+//         &mut Empty::default(),
+//     );
+
+//     let mut win = minifb::Window::new("Splat", W, H, minifb::WindowOptions::default()).unwrap();
+//     while win.is_open() {
+//         win.update_with_buffer(color.raw(), W, H).unwrap();
+//     }
+// }
+fn main(){}
+```

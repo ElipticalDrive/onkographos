@@ -1,0 +1,677 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: store SH signed and evaluate it with the reference view direction (#1054, #1063) by klausi3D · Pull Request #1062 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Sep 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Refs #1054 (audit GS-AUDIT-SHD-002, P1) and #1063. Slice 1 of the accepted ADR docs/architecture/adr-splat-colour-encoding.md (#1059), option E.
+Base: 522a212ef3a (origin/master) · Head: d2e0661f798 (round 1 f6b0ea08c2e, then a CodeFactor split 434c8252071, then round 2 d2e0661f798, on top of 54897156423) · Risk class: R2 (renderer / shaders / tests) · Status: evidence complete; maintainer visual sign-off given; ready for review.
+Problem
+Negative spherical-harmonics coefficients are clamped to zero by the unsigned RGB9E5 packing on every production path #1054: Both GPU packers stored each SH coefficient triplet as unsigned RGB9E5, which clamped every negative channel to 0 on every path. Trained SH has zero mean, so view-dependent colour was wrong on every real scan. The audit runtime probe showed negative band-1 SH rendering bit-identical to zero SH.
+SH view direction is inverted against the 3DGS reference: bands 1 and 3 of view-dependent colour are sign-flipped on every real scan #1063 (found in review round 1): tile_binning.glsl evaluated the SH basis with dir = camera − splat. The reference, Inria 3DGS computeColorFromSH (forward.cu), uses dir = pos − campos. The basis is odd in dir for bands 1 and 3, so every trained band-1 and band-3 coefficient rendered with the opposite sign. The clamp had partly hidden this, so fixing only the clamp would have made the flipped term fully visible. By maintainer decision both land together.
+Change
+Encoding (renderer/gaussian_gpu_layout.*):
+Each triplet is three 10-bit two's-complement integers (bits 0-9 / 10-19 / 20-29; bits 30-31 zero).
+They are scaled by one per-splat magnitude, the largest stored |component|, carried in the unused sh_dc.w lane. No shader reads sh_dc.w as colour; ADR §2 verified this, and the round-1 review re-checked it.
++0 bytes per splat: PackedGaussian and PackedGaussianQuantized stay 128 B / 80 B.
+Max error per component is scale/1022. Non-finite components count as 0. A non-finite inverse step (scale below about 1.5e-36) stores zero words instead of converting inf or NaN to int.
+New id GS_SH_ENCODING_SNORM10_SPLAT_SCALE = 2; the RGB9E5 id 1 is retired and never reused.
+SH words are uint end to end: PackedSphericalHarmonics.encoded, and GLSL sh_encoded[12] in tile_binning, both rasterizers, depth_compute and the embedded mirror in gpu_sorting_pipeline.cpp. Many SNORM10 words are float denormals, and a float array would leave them at the mercy of a driver's denormal handling.
+Shader (shaders/includes/gs_sh_binning.glsl, shaders/tile_binning.glsl):
+decode_sh_snorm10() does sign extension through bitfieldExtract on a signed int.
+The quantized metadata synthesiser uses the new id.
+The view direction is now the reference normalize(g.position − camera) (SH view direction is inverted against the 3DGS reference: bands 1 and 3 of view-dependent colour are sign-flipped on every real scan #1063).
+An unsupported SH encoding still renders DC-only, but is now counted: debug counter sh_unknown_encoding_count, appended to DebugCounters / TileDebugCounterSnapshot and exported in the binning stats. This includes encoding 0 with a non-zero coefficient count. The counter counts evaluations, not splats; on the SH-cache path it counts refreshes.
+Guard (tests/ci/check_gaussian_layout_sync.py):
+A mirror check pins TileDebugCounterSnapshot to the binding-6 DebugCounters SSBO (sizeof anchor 132 B).
+The SNORM10 contract check pins, between the host encoder/decoder mirror and the GLSL decoder:
+the id, max and field offsets;
+sign extension, via the signed int word;
+the encoder shifts and the signed clamp;
+the scale lane (dst.sh.dc[3] / dst.sh_dc[3] written, g.sh_dc.w read);
+the quantized metadata id, and that nothing emits RGB9E5.
+The view direction is deliberately not pinned by source spelling (round 2): the GPU test asserts it as a rendered property.
+Checks are scoped to function bodies with comments stripped.
+Release gate manifest: the RequiresGPU snapshot goes 163 → 164, recomputed with the repo's own functions. RendererSceneTree minimum_test_cases goes 1 → 2.
+Waived by the maintainer, not changed: the second RGB9E5 decoder in gaussian_splat_common_inc.glsl. Its only user, gaussian_splat.glsl, is compiled but never drawn. Deletion is tracked in gaussian_splatting: delete the dead gaussian_splat.glsl shader and its RGB9E5 SH decoder #1064.
+Evidence (RTX 3090, driver 591.86, Vulkan Forward+, dev build -O0, head f6b0ea08c2e; the 434c8252071 split re-ran the guard mutations, [SHEncoding] and the RendererSceneTree batch green)
+# (ADR §6)
+Evidence
+Result
+1
+Host round-trip doctests: test_sh_encoding.h in a new strict lane GaussianSplatting [SHEncoding]. Covers both packers; negative, positive, mixed-sign, tiny, large, all-zero, non-finite and coefficient-limit inputs; decoded through the C++ mirror that the guard pins to the GLSL.
+6/6 cases, 629/629 assertions. Mutation (clamp q ∈ [0, 511]): 5/6 cases fail.
+2
+Permanent GPU readback against the reference formula: [GaussianSplatting][SceneTree][RequiresGPU] Band-1 SH renders the reference colour delta … (RendererSceneTree batch). One opaque splat per band-1 slot and sign (±0.4, red). The red delta is compared with Inria's c · basis_k(normalize(splat − camera)) within 0.02. Runs on-axis and off-axis, on the unquantized and quantized atlas routes. It asserts its premises (route taken, fixture SH degree 1, mid-grey zero-SH) and FAILs, never skips.
+24/24 assertions. Off-axis measured vs reference: slot 0 +0.046 / −0.054 vs ±0.052; slot 1 +0.169 / −0.173 vs ±0.175; slot 2 +0.061 / −0.070 vs ±0.070. Quantized values are identical to unquantized. Mutations: view direction reversed → 14/24 fail; negative coefficients clamped to zero → 7/24 fail.
+—
+Audit runtime probe (fresh project, raw and imported PLY; round 0)
+Negative SH R 0.3880 (was 0.4986, identical to zero), zero 0.4986, positive 0.6037.
+—
+Full GPU harness: run_gpu_harness.py, all batches
+98/98 cases, 8741/8741 assertions, max_rc 0
+—
+Module suite: run_module_tests.py --godot-binary …, all lanes and guards
+exit 0. 29 lanes (23 strict), 28 pass. The advisory GPU Memory Stream lane reports no-coverage; that lane is untouched by this PR. [SHEncoding] 6 tests / 629 assertions.
+—
+Guards: check_gaussian_layout_sync.py, check_renderer_release_gates.py (+ its 146 unit tests)
+PASS. Each layout pin was mutation-proven (a wrong offset, uint word, a dropped scale-lane write, metadata id 1).
+—
+Updated tests pinning the old contract: test_gaussian_importer.h (encoding id); test_quantized_packing.h (sh_dc[3] is the SH scale).
+pass
+Single-vendor blind spot: all runtime evidence is from one NVIDIA RTX 3090 on Vulkan. D3D12, Metal, AMD, Intel and mobile drivers are untested. The uint words remove the denormal-flush risk by construction, not by test.
+Not covered by the GPU test: the streaming atlas route. It shares the decoder and the view-direction code with the two covered routes, but no GPU case renders SH through it.
+Evidence status
+All three evidence items are now posted:
+ADR §8 s distribution: comment.
+§6.5 real-scan visual A/B and §6.6 binning timing A/B: comment. Binning is +0.9%, within run-to-run spread; the frame time is unchanged.
+The maintainer signed off on the real-scan appearance on 2026-09-24, having seen the contact sheet (delivered separately), and the PR left draft.
+CI at 434c8252071: every check passes except qlty check, which reports "Build errored" (its log needs a qlty login). It is not a required check.
+Review round 1 (independent GPU review), disposition
+#
+Finding
+Disposition
+1
+View direction opposite to the reference
+Fixed (#1063); the GPU test now asserts the reference sign
+2
+GPU test only on-axis, unquantized, symmetry-only
+Fixed: analytic delta, off-axis, quantized route. Streaming route is still uncovered (stated above)
+3
+ADR says delete the dead decoder
+Waived by the maintainer; follow-up #1064
+4
+Missing §8 s report and single-vendor line
+Fixed in this body (the s report is pending)
+5
+Guard: uint word passes, whole-file matches, DOTALL regex, no scale-lane pin
+Fixed (see Guard)
+6
+Infinite inv_step → UB
+Fixed
+7
+Fixed-count render loop
+Fixed: gs_pump_until
+8
+Counter misses encoding 0 with count > 0
+Fixed; the evaluations-vs-splats semantics are documented above
+9
+Stale RGB9E5 text and harness comment
+Fixed
+10
+Float denormal SH words
+Fixed: uint end to end
+Review round 2 (Codex on 434c8252071), disposition
+#
+Finding
+Disposition
+P2
+[SHEncoding] not in HEADLESS_GAUSSIAN_SCOPED_TAGS, so the advisory [untagged] lane ran it too
+Fixed in d2e0661f798: measured 6 → 0 overlapping cases, full module suite exit 0
+P2
+Guard pinned the view direction's source spelling
+Fixed in d2e0661f798: pin removed; the property stays asserted by the RendererSceneTree GPU case, re-proven at this head (reversed direction fails 14/24, restored 24/24)
+Also noticed (not changed here)
+GaussianData derives sh_degree from the highest non-zero band-1 slot (core/gaussian_data.cpp:264-284). The quantized route gates bands by it (ChunkMetaGPU.sh_limit, resident_instance_contract_publisher.cpp:738), while the unquantized route hard-codes chunk_sh_limit = 3. So an asset whose slot 2 is zero on every splat renders band 1 on one route and DC-only on the other. Real scans carry complete bands, so this only surfaced in the test fixture, which now keeps band 1 complete.
+The earlier note that test_quantized_packing.h cited a non-existent "GPU-harness PSNR test" is fixed: the comment now says what exists.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+gaussian_splatting: store SH coefficients signed so negative SH is no…
+…
+5489715
+```
+… longer clamped to zero (#1054)
+
+Slice 1 of docs/architecture/adr-splat-colour-encoding.md (option E). Both GPU packers stored
+each SH coefficient triplet as unsigned RGB9E5, which clamped every negative channel to 0 on
+every path, so view-dependent colour was wrong on every real scan (runtime-confirmed in the
+audit: negative band-1 SH rendered bit-identical to zero SH).
+
+- Host (renderer/gaussian_gpu_layout.*): each triplet is now three 10-bit two's-complement
+  integers (bits 0-9/10-19/20-29), scaled by one per-splat magnitude (the largest stored
+  |component|) carried in the unused sh_dc.w lane. +0 bytes per splat; PackedGaussian and
+  PackedGaussianQuantized stay 128/80 B. Max error per component: scale/1022. Non-finite
+  components count as 0. New id GS_SH_ENCODING_SNORM10_SPLAT_SCALE = 2; RGB9E5 (1) is retired.
+- Shader (gs_sh_binning.glsl, tile_binning.glsl): decode_sh_snorm10() with bitfieldExtract sign
+  extension; the quantized metadata synthesiser uses the new id. An unsupported SH encoding still
+  falls back to DC-only but is now counted (debug counter sh_unknown_encoding_count, appended to
+  DebugCounters / TileDebugCounterSnapshot and exported in the binning stats).
+- Guard (check_gaussian_layout_sync.py): pins TileDebugCounterSnapshot to the DebugCounters SSBO
+  (new sizeof anchor), and pins the SNORM10 word format (id, max, field offsets, sign extension,
+  encoder shifts, quantized metadata id, no RGB9E5 emitter) between host and GLSL. Mutation-proven.
+- Tests: new test_sh_encoding.h in a new strict lane [SHEncoding] (host round-trips for both
+  packers incl. negative/positive/mixed/tiny/large/zero/non-finite) plus a
+  [SceneTree][RequiresGPU] one-splat GPU readback (RendererSceneTree batch) asserting
+  negative < zero < positive and symmetry. Both mutation-proven against a re-introduced clamp.
+  Tests that pinned the old contract are updated (encoding id; sh_dc[3] is the SH scale).
+
+The second RGB9E5 decoder (gaussian_splat_common_inc.glsl, used only by gaussian_splat.glsl) is
+left unchanged: that shader is compiled but never drawn, and it reads its own splat_sh buffer
+layout, not PackedGaussian, so it is outside this contract.
+
+Refs #1054.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+added
+bug
+Something isn't working
+area:shaders
+GLSL shader code
+data-integrity
+Data corruption or validation gap
+user-facing
+Directly affects external users, docs, or public repo surface
+labels
+Sep 23, 2026
+klausi3D
+mentioned this pull request
+Sep 24, 2026
+SH view direction is inverted against the 3DGS reference: bands 1 and 3 of view-dependent colour are sign-flipped on every real scan
+#1063
+Closed
+gaussian_splatting: evaluate band-1 SH with the reference view direct…
+…
+f6b0ea0
+```
+…ion; review round 1 for signed SH (#1054, #1063)
+
+Review round 1 of the signed SH storage slice.
+
+- #1063: tile_binning.glsl evaluated the SH basis with dir = camera - splat. The reference
+  (Inria 3DGS computeColorFromSH, forward.cu) uses dir = pos - campos. The basis is odd in dir
+  for bands 1 and 3, so every trained band-1/band-3 coefficient rendered with the opposite sign.
+  The unsigned RGB9E5 clamp had partly hidden this.
+- SH words are uint end to end (PackedSphericalHarmonics.encoded, GLSL sh_encoded[12] in all
+  four mirrors), so no driver can flush a SNORM10 word that happens to be a float denormal.
+- Encoder: a non-finite inverse step (scale below ~1.5e-36) now stores zero words instead of
+  converting inf/NaN to int (undefined behaviour).
+- The unsupported-encoding counter also counts encoding 0 with a non-zero coefficient count.
+- GPU test (RendererSceneTree batch) now asserts the analytic reference delta c * basis_k(dir)
+  per band-1 slot and sign, on-axis and off-axis, on the unquantized AND quantized atlas routes,
+  and waits with gs_pump_until. The fixture keeps band 1 complete (a green slot-2 coefficient):
+  GaussianData derives sh_degree from the highest non-zero band-1 slot and the quantized route
+  gates bands by it, so a lone slot-0/1 coefficient rendered DC-only there. Premise asserted.
+  Mutation-proven on an RTX 3090 / Vulkan: reversing the view direction fails 14/24
+  assertions; clamping negative coefficients to zero fails 7/24.
+- Layout guard: sign extension pinned via the signed `int word`, checks scoped to function
+  bodies, the sh_dc.w / dc[3] scale lane pinned, encoder shifts and clamp pinned, and the view
+  direction convention pinned.
+- Release gate manifest: RequiresGPU snapshot 163 -> 164 (recomputed with the repo's own
+  functions); RendererSceneTree minimum_test_cases 1 -> 2.
+- Stale text: RGB9E5 comments, generated shader reference, the RendererSceneTree batch comment,
+  and a test_quantized_packing.h comment citing a PSNR test that does not exist.
+
+The dead second RGB9E5 decoder (gaussian_splat_common_inc.glsl, used only by the never-drawn
+gaussian_splat.glsl) stays by maintainer waiver; deletion is a follow-up.
+
+Refs #1054, #1063.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+mentioned this pull request
+Sep 24, 2026
+gaussian_splatting: delete the dead gaussian_splat.glsl shader and its RGB9E5 SH decoder
+#1064
+Open
+klausi3D
+changed the title
+gaussian_splatting: store SH coefficients signed so negative SH is no longer clamped to zero (#1054)
+gaussian_splatting: store SH signed and evaluate it with the reference view direction (#1054, #1063)
+Sep 24, 2026
+gaussian_splatting: split the SH contract guard and the SH GPU test h…
+…
+434c825
+```
+…elper into smaller functions (#1054)
+
+CodeFactor flagged both as complex methods. No behaviour change:
+
+- check_gaussian_layout_sync.py: the nested helpers become module-level (_sh_one,
+  _strip_c_comments, _sh_function_body) and _check_sh_snorm10_contract delegates to four
+  sub-checks (constants, decoders, encoder + scale lane, binning). Same patterns and
+  messages; the five guard mutations (uint word, wrong field offset, dropped scale-lane
+  write, reversed view direction, quantized metadata id 1) still turn it red.
+- test_sh_encoding.h: render_splat_red() is split into make_band1_splat() (the fixture) and
+  sample_centroid_red() (the readback sampling). Same assertions; RendererSceneTree batch
+  2/2 cases, 40/40 assertions.
+
+Refs #1054.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+commented
+Sep 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ADR §8 evidence: distribution of the per-splat SNORM10 scale s on a real scan (head 434c8252071)
+Asset: holzbank-clean.ply (252,326 splats, SH degree 3, 45 f_rest). The loader passes coefficients through raw (io/ply_loader.cpp:1070-1087). s is the largest |component| over the triplets the packer stores (select_sh_coefficients, renderer/gaussian_gpu_layout.cpp:38-51): the first 12 for PackedGaussian, the first 6 for PackedGaussianQuantized. Computed host-side from the PLY with NumPy, with the same selection rule and the same error bound as the encoder (max decode error per component = s/1022).
+PackedGaussian (12 slots)
+PackedGaussianQuantized (6 slots)
+s p5 / p50 / p95 / p99 / max
+0.069 / 0.179 / 0.344 / 0.430 / 0.741
+0.047 / 0.138 / 0.292 / 0.375 / 0.664
+splats with s = 0 (all stored SH zero)
+3,020 (1.2%)
+3,020 (1.2%)
+max decode error per component, p50 / p99 / max
+1.8e-4 / 4.2e-4 / 7.3e-4
+1.4e-4 / 3.7e-4 / 6.5e-4
+non-zero components that decode to 0 (`
+c
+< s/1022`)
+relative error bound `(s/1022)/
+c
+`, p50 / p95
+Reading:
+The worst-case per-component error on this scan (7.3e-4) is about 1/5 of one 8-bit display step (1/255 ≈ 3.9e-3).
+The components that flush to zero are the smallest in their splat (below 1/1022 of that splat's largest), so their colour contribution is below display precision.
+The shared per-splat scale does not visibly crush small coefficients on this scan.
+Single asset, single scan pipeline; other capture pipelines may have heavier-tailed SH.
+Still pending, and needing an idle runner: the §6.5 before/after visual check and the §6.6 binning timing A/B.
+klausi3D
+commented
+Sep 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+ADR §6.5 / §6.6 evidence: real-scan visual A/B and binning timing A/B (head 434c8252071, RTX 3090, driver 591.86, Vulkan Forward+, dev build -O0, 960×720, runner idle)
+Setup
+Scene: holzbank-clean.ply (252,326 splats, SH degree 3), shipped defaults, no lights, black background.
+Base binary: built at 0fcefee. Its only module difference from the PR base 522a212ef3a is gaussian_splatting: shadowed splats keep engine ambient instead of going black (#1055) #1060's shadow_weight term in tile_binning.glsl, which stays 0 without lights, so it renders identically to the PR base for this scene.
+Fix binary: 434c8252071.
+Probes: probe_sh_ab.gd (4 cameras spread around the object) and probe_timing.gd (300 captured frames after 120 warm-up frames; only finite, > 0 samples count).
+Visual difference (splat pixels only, i.e. non-black in either image; 0-255 levels)
+view
+mean abs delta
+p99 abs delta
+PSNR
+pixels changed > 2 levels
+mean luma shift
+v0 (timing view)
+8.45
+36
+27.1 dB
+90.0%
++5.58
+v1 front
+7.62
+33
+28.0 dB
+90.7%
++0.92
+v2 left
+7.49
+34
+27.9 dB
+87.9%
+−1.83
+v3 back
+7.85
+35
+27.6 dB
+89.4%
++0.18
+What the renders show:
+The change is large and covers the whole scan, as expected: every trained band-1/3 coefficient changes sign, and negative coefficients stop being clamped.
+The mean luma shift is near zero, with a different sign per view: the fix redistributes view-dependent colour rather than brightening or darkening the scan.
+The base render has a milky haze over the whole object. Positive-only SH can only add colour, so it washes out. The fix removes the haze: the grass is greener with more visible detail, and the bench faces are shaded differently per view.
+No black patches, NaN speckle or fireflies in any view.
+A contact sheet (base | fix | |delta|×8, per view) and a full-resolution crop went to the maintainer for sign-off. They are not committed, since they are ephemeral artifacts.
+Binning GPU time (gpu_binning_ms, 3 interleaved base/fix pairs, 300/300 valid samples each)
+run 1
+run 2
+run 3
+mean of medians
+base median
+0.2798 ms
+0.2798 ms
+0.2816 ms
+0.2804 ms
+fix median
+0.2826 ms
+0.2847 ms
+0.2816 ms
+0.2830 ms
+base / fix p95
+0.295 / 0.292
+0.294 / 0.301
+0.296 / 0.297
+The fix adds about +0.0026 ms (+0.9%) to binning, the same size as the run-to-run spread (0.2816 vs 0.2798 within base). Frame-time medians: base 4.64 / 4.63 / 4.65 ms, fix 4.64 / 4.69 / 4.61 ms, no difference. This is a -O0 dev build on one GPU.
+Limits
+This is not a comparison against an external reference 3DGS renderer. The sign convention is proven analytically in the permanent GPU test instead: per-slot deltas match Inria's formula, and the reversed direction fails 14/24 assertions.
+Single vendor.
+The sign-off on appearance is the maintainer's.
+klausi3D
+marked this pull request as ready for review
+September 24, 2026 19:50
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 24, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 434c825207
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/ci/run_module_tests.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/ci/check_gaussian_layout_sync.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+gaussian_splatting: keep [SHEncoding] out of the advisory lane and dr…
+…
+d2e0661
+```
+…op the view-direction spelling pin (#1054)
+
+Review round 2 (Codex, two P2s on 434c825):
+
+- run_module_tests.py: SHEncoding joins HEADLESS_GAUSSIAN_SCOPED_TAGS. Without it the advisory
+  [untagged] lane also selected all 6 [SHEncoding] cases (measured with the lane's own filters:
+  6 -> 0), so every module run executed the corpus twice. The strict lane is unchanged
+  (6 tests / 629 assertions).
+- check_gaussian_layout_sync.py: removes the pin on the exact source spelling of the SH view
+  direction. It rejected equivalent refactors and asserted a mechanism, not the property
+  (tests/AGENTS.md). The property, a camera -> splat direction matching the reference, stays
+  asserted by the RendererSceneTree GPU case; re-proven at this head: reversing the direction
+  fails 14/24 assertions, restored 24/24. The other layout pins still go red under their
+  mutations.
+
+Refs #1054, #1063.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+Hide details
+View details
+klausi3D
+merged commit 5fc3b65
+into
+master
+Sep 25, 2026
+20 of 21 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/1054-signed-sh
+branch
+September 25, 2026 09:06
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 25, 2026
+docs: ADR splat colour encoding -- record review round 2 as slice-2 p…
+…
+32c6804
+```
+…reconditions; slice 1 landed (#1054, #1056)
+
+Codex round 2 on ca0b0aa found three real gaps in the migration design (v1 world
+re-import rejected before the legacy route; legacy GSIF colour deltas applied in the wrong
+space; the exact-appearance promise cannot hold for higher-order SH after slice 1). All three
+only matter when slice 2 is implemented, and slice 2 is not an alpha blocker, so they are
+recorded in section 9 as preconditions that slice 2's PR must resolve, with the direction and
+evidence for each, rather than redesigned now. Code citations re-read on origin/master.
+
+Also records that slice 1 merged as #1062 (with the #1063 view-direction fix) and that the
+dead-decoder deletion is #1064.
+
+Refs #1054, #1056.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 25, 2026
+Merge origin/master into gs/54-indirect-dispatch-abi-pin
+…
+5e7297d
+```
+Conflict in tests/ci/check_gaussian_layout_sync.py, main()'s PASSED summary
+only. Both sides are kept: master's (#1062) DebugCounters and SH SNORM10
+lines, followed by this branch's coverage-derived IndirectDispatch line, which
+matches the call order in main() (_check_debug_counters_mirror,
+_check_sh_snorm10_contract, _check_indirect_dispatch_abi; the calls merged
+cleanly).
+
+Verified with python -B on the merged tree. check_gaussian_layout_sync.py
+exits 0, test_check_gaussian_layout_sync.py passes, and run_module_tests.py
+--guard-only exits 0. Every IndirectDispatch mutation is still red (the
+origin/master guard is green on each). Master's SH check is still red on
+int word = int(packed) -> uint word = uint(packed).
+
+Refs #54
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 25, 2026
+docs: ADR — explicit, signed splat colour encoding (SH sign + DC cont…
+…
+979c590
+```
+…ract) (#1054, #1056) (#1059)
+
+* docs: ADR — explicit, signed splat colour encoding (SH sign + DC contract) (#1054, #1056)
+
+Proposed ADR (awaiting maintainer approval) for the storage contract shared by
+two P1 audit defects: RGB9E5 clamps negative SH coefficients to zero on every
+GPU packing path (GS-AUDIT-SHD-002), and the DC colour encoding is an implicit
+per-splat bit whose zero value means "legacy" (GS-AUDIT-PERS-010).
+
+Enumerates every packer and producer at 0fcefee with file:line, compares
+five signed-SH storage options by bytes/splat, VRAM at 5M, precision and
+quantized-path fit, defines a non-defaulting DC contract without LEGACY_BIAS,
+sets per-format versioning/migration, required acceptance evidence, and a
+five-slice implementation order with risk classes. Indexed in
+docs/architecture/index.md. Docs only.
+
+Refs #1054, Refs #1056
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs: ADR splat colour encoding — accept, and apply review round 1 (#1054, #1056)
+
+Maintainer approved the recommendation (Option E + explicit DC contract) on
+2026-09-23. Review round 1 (Codex inline review on #1059) amends the plan
+without changing the recommended option:
+
+- Container versioning: bump .gsplatworld 1 -> 2 and GSF 2 -> 3 instead of
+  newly rejecting tag 0 under unchanged versions; keep an explicit legacy read
+  route for the old versions that reproduces today's appearance by converting
+  tag-0 splats on the CPU at read (the GPU never decodes LEGACY_BIAS).
+- Random-access loading: validation is a header-level encoding field checked at
+  open plus lazy per-chunk checks at decode, never a whole-payload pre-scan;
+  open-time and bytes-read evidence required.
+- Test rule: fail-on-base applies to defect-reproduction tests; preservation
+  tests are mutation-proven against the new logic.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs: ADR splat colour encoding -- record review round 2 as slice-2 preconditions; slice 1 landed (#1054, #1056)
+
+Codex round 2 on ca0b0aa found three real gaps in the migration design (v1 world
+re-import rejected before the legacy route; legacy GSIF colour deltas applied in the wrong
+space; the exact-appearance promise cannot hold for higher-order SH after slice 1). All three
+only matter when slice 2 is implemented, and slice 2 is not an alpha blocker, so they are
+recorded in section 9 as preconditions that slice 2's PR must resolve, with the direction and
+evidence for each, rather than redesigned now. Code citations re-read on origin/master.
+
+Also records that slice 1 merged as #1062 (with the #1063 view-direction fix) and that the
+dead-decoder deletion is #1064.
+
+Refs #1054, #1056.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs: mark the splat colour-encoding ADR accepted in the architecture index (#1054, #1056)
+
+Codex P2 on 32c6804: the ADR records maintainer approval and a landed slice, but the index
+still said Proposed.
+
+Refs #1054, #1056.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs: ADR splat colour encoding -- fold the CPU colour consumers into slice 2 (#1054, #1056)
+
+Codex P1 on 9d4184d, verified in code: with slice 2 storing DC in coefficient space and
+slice 5 converting the brush (core/gaussian_data_edits.cpp:317-322) and grading bake
+(core/gaussian_data_color_grading.cpp:34-43) only later, every revision in between would
+corrupt edited colours and persist them on save. The consumers need slice 2's display
+helpers, so they join slice 2; slice 5 is retired. Slice 2's evidence gains a brush plus
+grading round trip through save and load. Recorded in section 9, review round 3.
+
+Refs #1054, #1056.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs: ADR splat colour encoding -- the direct runtime-colour APIs join slice 2 (#1054, #1056)
+
+Codex P1 on c89c977, verified in code: set_runtime_color() / apply_color_range() store a
+display Color and commit_runtime_changes() copies it into sh_dc unchanged
+(core/gaussian_data_edits.cpp:121-160, :199-203). They are now named in slice 2, with their own
+commit + save/load evidence; the brush route is not their coverage.
+
+Refs #1054, #1056.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs(adr): record review round 5 (brush undo in slice 2, asset-colour previews in slice 3)
+
+Codex on 28696d8:
+- P1: capture_brush_affected_state() saves raw sh_dc beside display-space
+  overlays and restore_brush_stroke() writes all of them back as runtime
+  colours, so undo would darken un-overlaid splats by 0.5 once slice 2
+  lands. Slice 2 now covers capture/restore, with a stroke/undo/commit/
+  save/load evidence test.
+- P2: the asset preview and gizmo heatmap read GaussianSplatAsset::colors,
+  a coefficient-space lane, as display colour (already 0.5 dark for PLY).
+  Slice 3 converts both readers together with the SPZ decode.
+
+Refs #1054, #1056
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs(adr): record review round 6 (colour thumbnails read coefficient-space asset colours)
+
+Codex P2 on 998b8ef: the import-time colour thumbnail averages
+GaussianSplatAsset::colors unconverted and persists it, so a mid-grey
+splat thumbnails black once SPZ colours become coefficients (already the
+case for PLY). Slice 3 now converts the thumbnail generator with the
+preview and gizmo readers and versions the thumbnail fingerprint, whose
+disk cache would otherwise serve stale images; a stale persisted PLY
+preview image is regenerated or release-noted, not a PLY importer bump.
+
+Refs #1054, #1056
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+* docs(adr): add the slice-2 colour inventory rule; close set_colors and SPZ ordering (round 7)
+
+Rounds 3-7 each found one more DC-colour producer or consumer. Slice 2 now
+carries a class rule: its PR lists a code-derived inventory of every
+producer and consumer of Gaussian::sh_dc and GaussianSplatAsset colours,
+each converted through the display helpers or refusing untagged data, and
+an omitted entry is a review blocker. The known cases are examples.
+
+Codex P1s on 46fe254, closed through the rule:
+- GaussianSplatAsset.set_colors() takes display colours, converts and
+  tags SH_C0 in slice 2; importers move to a coefficient-space setter.
+- The .gsplatworld v2 / GSF v3 writers refuse SPZ-derived (and untagged)
+  data until slice 3 instead of stamping it canonical, with a test.
+
+Refs #1054, #1056
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EZQEqEaRe9X3XiLSE1i1oR
+
+---------
+
+Co-authored-by: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+This was referenced Sep 25, 2026
+Negative spherical-harmonics coefficients are clamped to zero by the unsigned RGB9E5 packing on every production path
+#1054
+Closed
+Starter template renders its splats nearly black: the splat cloud shadows itself under the template's DirectionalLight3D from the refocused camera
+#1089
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+area:shaders
+GLSL shader code
+bug
+Something isn't working
+data-integrity
+Data corruption or validation gap
+user-facing
+Directly affects external users, docs, or public repo surface
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

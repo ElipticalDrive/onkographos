@@ -1,0 +1,204 @@
+--- v001.md
++++ v002.md
+@@ -6,18 +6,16 @@
+ **Inputs and Outputs:**
+ Input: A 4x4 block of HDR texels (typically 32-bit floating point per channel).
+-Output: A BC6H compressed block (128 bits).
++Output: A BC6H compressed block.
+ 
+ **Data Structures:**
+-The BC6H format uses 128 bits per 4x4 block. The specific bit layout depends on the selected mode.
+-- Mode 11: Uses a single partition (all 16 texels share the same endpoints).
+-- Modes 2 and 6: Use two partitions (8 texels each).
++Not given in the sources.
+ 
+ **Parameters:**
+-- `QUALITY`: A macro flag. If defined, the compressor uses Quality mode; otherwise, it uses Fast mode [S1, unofficial].
+-- `LOG2_SPACE`: All arithmetic is performed in log2 space [S1, unofficial].
++- `QUALITY`: A compile-time macro in `compress.hlsl` that toggles between the Fast and Quality presets [S1, unofficial].
++- `LOG2_SPACE`: All arithmetic and endpoint calculations are performed in log2 space rather than linear space to optimize for perceptual error after tone mapping [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1. **Log2 Conversion:** Convert all input texel color values $C$ to log2 space: $L = \log_2(C)$. Handle zero or negative values appropriately (e.g., clamp to a minimum representable value) [G].
++1. **Log2 Conversion:** Convert all input texel color values $C$ to log2 space: $L = \log_2(C)$. Handle zero or negative values by clamping to a minimum representable value [G].
+ 
+ 2. **Mode Selection:**
+@@ -44,84 +42,88 @@
+ 
+ ```python
++import math
++
+ def compress_block(texels_4x4, quality_mode=False):
+-    # Convert to log2 space
+-    # Handle non-positive values by clamping to a small epsilon or minimum representable log2 value
+-    log_texels = [log2_safe(c) for c in texels_4x4]
+-    
++    # texels_4x4: list of 16 tuples/lists of 3 floats (RGB)
++    # Step 1: Log2 Conversion
++    log_texels = []
++    for c in texels_4x4:
++        log_c = [math.log2(max(v, 1e-12)) for v in c] # Clamp to avoid log(0) [G]
++        log_texels.append(log_c)
++
+     if not quality_mode:
+         # Fast Mode: Mode 11
+-        # 1. Compute bounding box of log_texels
+-        min_val = min(log_texels)
+-        max_val = max(log_texels)
+-        
+-        # 2. Order colors by diagonal (simplified: sort by value)
+-        # Note: The source mentions ordering by diagonal, but for Mode 11 (single line),
+-        # sorting by the scalar value along the diagonal is sufficient for least squares.
+-        sorted_texels = sorted(log_texels)
+-        
+-        # 3. Least squares fit for endpoints E0, E1
+-        # For a single line, E0 and E1 are typically the min and max of the fitted line
+-        # or derived from the bounding box. The source says "using least square fit to find optimal endpoints".
+-        # A simple approximation for Mode 11 is to use the min and max of the sorted texels
+-        # or the bounds of the bounding box.
+-        e0 = min_val
+-        e1 = max_val
+-        
+-        # 4. Encode BC6H Mode 11
+-        return encode_bc6h_mode11(e0, e1)
++        # a. Compute color bounding box in log2 space
++        min_val = [min(log_texels[i][j] for i in range(16)) for j in range(3)]
++        max_val = [max(log_texels[i][j] for i in range(16)) for j in range(3)]
++
++        # b. Order colors by a diagonal of this bounding box
++        diagonal = [max_val[j] - min_val[j] for j in range(3)]
++        projected = []
++        for i, c in enumerate(log_texels):
++            proj = sum(c[j] * diagonal[j] for j in range(3))
++            projected.append((proj, i))
++        projected.sort(key=lambda x: x[0])
++        sorted_texels = [log_texels[p[1]] for p in projected]
++
++        # c. Least squares fit for endpoints E0, E1
++        e0 = sorted_texels[0]
++        e1 = sorted_texels[-1]
++
++        # d. Encode BC6H Mode 11
++        return {"mode": 11, "endpoints": [e0, e1]}
+     else:
+         # Quality Mode: Modes 2 and 6
+         best_partition = None
+-        best_error = infinity
+-        
+-        # Iterate through partitions for Mode 2 and Mode 6
+-        for partition in get_partitions_for_modes([2, 6]):
+-            # Split texels into two groups based on partition
+-            group1 = [log_texels[i] for i in partition.group1_indices]
+-            group2 = [log_texels[i] for i in partition.group2_indices]
+-            
++        best_error = float('inf')
++
++        # Iterate through all valid partitions for Modes 2 and 6 (32 total) [G]
++        for p_idx in range(32):
++            mode = 2 if p_idx < 16 else 6
++            # Standard BC6H partition bit patterns [G]
++            bits = p_idx if mode == 2 else p_idx - 16
++            group1_indices = [i for i in range(16) if (bits >> i) & 1]
++            group2_indices = [i for i in range(16) if not ((bits >> i) & 1)]
++
++            group1 = [log_texels[i] for i in group1_indices]
++            group2 = [log_texels[i] for i in group2_indices]
++
+             # Compute bounding box for each group
+-            min1 = min(group1)
+-            max1 = max(group1)
+-            min2 = min(group2)
+-            max2 = max(group2)
+-            
++            min1 = [min(g[j] for g in group1) for j in range(3)]
++            max1 = [max(g[j] for g in group1) for j in range(3)]
++            min2 = [min(g[j] for g in group2) for j in range(3)]
++            max2 = [max(g[j] for g in group2) for j in range(3)]
++
+             # Calculate error as distance of every texel from that line
+-            # For each group, the line is defined by min and max.
+-            # Error is sum of squared distances from the line.
+-            # For a 1D line in log space, distance of a point x from line [a, b] is 0 if x is on the line.
+-            # However, the source says "distance of every texel from that line".
+-            # In 3D color space, this is the perpendicular distance.
+-            # Since we are in log2 space and treating it as a line, we approximate.
+-            # A common approximation is the sum of squared differences from the fitted line.
+-            # For simplicity, we assume the error is the sum of squared distances from the bounding box diagonal.
+-            error1 = sum((x - lerp(min1, max1, t))^2 for x in group1) # Placeholder for actual 3D distance
+-            error2 = sum((x - lerp(min2, max2, t))^2 for x in group2)
+-            total_error = error1 + error2
+-            
++            def line_error(group, min_pt, max_pt):
++                dir_vec = [max_pt[j] - min_pt[j] for j in range(3)]
++                length_sq = sum(d*d for d in dir_vec)
++                if length_sq == 0:
++                    return sum(sum((g[j] - min_pt[j])**2 for j in range(3)) for g in group)
++                error = 0.0
++                for g in group:
++                    t = sum((g[j] - min_pt[j]) * dir_vec[j] for j in range(3)) / length_sq
++                    proj = [min_pt[j] + t * dir_vec[j] for j in range(3)]
++                    dist_sq = sum((g[j] - proj[j])**2 for j in range(3))
++                    error += dist_sq
++                return error
++
++            total_error = line_error(group1, min1, max1) + line_error(group2, min2, max2)
++
+             if total_error < best_error:
+                 best_error = total_error
+-                best_partition = partition
+-        
+-        # Encode best partition
+-        # Similar to Fast Mode, find endpoints for each group
+-        g1_indices = best_partition.group1_indices
+-        g2_indices = best_partition.group2_indices
+-        g1 = [log_texels[i] for i in g1_indices]
+-        g2 = [log_texels[i] for i in g2_indices]
+-        
+-        e0 = min(g1)
+-        e1 = max(g1)
+-        e2 = min(g2)
+-        e3 = max(g2)
+-        
+-        # Determine if Mode 2 or 6 was used
+-        mode = best_partition.mode
+-        return encode_bc6h_mode(mode, e0, e1, e2, e3)
++                best_partition = (mode, group1_indices, group2_indices)
+ 
+-def log2_safe(x):
+-    if x <= 0:
+-        return -128.0 # Minimum representable value [G]
+-    return math.log2(x)
++        # Pass 2: Encode best partition
++        mode, g1_idx, g2_idx = best_partition
++        g1 = [log_texels[i] for i in g1_idx]
++        g2 = [log_texels[i] for i in g2_idx]
++
++        e0 = min(g1, key=lambda x: x[0])
++        e1 = max(g1, key=lambda x: x[0])
++        e2 = min(g2, key=lambda x: x[0])
++        e3 = max(g2, key=lambda x: x[0])
++
++        return {"mode": mode, "endpoints": [e0, e1, e2, e3]}
+ ```
+ 
+@@ -134,5 +136,5 @@
+ **Time and Memory Complexity:**
+ - Fast Mode: Extremely fast. Compresses a 256x256x6 cubemap in 0.02ms on an NV P4000 [S1, unofficial].
+-- Quality Mode: Slower but still real-time. Compresses a 256x256x6 cubemap in 0.528ms on an NV P4000 [S1, unofficial].
++- Quality Mode: Compresses a 256x256x6 cubemap in 0.528ms on an NV P4000 [S1, unofficial].
+ - Memory: Minimal additional memory required for the 4x4 block processing [G].
+ 
+@@ -148,9 +150,9 @@
+ 
+ **When to Use:**
+-- Use Fast Mode when speed is critical and quality comparable to offline "fast" presets is acceptable.
+-- Use Quality Mode when higher fidelity is needed and slightly more time is available.
++- Use Fast Mode when speed is critical and quality comparable to offline "fast" presets is acceptable [S1, unofficial].
++- Use Quality Mode when higher fidelity is needed and slightly more time is available [S1, unofficial].
+ 
+ ## Background
+-GPURealTimeBC6H is an unofficial implementation of a real-time BC6H compressor [S1, unofficial]. It builds on techniques from "Real-Time DXT Compression" by J.M.P. van Waveren (2006) and "High Quality DXT Compression using CUDA" by Ignacio Castaño (2007) [S1, unofficial]. It is used in several released AA/AAA games [S1, unofficial].
++GPURealTimeBC6H is a real-time BC6H compressor that runs on a GPU [S1, unofficial]. It builds on techniques from "Real-Time DXT Compression" by J.M.P. van Waveren (2006) and "High Quality DXT Compression using CUDA" by Ignacio Castaño (2007) [S1, unofficial]. It is used in several released AA/AAA games [S1, unofficial].
+ 
+ ## Sources

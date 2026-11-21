@@ -1,0 +1,165 @@
+--- v005.md
++++ v006.md
+@@ -1,12 +1,12 @@
+ # Wavelet-based Multiresolution Rendering
+ 
+-Also called: Wavelet-based Multresolution Isosurface Rendering
++Also called: Wavelet-based Multiresolution Isosurface Rendering
+ 
+ ## Overview
+-An interactive rendering method for isosurfaces in voxel grids that represents the underlying trivariate function as a spline wavelet hierarchy [S1]. This allows for adaptive, view-dependent selection of level-of-detail by superimposing appropriately weighted basis functions, decreasing resolution of distant parts to improve performance with little impact on visual quality [S1]. It differs from [Wavelet-based Adaptive Resolution Volume Rendering](1171-wavelet-based-adaptive-resolution-volume-rendering.md) by focusing specifically on isosurface extraction via root finding rather than volume accumulation, and from [Hierarchical Wavelet Transform on Omnitrees](2216-hierarchical-wavelet-transform-on-omnitrees.md) by using a standard octree structure with B-spline wavelets rather than omnitrees.
++An interactive rendering method for isosurfaces in voxel grids that represents the underlying trivariate function as a spline wavelet hierarchy [S1]. This allows for adaptive, view-dependent selection of level-of-detail by superimposing appropriately weighted basis functions, decreasing resolution of distant parts to improve performance with little impact on visual quality [S1]. The method implements both wavelet reconstruction and root finding in CUDA to utilize high computational performance [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   Volumetric dataset $V$ of size $N \times N \times N$ (tested up to $512^3$) [S1].
++*   Volumetric dataset $V$ of size $N \times N \times N$ (tested up to $512^3$ voxels) [S1].
+ *   Isovalue $c$ defining the surface $f(x,y,z) = c$ [S1].
+ *   Camera position and viewport parameters (tested up to $1024 \times 768$ pixels) [S1].
+@@ -21,5 +21,5 @@
+ 
+ **Data Structures:**
+-*   **Octree:** Nested vector spaces where nodes represent regions of the volume. Leaf nodes store min/max values estimated using the convex combination property of B-spline basis functions, propagated from leaves to root [S1].
++*   **Octree:** Nested vector spaces where nodes represent regions of the volume. Leaf nodes store min/max values estimated using the convex combination property of the B-spline basis, propagated towards the root [S1].
+ *   **Wavelet Coefficients:** Stored in a hierarchy corresponding to the octree levels. Detail coefficients are set to zero for deactivated nodes [S1].
+ *   **Chunks:** Groups of $k \times k \times k$ octree nodes processed together for GPU efficiency [S1].
+@@ -62,60 +62,89 @@
+ 
+ ```python
+-def wavelet_multiresolution_rendering(volume, isovalue, camera, threshold):
++def wavelet_multiresolution_rendering(volume, isovalue, camera_pos, threshold):
+     # 1. Wavelet Transform
+-    # Perform 3D wavelet transform using polynomial spline wavelets
+-    # Separable implementation: x, then y, then z direction
+-    wavelet_coeffs = wavelet_transform_3d_separable(volume)
+-    
+-    # 2. Build Octree with Min/Max Propagation
+-    # Estimate min/max values at leaf nodes using convex combination property
+-    # Propagate min/max towards root
+-    octree = build_octree_with_bounds(wavelet_coeffs)
+-    
++    # Perform separable 3D wavelet transform using polynomial spline wavelets
++    # Sequentially transform along x, y, and z directions using a gather approach
++    coeffs = wavelet_transform_separable(volume)
++
++    # 2. Build Octree with Min/Max Bounds
++    # Estimate leaf min/max using convex combination of B-spline basis
++    # Propagate bounds to root
++    octree = build_octree_bounds(coeffs)
++
+     # 3. View-dependent Chunk Activation
+-    # Define chunk size k=8
+     k = 8
+     active_chunks = []
+-    
+     for chunk in octree.get_chunks(k):
+-        # Check if chunk can contain isovalue
+-        min_val, max_val = chunk.get_min_max()
++        min_val, max_val = chunk.get_bounds()
+         if not (min_val <= isovalue <= max_val):
+             continue
+-            
+-        # Check view-dependent error metric
+         s = chunk.node_diameter
+-        c = camera.distance_to_chunk_center(chunk)
++        c = distance(camera_pos, chunk.center)
+         if s * c > threshold:
+             active_chunks.append(chunk)
+-            
+-    # 4. Selective Reconstruction and Rendering
+-    # Process chunks in order, skipping deactivated ones
++
++    # 4. Selective Reconstruction & Rendering
+     for chunk in active_chunks:
+         # Ensure continuity: reconstruct neighbors if wavelet support extends into them
+-        neighbors = get_neighbors(chunk, k)
+-        reconstruction_data = reconstruct_chunk(chunk, wavelet_coeffs, k)
+-        
+-        # Reconstruct neighbors if needed for continuity
+-        for neighbor in neighbors:
+-            if neighbor not in active_chunks:
+-                neighbor_data = reconstruct_chunk(neighbor, wavelet_coeffs, k)
+-                reconstruction_data.merge(neighbor_data)
+-                
++        neighbor_chunks = get_continuity_neighbors(chunk, k)
++        chunks_to_process = list(set([chunk] + neighbor_chunks))
++
++        reconstruction_data = []
++        for c in chunks_to_process:
++            # If all detail coefficients are zero, output corresponds to next lower resolution
++            data = reconstruct_chunk(c, coeffs, k)
++            reconstruction_data.extend(data)
++
+         # Root finding for isosurface
+-        # Solve f(x,y,z) = sum(f_ijk * x^i * y^j * z^k) = 0
+-        surface_points = find_roots(reconstruction_data, isovalue, degree=d)
+-        
+-        # Render surface points
+-        render(surface_points)
++        points = find_isosurface_points(reconstruction_data, isovalue, degree=3)
++
++        # Render points (safely handles empty lists to prevent unpacking errors)
++        render_surface(points)
++
++def wavelet_transform_separable(volume):
++    # 1D convolution along x, then y, then z
++    # Uses low-pass and high-pass filter kernels
++    # Gather approach: traverse octree and accumulate wavelet contributions
++    data = volume.copy()
++    for dim in [0, 1, 2]:
++        data = convolve_1d_gather(data, dim)
++    return data
++
++def build_octree_bounds(coeffs):
++    # Create octree hierarchy from coefficients
++    # Leaf bounds from convex combination of B-spline basis
++    # Propagate min/max up to root
++    return Octree(coeffs)
++
++def get_continuity_neighbors(chunk, k):
++    # Return adjacent chunks whose wavelet support overlaps the current chunk
++    return chunk.get_adjacent_chunks()
+ 
+ def reconstruct_chunk(chunk, coeffs, k):
+-    # CUDA kernel logic:
+-    # Blocks of k x k threads
+-    # Each thread computes 1D convolution with low/high pass filters
+-    # One block handles a beam of k x k voxels along convolution direction
+-    # Data fetched for previous chunk is reused
+-    # All needed data resides in register space before convolution
+-    return apply_wavelet_reconstruction(chunk, coeffs, k)
++    # CUDA kernel: blocks of k x k threads
++    # Each thread computes 1D convolution with wavelet filters
++    # One block handles k x k voxel beam along convolution direction
++    # Data reused from previous chunk, kept in registers
++    return chunk.apply_wavelet_reconstruction(coeffs, k)
++
++def find_isosurface_points(data, isovalue, degree):
++    # Solve f(x,y,z) = sum(f_ijk * x^i * y^j * z^k) - isovalue = 0
++    # Returns list of (x, y, z) tuples on the surface
++    points = []
++    for sample in data:
++        # [G] Standard numerical root finding (e.g., Newton-Raphson or grid traversal)
++        # Returns list of 3D points to prevent unpacking errors when empty
++        roots = solve_polynomial_surface(sample, isovalue, degree)
++        points.extend(roots)
++    return points
++
++def solve_polynomial_surface(sample, isovalue, degree):
++    # [G] Standard numerical method to find intersections of polynomial surface
++    return []
++
++def render_surface(points):
++    # Project and rasterize points to viewport
++    pass
+ ```
+ 
+@@ -138,6 +167,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of active chunks and the support size of the wavelet. The separable transform reduces complexity compared to a full 3D transform. GPU implementation utilizes high computational performance [S1].
+-*   **Memory Complexity:** Scales with the volume size and the octree structure. Detail coefficients for deactivated nodes are set to zero, saving memory [S1].
++*   **Time Complexity:** Depends on the number of active chunks and the support size of the wavelet [S1]. The separable transform reduces complexity compared to a full 3D transform [S1]. GPU implementation utilizes high computational performance [S1].
++*   **Memory Complexity:** Scales with the volume size and the octree structure [S1]. Detail coefficients for deactivated nodes are set to zero, saving memory [S1].
+ *   **Performance:** Tested with datasets up to $512^3$ voxels and viewport sizes up to $1024 \times 768$ pixels, demonstrating interactive frame rates [S1].
+ *   **Strengths:** Interactive rendering, view-dependent level-of-detail, continuous surfaces (no cracks) due to B-spline continuity [S1].

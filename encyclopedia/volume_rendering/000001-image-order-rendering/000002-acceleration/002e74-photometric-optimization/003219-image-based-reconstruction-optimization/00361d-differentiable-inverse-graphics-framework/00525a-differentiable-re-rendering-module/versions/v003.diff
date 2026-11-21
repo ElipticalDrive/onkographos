@@ -1,0 +1,164 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Predicted intrinsic properties (albedo $\tilde{A}$, normals $\tilde{N}$, depth $\tilde{D}$) and a predicted 3D lighting volume $\hat{L}$ represented by VSGs.
++*   **Inputs:** Predicted intrinsic properties (albedo $\tilde{A}$, normals $\tilde{N}$, depth $\tilde{D}$) and a predicted 3D lighting volume $\hat{L}$ represented by VSGs [S1].
+ *   **Outputs:** A re-rendered Low Dynamic Range (LDR) image $\tilde{I}$, which is compared against the ground-truth input image $I$ to compute the loss for joint training [S1].
+ 
+@@ -22,6 +22,6 @@
+     $$ \tilde{S}_p = \sum_{l \in \{l\}_K} R(p, l, \hat{L}) \max(l \cdot \tilde{N}_p, 0) \Delta \Omega $$
+     where $\tilde{N}_p$ is the predicted normal at $p$, $\max(l \cdot \tilde{N}_p, 0)$ is the Lambertian diffuse term, and $\Delta \Omega$ is the differential solid angle associated with each direction in the Fibonacci lattice [S1].
+-5.  **Albedo Modulation and Energy Conservation:** Multiply the shading by the predicted albedo $\tilde{A}_p$ and apply the energy conservation ratio $\pi_1$ [S1]:
+-    $$ \text{HDR Value}_p = \pi_1 \cdot \tilde{A}_p \cdot \tilde{S}_p $$
++5.  **Albedo Modulation and Energy Conservation:** Multiply the shading by the predicted albedo $\tilde{A}_p$ element-wise and apply the energy conservation ratio $\pi_1$ [S1]:
++    $$ \text{HDR Value}_p = \pi_1 \cdot (\tilde{A}_p \otimes \tilde{S}_p) $$
+ 6.  **Soft Clipping:** Apply the soft clipping function $\phi$ to convert the HDR value to an LDR value within $[0, 1]$, ensuring differentiability [S1]:
+     $$ \tilde{I}_p = \phi(\text{HDR Value}_p) $$
+@@ -40,5 +40,5 @@
+ *   **Soft Clipping Function:**
+     $$ \phi(x) = \begin{cases} x & \text{if } x \le \tau \\ \tau + (1 - \tau)(1 - e^{-\frac{x-\tau}{1-\tau}}) & \text{if } x > \tau \end{cases} $$
+-    *Note: The source text provides a garbled formula for $x > \tau$ as $x-\tau / (1-(1-\tau)e^{-...})$. The standard soft clipping with exponential function implied by context and common practice in differentiable rendering is used here [S1].*
++    *Note: The source text provides a garbled formula for $x > \tau$. The standard soft clipping with exponential function implied by context is used here [S1].*
+     *   $\tau$: Threshold for soft clipping, set to 0.9 [S1].
+ 
+@@ -52,63 +52,49 @@
+ **Pseudocode:**
+ ```python
+-def differentiable_re_rendering(pixels, predicted_depth, predicted_normals, predicted_albedo, lighting_volume, k=50, tau=0.9, pi_1=1.0):
++import math
++
++def differentiable_re_rendering(predicted_depth, predicted_normals, predicted_albedo, lighting_volume, k=50, tau=0.9, pi_1=1.0):
+     """
+     Re-renders the input image using predicted intrinsics and VSG lighting.
+-    
+-    Args:
+-        pixels: List of pixel coordinates (x, y) or image dimensions.
+-        predicted_depth: 2D array of predicted depth values D_tilde.
+-        predicted_normals: 3D array (H, W, 3) of predicted normals N_tilde.
+-        predicted_albedo: 3D array (H, W, 3) of predicted albedo A_tilde.
+-        lighting_volume: Function or data structure to query radiance R(p, l, L_hat).
+-        k: Number of lighting directions to sample.
+-        tau: Soft clipping threshold.
+-        pi_1: Energy conservation ratio.
+-        
+-    Returns:
+-        re_rendered_image: 2D array of LDR RGB values.
+     """
+-    h, w = predicted_depth.shape
+-    re_rendered_image = np.zeros((h, w, 3))
++    h = len(predicted_depth)
++    w = len(predicted_depth[0])
++    re_rendered_image = [[None] * w for _ in range(h)]
+     
+     # Precompute lighting directions using Fibonacci lattice on upper hemisphere
+     lighting_directions = fibonacci_lattice_upper_hemisphere(k)
+     
+-    # Precompute differential solid angle (constant for uniform Fibonacci lattice)
+-    delta_omega = 4 * np.pi / (2 * k) # Approximation for upper hemisphere sampling density
++    # Differential solid angle for K points on a hemisphere
++    delta_omega = 2 * math.pi / k
+     
+     for y in range(h):
+         for x in range(w):
+             # Step 1: Determine 3D location
+-            depth_val = predicted_depth[y, x]
+-            # Note: Actual 3D coordinate calculation requires camera intrinsics, 
+-            # but the formula uses p = (x_p, y_p, D_tilde_p) as the query point.
+-            # We assume the lighting volume is queried at this depth along the ray.
+-            # For simplicity, we pass the depth and pixel coords to the query function.
++            depth_val = predicted_depth[y][x]
+             point_3d = (x, y, depth_val)
+             
+             # Step 2 & 3: Query radiance for each lighting direction
+-            shading_sum = np.zeros(3)
++            shading_sum = [0.0, 0.0, 0.0]
+             for l in lighting_directions:
+-                # Query radiance from VSG lighting volume
+-                # R(p, l, L_hat) returns a 3D vector (RGB radiance)
++                # Query radiance from VSG lighting volume (Eq. 2 not provided in sources)
+                 radiance = lighting_volume.query(point_3d, l)
+                 
+                 # Lambertian diffuse term
+-                normal = predicted_normals[y, x]
+-                dot_product = np.dot(l, normal)
++                normal = predicted_normals[y][x]
++                dot_product = l[0]*normal[0] + l[1]*normal[1] + l[2]*normal[2]
+                 diffuse_term = max(dot_product, 0.0)
+                 
+                 # Accumulate shading
+-                shading_sum += radiance * diffuse_term * delta_omega
++                for c in range(3):
++                    shading_sum[c] += radiance[c] * diffuse_term * delta_omega
+             
+             # Step 4 & 5: Albedo modulation and energy conservation
+-            albedo = predicted_albedo[y, x]
+-            hdr_value = pi_1 * albedo * shading_sum
++            albedo = predicted_albedo[y][x]
++            hdr_value = [pi_1 * albedo[c] * shading_sum[c] for c in range(3)]
+             
+             # Step 6: Soft clipping
+             ldr_value = soft_clip(hdr_value, tau)
+             
+-            re_rendered_image[y, x] = ldr_value
++            re_rendered_image[y][x] = ldr_value
+             
+     return re_rendered_image
+@@ -118,9 +104,5 @@
+     Soft clipping function to map HDR values to LDR [0, 1].
+     """
+-    if x <= tau:
+-        return x
+-    else:
+-        # Standard soft clipping with exponential function
+-        return tau + (1 - tau) * (1 - np.exp(-(x - tau) / (1 - tau)))
++    return [tau + (1 - tau) * (1 - math.exp(-(v - tau) / (1 - tau))) if v > tau else v for v in x]
+ 
+ def fibonacci_lattice_upper_hemisphere(k):
+@@ -129,24 +111,19 @@
+     """
+     directions = []
++    golden_angle = math.pi * (1 + math.sqrt(5))
+     for i in range(k):
+-        # Fibonacci lattice parameterization for upper hemisphere
+-        # y = 1 - (2*i + 1)/k + 1/k  (normalized 0 to 1 for upper hemisphere)
+-        # theta = arccos(y)
+-        # phi = pi * (1 + sqrt(5)) * i
+         y = 1.0 - (2 * i + 1) / k
+-        theta = np.arccos(y)
+-        phi = np.pi * (1 + np.sqrt(5)) * i
++        theta = math.acos(y)
++        phi = golden_angle * i
+         
+-        # Convert spherical to Cartesian
+-        x_coord = np.sin(theta) * np.cos(phi)
+-        y_coord = np.sin(theta) * np.sin(phi)
+-        z_coord = np.cos(theta)
++        x_coord = math.sin(theta) * math.cos(phi)
++        y_coord = math.sin(theta) * math.sin(phi)
++        z_coord = math.cos(theta)
+         
+-        directions.append(np.array([x_coord, y_coord, z_coord]))
++        directions.append((x_coord, y_coord, z_coord))
+     return directions
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The soft clipping function must be implemented carefully to ensure numerical stability near the threshold $\tau$ [S1].
+ *   **Boundaries:** The lighting volume query must handle points outside the defined volume or near boundaries gracefully [G].
+ *   **Degenerate Input:** If predicted depth is invalid (e.g., zero or negative), the 3D location is undefined, leading to errors in lighting query [G].
+@@ -159,5 +136,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** The re-rendering step involves $K$ ray queries per pixel. With $K=50$ and ray sharing among 8-neighbors, the effective cost is equivalent to $K=450$ rays per pixel [S1].
+-*   **Memory Complexity:** Requires storing the 3D lighting volume $\hat{L}$ and intrinsic maps. The source notes that GPU memory usage is comparable to Lighthouse's 15G during training [S1].
++*   **Memory Complexity:** Requires storing the 3D lighting volume $\hat{L}$ and intrinsic maps [S1].
+ *   **Measured Performance:** On a TITAN V GPU, the inference time for the Differentiable Re-rendering Module is 140ms, while the Direct Prediction, Lighting Joint Prediction, and Joint Re-prediction Modules take 20ms, 130ms, and 12ms respectively [S1].
+ *   **Scaling:** The method uses a fixed re-rendering resolution of $60 \times 80$ during training, which limits the resolution of the supervision signal but reduces computational cost [S1].
+@@ -168,5 +145,5 @@
+ 
+ ## Background
+-The Differentiable Re-rendering Module was introduced in the paper "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" by [S1] in 2021. It is part of a holistic inverse rendering framework that leverages a Volumetric Spherical Gaussian (VSG) representation for lighting. The method was designed to address the lack of HDR ground-truth data by using a differentiable renderer to supervise the learning of intrinsic properties and lighting from LDR images [S1]. It is used in the context of indoor scene reconstruction and inverse rendering, particularly for estimating spatially-varying lighting from single images [S1].
++The Differentiable Re-rendering Module was introduced in the paper "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" by [S1] in 2021. It is part of a holistic inverse rendering framework that leverages a Volumetric Spherical Gaussian (VSG) representation for lighting [S1]. The method was designed to address the lack of HDR ground-truth data by using a differentiable renderer to supervise the learning of intrinsic properties and lighting from LDR images [S1]. It is used in the context of indoor scene reconstruction and inverse rendering, particularly for estimating spatially-varying lighting from single images [S1].
+ 
+ ## Sources

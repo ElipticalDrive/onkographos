@@ -1,0 +1,68 @@
+# Progressive GAN Discriminator
+
+Also called: Progressive Growing Discriminator
+
+## Overview
+A convolutional discriminator that grows progressively in resolution to stabilize training and allow larger batch sizes at lower resolutions [S1]. It solves the instability inherent in training high-resolution GANs by starting with coarse shapes and gradually introducing fine details [S1]. Unlike standard ProgressiveGAN where the generator architecture grows, this variant keeps the generator fixed, increasing resolution by sampling rays more densely from the same implicit representation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Real or generated image patches (RGB, optionally RGB-D) at the current training resolution.
+*   Output: A scalar score indicating the probability that the input is real [S2].
+
+**Data Structures:**
+*   The discriminator is a convolutional neural network.
+*   It utilizes residual blocks and a minibatch standard deviation layer [S2].
+*   If depth is included, it is normalized to $[0, 1]$ [S2].
+
+**Steps:**
+1.  **Initialization:** Begin training at a low resolution (e.g., $32 \times 32$) with a large batch size [S1].
+2.  **Progressive Growth:** Double the resolution twice during training, up to $128 \times 128$ [S1].
+3.  **Layer Addition:** Add new layers to the discriminator to handle higher resolutions and discriminate fine details as resolution increases [S1].
+4.  **Final Rendering:** Final results are rendered by sampling $512 \times 512$ pixels, though training occurs at lower resolutions [S1].
+5.  **Discriminator Forward Pass (Standard):**
+    *   Input RGB-D.
+    *   Normalize depth to $[0, 1]$ [S2].
+    *   Apply Conv($3 \times 3$) [S2].
+    *   Pass through Residual Blocks [S2].
+    *   Apply Minibatch standard deviation [S2].
+    *   Apply Conv($3 \times 3$) [S2].
+    *   Flatten features [S2].
+    *   Apply two Linear layers [S2].
+    *   Output: 1 [S2].
+6.  **Discriminator Forward Pass (With Decoder/Refinement):**
+    *   Input: $4 \times 4$ feature maps from the discriminator (before minibatch standard deviation) [S2].
+    *   Apply successive transposed convolutions with stride 2 and bilinear filtering to upsample [S2].
+    *   Apply Conv($3 \times 3$) [S2].
+    *   Apply activation [S2].
+    *   Output: $4 \times 64 \times 64$ [S2].
+
+**Parameters:**
+*   Initial Resolution: $32 \times 32$ [S1].
+*   Final Training Resolution: $128 \times 128$ [S1].
+*   Final Rendering Resolution: $512 \times 512$ [S1].
+*   Depth Normalization: $[0, 1]$ [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Resolution Mismatch:** If the radiance field network is sampled at a lower resolution than the final output, generated depth maps will have lower resolution than real examples [S2].
+*   **Mitigation:** To prevent the discriminator from exploiting this detail difference, downsample all real depth maps to match the generated depth map resolution, then upsample both back to full resolution [S2].
+
+## Subtopics
+
+### [Progressive Patch Scaling](17543-progressive-patch-scaling.md)
+Progressive Patch Scaling is a training strategy for 3D GAN discriminators that operates on image patches of varying scales rather than full-resolution images, allowing the model to learn multi-scale features progressively. It solves the instability and diversity issues inherent in training 3D GANs from limited 2D observations by gradually reducing the scale of image patches used for training, starting from large sub-regions to smaller ones. Unlike methods that apply super-resolution modules to rendered values, this approach directly discriminates RGB color images or patches, relying on the progressive reduction of patch scale to stabilize training and promote diversity.
+
+### Discriminator and Decoder
+The discriminator evaluates real vs. fake samples using residual blocks and minibatch standard deviation [S2]. The decoder upsamples feature maps to original resolution [S2]. The discriminator input is RGB-D, with depth normalized to $[0, 1]$ [S2]. The process involves a Conv($3 \times 3$), Residual Blocks, Minibatch stdev, Conv($3 \times 3$), Flatten, and two Linear layers, outputting a single scalar [S2]. The decoder takes $4 \times 4$ feature maps, applies successive transposed convolutions with stride 2 and bilinear filtering, a Conv($3 \times 3$), and an activation, outputting $4 \times 64 \times 64$ [S2]. A key pitfall is that if the radiance field is sampled at lower resolution than the output, generated depth maps lack detail compared to real ones; this is mitigated by downsampling real depth maps to match generated resolution before upsampling both back to full resolution [S2].
+
+## Operating characteristics
+*   **Stability:** Allows larger batch sizes at the beginning of training, which helps to stabilize and speed training [S1].
+*   **Resolution Scaling:** Training resolution is limited to $128 \times 128$ in standard experiments, while final rendering uses $512 \times 512$ [S1].
+*   **Generator Independence:** The generator architecture does not grow; resolution is increased by sampling rays more densely from the same implicit representation [S1].
+
+## Background
+Originated from ProgressiveGAN [25] (cited in [S1]), this method was adapted for 3D-aware image synthesis in pi-GAN [S1] and unconstrained scene generation [S2]. It addresses the difficulty of training GANs at high resolutions by progressively introducing detail.
+
+## Sources
+[S1] pi-GAN: Periodic Implicit Generative Adversarial Networks for 3D-Aware Image Synthesis, https://doi.org/10.1109/cvpr46437.2021.00574, fetched 2026-10-26
+[S2] Unconstrained Scene Generation with Locally Conditioned Radiance Fields, https://doi.org/10.1109/iccv48922.2021.01404, fetched 2026-10-26

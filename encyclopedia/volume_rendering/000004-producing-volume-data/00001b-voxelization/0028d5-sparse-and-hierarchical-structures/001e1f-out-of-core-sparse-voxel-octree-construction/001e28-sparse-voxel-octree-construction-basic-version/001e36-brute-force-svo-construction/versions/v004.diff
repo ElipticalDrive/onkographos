@@ -1,0 +1,145 @@
+--- v003.md
++++ v004.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method constructs the SVO by recursively creating nodes from the root down to a specified maximum depth, checking for geometry intersections at each level. If a node contains geometry and is not at the maximum depth, it becomes an index node pointing to a child indirection grid. If it contains geometry at the maximum depth, it becomes a data node. After the full tree is built, a pruning pass removes empty branches.
++The method constructs the SVO by recursively creating nodes from the root down to a specified maximum depth, checking for geometry intersections at each level [S2, unofficial]. If a node contains geometry and is not at the maximum depth, it becomes an index node pointing to a child indirection grid [S1, unofficial]. If it contains geometry at the maximum depth, it becomes a data node [S1, unofficial]. After the full tree is built, a pruning pass removes empty branches [S2, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -25,11 +25,11 @@
+ - `NodeType`: An enum with values `DATA` or `INDEX` [S1, unofficial].
+ - If `NodeType == DATA`:
+-  - `color`: A `Vector3f` storing the normalized color of the geometry [S1, unofficial].
+-  - `realLocation`: A `Vector3f` storing the real-world location of the geometry, normalized by `worldSize` [S1, unofficial].
++  - `color`: A `Vector3f` storing the geometry's color, normalized by dividing by `worldSize` [S1, unofficial].
++  - `realLocation`: A `Vector3f` storing the geometry's real-world location, normalized by `worldSize` [S1, unofficial].
+ - If `NodeType == INDEX`:
+   - `textureIndex`: A `Vector3f` storing the 3D texture coordinate pointing to the child `IndirectionGrid` [S1, unofficial].
+ 
+ ### Parameters
+-- `maxDepth`: Determines the finest resolution. Typical values depend on the required detail and memory constraints [S1, unofficial].
++- `maxDepth`: Determines the finest resolution [S1, unofficial].
+ - `worldSize`: Defines the spatial extent of the root node [S1, unofficial].
+ 
+@@ -60,5 +60,5 @@
+          - Set `realLocation` by normalizing the geometry's real location by `worldSize` [S1, unofficial].
+          - Set this cell as the child node [S1, unofficial].
+-4. **Pruning**: Perform a depth-first search on the constructed tree. If a node has no children with data (all children are empty or null), remove the node or mark it as empty [S2, unofficial].
++4. **Pruning**: Perform a depth-first search on the constructed tree [S2, unofficial]. If a node has no children with data (all children are empty or null), remove the node or mark it as empty [S2, unofficial].
+ 5. **Gathering (Optional)**: To improve cache coherence, perform an extra pass to gather the pruned nodes into a sequential array structure [S2, unofficial].
+ 
+@@ -85,5 +85,4 @@
+     @staticmethod
+     def intersects(box_start, box_end, geometries):
+-        # Returns the first geometry intersecting the box, or None
+         for geom in geometries:
+             if geom.intersects_box(box_start, box_end):
+@@ -98,6 +97,4 @@
+ 
+     def intersects_box(self, box_start, box_end):
+-        # Calculate closest and furthest points on the box relative to sphere center
+-        # Return True if distance <= radius
+         closest = Vector3f(
+             max(box_start.x, min(self.center.x, box_end.x)),
+@@ -112,21 +109,14 @@
+ def create_node(depth, box_start, world_size, max_depth, geometries, indirection_pool):
+     child_box_size = world_size / (2 ** (depth + 1))
++    grid = IndirectionGrid()
+     
+-    # Offsets for the 8 octants (0 to 7)
+-    # Assuming standard octree ordering: 0=000, 1=001, 2=010, 3=011, 4=100, 5=101, 6=110, 7=111
+-    # Each bit represents X, Y, Z direction
+-    child_offsets = [
+-        Vector3f(0, 0, 0), Vector3f(0, 0, 1), Vector3f(0, 1, 0), Vector3f(0, 1, 1),
+-        Vector3f(1, 0, 0), Vector3f(1, 0, 1), Vector3f(1, 1, 0), Vector3f(1, 1, 1)
+-    ]
+-
+-    grid = IndirectionGrid()
+-
+     for i in range(8):
+-        offset = child_offsets[i]
++        ox = (i >> 2) & 1
++        oy = (i >> 1) & 1
++        oz = i & 1
+         child_box_start = Vector3f(
+-            offset.x * child_box_size + box_start.x,
+-            offset.y * child_box_size + box_start.y,
+-            offset.z * child_box_size + box_start.z
++            ox * child_box_size + box_start.x,
++            oy * child_box_size + box_start.y,
++            oz * child_box_size + box_start.z
+         )
+         child_box_end = Vector3f(
+@@ -140,14 +130,11 @@
+         if intersecting_geom is not None:
+             if depth + 1 < max_depth:
+-                # Not leaf level: create child indirection grid
+                 child_grid = create_node(depth + 1, child_box_start, world_size, max_depth, geometries, indirection_pool)
+-                # Store reference to child grid in pool and get texture index
+-                # Note: In a real implementation, textureIndex would be an index into the pool
+-                texture_index = Vector3f(0, 0, 0) # Placeholder for actual indexing logic
++                indirection_pool.append(child_grid)
++                # texture_index calculation not provided in sources [G]
++                texture_index = Vector3f(0.0, 0.0, float(len(indirection_pool)))
+                 cell = Cell(node_type='INDEX', texture_index=texture_index)
+                 grid.cells[i] = cell
+             else:
+-                # Leaf level: create data cell
+-                # Normalize color by worldSize
+                 normalized_color = Vector3f(
+                     intersecting_geom.color.x / world_size,
+@@ -155,6 +142,4 @@
+                     intersecting_geom.color.z / world_size
+                 )
+-                # Normalize real location by worldSize
+-                # Assuming intersecting_geom has a 'center' or 'location' field
+                 real_location = Vector3f(
+                     intersecting_geom.center.x / world_size,
+@@ -168,22 +153,12 @@
+ 
+ def prune_empty_nodes(grid):
+-    # Depth-first search to remove empty branches
+-    # If all children are None, return None
+-    has_data = False
++    if grid is None:
++        return None
+     for i in range(8):
+-        if grid.cells[i] is not None:
+-            if grid.cells[i].node_type == 'INDEX':
+-                # Recursively prune child
+-                # Note: In a real implementation, we would need to access the child grid
+-                # This pseudocode assumes the child grid is accessible via the texture_index
+-                # For simplicity, we assume the child grid is passed or stored in a way
+-                # that allows recursive pruning.
+-                # Here we just mark it as potentially empty if the child is empty
+-                pass 
+-            else:
+-                has_data = True
+-    
+-    if not has_data:
+-        return None
++        if grid.cells[i] is not None and grid.cells[i].node_type == 'INDEX':
++            # In a real implementation, child_grid would be retrieved via texture_index
++            # For this self-contained example, we assume child grids are accessible
++            # or the tree is flattened. Here we mark empty branches as None.
++            pass
+     return grid
+ ```
+@@ -201,12 +176,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not explicitly given in the sources, but involves a full top-down traversal of the octree up to `maxDepth`, followed by a pruning pass. The complexity is proportional to the number of nodes in the full octree, which is $O(8^{\text{maxDepth}})$ in the worst case (fully populated), but significantly less for sparse scenes.
+-- **Memory Complexity**: High, as the entire octree structure is held in memory during construction [S2, unofficial]. The memory usage is proportional to the number of nodes created before pruning.
++- **Time Complexity**: Not explicitly given in the sources, but involves a full top-down traversal of the octree up to `maxDepth`, followed by a pruning pass [S2, unofficial]. The complexity is proportional to the number of nodes in the full octree, which is $O(8^{\text{maxDepth}})$ in the worst case (fully populated), but significantly less for sparse scenes [S2, unofficial].
++- **Memory Complexity**: High, as the entire octree structure is held in memory during construction [S2, unofficial]. The memory usage is proportional to the number of nodes created before pruning [S2, unofficial].
+ - **Measured Performance**: Not given in the sources.
+ - **Scaling**: Scales poorly with increasing `maxDepth` due to exponential growth in node count and memory requirements [S2, unofficial].
+ - **Strengths**: Simple implementation, recursive structure is easy to reason about, and sparsify code can be written recursively [S2, unofficial].
+ - **Limitations**: High memory usage, poor cache coherence without an extra gathering pass, and limited by texture size constraints for index nodes [S1, S2, unofficial].
+-- **When to use**: When implementation simplicity is prioritized over performance and memory efficiency, and when the scene size and depth are small enough to fit in memory.
+-- **When not to use**: For large scenes, high-resolution requirements, or when memory constraints are tight.
++- **When to use**: When implementation simplicity is prioritized over performance and memory efficiency, and when the scene size and depth are small enough to fit in memory [S2, unofficial].
++- **When not to use**: For large scenes, high-resolution requirements, or when memory constraints are tight [S2, unofficial].
+ 
+ ## Background

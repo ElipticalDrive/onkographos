@@ -1,0 +1,177 @@
+# Similarity Theory / High-Order Similarity Relations
+
+Also called: Equivalence Classes in RTE, Order-N Similarity, Similarity Relations, Similarity Theory for Radiative Transfer
+
+## Overview
+Similarity Theory identifies equivalence classes within the Radiative Transfer Equation (RTE) parameter space, where distinct sets of scattering parameters produce identical (or approximately identical) solution radiance fields, provided the radiance is band-limited in the spherical harmonics domain [S1]. It enables the replacement of difficult-to-simulate scattering parameters (e.g., highly forward-scattering or optically dense media) with equivalent, easier-to-simulate parameters that reduce the number of scattering events required, thereby accelerating forward rendering [S1]. Unlike first-order methods like the diffusion approximation, which only preserve the first Legendre moment and assume linear anisotropy, higher-order similarity relations preserve higher angular frequencies of the phase function, offering finer partitions of the parameter space and higher accuracy for complex scattering behaviors [S1].
+
+## How it works
+The method transforms original scattering parameters $(\sigma_t, \sigma_s, f)$ into altered parameters $(\sigma_t^*, \sigma_s^*, f^*)$ such that the altered RTE yields the same radiance solution as the original.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Original extinction coefficient $\sigma_t$ (or $\sigma_a, \sigma_s$).
+    *   Original scattering coefficient $\sigma_s$.
+    *   Original phase function $f(\boldsymbol{\omega}' \cdot \boldsymbol{\omega})$.
+    *   User-defined accuracy/performance trade-off parameter $\alpha \in (0, 1)$ [S1].
+    *   Order of similarity $N$ (integer $\ge 1$) [S1].
+*   **Outputs:**
+    *   Altered extinction coefficient $\sigma_t^*$.
+    *   Altered scattering coefficient $\sigma_s^*$.
+    *   Altered phase function $f^*(\boldsymbol{\omega}' \cdot \boldsymbol{\omega})$, typically represented as a tabulated function or defined by its Legendre moments.
+
+### Data Structures
+*   **Phase Function Representation:** The phase function $f$ is represented by its Legendre moments $f_n$.
+    *   $f_n$: The $n$-th Legendre moment of the phase function.
+    *   Storage: An array or list of moments $[f_0, f_1, \dots, f_N]$ for the original phase function, and $[f_0^*, f_1^*, \dots, f_N^*]$ for the altered phase function.
+    *   Note: $f_0 = 1$ and $f_0^* = 1$ by definition of probability density [S1].
+
+### Formulas
+The phase function $f$ is expanded in spherical harmonics or Legendre polynomials:
+$$ f(\boldsymbol{\omega}' \cdot \boldsymbol{\omega}) = \sum_{n=0}^{\infty} \frac{2n+1}{4\pi} f_n P_n(\boldsymbol{\omega}' \cdot \boldsymbol{\omega}) $$
+where $P_n$ is the $n$-th Legendre polynomial, and the moments are:
+$$ f_n = 2\pi \int_{-1}^{1} f(t) P_n(t) dt $$
+The altered parameters must satisfy the **Similarity Relations of Order N** [S1]:
+1.  **Absorption/Extinction:**
+    $$ \sigma_a = \sigma_a^* $$
+    Consequently, $\sigma_t^* = \sigma_a^* + \sigma_s^* = \sigma_a + \sigma_s^*$.
+2.  **Scattering and Phase Moments ($1 \le n \le N$):**
+    $$ \sigma_s (1 - f_n) = \sigma_s^* (1 - f_n^*) $$
+
+### Parameters
+*   **$\alpha \in (0, 1)$:** A user-provided parameter controlling the trade-off between performance and accuracy [S1]. In practice, this parameter is used to select the target $\sigma_s^*$ or the order $N$, effectively scaling the scattering coefficient to reduce optical density while maintaining appearance fidelity within the band-limit assumption [S1].
+*   **$N$:** The order of the similarity relation. Higher $N$ preserves more angular detail but requires solving for more moments [S1].
+
+### Steps
+1.  **Compute Original Moments:** Calculate the Legendre moments $f_n$ of the original phase function $f$ for $n = 0, \dots, N$.
+2.  **Determine Altered Scattering Coefficient:** Choose $\sigma_s^*$ based on the desired performance gain (e.g., using $\alpha$). A common approach is to reduce $\sigma_s$ to lower the optical density, subject to the constraint that $\sigma_s^* < \sigma_s$ for acceleration [S1].
+3.  **Compute Altered Moments:** For each $n$ from $1$ to $N$, compute the required altered Legendre moments $f_n^*$ using the similarity relation:
+    $$ f_n^* = 1 - \frac{\sigma_s}{\sigma_s^*} (1 - f_n) $$
+    Note: If $\sigma_s^* = 0$, this step is undefined; however, $\sigma_s^*$ is typically chosen $>0$ [S1].
+4.  **Reconstruct Altered Phase Function:** Solve for the tabulated function $f^*(\cdot)$ that matches the computed moments $f_n^*$. This is an inverse moment problem. A common numerical approach is to use a least-squares fit or a constrained optimization to find a valid probability density function $f^*$ that minimizes the error against the target moments $f_n^*$ [S1].
+5.  **Replace Parameters:** Substitute the original parameters $(\sigma_t, \sigma_s, f)$ with the altered parameters $(\sigma_t^*, \sigma_s^*, f^*)$ in the base volume rendering method [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_altered_parameters(sigma_s, sigma_a, phase_function_moments, alpha, order_N):
+    """
+    Computes altered scattering parameters using Similarity Theory.
+    
+    Args:
+        sigma_s: Original scattering coefficient.
+        sigma_a: Original absorption coefficient.
+        phase_function_moments: List of original Legendre moments [f_0, f_1, ..., f_N].
+        alpha: Trade-off parameter in (0, 1). Lower alpha implies more reduction in sigma_s.
+        order_N: Order of similarity relation.
+        
+    Returns:
+        sigma_s_star: Altered scattering coefficient.
+        sigma_a_star: Altered absorption coefficient.
+        moments_star: List of altered Legendre moments [f_0*, f_1*, ..., f_N*].
+    """
+    # Step 1: Determine altered scattering coefficient
+    # The source mentions alpha controls the trade-off. 
+    # A simple linear scaling is a common interpretation for alpha in this context,
+    # though the exact mapping from alpha to sigma_s_star is implementation-specific.
+    # We assume sigma_s_star = alpha * sigma_s for demonstration, 
+    # ensuring sigma_s_star > 0.
+    sigma_s_star = alpha * sigma_s
+    
+    # Guard against division by zero
+    if sigma_s_star <= 0:
+        raise ValueError("Altered scattering coefficient must be positive.")
+
+    # Step 2: Compute altered moments
+    moments_star = []
+    
+    # f_0 is always 1 for probability density functions
+    moments_star.append(1.0)
+    
+    for n in range(1, order_N + 1):
+        f_n = phase_function_moments[n]
+        
+        # Similarity relation: sigma_s * (1 - f_n) = sigma_s_star * (1 - f_n_star)
+        # Solving for f_n_star:
+        # 1 - f_n_star = (sigma_s / sigma_s_star) * (1 - f_n)
+        # f_n_star = 1 - (sigma_s / sigma_s_star) * (1 - f_n)
+        
+        ratio = sigma_s / sigma_s_star
+        f_n_star = 1.0 - ratio * (1.0 - f_n)
+        
+        # Clamp f_n_star to [-1, 1] to ensure physical validity, 
+        # though this may introduce approximation error if the band-limit assumption is violated.
+        f_n_star = max(-1.0, min(1.0, f_n_star))
+        
+        moments_star.append(f_n_star)
+        
+    # Step 3: Compute altered absorption and extinction
+    # sigma_a = sigma_a_star
+    sigma_a_star = sigma_a
+    sigma_t_star = sigma_a_star + sigma_s_star
+    
+    return sigma_s_star, sigma_a_star, moments_star
+
+def reconstruct_phase_function(moments_star, resolution=100):
+    """
+    Reconstructs the phase function f*(t) from Legendre moments.
+    This is a simplified reconstruction using the truncated series.
+    In practice, a more robust method (e.g., maximum entropy or least-squares) 
+    might be needed to ensure f*(t) >= 0.
+    """
+    t_values = np.linspace(-1, 1, resolution)
+    f_star_values = np.zeros(resolution)
+    
+    for i, t in enumerate(t_values):
+        value = 0.0
+        for n, f_n in enumerate(moments_star):
+            # P_n(t) is the n-th Legendre polynomial
+            p_n = legendre_polynomial(n, t)
+            value += (2 * n + 1) / (4 * np.pi) * f_n * p_n
+        f_star_values[i] = value
+        
+    # Ensure non-negativity
+    f_star_values = np.maximum(f_star_values, 0.0)
+    
+    # Normalize to ensure integral is 1 (f_0* = 1)
+    # The integral of f*(t) over [-1,1] should be 2 (since 4pi factor is in front of f_0)
+    # Actually, the expansion is f(t) = sum (2n+1)/4pi f_n P_n(t).
+    # Integral of P_0 is 2. So integral of f is (1/4pi)*1*2 = 1/2pi? 
+    # Wait, standard normalization: integral_{-1}^1 f(t) dt = 2? 
+    # Let's check: f_0 = 1/2 integral_{-1}^1 f(t) dt. So integral is 2.
+    # The sum formula: integral_{-1}^1 sum ... dt = (1/4pi) * f_0 * 2 * 4pi = 2 f_0 = 2.
+    # So we need to normalize f_star_values such that their integral is 2.
+    
+    integral = np.trapz(f_star_values, t_values)
+    if integral > 0:
+        f_star_values = f_star_values * (2.0 / integral)
+        
+    return t_values, f_star_values
+```
+
+### Edge Cases and Pitfalls
+*   **Band-Limit Assumption Violation:** The theory assumes the radiance $L$ is band-limited in the spherical harmonics domain ($a_{mn}=0$ for $n>N$). In practice, this assumption may not hold everywhere, especially near boundaries or in optically thin regions, resulting in an approximated rather than identical solution [S1].
+*   **No Perfect Relation:** There is no "perfect" similarity relation for all $n, m$ simultaneously unless the parameters are unchanged. The method relies on the truncation at order $N$ [S1].
+*   **Non-Negativity:** The reconstructed phase function $f^*$ must be non-negative. Simple truncation of the Legendre series may produce negative values, requiring post-processing or a more sophisticated reconstruction algorithm [S1].
+*   **Heterogeneous Materials:** For spatially varying parameters, the similarity relations must be satisfied at every location $x$. The altered parameters $\sigma_s^*, \sigma_a^*, f^*$ must also be spatially varying [S1].
+
+## Subtopics
+
+### Similarity Theory Equivalence Classes
+Defines equivalence classes for scattering parameters based on the assumption that radiance is linearly anisotropic (Order-1 similarity). Two parameter points $(g, \sigma_s)$ and $(g', \sigma_s')$ belong to the same class if $\sigma_s(1 - g) = \sigma_s'(1 - g')$, where $g$ is the anisotropy factor (first Legendre moment) [S1]. The error function $d(g, \sigma_s) := \|\mathbf{I}(g, \sigma_s) - \mathbf{I}_0\|_2$ measures the difference between rendered images, with low-error regions matching the predicted equivalence classes. However, error values are not exactly zero near boundaries due to the failure of the linear anisotropy assumption [S1]. This is used in forward rendering to map difficult scattering parameters to equivalent, easier-to-simulate parameters with lower optical density [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The precomputation of altered parameters is $O(N)$, where $N$ is the order of similarity. The rendering time is reduced because the altered scattering coefficient $\sigma_s^*$ is typically smaller than $\sigma_s$, leading to fewer scattering events per light path. The speedup depends on the ratio $\sigma_s / \sigma_s^*$ [S1].
+*   **Memory Complexity:** Requires storage for the altered phase function, which can be represented as a table of size proportional to the resolution of the angular domain or the number of moments $N$ [S1].
+*   **Measured Performance:** The method accelerates rendering of optically dense and highly forward-scattering materials (e.g., milk, marble) by reducing the number of subsurface scatterings needed. It is particularly effective for materials where standard Monte Carlo methods produce high noise [S1].
+*   **Strengths:** Provides a rigorous theoretical framework for parameter equivalence. Higher-order relations offer better accuracy than first-order methods (like diffusion approximation) by capturing more of the phase function's structure [S1]. Easy to implement as it only requires replacing parameters in an existing renderer [S1].
+*   **Limitations:** Accuracy degrades near boundaries or in optically thin regions where the band-limit assumption fails. The reconstruction of the altered phase function from moments can be non-trivial and may require numerical optimization [S1].
+*   **When to Use:** When rendering optically dense, forward-scattering media where standard path tracing is too slow or noisy. When a trade-off between performance and accuracy is acceptable.
+*   **When Not to Use:** When high accuracy is required near boundaries or in thin regions. When the phase function has very high angular frequencies that cannot be captured by a low-order $N$ [S1].
+
+## Background
+Similarity Theory was originally introduced to applied physics by Wyman et al. in 1989 [S1]. It studies the equivalence classes of the RTE's parameter space by deriving a hierarchy of equivalence relations called "similarity relations." In computer graphics, it was previously only used in the form of the simplest order-1 similarity relation (often associated with the diffusion approximation or isotropic scattering approximations). The paper by Jakob et al. [2010] (cited as [S1] in the notes, likely referring to the SIGGRAPH 2014 paper "High-order similarity relations in radiative transfer" by W. Jakob et al.) presented a complete exposition of the theory and practical algorithms for higher-order relations in graphics [S1].
+
+## Sources
+[S1] High-order similarity relations in radiative transfer, https://doi.org/10.1145/2601097.2601104, fetched 2026-10-26

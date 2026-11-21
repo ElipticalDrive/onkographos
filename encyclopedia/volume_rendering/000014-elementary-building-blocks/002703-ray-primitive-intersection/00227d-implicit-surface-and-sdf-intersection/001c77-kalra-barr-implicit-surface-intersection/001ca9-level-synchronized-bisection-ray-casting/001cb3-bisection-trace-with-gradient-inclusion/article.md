@@ -1,0 +1,155 @@
+# Bisection Trace with Gradient Inclusion
+
+Also called: Level-Synchronized Interval Bisection
+
+## Overview
+Bisection Trace with Gradient Inclusion is a robust ray casting algorithm that renders the zero-level-set of an implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ by combining level-synchronized bisection with gradient-based interval arithmetic. It solves the problem of missing surface features during ray traversal by using an inclusion function to guarantee that no zero-crossings are pruned. It differs from standard bisection by using the Lipschitz constant derived from local gradients to compute tight, safe step sizes, ensuring convergence without overshooting the surface [S1, unofficial].
+
+## How it works
+The method operates on a batch of rays, processing them in lockstep (level-synchronized) to refine their hit locations. It relies on an `InclusionFunction` that provides a guaranteed bounding interval $[f_-(t), f_+(t)]$ for the implicit function over a candidate step.
+
+**Inputs:**
+- `origins`: Array of ray origins $\mathbf{o} \in \mathbb{R}^3$.
+- `directions`: Array of ray directions $\mathbf{d} \in \mathbb{R}^3$ (normalized).
+- `t_min`, `t_max`: Scalar bounds for the ray segment.
+- `hit_mask`: Boolean array indicating active rays.
+- `inclusion`: An instance of `InclusionFunction` (specifically `GradientInclusion`).
+- `f_np`: The implicit function evaluator $f(\mathbf{x})$.
+- `max_depth`: Integer, maximum number of bisection steps.
+- `threshold`: Float, convergence tolerance for the interval width.
+- `lipschitz`: Float or 'auto'. The Lipschitz constant $L$ for the inclusion function.
+- `newton_iter`: Integer, optional Newton refinement steps after bisection.
+- `batch_size`: Integer, number of rays to process per batch.
+
+**Data Structures:**
+- `Interval`: A pair of floats $[lo, hi]$ representing the guaranteed range of $f$.
+- `RayState`: Contains current $t$ (or interval $[t_{start}, t_{end}]$), current hit point $\mathbf{x}$, and active status.
+
+**Parameters:**
+- `max_depth`: Typical values depend on required precision; e.g., 20-30 for high-res.
+- `threshold`: E.g., $10^{-6}$ or $10^{-8}$ relative to scene scale.
+- `lipschitz`: If 'auto', estimated by sampling gradient norms $\|\nabla f\|$ over the bounding box using automatic differentiation [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialization**:
+   - For each active ray, initialize the search interval $[t_{start}, t_{end}] = [t_{min}, t_{max}]$.
+   - If `lipschitz` is 'auto', compute $L = \max_{\mathbf{x} \in \text{Box}} \|\nabla f(\mathbf{x})\|$ by sampling gradients [S1, unofficial].
+   - Initialize `inclusion` with $f_{np}$ and $L$.
+
+2. **Level-Synchronized Bisection Loop**:
+   - For `step` from 1 to `max_depth`:
+     - For each active ray $i$:
+       - Compute midpoint $t_{mid} = (t_{start}^{(i)} + t_{end}^{(i)}) / 2$.
+       - Evaluate inclusion function: $[f_{min}, f_{max}] = \text{inclusion.evaluate}(t_{start}^{(i)}, t_{end}^{(i)})$.
+       - **Pruning**: If $0 \notin [f_{min}, f_{max}]$, the surface is not in this interval. Mark ray as missed or handle accordingly [S1, unofficial].
+       - **Refinement**:
+         - If $|t_{end}^{(i)} - t_{start}^{(i)}| < \text{threshold}$, stop bisection for this ray.
+         - Determine new interval:
+           - Evaluate $f(t_{start})$ and $f(t_{mid})$ (or use inclusion bounds if available).
+           - If signs differ between $t_{start}$ and $t_{mid}$, set $t_{end}^{(i)} = t_{mid}$.
+           - Else, set $t_{start}^{(i)} = t_{mid}$.
+       - Update hit point $\mathbf{x}^{(i)} = \mathbf{o}^{(i)} + t_{mid}^{(i)} \mathbf{d}^{(i)}$.
+
+3. **Newton Refinement (Optional)**:
+   - For each ray that converged:
+     - Perform `newton_iter` steps: $t_{new} = t_{old} - f(\mathbf{x}) / (\nabla f(\mathbf{x}) \cdot \mathbf{d})$.
+     - Update $\mathbf{x}$ and $t$.
+
+4. **Output**:
+   - Final hit positions $\mathbf{x}$ and depths $t$ for all rays.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bisection_trace_with_gradient_inclusion(origins, directions, t_min, t_max, hit_mask, inclusion, f_np, max_depth, threshold, lipschitz, newton_iter, batch_size):
+    # Initialize Lipschitz constant if auto
+    if lipschitz == 'auto':
+        # Estimate L by sampling gradient norms over bounding box [G]
+        lipschitz = estimate_lipschitz(f_np, bounding_box)
+    
+    # Initialize inclusion function
+    inclusion.set_lipschitz(lipschitz)
+    
+    # Initialize ray states
+    t_start = np.full_like(origins[:, 0], t_min)
+    t_end = np.full_like(origins[:, 0], t_max)
+    
+    for step in range(max_depth):
+        # Process in batches if specified
+        batch_indices = np.where(hit_mask)[0]
+        if batch_size is not None:
+            for b_start in range(0, len(batch_indices), batch_size):
+                b_end = min(b_start + batch_size, len(batch_indices))
+                batch_idx = batch_indices[b_start:b_end]
+                process_batch(batch_idx, origins, directions, t_start, t_end, hit_mask, inclusion, f_np, threshold)
+        else:
+            process_batch(np.where(hit_mask)[0], origins, directions, t_start, t_end, hit_mask, inclusion, f_np, threshold)
+            
+        # Check convergence
+        if np.all(np.abs(t_end - t_start) < threshold):
+            break
+            
+    # Newton refinement
+    if newton_iter > 0:
+        for i in range(len(origins)):
+            if hit_mask[i]:
+                refine_with_newton(origins[i], directions[i], t_start[i], f_np, newton_iter)
+                
+    return t_start, origins + t_start[:, None] * directions
+
+def process_batch(indices, origins, directions, t_start, t_end, hit_mask, inclusion, f_np, threshold):
+    for i in indices:
+        if not hit_mask[i]:
+            continue
+            
+        # Evaluate inclusion over current interval
+        f_min, f_max = inclusion.evaluate(t_start[i], t_end[i])
+        
+        # Prune if zero not in range
+        if f_min > 0 or f_max < 0:
+            hit_mask[i] = False
+            continue
+            
+        # Bisection
+        t_mid = 0.5 * (t_start[i] + t_end[i])
+        
+        # Check convergence
+        if t_end[i] - t_start[i] < threshold:
+            continue
+            
+        # Determine new interval based on sign change
+        # Note: Using inclusion bounds for robustness, or exact f(t_mid) if available
+        f_mid = f_np(origins[i] + t_mid * directions[i])
+        
+        # Evaluate f at start for sign check
+        f_start = f_np(origins[i] + t_start[i] * directions[i])
+        
+        if f_start * f_mid < 0:
+            t_end[i] = t_mid
+        else:
+            t_start[i] = t_mid
+```
+
+**Edge Cases and Pitfalls:**
+- **Lipschitz Constant**: If $L$ is underestimated, the inclusion bounds may not be guaranteed, leading to missed surfaces. Overestimation leads to slower convergence [S1, unofficial].
+- **Degenerate Intervals**: If $t_{start} \approx t_{end}$, division by zero in Newton steps must be guarded [G].
+- **Non-Convex Surfaces**: The method finds the *first* zero crossing in the interval. If multiple crossings exist, only the first is guaranteed [S1, unofficial].
+
+## Subtopics
+
+### [Interval Arithmetic Inclusion Strategies](1410-interval-arithmetic-inclusion-strategies.md)
+Provides the bounding functions used by this method. Choose `GradientInclusion` for a balance of tightness and generality, or `AffineInclusion` for symbolic functions requiring tighter bounds.
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot D)$, where $N$ is the number of rays and $D$ is `max_depth`. Each step involves an inclusion evaluation and a function evaluation.
+- **Memory Complexity**: $O(N)$ for storing ray states.
+- **Performance**: Robust against aliasing and missed surfaces, but slower than simple bisection due to inclusion overhead. Performance scales linearly with ray count and depth.
+- **Strengths**: Guaranteed no-miss property; handles complex implicit functions well.
+- **Limitations**: Computationally expensive due to interval arithmetic; requires Lipschitz constant estimation.
+
+## Background
+The method is part of the "iso-surface-rendering" library by narnia-ai-mason, which implements robust ray casting for implicit surfaces using interval arithmetic [S1, unofficial]. It builds on the principles of level-synchronized bisection ray casting, enhancing it with gradient-based inclusion strategies for improved accuracy and efficiency.
+
+## Sources
+[S1] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)

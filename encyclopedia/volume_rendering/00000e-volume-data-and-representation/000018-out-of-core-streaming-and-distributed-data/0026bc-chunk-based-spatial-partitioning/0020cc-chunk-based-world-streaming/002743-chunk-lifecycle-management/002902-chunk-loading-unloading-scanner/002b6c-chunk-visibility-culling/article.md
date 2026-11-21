@@ -1,0 +1,142 @@
+# Chunk Visibility Culling
+
+Also called: Chunk Frustum Culling, Frustum Culling for Chunk Rendering, Frustum Culling for Chunk Visibility
+
+## Overview
+Chunk Visibility Culling is a technique to determine which chunks are visible to the camera by checking if their bounding boxes intersect the view frustum, sorted by distance [S3, S4, unofficial]. It solves the problem of rendering massive voxel worlds by avoiding the transfer of invisible geometry to the GPU, which would otherwise consume prohibitive amounts of VRAM [S1, unofficial]. It sets itself apart from its siblings by performing the geometric intersection test on flat lists of loaded chunks, whereas [Octree Frustum Culling & LOD Selection](5771-octree-frustum-culling-lod-selection.md) uses hierarchical traversal and [Out-of-Core Frustum Clipping](6688-out-of-core-frustum-clipping.md) couples culling with resolution selection for out-of-core streaming [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A camera object (containing projection and view matrices), a list of currently loaded chunks, and a `renderRadius` defining the search scope around the camera [S3, unofficial].
+- **Output:** A set of visible chunks (`_chunkVisibleSet`) and a set of chunks ready for rendering (`_chunkRenderSet`) [S2, unofficial].
+
+**Data Structures:**
+- **Chunk:** Contains world position coordinates (`GetXWorldPos`, `GetZWorldPos`) and size constants (`m_XSize`, `m_ZSize`) [S4, unofficial].
+- **Frustum:** An object with a method `IsChunkInFrustum(float x, float z)` or `intersectsBox(bounds)` [S1, S3, S4, unofficial].
+- **ChunkManager:** Maintains `_chunkVisibleSet` (e.g., `std::set<Chunk*>`) and `_chunkRenderSet` (e.g., `std::set<Chunk*>`) [S2, unofficial].
+
+**Steps:**
+1. **Extract Frustum:** Calculate the view frustum from the camera's projection and view matrices. In OpenGL-style systems, this is often done via `projScreenMatrix = camera.projectionMatrix * camera.matrixWorldInverse` followed by `frustum.setFromProjectionMatrix(projScreenMatrix)` [S1, S3, unofficial].
+2. **Calculate Center Chunk:** Determine the chunk coordinates containing the camera to define the search area.
+   $$
+   \text{center\_chunk\_coords} = \left( \left\lfloor \frac{\text{camera.position.x}}{\text{CHUNK\_WORLD\_SIZE}} \right\rfloor, \left\lfloor \frac{\text{camera.position.y}}{\text{CHUNK\_WORLD\_SIZE}} \right\rfloor, \left\lfloor \frac{\text{camera.position.z}}{\text{CHUNK\_WORLD\_SIZE}} \right\rfloor \right)
+   $$
+   [S3, unofficial]
+3. **Iterate Loaded Chunks:** Loop through all chunks currently loaded in the world [S1, unofficial].
+4. **Compute World Position:** For each chunk, calculate its world-space bounding box or center.
+   $$
+   wx = \text{chunk} \rightarrow \text{GetXWorldPos()} \times \text{Chunk::m\_XSize}
+   $$
+   $$
+   wz = \text{chunk} \rightarrow \text{GetZWorldPos()} \times \text{Chunk::m\_ZSize}
+   $$
+   [S4, unofficial]
+5. **Frustum Test:** Check if the chunk's bounding volume intersects the frustum.
+   - If using a specific 2D frustum check: `if (!frustum.IsChunkInFrustum(wx, wz)) continue;` [S4, unofficial].
+   - If using a 3D AABB check: `if (frustum.intersectsBox(bounds))` add to visible list [S3, unofficial].
+   - Skip chunks whose bounding AABB is outside the frustum [S1, unofficial].
+6. **Sort by Distance:** Sort the visible chunks by squared distance from the `center_chunk_coords` to optimize rendering order and LOD selection [S1, S3, unofficial].
+   $$
+   \text{dist}^2 = (x_{chunk} - x_{center})^2 + (y_{chunk} - y_{center})^2 + (z_{chunk} - z_{center})^2
+   $$
+7. **Update Sets:** Populate `_chunkVisibleSet` and `_chunkRenderSet` with the sorted, visible chunks [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_visibility_list(camera, chunk_manager, render_radius):
+    # 1. Extract frustum from camera matrices [S1, S3, unofficial]
+    proj_matrix = camera.projection_matrix
+    view_matrix = camera.matrix_world_inverse
+    proj_screen_matrix = proj_matrix * view_matrix
+    frustum = Frustum.from_projection_matrix(proj_screen_matrix)
+
+    # 2. Calculate center chunk coordinates [S3, unofficial]
+    chunk_world_size = chunk_manager.chunk_size
+    center_x = floor(camera.position.x / chunk_world_size)
+    center_y = floor(camera.position.y / chunk_world_size)
+    center_z = floor(camera.position.z / chunk_world_size)
+
+    visible_chunks = []
+
+    # 3. Iterate over loaded chunks within render radius [S1, S3, unofficial]
+    # Note: In practice, iterate only chunks within [center - radius, center + radius]
+    for chunk in chunk_manager.loaded_chunks:
+        
+        # 4. Compute world-space bounding box or center [S4, unofficial]
+        # Assuming chunk provides world position and size
+        wx = chunk.get_x_world_pos() * chunk.m_x_size
+        wz = chunk.get_z_world_pos() * chunk.m_z_size
+        wy = chunk.get_y_world_pos() * chunk.m_y_size # Implied for 3D
+        
+        # Construct bounding box or center point for test
+        # Implementation detail: Some frustums take center+size, others AABB [S3, S4, unofficial]
+        bounds = BoundingBox(center=(wx, wy, wz), size=(chunk.m_x_size, chunk.m_y_size, chunk.m_z_size))
+
+        # 5. Frustum intersection test [S1, S3, S4, unofficial]
+        # Check if bounding AABB is outside the frustum [S1, unofficial]
+        if not frustum.intersects_box(bounds):
+            continue
+
+        # 6. Calculate squared distance for sorting [S3, unofficial]
+        dx = chunk.get_x_world_pos() - center_x
+        dy = chunk.get_y_world_pos() - center_y
+        dz = chunk.get_z_world_pos() - center_z
+        squared_dist = dx*dx + dy*dy + dz*dz
+
+        visible_chunks.append((chunk, squared_dist))
+
+    # 7. Sort visible chunks by squared distance [S3, unofficial]
+    visible_chunks.sort(key=lambda item: item[1])
+
+    # 8. Update manager sets [S2, unofficial]
+    chunk_manager.chunk_visible_set = set(item[0] for item in visible_chunks)
+    chunk_manager.chunk_render_set = set(item[0] for item in visible_chunks)
+
+    return visible_chunks
+```
+
+**Parameters:**
+- `camera`: PerspectiveCamera object [S3, unofficial].
+- `renderRadius`: Number, radius in chunk coordinates around the center chunk to check [S3, unofficial].
+- `Frustum`: Object with `IsChunkInFrustum` or `intersectsBox` methods [S3, S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Bounding Volume Staleness:** Bounding volumes may become out of date after transformations, requiring a rebuild check via `boundingVolumeOutOfDate()` [S2, unofficial].
+- **Precision:** Floating-point precision issues may arise when calculating world positions for very large coordinate values; using squared distance for sorting avoids square root operations [S3, unofficial].
+- **Empty Frustum:** If the camera is inside a chunk, the frustum test must correctly handle the case where the bounding box fully contains the camera [G].
+
+## Subtopics
+
+### [Octree Frustum Culling & LOD Selection](5771-octree-frustum-culling-lod-selection.md)
+This method uses an octree spatial partitioning structure to efficiently determine which chunks of a voxel world are visible within the camera's view frustum and to select the appropriate Level of Detail (LOD) for each visible chunk. It solves the problem of rendering massive voxel worlds (e.g., $256^3$ cubes) by avoiding the transfer of invisible geometry to the GPU, which would otherwise consume prohibitive amounts of VRAM (e.g., ~4.5 GB for a full $256^3$ world). It is distinguished from sibling methods by its explicit integration of LOD selection based on distance during the culling traversal, rather than relying solely on static distance sorting or out-of-core clipping.
+
+### [Out-of-Core Frustum Clipping](6688-out-of-core-frustum-clipping.md)
+Out-of-Core Frustum Clipping is a visibility culling stage in distributed volume rendering where each rendering node determines which parts of the dataset to display based on the current view, loading only the required subvolume at the maximum resolution fitting into texture memory. It sets itself apart from sibling methods by explicitly coupling the geometric frustum test with a resolution selection algorithm that ensures the loaded data fits within a strict voxel count limit per texture, enabling out-of-core streaming from hard disk.
+
+### [Frustum Culling & Distance Sorting](6849-frustum-culling-distance-sorting.md)
+This method filters visible chunks and sorts them by distance for rendering order. It builds on [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by adding a distance-based sort to the visible set, ensuring correct depth ordering for transparent or blended rendering passes [G]. It differs from [Octree Frustum Culling & LOD Selection](5771-octree-frustum-culling-lod-selection.md) by operating on flat chunk lists rather than hierarchical tree traversal, and from [Out-of-Core Frustum Clipping](6688-out-of-core-frustum-clipping.md) by not performing geometric clipping of chunk geometry, only visibility culling [G].
+
+### Streaming via Visibility Buffer
+Transferring Gaussians to the GPU on-demand based on visibility determination using a visibility buffer, rather than just view frustum culling [S5]. Kerbl et al. [1] perform frustum culling during rendering. A tiled compute-based software rasterizer determines whether a Gaussian overlaps with a tile before sorting Gaussians for each tile individually [S5]. Jiang et al. [23] divide a scene into voxels. They determine which voxels lie in the view frustum using a KD-Tree and subsequently transfer these to the GPU [S5]. Kerbl et al. [18] asynchronously transfer high-detail Gaussians to replace those with lower detail as part of their LOD solution [S5]. The proposed method performs visibility determination using a visibility buffer [S5].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of loaded chunks, as each chunk's bounding box must be tested against the frustum [S1, S3, unofficial]. Sorting adds $O(V \log V)$ where $V$ is the number of visible chunks [S3, unofficial].
+- **Memory Complexity:** $O(V)$ to store the visible chunk set [S2, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance degrades linearly with the number of loaded chunks. Using a `renderRadius` limits $N$ to chunks near the camera, improving performance [S3, unofficial].
+- **Strengths:** Simple to implement; effective at reducing GPU draw calls by eliminating off-screen chunks [S1, S3, unofficial].
+- **Limitations:** Does not handle occlusion (chunks behind other chunks are still processed); requires all chunks to be loaded into CPU memory before culling [S1, S3, unofficial].
+- **When to use:** When the scene is sparse or the number of loaded chunks is manageable; when hardware supports fast frustum-box intersection tests.
+- **When not to use:** When occlusion is significant and CPU culling is too slow; when memory bandwidth is the bottleneck and chunks are not yet loaded.
+
+## Background
+Chunk Visibility Culling is a standard technique in voxel engine development, originating from the need to render large-scale voxel worlds efficiently [S1, S2, S3, S4, unofficial]. It is widely used in games and simulations that utilize chunk-based spatial partitioning [S1, S2, S3, S4, unofficial]. The method is often implemented in conjunction with chunk loading/unloading scanners to manage the lifecycle of chunk data [S1, S2, unofficial].
+
+## Sources
+[S1] Linirby/HelloVoxel, https://github.com/Linirby/HelloVoxel, fetched 2026-10-27 (unofficial)
+[S2] nnarain/VoxelEngine, https://github.com/nnarain/VoxelEngine, fetched 2026-10-27 (unofficial)
+[S3] andrewbloese-00/web_voxel_terrain, https://github.com/andrewbloese-00/web_voxel_terrain, fetched 2026-10-27 (unofficial)
+[S4] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)
+[S5] Virtual memory for 3D Gaussian Splatting, https://zenodo.org/records/19690968, fetched 2026-10-26

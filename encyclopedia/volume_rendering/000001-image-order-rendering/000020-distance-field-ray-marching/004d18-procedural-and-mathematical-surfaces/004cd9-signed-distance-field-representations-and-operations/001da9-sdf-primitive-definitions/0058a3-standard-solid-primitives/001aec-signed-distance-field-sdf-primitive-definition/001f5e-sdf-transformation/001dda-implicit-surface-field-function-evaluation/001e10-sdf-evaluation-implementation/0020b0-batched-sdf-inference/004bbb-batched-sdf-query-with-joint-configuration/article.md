@@ -1,0 +1,154 @@
+# Batched SDF Query with Joint Configuration
+
+
+## Overview
+This method evaluates Signed Distance Fields (SDFs) for volumetric structures across multiple joint configurations and query points simultaneously, enabling efficient batched inference for robotic kinematics [S1, unofficial]. It differs from single-configuration queries by integrating Forward Kinematics (FK) chains to support automatic differentiation with respect to joint angles, facilitating gradient-based optimization tasks like collision avoidance [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** `points` tensor of shape $(N, d)$ representing $N$ geometric points in $d$ dimensions (typically 2 or 3) [S1, unofficial].
+- **Input:** `joint_configuration` tensor of shape $(B, J)$ representing $B$ batched configurations, each with $J$ joint angles [S1, unofficial].
+- **Input:** `range_per_dim` tensor of shape $(d, 2)$ specifying the minimum and maximum range for each dimension [S1, unofficial].
+- **Input:** `compute_grad` boolean flag; if `False`, gradient computation is skipped for performance [S1, unofficial].
+- **Output:** `sdf_val` tensor of shape $(B, N)$ containing signed distance values [S1, unofficial].
+- **Output:** `sdf_grad` tensor of shape $(B, N, d)$ containing gradients with respect to points, or `None` if `compute_grad` is `False` [S1, unofficial].
+
+**Data Structures:**
+The implementation relies on a custom PyTorch `Function` subclass (e.g., `ObjectFrameSDF`) to manage the forward pass and backward pass for autograd [S1, unofficial]. The backward pass specifically computes $\frac{\partial \text{sdf\_val}}{\partial \text{points}}$ using the saved SDF gradient from the forward pass [S1, unofficial].
+
+**Steps:**
+1.  **Validation:** Check if query points lie within the specified `range_per_dim` using a helper function `is_inside`. This function returns a boolean tensor indicating membership [S1, unofficial].
+    $$ \text{is\_inside}(\mathbf{P}, \mathbf{R}) = \bigwedge_{i=0}^{d-1} (R_{i,0} \le P_{:,i} \le R_{i,1}) $$
+    Where $\mathbf{P}$ is the points tensor and $\mathbf{R}$ is the range tensor [S1, unofficial].
+2.  **Configuration Application:** Apply the current joint configuration to the SDF object. This transforms the query points into the object's local frame via Forward Kinematics [S1, unofficial].
+3.  **SDF Evaluation:** Evaluate the SDF value at the transformed points. If `compute_grad` is `True`, also compute the gradient of the SDF with respect to the points in the object frame [S1, unofficial].
+4.  **Gradient Accumulation (Backward):** If `compute_grad` is `True`, the backward pass computes the gradient of the loss with respect to the input points:
+    $$ \frac{\partial \text{loss}}{\partial \mathbf{P}_{\text{obj}}} = \frac{\partial \text{loss}}{\partial \text{sdf\_val}} \otimes \text{sdf\_grad} $$
+    Where $\otimes$ denotes element-wise multiplication broadcasted appropriately [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def is_inside(points: torch.Tensor, range_per_dim: torch.Tensor) -> torch.Tensor:
+    """
+    Check if points are within the specified range per dimension.
+    :param points: Tensor of shape (N, d)
+    :param range_per_dim: Tensor of shape (d, 2) with [min, max] for each dim
+    :return: Boolean tensor of shape (N,)
+    """
+    return torch.all((range_per_dim[:, 0] <= points) & (points <= range_per_dim[:, 1]), dim=-1)
+
+class BatchedSDFQuery:
+    def __init__(self, sdf_object, compute_grad=True):
+        self.sdf_object = sdf_object
+        self.compute_grad = compute_grad
+
+    def query(self, points: torch.Tensor, joint_config: torch.Tensor, range_per_dim: torch.Tensor) -> tuple:
+        """
+        Query SDF for batched joint configurations.
+        :param points: Tensor of shape (N, d)
+        :param joint_config: Tensor of shape (B, J)
+        :param range_per_dim: Tensor of shape (d, 2)
+        :return: sdf_val (B, N), sdf_grad (B, N, d) or None
+        """
+        # Validate points are within range
+        # Note: In practice, this might be used for culling or assertion
+        # is_inside(points, range_per_dim) 
+        
+        # Set joint configuration in the SDF object
+        # This step internally handles Forward Kinematics to transform points
+        self.sdf_object.set_joint_configuration(joint_config)
+        
+        # Query the SDF
+        # The underlying C++/CUDA kernel or PyTorch Function handles the batched evaluation
+        sdf_val, sdf_grad = self.sdf_object(points, compute_grad=self.compute_grad)
+        
+        return sdf_val, sdf_grad
+
+# Example Usage
+def example_usage():
+    # Setup
+    device = torch.device('cuda')
+    d = 3
+    N = 200
+    num_configs = 1000
+    
+    # Base joint configuration
+    th_base = torch.tensor([0.0, -math.pi / 4.0, 0.0, math.pi / 2.0, 0.0, math.pi / 4.0, 0.0], device=device)
+    
+    # Perturbations for batch
+    th_perturbation = torch.randn(num_configs - 1, 7, device=device) * 0.1
+    th = torch.cat((th_base.view(1, -1), th_perturbation + th_base))
+    
+    # Query points
+    y = 0.02
+    query_range = torch.tensor([[-1, 0.5], [y, y], [-0.2, 0.8]], device=device)
+    
+    # Generate coordinates (simulated helper)
+    # coords, pts = get_coordinates_and_points_in_grid(0.01, query_range, device)
+    # For this example, assume pts is generated
+    pts = torch.rand(N, d, device=device) * (query_range[:, 1] - query_range[:, 0]) + query_range[:, 0]
+    
+    # Initialize SDF object (mock)
+    # s = CachedSDF(...) 
+    
+    # Query without gradients
+    # sdf_val, sdf_grad = s(pts, th, compute_grad=False)
+    
+    # Query with gradients for optimization
+    th.requires_grad = True
+    # sdf_val, sdf_grad = s(pts, th, compute_grad=True)
+    # loss = sdf_val.sum()
+    # loss.backward()
+    # print(th.grad) # Contains d(sdf_val)/d(th)
+
+```
+
+**Parameters:**
+- `compute_grad`: Boolean. Default `True`. If `False`, skips gradient computation, improving performance [S1, unofficial].
+- `points`: Input tensor of shape $(N, d)$ [S1, unofficial].
+- `range_per_dim`: Input tensor of shape $(d, 2)$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Ensure joint configurations are normalized or handled correctly if angles wrap around (e.g., $-\pi$ to $\pi$) [S1, unofficial].
+- **Boundaries:** Points outside `range_per_dim` may yield undefined or incorrect SDF values if not pre-filtered [S1, unofficial].
+- **Degenerate Input:** Empty point sets or zero-sized batches should be handled gracefully by the underlying batched kernel [S1, unofficial].
+
+## Subtopics
+
+### [SDF Value Computation](6443-sdf-value-computation.md)
+Computes SDF values for a single configuration. Use when batch processing is not required.
+
+### [SDF Value and Gradient Query](13051-sdf-value-and-gradient-query.md)
+Returns both SDF values and gradients for a single configuration. Use when gradients are needed but batched joint configurations are not.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time complexity scales linearly with the number of points $N$ and the number of batched configurations $B$ [S1, unofficial].
+- Memory complexity is dominated by the storage of $B \times N$ SDF values and gradients [S1, unofficial].
+
+**Measured Performance:**
+- On an RTX 4070 with an 8-link Kuka robot:
+    - Single configuration with 100K points: 3.1 ms [S1, unofficial].
+    - 1000 configurations x 10K points: 198 ms [S1, unofficial].
+    - 5000 configurations x 10K points: 997 ms [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** High throughput for batched queries; supports autograd for optimization [S1, unofficial].
+- **Limitations:** Performance degrades with very large batch sizes if memory is constrained; requires GPU acceleration for optimal performance [S1, unofficial].
+
+**When to Use:**
+- Use for trajectory optimization, collision avoidance, and any scenario requiring gradient-based optimization over joint configurations [S1, unofficial].
+
+**When Not to Use:**
+- Avoid for single-point queries where overhead of batching is not justified [S1, unofficial].
+
+## Background
+This method originates from the `pytorch_volumetric` library by the University of Michigan ARM Lab [S1, unofficial]. It is designed to integrate volumetric SDF representations with robotic kinematics, enabling efficient collision checking and optimization in high-dimensional configuration spaces [S1, unofficial].
+
+## Sources
+[S1] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)

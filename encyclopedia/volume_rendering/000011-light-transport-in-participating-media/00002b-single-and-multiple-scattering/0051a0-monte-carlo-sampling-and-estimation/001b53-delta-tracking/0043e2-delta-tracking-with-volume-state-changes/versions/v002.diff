@@ -1,0 +1,94 @@
+--- v001.md
++++ v002.md
+@@ -4,54 +4,63 @@
+ 
+ ## Overview
+-This method adapts delta tracking to handle volumes that change state between optimization iterations, such as in inverse rendering or dynamic simulations. It solves the problem of efficiently reusing sampled path vertices from previous iterations by ensuring the majorant extinction coefficient bounds the density of both the old and new volume states simultaneously [S1]. Unlike standard delta tracking which assumes a static density field, this approach treats the transition between states as a correlated sampling problem, analogous to rendering spectrally varying volumes [S1].
++Delta tracking with volume state changes is a Monte Carlo technique for rendering participating media where the volume density changes between optimization iterations or time steps, such as in inverse rendering or animation. It solves the problem of maintaining unbiased sampling when reusing path vertices across frames or iterations by ensuring the majorant extinction coefficient bounds the density of both the current and previous volume states. It differs from standard delta tracking by explicitly handling temporal or iterative correlations, which increases null collision overhead but leverages the fact that density changes are typically small [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A sequence of volume density fields $\rho_t(\mathbf{x})$ for iteration $t$ and $t+1$.
+-- Input: A set of previously sampled path vertices $\{\mathbf{x}_i\}$ from iteration $t$.
+-- Output: Updated path vertices and weights for iteration $t+1$ that maintain statistical consistency.
++- Input: A sequence of volume density fields $\rho_t(\mathbf{x})$ for time/iteration $t$ and $t+1$.
++- Input: A set of path vertices $\{\mathbf{x}_i\}$ sampled from the previous state $t$.
++- Output: Unbiased radiance estimates for the current state $t+1$ using the existing path structure.
+ 
+ **Data Structures:**
+-- `Majorant`: A scalar value $M$ representing the upper bound on extinction.
+-- `Vertices`: A list of 3D points $\mathbf{x}$ and associated weights $w$.
++- `density_field`: A function or grid mapping $\mathbf{x} \to \rho(\mathbf{x})$.
++- `majorant`: A scalar $M$ such that $M \ge \sigma_t(\mathbf{x})$ for all $\mathbf{x}$ in the domain.
+ 
+ **Method Steps:**
+-1. **Determine the Combined Majorant:** For each sampled vertex $\mathbf{x}_i$ from the previous iteration, calculate the maximum density between the old state $\rho_t(\mathbf{x}_i)$ and the new state $\rho_{t+1}(\mathbf{x}_i)$. The majorant $M$ must satisfy:
+-   $$ M \geq \max(\sigma_t(\mathbf{x}_i), \sigma_{t+1}(\mathbf{x}_i)) $$
+-   where $\sigma$ is the extinction coefficient derived from density [S1]. In practice, $M$ is often set to the global maximum of the union of densities or a conservative bound covering both fields [S1].
++1. **Determine the Combined Majorant:**
++   When reusing a path vertex $\mathbf{x}$, the extinction coefficient must be bounded for both the old state $\sigma_t(\mathbf{x})$ and the new state $\sigma_{t+1}(\mathbf{x})$. The majorant $M$ must satisfy:
++   $$ M \ge \max(\sigma_t(\mathbf{x}), \sigma_{t+1}(\mathbf{x})) $$
++   In practice, $M$ is often precomputed as the global maximum of the union of densities or updated incrementally if the change is small [S1].
+ 
+-2. **Sample Free Path:** Using the majorant $M$, sample the distance to the next collision using the standard delta tracking free path distribution:
+-   $$ d = -\frac{\ln(r)}{M} $$
+-   where $r$ is a uniform random number in $(0, 1)$ [S1].
++2. **Sample Free Path:**
++   For a ray segment starting at $\mathbf{x}$, sample the distance to the next collision $d$ using the combined majorant:
++   $$ d = -\frac{\ln(u)}{M} $$
++   where $u \sim \text{Uniform}(0, 1)$.
+ 
+-3. **Evaluate State:** At the new position $\mathbf{x}' = \mathbf{x} + d \cdot \omega$, evaluate the density for the current target state (e.g., $\rho_{t+1}$).
++3. **Check for Collision:**
++   Evaluate the density at the proposed collision point $\mathbf{x}' = \mathbf{x} + d \cdot \omega$.
++   - If $\mathbf{x}'$ is outside the volume, terminate the path.
++   - Otherwise, determine if a real collision occurs. The probability of a real collision is:
++     $$ p_{\text{real}} = \frac{\sigma_{t+1}(\mathbf{x}')}{M} $$
++     Generate $v \sim \text{Uniform}(0, 1)$. If $v < p_{\text{real}}$, accept the collision as a real scattering event. If $v \ge p_{\text{real}}$, it is a null collision (virtual interaction).
+ 
+-4. **Accept/Reject:** Perform the standard delta tracking acceptance test. If the sampled density is less than the majorant, accept the collision with probability $\frac{\sigma_{t+1}(\mathbf{x}')}{M}$. If rejected, treat it as a null collision and repeat from step 2 [S1].
+-
+-5. **Weight Adjustment:** If the vertex is reused from a previous iteration, adjust the weight to account for the change in density and the increased probability of null collisions due to the larger majorant [S1].
++4. **Handle State Transition:**
++   - If a real collision occurs, update the path vertex to $\mathbf{x}'$ and continue tracking.
++   - If a null collision occurs, continue tracking from $\mathbf{x}'$ with the same direction, accumulating zero radiance contribution for this step.
++   - Note: The majorant $M$ must remain valid for both states throughout the path. If the path traverses regions where the density change is significant, $M$ must be large enough to bound the maximum possible density in either state [S1].
+ 
+ **Parameters:**
+-- $M$: Majorant extinction. Must be $\geq \max(\sigma_{old}, \sigma_{new})$ at all sampled points [S1].
++- $M$: Majorant extinction coefficient. Typical value: $\max_{\mathbf{x}} (\max(\sigma_t(\mathbf{x}), \sigma_{t+1}(\mathbf{x})))$ [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Increased Null Collisions:** Bounding the majorant for both states increases the number of null collisions because $M$ is larger than the density of either individual state [S1].
+-- **Small Density Changes:** The overhead is typically limited because density changes between optimization iterations are small [S1].
+-- **Precision:** Ensure $M$ is computed with sufficient precision to avoid underestimating the bound, which would bias the results [G].
++- **Increased Null Collisions:** Bounding the majorant for both states increases the number of null collisions compared to tracking each state independently. However, this overhead is limited because density changes between iterations are typically small [S1].
++- **Precision:** Ensure $M$ is computed accurately to avoid bias. If $M < \sigma(\mathbf{x})$ at any point, the sampling distribution is invalid.
++- **Degenerate Input:** If the volume density becomes zero in one state but not the other, the majorant must still bound the non-zero state.
+ 
+ ## Subtopics
+ 
+ ### [Heterogeneous Volumetric Raymarching](11138-heterogeneous-volumetric-raymarching.md)
+-A rendering technique for participating media (clouds, fog, godrays) that uses delta tracking and ratio tracking on density fields instead of sphere tracing on distance, allowing for heterogeneous (non-uniform) density distributions.
++Uses delta tracking on density fields for non-uniform media. Chooses this when handling complex, non-analytic density distributions.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Increases with the ratio of the combined majorant to the actual density. Since $M$ bounds both old and new densities, the expected number of null collisions is proportional to $M / \sigma_{avg}$ [S1].
+-- **Memory Complexity:** Low, as it reuses existing vertex data structures [S1].
+-- **Strengths:** Enables efficient optimization by reusing path samples, reducing the cost of recomputing paths from scratch [S1].
+-- **Limitations:** The increase in null collisions can degrade performance if density changes are large between iterations [S1].
+-- **When to Use:** Inverse rendering or optimization tasks where volume parameters are updated iteratively and path reuse is beneficial [S1].
+-- **When Not to Use:** Static rendering where densities do not change, or where density changes are so large that the majorant becomes inefficient [S1].
++- **Time Complexity:** $O(N \cdot \frac{M}{\bar{\sigma}})$, where $N$ is the path length and $\bar{\sigma}$ is the average extinction. The overhead increases with the ratio of the combined majorant to the actual extinction.
++- **Memory Complexity:** $O(1)$ per path vertex, plus storage for the density fields.
++- **Performance:** The method introduces additional null collisions due to the conservative majorant. However, since density changes between optimization steps are small, the performance penalty is often acceptable [S1].
++- **Strengths:** Enables efficient reuse of path vertices in inverse rendering and animation, reducing variance from path initialization.
++- **Limitations:** Increased null collision rate compared to independent tracking. Not suitable if density changes are large or discontinuous between states.
++- **When to Use:** Inverse rendering, optimization trajectories, or animation where path vertices can be reused across frames/iterations with small density changes [S1].
++- **When Not to Use:** When density changes are large, or when independent sampling is preferred to avoid correlation artifacts.
+ 
+ ## Background
+-The concept of sample reuse in volumes was introduced in the context of recursive control variates for inverse rendering [S1]. The authors observed that rendering a volume with two states (old and new) is mathematically analogous to rendering a volume with spectrally varying extinction and albedo [S1]. This insight allows techniques developed for spectrally varying volumes to be applied to temporal state changes in optimization [S1]. The method builds on the foundational delta tracking algorithm by Woodcock et al. [S1].
++The technique arises in the context of recursive control variates for inverse rendering, where sample reuse is critical for variance reduction. It was identified that delta tracking requires the majorant to bound both old and new volumes, adding overhead [S1]. The method is analogous to rendering spectrally varying volumes, suggesting potential benefits from techniques designed for such cases [S1].
+ 
+ ## Sources

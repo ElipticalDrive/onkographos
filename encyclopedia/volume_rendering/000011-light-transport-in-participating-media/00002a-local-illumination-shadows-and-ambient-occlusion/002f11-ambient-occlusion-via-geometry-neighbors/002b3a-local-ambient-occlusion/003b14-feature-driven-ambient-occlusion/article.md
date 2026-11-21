@@ -1,0 +1,186 @@
+# Feature-Driven Ambient Occlusion
+
+Also called: Feature-Driven AO
+
+## Overview
+Feature-Driven Ambient Occlusion is a shading technique for direct volume rendering that computes ambient occlusion separately for identified features (layers) to prevent the overdarkening of internal layers caused by inter-occlusions from neighboring features, while preserving auto-occlusions [S1]. Unlike classical ambient occlusion which darkens internal layers in multi-layer volumes due to inter-occlusions, this method neglects inter-occlusions between features to prevent overdarkening while keeping auto-occlusions [S1]. It is distinct from [Local Ambient Occlusion](4977-local-ambient-occlusion.md) and [Local Ambient Occlusion (LAO)](4502-local-ambient-occlusion-lao.md) by explicitly segmenting the volume into features and computing independent occlusion volumes for each, rather than treating the volume as a single homogeneous medium or using statistical distributions [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar dataset $V$, a set of identified features $k \in [1, n_f]$ where $n_f$ is the number of features, a transfer function mapping scalar values to opacity $\alpha$, the sphere radius $R_\Omega$, the number of rays $L$, and the number of samples per ray $M$ [S1].
+*   **Output:** A final 3D ambient occlusion volume $AO(v)$ [S1].
+
+**Data Structures:**
+*   **Bricks:** The 3D dataset is decomposed into equal-sized bricks. Each brick stores a boolean indicating if it contains only empty voxels. Bricks overlap to prevent discontinuities at borders [S1].
+*   **Occlusion Textures:** A set of 3D textures $T_k$, one for each feature $k$, storing the precomputed ambient occlusion factor for that feature [S1].
+*   **Final AO Volume:** A 3D texture storing the recombined ambient occlusion values [S1].
+
+**Parameters:**
+*   $L$: Number of cast rays used to sample the hemisphere for ambient occlusion computation [S1].
+*   $M$: Number of samples used to approximate the integral for light contribution along a single ray [S1].
+*   $R_\Omega$: Sphere radius used for the occlusion region. If too large, it causes overocclusion; if too small, it results in poor shading [S1].
+*   $n_f$: Number of features identified in the dataset [S1].
+*   $\alpha_i$: Opacity of sample $i$, obtained via the transfer function [S1].
+
+**Steps:**
+
+1.  **Preprocessing (Bricking):**
+    Decompose the 3D dataset into equal-sized bricks. Scan each brick to determine if it contains only empty voxels. Store this as a boolean. Use overlapping bricks to prevent discontinuities at borders [S1].
+
+2.  **Per-Feature Occlusion Computation:**
+    For each feature $k$ from $1$ to $n_f$:
+    a.  Initialize an empty 3D texture $T_k$ of the same dimensions as the dataset.
+    b.  For each voxel $v$ in the dataset:
+        i.  If $v$ does not belong to feature $k$, set $T_k(v) = 1.0$ (fully lit/no occlusion) [G]. *Note: The source implies that voxels not contributing to feature $k$'s occlusion calculation are treated as transparent or non-occluding in the specific raycast for that feature, but the recombination logic suggests $T_k$ stores the occlusion *caused by* feature $k$ or *experienced by* feature $k$. The text states: "compute separate ambient occlusions for each feature... setting the opacity of all neighboring voxels... that do not belong to feature k to 0." This implies $T_k(v)$ is the occlusion factor for voxel $v$ considering only feature $k$ as an occluder.*
+        ii. If $v$ belongs to feature $k$, compute the ambient occlusion factor $AO_k(v)$:
+            1.  Initialize $I_l = 0$.
+            2.  For $l = 1$ to $L$ (cast $L$ rays):
+                a.  Cast a ray from $v$ in a direction uniformly scattered on the hemisphere (or sphere, source mentions hemisphere in intro but sphere in parameters, standard AO uses hemisphere relative to normal, but volume AO often uses sphere. Source Eq 4 sums $I_l$ and divides by $L$. Source text says "pseudo-random rays uniformly scattered using polar coordinates" which implies sphere or hemisphere. Given "hemisphere described by the solid angle $\omega$ centered on normal N" in Eq 1, but volume rendering often lacks normals. The source Eq 4 is $AO(v) = \frac{1}{L} \sum I_l$. We assume $L$ rays in the hemisphere or sphere. The source mentions "hemisphere" in the classic AO definition but "sphere" in the parameters. We will follow the formula structure). *Clarification from source: "pseudo-random rays uniformly scattered using polar coordinates" usually implies a sphere. However, Eq 1 defines AO over a hemisphere. For volume rendering without normals, a sphere is common. The source text says "hemisphere" in section 3 but "sphere" in parameters. We will assume $L$ rays distributed over the relevant solid angle (sphere or hemisphere). Let's stick to the formula's summation.*
+                b.  Compute the light contribution $I_l(v)$ for this ray using $M$ samples in a front-to-back compositing scheme:
+                    $$ I_l(v) = \frac{1}{M} \sum_{m=0}^{M-1} \prod_{i=0}^{m-1} (1 - \alpha_{i,k}) $$
+                    Where $\alpha_{i,k}$ is the opacity of the $i$-th sample along the ray. Crucially, for the computation of feature $k$'s occlusion texture $T_k$, the opacity $\alpha_{i,k}$ is derived from the dataset such that:
+                    *   If sample $i$ belongs to feature $k$, use its actual opacity $\alpha_i$.
+                    *   If sample $i$ does *not* belong to feature $k$, set its opacity to $0$ [S1].
+                    *   *Note on Pitfall:* The source states: "setting the opacity of all neighboring voxels (inside sphere radius RΩ) that do not belong to feature k to 0." This effectively ignores other features during the raycast for $T_k$.
+                c.  Add $I_l(v)$ to the sum for $AO_k(v)$.
+            3.  Compute $AO_k(v) = \frac{1}{L} \sum_{l=1}^{L} I_l(v)$ [S1].
+            4.  Store $AO_k(v)$ in $T_k(v)$.
+
+3.  **Recombination:**
+    For each voxel $v$, compute the final ambient occlusion value $AO(v)$ by taking the maximum of the per-feature occlusion values:
+    $$ AO(v) = \max \{ T_k(v) \mid \forall k \in [1, n_f] \} $$
+    This operator is preferred over averaging because it reduces artifacts, improves contrast, and extends the influence of opaque features to neighboring less opaque ones, which is acceptable as less opaque features are less visible [S1].
+
+4.  **Rendering:**
+    Perform final rendering using a traditional volume raycasting algorithm (e.g., in GLSL). Fetch the precomputed ambient occlusion factor $AO(v)$ and two additional textures for preintegrated volume rendering [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_feature_driven_ao(dataset, features, transfer_function, R_omega, L, M, brick_size):
+    """
+    dataset: 3D array of scalar values
+    features: 3D array of feature IDs (0 for empty/background)
+    transfer_function: function(scalar) -> opacity
+    R_omega: radius of occlusion sphere
+    L: number of rays
+    M: number of samples per ray
+    brick_size: size of bricks for optimization
+    """
+    n_f = max(features.flatten()) + 1 # Assuming feature IDs are 0..n_f-1
+    # 0 is background/empty
+    volume_shape = dataset.shape
+    
+    # Step 1: Preprocessing (Bricking)
+    # Create a boolean mask for non-empty bricks for each feature?
+    # The source says: "preprocess the volume... decomposed into equal sized bricks... 
+    # determine if it contains only empty voxels... stored as a boolean."
+    # "Raycast only non-empty voxels... to optimize performance."
+    # We assume a helper function `is_brick_empty(brick_data, feature_id)` exists.
+    bricks = decompose_into_bricks(dataset, features, brick_size)
+    brick_masks = compute_brick_masks(bricks, features) # Boolean: True if brick has voxels of feature k
+    
+    # Step 2: Per-Feature Occlusion Computation
+    occlusion_textures = []
+    
+    for k in range(1, n_f): # Skip 0 (background)
+        T_k = np.zeros(volume_shape)
+        
+        # Iterate over voxels. Optimization: skip bricks marked as empty for feature k
+        for v in voxels_in_volume(volume_shape):
+            if not brick_masks[get_brick_index(v, brick_size), k]:
+                T_k[v] = 1.0 # Fully lit if no occluders of feature k nearby
+                continue
+                
+            # Compute AO for voxel v considering only feature k
+            ao_sum = 0.0
+            
+            # Generate L rays
+            rays = generate_uniform_rays(L) # Directions on hemisphere or sphere
+            
+            for ray in rays:
+                # Raycast along direction 'ray' from v
+                # Sample M points along the ray within R_omega
+                light_contribution = 0.0
+                product_term = 1.0 # Product of (1 - alpha)
+                
+                for m in range(M):
+                    # Calculate position of sample m along the ray
+                    # Distance from v to sample m
+                    # Assuming uniform sampling along the ray segment of length R_omega
+                    # Or optical depth? Source mentions "initial offset a" and "optical depth tau" 
+                    # but Eq 3 uses simple sum/product. We assume uniform spatial sampling 
+                    # or optical depth sampling. Source Eq 3: sum_{m=0}^{M-1} 1/M prod...
+                    # This implies M samples.
+                    
+                    sample_pos = v + ray * (m + 0.5) * (R_omega / M) # Approximate
+                    
+                    # Get scalar value at sample_pos
+                    val = trilinear_interpolate(dataset, sample_pos)
+                    
+                    # Get feature ID at sample_pos
+                    feat_id = trilinear_interpolate_int(features, sample_pos)
+                    
+                    # Get opacity
+                    alpha = transfer_function(val)
+                    
+                    # Key Step: Ignore other features
+                    if feat_id != k:
+                        alpha = 0.0
+                    
+                    # Update product term for next sample
+                    # The term for sample m is (1 - alpha_m)
+                    # The contribution of sample m to the integral is (1/M) * product_{i=0}^{m-1} (1 - alpha_i)
+                    # Wait, Eq 3: sum_{m=0}^{M-1} 1/M prod_{i=0}^{m-1} (1 - alpha_i)
+                    # This is the standard front-to-back compositing approximation for transmission.
+                    
+                    light_contribution += (1.0 / M) * product_term
+                    
+                    # Update product term for the NEXT sample (m+1)
+                    product_term *= (1.0 - alpha)
+                
+                ao_sum += light_contribution
+            
+            T_k[v] = ao_sum / L
+        
+        occlusion_textures.append(T_k)
+        
+    # Step 3: Recombination
+    final_ao = np.zeros(volume_shape)
+    for v in voxels_in_volume(volume_shape):
+        max_val = 0.0
+        for T_k in occlusion_textures:
+            val = T_k[v]
+            if val > max_val:
+                max_val = val
+        final_ao[v] = max_val
+        
+    return final_ao
+```
+
+## Operating characteristics
+*   **Time Complexity:** Computing separate ambient occlusion textures increases computation cost by a factor equal to the number of features $n_f$ [S1].
+*   **Memory Complexity:** Requires storing $n_f$ occlusion 3D textures plus the final recombined texture, plus brick metadata [S1].
+*   **Measured Performance:**
+    *   Dataset: Orange (256x256x64), Viewport: 1024x768, Hardware: AMD Opteron 2431, Nvidia GTX 295.
+        *   No shading: ~200 fps
+        *   Phong shading: ~125 fps
+        *   Classical AO: ~130 fps
+        *   Feature-driven AO: ~130 fps [S1]
+    *   Dataset: CT Knee (379x229x305), Viewport: 1024x768, Hardware: AMD Opteron 2431, Nvidia GTX 295.
+        *   No shading: ~60 fps
+        *   Phong shading: ~50 fps
+        *   Classical AO: ~45 fps
+        *   Feature-driven AO: ~45 fps [S1]
+*   **Strengths:** Improves visual quality of multi-layer volumes by preventing overdarkening of internal layers; less parameter-sensitive than classical AO; preserves auto-occlusions for shape perception [S1].
+*   **Limitations:** Requires pre-segmentation of features; computation cost scales linearly with the number of features; naive implementation causes artifacts at feature borders if not handled with separate textures and max recombination [S1].
+*   **When to use:** Direct volume rendering of multi-layer datasets (e.g., CT scans) where features are interleaved and distinct visual separation is desired [S1].
+*   **When not to use:** Single-feature volumes (classical AO is sufficient); scenes where inter-feature occlusion is desired (e.g., realistic shadowing between distinct objects).
+
+## Background
+Feature-Driven Ambient Occlusion was introduced by Ancel, Dischler, and Mongenet in 2010 [S1]. It addresses the limitations of straightforward ambient occlusion application in direct volume rendering, specifically the overdarkening of internal layers in multi-layer volumes [S1]. The method builds on [Local Ambient Occlusion](4977-local-ambient-occlusion.md) principles but introduces feature segmentation to decouple inter-occlusions. It is used in scientific 3D scalar field visualization to improve feature perception and data comprehension for non-experts [S1].
+
+## Sources
+[S1] Feature-Driven Ambient Occlusion for Direct Volume Rendering, https://doi.org/10.2312/vg/vg10/085-092, fetched 2026-10-26

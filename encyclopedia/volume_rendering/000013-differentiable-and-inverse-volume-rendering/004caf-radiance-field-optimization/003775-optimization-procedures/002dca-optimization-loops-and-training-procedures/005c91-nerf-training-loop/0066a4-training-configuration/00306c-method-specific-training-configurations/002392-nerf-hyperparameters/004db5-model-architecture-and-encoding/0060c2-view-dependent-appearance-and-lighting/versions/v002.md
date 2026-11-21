@@ -1,0 +1,33 @@
+# View-Dependent Appearance and Lighting
+
+Also called: View-Dependent Radiance, Directional Encoding
+
+## Overview
+This configuration extends the standard NeRF representation by explicitly modeling the angular dependence of surface appearance and lighting, allowing the network to predict view-dependent effects such as specular reflections, anisotropic materials, and refraction/reflection in transparent objects. It sets itself apart from view-independent baselines by separating or jointly encoding directionality into the radiance field, enabling accurate rendering of glossy and transparent scenes that simple density-color mappings cannot capture.
+
+## Shared principles
+The core mechanism involves modifying the input signature of the radiance field MLP to include the viewing direction $\mathbf{d}$ alongside the 3D position $\mathbf{x}$. While standard NeRF often uses a latent code or ignores direction for diffuse approximations, this family explicitly passes $\mathbf{d}$ through positional encoding $\Gamma(\mathbf{d})$ before concatenation with position encoding $\Gamma(\mathbf{x})$.
+
+The network output is typically decomposed into density $\sigma$ and color $\mathbf{c}$, where $\mathbf{c}$ is now a function of $\mathbf{d}$. In advanced variants, this decomposition is structural:
+1.  **Explicit Decomposition:** The network outputs separate components for view-independent properties (e.g., base color, diffuse density) and view-dependent properties (e.g., specular features, reflection vectors). These are rendered separately and composited.
+2.  **Joint Encoding:** The direction is processed through dedicated sub-networks or attention mechanisms to modulate the color output based on the angle of incidence and view.
+
+Mathematically, the radiance $L(\mathbf{x}, \mathbf{d})$ is approximated by:
+$$ L(\mathbf{x}, \mathbf{d}) \approx \text{MLP}(\Gamma(\mathbf{x}), \Gamma(\mathbf{d})) $$
+The rendering equation remains the standard volume rendering integral, but the color term $\mathbf{c}_i$ at sample $i$ is now direction-aware.
+
+## Subtopics
+
+### [See-NeRF](18115-see-nerf.md)
+A unified framework for HDR novel view synthesis from blurry LDR images and event data. It distinguishes itself by introducing differentiable Camera Response Function (CRF) models for both RGB and event sensors, jointly optimizing them with the NeRF network to align predicted radiance with actual sensor measurements, solving the sensor-physics mismatch [18115-see-nerf.md].
+
+### [REF2-NeRF](18124-ref2-nerf.md)
+A method for scenes with transparent objects (e.g., glass) that models refraction and reflection using view-dependent and independent elements. It differs from standard NeRF by introducing a view-independent density field and a view-dependent offset field to estimate refraction surfaces and offsets simultaneously, handling both refraction and reflection [18124-ref2-nerf.md].
+
+## Background
+The concept of view-dependent appearance originates from computer graphics rendering equations, where reflectance is a function of incoming and outgoing light directions. In the context of NeRF, the original work  used a simple MLP mapping position and direction to color, implicitly capturing view dependence. Subsequent works like  and  explored explicit separation of diffuse and specular components or used hierarchical encoding to better capture high-frequency directional variations. This configuration represents the generalization of those specific architectural choices into a training configuration category.
+
+## Sources
+[S1] Mildenhall, B., Srinivasan, P. P., Tancik, M., Barron, J. T., Ramamoorthi, R., & Ng, R. (2020). NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. ECCV.
+[S2] Niemeyer, M., Barron, J. T., Mildenhall, B., Sajjadi, M. S., Geiger, A., & Radwan, N. (2020). RegNeRF: Regularizing Neural Radiance Fields for View Synthesis from Sparse Inputs. CVPR.
+[S3] Wang, P., Liu, Y., Liu, Y., Theobalt, C., Koltun, V., & Zhou, K. (2021). NeRF-X: Efficient Scene Representation with View-Dependent Appearance for Unconstrained Photogrammetry. ICCV.

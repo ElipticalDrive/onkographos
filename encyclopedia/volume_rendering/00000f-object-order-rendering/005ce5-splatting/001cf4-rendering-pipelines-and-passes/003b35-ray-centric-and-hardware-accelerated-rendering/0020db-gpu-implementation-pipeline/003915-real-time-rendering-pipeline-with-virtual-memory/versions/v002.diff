@@ -1,0 +1,217 @@
+--- v001.md
++++ v002.md
+@@ -8,39 +8,31 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scene of 3D Gaussians, each assigned to a logical page ID; camera position and orientation; a proxy mesh representing the spatial distribution of these pages.
+-*   **Output:** A final 2D image with alpha-blended Gaussians.
++*   **Input:** A scene of 3D Gaussians, each assigned to a logical page ID; camera position and orientation; a proxy mesh representing the spatial distribution of these pages [S1, G].
++*   **Output:** A final 2D image with alpha-blended Gaussians [S1].
+ 
+ **Data Structures:**
+-1.  **Page Table:** A single array structure (selected over hierarchical for memory locality) [S1]. Each entry contains:
+-    *   `page_id`: The logical page identifier.
+-    *   `physical_page_index`: The index of the physical memory page currently holding this data.
+-    *   `valid`: Boolean indicating if the entry maps to valid data.
+-    *   `LOD`: The detail level of the data in the physical page.
+-    *   `last_use_frame`: The frame index in which this page was last accessed.
+-    *   `required`: Boolean flag set during the update phase to indicate necessity for the current frame.
++1.  **Page Table:** A single array structure (selected over hierarchical for better memory locality) [S1]. Each entry contains: `page_id` (logical identifier), `physical_page_index` (index of the physical memory page), `valid` (boolean indicating valid data), `LOD` (detail level), `last_use_frame` (frame index of last access), `required` (boolean flag for current frame necessity), and an LOD-dependent list of contained pages [S1].
+ 2.  **Gaussian Buffer:** A storage buffer containing the actual Gaussian properties (translation, rotation, scale, opacity, spherical harmonics) for all active physical pages [S1].
+ 3.  **Index Buffer:** A buffer of indices, one per Gaussian, used to sort and retrieve Gaussian properties [S1].
+-4.  **Staging Buffer:** A temporary CPU/GPU accessible buffer used to transfer new page data before copying to the Gaussian Buffer [S1].
++4.  **Staging Buffer:** A temporary buffer used to transfer new page data before copying to the Gaussian Buffer [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Proxy Rendering:** Render a proxy mesh where each face is marked with a `page_id`. This generates a list of visible page IDs required for the current frame [S1].
++1.  **Proxy Rendering:** Render a proxy mesh where each face is marked with a `page_id` to generate a list of visible page IDs required for the current frame [S1].
+ 2.  **Page Table Update:**
+-    a. Traverse the page table entries. Mark entries as `required` if their `page_id` is in the visible list.
+-    b. Identify `free` physical pages (those with `valid=false` or whose `page_id` is not in the required list). Store these free pages along with their `last_use_frame` [S1].
+-    c. Remove pages from the required list that are already present in the page table at the correct LOD. The remaining required list contains only pages missing from GPU memory [S1].
++    a. Traverse the page table entries and mark entries as `required` if their `page_id` is in the visible list [S1].
++    b. Identify `free` physical pages (those with `valid=false` or whose `page_id` is not in the required list) and store them along with their `last_use_frame` [S1].
++    c. Remove pages from the required list that are already present in the page table at the correct LOD; the remaining required list contains only pages missing from GPU memory [S1].
+ 3.  **Data Streaming:**
+-    a. If there is space in the Gaussian Buffer, copy the data for the remaining required pages into the Staging Buffer.
++    a. Copy the data for the remaining required pages into the Staging Buffer [S1].
+     b. Select free physical pages from the list generated in Step 2b based on the Least-Recently-Used (LRU) order (lowest `last_use_frame`) [S1].
+-    c. Copy the Staging Buffer contents into the Gaussian Buffer at the selected physical page indices.
++    c. Copy the Staging Buffer contents into the Gaussian Buffer at the selected physical page indices [S1].
+     d. Update the Page Table entries for these pages to mark them `valid`, set their `physical_page_index`, and update `last_use_frame` to the current frame [S1].
+     e. Write the list of currently valid physical pages to a buffer accessible by the GPU renderer [S1].
+-4.  **Index Generation:** A compute shader converts the list of valid physical pages into a list of sortable indices. It calculates the distance of each Gaussian from the camera [S1].
+-5.  **Global Sorting:** A compute shader performs a radix sort on the index buffer based on the calculated camera distances. This ensures Gaussians are sorted back-to-front for correct alpha blending [S1].
++4.  **Index Generation:** A compute shader converts the list of valid physical pages into a list of sortable indices and calculates the distance of each Gaussian from the camera [S1].
++5.  **Global Sorting:** A compute shader performs a radix sort on the index buffer based on the calculated camera distances to ensure Gaussians are sorted back-to-front for correct alpha blending [S1].
+ 6.  **Rendering:**
+-    a. Dispatch a vertex shader for every Gaussian in the sorted index buffer. The vertex shader retrieves Gaussian properties from the Gaussian Storage Buffer using the sorted index [S1].
+-    b. **Geometry Construction:**
+-        *   *Preferred:* If geometry shaders are available, use them to construct rectangular quads from the point primitives [S1].
+-        *   *Fallback:* If geometry shaders are unavailable, render point primitives as squares. Note: This fallback leads to a significant increase in fragment shader invocations and discards due to the square shape covering non-Gaussian areas [S1].
++    a. Dispatch a vertex shader for every Gaussian in the sorted index buffer; the vertex shader retrieves Gaussian properties from the Gaussian Storage Buffer using the sorted index [S1].
++    b. **Geometry Construction:** If geometry shaders are available, use them to construct rectangular quads from the point primitives [S1]. If geometry shaders are unavailable, render point primitives as squares [S1].
+     c. **Fragment Shader:** Discard pixels outside the splatted Gaussian shape (ellipse) [S1].
+     d. **Alpha Blending:** Combine the quads via alpha blending to create the final image [S1].
+@@ -54,84 +46,107 @@
+     physical_page_index: int
+     valid: bool
+-    LOD: int
++    lod: int
+     last_use_frame: int
+     required: bool
++    contained_pages: list[int] # LOD-dependent list of contained pages
+ 
+ class Gaussian:
+-    position: vec3
+-    rotation: quat
+-    scale: vec3
++    position: list[float] # vec3
++    rotation: list[float] # quat
++    scale: list[float]    # vec3
+     opacity: float
+-    sh_coeffs: array # Spherical harmonics
++    sh_coeffs: list[float]
+ 
+ # Global State
+-page_table: array[PageTableEntry]
+-gaussian_buffer: array[Gaussian] # Flat array of all active Gaussians
+-index_buffer: array[int] # Indices into gaussian_buffer
+-camera_position: vec3
++page_table: list[PageTableEntry]
++gaussian_buffer: list[Gaussian]
++index_buffer: list[int]
++camera_position: list[float]
++gaussians_per_page: int = 1024 # Not given in the sources, assumed constant for layout [G]
++staging_buffer: list[Gaussian]
+ 
+-def update_page_table(visible_page_ids: array[int], current_frame: int):
++def update_page_table(visible_page_ids: list[int], current_frame: int) -> list[int]:
+     # Step 2a: Mark required pages
+     for entry in page_table:
+         entry.required = entry.page_id in visible_page_ids
+ 
+-    # Step 2b: Identify free pages
++    # Step 2b: Identify free pages and store with last use frame
+     free_pages = []
+     for entry in page_table:
+         if not entry.required:
+             free_pages.append(entry)
+-    
+-    # Sort free pages by last_use_frame (LRU)
++
++    # Sort free pages by last_use_frame (LRU order)
+     free_pages.sort(key=lambda e: e.last_use_frame)
+ 
+-    # Step 2c: Remove pages already present at correct LOD
++    # Step 2c: Remove pages already present in the page table at the correct LOD
+     required_new_pages = []
+     for page_id in visible_page_ids:
+-        found = False
++        present = False
+         for entry in page_table:
+             if entry.page_id == page_id and entry.valid and entry.required:
+-                found = True
++                present = True
+                 break
+-        if not found:
++        if not present:
+             required_new_pages.append(page_id)
+ 
+     # Step 3: Data Streaming
+-    # Assume staging_buffer and gaussian_buffer have sufficient capacity
++    # Copy new required pages to a staging buffer
++    staging_buffer.clear()
++    for page_id in required_new_pages:
++        page_data = fetch_page_data_from_staging(page_id)
++        staging_buffer.extend(page_data)
++
++    # Choose free physical pages based on LRU order and copy to Gaussian buffer
+     for i, page_id in enumerate(required_new_pages):
+         if i < len(free_pages):
+             target_entry = free_pages[i]
+-            
+-            # Copy data from CPU/Staging to GPU Gaussian Buffer
+-            # get_gaussian_data_for_page(page_id) returns the array of Gaussians for this page
+-            new_gaussians = get_gaussian_data_for_page(page_id)
+-            
+             start_idx = target_entry.physical_page_index * gaussians_per_page
+-            for j, g in enumerate(new_gaussians):
++            for j, g in enumerate(staging_buffer[i*gaussians_per_page : (i+1)*gaussians_per_page]):
+                 gaussian_buffer[start_idx + j] = g
+-            
++
+             # Update Page Table
+             target_entry.valid = True
+             target_entry.last_use_frame = current_frame
+-            target_entry.required = True # It is now required and present
+-            
+-            # Note: page_id is already set in the entry from initialization
++            target_entry.required = True
++
++    return required_new_pages
++
++def fetch_page_data_from_staging(page_id: int) -> list[Gaussian]:
++    # Simulates reading page data from CPU memory or staging area
++    return [Gaussian() for _ in range(gaussians_per_page)]
+ 
+ def render_frame():
+-    # Step 4 & 5: Sort Indices
+-    # Compute distances
++    # Step 4: Index Generation & Distance Calculation
++    distances = [0.0] * len(index_buffer)
+     for i, idx in enumerate(index_buffer):
+         g = gaussian_buffer[idx]
+-        dist = length(g.position - camera_position)
+-        distances[i] = dist
+-    
+-    # Radix Sort indices based on distances
+-    sorted_indices = radix_sort(index_buffer, distances)
+-    
+-    # Step 6: Render
+-    # Vertex Shader retrieves properties using sorted_indices
+-    # Geometry Shader creates quads (or fallback to points)
+-    # Fragment Shader discards outside ellipse
+-    # Alpha Blend
+-    draw_quads(sorted_indices)
++        dx = g.position[0] - camera_position[0]
++        dy = g.position[1] - camera_position[1]
++        dz = g.position[2] - camera_position[2]
++        distances[i] = (dx*dx + dy*dy + dz*dz) ** 0.5
++
++    # Step 5: Global Sorting (Radix Sort)
++    sorted_indices = radix_sort_indices(index_buffer, distances)
++
++    # Step 6: Rendering
++    # Dispatch vertex shader for every Gaussian in sorted_indices
++    # Retrieve properties from gaussian_buffer
++    # Geometry shader constructs rectangular quads (or fallback to point primitives as squares)
++    # Fragment shader discards pixels outside splatted Gaussian shape
++    # Alpha blending combines quads
++    for idx in sorted_indices:
++        g = gaussian_buffer[idx]
++        # Vertex shader computes screen-space quad vertices
++        # Rasterizer fills fragments
++        # Fragment shader evaluates Gaussian alpha and discards if below threshold
++        pass
++
++def radix_sort_indices(indices: list[int], distances: list[float]) -> list[int]:
++    # Standard GPU radix sort implementation [G]
++    # Sorts indices array in-place based on distances array
++    combined = list(zip(distances, indices))
++    combined.sort(key=lambda x: x[0])
++    return [idx for _, idx in combined]
+ ```
+ 
+@@ -146,8 +161,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Sorting is performed using a radix sort on the index buffer, which is generally $O(N)$ for $N$ Gaussians [S1]. Page table updates are linear with respect to the number of pages in the table [S1].
++*   **Time Complexity:** Sorting is performed using a radix sort on the index buffer, which is generally $O(N)$ for $N$ Gaussians [S1].
+ *   **Memory Complexity:** Memory usage is bounded by the number of physical pages loaded into GPU memory, determined by available VRAM and the LRU eviction policy [S1].
+ *   **Performance:** The method is designed for real-time performance, targeting frame times below 16 ms [S1]. It avoids the overhead of sparse residency indirection textures by using an index buffer [S1].
+-*   **Strengths:** Global sorting ensures correct alpha blending; virtual memory allows rendering scenes larger than VRAM; single-array page table improves locality.
++*   **Strengths:** Global sorting ensures correct alpha blending; virtual memory allows rendering scenes larger than VRAM; single-array page table improves locality [S1].
+ *   **Limitations:** Requires geometry shaders for optimal performance (fallback is inefficient); global sorting can be costly for extremely large numbers of Gaussians compared to tile-based approaches [S1].
+ 

@@ -1,0 +1,116 @@
+# Truncated Dynamic Low-pass Filter
+
+
+## Overview
+The Truncated Dynamic Low-pass Filter (TDLF) is a frequency masking strategy applied to positional encoding during the optimization of Neural Radiance Fields (NeRFs), specifically designed to prevent convergence to local optima in pose estimation tasks [S1]. Unlike standard Dynamic Low-pass Filters (such as BARF) which begin with zero frequency content, TDLF initializes the frequency threshold at a non-zero value, ensuring valid color information is available from the first iteration while still suppressing high-frequency details that cause instability [S1]. This coarse-to-fine approach allows for robust global localization in large-scale scenes where initial pose estimates may be inaccurate [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Input coordinates $x$, current optimization iteration index, total number of optimization iterations $N$, maximum frequency index $L$, and initial truncation ratio $\alpha_0$.
+*   **Output:** Modified positional encoding vector $\gamma_k(x, \alpha)$ for each frequency band $k$.
+
+**Data Structures**
+The positional encoding layer maintains a frequency index $k$ ranging from $0$ to $L-1$. The filter state is defined by the current active frequency threshold, determined by the ratio $\alpha$ and the initial offset $\alpha_0$.
+
+**Parameters**
+*   $L$: The full positional encoding frequency (maximum frequency index).
+*   $\alpha_0$: The initial truncation threshold ratio. Typical value: $0.4$ (40% of $L$) [S1].
+*   $\alpha$: The dynamic ratio of the current iteration to the total number of iterations, updated periodically [S1].
+*   Update frequency: The parameter $\alpha$ is updated every 50 steps during the pose optimization stage [S1].
+
+**Steps**
+1.  Initialize the initial truncation threshold ratio $\alpha_0$ to a non-zero value, typically $0.4 \times L$ [S1].
+2.  During the optimization loop, calculate the current dynamic ratio $\alpha$ as the ratio of the current iteration number to the total number of iterations [S1].
+3.  Update the effective threshold value using the formula: $\text{threshold} = (\alpha + \alpha_0)L$ [S1].
+4.  For each positional encoding band $k$:
+    a. Calculate the weight $\omega_k(\alpha)$ to determine if the band is active.
+    b. Apply the weight to the standard sinusoidal encoding [S1].
+
+**Formulas**
+The $k$-th positional encoding function is defined as [S1]:
+
+$$
+\gamma_k(x, \alpha) = \omega_k(\alpha) \cdot [\cos(2k\pi x), \sin(2k\pi x)]
+$$
+
+The weight $\omega_k(\alpha)$ is calculated as [S1]:
+
+$$
+\omega_k(\alpha) =
+\begin{cases}
+1 & \text{if } k \le (\alpha + \alpha_0)L \\
+0 & \text{if } k > (\alpha + \alpha_0)L
+\end{cases}
+$$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def truncated_dynamic_low_pass_filter(x, k, L, alpha_0, current_iter, total_iters, update_step=50):
+    """
+    Applies the Truncated Dynamic Low-pass Filter to a specific frequency band k.
+    
+    Args:
+        x: Input coordinate (scalar or vector component).
+        k: Frequency band index (integer).
+        L: Maximum frequency index (integer).
+        alpha_0: Initial truncation threshold ratio (float, e.g., 0.4).
+        current_iter: Current optimization iteration number (integer).
+        total_iters: Total number of optimization iterations (integer).
+        update_step: Frequency at which alpha is updated (integer, default 50).
+        
+    Returns:
+        The filtered positional encoding vector [cos, sin].
+    """
+    # Calculate current dynamic ratio alpha
+    # Note: Alpha is updated every 'update_step' iterations.
+    # In a strict implementation, alpha would be a state variable updated in the main loop.
+    # Here we compute it directly based on the iteration count for clarity.
+    alpha = current_iter / total_iters
+    
+    # Calculate the effective threshold index
+    # The threshold is (alpha + alpha_0) * L
+    threshold_index = (alpha + alpha_0) * L
+    
+    # Determine if band k is active
+    if k <= threshold_index:
+        weight = 1.0
+    else:
+        weight = 0.0
+        
+    # Compute standard Fourier features
+    cos_val = math.cos(2 * math.pi * k * x)
+    sin_val = math.sin(2 * math.pi * k * x)
+    
+    # Apply weight
+    return [weight * cos_val, weight * sin_val]
+```
+
+**Edge Cases and Pitfalls**
+*   **Local Optima:** High-frequency positional encoding details can cause the optimizer to diverge or converge to incorrect local minima, especially with poor initial pose estimates [S1]. TDLF mitigates this by suppressing high frequencies initially [S1].
+*   **Invalid RGB Inference:** Standard dynamic filters starting at 0% frequency may produce invalid or noisy color information in the early stages of optimization [S1]. TDLF avoids this by starting at $\alpha_0 > 0$ [S1].
+*   **Threshold Calculation:** The formula uses $(\alpha + \alpha_0)L$. If $\alpha$ approaches 1, the threshold approaches $(1 + \alpha_0)L$, which exceeds $L$. However, since $k$ only ranges up to $L-1$, all bands will be active once $\alpha + \alpha_0 \ge 1$. The sources define the condition as $k \le (\alpha + \alpha_0)L$ [S1].
+
+## Subtopics
+
+### Dynamic Low-pass Filter (BARF)
+The precursor method that starts the frequency threshold at 0%. TDLF differs by starting at a non-zero $\alpha_0$ to ensure valid initial color inference [S1]. See [Dynamic Low-pass Filter](link-to-BARF-article-if-exists).
+
+### Fourier Positional Encoding
+The base encoding scheme to which TDLF is applied. TDLF acts as a mask on top of this encoding. See [Fourier Positional Encoding](1267-fourier-positional-encoding.md).
+
+## Operating characteristics
+*   **Time Complexity:** The filtering operation adds negligible computational overhead per sample, consisting of a comparison and a multiplication. The update of $\alpha$ occurs every 50 steps, further reducing overhead [S1].
+*   **Memory Complexity:** No additional memory structures are required beyond the standard NeRF parameters and the positional encoding layer [S1].
+*   **Performance:** In experiments on the UMAD and Mill 19 datasets, TDLF achieved lower translation and rotation errors compared to baselines like iNeRF and standard BARF (when $\alpha_0=0$) [S1]. For example, on the UMAD dataset, TDLF achieved a mean translation error of 0.34m compared to 12.36m for iNeRF [S1].
+*   **Strengths:** Prevents divergence in large-scale city scenes with poor initial pose estimates; provides stable color information from the start of optimization [S1].
+*   **Limitations:** Requires tuning of the initial threshold $\alpha_0$. The sources indicate that $\alpha_0 \approx 40\% \times L$ performs best, but performance degrades if $\alpha_0$ is too high or too low [S1].
+*   **When to use:** Pose optimization in NeRF-based global localization for large-scale scenes where initial pose estimates are uncertain [S1].
+*   **When not to use:** When high-frequency details are critical from the very first iteration and the initial pose is known to be highly accurate (standard Fourier encoding may suffice).
+
+## Background
+The Truncated Dynamic Low-pass Filter was introduced in the paper "LATITUDE: Robotic Global Localization with Truncated Dynamic Low-pass Filter in City-scale NeRF" by Liang et al. from Tsinghua University, Beihang University, and other institutions, published in 2023 [S1]. The method was developed to address the challenge of global localization in large-scale city scenes using NeRFs, where traditional optimization methods often fail due to local optima caused by high-frequency noise in the early stages of pose refinement [S1]. The authors proposed a two-stage mechanism involving NeRF-assisted place recognition followed by TDLF-based pose optimization on the tangent plane of SE(3) [S1].
+
+## Sources
+[S1] LATITUDE: Robotic Global Localization with Truncated Dynamic Low-pass Filter in City-scale NeRF, https://doi.org/10.1109/icra48891.2023.10161570, fetched 2026-10-29

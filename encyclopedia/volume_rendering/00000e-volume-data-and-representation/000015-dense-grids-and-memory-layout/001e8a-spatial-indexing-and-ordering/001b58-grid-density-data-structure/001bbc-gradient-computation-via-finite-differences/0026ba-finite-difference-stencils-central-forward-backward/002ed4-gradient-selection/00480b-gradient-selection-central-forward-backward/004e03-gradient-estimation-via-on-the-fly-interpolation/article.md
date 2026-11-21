@@ -1,0 +1,91 @@
+# Gradient Estimation via On-the-Fly Interpolation
+
+Also called: Gradient Estimation via Central Differencing, Interpolated Gradient Estimation, On-the-Fly Gradient Computation
+
+## Overview
+This method estimates the gradient vector at an arbitrary sample point $(x,y,z)$ during ray integration by computing central differences of the underlying scalar volume data on demand, rather than precomputing and storing gradients at grid nodes [S2, unofficial][S3, book]. It trades increased computational load for reduced memory footprint, avoiding the storage overhead of a separate gradient field [S2, unofficial]. Unlike precomputed gradient approaches, it exploits the spatial and temporal locality of the scalar values required for the stencil, which can yield performance gains on both CPU and GPU architectures [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A scalar volume dataset $V$ defined on a regular 3D grid, and a sample position $\mathbf{p} = (x, y, z)$ within the volume bounds.
+- Output: The gradient vector $\mathbf{g} = [g_x, g_y, g_z]^T$ at $\mathbf{p}$.
+
+**Data Structures**
+- $V$: A 3D array of scalar values. The implementation assumes standard grid indexing where $V(i, j, k)$ accesses the value at grid coordinates $(i, j, k)$. Boundary conditions must be handled to prevent out-of-bounds access [G].
+
+**Steps**
+1.  **Interpolate Support Samples**: Since the sample point $\mathbf{p}$ is generally not aligned with grid nodes, the six scalar values required for the central difference stencil must be interpolated from the volume data. Let $V_{\text{interp}}(x, y, z)$ denote the interpolated value at arbitrary coordinates. Common interpolation filters (e.g., trilinear, cubic) are used [S1, unofficial][S3, book].
+2.  **Compute Central Differences**: Calculate the gradient components using the central difference formula [S3, book]:
+    $$
+    \begin{bmatrix} g_x \\ g_y \\ g_z \end{bmatrix} = \begin{bmatrix} V_{\text{interp}}(x-1, y, z) \\ V_{\text{interp}}(x, y-1, z) \\ V_{\text{interp}}(x, y, z-1) \end{bmatrix} - \begin{bmatrix} V_{\text{interp}}(x+1, y, z) \\ V_{\text{interp}}(x, y+1, z) \\ V_{\text{interp}}(x, y, z+1) \end{bmatrix}
+    $$
+    Note: The sources present this formula without explicit division by step size (e.g., $\Delta x$). This implies either unit grid spacing or that the gradient is unnormalized for relative comparison [S3, book]. In practice, if grid spacing $\Delta \mathbf{x}$ is not unit, the result should be divided by $\Delta \mathbf{x}$ [G].
+3.  **Return Gradient**: Return $\mathbf{g}$ for use in illumination calculations (e.g., normal vector normalization) [S3, book].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gradient_on_the_fly(V, x, y, z, interp_func):
+    """
+    Computes the gradient at (x, y, z) using on-the-fly central differencing.
+    
+    Args:
+        V: 3D array of volume data.
+        x, y, z: Float coordinates of the sample point.
+        interp_func: Function that interpolates V at arbitrary (x, y, z).
+                     Must handle boundary conditions (e.g., clamp, repeat).
+    
+    Returns:
+        g: Tuple (gx, gy, gz) representing the gradient vector.
+    """
+    # Interpolate the six support points for the central difference stencil
+    # Left neighbors
+    v_left_x = interp_func(V, x - 1, y, z)
+    v_left_y = interp_func(V, x, y - 1, z)
+    v_left_z = interp_func(V, x, y, z - 1)
+    
+    # Right neighbors
+    v_right_x = interp_func(V, x + 1, y, z)
+    v_right_y = interp_func(V, x, y + 1, z)
+    v_right_z = interp_func(V, x, y, z + 1)
+    
+    # Compute central differences
+    gx = v_left_x - v_right_x
+    gy = v_left_y - v_right_y
+    gz = v_left_z - v_right_z
+    
+    return (gx, gy, gz)
+```
+
+**Parameters**
+- Interpolation Filter: The quality of the interpolation filter significantly impacts gradient accuracy. Trilinear or higher-order filters are typically used [S1, unofficial][S3, book].
+- Grid Spacing: If the volume is not unit-spaced, the gradient components must be scaled by the inverse of the respective axis spacing [G].
+
+**Edge Cases and Pitfalls**
+- **Boundary Conditions**: When sample points are near volume boundaries, the stencil requires values outside the grid. These must be handled via clamping, reflection, or extrapolation [G].
+- **Interpolation Sensitivity**: Gradients are more sensitive to interpolation filter quality than the scalar values themselves because they are used in illumination calculations involving normalization of normal vectors [S1, unofficial][S3, book]. Poor interpolation can lead to noisy normals and incorrect shading.
+- **Precision**: The subtraction of nearby interpolated values can amplify noise if the volume data is noisy [G].
+
+## Subtopics
+
+### Precomputed Gradients
+Computes gradients at all grid nodes beforehand and stores them. Uses more memory but reduces per-sample compute cost. [Gradient Selection — Central/Forward/Backward](12132-gradient-selection-central-forward-backward.md)
+
+### Gradient Filtering
+Applies optimized gradient filters directly to the volume data. Often provides the best visual results but has higher complexity. [Gradient Selection — Central/Forward/Backward](12132-gradient-selection-central-forward-backward.md)
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per sample, but with a higher constant factor due to six interpolation calls and six arithmetic operations per sample.
+- **Memory Complexity**: $O(1)$ additional memory per sample. No storage for a gradient field is required, reducing the total memory footprint by a factor of three compared to precomputed gradients [S2, unofficial].
+- **Performance**: On-the-fly computation was found to be faster than precomputed gradients by an average of 8.2% on Intel/Nehalem, 19.4% on AMD/MagnyCours, and 80.7% on NVIDIA/Fermi [S2, unofficial]. This is attributed to the spatial and temporal locality of the scalar values needed for the stencil, which are either nearby in memory (especially with Z-ordering) or loaded recently, whereas precomputed gradients cause additional cache pressure from a separate memory buffer [S2, unofficial].
+- **Strengths**: Lower memory usage; avoids cache misses associated with separate gradient buffers; simple to implement.
+- **Limitations**: Higher computational cost per sample; sensitive to interpolation quality; not suitable for very large volumes where memory is the primary bottleneck.
+
+## Background
+The method was analyzed in the context of shared-memory parallel raycasting volume rendering [S2, unofficial]. It is one of three popular methods to estimate gradients from volume data, alongside precomputed central differencing and gradient filtering [S3, book]. The approach leverages the observation that the six-point stencil operation has significant locality, making it efficient despite the repeated computation [S2, unofficial].
+
+## Sources
+[S1] Overview of Volume Rendering, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S2] Multi-core and Many-core Shared-memory Parallel Raycasting Volume Rendering Optimization and Tuning, https://digital.library.unt.edu/ark:/67531/metadc829701/?q=empty space skipping volume rendering, fetched 2026-10-28 (unofficial)
+[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

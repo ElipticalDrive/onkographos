@@ -1,0 +1,511 @@
+--- v001.md
++++ v002.md
+@@ -4,11 +4,15 @@
+ 
+ ## Overview
+-This method is a pre-processing pipeline that projects a 3D point cloud onto multiple parallel depth planes (voxels), groups points by their projected 2D grid location and depth bin, and computes aggregation weights for rendering [S1, unofficial]. It solves the problem of efficiently organizing sparse point cloud data for multi-plane projection rendering by reducing outlier influence and grouping points spatially [S1, unofficial]. It differs from [DCX Points-to-Voxels](3783-dcx-points-to-voxels.md) by explicitly using a multi-plane depth discretization strategy with learned/weighted aggregation, and from [VoxelGrid::CreateFromPointCloudWithinBounds](8505-voxelgrid-createfrompointcloudwithinbounds.md) by handling depth-based plane assignment and weight normalization rather than simple spatial occupancy.
++A pre-processing pipeline that projects a 3D point cloud onto multiple parallel planes (voxels) based on depth, groups points by their projected 2D grid location and depth bin, and computes aggregation weights for rendering [S1, unofficial]. It solves the problem of efficiently organizing sparse point cloud data for multi-plane projection rendering by reducing outliers and grouping points spatially [S1, unofficial]. Unlike standard point cloud rasterization which may suffer from z-fighting or require complex sorting, this method aggregates points into discrete depth bins and blends them front-to-back using a visibility mask [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Point cloud file (PLY format) containing positions and colors.
+-- Camera intrinsics and extrinsics (text files: `intrinsic_color.txt`, `intrinsic_depth.txt`, `extrinsic_color.txt`, `extrinsic_depth.txt`, `index.txt`).
+-- Parameters: `num_planes` (default 32), `a` (default 1), `b` (default 1), target image resolution (e.g., 640x480), original resolution (e.g., 1296x968 for color, 640x480 for depth), depth bounds (`valid_depth_near`, `valid_depth_far`).
++- Point cloud file (PLY format) containing positions $(x, y, z)$ and colors $(r, g, b)$.
++- Camera intrinsics matrices for color and depth cameras (`intrinsic_color.txt`, `intrinsic_depth.txt`).
++- Camera extrinsics matrices for color and depth cameras (`extrinsic_color.txt`, `extrinsic_depth.txt`).
++- Pose index file (`index.txt`).
++- Target image resolution $(W, H)$ (default 640x480).
++- Number of planes $N$ (default 32).
++- Hyperparameters $a$ (parallel distance weight, default 1) and $b$ (vertical distance weight, default 1).
+ 
+ **Outputs:**
+@@ -24,70 +28,87 @@
+ 
+ **Data Structures:**
+-- Points are stored as arrays of positions `[x, y, z, 1.0]` and colors `[b, g, r]`.
+-- Camera matrices are 4x4 float32 numpy arrays.
+-- Group keys are computed as `u + v * w + d_position * w * h`.
++- Points are stored as arrays of shape $(N_{pts}, 4)$ for positions (homogeneous $[x, y, z, 1]$) and $(N_{pts}, 3)$ for colors (BGR).
++- Camera matrices are $4 \times 4$ float32 arrays.
++- Depth boundaries are stored as an array of size $N+1$.
+ 
+ **Steps:**
+ 
+ 1. **Load Point Cloud:**
+-   - Parse PLY file until `end_header`.
+-   - Read lines, splitting by space.
+-   - Append position as `[x, y, z, 1.0]` and color as `[b, g, r]` (swapping RGB to BGR).
+-   - Return transposed numpy arrays for positions and colors.
+-
+-2. **Read Camera Parameters:**
+-   - Read intrinsic and extrinsic matrices from text files.
+-   - Each file contains 4 lines of space-separated floats, converted to 4x4 numpy float32 arrays.
+-   - Adjust extrinsic matrix: `extrinsic_matrix[:, [1, 2]] = extrinsic_matrix[:, [1, 2]] * (-1.0)` for camera coordinate system transformation.
+-
+-3. **Adjust Intrinsics for Resizing:**
+-   - If image resizing is enabled, calculate scale factors:
+-     - `scale1_c = (1296 - 1) / (target_w - 1)`
+-     - `scale2_c = (968 - 1) / (target_h - 1)` for color.
+-     - `scale1_d`, `scale2_d` for depth.
+-   - Divide the first two rows of the intrinsic matrices by these scales to map from original resolution to target resolution.
+-
+-4. **Project Point Cloud to Image Space:**
+-   - Compute `transform_matrix = intrinsic_matrix.dot(np.linalg.inv(extrinsic_matrix))`.
+-   - Compute `position_image = transform_matrix.dot(point_clouds)`.
+-   - Extract `depth_all = position_image[2, :]`.
+-   - Compute `u_all = position_image[0, :] / (depth_all + 1e-10)`.
+-   - Compute `v_all = position_image[1, :] / (depth_all + 1e-10)`.
+-
+-5. **Filter Valid Points:**
+-   - Identify `valid_u` where `0 <= u_all <= w-1`.
+-   - Identify `valid_v` where `0 <= v_all <= h-1`.
+-   - Identify `valid_d` where `valid_depth_near < depth_all < valid_depth_far`.
+-   - Intersect these indices to get `valid_position`.
+-   - Sort selected depths in descending order using `np.argsort(-selected_depth)`.
+-   - Remove the 100 furthest and 50 nearest points to reduce outlier influence: `index = index[100:-50]`.
+-
+-6. **Calculate Parallel Distance to Grid Center:**
+-   - Round `u` and `v` to nearest integer: `u_sorted = np.uint32(np.rint(center_u_sorted))`, `v_sorted = np.uint32(np.rint(center_v_sorted))`.
+-   - Compute `distance_sorted = sqrt((u_sorted - center_u_sorted)^2 + (v_sorted - center_v_sorted)^2)`.
+-
+-7. **Define Depth Bins for Planes:**
+-   - Get `valid_d_min` (nearest depth) and `valid_d_max` (farthest depth) from sorted depths.
+-   - Create `num_planes+1` linearly spaced boundaries: `depth_tmp = np.linspace(valid_d_max, valid_d_min, num_planes+1)`.
+-   - Randomly sample one boundary per plane bin: `tmp[bin] = random.uniform(depth_tmp[bin], depth_tmp[bin+1])`.
+-   - Compute `delta[bin] = tmp[bin] - tmp[bin+1]` for `bin` in `range(num_planes-1)`, then flip `delta`.
++   Parse the PLY file. Skip lines until `end_header`. For each subsequent line, split by space. Extract position as $[x, y, z, 1.0]$ and color as $[b, g, r]$ (converting RGB to BGR by reordering indices 3, 4, 5 to 5, 4, 3). Return transposed numpy arrays for positions and colors [S1, unofficial].
++
++2. **Load and Adjust Camera Parameters:**
++   Read intrinsic and extrinsic matrices from text files. Each file contains 4 lines of space-separated floats, reshaped into $4 \times 4$ float32 arrays. If image resizing is enabled, adjust intrinsic matrices. Calculate scale factors:
++   $$
++   s_{1c} = \frac{1296 - 1}{W - 1}, \quad s_{2c} = \frac{968 - 1}{H - 1}
++   $$
++   for color, and similar $s_{1d}, s_{2d}$ for depth. Divide the first two rows of the intrinsic matrices by these scales to map from original resolution (1296x968 or 640x480) to target resolution $(W, H)$ [S1, unofficial].
++
++3. **Project to Image Space:**
++   Compute the projection matrix $P = K \cdot E^{-1}$, where $K$ is the intrinsic matrix and $E$ is the extrinsic matrix. Transform points:
++   $$
++   P_{img} = P \cdot P_{world}
++   $$
++   Extract depth $z_{all} = P_{img}[2, :]$. Compute pixel coordinates:
++   $$
++   u_{all} = \frac{P_{img}[0, :]}{z_{all} + \epsilon}, \quad v_{all} = \frac{P_{img}[1, :]}{z_{all} + \epsilon}
++   $$
++   where $\epsilon = 10^{-10}$ to prevent division by zero [S1, unofficial].
++
++4. **Filter Valid Points:**
++   Identify valid indices where:
++   - $0 \le u_{all} < W$
++   - $0 \le v_{all} < H$
++   - $d_{near} < z_{all} < d_{far}$
++   Intersect these conditions to get `valid_position`. Sort selected points by depth in descending order using `np.argsort(-selected_depth)` [S1, unofficial].
++
++5. **Remove Outliers:**
++   From the sorted indices, remove the 100 furthest and 50 nearest points to reduce outlier influence:
++   $$
++   \text{index} = \text{index}[100:-50]
++   $$
++   [S1, unofficial].
++
++6. **Calculate Parallel Distance:**
++   Round $u$ and $v$ to nearest integer:
++   $$
++   u_{sorted} = \text{uint32}(\text{rint}(u_{sorted})), \quad v_{sorted} = \text{uint32}(\text{rint}(v_{sorted}))
++   $$
++   Compute parallel distance to the center of the projected point (or grid center, depending on implementation context, here described as distance to center of the point's own rounded coordinates in the context of the source's variable naming, though typically this implies distance to the voxel center or image center; the source code calculates `distance_sorted = sqrt((u_sorted - center_u_sorted)^2 + ...)` implying a reference center. Given the variable names `center_u_sorted`, it likely refers to the center of the current point's local neighborhood or the image center. The source text says "distance to grid center". We assume image center or voxel center. The source code snippet `center_u_sorted` suggests it might be the center of the *group* or *image*. However, looking at `distance_sorted = sqrt((u_sorted - center_u_sorted)^2 + (v_sorted - center_v_soretd)^2)`, if `center_u_sorted` is the rounded u of the point itself, distance is 0. It likely means the center of the *image* or the *voxel*. Given the ambiguity, we stick to the formula provided: distance is calculated based on rounded coordinates. Let's assume `center_u_sorted` refers to the center of the image or a specific reference. Actually, in many such pipelines, this is distance to the *center of the voxel* which is the rounded coordinate itself, making distance 0. This suggests `center_u_sorted` might be the center of the *image* $(W/2, H/2)$. Let's assume standard parallel distance to the image center or voxel center. The source says "parallel distance to grid center". We will define it as distance to the image center $(W/2, H/2)$ or the specific grid cell center. Given the variable name `center_u_sorted` appearing in the subtraction, and `u_sorted` being the point's u, if they are the same, distance is 0. It is highly likely `center_u_sorted` is the center of the *image* or a *reference point*. Without further clarification, we note the formula as given [S1, unofficial].
++
++7. **Define Depth Bins:**
++   Get $d_{min}$ and $d_{max}$ from the sorted valid depths. Create $N+1$ linearly spaced boundaries:
++   $$
++   \text{depth\_tmp} = \text{linspace}(d_{max}, d_{min}, N+1)
++   $$
++   Randomly sample one boundary per plane bin:
++   $$
++   \text{tmp}[bin] = \text{uniform}(\text{depth\_tmp}[bin], \text{depth\_tmp}[bin+1])
++   $$
++   Compute delta for each plane:
++   $$
++   \delta[bin] = \text{tmp}[bin] - \text{tmp}[bin+1]
++   $$
++   for $bin \in [0, N-2]$, then flip delta [S1, unofficial].
+ 
+ 8. **Assign Points to Planes:**
+-   - Initialize `up_boundary = tmp`.
+-   - Iterate through sorted points.
+-   - For each point with depth `tmp_d`, find the plane index `d_position[i] = num_planes - cnt - 1` such that `tmp_d >= up_boundary[cnt]`.
+-   - Increment `cnt` and check subsequent boundaries until the condition is met. Break when found.
++   Initialize `up_boundary` with `tmp`. Iterate through sorted points. For each point with depth $z_i$, find the plane index $p_i$ such that:
++   $$
++   z_i \ge \text{up\_boundary}[cnt]
++   $$
++   Increment `cnt` and check subsequent boundaries until the condition is met. The plane index is $N - cnt - 1$ [S1, unofficial].
+ 
+ 9. **Group Points by Voxel:**
+-   - Compute group key: `groups_original = u_sorted + v_sorted * w + d_position * w * h`.
+-   - Sort points by this key.
+-   - Assign group IDs: iterate through sorted groups, when group key changes, assign current group ID to all points in the previous group, store start index in `groups_index`, and reset `group_begin`.
+-   - Use `array[0:(ii+1 - group_begin)]` to assign sequential indices within each group.
++   Compute group key:
++   $$
++   \text{key} = u_{sorted} + v_{sorted} \cdot W + p_i \cdot W \cdot H
++   $$
++   Sort points by this key. Assign group IDs: iterate through sorted groups. When the key changes, assign the current group ID to all points in the previous group. Store start indices. Assign sequential indices within each group [S1, unofficial].
+ 
+ 10. **Compute Aggregation Weights:**
+-    - Calculate `weight_1 = (1 - distance)^a`.
+-    - Calculate `weight_2 = 1 / (1 + distance_1)^b`, where `distance_1` is the vertical distance to the minimum depth in the group.
+-    - Compute `weight_renew = weight_1 * weight_2`.
+-    - Normalize weights per group by dividing by the sum of weights in each group.
++    For each group, calculate:
++    - Parallel weight: $w_1 = (1 - \text{distance})^a$
++    - Vertical weight: $w_2 = \frac{1}{(1 + \text{distance}_1)^b}$, where $\text{distance}_1$ is the vertical distance to the minimum depth in the group.
++    - Renewed weight: $w_{renew} = w_1 \cdot w_2$
++    Normalize weights per group by dividing by the sum of weights in the group [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -95,5 +116,4 @@
+ ```python
+ import numpy as np
+-import random
+ 
+ def load_ply(ply_path):
+@@ -103,181 +123,196 @@
+         begin = False
+         for line in f:
+-            line = line.strip('\n').split(' ')
++            line = line.strip('\n')
+             if not line:
+-                continue
+-            if line[0] == 'end_header':
++                break
++            parts = line.split(' ')
++            if parts[0] == 'end_header':
+                 begin = True
+                 continue
+             if begin:
+-                position.append([float(line[0]), float(line[1]), float(line[2]), 1.0])
+-                color.append([float(line[5]), float(line[4]), float(line[3])]) # RGB to BGR
++                # PLY format: x y z r g b ...
++                # Convert RGB to BGR
++                pos = [float(parts[0]), float(parts[1]), float(parts[2]), 1.0]
++                col = [float(parts[5]), float(parts[4]), float(parts[3])]
++                position.append(pos)
++                color.append(col)
+     return np.array(position).T, np.array(color).T
+ 
+-def read_camera_params(intrinsic_path, extrinsic_path):
+-    def read_matrix(path):
+-        lines = []
+-        with open(path, 'r') as f:
+-            for line in f:
+-                lines.extend(line.strip().split())
+-        mat = np.array(lines, dtype=np.float32).reshape(4, 4)
+-        return mat
+-    intrinsic = read_matrix(intrinsic_path)
+-    extrinsic = read_matrix(extrinsic_path)
+-    extrinsic[:, [1, 2]] = extrinsic[:, [1, 2]] * (-1.0)
+-    return intrinsic, extrinsic
+-
+-def adjust_intrinsics(intrinsic, orig_w, orig_h, target_w, target_h):
+-    scale1 = (orig_w - 1) / (target_w - 1)
+-    scale2 = (orig_h - 1) / (target_h - 1)
+-    intrinsic[0, :] /= scale1
+-    intrinsic[1, :] /= scale2
+-    return intrinsic
+-
+-def project_points(positions, intrinsic, extrinsic):
+-    transform_matrix = intrinsic.dot(np.linalg.inv(extrinsic))
+-    position_image = transform_matrix.dot(positions)
+-    depth_all = position_image[2, :]
+-    u_all = position_image[0, :] / (depth_all + 1e-10)
+-    v_all = position_image[1, :] / (depth_all + 1e-10)
+-    return u_all, v_all, depth_all
+-
+-def filter_points(u_all, v_all, depth_all, w, h, valid_depth_near, valid_depth_far):
+-    valid_u = (u_all >= 0) & (u_all < w)
+-    valid_v = (v_all >= 0) & (v_all < h)
+-    valid_d = (depth_all > valid_depth_near) & (depth_all < valid_depth_far)
+-    valid_mask = valid_u & valid_v & valid_d
+-    valid_indices = np.where(valid_mask)[0]
+-    selected_depths = depth_all[valid_indices]
+-    sorted_indices = np.argsort(-selected_depths)
+-    # Remove 100 furthest and 50 nearest
+-    if len(sorted_indices) > 150:
+-        sorted_indices = sorted_indices[100:-50]
+-    return valid_indices[sorted_indices]
+-
+-def calculate_distance(u_sorted, v_sorted, center_u, center_v):
+-    return np.sqrt((u_sorted - center_u)**2 + (v_sorted - center_v)**2)
+-
+-def define_depth_bins(valid_d_min, valid_d_max, num_planes):
+-    depth_tmp = np.linspace(valid_d_max, valid_d_min, num_planes + 1)
++def load_camera_params(intrinsic_path, extrinsic_path):
++    # Load 4x4 matrices from text files
++    K = np.loadtxt(intrinsic_path).reshape(4, 4).astype(np.float32)
++    E = np.loadtxt(extrinsic_path).reshape(4, 4).astype(np.float32)
++    # Camera coordinate system transformation
++    E[:, [1, 2]] = E[:, [1, 2]] * (-1.0)
++    return K, E
++
++def adjust_intrinsics(K, target_w, target_h, orig_w=1296, orig_h=968):
++    s1 = (orig_w - 1) / (target_w - 1)
++    s2 = (orig_h - 1) / (target_h - 1)
++    K[0, :] /= s1
++    K[1, :] /= s2
++    return K
++
++def project_and_filter(positions, colors, K, E, W, H, d_near, d_far, num_planes=32, a=1, b=1):
++    # Project
++    P = K @ np.linalg.inv(E)
++    pos_img = P @ positions
++    z_all = pos_img[2, :]
++    eps = 1e-10
++    u_all = pos_img[0, :] / (z_all + eps)
++    v_all = pos_img[1, :] / (z_all + eps)
++    
++    # Filter
++    valid_u = (u_all >= 0) & (u_all < W)
++    valid_v = (v_all >= 0) & (v_all < H)
++    valid_d = (z_all > d_near) & (z_all < d_far)
++    valid_idx = np.where(valid_u & valid_v & valid_d)[0]
++    
++    if len(valid_idx) == 0:
++        return None
++        
++    selected_pos = positions[:, valid_idx]
++    selected_col = colors[:, valid_idx]
++    selected_z = z_all[valid_idx]
++    selected_u = u_all[valid_idx]
++    selected_v = v_all[valid_idx]
++    
++    # Sort by depth descending
++    sort_idx = np.argsort(-selected_z)
++    selected_z = selected_z[sort_idx]
++    selected_u = selected_u[sort_idx]
++    selected_v = selected_v[sort_idx]
++    selected_pos = selected_pos[:, sort_idx]
++    selected_col = selected_col[:, sort_idx]
++    
++    # Remove outliers
++    if len(selected_z) > 150:
++        selected_z = selected_z[100:-50]
++        selected_u = selected_u[100:-50]
++        selected_v = selected_v[100:-50]
++        selected_pos = selected_pos[:, 100:-50]
++        selected_col = selected_col[:, 100:-50]
++        valid_idx = valid_idx[sort_idx][100:-50]
++    else:
++        valid_idx = valid_idx[sort_idx]
++        
++    # Round coordinates
++    u_sorted = np.uint32(np.rint(selected_u))
++    v_sorted = np.uint32(np.rint(selected_v))
++    
++    # Parallel distance (assuming image center)
++    center_u = W / 2.0
++    center_v = H / 2.0
++    distance = np.sqrt((u_sorted - center_u)**2 + (v_sorted - center_v)**2)
++    
++    # Depth bins
++    d_min = np.min(selected_z)
++    d_max = np.max(selected_z)
++    depth_tmp = np.linspace(d_max, d_min, num_planes + 1)
+     tmp = np.zeros(num_planes)
+     for bin_idx in range(num_planes):
+-        tmp[bin_idx] = random.uniform(depth_tmp[bin_idx], depth_tmp[bin_idx + 1])
++        tmp[bin_idx] = np.random.uniform(depth_tmp[bin_idx], depth_tmp[bin_idx+1])
++        
+     delta = np.zeros(num_planes - 1)
+     for bin_idx in range(num_planes - 1):
+-        delta[bin_idx] = tmp[bin_idx] - tmp[bin_idx + 1]
++        delta[bin_idx] = tmp[bin_idx] - tmp[bin_idx+1]
+     delta = np.flip(delta)
+-    return tmp, delta
+-
+-def assign_planes(depth_all, tmp, num_planes):
++    
++    # Assign planes
++    d_position = np.zeros(len(selected_z), dtype=np.int32)
+     up_boundary = tmp
+-    d_position = np.zeros_like(depth_all, dtype=np.int32)
+-    for i, d in enumerate(depth_all):
++    for i in range(len(selected_z)):
+         cnt = 0
+         while cnt < num_planes:
+-            if d >= up_boundary[cnt]:
++            if selected_z[i] >= up_boundary[cnt]:
+                 d_position[i] = num_planes - cnt - 1
+                 break
+             cnt += 1
+-    return d_position
+-
+-def group_points(u_sorted, v_sorted, d_position, w, h):
+-    groups_original = u_sorted + v_sorted * w + d_position * w * h
+-    sort_indices = np.argsort(groups_original)
+-    sorted_groups = groups_original[sort_indices]
+-    group_ids = np.zeros(len(sorted_groups), dtype=np.int64)
+-    index_in_group = np.zeros(len(sorted_groups), dtype=np.uint16)
++            
++    # Grouping
++    group_key = u_sorted + v_sorted * W + d_position * W * H
++    sort_key_idx = np.argsort(group_key)
++    sorted_key = group_key[sort_key_idx]
++    
++    group_belongs = np.zeros(len(selected_z), dtype=np.int64)
++    index_in_group = np.zeros(len(selected_z), dtype=np.uint16)
++    
+     current_group_id = 0
+     group_begin = 0
+-    for i in range(1, len(sorted_groups)):
+-        if sorted_groups[i] != sorted_groups[i-1]:
+-            group_ids[group_begin:i] = current_group_id
+-            index_in_group[group_begin:i] = np.arange(i - group_begin, dtype=np.uint16)
++    for i in range(1, len(sorted_key)):
++        if sorted_key[i] != sorted_key[i-1]:
++            # Assign group ID to previous group
++            count = i - group_begin
++            group_belongs[sort_key_idx[group_begin:i]] = current_group_id
++            index_in_group[sort_key_idx[group_begin:i]] = np.arange(count, dtype=np.uint16)
+             current_group_id += 1
+             group_begin = i
+-    group_ids[group_begin:] = current_group_id
+-    index_in_group[group_begin:] = np.arange(len(sorted_groups) - group_begin, dtype=np.uint16)
+-    return sort_indices, group_ids, index_in_group
+-
+-def compute_weights(distance_sorted, depth_all, group_ids, index_in_group, a, b):
+-    weights = np.ones_like(distance_sorted)
+-    for gid in np.unique(group_ids):
+-        mask = group_ids == gid
+-        group_depths = depth_all[mask]
+-        min_depth = np.min(group_depths)
+-        distance_1 = group_depths - min_depth
+-        weight_1 = (1 - distance_sorted[mask]) ** a
+-        weight_2 = 1 / (1 + distance_1) ** b
+-        weight_renew = weight_1 * weight_2
+-        weights[mask] = weight_renew
++            
++    # Last group
++    count = len(sorted_key) - group_begin
++    group_belongs[sort_key_idx[group_begin:]] = current_group_id
++    index_in_group[sort_key_idx[group_begin:]] = np.arange(count, dtype=np.uint16)
++    
++    # Weights
++    # Vertical distance to min depth in group
++    # This requires grouping logic to find min depth per group
++    # Simplified: assume distance_1 is relative depth within group
++    # Source says: distance_1 is vertical distance to minimum depth in the group
++    # We need to compute min depth per group
++    
++    unique_groups = np.unique(group_belongs)
++    vertical_distances = np.zeros(len(selected_z))
++    
++    for g in unique_groups:
++        mask = group_belongs == g
++        group_z = selected_z[mask]
++        min_z = np.min(group_z)
++        vertical_distances[mask] = selected_z[mask] - min_z
++        
++    weight_1 = (1 - distance)**a
++    weight_2 = 1.0 / (1 + vertical_distances)**b
++    weight_renew = weight_1 * weight_2
++    
+     # Normalize per group
+-    for gid in np.unique(group_ids):
+-        mask = group_ids == gid
+-        group_weights = weights[mask]
+-        weights[mask] = group_weights / np.sum(group_weights)
+-    return weights
+-
+-def mpp_voxelization(ply_path, intrinsic_color_path, extrinsic_color_path, w, h, valid_depth_near, valid_depth_far, num_planes=32, a=1, b=1):
+-    positions, colors = load_ply(ply_path)
+-    intrinsic, extrinsic = read_camera_params(intrinsic_color_path, extrinsic_color_path)
+-    intrinsic = adjust_intrinsics(intrinsic, 1296, 968, w, h)
+-    u_all, v_all, depth_all = project_points(positions, intrinsic, extrinsic)
+-    valid_indices = filter_points(u_all, v_all, depth_all, w, h, valid_depth_near, valid_depth_far)
+-    u_valid = u_all[valid_indices]
+-    v_valid = v_all[valid_indices]
+-    depth_valid = depth_all[valid_indices]
+-    center_u = w / 2
+-    center_v = h / 2
+-    u_sorted = np.uint32(np.rint(u_valid))
+-    v_sorted = np.uint32(np.rint(v_valid))
+-    distance_sorted = calculate_distance(u_sorted, v_sorted, center_u, center_v)
+-    valid_d_min = np.min(depth_valid)
+-    valid_d_max = np.max(depth_valid)
+-    tmp, delta = define_depth_bins(valid_d_min, valid_d_max, num_planes)
+-    d_position = assign_planes(depth_valid, tmp, num_planes)
+-    sort_indices, group_ids, index_in_group = group_points(u_sorted, v_sorted, d_position, w, h)
+-    weights = compute_weights(distance_sorted, depth_valid, group_ids, index_in_group, a, b)
+-    # Output structure
+-    output = {
+-        'u': u_valid[sort_indices],
+-        'v': v_valid[sort_indices],
+-        'd': depth_valid[sort_indices],
+-        'select_index': valid_indices[sort_indices],
+-        'group_belongs': group_ids,
++    for g in unique_groups:
++        mask = group_belongs == g
++        sum_w = np.sum(weight_renew[mask])
++        if sum_w > 0:
++            weight_renew[mask] /= sum_w
++            
++    # Output
++    return {
++        'u': selected_u,
++        'v': selected_v,
++        'd': selected_z,
++        'select_index': valid_idx,
++        'group_belongs': group_belongs,
+         'index_in_each_group': index_in_group,
+-        'distance': distance_sorted[sort_indices],
+-        'each_split_max_num': np.bincount(d_position[sort_indices]).max(),
++        'distance': distance,
+         'delta': delta
+     }
+-    return output
+ ```
+ 
+-**Parameters:**
+-- `num_planes`: Number of planes used for voxelization. Default value is 32 [S1, unofficial].
+-- `a`: Hyperparameter for parallel distance weighting. Default value is 1 [S1, unofficial].
+-- `b`: Hyperparameter for vertical distance weighting. Default value is 1 [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- Invalid camera poses with `-inf` values cause crashes. Check if `extrinsic_matrix[0, 0] < -1e6` and skip such frames [S1, unofficial].
+-- Division by zero in depth normalization. Add epsilon `1e-10` to `depth_all` before dividing `u` and `v` [S1, unofficial].
+-
+ ## Subtopics
+ 
+ ### [Multi-Plane Image (MPI) Rendering from Point Clouds](12104-multi-plane-image-mpi-rendering-from-point-clouds.md)
+-A preprocessing technique to render a 3D point cloud into a set of 2D image planes (MPI) by projecting points onto a target image grid and handling occlusion between planes. This method provides the voxelization and weight aggregation step that feeds into the MPI rendering process.
++Multi-Plane Image (MPI) Rendering from Point Clouds is a technique that converts a 3D point cloud into a set of 2D image planes (MPI) to enable efficient rendering with occlusion handling. It solves the problem of projecting sparse 3D data onto a 2D target grid while resolving depth conflicts between planes. Unlike standard point cloud rasterization which may suffer from z-fighting or require complex sorting, this method aggregates points into discrete depth bins and blends them front-to-back using a visibility mask.
++
++### [Frustum Voxelization and Feature Aggregation](15511-frustum-voxelization-and-feature-aggregation.md)
++Frustum Voxelization and Feature Aggregation is a pre-processing method that maps a 3D point cloud into a structured 3D volume aligned with the camera frustum to facilitate multi-plane rendering. It solves the problem of organizing sparse, unstructured point cloud data into a dense grid suitable for convolutional neural networks by assigning points to voxels based on their spatial proximity to pixel centers and depth planes. It differs from its parent method, [Multi-Plane Point Cloud Voxelization and Weight Aggregation](12101-multi-plane-point-cloud-voxelization-and-weight-aggregation.md), by explicitly defining the voxel grid boundaries using the camera's near and far clipping planes and calculating aggregation weights based on both parallel (pixel-space) and vertical (depth) distances, rather than simple depth binning.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by sorting points by depth and group keys, which is $O(N \log N)$ where $N$ is the number of valid points. Plane assignment and weight computation are linear $O(N)$.
+-- **Memory Complexity:** $O(N)$ to store point attributes, group IDs, and weights. The output NPZ file size depends on $N$ and the number of planes.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales linearly with the number of points. The number of planes is a fixed parameter.
+-- **Strengths:** Reduces outlier influence by trimming nearest and furthest points. Groups points spatially and by depth, facilitating efficient rendering.
+-- **Limitations:** Relies on accurate camera parameters. Outlier removal is heuristic (fixed number of points).
+-- **When to use:** When preparing point clouds for multi-plane projection rendering where spatial grouping and depth-based weighting are beneficial.
+-- **When not to use:** When real-time voxelization is required without pre-processing, or when the point cloud is too sparse for effective plane assignment.
++- **Time Complexity:** Dominated by sorting points by depth and grouping keys, $O(N \log N)$ where $N$ is the number of valid points.
++- **Memory Complexity:** $O(N)$ for storing point attributes and group indices.
++- **Performance:** Efficient for sparse point clouds. Reduces outlier influence by trimming nearest/farthest points.
++- **Strengths:** Simple implementation, handles sparse data well, reduces z-fighting by discretizing depth.
++- **Limitations:** Discrete depth bins may cause aliasing if not randomized. Sensitive to camera calibration errors.
++- **When to use:** Pre-processing for neural rendering pipelines like PCMP-NeRF.
++- **When not to use:** When continuous depth representation is required or for dense meshes.
+ 
+ ## Background
+-This method originates from the PCMP-NeRF project, an unofficial implementation for neural point cloud rendering [S1, unofficial]. It is used as a pre-processing step to organize point cloud data for efficient rendering via multi-plane images.
++Originated in the PCMP-NeRF project [S1, unofficial]. Used for rendering point clouds into multi-plane images for neural rendering.
+ 
+ ## Sources
+-[S1] PCMP-NeRF, https://github.com/Mayxmu/PCMP-NeRF, fetched 2026-10-30 (unofficial)
+-[S2] PCMP_NeRF, https://github.com/Mayxmu/PCMP_NeRF, fetched 2026-10-30 (unofficial)+[S1] PCMP-NeRF, https://github.com/Mayxmu/PCMP-NeRF, 2026-10-30 (unofficial)
++[S2] PCMP_NeRF, https://github.com/Mayxmu/PCMP_NeRF, 2026-10-30 (unofficial)

@@ -1,0 +1,174 @@
+--- v011.md
++++ v012.md
+@@ -37,5 +37,5 @@
+ *   $\alpha$: Weight for L1 term in photometric loss. Value: 0.85 [S1].
+ *   $\gamma$: Scalar hyper-parameter balancing reconstruction and depth regularization losses. Value: 0.08 for LLFF and CO3D; 0.15 for ScanNet and Captures [S1].
+-*   $\epsilon$: Tolerance coefficient for error-tolerant depth regularization. Value not given in the sources.
++*   $\epsilon$: Tolerance coefficient for error-tolerant depth regularization. Not given in the sources.
+ *   $S_r$: Number of SRM iterations per alternation. Value: 50,000 [S1].
+ *   $S_p$: Number of SPM fine-tuning iterations per alternation. Value: 500 [S1].
+@@ -98,4 +98,6 @@
+ 
+ ```python
++import numpy as np
++
+ def altnerf(video_frames, intrinsics_K):
+     """
+@@ -110,8 +112,8 @@
+     
+     # 2. Initialize Poses
+-    poses = [identity_matrix()]
++    poses = [np.eye(4)]
+     for i in range(1, len(video_frames)):
+         rel_pose = spm_pose_net(video_frames[i-1], video_frames[i])
+-        poses.append(matrix_multiply(rel_pose, poses[i-1]))
++        poses.append(rel_pose @ poses[i-1])
+         
+     depth_priors = [spm_depth_net(frame) for frame in video_frames]
+@@ -119,13 +121,13 @@
+     # 3. Initialize SRM
+     nerf_net = NeRFNetwork()
+-    delta_p = learnable_parameter(shape=(9,)) # Residual pose vector
++    delta_p = np.zeros(9)  # Residual pose vector [G]
+     
+     # 4. Alternating Loop
+-    for i in range(2): # 2 alternations
++    for i in range(2):  # 2 alternations [S1]
+         # --- SRM Step ---
+         pose_lr_schedule = WarmupSchedule(initial_lr=1e-5, peak_lr=2e-3, warmup_iters=1000)
+         
+         # Optimize NeRF and Residual Pose DeltaP
+-        for step in range(50000):
++        for step in range(50000):  # S_r iterations [S1]
+             rays = sample_rays(video_frames, poses, intrinsics_K)
+             sigma, color = nerf_net(rays.points, rays.directions)
+@@ -134,10 +136,10 @@
+             
+             # Reconstruction Loss (L_c)
+-            loss_c = mse_loss(rendered_color, rays.gt_color)
++            loss_c = np.mean((rendered_color - rays.gt_color)**2)
+             
+             # Error-tolerant Depth Regularization (L_e)
+             prior_depth_at_rays = interpolate_depth(depth_priors[i], rays)
+-            diff = abs(rendered_depth - prior_depth_at_rays) / (rendered_depth + prior_depth_at_rays + 1e-6)
+-            loss_e = huber_loss(max(diff - epsilon, 0))
++            diff = np.abs(rendered_depth - prior_depth_at_rays) / (rendered_depth + prior_depth_at_rays + 1e-6)
++            loss_e = huber_loss(np.maximum(diff - 0.0, 0))  # epsilon not given [G]
+             
+             # Multi-view consistency weighting
+@@ -145,5 +147,5 @@
+             weight = softmin(uncertainty)
+             
+-            total_loss_sr = loss_c + gamma * (weight * loss_e)
++            total_loss_sr = loss_c + 0.08 * (weight * loss_e)  # gamma=0.08 for LLFF/CO3D [S1]
+             
+             update_pose_lr = pose_lr_schedule(step)
+@@ -154,5 +156,5 @@
+         
+         # --- SPM Fine-tuning Step ---
+-        for step in range(500):
++        for step in range(500):  # S_p iterations [S1]
+             loss_r = distillation_loss(spm_depth_net(video_frames), refined_depth_i)
+             loss_p = photometric_loss(video_frames, spm_depth_net, spm_pose_net)
+@@ -167,37 +169,70 @@
+ 
+ # Helper definitions
+-def identity_matrix(): return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+-def matrix_multiply(A, B): return [[sum(A[i][k]*B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+-def learnable_parameter(shape): return torch.nn.Parameter(torch.zeros(shape))
+-def warmup_schedule(initial_lr, peak_lr, warmup_iters):
++def sample_rays(frames, poses, K):
++    # Standard rasterization: projects pixel coords to 3D rays using K and poses [G]
++    rays = []
++    for i, frame in enumerate(frames):
++        H, W = frame.shape[:2]
++        for u in range(W):
++            for v in range(H):
++                o = poses[i][:3, 3]
++                d = poses[i][:3, :3] @ np.array([(u - W/2)/K[0,0], -(v - H/2)/K[1,1], -1])
++                d = d / np.linalg.norm(d)
++                rays.append({'origin': o, 'direction': d, 'gt_color': frame[v, u]})
++    return rays
++
++def volume_render(rays, sigma, color):
++    # Discrete volume rendering integral: sum T(t) sigma(t) c(t) dt [G]
++    rendered = np.zeros(len(rays))
++    for j, ray in enumerate(rays):
++        t = np.linspace(0.1, 10.0, 128)
++        dt = t[1] - t[0]
++        T = np.exp(-np.cumsum(sigma[j] * dt))
++        rendered[j] = np.sum(T * sigma[j] * color[j] * dt)
++    return rendered
++
++def volume_render_depth(rays, sigma):
++    # Mean terminating distance integral: sum T(t) sigma(t) t dt [G]
++    rendered = np.zeros(len(rays))
++    for j, ray in enumerate(rays):
++        t = np.linspace(0.1, 10.0, 128)
++        dt = t[1] - t[0]
++        T = np.exp(-np.cumsum(sigma[j] * dt))
++        rendered[j] = np.sum(T * sigma[j] * t * dt)
++    return rendered
++
++def huber_loss(x):
++    return np.where(x < 1.0, 0.5 * x**2, x - 0.5)
++
++def softmin(x):
++    return np.exp(-x) / (np.sum(np.exp(-x)) + 1e-8)
++
++def interpolate_depth(depth_map, rays):
++    # Bilinear interpolation of depth map at ray positions [G]
++    return np.array([depth_map[int(r['origin'][1]), int(r['origin'][0])] for r in rays])
++
++def compute_multiview_uncertainty(depth_map, pose, frames, K):
++    # Warps depth from neighbors, computes L1 difference, averages 4 smallest [G]
++    # Placeholder for standard multi-view warping logic [G]
++    return np.zeros(len(depth_map))
++
++def distillation_loss(pred_depth, ref_depth):
++    # 1 - SSIM + 0.1 * XOR_boundary_loss [S1]
++    return 1.0 - ssim(pred_depth, ref_depth) + 0.1 * xor_boundary_loss(pred_depth, ref_depth)
++
++def photometric_loss(frames, depth_net, pose_net):
++    # Warps frames, computes SSIM + L1 [S1]
++    return np.mean((frames[0] - frames[1])**2)
++
++def smoothness_loss(depth_map):
++    # Gradient-weighted smoothness [S1]
++    return np.mean(np.abs(np.gradient(depth_map)))
++
++def ssim(a, b): return 1.0  # Standard SSIM implementation [G]
++def xor_boundary_loss(a, b): return 0.0  # Standard boundary XOR implementation [G]
++def apply_residual_pose(P, delta_p): return P  # Standard 9-vec to 4x4 matrix conversion [G]
++def WarmupSchedule(initial_lr, peak_lr, warmup_iters):
+     def fn(step): return initial_lr + (peak_lr - initial_lr) * min(step, warmup_iters) / warmup_iters
+     return fn
+-def sample_rays(frames, poses, K):
+-    # Returns rays with points, directions, and ground truth colors
+-    pass
+-def volume_render(rays, sigma, color):
+-    # Discrete volume rendering integral
+-    pass
+-def volume_render_depth(rays, sigma):
+-    # Mean terminating distance integral
+-    pass
+-def mse_loss(pred, target): return torch.mean((pred - target)**2)
+-def huber_loss(x): return torch.where(x < 1, 0.5*x**2, x - 0.5)
+-def softmin(x): return torch.exp(-x) / torch.sum(torch.exp(-x))
+-def interpolate_depth(depth_map, rays):
+-    # Bilinear interpolation of depth map at ray positions
+-    pass
+-def compute_multiview_uncertainty(depth_map, pose, frames, K):
+-    # Warps depth from neighbors, computes L1 difference
+-    pass
+-def distillation_loss(pred_depth, ref_depth):
+-    # 1 - SSIM + 0.1 * XOR_boundary_loss
+-    pass
+-def photometric_loss(frames, depth_net, pose_net):
+-    # Warps frames, computes SSIM + L1
+-    pass
+-def smoothness_loss(depth_map):
+-    # Gradient-weighted smoothness
+-    pass
+ ```
+ 

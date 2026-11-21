@@ -1,0 +1,172 @@
+--- v018.md
++++ v019.md
+@@ -28,4 +28,6 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def single_2d_projection_voxelization(triangle, resolution, bb_min, bb_max):
+     # triangle: list of 3 vertices, each (x, y, z)
+@@ -35,5 +37,5 @@
+     # 1. Identify dominant axis
+     n = cross(triangle[1] - triangle[0], triangle[2] - triangle[0])
+-    dominant_axis = argmax([abs(n[0]), abs(n[1]), abs(n[2])])
++    dominant_axis = 0 if abs(n[0]) >= abs(n[1]) and abs(n[0]) >= abs(n[2]) else (1 if abs(n[1]) >= abs(n[2]) else 2)
+     
+     # 2. Project and Rasterize
+@@ -42,4 +44,6 @@
+     
+     voxel_grid = {}
++    scale = resolution[dominant_axis] / (bb_max[dominant_axis] - bb_min[dominant_axis])
++    offset = -bb_min[dominant_axis] * scale
+     
+     for u, v in pixels:
+@@ -50,6 +54,8 @@
+             # 3. Pixel center covered
+             depth_tri = center_3d[dominant_axis]
+-            voxel_idx = map_to_voxel(center_3d, resolution, bb_min, bb_max)
+-            voxel_grid[voxel_idx] = True
++            idx = int(math.floor(depth_tri * scale + offset))
++            voxel_idx = list(map_to_voxel_2d(center_3d, resolution, bb_min, bb_max))
++            voxel_idx[dominant_axis] = idx
++            voxel_grid[tuple(voxel_idx)] = True
+         else:
+             # 4. Edge pixel: triangle covers pixel but not center
+@@ -58,11 +64,12 @@
+             if h_extents:
+                 clamped_h = clamp_extents(h_extents, u, v)
+-                depths_h = [project_2d_to_3d(proj_tri, dominant_axis, p)[dominant_axis] for p in clamped_h]
+-                voxel_center_depth = get_voxel_center_depth(u, v, dominant_axis, resolution, bb_min, bb_max)
++                depths_h = sorted([project_2d_to_3d(proj_tri, dominant_axis, p)[dominant_axis] for p in clamped_h])
++                voxel_idx = int(math.floor((u + 0.5) * scale + offset))
++                voxel_center_depth = (voxel_idx + 0.5) / scale + bb_min[dominant_axis]
+                 
+-                if (depths_h[0] < voxel_center_depth < depths_h[1]) or (depths_h[0] > voxel_center_depth > depths_h[1]):
++                if depths_h[0] < voxel_center_depth < depths_h[1]:
+                     for p in clamped_h:
+                         p3d = project_2d_to_3d(proj_tri, dominant_axis, p)
+-                        voxel_grid[map_to_voxel(p3d, resolution, bb_min, bb_max)] = True
++                        voxel_grid[tuple(map_to_voxel_2d(p3d, resolution, bb_min, bb_max))] = True
+                 else:
+                     # Vertical test
+@@ -70,9 +77,11 @@
+                     if v_extents:
+                         clamped_v = clamp_extents(v_extents, u, v)
+-                        depths_v = [project_2d_to_3d(proj_tri, dominant_axis, p)[dominant_axis] for p in clamped_v]
+-                        if (depths_v[0] < voxel_center_depth < depths_v[1]) or (depths_v[0] > voxel_center_depth > depths_v[1]):
++                        depths_v = sorted([project_2d_to_3d(proj_tri, dominant_axis, p)[dominant_axis] for p in clamped_v])
++                        if depths_v[0] < voxel_center_depth < depths_v[1]:
+                             for p in clamped_v:
+                                 p3d = project_2d_to_3d(proj_tri, dominant_axis, p)
+-                                voxel_grid[map_to_voxel(p3d, resolution, bb_min, bb_max)] = True
++                                voxel_grid[tuple(map_to_voxel_2d(p3d, resolution, bb_min, bb_max))] = True
++
++    return voxel_grid
+ 
+ # Helper definitions
+@@ -84,25 +93,57 @@
+ 
+ def rasterize_2d(tri_2d, res):
+-    # Standard scanline rasterization returning covered (u, v) pixel coordinates
+-    # Implementation omitted for brevity; returns list of (u, v) tuples
+-    pass
++    # Standard scanline rasterization returning covered (u, v) pixel coordinates [G]
++    v0, v1, v2 = tri_2d
++    min_u, max_u = int(min(v[0] for v in tri_2d)), int(max(v[0] for v in tri_2d)) + 1
++    min_v, max_v = int(min(v[1] for v in tri_2d)), int(max(v[1] for v in tri_2d)) + 1
++    covered = []
++    for u in range(min_u, max_u):
++        for v in range(min_v, max_v):
++            if point_in_triangle((u + 0.5, v + 0.5), tri_2d):
++                covered.append((u, v))
++    return covered
++
++def point_in_triangle(p, tri):
++    v0, v1, v2 = tri
++    denom = (v1[0] - v0[0]) * (v2[1] - v0[1]) - (v2[0] - v0[0]) * (v1[1] - v0[1])
++    if denom == 0: return False
++    w0 = ((v1[1] - v0[1]) * (p[0] - v0[0]) + (v0[0] - v1[0]) * (p[1] - v0[1])) / denom
++    w1 = ((v2[1] - v0[1]) * (p[0] - v0[0]) + (v0[0] - v2[0]) * (p[1] - v0[1])) / denom
++    w2 = 1.0 - w0 - w1
++    return w0 >= 0 and w1 >= 0 and w2 >= 0
+ 
+ def project_2d_to_3d(proj_tri, dominant_axis, p2d):
+     # Barycentric interpolation to reconstruct 3D point at 2D location
+     v0, v1, v2 = proj_tri
+-    # Reconstruct full 3D vertices by inserting dominant axis coordinate back
+     full_tri = []
+     for v in proj_tri:
+         full_v = list(v)
+-        full_v.insert(dominant_axis, 0) # Placeholder, will be replaced
++        full_v.insert(dominant_axis, 0)
+         full_tri.append(tuple(full_v))
+-    # Actual interpolation uses barycentric weights on 2D coords
+-    # Returns 3D point or None if outside triangle
+-    pass
++    denom = (full_tri[1][0] - full_tri[0][0]) * (full_tri[2][1] - full_tri[0][1]) - (full_tri[2][0] - full_tri[0][0]) * (full_tri[1][1] - full_tri[0][1])
++    if denom == 0: return None
++    w0 = ((full_tri[1][1] - full_tri[0][1]) * (p2d[0] - full_tri[0][0]) + (full_tri[0][0] - full_tri[1][0]) * (p2d[1] - full_tri[0][1])) / denom
++    w1 = ((full_tri[2][1] - full_tri[0][1]) * (p2d[0] - full_tri[0][0]) + (full_tri[0][0] - full_tri[2][0]) * (p2d[1] - full_tri[0][1])) / denom
++    w2 = 1.0 - w0 - w1
++    if w0 < 0 or w1 < 0 or w2 < 0: return None
++    return (
++        w0 * full_tri[0][0] + w1 * full_tri[1][0] + w2 * full_tri[2][0],
++        w0 * full_tri[0][1] + w1 * full_tri[1][1] + w2 * full_tri[2][1],
++        w0 * full_tri[0][2] + w1 * full_tri[1][2] + w2 * full_tri[2][2]
++    )
+ 
+ def get_line_extents(proj_tri, dominant_axis, center_2d, horizontal):
+     # Intersects triangle with line y=center_2d[1] (horizontal) or x=center_2d[0] (vertical)
+-    # Returns list of 2D intersection points
+-    pass
++    v0, v1, v2 = proj_tri
++    line_val = center_2d[1] if horizontal else center_2d[0]
++    line_coord = 1 if horizontal else 0
++    points = []
++    edges = [(v0, v1), (v1, v2), (v2, v0)]
++    for a, b in edges:
++        if (a[line_coord] - line_val) * (b[line_coord] - line_val) <= 0:
++            t = (line_val - a[line_coord]) / (b[line_coord] - a[line_coord] + 1e-9)
++            other_coord = a[1 - line_coord] + t * (b[1 - line_coord] - a[1 - line_coord])
++            points.append((other_coord, line_val) if horizontal else (line_val, other_coord))
++    return points
+ 
+ def clamp_extents(extents, u, v):
+@@ -110,14 +151,8 @@
+     return [(max(u, min(u+1, p[0])), max(v, min(v+1, p[1]))) for p in extents]
+ 
+-def map_to_voxel(point_3d, resolution, bb_min, bb_max):
++def map_to_voxel_2d(point_3d, resolution, bb_min, bb_max):
+     scale = [resolution[i] / (bb_max[i] - bb_min[i]) for i in range(3)]
+     offset = [-bb_min[i] * scale[i] for i in range(3)]
+-    return tuple(int((point_3d[i] * scale[i]) + offset[i]) for i in range(3))
+-
+-def get_voxel_center_depth(u, v, dominant_axis, resolution, bb_min, bb_max):
+-    # Computes the depth coordinate of the voxel center at pixel (u, v)
+-    scale = resolution[dominant_axis] / (bb_max[dominant_axis] - bb_min[dominant_axis])
+-    offset = -bb_min[dominant_axis] * scale
+-    return (u + 0.5) * scale + offset
++    return tuple(int(math.floor(point_3d[i] * scale[i] + offset[i])) for i in range(3))
+ ```
+ 
+@@ -127,6 +162,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Degenerate Triangles:** Triangles with zero area or collinear vertices may produce invalid normals [G]. Ensure normal computation handles degenerate cases by returning a default axis or skipping the triangle.
+-*   **Precision:** Depth comparisons for the edge tests must be robust to floating-point errors [G]. Use a small epsilon when comparing depths to voxel center depths.
++*   **Degenerate Triangles:** Triangles with zero area or collinear vertices may produce invalid normals [G]. Ensure normal computation handles degenerate cases by returning a default axis or skipping the triangle [G].
++*   **Precision:** Depth comparisons for the edge tests must be robust to floating-point errors [G]. Use a small epsilon when comparing depths to voxel center depths [G].
+ *   **Boundary Conditions:** The rasterization must ensure that pixels on the boundary of the projection are correctly handled to avoid missing voxels at the edges of the bounding box [G].
+ 
+@@ -137,8 +172,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+ *   **Strengths:** Significantly faster than multi-view methods due to the reduction in rasterization passes. It produces 6-separating voxelization, ensuring tunnel-freeness [S1, unofficial].
+-*   **Limitations:** Relies on the "thinness" property, which may not hold for all geometric configurations or non-planar inputs. It is specifically designed for planar triangles [S1, unofficial].
++*   **Limitations:** Relies on the "thinness" property, which may not hold for all geometric configurations or non-planar inputs [S1, unofficial]. It is specifically designed for planar triangles [S1, unofficial].
+ *   **When to Use:** When computational efficiency is critical and the input geometry consists of planar triangles [G].
+ *   **When Not to Use:** For non-planar surfaces or when higher-order topological guarantees beyond 6-separation are required without additional processing [G].

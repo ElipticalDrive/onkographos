@@ -1,0 +1,444 @@
+
+
+# FlexGS: Train Once, Deploy Everywhere with Many-in-One Flexible 3D Gaussian Splatting
+
+Hengyu Liu1\*, Yuehao Wang2∗ , Chenxin Li1∗ , Ruisi Cai2,3† , Kevin Wang2 , Wuyang Li1 , Pavlo Molchanov3 , Peihao Wang2 , Zhangyang Wang2 1 The Chinese University of Hong Kong, 2 University of Texas at Austin, 3 Nvidia
+
+# Abstract
+
+3D Gaussian splatting (3DGS) has enabled various applications in 3D scene representation and novel view synthesis due to its efficient rendering capabilities. However, 3DGS demands relatively significant GPU memory, limiting its use on devices with restricted computational resources. Previous approaches have focused on pruning less important Gaussians, effectively compressing 3DGS but often requiring a fine-tuning stage and lacking adaptability for the specific memory needs of different devices. In this work, we present an elastic inference method for 3DGS. Given an input for the desired model size, our method selects and transforms a subset of Gaussians, achieving substantial rendering performance without additional fine-tuning. We introduce a tiny learnable module that controls Gaussian selection based on the input percentage, along with a transformation module that adjusts the selected Gaussians to complement the performance of the reduced model. Comprehensive experiments on ZipNeRF, MipNeRF and Tanks&Temples scenes demonstrate the effectiveness of our approach. Code is available at [https://flexgs.github.io/.](https://flexgs.github.io/)
+
+# 1. Introduction
+
+Neural scene representations have significantly advanced the field of novel view synthesis by enabling the efficient and high-fidelity reconstruction of complex 3D scenes. Among these, 3D Gaussian Splatting (3DGS) [15, 18, 28, 50–52] has emerged as a prominent technique due to its efficient rendering capabilities and ability to handle largescale scenes. By representing scenes as a collection of anisotropic Gaussians, 3DGS strikes a balance between rendering speed and visual quality, making it suitable for realtime applications. Despite 3DGS being a promising technique for various applications and platforms, its widespread adoption faces two major challenges. First, standard 3DGS models are costly, requiring users to store millions of Gaus-
+
+Figure 1. Comparison between compression methods for 3D Gaussian Splatting. (a) Traditional case-by-case compression requires separate fine-tuning for each ratio. (b) Our elastic inference enables dynamic compression at any ratio without re-training, adaptively balancing quality and computational costs for diverse deployment scenarios.
+
+sian primitives, each with attributes such as position, scaling, rotation, opacity, and color, leading to significant memory overhead. For instance, as reported in [29], deploying and rendering a city-scale scene (over 20 million Gaussians) requires at least 4 GB of networking bandwidth and GPU memory, which is not always affordable to smartphones and laptops with weak GPU. To mitigate this, recent work compresses 3DGS via pruning [10, 37], which employs heuristics to estimate the importance of Gaussians and subsequently prune the less important ones. The pruning process is typically followed by an additional fine-tuning stage, which requires around 16.7% of the original training cost to restore rendering quality for each compression.
+
+Second, even efficient pruned 3DGS models often struggle to meet the diverse hardware constraints of different deployment environments. For instance, as a potential application of 3DGS, virtual reality city roaming and room tours require the deployment of 3DGS-represented scenes across various devices: PC-connected headsets (e.g., Valve Index®) rely on consumer-grade GPUs in the connected PC; while standalone headsets (e.g., Meta Quest®) feature integrated GPUs with limited memory and processing power. Additionally, different device models (such as those in the iPhone®series) may have varying configurations of computing and graphics units, further increasing the diversity of computational demands. Although one can compress an op-
+
+\*denotes Equal Contribution, † denotes Project Lead.
+
+timized 3DGS for every new device constraint, the process is inefficient as each specific computational budget must be handled separately. A more cost-effective solution is to generate a set of compressed models for popular devices and select the model that best meets the requirements of other devices. However, rendering quality may not reach the optimal level on devices for which the models are not specifically tailored, compromising the user experience.
+
+In this work, we introduce FlexGS, which can be trained once and seamlessly adapt to varying computational constraints, eliminating the need for costly retraining or finetuning for each configuration / hardware constraint. Given an input specifying the desired model size, our method selects and transforms a subset of Gaussians to meet the memory requirements while maintaining considerable rendering performance. Through comprehensive experiments on Mip-NeRF 360 [2], Temples&Tanks [21], and Zip-NeRF [3] datasets, we demonstrate that FlexGS can achieve competitive rendering quality with any user-desired fraction of the memory footprint of the original 3DGS models. The key contributions of FlexGS are as follows:
+
+- FlexGS seamlessly adapts to varying memory budgets at inference time. Unlike previous methods that require separate models or extensive fine-tuning for each target size, FlexGS operates with a single model that can elastically adjust the number of active Gaussians based on real-time input, offering significant flexibility for deployment on devices with different performance budgets.
+- We propose a learnable module that dynamically selects the most significant Gaussians based on an input compression ratio. This selector is guided by a novel Global Importance (GI) metric, which quantifies the contribution of each Gaussian to the overall rendering quality by considering factors such as spatial coverage, opacity, and transmittance.
+- To compensate for the removal of Gaussians and mitigate potential performance degradation, we introduce a transformation module that adjusts the attributes of the selected Gaussians. This module predicts spatial and geometric transformations, ensuring that the reduced set of Gaussians can effectively represent the scene across different ratios without overfitting to specific configurations.
+
+# 2. Related Work
+
+Compact Neural Radiance Field. Neural Radiance Field (NeRF) [32] revolutionized novel view synthesis by introducing an implicit MLP model that generates novel views via ray-based RGB accumulation. While groundbreaking, its computational demands from dense sampling and complex networks limit real-time applications. Various solutions like Instant-NGP [34], TensoRF [7], Kplanes [11], and DVGO [42] proposed explicit grid representations to accelerate computation, though at increased storage costs. To address storage efficiency, two main compression paradigms have emerged. Direct value compression includes techniques like pruning [9, 26], vector quantization [26, 27], and entropy-based methods in BiRF [40] and SHACIRA [14]. Structure-aware approaches leverage spatial correlations through wavelet transforms [39], rank decomposition [43], or predictive coding [41], exploiting the inherent regularity of feature grids. CNC [8] demonstrates the effectiveness of structural compression through significant rate-distortion improvements.
+
+Compact 3D Gaussian Splatting. 3D Gaussian Splatting (3DGS) [17] presents an alternative to NeRF by modeling scenes with optimizable 3D Gaussians. Through differentiable splatting and efficient rasterization [24], it achieves faster training and rendering while maintaining visual quality. However, the method typically requires millions of Gaussian primitives, each storing independent spatial and appearance attributes, resulting in substantial memory requirements. The scattered nature of point-based representation poses unique challenges for structural compression. Recent advances in compressing 3DGS can be categorized into three main approaches scene [1]: compaction [10, 19, 25], attribute compression [10, 25, 35, 37], and structured representation [30, 33].
+
+Scene compaction in 3DGS primarily follows two approaches: densification and pruning. Densification methods strategically add Gaussians to improve scene representation. For example, the Color-cued Efficient Densification method [19] leverages view-independent spherical harmonics coefficients to enhance detail capture while keeping minimum densification. In contrast, pruning provides a more direct path to compactness by removing redundant Gaussians. Compact3DGS [25] and RDO-Gaussian [44] introduce mask promoters for iterative Gaussian elimination, while LightGaussian [10] employs a one-time importance scoring system for efficient pruning.
+
+Attribute compression reduces per-Gaussian storage requirements through quantization. Several methods [10, 36, 37] have introduced vector quantization to compress Gaussian parameters. Reduced3DGS [38] takes a different approach by proposing adaptive adjustment of spherical harmonics degree based on view-dependent effects. However, these compression techniques often introduce additional computational overhead during rendering.
+
+Structured representation methods organize Gaussians to exploit spatial coherence. Scaffold-GS [30] presents an anchor-based representation where attributes are associated with representative points rather than individual Gaussians. Gaussian Grids [33] explores novel approaches through 2D spatial organization, though spatial redundancy remains partially unexploited in current methods. While existing methods rely on fixed compression ratios or model-specific optimization, our work introduces a unified framework that dynamically adapts to varying computational constraints. By jointly optimizing scene compactness and spatial relationships, our approach enables efficient deployment across diverse hardware platforms through a single trained model.
+
+Elastic Inference. Flexible inference has been a major focus of research, particularly in convolutional neural networks (CNNs). Yu and Huang [47], Yu et al. [48] pioneered slimmable neural networks, allowing a single model to operate with different numbers of convolutional kernels. OFA [4] further advanced this idea by generalizing pruning techniques to build a model capable of adapting to multiple configurations.
+
+More recently, slimmable models have been extended to Transformer architectures. Kusupati et al. [23] proposed the nested Matryoshka structure, while Matformer [22] applied this concept to the MLP hidden dimensions of large language models. Flextron [5] introduced elastic multihead attention and constructed elastic LLMs using learnable routers. However, these methods are designed specifically for neural networks and cannot be directly applied to 3DGS.
+
+## 3. Method
+
+Given a set of ratios E = {ei} n i=1, our proposed elastic framework, FlexGS, trains 3DGS once and enables it to render with an arbitrary number of Gaussians without requiring additional fine-tuning. FlexGS consists of two modules: 1) A learnable Gaussian selector for adaptively selecting Gaussians under a given ratio (Sec. 3.2\); 2) A ratiodependent Gaussian transformation field for displacing selected Gaussians to compensate missing details due to the decrease of the number of Gaussians (Sec. 3.3\). In the following Sec. 3.1, we first overview the basics of 3DGS.
+
+### 3.1. Preliminary
+
+3DGS [18] utilizes a set of anisotropic Gaussians with various attributes for 3D representation. As described in Eq. 1, each Gaussian is defined by a mean value X and a covariance matrix Σ, which collectively delineate its spatial position and size. For differentiable optimization, Σ can be decomposed into a scaling matrix S and a rotation matrix R. A 3D vector s for scaling and a quaternion q for rotation are utilized for independent optimization of both factors.
+
+
+$$G(\mathbf{X}) = e^{-\frac{1}{2}\mathbf{X}^T \mathbf{\Sigma}^{-1} \mathbf{X}}, \mathbf{\Sigma} = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T. \quad (1)$$
+
+When rendering 2D images, differential splatting [46] is employed for the 3D Gaussians within the camera planes. The covariance matrix Σ′ in camera coordinates can be calculated as Σ ′ = JWΣW⊤J ⊤, where W is the viewing transform matrix and J is the Jacobian matrix of the affine approximation of the projective transformation. For each pixel, the color c and opacity α of Gaussians are used for the blending of N ordered points that overlap the pixel:
+
+$$C = \sum_{i \in N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j). \quad (2)$$
+
+In summary, each Gaussian is characterized by: position X ∈ R 3 , scaling vector s ∈ R 3 , rotation vector q ∈ R 3 , opacity α ∈ R and color c defined by spherical harmonics coefficients SH ∈ R (d+1)2 (d is the SH degree).
+
+### 3.2. Adaptive Gaussian Selector
+
+Background and Problem Formulation. For a 3DGS with N Gaussians and a target ratio e (representing the desired percentage of remaining Gaussians), FlexGS aims to predict a binary scaler λi for each Gaussian. This scaler determines whether the i-th Gaussian is selected (λi = 1) or not (λi = 0), ensuring minimal performance degradation while satisfying the constraint P i λi = eN.
+
+To solve this problem, recent post-hoc compression methods [10, 37] use heuristics to assign importance scores si based on the attributes of each Gaussian i. They retain only those Gaussians with the highest scores, i.e., λi = 1 if i is among the Top-K Gaussians ranked by si , where K = eN. However, these methods require multiple separate runs for each ratio e after the Gaussian model is pretrained. In contrast, we aim to "elastic-ize" 3DGS during the training, thus the Gaussian model can be inferenced with arbitrary remaining raio. To achieve this, importance scores must be frequently re-computed as Gaussian attributes constantly evolve during training. In addition, a fixed heuristic selection rule may fail to generalize in extreme cases, e.g., when selecting 1% of Gaussians. To address this, we jointly train a learnable module to adaptively select points based on the Gaussian attributes and the desired ratio.
+
+Adaptive Selection via Gumbel-Softmax. Due to the discrete nature of variable λi , i ∈ [N], traditional gradient descent methods are ineffective, as they rely on the continuous differentiability of the objective function with respect to its variables. Direct optimization over discrete choices would require exhaustive search or evolutionary algorithms, both of which are computationally prohibitive due to the large search space. To overcome this challenge, we employ Gumbel-Softmax [16, 31], which provides a continuous relaxation of the discrete optimization problem. This technique approximates categorical distributions over discrete variables by a differentiable softmax function with Gumbel noise, enabling the use of gradient-based optimization.
+
+We first represent each binary variable λi as a Bernoulli distribution, and instead of directly selecting between 0 and 1, we model the probability of each outcome. Specifically, given the i-th Gaussian's attributes Ai = {X, s, q} and a
+
+
+
+Figure 2. Overall framework of FlexGS: (a) Adaptive Gaussian Selector: utilizes a GsNet to output the differentiable mask and Global Important as guidance for adaptive selection; (b) Gaussian Transform Field: queries a Spatial-Ratio Neural Field and outputs the transforms of Gaussian attributes under the given elastic ratio. All the modules are jointly optimized to minimize the rendering loss.
+
+ratio e, we model the categorical distribution with GsNet (detailed later) as below:
+
+| $P(\lambda_i = m \mathbf{A}_i, e) = \text{GsNet}(\mathbf{A}_i, e),$        | $m \in \{0, 1\},$                      |
+|----------------------------------------------------------------------------|----------------------------------------|
+| $\text{s.t. } \sum_{m \in \{0, 1\}} P(\lambda_i = m \mathbf{A}_i, e) = 1.$ | (3) |
+
+We perform the stochastic sampling based on the categorical distribution P(λi = m|Ai , e) during training. Leveraging the differentiability of the Gumbel-Softmax, the algorithm dynamically adjusts the probabilities, assigning higher values to m that are more likely to yield improved performance, reflecting the favorable selecting decisions.
+
+GsNet Structure and Optimization. We convert the ratio e, to feature he with a lightweight network as below:
+
+$$h_e = \sigma(\sigma(e w_e^1) W_e^2), \quad (4)$$
+
+where the w1 e ∈ R D, and W2 e ∈ R D×D. σ(·) denotes the non-linear activation function, and we adopt ReLU activation during implementation. Similarly, to embed Gaussian attributes Ai , we first concatenate the elements in Ai to ξ ∈ R H, and obtain h a i as follows:
+
+$$\begin{aligned} h_i^a &= \sigma \left( \sigma(\xi W_a^1) W_a^2 \right), \\ \xi &= \text{Concat}(\{a : a \in A_i\}), \end{aligned} \tag{5}$$
+
+where the W1 a ∈ R H×D, and W2 a ∈ R D×D. After obtaining he and h a i , features are first concatenated then mixed through a mixing layer with weight W ∈ R 2D×2 , which projects the concatenated features of dimension 2D into a 2-dimensional output, producing logits z. For a ratio e:
+
+$$\mathbf{z} = [h_e, h_i^a]W. \quad (6)$$
+
+The logits are then processed by a Gumbel-Softmax [16] layer to model the categorical distribution.
+
+$$P(\lambda_i = m | \mathbf{A}_i, e) = \frac{\exp((z_m + g_m)/\tau)}{\sum_{m=0,1} \exp((z_m + g_m)/\tau)}, \quad (7)$$
+
+where gm is sampled from Gumbel(0, 1) distribution, and τ is a temperature parameter that controls the smoothness of the approximation. During the 3DGS optimization stage, binary masks Mc are sampled from the categorical distribution to select the active Gaussians for training. The temperature parameter τ is exponentially decayed, and as τ approaches 0, the distribution converges to a one-hot vector, allowing GsNet to make more deterministic selections.
+
+Global Importance. Our pilot study reveals that GsNet struggles to converge smoothly due to insufficient constraints in Gaussian selection at high ratios, where there are numerous ways to mask Gaussians. Thus, introducing a mechanism to guide and prioritize Gaussian selection is necessary. Inspired by [10, 37] that employ opacity and scale vectors to quantify the significance of Gaussian components, we introduce the Global Importance (GI) score as a preference criterion for selecting Gaussians. In Eq. 8, the Global Importance (GI) score of each Gaussian is quantified by its volumetric extent, the frequency of its projection intersecting image pixels, its opacity, and the transmittance of incident rays it attenuates:
+
+
+
+| $Q_{HW}$                                                                                                                                         |
+|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| $\text{GL}_i = \sum_{p=1}^{Q_{HW}} \mathbb{1}(G(\mathbf{X}_i), \mathbf{r}_p) \cdot \gamma(\mathbf{s}_i) \cdot \alpha_i \cdot T(i, p), \quad (8)$ |
+
+where Q, H, and W denote the number of seen views, image height, and width. 1(G(Xi), rp) indicates whether the projection of G(Xi) on the camera plane has overlaps with pixel p. Following [10], γ(si) calculates the volume normalized by the 90% of the largest volume. T(i, p) is the transmittance of the i-th Gaussian for rendering pixel p. Let ID(i, p) denote the index of the i-th Gaussian among the sorted set of Np Gaussians overlapping with p. Then, γ(si) and T(i, p) can be expressed as:
+
+$$\begin{aligned} \gamma(\mathbf{s}_i) &= \max(V(\mathbf{s}_i)/V_{90\%}, 1), V(\mathbf{s}) = |s_1 s_2 s_3| \pi/3. \quad (9) \\ &\stackrel{\text{ID}(i,p)-1}{=} T(i,p) = \prod_{t=1}^{\text{ID}(i,p)-1} (1 - \alpha_t). \quad (10) \end{aligned}$$
+
+
+
+Figure 3. Visualization of the point distribution for masked 3DGS (left) and FlexGS (right). Simply masking out Gaussians leads to missing areas. The point distribution on the left highlights the absence of points in the background.
+
+With GI computed for each Gaussian, we select the top ⌊eN⌋ Gaussians with the highest GI scores to obtain the guidance mask MGI . To incorporate this guidance and ensure the number of selected Gaussians aligns with the desired elastic ratio e, we regularize the selection process by closing the gap between Mc and the guidance mask via LGI , and imposing a sparsity ratio constraint via Lspar:
+
+$$\mathcal{L}_{GI} = \left| \widehat{M} - M_{GI} \right|, \mathcal{L}_{spar} = \left| e - \sum_{m \in \tilde{M}} \frac{m}{N} \right|. \quad (11)$$
+
+## 3.3. Gaussian Transform Field
+
+Merely optimizing Gaussian selection for an elastic ratio may lead to excessive updates of crucial Gaussians at lower ratios, thereby inducing overfitting to these ratios and subsequently diminishing rendering quality under other ratios. Furthermore, selecting a portion of 3DGS will inevitably lead to holes and missing details in the rendering results. As visualized in Fig. 3, simply fine-tuning the SH and opacity attributes is unlikely to compensate for those degraded areas in the masked 3DGS. Therefore, we propose to transform the positions, scaling, and rotations of selected Gaussians to patch the missing areas. To do this, we introduce the Gaussian Transform Field, consisting of a Spatial-Ratio Neural Field ψ and a Multi-Head Predictor ϕ. This module predicts position and shape transformations for each Gaussian, mapping them from their original state, where all Gaussians are selected, to the adapted state under a given elastic ratio.
+
+Spatial-Ratio Neural Field. Inspired by previous work in dynamic scene representation [6, 12, 45], our Spatial-Ratio Neural Field ψ is a mapping from 4D coordinate (X, e) to multi-channel features. Given a Gaussian at X and an elastic ratio e, the mapping can be queried to retrieve a ratio-dependent spatial feature for the Gaussian. The Spatial-Ratio Neural Field in our method is modeled as a multi-resolution 4D volume: ψ = {ψl ∈ R4}l∈{1,2}, where each vertex in the volume stores a multi-channel feature. Following [45], we factorize ψl into 6 planes ψl (k1, k2) ∈ R dk1×dk2 ,(k1, k2) ∈ {(x, y),(x, z),(x, t),(y, z),(y, t),(z, t)} for efficiency consideration. In specific, the feature querying can be formulated as Eq. 12.
+
+
+$$\mathbf{f} = \mathcal{F}_m(\mathbf{f}_m), \quad \mathbf{f}_m = \bigcup_l \text{BiInterp}(\psi_l(\mathbf{X}, e)), \quad (12)$$
+
+where BiInterp denotes bilinear interpolation employed for interpolating vertex features stored in the multi-resolution 4D volume, and Fm is an MLP that fuses features across multi-resolutions.
+
+Multi-Head Predictor. A set of multi-layer perceptrons (MLPs), denoted as {ϕX, ϕs , ϕq}, then transforms the queried features into displacement vectors of Gaussian attributes between their "all-selected" states (i.e., e = 1) and the adapted states under the specified elastic ratio.
+
+$$T_X = \phi_X(\mathbf{f}), T_s = \phi_s(\mathbf{f}), T_q = \phi_q(\mathbf{f}), \quad (13)$$
+
+The selected Gaussians are then transformed by the predicted displacement vectors to new positions and shapes: X = X + T X, s = s + T s, q = q + T q. Ultimately, we acquire a set of Gaussians that conform to the specified elastic ratios in quantity, with their spatial positions and shape adjusted accordingly to guarantee rendering quality.
+
+### 3.4. Optimization
+
+During training, to ensure differentiable Gaussian selection, the opacity of all Gaussian is updated as follows:
+
+$$\alpha_i = \alpha_i \cdot \hat{M}_i, \quad (14)$$
+
+where unselected Gaussians are rendered in transparent. At each training iteration, an elastic ratio e is randomly sampled from E. Subsequently, based on the output masks of our Adaptive Gaussian Selector, the top e most significant Gaussians are selected from the entire Gaussians. At each optimization step, two images are rendered: I e s using selected Gaussians, and If using all Gaussians. Both will be supervised against the ground truth IGT :
+
+$$\mathcal{L}_{render} = |I_s^e - I_{GT}| + |I_f - I_{GT}|, \quad e \sim E. \quad (15)$$
+
+The final loss function is given in Eq. 16, where β1 and β2 are weighting coefficients for the regularization with GI guidance and the ratio constraint, respectively.
+
+
+$$\mathcal{L} = \mathcal{L}_{render} + \beta_1 \mathcal{L}_{GI} + \beta_2 \mathcal{L}_{spar.} \quad (16)$$
+
+Table 1. Quantitative results of FlexGS across various elastic ratios compared with other methods on Mip-NeRF360 dataset [2] (LightGS\* denotes the LightGaussian without fine-tuning after pruning).
+
+| Method   |        |        | 1%     |        |        | 5%     |        |        | 10%    |        |        | 15%    |        |
+|----------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+|          |        | PSNR   | SSIM   | LPIPS  | PSNR   | SSIM   | LPIPS  | PSNR   | SSIM   | LPIPS  | PSNR   | SSIM   | LPIPS  |
+| LightGS* | [10]   | 14.455 | 0.3741 | 0.5780 | 17.302 | 0.5055 | 0.4369 | 19.595 | 0.6085 | 0.3506 | 21.467 | 0.6805 | 0.2940 |
+| LightGS  | [10]   | 22.265 | 0.6128 | 0.4384 | 25.223 | 0.8381 | 0.3305 | 26.570 | 0.7831 | 0.2399 | 27.239 | 0.8079 | 0.2070 |
+| C3DGS    | [37] , | 21.766 | 0.5440 | 0.5101 | 24.224 | 0.7333 | 0.3452 | 25.609 | 0.7700 | 0.2457 | 26.447 | 0.7807 | 0.2277 |
+| EAGLES   | [13]   | 21.761 | 0.5173 | 0.5479 | 23.421 | 0.7389 | 0.3544 | 24.489 | 0.6822 | 0.3111 | 25.078 | 0.6789 | 0.2744 |
+| Ours     |        | 22.730 | 0.6128 | 0.4384 | 25.412 | 0.7475 | 0.2935 | 26.577 | 0.7933 | 0.2320 | 27.035 | 0.8072 | 0.2087 |
+
+
+
+
+
+Figure 4. Visual results compared with other methods on various elastic ratios:{0.1,0.5,1.0,1.5} on Mip-NeRF360 [2]: {bicycle, flowers}, T&T [21]: {drjohnson} and ZipNeRF [3]: {nyc}.
+
+## 4. Experiments
+
+### 4.1. Evaluation Setup
+
+Datasets. Our experiments focus on three widely used datasets for real-world, large-scale scene rendering: Mip-NeRF360 [2], Zip-NeRF [3], and Tanks and Temples [21] (T&T). Mip-NeRF360 [2] comprises nine distinct scenes that encompass both expansive outdoor scenes and intricate indoor settings. Zip-NeRF [3] consists of four sizable indoor scenes, each containing 990-1800 images. In our evaluation of Zip-NeRF, we adopt the identical split strategy employed for Mip-NeRF360. We evaluate selected scenes from the T&T [20], following the same choices in [18].
+
+Baselines and Metrics. We evaluate the proposed FlexGS against state-of-the-art Compression GS approaches LightGaussian [10] (and its variant without postpruning fine-tuning, dubbed LightGS\*), C3DGS [37], and EAGLES [13] across various elastic ratios. The rendering quality is meticulously evaluated using standard image quality metrics: PSNR to measure pixel-wise reconstruction fidelity, SSIM to assess structural similarity, and LPIPS [49] to evaluate perceptual quality.
+
+Implementation Details. The training process of FlexGS contains two stages. The initial stage comprises 15k iterations, replicating the original 3DGS training procedure. In the subsequent stage, both GsNet and the Transform Field are optimized over 20k iterations, with the elastic ratio randomly sampled from {0.01, 0.05, 0.10, 0.15} at each iteration. In this phase, βs is set to 1.0 and βd is configured to 0.01. To ensure the accuracy of guidance, the Global Importance of all Gaussians is updated every 1k iterations. All experiments are conducted on an NVIDIA A100 GPU.
+
+Table 2. Performance of FlexGS across various elastic ratios compared with other methods on Real-world 3D datasets: T&T [21] and ZipNeRF [3]. LightGS\* denotes the LightGaussian without fine-tuning after pruning.
+
+|          |        |        |        |        |        | T&T    |        |        |        |        |        |        |        | Zip-NeRF |        |        |          |
+|----------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|----------|--------|--------|----------|
+|          | Method |        | 1%     |        | 5%     |        | 10%    |        | 15%    |        | 1%     |        | 5%     |          | 10%    |        | 15%      |
+|          |        | PSNR   | ↑ SSIM | ↑ PSNR | ↑ SSIM | ↑ PSNR | ↑ SSIM | ↑ PSNR | ↑ SSIM | ↑ PSNR | ↑ SSIM | ↑ PSNR | ↑ SSIM | ↑ PSNR   | ↑ SSIM | ↑ PSNR | ↑ SSIM ↑ |
+| LightGS* | [10]   | 14.653 | 0.4674 | 19.545 | 0.6705 | 21.724 | 0.7705 | 23.550 | 0.8271 | 14.744 | 0.5442 | 18.772 | 0.6514 | 20.913   | 0.7119 | 22.839 | 0.7506   |
+| LightGS  | [10]   | 22.795 | 0.7231 | 25.774 | 0.8605 | 26.820 | 0.8954 | 27.782 | 0.9098 | 19.812 | 0.6527 | 22.899 | 0.7356 | 24.223   | 0.7788 | 24.957 | 0.8040   |
+| C3DGS    | [37]   | 21.535 | 0.6930 | 25.625 | 0.8460 | 26.823 | 0.8853 | 26.860 | 0.9013 | 19.955 | 0.6405 | 22.105 | 0.7065 | 23.425   | 0.7518 | 24.053 | 0.7760   |
+| EAGLES   | [13]   | 19.558 | 0.6140 | 22.738 | 0.7620 | 24.058 | 0.8155 | 24.808 | 0.8440 | 18.495 | 0.6193 | 20.599 | 0.6721 | 21.934   | 0.7086 | 22.785 | 0.7359   |
+| Ours     |        | 23.090 | 0.7731 | 26.689 | 0.8764 | 27.069 | 0.9045 | 27.802 | 0.9101 | 20.963 | 0.6722 | 23.513 | 0.7572 | 24.691   | 0.7962 | 25.167 | 0.8132   |
+
+Table 3. Ablation studies of FlexGS on the T&T [21] dataset: G.I. denotes the guidance with Global Importance, Adap. Sel. denotes the Adaptive Selection, and Heuristic Sel. directly conducts elastic inference without Adaptive Selection and Transform field.
+
+| Method                        |        | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |         |
+|-------------------------------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|---------|
+|                               | PSNR ↑ | SSIM ↑ | LPIPS ↓ | PSNR ↑ | SSIM ↑ | LPIPS ↓ | PSNR ↑ | SSIM ↑ | LPIPS ↓ | PSNR ↑ | SSIM ↑ | LPIPS ↓ |
+| w/o Adaptive Selector         | 14.653 | 0.4674 | 0.5092  | 19.545 | 0.6705 | 0.3082  | 21.724 | 0.7705 | 0.2127  | 23.550 | 0.8271 | 0.1628  |
+| w/o Transform Field           | 15.117 | 0.4564 | 0.6080  | 14.600 | 0.4441 | 0.6231  | 14.576 | 0.4441 | 0.6273  | 14.569 | 0.4439 | 0.6290  |
+| Adapt. Sel. w/o Sparsity      | 23.017 | 0.7645 | 0.2894  | 26.022 | 0.8725 | 0.1496  | 26.960 | 0.9002 | 0.1088  | 27.147 | 0.9078 | 0.0965  |
+| Adapt. Sel. w/o GI            | 19.472 | 0.6325 | 0.4222  | 22.944 | 0.7702 | 0.2685  | 24.075 | 0.8155 | 0.2145  | 24.642 | 0.8360 | 0.1889  |
+| Adapt. Sel. w/o Sparsity + GI | 18.363 | 0.5528 | 0.4619  | 24.323 | 0.8336 | 0.1856  | 26.528 | 0.8919 | 0.1275  | 26.831 | 0.9013 | 0.1152  |
+| Full Model                    | 23.090 | 0.7731 | 0.2854  | 26.189 | 0.8769 | 0.1456  | 27.069 | 0.9045 | 0.1035  | 27.302 | 0.9106 | 0.0934  |
+
+## 4.2. Main Results
+
+Experimental results for elastic inference across various ratios on Mip-NeRF360 [2], Zip-NeRF [3] and T&T [21] are shown in Tab. 1 and Tab. 2 respectively. Note that different from all previous methods, which require separate training for each ratio, FlexGS only requires a single training session to enable flexible inference across different ratios, Visual results in Fig. 4 also indicate that the proposed FlexGS offers superior efficiency and user convenience.
+
+Mip-NeRF360. The comparison results are presented in Tab. 1. Despite utilizing less training time, our method consistently outperforms other approaches in terms of reconstruction quality across all metrics on almost all elastic ratios (10%, 5%, and 1%). At lower Gaussian ratios, the performance gap becomes even more pronounced. For example, in the most challenging scenario, retaining only 1% of the Gaussians, our method achieves a PSNR of 22.730 and an SSIM of 0.6128, outperforming LightGS\* (PSNR 14.455, SSIM 0.3741) and C3DGS (PSNR 21.766, SSIM 0.5440) by a noticeable margin, indicating the significant potential of our approach for edge devices. These results underscore the robustness of FlexGS in managing varying compression levels, consistently delivering superior reconstruction quality and training efficiency.
+
+T&T. The performance results are summarized in Tab. 2 (left). FlexGS achieves the highest PSNR across all elastic ratios. Notably, at the challenging 1% elastic ratio, FlexGS attains a PSNR of 23.090, substantially surpassing LightGS\* (14.653 PSNR) and C3DGS (21.535 PSNR) by 8.437 and 1.555 PSNR, respectively. This performance advantage persists as the elastic ratio increases, with FlexGS reaching a PSNR of 27.802 at the 15% ratio, again outperforming all other methods by a noticeable margin.
+
+ZipNeRF. We report the results in Tab. 2 (right). It can be observed that FlexGS consistently delivers the best performance across all ratios. Specifically, at the 1% ratio, FlexGS achieves a PSNR of 20.963, outperforming LightGS\* (14.744 PSNR) and C3DGS (19.955 PSNR), demonstrating the robustness of FlexGS, even under extreme compression. This consistently superior performance across varying elastic ratios shows the effectiveness of FlexGS in scenes with larger scales.
+
+## 4.3. Further Empirical Study
+
+Ablation Study. We conduct comprehensive ablation studies to evaluate the effectiveness of each component in our framework. As shown in Tab. 3, we examine different configurations by disabling individual components: Adaptive Selector, Transform Field, Sparsity, and Global Importance (GI). Performance is assessed across multiple sparsity ratios (1%, 5%, 10%, 15%) using PSNR, SSIM, and LPIPS.
+
+Our analysis reveals that Transform Field is the most crucial component, as its removal causes severe performance degradation (PSNR drops to 14.57-15.12 across all sparsity ratios). Disabling the Adaptive Selector also significantly impacts performance (PSNR: 14.65 at 1% sparsity), while
+
+
+
+Table 4. Generalized Exploration: Elastic inference performance of FlexGS under elastic ratios unseen during training, compared with other methods on ZipNeRF [3] dataset.
+
+|          | Method |        | 2%     |        | 4%     |        | 6%     |        | 8%     |
+|----------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
+|          |        | PSNR   | SSIM   | PSNR   | SSIM   | PSNR   | SSIM   | PSNR   | SSIM   |
+| LightGS* | [10]   | 15.371 | 0.5631 | 17.582 | 0.6016 | 18.822 | 0.6714 | 19.311 | 0.6859 |
+| LightGS  | [10]   | 21.081 | 0.6831 | 22.448 | 0.7219 | 23.252 | 0.7467 | 23.805 | 0.7649 |
+| C3DGS    | [37]   | 20.524 | 0.6629 | 21.675 | 0.6936 | 22.438 | 0.7174 | 22.961 | 0.7359 |
+| EAGLES   | [13]   | 18.493 | 0.5918 | 19.598 | 0.6039 | 20.295 | 0.6379 | 21.064 | 0.7019 |
+| Ours     |        | 21.636 | 0.7014 | 22.971 | 0.7406 | 24.402 | 0.7891 | 24.720 | 0.7999 |
+
+
+
+
+
+Figure 5. Visualization of FlexGS for generalization exploration across various elastic ratios (unseen during training: 0.02, 0.04 and seen: 0.10) on the ZipNeRF [3]: {London} and Mip-NeRF360 [2]: {bonsai}.
+
+removing GI leads to moderate degradation (PSNR: 19.47 at 1% sparsity). The full model achieves the best performance across all metrics and sparsity ratios, with optimal results of 27.302 PSNR, 0.9106 SSIM, and 0.0934 LPIPS at 15% sparsity, which validates the effectiveness of our complete framework design.
+
+Can Elastic Ratios be Generalizable? To evaluate whether the integration of GsNet and Gumbel-Softmax [16] layer, alongside the use of the dense Transform Field, enables FlexGS to generalize across varying elastic ratios, we perform elastic inference on FlexGS using ratios {0.02, 0.04, 0.06, 0.08} distinct from those employed during training {0.01, 0.05, 0.10, 0.15} on the Zip-NeRF [3] dataset. Quantitative results are presented in Tab. 4. As we can see, FlexGS consistently outperforms all baseline methods in elastic inference across various ratios, with improvements of at least 0.5 in PSNR and 0.02 in SSIM. This demonstrates its state-of-the-art performance on unseen ratios, surpassing methods with fine-tuning. Fig. 5 shows that FlexGS renders outputs with novel ratios that closely match those seen dur-
+
+Figure 6. PSNR vs. inference time: Our method achieves the best balance, reducing inference time to 0.13s while maintaining high render quality (PSNR 23.0), outperforming alternatives like LightGS and EAGLES across unseen elastic ratios.
+
+ing training, and the visual quality improves as the novel ratios approach the training ones. These results show the robust generalization of FlexGS across different elastic ratios, further indicating the continuity and smoothness of the Gaussian Transform Field.
+
+Inference-Time Efficiency. Compared to existing Gaussian compression models, our framework offers a key advantage: it achieves high-quality rendering with significantly reduced inference time, which is essential for realtime applications, especially with unseen elastic ratios. While existing methods require separate compression processes for each target ratio, our approach enables dynamic, on-the-fly compression for arbitrary ratios. Fig. 6 shows the trade-off between PSNR and inference time. Our method achieves the best balance, with an elastic inference time of 0.13 seconds and a high rendering quality of PSNR 23.0, outperforming other methods like EAGLES (600s) and LightGS (150s). It also surpasses alternatives such as LightGS\* (7.43s) and C3DGS (100s) in speed and quality. These highlight the advantage of FlexGS for maintaining rendering quality with minimal inference-time overhead.
+
+## 5. Conclusion
+
+This paper presents FlexGS, a flexible 3DGS framework that enables efficient deployment across devices with varying computational constraints. Through our elastic inference method, which combines adaptive Gaussian selection and transformation modules, we achieve efficient model compression without requiring additional finetuning. The framework demonstrates strong adaptability by dynamically adjusting the model size according to device-specific requirements while maintaining high rendering quality. Extensive experiments on ZipNeRF, Mip-NeRF and Tanks&Temples datasets validate our approach's effectiveness, showing that FlexGS successfully bridges the gap between high-quality 3D scene representation and practical deployment constraints. FlexGS provides a promising direction for making 3DGS more accessible and deployable across a broader range of applications.
+
+# References
+
+[1] Milena T Bagdasarian, Paul Knoll, Yi-Hsin Li, Florian Barthel, Anna Hilsmann, Peter Eisert, and Wieland Morgenstern. 3dgs. zip: A survey on 3d gaussian splatting compression methods. arXiv preprint arXiv:2407.09510, 2024. 2 [2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5470–5479, 2022. 2, 6, 7, 8, 3, 5 [3] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Zip-nerf: Anti-aliased grid-based neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 19697–19705, 2023. 2, 6, 7, 8 [4] Han Cai, Chuang Gan, Tianzhe Wang, Zhekai Zhang, and Song Han. Once-for-all: Train one network and specialize it for efficient deployment. arXiv preprint arXiv:1908.09791, 2019. 3 [5] Ruisi Cai, Saurav Muralidharan, Greg Heinrich, Hongxu Yin, Zhangyang Wang, Jan Kautz, and Pavlo Molchanov. Flextron: Many-in-one flexible large language model. arXiv preprint arXiv:2406.10260, 2024. 3 [6] Ang Cao and Justin Johnson. Hexplane: A fast representation for dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 130–141, 2023. 5 [7] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In European Conference on Computer Vision, pages 333–350. Springer, 2022. 2 [8] Yihang Chen, Qianyi Wu, Mehrtash Harandi, and Jianfei Cai. How far can we compress instant-ngp-based nerf? In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2024. 2 [9] Chenxi Lola Deng and Enzo Tartaglione. Compressing explicit voxel grid representations: fast nerfs become also small. In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision, pages 1236–1245, 2023. 2 [10] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps. arXiv preprint arXiv:2311.17245, 2023. 1, 2, 3, 4, 6, 7, 8, 5 [11] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes: Explicit radiance fields in space, time, and appearance. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12479–12488, 2023. 2 [12] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and Angjoo Kanazawa. K-planes: Explicit radiance fields in space, time, and appearance. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12479–12488, 2023. 5, 3 [13] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. Eagles: Efficient accelerated 3d gaussians with lightweight encodings. arXiv preprint arXiv:2312.04564, 2023. 6, 7, 8, 5 [14] Sharath Girish, Abhinav Shrivastava, and Kamal Gupta. Shacira: Scalable hash-grid compression for implicit neural representations. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 17513–17524, 2023. 2 [15] Yujin Ham, Mateusz Michalkiewicz, and Guha Balakrishnan. Dragon: Drone and ground gaussian splatting for 3d building reconstruction. In 2024 IEEE International Conference on Computational Photography (ICCP), pages 1–12. IEEE, 2024. 1 [16] Eric Jang, Shixiang Gu, and Ben Poole. Categorical reparameterization with gumbel-softmax. arXiv preprint arXiv:1611.01144, 2016. 3, 4, 8, 2 [17] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuhler, ¨ and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42 (4), 2023. 2 [18] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuhler, ¨ and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42 (4):1–14, 2023. 1, 3, 6 [19] Sieun Kim, Kyungjin Lee, and Youngki Lee. Color-cued efficient densification method for 3d gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 775–783, 2024. 2 [20] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics (ToG), 36 (4):1–13, 2017. 6 [21] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics (ToG), 36 (4):1–13, 2017. 2, 6, 7 [22] Sneha Kudugunta, Aditya Kusupati, Tim Dettmers, Kaifeng Chen, Inderjit Dhillon, Yulia Tsvetkov, Hannaneh Hajishirzi, Sham Kakade, Ali Farhadi, Prateek Jain, et al. Matformer: Nested transformer for elastic inference. arXiv preprint arXiv:2310.07707, 2023. 3 [23] Aditya Kusupati, Gantavya Bhatt, Aniket Rege, Matthew Wallingford, Aditya Sinha, Vivek Ramanujan, William Howard-Snyder, Kaifeng Chen, Sham Kakade, Prateek Jain, et al. Matryoshka representation learning. Advances in Neural Information Processing Systems, 35:30233–30249, 2022. 3 [24] Christoph Lassner and Michael Zollhofer. Pulsar: Efficient sphere-based neural rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 1440–1449, 2021. 2 [25] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3d gaussian representation for radiance field. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 21719– 21728, 2024. 2 [26] Lingzhi Li, Zhen Shen, Zhongshu Wang, Li Shen, and Liefeng Bo. Compressing volumetric radiance fields to 1 mb.
+
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 4222–4231, 2023. 2 [27] Lingzhi Li, Zhongshu Wang, Zhen Shen, Li Shen, and Ping Tan. Compact real-time radiance fields with neural codebook. In ICME, 2023. 2 [28] Jiaqi Lin, Zhihao Li, Xiao Tang, Jianzhuang Liu, Shiyong Liu, Jiayue Liu, Yangdi Lu, Xiaofei Wu, Songcen Xu, Youliang Yan, et al. Vastgaussian: Vast 3d gaussians for large scene reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5166–5175, 2024. 1 [29] Yang Liu, Chuanchen Luo, Lue Fan, Naiyan Wang, Junran Peng, and Zhaoxiang Zhang. Citygaussian: Real-time high-quality large-scale scene rendering with gaussians. In European Conference on Computer Vision, pages 265–282. Springer, 2025. 1 [30] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2024. 2 [31] Connor J Maddison, Andriy Mnih, and Yee Whye Teh. The concrete distribution: A continuous relaxation of discrete random variables. In International Conference on Learning Representations (ICLR), 2017. 3 [32] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 2 [33] Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and Peter Eisert. Compact 3d scene representation via selforganizing gaussian grids. arXiv preprint arXiv:2312.13299, 2023. 2 [34] Thomas Muller, Alex Evans, Christoph Schied, and Alexan- ¨ der Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Transactions on Graphics (ToG), 41(4):1–15, 2022. 2 [35] KL Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi Koohpayegani, and Hamed Pirsiavash. Compact3d: Compressing gaussian splat radiance field models with vector quantization. arXiv preprint arXiv:2311.18159, 2023. 2 [36] KL Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi Koohpayegani, and Hamed Pirsiavash. Compgs: Smaller and faster gaussian splatting with vector quantization. In European Conference on Computer Vision, 2024. 2 [37] Simon Niedermayr, Josef Stumpfegger, and Rudiger West- ¨ ermann. Compressed 3d gaussian splatting for accelerated novel view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 10349–10358, 2024. 1, 2, 3, 4, 6, 7, 8, 5 [38] Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and George Drettakis. Reducing the memory footprint of 3d gaussian splatting. Proceedings of the ACM on Computer Graphics and Interactive Techniques, 7(1):1–17, 2024. 2 [39] Daniel Rho, Byeonghyeon Lee, Seungtae Nam, Joo Chan Lee, Jong Hwan Ko, and Eunbyung Park. Masked wavelet representation for compact neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20680–20690, 2023. 2 [40] Seungjoo Shin and Jaesik Park. Binary radiance fields. Advances in neural information processing systems, 2023. 2 [41] Zetian Song, Wenhong Duan, Yuhuai Zhang, Shiqi Wang, Siwei Ma, and Wen Gao. Spc-nerf: Spatial predictive compression for voxel based radiance field. arXiv preprint arXiv:2402.16366, 2024. 2 [42] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 5459– 5469, 2022. 2 [43] Jiaxiang Tang, Xiaokang Chen, Jingbo Wang, and Gang Zeng. Compressible-composable nerf via rank-residual decomposition. Advances in Neural Information Processing Systems, 35:14798–14809, 2022. 2 [44] Henan Wang, Hanxin Zhu, Tianyu He, Runsen Feng, Jiajun Deng, Jiang Bian, and Zhibo Chen. End-to-end ratedistortion optimized 3d gaussian representation. arXiv preprint arXiv:2406.01597, 2024. 2 [45] Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Xinggang Wang. 4d gaussian splatting for real-time dynamic scene rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 20310–20320, 2024. 5, 3 [46] Wang Yifan, Felice Serena, Shihao Wu, Cengiz Oztireli, ¨ and Olga Sorkine-Hornung. Differentiable surface splatting for point-based geometry processing. ACM Transactions on Graphics (TOG), 38(6):1–14, 2019. 3 [47] Jiahui Yu and Thomas S Huang. Universally slimmable networks and improved training techniques. In Proceedings of the IEEE/CVF international conference on computer vision, pages 1803–1811, 2019. 3 [48] Jiahui Yu, Linjie Yang, Ning Xu, Jianchao Yang, and Thomas Huang. Slimmable neural networks. arXiv preprint arXiv:1812.08928, 2018. 3 [49] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE conference on computer vision and pattern recognition, pages 586–595, 2018. 6 [50] Xuanyu Zhang, Jiarui Meng, Runyi Li, Zhipei Xu, Jian Zhang, et al. Gs-hider: Hiding messages into 3d gaussian splatting. Advances in Neural Information Processing Systems, 37:49780–49805, 2024. 1 [51] Xuanyu Zhang, Jiarui Meng, Zhipei Xu, Shuzhou Yang, Yanmin Wu, Ronggang Wang, and Jian Zhang. Securegs: Boosting the security and fidelity of 3d gaussian splatting steganography. arXiv preprint arXiv:2503.06118, 2025. [52] Hongyu Zhou, Jiahao Shao, Lu Xu, Dongfeng Bai, Weichao Qiu, Bingbing Liu, Yue Wang, Andreas Geiger, and Yiyi Liao. Hugs: Holistic urban 3d scene understanding via gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 21336– 21345, 2024. 1
+
+# FlexGS: Train Once, Deploy Everywhere with Many-in-One Flexible 3D Gaussian Splatting
+
+Supplementary Material
+
+#### A. Theoretical Analysis
+
+#### A.1. Differentiable Gaussian Selection
+
+To substantiate the claims made in Sec. 3.2 regarding the ability of the proposed GsNet and Gumbel-Softmax [16] mechanisms to enable Adaptive Gaussian Selection in a differentiable manner, the following derivation is provided. As shown in Eq. 17 and Eq. 18, with the logits z ∈ R N×C , where N represent the number of Gaussians and C denotes to the number of classes (set to 2), a Gumbel noise sampling is conducted, whereby noise is integrated and the temperature parameter is appropriately scaled by τ .
+
+
+$$g_{i,c} = -\log \left( -\log (U_{i,c}) \right), U_{i,c} \sim \text{Uniform}(0, 1). \quad (17)$$
+
+
+$$\bar{z}_{i,c} = \frac{z_{i,c} + g_{i,c}}{\tau}. \quad (18)$$
+
+Then a softmax function is used for calculating soft output.
+
+$$z_{\text{soft},i,c} = \frac{\exp(\tilde{z}_{i,c})}{\sum_{k=1}^C \exp(\tilde{z}_{i,k})} \quad (19)$$
+
+Alternatively, discrete hard outputs may be derived from the soft outputs for utilization in forward propagation.
+
+$$\mathbf{z}_{\text{hard},i,c} = \begin{cases} \text{if } c = \text{arg max}_k \mathbf{z}_{\text{soft},i,k} \\ 0 \text{ otherwise} \end{cases} \quad (20)$$
+
+The Straight-Through Estimator is employed to reconcile the discrete nature of hard outputs with the differentiable characteristics of soft outputs within the hard Gumbel-Softmax framework:
+
+$$\begin{aligned} B_i &= z_{\text{hard},i} - z_{\text{soft},i} + z_{\text{soft},i} \\ &= z_{\text{hard},i} + (z_{\text{soft},i} - z_{\text{soft},i}) \\ &= z_{\text{hard},i} + \text{stop-gradient}(z_{\text{soft},i}) \end{aligned} \tag{21}$$
+
+where stop gradient(zsoft,i) signifies that during backpropagation, the gradient associated with zsoft,i is disregarded, thereby exclusively preserving the value of zhard,i.
+
+For an entire batch of size N, let the input matrix z ∈ R N×2 and the output matrix B ∈ R N×2 be defined. While the selected mask Mˆ = zoutput[:, −1]. The gradient matrix ∂Mˆ ∂z ∈ R N×2 is delineated as follows:
+
+$$\frac{\partial \hat{M}}{\partial z} = \frac{1}{\tau} \begin{bmatrix} -B_{1,0}B_{1,1} & B_{1,1} (1 - B_{1,1}) \\ -B_{2,0}B_{2,1} & B_{2,1} (1 - B_{2,1}) \\ \vdots & \vdots \\ -B_{N,0}B_{N,1} & B_{N,1} (1 - B_{N,1}) \end{bmatrix} \quad (22)$$
+
+where, the temperature parameter is denoted by τ . The probabilities of the i-th sample belonging to class 0 and class 1 are represented by Bi0 and Bi1, respectively. The ellipsis indicates that this pattern continues similarly for all N samples. The aforementioned gradient matrix can also be expressed in a vectorized form as follows:
+
+
+$$\frac{\partial \hat{M}}{\partial z} = \frac{1}{\tau} [-B[:,0] \odot B[:,1] - B[:,1] \odot (1 - B[:,1])], \quad (23)$$
+
+where ⊙ signifies element-wise multiplication. From Eq. 23, we can observe that the gradient of each parameter in GsNet can be calculated based on the "chain rule".
+
+#### A.2. Gradients of Gaussian Attributes
+
+To elucidate the computational procedure, we hereby redefine the notations previously employed in Sec. 3.1. The current opacity of the specific Gaussian i within the rendering process for pixel p is illustrated in Eq. 24.
+
+
+
+| $\alpha_i = \hat{o}_i \cdot \mathbf{G}_2(i, p), \quad \hat{o}_i = o_i \cdot \hat{\mathbf{M}}_i, \quad (24)$ |
+|-------------------------------------------------------------------------------------------------------------|
+|-------------------------------------------------------------------------------------------------------------|
+
+where oˆi is the masked opacity for the selected Gaussians and G2(i, p) denotes the effect coefficient of the 2D projection of the Gaussian i to the pixel p.
+
+With the given ratio e, the rendering loss of the selected Gaussian can be calculated as below:
+
+$$\mathcal{L}_s = |I_s^e - I_{GT}|. \quad (25)$$
+
+Specially, for the i−th Gaussian interacted with pixel p on rendered Image I e s , the gradient of the Gaussian attribute µ can be calculated as shown in Eq. 26.
+
+
+$$\begin{aligned} \frac{\partial \mathcal{L}_s}{\partial \mu_i} &= \frac{\partial \mathcal{L}_s}{\partial \hat{\boldsymbol{\delta}}_i} \cdot \frac{\partial \hat{\boldsymbol{\delta}}_i}{\partial \mu_i} \cdot \mathbf{G}_2 + \frac{\partial \mathcal{L}_s}{\partial \mathbf{G}_2} \cdot \frac{\partial \mathbf{G}_2}{\mu_i} \cdot \hat{\boldsymbol{\delta}}_i \\ &= \mathbf{G}_2 \cdot \frac{\partial \mathcal{L}_s}{\partial \hat{\boldsymbol{\delta}}_i} \frac{\partial o_i \cdot \hat{\mathbf{M}}_i}{\partial \mu_i} + o_i \hat{\mathbf{M}}_i \cdot \frac{\partial \mathcal{L}_s}{\partial \mathbf{G}_2} \frac{\partial \mathbf{G}_2}{\mu_i} \quad (26) \\ &= o_i \mathbf{G}_2 \cdot \frac{\partial \mathcal{L}_s}{\partial \hat{\boldsymbol{\delta}}_i} \frac{\partial \hat{\mathbf{M}}_i}{\partial \mathbf{z}} \frac{\partial \mathbf{z}}{\partial \mu_i} + o_i \hat{\mathbf{M}}_i \cdot \frac{\partial \mathcal{L}_s}{\partial \mathbf{G}_2} \frac{\partial \mathbf{G}_2}{\mu_i} \end{aligned}$$
+
+Where ∂z ∂µi is the gradient of GsNet to µi . Other attributes of Gaussians can also be calculated in the same process, with the gradient ∂Mˆ i ∂z is calculated in 23.
+
+# B. Implementation Details
+
+# B.1. Training Details
+
+In Sec. 3.2, the dimensionality D of the hidden features in GsNet, employed for adaptive selection, is set to 64. To en-
+
+
+
+
+
+Figure 7. Visual results compared with other methods on various elastic ratios:{0.01,0.05,0.10,0.15} on Mip-NeRF360 [2]: {bicycle, room, counter, stump, bonsai}.
+
+hance computational efficiency, the implementation of the Spatial-Ratio Neural Field proposed in Sec. 3.3 adheres to the configurations outlined in [12, 45], utilizing six planes {(x, y),(x, z),(y, z),(x, e),(y, e),(z, e)} to model the 4D voxel space. The resolutions across the four dimensions (x, y, z, and e) are configured as {64, 64, 64, 100}. Additionally, the hidden feature dimension of the Multi-Head Predictor for predicting the transformation under the given ratio is set to 64.
+
+## B.2. Inference Details
+
+During elastic inference, in contrast to the training phase where the opacity of Gaussians is multiplied by the binary mask values, we directly discard the unselected Gaussians. Furthermore, we observe that despite enforcing sparsity supervision on the masks predicted by GsNet, the number of activated entries within the predicted mask does not exactly achieve the desired ratio. For instance, a target ratio of 0.20
+
+results in approximately selecting 19.5% of all Gaussians. Therefore, to attain an accurate elastic ratio, during inference, we employ Pytorch's F.gumbel softmax function with its parameter hard=False to output continuous logits and select the top ⌊eN⌋ logits out of N.
+
+# C. More Experimental Results
+
+In this section, we provide more pre-scene results. Visual comparisons on four scenes of Mip-NeRF360 [2] {bonsai, counter, room, stump} under the given ratios {0.01, 0.05, 0.10, 0.15} are shown in Fig. 7. The breakdown results of quantitative comparisons on each scene of the tested datasets are from Tab. 5 to Tab. 12.
+
+How useful is the elastic inference in real application scenarios? In practical applications, the loading and deployment of pre-trained Gaussian models inherently de-
+
+
+
+Figure 8. Potential use of elastic inference in the application scenario of incremental scene loading.
+
+mand a considerable amount of time. Moreover, as shown in Fig 8, the aggregate loading time escalates proportionally with the number of Gaussian models being deployed. Elastic inference enables the rapid deployment of lower-precision, coarse-grained models, while simultaneously maximizing rendering quality within a given resource budget. It can further allow for the incremental loading of higher-precision, detail-rich models. This enhances the user experience of 3D scene deployment scenarios over time, like mobile gaming and online VR shopping.
+
+Table 5. Quantitative results of FlexGS across various elastic ratios compared with other methods on Mip-NeRF360:{bicycle} [2] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+|          | Method |        | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |           |
+|----------|--------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          |        | PSNR   | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | [10]   | 14.561 | 0.3327 | 0.5782  | 16.379 | 0.4445 | 0.4498  | 18.235 | 0.5388 | 0.3716  | 20.042 | 0.6207 | 0.3163    |
+| LightGS  | [10]   | 21.896 | 0.4814 | 0.5335  | 23.222 | 0.5952 | 0.3989  | 24.131 | 0.6769 | 0.3209  | 24.714 | 0.7230 | 0.2714    |
+| C3DGS    | [37]   | 21.740 | 0.4770 | 0.5350  | 23.110 | 0.5780 | 0.4110  | 23.910 | 0.6560 | 0.3390  | 24.460 | 0.7060 | 0.2930    |
+| EAGLES   | [13]   | 21.326 | 0.4549 | 0.5618  | 22.970 | 0.5600 | 0.4400  | 23.690 | 0.6300 | 0.3900  | 23.530 | 0.6300 | 0.3600    |
+| Ours     |        | 22.385 | 0.5350 | 0.4806  | 23.988 | 0.6865 | 0.3330  | 24.476 | 0.7302 | 0.2769  | 24.596 | 0.7408 | 0.2576    |
+
+Table 6. Quantitative results of FlexGS across various elastic ratios compared with other methods on Mip-NeRF360:{bonsai} [2] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+|          | Method |          | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |           |
+|----------|--------|----------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          |        | PSNR     | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | [10]   | * 15.231 | 0.4839 | 0.5181  | 19.071 | 0.6481 | 0.3567  | 21.774 | 0.7607 | 0.2632  | 24.025 | 0.8326 | 0.2020    |
+| LightGS  | [10]   | 22.397   | 0.6844 | 0.4185  | 27.359 | 0.8399 | 0.2327  | 29.374 | 0.9025 | 0.1580  | 30.590 | 0.9289 | 0.1220    |
+| C3DGS    | [37]   | 21.810   | 0.6640 | 0.4420  | 25.700 | 0.8020 | 0.2660  | 28.240 | 0.8810 | 0.1780  | 29.560 | 0.9150 | 0.1380    |
+| EAGLES   | [13]   | 20.601   | 0.6263 | 0.4921  | 24.660 | 0.7700 | 0.3300  | 26.420 | 0.8300 | 0.2500  | 27.450 | 0.8600 | 0.2200    |
+| Ours     |        | 24.420   | 0.7415 | 0.3511  | 28.449 | 0.8775 | 0.2024  | 30.605 | 0.9296 | 0.1324  | 31.606 | 0.9452 | 0.1063    |
+
+Table 7. Quantitative results of FlexGS across various elastic ratios compared with other methods on Mip-NeRF360:{counter} [2] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+|          | Method |        | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |           |
+|----------|--------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          |        | PSNR   | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | [10]   | 14.866 | 0.4669 | 0.5304  | 18.713 | 0.6149 | 0.3806  | 21.300 | 0.7064 | 0.3025  | 23.176 | 0.7671 | 0.2496    |
+| LightGS  | [10]   | 22.474 | 0.6886 | 0.4167  | 25.882 | 0.8085 | 0.2644  | 27.481 | 0.8590 | 0.2002  | 28.348 | 0.8857 | 0.1652    |
+| C3DGS    | [37]   | 21.920 | 0.6640 | 0.4420  | 25.820 | 0.8040 | 0.2660  | 27.390 | 0.8640 | 0.1920  | 28.120 | 0.8890 | 0.1580    |
+| EAGLES   | [13]   | 21.750 | 0.6700 | 0.4400  | 23.330 | 0.7400 | 0.3600  | 24.640 | 0.7900 | 0.2900  | 25.420 | 0.8200 | 0.2500    |
+| Ours     |        | 23.367 | 0.7282 | 0.3647  | 26.151 | 0.8298 | 0.2402  | 27.577 | 0.8807 | 0.1733  | 28.264 | 0.8997 | 0.1453    |
+
+Table 8. Quantitative results of FlexGS across various elastic ratios compared with other methods on Mip-NeRF360:{flowers} [2] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+|          | Method |        | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |           |
+|----------|--------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          |        | PSNR   | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | [10]   | 12.883 | 0.2349 | 0.6578  | 15.128 | 0.3436 | 0.5264  | 16.853 | 0.4242 | 0.4596  | 18.211 | 0.4808 | 0.4204    |
+| LightGS  | [10]   | 18.274 | 0.3487 | 0.6104  | 19.837 | 0.4813 | 0.4680  | 20.763 | 0.5511 | 0.4090  | 21.306 | 0.5857 | 0.3776    |
+| C3DGS    | [37]   | 18.100 | 0.3340 | 0.6160  | 19.570 | 0.4530 | 0.4790  | 20.400 | 0.5200 | 0.4250  | 20.920 | 0.5560 | 0.3970    |
+| EAGLES   | [13]   | 17.862 | 0.3158 | 0.6461  | 19.390 | 0.4300 | 0.5300  | 20.110 | 0.4800 | 0.4700  | 20.530 | 0.5200 | 0.4400    |
+| Ours     |        | 18.363 | 0.3771 | 0.5656  | 21.489 | 0.5828 | 0.3836  | 21.691 | 0.5972 | 0.3646  | 21.699 | 0.5989 | 0.3581    |
+
+Table 9. Quantitative results of FlexGS across various elastic ratios compared with other methods on T&T:{train} [21] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+| Method   |        | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |           |
+|----------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          | PSNR   | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | 11.907 | 0.3357 | 0.5643  | 15.106 | 0.5287 | 0.3958  | 17.144 | 0.6497 | 0.2905  | 18.711 | 0.7287 | 0.2264    |
+| LightGS  | 18.304 | 0.5845 | 0.4506  | 21.201 | 0.7721 | 0.2476  | 22.241 | 0.8363 | 0.1682  | 22.835 | 0.8655 | 0.1298    |
+| C3DGS    | 17.657 | 0.5397 | 0.4790  | 20.526 | 0.7540 | 0.2159  | 21.595 | 0.8217 | 0.1852  | 22.274 | 0.8513 | 0.1427    |
+| EAGLES   | 16.715 | 0.4825 | 0.5370  | 18.794 | 0.6452 | 0.3798  | 19.633 | 0.7145 | 0.3021  | 20.175 | 0.7545 | 0.2583    |
+| Ours     | 19.189 | 0.6607 | 0.3726  | 21.629 | 0.8042 | 0.2135  | 22.475 | 0.8519 | 0.155   | 22.830 | 0.8645 | 0.1354    |
+
+Table 10. Quantitative results of FlexGS across various elastic ratios compared with other methods on T&T:{truck} [21] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+| Method   |        | 0.0100 |         |        | 0.0500 |         |        | 0.1000 |         |        | 0.1500 |           |
+|----------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          | PSNR   | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | 11.449 | 0.4011 | 0.4998  | 15.287 | 0.6407 | 0.2709  | 18.501 | 0.7652 | 0.1750  | 21.179 | 0.8381 | 0.1261    |
+| LightGS  | 20.641 | 0.7227 | 0.3079  | 24.993 | 0.8952 | 0.1057  | 26.478 | 0.9284 | 0.0631  | 27.130 | 0.9395 | 0.0505    |
+| C3DGS    | 20.551 | 0.7201 | 0.3087  | 24.457 | 0.8877 | 0.1135  | 26.028 | 0.9241 | 0.0681  | 26.736 | 0.9360 | 0.0532    |
+| EAGLES   | 18.346 | 0.6084 | 0.4331  | 21.753 | 0.7874 | 0.2317  | 23.164 | 0.8466 | 0.1624  | 24.034 | 0.8773 | 0.1282    |
+| Ours     | 22.433 | 0.8061 | 0.2248  | 25.374 | 0.9062 | 0.0934  | 26.587 | 0.9324 | 0.0579  | 27.000 | 0.9393 | 0.0501    |
+
+Table 11. Quantitative results of FlexGS across various elastic ratios compared with other methods on Zip-NeRF:{Berlin} [3] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+| Method   |        | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |           |
+|----------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          | PSNR   | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | 15.628 | 0.6578 | 0.5101  | 20.121 | 0.7457 | 0.4177  | 22.374 | 0.7951 | 0.3629  | 23.897 | 0.8278 | 0.3287    |
+| LightGS  | 20.693 | 0.7432 | 0.4554  | 24.272 | 0.8194 | 0.3672  | 25.782 | 0.8549 | 0.3204  | 26.563 | 0.8722 | 0.2958    |
+| C3DGS    | 20.243 | 0.7351 | 0.4679  | 23.055 | 0.7887 | 0.4047  | 24.694 | 0.8290 | 0.3491  | 25.383 | 0.8479 | 0.3238    |
+| EAGLES   | 18.984 | 0.7198 | 0.4728  | 21.543 | 0.7598 | 0.4422  | 23.045 | 0.7927 | 0.4001  | 23.987 | 0.8134 | 0.3724    |
+| Ours     | 21.560 | 0.7664 | 0.4257  | 24.936 | 0.8377 | 0.3407  | 26.242 | 0.8669 | 0.3000  | 26.770 | 0.8793 | 0.2794    |
+
+Table 12. Quantitative results of FlexGS across various elastic ratios compared with other methods on Zip-NeRF:{London} [3] (LightGS\* denotes the LightGaussian without finetuning after pruning).
+
+| Method   |        | 1%     |         |        | 5%     |         |        | 10%    |         |        | 15%    |           |
+|----------|--------|--------|---------|--------|--------|---------|--------|--------|---------|--------|--------|-----------|
+|          | PSNR   | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS | ↓ PSNR | ↑ SSIM | ↑ LPIPS ↓ |
+| LightGS* | 15.829 | 0.5365 | 0.5922  | 19.372 | 0.6468 | 0.4942  | 21.456 | 0.7029 | 0.4324  | 22.798 | 0.7400 | 0.3916    |
+| LightGS  | 20.481 | 0.6535 | 0.5475  | 23.474 | 0.7274 | 0.4498  | 24.681 | 0.7677 | 0.3935  | 25.358 | 0.7914 | 0.3592    |
+| C3DGS    | 20.162 | 0.6426 | 0.5582  | 22.843 | 0.7028 | 0.4833  | 24.032 | 0.7428 | 0.4291  | 24.644 | 0.7674 | 0.3857    |
+| EAGLES   | 18.241 | 0.6136 | 0.5655  | 20.826 | 0.6638 | 0.5370  | 22.248 | 0.6943 | 0.4956  | 23.027 | 0.7164 | 0.4643    |
+| Ours     | 21.29  | 0.6697 | 0.5234  | 24.015 | 0.7458 | 0.4200  | 25.086 | 0.7834 | 0.3652  | 25.540 | 0.8012 | 0.3383    |

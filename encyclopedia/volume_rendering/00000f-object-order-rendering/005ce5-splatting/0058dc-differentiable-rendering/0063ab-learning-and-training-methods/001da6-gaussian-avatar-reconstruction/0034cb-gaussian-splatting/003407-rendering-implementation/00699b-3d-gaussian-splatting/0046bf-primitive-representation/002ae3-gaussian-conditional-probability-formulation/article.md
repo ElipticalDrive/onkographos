@@ -1,0 +1,120 @@
+# Gaussian Conditional Probability Formulation
+
+Also called: Conditional Splat, Factorized 3D Gaussian Splatting, Factorized Density, Unnormalized 4D Gaussian probability distribution
+
+## Overview
+This method decomposes a 3D Gaussian probability density into a product of a marginal distribution along the depth axis and a conditional distribution over the 2D coordinates given the depth [S1, unofficial]. It treats the unnormalized 4D Gaussian as a special probability distribution over spatial coordinates $(u, v)$ and time $t$ (or depth), enabling factorization into temporal and conditional spatial components [S2, unofficial]. This factorized approach provides a computationally efficient way to model volumetric data for slice-based rendering or tomographic reconstruction compared to processing the full 3D density directly [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D Gaussian primitive defined by mean vector $\boldsymbol{\mu}_{3D}$ and covariance matrix $\Sigma_{3D}$ [S1, unofficial].
+*   **Output:** A factorized representation consisting of a marginal distribution $p(t)$ and a conditional distribution $p(u, v | t)$ [S1, unofficial].
+
+**Data Structures:**
+The 3D Gaussian is parameterized by:
+*   $\boldsymbol{\mu}_{3D} = [\mu_x, \mu_y, \mu_z]^\top$: The mean vector [S1, unofficial].
+*   $\Sigma_{3D}$: The $3 \times 3$ symmetric covariance matrix with elements $\sigma_{xx}, \sigma_{xy}, \sigma_{xz}, \sigma_{yy}, \sigma_{yz}, \sigma_{zz}$ [S1, unofficial].
+
+**Formulas:**
+The joint density $p(u, v, t)$ is factorized as:
+$$p(u, v, t) = p(t) \cdot p(u, v | t)$$ [S1, unofficial][S2, unofficial]
+
+1.  **Marginal Distribution $p(t)$:**
+    The distribution along the depth axis $t$ is a 1D Gaussian:
+    $$p(t) \sim \mathcal{N}(\mu_z, \sigma_{zz})$$ [S1, unofficial]
+    Where $\mu_z$ and $\sigma_{zz}$ are the mean and variance of the Gaussian along the z-axis [S1, unofficial].
+    *Note: [S2, unofficial] defines a more general temporal marginal $p(t) = (2\pi)^{-1/2} \det(\Sigma_t)^{-1/2} \mathcal{N}(t|\mu_t, \Sigma_t)$, but for the standard 3DGS depth decomposition, the scalar variance $\sigma_{zz}$ is used [S1, unofficial].*
+
+2.  **Conditional Distribution $p(u, v | t)$:**
+    Conditioned on a specific depth $t$, the distribution over in-plane coordinates $(u, v)$ is a 2D Gaussian:
+    $$p(u, v | t) \sim \mathcal{N}(\boldsymbol{\mu}_{uv|t}, \Sigma_{uv|t})$$ [S1, unofficial]
+
+    **Conditional Mean $\boldsymbol{\mu}_{uv|t}$:**
+    The conditional mean is shifted linearly according to the offset $t - \mu_z$:
+    $$
+    \begin{bmatrix} \mu_u \\ \mu_v \end{bmatrix} = \boldsymbol{\mu}_{uv|t} = \begin{bmatrix} \mu_x \\ \mu_y \end{bmatrix} + \frac{t - \mu_z}{\sigma_{zz}} \begin{bmatrix} \sigma_{xz} \\ \sigma_{yz} \end{bmatrix}
+    $$ [S1, unofficial]
+    This relation reflects how the mean position of the Gaussian footprint in the image plane moves as we slice through different depth levels [S1, unofficial].
+
+    **Conditional Covariance $\Sigma_{uv|t}$:**
+    The conditional covariance matrix is given by the Schur complement:
+    $$
+    \Sigma_{uv|t} = \Sigma_{uv} - \Sigma_{uv,t} \sigma_{zz}^{-1} \Sigma_{t,uv}
+    $$ [S2, unofficial]
+    Explicitly, using the elements of $\Sigma_{3D}$:
+    $$
+    \Sigma_{uv|t} = \begin{bmatrix} \sigma_{xx} & \sigma_{xy} \\ \sigma_{xy} & \sigma_{yy} \end{bmatrix} - \frac{1}{\sigma_{zz}} \begin{bmatrix} \sigma_{xz} \\ \sigma_{yz} \end{bmatrix} \begin{bmatrix} \sigma_{xz} & \sigma_{yz} \end{bmatrix}
+    $$ [S1, unofficial]
+    This matrix accounts for how the uncertainty in $u$ and $v$ directions reduces once the depth $t$ is fixed [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_conditional_formulation(mu_3d, sigma_3d, t):
+    """
+    Computes the conditional 2D Gaussian parameters for a slice at depth t.
+    
+    Args:
+        mu_3d: Array [mu_x, mu_y, mu_z]
+        sigma_3d: 3x3 Covariance matrix [[s_xx, s_xy, s_xz], [s_xy, s_yy, s_yz], [s_xz, s_yz, s_zz]]
+        t: Depth value (scalar)
+        
+    Returns:
+        mu_uv_cond: Array [mu_u, mu_v]
+        sigma_uv_cond: 2x2 Covariance matrix
+    """
+    # Extract scalar components
+    mu_x, mu_y, mu_z = mu_3d
+    s_xx, s_xy, s_xz = sigma_3d[0]
+    s_yy, s_yz = sigma_3d[1][1], sigma_3d[1][2]
+    s_zz = sigma_3d[2][2]
+    
+    # 1. Compute Conditional Mean
+    # mu_uv|t = [mu_x, mu_y] + (t - mu_z) / sigma_zz * [sigma_xz, sigma_yz]
+    offset = (t - mu_z) / s_zz
+    mu_u = mu_x + offset * s_xz
+    mu_v = mu_y + offset * s_yz
+    mu_uv_cond = [mu_u, mu_v]
+    
+    # 2. Compute Conditional Covariance (Schur Complement)
+    # Sigma_uv|t = Sigma_uv - (1/sigma_zz) * Sigma_uv_t * Sigma_t_uv
+    # Sigma_uv is the top-left 2x2 block
+    # Sigma_uv_t is the column vector [s_xz, s_yz]
+    
+    term1 = s_xx - (s_xz * s_xz) / s_zz
+    term2 = s_xy - (s_xz * s_yz) / s_zz
+    term3 = s_yy - (s_yz * s_yz) / s_zz
+    
+    sigma_uv_cond = [[term1, term2], 
+                     [term2, term3]]
+                     
+    return mu_uv_cond, sigma_uv_cond
+```
+
+**Parameters:**
+*   $\mu_{3D}$: Mean vector [S1, unofficial].
+*   $\Sigma_{3D}$: Covariance matrix [S1, unofficial].
+*   $t$: Slice depth or time coordinate [S1, unofficial][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Division by $\sigma_{zz}$ occurs in the mean shift and covariance calculation. If $\sigma_{zz}$ is near zero, the Gaussian is extremely thin along the depth axis, leading to numerical instability. [G] Guard against division by zero by clamping $\sigma_{zz}$ to a small epsilon or handling degenerate Gaussians separately.
+*   **Boundary:** The conditional distribution is valid for any $t$, but the approximation assumes the Gaussian is well-behaved. For slice-based rendering, this formulation allows processing individual planes efficiently [S1, unofficial].
+
+## Subtopics
+
+### [N-Dimensional Gaussian (6DGS/7DGS)](9230-n-dimensional-gaussian-6dgs-7dgs.md)
+Extends this formulation to model joint distributions over non-spatial dimensions like viewing direction or time, conditioning on queries to derive view-specific or time-specific 3D Gaussians. It differs from standard 3DGS by explicitly encoding dependencies between geometry and observation parameters.
+
+## Operating characteristics
+*   **Time Complexity:** The factorization allows for efficient slice-based rendering. Instead of integrating the full 3D density, one can process individual planes (slices) using the 2D conditional Gaussian, which is computationally cheaper than processing the full 3D volume directly [S1, unofficial].
+*   **Memory Complexity:** No additional memory is required beyond the standard 3D Gaussian parameters, as the conditional parameters are computed on-the-fly from the marginal and covariance [S1, unofficial].
+*   **Strengths:** Provides a computationally efficient way to model volumetric data, particularly useful in applications like slice-based rendering or tomographic reconstruction [S1, unofficial]. It accurately captures the reduction in uncertainty in $u$ and $v$ directions once depth $t$ is fixed [S1, unofficial].
+*   **Limitations:** The method relies on the Gaussian assumption. If the underlying density is highly non-Gaussian, the factorization may introduce approximation errors. [G] The accuracy depends on the validity of the Gaussian approximation for the specific primitive.
+
+## Background
+The Gaussian Conditional Probability Formulation is based on the statistical property that a multivariate Gaussian distribution can be factorized into a marginal and a conditional distribution. This property is leveraged in 3D Gaussian Splatting variants (such as 2DGS/1DGS and 4DGS) to enable efficient rendering by decomposing the 3D (or 4D) density into depth/time and spatial components [S1, unofficial][S2, unofficial]. The method was introduced in the context of factorized 3D Gaussian Splatting for internal scene reconstruction [S1, unofficial] and real-time photorealistic dynamic scene representation [S2, unofficial].
+
+## Sources
+[S1] InnerGS: Internal Scenes Reconstruction and Segmentation via Factorized 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2508.13287, fetched 2026-10-26 (unofficial)
+[S2] “Real-time Photorealistic Dynamic Scene Representation and Rendering with 4D Gaussian Splatting”, https://radiancefields.com/papers/real-time-photorealistic-dynamic-scene-representation-and-rendering-with-4d-gaussian-splatting, fetched 2026-10-30 (unofficial)

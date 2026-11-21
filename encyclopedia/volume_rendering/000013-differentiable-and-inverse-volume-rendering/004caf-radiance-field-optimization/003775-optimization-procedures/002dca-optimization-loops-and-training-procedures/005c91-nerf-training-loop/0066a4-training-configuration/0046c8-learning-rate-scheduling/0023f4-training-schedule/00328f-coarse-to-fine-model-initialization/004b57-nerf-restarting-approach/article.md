@@ -1,0 +1,97 @@
+# NeRF Restarting Approach
+
+Also called: Joint Pose-NeRF Refinement with Restart, Pose-Constrained NeRF Restart
+
+## Overview
+The NeRF Restarting Approach is a training schedule for joint pose and radiance field optimization that eliminates artifacts learned during the pose refinement phase by discarding the neural network weights and retraining from scratch. Unlike staged training, which freezes poses and continues training the existing networks, this method re-initializes both coarse and fine Multi-Layer Perceptrons (MLPs) after pose convergence [S1]. It is chosen when the initial joint optimization introduces persistent artifacts into the scene representation that persist even after pose stabilization [S1].
+
+## How it works
+The method consists of three distinct phases. It takes as input a set of $N$ images with noisy initial camera poses and a target radiance field representation defined by a coarse MLP $F_{\theta_c}$ and a fine MLP $F_{\theta_f}$. The output is the optimized camera poses and the final radiance field parameters.
+
+**Data Structures:**
+*   **Camera Poses:** A set of $N$ transformation matrices $P_i \in \mathbb{R}^{4 \times 4}$ or corresponding rotation/translation vectors.
+*   **Coarse MLP ($F_{\theta_c}$):** A neural network mapping 3D coordinates and viewing directions to density and color. Parameters $\theta_c$ are initialized from scratch in Phase 3.
+*   **Fine MLP ($F_{\theta_f}$):** A neural network mapping 3D coordinates and viewing directions to color (and optionally density). Parameters $\theta_f$ are initialized from scratch in Phase 3.
+
+**Steps:**
+
+1.  **Phase 1: Joint Pose and Coarse Network Training**
+    *   Initialize $F_{\theta_c}$ and $F_{\theta_f}$ (typically from scratch or a standard pre-training).
+    *   Initialize camera poses $P_i$ with the provided noisy estimates.
+    *   Perform gradient descent to jointly optimize the network parameters $\theta_c, \theta_f$ and the camera poses $P_i$.
+    *   Continue until the camera pose estimates converge. Convergence is typically determined by a threshold on the change in pose parameters or a plateau in the training loss [S1].
+
+2.  **Phase 2: Pose Freezing and Network Re-initialization**
+    *   Freeze the optimized camera poses $P_i^{*}$ obtained from Phase 1. These are no longer updated during backpropagation.
+    *   Discard the current weights $\theta_c$ and $\theta_f$ learned in Phase 1.
+    *   Re-initialize the parameters for both the coarse MLP $F_{\theta_c}$ and the fine MLP $F_{\theta_f}$ from scratch. This removes any artifacts or biases learned during the coupled optimization of poses and geometry [S1].
+
+3.  **Phase 3: Fixed-Pose Radiance Field Training**
+    *   Train the re-initialized $F_{\theta_c}$ and $F_{\theta_f}$ using the fixed, optimized poses $P_i^{*}$.
+    *   The optimization minimizes the rendering loss (e.g., MSE between rendered and ground truth pixels) with respect to $\theta_c$ and $\theta_f$ only.
+    *   This phase allows the networks to learn sharp geometry without the interference of pose uncertainty [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialization
+poses = initialize_noisy_poses(images)
+theta_c = initialize_mlp() # Coarse network weights
+theta_f = initialize_mlp() # Fine network weights
+
+# Phase 1: Joint Optimization
+while not poses_converged(poses):
+    # Render images using current poses and networks
+    rendered_images = render(poses, theta_c, theta_f, rays)
+    
+    # Compute loss (e.g., MSE)
+    loss = compute_loss(rendered_images, ground_truth_images)
+    
+    # Backpropagate to update both poses and network weights
+    gradients = compute_gradients(loss, poses, theta_c, theta_f)
+    poses = update(poses, gradients.poses)
+    theta_c = update(theta_c, gradients.theta_c)
+    theta_f = update(theta_f, gradients.theta_f)
+
+# Phase 2: Re-initialization
+optimized_poses = poses # Freeze poses
+theta_c = initialize_mlp() # Reset coarse weights
+theta_f = initialize_mlp() # Reset fine weights
+
+# Phase 3: Fixed-Pose Training
+for epoch in range(num_epochs):
+    # Render images using fixed optimized poses
+    rendered_images = render(optimized_poses, theta_c, theta_f, rays)
+    
+    # Compute loss
+    loss = compute_loss(rendered_images, ground_truth_images)
+    
+    # Backpropagate to update only network weights
+    gradients = compute_gradients(loss, theta_c, theta_f)
+    theta_c = update(theta_c, gradients.theta_c)
+    theta_f = update(theta_f, gradients.theta_f)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Pose Convergence Criteria:** If Phase 1 stops too early, the frozen poses in Phase 2 will be inaccurate, leading to poor reconstruction. If it runs too long, it may overfit to noise [S1].
+*   **Re-initialization Strategy:** The method relies on the assumption that the artifacts are tied to the specific weight configuration of Phase 1. Standard initialization (e.g., He or Xavier) is required [S1].
+
+## Subtopics
+
+### Staged Training
+Staged training is a variant where the camera poses are refined while training the coarse network, and then the poses are frozen while training both coarse and fine networks, without re-initializing the weights. It prevents blurry surfaces compared to joint training of all parameters because the fine network learns sharp geometry from frozen, registered poses and a pre-trained coarse network [S1]. On DTU with 3 views and 15% initial additive Gaussian noise, staged training achieves PSNR 17.58 (18.62 masked), SSIM 0.71 (0.82 masked), LPIPS 0.26 (0.13 masked), and DE 1.81 [S1]. It is chosen when one wishes to avoid the computational cost of re-initialization and full re-training, but still wants to decouple pose refinement from fine geometry learning [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Higher than staged training due to the re-initialization and full re-training of both MLPs in Phase 3. Phase 1 requires joint optimization of poses and networks, which is computationally intensive.
+*   **Memory Complexity:** Standard NeRF memory requirements. No additional memory overhead compared to standard joint training, as the old weights are discarded rather than stored.
+*   **Performance:** On DTU with 3 views and 15% initial additive Gaussian noise, the restarting approach achieves PSNR 17.80 (19.07 masked), SSIM 0.72 (0.83 masked), LPIPS 0.25 (0.12 masked), and DE 1.84 [S1]. This outperforms staged training (PSNR 17.58) and joint training of poses with both coarse and fine MLPs, which often results in slightly blurry surfaces [S1].
+*   **Strengths:** Removes artifacts learned during pose optimization that may persist in staged training [S1]. Provides the best rendering quality among the compared schedules [S1].
+*   **Limitations:** Requires more training time due to the restart. Sensitive to the convergence criterion of Phase 1.
+
+## Background
+The NeRF Restarting Approach was introduced in the context of optimizing Neural Radiance Fields from sparse and noisy poses. It was identified as the best alternative for joint pose-NeRF training in ablation studies comparing various training schedules [S1]. The method addresses the issue of artifacts persisting in the scene representation when poses and networks are optimized jointly or in a staged manner without weight reset [S1].
+
+## Sources
+[S1] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26

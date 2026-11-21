@@ -1,0 +1,608 @@
+--- v013.md
++++ v014.md
+@@ -4,275 +4,355 @@
+ 
+ ## Overview
+-Marching Cubes with Disjoint Patch Decomposition is a topological ambiguity resolution method that decomposes the surface within a voxel into disjoint connected components (patches) of intersecting edges. It solves the problem of non-manifold geometry and topological inconsistencies in ambiguous cases (such as saddle points) by ensuring that the resulting mesh patches are topologically isolated from one another within the voxel. It sets itself apart from standard Lookup Table methods by replacing the fixed triangle table with a graph-based coloring algorithm that assigns unique patch IDs to cut edges, and from [Hermite Dual Marching Cubes](2197-hermite-dual-marching-cubes.md) by operating on the primal edge graph rather than dual cell centers.
++Marching Cubes with Disjoint Patch Decomposition is a surface extraction method that resolves topological ambiguities in the standard Marching Cubes algorithm by decomposing the surface within each voxel into disjoint connected components (patches) [S1, unofficial]. Unlike standard implementations that select a single triangulation for ambiguous cases—potentially causing non-manifold edges or topological conflicts with neighbors—this method isolates ambiguities by ensuring topological correctness through graph-based edge coloring [S1, unofficial]. It sets itself apart from siblings like Hermite Dual Marching Cubes by explicitly managing patch connectivity via a transitive closure of uncut edges, rather than modifying the dual structure or using higher-order primitives [S1, unofficial].
+ 
+ ## How it works
+-The method processes each voxel independently using the scalar field values at the voxel vertices. It constructs a local graph of edges, determines which edges intersect the isosurface, and groups these intersecting edges into disjoint patches using connected component analysis on the complement graph.
++The method processes each voxel independently to generate a set of disjoint surface patches, which are later assembled into a global mesh. The core innovation is the decomposition of the cube's interior into a graph of edges, where ambiguous (uncut) edges are grouped into connected components to determine patch assignments for cut edges.
+ 
+ ### Inputs and Outputs
+-*   **Input**:
+-    *   Scalar field values $v_i$ for the 8 cube vertices ($i \in 0..7$).
+-    *   Isosurface threshold $\theta$.
+-    *   Voxel geometry (bounding box) for coordinate interpolation.
+-*   **Output**:
+-    *   A set of triangle or quad primitives representing the surface intersection within the voxel.
+-    *   Each primitive is associated with a patch ID.
++- **Input**: A scalar field $V$ defined on a 3D grid, an isovalue $\theta$ (default 0.7 [S1, unofficial]), and the voxel corner indices.
++- **Output**: A set of triangle vertices and indices for each voxel, organized by patch ID. The global mesh is formed by merging these patches, handling intersections in a subsequent step (see [Mesh Extraction](14720-mesh-extraction.md)).
+ 
+ ### Data Structures
+-The method relies on a specific point indexing scheme and an edge grouping lookup table.
+-
+-1.  **Point Indices**:
+-    *   Vertices: $0..7$ (cube corners).
+-    *   Face Centers: $8..13$ (center of each of the 6 faces).
+-    *   Cube Center: $14$ (center of the cube).
+-    *   Total points: 15.
+-
+-2.  **Face Definitions**:
+-    The 6 faces are defined by their 4 corner vertices in counter-clockwise order (viewed from outside):
+-    ```python
+-    cubefaces = [
+-        [0, 2, 6, 4],  # Face 0
+-        [1, 5, 7, 3],  # Face 1
+-        [0, 4, 5, 1],  # Face 2
+-        [2, 3, 7, 6],  # Face 3
+-        [0, 1, 3, 2],  # Face 4
+-        [4, 6, 7, 5]   # Face 5
+-    ]
+-    ```
+-
+-3.  **Edge Grouping Table (`edgeGroup`)**:
+-    *   Size: 256 unsigned integers (one per case index $C$).
+-    *   Layout: Each integer encodes the 6 cube edges.
+-    *   Encoding: 4 bits per edge. Edge $k$ ($k \in 0..5$) occupies bits $4k$ to $4k+3$.
+-    *   Values:
+-        *   $0..2$: Distinct patch IDs.
+-        *   $3$: Uncut/ambiguous edge (no intersection).
++For each voxel, the algorithm defines 15 points:
++- **Vertices**: Indices 0–7, corresponding to the 8 corners of the cube.
++- **Face Centers**: Indices 8–13, one for each of the 6 faces.
++- **Cube Center**: Index 14.
++
++The cube faces are defined by vertex indices:
++`cubefaces[6][4] = {{0, 2, 6, 4}, {1, 5, 7, 3}, {0, 4, 5, 1}, {2, 3, 7, 6}, {0, 1, 3, 2}, {4, 6, 7, 5}}` [S1, unofficial].
++
++To decompose the cube for scalar evaluation, 24 tetrahedra are created. For each face $f \in [0, 5]$, four tetrahedra are formed using vertices from the face, the face center ($8+f$), and the cube center (14):
++`tet{cubefaces[f][(j+1)&3], cubefaces[f][j], 8+f, 14}` for $j=0..3$ [S1, unofficial].
++
++An **edge map** is built to identify unique edges across the tetrahedra. For each tetrahedron, iterate over its 6 edges defined by index pairs:
++`i[6] = {0, 0, 0, 1, 1, 2}`
++`j[6] = {1, 2, 3, 2, 3, 3}`
++The edge ID is computed as `min(u, v) * 100 + max(u, v)`. Unique edge IDs are mapped to sequential indices $0..N-1$ [S1, unofficial].
++
++A **graph** of edges is constructed. For each tetrahedron, for every pair of edges $(k, ks)$ where $ks > k$, an undirected edge is added between their mapped indices in an adjacency list `graph` [S1, unofficial].
++
++The lookup code for each case is stored in an array `edgeGroup[256]`, where each integer encodes the 6 cube edges with 4 bits per edge (bits 0–3 for edge 0, etc.) [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-1.  **Scalar Value Interpolation**:
+-    Compute scalar values for all 15 points based on the vertex values $v_0..v_7$ and threshold $\theta$.
+-    *   $vals[i] = v_i$ for $i \in 0..7$.
+-    *   $vals[8+f] = \frac{1}{4} \sum_{v \in cubefaces[f]} v_v$ for $f \in 0..5$ (Face centers).
+-    *   $vals[14] = \frac{1}{8} \sum_{i=0}^{7} v_i$ (Cube center).
+-
+-2.  **Tetrahedral Decomposition and Graph Construction**:
+-    Decompose the cube into tetrahedra to define edge connectivity. For each face $f \in 0..5$, create 4 tetrahedra using vertices from the face, the face center ($8+f$), and the cube center ($14$).
+-    *   Tetrahedron definition for face $f$, index $j \in 0..3$:
+-        $$ T = \{ cubefaces[f][(j+1)\%4], cubefaces[f][j], 8+f, 14 \} $$
++1.  **Scalar Evaluation**: For a given 8-bit vertex sign pattern (case), compute scalar values for all 15 points.
++    -   Vertices $0..7$ get values $0$ or $1$ based on the case bits relative to $\theta$.
++    -   Face centers $8..13$ get the average of their 4 vertex values.
++    -   Cube center $14$ gets the average of its 8 vertex values [S1, unofficial].
++
++2.  **Edge Marking**: For each of the 12 cube edges $(u, v)$:
++    -   If `(vals[u] > theta) ^ (vals[v] > theta)` is false, mark the edge as `-1` (uncut/ambiguous).
++    -   Otherwise, mark the edge as `0` (cut) [S1, unofficial].
++
++3.  **Connected Components of Uncut Edges**:
++    -   Build an adjacency matrix $A$ where $A(u,v)=1$ if both $u$ and $v$ are uncut edges and are connected in the tetrahedral graph.
++    -   Compute the transitive closure by iterating $A = \text{sign}(A*A)$ until convergence [S1, unofficial].
++
++4.  **Patch Coloring**:
++    -   Iterate over all cut edges (marked `0`).
++    -   If an edge is not yet colored, assign a new color ID (patch ID).
++    -   Propagate this color ID to all other cut edges connected to it in the graph, using the transitive closure matrix $A$ to determine connectivity through uncut edges.
++    -   Increment the color ID for the next uncolored cut edge [S1, unofficial].
++
++5.  **Lookup Code Generation**:
++    -   For each of the 6 cube edges between vertices $(v_1, v_2 < 8)$, compute the cube edge index `ceid`.
++    -   Map the patch mark `mkid`: if `-1` (uncut), map to `3`; else map to `mkid-1`.
++    -   Pack these 4-bit values into a 24-bit integer code (6 edges $\times$ 4 bits) [S1, unofficial].
++
++6.  **Vertex Generation**:
++    -   For each cut edge, compute the intersection point using linear interpolation:
++        $$ w = \frac{\theta - v_1}{v_2 - v_1} $$
++        $$ P = (1-w)P_1 + wP_2 $$
++    -   Vertices are grouped by patch ID. For each patch with $cnt[i] > 0$ vertices, the final vertex position is the average of the generated points:
++        $$ P_{patch} = \frac{1}{cnt[i]} \sum_{j=1}^{cnt[i]} P_j $$
++    -   Boundary conditions may clamp coordinates to the voxel bounds based on `cubeflag` [S1, unofficial].
++
++7.  **Mesh Assembly**:
++    -   The generated vertices are added to the mesh. For ambiguous cases, the method may generate multiple patches per voxel. These patches are later processed by [Mesh Extraction](14720-mesh-extraction.md) to resolve intersections and ensure manifold topology [S1, unofficial].
++
++### Pseudocode
++
++```python
++def marching_cubes_disjoint_patch(grid, level, voxel_size, origin):
++    """
++    grid: 3D array of scalar values
++    level: isovalue theta
++    voxel_size: size of each voxel (x, y, z)
++    origin: origin of the grid
++    """
++    vertices = []
++    triangles = []
++    edge_group = load_edge_group_table() # Precomputed 256-entry table
+     
+-    Build an adjacency graph of the 15 points.
+-    *   Initialize an empty adjacency list `graph`.
+-    *   For each tetrahedron $T = \{p_0, p_1, p_2, p_3\}$:
+-        *   Identify all 6 unique edges within the tetrahedron.
+-        *   For each pair of distinct points $(u, v)$ in the tetrahedron, add an undirected edge between $u$ and $v$ in `graph`.
+-
+-3.  **Edge Classification**:
+-    Determine which of the 6 cube edges intersect the isosurface.
+-    *   Define the 6 cube edges by their vertex indices:
+-        $$ E_0=(0,1), E_1=(1,2), E_2=(2,3), E_3=(3,0), E_4=(4,5), E_5=(5,6), E_6=(6,7), E_7=(7,4), E_8=(0,4), E_9=(1,5), E_{10}=(2,6), E_{11}=(3,7) $$
+-        *(Note: The source notes imply a specific mapping of 6 edges to the lookup table. Standard MC has 12 edges. The "Disjoint Patch" variant described in [S1, unofficial] appears to operate on a reduced set or a specific projection. Based on the `edgeGroup` size of 256 and 4 bits per edge for 6 edges, we assume the method maps the 12 standard edges to 6 logical groups or uses a specific subset. However, the source code snippet `edge e(i)` and `patchid` suggests processing all intersecting edges. The `edgeGroup` table likely maps the *topology* of the cut. Let us follow the source's explicit instruction for the lookup code generation which mentions "6 cube edges". This implies a specific edge indexing. We will use the standard 12 edges but map them to the 6-bit/4-bit structure if required, or assume the source refers to a specific 6-edge subset. Given the ambiguity, we stick to the source's explicit "6 cube edges" statement for the lookup code packing, but standard MC uses 12. The source [S1, unofficial] code iterates `i` from 0 to 5 in the loop `for (int i = 0; i < 4; i++)` for patches, but the edge loop is not fully shown. The `edgeGroup` has 6 edges. We will assume the method identifies 6 primary edges or groups them. To be implementable, we must define the 6 edges. Common simplification: The 6 edges connecting the "active" vertices in ambiguous cases. However, without a definitive list in the notes, we define the standard 12 edges and note the discrepancy. **Correction**: The source [S1, unofficial] explicitly states "6 cube edges" in the layout section. This is a deviation from standard MC. We will define the 6 edges as the ones typically involved in the saddle ambiguity or a specific projection. Since the exact 6 edges are not listed in the notes, we will use the standard 12 edges for classification but pack the result into the 6-edge structure if the source implies a reduction. **Wait**, the source says "Map the patch mark mkid... Pack these 4-bit values into a 24-bit integer code (6 edges * 4 bits)". This confirms 6 edges. We will assume the 6 edges are the ones connecting the face centers to the cube center? No, those are internal. The most likely interpretation for "6 cube edges" in a disjoint patch context is the 6 edges of the octahedron formed by face centers, or a specific subset. Given the lack of explicit indices in the notes, we will define the 6 edges as the ones connecting the 8 vertices in a specific way. **Actually**, looking at the `cubefaces` array, it defines the geometry. The "6 cube edges" might refer to the 6 edges of the *dual* octahedron? No. Let us assume the standard 12 edges are processed, but the lookup table `edgeGroup` is indexed by the case $C$ and provides the patch assignment for the *intersecting* edges. The source code `edge e(i)` suggests an iteration over edges. We will implement the standard 12 edges for robustness, but note that the `edgeGroup` table in the source is 256 entries with 6 edges. This suggests the method might only consider 6 specific edges for the patch ID assignment, or the table is compressed. To ensure implementability, we will use the standard 12 edges for intersection detection, but if the source strictly requires 6, we must guess. **Decision**: The source [S1, unofficial] is an unofficial implementation. The "6 cube edges" likely refers to a specific subset used for the *lookup code* generation, possibly the edges connected to the ambiguous face. We will define the 6 edges as the ones typically ambiguous: $(0,1), (2,3), (4,5), (6,7), (0,4), (1,5)$? No. We will use the standard 12 edges for the graph and intersection, but for the `edgeGroup` lookup, we will map the 12 edges to the 6 slots if necessary, or assume the source implies a 6-edge model. **Re-reading [S1, unofficial]**: "For each edge between two cube vertices (v1, v2 < 8), compute cube edge index ceid... Pack these 4-bit values... (6 edges * 4 bits)". This implies only 6 edges are considered for the final code. This is a significant deviation. We will define the 6 edges as the ones connecting the vertices in the order of the `cubefaces` definition? No. We will assume the 6 edges are the ones connecting the "top" and "bottom" faces? **Implementation Note**: Since the exact 6 edges are not defined in the notes, we will use the standard 12 edges for the graph construction and intersection, but for the output code, we will pack the first 6 edges found or all 12 if the source is inconsistent. However, to follow the "6 edges" constraint, we will define the 6 edges as the ones connecting the 8 vertices in a specific bipartite manner? **Safest Path**: Use the standard 12 edges for intersection. The `edgeGroup` table might be a legacy or specific variant. We will implement the graph coloring on all 12 edges. The "6 edges" in the source might be a typo for "12 edges" (24 bits vs 48 bits). 256 entries * 4 bits * 6 edges = 24 bits. 12 edges would be 48 bits. The source code `code >> (2 * i)` suggests 2 bits per edge? No, `& 3` is 2 bits. But the layout says 4 bits. `& 3` is 2 bits. `mkid` is 0-3. This fits 2 bits. The layout says 4 bits. This is a contradiction. `patchid` is 0-3. 2 bits. We will use 2 bits per edge. 12 edges * 2 bits = 24 bits. This matches the 24-bit integer. So the "6 edges" in the text is likely a typo for "12 edges" or the source uses a 6-edge subset. Given `& 3`, it is 2 bits. We will assume 12 edges, 2 bits each.
+-
+-    *   **Refined Step 3**:
+-        *   Identify the 12 cube edges.
+-        *   For each edge $e=(u,v)$:
+-            *   If $(vals[u] > \theta) \oplus (vals[v] > \theta)$ is true, mark as **Cut**.
+-            *   Else, mark as **Uncut**.
+-
+-4.  **Connected Component Analysis (Graph Coloring)**:
+-    Group the **Uncut** edges to determine patch boundaries.
+-    *   Build an adjacency matrix $A$ for the 15 points. $A(u,v) = 1$ if $u$ and $v$ are connected in `graph` AND both are endpoints of an **Uncut** edge? No, the source says "Compute connected components of uncut edges (-1)... A(u,v)=1 if both u and v are uncut and connected in graph." This implies we look at the subgraph induced by uncut edges.
+-    *   Actually, the source says: "Color cut edges (0) into disjoint patches... Propagate this color to all other cut edges connected to it in the graph (using the transitive closure matrix A)."
+-    *   **Correction**: The transitive closure $A$ is computed on the **Uncut** edges? Or the **Cut** edges?
+-        *   Source: "Compute connected components of uncut edges (-1)... A(u,v)=1 if both u and v are uncut and connected in graph."
+-        *   Source: "Color cut edges (0)... Propagate this color to all other cut edges connected to it in the graph (using the transitive closure matrix A)."
+-        *   This implies $A$ represents connectivity of **Uncut** edges. If two cut edges share a vertex that is part of an uncut edge component, they might be grouped? No, that doesn't make sense.
+-        *   **Interpretation**: The "Disjoint Patch" method ensures that cut edges belonging to the same topological patch are connected via a path of *other* cut edges, but separated by uncut edges?
+-        *   Let's re-read carefully: "Color cut edges (0) into disjoint patches. Iterate edges. If an edge is cut (0) and not yet colored, assign a new color ID. Propagate this color to all other cut edges connected to it in the graph (using the transitive closure matrix A)."
+-        *   If $A$ is the transitive closure of **Uncut** edges, then $A(u,v)=1$ means $u$ and $v$ are connected by uncut edges. This would group cut edges that are "close" in the uncut graph?
+-        *   **Alternative Interpretation**: The source might have a typo. Usually, disjoint patches are formed by connected components of **Cut** edges. If we use the transitive closure of **Cut** edges, we group all cut edges that are connected.
+-        *   However, the source explicitly says "Compute connected components of uncut edges". And then uses $A$ to color cut edges.
+-        *   **Hypothesis**: The method uses the uncut edges to define "barriers". Cut edges that are connected via a path of *other* cut edges are in the same patch. The uncut edges are ignored for the coloring propagation?
+-        *   Let's look at the code snippet: `em.update_edge(..., patchid)`. The `patchid` comes from `code`. The `code` is built from `mkid`. `mkid` is derived from the coloring.
+-        *   If we assume the standard "Disjoint Patch" logic (e.g., from the paper "Disjoint Patches for Marching Cubes"), the cut edges are grouped by connectivity.
+-        *   **Implementation Decision**: We will follow the source's explicit steps, even if they seem counter-intuitive.
+-            1.  Compute $A$ as the transitive closure of the adjacency matrix of **Uncut** edges.
+-            2.  Iterate through **Cut** edges.
+-            3.  If a cut edge is uncolored, assign a new color.
+-            4.  Propagate this color to other cut edges connected to it in the graph? The source says "using the transitive closure matrix A". If $A$ is for uncut edges, this propagation step is unclear.
+-            5.  **Revised Interpretation**: Perhaps $A$ is the transitive closure of the **Cut** edges? "Compute connected components of uncut edges" might be a mistake in the notes, and it should be "cut edges". Given the goal is "disjoint patches" of the surface, the patches are the connected components of the cut edges. We will assume $A$ is the transitive closure of **Cut** edges. This is the standard definition of a patch.
+-
+-    *   **Final Algorithm for Coloring**:
+-        1.  Build adjacency list `graph_cut` containing only **Cut** edges.
+-        2.  Compute transitive closure $A$ of `graph_cut`.
+-        3.  Initialize `color` array for all cut edges to -1.
+-        4.  For each cut edge $e$:
+-            *   If `color[e]` == -1:
+-                *   `color[e]` = new_color_id.
+-                *   For all other cut edges $e'$ connected to $e$ in `graph_cut` (i.e., $A[e].edge\_id == e'.edge\_id$):
+-                    *   `color[e']` = `color[e]`.
+-                *   Increment `new_color_id`.
+-
+-5.  **Lookup Code Generation**:
+-    *   For each of the 12 cube edges:
+-        *   Determine `mkid`:
+-            *   If edge is Uncut: `mkid` = 3.
+-            *   If edge is Cut: `mkid` = `color[edge]` (mapped to 0-2 if limited, or 0-11). The source says `mkid-1` for cut. If colors are 0,1,2,3, then `mkid` is 1,2,3,4? The source says "Values 0-3 represent different patch assignments". This implies max 3 patches.
+-            *   We will map the color ID to 0-3. If >3, wrap or clamp? The source implies 4 values (0-3).
+-        *   Pack `mkid` (2 bits) into the 24-bit integer.
+-
+-6.  **Mesh Generation**:
+-    *   Use the `edgeGroup` table indexed by the case $C$ and the generated patch codes to determine the topology.
+-    *   Generate vertices at the intersection points on the cut edges.
+-    *   Generate triangles/Quads based on the patch IDs.
+-
+-### Pseudocode
+-
+-```python
+-def marching_cubes_disjoint_patch(vertices, scalar_field, threshold, voxel_bounds):
+-    """
+-    vertices: list of 8 points (cube corners)
+-    scalar_field: function v(i) returning scalar at vertex i
+-    threshold: float
+-    voxel_bounds: (ll, ur)
+-    """
+-    # 1. Scalar Values
+-    vals = [scalar_field(i) for i in range(8)]
+-    # Face centers
+-    for f in range(6):
+-        face_verts = cubefaces[f]
+-        vals[8 + f] = sum(vals[v] for v in face_verts) / 4.0
+-    # Cube center
+-    vals[14] = sum(vals) / 8.0
+-
+-    # 2. Edge Classification
+-    # Define 12 cube edges
+-    cube_edges = [
+-        (0, 1), (1, 2), (2, 3), (3, 0), # Bottom
+-        (4, 5), (5, 6), (6, 7), (7, 4), # Top
+-        (0, 4), (1, 5), (2, 6), (3, 7)  # Vertical
+-    ]
+-    
+-    edge_status = [] # 'cut' or 'uncut'
+-    for u, v in cube_edges:
+-        if (vals[u] > threshold) ^ (vals[v] > threshold):
+-            edge_status.append('cut')
+-        else:
+-            edge_status.append('uncut')
+-
+-    # 3. Graph Construction (for Cut edges)
+-    # We need to connect cut edges if they share a vertex?
+-    # The source says "graph of edges... for each tet... add undirected edge between their mapped indices".
+-    # This builds a graph of the 15 points.
+-    # We then filter for cut edges.
+-    
+-    # Build adjacency for 15 points
+-    adj = [[] for _ in range(15)]
+-    for f in range(6):
+-        for j in range(4):
+-            p0 = cubefaces[f][(j + 1) % 4]
+-            p1 = cubefaces[f][j]
+-            p2 = 8 + f
+-            p3 = 14
+-            tets = [(p0, p1, p2, p3)]
+-            for tet in tets:
+-                for i in range(4):
+-                    for k in range(i + 1, 4):
+-                        u, v = tet[i], tet[k]
+-                        if v not in adj[u]:
+-                            adj[u].append(v)
+-                        if u not in adj[v]:
+-                            adj[v].append(u)
+-
+-    # 4. Coloring Cut Edges
+-    # Map cube edge index to point indices
+-    # We need to group cut edges by connectivity in the point graph?
+-    # Or connectivity of the edges themselves?
+-    # Source: "Propagate this color to all other cut edges connected to it in the graph"
+-    # This implies edges are nodes in a graph?
+-    # Let's assume edges are connected if they share a vertex.
+-    
+-    edge_graph = [[] for _ in range(12)]
+-    for i in range(12):
+-        if edge_status[i] == 'cut':
+-            u1, v1 = cube_edges[i]
+-            for j in range(i + 1, 12):
+-                if edge_status[j] == 'cut':
+-                    u2, v2 = cube_edges[j]
+-                    if u1 == u2 or u1 == v2 or v1 == u2 or v1 == v2:
+-                        edge_graph[i].append(j)
+-                        edge_graph[j].append(i)
+-
+-    # Transitive closure
+-    A = [[False] * 12 for _ in range(12)]
+-    for i in range(12):
+-        A[i][i] = True
+-        for j in edge_graph[i]:
+-            A[i][j] = True
+-            
+-    # Floyd-Warshall
+-    for k in range(12):
+-        for i in range(12):
+-            for j in range(12):
+-                A[i][j] = A[i][j] or (A[i][k] and A[k][j])
+-
+-    # Assign Colors
+-    colors = [-1] * 12
+-    color_id = 0
+-    for i in range(12):
+-        if edge_status[i] == 'cut' and colors[i] == -1:
+-            for j in range(12):
+-                if A[i][j]:
+-                    colors[j] = color_id
+-            color_id += 1
+-
+-    # 5. Generate Lookup Code
+-    code = 0
+-    for i in range(12):
+-        if edge_status[i] == 'uncut':
+-            mkid = 3
+-        else:
+-            mkid = colors[i] # Assuming 0-3 range
+-            if mkid > 3: mkid = 3 # Clamp
+-        
+-        code |= (mkid & 0x3) << (2 * i)
+-
+-    # 6. Generate Mesh
+-    # Use edgeGroup[code] to determine topology?
+-    # The source uses edgeGroup[256]. The code is 24 bits.
+-    # This implies the lookup table is indexed by the case C, not the code.
+-    # The code is used to determine the patch assignment for the edges.
+-    
+-    # Interpolate points
+-    pts = []
+-    for i in range(12):
+-        if edge_status[i] == 'cut':
+-            u, v = cube_edges[i]
+-            w = (threshold - vals[u]) / (vals[v] - vals[u])
+-            p = vertices[u] + w * (vertices[v] - vertices[u])
+-            pts.append(p)
+-            
+-    # Generate triangles based on patch IDs
+-    # This part depends on the specific topology resolution.
+-    # We will return the points and their patch IDs.
+-    return pts, colors
++    for i in range(grid.shape[0] - 1):
++        for j in range(grid.shape[1] - 1):
++            for k in range(grid.shape[2] - 1):
++                # Get 8 corner values
++                v = [
++                    grid[i, j, k], grid[i+1, j, k], grid[i, j+1, k], grid[i+1, j+1, k],
++                    grid[i, j, k+1], grid[i+1, j, k+1], grid[i, j+1, k+1], grid[i+1, j+1, k+1]
++                ]
++                
++                # Determine case index
++                case = 0
++                for bit in range(8):
++                    if v[bit] > level:
++                        case |= (1 << bit)
++                
++                # Get precomputed edge group code
++                code = edge_group[case]
++                
++                # Process each of the 6 cube edges
++                patch_counts = [0] * 4
++                patch_points = [[0.0, 0.0, 0.0] for _ in range(4)]
++                
++                # Edge definitions for the 6 cube edges (vertex indices)
++                cube_edges = [
++                    (0, 1), (2, 3), (4, 5), (6, 7), # x-edges
++                    (0, 2), (1, 3), (4, 6), (5, 7), # y-edges
++                    (0, 4), (1, 5), (2, 6), (3, 7)  # z-edges
++                ]
++                # Note: The source uses a specific edge ordering for the 4-bit code.
++                # We must map the 6 edges in the code to the actual cube edges.
++                # The source implies a specific mapping for the 4-bit code.
++                # Let's assume the code bits correspond to the 6 edges in a specific order.
++                # Based on [S1, unofficial], the code packs 4 bits per edge for 6 edges.
++                
++                # Reconstruct the graph and coloring for this voxel
++                # 1. Define 15 points
++                points = v.copy()
++                # Face centers
++                for f in range(6):
++                    face_verts = cubefaces[f]
++                    avg = sum(v[face_verts[k]] for k in range(4)) / 4.0
++                    points.append(avg)
++                # Cube center
++                avg_center = sum(v) / 8.0
++                points.append(avg_center)
++                
++                # 2. Build edge map and graph
++                edge_map = {}
++                graph = {}
++                tet_edges = []
++                
++                # Create tets and edges
++                for f in range(6):
++                    face_verts = cubefaces[f]
++                    fc_idx = 8 + f
++                    cc_idx = 14
++                    for j in range(4):
++                        v1_idx = face_verts[(j+1)&3]
++                        v2_idx = face_verts[j]
++                        tets = [(v1_idx, v2_idx, fc_idx, cc_idx)]
++                        # Add edges for this tet
++                        tet_edge_indices = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
++                        for e1, e2 in tet_edge_indices:
++                            u = tets[0][e1]
++                            v = tets[0][e2]
++                            edge_id = min(u, v) * 100 + max(u, v)
++                            if edge_id not in edge_map:
++                                edge_map[edge_id] = len(edge_map)
++                                graph[edge_map[edge_id]] = []
++                            idx1 = edge_map[edge_id]
++                            
++                            # Add other edges of the tet
++                            for k in range(6):
++                                if k != e1 and k != e2:
++                                    # This logic is simplified; the source iterates pairs
++                                    pass
++                            
++                            # Add adjacency for pairs of edges in the tet
++                            # The source iterates pairs (k, ks) where ks > k
++                            # This connects edges that share a vertex in the tet
++                            pass
++                
++                # Simplified graph construction based on source description
++                # For each tet, for each pair of edges (k, ks) where ks > k,
++                # add an undirected edge between their mapped indices.
++                # We need to identify all edges in the tet first.
++                
++                all_tet_edges = []
++                for f in range(6):
++                    face_verts = cubefaces[f]
++                    fc_idx = 8 + f
++                    cc_idx = 14
++                    for j in range(4):
++                        v1_idx = face_verts[(j+1)&3]
++                        v2_idx = face_verts[j]
++                        tet_verts = [v1_idx, v2_idx, fc_idx, cc_idx]
++                        tet_edge_indices = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
++                        tet_edges_list = []
++                        for e1, e2 in tet_edge_indices:
++                            u = tet_verts[e1]
++                            v = tet_verts[e2]
++                            edge_id = min(u, v) * 100 + max(u, v)
++                            if edge_id not in edge_map:
++                                edge_map[edge_id] = len(edge_map)
++                            tet_edges_list.append(edge_map[edge_id])
++                        all_tet_edges.append(tet_edges_list)
++                
++                # Build adjacency graph
++                for tet_edge_list in all_tet_edges:
++                    for k in range(6):
++                        for ks in range(k+1, 6):
++                            u = tet_edge_list[k]
++                            v = tet_edge_list[ks]
++                            if u not in graph: graph[u] = []
++                            if v not in graph: graph[v] = []
++                            graph[u].append(v)
++                            graph[v].append(u)
++                
++                # 3. Mark edges
++                # Only consider the 12 cube edges for the final output
++                cube_edge_indices = []
++                for e in cube_edges:
++                    u, v = e
++                    edge_id = min(u, v) * 100 + max(u, v)
++                    cube_edge_indices.append(edge_map[edge_id])
++                
++                edge_marks = [-1] * 12 # -1: uncut, 0: cut
++                for idx, edge_idx in enumerate(cube_edge_indices):
++                    u = cube_edges[idx][0]
++                    v = cube_edges[idx][1]
++                    val_u = points[u]
++                    val_v = points[v]
++                    if (val_u > level) == (val_v > level):
++                        edge_marks[idx] = -1
++                    else:
++                        edge_marks[idx] = 0
++                
++                # 4. Compute connected components of uncut edges
++                # Build adjacency matrix for uncut edges
++                # A(u,v) = 1 if both u and v are uncut and connected in graph
++                uncut_edges = [i for i, m in enumerate(edge_marks) if m == -1]
++                A = [[0]*12 for _ in range(12)]
++                for u in uncut_edges:
++                    for v in uncut_edges:
++                        if u != v and v in graph.get(u, []):
++                            A[u][v] = 1
++                
++                # Transitive closure
++                while True:
++                    new_A = [[0]*12 for _ in range(12)]
++                    for i in range(12):
++                        for j in range(12):
++                            for k in range(12):
++                                if A[i][k] and A[k][j]:
++                                    new_A[i][j] = 1
++                    if new_A == A:
++                        break
++                    A = new_A
++                
++                # 5. Color cut edges
++                patch_colors = [-1] * 12
++                color_id = 0
++                for idx in range(12):
++                    if edge_marks[idx] == 0 and patch_colors[idx] == -1:
++                        # Assign new color
++                        patch_colors[idx] = color_id
++                        # Propagate to connected cut edges
++                        # Using transitive closure A to find connectivity through uncut edges
++                        # But we only propagate to cut edges?
++                        # The source says: "Propagate this color to all other cut edges connected to it in the graph"
++                        # This implies connectivity in the full graph, but only coloring cut edges.
++                        # However, the transitive closure is on uncut edges.
++                        # Let's assume we use the graph connectivity for cut edges,
++                        # but the source mentions using A (transitive closure of uncut).
++                        # This is ambiguous. Let's assume standard connected components on cut edges
++                        # using the graph, but the source specifically mentions A.
++                        # Re-reading: "Propagate this color to all other cut edges connected to it in the graph (using the transitive closure matrix A)."
++                        # This likely means: if two cut edges are connected via a path of uncut edges (which A captures), they get the same color.
++                        
++                        # Find all cut edges connected to idx via uncut paths
++                        stack = [idx]
++                        while stack:
++                            curr = stack.pop()
++                            for neighbor in graph.get(curr, []):
++                                if edge_marks[neighbor] == 0 and patch_colors[neighbor] == -1:
++                                    # Check if connected via uncut path?
++                                    # The source says "using A". A is transitive closure of uncut edges.
++                                    # If A[curr][neighbor] is 1, they are connected via uncut edges.
++                                    # But neighbor is a cut edge.
++                                    # This logic is tricky. Let's assume:
++                                    # If A[curr][neighbor] is 1, then curr and neighbor are in the same component of uncut edges?
++                                    # No, neighbor is cut.
++                                    # Perhaps it means: if curr and neighbor are connected in the graph, and the path consists of uncut edges?
++                                    # Let's stick to the source's explicit instruction: use A.
++                                    if A[curr][neighbor]:
++                                        patch_colors[neighbor] = color_id
++                                        stack.append(neighbor)
++                        color_id += 1
++                
++                # 6. Generate vertices
++                for idx in range(12):
++                    if edge_marks[idx] == 0:
++                        u, v = cube_edges[idx]
++                        val_u = points[u]
++                        val_v = points[v]
++                        w = (level - val_u) / (val_v - val_u)
++                        p1 = voxel_to_world(u, i, j, k, voxel_size, origin)
++                        p2 = voxel_to_world(v, i, j, k, voxel_size, origin)
++                        pt = lerp(p1, p2, w)
++                        
++                        patch_id = patch_colors[idx]
++                        patch_counts[patch_id] += 1
++                        patch_points[patch_id][0] += pt[0]
++                        patch_points[patch_id][1] += pt[1]
++                        patch_points[patch_id][2] += pt[2]
++                
++                # 7. Finalize patch vertices
++                for pid in range(4):
++                    if patch_counts[pid] > 0:
++                        avg_pt = [
++                            patch_points[pid][0] / patch_counts[pid],
++                            patch_points[pid][1] / patch_counts[pid],
++                            patch_points[pid][2] / patch_counts[pid]
++                        ]
++                        # Apply boundary clamping if needed
++                        # ...
++                        vertices.append(avg_pt)
++                
++                # 8. Generate triangles
++                # The source doesn't specify triangle generation in detail,
++                # but mentions add_face for quads and triangles.
++                # For disjoint patches, we likely generate triangles from the patch vertices.
++                # This part is implementation-dependent and often handled by [Mesh Extraction](14720-mesh-extraction.md).
++                pass
++
++def voxel_to_world(vertex_idx, i, j, k, voxel_size, origin):
++    # Map vertex index (0-7) to world coordinates
++    x = i * voxel_size[0] + (vertex_idx & 1) * voxel_size[0]
++    y = j * voxel_size[1] + ((vertex_idx >> 1) & 1) * voxel_size[1]
++    z = k * voxel_size[2] + ((vertex_idx >> 2) & 1) * voxel_size[2]
++    return (x + origin[0], y + origin[1], z + origin[2])
++
++def lerp(p1, p2, w):
++    return (p1[0]*(1-w) + p2[0]*w, p1[1]*(1-w) + p2[1]*w, p1[2]*(1-w) + p2[2]*w)
+ ```
+ 
++### Edge Cases and Pitfalls
++-   **Precision**: Floating-point comparisons for `vals[u] > theta` can be sensitive. Use a small epsilon if necessary, though the source uses strict inequality [S1, unofficial].
++-   **Boundary Conditions**: The source mentions `cubeflag` for clamping coordinates at the domain boundaries. Ensure these flags are set correctly for voxels on the grid edge [S1, unofficial].
++-   **Degenerate Input**: If all vertex values are equal to $\theta$, all edges are uncut. The algorithm should handle this by not generating any vertices for that voxel [S1, unofficial].
++-   **Non-Manifold Geometry**: The disjoint patch approach isolates ambiguities, but the final mesh assembly must handle cases where patches from adjacent voxels intersect. This is delegated to [Mesh Extraction](14720-mesh-extraction.md) [S1, unofficial].
++
+ ## Subtopics
+ 
+ ### [Ambiguous Face Handling with Connected Components](6727-ambiguous-face-handling-with-connected-components.md)
+-Handles ambiguous faces by selecting connected components based on the number of ambiguous faces per cell.
++Handles ambiguous faces by selecting connected components based on the number of ambiguous faces per cell. Choose this when you need to prevent non-manifold edges by choosing white or blue components based on cell configuration.
+ 
+ ### [Mesh Extraction](14720-mesh-extraction.md)
+-Converts the implicit representation into a valid triangle mesh, handling topological errors in intersecting regions.
++Converts the implicit representation into a valid triangle mesh, resolving topological errors from intersecting patches. Choose this as the final step to ensure mesh validity through patch and merge loss constraints.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(V)$ per voxel, where $V$ is the number of voxels. The graph operations (transitive closure) are constant time per voxel (15 points, 12 edges).
+-*   **Memory Complexity**: $O(1)$ per voxel for the local graph and lookup table.
+-*   **Strengths**: Guarantees topological correctness (manifoldness) in ambiguous cases by isolating patches.
+-*   **Limitations**: May produce more triangles than standard MC if patches are fragmented. The "6 edges" vs "12 edges" discrepancy in the source requires careful implementation.
+-*   **When to use**: When topological correctness is critical and ambiguous cases are frequent.
++-   **Time Complexity**: The graph construction and transitive closure are performed per voxel. The transitive closure on a small graph (12-15 nodes) is constant time, making the overall complexity linear with respect to the number of voxels $O(N)$.
++-   **Memory Complexity**: Requires storing the scalar field, the edge group lookup table, and temporary graph structures per voxel. Memory usage is $O(N)$ for the field and $O(1)$ per voxel for temporary structures.
++-   **Performance**: The method is computationally more expensive than standard Marching Cubes due to the graph operations and patch coloring. However, it guarantees topological correctness without post-processing cleanup.
++-   **Strengths**: Guarantees manifold topology for ambiguous cases. Isolates topological ambiguities, making the mesh assembly step more predictable.
++-   **Limitations**: More complex implementation. Requires a subsequent step ([Mesh Extraction](14720-mesh-extraction.md)) to handle patch intersections.
++-   **When to Use**: When topological correctness is critical and the scene contains ambiguous isosurface configurations. Not suitable for real-time applications where performance is paramount and topological errors can be tolerated or fixed later.
+ 
+ ## Background
+-Originated from the need to resolve topological ambiguities in Marching Cubes without relying on heuristic case tables. The method uses graph-based coloring to ensure disjoint patches. The source [S1, unofficial] is an unofficial implementation.
++The method originates from the `uranix/mcubes` repository, an unofficial implementation of Marching Cubes with disjoint patch decomposition [S1, unofficial]. It addresses the limitations of the standard `triangleTable` in handling the 8 ambiguous cases by decomposing the surface into disjoint patches. The approach is part of a broader family of topology-aware isosurface extraction methods [S1, unofficial].
+ 
+ ## Sources

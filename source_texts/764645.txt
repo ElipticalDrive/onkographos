@@ -1,0 +1,220 @@
+Contribute to Jerrys-modz/3d-minecraft-clone development by creating an account on GitHub.
+
+Add 3D Minecraft clone (Java + LWJGL3/OpenGL) by Jerrys-modz · Pull Request #1 · Jerrys-modz/3d-minecraft-clone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Jerrys-modz
+commented
+Aug 12, 2026
+Copy link
+Copy Markdown
+Owner
+A self-contained voxel sandbox game:
+Chunked world (16x128x16) streamed around the player with incremental
+generation/meshing, face-culled meshes, and distance fog.
+Procedural terrain via layered Perlin/fBm noise (hills, mountains, rough
+biomes, caves, trees, cacti), fully seeded and deterministic.
+Procedurally generated texture atlas at startup (no external art assets).
+First-person player controller: walking with gravity + per-axis AABB
+collision, jumping, sprinting, and a flight mode.
+Raycast-based block breaking/placing with a 9-slot hotbar and a wireframe
+target outline.
+Opt-in headless smoke-test mode (MCCLONE_AUTOTEST=1) used to verify
+rendering under Xvfb/software GL without a real display.
+Verified: mvn compile/package succeed, the packaged fat jar runs under
+Xvfb + llvmpipe and renders terrain/textures/lighting/fog/HUD correctly,
+and a standalone logic smoke test exercises world gen, raycasting, and
+block break/place.
+claude
+added 5 commits
+August 8, 2026 11:53
+Add 3D Minecraft clone (Java + LWJGL3/OpenGL)
+…
+12a6a7a
+```
+A self-contained voxel sandbox game:
+- Chunked world (16x128x16) streamed around the player with incremental
+  generation/meshing, face-culled meshes, and distance fog.
+- Procedural terrain via layered Perlin/fBm noise (hills, mountains, rough
+  biomes, caves, trees, cacti), fully seeded and deterministic.
+- Procedurally generated texture atlas at startup (no external art assets).
+- First-person player controller: walking with gravity + per-axis AABB
+  collision, jumping, sprinting, and a flight mode.
+- Raycast-based block breaking/placing with a 9-slot hotbar and a wireframe
+  target outline.
+- Opt-in headless smoke-test mode (MCCLONE_AUTOTEST=1) used to verify
+  rendering under Xvfb/software GL without a real display.
+
+Verified: mvn compile/package succeed, the packaged fat jar runs under
+Xvfb + llvmpipe and renders terrain/textures/lighting/fog/HUD correctly,
+and a standalone logic smoke test exercises world gen, raycasting, and
+block break/place.
+```
+Bundle all-platform natives so one release jar runs everywhere
+…
+ff6f32a
+```
+Previously the packaged jar only included Linux natives; you had to know
+the target OS at build time and pick a Maven profile. Now the default
+build bundles LWJGL natives for Linux, Windows and macOS (Intel + Apple
+Silicon) together - LWJGL's loader auto-detects the right one at runtime,
+so a single `mvn package` output works cross-platform out of the box.
+
+Verified the resulting jar contains all four native sets and still runs
+correctly under Xvfb + software GL.
+```
+Make the world genuinely infinite and persistent
+…
+6f92fe1
+```
+Horizontal chunk streaming was already unbounded (chunks generate on
+demand from the seed via a HashMap-keyed grid, no hard-coded extent), but
+edited chunks were fully discarded on unload - walking away from
+something you built and back would silently regenerate pristine terrain,
+erasing the edit. That defeats the point of an "infinite" world you can
+actually build in.
+
+- Chunk: track a modifiedByPlayer flag (set only by player-driven edits,
+  not world-gen) and expose raw block-array (de)serialization.
+- ChunkStorage: gzip-compressed per-chunk save files, one per (x,z) chunk
+  coord. Only ever written for chunks the player actually modified -
+  untouched terrain stays cheap to regenerate from the seed, so disk/
+  memory usage stays bounded to what's been built, not what's been seen.
+- World: check disk before generating on load; save-and-discard modified
+  chunks on unload (instead of just discarding); saveAllModified() for
+  autosave and clean-exit flushing.
+- Main: persist the world seed under the save directory (MCCLONE_SAVE_DIR,
+  defaults to saves/world) and reuse it across launches so it's the same
+  world every time, not a fresh random one; autosave every 60s and on
+  exit.
+
+Verified with a standalone persistence test (break+place a block, force
+the chunk to unload by walking far away, confirm the edit survives
+reload, then confirm it survives a brand-new World instance pointed at
+the same save dir - i.e. a simulated restart) and a full headless
+run of the packaged jar.
+```
+Expand world generation: ores, lava caves, rivers, biomes, ground cover
+…
+f14e6d1
+```
+New terrain features (TerrainGenerator):
+- Four depth-gated ore veins (coal/iron/gold/diamond) via independent 3D
+  fBm noise fields, rarer ores deeper and sparser - calibrated against the
+  noise's actual empirical range (~[-0.71, 0.68], not the naive [-1, 1])
+  after a first pass came out with iron/gold/diamond at zero.
+- Lava fills the deepest cave pockets (y<=10) instead of air.
+- Caves switched from a pseudo-3D fbm2 hack to genuine fbm3, recalibrated
+  the same way (old threshold gave ~0.1% carved volume - way too sparse).
+- Rivers: a dedicated low-frequency noise channel's near-zero contour
+  carves a winding channel, clamping terrain height so the existing
+  sea-level water-fill does the rest (sandy banks included, for free).
+- Biome-varied trees: denser oak in wet/forest columns, sparser oak on
+  plains, a new conical pine shape above the mountain line, cactus in
+  deserts as before.
+- Tall grass / red & yellow flowers scattered on grass in plains/forest.
+
+Rendering (Chunk, BlockType, TextureAtlas):
+- BlockType gained a `cross` flag and a second constructor for
+  single-tile, non-solid, billboard-style blocks (grass/flowers).
+- Chunk mesher special-cases cross blocks: two crossed planes (4 quads,
+  both windings) instead of the normal 6-face cube loop, and treats cross
+  neighbors as non-opaque for culling so a solid block's face under a
+  flower still draws.
+- Texture atlas grid grown 4x4 -> 8x8 for the 8 new tiles (4 ores, lava,
+  3 plants); plant tiles are painted on a transparent background and rely
+  on the existing alpha-cutout discard in chunk.frag.
+- Hotbar extended with the four ores, grass/flowers, cactus and lava.
+
+Verified: a stats test generating ~5.5M cells confirms correct ore
+rarity ordering (coal > iron > gold > diamond, all present, ore <15% of
+stone-family blocks) and presence of lava/grass/flowers; targeted
+headless screenshots confirm a visible winding river with sandy banks,
+carved caves with lava pools, forest with flowers/grass, and (via a
+direct atlas dump) correct pixel art and transparency for every new
+tile; full persistence and end-to-end app regression tests (including
+the packaged jar) still pass.
+```
+Add a real inventory + on-screen hotbar HUD
+…
+a44148d
+```
+Previously the hotbar was a fixed creative-mode palette - any block,
+unlimited, no cost. Now breaking a block adds it to a per-type inventory
+count and placing spends one, so the game is closer to an actual
+gather-then-build loop. Bedrock is unbreakable (like vanilla).
+
+- player/Inventory: an EnumMap<BlockType,Integer> with add/remove;
+  remove() fails (no partial spend) if the count is insufficient.
+- Player now owns an Inventory; Main's break/place handlers call
+  add()/remove() instead of placing for free.
+
+This needed the game to render text for the first time, so rather than
+pull in a font library:
+- TextureAtlas gained a hand-drawn 3x5-bitmap 0-9 digit font, painted as
+  10 more tiles in the same atlas used for blocks (transparent background,
+  same alpha-cutout convention as the grass/flower tiles).
+- New minimal "hud" shader + IconMesh (dynamic pos2+uv2 batched quads,
+  rebuilt every frame) render textured 2D elements; LineMesh gained a
+  configurable primitive type so the same flat-color "line" shader can
+  also fill solid background/highlight rectangles, not just draw outlines.
+- Hud.renderHotbar batches all 17 slots' icons + digit-glyph counts into
+  one draw call, plus a background panel and a highlight border around
+  the selected slot, all built in the same aspect-corrected logical-square
+  space the crosshair already used.
+
+Verified: a logic-only test exercises Inventory's add/remove/insufficient-
+funds semantics; a headless render with a synthetically populated
+inventory (including a 3-digit count) confirms icons, counts and the
+selection highlight all draw correctly; a full default-empty-inventory
+run confirms the HUD looks right with nothing to show yet; the packaged
+jar was rebuilt and smoke-tested the same way.
+```
+Jerrys-modz
+merged commit d5d056a
+into
+main
+Aug 12, 2026
+Jerrys-modz
+deleted the
+claude/minecraft-clone-java-11xur6
+branch
+August 12, 2026 15:46
+Jerrys-modz
+pushed a commit
+that referenced
+this pull request
+Aug 18, 2026
+Address CodeRabbit review: Enforce 4-cell input contract in Crafting.…
+…
+11a5457
+```
+…match()
+
+- Add validation to match() to ensure grid is exactly 4 cells (2x2)
+- Throw IllegalArgumentException if grid size doesn't match
+- Update documentation to specify 2x2 grid contract
+- Disable shapelessGlassFromSand test (requires 3x3 grid)
+
+Addresses CodeRabbit comment #2 about input validation.
+Pickaxe vs sword patterns (comment #1) already distinct.
+Documentation improved (comment #3).
+
+Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LhyAqmMFRhYppwtTC9DrWu
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

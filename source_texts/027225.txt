@@ -1,0 +1,301 @@
+🔴🔴 2026-10-08 — RDR2 already built this exact system, and wrote the verdict Researched against primary sources. Red Dead Redemption 2 shipped a unified volumetric system whose stated goal is this issue's goal, word for word: "Unified vol...
+
+feat(render): volumetric clouds as a spherical shell, per planet · Issue #731 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(render): volumetric clouds as a spherical shell, per planet #731
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+feat(render): volumetric clouds as a spherical shell, per planet#731
+Copy link
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsenhancementNew feature or requestNew feature or requestpriority:highAlta prioridadAlta prioridad
+Description
+lobinuxsoft
+opened on Aug 5, 2026
+Issue body actions
+🔴🔴 2026-10-08 — RDR2 already built this exact system, and wrote the verdict
+Researched against primary sources. Red Dead Redemption 2 shipped a unified volumetric system whose stated goal is this issue's goal, word for word: "Unified volumetric rendering system / Single lighting and data model / Cover large and small scale effects". Their conclusion, slide 49:
+"Frustum Volumes: Undersample data at large distances. Limited resolution. Exponential slice distribution. Unstable, even with temporal integration. Need a system to 'take over' at some distance."
+Their froxel grid covers <160 m. Beyond it, a raymarch — same data model, same shading model, same materials, two samplers. So the shape is not "clouds apart from volumetrics": it is one system, two samplers.
+Why 1024 m worked and 20 km cannot — the arithmetic
+The limit was never the distance. It is the thickness of the far slice. Logarithmic distribution from 5 m:
+far
+24 slices
+64 slices
+128 slices
+200 m (today)
+last 28.5 m
+11.2 m
+5.7 m
+1024 m
+203.7 m
+81.7 m
+41.7 m
+5 km
+1250 m
+512 m
+263 m
+20 km
+5844 m
+2431 m
+1255 m
+🔴 The shipped success in stellar_delivery was clouds in froxels at ~1 km with 64 slices, where the far slice is tens of metres. At 20 km with 24 slices it is 5844 m — 180× worse. It is not the same experiment under a different range; it is a different experiment wearing the same name.
+Lateral footprint compounds it: with 4096 cells at 16:9 (~85×48) and 60° hfov, one froxel spans 2.7 m at 200 m, 13.9 m at 1 km, 270 m at 20 km.
+To hold a log grid's far slice under 100 m out to 20 km takes 1655 slices. Under 8 m — Nubis3's voxel size — takes 20731.
+⚠️ And raising detail_spread makes the far end worse, not better: it concentrates precision near the camera. At 20 km with 24 slices, spread 2 gives a 1632 m last slice; spread 4 gives 3131 m.
+So the failure at planetary range is topological, not qualitative: a 270 × 470 × 5844 m froxel is not a participating medium with structure, it is a slab. The cloud stops having an inside and an outside.
+Nobody does clouds in the froxel grid
+Checked explicitly. RDR2: froxels <160 m, "tracing starts where voxels end", cirrus at 8 km is a flat 2D texture. Horizon Zero Dawn / Nubis: spherical raymarch, and above 4000 m scrolling 2D textures. Nubis3 (Decima): raymarch over a world voxel grid with compressed SDF — not frustum-aligned. Frostbite 2016: clouds in their own half-res pass; the 32×32×16 froxel volume is aerial perspective only. UE5: a dedicated VolumetricRenderTarget, separate from Volumetric Fog's grid. Godot documents that volumetric fog "has a finite range and will eventually stop being rendered in the distance".
+No production title found rendering clouds in an extended-range froxel grid.
+🟢 What this unblocks: motion vectors were never the blocker
+This issue and #977 both list geometry motion vectors (#481/#732) as the real schedule dependency. No production volumetric system uses them.
+Frostbite (clouds): "we re-project the previous result according to previous and current camera properties, i.e. projection and transform." Camera matrices, nothing else.
+RDR2 (material volume): "wind velocity as motion vector", modulated by an R8 reprojection-magnitude volume so it does not filter between interior and exterior. The medium's own velocity — which this engine generates analytically.
+And the cloud's own motion vector is four lines, from the transmittance-weighted depth RDR2 already computes for its ESM and its upscale kernel:
+```
+depth = lerp(depth, ray.t, pow(transmittance, 4));
+```
+That same Depth_cloud gives three things at once: where to apply aerial perspective once (Frostbite 2016, eq. 21 — not per march step), the full-res upscale kernel width, and a world position to reproject against last frame's view-projection.
+⚠️ Do NOT temporally filter the scattered light volume
+RDR2 tried and removed it: "Light ghosting with moving lights. Trailing with strong forward scattering on moving camera." Dithered lookups + TAA there instead. Temporal goes on the material volume and the shadow volume only. UE admits the same artefact: "fast-changing lights, like flashlights and muzzle flashes, leave lighting trails."
+The measured path from 39.83 ms
+Guerrilla's cascade, in the order they measured it: LOD + adaptive step (22 → 8.1 ms), light only where there is density (→ 3.34), cull below the horizon (→ 1.81), conservative depth culling (→ 1.2 ms). 18× cumulative, on PS4.
+Plus half-res with 1 ray in 4 reconstructed over 4 frames. RDR2's ray placement took three attempts, and slides 53–55 save us two: uniform-by-frame-index starves near depth; checkerboard alone is not enough; checkerboard plus comparing the current 2×2 tile's min/max depth against its 8 neighbours, placing the ray where depth is under-represented.
+RDR2's whole volumetric system — shadow + material + scattering volumes, far raymarch, reconstruction, cloud ESM — is 2.61 ms on PS4.
+⚠️ Every figure above is PS4 (176 GB/s dedicated) or Xbox One. A 10 W handheld APU shares ~90–120 GB/s with the CPU, and Frostbite's froxel cost scales ~3.55× for 4× froxels — bandwidth-bound, so expect a penalty nearer 2× than 1×. No published froxel measurement on RDNA at 10 W exists.
+Revised order
+More slices before more range. 24 → 64 costs 1.24 MB more per volume (0.75 → 1.99 MB) and takes the far slice from 28.5 m to 11.2 m at 200 m. Memory is not the constraint here — the whole grid is under a megabyte against Frostbite's 7 MB.
+Depth_cloud weighted by transmittance — unblocks aerial perspective, the upscale, and the reprojection.
+Reprojection from camera matrices + medium velocity. Not feat(render): the engine's own temporal upscaler — WGSL, ported from FSR2's shaders #481/feat(render): temporal upscaling on both vendors — motion vectors, FSR, DLSS, XeSS #732.
+Half-res raymarch beyond where the froxels end, with RDR2's ray placement.
+Sources: RDR2, SIGGRAPH 2019 · Frostbite 2015 · Frostbite 2016 · HZD 2015 · Nubis 2017 · Nubis Cubed 2023 · Hillaire 2020
+2026-08-26 — the owner already shipped clouds AS fog, and it was cheap
+Stated by the owner, and it settles a question this issue was still
+treating as open: in stellar_delivery he used Godot's volumetric fog
+as the cloud medium, not a separate cloud technique, and it performed
+well.
+So there is no second long-range grid to design. volumetric_fog_length
+reaches 1024 m and volumetric_fog_detail_spread biases the Z
+distribution, which is what makes one froxel volume cover both the fog
+near the camera and the layer above it. That was raised here as an
+obstacle — clouds live at kilometre scale, fog grids default to 64 m —
+and it is not one: the range is a parameter and it was already used that
+way in a shipped project.
+🔴 What it means for #977: the grid serves FOUR consumers, not three —
+clustering (#780), aerial perspective (#976), fog, and clouds. Sizing it
+is now the whole design, and it is decided once.
+⚠️ Unchanged: the measured win here is quarter resolution plus temporal
+reprojection, and that still waits on motion vectors (#481/#732). The
+froxel volume replaces the per-pixel march; the reprojection is what
+takes it from affordable to cheap.
+🔴🔴 2026-08-13: the clouds are 39 ms of the handheld's frame. Measured.
+They were turned off to find out, on the device:
+clouds on
+clouds off
+sky GPU scope
+39.83 ms
+1.22 ms
+97 % of the sky pass is this feature. Everything else in that pass —
+gradient, frag_depth, overdraw — is 1.2 ms together. Against a 13.9 ms
+budget, the clouds as they exist today cost nearly three whole frames.
+So this issue stops being "nicer clouds, per planet" and becomes the
+condition on clouds existing at all: they cannot come back in their
+current form. cloud_coverage: 0 is the only setting the handheld can
+afford right now, which is not a feature — it is the feature switched
+off.
+⚠️ And that is a scene value, not a build one. Any project that sets
+coverage above zero pays it. Nothing warns.
+What has to be true before they return
+Already written below: the froxel technique from Godot rather than
+Bevy's per-pixel raymarch, and its grid is #780's cluster grid. Adding
+from the survey of current practice:
+Quarter resolution + temporal reprojection. Guerrilla updates 1
+pixel in 16 per frame (Nubis). 🔴 Needs motion vectors, which do not
+exist — feat(render): the engine's own temporal upscaler — WGSL, ported from FSR2's shaders #481/feat(render): temporal upscaling on both vendors — motion vectors, FSR, DLSS, XeSS #732. That dependency is the real schedule here.
+Fewer steps with jitter and analytic integration — comparable
+results at 1/16 the steps. Cheapest thing to try against the
+current shader, and it does not need new infrastructure.
+Empty-space skipping by weather column, and clipping the active Y
+range with an early-out for rays that miss the cloud profile.
+Motion vectors derived from the march itself, weighting the
+absorption position — clouds reproject without waiting for the
+geometry's motion vectors.
+🔴 The current shader is already at the end of its tuning: 48→32 steps,
+4→3 light steps, 800→500 length, early-out 1 %→5 %, each paying quality.
+There is nothing left to shave. It is a technique change or nothing.
+🔴 2026-08-12 — the technique to copy is Godot's, not Bevy's
+Raised by the user, who ships Godot's volumetric fog in stellar_delivery
+and found it cheap. Investigated rather than assumed, and he is right —
+this is one of the few places where Bevy is the expensive one and the
+port-literal policy does not apply.
+Bevy bevy_pbr::volumetric_fog
+Godot 4 volumetric fog
+Technique
+raymarch in screen space, per pixel
+froxel buffer, frustum-aligned voxels
+Default resolution
+per-pixel
+64×64×64 (project setting)
+Cost driver
+"overhead scales directly with the number of directional lights"
+one pass over the grid, regardless of pixels
+Mesh lookup
+marched again
+a single lookup into the froxel buffer
+Temporal
+none
+reprojection against last frame, "minimal performance cost"
+Upstream advice
+"apply VolumetricLight sparingly"
+—
+Godot's own note on why fog volumes render into the froxel buffer
+rather than independently: they deliberately avoid geometry shaders
+because those are "poorly supported on many hardware platforms,
+especially integrated graphics" — which is the exact platform this
+engine is judged on.
+🔴 A per-pixel raymarch is the technique that just cost us 47 ms
+(#771). Adopting Bevy's fog would be adopting it again, next to the one
+we are removing.
+🔴🔴 The froxel buffer IS the cluster grid — this belongs to #780
+Godot's froxels and Bevy's clusters are the same structure: frustum-
+aligned cells, small near the camera, growing with distance. #780 builds
+exactly that for lights, and Bevy's own grid already carries
+CLUSTERABLE_OBJECT_TYPE_* for decals, irradiance volumes and reflection
+probes — things attached to a region rather than lights.
+So #780 is the input of three separate things, not one: VSM page
+marking (#477), the single shadow-page pool (#477's redesign), and this.
+Building volumetric fog before the cluster grid means writing the grid
+twice.
+⏭️ Ordering: #771/#248 (the sky) → #780 (clustering) → this. And when
+it gets written, the reference is Godot's froxel pass, with Bevy's
+FogVolume component shape only if it happens to fit.
+Goal
+Cloud layers and fog that wrap a planet, not a box.
+Sibling of #248 (AtmosphereVolume). Same framing — a shell between two radii around a planet centre — and a different integrand: #248 integrates scattering through air, this integrates density through cloud.
+Why a separate issue, and why not Bevy's fog volumes
+Bevy's FogVolume (0.15) is an axis-aligned bounding box carrying a 3D density texture, with scrolling for movement. That composes beautifully with chunks and does not compose with a planet at all: a cloud layer is a spherical shell, and an AABB large enough to hold one is mostly empty space that every ray still has to march through.
+The technique for a shell is raymarching between an inner and outer radius, with density from noise rather than from a finite texture. Guerrilla's Nubis work for Horizon Zero Dawn is the reference — cloud types by altitude, coverage and erosion from separate noise fields, cheap lighting through a few in-scattering samples rather than a second march.
+Scope
+CloudLayer component beside AtmosphereVolume on the same planet entity: inner radius, outer radius, coverage, density, wind, and a material asset for the noise parameters.
+Ray-sphere intersection shared with feat(render): AtmosphereVolume component per-planet (sky PR B) #248. Both need "where does this ray enter and leave a shell around this centre"; writing it twice is how the two drift apart.
+Marched in the same pass as the atmosphere, or ordered against it — clouds sit inside the atmosphere, so scattering applies to the light that reaches them and to the light they send on. Deciding that ordering is part of this issue.
+Distance policy. Same rule as the rest of the engine at scale: from orbit, a cloud layer is a texture on a sphere; from the ground it is a volume you fly through. The transition has to be continuous, and where it happens has to be measured, not guessed.
+Explicitly for universes
+N planets, each with its own layer. The camera can be inside zero, one, or none of them, and the shader early-outs on a missed shell exactly as feat(render): AtmosphereVolume component per-planet (sky PR B) #248 does.
+Nothing here may assume a single planet or a horizontal layer. A flat cloud plane is the thing this issue exists to not build.
+Out of scope
+Ground fog and local fog volumes — an AABB is the right shape for those, and Bevy's FogVolume is the design to copy when they land.
+Weather simulation. Coverage is an authored parameter here, not a simulation output.
+Depends on
+#248 for the shell maths and the atmosphere it composes with. Do not start before it: clouds lit by a sun that ignores the atmosphere look wrong in a way no cloud tuning fixes.
+Relationship to #771
+#771 is the same march's cost: the sky that exists today evaluates
+procedural FBM per sample — up to 8 192 hashes per pixel — and does it
+before the depth pass, so hidden pixels pay in full. That has to come
+down whatever shape the volume is.
+#771 goes first. Reshaping a march this expensive means porting the
+expense into the shell. This issue then inherits its sampling technique
+(3D noise textures, empty-space skipping, fixed step size) and gives it
+the ray-shell intersection shared with #248.
+⚠️ The budget both are spent against is #769: 13.9 ms for the whole
+frame, at 10 W on the OneXFly.
+Reactions are currently unavailable
+Activity
+lobinuxsoft
+added
+enhancementNew feature or requestNew feature or request
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadows
+on Aug 5, 2026
+lobinuxsoft
+added a commit that references this issue on Aug 5, 2026
+docs(roadmap): fold in the six issues the Bevy sweep produced
+...
+22eb52c
+lobinuxsoft
+added
+priority:highAlta prioridadAlta prioridad
+on Aug 13, 2026
+lobinuxsoft commented on Aug 14, 2026
+lobinuxsoft
+on Aug 14, 2026
+OwnerAuthor
+More actions
+The froxel grid is already half of this, and the roadmap already said so
+"Build the grid once. #477 (VSM page marking), #731 (the fog froxel
+buffer) and the single shadow-page pool all want this same structure.
+Three grids is the failure mode." — ROADMAP.md
+What was not written down is why it is worth more than sharing an
+allocation. The expensive question a volumetric pass asks per froxel
+is how much light reaches this cell, and the cluster grid already
+answers it: every cell knows which lights touch it (#780). The work
+being shared is the light culling, not the buffer.
+Godot arrived at the same structure — a frustum-aligned froxel buffer,
+64×64×64 by default — and renders every FogVolume into that one buffer
+rather than each independently, which "allows it to detach light
+rendering from FogVolume rendering and support large numbers of lights
+independent from the number of FogVolumes".
+🔴 But the grid does not reach the clouds
+The froxel buffer ends at ClusterSettings::far — 200 m by default, and
+Godot's fog defaults to around 100 m. The clouds in this issue are a
+spherical shell around a planet, kilometres out. They are outside
+the grid by two orders of magnitude.
+So the two are complementary rather than one technique:
+structure
+fog, god rays, local volumetrics
+froxel buffer, sharing the cluster's light lists
+planetary clouds
+raymarch against the shell, its own pass
+Assuming one covers the other is the same mistake as setting far: 40
+for a scene the camera views from further than that (#820) — the grid
+silently stops describing what is being asked of it.
+⚠️ And the budget has not moved
+These clouds cost 39 ms and are switched off, which is the only
+reason the frame meets budget at all. Sharing the light lists makes a
+volumetric pass cheaper; it does not make it free — it is still a
+raymarch per froxel plus an integration. The frame is currently at twice
+budget on direct lighting alone (#821), so this waits behind #824 /
+#825 / #826.
+References worth having before building it
+Wronski, Volumetric Fog: Unified Compute Shader-Based Solution to
+Atmospheric Scattering, SIGGRAPH 2014 — the origin of froxel-based
+volumetrics, compute-shader based, reusing the light culling. The
+paper this issue's near-field half should be built from.
+https://advances.realtimerendering.com/s2014/index.html
+Valient, Reflections and Volumetrics of Killzone Shadow Fall,
+SIGGRAPH 2014 — volumetrics with temporal reprojection, same course.
+Schneider, The Real-Time Volumetric Cloudscapes of Horizon Zero
+Dawn, SIGGRAPH 2015 — the canonical volumetric cloud paper, and it
+models the clouds as a spherical shell over the planet, which is
+exactly this issue's shape. Not in the 2014 course; it is the one to
+read for the cloud half.
+lobinuxsoft
+added a commit that references this issue on Aug 20, 2026
+docs(render): build the census to Unreal's published configuration
+...
+5e3c5e1
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:renderRender pipeline — passes, materials, post-processing, sky, shadowsRender pipeline — passes, materials, post-processing, sky, shadowsenhancementNew feature or requestNew feature or requestpriority:highAlta prioridadAlta prioridad
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

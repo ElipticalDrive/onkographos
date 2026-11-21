@@ -1,0 +1,250 @@
+Problem We currently don't have a standard way for shaders to access random-number-generation facilities build into a renderer. The closest we have is noise functions, but in sample-based numerical integration like path-tracers, well-str...
+
+Defining a canonical interface to random numbers · Issue #1830 · AcademySoftwareFoundation/OpenShadingLanguage · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Defining a canonical interface to random numbers #1830
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Defining a canonical interface to random numbers#1830
+Copy link
+Description
+sfriedmapixar
+opened on Jun 14, 2024
+Issue body actions
+Problem
+We currently don't have a standard way for shaders to access random-number-generation facilities build into a renderer. The closest we have is noise functions, but in sample-based numerical integration like path-tracers, well-stratified numbers can make a significant improvement in the visual quality of low-sample-count integrations.
+In particular, we'd like to expose
+uniformly-distributed random samples
+"well-stratified" random samples across different invocations of the shader, for whatever "well-stratified" happens to mean to a particular renderer that is in-charge of the generating the integration samples.
+a way of getting multiple samples for a single shader-group evaluation that are "well-stratified" relative to one-another
+a way of getting multiple samples for a single shader-group evaluation that are distributed independent of one another within the shader group execution, but relatively well stratified with respect to other invocations of the shader group.
+Even though the implementation of this is renderer specific, it would be nice to expose the functionality in a canonical way across renderers to reduce the challenge of writing OSL shaders that take advantage of these facilities.
+Some Possible Implementations
+A discussion on the ASWF #openshadinglanguage slack channel did some initial exploration of these possibilities:
+A new shadeop() with full jit-backend support that has the entire implementation embedded in OSL source.
+An agreed upon set of getattribute() queries that renderers are expected to respond to.
+A stdosl.h implementation that provides a common set of interface functions, but can be implemented via an agreed upon set of getattribute() queries to be customized by renderers that can fall back to noise() based OSL intrinsic functionality.
+The preferred solution seems to be something along the lines of 3, but bringing it here for further discussion/suggestion.
+Initial Proposal
+The base unit of functionality that a renderer could use to override would be a getattribute call using the "RNG" namespace, for Random-Number-Generator. This proposal attempts to fit what we need within current getattribute API limitations. Within that namespace, there would be the following attributes that could be queried:
+"uniform" - A uniformly distributed random number.
+When combined with the "array index" form of getattribute, the array-index becomes a "seed".
+"stratified" - A random number well-stratified according to the integration technique of the renderer.
+When combined with the "array index" form of getattribute, the array-index becomes a way to choose independent stratifications (i.e. all calls with index 1 will be stratified with respect to each other within the stratification domain, eg. samples within a pixel in a path-tracer, but a call with index 1 and a call with index 2 will be independent).
+"stratifiedseq" - Allows access to a stratified sequence of numbers, where numbers in the sequence are stratified with respect to each other.
+Only available with the "array index" form, which says which number in the sequence to return. If multiple sequences are needed, that can be achieved with just this one index by providing a large "offset" into the sequence.
+"idealsequenceoffset" - This returns the renderer specific ideal offset to get multiple stratified sequences to be used with the "stratifiedseq" flavor.
+Both "int[3]" and "float[3]" return types could be supported, with "int" type returning up to 32 bits of randomness, and float returning 0-1 normalized values with up to 24 bits of randomness. The array of [3] is required to be able to support stratification across up to 3 dimensions.
+The stratification strategy of choice is up to the renderer, and may be things like blue noise, QMC sequences, progressive multi-jitter, etc. A built-in default if none of these getattribute calls is supported would simply be a call to hash-noise. All of this would be wrapped up in new random() function calls provided as part of the standard library in stdosl.h to provide a readable and portable interface. The most explicit call would be
+int[3] random(string type, int seed, int sequence);
+type -- Specifies the "uniform", "stratified", etc type of random number.
+seed -- An index across the "independent" dimension of random numbers, specifies a seed-like integer, so calls with the same seed for the same execution of the same shader return the same value, and different seeds return statistically independent values.
+sequence -- An index across the "property" space of random numbers -- specifies an index into the appropriate "sequence" for a given type of random number. For "uniform" it may be equivalent to incrementing the seed. For "stratified", types the results maintain the stratification property across sequence numbers.
+Variants with int, and int[2] results would be provided that just return the initial dimensions of the int[3] variant. If a renderer only implements the float[3] version of getattribute(), that would be used as a fallback and would only provide 24 bits of randomness per dimension.
+Variants that provide float[3],float[2] and float results would be provided that either directly ask the renderer via getattribute for these types, or fallback to utilizing the int versions and doing a conversion from 32-bit-random int to 24-bit 0-1 random float with OSL code.
+Variants that omit the seed and sequence values utilizing a default of 0 for those would be provided in stdosl.h
+Because of the restriction of 1 integer arg to the existing getattribute shadeop, we would implement
+int result[3] = random("stratifiedseq", 3, 7);
+as
+```
+int[3] random(string type, int seed, int sequence)
+{
+    int result[3];
+
+    int offsetStride = 4096; // big default
+    getattribute("RNG", "idealsequenceoffset", offsetStride);
+    getattribute("RNG", "stratifiedseq", 3 * offsetStride + 7, result);
+    return result;
+}
+```
+Activity
+brechtvl commented on Jun 15, 2024
+brechtvl
+on Jun 15, 2024
+Last edited by brechtvl
+Contributor
+More actions
+I was thinking something like this, where you specify the number of samples that you are going to take within a shader invocation.
+```
+datatype random(string type, int seed, int sample_index = 0, int num_samples = 1)
+```
+And then the implementation of that would be fully up to the renderer, without exposing something like an idealsequenceoffset. Depending on the type of sequence you have, it could do simply this:
+```
+full_sequence_index = pixel_sample_index * num_samples + sample_index
+```
+So that not only samples are stratified within each shader invocation, but also between pixel samples.
+But there may be good use cases for something more low level, they just aren't clear to me.
+lgritz commented on Jun 15, 2024
+lgritz
+on Jun 15, 2024
+Collaborator
+More actions
+I can't be at this coming week's TSC meeting, but I'm hoping the rest of you can attend and discuss this, have different renderer teams present anything they've done that differs, and see if you can't emerge with a consensus of what this function should look like to meet everybody's needs.
+Bonus points if anybody happens to be familiar with what OpenQMC proposes so if it's adopted, we can be sure it could be used to implement this by those who would want to do so.
+@aconty @AdrienHerubel for visibility
+aconty commented on Jun 16, 2024
+aconty
+on Jun 16, 2024
+Contributor
+More actions
+Here's how we normally do things at imageworks.
+When a call to a shader happens, it is for some subpixel (maybe with splitting) within a pixel at some depth. So there is an implicit "global" index and a base nsamples for that call, let's call them (index, nsamples). This code might clarify:
+```
+struct SampleIdx {
+    int nsamples, index;
+    
+    SampleIdx expand(int split_nsamples, int split_index) const
+    {
+        return { nsamples * split_nsamples, index * nsamples + split_index };
+    }
+};
+```
+You always ask for samples with an instance of SampleIdx so the render knows what sample you want in the sequence. If you just want 1 sample you call sample(SampleIdx{1, 0}, seed) otherwise you write a loop:
+```
+for (int i = 0; i < N; ++i) {
+    dosomething(sample(SampleIdx(N, i), seed));
+}
+```
+The render will internally call the expand() method like curent_subpixel_index.expand(user_index) to get the actual index. You can therefore nest loops and calls as long as you track the current SampleIdx. The render takes into account depth to decorrelate sequences, and we try to guarantee that your samples are stratified within your loop, and within the pixel.
+Just mentioning this in case I can steer the API towards this simple idea. Haven't looked yet into openqmc, so maybe this approach is incompatible with the state of the art.
+brechtvl commented on Jun 16, 2024
+brechtvl
+on Jun 16, 2024
+Last edited by brechtvl
+Contributor
+More actions
+I think that matches what I proposed. The render services API can be the same, and then on either side of that API (internally in the renderer and in the OSL shader) you can do this nested splitting if needed.
+aconty commented on Jun 17, 2024
+aconty
+on Jun 17, 2024
+Contributor
+More actions
+Sorry, I missed your post, Brecht. Yes, that's exactly it. We just have this integer pair sample id type to encapsulate the two parameters.
+sfriedmapixar commented on Jun 20, 2024
+sfriedmapixar
+on Jun 20, 2024
+Last edited by sfriedmapixar
+ContributorAuthor
+More actions
+@brechtvl and @aconty, it seems you are both assuming an implementation where we add another rendererservices entrypoint and make random() a builtin shadeop that delegates to that. I was hoping to not add another entrypoint, and instead utilize getattribute, and take advantage of the work being done to transform those into things where the renderer can direclty provide bitcode rather than using a rendererservices virtual dispatch. On the pro's side of getattribute, it's a lot less work in terms of what has to change in the OSL source, and it can take advantage of all this other work going on to optimize and specialize getattribute across CPU and GPU. On the con's side, that does limit us to just the 1 integer input per call, hence the extra getattribute call to the renderer, and also may not be super obvious to new renderer implementers that getattribute is where the random interface lives.
+The whole goal with the "idealsequenceoffset" call was for the renderer to provide enough state to the OSL code that OSL code could combine the numbers into a single sample index that could be passed into the second getattribute call. I could definitely see an argument being made for passing in the desired number of samples, with
+```
+getattribute("RNG", "idealsequenceoffset", sampesneeded, offsetStride);
+```
+So that the renderer knows the goal number of samples. If at a low level you just need the stride to match, it could directly return that number, but if you had some reason the renderer new about undesirable correlations, or better strides to round to or mutliply by, it could incorporate them with that call.
+Then the stdosl.h implementation could look like this
+```
+int[3] random(string type, int seed, int sequence, int nsamples)
+{
+    int result[3];
+    // do some other stuff for other types and defualts
+    if (type == "stratifiedseq")
+    {
+        int offsetStride = nsamples; // default, assume nsamples is good for splitting
+        getattribute("RNG", "idealsequenceoffset", nsamples,  offsetStride);
+        getattribute("RNG", "stratifiedseq", seed * offsetStride + sequence, result);
+    }
+    return result;
+}
+```
+So that
+int result[3] = random("stratifiedseq", 3, sequence, 16);
+would end up running
+```
+        getattribute("RNG", "idealsequenceoffset", 16,  offsetStride);
+        getattribute("RNG", "stratifiedseq", 3 * offsetStride + sequence, result);
+```
+potentially constant folding offset stride down (here to just 16) so sequence was the only thing still live, and a runtime call of
+```
+        getattribute("RNG", "stratifiedseq", 48 + sequence, result);
+```
+I do like the idea of bundling some of this up in a struct with things like the expand() functionality so it's easy for shader-writers to use the numbers "well."
+And just to say it, another thing we have to keep in mind when designing this is the aggressive optimizations we want to be able to keep in OSL. For example, if a shading node has the same outputs, those instances of the node get merged into a single execution, assuming they will produce the same result. If there is some state internal to the renderer automatically incrementing some sequence offset, it will be sensitive to the actual number of calls that are executed to get a sample, and would be altered by this optimization. So we need to steer away from implementations where the number of calls to getattribute or random or whatever actually change without that state of change visible to the OSL RuntimeOptimize. One of the ways to defeat that kind of optimization is to pass through a different seed value where you actually want to generate different callsites.
+sfriedmapixar commented on Jun 20, 2024
+sfriedmapixar
+on Jun 20, 2024
+ContributorAuthor
+More actions
+This was discussed in today's TSC meeting, and I think we agreed on the following things.
+First, it will be nice for the OSL shader writer to have the interface of up to 3 integers to specify how they want to access well stratified samples. (apologies, I'm switching mid-issue from the seed, sequence, and nsamples names above to the bit-more-explicit and hopefully clearer names people were using in the conversation of seed, sample_index and num_samples)
+```
+datatype random(string type, int seed, int sample_index, int num_samples);
+```
+Because we're not 100% sure this will be the best interface yet, we want to give it time as a "provisional" shadeop implmented in stdosl.h as OSL code that's inspectable, and have calls to renderer-overridable getattribute() calls there, along with fall-backs to built-in OSL hash noise for renderers that don't override. Eventually, if this interface needs modification, that's a little easier to modify, and once it solidifies in a couple versions or so, we can then "promote" it to a full shadeop+rendererservices entrypoint with some confidence that we got it right, and also do so with an eye towards what it would take to make those entrypoints less onerous to add.
+The drawback to this is we have to get 3 integers boiled down to 1. In the discussion, it seemed that the consensus among renderer authors was we could probably make due with 8-bits for seed, and 12-bits for the current sample index and 12-bits for the max sample index (current and max sample index must have the same number of bits, and we want to support situations where you want to stochastically integrate with a high sample count within the shader to get a "converged" answer). This allows us to "pack" the numbers into one 32 bit integer, as long as renderer's agree on the packing (which will be done in stdosl.h code, so visible and common to everyone).
+curtisblack commented on Jun 21, 2024
+curtisblack
+on Jun 21, 2024
+Contributor
+More actions
+I'm curious about the type option, are all the integer arguments valid for all types? stratifiedseq would use them all, but wouldn't stratified only need one argument: sequence id? Would that be a case for having two function signatures, perhaps random(int id) and random_sequence(int id, int i, int n) ?
+Apart from that there are some bits of info that ideally the renderer might need to know ahead of time to be efficient, for the stratified option, a renderer might want to know how many different sequence id's are requested so it can generate those per-pixel sequences at the same time it generates all the other internal sequences it needs. That should be possible with the getattribute provided that the sequence id is compile time constant. Will that be a requirement? That way the build_attribute_getter can figure out how many numbers are requested.
+For the stratifiedseq option things get a bit trickier, does num_samples need to be a compile time constant? That would allow the renderer to introspect the function usages and generate these numbers before shading. However with the interim packing approach that won't be possible, because presumably sample_index won't be compile time constant, causing the packed integer to also not be constant.
+One other thing, do we want to consider allowing the renderer to implement stratifiedseq as a simple low quality state machine generator for performance? Accessing samples by index would prevent this.
+brechtvl commented on Jun 21, 2024
+brechtvl
+on Jun 21, 2024
+Contributor
+More actions
+@curtisblack I guess it's a question for all renderer authors if they need to know about the number of sequences and samples in advance, and if this needs to be stateful to be efficient. Because it complicates the implementation a lot.
+At least for Cycles, the answer is no to both. It used to be different, and maybe in the future there comes a great new sampling pattern that changes things. But personally I would not complicate the OSL implementation for that at this point.
+sfriedmapixar commented on Jun 21, 2024
+sfriedmapixar
+on Jun 21, 2024
+ContributorAuthor
+More actions
+A given type of noise may ignore one or more of the input integers. I think stdosl.h will have multiple function signatures for shader-writer convenience that use "default" values for some of those args (which will be constant). Because these are just getattribute calls at the moment, the renderer will have all the upfront knowledge about it that implies.
+The point you bring up about the packed value not being compile time constant is a good one for us to keep in mind in terms of motivating the transition to a shadeop. If just the seed is used, that should be compile time constant, and that will work with build_attribute_getter as you say. The sample_index won't, and so can only be supported by renderers that can handle run-time getattribute calls. The goal for this is to have an interface that all shader writers can write against that they can use to access more advanced random number generation if available, but there should be graceful fallbacks if not available. So long as a renderer that can't handle runtime getattribute calls returns "failure" for that call, we'll try to have the stdosl.h wrapper have a sensible fallback to one of the other calls, all the way down to just using the hash noise function if the renderer supports no customization. A lot of this is to provide a standardized way for renderers to opt-in to better random numbers...if they don't opt-in, they'll get low-quality ones by default.
+It's also important to remember we can't have a random call with state behind the scenes updated within an execution due to the optimization passes in the OSL runtime optimizer. For the same inputs, a given random() call for a given shader execution must return the same value -- it can (and should) vary execution to execution, but not within a given shader invocation. The reason for this is the optimizer may merge nodes that it notices have the same inputs, and wire the single merged node to multiple outputs.
+lgritz commented on Jun 21, 2024
+lgritz
+on Jun 21, 2024
+Collaborator
+More actions
+It's also important to remember we can't have a random call with state behind the scenes updated within an execution due to the optimization passes in the OSL runtime optimizer.
+Well, we could mark the function as having side effects so it's not optimized away.
+sfriedmapixar commented on Jun 21, 2024
+sfriedmapixar
+on Jun 21, 2024
+ContributorAuthor
+More actions
+We could...and we would have to carry that all the way up to things like the merging of duplicate instances, which IIRC isn't currently considering side-effects and is mostly just looking at if they are the same master and same param values right now. Having side-effects that are the same each execution is semantically different than having side effects that vary per execution, and I think most of the code has been written assuming the former, and if we change that there will be a lot of subtle bugs to find. But if we did that, it would also prevent the optimization for all renderers, not just those that have nondeterministic random numbers, so we'd also want to guard that behind some kind of optimization attribute, I think, which again adds quite a bit of complication to the OSL code.
+If you want to get that kind of functionality, I think it would be better to pass around a "sample context" in your shader, that makes the state explicit and visible to the RuntimeOptimizer rather than adding more assumptions that prevent optimizations.
+Where I sit, being the one who ends up attaching a debugger to a full production shot to find out what has gone wrong when things really go wrong, I much prefer having more determinism rather than less.
+So we could, but I don't think the cost is justified.
+lgritz commented on Jun 21, 2024
+lgritz
+on Jun 21, 2024
+Collaborator
+More actions
+Yes, I agree. I just wanted to be sure people understood the possibility was on the table.
+👍React with 👍1Reacted by sfriedmapixar
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

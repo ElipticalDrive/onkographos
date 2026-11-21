@@ -1,0 +1,145 @@
+--- v001.md
++++ v002.md
+@@ -4,35 +4,36 @@
+ 
+ ## Overview
+-Boundary Geometry Classification is a filtering step in blocky meshing that ensures neighbor-based face culling is applied exclusively to geometry lying on voxel cell boundary planes, while leaving internal geometry of complex blocks untouched [S1, unofficial]. It solves the problem where culling logic intended for inter-block occlusion would incorrectly suppress valid internal triangles within a single complex shape [S1, unofficial]. It differs from [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by operating on the geometric position of vertices rather than precomputed coverage bitmasks, and from [Face-Culling Geometry Shader](3928-face-culling-geometry-shader.md) by being a CPU-side classification logic rather than a GPU shader stage.
++Boundary Geometry Classification is a method used in blocky meshing to distinguish between geometry located on the voxel cell boundary planes and geometry located in the interior of a complex block [S1, unofficial]. It solves the problem where neighbor-based face culling must be restricted to external surfaces to avoid incorrectly culling internal geometry that is occluded by the block's own internal structure [S1, unofficial]. It sets itself apart from siblings like [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by providing the geometric predicate required to determine *which* faces are eligible for neighbor occlusion tests, rather than performing the culling logic itself.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A list of generated polygons (triangles), each defined by a set of 3D vertices.
+-- Output: A boolean classification for each polygon indicating whether it is a "boundary polygon" eligible for neighbor culling.
++- Input: A polygon defined by a list of 3D vertices (`vertices`), the axis of the face being tested (`axis`), the coordinate of the cell boundary plane (`plane`), and a small tolerance value (`eps`).
++- Output: A boolean indicating whether the polygon lies on the boundary.
+ 
+ **Data Structures:**
+-- Polygon: A collection of vertices. Each vertex is a 3D vector $(x, y, z)$.
+-- Cell Boundary Plane: Defined by an axis index $a \in \{0, 1, 2\}$ (corresponding to $x, y, z$) and a plane coordinate $P$.
++- `vertices`: An array of 3D vectors (`Vec3`), where each vector contains `(x, y, z)` coordinates.
++- `axis`: An integer index (0, 1, or 2) corresponding to the x, y, or z axis perpendicular to the face.
++- `plane`: A floating-point scalar representing the coordinate value of the voxel cell boundary (e.g., $x=0$, $x=1$).
++- `eps`: A floating-point tolerance value for numerical stability.
+ 
+ **Steps:**
+-1. For each generated polygon, determine if it qualifies as a boundary polygon.
+-2. A polygon is classified as a boundary polygon if all its vertices lie on the same cell boundary plane within a specified tolerance $\epsilon$.
+-3. The check is performed for each of the six possible boundary planes of the voxel cell containing the polygon. If the condition holds for any one plane, the polygon is marked as boundary geometry.
++1. Iterate through each vertex $v$ in the polygon's vertex list.
++2. For each vertex, extract the coordinate corresponding to the specified `axis`.
++3. Calculate the absolute difference between this coordinate and the `plane` value.
++4. Check if this difference is less than or equal to `eps`.
++5. If all vertices satisfy this condition, the polygon is classified as a boundary polygon. Otherwise, it is internal.
+ 
+-**Formulas:**
+-A polygon with vertices $V = \{v_0, v_1, v_2\}$ lies on the boundary plane defined by axis $a$ and coordinate $P$ if:
+-$$ \forall v \in V, \quad |v[a] - P| \le \epsilon $$
+-Where:
+-- $v[a]$ is the coordinate of vertex $v$ along axis $a$.
+-- $P$ is the coordinate of the cell boundary (e.g., integer voxel coordinate).
+-- $\epsilon$ is a small tolerance value.
++**Formula:**
++A polygon with vertices $V = \{v_0, v_1, \dots, v_n\}$ is on the boundary if:
++$$ \forall v \in V, \quad |v_{\text{axis}} - \text{plane}| \le \text{eps} $$
++Where $v_{\text{axis}}$ is the component of vertex $v$ along the specified axis.
+ 
+ **Parameters:**
+-- $\epsilon$: A small tolerance value used to determine if a vertex lies on the boundary plane. [S1, unofficial] Typical values are not specified in the sources.
++- `eps`: A small tolerance value. The exact value is not specified in the sources [S1, unofficial]. It must be small enough to distinguish boundary geometry from internal geometry but large enough to handle floating-point precision errors.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Internal Geometry:** Complex blocks may contain internal triangles that do not lie on any cell boundary plane. These must not be tested against neighboring blocks [S1, unofficial].
+-- **Tolerance:** The choice of $\epsilon$ is critical. Too small a value may fail to classify vertices that are numerically on the boundary due to floating-point precision; too large a value may incorrectly classify internal geometry as boundary geometry. [S1, unofficial]
+-- **Chunk Borders:** Faces on the edge of a chunk are not semantically special; they still have neighbor voxels, just retrieved from a different source. The classification logic remains the same [S1, unofficial].
++- **Precision:** Floating-point inaccuracies in vertex generation may cause vertices that are theoretically on the boundary to fail the check. A non-zero `eps` is required [S1, unofficial].
++- **Degenerate Input:** If a polygon has no vertices, the function should return false or handle the empty case explicitly [G].
++- **Internal Geometry:** Geometry strictly inside the voxel (not on any of the 6 boundary planes) will fail this check for all axes and should be excluded from neighbor culling tests to prevent incorrect occlusion [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -40,68 +41,40 @@
+ def lies_on_boundary(vertices: list, axis: int, plane: float, eps: float) -> bool:
+     """
+-    Check if all vertices lie on the boundary plane defined by axis and plane.
++    Classifies a polygon as a boundary polygon if all its vertices lie on the same cell boundary plane.
+     
+     Args:
+         vertices: List of 3D vectors (x, y, z).
+-        axis: Index of the axis (0, 1, or 2) corresponding to the boundary plane.
+-        plane: The coordinate of the boundary plane.
+-        eps: Tolerance for the boundary check.
++        axis: Index of the axis (0=x, 1=y, 2=z) perpendicular to the face.
++        plane: The coordinate value of the boundary plane.
++        eps: Tolerance for boundary detection.
+         
+     Returns:
+         True if all vertices are within eps of the plane, False otherwise.
+     """
++    # Handle empty vertex list
++    if not vertices:
++        return False
++        
+     for v in vertices:
+-        if abs(v[axis] - plane) > eps:
++        # Extract coordinate along the specified axis
++        coord = v[axis]
++        # Check if within tolerance of the boundary plane
++        if abs(coord - plane) > eps:
+             return False
++            
+     return True
+-
+-def classify_boundary_polygon(vertices: list, cell_bounds: dict, eps: float) -> bool:
+-    """
+-    Classify a polygon as a boundary polygon if it lies on any of the 6 cell boundary planes.
+-    
+-    Args:
+-        vertices: List of 3D vectors defining the polygon.
+-        cell_bounds: Dictionary containing the min and max coordinates for the cell in each dimension.
+-                     Example: {'min': [x_min, y_min, z_min], 'max': [x_max, y_max, z_max]}
+-        eps: Tolerance for the boundary check.
+-        
+-    Returns:
+-        True if the polygon is a boundary polygon, False otherwise.
+-    """
+-    # Check the 6 faces of the voxel cell
+-    # Faces are defined by axis and the min/max coordinate of that axis
+-    boundaries = [
+-        (0, cell_bounds['min'][0]), (0, cell_bounds['max'][0]),
+-        (1, cell_bounds['min'][1]), (1, cell_bounds['max'][1]),
+-        (2, cell_bounds['min'][2]), (2, cell_bounds['max'][2])
+-    ]
+-    
+-    for axis, plane in boundaries:
+-        if lies_on_boundary(vertices, axis, plane, eps):
+-            return True
+-            
+-    return False
+ ```
+ 
+ ## Subtopics
+ 
+-### Complex Face and Edge Criterion
+-This variant extends boundary classification to detect cells containing surface pieces smaller than the current subdivision level, specifically for octree-based adaptive meshing [S2].
+-- **Complex Face Criterion:** Detects connected components of voxels on homogeneous cell faces (where all vertices are inside or outside the surface $\partial V$) [S2]. It ensures that all cells intersected by $\partial V$ are processed by only checking voxels belonging to cell faces [S2].
+-- **Complex Edge Criterion:** Detects configurations where a cell edge intersects $\partial V$ more than once, which can induce non-manifold surfaces [S2].
+-- **Usage:** Used in octree construction to decide if a cell must be subdivided based on topological and geometrical characteristics of $\partial V$ [S2].
+-
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of polygons, as each polygon is checked against a constant number of boundary planes (6).
+-- **Memory Complexity:** $O(1)$ auxiliary space per polygon, as the check is stateless.
+-- **Strengths:** Allows arbitrary internal geometry to remain untouched while efficiently applying neighbor occlusion only where spatially relevant [S1, unofficial]. Simplifies chunk transition logic by treating chunk borders as having normal voxel neighbors [S1, unofficial].
+-- **Limitations:** Requires precise knowledge of cell boundaries and tolerance $\epsilon$ to avoid misclassification. Does not handle complex internal topology detection (handled by variants like Complex Face Criterion) [S2].
+-- **When to use:** When using neighbor-based culling in blocky meshing to avoid culling internal triangles of complex shapes [S1, unofficial].
+-- **When not to use:** When using methods that do not rely on neighbor occlusion or when internal geometry culling is desired [S1, unofficial].
++- **Time Complexity:** $O(V)$, where $V$ is the number of vertices in the polygon. Since polygons in blocky meshing are typically triangles ($V=3$), this is effectively $O(1)$.
++- **Memory Complexity:** $O(1)$ auxiliary space.
++- **Strengths:** Simple, fast, and robust for separating internal from external geometry. It allows the mesher to keep arbitrary internal geometry while applying neighbor occlusion only where it makes spatial sense [S1, unofficial].
++- **Limitations:** Relies on a tolerance value `eps` which must be chosen carefully. It does not handle topological complexity within homogeneous regions; that is handled by the [Complex Face and Edge Criterion](6790-complex-face-and-edge-criterion.md) [S1, unofficial].
+ 
+ ## Background
+-Boundary Geometry Classification was introduced in the context of face culling for voxel cubes and partial shapes [S1, unofficial]. It addresses the need to separate boundary geometry from internal geometry in complex blocks to optimize neighbor-based culling [S1, unofficial]. The Complex Face and Edge Criterion variant was developed for adaptive surface extraction from anisotropic volumetric data using generalized octrees [S2].
++This method is part of the face culling pipeline for voxel cubes and partial shapes, specifically designed to support neighbor-based occlusion culling in blocky meshing [S1, unofficial]. It ensures that internal triangles inside a complex block are not tested against neighboring blocks, which would be incorrect [S1, unofficial].
+ 
+ ## Sources
+-[S1] Face Culling for Voxel Cubes and Partial Shapes, https://ogyrecdev.github.io/posts/face-culling/, fetched 2026-10-28 (unofficial)
+-[S2] Adaptive surface extraction from anisotropic volumetric data: contouring on generalized octrees, https://doi.org/10.1007/s12243-013-0369-4, fetched 2026-10-29+[S1] Face Culling for Voxel Cubes and Partial Shapes, https://ogyrecdev.github.io/posts/face-culling/, fetched 2026-10-28 (unofficial)

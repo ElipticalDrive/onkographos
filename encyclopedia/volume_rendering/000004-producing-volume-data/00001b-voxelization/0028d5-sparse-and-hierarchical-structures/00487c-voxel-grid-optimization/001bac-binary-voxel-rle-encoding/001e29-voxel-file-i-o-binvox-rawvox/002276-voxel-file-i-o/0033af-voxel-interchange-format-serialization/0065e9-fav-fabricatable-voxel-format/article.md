@@ -1,0 +1,234 @@
+# FAV (Fabricatable Voxel) Format
+
+Also called: Fabricatable Voxel
+
+## Overview
+FAV (Fabricatable Voxel) is a voxel-based 3D data format that represents models as a 3D buildup of volume cells (voxels) on a grid, allowing free design of internal structures, materials, colors, and connection intensities [S1]. Unlike mesh-based formats (STL, AMF, 3MF) which are limited to surface definitions, FAV enables intensive 3D structure modeling and seamless data flow to 3D printers by retaining optimized information for fabrication [S1]. It is described in XML with a tree structure, defining models through a palette of geometries and materials, voxel definitions referencing these, and a grid-based structure mapping voxels to 3D space [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** None explicitly defined for the format itself; it is a storage/transport format.
+*   **Output:** An XML document representing a 3D voxel model.
+
+**Data Structures:**
+The format is an XML tree. Key elements and their attributes/contents are:
+
+1.  `<metadata>`: Contains `<author>`, `<license>`, `<title>`.
+2.  `<palette>`: Contains definitions for basic information.
+    *   `<geometry (ID, Name)>`: Defines voxel `<shape>` and `<scale>` for grid cells. Can refer to an external file.
+    *   `<material (ID, Name)>`: Defines material information (e.g., ABS, PLA, ISO standard, product code, URL).
+3.  `<voxel (ID, Name)>`: Defines a voxel unit.
+    *   References `<geometry>` ID and `<material>` ID.
+    *   For hybrid materials, multiple `<material>` entries are defined with a `<ratio>`.
+    *   Can hold arbitrary properties.
+4.  `<object (ID, Name)>`: Defines the actual 3D model data.
+    *   Contains `<grid>`.
+5.  `<grid>`: Defines the space for voxel buildup.
+    *   `<origin>`: Distance from global origin.
+    *   `<unit>`: Cell size.
+    *   `<dimension>`: Max number of voxels in each axis.
+    *   `<structure (Compression)>`: Maps voxels to the grid.
+        *   Contains `<voxel_map>`, `<color_map>`, `<link_map>`.
+        *   Each map is defined separately by layer.
+6.  `<structure (Compression)>`:
+    *   Attribute `Compression`: Options are 'none' (uncompressed), 'Base64', or 'ZLIB' (compressed) [S1].
+7.  `<voxel_map (bit_per_voxel=8)>`:
+    *   Stores shape/attributes.
+    *   Layout: Connected voxel lines for `dimension.y` arranged for `dimension.x`.
+    *   Encoding: Two hexadecimal characters express one voxel.
+    *   Value: If a voxel exists, its `<voxel>` ID is specified; if not, 0 is specified.
+8.  `<color_map (color_mode)>`:
+    *   Stores full-color info.
+    *   Modes: Grayscale, RGB, CYMK [S1].
+    *   Layout: Connected color value lines for `dimension.y` arranged for `dimension.x`.
+    *   Encoding: Six hexadecimal characters express one voxel's color in RGB format.
+    *   Omission: If `voxel_map` specifies 0, color info is omitted.
+9.  `<link_map (neighbors)>`:
+    *   Stores connection intensity.
+    *   Neighbors: 6, 18, or 26 [S1].
+    *   Layout: Connected link value lines for `dimension.y` arranged for `dimension.x`.
+    *   Encoding: Twelve hexadecimal characters express one voxel's link information for 6 neighbors.
+    *   Omission: If `voxel_map` specifies 0, link info is omitted.
+
+**Steps:**
+1.  Register basic information to `<palette>`.
+2.  Define `<voxel>` using some basic information on `<palette>`.
+3.  Carry out modeling of a three-dimensional structure and attributes by buildup of `<voxel>` on a three-dimensional grid.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for parsing/constructing a FAV XML structure
+# Note: This is a logical representation of the XML tree and data mapping.
+
+class FAVModel:
+    def __init__(self):
+        self.metadata = {}
+        self.geometries = {} # ID -> {Name, Shape, Scale}
+        self.materials = {}  # ID -> {Name, Info}
+        self.voxels = {}     # ID -> {GeometryID, MaterialIDs, Ratios, Properties}
+        self.objects = {}    # ID -> Grid
+
+    def add_geometry(self, geo_id, name, shape, scale):
+        self.geometries[geo_id] = {'Name': name, 'Shape': shape, 'Scale': scale}
+
+    def add_material(self, mat_id, name, info):
+        self.materials[mat_id] = {'Name': name, 'Info': info}
+
+    def add_voxel(self, voxel_id, name, geo_id, materials, properties=None):
+        # materials is a list of (material_id, ratio) tuples
+        self.voxels[voxel_id] = {
+            'Name': name,
+            'GeometryID': geo_id,
+            'Materials': materials,
+            'Properties': properties or {}
+        }
+
+    def add_object(self, obj_id, name, origin, unit, dimension, structure_layers):
+        # structure_layers is a list of layer dicts
+        grid = {
+            'Origin': origin,
+            'Unit': unit,
+            'Dimension': dimension,
+            'Layers': structure_layers
+        }
+        self.objects[obj_id] = grid
+
+    def parse_voxel_map_layer(self, layer_data, dimension_x, dimension_y, bit_per_voxel=8):
+        """
+        Parses the voxel_map for a single layer.
+        layer_data: string of hex characters (2 chars per voxel)
+        dimension_x: width of the grid
+        dimension_y: height of the grid
+        Returns a 2D array of voxel IDs.
+        """
+        # Each voxel is 2 hex chars = 1 byte = 8 bits
+        # Total bytes = dimension_x * dimension_y
+        bytes_data = bytes.fromhex(layer_data)
+        
+        # Reshape into 2D array: dimension_y rows, dimension_x columns
+        # The spec says "connected voxel lines for dimension.y arranged for dimension.x"
+        # This implies the data is laid out row by row (y) for each x? 
+        # Or x by y? "arranged for number of dimension.x" usually means the outer loop or primary index.
+        # Let's assume standard raster order: y varies fastest or x varies fastest?
+        # "connected voxel lines for dimension.y" suggests lines of length dimension.y.
+        # "arranged for number of dimension.x" suggests there are dimension_x such lines.
+        # So, data is [line_0, line_1, ..., line_{dim_x-1}]
+        # Each line is dimension_y voxels.
+        
+        voxel_ids = []
+        for x in range(dimension_x):
+            line = []
+            for y in range(dimension_y):
+                byte_index = x * dimension_y + y
+                if byte_index < len(bytes_data):
+                    vid = bytes_data[byte_index]
+                    line.append(vid)
+                else:
+                    line.append(0) # Default to 0 if data short
+            voxel_ids.append(line)
+        return voxel_ids
+
+    def parse_color_map_layer(self, layer_data, dimension_x, dimension_y, color_mode='RGB'):
+        """
+        Parses the color_map for a single layer.
+        layer_data: string of hex characters (6 chars per voxel for RGB)
+        dimension_x: width
+        dimension_y: height
+        Returns a 2D array of color values (or None if omitted).
+        """
+        if color_mode == 'RGB':
+            chars_per_voxel = 6
+        elif color_mode == 'Grayscale':
+            # Not specified how many chars, assuming similar to RGB or less. 
+            # Spec says "Six hexadecimal characters express one voxel's color in RGB format."
+            # For other modes, exact char count is "Not given in the sources."
+            chars_per_voxel = 6 # Placeholder, should be defined by spec
+        elif color_mode == 'CYMK':
+            chars_per_voxel = 6 # Placeholder
+            
+        bytes_data = bytes.fromhex(layer_data)
+        colors = []
+        for x in range(dimension_x):
+            line = []
+            for y in range(dimension_y):
+                start_idx = (x * dimension_y + y) * chars_per_voxel
+                end_idx = start_idx + chars_per_voxel
+                if end_idx <= len(bytes_data):
+                    color_hex = bytes_data[start_idx:end_idx]
+                    line.append(color_hex)
+                else:
+                    line.append(None) # Omitted if voxel is 0
+            colors.append(line)
+        return colors
+
+    def parse_link_map_layer(self, layer_data, dimension_x, dimension_y, neighbors=6):
+        """
+        Parses the link_map for a single layer.
+        layer_data: string of hex characters (12 chars per voxel for 6 neighbors)
+        dimension_x: width
+        dimension_y: height
+        Returns a 2D array of link values.
+        """
+        chars_per_voxel = 12
+        bytes_data = bytes.fromhex(layer_data)
+        links = []
+        for x in range(dimension_x):
+            line = []
+            for y in range(dimension_y):
+                start_idx = (x * dimension_y + y) * chars_per_voxel
+                end_idx = start_idx + chars_per_voxel
+                if end_idx <= len(bytes_data):
+                    link_hex = bytes_data[start_idx:end_idx]
+                    line.append(link_hex)
+                else:
+                    line.append(None) # Omitted if voxel is 0
+            links.append(line)
+        return links
+
+# Example usage logic
+# 1. Create FAVModel
+# 2. Add geometries and materials to palette
+# 3. Define voxels referencing palette
+# 4. Define object with grid dimensions
+# 5. For each layer in structure:
+#    - Parse voxel_map (hex string) -> 2D voxel ID array
+#    - Parse color_map (hex string) -> 2D color array (if present)
+#    - Parse link_map (hex string) -> 2D link array (if present)
+#    - Store in object's grid layers
+```
+
+**Parameters:**
+*   `bit_per_voxel`: Default 8 [S1].
+*   `color_mode`: Grayscale, RGB, CYMK [S1].
+*   `neighbors`: 6, 18, or 26 [S1].
+*   `compression`: 'none', 'Base64', 'ZLIB' [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Omission of Data:** If `voxel_map` specifies 0 (no voxel), color and link info are omitted from their respective maps. The parser must handle variable-length data if compression or omission affects byte alignment, though the spec implies fixed hex character counts per voxel *if* present.
+*   **Hex Encoding:** Voxel IDs are 2 hex chars, Colors are 6 hex chars (RGB), Links are 12 hex chars (6 neighbors). Ensure correct byte conversion.
+*   **Grid Layout:** The arrangement of voxels in the map is "connected voxel lines for dimension.y arranged for dimension.x". This implies the data is structured as `dimension_x` lines, each of length `dimension_y`.
+
+## Subtopics
+
+### Hierarchical Sparse Voxel Format (glTF-based)
+A glTF-based format for sparse voxels. Choose when interoperability with web-based 3D viewers and glTF ecosystems is required. [13799-hierarchical-sparse-voxel-format-gltf-based.md]
+
+### Comparison
+FAV is XML-based and designed for intensive 3D structure modeling and 3D printing, allowing free internal structure design. Hierarchical Sparse Voxel Format is glTF-based, likely optimized for sparse data and web rendering.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Allows free design of internal structures, materials, colors, and connection intensities at each voxel position. Enables complex microstructures and varied material distributions. Seamless data flow to 3D printers. Retains optimized information for fabrication.
+*   **Limitations:** XML-based, which may be verbose. Limited to voxel-based representation.
+*   **When to Use:** Intensive 3D structure modeling, seamless data flow to 3D printers, 3D half-toning, enhancing expressiveness of 3D printers.
+*   **When Not to Use:** When surface-only representation is sufficient (use STL/AMF/3MF). When sparse data efficiency is critical and glTF interoperability is needed.
+
+## Background
+FAV (Fabricatable Voxel) was proposed in 2016 to effectively utilize the abilities of current 3D printers by retaining optimized information for fabrication [S1]. It was released as a specification in July 2016 [S1]. It addresses the limitations of mesh-based formats (STL, AMF, 3MF) which are limited to surface definitions and predefined internal patterns [S1]. FAV allows for intensive and minute design of internal structures and attributes [S1].
+
+## Sources
+[S1] Intensive 3D Structure Modeling and Seamless Data Flow to 3D Printers Using Voxel-Based Data Format FAV (Fabricatable Voxel), https://doi.org/10.2352/issn.2169-4451.2016.32.1.art00033_1, fetched 2026-10-26

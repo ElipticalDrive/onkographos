@@ -1,0 +1,127 @@
+# Light-space opacity precomputation
+
+Also called: Light-point-of-view ray marching, Light-volume accumulation
+
+## Overview
+Light-space opacity precomputation accelerates non-collocated view and light rendering by precomputing the accumulated opacity along light rays, thereby avoiding expensive per-shading-point light-ray marching [S1]. It differs from naive non-collocated rendering by precomputing light-transport opacity from the light's point of view and reusing it for any view direction [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume representation of the scene and the light source position/direction [S1].
+*   **Output:** A precomputed 3D volume storing accumulated opacity (transmittance) from the light's perspective [S1].
+
+**Data Structures:**
+*   **Precomputed Volume:** A 3D grid storing accumulated opacity values [S1].
+    *   **Layout:** 3D array of floating-point values [S1].
+    *   **Size:** $128^3$ voxels, restricted by available GPU memory [S1].
+    *   **Coordinate System:** The scene is normalized such that the object center is at the origin and scaled to fit within the $[-1, 1]^3$ cube [S1].
+
+**Steps:**
+1.  **Scene Normalization:** Translate the object center to the origin and scale the bounding box to fit into the $[-1, 1]^3$ cube [S1].
+2.  **Light-View Ray Marching:** Ray march from the light's point of view through the volume [S1].
+3.  **Opacity Accumulation:** Accumulate opacity along each light ray at each spatial position of the volume [S1]. The accumulated opacity (transmittance) $T(\mathbf{p})$ at position $\mathbf{p}$ is computed as:
+    $$ T(\mathbf{p}) = \exp\left(-\sum_{i} \sigma_i \Delta s_i\right) $$
+    where $\sigma_i$ is the extinction coefficient at sample $i$ and $\Delta s_i$ is the step size along the ray from the light source to $\mathbf{p}$ [G].
+4.  **Storage:** Store the accumulated opacity in a precomputed volume [S1].
+5.  **Rendering Sampling:** During rendering, sample the precomputed accumulated opacity volume directly for each shading point's connection to the light source [S1].
+
+**Parameters:**
+*   **Volume Resolution:** $128^3$ [S1].
+*   **Scene Normalization:** Object center translated to origin, scaled to fit into the $[-1, 1]^3$ cube [S1].
+*   **Training Image Resolution:** $400 \times 500$ to $1100 \times 1100$ [S1].
+*   **Training Iterations:** ~450,000 total, converges in ~200,000 [S1].
+*   **Rendering Resolution:** $700 \times 700$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **SfM Registration Failure:** Structure from Motion (SfM) may fail to register certain views, reducing the actual number of training images to 300 to 385 per scene [S1].
+*   **Resolution Limits:** A $128^3$ volume resolution may fail to fully reproduce geometry and appearance for scenes with highly complex surface normal variations and texture details [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def precompute_light_opacity(volume_query, light_pos, grid_size=128, bounds_min=-1.0, bounds_max=1.0):
+    """
+    Precomputes accumulated opacity (transmittance) from the light's point of view.
+    
+    Args:
+        volume_query: Callable that returns the extinction coefficient sigma at a 3D point.
+        light_pos: 3D tuple/list, position of the light source.
+        grid_size: Resolution of the precomputed volume (default 128).
+        bounds_min, bounds_max: Normalized bounds of the volume (default -1 to 1).
+        
+    Returns:
+        light_opacity_volume: 3D list of shape (grid_size, grid_size, grid_size)
+    """
+    # Initialize output volume
+    light_opacity_volume = [[[0.0] * grid_size for _ in range(grid_size)] for _ in range(grid_size)]
+    
+    step_size = (bounds_max - bounds_min) / grid_size
+    march_steps = 64
+    march_step_len = step_size * march_steps  # Total distance covered per voxel ray
+    
+    for z in range(grid_size):
+        for y in range(grid_size):
+            for x in range(grid_size):
+                # Voxel center in normalized space [-1, 1]^3
+                p = (bounds_min + (x + 0.5) * step_size,
+                     bounds_min + (y + 0.5) * step_size,
+                     bounds_min + (z + 0.5) * step_size)
+                
+                # Ray direction from light to voxel
+                dir_vec = (p[0] - light_pos[0], p[1] - light_pos[1], p[2] - light_pos[2])
+                length = math.sqrt(dir_vec[0]**2 + dir_vec[1]**2 + dir_vec[2]**2)
+                
+                if length == 0:
+                    light_opacity_volume[z][y][x] = 1.0
+                    continue
+                
+                # Normalize direction
+                dir_vec = (dir_vec[0] / length, dir_vec[1] / length, dir_vec[2] / length)
+                
+                # Discrete accumulation from light to p
+                accumulated_sigma_ds = 0.0
+                current_pos = list(light_pos)
+                
+                # March from light towards p
+                for step in range(march_steps):
+                    # Sample extinction coefficient at current_pos [G]
+                    sigma = volume_query(current_pos)
+                    accumulated_sigma_ds += sigma * march_step_len
+                    
+                    # Advance along ray
+                    current_pos = (current_pos[0] + dir_vec[0] * march_step_len,
+                                   current_pos[1] + dir_vec[1] * march_step_len,
+                                   current_pos[2] + dir_vec[2] * march_step_len)
+                
+                # Compute transmittance T = exp(-integral of sigma)
+                t = 1.0 if accumulated_sigma_ds == 0 else math.exp(-accumulated_sigma_ds)
+                light_opacity_volume[z][y][x] = t
+                
+    return light_opacity_volume
+```
+
+## Subtopics
+
+### [LightImage Precomputation](11928-lightimage-precomputation.md)
+Accelerates the computation of multiple scattering in participating media by precomputing the visibility of the light source from the perspective of the volume into a 2D texture map. It solves the problem of expensive per-shading-point light-ray marching by storing light visibility modulated by source intensity, allowing efficient blur-based approximation of indirect illumination. It differs from the parent method by specifically targeting the visibility component via a 2D orthographic projection of the volume's bounding box, rather than storing full 3D light-segment integrals for every voxel.
+
+### Entry-Point Generation (Cuboids)
+A geometry shader-based method to generate optimized entry-points for light-space illumination by projecting first/last hit point pairs from camera space to light space [S2, unofficial]. Line segments are formed based on each first and last hit point pair derived from the visibility pass and projected as seen from the light source using a geometry shader operating on hit point pairs [S2, unofficial]. Representing line segments as cuboids avoids degeneration to points when the light direction is collinear with the camera direction, which would cause holes; cuboid depth corresponds to the distance between first and last hit points, and width/height are calculated based on pixel size and distance to the light source [S2, unofficial]. No specific rasterization is required as synchronization is per-pixel based [S2, unofficial]. Multiple light sources are handled by projecting instantiated geometry to multiple output targets using respective light source projection matrices [S2, unofficial]. Generating optimized exit-points yields no performance improvement with early ray-termination [S2, unofficial].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On 4 NVIDIA 2080Ti RTX GPUs, training takes ~450,000 iterations (~2 days), converging in ~200,000 iterations [S1]. Rendering a $700 \times 700$ image takes ~0.8s for collocated view and light, and ~2.3s for non-collocated view and light using this precomputation [S1].
+*   **Strengths:** Significantly reduces rendering time for arbitrary light and view directions compared to naive per-point light-ray marching [S1].
+*   **Limitations:** High memory usage restricts volume resolution to $128^3$, which may fail to reproduce complex surface normal variations and texture details [S1]. SfM registration failures can reduce the number of available training images [S1].
+*   **When to use:** Relighting and novel view synthesis under arbitrary light and view directions [S1].
+*   **When not to use:** Scenes requiring high-fidelity reproduction of complex surface normal variations and fine texture details beyond the $128^3$ resolution limit [S1].
+
+## Background
+This method was introduced in the context of deep reflectance volumes for relightable reconstructions from multi-view photometric images [S1]. It addresses the computational bottleneck of non-collocated rendering where the light and camera are not at the same position, requiring expensive light-ray marching for each shading point [S1]. The approach leverages the observation that light-transport opacity can be precomputed from the light's perspective and reused for any view direction [S1].
+
+## Sources
+[S1] Deep Reflectance Volumes: Relightable Reconstructions from Multi-view Photometric Images, https://doi.org/10.1007/978-3-030-58580-8_18, fetched 2026-10-26
+[S2] Multimodal Volume Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2015/sunden15multimodal.pdf, fetched 2026-10-29 (unofficial)

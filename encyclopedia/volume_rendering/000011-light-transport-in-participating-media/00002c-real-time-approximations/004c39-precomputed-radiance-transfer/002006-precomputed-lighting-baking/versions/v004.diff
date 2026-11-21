@@ -1,0 +1,237 @@
+--- v003.md
++++ v004.md
+@@ -4,116 +4,127 @@
+ 
+ ## Overview
+-Precomputed Lighting (Baking) is a real-time volume rendering optimization that accelerates light transport by pre-calculating the direct lighting term ($L_i$) for each voxel in a grid and storing it as texture data [S1, S2, S3, unofficial]. It solves the performance bottleneck of evaluating illumination integrals per raymarching step by replacing runtime light sampling with trilinear interpolation of baked values [S1, S2, unofficial]. Unlike [Voxel Cone Tracing](1454-voxel-cone-tracing.md) which approximates multiple scattering via cone tracing at runtime, or [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) which compresses directional data into basis functions, this method stores raw or simplified lighting intensity directly, making it view-independent but strictly dependent on the static scene and light configuration [S2, unofficial].
++Precomputed Lighting (Baking) is a real-time volume rendering optimization that accelerates illumination by pre-calculating the incident radiance term ($L_i$) for each voxel in a grid and storing it in a texture, allowing the renderer to skip evaluating $L_i$ during the primary raymarching pass [S1, S2, S3, unofficial]. Unlike [Voxel Cone Tracing](1454-voxel-cone-tracing.md) or [Froxel-based Volumetric Rendering](1919-froxel-based-volumetric-rendering.md), which approximate scattering and visibility dynamically per frame, this method decouples the expensive light transport calculation from the view-dependent rendering loop [S1, unofficial]. It is distinguished from [Precomputed Radiance Transfer (PRT)](9429-precomputed-radiance-transfer-prt.md) by storing absolute radiance values rather than transfer functions, making it faster at runtime but less flexible to dynamic lighting changes [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   3D voxel grid representing the participating medium (density field).
+-*   Scene geometry (for shadow casting).
+-*   Light source definitions (position, intensity, direction).
+-
+-**Outputs:**
+-*   A 3D texture (or volume buffer) containing precomputed lighting values ($L_{baked}$) for each voxel.
++**Inputs and Outputs:**
++*   **Input:** A 3D voxel grid representing the participating medium (density $\sigma_t$, absorption $\sigma_a$, scattering $\sigma_s$), light source positions, intensities, and directions.
++*   **Output:** A 3D texture (or volume) storing the precomputed incident radiance ($L_i$) for each voxel.
+ 
+ **Data Structures:**
+-*   **Baking Texture:** A 3D texture array or volume texture. The resolution can be lower than the simulation voxel grid because lighting is spatially smooth [S3, unofficial].
+-*   **Storage Layout:** Typically stored in memory order optimized for cache coherency (e.g., iterating x, then y, then z) to minimize cache misses during the baking pass [S1, unofficial].
++The precomputed lighting is stored in a 3D texture array or a single 3D texture.
++*   **Format:** Typically 16-bit or 32-bit floating point per channel (RGB) to accommodate high dynamic range lighting.
++*   **Resolution:** The resolution of the baking texture can be lower than the rendering voxel grid resolution because light attenuation and scattering are spatially smooth (blurry) [S3, unofficial].
++*   **Memory Layout:** To optimize cache performance during the baking pass, data should be iterated in memory order (e.g., x-fastest, z-slowest) [S1, unofficial].
+ 
+-**Steps:**
++**Algorithm Steps:**
+ 
+-1.  **Baking Pass (Offline/Pre-frame):**
++1.  **Baking Pass (Precomputation):**
+     For each voxel center $(x, y, z)$ in the grid:
+-    a. Cast a ray from the voxel center towards each light source in the scene.
+-    b. Perform a secondary raymarch or shadow map lookup to determine the transmissivity (visibility) along the path to the light [S2, S3, unofficial].
+-    c. Calculate the direct illumination $L_i$ received by the voxel, accounting for attenuation through the medium [S1, S2, unofficial].
+-    d. Store the resulting $L_i$ value in the corresponding voxel of the baking texture [S1, S3, unofficial].
++    a.  Cast a ray from the voxel center towards each light source in the scene.
++    b.  Perform a secondary raymarch (or shadow march) from the voxel center to the light source to calculate transmissivity (shadowing) [S2, unofficial].
++    c.  Compute the incident radiance $L_i(x, y, z)$ by integrating the light contribution attenuated by the medium along the path to the light [S1, S2, unofficial].
++    d.  Store the resulting $L_i$ vector in the baking texture at index $(x, y, z)$ [S1, unofficial].
+ 
+-2.  **Rendering Pass (Real-time):**
+-    a. Perform standard volumetric raymarching from the camera.
+-    b. For each sample point along the camera ray, perform a few real-time light samples (e.g., ~2 steps) to capture high-frequency details or dynamic effects [S3, unofficial].
+-    c. Sample the precomputed lighting texture at the sample point's coordinates using trilinear interpolation [S2, unofficial].
+-    d. Combine the interpolated baked lighting with the real-time samples to compute the final radiance [S3, unofficial].
++2.  **Rendering Pass (Runtime):**
++    For each camera ray:
++    a.  Perform standard volumetric raymarching (e.g., front-to-back compositing).
++    b.  At each sample point, sample the baking texture using trilinear interpolation to retrieve the precomputed $L_i$ [S2, unofficial].
++    c.  Use the retrieved $L_i$ in the radiative transfer equation, skipping the expensive light visibility calculation [S1, unofficial].
++    d.  Optionally, combine with a few real-time light samples for high-frequency details if the cache resolution is low [S3, unofficial].
+ 
+ **Formulas:**
+-The baked lighting value $L_{baked}(v)$ for a voxel $v$ is approximated as:
+-$$ L_{baked}(v) = \int_{\Omega} L_e(\omega) T(v, \omega) d\omega $$
++The incident radiance $L_i$ at voxel $v$ from a light source $L$ is computed as:
++$$ L_i(v) = \int_{0}^{d_{light}} L_{source} \cdot T(v, t) \, dt $$
+ Where:
+-*   $L_e(\omega)$ is the emitted radiance from light sources in direction $\omega$.
+-*   $T(v, \omega)$ is the transmissivity (visibility) from voxel $v$ to the light in direction $\omega$, computed via raymarching or shadow maps [S2, unofficial].
++*   $L_{source}$ is the radiance emitted by the light.
++*   $d_{light}$ is the distance to the light source.
++*   $T(v, t)$ is the transmissivity from voxel $v$ to point $t$ along the ray to the light, calculated as $T(v, t) = e^{-\int_{v}^{t} \sigma_t(s) ds}$.
++*   $\sigma_t$ is the extinction coefficient of the medium.
++
++At runtime, the radiance $L$ accumulated at a sample point is:
++$$ L = L_{in} \cdot T_{camera} + L_i(v) \cdot (1 - T_{camera}) $$
++Where $L_{in}$ is the incoming radiance from the camera ray and $T_{camera}$ is the transmissivity from the camera to the sample point [S2, unofficial].
+ 
+ **Parameters:**
+-*   **Cache Resolution:** Can be significantly lower than the actual voxel resolution (e.g., 1/2 or 1/4 scale) because light attenuation is inherently blurry [S3, unofficial].
+-*   **Light Samples:** The number of real-time light samples taken during the main pass is small (typically ~2) to blend with the baked data [S3, unofficial].
++*   **Cache Resolution:** Can be significantly lower than the simulation voxel resolution (e.g., 1/2 or 1/4 scale) due to the blurring nature of volumetric light [S3, unofficial].
++*   **Light Samples:** In hybrid approaches, a small number of real-time light samples (~2) may be performed before sampling the cache to capture sharp shadows [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Dynamic Changes:** The baking must be restarted whenever the lighting configuration or the volume simulation changes [S1, unofficial].
+-*   **Performance:** The baking pass itself is computationally expensive and can take significant time, negating some real-time benefits if not cached effectively [S1, unofficial].
+-*   **Memory:** Storing full lighting data per voxel increases memory bandwidth requirements during the render pass [S1, unofficial].
++*   **Dynamic Lighting:** The technique requires re-baking whenever the lighting configuration (position, intensity, color) or the medium simulation (density changes) changes [S1, unofficial].
++*   **View Independence:** The baked data is view-independent but scene and light-source dependent [S2, unofficial].
++*   **Precision:** Ensure the baking texture format supports sufficient dynamic range to prevent clipping of bright light sources [S3, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Baking Pass
+-def bake_lighting(volume_grid, lights, resolution):
++def bake_lighting(grid, lights, resolution):
+     """
+-    Pre-computes direct lighting for each voxel.
++    Precomputes incident radiance for each voxel.
++    grid: 3D array of density/extinction coefficients.
++    lights: List of light sources with position, intensity, direction.
++    resolution: Dimensions of the voxel grid.
++    Returns: 3D texture of incident radiance.
+     """
+-    baking_texture = create_3d_texture(resolution)
++    baking_texture = create_3d_texture(resolution, channels=3)
+     
+-    # Iterate in memory-friendly order (x, y, z) to optimize cache usage [S1, unofficial]
++    # Iterate in memory-friendly order (x-fastest)
+     for z in range(resolution.z):
+         for y in range(resolution.y):
+             for x in range(resolution.x):
+-                voxel_center = get_voxel_center(x, y, z, resolution)
+-                total_light = vec3(0.0)
++                voxel_pos = get_voxel_center(x, y, z)
++                total_radiance = vec3(0.0)
+                 
+                 for light in lights:
+-                    # Cast ray from voxel to light to compute visibility/transmissivity [S2, unofficial]
+-                    visibility = compute_visibility(voxel_center, light.position, volume_grid)
++                    # Cast ray from voxel to light
++                    ray_origin = voxel_pos
++                    ray_direction = normalize(light.position - voxel_pos)
++                    distance_to_light = length(light.position - voxel_pos)
+                     
+-                    # Calculate direct illumination contribution [S1, unofficial]
+-                    light_contribution = light.intensity * visibility
++                    # Calculate transmissivity along the path to the light
++                    transmissivity = 1.0
++                    steps = calculate_steps(distance_to_light, grid)
+                     
+-                    total_light += light_contribution
++                    for step in range(steps):
++                        sample_pos = ray_origin + ray_direction * (step * step_size)
++                        density = sample_density(grid, sample_pos)
++                        # Accumulate extinction
++                        transmissivity *= exp(-density * step_size)
++                    
++                    # Add light contribution attenuated by transmissivity
++                    light_contribution = light.intensity * transmissivity
++                    total_radiance += light_contribution
+                 
+-                baking_texture.set(x, y, z, total_light)
++                baking_texture.set(x, y, z, total_radiance)
+     
+     return baking_texture
+ 
+-# Rendering Pass
+-def render_volume(camera_ray, volume_grid, baking_texture, step_size):
++def render_with_baked_lighting(camera_ray, grid, baking_texture, resolution):
+     """
+-    Renders volume using baked lighting with minimal real-time sampling [S3, unofficial].
++    Renders volume using precomputed lighting.
+     """
+-    accumulated_color = vec3(0.0)
+-    accumulated_alpha = 0.0
+-    sample_pos = camera_ray.origin
++    color = vec3(0.0)
++    transmittance = 1.0
++    ray_pos = camera_ray.origin
++    ray_dir = camera_ray.direction
+     
+-    while sample_pos is inside volume and accumulated_alpha < 1.0:
+-        density = volume_grid.sample(sample_pos)
++    while transmittance > 0.001 and ray_pos inside grid:
++        # Sample density for raymarching
++        density = sample_density(grid, ray_pos)
+         
+-        # Perform a few real-time light samples for high-frequency detail [S3, unofficial]
+-        # Typically ~2 steps are sufficient to blend with baked data
+-        realtime_light = vec3(0.0)
+-        for i in range(2):
+-            visibility = compute_visibility(sample_pos, light.position, volume_grid)
+-            realtime_light += light.intensity * visibility
++        if density > 0.0:
++            # Retrieve precomputed incident radiance
++            baked_li = baking_texture.sample_trilinear(ray_pos, resolution)
++            
++            # Update color with in-scattering from baked light
++            # Assuming single scattering approximation for simplicity
++            scattering_coeff = density * scattering_ratio # scattering_ratio is sigma_s / sigma_t
++            color += baked_li * scattering_coeff * transmittance * step_size
++            
++            # Update transmittance
++            transmittance *= exp(-density * step_size)
+         
+-        # Sample precomputed lighting via trilinear interpolation [S2, unofficial]
+-        baked_light = baking_texture.sample_trilinear(sample_pos)
++        ray_pos += ray_dir * step_size
+         
+-        # Combine baked and real-time lighting [S3, unofficial]
+-        # Note: Exact blending weights depend on implementation specifics [G]
+-        final_light = realtime_light + baked_light
+-        
+-        # Standard volume rendering integration
+-        color = density * final_light
+-        alpha = density * step_size
+-        
+-        accumulated_color += color * (1.0 - accumulated_alpha)
+-        accumulated_alpha += alpha * (1.0 - accumulated_alpha)
+-        
+-        sample_pos += camera_ray.direction * step_size
+-        
+-    return accumulated_color
++    return color
+ ```
+ 
+@@ -121,22 +132,23 @@
+ 
+ ### [Hybrid Preshading with Postclassification](2171-hybrid-preshading-with-postclassification.md)
+-Decouples classification and shading to balance speed and quality, performing shading before interpolation.
++Decouples classification and shading, using precomputed reflectance maps for speed while maintaining visual fidelity through postclassification.
+ 
+ ### [Pre-computation](2330-pre-computation.md)
+-Explicitly pre-computes diffusion components and density derivatives via a solver to enable efficient derivative-based shading.
++Calculates intermediate radiance variables and density derivatives to avoid redundant calculations during ray marching, including first-order inscattering approximations.
+ 
+ ### [Precomputed Radiance Transfer (PRT)](9429-precomputed-radiance-transfer-prt.md)
+-Uses transfer functions to map incoming light to radiance distribution, offering flexibility for arbitrary lighting setups at runtime.
++Models light interaction using transfer functions for arbitrary lighting setups at runtime, offering flexibility at the cost of higher runtime complexity compared to full baking.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Baking pass is $O(V \cdot L)$ where $V$ is the number of voxels and $L$ is the number of lights, involving secondary raymarching [S1, S2, unofficial]. Render pass is $O(R)$ where $R$ is the number of raymarch steps, with constant-time texture lookups [S1, unofficial].
+-*   **Memory Complexity:** $O(V)$ for storing the baking texture. Resolution can be reduced to save memory [S3, unofficial].
+-*   **Strengths:** Significantly reduces per-frame lighting calculation cost; view-independent [S2, unofficial].
+-*   **Limitations:** Requires re-baking for any change in lighting or geometry; baking pass can be slow; static lighting assumption [S1, unofficial].
+-*   **When to use:** Static scenes with static lighting where real-time performance is critical and baking time is acceptable [S1, unofficial].
+-*   **When not to use:** Dynamic lighting, dynamic geometry, or highly transient scenes [S1, unofficial].
++*   **Time Complexity:** $O(V \cdot L)$ for baking, where $V$ is the number of voxels and $L$ is the number of light sources. $O(1)$ per sample during rendering (texture lookup) [S1, S3, unofficial].
++*   **Memory Complexity:** $O(V)$ to store the baked lighting texture [S1, unofficial].
++*   **Performance:** Significantly reduces per-frame rendering cost by eliminating light visibility calculations during raymarching [S1, unofficial].
++*   **Strengths:** Fast runtime rendering; view-independent precomputation allows efficient caching [S2, unofficial].
++*   **Limitations:** Cannot handle dynamic lights or dynamic geometry/medium changes without expensive re-baking [S1, unofficial]. Not suitable for real-time dynamic scenes with changing illumination [S1, unofficial].
++*   **When to use:** Static scenes with static lighting; offline or pre-rendered content; scenarios where lighting changes are infrequent [S1, unofficial].
++*   **When not to use:** Dynamic lighting, real-time day/night cycles, or interactive scenes with moving light sources [S1, unofficial].
+ 
+ ## Background
+-Precomputed Lighting (Baking) is a historical technique mentioned for reference and educational purposes in modern volume rendering literature [S1, unofficial]. It draws inspiration from traditional shadow mapping and precomputed radiance transfer concepts, adapted for volumetric data [S1, S2, unofficial]. While largely superseded by more flexible real-time approximations like voxel cone tracing or spherical harmonics, it remains a fundamental concept in understanding the trade-offs between precomputation and runtime calculation [S1, unofficial].
++Precomputed Lighting (Baking) is a historical technique in volume rendering, often cited for reference rather than current practical utility in dynamic real-time applications [S1, unofficial]. It draws inspiration from traditional shadow mapping and deep shadow maps, which store density or depth information to accelerate visibility queries [S1, unofficial]. The method was popularized in early GPU-based volume rendering implementations to overcome the high cost of evaluating light transport integrals per sample [S2, unofficial]. It is closely related to the concept of "Precomputed Light Transmissivity" used in scientific visualization [S2, unofficial].
+ 
+ ## Sources

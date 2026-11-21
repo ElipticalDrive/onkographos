@@ -1,0 +1,299 @@
+Naturally in irr::ext::ClusteredLighting, the extension will not actually provide the deferred shading (so it can be modularily used for Forward+ as well). Base off: http://www.humus.name/Articles/PracticalClusteredShading.pdf Pre-requis...
+
+ClusteredDeferred Example and Clustering Extension · Issue #216 · buildaworldnet/IrrlichtBAW · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+ClusteredDeferred Example and Clustering Extension #216
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+ClusteredDeferred Example and Clustering Extension#216
+Copy link
+Labels
+bigmedium < task size < largemedium < task size < largehelp wanted
+Description
+devshgraphicsprogramming
+opened on Jan 26, 2019
+Issue body actions
+Naturally in irr::ext::ClusteredLighting, the extension will not actually provide the deferred shading (so it can be modularily used for Forward+ as well).
+Base off:
+http://www.humus.name/Articles/PracticalClusteredShading.pdf
+Pre-requisites:
+GPU Prefix Sum GLSL Generator (finish blur)
+GPU Sorting Benchmark and Implementation/Extension
+Bone data format benchmark (mosty to know what format to store lights, etc. in)
+Few changes to Avalanche method:
+Allow tiles to be 16x16, 32x32, or 64x64. But disallow more than 128 tiles/axis
+Calculate the number of Z splits from the Projection Matrix to be such that the splits are close in shape to a cube (has to also work with skewed matrices), but can limit the value to be <=128
+Experiment with keeping a direct light list as SSBO instead of keeping a light index list (static scene, apples to apples comparison only benchmarking list building copy cost via Compute Shader + Lighting)
+Experiment with hierarchical Light Culling, to make the 3D skip-list a 4D skip list (still do on CPU), a.k.a. "use the mip-map"
+Generate the 3D Prefix Sum of the light cluster array on the GPU (if can't get implicitly from the hierarchical cull step)
+Attempt a GPU light clustering implementation
+Define clusters as log partition but automatically cull (make invalid) clusters that are wholly behind Z-Buffer and provide an option to cull clusters that are wholly in-front as well, when a Z-Buffer is provided
+Pseudocode for CPU light clustering:
+```
+for each light
+{
+   aabbox3di clusterIndices = calculateLightBoundsInClusters(light);
+   // turn clusterIndices (the 3D range) into octree node IDs
+   list<uvec4> clustersToInsert = rangeToMortons(clusterIndices);
+   for each clusterToInsert
+      clusters[clusterToInsert.w](clusterToInsert.xyz>>clusterToInsert.w).insert(light);
+}
+compactClusters
+```
+Algorithm outline for GPU:
+```
+First Pass Compute Shader (for all lights in the world)
+{
+   aabbox3df clusterBounds= calculateLightBoundsInClusters(light);
+   if (clusterBounds outside the scene) // out of frustum, maybe simple Z-cull here too
+      return;
+
+   aabbox3d_uint10_t clusterIndexBounds = convert(clusterBounds);
+
+   uint threadsToSpawnForAdd = rangeToMortons(clusterIndexBounds).size(); // would be cool to have a function that gives a reasonable upper bound on the number of octree nodes produced by an AABB, without actually computing the ranges
+   uint dataOffset = atomic_add(secondDispatchIndirect.threadCount,threadsToSpawnForAdd); // atomic, use warp intrinsic tricks and balloting if available
+   for (uint i=0; i<threadsToSpawnForAdd; i++)
+      intermediateOutput[i+dataOffset] = uvec2(globalLightID,mortonLeafCode(clusterIndexBounds,i));
+
+   // will probably need this not to segfault GPU
+   barrier();
+   atomic_max(secondDispatchIndirect.threadCount,MAX_DISPATCH_SIZE);
+}
+/// Async query the indirect dispatch size (for anticipating buffer resizes)
+Second Pass Compute Shader (indirectly dispatched size)
+{
+   uvec2 lightID_mortonID = intermediateOutput[gl_GlobalThreadID];
+   Light light = globalLightList[lightID_mortonID.x]; // use thread election and warp instrinsics to save on loads if possible
+   if (light actually in cluster and cluster visible) // complex Z-cull possible here
+      return;
+
+   // elect thread to do this if possible with ARB_ballot
+   atomic_add(skipList[lightID_mortonID.y],1u);
+}
+Third Pass Compute Shader
+{
+   Compute Exclusive Prefix Sum over skipList
+}
+Fourth Pass Compute Shader // run on same input as Second Pass (or compact even more in second pass)
+{
+   if (! survived second pass)
+      return;
+
+   frustumSortedLightList[atomic_add(prefixedSkipList[lightID_mortonID.y],1u)] = globalLightList[lightID_mortonID.x];
+}
+// now prefix sum will be inclusive 👍 
+```
+NOTE: Could abuse the vertex/pixel pipeline with an empty framebuffer here, where the first-pass would be a vertex shader producing a quad covering threadsToSpawnForAdd pixels, and the second-pass compute shader would be a pixel shader. (this is probably the better solution)
+NOTE2: Its possible to separate spotlights from point lights quite easily, but that would require virtually splitting each cluster into 2.
+There is one more possible investigation for the future with the use of warp-intrinsics/shared memory, the N-ary search using all warps together... maybe a 4D skip-list is not necessary.
+Reactions are currently unavailable
+Activity
+devshgraphicsprogramming
+added
+help wanted
+bigmedium < task size < largemedium < task size < large
+on Jan 26, 2019
+devshgraphicsprogramming commented on Jan 26, 2019
+devshgraphicsprogramming
+on Jan 26, 2019
+CollaboratorAuthor
+More actions
+Further ideas for cluster light histogram generation, via raster pipeline abuse:
+3D Layered Rendering (tessellation shader amplification) into stencil-only FBO (but no hierarchical culling)
+Same as above, except for Layered+Multi-attachment rendering and liberal use of discard keyword
+Same as the first approach but using Tesselation+Geometry shader to not have to use discard
+On mobile (or when Tessellation+Geometry not available) compute shader can be used to emulate VS+TS+GS at a minor cost.
+When stencil limit is too little (non hierarchical approaches, or because the raster based prefixing is overly conservative), single attachment no depth R16UNORM FBO could be used with blending.
+devshgraphicsprogramming commented on Jan 26, 2019
+devshgraphicsprogramming
+on Jan 26, 2019
+CollaboratorAuthor
+More actions
+Even more ridiculous idea, use stencil K-routed indep transparency to keep a list of N-apparently-strongest lights per cluster.
+devshgraphicsprogramming commented on Jan 30, 2019
+devshgraphicsprogramming
+on Jan 30, 2019
+CollaboratorAuthor
+More actions
+Idea for culling non-contributing lights:
+```
+1. Clear the Cluster Mask (can be depth, stencil or atomic texture) to DEAD
+2. During Hi-Z construction, tag clusters which have geometry inside with ACTIVE
+3. Raster anything else that will not be in Z-Buffer (water, particle, transparent) conservatively into Cluster Buffer and set ACTIVE
+
+4. When counting lights, launch invocations conservatively and test against Cluster Mask
+```
+Notes: because of the cluster mask being used as a storage image, hi-z with depth format will be impossible to leverage.
+devshgraphicsprogramming commented on Jan 30, 2019
+devshgraphicsprogramming
+on Jan 30, 2019
+Last edited by devshgraphicsprogramming
+CollaboratorAuthor
+More actions
+Need conservative voxelization for tagging clusters Transparents (and would be nice to test against Hi-Z and Cluster mask for them as well).
+devshgraphicsprogramming commented on Jan 30, 2019
+devshgraphicsprogramming
+on Jan 30, 2019
+CollaboratorAuthor
+More actions
+Summing up:
+Cluster with transparent optimization requires depth testing against Far Hi-Z + already ACTIVE cluster rejection
+Since we do not want to lose depth-testing, we cannot reproject triangles on dominant axes
+Don't want to use geometry shader
+devshgraphicsprogramming commented on Jan 30, 2019
+devshgraphicsprogramming
+on Jan 30, 2019
+CollaboratorAuthor
+More actions
+Knowing the state-of-the art
+https://developer.nvidia.com/content/basics-gpu-voxelization
+Since we do not want to lose depth-testing, we cannot reproject triangles on dominant axes
+Check ddx ddy in shader and atomically tag a range of clusters along Z (and loose the ability to have early cluster tests) OR don't Z-test and just reproject with geometry shader (CS for mobile).
+Don't want to use geometry shader for conservative rasterization
+MSAA approximation to conservative raster or CS shader is the only alternative.
+Cluster with transparent optimization requires depth testing against Far Hi-Z + already ACTIVE cluster rejection
+Don't reproject triangles, or else lose the Z-Test.
+Even if we could launch 1 fragment per cluster intersected by a triangle, we couldn't leverage early-Z or early-stencil for culling against ACTIVE clusters without broadcasting triangles to different FBO layers (expensive). So there's no point in forcing the Stencil Mask to be the depth or stencil component.
+Semi Conclusion
+Use Compute Shader to filter (against HiZ and whole cluster frustum), duplicate and expand transparent triangles (for conservative raster) as well as select dominant axis (if giving up on Hi-Z culling).
+Alternative
+Cluster Mask could be a bitfield, 24bit fixed point depth to be exact :)
+Note this could limit us to 24 partitions in the Z-axis
+Or alternatively that would group 24 partitions into 1, reducing the chance that Z is not our dominant axis, which would not necessitate triangle reprojection.
+devshgraphicsprogramming commented on Jan 30, 2019
+devshgraphicsprogramming
+on Jan 30, 2019
+Last edited by devshgraphicsprogramming
+CollaboratorAuthor
+More actions
+Nvidia hardware cannot do ARB_shader_stencil_export, which implies that the Cluster Mask bitfield cannot be in the stencil component (because different triangle pixels would need different stencil values depending on their z-value).
+However Cluster Mask in depth component would mean no z-tests at all because the pixel z-value is actually a Z-axis bin-mask now and there's no hardware z-comparison function that would actually work with that. Plus also we need z-test for Hi-Z cull against framebuffer.
+Conclusion
+Either broadcast your triangles to layers and pay at least 8x more memory for hardware early per-pixel tests as well as the perf decrease from chopping up your triangles, or give up on the hope of transparents culling themselves out, or use atomics on storage images.
+Even more ridiculous idea, use stencil K-routed indep transparency to keep a list of N-apparently-strongest lights per cluster.
+But not all is lost, since now we have a free stencil component that we could use for this.
+devshgraphicsprogramming commented on Jan 31, 2019
+devshgraphicsprogramming
+on Jan 31, 2019
+Last edited by devshgraphicsprogramming
+CollaboratorAuthor
+More actions
+Addtional Note
+If we wanted to leverage early-Z cull on voxelization, the Z buffer would have to be copied multiple times into the layers, and that would be a fail.
+devshgraphicsprogramming commented on Jan 31, 2019
+devshgraphicsprogramming
+on Jan 31, 2019
+Last edited by devshgraphicsprogramming
+CollaboratorAuthor
+More actions
+There are only 2 approaches to culling the transparent triangle voxelization
+Only cull against scene Hi-Z
+Associate color attachment bits to clusters along the Z-axis, obvs storage required per Z-line gets rounded up to the nearest 4 bytes.
+Prime the color attachment with correct live bits
+Enable and set LogicOp to OR
+Conservative raster the triangles, do triangle voxel intersection test, output intersected voxel bitfield as pixel value
+Cull against Hi-Z and self
+Associate color attachment bits to clusters along the Z-axis, obvs storage required per Z-line gets rounded up to the nearest 4 bytes.
+Prime the color attachment with correct live bits
+Render to depth-only FBO with shader
+```
+load cluster bitfield
+
+quit if no dead clusters cross triangle
+
+atomicOR(clusterBitfield,triangleVoxelZCoverage)
+```
+Conclusion
+The second approach's culling is redundant (you have to do the calc anyway to figure out the coverage)
+Use color attachment bits for cluster active masks (max 128 Z-partitions), don't choose dominant axis (no need with bitfield voxels), do conservative raster triangle expansion (with culling+filtering first) via CS or Geom Shader instead of the MSAA approach.
+devshgraphicsprogramming commented on Jan 31, 2019
+devshgraphicsprogramming
+on Jan 31, 2019
+Last edited by devshgraphicsprogramming
+CollaboratorAuthor
+More actions
+Result the Light Clustering Algorithm Tries To Achieve
+A per-cluster count of probably visible light sources.
+Ergo this needs to be a 3D array of integer values of at least 8 bits, although a safer choice would be 16bit.
+For this reason, if using rasterization for voxelization, the light volumes need to be created via layered rendering and triangle broadcast (duplication) by CS or TS.
+In-Cluster Culling
+Live/Dead Stencil tagging cannot use 2 values to specify a "live" range (impractical for transparent voxelization), so keep the HiZ buffer around for both transparent tagging and light voxelization.
+Light Pre-Culling
+Before a light is voxelized into the cluster grid, the light list can be frustum culled, HiZ culled both to discard a light entirely, but also to trim its Z-range (useful in lowering broadcast ratio), all in the Compute or Tessellation Control shader.
+Light Voxelization
+It is desirable to spawn 1 thread per light per cluster for non-divergence and ideal parallelism. This is why the TC or CS light preprocessing stage should not attempt to construct triangle approximations for the light volume cross-section (1 thread per-triangle vertex optimum in either evaluation or vertex shader). Also there should be no Geometry-Shader hi-Z per-triangle culling (not enough clusters on average triangle to justify), unless it somehow happens in the CS/TC stage.
+For seamless/gapless rendering reasons indexed meshes shall be used to draw the cross-sections, with a square or a pentagon used to approximate the conical section.
+Although given the highly symmetric ellipse conical section, quadrilateral approximation is preferred over a pentagon or even a heaxgon.
+devshgraphicsprogramming commented on Feb 1, 2019
+devshgraphicsprogramming
+on Feb 1, 2019
+Last edited by devshgraphicsprogramming
+CollaboratorAuthor
+More actions
+Light Clustering Schemes
+Regular Grid
+Results in heavy memory usage with lights that cover multiple clusters (as each cluster needs a copy of the light index).
+Simple to use in shading and introduces very little divergence.
+MipMap Pyramid In Frustum
+Based on the assumption that light-volumes will have roughly similar shapes, so the same lights near the camera will occupy many clusters (almost all) in the first few Z- partitions.
+Hence we could introduce more Z-partitions (log2(n) more) with "merged" clusters near the camera.
+This method does not introduce any more divergence in the shading (only divergent part is the mip-map coord to sample from).
+Octree
+This builds on the regular grid approach, storing a full octree in the mip-maps of the grid texture.
+This approach would likely introduce some divergence but only on the light fetching, not the lighting calculations themselves.
+However the real challenge is how to efficiently construct the said octree, because:
+The Light only needs to be listed in the higher-level node if it would touch all child clusters
+The whole purpose of this is to limit the amount of memory needed
+Is it possible to build an octree efficiently using less memory bandwidth than for the above?
+devshgraphicsprogramming commented on Apr 29, 2019
+devshgraphicsprogramming
+on Apr 29, 2019
+CollaboratorAuthor
+More actions
+https://frostbite-wp-prd.s3.amazonaws.com/wp-content/uploads/2016/03/29204330/GDC_2016_Compute.pdf
+devshgraphicsprogramming commented on Aug 5, 2019
+devshgraphicsprogramming
+on Aug 5, 2019
+CollaboratorAuthor
+More actions
+https://www.youtube.com/watch?v=Bmy3Tt3Ottc at 30:00
+devshgraphicsprogramming commented on Jul 22, 2021
+devshgraphicsprogramming
+on Jul 22, 2021
+CollaboratorAuthor
+More actions
+Pre-requisites are done
+devshgraphicsprogramming commented on Aug 30, 2023
+devshgraphicsprogramming
+on Aug 30, 2023
+CollaboratorAuthor
+More actions
+no need anymore.
+devshgraphicsprogramming
+closed this as completedon Aug 30, 2023
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bigmedium < task size < largemedium < task size < largehelp wanted
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

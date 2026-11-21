@@ -1,0 +1,237 @@
+--- v004.md
++++ v005.md
+@@ -4,134 +4,129 @@
+ 
+ ## Overview
+-A Sparse Voxel Octree (SVO) is a hierarchical spatial subdivision data structure that stores voxel data sparsely by only retaining nodes containing geometry, enabling efficient ray-traced rendering and Level-of-Detail (LoD) management [S2, S3, S4, unofficial]. It distinguishes itself from flat grid structures by providing tight compression of sparse spaces and from KD-trees by offering uniform subdivision at every level, which ensures smoothly-degrading LoD and consistent processing cost bounds [S2, unofficial]. Unlike its sibling [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md) which groups voxels into fixed-size bricks for cache locality, the standard SVO focuses on a compact, pointer-based or bitmask-driven node structure optimized for direct shader traversal [S5, unofficial].
++A Sparse Voxel Octree (SVO) is a hierarchical spatial subdivision data structure that stores voxel data sparsely by only retaining nodes containing geometry, enabling efficient ray-traced rendering and Level-of-Detail (LoD) management [S2, S3, S4, unofficial]. It distinguishes itself from dense grids by eliminating empty space overhead and from KD-trees by providing uniform subdivision at every level, which ensures smoothly-degrading LoD and predictable processing costs [S2, unofficial]. Unlike sibling methods like [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md) which optimize for cache linearization via flattening, the standard SVO prioritizes tight compression of sparse spaces and direct pointer-based traversal [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:** A 3D volume or signed distance field (SDF) representing geometry.
+-**Outputs:** A tree data structure where nodes represent spatial regions, allowing traversal to find surface intersections.
++**Outputs:** A tree structure where internal nodes define spatial hierarchy and leaf nodes (or nodes with valid children) store voxel data.
+ 
+-### Data Structures
+-The SVO is composed of nodes arranged in an octree hierarchy. Each node represents a cubic region of space.
++**Data Structures:**
++The SVO is composed of nodes. Each node contains:
++1.  **Valid Mask:** A bitmask indicating which of the 8 children contain geometry. If the mask is 0, the node is a leaf (empty). If the mask is non-zero, the node has children.
++2.  **Child Pointer:** A pointer (or index) to the first child in a contiguous list of children that actually contain geometry. The number of allocated children equals the number of set bits in the valid mask [S3, S5, unofficial].
++3.  **Voxel Data (Leaf/Content):** For leaf nodes or nodes storing surface data, this includes:
++    *   **SDF Value:** Stored as an 8-bit signed normalized integer (snorm). A value of 1 encodes 0.5 interior voxel diagonals. Values are clamped to $[-1, 1]$ [S1, unofficial].
++    *   **Contours (Optional):** Two parallel planes bounding the surface within the voxel, used as tighter-fitting bounding volumes for ray intersection [S5, unofficial].
+ 
+-1.  **Node Layout:**
+-    *   **Bitmask (Valid Mask):** An 8-bit integer where each bit corresponds to one of the 8 children (octants). A set bit indicates the child exists (contains geometry); a cleared bit indicates the child is empty [S3, S5, unofficial].
+-    *   **Child Pointer/Index:** A reference to the first child node. In pointerless implementations, this is often an index into a flat array of nodes or a relative pointer within a streaming block [S5, unofficial].
+-    *   **Data (Leaf Nodes):** If a node is a leaf, it stores the voxel data. For SDFs, this is typically an 8-bit signed normalized integer (snorm) representing the distance to the surface [S1, unofficial].
+-    *   **Contours (Optional):** For accelerated ray tracing, leaf nodes may store two parallel planes bounding the surface within the voxel, providing a tighter bounding volume than the voxel cube itself [S5, unofficial].
++**Layout Details:**
++*   Nodes are stored compactly. The bitmasks describe the spatial relation between parent and children [S5, unofficial].
++*   The tree is often split into 'blocks' with relative pointers to support out-of-core streaming [S5, unofficial].
++*   Leaf voxels are not stored directly as separate entities; their state is implied by the parent's valid mask and the absence of further children [S5, unofficial].
+ 
+-2.  **Tree Properties:**
+-    *   **Uniform Subdivision:** Every internal node has exactly 8 children, partitioning the space into 8 equal octants [S2, S4, unofficial].
+-    *   **Sparsity:** The tree terminates at a node if all leaf nodes in its subtree contain the same data (e.g., all empty or all identical voxel types) [S4, unofficial]. Only non-empty branches are stored.
+-    *   **Voxel Size:** The physical size of a voxel doubles with each level of depth. Level 0 voxels are largest; deeper levels represent finer detail [S1, unofficial].
++**Algorithm: Construction**
++1.  Initialize an empty root node.
++2.  For each voxel in the input volume:
++    a. Determine the path from the root to the leaf corresponding to the voxel's position.
++    b. If the path does not exist, create intermediate nodes as needed.
++    c. At the leaf level, store the voxel data (SDF/Color).
++    d. Update the `valid_mask` of all ancestor nodes along the path to include the new child.
++    e. Update the `child_pointer` of ancestors if the new child is the first allocated child for that parent.
++3.  Terminate the tree at any node where all potential leaf nodes contain the same data (all empty or all identical) [S4, unofficial].
+ 
+-### Algorithm: Traversal
+-Traversal is typically performed in shader code for real-time rendering [S1, unofficial]. The goal is to find the intersection of a ray with the implicit surface.
++**Algorithm: Ray Traversal (Shader Implementation)**
++Traversal occurs entirely in shader code [S1, unofficial]. The index of the next node is found by flipping bits of the current node index based on ray direction [S5, unofficial].
+ 
+-**Parameters:**
+-*   `ray_origin`: 3D vector.
+-*   `ray_direction`: 3D vector.
+-*   `max_depth`: Maximum tree depth to traverse.
+-*   `epsilon`: Small offset to prevent self-intersection [G].
++```python
++def traverse_svo(ray_origin, ray_direction, root_index, max_depth):
++    # Stack to maintain the path from root to current node
++    path_stack = [root_index]
++    current_node_index = root_index
++    
++    # Initial bounds check (optional, depends on implementation)
++    if not is_node_valid(current_node_index):
++        return None
+ 
+-**Steps:**
+-1.  **Initialize:** Start at the root node. Maintain a stack of node indices representing the path from the root to the current node [S5, unofficial].
+-2.  **Traverse:**
+-    *   While the current node is not a leaf and depth < `max_depth`:
+-        *   Determine which octant the ray enters relative to the current node's center. This is done by comparing the ray's position to the node's center coordinates.
+-        *   Check the bitmask to see if the target child exists.
+-        *   If the child exists, push the current node index to the stack, update the current node to the child, and increment depth.
+-        *   If the child does not exist, backtrack: pop from the stack, update current node to the parent, and continue traversal from the parent's next potential child (if any) or terminate if no other children exist.
+-3.  **Intersect:**
+-    *   Once a leaf node is reached, perform ray-voxel intersection.
+-    *   If contours are stored, use the plane equations to find the intersection point more accurately than a simple box intersection [S5, unofficial].
+-    *   If using SDFs, perform sphere tracing or Newton-Raphson iteration within the voxel to find the precise surface intersection [S1, unofficial].
+-4.  **Backtrack:** If no intersection is found in the leaf, backtrack to the parent and try the next sibling.
+-
+-**Pseudocode:**
+-```python
+-def traverse_svo(root_node, ray_origin, ray_direction, max_depth):
+-    # Stack stores indices of nodes in the current path
+-    stack = []
+-    current_node = root_node
+-    depth = 0
+-    
+-    while depth <= max_depth:
+-        # Check if current node is a leaf
+-        if is_leaf(current_node):
+-            # Perform intersection test at leaf
+-            hit = intersect_leaf(current_node, ray_origin, ray_direction)
++    for depth in range(max_depth):
++        # 1. Get node data
++        node = get_node_data(current_node_index)
++        
++        # 2. Check if leaf or has children
++        if node.valid_mask == 0:
++            # Leaf node: perform intersection test
++            # If contours are stored, use them for tighter bounds
++            hit = ray_intersect_voxel(ray_origin, ray_direction, node.data)
+             if hit:
+                 return hit
++            else:
++                # Backtrack
++                if not path_stack:
++                    return None
++                current_node_index = path_stack.pop()
++                continue
++        
++        # 3. Determine which children to visit
++        # Calculate child indices based on ray direction and current position
++        # The index of the next node can be found by flipping bits of the current node index
++        # depending on the ray direction [S5, unofficial]
++        
++        # Identify children intersected by ray
++        intersected_children = get_intersected_children(current_node_index, ray_origin, ray_direction)
++        
++        # Filter by valid mask
++        candidates = intersected_children & node.valid_mask
++        
++        if candidates == 0:
++            # No valid children in this direction
++            if not path_stack:
++                return None
++            current_node_index = path_stack.pop()
++            continue
+             
+-            # Backtrack if no hit
+-            if not stack:
+-                return None # No intersection found
+-            
+-            # Pop current node and move to next sibling of parent
+-            parent_index = stack.pop()
+-            current_node = get_node(parent_index)
+-            depth -= 1
+-            
+-            # Find next sibling to visit
+-            next_child = find_next_sibling(current_node, ray_direction)
+-            if next_child is not None:
+-                current_node = next_child
+-                depth += 1
+-                stack.append(parent_index) # Re-push parent to maintain path context if needed for relative coords
+-            else:
+-                # No more siblings, continue backtracking
+-                continue
+-        else:
+-            # Internal node: determine which child to visit
+-            child_index = get_child_index(current_node, ray_origin, ray_direction)
+-            
+-            # Check if child exists using bitmask
+-            if not is_child_valid(current_node, child_index):
+-                # Child is empty, backtrack
+-                if not stack:
+-                    return None
+-                
+-                parent_index = stack.pop()
+-                current_node = get_node(parent_index)
+-                depth -= 1
+-                
+-                next_child = find_next_sibling(current_node, ray_direction)
+-                if next_child is not None:
+-                    current_node = next_child
+-                    depth += 1
+-                    stack.append(parent_index)
+-                else:
+-                    continue
+-            else:
+-                # Child exists, descend
+-                stack.append(current_node.index)
+-                current_node = get_child(current_node, child_index)
+-                depth += 1
+-                
++        # Push current node to stack before descending
++        path_stack.append(current_node_index)
++        
++        # Select the first candidate child (or process all if needed for transparency)
++        # Typically, we pick the closest child along the ray
++        next_child_index = get_first_set_bit_index(candidates)
++        
++        # Update ray origin for next step (optional, depending on traversal style)
++        # In many SVO implementations, the ray is kept global, and node indices encode position
++        current_node_index = next_child_index
++
+     return None
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Precision:** SDF values are often stored as 8-bit snorm integers, clamped to [-1, 1]. This limits the precision of the distance field, especially at larger voxel sizes [S1, unofficial].
+-*   **Artifacts:** Standard SVOs lack interpolation and filtering, causing popping artifacts when transitioning between LoD levels and aliasing at distance or close to the viewpoint [S3, unofficial]. This requires post-processing (screen-space blurring) or stitching algorithms to achieve C0-continuity [S3, unofficial].
+-*   **Dynamic Updates:** Adding, deleting, or modifying blocks can be expensive, potentially requiring a large part of the octree to be rebuilt [S4, unofficial]. The structure assumes static geometry for optimal performance; dynamic updates are not efficiently supported on GPU without significant overhead [S5, unofficial].
+-*   **Cache Coherence:** Octrees are harder to make cache-friendly compared to flat structures due to pointer chasing [S2, unofficial].
++**Parameters:**
++*   **SDF Precision:** 8-bit snorm [S1, unofficial].
++*   **Subdivision Ratio:** 1:2 per axis (8 children per parent) [S2, unofficial].
++*   **Max Depth:** Determined by required resolution and memory constraints.
++
++**Edge Cases and Pitfalls:**
++*   **Interpolation Artifacts:** Standard SVO lacks interpolation and filtering, causing popping artifacts when transitioning between levels and aliasing at distance or close to the viewpoint [S3, unofficial]. This is often mitigated by screen-space blurring or merging LODs via a stitching algorithm to achieve C0-continuity [S3, unofficial].
++*   **Dynamic Updates:** Adding, deleting, or modifying blocks is expensive, potentially requiring a large part of the octree to be rebuilt [S4, unofficial].
++*   **Cache Friendliness:** Octrees are harder to make cache-friendly compared to flat structures [S2, unofficial].
++*   **Static Geometry Assumption:** Calculating contours adds overhead to construction speed, making the standard SVO better suited for static geometry [S5, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Voctopus Sparse Voxel Octree](11000-voctopus-sparse-voxel-octree.md)
+-A compact, flat-memory SVO implementation for WebGL/JavaScript, using pointer encoding and small kernels for traversal and ray-AABB intersection without meshification.
++A compact, flat-memory SVO optimized for WebGL/JavaScript traversal using pointer encoding and small kernels.
+ 
+ ### [Sparse Voxel Octree (SVO) Spatial Partitioning and LOD Management](12070-sparse-voxel-octree-svo-spatial-partitioning-and-lod-managem.md)
+-Replaces flat chunk storage with an SVO for dynamic LOD selection based on camera distance, reducing CPU overhead and memory footprint for large scenes.
++Replaces flat chunk storage with hierarchical SVO for dynamic LOD selection based on camera distance.
++
++### [Sparse Voxel Octree (SVO) GPU Implementation](12570-sparse-voxel-octree-svo-gpu-implementation.md)
++Implements SVO on GPU using linked nodes in linear memory (2x2x2 tiles) and a 3D texture brick pool for interpolation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Traversal time is proportional to the number of nodes visited, which depends on the ray length and scene density. In the worst case (dense scene), it approaches $O(N)$ where $N$ is the number of voxels, but typically much faster due to sparsity.
+-*   **Memory Complexity:** Memory usage is proportional to the number of non-empty nodes. It provides tight compression for sparse spaces but can be memory-intensive for dense, complex geometry due to node overhead [S2, unofficial].
+-*   **Performance:** Efficient for ray-traced rendering of static geometry. Construction speed is slower than flat grids due to tree building overhead, and dynamic updates are costly [S5, unofficial].
+-*   **Strengths:** Excellent compression for sparse data, smooth LoD, uniform subdivision for consistent bounds.
+-*   **Limitations:** Poor cache locality, complex implementation, difficult dynamic updates, aliasing artifacts without filtering [S2, S3, S4, unofficial].
++*   **Time Complexity:** Traversal is $O(\log N)$ relative to the number of voxels, but depends heavily on the depth of the tree and the density of geometry [S2, unofficial].
++*   **Memory Complexity:** Highly efficient for sparse spaces, storing only nodes with geometry [S2, unofficial]. However, a complete octree of a certain depth can still consume significant memory due to node overhead [S2, unofficial].
++*   **Performance:** Fast rendering via raytracing due to tight bounding volumes (contours) and efficient bit-flip traversal [S5, unofficial]. Slower construction and modification compared to flat grids [S4, S5, unofficial].
++*   **Strengths:** Tight compression of sparse spaces, smooth LoD degradation, efficient ray-casting acceleration [S2, unofficial].
++*   **Limitations:** Poor cache locality, complex implementation, expensive dynamic updates, interpolation artifacts without additional techniques [S2, S3, S4, unofficial].
++*   **When to Use:** Static or semi-static large-scale voxel scenes requiring high-quality rendering and LoD [S4, S5, unofficial].
++*   **When Not to Use:** Highly dynamic scenes requiring frequent updates, or when cache-friendly linear traversal is critical [S2, S4, unofficial].
+ 
+ ## Background
+-The Sparse Voxel Octree was popularized by Crassin, Neyret, Lefebvre, and Eisemann in 2009 with GigaVoxels, which introduced ray-guided streaming for efficient voxel rendering [S4, S5, unofficial]. Laine and Karras further refined the concept in 2010 with "Efficient Sparse Voxel Octrees," focusing on memory efficiency and shader-based traversal [S1, S5, unofficial]. The structure has been used in projects like EverQuest Next [S4, unofficial] and is a foundational technique in modern voxel rendering pipelines.
++The Sparse Voxel Octree was popularized by Crassin, Neyret, Lefebvre, and Eisemann in 2009 with GigaVoxels, which exploited SVOs for ray-guided streaming [S4, unofficial]. The "Efficient Sparse Voxel Octree" (ESVO) implementation details were further refined by Laine and Karras in 2010, focusing on memory efficiency and shader-based traversal [S1, S5, unofficial]. It has been used in projects like EverQuest Next [S4, unofficial], but is not used in Minecraft [S4, unofficial].
+ 
+ ## Sources

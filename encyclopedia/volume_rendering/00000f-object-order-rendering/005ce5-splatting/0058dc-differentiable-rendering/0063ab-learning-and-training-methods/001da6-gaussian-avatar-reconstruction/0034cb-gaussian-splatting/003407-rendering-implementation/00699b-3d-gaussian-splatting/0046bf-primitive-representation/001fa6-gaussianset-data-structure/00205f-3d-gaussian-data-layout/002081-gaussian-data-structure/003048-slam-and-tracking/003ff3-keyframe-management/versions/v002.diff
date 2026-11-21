@@ -1,0 +1,164 @@
+--- v001.md
++++ v002.md
+@@ -1,73 +1,112 @@
+ # Keyframe Management
+-
+ Also called: Keyframing
+-
+ ## Overview
+-Keyframe management maintains a small sliding window $W_k$ of camera poses and corresponding Gaussian representations to enable efficient joint optimization in online Gaussian SLAM systems [S1, unofficial]. By limiting optimization to a subset of non-redundant frames, it avoids the computational infeasibility of processing all historical data while ensuring sufficient multiview constraints for accurate pose estimation and map refinement [S1, unofficial]. It differs from fixed-interval keyframing by using covisibility metrics to select frames that span wide baselines and observe distinct scene areas [S1, unofficial].
+-
++Keyframe management maintains a small, computationally feasible sliding window $W_k$ of camera poses and corresponding Gaussian states to enable joint optimization in online 3D Gaussian Splatting SLAM [S1, unofficial]. It solves the infeasibility of jointly optimizing all captured frames by selecting non-redundant keyframes that span a wide baseline for multiview constraints while discarding those with low overlap [S1, unofficial]. It differs from fixed-interval or purely heuristic insertion by explicitly measuring covisibility via Gaussian rasterization visibility [S1, unofficial] or voxel allocation ratios [S2].
+ ## How it works
+-**Inputs:** Current tracked frame $i$, last keyframe $j$, current keyframe window $W_k$, camera pose estimates, and the current Gaussian set $\mathcal{G}$.
+-**Outputs:** Updated keyframe window $W_k$, registration of frame $i$ as a new keyframe (or rejection), and removal of obsolete keyframes from $W_k$.
++**Inputs and Outputs:**
++- Input: Current tracked frame $i$, last keyframe $j$, current keyframe window $W_k$, and scene representation (Gaussians or Voxels).
++- Output: Updated window $W_k$ (insertion/removal of keyframes).
+ 
+ **Data Structures:**
+-*   $W_k$: A list or queue of keyframe indices/IDs.
+-*   $\mathcal{G}$: The set of 3D Gaussians, sorted along camera rays for rasterization.
+-*   $V_i$: The set of visible Gaussians for frame $i$.
++- **Keyframe Window $W_k$:** A list or queue of keyframe indices/poses. Size is limited to a small constant (e.g., ~10-20, though exact max is "detailed in the supplementary" [S1, unofficial]).
++- **Visibility Mask:** A boolean or count array indicating which Gaussians are visible from a specific view. A Gaussian is visible if it is used in rasterization and the accumulated alpha $\alpha$ along the ray has not reached 0.5 [S1, unofficial].
+ 
+-**Gaussian Visibility Definition:**
+-A Gaussian $g \in \mathcal{G}$ is considered visible from a view if it is used in the rasterization process and the accumulated alpha $\alpha$ along the ray has not yet reached 0.5 [S1, unofficial]. This leverages the inherent visibility ordering of 3D Gaussian Splatting to handle occlusions without additional heuristics [S1, unofficial].
++**Steps:**
++1. **Covisibility Estimation:**
++   - Calculate the Intersection over Union (IoU) of visible Gaussians between the current frame $i$ and the last keyframe $j$ [S1, unofficial]:
++     $$ \text{Covisibility}(i, j) = \frac{|V_i \cap V_j|}{|V_i \cup V_j|} $$
++     where $V_i$ is the set of visible Gaussians for frame $i$ [S1, unofficial].
++   - Alternatively, for voxel-based methods, calculate the ratio $p_{kf} = N_c / N_o$, where $N_c$ is the number of voxels that would be allocated if frame $i$ were chosen as a keyframe, and $N_o$ is the number of currently observed voxels [S2].
+ 
+-**Algorithm Steps:**
++2. **Keyframe Insertion:**
++   - Register frame $i$ as a keyframe if:
++     - Covisibility with the last keyframe drops below a threshold [S1, unofficial], OR
++     - Relative translation $t_{ij}$ is large with respect to the median depth [S1, unofficial], OR
++     - The ratio $p_{kf}$ exceeds a threshold [S2], OR
++     - No keyframe has been created for the past $N$ frames (maximum interval constraint) [S2].
++   - If inserted, initialize new Gaussians $\mu_W$ by back-projecting depth (if available) or rendering depth at the current frame with low variance [S1, unofficial].
+ 
+-1.  **Covisibility Measurement:**
+-    Calculate the intersection over union (IoU) of visible Gaussians between the current frame $i$ and the last keyframe $j$ [S1, unofficial].
+-    $$ \text{Covisibility}(i, j) = \frac{|V_i \cap V_j|}{|V_i \cup V_j|} $$
+-    where $| \cdot |$ denotes the count of visible Gaussians [S1, unofficial].
++3. **Keyframe Removal:**
++   - Remove a keyframe from $W_k$ if its overlap coefficient with the latest keyframe drops below a threshold [S1, unofficial]. This heuristic follows DSO [S1, unofficial].
+ 
+-2.  **Keyframe Registration Criteria:**
+-    Register frame $i$ as a new keyframe if either of the following conditions is met [S1, unofficial]:
+-    *   $\text{Covisibility}(i, j) < \tau_{cov}$, where $\tau_{cov}$ is a covisibility threshold.
+-    *   The relative translation $t_{ij}$ between frame $i$ and keyframe $j$ is large with respect to the median depth of the scene [S1, unofficial].
+-
+-3.  **Keyframe Removal (Window Management):**
+-    After adding a new keyframe, evaluate existing keyframes in $W_k$ for removal [S1, unofficial]. A keyframe $k \in W_k$ is removed if its overlap coefficient with the latest keyframe drops below a threshold $\tau_{overlap}$ [S1, unofficial]. This heuristic, adapted from DSO, ensures the window remains small and focused on relevant observations [S1, unofficial].
+-
+-4.  **Gaussian Insertion/Pruning (Trigger):**
+-    Upon registering a new keyframe, trigger Gaussian insertion and pruning routines to capture newly visible elements and refine details [S1, unofficial].
++**Pseudocode:**
++```python
++def update_keyframe_window(current_frame, last_keyframe, window, scene):
++    # Step 1: Estimate Covisibility
++    visible_gaussians_current = get_visible_gaussians(current_frame, scene)
++    visible_gaussians_last = get_visible_gaussians(last_keyframe, scene)
++    
++    # IoU calculation
++    intersection = len(visible_gaussians_current & visible_gaussians_last)
++    union = len(visible_gaussians_current | visible_gaussians_last)
++    covisibility = intersection / union if union > 0 else 0.0
++    
++    # Relative translation check
++    rel_translation = compute_relative_translation(current_frame, last_keyframe)
++    median_depth = get_median_depth(scene)
++    translation_large = rel_translation > threshold * median_depth
++    
++    # Step 2: Check Insertion Criteria
++    should_insert = False
++    
++    # Criterion 1: Low Covisibility
++    if covisibility < COVISIBILITY_THRESHOLD:
++        should_insert = True
++        
++    # Criterion 2: Large Translation
++    if translation_large:
++        should_insert = True
++        
++    # Criterion 3: Max Interval (if no keyframe in past N frames)
++    if frames_since_last_keyframe >= MAX_INTERVAL:
++        should_insert = True
++        
++    # Criterion 4: Voxel Allocation Ratio (if using voxel-based method)
++    # N_c = count_new_voxels(current_frame, scene)
++    # N_o = count_observed_voxels(scene)
++    # if (N_c / N_o) > VOXEL_RATIO_THRESHOLD:
++    #     should_insert = True
++        
++    if should_insert:
++        # Insert new keyframe
++        window.append(current_frame)
++        insert_new_gaussians(current_frame, scene)
++        
++        # Step 3: Remove old keyframes if necessary
++        # Remove keyframe k from window if overlap(k, latest_keyframe) < OVERLAP_THRESHOLD
++        latest = window[-1]
++        for k in window[:-1]:
++            if compute_overlap(k, latest) < OVERLAP_THRESHOLD:
++                window.remove(k)
++                
++    return window
++```
+ 
+ **Parameters:**
+-*   $\tau_{cov}$: Covisibility threshold. Not given in the sources.
+-*   $\tau_{overlap}$: Overlap coefficient threshold for removal. Not given in the sources.
+-*   Median Depth: Used to normalize translation magnitude. Not given in the sources.
++- **Covisibility Threshold:** Not given in the sources.
++- **Translation Threshold:** Not given in the sources.
++- **Max Interval ($N$):** Not given in the sources [S2].
++- **Voxel Ratio Threshold:** Not given in the sources [S2].
++- **Overlap Threshold:** Not given in the sources [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Loopy Motions:** In long-term loops, covisibility may remain high, preventing new keyframe insertion and leading to missing parts of the model or insufficient multi-view constraints [S2]. (Addressed by variants).
+-*   **Precision:** Covisibility relies on accurate Gaussian visibility tracking; errors in rasterization alpha accumulation can lead to incorrect covisibility estimates [S1, unofficial].
++- **Loopy Camera Motions:** Without a maximum interval constraint, the system may fail to allocate new keyframes in loops, leading to missing parts of the model or insufficient multi-view constraints [S2].
++- **Catastrophic Forgetting:** Online incremental learning is prone to forgetting; joint optimization with a sliding window helps mitigate this [S2].
++- **Occlusion Handling:** The visibility metric (accumulated $\alpha < 0.5$) naturally handles occlusions without additional heuristics [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Keyframe Selection
+-A strategy for long-term map consistency that uses an explicit voxel structure to determine keyframe insertion [S2]. Unlike covisibility-based methods, it tests tracked frames against the existing map to count allocatable voxels [S2].
+-*   **Definition:** Selects keyframes by measuring the ratio of new voxels that would be allocated if the frame were chosen as a keyframe [S2].
+-*   **Steps:**
+-    1.  For each successfully tracked frame, perform an intersection test against the existing voxel map to find $N_c$, the number of voxels that would be allocated if the frame is chosen as a new keyframe [S2].
+-    2.  Let $N_o$ be the number of currently observed voxels in the map [S2].
+-    3.  Insert a new keyframe if the ratio $p_{kf} = N_c / N_o$ exceeds a threshold [S2].
+-    4.  Enforce a maximum interval constraint: create a new keyframe if none has been created in the past $N$ frames, preventing missing parts in loopy camera motions [S2].
+-*   **Parameters:**
+-    *   $N_c$: Number of voxels that would be allocated if the current frame is chosen as a keyframe [S2].
+-    *   $N_o$: Number of currently observed voxels in the map [S2].
+-    *   $N$: Maximum number of frames allowed between keyframe insertions [S2].
+-*   **When to choose:** When long-term map consistency is critical and the system uses a voxel-based representation (e.g., Vox-Fusion), particularly in environments with loopy trajectories where covisibility metrics might fail to trigger new keyframes [S2].
++A strategy for long-term map consistency in voxel-based SLAM (Vox-Fusion) that tests tracked frames against the existing map to determine allocatable voxels [S2]. It inserts a keyframe if the ratio of new allocatable voxels $N_c$ to currently observed voxels $N_o$ exceeds a threshold, ensuring exploratory movements are captured [S2]. It also enforces a maximum interval $N$ between keyframe insertions to prevent missing parts in loopy camera motions [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Covisibility calculation is $O(|V_i \cap V_j|)$ or $O(|V_i \cup V_j|)$ depending on implementation, which is significantly faster than full joint optimization of all frames [S1, unofficial]. Voxel-based selection adds $O(N_c)$ cost for intersection testing [S2].
+-*   **Memory Complexity:** Maintains only a small window $W_k$ of keyframes, keeping memory usage bounded and independent of the total number of captured frames [S1, unofficial].
+-*   **Strengths:** Reduces computational overhead for online optimization; ensures non-redundant observations; handles occlusions naturally via Gaussian visibility [S1, unofficial].
+-*   **Limitations:** Covisibility-based methods may fail in loopy motions without additional interval constraints [S2]. Performance depends on accurate visibility estimation [S1, unofficial].
+-*   **When to use:** Online Gaussian SLAM systems where real-time performance is required and the scene exhibits significant camera motion [S1, unofficial].
++- **Time Complexity:** Linear with respect to the number of visible Gaussians for covisibility calculation [S1, unofficial]. Voxel-based selection requires intersection tests against the map [S2].
++- **Memory Complexity:** Proportional to the size of the keyframe window $W_k$, which is kept small [S1, unofficial].
++- **Performance:** Enables online optimization by restricting joint bundle adjustment to a small window [S1, unofficial].
++- **Strengths:** Handles occlusions naturally via rasterization visibility [S1, unofficial]; prevents catastrophic forgetting [S2]; ensures multiview constraints via baseline selection [S1, unofficial].
++- **Limitations:** Relies on heuristics for thresholds (detailed in supplementary [S1, unofficial]); may miss details if interval constraints are not tuned [S2].
+ 
+ ## Background
+-Keyframe management in Gaussian SLAM was introduced to address the infeasibility of jointly optimizing all images from a video stream online [S1, unofficial]. The approach adapts heuristics from traditional Direct Sparse Odometry (DSO) for window management [S1, unofficial]. Variants using voxel-based selection were proposed to improve long-term consistency in voxel-based neural implicit representations [S2].
++Originated in the context of online 3D Gaussian Splatting SLAM, where joint optimization of all frames is infeasible [S1, unofficial]. The keyframe management heuristics are adapted from DSO [S1, unofficial]. Voxel-based keyframe selection was introduced in Vox-Fusion to ensure long-term map consistency and prevent catastrophic forgetting [S2].
+ 
+ ## Sources

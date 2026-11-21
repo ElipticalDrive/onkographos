@@ -1,0 +1,384 @@
+--- v004.md
++++ v005.md
+@@ -4,253 +4,170 @@
+ 
+ ## Overview
+-Material Parameter Setting defines the data structures and API calls required to configure how a volumetric medium interacts with light during ray marching. It solves the problem of mapping abstract physical or artistic properties (density, color, scattering behavior, emission) into a format consumable by the rendering engine's integration loop. It is distinguished from sibling methods by its focus on **configuration** rather than **sampling**: while [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) handles the geometric traversal and [Specific Material and Geometry Rendering](4395-specific-material-and-geometry-rendering.md) handles the shading logic, this method establishes the state (textures, scalar multipliers, phase functions) that those processes read.
++Material Parameter Setting defines the binding between spatial data (grids, textures, or procedural functions) and optical properties (absorption, scattering, emission) in volume rendering. It solves the problem of how to map raw voxel data to physically or artistically plausible light interaction. It is distinguished by two primary paradigms: a **Structured Object-Based** approach where a material object holds typed fields and texture descriptors, switching between a fast path (grid names) and a programmable path (nodes) [S1][S3], and a **Procedural API-Based** approach using context handles and integer constants to define material slots and surface side logic [S2].
+ 
+ ## How it works
+-The method operates through two primary paradigms: a structured object-based format (used in CUDA/physically-based renderers) and a procedural API-based format (used in legacy or specific SDKs like VolPack). Both paradigms share the goal of binding data sources (grids/textures) to shading parameters.
++The method operates through two distinct implementation styles found in the literature: the Object-Based Material Format (common in modern GPU ray marchers) and the API-Based Material State (common in legacy C-based volume renderers).
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Raw volume data (VDB grids, 3D textures), scalar values (density, temperature), physical constants (wavelengths, Kelvin), and user-defined artistic controls (color, roughness).
+-*   **Outputs:** A configured `Material` object or context state that exposes fields for density, scatter, transparency, and emission to the ray marching shader.
++*   **Inputs:** Spatial data (VDB grids, 3D textures, or label maps), optical parameters (albedo, density, phase function coefficients), and metadata (affine transforms, intensity ranges).
++*   **Outputs:** A configured material state object or context handle that the ray marching kernel queries during integration to determine color, opacity, and emission at each sample point.
+ 
+ ### Data Structures
+ 
+-#### 1. Material Object (Structured Format)
+-Used in physically-based ray marching (e.g., CUDA implementations). The object holds shading parameters and texture descriptors.
++#### 1. Material Object (Object-Based)
++Defined in [S1], this structure holds shading parameters. Texture descriptors are integers; `-1` indicates the texture is unused.
+ 
+-**Fields:**
+-*   `albedo`: `float3` (linear RGB). Surface/medium color.
+-*   `metalness`: `float` in $[0, 1]$. Ratio of specular to diffuse response.
+-*   `roughness`: `float` in $[0, 1]$. Smoothness of reflections/scattering.
+-*   `F0`: `float3` (linear RGB). Base reflectivity at normal incidence.
+-*   `triplar`: `bool`. Projection mode flag (XZ planar vs. triplanar).
+-*   `normalStrength`: `float`. Multiplier for normal map influence.
+-*   `albedoTex`: `int` (texture descriptor). `-1` if unused.
+-*   `normalTex`: `int` (texture descriptor). `-1` if unused.
+-*   `roughnessTex`: `int` (texture descriptor). `-1` if unused.
+-*   `metalnessTex`: `int` (texture descriptor). `-1` if unused.
+-*   `heightmapTex`: `int` (texture descriptor). `-1` if unused. Used for geometric displacement.
+-*   `ambietTex`: `int` (texture descriptor). `-1` if unused. Ambient occlusion map.
++```cpp
++struct Material {
++    // Basic shading properties
++    float3 albedo;          // Linear float RGB
++    float metalness;        // Float [0..1]
++    float roughness;        // Float [0..1]
++    float3 F0;              // Linear float RGB, base reflectivity
++    
++    // Projection and Normal settings
++    bool triplar;           // Boolean: XZ planar (false) vs triplanar (true)
++    float normalStrength;   // Linear float
++    
++    // Texture Descriptors (integers, -1 if unused)
++    int albedoTex;          // Texture descriptor for albedo
++    int normalTex;          // Texture descriptor for normals
++    int roughnessTex;       // Texture descriptor for roughness
++    int metalnessTex;       // Texture descriptor for metalness
++    int heightmapTex;       // Texture descriptor for geometric displacement
++    int ambietTex;          // Texture descriptor for ambient occlusion
++};
++```
+ 
+-#### 2. VolPack Material State (API Format)
+-Used in the VolPack SDK. State is managed via context handles and integer constants.
++#### 2. Volume Material Setup State (SDK-Based)
++Defined in [S4, unofficial], this represents the state passed to a shader material for rendering a volume with transfer functions.
+ 
+-**Constants:**
+-*   `material_num`: `int`. Identifier for the material slot. Values: `VP_MATERIAL0` through `VP_MATERIAL5`.
+-*   `property`: `int`. The attribute to set.
+-    *   `VP_AMBIENT`: Sets R, G, B ambient reflection coefficients.
+-    *   `VP_DIFFUSE`: Sets R, G, B diffuse reflection coefficients.
+-    *   `SPECULAR`: Sets R, G, B specular reflection coefficients.
+-    *   `VP_SHINYNESS`: Sets specular exponent (G, B arguments ignored).
+-*   `surface_side`: `int`. Determines voxel selection based on gradient direction.
+-    *   `VP_EXTERIOR`: Voxels where gradient points towards viewer.
+-    *   `VP_INTERIOR`: Voxels where gradient points away from viewer.
+-    *   `VP_BOTH_SIDES`: All voxels.
+-    *   *Note:* `VP_REVERSE_SURFACE_SIDES` can invert exterior/interior logic.
++```cpp
++struct VolumeMaterialSetup {
++    int _IsLabelMap;        // int flag (0 or 1)
++    float _P1;              // Continuous TF intensity range lower bound
++    float _P99;             // Continuous TF intensity range upper bound
++    float4 _Dim;            // Vector4(dimX, dimY, dimZ, 1f)
++    float4x4 _Affine;       // Affine matrix from metadata
++    float4x4 _InvAffine;    // Inverse affine matrix
++    Texture3D* texLbl;      // Label texture
++    Texture3D* texW;        // Weight texture (null if not present)
++    Texture3D* tfTexCurrent;// Transfer function texture
++};
++```
+ 
+-#### 3. VRDF SDK Material State (Shader Uniforms)
+-Used in the VRDF SDK for labelmap and continuous transfer functions.
++#### 3. API Material Properties (Procedural API)
++Defined in [S2], properties are set via integer constants.
+ 
+-**Uniforms:**
+-*   `_IsLabelMap`: `int`. `1` if transfer function is a labelmap, `0` otherwise.
+-*   `_P1`, `_P99`: `float`. Intensity range clamping for continuous transfer functions.
+-*   `_Dim`: `Vector4`. Volume dimensions $(dimX, dimY, dimZ, 1.0)$.
+-*   `_Affine`: `mat4`. Affine transformation matrix from metadata.
+-*   `_InvAffine`: `mat4`. Inverse of `_Affine`.
+-*   `_VolumeTexLabels`: `sampler3D`. Label texture source.
+-*   `_VolumeTexWeights`: `sampler3D`. Weight texture source (optional).
+-*   `_HasWeights`: `int`. `1` if weights are present, `0` otherwise.
+-*   `_TFTex`: `sampler3D`. Transfer function texture.
++*   `material_num`: `VP_MATERIAL0` through `VP_MATERIAL5`.
++*   `property`: `VP_AMBIENT`, `VP_DIFFUSE`, `VP_SPECULAR`, `VP_SHINYNESS`.
++*   `surface_side`: `VP_EXTERIOR`, `VP_INTERIOR`, `VP_BOTH_SIDES`.
+ 
+ ### Numbered Steps
+ 
+-#### A. Structured Material Initialization (CUDA/PBR Style)
+-1.  **Define Parameters:** Determine `albedo`, `metalness`, `roughness`, and `F0`.
+-2.  **Select Constructor:**
+-    *   If full control is needed, use Constructor 1: `Material(albedo, metalness, roughness, F0)`.
+-    *   If standard dielectric behavior is desired, use Constructor 2: `Material(albedo, roughness, metalness)`. This internally calls Constructor 1 with `F0 = [0.04, 0.04, 0.04]` [S1].
+-3.  **Initialize Defaults:** The constructor sets all texture descriptors (`albedoTex`, etc.) to `-1` (textureless), projection mode to planar, and `normalStrength` to `1.0` [S1].
+-4.  **Bind Textures (Optional):** If procedural or texture-driven shading is required, attach input nodes or texture descriptors to the corresponding fields. This switches the material from the "fast path" (typed grid names) to the "fully programmable path" [S3].
++#### Path A: Object-Based Material Construction
++1.  **Initialize Material:** Create a `Material` instance.
++2.  **Set Core Properties:** Assign `albedo`, `metalness`, `roughness`.
++3.  **Set F0:**
++    *   If using Constructor 1: Assign `F0` directly.
++    *   If using Constructor 2: Assign `F0` to `[0.04, 0.04, 0.04]` (standard base reflectance for non-metal dielectrics) [S1].
++4.  **Reset Textures:** Set all texture descriptors (`albedoTex`, `normalTex`, etc.) to `-1` [S1].
++5.  **Set Defaults:** Set `triplar` to false (XZ planar), `normalStrength` to `1.0` [S1].
++6.  **Attach Procedural Inputs (Optional):** If nodes are attached, override the fast-path grid names with procedural outputs for density, color, and temperature [S3].
+ 
+-#### B. VolPack API Configuration
+-1.  **Select Material Slot:** Choose `material_num` from `VP_MATERIAL0` to `VP_MATERIAL5`.
+-2.  **Set Properties:** Call `vpSetMaterial(vpc, material_num, property, surface_side, r, g, b)` for each attribute.
+-    *   For `VP_SHINYNESS`, pass `r` as the exponent; `g` and `b` are ignored.
+-    *   For color properties, `r`, `g`, `b` are the coefficients.
+-3.  **Define Surface Side:** Set `surface_side` to `VP_EXTERIOR`, `VP_INTERIOR`, or `VP_BOTH_SIDES` to control which voxels are shaded [S2].
++#### Path B: API-Based Material Configuration
++1.  **Select Context:** Obtain `vpContext *vpc`.
++2.  **Select Material Slot:** Choose `material_num` (e.g., `VP_MATERIAL0`).
++3.  **Set Surface Side:** Choose `surface_side` (`VP_EXTERIOR`, `VP_INTERIOR`, or `VP_BOTH_SIDES`). Note: `VP_EXTERIOR` affects voxels where the gradient points towards the viewer; `VP_INTERIOR` where it points away. Use `VP_REVERSE_SURFACE_SIDES` to invert this logic [S2].
++4.  **Set Properties:** Call `vpSetMaterial(vpc, material_num, property, surface_side, r, g, b)`.
++    *   For `VP_SHINYNESS`, `g` and `b` are unused.
++    *   For `VP_AMBIENT`, `VP_DIFFUSE`, `VP_SPECULAR`, set RGB coefficients [S2].
+ 
+-#### C. VRDF SDK Initialization
+-1.  **Extract Metadata:** Read `dimX, dimY, dimZ` from `d.meta.dim` [S4, unofficial].
+-2.  **Determine Transfer Function Type:** Check `d.tf.type`.
+-    *   If `"continuous"` and `d.meta.intensity_range` exists (length 2), set `p1 = d.meta.intensity_range[0]` and `p99 = d.meta.intensity_range[1]`.
+-    *   Otherwise, set `p1 = 0.0`, `p99 = 1.0`.
+-3.  **Compute Inverse Affine:** Construct `invAffine` from `d.meta.affine` [S4, unofficial].
+-4.  **Select Textures:**
+-    *   `texLbl = volumeTexLabels ?? d.labelTexture ?? BlackTex3D`.
+-    *   `texW = volumeTexWeights ?? d.weightTexture ?? null`.
+-5.  **Bind Uniforms:** Set `_P1`, `_P99`, `_Dim`, `_Affine`, `_InvAffine`, `_IsLabelMap`, and `_HasWeights` in the shader program. Assign `volumeMaterial` to the `MeshRenderer` [S4, unofficial].
++#### Path C: Volume SDK Setup (VRDF)
++1.  **Extract Dimensions:** Get `dimX, dimY, dimZ` from `d.meta.dim` [S4, unofficial].
++2.  **Initialize Ranges:** Set `p1 = 0.0f`, `p99 = 1.0f`.
++3.  **Check Intensity Range:** If `d.tf.type == "continuous"` and `d.meta.intensity_range` exists with length 2, set `p1 = d.meta.intensity_range[0]` and `p99 = d.meta.intensity_range[1]` [S4, unofficial].
++4.  **Compute Affine:** Construct `affine` from `d.meta.affine` (4x4). Compute `invAffine = affine.inverse()` [S4, unofficial].
++5.  **Select Textures:**
++    *   `texLbl = volumeTexLabels ?? d.labelTexture ?? BlackTex3D` [S4, unofficial].
++    *   `texW = volumeTexWeights ?? d.weightTexture ?? null`. Bind `_VolumeTexWeights` to `texW` or `BlackTex3D`. Set `_HasWeights = 1` if `texW != null`, else `0` [S4, unofficial].
++6.  **Bind Transfer Function:** Bind `_TFTex` to `tfTexCurrent`. Set `_IsLabelMap = 1` if `d.tf.type == "labelmap"`, else `0` [S4, unofficial].
++7.  **Set Uniforms:** Set `_P1`, `_P99`, `_Dim` (Vector4), `_Affine`, `_InvAffine`. Assign `volumeMaterial` to `MeshRenderer.sharedMaterial` [S4, unofficial].
+ 
+ ### Formulas and Parameters
+ 
+-#### Transparency and Depth
+-The `Standard Volume Material` uses Transparency Color and Depth to simulate per-wavelength travel distances [S3].
+-*   **Transparency Color:** A color vector where darker values imply thicker media (higher absorption) and brighter values imply thinner media.
+-*   **Transparency Depth:** A scalar value in centimeters. It defines the characteristic attenuation length.
+-    *   At depth $d$, the volume tints with the opposite color of the Transparency Color.
+-    *   Formula implication: Absorption coefficient $\sigma_a(\lambda) \propto \frac{1}{\text{Depth}} \cdot \text{Color}(\lambda)$ [S3].
++#### Optical Parameters
++*   **Density ($\sigma$):** Multiplied by the volume channel grid to set the overall thick or thin character of the medium [S3].
++*   **Scatter Color:** Sets the RGB reflectance of the volume [S3].
++*   **Scatter Scale:** Sets the brightness of the reflection [S3].
++*   **Anisotropy Mode:**
++    *   **Henyey-Greenstein:** Slider range $[-1, +1]$. All-rounder for isotropic smoke [S3].
++    *   **Jendersie-d’Eon:** Cloud specialist for light passing through water droplets [S3].
++*   **Transparency Color:** Implements per-wavelength travel distances. Darker means thicker, brighter means thinner. Tints the volume with its opposite color at depth [S3].
++*   **Transparency Depth:** Measured in centimeters. Should be set in relation to the real-world size of the volume. Tints the volume with its opposite color at depth, including shadows [S3].
++*   **Emission Mode:**
++    *   **Blackbody:** Converts temperature (Kelvin) to physically correct colors. Deep red $\approx 3,000$ K to white/blue-white $> 9,000$ K [S3].
++    *   **Color:** Art-directed black-to-red-to-yellow gradient [S3].
+ 
+-#### Emission Modes
+-*   **Blackbody Mode:** Converts temperature $T$ (Kelvin) to color.
+-    *   Range: $3,000 \text{ K}$ (deep red) to $>9,000 \text{ K}$ (white/blue-white) [S3].
+-    *   Uses Planck's law or a spectral approximation to generate physically correct radiance.
+-*   **Color Mode:** Uses a fixed artistic gradient: Black $\rightarrow$ Red $\rightarrow$ Yellow. Ignores physics [S3].
+-
+-#### Anisotropy (Phase Function)
+-*   **Henyey-Greenstein:** Controlled by asymmetry parameter $g \in [-1, 1]$. Default/All-rounder for isotropic smoke [S3].
+-*   **Jendersie-d’Eon:** Specialized for clouds, modeling light passing through water droplets [S3].
+-
+-### Pseudocode
+-
++#### Pseudocode: Object-Based Material Initialization
+ ```python
+-# Structured Material Initialization (Python-like representation of C++/CUDA logic)
+-
+-class Material:
+-    def __init__(self, albedo, metalness, roughness, F0=None):
+-        self.albedo = albedo          # float3
+-        self.metalness = metalness    # float [0..1]
+-        self.roughness = roughness    # float [0..1]
++def create_material(albedo, metalness, roughness, F0=None):
++    """
++    Creates a Material object.
++    If F0 is None, uses default dielectric reflectance.
++    """
++    mat = Material()
++    
++    mat.albedo = albedo
++    mat.metalness = metalness
++    mat.roughness = roughness
++    
++    if F0 is not None:
++        mat.F0 = F0
++    else:
++        # Default F0 for non-metal dielectrics
++        mat.F0 = float3(0.04, 0.04, 0.04)
+         
+-        # Constructor 2 logic: if F0 is None, use standard dielectric base reflectance
+-        if F0 is None:
+-            self.F0 = [0.04, 0.04, 0.04]
+-        else:
+-            self.F0 = F0              # float3
+-            
+-        # Defaults for textureless mode
+-        self.tripar = False           # bool
+-        self.normalStrength = 1.0     # float
+-        self.albedoTex = -1           # int descriptor
+-        self.normalTex = -1           # int descriptor
+-        self.roughnessTex = -1        # int descriptor
+-        self.metalnessTex = -1        # int descriptor
+-        self.heightmapTex = -1        # int descriptor
+-        self.ambietTex = -1           # int descriptor
+-
+-    def set_texture(self, tex_type, descriptor):
+-        """
+-        tex_type: 'albedo', 'normal', 'roughness', 'metalness', 'heightmap', 'ambient'
+-        descriptor: int texture handle
+-        """
+-        if tex_type == 'albedo': self.albedoTex = descriptor
+-        elif tex_type == 'normal': self.normalTex = descriptor
+-        elif tex_type == 'roughness': self.roughnessTex = descriptor
+-        elif tex_type == 'metalness': self.metalnessTex = descriptor
+-        elif tex_type == 'heightmap': self.heightmapTex = descriptor
+-        elif tex_type == 'ambient': self.ambietTex = descriptor
+-
+-# VolPack API Simulation
+-def vp_set_material(vpc, material_num, property, surface_side, r, g, b):
+-    """
+-    Simulates the VolPack vpSetMaterial call.
+-    material_num: int (0-5)
+-    property: int (VP_AMBIENT, VP_DIFFUSE, VP_SPECULAR, VP_SHINYNESS)
+-    surface_side: int (VP_EXTERIOR, VP_INTERIOR, VP_BOTH_SIDES)
+-    r, g, b: float
+-    """
+-    # Implementation detail: Updates internal state table for material_num
+-    pass
+-
+-# VRDF SDK Initialization Simulation
+-def setup_vrdf_material(d):
+-    """
+-    Initializes material uniforms for VRDF SDK based on metadata d.
+-    """
+-    # 1. Extract dimensions
+-    dimX, dimY, dimZ = d.meta.dim
++    # Reset textures to unused
++    mat.albedoTex = -1
++    mat.normalTex = -1
++    mat.roughnessTex = -1
++    mat.metalnessTex = -1
++    mat.heightmapTex = -1
++    mat.ambietTex = -1
+     
+-    # 2. Determine intensity range
+-    p1 = 0.0
+-    p99 = 1.0
+-    if d.tf.type == "continuous" and len(d.meta.intensity_range) == 2:
+-        p1 = d.meta.intensity_range[0]
+-        p99 = d.meta.intensity_range[1]
+-        
+-    # 3. Compute affine matrices
+-    affine = d.meta.affine # 4x4 matrix
+-    invAffine = affine.inverse()
++    # Set defaults
++    mat.tripar = False
++    mat.normalStrength = 1.0
+     
+-    # 4. Select textures
+-    texLbl = d.labelTexture if d.labelTexture else BlackTex3D
+-    texW = d.weightTexture if d.weightTexture else None
+-    
+-    # 5. Set flags
+-    isLabelMap = 1 if d.tf.type == "labelmap" else 0
+-    hasWeights = 1 if texW is not None else 0
+-    
+-    # 6. Bind to shader (pseudo-binding)
+-    shader.set_uniform("_P1", p1)
+-    shader.set_uniform("_P99", p99)
+-    shader.set_uniform("_Dim", [dimX, dimY, dimZ, 1.0])
+-    shader.set_uniform("_Affine", affine)
+-    shader.set_uniform("_InvAffine", invAffine)
+-    shader.set_uniform("_IsLabelMap", isLabelMap)
+-    shader.set_uniform("_HasWeights", hasWeights)
+-    shader.set_uniform("_VolumeTexLabels", texLbl)
+-    shader.set_uniform("_VolumeTexWeights", texW if texW else BlackTex3D)
+-    
+-    return shader
++    return mat
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Case Sensitivity:** In the Standard Volume Material, channel names (e.g., grid names) are case-sensitive. Typing "Density" instead of "density" will fail to bind the volume channel [S3].
+-*   **Texture Descriptors:** Texture descriptors must be `-1` when unused. Leaving them uninitialized or using `0` (if `0` is a valid handle) may cause undefined behavior or incorrect sampling [S1].
+-*   **Surface Side Reversal:** The meaning of `VP_EXTERIOR` and `VP_INTERIOR` depends on the gradient direction. If the volume is inverted or the viewer position changes unexpectedly, `VP_REVERSE_SURFACE_SIDES` may be required to maintain correct shading [S2].
+-*   **Transparency Depth Scale:** `Transparency Depth` is measured in centimeters. Setting it relative to the wrong real-world scale will result in volumes that appear impossibly thick or thin [S3].
++*   **Case Sensitivity:** Volume channel names (grid names) are case-sensitive [S3].
++*   **Surface Side Logic:** `VP_EXTERIOR` and `VP_INTERIOR` depend on gradient direction. If the gradient is ambiguous or zero, behavior may be undefined or default to the specified side. Use `VP_REVERSE_SURFACE_SIDES` if the gradient direction is inverted relative to the viewer [S2].
++*   **Transparency Depth Scaling:** `Transparency Depth` is in centimeters. Setting it incorrectly relative to the scene scale will result in incorrect attenuation and tinting [S3].
++*   **Texture Descriptors:** Using `-1` explicitly disables texture lookup. Using an uninitialized or invalid integer may cause GPU crashes or undefined behavior [S1].
+ 
+ ## Subtopics
+ 
+ ### Volume Material Setup
+-A specific initialization variant used in the VRDF SDK context. It focuses on preparing the shader uniforms for labelmap and continuous transfer functions. It differs from the general Material Object by explicitly handling metadata extraction (affine matrices, intensity ranges) and texture binding logic (`_HasWeights`, `_IsLabelMap`) rather than just shading parameters. It is chosen when working with the VRDF SDK's specific data format (VRDF) which separates label/weight textures from the transfer function [S4, unofficial].
++A specific implementation variant for SDK-based rendering (e.g., VRDF) that handles transfer function binding and affine transformations. It differs from the generic object-based material by explicitly managing label maps, weight textures, and intensity range clamping (`_P1`, `_P99`) for continuous transfer functions. It is chosen when using a structured SDK pipeline that requires automatic handling of metadata and transfer function types (labelmap vs. continuous) [S4, unofficial].
+ 
+ ## Operating characteristics
+-
+-### Time and Memory Complexity
+-*   **Memory:** The `Material` object is small, storing only a few floats and integer descriptors. The bulk of memory usage comes from the bound textures/grids (VDB, 3D textures), which are external to the material object itself.
+-*   **Time:** Initialization is $O(1)$ for the structured object. The VRDF SDK setup is $O(1)$ relative to volume size, but involves matrix inversion ($O(1)$ for 4x4) and texture binding. The actual rendering cost is determined by the ray marching loop, not the material setup.
+-
+-### Measured Performance
+-*   **Fast Path:** The Standard Volume Material's "fast path" (typed grid names) is optimized for speed, avoiding procedural node evaluation overhead [S3].
+-*   **Programmable Path:** Attaching input nodes switches to a fully programmable path, which may incur overhead from procedural noise or remapping calculations during sampling [S3].
+-
+-### Strengths and Limitations
+-*   **Strengths:**
+-    *   **Flexibility:** Supports both simple scalar multiplication (Density) and complex procedural driving (input nodes) [S3].
+-    *   **Physical Accuracy:** Blackbody emission and per-wavelength transparency provide physically plausible results [S3].
+-    *   **Standardization:** The Material Object format aligns with PBR workflows (albedo, metalness, roughness) [S1].
+-*   **Limitations:**
+-    *   **Complexity:** The programmable path can be difficult to debug compared to the fast path [S3].
+-    *   **Scale Dependency:** Transparency Depth requires careful real-world scaling [S3].
+-    *   **Legacy API:** VolPack's API is rigid and requires explicit property setting for each material slot [S2].
+-
+-### When to Use
+-*   Use the **Structured Material Object** when integrating volumetric rendering into a PBR pipeline or CUDA-based renderer where texture-based shading is preferred [S1].
+-*   Use the **VolPack API** when working with legacy VolPack data or specific SDK constraints [S2].
+-*   Use the **VRDF SDK Setup** when processing VRDF-formatted volumes with labelmaps or weight textures [S4, unofficial].
+-*   Avoid the **Programmable Path** if performance is critical and simple density/color modulation is sufficient; stick to the **Fast Path** [S3].
++*   **Time Complexity:** O(1) for material setup/configuration. O(1) per sample during ray marching (texture lookup and parameter evaluation).
++*   **Memory Complexity:** O(1) for the material object itself. O(N) for associated textures/grids if attached.
++*   **Performance:** The "fast path" (typed grid names) is optimized for speed, avoiding procedural node evaluation overhead [S3]. The "fully programmable path" incurs higher CPU/GPU overhead for node evaluation but offers greater flexibility [S3].
++*   **Strengths:** Clear separation of concerns (data vs. shading). Support for both physical (Blackbody) and artistic (Color gradient) emission. Fine control over surface side selection.
++*   **Limitations:** API-based approach (`vpSetMaterial`) is rigid and requires recompilation or complex state management for dynamic changes. Object-based approach requires careful management of texture descriptors.
++*   **When to Use:** Use Object-Based for modern, flexible volume rendering with procedural details. Use API-Based for legacy systems or simple, static volume shading. Use Volume Material Setup when working with structured SDKs that provide metadata and transfer functions.
+ 
+ ## Background
+-
+-### Origin
+-*   **Material Object:** Originated in CUDA-based ray marching frameworks for distance fields and volumes, designed to bridge the gap between SDF rendering and volumetric shading [S1].
+-*   **VolPack API:** Developed by Stanford University as part of the VolPack library for interactive volume rendering [S2].
+-*   **Standard Volume Material:** Developed by Maxon (Cinema 4D/Redshift) as part of their volumetric rendering toolkit, integrating VDB grid support with artistic controls [S3].
+-*   **VRDF SDK:** Developed by Guillaume Schneider as an open-source SDK for volume rendering, focusing on labelmap and transfer function handling [S4, unofficial].
+-
+-### History and Development
+-*   VolPack was one of the earliest libraries to provide a standardized API for volume rendering, influencing later SDKs [S2].
+-*   The Material Object format evolved from surface PBR materials, adapting fields like `metalness` and `roughness` for volumetric scattering and absorption [S1].
+-*   The Standard Volume Material represents a modern approach, combining simulation data (VDB) with artistic controls (nodes) in a single interface [S3].
++*   **Material Format:** Originated in GPU-based ray marching frameworks, specifically detailed in "Raymarching Distance Fields with CUDA" [S1]. It reflects the shift towards PBR (Physically Based Rendering) principles in volumetric shading.
++*   **vpSetMaterial:** Part of the VolPack library, a classic C-based volume rendering toolkit from Stanford [S2]. It represents an earlier, state-machine approach to volume shading.
++*   **Standard Volume Material:** Popularized by modern 3D software (e.g., Maxon Cinema 4D Redshift) as a user-friendly interface for VDB volumes, combining fast paths with procedural node support [S3].
++*   **Volume Material Setup:** Derived from open-source SDKs like VRDF, focusing on automated setup from metadata [S4, unofficial].
+ 
+ ## Sources
+-
+ [S1] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
+ [S2] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28

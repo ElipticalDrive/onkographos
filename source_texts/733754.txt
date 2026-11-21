@@ -1,0 +1,563 @@
+A generative game framework for Unity. Contribute to callum-rose/Assembler development by creating an account on GitHub.
+
+Add 3-view voxel reconstruction spike editor window by callum-rose · Pull Request #353 · callum-rose/Assembler · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+callum-rose
+commented
+Jun 15, 2026
+Copy link
+Copy Markdown
+Owner
+What
+A throwaway, standalone Unity editor window (Assembler → Voxel Spike (3-View)) that reconstructs a voxel model from three orthographic images (front / right / top) and exports it to Goxel plain-text format, so it can be opened directly in the Goxel editor.
+This is a disprove-the-theory spike: can a supersampled silhouette/visual-hull approach over three (AI-generated, mutually inconsistent) orthographic views produce usable voxel assets?
+How it works
+Segment each image by a near-white luminance key (threshold slider), then crop to the foreground bounding box — this is the per-view scale normalization.
+Derive grid dimensions from the crop aspect ratios: you set height in voxels (Y); width comes from the front view, length (depth) from the right view.
+Occupancy = supersampled silhouette AND across all three views (the visual hull), with a majority vote per voxel to soften view disagreement.
+Colour by multi-view back-projection — mean of foreground views, front-priority, or most-saturated.
+Export to Goxel text (# X Y Z RRGGBB), remapped to Goxel's Z-up so the model stands upright.
+After a run it renders the three segmentation masks so you can sanity-check the key and spot views that need flipping.
+Knobs
+Height resolution, supersample rate, solid-vote fraction, segmentation threshold, silhouette dilation, per-view U/V flip toggles (handedness), sub-voxel grid offset (X/Y/Z), colour mode, output path.
+Reviewer notes
+Standalone: own editor-only asmdef (VoxelSpike.Editor) with no references to the project's Voxels/Voxelization assemblies, so the result can't be confounded by the real pipeline. Easy to delete wholesale if the theory doesn't pan out.
+Handles non-readable source textures via a RenderTexture blit fallback, so image import settings don't matter.
+Avoids records / init / nullable annotations per this project's editor-asmdef constraints.
+Not yet compiled in batch mode — intended to be picked up by the open editor. Known limitation: interior colour bleeds along the projection axis (whole-column smearing), which is irrelevant for judging the occupancy theory but would need a best-view rule for colour quality.
+🤖 Generated with Claude Code
+callum-rose
+and others
+added 30 commits
+June 15, 2026 17:25
+Add 3-view voxel reconstruction spike editor window
+…
+2f6c7df
+```
+A throwaway disprove-the-theory rig that reconstructs a voxel model from
+three orthographic images (front/right/top) and exports to Goxel text.
+
+Implements the supersampled visual-hull approach: per-view white-key
+segmentation + bbox crop (scale normalization), aspect-derived grid
+dimensions, supersampled silhouette AND with majority vote for occupancy,
+and multi-view colour back-projection (mean/front-priority/most-saturated).
+Output is remapped to Goxel Z-up.
+
+Standalone editor-only assembly with no dependency on the project's
+Voxels/Voxelization assemblies, so results can't be confounded by the
+real pipeline. Menu: Assembler > Voxel Spike (3-View).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Colour voxels from visible views + mirror flags
+…
+414b0b2
+```
+Replace the flat whole-column 3-view average (which muddied every voxel)
+with occlusion-correct, visibility-based colouring:
+
+- Pass 1 builds the occupancy grid (unchanged supersample + vote).
+- Pass 2 computes per-column first-hit extents along each axis, so a view
+  only colours the surface voxels it can actually see.
+- Pass 3 colours each voxel from the view(s) that see it: one view -> that
+  colour, several -> their average. Interior/unseen voxels fall back to the
+  flat mean so there are no holes.
+
+Add per-view "opposite side is a mirror" toggles (front<->back, right<->left,
+top<->bottom): when set, a view also colours its far-facing shell, giving
+full surface colour on symmetric objects from just three images.
+
+Colour mode is now VisibleViews (default) or FlatMean (old behaviour, kept
+for comparison). Drops the per-sample FrontPriority/MostSaturated modes.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Add modal palette quantisation step
+…
+e28bbf1
+```
+After per-voxel colouring, optionally snap every voxel to one of N popular
+("modal") colours so the output is a clean fixed-palette voxel asset.
+
+- Collect all voxel colours, coarse-bin them into a 4-bit/channel RGB
+  histogram, take the N most-populated bins, and use each bin's mean as a
+  palette entry (BuildModalPalette).
+- Snap each voxel to its nearest palette colour (Nearest, Euclidean RGB).
+- UI: "Quantise palette" toggle (on by default) + "Palette colours (N)"
+  slider (1-64, default 16). Status line reports the palette size used.
+
+Pass 3 now collects voxels into lists instead of writing inline, so the
+quantisation pass can run over the full set before the Goxel text is written.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Add variety (farthest-point) palette selection
+…
+29b56da
+```
+Modal/popularity selection is area-weighted, so small but chromatically
+distinct features (a single-voxel eye) get washed out. Add a "Variety"
+palette mode that selects for colour diversity instead.
+
+- Factor the RGB histogram out into BuildHistogram (one candidate colour +
+  population per occupied 4-bit bin), shared by both strategies. Binning
+  merges near-duplicate colours up front.
+- BuildVarietyPalette: farthest-point (max-min) selection — seed with the
+  most populous bin, then repeatedly add the candidate furthest from the
+  chosen set. Distinct outliers survive even at tiny voxel counts.
+- New "Palette selection" popup: Variety (default) or Modal.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Fill unseen voxels from nearest seen neighbour (post-quantise)
+…
+be2db5b
+```
+Previously voxels no view could see fell back to the muddy flat-mean. Now:
+
+- Pass 3 tags each voxel as seen (a view coloured it) or unseen, and records
+  a grid-cell -> voxel-index map.
+- Pass 4 builds the palette and snaps using only seen voxels, so unseen mud
+  never pollutes the palette.
+- Pass 5 (new) flood-fills unseen voxels with their nearest seen neighbour's
+  colour via a multi-source BFS over the solid grid (6-connected), seeded
+  from every seen voxel. Runs after quantisation, so filled voxels inherit an
+  already-quantised colour and stay on-palette.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Add curated fixed-palette quantisation
+…
+e32e687
+```
+Image-derived palettes inherit the AI render's muddy intermediate tones.
+Add a "Curated" palette mode (now the default) that snaps each voxel to the
+nearest entry of a hand-tuned pixel/voxel-art palette instead:
+
+- Endesga 32 (default), DawnBringer 32, DawnBringer 16, PICO-8.
+- "Palette selection" -> Curated shows a "Curated palette" picker; the N
+  slider is hidden (palette size is fixed).
+- Variety/Modal image-derived modes remain available.
+
+Snapping reuses the existing nearest-colour step, so unseen-voxel fill still
+runs afterwards and inherits on-palette colours.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Lab colour matching + cap object to N colours
+…
+dac6c43
+```
+- Snap voxels to the palette in CIELAB (perceptual) instead of Euclidean RGB,
+  so matches respect how the eye weights lightness/green. Adds RgbToLab
+  (sRGB -> linear -> XYZ(D65) -> Lab), NearestLabIndex, SrgbToLinear, LabF.
+- Cap the object to N colours even in curated mode: after snapping to the
+  (up to 32) curated colours, if more than N end up used, keep a variety-
+  spread subset (farthest-point in Lab, seeded by the most populous used
+  entry) and remap dropped colours to their nearest kept one.
+- The N slider now reads "Max colours (N)" and applies in every palette mode;
+  the curated picker shows alongside it. paletteUsed reports distinct colours
+  actually used after the cap.
+
+SnapAndLimit replaces the RGB Nearest helper; unseen-voxel fill still runs
+after it, so filled voxels inherit the capped, on-palette colours.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Add part-label back-projection (segmentation spike)
+…
+594ae42
+```
+Spike the "decompose into parts" step by back-projecting 2D part maps into
+the reconstructed voxels, reusing the existing projection/visibility/fill
+machinery.
+
+- New "Part decomposition" section: Output = Colour (existing) or Parts.
+  Parts mode takes three flat colour-coded label maps (front/right/top),
+  one colour per part, sharing the per-view flips.
+- BuildLabelPalette: histogram the foreground label pixels across the three
+  maps (binning merges antialiasing) and keep well-populated bins as the
+  discrete part set.
+- Pass 3 (parts): each view that sees a voxel votes a part id (nearest label
+  colour in Lab, nearest-pixel sampling so boundaries stay hard); majority
+  wins (front > right > top). Voxels get their part's colour.
+- Unseen voxels inherit the nearest seen part via the existing FillUnseen
+  BFS; quantisation is skipped (parts are already discrete). Status reports
+  the part count.
+
+No joints/hierarchy yet — this only answers "does label back-projection
+segment the blob cleanly?".
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Add box-seeded part segmentation (PartBoxes mode)
+…
+410ad53
+```
+Decompose the voxel model into parts from coarse AI-supplied 3D boxes
+instead of pixel-aligned label maps (which AI-generated references can't
+produce reliably). Boxes are just JSON numbers in normalized model space.
+
+- Output mode renamed Parts -> PartLabels; new PartBoxes mode with a JSON
+  text area ({ "parts":[{ "name","min":[x,y,z],"max":[x,y,z] }] }) and a
+  refit-iterations slider.
+- SegmentByBoxes: voxels inside exactly one box seed that part; a competitive
+  multi-source BFS over the solid grid grows the seeds (geodesic nearest core
+  wins, so boundaries settle at constrictions / joints). Each part guaranteed
+  >=1 seed; coreless components fall back to nearest box centre. Boxes refit
+  to their assigned voxels each iteration (Lloyd-style snap to real geometry).
+- Voxels coloured by part (evenly spaced hues); console logs a name->colour
+  legend. Quantise and unseen-fill skipped in box mode (every voxel assigned).
+
+No joints/hierarchy yet — proves whether box priors + geometric growth
+segment the blob into sensible parts.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Add volume-utilisation box fit mode
+…
+3bb2f15
+```
+The growth strategy races each box outward until it meets a neighbour, and
+the AABB refit lets a winning box balloon (a leg that steals body voxels gets
+a taller box, then steals more) — so boxes grab as many voxels as possible
+rather than the ones they best contain.
+
+Add a "Utilise" fit mode (now the default) alongside "Grow":
+- Assignment: each voxel joins the box with the smallest box-normalized
+  (Chebyshev) distance to centre, i.e. the box it sits most snugly inside
+  relative to that box's size. A belly voxel near the top edge of the short
+  leg box loses to the body box it sits well within; a neck voxel near the
+  front face of the long body box loses to the head box.
+- Refit: boxes shrink to the percentile spread of their voxels (hug the dense
+  bulk, drop sprawl outliers), removing the AABB ballooning feedback.
+- New "Box coverage (pct)" slider (default 0.9) controls refit tightness.
+
+SegmentByBoxes now branches into UtiliseAssign / GrowAssign; the original
+geodesic growth is preserved as Grow for comparison.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Add minimal-volume shrinkwrap box fit (anchor-based)
+…
+69c2597
+```
+Reframe box segmentation as a minimum-volume set cover: each cube must
+contain its anchor point (known to be in that part), the cubes together must
+cover every voxel, and the objective is minimal total cube volume. Cubes
+grow/shrink freely from their anchors.
+
+- Parts JSON now takes "anchor":[x,y,z] (must-contain point) and/or a
+  "min"/"max" seed box. Shrinkwrap uses the anchor; Grow/Utilise use the box.
+- ShrinkwrapAssign: coordinate descent — assign each voxel to the cube whose
+  AABB expands by the least volume to include it, refit each cube to the tight
+  AABB of its anchor + assigned voxels, keep the lowest-total-volume pass.
+- New "Shrinkwrap" fit mode (now default); Utilise/Grow kept for comparison.
+  Iterations raised to 0-20.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Parts JSON in voxel (Goxel) coordinates
+…
+8a419f6
+```
+Anchors and boxes are now specified in voxel coordinates in Goxel [X, Y, Z]
+order — the numbers shown in Goxel / the exported .txt — instead of
+normalized [0,1]. ParsePartBoxes takes the grid dims and converts each coord
+(Goxel X,Y,Z = world i=width, k=depth, j=height) to normalized model space,
+so all downstream assignment is unchanged.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Move grill-me skill to global Claude config
+…
+fa36ae9
+```
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Segment by distance from perimeter-average background
+…
+fcfb94f
+```
+The white-background luminance test failed on coloured backgrounds. Estimate
+the background as the average of the image's perimeter (border-ring) pixels,
+then mark a pixel foreground when its RGB distance from that background
+exceeds the tolerance. Works on any flat background colour.
+
+"BG luminance threshold" becomes "BG colour tolerance" (normalized RGB
+distance, 0.02..0.8, default 0.2). Applies to source and label images alike.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Rebuild Voxel Spike for AI-in-the-loop turnaround pipeline
+…
+837c996
+```
+Scrap the 3-image visual-hull window and rebuild around the turnaround flow:
+- Stage 1: split a front+right sheet into two objects (connected components on
+  a shared vertical extent so the views stay height-registered), carve a
+  high-res F+R hull, and export a top-down colour-guess PNG.
+- Stage 2: re-carve with the AI-refined top as the third silhouette, down-res
+  to an editable resolution (modal block colour), and write Goxel text.
+Ports the perimeter-average segmentation, Lab palette quantisation, and
+unseen-voxel fill; drops the part-decomposition (boxes/labels/shrinkwrap).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Stage 1 also exports the carved F+R hull as Goxel text
+…
+d4111ea
+```
+Write the high-res hull as-is to hull.txt alongside the top-guess PNG, so the
+carved geometry can be inspected in Goxel before the AI round-trip. Separate
+path from stage 2's down-res output.txt.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Stage 1: cleaner top render + AI reference sheet
+…
+0307359
+```
+Make the top guess legible and give the AI context so it knows what it is:
+- Render the top-down on a flat neutral background instead of a muddy
+  transparent gradient.
+- Export reference_sheet.png laying out front | right | annotated-top, so the
+  AI sees the subject and orientation. The top panel gets a dark silhouette
+  outline and a front-edge arrow; the pristine (un-annotated) top_guess.png
+  remains the re-import target.
+- Re-import the refined top via largest-connected-component segmentation so a
+  stray mark the AI leaves can't skew registration.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: third-angle projection layout with miter line
+…
+c6d5954
+```
+Replace the horizontal front|right|top strip with a proper engineering-drawing
+layout that does the construction legwork for the AI:
+- Top guess placed directly above the front view (shares width); side view to
+  the right of front (shares height); all three rendered at one pixels-per-voxel
+  scale so dimensions line up.
+- Vertical gutter (front->top) equals the horizontal gutter (front->side), so a
+  45° miter through the front view's top-right corner reflects depth from the
+  side view into the top.
+- Draw the datum lines along that corner's edges plus the 45° miter diagonal as
+  light guide lines.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Pre-draw feature projectors on the reference sheet
+…
+687bbc1
+```
+Detect salient column positions in the front and side views (silhouette extents
+plus strongest vertical colour/feature boundaries via per-column Lab+silhouette
+edge strength, peak-picked with spacing) and pre-draw their projectors: width
+landmarks rise from the front into the top; depth landmarks reflect from the
+side across the 45° miter into the top. Gives the AI concrete pre-placed guides
+at meaningful feature/size boundaries.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: 2x resolution, finer construction lines
+…
+62461bb
+```
+Double the projection sheet's pixels-per-voxel (220->440) and halve the
+datum/miter thickness (s/3 -> s/6), so the construction lines read finer against
+the higher-res canvas.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: bump to 4x resolution for finer lines
+…
+1dfb211
+```
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: fewer, more selective feature guides
+…
+cc99e2e
+```
+Cut interior feature projectors from up to 5/view to a 2/view default, raise the
+peak threshold (0.18->0.30) and spacing (W/16->W/8) so only prominent colour/
+feature boundaries qualify, and expose a 'Feature guides / view' slider (0-6;
+0 = silhouette box + miter only) so the guide density is tunable per run.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: quarter-arc depth transfer + landing ticks
+…
+0ea35b5
+```
+Add an arc mode for side->top depth transfer (default): a quarter arc swung
+about the shared corner replaces the miter L-path as a single continuous,
+visually-distinct stroke. Mark where every projector lands on the top view with
+a small orange tick — the unambiguous target a pattern-matching image model can
+actually use. Both toggleable ('Depth via arcs', 'Landing ticks'); the miter
+diagonal stays drawn either way as the arc's centre/anchor.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Top guess: only show certain colours, leave the rest for the AI
+…
+0a4ba93
+```
+Gate the top render on the per-voxel seen flag: a column's top voxel keeps its
+real colour only when a view actually sampled it (a front/side face, or a
+mirrored face when the symmetry toggles are on). Solid-but-uncertain columns get
+a flat 'unknown' placeholder so the footprint stays visible but clearly reads as
+fill-me; empty columns stay background. Stops the muddy nearest-neighbour guess
+in the top guess and hands the blanks to the image model. Carve fill and
+hull.txt are unchanged (still fully coloured).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: 'Side-view guides only' toggle
+…
+4ce5479
+```
+Add a checkbox to draw only the side-view (depth) feature projectors and skip
+the front-view (width) ones, for when the front-view guides clutter more than
+they help. Datum box and miter stay either way.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: configurable guide colour
+…
+7238063
+```
+Replace the hard-coded Guide constant with a 'Guide colour' ColorField, threaded
+into the projection sheet so the datum, feature projectors, and depth arcs/lines
+use it. Miter diagonal and landing ticks keep their orange accent.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Top guess: only colour single-view voxels, not front+side edges
+…
+2be6697
+```
+Track per-voxel view count and colour a top column only when exactly one view
+sampled it. Voxels seen by both the front and side (the front-right edge) are an
+averaged, ambiguously-placed guess, so they now get the 'unknown' placeholder
+for the AI to fill instead of a potentially-misleading colour.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Reference sheet: 'Top: grid, no colour' mode
+…
+9867a67
+```
+Add a checkbox that skips the top-view colour guess entirely (footprint shown as
+the flat unknown placeholder) and overlays an even reference grid over the top so
+the AI has spatial cells to fill, instead of any sampled colours.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Top guess: only colour confirmed vertical-surface voxels
+…
+23c6ec5
+```
+The F+R hull over-fills (front X x side Z), so colouring a column's top voxel can
+paint colour onto phantom voxels the vertical (top) carve will delete. Gate top
+colouring on a horizontal-edge test: only colour when the top voxel borders empty
+space in X or Z (a real object wall, guaranteed in the top footprint), in
+addition to being seen by exactly one view. Buried hull-intersection voxels now
+get the unknown placeholder instead of a misleading colour.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Top guess: confirm colour only at a view's silhouette edge
+…
+736a19f
+```
+The 3D horizontal-edge test failed because the over-filled hull gives phantom
+voxels empty neighbours too. Replace it with the real criterion: a voxel may be
+coloured only if the view that sampled it saw it AT its silhouette edge (the
+sample's pixel borders background in that view). Computed per voxel at carve time
+via View.OnEdge and stored as edgeSeen; the top render now gates on
+seenCount==1 && edgeSeen. Kills the back-projected ear-brown smear across
+interior columns.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+callum-rose
+and others
+added 2 commits
+June 24, 2026 21:20
+Reference sheet: threshold-driven guides at every colour change
+…
+6b87261
+```
+Replace the fixed per-view guide count with a 'Guide sensitivity' slider: place
+a projector at every local edge-strength maximum above a sensitivity-driven
+threshold (0 = silhouette box only, 1 = even subtle changes), capped only by a
+light min-spacing that suppresses duplicate lines on one edge. The guide count
+now scales with how busy each view is instead of a hard cap of 2.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Top guess: also confirm colour where two views agree
+…
+f8f50dc
+```
+Broaden the top-guess certainty rule from "exactly one view saw it at a
+silhouette edge" to "a colouring view saw it at a silhouette edge AND the
+views that saw it agree on colour within tolerance". Single-view voxels
+keep distance 0 so they always pass the agreement half (today's behaviour);
+agreeing two-view corners now qualify too, filling the over-fill voxels the
+old rule excluded only when the views' colours actually corroborate them.
+
+Store a per-voxel max-pairwise sample distance (agreeDist) at carve time and
+threshold it at render with a new 0-1 "Colour agree tolerance" slider
+(default 0.10). Applies to both top_guess.png and the reference-sheet panel.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+callum-rose
+closed this
+Jun 28, 2026
+callum-rose
+added a commit
+that referenced
+this pull request
+Jun 28, 2026
+Add resume handoff doc for the paused turnaround spike
+…
+ad5dea6
+```
+Capture the current state of the VoxelSpike turnaround spike so the work can
+be resumed later: pipeline stages, the top-guess colour-agreement certainty
+rule (and why it was chosen over alternatives), the reference sheet, the
+image-gen prompt (previously chat-only), open threads, and the editor-asmdef
+gotchas. PR #353 is being closed (not merged) while the work is on hold; the
+branch is preserved.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+callum-rose
+commented
+Jun 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Pausing this work for now — closed (not merged), so the branch claude/thirsty-goldberg-3a8025 is preserved and this PR can be reopened to resume.
+A resume handoff doc was added at Assets/VoxelSpike/HANDOFF.md (top of branch, commit ad5dea6) covering: the 2-stage pipeline, the top-guess colour-agreement certainty rule and why it was chosen over the alternatives, the reference sheet, the image-gen prompt (previously chat-only), and the open threads (visual confirmation of the agreement rule + top-panel auto-extraction).
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

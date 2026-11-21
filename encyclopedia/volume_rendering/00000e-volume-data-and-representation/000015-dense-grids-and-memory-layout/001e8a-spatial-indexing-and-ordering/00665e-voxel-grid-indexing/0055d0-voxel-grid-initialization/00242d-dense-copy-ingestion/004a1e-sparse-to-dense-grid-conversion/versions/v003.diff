@@ -1,0 +1,111 @@
+--- v002.md
++++ v003.md
+@@ -2,5 +2,5 @@
+ Also called: VTK export
+ ## Overview
+-This method converts a sparse OpenVDB volume grid into a dense, contiguous float array with `LayoutXYZ` ordering, then exports it as a legacy VTK `STRUCTURED_POINTS` binary file [S1, unofficial]. It bridges the gap between memory-efficient sparse representations and renderers requiring dense, contiguous memory layouts [G].
++This method converts a sparse OpenVDB volume grid into a dense, contiguous float array with `LayoutXYZ` ordering, then exports it as a legacy VTK `STRUCTURED_POINTS` binary file [S1, unofficial]. It bridges memory-efficient sparse representations and renderers requiring dense, contiguous memory layouts [G].
+ ## How it works
+ **Inputs:**
+@@ -15,7 +15,7 @@
+ 
+ **Data Structures:**
+-- **Sparse Grid:** OpenVDB `Grid` object with active voxels [G].
++- **Sparse Grid:** OpenVDB `Grid` object containing active voxels [G].
+ - **Dense Grid:** A dense 3D array with dimensions `volume_size` [G].
+-- **VTK File:** Binary file containing header and raw float data [G].
++- **VTK File:** Binary file containing a text header and raw float data [G].
+ 
+ **Steps:**
+@@ -27,5 +27,5 @@
+ 2. **Copy Sparse to Dense:** Transfer active voxel values from the sparse grid into the corresponding positions in the dense array using `openvdb::tools::copyToDense` [S1, unofficial].
+ 
+-3. **Convert Byte Order:** Convert the dense float data to big-endian byte order to ensure cross-platform compatibility for the VTK binary format. This conversion is performed in parallel using TBB `blocked_range` [S1, unofficial].
++3. **Convert Byte Order:** Convert the dense float data to big-endian byte order to ensure cross-platform compatibility for the VTK binary format [S1, unofficial]. This conversion is performed in parallel using TBB `blocked_range` [S1, unofficial].
+ 
+ 4. **Export VTK File:** Write the big-endian float array to a file using the legacy VTK `STRUCTURED_POINTS` format [S1, unofficial].
+@@ -34,4 +34,5 @@
+ ```python
+ import struct
++from concurrent.futures import ThreadPoolExecutor
+ 
+ def sparse_to_dense_vtk(sparse_grid, transform, volume_size, center):
+@@ -39,28 +40,31 @@
+     vmin = center - volume_size / 2
+     vmax = center + volume_size / 2
+-    # Create dense grid with dimensions volume_size
+-    dense_grid = [0.0] * (volume_size ** 3)
+-    
+-    # Step 2: Copy sparse to dense
+-    # openvdb::tools::copyToDense transfers active voxels to dense grid
+-    for voxel in sparse_grid.active_voxels():
+-        # Map world coordinates to indices using transform
+-        # Note: worldToIndexCellCentered or worldToIndexNodeCentered depends on grid centering
+-        idx = transform.world_to_index(voxel.world_pos)
+-        dense_grid[idx] = voxel.value
+-        
++    dense_size = volume_size ** 3
++    dense_grid = [0.0] * dense_size
++
++    # Step 2: Copy sparse to dense using OpenVDB's tool
++    # openvdb::tools::copyToDense maps active voxels to the dense grid
++    # based on the transform's worldToIndexCellCentered/NodeCentered logic
++    copy_to_dense_impl(sparse_grid, dense_grid, transform)
++
+     # Step 3: Convert to big-endian byte order in parallel
+-    # Use TBB blocked_range for parallel byte order conversion
+-    num_threads = 4  # Typical thread count
+-    chunk_size = len(dense_grid) // num_threads
+-    for i in range(num_threads):
+-        start = i * chunk_size
+-        end = start + chunk_size if i < num_threads - 1 else len(dense_grid)
+-        for j in range(start, end):
+-            # Convert float to big-endian bytes and back
+-            dense_grid[j] = struct.unpack('>f', struct.pack('<f', dense_grid[j]))[0]
+-            
++    # Simulates TBB blocked_range parallelization
++    def convert_chunk(start, end):
++        for i in range(start, end):
++            # Pack as little-endian float, unpack as big-endian float
++            dense_grid[i] = struct.unpack('>f', struct.pack('<f', dense_grid[i]))[0]
++
++    num_threads = 4
++    chunk_size = dense_size // num_threads
++    with ThreadPoolExecutor(max_workers=num_threads) as executor:
++        futures = []
++        for i in range(num_threads):
++            start = i * chunk_size
++            end = start + chunk_size if i < num_threads - 1 else dense_size
++            futures.append(executor.submit(convert_chunk, start, end))
++        for f in futures:
++            f.result()
++
+     # Step 4: Export to VTK STRUCTURED_POINTS binary file
+-    # Write VTK header and raw big-endian float data
+     with open("output.vtk", "wb") as f:
+         f.write(b"# vtk DataFile Version 2.0\n")
+@@ -70,9 +74,16 @@
+         f.write(f"DIMENSIONS {volume_size} {volume_size} {volume_size}\n".encode())
+         f.write(f"ORIGIN {vmin[0]} {vmin[1]} {vmin[2]}\n".encode())
+-        f.write(b"POINT_DATA " + str(len(dense_grid)).encode() + b"\n")
++        f.write(b"POINT_DATA " + str(dense_size).encode() + b"\n")
+         f.write(b"SCALARS density float 1\n")
+         f.write(b"LOOKUP_TABLE default\n")
+         for val in dense_grid:
+             f.write(struct.pack('>f', val))
++
++def copy_to_dense_impl(sparse_grid, dense_grid, transform):
++    # Implements openvdb::tools::copyToDense behavior
++    for voxel in sparse_grid.active_voxels():
++        idx = transform.world_to_index(voxel.world_pos)
++        if 0 <= idx < len(dense_grid):
++            dense_grid[idx] = voxel.value
+ ```
+ 
+@@ -95,5 +106,5 @@
+ - **Time Complexity:** $O(N)$, where $N$ is the number of active voxels in the sparse grid. The copy operation and byte order conversion are linear in the number of active voxels [G].
+ - **Memory Complexity:** $O(V)$, where $V$ is the total number of voxels in the dense grid ($volume\_size^3$). The dense grid requires contiguous memory for all voxels, regardless of sparsity [G].
+-- **Measured Performance:** Not given in the sources.
++- **Measured Performance:** Not given in the sources [G].
+ - **Strengths:** Simple, efficient conversion from sparse to dense; produces a widely supported VTK format; parallel byte order conversion improves performance [G].
+ - **Limitations:** High memory usage for large dense grids; not suitable for highly sparse data where memory efficiency is critical; VTK `STRUCTURED_POINTS` is a legacy format [G].

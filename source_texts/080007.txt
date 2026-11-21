@@ -1,0 +1,459 @@
+Render ipywidgets inside a PyShiny app. Contribute to posit-dev/py-shinywidgets development by creating an account on GitHub.
+
+feat: add render_ipyvolume() for ipyvolume 3D plots by cpsievert · Pull Request #329 · posit-dev/py-shinywidgets · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+cpsievert
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Stacked on #324 (@render_pythreejs), on top of #356 (shared, process-global widgets; replacement for the auto-merged #351), #346 (browser-created widget comms), and #343 (generic AMD-externals resolution). This PR adds the ipyvolume renderer; its dependency machinery lives in #343 and its shared-widget handling in #356. Merge order: #343 → #346 → #356 → #324 → this PR. Part of #278.
+Add @render_ipyvolume for ipyvolume 3D plots
+ipyvolume is the classic Jupyter 3D plotting package (scatter, quiver, volume rendering). With this PR, Shiny apps can render ipyvolume figures reactively — the WebGL canvas fills (and resizes with) its container, and camera state and selections round-trip to Python:
+```
+import ipyvolume as ipv
+import numpy as np
+from shiny import App, ui
+from shinywidgets import output_widget, render_ipyvolume
+
+app_ui = ui.page_fillable(output_widget("plot"))
+
+def server(input, output, session):
+    @render_ipyvolume
+    def plot():
+        x, y, z = np.random.normal(size=(3, 1000))
+        ipv.quickscatter(x, y, z, size=1, marker="sphere")
+        return ipv.gcf()
+
+app = App(app_ui, server)
+```
+Requires pip install 'shinywidgets[ipyvolume]' (the extra also installs ipython_genutils, which ipyvolume 0.6.3 — the latest release, from 2023 — imports but doesn't declare).
+Both ways of building a figure work, including in outputs that re-render:
+The pylab API: ipv.quickscatter(...), or ipv.figure() plus drawing calls — return ipv.gcf() (or the object quickscatter()/gcc() returns, which is unwrapped to its figure).
+Direct construction: ipv.Figure() with ipv.widgets.Scatter and friends added to fig.scatters. Set size_selected/color_selected explicitly on scatters (their trait defaults are 0-d numpy arrays, which don't JSON-serialize; pylab sets them for you) and set fig.xlim/ylim/zlim (directly constructed figures default to a [0, 1]³ axis box with no auto-fit).
+Interaction state round-trips to Python: orbit/zoom camera state via reactive_read(), and rectangle/lasso selections via fig.on_selection(fn) (selections arrive as custom messages, not trait changes, and the payload is a pixel/device region, not selected indices).
+Sizing
+A figure's width/height traits are its WebGL canvas size in pixels, with no built-in fit-to-container behavior, so a WIDGET_BEHAVIORS entry (js) drives the canvas from the container through those traits (throttled ResizeObservers on the output and the widget view, minus toolbar height; the measured size round-trips to Python). Explicit sizes are always respected:
+The two "default" sizes (the 500x400 trait default and the 400x500 ipv.figure() always passes) are treated as unset, as is a size matching the last browser sync (so redisplaying a cached figure still fills).
+An explicit ipv.figure(width=..., height=...) keeps its pixel size, even inside an output_widget(height=...).
+output_widget(height=...) sizes the canvas to the output.
+A widget Layout(height=...) — including viewport-relative values like "50vh" — sizes the canvas to the widget view.
+Implementation notes
+Shared ipyvue/ipyvuetify widgets come from feat: share process-global widgets across sessions and re-renders (#348) #351. import ipyvolume constructs module-level singleton widgets (ipyvue's force_load_instance, ipyvuetify's theme), and pylab's never-rendered Container uses ipyvue Template widgets that are shared across the whole process. feat: share process-global widgets across sessions and re-renders (#348) #351 treats these as process-global widgets (tolerated at import time, mirrored into every session, never closed by render cleanup), so this PR needs no ipyvolume-specific workaround: apps can import ipyvolume at module level, and pylab figures re-render cleanly across re-renders and sessions.
+require.js externals (from feat: resolve widget bundles' AMD externals generically #343). ipyvolume's and pythreejs's AMD bundles each declare an external three but ship incompatible three.js builds, and an ipyvolume figure needs both (its scene/camera are pythreejs widgets); jupyter-vuetify's bundle similarly externalizes jupyter-vue. The generic resolution in feat: resolve widget bundles' AMD externals generically #343 parses the bundles' define([...]) headers at render time and maps/shims those externals per-module — without it, require.js requests /three.js at the app root (404) and the figure never renders.
+ipywidgets 8. ipyvolume 0.6.3 works with the repo's ipywidgets 8.1+ floor and the bundled @jupyter-widgets/html-manager 1.0.
+Caveats
+ipyvolume's FigureView.remove() never calls renderer.dispose(), so WebGL contexts leak per re-render (upstream; unmaintained since 2023) — the same theme as k3d/ipysigma in docs/widget-reports/.
+Rough benchmark (base64 buffer transport, page load → first composited frame, headless Chromium): ~10k float32 points ~1.6 s; ~100k points ~8.5 s. Transport isn't the bottleneck at 10k but dominates at 100k. (Measured with direct construction.)
+Verification
+make check-format and make pyright (0 errors) on this head
+js/src and the committed shinywidgets/static/output.js are byte-identical to the previously verified head of this PR (where cd js && yarn build reproduced the bundle)
+Unit tests and the Playwright suites (tests/playwright/render_ipyvolume: rendering, fill, explicit sizing, selection + camera round trips; tests/playwright/render_ipyvolume_rerender: re-render lifecycle over the pylab API, old models closed) are left to CI on this head
+Testing notes for future widget work: WebGL renders fine in headless Chromium (SwiftShader), and tests assert composited screenshot pixels since WebGL canvases can't be read back; clicks that land while the main thread is busy with WebGL setup can sit in the renderer's event queue for a long time, so tests wait for the first frame before interacting.
+cpsievert
+requested a balanced review from Copilot
+October 23, 2026 03:54
+Copilot started reviewing on behalf of
+cpsievert
+October 23, 2026 03:54
+View session
+This comment was marked as resolved.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+cpsievert
+mentioned this pull request
+Oct 24, 2026
+[Feature]: Support for Viser (3D-Visualisations)
+#214
+Open
+cpsievert
+requested a balanced review from Copilot
+October 24, 2026 00:36
+Copilot started reviewing on behalf of
+cpsievert
+October 24, 2026 00:37
+View session
+This comment was marked as resolved.
+Sign in to view
+Sorry, something went wrong.
+Uh oh!
+There was an error while loading. Please reload this page.
+cpsievert
+added a commit
+that referenced
+this pull request
+Oct 24, 2026
+Guard jupyter-vue require.js mapping behind SHINYWIDGETS_CDN_ONLY
+…
+1a68dd7
+```
+In CDN-only mode the local jupyter-vue path mapping was still being
+served, bypassing the local-dependency guard. Skip it in CDN-only mode
+and disable CDN-only mode in test_vuetify_widget_open_serves_jupyter_vue
+(which asserts the mapping is present in local mode).
+
+Addresses #329 (comment)
+```
+cpsievert
+requested a balanced review from Copilot
+October 24, 2026 00:52
+Copilot started reviewing on behalf of
+cpsievert
+October 24, 2026 00:53
+View session
+Copilot
+AI
+reviewed
+Oct 24, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 Needs a closer look
+Auto-height widget layouts can bypass explicit output sizing and leave the canvas clipped.
+2 open issues
+Resize canvas when explicit view layout dimensions change
+Preserve explicit figure dimensions with CSS output height
+1 previously missed issue
+In code that hasn't changed since last review
+Exclude auto layout height from intrinsic view measurement
+js/​src/​ipyvolume.ts:47
+With output_widget(height="250px") and Layout(height="auto"), this treats the auto-height view as explicitly sized and measures its intrinsic height instead of the 250px output. The canvas therefore retains its default height and overflows or is clipped, even though set_layout_defaults() treats "auto" as unset. Exclude intrinsic sizing keywords when deciding whether to measure the view, add a regression case combining an explicit output height with an auto Layout height, and regenerate shinywidgets/static/output.js.
+1 resolved since last review
+Guard jupyter-vue mapping in CDN-only mode
+Review effort: Balanced
+cpsievert
+mentioned this pull request
+Oct 26, 2026
+feat: resolve widget bundles' AMD externals generically
+#343
+Merged
+cpsievert
+changed the base branch from
+main
+to
+generic-amd-externals
+October 26, 2026 21:47
+cpsievert
+added this pull request to stack #344
+October 26, 2026 22:09
+cpsievert
+removed this pull request from stack #344
+October 26, 2026 22:28
+cpsievert
+changed the base branch from
+generic-amd-externals
+to
+render-pythreejs
+October 26, 2026 22:28
+cpsievert
+added this pull request to stack #345
+October 26, 2026 22:28
+cpsievert
+mentioned this pull request
+Oct 26, 2026
+feat: add render_pythreejs() for pythreejs 3D scenes
+#324
+Merged
+cpsievert
+marked this pull request as ready for review
+October 26, 2026 22:30
+cpsievert
+mentioned this pull request
+Oct 26, 2026
+feat: let the browser open widget comms (bqplot toolbar, pythreejs light defaults)
+#346
+Merged
+cpsievert
+removed this pull request from stack #345
+October 26, 2026 23:09
+cpsievert
+added this pull request to stack #347
+October 26, 2026 23:09
+cpsievert
+mentioned this pull request
+Oct 26, 2026
+Shared singleton widgets (e.g., ipyvue's template_registry) break under render-scoped cleanup and across sessions
+#348
+Closed
+cpsievert
+added a commit
+that referenced
+this pull request
+Oct 27, 2026
+Guard jupyter-vue require.js mapping behind SHINYWIDGETS_CDN_ONLY
+…
+bac7331
+```
+In CDN-only mode the local jupyter-vue path mapping was still being
+served, bypassing the local-dependency guard. Skip it in CDN-only mode
+and disable CDN-only mode in test_vuetify_widget_open_serves_jupyter_vue
+(which asserts the mapping is present in local mode).
+
+Addresses #329 (comment)
+```
+cpsievert
+force-pushed
+the
+render-ipyvolume
+branch
+from
+dd914bf to
+aad6425
+Compare
+October 27, 2026 15:26
+cpsievert
+mentioned this pull request
+Oct 27, 2026
+feat: share process-global widgets across sessions and re-renders (#348)
+#351
+Merged
+cpsievert
+force-pushed
+the
+render-ipyvolume
+branch
+from
+aad6425 to
+2fb8293
+Compare
+October 27, 2026 22:38
+cpsievert
+added a commit
+that referenced
+this pull request
+Oct 27, 2026
+test: disable CDN-only mode for the jupyter-vue mapping test
+…
+3572e1f
+```
+The local jupyter-vue require.js path mapping is skipped in CDN-only mode
+(the local-dependency guard), so test_vuetify_widget_open_serves_jupyter_vue,
+which asserts the mapping is present, now turns CDN-only mode off.
+
+Addresses #329 (comment)
+```
+cpsievert
+removed this pull request from stack #347
+October 27, 2026 22:45
+cpsievert
+changed the base branch from
+render-pythreejs
+to
+feat-348-shared-widgets
+October 27, 2026 22:46
+cpsievert
+added this pull request to stack #352
+October 27, 2026 22:46
+cpsievert
+force-pushed
+the
+render-ipyvolume
+branch
+from
+2fb8293 to
+107b3a3
+Compare
+October 28, 2026 00:09
+cpsievert
+added a commit
+that referenced
+this pull request
+Oct 28, 2026
+test: disable CDN-only mode for the jupyter-vue mapping test
+…
+1f18929
+```
+The local jupyter-vue require.js path mapping is skipped in CDN-only mode
+(the local-dependency guard), so test_vuetify_widget_open_serves_jupyter_vue,
+which asserts the mapping is present, now turns CDN-only mode off.
+
+Addresses #329 (comment)
+```
+cpsievert
+removed this pull request from stack #352
+October 28, 2026 00:10
+cpsievert
+mentioned this pull request
+Oct 28, 2026
+feat: share process-global widgets across sessions and re-renders (#348)
+#356
+Merged
+cpsievert
+changed the base branch from
+feat-348-shared-widgets
+to
+render-pythreejs
+October 28, 2026 00:12
+cpsievert
+added this pull request to stack #357
+October 28, 2026 00:13
+cpsievert
+added 6 commits
+October 27, 2026 19:28
+feat: add render_ipyvolume() for ipyvolume 3D plots (#278)
+…
+a01df11
+```
+- render_ipyvolume() accepts an ipyvolume.Figure, whether built with the
+  pylab API (ipv.gcf() after drawing) or constructed directly, and
+  unwraps the Container returned by ipv.quickscatter()/ipv.gcc() to its
+  figure
+- The figure's WebGL canvas fills (and tracks) its container unless the
+  figure has an explicit width/height, via a new ipyvolume entry in
+  WIDGET_BEHAVIORS (js/src/fill.ts + js/src/ipyvolume.ts) and
+  ipyvolume_layout_defaults in _render_widget_base.py
+- Selection (on_selection) and camera traits round-trip to Python
+- A shinywidgets[ipyvolume] extra (ipyvolume 0.6.3 also needs the
+  undeclared ipython_genutils)
+- examples/ipyvolume, unit tests, and Playwright tests (rendering, fill
+  and explicit sizing, selection/camera round trips, pylab re-render
+  lifecycle and model cleanup)
+
+pylab's never-rendered Container shares ipyvue's process-wide Template
+widgets; shared-widget support (#348) keeps those alive across
+re-renders and sessions, so pylab works for reactive outputs too.
+```
+fix: ipyvolume canvas re-measures after fullscreen-exit transitions
+…
+a8d18b5
+```
+Exiting a card's fullscreen mode left the ipyvolume canvas ~10px too
+tall (slightly clipped) until the next container resize: the auto-resize
+sampled the figure toolbar's height mid-transition and no further event
+fired to correct it. After applying a new canvas size, schedule one
+trailing re-measure (350ms) so post-transition toolbar heights are
+picked up. Includes the rebuilt shinywidgets/static/output.js.
+```
+fix(ipyvolume): measure the widget view when its Layout supplies the …
+…
+2e3edd6
+```
+…size
+
+With Layout(height="300px") inside a fillable card, output_widget() stays
+a fill item (taller than the widget) even though the widget disables
+filling, so measuring the output sized the canvas to the container and
+the 300px widget clipped it. Measure the explicitly sized view instead
+when the Layout supplies an inline width/height; otherwise keep measuring
+the output. Adds a Playwright regression test for a Layout-height figure
+inside a fillable card (fails before the fix with the canvas sized to
+the taller output).
+```
+fix(ipyvolume): keep filling when redisplaying a browser-resized figure
+…
+0738010
+```
+The browser resizer saves its measured canvas size back to the figure's
+width/height traits, so re-rendering a cached, session-lifetime figure
+mistook those measurements for an explicit user size and flipped fill
+from True to False (the output then stopped tracking container resizes).
+Record the size last synced from the front-end (via a wrapper on
+set_state(), the method front-end 'update' messages go through) and treat
+a matching size as unset, while a size the user assigned after that sync
+still counts as an intentional explicit size.
+```
+test: disable CDN-only mode for the jupyter-vue mapping test
+…
+a4bf2c1
+```
+The local jupyter-vue require.js path mapping is skipped in CDN-only mode
+(the local-dependency guard), so test_vuetify_widget_open_serves_jupyter_vue,
+which asserts the mapping is present, now turns CDN-only mode off.
+
+Addresses #329 (comment)
+```
+fix: respect explicit ipyvolume figure sizes in sized outputs
+…
+3d2adb1
+```
+Two Copilot review fixes:
+
+- setupFixedSize gated the resizer on any CSS height, so an explicit
+  ipv.Figure(width=400, height=300) inside output_widget(height=...)
+  got overwritten. A Layout height on the widget still drives the
+  canvas (that's a size to fill), but the output's CSS height now only
+  applies while the widget hasn't opted out of filling.
+
+- A viewport-relative Layout height (e.g., Layout(height="50vh"))
+  resizes the view without touching its inline style or the output's
+  size, which neither observer caught; observe the view's geometry
+  too (safe: with no explicit Layout size the view tracks the canvas
+  and resizeToFit() measures the output behind its size cache).
+
+Adds Playwright regression tests for both combinations.
+```
+cpsievert
+force-pushed
+the
+render-ipyvolume
+branch
+2 times, most recently
+from
+644adef to
+88365f3
+Compare
+October 28, 2026 00:41
+chore: sort ipyvolume entries and rebuild the bundle
+…
+45f4b51
+```
+Put the ipyvolume renderer export, fill behavior, layout defaults, and
+their tests in alphabetical order alongside the other renderers, move
+code that earlier rebases displaced back to its upstream position, and
+rebuild shinywidgets/static/output.js from the ipyvolume JS sources.
+```
+cpsievert
+force-pushed
+the
+render-ipyvolume
+branch
+from
+88365f3 to
+45f4b51
+Compare
+October 28, 2026 00:44
+Hide details
+View details
+cpsievert
+merged commit a950b84
+into
+main
+Oct 28, 2026
+0 of 5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+cpsievert
+deleted the
+render-ipyvolume
+branch
+October 28, 2026 00:45
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

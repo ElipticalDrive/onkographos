@@ -1,0 +1,61 @@
+# Textured Gaussians
+
+Also called: Textured 3D Gaussians
+
+## Overview
+Textured Gaussians replace the standard spherical harmonic (SH) coefficients used for view-dependent color in 3D Gaussian Splatting with explicit 2D textures mapped onto each primitive [S1, unofficial]. This method solves the limitation of SH representations in capturing high-frequency appearance details without requiring an increase in the number of primitives [S1, unofficial]. It sets itself apart from sibling methods like View-Dependent Appearance Representations by utilizing spatial UV sampling rather than directional basis functions, enabling high-fidelity texture reconstruction [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $i$, where each Gaussian $i$ is defined by its geometric parameters (mean $\mathbf{\mu}_i$, covariance $\mathbf{\Sigma}_i$), opacity $\alpha_i$, and new appearance attributes: a 2D texture image $T_i$ and local UV coordinates $\mathbf{u}_i = (u_i, v_i)$ [S1, unofficial].
+*   **Output:** A rendered 2D image where each pixel color is computed via alpha-blending [S1, unofficial].
+
+**Data Structures:**
+*   **Texture $T_i$:** A 2D image array (e.g., RGB or RGBA) associated with Gaussian $i$. The resolution is typically small (e.g., $16 \times 16$ or $32 \times 32$) to balance detail and memory [S1, unofficial].
+*   **UV Coordinates $\mathbf{u}_i$:** A 2D vector $(u_i, v_i) \in [0, 1]^2$ stored per Gaussian, representing the sampling location on $T_i$ [S1, unofficial].
+
+**Steps:**
+1.  **Rasterization:** Project each Gaussian $i$ to 2D screen space using the camera projection matrix and the 3D-to-2D covariance transformation [G]. Sort Gaussians front-to-back based on depth [G].
+2.  **UV Sampling:** For each Gaussian $i$, retrieve its associated texture $T_i$ and UV coordinates $\mathbf{u}_i$ [S1, unofficial].
+3.  **Color Computation:** Sample the color $c_i$ from the texture $T_i$ at the location $\mathbf{u}_i$. This is typically done using bilinear interpolation:
+    $$
+    c_i = T_i(\mathbf{u}_i)
+    $$
+    Unlike SH-based methods, $c_i$ is static with respect to the viewing direction $\mathbf{v}$ for a given Gaussian, assuming the texture encodes the appearance directly [S1, unofficial]. If view-dependence is required, it must be encoded within the texture itself or via additional parameters [G].
+4.  **Alpha Blending:** Compute the final pixel color $C(p)$ using the standard front-to-back alpha-blending equation, where $c_i$ is now the sampled texture color:
+    $$
+    C(p) = \sum_{i \in \text{sorted}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+    $$
+    [S1, unofficial]
+
+**Parameters:**
+*   **Texture Resolution:** Not given in the sources. Typical values in related literature range from $16 \times 16$ to $64 \times 64$ pixels [G].
+*   **UV Mapping:** The method assumes pre-computed or learned UV coordinates $\mathbf{u}_i$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **UV Overlap:** If multiple Gaussians map to the same UV coordinates in a shared texture, artifacts may occur. Textured Gaussians typically assign unique textures or UVs per primitive to avoid this [S1, unofficial].
+*   **Memory Bandwidth:** Storing a texture per Gaussian increases memory usage compared to SH coefficients. The trade-off is between storage bandwidth and computational cost of decoding [S1, unofficial].
+*   **Degenerate Input:** If a Gaussian has no associated texture or invalid UV coordinates, the color contribution $c_i$ is undefined. A default color (e.g., white or black) should be used as a fallback [G].
+
+## Subtopics
+
+### Texture-GS
+A method that disentangles the geometry and appearance of 3DGS [S2, unofficial]. It learns a UV mapping network for points near the underlying surface, enabling manipulation such as texture painting and texture swapping [S2, unofficial].
+
+### 3DGM
+A method that represents a 3D scene with a proxy mesh with fixed UV mapping where Gaussians are stored on the texture map [S2, unofficial]. This disentangled representation allows animation and texture editing [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is dominated by rasterization and texture sampling. Texture sampling is $O(1)$ per Gaussian but involves memory access. Overall complexity is similar to standard 3DGS rasterization, $O(N)$ where $N$ is the number of Gaussians [S1, unofficial].
+*   **Memory Complexity:** Higher than SH-based methods. Each Gaussian requires storing a 2D texture array in addition to geometric parameters. Memory usage scales with $N \times H \times W \times C$, where $H, W$ are texture dimensions and $C$ is channels [S1, unofficial].
+*   **Strengths:** Enables high-frequency appearance details without increasing the number of primitives [S1, unofficial]. Allows for explicit texture editing and manipulation [S2, unofficial].
+*   **Limitations:** Increased memory footprint. Requires UV mapping, which may be non-trivial to compute for complex scenes [S2, unofficial].
+*   **When to use:** When high-fidelity texture details are required and memory bandwidth is sufficient. When explicit texture editing is needed [S2, unofficial].
+*   **When not to use:** When memory is constrained or when view-dependent effects are complex and better modeled by SH [S1, unofficial].
+
+## Background
+Textured Gaussians were introduced as an alternative to spherical harmonics in 3D Gaussian Splatting to address artifacts in scenes with semi-transparent objects and to capture high-frequency details [S1, unofficial]. The approach abandons SH coefficients in favor of explicit 2D textures mapped onto each primitive [S1, unofficial]. This method is part of the broader trend of disentangling geometry and appearance in 3D Gaussian representations [S2, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

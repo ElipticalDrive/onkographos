@@ -1,0 +1,248 @@
+--- v006.md
++++ v007.md
+@@ -4,13 +4,19 @@
+ 
+ ## Overview
+-The Conditional Radiance Field with Shared Branch is a neural radiance field architecture designed for shape and color disentanglement, enabling efficient editing by allowing specific submodules to be finetuned [S1]. It maps a 3D location $\mathbf{x}$, viewing direction $\mathbf{d}$, and instance-specific shape code $\mathbf{z}^{(s)}$ and color code $\mathbf{z}^{(c)}$ to radiance $\mathbf{c}$ and scalar density $\sigma$ [S1]. Unlike standard NeRF or basic conditional variants, this method introduces a shared shape network that learns a category-specific geometric representation, improving view synthesis quality and scalability to multiple instances [S1].
++The Conditional Radiance Field with Shared Branch is a neural radiance field architecture designed for shape and color disentanglement, enabling efficient editing by allowing specific submodules to be finetuned [S1]. It maps a 3D location $\mathbf{x}$, viewing direction $\mathbf{d}$, and instance-specific shape code $\mathbf{z}^{(s)}$ and color code $\mathbf{z}^{(c)}$ to radiance $\mathbf{c}$ and scalar density $\sigma$ [S1]. It sets itself apart from standard NeRF [Parent](3065-nerf-hyperparameters.md) by introducing a modular structure with a shared shape branch and instance-specific branches, rather than a single monolithic MLP or simple input concatenation [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** 3D position $\mathbf{x}$, viewing direction $\mathbf{d}$, instance-specific shape latent code $\mathbf{z}^{(s)} \in \mathbb{R}^{32}$, instance-specific color latent code $\mathbf{z}^{(c)} \in \mathbb{R}^{32}$.
+-*   **Outputs:** Scalar density $\sigma \in \mathbb{R}$, radiance color $\mathbf{c} \in \mathbb{R}^3$.
++**Inputs:**
++*   3D position $\mathbf{x} \in \mathbb{R}^3$.
++*   Viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++*   Instance-specific shape code $\mathbf{z}^{(s)} \in \mathbb{R}^{32}$.
++*   Instance-specific color code $\mathbf{z}^{(c)} \in \mathbb{R}^{32}$.
++
++**Outputs:**
++*   Scalar volume density $\sigma \in \mathbb{R}$.
++*   Radiance (color) $\mathbf{c} \in \mathbb{R}^3$.
+ 
+ **Data Structures:**
+-The network consists of five Multi-Layer Perceptrons (MLPs), all with 4 layers, 256 hidden channels, and ReLU activations [S1]:
++The network consists of five Multi-Layer Perceptrons (MLPs), all configured with 4 layers, 256 channels width, and ReLU activations [S1].
+ 1.  $F_{\text{share}}$: Shared shape network.
+ 2.  $F_{\text{inst}}$: Instance-specific shape network.
+@@ -19,25 +25,26 @@
+ 5.  $F_{\text{rad}}$: Output radiance network (2-layer MLP).
+ 
+-Latent codes $\mathbf{z}^{(s)}$ and $\mathbf{z}^{(c)}$ are learnable parameters optimized alongside network weights [S1].
++All intermediate feature vectors output by $F_{\text{share}}$, $F_{\text{inst}}$, and $F_{\text{fuse}}$ are 256-dimensional [S1].
+ 
+-**Positional Encoding:**
+-Standard NeRF positional encoding $\gamma(\cdot)$ is applied to $\mathbf{x}$ and $\mathbf{d}$ [S1].
++**Steps:**
++1.  **Compute Shared Shape Representation:** Apply positional encoding $\gamma(\mathbf{x})$ to the input position $\mathbf{x}$ [14428-sparse-view-and-few-shot-optimization.md]. Pass the result through $F_{\text{share}}$ to obtain the shared shape feature $\mathbf{h}_{\text{share}}$:
++    $$ \mathbf{h}_{\text{share}} = F_{\text{share}}(\gamma(\mathbf{x})) $$
++2.  **Compute Instance-Specific Shape Representation:** Concatenate the shape code $\mathbf{z}^{(s)}$ with the positional encoding $\gamma(\mathbf{x})$. Pass the concatenated vector through $F_{\text{inst}}$ to obtain the instance-specific shape feature $\mathbf{h}_{\text{inst}}$:
++    $$ \mathbf{h}_{\text{inst}} = F_{\text{inst}}([\mathbf{z}^{(s)}, \gamma(\mathbf{x})]) $$
++3.  **Fuse Representations:** Add the shared and instance-specific shape features, then pass the sum through $F_{\text{fuse}}$ to obtain the fused shape feature $\mathbf{h}_{\text{fuse}}$:
++    $$ \mathbf{h}_{\text{fuse}} = F_{\text{fuse}}(\mathbf{h}_{\text{share}} + \mathbf{h}_{\text{inst}}) $$
++4.  **Predict Density:** Pass $\mathbf{h}_{\text{fuse}}$ through the linear layer $F_{\text{dens}}$ to obtain the scalar density $\sigma$:
++    $$ \sigma = F_{\text{dens}}(\mathbf{h}_{\text{fuse}}) $$
++5.  **Predict Radiance:** Concatenate the fused shape feature $\mathbf{h}_{\text{fuse}}$, the color code $\mathbf{z}^{(c)}$, and the positional encoding of the viewing direction $\gamma(\mathbf{d})$. Pass this concatenated vector through the two-layer MLP $F_{\text{rad}}$ to obtain the radiance $\mathbf{c}$:
++    $$ \mathbf{c} = F_{\text{rad}}([\mathbf{h}_{\text{fuse}}, \mathbf{z}^{(c)}, \gamma(\mathbf{d})]) $$
+ 
+-**Algorithm Steps:**
+-1.  **Compute Shared Shape Representation:** Pass the positional encoding of the position, $\gamma(\mathbf{x})$, through the shared shape network:
+-    $$ \mathbf{h}_{\text{share}} = F_{\text{share}}(\gamma(\mathbf{x})) $$
+-2.  **Compute Instance-Specific Shape Representation:** Concatenate the shape code $\mathbf{z}^{(s)}$ with $\gamma(\mathbf{x})$, then pass through the instance-specific shape network:
+-    $$ \mathbf{h}_{\text{inst}} = F_{\text{inst}}([\mathbf{z}^{(s)}; \gamma(\mathbf{x})]) $$
+-3.  **Fuse Representations:** Add the outputs of the shared and instance-specific networks, then pass through the fusion network:
+-    $$ \mathbf{h}_{\text{fuse}} = F_{\text{fuse}}(\mathbf{h}_{\text{share}} + \mathbf{h}_{\text{inst}}) $$
+-4.  **Predict Density:** Pass the fused representation through the linear density network:
+-    $$ \sigma = F_{\text{dens}}(\mathbf{h}_{\text{fuse}}) $$
+-5.  **Predict Radiance:** Concatenate the fused representation $\mathbf{h}_{\text{fuse}}$, the color code $\mathbf{z}^{(c)}$, and the encoded viewing direction $\gamma(\mathbf{d})$. Pass this concatenation through the radiance network:
+-    $$ \mathbf{c} = F_{\text{rad}}([\mathbf{h}_{\text{fuse}}; \mathbf{z}^{(c)}; \gamma(\mathbf{d})]) $$
+-
+-**Rendering:**
+-Rendering follows standard volume rendering with alpha compositing [S1]:
+-$$ \hat{C}(r, \mathbf{z}^{(s)}, \mathbf{z}^{(c)}) = \sum_{i=1}^{N_c} c_i \alpha_i \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right) $$
+-where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $\delta_i = t_{i+1} - t_i$ [S1].
++**Parameters:**
++*   Shape code dimension: 32 [S1].
++*   Color code dimension: 32 [S1].
++*   MLP depth for $F_{\text{share}}, F_{\text{inst}}, F_{\text{fuse}}$: 4 layers [S1].
++*   MLP width: 256 channels [S1].
++*   Feature dimension: 256 [S1].
++*   Optimizer: Adam [S1].
++*   Training learning rate: $10^{-4}$ [S1].
+ 
+ **Pseudocode:**
+@@ -48,102 +55,99 @@
+ 
+ class ConditionalRadianceFieldSharedBranch(nn.Module):
+-    def __init__(self, dim_z=32, hidden_dim=256, num_layers=4):
++    def __init__(self, pos_enc_dim=6, latent_dim=32, hidden_dim=256):
+         super().__init__()
+-        # Fshare: 4 layers, 256 channels, ReLU
+-        self.Fshare = self._make_mlp(num_layers, hidden_dim, relu=True)
+-        # Finst: 4 layers, 256 channels, ReLU
+-        self.Finst = self._make_mlp(num_layers, hidden_dim, relu=True)
+-        # Ffuse: 4 layers, 256 channels, ReLU
+-        self.Ffuse = self._make_mlp(num_layers, hidden_dim, relu=True)
+-        # Fdens: Linear layer (1 layer implied by "linear layer")
+-        self.Fdens = nn.Linear(hidden_dim, 1)
+-        # Frad: 2-layer MLP, 256 channels, ReLU
+-        # Input dim: hidden_dim + dim_z + dim_gamma_d
+-        # Output dim: 3 (RGB)
+-        self.Frad = self._make_mlp(2, hidden_dim, relu=True, final_dim=3)
++        # Positional encoding function as defined in Parent
++        # gamma(x) returns a tensor of size pos_enc_dim * 2 * 3 = 36 for 3D coords
++        # Note: Standard NeRF uses 6 frequencies, resulting in 36 dims.
++        # The source [S1] references Mildenhall et al. [45] for training details.
+         
+-        # Latent codes are parameters
+-        self.z_s = nn.Parameter(torch.randn(1, dim_z))
+-        self.z_c = nn.Parameter(torch.randn(1, dim_z))
+-
+-    def _make_mlp(self, num_layers, hidden_dim, relu=True, final_dim=None):
+-        layers = []
+-        in_dim = hidden_dim
+-        for i in range(num_layers):
+-            out_dim = final_dim if (i == num_layers - 1 and final_dim is not None) else hidden_dim
+-            layers.append(nn.Linear(in_dim, out_dim))
+-            if relu and not (final_dim is not None and i == num_layers - 1):
+-                layers.append(nn.ReLU())
+-            in_dim = out_dim
+-        return nn.Sequential(*layers)
++        # Shared shape network: 4 layers, 256 channels
++        self.F_share = nn.Sequential(
++            nn.Linear(pos_enc_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim) # Output 256-dim feature
++        )
++        
++        # Instance-specific shape network: 4 layers, 256 channels
++        # Input: latent_dim + pos_enc_dim
++        self.F_inst = nn.Sequential(
++            nn.Linear(latent_dim + pos_enc_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim) # Output 256-dim feature
++        )
++        
++        # Fusion shape network: 4 layers, 256 channels
++        # Input: hidden_dim (from sum of share and inst)
++        self.F_fuse = nn.Sequential(
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim) # Output 256-dim feature
++        )
++        
++        # Output density network: Linear layer
++        # Input: hidden_dim
++        self.F_dens = nn.Linear(hidden_dim, 1)
++        
++        # Output radiance network: 2-layer MLP
++        # Input: hidden_dim + latent_dim + pos_enc_dim
++        self.F_rad = nn.Sequential(
++            nn.Linear(hidden_dim + latent_dim + pos_enc_dim, hidden_dim), nn.ReLU(),
++            nn.Linear(hidden_dim, 3) # Output RGB
++        )
+ 
+     def forward(self, x, d, z_s, z_c):
+         """
+-        x: [N, 3] positions
+-        d: [N, 3] directions
+-        z_s: [N, 32] shape codes
+-        z_c: [N, 32] color codes
++        x: (N, 3) position
++        d: (N, 3) viewing direction
++        z_s: (N, 32) shape code
++        z_c: (N, 32) color code
+         """
+-        # Positional encoding is assumed to be handled externally or as a helper
+-        # For implementation completeness, we assume gamma is a function that expands dims
+-        # Standard NeRF gamma(x) expands 3D to 6D (sin/cos)
+-        gamma_x = positional_encoding(x, num_frequencies=10) # [N, 60]
+-        gamma_d = positional_encoding(d, num_frequencies=4)  # [N, 24]
++        # Apply positional encoding
++        gamma_x = positional_encoding(x)
++        gamma_d = positional_encoding(d)
+         
+         # 1. Shared shape representation
+-        h_share = self.Fshare(gamma_x) # [N, 256]
++        h_share = self.F_share(gamma_x)
+         
+         # 2. Instance-specific shape representation
+-        # Concatenate z_s and gamma_x
+-        z_s_expanded = z_s.unsqueeze(1).expand(-1, gamma_x.size(1), -1).reshape(-1, z_s.size(1)) # [N, 32]
+-        # Note: z_s is per-instance, but here we assume batched processing where z_s corresponds to rows
+-        # In practice, z_s might be [N_instances, 32]. If batched by ray, z_s must be gathered.
+-        # Assuming z_s and z_c are passed as [N, 32] for the current batch of rays belonging to instances.
+-        inst_input = torch.cat([z_s, gamma_x], dim=-1) # [N, 32+60]
+-        h_inst = self.Finst(inst_input) # [N, 256]
++        x_inst_input = torch.cat([z_s, gamma_x], dim=-1)
++        h_inst = self.F_inst(x_inst_input)
+         
+         # 3. Fuse representations
+-        h_fuse = self.Ffuse(h_share + h_inst) # [N, 256]
++        h_fuse = self.F_fuse(h_share + h_inst)
+         
+         # 4. Predict density
+-        sigma = self.Fdens(h_fuse).squeeze(-1) # [N]
++        sigma = self.F_dens(h_fuse).squeeze(-1)
+         
+         # 5. Predict radiance
+-        # Concatenate h_fuse, z_c, gamma_d
+-        rad_input = torch.cat([h_fuse, z_c, gamma_d], dim=-1) # [N, 256+32+24]
+-        c = self.Frad(rad_input) # [N, 3]
++        rad_input = torch.cat([h_fuse, z_c, gamma_d], dim=-1)
++        c = self.F_rad(rad_input)
+         
+-        return c, sigma
++        return sigma, c
+ 
+-def positional_encoding(x, num_frequencies=10):
+-    """Standard NeRF positional encoding."""
+-    x = x.unsqueeze(-1) # [N, 3, 1]
+-    scales = torch.tensor([2**i for i in range(num_frequencies)], dtype=x.dtype, device=x.device)
+-    shaped = x * (2 * torch.pi * scales) # [N, 3, num_freq]
+-    encoded = torch.cat([torch.sin(shaped), torch.cos(shaped)], dim=-1) # [N, 3, 2*num_freq]
+-    return encoded.reshape(x.shape[0], -1)
++def positional_encoding(x, min_deg=0, max_deg=6):
++    """
++    Standard NeRF positional encoding.
++    x: (..., 3)
++    Returns: (..., 3 * 2 * max_deg)
++    """
++    scales = [2**i for i in range(min_deg, max_deg)]
++    xb = torch.reshape((x[..., None, :] * scales), (*x.shape[:-1], len(scales), x.shape[-1]))
++    xb = torch.reshape(torch.cat([xb, xb + torch.pi/2.0], -1), (*x.shape[:-1], len(scales) * 2 * x.shape[-1]))
++    encoding = torch.cat([torch.sin(xb), torch.cos(xb)], -1)
++    return encoding
+ ```
+ 
+-**Parameters:**
+-*   Shape and color code dimension: 32 [S1].
+-*   MLP depth: 4 layers for $F_{\text{share}}$, $F_{\text{inst}}$, $F_{\text{fuse}}$ [S1].
+-*   MLP width: 256 channels [S1].
+-*   Feature dimension: 256-dimensional features output by $F_{\text{share}}$, $F_{\text{inst}}$, $F_{\text{fuse}}$ [S1].
+-*   Optimizer: Adam [S1].
+-*   Training learning rate: $10^{-4}$ [S1].
+-*   Edit learning rate: $10^{-2}$ [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Caching:** Because the set of training rays is small during optimization, caching computed features is computationally feasible and recommended to accelerate edits [S1].
+-*   **Disentanglement:** The architecture explicitly separates shape and color paths to enable independent editing. Mixing these paths degrades editing quality [S1].
+-
+ ## Operating characteristics
+-*   **Performance:** On the PhotoShapes dataset, the shared shape branch improves PSNR from 33.91 (without shared branch) to 35.79 [S1].
+-*   **Efficiency:** Accelerates color edits by $3.2\times$ and shape edits by $1.9\times$ compared to non-modular approaches by allowing selective updates [S1].
+-*   **Scalability:** The shared branch helps the model scale to more instances by learning a category-specific geometric representation [S1].
+-*   **Limitations:** Requires joint optimization of latent codes and network weights, which can be sensitive to learning rate choices (e.g., $10^{-4}$ for training, $10^{-2}$ for editing) [S1].
++*   **Performance:** On the PhotoShapes dataset, the shared shape branch improves PSNR from 33.91 (model without shared branch) to 35.79 [S1].
++*   **Efficiency:** The modular design allows for caching during optimization because the set of training rays is small [S1]. This accelerates color edits by $3.2\times$ and shape edits by $1.9\times$ compared to non-modular approaches [S1].
++*   **Scalability:** The shared shape branch helps the model scale to more instances [S1].
++*   **Limitations:** The method requires jointly optimizing latent codes for each instance, which increases memory usage compared to a single-instance NeRF if many instances are stored simultaneously [S1].
+ 
+ ## Background
+-The method was introduced in "Editing Conditional Radiance Fields" (ICCV 2021) [S1]. It builds on the inductive biases of NeRF, specifically positional encodings and stage-wise network design, to create a modular model for shape and color disentanglement [S1]. It is used for editing 3D objects by optimizing a loss over network parameters and learned codes, allowing for accurate and efficient modifications [S1].
++The method was introduced in "Editing Conditional Radiance Fields" [S1]. It builds on the inductive biases of NeRF [Parent](3065-nerf-hyperparameters.md) and Mildenhall et al. [45], specifically the use of positional encodings and stage-wise network design [S1]. The architecture was designed to facilitate shape and color editing by disentangling these attributes into separate network branches and latent codes [S1].
+ 
+ ## Sources

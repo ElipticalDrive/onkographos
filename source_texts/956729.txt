@@ -1,0 +1,85 @@
+Contribute to maelkobura/nobara.engine development by creating an account on GitHub.
+
+feat(nVoxel)!: mesh chunks with greedy cubes, models, and occlusion by maelkobura · Pull Request #38 · maelkobura/nobara.engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+maelkobura
+commented
+Nov 7, 2026
+Copy link
+Copy Markdown
+Owner
+nRenderer can keep and draw the geometry of chunks, and nVoxel stores their blocks, but nothing turned blocks into geometry yet. This change adds nVoxel.Renderer, the client extension of nVoxel that meshes the chunks of every grid into the chunk geometry of nRenderer, in background jobs, as blocks change and chunks load. The server keeps no meshing code.
+What changes
+Add the module nobara.voxel.renderer (src/nVoxel/Nobara.Voxel.Renderer/), client side, an extension of nobara.voxel that depends on nVoxel and nRenderer, and on nBlocks (the visual of states) and nContext (the loading task and the end of the session), whose services it uses directly.
+Visual of block states: declare and read the free properties RenderTexture (and RenderTextureSide, Top, Bottom, North, East, South, West), RenderModel, and RenderTint of Block resources, variants applied, into tables per state built once at start: textures by face after the orientation of the state, tint, category of faces from Opacity, and models placed and turned. A missing texture or mesh stops the start with BlockVisualException, with its file and line.
+Meshers: cubes are meshed with greedy meshing (largest rectangles of equal faces per slice, hidden faces removed, neighbors read in the frozen copy, cut-out faces kept between cut-out blocks, faces between transparent blocks of one type hidden); models are placed in their cell and turned with the orientation of the state; a multi-block is meshed from its origin cell by its chunk, even when it overhangs it. A module that adds a shape registers an IBlockMesher (IVoxelMeshing.RegisterMesher), which receives the block, its neighbors, its visual, and, for an instance-dependent shape, a frozen copy of its block data; a shape without mesher is reported at start.
+Ambient occlusion per vertex, from the blocks beside each corner; full light everywhere, as no light is computed yet.
+Remeshes in background jobs on a frozen copy of the chunk and of one layer of cells of its 26 neighbors, made on the loop thread during extraction. Chunks are marked by batch notifications (with their neighbors when a change touches a border) and by loading; at most one remesh per chunk at a time and per frame; changes made by actions first, then nearest the camera; a result whose chunk changed meanwhile is discarded. Results go to ChunkGeometry during extraction: a group per grid, a section per chunk, with the face-to-face connections for the visibility graph.
+Session: the loading task "meshed chunks of the simulation area"; sections freed when the session ends; the world state counter "meshed chunks".
+nRenderer: the fourth word of ChunkVertex now holds a 7-bit tint index, and the four channels of light go from 6 bits in quarters to 5 bits in halves (0 to 15.5); ChunkGeometry.SetTints keeps a palette of 128 linear colors that the shader library reads at binding 8 (TintsBinding, in the set of DrawLayout) with nobara_chunkTint; RenderMesh.Geometry (MeshGeometry) keeps the triangles of a mesh on the CPU.
+nVoxel: IShapeRegistry.GetOrientation gives the rotation of the orientation of a state in its cell; Chunk.GetBlockDataView and Chunk.CopyBlockData give a live view or a frozen copy of the block data of a cell, which a job may read.
+Choices made
+Tint as a palette index in the vertex. A tint per state (grass, leaves) must not stop greedy meshing, and a full color per vertex does not fit in 16 bytes. The 3 reserved bits and one bit of each channel of light make a 7-bit index into a palette of 128 colors; light in halves is enough for smoothed light, which averages four whole values. The layer of texture stays per vertex, so per face.
+Textures of blocks in the existing texture arrays of nRenderer, one per size and settings, rather than an array of their own: one texture mechanism, stable identifiers, no copy, and blocks may mix texture sizes. A pipeline that draws chunks reads several arrays.
+Property syntax. Flat free properties per face (RenderTextureTop…), so a variant can change one face; the most specific wins. Faces are named in the reference orientation and turn with the state. RenderTint is #RRGGBB in sRGB. A model has its origin at the center of the bottom of its cell and turns around the center of the cell; each slot takes the Albedo texture of its material, else the RenderTexture of the block.
+A neighbor that is not loaded hides the faces next to it in grids that load chunks with tickets, so the edge of the view area shows no walls; in other grids, an absent chunk is air.
+Models do not hide the faces of their neighbors and cast no ambient occlusion: the native model shape is a full box for collision only.
+Greedy meshing merges only faces whose four corners have the same occlusion, so shadows stay at their corners; the diagonal of a quad joins its two lighter corners.
+A change made by an action shows at the next frame: its remesh starts in the frame of its tick, and the next frame waits for it if it did not finish. Loading and neighbor remeshes never wait.
+One palette of tints per context, held by ChunkGeometry: SetTints replaces the whole palette, and nVoxel.Renderer sets it when it starts. Another module that writes sections with tints would have to share it; there is no such module yet.
+BREAKING CHANGE: the fourth word of ChunkVertex changes. The sky light and the red, green, and blue light of blocks take 5 bits each, in halves from 0 to 15.5 (ChunkVertex.MaxLight is now 15.5), and the top 7 bits hold the tint index; a shader that decoded the vertex itself must decode the new layout, or use the shader library. The constructor of ChunkVertex gains an optional tint parameter: code that calls it must be compiled again. IShapeRegistry gains GetOrientation, which an implementation of the interface outside nVoxel must add.
+Measurements
+Debug and Release builds on the development machine (11 workers).
+Case
+Time
+Remesh of a surface chunk (hills of dirt over stone, 4,488 triangles), Release
+1.3 ms
+The same, Debug
+10 ms
+Steady-state managed allocation of the mesher
+0 bytes
+Documentation
+src/nVoxel/README.md: the extension nVoxel.Renderer, GetOrientation, and BlockDataView
+src/nRenderer/README.md: tints, the vertex, and MeshGeometry
+docs/explanation/chunk-meshing.md (new)
+docs/explanation/chunk-geometry.md: the vertex
+docs/explanation/glossary.md: ambient occlusion, greedy meshing, mesher, remesh
+Validation
+dotnet build Nobara.slnx: no warning, no error
+dotnet test src/nVoxel/Nobara.Voxel.Renderer.Tests: 29 passed, three runs in a row (greedy patterns, hidden faces between chunks, occlusion at corners, turned model, multi-block across two chunks, discarded result, one remesh for a hundred changes, order of the remeshes and loading from the viewer outward, no allocation, loading task, session end, flat world at the default view radius drawn by a culling pipeline on the fake device)
+dotnet test src/nRenderer/Nobara.Renderer.Tests, GPU tests included: 139 passed, among them the palette of tints and the decoding of the tint index and of nobara_chunkTint at binding 8 on the GPU
+dotnet test Nobara.slnx, GPU tests included, on an AMD Radeon RX 5700 XT: every suite passed, except one test of Nobara.Frames.SDL2.Tests that switches the window to exclusive full screen, which Windows refused on this machine (DISP_CHANGE_FAILED); nFrames is not changed
+python .github/scripts/check_all.py: script tests, license headers, forbidden terms, internal links, markdownlint, SDK pack, generated solution, module sheets, and build passed; tests as above
+feat(nVoxel)!: mesh chunks with greedy cubes, models, and occlusion
+02c9e98
+Hide details
+View details
+maelkobura
+merged commit de53621
+into
+main
+Nov 7, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+maelkobura
+deleted the
+feat/nvoxel-renderer
+branch
+November 7, 2026 20:49
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

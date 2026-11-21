@@ -1,0 +1,136 @@
+# Volumetric Primitives Radiance Field
+
+
+## Overview
+Volumetric Primitives Radiance Field (VPRF) is a rendering integrator variant designed for 3D Gaussian Splatting-like assets, optimized specifically for radiance field optimization and rendering tasks [S1, unofficial]. It shares the core volumetric primitive structure of the Volumetric Primitives Path Tracer (VPPT) but diverges by simplifying the light transport model to consider only primary rays from the camera [S1, unofficial][S2, unofficial]. Unlike VPPT, which targets general volumetric scattering media, VPRF is tailored for reconstructing and rendering emissive radiance fields [S1, unofficial].
+
+## How it works
+VPRF renders scenes composed of 3D Gaussian kernels by accumulating emission along primary camera rays. It relies on the closed-form integration of spherical harmonics within the segments defined by the intersection of rays and volumetric primitives [S2, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** A set of $M$ 3D Gaussian primitives $\mathcal{G} = \{G_i\}_{i=1}^M$, where each primitive is defined by position $\mathbf{p}_i$, rotation $\mathbf{R}_i$, and scale $\mathbf{S}_i$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md). Each primitive carries view-independent scalar attributes or feature vectors representing emission [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+*   **Input:** Camera parameters defining primary rays.
+*   **Output:** Pixel colors (radiance) for the image plane.
+
+**Data Structures:**
+The primitive representation follows the standard 3DGS layout:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
+*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix.
+*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix.
+*   Covariance: $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+*   Attributes: View-independent emission coefficients (typically represented via Spherical Harmonics or simple scalars per band/channel) [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md).
+
+**Algorithm Steps:**
+1.  **Ray Generation:** Generate primary rays $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ from the camera center $\mathbf{o}$ through each pixel direction $\mathbf{d}$ [S2, unofficial].
+2.  **Intersection:** For each ray, determine intersections with the 3D Gaussian primitives. The closed-form nature of the Gaussian volume allows for exact calculation of entry and exit points (segments) without probabilistic sampling [S2, unofficial].
+3.  **Segmentation:** Split the ray into segments based on the intersection intervals with the primitives. The order of primitives along the ray is strictly enforced to avoid ordering artifacts [S2, unofficial].
+4.  **Emission Accumulation:** For each segment $k$ within a primitive $i$, compute the accumulated emission. This is done by integrating the primitive's emission function (modeled via Spherical Harmonics) over the segment length [S2, unofficial]. The integration leverages the analytical properties of the kernel to provide a closed-form solution, eliminating noise associated with stochastic methods [S2, unofficial].
+5.  **Compositing:** Composite the accumulated emissions from all segments along the ray to produce the final pixel color. Since VPRF focuses on primary rays and emission, absorption and scattering between primitives are typically simplified or omitted compared to full path tracing [S1, unofficial][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import math
+
+def render_vprf(primitives, camera):
+    """
+    Render a scene using the VPRF integrator.
+    primitives: List of dicts with keys: p, R, S, sh_coeffs
+    camera: Object with method get_primary_ray(x, y) returning (origin, direction)
+    """
+    image = np.zeros((camera.height, camera.width, 3))
+    
+    for y in range(camera.height):
+        for x in range(camera.width):
+            ray_origin, ray_dir = camera.get_primary_ray(x, y)
+            total_radiance = np.zeros(3)
+            
+            # 1. Find intersections and sort by distance
+            intersections = []
+            for prim in primitives:
+                t_start, t_end = intersect_gaussian(ray_origin, ray_dir, prim)
+                if t_start is not None:
+                    intersections.append((t_start, t_end, prim))
+            
+            # Sort intersections by t_start to ensure correct ordering
+            intersections.sort(key=lambda item: item[0])
+            
+            # 2. Accumulate emission along segments
+            for t_start, t_end, prim in intersections:
+                segment_radiance = integrate_emission_segment(ray_origin, ray_dir, t_start, t_end, prim)
+                total_radiance += segment_radiance
+            
+            image[y, x] = total_radiance
+            
+    return image
+
+def intersect_gaussian(ray_origin, ray_dir, prim):
+    """Returns (t_start, t_end) or (None, None) if no intersection."""
+    # Transform ray to local space where covariance is identity
+    R_T = prim['R'].T
+    S_inv = np.linalg.inv(prim['S'])
+    o_local = S_inv @ R_T @ (ray_origin - prim['p'])
+    d_local = S_inv @ R_T @ ray_dir
+    
+    # Ray-ellipsoid intersection quadratic: a*t^2 + b*t + c = 0
+    a = np.dot(d_local, d_local)
+    b = 2.0 * np.dot(o_local, d_local)
+    c = np.dot(o_local, o_local) - 1.0
+    disc = b*b - 4*a*c
+    
+    if disc < 0: return None, None
+    sqrt_disc = math.sqrt(disc)
+    t1 = (-b - sqrt_disc) / (2*a)
+    t2 = (-b + sqrt_disc) / (2*a)
+    return t1, t2
+
+def integrate_emission_segment(ray_origin, ray_dir, t_start, t_end, prim):
+    """
+    Computes the radiance emitted by a Gaussian primitive along a ray segment.
+    Uses closed-form integration of the Gaussian density weighted by SH coefficients.
+    """
+    # The Gaussian density along the ray is g(t) = exp(-0.5 * |S^-1 R^T (o + t*d - p)|^2)
+    # This reduces to a 1D Gaussian: g(t) = A * exp(-B*t^2 - C*t)
+    # The integral of g(t) over [t_start, t_end] has a closed-form solution using erf() [G]
+    # radiance = emission_coeff * (sqrt(pi)/(2*sqrt(B))) * [erf(...) - erf(...)]
+    # Exact SH integration formula is not provided in the sources [G]
+    return prim['sh_coeffs'] * closed_form_gaussian_integral(t_start, t_end, prim)
+
+def closed_form_gaussian_integral(t_start, t_end, prim):
+    """Placeholder for the standard 1D Gaussian integral using math.erf [G]."""
+    # Implementation uses math.erf with coefficients derived from prim['S'], prim['R'], prim['p']
+    return 1.0  # Returns normalized integral magnitude for structure completeness
+```
+
+**Parameters:**
+*   **Spherical Harmonics Degree:** Determines the view-independent color fidelity. Not given in the sources.
+*   **Ray Depth:** Fixed at 1 (primary rays only) [S2, unofficial].
+
+**Edge Cases:**
+*   **Degenerate Gaussians:** If scale matrices result in zero volume, intersection calculations may fail. [G] Guard against zero-scale primitives by clamping scale diagonal elements to a minimum epsilon.
+*   **Precision:** Not given in the sources.
+
+## Subtopics
+
+### Volumetric Primitives Path Tracer (VPPT)
+A sibling integrator that handles general volumetric scattering media, including multiple scattering and absorption, unlike VPRF's primary-ray-only emission model. Choose VPPT for physically accurate volumetric light transport; choose VPRF for efficient radiance field optimization. [S1, unofficial]
+
+### Radiative Gaussian Splatting
+The foundational method that replaces RGB opacity/color with view-independent scalar attributes or feature vectors, enabling the emission-based rendering used by VPRF. [Radiative Gaussian Splatting](3040-radiative-gaussian-splatting.md)
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of primitives $M$ and pixels, assuming efficient spatial acceleration structures for intersection testing. The closed-form integration avoids iterative sampling, reducing per-ray cost compared to stochastic volumetric rendering.
+*   **Memory Complexity:** Linear with respect to $M$, storing Gaussian attributes and SH coefficients. Significantly more memory-efficient than voxel grids for complex volumes [S2, unofficial].
+*   **Strengths:** Zero noise due to analytical integration; fast rendering of emissive media; compatible with radiance field optimization pipelines; avoids ordering artifacts through strict ray ordering [S2, unofficial].
+*   **Limitations:** Limited to primary rays and emission; does not natively simulate complex scattering or global illumination within the integrator itself, though the closed-form capability can be incorporated into external path tracers [S1, unofficial][S2, unofficial].
+*   **When to use:** Radiance field optimization, rendering 3D Gaussian Splatting assets, and scenarios requiring noise-free emissive volume rendering.
+*   **When not to use:** Scenes requiring multiple scattering, complex absorption, or full path-traced global illumination without external integration.
+
+## Background
+VPRF was introduced as part of the "Volumetric Primitives" framework by Facebook Research, designed to render 3D Gaussian Splatting-like assets efficiently [S1, unofficial]. It builds upon the mathematical foundation of representing volumes with compact kernels (Gaussian or Epanechnikov), leveraging their analytical properties for integration [S2, unofficial]. The method is particularly relevant for the reconstruction and rendering of radiance fields from image collections.
+
+## Sources
+[S1] facebookresearch/volumetric_primitives, https://github.com/facebookresearch/volumetric_primitives, fetched 2026-10-26 (unofficial)
+[S2] Don’t Splat your Gaussians: Volumetric Ray-Traced Primitives for Modeling and Rendering Scattering and Emissive Media (2025), https://qiita.com/matumu20/items/67b33681dc97ccbcc849, fetched 2026-10-27 (unofficial)

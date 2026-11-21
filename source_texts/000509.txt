@@ -1,0 +1,141 @@
+Hi! I would like to know, what would be the most efficient way of traversing an octree in CUDA (for a raytracer). I think that each recursion should be done as a separate kernel execution pass. I’d like to know your opin…
+
+Best way of traversing an octree in CUDA? - CUDA Programming and Performance - NVIDIA Developer Forums
+Best way of traversing an octree in CUDA?
+Accelerated Computing
+CUDA
+CUDA Programming and Performance
+jesusgumbau
+April 29, 2009, 1:36pm
+1
+Hi! I would like to know, what would be the most efficient way of traversing an octree in CUDA (for a raytracer). I think that each recursion should be done as a separate kernel execution pass. I’d like to know your opinions.
+Greetings.
+E.D_Riedijk
+April 30, 2009, 4:50am
+2
+I think not, you can just traverse it in one kernel. I traverse a kd-tree in a kernel.
+jesusgumbau
+April 30, 2009, 7:30am
+3
+Yeah, I could do the whole traversal in a single kernel executon. But smaller kernels are supposed to be better. So I was wondering what would be the most efficient way of doing it.
+Simon_Green
+April 30, 2009, 10:43am
+4
+You should do it in a single kernel (kernel invocation is quite expensive) - to get around the recursion either use a stack in local memory, or use a stackless traversal.
+I would recommend binding the octree node data as a texture and reading it with tex1Dfetch() (since you will be accessing it randomly).
+Some references:
+[url=“http://s08.idav.ucdavis.edu/olick-current-and-next-generation-parallelism-in-games.pdf”]http://s08.idav.ucdavis.edu/olick-current-...sm-in-games.pdf[/url]
+[url=“GigaVoxels : Ray-Guided Streaming for Efficient and Detailed Voxel Rendering”]http://artis.imag.fr/Publications/2009/CNLE09/[/url]
+jesusgumbau
+April 30, 2009, 5:35pm
+5
+Ok, I wrote the whole octree traversal and reordering by distance into a single kernel execution and it seems to work well. I am able to render 100,000 highly packet spheres at 3FPs using raytracing at a resolution of 512x512.
+What about this performance?
+However, I see some problems of doing the whole traversal in a single kernel. Each kernel represents a ray.
+First of all, each kernel uses a stack to traverse the octrees and a temporal list to re-order octree nodes in “local” memory (which seems to be global memory). This forces me to manually introduce a maximum value for them, wasting lots of memory in some cases and needing much more in others.
+Moreover, trying to fit these temporal structures in shared memory is tricky.
+What do you think?
+E.D_Riedijk
+May 1, 2009, 5:40am
+6
+Hmm, I would have each block or each thread represent a ray. The latter helps with cache hits traversing the octree. a 2D grid and 2D block would do that quite good normally. I believe it is called packet ray traversal or something similar.
+jesusgumbau
+May 1, 2009, 8:55am
+7
+A thread for me represents a ray, and that ray traverses the octree in a single kernel execution. My block and grid are configured as 2D, so by using texture fetches instead of global memory I expect to take advantage of the cache and to speed up my traversal even more.
+One more question: as the child nodes of each octree node are 8 consecutive memory posisions… it should be better to allocate them as condtant memory instead of texture memory?
+However, I am still wondering… in theory due to the SIMD nature of the threads, performin a full tree traversal by using a single kernel would cause threads to stall a lot, because of the amount of conditional code required for the traversal. That’s why I initially decided doing it by using small kernels and simulating the recursion with many CUDA calls.
+However, Simon Green said it was better to code it all into a single kernel… I’d love to know the advatages of this approach, taking into account that the SIMD nature woud produce lots of stalls and idle threads.
+Greetings.
+E.D_Riedijk
+May 1, 2009, 10:30am
+8
+If your threads (rays) of a single warp are coherent (they have almost the same direction), they traverse the octree in exactly the same way (small differences aside). Also divergent branches are not as expensive as one might think. You can see with the profiler how many divergent branches you have, and as always with CUDA, you may even want to benchmark several ways to do something. That is the only way to really know for sure. I have had numerous times when I was sure I was speeding things up by smart programming and it resulted in slower speeds…
+jesusgumbau
+May 14, 2009, 1:27pm
+9
+Hi guys. Thanks a lot for such precious info. I have one more question for you. I am writing a ray-tracer which operates in two steps. The first step each ray traverses the GPU and outputs a list with the nodes of the octree which intersect the ray. In the second step, this info (a list of octrees per pixel) is taken as input and used to detect collisions against the triangles inside them in order.
+I was wondering what would be the fastest option: doing it in two stages or in a single one. I’m doing it in two stages in order to minimize the complexity of the kernel.
+A last simple question: Is there any limit on program size or registers needed execute a program. I noticed that adding and using a new variable to my program caused it silently fail in its execution! This is why I think I would not be able to include both the octree traversal and triangles intersection tests in a single program.
+seibert
+May 14, 2009, 11:08pm
+10
+The limit on program size is nearly impossible to reach, but the limit on registers is per block, not per thread. (See appendix A for the limits) If you are running out of registers, then the easiest way to get back under the limit is to reduce the number of threads per block. If you pass the --ptxas-options=-v parameter to nvcc, it will print out the number of registers per thread the kernel uses. (this is so useful, I wish it was the default output for ptxas!) Then you can look at section 5.2 in the programming guide for the formula to compute how many registers each block uses.
+jesusgumbau
+May 15, 2009, 7:21am
+11
+Such a useful information. However, if you run out of registers, the system is supposed to use local (global) memory with the consequent performance penalty. Therefore, my program should always execute, but at much lower speed. Is this correct?
+seibert
+May 15, 2009, 1:33pm
+12
+Not quite. The compiler (or is it ptxas?) will sometimes try to reduce the number of registers by spilling them to local memory. You have some control over this with the --maxrregcount option, which lets you specify the maximum number of registers per thread to use. However, once the compilation and assembly is finished, the number of registers required per thread is fixed. The decision about local memory vs. registers is made at compile-time, not run-time, whereas you don’t know if you will run out of registers until run-time, when you specify the block size.
+If you run out of registers you have several options:
+Reduce the number of threads per block. (Easiest)
+Use --maxrregcount with a smaller number.
+Go back and make your kernel simpler. (Usually not possible)
+Buy a GTX 200-series or Tesla 10-series card. :) They have 16384 registers per multiprocessor, compared to 8192 for the older GeForce 8 and 9 series.
+stefan_banev
+July 7, 2009, 10:02pm
+13
+If your threads (rays) of a single warp are coherent (they have almost the same direction), they traverse the octree in exactly the same way (small differences aside).
+It would be great if you may buck your statement by something more substantial then just by statement itself; in my experience, the code path divergence issue for octree traversal is an issue even for neighboring rays if you go-down into inner-cell subdivision levels (it is the only way to have a good rendering quality for volumetric ray tracing/casting (high quality volume rendering)). In fact, this intrinsic SIMD limitation of today’s GPU was the “deal killer” issue for my development of volumetric ray-tracer under GPU/CUDA. New truly MIMD GPU must have no such limitations; unfortunately it is not enough to call things MIMD it should be an actually MIMD; well, will see…
+Related topics
+Topic
+Replies
+Views
+Activity
+Help with Volume Rendering & Octrees
+CUDA Programming and Performance
+13
+19932
+July 18, 2009
+ray tracer choosing tools
+CUDA Programming and Performance
+24
+34524
+May 20, 2008
+Ray Tracing
+CUDA Programming and Performance
+15
+17175
+April 14, 2007
+Best Way to Represent a Tree
+CUDA Programming and Performance
+1
+2668
+February 1, 2009
+Thinking Parallel, Part II: Tree Traversal on the GPU
+Technical Blog
+6
+1117
+August 27, 2022
+Raycasting performance on GPU
+CUDA Programming and Performance
+13
+6074
+September 28, 2008
+Premature stop of BVH traversal?
+Raytracing
+hw
+,
+cuda
+,
+rtx
+3
+764
+January 24, 2024
+Is there any performance difference implementing a ray-tracer in cuda vs. rendering pipelines?
+CUDA Programming and Performance
+7
+3172
+March 2, 2019
+CUDA recursion failed
+CUDA Programming and Performance
+11
+3992
+November 13, 2016
+CUDA and raytracing
+CUDA Programming and Performance
+0
+3620
+August 23, 2007

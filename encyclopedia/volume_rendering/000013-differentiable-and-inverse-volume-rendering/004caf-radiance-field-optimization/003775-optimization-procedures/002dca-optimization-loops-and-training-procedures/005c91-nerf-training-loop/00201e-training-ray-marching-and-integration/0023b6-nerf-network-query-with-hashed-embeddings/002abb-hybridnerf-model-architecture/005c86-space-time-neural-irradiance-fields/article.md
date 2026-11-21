@@ -1,0 +1,186 @@
+# Space-time Neural Irradiance Fields
+
+Also called: ST-NIF, Space-time Neural Irradiance Fields for Free-Viewpoint Video
+
+## Overview
+Space-time Neural Irradiance Fields (ST-NIF) is a differentiable volume rendering method that represents a dynamic scene as a 4D implicit function mapping spatiotemporal coordinates $(x,t)$ to color and volume density [S1]. It solves the problem of free-viewpoint video synthesis from a single moving camera by regularizing the inherently under-constrained geometry of dynamic scenes [S1]. Unlike static NeRF variants, ST-NIF introduces empty-space and static-scene losses to prevent haze-like artifacts and disocclusion errors, respectively [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A stream of $N_f$ RGB-D images $I_t: u \rightarrow (c, d)$ at discrete time steps $t \in \mathcal{T} = \{1, \dots, N_f\}$, where $u=(u,v)$ are 2D pixel coordinates [S1].
+*   Camera calibrations $P_t$ for each frame [S1].
+*   Near and far clipping planes $s_n$ and $s_f$ [S1].
+
+**Outputs:**
+*   A neural network $F$ that approximates the irradiance field: $F: (x,t) \rightarrow (c, \sigma)$, where $c$ is color and $\sigma$ is volume density [S1].
+*   Rendered RGB images for novel viewpoints and time steps [S1].
+
+### Data Structures
+*   **Neural Network:** An MLP with the same architecture as the original NeRF, except the first 8 layers use 1024 activations instead of 256 [S1].
+*   **Positional Encoding:** Applied to spatial coordinates with 4 frequency bands [S1].
+*   **Time Normalization:** Time $t$ is normalized to the range $[-1, 1]$ [S1].
+*   **Sample Pool:** A set of 3D points $\mathcal{X}$ derived from the union of sampling locations along all rays of all frames, excluding points closer than $\epsilon$ to observed surfaces [S1].
+
+### Parameters
+*   **Batch Size:** $N_r = 1024$ rays randomly drawn from an input frame $I_t$ without replacement [S1].
+*   **Empty-space margin:** $\epsilon = 0.05 \cdot (s_f - s_n)$ [S1].
+*   **Loss Weights:** $\alpha, \beta, \gamma$ for depth, empty-space, and static losses respectively [S1].
+*   **Training Iterations:** 800,000 [S1].
+
+### Ray Parameterization
+A ray $r$ at time $t$ is determined by a pixel location $u$ and camera calibration $P_t$. The ray is parameterized such that the parameter $s$ denotes scene depth. This is achieved by setting the directional vector $d$ such that its projection onto the principal ray has a unit norm in the camera space [S1].
+
+### Training Steps
+
+1.  **Hierarchical Sampling:** Use hierarchical volume sampling as in the original NeRF to generate coarse and fine samples along each ray [S1].
+2.  **Static Scene Sample Pool Construction:**
+    *   Take the union of all sampling locations along all rays of all frames to form a sample pool $\mathcal{X}$ [S1].
+    *   Exclude all points closer to any observed surfaces than threshold $\epsilon$ [S1].
+3.  **Static Loss Sampling:**
+    *   Randomly draw a fixed number of sampling locations from $\mathcal{X}$ at each training iteration [S1].
+    *   Add small random jitters to each sampling location [S1].
+    *   Randomly choose a time $t'$ for each sample location $x$, ensuring $(x, t')$ is not close to any scene surfaces [S1].
+4.  **Forward Pass:** Query the network $F$ for color and density at sampled points [S1].
+5.  **Volume Rendering:** Compute rendered color $\hat{C}(r,t)$ using numerical quadrature (Eq. 1) [S1].
+6.  **Loss Computation:** Calculate $L_{color}$, $L_{depth}$, $L_{empty}$, and $L_{static}$ [S1].
+7.  **Optimization:** Minimize total loss $L$ [S1].
+
+### Formulas
+
+**Volume Rendering:**
+$$ \hat{C}(r) = \int_{s_n}^{s_f} T(s) \sigma(r(s)) c(r(s), d) ds $$
+$$ T(s) = \exp \left( -\int_{s_n}^{s} \sigma(r(p)) dp \right) $$
+[S1]
+
+**Color Reconstruction Loss:**
+$$ L_{color} = \sum_{(r,t) \in \mathcal{R}} \| \hat{C}(r,t) - C(r,t) \|^2 $$
+where $\mathcal{R}$ is a batch of rays associated with time $t$, and $C(r,t)$ is the ground truth color [S1].
+
+**Depth Reconstruction Loss:**
+$$ L_{depth} = \sum_{(r,t) \in \mathcal{R}} \left\| \frac{1}{\hat{D}(r,t)} - \frac{1}{D(r,t)} \right\|^2 $$
+where $D(r,t)$ is the input depth, and $\hat{D}(r,t)$ is the integrated sample depth:
+$$ \hat{D}(r,t) = \int_{s_n}^{s_f} T(s,t) \sigma(r(s),t) s \, ds $$
+[S1]
+
+**Empty-Space Loss:**
+$$ L_{empty} = \sum_{(r,t) \in \mathcal{R}} \int_{s_n}^{d_t(u) - \epsilon} \sigma(r(s),t) \, ds $$
+where $d_t(u)$ is the scene depth for pixel $u$ at time $t$, and $\epsilon = 0.05 \cdot (s_f - s_n)$ [S1].
+
+**Static Scene Loss:**
+Measured on the jittered samples from pool $\mathcal{X}$ at random times $t'$ [S1]. The specific formula is not provided in the sources, but it constrains spaces surrounding surface regions to handle disocclusions [S1].
+
+**Total Loss:**
+$$ L = L_{color} + \alpha L_{depth} + \beta L_{empty} + \gamma L_{static} $$
+[S1]
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_st_nif(frames, cameras, s_n, s_f, num_iterations=800000):
+    """
+    frames: List of RGB-D images I_t with associated camera calibrations P_t.
+    s_n, s_f: Near and far clipping distances.
+    """
+    # Initialize MLP F with NeRF architecture (1024 units for first 8 layers)
+    # Initialize positional encoder with 4 frequency bands
+    # Normalize time to [-1, 1]
+    
+    # Precompute static sample pool X
+    sample_pool = []
+    for t in range(len(frames)):
+        rays = generate_rays(frames[t], cameras[t])
+        for r in rays:
+            # Hierarchical sampling along ray r
+            coarse_samples = hierarchical_sample(r, s_n, s_f)
+            fine_samples = hierarchical_sample(r, s_n, s_f)
+            all_samples = coarse_samples + fine_samples
+            
+            # Filter points closer than epsilon to observed surface
+            depth = frames[t].depth
+            for x in all_samples:
+                if distance_to_surface(x, depth, cameras[t]) > epsilon:
+                    sample_pool.append(x)
+    
+    for iteration in range(num_iterations):
+        # 1. Sample Rays for Color/Depth/Empty Losses
+        batch_rays = random_sample_rays(frames, cameras, N_r=1024)
+        
+        total_loss = 0
+        l_color = 0
+        l_depth = 0
+        l_empty = 0
+        
+        for r, t in batch_rays:
+            # Hierarchical sampling
+            coarse_pts, fine_pts = hierarchical_volume_sampling(r, s_n, s_f)
+            
+            # Query Network
+            # Coarse pass
+            c_coarse, sigma_coarse = query_network(coarse_pts, t)
+            # Fine pass
+            c_fine, sigma_fine = query_network(fine_pts, t)
+            
+            # Volume Rendering
+            c_rendered = volume_render(c_fine, sigma_fine, r)
+            
+            # Ground Truth
+            c_gt = frames[t].color[r.pixel]
+            d_gt = frames[t].depth[r.pixel]
+            
+            # Color Loss
+            l_color += norm_sq(c_rendered - c_gt)
+            
+            # Depth Loss
+            d_pred = integrate_depth(sigma_fine, coarse_pts, r)
+            l_depth += norm_sq(1/d_pred - 1/d_gt)
+            
+            # Empty Space Loss
+            # Integrate sigma from s_n to d_gt - epsilon
+            empty_sigma = integrate_sigma_up_to(sigma_fine, coarse_pts, r, d_gt - epsilon)
+            l_empty += empty_sigma
+            
+        # 2. Sample for Static Loss
+        static_samples = random_sample_from_pool(sample_pool, count=1024)
+        l_static = 0
+        for x in static_samples:
+            # Random time t' ensuring (x, t') is not close to surface
+            t_prime = random_time_not_near_surface(x, frames, cameras, epsilon)
+            sigma_static, _ = query_network(x, t_prime)
+            # Static loss constrains spaces surrounding surface regions
+            # Formula not explicitly given, but implies penalizing density in unconstrained regions
+            l_static += compute_static_loss(sigma_static, x, t_prime)
+            
+        # Total Loss
+        loss = l_color + alpha * l_depth + beta * l_empty + gamma * l_static
+        
+        # Backpropagate and update
+        optimize(loss)
+```
+
+### Edge Cases and Pitfalls
+*   **Motion-Appearance Ambiguity:** In dynamic scenes, a single video provides only one observation per time step, making geometry estimation severely under-constrained. Incorrect geometry leads to artifacts when deviating from the original camera trajectory [S1].
+*   **Haze-like Artifacts:** Predicted depth is a weighted sum of depth values along the ray, leading to haze-like visual artifacts at novel views. Addressed by the empty-space loss [S1].
+*   **Disocclusion Artifacts:** Unconstrained spaces hidden from input viewpoints are prone to artifacts when disoccluded due to viewpoint changes. Addressed by the static scene loss [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** Training takes approximately 48 hours for a network with about 100 video frames [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Handles dynamic scenes from a single moving camera; produces geometrically correct novel view synthesis when combined with depth and empty-space constraints [S1].
+*   **Limitations:** Relies on input depth maps; prone to artifacts in disoccluded regions if static loss is insufficient; computationally expensive training [S1].
+*   **When to use:** Free-viewpoint video synthesis from a single moving camera with RGB-D input.
+*   **When not to use:** Static scenes (use standard NeRF); scenes with no depth information; real-time rendering (requires offline training) [S1].
+
+## Background
+
+*   **Origin:** Proposed in "Space-time Neural Irradiance Fields for Free-Viewpoint Video" [S1].
+*   **History:** Builds on the original NeRF framework [S1].
+*   **Usage:** Free-viewpoint video synthesis [S1].
+
+## Sources
+
+[S1] Space-time Neural Irradiance Fields for Free-Viewpoint Video, https://doi.org/10.1109/cvpr46437.2021.00930, fetched 2026-10-28

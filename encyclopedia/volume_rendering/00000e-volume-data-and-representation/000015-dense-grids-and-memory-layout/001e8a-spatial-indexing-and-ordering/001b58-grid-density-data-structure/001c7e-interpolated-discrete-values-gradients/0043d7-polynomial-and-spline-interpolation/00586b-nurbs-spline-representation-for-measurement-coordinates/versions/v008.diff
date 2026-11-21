@@ -1,0 +1,294 @@
+--- v007.md
++++ v008.md
+@@ -4,184 +4,142 @@
+ 
+ ## Overview
+-This method represents uncertain measurement coordinates (such as view angles and detector locations) as a NURBS surface whose control points and weights are optimized alongside the volume reconstruction [S1, unofficial]. It addresses the problem of measurement uncertainty in tomographic reconstruction by learning accurate tilt and view angles that are more precise than assumed initial values [S1, unofficial]. Unlike standard interpolation which assumes fixed grid coordinates, this approach treats the coordinate system itself as a learnable rational B-spline field, allowing the reconstruction to correct for systematic geometric errors [S1, unofficial].
++This method represents uncertain measurement coordinates (such as view angles and detector locations in CT imaging) as a NURBS surface whose control points and weights are optimized alongside the volume reconstruction [S1, unofficial]. It differs from implicit neural representations by using fixed-degree spline basis functions with optimized control points, which allows for the explicit enforcement of physical consistency conditions (such as Radon transform symmetries) that neural networks approximate implicitly [S1, unofficial]. It is typically paired with a U-Net reconstruction network $G_\mu(\cdot)$ that maps the NURBS-interpolated coordinates to image space [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Measurement coordinates $\mathbf{m} = [\theta', t']^T$ (e.g., view angle and detector location) normalized to $[0, 1]$.
+-*   Number of segments $J, K$ per dimension.
+-*   Degrees $d_\Theta, d_T \in \mathbb{Z}^+$.
+-*   Learnable control points $Q_{u,v}$ and weights $w_{u,v}$.
+-
+-**Outputs:**
+-*   Rational basis function values $b_{j,k}(\mathbf{m})$ used to interpolate or optimize the measurement coordinate mapping.
++**Inputs and Outputs:**
++*   **Inputs:** A set of nominal measurement coordinates (e.g., view angles $\theta'$, detector positions $t'$) and their associated uncertainties.
++*   **Outputs:** Optimized measurement coordinates $\hat{\mathbf{m}}$ and the corresponding volume data, where the mapping from nominal to optimized coordinates is defined by the NURBS surface.
+ 
+ **Data Structures:**
+-*   **Knot Vector:** A 1D array of size $N + d + 1$ for each dimension, where $N$ is the number of segments and $d$ is the degree.
+-    *   Elements $0 \le u < d + 1$: Value $0$.
+-    *   Elements $d + 1 \le u \le N$: Uniformly spaced between $0$ and $1$.
+-    *   Elements $N < u \le N + d$: Value $1$.
+-*   **Control Points:** A tensor of shape $(J, K, \text{dim})$ storing the spatial coordinates.
+-*   **Weights:** A tensor of shape $(J, K)$ storing positive scalar weights.
++*   **Knot Vectors:** For each dimension $d$ (e.g., angle, detector), a knot vector $\mathbf{K}_d$ of size $N_d + d_{deg} + 1$ is required. The knot vector is not learnable.
++*   **Control Points:** A grid of control points $\mathbf{Q}$ of shape $(J, K, \dots)$ corresponding to the dimensions of the measurement space. These are learnable.
++*   **Weights:** A grid of scalar weights $w$ of shape $(J, K, \dots)$ corresponding to the control points. These are learnable.
++*   **Degrees:** Integer degrees $d_\Theta, d_T \in \mathbb{Z}^+$ for each dimension.
+ 
+-**Steps:**
+-1.  **Construct Knot Vectors:** Generate knot vectors $U$ for the view angle dimension and $V$ for the detector location dimension using the piecewise uniform definition above [S1, unofficial].
+-2.  **Compute B-spline Basis Functions:** For a given coordinate $\theta'$, compute the 1D B-spline basis functions $Q_{u, d_\Theta}(\theta')$ for all $u \in [0, J-1]$ using the Cox-de Boor recursion [S1, unofficial]. Repeat for $t'$ and $d_T$ to get $Q_{v, d_T}(t')$ [S1, unofficial].
+-3.  **Evaluate Rational Basis Functions:** Compute the tensor product rational basis function $b_{j,k}([\theta', t']^T)$ using the formula below [S1, unofficial].
+-4.  **Optimization:** During volume reconstruction, the control points $Q$ and weights $w$ are updated via gradient descent to minimize reconstruction error, effectively learning the true measurement coordinates [S1, unofficial].
++**Knot Vector Construction:**
++For a dimension with $J$ segments and degree $d_{deg}$, the knot vector elements $k_u$ for $0 \le u \le J + d_{deg}$ are defined as:
++1.  $k_u = 0$ for $0 \le u < d_{deg} + 1$.
++2.  $k_u$ is uniformly spaced between 0 and 1 for $d_{deg} + 1 \le u \le J$.
++3.  $k_u = 1$ for $J < u \le J + d_{deg}$.
+ 
+-**Formula:**
+-The rational basis function is defined as [S1, unofficial]:
++**Basis Function Evaluation:**
++The 1D B-spline basis functions $Q_{u, d}(\xi)$ are computed using the Cox-de Boor recursion [S1, unofficial]:
++$$
++Q_{u,0}(\xi) = \begin{cases} 
++1 & \text{if } k_u \le \xi < k_{u+1} \\
++0 & \text{otherwise}
++\end{cases}
++$$
++$$
++Q_{u,d}(\xi) = \frac{\xi - k_u}{k_{u+d} - k_u} Q_{u,d-1}(\xi) + \frac{k_{u+d+1} - \xi}{k_{u+d+1} - k_{u+1}} Q_{u+1,d-1}(\xi)
++$$
++If any denominator in the recursion is zero, the corresponding term is set to zero [S1, unofficial].
+ 
++**Rational Basis Function:**
++For a 2D measurement coordinate vector $[\theta', t']^T$, the rational basis function $b_{j,k}$ is defined as [S1, unofficial]:
+ $$
+ b_{j,k}([\theta', t']^T) = \frac{\sum_{u=0}^{J-1} \sum_{v=0}^{K-1} w_{u,v} Q_{u,d_\Theta}(\theta') Q_{v,d_T}(t')}{\sum_{u=0}^{J-1} \sum_{v=0}^{K-1} Q_{u,d_\Theta}(\theta') Q_{v,d_T}(t')}
+ $$
++For $D$ dimensions, the NURBS surface is constructed by taking the tensor product of $D$ one-dimensional NURBS curves [S1, unofficial].
+ 
+-Where:
+-*   $w_{u,v}$ are learnable weights.
+-*   $Q_{u,d_\Theta}(\theta')$ is the $u$-th B-spline basis function of degree $d_\Theta$ evaluated at $\theta'$.
+-*   $Q_{v,d_T}(t')$ is the $v$-th B-spline basis function of degree $d_T$ evaluated at $t'$.
+-*   $J, K$ are the number of segments in each dimension.
+-
+-**Cox-de Boor Recursion:**
+-The B-spline basis functions $Q_{u,d}(k)$ are computed recursively [S1, unofficial]:
+-
+-$$
+-Q_{u,0}(k) = \begin{cases} 
+-1 & \text{if } k_u \le k < k_{u+1} \\
+-0 & \text{otherwise}
+-\end{cases}
+-$$
+-
+-$$
+-Q_{u,d}(k) = \frac{k - k_u}{k_{u+d} - k_u} Q_{u,d-1}(k) + \frac{k_{u+d+1} - k}{k_{u+d+1} - k_{u+1}} Q_{u+1,d-1}(k)
+-$$
+-
+-**Parameters:**
+-*   $d_\Theta, d_T$: Degrees of the spline. Typical values are integers $\ge 1$ [S1, unofficial].
+-*   $J, K$: Number of segments. In the cited example, 120 view angles were modeled [S1, unofficial].
+-
+-**Pitfalls:**
+-*   **Zero Denominators:** In the Cox-de Boor recursion, if a denominator ($k_{u+d} - k_u$ or $k_{u+d+1} - k_{u+1}$) is zero, the entire term is set to zero [S1, unofficial]. This prevents division by zero errors during evaluation.
+-*   **Boundary Conditions:** The knot vector construction ensures that the basis functions span the interval $[0, 1]$ correctly, but out-of-bounds query points must be clamped or handled explicitly before evaluation [S1, unofficial].
++**Algorithm Steps:**
++1.  **Initialize:** Define knot vectors for each measurement dimension based on the number of segments and chosen degrees. Initialize learnable control points $\mathbf{Q}$ and weights $w$.
++2.  **Evaluate Basis:** For a given nominal measurement coordinate $\mathbf{m}'$, compute the 1D B-spline basis functions $Q$ for each dimension using the Cox-de Boor recursion.
++3.  **Compute Rational Weights:** Calculate the numerator and denominator of the rational basis function using the tensor product of the 1D basis functions and the learnable weights $w$.
++4.  **Map Coordinates:** Compute the optimized measurement coordinate $\hat{\mathbf{m}}$ by applying the rational basis functions to the control points $\mathbf{Q}$.
++5.  **Reconstruct:** Use the optimized coordinates $\hat{\mathbf{m}}$ as input to the volume reconstruction network $G_\mu(\cdot)$ to generate the volume data.
++6.  **Optimize:** Update control points $\mathbf{Q}$ and weights $w$ via gradient descent to minimize the reconstruction error [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def cox_de_boor(knot_vector, degree, xi):
++    """
++    Computes 1D B-spline basis functions using Cox-de Boor recursion.
++    knot_vector: list of knot values
++    degree: integer degree of the spline
++    xi: scalar query point
++    Returns: list of basis function values for all control points
++    """
++    n = len(knot_vector) - degree - 1
++    basis = [0.0] * n
++    
++    # Degree 0
++    for u in range(n):
++        if knot_vector[u] <= xi < knot_vector[u+1]:
++            basis[u] = 1.0
++            
++    # Higher degrees
++    for d in range(1, degree + 1):
++        new_basis = [0.0] * n
++        for u in range(n):
++            # First term
++            denom1 = knot_vector[u+d] - knot_vector[u]
++            if denom1 != 0:
++                term1 = (xi - knot_vector[u]) / denom1 * basis[u]
++            else:
++                term1 = 0.0
++                
++            # Second term
++            denom2 = knot_vector[u+d+1] - knot_vector[u+1]
++            if denom2 != 0:
++                term2 = (knot_vector[u+d+1] - xi) / denom2 * basis[u+1] if u+1 < n else 0.0
++            else:
++                term2 = 0.0
++                
++            new_basis[u] = term1 + term2
++        basis = new_basis
++    return basis
+ 
+-```python
+-def compute_knot_vector(num_segments, degree):
++def nurbs_surface_evaluation(nominal_coords, knot_vectors, degrees, control_points, weights):
+     """
+-    Constructs a knot vector with num_segments segments and given degree.
+-    Returns an array of size num_segments + degree + 1.
++    Evaluates the NURBS surface for given nominal coordinates.
++    nominal_coords: list of coordinates [theta, t, ...]
++    knot_vectors: list of knot vectors for each dimension
++    degrees: list of degrees for each dimension
++    control_points: tensor of control points
++    weights: tensor of weights
++    Returns: optimized coordinate value
+     """
+-    size = num_segments + degree + 1
+-    knots = [0.0] * size
+-    
+-    # First degree + 1 elements are 0
+-    # Last degree + 1 elements are 1
+-    # Middle elements are uniformly spaced
+-    
+-    # Implementation of the specific structure described in [S1, unofficial]:
+-    # 0 <= u < degree + 1 -> 0
+-    # degree + 1 <= u <= num_segments -> uniform
+-    # num_segments < u <= num_segments + degree -> 1
+-    
+-    for u in range(size):
+-        if u < degree + 1:
+-            knots[u] = 0.0
+-        elif u > num_segments:
+-            knots[u] = 1.0
+-        else:
+-            # Uniform spacing between 0 and 1 for indices degree+1 to num_segments
+-            # There are (num_segments - (degree + 1) + 1) = num_segments - degree intervals
+-            # The points are at indices degree+1, ..., num_segments
+-            # Total points in this range: num_segments - degree
+-            # We map index u to a fraction in [0, 1]
+-            # The range of u is [degree+1, num_segments]
+-            # Let's normalize u to this range
+-            normalized_u = u - (degree + 1)
+-            total_points_in_range = num_segments - degree
+-            knots[u] = normalized_u / total_points_in_range
+-            
+-    return knots
+-
+-def cox_de_boor(k, u, degree, knots):
+-    """
+-    Computes the B-spline basis function Q_{u, degree}(k) using Cox-de Boor recursion.
+-    k: the coordinate value (float)
+-    u: the index of the basis function (int)
+-    degree: the degree of the spline (int)
+-    knots: the knot vector array (list of floats)
+-    """
+-    if degree == 0:
+-        # Q_{u,0}(k) is 1 if k_u <= k < k_{u+1}, else 0
+-        # Note: The source uses <= and < for the first interval. 
+-        # Standard B-spline definitions vary slightly on boundary inclusion.
+-        # We follow the source's logic: 1 if k_u <= k < k_{u+1}
+-        if knots[u] <= k < knots[u+1]:
+-            return 1.0
+-        else:
+-            return 0.0
+-            
+-    # Recursive step
+-    # Term 1: (k - k_u) / (k_{u+d} - k_u) * Q_{u, d-1}(k)
+-    denom1 = knots[u + degree] - knots[u]
+-    term1 = 0.0
+-    if denom1 != 0:
+-        term1 = ((k - knots[u]) / denom1) * cox_de_boor(k, u, degree - 1, knots)
+-    else:
+-        # If denominator is zero, term is zero [S1, unofficial]
+-        term1 = 0.0
++    # Compute 1D basis functions for each dimension
++    basis_funcs = []
++    for i, coord in enumerate(nominal_coords):
++        basis = cox_de_boor(knot_vectors[i], degrees[i], coord)
++        basis_funcs.append(basis)
+         
+-    # Term 2: (k_{u+d+1} - k) / (k_{u+d+1} - k_{u+1}) * Q_{u+1, d-1}(k)
+-    denom2 = knots[u + degree + 1] - knots[u + 1]
+-    term2 = 0.0
+-    if denom2 != 0:
+-        term2 = ((knots[u + degree + 1] - k) / denom2) * cox_de_boor(k, u + 1, degree - 1, knots)
+-    else:
+-        # If denominator is zero, term is zero [S1, unofficial]
+-        term2 = 0.0
+-        
+-    return term1 + term2
+-
+-def evaluate_nurbs_basis(theta_prime, t_prime, J, K, d_theta, d_t, knots_theta, knots_t, weights):
+-    """
+-    Evaluates the rational basis function for NURBS surface.
+-    theta_prime: view angle coordinate in [0, 1]
+-    t_prime: detector location coordinate in [0, 1]
+-    J, K: number of segments
+-    d_theta, d_t: degrees
+-    knots_theta, knots_t: knot vectors
+-    weights: 2D array of shape (J, K)
+-    """
++    # Compute tensor product and rational weight
+     numerator = 0.0
+     denominator = 0.0
+     
+-    for u in range(J):
+-        for v in range(K):
+-            # Compute 1D B-spline basis functions
+-            q_theta = cox_de_boor(theta_prime, u, d_theta, knots_theta)
+-            q_t = cox_de_boor(t_prime, v, d_t, knots_t)
+-            
++    # Iterate over all control points (simplified for 2D)
++    for u in range(len(basis_funcs[0])):
++        for v in range(len(basis_funcs[1])):
++            # Tensor product of basis functions
++            basis_val = basis_funcs[0][u] * basis_funcs[1][v]
+             w = weights[u, v]
+             
+-            numerator += w * q_theta * q_t
+-            denominator += q_theta * q_t
++            numerator += w * basis_val
++            denominator += basis_val
+             
+-    # Avoid division by zero if denominator is 0 (though unlikely with valid knots/weights)
+     if denominator == 0:
+-        return 0.0
++        return 0.0 # Or handle as undefined
+         
+     return numerator / denominator
+ ```
+ 
++## Subtopics
++
++### [NURBS-based Uncalibrated Imaging Reconstruction](16412-nurbs-based-uncalibrated-imaging-reconstruction.md)
++NURBS-based Uncalibrated Imaging Reconstruction is a method for reconstructing volumetric data (specifically CT) from projections with uncertain or uncalibrated measurement coordinates (view angles, tilt angles, detector positions) by modeling these coordinates as a NURBS surface. It differs from implicit neural representations by using fixed-degree spline basis functions with optimized control points, which allows for the explicit enforcement of physical consistency conditions (such as Radon transform symmetries) that neural networks approximate implicitly. It is typically paired with a U-Net reconstruction network $G_\mu(\cdot)$ that maps the NURBS-interpolated coordinates to image space.
++
+ ## Operating characteristics
+-*   **Complexity:** Evaluation is $O(J \cdot K)$ per query point, where $J$ and $K$ are the number of segments in each dimension. This is comparable to other spline methods but involves rational division.
+-*   **Performance:** The method demonstrates reduced angle error compared to baseline and implicit neural representations in the presence of measurement noise [S1, unofficial].
+-*   **Strengths:** Explicitly models uncertainty in measurement coordinates; differentiable, allowing end-to-end optimization with volume reconstruction.
+-*   **Limitations:** Requires optimization of additional parameters (control points and weights); sensitive to knot vector construction and degree selection.
+-*   **When to use:** When measurement coordinates (view angles, detector positions) are unknown or uncertain and need to be learned jointly with the volume.
+-*   **When not to use:** When measurement coordinates are known precisely and fixed.
++*   **Time Complexity:** Evaluation is $O(J \cdot K \cdot \dots)$ per dimension, where $J, K$ are the number of segments. This is generally faster than implicit neural representations which require evaluating deep networks for every query.
++*   **Memory Complexity:** Requires storing control points and weights, which scales with the number of segments and dimensions.
++*   **Strengths:** Explicitly enforces physical consistency; differentiable; fixed-degree basis functions provide predictable smoothness.
++*   **Limitations:** Requires careful tuning of knot vectors and degrees; may struggle with highly irregular measurement errors compared to flexible neural networks.
++*   **When to use:** When measurement coordinates are uncertain but follow a smooth, structured pattern, and physical consistency is important.
++*   **When not to use:** When measurement errors are highly erratic or lack smoothness, or when computational resources for optimization are limited.
+ 
+ ## Background
+-The method originates from differentiable uncalibrated imaging frameworks, specifically detailed in "Differentiable Uncalibrated Imaging" [S1, unofficial]. It builds upon the concept of using NURBS surfaces to model continuous fields from discrete data [S1, unofficial]. The implementation relies on modified PyTorch source code from the NURBS-Diff module [S1, unofficial]. It is applied in 2D and 3D CT reconstruction scenarios where view angle and detector location uncertainties are significant [S1, unofficial].
++The method originates from the paper "Differentiable Uncalibrated Imaging" [S1, unofficial], which proposes using NURBS surfaces to model measurement coordinate uncertainties in CT reconstruction. It builds on the principles of spline interpolation and rational basis functions, extending them to the context of differentiable imaging reconstruction. The approach was implemented using PyTorch, leveraging the NURBS-Diff module [S1, unofficial].
+ 
+ ## Sources

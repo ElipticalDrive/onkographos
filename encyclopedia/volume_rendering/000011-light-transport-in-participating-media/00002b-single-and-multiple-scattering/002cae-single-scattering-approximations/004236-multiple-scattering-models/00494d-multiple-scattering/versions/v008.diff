@@ -1,0 +1,154 @@
+--- v007.md
++++ v008.md
+@@ -4,116 +4,49 @@
+ 
+ ## Overview
+-Multiple scattering simulates the effect resulting from more than one scattering bounce, where photons change direction at least twice within a participating medium [S1][S2, unofficial]. It solves the problem of rendering dense media, such as thick clouds or smoke, which appear dark and lifeless under single scattering approximations because they fail to account for light trapped and re-emitted within the volume [S2, unofficial]. Unlike single scattering, which is sufficient for thin media like light haze, multiple scattering is required to capture the high albedo and volumetric glow of dense participating media [S1][S2, unofficial].
++Multiple scattering accounts for light undergoing two or more scattering events within a participating medium before reaching the viewer [S1]. While single scattering approximations suffice for thin media like haze, they fail to capture the brightness and volume of dense media such as clouds or smoke, where photons bounce dozens or hundreds of times [S2, unofficial]. This method solves the problem of dark, lifeless rendering in dense volumes by simulating these higher-order bounces, though it incurs significant computational cost and noise [S1][S2, unofficial].
+ 
+ ## How it works
+-Multiple scattering is implemented by extending the ray marching process to account for indirect illumination within the volume. While the parent article [Multiple Scattering Models](10687-multiple-scattering-models.md) outlines the general recursive accumulation of radiance, the specific implementation of "Multiple Scattering" as a distinct rendering mode often involves explicitly tracing additional bounces or limiting the simulation depth [S1][S2, unofficial].
++**Inputs and Outputs**
++*   **Inputs:** Volume density fields (e.g., OpenVDB), scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\omega_i, \omega_o)$, and a `Volume Trace Depth` parameter controlling the maximum number of bounces [S1][S2, unofficial].
++*   **Outputs:** Radiance $L$ contributing to the final image pixel, decomposed into direct, single, and multiple scattering components [S1].
+ 
+-**Inputs and Outputs:**
+-*   **Input:** Volume density field, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\omega_i, \omega_o)$, and a **Volume Trace Depth** parameter controlling the maximum number of bounces [S2, unofficial].
+-*   **Output:** Radiance $L$ at the camera pixel, including contributions from direct light and light scattered $n \ge 2$ times [S1].
++**Data Structures**
++*   **Volume Grid:** Typically stored in formats like OpenVDB, which holds sparse voxel data for smoke and clouds [S2, unofficial].
++*   **Ray State:** Tracks current position, direction, accumulated transmittance, and current scattering order (bounce count) [S2, unofficial].
+ 
+-**Data Structures:**
+-*   **Volume Trace Depth:** An integer parameter specifying the maximum number of scattering events to simulate per ray [S2, unofficial].
+-*   **Scattering Strength:** A scalar value in the volume shader that must be sufficiently high to make the intensity of scattered light visible [S2, unofficial].
++**Steps**
++1.  **Initialize Ray:** Cast a primary ray from the camera into the volume. Initialize accumulated radiance $L_{acc} = 0$ and transmittance $T = 1$. Set bounce counter $n = 0$ [S2, unofficial].
++2.  **Marching Loop:** Step through the volume along the ray direction. At each sample point $x$:
++    *   Evaluate extinction coefficient $\sigma_t(x) = \sigma_a(x) + \sigma_s(x)$ [S1].
++    *   Compute transmittance to the next sample: $T_{step} = \exp(-\sigma_t(x) \cdot \Delta s)$ [S2, unofficial].
++    *   Update total transmittance: $T \leftarrow T \cdot T_{step}$ [S2, unofficial].
++3.  **Scattering Event:** If a scattering event occurs (determined by $\omega_0 = \sigma_s / \sigma_t$ [S1]):
++    *   Increment bounce counter $n$.
++    *   If $n > \text{Volume Trace Depth}$, terminate the multiple scattering contribution for this ray [S2, unofficial].
++    *   Sample the phase function $p(\omega_i, \omega_o)$ to determine the new direction $\omega_o$ [S1].
++    *   Recursively or iteratively trace the new ray segment to compute the in-scattered light contribution [S2, unofficial].
++    *   Add the contribution to $L_{acc}$, weighted by $T$ and $\sigma_s$ [S2, unofficial].
++4.  **Accumulate:** Sum contributions from all bounces up to `Volume Trace Depth` [S2, unofficial].
++5.  **Output:** Return $L_{acc}$ as the multiple scattering component [S1].
+ 
+-**Steps:**
+-1.  **Initialize Ray:** Cast a primary ray from the camera into the scene [S2, unofficial].
+-2.  **March:** Step through the volume, accumulating optical depth [S2, unofficial].
+-3.  **Sample Scattering:** At each step, determine if a scattering event occurs based on the scattering coefficient [S2, unofficial].
+-4.  **Bounce Accumulation:**
+-    *   If a scattering event occurs, compute the new direction using the phase function [S2, unofficial].
+-    *   If the current bounce count is less than the **Volume Trace Depth**, continue tracing the ray to account for subsequent bounces [S2, unofficial].
+-    *   If the bounce count exceeds the depth, terminate the path or approximate the remaining contribution [S2, unofficial].
+-5.  **Accumulate Radiance:** Sum the emitted and scattered light along the path, weighted by transmittance [S2, unofficial].
++**Parameters**
++*   **Volume Trace Depth:** Controls the maximum number of scattering bounces simulated. Typical tested values include 1 (single scattering), 5, and 31 [S2, unofficial]. Higher values increase brightness in dense media but also cost [S2, unofficial].
++*   **Scattering Strength:** The magnitude of $\sigma_s$ must be sufficiently high for scattered light intensity to be visible [S2, unofficial].
+ 
+-**Parameters:**
+-*   **Volume Trace Depth:** Controls the number of scattering bounces simulated. Typical tested values include 1 (single scattering), 5, and 31 [S2, unofficial].
+-*   **Scattering Strength:** Must be high enough for scattered light intensity to be visible; otherwise, the multiple scattering effect may be imperceptible [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Noise:** Unbiased rendering of multiple scattering can be noisy due to the high variance in path lengths and scattering events [S1].
+-*   **Performance:** Every added bounce multiplies the computational work, making dense media with high multiple scattering significantly more expensive to render [S2, unofficial].
+-*   **Denoising Difficulty:** Volumes are notoriously harder to denoise than surfaces because helper data, such as surface normals, does not exist inside a cloud [S2, unofficial].
+-*   **Zero Bounces:** In some implementations (e.g., Cycles), the default number of bounces is zero, meaning multiple scattering is disabled by default [S1].
+-
+-**Pseudocode:**
+-```python
+-def render_multiple_scattering(ray, volume, max_bounces):
+-    """
+-    Renders a ray through a volume with multiple scattering support.
+-    
+-    Args:
+-        ray: The primary ray from the camera.
+-        volume: The participating medium properties (sigma_s, sigma_a, phase function).
+-        max_bounces: The Volume Trace Depth parameter.
+-        
+-    Returns:
+-        L: Total radiance accumulated along the ray.
+-    """
+-    L = 0.0
+-    current_ray = ray
+-    transmittance = 1.0
+-    
+-    for bounce in range(max_bounces + 1):
+-        # Step through the volume
+-        hit, distance = volume.march(current_ray)
+-        
+-        if not hit:
+-            break
+-            
+-        # Calculate optical depth for the segment
+-        sigma_t = volume.sigma_s + volume.sigma_a
+-        optical_depth = sigma_t * distance
+-        
+-        # Calculate transmittance
+-        T = exp(-optical_depth)
+-        
+-        # Sample scattering event
+-        # [G] Standard Russian Roulette or exact sampling logic would go here
+-        # based on the ratio of sigma_s to sigma_t.
+-        scattered = sample_scattering(volume, current_ray, distance)
+-        
+-        if scattered:
+-            # Compute in-scattered radiance
+-            # L_in = sigma_s * integral(p(omega_i, omega_o) * L(omega_i) d omega_i)
+-            # For simplicity in this basic model, we assume a single dominant 
+-            # incoming direction or precomputed environment contribution.
+-            L_scattered = compute_in_scattering(volume, current_ray, distance)
+-            
+-            # Add contribution
+-            L += transmittance * L_scattered
+-            
+-            # Prepare for next bounce
+-            if bounce < max_bounces:
+-                # Update ray direction based on phase function
+-                current_ray.direction = scatter_direction(volume.phase_function, current_ray.direction)
+-                current_ray.origin = hit_point
+-                transmittance *= T # Update transmittance for the next segment
+-            else:
+-                break
+-        else:
+-            # Absorption or no scattering event in this segment
+-            transmittance *= T
+-            
+-    return L
+-```
+-
+-## Subtopics
+-*   **Heterogeneous In-scattering with Multiple Scattering [4934-heterogeneous-in-scattering-with-multiple-scattering](4934-heterogeneous-in-scattering-with-multiple-scattering.md):** Handles spatially varying density during multiple scattering.
+-*   **Most Probable Paths (MPP) Lighting Model [12244-most-probable-paths-mpp-lighting-model](12244-most-probable-paths-mpp-lighting-model.md):** Uses statistical path selection to approximate multiple scattering efficiently.
+-*   **Riley et al. Angular Distribution Renderer [12249-riley-et-al-angular-distribution-renderer](12249-riley-et-al-angular-distribution-renderer.md):** Uses angular distributions to approximate the in-scattering integral without explicit path tracing.
+-*   **3D-Filter / Concrete Directions [12253-3d-filter-concrete-directions](12253-3d-filter-concrete-directions.md):** Uses precomputed filters to estimate multiple scattering contributions.
+-*   **Hybrid Hair/Fur Rendering Strategy [15774-hybrid-hair-fur-rendering-strategy](15774-hybrid-hair-fur-rendering-strategy.md):** Combines explicit geometric tracing for direct light with volumetric approximations for higher-order bounces.
++**Pitfalls**
++*   **Noise:** Unbiased rendering of multiple scattering is inherently noisy due to the variance in path lengths and scattering events [S1].
++*   **Denoising Difficulty:** Volumes are harder to denoise than surfaces because auxiliary data like surface normals are unavailable inside the volume [S2, unofficial].
++*   **Performance:** Every added bounce multiplies computational work, making high `Volume Trace Depth` settings expensive [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The computational cost increases multiplicatively with the number of bounces. Simulating dozens or hundreds of bounces is required for realistic dense clouds, making it significantly more expensive than single scattering [S2, unofficial].
+-*   **Memory Complexity:** Depends on the volume data structure (e.g., OpenVDB) and the recursion depth. No additional large buffers are strictly required for the basic bounce accumulation, but denoising may require auxiliary buffers [S2, unofficial].
+-*   **Strengths:** Produces realistic lighting for dense media like clouds and smoke, capturing high reflectivity (up to 90% for thick cumulus clouds) [S2, unofficial].
+-*   **Limitations:** High noise levels in unbiased rendering; difficult to denoise due to lack of surface normals; computationally prohibitive for high bounce counts without approximations [S1][S2, unofficial].
+-*   **When to use:** For dense participating media where single scattering results in dark, lifeless appearances [S2, unofficial].
+-*   **When not to use:** For thin media like light haze, where single scattering is sufficient and faster [S2, unofficial]; or for materials with well-defined surfaces like skin, where subsurface scattering is more efficient [S1].
++*   **Complexity:** Time complexity grows exponentially with the number of bounces and optical thickness of the medium [S2, unofficial]. Memory complexity depends on the volume grid resolution and storage format (e.g., OpenVDB) [S2, unofficial].
++*   **Performance:** Rendering dense clouds with multiple scattering is significantly slower than single scattering [S2, unofficial]. GPU rendering and approximations are often required to manage costs [S2, unofficial].
++*   **Strengths:** Produces realistic brightness and volume for dense media like cumulus clouds (which can reflect up to 90% of incident light) [S2, unofficial].
++*   **Limitations:** High noise levels; limited by practical render times; not suitable for real-time without approximation [S1][S2, unofficial].
++*   **When to use:** For offline rendering of dense clouds, smoke, or subsurface scattering where visual fidelity is critical [S1][S2, unofficial].
++*   **When not to use:** For thin media like light haze (single scattering suffices) or real-time applications requiring low latency [S1][S2, unofficial].
+ 
+ ## Background
+-The concept of multiple scattering is fundamental to radiative transfer in participating media. In computer graphics, it became a distinct rendering mode as engines sought to move beyond the limitations of single scattering approximations. The term "Multiple Scattering" is often used in contrast to "Single Scattering" in software documentation, such as in Blender's Cycles and Eevee renderers, where it is noted that unbiased rendering of multiple scattering can be noisy and is often disabled by default [S1]. The implementation details, such as the "Volume Trace Depth" parameter, have been documented in tutorials and engine-specific guides, highlighting the trade-off between visual fidelity and performance [S2, unofficial].
++Multiple scattering is a fundamental concept in radiative transfer theory, essential for simulating real-world effects like scattering in clouds and subsurface scattering [S1]. In computer graphics, it has been a challenge for unbiased renderers due to its computational cost and noise. Blender's Cycles renderer, for instance, defaults to zero volume bounces (single scattering) due to noise concerns, while Eevee does not support it [S1]. The industry has adopted OpenVDB for volume data exchange, originally developed at DreamWorks Animation and open-sourced in 2012 [S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,218 @@
+Rust server for weather data: radar, NWP models, satellite, observations and alerts over OGC API EDR, Features, Maps and Tiles, WMS 1.3.0 and 3D Tiles. Reads GRIB2, Zarr, ODIM HDF5, GeoTIFF/COG, QueryData, NetCDF, BUFR, CAP and PostGIS. Binaries for Linux, macOS and Windows. - feat(engine-odim PVOL): configurable render resampling, default nearest (#186) by mrauhala · Pull Request #447 · mrauhala/meteocore
+
+feat(engine-odim PVOL): configurable render resampling, default nearest (#186) by mrauhala · Pull Request #447 · mrauhala/meteocore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mrauhala
+commented
+Jun 17, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+The per-site PVOL Cartesian render (polar_sample — WMS/Maps/Tiles for engine_type = "odim-volume") has sampled bilinearly since #186, which blends the four surrounding (ray, bin) cells to close the radial bin/wedge structure far from the radar. That smoothing also softens peaks and erases the discrete radar bins — detail that is visible in the COMP composite (nearest) and GeoTIFF (nearest) renders, so per-site DBZH layers look blurry by comparison (user-reported).
+This adds a per-collection toggle and restores nearest-neighbour as the default:
+```
+[odim]
+# resampling = "nearest"   # default — discrete bins visible, full detail
+resampling = "bilinear"    # opt back into the #186 smoothing
+```
+nearest was the pre-#186 default: each output pixel takes its single enclosing polar cell, so cells tile the output plane and widen with range — the bins stay visible and every gate's value is preserved, with no gaps (there never were empty gaps; #186's "radial spokes" were this discrete-bin structure itself). bilinear keeps the #186 look available per collection.
+Changes
+New ds_core::config::ResamplingMethod enum (serde lowercase; Default = Nearest); #[serde(default)] field resampling on OdimConfig.
+Threaded engine → every PolarVolumeSiteView → polar_sample, which now branches per pixel: nearest = floor of the fractional (ray, bin) (ray wraps at the 0°/360° seam); bilinear = the existing mask-aware bilinear_cell.
+Unaffected (verified against the code): COMP composite render (always nearest), EDR position/area queries (always nearest — a point query wants the measurement, not a cosmetic blend), and the 3D Tiles voxel / isosurface / echo-top products (those sample nearest then apply a separate smooth_grid 3-D blur in ds-3dtiles, 3D Tiles isosurface: smooth the scalar field before marching (reuse the voxel blur) #381; the point cloud is raw). So this toggle is map-render-only.
+Docs: OdimConfig/ResamplingMethod rustdoc + a CLAUDE.md PVOL note.
+Test plan
+cargo test -p engine-odim — 32 integration + lib tests pass.
+New polar_sample_nearest_does_not_blend_rays locks in the default (ray-only field → every sampled value is an exact integer ray index, no blending); existing bilinear tests now pin ResamplingMethod::Bilinear explicitly (incl. the per-pixel-reference and blend-across-rays tests).
+cargo clippy -p engine-odim --all-targets clean; cargo fmt --check clean.
+cargo check --workspace --tests --examples clean.
+🤖 Generated with Claude Code
+claude
+Bot
+commented
+Jun 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Code Review
+The resampling toggle itself is clean and correct: Copy+Default enum, #[serde(default)] on the config field, proper ray wraparound via rem_euclid, correct propagation engine → view → polar_sample. The new regression test (polar_sample_nearest_does_not_blend_rays) is well-constructed and locks in the default.
+Three real issues below:
+1. Live external URL committed to collections.d/ (operational risk)
+collections.d/cap-alerts-feed.toml activates feed_url = "https://feeds.meteoalarm.org/..." as the primary setting (the data_path line is commented out). Any server started with collections_dir = "collections.d" — including the default demo setup — will make an outbound HTTPS request to MeteoAlarm on startup and every 300 s thereafter. If the network is unavailable (CI, air-gapped, offline dev), the engine starts degraded silently; CI jobs that spin up the server will acquire an external dependency. The prior convention in this repo is that committed configs under collections.d/ use local testdata/ paths. Either restore data_path as the active line, or move this file to docs/ / examples/ and add a note that it requires internet access.
+2. bin_f.floor() as usize in the Nearest branch is unguarded
+The comment asserts bin_f is already in [0, nbins) via pre-existing range-checking earlier in the loop, but that check is not visible in the diff. The old bilinear_cell path has its own internal clamping and is safe regardless; the new Nearest path is only safe if the pre-existing guard is actually in place. If bin_f can reach >= nbins for any output pixel, pixels.sample(ray, bin, ...) will index out of bounds. A debug_assert!(bin < sweep.nbins, ...) after the floor cast would make the invariant explicit and is zero-cost in release builds.
+3. resampling on OdimConfig is silently ignored by the COMP engine
+OdimConfig is shared between engine_type = "odim" (COMP composite, OdimEngine) and engine_type = "odim-volume" (PVOL, PolarVolumeEngine). The doc comment says "Only the per-site PVOL map render reads this", but there is no config-validation warning. A user who adds resampling = "bilinear" to a COMP collection's [odim] block gets a silent no-op. A startup tracing::warn! when resampling != Nearest is detected on an OdimEngine would prevent silent misconfiguration.
+claude
+Bot
+reviewed
+Jun 17, 2026
+View reviewed changes
+Comment thread
+collections.d/cap-alerts-feed.toml
+Outdated
+# # SSRF guard: entries off the feed's own origin are dropped unless listed here.
+# feed_allowlist = ["https://cap.example.org/"]
+#data_path = "testdata/cap"
+feed_url = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-finland"
+claude
+Bot
+Jun 17, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This commits a live MeteoAlarm URL as the active setting — the data_path line above is commented out. A server started with collections_dir = "collections.d" (the default demo setup) will make outbound HTTPS requests to MeteoAlarm on every startup and 300 s poll. CI jobs that launch the server will silently depend on external network access.
+The convention in this repo's collections.d/ is to point at local testdata/ paths. Either make data_path the active line here, or move this file to docs//examples/ and document the network dependency.
+claude
+Bot
+reviewed
+Jun 17, 2026
+View reviewed changes
+Comment thread
+crates/engine-odim/src/volume_engine.rs
+let value = match resampling {
+// Each output pixel takes its single enclosing cell. `bin_f` is
+// already in `[0, nbins)`, so `floor` lands in range; the ray
+// wraps at the 0°/360° seam. Cells tile the plane and widen
+claude
+Bot
+Jun 17, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The comment on the match arm asserts bin_f is already in [0, nbins) via pre-existing range-checking earlier in the loop, but that guard isn't visible in this diff. bilinear_cell has its own internal clamping so the old path was safe regardless; this Nearest path is only safe if the invariant holds. If bin_f can reach >= nbins, indexing into pixels will panic. A cheap guard:
+Suggested change
+// wraps at the 0°/360° seam. Cells tile the plane and widen
+let bin = bin_f.floor() as usize;
+debug_assert!(bin < sweep.nbins, "bin_f={bin_f} out of [0, nbins={}) range", sweep.nbins);
+This is zero-cost in release builds and documents the invariant.
+claude
+Bot
+reviewed
+Jun 17, 2026
+View reviewed changes
+Comment thread
+crates/core/src/config.rs
+/// the per-site PVOL map render reads this; the COMP composite render and
+/// every EDR query are nearest regardless. See [`ResamplingMethod`].
+#[serde(default)]
+pub resampling: ResamplingMethod,
+claude
+Bot
+Jun 17, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+OdimConfig is shared by both engine_type = "odim" (COMP, OdimEngine) and engine_type = "odim-volume" (PVOL, PolarVolumeEngine). The COMP engine never reads this field, so resampling = "bilinear" in a COMP collection's [odim] block is silently ignored. A startup tracing::warn! in OdimEngine::new (or wherever it constructs from OdimConfig) when config.resampling != ResamplingMethod::Nearest would surface the misconfiguration instead of swallowing it.
+feat(engine-odim PVOL): configurable render resampling, default neare…
+…
+bf84200
+```
+…st (#186)
+
+The per-site PVOL Cartesian render (`polar_sample`, WMS/Maps/Tiles) has
+sampled bilinearly since #186, which blends the four surrounding
+`(ray, bin)` cells to smooth the radial bin/wedge structure far from the
+radar. That smoothing softens peaks and erases the discrete radar bins —
+detail that is visible in the COMP composite (nearest) and GeoTIFF
+(nearest) renders, so per-site DBZH layers look blurry by comparison.
+
+Add `OdimConfig.resampling` (`[odim] resampling = "nearest" | "bilinear"`),
+defaulting to **nearest** — each output pixel takes its single enclosing
+polar cell, so cells tile the plane and widen with range and every gate's
+value is preserved (the pre-#186 look). `bilinear` keeps the #186 smoothing
+available per collection.
+
+- New `ds_core::config::ResamplingMethod` enum (serde lowercase, default
+  Nearest); `#[serde(default)]` field on `OdimConfig`.
+- Threaded engine → every `PolarVolumeSiteView` → `polar_sample`, which
+  branches per pixel (nearest = `floor` of the fractional `(ray, bin)`,
+  ray wraps at the seam, debug_assert on the in-range invariant; bilinear =
+  existing `bilinear_cell`).
+- COMP (`engine_type = "odim"`) ignores `resampling`; `OdimEngine::new`
+  now WARNs on a non-default value instead of swallowing it.
+- Unaffected: COMP composite render (always nearest), EDR position/area
+  (always nearest — a point query wants the measurement), and the 3D Tiles
+  voxel/isosurface/echo-top products (separate `smooth_grid` blur, #381).
+- New test `polar_sample_nearest_does_not_blend_rays` locks in the default;
+  existing bilinear tests pin `ResamplingMethod::Bilinear` explicitly.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+mrauhala
+force-pushed
+the
+feat/odim-pvol-resampling-toggle
+branch
+from
+96012a8 to
+bf84200
+Compare
+June 17, 2026 09:50
+mrauhala
+commented
+Jun 17, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Thanks — addressed all three findings (force-pushed bf84200):
+collections.d/cap-alerts-feed.toml (+ ~45 other files) — removed. These were untracked local files (binary radar fixtures, demo configs) accidentally swept into the commit by a git add -A; they were never part of this change. Force-pushed a commit containing only the 8 intended files. Good catch — that would have shipped hundreds of MB of binaries and an external network dependency.
+volume_engine.rs nearest arm — debug_assert! added. The bin_f >= nbins guard earlier in the loop does hold the invariant (so the path was safe), but the assert now documents and enforces it in debug builds, per your suggestion.
+COMP ignores resampling — startup WARN added. OdimEngine::new now logs a tracing::warn! when config.resampling != ResamplingMethod::default(), mirroring the existing time_window-ignored warning, so a misconfigured [odim] resampling on a COMP collection surfaces instead of silently no-op'ing.
+cargo test -p engine-odim (incl. the 6 polar_sample tests), clippy --all-targets, and fmt --check all clean.
+claude
+Bot
+commented
+Jun 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Overall: correct and ready to merge. No correctness bugs, no security issues, no CLAUDE.md violations.
+Correctness of the nearest-neighbour path: Both bounds on bin_f are guarded (< 0.0 and >= nbins) before the floor cast, so bin is always in [0, nbins). The debug_assert is sound. Ray wrapping with rem_euclid correctly handles the 0/360 seam. pixels.sample passes Some(moment.undetect), consistent with bilinear_cell internally.
+Threading: resampling flows OdimConfig -> PolarVolumeEngine -> every PolarVolumeSiteView via make_view(). All construction sites in tests and examples updated.
+COMP isolation: OdimEngine::new warns on a non-default value rather than silently discarding it. Appropriate given the shared OdimConfig type.
+Tests: polar_sample_nearest_does_not_blend_rays locks in the default with a tight invariant (all sampled values are exact integers = no blending). Existing bilinear tests are explicitly pinned to ResamplingMethod::Bilinear.
+CLAUDE.md compliance: Enum lives in ds-core/src/config.rs (no new framework deps), serde(default) is correct, Copy appropriate for a two-variant flag, Serialize deliberately absent (consistent with every other config type in the file).
+One operational note for the release: Existing PVOL deployments will silently switch from bilinear to nearest on upgrade -- the intended behaviour change, documented in the PR description. Operators who preferred the bilinear look need to add resampling = "bilinear" to their [odim] block. Worth a sentence in the release notes.
+Hide details
+View details
+mrauhala
+merged commit 1ec84f4
+into
+main
+Jun 17, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+mrauhala
+deleted the
+feat/odim-pvol-resampling-toggle
+branch
+June 17, 2026 17:16
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,180 @@
+# Iterative Reconstruction with Basis Expansion
+
+Also called: Linear Combination Basis Method, Non-negative Linear Least-Squares Optimization
+
+## Overview
+Iterative Reconstruction with Basis Expansion models the attenuation map as a linear combination of non-negative basis functions to solve the inverse problem when filtered backprojection fails due to inconsistent projections or limited viewing angles [S1]. Unlike Fourier-space methods such as [Filtered Back-Projection (FBP)](11308-filtered-back-projection-fbp.md), which assume ideal data consistency, this method formulates the reconstruction as a convex non-negative linear least-squares optimization problem, guaranteeing a solution that emits a target light field with consistent views [S1].
+
+## How it works
+**Inputs:**
+- Target logarithmic light field vector $\bar{l}$, where elements $\bar{l}_{ij}$ correspond to discrete rays $(i, j)$.
+- A set of $N_b$ basis functions $\bar{\phi}_k(x, y)$ with known spatial support.
+- Ray geometry parameters: display width $w$, height $h$, depth $d_r$, and discrete ray indices $(i, j)$ mapping to continuous coordinates $(u, a)$.
+
+**Outputs:**
+- Coefficient vector $\alpha \in \mathbb{R}^{N_b}$, where $\alpha_k \ge 0$.
+- Reconstructed attenuation map $\mu(x, y)$.
+
+**Data Structures:**
+- **Projection Matrix $P$**: A sparse matrix of size $N_r \times N_b$, where $N_r$ is the number of rays. Element $P_{ij}^{(k)}$ represents the line integral of basis function $k$ along ray $(i, j)$.
+- **Basis Functions**: Defined on a domain $[-h/2, h/2] \times [-w/2, w/2]$. Can be conventional voxels or functions with compact/extended support [S1].
+
+**Formulas:**
+The attenuation map is modeled as:
+$$ \mu(x, y) = \sum_{k=1}^{N_b} \alpha_k \bar{\phi}_k(x, y) \quad (7) $$
+
+The forward model for the discrete logarithmic light field is:
+$$ \bar{l}_{ij} = - \sum_{k=1}^{N_b} \alpha_k P_{ij}^{(k)} \quad (9) $$
+
+The projection matrix element $P_{ij}^{(k)}$ is calculated via line integral:
+$$ P_{ij}^{(k)} = \int_{-h/2}^{h/2} \int_{-w/2}^{w/2} \bar{\phi}_k(x, y) \delta(d_r(x - (i\Delta u)) - (j\Delta a)y) \, dx \, dy \quad (10) $$
+
+The reconstruction solves the following convex optimization problem:
+$$ \arg \min_{\alpha} \| \bar{l} + P\alpha \|_2^2, \quad \text{subject to } \alpha \ge 0 \quad (11) $$
+
+**Parameters:**
+- $N_b$: Number of basis functions. Not given in the sources.
+- $N_l$: Number of layers (in multi-layer variant). Not given in the sources.
+- Layer spacing: Evenly spaced over total display thickness (e.g., 1.25 cm in prototype) [S1].
+- Layer resolution: 171 dots per inch (149 µm pixels) in prototype [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.optimize import nnls
+
+def compute_projection_matrix(basis_functions, ray_params, num_basis, num_rays):
+    """
+    Computes the projection matrix P where P[i, k] is the line integral
+    of basis function k along ray i.
+    
+    Args:
+        basis_functions: List of callable functions phi_k(x, y).
+        ray_params: Dictionary containing delta_u, delta_a, d_r, h, w.
+        num_basis: Number of basis functions Nb.
+        num_rays: Number of rays Nr.
+        
+    Returns:
+        P: Matrix of shape (num_rays, num_basis).
+    """
+    delta_u = ray_params['delta_u']
+    delta_a = ray_params['delta_a']
+    d_r = ray_params['d_r']
+    h = ray_params['h']
+    w = ray_params['w']
+    
+    P = np.zeros((num_rays, num_basis))
+    
+    for i in range(num_rays):
+        # Map discrete ray index i to continuous coordinates
+        # Note: The source uses indices (i, j) for rays. 
+        # Assuming a flattened ray index or specific geometry mapping.
+        # For generic implementation, we assume ray_params provides u and a for each ray.
+        u = i * delta_u # Placeholder for actual ray coordinate mapping
+        a = 0 # Placeholder for actual ray coordinate mapping
+        
+        for k in range(num_basis):
+            # Numerical integration of the basis function along the ray path
+            # The delta function constrains the integration to the line:
+            # d_r * (x - u) - a * y = 0  =>  x = u + (a/d_r) * y
+            # Integral becomes: integral over y of phi_k(u + (a/d_r)*y, y)
+            
+            # Simple numerical quadrature along the ray path within the display bounds
+            # This is a placeholder for the specific integration method used in [S1]
+            # as the exact quadrature rule is not detailed in the provided text.
+            # [G] Using a simple Riemann sum approximation for the line integral.
+            
+            y_vals = np.linspace(-w/2, w/2, 100)
+            x_vals = u + (a / d_r) * y_vals
+            
+            # Filter points within the display height bounds
+            valid = (x_vals >= -h/2) & (x_vals <= h/2)
+            
+            if np.any(valid):
+                integrand = basis_functions[k](x_vals[valid], y_vals[valid])
+                # Approximate integral using trapezoidal rule
+                P[i, k] = np.trapz(integrand, y_vals[valid])
+            else:
+                P[i, k] = 0.0
+                
+    return P
+
+def reconstruct_attenuation(light_field, basis_functions, ray_params, num_basis):
+    """
+    Reconstructs the attenuation coefficients alpha using non-negative least squares.
+    
+    Args:
+        light_field: Vector l_bar of target logarithmic light field values.
+        basis_functions: List of callable basis functions.
+        ray_params: Geometry parameters.
+        num_basis: Number of basis functions.
+        
+    Returns:
+        alpha: Vector of non-negative coefficients.
+    """
+    num_rays = len(light_field)
+    
+    # 1. Construct the projection matrix P
+    P = compute_projection_matrix(basis_functions, ray_params, num_basis, num_rays)
+    
+    # 2. Solve the optimization problem: arg min || l_bar + P * alpha ||^2 s.t. alpha >= 0
+    # This is equivalent to: arg min || P * alpha - (-l_bar) ||^2
+    # Using scipy's nnls which solves min ||b - Ax||^2 s.t. x >= 0
+    # Here A = P, b = -l_bar
+    
+    b = -light_field
+    alpha, _ = nnls(P, b)
+    
+    return alpha
+
+def render_light_field(alpha, basis_functions, ray_params, num_rays):
+    """
+    Renders the light field from the reconstructed coefficients.
+    
+    Args:
+        alpha: Coefficients vector.
+        basis_functions: List of callable basis functions.
+        ray_params: Geometry parameters.
+        num_rays: Number of rays.
+        
+    Returns:
+        l_rendered: Rendered logarithmic light field.
+    """
+    num_basis = len(alpha)
+    P = compute_projection_matrix(basis_functions, ray_params, num_basis, num_rays)
+    
+    # Forward model: l_bar = - P * alpha
+    l_rendered = -np.dot(P, alpha)
+    
+    return l_rendered
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision**: The optimization relies on the linearity of the human visual system to logarithmic changes in illumination (Weber-Fechner law) [S1]. Deviations from this linearity may affect perceptual quality.
+- **Boundaries**: The integration domain is bounded by the display dimensions $[-h/2, h/2] \times [-w/2, w/2]$ [S1]. Basis functions extending outside this domain must be handled correctly in the projection matrix calculation.
+- **Degenerate Input**: If the viewing angles are too limited, the system matrix $P$ may be ill-conditioned, leading to unstable solutions. The non-negativity constraint helps regularize the solution [S1].
+
+## Subtopics
+
+### [Iterative Reconstruction with Local Support Basis Functions](18310-iterative-reconstruction-with-local-support-basis-functions.md)
+A tomographic method for reconstructing a volumetric density field from a small number of camera images by modeling the scene as a linear combination of basis functions with local support. It differs from Fourier-space methods like [Filtered Back-Projection (FBP)](16502-iterative-reconstruction-with-basis-expansion.md) by using basis functions with finite support to create a sparse system matrix, which allows the solution space to be restricted by a visual hull to discard zero-valued variables.
+
+### Multi-Layer Attenuation Model
+A model representing the attenuator as a finite number $N_l$ of discrete attenuation layers (masks) separated by distances $d_k$, where each mask controls spatially-varying transmittance [S1]. The forward model for the logarithmic light field is $\bar{l}(u, a) = \sum_{k=1}^{N_l} \ln t_k(u + (d_k/d_r)a) = - \sum_{k=1}^{N_l} a_k(u + (d_k/d_r)a)$, where $a_k(\xi) = -\ln t_k(\xi)$ is the absorbance of mask $k$ at position $\xi$ [S1]. This leads to a linear system similar to the single-layer case, allowing the use of the same iterative reconstruction algorithm. In the prototype, layers are evenly-spaced over a total display thickness of 1.25 cm, with a resolution of 171 dots per inch (149 µm pixels) [S1].
+
+## Operating characteristics
+- **Time Complexity**: The method requires iterative optimization, which is computationally more complex than direct transform methods like FBP [S1]. The complexity depends on the number of basis functions $N_b$, the number of rays $N_r$, and the convergence rate of the optimization algorithm.
+- **Memory Complexity**: Requires storing the projection matrix $P$, which is $N_r \times N_b$. If basis functions have local support, $P$ is sparse, reducing memory requirements.
+- **Measured Performance**: In the prototype, a 5.7 cm × 7.6 cm display with 1.25 cm thickness and 171 dpi resolution was used. The scene was rendered as a light field with 7×7 oblique projections [S1].
+- **Strengths**: Better accounts for inconsistent projections over limited angles compared to FBP [S1]. Guarantees consistent views in the least-squares sense [S1].
+- **Limitations**: Higher computational complexity than FBP [S1]. Requires careful selection of basis functions and optimization parameters.
+- **When to use**: When projections are inconsistent or viewing angles are limited, making FBP unsuitable.
+- **When not to use**: When computational resources are limited and projections are consistent.
+
+## Background
+The method was introduced by Wetzstein et al. in 2011 in the paper "Layered 3D: Tomographic Image Synthesis for Attenuation-based Light Field and High Dynamic Range Displays" [S1]. It builds on the work of Herman [1995] on iterative reconstruction algorithms [S1]. The approach is motivated by the need to synthesize attenuation maps for layered 3D displays, where traditional transform methods fail due to the discrete nature of the layers and limited viewing angles. The method leverages the Weber-Fechner law to justify the use of logarithmic light field values in the optimization [S1].
+
+## Sources
+[S1] Layered 3D: Tomographic Image Synthesis for Attenuation-based Light Field and High Dynamic Range Displays, https://vccimaging.org/Publications/Wetzstein2011TIG/Wetzstein2011TIG.pdf, fetched 2026-10-29

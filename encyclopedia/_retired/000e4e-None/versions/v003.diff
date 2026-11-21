@@ -1,0 +1,269 @@
+--- v002.md
++++ v003.md
+@@ -4,81 +4,204 @@
+ 
+ ## Overview
+-Neural Volumes (NV) is a differentiable volume rendering method that synthesizes novel views of dynamic scenes by optimizing a deep 3D convolutional network to predict a discretized RGB$\alpha$ voxel grid and a 3D warp field [S1, S2]. It solves the problem of rendering semi-transparent and dynamic objects (e.g., smoke, hair) from sparse multi-view images by combining a variational autoencoder (VAE) for latent scene encoding with a differentiable ray-marching renderer [S2]. It sets itself apart from implicit MLP-based methods like [Neural Radiance Fields](4972-neural-radiance-fields.md) by using an explicit voxel grid for memory efficiency and real-time inference, and from static voxel methods like [DeepVoxels](1121-best-viewpoint-selection-via-opacity-entropy.md) by introducing a learned warp field to model non-rigid motion and increase effective resolution [S2].
++Neural Volumes (NV) is a method for synthesizing novel views of dynamic scenes by optimizing a deep 3D convolutional network to predict a discretized RGB$\alpha$ voxel grid and a 3D warp field [S1, S2]. It solves the problem of rendering semi-transparent, non-rigidly deforming objects (such as smoke, hair, or human faces) from sparse multi-view video input without explicit geometry reconstruction [S2]. It sets itself apart from implicit neural radiance fields by using an explicit voxel grid for memory efficiency and interpretability, and from static voxel methods by introducing a learnable warp field to model motion and effectively increase resolution [S1, S2][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $K$ synchronized, calibrated RGB images from different viewpoints (typically $K=3$ orthogonal views) [S2]. Camera intrinsics ($K$) and extrinsics ($c2w$) are required for ray generation [S2].
+-*   **Outputs:** A rendered RGB image for a target novel viewpoint [S2].
++*   **Inputs:** A set of $K$ synchronized, calibrated camera views (typically $K=3$ orthogonal views) of a dynamic scene [S2].
++*   **Outputs:** A rendered image $\hat{I}$ from a novel viewpoint, and the optimized parameters of the encoder-decoder network and warp field [S2].
+ 
+ **Data Structures:**
+-1.  **Latent Code ($z$):** A vector in $\mathbb{R}^{256}$ representing the scene state at a specific time instant [S2].
+-2.  **Voxel Grid ($V$):** A discrete 3D grid of resolution $D \times D \times D$ (typically $128^3$) storing RGBA values [S1, S2]. The function maps $\mathbf{V}: \mathbb{R}^3 \rightarrow \mathbb{R}^4$, where $\mathbf{V}_{\text{rgb}}(\mathbf{x}) \in \mathbb{R}^3$ is color and $\mathbf{V}_{\alpha}(\mathbf{x}) \in \mathbb{R}$ is differential opacity in $[0, \infty]$ [S2].
+-3.  **Warp Grid ($W$):** A discrete 3D grid of resolution $32^3$ storing inverse warp vectors [S1]. It encodes the location within the template voxel grid from which color and opacity are sampled [S2].
+-
+-**Network Architecture:**
+-1.  **Encoder:** A CNN with $K$ dedicated branches processes input images (downsampled to $334 \times 512$) [S2]. Outputs are concatenated and encoded into parameters $\mu, \sigma$ of a diagonal 256-dimensional Gaussian [S2].
+-2.  **Decoder:** Converts the latent code $z$ into the Voxel Grid $V$ and Warp Grid $W$. Two architectures are described:
+-    *   **Convolutional Decoder:** Uses 3D transposed convolutions to upsample a $1 \times 1 \times 1$ feature cube to full resolution [S3, unofficial].
+-    *   **Linear Basis Decoder:** Uses fully connected layers to generate a flattened vector representing the grid [S3, unofficial].
+-    *   *Note:* Softplus activation is applied to ensure non-negative RGBA values [S3, unofficial].
+-
+-**Numbered Steps:**
+-
+-1.  **Ray Sampling:** For each pixel in the target view, compute ray origin $\mathbf{o}$ and direction $\mathbf{d}$ using camera parameters. Sample points $\mathbf{r}_j$ along the ray within near/far bounds [S2].
+-
+-2.  **Warp Field Sampling:** For each sample point $\mathbf{r}_j$, sample the inverse warp vector $\mathbf{w}_j$ from the Warp Grid $W$ [S2]. The warped position is $\mathbf{x}_j = W^{-1}(\mathbf{r}_j)$ [S3, unofficial].
+-    *   *Warp Mixing:* If using affine warp spatial mixing, the inverse warp is computed as a weighted average of $N$ affine transforms $A_i^{-1}$:
+-        $$ W^{-1}(x) = \frac{\sum_{i=1}^{N} w_i(A_i^{-1}(x)) \times A_i^{-1}(x)}{\sum_{i=1}^{N} w_i(A_i^{-1}(x))} $$
+-        where weights $w_i$ are sampled in warp space [S3, unofficial].
+-
+-3.  **Volume Query:** Sample the RGBA values from the Voxel Grid $V$ at the warped positions $\mathbf{x}_j$:
+-    $$ \mathbf{V}(\mathbf{x}_j) = (\mathbf{V}_{\text{rgb}}(\mathbf{x}_j), \mathbf{V}_{\alpha}(\mathbf{x}_j)) $$
+-    [S2].
+-
+-4.  **Differentiable Ray Marching:** Accumulate color and opacity front-to-back using alpha blending [S3, unofficial]:
+-    $$ I_{\text{rgb}}(p) = \sum_{j} \mathbf{V}_{\text{rgb}}(\mathbf{r}_j) \cdot \mathbf{V}_{\alpha}(\mathbf{r}_j) \cdot \prod_{k<j} (1 - \mathbf{V}_{\alpha}(\mathbf{r}_k)) $$
+-    $$ I_{\alpha}(p) = 1 - \prod_{j} (1 - \mathbf{V}_{\alpha}(\mathbf{r}_j)) $$
+-    [S3, unofficial].
+-
+-5.  **Loss Computation:** Compute the total loss $\mathcal{L}$ [S3, unofficial]:
+-    $$ \mathcal{L}(\theta) = \| I_{\text{rgb}} - I^*_{\text{rgb}} \|_2^2 + \beta \cdot D_{KL}(z \| \mathcal{N}(0,1)) + \lambda_{tv} J_{tv}(\mathbf{V}_{\alpha}) + \lambda_B J_B(I_{\alpha}) $$
+-    Where:
+-    *   $D_{KL}$ is the KL-divergence between the latent distribution and a standard normal [S2].
+-    *   $J_{tv}$ is Total Variation regularization on $\mathbf{V}_{\alpha}$ [S3, unofficial].
+-    *   $J_B$ is a Beta distribution prior on exit opacity $I_{\alpha}$ [S3, unofficial].
+-
+-6.  **Backpropagation:** Update network weights $\theta$ (Encoder and Decoder) using gradients of $\mathcal{L}$ [S2].
+-
+-**Parameters:**
+-*   Voxel Grid Resolution: $128^3$ [S1].
+-*   Warp Grid Resolution: $32^3$ [S1].
+-*   Latent Dimension: 256 [S2].
+-*   Input Views: $K=3$ (frontal, left, right) [S2].
+-*   Input Resolution: $334 \times 512$ (downsampled by 8 from original) [S2].
+-*   Regularization Weights: $\beta, \lambda_{tv}, \lambda_B$ (values not given in sources) [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **MLP Complexity:** Using MLPs for volume decoding requires prohibitive size for high-quality reconstructions and is evaluated at every ray-marching step, restricting real-time performance [S2].
+-*   **Resolution Limits:** The explicit $128^3$ voxel grid prevents scaling to represent fine details at very high resolutions [S1].
+-*   **Background:** The method assumes objects lie entirely within a bounded volume in front of a distinct background, which must be captured separately [S1].
++1.  **Voxel Grid ($V$):** A discrete 3D grid of size $D \times D \times D$ (typically $128^3$) storing RGBA values [S1, S2].
++    *   $\mathbf{V}(\mathbf{x}) = (\mathbf{V}_{\text{rgb}}(\mathbf{x}), \mathbf{V}_{\alpha}(\mathbf{x}))$ [S2].
++    *   $\mathbf{V}_{\text{rgb}} \in \mathbb{R}^3$ is the color.
++    *   $\mathbf{V}_{\alpha} \in \mathbb{R}$ is the differential opacity in $[0, \infty)$, where 0 is fully transparent [S2].
++2.  **Warp Grid ($W$):** A discrete 3D grid of size $D_w \times D_w \times D_w$ (typically $32^3$) storing inverse affine transformations [S1][S3, unofficial].
++    *   Each voxel stores parameters for an affine transform $A^{-1}$ (rotation $R$, scale $s$, translation $t$) [S3, unofficial].
++3.  **Latent Code ($z$):** A vector $z \in \mathbb{R}^{256}$ representing the scene state at a specific time instant [S2].
++4.  **Conditioning Variable ($c$):** An optional vector concatenated with $z$ to allow conditional decoding (e.g., view-dependent appearance) [S2].
++
++**Algorithm Steps:**
++
++1.  **Encoding:**
++    *   Input images from $K$ cameras are passed through dedicated CNN branches [S2].
++    *   Outputs are concatenated and encoded into a diagonal Gaussian distribution parameters $(\mu, \sigma)$ [S2].
++    *   Sample latent code $z$ using the reparameterization trick: $z = \mu + \sigma \odot \epsilon, \quad \epsilon \sim \mathcal{N}(0, I)$ [S2].
++
++2.  **Decoding (Voxel Generation):**
++    *   The decoder network takes $z$ (and optionally $c$) and produces the Voxel Grid $V$ and Warp Grid $W$ [S1, S2].
++    *   *Decoder Architectures:*
++        *   **Convolutional Decoder:** Uses 3D transposed convolutions to upsample a $1 \times 1 \times 1$ feature cube to the full resolution grid (e.g., $128^3$) [S3, unofficial].
++        *   **Linear Basis Decoder:** Uses fully connected layers to directly generate a flattened vector representing the grid [S3, unofficial].
++    *   Activation functions (e.g., softplus) ensure non-negative opacity values [S3, unofficial].
++
++3.  **Warping (Deformable Volumes):**
++    *   Instead of sampling $V$ directly at ray positions, the method samples the Warp Grid to find the source location in the template volume [S2].
++    *   For a ray point $\mathbf{x}$, the inverse warp $W^{-1}(\mathbf{x})$ is computed by spatially mixing $N$ affine transformations [S3, unofficial]:
++        $$ W^{-1}(\mathbf{x}) = \sum_{i=1}^{N} w_i(A_i^{-1}(\mathbf{x})) \times A_i^{-1}(\mathbf{x}) $$
++    *   Weights $w_i$ are sampled in "warp space" (not world space) [S3, unofficial].
++    *   The effective volume value at $\mathbf{x}$ is $V_{\text{eff}}(\mathbf{x}) = V(W^{-1}(\mathbf{x}))$ [S3, unofficial].
++
++4.  **Differentiable Ray Marching:**
++    *   For each pixel, a camera ray $\mathbf{r}$ is cast. Samples $r_j$ are taken along the ray [S3, unofficial].
++    *   Color and opacity are accumulated front-to-back using alpha blending [S3, unofficial]:
++        $$ I_{\text{rgb}}(p) = \sum_{j} V_{\text{rgb}}(r_j) \cdot V_{\alpha}(r_j) \cdot \prod_{k<j} (1 - V_{\alpha}(r_k)) $$
++        $$ I_{\alpha}(p) = 1 - \prod_{j} (1 - V_{\alpha}(r_j)) $$
++    *   This step is fully differentiable, allowing gradients to flow from the image loss back to the voxel and warp grids [S3, unofficial].
++
++5.  **Optimization:**
++    *   The network is trained end-to-end by minimizing the loss function [S3, unofficial]:
++        $$ \mathcal{L}(\theta) = \| I_{\text{rgb}} - I^*_{\text{rgb}} \|_2^2 + \beta \cdot D_{KL}(z \| \mathcal{N}(0,1)) + \lambda_{tv} J_{tv}(V_{\alpha}) + \lambda_B J_B(I_{\alpha}) $$
++    *   $D_{KL}$: KL-divergence regularization for the latent space [S2].
++    *   $J_{tv}$: Total variation regularization on log-opacity to encourage sharp boundaries [S3, unofficial].
++    *   $J_B$: Beta distribution prior on exit opacity to encourage binary transparency (fully transparent or opaque) [S3, unofficial].
++
++**Pseudocode:**
++
++```python
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class NeuralVolumes:
++    def __init__(self, voxel_res=128, warp_res=32, latent_dim=256, num_cameras=3):
++        self.encoder = Encoder(latent_dim, num_cameras)
++        self.decoder = Decoder(voxel_res, warp_res, latent_dim)
++        self.voxel_res = voxel_res
++        self.warp_res = warp_res
++        
++    def encode(self, images):
++        """
++        images: Tensor of shape (B, K, H, W, 3)
++        Returns: latent code z (B, latent_dim)
++        """
++        # 1. Pass each camera view through dedicated CNN branch
++        features = [self.encoder.cnn_branches[i](images[:, i]) for i in range(len(self.encoder.cnn_branches))]
++        
++        # 2. Concatenate and encode to Gaussian parameters
++        combined = torch.cat(features, dim=1)
++        mu, log_var = self.encoder.bottleneck(combined)
++        
++        # 3. Reparameterization trick
++        std = torch.exp(0.5 * log_var)
++        eps = torch.randn_like(std)
++        z = mu + eps * std
++        return z
++
++    def decode_and_render(self, z, camera_params, target_images):
++        """
++        z: Latent code (B, latent_dim)
++        camera_params: Dictionary with 'origin' (B, 3) and 'direction' (B, H, W, 3)
++        target_images: Ground truth images (B, H, W, 3)
++        Returns: Loss scalar
++        """
++        # 1. Generate Voxel Grid and Warp Grid
++        # V: (B, 4, D, D, D) -> RGBA
++        # W: (B, 12, D_w, D_w, D_w) -> 3 affine transforms (R:9, s:3, t:0? or similar affine params)
++        V, W = self.decoder(z)
++        
++        # 2. Ray Marching
++        origins = camera_params['origin']
++        directions = camera_params['direction']
++        
++        # Sample points along rays
++        # Assuming fixed number of samples N_samples
++        t_vals = torch.linspace(0.1, 10.0, steps=128).to(V.device) # Example bounds
++        rays_o = origins.unsqueeze(1).unsqueeze(1).unsqueeze(1) # (B, 1, 1, 1, 3)
++        rays_d = directions.unsqueeze(1) # (B, 1, H, W, 3) -> needs broadcasting
++        
++        # Create grid of points along rays
++        # Shape: (B, H, W, N_samples, 3)
++        points = rays_o + rays_d * t_vals.unsqueeze(-1) 
++        
++        # 3. Apply Warp Field
++        # Sample warp grid at 'points' to get inverse affine transforms
++        # W_sampled: (B, H, W, N_samples, 12)
++        W_sampled = F.grid_sample(W, points, mode='bilinear', padding_mode='border', align_corners=True)
++        
++        # Convert warp samples to inverse affine transforms and apply to points
++        # This effectively warps the query point to the template space
++        warped_points = apply_warp(points, W_sampled) # Implementation detail: matrix mult
++        
++        # 4. Sample Voxel Grid at warped points
++        # V_sampled: (B, 4, H, W, N_samples)
++        V_sampled = F.grid_sample(V, warped_points, mode='bilinear', padding_mode='border', align_corners=True)
++        
++        # 5. Alpha Compositing
++        # V_sampled[:, 0:3] is RGB, V_sampled[:, 3] is Alpha
++        rgb_samples = V_sampled[:, 0:3] # (B, 3, H, W, N)
++        alpha_samples = V_sampled[:, 3] # (B, 1, H, W, N)
++        
++        # Compute transmittance and accumulated color
++        # T_i = exp(-sum(sigma * delta))
++        # Here alpha_samples is differential opacity. 
++        # Approximation: weight = alpha * transmittance
++        # Transmittance T_0 = 1
++        # T_i = T_{i-1} * (1 - alpha_i)
++        
++        alphas = alpha_samples.squeeze(1) # (B, H, W, N)
++        rgbs = rgb_samples.permute(0, 2, 3, 1, 4) # (B, H, W, 3, N)
++        
++        # Front-to-back blending
++        # I_rgb = sum( c_i * alpha_i * prod_{j<i} (1 - alpha_j) )
++        # I_alpha = 1 - prod_{j} (1 - alpha_j)
++        
++        # Calculate transmittance
++        # (B, H, W, N)
++        transmittance = torch.ones_like(alphas)
++        for i in range(alphas.shape[-1]):
++            if i > 0:
++                transmittance[:, :, :, i] = transmittance[:, :, :, i-1] * (1 - alphas[:, :, :, i-1])
++        
++        # Weighted sum
++        # weights: (B, H, W, N)
++        weights = alphas * transmittance
++        # Final color: (B, H, W, 3)
++        final_rgb = torch.sum(rgbs * weights.unsqueeze(-1), dim=-1)
++        final_alpha = 1 - transmittance[:, :, :, -1]
++        
++        # 6. Loss Calculation
++        # L2 Loss
++        l2_loss = F.mse_loss(final_rgb, target_images)
++        
++        # KL Divergence (from encoder)
++        kl_loss = -0.5 * torch.sum(1 + log_var - mu**2 - log_var.exp())
++        
++        # Total Variation on Opacity
++        tv_loss = compute_total_variation(V[:, 3])
++        
++        # Beta Prior on Exit Opacity (simplified as penalty on final_alpha)
++        # J_B(I_alpha) encourages binary alpha
++        beta_loss = compute_beta_prior(final_alpha)
++        
++        total_loss = l2_loss + 0.1 * kl_loss + 0.01 * tv_loss + 0.1 * beta_loss
++        
++        return total_loss, final_rgb
++
++    def render(self, z, camera_params):
++        """Inference: Decode and render without target images."""
++        V, W = self.decoder(z)
++        # ... (Same ray marching logic as above, skipping loss) ...
++        return final_rgb
++```
+ 
+ ## Subtopics
+ 
+ ### [Voxel Grid Decoders](2219-voxel-grid-decoders.md)
+-Models the volume as a discrete 3D grid, trading memory for speed to enable real-time rendering.
++Voxel Grid Decoders model the volume function $V(\mathbf{x}; \mathbf{z})$ as a discrete 3D grid of voxels, producing an explicit 3D voxel grid as the output tensor of a neural network. This approach avoids the prohibitive computational requirements of evaluating deep MLPs at every ray-marching step, enabling real-time rendering speeds. It sets itself apart from implicit MLP decoders by trading memory for speed, storing values in a structured grid rather than computing them on the fly.
+ 
+ ### [RenderNet Architecture](6691-rendernet-architecture.md)
+-A deep CNN that separates 3D feature extraction and 2D image decoding, performing view-space resampling.
++RenderNet is a deep convolutional network designed for the differentiable rendering of voxelized 3D shapes. It solves the problem of synthesizing novel views by mapping a 3D input volume directly to a 2D image, learning visual feature mappings from exemplary images. What sets it apart from its siblings, such as [Voxel Grid Decoders](2219-voxel-grid-decoders.md), is its explicit architectural separation of 3D feature extraction and 2D image decoding, connected by a projection unit that aggregates features along the viewing ray using an MLP. Unlike methods that extract features in object space independent of camera parameters, RenderNet performs view-space resampling at the beginning of the pipeline, making the features inherently dependent on the camera pose.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training requires at least 12 hours per scene [S1]. Inference is real-time once the latent codes are generated [S2].
+-*   **Memory Complexity:** Depends on the voxel grid resolution ($128^3$) and warp grid ($32^3$). Explicit grids consume more memory than implicit representations but allow faster access [S1, S2].
+-*   **Strengths:** Captures detailed volumetric geometry and appearance for dynamic, semi-transparent objects (smoke, hair); supports real-time inference; interpretable volume [S1, S2].
+-*   **Limitations:** Limited by voxel grid resolution for fine details; requires bounded volume with distinct background; training time is long [S1].
+-*   **When to use:** Dynamic scenes with semi-transparent materials where real-time novel view synthesis is needed [S2].
+-*   **When not to use:** Static scenes with fine details requiring higher than $128^3$ resolution; scenes without a distinct background [S1].
++*   **Time Complexity:** Training is computationally expensive, requiring at least 12 hours per scene [S1]. Inference is real-time capable once trained, as it involves decoding a volume and ray marching [S2].
++*   **Memory Complexity:** Scales with the voxel grid resolution. A $128^3$ grid requires significant memory, limiting the representation of fine details at high resolutions [S1]. The warp grid ($32^3$) adds overhead but is smaller [S1].
++*   **Performance:** Captures reasonably detailed volumetric geometry and appearance [S1]. Outperforms baselines like SRN and Local Light Field Fusion in qualitative and quantitative metrics for dynamic scenes [S1].
++*   **Strengths:** Handles semi-transparent materials (smoke, hair) and dynamic non-rigid deformation [S2]. The explicit volume is interpretable and allows for better viewpoint generalization compared to implicit methods [S2]. Real-time inference [S2].
++*   **Limitations:** Limited by the fixed resolution of the voxel grid ($128^3$), preventing scaling to very fine details [S1]. Requires a bounded volume with a distinct background [S1]. Training time is long [S1].
++*   **When to use:** When rendering dynamic, semi-transparent objects from sparse multi-view video is required, and interpretability or real-time inference is needed.
++*   **When not to use:** For static scenes where simpler methods suffice, or for scenes requiring extremely high-frequency detail beyond the voxel resolution.
+ 
+ ## Background
+-Neural Volumes was introduced by Lombardi et al. in 2019 [S2]. It builds on earlier work in volume rendering and neural networks, such as DeepVoxels [S2], but extends it to handle dynamic scenes and semi-transparent materials. The method was evaluated on datasets like "Real Forward-Facing" (LLFF) and custom captures of dynamic objects [S1]. It is used for synthesizing novel views of dynamic objects like faces, hair, and smoke [S2].
++Neural Volumes was introduced by Lombardi et al. in 2019 [S2]. It builds upon earlier work on ray potentials and voxel-based rendering [S2]. The method was developed to address the limitations of mesh-based reconstruction for dynamic, semi-transparent objects and the lack of real-time inference in previous neural rendering approaches like DeepVoxels [S2]. It is used for synthesizing novel views of dynamic scenes, including human faces, hair, and smoke [S2][S3, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,146 @@
+--- v002.md
++++ v003.md
+@@ -25,15 +25,15 @@
+ **Algorithm Steps:**
+ 1.  **Initialization:** Setup the NeRF model, discriminator, and optimizers [S2, unofficial].
+-2.  **Iteration Start:** Zero all optimizer gradients using `self.optimizers.zero_grad_all()` [S2, unofficial].
++2.  **Iteration Start:** Zero all optimizer gradients [S2, unofficial].
+ 3.  **Check Adversarial Mode:** Evaluate if `self.config.adv_loss_mult > 0.0` [S2, unofficial].
+ 4.  **Discriminator Training (if active):**
+     a.  Extract real image patches from the ground truth batch and fake image patches from the NeRF rendering outputs [S2, unofficial].
+-    b.  Compute discriminator loss dictionary via `pipeline.get_discriminator_train_loss_dict` [S2, unofficial].
+-    c.  Sum all values in the dictionary into `d_loss` using `functools.reduce(torch.add, d_loss_dict.values())` [S2, unofficial].
+-    d.  Backpropagate `d_loss` via `d_loss.backward()` [S2, unofficial].
+-    e.  Verify gradients are finite using `has_finite_gradients` [S2, unofficial].
++    b.  Compute discriminator loss dictionary [S2, unofficial].
++    c.  Sum all values in the dictionary into `d_loss` [S2, unofficial].
++    d.  Backpropagate `d_loss` [S2, unofficial].
++    e.  Verify gradients are finite [S2, unofficial].
+     f.  Step the discriminator optimizer [S2, unofficial].
+ 5.  **NeRF Training:**
+-    a.  Compute NeRF loss dictionary via `pipeline.get_nerf_train_loss_dict` [S2, unofficial].
++    a.  Compute NeRF loss dictionary [S2, unofficial].
+     b.  Sum values into `loss` [S2, unofficial].
+     c.  If discriminator was trained, merge the discriminator loss dict into the NeRF loss dict before returning [S2, unofficial].
+@@ -56,50 +56,72 @@
+ **Pseudocode:**
+ ```python
+-def train_iteration(self, batch, outputs):
+-    # 1. Zero gradients
+-    self.optimizers.zero_grad_all()
++def train_iteration(batch, nerf_model, discriminator, nerf_optimizer, disc_optimizer, config):
++    # 1. Zero all optimizer gradients
++    for param in list(nerf_model.parameters()) + list(discriminator.parameters()):
++        if hasattr(param, 'grad'):
++            param.grad = None
+ 
+     # 2. Check if adversarial loss is active
+-    if self.config.adv_loss_mult > 0.0:
+-        # 3. Extract patches
+-        real_patches, fake_patches = self.get_patches(outputs, batch)
++    if config.adv_loss_mult > 0.0:
++        # 3. Extract real and fake patches
++        real_patches, fake_patches = extract_patches(batch, nerf_model.outputs, config.patch_size)
+ 
+-        # 4. Discriminator Loss
+-        pred_real = self.run_discriminator(real_patches)
+-        pred_fake = self.run_discriminator(fake_patches)
+-        
+-        # Standard GAN loss terms (implied by get_discriminator_train_loss_dict)
+-        d_loss_dict = self.compute_d_loss(real_patches, fake_patches)
+-        
+-        # Gradient Penalty
+-        gp_loss = self.compute_simple_gradient_penalty(real_patches)
+-        d_loss_dict["gp_loss"] = gp_loss * self.config.gp_loss_mult
+-        
+-        # Sum discriminator loss
+-        d_loss = functools.reduce(torch.add, d_loss_dict.values())
+-        
+-        # Update Discriminator
++        # 4. Discriminator forward pass
++        pred_real = discriminator(real_patches)
++        pred_fake = discriminator(fake_patches)
++
++        # 5. Compute discriminator loss
++        d_loss_dict = compute_discriminator_loss(pred_real, pred_fake)
++
++        # 6. Compute gradient penalty (R1)
++        gp_loss = compute_gradient_penalty(discriminator, real_patches)
++        d_loss_dict["gp_loss"] = gp_loss * config.gp_loss_mult
++
++        # 7. Sum discriminator loss
++        d_loss = sum(d_loss_dict.values())
++
++        # 8. Backpropagate and update discriminator
+         d_loss.backward()
+-        assert has_finite_gradients(self.discriminator.parameters())
+-        self.discriminator_optimizer.step()
++        assert all(tensor_is_finite(p.grad) for p in discriminator.parameters() if p.grad is not None)
++        disc_optimizer.step()
+ 
+-    # 5. NeRF Loss
+-    nerf_loss_dict = self.get_nerf_train_loss_dict(outputs, batch)
+-    
+-    # Merge discriminator loss if active
+-    if self.config.adv_loss_mult > 0.0:
+-        # Add adversarial loss to NeRF dict
+-        adv_loss = self.compute_adv_loss(fake_patches)
+-        nerf_loss_dict["adv_loss"] = adv_loss * self.config.adv_loss_mult
+-        # Add VGG perceptual loss if configured
+-        if self.config.vgg_loss_mult > 0.0:
+-            vgg_loss = self.compute_vgg_loss(outputs, batch)
+-            nerf_loss_dict["vgg_loss"] = vgg_loss * self.config.vgg_loss_mult
+-            
+-    loss = functools.reduce(torch.add, nerf_loss_dict.values())
+-    
+-    # Update NeRF
++    # 9. Compute NeRF loss
++    nerf_loss_dict = compute_nerf_loss(batch, nerf_model.outputs)
++
++    # 10. Merge adversarial loss into NeRF loss if active
++    if config.adv_loss_mult > 0.0:
++        adv_loss = compute_adversarial_loss(discriminator, fake_patches)
++        nerf_loss_dict["adv_loss"] = adv_loss * config.adv_loss_mult
++        if config.vgg_loss_mult > 0.0:
++            vgg_loss = compute_vgg_perceptual_loss(batch, nerf_model.outputs)
++            nerf_loss_dict["vgg_loss"] = vgg_loss * config.vgg_loss_mult
++
++    # 11. Sum NeRF loss
++    loss = sum(nerf_loss_dict.values())
++
++    # 12. Backpropagate and update NeRF
+     loss.backward()
+-    self.neurf_optimizer.step()
++    nerf_optimizer.step()
++
++def extract_patches(batch, outputs, patch_size):
++    real_patches = batch["image"].reshape(-1, patch_size, patch_size, 3).permute(0, 3, 1, 2)
++    fake_patches = outputs["rgb"].reshape(-1, patch_size, patch_size, 3).permute(0, 3, 1, 2)
++    return real_patches, fake_patches
++
++def compute_discriminator_loss(pred_real, pred_fake):
++    return {"disc_real": -pred_real.mean(), "disc_fake": -pred_fake.mean()}
++
++def compute_gradient_penalty(discriminator, x):
++    x.requires_grad = True
++    pred = discriminator(x)
++    gradients = autograd.grad(pred.sum(), x, create_graph=True, only_inputs=True)[0]
++    return 0.5 * (gradients.square().sum([1, 2, 3]).mean())
++
++def compute_adversarial_loss(discriminator, fake_patches):
++    pred_fake = discriminator(fake_patches)
++    return softplus(-pred_fake).mean()
++
++def tensor_is_finite(tensor):
++    return not any(tensor != tensor) and not any(tensor == float('inf')) and not any(tensor == float('-inf'))
+ ```
+ 
+@@ -110,6 +132,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds overhead from discriminator forward/backward passes and patch extraction [S2, unofficial].
+-*   **Memory Complexity:** Requires storing discriminator parameters and intermediate gradients for patches [S2, unofficial].
++*   **Time Complexity:** Not given in the sources. Adds overhead from discriminator forward/backward passes and patch extraction [S2, unofficial].
++*   **Memory Complexity:** Not given in the sources. Requires storing discriminator parameters and intermediate gradients for patches [S2, unofficial].
+ *   **Performance:** Evaluated on challenging indoor scenes from ScanNet++ and Tanks and Temples [S1]. Achieves significant improvements in perceptual metrics like LPIPS (reductions between 28-48%) while maintaining better PSNR and SSIM scores compared to baselines [S1].
+ *   **Strengths:** Mitigates quality degradation from imperfect input data (limited coverage, distortion, illumination changes) [S1]. Enforces 3D-consistent photorealism [S1].

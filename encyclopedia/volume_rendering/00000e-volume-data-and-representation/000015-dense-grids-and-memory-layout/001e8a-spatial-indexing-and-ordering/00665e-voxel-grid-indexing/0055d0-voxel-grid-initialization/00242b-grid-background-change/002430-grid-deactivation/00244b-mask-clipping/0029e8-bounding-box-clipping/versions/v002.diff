@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -1,31 +1,25 @@
+ # Bounding Box Clipping
+-
+ Also called: clip (bbox)
+-
+ ## Overview
+-Bounding Box Clipping returns a new grid containing only the active voxels of a source grid that lie within a specified axis-aligned bounding box (AABB) [S1, unofficial]. It serves as a spatial filter to isolate a region of interest or reduce memory footprint by discarding voxels outside the target volume [S1, unofficial]. Unlike [Mask Clipping](3229-mask-clipping.md), which uses a secondary binary grid to define the active region, Bounding Box Clipping uses geometric coordinates, making it suitable for rectangular sub-volumes without requiring a pre-computed mask grid.
+-
++Bounding Box Clipping returns a new grid containing only the active voxels of a source grid that lie within a specified spatial bounding box [S1, unofficial]. It solves the problem of isolating a specific region of interest or reducing memory footprint by discarding voxels outside a defined extent. Unlike [Mask Clipping](3229-mask-clipping.md), which filters voxels based on the activity state of a secondary mask grid, Bounding Box Clipping filters based on geometric coordinates [S1, unofficial].
+ ## How it works
+ **Inputs:**
+-- `source_grid`: The input voxel grid containing active/inactive voxels.
+-- `bbox`: An axis-aligned bounding box defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$.
++- `source_grid`: The input voxel grid containing active and inactive voxels.
++- `bbox`: A bounding box defined by minimum and maximum coordinates (e.g., `min_x, min_y, min_z` and `max_x, max_y, max_z`).
+ 
+ **Outputs:**
+-- `clipped_grid`: A new grid containing only the voxels from `source_grid` where the voxel center (or representative coordinate) lies within `bbox`.
++- `clipped_grid`: A new grid instance containing only the voxels from `source_grid` whose coordinates satisfy the bounding box constraint.
+ 
+ **Data Structures:**
+-- The output grid typically maintains the same internal data structure as the source (e.g., a dense array, sparse hash map, or linked list of blocks), but initialized with a smaller extent or a subset of the original data.
+-- If the source is sparse, the output may be a new sparse structure containing only the relevant entries.
++- The output grid retains the spatial metadata (origin, resolution, voxel size) of the source grid, but its active voxel list is filtered.
++- Internal representation of the bounding box is typically axis-aligned (AABB).
+ 
+ **Steps:**
+-1. Initialize an empty container for the output grid data.
++1. Initialize an empty list or buffer `data` to store the active voxels for the new grid.
+ 2. Iterate through all active voxels in the `source_grid`.
+-3. For each active voxel at coordinate $c = (x, y, z)$:
++3. For each active voxel at coordinate $c$:
+    - Check if $c$ is contained within `bbox`.
+-   - The containment test is defined as:
+-     $$x_{min} \le x \le x_{max} \land y_{min} \le y \le y_{max} \land z_{min} \le z \le z_{max}$$
+-   - If the condition is true, add the voxel (and its associated data) to the output container.
+-4. Construct the `clipped_grid` from the output container.
+-5. Return `clipped_grid`.
++   - If `contains(bbox, c)` is true, add the voxel (value and coordinate) to `data`.
++4. Construct `clipped_grid` using `data` and the original grid's metadata.
+ 
+ **Pseudocode:**
+@@ -33,52 +27,48 @@
+ def bounding_box_clip(source_grid, bbox):
+     """
+-    Clips a voxel grid to a bounding box.
++    Returns a new grid containing only active voxels of source_grid 
++    that lie within the specified bbox.
+     
+     Args:
+-        source_grid: Object with method `get_active_voxels()` returning an iterable of (coord, data).
+-        bbox: Tuple (x_min, y_min, z_min, x_max, y_max, z_max).
+-        
++        source_grid: Object with method get_active_voxels() returning list of (coord, value)
++        bbox: Object with method contains(coord) returning boolean
+     Returns:
+-        A new grid object containing only voxels inside the bbox.
++        new_grid: Instance of the grid class with filtered active voxels
+     """
+-    x_min, y_min, z_min, x_max, y_max, z_max = bbox
+-    clipped_data = []
++    clipped_voxels = []
+     
+-    # Iterate over all active voxels in the source
+-    for coord, data in source_grid.get_active_voxels():
+-        x, y, z = coord
+-        
+-        # Check containment in AABB
+-        if (x_min <= x <= x_max and
+-            y_min <= y <= y_max and
+-            z_min <= z <= z_max):
+-            clipped_data.append((coord, data))
++    # Iterate over all active voxels in the source grid
++    for coord, value in source_grid.get_active_voxels():
++        # Check if the voxel coordinate is inside the bounding box
++        if bbox.contains(coord):
++            clipped_voxels.append((coord, value))
+             
+-    # Construct and return the new grid
+-    # Implementation detail: The specific constructor depends on the grid type.
+-    # [G] Assuming a generic Grid constructor that accepts a list of active voxels.
+-    return Grid.from_active_voxels(clipped_data)
++    # Create and return the new grid with the filtered voxels
++    # The new grid inherits metadata (origin, resolution) from source_grid
++    new_grid = source_grid.create_empty_copy()
++    new_grid.set_active_voxels(clipped_voxels)
++    return new_grid
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Empty Result:** If no active voxels lie within the bounding box, the result is an empty grid. The implementation must handle this gracefully (e.g., returning a valid empty grid rather than null, unless specified otherwise).
+-- **Boundary Precision:** Coordinate comparisons should be inclusive ($\le$) to ensure voxels on the boundary are included, consistent with standard voxel grid indexing.
+-- **Degenerate BBox:** If $x_{min} > x_{max}$ or similar for other axes, the bbox is invalid. The method should either return an empty grid or raise an error. [G] Raising an error is safer to prevent silent data loss.
++- If no active voxels lie within the bounding box, the resulting grid may be empty or null, depending on implementation [S2, unofficial].
++- Coordinate system alignment: The bounding box coordinates must be in the same space as the voxel grid coordinates (e.g., voxel indices vs. world units). Mismatched spaces lead to incorrect clipping [G].
++- Precision: Floating-point bounding box boundaries should be handled carefully when comparing against integer voxel indices to avoid off-by-one errors [G].
+ 
+ ## Subtopics
+ 
+ ### Voxel Body Copying with Sub-Voxel Clipping
+-This variant handles clipping at a finer granularity, potentially operating on "solid blocks" or "voxel bodies" rather than individual voxels. It calculates the integer bounding box of the volume within the world grid using a function like `TryGetRange` [S2, unofficial]. If no solid range exists, it returns null [S2, unofficial]. It iterates over all solid blocks in the volume using `ForEachSolidIn` [S2, unofficial]. For each block, if it is not fully inside the target bbox, it calls `ClipBlock` with `keepInside: true` to get the clipped field [S2, unofficial]. If the resulting field is empty, it is skipped; if it is full, the field is set to null [S2, unofficial]. Otherwise, a new `VoxelBody.Voxel` with the clipped field is added to a `kept` list [S2, unofficial]. If the `kept` list is empty, it returns null; otherwise, it creates a `VoxelBody` using `VoxelBody.Cropped` with the name and the list of voxels [S2, unofficial]. This approach is useful when the underlying data is organized in larger, immutable blocks that need to be partially retained.
++This variant handles clipping at the level of solid blocks or "voxel bodies" rather than individual voxels. It calculates the integer bounding box of the volume within the world grid using `TryGetRange`. If no solid range exists, it returns null [S2, unofficial]. It iterates over all solid blocks using `ForEachSolidIn`. For each block, if it is not fully inside the target range, it calls `ClipBlock` with `keepInside: true` to generate a clipped field. If the resulting field is empty, the block is skipped; if it is full, the field is set to null. Otherwise, a new `VoxelBody.Voxel` with the clipped field is added to a `kept` list. If the `kept` list is empty, it returns null; otherwise, it creates a `VoxelBody` using `VoxelBody.Cropped` with the name and the list of voxels [S2, unofficial]. This approach is useful for optimizing memory by preserving block-level structure while trimming extents.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of active voxels in the source grid. Each active voxel is visited once and checked against the bbox.
+-- **Memory Complexity:** $O(K)$, where $K$ is the number of active voxels inside the bounding box. The output grid stores only these voxels.
+-- **Performance:** The operation is generally fast and memory-bound if the grid is sparse, as it avoids iterating over inactive voxels. If the grid is dense, iterating over the entire volume may be costly, but the clipping itself is a simple comparison.
+-- **Strengths:** Simple to implement, efficient for sparse grids, no need for auxiliary mask data.
+-- **Limitations:** Only supports axis-aligned rectangular regions. Not suitable for irregular or non-rectangular sub-volumes.
++**Time Complexity:** Linear with respect to the number of active voxels in the source grid, $O(N)$, where $N$ is the count of active voxels. The check `contains(bbox, c)` is $O(1)$.
++**Memory Complexity:** Proportional to the number of voxels retained in the clipped region.
++**Strengths:** Simple to implement; effective for isolating regions of interest; reduces memory usage for large sparse grids.
++**Limitations:** Does not compress data; if the bounding box is large, the output grid may still be large. Not suitable for hierarchical compression.
++**When to use:** When a specific spatial subset of a volume is needed for rendering or analysis.
++**When not to use:** When hierarchical access patterns are required (use [Spatial Indexing](link) instead) or when data needs to be preserved in its original structure.
+ 
+ ## Background
+-Bounding Box Clipping is a fundamental operation in voxel-based graphics and simulation, often used for level-of-detail management, culling, or preparing data for specific rendering passes. It is implemented in various voxel engines and libraries, such as Lyr.jl [S1, unofficial] and VoxelTerraformer [S2, unofficial].
+-
++Bounding Box Clipping is a fundamental operation in voxel-based data processing, often used in preprocessing steps for volume rendering or spatial queries. It is implemented in various voxel engines and libraries to manage memory and focus computation.
+ ## Sources
+ [S1] Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)

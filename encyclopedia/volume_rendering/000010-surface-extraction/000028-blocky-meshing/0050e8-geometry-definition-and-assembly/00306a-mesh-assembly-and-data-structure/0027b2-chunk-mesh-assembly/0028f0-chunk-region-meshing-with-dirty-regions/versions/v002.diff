@@ -1,0 +1,263 @@
+--- v001.md
++++ v002.md
+@@ -4,54 +4,49 @@
+ 
+ ## Overview
+-Chunk Region Meshing with Dirty Regions generates geometry for a specific chunk by processing only "dirty" cells within a defined region, while consulting the complete chunk and its neighbors for visibility, ambient occlusion, and fluid data [S1, unofficial]. It differs from full-chunk meshing by returning an `ownedRegion` that includes a 1-cell halo around the dirty region for face culling, AO, and fluid corner reads, clamped at chunk boundaries [S1, unofficial]. This allows incremental updates without regenerating the entire chunk mesh, maintaining compatibility with the standard `meshChunk` API by returning empty buffers for empty regions [S1, unofficial].
++Chunk Region Meshing with Dirty Regions is an incremental surface extraction method that generates geometry for a voxel chunk by processing only a specified subset of "dirty" cells, while consulting the complete chunk and its neighbors for visibility, ambient occlusion (AO), and fluid data [S1, unofficial]. It solves the problem of expensive full-chunk remeshing by allowing partial updates, ensuring that only changed geometry is regenerated [S1, unofficial]. Unlike [Section-based Mesh Generation](4220-section-based-mesh-generation.md), which processes the entire chunk layer by layer, this method restricts computation to a local `dirtyRegion`, significantly reducing work for sparse updates [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `chunk`: The current chunk's voxel data.
+-- `neighbors`: Adjacent chunk data required for boundary visibility and AO.
+-- `dirtyRegion`: A chunk-local half-open region defined by minimum and maximum coordinates.
+-- `lookupTables`: Pre-computed tables for special blocks, layers, fluids, and cross-plants [S1, unofficial].
+-
+-**Outputs:**
+-- `ownedRegion`: A `MeshRegion` object containing a 1-cell halo around the `dirtyRegion`, clamped to chunk boundaries [S1, unofficial].
+-- `layers`: An object containing arrays for `crossPlants`, `fluids`, `opaque`, `specialBlocks`, `transparentSolid`, and `water` [S1, unofficial].
++**Inputs and Outputs:**
++The primary input is a chunk-local half-open `dirtyRegion` defining the cells to process [S1, unofficial]. The function also requires access to the full chunk data, neighbor chunks (for boundary visibility/AO), lookup tables for special blocks, fluids, and cross-plants, and a sink for collecting results [S1, unofficial]. The output is an `ownedRegion` object containing a `dirtyRegion` (MeshRegion), an `ownedRegion` (MeshRegion) that includes a 1-cell halo around the dirty region, and a `layers` object containing arrays for `crossPlants`, `fluids`, `opaque`, `specialBlocks`, `transparentSolid`, and `water` [S1, unofficial].
+ 
+ **Data Structures:**
+-- `MeshRegion`: Defined by `dirtyRegion` (the input region) and `ownedRegion` (the expanded region used for computation) [S1, unofficial].
+-- `Uint32Array`: A mask used for greedy meshing initialization [S1, unofficial].
+-- `layers`: Each key maps to an array of mesh primitives. Cubes use unit faces; plants and fluids use independent cell-owned buffers [S1, unofficial].
++*   **MeshRegion:** Defines a bounding box. The `ownedRegion` extends the `dirtyRegion` by a 1-cell halo in all directions, clamped at chunk boundaries [S1, unofficial].
++*   **Layers:** An object mapping block types to arrays of mesh data [S1, unofficial].
++*   **Greedy Mesh Mask:** A `Uint32Array` used to track processed cells during the greedy meshing pass [S1, unofficial].
++*   **Light Masks:** Pre-computed masks for required cells to optimize lighting calculations [S1, unofficial].
+ 
+ **Steps:**
+-1. **Validate Inputs:** Check that chunk views and neighbor data are valid [S1, unofficial].
+-2. **Normalize Region:** Adjust `dirtyRegion` coordinates to be within bounds: $[FIRST\_INDEX, CHUNK\_SIZE]$ for X and Z, and $[FIRST\_INDEX, height]$ for Y [S1, unofficial].
+-3. **Check Emptiness:** If `dirtyRegion` is empty (min $\ge$ max in any axis), return an empty mesh result with empty layers [S1, unofficial].
+-4. **Retrieve Lookups:** Load lookup tables for special blocks, layers, fluids, and cross-plants [S1, unofficial].
+-5. **Mesh Special Blocks:** Process special blocks within the `dirtyRegion` [S1, unofficial].
+-6. **Mesh Fluids:** Process fluid surfaces within the `dirtyRegion` [S1, unofficial].
+-7. **Initialize Sink:** Create a sink for collecting mesh layers and push results from cross-plants, fluids, and special blocks [S1, unofficial].
+-8. **Generate Light Masks:** Compute light masks for the required cells [S1, unofficial].
+-9. **Initialize Greedy Mask:** Initialize a `Uint32Array` mask for greedy meshing [S1, unofficial].
+-10. **Mesh Faces:** Generate all faces using the chunk, fluids, light, lookup, mask, neighbors, plants, `dirtyRegion`, special lookup, push function, and Y limit [S1, unofficial].
+-11. **Return Result:** Return the `ownedRegion` and `layers` [S1, unofficial].
++1.  **Validate:** Ensure chunk views and neighbor data are accessible [S1, unofficial].
++2.  **Normalize Region:** Clamp the `dirtyRegion` coordinates to valid bounds: $[FIRST\_INDEX, CHUNK\_SIZE]$ for X and Z, and $[FIRST\_INDEX, height]$ for Y [S1, unofficial].
++3.  **Check Empty:** If the normalized region is empty (min $\ge$ max in any axis), return an empty mesh result with empty layers [S1, unofficial].
++4.  **Retrieve Lookups:** Load lookup tables for special blocks, layers, fluids, and cross-plants [S1, unofficial].
++5.  **Mesh Special Blocks:** Process special block geometry within the `dirtyRegion` [S1, unofficial].
++6.  **Mesh Fluids:** Process fluid surface geometry within the `dirtyRegion` [S1, unofficial].
++7.  **Initialize Sink:** Create a sink for collecting mesh layers and prepare to push results from cross-plants, fluids, and special blocks [S1, unofficial].
++8.  **Generate Light Masks:** Compute light masks for the cells in the `dirtyRegion` [S1, unofficial].
++9.  **Initialize Mask:** Create a `Uint32Array` mask for greedy meshing, initialized to zero [S1, unofficial].
++10. **Mesh Faces:** Execute the main meshing pass using the chunk, fluids, light masks, lookup tables, mask, neighbors, plants, `dirtyRegion`, special lookup, push function, and Y limit [S1, unofficial].
++11. **Return:** Return the `ownedRegion` containing the generated layers [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def mesh_chunk_region(chunk, neighbors, dirty_region, lookup_tables):
+-    # 1. Validate chunk views and neighbors
+-    if not is_valid(chunk) or not is_valid(neighbors):
+-        raise ValueError("Invalid chunk or neighbor data")
++def mesh_chunk_region(chunk, neighbors, dirty_region, config):
++    # 1. Validate inputs
++    if not chunk.valid or not neighbors.valid:
++        raise ValueError("Invalid chunk or neighbor views")
+ 
+-    # 2. Normalize dirty region coordinates
+-    min_x = max(dirty_region.min_x, FIRST_INDEX)
+-    max_x = min(dirty_region.max_x, CHUNK_SIZE)
+-    min_y = max(dirty_region.min_y, FIRST_INDEX)
+-    max_y = min(dirty_region.max_y, height)
+-    min_z = max(dirty_region.min_z, FIRST_INDEX)
+-    max_z = min(dirty_region.max_z, CHUNK_SIZE)
++    # 2. Normalize dirty region to chunk bounds
++    # CHUNK_SIZE is typically 16
++    x_min = max(dirty_region.x_min, 0)
++    x_max = min(dirty_region.x_max, CHUNK_SIZE)
++    z_min = max(dirty_region.z_min, 0)
++    z_max = min(dirty_region.z_max, CHUNK_SIZE)
++    y_min = max(dirty_region.y_min, 0)
++    y_max = min(dirty_region.y_max, chunk.height)
+ 
+     # 3. Check for empty region
+-    if min_x >= max_x or min_y >= max_y or min_z >= max_z:
++    if x_min >= x_max or z_min >= z_max or y_min >= y_max:
+         return {
+-            "dirtyRegion": {"min": [min_x, min_y, min_z], "max": [max_x, max_y, max_z]},
++            "dirtyRegion": {"x_min": x_min, "x_max": x_max, "z_min": z_min, "z_max": z_max, "y_min": y_min, "y_max": y_max},
+             "layers": {
+                 "crossPlants": [],
+@@ -62,67 +57,74 @@
+                 "water": []
+             },
+-            "ownedRegion": {"min": [min_x, min_y, min_z], "max": [max_x, max_y, max_z]}
++            "ownedRegion": {"x_min": x_min, "x_max": x_max, "z_min": z_min, "z_max": z_max, "y_min": y_min, "y_max": y_max}
+         }
+ 
+-    # 4. Retrieve lookup tables
+-    special_lookup = lookup_tables.special_blocks
+-    fluid_lookup = lookup_tables.fluids
+-    plant_lookup = lookup_tables.plants
++    # 4. Retrieve lookups
++    special_lookup = get_special_block_lookup(config)
++    fluid_lookup = get_fluid_lookup(config)
++    plant_lookup = get_plant_lookup(config)
+ 
+     # 5. Mesh special blocks
+-    special_mesh = mesh_special_blocks(chunk, dirty_region, special_lookup)
++    special_meshes = mesh_special_blocks(chunk, dirty_region, special_lookup)
+ 
+-    # 6. Mesh fluid surfaces
+-    fluid_mesh = mesh_fluids(chunk, dirty_region, fluid_lookup)
++    # 6. Mesh fluids
++    fluid_meshes = mesh_fluids(chunk, dirty_region, fluid_lookup)
+ 
+-    # 7. Initialize sink and push results
++    # 7. Initialize sink
+     sink = []
+-    sink.extend(special_mesh)
+-    sink.extend(fluid_mesh)
+ 
+     # 8. Generate light masks
+-    light_mask = generate_light_masks(chunk, dirty_region)
++    light_masks = generate_light_masks(chunk, dirty_region)
+ 
+-    # 9. Initialize greedy meshing mask
+-    greedy_mask = Uint32Array(size=dirty_region.volume)
++    # 9. Initialize greedy mesh mask
++    # Size depends on dirty region dimensions
++    mask_width = x_max - x_min
++    mask_depth = z_max - z_min
++    mask_height = y_max - y_min
++    mask = [0] * (mask_width * mask_depth * mask_height)
+ 
+-    # 10. Mesh all faces
+-    # Note: The halo is implicitly handled by the meshing function using neighbors
+-    face_mesh = mesh_faces(
++    # 10. Mesh faces (Greedy Meshing)
++    # The owned region includes a 1-cell halo
++    halo_x_min = max(x_min - 1, 0)
++    halo_x_max = min(x_max + 1, CHUNK_SIZE)
++    halo_z_min = max(z_min - 1, 0)
++    halo_z_max = min(z_max + 1, CHUNK_SIZE)
++    halo_y_min = max(y_min - 1, 0)
++    halo_y_max = min(y_max + 1, chunk.height)
++
++    owned_region = {
++        "x_min": halo_x_min, "x_max": halo_x_max,
++        "z_min": halo_z_min, "z_max": halo_z_max,
++        "y_min": halo_y_min, "y_max": halo_y_max
++    }
++
++    opaque_meshes = mesh_faces_greedy(
+         chunk=chunk,
+-        fluids=fluid_mesh,
+-        light=light_mask,
+-        lookup=lookup_tables,
+-        mask=greedy_mask,
+         neighbors=neighbors,
++        dirty_region=dirty_region,
++        light_masks=light_masks,
++        mask=mask,
++        lookup=special_lookup,
++        fluids=fluid_lookup,
+         plants=plant_lookup,
+-        dirty_region=dirty_region,
+-        push_function=lambda layer, data: sink.append((layer, data)),
+-        y_limit=height
++        y_limit=chunk.height,
++        push_function=lambda layer_type, mesh_data: sink.append((layer_type, mesh_data))
+     )
+ 
+-    # 11. Construct owned region with 1-cell halo
+-    owned_min_x = max(min_x - 1, FIRST_INDEX)
+-    owned_max_x = min(max_x + 1, CHUNK_SIZE)
+-    owned_min_y = max(min_y - 1, FIRST_INDEX)
+-    owned_max_y = min(max_y + 1, height)
+-    owned_min_z = max(min_z - 1, FIRST_INDEX)
+-    owned_max_z = min(max_z + 1, CHUNK_SIZE)
+-
+-    owned_region = {
+-        "min": [owned_min_x, owned_min_y, owned_min_z],
+-        "max": [owned_max_x, owned_max_y, owned_max_z]
++    # 11. Compile results
++    # Note: The source implies layers are populated via the sink and specific passes
++    # We aggregate them here for the return structure
++    layers = {
++        "crossPlants": [], # Populated by plant pass if applicable
++        "fluids": fluid_meshes,
++        "opaque": opaque_meshes,
++        "specialBlocks": special_meshes,
++        "transparentSolid": [],
++        "water": []
+     }
+ 
+     return {
+-        "dirtyRegion": {"min": [min_x, min_y, min_z], "max": [max_x, max_y, max_z]},
+-        "layers": {
+-            "crossPlants": sink.get("crossPlants", []),
+-            "fluids": sink.get("fluids", []),
+-            "opaque": sink.get("opaque", []),
+-            "specialBlocks": sink.get("specialBlocks", []),
+-            "transparentSolid": sink.get("transparentSolid", []),
+-            "water": sink.get("water", [])
+-        },
++        "dirtyRegion": {"x_min": x_min, "x_max": x_max, "z_min": z_min, "z_max": z_max, "y_min": y_min, "y_max": y_max},
++        "layers": layers,
+         "ownedRegion": owned_region
+     }
+@@ -130,39 +132,29 @@
+ 
+ **Parameters:**
+-- `CHUNK_SIZE`: Constant defining the width/depth of the chunk, implied to be 16 in Minecraft-like contexts [S1, unofficial].
++*   `CHUNK_SIZE`: Constant defining the width/depth of the chunk. Implied to be 16 based on Minecraft context [S1, unofficial].
++*   `dirtyRegion`: The half-open bounding box of cells to process [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- The input halo influences reads for visibility and AO but never owns or contributes output cells [S1, unofficial].
+-- Do not splice greedy full-chunk mesh quads mid-process [S1, unofficial].
+-- Empty regions return empty owned buffers, keeping the output invariant with the standard `meshChunk` API [S1, unofficial].
++*   **Empty Region:** If the dirty region is empty, the function returns empty buffers, maintaining API invariance with `meshChunk` [S1, unofficial].
++*   **Halo Influence:** The 1-cell halo in the `ownedRegion` influences reads for visibility and AO but does not own or contribute output cells for the dirty region itself [S1, unofficial].
++*   **Greedy Meshing:** Do not splice greedy full-chunk mesh quads mid-process; the mask must be managed correctly to avoid incorrect culling [S1, unofficial].
++*   **Precision:** Coordinates must be normalized to integer indices within bounds to avoid out-of-bounds reads [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Mesh Generation & Entity Spawning Pipeline](4407-mesh-generation-entity-spawning-pipeline.md)
+-Processes asynchronous mesh tasks, constructs Bevy meshes from vertex/index buffers, and spawns chunk entities with transforms and materials.
++This pipeline orchestrates the asynchronous generation of triangle-list meshes from voxel data and their subsequent instantiation as renderable entities in a game engine. It solves the problem of decoupling expensive geometry computation from the main render loop, ensuring frame-rate stability by batching mesh creation and controlling entity spawn rates. Unlike synchronous meshing, this method manages dependencies on neighbor chunks to ensure face consistency, deferring requests until all required context is available.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- Time complexity is proportional to the number of dirty cells and their neighbors, rather than the entire chunk volume [S1, unofficial].
+-- Memory complexity is proportional to the size of the `ownedRegion` and the resulting mesh layers [S1, unofficial].
+-
+-**Measured Performance:**
+-- Specific performance metrics are not provided in the sources [S1, unofficial].
+-
+-**Scaling:**
+-- Scales with the number of dirty cells and the complexity of the region [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-- Strengths: Efficient incremental updates, reduced computation for sparse changes [S1, unofficial].
+-- Limitations: Requires careful management of the halo region and neighbor data [S1, unofficial].
+-
+-**When to Use:**
+-- Use when only a small portion of a chunk has changed [S1, unofficial].
+-
+-**When Not to Use:**
+-- Avoid when the entire chunk needs regeneration or when changes are widespread [S1, unofficial].
++*   **Time Complexity:** Proportional to the volume of the `dirtyRegion` plus the overhead of neighbor lookups for the halo. Significantly faster than full-chunk meshing for sparse updates.
++*   **Memory Complexity:** Proportional to the size of the `dirtyRegion` and the `ownedRegion` (including halo). The greedy mesh mask requires $O(W \times D \times H)$ space for the dirty region dimensions.
++*   **Performance:** Measured performance depends on the density of dirty cells. Fluid meshing is priced separately due to its variable complexity [S1, unofficial].
++*   **Strengths:** Incremental updates reduce CPU load for dynamic scenes. Consistent face culling via the halo ensures visual correctness.
++*   **Limitations:** Requires careful management of neighbor data and halo regions. Not suitable for full-chunk regeneration where full consistency is needed without neighbor context.
++*   **When to Use:** When only a small portion of a chunk has changed (e.g., player block placement).
++*   **When Not to Use:** When the entire chunk needs remeshing or when neighbor consistency cannot be guaranteed.
+ 
+ ## Background
+-This method is part of the `mc-meshing` library by Nerima Games, designed for efficient chunk meshing in voxel-based games [S1, unofficial]. It builds on the principles of chunk mesh assembly, focusing on incremental updates to reduce computational overhead [S1, unofficial].
++This method is part of the `mc-meshing` library, an unofficial implementation for Minecraft-style voxel rendering [S1, unofficial]. It addresses the performance bottleneck of full-chunk meshing in dynamic voxel worlds by enabling incremental updates. The approach is inspired by the need for real-time performance in game engines where voxel data changes frequently.
+ 
+ ## Sources

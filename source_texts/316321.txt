@@ -1,0 +1,377 @@
+Neural Volume Rendering — Isaac Sim Documentation
+Skip to main content
+Back to top
+Isaac Sim Documentation
+Choose version
+discord
+github
+twitter
+youtube
+instagram
+www
+linkedin
+twitch
+Is this page helpful?
+Neural Volume Rendering#
+NuRec (Neural Reconstruction) enables scene rendering in Omniverse using neural volumes derived from real-world images.
+Compatible environments are published as USD stages that use OpenUSD ParticleField geometry (3D Gaussian splats and related radiance fields), which Omniverse RTX renders natively together with polygonal scene content.
+For renderer behavior, import guidance, shadows, and color handling for particle fields, see Gaussian Splats (Particle Fields) in the Omniverse Materials and Rendering documentation.
+For NuRec-specific data preparation, reconstruction, rendering, and integration with Omniverse applications such as Isaac Sim, see the NVIDIA Omniverse NuRec documentation.
+To train splats and export ParticleField USD stages for Omniverse, use the open-source 3DGruT project.
+Example#
+The following examples show how to load a NuRec USD scene into Isaac Sim and run a simulation.
+Use nurec_carter_script_editor.py from the Script Editor or nurec_carter.py as a Standalone Application.
+Each script iterates over the configured scenarios, opens the stage, loads the Carter navigation asset, sets the start location and navigation target, and steps the timeline so the wheeled robot drives toward the target.
+Note
+Rendering particle fields with DLSS Frame Generation enabled may show visual artifacts. If that happens, disable Frame Generation in Rendering Settings. See Gaussian Splats (Particle Fields).
+Prerequisites#
+Download the NVIDIA NuRec Dataset from Hugging Face.
+Update the USER_PATH variable in both scripts: USER_PATH = "/home/user/PhysicalAI-Robotics-NuRec".
+For the Script Editor example, launch Isaac Sim with the following recommended settings:
+```
+./isaac-sim.sh \
+    --/renderer/multiGpu/enabled=false \
+    --/rtx/spg/enabled=true \
+    --/omni/rtx/nre/compositing/disableNuRecPostProcessings=true \
+    --/rtx/rtpt/gaussian/skipTonemapping/enabled=false \
+    --enable omni.rtx.spg
+```
+Alternatively, pass the settings when you run the standalone example.
+Replace path/to/nurec_carter.py with the path where you saved the script:
+```
+./python.sh path/to/nurec_carter.py \
+    --/renderer/multiGpu/enabled=false \
+    --/rtx/spg/enabled=true \
+    --/omni/rtx/nre/compositing/disableNuRecPostProcessings=true \
+    --/rtx/rtpt/gaussian/skipTonemapping/enabled=false \
+    --enable omni.rtx.spg
+```
+Script Editor
+Script Editor
+```
+import asyncio
+import os
+
+import isaacsim.core.experimental.utils.app as app_utils
+import omni.timeline
+from isaacsim.core.experimental.prims import XformPrim
+from isaacsim.core.experimental.utils.prim import get_prim_at_path
+from isaacsim.core.experimental.utils.stage import add_reference_to_stage, open_stage_async
+from isaacsim.storage.native import get_assets_root_path_async
+from pxr import PhysxSchema, UsdPhysics
+
+# User path of the HF NuRec dataset
+USER_PATH = "/home/user/PhysicalAI-Robotics-NuRec"
+
+# Paths for loading and placing the Nova Carter navigation asset and its target.
+NOVA_CARTER_NAV_URL = "/Isaac/Samples/Replicator/OmniGraph/nova_carter_nav_only.usd"
+NOVA_CARTER_NAV_USD_PATH = "/World/NovaCarterNav"
+NOVA_CARTER_NAV_TARGET_PATH = f"{NOVA_CARTER_NAV_USD_PATH}/targetXform"
+# Scenarios for testing navigation in the environments
+EXAMPLE_CONFIGS = [
+    {
+        "name": "Andoria",
+        "stage_url": f"{USER_PATH}/hand_hold-endeavor-andoria/particle_spg-runtime.usdz",
+        "nav_start_loc": (0.0, 0.5, 0.0),
+        "nav_relative_target_loc": (0.0, 6.0, 0.0),
+        "num_simulation_steps": 500,
+    },
+    {
+        "name": "Wormhole",
+        "stage_url": f"{USER_PATH}/hand_hold-endeavor-wormhole/particle_spg-runtime.usdz",
+        "nav_start_loc": (5, 0, 0),
+        "nav_relative_target_loc": (0, -4, 0),
+        "num_simulation_steps": 500,
+    },
+    {
+        "name": "Cafe",
+        "stage_url": f"{USER_PATH}/nova_carter-cafe/particle_spg-runtime.usdz",
+        "nav_start_loc": (0, 0, 0),
+        "nav_relative_target_loc": (-3, -1.5, 0),
+        "num_simulation_steps": 500,
+    },
+    {
+        "name": "Galileo",
+        "stage_url": f"{USER_PATH}/nova_carter-galileo/particle_spg-runtime.usdz",
+        "nav_start_loc": (-2.5, 2.5, 0),
+        "nav_relative_target_loc": (4, 0, 0),
+        "num_simulation_steps": 500,
+    },
+]
+
+
+async def run_example_async(example_config):
+    example_name = example_config.get("name")
+    print(f"Running example: '{example_name}'")
+
+    # Open the stage
+    stage_url = example_config.get("stage_url")
+    if not stage_url:
+        print(f"Stage URL not provided, exiting")
+        return
+    if not os.path.exists(stage_url):
+        print(f"Stage URL does not exist: '{stage_url}', exiting")
+        return
+
+    print(f"Opening stage: '{stage_url}'")
+    stage_opened, stage = await open_stage_async(stage_url)
+    if not stage_opened or stage is None:
+        print(f"Failed to open stage: '{stage_url}', exiting")
+        return
+
+    # Make sure the physics scene is set to synchronous for the navigation to work
+    for prim in stage.Traverse():
+        if prim.IsA(UsdPhysics.Scene):
+            physx_scene = PhysxSchema.PhysxSceneAPI.Apply(prim)
+            physx_scene.GetUpdateTypeAttr().Set("Synchronous")
+            break
+
+    # Load the carter navigation asset
+    assets_root_path = await get_assets_root_path_async()
+    carter_nav_path = assets_root_path + NOVA_CARTER_NAV_URL
+    print(f"Loading carter nova asset: '{carter_nav_path}'")
+    carter_nav_prim = add_reference_to_stage(usd_path=carter_nav_path, path=NOVA_CARTER_NAV_USD_PATH)
+
+    # Set the carter navigation start location
+    nav_start_loc = example_config.get("nav_start_loc")
+    if not nav_start_loc:
+        print(f"Navigation start location not provided, exiting")
+        return
+    print(f"Setting carter navigation start location to: {nav_start_loc}")
+    XformPrim(str(carter_nav_prim.GetPath()), reset_xform_op_properties=True).set_local_poses(
+        translations=[nav_start_loc]
+    )
+
+    # Set the carter navigation target prim location
+    nav_relative_target_loc = example_config.get("nav_relative_target_loc")
+    if not nav_relative_target_loc:
+        print(f"Navigation relative target location not provided, exiting")
+        return
+    print(f"Setting carter navigation target location to: {nav_relative_target_loc}")
+    carter_navigation_target_prim = get_prim_at_path(NOVA_CARTER_NAV_TARGET_PATH)
+    if not carter_navigation_target_prim.IsValid():
+        print(f"Carter navigation target prim not found at path: '{NOVA_CARTER_NAV_TARGET_PATH}', exiting")
+        return
+    XformPrim(NOVA_CARTER_NAV_TARGET_PATH, reset_xform_op_properties=True).set_local_poses(
+        translations=[nav_relative_target_loc]
+    )
+
+    # Run the simulation for the given number of steps
+    num_simulation_steps = example_config.get("num_simulation_steps")
+    if not num_simulation_steps:
+        print(f"Number of simulation steps not provided, exiting")
+        return
+    print(f"Running {num_simulation_steps} simulation steps")
+    timeline = omni.timeline.get_timeline_interface()
+    app_utils.play()
+    for i in range(num_simulation_steps):
+        if i % 10 == 0:
+            print(f"Step {i}, time: {timeline.get_current_time():.4f}")
+        await app_utils.update_app_async()
+
+    print(f"Simulation complete, stopping timeline")
+    app_utils.stop()
+
+
+async def run_examples_async():
+    for example_config in EXAMPLE_CONFIGS:
+        await run_example_async(example_config)
+
+
+asyncio.ensure_future(run_examples_async())
+```
+Standalone Application
+Standalone Application
+```
+import os
+
+from isaacsim import SimulationApp
+
+simulation_app = SimulationApp(launch_config={"headless": False})
+
+import isaacsim.core.experimental.utils.app as app_utils
+import omni.timeline
+from isaacsim.core.experimental.prims import XformPrim
+from isaacsim.core.experimental.utils.prim import get_prim_at_path
+from isaacsim.core.experimental.utils.stage import add_reference_to_stage, open_stage
+from isaacsim.storage.native import get_assets_root_path
+from pxr import PhysxSchema, UsdPhysics
+
+# User path of the HF NuRec dataset
+USER_PATH = "/home/user/PhysicalAI-Robotics-NuRec"
+
+# Paths for loading and placing the Nova Carter navigation asset and its target.
+NOVA_CARTER_NAV_URL = "/Isaac/Samples/Replicator/OmniGraph/nova_carter_nav_only.usd"
+NOVA_CARTER_NAV_USD_PATH = "/World/NovaCarterNav"
+NOVA_CARTER_NAV_TARGET_PATH = f"{NOVA_CARTER_NAV_USD_PATH}/targetXform"
+# Scenarios for testing navigation in the environments
+EXAMPLE_CONFIGS = [
+    {
+        "name": "Andoria",
+        "stage_url": f"{USER_PATH}/hand_hold-endeavor-andoria/particle_spg-runtime.usdz",
+        "nav_start_loc": (0.0, 0.5, 0.0),
+        "nav_relative_target_loc": (0.0, 6.0, 0.0),
+        "num_simulation_steps": 500,
+    },
+    {
+        "name": "Wormhole",
+        "stage_url": f"{USER_PATH}/hand_hold-endeavor-wormhole/particle_spg-runtime.usdz",
+        "nav_start_loc": (5, 0, 0),
+        "nav_relative_target_loc": (0, -4, 0),
+        "num_simulation_steps": 500,
+    },
+    {
+        "name": "Cafe",
+        "stage_url": f"{USER_PATH}/nova_carter-cafe/particle_spg-runtime.usdz",
+        "nav_start_loc": (0, 0, 0),
+        "nav_relative_target_loc": (-3, -1.5, 0),
+        "num_simulation_steps": 500,
+    },
+    {
+        "name": "Galileo",
+        "stage_url": f"{USER_PATH}/nova_carter-galileo/particle_spg-runtime.usdz",
+        "nav_start_loc": (-2.5, 2.5, 0),
+        "nav_relative_target_loc": (4, 0, 0),
+        "num_simulation_steps": 500,
+    },
+]
+
+
+def run_example(example_config):
+    example_name = example_config.get("name")
+    print(f"Running example: '{example_name}'")
+
+    # Open the stage
+    stage_url = example_config.get("stage_url")
+    if not stage_url:
+        print("Stage URL not provided, exiting")
+        return
+    if not os.path.exists(stage_url):
+        print(f"Stage URL does not exist: '{stage_url}', exiting")
+        return
+
+    print(f"Opening stage: '{stage_url}'")
+    stage_opened, stage = open_stage(stage_url)
+    if not stage_opened or stage is None:
+        print(f"Failed to open stage: '{stage_url}', exiting")
+        return
+
+    # Make sure the physics scene is set to synchronous for the navigation to work
+    for prim in stage.Traverse():
+        if prim.IsA(UsdPhysics.Scene):
+            physx_scene = PhysxSchema.PhysxSceneAPI.Apply(prim)
+            physx_scene.GetUpdateTypeAttr().Set("Synchronous")
+            break
+
+    # Load the carter navigation asset
+    assets_root_path = get_assets_root_path()
+    carter_nav_path = assets_root_path + NOVA_CARTER_NAV_URL
+    print(f"Loading carter nova asset: '{carter_nav_path}'")
+    carter_nav_prim = add_reference_to_stage(usd_path=carter_nav_path, path=NOVA_CARTER_NAV_USD_PATH)
+
+    # Set the carter navigation start location
+    nav_start_loc = example_config.get("nav_start_loc")
+    if not nav_start_loc:
+        print(f"Navigation start location not provided, exiting")
+        return
+    print(f"Setting carter navigation start location to: {nav_start_loc}")
+    XformPrim(str(carter_nav_prim.GetPath()), reset_xform_op_properties=True).set_local_poses(
+        translations=[nav_start_loc]
+    )
+
+    # Set the carter navigation target prim location
+    nav_relative_target_loc = example_config.get("nav_relative_target_loc")
+    if not nav_relative_target_loc:
+        print(f"Navigation relative target location not provided, exiting")
+        return
+    print(f"Setting carter navigation target location to: {nav_relative_target_loc}")
+    carter_navigation_target_prim = get_prim_at_path(NOVA_CARTER_NAV_TARGET_PATH)
+    if not carter_navigation_target_prim.IsValid():
+        print(f"Carter navigation target prim not found at path: '{NOVA_CARTER_NAV_TARGET_PATH}', exiting")
+        return
+    XformPrim(NOVA_CARTER_NAV_TARGET_PATH, reset_xform_op_properties=True).set_local_poses(
+        translations=[nav_relative_target_loc]
+    )
+
+    # Run the simulation for the given number of steps
+    num_simulation_steps = example_config.get("num_simulation_steps")
+    if not num_simulation_steps:
+        print(f"Number of simulation steps not provided, exiting")
+        return
+    print(f"Running {num_simulation_steps} simulation steps")
+    timeline = omni.timeline.get_timeline_interface()
+    app_utils.play()
+    for i in range(num_simulation_steps):
+        if i % 10 == 0:
+            print(f"Step {i}, time: {timeline.get_current_time():.4f}")
+        app_utils.update_app()
+
+    print(f"Simulation complete, stopping timeline")
+    app_utils.stop()
+
+
+def run_examples():
+    for example_config in EXAMPLE_CONFIGS:
+        run_example(example_config)
+
+
+run_examples()
+
+simulation_app.close()
+```
+Use sensors with NuRec#
+If the stage contains sensor render products under /Render, set RENDER_PRODUCT_PATH to one of their paths and run the script in the Script Editor.
+```
+import carb.settings
+import omni.kit.viewport.utility as viewport_utils
+import omni.usd
+from pxr import Sdf, Usd
+
+RENDER_PRODUCT_PATH = "/Render/camera_right"
+
+stage = omni.usd.get_context().get_stage()
+if stage is None:
+    raise RuntimeError("No USD stage is open.")
+
+render_product = stage.GetPrimAtPath(RENDER_PRODUCT_PATH)
+if not render_product.IsValid() or render_product.GetTypeName() != "RenderProduct":
+    available_paths = [str(prim.GetPath()) for prim in stage.Traverse() if prim.GetTypeName() == "RenderProduct"]
+    print(f"Render product '{RENDER_PRODUCT_PATH}' does not exist.")
+    print(f"Available render products: {available_paths}")
+else:
+    settings = carb.settings.get_settings()
+    settings.set_bool("/rtx/rtpt/gaussian/accumulatedDepth/allHits/enabled", True)
+    settings.set_bool("/rtx/rtpt/gaussian/accumulatedAlbedo/enabled", True)
+
+    identity_exposure = {
+        "exposure": 0.0,
+        "exposure:fStop": 1.0,
+        "exposure:iso": 0.0,
+        "exposure:responsivity": 1.0,
+        "exposure:time": 1.0,
+    }
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        for prim in stage.Traverse():
+            if prim.GetTypeName() != "Camera":
+                continue
+            prim.AddAppliedSchema("OmniRtxCameraAutoExposureAPI_1")
+            prim.AddAppliedSchema("OmniRtxCameraExposureAPI_1")
+            for name, value in identity_exposure.items():
+                prim.CreateAttribute(name, Sdf.ValueTypeNames.Float).Set(value)
+            prim.CreateAttribute("omni:rtx:autoExposure:enabled", Sdf.ValueTypeNames.Bool).Set(False)
+
+    viewport = viewport_utils.get_active_viewport()
+    if viewport is None:
+        raise RuntimeError("No active viewport is available.")
+
+    if str(viewport.render_product_path) != RENDER_PRODUCT_PATH:
+        viewport.render_product_path = RENDER_PRODUCT_PATH
+    print(f"Bound the active viewport to '{RENDER_PRODUCT_PATH}'. Allow about five seconds for the image to converge.")
+```
+Note
+Binding a different render product can switch the viewport to its authored camera.
+Allow approximately five seconds for the viewport image to converge.
+For detailed NuRec rendering settings and validation workflows, see NuRec utilities.
+Known Limitations#
+Opening a .usdz file as the root stage and then adding another USD asset to it (via Add Reference, Add Payload, or drag-and-drop into the Stage) fails to load the added asset. The new prim appears empty with its name shown in red. As a workaround, open a .usd or .usda file (or create a new stage) as the root stage and reference the .usdz assets from there. This limitation will be addressed in a future release.
+On this page

@@ -1,0 +1,146 @@
+# Naive SDF Generation (CPU)
+Also called: Brute-force SDF generation
+
+## Overview
+Naive SDF Generation (CPU) computes the Signed Distance Field (SDF) for a triangular mesh by explicitly evaluating the Euclidean distance from every voxel center to the mesh surface on the CPU. It solves the problem of creating a volumetric distance representation for ray marching or volume rendering by iterating through all triangles for every sample point. Unlike [Explicit Surface to TSDF Conversion](2615-explicit-surface-to-tsdf-conversion.md), which relies on volume integration or ray casting from virtual cameras, or [Sparse VDB SDF Generation](4498-sparse-vdb-sdf-generation.md), which uses hierarchical data structures for efficiency, this method performs a direct geometric query. It differs from [GPU-based SDF Generation](10690-gpu-based-sdf-generation.md) by executing the distance calculations sequentially or with limited CPU threading rather than leveraging massive parallelism in shaders [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A triangular mesh defined by a vertex buffer, an index buffer, and a world transformation matrix.
+- Output: A 3D grid (volume texture) where each voxel stores the signed Euclidean distance to the mesh surface.
+
+**Data Structures:**
+- **Triangle List:** A list of triangles, where each triangle is defined by three vertices $(v_0, v_1, v_2)$ and a precomputed normal $\mathbf{n}$.
+- **Sample Grid:** A 3D array of points covering the bounding volume of interest.
+
+**Steps:**
+1. **Transform Vertices:** Extract all vertices from the geometry and transform them using the mesh's world matrix to match their actual location in world space [S1, unofficial].
+2. **Generate Triangles:** Create a list of triangles from the index and vertex buffer data [S1, unofficial].
+3. **Compute Normals:** Calculate the normal for each triangle based on the clockwise arrangement of its edges to determine inside/outside orientation [S1, unofficial].
+4. **Iterate Samples:** For each sample point $\mathbf{p}$ in the grid:
+    a. Initialize `min_sq_dist` to infinity and `closest_normal` to zero.
+    b. Iterate through all triangles in the mesh.
+    c. Compute the squared distance from $\mathbf{p}$ to the current triangle using a point-to-triangle distance function (e.g., [Triangle Unsigned](http://www.iquilezles.org/www/articles/distfunctions/distfunctions.htm)) [S1, unofficial].
+    d. If the computed squared distance is less than `min_sq_dist`, update `min_sq_dist` and store the triangle's normal as `closest_normal`.
+5. **Determine Sign:** Calculate the dot product between the vector from the closest point on the triangle to $\mathbf{p}$ and `closest_normal`. If the dot product indicates the point is on the opposite side of the normal (looking opposite direction), the point is outside; otherwise, it is inside [S1, unofficial].
+6. **Compute Final Distance:** Calculate the signed Euclidean distance $SDF$ using the formula:
+   $$ SDF = \sqrt{|d^2|} \times \text{sign}(d^2) $$
+   where $d^2$ is the squared distance to the closest triangle, and $\text{sign}(d^2)$ is $-1$ if inside, $1$ if outside [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_naive_sdf(mesh, grid_points):
+    """
+    mesh: Object containing vertices, indices, and world_matrix.
+    grid_points: List of 3D vectors representing voxel centers.
+    Returns: List of signed distances corresponding to grid_points.
+    """
+    # Step 1 & 2: Transform and generate triangles
+    transformed_vertices = [v * mesh.world_matrix for v in mesh.vertices]
+    triangles = []
+    for i in range(0, len(mesh.indices), 3):
+        v0 = transformed_vertices[mesh.indices[i]]
+        v1 = transformed_vertices[mesh.indices[i+1]]
+        v2 = transformed_vertices[mesh.indices[i+2]]
+        # Step 3: Compute normal from clockwise edge arrangement
+        e1 = v1 - v0
+        e2 = v2 - v0
+        normal = normalize(cross(e1, e2))
+        triangles.append((v0, v1, v2, normal))
+
+    results = []
+    for p in grid_points:
+        min_sq_dist = float('inf')
+        closest_normal = None
+        
+        # Step 4: Iterate all triangles
+        for (v0, v1, v2, n) in triangles:
+            # Compute squared distance from p to triangle (v0, v1, v2)
+            # Using standard point-to-triangle distance logic
+            sq_dist = point_to_triangle_sq_dist(p, v0, v1, v2)
+            
+            if sq_dist < min_sq_dist:
+                min_sq_dist = sq_dist
+                closest_normal = n
+
+        # Step 5: Determine sign
+        # Vector from closest point on triangle to p. 
+        # Note: For simplicity, we approximate the closest point direction 
+        # or use the vector from p to the triangle plane if exact projection is complex.
+        # The source implies using the distance vector to the triangle normal.
+        # Assuming 'closest_point' is derived from the sq_dist calculation internally:
+        # Here we assume a helper returns the closest point on the triangle.
+        closest_point = get_closest_point_on_triangle(p, v0, v1, v2) # Implementation detail of point_to_triangle_sq_dist
+        vec_to_p = p - closest_point
+        dot_product = dot(vec_to_p, closest_normal)
+        
+        # If dot product is negative, we are looking opposite to normal -> Outside?
+        # Source says: "If we look the opposite direction we are outside, if we look the same way we are inside"
+        # Standard convention: Normal points OUT. If vec_to_p is in same direction as normal, we are outside.
+        # Let's follow source logic strictly: "negative means inside"
+        # If dot > 0, we are on the side of the normal (outside). If dot < 0, inside.
+        # However, source says: "Adjust the sign based on this (negative means inside)"
+        # Let's assume sign = -1 if inside, 1 if outside.
+        if dot_product < 0:
+            sign = -1
+        else:
+            sign = 1
+            
+        # Step 6: Final distance
+        distance = sqrt(abs(min_sq_dist)) * sign
+        results.append(distance)
+        
+    return results
+
+def point_to_triangle_sq_dist(p, v0, v1, v2):
+    """
+    Returns squared distance from point p to triangle v0-v1-v2.
+    Also implicitly defines the closest point for sign calculation.
+    """
+    # Standard implementation of point-to-triangle distance
+    # Returns (squared_distance, closest_point)
+    # This is a standard geometric primitive, details omitted for brevity but required for implementation.
+    # [G] Standard algorithm: project p onto plane, clamp to barycentric coords, handle edges/corners.
+    pass
+
+def get_closest_point_on_triangle(p, v0, v1, v2):
+    # [G] Returns the closest point on the triangle surface to p.
+    pass
+```
+
+**Parameters:**
+- **Thread Count:** The number of CPU threads used to parallelize the sample iteration. Typical values range from 1 to the number of CPU cores [S1, unofficial].
+- **Sampling Resolution:** The density of sample points. Decreasing the distance between sampling points by half increases computation cost by 8 times [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **High Computational Cost:** The naive approach checks every triangle for every sample point. For a mesh with 280,000 triangles, this results in significant latency [S1, unofficial].
+- **Precision:** Floating-point precision errors may occur in the dot product sign determination for points very close to the surface.
+- **Degenerate Input:** Triangles with zero area or collinear vertices may produce undefined normals or distances.
+
+## Subtopics
+
+### [GPU-based SDF Generation](10690-gpu-based-sdf-generation.md)
+GPU-based SDF Generation is a technique to compute Signed Distance Fields (SDFs) for a mesh by uploading triangle vertex data to a texture and calculating distances in a pixel or compute shader, offering significant speedup over CPU-based methods. It solves the performance bottleneck of CPU voxelization by leveraging massive parallelism, enabling real-time or near-real-time SDF updates for animated characters. Unlike [Naive SDF Generation (CPU)](10688-naive-sdf-generation-cpu.md), which processes voxels sequentially or with limited threading, this method maps the distance calculation workload directly to the GPU's parallel cores, reducing generation time from seconds to milliseconds.
+
+### [Mesh to SDF via Point Cloud](16282-mesh-to-sdf-via-point-cloud.md)
+This method generates a Signed Distance Field (SDF) for a query set of points by first converting a triangular mesh into a discrete point cloud and then computing distances to that cloud. It solves the problem of creating volumetric distance data from polygonal surfaces without requiring complex analytic integration or GPU-based ray marching. It differs from analytic voxelization by relying on nearest-neighbor search in a point cloud, and from GPU-based generation by performing the heavy lifting on the CPU using KD-trees and batched processing.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of sample points (voxels) and $M$ is the number of triangles in the mesh.
+- **Memory Complexity:** $O(N)$ for storing the distance field, plus $O(M)$ for the mesh data.
+- **Measured Performance:** On a quad-core CPU, generating an SDF for a large mesh (Sponza Atrium) took 30,744ms with 1 thread, 15,546ms with 2 threads, and 10,009ms with 8 threads (capped at 4 cores) [S1, unofficial]. High-resolution SDF generation for a large mesh took approximately 1.5 hours (5,636,817ms) with 4 threads [S1, unofficial].
+- **Scaling:** Computation cost scales cubically with sampling resolution (halving voxel size increases cost by 8x) [S1, unofficial]. Scaling with thread count is linear up to the number of physical cores [S1, unofficial].
+- **Strengths:** Simple to implement; does not require complex data structures like BVHs or KD-trees; works with any watertight mesh.
+- **Limitations:** Extremely slow for high-resolution grids or complex meshes; does not scale well beyond CPU core counts; prohibitive for real-time applications without GPU acceleration.
+- **When to use:** Low-resolution previews, static meshes with low triangle counts, or educational purposes.
+- **When not to use:** High-resolution volume rendering, animated meshes, or real-time applications.
+
+## Background
+The method was described by Kosmonaut in a blog post detailing a journey into Signed Distance Field rendering [S1, unofficial]. The author implemented the naive approach to understand the fundamentals of SDF generation before moving to GPU-based optimizations. The technique relies on basic geometric primitives, specifically the point-to-triangle distance function popularized by Inigo Quilez [S1, unofficial].
+
+## Sources
+[S1] Signed Distance Field Rendering Journey pt.1 – kosmonaut's blog, https://kosmonautblog.wordpress.com/2017/05/01/signed-distance-field-rendering-journey-pt-1/, fetched 2026-10-29 (unofficial)
+[S2] EmmetOT/IsoMesh, https://github.com/EmmetOT/IsoMesh, fetched 2026-10-26 (unofficial)
+[S3] mesh_to_sdf, https://github.com/marian42/mesh_to_sdf, fetched 2026-10-28 (unofficial)

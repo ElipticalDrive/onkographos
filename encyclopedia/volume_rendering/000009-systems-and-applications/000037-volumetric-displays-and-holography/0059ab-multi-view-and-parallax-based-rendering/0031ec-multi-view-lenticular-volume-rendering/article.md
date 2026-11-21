@@ -1,0 +1,147 @@
+# Multi-view Lenticular Volume Rendering
+
+Also called: GPU-accelerated volume rendering to 3D lenticular displays
+
+## Overview
+A method for hardware-accelerated generation of multi-view stereoscopic images of volumetric datasets for display on a multi-view lenticular screen, using the GPU for both rendering and compositing [S1, unofficial]. It solves the problem of interactive visualization of large 3D medical volumes on glasses-free 3D displays by decomposing the scene into perspective projections from offset focal spots and interlacing them into a single bitmap [S1, unofficial]. It sets itself apart from sibling methods by explicitly handling the asymmetric frustum geometry required for lenticular lenses and performing the final sub-pixel interlacing via a static texture map lookup on the GPU, rather than pre-computing a hologram or projecting from separate physical sources [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset (e.g., medical CT/MRI), lenticular display parameters (focal distance $f$, view count $N$, camera spacing $d$), and the dataset dimensions.
+*   **Output:** A single interlaced bitmap suitable for the LCD panel underlying the lenticular sheet.
+
+**Data Structures:**
+1.  **Bricks:** The volumetric dataset is divided into 3D blocks ("bricks") to fit within the graphics card's texture memory and align with its memory architecture [S1, unofficial].
+2.  **Texture0 (View Map):** A static 2D texture map storing the view number for each sub-pixel (R, G, B) of the output image. This is pre-calculated based on the lenticular lens geometry and remains constant for all frames [S1, unofficial].
+3.  **Texture1 (View Stack):** A single wide rectangular 2D texture map storing all $N$ rendered views vertically next to each other. Each view occupies a horizontal strip of height $H_{view} = H_{LCD} / N$ [S1, unofficial].
+
+**Parameters:**
+*   $N$: Number of views. The specific implementation uses $N=9$, but the method applies to any $N$ [S1, unofficial].
+*   $f$: Focal distance of the lenticular lenses.
+*   $d$: Distance between adjacent view camera positions.
+*   Resolution: Each individual view has an effective resolution of $(1/N)$ of the LCD matrix resolution in the horizontal direction [S1, unofficial].
+
+**Steps:**
+
+1.  **Data Partitioning:** Divide the input volumetric dataset into bricks suitable for GPU texture memory [S1, unofficial].
+2.  **View Rendering Loop:** For each view index $n$ from $0$ to $N-1$:
+    a.  **Frustum Setup:** Define an asymmetric perspective projection frustum for view $n$. The camera position is offset from the center. The projection coordinates $(x', y')$ for a world point $(x, y, z)$ are calculated as [S1, unofficial]:
+        $$
+        x' = \frac{(x - n \cdot d) \cdot f}{f - z} + n \cdot d
+        $$
+        $$
+        y' = \frac{y \cdot f}{f - z}
+        $$
+    b.  **Direct Volume Rendering (DVR):** Render the volume using the defined frustum. Rays are cast from the focal spot through each pixel. The volume rendering integral is approximated by traversing rays in back-to-front order using the over operator [S1, unofficial]:
+        $$
+        C_{n+1} = \alpha_n \cdot c_n + (1 - \alpha_n) \cdot C_n
+        $$
+        where $C_n$ is the intermediate color value, $\alpha_n$ is the opacity, and $c_n$ is the color at sample $n$. This is implemented using standard alpha blending (e.g., DirectX or OpenGL) on textured slices [S1, unofficial].
+    c.  **Storage:** Store the resulting image for view $n$ in the $n$-th vertical strip of `Texture1` [S1, unofficial].
+3.  **Compositing:** Generate the final interlaced image by parsing every pixel of the output LCD resolution. For each pixel, read the view numbers for the Red, Green, and Blue components from `Texture0`. Sample the corresponding view from `Texture1` for each color channel to construct the final pixel color [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_lenticular_volume(volume_data, lenticular_params, lcd_resolution):
+    """
+    volume_data: List of 3D arrays (bricks) representing the volumetric dataset.
+    lenticular_params: Object containing f (focal distance), d (camera spacing), N (number of views).
+    lcd_resolution: Tuple (width, height) of the LCD display.
+    """
+    N = lenticular_params.N
+    f = lenticular_params.f
+    d = lenticular_params.d
+    
+    # Step 1: Pre-calculate view map (Texture0)
+    # For each pixel (px, py) in the LCD, determine which view index 
+    # corresponds to R, G, and B channels based on lens geometry.
+    # This is static and computed once.
+    view_map = compute_view_map(lcd_resolution, lenticular_params)
+    
+    # Step 2: Render each view
+    # Texture1 is a 2D texture of size (width, height * N)
+    texture1 = create_texture(lcd_resolution[0], lcd_resolution[1] * N)
+    
+    for n in range(N):
+        # Define asymmetric frustum for view n
+        # The camera is offset by n*d. The projection matrix maps world coords
+        # to the specific view's viewport.
+        frustum = compute_asymmetric_frustum(n, d, f)
+        
+        # Render volume to a temporary buffer for this view
+        # Resolution of the view is (lcd_width, lcd_height / N)
+        view_height = lcd_resolution[1] // N
+        view_buffer = render_volume_bricks(volume_data, frustum, 
+                                           (lcd_resolution[0], view_height))
+        
+        # Store view_buffer in the n-th vertical strip of Texture1
+        # The strip starts at y = n * view_height
+        texture1.set_region(0, n * view_height, lcd_resolution[0], view_height, view_buffer)
+
+    # Step 3: Composite final image
+    final_image = create_texture(lcd_resolution[0], lcd_resolution[1])
+    
+    for py in range(lcd_resolution[1]):
+        for px in range(lcd_resolution[0]):
+            # Get view indices for R, G, B from the static map
+            view_r, view_g, view_b = view_map[px, py]
+            
+            # Sample from Texture1
+            # Each view has height view_height
+            y_r = view_r * view_height + (py % view_height)
+            y_g = view_g * view_height + (py % view_height)
+            y_b = view_b * view_height + (py % view_height)
+            
+            color_r = texture1.sample(px, y_r)
+            color_g = texture1.sample(px, y_g)
+            color_b = texture1.sample(px, y_b)
+            
+            final_image[px, py] = (color_r, color_g, color_b)
+            
+    return final_image
+
+def compute_asymmetric_frustum(n, d, f):
+    """
+    Returns a projection function/matrix for view n.
+    Coordinates (x, y, z) are mapped to screen coordinates.
+    """
+    def project(x, y, z):
+        # Asymmetric frustum formula from source
+        # Note: Source formula assumes specific coordinate system conventions.
+        # Implementation must align with the renderer's coordinate space.
+        x_proj = ((x - n * d) * f) / (f - z) + n * d
+        y_proj = (y * f) / (f - z)
+        return (x_proj, y_proj)
+    return project
+
+def compute_view_map(lcd_resolution, lenticular_params):
+    """
+    Pre-calculates which view index corresponds to R, G, B for each pixel.
+    This depends on the physical alignment of the LCD sub-pixels under the lenticular lenses.
+    Not given in the sources. [G]
+    """
+    # Placeholder for the specific geometric calculation of sub-pixel mapping.
+    # In practice, this maps the periodic structure of the lenticular lens
+    # to the RGB sub-pixel grid.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Limits:** The dataset must be divided into bricks to fit within the graphics card's texture memory [S1, unofficial].
+*   **Resolution Trade-off:** Each view has a lower resolution ($1/N$ of LCD width), which may reduce detail per view but allows for interactive frame rates [S1, unofficial].
+*   **Static Geometry:** The view map (`Texture0`) is static; it assumes the display and camera setup do not change during runtime [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** Up to 15 frames per second for a $256^3$ voxel dataset on a nine-view lenticular display [S1, unofficial].
+*   **Complexity:** Time complexity is proportional to $N \times R \times S$, where $N$ is the number of views, $R$ is the number of rays per view, and $S$ is the number of samples per ray. Memory complexity is dominated by the storage of the volume bricks and the `Texture1` stack ($N$ times the view resolution) [S1, unofficial].
+*   **Strengths:** Hardware-accelerated interactive manipulation of large datasets (>100 MB); no glasses required for the viewer; leverages standard GPU primitives (alpha blending, texture sampling) [S1, unofficial].
+*   **Limitations:** Requires specific lenticular hardware; resolution per view is reduced; asymmetric frustum calculations add complexity to the projection step [S1, unofficial].
+
+## Background
+The method was proposed by Daniel Ruijters from Philips Medical Systems [S1, unofficial]. It addresses the growing size of volumetric medical imaging data and the need for interactive 3D visualization without glasses. The approach builds on Direct Volume Rendering [2] and multi-view display principles [3, 5, 6, 7] cited in the original paper [S1, unofficial].
+
+## Sources
+[S1] GPU-accelerated volume rendering to 3D lenticular displays, https://lirias.kuleuven.be/bitstream/123456789/235668/1/GPU_Volume_Rendering_to_Lenticular_Display7.pdf, fetched 2026-10-27 (unofficial)

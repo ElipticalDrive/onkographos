@@ -1,0 +1,1504 @@
+Feed-Forward Hierarchical Gaussian Diﬀusion for Extreme CT
+Reconstruction
+Yuezhe Yanga,b , Li Chenga,∗
+a Department of Electrical and Computer Engineering, University of Alberta, Edmonton, Alberta, T6G 1H9, Canada
+arXiv:2608.15343v1 [cs.CV] 15 Aug 2026
+b School of Computer Science, University of Sydney, Sydney, New South Wales, 2006, Australia
+ARTICLE INFO
+ABSTRACT
+Keywords:
+Computed tomography
+sparse-view reconstruction
+limited-angle reconstruction
+low-dose CT
+3D Gaussian representation
+diﬀusion model
+Reconstructing three-dimensional computed tomography (CT) from severely constrained projections
+is highly ill-posed. Sparse angular sampling, restricted angular coverage, and low photon counts can
+occur individually or jointly, obscuring global anatomy and local tissue detail. Many learned CT
+reconstruction methods are tailored to a single dominant degradation. Existing diﬀusion and Gaussian
+approaches commonly recover global structure and local detail within a shared representation.
+We propose HiGDiﬀ, a feed-forward hierarchical Gaussian diﬀusion framework that decomposes
+reconstruction both spatially and from structure to detail. Physics-conditioned anatomical anchors and
+a foreground capacity ﬁeld allocate learnable Gaussian primitives to informative regions. A structure
+diﬀusion stage ﬁrst recovers global attenuation geometry, and its learned representation conditions a
+detail diﬀusion stage for residual boundaries and tissue transitions. The resulting Gaussian banks are
+rendered as attenuation ﬁelds and further reﬁned by a gradient-isolated residual module. Experiments
+on three distinct CT benchmark datasets demonstrate state-of-the-art reconstruction performance
+across isolated, paired, and joint degradation settings, including improvements of 5.81 dB in macroaverage peak signal-to-noise ratio (PSNR) and 0.113 in structural similarity index measure (SSIM)
+on the Low Dose CT Image and Projection Data (LDCT-PD) collection. Code and experimental
+conﬁgurations are openly available at github.com/Bean-Young/HiGDiﬀ.
+1. Introduction
+Computed tomography (CT) reconstructs a volumetric attenuation ﬁeld from X-ray line integrals and supports quantitative tissue assessment, lesion localization,
+and three-dimensional (3D) anatomical visualization (Mayo,
+1991; Adams, 2009). Three acquisition constraints degrade
+the measurements through diﬀerent mechanisms. Sparseview acquisition reduces angular sampling density and
+produces globally distributed streaks and angular-aliasing
+artifacts. Limited-angle acquisition restricts angular coverage, removes direction-dependent information, and causes
+anisotropic blurring and characteristic slope artifacts (Barrett and Keat, 2004). Low-dose acquisition lowers the photon
+ﬂux and increases signal-dependent Poisson noise in the
+measured projections (Liang et al., 2017). We study severely
+constrained CT acquisition across individual, paired, and
+joint degradation settings. These conditions reduce the available projection evidence through one or more acquisition
+factors. Joint degradation couples sampling aliasing, directional incompleteness, and photon noise, obscuring both
+long-range anatomy and local tissue transitions. Successful
+reconstruction must recover anatomical continuity, preserve
+subtle detail, and prevent acquisition artifacts from appearing as anatomical structures across this spectrum.
+Analytical and iterative reconstruction expose a persistent trade-oﬀ between accuracy and eﬃciency. Filtered back
+projection (FBP) oﬀers high speed and degrades sharply
+with incomplete or noisy measurements. Model-based iterative reconstruction incorporates the acquisition operator
+∗ Corresponding author
+yuezhe1@ualberta.ca (Y. Yang); lcheng5@ualberta.ca (L. Cheng)
+Yang et al.: Preprint submitted to Elsevier
+and handcrafted regularization at a considerably higher computational cost (Deák et al., 2013; Koetzier et al., 2023).
+Learned post-processing and unrolled networks integrate
+data-driven priors with analytic or iterative inversion, as
+demonstrated by RED-CNN, FBPConvNet, and LEARN
+(Chen et al., 2017; Jin et al., 2017; Chen et al., 2018).
+Frequency-aware and dual-domain methods further target
+sparse-view artifacts and projection noise (Ma et al., 2023;
+Li et al., 2025a). These approaches are commonly conﬁgured
+around one dominant degradation or a selected pair. Their
+dense voxel parameterizations assign representation sites
+uniformly across the volume, which constrains anatomyaware allocation of reconstruction capacity under severely
+limited measurements.
+Diﬀusion priors provide expressive image distributions
+and integrate measurement evidence through data-ﬁdelity
+updates, model-based reconstruction, sinogram completion,
+and degradation-aware sampling (Liu et al., 2023; Chung
+et al., 2023; Yang et al., 2025; Chen et al., 2025a,b). Their
+generative states are dense images, volumes, or projections
+in which global anatomical organization and residual local
+detail share one parameterization. Joint degradation couples
+directional information loss with signal-dependent noise,
+creating distinct recovery demands for long-range structure
+and local tissue transitions.
+Continuous representations provide spatially adaptive
+parameterization through implicit ﬁelds and explicit primitives (Yang et al., 2026a). DPER combines a coordinatebased attenuation ﬁeld with a diﬀusion prior for sparseview and limited-angle CT (Du et al., 2024). Explicit 3D
+Gaussians expose position, orientation, scale, and contribution as locally controllable attributes (Kerbl et al., 2023).
+Page 1 of 14
+HiGDiﬀ
+Recent Gaussian CT methods span projection synthesis,
+per-volume primitive ﬁtting, learned Gaussian prediction,
+and discretized Gaussian reconstruction (Nikolakakis et al.,
+2024; Li et al., 2025b; Lin et al., 2024; Wu et al., 2025).
+These studies establish the value of explicit Gaussian representations and generally use one bank for global attenuation
+geometry and residual detail. The functional hierarchy between these two components consequently remains implicit
+under joint degradation.
+We address this gap with HiGDiﬀ, a feed-forward hierarchical Gaussian diﬀusion framework for constrained CT reconstruction across isolated, paired, and joint acquisition settings. Our central premise is that ambiguity from sparse angular sampling, restricted angular coverage, and low photon
+ﬂux should be decomposed spatially and hierarchically. Spatial decomposition allocates Gaussian capacity to anatomically informative regions. Hierarchical decomposition recovers low-to-mid-frequency attenuation geometry before
+residual boundaries and tissue transitions.
+HiGDiﬀ realizes this principle through landmark-free
+anatomical anchors, a foreground capacity ﬁeld, and sequential structure-to-detail diﬀusion. The foreground ﬁeld
+estimates the utility of allocating Gaussian primitives and
+modulating their denoising features, allowing the model to
+emphasize boundaries and residual-sensitive regions. The
+learned structure bank conditions the detail bank. A shared
+gradient-isolated network compensates for residual errors
+under the ﬁxed primitive budget and preserves the rendered
+Gaussian ﬁeld as the reconstruction backbone.
+The main contributions are summarized below.
+1. We formulate a uniﬁed CT reconstruction task spanning isolated, paired, and joint degradation settings under
+severely constrained acquisition.
+2. We introduce a sequential structure-to-detail diﬀusion
+framework over explicit Gaussian banks. Foregroundaware initialization allocates primitives to anatomically
+informative regions. The completed structure bank then
+conditions detail diﬀusion, and gradient-isolated reﬁnement preserves the Gaussian reconstruction as the output
+backbone.
+3. Across three distinct CT benchmark datasets, HiGDiﬀ
+achieves the best macro-average SSIM on all three datasets
+and the best macro-average PSNR on both 3D datasets.
+On LDCT-PD, it improves macro-average PSNR by 5.81
+dB and SSIM by 0.113 over the strongest metric-speciﬁc
+baselines.
+2. Related Work
+2.1. Deep reconstruction under joint CT
+degradations
+Deep CT reconstruction can be organized by where a
+learned prior interacts with the imaging operator. Imagedomain methods correct an analytic reconstruction, as in
+RED-CNN and FBPConvNet (Chen et al., 2017; Jin et al.,
+Yang et al.: Preprint submitted to Elsevier
+2017). Frequency-aware methods isolate artifact-related components, as in FreeSeed (Ma et al., 2023). ProCT uses viewaware prompting and contextual examples across incompleteview settings (Ma et al., 2026). Unrolled networks such as
+LEARN insert learned regularizers into iterative reconstruction (Chen et al., 2018). These paradigms trade direct access
+to measurements against computational cost and dependence
+on acquisition-speciﬁc training distributions.
+Sparse-view, limited-angle, and low-dose acquisition alter the inverse problem in complementary ways, so most
+learned methods are developed around one dominant factor
+or a selected pair. DDoCT jointly suppresses projection
+noise and sparse-view streaks in projection and image domains (Li et al., 2025a). Untrained deep-prior reconstruction spans sparse-view, limited-angle, and noisy conditions
+through per-instance ﬁtting (Shu and Entezari, 2022). When
+all three degradations occur simultaneously, global nonidentiﬁability and local statistical corruption become coupled. Sparse-view artifact removal can amplify photon noise,
+and limited-angle reconstruction requires priors that recover
+missing directional information. HiGDiﬀ conditions a uniﬁed reconstruction path on view density, angular span, and
+dose metadata.
+2.2. Diﬀusion models for CT reconstruction
+CT diﬀusion methods diﬀer chieﬂy in the variable being
+diﬀused and in how measurement consistency is imposed.
+Image- and volume-domain approaches learn an anatomical
+score and combine it with an acquisition model. DOLCE
+uses a transformed-sinogram condition and explicit dataﬁdelity steps for limited-angle CT (Liu et al., 2023), TIFA accelerates limited-angle score sampling through jump, timereversion, and compressed sampling (Wang et al., 2024),
+and DiﬀusionMBIR couples pretrained slice priors through
+a model-based 3D solver (Chung et al., 2023). CDDM
+cascades latent- and pixel-domain diﬀusion and mitigates
+the discrepancy introduced by data-consistency operations
+(Chen et al., 2025a). These formulations provide expressive
+priors over dense image or volume states.
+Projection-domain and degradation-process formulations
+bring the diﬀusion trajectory closer to CT acquisition. CTSDM replaces generic Gaussian corruption with progressive
+projection-view sampling to reconstruct across sampling
+rates (Yang et al., 2025). CvG-Diﬀ similarly models sparseview artifacts as a deterministic degradation process and
+uses a structure-before-detail sampling strategy (Chen et al.,
+2025b). Noise-inspired diﬀusion adapts the stochastic process to low-dose measurements (Gao et al., 2025). These
+studies improve acquisition awareness around one principal
+degradation axis, with global structure and residual detail
+represented by the same 3D state.
+More generally, multi-stage diﬀusion can condition a
+second generative process on the output of a ﬁrst (Singh et al.,
+2024). HiGDiﬀ instantiates this dependency directly in the
+space of explicit CT Gaussian parameters. The learned structure bank conditions the residual detail bank, establishing
+Page 2 of 14
+HiGDiﬀ
+Sparse view
+Limited angle
+Low dose
+Joint degradation
+Full
+Streak artifacts
+Slope artifacts
+Poisson artifacts
+Multiple artifacts
+Accurate imaging
+Figure 1: Representative acquisition constraints considered in this study. The ﬁgure shows sparse-view sampling, limited-angle
+coverage, low photon ﬂux, their joint occurrence, and the full reference acquisition at a consistent scale. Paired settings combine
+the corresponding acquisition factors and are speciﬁed in Section 4.1.
+a hierarchy between two explicit Gaussian banks within a
+uniﬁed reconstruction path.
+2.3. Continuous and Gaussian representations for
+tomography
+Continuous representations provide an alternative to
+dense voxel grids by parameterizing attenuation with coordinates, basis functions, or explicit primitives (Yang et al.,
+2026a). Implicit neural representations oﬀer continuous
+coordinate-to-attenuation mappings through repeated ray
+evaluation and per-instance optimization. DPER couples
+such a ﬁeld with a diﬀusion prior for sparse-view and limitedangle CT through iterative half-quadratic splitting (Du et al.,
+2024). Explicit Gaussians expose position, orientation, scale,
+and contribution as anisotropic primitives (Kerbl et al.,
+2023). GaSpCT applies Gaussian splatting with foreground
+and background regularization to CT projection synthesis
+(Nikolakakis et al., 2024). 3DGR-CT ﬁts FBP-initialized
+attenuation primitives through diﬀerentiable projection (Li
+et al., 2025b). DIF-Gaussian predicts Gaussian feature distributions for extremely sparse-view cone-beam CT (Lin
+et al., 2024), and DGR reconstructs CT volumes end to end
+with discretized Gaussian functions (Wu et al., 2025). These
+methods establish the value of continuous Gaussian representations and generally retain a single bank that combines
+global attenuation geometry with residual detail.
+HiGDiﬀ advances this line by diﬀusing two foregroundselective Gaussian banks in a structure-conditioned sequence.
+DiﬀGS demonstrates generative modeling of Gaussian attributes (Zhou et al., 2024), and UltraGS illustrates how
+Gaussian attributes and rendering operators can be adapted
+to medical image formation (Yang et al., 2026b). In our CT
+setting, landmark-free anchors initialize structure primitives,
+and a continuous foreground ﬁeld modulates initializationsite selection, attention, and denoiser features (You et al.,
+Yang et al.: Preprint submitted to Elsevier
+Figure 2: Conceptual comparison of reconstruction paradigms.
+Conventional Gaussian reconstruction optimizes a single primitive bank. Dense voxel diﬀusion denoises a single volumetric
+state. HiGDiﬀ performs sequential structure and detail diﬀusion over two explicit Gaussian banks before rendering the
+reconstructed attenuation ﬁeld.
+2022; Shi et al., 2026). The contribution integrates explicit Gaussian representation, spatially selective capacity
+allocation, and a feed-forward structure-to-detail diﬀusion
+hierarchy.
+Figure 2 contrasts this design with single-bank Gaussian
+reconstruction and dense voxel diﬀusion.
+3. Method
+Overview. Given projections aﬀected by sparse-view sampling, limited-angle coverage, low photon counts, or their
+combinations, HiGDiﬀ derives physics features and initializes ﬁxed-cardinality structure and detail Gaussian banks
+from anatomical cues. Slot-aligned residual diﬀusion ﬁrst
+completes the structure bank, whose tokens and unexplained
+measurement residual then condition detail diﬀusion. The
+rendered banks form the reconstruction backbone, followed
+Page 3 of 14
+HiGDiﬀ
+Training Only
+Reference CT
+Low-Frequency Structure �∗
+�
+�
+∗
+Signed Detail Residual ��
+∗
+Input
+�
+projections
+Degraded CT �0
+�phy
+Physics Encoder
+Target Structure Bank �∗
+�
+Target Detail Bank ��
+∗
+K
+Anatomical Anchors
+Foreground
+�fg
+Capacity Field
+Reconstructed CT
+Refinement
+Network �
+Gaussian
+Attenuation
+Gaussian Render
+Structure Bank �� ,0
+Structure Gaussian Diffusion ��
+Detail Bank ��,0
+Detail Bank �
+�
+Detail Gaussian Diffusion
+��
+Structure Bank ��
+Stop-Gradient
+Bounded Residual ��
+Figure 3: Overview of the proposed HiGDiﬀ framework. Given jointly degraded measurements 𝑌 , the physics encoder predicts
+anatomical anchors  and a foreground capacity ﬁeld 𝐹fg to initialize ﬁxed-cardinality structure and detail Gaussian banks. During
+training, the reference attenuation ﬁeld 𝜇 ∗ is decomposed to construct slot-aligned Gaussian targets. Structure diﬀusion 𝐷𝑠 ﬁrst
+completes global attenuation geometry. Its Gaussian tokens and remaining measurement residual then condition detail diﬀusion
+𝐷𝑑 . The two completed banks are rendered into the Gaussian attenuation ﬁeld 𝜇̂ 𝐺 , and the gradient-isolated bounded reﬁnement
+𝐻 produces the ﬁnal reconstruction ̂
+𝜇.
+by a gradient-isolated bounded voxel correction. Figure 3
+summarizes the pipeline.
+Notation. The bank index is 𝑏 ∈ {𝑠, 𝑑}, with 𝑖 and 𝑗
+indexing structure and detail primitives. Superscripts ∗ and 𝑡
+denote training targets and diﬀusion time. Subscript 0, hats,
+and bars denote initialization, prediction, and exponentialmoving-average (EMA) copies. Positions use normalized
+scanner coordinates in [−1, 1]3 , and ⊙ is element-wise
+multiplication. Stop-gradient preserves its forward value
+and blocks back-propagation as follows. sg(𝑣) = 𝑣 and
+𝜕 sg(𝑣)∕𝜕𝑣 = 0.
+3.1. Foreground-Aware Gaussian Initialization
+HiGDiﬀ initializes both Gaussian banks from a shared
+physics feature pyramid, landmark-free anatomical anchors,
+and a continuous foreground capacity ﬁeld.
+and let 𝐼𝑟 = 𝐼0 exp(−𝑌𝑟 ) be its estimated photon count. We
+deﬁne the normalized inverse-noise reliability as
+√
+max(𝐼𝑟 , 1)
+𝑊𝑟 = 𝑀 𝑟
+.
+(2)
+√
+max𝓁∶𝑀𝓁 =1 max(𝐼𝓁 , 1)
+Thus, high-count rays receive larger weights and unobserved
+rays have zero weight in every residual and projectionconsistency term. We compute 𝑉0 = Θ (𝑌 ) using the
+geometry-matched FBP operator Θ . The operator Θ denotes unﬁltered backprojection.
+Physics feature encoder. The multiscale 3D encoder
+𝐸phy combines the analytic initialization with the reliabilityweighted backprojection of its measurement residual.
+(
+(
+))
+𝐹phy = 𝐸phy 𝑉0 , Θ 𝑊 ⊙ [𝑌 − Θ (𝑉0 )] .
+(3)
+(1)
+The pyramid 𝐹phy jointly encodes the analytic estimate and
+its observed-ray inconsistency. This compact condition is
+shared by the anchor, foreground, and diﬀusion modules, so
+primitive allocation and subsequent denoising are driven by
+the same acquisition evidence.
+where Θ is the X-ray transform and 𝜀 is heteroscedastic
+noise. Let 𝑀𝑟 ∈ {0, 1} indicate whether ray 𝑟 is observed
+Landmark-free anatomical anchors. The anchor network 𝐸kp predicts 𝐾 normalized coordinates, local scales,
+Problem formulation. Let 𝜇∗ denote the unknown 3D
+attenuation ﬁeld and 𝑌 the post-log measurements acquired
+under geometry Θ.
+𝑌 = Θ (𝜇∗ ) + 𝜀,
+Yang et al.: Preprint submitted to Elsevier
+Page 4 of 14
+HiGDiﬀ
+orientations, conﬁdence values, and structure embeddings.
+ = 𝐸kp (𝐹phy ) = {(𝑐𝑘 , 𝑟𝑘 , 𝑅𝑘 , 𝛾𝑘 , 𝑒𝑘 )}𝐾
+.
+𝑘=1
+(4)
+Here 𝑐𝑘 ∈ [−1, 1]3 , 𝑟𝑘 ∈ ℝ3+ , 𝑅𝑘 ∈ SO(3), 𝛾𝑘 ∈ [0, 1],
+and 𝑒𝑘 ∈ ℝ𝑑𝑒 denote coordinate, scale, orientation, conﬁdence, and descriptor. Landmark-free training matches the
+unordered anchors from two geometry-preserving view subsets by a conﬁdence-weighted Hungarian cost over coordinates, orientations, and descriptors. Cross-view consistency
+and automatically derived edge and distance-transform targets promote repeatability, and repulsion prevents slot collapse. The resulting anchors form a stable coarse anatomical
+scaﬀold under landmark-free supervision, and their geometry determines the initialization of broad structure primitives.
+Foreground capacity ﬁeld. The voxel decoder 𝐸fg predicts a scalar capacity ﬁeld over normalized coordinates
+𝑥 ∈ [−1, 1]3 . At diﬀusion step 𝑡, this ﬁeld is sampled at the
+current centre 𝑚𝑡𝑏,𝑖 of primitive 𝑖.
+𝐹fg (𝑥) = 𝐸f g (𝐹phy , )(𝑥) ∈ [0, 1],
+(
+)
+𝑡
+= sg 𝐹f g (𝑚𝑡𝑏,𝑖 ) .
+𝑞𝑏,𝑖
+(5)
+𝑡 ∈ [0, 1] serves as a detached
+The sampled conﬁdence 𝑞𝑏,𝑖
+condition for initialization, attention, and denoiser features.
+𝐹fg encodes graded primitive utility across regions while
+the Gaussian attributes determine the diﬀusion state and
+attenuation amplitude. This design concentrates capacity
+near uncertain boundaries and residual-sensitive regions,
+stabilizes foreground learning, and preserves the learned
+attenuation scale during rendering.
+Dual Gaussian banks. Let 𝑁 = 𝑁𝑠 + 𝑁𝑑 be the total
+primitive budget and 𝜋𝑠 ∈ (0, 1) the structure fraction. We
+set 𝑁𝑠 = round(𝜋𝑠 𝑁) and 𝑁𝑑 = 𝑁 − 𝑁𝑠 . The 𝐾 anchors
+deﬁne the anatomical support for the structure score, while
+the foreground, edge, and residual responses determine the
+ﬁnal ﬁxed-cardinality top-𝑁𝑠 and top-𝑁𝑑 locations. The average structure capacity per anchor is therefore 𝑃𝑠 = 𝑁𝑠 ∕𝐾;
+individual anchors may receive diﬀerent numbers of slots
+according to their conﬁdence and spatial support. This yields
+ﬁxed-cardinality banks 𝑠,0 and 𝑑,0 . With Samp(𝐹 , 𝑚) denoting concatenated trilinear samples from pyramid 𝐹 at 𝑚,
+primitive 𝑖 and its contextual token are
+𝑔𝑏,𝑖 = (𝑚𝑏,𝑖 , 𝑠𝑏,𝑖 , 𝑢𝑏,𝑖 , 𝑎𝑏,𝑖 ),
+𝑧𝑏,𝑖 = Samp(𝐹phy , 𝑚𝑏,𝑖 ).
+(6)
+Here 𝑚𝑏,𝑖 ∈ [−1, 1]3 , 𝑠𝑏,𝑖 ∈ ℝ3+ , and 𝑢𝑏,𝑖 ∈ ℝ6 are centre,
+principal scales, and a continuous rotation code (Zhou et al.,
+2019). The map 𝑅 ∶ ℝ6 → SO(3) returns a 3D rotation, giving Σ𝑏,𝑖 = 𝑅(𝑢𝑏,𝑖 ) diag(𝑠2𝑏,𝑖 )𝑅(𝑢𝑏,𝑖 )⊤ . Structure amplitudes
+satisfy 𝑎𝑠,𝑖 ≥ 0. Detail amplitudes 𝑎𝑑,𝑖 ∈ ℝ are signed because the residual ﬁeld 𝜇𝑑∗ = 𝜇∗ − 𝜇𝑠∗ contains both positive
+and negative local corrections. Negative detail amplitudes
+Yang et al.: Preprint submitted to Elsevier
+subtract local overestimation from the structure ﬁeld, and
+the ﬁnal projection Π+ in Eq. (21) enforces a nonnegative
+attenuation output. Diﬀusion updates (𝑚, 𝑠, 𝑢, 𝑎) and retains
+𝑧𝑏,𝑖 as contextual information. Structure slots inherit anchor
+geometry, and detail slots use smaller initial scales. The two
+banks use the same explicit primitive representation with
+distinct spatial scales and functional roles. Their ﬁxed cardinalities establish direct slot alignment for Gaussian attributes
+throughout diﬀusion. We denote the complete initialization
+mapping by (𝑠,0 , 𝑑,0 ) = (𝑌 , Θ; 𝜃𝐼 ), where 𝜃𝐼 collects the
+modules in this subsection.
+For any bank 𝑏 , the renderer G evaluates a peaknormalized anisotropic Gaussian basis on the voxel coordinate 𝑥.
+]
+[
+𝐺 (𝑥; 𝑚, Σ) = exp − 12 (𝑥 − 𝑚)⊤ Σ−1 (𝑥 − 𝑚) ,
+G (𝑏 )(𝑥) =
+𝑁𝑏
+∑
+𝑖=1
+(7)
+𝑎𝑏,𝑖 𝐺 (𝑥; 𝑚𝑏,𝑖 , Σ𝑏,𝑖 ).
+The renderer converts normalized centres and covariances to
+physical voxel spacing during evaluation.
+3.2. Structure-to-Detail Hierarchical Gaussian
+Diﬀusion
+HiGDiﬀ organizes Gaussian diﬀusion as a sequential
+structure-to-detail process. The structure stage estimates
+low-to-mid-frequency attenuation geometry, and its completed representation conditions the detail stage that estimates residual boundaries and tissue transitions.
+Clean Gaussian targets. During training, the reference
+ﬁeld is decomposed into
+𝜇𝑠∗ = 𝐺𝜎 ∗ 𝜇∗ ,
+𝜇𝑑∗ = 𝜇∗ − 𝜇𝑠∗ ,
+(8)
+where ∗ is 3D convolution and 𝐺𝜎 is a ﬁxed Gaussian lowpass kernel of bandwidth 𝜎. An EMA copy of the initialization mapping provides slowly varying target partitions.
+𝜃̄𝐼 ← 𝜌𝐼 𝜃̄𝐼 + (1 − 𝜌𝐼 )𝜃𝐼 ,
+̄
+̄
+(𝑠,0 , 𝑑,0 ) = (𝑌 , Θ; 𝜃̄𝐼 ),
+(9)
+where 𝜃𝐼 and 𝜃̄𝐼 are the online and EMA parameters, 𝜌𝐼 ∈
+[0, 1) is the decay, and ← denotes the EMA update. A
+deterministic operator converts both ﬁelds into slot-aligned
+Gaussian targets.
+(∗𝑠 , ∗𝑑 ) = 𝐺 (𝜇𝑠∗ , 𝜇𝑑∗ ; sg(̄𝑠,0 ), sg(̄𝑑,0 )).
+(10)
+The detached EMA banks deﬁne Mahalanobis partitions.
+Weighted moments and local least squares then determine
+target geometry and amplitude under Eq. (7). Detail moments use absolute residual weights and signed amplitude
+ﬁtting. Empty or near-isotropic slots retain their initial geometry, and principal axes are aligned to the initialization to
+preserve correspondence. This construction supplies training targets for every initialized slot. The structure bank
+approximates the low-pass attenuation ﬁeld, and the detail
+Page 5 of 14
+HiGDiﬀ
+(11)
+𝐸𝑠 returns one token 𝑟𝑠,𝑖 per completed structure primitive.
+These tokens summarize the recovered long-range attenuation organization and form the explicit bridge from the ﬁrst
+diﬀusion stage to the second.
+which quantiﬁes the ﬁxed-budget target approximation in
+evaluation.
+Structure-conditioned detail Gaussian diﬀusion. The
+bank models its signed residual. The corresponding ﬁxedbudget oracle ﬁeld is
+∗
+𝜇𝐺
+= G (∗𝑠 ) + G (∗𝑑 ),
+Residual diﬀusion. For bank 𝑏, 𝜙𝑏 maps Gaussian attributes to a standardized unconstrained vector using inverse hyperbolic tangent for centres, logarithms for positive
+scales and structure amplitudes, identity for signed detail
+amplitudes, and the continuous rotation code. The clean slotaligned correction is
+𝛿𝜉𝑏0 = 𝜙𝑏 (∗𝑏 ) − 𝜙𝑏 (𝑏,0 ).
+(12)
+Residual diﬀusion around the physics-derived initialization
+preserves its spatial layout and concentrates the generative
+process on acquisition-dependent errors in geometry and attenuation. We use the standard noise-prediction formulation
+of denoising diﬀusion probabilistic models (Ho et al., 2020).
+For a bank-speciﬁc schedule of 𝑇𝑏 steps, let 𝛽𝑏,𝑡 be the noise
+∏𝑡
+variance, 𝛼𝑏,𝑡 = 1 − 𝛽𝑏,𝑡 , and 𝛼̄ 𝑏,𝑡 =
+𝓁=1 𝛼𝑏,𝓁 . Forward
+diﬀusion is
+√
+√
+𝑡
+0
+𝛿𝜉𝑏,𝑖
+= 𝛼̄ 𝑏,𝑡 𝛿𝜉𝑏,𝑖
++ 1 − 𝛼̄ 𝑏,𝑡 𝜖𝑏,𝑖 , 𝜖𝑏,𝑖 ∼  (0, 𝐼), (13)
+where 𝐼 is the identity covariance and 𝛼̄ 𝑏,0 = 1. Starting from
+𝑇
+𝛿𝜉𝑏 𝑏 ∼  (0, 𝐼), deterministic DDIM (𝜂 = 0) (Song et al.,
+𝑡 to update
+2021) uses predicted noise 𝜖̂𝑏,𝑖
+√
+𝑡
+𝑡 −
+1 − 𝛼̄ 𝑏,𝑡 𝜖̂𝑏,𝑖
+𝛿𝜉𝑏,𝑖
+0
+̂
+,
+𝛿𝜉 𝑏,𝑖 =
+√
+𝛼̄ 𝑏,𝑡
+(14)
+√
+√
+0
+𝑡−1
+𝑡
+̂ + 1 − 𝛼̄ 𝑏,𝑡−1 𝜖̂ .
+𝛿𝜉𝑏,𝑖 = 𝛼̄ 𝑏,𝑡−1 𝛿𝜉
+𝑏,𝑖
+𝑏,𝑖
+Inverse standardization and 𝜙−1
+add the correction to 𝑏,0
+𝑏
+and recover valid attributes. Centre clipping and positive numerical ﬂoors maintain valid domains. The same blockwise
+statistics are used at training and inference.
+Structure Gaussian diﬀusion. At reverse step 𝑡, each
+structure primitive samples the physics pyramid at its current
+centre and fuses this evidence with its initial token and
+Gaussian attributes.
+𝑡
+𝑓𝑠,𝑖
+= Samp(𝐹phy , 𝑚𝑡𝑠,𝑖 ),
+(
+)
+𝑡
+𝑡
+𝑡
+𝑐𝑠,𝑖
+= 𝑤(𝑞𝑠,𝑖
+)𝑀𝑠 [𝑧𝑠,𝑖 , 𝑓𝑠,𝑖
+, 𝜙𝑠 (𝑔𝑠,𝑖,0 )] ,
+(15)
+𝑡
+𝑡
+𝑡
+𝜖̂𝑠,𝑖
+= 𝐷𝑠 (𝛿𝜉𝑠,𝑖
+, 𝑐𝑠,𝑖
+, 𝑡).
+Here [⋅] is concatenation, 𝑀𝑠 is a fusion MLP, and 𝑤(𝑞) =
+0.15 + 0.85𝑞. The permutation-equivariant set denoiser 𝐷𝑠
+𝑡 and adds log(10−6 +𝑞 𝑡 )
+returns a noise vector matching 𝛿𝜉𝑠,𝑖
+𝑠,𝑖
+to its self-attention logits. Repeating Eq. (14) yields 𝑠 ,
+which is rendered and encoded as
+𝜇̂ 𝑠 = G (𝑠 ),
+(
+)
+𝑁𝑠
+𝑅𝑠 = {𝑟𝑠,𝑖 }𝑖=1 = 𝐸𝑠 𝑠 , 𝜇̂ 𝑠 , 𝐹phy .
+Yang et al.: Preprint submitted to Elsevier
+(16)
+detail stage receives 𝑅𝑠 and the weighted backprojection of
+the remaining measurement residual,
+(
+[
+])
+𝐵𝑠 = Θ 𝑊 ⊙ 𝑌 − Θ (𝜇̂ 𝑠 ) .
+(17)
+Here 𝐵𝑠 is the unexplained observed-ray evidence in the
+voxel domain. Training constructs detail conditions from a
+completed structure sample. Let 𝜃𝑠 and 𝜃̄𝑠 parameterize 𝐷𝑠
+and its EMA copy 𝐷̄ 𝑠 , updated with decay 𝜌𝑠 as 𝜃̄𝑠 ← 𝜌𝑠 𝜃̄𝑠 +
+(1 − 𝜌𝑠 )𝜃𝑠 . The operator DDIM𝑇𝑠 denotes 𝑇𝑠 applications of
+Eq. (14). Each detail update constructs detached structure
+conditions as
+̃𝑠 = DDIM𝑇𝑠 (𝑠,0 ; 𝐹phy , 𝐹f g , 𝐷̄ 𝑠 ),
+𝜇̃𝑠 = G (̃𝑠 ),
+(
+)
+𝑅̌ 𝑠 = sg 𝐸𝑠 (̃𝑠 , 𝜇̃𝑠 , 𝐹phy ) ,
+))
+( (
+𝜇𝑠 )] .
+𝐵̌ 𝑠 = sg Θ 𝑊 ⊙ [𝑌 − Θ (̃
+(18)
+Tildes denote the completed EMA prediction, and checks denote stopped training conditions. (𝑅̌ 𝑠 , 𝐵̌ 𝑠 ) replaces (𝑅𝑠 , 𝐵𝑠 )
+during training. Each detail primitive then samples the
+physics and residual volumes and aggregates its 𝑘 nearest
+structure tokens.
+𝑡
+𝑓𝑑,𝑗
+= Samp(𝐹phy , 𝑚𝑡𝑑,𝑗 ),
+𝑏𝑡𝑑,𝑗 = Samp(𝐵𝑠 , 𝑚𝑡𝑑,𝑗 ),
+)
+(
+ℎ𝑡𝑑,𝑗 = LocalAttn 𝑧𝑑,𝑗 , {𝑟𝑠,𝑖 }𝑖∈𝑘 (𝑚𝑡 ) ,
+(19)
+𝑑,𝑗
+(
+)
+𝑡
+𝑡
+𝑡
+𝑐𝑑,𝑗
+= 𝑤(𝑞𝑑,𝑗
+)𝑀𝑑 [𝑧𝑑,𝑗 , 𝜙𝑑 (𝑔𝑑,𝑗,0 ), 𝑓𝑑,𝑗
+, 𝑏𝑡𝑑,𝑗 , ℎ𝑡𝑑,𝑗 ] ,
+𝑡
+𝑡
+𝑡
+𝜖̂𝑑,𝑗
+= 𝐷𝑑 (𝛿𝜉𝑑,𝑗
+, 𝑐𝑑,𝑗
+, 𝑡).
+Here 𝑘 (𝑚) contains the 𝑘 nearest structure centres. Restricted scaled dot-product attention (Vaswani et al., 2017)√
+is
+∑
+ℎ𝑡𝑑,𝑗 = 𝑖 𝛼𝑗𝑖 𝑉 𝑟𝑠,𝑖 , where 𝛼𝑗𝑖 = sof tmax𝑖 ((𝑄𝑧𝑑,𝑗 )⊤ 𝐾𝑟𝑠,𝑖 ∕ 𝑑ℎ )
+and 𝑄, 𝐾, 𝑉 are learned projections of key dimension 𝑑ℎ .
+The fusion MLP 𝑀𝑑 combines local physics, unexplained
+measurements, and structure context. 𝐷𝑑 predicts noise with
+𝑡 . This explicit dependency implements
+the dimension of 𝛿𝜉𝑑,𝑗
+sequential structure-to-detail diﬀusion. Local structure attention limits detail updates to anatomically compatible
+corrections, and 𝐵𝑠 directs them toward the remaining
+measurement residual.
+3.3. Gaussian-Conditioned Attenuation
+Reﬁnement
+The completed banks form the additive Gaussian reconstruction
+𝜇̂ 𝑑 = G (𝑑 ),
+𝜇̂ 𝐺 = 𝜇̂ 𝑠 + 𝜇̂ 𝑑 .
+(20)
+Page 6 of 14
+HiGDiﬀ
+𝜇̂ 𝐺 is evaluated in physical voxel spacing, with 𝑎𝑏,𝑖 in attenuation units. Foreground conﬁdence inﬂuences placement
+and denoising. Rendering uses the learned attenuation amplitudes directly. The renderer expands a ﬁnite set of smooth
+anisotropic 3D basis functions onto a dense 3D voxel grid.
+This representation captures global attenuation organization
+eﬃciently, while ﬁnite primitive capacity leaves grid-scale
+errors at sharp interfaces, narrow structures, and regions affected by structured acquisition artifacts. The reﬁnement network 𝐻 predicts the corresponding bounded voxel-domain
+residual.
+(
+)
+𝐵𝐺 = Θ 𝑊 ⊙ [𝑌 − Θ (sg(𝜇̂ 𝐺 ))] ,
+(
+)
+𝑟𝜇 = 𝑟max tanh 𝐻 cat[sg(𝜇̂ 𝐺 ), sg(𝐵𝐺 ), 𝐹fg ] ,
+(21)
+(
+)
+𝜇̂ = Π+ sg(𝜇̂ 𝐺 ) + 𝑟𝜇 ,
+Π+ (𝑣) = max(𝑣, 0).
+Dataset
+Region
+Dim.
+Train/Fine-tune
+Test
+LDCT-PD
+TCIA Pancreas
+LoDoPaB-CT
+Thorax
+Abdomen
+Thorax
+3D
+3D
+2D
+11 volumes
+5 volumes
+3,007 slices
+45 volumes
+36 volumes
+12,830 slices
+Together, the bank-speciﬁc targets and scale penalty establish distinct structure and detail roles through supervision
+and architecture. The complete Stage-I objective is
+𝐺 = dif f +aux +sep +𝜆joint ‖𝜇̂ 𝐺 −𝜇∗ ‖1 +𝜆proj proj (𝜇̂ 𝐺 ).
+(25)
+Stage II attenuation reﬁnement. After freezing all Stage-
+Here 𝐻 is a multiscale 3D residual network operating on
+the rendered attenuation volume, the observed-ray residual
+backprojection, and the foreground ﬁeld. cat is channel-wise
+concatenation, and 𝑟max bounds the correction by ‖𝑟𝜇 ‖∞ ≤
+𝑟max . The single nonnegative projection Π+ follows residual
+addition. The Gaussian hierarchy supplies the global 3D
+attenuation layout and localized tissue representation, while
+𝐻 corrects residual errors after dense voxelization. Stopgradient and Stage-II freezing maintain this division during
+reﬁnement training.
+3.4. Training Objectives and Feed-Forward
+Inference
+Training has two stages. Stage I alternates structure
+updates, which learn the initialization and 𝐷𝑠 , with detail
+updates, which construct the stopped conditions in Eq. (18)
+and learn 𝐷𝑑 . Stage II trains the reﬁnement network after
+freezing all Stage-I modules.
+Stage I Gaussian representation learning. All 𝜆 terms
+are nonnegative weights. We group anchor consistency,
+structural reconstruction, and slot repulsion in kp , and
+capacity-target cross-entropy and smoothness in fg , giving
+aux = 𝜆kp kp + 𝜆fg fg . The diﬀusion loss is
+[
+]
+∑
+2
+𝑡 ‖
+𝑡 ‖
+dif f =
+𝜆𝑏 𝔼𝑡,𝑖,𝜖 𝑤(𝑞𝑏,𝑖 ) ‖𝜖𝑏,𝑖 − 𝜖̂𝑏,𝑖 ‖ . (22)
+‖
+‖2
+𝑏∈{𝑠,𝑑}
+The expectation samples a timestep, primitive, and noise for
+each bank. Target and scale separation is enforced by
+sep = 𝜆str ‖𝜇̂ 𝑠 − 𝜇𝑠∗ ‖1 + 𝜆det ‖𝜇̂ 𝑑 − 𝜇𝑑∗ ‖1
+)
+(
+∑
+∑
+(23)
+[𝑠𝑑,𝑗 − 𝜏𝑑 ]+ ,
++ 𝜆bw
+[𝜏𝑠 − 𝑠𝑠,𝑖 ]+ +
+𝑖
+Table 1
+Anatomical region, reconstruction dimensionality, and data
+split for each dataset.
+𝑗
+where 𝑠𝑏,𝑖 is the mean principal scale, [𝑥]+ = max(𝑥, 0), and
+𝜏𝑠 , 𝜏𝑑 encourage broad structure and compact detail primitives. For any attenuation ﬁeld 𝜈, observed-ray consistency
+is
+(
+)‖
+‖
+proj (𝜈) = ‖𝑊 ⊙ Θ (𝜈) − 𝑌 ‖ .
+(24)
+‖
+‖1
+Yang et al.: Preprint submitted to Elsevier
+I modules, we optimize 𝐻 with
+(
+)
+𝐻 = ‖𝜇̂ − 𝜇 ∗ ‖1 + 𝜆ssim 1 − SSIM3D ( ̂
+𝜇, 𝜇 ∗ )
++ 𝜆proj proj ( ̂
+𝜇) + 𝜆res ‖𝑟𝜇 ‖1 .
+(26)
+Here SSIM3D is volumetric structural similarity, and the last
+term keeps the bounded correction small.
+Feed-forward inference. At test time, HiGDiﬀ applies 𝑇𝑠
+structure and 𝑇𝑑 detail DDIM steps, renders both banks, and
+performs one bounded reﬁnement pass.
+4. Experiments
+4.1. Experimental setup
+We evaluate HiGDiﬀ on the chest subset of the public Low Dose CT Image and Projection Data collection
+(LDCT-and-Projection-data; hereafter LDCT-PD) (McCollough et al., 2020), the public TCIA Pancreas collection
+(Roth et al., 2016, 2015; Clark et al., 2013), and the slicebased LoDoPaB-CT benchmark (Leuschner et al., 2019,
+2021). Table 1 reports the anatomical region, reconstruction
+dimensionality, and the number of training or ﬁne-tuning and
+test samples. The 3D model is trained on 11 LDCT-PD volumes and tested on 45 LDCT-PD volumes. TCIA Pancreas
+is used for cross-dataset generalization, and a separate 2D
+model is trained on 3,007 LoDoPaB-CT slices and tested
+on 12,830 slices. All partitions are patient-disjoint; all slices
+from one LoDoPaB-CT subject remain in the same partition.
+The 16 ﬁxed acquisition settings form the four groups
+used in Tables 2–4. Limited-angle acquisition uses angular spans 0◦ –𝜃 with 𝜃 ∈ {90◦ , 120◦ , 150◦ , 180◦ }. Sparseview acquisition retains view ratios 𝑟 ∈ {1∕3, 1∕6, 1∕9,
+1∕12} over the nominal angular range. Their paired combination uses (𝑟, 𝜃) ∈ {(1∕3, 90◦ ), (1∕6, 120◦ ), (1∕9, 150◦ ),
+(1∕12, 180◦ )}. The ﬁnal group contains standalone low dose
+and low dose combined with (1∕3, 120◦ ), (1∕6, 150◦ ), or
+(1∕9, 180◦ ). Standalone low dose uses the paired low-dose
+observation for datasets that provide it. Derived joint settings
+use deterministic Poisson projection corruption. The result
+tables label each setting by 𝜃, 𝑟, or (𝑟, 𝜃).
+Page 7 of 14
+HiGDiﬀ
+Implementation and hyperparameters. The main conﬁguration uses 𝐾 = 128 anatomical anchors and a total budget
+of 𝑁 = 512 Gaussian primitives. The structure fraction is
+𝜋𝑠 = 0.40, giving 𝑁𝑠 = 205 structure primitives, 𝑁𝑑 = 307
+detail primitives, and an average 𝑃𝑠 = 𝑁𝑠 ∕𝐾 ≈ 1.60
+structure slots per anchor. The target decomposition uses 𝜎 =
+1 voxel, each detail primitive attends to the 𝑘 = 8 nearest
+structure primitives, and inference uses 𝑇𝑠 = 𝑇𝑑 = 3 deterministic DDIM steps. The reﬁnement network has 24 hidden
+channels and uses 𝑟max = 0.30 in the normalized attenuation
+range. These values are selected on the validation split and
+ﬁxed across datasets and degradation settings. Training uses
+AdamW (Loshchilov and Hutter, 2019) with weight decay
+10−4 . Experiments are run in the same PyTorch/CUDA
+environment on a single NVIDIA RTX PRO 6000 GPU.
+For each acquisition setting on TCIA Pancreas, all methods start from the corresponding LDCT-PD-trained checkpoint and are ﬁne-tuned on the same ﬁve target-domain
+volumes for ﬁve epochs with AdamW and a learning rate
+of 10−5 . Evaluation uses the same 36 disjoint target-domain
+volumes. Preprocessing, target normalization, checkpoint
+selection, and data partitions are shared across methods.
+The comparison includes the Gaussian-based 3DGRCT (Li et al., 2025b), the diﬀusion methods DOLCE (Liu
+et al., 2023), NEED (Gao et al., 2025), and TIFA (Wang
+et al., 2024), and the deterministic methods FBPConvNet
+(Jin et al., 2017), FreeSeed (Ma et al., 2023), ProCT (Ma
+et al., 2026), and U-Net (Ronneberger et al., 2015). DOLCE,
+FreeSeed, ProCT, and TIFA use geometry-matched 3D
+implementations on LDCT-PD. NEED and 3DGR-CT use
+project-local hybrid implementations, and the LoDoPaB-CT
+comparison uses 2D conﬁgurations.
+We report peak signal-to-noise ratio (PSNR, dB) and
+structural similarity index measure (SSIM) (Wang et al.,
+2004) on attenuation ﬁelds clipped and normalized to [0, 1].
+PSNR uses a data range of 1. SSIM uses 𝐶1 = 0.012 and
+𝐶2 = 0.032 and is computed over each complete 3D volume
+for LDCT-PD and TCIA Pancreas and over each 2D slice for
+LoDoPaB-CT. Metrics are then averaged over all held-out
+volumes or slices for each setting. Each dataset table contains all 16 setting-level results and their unweighted macroaverage. The best and second-best results are indicated by
+boldface and underlining.
+4.2. Overall quantitative comparison
+Across the two volumetric benchmarks, HiGDiﬀ ranks
+ﬁrst in both metrics for all 16 acquisition settings. Its advantage remains pronounced in the three rows where sparseview, limited-angle, and low-dose degradation occur simultaneously. On the 2D LoDoPaB-CT benchmark, HiGDiﬀ
+is eﬀectively tied with DOLCE in macro-average PSNR
+and gives the highest mean SSIM and the most consistent
+performance under the joint settings. The following three
+subsections analyze the result tables separately.
+4.3. 3D reconstruction on LDCT-PD
+Table 2 shows that HiGDiﬀ achieves the highest PSNR
+and SSIM in every LDCT-PD setting. Its macro-average
+Yang et al.: Preprint submitted to Elsevier
+reaches 32.655 dB and 0.8661 SSIM, improving over the
+strongest metric-speciﬁc comparators by 5.808 dB and
+0.1131 SSIM. The gains span all corruption groups. Under
+limited-angle acquisition, the PSNR improvement over the
+strongest baseline ranges from 4.709 dB at 90◦ to 11.067
+dB at 180◦ . Under sparse-view acquisition, HiGDiﬀ retains
+35.044 dB and 0.8834 SSIM at the most severe 1∕12 view
+ratio.
+The paired sparse-view and limited-angle results further
+show that the model remains stable when angular density
+and angular support are reduced together. The most demanding group additionally introduces low-dose noise. Averaged
+over its three joint rows, HiGDiﬀ obtains 29.067 dB and
+0.8014 SSIM. It exceeds the strongest comparator averages
+by 3.301 dB and 0.0707 SSIM. This persistent margin under coupled corruption is notable because the remaining
+measurements contain both directional incompleteness and
+signal-dependent noise.
+Figure 4 provides the corresponding visual comparison at representative limited-angle, sparse-view, paired, and
+joint settings. In the limited-angle example, competing reconstructions retain slope artifacts or attenuate ﬁne boundaries. HiGDiﬀ recovers a more continuous thoracic structure.
+The same pattern persists as sparse sampling is added, with
+distributed streaks suppressed and local contrast retained.
+Under joint degradation, HiGDiﬀ remains visually closest to
+the reference and reduces the structured artifacts and tissue
+smoothing visible in the other reconstructions.
+4.4. 2D reconstruction on LoDoPaB-CT
+Table 3 presents a more competitive 2D benchmark.
+DOLCE obtains the highest macro-average PSNR at 38.390
+dB, 0.028 dB above HiGDiﬀ. HiGDiﬀ gives the highest
+mean SSIM at 0.9241, exceeding DOLCE by 0.0070. At
+the setting level, HiGDiﬀ ranks ﬁrst in 10 of 16 PSNR
+comparisons and 14 of 16 SSIM comparisons. NEED and
+DOLCE remain stronger in several mild limited-angle and
+sparse-view settings, so PSNR superiority depends on the
+acquisition setting.
+The relative ordering changes under compound degradation. HiGDiﬀ ranks ﬁrst in both metrics for all three sparseview, limited-angle, and low-dose rows, averaging 34.715
+dB and 0.8799 SSIM. The gains over the strongest comparator averages are 0.117 dB and 0.0088 SSIM. On LoDoPaBCT, these results show improved structural ﬁdelity and robustness to coupled corruption, alongside a macro-average
+PSNR eﬀectively tied with the strongest diﬀusion baseline.
+4.5. Cross-dataset generalization on TCIA
+Pancreas
+Table 4 evaluates cross-dataset generalization from LDCTPD to TCIA Pancreas. HiGDiﬀ achieves 35.298 dB and
+0.9261 SSIM on average. It ranks ﬁrst for both metrics
+in all 16 settings, outperforming the strongest comparator
+averages by 8.571 dB and 0.1464 SSIM. The gains across
+both limited-angle and sparse-view groups indicate that the
+learned representation generalizes across the anatomical
+shift from thorax to abdomen.
+Page 8 of 14
+HiGDiﬀ
+Table 2
+Results on LDCT-PD (3D). Each entry reports PSNR in dB followed by SSIM. The four setting groups are deﬁned in Section 4.1.
+Best and second-best values are shown in bold and underlined.
+Setting
+FBPConvNet
+TIP’17
+U-Net
+MICCAI’15
+FreeSeed
+MICCAI’23
+ProCT
+PR’26
+DOLCE
+ICCV’23
+NEED
+MIA’25
+TIFA
+TMI’24
+3DGR-CT
+MIA’25
+HiGDiﬀ
+Ours
+Limited-angle
+90◦
+18.928/0.5733 20.271/0.6023 18.664/0.5804 20.597/0.5500 17.915/0.5583 20.263/0.6018 18.828/0.5867 20.278/0.6004 25.306/0.7959
+120◦
+22.557/0.6868 23.967/0.7221 22.277/0.6388 24.020/0.6241 21.489/0.6300 23.887/0.7172 22.362/0.6360 23.913/0.7178 29.172/0.8598
+◦
+150
+26.142/0.7506 27.101/0.7734 25.174/0.6543 26.489/0.6463 24.852/0.6256 27.032/0.7722 25.726/0.6705 27.131/0.7717 33.097/0.9046
+180◦
+30.055/0.8044 30.180/0.8121 26.111/0.6753 28.414/0.6385 27.516/0.6436 29.980/0.8098 29.015/0.7051 30.016/0.8115 41.247/0.9687
+Sparse-view
+1∕3
+29.869/0.7971 30.183/0.8119 26.081/0.6760 28.404/0.6382 27.507/0.6436 29.903/0.8095 29.011/0.7036 30.037/0.8114 40.357/0.9519
+1∕6
+29.560/0.7889 30.186/0.8126 25.997/0.6794 28.390/0.6393 27.459/0.6447 29.921/0.8091 28.958/0.6985 30.155/0.8131 37.922/0.9259
+1∕9
+28.520/0.7389 30.097/0.8115 25.955/0.6734 28.320/0.6407 27.313/0.6416 29.850/0.8078 28.823/0.6890 29.997/0.8116 36.313/0.9043
+1∕12
+27.250/0.6698 29.787/0.8037 25.840/0.6567 28.176/0.6393 27.058/0.6319 29.583/0.8022 28.558/0.6700 29.677/0.8039 35.044/0.8834
+Sparse-view + limited-angle
+(1∕3, 90◦ )
+18.891/0.5673 20.232/0.6022 18.607/0.5768 20.569/0.5491 17.887/0.5557 20.232/0.6016 18.792/0.5840 20.242/0.5995 25.132/0.7855
+(1∕6, 120◦ ) 22.262/0.6517 23.957/0.7204 22.231/0.6380 23.974/0.6227 21.433/0.6254 23.875/0.7165 22.323/0.6305 23.900/0.7150 28.663/0.8291
+(1∕9, 150◦ ) 25.268/0.6708 27.057/0.7700 25.087/0.6554 26.377/0.6413 24.660/0.6172 27.029/0.7699 25.592/0.6573 27.049/0.7690 31.698/0.8547
+(1∕12, 180◦ ) 27.180/0.6688 29.722/0.8038 25.840/0.6567 28.176/0.6393 27.054/0.6318 29.527/0.8011 28.578/0.6700 29.616/0.8034 35.028/0.8853
+Low-dose and joint degradation
+LD
+28.651/0.7421 29.506/0.8094 25.789/0.6807 28.245/0.6327 27.241/0.6309 29.464/0.8091 28.718/0.6591 29.492/0.8116 36.292/0.9039
+(1∕3, 120◦ )
+(1∕6, 150◦ )
+(1∕9, 180◦ )
+19.436/0.3626 23.475/0.6962 20.759/0.4406 23.086/0.5028 20.240/0.4355 23.453/0.6939 21.319/0.4449 23.456/0.6919 27.172/0.7781
+19.427/0.2829 26.012/0.7375 21.800/0.3881 24.711/0.4959 21.755/0.4139 25.985/0.7360 23.434/0.4689 25.994/0.7343 29.152/0.8032
+19.116/0.2336 27.808/0.7582 21.458/0.3200 25.702/0.4810 22.170/0.3969 27.861/0.7584 24.346/0.4702 27.767/0.7578 30.878/0.8228
+Mean
+24.569/0.6243 26.846/0.7530 23.604/0.5994 25.853/0.5988 23.972/0.5829 26.740/0.7510 25.274/0.6215 26.795/0.7515 32.655/0.8661
+Table 3
+Results on LoDoPaB-CT (2D). Each entry reports PSNR in dB followed by SSIM. The four setting groups are deﬁned in
+Section 4.1. Best and second-best values are shown in bold and underlined.
+Setting
+FBPConvNet
+TIP’17
+U-Net
+MICCAI’15
+FreeSeed
+MICCAI’23
+ProCT
+PR’26
+DOLCE
+ICCV’23
+NEED
+MIA’25
+TIFA
+TMI’24
+3DGR-CT
+MIA’25
+HiGDiﬀ
+Ours
+Limited-angle
+90◦
+29.459/0.8085 27.618/0.7275 29.435/0.8191 29.630/0.8294 31.577/0.8654 30.576/0.8558 31.006/0.8606 27.801/0.7330 31.434/0.8778
+120◦
+31.933/0.8669 29.032/0.7570 31.361/0.8475 31.813/0.8727 34.151/0.9065 32.905/0.8960 33.484/0.9002 29.451/0.7664 34.215/0.9170
+◦
+150
+35.164/0.9178 30.591/0.7951 33.881/0.8955 35.011/0.9224 37.595/0.9427 36.228/0.9339 36.866/0.9398 31.189/0.8038 37.509/0.9507
+180◦
+49.962/0.9902 35.130/0.8653 48.122/0.9835 49.731/0.9898 50.488/0.9902 51.106/0.9911 50.943/0.9910 36.897/0.9068 49.982/0.9906
+Sparse-view
+1∕3
+47.408/0.9823 35.006/0.8630 46.191/0.9749 47.341/0.9818 48.268/0.9831 48.512/0.9837 48.349/0.9835 37.029/0.9068 47.801/0.9836
+1∕6
+43.544/0.9620 34.630/0.8467 42.586/0.9540 43.362/0.9616 44.280/0.9649 44.142/0.9644 44.201/0.9651 36.514/0.8958 44.164/0.9667
+1∕9
+41.235/0.9437 33.874/0.8280 40.037/0.9240 41.085/0.9438 41.882/0.9487 41.778/0.9480 41.779/0.9486 35.767/0.8834 41.908/0.9521
+1∕12
+39.656/0.9282 33.485/0.8156 38.533/0.9050 39.519/0.9281 40.313/0.9351 40.185/0.9344 40.156/0.9342 35.431/0.8745 40.406/0.9397
+Sparse-view + limited-angle
+(1∕3, 90◦ )
+29.496/0.8070 27.603/0.7270 29.417/0.8171 29.661/0.8286 31.534/0.8623
+(1∕6, 120◦ ) 31.695/0.8540 28.932/0.7516 31.121/0.8285 31.615/0.8566 33.768/0.8872
+(1∕9, 150◦ ) 34.209/0.8852 30.149/0.7728 33.038/0.8544 34.065/0.8836 36.371/0.9081
+(1∕12, 180◦ ) 39.655/0.9281 33.208/0.8122 38.536/0.9050 39.518/0.9281 40.314/0.9352
+30.590/0.8532
+32.720/0.8777
+35.290/0.9000
+40.184/0.9343
+30.992/0.8574 27.930/0.7361 31.437/0.8743
+33.107/0.8796 29.351/0.7594 33.942/0.9003
+35.596/0.9008 30.858/0.7835 36.415/0.9192
+40.159/0.9343 35.440/0.8752 40.433/0.9397
+Low-dose and joint degradation
+LD
+39.414/0.9244 34.435/0.8408 39.035/0.9206 39.341/0.9265 39.904/0.9309 39.795/0.9305 39.771/0.9304 35.575/0.8836 39.999/0.9342
+(1∕3, 120◦ )
+(1∕6, 150◦ )
+(1∕9, 180◦ )
+31.337/0.8203 28.700/0.7250 30.541/0.7880 30.799/0.8207 32.752/0.8516 31.754/0.8385 32.115/0.8413 29.374/0.7441 32.895/0.8633
+33.259/0.8418 29.645/0.7416 31.942/0.8069 32.722/0.8453 34.511/0.8694 33.698/0.8603 33.902/0.8614 30.063/0.7477 34.618/0.8790
+36.059/0.8809 32.629/0.7888 35.703/0.8770 35.900/0.8834 36.530/0.8921 36.338/0.8886 36.352/0.8904 33.866/0.8429 36.632/0.8973
+Mean
+37.093/0.8963 31.542/0.7911 36.217/0.8813 36.945/0.9001 38.390/0.9171 37.863/0.9119 38.049/0.9137 32.658/0.8215 38.362/0.9241
+Under the three joint protocols, HiGDiﬀ averages 30.863
+dB and 0.8780 SSIM, exceeding the strongest comparator
+averages by 5.764 dB and 0.1698 SSIM.
+The cross-dataset examples in Figure 5 complement
+these measurements. On LoDoPaB-CT, where the numerical
+comparison is close, HiGDiﬀ preserves structural continuity
+under compound degradation and limits ampliﬁcation of
+low-dose noise. On TCIA Pancreas, it reduces residual noise
+and directional artifacts around abdominal structures. These
+images illustrate the observed generalization trend.
+Yang et al.: Preprint submitted to Elsevier
+4.6. Ablation studies
+We conduct the ablations on LDCT-PD and average
+PSNR and SSIM over the 16 ﬁxed acquisition settings.
+The study follows the three methodological components
+in Sections 3.1–3.3. They are foreground-aware initialization, structure-to-detail Gaussian diﬀusion, and gradientisolated attenuation reﬁnement. We additionally examine
+the grouped objectives in Section 3.4, visualize successive
+reconstruction stages, and report reverse-step sensitivity.
+Page 9 of 14
+HiGDiﬀ
+Table 4
+Results on TCIA Pancreas (3D). Each entry reports PSNR in dB followed by SSIM. The four setting groups are deﬁned in
+Section 4.1. Best and second-best values are shown in bold and underlined.
+FBPConvNet
+TIP’17
+Setting
+U-Net
+MICCAI’15
+FreeSeed
+MICCAI’23
+ProCT
+PR’26
+DOLCE
+ICCV’23
+NEED
+MIA’25
+TIFA
+TMI’24
+3DGR-CT
+MIA’25
+HiGDiﬀ
+Ours
+Limited-angle
+90◦
+18.497/0.5746 19.973/0.6630 18.359/0.6067 19.593/0.5824 17.005/0.5251 19.997/0.6610 17.760/0.6055 20.087/0.6584 26.189/0.8500
+120◦
+21.835/0.6736 23.632/0.7469 21.841/0.6528 22.861/0.6590 20.207/0.6107 23.604/0.7374 21.404/0.6828 23.607/0.7364 28.507/0.8888
+◦
+150
+24.931/0.7294 26.306/0.7990 23.744/0.6407 25.605/0.6900 23.393/0.6625 26.199/0.7952 25.239/0.7379 26.284/0.7961 32.477/0.9357
+180◦
+28.339/0.8127 30.565/0.8528 25.763/0.6854 28.051/0.6736 26.612/0.6918 30.293/0.8101 29.862/0.7357 30.308/0.8294 45.999/0.9934
+Sparse-view
+1∕3
+28.436/0.8140 30.547/0.8505 25.739/0.6846 28.042/0.6735 26.621/0.6920 30.285/0.8144 29.856/0.7358 30.355/0.8291 45.386/0.9912
+1∕6
+28.277/0.8026 30.604/0.8500 25.567/0.6859 28.003/0.6737 26.558/0.6917 30.241/0.8167 29.817/0.7350 30.401/0.8319 43.281/0.9831
+1∕9
+27.828/0.7635 30.359/0.8477 25.396/0.6846 27.856/0.6739 26.409/0.6881 30.090/0.8130 29.631/0.7320 30.203/0.8324 41.273/0.9759
+1∕12
+27.251/0.7131 29.993/0.8402 25.307/0.6774 27.698/0.6716 26.263/0.6835 29.749/0.8115 29.349/0.7313 29.780/0.8232 39.735/0.9662
+Sparse-view + limited-angle
+(1∕3, 90◦ )
+18.487/0.5727 19.968/0.6656 18.327/0.6063 19.588/0.5826 17.015/0.5248 20.053/0.6609 17.775/0.6051 20.060/0.6598 26.050/0.8472
+(1∕6, 120◦ ) 21.756/0.6588 23.590/0.7468 21.842/0.6585 22.795/0.6553 20.150/0.6072 23.554/0.7390 21.379/0.6799 23.573/0.7358 28.405/0.8824
+(1∕9, 150◦ ) 24.557/0.6785 26.290/0.7974 23.806/0.6462 25.411/0.6763 23.270/0.6530 26.112/0.7903 25.132/0.7297 26.187/0.7889 31.455/0.9204
+(1∕12, 180◦ ) 27.246/0.7134 30.079/0.8406 25.308/0.6774 27.698/0.6716 26.266/0.6835 29.716/0.8130 29.337/0.7311 29.793/0.8279 39.702/0.9660
+Low-dose and joint degradation
+LD
+28.348/0.8025 30.439/0.8499 25.947/0.6915 28.224/0.6785 26.777/0.6953 30.082/0.8152 29.966/0.7333 30.288/0.8328 43.724/0.9830
+(1∕3, 120◦ )
+(1∕6, 150◦ )
+(1∕9, 180◦ )
+18.727/0.2588 22.729/0.6895 20.016/0.3723 21.857/0.4861 19.123/0.3611 22.657/0.6863 20.264/0.4030 22.700/0.6821 27.801/0.8485
+18.629/0.1949 25.154/0.7124 20.726/0.3202 23.842/0.4721 20.817/0.3352 24.990/0.7143 22.256/0.3954 25.012/0.7098 30.083/0.8771
+18.445/0.2007 27.415/0.7226 20.909/0.3010 25.148/0.4522 21.535/0.3345 26.983/0.6757 23.421/0.4175 27.064/0.6878 34.705/0.9084
+Mean
+23.849/0.6227 26.728/0.7797 23.037/0.5994 25.142/0.6233 23.001/0.5900 26.538/0.7596 25.153/0.6494 26.606/0.7664 35.298/0.9261
+Limited Angle (180°):
+Input
+GroundTruth
+HiGDiff
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+Input
+GroundTruth
+HiGDiff
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+Input
+GroundTruth
+HiGDiff
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+Input
+GroundTruth
+HiGDiff
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+Sparse View (1/6):
+Sparse View + Limited Angle (1/12, 180°):
+Low Dose + Sparse View + Limited Angle (1/3, 120°):
+Figure 4: Qualitative comparison on LDCT-PD under representative limited-angle, sparse-view, paired sparse-view and limitedangle, and joint low-dose settings. Red boxes identify regions enlarged for boundary and artifact comparison. All methods are
+displayed using the same attenuation window within each row. The joint row shows mild low-contrast boundary smoothing.
+4.6.1. Core components
+Table 5 examines the initialization and reﬁnement modules that support the hierarchical design. Removing the
+physics residual from 𝐹phy , the anchor set , or the foreground ﬁeld 𝐹fg reduces performance, with the anchors
+producing the largest PSNR loss among the three initialization cues. Removing 𝐻 evaluates the dual-bank Gaussian
+rendering directly. Its 25.471 dB and 0.5854 SSIM show
+that the Gaussian hierarchy alone recovers a meaningful
+3D attenuation ﬁeld, while a ﬁnite set of smooth primitives
+Yang et al.: Preprint submitted to Elsevier
+leaves voxel-scale error at sharp tissue interfaces and under
+structured streak and noise corruption. 𝐻 operates on the
+dense 3D attenuation grid and combines 𝜇̂ 𝐺 , the residual
+backprojection 𝐵𝐺 , and 𝐹f g to correct these errors with a
+bounded multiscale residual. Relative to Gaussian rendering
+alone, 𝐻 contributes a further 7.184 dB and 0.2807 SSIM,
+quantifying the complementary contribution of dense voxel
+reﬁnement.
+The hierarchy remains necessary when 𝐻 is present. All
+variants in Table 6 retain the same reﬁnement network and
+Page 10 of 14
+HiGDiﬀ
+Sparse View + Limited Angle (1/6, 120°):
+LoDoPaB
+Input
+GroundTruth
+HiGDiff
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+Low Dose + Sparse View + Limited Angle (1/3, 120°):
+Input
+GroundTruth
+HiGDiff
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+Input
+GroundTruth
+HiGDiff
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+FBPConvNet
+U-Net
+FreeSeed
+ProCT
+DOLCE
+NEED
+TIFA
+3DGR-CT
+Low Dose:
+TCIA
+Low Dose + Sparse View + Limited Angle (1/9, 180°):
+Input
+GroundTruth
+HiGDiff
+Figure 5: Qualitative comparison on LoDoPaB-CT in the top two rows and TCIA Pancreas in the bottom two rows. The
+examples cover compound sparse-view and limited-angle degradation and low-dose combinations. Residual directional texture and
+low-contrast smoothing remain visible under the most severe combinations.
+training schedule. Removing bank decomposition reduces
+PSNR from 32.655 to 30.813 dB, removing sequential conditioning reduces it to 30.146 dB, and replacing Gaussian diﬀusion with direct correction prediction reduces it to 24.832 dB.
+Since 𝐻 is unchanged in these comparisons, the remaining
+diﬀerences arise from the Gaussian representation and its
+structure-to-detail inference. The two stages have complementary roles: the Gaussian banks organize the recoverable
+3D attenuation ﬁeld, and 𝐻 completes the residual information on the voxel grid. Allowing the reﬁnement loss to
+cross the stop-gradient boundary also lowers both metrics,
+supporting the staged optimization of these roles.
+Table 5: Core component ablation on LDCT-PD.
+PSNR (dB) ↑
+SSIM ↑
+w/o physics residual
+w/o anchors 
+w/o 𝐹fg
+w/o reﬁnement 𝐻
+w/o sg(⋅)
+24.584
+29.317
+30.372
+25.471
+30.747
+0.7449
+0.7680
+0.8336
+0.5854
+0.8046
+Full HiGDiﬀ
+32.655
+0.8661
+Variant
+4.6.2. Hierarchical structure
+Table 6 isolates the organization of the Gaussian banks
+and their conditioning paths while retaining 𝐻. Removing the structure and detail bank decomposition or their
+sequential dependency lowers both metrics. The complete
+hierarchy outperforms both single-condition variants, showing that 𝑅𝑠 and 𝐵𝑠 provide complementary information.
+Replacing DDIM diﬀusion with direct correction prediction
+Yang et al.: Preprint submitted to Elsevier
+also degrades performance, supporting iterative Gaussian
+denoising for the slot-aligned residuals.
+Table 6: Ablation of the structure-to-detail design on
+LDCT-PD.
+PSNR (dB) ↑
+SSIM ↑
+w/o bank decomposition
+w/o sequential conditioning
+w/o structure tokens 𝑅𝑠
+w/o residual evidence 𝐵𝑠
+w/o DDIM diﬀusion
+30.813
+30.146
+30.859
+30.792
+24.832
+0.8443
+0.8440
+0.8450
+0.8436
+0.7395
+Full hierarchy
+32.655
+0.8661
+Variant
+4.6.3. Loss functions
+Table 7 shows that the structure and detail separation
+objective has the clearest eﬀect on SSIM, and the residual
+penalty is more inﬂuential for PSNR. Removing the auxiliary or projection objective produces smaller diﬀerences
+among the reduced variants. These terms mainly stabilize
+anchor and foreground learning and observed-ray ﬁdelity.
+Table 7: Ablation of the grouped objectives on LDCT-PD.
+Objective
+PSNR (dB) ↑
+SSIM ↑
+w/o aux
+w/o sep
+w/o proj
+w/o res
+30.846
+30.799
+30.816
+30.689
+0.8436
+0.8280
+0.8445
+0.8431
+Full objective
+32.655
+0.8661
+4.6.4. Output stages and reverse steps
+Figure 6 visualizes the successive outputs of the reconstruction path. Structure diﬀusion establishes the coarse
+Page 11 of 14
+HiGDiﬀ
+CT Image:
+Error Map:
+Input
+Low dose
+Input
+Structure
+Diffusion
+Detail
+Diffusion
+Gaussian
+Fusion
+Final
+Output
+Ground
+Truth
+Figure 6: Qualitative evolution of the HiGDiﬀ reconstruction
+on LDCT-PD. The upper row shows the output of each stage,
+and the lower row shows its absolute error map relative to the
+ground truth.
+attenuation organization, after which detail diﬀusion and
+Gaussian fusion sharpen local boundaries and reduce structured error. The ﬁnal bounded reﬁnement removes residual
+voxel-domain discrepancies and retains the Gaussian reconstruction as its base. Table 8 further shows a monotonic gain
+as the deterministic schedules increase from one to three
+reverse steps.
+Table 8: Reverse-step sensitivity on LDCT-PD, reported
+as averages over the complete 16-setting protocol.
+(𝑇𝑠 , 𝑇𝑑 )
+(1, 1)
+(2, 2)
+(3, 3) (full)
+PSNR (dB) ↑
+SSIM ↑
+30.147
+31.260
+32.655
+0.8491
+0.8639
+0.8661
+5. Discussion
+5.1. Clinical Relevance of Joint Degradation
+Reducing view count, angular coverage, and photon ﬂux
+simultaneously represents a clinically relevant stress regime
+when acquisition time, scanning trajectories, and radiation
+exposure are jointly constrained. The resulting errors are
+coupled. Limited angles remove direction-dependent information and produce slope artifacts, sparse sampling distributes streaks, and low photon counts corrupt the remaining evidence. The joint quantitative results and the visual
+comparisons in Figures 4 and 5 indicate that the structureto-detail representation can preserve both long-range attenuation organization and local tissue transitions under this
+combined loss of information. Improved PSNR, SSIM, and
+visual ﬁdelity indicate potential value for dose- and timeconstrained CT.
+5.2. Low-Data Cross-Dataset Generalization
+The LDCT-PD-to-TCIA experiment evaluates transfer
+from thoracic LDCT-PD to abdominal TCIA Pancreas. The
+results show that the Gaussian hierarchy transfers eﬀectively across anatomy and acquisition statistics, while targetdomain adaptation calibrates dataset-speciﬁc intensity and
+noise.
+Yang et al.: Preprint submitted to Elsevier
+Low dose
+Output
+Joint degradation
+Input
+Joint degradation
+Output
+GroundTruth
+Figure 7: Representative failure case. The columns show the
+low-dose input and output, joint-degradation input and output,
+and ground truth. Severe joint degradation leaves residual
+smoothing and incomplete low-contrast structure.
+The TCIA ranking also provides insight into low-data
+generalization. U-Net (Ronneberger et al., 2015) is the
+strongest comparator in macro-average PSNR and SSIM and
+ranks second in most individual settings. Its relatively small
+parameter count facilitates adaptation with limited targetdomain data, whereas the larger parameter spaces of the
+other reconstruction models require more data for reliable
+adaptation. The functionally distinct Gaussian banks provide
+a complementary adaptation mechanism. The structure bank
+preserves transferable global attenuation organization, while
+the detail bank reallocates representation capacity to targetdomain tissue transitions. This structured representation
+supports generalization to a new anatomy with limited targetdomain data.
+5.3. Limitations and Future Work
+The most severe joint settings expose the current operating boundary. On LDCT-PD, performance decreases to
+27.172 dB and 0.7781 SSIM at the joint (1∕3, 120◦ ) lowdose setting, compared with the macro-average of 32.655 dB
+and 0.8661 SSIM. The corresponding diﬃcult examples in
+Figures 4 and 5 retain mild boundary smoothing and residual
+directional texture in low-contrast regions. Figure 7 further
+illustrates this limitation on a representative thoracic slice.
+The low-dose reconstruction recovers most gross anatomy.
+Joint degradation introduces severe directional streaks and
+photon noise, and the reconstruction suppresses much of this
+corruption. Portions of the low-contrast thoracic structure
+remain incompletely recovered. Information lost to the angular null space and photon noise remains fundamentally
+ambiguous, even under a strong learned prior.
+The evaluated degradations rely substantially on simulated or protocol-derived projection corruption. Consistency
+on observed rays leaves the limited-angle null space unresolved, so subtle low-contrast ﬁndings may remain uncertain. Raw photon-count data, prospective acquisitions,
+multi-centre validation, attenuation-bias analysis, task-based
+assessment, and blinded reader evaluation are therefore required before clinical conclusions.
+The ﬁxed Gaussian budget and structure and detail bandwidth may also underrepresent very small or low-contrast
+structures. Adaptive primitive allocation, learned multiscale
+decomposition, and uncertainty-aware capacity control are
+natural extensions. Fixed DDIM sampling (Song et al., 2021)
+Page 12 of 14
+HiGDiﬀ
+introduces iterative computation. Future work will investigate self-supervised ﬁne-tuning, domain-generalized training, faster samplers, and explicit analysis of reconstruction
+quality and runtime.
+6. Conclusion
+This work presented HiGDiﬀ for 3D CT reconstruction under severely constrained acquisition across isolated,
+paired, and joint degradation settings. HiGDiﬀ decomposes
+the resulting ambiguity spatially through foreground-aware
+Gaussian allocation and hierarchically through structureconditioned detail diﬀusion. The two functionally distinct
+Gaussian banks recover global attenuation organization and
+residual tissue transitions. Gradient-isolated reﬁnement corrects the rendered ﬁeld and preserves the learned primitive
+parameters. Experiments across LDCT-PD, LoDoPaB-CT,
+and TCIA Pancreas demonstrate consistent gains under joint
+degradation, and the TCIA study shows cross-dataset generalization. Together, these ﬁndings support hierarchical Gaussian diﬀusion as an explicit and adaptable representation for
+severely constrained CT reconstruction.
+CRediT authorship contribution statement
+Conceptualization, Methodology, Software, Validation, Formal analysis, Investigation, Data curation, Visualization, Writing – original draft, Writing – review and
+editing: Yuezhe Yang. Supervision, Project administration, Writing – review and editing: Li Cheng.
+Acknowledgements
+Yuezhe Yang acknowledges support from the China
+Scholarship Council (CSC). We acknowledge the creators
+of the LDCT-and-Projection-data collection and the support
+of NIBIB grants EB017095 and EB017185 (Cynthia McCollough, PI) for its creation.
+References
+Adams, J.E., 2009. Quantitative computed tomography. European journal
+of radiology 71, 415–424.
+Barrett, J.F., Keat, N., 2004. Artifacts in ct: recognition and avoidance.
+Radiographics 24, 1679–1691.
+Chen, H., Hao, Z., Guo, L., Xiao, L., 2025a. Mitigating data consistency
+induced discrepancy in cascaded diﬀusion models for sparse-view ct
+reconstruction. IEEE Transactions on Medical Imaging 44. doi:10.1109/
+TMI.2025.3557243.
+Chen, H., Zhang, Y., Chen, Y., Zhang, J., Zhang, W., Sun, H., Lv, Y., Liao,
+P., Zhou, J., Wang, G., 2018. LEARN: Learned experts’ assessmentbased reconstruction network for sparse-data CT. IEEE Transactions on
+Medical Imaging 37, 1333–1347. doi:10.1109/TMI.2018.2805692.
+Chen, H., Zhang, Y., Kalra, M.K., Lin, F., Chen, Y., Liao, P., Zhou, J., Wang,
+G., 2017. Low-dose CT with a residual encoder–decoder convolutional
+neural network. IEEE Transactions on Medical Imaging 36, 2524–2535.
+doi:10.1109/TMI.2017.2715284.
+Chen, J., Lin, Y., Qin, Y., Wang, H., Li, X., 2025b. Cross-view generalized diﬀusion model for sparse-view ct reconstruction, in: Medical
+Image Computing and Computer Assisted Intervention – MICCAI 2025,
+Springer Nature Switzerland. doi:10.1007/978-3-032-05325-1_14.
+Yang et al.: Preprint submitted to Elsevier
+Chung, H., Ryu, D., McCann, M.T., Klasky, M.L., Ye, J.C., 2023. Solving
+3d inverse problems using pre-trained 2d diﬀusion models, in: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pp. 22542–22551.
+Clark, K., Vendt, B., Smith, K., Freymann, J., Kirby, J., Koppel, P., Moore,
+S., Phillips, S., Maﬃtt, D., Pringle, M., Tarbox, L., Prior, F., 2013. The
+cancer imaging archive (TCIA): Maintaining and operating a public
+information repository. Journal of Digital Imaging 26, 1045–1057.
+doi:10.1007/s10278-013-9622-7.
+Deák, Z., Grimm, J.M., Treitl, M., Geyer, L.L., Linsenmaier, U., Körner, M.,
+Reiser, M.F., Wirth, S., 2013. Filtered back projection, adaptive statistical iterative reconstruction, and a model-based iterative reconstruction in
+abdominal ct: an experimental clinical study. Radiology 266, 197–206.
+Du, C., Lin, X., Wu, Q., Tian, X., Su, Y., Luo, Z., Zheng, R., Chen, Y., Wei,
+H., Zhou, S.K., Yu, J., Zhang, Y., 2024. DPER: Diﬀusion prior driven
+neural representation for limited angle and sparse view ct reconstruction.
+arXiv preprint arXiv:2404.17890 doi:10.48550/arXiv.2404.17890.
+Gao, Q., Chen, Z., Zeng, D., Zhang, J., Ma, J., Shan, H., 2025. Noiseinspired diﬀusion model for generalizable low-dose ct reconstruction.
+Medical Image Analysis 105, 103710. doi:10.1016/j.media.2025.103710.
+Ho, J., Jain, A., Abbeel, P., 2020. Denoising diﬀusion probabilistic models,
+in: Advances in Neural Information Processing Systems, pp. 6840–6851.
+Jin, K.H., McCann, M.T., Froustey, E., Unser, M., 2017. Deep convolutional
+neural network for inverse problems in imaging. IEEE transactions on
+image processing 26, 4509–4522.
+Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G., 2023. 3d gaussian
+splatting for real-time radiance ﬁeld rendering. ACM Trans. Graph. 42,
+139–1.
+Koetzier, L.R., Mastrodicasa, D., Szczykutowicz, T.P., van der Werf,
+N.R., Wang, A.S., Sandfort, V., van der Molen, A.J., Fleischmann, D.,
+Willemink, M.J., 2023. Deep learning image reconstruction for ct:
+technical principles and clinical prospects. Radiology 306, e221257.
+Leuschner, J., Schmidt, M., Otero Baguer, D., 2019. LoDoPaB-CT dataset
+(version 1.0.0). Zenodo. doi:10.5281/zenodo.3384092.
+Leuschner, J., Schmidt, M., Otero Baguer, D., Maass, P., 2021. LoDoPaBCT, a benchmark dataset for low-dose computed tomography reconstruction. Scientiﬁc Data 8, 109. doi:10.1038/s41597-021-00893-z.
+Li, L., Zhang, Z., Li, Y., Wang, Y., Zhao, W., 2025a. DDoCT: Morphology
+preserved dual-domain joint optimization for fast sparse-view low-dose
+ct imaging. Medical Image Analysis 101, 103420. doi:10.1016/j.media.
+2024.103420.
+Li, Y., Fu, X., Li, H., Zhao, S., Jin, R., Zhou, S.K., 2025b. 3dgr-ct: Sparseview ct reconstruction with a 3d gaussian representation. Medical Image
+Analysis 103, 103585. doi:10.1016/j.media.2025.103585.
+Liang, J.Z., La Riviere, P.J., El Fakhri, G., Glick, S.J., Siewerdsen, J., 2017.
+Guest editorial low-dose ct: what has been done, and what challenges
+remain? IEEE Transactions on Medical Imaging 36, 2409–2416.
+Lin, Y., Wang, H., Chen, J., Li, X., 2024. Learning 3d gaussians for
+extremely sparse-view cone-beam ct reconstruction, in: Medical Image
+Computing and Computer Assisted Intervention – MICCAI 2024, pp.
+425–435. doi:10.1007/978-3-031-72104-5_41.
+Liu, J., Anirudh, R., Thiagarajan, J.J., He, S., Mohan, K.A., Kamilov, U.S.,
+Kim, H., 2023. Dolce: A model-based probabilistic diﬀusion framework
+for limited-angle ct reconstruction, in: Proceedings of the IEEE/CVF
+international conference on computer vision, pp. 10498–10508.
+Loshchilov, I., Hutter, F., 2019.
+Decoupled weight decay regularization, in: International Conference on Learning Representations.
+arXiv:1711.05101.
+Ma, C., Li, Z., He, J., Zhang, J., Zhang, Y., Shan, H., 2026. Universal pretraining for generalizable incomplete-view CT reconstruction. Pattern
+Recognition 178, 113513. doi:10.1016/j.patcog.2026.113513.
+Ma, C., Li, Z., Zhang, J., Zhang, Y., Shan, H., 2023. Freeseed: Frequencyband-aware and self-guided network for sparse-view ct reconstruction,
+in: International conference on medical image computing and computerassisted intervention, Springer. pp. 250–259.
+Mayo, J.R., 1991. The high-resolution computed tomography technique, in:
+Seminars in roentgenology, Elsevier. pp. 104–109.
+Page 13 of 14
+HiGDiﬀ
+McCollough, C., Chen, B., Holmes, D.R., Duan, X., Yu, Z., Yu, L., Leng,
+S., Fletcher, J.G., 2020. Low dose CT image and projection data
+(LDCT-and-Projection-data) (version 7). The Cancer Imaging Archive.
+doi:10.7937/9NPB-2637.
+Nikolakakis, E., Gupta, U., Vengosh, J., Bui, J., Marinescu, R., 2024.
+GaSpCT: Gaussian splatting for novel ct projection view synthesis.
+arXiv preprint arXiv:2404.03126 doi:10.48550/arXiv.2404.03126.
+Ronneberger, O., Fischer, P., Brox, T., 2015. U-net: Convolutional networks
+for biomedical image segmentation, in: International Conference on
+Medical image computing and computer-assisted intervention, Springer.
+pp. 234–241.
+Roth, H., Farag, A., Turkbey, E.B., Lu, L., Liu, J., Summers, R.M., 2016.
+Data from Pancreas-CT (version 2). The Cancer Imaging Archive.
+doi:10.7937/K9/TCIA.2016.tNB1kqBU.
+Roth, H.R., Lu, L., Farag, A., Shin, H.C., Liu, J., Turkbey, E.B., Summers,
+R.M., 2015. DeepOrgan: Multi-level deep convolutional networks for
+automated pancreas segmentation, in: Medical Image Computing and
+Computer-Assisted Intervention – MICCAI 2015, Springer. pp. 556–564.
+doi:10.1007/978-3-319-24553-9_68.
+Shi, C., Yu, Y., Yang, S., 2026. Vision transformers need more than
+registers, in: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pp. 26328–26337.
+Shu, Z., Entezari, A., 2022. Sparse-view and limited-angle ct reconstruction
+with untrained networks and deep image prior. Computer Methods and
+Programs in Biomedicine 226, 107167. doi:10.1016/j.cmpb.2022.107167.
+Singh, S., Keserwani, P., Iwamura, M., Roy, P.P., 2024. DCDM: Diﬀusionconditioned-diﬀusion model for scene text image super-resolution, in:
+European Conference on Computer Vision, pp. 1474–1484.
+Song, J., Meng, C., Ermon, S., 2021. Denoising diﬀusion implicit
+models, in: International Conference on Learning Representations.
+arXiv:2010.02502.
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A.N.,
+Kaiser, L., Polosukhin, I., 2017. Attention is all you need, in: Advances
+in Neural Information Processing Systems.
+Wang, Y., Li, Z., Wu, W., 2024. Time-reversion fast-sampling scorebased model for limited-angle CT reconstruction. IEEE Transactions
+on Medical Imaging 43, 3449–3460. doi:10.1109/TMI.2024.3418838.
+Wang, Z., Bovik, A.C., Sheikh, H.R., Simoncelli, E.P., 2004. Image
+quality assessment: From error visibility to structural similarity. IEEE
+Transactions on Image Processing 13, 600–612. doi:10.1109/TIP.2003.
+819861.
+Wu, S., Lu, Y., Guo, Y., Ji, W., Huang, S., Yang, F., Sirejiding, S., He,
+Q., Tong, J., Ji, Y., Ding, Y., Lu, H., 2025. Discretized gaussian
+representation for tomographic reconstruction, in: Proceedings of the
+IEEE/CVF International Conference on Computer Vision, pp. 25073–
+25082.
+Yang, L., Huang, J., Yang, G., Zhang, D., 2025. CT-SDM: A sampling
+diﬀusion model for sparse-view ct reconstruction across various sampling rates. IEEE Transactions on Medical Imaging 44, 2581–2593.
+doi:10.1109/TMI.2025.3541491.
+Yang, Y., Bi, L., Yang, B., Wang, Y., He, Y., Peng, Y., Jin, Z., Dong, X., Kim,
+J., 2026a. Representation paradigms in ai-based 3d radiological image
+reconstruction: A systematic review. arXiv preprint arXiv:2504.11349
+doi:10.48550/arXiv.2504.11349.
+Yang, Y., Ruan, Q., Cai, W., Dong, Y., Yang, D., Dong, X., Jin, Z., Dai,
+Y., 2026b. UltraGS: Real-time physically-decoupled gaussian splatting
+for ultrasound novel view synthesis, in: IEEE International Conference
+on Multimedia and Expo. doi:10.48550/arXiv.2511.07743. accepted;
+arXiv:2511.07743.
+You, Y., Liu, W., Ze, Y., Li, Y.L., Wang, W., Lu, C., 2022. UKPGAN:
+A general self-supervised keypoint detector, in: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp.
+17042–17051.
+Zhou, J., Zhang, W., Liu, Y.S., 2024. DiﬀGS: Functional gaussian splatting diﬀusion, in: Advances in Neural Information Processing Systems.
+doi:10.52202/079017-1185.
+Zhou, Y., Barnes, C., Lu, J., Yang, J., Li, H., 2019. On the continuity
+of rotation representations in neural networks, in: Proceedings of the
+Yang et al.: Preprint submitted to Elsevier
+IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp.
+5745–5753. doi:10.1109/CVPR.2019.00589.
+Page 14 of 14

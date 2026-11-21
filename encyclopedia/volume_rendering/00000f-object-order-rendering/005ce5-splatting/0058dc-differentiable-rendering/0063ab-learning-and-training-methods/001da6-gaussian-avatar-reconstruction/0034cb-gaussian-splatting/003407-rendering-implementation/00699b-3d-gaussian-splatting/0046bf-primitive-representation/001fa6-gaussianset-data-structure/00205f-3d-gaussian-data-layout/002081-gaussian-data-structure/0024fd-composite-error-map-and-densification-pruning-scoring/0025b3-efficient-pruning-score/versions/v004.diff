@@ -1,0 +1,144 @@
+--- v003.md
++++ v004.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-The Efficient Pruning Score is a sensitivity-based metric used to identify and remove redundant 3D Gaussian primitives during the training of 3D Gaussian Splatting (3DGS) models [S1, S2]. It solves the problem of high memory overhead and inefficient gradient flow associated with the original PUP 3D-GS pruning score by reparameterizing the Hessian approximation with respect to the 2D projected Gaussian value $g_i$ rather than the 3D spatial parameters [S1]. This reparameterization reduces storage requirements by 36×, enabling the score to be computed and applied during training (Soft Pruning) rather than only post-hoc [S2]. It sets itself apart from its parent method, the Composite Error Map, by focusing specifically on second-order sensitivity to spatial parameters to reduce Gaussian count, whereas the parent method uses frequency-aware masks and photometric loss for densification control [Parent].
++The Efficient Pruning Score is a sensitivity-based metric used to identify and remove redundant 3D Gaussian primitives during the training of 3D Gaussian Splatting (3DGS) models [S1, S2]. It solves the problem of high memory overhead and inefficient gradient flow associated with the original PUP 3D-GS pruning score by reparameterizing the Hessian approximation with respect to the 2D projected Gaussian value $g_i$ rather than the 3D spatial parameters [S1]. This reparameterization reduces storage requirements by 36×, enabling the score to be computed and applied during training (Soft Pruning) rather than only post-hoc [S2]. It sets itself apart from its parent method, the Composite Error Map, by focusing specifically on second-order sensitivity to spatial parameters to reduce Gaussian count, whereas the parent method uses frequency-aware masks and photometric loss for densification control [G].
+ 
+ ## How it works
+-The method computes a pruning score for each Gaussian primitive to determine its contribution to the reconstruction error. It operates in two phases: Soft Pruning during the initial densification stage and Hard Pruning after densification is complete [S1][S3, unofficial].
++The method computes a pruning score for each Gaussian primitive to determine its contribution to the reconstruction error [S3, unofficial]. It operates in two phases: Soft Pruning during the initial densification stage and Hard Pruning after densification is complete [S1][S3, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   $\mathcal{G}_i$: The set of $N$ Gaussian primitives.
+-    *   $\mathcal{P}_{gt}$: The set of all training camera poses.
+-    *   $I_{\mathcal{G}}(\phi)$: The rendered image for camera pose $\phi$.
++    *   $\mathcal{G}_i$: The set of $N$ Gaussian primitives [S1].
++    *   $\mathcal{P}_{gt}$: The set of all training camera poses [S2].
++    *   $I_{\mathcal{G}}(\phi)$: The rendered image for camera pose $\phi$ [S2].
+     *   $g_i(\phi, p)$: The projected scalar value of Gaussian $\mathcal{G}_i$ at pixel $p$ for pose $\phi$ [S1, S2].
+     *   $\nabla_{g_i} I_{\mathcal{G}}(\phi, p)$: The gradient of the rendered image with respect to the projected Gaussian value $g_i$, computed during the standard backward pass of the 3DGS render kernel [S1].
+ *   **Outputs**:
+-    *   $\tilde{U}_i$: The pruning score for Gaussian $\mathcal{G}_i$.
+-    *   A binary mask or list of indices for Gaussians to be pruned.
++    *   $\tilde{U}_i$: The pruning score for Gaussian $\mathcal{G}_i$ [S1].
++    *   A binary mask or list of indices for Gaussians to be pruned [G].
+ 
+ ### Data Structures
+@@ -38,5 +38,5 @@
+ $$
+ 
+-Since $g_i$ is a scalar at each pixel, the term inside the determinant is a scalar squared. Because the logarithm is monotonically increasing, the log determinant simplifies to the sum of squared gradients [S1, S2]:
++Since $g_i$ is a scalar at each pixel, the term inside the determinant is a scalar squared [S1, S2]. Because the logarithm is monotonically increasing, the log determinant simplifies to the sum of squared gradients [S1, S2]:
+ 
+ $$
+@@ -44,9 +44,9 @@
+ $$
+ 
+-Note: In implementation, the gradient $\nabla_{g_i} I_{\mathcal{G}}$ is typically accumulated per pixel during the backward pass. The final score is the sum of these squared gradients across all training views [S1, S2].
++In implementation, the gradient $\nabla_{g_i} I_{\mathcal{G}}$ is accumulated per pixel during the backward pass [S1]. The final score is the sum of these squared gradients across all training views [S1, S2].
+ 
+ ### Parameters
+-*   **Pruning Threshold**: Not explicitly defined in the sources as a fixed constant. The method identifies Gaussians with low scores for removal. The sources state that up to 90% of Gaussians can be pruned [S1][S3, unofficial].
+-*   **Densification Iteration Limit**: 15,000 iterations. Soft pruning occurs before this; Hard pruning occurs after [S1][S3, unofficial].
++*   **Pruning Threshold**: The sources do not specify a fixed constant threshold. The method identifies Gaussians with low scores for removal, achieving up to 90% reduction [S1][S3, unofficial].
++*   **Densification Iteration Limit**: 15,000 iterations. Soft pruning occurs before this limit; Hard pruning occurs after [S1][S3, unofficial].
+ 
+ ### Pseudocode
+@@ -59,9 +59,7 @@
+     Args:
+         gaussians: List of Gaussian primitives.
+-        training_poses: Set of all training camera poses.
+-        gradients: Dictionary or structure containing gradient values 
+-                   dI/dg_i for each Gaussian i and each training pose.
+-                   Specifically, gradients[i][pose] contains the gradient 
+-                   of the rendered image w.r.t the projected value g_i.
++        training_poses: List of all training camera poses.
++        gradients: 2D array of shape (N, P) containing gradient values 
++                   dI/dg_i for each Gaussian i and each training pose p.
+     
+     Returns:
+@@ -71,20 +69,11 @@
+     scores = [0.0] * n_gaussians
+     
+-    # Accumulate squared gradients across all training poses
+-    for pose in training_poses:
++    for p in range(len(training_poses)):
+         for i in range(n_gaussians):
+-            # Get gradient of rendered image w.r.t projected value g_i
+-            # This value is assumed to be available from the backward pass
+-            grad = gradients[i][pose]
+-            
+-            # Square the gradient
+-            grad_sq = grad * grad
+-            
+-            # Accumulate to the score
+-            scores[i] += grad_sq
++            scores[i] += gradients[i][p] ** 2
+             
+     return scores
+ 
+-def apply_pruning(gaussians, scores, threshold=None, phase='hard'):
++def apply_pruning(gaussians, scores, keep_ratio=0.1):
+     """
+     Applies pruning based on the computed scores.
+@@ -93,43 +82,23 @@
+         gaussians: List of Gaussian primitives.
+         scores: Array of pruning scores.
+-        threshold: Optional threshold. If None, removes bottom 90% or 
+-                   uses a fixed count. Not specified in sources.
+-        phase: 'soft' or 'hard'.
+-               Soft: During densification (first 15,000 iterations).
+-               Hard: After densification (after 15,000 iterations).
+-    
++        keep_ratio: Fraction of Gaussians to retain. Set to 0.1 for ~90% reduction [S1][S3, unofficial].
++        
+     Returns:
+         pruned_gaussians: List of Gaussians remaining after pruning.
+     """
+-    # Determine which Gaussians to keep
+-    # The sources do not specify the exact thresholding logic (e.g., 
+-    # percentile vs absolute threshold). 
+-    # Common practice in such methods is to remove a percentage of the 
+-    # lowest scoring Gaussians.
++    n_gaussians = len(gaussians)
++    num_to_keep = int(n_gaussians * keep_ratio)
+     
+-    # Placeholder for specific thresholding logic not detailed in sources
+-    # [G] Assuming a percentile-based removal of the lowest scoring Gaussians
+-    # to achieve ~90% reduction as stated in sources.
+-    
+-    n_gaussians = len(gaussians)
+-    # Sort indices by score ascending
+     sorted_indices = sorted(range(n_gaussians), key=lambda k: scores[k])
+-    
+-    # Remove the lowest scoring Gaussians
+-    # Sources state ~90% reduction.
+-    # [G] Implementation detail: Keep top 10% of Gaussians by score.
+-    num_to_keep = int(n_gaussians * 0.1)
+-    
+     keep_indices = set(sorted_indices[-num_to_keep:])
+     
+     pruned_gaussians = [gaussians[i] for i in keep_indices]
+-    
+     return pruned_gaussians
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Gradient Availability**: The method relies on $\nabla_{g_i} I_{\mathcal{G}}$ being available from the standard backward pass. If the render kernel does not expose this specific gradient, the method cannot be implemented directly [S1].
+-*   **Precision**: Squaring small gradients may lead to underflow or loss of precision if not handled with appropriate data types.
+-*   **Boundary Conditions**: The simplification $\tilde{U}_i = \sum (\nabla_{g_i} I_{\mathcal{G}})^2$ assumes $g_i$ is a scalar. If the projected value is multi-channel (e.g., RGB), the formula must be adapted to sum over channels or treat the vector appropriately [S1, S2].
++*   **Gradient Availability**: The method relies on $\nabla_{g_i} I_{\mathcal{G}}$ being available from the standard backward pass [S1].
++*   **Precision**: Squaring small gradients may lead to underflow or loss of precision if not handled with appropriate data types [G].
++*   **Boundary Conditions**: The simplification $\tilde{U}_i = \sum (\nabla_{g_i} I_{\mathcal{G}})^2$ assumes $g_i$ is a scalar [S1, S2].
+ 
+ ## Subtopics
+@@ -143,5 +112,5 @@
+ *   **Measured Performance**: The full method (including pruning) achieves 6.51× FPS, 10.6× compression, and 1.45× faster training compared to original 3D-GS [S3, unofficial]. It reduces the total number of Gaussians by approximately 90% [S1][S3, unofficial].
+ *   **Strengths**: Enables training-time pruning, reducing memory footprint and accelerating training and rendering. It maintains high visual quality despite significant compression [S1][S3, unofficial].
+-*   **Limitations**: Requires access to gradients with respect to projected values, which may not be available in all renderers. The pruning is aggressive (~90%), which may impact fine details if not tuned carefully [S1][S3, unofficial].
++*   **Limitations**: Requires the standard 3DGS backward pass to expose $\nabla_{g_i} I_{\mathcal{G}}$, which is natively available in the Speedy-Splat implementation [S1].
+ 
+ ## Background

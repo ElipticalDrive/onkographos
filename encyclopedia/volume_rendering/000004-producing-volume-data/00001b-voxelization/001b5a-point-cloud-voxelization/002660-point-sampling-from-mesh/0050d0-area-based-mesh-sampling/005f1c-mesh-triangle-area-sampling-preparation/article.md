@@ -1,0 +1,186 @@
+# Mesh Triangle Area Sampling Preparation
+
+
+## Overview
+This method prepares the geometric and material state required for area-based mesh sampling by extracting, validating, and caching mesh data from a collection of objects. It solves the problem of efficiently converting raw scene graph data into a flat, contiguous structure of triangles with associated material and texture references, ensuring that subsequent sampling steps have deterministic access to surface area and material properties. It differs from [Area-Based Mesh Sampling](14310-area-based-mesh-sampling.md) by focusing solely on data extraction and validation rather than the stochastic generation of points, and from [Point Sampling State Preparation](17814-point-sampling-state-preparation.md) by implementing the specific logic for triangle iteration and area calculation within the Blender context.
+
+## How it works
+**Inputs:** A collection of objects (`collection.all_objects`), a dependency graph (`depsgraph`) for evaluation, and diagnostic tracking structures.
+**Outputs:** A `PointSamplingState` object containing:
+- `triangles`: A flat list of triangle data (vertices, UVs, material index).
+- `cumulative_areas`: A prefix sum array of triangle areas for weighted sampling.
+- `total_area`: The sum of all valid triangle areas.
+- `sample_count`: The target number of points to generate (derived from total area and density).
+- `materials`: A list of interned `PlainMaterialData` objects.
+- `images`: A list of interned `PlainImageData` objects.
+- `random_seed`: A seed for the sampling process.
+
+**Data Structures:**
+- `PlainMaterialData`: Contains `base_color` (tuple of 3 floats) and `image_index` (int or None).
+- `PlainImageData`: Contains image data handle and metadata.
+- `MaterialInfo`: Temporary structure holding `material_name`, `base_color`, `image`, and `fallback_code`.
+
+**Steps:**
+1. Iterate over each object in `collection.all_objects`.
+2. Skip objects where `obj.type != "MESH"` [S1, unofficial].
+3. Evaluate the object geometry: `evaluated_obj = obj.evaluated_get(depsgraph)` [S1, unofficial].
+4. Convert to a mesh data block: `mesh = evaluated_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)` [S1, unofficial].
+5. Skip if `mesh` is `None` [S1, unofficial].
+6. Compute loop triangles: `mesh.calc_loop_triangles()` [S1, unofficial].
+7. Skip if `not mesh.loop_triangles` (empty mesh) [S1, unofficial].
+8. Extract the active UV layer: `uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None` [S1, unofficial].
+9. Resolve material information for each mesh material and intern them into flat lists using `_intern_plain_material` [S1, unofficial].
+10. Iterate over `mesh.loop_triangles`.
+11. Compute `area = float(triangle.area)` [S1, unofficial].
+12. Skip if `area <= 0.0` to prevent degenerate sampling or division-by-zero errors [S1, unofficial].
+13. Map the material index: `material_info = material_infos[material_index]` if valid, else use a fallback [S1, unofficial].
+14. Intern the material using `_intern_plain_material` to get a consistent index [S1, unofficial].
+15. Track fallback triangles: increment `fallback_triangle_count` and `fallback_material_triangle_counts[material_info.material_name]` if `material_info.fallback_code is not None` [S1, unofficial].
+16. Append triangle data (vertices, UVs, interned material index) to the `triangles` list.
+17. Append `area` to a temporary list of areas.
+18. After iterating all triangles, compute `cumulative_areas` as the prefix sum of the areas list.
+19. Set `total_area` to the last value in `cumulative_areas` (or 0 if empty).
+20. Calculate `sample_count` based on `total_area` and a surface density parameter (not defined in this method, assumed external) [S1, unofficial].
+21. Construct and return the `PointSamplingState` object.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def prepare_mesh_sampling_state(collection, depsgraph, density_per_unit_area, random_seed):
+    triangles = []
+    areas = []
+    materials = []
+    images = []
+    material_lookup = {}
+    image_lookup = {}
+    diagnostics = DiagnosticsSession()
+    fallback_triangle_count = 0
+    fallback_material_triangle_counts = {}
+
+    for obj in collection.all_objects:
+        if obj.type != "MESH":
+            continue
+
+        evaluated_obj = obj.evaluated_get(depsgraph)
+        mesh = evaluated_obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+        
+        if mesh is None:
+            continue
+
+        mesh.calc_loop_triangles()
+        
+        if not mesh.loop_triangles:
+            continue
+
+        uv_layer = mesh.uv_layers.active.data if mesh.uv_layers.active else None
+
+        # Resolve and intern materials for this mesh
+        # Note: _intern_plain_material handles deduplication
+        for material_index, material in enumerate(mesh.materials):
+            # Assume material_info is extracted from mesh data
+            material_info = extract_material_info(material, mesh, uv_layer)
+            _intern_plain_material(
+                material_info=material_info,
+                materials=materials,
+                material_lookup=material_lookup,
+                images=images,
+                image_lookup=image_lookup,
+                diagnostics=diagnostics
+            )
+
+        for triangle in mesh.loop_triangles:
+            area = float(triangle.area)
+            
+            # Pitfall: Skip degenerate triangles
+            if area <= 0.0:
+                continue
+
+            # Map material index
+            mat_idx = triangle.material_index
+            material_info = mesh.materials[mat_idx] if mat_idx < len(mesh.materials) else None
+            
+            # Intern material to get consistent index
+            interned_mat_index = _intern_plain_material(
+                material_info=material_info,
+                materials=materials,
+                material_lookup=material_lookup,
+                images=images,
+                image_lookup=image_lookup,
+                diagnostics=diagnostics
+            )
+
+            # Track fallbacks if applicable
+            if material_info and getattr(material_info, 'fallback_code', None) is not None:
+                fallback_triangle_count += 1
+                mat_name = material_info.material_name if hasattr(material_info, 'material_name') else "Unknown"
+                fallback_material_triangle_counts[mat_name] = fallback_material_triangle_counts.get(mat_name, 0) + 1
+
+            # Extract vertex positions and UVs
+            verts = triangle.verts
+            v0 = mesh.vertices[verts[0]].co
+            v1 = mesh.vertices[verts[1]].co
+            v2 = mesh.vertices[verts[2]].co
+            
+            uv0 = uv_layer[triangle.loop_indices[0]].uv if uv_layer else (0.0, 0.0)
+            uv1 = uv_layer[triangle.loop_indices[1]].uv if uv_layer else (0.0, 0.0)
+            uv2 = uv_layer[triangle.loop_indices[2]].uv if uv_layer else (0.0, 0.0)
+
+            triangles.append({
+                'v0': v0, 'v1': v1, 'v2': v2,
+                'uv0': uv0, 'uv1': uv1, 'uv2': uv2,
+                'material_index': interned_mat_index
+            })
+            areas.append(area)
+
+    # Compute cumulative areas
+    cumulative_areas = []
+    current_sum = 0.0
+    for a in areas:
+        current_sum += a
+        cumulative_areas.append(current_sum)
+
+    total_area = cumulative_areas[-1] if cumulative_areas else 0.0
+    
+    # Sample count calculation (assumed formula based on density)
+    sample_count = int(total_area * density_per_unit_area)
+
+    return PointSamplingState(
+        triangles=triangles,
+        cumulative_areas=cumulative_areas,
+        total_area=total_area,
+        sample_count=sample_count,
+        random_seed=random_seed,
+        materials=materials,
+        images=images
+    )
+```
+
+**Parameters:**
+- `density_per_unit_area`: Points per square unit. Typical values depend on desired resolution; not specified in sources [S1, unofficial].
+- `random_seed`: Integer seed for reproducibility.
+
+**Edge Cases and Pitfalls:**
+- Triangles with `area <= 0.0` are skipped to prevent degenerate sampling or division-by-zero errors during point generation [S1, unofficial].
+- Missing UV layers default to `(0.0, 0.0)` [S1, unofficial].
+- Missing materials use a fallback mechanism tracked in diagnostics [S1, unofficial].
+
+## Subtopics
+
+### [Point Sampling State Preparation](17814-point-sampling-state-preparation.md)
+Extracts mesh geometry, materials, and textures from a target collection to build the state required for point sampling. It serves as the initialization phase for generating point clouds from mesh surfaces, ensuring that all necessary data (triangles, materials, textures) is loaded and cached before the actual sampling execution begins. It distinguishes itself by managing the lifecycle of the sampling state, including caching, asynchronous worker spawning, and memory release, rather than performing the geometric sampling itself.
+
+### Area-Weighted Mesh Covariance
+Computes the covariance matrix of a mesh weighted by face area [S2, unofficial]. If no faces or tstrips exist, it falls back to vertex-only covariance [S2, unofficial]. It initializes a 3x3 matrix $C$ to $0.0$ and `totarea` to $0.0$ [S2, unofficial]. It iterates over faces $i$ from $0$ to $n-1$ [S2, unofficial]. For each face, it gets vertices $p[f[0]], p[f[1]], p[f[2]]$ [S2, unofficial]. It computes the face centroid $c = (p[f[0]] + p[f[1]] + p[f[2]]) / 3.0$ [S2, unofficial]. It computes the face area $A_f = \text{len}(\text{trinorm}(p[f[0]], p[f[1]], p[f[2]]))$ [S2, unofficial]. It accumulates the area: `totarea += A_f` [S2, unofficial]. It computes the vertex weight $w_v = A_f / 12.0$ [S2, unofficial]. For each vertex $v$ in the face, it computes the relative position $p_c = p[f[v]] - c$ [S2, unofficial]. It accumulates the vertex covariance: $C[j][k] += w_v \cdot p_c[j] \cdot p_c[k]$ for $j \le k$ [S2, unofficial]. It accumulates the centroid covariance: $C[j][k] += A_f \cdot c[j] \cdot c[k]$ for $j \le k$ [S2, unofficial]. It normalizes the matrix by total area: $C[j][k] /= \text{totarea}$ [S2, unofficial]. It mirrors the lower triangle: $C[1][0]=C[0][1]$, $C[2][0]=C[0][2]$, $C[2][1]=C[1][2]$ [S2, unofficial]. The formula is:
+$$ C = \frac{1}{A_{total}} \sum_{f} \left( \frac{A_f}{12} \sum_{v \in f} (p_v - c_f)(p_v - c_f)^T + A_f c_f c_f^T \right) $$
+[S2, unofficial].
+
+## Operating characteristics
+Time complexity is linear with respect to the number of triangles in the collection, $O(N)$, where $N$ is the total number of valid triangles. Memory complexity is also $O(N)$ to store the triangle data, cumulative areas, and interned materials. Performance depends on the efficiency of the mesh evaluation and UV extraction steps. Strengths include robust handling of degenerate geometry and efficient material deduplication. Limitations include the lack of built-in sampling logic, requiring a separate step for point generation. It is suitable for preprocessing large scenes where material consistency and geometric validity are critical before sampling. It is not suitable for real-time applications due to the overhead of data extraction and caching.
+
+## Background
+Originating from the `3dgs-dataset-builder` project [S1, unofficial], this method was developed to facilitate the creation of high-quality point cloud datasets from mesh-based 3D scenes for applications like 3D Gaussian Splatting. It addresses the need for deterministic, area-proportional sampling by ensuring that the underlying mesh data is correctly prepared and validated. The area-weighted covariance variant [S2, unofficial] originates from research on sparse voxel DAGs and out-of-core voxelization, providing a geometric summary of mesh orientation and spread.
+
+## Sources
+[S1] yumehiko/3dgs-dataset-builder, https://github.com/yumehiko/3dgs-dataset-builder, fetched 2026-10-27 (unofficial)
+[S2] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, https://github.com/prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,136 @@
+--- v005.md
++++ v006.md
+@@ -18,5 +18,5 @@
+ *   `Camera`:
+     *   `position`: `Vec3` eye position.
+-    *   `left`, `forward`, `up`: `Vec3` basis vectors.
++    *   `left`, `forward`, `up`: `Vec3` basis vectors [S2, unofficial].
+     *   `focal_length`: `f32` derived from angle of view.
+     *   `aspect_ratio`: `f32` width/height ratio.
+@@ -36,17 +36,17 @@
+ 
+ **Steps:**
+-1.  **Pixel Sampling:** For each pixel $(i, j)$, generate `SAMPLE_COUNT` samples. Compute pixel coordinates $x, y$ with jitter:
++1.  **Pixel Sampling:** For each pixel $(i, j)$, generate `SAMPLE_COUNT` samples [S2, unofficial]. Compute pixel coordinates $x, y$ with jitter:
+     $$ x = -0.5 + \frac{j + \text{jitter}_x}{\text{width} - 1.0} $$
+     $$ y = 0.5 - \frac{i + \text{jitter}_y}{\text{height} - 1.0} $$
+     where $\text{jitter} \in [-0.5, 0.5]$ is a uniform random float [S2, unofficial].
+-2.  **Ray Generation:** Use `Camera::get_ray(x, y)` to generate the primary ray. This accounts for depth of field using `uniform_disk()` for aperture sampling [S2, unofficial].
+-3.  **Path Tracing Loop:** Call `cast_ray` with the ray origin and direction. Initialize `acc = Vec3::ONE` and `bounces = 0` [S2, unofficial].
++2.  **Ray Generation:** Use `Camera::get_ray(x, y)` to generate the primary ray [S2, unofficial]. This accounts for depth of field using `uniform_disk()` for aperture sampling [S2, unofficial].
++3.  **Path Tracing Loop:** Call `cast_ray` with the ray origin and direction [S2, unofficial]. Initialize `acc = Vec3::ONE` and `bounces = 0` [S2, unofficial].
+ 4.  **Intersection:** Query `scene.map.ray_intersection(origin, direction)` [S2, unofficial].
+     *   If `None` (miss), multiply `acc` by `scene.background_color(direction)` and terminate the path [S2, unofficial].
+-    *   If `Some(hit_info)`, proceed to shading.
++    *   If `Some(hit_info)`, proceed to shading [S2, unofficial].
+ 5.  **Shading and Termination:**
+-    *   **Lambertian:** Multiply `acc` by `hit_info.material.color`. Compute normal `n = scene.map.normal(hit_info.position)`. Offset origin: `origin = hit_info.position + 2.0 * SURFACE_DIST * n`. Sample new direction `w` using `cos_weighted_hemisphere(n)` [S2, unofficial].
++    *   **Lambertian:** Multiply `acc` by `hit_info.material.color`. Compute normal `n = scene.map.normal(hit_info.position)` [S2, unofficial]. Offset origin: `origin = hit_info.position + 2.0 * SURFACE_DIST * n` [S2, unofficial]. Sample new direction `w` using `cos_weighted_hemisphere(n)` [S2, unofficial].
+     *   **Emissive:** Multiply `acc` by `hit_info.material.color` and terminate the path (absorbing/emitting surface) [S2, unofficial].
+-    *   **Specular:** Compute reflection. If `rand < specularity`, reflect direction with fuzziness. If reflected direction points below surface (`dot < 0`), zero `acc` and terminate. Else, multiply `acc` by color and sample `cos_weighted_hemisphere` for next bounce [S2, unofficial].
++    *   **Specular:** Compute reflection. If `rand < specularity`, reflect direction with fuzziness [S2, unofficial]. If reflected direction points below surface (`dot < 0`), zero `acc` and terminate [S2, unofficial]. Else, multiply `acc` by color and sample `cos_weighted_hemisphere` for next bounce [S2, unofficial].
+ 6.  **Russian Roulette:** Calculate $Q = \max(\text{acc}.x, \text{acc}.y, \text{acc}.z)$ [S1, unofficial]. Generate random float $r \in [0, 1]$. If $r > Q$, terminate path (set `acc = Vec3::ZERO`) [S1, unofficial]. Otherwise, scale `acc` by $1/Q$ to maintain unbiased expectation [S1, unofficial].
+ 7.  **Bounce Limit:** If `bounces > MAX_BOUNCES`, set `acc = Vec3::ZERO` and terminate [S2, unofficial].
+@@ -69,5 +69,5 @@
+     def normalize(self):
+         l = self.length()
+-        return Vec3(self.x/l, self.y/l, self.z/l) if l > 0 else Vec3(0,0,0)
++        return Vec3(self.x/l, self.y/l, self.z/l) if l > 1e-8 else Vec3(0,0,0)
+ 
+ class Material:
+@@ -84,9 +84,24 @@
+ class SdfMap:
+     def ray_intersection(self, origin, direction):
+-        # Placeholder for actual SDF intersection logic
++        # Standard SDF raymarching loop
++        t = 0.0
++        for _ in range(64):
++            p = origin.add(direction.scale(t))
++            d = self.sdf(p)
++            if d < 1e-4:
++                return HitInfo(p, self.material_at(p), self.id_at(p))
++            t += d
+         return None
++    def sdf(self, p): return 1.0 # Placeholder for actual SDF function
++    def material_at(self, p): return Material.Lambertian
++    def id_at(self, p): return 0
+     def normal(self, position):
+-        # Placeholder for normal computation
+-        return Vec3(0, 1, 0)
++        # Central difference gradient
++        eps = 1e-4
++        return Vec3(
++            self.sdf(position.add(Vec3(eps,0,0))) - self.sdf(position.add(Vec3(-eps,0,0))),
++            self.sdf(position.add(Vec3(0,eps,0))) - self.sdf(position.add(Vec3(0,-eps,0))),
++            self.sdf(position.add(Vec3(0,0,eps))) - self.sdf(position.add(Vec3(0,0,-eps)))
++        ).normalize()
+ 
+ class Camera:
+@@ -129,5 +144,4 @@
+ 
+ def cos_weighted_hemisphere(normal):
+-    # Standard cosine-weighted hemisphere sampling
+     u1 = random.random()
+     u2 = random.random()
+@@ -137,5 +151,4 @@
+     y = r * math.sin(theta)
+     z = math.sqrt(max(0.0, 1.0 - u1))
+-    # Construct basis
+     if abs(normal.x) > 0.999:
+         tangent = Vec3(1, 0, 0)
+@@ -160,4 +173,11 @@
+             break
+         
++        # Skip light source to avoid double counting emission [S1, unofficial]
++        if hit_info.id == scene.objects.size() - 1:
++            origin = hit_info.position.add(scene.map.normal(hit_info.position).scale(2.0 * SURFACE_DIST))
++            direction = cos_weighted_hemisphere(scene.map.normal(hit_info.position))
++            bounces += 1
++            continue
++            
+         material = hit_info.material
+         position = hit_info.position
+@@ -230,25 +250,34 @@
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Light Source Index:** Light sources are represented as the last object in the vector (`objects.size() - 1`). The loop for sampling indirect bounces must skip hits on the light source to prevent double counting its emission [S1, unofficial].
++*   **Self-Intersection:** A small epsilon `SURFACE_DIST = 0.001` is added to the hit position along the surface normal to prevent self-intersection (shadow acne) when spawning the next ray [S2, unofficial].
++*   **Russian Roulette Scaling:** Russian Roulette introduces variance if not scaled correctly; the throughput must be divided by the survival probability $Q$ to maintain an unbiased estimator [G].
++
+ ## Subtopics
+ 
+ ### [Path Tracing with Discrete Event Sampling](5168-path-tracing-with-discrete-event-sampling.md)
+-Replaces continuous Russian Roulette with discrete probabilistic decisions (absorption, scattering, null events) to improve efficiency in sparse media by skipping non-interacting steps. Choose when rendering sparse participating media where transmittance dominates.
++Replaces continuous Russian Roulette with discrete probabilistic decisions (absorption, scattering, null events) to improve efficiency in sparse media by skipping non-interacting steps. Unlike Explicit Path Tracing with Russian Roulette, which uses continuous probability based on albedo/extinction ratios, this method explicitly handles null events to improve efficiency in sparse media. Supports temperature-dependent emission and Henyey-Greenstein phase function scattering.
+ 
+ ### [Recursive Trace Function](9277-recursive-trace-function.md)
+-The core recursive routine for backward path tracing with Directed Distance Fields (DDF), handling intersection, shading, and recursion logic for single light path segments. Choose when using DDF-based acceleration structures.
++The core recursive routine for backward path tracing with Directed Distance Fields (DDF), handling intersection, shading, and recursion logic for single light path segments [G]. Distinguished from non-recursive or iterative path tracers by its explicit handling of DDF queries (forward and backward passes) and its direct integration of Russian Roulette termination logic via the parent algorithm's bounce limit [G].
++
++### Russian Roulette for Scattering Albedo
++A variance reduction technique using the scattering albedo to decide whether to continue tracing a scattered ray or terminate it [S3, unofficial]. The scattering albedo is defined as $\alpha = \sigma_s / \sigma_t$ [S3, unofficial]. If a random number $\xi < \alpha$, the diffusion contribution is computed as $L_{diffusion,N} = \frac{1}{N} \sum J(s_j')$; otherwise, the contribution is 0 [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S \cdot B)$, where $N$ is the number of pixels, $S$ is samples per pixel, and $B$ is the average path length (bounded by `MAX_BOUNCES`).
+-*   **Memory Complexity:** $O(1)$ auxiliary space per ray (excluding scene storage), as the algorithm is iterative or shallowly recursive.
++*   **Time Complexity:** $O(N \cdot S \cdot B)$, where $N$ is the number of pixels, $S$ is samples per pixel, and $B$ is the average path length (bounded by `MAX_BOUNCES`) [G].
++*   **Memory Complexity:** $O(1)$ auxiliary space per ray (excluding scene storage), as the algorithm is iterative or shallowly recursive [G].
+ *   **Performance:** Depends heavily on scene complexity and `MAX_BOUNCES`. In the reference implementation, 800x600 resolution with 100 samples and 4 bounces renders in seconds on modern CPUs [S2, unofficial].
+-*   **Strengths:** Simple to implement, unbiased, handles complex lighting via recursion.
+-*   **Limitations:** High variance in dark areas (noise), slow convergence for indirect lighting. Russian Roulette introduces variance if not scaled correctly.
+-*   **When to use:** General-purpose offline rendering, educational purposes, scenes with moderate indirect lighting.
+-*   **When not to use:** Real-time rendering, scenes requiring high precision in very dark areas without sufficient samples, or highly participating media (requires volume-specific extensions).
++*   **Strengths:** Simple to implement, unbiased, handles complex lighting via recursion [G].
++*   **Limitations:** High variance in dark areas (noise), slow convergence for indirect lighting. Russian Roulette introduces variance if not scaled correctly [G].
++*   **When to use:** General-purpose offline rendering, educational purposes, scenes with moderate indirect lighting [G].
++*   **When not to use:** Real-time rendering, scenes requiring high precision in very dark areas without sufficient samples, or highly participating media (requires volume-specific extensions) [G].
+ 
+ ## Background
+-Originating from standard Monte Carlo path tracing techniques, this specific implementation is found in unofficial repositories such as `ollituohenmaa/raymarching-pathtracer` [S2, unofficial] and `wangyuehi/VolumeSingleScattering` [S1, unofficial]. It builds on the principles of backward ray tracing and Russian Roulette termination introduced by Kajiya (1986) and Whitted (1980), adapted for SDF-based rendering.
++Originating from standard Monte Carlo path tracing techniques, this specific implementation is found in unofficial repositories such as `ollituohenmaa/raymarching-pathtracer` [S2, unofficial] and `wangyuehi/VolumeSingleScattering` [S1, unofficial]. It builds on the principles of backward ray tracing and Russian Roulette termination introduced by Kajiya (1986) and Whitted (1980), adapted for SDF-based rendering [G].
+ 
+ ## Sources
+ [S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
+-[S2] ollituohenmaa/raymarching-pathtracer, https://github.com/ollituohenmaa/raymarching-pathtracer, fetched 2026-10-26 (unofficial)+[S2] ollituohenmaa/raymarching-pathtracer, https://github.com/ollituohenmaa/raymarching-pathtracer, fetched 2026-10-26 (unofficial)
++[S3] Volume Rendering and Scattering Theory, https://www.scribd.com/document/912805133/02941-Slides-07-Volumes, fetched 2026-10-29 (unofficial)

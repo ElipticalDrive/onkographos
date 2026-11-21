@@ -1,0 +1,183 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-MELON is a differentiable inverse rendering method that jointly optimizes a Neural Radiance Field (NeRF) and camera poses from a set of unposed images [S1]. It solves the problem of local minima in the low-dimensional $SO(3)$ latent space by introducing a "modulo loss" that maps the encoder's output to a quotient space, effectively replicating the latent variables to match the object's rotational symmetries [S1]. Unlike adversarial approaches such as GNeRF, MELON uses an encoder-decoder architecture with amortized inference, allowing it to perform ab-initio reconstruction without pose initialization or pre-trained CNNs [S1].
++MELON is a differentiable inverse rendering method that jointly optimizes a Neural Radiance Field (NeRF) and camera poses from a set of unposed images [S1]. It solves the problem of local minima in the low-dimensional $SO(3)$ latent space by introducing a "modulo loss" that maps the encoder's output to a quotient space, effectively replicating the latent variables to match the object's rotational symmetries [S1]. Unlike adversarial approaches such as GNeRF, MELON uses an encoder-decoder architecture with amortized inference, allowing it to perform ab-initio reconstruction without pose initialization or pre-trained CNNs [S1]. Does not require a discriminator [S1].
+ 
+ ## How it works
+@@ -15,5 +15,5 @@
+ *   **Encoder ($h_\xi$):** A neural network with weights $\xi$ that maps an input image $I_i$ to a latent pose variable $z_i$ in the latent space $SO(3)$ [S1].
+ *   **Latent Space ($\Omega$):** Parameterized as $SO(3)$ using azimuth $\theta \in SO(2)$, elevation $\phi \in [-\pi/2, \pi/2]$, and roll $\alpha \in SO(2)$ [S1].
+-*   **Replication Order ($N$):** Integer $N \in \mathbb{N}^*$ defining the equivalence relation $R_N$ [S1].
++*   **Replication Order ($N$):** Integer $N \in \mathbb{N}^*$ defining the equivalence relation [S1].
+ 
+ **Mathematical Formulation:**
+@@ -32,5 +32,5 @@
+ 
+ **Algorithm Steps:**
+-1.  **Initialize:** Initialize NeRF parameters $\psi$ and Encoder parameters $\xi$ [G]. Set replication order $N$ [S1].
++1.  **Initialize:** Initialize NeRF parameters $\psi$ and Encoder parameters $\xi$. Set replication order $N$ [S1].
+ 2.  **Encode:** For each input image $I_i$, compute the latent estimate $z_i = h_\xi(I_i)$ [S1].
+ 3.  **Generate Equivalence Class:** Compute the equivalence class $[z_i]_{R_N} = \{ z \mid z R_N z_i \}$ [S1].
+@@ -50,64 +50,58 @@
+ import torch.optim as optim
+ 
+-def pose_to_rotation(theta, phi, alpha):
+-    """Converts azimuth (theta), elevation (phi), roll (alpha) to a 3x3 rotation matrix [G]."""
+-    ct, st = torch.cos(theta), torch.sin(theta)
+-    cp, sp = torch.cos(phi), torch.sin(phi)
+-    ca, sa = torch.cos(alpha), torch.sin(alpha)
+-    R = torch.zeros(3, 3, device=theta.device)
+-    R[0, 0] = ct * ca - st * sp * sa
+-    R[1, 0] = cp * st
+-    R[2, 0] = st * ca + ct * sp * sa
+-    R[0, 1] = -ct * sa - st * sp * ca
+-    R[1, 1] = cp * ct
+-    R[2, 1] = -st * sa + ct * sp * ca
+-    R[0, 2] = st * cp
+-    R[1, 2] = -sp
+-    R[2, 2] = ct * cp
++# Standard helper: Euler angles (azimuth, elevation, roll) to rotation matrix [G]
++def pose_to_rotation(pose):
++    theta, phi, alpha = pose
++    cx, sx = torch.cos(theta), torch.sin(theta)
++    cy, sy = torch.cos(phi), torch.sin(phi)
++    cz, sz = torch.cos(alpha), torch.sin(alpha)
++    R = torch.stack([
++        cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
++        sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
++        -sy, cy * sx, cy * cx
++    ]).reshape(3, 3)
+     return R
+ 
+-def generate_rays(intrinsics, R, T, H, W):
+-    """Generates ray origins and directions for a grid of pixels using the pinhole model [G]."""
++# Standard helper: Generate camera rays from intrinsics and pose [G]
++def generate_rays(intrinsics, R, T, image_shape):
++    H, W = image_shape
+     f = intrinsics['focal_length']
+     u, v = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='xy')
+-    u = (u.float() - W / 2) / f
+-    v = (v.float() - H / 2) / f
+-    d_cam = torch.stack([u, -v, -torch.ones_like(u)], dim=-1)
+-    d_world = torch.einsum('ij, ...j -> ...i', R, d_cam)
+-    d_world = d_world / torch.norm(d_world, dim=-1, keepdim=True)
+-    o_world = T.expand(H, W, 3)
+-    return o_world, d_world
++    dx = (u - W / 2) / f
++    dy = -(v - H / 2) / f
++    dz = -torch.ones_like(u)
++    directions = torch.stack([dx, dy, dz], dim=-1)
++    directions = torch.einsum('ij,hwj->hwi', R, directions)
++    origins = T.expand(H, W, 3)
++    return origins, directions
+ 
+-def volume_render(nerf, rays_o, rays_d, t_near, t_far, num_samples):
+-    """Discrete volume rendering integral [G]."""
+-    t_vals = torch.linspace(t_near, t_far, num_samples, device=rays_o.device)
+-    deltas = t_vals[1:] - t_vals[:-1]
+-    deltas = torch.cat([deltas, torch.tensor([0.001], device=t_vals.device)])
+-    pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_vals.unsqueeze(2)
+-    pts = pts.reshape(-1, 3)
+-    raw = nerf(pts, rays_d.reshape(-1, 3))
+-    color, density = raw[..., :3], raw[..., 3:]
+-    alpha = 1.0 - torch.exp(-torch.relu(density) * deltas)
+-    trans = torch.cumprod(torch.exp(-torch.relu(density) * deltas), dim=0)
+-    weights = alpha * torch.cat([torch.ones_like(trans[..., :1]), trans[..., :-1]], dim=-1)
+-    color = torch.sum(weights * color, dim=0)
++# Standard helper: Volume rendering via discrete ray marching [G]
++def volume_render(nerf, origins, directions, num_samples=128, near=0.1, far=10.0):
++    t_vals = torch.linspace(near, far, num_samples)
++    z_vals = 0.5 * (t_vals[1:] + t_vals[:-1])
++    points = origins[..., None, :] + directions[..., None, :] * z_vals[None, None, :]
++    colors, densities = nerf(points, directions[..., 0, 0, :].expand_as(points))
++    alpha = 1.0 - torch.exp(-torch.relu(densities) * (far - near) / num_samples)
++    weights = alpha * torch.cumprod(torch.ones_like(alpha) - alpha + 1e-10, dim=-2)
++    weights[..., 0] = alpha[..., 0]
++    color = torch.sum(weights * colors, dim=-2)
+     return color
+ 
+-def melon_step(nerf, encoder, images, intrinsics, r, N, optimizer):
+-    """One optimization step of MELON [S1]."""
++def modulo_loss_step(nerf, encoder, images, intrinsics, r, N, optimizer):
+     optimizer.zero_grad()
+     total_loss = 0
+-    for I_i in images:
++    for i, I_i in enumerate(images):
+         z_i = encoder(I_i)
+-        theta, phi, alpha = z_i
++        azimuth, elevation, roll = z_i
+         synthetic_views = []
+         for k in range(N):
+-            new_theta = (theta + 2 * torch.pi * k / N) % (2 * torch.pi)
+-            R = pose_to_rotation(new_theta, phi, alpha)
+-            T = torch.tensor([0, 0, r], device=theta.device)
+-            rays_o, rays_d = generate_rays(intrinsics, R, T, I_i.shape[1], I_i.shape[2])
+-            rendered = volume_render(nerf, rays_o, rays_d, 0.5, 5.0, 128)
+-            synthetic_views.append(rendered)
+-        dists = [torch.sum((I_i - view)**2) for view in synthetic_views]
++            new_azimuth = (azimuth + 2 * torch.pi * k / N) % (2 * torch.pi)
++            latent_pose = torch.stack([new_azimuth, elevation, roll])
++            R = pose_to_rotation(latent_pose)
++            T = torch.tensor([0, 0, r], device=latent_pose.device)
++            rays_o, rays_d = generate_rays(intrinsics, R, T, I_i.shape)
++            rendered_view = volume_render(nerf, rays_o, rays_d)
++            synthetic_views.append(rendered_view)
++        dists = [torch.sum((I_i - view) ** 2) for view in synthetic_views]
+         min_dist = min(dists)
+         total_loss += min_dist
+@@ -117,21 +111,21 @@
+ 
+ def pose_estimation(nerf, encoder, images, intrinsics, r, N):
+-    """Final pose estimation after training [S1]."""
+     poses = []
+     for I_i in images:
+         z_i = encoder(I_i)
+-        theta, phi, alpha = z_i
++        azimuth, elevation, roll = z_i
+         best_pose = None
+         best_dist = float('inf')
+         for k in range(N):
+-            new_theta = (theta + 2 * torch.pi * k / N) % (2 * torch.pi)
+-            R = pose_to_rotation(new_theta, phi, alpha)
+-            T = torch.tensor([0, 0, r], device=theta.device)
+-            rays_o, rays_d = generate_rays(intrinsics, R, T, I_i.shape[1], I_i.shape[2])
+-            rendered = volume_render(nerf, rays_o, rays_d, 0.5, 5.0, 128)
+-            dist = torch.sum((I_i - rendered)**2)
++            new_azimuth = (azimuth + 2 * torch.pi * k / N) % (2 * torch.pi)
++            latent_pose = torch.stack([new_azimuth, elevation, roll])
++            R = pose_to_rotation(latent_pose)
++            T = torch.tensor([0, 0, r], device=latent_pose.device)
++            rays_o, rays_d = generate_rays(intrinsics, R, T, I_i.shape)
++            rendered_view = volume_render(nerf, rays_o, rays_d)
++            dist = torch.sum((I_i - rendered_view) ** 2)
+             if dist < best_dist:
+                 best_dist = dist
+-                best_pose = torch.stack([new_theta, phi, alpha])
++                best_pose = latent_pose
+         poses.append(best_pose)
+     return poses
+@@ -146,14 +140,14 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Local Minima:** The low dimensionality of $SO(3)$ induces local minima [S1]. The modulo loss mitigates this by making the loss landscape more convex [S1].
+-*   **Unknown Translation:** If both object-to-camera distances and in-plane translations are unknown, the latent space becomes $SE(3)$ [S1]. MELON fails to jointly infer rotation $R_i$ and translation $T_i$ in this setup [S1].
+-*   **Symmetry Matching:** If $N$ does not match the object's symmetry, convergence may be poor [S1]. The fractional covering $D_R(f^*)$ indicates the likelihood of convergence [S1].
++*   **Local Minima:** The low dimensionality of $SO(3)$ induces local minima. The modulo loss mitigates this by making the loss landscape more convex [S1].
++*   **Unknown Translation:** If both object-to-camera distances and in-plane translations are unknown, the latent space becomes $SE(3)$. MELON fails to jointly infer rotation $R_i$ and translation $T_i$ in this setup [S1].
++*   **Symmetry Matching:** If $N$ does not match the object's symmetry, convergence may be poor. The fractional covering $D_R(f^*)$ indicates the likelihood of convergence [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Compute time per gradient step increases linearly with the replication order $N$ [S1]. For $N=1$, it takes 23 ms/it; $N=2$ takes 34 ms/it; $N=3$ takes 43 ms/it; $N=4$ takes 52 ms/it [S1].
+-*   **Memory Complexity:** Not given in the sources [S1].
++*   **Time Complexity:** Compute time per gradient step increases linearly with the replication order $N$. For $N=1$, it takes 23 ms/it; $N=2$ takes 34 ms/it; $N=3$ takes 43 ms/it; $N=4$ takes 52 ms/it [S1].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** On the 'lego' scene with 6 views, MELON achieves a PSNR of 35.4 and a mean angular error of 0.901°, outperforming GNeRF (PSNR 35.3, error 1.21°) and failing COLMAP [S1].
+-*   **Strengths:** Does not require CNN pre-training or pose initialization (ab-initio) [S1]. Does not require a discriminator (unlike GNeRF) [S1]. Robust to small datasets (works with as few as 6 views) [S1].
+-*   **Limitations:** Fails when translation is unknown ($SE(3)$) [S1]. Requires known intrinsics and object-to-camera distance [S1].
++*   **Strengths:** Does not require CNN pre-training or pose initialization (ab-initio). Does not require a discriminator (unlike GNeRF). Robust to small datasets (works with as few as 6 views) [S1].
++*   **Limitations:** Fails when translation is unknown ($SE(3)$). Requires known intrinsics and object-to-camera distance [S1].
+ 
+ ## Background

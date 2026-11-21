@@ -1,0 +1,206 @@
+# Switch-NeRF++ Forward Pass and Loss
+
+Also called: Switch-NeRF++
+
+## Overview
+Switch-NeRF++ is a large-scale neural radiance field method that employs a Mixture of Experts (MoE) architecture to efficiently render heterogeneous urban scenes. It solves the scalability problem of HashGrid Neural Fields by routing 3D points to specialized hash experts based on local scene complexity, thereby balancing memory usage and rendering accuracy. It differs from standard HashNeRF by introducing a learned gating mechanism that selects a single expert per point, and from Switch-NeRF by upgrading the expert capacity and resolution scaling for higher fidelity in massive environments.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D point coordinates $x$, view direction $d$, and appearance embedding $a$.
+*   **Outputs:** Predicted density $\sigma$, color $c$, and rendered image color $\hat{C}(r)$.
+
+**Data Structures and Layout:**
+The method uses a HashGate and $N$ Hash Experts.
+*   **HashGate:** Uses a base resolution of 16 and a desired resolution of 2048. The hashmap size is $2^{19}$ [S1].
+*   **Hash Experts:** There are $N=8$ experts [S1]. Their base resolutions $\{r\}$ are logarithmically spaced in $[16, 512]$. Their desired resolutions $\{\tilde{r}\}$ are logarithmically spaced in $[2048, 16384]$ [S1].
+*   **Space Contraction:** To handle unbounded space, points are normalized into a unit sphere. If $\|x\| \le 1$, $x$ remains unchanged. If $\|x\| > 1$, $x$ is transformed by $\frac{x}{2 - \frac{1}{\|x\|}}$ [S1]. This maps background points into a bounded scene without affecting foreground points [S1].
+
+**Numbered Steps:**
+1.  **Space Contraction:** Apply the contraction function to input point $x$ if $\|x\| > 1$ [S1].
+2.  **Gating Network:** Encode the contracted position $x$ using the HashGate to get feature vector $f_g$ [S1].
+3.  **Gate Values:** Compute gate probabilities $G = \text{Softmax}(f_g)$ [S1].
+4.  **Expert Selection:** Select the top-1 expert index $i = \arg\max(G)$ [S1].
+5.  **Expert Encoding:** Encode $x$ using the selected expert $i$ to obtain $E_i(x)$ [S1].
+6.  **Gate Application:** Apply the gate value to the expert output: $\hat{E}_i(x) = G_i \cdot E_i(x)$ [S1].
+7.  **Direction Encoding:** Encode view direction $d$ using Spherical Harmonics to get $SH_d$ [S1].
+8.  **Feature Concatenation:** Concatenate features: $f_{final} = [\hat{E}_i(x), SH_d, a]$ [S1].
+9.  **Density Prediction:** Pass $\hat{E}_i(x)$ through a density MLP: $\sigma = \text{MLP}_{density}(\hat{E}_i(x))$ [S1].
+10. **Color Prediction:** Pass $\hat{E}_i(x)$ through a color MLP: $c = \text{MLP}_{color}(\hat{E}_i(x))$ [S1].
+11. **Volume Rendering:** Compute transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and rendered color $\hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i$ [S1].
+12. **Loss Computation:** Calculate Rendering Loss $L_r$ and Gate Balance Loss $L_b$ [S1].
+
+**Formulas:**
+*   **Gate Balance Loss:** $L_b = \sum_n f_n g_n$, where $f_n$ and $g_n$ are flow and gate values for expert $n$ [S1].
+*   **Overall Loss:** $L_o = L_r + \lambda L_b$ [S1].
+*   **Rendering Loss:** $L_r = \sum_{r \in R} (\hat{C}(r) - C(r))^2$ [S1].
+
+**Parameters:**
+*   **Balance Loss Weight ($\lambda$):** $5 \times 10^{-4}$ [S1].
+*   **Optimizer:** Adam with learning rate $5 \times 10^{-4}$, exponentially decreasing [S1].
+*   **Precision:** Half-precision training and testing [S1].
+*   **Batch Prioritized Routing:** Integrated to refine training by prioritizing critical samples, with $C_f$ empirically set to 1.0 to avoid extra memory consumption [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def contract_point(x):
+    """
+    Contracts unbounded 3D space into a unit sphere.
+    If ||x|| <= 1, return x.
+    If ||x|| > 1, return x / (2 - 1/||x||).
+    """
+    norm = torch.norm(x, dim=-1, keepdim=True)
+    # Guard against division by zero if norm is 0
+    norm = torch.clamp(norm, min=1e-8)
+    mask = (norm > 1.0).float()
+    contracted_x = x / (2.0 - 1.0 / norm)
+    return torch.where(mask > 0, contracted_x, x)
+
+def spherical_harmonics(d, degree=3):
+    """
+    Simplified Spherical Harmonics encoding for direction d.
+    Assumes standard SH basis functions up to degree 3.
+    """
+    # Placeholder for actual SH implementation logic
+    # In practice, this maps 3D vector d to SH coefficients
+    return torch.zeros_like(d) # [G] Placeholder for SH calculation
+
+class SwitchNeRFPlusPlus:
+    def __init__(self, num_experts=8):
+        self.num_experts = num_experts
+        # HashGate configuration
+        self.hash_gate = HashEncoding(base_resolution=16, desired_resolution=2048, hashmap_size=2**19)
+        
+        # Hash Experts configuration
+        # Logarithmically spaced base resolutions in [16, 512]
+        base_resolutions = [16 * (512/16)**(i/(num_experts-1)) for i in range(num_experts)]
+        # Logarithmically spaced desired resolutions in [2048, 16384]
+        desired_resolutions = [2048 * (16384/2048)**(i/(num_experts-1)) for i in range(num_experts)]
+        
+        self.experts = nn.ModuleList([
+            HashEncoding(base=int(b), desired=int(d)) 
+            for b, d in zip(base_resolutions, desired_resolutions)
+        ])
+        
+        # MLPs for prediction
+        self.mlp_density = nn.Sequential(
+            nn.Linear(256, 128), # [G] Assuming 256 dim from HashEncoding output
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        self.mlp_color = nn.Sequential(
+            nn.Linear(256, 128), # [G] Assuming 256 dim
+            nn.ReLU(),
+            nn.Linear(128, 3)
+        )
+        
+        self.lambda_balance = 5e-4
+
+    def forward(self, x, d, a):
+        # Part I: Space Contraction
+        x_contracted = contract_point(x)
+        
+        # Part II: Gating Network
+        f_g = self.hash_gate(x_contracted)
+        G = F.softmax(f_g, dim=-1)
+        # Select top-1 expert
+        expert_idx = torch.argmax(G, dim=-1, keepdim=True)
+        
+        # Part III: Hash Expert Processing
+        # Gather expert features for the selected experts
+        # Note: In a real implementation, this requires gathering from the list of experts
+        # based on expert_idx. Here we assume a batched operation or loop.
+        # For simplicity, we assume x is a single point or batch handled by indexing.
+        
+        # Get features from all experts
+        expert_features = [expert(x_contracted) for expert in self.experts]
+        expert_features = torch.stack(expert_features, dim=1) # Shape: [Batch, N, Dim]
+        
+        # Apply gate values
+        # G shape: [Batch, N]
+        # expert_features shape: [Batch, N, Dim]
+        gated_features = expert_features * G.unsqueeze(-1)
+        
+        # Select the top-1 expert's gated feature
+        # Gather along the expert dimension
+        selected_expert_features = torch.gather(gated_features, 1, expert_idx.unsqueeze(-1).expand(-1, -1, gated_features.shape[-1])).squeeze(1)
+        
+        # Part IV: Prediction
+        SH_d = spherical_harmonics(d)
+        f_final = torch.cat([selected_expert_features, SH_d, a], dim=-1)
+        
+        # Density and Color are predicted from the expert features only, not the full concatenation
+        # According to Algorithm 1 lines 26-27: MLP takes E_hat_i(x)
+        sigma = self.mlp_density(selected_expert_features)
+        c = self.mlp_color(selected_expert_features)
+        
+        return sigma, c, G, expert_idx
+
+    def compute_loss(self, sigma, c, x, d, a, gt_color, delta):
+        # Volume Rendering
+        # Simplified rendering for a single ray with N samples
+        # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+        # C = sum_{i=1}^{N} T_i * (1 - exp(-sigma_i * delta_i)) * c_i
+        
+        # Compute transmittance
+        # alpha_i = 1 - exp(-sigma_i * delta_i)
+        alpha = 1.0 - torch.exp(-sigma * delta)
+        
+        # T_0 = 1
+        # T_i = T_{i-1} * (1 - alpha_{i-1})
+        transmittance = torch.ones_like(sigma[..., 0])
+        transmittance = torch.cat([transmittance, torch.cumprod(1 - alpha[..., :-1], dim=0)], dim=0)
+        
+        rendered_color = torch.sum(transmittance.unsqueeze(-1) * alpha.unsqueeze(-1) * c, dim=0)
+        
+        # Rendering Loss
+        L_r = torch.mean((rendered_color - gt_color) ** 2)
+        
+        # Gate Balance Loss
+        # L_b = sum_n f_n g_n
+        # f_n is flow (number of points assigned to expert n)
+        # g_n is gate value (average gate value for expert n)
+        # This requires aggregating over the batch. 
+        # For a single forward pass, we approximate or assume batch statistics are available.
+        # Here we compute it for the current batch's expert assignments.
+        batch_size = sigma.shape[0]
+        # Count points per expert
+        expert_counts = torch.bincount(expert_idx.flatten(), minlength=self.num_experts).float()
+        # Average gate value per expert
+        expert_gate_means = torch.zeros(self.num_experts).to(sigma.device)
+        # Scatter mean of G values to experts
+        # G is [Batch, N]
+        # We need to sum G values for each expert index
+        # Using scatter_add
+        expert_gate_sums = torch.zeros(self.num_experts).to(sigma.device)
+        # Expand G to match expert_idx shape for scattering
+        # expert_idx is [Batch, 1]
+        # We want to sum G[:, expert_idx]
+        # This is complex to vectorize simply without loops or advanced gather.
+        # Simplified: Assume f_n and g_n are computed via batch statistics.
+        # For the purpose of the algorithm description, we state the formula.
+        L_b = 0.0 # [G] Placeholder for complex batch aggregation logic
+        
+        L_o = L_r + self.lambda_balance * L_b
+        return L_o, rendered_color
+```
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the hash lookups in the gating network and the selected expert. Since only one expert is selected per point, the per-point cost is comparable to a single HashGrid lookup plus MLP inference, rather than summing all experts.
+*   **Memory Complexity:** Determined by the sum of the hash table sizes of all $N$ experts. The logarithmic spacing of resolutions ensures that experts covering large scales (high resolution) are fewer, while those covering fine details (low resolution) are more numerous but smaller, optimizing memory for urban scenes [S1].
+*   **Performance:** Designed for large-scale scenes (e.g., 4k-5k resolution images, km-scale coverage). It uses half-precision training to reduce memory footprint [S1].
+*   **Strengths:** Scalability to massive urban environments; efficient memory usage via expert specialization; improved accuracy over single-expert models through hierarchical resolution [S1].
+*   **Limitations:** Requires careful tuning of the balance loss weight $\lambda$ to ensure uniform expert utilization; complexity in implementation due to dynamic expert routing [S1].
+
+## Background
+Switch-NeRF++ was developed to address the limitations of previous neural radiance field methods in large-scale urban reconstruction. It builds on the HashNeRF architecture and the Switch-NeRF MoE approach. The method was introduced in the paper "Learning Heterogeneous Mixture of Scene Experts for Large-Scale Neural Radiance Fields" [S1]. It is particularly suited for datasets like Block-NeRF, UrbanBIS, and MatrixCity, which feature high-resolution imagery over vast areas [S1].
+
+## Sources
+[S1] Learning Heterogeneous Mixture of Scene Experts for Large-Scale Neural Radiance Fields., https://doi.org/10.1109/tpami.2025.3603305, fetched 2026-10-26

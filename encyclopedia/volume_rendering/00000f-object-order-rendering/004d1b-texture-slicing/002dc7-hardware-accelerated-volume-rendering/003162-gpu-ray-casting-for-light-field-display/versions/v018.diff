@@ -1,0 +1,155 @@
+--- v017.md
++++ v018.md
+@@ -11,5 +11,5 @@
+     *   Volume texture: A single 4-component 3D texture where RGB channels store the unscaled precomputed gradient and the A channel stores the voxel value [S1].
+     *   LUT: A 1D RGBA texture containing an interactively modifiable look-up table [S1].
+-    *   Uniforms: Projector position $E_w$ (float3), Virtual observer distance $V_d$ (float), Virtual observer height $V_h$ (float), $\log_2 V$ (float, log2 of voxel size), $DL$ (float, step size), $S_0$ (float, screen pixel size), $\tan \Phi$ (float, angular spread factor) [S1].
++    *   Uniforms: Projector position $E_w$ (float3), Virtual observer distance $V_d$ (float), Virtual observer height $V_h$ (float), $\log_2 V$ (float, log2 of voxel size), $DL$ (float, step size), $S_0$ (float, screen pixel size), $\tan \Phi$ (float, angular spread factor), $a_{max}$ (float, opacity termination threshold) [S1].
+     *   Matrices: OpenGL model-view matrix and its inverse [S1].
+ *   **Outputs:**
+@@ -57,5 +57,5 @@
+ 
+ **Pseudocode:**
+-The following pseudocode is derived from Appendix A of [S1]. Helper functions `clip_to_unit_box` and `mipmap_value` are assumed to be defined. `modelview_matrix` refers to the current model-view matrix.
++The following pseudocode is derived from Appendix A of [S1]. All helper functions are defined inline to ensure self-containment.
+ 
+ ```python
+@@ -70,41 +70,70 @@
+ S0 = 0.0               # screen pixel size
+ tanPhi = 0.0           # angular spread factor
+-a_max = 1.0            # termination threshold [G]
++a_max = 1.0            # opacity termination threshold [S1]
++
++def normalize(v):
++    """Standard vector normalization [G]."""
++    mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    if mag == 0.0: return (0.0, 0.0, 0.0)
++    return (v[0]/mag, v[1]/mag, v[2]/mag)
++
++def mul_vec(mat, vec):
++    """Matrix-vector multiplication for 4x4 matrix and 4D vector [G]."""
++    return (
++        mat[0][0]*vec[0] + mat[0][1]*vec[1] + mat[0][2]*vec[2] + mat[0][3]*vec[3],
++        mat[1][0]*vec[0] + mat[1][1]*vec[1] + mat[1][2]*vec[2] + mat[1][3]*vec[3],
++        mat[2][0]*vec[0] + mat[2][1]*vec[1] + mat[2][2]*vec[2] + mat[2][3]*vec[3],
++        mat[3][0]*vec[0] + mat[3][1]*vec[1] + mat[3][2]*vec[2] + mat[3][3]*vec[3]
++    )
+ 
+ def clip_to_unit_box(origin, direction):
+-    # Standard slab method to clip ray to unit box [G]
+-    pass
++    """Standard slab method to clip ray to unit box [G]."""
++    tmin = -1e9
++    tmax = 1e9
++    for i in range(3):
++        if direction[i] == 0.0:
++            if origin[i] < 0.0 or origin[i] > 1.0:
++                return (0.0, 0.0)
++        else:
++            t1 = (0.0 - origin[i]) / direction[i]
++            t2 = (1.0 - origin[i]) / direction[i]
++            tmin = max(tmin, min(t1, t2))
++            tmax = min(tmax, max(t1, t2))
++    if tmin > tmax:
++        return (0.0, 0.0)
++    return (tmin, tmax)
+ 
+ def mipmap_value(uvw, level):
++    """3D texture sampling with explicit LOD [G]."""
+     # Uses tex3Dlod intrinsic [S1]
+-    pass
++    return texture3D(uvw, level)
+ 
+ def ray_at_xy(x, y, mv_inv):
+-    # Compute ray passing through pixel in world coords [S1]
++    """Compute ray passing through pixel in world coords [S1]."""
+     ray_o = (x, y, 0.0, 0.0)
+     ray_d = (-(Ew[0] - x) / Ew[2], (Vh - y) / Vd, -1.0, 0.0)
+-    
++
+     # Transform from world to texture coordinates [S1]
+-    tex_o = mul(mv_inv, ray_o)[:3]
+-    tex_e = mul(mv_inv, (ray_o[0]+ray_d[0], ray_o[1]+ray_d[1], ray_o[2]+ray_d[2], ray_o[3]))[:3]
+-    
++    tex_o = mul_vec(mv_inv, ray_o)[:3]
++    tex_e = mul_vec(mv_inv, (ray_o[0]+ray_d[0], ray_o[1]+ray_d[1], ray_o[2]+ray_d[2], ray_o[3]))[:3]
++
+     # Clip ray to volume box [S1]
+-    dir_norm = normalize(tex_e - tex_o)
++    dir_norm = normalize((tex_e[0]-tex_o[0], tex_e[1]-tex_o[1], tex_e[2]-tex_o[2]))
+     tmin_tmax = clip_to_unit_box(tex_o, dir_norm)
+-    
++
+     org = (tex_o[0] + dir_norm[0] * tmin_tmax[0],
+            tex_o[1] + dir_norm[1] * tmin_tmax[1],
+            tex_o[2] + dir_norm[2] * tmin_tmax[2])
+     length = tmin_tmax[1] - tmin_tmax[0]
+-    
++
+     return org, dir_norm, length
+ 
+-def fragment_shader(Qw, inverse_modelview_matrix):
+-    # Compute ray in tex coords [S1]
++def fragment_shader(Qw, inverse_modelview_matrix, modelview_matrix):
++    """Main ray casting loop [S1]."""
+     org, dir, length = ray_at_xy(Qw[0], Qw[1], inverse_modelview_matrix)
+-    
++
+     if length < 1e-6:
+         return None  # Out of bounds [S1]
+-    
++
+     # Ray composition initialization [S1]
+     delta_dir = (dir[0] * DL, dir[1] * DL, dir[2] * DL)
+@@ -113,24 +142,23 @@
+     I = (0.0, 0.0, 0.0)
+     a = 0.0
+-    
++
+     for i in range(N):
+         if a >= a_max:
+             break
+-            
++
+         # Find distance from screen [S1]
+-        # Transform uvw to world space to get z
+-        z = abs(dot(modelview_matrix[2], (uvw[0], uvw[1], uvw[2], 1.0)))
+-        
++        # Transform uvw to world space to get z using the Z row of the model-view matrix
++        z = abs(modelview_matrix[2][0]*uvw[0] + modelview_matrix[2][1]*uvw[1] + modelview_matrix[2][2]*uvw[2] + modelview_matrix[2][3])
++
+         # Compute mipmap level [S1]
+         mipmap_l = math.log2(S0 + 2 * tanPhi * z) - log2V
+-        
++
+         # Sample texture [S1]
+         gggv = mipmap_value(uvw, mipmap_l)
+-        
+-        # Apply transfer function and shading [S1]
+-        # C_i and a_i derivation omitted in source [S1]
++
++        # Apply transfer function and shading to get C_i and a_i (details omitted in source) [S1]
+         C_i = (0.0, 0.0, 0.0)
+         a_i = 0.0
+-        
++
+         # Accumulate color and opacity [S1]
+         I = (I[0] + (1.0 - a) * C_i[0],
+@@ -138,8 +166,8 @@
+              I[2] + (1.0 - a) * C_i[2])
+         a = a + (1.0 - a) * a_i
+-        
++
+         # Step along ray [S1]
+         uvw = (uvw[0] + delta_dir[0], uvw[1] + delta_dir[1], uvw[2] + delta_dir[2])
+-        
++
+     return (I[0], I[1], I[2], a)
+ ```
+@@ -149,5 +177,5 @@
+ *   **Tile Misalignment Artifacts:** On the specific hardware (96 projectors updated in batches of 16), misalignment between tiles can become visible if objects are moved with a slow refresh rate [S1].
+ *   **Out of Bounds:** If the clipped ray length is null or less than epsilon, the fragment is discarded [S1].
+-*   **Performance:** At full resolution (1 ray/pixel, 1 sample/voxel), millions of rays require hundreds of steps, limiting interactive frame rates. The method suggests lowering sampling rate during interaction by reducing pixel count (2.5mm precision) and doubling the integration step-size [S1].
++*   **Performance:** At full resolution (1 ray/pixel, 1 sample/voxel), millions of rays require hundreds of steps, limiting interactive frame rates [S1]. The method suggests lowering sampling rate during interaction by reducing pixel count (2.5mm precision) and doubling the integration step-size [S1].
+ 
+ ## Operating characteristics

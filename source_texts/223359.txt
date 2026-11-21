@@ -1,0 +1,158 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: HLOD B3 — renderer owns per-view cuts through ViewSet by klausi3D · Pull Request #1284 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Restack 2026-10-30 (X11/numpy): current base/head. Base PR #1283, base SHA ecb68cd5438. Immutable diff: ecb68cd5438..4ce21d6bbfc. Head 4ce21d6bbfc (was f30044422da). This restack adds a follow-up commit renaming this layer's new Status uses (test_hlod_view_set.cpp). Existing commits are not rewritten; range-diffs show only rename context. Earlier base/head lines below are superseded.
+Restack 2026-10-29: current base. Base PR #1283 (feat/hlod-stack-06-b2-views), base SHA 4c3a88d40d66b98458e839dcd1bda405bfe1d5da. Head f30044422dac82dd5528460d90d72ae127519a91. Immutable diff: 4c3a88d40d6..f30044422da. Restacked from base 5886404fcc2 / head 77373a2b711 with git rebase --onto; range-diff: 2x =. The base and head lines below predate this restack and are superseded by this paragraph.
+Draft. Package B3 of the HLOD large-world chain (ADR docs/architecture/adr-hlod-streaming.md 6.4, 6.5, 6.9, 14.1, 14.2). Wires the B2 ViewSet into the real renderer path.
+Base: PR #1283 (feat/hlod-stack-06-b2-views), base SHA 5886404fcc2b0c08da1ef0b23b13f2fd51cf1600. Head: see the latest commit (review-fix round on top of 07f5167322b).
+Risk class: R2 (renderer path and lod/**; renderer rules require GPU evidence and an independent GPU/performance review before the stack merges).
+Refs #1131.
+Maintainer disposition: packages B-F are programmed ahead; nothing merges before the end-of-stack acceptance.
+What changed
+RenderFrameContextManager no longer keeps HlodViewSlot[4] histories. gs_hlod_runtime::ViewSet is the single owner of per-view cut state. The manager keeps only a thin lifetime binding per view (buffers id, render target, lifetime epoch, snapshot owner, LRU clock); no cut state is duplicated.
+View key = mix(RenderSceneBuffersRD id, lifetime epoch). A view is dropped and re-admitted exactly where the old slot reset: epoch change, render-target change, new snapshot object, LRU eviction at 4 views (HLOD_MAX_VIEWS). ViewSet::remove_view releases the reservation on every drop, so nothing leaks from an old epoch.
+Policy-hash invalidation is delegated to ViewSet (tau, tile area, caps are in its policy hash; same inputs as the old renderer hash). A snapshot or caps that outgrow the reservation are repaired by one re-admission against the current snapshot, otherwise an explicit refusal.
+prepare_hlod_frame builds a SelectionSnapshot from the publisher inputs: one asset, one identity-placed instance holding the view caps (single-asset scope; no multi-asset world). The snapshot is a reused member, refilled in place per frame. Budget = remaining route headroom (route_limit - route_bytes); GPU-side sort/record/draw buffers and payload are already inside the route ledger, so ViewSet charges only the CPU histories and draw records it allocates (no double count). The 80% admission factor and every cap are untouched.
+Fallback mapping (hlod_fallback_for_view/admission/snapshot): only a READY view is active. LOADING, NOT_ADMITTED, FAILED, every admission refusal and snapshot over-budget map to the canonical route with an explicit hlod_reason. READY with zero records is the selector's EMPTY status (everything culled), a complete empty cut, as before.
+Telemetry: hlod_budget_bound_frames, hlod_root_dropped_frames, hlod_reason keep their meaning and the old reason strings where the cut status is still known (hlod_bootstrap_*, cut_unavailable, complete_view_history_unavailable). New reasons: hlod_view_budget_refused, hlod_view_limit_refused, hlod_view_caps_refused, hlod_view_resources_refused, hlod_view_key_conflict, hlod_view_admission_invalid, hlod_snapshot_over_budget, hlod_snapshot_invalid, hlod_view_reservation_exceeded, hlod_view_not_admitted, hlod_view_failed. The old cut_status_unmapped cannot occur any more. Consumers grepped (tests/runtime GDScript and python): they match only active, unsupported_view_or_material and resource_ledger_warmup_or_unavailable, all unchanged. hlod_cpu_cut_usec now also covers a first-frame or re-admission admission.
+ViewSet::ViewResult gained visited_nodes (telemetry hlod_visited_nodes).
+Publish order: draw entries are now in NodeKey order instead of CutHistory order. Verified downstream: the list is a lookup table (depth_compute.glsl stores the chunk index per splat from an atomic append; tile_binning.glsl reads entries[index]); splat order comes from the atomic append plus the depth sort, so no sort key, fade pair or telemetry depends on entry order (hlod_selected_parents is a count). GPU confirmation is part of the end-of-stack run.
+Deleted
+HlodViewSlot, hlod_views[4], acquire_hlod_history, hlod_history_bytes (unused), clear_hlod_histories, the renderer-side tau/capacity/records policy hash and the per-status switch in prepare_hlod_frame. No dead old slots remain.
+Intended behavior changes versus base
+Selection is not identical to base: the NodeKey tie rank is now passed to the selector, so tied priorities under a binding budget can choose a different (array-order independent) cut.
+node_budget is clamped to the asset node count (slot.node_count); where base fell back on node_budget > capacity, the head goes active.
+CutHistory::INVALID now maps to hlod_view_failed (was cut_unavailable).
+Review-fix round
+Headroom shrink no longer flaps: ViewSet::select withdraws a view only when shared payload plus that view own reservation exceeds the budget, not when the total of all views dips under it (SNAPSHOT_OVER_BUDGET is reported only then). Test: headroom below the total but above each reservation keeps both views READY with no re-admission; below one reservation the view is withdrawn with hlod_view_budget_refused.
+Tie ranks are cached per (asset key, snapshot object, content revision, node count) and shared by slots (tie_rank_builds() counter); re-admission of unchanged content computes nothing, a new revision builds one table. The cache is pruned on admit/remove, never per frame.
+Stale bindings: before every admission, bindings whose buffers no longer resolve in ObjectDB or whose token epoch/target is stale are evicted (evict_stale_hlod_bindings, injectable liveness check). Test: a freed most-recently-used view is evicted while the LRU view is kept, and a freed view releases budget.
+acquire_hlod_identity: the pure part (hlod_identity_from_token) and the token epoch behavior (configure, free_data, configure(null)) are unit-tested, as are the no-target and null-buffers refusals. NOT unit-tested: the success path through a live RenderSceneBuffersRD with a valid render target and the custom-data slot (needs a device); the GPU gate covers it.
+The reusable snapshot releases its runtime data Ref after every prepare_hlod_frame (scope guard); test checks the reference count.
+Mutants, each failing its case: total-based affordability, no rank cache, no stale eviction.
+Tests (CPU)
+7 new cases in tests/test_hlod_view_set.cpp: view admitted, reused, refused and re-admitted across buffer lifetime, epoch, target, source and LRU; policy change invalidation through the manager; fallback mapping for every readiness, admission and snapshot state, end to end.
+HLOD (*HLOD*, [RequiresGPU] excluded): 117 cases / 500,640 assertions, 0 failures (base 110 / 500,450). WorldIO: 110 / 499,636, 0 failures (unchanged). Existing runtime-cut and HLOD suites unchanged and passing.
+run_module_tests.py --guard-only (GS_CI_BASE_REF=origin/feat/hlod-stack-06-b2-views): rc 0. No GPU struct touched. python -m unittest discover -s tests/agentic: 166 OK.
+Binary: scons line of stack-06, exe mtime 2026-10-28 14:52:34. Runtime-cut suite 7 / 2,000.
+Fail-on-base: the base has no select_hlod_view, so the cases do not compile there. Mutants on the head, each failing exactly its case: epoch check removed from the binding match (lifetime case, 3 assertions), ViewSet policy invalidation removed (policy case, 2), LOADING mapped to active (mapping case, 5+). Restored source passes.
+Not covered
+acquire_hlod_identity (the RenderSceneBuffersRD custom-data token) needs a live buffers object and is only exercised by the GPU gate.
+NOT_RUN
+GPU runs, runtime harness, benchmarks, real-scan coverage/quality captures: NOT_RUN (run once at the end of the stack). CPU tests alone do not satisfy the GPU/real-scan gates.
+🤖 Generated with Claude Code
+klausi3D
+mentioned this pull request
+Oct 28, 2026
+gaussian_splatting: HLOD C1 — precise world frame, origin revision, per-draw camera-relative offset
+#1285
+Draft
+klausi3D
+force-pushed
+the
+feat/hlod-stack-06-b2-views
+branch
+from
+5886404 to
+4c3a88d
+Compare
+October 29, 2026 18:01
+klausi3D
+force-pushed
+the
+feat/hlod-stack-07-b3-wiring
+branch
+from
+77373a2 to
+f300444
+Compare
+October 29, 2026 18:01
+klausi3D
+and others
+added 3 commits
+October 30, 2026 22:40
+gaussian_splatting: HLOD B3 — renderer owns per-view cuts through Vie…
+…
+4e685c3
+```
+…wSet (Refs #1131)
+
+Replace the four per-buffer HlodViewSlot histories with gs_hlod_runtime::ViewSet,
+keyed by RenderSceneBuffersRD id and lifetime epoch; map every non-ready
+readiness/admission result to the canonical route with explicit hlod_reason.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+gaussian_splatting: HLOD B3 review fixes — keep affordable reservatio…
+…
+46369a2
+```
+…ns, cache tie ranks, evict stale bindings (Refs #1131)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+gaussian_splatting: follow the CutHistory::SelectStatus rename in thi…
+…
+4ce21d6
+```
+…s layer
+
+Uses of CutHistory::Status added by this layer now refer to SelectStatus
+(X11/Xlib.h #defines Status; see the rename on the resident-runtime layer).
+No behaviour change.
+
+Refs #1131
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+klausi3D
+force-pushed
+the
+feat/hlod-stack-06-b2-views
+branch
+from
+4c3a88d to
+ecb68cd
+Compare
+October 30, 2026 21:48
+klausi3D
+force-pushed
+the
+feat/hlod-stack-07-b3-wiring
+branch
+from
+f300444 to
+4ce21d6
+Compare
+October 30, 2026 21:48
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

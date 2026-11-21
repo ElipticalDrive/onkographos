@@ -1,0 +1,241 @@
+# Projected Tetrahedra
+
+Also called: Shirley and Tuchman, Shirley-Tuchman Method
+
+## Overview
+Projected Tetrahedra (PT) is an object-order (cell-projection) volume rendering technique that renders unstructured tetrahedral meshes by projecting individual tetrahedra onto the screen, decomposing them into triangles, and compositing them in back-to-front order [S1, S2, S5, unofficial][S9]. It solves the problem of visualizing complex, non-convex, or disconnected unstructured data (such as finite element meshes) with high geometric fidelity, avoiding the stair-stepping artifacts of voxel-based methods [S2, S3, S4, unofficial]. Unlike [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md), which extracts an isosurface mesh, PT renders the volume itself using translucent triangles [S2, unofficial][S14]. Unlike [Early Tetrahedron Termination](1451-early-tetrahedron-termination.md) or [TetraSDF](11632-tetrasdf.md), PT relies on explicit geometric decomposition and hardware rasterization rather than ray-marching or signed distance fields [S1, S3, S12, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A tetrahedral mesh $M_T$ where each vertex $V_i$ has an associated scalar value $s_i$ [S1, S11, unofficial]. The mesh may be derived from decomposing hexahedral cells (typically 5 tetrahedra per cube) [S11, S16, unofficial].
+*   **Output:** A 2D image with color and opacity per pixel, composited via the Porter-Duff "over" operator [S12, unofficial][S9].
+
+**Data Structures:**
+*   **Tetrahedron:** Defined by 4 vertices $V_0, V_1, V_2, V_3$ [S17].
+*   **Basis Graph (GPU Implementation):** A fixed topology of 5 vertices: the 4 real tetrahedron vertices plus 1 "phantom" vertex $V_P$ [S15, unofficial][S17]. The topology is a `GL_TRIANGLE_FAN` starting at $V_P$, then $V_0, V_1, V_2, V_3$, closing back to $V_0$ [S15, unofficial]. This allows a single vertex shader program to handle all projection classes by dynamically computing coordinates or swapping vertices [S15, unofficial][S17].
+*   **Classification Texture (GPU):** A 1D texture mapping test permutations to projection class and vertex order [S10].
+*   **Transfer Function:** A lookup table (LUT) or 2D texture mapping scalar values to color $C(s)$ and extinction coefficient $\tau(s)$ [S7, S9]. Pre-integrated tables (e.g., $\psi$ table) may be used to support arbitrary transfer functions [S9, S10].
+
+**Numbered Steps:**
+
+1.  **Preprocessing (View-Dependent):**
+    *   Calculate plane equations for each face of every tetrahedron to determine visibility relative to the viewpoint [S6, S13, unofficial].
+    *   Compute the gradient $\bar{g}$ of the scalar field within each tetrahedron [S19].
+    *   [G] Initialize the view matrix and projection matrix.
+
+2.  **Visibility Sorting:**
+    *   Sort all tetrahedra in back-to-front order with respect to the eyepoint [S1, S6, unofficial][S7].
+    *   Common approximation: Sort by centroid depth [S14]. For higher accuracy, use Williams' MPVO (Maximum Projection Volume Order) or k-buffer sorting [S10][S13, unofficial].
+
+3.  **Projection and Classification (Per Tetrahedron):**
+    *   Transform the four vertices $V_0..V_3$ to screen space [S2, S15, unofficial].
+    *   Classify the tetrahedron based on the visibility of its faces relative to the viewpoint. The classification is determined by the signs of the dot products of the view vector with the face normals, or equivalently by the z-components of cross products in screen space [S16, S15, unofficial].
+    *   There are four projection classes [S5, S16, unofficial]:
+        *   **Class 1:** All 4 faces visible (+ + + +). Decomposes into 3 triangles.
+        *   **Class 2:** 3 faces visible, 1 hidden (+ + + -). Decomposes into 4 triangles.
+        *   **Class 3:** 2 faces visible, 2 hidden (+ + - - or + - + -). Degenerate case of Class 1 or 2.
+        *   **Class 4:** 1 face visible, 3 hidden (+ - - -). Degenerate case.
+    *   [G] Handle degenerate cases (Class 3/4) by creating zero-area triangles or skipping them [S15, unofficial].
+
+4.  **Decomposition into Triangles:**
+    *   Decompose the projected outline of the tetrahedron into one to four triangles based on the classification [S2, S5, S12, unofficial].
+    *   Identify the "thick vertex" $v_t$: the point on the ray segment traversing the maximum distance through the tetrahedron [S9].
+        *   For Class 2, $v_t$ is the intersection of the front and back edges [S9].
+        *   For other classes, $v_t$ is one of the projected vertices [S9].
+    *   The other vertices are "thin vertices" [S9].
+
+5.  **Attribute Computation (Color and Opacity):**
+    *   Compute the scalar values at the ray's entry ($s_f$) and exit ($s_b$) points [S9].
+    *   For thin vertices, $s_f = s_b = s_v$ (the scalar value at the vertex) [S9][S11, unofficial].
+    *   For the thick vertex, interpolate $s_f$ and $s_b$ from the thin vertices if necessary [S9][S11, unofficial].
+    *   Compute the thickness $l$ of the cell along the viewing ray (distance traversed by the ray segment) [S9, S10].
+    *   Map $s_f$ and $s_b$ to chromaticity $C(s)$ and extinction coefficient $\tau(s)$ using the transfer function [S9].
+    *   Compute opacity $\alpha$ for the thick vertex:
+        $$ \alpha = 1 - e^{-\tau_{avg} \cdot l} $$
+        where $\tau_{avg} = (\tau(s_f) + \tau(s_b)) / 2$ [S9, S10].
+    *   Compute color $C$ for the thick vertex as the average of $C(s_f)$ and $C(s_b)$ [S9].
+    *   Thin vertices are rendered with zero opacity and their original chromaticity $C(s_v)$ [S9].
+    *   [G] In GPU implementations, these values are often computed in a vertex shader or fragment shader using texture lookups [S10][S15, unofficial].
+
+6.  **Rasterization and Compositing:**
+    *   Render the decomposed triangles using hardware rasterization [S2, S6, unofficial].
+    *   Use backface culling to render only front faces if applicable [S19].
+    *   Composite the fragments into the framebuffer in back-to-front order using the Porter-Duff "over" operator [S12, unofficial][S9]:
+        $$ I_{new} = \alpha C + (1 - \alpha) I $$
+        where $I$ is the previous framebuffer color, $C$ is the fragment color, and $\alpha$ is the fragment opacity [S9, S10].
+
+**Pseudocode (CPU/GPU Hybrid Approach):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_projected_tetrahedra(tetrahedra, view_matrix, projection_matrix, transfer_function, width, height):
+    # Step 1: Preprocessing
+    for tet in tetrahedra:
+        tet.compute_plane_equations()
+        tet.compute_gradient()
+
+    # Step 2: Visibility Sorting
+    def centroid_depth(tet):
+        cx = sum(v.x for v in tet.vertices) / 4.0
+        cy = sum(v.y for v in tet.vertices) / 4.0
+        cz = sum(v.z for v in tet.vertices) / 4.0
+        return view_matrix.project_z(cx, cy, cz)
+
+    tetrahedra.sort(key=centroid_depth)
+
+    # Step 3 & 4: Projection, Classification, Decomposition
+    triangles_to_render = []
+    for tet in tetrahedra:
+        screen_verts = [projection_matrix.transform(v) for v in tet.vertices]
+        v0, v1, v2, v3 = screen_verts
+
+        # Classify using cross products in screen space [S15, unofficial]
+        c1 = (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0])
+        c2 = (v1[0]-v0[0])*(v3[1]-v0[1]) - (v1[1]-v0[1])*(v3[0]-v0[0])
+        c3 = (v2[0]-v0[0])*(v3[1]-v0[1]) - (v2[1]-v0[1])*(v3[0]-v0[0])
+
+        test1 = (c1 * c2 < 0)
+        test2 = (c1 * c3 > 0)
+        class_id = 1 if (test1 and test2) else (2 if test1 else 3)
+
+        # Decompose into triangles [S5, S12, unofficial]
+        if class_id == 1:
+            tri_indices = [(0, 1, 2), (0, 2, 3)]
+        else:
+            tri_indices = [(0, 1, 2), (0, 2, 3), (0, 3, 1)]
+
+        # Step 5: Attribute Computation
+        l = tet.compute_thickness(view_matrix)
+        g = tet.gradient
+        d = view_matrix.direction
+        s_f = tet.scalar_at_entry(g, d)
+        s_b = s_f + (g.dot(d)) * l
+        tau_avg = (transfer_function.tau(s_f) + transfer_function.tau(s_b)) / 2.0
+        alpha_thick = 1.0 - math.exp(-tau_avg * l)
+        color_thick = (transfer_function.color(s_f) + transfer_function.color(s_b)) / 2.0
+
+        for tri in tri_indices:
+            verts = [screen_verts[i] for i in tri]
+            attrs = []
+            for i in tri:
+                if i == 0: # Thick vertex placeholder for Class 1/2
+                    attrs.append({'pos': verts[i], 'alpha': alpha_thick, 'color': color_thick})
+                else:
+                    attrs.append({'pos': verts[i], 'alpha': 0.0, 'color': transfer_function.color(tet.scalar_at(i))})
+            triangles_to_render.append({'verts': verts, 'attrs': attrs})
+
+    # Step 6: Rasterization and Compositing
+    framebuffer = [[(0.0, 0.0, 0.0), 0.0] for _ in range(width * height)]
+    for tri_data in triangles_to_render:
+        for y in range(int(min(v[1] for v in tri_data['verts'])), int(max(v[1] for v in tri_data['verts']))):
+            for x in range(int(min(v[0] for v in tri_data['verts'])), int(max(v[0] for v in tri_data['verts']))):
+                alpha_f, color_f = interpolate_barycentric(x, y, tri_data['verts'], tri_data['attrs'])
+                if alpha_f > 0.0:
+                    idx = y * width + x
+                    prev_c, prev_a = framebuffer[idx]
+                    new_c = alpha_f * color_f + (1.0 - alpha_f) * prev_c
+                    new_a = alpha_f + prev_a * (1.0 - alpha_f)
+                    framebuffer[idx] = (new_c, new_a)
+
+def interpolate_barycentric(x, y, verts, attrs):
+    # Standard barycentric interpolation for fragment attributes
+    v0, v1, v2 = verts
+    a0, a1, a2 = attrs
+    denom = (v1[1]-v2[0])*(v0[0]-v2[0]) + (v2[0]-v1[0])*(v0[1]-v2[1])
+    w0 = ((v1[1]-v2[1])*(x-v2[0]) + (v2[0]-v1[0])*(y-v2[1])) / denom
+    w1 = ((v2[1]-v0[1])*(x-v2[0]) + (v0[0]-v2[0])*(y-v2[1])) / denom
+    w2 = 1.0 - w0 - w1
+    alpha_f = w0*a0['alpha'] + w1*a1['alpha'] + w2*a2['alpha']
+    color_f = w0*a0['color'] + w1*a1['color'] + w2*a2['color']
+    return alpha_f, color_f
+```
+
+**Parameters:**
+*   **Transfer Function:** Maps scalar values to color and opacity. Can be a 1D LUT or 2D texture (indexed by scalar and thickness) [S7, S9].
+*   **Sorting Algorithm:** Centroid sort (fast, approximate) or MPVO/k-buffer (accurate, slow) [S10][S13, unofficial].
+*   **Basis Graph:** Fixed 5-vertex topology for GPU vertex shaders [S15, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Sorting Accuracy:** Centroid sorting is not 100% accurate and can lead to visual artifacts, especially with elongated cells or complex overlaps [S10, S14].
+*   **Degeneracy:** Classes 3 and 4 are degenerate cases where a vertex is projected onto an edge or another vertex [S9][S15, unofficial].
+*   **Precision:** Linear interpolation of opacity can cause Mach banding artifacts [S18, book][S23, unofficial].
+*   **GPU Constraints:** Vertex shaders lack branching and dynamic vertex creation, requiring redundant calculations for all projection classes [S15, unofficial][S17].
+*   **Edge Artifacts:** Interpolation weights becoming zero at edges can cause loss of classification and erroneous zero thickness lookup [S19].
+
+## Subtopics
+
+### [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md)
+Tetrahedral Volume Rendering (Tetrahedral VR) is a cell-projection technique that renders unstructured tetrahedral meshes by projecting individual tetrahedra onto the screen and compositing them in depth order. It solves the problem of visualizing complex, non-convex, or disconnected unstructured data (such as finite element meshes) with high geometric fidelity, avoiding the stair-stepping artifacts of voxel-based methods. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md), which generates triangles for hardware rasterization, this method typically follows a two-pass GPU pipeline or a differentiable rasterization approach. The core logic involves projecting tetrahedra, determining their screen-space geometry, computing ray intersections, and accumulating color/opacity.
+
+### [Cell Projection of Tetrahedral Meshes (Data Transfer Optimization)](1499-cell-projection-of-tetrahedral-meshes-data-transfer-optimiza.md)
+This method addresses the data transfer bottleneck between the CPU and the graphics board in unstructured volume visualization by employing a view-independent description of the mesh. It builds a fixed set of data in a preprocessing step that is reused every frame, allowing for caching and pre-compilation of transfer data. Unlike its sibling [Projected Tetrahedra](877-projected-tetrahedra.md), which produces a continuous stream of triangles that cannot be combined to blocks without significant overhead, this approach pre-defines the geometry to optimize bandwidth usage through OpenGL mechanisms.
+
+### [Alternating Tetrahedral Decomposition](3183-alternating-tetrahedral-decomposition.md)
+Alternating Tetrahedral Decomposition is a method for converting a structured hexahedral grid into a tetrahedral mesh by partitioning each cubic cell into five tetrahedra. It solves the topological consistency problem inherent in decomposing cubes, where using a single decomposition pattern for all cells creates T-junctions and discontinuities at shared faces. It sets itself apart from non-alternating schemes by ensuring that adjacent cells share common faces, maintaining the manifold topology required for correct ray-primitive traversal and data interpolation.
+
+### [Hardware-Assisted Projection](5625-hardware-assisted-projection.md)
+Hardware-Assisted Projection is a family of volume rendering techniques that project 3D geometric primitives (tetrahedra, polyhedra, or hexahedra) onto the 2D image plane to leverage the graphics pipeline's rasterization and blending hardware. It solves the performance bottleneck of software-based raycasting by replacing irregular memory access with global back-to-front sorting and hardware-accelerated compositing. Unlike sibling methods that may use local sorting, additive accumulation, or specific decomposition strategies, this family is defined by the reliance on explicit depth sorting of cells to ensure correct alpha blending via the Porter-Duff "over" operator, or additive accumulation in absorption-only regimes.
+
+### [Sorting-free Projected Tetrahedra](7393-sorting-free-projected-tetrahedra.md)
+Sorting-free Projected Tetrahedra (SPT) is a volume rendering technique for irregular tetrahedral datasets that approximates back-to-front accumulation using stochastic color composition, thereby eliminating the need for explicit visibility sorting. Unlike its sibling [Projected Tetrahedra](877-projected-tetrahedra.md), which requires sorting tetrahedra before rendering, SPT controls particle rendering via opacity as a probability in the rasterization process, avoiding the sorting artifacts inherent in k-buffer methods like [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) (HAVS).
+
+### [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md)
+GPU-based Projected Tetrahedra is a method for interactive volume rendering of unstructured tetrahedral data that shifts the geometric classification and decomposition of cells from the CPU to the GPU using programmable vertex shaders. It solves the performance bottleneck of traditional Projected Tetrahedra (PT) by avoiding redundant projections and pre-processing, allowing for the rendering of large datasets at interactive rates. It differs from standard PT by executing the classification logic within the vertex shader program rather than on the CPU, and from ray-casting approaches by occupying a substantially smaller memory footprint while achieving competitive frame rates.
+
+### [Texture-Encoded Isosurfacing](7682-texture-encoded-isosurfacing.md)
+Texture-Encoded Isosurfacing is a GPU-based technique for extracting isosurfaces from unstructured tetrahedral grids by using 2D texturing hardware to compute intersections. It sets itself apart from sibling methods like [Projected Tetrahedra](877-projected-tetrahedra.md) by using the decomposition step of the PT algorithm to create smaller tetrahedra instead of triangles, then projecting their front and back faces to leverage a checkerboard texture for intersection computation.
+
+#### Hybrid Screen-Space Projection Ray Casting
+A method for irregular grids that projects volumetric primitives (tetrahedra) onto screen space to determine visibility order, then casts rays through the resulting 2D triangle list to fetch scalar values [S1, unofficial]. It decomposes each volumetric primitive into faces, projects all triangles onto the screen to determine visibility order, and casts a ray through the projected triangles to generate a depth-sorted list of intersections [S1, unofficial]. Volume rendering is performed by linearly interpolating between adjacent faces, assuming linear opacity and intensity contribution for each tetrahedron [S1, unofficial]. The list of triangles per pixel must be updated whenever the viewpoint changes, requiring a sorting step [S1, unofficial]. Rendering time was 11 seconds for a $256^2$ viewport and up to 100 seconds for a $1024^2$ viewport on an SGI Power Challenge, with a sorting step time of ~2 seconds per viewpoint change [S1, unofficial].
+
+#### CellFast
+A software algorithm for interactive unstructured volume rendering that moves computations for order-independent transparency and volume scan conversion from CPU to graphics hardware, eliminating the need for a software sorting pass [S24, unofficial]. It preprocesses the dataset, visibility sorts cells back-to-front, tests plane equations to determine class (1-4), projects and splits cell unique front/back faces, computes color and opacity for the thick vertex, and scanconverts new triangles in hardware [S24, unofficial]. In the original CellFast implementation on OpenGL accelerated desktops, Steps II-V (visibility sorting, plane equation testing, projection/splitting, and color/opacity computation) saturate the host CPU, leaving the graphics hardware running below capacity [S24, unofficial]. An average of 3.4 triangles are written per tetrahedron during the splitting process [S24, unofficial].
+
+#### Min-Volume Ellipsoid Approximation
+A technique to approximate a tetrahedron's projection by finding the enclosing ellipsoid with the smallest volume, used to simplify constrained minimization over integrals with no closed form [S26]. It notes that the unit sphere is the min-volume ellipsoid for the unit tetrahedron, applies the transformation $T$ associated with the specific tetrahedron to the unit sphere, and transfers the transform $T$, point position, and scalar value to the GPU [S26]. A simple raycaster determines the projection of the ellipsoid, transforming rays using $T$ to cull fragments on the GPU based on simple ray-sphere intersection [S26]. The volume scaling factor is $\det(T)$, where $T$ is the transformation matrix mapping the unit tetrahedron to the target tetrahedron [S26]. Sub-pixel tetrahedra do not require reshaping, providing speedups [S26].
+
+#### Projected Tetrahedra with MPVONC
+The most popular technique for rendering unstructured tetrahedral meshes, combining Projected Tetrahedra with the MPVO with Non-Convexities sorting algorithm [S13, unofficial]. MPVONC sorting is not exact, leading to visual artifacts, but is fast and 'accurate enough' for most applications [S13, unofficial]. PT has accuracy and implementation issues leading to incorrect images, particularly regarding perspective projection and compositing accuracy on existing GPUs [S12, S13, unofficial]. Most existing codes do not generate strictly correct images and are often limited to parallel projections due to implementation limitations [S13, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of tetrahedra [S15, unofficial]. The visibility sorting step is a bottleneck, often $O(N \log N)$ or worse depending on the algorithm [S6, unofficial][S8, book].
+*   **Memory Complexity:** Substantially less than ray casting approaches because no topology information (e.g., adjacency lists) needs to be stored for traversal [S9][S11, unofficial]. Memory usage is approximately 20 bytes per tetrahedron (assuming 4 tets per vertex) in GPU implementations [S10].
+*   **Measured Performance:** Interactive rates (up to 2.0 M Tets/s) can be achieved on current graphics hardware with GPU-based implementations [S9]. Software implementations are significantly slower (seconds to minutes per frame) [S1, unofficial][S7].
+*   **Scaling:** Performance scales with the number of tetrahedra and the complexity of the transfer function [S15, unofficial]. Sorting performance degrades with complex overlaps [S8, book].
+*   **Strengths:** High geometric fidelity, efficient use of graphics hardware for rasterization and compositing, low memory footprint compared to ray casting [S1, unofficial][S9][S11, unofficial].
+*   **Limitations:** Requires visibility sorting, which is a bottleneck and can be inaccurate [S1, unofficial][S8, book][S10]. Degenerate cases and edge artifacts can occur [S9, S19]. Linear interpolation of opacity can cause Mach banding [S18, book][S23, unofficial].
+*   **When to Use:** Interactive visualization of unstructured tetrahedral meshes where geometric fidelity is important and sorting overhead is acceptable [S1, unofficial][S9].
+*   **When Not to Use:** When exact visibility ordering is critical and sorting is too slow, or when the dataset is too large for the sorting bottleneck [S1, unofficial][S8, book].
+
+## Background
+Projected Tetrahedra was proposed by Shirley and Tuchman in 1990 [S1, S2, S4, S5, unofficial][S9][S12, unofficial]. It was one of the first algorithms for projecting cells of unstructured grids, designed to utilize the geometry acceleration and rasterization of polygon rendering available in graphics hardware [S1, S6, unofficial]. The method has been widely adopted and extended, including GPU-based implementations using vertex shaders (e.g., GATOR algorithm) and optimizations for data transfer and sorting [S9, S10][S15, unofficial][S17]. It is a foundational technique in the field of unstructured volume rendering [S1, S3, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] Unstructured Volume Rendering Unstructured Volume Rendering.  Grid Types.  Structured Grids:.  uniform.  regular.  rectilinear.  curvilinear.  Unstructured Grids:.  regular.  irregular.  hybrid.  curv, https://www.slideserve.com/tmauriello/unstructured-volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-25 (unofficial)
+[S3] An Overview of Rendering from Volume Data --- including Surface and Volume Rendering, https://core.ac.uk/download/63614.pdf, fetched 2026-10-30 (unofficial)
+[S4] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
+[S5] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+[S6] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)
+[S7] Chapter 7. Irregular Grids: The Projected Tetrahedra Render ..., https://techpubs.jurassic.nl/library/manuals/4000/007-4389-010/sgi_html/ch07.html, fetched 2026-10-27
+[S8] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S9] PDF Volume and Isosurface Rendering with GPU-Accelerated Cell Projection*, https://graphics.tudelft.nl/~marroquim/publications/pdfs/marroquim-CGF2008.pdf, fetched 2026-10-27
+[S10] PDF GPU-Based Cell Projection for Interactive Volume Rendering, https://graphics.tudelft.nl/~marroquim/publications/pdfs/marroquim-sibgrapi2006.pdf, fetched 2026-10-27
+[S11] Volume and Isosurface Rendering with GPU‐Accelerated Cell Projection, https://www.researchgate.net/publication/227523087_Volume_and_Isosurface_Rendering_with_GPU-Accelerated_Cell_Projection, fetched 2026-10-27 (unofficial)
+[S12] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S13] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey of GPU-Based Volume Rendering of Unstructured Grids, fetched 2026-10-28 (unofficial)
+[S14] PDF Parallel Unstructured Volume Rendering in ParaView, https://www.kennethmoreland.com/documents/ParallelVolRen.pdf, fetched 2026-10-27
+[S15] (PDF) Tetrahedral projection using vertex shaders - ResearchGate, https://www.researchgate.net/publication/221247894_Tetrahedral_projection_using_vertex_shaders, fetched 2026-10-28 (unofficial)
+[S16] Projected Tetrahedra - DocsLib, https://docslib.org/doc/12619673/projected-tetrahedra, fetched 2026-10-27 (unofficial)
+[S17] Tetrahedral Projection using Vertex Shaders, https://www.kennethmoreland.com/gator/volvis2002.pdf, fetched 2026-10-28
+[S18] Cell projection of meshes with non-planar faces, https://digital.library.unt.edu/ark:/67531/metadc1408947/?q=projected tetrahedra, fetched 2026-10-28 (book)
+[S19] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based-view-independent-cell-projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29
+[S20] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
+[S21] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
+[S22] PDF Hardware-Assisted Visibility Sorting for Unstructured Volume Rendering, https://www.sci.utah.edu/~stevec/papers/havs.pdf, fetched 2026-10-29
+[S23] (PDF) An Architecture For Interactive Tetrahedral Volume ..., https://www.researchgate.net/publication/221257851_An_Architecture_For_Interactive_Tetrahedral_Volume_Rendering, fetched 2026-11-01 (unofficial)
+[S24] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)
+[S25] PDF Hardware-Assisted Point-Based Volume Rendering of Tetrahedral Meshes, https://www.sci.utah.edu/~eranders/papers/pbvr.pdf, fetched 2026-10-28 (unofficial)

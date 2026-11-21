@@ -1,0 +1,234 @@
+--- v001.md
++++ v002.md
+@@ -8,18 +8,18 @@
+ ## How it works
+ **Inputs:**
+-*   Primitive center coordinate in canonical space: $\mu \in \mathbb{R}^3$.
+-*   Timestamp: $t$.
+-*   Grid resolution: $R$.
+-*   Number of parallel hash functions: $k=128$.
+-*   Hash parameters: Matrix $A \in \mathbb{Z}^{k \times 3}$, vector $b \in \mathbb{Z}^k$, large prime $P$, and modulo basis $m$.
+-*   Number of frequency bands for time encoding: $L$.
++*   Primitive center coordinate in canonical space: $\mu \in \mathbb{R}^3$ [S1].
++*   Timestamp: $t$ [S1].
++*   Grid resolution: $R$ [S1].
++*   Number of parallel hash functions: $k=128$ [S1].
++*   Hash parameters: Matrix $A \in \mathbb{Z}^{k \times 3}$, vector $b \in \mathbb{Z}^k$, large prime $P$, and modulo basis $m$ [S1].
++*   Number of frequency bands for time encoding: $L$ [S1].
+ 
+ **Outputs:**
+-*   Deformation offsets: $\Delta \mu$ (Position, size 3), $\Delta s$ (Scale, size 3), $\Delta r$ (Rotation, size 4), $\Delta o$ (Opacity, size 1), $\Delta c$ (Spherical Harmonics, size 48).
++*   Deformation offsets: $\Delta \mu$ (Position, size 3), $\Delta s$ (Scale, size 3), $\Delta r$ (Rotation, size 4), $\Delta o$ (Opacity, size 1), $\Delta c$ (Spherical Harmonics, size 48) [S1].
+ 
+ **Data Structures:**
+-*   **Hash Feature Decoder:** A neural network consisting of Linear Layers interleaved with Mish activation functions and LayerNorm. It maps the high-dimensional hash signature to continuous deformation features.
+-*   **TimeMLP:** A shallow neural module processing the temporal feature.
+-*   **FiLM Generator:** A compact network regressing scale $\gamma(f_{time})$ and shift $\beta(f_{time})$ vectors.
++*   **Hash Feature Decoder:** A neural network consisting of Linear Layers interleaved with Mish activation functions and LayerNorm [S1]. It maps the high-dimensional hash signature to continuous deformation features [S1].
++*   **TimeMLP:** A shallow neural module processing the temporal feature [S1].
++*   **FiLM Generator:** A compact network regressing scale $\gamma(f_{time})$ and shift $\beta(f_{time})$ vectors [S1].
+ 
+ **Steps:**
+@@ -27,5 +27,5 @@
+ 1.  **Normalization:** Normalize the primitive's center coordinate $\mu$ to the unit cube:
+     $$ \hat{\mu} = \text{normalize}(\mu) \in [0, 1]^3 $$
+-    [G] Normalization is typically performed by subtracting the minimum coordinate and dividing by the range, or assuming the canonical space is already bounded.
++    [S1]
+ 
+ 2.  **Discretization:** Discretize $\hat{\mu}$ into an integer voxel index $v$ at resolution $R$:
+@@ -82,16 +82,7 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+ class ComputationalDeformationField:
+     def __init__(self, k=128, R=256, L=10, P=10**9 + 7, m=2**16):
+-        """
+-        Initialize CDF.
+-        :param k: Number of parallel hash functions (default 128).
+-        :param R: Grid resolution.
+-        :param L: Number of frequency bands for time encoding.
+-        :param P: Large prime for hash modulo.
+-        :param m: Modulo basis for hash.
+-        """
+         self.k = k
+         self.R = R
+@@ -100,11 +91,9 @@
+         self.m = m
+         
+-        # Hash parameters A and b
+-        # A: [k, 3], b: [k]
++        # Hash parameters A: [k, 3], b: [k]
+         self.A = nn.Parameter(torch.randint(0, m, (k, 3), dtype=torch.long))
+         self.b = nn.Parameter(torch.randint(0, m, (k,), dtype=torch.long))
+         
+-        # Hash Feature Decoder: Linear -> Mish -> LayerNorm -> ...
+-        # Assuming a simple structure for implementation clarity
++        # Hash Feature Decoder: Linear -> Mish -> LayerNorm
+         self.hash_decoder = nn.Sequential(
+             nn.Linear(k, 256),
+@@ -114,10 +103,10 @@
+             nn.Mish(),
+             nn.LayerNorm(128),
+-            nn.Linear(128, 64) # Output feature dimension per vertex
++            nn.Linear(128, 64)
+         )
+         
+         # TimeMLP
+         self.time_mlp = nn.Sequential(
+-            nn.Linear(2 * L + 1, 64), # Input size: t + 2*L trig values
++            nn.Linear(2 * L + 1, 64),
+             nn.Mish(),
+             nn.Linear(64, 32)
+@@ -128,5 +117,5 @@
+             nn.Linear(32, 64),
+             nn.Mish(),
+-            nn.Linear(64, 128) # Output 2 * feature_dim for scale and shift
++            nn.Linear(64, 128)
+         )
+         
+@@ -135,56 +124,24 @@
+             nn.Linear(128, 64),
+             nn.Mish(),
+-            nn.Linear(64, 3 + 3 + 4 + 1 + 48) # Total output dim
++            nn.Linear(64, 3 + 3 + 4 + 1 + 48)
+         )
+         
+         # Spatial projection weights for FiLM
+-        self.W_s = nn.Parameter(torch.eye(64)) # Assuming 64-dim spatial latent
++        self.W_s = nn.Parameter(torch.eye(64))
+         self.b_s = nn.Parameter(torch.zeros(64))
+ 
+     def sinusoidal_encoding(self, t):
+-        """
+-        Encode timestamp t using sinusoidal positional encoding.
+-        :param t: Scalar timestamp.
+-        :return: Encoded vector.
+-        """
+-        # t is scalar, shape [1]
+-        # fl = 2^(l-1)
+         freq_bands = torch.pow(2.0, torch.arange(self.L, device=t.device).float())
+-        # sin(2 * pi * fl * t)
+         sin_vals = torch.sin(2 * math.pi * freq_bands * t)
+         cos_vals = torch.cos(2 * math.pi * freq_bands * t)
+-        # Concatenate t, sin, cos
+         return torch.cat([t, sin_vals, cos_vals], dim=0)
+ 
+     def dense_hash_encode(self, coords):
+-        """
+-        Dense Hash Encoding for a batch of coordinates.
+-        :param coords: [N, 3] integer coordinates.
+-        :return: [N, k] normalized hash signatures.
+-        """
+-        # coords: [N, 3]
+-        # A: [k, 3], b: [k]
+-        # h_int = (coords @ A.T + b) % P % m
+-        # coords @ A.T -> [N, k]
+         h_int = (coords @ self.A.T + self.b) % self.P % self.m
+-        # Normalize to [-1, 1]
+-        # Assuming h_int is in [0, m-1]
+         h_norm = 2.0 * (h_int.float() / self.m) - 1.0
+         return h_norm
+ 
+     def trilinear_interpolate(self, features, coords_frac):
+-        """
+-        Trilinear interpolation of features at grid vertices.
+-        :param features: [8, D] features at the 8 corners.
+-        :param coords_frac: [3] fractional part of the normalized coordinate.
+-        :return: [D] interpolated feature.
+-        """
+-        # coords_frac: [x, y, z] in [0, 1]
+-        # Weights for each of the 8 corners
+-        # Corner index i corresponds to binary representation of i
+-        # w = (1-x)*(1-y)*(1-z) for (0,0,0)
+         x, y, z = coords_frac.unbind(dim=0)
+-        
+-        # Precompute weights
+         w000 = (1-x)*(1-y)*(1-z)
+         w100 = x*(1-y)*(1-z)
+@@ -195,61 +152,36 @@
+         w011 = (1-x)*y*z
+         w111 = x*y*z
+-        
+         weights = torch.stack([w000, w100, w010, w110, w001, w101, w011, w111])
+-        
+-        # features: [8, D]
+-        # Dot product
+         return torch.sum(weights.unsqueeze(1) * features, dim=0)
+ 
+     def forward(self, mu, t):
+-        """
+-        Forward pass of CDF.
+-        :param mu: [3] primitive center in canonical space.
+-        :param t: Scalar timestamp.
+-        :return: Deformation offsets.
+-        """
+-        # 1. Normalize mu to [0, 1]
+-        # Assuming mu is already in a bounded range, normalize to [0,1]
+-        # [G] Implementation detail: normalize based on scene bounds or assume unit cube
+-        mu_hat = mu # Placeholder for normalization logic if not already normalized
+-        
+-        # 2. Discretize to voxel index v
++        # [G] Canonical space is normalized to [0,1]^3; if input is unbounded, apply min-max normalization.
++        mu_hat = mu
+         v = torch.floor(self.R * mu_hat).long()
+         
+-        # 3. Generate 8 corner vertices
+-        # Binary offsets (dx, dy, dz) in {0, 1}^3
+         corners = []
+         for dx in [0, 1]:
+             for dy in [0, 1]:
+                 for dz in [0, 1]:
+-                    corner = v + torch.tensor([dx, dy, dz], dtype=torch.long)
++                    corner = v + torch.tensor([dx, dy, dz], dtype=torch.long, device=v.device)
+                     corners.append(corner)
+-        corners = torch.stack(corners) # [8, 3]
+-        
+-        # 4. Dense Hash Encoding
+-        h_sigs = self.dense_hash_encode(corners) # [8, k]
+-        
+-        # 5. Hash Feature Decoding
+-        vertex_features = self.hash_decoder(h_sigs) # [8, D]
+-        
+-        # 6. Trilinear Interpolation
+-        # Fractional part of mu_hat
++        corners = torch.stack(corners)
++        
++        h_sigs = self.dense_hash_encode(corners)
++        vertex_features = self.hash_decoder(h_sigs)
++        
+         frac = mu_hat - v.float() / self.R
+-        f_voxel = self.trilinear_interpolate(vertex_features, frac) # [D]
+-        
+-        # 7. Time Encoding
+-        gamma_t = self.sinusoidal_encoding(t) # [2L+1]
+-        
+-        # 8. Temporal Feature
+-        f_time = self.time_mlp(gamma_t) # [32]
+-        
+-        # 9. FiLM Fusion
+-        h_spatial = self.W_s @ f_voxel + self.b_s # [D]
+-        film_params = self.film_gen(f_time) # [2*D]
+-        gamma_film = film_params[:self.W_s.shape[0]] # [D]
+-        beta_film = film_params[self.W_s.shape[0]:] # [D]
++        f_voxel = self.trilinear_interpolate(vertex_features, frac)
++        
++        gamma_t = self.sinusoidal_encoding(t)
++        f_time = self.time_mlp(gamma_t)
++        
++        h_spatial = self.W_s @ f_voxel + self.b_s
++        film_params = self.film_gen(f_time)
++        D = vertex_features.shape[1]
++        gamma_film = film_params[:D]
++        beta_film = film_params[D:]
+         f_ST = gamma_film * h_spatial + beta_film
+         
+-        # 10. Deformation Prediction
+         offsets = self.deform_net(f_ST)
+         return offsets
+@@ -266,5 +198,4 @@
+ *   **Hash Collisions:** The design avoids resolving arbitrary hash collisions explicitly. Instead, the Hash Feature Decoder learns a joint mapping from high-dimensional signatures to continuous deformation features. Exact signature collisions are rare with $k=128$, and in the $N^{3D}$V query domain, full signatures produced zero exact duplicates across all queried voxel-corner coordinate sets [S1].
+ *   **Precision:** The hash operation involves modulo arithmetic with large primes, which may require careful handling of integer overflow in fixed-width integer types if implemented in lower-level languages [S1].
+-*   **Boundary Conditions:** The normalization of coordinates to $[0, 1]$ and subsequent discretization must handle coordinates outside the canonical space appropriately, potentially by clamping or extrapolation, though the sources do not specify explicit boundary handling beyond normalization [S1].
+ 
+ ## Operating characteristics

@@ -1,0 +1,198 @@
+--- v002.md
++++ v003.md
+@@ -11,7 +11,7 @@
+ 
+ **Data Structures:**
+-*   **White Noise Texture:** A 3D volume of random values, typically isotropic Gaussian or uniform noise, sampled along streamlines [S2, unofficial]. Exact layout and bit packing are not given in the sources.
+-*   **Dye Mask:** A 3D volume where non-zero values indicate the presence of dye. The value represents the color/intensity of the dye at that location [S2, unofficial]. Exact layout and bit packing are not given in the sources.
+-*   **Streamline Data:** Precomputed or on-the-fly streamline paths for each voxel, defined by their start points and integration directions [G]. Exact layout and bit packing are not given in the sources.
++*   **White Noise Texture:** A 3D volume of random values, typically isotropic Gaussian or uniform noise, sampled along streamlines [S2, unofficial]. Exact layout and bit packing are not given in the sources [G].
++*   **Dye Mask:** A 3D volume where non-zero values indicate the presence of dye. The value represents the color/intensity of the dye at that location [S2, unofficial]. Exact layout and bit packing are not given in the sources [G].
++*   **Streamline Data:** Precomputed or on-the-fly streamline paths for each voxel, defined by their start points and integration directions [G]. Exact layout and bit packing are not given in the sources [G].
+ 
+ **Steps:**
+@@ -34,55 +34,50 @@
+     
+     Args:
+-        vector_field: 3D array of vectors V(x,y,z).
+-        noise_texture: 3D array of noise values N(x,y,z).
+-        dye_mask: 3D array of dye colors M(x,y,z).
++        vector_field: 3D array of vectors V(x,y,z) with a sample(x,y,z) method.
++        noise_texture: 3D array of noise values N(x,y,z) with a sample(x,y,z) method.
++        dye_mask: 3D array of dye colors M(x,y,z) with a sample(x,y,z) method.
+         convolution_length: L, the integration length for LIC.
+-        camera: Object with screen_shape, height, width, and get_ray(x, y) method.
++        camera: Object with height, width, and get_ray(x, y) returning (origin, direction).
+         
+     Returns:
+         final_image: 2D array with base LIC and advected dye.
+     """
+-    # Step 1: Compute standard LIC for the base texture
+-    base_lic = compute_standard_lic(vector_field, noise_texture, convolution_length, camera)
+-    
+-    # Step 2: Identify cells affected by dye injection
+-    # A cell is affected if its backward streamline intersects the dye mask
+-    affected_cells = find_affected_cells(vector_field, dye_mask, convolution_length)
+-    
+-    # Step 3: Compute dye-specific LIC for affected cells only
+-    # Convolve dye mask along BACKWARD streamlines for affected cells
+-    dye_lic = compute_dye_lic(vector_field, dye_mask, affected_cells, convolution_length, camera)
+-    
+-    # Step 4: Composite results
+-    # Overwrite base LIC pixels with dye LIC pixels where dye is present
+-    final_image = base_lic.copy()
+-    for y in range(camera.height):
+-        for x in range(camera.width):
+-            if dye_lic[y, x] != 0:
+-                final_image[y, x] = dye_lic[y, x]
+-                
++    height, width = camera.height, camera.width
++    F_out = [[0.0] * width for _ in range(height)]
++    D_out = [[0.0] * width for _ in range(height)]
++    num_samples = 100  # Integration discretization [G]
++
++    for y in range(height):
++        for x in range(width):
++            ray_origin, ray_direction = camera.get_ray(x, y)
++
++            # 1. Compute base LIC F_out(x,y) along both directions
++            samples_fwd = integrate_streamline(vector_field, ray_origin, ray_direction, convolution_length, num_samples)
++            samples_bwd = integrate_streamline(vector_field, ray_origin, [-d for d in ray_direction], convolution_length, num_samples)
++            # Standard LIC averages samples from both directions
++            all_samples = [(s_f + s_b) / 2.0 for s_f, s_b in zip(samples_fwd, samples_bwd)]
++            F_out[y][x] = convolve_1d(all_samples, convolution_length)
++
++            # 2. Check if backward streamline passes through dye
++            is_affected = any(dye_mask.sample(s[0], s[1], s[2]) != 0.0 for s in samples_bwd)
++
++            # 3. Compute dye LIC D_out(x,y) only for affected cells, backward only
++            if is_affected:
++                dye_samples = [dye_mask.sample(s[0], s[1], s[2]) for s in samples_bwd]
++                D_out[y][x] = convolve_1d(dye_samples, convolution_length)
++            else:
++                D_out[y][x] = 0.0
++
++    # 4. Composite: overwrite F_out with D_out where D_out is non-zero
++    final_image = [[0.0] * width for _ in range(height)]
++    for y in range(height):
++        for x in range(width):
++            if D_out[y][x] != 0.0:
++                final_image[y][x] = D_out[y][x]
++            else:
++                final_image[y][x] = F_out[y][x]
+     return final_image
+ 
+-def compute_standard_lic(vector_field, noise, L, camera):
+-    """
+-    Computes standard LIC by convolving noise along streamlines in both directions.
+-    """
+-    image = [[0.0] * camera.width for _ in range(camera.height)]
+-    kernel_size = int(2 * L) + 1
+-    kernel = [1.0 / kernel_size] * kernel_size
+-    
+-    for y in range(camera.height):
+-        for x in range(camera.width):
+-            ray_origin, ray_direction = camera.get_ray(x, y)
+-            # Integrate forward and backward
+-            samples_fwd = integrate_streamline(vector_field, ray_origin, ray_direction, L)
+-            samples_bwd = integrate_streamline(vector_field, ray_origin, [-d for d in ray_direction], L)
+-            # Combine samples (standard LIC usually averages or sums)
+-            all_samples = [s_fwd + s_bwd for s_fwd, s_bwd in zip(samples_fwd, samples_bwd)]
+-            # Apply LIC filter kernel
+-            image[y][x] = convolve_1d(all_samples, kernel)
+-    return image
+-
+-def integrate_streamline(field, origin, direction, length):
++def integrate_streamline(field, origin, direction, length, num_samples):
+     """
+     Integrates along a streamline, sampling the field.
+@@ -90,74 +85,27 @@
+     samples = []
+     pos = list(origin)
+-    step = length / 100
++    step = length / num_samples
+     dir_len = (direction[0]**2 + direction[1]**2 + direction[2]**2)**0.5
+     norm_dir = [d / dir_len for d in direction]
+     
+-    for _ in range(100):
+-        samples.append(field.sample(pos))
++    for _ in range(num_samples):
++        samples.append(field.sample(pos[0], pos[1], pos[2]))
+         pos = [pos[i] + norm_dir[i] * step for i in range(3)]
+     return samples
+ 
+-def find_affected_cells(field, dye_mask, L):
++def convolve_1d(data, length):
+     """
+-    Identifies cells whose backward streamlines pass through the dye mask.
++    1D convolution with a box filter kernel of size 2*L+1.
+     """
+-    affected = []
+-    # Iterate over grid cells (or use fast search algorithm)
+-    for cell in field.grid_cells:
+-        # Trace backward from cell
+-        samples = integrate_streamline(field, cell.center, [-v for v in field.vector_at(cell.center)], L)
+-        # Check if any sample falls within dye_mask
+-        for s in samples:
+-            if dye_mask.sample(s) != 0:
+-                affected.append(cell)
+-                break
+-    return affected
+-
+-def compute_dye_lic(field, dye_mask, affected_cells, L, camera):
+-    """
+-    Computes LIC using the dye mask along backward streamlines for affected cells.
+-    """
+-    dye_image = [[0.0] * camera.width for _ in range(camera.height)]
+-    kernel_size = int(2 * L) + 1
++    kernel_size = int(2 * length) + 1
+     kernel = [1.0 / kernel_size] * kernel_size
+-    
+-    for cell in affected_cells:
+-        # Map cell to screen pixel (simplified projection)
+-        pixel = project_to_screen(cell.center, camera)
+-        if pixel is not None:
+-            y, x = pixel
+-            # Trace backward from cell
+-            samples = integrate_streamline(field, cell.center, [-v for v in field.vector_at(cell.center)], L)
+-            # Sample dye mask along backward path
+-            dye_samples = [dye_mask.sample(s) for s in samples]
+-            # Apply LIC filter
+-            dye_image[y][x] = convolve_1d(dye_samples, kernel)
+-    return dye_image
+-
+-def convolve_1d(data, kernel):
+-    """
+-    1D convolution with valid boundaries.
+-    """
+     n = len(data)
+-    k = len(kernel)
+     result = 0.0
+     for i in range(n):
+-        for j in range(k):
+-            idx = i - (k // 2) + j
++        for j in range(kernel_size):
++            idx = i - (kernel_size // 2) + j
+             if 0 <= idx < n:
+                 result += data[idx] * kernel[j]
+     return result
+-
+-def project_to_screen(point, camera):
+-    """
+-    Projects a 3D point to a 2D screen coordinate.
+-    """
+-    # Simplified orthographic projection for demonstration
+-    if camera.min_x <= point[0] <= camera.max_x and camera.min_y <= point[1] <= camera.max_y:
+-        x = int((point[0] - camera.min_x) / (camera.max_x - camera.min_x) * camera.width)
+-        y = int((point[1] - camera.min_y) / (camera.max_y - camera.min_y) * camera.height)
+-        return (y, x)
+-    return None
+ ```
+ 
+@@ -176,5 +124,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The complexity is dominated by the streamline integration and convolution. For each frame, standard LIC is computed for all pixels ($O(N)$ where $N$ is the number of pixels) [S1, unofficial]. The dye advection step requires identifying affected cells and computing LIC only for them [S2, unofficial]. With the fast searching algorithm, the number of affected cells is proportional to the dye volume and flow velocity, making it significantly faster than recomputing LIC for the entire volume [S1, unofficial].
++*   **Time Complexity:** The complexity is dominated by the streamline integration and convolution. For each frame, standard LIC is computed for all pixels ($O(N)$ where $N$ is the number of pixels) [S1, S2, unofficial]. The dye advection step requires identifying affected cells and computing LIC only for them [S2, unofficial]. With the fast searching algorithm, the number of affected cells is proportional to the dye volume and flow velocity, making it significantly faster than recomputing LIC for the entire volume [S1, unofficial].
+ *   **Memory Complexity:** Requires storage for the vector field, noise texture, dye mask, and streamline data [G]. The fast searching algorithm reduces memory overhead by avoiding exhaustive neighbor lists [S1, unofficial].
+ *   **Strengths:** Allows dynamic, interactive injection of dye to highlight specific flow features; preserves the visual quality of standard LIC; provides clear directional information for local flow structures [S1, S2, unofficial].

@@ -1,0 +1,93 @@
+# Density Mapping Layer
+
+Also called: fea2denseAct
+
+## Overview
+The Density Mapping Layer derives the volumetric density $\sigma$ of a sample point from its queried feature vector [S1]. It serves as the final conversion step in explicit neural feature volume architectures, translating implicit geometric features into physical rendering properties [S1]. It differs from its parent, the [Density Activation](2421-density-activation.md), by performing a specific transformation from feature space to scalar density, whereas the parent handles the non-linear activation of those features [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Feature vector $\mathbf{F}(\mathbf{x}_i)$ for sample point $\mathbf{x}_i$.
+*   Output: Scalar density value $\sigma$.
+
+**Data Structures:**
+*   Feature vector $\mathbf{F}$: Dimensionality depends on the bottleneck size. The source specifies a bottleneck feature size of 256 [S1].
+*   Linear weights: Matrix mapping feature dimension to 1 (density).
+*   MLP weights: For the non-linear variant, weights for one hidden layer with 64 neurons.
+
+**Steps:**
+1.  Query the feature vector $\mathbf{F}(\mathbf{x}_i)$ from the volume at position $\mathbf{x}_i$ [S1].
+2.  Apply the density mapping transformation based on the dataset type:
+    *   **Real-world 360 dataset:** Apply a linear transform from $\mathbf{F}(\mathbf{x}_i)$ to $\sigma$ [S1].
+    *   **NeRF synthetic dataset:** Apply a tiny network with one hidden layer and 64 neurons to $\mathbf{F}(\mathbf{x}_i)$ to produce $\sigma$ [S1].
+3.  The resulting $\sigma$ is used for volume rendering integration [S1].
+
+**Formulas:**
+For the linear variant (Real-world 360):
+$$ \sigma = \mathbf{w}^T \mathbf{F}(\mathbf{x}_i) + b $$
+Where $\mathbf{w}$ is the weight vector and $b$ is the bias.
+
+For the MLP variant (NeRF synthetic):
+$$ \mathbf{h} = \text{ReLU}(\mathbf{W}_1 \mathbf{F}(\mathbf{x}_i) + \mathbf{b}_1) $$
+$$ \sigma = \mathbf{w}_2^T \mathbf{h} + b_2 $$
+Where $\mathbf{W}_1$ is a matrix of shape $(64, \text{dim}(\mathbf{F}))$, $\mathbf{b}_1$ is a bias vector of size 64, $\mathbf{w}_2$ is a weight vector of size 64, and $b_2$ is a scalar bias [S1]. Note: The source specifies GELU activation was used in the main network, but does not explicitly specify the activation for this specific tiny density network, only that it has one hidden layer. Standard practice implies ReLU or similar, but the source text says "tiny network with one hidden layer". We assume standard activation unless specified. However, the source explicitly mentions GELU for the *main* network layers, not necessarily this specific layer. Given the ambiguity, we note the structure. [S1]
+
+**Parameters:**
+*   Bottleneck feature size: 256 [S1].
+*   Hidden layer neurons (synthetic): 64 [S1].
+
+**Edge cases and pitfalls:**
+*   The choice of mapping significantly impacts rendering quality. The source states the tiny network yields "slightly better rendering quality" for synthetic data, while the linear transform is sufficient for real-world data [S1].
+*   The layer has "negligible impact on the overall training time" [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def density_mapping_layer(feature_vector, dataset_type, hidden_dim=64):
+    """
+    Derives density from feature vector.
+    
+    Args:
+        feature_vector: Tensor of shape (batch_size, 256) representing F(x_i).
+        dataset_type: String, either 'real_world_360' or 'nerf_synthetic'.
+        hidden_dim: Integer, number of neurons in hidden layer for synthetic variant.
+        
+    Returns:
+        Tensor of shape (batch_size,) representing density sigma.
+    """
+    if dataset_type == 'real_world_360':
+        # Linear transform from feature vector to density value
+        # Assuming weights and bias are initialized parameters
+        # sigma = w^T * F + b
+        sigma = torch.matmul(feature_vector, weights_linear) + bias_linear
+    elif dataset_type == 'nerf_synthetic':
+        # Tiny network with one hidden layer and 64 neurons
+        # h = ReLU(W1 * F + b1)
+        # sigma = w2^T * h + b2
+        hidden = torch.relu(torch.matmul(feature_vector, weights_mlp_1) + bias_mlp_1)
+        sigma = torch.matmul(hidden, weights_mlp_2) + bias_mlp_2
+    else:
+        raise ValueError("Unknown dataset type")
+        
+    return sigma
+```
+*Note: The source does not specify the activation function for the hidden layer of the synthetic variant's tiny network, only that it has one hidden layer. The main network uses GELU [S1]. The pseudocode assumes ReLU as a standard default for such small heads if not specified, but this is an implementation detail not explicitly confirmed in the source text for this specific layer. [G]*
+
+## Subtopics
+
+### [Neural Network Density and Color Definition](10291-neural-network-density-and-color-definition.md)
+Defines volumetric density and view-dependent color using linear projections. It separates density prediction (position-only) from color prediction (position + view direction) using distinct linear heads. It differs from the Density Mapping Layer by being part of a broader output definition that includes color, whereas the Density Mapping Layer is specifically for density derivation from features.
+
+## Operating characteristics
+*   **Time Complexity:** Negligible impact on overall training time [S1].
+*   **Memory Complexity:** Minimal additional memory for the small linear weights or the 64-neuron MLP weights.
+*   **Strengths:** Simple to implement; adapts to dataset characteristics (linear for real-world, MLP for synthetic).
+*   **Limitations:** The synthetic variant adds slight computational overhead compared to the linear variant, though still negligible.
+*   **When to use:** Use linear for real-world 360 datasets; use MLP (64 hidden neurons) for NeRF synthetic datasets to achieve slightly better quality [S1].
+
+## Background
+The method originates from the paper "Volume Feature Rendering for Fast Neural Radiance Field Reconstruction" [S1]. It was developed to efficiently derive density from queried feature vectors in explicit neural feature volume architectures. The authors found that while a linear transform suffices for real-world data, a small non-linear network improves quality for synthetic NeRF data [S1].
+
+## Sources
+[S1] Volume Feature Rendering for Fast Neural Radiance Field Reconstruction, https://papers.neurips.cc/paper_files/paper/2023/file/ce182e31662883d4decc84a0255335b6-Paper-Conference.pdf, fetched 2026-10-27

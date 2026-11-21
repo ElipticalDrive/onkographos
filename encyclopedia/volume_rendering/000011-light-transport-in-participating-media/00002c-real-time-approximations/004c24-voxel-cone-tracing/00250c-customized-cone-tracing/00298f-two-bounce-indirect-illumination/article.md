@@ -1,0 +1,105 @@
+# Two-Bounce Indirect Illumination
+
+Also called: Glossy Reflections via Cone Tracing, Indirect Illumination, Real-time Indirect Illumination Algorithm, Voxel Cone Tracing Pipeline
+
+## Overview
+A three-step GPU-based algorithm for computing two light bounces of indirect illumination for Lambertian and glossy materials at interactive framerates [S1]. It differs from standard voxel cone tracing by explicitly capturing incoming radiance from dynamic light sources into a sparse voxel octree and filtering it using a view-dependent Gaussian-Lobes representation, enabling efficient approximation of glossy reflections and color bleeding without static caches [S1].
+
+## How it works
+The method computes indirect illumination using a two-step approach: capturing incoming radiance from light sources in octree leaves, filtering/distributing it over octree levels, and performing approximate cone tracing for light transport [S1].
+
+**Inputs:**
+*   Sparse voxel octree hierarchy (initially empty or containing geometry).
+*   Dynamic light sources (position, color, intensity).
+*   Camera position and view vector.
+*   Surface material properties (diffuse color, specular exponent).
+
+**Outputs:**
+*   Final color for each visible surface fragment, combining direct and indirect illumination.
+
+**Data Structures:**
+*   **Sparse Voxel Octree:** Stores incoming radiance. Each node contains a compact Gaussian-Lobes representation of the filtered distribution of incoming light directions and energy [S1].
+*   **Light-View Map:** A rasterization buffer used to capture photons from light sources [S1].
+
+**Steps:**
+
+1.  **Capture Incoming Radiance (Photon Splatting):**
+    *   Render the scene from the perspective of each dynamic light source using standard rasterization to output a world position map (light-view map) [S1].
+    *   Each pixel in this map represents a photon that bounces off the visible surface fragment [S1].
+    *   Splat these photons into the leaves of the sparse voxel octree hierarchy. The splatting stores the direction and energy of the incoming light [S1].
+
+2.  **Filter and Distribute Radiance (Octree Mipmapping):**
+    *   Filter the incoming radiance values from the leaves into the higher levels of the octree (mipmap) [S1].
+    *   Use a compact Gaussian-Lobes representation to store the filtered distribution of incoming light directions [S1].
+    *   Perform this filtering efficiently in parallel using a screen-space quad-tree analysis [S1].
+    *   The voxel filtering scheme treats the Normal Distribution Function (NDF) and the Bidirectional Reflectance Distribution Function (BRDF) in a view-dependent way [S1].
+
+3.  **Final Gathering (Cone Tracing):**
+    *   Render the scene from the camera. Use deferred shading to determine which surface points require indirect illumination calculation [S1].
+    *   For each such point, perform final gathering by sending out several cones to query the illumination distributed in the octree [S1].
+    *   Combine direct and indirect illumination for the final color [S1].
+
+**Parameters and Formulas:**
+*   **Diffuse Estimation:** Typically, five large cones are sent out to estimate the diffuse energy coming from the scene [S1].
+*   **Specular Estimation:** A tight cone is sent in the reflected direction with respect to the viewpoint to capture the specular component [S1].
+*   **Specular Cone Aperture:** The aperture of the specular cone is derived from the specular exponent of the material [S1]. Let $n$ be the specular exponent. The cone aperture $\alpha$ is determined such that it aligns with the glossy lobe defined by $n$ [S1]. (Exact formula not provided in sources; [G] typically $\alpha \propto 1/\sqrt{n}$ or similar mapping to solid angle).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_two_bounce_indirect_illumination(scene, lights, camera, octree):
+    # Step 1: Capture incoming radiance
+    for light in lights:
+        # Render scene from light's perspective to get world positions
+        light_view_map = rasterize_scene_from_light(scene, light)
+        
+        # Splat photons into octree leaves
+        for pixel in light_view_map:
+            world_pos = pixel.world_position
+            photon_energy = pixel.color * light.intensity
+            photon_direction = normalize(light.position - world_pos)
+            octree.splat_leaf(world_pos, photon_energy, photon_direction)
+
+    # Step 2: Filter radiance into octree levels
+    # Parallel screen-space quad-tree analysis filters leaves to higher levels
+    octree.filter_gaussian_lobes()
+
+    # Step 3: Final gathering from camera
+    for surface_point in deferred_shading_buffer:
+        if surface_point.needs_indirect_illumination:
+            indirect_color = vec3(0.0)
+            
+            # Estimate diffuse energy with large cones
+            for i in range(5):
+                cone_direction = sample_diffuse_hemisphere(surface_point.normal)
+                cone_aperture = LARGE_CONE_ANGLE
+                radiance = octree.query_cone(cone_direction, cone_aperture)
+                indirect_color += radiance * surface_point.diffuse_color
+            
+            # Estimate specular energy with tight cone
+            view_vector = normalize(camera.position - surface_point.position)
+            reflect_direction = reflect(-view_vector, surface_point.normal)
+            specular_aperture = get_specular_aperture(surface_point.specular_exponent)
+            radiance = octree.query_cone(reflect_direction, specular_aperture)
+            indirect_color += radiance * surface_point.specular_color
+            
+            surface_point.final_color += indirect_color
+```
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Interactive framerates are achieved due to the parallel nature of the octree filtering and the limited number of cones (typically 5+1) per pixel [S1].
+*   **Memory Complexity:** Uses a sparse voxel octree, which allows for high precision with lower memory usage compared to dense grids, storing only incoming radiance and occlusion information [S1].
+*   **Strengths:** Handles dynamic scenes and dynamic light sources effectively. Supports glossy reflections and color bleeding. View-dependent filtering improves accuracy for anisotropic or glossy materials [S1].
+*   **Limitations:** Approximate nature of cone tracing may introduce artifacts. The method is complex to implement due to the octree filtering and Gaussian-Lobes representation [S1].
+*   **When to use:** Real-time rendering of scenes with dynamic lighting and glossy materials where global illumination effects like color bleeding are desired [S1].
+*   **When not to use:** Scenes requiring exact global illumination or where performance is critical and approximate results are unacceptable [S1].
+
+## Background
+The method was introduced in the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" [S1]. It builds upon earlier work in voxel cone tracing and photon mapping, adapting them for real-time GPU execution. The approach addresses the limitations of caching-based global illumination in dynamic scenes by computing inter-reflections on the fly [S1].
+
+## Sources
+[S1] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26

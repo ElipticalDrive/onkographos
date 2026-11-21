@@ -1,0 +1,105 @@
+# Truncated Tensor Decomposition
+
+Also called: Low-Rank Approximation via Truncation, Rank Truncation, Rank-reduced tensor decomposition, Tucker Truncation
+
+## Overview
+Truncated Tensor Decomposition is a post-processing technique that reduces the multilinear rank of an already computed Tucker decomposition to achieve data compression or interactive level-of-detail (LOD) [S1, S3, unofficial]. It explicitly selects a reduced rank $(K_1, K_2, ..., K_N)$ smaller than the initial Tucker rank $(R_1, R_2, ..., R_N)$ to achieve compression [S1, unofficial]. Unlike [Tensor Approximation](5362-tensor-approximation.md), which computes the decomposition from scratch, or [Tensor-Specific Quantization](6775-tensor-specific-quantization.md), which focuses on bit-depth reduction, Truncated Tensor Decomposition leverages the all-orthogonality property of the Tucker core to allow progressive, ex-post truncation without recomputing the full decomposition [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A full Tucker decomposition of an $N$-dimensional tensor $\mathcal{A}$, consisting of factor matrices $\mathbf{U}^{(n)} \in \mathbb{R}^{I_n \times R_n}$ for $n=1 \dots N$, and a core tensor $\mathcal{B} \in \mathbb{R}^{R_1 \times R_2 \times \dots \times R_N}$ [S2].
+*   **Input:** Target reduced ranks $K_n$ for each mode, where $1 \le K_n < R_n$ [S2].
+*   **Output:** A rank-reduced approximation $\tilde{\mathcal{A}}$ represented by truncated factor matrices $\mathbf{U}^{(n)}_k \in \mathbb{R}^{I_n \times K_n}$ and a truncated core tensor $\mathcal{B}_k \in \mathbb{R}^{K_1 \times K_2 \times \dots \times K_N}$ [S2].
+
+**Data Structures:**
+*   **Factor Matrices:** Stored as 2D arrays. The $n$-th factor matrix $\mathbf{U}^{(n)}$ has dimensions $I_n \times R_n$ [S1, unofficial]. Columns correspond to principal components (basis vectors) ordered by importance (variance explained) [S1, unofficial].
+*   **Core Tensor:** Stored as an $N$-dimensional array of size $R_1 \times R_2 \times \dots \times R_N$ [S1, unofficial]. Due to the all-orthogonality property, the energy is concentrated in the leading entries [S1, unofficial].
+
+**Steps:**
+1.  **Initialize:** Start with the full Tucker decomposition $\mathcal{A} \approx \mathcal{B} \times_1 \mathbf{U}^{(1)} \times_2 \mathbf{U}^{(2)} \times \dots \times_N \mathbf{U}^{(N)}$ [S1, unofficial].
+2.  **Truncate Factor Matrices:** For each mode $n=1 \dots N$:
+    *   Select the first $K_n$ columns of $\mathbf{U}^{(n)}$ [S2].
+    *   Form the truncated matrix $\mathbf{U}^{(n)}_k$ containing only these columns [S2].
+3.  **Truncate Core Tensor:**
+    *   Extract the sub-block of $\mathcal{B}$ defined by the indices $1 \dots K_1$ along mode 1, $1 \dots K_2$ along mode 2, ..., $1 \dots K_N$ along mode $N$ [S2].
+    *   Form the truncated core tensor $\mathcal{B}_k$ of size $K_1 \times K_2 \times \dots \times K_N$ [S2].
+4.  **Reconstruct (Optional):** The approximated tensor is given by:
+    $$ \tilde{\mathcal{A}} = \mathcal{B}_k \times_1 \mathbf{U}^{(1)}_k \times_2 \mathbf{U}^{(2)}_k \times \dots \times_N \mathbf{U}^{(N)}_k $$
+    This minimizes the least-squares error $\| \mathcal{A} - \tilde{\mathcal{A}} \|^2$ relative to the subspace spanned by the selected ranks [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def truncated_tucker_decomposition(factor_matrices, core_tensor, target_ranks):
+    """
+    Performs rank truncation on a Tucker decomposition.
+    
+    Args:
+        factor_matrices: List of N numpy arrays, where factor_matrices[n] is shape (I_n, R_n).
+        core_tensor: N-dimensional numpy array of shape (R_1, R_2, ..., R_N).
+        target_ranks: List of N integers, where target_ranks[n] is K_n < R_n.
+        
+    Returns:
+        truncated_factors: List of N numpy arrays, where truncated_factors[n] is shape (I_n, K_n).
+        truncated_core: N-dimensional numpy array of shape (K_1, K_2, ..., K_N).
+    """
+    truncated_factors = []
+    
+    # Step 1 & 2: Truncate factor matrices
+    for n in range(len(factor_matrices)):
+        R_n = factor_matrices[n].shape[1]
+        K_n = target_ranks[n]
+        
+        if K_n >= R_n:
+            # No truncation needed for this mode
+            truncated_factors.append(factor_matrices[n])
+        else:
+            # Select first K_n columns (principal components)
+            # [G] Assumes columns are ordered by decreasing importance/variance,
+            # which is standard for HOSVD/Tucker decomposition outputs.
+            u_k = factor_matrices[n][:, :K_n]
+            truncated_factors.append(u_k)
+            
+    # Step 3: Truncate core tensor
+    # Extract the sub-block [0:K_1, 0:K_2, ..., 0:K_N]
+    slices = tuple(slice(0, k) for k in target_ranks)
+    truncated_core = core_tensor[slices]
+    
+    return truncated_factors, truncated_core
+```
+
+**Parameters:**
+*   **Target Ranks $(K_1, \dots, K_N)$:** The desired reduced dimensions. Chosen to achieve compression or satisfy a maximum allowable reconstruction error threshold [S1, unofficial][S2].
+*   **Initial Ranks $(R_1, \dots, R_N)$:** Determined by the initial Tucker decomposition [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **CP Decomposition:** Truncation cannot be performed ex-post on a CP decomposition produced by Alternating Least Squares (ALS) because it lacks the all-orthogonality property of the Tucker core [S1, unofficial].
+*   **Ordering:** Truncation relies on the factor matrix columns being ordered by significance, as the first components capture the most variability [S1, unofficial].
+*   **Precision:** Removing principal components discards details. If $K_n$ is too small, significant structural features may be lost [S1, unofficial].
+
+## Subtopics
+
+### [Adaptive Rank Selection via Binary Search](9822-adaptive-rank-selection-via-binary-search.md)
+A method to determine the optimal Tucker decomposition rank $(R_1, R_2, R_3)$ for individual data blocks in multi-resolution volume rendering. It solves the trade-off between compression ratio and reconstruction error (measured by Peak Signal-to-Noise Ratio, PSNR) by finding the smallest rank that satisfies a specific error threshold for each block. Unlike uniform rank decomposition, which applies the same rank to all blocks (leading to either quality loss or inefficient compression), this method assigns different ranks to different blocks based on their local complexity. It builds on [Truncated Tensor Decomposition](7540-truncated-tensor-decomposition.md) by using a pre-computed high-rank decomposition to efficiently search for the best truncation point without recomputing the full HOSVD for every trial rank.
+
+### [Rank-Residual Learning](13305-rank-residual-learning.md)
+Rank-Residual Learning is a training strategy for tensor-based volume compression that simulates the low-rank approximation property of Singular Value Decomposition (SVD) by training multiple truncation levels in parallel. Unlike sequential training methods that freeze earlier stages before training new ones, or independent parallel training that detaches gradients, this method simultaneously supervises sequentially accumulated outputs from all groups using a rank-residual loss. This approach allows each group of ranks to learn residual errors from previous groups, improving training speed while maintaining or improving reconstruction quality compared to baseline truncation methods.
+
+### Tucker Thresholding
+A compression technique for Tucker decomposed data where small elements of the core tensor are made zero, followed by run-length and entropy encoding [S3, unofficial]. Compared to wavelets (DCT, Haar, Daubechies, Coiflets, Biorthogonal), Tucker thresholding generally achieves lower relative error for the same compression factor on datasets like Bonsai, Foot, Skull, and Wood [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The truncation step is very fast to apply, involving simple array slicing [S3, unofficial].
+*   **Memory Complexity:** Reduces storage from $O(\sum I_n R_n + \prod R_n)$ to $O(\sum I_n K_n + \prod K_n)$ [S1, unofficial].
+*   **Performance:** Provides interactive level-of-detail capabilities because truncation is applied during visualization or pre-computed for LOD levels [S3, unofficial].
+*   **Strengths:** Allows progressive refinement; computationally cheap to adjust rank post-decomposition; preserves major structures while discarding negligible components [S1, unofficial].
+*   **Limitations:** Requires an initial full-rank decomposition; not applicable to CP decompositions [S1, unofficial]; quality depends heavily on the initial decomposition quality and column ordering [S1, unofficial].
+
+## Background
+Truncated Tensor Decomposition originates from the properties of the Tucker Higher-Order Singular Value Decomposition (HOSVD). The method exploits the "all-orthogonality" of the Tucker core tensor, a property established by De Lathauwer et al. (2000a) [S1, unofficial]. In volume rendering and compression, it was popularized as a means to achieve interactive LOD by reducing the ranks of pre-computed Tucker blocks [S3, S1, unofficial]. It is distinct from CP decomposition truncation, which is not straightforward due to the lack of orthogonality in the CP core [S1, unofficial].
+
+## Sources
+[S1] Interactive Multiresolution and Multiscale Visualization of Large Volume Data, https://doi.org/10.2312/diss.20138322, fetched 2026-10-26 (unofficial)
+[S2] An Algorithm for Choosing Optimal Rank in Tensor Approximation of Multi-Resolution Volume Rendering, https://doi.org/10.12677/csa.2018.811183, fetched 2026-10-26
+[S3] PDF Analysis of Tensor Approximation for Compression-Domain Volume ..., https://www.ifi.uzh.ch/vmml/publications/analysistensorapproximationtalk/tensorapproximation.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,629 @@
+--- v002.md
++++ v003.md
+@@ -4,338 +4,306 @@
+ 
+ ## Overview
+-CodeNeRF is an implicit 3D neural representation that learns the variation of object shapes and textures across a semantic category, enabling the synthesis of novel views of unseen objects from a single unposed input image [S1]. Unlike standard NeRF which is scene-specific, CodeNeRF disentangles shape and texture by learning separate latent embeddings, allowing for joint optimization of camera viewpoint and latent codes at test time [S1]. It differs from sibling methods like [DoF-NeRF](9432-dof-nerf.md) and [NeRF-VPT](11770-nerf-vpt.md) by explicitly decoupling the geometry and appearance priors into distinct embedding spaces, whereas [Signed Distance Function (SDF) Representations](12495-signed-distance-function-sdf-representations.md) rely on distance fields rather than volumetric density [S1].
++CodeNeRF is an implicit 3D neural representation that learns the variation of object shapes and textures across a semantic category, enabling the synthesis of novel views of unseen objects from a single unposed input image [S1]. Unlike standard NeRF which is scene-specific, CodeNeRF disentangles shape and texture by learning separate latent embeddings, allowing for joint optimization of camera viewpoint, shape code, and texture code at test time [S1]. It differs from sibling methods like DoF-NeRF by explicitly decoupling shape and texture into independent embedding spaces, whereas alternatives like M1 (direction input to shape network) or M2 (single embedding) fail to maintain disentanglement, leading to incorrect textures or unwanted shape changes during editing [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Training Input:** A set of $N$ images $\mathcal{V} = \{I_i, K_i, T_i\}_{i=1}^N$ depicting $M$ objects with known camera poses (intrinsic $K_i$ and extrinsic $T_i$).
+-*   **Inference Input:** A single unposed reference image $I_{test}$ of an unseen object.
+-*   **Outputs:** Rendered novel views, estimated camera pose (inference), and disentangled shape/texture codes.
+-
+-**Data Structures:**
+-1.  **Network Weights $\Theta$:** Parameters for two MLPs, $\text{F}^s_{\Theta_s}$ and $\text{F}^t_{\Theta_t}$.
+-2.  **Latent Embeddings:**
+-    *   Shape code $\mathbf{z_s} \in \mathbb{R}^{d_s}$
+-    *   Texture code $\mathbf{z_t} \in \mathbb{R}^{d_t}$
+-    *   During training, a set $\{\mathbf{z_s}_j, \mathbf{z_t}_j\}_{j=1}^M$ is optimized for each object.
+-3.  **Camera Parameters:** Azimuth $\phi$, elevation $\theta$, and distance $\rho$.
+-
+-**Positional Encoding:**
+-Positional encoding $\gamma(\cdot)$ is applied to 3D coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ [S1].
+-*   Frequencies for $\mathbf{x}$: 10.
+-*   Frequencies for $\mathbf{d}$: 4 [S1].
+-
+-**Network Architecture:**
+-The model uses an auto-decoder architecture with decoupled embedding spaces [S1].
+-1.  **Shape Network $\text{F}^s_{\Theta_s}$:** Maps $(\gamma_{\mathbf{x}}(\mathbf{x}), \mathbf{z_s})$ to volume density $\sigma$ and an intermediate feature vector $\mathbf{v} \in \mathbb{R}^{256}$ [S1].
+-    $$ \text{F}^s_{\Theta_s} : (\gamma_{\mathbf{x}}(\mathbf{x}), \mathbf{z_s}) \xrightarrow{} (\sigma, \mathbf{v}) $$
+-2.  **Texture Network $\text{F}^t_{\Theta_t}$:** Maps $(\mathbf{v}, \gamma_{\mathbf{d}}(\mathbf{d}), \mathbf{z_t})$ to RGB color $\mathbf{c}$ [S1].
+-    $$ \text{F}^t_{\Theta_t} : (\mathbf{v}, \gamma_{\mathbf{d}}(\mathbf{d}), \mathbf{z_t}) \xrightarrow{} (\mathbf{c}) $$
+-3.  **Combined Field:** $\text{F}_\Theta = \text{F}^t_{\Theta_t} \circ \text{F}^s_{\Theta_s}$ [S1].
+-
+-**Volume Rendering:**
+-For a camera ray $\mathbf{r}(t) = \mathbf{c} + t\mathbf{d}$, $N$ uniform samples are taken from near to far bounds [S1]. The estimated pixel color $\hat{C}(\mathbf{r})$ is:
++CodeNeRF employs an auto-decoder architecture with decoupled shape and texture embedding spaces. The model consists of two MLPs: a shape network $F^s_{\Theta_s}$ and a texture network $F^t_{\Theta_t}$, which together form the radiance field $F_\Theta$ [S1].
++
++### Inputs and Outputs
++*   **Inputs:**
++    *   3D spatial position $\mathbf{x} \in \mathbb{R}^3$.
++    *   Viewing direction $\mathbf{d} \in \mathbb{R}^3$.
++    *   Shape latent code $\mathbf{z_s} \in \mathbb{R}^{D_s}$.
++    *   Texture latent code $\mathbf{z_t} \in \mathbb{R}^{D_t}$.
++    *   Camera parameters (azimuth $\phi$, elevation $\theta$, distance $\rho$) during inference optimization [S1].
++*   **Outputs:**
++    *   Volume density $\sigma \in \mathbb{R}$.
++    *   View-dependent color $\mathbf{c} \in \mathbb{R}^3$ [S1].
++
++### Data Structures
++*   **Network Parameters $\Theta$:** Weights for $F^s_{\Theta_s}$ and $F^t_{\Theta_t}$.
++*   **Latent Embeddings:**
++    *   $\mathbf{z_s}$: Shape code.
++    *   $\mathbf{z_t}$: Texture code.
++    *   During training, a set of embeddings $\{\mathbf{z_s}_j, \mathbf{z_t}_j\}_{j=1}^M$ is maintained for $M$ objects [S1].
++*   **Camera Pose:** Represented by spherical coordinates $(\phi, \theta, \rho)$ or equivalent rotation/translation matrices for ray generation [S1].
++
++### Positional Encoding
++Positional encoding $\gamma(\cdot)$ is applied to coordinates and directions to capture high-frequency details [S1]:
++*   For 3D point coordinates $\mathbf{x}$: 10 frequencies are used [S1].
++*   For viewing directions $\mathbf{d}$: 4 frequencies are used [S1].
++
++### Network Architecture
++The architecture is split into two stages to enforce disentanglement [S1]:
++
++1.  **Shape Network ($F^s_{\Theta_s}$):**
++    Takes the positional encoding of the 3D point $\gamma_{\mathbf{x}}(\mathbf{x})$ and the shape code $\mathbf{z_s}$ as input. It outputs the volume density $\sigma$ and an intermediate feature vector $\mathbf{v} \in \mathbb{R}^{256}$ [S1].
++    $$ F^s_{\Theta_s}: (\gamma_{\mathbf{x}}(\mathbf{x}), \mathbf{z_s}) \rightarrow (\sigma, \mathbf{v}) $$
++
++2.  **Texture Network ($F^t_{\Theta_t}$):**
++    Takes the intermediate feature vector $\mathbf{v}$, the positional encoding of the viewing direction $\gamma_{\mathbf{d}}(\mathbf{d})$, and the texture code $\mathbf{z_t}$ as input. It outputs the RGB color $\mathbf{c}$ [S1].
++    $$ F^t_{\Theta_t}: (\mathbf{v}, \gamma_{\mathbf{d}}(\mathbf{d}), \mathbf{z_t}) \rightarrow (\mathbf{c}) $$
++
++The combined radiance field is $F_\Theta = F^t_{\Theta_t} \circ F^s_{\Theta_s}$ [S1].
++
++### Volume Rendering
++Color is aggregated along camera rays $\mathbf{r}(t) = \mathbf{c} + t\mathbf{d}$ using standard volume rendering equations with $N$ uniform samples from near to far bounds [S1]. The estimated pixel color $\hat{C}(\mathbf{r})$ is:
++
+ $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+-where $\delta_i = t_{i+1} - t_i$ and $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1].
+-
+-**Training Procedure:**
+-1.  Sample a batch of 4094 rays per image using intrinsic and extrinsic parameters [S1].
+-2.  Sample 64 points along each ray [S1].
+-3.  Feed points to $\text{F}_\Theta$ with current $\mathbf{z_s}$ and $\mathbf{z_t}$ estimates to obtain $\sigma$ and $\mathbf{c}$ [S1].
+-4.  Compute loss $\mathcal{L}$:
++
++Where:
++*   $\delta_i = t_{i+1} - t_i$ is the distance between adjacent samples [S1].
++*   $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance [S1].
++*   $\sigma_i$ and $\mathbf{c}_i$ are the density and color at sample $i$ [S1].
++
++### Training Procedure
++During training, the model learns from a set of $N$ images depicting $M$ objects with known poses [S1].
++
++1.  **Ray Sampling:** For each image, sample a batch of 4094 rays using intrinsic and extrinsic camera parameters [S1].
++2.  **Point Sampling:** Sample 64 points along each ray [S1].
++3.  **Forward Pass:** Feed points, directions, and current latent codes $\{\mathbf{z_s}_j, \mathbf{z_t}_j\}$ into $F_\Theta$ to obtain $\sigma$ and $\mathbf{c}$ [S1].
++4.  **Rendering:** Compute rendered colors $\hat{C}(\mathbf{r})$ using volume rendering [S1].
++5.  **Loss Calculation:** Minimize the total loss $\mathcal{L}$ [S1]:
++
+     $$ \mathcal{L}(\Theta, \{\mathbf{z_s}^i, \mathbf{z_t}^i\}^M) = \sum_{\mathbf{r} \in \mathcal{R}} ||\hat{C}(\mathbf{r}) - C(\mathbf{r})||_2^2 + \frac{1}{\nu^2} \sum_{i=1}^M (||\mathbf{z_s}^i||_2^2 + ||\mathbf{z_t}^i||_2^2) $$
+-    where the first term is photometric L2 loss and the second is $L_2$ regularization on latent vectors [S1].
+-5.  Optimize $\Theta$, $\{\mathbf{z_s}^i\}$, and $\{\mathbf{z_t}^i\}$ using AdamW [S1].
+-
+-**Inference Procedure:**
+-Given a single unposed image $I_{test}$:
+-1.  Initialize $\mathbf{z_s}$ and $\mathbf{z_t}$ with the mean vector of trained embeddings [S1].
+-2.  Initialize camera parameters $(\phi, \theta, \rho)$ with random or coarse estimates [S1].
+-3.  Fix network weights $\Theta$ [S1].
+-4.  Minimize photometric loss jointly with respect to $\mathbf{z_s}, \mathbf{z_t}$ and camera parameters $(\phi, \theta, \rho)$ [S1]:
++
++    Where:
++    *   The first term is the photometric L2 loss [S1].
++    *   The second term is an L2 regularization loss on the latent vectors with weight $1/\nu^2$ [S1].
++    *   $\mathcal{R}$ is the set of sampled rays [S1].
++
++6.  **Optimization:** Update network parameters $\Theta$ and latent embeddings $\{\mathbf{z_s}_j, \mathbf{z_t}_j\}_{j=1}^M$ jointly using AdamW [S1].
++
++### Inference Optimization
++Given a single unposed reference image of an unseen object, CodeNeRF reconstructs the object and estimates its viewpoint [S1].
++
++1.  **Initialization:**
++    *   Network weights $\Theta$ are fixed (pre-trained) [S1].
++    *   Latent vectors $\mathbf{z_s}, \mathbf{z_t}$ are initialized with the mean vector of the trained embeddings [S1].
++    *   Camera parameters $(\phi, \theta, \rho)$ are initialized with large errors (average 80 degrees rotation error from ground truth) [S1].
++2.  **Joint Optimization:** Minimize the photometric loss and regularization term with respect to $\mathbf{z_s}, \mathbf{z_t}$ and camera parameters $(\phi, \theta, \rho)$ [S1]:
++
+     $$ \min_{\mathbf{z_s}, \mathbf{z_t}, \phi, \theta, \rho} \mathcal{L}(\mathbf{z_s}, \mathbf{z_t}, \phi, \theta, \rho) + \frac{1}{\nu^2} (||\mathbf{z_s}||_2^2 + ||\mathbf{z_t}||_2^2) $$
+-5.  Run optimization for 299 iterations [S1].
+-
+-**Pseudocode:**
++
++3.  **Iteration:** Run optimization for 299 iterations [S1].
++
++### Pseudocode
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-import torch.optim as optim
+ import numpy as np
+ 
+-class CodeNeRF:
+-    def __init__(self, shape_dim=256, texture_dim=256, num_freq_x=10, num_freq_d=4):
+-        """
+-        Initialize CodeNeRF model.
+-        """
+-        self.num_freq_x = num_freq_x
+-        self.num_freq_d = num_freq_d
+-        
+-        # Positional Encoding function
+-        self.pos_enc_x = PositionalEncoding(num_freq_x)
+-        self.pos_enc_d = PositionalEncoding(num_freq_d)
+-        
+-        # Shape Network: maps (encoded_x, z_s) -> (sigma, v)
+-        # Input dim: (2 * num_freq_x + 1) + shape_dim
+-        # Output dim: 1 (sigma) + 256 (v)
+-        self.F_s = nn.Sequential(
+-            nn.Linear((2 * num_freq_x + 1) + shape_dim, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 257) # 1 for sigma, 256 for v
+-        )
+-        
+-        # Texture Network: maps (v, encoded_d, z_t) -> c
+-        # Input dim: 256 (v) + (2 * num_freq_d + 1) + texture_dim
+-        # Output dim: 3 (RGB)
+-        self.F_t = nn.Sequential(
+-            nn.Linear(256 + (2 * num_freq_d + 1) + texture_dim, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 3)
+-        )
+-        
+-        # Parameters
+-        self.params = list(self.F_s.parameters()) + list(self.F_t.parameters())
+-
+-    def forward_shape(self, x, z_s):
+-        """
+-        Forward pass through shape network.
+-        x: (B, 3) 3D coordinates
+-        z_s: (B, shape_dim) shape embedding
+-        """
+-        enc_x = self.pos_enc_x(x)
+-        input_cat = torch.cat([enc_x, z_s], dim=-1)
+-        out = self.F_s(input_cat)
+-        sigma = out[:, 0:1]
+-        v = out[:, 1:]
+-        return sigma, v
+-
+-    def forward_texture(self, v, d, z_t):
+-        """
+-        Forward pass through texture network.
+-        v: (B, 256) intermediate feature
+-        d: (B, 3) viewing direction
+-        z_t: (B, texture_dim) texture embedding
+-        """
+-        enc_d = self.pos_enc_d(d)
+-        input_cat = torch.cat([v, enc_d, z_t], dim=-1)
+-        c = self.F_t(input_cat)
+-        return c
+-
+-    def render_ray(self, ray_o, ray_d, z_s, z_t, num_samples=64, near=0.0, far=1.0):
+-        """
+-        Render a single ray using volume rendering.
+-        """
+-        t_vals = torch.linspace(near, far, num_samples)
+-        # Uniform sampling
+-        t_samples = t_vals
+-        
+-        # Query network
+-        # Expand ray_o and ray_d to match batch of samples
+-        # Assuming ray_o, ray_d are (B, 3) and we sample along them
+-        # For a single ray batch, we repeat coordinates
+-        
+-        # x = ray_o + t * ray_d
+-        # This logic assumes t_samples is (B, num_samples) and ray_o/d are (B, 3)
+-        # We need to broadcast correctly. 
+-        # Let's assume inputs are (B, 3) and we want to render for each ray in batch.
+-        
+-        # Reshape for broadcasting: ray_o (B, 1, 3), t_samples (B, S, 1)
+-        ray_o_exp = ray_o.unsqueeze(1)
+-        ray_d_exp = ray_d.unsqueeze(1)
+-        t_exp = t_samples.unsqueeze(2)
+-        
+-        x = ray_o_exp + t_exp * ray_d_exp # (B, S, 3)
+-        d = ray_d_exp.expand_as(x) # (B, S, 3)
+-        
+-        # Repeat embeddings for each sample along the ray
+-        z_s_exp = z_s.unsqueeze(1).expand(-1, num_samples, -1) # (B, S, D_s)
+-        z_t_exp = z_t.unsqueeze(1).expand(-1, num_samples, -1) # (B, S, D_t)
+-        
+-        sigma, v = self.forward_shape(x, z_s_exp)
+-        c = self.forward_texture(v, d, z_t_exp)
+-        
+-        # Volume Rendering
+-        # delta_i = t_{i+1} - t_i
+-        deltas = t_samples[:, 1:] - t_samples[:, :-1]
+-        # Add last delta (or handle boundary) - standard NeRF uses delta to next
+-        # Here we compute weights for i=0 to N-1 based on delta_i
+-        # T_i = exp(-sum_{j=1}^{i-1} sigma_j delta_j)
+-        
+-        # sigma is (B, S, 1), deltas is (B, S-1)
+-        # We need to align dimensions. 
+-        # Let's compute alpha and transmittance
+-        
+-        # sigma_clamped = torch.clamp(sigma, min=1e-4) # [G] Guard against exp(0) issues in practice, though formula allows 0
+-        # alpha = 1 - torch.exp(-sigma * deltas) # This requires broadcasting deltas to (B, S, 1)
+-        
+-        # Correct implementation for uniform sampling weights:
+-        # sigma shape: (B, S, 1)
+-        # deltas shape: (B, S-1) -> pad to (B, S, 1) with 0 at end? 
+-        # Standard NeRF: delta_i = t_{i+1} - t_i. Weight w_i = alpha_i * T_i.
+-        
+-        # Let's use the standard differentiable volume rendering function
+-        weights = compute_volume_rendering_weights(sigma, t_samples, num_samples)
+-        rgb = torch.sum(weights * c, dim=1) # (B, 3)
+-        return rgb
+-
+-    def compute_volume_rendering_weights(self, sigma, t_samples, num_samples):
+-        """
+-        Compute rendering weights from sigma and t_samples.
+-        """
+-        # sigma: (B, S, 1)
+-        # t_samples: (B, S)
+-        
+-        # Calculate deltas
+-        # t_vals is (B, S)
+-        # deltas = t_vals[:, 1:] - t_vals[:, :-1] -> (B, S-1)
+-        # We need deltas for each sample i. 
+-        # Let's pad t_vals with far bound at end and near bound at start?
+-        # Standard: delta_i = t_{i+1} - t_i.
+-        
+-        # Create padded t_vals
+-        # t_padded = torch.cat([t_vals, torch.full_like(t_vals[:, -1:], 1.0)], dim=1) # Assuming far=1
+-        # deltas = t_padded[:, 1:] - t_padded[:, :-1]
+-        
+-        # Simpler: use the provided t_samples from render_ray which are linspace
+-        # We need to pass t_samples to this helper or compute inside render_ray
+-        
+-        # Re-implementing inside render_ray for clarity in one block:
+-        pass
+-
+-    def train_step(self, rays_o, rays_d, gt_rgb, z_s, z_t, nu=1.0):
+-        """
+-        Single training step.
+-        """
+-        # rays_o: (B, 3), rays_d: (B, 3), gt_rgb: (B, 3)
+-        # z_s: (B, D_s), z_t: (B, D_t)
+-        
+-        pred_rgb = self.render_ray(rays_o, rays_d, z_s, z_t)
+-        
+-        # Photometric Loss
+-        photometric_loss = torch.mean((pred_rgb - gt_rgb) ** 2)
+-        
+-        # Regularization Loss
+-        reg_loss = (1.0 / (nu ** 2)) * (torch.mean(z_s ** 2) + torch.mean(z_t ** 2))
+-        
+-        loss = photometric_loss + reg_loss
+-        
+-        return loss
+-
+-    def inference_optimize(self, ray_o, ray_d, gt_rgb, num_iters=299, lr_latent=1e-2, lr_cam=1e-2):
+-        """
+-        Optimize latent codes and camera pose for a single image.
+-        """
+-        # Initialize latent codes with mean of trained embeddings [S1]
+-        # [G] Assuming self.mean_z_s and self.mean_z_t are pre-computed during training
+-        z_s = torch.nn.Parameter(self.mean_z_s.clone())
+-        z_t = torch.nn.Parameter(self.mean_z_t.clone())
+-        
+-        # Initialize camera pose parameters [S1]
+-        # Parameters: azimuth (phi), elevation (theta), distance (rho)
+-        # [G] Need to define how these map to ray_o and ray_d. 
+-        # Typically, ray_o is origin, ray_d is direction derived from phi, theta, rho.
+-        # For simplicity, we optimize the ray origins/directions directly or the pose params.
+-        # The source says "optimize rotation and translation... azimuth, elevation, distance".
+-        # We will optimize the raw ray parameters for the specific pixel/ray batch.
+-        
+-        # Let's assume we are optimizing for a batch of rays from the test image.
+-        # We need to construct rays from pose params.
+-        # For this pseudocode, we optimize the ray origins and directions directly 
+-        # as proxies for pose, or optimize pose params and convert.
+-        # Source: "optimize the rotation and translation... using gradients".
+-        
+-        # Let's optimize phi, theta, rho for each ray? Or global pose?
+-        # CodeNeRF optimizes camera pose for the *object*. 
+-        # If we have a single image, we assume one pose for the whole image.
+-        
+-        phi = torch.nn.Parameter(torch.tensor(0.0))
+-        theta = torch.nn.Parameter(torch.tensor(0.0))
+-        rho = torch.nn.Parameter(torch.tensor(1.0))
+-        
+-        optimizer = optim.Adam([
+-            {'params': [z_s], 'lr': lr_latent},
+-            {'params': [z_t], 'lr': lr_latent},
+-            {'params': [phi, theta, rho], 'lr': lr_cam}
+-        ], lr=lr_latent) # Base lr for latent
+-        
+-        # Note: Source says initial lr 1e-2 for latent, 1e-2/1e-1/1e-1 for cam.
+-        # We'll use a single optimizer with different lrs.
+-        
+-        for i in range(num_iters):
+-            optimizer.zero_grad()
+-            
+-            # Convert pose params to rays_o, rays_d
+-            # [G] Placeholder for camera model conversion. 
+-            # Standard pinhole: 
+-            # d = [sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta)]
+-            # o = -rho * d (if looking at origin)
+-            # This is a simplification. Real implementation uses camera matrix.
+-            rays_o_opt, rays_d_opt = get_rays_from_pose(phi, theta, rho, gt_rgb.shape[0])
+-            
+-            pred_rgb = self.render_ray(rays_o_opt, rays_d_opt, z_s, z_t)
+-            
+-            loss = torch.mean((pred_rgb - gt_rgb) ** 2)
+-            loss.backward()
+-            optimizer.step()
+-            
+-        return z_s.detach(), z_t.detach(), phi.item(), theta.item(), rho.item()
+-
+-class PositionalEncoding(nn.Module):
+-    def __init__(self, num_freq):
+-        super().__init__()
+-        self.num_freq = num_freq
+-        
+-    def forward(self, x):
+-        # x: (..., 3)
+-        # Freqs: 2^0, 2^1, ..., 2^(num_freq-1)
+-        freqs = 2.0 ** torch.linspace(0, self.num_freq - 1, self.num_freq).to(x.device)
+-        # x_scales = x.unsqueeze(-1) * freqs.unsqueeze(0) # (..., 3, num_freq)
+-        # sin and cos
+-        # concat sin and cos
+-        # Standard NeRF PE
+-        x_expanded = x.unsqueeze(-1) * freqs.unsqueeze(0) # (..., 3, num_freq)
+-        x_sin = torch.sin(x_expanded)
+-        x_cos = torch.cos(x_expanded)
+-        out = torch.cat([x_sin, x_cos], dim=-1) # (..., 3, 2*num_freq)
+-        out = out.reshape(*x.shape[:-1], -1) # (..., 6*num_freq)
+-        return out
+-
+-def get_rays_from_pose(phi, theta, rho, batch_size):
+-    """
+-    Simplified ray generation from spherical coordinates.
+-    """
+-    # [G] This is a placeholder for the specific camera projection used in CodeNeRF.
+-    # The paper uses intrinsic/extrinsic matrices.
+-    # Here we assume a simple look-at at origin.
+-    d = torch.stack([
+-        torch.sin(theta) * torch.cos(phi),
+-        torch.sin(theta) * torch.sin(phi),
+-        torch.cos(theta)
+-    ], dim=-1)
+-    o = -rho * d
+-    # Expand to batch
+-    d = d.unsqueeze(0).expand(batch_size, -1)
+-    o = o.unsqueeze(0).expand(batch_size, -1)
+-    return o, d
++def positional_encoding(x, num_frequencies):
++    """
++    Standard positional encoding.
++    x: input tensor of shape (..., D)
++    num_frequencies: int
++    Returns: encoded tensor of shape (..., D * 2 * num_frequencies)
++    """
++    # Implementation details of PE are standard; 
++    # 10 frequencies for x, 4 for d as per [S1]
++    pass
++
++def shape_network(x_encoded, z_s, theta_s):
++    """
++    F^s_Theta_s: (gamma_x(x), z_s) -> (sigma, v)
++    x_encoded: encoded 3D position
++    z_s: shape latent code
++    theta_s: weights for shape network
++    Returns: sigma (density), v (feature vector R^256)
++    """
++    # MLP forward pass
++    pass
++
++def texture_network(v, d_encoded, z_t, theta_t):
++    """
++    F^t_Theta_t: (v, gamma_d(d), z_t) -> (c)
++    v: intermediate feature vector
++    d_encoded: encoded viewing direction
++    z_t: texture latent code
++    theta_t: weights for texture network
++    Returns: c (RGB color)
++    """
++    # MLP forward pass
++    pass
++
++def volume_rendering(sigma, c, t_near, t_far, num_samples):
++    """
++    Renders color from density and color samples along a ray.
++    sigma: array of densities
++    c: array of colors
++    t_near, t_far: near and far bounds
++    num_samples: int
++    Returns: rendered color
++    """
++    t = np.linspace(t_near, t_far, num_samples)
++    delta = np.diff(t, append=t[-1] + (t[-1] - t[-2])) # Approximation for last delta if needed, 
++                                                       # but standard is uniform spacing
++    # Correct delta calculation for uniform samples
++    # delta_i = t_{i+1} - t_i
++    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    
++    # Vectorized implementation
++    deltas = np.diff(t)
++    # Handle last sample if necessary, usually N samples cover the interval
++    # Assuming N samples are placed at t_1...t_N
++    # delta_i is distance between t_i and t_{i+1}
++    # For the last sample, we need a delta. Standard NeRF uses N samples.
++    # Let's assume uniform spacing h = (t_far - t_near) / (N - 1) if points are endpoints
++    # Or N points inside. The source says "N uniform samples".
++    # Let's stick to the formula provided: delta_i = t_{i+1} - t_i.
++    # This implies N-1 deltas for N points? 
++    # Actually, standard NeRF uses N samples. 
++    # Formula: sum_{i=1}^N T_i (1 - exp(-sigma_i delta_i)) c_i
++    # This requires delta_i for each i.
++    # If t has N elements, we need N deltas. 
++    # Usually t is defined such that we have intervals.
++    # Let's assume standard implementation where we sample N points.
++    
++    # Re-reading [S1]: "N uniform samples from the near to far bounds"
++    # "delta_i = t_{i+1} - t_i"
++    # This implies we need t_1 ... t_{N+1} or similar.
++    # Standard NeRF (Knapik et al / Mildenhall et al) usually samples N points.
++    # Let's assume the source implies the standard differentiable volume rendering.
++    
++    # Simplified standard volume rendering logic
++    alphas = 1.0 - np.exp(-sigma * deltas)
++    transmittance = np.exp(-np.cumsum(sigma * deltas))
++    # T_i in formula is exp(-sum_{j=1}^{i-1} sigma_j delta_j)
++    # This matches transmittance[i-1] if we index carefully.
++    
++    # Using numpy broadcasting for ray batch
++    # alpha = 1 - exp(-sigma * delta)
++    # T = exp(-cumsum(sigma * delta))
++    # Contribution = T * alpha * color
++    
++    # Note: The exact indexing depends on whether T_i includes i-1 or i.
++    # Formula: T_i = exp(-sum_{j=1}^{i-1} ...). So T_1 = 1.
++    
++    cum_sigma_delta = np.cumsum(sigma * deltas)
++    T = np.exp(np.concatenate([[0], cum_sigma_delta[:-1]])) # T_1=1, T_2=exp(-sigma_1 delta_1)
++    
++    # Wait, T_i in sum is weight for sample i.
++    # Weight_i = T_i * (1 - exp(-sigma_i delta_i))
++    
++    weights = T * (1.0 - np.exp(-sigma * deltas))
++    color = np.sum(weights * c, axis=-1)
++    return color
++
++def train_step(images, poses, network_params, latent_codes, hyperparams):
++    """
++    One training iteration.
++    """
++    # 1. Sample 4094 rays per image [S1]
++    rays = sample_rays(images, poses, num_rays=4094)
++    
++    # 2. Sample 64 points along each ray [S1]
++    points, directions = sample_points_along_rays(rays, num_samples=64)
++    
++    # 3. Encode inputs
++    x_encoded = positional_encoding(points, num_frequencies=10)
++    d_encoded = positional_encoding(directions, num_frequencies=4)
++    
++    # 4. Forward pass
++    # Shape network
++    sigma, v = shape_network(x_encoded, latent_codes['z_s'], network_params['theta_s'])
++    
++    # Texture network
++    c = texture_network(v, d_encoded, latent_codes['z_t'], network_params['theta_t'])
++    
++    # 5. Render
++    rendered_colors = volume_rendering(sigma, c, rays['t_near'], rays['t_far'], 64)
++    
++    # 6. Compute Loss
++    photometric_loss = np.mean((rendered_colors - images['colors'])**2)
++    reg_loss = (np.linalg.norm(latent_codes['z_s'])**2 + np.linalg.norm(latent_codes['z_t'])**2) / hyperparams['nu']**2
++    
++    total_loss = photometric_loss + reg_loss
++    
++    # 7. Backprop and Update
++    # Update network_params and latent_codes using AdamW
++    # LR: 1e-4 for network, 1e-3 for latents [S1]
++    pass
++
++def inference_optimize(single_image, pretrained_network_params, hyperparams):
++    """
++    Reconstruct unseen object from single unposed image.
++    """
++    # 1. Initialize latent codes with mean of trained embeddings [S1]
++    z_s = np.mean(trained_embeddings['z_s'])
++    z_t = np.mean(trained_embeddings['z_t'])
++    
++    # 2. Initialize camera pose with large random error [S1]
++    phi = random_angle() # Azimuth
++    theta = random_angle() # Elevation
++    rho = random_distance() # Distance
++    # Initial rotation error > 30 deg, avg 80 deg [S1]
++    
++    # 3. Optimization Loop (299 iterations) [S1]
++    for i in range(299):
++        # Generate rays from current camera pose
++        rays = generate_rays_from_pose(phi, theta, rho, single_image['intrinsic'])
++        
++        # Sample points
++        points, directions = sample_points_along_rays(rays, num_samples=64)
++        
++        # Encode
++        x_encoded = positional_encoding(points, num_frequencies=10)
++        d_encoded = positional_encoding(directions, num_frequencies=4)
++        
++        # Forward pass (Network weights fixed)
++        sigma, v = shape_network(x_encoded, z_s, pretrained_network_params['theta_s'])
++        c = texture_network(v, d_encoded, z_t, pretrained_network_params['theta_t'])
++        
++        # Render
++        rendered_colors = volume_rendering(sigma, c, rays['t_near'], rays['t_far'], 64)
++        
++        # Loss
++        photometric_loss = np.mean((rendered_colors - single_image['colors'])**2)
++        reg_loss = (np.linalg.norm(z_s)**2 + np.linalg.norm(z_t)**2) / hyperparams['nu']**2
++        total_loss = photometric_loss + reg_loss
++        
++        # Backprop w.r.t z_s, z_t, phi, theta, rho
++        # LR: 1e-2 for latents and camera params [S1]
++        # Camera LR: phi=1e-2, theta=1e-1, rho=1e-1 [S1]
++        update_variables(z_s, z_t, phi, theta, rho, total_loss)
++        
++    return z_s, z_t, phi, theta, rho
+ ```
+ 
++### Parameters
++*   **Positional Encoding Frequencies:** 10 for $\mathbf{x}$, 4 for $\mathbf{d}$ [S1].
++*   **Optimizer:** AdamW [S1].
++*   **Learning Rates (Training):**
++    *   Network parameters $\Theta$: $1 \times 10^{-4}$ [S1].
++    *   Latent vectors $\mathbf{z_s}, \mathbf{z_t}$: $1 \times 10^{-3}$ [S1].
++*   **Learning Rates (Inference):**
++    *   Latent vectors $\mathbf{z_s}, \mathbf{z_t}$: $1 \times 10^{-2}$ [S1].
++    *   Camera azimuth $\phi$: $1 \times 10^{-2}$ [S1].
++    *   Camera elevation $\theta$: $1 \times 10^{-1}$ [S1].
++    *   Camera distance $\rho$: $1 \times 10^{-1}$ [S1].
++*   **Regularization Weight:** $1/\nu^2$ [S1]. Value of $\nu$ not explicitly given in sources.
++*   **Samples per Ray:** 64 [S1].
++*   **Rays per Image (Training):** 4094 [S1].
++*   **Inference Iterations:** 299 [S1].
++
++### Edge Cases and Pitfalls
++*   **Camera Initialization:** Initial camera pose estimates can have rotation errors above 30 degrees (average 80 degrees from ground truth). The optimization must be robust to this; it converged in 85% of cases in experiments [S1].
++*   **Disentanglement Failure:** If the architecture is modified to input viewing direction into the shape network (M1) or use a single embedding for shape and texture (M2), disentanglement fails. M1 synthesizes incorrect textures, and M2 causes unwanted shape changes during texture editing [S1].
++*   **No 3D Supervision:** The model is trained end-to-end from images only, without 3D ground truth supervision, relying on multi-view photometric consistency [S1].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Training requires joint optimization of network weights and latent codes for all objects in the batch. Inference requires iterative optimization (299 iterations) per unseen object [S1].
+-*   **Memory Complexity:** Stores network weights $\Theta$ and $M$ pairs of latent vectors $\{\mathbf{z_s}, \mathbf{z_t}\}$ [S1].
+-*   **Performance:** On the ShapeNet-SRN benchmark, CodeNeRF achieves competitive PSNR and SSIM scores for novel view synthesis and few-shot reconstruction compared to methods like SRN and PixelNeRF [S1].
+-*   **Camera Pose Estimation:** The method converges to the correct camera pose in 85% of cases, even when initializations have rotation errors averaging 80 degrees [S1].
+-*   **Strengths:** Disentangles shape and texture, allowing independent editing; works with unposed input images; generalizes across object categories [S1].
+-*   **Limitations:** Requires iterative optimization at inference time; sensitive to initialization if disentanglement is not properly enforced (e.g., M1/M2 variants fail) [S1].
++*   **Time Complexity:** Training involves optimizing network weights and latent codes for all objects in the category. Inference requires iterative optimization (299 iterations) per unseen object to find latent codes and camera pose [S1].
++*   **Memory Complexity:** Requires storing latent embeddings for each object in the training set ($M$ objects) [S1].
++*   **Performance:** On the ShapeNet-SRN benchmark, CodeNeRF achieves competitive PSNR and SSIM scores for novel view synthesis and few-shot reconstruction compared to methods like SRN, PixelNeRF, and GRF [S1].
++*   **Strengths:**
++    *   Disentangles shape and texture, allowing independent editing [S1].
++    *   Does not require known camera pose at inference time [S1].
++    *   Generalizes well to unseen objects from a single image [S1].
++*   **Limitations:**
++    *   Requires training on a category of objects first [S1].
++    *   Inference optimization is iterative and slower than feed-forward methods [S1].
++    *   Convergence is not guaranteed (85% success rate in pose estimation) [S1].
+ 
+ ## Background
+-CodeNeRF was introduced in 2021 by [S1]. It builds on the original NeRF [S1] and SRN [S1] architectures. It addresses the limitation of NeRF being scene-specific by learning a prior over object categories. It is distinct from DeepSDF [S1] by not requiring 3D supervision and from SRN [S1] by decoupling shape and texture embeddings.
++CodeNeRF was introduced by [S1] at ICCV 2021. It builds on the original NeRF [S1] and takes inspiration from SRN [S1] and DeepSDF [S1]. It addresses the limitation of NeRF being scene-specific by learning a category-level representation. It is used for single-view reconstruction, novel view synthesis, and shape/texture editing on datasets like ShapeNet-SRN (cars and chairs) [S1].
+ 
+ ## Sources

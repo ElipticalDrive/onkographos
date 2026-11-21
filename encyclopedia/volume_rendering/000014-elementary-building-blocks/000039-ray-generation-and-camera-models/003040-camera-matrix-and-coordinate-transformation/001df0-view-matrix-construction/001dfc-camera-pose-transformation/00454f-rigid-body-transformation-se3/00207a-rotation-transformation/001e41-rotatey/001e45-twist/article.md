@@ -1,0 +1,107 @@
+# Twist
+Also called: Twist Transformation
+
+## Overview
+Twist is a geometric deformation operation for Signed Distance Fields (SDFs) that twists a shape around the Y-axis proportional to its height [S2, unofficial]. It solves the problem of creating helical or spiral variations of rigid primitives, such as twisting a cylinder into a corkscrew [S3, unofficial]. Unlike [RotateY](1720-rotatey.md), which applies a uniform rotation to the entire object, Twist applies a spatially varying rotation where the angle depends on the Y-coordinate, creating a gradient of rotation along the vertical axis [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A point $p = (p_x, p_y, p_z)$ and a twist factor $k$ (float) [S2, unofficial].
+- Output: A transformed point $p'$ [S2, unofficial].
+
+**Data Structures:**
+- No persistent data structures. The transformation is computed per-point during SDF evaluation [S2, unofficial].
+
+**Steps:**
+1. Calculate the twist angle $\theta$ based on the Y-coordinate and the twist factor:
+   $$ \theta = k \cdot p_y $$
+   [S2, unofficial]
+2. Compute the sine and cosine of the angle:
+   $$ c = \cos(\theta) $$
+   $$ s = \sin(\theta) $$
+   [S2, unofficial]
+3. Apply a 2D rotation matrix to the X and Z components of the point, leaving the Y component unchanged:
+   $$ p'_x = c \cdot p_x - s \cdot p_z $$
+   $$ p'_y = p_y $$
+   $$ p'_z = s \cdot p_x + c \cdot p_z $$
+   [S2, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def twist(p: tuple, k: float) -> tuple:
+    """Twists space around the Y-axis proportional to height."""
+    px, py, pz = p
+    angle = k * py
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    new_x = cos_a * px - sin_a * pz
+    new_y = py
+    new_z = sin_a * px + cos_a * pz
+    return (new_x, new_y, new_z)
+```
+
+**Parameters:**
+- $k$: The twist factor controlling the rate of twist [S2, unofficial]. A value of 0 results in no twist [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** For very large values of $k \cdot p_y$, standard floating-point arithmetic may lose precision in trigonometric evaluations, though this is rarely an issue for typical SDF scene scales [G].
+- **Boundaries:** The twist is continuous across space. During raymarching, high twist rates relative to step sizes may cause visible discretization artifacts if the step size is not adaptive [G].
+
+## Subtopics
+
+### Bend Transformation
+Bend is a geometric deformation operation for SDFs that curves a shape around the X-axis [S3, unofficial]. It solves the problem of creating organic, curved variations of rigid primitives, such as bending a cylinder into an arc [S3, unofficial]. Unlike [Twist](1722-twist.md), which rotates geometry around the Y-axis with a linear progression, Bend applies a spatially varying rotation around the X-axis, creating a smooth arc [S1, S3, unofficial].
+
+**Definition:** Bends space along the X-axis around the Y-axis [S2, unofficial].
+
+**Steps:**
+1. Calculate the bend angle $\theta$ based on the X-coordinate and a bend factor $k$:
+   $$ \theta = k \cdot p_x $$
+   [S2, unofficial]
+2. Compute the sine and cosine of the angle:
+   $$ c = \cos(\theta) $$
+   $$ s = \sin(\theta) $$
+   [S2, unofficial]
+3. Apply a 2D rotation matrix to the X and Y components of the point, leaving the Z component unchanged:
+   $$ p'_x = c \cdot p_x - s \cdot p_y $$
+   $$ p'_y = s \cdot p_x + c \cdot p_y $$
+   $$ p'_z = p_z $$
+   [S2, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def bend(p: tuple, k: float) -> tuple:
+    """Bends space along the X-axis around the Y-axis."""
+    px, py, pz = p
+    angle = k * px
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    new_x = cos_a * px - sin_a * py
+    new_y = sin_a * px + cos_a * py
+    new_z = pz
+    return (new_x, new_y, new_z)
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per point evaluation. The transformation involves a constant number of arithmetic operations and two trigonometric function calls [S2, unofficial].
+- **Memory Complexity:** $O(1)$. The operation requires only a few temporary scalar variables for intermediate calculations [G].
+- **Strengths:** Computationally inexpensive and simple to implement. Enables the creation of complex, organic shapes from simple primitives [S3, unofficial].
+- **Limitations:** The transformation is non-linear, which complicates analytical normal calculation. Normals must be transformed using the inverse transpose of the Jacobian of the transformation to remain perpendicular to the deformed surface [G].
+- **When to use:** When a helical or spiral deformation is desired for a primitive [S3, unofficial].
+- **When not to use:** When a uniform rotation is sufficient (use [RotateY](1720-rotatey.md)) or when a simple arc is desired (use [Bend](2044-bend.md)) [S3, unofficial].
+
+## Background
+Twist is a standard geometric transformation used in Signed Distance Field (SDF) raymarching [S3, unofficial]. It is implemented in educational and hobbyist raymarching codebases that demonstrate SDF manipulation techniques [S1, S2, unofficial].
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
+[S3] PDF COS 426 Final Project Writeup Raymarching with Signed Distance Fields, https://jbaum98.github.io/cos426_final_project/writeup.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,100 @@
+# Absorption Attenuation
+
+Also called: Absorption Coefficient Model, Absorption Coefficient, Absorption Model
+
+## Overview
+Absorption Attenuation is the process by which light radiance is reduced as it travels through a participating medium due to the conversion of photon energy into other forms, such as heat [S3, book]. It calculates the surviving radiance along a ray segment in an absorption-only medium where no scattering or emission occurs [S2, unofficial][S3, book]. Unlike scattering-based models, this method considers only the exponential decay of incident light, serving as the foundational component for compositing in volume rendering and radiography [8074-transparency-and-opacity.md].
+
+## How it works
+**Inputs and Outputs**
+- Input: Incident radiance $L_i$ at the start of the segment, the absorption coefficient field $\sigma_a(p, \omega)$, the start position $p$, the direction $\omega$, and the segment length $d$ [S2, unofficial][S3, book].
+- Output: Exitant radiance $L_o$ at the end of the segment [S3, book].
+
+**Data Structures**
+The absorption coefficient $\sigma_a$ represents the probability density that light is absorbed per unit distance traveled in the medium [S3, book]. Its units are reciprocal distance ($m^{-1}$) [S3, book]. It can take any non-negative value and is not required to be between 0 and 1 [S3, book]. It may vary with position $p$ and direction $\omega$, though implementations often model it as purely a function of position [S3, book]. Exact storage layouts (fields, sizes, bit packing) are Not given in the sources.
+
+**Formulas**
+The differential change in radiance $dL$ over a differential distance $dt$ is given by:
+$$ dL(p, \omega) = -\sigma_a(p, \omega) L(p, \omega) dt $$
+where $L(p, \omega)$ is the radiance at position $p$ in direction $\omega$, and $\sigma_a(p, \omega)$ is the absorption coefficient [S2, unofficial][S3, book].
+
+The surviving radiance after traveling distance $d$ in direction $\omega$ starting at point $p$ is:
+$$ L_{surviving} = L_{initial} \cdot e^{-\int_0^d \sigma_a(p + t\omega, \omega) dt} $$
+The term in the exponent is the optical depth $\tau$ [S1, unofficial]:
+$$ \tau(d) = \int_0^d \sigma_a(p + t\omega, \omega) dt $$
+Thus, the transmittance $T(d)$ is:
+$$ T(d) = e^{-\tau(d)} $$
+And the exitant radiance is:
+$$ L_o = T(d) L_i $$
+
+**Parameters**
+- $\sigma_a$: Absorption coefficient. It can take any non-negative value and is not required to be between 0 and 1 [S3, book]. It may vary with position $p$ and direction $\omega$, though many implementations (like pbrt) model it as purely a function of position [S3, book].
+
+**Steps**
+1. Initialize the accumulated optical depth $\tau = 0$ [G].
+2. Sample the absorption coefficient $\sigma_a$ at the current position along the ray [G].
+3. Add $\sigma_a \cdot dt$ to $\tau$, where $dt$ is the step size [G].
+4. Repeat steps 2-3 for all steps along the ray segment of length $d$ [G].
+5. Compute the transmittance $T = e^{-\tau}$ [S1, unofficial].
+6. Compute the output radiance $L_o = L_i \cdot T$ [S3, book].
+
+**Edge Cases and Pitfalls**
+- If $\sigma_a$ is zero, $T=1$ and no attenuation occurs [G].
+- If $\sigma_a$ is very large, $T$ approaches 0, resulting in complete opacity [G].
+- Numerical precision issues may arise if $\tau$ is extremely large, causing $e^{-\tau}$ to underflow to zero [G].
+- The absorption coefficient is distinct from the absorption coefficient used in specifying indices of refraction of conductors [S3, book].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def absorption_attenuation(L_initial, start_pos, direction, length, num_steps):
+    """
+    Calculate radiance after absorption attenuation.
+    
+    Args:
+        L_initial: Incident radiance at start_pos.
+        start_pos: 3D vector, starting point of the ray segment.
+        direction: Normalized 3D vector, direction of propagation.
+        length: Float, total distance to travel.
+        num_steps: Integer, number of discrete steps for numerical integration.
+        
+    Returns:
+        L_exitant: Radiance after attenuation.
+    """
+    tau = 0.0
+    dt = length / num_steps
+    
+    for i in range(num_steps):
+        current_pos = start_pos + direction * (i * dt)
+        # Sample absorption coefficient at current_pos
+        # Not given in sources; implementation detail for integration [G]
+        sigma_a = 0.0  # Replace with actual sampling logic
+        tau += sigma_a * dt
+        
+    transmittance = math.exp(-tau)
+    L_exitant = L_initial * transmittance
+    return L_exitant
+```
+
+## Subtopics
+
+### [Transparency and Opacity](8074-transparency-and-opacity.md)
+Defines transparency (transmittance) $T(s)$ as the fraction of light remaining and opacity $O(s)$ as the fraction absorbed ($O(s) = 1 - T(s)$). It is distinct from scattering-based models by considering only absorption.
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of sampling steps along the ray [G]. If the absorption coefficient is constant, it is $O(1)$ [G].
+- **Memory Complexity**: Depends on the storage of the absorption coefficient field [G]. For a 3D grid, it is $O(N^3)$ where $N$ is the resolution [G].
+- **Strengths**: Physically accurate for non-scattering media; computationally inexpensive compared to scattering models [G].
+- **Limitations**: Does not account for light scattering or emission; requires accurate sampling of $\sigma_a$ for inhomogeneous media [G].
+- **When to use**: When modeling media where scattering is negligible (e.g., certain types of smoke, fog, or X-ray attenuation) or when compositing pre-computed attenuation maps [G].
+
+## Background
+Absorption is one of the three main physical processes affecting radiance in participating media, alongside emission and scattering [S3, book].
+
+## Sources
+[S1] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
+[S2] Volume Rendering in Offline Renderer · A Graphics Guy's Note, https://agraphicsguynotes.com/posts/volume_rendering_in_offline_renderer/, fetched 2026-10-28 (unofficial)
+[S3] 11.1 Volume Scattering Processes, https://pbr-book.org/4ed/Volume_Scattering/Volume_Scattering_Processes, fetched 2026-10-29 (book)

@@ -1,0 +1,192 @@
+# Isosurface Characteristics Computation
+
+Also called: Integral of Gradient, Mean Gradient, Total Area, Confined Volume, Curvature, Pekar et al. Isosurface Characteristics
+
+## Overview
+Isosurface Characteristics Computation is a method for quantifying the geometric and topological properties of an extracted isosurface, specifically calculating the integral of the gradient along the surface, mean gradient, total area, confined volume, and curvature [S1, unofficial]. It sets itself apart from sibling methods like [Marching Cubes Surface Normal Estimation](1005-marching-cubes-surface-normal-estimation.md) and [Marching Cubes Surface Area Estimation](1315-marching-cubes-surface-area-estimation.md) by providing a unified framework for multiple scalar metrics derived from the underlying scalar field's gradient, rather than focusing on a single geometric primitive or post-processing step.
+
+## How it works
+The method operates on the scalar field $V$ and the extracted isosurface $S$ defined by $V(\mathbf{x}) = c$, where $c$ is the isovalue. It computes five key characteristics:
+
+1.  **Integral of the Gradient**: The surface integral of the magnitude of the gradient vector field over the isosurface.
+2.  **Mean Gradient**: The average magnitude of the gradient over the volume or surface, often used to characterize edge strength.
+3.  **Total Area**: The total surface area of the isosurface.
+4.  **Confined Volume**: The volume enclosed by the isosurface.
+5.  **Curvature**: Local curvature measures (mean and Gaussian) at each point on the surface.
+
+### Data Structures
+*   **Scalar Field $V$**: A 3D grid of values $V_{i,j,k}$.
+*   **Isosurface Mesh $S$**: A set of triangles $\{T_k\}$ with vertices $\mathbf{v}_i$.
+*   **Gradient Field $\nabla V$**: Computed from $V$ using finite differences or analytical derivatives if $V$ is defined by basis functions.
+
+### Steps
+
+1.  **Compute Gradient Field**: Calculate $\nabla V(\mathbf{x})$ for all points in the domain. For a grid, use central differences:
+    $$ \frac{\partial V}{\partial x} \approx \frac{V_{i+1,j,k} - V_{i-1,j,k}}{2\Delta x} $$
+    [G] Handle boundaries by using one-sided differences or clamping.
+
+2.  **Extract Isosurface**: Generate the mesh $S$ using an extraction algorithm (e.g., Marching Cubes) for isovalue $c$.
+
+3.  **Compute Total Area ($A$)**: Sum the areas of all triangles $T_k$ in $S$.
+    $$ A = \sum_{k} \text{Area}(T_k) $$
+    For a triangle with vertices $\mathbf{a}, \mathbf{b}, \mathbf{c}$:
+    $$ \text{Area}(T_k) = \frac{1}{2} \| (\mathbf{b} - \mathbf{a}) \times (\mathbf{c} - \mathbf{a}) \| $$
+
+4.  **Compute Confined Volume ($Vol$)**: Calculate the volume enclosed by $S$.
+    $$ Vol = \frac{1}{6} \sum_{k} (\mathbf{a}_k \times \mathbf{b}_k) \cdot \mathbf{c}_k $$
+    [G] Ensure consistent vertex winding order for signed volume.
+
+5.  **Compute Integral of Gradient ($I_\nabla$)**: Integrate the magnitude of the gradient over the surface.
+    $$ I_\nabla = \int_S \| \nabla V(\mathbf{x}) \| \, dA $$
+    Approximate by summing over triangles:
+    $$ I_\nabla \approx \sum_{k} \text{Area}(T_k) \cdot \| \nabla V(\mathbf{p}_k) \| $$
+    where $\mathbf{p}_k$ is the centroid of triangle $T_k$. Interpolate $\nabla V$ at $\mathbf{p}_k$ from the grid.
+
+6.  **Compute Mean Gradient ($\bar{g}$)**: Average gradient magnitude over the surface or volume.
+    $$ \bar{g} = \frac{1}{A} \int_S \| \nabla V(\mathbf{x}) \| \, dA = \frac{I_\nabla}{A} $$
+    [G] Alternatively, compute over the volume $Vol$:
+    $$ \bar{g}_{vol} = \frac{1}{Vol} \int_V \| \nabla V(\mathbf{x}) \| \, dV $$
+
+7.  **Compute Curvature**: For each vertex or triangle, compute mean curvature $H$ and Gaussian curvature $K$.
+    *   **Mean Curvature**: $H = \frac{1}{2}(\kappa_1 + \kappa_2)$
+    *   **Gaussian Curvature**: $K = \kappa_1 \kappa_2$
+    [G] Use discrete differential geometry operators (e.g., cotangent weights) for mesh-based estimation.
+
+### Parameters
+*   **Isovalue $c$**: The threshold for extraction.
+*   **Grid Resolution**: Affects gradient accuracy and mesh detail.
+*   **Smoothing**: Optional pre-processing of $V$ to reduce noise in gradient/curvature.
+
+### Edge Cases and Pitfalls
+*   **Noise**: High-frequency noise in $V$ leads to erratic gradients and curvature. Smoothing $V$ is recommended [S1, unofficial].
+*   **Boundary Effects**: Gradient computation at domain boundaries requires careful handling [G].
+*   **Degenerate Triangles**: Zero-area triangles in the mesh can skew area and curvature calculations. Filter or merge them.
+*   **Non-Manifold Geometry**: Ensure the mesh is manifold for accurate volume and area integration.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_isosurface_characteristics(V, grid_spacing, isovalue):
+    """
+    V: 3D numpy array of scalar field values
+    grid_spacing: tuple (dx, dy, dz)
+    isovalue: float, the isosurface threshold
+    Returns: dict with 'area', 'volume', 'integral_gradient', 'mean_gradient', 'curvature_map'
+    """
+    # Step 1: Compute Gradient Field
+    # Use central differences for interior, one-sided for boundaries
+    grad_V = compute_gradient(V, grid_spacing)
+    
+    # Step 2: Extract Isosurface
+    # Using a placeholder for Marching Cubes or similar
+    mesh = extract_isosurface(V, isovalue)
+    triangles = mesh.triangles
+    vertices = mesh.vertices
+    
+    # Step 3: Compute Total Area
+    area = 0.0
+    for tri in triangles:
+        a, b, c = vertices[tri]
+        area += 0.5 * np.linalg.norm(np.cross(b - a, c - a))
+    
+    # Step 4: Compute Confined Volume
+    volume = 0.0
+    for tri in triangles:
+        a, b, c = vertices[tri]
+        volume += np.dot(np.cross(a, b), c) / 6.0
+    volume = abs(volume) # Ensure positive volume
+    
+    # Step 5: Compute Integral of Gradient
+    integral_gradient = 0.0
+    for tri in triangles:
+        a, b, c = vertices[tri]
+        centroid = (a + b + c) / 3.0
+        # Interpolate gradient at centroid
+        grad_at_centroid = interpolate_gradient(grad_V, centroid, grid_spacing)
+        tri_area = 0.5 * np.linalg.norm(np.cross(b - a, c - a))
+        integral_gradient += tri_area * np.linalg.norm(grad_at_centroid)
+    
+    # Step 6: Compute Mean Gradient
+    mean_gradient = integral_gradient / area if area > 0 else 0.0
+    
+    # Step 7: Compute Curvature (per vertex)
+    curvature_map = {}
+    for i, vertex in enumerate(vertices):
+        # Compute local curvature using neighboring triangles
+        # Placeholder for discrete curvature computation
+        H, K = compute_vertex_curvature(vertex, i, mesh)
+        curvature_map[i] = {'mean': H, 'gaussian': K}
+        
+    return {
+        'area': area,
+        'volume': volume,
+        'integral_gradient': integral_gradient,
+        'mean_gradient': mean_gradient,
+        'curvature_map': curvature_map
+    }
+
+def compute_gradient(V, spacing):
+    """Compute gradient using finite differences."""
+    dx, dy, dz = spacing
+    # Central differences
+    dVdx = np.zeros_like(V)
+    dVdy = np.zeros_like(V)
+    dVdz = np.zeros_like(V)
+    
+    dVdx[1:-1, :, :] = (V[2:, :, :] - V[:-2, :, :]) / (2 * dx)
+    dVdy[:, 1:-1, :] = (V[:, 2:, :] - V[:, :-2, :]) / (2 * dy)
+    dVdz[:, :, 1:-1] = (V[:, :, 2:] - V[:, :, :-2]) / (2 * dz)
+    
+    # Boundary handling (one-sided)
+    dVdx[0, :, :] = (V[1, :, :] - V[0, :, :]) / dx
+    dVdx[-1, :, :] = (V[-1, :, :] - V[-2, :, :]) / dx
+    dVdy[:, 0, :] = (V[:, 1, :] - V[:, 0, :]) / dy
+    dVdy[:, -1, :] = (V[:, -1, :] - V[:, -2, :]) / dy
+    dVdz[:, :, 0] = (V[:, :, 1] - V[:, :, 0]) / dz
+    dVdz[:, :, -1] = (V[:, :, -1] - V[:, :, -2]) / dz
+    
+    return np.stack((dVdx, dVdy, dVdz), axis=-1)
+
+def interpolate_gradient(grad_V, point, spacing):
+    """Trilinear interpolation of gradient at a point."""
+    # Normalize point to grid coordinates
+    # ... (implementation details omitted for brevity)
+    pass
+
+def compute_vertex_curvature(vertex, idx, mesh):
+    """Compute mean and Gaussian curvature for a vertex."""
+    # Use cotangent weights or similar discrete method
+    # ... (implementation details omitted for brevity)
+    return 0.0, 0.0
+```
+
+## Subtopics
+
+### [Volumetric Divergence Metric](12575-volumetric-divergence-metric.md)
+The Volumetric Divergence Metric (VDC) estimates the accuracy of isosurfaces extracted by marching algorithms by calculating the total volume between the produced mesh isosurface and the ideal trilinear interpolation isosurface. It sets itself apart from sibling metrics like the Tetrahedron Volumetric Divergence (TVD) Predictor by providing a highly accurate ground truth through recursive subdivision, whereas TVD uses a faster, closed-form geometric approximation.
+
+### [Curvature-Based Anisotropy Estimation](16471-curvature-based-anisotropy-estimation.md)
+This method estimates anisotropy for surface shading by computing the principal curvatures of an isosurface. It serves as a baseline comparison against covariance-based methods, relying on differential geometry properties where principal curvature directions form an orthonormal basis in the tangent plane. Unlike covariance-based approaches that evaluate feature extent in both spatial and data domains, this method focuses strictly on the local geometry of the isosurface.
+
+### [Precomputed Geometric Quantities for Contour Trees](17208-precomputed-geometric-quantities-for-contour-trees.md)
+This method precomputes the geometric properties (area and volume) of all possible contours for a 3D scalar field, enabling real-time evaluation for any selected isovalue without expensive surface extraction. It differs from post-extraction methods by using a contour tree to hierarchically aggregate B-spline functions, allowing immediate quantification of topological features.
+
+### Hierarchical Surface Segmentation
+Segmentation of a surface into four types by combining Boolean operators for mean curvature (convex/concave) and Gaussian curvature (elliptic/hyperbolic) [S2]. Compute the mean curvature operator to determine if a region is convex or concave, and the Gaussian curvature sign operator to determine if a region is elliptic or hyperbolic. Classify each vertex based on the combination of mean and Gaussian curvature results. Used to explicitly localize minima of sulci and maxima of gyri, which serve as seed points for topology graph generation [S2].
+
+## Operating characteristics
+*   **Time Complexity**: Dominated by isosurface extraction ($O(N)$ for $N$ voxels) and gradient computation ($O(N)$). Curvature computation is $O(M)$ for $M$ vertices.
+*   **Memory Complexity**: $O(N)$ for the scalar field and gradient, $O(M)$ for the mesh.
+*   **Strengths**: Provides comprehensive geometric and topological insights; efficient for large datasets if optimized.
+*   **Limitations**: Sensitive to noise; requires a well-formed mesh for accurate volume/area.
+*   **When to Use**: When detailed geometric analysis of the isosurface is required, such as in medical imaging for tissue characterization or in scientific visualization for feature extraction.
+*   **When Not to Use**: For real-time applications where only basic visualization is needed, or when the scalar field is extremely noisy without pre-smoothing.
+
+## Background
+The method was proposed by Pekar et al. in 2001 as an efficient approach for computing isosurface characteristics including the integral of the gradient, mean gradient, total area, confined volume, and curvature [S1, unofficial]. It builds on earlier strategies by Bajaj et al. [S1, unofficial]. The method is particularly useful in volumetric data visualization for understanding the structure and properties of isosurfaces.
+
+## Sources
+[S1] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)
+[S2] Hierarchical Isosurface Segmentation Based on Discrete Curvature, https://inria.hal.science/inria-00537470v1, fetched 2026-10-26

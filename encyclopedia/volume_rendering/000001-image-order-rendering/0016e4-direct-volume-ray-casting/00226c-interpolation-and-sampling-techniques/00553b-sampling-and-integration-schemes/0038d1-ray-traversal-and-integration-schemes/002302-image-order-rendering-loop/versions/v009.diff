@@ -1,0 +1,398 @@
+--- v008.md
++++ v009.md
+@@ -4,172 +4,207 @@
+ 
+ ## Overview
+-The Image-order Rendering Loop is the primary control structure for volume ray casting, iterating over each pixel of the output image to generate a ray and shade the scene along that ray [S2, unofficial][S3]. It solves the problem of mapping 3D volumetric data to a 2D screen by decoupling pixel generation from data traversal, allowing for correct perspective projection and flexible shading models in a single pass [S1, unofficial]. Unlike object-order (rasterization) methods, it is described as more "CPU-like" but offers superior flexibility for adaptive sampling and full 32-bit compositing precision without intermediate buffers [S1, unofficial].
++The image-order rendering loop is the fundamental control structure for volume ray casting, iterating over each pixel of the output image to generate a camera ray and invoking a raymarcher to compute the final color [S2, unofficial][S3]. It differs from object-order (rasterization) by being more "CPU-like" in its iteration logic, offering correct perspective projection, single-pass ray casting, and full 32-bit compositing precision without requiring intermediate buffers [S1, unofficial].
+ 
+ ## How it works
+-The method operates by iterating through the screen space, generating camera rays, and invoking a raymarcher to sample the volume. The core logic follows a nested loop structure: an outer loop over pixels and an inner loop over ray samples (or traversal steps).
+-
+-**Inputs and Outputs:**
+-*   **Inputs:** Image dimensions ($vwidth, vheight$), camera parameters (position, direction, projection mode), volume dataset, shading mode enum.
+-*   **Outputs:** A 2D image buffer where each pixel contains the final color and/or depth value.
+-
+-**Data Structures:**
+-*   **Pixel Coordinates:** Integer indices $(x, y)$ ranging from $0$ to $vwidth-1$ and $0$ to $vheight-1$.
+-*   **Ray Parameters:** `rayOrigin` (vec3), `rayDirection` (vec3).
+-*   **Shading Mode:** Enum values including `TRACE`, `DEPTH`, `DEPTH_HIT`, `DIFFUSE`, `NORMAL`, `INDEX` [S2, unofficial].
+-*   **Projection Mode:** Enum values `PERSPECTIVE`, `ORTHOGRAPHIC` [S2, unofficial].
+-
+-**Numbered Steps:**
+-1.  **Initialization:** Set `CompletedSamples = 0`. Calculate light bounds $p_0, p_1$ if required for lighting checks [S2, unofficial].
+-2.  **Camera Transformation:** Apply rotation to the camera position and direction vectors [S2, unofficial].
+-3.  **Pixel Loop:** Iterate $y$ from $0$ to $vheight-1$ and $x$ from $0$ to $vwidth-1$.
+-4.  **Ray Generation:**
+-    *   Calculate normalized position $pos$ from pixel coordinates $(x, y)$ [S2, unofficial].
+-    *   If `ProjectionMode == PERSPECTIVE`:
+-        *   `rayOrigin` = `cameraPos`
+-        *   `rayDirection` = `cameraDir` + `pos`
+-    *   If `ProjectionMode == ORTHOGRAPHIC`:
+-        *   `rayOrigin` = `cameraPos` + `pos`
+-        *   `rayDirection` = `cameraDir`
+-5.  **Ray Marching/Shading:**
+-    *   If `ShadingMode == TRACE`:
+-        *   Call `ShadePathTrace` (or equivalent raymarcher) to accumulate color.
+-        *   Average the result with previous samples if `CompletedSamples > 0` [S2, unofficial].
+-    *   Else:
+-        *   Call `Raymarch` to find intersection or sample data.
+-        *   If a hit is detected, shade based on the active `ShadingMode` (e.g., DEPTH, DIFFUSE, NORMAL) [S2, unofficial].
+-        *   If no hit but the ray intersects the light AABB, write the light color [S2, unofficial].
+-        *   Otherwise, write a dark color (e.g., 25, 25, 25) [S2, unofficial].
+-6.  **Output:** Write the computed color/depth to the pixel buffer at index $x + y \times vwidth$ [S2, unofficial].
+-
+-**Formulas:**
+-*   **Ray Origin (Perspective):** $\mathbf{o} = \mathbf{C}$
+-*   **Ray Direction (Perspective):** $\mathbf{d} = \mathbf{D} + \mathbf{P}$
+-*   **Ray Origin (Orthographic):** $\mathbf{o} = \mathbf{C} + \mathbf{P}$
+-*   **Ray Direction (Orthographic):** $\mathbf{d} = \mathbf{D}$
+-    *   Where $\mathbf{C}$ is camera position, $\mathbf{D}$ is camera direction, and $\mathbf{P}$ is the normalized pixel offset [S2, unofficial].
+-
+-**Parameters:**
+-*   **ShadingMode:** Determines the visual output. Common values: `TRACE` (path tracing), `DEPTH` (depth visualization), `DIFFUSE` (diffuse lighting), `NORMAL` (normal visualization), `INDEX` (scalar index) [S2, unofficial].
+-*   **ProjectionMode:** `PERSPECTIVE` or `ORTHOGRAPHIC` [S2, unofficial].
+-*   **Compositing Methods:** MIP (Maximum Intensity Projection), averaging, nearest-point, and alpha compositing are commonly used within the compositing module [S3].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Shader Model Requirements:** Requires Shader Model 3.0 or higher to enable conditional loops and early loop exit in fragment shaders, which replaces multiple rendering passes and early-z testing [S1, unofficial].
+-*   **Precision:** The method supports full 32-bit compositing precision, avoiding the need for a separate compositing buffer [S1, unofficial].
+-*   **Lighting Bounds:** Failure to correctly calculate light bounds ($p_0, p_1$) may result in incorrect lighting for rays that do not hit the volume but pass through light sources [S2, unofficial].
+-
+-**Pseudocode:**
++The method operates by mapping 2D screen coordinates to 3D world-space rays and accumulating optical properties along those rays.
++
++**Inputs and Outputs**
++*   **Inputs**: Image dimensions ($W \times H$), camera parameters (position, direction, projection mode), volume data structure, and shading mode [S2, unofficial].
++*   **Outputs**: A 2D image buffer where each pixel $(x, y)$ contains the accumulated color $C_{out}$ [S3].
++
++**Data Structures**
++*   **Camera State**: Contains `cameraPos` (origin), `cameraDir` (direction vector), and `ProjectionMode` (enum: `PERSPECTIVE` or `ORTHOGRAPHIC`) [S2, unofficial].
++*   **Shading Mode**: Enum determining the compositing and lighting behavior. Values include `TRACE`, `DEPTH`, `DEPTH_HIT`, `DIFFUSE`, `NORMAL`, and `INDEX` [S2, unofficial].
++*   **Ray Structure**: Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S2, unofficial].
++
++**Numbered Steps**
++1.  **Initialization**: Set `CompletedSamples = 0`. Calculate light bounds $p_0, p_1$ if necessary for light intersection tests [S2, unofficial].
++2.  **Pixel Loop**: Iterate $y$ from $0$ to $vheight-1$ and $x$ from $0$ to $vwidth-1$ [S2, unofficial].
++3.  **Ray Generation**:
++    *   Calculate normalized pixel coordinates $rx, ry$ from $x, y$ [S2, unofficial].
++    *   Transform position `pos` based on projection mode [S2, unofficial]:
++        *   If `PERSPECTIVE`: $\mathbf{o} = \text{cameraPos}$, $\mathbf{d} = \text{cameraDir} + \text{pos}$ [S2, unofficial].
++        *   If `ORTHOGRAPHIC`: $\mathbf{o} = \text{cameraPos} + \text{pos}$, $\mathbf{d} = \text{cameraDir}$ [S2, unofficial].
++4.  **Ray Marching/Tracing**:
++    *   If `ShadingMode == TRACE`: Call `ShadePathTrace` with the ray and accumulated previous samples [S2, unofficial].
++    *   Else: Call `Raymarch` [S2, unofficial].
++5.  **Shading/Compositing**:
++    *   If a hit is detected: Shade based on `ShadingMode` (e.g., `DEPTH`, `DIFFUSE`) [S2, unofficial].
++    *   If no hit but ray intersects light AABB: Write light color [S2, unofficial].
++    *   Else: Write dark color (e.g., 25, 25, 25) [S2, unofficial].
++6.  **Output**: Write the resulting color to the display pixel [S3].
++
++**Formulas**
++*   **Ray Origin/Direction (Perspective)**:
++    $$ \mathbf{o} = \mathbf{C}_{pos}, \quad \mathbf{d} = \mathbf{C}_{dir} + \mathbf{P}_{norm} $$
++    Where $\mathbf{C}_{pos}$ is camera position, $\mathbf{C}_{dir}$ is camera direction, and $\mathbf{P}_{norm}$ is the normalized pixel offset [S2, unofficial].
++*   **Ray Origin/Direction (Orthographic)**:
++    $$ \mathbf{o} = \mathbf{C}_{pos} + \mathbf{P}_{norm}, \quad \mathbf{d} = \mathbf{C}_{dir} $$
++    [S2, unofficial].
++*   **Depth Shading**:
++    $$ C_{out}.g = C_{in}.g \times \frac{\text{depth}}{2.0} $$
++    Where `depth` is the distance from camera to hit point [S2, unofficial].
++*   **Normal Shading**:
++    $$ C_{out}.c = \begin{cases} 1.0 & \text{if } N.c \neq 0 \\ 0.0 & \text{otherwise} \end{cases} $$
++    For each component $c \in \{x, y, z\}$ [S2, unofficial].
++
++**Parameters**
++*   **ShadingMode**: Determines shading behavior. Common values: `TRACE`, `DEPTH`, `DEPTH_HIT`, `DIFFUSE`, `NORMAL`, `INDEX` [S2, unofficial].
++*   **ProjectionMode**: Determines ray generation. Values: `PERSPECTIVE`, `ORTHOGRAPHIC` [S2, unofficial].
++*   **Compositing Methods**: MIP, averaging, nearest-point, and alpha compositing are commonly used in the compositing module [S3].
++
++**Pseudocode**
+ ```python
+-def image_order_rendering_loop(vwidth, vheight, camera_pos, camera_dir, projection_mode, shading_mode, volume_data):
+-    """
+-    Renders a volume using the image-order approach.
++def image_order_rendering_loop(image_width, image_height, camera, volume_data, shading_mode):
++    """
++    Renders a volume using the image-order loop.
+     
+     Args:
+-        vwidth (int): Width of the output image.
+-        vheight (int): Height of the output image.
+-        camera_pos (Vec3): Camera position.
+-        camera_dir (Vec3): Camera direction vector.
+-        projection_mode (str): 'PERSPECTIVE' or 'ORTHOGRAPHIC'.
+-        shading_mode (str): 'TRACE', 'DEPTH', 'DEPTH_HIT', 'DIFFUSE', 'NORMAL', 'INDEX'.
+-        volume_data (Volume): The volumetric dataset.
++        image_width (int): Width of the output image.
++        image_height (int): Height of the output image.
++        camera (Camera): Object containing cameraPos, cameraDir, and ProjectionMode.
++        volume_data (VolumeData): The volume dataset to render.
++        shading_mode (Enum): One of TRACE, DEPTH, DEPTH_HIT, DIFFUSE, NORMAL, INDEX.
+         
+     Returns:
+-        Image: The rendered 2D image buffer.
+-    """
+-    image = Image(vwidth, vheight)
+-    completed_samples = 0
+-    
+-    # Pre-calculate light bounds if necessary for lighting checks
+-    # light_bounds = calculate_light_bounds(volume_data) 
+-    
+-    for y in range(vheight):
+-        for x in range(vwidth):
+-            # Calculate normalized pixel position
+-            # Implementation detail: 'pos' depends on specific camera setup
+-            # Assuming a simple linear mapping for demonstration
+-            pos = calculate_pixel_offset(x, y, vwidth, vheight)
++        list: 2D list of RGB tuples representing the rendered image.
++    """
++    # Initialize output buffer
++    image = [[(0, 0, 0) for _ in range(image_width)] for _ in range(image_height)]
++    
++    # Pre-calculate light bounds if needed for light intersection tests
++    # light_bounds = calculate_light_bounds() 
++
++    for y in range(image_height):
++        for x in range(image_width):
++            # 1. Calculate normalized pixel coordinates
++            # Note: Exact normalization depends on camera setup; assuming simple linear mapping here
++            rx = (x / image_width) * 2.0 - 1.0
++            ry = (y / image_height) * 2.0 - 1.0
+             
+-            # Transform camera parameters (rotation applied here)
+-            # transformed_pos = rotate(pos)
+-            # transformed_dir = rotate(camera_dir)
+-            # transformed_cam_pos = rotate(camera_pos)
++            # 2. Generate Ray based on ProjectionMode
++            if camera.ProjectionMode == "PERSPECTIVE":
++                ray_origin = camera.cameraPos
++                # pos is derived from rx, ry; simplified here as a vector addition
++                ray_direction = normalize(camera.cameraDir + vec3(rx, ry, 0.0))
++            else: # ORTHOGRAPHIC
++                ray_origin = camera.cameraPos + vec3(rx, ry, 0.0)
++                ray_direction = camera.cameraDir
++
++            # 3. Ray Marching / Tracing
++            hit_color = (0, 0, 0)
++            hit = False
+             
+-            # Generate Ray
+-            if projection_mode == 'PERSPECTIVE':
+-                ray_origin = camera_pos
+-                ray_direction = camera_dir + pos
+-            elif projection_mode == 'ORTHOGRAPHIC':
+-                ray_origin = camera_pos + pos
+-                ray_direction = camera_dir
+-            else:
+-                raise ValueError("Unknown projection mode")
+-            
+-            # Normalize direction if necessary
+-            ray_direction = normalize(ray_direction)
+-            
+-            # Ray Marching and Shading
+-            if shading_mode == 'TRACE':
+-                # Path tracing accumulation
+-                color = shade_path_trace(ray_origin, ray_direction, volume_data)
+-                if completed_samples > 0:
+-                    # Average with previous samples
+-                    color = (color + image.get_pixel(x, y)) / 2.0
+-                image.set_pixel(x, y, color)
+-                completed_samples += 1
++            if shading_mode == "TRACE":
++                # Path tracing logic
++                hit_color = shade_path_trace(ray_origin, ray_direction, volume_data, depth=100)
++                hit = True # Assume path trace handles hit detection internally
+             else:
+                 # Standard raymarching
+-                hit, hit_point, normal = raymarch(ray_origin, ray_direction, volume_data)
++                hit, hit_point, hit_normal = raymarch(ray_origin, ray_direction, volume_data)
+                 
+                 if hit:
+-                    if shading_mode == 'DEPTH':
+-                        depth = distance(camera_pos, hit_point)
+-                        # Example depth shading: green channel scales with depth
+-                        color = volume_data.get_color(hit_point)
+-                        color.g *= depth / 2.0
+-                    elif shading_mode == 'DEPTH_HIT':
+-                        depth = distance(camera_pos, hit_point)
+-                        color = volume_data.get_color(hit_point)
+-                        color.g *= depth / 2.0
+-                    elif shading_mode == 'DIFFUSE':
+-                        # Diffuse shading logic
+-                        color = compute_diffuse_shading(hit_point, normal, volume_data)
+-                    elif shading_mode == 'NORMAL':
+-                        # Normal visualization
+-                        color = map_normal_to_color(normal)
+-                    elif shading_mode == 'INDEX':
+-                        color = volume_data.get_scalar_index(hit_point)
++                    # 4. Shading based on mode
++                    if shading_mode == "DEPTH":
++                        depth_dist = distance(camera.cameraPos, hit_point)
++                        # Base color from volume, modulated by depth
++                        base_color = volume_data.sample(hit_point)
++                        hit_color = (base_color[0], base_color[1] * (depth_dist / 2.0), base_color[2])
++                    elif shading_mode == "DEPTH_HIT":
++                        depth_dist = distance(camera.cameraPos, hit_point)
++                        base_color = volume_data.sample(hit_point)
++                        hit_color = (base_color[0], base_color[1] * (depth_dist / 2.0), base_color[2])
++                    elif shading_mode == "DIFFUSE":
++                        # Simple diffuse shading
++                        light_dir = normalize(vec3(1.0, 1.0, -1.0))
++                        normal = hit_normal if hit_normal else vec3(0, 1, 0)
++                        diff = max(dot(normal, light_dir), 0.0)
++                        base_color = volume_data.sample(hit_point)
++                        hit_color = (base_color[0] * diff, base_color[1] * diff, base_color[2] * diff)
++                    elif shading_mode == "NORMAL":
++                        # Encode normal as color
++                        n = hit_normal
++                        hit_color = (
++                            1.0 if n.x != 0 else 0.0,
++                            1.0 if n.y != 0 else 0.0,
++                            1.0 if n.z != 0 else 0.0
++                        )
++                    elif shading_mode == "INDEX":
++                        # Render volume index
++                        hit_color = volume_data.get_index(hit_point)
+                     else:
+-                        color = volume_data.get_color(hit_point)
++                        # Default or unknown mode
++                        hit_color = (0, 0, 0)
+                 else:
+-                    # Check if ray intersects light AABB
++                    # Check for light intersection if no volume hit
++                    # Note: Specific light AABB logic from source [S2, unofficial]
++                    # If ray intersects light AABB, write light color
++                    # Else, write dark color
+                     if intersects_light_aabb(ray_origin, ray_direction):
+-                        color = get_light_color()
++                        hit_color = (255, 255, 255) # Light color
+                     else:
+-                        color = Vec3(25, 25, 25) # Dark color
+-                
+-                image.set_pixel(x, y, color)
+-                
++                        hit_color = (25, 25, 25) # Dark color
++
++            # 5. Output
++            image[y][x] = hit_color
++            
+     return image
+ 
+-def calculate_pixel_offset(x, y, vwidth, vheight):
+-    """
+-    Calculates the normalized position vector from pixel coordinates.
+-    Note: Exact formula depends on camera frustum setup.
+-    """
+-    # Placeholder for specific camera projection math
+-    # Typically involves mapping [0, width] to [-1, 1] or similar
+-    nx = (2.0 * x / vwidth) - 1.0
+-    ny = 1.0 - (2.0 * y / vheight)
+-    return Vec3(nx, ny, 0.0)
+-
+-def map_normal_to_color(normal):
+-    """
+-    Maps a normal vector to a color for visualization.
+-    """
+-    r = 1.0 if normal.x != 0 else 0.0
+-    g = 1.0 if normal.y != 0 else 0.0
+-    b = 1.0 if normal.z != 0 else 0.0
+-    return Vec3(r, g, b)
++def shade_path_trace(ray_origin, ray_direction, volume_data, depth):
++    """
++    Recursive path tracing function.
++    """
++    if depth <= 0:
++        return (0, 0, 0)
++    
++    hit, hit_point, hit_normal = raymarch(ray_origin, ray_direction, volume_data)
++    
++    if not hit:
++        # Check plane intersection if volume miss
++        if intersects_plane(ray_origin, ray_direction):
++            hit_point = plane_intersection(ray_origin, ray_direction)
++            hit_normal = plane_normal
++            hit = True
++    
++    if hit:
++        # Recursive bounce
++        # Note: Source [S2, unofficial] mentions random_in_hemi
++        # Simplified: return base color for this step
++        return volume_data.sample(hit_point)
++    else:
++        return (0, 0, 0)
++
++def raymarch(ray_origin, ray_direction, volume_data):
++    """
++    Performs ray marching through the volume.
++    Returns (hit, hit_point, hit_normal).
++    """
++    # Implementation depends on specific traversal scheme (e.g., step-based or octree)
++    # This is a placeholder for the actual traversal logic defined in sibling articles
++    # [G] In a standard step-based marcher, this would loop along the ray
++    # and sample the volume. For octree-based, it would traverse nodes.
++    # Since this article is the generic loop, we assume a generic hit detection.
++    return False, vec3(0,0,0), vec3(0,0,0)
++
++def intersects_light_aabb(ray_origin, ray_direction):
++    # Placeholder for light AABB intersection test
++    return False
++
++def intersects_plane(ray_origin, ray_direction):
++    # Placeholder for plane intersection
++    return False
++
++def plane_intersection(ray_origin, ray_direction):
++    # Placeholder
++    return vec3(0,0,0)
++
++def plane_normal():
++    return vec3(0,0,1)
+ ```
++
++**Edge Cases and Pitfalls**
++*   **Shader Model Requirements**: Requires Shader Model 3.0 or higher to enable conditional loops (early loop exit) in fragment shaders, which replaces multiple passes and early-z testing [S1, unofficial].
++*   **Precision**: Image-order allows for 32-bit compositing precision, avoiding the need for a compositing buffer [S1, unofficial].
++*   **Empty Space**: In sparse volumes (e.g., octrees), empty space must be skipped efficiently to avoid performance degradation [S1, unofficial].
+ 
+ ## Subtopics
+@@ -182,12 +217,12 @@
+ 
+ ### [Ray Casting Loop with Supersampling](12786-ray-casting-loop-with-supersampling.md)
+-Renders an image by casting rays per pixel through a scene, with optional multi-sample anti-aliasing using uniform sub-pixel jittering. It extends the basic [Image-order Rendering Loop](2938-image-order-rendering-loop.md) by introducing a sampling loop that averages multiple jittered ray samples per pixel to reduce aliasing artifacts.
++Renders an image by casting rays per pixel through a scene, with optional multi-sample anti-aliasing using uniform sub-pixel jittering. It extends the basic Image-order Rendering Loop by introducing a sampling loop that averages multiple jittered ray samples per pixel to reduce aliasing artifacts.
+ 
+ ### Renderer configuration
+-A top-level rendering controller managing ray depth, sampling rate, and background color [S4, unofficial].
+-*   **Parameters:**
++The Renderer configuration is a top-level rendering controller managing ray depth, sampling rate, and background color [S4, unofficial].
++*   **Parameters**:
+     *   `maxDepth`: Maximum recursion depth for ray tracing. Default: 100 [S4, unofficial].
+     *   `samplesPerPixel`: Number of samples per pixel for anti-aliasing/noise reduction. Default: 500 [S4, unofficial].
+-*   **Layout:**
++*   **Layout**:
+     *   Class `Renderer`.
+     *   Fields: `int maxDepth = 100`, `int samplesPerPixel = 500`, `RGB background{0, 0, 0}` [S4, unofficial].
+@@ -195,14 +230,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(P \times S)$, where $P$ is the number of pixels and $S$ is the number of samples per ray.
+-*   **Memory Complexity:** $O(P)$ for the output image buffer. The method does not require a compositing buffer, allowing full 32-bit precision [S1, unofficial].
+-*   **Performance:** The approach is flexible and supports adaptive sampling [S1, unofficial]. It is suitable for wide field of view, fly-throughs, virtual endoscopy, and integration into perspective scenes like games [S1, unofficial].
+-*   **Strengths:** Correct perspective projection, single-pass ray casting, full 32-bit compositing precision, and flexibility for advanced illumination techniques [S1, unofficial].
+-*   **Limitations:** Can be computationally expensive due to the per-pixel ray casting nature. Requires Shader Model 3.0+ for efficient conditional loops on GPU [S1, unofficial].
+-*   **When to use:** When correct perspective, flexible shading, or high-precision compositing is required, and hardware supports modern shader models.
+-*   **When not to use:** When hardware lacks support for conditional loops in shaders, or when object-order rasterization is sufficient for the scene complexity.
++*   **Time Complexity**: $O(W \times H \times S)$, where $W$ and $H$ are image dimensions and $S$ is the number of samples per pixel (or steps in ray marching) [S3].
++*   **Memory Complexity**: $O(W \times H)$ for the output image buffer, plus the memory required for the volume data structure [S1, unofficial].
++*   **Performance**: Image-order is described as more "CPU-like" but offers correct perspective and single-pass ray casting with 32-bit compositing [S1, unofficial]. It is flexible, supporting adaptive sampling [S1, unofficial].
++*   **Strengths**: Correct perspective, single-pass, 32-bit compositing precision, flexibility (adaptive sampling) [S1, unofficial].
++*   **Limitations**: Can be computationally expensive for high-resolution images or complex volumes due to the per-pixel ray casting [S1, unofficial].
++*   **When to Use**: When correct perspective and high-quality compositing are required, and when the hardware supports conditional loops in shaders (Shader Model 3.0+) [S1, unofficial].
++*   **When Not to Use**: When performance is critical and lower quality (e.g., object-order rasterization) is acceptable, or when the hardware does not support efficient conditional loops in shaders [S1, unofficial].
+ 
+ ## Background
+-The image-order approach is a fundamental technique in volume rendering, often contrasted with object-order (rasterization) methods. It has been widely adopted in GPU-based volume ray casting for its flexibility and ability to handle advanced illumination techniques [S1, unofficial]. Key implementations and optimizations have been published by researchers such as Krüger and Westermann (2003), Röttger et al. (2003), Green (2004), Stegmaier et al. (2005), and others [S1, unofficial]. The method is also utilized in FPGA-based volume rendering systems for applications like endomicroscopic image visualization [S3].
++The image-order approach is a fundamental technique in volume rendering, often contrasted with object-order (rasterization) methods [S1, unofficial]. It has been widely used in GPU-based volume ray casting, with notable implementations in the NVIDIA SDK and various research papers [S1, unofficial]. The technique is particularly relevant for applications requiring high-quality visualization, such as medical imaging (e.g., endomicroscopic images for oral cancer detection) [S3]. The use of image-order rendering on FPGAs has also been explored for its flexibility and cost-effectiveness in prototype development [S3].
+ 
+ ## Sources

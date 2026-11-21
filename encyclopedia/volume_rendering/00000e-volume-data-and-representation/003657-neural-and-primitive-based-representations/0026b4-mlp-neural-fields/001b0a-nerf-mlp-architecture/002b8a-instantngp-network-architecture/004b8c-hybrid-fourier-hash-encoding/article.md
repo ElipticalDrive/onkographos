@@ -1,0 +1,164 @@
+# Hybrid Fourier-Hash Encoding
+
+Also called: Geometry Representation with Fourier and Hash Encoding, Hybrid Positional Encoding, Ours (full), Modified NGP, Neural Geometry Representation (Proposed), Our neural geometry representation
+
+## Overview
+Hybrid Fourier-Hash Encoding is a neural geometry representation technique that combines low-dimensional Fourier positional encoding with learnable multi-scale hash features to improve the continuity of the signed distance function (SDF) and satisfy eikonal constraints [S1]. It addresses the non-smooth solutions and poor gradient continuity produced by hash encoding alone, which arises from the discontinuous nature of features on discrete grids [S1]. Unlike the baseline InstantNGP architecture which uses only hash encoding, this method decouples geometry from appearance by extracting features from an intermediate connected layer, ensuring hash encoding encodes only geometry [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D position vector $x \in \mathbb{R}^3$.
+- Output: A scalar Signed Distance Function (SDF) value $SDF(x)$ and a geometry feature vector $f_{geom}$ [S1].
+
+**Data Structures:**
+- **Hash Grid:** The multi-scale hash grid from InstantNGP [Parent], storing learnable feature vectors for each grid level [S1].
+- **Fourier Encoding:** A fixed low-dimensional positional encoding function $enc_{ff}(x)$ [S1].
+- **MLP Geometry Network:** A Multi-Layer Perceptron with specific layer ordering and initialization [S1].
+
+**Numbered Steps:**
+1. **Fourier Positional Encoding:** Compute the low-dimensional Fourier positional encoding $enc_{ff}(x)$ for the input 3D position $x$ [S1]. This is added as input to the first layer of the MLP [S1].
+2. **Hash Feature Extraction:** Compute the multi-scale hash encoding $enc(\theta_h, x)$ using the hash grid from InstantNGP [S1]. This involves hashing the coordinates of $x$ at multiple scales and interpolating the learned feature vectors [S1].
+3. **MLP Forward Pass:**
+   - The MLP takes $enc_{ff}(x)$ as input to the first hidden layer [S1].
+   - The hash encoding $enc(\theta_h, x)$ is moved to the middle layer of the MLP, serving as input to a specific "connected layer" [S1].
+   - The network processes these inputs through its layers [S1].
+4. **Feature Extraction:** Extract the geometry features $f_{geom}$ from the "connected layer" (an intermediate hidden layer) rather than the final output layer [S1]. This ensures that the hash encoding is used only for geometry (SDF) and does not encode rendering properties, decoupling geometry from appearance [S1].
+5. **SDF Output:** The final layer of the MLP outputs the SDF value $SDF(x)$ [S1].
+6. **Initialization:** Initialize the geometry network using the modified initialization method from SAL [S1]. This initialization produces an approximately spherical shape, helping to satisfy eikonal constraints [S1].
+
+**Formulas:**
+The neural geometry representation is expressed as:
+$$ SDF(x) = \Phi(\theta, enc_{ff}(x), enc(\theta_h, x)) $$
+where $\Phi$ is the MLP, $\theta$ are the network parameters, $enc_{ff}(x)$ is the Fourier positional encoding, and $enc(\theta_h, x)$ is the hash encoding [S1].
+
+**Parameters:**
+- **Fourier Encoding Dimension:** Not given in the sources.
+- **Hash Grid Parameters:** Inherited from InstantNGP [Parent].
+- **Initialization:** Modified SAL initialization [S1].
+
+**Edge Cases and Pitfalls:**
+- **Discontinuity:** Hash encoding alone suffers from discontinuities because features exist on discrete grids [S1]. The Fourier encoding mitigates this [S1].
+- **Geometry-Appearance Coupling:** If geometry features are extracted from the last layer, hash encoding may encode rendering properties, causing inconsistency between reconstructed geometry and rendered images [S1]. Extracting from the connected layer avoids this [S1].
+- **Initialization:** Improper initialization leads to poor satisfaction of eikonal constraints and rough surfaces [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def fourier_positional_encoding(x, num_bands=6):
+    """
+    Low-dimensional Fourier positional encoding.
+    x: numpy array of shape (3,) representing 3D position.
+    num_bands: Number of frequency bands.
+    Returns: numpy array of shape (2 * num_bands,)
+    """
+    # Standard Fourier encoding: [sin(2^0 * pi * x), cos(2^0 * pi * x), ...]
+    # Note: Exact formula for "low-dimensional" Fourier encoding is not fully specified in [S1].
+    # Assuming standard positional encoding as per common practice [8] cited in [S1].
+    freq_bands = 2.0 ** np.arange(num_bands)
+    x_expanded = np.expand_dims(x, axis=-1) * freq_bands
+    encoded = np.concatenate([np.sin(x_expanded), np.cos(x_expanded)], axis=-1)
+    return encoded
+
+def hash_encoding(x, hash_table, num_levels=16, level_dim=2, resolution=16):
+    """
+    Multi-scale hash encoding from InstantNGP.
+    x: numpy array of shape (3,)
+    hash_table: List of numpy arrays, each of shape (num_hashes, level_dim)
+    num_levels: Number of hash grid levels
+    level_dim: Dimension of feature vector per hash entry
+    resolution: Base resolution for grid hashing
+    Returns: numpy array of shape (num_levels * level_dim,)
+    """
+    # Implementation details of hash encoding are inherited from InstantNGP [Parent].
+    # This function is a placeholder for the complex hashing and interpolation logic.
+    # In a full implementation, this would involve:
+    # 1. Hashing coordinates to grid indices for each level.
+    # 2. Interpolating feature vectors from the hash table.
+    # 3. Concatenating features from all levels.
+    # For the purpose of this article, we assume this function returns the correct
+    # hash encoding vector as defined in the InstantNGP architecture.
+    pass
+
+def initialize_geometry_network(geom_mlp):
+    """
+    Initialize the geometry MLP using the modified SAL initialization.
+    geom_mlp: The MLP object or its parameters.
+    """
+    # SAL initialization aims to produce an approximately spherical shape.
+    # Specific weights and biases are set to satisfy eikonal constraints initially.
+    # Exact initialization values are not provided in [S1].
+    # [G] Assuming standard Xavier/He initialization is replaced by SAL-specific
+    #     initialization which sets biases to favor a spherical SDF.
+    pass
+
+def hybrid_fourier_hash_encoding(x, hash_table, geom_mlp, num_levels=16, level_dim=2, resolution=16):
+    """
+    Hybrid Fourier-Hash Encoding for geometry representation.
+    x: numpy array of shape (3,)
+    hash_table: List of numpy arrays for hash grid
+    geom_mlp: The geometry MLP
+    Returns: SDF value (float), geometry features (numpy array)
+    """
+    # Step 1: Fourier Positional Encoding
+    enc_ff = fourier_positional_encoding(x)
+    
+    # Step 2: Hash Feature Extraction
+    enc_h = hash_encoding(x, hash_table, num_levels, level_dim, resolution)
+    
+    # Step 3: MLP Forward Pass
+    # The MLP structure is:
+    # Input Layer -> [enc_ff] -> Hidden Layer 1 -> ... -> Connected Layer -> ... -> Output Layer
+    # The hash encoding enc_h is injected into the "Connected Layer" (middle layer).
+    
+    # [G] The exact MLP architecture (number of layers, dimensions) is not specified in [S1].
+    # Assuming a standard MLP structure where the connected layer is an intermediate layer.
+    # Let's assume the MLP has layers: L1, L2 (Connected), L3, L4 (Output).
+    
+    # Forward pass with enc_ff at input
+    h1 = relu(Linear1(enc_ff))
+    h2 = relu(Linear2(h1))
+    
+    # Inject hash encoding at the connected layer (L2)
+    # The hash encoding is concatenated or added to the features at this layer.
+    # [S1] says "move the hash encoding ... to the middle layer ... as input to the connected layer".
+    # This implies the hash encoding is an input to the connected layer's computation.
+    h2_with_hash = concat(h2, enc_h)
+    h3 = relu(Linear3(h2_with_hash))
+    
+    # Step 4: Feature Extraction
+    # Extract geometry features from the connected layer (h2_with_hash or h3?)
+    # [S1] says "extract the geometry features from the connected layer (inside the dashed box)".
+    # Fig 4(a) shows the connected layer is after the hash injection.
+    # Let's assume the features are taken from h3 (output of connected layer).
+    f_geom = h3
+    
+    # Step 5: SDF Output
+    sdf = Linear4(h3)
+    
+    return sdf, f_geom
+```
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:**
+  - Eikonal constraint error ($D_{eik}$): 0.00091 (Fig. 10) or 0.002 (Table 4) for the full method [S1].
+  - Gradient continuity error ($D_{grad}$): 0.005 (Fig. 10) or 0.002 (Table 4) for the full method [S1].
+  - Non-scale Laplace metric ($D_{lap}$): 0.129 for the full method, closest to the original mesh value of 0.132 [S1].
+- **Scaling:** Not given in the sources.
+- **Strengths:** Produces smoother reconstructions and better satisfies geometric constraints (eikonal and gradient continuity) compared to NGP [S1]. Decouples geometry from appearance [S1].
+- **Limitations:** More complex than NGP due to the addition of Fourier encoding and the connected layer [S1].
+- **When to use:** When smooth geometry and accurate SDF representation are required, especially for tasks like point cloud reconstruction or multi-view image reconstruction where eikonal constraints are important [S1].
+- **When not to use:** When computational simplicity is prioritized over geometric smoothness, or when appearance encoding is not a concern [S1].
+
+## Background
+- **Origin:** Proposed in "Multi-scale hash encoding based neural geometry representation" by Z. Deng, H. Xiao, Y. Lang, et al. [S1].
+- **History and Development:** The method builds on the InstantNGP architecture [Parent] and addresses its limitations in geometry smoothness and eikonal constraint satisfaction [S1]. It incorporates ideas from SAL [12] for initialization and Fourier positional encoding [8] for continuity [S1].
+- **Applications:** Neural point cloud reconstruction and neural volume rendering [S1].
+
+## Sources
+[S1] Multi-scale hash encoding based neural geometry representation, https://doi.org/10.1007/s41095-023-0340-x, fetched 2026-10-26

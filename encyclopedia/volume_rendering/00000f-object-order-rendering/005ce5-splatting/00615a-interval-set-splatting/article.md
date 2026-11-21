@@ -1,0 +1,151 @@
+# Interval Set Splatting
+
+Also called: Fast Volume Rendering of Data Slices, SoListSplat
+
+## Overview
+Interval Set Splatting is a method for the interactive visualization of "thin" interval sets within volumetric data by maintaining a sorted list of data values and their coordinates [S1]. It solves the problem of efficiently rendering specific value ranges (contours) by using binary search to isolate relevant voxels and splatting them with constant color and opacity [S1]. It differs from general volume splatting by pre-filtering data into a sorted structure to enable rapid, selective rendering of narrow value bands, and from pure iso-surface extraction by rendering a thickness (interval) rather than a single surface [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volumetric dataset, a user-defined selection range ($[RangeMin, RangeMax]$), a target contour value ($C$), a thickness parameter ($\Delta$), and viewing parameters (projection matrix, rotation).
+*   **Output:** A 2D image where voxels with values in $[C-\Delta, C+\Delta]$ are rendered as semi-transparent splats.
+
+**Data Structures:**
+The core data structure is a sorted list encapsulated in a class (e.g., `SoListSplat`).
+*   **List Layout:** An array of four-component vectors ($\mathbf{v}$).
+    *   Components 0-2: 3D coordinates $(x, y, z)$.
+    *   Component 3: The scalar data value $d$.
+*   **Sorting:** The list is sorted by the scalar data value (Component 3) [S1].
+*   **Metadata:** The class stores bounding box members `bboxMin` and `bboxMax` [S1].
+
+**Parameters:**
+*   $RangeMin, RangeMax$: Define the initial filter for data inclusion. Changing these requires rebuilding the list [S1].
+*   $C$ (Contour Value): The center of the interval to render (e.g., 37.0) [S1].
+*   $\Delta$ (Delta): Half-thickness of the interval. The rendered range is $[C-\Delta, C+\Delta]$ (e.g., 35.0 to 41.0) [S1].
+*   $SplatSize$: A user parameter scaling the size of the splats [S1].
+*   $Color, Opacity$: Constant values applied to all splats in the interval [S1].
+
+**Algorithm Steps:**
+
+1.  **List Construction (Offline/Update):**
+    *   Traverse the entire volumetric dataset once.
+    *   Select only voxels where $RangeMin \leq d \leq RangeMax$.
+    *   Store selected voxels as 4-component vectors $(x, y, z, d)$.
+    *   Sort the array by $d$ [S1].
+
+2.  **Rendering Loop (Per Frame):**
+    *   **Inquire View:** Get the current viewing transformation and determine a rotation matrix to orient the volume with projection space [S1].
+    *   **Initialize Pipeline:** Set up global rendering settings, blending functions, and texture splats [S1].
+    *   **Binary Search:** Perform a binary search on the sorted list to find the indices of entries with values $C-\Delta$ and $C+\Delta$ [S1].
+    *   **Iterate and Splat:** Traverse the subset of entries within the found range. For each entry:
+        *   Transform the voxel position $(x, y, z)$ using the rotation matrix [S1].
+        *   Project to screen space.
+        *   Render a primitive. Two types are supported:
+            *   **Texture Splat:** A texture-mapped square containing the reconstruction function of Crawfis and Max [3] in the alpha channel. This provides higher accuracy [S1].
+            *   **Point Splat:** A semi-transparent point primitive. This is used for large datasets where splats project to few pixels. Points do not require orientation transformations and can be cached [S1].
+        *   Apply the constant $Color$ and $Opacity$, scaled by $SplatSize$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class IntervalSetSplat:
+    def __init__(self, data, range_min, range_max):
+        """
+        data: list of (x, y, z, value) tuples
+        range_min, range_max: float
+        """
+        self.range_min = range_min
+        self.range_max = range_max
+        self.sorted_list = []
+        self._build_list(data)
+
+    def _build_list(self, data):
+        """Traverse data, filter by range, and sort by value."""
+        filtered = []
+        for x, y, z, val in data:
+            if self.range_min <= val <= self.range_max:
+                filtered.append([x, y, z, val])
+        # Sort by the 4th component (value)
+        filtered.sort(key=lambda item: item[3])
+        self.sorted_list = filtered
+
+    def render(self, contour_value, delta, rotation_matrix, splat_type='texture'):
+        """
+        contour_value: float C
+        delta: float Delta
+        rotation_matrix: 3x3 or 4x4 matrix
+        splat_type: 'texture' or 'point'
+        """
+        lower_bound = contour_value - delta
+        upper_bound = contour_value + delta
+        
+        # Binary search for indices
+        # Note: Standard bisect works on 1D keys. We need a custom search or key extraction.
+        # Assuming sorted_list is sorted by index 3.
+        
+        lower_idx = self._binary_search_lower(self.sorted_list, lower_bound, key_idx=3)
+        upper_idx = self._binary_search_upper(self.sorted_list, upper_bound, key_idx=3)
+        
+        # Initialize rendering pipeline
+        init_pipeline()
+        
+        for i in range(lower_idx, upper_idx):
+            voxel = self.sorted_list[i]
+            x, y, z, val = voxel
+            
+            # Transform coordinates
+            # Assuming rotation_matrix transforms local to view space
+            transformed_pos = transform(voxel[:3], rotation_matrix)
+            
+            if splat_type == 'point':
+                # Points do not require orientation transformations parallel to screen
+                # and can be cached.
+                render_point(transformed_pos, color, opacity, splat_size)
+            elif splat_type == 'texture':
+                # Render texture-mapped square with reconstruction function in alpha
+                render_texture_splat(transformed_pos, color, opacity, splat_size)
+
+    def _binary_search_lower(self, arr, target, key_idx):
+        """Find first index where arr[i][key_idx] >= target."""
+        low = 0
+        high = len(arr)
+        while low < high:
+            mid = (low + high) // 2
+            if arr[mid][key_idx] < target:
+                low = mid + 1
+            else:
+                high = mid
+        return low
+
+    def _binary_search_upper(self, arr, target, key_idx):
+        """Find first index where arr[i][key_idx] > target."""
+        low = 0
+        high = len(arr)
+        while low < high:
+            mid = (low + high) // 2
+            if arr[mid][key_idx] <= target:
+                low = mid + 1
+            else:
+                high = mid
+        return low
+```
+
+**Edge Cases and Pitfalls:**
+*   **Performance:** For large datasets, rendering a moderate number of texture splats can take >0.5s, disrupting smooth rotation [S1]. Use `point` splats for interactive rates in such cases [S1].
+*   **Mesh Topology:** Reconstruction properties of splatting on regular grids break down for curvilinear and unstructured meshes. Results require careful examination [S1].
+*   **List Rebuild:** Changing $RangeMin$ or $RangeMax$ requires traversing the data and rebuilding the sorted list, which is an expensive operation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** List construction is $O(N \log N)$ due to sorting, where $N$ is the number of voxels in the range [S1]. Rendering is $O(K)$, where $K$ is the number of voxels in the interval $[C-\Delta, C+\Delta]$. Binary search is $O(\log N)$ [S1].
+*   **Memory Complexity:** $O(N)$ to store the sorted list of selected voxels [S1].
+*   **Performance:** Point splats offer substantial speed-up over texture splats, enabling interactive exploration of large datasets (e.g., 1 million points) [S1]. Texture splats are slower but more accurate [S1].
+*   **Strengths:** Fast selection of specific value ranges; interactive animation possible with point splats; simple implementation [S1].
+*   **Limitations:** Not suitable for unstructured/curvilinear meshes without modification; texture splatting can be slow for large $K$; rebuilding the list is costly [S1].
+
+## Background
+The method was introduced in "Real-time slicing of data space" [S1]. It combines hardware-assisted splatting techniques [3, 4] with ideas from Shen and Johnson [22] and Ihm and Lee [9] to create a simple algorithm for representing "thin" interval sets [S1]. It was implemented as a C++ class extending Open Inventor graphics classes, specifically as `SoListSplat` [S1].
+
+## Sources
+[S1] Real-time slicing of data space, https://www.osti.gov/biblio/632502, fetched 2026-10-26

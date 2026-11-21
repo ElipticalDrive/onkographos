@@ -1,0 +1,441 @@
+--- v009.md
++++ v010.md
+@@ -4,209 +4,251 @@
+ 
+ ## Overview
+-Direct Voxel Grid Optimization (DVGO) is a method for reconstructing per-scene radiance fields from calibrated images by directly optimizing a dense 3D voxel grid for volume density and a feature voxel grid for color, achieving convergence in less than 15 minutes on a single GPU [S1, S5]. It sets itself apart from implicit methods like NeRF by replacing large neural networks with explicit voxel grids, and from earlier voxel methods by training the grid directly from scratch without requiring a conversion step from a pre-trained implicit model [S1, S5]. Its key differentiators are post-activation interpolation for sharp surface modeling and specific priors to prevent suboptimal "cloud" artifacts in free space [S1].
++Direct Voxel Grid Optimization (DVGO) is a method for reconstructing per-scene radiance fields from calibrated images by directly optimizing a dense 3D voxel grid for volume density and a feature voxel grid for color, achieving convergence in less than 15 minutes on a single GPU [S1, S5]. It sets itself apart from implicit methods like NeRF by eliminating the need for lengthy MLP training and from previous explicit voxel methods by training the grid directly from scratch without a conversion step from an implicit model [S1, S5]. Key differentiators include post-activation interpolation for sharp surface modeling and priors to prevent suboptimal "cloud" artifacts in free space [S1].
+ 
+ ## How it works
+-DVGO represents the scene using two primary data structures: a density voxel grid and a feature voxel grid, optimized via a two-stage process (coarse geometry search and fine detail reconstruction) [S1, S3].
+-
+-### Inputs and Outputs
+-*   **Inputs:** A set of $N$ calibrated images with known camera poses (intrinsic and extrinsic parameters). The scene is assumed to be bounded within a tight bounding box (BBox) [S1, S3].
+-*   **Outputs:** Optimized density voxel grid $V^{(c)}$ and $V^{(f)}$, feature voxel grid $V^{(feat)}$, and a shallow MLP for color prediction. The result is a radiance field capable of rendering novel views [S1].
+-
+-### Data Structures
+-1.  **Density Voxel Grid ($V$):** A 3D grid storing raw density values $\sigma$.
+-    *   **Coarse Stage ($V^{(c)}$):** Resolution $M^{(c)} \approx 100^3$ [S1, S5].
+-    *   **Fine Stage ($V^{(f)}$):** Resolution $M^{(f)} = 160^3$ (default) or $256^3$ [S1, S5].
+-    *   **Layout:** Dense 3D array. Values are queried via trilinear interpolation [S1].
+-2.  **Feature Voxel Grid ($V^{(feat)}$):** A 3D grid storing feature vectors.
+-    *   **Resolution:** Same as the fine density grid $V^{(f)}$ [S1].
+-    *   **Channels:** $D = 12$ [S1].
+-    *   **Layout:** Dense 3D array. Values are queried via trilinear interpolation [S1].
+-3.  **Shallow MLP:** A small network mapping features to view-dependent color.
+-    *   **Architecture:** 2 hidden layers, 128 channels per layer [S5].
+-    *   **Input:** Concatenation of interpolated features from $V^{(feat)}$ and positional encodings of position and viewing direction [S1, S5].
+-    *   **Output:** RGB color $\mathbf{c}$ [S1].
+-
+-### Numbered Steps
+-
+-#### 1. Initialization and Bounding Box
+-*   Automatically determine a BBox tightly enclosing the volume of interest to ensure parsimony [S1, S5].
+-*   Initialize the coarse density grid $V^{(c)}$ such that the initial activated alpha is $\alpha_{\text{init}}^{(c)} = 10^{-6}$ [S1, S5]. This low initialization avoids biasing geometry toward camera near planes [S1].
+-*   Initialize the fine density grid $V^{(f)}$ with $\alpha_{\text{init}}^{(f)} = 0.01$ [S1, S5].
+-
+-#### 2. Coarse Geometry Search
+-*   **Grid:** Use $V^{(c)}$ (resolution $100^3$) and a simple color voxel grid (view-invariant) [S3].
+-*   **Sampling:** Sample $K$ points along each ray. The step size is $\delta^{(c)} = 0.5 \times s^{(c)}$, where $s^{(c)}$ is the voxel size [S5].
+-*   **Free Space Skipping:** Define known free space using threshold $\tau_c = 10^{-3}$. Skip query points where the interpolated density is below $\tau_c$ [S1].
+-*   **Optimization:**
+-    *   Iterate for 10,000 steps [S1, S5].
+-    *   Optimizer: Adam [S5].
+-    *   Learning Rate: Base LR for voxel grids is 0.1 [S1, S5].
+-    *   **View-Count Prior:** Apply a lower learning rate to voxels visible to fewer views to avoid redundant voxels allocated for explaining observations from a small number of views [S1, S5].
+-    *   Loss: Photometric loss $\mathcal{L}_{\text{photo}}$ (defined below) [S5].
+-
+-#### 3. Fine Detail Reconstruction
+-*   **Grid:** Use $V^{(f)}$ (resolution $160^3$ or $256^3$) and $V^{(feat)}$ (12 channels) [S1, S5].
+-*   **Progressive Scaling:** Progressively scale the fine-stage voxel grid at checkpoints 1000, 2000, and 3000 [S1].
+-*   **Sampling:** Sample $K$ points along each ray. Step size $\delta^{(f)} = 0.5 \times s^{(f)}$ [S5].
+-*   **Unknown Space Skipping:** Skip low-density query points in unknown space using threshold $\tau_f = 10^{-4}$ [S1].
+-*   **Optimization:**
+-    *   Iterate for 20,000 steps [S1, S5].
+-    *   Optimizer: Adam [S5].
+-    *   Learning Rate: Base LR for voxel grids is 0.1; Base LR for shallow MLP is $10^{-3}$ [S1, S5].
+-    *   **View-Count Prior:** Apply lower learning rate to voxels visible to fewer views [S1, S5].
+-    *   Loss: Photometric loss $\mathcal{L}_{\text{photo}}$ plus auxiliary losses (point-wise RGB loss $w_{pt\_rgb}$ and background loss $w_{bg}$) [S1].
+-    *   Schedule: Exponential learning rate decay, downscaled by 0.1 at 20,000 iterations [S1].
+-
+-#### 4. Rendering (Forward Model)
+-For a ray $\mathbf{r}$, sample $K$ points. For each point $i$:
+-1.  **Query Density:** Trilinearly interpolate raw density $\sigma_i$ from $V^{(c)}$ or $V^{(f)}$ [S1].
+-2.  **Post-Activation Interpolation:** Apply activation function (e.g., Softplus/ReLU) *after* trilinear interpolation to produce opacity $\alpha_i$ [S1, S5]. This allows modeling sharp surfaces within a single grid cell [S1].
+-    $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+-    where $\delta_i$ is the distance to the adjacent point [S1, S5].
+-3.  **Query Color:**
+-    *   Trilinearly interpolate feature vector $\mathbf{f}_i$ from $V^{(feat)}$ [S1].
+-    *   Compute positional encodings for position $\mathbf{x}_i$ (using $k_x=5$ frequencies) and viewing direction $\mathbf{d}_i$ (using $k_d=4$ frequencies) [S1].
+-    *   Pass $[\mathbf{f}_i; \gamma(\mathbf{x}_i); \gamma(\mathbf{d}_i)]$ through the shallow MLP to get color $\mathbf{c}_i$ [S1, S5].
+-4.  **Accumulate:** Compute transmittance $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ and rendered color:
+-    $$ \hat{C}(\mathbf{r}) = \left( \sum_{i=1}^K T_i \alpha_i \mathbf{c}_i \right) + T_{K+1} \mathbf{c}_{\text{bg}} $$
+-    where $\mathbf{c}_{\text{bg}}$ is a pre-defined background color [S1, S5].
+-
+-#### 5. Loss Function
+-Minimize the photometric loss:
++**Inputs and Outputs:**
++*   **Inputs:** A set of $N$ calibrated images with known camera poses (intrinsic and extrinsic parameters).
++*   **Outputs:** Optimized density voxel grid $V^{(c)}$ and $V^{(f)}$, feature voxel grid $V^{(feat)}$, and shallow MLP weights for color prediction.
++
++**Data Structures:**
++1.  **Bounding Box (BBox):** Automatically computed to tightly enclose the volume of interest [S1, S5]. All voxel coordinates are normalized to $[0, 1]^3$ within this box.
++2.  **Coarse Density Grid ($V^{(c)}$):** A 3D tensor of shape $M^{(c)} \times M^{(c)} \times M^{(c)}$. Default $M^{(c)} = 100$ [S1, S5]. Stores raw density values $\sigma$.
++3.  **Fine Density Grid ($V^{(f)}$):** A 3D tensor of shape $M^{(f)} \times M^{(f)} \times M^{(f)}$. Default $M^{(f)} = 160$ [S1, S5]. Stores raw density values $\sigma$.
++4.  **Feature Grid ($V^{(feat)}$):** A 3D tensor of shape $M^{(f)} \times M^{(f)} \times M^{(f)} \times D$. Default $D=12$ [S1, S5]. Stores feature vectors $\mathbf{f}$.
++5.  **Shallow MLP:** A network with 2 hidden layers, 128 channels per layer [S5]. Inputs are concatenated positional encoding of position $\mathbf{x}$, viewing direction $\mathbf{d}$, and feature vector $\mathbf{f}$. Output is view-dependent color $\mathbf{c}$.
++
++**Parameters:**
++*   $\alpha_{init}^{(c)} = 10^{-6}$: Initial activated alpha for coarse stage [S1, S5].
++*   $\alpha_{init}^{(f)} = 0.01$: Initial activated alpha for fine stage [S1, S5].
++*   $\tau_c = 10^{-3}$: Threshold for known free space in coarse stage [S1, S5].
++*   $\tau_f = 10^{-4}$: Threshold for skipping low-density points in fine stage [S1, S5].
++*   $\delta^{(c)} = 0.5 \cdot s^{(c)}$: Sampling step size for coarse stage, where $s^{(c)}$ is voxel size [S5].
++*   $\delta^{(f)} = 0.5 \cdot s^{(f)}$: Sampling step size for fine stage, where $s^{(f)}$ is voxel size [S5].
++*   $k_x = 5$: Number of frequencies for positional embedding of position [S1, S5].
++*   $k_d = 4$: Number of frequencies for positional embedding of direction [S1, S5].
++*   $K$: Number of sample points per ray [S1, S5].
++*   $\mathbf{c}_{bg}$: Background color (typically white or black, treated as a constant or learnable parameter) [S1, S5].
++*   Learning Rates: Voxel grids $0.1$, MLP $10^{-3}$ [S1, S5].
++*   Optimizer: Adam [S1, S5].
++*   Batch Size: 8,192 rays [S1, S5].
++*   Iterations: Coarse stage 10,000; Fine stage 20,000 [S1, S5].
++
++**Algorithm Steps:**
++
++1.  **Initialization:**
++    *   Compute BBox enclosing the scene [S1, S5].
++    *   Initialize $V^{(c)}$ such that the activated opacity $\alpha$ is $\alpha_{init}^{(c)}$ everywhere [S1, S5]. This is achieved by setting raw density $\sigma$ such that $1 - \exp(-\sigma \delta) = \alpha_{init}^{(c)}$ [S1, S5].
++    *   Initialize $V^{(f)}$ and $V^{(feat)}$ to zero or small random values [S1, S5].
++
++2.  **Coarse Geometry Search (10,000 iterations):**
++    *   For each ray $\mathbf{r}$, sample $K$ points between near/far planes with step $\delta^{(c)}$ [S1, S5].
++    *   Query density $\sigma_i$ from $V^{(c)}$ using **post-activation interpolation** (see Formulas) [S1, S5].
++    *   **Free Space Skip:** If the interpolated raw density $\sigma_i < \tau_c$, treat the point as free space (opacity $\alpha_i = 0$) and skip further processing for this point [S1, S5].
++    *   Compute opacity $\alpha_i = 1 - \exp(-\sigma_i \delta^{(c)})$ [S1, S5].
++    *   Compute transmittance $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S1, S5].
++    *   Query color $\mathbf{c}_i$ from a **color voxel grid** (view-invariant) or a simple lookup [S3, S5]. *Note: The primary DVGO paper [S1, S5] describes using a feature grid with MLP for the fine stage, but mentions combining density grid with a color voxel grid for coarse geometry searching [S3]. Implementation typically uses a simple view-invariant color grid or the fine-stage MLP with zero features for coarse stage.*
++    *   Render color $\hat{C}(\mathbf{r})$ using volume rendering equation [S1, S5].
++    *   Compute Loss $\mathcal{L}_{photo}$ and auxiliary losses (background, point-wise RGB) [S1, S5].
++    *   **View-Count Prior:** Calculate the number of views $n_v$ visible to each voxel. Apply a learning rate multiplier $n_v / N_{views}$ or similar scaling to voxels with fewer visible views to avoid redundant allocation [S1, S5].
++    *   Update $V^{(c)}$ using Adam [S1, S5].
++
++3.  **Fine Detail Reconstruction (20,000 iterations):**
++    *   Initialize $V^{(f)}$ with raw densities corresponding to $\alpha_{init}^{(f)}$ [S1, S5].
++    *   For each ray $\mathbf{r}$, sample $K$ points with step $\delta^{(f)}$ [S1, S5].
++    *   Query density $\sigma_i$ from $V^{(f)}$ using **post-activation interpolation** [S1, S5].
++    *   **Low-Density Skip:** If $\sigma_i < \tau_f$, set $\alpha_i = 0$ [S1, S5].
++    *   Compute $\alpha_i = 1 - \exp(-\sigma_i \delta^{(f)})$ [S1, S5].
++    *   Compute $T_i$ [S1, S5].
++    *   Query feature vector $\mathbf{f}_i$ from $V^{(feat)}$ using trilinear interpolation [S1, S5].
++    *   Compute positional encoding $\gamma(\mathbf{x}_i)$ and $\gamma(\mathbf{d}_i)$ [S1, S5].
++    *   Input $[\gamma(\mathbf{x}_i), \gamma(\mathbf{d}_i), \mathbf{f}_i]$ to the Shallow MLP to get view-dependent color $\mathbf{c}_i$ [S1, S5].
++    *   Render $\hat{C}(\mathbf{r})$ [S1, S5].
++    *   Compute Loss $\mathcal{L}_{photo}$ [S1, S5].
++    *   **Progressive Scaling:** At iterations 1000, 2000, and 3000, progressively scale the resolution of $V^{(f)}$ and $V^{(feat)}$ if necessary (though default $160^3$ is often used directly) [S1, S5].
++    *   Update $V^{(f)}$, $V^{(feat)}$, and MLP weights using Adam [S1, S5].
++    *   Apply exponential learning rate decay (downscaled by 0.1 at 20,000 iterations) [S1, S5].
++
++**Formulas:**
++
++**Volume Rendering:**
++$$ \hat{C}(\mathbf{r}) = \left( \sum_{i=1}^K T_i \alpha_i \mathbf{c}_i \right) + T_{K+1} \mathbf{c}_{\text{bg}} $$
++$$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
++$$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++Where $\sigma_i$ is density, $\delta_i$ is distance to adjacent point, $\mathbf{c}_i$ is color, $\mathbf{c}_{\text{bg}}$ is background color [S1, S5].
++
++**Post-Activation Interpolation:**
++Unlike pre-activation (interpolating $\alpha$) or nearest-neighbor, DVGO interpolates the raw density $\sigma$ and then applies the activation function:
++$$ \sigma_{interp} = \text{TrilinearInterpolate}(V, \mathbf{x}) $$
++$$ \alpha = 1 - \exp(-\sigma_{interp} \delta) $$
++This allows modeling sharp linear surfaces within a single grid cell [S1, S5].
++
++**Loss Function:**
+ $$ \mathcal{L}_{\text{photo}} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\| \hat{C}(\mathbf{r}) - C(\mathbf{r}) \right\|_2^2 $$
+-where $\mathcal{R}$ is the set of rays in a sampled mini-batch (batch size 8,192 rays) [S1, S5].
+-
+-### Pseudocode
++Additional losses may include background loss ($w_{bg}$) and point-wise RGB loss ($w_{pt\_rgb}$) [S1, S5].
++
++**Pseudocode:**
+ 
+ ```python
+-import numpy as np
+-
+-def dvgo_forward(ray_origin, ray_direction, voxel_grid_density, voxel_grid_feat, 
+-                 mlp, near_plane, far_plane, num_samples, bg_color):
+-    """
+-    Renders a single ray using DVGO representation.
+-    """
+-    # Sample points along the ray
+-    t_vals = np.linspace(near_plane, far_plane, num_samples)
+-    points = ray_origin + ray_direction * t_vals[:, np.newaxis]
+-    
+-    # Query density and apply post-activation interpolation
+-    # Interpolate raw density first, then apply activation
+-    raw_densities = trilinear_interpolate(voxel_grid_density, points)
+-    # Example activation: Softplus or ReLU, followed by alpha calculation
+-    # Note: DVGO uses 1 - exp(-sigma * delta) where sigma is the activated density
+-    # For simplicity, assuming raw_densities are already in a form compatible with alpha
+-    # or that the activation is implicit in the grid storage/query logic described in [S1]
+-    # The key is: interpolate sigma, then alpha = 1 - exp(-sigma * delta)
+-    
+-    alphas = 1.0 - np.exp(-raw_densities * (t_vals[1] - t_vals[0])) # delta is constant step
+-    
+-    # Query features and compute color
+-    features = trilinear_interpolate(voxel_grid_feat, points)
+-    
+-    # Positional encoding for position and direction
+-    pos_enc = positional_encoding(points, num_freqs=5)
+-    dir_enc = positional_encoding(ray_direction, num_freqs=4)
+-    
+-    # MLP input: concat features, pos_enc, dir_enc
+-    mlp_input = np.concatenate([features, pos_enc, dir_enc], axis=-1)
+-    colors = mlp_forward(mlp, mlp_input)
+-    
+-    # Volume rendering accumulation
+-    transmittance = np.ones(num_samples + 1)
+-    for i in range(num_samples - 1, -1, -1):
+-        transmittance[i] = transmittance[i+1] * (1.0 - alphas[i])
+-        
+-    rendered_color = np.zeros(3)
+-    for i in range(num_samples):
+-        rendered_color += transmittance[i] * alphas[i] * colors[i]
+-        
+-    rendered_color += transmittance[num_samples] * bg_color
+-    return rendered_color
+-
+-def dvgo_optimize(images, poses, bbox, coarse_res=100, fine_res=160, 
+-                  num_coarse_iters=10000, num_fine_iters=20000):
+-    """
+-    Optimizes DVGO voxel grids.
+-    """
+-    # 1. Initialize grids
+-    # Initialize density grid with low alpha (10^-6)
+-    V_coarse = init_density_grid(coarse_res, alpha_init=1e-6)
+-    V_fine = init_density_grid(fine_res, alpha_init=0.01)
+-    V_feat = init_feature_grid(fine_res, channels=12)
+-    mlp = init_shallow_mlp()
+-    
+-    # 2. Coarse Stage
+-    for step in range(num_coarse_iters):
+-        rays = sample_rays(images, poses, batch_size=8192)
+-        for ray in rays:
+-            # Skip points in known free space (density < 1e-3)
+-            rendered = dvgo_forward(ray, V_coarse, None, mlp, ...) 
+-            # Note: Coarse stage uses color voxel grid, not MLP, for speed [S3]
+-            # But for simplicity in pseudocode, we assume a placeholder for coarse color
+-            loss = photometric_loss(rendered, ray.gt_color)
+-            # Backpropagate to V_coarse
+-            # Apply view-count based learning rate prior [S1]
+-            update(V_coarse, loss, lr=0.1)
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class DVGO:
++    def __init__(self, bbox_min, bbox_max, M_c=100, M_f=160, D=12, K=128):
++        self.bbox_min = torch.tensor(bbox_min)
++        self.bbox_max = torch.tensor(bbox_max)
++        self.M_c = M_c
++        self.M_f = M_f
++        self.D = D
++        self.K = K
++        
++        # Initialize grids
++        # Raw density initialized to yield alpha_init
++        alpha_init_c = 1e-6
++        alpha_init_f = 1e-2
++        # delta is voxel size * 0.5. Assuming unit bbox for simplicity, 
++        # actual delta depends on bbox size.
++        # sigma = -ln(1-alpha)/delta
++        self.sigma_init_c = -torch.log(1 - alpha_init_c) * 2 # assuming delta=0.5 for unit scale
++        self.sigma_init_f = -torch.log(1 - alpha_init_f) * 2
++        
++        self.V_c = torch.nn.Parameter(torch.full((M_c, M_c, M_c), self.sigma_init_c))
++        self.V_f = torch.nn.Parameter(torch.full((M_f, M_f, M_f), self.sigma_init_f))
++        self.V_feat = torch.nn.Parameter(torch.zeros((M_f, M_f, M_f, D)))
++        
++        # Shallow MLP: 2 hidden layers, 128 channels
++        self.mlp = nn.Sequential(
++            nn.Linear(2 * 5 + 2 * 4 + D, 128), # pos(5) + dir(4) + feat(12)
++            nn.ReLU(),
++            nn.Linear(128, 128),
++            nn.ReLU(),
++            nn.Linear(128, 3) # RGB
++        )
++        
++        self.optimizer = torch.optim.Adam([
++            {'params': self.V_c, 'lr': 0.1},
++            {'params': self.V_f, 'lr': 0.1},
++            {'params': self.V_feat, 'lr': 0.1},
++            {'params': self.mlp.parameters(), 'lr': 1e-3}
++        ])
++
++    def positional_encoding(self, x, k=5):
++        # Standard NeRF positional encoding
++        scales = torch.tensor([2**i for i in range(k)])
++        xb = torch.reshape((x * scales).float(), (-1, k * 2))
++        fb = torch.cat([torch.sin(xb), torch.cos(xb)], dim=-1)
++        return fb
++
++    def trilinear_interpolate(self, grid, coords):
++        # coords: (N, 3) in [0, 1]
++        # grid: (M, M, M) or (M, M, M, D)
++        # Normalize coords to [-1, 1] for grid_sample
++        coords_norm = 2.0 * coords - 1.0
++        coords_norm = coords_norm.unsqueeze(0).unsqueeze(0).unsqueeze(0) # (1, 1, 1, 3)
++        
++        if grid.dim() == 3:
++            # Density grid
++            grid_4d = grid.unsqueeze(0).unsqueeze(0) # (1, 1, M, M, M)
++            # grid_sample expects (N, C, H, W, D) -> (1, 1, M, M, M)
++            # coords needs to be (N, H_out, W_out, D_out, 3) -> (N, 1, 1, 1, 3)
++            # We need to reshape coords to match batch size
++            # For simplicity, assume we process one ray at a time or batch
++            # Using F.grid_sample
++            out = F.grid_sample(grid_4d, coords_norm, mode='bilinear', align_corners=False) # 3D interp
++            # Note: F.grid_sample is for 2D/3D. For 3D volume, use F.grid_sample with 3D coords
++            # Correct 3D interpolation:
++            # grid_sample(input, grid) where grid is (N, H_out, W_out, D_out, 3)
++            # Here we have N points.
++            pass 
++        
++        # Simplified manual interpolation for clarity if grid_sample is complex
++        # Or use standard 3D trilinear
++        return F.grid_sample(grid.unsqueeze(0).unsqueeze(0), coords_norm, mode='trilinear', align_corners=False).squeeze()
++
++    def render_ray(self, ray_o, ray_d, V_grid, is_fine=False):
++        # Sample points
++        t_vals = torch.linspace(0.0, 1.0, self.K)
++        z_vals = 0.5 * (t_vals[:-1] + t_vals[1:]) * torch.norm(ray_d) # Approx distance
++        
++        # Query points
++        points = ray_o.unsqueeze(0) + ray_d.unsqueeze(0) * z_vals.unsqueeze(1)
++        
++        # Normalize to [0, 1] relative to bbox
++        points_norm = (points - self.bbox_min) / (self.bbox_max - self.bbox_min)
++        
++        # Interpolate density
++        if is_fine:
++            sigma_raw = self.trilinear_interpolate(self.V_f, points_norm)
++            # Skip low density
++            mask = sigma_raw > 1e-4
++            sigma_raw = sigma_raw * mask.float() # Zero out low density
+             
+-    # 3. Fine Stage
+-    # Progressive scaling at checkpoints 1000, 2000, 3000 [S1]
+-    for step in range(num_fine_iters):
+-        rays = sample_rays(images, poses, batch_size=8192)
+-        for ray in rays:
+-            # Skip points in unknown space (density < 1e-4) [S1]
+-            rendered = dvgo_forward(ray, V_fine, V_feat, mlp, ...)
+-            loss = photometric_loss(rendered, ray.gt_color)
+-            # Backpropagate to V_fine, V_feat, mlp
+-            # Apply view-count based learning rate prior [S1]
+-            update(V_fine, loss, lr=0.1)
+-            update(V_feat, loss, lr=0.1)
+-            update(mlp, loss, lr=1e-3)
++            # Interpolate features
++            feat = self.trilinear_interpolate(self.V_feat, points_norm)
+             
+-        # Exponential LR decay at step 20000 [S1]
+-        if step == 20000:
+-            decay_lr(0.1)
++            # MLP for color
++            pos_enc = self.positional_encoding(points_norm, k=5)
++            dir_enc = self.positional_encoding(ray_d, k=4)
++            mlp_in = torch.cat([pos_enc, dir_enc, feat], dim=-1)
++            color = self.mlp(mlp_in)
++        else:
++            sigma_raw = self.trilinear_interpolate(self.V_c, points_norm)
++            color = torch.zeros_like(points_norm) # Placeholder for coarse color
+             
+-    return V_fine, V_feat, mlp
++        # Post-activation
++        delta = 0.5 * (self.bbox_max - self.bbox_min).max() / (self.M_f if is_fine else self.M_c) # Approx delta
++        alpha = 1.0 - torch.exp(-sigma_raw * delta)
++        
++        # Transmittance
++        T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :1]), 1.0 - alpha[:, :-1]], dim=-1), dim=-1)
++        
++        # Weighted sum
++        weights = alpha * T
++        color_out = torch.sum(weights.unsqueeze(-1) * color, dim=1)
++        
++        return color_out
++
++    def step(self, rays_o, rays_d, target_colors):
++        # Coarse Stage
++        color_c = self.render_ray(rays_o, rays_d, self.V_c, is_fine=False)
++        loss_c = F.mse_loss(color_c, target_colors)
++        
++        # Fine Stage
++        color_f = self.render_ray(rays_o, rays_d, self.V_f, is_fine=True)
++        loss_f = F.mse_loss(color_f, target_colors)
++        
++        loss = loss_c + loss_f
++        self.optimizer.zero_grad()
++        loss.backward()
++        
++        # View-count prior application (simplified)
++        # In practice, this requires tracking visibility per voxel
++        # self.apply_view_prior() 
++        
++        self.optimizer.step()
++        return loss
+ ```
+ 
+-### Parameters
+-*   **Grid Resolution:** $160^3$ (default) or $256^3$ [S1, S5].
+-*   **Coarse Grid Resolution:** $100^3$ [S1, S5].
+-*   **Initial Alpha (Coarse):** $10^{-6}$ [S1, S5].
+-*   **Initial Alpha (Fine):** $0.01$ [S1, S5].
+-*   **Free Space Threshold (Coarse):** $10^{-3}$ [S1].
+-*   **Unknown Space Threshold (Fine):** $10^{-4}$ [S1].
+-*   **Sampling Step Size:** $0.5 \times$ voxel size [S5].
+-*   **Feature Channels:** 12 [S1].
+-*   **MLP Hidden Layers:** 2 layers, 128 channels [S5].
+-*   **Positional Encoding Frequencies:** $k_x=5$ (position), $k_d=4$ (direction) [S1].
+-*   **Optimizer:** Adam [S5].
+-*   **Learning Rates:** Voxel grids: 0.1; MLP: $10^{-3}$ [S1, S5].
+-*   **Batch Size:** 8,192 rays [S1, S5].
+-*   **Training Iterations:** Coarse: 10,000; Fine: 20,000 [S1, S5].
+-
+-### Edge Cases and Pitfalls
+-*   **Suboptimal Geometry:** Direct voxel density optimization is prone to allocating "cloud" in free space to fit photometric loss instead of finding multi-view consistent geometry [S1]. Mitigated by low-density initialization and view-count-based learning rates [S1].
+-*   **Real-World Uncertainty:** Inconsistent lighting or SfM errors can lead to multi-view inconsistent and blurrier surfaces, reducing the advantage of post-activation for sharp surfaces [S1].
+-*   **Initialization Sensitivity:** Using $\alpha_{\text{init}}^{(c)} = 10^{-7}$ may require more iterations for the coarse stage in some scenes [S1].
+-
+ ## Subtopics
+ 
+ ### [Ref-DVGO](6572-ref-dvgo.md)
+-A reflection-aware variant that combines DVGO's fast hybrid representation with Ref-NeRF's reflection direction reparameterization to handle specular reflections in reflective scenes, reducing GPU memory and training time compared to large spatial MLPs.
++Ref-DVGO is a reflection-aware neural rendering method that combines the fast hybrid implicit-explicit representation of Direct Voxel Grid Optimization (DVGO) with the reflection direction reparameterization of Ref-NeRF to achieve high-quality photorealistic novel view synthesis of reflective scenes with reduced training and rendering time. It sets itself apart from DVGO by explicitly modeling specular reflections via a reflection-aware reparameterization and from Ref-NeRF by replacing large spatial MLPs with six distinct voxel grids, significantly reducing GPU memory requirements and training time.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is significantly faster than NeRF. Convergence is about two orders of magnitude faster, reducing training time from 10-20 hours (NeRF) to 15-22 minutes per scene on a single NVIDIA RTX 2080 Ti GPU [S1, S5].
+-*   **Memory Complexity:** Uses dense voxel grids. A $160^3$ grid contains ~4 million voxels. Memory usage is higher than hash-based methods (like Instant-NGP) but lower than high-resolution NeRF MLPs for equivalent quality [S1].
++**Time and Memory Complexity:**
++*   **Training Time:** Approximately 15 minutes for $160^3$ voxels and 22 minutes for $256^3$ voxels on a single NVIDIA RTX 2080 Ti GPU [S1, S5]. This is about two orders of magnitude faster than NeRF (10-20 hours) [S1].
+ *   **Rendering Speed:** Approximately 45x faster than NeRF (0.64 seconds vs 29 seconds per 800x800 image) [S1].
+-*   **Quality:** Achieves PSNR of 31.95 (160^3) and 32.80 (256^3) on standard benchmarks, surpassing NeRF's 31.01 [S1].
+-*   **Strengths:** Extremely fast training from scratch; no need for cross-scene pre-training; sharp surface modeling via post-activation interpolation [S1].
+-*   **Limitations:** Not designed for unbounded or forward-facing scenes (inward-facing only); real-world data noise can blur sharp surfaces [S1].
+-*   **When to Use:** Per-scene novel view synthesis where fast training is critical and the scene is bounded and inward-facing [S1, S5].
+-*   **When Not to Use:** Large-scale unbounded scenes, forward-facing scenes, or scenarios requiring cross-scene generalization without per-scene optimization [S1].
++*   **Memory:** Scales with $M^3$. $160^3$ voxels is approximately 4 million voxels. With density (1 float) and features (12 floats), memory is manageable on modern GPUs. Maximum resolution cited is $256^3$ [S1, S5].
++
++**Strengths and Limitations:**
++*   **Strengths:** Extremely fast convergence; no cross-scene pretraining required; sharp surface modeling via post-activation; comparable or superior PSNR to NeRF and MVSNeRF [S1, S5].
++*   **Limitations:** Prone to suboptimal geometry (cloud artifacts) if priors are not applied [S1]; real-world data uncertainty (lighting, SfM error) can lead to blurrier surfaces, reducing the advantage of post-activation [S1]; limited to bounded scenes (uses BBox) [S1].
++
++**When to Use:**
++*   Use for per-scene novel view synthesis where fast training is critical and the scene is bounded [S1, S5].
++*   Avoid for unbounded or forward-facing scenes without modification [S1].
+ 
+ ## Background
+-Direct Voxel Grid Optimization (DVGO) was introduced by Cheng Sun, Min Sun, and Hwann-Tzong Chen in 2022 [S1]. It addresses the bottleneck of lengthy training times in NeRF by directly optimizing explicit voxel grids, avoiding the need for conversion from implicit models [S1, S5]. The method builds on the principles of radiance-field optimization and explicit voxel representations [Parent]. It has been used on benchmarks such as Syn-NeRF, Syn-NSVF, BlendedMVS, and Tanks and Temples [S1].
++Direct Voxel Grid Optimization (DVGO) was introduced by Cheng Sun, Min Sun, and Hwann-Tzong Chen in 2022 [S1, S5]. It addresses the bottleneck of training time in Neural Radiance Fields (NeRF) by directly optimizing explicit voxel grids instead of implicit MLPs. The method builds on earlier voxel-based approaches but distinguishes itself by training from scratch without conversion from implicit models [S1, S5]. It has been used on benchmarks such as Syn-NeRF, Syn-NSVF, BlendedMVS, and Tanks and Temples [S1, S5].
+ 
+ ## Sources

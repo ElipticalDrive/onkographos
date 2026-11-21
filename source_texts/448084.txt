@@ -1,0 +1,131 @@
+Description When a path scatters in a medium, the path tracer handles the scattering point in its own branch: Renderer::path_trace_() in include/huira_impl/render/renderer.ipp, the if (opt_mi && opt_mi->t < t_seg) branch, from line 612. ...
+
+[Bug]: Light is miscounted where a path scatters in a participating medium · Issue #133 · huira-render/huira · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Bug]: Light is miscounted where a path scatters in a participating medium #133
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#142
+Closed
+[Bug]: Light is miscounted where a path scatters in a participating medium#133
+#142
+Copy link
+Labels
+bugSomething isn't workingSomething isn't working
+Description
+crgnam
+opened on Oct 20, 2026
+Issue body actions
+Description
+When a path scatters in a medium, the path tracer handles the scattering point in its own branch:
+Renderer::path_trace_() in include/huira_impl/render/renderer.ipp, the
+if (opt_mi && opt_mi->t < t_seg) branch, from line 612. That branch doesn't keep the multiple
+importance sampling (MIS) bookkeeping the rest of the loop relies on. Three problems follow.
+Light reaching a scattering point is counted more than once.
+At the scattering point, each light is sampled directly (next event estimation), and its
+contribution is added with no MIS weight.
+The path then continues in a direction sampled from the phase function. If that ray hits a
+sphere light, the light's emission is added again (line 733), weighted by
+power_heuristic(prev_bsdf_pdf, light_pdf), where prev_bsdf_pdf is the phase function's
+pdf.
+The two weights for the same light sum to 1 + w rather than 1, with
+w = p_phase² / (p_phase² + p_light²).
+That weight's light pdf comes from the wrong point. light_pdf is computed from
+prev_isect. The medium branch doesn't update prev_isect, so it is the last surface
+interaction, or a default-constructed one if the path hasn't hit a surface yet, rather than the
+scattering point.
+Light from indirect sources is under-counted after scattering, using stale data.
+Indirect sources aren't sampled at scattering points (reflector next event estimation runs
+only at surfaces). A phase-sampled ray that hits an indirect source is therefore the only way
+that light is found, and should count with weight 1.
+Instead it is weighted by power_heuristic(prev_bsdf_pdf, prev_reflector_pdf[k]) (line 806).
+prev_reflector_pdf holds the reflector pdf of the last surface bounce's direction, which the
+medium branch doesn't update.
+prev_reflector_pdf is allocated once per tile, at lines 1152 and 1294, and isn't reset at
+the start of each sample. So when a sample scatters before it bounces off any surface, the
+value comes from a previous sample, or a previous pixel.
+Whenever that stale value is nonzero, the light is under-counted, usually almost entirely,
+because cone-sampling pdfs are large.
+This was found by reading the code; the size of the error hasn't been measured. In scenes lit by
+the Sun, problem 1 is negligible: the Sun subtends about 7e-5 sr, so w is about 1e-10. Problem 3
+triggers only when the stale value is nonzero, which is rare when the indirect source is small in
+the sky. The errors can matter in two cases:
+media lit by sphere lights that are large in the sky;
+an indirect source lighting a medium, for example planetshine on an atmosphere.
+The behaviour has been on main since MIS-coupled reflector NEE (5064d4f) and the per-tile buffer
+reuse (2858b55).
+Expected Behavior
+For every light path, the weights of the strategies that can produce it sum to 1. At a scattering
+point:
+For lights, either:
+weight next event estimation by power_heuristic(light_pdf, phase_pdf), set prev_isect to
+the scattering point, and keep the weight for phase-sampled hits; or
+use next event estimation only there, so that a phase-sampled ray that hits a light adds
+nothing.
+For indirect sources, either:
+set prev_reflector_pdf to 0 at scattering points, so phase-sampled hits count fully; or
+add reflector next event estimation at scattering points, with MIS.
+In every case, reset prev_reflector_pdf at the start of each sample, so no sample reads
+another's.
+Tests
+A medium slab lit by a large sphere light: the MIS render agrees, within noise, with a
+reference that uses one strategy only (for example next event estimation only, at many samples).
+A medium lit only by an indirect source: a pixel's value doesn't depend on what was traced
+before it. The same pixel rendered alone, and within a tile after pixels whose paths bounce
+toward the source, should give the same result.
+Activity
+crgnam
+added
+bugSomething isn't workingSomething isn't working
+on Oct 20, 2026
+crgnam
+added 3 commits that reference this issue on Oct 25, 2026
+fix(render): Weight a light's samples in a medium against phase sampling
+...
+945deb3
+fix(render): Sample indirect sources where a path scatters in a medium
+...
+eebcb5d
+test(render): Check that a medium gets all of an indirect source's light
+...
+0d2d4a9
+crgnam
+closed this as completedin #142on Oct 25, 2026
+crgnam
+added 3 commits that reference this issue on Oct 25, 2026
+fix(render): Weight a light's samples in a medium against phase sampling
+...
+b703424
+fix(render): Sample indirect sources where a path scatters in a medium
+...
+ed7cb86
+test(render): Check that a medium gets all of an indirect source's light
+...
+0495573
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't working
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

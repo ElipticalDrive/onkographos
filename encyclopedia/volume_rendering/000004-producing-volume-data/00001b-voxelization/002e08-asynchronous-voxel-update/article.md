@@ -1,0 +1,92 @@
+# Asynchronous Voxel Update
+
+Also called: Lower-frequency Voxelization, Temporal Voxel Update, Timed Update Logic
+
+## Overview
+Asynchronous Voxel Update is a technique that decouples the frequency of voxel grid regeneration from the rendering frame rate to leverage temporal coherency in scenes with static or slowly moving geometry and lighting [S2, unofficial]. Unlike synchronous voxelization methods that update the volume data every frame, this approach updates the voxel world at a lower, configurable frequency, trading geometric accuracy for significant performance gains [S2, unofficial]. It is distinct from view-adaptive or sparse voxelization methods by focusing specifically on temporal decoupling rather than spatial resolution or structure optimization.
+
+## How it works
+The method controls the update decision based on elapsed time and a progress threshold, allowing the voxelization process to run asynchronously or be skipped entirely if the scene state has not changed sufficiently [S1, unofficial].
+
+**Inputs and Outputs:**
+- **Input:** Current timestamp, last update timestamp, update interval parameter, and a progress metric (e.g., rendering progress or scene change detection).
+- **Output:** Boolean flag indicating whether an update should occur; updated timestamp if an update is triggered.
+
+**Data Structures:**
+- `last_update_time`: Integer or float representing the timestamp of the last voxelization pass.
+- `update_interval`: Integer or float representing the minimum time (in milliseconds) between updates.
+- `current_time`: Integer or float representing the current system or frame timestamp.
+- `progress`: Float in range $[0, 1]$ representing the completion status of the current frame or scene state [S1, unofficial].
+
+**Parameters:**
+- **Update Interval:** A typical value is 1500 ms, though it can be adjusted based on scene dynamics [S1, unofficial].
+- **Update Frequency:** Alternatively specified as a frame count, such as updating every 5 frames [S2, unofficial].
+
+**Steps:**
+1. Check the `progress` metric. If `progress >= 0.95`, return `false` to prevent updates during finalization or heavy processing phases [S1, unofficial].
+2. Calculate the elapsed time since the last update: `elapsed = current_time - last_update_time`.
+3. If `elapsed >= update_interval`, trigger the voxelization process, update `last_update_time` to `current_time`, and return `true` [S1, unofficial].
+4. Otherwise, return `false` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def should_update_voxel_grid(current_time, last_update_time, update_interval, progress):
+    """
+    Determines if the voxel grid should be updated based on time and progress.
+    
+    Args:
+        current_time (float): Current timestamp in ms.
+        last_update_time (float): Timestamp of the last voxel update.
+        update_interval (float): Minimum time between updates in ms.
+        progress (float): Progress metric, typically 0.0 to 1.0.
+        
+    Returns:
+        bool: True if an update should occur, False otherwise.
+    """
+    # Prevent updates if progress is near completion (e.g., 95% or more)
+    if progress >= 0.95:
+        return False
+    
+    # Check if enough time has elapsed since the last update
+    elapsed_time = current_time - last_update_time
+    if elapsed_time >= update_interval:
+        # Trigger update and record the new timestamp
+        # Note: The actual voxelization logic is called externally
+        last_update_time = current_time
+        return True
+    
+    return False
+```
+
+**Edge Cases and Pitfalls:**
+- **Visual Artifacts:** Lowering the update frequency causes the voxel model to lag behind the triangle mesh, resulting in visible artifacts, especially with dynamic geometry or lighting [S2, unofficial].
+- **Precision:** Ensure `current_time` and `last_update_time` use a consistent high-resolution timer to avoid drift or incorrect intervals.
+
+## Subtopics
+
+### [View-Adaptive Voxelization](3313-view-adaptive-voxelization.md)
+Adjusts voxel density based on view importance, complementing temporal updates by optimizing spatial resources.
+
+### [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md)
+Often used in conjunction with asynchronous updates to reduce memory bandwidth when updating only changed regions.
+
+### [GPU and Parallel Acceleration Voxelization](6878-gpu-and-parallel-acceleration-voxelization.md)
+Asynchronous updates are frequently paired with GPU acceleration to minimize CPU-GPU synchronization overhead.
+
+## Operating characteristics
+- **Time Complexity:** Reduces the number of voxelization passes by a factor of $N$ (where $N$ is the ratio of render frame rate to update frequency), effectively lowering the computational load per second by $1 - 1/N$.
+- **Memory Complexity:** No additional memory overhead compared to synchronous voxelization, as the same voxel grid structure is reused.
+- **Measured Performance:** In implementations using voxel cone tracing, updating every 5 frames significantly reduces processing power usage, enabling real-time global illumination with dynamic lighting [S2, unofficial].
+- **Strengths:** High performance improvement for static or slow-moving scenes; leverages temporal coherency.
+- **Limitations:** Introduces latency between scene changes and their representation in the voxel grid, causing visual artifacts if objects move quickly [S2, unofficial].
+- **When to Use:** Ideal for scenes with static geometry and lighting, or where performance is critical and minor visual lag is acceptable.
+- **When Not to Use:** Unsuitable for fast-moving dynamic scenes or when high-fidelity real-time geometric accuracy is required.
+
+## Background
+The technique was described in the context of implementing voxel cone tracing for real-time global illumination, where it was noted that voxel worlds can be updated at a different frequency than the render frame rate to exploit temporal coherency of light sources and dynamic models [S2, unofficial]. It is also referenced in the Brush Gaussian splatting engine, where update logic is gated by progress and time intervals to manage caching and rendering resources [S1, unofficial].
+
+## Sources
+[S1] Brush – A new compatible Gaussian splatting engine, https://github.com/ArthurBrussee/brush, fetched 2026-10-26 (unofficial)
+[S2] #AltDevBlog » Implementing Voxel Cone Tracing, https://jahej.com/alt/2013_01_31_implementing-voxel-cone-tracing.html, fetched 2026-10-28 (unofficial)

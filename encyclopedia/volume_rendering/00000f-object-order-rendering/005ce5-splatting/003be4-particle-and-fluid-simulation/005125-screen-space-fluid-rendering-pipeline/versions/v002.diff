@@ -1,0 +1,182 @@
+--- v001.md
++++ v002.md
+@@ -8,83 +8,120 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of particles $P_i$, typically provided as `vtkPolyData` [S1, unofficial]. Each particle $i$ carries position $\mathbf{p}_i$, radius $r_i$, and optional scalar color $\mathbf{c}_i$ [S1, unofficial].
++*   **Input:** A set of particles $P_i$ provided as `vtkPolyData` [S1, unofficial]. Each particle is defined by its position $\mathbf{p}_i$, radius $r_i$, and optional scalar color $\mathbf{c}_i$ [S1, unofficial].
+ *   **Output:** A final composited image with fluid appearance, including surface normals and opacity derived from screen-space buffers [S1, unofficial].
+ 
+ **Data Structures:**
+ The pipeline utilizes several render targets (framebuffers) stored in screen space:
+-1.  **Depth Buffer:** Stores the depth of the nearest particle surface.
+-2.  **Thickness Buffer:** Accumulates the radial thickness of overlapping particles.
+-3.  **Color Buffer (Optional):** Accumulates particle colors.
+-4.  **Filtered Depth Buffer:** Smoothed version of the depth buffer for normal estimation.
+-5.  **Filtered Thickness Buffer:** Smoothed version of the thickness buffer for opacity/density.
++1.  **Depth Buffer:** Stores the depth of the nearest particle surface [S1, unofficial].
++2.  **Thickness Buffer:** Accumulates the radial thickness of overlapping particles [S1, unofficial].
++3.  **Color Buffer (Optional):** Accumulates particle colors [S1, unofficial].
++4.  **Filtered Depth Buffer:** Smoothed version of the depth buffer for normal estimation [S1, unofficial].
++5.  **Filtered Thickness Buffer:** Smoothed version of the thickness buffer for opacity/density [S1, unofficial].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Depth Pass:** Render all particles as spheres into the **Depth Buffer**. Enable the depth test. This creates a "bumpy" surface representing the fluid's outer boundary, where occlusion by static objects (e.g., a dragon) is automatically handled by discarding fluid pixels behind the occluder [S1, unofficial].
+-
+-2.  **Thickness Pass:** Render all particles as spheres into the **Thickness Buffer**. Disable the depth test. Enable blending (additive) to accumulate the thickness of overlapping spheres. The contribution of each particle to a pixel is based on its spherical kernel [S1, unofficial].
+-
+-3.  **Color Pass (Optional):** If particle colors are present, repeat the thickness accumulation pass into a **Color Buffer** using additive blending to accumulate color intensity [S1, unofficial].
+-
+-4.  **Filtering:** Apply filtering to the noisy buffers to produce smooth visual results [S1, unofficial].
+-    *   **Thickness/Color Filtering:** Apply a high-performance, separable Gaussian filter. This consists of 1-D Gaussian filters applied in each dimension (horizontal then vertical) [S1, unofficial].
+-    *   **Depth Filtering:** Apply a depth-specific filter to the Depth Buffer to create the **Filtered Depth Buffer**. This step is critical to distinguish between distinct surfaces and surface variations due to grazing angles [S1, unofficial]. Two modes are available:
+-        *   *Bilateral Gaussian Filter:* Simpler, lower computation, but lower surface quality [S1, unofficial].
+-        *   *Narrow-Range Filter (Default):* Higher quality, handles the distinction between distinct surfaces and grazing angle smoothing more effectively [S1, unofficial].
+-
+-5.  **Composition:** Combine the **Filtered Depth Buffer** (to derive normals), **Filtered Thickness Buffer** (for opacity/density), and **Color Buffer** (if used) into the final image. Normals are typically estimated from the gradient of the filtered depth buffer [S1, unofficial].
++1.  **Depth Pass:** Render all particles as spheres into the **Depth Buffer** with the depth test enabled [S1, unofficial]. This creates a bumpy surface representing the fluid boundary, and automatically discards fluid pixels occluded by static objects [S1, unofficial].
++2.  **Thickness Pass:** Render all particles as spheres into the **Thickness Buffer** with the depth test disabled and blending enabled [S1, unofficial]. This accumulates the spheres' thickness [S1, unofficial].
++3.  **Color Pass (Optional):** If particle colors are present, repeat the thickness accumulation pass into a **Color Buffer** using blending to accumulate color intensity [S1, unofficial].
++4.  **Filtering:** Apply filtering to the noisy buffers to produce smooth results [S1, unofficial].
++    *   **Thickness/Color Filtering:** Apply a high-performance, separable Gaussian filter (1-D Gaussian filters in each dimension) [S1, unofficial].
++    *   **Depth Filtering:** Apply a depth-specific filter to the Depth Buffer to create the **Filtered Depth Buffer** [S1, unofficial]. Distinct surfaces close in texture coordinates but with different depths must not be blended, while parts of the same surface with depth differences due to grazing angles must be smoothed [S1, unofficial]. Two modes are available: *Bilateral Gaussian Filter* (simpler, lower quality) and *Narrow-Range Filter* (default, higher quality) [S1, unofficial].
++5.  **Composition:** Combine the **Filtered Depth Buffer** (to derive normals), **Filtered Thickness Buffer** (for opacity/density), and **Color Buffer** (if used) into the final rendering result [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def screen_space_fluid_rendering(particles, camera, static_occluders):
++import numpy as np
++
++def screen_space_fluid_rendering(particles, viewport_width, viewport_height):
+     # Initialize screen-space buffers
+-    depth_buffer = create_buffer(width, height)
+-    thickness_buffer = create_buffer(width, height, clear=0.0)
+-    color_buffer = create_buffer(width, height, clear=0.0)
+-    
++    depth_buffer = np.full((viewport_height, viewport_width), np.inf, dtype=np.float32)
++    thickness_buffer = np.zeros((viewport_height, viewport_width), dtype=np.float32)
++    color_buffer = np.zeros((viewport_height, viewport_width, 3), dtype=np.float32)
++    has_color = any(p.color is not None for p in particles)
++
+     # Pass 1: Depth Buffer with Depth Test
+-    set_depth_test(enabled=True)
+-    set_depth_func(LESS)
+-    render_particles_as_spheres(particles, target=depth_buffer, 
+-                                write_color=False, write_depth=True)
+-    
++    for p in particles:
++        rasterize_sphere_depth(p, depth_buffer)
++
+     # Pass 2: Thickness Buffer without Depth Test, Additive Blending
+-    set_depth_test(enabled=False)
+-    set_blend_func(src=ONE, dst=ONE) # Additive blending
+-    render_particles_as_spheres(particles, target=thickness_buffer, 
+-                                write_color=False, write_depth=False)
+-    
++    for p in particles:
++        rasterize_sphere_thickness(p, thickness_buffer)
++
+     # Pass 3: Color Buffer (Optional)
+-    if particles_have_color:
+-        set_blend_func(src=ONE, dst=ONE)
+-        render_particles_as_spheres(particles, target=color_buffer, 
+-                                    write_color=True, write_depth=False)
+-        
++    if has_color:
++        for p in particles:
++            if p.color is not None:
++                rasterize_sphere_color(p, color_buffer)
++
+     # Filtering
+-    # Thickness and Color use separable Gaussian
+-    filtered_thickness = apply_separable_gaussian(thickness_buffer)
+-    filtered_color = apply_separable_gaussian(color_buffer) if particles_have_color else None
+-    
+-    # Depth uses Narrow-Range Filter (default) or Bilateral Gaussian
+-    filtered_depth = apply_narrow_range_filter(depth_buffer)
+-    
++    filtered_thickness = separable_gaussian_filter(thickness_buffer)
++    filtered_color = separable_gaussian_filter(color_buffer) if has_color else None
++    filtered_depth = narrow_range_filter(depth_buffer)  # Default filter
++
+     # Composition
+-    # Normals are derived from filtered_depth gradient
+     normals = compute_normals_from_depth(filtered_depth)
+     opacity = map_thickness_to_opacity(filtered_thickness)
+-    
+-    final_image = composite(final_image, opacity, normals, filtered_color)
+-    return final_image
++    return composite_buffers(normals, opacity, filtered_color)
+ 
+-def render_particles_as_spheres(particles, target, write_color, write_depth):
+-    for particle in particles:
+-        # Project particle sphere to screen space
+-        screen_pos, radius = project_sphere(particle.position, particle.radius)
+-        
+-        # Rasterize sphere into target buffer
+-        # For depth: write min depth
+-        # For thickness: add sphere thickness value (e.g., sqrt(r^2 - d^2))
+-        rasterize_sphere(screen_pos, radius, target, write_color, write_depth)
++def rasterize_sphere_depth(p, buffer):
++    # Project sphere to screen, rasterize pixels, write min depth
++    screen_pos, radius = project_to_screen(p.position, p.radius)
++    for y in range(max(0, int(screen_pos.y - radius)), min(buffer.shape[0], int(screen_pos.y + radius))):
++        for x in range(max(0, int(screen_pos.x - radius)), min(buffer.shape[1], int(screen_pos.x + radius))):
++            dist = np.sqrt((x - screen_pos.x)**2 + (y - screen_pos.y)**2)
++            if dist <= radius:
++                depth_val = compute_sphere_depth(screen_pos, radius, dist)
++                if depth_val < buffer[y, x]:
++                    buffer[y, x] = depth_val
++
++def rasterize_sphere_thickness(p, buffer):
++    # Project sphere to screen, rasterize pixels, add thickness (additive blend)
++    screen_pos, radius = project_to_screen(p.position, p.radius)
++    for y in range(max(0, int(screen_pos.y - radius)), min(buffer.shape[0], int(screen_pos.y + radius))):
++        for x in range(max(0, int(screen_pos.x - radius)), min(buffer.shape[1], int(screen_pos.x + radius))):
++            dist = np.sqrt((x - screen_pos.x)**2 + (y - screen_pos.y)**2)
++            if dist <= radius:
++                thickness = np.sqrt(radius**2 - dist**2)
++                buffer[y, x] += thickness
++
++def rasterize_sphere_color(p, buffer):
++    # Project sphere to screen, rasterize pixels, add color (additive blend)
++    screen_pos, radius = project_to_screen(p.position, p.radius)
++    for y in range(max(0, int(screen_pos.y - radius)), min(buffer.shape[0], int(screen_pos.y + radius))):
++        for x in range(max(0, int(screen_pos.x - radius)), min(buffer.shape[1], int(screen_pos.x + radius))):
++            dist = np.sqrt((x - screen_pos.x)**2 + (y - screen_pos.y)**2)
++            if dist <= radius:
++                buffer[y, x] += p.color
++
++def project_to_screen(position, radius):
++    # Standard perspective projection to screen coordinates
++    return position.xy, radius
++
++def compute_sphere_depth(screen_pos, radius, dist):
++    # Depth at distance dist from sphere center on screen
++    return screen_pos.z - np.sqrt(radius**2 - dist**2)
++
++def separable_gaussian_filter(buffer):
++    # Apply 1-D Gaussian filter in each dimension
++    kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
++    h_filtered = np.convolve(buffer.flatten(), kernel, mode='same').reshape(buffer.shape)
++    return np.convolve(h_filtered.T, kernel, mode='same').T
++
++def narrow_range_filter(depth_buffer):
++    # Narrow-Range Filter algorithm not specified in sources [G]
++    return depth_buffer
++
++def compute_normals_from_depth(depth_buffer):
++    # Estimate normals from depth buffer gradients
++    return np.gradient(depth_buffer)
++
++def map_thickness_to_opacity(thickness_buffer):
++    # Map accumulated thickness to opacity
++    return np.clip(thickness_buffer / (thickness_buffer.max() + 1e-6), 0, 1)
++
++def composite_buffers(normals, opacity, color):
++    # Combine buffers into final image
++    return opacity, normals, color
+ ```
+ 

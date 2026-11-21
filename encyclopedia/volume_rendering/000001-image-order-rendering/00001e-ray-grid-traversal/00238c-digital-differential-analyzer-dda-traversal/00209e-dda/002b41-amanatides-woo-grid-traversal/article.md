@@ -1,0 +1,206 @@
+# Amanatides–Woo grid traversal
+
+Also called: Line walk traversal on extended grid lines, traverseGridSegmentFloat
+
+## Overview
+This method traverses the grid cells intersected by a line segment defined by two points, calling a visitor function for each cell in traversal order [S2, unofficial]. It solves the problem of efficiently determining the sequence of axis-aligned grid cells crossed by a ray or segment, which is a fundamental step in volume rendering and ray tracing [S1, unofficial]. Unlike the original Amanatides–Woo voxel traversal which is optimized for large 3D grids with high initialization costs, this specific 2D floating-point variant is designed for small grids (e.g., 2x2 cells) where its logic is adapted to minimize overhead [S1, unofficial]. It builds on [DDA](2323-dda.md) by using a Digital Differential Analyzer approach to step through cells based on distance to grid boundaries.
+
+## How it works
+**Inputs:**
+- `start`: A 2D point $(start.x, start.y)$ representing the beginning of the line segment [S2, unofficial].
+- `end`: A 2D point $(end.x, end.y)$ representing the end of the line segment [S2, unofficial].
+- `visitor`: A callable object with a method `visit(int, int)` that is invoked for each traversed cell $(x, y)$ [S2, unofficial].
+
+**Outputs:**
+- The `visitor.visit` function is called for every grid cell intersected by the segment, in the order they are encountered from `start` to `end` [S2, unofficial].
+
+**Data Structures:**
+- No complex data structures are required for the core traversal loop. The algorithm uses scalar variables for coordinates, deltas, and t-max values [S2, unofficial].
+- Note: A related conceptual approach for small grids involves a 4x4 array of areas where each entry stores delimiting lines for north, east, south, and west sides, but the standard floating-point implementation described here uses direct arithmetic [S1, unofficial].
+
+**Parameters:**
+- `FL_FLT_MAX`: A large floating-point constant representing infinity, used when a component of the direction vector is zero to prevent division by zero [S2, unofficial].
+
+**Steps:**
+1. **Compute Initial Cell Coordinates:**
+   Determine the grid cell indices containing the start and end points:
+   $$x_0 = \lfloor start.x \rfloor, \quad y_0 = \lfloor start.y \rfloor$$
+   $$x_1 = \lfloor end.x \rfloor, \quad y_1 = \lfloor end.y \rfloor$$
+   [S2, unofficial]
+
+2. **Compute Step Directions:**
+   Determine the direction of traversal along each axis:
+   $$stepX = \begin{cases} 1 & \text{if } x_1 > x_0 \\ -1 & \text{if } x_1 < x_0 \\ 0 & \text{otherwise} \end{cases}$$
+   $$stepY = \begin{cases} 1 & \text{if } y_1 > y_0 \\ -1 & \text{if } y_1 < y_0 \\ 0 & \text{otherwise} \end{cases}$$
+   [S2, unofficial]
+
+3. **Compute Direction Deltas:**
+   Calculate the total displacement of the segment:
+   $$dx = end.x - start.x$$
+   $$dy = end.y - start.y$$
+   [S2, unofficial]
+
+4. **Compute T-Deltas (Inverse Step Size):**
+   Calculate the change in parameter $t$ required to cross one grid cell in each direction. If the direction component is zero, the t-delta is set to infinity:
+   $$tDeltaX = \begin{cases} \left| \frac{1}{dx} \right| & \text{if } dx \neq 0 \\ FL\_FLT\_MAX & \text{otherwise} \end{cases}$$
+   $$tDeltaY = \begin{cases} \left| \frac{1}{dy} \right| & \text{if } dy \neq 0 \\ FL\_FLT\_MAX & \text{otherwise} \end{cases}$$
+   [S2, unofficial]
+
+5. **Compute Next Intersection Coordinates:**
+   Determine the coordinate of the next grid boundary to cross in each direction. If stepping positively, the next boundary is the integer immediately following the start coordinate; otherwise, it is the integer at the start coordinate (assuming the start is not exactly on an integer boundary, or handling the degenerate case where $step=0$):
+   $$nextX = \begin{cases} \lfloor start.x \rfloor + 1 & \text{if } stepX > 0 \\ \lfloor start.x \rfloor & \text{otherwise} \end{cases}$$
+   $$nextY = \begin{cases} \lfloor start.y \rfloor + 1 & \text{if } stepY > 0 \\ \lfloor start.y \rfloor & \text{otherwise} \end{cases}$$
+   [S2, unofficial]
+
+6. **Compute Initial T-Max Values:**
+   Calculate the parameter $t$ at which the ray first intersects the next grid boundary in each direction. If the direction component is zero, the t-max is infinity:
+   $$tMaxX = \begin{cases} \left| \frac{nextX - start.x}{dx} \right| & \text{if } dx \neq 0 \\ FL\_FLT\_MAX & \text{otherwise} \end{cases}$$
+   $$tMaxY = \begin{cases} \left| \frac{nextY - start.y}{dy} \right| & \text{if } dy \neq 0 \\ FL\_FLT\_MAX & \text{otherwise} \end{cases}$$
+   [S2, unofficial]
+
+7. **Initialize Loop State:**
+   Set the maximum valid $t$ to 1.0 (the end of the segment). Initialize current cell coordinates to the start cell:
+   $$maxT = 1.0$$
+   $$currentX = x_0$$
+   $$currentY = y_0$$
+   [S2, unofficial]
+
+8. **Traversal Loop:**
+   Repeat the following steps until the end of the segment is reached:
+   a. Call `visitor.visit(currentX, currentY)` [S2, unofficial].
+   b. Find the minimum t-max: $t = \min(tMaxX, tMaxY)$ [S2, unofficial].
+   c. If $t > maxT$, break the loop [S2, unofficial].
+   d. If $tMaxX < tMaxY$:
+      - Increment $tMaxX$ by $tDeltaX$: $tMaxX \leftarrow tMaxX + tDeltaX$ [S2, unofficial].
+      - Increment $currentX$ by $stepX$: $currentX \leftarrow currentX + stepX$ [S2, unofficial].
+   e. Else (if $tMaxY \le tMaxX$):
+      - Increment $tMaxY$ by $tDeltaY$: $tMaxY \leftarrow tMaxY + tDeltaY$ [S2, unofficial].
+      - Increment $currentY$ by $stepY$: $currentY \leftarrow currentY + stepY$ [S2, unofficial].
+   [S2, unofficial]
+
+9. **Final Cell Check:**
+   After the loop, if the current cell is not the end cell $(x_1, y_1)$, explicitly visit the end cell to ensure it is included:
+   If $currentX \neq x_1$ or $currentY \neq y_1$, call `visitor.visit(x1, y1)` [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_grid_segment_float(start_x, start_y, end_x, end_y, visitor):
+    # 1. Compute Initial Cell Coordinates
+    x0 = floor(start_x)
+    y0 = floor(start_y)
+    x1 = floor(end_x)
+    y1 = floor(end_y)
+
+    # 2. Compute Step Directions
+    if x1 > x0:
+        step_x = 1
+    elif x1 < x0:
+        step_x = -1
+    else:
+        step_x = 0
+
+    if y1 > y0:
+        step_y = 1
+    elif y1 < y0:
+        step_y = -1
+    else:
+        step_y = 0
+
+    # 3. Compute Direction Deltas
+    dx = end_x - start_x
+    dy = end_y - start_y
+
+    # 4. Compute T-Deltas
+    if dx != 0.0:
+        t_delta_x = abs(1.0 / dx)
+    else:
+        t_delta_x = FL_FLT_MAX
+
+    if dy != 0.0:
+        t_delta_y = abs(1.0 / dy)
+    else:
+        t_delta_y = FL_FLT_MAX
+
+    # 5. Compute Next Intersection Coordinates
+    if step_x > 0:
+        next_x = floor(start_x) + 1
+    else:
+        next_x = floor(start_x)
+
+    if step_y > 0:
+        next_y = floor(start_y) + 1
+    else:
+        next_y = floor(start_y)
+
+    # 6. Compute Initial T-Max Values
+    if dx != 0.0:
+        t_max_x = abs((next_x - start_x) / dx)
+    else:
+        t_max_x = FL_FLT_MAX
+
+    if dy != 0.0:
+        t_max_y = abs((next_y - start_y) / dy)
+    else:
+        t_max_y = FL_FLT_MAX
+
+    # 7. Initialize Loop State
+    max_t = 1.0
+    current_x = x0
+    current_y = y0
+
+    # 8. Traversal Loop
+    while True:
+        visitor.visit(current_x, current_y)
+        
+        t = min(t_max_x, t_max_y)
+        
+        if t > max_t:
+            break
+        
+        if t_max_x < t_max_y:
+            t_max_x += t_delta_x
+            current_x += step_x
+        else:
+            t_max_y += t_delta_y
+            current_y += step_y
+
+    # 9. Final Cell Check
+    if current_x != x1 or current_y != y1:
+        visitor.visit(x1, y1)
+```
+[G] `FL_FLT_MAX` should be defined as a sufficiently large float (e.g., `1e30` or `float('inf')`) to represent infinity. `floor` returns the largest integer less than or equal to the argument.
+
+**Edge Cases and Pitfalls:**
+- **Zero Direction Component:** If $dx=0$ or $dy=0$, the corresponding t-delta and t-max are set to infinity to prevent division by zero and ensure the loop only steps in the non-zero direction [S2, unofficial].
+- **End Cell Inclusion:** The loop may terminate before visiting the final cell $(x_1, y_1)$ if the segment ends exactly at a boundary or if the t-max logic skips the last step. The explicit check at the end ensures the end cell is always visited [S2, unofficial].
+- **Degenerate Segment:** If `start` equals `end`, $dx=0$ and $dy=0$. The loop will visit the start cell once and then break, as $tMaxX$ and $tMaxY$ are infinity, and $t > maxT$ will be false initially? No, if $dx=0$, $tMaxX = \infty$. $t = \min(\infty, \infty) = \infty$. If $maxT=1.0$, $t > maxT$ is true, so it breaks after visiting the start cell. This is correct behavior for a point segment.
+
+## Subtopics
+
+### [Amanatides–Woo grid traversal (fixed-point Q24.8 variant)](5006-amanatides-woo-grid-traversal-fixed-point-q24-8-variant.md)
+Implements the algorithm using 32-bit signed integers with 8 fractional bits (Q24.8) to improve performance and avoid floating-point precision issues.
+
+### [Compiled Per-Ray Triangle Grid Walk](5198-compiled-per-ray-triangle-grid-walk.md)
+Compiles the per-ray traversal logic into a tight loop using Numba, eliminating global ray state array overhead.
+
+### [2.5D Grid Traversal with Z-interpolation](13672-2-5d-grid-traversal-with-z-interpolation.md)
+Extends the 2D DDA to calculate Z-coordinates for culling in 2.5D height-field representations.
+
+### [Amanatides-Woo Grid Picking](15338-amanatides-woo-grid-picking.md)
+Applies the traversal logic to a logical height map for exact, deterministic picking in 2D grid-based environments.
+
+## Operating characteristics
+- **Time Complexity:** The traversal time is proportional to the number of cells intersected by the segment. Each step involves constant-time arithmetic operations [S2, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space, as only scalar variables are used [S2, unofficial].
+- **Performance:** The floating-point variant is efficient for general use. However, for small grids (e.g., 2x2), the initialization cost of the general Amanatides–Woo algorithm is considered high, making this specific optimized variant or fixed-point variants more suitable [S1, unofficial].
+- **Strengths:** Simple implementation, no complex data structures, handles arbitrary segment directions [S2, unofficial].
+- **Limitations:** Floating-point precision issues may arise in specific hardware or with very large coordinates; fixed-point variants are preferred in such cases [S1, unofficial].
+
+## Background
+The Amanatides–Woo algorithm was originally introduced for voxel traversal in ray tracing [S1, unofficial]. The specific 2D floating-point variant described here is implemented in libraries such as FastLED for grid traversal tasks [S2, unofficial]. It is a standard technique in computer graphics for accelerating ray-grid intersection tests.
+
+## Sources
+[S1] Fast axis aligned cell traversal algorithm, https://stackoverflow.com/questions/13700625, fetched 2026-10-25 (unofficial)
+[S2] FastLED: fl/traverse_grid.h Source File, https://fastled.io/docs/d9/d42/traverse__grid_8h_source.html, fetched 2026-10-30 (unofficial)

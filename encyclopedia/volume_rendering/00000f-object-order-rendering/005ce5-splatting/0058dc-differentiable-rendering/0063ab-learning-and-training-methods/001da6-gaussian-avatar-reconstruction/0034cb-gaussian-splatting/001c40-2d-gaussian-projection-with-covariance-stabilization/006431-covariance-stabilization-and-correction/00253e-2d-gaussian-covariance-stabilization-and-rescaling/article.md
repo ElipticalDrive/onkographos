@@ -1,0 +1,102 @@
+# 2D Gaussian Covariance Stabilization and Rescaling
+
+Also called: Conic Matrix and Rescale Factor, Covariance Rescaling, Gaussian Covariance Pre-filtering, Pixel-spanning Gaussian
+
+## Overview
+This method stabilizes the projection of 3D Gaussians into screen space by applying a low-pass filter to the 2D covariance matrix, ensuring that each Gaussian spans at least the width of a single pixel to reduce aliasing artifacts [S2, unofficial]. It computes the inverse covariance (conic) matrix and a scalar rescale factor that preserves the integrated density of the Gaussian after filtering [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $\Sigma_n^{2D}$: The 2D screen-space covariance matrix for the $n$-th Gaussian [S2, unofficial].
+- $s$: The low-pass filter strength hyper-parameter. Default value is $0.3$ [S2, unofficial].
+
+**Outputs:**
+- `conic_and_rescale`: A 4-component vector containing the upper-triangular elements of the inverse covariance matrix and the rescale factor: $[ (\Sigma_n^{2D} + s\mathbf{I})^{-1}_{0,0}, (\Sigma_n^{2D} + s\mathbf{I})^{-1}_{0,1}, (\Sigma_n^{2D} + s\mathbf{I})^{-1}_{1,1}, \text{rescale} ]$ [S1, unofficial].
+
+**Data Structures:**
+- $\Sigma_n^{2D}$: A $2 \times 2$ symmetric matrix $\begin{pmatrix} \Sigma_{00} & \Sigma_{01} \\ \Sigma_{01} & \Sigma_{11} \end{pmatrix}$ [S2, unofficial].
+- `conic_and_rescale`: A `vec4` (or array of 4 floats) [S1, unofficial].
+
+**Steps:**
+1. Compute the determinant of the original covariance matrix:
+   $$ \det_{\text{pre}} = \det(\Sigma_n^{2D}) = \Sigma_{00}\Sigma_{11} - \Sigma_{01}^2 $$
+   [S1, unofficial]
+2. Apply the low-pass filter by adding the scalar $s$ to the diagonal elements of the covariance matrix:
+   $$ \Sigma_{\text{filtered}} = \Sigma_n^{2D} + s\mathbf{I} = \begin{pmatrix} \Sigma_{00} + s & \Sigma_{01} \\ \Sigma_{01} & \Sigma_{11} + s \end{pmatrix} $$
+   [S1, S2, unofficial]
+3. Compute the determinant of the filtered covariance matrix:
+   $$ \det_{\text{post}} = \det(\Sigma_{\text{filtered}}) = (\Sigma_{00} + s)(\Sigma_{11} + s) - \Sigma_{01}^2 $$
+   [S1, unofficial]
+4. Compute the rescale factor to preserve the integral of the Gaussian density:
+   $$ \text{rescale} = \sqrt{\max(0.0, \frac{\det_{\text{pre}}}{\det_{\text{post}}})} $$
+   [S1, unofficial]
+5. Compute the inverse of the filtered covariance matrix (the conic matrix) analytically for the $2 \times 2$ case:
+   $$ \Sigma_{\text{filtered}}^{-1} = \frac{1}{\det_{\text{post}}} \begin{pmatrix} \Sigma_{11} + s & -\Sigma_{01} \\ -\Sigma_{01} & \Sigma_{00} + s \end{pmatrix} $$
+   [S1, unofficial]
+6. Pack the result into the output vector:
+   $$ \text{conic\_and\_rescale} = [\Sigma_{\text{filtered}}^{-1}[0,0], \Sigma_{\text{filtered}}^{-1}[0,1], \Sigma_{\text{filtered}}^{-1}[1,1], \text{rescale}] $$
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_conic_and_rescale(cov_2d, s=0.3):
+    # cov_2d is a 2x2 matrix [[a, b], [b, c]]
+    a, b, c = cov_2d[0, 0], cov_2d[0, 1], cov_2d[1, 1]
+    
+    # Step 1: Pre-filter determinant
+    det_pre = a * c - b * b
+    
+    # Step 2: Filtered covariance
+    a_filt = a + s
+    c_filt = c + s
+    # b remains unchanged
+    
+    # Step 3: Post-filter determinant
+    det_post = a_filt * c_filt - b * b
+    
+    # Step 4: Rescale factor
+    # Guard against division by zero or negative ratio inside sqrt
+    ratio = det_pre / det_post if det_post != 0 else 0.0
+    rescale = (max(0.0, ratio)) ** 0.5
+    
+    # Step 5: Inverse filtered covariance (Conic matrix)
+    inv_00 = c_filt / det_post
+    inv_01 = -b / det_post
+    inv_11 = a_filt / det_post
+    
+    # Step 6: Return vec4
+    return [inv_00, inv_01, inv_11, rescale]
+```
+
+**Edge Cases and Pitfalls:**
+- If $\det_{\text{post}}$ is zero or negative due to numerical precision, the division in steps 4 and 5 must be guarded. The sources specify using $\max(0.0, \dots)$ for the ratio inside the square root [S1, unofficial].
+
+## Subtopics
+
+### [Conical Frustum to Gaussian](12183-conical-frustum-to-gaussian.md)
+This method approximates the density of a conical frustum segment along a ray as a 3D Gaussian distribution defined by a mean and covariance [12183-conical-frustum-to-gaussian.md]. It differs from the parent method by operating in 3D space to lift ray-space statistics into a full 3D Gaussian before projection, whereas the parent operates on the already projected 2D covariance [12183-conical-frustum-to-gaussian.md]. Choose it when differentiable volume rendering with integrated positional encoding is required for conical primitives.
+
+### BOGausS Precision Matrix Derivation
+A method to define the minimal size of 3D Gaussians based on reconstruction confidence using Variational Bayesian estimation to prevent the 'needle' effect [S3]. It calculates the inverse precision matrix for localization and size as $\Sigma_i^{(XYZ)^{-1}} = \sum_c \left( z_i^{(c)^2} \sigma^{(w)^2} W_c^T \begin{pmatrix} 1 & 0 & 0 \\ 0 & 1 & 0 \\ 0 & 0 & 0 \end{pmatrix} W_c \right)^{-1}$, where $W_c$ is the world transformation matrix for camera $c$ and $z_i^{(c)}$ is the distance of the Gaussian along the z-axis of camera $c$ [S3]. A scaling factor $\alpha=2$ is used to define confidence intervals $\Delta_i = \alpha \text{tr}(\Sigma_i^{(XYZ)^{-1}})^{-0.5}$ [S3]. Choose it when reconstruction confidence must explicitly bound Gaussian extents to avoid thin artifacts.
+
+### Global Blurriness/Sharpness Modulation via MLP Offsets
+This approach manipulates overall scene blurriness or sharpness by applying global transformations to per-Gaussian offsets $\delta r_j$ and $\delta s_j$ predicted by a compact MLP [S4]. The offsets control local rotation and scale adjustments alongside the base Gaussian parameters [S4]. Choose it when artistic control over depth-of-field or motion-blur effects is required without retraining the base splatting model.
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ per Gaussian [G].
+**Memory Complexity:** $O(1)$ additional storage per Gaussian for the rescale factor and conic matrix elements [G].
+**Strengths:** Eliminates high-frequency aliasing artifacts caused by undersampled Gaussians [S2, unofficial]. Preserves the total energy (integral) of the Gaussian density through the rescale factor [S1, unofficial].
+**Limitations:** Not given in the sources.
+**When to use:** When rendering at resolutions where Gaussians may span less than a pixel, or when training with anti-aliasing enabled [S2, unofficial].
+**When not to use:** Not given in the sources.
+
+## Background
+The method originates from the need to handle the discrete sampling of continuous Gaussian distributions in rasterization [G]. The specific formulation of the rescale factor to preserve density is detailed in implementations such as Taichi 3D Gaussian Splatting [S1, unofficial]. The anti-aliasing mode in gsplat modifies the 2D Gaussian sizes to ensure they span the width of a single pixel [S2, unofficial]. The BOGausS variant extends the concept of minimal size constraints to a probabilistic precision-based approach [S3].
+
+## Sources
+[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S2] gsplat: An Open-Source Library for Gaussian Splatting, https://doi.org/10.48550/arXiv.2409.06765, fetched 2026-10-29 (unofficial)
+[S3] BOGausS: Better Optimized Gaussian Splatting, https://doi.org/10.23919/eusipco63237.2025.11226626, fetched 2026-10-26
+[S4] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26

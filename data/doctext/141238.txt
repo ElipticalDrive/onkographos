@@ -1,0 +1,1037 @@
+Principal-Ordinates Propagation for Real-Time Rendering of Participating Media
+Oskar Eleka,b , Tobias Ritschela,b , Carsten Dachsbacherc , Hans-Peter Seidela,b
+a Max Planck Institut Informatik
+b MMCI Cluster of Excellence, Saarland University
+c Karlsruhe Institute of Technology
+Abstract
+Efficient light transport simulation in participating media is challenging in general, but especially if the medium is heterogeneous
+and exhibits significant multiple anisotropic scattering. We present Principal-Ordinates Propagation, a novel finite-element method
+that achieves real-time rendering speeds on modern GPUs without imposing any significant restrictions on the rendered participated
+medium. We achieve this by dynamically decomposing all illumination into directional and point light sources, and propagating
+the light from these virtual sources in independent discrete propagation domains. These are individually aligned with approximate
+principal directions of light propagation from the respective light sources. Such decomposition allows us to use a very simple and
+computationally efficient unimodal basis for representing the propagated radiance, instead of using a general basis such as spherical
+harmonics. The resulting approach is biased but physically plausible, and largely reduces the rendering artifacts inherent to existing
+finite-element methods. At the same time it allows for virtually arbitrary scattering anisotropy, albedo, and other properties of the
+simulated medium, without requiring any precomputation.
+Keywords: participating media; light scattering; natural phenomena; real-time rendering; physically-based rendering; finite elements
+1
+1. Introduction
+30
+contributions can be summarized as follows:
+• We propose the concept of Principal-Ordinates Propagation
+(POP), a deterministic finite-element scheme suitable for real33
+time simulation of anisotropic light transport in heterogeneous
+34
+participating media (Sec. 3).
+31
+Scattering, or translucency, greatly contributes to the appearance
+3 of many natural substances and objects in our surrounding. Al4 beit the problem can be easily formulated as the radiance transfer
+5 equation [3, 23], computing a solution can be very costly. Con6 sequently, many existing approaches simplify the problem, e.g.
+7 by assuming isotropic scattering or homogeneity of the material,
+8 to achieve interactive performance.
+32
+9
+In this work we propose a novel algorithm for plausible real-time
+rendering of heterogeneous participating media with arbitrary
+11 anisotropy. The core of our approach is to propagate light in
+12 propagation volumes oriented along the principal ordinates of
+13 the source illumination. For this we typically use multiple recti14 linear grids to propagate environmental (distant) lighting, and
+15 spherical grids to account for point light sources. In both cases,
+16 one dimension of the grids is aligned with the prominent direc17 tional part of the source radiance for which the grid has been cre18 ated. In contrast to previous methods (e.g. [15, 1]), discretizing
+19 the illumination into directional and point light sources enables
+20 us to approximately describe the anisotropy (directionality) of
+21 light transport by a single scalar value per grid cell. Specifi22 cally, this anisotropy value corresponds to a unimodal function
+23 implicitly aligned with the respective principal ordinate. In ad24 dition to exploiting data locality and the parallelism of GPUs,
+25 the benefit of these decisions is a significant reduction of the
+26 false scattering (numerical dissipation) and ray effect (misalign27 ment errors) artifacts arising in many finite-element methods as
+28 a consequence of representing the propagated radiance by, e.g.
+29 spherical harmonics or piecewise-constant functions. Our main
+39
+10
+40
+2
+Preprint submitted to Computers & Graphics
+• The theory of iterative light propagation in a uniform Euclidean grid using a minimal unimodal propagation basis and
+37
+explicit alignment with the illumination direction to minimize
+38
+propagation artifacts and maintain light directionality (Sec. 4).
+35
+36
+• An extension of the propagation scheme to handle environmental illumination by decomposing it in a set of discrete di41
+rections. This includes several new steps, namely specialized
+42
+prefiltering, importance propagation, and a separate propaga43
+tion of isotropic residual energy (Sec. 5).
+• An extension to local light sources via spherical grids, enabling the integration of instant radiosity to simulate light
+46
+interaction between solid objects and the medium (Sec. 6).
+44
+45
+48
+• Finally we analyse our approach in a number of diverse scenarios, demonstrating its versatility (Sec. 7).
+49
+2. Related work
+47
+Offline methods. A range of different approaches has been presented to compute solutions to the radiance transport equation
+52 for participating environments [3, 23]. However, none of the
+53 classic techniques provides a satisfying combination of gener54 ality, robustness, and, most importantly in our context, speed.
+55 Unbiased Monte-Carlo methods, such as bidirectional path trac50
+51
+August 22, 2014
+Figure 1: Dense smoke exhibiting strong multiple anisotropic scattering produced by a steam locomotive under complex environment illumination. Our approach
+renders it dynamically without any precomputations at 25 Hz (NVidia GeForce GTX 770).
+ing [20] and Metropolis light transport [29] usually require a 96 volumes [15, 1]. These approaches are attractive for interactive
+large number of paths to be traced; in particular in dense media 97 applications as their grid-based local propagation schemes al58 with high scattering anisotropy and albedo (like clouds or milk)
+98 low for easy parallel implementation on contemporary GPUs.
+59 the computation time increases tremendously. Caching is often
+99 Our work also shares similarities with the finite-difference time
+60 used to speed up the computation, e.g. radiance caching [12], 100 domain method [25], however we only consider the radiance
+61 photon mapping [14, 13] or virtual point lights [8]. However, 101 amplitude and in general concentrate on efficiency.
+62 these methods typically do not handle highly anisotropic scatter102 Virtually all existing variants or extensions of DOM use a sin63 ing very well, even with recent improvements [27, 28], and their
+103 gle scene-aligned propagation grid, where every cell stores a
+64 performance is often far from interactive.
+104 representation of the directional radiance function using spheri105 cal harmonics (SH) or piecewise-constant functions. This rep65 Finite-element methods. Finite-element methods, including vol106 resentation is then used to iteratively calculate energy trans66 ume radiosity [33], the discrete ordinates method (DOM) [3],
+107 fer between nearby cells, typically within a local 18- or 2667 light diffusion [36], and lattice-Boltzmann transport [10] handle
+108 neighbourhood. However, this representation is only suited
+68 highly multiple scattering well. However, in practice they allow
+109 for moderately anisotropic scattering at best – especially for
+69 only isotropic or moderately anisotropic scattering, and usually
+110 anisotropic media under complex (high-frequency) illumination
+70 suffer from false scattering (smoothing of sharp light beams)
+111 such approach causes prominent ray effects and false scattering
+71 and ray effects (selective exaggeration of scattered light due to
+112 artifacts (see [9]). We take a different approach and propose to
+72 discretized directions). Light propagation maps [9] significantly
+113 identify the most important light propagation directions (prin73 reduce the artifacts, but are still limited to rather low scattering
+114 cipal ordinates) in the scene and then use multiple propagation
+74 anisotropy.
+115 grids aligned with these directions, instead of a single one. This
+75 It can therefore be seen that strong scattering anisotropy is one 116 enables using a unimodal representation of the angular energy
+76 of the main limiting factors for existing methods. This is unfortu- 117 distribution around the principal direction in each grid cell.
+77 nate, as most real-world media exhibit relatively high anisotropy
+78 (Henyey-Greenstein [11] coefficient g ≈ 0.9 or more [26]). Al79 though isotropic approximations are acceptable in some cases,
+118 3. Principal-Ordinates Propagation
+80 this is generally not a valid assumption and one of the primary
+81 motivations for our work.
+119 The core idea of our method is to reduce the main drawbacks of
+82 Interactive rendering. Numerous works focus on individual 120 previous grid-based iterative methods, namely false scattering
+83 optical phenomena to achieve interactive or real-time perfor- 121 and ray effects. These problems stem from the fact that the
+84 mance. These phenomena include light shafts [32, 7], volume 122 propagation domain is generally not aligned with the prominent
+85 caustics [19, 21], shadows [22, 34], and clouds [2]. Various 123 light transport directions. We propose to remedy these issues
+86 approaches can also be found in visualization literature, e.g. 124 by using propagation volumes where the propagation domain is
+87 half-angle slicing [17] which empirically computes forward scat- 125 explicitly aligned with approximate principal directions of light
+88 tering for volume visualization. Sometimes precomputation is 126 transport.
+89 used to speed up the rendering of heterogeneous translucent
+127 Furthermore, we use only a single scalar value per grid cell to
+90 objects [35, 37] or smoke using compensated ray marching [39].
+128 describe the local anisotropy of the directional light distribu91 In contrast, we target general multiple scattering in participat129 tion. In our scheme, we use the well-known Henyey-Greenstein
+92 ing media without any precomputation or focus on a particular
+130 (HG) [11] distribution; the aforementioned value, called the
+93 phenomenon.
+131 anisotropy coefficient, is used to parametrize this distribution.
+94 We extend the work of Elek et al. [5], building primarily on 132 Using principal directions implies that for more complex light95 the concept of DOM [3] and the more recent light propagation 133 ing scenarios we have to use multiple grids that sufficiently
+56
+57
+2
+Distant
+Iterationm0
+Directional
+light
+Local
+Represented
+byma=1
+Iterationmm
+a=1 a=0.9
+a=0.6
+a=0.4
+a=0.9 a=0.8
+a=0.4
+a=0.2
+a=1
+a=0.9 a=0.7
+a=0.3
+a=0.1
+a=1
+a=1 a=0.8
+a=0.6
+a=0.6
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+a=1
+.....
+#mofmiterations
+Flux
+Anisotropy
+Grid (slice)
+Grid (world)
+Figure 3: The propagation grid aligned with the direction of incidence is initialized with the attenuated radiance and an anisotropy parameter ai = 1. During
+the propagation both radiance magnitude and anisotropy change towards lower
+anisotropy.
+Figure 2: For distant (parallel) light we use rectilinear grids aligned with its
+principal direction, and spherical grids for point light sources. Every grid cell
+stores only radiance magnitude and anisotropy. The propagation scheme is
+almost identical for both cases.
+xi is L(xi , ω) = Li · fhg (µ, ai ), where fhg is the HG function and
+µ = ω · d is the cosine of the angle between a direction ω and the
+134 well approximate their directionality; for local light sources we
+173 principal light direction d. We assume that the medium is further
+135 propose to use spherical grids centred around them.
+174 characterized by its (spatially-varying) scattering coefficient σs
+136 These choices inherently assume that the principal directions 175 and absorption coefficient σa ; these two quantities as well as the
+137 can be derived from the initial radiance distribution and do not 176 spatially-varying anisotropy of the phase function defined by the
+138 change strongly when light travels through the medium. How- 177 HG parameter g are wavelength-dependent and stored for every
+139 ever, such variation might occur if the density of the simulated 178 cell of the medium volume (which exists independently of the
+140 medium changes abruptly. Still we deem this to be a necessary 179 propagation volumes).
+141 compromise if speed is the priority, and as we discuss in Sec. 4.5,
+180 Conceptually, two grids are required in the propagation pro142 violating this assumption does not cause our algorithm to fail,
+181 cedure. The first, propagation grid, stores the unpropagated
+143 but only leads to a gradual decrease of accuracy.
+182 (residual) energy; we will denote it as L and its state at the iter144 In the following sections we first detail our concept of Principal- 183 ation m ∈ {1..M}, where M is the total number of propagation
+m
+145 Ordinates Propagation for a single directional source (Sec. 4). 184 iterations, as L . The second, accumulation grid Lacc , is needed
+146 Then we describe how to extend this scheme to environment 185 to accumulate the energy transported through the medium over
+147 illumination (Sec. 5) and local light sources (Sec. 6) by using 186 the course of the computation. Two options are available for
+148 multiple, importance-sampled, rectilinear and spherical prop- 187 implementing Lacc : we could either store the overall radiance dis149 agation volumes respectively. The propagation scheme is ex- 188 tribution that has passed though each cell during the propagation,
+150 plained using radiance as the radiometric quantity; we assume 189 or alternatively store only the observer-dependent out-scattered
+151 all other quantities (such as irradiance from environment maps 190 radiance at each iteration. We opted for the second approach,
+152 or intensity from point lights) to be converted accordingly. All 191 because storing the entire directional radiance distribution at
+153 frequently-used notation is summarized in Table 1.
+192 each cell is much more expensive than just accumulating the
+193 outgoing radiance (which is essentially a single scalar value). Al194 though this of course requires recomputing the solution on every
+195 observer position change, it is in agreement with our premise of
+154 4. Rectilinear grids for directional light
+196 a fully dynamic algorithm without relying on precomputations.
+171
+172
+The concept as well as the theory behind our propagation scheme
+can be best explained for parallel (distant) light travelling along
+197 4.1. Grid initialization
+157 a direction d through a region in space (Fig. 2, top). For this case
+158 we discretize the space into a uniform rectilinear grid similar
+159 to DOM; however, we make sure that one of its dimensions is 198 At the beginning each propagation grid—which is scaled to
+160 aligned with d. For every grid cell i, we store the directional dis- 199 span the entire medium (Fig. 2, top)—needs to be initialized
+161 tribution of light and its magnitude Li (all computations are per- 200 by the incident radiance at each cell. As no scattering has been
+162 formed independently per-wavelength, which is omitted here for 201 accounted for yet, the anisotropy is set to an HG coefficient of
+163 brevity). The main difference to DOM is that we represent both 202 ai = 1, an equivalent to the Dirac function in the direction d
+164 the directional distribution of light and the phase function using 203 (Fig. 3). That is, for every cell, we compute the transmittance Ti
+165 the HG distribution implicitly aligned with d. To distinguish radi- 204 (from the point where light enters the medium, travelling along
+166 ance anisotropy (directional distributions) from phase functions, 205 d to xi ) set to Li = Lin (d) · Ti . Note that this can be efficiently
+167 we denote the HG parameter for the former as ai ∈ [−1, 1], and 206 computed using ray marching: as our grid is aligned with d we
+168 g ∈ [0, 1] for the latter (we do not consider negative values of g 207 can compute the transmittance incrementally along individual
+169 because of physical implausibility of dominantly-backscattering 208 ‘slices’ of the grid in a single sweep along d, accessing each cell
+170 media). That is, the directional radiance of a grid cell centred at 209 only once.
+155
+156
+3
+d
+g
+σs , σa
+xi
+Li , ai
+fhg , Fhg
+µ
+L, Lacc
+M, m
+Lin (d)
+∆Lsrc→dst
+Ti , Tsrc→dst
+Ωi , Ωn
+N, n
+(principal) direction
+scattering anisotropy coefficient
+scattering / absorption coefficient
+location of grid cell i
+(per-cell) radiance magnitude and anisotropy
+HG function and its cumulative distribution
+scattering angle cosine
+propagation and accumulation grid
+number of iterations / iteration index
+incident radiance from direction d
+src to dst radiance contribution
+transmittance to cell i and between cells
+solid angle subtended by cell i or ordinate n
+number of principal ordinates / ordinate index
+Table 1: Table of frequently-used symbols (in the order of appearance).
+| ϕ1- ϕ2|
+d
+Destination
+Fhg(μ, g)
+θ1
+θ2
+Source
+Fhg(μ, g)
+Ωsrc→dst
+d
+fhg(μ, g)
+Inter-cell transport
+reduces anisotropy
+(scattering; Eq. 4)
+and radiant energy
+(absorption; Eq. 2)
+Source
+Figure 4: Left: Our polar parametrization of the solid sphere. The coloured
+patches correspond to the approximate solid angles subtended by the cells next to
+(green), in front (purple) and behind (orange) src. Middle: The HG cumulative
+function Fhg is used to integrate the radiance from the source cell flowing towards
+the destination cells (depicted as coloured patches of fhg , for g = 0.5). Right: On
+the way the light undergoes scattering and is possibly reduced by absorption.
+transmittance Tsrc→dst accounts just for absorption that affects
+the radiance propagation on its way from src to dst. This is
+227 because our scheme treats scattering as a decrease of anisotropy
+210 4.2. Light energy propagation
+228 and not as an extinction process, as we show below. In practice,
+211 In this section, we describe how to iteratively update the grid 229 we take the averaged absorption coefficients σa at the source
+212 to simulate the propagation of light. We use a propagation 230 and destination cells and the distance between their centres t,
+213 stencil where the radiance of each grid cell is propagated to 231 and apply the Beer-Lambert-Bouguer law. To avoid aliasing
+214 its six direct neighbours in every iteration. Specifically, we 232 if the resolution of the propagation grid is much smaller than
+215 perform a more GPU-friendly gathering-type computation of 233 the medium volume resolution, the medium parameters need
+216 how much radiance flows into each grid cell from its neighbours 234 to be sampled from a downscaled version of the volume. On
+217 based on their radiance distributions, and then combine these 235 GPU, downscaling is a very fast operation, as it corresponds to
+218 contributions to yield the new distribution at that cell (Fig. 4, 236 building a small number of MIP map levels (depending on the
+219 right). In the following we denote the neighbouring source cell 237 ratio between the grid resolutions, but usually 1 or 2).
+220 with index src, and the target destination cell with dst.
+Radiance anisotropy contribution. Similarly to absorption attenuating the radiant energy flowing between neighbouring cells,
+Radiance magnitude contribution. We first need to determine
+the anisotropy of the energy propagated from src to dst will
+the amount of radiant energy that flows from cell src towards
+decrease due to scattering. In agreement with the radiance transdst according to the radiance distribution in src. To this end,
+fer equation, in our case this can be easily computed exploiting
+we efficiently integrate L(xsrc , ω) over the solid angle subtended
+the self-convolution property of the HG distribution [24]: in a
+by dst (denoted as Ωsrc→dst below) using
+the
+closed
+form
+of
+the
+Rµ
+medium with scattering anisotropy of g the radiance anisotropy
+cumulative HG function Fhg (µ, g) = −1 fhg (µ 0 , g) dµ 0 :
+reduces to a0 = a · gσs ·t after travelling a distance t (assuming
+
+
+2
+a constant σs along this path). We obtain σs and t the same
+1−g
+1
+1
+·
+.
+(1)
+Fhg (µ, g) =
+−
+way
+as for computing Tsrc→dst above. The change of radiance
+1/2
+2
+4πg
+1
++
+g
+(1 + g − 2gµ)
+anisotropy from src to dst is therefore
+By this we compute the radiance from src travelling towards dst
+∆asrc→dst = asrc · gσs ·t .
+(4)
+using the transmittance Tsrc→dst as
+238 We can easily see that this formula cannot lead to an increase
+∆Lsrc→dst = Lsrc · Tsrc→dst · |φ1 − φ2 |
+
+(2) 239 of anisotropy, since g ∈ [0, 1]. Additionally, in non-scattering
+240 media (σs = 0) the directionality will be preserved perfectly.
+· Fhg (cos θ1 , asrc ) − Fhg (cos θ2 , asrc )
+225
+226
+using the following approximate parametrization for the subtended solid angle Ωsrc→dst (depending on mutual positions of
+src and dst):
+
+π
+
+(0, 4 , 2π) dst in front of src
+π
+(θ1 , θ2 , |φ1 − φ2 |) = ( π4 , 3π
+(3)
+dst next to src
+4 , 2)
+
+ 3π
+( 4 , π, 2π) dst behind src
+Combining contributions from neighbours. Updating the radiance distribution at the cell dst entails accumulating the contributions from its six neighbours (indexed by src) as
+Ldst = ∑ ∆Lsrc→dst ,
+(5)
+∑src ∆Lsrc→dst · ∆asrc→dst
+.
+∑src ∆Lsrc→dst
+(6)
+src
+adst =
+(see Fig. 4, left for a sample illustration of the second case 241 While the radiant energy contributions simply need to be added
+of Eq. 3). Since the HG distribution is rotationally-symmetric 242 up, the anisotropy is a weighted average of its neighbours, since
+223 (Fig. 4, middle) only the absolute value of the difference of 243 the update has to yield an anisotropy value adst within the valid
+224 the azimuthal angles |φ1 − φ2 | is required. Note that here the 244 range. We discuss implications of Eq. 6 in Sec. 4.5.
+221
+222
+4
+245
+Strong absorption
+4.3. Iterating the solution
+Source 1
+The update procedure defined by Eqs. 5 and 6 is performed
+for every cell of Lm to yield Lm+1 for every iteration m.
+248 Implementation-wise, this requires maintaining a second grid
+249 identical to the propagation grid and swapping these at each
+250 iteration.
+Destination
+Source 1
+Destination
+Source 1
+Destination
+246
+247
+Source 2
+m
+= Lacc,i
++ Lim+1 · fhg (µ, am+1
+)
+i
+Source 2
+Figure 5: Three examples of the local propagation behaviour. Left: all source
+cells exhibit strong forward scattering which is well-preserved by our propagation scheme. Centre: radiance anisotropy is reduced due to in-scattering from
+Source 2 which has isotropic radiance distribution. Right: light from Source 1
+to destination is almost entirely absorbed. Light from Source 2 should then be
+deviated “upwards”, which our scheme cannot represent.
+Additionally, the results of every propagation iteration need to
+be accumulated in Lacc by evaluating the updated distributions
+in Lm+1 :
+m+1
+m
+Lacc,i
+= Lacc,i
++ Lm+1 (xi , c − xi )
+Source 2
+(7)
+(8)
+287 at dst will result from superposing the neighbouring distribufor every cell i. Here c is the observer position and µ is therefore 288 tions according to how much energy they contribute to dst. The
+252 the dot product of d and the view direction.
+289 main limitation of this approach lies in the fact that combin251
+ing multiple HG distributions with different anisotropy values
+cannot generally be represented by any single HG distribution.
+253 4.4. Upsampling and rendering
+292 Although we have experimented with fitting the resulting HG
+293 distribution to the combination of its neighbours in terms of
+254 When the solution has converged after a sufficient number of
+294 least square error, we found that the simple weighted arithmetic
+255 iterations, using it for rendering is relatively straightforward.
+295 average produces comparable results while keeping the compu256 We employ ray-marching to integrate the incoming radiance
+296 tational cost of this core operation minimal. In addition, Eq. 6
+257 for every camera ray using the common front-to-back emission297 very well preserves the anisotropy of light transported along the
+258 absorption model [23]. In this case the emission term corre298 principal direction, thus greatly reducing false scattering effects.
+259 sponds to the scattered radiance accumulated in Lacc .
+290
+291
+As we discuss in Sec. 7, the typical resolutions used for the prop- 299 Note that there are cases of very heterogeneous media where
+300 our approach might locally become inaccurate (see Fig. 5). If
+261 agation grids need to be rather small (in most of our examples
+3
+301 light along the principal direction undergoes strong absorption,
+262 20 or less) for performance reasons. In order to improve the
+302 while light from other directions does not, the resulting light
+263 rendering quality with such low grid resolutions it is desired to
+303 distribution should possibly become skewed, which cannot be
+264 upsample them prior to their visualization. We use a 3D version
+304 represented within our framework. Although this is obviously
+265 of the joint bilateral upsampling [18] where the density field of
+305 a failure case of our representation, occurrences of such strong
+266 the medium (i.e. the spatially varying scattering coefficient) is
+306 absorption fluctuations are comparatively rare, and more impor267 used as a guidance signal. Typically, the density field is signifi307 tantly the resulting radiance magnitude in these cases is typically
+268 cantly more detailed than the propagation volumes; this detail
+308 very small (therefore having little impact on the resulting im269 is “transferred” to the solution by the upsampling. According to
+309 age). Also note that with multiple propagation volumes we can
+270 our experiments, low-resolution propagation grids are usually
+310 actually reproduce complex multimodal radiance distributions,
+271 sufficient for plausible results.
+311 despite each grid being composed of unimodal HG distributions.
+260
+272
+4.5. Discussion of the propagation scheme
+312 5. Multiple propagation grids for environment lighting
+Using the unimodal HG function with a single parameter to rep274 resent the directional distributions in light transport obviously
+275 means that there are distributions in a cell that cannot be repre- 313 In the previous section we have described our approach for a
+276 sented well. On the other hand, we compensate for this by using 314 single directional light source. In order to account for environ277 multiple grids (see Sec. 5), which in turn can handle anisotropic 315 mental lighting (typically modelled by an environment map),
+278 phase functions significantly better than previous work thanks 316 we need to use multiple grids oriented along different principal
+279 to the proposed propagation scheme. In comparison, an exceed- 317 directions.
+280 ingly large number of SH coefficients is required to represent
+318 In this section we discuss how to choose these directions and,
+281 highly anisotropic distributions, and this still does not prevent
+319 as every grid accounts for light from a finite solid angle, how
+282 false scattering issues if a local propagation scheme is employed.
+320 to prefilter the respective incident radiance to avoid singularity
+283 The most heuristic step of our scheme is the recombination of 321 artifacts (see Fig. 6). We further describe how the multiple
+284 reduced anisotropies from neighbouring cells in Eq. 6 (which 322 propagation grids are combined together for rendering. Finally
+285 we further elaborate on in the supplementary materials). The 323 we present an additional (optional) step in the pipeline of our
+286 logic behind this formulation is that the radiance distribution 324 algorithm, which allows splitting the propagation into two stages,
+273
+5
+Without importance
+Sampling without imp.
+With importance
+Importance map
+Without importance
+Sampling with imp.
+Sampling without imp.
+With importance
+Importance map
+Sampling with imp.
+With prefiltering
+Without prefiltering
+Figure 7: Importance propagation improves overall radiance distribution across the medium and visibility of bright regions behind. This especially holds for
+high-albedo media with strong scattering anisotropy (here g = 0.98) and when using a low number of ordinates (27 here).
+and high anisotropy, while less important ordinates are more
+sparse, and will have larger solid angles and low anisotropy.
+347 The scalar factor β > 0 defines the proportionality and currently
+348 needs to be tuned empirically once for each environment map;
+349 from our experience this is a simple and quick task.
+345
+346
+350
+5.2. Importance propagation
+The described sampling scheme can be further improved by
+considering how much illumination from different directions
+g = 0.95
+g = 0.98
+g = 0.99
+g = 0.999
+353 actually contributes to the image. To this end, we introduce
+Figure 6: The effect of prefiltered initialization on a thin, strongly-scattering 354 an additional importance propagation step before sampling the
+medium with increasing anisotropy (left to right). Without prefiltering (top) the 355 environment map: we use a regular grid (perspective-warped
+individual ordinates become apparent. Using prefiltering (bottom) the result- 356 into the camera frustum and oriented along the view direction)
+ing images become much smoother and yield the expected appearance (more
+357 and propagate importance from the camera through the medium.
+anisotropic slabs appear more transparent). Note that our technique is energy358 Thanks to the duality of light transport this is equivalent to the
+conserving (as opposed to, e.g. singularity clamping in instant radiosity).
+359 radiance propagation as described before. The result of this
+360 propagation is a directional importance distribution stored in the
+325 anisotropic and isotropic, greatly improving the convergence for
+361 grid cells. By ray-marching this grid we project the importance
+326 media with very high albedo values.
+362 into the directional domain and create a directional importance
+363 map that aligns with the environment map. We then sample the
+364 environment map according to its product with the importance
+327 5.1. Prefiltering
+365 map. We show that in certain situations this step improves the
+328 A straightforward approach is importance-sampling the environ- 366 sampling result, mainly when a low number of propagation grids
+329 ment map to obtain N directions, dn , each carrying an energy 367 is used (see Sec. 7 and Fig. 7). It is also quite cost-effective, since
+330 corresponding to its associated portion of the directional domain 368 the directional importance function is typically very smooth and
+331 Ωn . We can account for the shape of Ωn when determining 369 therefore only low resolutions for the propagation grid and the
+332 the initial directional radiance distributions (parameter ai in 370 directional map are required (all our examples use the resolutions
+333 Sec. 4.1). Recall that the anisotropy parameter of f hg represents 371 of 163 and 32 × 16 respectively).
+334 the average cosine of the distribution. We can therefore approxiR
+335 mate the initial an,i =
+Ωn −dn · ω dω/||Ωn ||, the average cosine
+372 5.3. Merging multiple grids
+336 between dn and the directions in Ωn and use this value for the
+337 grid initialization. In practice, an,i can be approximated without
+373 Computing the propagation for each of the N principal ordi338 the integration over Ωn for each ordinate or without even know374 nates yields a separate, view-dependent accumulation grid Lacc,n
+339 ing the shape of Ωn . As we importance-sample the environment
+375 (Sec. 4). Although it is possible to visualize these directly, this is
+340 map, the importance of the ordinate n is proportional and (up
+376 very inefficient as each grid in the set would have to be accessed
+341 to a factor) very similar to the actual solid angle of Ωn . There377 at every ray-marching step.
+342 fore, we use a heuristic that maps the importance wn ∈ (0, 1)
+β
+343 to anisotropy as an,i = (1 − wn /N) : important ordinates are 378 Because of this we instead opt to combine all Lacc,n into a sin344 denser in the directional domain and will have small solid angles 379 gle medium-aligned grid, prior to upsampling and visualization
+351
+352
+6
+Illumination #2
+With residual propagation
+Without residual propagation
+Illumination #1
++
+Anisotropic energy
++
+Isotropic energy
+Anisotropic energy
++
+Isotropic energy
+Anisotropic energy
++
+Isotropic energy
+Anisotropic energy
+Isotropic energy
+Figure 8: Evaluation of the isotropic residuum (IR) propagation. We show the dragon dataset illuminated by two different environment maps, from two opposing
+viewpoints for each to demonstrate the view dependence of the resulting light distributions. The used medium (milk [26], σs = {0.91, 1.07, 1.25} m−1 , g = 0.95) has
+an albedo over 99.9 % across the visible spectrum, making it a difficult material to render because of the high number of iterations necessary to converge. The full
+propagation (64 ordinates, 163 grid each) requires about 100 iterations to converge, taking 120 ms (#1) and 90 ms (#2) respectively. In comparison, our heuristic
+(Eq. 6) switches to isotropic propagation after m0 = 20 full anisotropic iterations (εa = 0.1, ∆x = 0.25 m). The IR propagation requires additional 20 iterations in a
+single 323 propagation grid. The combined propagation time in this case was 28 ms (25 ms anisotropic and 3 ms isotropic) for illumination #1 and 24 ms (20.5 ms
+anisotropic and 3.5 ms isotropic) for #2; this is about a 4-fold speed-up compared to the full propagation, with negligible visual difference.
+In practice, we determine the iteration m0 when we can switch to
+the cheaper isotropic propagation based on the maximum radiance anisotropy, ab (for a directional light ab = 1, but prefiltering
+can lower it, to our benefit), and phase function anisotropy g.
+Both of these parameters are determined at the initialization.
+Making use of the the HG self-convolution property (Sec. 4.2),
+from these values we can approximate the distance t that light
+has to travel such that its anisotropy falls below εa with
+(Sec. 4.4). We usually use double the resolution of the individual
+propagation grids, since these are oriented arbitrarily in space
+382 (and therefore not increasing the resolution would result in un383 dersampling). This is however still a very fast step that also
+384 allows the remainder of the pipeline to stay virtually identical to
+385 the single-ordinate setting.
+380
+381
+386
+5.4. Isotropic residuum
+ab · gσ s ·t = εa ,
+m
+387 We assume the solution to be converged when all Ln are below
+388 a small threshold εL . This can however take a large number
+(9)
+where σ s is the average scattering coefficient in the medium.
+Furthermore, we know that the travel distance depends on the
+average grid spacing ∆x and the number of iterations, i.e. t =
+m · ∆x, and obtain:
+of iterations for high-albedo media, a problem inherent to all
+finite-element transport methods. On the other hand, we can
+391 observe that scattering reduces the anisotropy of the radiance
+392 distribution and we can treat the propagation as (near-)isotropic
+393 as soon as |an,i | < εa ∀i, ∀n, for a small anisotropy threshold εa .
+389
+390
+m0 =
+ln εa − ln ab
+1
+·
+.
+ln g
+σ s · ∆x
+(10)
+As soon as all propagation grids fulfil this criterion the energy
+0
+403 It is however usually a good idea to use m at least equal to the
+from them can be merged into a single grid aligned with the
+404 grid resolution along the propagation direction, to allow for light
+396 medium, as there is no directionality present anymore. This is
+405 even from the first row of cells to sufficiently penetrate into the
+397 similar to merging the accumulation grids (Sec. 5.3), except that
+406 rest of the volume (cf. [15]). The subsequent propagation then
+398 here the propagation grids are merged as well and the propaga407 operates on the residual isotropic radiance in the merged grid,
+399 tion process switches to isotropic scattering (i.e. the anisotropies
+408 iterating until the residual energy falls below εL .
+400 an,i need not be maintained anymore). This decreases the propa401 gation costs tremendously, as from this point it is performed just 409 Reasonable values for εa are around 0.1, or even higher. In fact
+402 for a single global grid instead of one grid per principal ordinate. 410 this decision is not unlike the one made in similarity theory [38].
+394
+395
+7
+Direct surface
+illumination
+Direct
+scattering
+All surface light
+Resulting radiance
+All scattering
+VPLs
+Indirect surface +
+illumination
+Indirect
+scattering
+Radial grids
++
++
+Σ
+Surface transport
+Volume transport
+Figure 9: Workflow of the presented algorithm for a single directional light. For distant environment illumination the volumetric part of the pipeline is very similar,
+with the exception of rectilinear grids being used to propagate illumination from distant ordinates instead of the combination of VPLs and spherical grids.
+Ours (g = 0)
+Ours
+(g = 0.81)
+Ours
+Ours
+(g = 0.7) (g = 0.87)
+Ours
+Ours
+(g = 0.8) (g = 0.92)
+Ours
+(g = 0.9)
+The resulting grid is thus topologically equivalent to rectilinear
+grid (except for being cyclic in the two angular dimensions) and
+438 albeit not being uniform, it allows us to approximately treat the
+439 space as locally Euclidean and obtain plausible results again
+440 using virtually the same propagation scheme as before. The
+Light tracing (g = 0)
+Light tracing (g = 0.7)
+Light tracing (g = 0.8)
+Light tracing (g = 0.9)
+441 main difference in the propagation is that we have to account
+Figure 10: Comparison of our radial propagation to a Monte-Carlo reference 442 for the quadratic fall-off : although we base our propagation on
+for a uniform spherical medium (radius 2.5 m, σs = {0.8, 1, 1.3} m−1 and unit 443 radiance, we have to explicitly compensate for the varying grid
+albedo). The resolution of the radial propagation grid was 323 . Our solution
+differs from the reference mainly due to low (but for this propagation type still 444 cell sizes resulting from the non-uniform shell spacing. To this
+present) false scattering, in particular with low anisotropy values. We found 445 end, we scale the radiance when propagating along the principal
+that this can be reduced by artificially increasing g, if a specific appearance is 446 direction in proportion to the radial coordinate spacing. A samdesired.
+447 ple demonstration of this propagation type for a point light in a
+448 simple homogeneous spherical medium is shown in Fig. 10.
+411 Here, after a certain number of scattering events the propagation
+412 switches to isotropic scattering, which is accompanied by a 449 Instant radiosity. Given the ability to use local point lights, we
+413 switch to a so-called reduced scattering coefficient. This is 450 can use instant radiosity [16] methods, which represent complex
+414 usually done on an empirical basis and despite the fact that using 451 illumination as a collection of point lights, to simulate surface415 the Henyey-Greenstein phase function allows us to quantify the 452 to-volume light transport. Normally these VPLs are obtained
+416 decision better (cf. [6]) this approach is still an approximation. 453 from random walks through the scene. In our interactive setting,
+417 Similarity theory also does not apply well to heterogeneous 454 we generate VPLs using a reflective shadow map (RSM) [4]
+418 media. Thanks to the fact that we treat scattering as a gradual 455 for every primary light. We importance-sample these RSMs
+419 decrease of anisotropy we can transit to isotropic propagation 456 according to surface albedo and (attenuated) irradiance, aiming
+420 in a well controlled manner, without changing the propagation 457 at keeping the total number of VPLs low. The reflected radiance
+421 parameters or compromising the solution accuracy (aside from 458 is then used to initialize the radial propagation grids. Prefiltering
+422 small geometric misalignments caused by the grid merging). We 459 can be done in the same way as for environment maps: VPLs
+423 demonstrate this in Fig. 8.
+460 with a large importance have a high initial anisotropy and vice
+461 versa. Similar to surface lighting, we can use clamping to reduce
+462 any remaining singularities [8]. Fig. 9 depicts the pipeline of
+424 6. Radial grids for local light sources
+463 the algorithm when propagating scattering from one directional
+464 light and VPLs generated from its RSM.
+425 In order to extend our method to local light sources, we use
+426 spherical grids with two angular coordinates and a radial coordi427 nate which is again aligned with the initial principal directions of 465 7. Results and analysis
+428 the point source (Fig. 2, bottom). To obtain more isotropic cell
+429 shapes, the spacing of shells along the radial coordinate grows 466 All results were computed on a PC with a 3.7 GHz Intel Xeon
+430 exponentially (in proportion to the radial segment length at a 467 CPU, 16 GB of RAM and an NVidia GeForce GTX 770 GPU
+431 given radius). For parametrizing the spherical domain we use the 468 with 2 GB of VRAM. Our implementation is written in C++,
+432 octahedron parametrization [30] mainly as it is simple, provides 469 using OpenGL and GLSL for the GPU code. In all our measure433 reasonably uniform sampling, and above all, it discretizes the 470 ments we use the framebuffer resolution of 800×600 in order
+434 domain into a 2D square where every cell has four natural neigh- 471 to let the computation time be dominated by the propagation
+435 bours (plus two along the radial axis), similar to rectilinear grids. 472 rather than ray-marching. Resolutions of the medium density
+436
+437
+8
+M-C
+(12 h)
+POP
+(30 Hz)
+POP
+(1 Hz)
+SHDOM
+(30 Hz)
+SHDOM
+(1 Hz)
+Figure 11: Comparison of our Principal-Ordinates Propagation (POP) to SHDOM and a Monte-Carlo reference (light tracing), for a smoke plume 10 m across with
+σs = {2.9, 3.6, 4.2} m−1 , σa = {3.4, 3.35, 3.4} m−1 and g = 0.9 using the “Uffizi” environment map as illumination. For POP we used 64 and 125 principal ordinates,
+grid resolutions of 203 and 503 , 10 and 30 propagation iterations, respectively. For SHDOM we have used 5 and 10 bands to represent the directional radiance
+distribution in each cell and the same grid resolutions. SHDOM required a strong prefiltering to avoid ringing and due to false scattering it fails to reproduce the high
+scattering anisotropy. Our method compares well to the reference solution, and even with real-time settings it qualitatively matches the overall appearance.
+IsotropicBscattering:BgB=B0
+M-C
+ModeratelyBanisotropicBscattering:BgB=B0.7
+M-C
+POP
+M-C
+POP
+Red:BM-CBBBBBBlue:BPOP
+HighlyBanisotropicBscattering:BgB=B0.96
+POP
+Red:BM-CBBBBBBlue:BPOP
+Red:BM-CBBBBBBlue:BPOP
+Figure 12: Detailed analysis of our method (POP) in comparison to Monte-Carlo reference (light tracing). We use a sample single-ordinate scenario, with a 163
+propagation domain aligned with the medium (unit homogeneous cube, σs = 4 m−1 , 100 % albedo), using three representative anisotropy values. The plots compare
+the converged (incident) radiance distributions within a 2D horizontal slice in the middle of the domain.
+datasets are typically in the order of tens in each dimension 500 tributions produced by POP have more complex shapes that the
+(but effectively enhanced by procedural noise). Although the 501 simple Henyey-Greenstein ellipsoid lobes, since they are consti475 number of propagation iterations needs to be chosen empirically 502 tuted by a superposition of such lobes. In addition, Fig. 10 shows
+476 at the moment, in general we found that amounts similar to the 503 a simplified analysis similar to this, for a point light source.
+477 propagation grid resolution along the propagation dimension is
+478 sufficient (around 10–20 in our examples). Please note that we
+479 blur the environment maps only for presentation purposes (so 504 Propagation behaviour. We examine the convergence of our
+480 that the medium lighting features can be examined better) – the 505 method in Fig. 13. The setting is identical to the second case
+481 actual illumination is in fact sampled from the full-resolution 506 in Fig. 12. Notice that because of an absence of absorption the
+482 maps. Other specific scene details are provided in the caption of 507 propagation takes a significant number of iterations, even for the
+3
+508 small 16 grid. That is the main motivation for introducing the
+483 each discussed figure.
+509 isotropic residuum propagation (Sec. 5.4).
+473
+474
+Reference comparisons. We first compare our approach to an 510 The effect of using different numbers of principal ordinates is
+unbiased Monte-Carlo reference (light tracing), as well as spher- 511 shown in Fig. 14. It can be seen that the discretization becomes
+486 ical harmonics (SH) DOM, in Fig. 11. It is apparent that the 512 apparent only with very few ordinates. The importance propaga487 described artifacts prevent SHDOM from handling anisotropic 513 tion usually helps to alleviate this by sampling those directions
+488 media correctly, despite being theoretically capable to do so. In 514 which will influence the solution most significantly. As Fig. 7
+489 contrast POP, despite being biased, reproduces the qualitative 515 demonstrates, this is most likely the opposite side of the medium,
+516 suggesting that a simpler empirical heuristic could potentially
+490 appearance well.
+517 work in certain cases.
+491 A simpler analysis for a single directional propagation is pre492 sented as well. Fig. 12 shows comparisons to the reference for a 518 One of the main shortcomings of the importance propagation is
+493 single ordinate, propagating in a simple cubic medium. Again, 519 its potential temporal incoherency, mostly manifested by tempo494 despite some differences in the appearance, we can see the di- 520 ral flickering. For this reason we filter the importance map both
+495 rectional radiance distributions match well. We note that this 521 spatially and temporarily, which, however, is not a fully robust
+496 is actually a difficult case for our method, because the medium 522 solution to the issue. One of our main targets for future work
+497 regularity and the high density gradient on the faces parallel to 523 is therefore improving this by explicitly enforcing temporal co498 the propagation direction violate the alignment assumption, as 524 herence when the sampled light sources relocate due to camera
+499 discussed in Sec. 4.5. However, observe that the directional dis- 525 movement or illumination changes, similarly to, e.g. [31].
+484
+485
+9
+m=1
+m=5
+m=2
+m = 10
+m = 20
+m = 30
+m = 60
+m = 100
+m = 200
+sible participating media are rather insensitive to its anisotropy,
+i.e. anisotropic media render roughly as fast as isotropic media.
+547 Although a larger number of ordinates might be required to re548 produce high-anisotropy effects, this additional effort is usually
+549 compensated by a decreased complexity of the spatial radiance
+550 distribution, which enables using coarser propagation grids.
+545
+546
+30 Hz
+55 Hz
+15 Hz
+Our dual propagation scheme also efficiently handles optically
+thick anisotropic media, as seen in Fig. 8. The initial, full prop553 agation handles the directionally-dependent portion of radiant
+554 energy, while the remaining isotropic residuum is rapidly propa555 gated in the second stage.
+With importance
+Without importance
+Figure 13: Convergence of our propagation scheme for the setting described in Fig. 12, with scattering anisotropy g = 0.7. The plots show the respective incident
+radiance distributions within a 2D horizontal slice in the middle of the domain (marked by the red dashed line). The observed strong forward peaks represent the
+unscattered energy which did not (yet) interact with the medium.
+551
+552
+46 Hz
+14 Hz
+28 Hz
+8 ordinates
+64 ordinates
+216 ordinates
+Animation. Thanks to the fully dynamic nature of our approach
+we can seamlessly handle animated media without any precom558 putations or performance penalty. Fig. 16 shows several frames
+559 of an animated smoke plume coherently rendered at real-time
+560 framerates. In Fig. 17 we then demonstrate the dynamic interac561 tion of POP with surfaces, as described in Sec. 6.
+556
+Figure 14: The smoke dataset with an increasing number of ordinates using
+the “kitchen” environment map (g = 0.9, 203 grid resolution, 10 propagation
+iterations). Accounting for importance improves the results, mainly if low
+numbers of principal ordinates are used. The typical setting we use (shown in the
+bottom-centre) takes 5 ms for importance propagation, 2 ms for determining the
+ordinates, 2 ms for grid initialization, 12 ms for propagation, 2 ms for residuum
+propagation, 4 ms for grid merging and upsampling and 5 ms for ray-marching.
+557
+In general, we believe to have demonstrated the versatility of
+our method. Our propagation is capable of computing direct
+526 Prefiltering helps to improve the rendering quality in most scenar564 illumination and low-order scattering effects (light shafts), as
+527 ios and we used it to generate all results throughout the paper. It
+565 well as arbitrary multiple scattering from directional, local and
+528 is particularly indispensable for media with an optical thickness
+566 environment illumination. Orthogonal to this, POP is capable of
+529 insufficient to blur the sampled illumination, e.g. as in Fig. 6,
+567 simulating media with wide ranges of optical thickness, albedo
+530 where singularity-like artifacts would appear otherwise. Our
+568 and most importantly, scattering anisotropy.
+531 prefiltering removes these artifacts but still allows perceiving
+532 features of the background illumination, thanks to its adaptivity
+533 (as opposed to a naı̈ve prefiltering of the source illumination).
+569 8. Discussion and conclusion
+562
+563
+Scattering anisotropy. The shortcomings of current methods in 570 We propose a novel discrete ordinates method capable of computhandling highly anisotropic scattering were the main motivation 571 ing light transport in heterogeneous participating media exhibit536 for our work, as by far the majority of both natural and artificial 572 ing light scattering of virtually arbitrary anisotropy. The method
+537 media exhibit anisotropic scattering (cf. [26]).
+573 does not require any precomputations, which makes it well suit574 able for simulating dynamic and evolving media without extra
+538 We tested our method for clouds with naturally very high scatter575 considerations. Our representation also adapts to and prefilters
+539 ing anisotropy in comparison to their isotropic versions (Fig. 15).
+576 the incident lighting. Radiance is represented by the Henyey540 It can be seen that our propagation scheme handles both cases
+577 Greenstein distribution, and propagated by our novel scheme in
+541 well, and that correctly handling anisotropic scattering is a key
+578 volumes oriented along estimated principal light directions.
+542 to reproducing such media. The same can be observed in Fig. 1,
+543 since steam has properties similar to clouds. Interestingly, grid 579 In general the steps of the proposed method are physically544 resolutions as well as computation times required to render plau- 580 plausible (please refer to the supplementary materials for further
+534
+535
+10
+Isotropic
+Anisotropic
+Figure 15: In media like clouds the scattering anisotropy plays a significant role in their appearance, thus the common assumption of isotropic scattering prevents a
+believable rendition of such media. The clouds are rendered by the described method at 35 Hz using 64 ordinates and 203 grid resolution for each of them, with 15
+propagation iterations. The scattering anisotropy was set to g = 0.96.
+prohibitively high. Our approach deals with this issue by using
+multiple superimposed, relatively small propagation grids, in
+610 which a low number of iterations is sufficient to propagate most
+611 of the radiant energy (cf. Fig. 8). Media with higher optical
+612 thickness also decrease the anisotropy of the propagated light
+613 faster, allowing us to switch to the cheaper isotropic propagaFigure 16: Animated sequence of an expanding smoke plume, rendered dynami614 tion mode earlier (Sec. 5.4). The lighting frequencies resulting
+cally at 30 Hz by our method while maintaining good temporal coherence.
+615 from the isotropic transport are by definition low and therefore a
+616 lower-resolution propagation domain is sufficient here as well.
+581 details). The employed empirical heuristics introduce a certain
+617 As future work, we would like to extend our propagation to work
+582 bias but allow us to make design decisions that result in a real618 with hierarchical or nested grids to handle higher details in media
+583 time performance on contemporary graphics hardware.
+619 as well as illumination. In general, we believe that the effect of
+584 The decomposition into a finite number of directions for distant 620 complex lighting on dynamic participating media is an exciting
+585 light can only be successful if the variation of the initial light 621 visual phenomenon that deserves more dedicated research, e.g.
+586 distribution is not too high; this however holds for the HDR 622 to better understand human perception of volumetric light or the
+587 environment maps we used in our experiments (e.g. Fig. 15). 623 artistic practice applied to depict it.
+588 In addition our prefiltered initialization can be used to avoid
+589 discretization artifacts in favour of a smooth approximation
+624 Acknowledgements. We would like to thank Anton Kaplanyan
+590 (Fig. 6).
+625 for inspiring discussions, Chuong Nguyen, Peter Vangorp and
+591 Since the presented method directly relates to DOM it shares 626 Yulia Gryaditskaya for reviewing early drafts of the article, and
+592 some of its basic limitations, such as handling of (surface) bound- 627 the anonymous reviewers for their valuable feedback.
+593 aries. In volumes with high density gradients (close to opaque
+628 [1] M. Billeter, E. Sintorn, and U. Assarsson. Real-time multiple scattering
+594 surfaces) the light distribution might not be faithfully reproduced 629
+using light propagation volumes. In Proc. I3D, 2012.
+595 by the HG basis aligned with the initial light direction. Also 630 [2] A. Bouthors, F. Neyret, N. Max, E. Bruneton, and C. Crassin. Interactive
+631
+multiple anisotropic scattering in clouds. In Proc. I3D, 2008.
+596 the resolution of every principal grid is limited and the general
+632 [3] S. Chandrasekhar. Radiative transfer. Dover Publications, 1960.
+597 limitations of discrete sampling apply: for finer details higher
+633 [4] C. Dachsbacher and M. Stamminger. Reflective Shadow Maps. In Proc.
+598 resolutions are required. However, the upsampling (Sec. 4.4) 634
+I3D, pages 203–213, 2005.
+599 and prefiltering (Sec. 5.1) steps help to defer these issues and for 635 [5] O. Elek, T. Ritschel, C. Dachsbacher, and H.-P. Seidel. Interactive light
+636
+scattering with principal-ordinate propagation. In Proc. Graphics Interface,
+600 typical volume data sets moderate propagation grid resolutions
+637
+2014.
+3
+3
+601 of 8 –20 have shown to be sufficient to handle a wide range of
+638 [6] O. Elek, T. Ritschel, A. Wilkie, and H.-P. Seidel. Interactive cloud render602 illumination conditions and medium properties.
+639
+ing using temporally coherent photon mapping. Computers & Graphics,
+608
+609
+640
+36:1109–1118, 2012.
+Another characteristic inherent to all finite-element methods is 641 [7] T. Engelhardt and C. Dachsbacher. Epipolar sampling for shadows and
+crepuscular rays in participating media with single scattering. In Proc.
+604 that their convergence rate depends not only on the propagation 642
+643
+I3D, 2010.
+605 domain resolution but also on the optical thickness of the simu644 [8] T. Engelhardt, J. Novák, T.-W. Schmidt, and C. Dachsbacher. Approximate
+606 lated medium; especially for high-albedo media the number of
+645
+bias compensation for rendering scenes with heterogeneous participating
+607 iterations required for producing a converged solution might be 646
+media. Comp. Graph. Forum, 31(7):2145–2154, 2012.
+603
+11
+Figure 17: Scene with both animated medium and illumination, combining scattering from directional and local virtual light sources, running at 16 Hz (including
+the generation of the 125 VPLs and rendering the indirect illumination from surfaces, which alone takes 30 ms). The medium has a size of 203 m with σs =
+{3.2, 3.3, 3.4} m−1 , σa = {1.15, 1.2, 1.3} m−1 , g = 0.7, and is very heterogeneous. The grid size for the directional light is 1282 × 16, with the 16-cell axis oriented
+along the light shafts (i.e. along the principal ordinate). The radial grids have a resolution of 83 each. We use these settings for local light sources in all our examples;
+note how even this small resolution proves to be sufficient for plausible results.
+[9] R. Fattal. Participating media illumination using light propagation maps. 696 [31] R. Prutkin, A. Kaplanyan, and C. Dachsbacher. Reflective shadow map
+697
+clustering for real-time global illumination. In Proc. Eurographics (Short
+ACM Trans. Graph., 28:7:1–7:11, 2009.
+649 [10] R. Geist, K. Rasche, J. Westall, and R. Schalkoff. Lattice-Boltzmann 698
+Papers), pages 9–12, 2012.
+650
+lighting. In Proc. EGSR, pages 355–362, 2004.
+699 [32] Z. Ren, K. Zhou, S. Lin, and B. Guo. Gradient-based interpolation and
+651 [11] L. G. Henyey and J. L. Greenstein. Diffuse radiation in the Galaxy. Astro- 700
+sampling for real-time rendering of inhomogeneous, single-scattering
+652
+physical Journal, 93:70–83, 1941.
+701
+media. Technical report, Microsoft Research, 2008.
+653 [12] W. Jarosz, C. Donner, M. Zwicker, and H. W. Jensen. Radiance caching 702 [33] H. E. Rushmeier and K. E. Torrance. The zonal method for calculating
+654
+for participating media. ACM Trans. Graph., 27:7:1–7:11, 2008.
+703
+light intensities in the presence of a participating medium. Computer
+655 [13] W. Jarosz, D. Nowrouzezahrai, I. Sadeghi, and H. W. Jensen. A compre- 704
+Graphics (Proc. SIGGRAPH), 21:293–302, 1987.
+656
+hensive theory of volumetric radiance estimation using photon points and 705 [34] M. Salvi, K. Vidimče, A. Lauritzen, and A. Lefohn. Adaptive volumetric
+657
+beams. ACM Trans. Graph., 30:5:1–5:19, 2011.
+706
+shadow maps. In Proc. EGSR, pages 1289–1296, June 2010.
+658 [14] H. W. Jensen and P. H. Christensen. Efficient simulation of light transport 707 [35] P. Sloan, J. Kautz, and J. Snyder. Precomputed radiance transfer for real659
+in scenes with participating media using photon maps. In Proc. SIG- 708
+time rendering in dynamic, low-frequency lighting environments. In ACM
+660
+GRAPH, pages 311–320, 1998.
+709
+Trans. Graph., 2002.
+661 [15] A. Kaplanyan and C. Dachsbacher. Cascaded light propagation volumes 710 [36] J. Stam. Multiple scattering as a diffusion process. In Proc. EGWR, pages
+662
+for real-time indirect illumination. In Proc. I3D, 2010.
+711
+41–50, 1995.
+663 [16] A. Keller. Instant radiosity. In Proc. SIGGRAPH, pages 49–56, 1997.
+712 [37] Y. Wang, J. Wang, N. Holzschuch, K. Subr, J.-H. Yong, and B. Guo. Real664 [17] J. Kniss, S. Premože, C. Hansen, and D. Ebert. Interactive translucent 713
+time rendering of heterogeneous translucent objects with arbitrary shapes.
+665
+volume rendering and procedural modeling. In Proc. Visualization, pages 714
+Comp. Graph. Forum, 29:497–506, 2010.
+666
+109–116, 2002.
+715 [38] D. R. Wyman, M. S. Patterson, and B. C. Wilson. Similarity relations
+667 [18] J. Kopf, M. F. Cohen, D. Lischinski, and M. Uyttendaele. Joint bilateral 716
+for the interaction parameters in radiation transport. Applied Optics,
+668
+upsampling. ACM Trans. Graph, 26(3):96, 2007.
+717
+28(24):5243–5249, 1989.
+669 [19] J. Krüger, K. Bürger, and R. Westermann. Interactive screen-space accurate 718 [39] K. Zhou, Z. Ren, S. Lin, H. Bao, B. Guo, and H.-Y. Shum. Real-time
+670
+photon tracing on GPUs. In Proc. EGSR, 2006.
+719
+smoke rendering using compensated ray marching. In ACM Trans. Graph.,
+671 [20] E. P. Lafortune and Y. D. Willems. Rendering participating media with 720
+pages 36:1–36:12, 2008.
+672
+bidirectional path tracing. In Proc. EGWR, pages 91–100, 1996.
+673 [21] G. Liktor and C. Dachsbacher. Real-time volume caustics with adaptive
+674
+beam tracing. In Proc. I3D, 2011.
+675 [22] T. Lokovic and E. Veach. Deep shadow maps. In Proc. SIGGRAPH, pages
+676
+385–392, 2000.
+677 [23] N. Max. Optical models for direct volume rendering. IEEE Transactions
+678
+on Visualization and Computer Graphics, 1(2):99–108, 1995.
+679 [24] N. Max, G. Schussman, R. Miyazaki, K. Iwasaki, and T. Nishita. Diffusion
+680
+and multiple anisotropic scattering for global illumination in clouds. J.
+681
+WSCG, 1–3:277–284, 2004.
+682 [25] A. Musbach, G. W. Meyer, F. Reitich, and S. H. Oh. Full wave modeling
+683
+of light propagation and reflection. Comp. Graph. Forum, 32(6), 2013.
+684 [26] S. G. Narasimhan, M. Gupta, C. Donner, R. Ramamoorthi, S. K. Nayar,
+685
+and H. W. Jensen. Acquiring scattering properties of participating media
+686
+by dilution. ACM Trans. Graph., 25:1003–1012, 2006.
+687 [27] J. Novák, D. Nowrouzezahrai, C. Dachsbacher, and W. Jarosz. Progressive
+688
+virtual beam lights. Comp. Graph. Forum, 31:1407–1413, 2012.
+689 [28] J. Novák, D. Nowrouzezahrai, C. Dachsbacher, and W. Jarosz. Virtual ray
+690
+lights for rendering scenes with participating media. ACM Trans. Graph.,
+691
+29(4):60:1–60:11, 2012.
+692 [29] M. Pauly, T. Kollig, and A. Keller. Metropolis light transport for partici693
+pating media. In Proc. EGWR, pages 11–22, 2000.
+694 [30] E. Praun and H. Hoppe. Spherical parametrization and remeshing. ACM
+695
+Trans. Graph., 22(3):340–49, 2003.
+647
+648
+12

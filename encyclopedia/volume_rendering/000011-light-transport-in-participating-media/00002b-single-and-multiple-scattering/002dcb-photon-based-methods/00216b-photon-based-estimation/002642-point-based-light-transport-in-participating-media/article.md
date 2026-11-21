@@ -1,0 +1,212 @@
+# Point-Based Light Transport in Participating Media
+
+Also called: Point-Based Global Illumination in Participating Media, Point-Based Global Illumination for Participating Media, Point-Based Light Transport for Participating Media with Refractive Boundaries, PBGI for homogeneous media with refractive boundaries
+
+## Overview
+Point-Based Light Transport in Participating Media is a global illumination method for homogeneous translucent materials with refractive boundaries that decorrelates scene complexity from illumination computation by replacing the scene with a shaded point cloud (volume samples) for indirect illumination, while keeping polygonal representation for direct visibility [S1, S3]. It computes single, double, and multiple scattering contributions separately, handling refraction at boundaries which breaks screen-space coherence [S3]. It sets itself apart from its siblings [Compute Shader Photon Integration](2111-compute-shader-photon-integration.md) and [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md) by using a precomputed multiple scattering table and a specific tree-cut traversal for double scattering, rather than density estimation or beam-based storage [S1, S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Scene geometry (polygonal mesh), material properties (index of refraction $\eta$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\hat{i}, \hat{o})$), light source positions and intensities.
+*   **Outputs:** Radiance $L$ for each camera ray sample.
+
+**Data Structures:**
+1.  **Light Surface Samples:**
+    *   Layout: Position $\mathbf{x}_s$, diffuse intensity $I_s$.
+    *   Storage: Organized in an octree spatial hierarchy.
+2.  **Light Volume Samples:**
+    *   Layout: Position $\mathbf{x}_v$, incoming light direction $\mathbf{d}_v$, incoming light intensity $I_v$, Oriented Bounding Box (OBB) defining the volume of influence $V_v$. The OBB is computed using the surface area around the originating surface sample and the length of the sampling interval on the incoming ray [S1, S3].
+    *   Storage: Organized in an octree spatial hierarchy. Each node stores the average position, average direction of incoming light, and combined bounding box of its descendants [S1].
+3.  **Multiple Scattering Table:**
+    *   Layout: 4D table $L_o(\rho/\ell, z/\ell, \theta, \phi)$.
+    *   Storage: Initially a 2D grid of $512 \times 512$ cells. Each cell stores a lobe in spherical coordinates $(\theta, \phi)$ sampled with 18 directions for $\theta$ and 36 for $\phi$. Compressed using a bottom-up quadtree: replace four neighboring cells with identical lobes with a single cell storing the same lobe [S1].
+
+**Precomputation Steps:**
+1.  **Surface Sampling:** Place blue-noise surface samples on the object surface. If enclosed in transparent layers, place samples on the outer layer, connect to the light source, trace the refracted ray through transparent layers to the participating media, and remove samples too close to others to ensure minimal distance [S1, S3]. Store indirect diffuse illumination and indirect illumination from inside the material after multiple bounces [S3].
+2.  **Volume Sampling:** Connect surface samples to the light source. Compute the refracted ray inside the material (including internal reflections) and sample this ray. Each volume sample stores $\mathbf{x}_v, \mathbf{d}_v, I_v$, and its OBB [S1, S3].
+3.  **Hierarchy Construction:** Build an octree over light surface samples [S3]. Build an octree over light volume samples [S1].
+4.  **Table Generation:** Simulate photon propagation in an infinite medium with a point light source sending photons in a single direction. Accumulate results to form a table of material response. Store response in cylindrical coordinates $(\rho, z)$ indexed by distances divided by mean-free-path $\ell$. Store outgoing radiance in spherical coordinates $(\theta, \phi)$ relative to the current frame [S1].
+
+**Rendering Steps:**
+1.  **Ray Tracing:** Trace rays from the camera. When a ray reaches a translucent object, compute the refracted ray inside the object with direction $\mathbf{o}$ [S1, S3].
+2.  **Sample Placement:** Place sample points $P_k$ on the refracted ray, defined by depth $d_k$ from the entry point.
+    *   If the camera ray reaches the media directly or after specular events, place $k_{max}$ samples with exponential depth distribution [S1, S3].
+    *   If it reaches after diffuse interactions, sample randomly with a smaller number of samples (as low as one) [S1, S3].
+3.  **Contribution Computation:** For each sample point $P_k$, compute single, double, multiple, and bounced contributions, then sum them [S1, S3].
+
+**Formulas:**
+*   **Transmittance:** $T_r(\mathbf{x} \leftrightarrow \mathbf{x}_t) = e^{-\sigma_t \|\mathbf{x} - \mathbf{x}_t\|}$ [S1].
+*   **Sample Depth:** $d_k = -\frac{1}{\sigma_t} \log\left(1 - \frac{k(1 - e^{-\sigma_t d_{max}})}{k_{max}}\right)$, where $d_{max}$ is the exit point depth, $k$ is the sample index ($1$ to $k_{max}$), and $\sigma_t = \sigma_s + \sigma_a$ [S1].
+*   **Single Scattering at $P_k$:**
+    $$ \text{single}(P_k) = e^{-\sigma_t d_k} \frac{1}{N_v} \sum_{i} \sigma_s p(\mathbf{o}, \mathbf{d}_{vi}) I_{vi} $$
+    where $N_v$ is the number of leaf nodes whose bounding box contains $P_k$, and the sum is over leaf nodes $v_i$ containing $P_k$ [S1].
+*   **Double Scattering at $P_k$:**
+    $$ \text{double}(P_k) = e^{-\sigma_t d_k} \sum_{i} \frac{e^{-\sigma_t r_i} I_{vi}}{r_i^2} \sigma_s^2 p(\mathbf{o}, \mathbf{m}_i) p(\mathbf{m}_i, \mathbf{d}_{vi}) $$
+    where $r_i = \|P_k - v_i\|$, $\mathbf{m}_i = (P_k - v_i)/r_i$, and the sum is over nodes in the tree cut [S1]. Weak singularities caused by $r_{12}$ are handled by clamping [S1].
+*   **Multiple Scattering at $P_k$:**
+    $$ \text{mult}(P_k) = e^{-\sigma_t d_k} \sum_{i} \frac{L_o\left(\frac{\rho_k}{\ell}, \frac{z_k}{\ell}, T_{(v_i, \mathbf{d}_i)}(\mathbf{o})\right)}{v_i} $$
+    where $z_k = (P_k - v_i) \cdot \mathbf{d}_i$, $\rho_k = \|(P_k - v_i) - z_k \mathbf{d}_i\|$, $\ell$ is mean-free-path, $L_o$ is outgoing radiance from the precomputed table, and $T_{(v_i, \mathbf{d}_i)}(\mathbf{o})$ is direction $\mathbf{o}$ in the frame defined by $(v_i, \mathbf{d}_i)$ [S1].
+*   **Bounced Multiple Scattering:**
+    $$ \text{bounced}(P_k) = e^{-\sigma_t d_k} \sum_{j} \frac{e^{-\sigma_t q_j} I_{sj}}{q_j^2} f_r(\mathbf{t}_j) \sigma_s p(\mathbf{o}, \mathbf{t}_j) $$
+    where $q_j = \|P_k - s_j\|$, $\mathbf{t}_j = (P_k - s_j)/q_j$, and the sum is over surface samples in the tree cut [S1].
+*   **Total Radiance:**
+    $$ L = \sum_k (\text{single}(P_k) + \text{double}(P_k) + \text{mult}(P_k) + \text{bounced}(P_k)) $$
+    [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def precompute_surface_samples(mesh, lights):
+    # Place blue-noise samples on surface
+    samples = []
+    for light in lights:
+        # Connect to light, trace refracted ray if enclosed in transparent layers
+        # Remove samples too close to others
+        samples.extend(generate_blue_noise_samples(mesh, light))
+    return build_octree(samples)
+
+def precompute_volume_samples(surface_octree, lights):
+    volumes = []
+    for surface_sample in surface_octree.flatten():
+        # Connect to light, compute refracted ray inside material
+        # Include internal reflections
+        ray = trace_refracted_ray(surface_sample.position, lights)
+        # Sample the ray
+        for t in sample_ray(ray):
+            volume = {
+                'position': ray.point(t),
+                'direction': ray.direction,
+                'intensity': compute_intensity(ray, t),
+                'obb': compute_obb(surface_sample, t)
+            }
+            volumes.append(volume)
+    return build_octree(volumes)
+
+def precompute_multiple_scattering_table(material):
+    # Simulate photon propagation in infinite medium
+    # Point light source sending photons in single direction
+    grid = create_grid(512, 512)
+    for photon in trace_photons_infinite_medium(material):
+        rho, z = to_cylindrical(photon.position, photon.direction)
+        theta, phi = to_spherical(photon.outgoing_direction, photon.direction)
+        grid[rho, z].add_lobe(theta, phi, photon.energy)
+    # Compress using bottom-up quadtree
+    return compress_quadtree(grid)
+
+def render_camera_ray(camera_ray, surface_octree, volume_octree, table, material):
+    # Compute refracted ray inside object
+    refracted_ray = trace_refraction(camera_ray, material)
+    
+    # Determine sampling strategy
+    if camera_ray.is_direct_or_specular():
+        k_max = 64 # Example value
+        d_max = refracted_ray.exit_depth
+        samples = []
+        for k in range(1, k_max + 1):
+            d_k = -1.0 / material.sigma_t * math.log(1 - k * (1 - math.exp(-material.sigma_t * d_max)) / k_max)
+            samples.append({'point': refracted_ray.point(d_k), 'depth': d_k, 'index': k})
+    else:
+        # Random sampling with fewer points
+        samples = [generate_random_sample(refracted_ray)]
+
+    total_radiance = 0.0
+    for sample in samples:
+        pk = sample['point']
+        dk = sample['depth']
+        
+        # Single Scattering
+        single = compute_single_scattering(pk, refracted_ray.direction, volume_octree, material)
+        
+        # Double Scattering
+        double = compute_double_scattering(pk, refracted_ray.direction, volume_octree, material)
+        
+        # Multiple Scattering
+        multiple = compute_multiple_scattering(pk, refracted_ray.direction, volume_octree, table, material)
+        
+        # Bounced Multiple Scattering
+        bounced = compute_bounced_scattering(pk, refracted_ray.direction, surface_octree, material)
+        
+        total_radiance += single + double + multiple + bounced
+        
+    return total_radiance
+
+def compute_single_scattering(pk, o, volume_octree, material):
+    # Traverse octree, stop if bounding box does not contain pk
+    leaf_nodes = get_leaf_nodes_containing(volume_octree, pk)
+    if not leaf_nodes:
+        return 0.0
+    sum_contrib = 0.0
+    for vi in leaf_nodes:
+        sum_contrib += material.sigma_s * phase_function(o, vi.direction) * vi.intensity
+    return math.exp(-material.sigma_t * pk.depth) * sum_contrib / len(leaf_nodes)
+
+def compute_double_scattering(pk, o, volume_octree, material):
+    # Traverse octree until tree cut criterion is met
+    # Criterion: solid angle * phase function
+    tree_cut = get_tree_cut(volume_octree, pk, o)
+    sum_contrib = 0.0
+    for vi in tree_cut:
+        ri = distance(pk, vi.position)
+        mi = normalize(pk - vi.position)
+        # Clamp weak singularities caused by r12
+        if ri < epsilon:
+            ri = epsilon
+        contrib = (math.exp(-material.sigma_t * ri) * vi.intensity / (ri * ri)) * \
+                  (material.sigma_s ** 2) * \
+                  phase_function(o, mi) * phase_function(mi, vi.direction)
+        sum_contrib += contrib
+    return math.exp(-material.sigma_t * pk.depth) * sum_contrib
+
+def compute_multiple_scattering(pk, o, volume_octree, table, material):
+    # Use same tree cut as double scattering
+    tree_cut = get_tree_cut(volume_octree, pk, o)
+    sum_contrib = 0.0
+    for vi in tree_cut:
+        # Cylindrical coordinates around (vi, di) axis
+        z_k = dot(pk - vi.position, vi.direction)
+        rho_k = norm((pk - vi.position) - z_k * vi.direction)
+        # Transform outgoing direction o to frame of (vi, di)
+        o_transformed = transform_direction(o, vi.position, vi.direction)
+        # Extract from table
+        lo = table.query(rho_k / material.mean_free_path, z_k / material.mean_free_path, o_transformed)
+        sum_contrib += lo / vi.volume
+    return math.exp(-material.sigma_t * pk.depth) * sum_contrib
+
+def compute_bounced_scattering(pk, o, surface_octree, material):
+    # Use same tree cut as double scattering
+    tree_cut = get_tree_cut(surface_octree, pk, o)
+    sum_contrib = 0.0
+    for sj in tree_cut:
+        qj = distance(pk, sj.position)
+        tj = normalize(pk - sj.position)
+        if qj < epsilon:
+            qj = epsilon
+        contrib = (math.exp(-material.sigma_t * qj) * sj.intensity / (qj * qj)) * \
+                  brdf(sj.normal, tj, o) * material.sigma_s * phase_function(o, tj)
+        sum_contrib += contrib
+    return math.exp(-material.sigma_t * pk.depth) * sum_contrib
+```
+
+## Subtopics
+
+### [Covariance Driven Single Scattering Computation](12280-covariance-driven-single-scattering-computation.md)
+This method extends point-based light transport for participating media with refractive boundaries by replacing fixed kernel sizes with dynamic kernels predicted by the local light field's frequency content. It solves the problem of over-blurred single scattering in high-frequency volume caustics by using the determinant of a covariance matrix to adaptively shrink the sampling kernel where light transport is complex, allowing fewer samples to capture sharp details. It sets itself apart from its parent method [Point-Based Light Transport in Participating Media](3763-point-based-light-transport-in-participating-media.md) by specifically optimizing the single scattering pass with frequency analysis, while retaining the parent's approach for double and multiple scattering.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of samples $k_{max}$ and the depth of the octree traversal. The tree cut optimization reduces the number of nodes visited for double and multiple scattering [S1].
+*   **Memory Complexity:** The precomputed multiple scattering table is compressed from 8.4 GB to approximately 100 MB using the quadtree compression [S1]. The octrees for surface and volume samples add additional memory proportional to the number of samples.
+*   **Measured Performance:** Up to 60x faster than UPBP (Unified Points, Beams and Paths) with similar quality [S1]. Rendering time was 41 minutes for an olive oil scene compared to 6 hours for UPBP [S1]. The GPU implementation yields 30 fps when moving the viewpoint and 25 fps when editing light position or material parameters [S3].
+*   **Strengths:** Fast convergence with little noise. Handles refractive boundaries which break screen-space coherence. Supports editing of material properties and light position [S3]. Suitable for interactive rendering applications [S2].
+*   **Limitations:** Assumes homogeneous materials; extension to heterogeneous materials requires further work [S2]. Does not consider visibility when summing contributions, resulting in over-estimation when there is occlusion [S2]. Point-based methods are biased [S2]. Cannot handle multiple refractions caused by concave geometries; only handles light paths with a single refraction on the camera ray and a single refraction on the light ray [S3].
+
+## Background
+*   **Origin:** The method was introduced by Beibei Wang, Jean-Dominique Gascuel, and Nicolas Holzschuch from INRIA and Université Grenoble-Alpes in 2016 [S1].
+*   **History:** It builds upon point-based global illumination techniques [S1]. It addresses limitations of previous methods such as BDPT, BRE, and UPBP by providing a faster alternative with a smaller memory footprint [S1]. It also differs from dipole methods by targeting a wide range of albedos and from screen-space methods by handling refractive interfaces [S3].
+*   **Usage:** Used for translucent materials with low albedo and large mean-free-path, where low-order scattering effects dominate [S1]. Suitable for rendering applications needing limited rendering cost and interactive rendering applications [S2].
+
+## Sources
+[S1] Point-Based Light Transport for Participating Media with Refractive Boundaries, https://doi.org/10.2312/sre20161216, fetched 2026-10-26
+[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
+[S3] Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries, https://doi.org/10.1109/TVCG.2017.2768525, fetched 2026-10-26

@@ -1,0 +1,209 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs:**
+-- `vertices`: Array of shape $(N, D)$ containing vertex positions ($D=2$ for 2D, $D=3$ for 3D), type Float.
+-- `simplices` (or `faces`/`edges`): Array of shape $(F, D)$ containing vertex indices for triangles (3D) or edges (2D), type `uint32_t`.
++- `vertices`: Array of shape $(N, D)$ containing vertex positions ($D=2$ for 2D, $D=3$ for 3D), type Float [S1, unofficial].
++- `simplices`: Array of shape $(F, D)$ containing vertex indices for triangles (3D) or edges (2D), type `uint32_t` [S1, unofficial].
+ - `grid_shape`: Tuple $(H, W)$ for 2D or $(D, H, W)$ for 3D.
+ - `method`: String `'mc'` or `'cf'`. If `'auto'`, selects `'cf'` if `filter_radius == half_voxel_size`, otherwise `'mc'` [S1, unofficial].
+@@ -17,13 +17,13 @@
+ 
+ **Outputs:**
+-- `occupancy`: Output tensor of shape `grid_shape`, type Float, containing winding numbers.
+-- `d_vertices`: Gradient tensor for vertices, shape $(N, D)$, type Float.
+-- `d_occupancy`: Gradient tensor for occupancy, shape `grid_shape`, type Float.
++- `occupancy`: Output tensor of shape `grid_shape`, type Float, containing winding numbers [S1, unofficial].
++- `d_vertices`: Gradient tensor for vertices, shape $(N, D)$, type Float [S1, unofficial].
++- `d_occupancy`: Gradient tensor for occupancy, shape `grid_shape`, type Float [S1, unofficial].
+ 
+ **Data Structures:**
+-The implementation uses a grid coordinate system where the world space $[-1, 1]^D$ is mapped to grid indices.
+-- `step_x = 2.0 / depth` (or width for 2D)
+-- `step_y = 2.0 / height`
+-- `step_z = 2.0 / width` (for 3D)
++The implementation uses a grid coordinate system where the world space $[-1, 1]^D$ is mapped to grid indices [S1, unofficial].
++- `step_x = 2.0 / depth` (or width for 2D) [S1, unofficial].
++- `step_y = 2.0 / height` [S1, unofficial].
++- `step_z = 2.0 / width` (for 3D) [S1, unofficial].
+ - Grid center optimization uses `center_k = width / 2` [S1, unofficial].
+ 
+@@ -33,6 +33,6 @@
+ 3. Initialize `occupancy` as a zero tensor [S1, unofficial].
+ 4. For each face (triangle or edge):
+-   - Extract vertices $v_0, v_1, v_2$ (or $v_0, v_1$ for 2D).
+-   - Compute edge vectors $e_1 = v_1 - v_0$, $e_2 = v_2 - v_0$.
++   - Extract vertices $v_0, v_1, v_2$ (or $v_0, v_1$ for 2D) [S1, unofficial].
++   - Compute edge vectors $e_1 = v_1 - v_0$, $e_2 = v_2 - v_0$ [S1, unofficial].
+    - Compute normal $n = \text{normalize}(\text{cross}(e_1, e_2))$ and area $A = 0.5 \|\text{cross}(e_1, e_2)\|$ [S1, unofficial].
+    - Determine bounding box in grid coordinates:
+@@ -55,5 +55,5 @@
+ **Backward Pass:**
+ 1. Select backward function based on method and dtype [S1, unofficial].
+-2. Initialize `d_vertices` as zeros [S1, unofficial].
++2. Initialize gradient tensor for vertices ($\delta_{\text{vertices}}$) as zeros with same shape and dtype [S1, unofficial].
+ 3. For each face:
+    - Compute normal velocities for backward pass:
+@@ -67,5 +67,5 @@
+    - **Backward Mode Gradient:** If `d_occupancy` is provided as input (backward-mode differentiation):
+      - Iterate over affected voxels.
+-     - Compute `differential_weight = d_occupancy[idx] / cell_volume` [S1, unofficial].
++     - Compute `differential_weight = d_occupancy[n_voxel_index] * filter_weight * area / num_samples_per_simplex` [S1, unofficial].
+      - For CF method, compute the geometric contribution vector `contrib` (same as primal but using barycentric coordinates) [S1, unofficial].
+      - Update vertex gradients:
+@@ -80,5 +80,4 @@
+ ```python
+ import torch
+-import numpy as np
+ 
+ def voxelize_cf_3d_backward(vertices, faces, occupancy, d_occupancy, grid_shape):
+@@ -92,5 +91,4 @@
+     N, D = vertices.shape
+     d_vertices = torch.zeros_like(vertices)
+-    
+     step_x = 2.0 / grid_shape[0]
+     step_y = 2.0 / grid_shape[1]
+@@ -118,53 +116,65 @@
+         min_x = torch.min(v0[0], torch.min(v1[0], v2[0]))
+         max_x = torch.max(v0[0], torch.max(v1[0], v2[0]))
+-        # ... compute min_y, max_y, min_z, max_z similarly
++        min_y = torch.min(v0[1], torch.min(v1[1], v2[1]))
++        max_y = torch.max(v0[1], torch.max(v1[1], v2[1]))
++        min_z = torch.min(v0[2], torch.min(v1[2], v2[2]))
++        max_z = torch.max(v0[2], torch.max(v1[2], v2[2]))
+         
+         bbox_min_i = max(0, int((min_x + 1) / step_x))
+         bbox_max_i = min(grid_shape[0] - 1, int((max_x + 1) / step_x))
+-        # ... compute other bbox bounds
++        bbox_min_j = max(0, int((min_y + 1) / step_y))
++        bbox_max_j = min(grid_shape[1] - 1, int((max_y + 1) / step_y))
++        bbox_min_k = max(0, int((min_z + 1) / step_z))
++        bbox_max_k = min(grid_shape[2] - 1, int((max_z + 1) / step_z))
+         
+         # Barycentric coordinates of triangle
+-        # Triangle in barycentric space: (1,0,0), (0,1,0), (0,0,1)
+-        # We split this polygon by planes x=const, y=const, z=const
+-        
+-        # Pseudocode for polygon splitting is complex; 
+-        # assuming a helper `split_polygon_bary` exists which returns 
+-        # a list of polygons in barycentric coords.
+-        
+         remaining_poly = [torch.tensor([1.0, 0.0, 0.0]), 
+                           torch.tensor([0.0, 1.0, 0.0]), 
+                           torch.tensor([0.0, 0.0, 1.0])]
++        tri_x = torch.tensor([v0[0], v1[0], v2[0]])
++        tri_y = torch.tensor([v0[1], v1[1], v2[1]])
++        tri_z = torch.tensor([v0[2], v1[2], v2[2]])
+         
+         for i in range(bbox_min_i, bbox_max_i + 1):
+             x_hi = -1.0 + (i + 1) * step_x
+-            # Split remaining_poly by plane x = x_hi
+-            # This requires projecting barycentric coords to Cartesian x
+-            # x = dot(bary, tri_x) where tri_x = [v0.x, v1.x, v2.x]
+-            tri_x = torch.tensor([v0[0], v1[0], v2[0]])
+-            
+             below_poly, above_poly = split_polygon_bary(remaining_poly, tri_x, x_hi)
+             remaining_poly = above_poly
+-            
+             if len(below_poly) < 3:
+                 continue
+                 
+-            # For each slice in below_poly, iterate y
+-            # ... (nested loops for y and z)
+-            
+-            # For each voxel (i, j, k) intersected:
+-            # Compute intersection polygon in barycentric coords
+-            # Compute contribution
+-            # Update d_vertices
+-            
+-            # Simplified update for one voxel:
+-            # contrib = compute_barycentric_contribution(barycentric_polygon)
+-            # differential_weight = d_occupancy[i, j, k] / cell_volume
+-            
+-            # d_vertices[i0] += contrib[0] * unit_normal * differential_weight
+-            # d_vertices[i1] += contrib[1] * unit_normal * differential_weight
+-            # d_vertices[i2] += contrib[2] * unit_normal * differential_weight
+-            
+-            pass
+-            
++            for j in range(bbox_min_j, bbox_max_j + 1):
++                y_hi = -1.0 + (j + 1) * step_y
++                below_poly_y, above_poly_y = split_polygon_bary(below_poly, tri_y, y_hi)
++                below_poly = above_poly_y
++                if len(below_poly_y) < 3:
++                    continue
++                    
++                for k in range(bbox_min_k, bbox_max_k + 1):
++                    z_hi = -1.0 + (k + 1) * step_z
++                    below_poly_z, above_poly_z = split_polygon_bary(below_poly, tri_z, z_hi)
++                    below_poly = above_poly_z
++                    if len(below_poly_z) < 3:
++                        continue
++                        
++                    # Compute contribution for voxel (i, j, k)
++                    pivot = torch.tensor([1.0/3, 1.0/3, 1.0/3])
++                    contrib = torch.zeros(3)
++                    for vi in range(len(below_poly_z) - 2):
++                        pv0 = below_poly_z[0]
++                        pv1 = below_poly_z[vi + 1]
++                        pv2 = below_poly_z[vi + 2]
++                        edge1 = pv1 - pv0
++                        edge2 = pv2 - pv0
++                        sub_area = 0.5 * torch.norm(torch.cross(edge1, edge2))
++                        b1 = pv1 / 3.0
++                        b2 = pv2 / 3.0
++                        contrib += sub_area * (pivot + b1 + b2)
++                        
++                    differential_weight = d_occupancy[i, j, k] / cell_volume
++                    dvn_vec = unit_normal
++                    for d in range(3):
++                        d_vertices[i0 * 3 + d] += contrib[0] * dvn_vec[d] * differential_weight
++                        d_vertices[i1 * 3 + d] += contrib[1] * dvn_vec[d] * differential_weight
++                        d_vertices[i2 * 3 + d] += contrib[2] * dvn_vec[d] * differential_weight
+     return d_vertices
+ 
+@@ -177,20 +187,15 @@
+     above = []
+     n = len(polygon_bary)
+-    
+     for i in range(n):
+         curr = polygon_bary[i]
+         next_v = polygon_bary[(i + 1) % n]
+-        
+         curr_val = torch.dot(curr, tri_coords)
+         next_val = torch.dot(next_v, tri_coords)
+-        
+         curr_below = curr_val <= value
+         next_below = next_val <= value
+-        
+         if curr_below:
+             below.append(curr)
+         else:
+             above.append(curr)
+-            
+         if curr_below != next_below:
+             d = next_val - curr_val
+@@ -200,5 +205,4 @@
+                 below.append(intersection)
+                 above.append(intersection)
+-                
+     return below, above
+ ```
+@@ -210,5 +214,5 @@
+ 
+ ### [Differentiable Voxelization from Radiative Gaussians](2380-differentiable-voxelization-from-radiative-gaussians.md)
+-A differentiable voxelizer $V$ to efficiently query a density volume $V \in \mathbb{R}^{X \times Y \times Z}$ from radiative Gaussians, used for 3D regularization. It extends the voxelization concept to Gaussian splats rather than triangle meshes, allowing gradients to flow from the voxel grid back to the Gaussian parameters (position, covariance, opacity).
++A differentiable voxelizer $\mathcal{V}$ to efficiently query a density volume $V \in \mathbb{R}^{X \times Y \times Z}$ from radiative Gaussians, used for 3D regularization. It extends the voxelization concept to Gaussian splats rather than triangle meshes, allowing gradients to flow from the voxel grid back to the Gaussian parameters (position, covariance, opacity).
+ 
+ ### Backward Differentiable Closed-form Voxelization
+@@ -222,6 +226,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(F \cdot B)$, where $F$ is the number of faces and $B$ is the average number of voxels in the bounding box of a face. The CF method involves polygon splitting, which can increase the constant factor compared to simple rasterization, but avoids sampling noise.
+-- **Memory Complexity:** $O(V)$ for the output grid, plus temporary storage for polygon splitting $O(F \cdot B)$ [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Performance:** The implementation is CPU-only. GPU tensors are automatically moved to CPU for processing and moved back, issuing a warning [S1, unofficial]. The CF method assumes a box filter the size of a voxel. If `filter_radius` does not equal half voxel size, the CF method has no effect and falls back to MC or is invalid [S1, unofficial].
+ - **Strengths:** Provides exact, noise-free gradients for triangle meshes. Supports both 2D and 3D.

@@ -1,0 +1,289 @@
+--- v017.md
++++ v018.md
+@@ -1,5 +1,5 @@
+ # Texture-Based Volume Rendering
+ 
+-Also called: Geometry-based volume visualization, Proxy Geometry Rendering, Slice-based rendering, TBVR, Texture Based Ray Casting
++Also called: Geometry-based volume visualization, Proxy Geometry Rendering, Slice-based rendering, TBVR, Texture Based Ray Casting, Texture-based visualization
+ 
+ ## Overview
+@@ -10,5 +10,5 @@
+ 
+ ### Inputs and Outputs
+-*   **Input:** Volumetric scalar field data (regular grid), transfer function (TF), camera parameters (view/projection matrices), and rendering mode (transparent/solid).
++*   **Input:** Volumetric scalar field data (regular grid), transfer function (TF), camera parameters (view/projection matrices), and rendering mode (transparent/solid) [S3, book][S5, unofficial].
+ *   **Output:** 2D color buffer with composited volume image.
+ 
+@@ -20,5 +20,5 @@
+     *   1D texture mapping scalar values to RGBA color/opacity [S3, book].
+ 3.  **Proxy Geometry:**
+-    *   Array of vertices defining planar polygons (quads or triangle fans) intersecting the volume bounding box.
++    *   Array of vertices defining planar polygons (quads or triangle fans) intersecting the volume bounding box [S2, S6, unofficial].
+     *   **Object-Aligned:** Rectangles aligned with principal axes (X, Y, Z) [S2, unofficial][S3, book].
+     *   **View-Aligned:** Polygons orthogonal to the viewing direction, constructed by intersecting slicing planes with the volume bounding box [S2, S6, unofficial].
+@@ -44,13 +44,12 @@
+     *   Update vertex arrays with proxy geometry vertices and their corresponding 3D texture coordinates [S3, book]. Texture coordinates are assigned to vertices, either on CPU or via vertex shader [S2, unofficial][S3, book].
+     *   Refresh textures if rendering mode or transfer function parameters change [S3, book].
+-    *   Perform opacity correction of transfer function textures if sampling rate changed [S3, book].
+ 
+ 3.  **Draw:**
+     *   Set up rendering state:
+-        *   Disable lighting and culling [S3, book][S9].
++        *   Disable lighting and culling [S3, book][S9, unofficial].
+         *   Enable alpha blending. For Over operator (back-to-front): Source = 1, Destination = 1 - Source Alpha [S2, unofficial]. For Under operator (front-to-back): Source = 1 - Destination Alpha, Destination = 1 [S2, unofficial].
+-        *   Disable depth testing or disable depth buffer writing if blending with opaque geometry [S9].
+-    *   Bind volume texture and transfer function texture [S3, book][S9].
+-    *   Specify shader input parameters (matrices, uniforms) [S9].
++        *   Disable depth testing or disable depth buffer writing if blending with opaque geometry [S9, unofficial].
++    *   Bind volume texture and transfer function texture [S3, book][S9, unofficial].
++    *   Specify shader input parameters (matrices, uniforms) [S9, unofficial].
+     *   Draw slice polygons in sorted order (back-to-front for Over operator) [S2, unofficial][S3, book].
+     *   Restore rendering state [S3, book].
+@@ -70,135 +69,105 @@
+ 
+ ```python
+-# Vertex Shader
+-# Inputs: position (vec3), modelMatrix (mat4), viewMatrix (mat4), projectionMatrix (mat4)
+-# Outputs: gl_Position (vec4), texPosition (vec4), vCam (vec3)
+-
+-varying vec4 texPosition;
+-varying vec3 vCam;
+-
+-void main() {
+-    // Transform vertex to world space for texture coordinate calculation
+-    texPosition = modelMatrix * vec4(position, 1.0);
+-    
+-    // Camera position in world space
+-    vCam = vec3(viewMatrix * vec4(0.0, 0.0, 0.0, 1.0)); // Assuming view matrix transforms world to camera, inverse gives camera pos in world? 
+-    # Note: Standard OpenGL view matrix transforms world to camera. 
+-    # To get camera position in world, we need inverse of view matrix. 
+-    # However, source [S5, unofficial] uses cameraPosition directly. 
+-    # We assume vCam is passed as uniform or computed correctly.
+-    # For self-contained pseudocode, we assume vCam is available.
+-    
+-    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
+-}
+-
+-# Fragment Shader (Transparent Mode)
+-# Inputs: texPosition (vec4), vCam (vec3)
+-# Uniforms: u_data (sampler3D), u_slices (vec3), u_thresh (float), u_alphaScale (float)
+-#           u_clipCubeEnabled (bool), u_clipCubeMax (vec3), u_clipCubeMin (vec3)
+-#           u_clipPlaneXEnabled (bool), u_clipPlaneX (float), etc.
+-
+-void main() {
+-    // Normalize texture coordinates based on volume dimensions
+-    # Source [S5, unofficial] uses (texPosition / u_slices) + 0.5. 
+-    # This assumes texPosition is in voxel space or similar.
+-    vec3 texCoords = vec3(
+-        (texPosition.x / u_slices.x) + 0.5,
+-        (texPosition.y / u_slices.y) + 0.5,
+-        (texPosition.z / u_slices.z) + 0.5
+-    );
+-    
+-    // Sample volume data
+-    vec4 color = texture(u_data, texCoords);
+-    
+-    // Discard if below threshold
+-    if (color.r < u_thresh) {
+-        discard;
+-    }
+-    
+-    // Clipping logic
+-    if (u_clipCubeEnabled) {
+-        if (texPosition.x > u_clipCubeMax.x || texPosition.x < u_clipCubeMin.x) discard;
+-        if (texPosition.y > u_clipCubeMax.y || texPosition.y < u_clipCubeMin.y) discard;
+-        if (texPosition.z > u_clipCubeMax.z || texPosition.z < u_clipCubeMin.z) discard;
+-    }
+-    if (u_clipPlaneXEnabled) {
+-        if (texPosition.x > u_clipPlaneX) discard;
+-    }
+-    # Note: Source [S5, unofficial] has specific axis mappings for clip planes which may depend on rotation.
+-    # We implement generic checks.
+-    
++def vertex_shader(position, model_matrix, view_matrix, projection_matrix):
++    # Transform vertex to world space for texture coordinate calculation
++    tex_position = model_matrix @ vec4(position, 1.0)
++    
++    # Camera position in world space (inverse of view matrix applied to origin)
++    v_cam = inverse(view_matrix)[:3, 3]
++    
++    gl_Position = projection_matrix @ view_matrix @ model_matrix @ vec4(position, 1.0)
++    return tex_position, v_cam
++
++def fragment_shader(tex_position, v_cam, volume_texture, slices_dims, threshold, alpha_scale, 
++                    clip_cube_enabled, clip_cube_max, clip_cube_min,
++                    clip_plane_x_enabled, clip_plane_x, clip_plane_y_enabled, clip_plane_y,
++                    clip_plane_z_enabled, clip_plane_z):
++    # Normalize texture coordinates based on volume dimensions
++    tex_coords = vec3(
++        (tex_position.x / slices_dims.x) + 0.5,
++        (tex_position.y / slices_dims.y) + 0.5,
++        (tex_position.z / slices_dims.z) + 0.5
++    )
++    
++    # Sample volume data
++    color = sample_texture(volume_texture, tex_coords)
++    
++    # Discard if below threshold
++    if color.r < threshold:
++        return None
++    
++    # Clipping logic
++    if clip_cube_enabled:
++        if not (clip_cube_min.x <= tex_position.x <= clip_cube_max.x and
++                clip_cube_min.y <= tex_position.y <= clip_cube_max.y and
++                clip_cube_min.z <= tex_position.z <= clip_cube_max.z):
++            return None
++    if clip_plane_x_enabled and tex_position.x > clip_plane_x:
++        return None
++    if clip_plane_y_enabled and tex_position.z > clip_plane_y:
++        return None
++    if clip_plane_z_enabled and tex_position.y < clip_plane_z:
++        return None
++        
+     # Apply alpha scale
+-    color.a *= u_alphaScale;
+-    
+-    # For solid rendering, normal calculation and lighting would be added here.
+-    # For transparent, we output the sampled color/alpha.
+-    gl_FragColor = color;
+-}
+-
+-# Fragment Shader (Solid Mode with Lighting)
+-# Additional Uniforms: lightPos (vec3), lightPos2 (vec3), Ka, Kd, Ks, shininess, ambientLight, lightColour
+-
+-vec3 shading(vec3 N, vec3 V, vec3 L) {
+-    vec3 Ka = vec3(0.1, 0.1, 0.1);
+-    vec3 Kd = vec3(0.6, 0.6, 0.6);
+-    vec3 Ks = vec3(0.2, 0.2, 0.2);
+-    float shininess = 100.0;
+-    vec3 lightColour = vec3(1.0, 1.0, 1.0);
+-    vec3 ambientLight = vec3(0.3, 0.3, 0.3);
+-    
+-    vec3 H = normalize(L + V);
+-    vec3 ambient = Ka * ambientLight;
+-    
+-    float diffuseLight = max(dot(L, N), 0.0);
+-    vec3 diffuse = Kd * lightColour * diffuseLight;
+-    
+-    float specularLight = pow(max(dot(H, N), 0.0), shininess);
+-    if (diffuseLight <= 0.0) {
+-        specularLight = 0.0;
+-    }
+-    vec3 specular = Ks * lightColour * specularLight;
+-    
+-    return ambient + diffuse + specular;
+-}
+-
+-void main() {
+-    vec3 texCoords = vec3(
+-        (texPosition.x / u_slices.x) + 0.5,
+-        (texPosition.y / u_slices.y) + 0.5,
+-        (texPosition.z / u_slices.z) + 0.5
+-    );
+-    
+-    vec4 color = texture(u_data, texCoords);
+-    if (color.r < u_thresh) discard;
+-    
++    color.a *= alpha_scale
++    return color
++
++def shading(normal, view_dir, light_dir, Ka, Kd, Ks, shininess, light_colour, ambient_light):
++    half_vector = normalize(light_dir + view_dir)
++    ambient = Ka * ambient_light
++    diffuse_light = max(dot(light_dir, normal), 0.0)
++    diffuse = Kd * light_colour * diffuse_light
++    specular_light = pow(max(dot(half_vector, normal), 0.0), shininess)
++    if diffuse_light <= 0.0:
++        specular_light = 0.0
++    specular = Ks * light_colour * specular_light
++    return ambient + diffuse + specular
++
++def fragment_shader_solid(tex_position, v_cam, volume_texture, slices_dims, threshold, alpha_scale,
++                          light_pos1, light_pos2):
++    tex_coords = vec3(
++        (tex_position.x / slices_dims.x) + 0.5,
++        (tex_position.y / slices_dims.y) + 0.5,
++        (tex_position.z / slices_dims.z) + 0.5
++    )
++    
++    color = sample_texture(volume_texture, tex_coords)
++    if color.r < threshold:
++        return None
++        
+     # Compute Normal via Central Differences
+-    float delta = 1.0 / 256.0; # Assuming 256 dimension or normalized space
+-    # Note: Delta should be based on actual voxel spacing or texture resolution
+-    vec3 sample1, sample2;
+-    
+-    sample1 = texture(u_data, texCoords - vec3(delta, 0.0, 0.0));
+-    sample2 = texture(u_data, texCoords + vec3(delta, 0.0, 0.0));
+-    vec3 N_x = sample2.x - sample1.x;
+-    
+-    sample1 = texture(u_data, texCoords - vec3(0.0, delta, 0.0));
+-    sample2 = texture(u_data, texCoords + vec3(0.0, delta, 0.0));
+-    vec3 N_y = sample2.x - sample1.x;
+-    
+-    sample1 = texture(u_data, texCoords - vec3(0.0, 0.0, delta));
+-    sample2 = texture(u_data, texCoords + vec3(0.0, 0.0, delta));
+-    vec3 N_z = sample2.x - sample1.x;
+-    
+-    vec3 N = normalize(vec3(N_x, N_y, N_z));
+-    
+-    vec3 L1 = normalize(lightPos - vec3(texPosition));
+-    vec3 L2 = normalize(lightPos2 - vec3(texPosition));
+-    vec3 V = normalize(vCam - vec3(texPosition));
+-    
+-    vec3 shade1 = shading(N, V, L1);
+-    vec3 shade2 = shading(N, V, L2);
+-    
+-    color.rgb = shade1 + shade2;
+-    gl_FragColor = color;
+-}
++    delta = 1.0 / 256.0
++    sample1 = sample_texture(volume_texture, tex_coords - vec3(delta, 0.0, 0.0))
++    sample2 = sample_texture(volume_texture, tex_coords + vec3(delta, 0.0, 0.0))
++    N_x = sample2.x - sample1.x
++    
++    sample1 = sample_texture(volume_texture, tex_coords - vec3(0.0, delta, 0.0))
++    sample2 = sample_texture(volume_texture, tex_coords + vec3(0.0, delta, 0.0))
++    N_y = sample2.x - sample1.x
++    
++    sample1 = sample_texture(volume_texture, tex_coords - vec3(0.0, 0.0, delta))
++    sample2 = sample_texture(volume_texture, tex_coords + vec3(0.0, 0.0, delta))
++    N_z = sample2.x - sample1.x
++    
++    normal = normalize(vec3(N_x, N_y, N_z))
++    
++    L1 = normalize(light_pos1 - vec3(tex_position))
++    L2 = normalize(light_pos2 - vec3(tex_position))
++    V = normalize(v_cam - vec3(tex_position))
++    
++    # Lighting constants from [S5, unofficial]
++    Ka = vec3(0.1, 0.1, 0.1)
++    Kd = vec3(0.6, 0.6, 0.6)
++    Ks = vec3(0.2, 0.2, 0.2)
++    shininess = 100.0
++    light_colour = vec3(1.0, 1.0, 1.0)
++    ambient_light = vec3(0.3, 0.3, 0.3)
++    
++    shade1 = shading(normal, V, L1, Ka, Kd, Ks, shininess, light_colour, ambient_light)
++    shade2 = shading(normal, V, L2, Ka, Kd, Ks, shininess, light_colour, ambient_light)
++    
++    color.rgb = shade1 + shade2
++    return color
+ ```
+ 
+@@ -226,5 +195,5 @@
+ 
+ ### 2D Slice Replication Approach
+-A variant of object-aligned rendering where data is stored as a set of 2D texture slices. Proxy polygons are simple rectangles aligned with slices. To avoid data replication, slices can be reconstructed on the fly, incurring performance overhead. Sampling rate depends on volume resolution, which can be mitigated by adding intermediate slices and using trilinear interpolation [S9].
++A variant of object-aligned rendering where data is stored as a set of 2D texture slices. Proxy polygons are simple rectangles aligned with slices. To avoid data replication, slices can be reconstructed on the fly, incurring performance overhead. Sampling rate depends on volume resolution, which can be mitigated by adding intermediate slices and using trilinear interpolation [S9, unofficial].
+ 
+ ## Operating characteristics
+@@ -250,4 +219,4 @@
+ [S6] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+ [S7] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+-[S8] Volume Rendering Lecture Nov-30-2005 (Spanish), https://www.ciroduran.com/personal2/wp-content/uploads/2009/07/clase-volumerendering.pdf, fetched 2026-10-29 (unofficial)
+-[S9] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29+[S8] A Survey of GPU-Based Volume Rendering of ..., https://www.sci.utah.edu/~csilva/papers/rita2005.pdf, fetched 2026-10-29 (unofficial)
++[S9] Volume Rendering Lecture Nov-30-2005 (Spanish), https://www.ciroduran.com/personal2/wp-content/uploads/2009/07/clase-volumerendering.pdf, fetched 2026-10-29 (unofficial)

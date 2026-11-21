@@ -1,0 +1,133 @@
+# Interval Raymarching
+
+Also called: Affine Raymarching, Interval SDF Raymarching
+
+## Overview
+Interval Raymarching is a technique for accelerating signed distance field (SDF) raymarching by evaluating the SDF over an interval of the ray using affine or interval arithmetic, rather than at a single point [S1, unofficial]. It solves the problem of slow linear convergence in standard sphere tracing by enabling reliable linear interpolation (secant method) to find the surface zero, achieving superlinear (phi-degree) convergence [S1, unofficial]. Unlike sphere tracing, which guarantees no-penetration via conservative step sizes, Interval Raymarching uses the bounds of the arithmetic to verify if the surface *could* exist within the interval, allowing larger steps while maintaining correctness [S1, unofficial].
+
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), SDF function $f(\mathbf{p})$, maximum distance $t_{max}$, maximum iterations $N_{max}$, and an epsilon $\epsilon$ for termination [S1, unofficial].
+**Outputs:** Intersection distance $t$, surface normal $\mathbf{n}$, and hit status [S1, unofficial].
+
+**Data Structures:**
+*   **Affine Form:** A representation of the SDF value over an interval $[t_{start}, t_{end}]$ as:
+    $$ \tilde{f}(t) = f_0 + \sum_{i=1}^{n} f_i \epsilon_i + f_{err} $$
+    where $f_0$ is the central value, $f_i$ are coefficients for independent noise variables $\epsilon_i \in [-1, 1]$, and $f_{err}$ is the remainder bound [S1, unofficial].
+*   **Interval:** A pair $[t_{min}, t_{max}]$ representing the range of distances along the ray being evaluated [S1, unofficial].
+
+**Numbered Steps:**
+1.  Initialize current distance $t = 0$.
+2.  Define an interval $[t, t + \Delta t]$ for the next step. The size $\Delta t$ can be adaptive or fixed, but must be large enough to make progress yet small enough to keep the affine error bound tight [S1, unofficial].
+3.  Evaluate the SDF $f(\mathbf{p})$ over the interval using affine arithmetic. This produces an affine form $\tilde{f}$ representing the range of SDF values for all points $\mathbf{p} = \mathbf{o} + \tau\mathbf{d}$ where $\tau \in [t, t + \Delta t]$ [S1, unofficial].
+4.  Check if the interval contains zero. If the lower bound of the affine form is $> 0$ or the upper bound is $< 0$, the surface does not intersect this interval. Proceed to step 6 [S1, unofficial].
+5.  If the interval contains zero (i.e., lower bound $\le 0$ and upper bound $\ge 0$), the surface *may* intersect this interval. Use the affine form to reliably linearly interpolate (method of secants) to find the approximate zero of the SDF within this interval. This provides a new, more accurate estimate for $t$ [S1, unofficial].
+6.  If the zero is found within tolerance $\epsilon$, compute the surface normal $\mathbf{n}$ using the gradient of the affine form (or standard finite differences if precision requires) and terminate [S1, unofficial].
+7.  If no zero is found or the interval was skipped, update $t$ to the end of the interval (or the interpolated zero if found but not converged) and repeat from step 2 [S1, unofficial].
+8.  Terminate if $t > t_{max}$ or iterations exceed $N_{max}$ [S1, unofficial].
+
+**Formulas:**
+*   **Affine Evaluation:** The SDF value at any point in the interval is bounded by:
+    $$ [\tilde{f}]_{min} = f_0 - \sum_{i=1}^{n} |f_i| - f_{err}, \quad [\tilde{f}]_{max} = f_0 + \sum_{i=1}^{n} |f_i| + f_{err} $$
+    The interval contains zero if $[\tilde{f}]_{min} \le 0 \le [\tilde{f}]_{max}$ [S1, unofficial].
+*   **Secant Interpolation:** To find the zero within the interval, linearly interpolate between the endpoints of the interval using the affine form's central value and gradient approximation [S1, unofficial].
+
+**Parameters:**
+*   $\epsilon$: Epsilon for gradient approximation and termination. Should be comparable to the projected pixel size to attenuate aliasing [S1, unofficial].
+*   $\Delta t$: Step size. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Underestimate SDF:** If the SDF function underestimates the true distance, the algorithm may fail to detect intersections or produce incorrect results. Conservative-estimate SDFs are required [S1, unofficial].
+*   **Affine Error Bound:** If the error bound $f_{err}$ is too large, the interval check may always return "contains zero," leading to excessive refinement. Reduced affine arithmetic can mitigate this [S1, unofficial].
+*   **Degenerate Input:** Rays parallel to surfaces or grazing angles may require smaller intervals or special handling to maintain precision [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def interval_raymarch(ray_origin, ray_direction, sdf_func, max_dist, max_steps, epsilon):
+    t = 0.0
+    for i in range(max_steps):
+        if t > max_dist:
+            return False, None, t
+        
+        # Define interval [t, t + step]
+        # Step size selection is not specified in sources [G]
+        step = compute_step_size(t, ray_direction, sdf_func) 
+        t_end = t + step
+        
+        # Evaluate SDF over interval using affine arithmetic
+        # Returns affine form: (central_value, coefficients, error_bound)
+        affine_form = evaluate_sdf_affine(sdf_func, ray_origin, ray_direction, t, t_end)
+        
+        # Check if interval contains zero
+        lower_bound = affine_form.central - sum(abs(c) for c in affine_form.coeffs) - affine_form.error
+        upper_bound = affine_form.central + sum(abs(c) for c in affine_form.coeffs) + affine_form.error
+        
+        if lower_bound > 0 or upper_bound < 0:
+            # No intersection in this interval, skip
+            t = t_end
+            continue
+        
+        # Interval contains zero; use secant method to find approximate zero
+        # Use affine form to interpolate
+        t_zero = interpolate_zero(affine_form, t, t_end)
+        
+        # Check for convergence
+        p = ray_origin + ray_direction * t_zero
+        val = sdf_func(p)
+        if abs(val) < epsilon:
+            # Compute normal from affine form gradient or finite differences
+            normal = compute_normal(sdf_func, p, epsilon)
+            return True, normal, t_zero
+        
+        # Update t to the found zero for next iteration
+        t = t_zero
+        
+    return False, None, t
+
+def evaluate_sdf_affine(sdf_func, origin, direction, t_start, t_end):
+    # This function implements affine arithmetic evaluation of the SDF
+    # over the interval [t_start, t_end].
+    # It returns an affine form representing the range of SDF values.
+    # Implementation details depend on the specific affine arithmetic library or method.
+    # Not given in the sources. [G]
+    pass
+
+def interpolate_zero(affine_form, t_start, t_end):
+    # Linear interpolation using the affine form to find the zero crossing
+    # Not given in the sources. [G]
+    pass
+
+def compute_step_size(t, direction, sdf_func):
+    # Adaptive step size calculation
+    # Not given in the sources. [G]
+    pass
+
+def compute_normal(sdf_func, point, epsilon):
+    # Compute surface normal using finite differences
+    # Not given in the sources. [G]
+    pass
+```
+
+## Subtopics
+
+### Reduced Affine Arithmetic
+A variant that reduces the error bound by tracking dependencies between variables, improving precision for complex SDFs. Choose when standard affine arithmetic yields too large error bounds. [S1, unofficial]
+
+### Interval Arithmetic Raytracing
+A broader category that includes Interval Raymarching but applies to general implicit functions, not just SDFs. Choose when dealing with non-distance-based implicit surfaces. [S1, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** Superlinear convergence (phi-degree) compared to linear convergence in sphere tracing, potentially reducing iteration counts significantly [S1, unofficial]. However, each iteration involves more expensive affine arithmetic operations [S1, unofficial].
+*   **Memory Complexity:** Requires storing affine forms, which have higher memory overhead than scalar values [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Faster convergence for SDFs; inherently provides gradient approximation for lighting; avoids penetration issues through interval checking [S1, unofficial].
+*   **Limitations:** Requires conservative SDFs; affine arithmetic can be complex to implement; error bounds may lead to excessive refinement if not managed [S1, unofficial].
+*   **When to Use:** When rendering complex SDF scenes with high iteration counts in standard sphere tracing; when gradient information is needed for lighting [S1, unofficial].
+*   **When Not to Use:** For simple scenes where sphere tracing is sufficient; when SDFs are not conservative [S1, unofficial].
+
+## Background
+Interval Raymarching was proposed by Kragen Javier Sitaker in 2019, inspired by discussions with banyaszvonat and prior work on interval arithmetic in raytracing by Jorge Eliecer Florez Diaz [S1, unofficial]. It builds on the popularity of SDF raymarching in the demoscene and implicit CAD systems [S1, unofficial]. The technique leverages affine arithmetic to achieve faster convergence than the linear convergence of sphere tracing [S1, unofficial].
+
+## Sources
+[S1] Interval raymarching ⁑ Dercuano, https://dercuano.github.io/notes/interval-raymarching.html, fetched 2026-10-30 (unofficial)

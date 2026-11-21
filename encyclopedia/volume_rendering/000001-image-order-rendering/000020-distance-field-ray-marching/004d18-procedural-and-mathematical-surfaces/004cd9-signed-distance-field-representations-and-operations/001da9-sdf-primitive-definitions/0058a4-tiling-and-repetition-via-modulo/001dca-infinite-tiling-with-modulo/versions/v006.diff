@@ -1,0 +1,134 @@
+--- v005.md
++++ v006.md
+@@ -4,14 +4,10 @@
+ 
+ ## Overview
+-Infinite Tiling with Modulo is a technique for rendering infinite, repeating patterns of a single Signed Distance Field (SDF) primitive by folding space using the modulo operator [S1, S2, unofficial]. It solves the problem of representing unbounded periodic geometry (such as crystal lattices or fractal structures) without explicit mesh instances, allowing a single SDF evaluation to tile the scene infinitely at essentially zero extra computational cost [S3, unofficial]. Unlike [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md), which requires explicit enumeration of objects, this method implicitly generates infinite instances by mapping any world-space coordinate back to a canonical local tile [S2, unofficial].
++Infinite Tiling with Modulo is a technique for rendering infinite, repeating patterns of a single Signed Distance Field (SDF) primitive by folding space using the modulo operator [S1, S2, unofficial]. It allows a single primitive SDF to be tiled infinitely at essentially zero extra computational cost, enabling the creation of ray-marched fractals like Mandelbulbs and Menger sponges [S3, unofficial]. Unlike explicit mesh instances, it generates infinite geometry procedurally by mapping query points into a periodic local coordinate system [S2, unofficial].
+ 
+ ## How it works
+-The method transforms the sampling point $\mathbf{p}$ into a periodic coordinate system before evaluating the base SDF. This ensures that all points in space are mapped to the nearest instance of the primitive within a repeating unit cell.
+-
+ **Inputs and Outputs:**
+-*   **Input:** $\mathbf{p} \in \mathbb{R}^3$, the world-space position of the ray sample.
+-*   **Input:** $c \in \mathbb{R}$, the period or tile size (must be positive) [S2, S4, unofficial].
+-*   **Input:** $\mathbf{o} \in \mathbb{R}^3$, an optional offset vector used to center the tile or shift the grid origin [S1, unofficial].
+-*   **Output:** $\mathbf{q} \in \mathbb{R}^3$, the folded local coordinate within the unit cell.
++*   **Input:** Query point $\mathbf{p} \in \mathbb{R}^3$, tile period $c \in \mathbb{R}$ (scalar or vector).
++*   **Output:** Transformed point $\mathbf{q} \in \mathbb{R}^3$ mapped to the fundamental tile cell.
+ 
+ **Data Structures:**
+@@ -19,67 +15,70 @@
+ 
+ **Steps:**
+-1.  **Shift:** Add the offset $\mathbf{o}$ to the input position $\mathbf{p}$ to adjust the grid origin.
+-2.  **Modulo:** Apply the modulo operator with period $c$ to each component of the shifted position.
+-3.  **Center:** Subtract half the period ($c/2$) from the result to center the tile at the origin (or at $\mathbf{o}$ if offset is used).
+-
+-**Formula:**
+-$$ \mathbf{q} = \text{mod}(\mathbf{p} + \mathbf{o}, c) - \frac{c}{2} $$
+-
+-Where $\text{mod}(x, c)$ is the floating-point remainder operation, typically defined as $x - c \cdot \lfloor x/c \rfloor$.
++1.  **Calculate Periodic Coordinate:** Apply the modulo operation to the query point $\mathbf{p}$ using the period $c$. To center the tile at the origin (ensuring the SDF primitive is evaluated symmetrically), an offset is typically added before the modulo, and the result is shifted back.
++    $$ \mathbf{q} = \text{mod}(\mathbf{p} + \mathbf{offset}, c) - \frac{c}{2} $$
++    Where $\mathbf{offset}$ is often chosen to center the primitive within the tile (e.g., $\mathbf{offset} = c/2$) [S1, S2, unofficial].
++2.  **Evaluate SDF:** Evaluate the base SDF primitive $f(\mathbf{q})$ using the transformed point $\mathbf{q}$ [S2, unofficial].
+ 
+ **Parameters:**
+-*   $c$: The size of the repeating tile. Lower values increase object density; higher values increase spacing [S2, unofficial].
+-*   $\mathbf{o}$: Offset. A common value is $\mathbf{o} = (1.5, 1.5, 1.5)$ when $c=3.0$ to center the tile at the origin [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Negative Coordinates:** Standard modulo implementations in some languages or hardware may return negative results for negative inputs, or the centering logic may fail if the input space is not handled correctly. The formula $\text{mod}(p, c) - c/2$ assumes the modulo result is in $[0, c)$. If the modulo implementation returns values in $(-c/2, c/2]$, the centering step changes [S2, S4, unofficial].
+-*   **Zero Period:** $c=0$ causes division by zero in the modulo operation.
+-*   **Precision:** For very large world coordinates, floating-point precision errors in the modulo operation can cause visible artifacts or "popping" as the ray marches. Bounding volume checks or local coordinate transformations are often used in production to mitigate this [S3, unofficial].
++*   $c$: The period or size of the tile. Lower values make objects appear closer; higher values make them further apart [S2, unofficial].
++*   $\mathbf{offset}$: Added before modulo to center the tile at the origin. A common value is $c/2$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def repeat(p: Vector3, c: float, offset: Vector3 = Vector3(0, 0, 0)) -> Vector3:
++def repeat(p: Vector3, c: float) -> Vector3:
+     """
+-    Folds space to create infinite tiling of an SDF primitive.
++    Maps point p into the fundamental tile cell of size c centered at origin.
++    Implements: q = mod(p + c/2, c) - c/2
++    """
++    # Add offset to center the tile at origin before modulo
++    # c/2 is the standard offset to ensure symmetry around 0
++    offset = c / 2.0
+     
+-    Args:
+-        p: World space position.
+-        c: Tile period/size.
+-        offset: Optional offset to shift the grid origin.
+-        
+-    Returns:
+-        Folded local position within the unit cell.
+-    """
+-    # Step 1: Shift by offset
+-    shifted = p + offset
++    # Apply modulo
++    # Note: Standard modulo operator behavior varies by language.
++    # In GLSL/HLSL, mod(x, y) returns x - y * floor(x / y).
++    # This ensures the result is in [0, y).
++    q = mod(p + offset, c)
+     
+-    # Step 2: Modulo operation
+-    # Note: Standard fmod(x, y) returns x - y * trunc(x/y)
+-    # This results in a value in (-c, c). 
+-    # To ensure [0, c), we adjust negative results.
+-    mod_val = fmod(shifted, c)
+-    mod_val = select(mod_val < 0.0, mod_val + c, mod_val)
+-    
+-    # Step 3: Center the tile
+-    # Subtracting c/2 centers the tile around the origin (or offset)
+-    q = mod_val - (c / 2.0)
++    # Shift back to center at origin: result in [-c/2, c/2)
++    q = q - offset
+     
+     return q
++
++def infinite_tile_sdf(p: Vector3, c: float, base_sdf_func) -> float:
++    """
++    Evaluates an SDF for an infinite tiling of a base primitive.
++    """
++    # Transform point to local tile coordinate
++    q = repeat(p, c)
++    
++    # Evaluate base SDF at transformed point
++    # The base_sdf_func must satisfy Lipschitz condition 1
++    distance = base_sdf_func(q)
++    
++    return distance
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** Floating-point precision errors in the modulo operation can cause visible seams or artifacts at tile boundaries if the SDF is not continuous or if the primitive touches the boundary [S2, unofficial].
++*   **Boundary Conditions:** If the primitive SDF extends to the boundary of the tile, the distance field may become discontinuous or incorrect at the tile edges because the modulo operation folds space abruptly. The primitive should be strictly contained within the tile cell (i.e., $f(\mathbf{q}) > 0$ at the tile boundaries) to ensure correct distance values [S2, unofficial].
++*   **Negative Coordinates:** Standard modulo implementations may behave differently with negative inputs. The offset strategy ($\mathbf{p} + c/2$) helps normalize the input range, but care must be taken with languages where `mod` returns negative values for negative inputs [S4, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Finite Tiling
+-A variant that produces a finite number of repetitions of a shape by limiting the tiling to a specific box [S4, unofficial]. It takes an additional vector $\vec{l}$ as input, representing the corner of the box used to limit the number of repetitions. The implementation typically involves checking if the folded coordinate $\mathbf{q}$ lies within the bounds defined by $\vec{l}$ and returning an infinite distance (or a large value) if it is outside, effectively clipping the infinite grid [S4, unofficial].
++A variant of Infinite Tiling which produces a finite number of repetitions of a shape [S4, unofficial]. It takes an additional vector $\vec{l}$ as input, where $\vec{l}$ is the corner of the box used to limit the number of repetitions of the shape [S4, unofficial]. This is achieved by combining the modulo tiling with a box SDF subtraction or by clamping the transformed coordinates [S4, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(1)$ per sample. The modulo operation is a constant-time arithmetic operation.
+-*   **Memory Complexity:** $O(1)$. No additional memory is required beyond the input and output vectors.
+-*   **Performance:** Enables rendering of fractals (e.g., Mandelbulbs, Menger sponges) and infinite scenes at real-time frame rates, as scene complexity does not grow with the number of visible instances [S3, unofficial].
+-*   **Strengths:** Extremely efficient for periodic structures; no need for scene graphs or instance buffers.
+-*   **Limitations:** Cannot represent non-periodic or sparse infinite structures without additional logic. Precision issues may arise at extreme coordinate magnitudes.
++*   **Memory Complexity:** $O(1)$. No additional memory is required beyond the base SDF evaluation.
++*   **Performance:** Enables rendering of infinite geometry at essentially zero extra cost compared to a single primitive [S3, unofficial]. This makes it suitable for real-time ray marching of fractals and dense patterns.
++*   **Strengths:** Extremely efficient for creating infinite repeating structures; no mesh generation or instance management required.
++*   **Limitations:** Cannot represent non-repeating or sparse infinite structures; requires careful primitive sizing to avoid boundary artifacts; limited to periodic patterns.
++*   **When to use:** When rendering infinite grids, crystals, or fractals where the pattern repeats periodically.
++*   **When not to use:** When the scene requires non-periodic geometry, finite instances with varying scales/rotations (unless combined with other techniques), or when the primitive size is comparable to the tile size (leading to self-intersection artifacts).
+ 
+ ## Background
+-The technique is foundational in ray marching and procedural geometry, popularized by demoscene artists and researchers like Inigo Quilez, who used it to create fractals such as the Menger sponge [S2, S3, unofficial]. It leverages the mathematical property of periodicity to reuse a single distance function, a concept central to procedural texture generation and implicit modeling.
++The technique is a fundamental building block in procedural ray marching, popularized by Inigo Quilez and others in the demoscene and real-time graphics community [S2, S3, unofficial]. It leverages the mathematical property of the modulo function to create periodic space folding, allowing a single analytical surface to represent an infinite array of objects [S2, unofficial]. It is widely used in the creation of ray-marched fractals such as Mandelbulbs and Menger sponges [S3, unofficial].
+ 
+ ## Sources

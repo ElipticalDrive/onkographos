@@ -1,0 +1,350 @@
+--- v002.md
++++ v003.md
+@@ -4,48 +4,45 @@
+ 
+ ## Overview
+-Autoencoder/Autodecoder Conditioning enables a single neural field to represent multiple distinct geometric instances by associating each instance with a unique latent vector $z$. Unlike concatenation conditioning which injects $z$ into the coordinate stream, this method treats $z$ as a global context parameter optimized per-shape, allowing the network to learn a structured shape space rather than just overfitting a single geometry [S1, unofficial][S2, unofficial]. It is chosen when the goal is to learn a manifold of shapes or to generalize across a dataset of similar objects, as opposed to rendering a single static scene [S2, unofficial].
++Autoencoder/Autodecoder Conditioning is a method for training neural fields to represent multiple data instances (e.g., shapes or images) by associating a unique, learnable latent vector $z_j$ with each instance $j$ [S1, unofficial][S2, unofficial]. It solves the problem of multi-instance representation without requiring a separate encoder network during inference, distinguishing itself from Concatenation Conditioning (which concatenates $z$ to input coordinates) and HyperNetwork Conditioning (which uses a secondary network to generate weights) [S1, unofficial][S2, unofficial]. The method optimizes the latent vectors jointly with the network weights during training and, for test shapes, optimizes $z$ per-instance to achieve reconstruction [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A set of training shapes $\{S_j\}_{j \in J}$, where each shape is represented by sampled points (and optionally normals or depth).
+-*   **Output:** A trained MLP $f(x; \theta, z_j)$ and optimized latent vectors $\{z_j\}$ that define the geometry of each shape $j$.
++**Inputs and Outputs:**
++*   **Input:** A set of training examples $J$ (e.g., point clouds or images). For each example $j \in J$, a latent vector $z_j \in \mathbb{R}^L$ is required.
++*   **Output:** A trained neural field $f(x; \theta, z_j)$ that predicts volumetric properties (e.g., SDF, density, color) for query coordinates $x$, conditioned on the specific latent code $z_j$.
+ 
+-**Data Structures**
+-*   **Latent Vector ($z_j$):** A learnable parameter vector for each shape $j$.
+-    *   Dimension: $L$. Typically $L=256$ for shape space learning experiments [S1, unofficial]. For standard single-shape reconstruction, $L=0$ is used, effectively removing the latent code [S1, unofficial].
+-    *   Initialization: $z_j \leftarrow \mathbf{0} \in \mathbb{R}^L$ [S1, unofficial].
+-*   **MLP Architecture:**
+-    *   Input dimension: $3 + L$ (3 for spatial coordinates $x$, $L$ for latent code $z$) [S1, unofficial].
+-    *   Layer Sequence:
+-        1.  $FC^+$ (Fully Connected + Softplus)
+-        2.  $FC^+$
+-        3.  $FC^+$
+-        4.  $FC^+$
+-        5.  $FC$ (Linear, output 512)
+-        6.  $FC^+$
+-        7.  $FC^+$
+-        8.  $FC$ (Linear, final output)
+-    *   Skip Connection: Direct connection from the input $(x, z)$ to the 4th layer [S1, unofficial].
+-    *   Activation: Softplus, defined as $\text{softplus}(x) = \frac{1}{\beta} \ln(1 + e^{\beta x})$ with $\beta = 100$ [S1, unofficial].
++**Data Structures:**
++*   **Latent Vector $z_j$:** A learnable parameter tensor of size $L$. In shape reconstruction, $L$ may be 0 (effectively a shared network), but for shape space learning, $L=256$ is typical [S1, unofficial].
++*   **Network Architecture:** A Multi-Layer Perceptron (MLP) where the input dimension is $3 + L$ (3 for spatial coordinates $x$, $L$ for latent code $z_j$) [S1, unofficial].
+ 
+-**Algorithm**
+-The method operates in two phases: training and inference.
++**Algorithm Steps:**
++1.  **Initialization:** For each training example $j \in J$, initialize the latent vector $z_j$ to zero: $z_j \leftarrow \mathbf{0} \in \mathbb{R}^L$ [S1, unofficial].
++2.  **Network Definition:** Define the MLP $f$ with input dimension $3+L$. The architecture typically consists of fully connected (FC) layers with skip connections. Specifically, a skip connection connects the input directly to the 4th layer [S1, unofficial].
++3.  **Loss Calculation:** For a batch $B \subset J$, compute the total loss:
++    $$ \mathcal{L} = \frac{1}{|B|} \sum_{j \in B} \ell(\theta, z_j) + \alpha \|z_j\|_2 $$
++    where $\ell$ is the task-specific loss (e.g., Chamfer distance, depth loss, silhouette loss) [S1, unofficial][S3], and $\alpha$ is the regularization weight [S1, unofficial].
++4.  **Optimization:** Update both the network weights $\theta$ and the latent vectors $\{z_j\}_{j \in B}$ using an optimizer (e.g., Adam) to minimize $\mathcal{L}$ [S1, unofficial].
++5.  **Test-Time Inference:** For a new test shape, obtain the final reconstruction by optimizing the latent vector $z$ for 800 iterations using the task-specific loss $\ell$ [S1, unofficial].
+ 
+-1.  **Training Phase:**
+-    For each batch $B \subset J$:
+-    a. Sample spatial points $x$ from the shapes in $B$.
+-    b. Compute the reconstruction loss $\ell(\theta, z_j)$ for each $j \in B$ based on the MLP output $f(x; \theta, z_j)$ compared to ground truth (e.g., SDF values, normals, or depth) [S1, unofficial].
+-    c. Compute the total loss:
+-       $$ \mathcal{L} = \frac{1}{|B|} \sum_{j \in B} \left( \ell(\theta, z_j) + \alpha \|z_j\|_2 \right) $$
+-       where $\alpha = 0.01$ is the regularization weight [S1, unofficial].
+-    d. Update parameters $\theta$ and latent vectors $z_j$ using an optimizer (e.g., Adam) [S1, unofficial].
++**Network Architecture Details:**
++The MLP uses Fully Connected (FC) layers. An "FC+" layer is defined as an FC layer followed by a Softplus activation [S1, unofficial].
++*   **Activation:** Softplus with $\beta = 100$:
++    $$ \text{Softplus}(x) = \frac{1}{\beta} \ln(1 + e^{\beta x}) $$
++*   **Layer Sequence:**
++    1.  Input ($3+L$) $\to$ FC+
++    2.  FC+
++    3.  FC+
++    4.  FC+ (Skip connection from Input)
++    5.  FC+ (Hidden size 512)
++    6.  FC+
++    7.  FC+
++    8.  FC (Output)
++    [S1, unofficial]
+ 
+-2.  **Inference Phase (Test Shapes):**
+-    For a test shape $k$:
+-    a. Initialize $z_k \leftarrow \mathbf{0}$ [S1, unofficial].
+-    b. Optimize $z_k$ for 800 iterations using the loss $\ell(\theta, z_k)$ with fixed $\theta$ [S1, unofficial].
+-    c. Use the final $z_k$ and $\theta$ to evaluate $f(x; \theta, z_k)$ for rendering or reconstruction.
++**Parameters:**
++*   $L$: Latent vector size. $L=256$ for shape space experiments [S1, unofficial].
++*   $\alpha$: Regularization weight. Typical value $\alpha = 0.01$ [S1, unofficial].
++*   $\beta$: Softplus smoothness parameter. $\beta = 100$ [S1, unofficial].
+ 
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+ import torch
+@@ -57,165 +54,105 @@
+         super().__init__()
+         self.beta = beta
++
+     def forward(self, x):
+         return (1.0 / self.beta) * torch.log(1 + torch.exp(self.beta * x))
+ 
+-class ConditionalMLP(nn.Module):
++class AutoDecoderMLP(nn.Module):
+     def __init__(self, latent_dim=256):
+         super().__init__()
+         self.latent_dim = latent_dim
+-        # Layer definitions: FC+ means Linear -> Softplus
+-        # Input: 3 (coords) + L (latent)
+-        self.fc1 = nn.Linear(3 + latent_dim, 512)
+-        self.act1 = Softplus()
++        input_dim = 3 + latent_dim
++        
++        # Layer sequence: FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC
++        # Skip connection from input to 4th layer
++        self.fc1 = nn.Linear(input_dim, 512)
+         self.fc2 = nn.Linear(512, 512)
+-        self.act2 = Softplus()
+         self.fc3 = nn.Linear(512, 512)
+-        self.act3 = Softplus()
+         self.fc4 = nn.Linear(512, 512)
+-        self.act4 = Softplus()
+-        # Skip connection to 4th layer (index 3 in 0-based list of hidden layers before output)
+-        # The architecture description says: FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC
+-        # Let's map strictly:
+-        # 1. FC+ (512)
+-        # 2. FC+ (512)
+-        # 3. FC+ (512)
+-        # 4. FC+ (512) -- Skip connection from input here? 
+-        # Source says: "FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC"
+-        # And "skip connection connects the input directly to the 4th layer".
+-        # Assuming 4th layer is the 4th transformation.
++        self.fc5 = nn.Linear(512, 512)
++        self.fc6 = nn.Linear(512, 512)
++        self.fc7 = nn.Linear(512, 1) # Output dimension depends on task (e.g., SDF)
+         
+-        # Re-interpreting source layout:
+-        # Layer 1: FC+ (512)
+-        # Layer 2: FC+ (512)
+-        # Layer 3: FC+ (512)
+-        # Layer 4: FC+ (512) -- Input skips to here? Or is the "4th layer" the one before the "512" block?
+-        # Source: "FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC"
+-        # "dashed line connecting the input to the 4th layer"
+-        # Usually, skip connections go to the layer *after* the concatenation or the layer itself.
+-        # Let's assume standard ResNet-style or DenseNet-style addition.
+-        # However, the text says "FC+ ... -> 512". This implies the 4th FC+ outputs 512.
+-        # Then "512" might be a bottleneck or just a label for the next layer?
+-        # Actually, looking at SAL (Atzmon et al.), the architecture is often:
+-        # Input -> FC+ -> FC+ -> FC+ -> FC+ -> FC (512) -> FC+ -> FC+ -> FC
+-        # With skip connection from Input to the 4th layer (the 4th FC+).
+-        
+-        self.fc5 = nn.Linear(512, 512) # The "512" block might be a linear layer without activation?
+-        # Source: "FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC"
+-        # It lists 8 layers.
+-        # 1. FC+
+-        # 2. FC+
+-        # 3. FC+
+-        # 4. FC+
+-        # 5. FC (Linear, 512) -- No activation mentioned for this specific "512" step? 
+-        # Or is "512" the output size of the 4th layer?
+-        # "FC+ ... -> 512" usually means the layer outputs 512.
+-        # Let's assume the "512" is a Linear layer without activation, acting as a bottleneck or transition.
+-        
+-        self.fc6 = nn.Linear(512, 512)
+-        self.act6 = Softplus()
+-        self.fc7 = nn.Linear(512, 512)
+-        self.act7 = Softplus()
+-        self.fc8 = nn.Linear(512, 1) # Final output (SDF/Value)
++        self.softplus = Softplus(beta=100)
+ 
+     def forward(self, x, z):
+-        # x: [B, 3], z: [B, L]
++        # x: (N, 3), z: (N, L)
++        # Concatenate x and z
+         input_vec = torch.cat([x, z], dim=1)
+         
+-        h1 = self.act1(self.fc1(input_vec))
+-        h2 = self.act2(self.fc2(h1))
+-        h3 = self.act3(self.fc3(h2))
+-        h4 = self.act4(self.fc4(h3))
++        h = self.softplus(self.fc1(input_vec))
++        h = self.softplus(self.fc2(h))
++        h = self.softplus(self.fc3(h))
+         
+-        # Skip connection to 4th layer (h4)
+-        # If the skip connects to the input of the 4th layer, it would be h3.
+-        # If it connects to the output of the 4th layer, it's h4.
+-        # "connects the input directly to the 4th layer" usually means adding to the 4th layer's output or input.
+-        # In SAL, the skip connection is from input to the 4th layer's output (h4) before the next layer?
+-        # Or is it h4 = act4(fc4(h3) + input)?
+-        # Let's assume additive skip connection to the 4th layer's output as per common practice in such architectures (e.g. DeepSDF/SAL).
+-        # However, the text says "FC+ -> ... -> FC+ -> 512".
+-        # Let's stick to the sequence:
+-        # h1 = act(fc1(inp))
+-        # h2 = act(fc2(h1))
+-        # h3 = act(fc3(h2))
+-        # h4 = act(fc4(h3))
+-        # h5 = fc5(h4) # The "512" layer
+-        # h6 = act(fc6(h5))
+-        # h7 = act(fc7(h6))
+-        # out = fc8(h7)
++        # Skip connection to 4th layer
++        h = self.softplus(self.fc4(torch.cat([h, input_vec], dim=1)))
+         
+-        # Re-reading: "FC+ -> FC+ -> FC+ -> FC+ -> 512 -> FC+ -> FC+ -> FC"
+-        # This lists 8 blocks.
+-        # 1. FC+
+-        # 2. FC+
+-        # 3. FC+
+-        # 4. FC+
+-        # 5. 512 (Linear)
+-        # 6. FC+
+-        # 7. FC+
+-        # 8. FC
+-        
+-        # Skip connection to 4th layer.
+-        # If we add input to h4:
+-        h4_with_skip = h4 + input_vec 
+-        
+-        h5 = self.fc5(h4_with_skip)
+-        h6 = self.act6(self.fc6(h5))
+-        h7 = self.act7(self.fc7(h6))
+-        out = self.fc8(h7)
++        h = self.softplus(self.fc5(h))
++        h = self.softplus(self.fc6(h))
++        out = self.fc7(h)
+         return out
+ 
+-def train_autoencoder(shapes, num_shapes, epochs=100000, batch_size=32, alpha=0.01):
+-    # Initialize latent codes
+-    z = torch.zeros(num_shapes, 256, requires_grad=True)
+-    
+-    # Initialize MLP
+-    model = ConditionalMLP(latent_dim=256)
+-    optimizer = optim.Adam(list(model.parameters()) + [z], lr=1e-4)
+-    
+-    for epoch in range(epochs):
+-        # Sample batch of shape indices
+-        batch_indices = torch.randint(0, num_shapes, (batch_size,))
+-        
++def train_auto_decoder(model, latent_vectors, optimizer, data_loader, alpha=0.01, iterations=100000):
++    """
++    model: AutoDecoderMLP instance
++    latent_vectors: Tensor of shape (num_shapes, L), initialized to 0
++    optimizer: Optimizer for both model.parameters() and latent_vectors
++    data_loader: Yields batches of (points, labels)
++    """
++    for step in range(iterations):
+         optimizer.zero_grad()
+         
+-        total_loss = 0
+-        for idx in batch_indices:
+-            # Sample points x from shape shapes[idx]
+-            x = sample_points(shapes[idx]) # [B_local, 3]
+-            
+-            # Get latent code
+-            z_j = z[idx] # [256]
+-            z_j = z_j.expand(x.size(0), -1) # [B_local, 256]
+-            
+-            # Forward pass
+-            pred = model(x, z_j) # [B_local, 1]
+-            
+-            # Compute reconstruction loss l(theta, z_j)
+-            # Placeholder for specific loss (SDF, depth, etc.)
+-            loss_recon = compute_reconstruction_loss(pred, x, shapes[idx])
+-            
+-            # Regularization
+-            loss_reg = alpha * torch.norm(z_j)
+-            
+-            total_loss += loss_recon + loss_reg
+-            
+-        total_loss /= batch_size
+-        total_loss.backward()
++        # Sample batch of shapes and their corresponding points
++        # Assume data_loader yields (points, labels) for a batch of shapes
++        # and we have a mapping from batch index to latent vector index
++        batch_points, batch_labels = next(data_loader)
++        
++        # Retrieve latent vectors for the current batch
++        # This requires a mapping from batch indices to latent vector indices
++        # For simplicity, assuming batch corresponds to a subset of latent vectors
++        batch_latents = latent_vectors[batch_indices] 
++        
++        # Forward pass
++        predictions = model(batch_points, batch_latents)
++        
++        # Compute task-specific loss l(theta, z_j)
++        # Example: Chamfer distance or L2 loss against labels
++        task_loss = compute_task_loss(predictions, batch_labels)
++        
++        # Compute L2 regularization on latent codes
++        reg_loss = torch.norm(batch_latents, p=2)
++        
++        # Total loss
++        loss = task_loss + alpha * reg_loss
++        
++        loss.backward()
+         optimizer.step()
+ 
+-def infer_test_shape(model, test_shape, iterations=800, lr=1e-4):
+-    z_test = torch.zeros(256, requires_grad=True)
+-    optimizer = optim.Adam([z_test], lr=lr)
++def test_reconstruction(model, test_points, optimizer, alpha=0.01, iterations=800):
++    """
++    Optimize a single latent vector z for a test shape.
++    """
++    # Initialize z to 0
++    z = torch.zeros(1, model.latent_dim, requires_grad=True)
+     
+-    for _ in range(iterations):
+-        optimizer.zero_grad()
+-        x = sample_points(test_shape)
+-        pred = model(x, z_test.expand(x.size(0), -1))
+-        loss = compute_reconstruction_loss(pred, x, test_shape)
++    # Create optimizer for z only
++    optimizer_z = optim.Adam([z], lr=0.0001)
++    
++    for step in range(iterations):
++        optimizer_z.zero_grad()
++        
++        predictions = model(test_points, z)
++        
++        # Task-specific loss for the test shape
++        task_loss = compute_task_loss(predictions, test_labels)
++        
++        # Regularization
++        reg_loss = torch.norm(z, p=2)
++        
++        loss = task_loss + alpha * reg_loss
+         loss.backward()
+-        optimizer.step()
++        optimizer_z.step()
+         
+-    return z_test.detach()
++    return z
+ ```
+ 
+@@ -223,15 +160,15 @@
+ 
+ ### Latent Code Regularizer
+-A specific regularization term $\mathcal{L}_l(z) = \|z\|_2$ applied to the latent codes in the autodecoder framework. It penalizes large magnitudes of $z$, keeping codes close to zero and enforcing similarity between different shapes in the learned space [S3]. A pitfall is that SDF and DDF (Directional Distance Function) models share the same latent code for a given shape, so the regularizer applies to both simultaneously [S3].
++A specific regularization term $\mathcal{L}_l(z) = \|z\|_2$ applied to the latent codes in the autodecoder framework [S3]. It penalizes large magnitudes of $z$ to keep latent codes close to zero, ensuring similarity between different shapes in the learned space [S3]. A pitfall is that SDF and DDF models must share the same latent code for a given shape to maintain consistency [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training requires joint optimization of network weights $\theta$ and latent vectors $z_j$. Inference for a new shape requires iterative optimization of $z$ (e.g., 800 iterations) [S1, unofficial].
+-*   **Memory Complexity:** $O(N \cdot L)$ to store $N$ latent vectors of dimension $L$. For $N=10$ shapes and $L=256$, this is negligible.
+-*   **Performance:** On a single Nvidia V-100 GPU, training for 100k iterations takes significant time but produces high-quality reconstructions [S1, unofficial].
+-*   **Strengths:** Enables learning a continuous shape space; allows interpolation of shapes via latent vector averaging [S1, unofficial].
+-*   **Limitations:** Inference is slow due to per-shape optimization; requires careful tuning of $\alpha$ and learning rates [S1, unofficial].
++*   **Time Complexity:** Training requires joint optimization of network weights and latent vectors. Test-time inference requires iterative optimization of $z$ (e.g., 800 iterations) per shape [S1, unofficial].
++*   **Memory Complexity:** Memory usage scales linearly with the number of shapes $|J|$ due to the storage of $|J|$ latent vectors of size $L$ [S1, unofficial].
++*   **Strengths:** Enables representation of multiple shapes with a single network; allows interpolation of latent vectors to explore shape space [S1, unofficial].
++*   **Limitations:** Test-time inference is slow due to per-shape optimization; requires careful tuning of regularization parameter $\alpha$ [S1, unofficial].
++*   **When to use:** When learning a shared shape space from multiple scans or when a single network must represent multiple instances without an explicit encoder [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-The method originates from the "Auto-Decoder" setup introduced by Park et al. (2019) in "Implicit Geometric Regularization for Learning Shapes" [S1, unofficial]. It was further popularized in works like SAL (Atzmon & Lipman, 2020) and applied to datasets like D-Faust for learning shape spaces of human meshes [S1, unofficial]. The concept of using latent codes to condition neural fields is also discussed in broader introductions to neural fields [S2, unofficial].
++The method originates from the auto-decoder setup introduced by Park et al. (2019) for learning shape spaces from raw scans [S1, unofficial]. It was applied to datasets like D-Faust for learning human shape and pose variations [S1, unofficial]. The approach is a variant of conditional neural fields where the condition is a learnable latent vector rather than a fixed input or generated weights [S2, unofficial].
+ 
+ ## Sources

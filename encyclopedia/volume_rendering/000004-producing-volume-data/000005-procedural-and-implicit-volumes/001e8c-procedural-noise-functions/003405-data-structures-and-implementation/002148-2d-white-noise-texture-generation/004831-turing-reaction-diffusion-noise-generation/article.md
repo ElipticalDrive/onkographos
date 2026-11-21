@@ -1,0 +1,114 @@
+# Turing Reaction-Diffusion Noise Generation
+
+Also called: Reaction Diffusion Scheme
+
+## Overview
+This method generates initial noise textures with smooth, large 'spots' using Turing's reaction-diffusion equations, replacing standard white noise for better visual representation of tensor fields [S1, unofficial]. It solves the problem that high-frequency noise textures, such as white noise, are not suitable for achieving a proper visual representation of data in certain visualization approaches [S1, unofficial]. It sets itself apart from its sibling [2D White Noise Texture Generation](2485-2d-white-noise-texture-generation.md) by producing correlated, spatially structured patterns rather than uncorrelated random values.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Grid dimensions (implied by the tiling context), diffusion constants $D_a, D_b$, scalar $s$, and initial random values for grids $a$ and $b$.
+- Output: Two discrete grids $a$ and $b$ representing the reaction-diffusion state.
+
+**Data Structures:**
+- Two 2D arrays (grids) $a$ and $b$ of identical dimensions. The indices are $i$ and $j$.
+- Values are typically floating-point numbers. The source does not specify bit packing or exact data types, but implies continuous values for the calculation [S1, unofficial].
+
+**Parameters:**
+- $D_a$: Diffusion constant for grid $a$. Value: $0.125$ [S1, unofficial].
+- $D_b$: Diffusion constant for grid $b$. Value: $0.031$ [S1, unofficial].
+- $s$: Scalar controlling the size of the spots. Smaller $s$ leads to larger spots [S1, unofficial].
+- Boundary Conditions: Continuous boundary conditions are assumed for grid coordinates $i$ and $j$ to obtain a seamless texture [S1, unofficial].
+
+**Steps:**
+1. Initialize grids $a$ and $b$ with random values. The source does not specify the distribution or range of these initial values [G].
+2. For each cell $(i, j)$ in the grid, calculate the change $\Delta a_{i,j}$ and $\Delta b_{i,j}$ using the discrete Turing reaction-diffusion equations:
+   $$ \Delta a_{i,j} = F(i,j) + D_a \cdot (a_{i+1,j} + a_{i-1,j} + a_{i,j+1} + a_{i,j-1} - 4 \cdot a_{i,j}) $$
+   $$ \Delta b_{i,j} = G(i,j) + D_b \cdot (b_{i+1,j} + b_{i-1,j} + b_{i,j+1} + b_{i,j-1} - 4 \cdot b_{i,j}) $$
+3. Calculate the reaction functions $F(i, j)$ and $G(i, j)$:
+   $$ F(i, j) = s(16 - a_{i,j} \cdot b_{i,j}) $$
+   $$ G(i, j) = s(a_{i,j} \cdot b_{i,j} - b_{i,j} - \beta_{i,j}) $$
+   Note: $\beta_{i,j}$ is an input term mentioned in the formula for $G$. The source does not define $\beta_{i,j}$ further, nor does it specify if it is a constant, a function of position, or another grid [S1, unofficial].
+4. Update the grids:
+   $$ a_{i,j} \leftarrow a_{i,j} + \Delta a_{i,j} $$
+   $$ b_{i,j} \leftarrow b_{i,j} + \Delta b_{i,j} $$
+5. Repeat steps 2-4 for a number of iterations until the desired pattern stability or visual quality is achieved. The source does not specify the number of iterations [G].
+6. Handle boundaries using continuous boundary conditions (e.g., wrapping or mirroring) to ensure seamlessness [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_reaction_diffusion_noise(width, height, s, num_iterations):
+    # Initialize grids with random values [G]
+    a = [[random() for _ in range(width)] for _ in range(height)]
+    b = [[random() for _ in range(width)] for _ in range(height)]
+    
+    Da = 0.125
+    Db = 0.031
+    
+    for _ in range(num_iterations):
+        new_a = [[0.0 for _ in range(width)] for _ in range(height)]
+        new_b = [[0.0 for _ in range(width)] for _ in range(height)]
+        
+        for i in range(height):
+            for j in range(width):
+                # Get neighbors with continuous boundary conditions (wrapping)
+                a_up = a[(i - 1) % height][j]
+                a_down = a[(i + 1) % height][j]
+                a_left = a[i][(j - 1) % width]
+                a_right = a[i][(j + 1) % width]
+                
+                b_up = b[(i - 1) % height][j]
+                b_down = b[(i + 1) % height][j]
+                b_left = b[i][(j - 1) % width]
+                b_right = b[i][(j + 1) % width]
+                
+                # Calculate Laplacian terms
+                laplacian_a = a_up + a_down + a_left + a_right - 4 * a[i][j]
+                laplacian_b = b_up + b_down + b_left + b_right - 4 * b[i][j]
+                
+                # Calculate reaction terms
+                # Note: beta_ij is undefined in the source [S1, unofficial]
+                # Assuming beta_ij is 0 or a constant if not specified, 
+                # but this is a gap in the source. [G]
+                beta_ij = 0.0 
+                
+                F_ij = s * (16 - a[i][j] * b[i][j])
+                G_ij = s * (a[i][j] * b[i][j] - b[i][j] - beta_ij)
+                
+                # Calculate deltas
+                delta_a = F_ij + Da * laplacian_a
+                delta_b = G_ij + Db * laplacian_b
+                
+                # Update
+                new_a[i][j] = a[i][j] + delta_a
+                new_b[i][j] = b[i][j] + delta_b
+        
+        a = new_a
+        b = new_b
+        
+    return a, b
+```
+
+**Edge Cases and Pitfalls:**
+- Tiling the reaction diffusion texture can cause minor artifacts at boundaries, but these are ignored in practice due to the advection step [S1, unofficial].
+- The definition of $\beta_{i,j}$ is sparse in the text [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** The method is computationally expensive, as noted by the source [S1, unofficial]. Each iteration requires $O(N)$ operations for an $N$-pixel grid, and multiple iterations are needed.
+- **Memory Complexity:** Requires storage for two grids of the same size as the output texture.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The source mentions tiling to create a texture of required size because reaction diffusion is computationally expensive [S1, unofficial]. This implies generating a smaller base pattern and tiling it, or generating a large pattern directly if resources allow.
+- **Strengths:** Produces smooth, large 'spots' that are randomly and almost uniquely distributed, providing a better visual representation for tensor fields than white noise [S1, unofficial].
+- **Limitations:** Computationally expensive [S1, unofficial]. Potential boundary artifacts when tiling, though mitigated by subsequent steps [S1, unofficial].
+- **When to use:** When visual representation of tensor fields requires smooth, correlated noise patterns instead of high-frequency white noise [S1, unofficial].
+- **When not to use:** When computational resources are limited and white noise is sufficient [S1, unofficial].
+
+## Background
+The method is based on Turing's reaction-diffusion scheme first introduced by Turing [Tur52] to simulate the mixture of two reacting chemicals [S1, unofficial]. It is used in the context of Image-Space Tensor Field Visualization Using a LIC-like Method [S1, unofficial].
+
+## Sources
+[S1] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)

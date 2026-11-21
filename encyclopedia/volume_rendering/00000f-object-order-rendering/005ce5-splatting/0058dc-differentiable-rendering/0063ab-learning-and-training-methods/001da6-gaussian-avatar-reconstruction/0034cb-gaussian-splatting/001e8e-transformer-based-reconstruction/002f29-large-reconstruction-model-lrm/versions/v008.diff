@@ -1,0 +1,172 @@
+--- v007.md
++++ v008.md
+@@ -1,77 +1,117 @@
+ # Large Reconstruction Model (LRM)
+-
+ ## Overview
+-Large Reconstruction Model (LRM) is a feedforward neural network that performs single-image or multi-view to 3D reconstruction by predicting a triplane neural representation in a single transformer forward pass [S1, unofficial][S2]. It solves the problem of per-scene optimization latency by learning 3D priors from large-scale datasets, enabling real-time reconstruction [S1, unofficial][S2]. It sets itself apart from its siblings by outputting a continuous triplane field rather than discrete primitives (like [GS-LRM](1483-gs-lrm.md)) or meshes directly, serving as the foundational architecture for subsequent variants [S1, unofficial].
+-
++Large Reconstruction Model (LRM) is a feedforward transformer-based method for single-image or multi-view to 3D reconstruction that outputs a triplane neural representation in a single forward pass [S1, unofficial][S3, unofficial]. It solves the problem of slow, per-scene optimization in traditional neural rendering by learning 3D priors from large-scale datasets, enabling real-time reconstruction [S1, unofficial][S3, unofficial]. It sets itself apart from its siblings by using a triplane representation as the primary output, whereas [Flash3D](1481-flash3d.md) and [GS-LRM](1483-gs-lrm.md) predict 3D Gaussians directly, and [Reconstruction-based Generation](11811-reconstruction-based-generation.md) focuses on generation pipelines rather than direct reconstruction [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A single image $I$ or a viewset $V = \{I_i\}_{i=1}^N$ with corresponding camera parameters $\{\pi_i\}_{i=1}^N$ [S2].
+-*   **Output:** A triplane neural representation $\theta$ [S2]. This representation is subsequently rendered to produce novel view images $\hat{I}$ [S2].
++- Input: A single image $I$ or a viewset $V=\{I_i\}_{i=1}^N$ with corresponding camera parameters $\{\pi_i\}_{i=1}^N$ [S2].
++- Output: A triplane neural representation $\theta$ [S1, unofficial][S2].
++- Final Render: Novel view images $\hat{I} = R(\theta, \pi)$ [S2].
+ 
+ **Data Structures:**
+-The core data structure is the **triplane**, a 3D representation composed of three 2D feature planes oriented along the XY, YZ, and XZ axes [S2]. The model $\Phi$ outputs parameters $\theta$ defining this triplane [S2].
++- **Trplane Representation $\theta$**: A 3D feature field represented by three 2D planes (XY, YZ, XZ) [S2]. The exact bit-packing or resolution of the triplane is not given in the sources [S2].
++- **Transformer Blocks**: A series of transformer blocks process the input features [S2].
++- **Splatter Layer**: A component that splats source view features into a new triplane [S2].
+ 
+-**Algorithm Steps:**
+-1.  **Feature Extraction:** Extract a pixel-wise feature map $\mathbf{v} = \psi(I_i)$ from each input image $I_i$ using a vision encoder $\psi$ [S2].
+-2.  **Lifting (Splatter):** Lift the 2D feature maps into an initial 3D representation $\tilde{\theta}$ using a "Splatter" layer [S2]. The Splatter layer projects the source view features into a new triplane, taking previous transformer block outputs as prior shape encoding [S2].
+-3.  **Transformer Processing:** Input $\tilde{\theta}$ into the large-scale model $\Phi$ to output the final 3D representations $\theta = \Phi_\theta(\tilde{\theta})$ [S2].
+-    *   The model consists of a series of transformer blocks [S2].
+-    *   The Splatter layer is inserted every 3 transformer blocks (resulting in 5 blocks total in the described configuration) [S2].
+-4.  **Rendering:** Output novel view images $\hat{I} = R(\theta, \pi)$ from $\theta$ using a differentiable Renderer $R$ [S2].
+-5.  **Training:** Train the model by minimizing a loss $L$ between the rendered novel view image $\hat{I}$ and the corresponding ground truth image $I$ [S2].
++**Steps:**
++1. **Feature Extraction**: Extract a pixel-wise feature map $\mathbf{v}=\psi(I_i)$ from each image $I_i$ in the input viewset [S2].
++2. **Lifting with Splatter**: Lift the feature maps into an intermediate 3D representation $\tilde{\theta}$ using the Splatter component [S2].
++3. **Transformer Processing**: Input $\tilde{\theta}$ into the large-scale model $\Phi$ (a transformer) to output the final 3D representations $\theta=\Phi_\theta(\tilde{\theta})$ [S2].
++   - The Splatter layer is inserted every 3 transformer blocks (i.e., 5 blocks in total) [S2].
++   - The Splatter layer takes previous block outputs as prior shape encoding [S2].
++4. **Rendering**: Output novel view images $\hat{I} = R(\theta, \pi)$ from $\theta$ using the Renderer component [S2].
++5. **Training**: Train the model by minimizing the loss $L$ between the novel rendered image $\hat{I}$ and the corresponding ground truth $I$ [S2].
++
++**Formulas:**
++- Feature extraction: $\mathbf{v}=\psi(I_i)$ [S2].
++- Intermediate representation: $\tilde{\theta} = \text{Splatter}(\mathbf{v})$ [S2].
++- Final representation: $\theta=\Phi_\theta(\tilde{\theta})$ [S2].
++- Rendering: $\hat{I} = R(\theta, \pi)$ [S2].
++- Loss: $L(\hat{I}, I)$ [S2].
++
++**Parameters:**
++- **Dataset**: Trained on Objaverse + Objaverse-XL [S1, unofficial].
++- **Transformer Blocks**: 5 blocks in total, with Splatter inserted every 3 blocks [S2].
++- **LPIPS Optimization**: Enabled in the Lightplane-augmented LRM to avoid deferred backpropagation complexity [S2].
++- **Resolution**: Training uses low-resolution images (64x64) for some losses, but high-resolution rendering is supported [S2].
++
++**Edge Cases and Pitfalls:**
++- **Multi-view Input**: The method supports multi-view inputs, but the specific handling of camera pose errors or inconsistent views is not detailed [S2].
++- **Memory Efficiency**: The memory efficiency of the renderer allows for high-resolution rendering and image-level losses, which is a key advantage over the original LRM's deferred backpropagation [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def LRM_forward(input_images, camera_params):
+-    # 1. Extract features
+-    features = []
+-    for img in input_images:
+-        v = VisionEncoder(img) # psi(I_i)
+-        features.append(v)
++def LRM_forward(image_or_viewset, cameras):
++    # Step 1: Feature Extraction
++    if is_single_image(image_or_viewset):
++        views = [image_or_viewset]
++        cam_params = [cameras]
++    else:
++        views = image_or_viewset
++        cam_params = cameras
+     
+-    # 2. Initial Lifting (Splatter)
+-    # Lifts 2D features into a triplane representation
+-    theta_tilde = Splatter(features, camera_params)
++    # Extract pixel-wise feature maps
++    feature_maps = []
++    for i, img in enumerate(views):
++        v = psi(img) # psi is the feature extractor
++        feature_maps.append(v)
+     
+-    # 3. Transformer Blocks with Interleaved Splatter
+-    # Total 5 blocks, Splatter inserted every 3 blocks
++    # Step 2: Lifting with Splatter (Initial)
++    # Splatter lifts features into a 3D representation
++    theta_tilde = splatter(feature_maps, cam_params)
++    
++    # Step 3: Transformer Processing
++    # 5 transformer blocks total, Splatter inserted every 3 blocks
+     theta = theta_tilde
+-    for i in range(5):
+-        theta = TransformerBlock(theta)
+-        if (i + 1) % 3 == 0:
+-            # Insert Splatter layer using previous output as prior
+-            theta = Splatter(features, theta)
++    for block_idx in range(5):
++        # Process through transformer block
++        theta = transformer_block(theta)
++        
++        # Insert Splatter layer every 3 blocks (i.e., after block 2 and block 5? 
++        # Source says "every 3 transformer blocks (i.e. 5 blocks in total)"
++        # This implies Splatter is inserted at specific intervals.
++        # Assuming Splatter is inserted after block 2 and block 5 is the final output?
++        # Or Splatter is inserted *within* the sequence.
++        # Let's assume Splatter is inserted after block 2 and block 5 is the end.
++        # Actually, "every 3 transformer blocks" suggests a periodic insertion.
++        # With 5 blocks, it might be inserted after block 2 and block 5?
++        # Or maybe it's inserted after block 2, and the 5th block is the last one.
++        # Let's assume Splatter is inserted after block 2.
++        if block_idx == 2:
++            # Splatter takes previous block outputs as prior shape encoding
++            theta = splatter(theta, cam_params)
+             
+-    # 4. Final Output
+-    return theta
++    # Step 4: Rendering
++    # Output novel view images
++    # Assuming we want to render from a specific camera pi
++    # theta is the final 3D representation
++    rendered_image = renderer(theta, pi)
++    
++    return rendered_image, theta
+ 
+-def LRM_render(triplane_params, camera_params):
+-    # Render novel views from the triplane
+-    return Renderer(triplane_params, camera_params)
++def LRM_loss(rendered_image, ground_truth_image):
++    # Minimize loss L between novel rendered image and ground truth
++    loss = L(rendered_image, ground_truth_image)
++    return loss
+ ```
+-
+-**Parameters and Training:**
+-*   **Dataset:** Trained on Objaverse and Objaverse-XL [S1, unofficial].
+-*   **Loss:** The model is trained using image-level losses [S2].
+-*   **Optimization:** The integration of the Lightplane Renderer allows for LPIPS optimization without the added complexity of deferred backpropagation used in earlier implementations [S2].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Memory Efficiency:** The memory efficiency of the Renderer is critical for enabling high-resolution differentiable rendering and backpropagation of image-level losses [S2].
+-*   **Unbounded Scenes:** For background representation, ray-point coordinates may need contraction to represent unbounded scenes [S2].
++Note: The exact placement of the Splatter layer within the 5 blocks is ambiguous. "Every 3 transformer blocks (i.e. 5 blocks in total)" suggests a specific architecture. If it's inserted every 3 blocks, and there are 5 blocks, it might be inserted after block 2 (if 0-indexed) or block 3 (if 1-indexed). The pseudocode assumes insertion after block 2 (0-indexed) as a placeholder for the specific architecture detail which is not fully explicit. [G]
+ 
+ ## Subtopics
+ 
+ ### [Large Gaussian Reconstruction Model (GRM)](5961-large-gaussian-reconstruction-model-grm.md)
+-A variant that replaces the triplane output with Gaussian primitives, supporting both single and multi-view inputs.
++The Large Gaussian Reconstruction Model (GRM) is a feedforward neural network for single-image or multi-view to 3D reconstruction that directly predicts Gaussian maps. It builds on [Large Reconstruction Model (LRM)](5959-large-reconstruction-model-lrm.md) by replacing its output format with Gaussian primitives, supporting both single and multi-view inputs.
+ 
+ ## Operating characteristics
+-*   **Latency:** Real-time reconstruction on a single GPU [S1, unofficial].
+-*   **Accuracy:** Outperforms baseline ViewFormer and overfitting baselines (Voxel, NeRF) in amortized 3D reconstruction tasks [S2].
+-*   **Scalability:** Highly scalable components allow for large-scale 3D reconstruction and generation [S2].
+-*   **Limitations:** The original LRM required deferred backpropagation for certain losses, which added complexity [S2].
+-
++- **Time Complexity**: Feedforward model, single transformer pass, enabling real-time reconstruction [S1, unofficial][S3, unofficial].
++- **Memory Complexity**: Memory efficient due to the Lightplane renderer, allowing high-resolution rendering and image-level losses without deferred backpropagation [S2].
++- **Measured Performance**: Outperforms baseline ViewFormer [41] and overfitting baselines like Voxel and NeRF [S2]. Specific metrics are not provided in the sources [S2].
++- **Scaling**: Highly scalable components for neural 3D fields [S2].
++- **Strengths**: Real-time reconstruction, high-resolution rendering, memory efficiency, support for multi-view inputs [S1, unofficial][S2][S3, unofficial].
++- **Limitations**: Relies on large-scale datasets (Objaverse + Objaverse-XL) for training [S1, unofficial].
++- **When to use**: When real-time 3D reconstruction from single or multi-view images is required [S1, unofficial][S3, unofficial].
++- **When not to use**: When high-fidelity per-scene optimization is required, or when the input data does not match the training distribution [S2].
+ ## Background
+-LRM was introduced by Adobe in 2023 and published at ICLR 2024 [S1, unofficial][S3, unofficial]. It represents a shift from per-scene optimization to feedforward prediction, leveraging large-scale datasets like Objaverse [S1, unofficial]. It serves as the parent architecture for several subsequent methods, including InstantMesh, MeshLRM, and GS-LRM [S1, unofficial].
+-
++- **Origin**: LRM was introduced by Adobe in 2023 [S1, unofficial].
++- **History**: It represents a shift from per-scene optimization to feedforward models for 3D reconstruction [S1, unofficial].
++- **Usage**: Used for single-image to 3D reconstruction and generation [S1, unofficial][S3, unofficial].
+ ## Sources
+ [S1] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

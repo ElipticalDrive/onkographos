@@ -1,0 +1,106 @@
+# Forgetful Selection Median Filter
+
+Also called: Forgetful selection, Median filter via forgetful selection
+
+## Overview
+The Forgetful Selection Median Filter is a GPU-optimized algorithm for computing the median of a data set, specifically designed to overcome register pressure limitations on CUDA hardware [S1]. It solves the problem of high memory usage in classic histogram-based median filters, which require excessive registers per thread, thereby limiting parallelism on GPUs with limited low-latency memory (up to compute capability 3.5) [S1]. It sets itself apart from histogram-based siblings by maintaining a small, fixed-size subset of values in registers rather than a full frequency distribution, allowing sorting operations to occur entirely within registers [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of $n$ numbers (typically voxel values in a local neighborhood).
+- Output: The median value of the set.
+- Data Layout: Values are stored as 8-bit unsigned integers [S1].
+
+**Data Structures:**
+- A register-based subset of size $k = n/2 + 1$ [S1].
+- The subset holds the current candidate values for the median.
+
+**Algorithm Steps:**
+1. Initialize the subset with the first $n/2 + 1$ numbers from the input set [S1].
+2. Identify the minimum and maximum values (extrema) within the current subset [S1].
+3. Remove both the minimum and maximum values from the subset [S1].
+4. Add one additional value from the remaining input set to the subset [S1].
+5. Repeat steps 2–4 until the subset contains only one element [S1].
+6. The remaining element is the median [S1].
+
+**Implementation Details:**
+- The algorithm is applied iteratively in the slow scan direction [S1].
+- Each CUDA thread is assigned to a single pixel in a B-scan of the output volume [S1].
+- Shared memory blocking is used to hide memory access latencies, acting as explicit caching [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def forgetful_selection_median(values):
+    """
+    Computes the median of a list of values using the forgetful selection algorithm.
+    values: list of numbers (e.g., 8-bit unsigned integers)
+    returns: the median value
+    """
+    n = len(values)
+    # Step 1: Start with a subset of n/2 + 1 numbers
+    subset_size = n // 2 + 1
+    subset = values[:subset_size]
+    
+    # Remaining values to process
+    remaining = values[subset_size:]
+    
+    # Step 5: Iterate until only the median remains
+    while len(subset) > 1:
+        # Step 2: Identify extrema
+        min_val = min(subset)
+        max_val = max(subset)
+        
+        # Step 3: Remove extrema from the subset
+        # Note: If min_val == max_val, remove one instance of each
+        # To ensure correctness, we remove one occurrence of min and one of max
+        subset.remove(min_val)
+        subset.remove(max_val)
+        
+        # Step 4: Add an additional value from the original set
+        if remaining:
+            subset.append(remaining.pop(0))
+            
+    return subset[0]
+```
+
+**Parameters:**
+- $n$: The number of input values (e.g., 27 for a 3x3x3 filter) [S1].
+- Typical Value: For a 3x3x3 median filter, $n=27$, requiring $14$ registers for the subset [S1].
+
+**Edge Cases and Pitfalls:**
+- Register Limit: Classic histogram-based approaches fail on older CUDA hardware because they require more than 256 registers per thread, preventing sufficient parallel thread count [S1].
+- Precision: Data is saved as 8-bit unsigned integers, which may limit dynamic range compared to floating-point representations [S1].
+- Boundary Conditions: The algorithm assumes a valid input set of size $n \ge 1$. For even $n$, the standard median definition (average of two middle values) is not explicitly described; the algorithm returns one of the two middle values depending on removal order [G].
+
+## Subtopics
+
+### 2D Gaussian Filter
+A 5x5 2D Gaussian filter used for de-noising, implemented using the same blocking approach and thread structure as the median filter [S1]. Convolution is used instead of the 2D Fourier transform because the Gaussian kernel is small, making convolution faster [S1]. Both filters operate on data saved as 8-bit unsigned integers [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Memory: The algorithm requires only $n/2 + 1$ registers, allowing sorting operations to take place entirely within registers [S1]. This is significantly less than histogram-based methods which require a full frequency array [S1].
+- Time: The algorithm is iterative, requiring $O(n \log n)$ or similar complexity depending on the sorting implementation within the subset, but the constant factor is low due to register locality [S1].
+
+**Measured Performance:**
+- The method enables sufficient parallel thread counts on CUDA hardware up to compute capability 3.5, leveraging the computational power of the GPU which was previously bottlenecked by register limits [S1].
+- Shared memory blocking effectively hides memory access latencies [S1].
+
+**Strengths and Limitations:**
+- Strengths: Low register footprint, high parallelism on older GPUs, efficient use of shared memory for caching [S1].
+- Limitations: Algorithmically more complicated than histogram-based approaches [S1]. Limited to 8-bit unsigned integer data in the cited implementation [S1].
+
+**When to Use:**
+- Use when implementing median filtering on CUDA GPUs with limited register space (compute capability $\le$ 3.5) and when histogram-based methods cause register spilling or insufficient thread occupancy [S1].
+
+**When Not to Use:**
+- Avoid on modern GPUs with abundant registers where histogram-based methods might be simpler to implement and potentially faster due to parallel reduction techniques [S1].
+- Avoid if floating-point precision is required for the median calculation [S1].
+
+## Background
+The Forgetful Selection Median Filter was employed in the context of enhanced volumetric visualization for real-time 4D intraoperative ophthalmic swept-source OCT [S1]. It was chosen over classic histogram-based approaches due to the inadequate low-latency memory (registers) on CUDA cores at the time (up to compute capability 3.5) [S1]. The method relies on the mathematical property that the median of a set of $n$ numbers cannot be the extrema of an $n/2 + 1$ subset of those numbers [S1].
+
+## Sources
+[S1] Enhanced volumetric visualization for real time 4D intraoperative ophthalmic swept-source OCT, https://doi.org/10.1364/boe.7.001815, fetched 2026-11-08

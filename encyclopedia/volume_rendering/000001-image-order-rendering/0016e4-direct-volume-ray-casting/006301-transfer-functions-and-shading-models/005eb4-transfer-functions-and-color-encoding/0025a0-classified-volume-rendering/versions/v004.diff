@@ -1,0 +1,332 @@
+--- v003.md
++++ v004.md
+@@ -4,150 +4,216 @@
+ 
+ ## Overview
+-Classified Volume Rendering is a direct volume ray casting method that achieves maximum rendering speed by precomputing optical properties (color and opacity) for every voxel, thereby decoupling the classification step from the rendering loop [S1, S3]. Unlike standard direct volume rendering which applies the transfer function during ray traversal, this method fixes the classification function permanently during a preprocessing phase, allowing subsequent renders to vary only view transformation and shading parameters without recomputing voxel opacities [S1, S3]. It is distinguished from [Direct Volume Rendering](19-direct-volume-ray-casting.md) by its reliance on a pre-classified data structure and the absence of octree acceleration, making it the fastest available mode when the opacity transfer function remains constant [S3].
++Classified Volume Rendering is a direct volume ray casting method that achieves maximum rendering speed by precomputing optical properties (color and opacity) for every voxel, allowing the rendering engine to bypass per-sample classification during the projection phase [S1, S3]. It solves the performance bottleneck of standard ray casting where transfer functions are applied repeatedly for every sample along every ray [S1]. Unlike [Direct Volume Rendering](1184-direct-volume-rendering.md) which applies transfer functions on-the-fly, or [Min-Max Octree](1184-direct-volume-ray-casting.md) acceleration which allows dynamic transfer function changes, Classified Volume Rendering requires the classification to be fixed during the precomputation phase [S1, S3].
+ 
+ ## How it works
+-The method operates in two distinct phases: a one-time preprocessing phase to generate the classified volume, and a rendering phase that performs ray casting using the precomputed data.
++The method consists of two distinct phases: a one-time precomputation phase that transforms raw scalar data into a classified volume, and a rendering phase that projects this classified data using ray casting [S1][S2, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Raw volume data: A 3D grid of scalar values (e.g., Hounsfield units for CT) $V_{raw}[x][y][z]$.
+-*   Classification function: A set of transfer functions mapping scalar ranges to color $C$ and opacity $\alpha$. The sources specify the use of trapezoidal functions for tissue separation [S2, unofficial].
+-*   View parameters: Camera origin, direction, and projection matrix.
+-*   Shading parameters: Light positions, material properties, and normal estimation method [S1].
++1.  **Raw Volume Data:** A 3D grid of scalar values (e.g., Hounsfield units from CT scans) [S1][S2, unofficial].
++2.  **Classification Function:** A set of transfer functions, typically defined as trapezoids or thresholds, mapping scalar ranges to specific tissue types [S2, unofficial].
++3.  **View and Shading Parameters:** Camera position, orientation, and lighting settings used during the rendering phase [S1].
+ 
+ **Outputs:**
+-*   A 2D image buffer containing the final rendered pixel colors.
+-*   A preclassified volume data structure containing run-length encoded classified data [S1].
++1.  **Preclassified Volume:** A data structure containing run-length encoded, classified voxel data (color and opacity) [S1].
++2.  **Rendered Image:** A 2D pixel buffer containing the final projected image [S1, S3].
+ 
+ ### Data Structures
+-The core data structure is the **preclassified volume**. While the exact memory layout of the "run-length encoded" structure is not detailed in the provided sources, the rendering routine `vpRenderClassifiedVolume` accesses this structure directly instead of the raw voxel array or an octree [S3]. The structure stores the precomputed optical properties for each voxel.
+-
+-The image buffer is declared as:
+-```c
+-unsigned char image[bytes_per_scan][height][bytes_per_pixel];
+-```
+-where `bytes_per_pixel` is determined by the pixel format (e.g., 4 bytes for RGB+opacity) [S1].
+-
+-### Preprocessing Phase
+-This phase is performed once when the volume is acquired or when the classification function changes.
+-
+-1.  **Load Volume Data:** Read the raw scalar volume $V_{raw}$ [S1].
+-2.  **Choose Classification Function:** Define the transfer functions. For medical imaging, trapezoidal functions are used to separate tissue types (e.g., bone, soft tissue) based on attenuation threshold levels [S2, unofficial].
+-3.  **Precompute Classified Volume:** Iterate through every voxel in the volume dataset [S1][S2, unofficial].
+-    *   For each voxel, determine the percentage of each tissue type represented based on the scalar value and the trapezoidal thresholds [S2, unofficial].
+-    *   Calculate the weighted sum of the colors and opacities for each tissue type to determine the overall color $C_v$ and transparency $\alpha_v$ for that voxel [S2, unofficial].
+-    *   Store these precomputed values in the classified volume structure [S1].
++The core data structure is the **Preclassified Volume**. While the exact internal memory layout of the run-length encoding is not specified in the provided sources, the structure must support:
++*   Storage of precomputed color ($C$) and opacity ($\alpha$) for each voxel or run [S1][S2, unofficial].
++*   The sources explicitly state that the octree (used in min-max acceleration) is **not** used for this specific rendering mode [S3].
++*   The output image buffer is declared with dimensions `image[bytes_per_scan][height][bytes_per_pixel]`, where `bytes_per_pixel` is determined by the pixel format (e.g., 4 bytes for RGBA) [S1].
++
++### Precomputation Phase
++This phase is performed once and can take several minutes depending on volume size [S1].
++
++1.  **Load Volume Data:** Read the raw scalar voxel grid [S1].
++2.  **Choose Classification Function:** Define the mapping from scalar values to tissue types. The sources specify using **trapezoids** for each tissue type (e.g., bone, soft tissue) [S2, unofficial].
++3.  **Classify Voxels:** For each voxel in the volume:
++    *   Determine the tissue type(s) represented by the scalar value using predefined attenuation threshold levels [S2, unofficial].
++    *   Calculate the weighted sum of the percentage of each tissue type represented in the voxel [S2, unofficial].
++    *   Assign a specific color ($C$) and opacity ($\alpha$) based on the tissue types and their weights [S2, unofficial].
++    *   Store the resulting classified value in the preclassified volume structure [S1].
++4.  **Run-Length Encoding:** Compress the classified volume data using run-length encoding to optimize memory access during rendering [S1].
+ 
+ ### Rendering Phase
+-This phase is repeated for each frame or view change.
++This phase is repeated for each view or animation frame [S1].
+ 
+ 1.  **Set View and Shading Parameters:** Configure the camera and lighting [S1].
+-2.  **Ray Casting:** For each pixel, cast a ray through the 3D volume [S2, unofficial].
+-3.  **Voxel Traversal:** As the ray passes through voxels, retrieve the precomputed color $C_v$ and opacity $\alpha_v$ from the classified volume structure [S3]. Note that the octree is **not** used in this mode [S3].
+-4.  **Compositing:** Apply the front-to-back compositing equation to integrate the contributions of the voxels along the ray [S2, unofficial][S3].
+-    $$
+-    C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_v C_v
+-    $$
+-    $$
+-    \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_v
+-    $$
+-    where $C'$ and $\alpha'$ are the accumulated color and opacity, initialized to 0 [S3, S12].
+-5.  **Shading Application:** Enhance 3D perception by applying shading effects (e.g., reflections, shadows) to the surface of the rendered image based on the accumulated normals or gradients [S1][S2, unofficial].
+-6.  **Store Result:** Place the final pixel color in the image buffer declared by `vpSetImage()` [S1].
++2.  **Ray Casting:** Simulate rays of light projected through the 3D volume [S2, unofficial].
++3.  **Projection:** For each pixel, integrate the contributions of the classified voxels intersected by the ray [S2, unofficial].
++    *   Each voxel passed by the ray modulates the light color based on its preassigned color and transparency [S2, unofficial].
++    *   The standard front-to-back compositing equation is used (see [Direct volume ray casting](19-direct-volume-ray-casting.md) for the specific formula).
++4.  **Output:** Place the result in the buffer declared by `vpSetImage()` [S1].
+ 
+ ### Pseudocode
++The following pseudocode implements the VolPack API workflow described in the sources [S1, S3].
+ 
+ ```python
+-def preprocess_volume(raw_volume, classification_functions):
+-    """
+-    Precomputes the classified volume data structure.
+-    raw_volume: 3D array of scalar values.
+-    classification_functions: List of trapezoidal functions mapping scalar ranges to (color, opacity).
+-    Returns: classified_volume_data (run-length encoded structure).
+-    """
+-    classified_volume_data = initialize_run_length_encoded_structure()
++# Phase 1: Precomputation (One-time)
++
++def precompute_classified_volume(raw_volume, classification_functions):
++    """
++    raw_volume: 3D array of scalar values (e.g., CT Hounsfield units)
++    classification_functions: List of trapezoids mapping scalar ranges to (color, opacity)
++    Returns: preclassified_volume (run-length encoded structure)
++    """
++    preclassified_volume = RunLengthEncodedStructure()
+     
+-    for x, y, z in raw_volume.indices():
+-        scalar_value = raw_volume[x, y, z]
+-        
+-        # Determine tissue contributions using trapezoidal functions
+-        total_color = (0, 0, 0)
+-        total_opacity = 0.0
+-        
++    for voxel in raw_volume:
++        scalar_value = voxel.value
++        
++        # Determine tissue types and weights using trapezoids
++        tissue_weights = {}
+         for tissue in classification_functions:
+-            # Calculate percentage of this tissue type represented in the voxel
+-            # based on predefined attenuation threshold levels
+-            percentage = tissue.calculate_percentage(scalar_value)
+-            
+-            # Weighted sum of color and opacity
+-            tissue_color = tissue.get_color()
+-            tissue_opacity = tissue.get_opacity()
+-            
+-            total_color += percentage * tissue_color
+-            total_opacity += percentage * tissue_opacity
+-            
+-        # Store precomputed optical properties
+-        classified_volume_data.set_voxel_properties(x, y, z, total_color, total_opacity)
+-        
+-    return classified_volume_data
+-
+-def render_classified_volume(classified_volume_data, view_params, shading_params):
+-    """
+-    Renders the preclassified volume using current viewing and shading parameters.
+-    classified_volume_data: The precomputed run-length encoded structure.
+-    view_params: Camera origin, direction, projection.
+-    shading_params: Light positions, material properties.
+-    Returns: 2D image buffer.
+-    """
+-    image_buffer = initialize_image_buffer()
++            weight = evaluate_trapezoid(tissue, scalar_value)
++            if weight > 0:
++                tissue_weights[tissue] = weight
++        
++        # Calculate overall color and transparency
++        # Weighted sum of percentages
++        final_color = (0, 0, 0)
++        final_opacity = 0
++        
++        for tissue, weight in tissue_weights.items():
++            final_color += weight * tissue.color
++            final_opacity += weight * tissue.opacity
++            
++        # Normalize or clamp if necessary (standard compositing logic applies later)
++        # Store in preclassified volume
++        preclassified_volume.set(voxel.position, final_color, final_opacity)
++        
++    return preclassified_volume
++
++# Phase 2: Rendering (Repeated)
++
++def render_classified_volume(preclassified_volume, view_params, shading_params):
++    """
++    preclassified_volume: The output from precompute_classified_volume
++    view_params: Camera origin, direction, image dimensions
++    shading_params: Lighting model, ambient/diffuse/specular coefficients
++    Returns: image_buffer
++    """
++    image_buffer = allocate_image_buffer(view_params.width, view_params.height)
+     
+-    for pixel in image_buffer.pixels():
+-        ray = generate_ray(pixel, view_params)
+-        
+-        accumulated_color = (0, 0, 0)
+-        accumulated_opacity = 0.0
+-        
+-        # Traverse ray through volume
+-        # Note: Octree is NOT used in this mode [S3]
+-        for voxel_sample in ray.traverse(classified_volume_data):
+-            # Retrieve precomputed properties
+-            C_v = voxel_sample.color
+-            alpha_v = voxel_sample.opacity
+-            
+-            # Front-to-back compositing
+-            transmittance = 1.0 - accumulated_opacity
+-            accumulated_color += transmittance * alpha_v * C_v
+-            accumulated_opacity += transmittance * alpha_v
+-            
+-            if accumulated_opacity >= 1.0:
+-                break # Ray fully occluded
+-        
+-        # Apply shading effects (reflections, shadows) [S1][S2, unofficial]
+-        final_color = apply_shading(accumulated_color, accumulated_opacity, shading_params)
+-        
+-        image_buffer.set_pixel(pixel, final_color)
+-        
++    for y in range(view_params.height):
++        for x in range(view_params.width):
++            # Generate ray for pixel (x, y)
++            ray = generate_ray(view_params, x, y)
++            
++            # Initialize compositing variables
++            accumulated_color = (0, 0, 0)
++            accumulated_opacity = 0
++            
++            # Ray march through the preclassified volume
++            # Note: Octree is NOT used for this mode [S3]
++            t = ray.entry_t
++            while t < ray.exit_t:
++                # Sample the preclassified volume at ray position
++                # Since data is classified, we retrieve C and alpha directly
++                voxel = preclassified_volume.sample(ray.position_at(t))
++                
++                if voxel is not empty:
++                    C_i = voxel.color
++                    alpha_i = voxel.opacity
++                    
++                    # Front-to-back compositing
++                    # C' = C' + (1 - alpha') * alpha * C
++                    # alpha' = alpha' + (1 - alpha') * alpha
++                    transmittance = 1.0 - accumulated_opacity
++                    accumulated_color = accumulated_color + (transmittance * alpha_i * C_i)
++                    accumulated_opacity = accumulated_opacity + (transmittance * alpha_i)
++                    
++                    # Early termination if fully opaque
++                    if accumulated_opacity >= 1.0:
++                        break
++                
++                t += ray.step_size
++            
++            # Apply shading if not baked into preclassification
++            # Note: Sources state shading parameters are set but do not explicitly
++            # say shading is baked into the preclassified volume. 
++            # However, VolPack's vpRenderClassifiedVolume uses "current viewing and shading parameters" [S1].
++            # This implies shading might be applied during ray casting or the preclassification
++            # only handles the transfer function (color/alpha), not lighting.
++            # Given the description "modulates the colour... depending on assigned colour and transparency" [S2, unofficial],
++            # and the separation of "shading parameters" in the loop [S1], 
++            # we assume shading is applied during the ray cast or the preclassified volume
++            # only contains the transfer function output.
++            # Standard VolPack behavior: Classified volume stores RGBA. Shading is applied 
++            # to the raw volume. For classified volume, shading is often limited or 
++            # applied via the "shading parameters" context which might affect the final 
++            # compositing or be ignored if the volume is fully pre-classified.
++            # The source [S1] says "render with any shading parameters", implying they are used.
++            # We apply a simple shading model here as a placeholder for the integration step.
++            # [G] Assuming standard Phong shading is applied to the accumulated color 
++            # or the voxel color if normals are available. Since preclassified volume 
++            # only stores C and alpha, shading must be applied during ray casting 
++            # using gradient info from the raw volume or ignored. 
++            # Given the strict "classified volume" definition, we assume the 
++            # "shading parameters" context is used to modulate the final result 
++            # or the preclassification includes a static lighting model.
++            # To be safe and implementable: We apply the shading to the accumulated color.
++            # [G] This is a gap: VolPack's classified volume rendering typically 
++            # does NOT support dynamic lighting/shading per sample because the 
++            # optical properties are fixed. The "shading parameters" might refer 
++            # to ambient light or are simply ignored for the classified mode.
++            # However, the source says "any shading parameters". 
++            # We will assume the shading is applied to the final accumulated color 
++            # or the voxel color if the implementation supports it.
++            # For a strict implementation of "Classified Volume Rendering" as defined:
++            # The color C_i is fixed. Shading is likely not per-sample dynamic.
++            # We will skip dynamic shading in the loop to adhere to the "fixed classification" constraint,
++            # but note that the API accepts shading parameters.
++            
++            image_buffer[x, y] = accumulated_color
++            
+     return image_buffer
++
++def evaluate_trapezoid(trapezoid, value):
++    """
++    Evaluates a trapezoidal transfer function.
++    Returns a weight between 0 and 1.
++    """
++    # Trapezoid defined by (start, peak_start, peak_end, end)
++    # Weight is 0 outside [start, end]
++    # Weight is 1 inside [peak_start, peak_end]
++    # Linear ramp in [start, peak_start] and [peak_end, end]
++    if value < trapezoid.start or value > trapezoid.end:
++        return 0.0
++    elif trapezoid.start <= value < trapezoid.peak_start:
++        return (value - trapezoid.start) / (trapezoid.peak_start - trapezoid.start)
++    elif trapezoid.peak_start <= value <= trapezoid.peak_end:
++        return 1.0
++    elif value > trapezoid.peak_end and value <= trapezoid.end:
++        return (trapezoid.end - value) / (trapezoid.end - trapezoid.peak_end)
++    return 0.0
+ ```
+ 
+ ### Parameters and Edge Cases
+ *   **Precomputation Time:** Several minutes, depending on volume size [S1].
+-*   **Trapezoid Slope:** Manipulating the slope of the trapezoidal transfer functions allows real-time adjustment of which structures are included (e.g., sliding towards lower Hounsfield units includes smaller vessels) [S2, unofficial].
+-*   **Fixed Classification:** The opacity transfer function **must not change** between renderings because voxel opacities are fixed in the preclassified volume [S3]. Changing the transfer function requires re-running the preprocessing phase.
+-*   **Masking Pathology:** VR can mask anatomical information and pathology (e.g., intracranial aneurysms) if bone subtraction is not performed [S2, unofficial].
++*   **Trapezoid Slope:** Manipulating the slope of the trapezoid transfer function allows real-time adjustment of which structures are included (e.g., sliding towards lower Hounsfield units includes smaller vessels) [S2, unofficial].
++*   **Constraint:** The opacity transfer function **must not change** after precomputation. If the opacity function changes, the preclassified volume is invalid, and the user must switch to `vpRenderRawVolume` with an octree [S3].
++*   **Pitfall:** Volume Rendering can mask anatomical information and pathology (e.g., intracranial aneurysms) because overlapping structures obscure each other. Correlation with MPR images is recommended [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Image-Centric Volume Rendering with SN-SVM Classification](7509-image-centric-volume-rendering-with-sn-svm-classification.md)
+-This method enables direct volume rendering by allowing users to interact with raw 2D volume slices to define training data for an SN-SVM classifier, which then automatically classifies all voxels and assigns colors via color harmonization. It distinguishes itself from Classified Volume Rendering by avoiding pre-processing steps such as branch decomposition or contour tree computation, thereby preserving raw data granularity and preventing information loss during initial semantic realization.
++Enables direct volume rendering via user-defined 2D slices for SN-SVM training, preserving raw data granularity without branch decomposition.
++
++### [VNet4-4](7783-vnet4-4.md)
++Uses a 3D CNN to infer RGB$\kappa$ volumes directly, bypassing explicit transfer functions and semantic segmentation.
+ 
+ ## Operating characteristics
+-*   **Speed:** This is the fastest rendering mode available in VolPack [S3]. It eliminates the need for per-ray classification and octree traversal during rendering [S1, S3].
+-*   **Memory:** Requires additional memory to store the preclassified volume structure, which involves run-length encoding [S1].
+-*   **Flexibility:** Low flexibility regarding the transfer function. It is only suitable when the classification (opacity transfer function) remains fixed across multiple renderings [S1, S3]. If the transfer function changes, the slower [Direct Volume Rendering](19-direct-volume-ray-casting.md) with min-max octree acceleration should be used [S1, S3].
+-*   **Accuracy:** May mask anatomical details or pathology if not carefully configured (e.g., lack of bone subtraction) [S2, unofficial].
++*   **Time Complexity:** Precomputation is $O(N)$ where $N$ is the number of voxels, taking several minutes [S1]. Rendering is $O(P \cdot S)$ where $P$ is pixels and $S$ is samples per ray, but significantly faster than raw volume rendering because classification is skipped [S1, S3].
++*   **Memory Complexity:** Requires storage for the run-length encoded classified volume [S1].
++*   **Performance:** This is the fastest rendering mode available in VolPack [S3].
++*   **Strengths:** Ideal for scenarios requiring many renderings of the same volume with the same classification (e.g., interactive rotation of a fixed dataset) [S1, S3].
++*   **Limitations:** Cannot handle dynamic changes to the opacity transfer function [S3]. Precomputation delay makes it unsuitable for rapid exploration of different transfer functions [S1].
++*   **When to Use:** When the classification is fixed and high-speed rendering is required [S1, S3].
++*   **When Not to Use:** When the user needs to frequently adjust the transfer function or explore different tissue segmentations [S1, S3].
+ 
+ ## Background
+-Classified Volume Rendering is part of the VolPack library, a standard software package for volume rendering [S1]. It was designed to address the computational cost of applying transfer functions during ray casting by moving this operation to a preprocessing stage [S1]. The method is particularly relevant in medical imaging, where large volumes (CT/MR) are rendered repeatedly from different viewpoints with consistent tissue classification [S2, unofficial].
++Classified Volume Rendering is part of the VolPack library, a standard toolkit for volume rendering [S1]. It was designed to provide the fastest possible rendering speed by trading flexibility (dynamic transfer functions) for performance [S1]. The method relies on the principle that classification is often the most computationally expensive part of the ray casting pipeline when done per-sample [S2, unofficial]. By precomputing the optical properties, the rendering engine only needs to perform compositing [S1][S2, unofficial].
+ 
+ ## Sources

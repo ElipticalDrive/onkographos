@@ -1,0 +1,124 @@
+--- v005.md
++++ v006.md
+@@ -4,63 +4,52 @@
+ 
+ ## Overview
+-Bounding Volume Culling is an optimization that limits raymarching to a specific bounding volume, dropping rays that exceed a certain distance from the eye to speed up rendering [S1, unofficial]. It differs from its siblings, [Empty-space skipping](1002-empty-space-skipping.md) and [Early ray termination](1019-early-ray-termination.md), by terminating rays based on absolute geometric distance from the camera rather than accumulated opacity or empty space traversal [S1, unofficial]. Unlike [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md), which uses probabilistic bounds to ensure unbiasedness, Bounding Volume Culling is a deterministic hard cutoff [S1, unofficial].
++Bounding Volume Culling is an optimization that limits raymarching to a specific bounding volume, dropping rays that exceed a certain distance from the eye to speed up rendering [S1, unofficial]. It differs from its siblings, [Empty-space skipping](1002-empty-space-skipping.md) and [Early ray termination](1019-early-ray-termination.md), by using a global geometric constraint (maximum travel distance) rather than local density or opacity thresholds to terminate the integration loop.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, maximum travel distance $T_{max}$.
+-*   **Output:** Boolean flag indicating whether the ray should be processed or discarded.
++*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, maximum travel distance $T_{max}$, and a distance field function $S(\mathbf{p})$ that returns the distance to the closest surface at point $\mathbf{p}$.
++*   **Output:** The final color or termination status of the ray.
+ 
+ **Data Structures:**
+-*   $T_{max}$: A scalar float representing the maximum allowed distance from the ray origin.
++*   No complex data structures are required for the basic method. A single scalar variable tracks the accumulated distance.
+ 
+ **Steps:**
+-1.  Initialize the total distance traveled by the ray, $t$, to $0$.
+-2.  During the raymarching loop, update $t$ by adding the step size $\Delta t$ at each iteration: $t \leftarrow t + \Delta t$.
+-3.  Check if $t > T_{max}$.
+-4.  If true, terminate the raymarch process immediately [S1, unofficial].
++1.  Initialize the accumulated distance traveled by the ray, $t$, to $0$.
++2.  While $t < T_{max}$:
++    a.  Evaluate the current position $\mathbf{p} = \mathbf{o} + t \mathbf{d}$.
++    b.  Compute the distance to the closest surface, $d = S(\mathbf{p})$.
++    c.  If $d$ is sufficiently small (surface hit), terminate and shade.
++    d.  Advance the ray: $t \leftarrow t + d$.
++3.  If the loop completes without hitting a surface (i.e., $t \ge T_{max}$), terminate the ray.
++
++**Formulas:**
++*   Ray position: $\mathbf{p}(t) = \mathbf{o} + t \mathbf{d}$
++*   Termination condition: $t \ge T_{max}$
+ 
+ **Parameters:**
+-*   $T_{max}$: The predefined limit. Typical values depend on the scene scale; for example, a value of $64$ steps was used in demonstrations where step size was normalized [S1, unofficial].
++*   $T_{max}$: The predefined limit for ray travel. Typical values depend on the scene scale; for example, a maximum step count of 64 steps with a step size of 1.0 implies $T_{max} = 64$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** If $T_{max}$ is too small, valid geometry near the camera may be clipped. If too large, the optimization provides no benefit.
+-*   **Degenerate Input:** Rays originating inside the bounding volume must still respect the limit if they exit and re-enter, or simply terminate upon exit if the volume is convex and the ray is outside.
++*   **Precision:** If $T_{max}$ is very large, floating-point precision errors in $t$ may cause the ray to overshoot or fail to terminate correctly.
++*   **Boundaries:** Rays originating outside the bounding volume may terminate immediately if $T_{max}$ is set relative to the volume's extent rather than the ray's path.
+ 
+ **Pseudocode:**
+ ```python
+-def bounding_volume_culling(ray_origin, ray_direction, max_distance):
+-    """
+-    Determines if a ray should be processed based on a maximum travel distance.
+-    
+-    Args:
+-        ray_origin: Vector3, origin of the ray.
+-        ray_direction: Vector3, normalized direction of the ray.
+-        max_distance: Float, the maximum distance the ray is allowed to travel from the origin.
+-        
+-    Returns:
+-        Bool: True if the ray is within bounds, False if it should be culled.
+-    """
+-    # In a typical raymarching loop, this check is performed after updating the current position
+-    # or the accumulated distance.
+-    
+-    # Example integration within a step:
+-    current_distance = 0.0
+-    step_size = 0.01  # Example step size
+-    
+-    # This function is usually called to decide if the *entire* ray march should be skipped
+-    # or if the current step should terminate the loop.
+-    # Here we demonstrate the termination condition check.
+-    
+-    if current_distance > max_distance:
+-        return False  # Cull the ray
+-    
+-    return True  # Proceed with raymarching
++def bounding_volume_culling(ray_origin, ray_direction, max_distance, distance_field):
++    t = 0.0
++    while t < max_distance:
++        p = ray_origin + t * ray_direction
++        d = distance_field(p)
++        if d < epsilon:  # epsilon is a small threshold for surface hit
++            return shade(p, ray_direction)
++        t += d
++    # Ray exceeded the bounding volume limit
++    return background_color
+ ```
+-*Note: The sources describe tracking the total distance $t$ and terminating if $t$ exceeds the limit [S1, unofficial]. The pseudocode above reflects the logic of checking this condition.*
+ 
+ ## Subtopics
+ 
+ ### Heap-based Bounding Volume Culling for Sphere Tracing
+-An algorithm to find the closest object in a collection by maintaining a heap of bounding volume distances [S2]. It computes distances to bounding volumes first, then contents, culling based on the smallest bounding volume distance [S2]. It differs from [Bounding Spheres Optimization](1567-bounding-spheres-optimization.md) by actively managing a heap to defer expensive content distance calculations until necessary, whereas Bounding Spheres Optimization groups objects into enclosing spheres to eliminate distance calculations entirely for distant objects [S2].
++An algorithm to find the closest object in a collection by maintaining a heap of bounding volume distances. It computes distances to bounding volumes first, then contents, culling based on the smallest bounding volume distance [S2]. It differs from the parent method by managing a collection of objects rather than a single global limit, deferring expensive distance computations until necessary [S2].
+ 
+ **Steps:**
+@@ -71,7 +60,7 @@
+     a. Let $d_{content}$ be $\min(d_{min}, \text{distance to contents of top BV})$.
+     b. Remove top of heap.
+-    c. Let $d_{bv}$ be the distance to the new top BV.
++    c. Let $d_{bv}$ be distance to new top BV.
+     d. Stop if $d_{content} < d_{bv}$ or heap is empty.
+-5.  Return $d_{content}$ [S2].
++5.  Return $d_{content}$.
+ 
+ **Parameters:**
+@@ -79,12 +68,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per ray for the basic distance check. For heap-based variants, $O(\log N)$ for heap operations where $N$ is the number of bounding volumes.
+-*   **Memory Complexity:** $O(N)$ to store bounding volumes and the heap.
+-*   **Strengths:** Simple to implement; effectively culls rays that miss the scene entirely or travel too far into empty space.
+-*   **Limitations:** Does not account for opacity or density; may terminate rays that are close to interesting geometry but just outside the bound. Performance degradation can occur in perspective cases for typical implicit surfaces if the bounding volume checks are expensive [S2].
+-*   **When to use:** When the scene has a well-defined spatial extent and rays frequently miss the geometry or travel long distances through empty space.
++*   **Time Complexity:** $O(1)$ per ray for the basic method, assuming $T_{max}$ is fixed. For heap-based variants, it is $O(N \log N)$ for initialization and $O(\log N)$ per query, where $N$ is the number of bounding volumes.
++*   **Memory Complexity:** $O(1)$ for basic; $O(N)$ for heap-based.
++*   **Strengths:** Simple to implement; effective for scenes with known bounds; reduces unnecessary shading calculations.
++*   **Limitations:** Does not account for empty space within the volume; may terminate rays that would have contributed to fog or global illumination if not handled carefully.
++*   **When to use:** When the scene has a clear spatial extent and rays rarely need to travel beyond a certain distance.
+ 
+ ## Background
+-Bounding Volume Culling originated as a method to speed up raymarching by limiting rays to a specific bounding volume [S1, unofficial]. It is often used in conjunction with fog to avoid artifacts at large distances [S1, unofficial]. The heap-based variant for sphere tracing was developed to efficiently find the closest object in a collection of implicit surfaces by leveraging bounding volume distances [S2].
++The concept of limiting raymarching to a bounding volume was introduced in early raymarching literature as a way to speed up rendering by avoiding calculations for rays that have traveled too far [S1, unofficial]. The heap-based variant for sphere tracing was described in the context of geometric methods for antialiased ray tracing of implicit surfaces [S2].
+ 
+ ## Sources

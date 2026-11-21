@@ -1,0 +1,141 @@
+# Lidar Depth Generation
+Also called: LiDAR Depth Map Generation, LiDAR-to-Image Depth Projection
+
+## Overview
+Lidar Depth Generation converts sparse, unstructured 3D LiDAR point clouds into dense, pixel-aligned depth maps for synchronized RGB images. It solves the problem of generating high-quality depth supervision for neural rendering or vision tasks by leveraging the geometric accuracy of LiDAR sensors. Unlike direct depth sensing, this method projects accumulated LiDAR points from multiple time steps onto the 2D image plane, resolving occlusions and sparsity by selecting the nearest point per pixel. It builds on [Depth Map to Absolute Camera Coordinates](7984-depth-map-to-absolute-camera-coordinates.md) by providing the raw depth values and projection logic required to establish the camera-space depth map.
+
+## How it works
+**Inputs:**
+- A target RGB image frame $I$ with known camera intrinsics $K$ and extrinsics $T_{cam}^{world}$ (pose).
+- A set of $N$ LiDAR frames $\{L_1, L_2, ..., L_N\}$, where each frame $L_i$ contains a set of 3D points $P_i = \{(x, y, z)\}$ in the LiDAR sensor coordinate system.
+- A synchronization window parameter $W$ (number of closest LiDAR frames to consider).
+
+**Outputs:**
+- A depth map $D$ of size $H \times W$, where $D_{u,v}$ is the depth value for pixel $(u, v)$.
+- A validity mask $M$ indicating which pixels have valid depth.
+
+**Data Structures:**
+- **Depth Map:** A 2D array of floats, initialized to infinity or a sentinel value (e.g., -1) to indicate no depth.
+- **Point Cloud:** A list of 3D vectors.
+
+**Steps:**
+1. **Selection:** Identify the $W$ LiDAR frames closest in time to the target image frame. Let this subset be $L_{selected}$.
+2. **Transformation:** For each LiDAR frame $L_i \in L_{selected}$, transform its points from the LiDAR sensor frame to the world coordinate frame using the sensor-to-world transformation matrix $T_{lidar}^{world}$. Let the transformed points be $P_i^{world}$.
+3. **Projection:** For each point $p \in P_i^{world}$, project it onto the image plane using the camera intrinsics $K$ and the camera-to-world pose $T_{cam}^{world}$.
+   - Compute the camera-relative point: $p_{cam} = T_{cam}^{world^{-1}} \cdot p$.
+   - Project to normalized device coordinates: $p_{ndc} = K \cdot p_{cam}$.
+   - Convert to pixel coordinates $(u, v)$:
+     $$ u = \frac{p_{ndc,x}}{p_{ndc,z}} $$
+     $$ v = \frac{p_{ndc,y}}{p_{ndc,z}} $$
+   - Check if $(u, v)$ lies within the image bounds $[0, W_{img}) \times [0, H_{img})$ and if $p_{ndc,z} > 0$ (point is in front of the camera).
+4. **Depth Calculation:** For valid projections, compute the depth value $d$ as the Euclidean distance from the camera center to the point:
+   $$ d = \| p_{cam} \|_2 = \sqrt{p_{cam,x}^2 + p_{cam,y}^2 + p_{cam,z}^2} $$
+5. **Aggregation:** For each pixel $(u, v)$, if multiple points project to it, select the point with the smallest depth value $d$. Update the depth map:
+   $$ D_{u,v} = \min(D_{u,v}, d) $$
+   Mark $M_{u,v} = 1$ if $D_{u,v}$ was updated.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_lidar_depth(image_intrinsics, camera_pose, lidar_frames, num_frames=10):
+    """
+    image_intrinsics: 3x3 matrix K
+    camera_pose: 4x4 matrix T_cam_world
+    lidar_frames: list of (timestamp, points_3d, lidar_pose)
+    num_frames: number of closest lidar frames to use
+    """
+    # 1. Select closest frames
+    target_timestamp = get_image_timestamp()
+    sorted_lidar = sort_by_time_diff(lidar_frames, target_timestamp)
+    selected_lidar = sorted_lidar[:num_frames]
+    
+    # Initialize depth map with infinity
+    height, width = get_image_shape()
+    depth_map = np.full((height, width), np.inf)
+    valid_mask = np.zeros((height, width), dtype=bool)
+    
+    # Inverse camera pose for world-to-camera transformation
+    cam_inv = np.linalg.inv(camera_pose)
+    
+    for frame in selected_lidar:
+        lidar_points = frame.points
+        lidar_pose = frame.pose
+        
+        # 2. Transform to world coordinates
+        # lidar_points are Nx3, lidar_pose is 4x4
+        # Homogeneous coordinates for batch transformation
+        ones = np.ones((lidar_points.shape[0], 1))
+        lidar_points_homo = np.hstack([lidar_points, ones])
+        world_points_homo = (lidar_pose @ lidar_points_homo.T).T
+        world_points = world_points_homo[:, :3]
+        
+        # 3. Project to image coordinates
+        # Transform world points to camera coordinates
+        cam_points_homo = (cam_inv @ world_points_homo.T).T
+        cam_points = cam_points_homo[:, :3]
+        
+        # Check if points are in front of camera
+        valid_z = cam_points[:, 2] > 0
+        
+        # Project using intrinsics
+        # u = fx * x/z + cx, v = fy * y/z + cy
+        x, y, z = cam_points[valid_z].T
+        u = (image_intrinsics[0, 0] * x / z) + image_intrinsics[0, 2]
+        v = (image_intrinsics[1, 1] * y / z) + image_intrinsics[1, 2]
+        
+        # Check image bounds
+        valid_u = (u >= 0) & (u < width)
+        valid_v = (v >= 0) & (v < height)
+        
+        valid_indices = np.where(valid_z & valid_u & valid_v)[0]
+        
+        if len(valid_indices) == 0:
+            continue
+            
+        u_valid = u[valid_indices].astype(int)
+        v_valid = v[valid_indices].astype(int)
+        z_valid = z[valid_indices]
+        
+        # 4. Compute depth (distance from camera center)
+        # Depth is Euclidean distance in camera coordinates
+        depths = np.sqrt(x[valid_indices]**2 + y[valid_indices]**2 + z_valid**2)
+        
+        # 5. Update depth map with minimum depth
+        for idx in range(len(valid_indices)):
+            ui, vi = u_valid[idx], v_valid[idx]
+            d = depths[idx]
+            if d < depth_map[vi, ui]:
+                depth_map[vi, ui] = d
+                valid_mask[vi, ui] = True
+                
+    return depth_map, valid_mask
+```
+
+**Parameters:**
+- `num_frames`: Typically 10, as used in PandaSet [S1].
+- `lidar_pose`: Must be synchronized and calibrated relative to the camera.
+
+**Edge Cases:**
+- **No LiDAR points:** If no points project to a pixel, the depth remains infinity/invalid.
+- **Multiple points:** The nearest point (smallest depth) is chosen, handling occlusions [S1].
+- **Precision:** Floating-point precision in depth calculation should be sufficient to distinguish close points.
+
+## Subtopics
+
+### [LiDAR Ray Simulation](18371-lidar-ray-simulation.md)
+Simulates real LiDAR sensor rays by defining ray origin and direction based on sensor parameters and ego-vehicle motion to generate 3D points.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot W)$, where $N$ is the number of LiDAR points in the selected frames and $W$ is the number of frames. Projection and aggregation are linear in the number of points.
+- **Memory Complexity:** $O(H \cdot W)$ for the depth map, plus storage for the selected LiDAR points.
+- **Strengths:** Provides accurate depth supervision by leveraging LiDAR's direct range measurement. Handles sparse LiDAR data by accumulating points over time.
+- **Limitations:** Requires synchronized LiDAR and camera data. Performance depends on the density of LiDAR points and the number of frames used. Occlusions may still result in missing depth if the nearest point is not captured.
+- **When to use:** When generating depth maps for neural rendering or vision tasks where LiDAR data is available but sparse.
+- **When not to use:** When real-time performance is critical and LiDAR data is not available or too sparse.
+
+## Background
+Lidar Depth Generation is a technique used in datasets like PandaSet to provide depth supervision for neural radiance fields (NeRF) and other vision tasks. It was introduced in the LidaRF paper, which delves into the use of LiDAR for neural radiance fields on street scenes [S1]. The method addresses the challenge of unbounded scenes by normalizing the scene based on the camera trajectory radius.
+
+## Sources
+[S1] LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes, https://doi.org/10.1109/cvpr52733.2024.01850, fetched 2026-10-26

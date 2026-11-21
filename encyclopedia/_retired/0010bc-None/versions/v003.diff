@@ -1,0 +1,224 @@
+--- v002.md
++++ v003.md
+@@ -4,132 +4,122 @@
+ 
+ ## Overview
+-Dynamic Load Balancing via Tile Queue is a parallel processing scheme that splits screen space into tiles and assigns them to processors via a shared queue to ensure high processor utilization across varying views [S1, book]. It addresses the unpredictability of isosurface extraction complexity per pixel, which static partitioning cannot handle efficiently [S1, book]. Unlike its siblings, which often rely on static spatial locality or explicit communication minimization for cell assignment, this method uses a dynamic queue with variable-granularity chunking to balance load without synchronization overhead during the rendering phase [S1, book].
++Dynamic Load Balancing via Tile Queue is a parallel processing scheme that splits screen space into tiles and assigns them to processors via a shared queue to ensure high processor utilization over a wide range of views [S1, book]. It addresses the unpredictability of isosurface extraction complexity per pixel, which static partitioning cannot handle efficiently [S1, book]. It sets itself apart from static contiguous partitioning by adapting to workload variations and from centralized dispatching by distributing the queue management logic to avoid a single point of control bottleneck [S1, book][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Screen dimensions (width $W$, height $H$) [G].
+-- Number of processors $P$ [G].
+-- Tile dimensions $T_w \times T_h$ [S1, book].
+-
+-**Outputs:**
+-- Rendered image [G].
+-- Processor utilization metrics [G].
++**Inputs and Outputs:**
++*   **Input:** A volumetric dataset, a camera view, and a set of $P$ processors.
++*   **Output:** A rendered image (framebuffer).
+ 
+ **Data Structures:**
+-- **Tile:** A rectangular region of the image defined by top-left pixel coordinates $(x, y)$ and dimensions $T_w \times T_h$ [S1, book].
+-- **Queue:** A shared data structure containing available tile assignments. The queue supports atomic "pull" operations to retrieve a range of assignments [S1, book].
++*   **Tile:** A rectangular region of the image. In the reference implementation, tiles are 32 pixels wide by 4 pixels high [S1, book]. The width (32 pixels) ensures that tiles do not share a cache line with neighboring tiles (assuming standard cache line sizes, e.g., 128 bytes for 4 pixels of float data) [S1, book].
++*   **Queue:** A shared data structure containing tile assignments. The queue supports atomic "pull" operations.
+ 
+-**Parameters:**
+-- Tile width $T_w = 32$ pixels [S1, book].
+-- Tile height $T_h = 4$ pixels [S1, book].
+-- Initial chunk size: Large (number of tiles pulled per request is high) [S1, book].
+-- Final chunk size: Small (number of tiles pulled per request decreases as the frame completes) [S1, book].
+-
+-**Steps:**
+-1. **Tile Partitioning:** Divide the screen space into disjoint tiles of size $32 \times 4$ pixels [S1, book]. The total number of tiles $N_{tiles}$ is calculated as:
+-   $$ N_{tiles} = \left\lceil \frac{W}{32} \right\rceil \times \left\lceil \frac{H}{4} \right\rceil $$
+-   The tile width of 32 pixels ensures that tiles do not share a cache line with neighboring tiles, optimizing memory access patterns [S1, book].
+-2. **Queue Initialization:** At the beginning of each frame, create a queue containing all $N_{tiles}$ assignments [S1, book]. Each assignment represents one tile.
+-3. **Dynamic Assignment Loop:** For each processor $p$:
+-   a. Pull a range of assignments (tiles) from the shared queue [S1, book].
+-   b. The number of tiles pulled depends on the frame's progress:
+-      - Early in the frame: Pull a large chunk of tiles to reduce contention for the queue lock/atomic operation [S1, book].
+-      - Late in the frame: Pull smaller chunks to ensure fine-grained load balancing as remaining work diminishes [S1, book].
+-   c. Process all assigned tiles (ray-tracing/isosurface extraction) [S1, book].
+-   d. If work remains in the queue, return to step 3a [S1, book].
+-4. **Completion:** The frame is complete when the queue is empty and all processors have finished their current tasks [S1, book].
++**Algorithm Steps:**
++1.  **Initialization:** Split the screen space into tiles in image space [S1, book]. At the beginning of a frame, each tile becomes an assignment in the shared queue [S1, book].
++2.  **Work Pulling:** Each processor pulls a range of assignments from the queue [S1, book].
++3.  **Processing:** The processor performs the assigned work (ray-tracing/isosurface extraction) for the tiles in the pulled range [S1, book].
++4.  **Iteration:** After completing the work, the processor returns to the queue to pull more assignments [S1, book].
++5.  **Granularity Adjustment:** Assignments are initially doled out in large chunks. As the frame nears completion, the chunk size gets smaller [S1, book]. This large granularity early reduces contention, while smaller granularity late balances load efficiently [S1, book].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-import threading
+-from collections import deque
++# Global shared state
++tile_queue = Queue() # Contains all tiles for the current frame
+ 
+-def dynamic_tile_queue_load_balancing(screen_width, screen_height, num_processors, volume_data):
+-    tile_w = 32
+-    tile_h = 4
++def initialize_frame(tiles):
++    """Populate the queue with all tiles at the start of a frame."""
++    for tile in tiles:
++        tile_queue.enqueue(tile)
+ 
+-    # Calculate number of tiles
+-    tiles_x = math.ceil(screen_width / tile_w)
+-    tiles_y = math.ceil(screen_height / tile_h)
+-    total_tiles = tiles_x * tiles_y
++def processor_work_loop(processor_id):
++    """Main loop for a single processor."""
++    while True:
++        # Pull a chunk of tiles from the queue
++        # The size of the chunk depends on the frame progress
++        chunk_size = get_dynamic_chunk_size()
++        assigned_tiles = []
++        
++        for _ in range(chunk_size):
++            tile = tile_queue.try_dequeue()
++            if tile is None:
++                break
++            assigned_tiles.append(tile)
++            
++        if not assigned_tiles:
++            # No more work available
++            break
++            
++        # Perform rendering for the assigned tiles
++        for tile in assigned_tiles:
++            render_tile(tile)
+ 
+-    # Initialize queue with all tile indices
+-    queue = deque(range(total_tiles))
+-    queue_lock = threading.Lock()
+-
+-    # Shared state for chunk size adaptation
+-    current_chunk_size = 16  # Large initial chunk [G]
+-    threshold = 10           # Threshold to switch to small chunks [G]
+-
+-    def process_tile(tile_idx):
+-        tx = tile_idx % tiles_x
+-        ty = tile_idx // tiles_x
+-        x_start, x_end = tx * tile_w, min((tx + 1) * tile_w, screen_width)
+-        y_start, y_end = ty * tile_h, min((ty + 1) * tile_h, screen_height)
+-        # Raycasting and volume access logic [G]
+-        # Bug fix: Cast coordinates to int before indexing to prevent TypeError
+-        for y in range(y_start, y_end):
+-            for x in range(x_start, x_end):
+-                ix, iy = int(x), int(y)
+-                _ = volume_data[0][iy][ix]
+-
+-    def worker():
+-        nonlocal current_chunk_size
+-        while True:
+-            with queue_lock:
+-                if not queue:
+-                    break
+-                batch = []
+-                for _ in range(current_chunk_size):
+-                    if queue:
+-                        batch.append(queue.popleft())
+-                    else:
+-                        break
+-            if not batch:
+-                break
+-            for tile_idx in batch:
+-                process_tile(tile_idx)
+-            # Adapt chunk size: reduce as frame progresses [S1, book]
+-            with queue_lock:
+-                remaining = len(queue)
+-            if remaining < threshold:
+-                current_chunk_size = 1  # Small final chunk [G]
+-
+-    threads = [threading.Thread(target=worker) for _ in range(num_processors)]
+-    for t in threads: t.start()
+-    for t in threads: t.join()
++def get_dynamic_chunk_size():
++    """
++    Returns the number of tiles to pull in one atomic operation.
++    Large at start, small at end.
++    Implementation detail: [G]
++    """
++    # Not given in the sources. 
++    # Typical implementation: start with N tiles, decrement N as 
++    # queue empties or based on time elapsed.
++    pass
+ ```
+ 
++**Parameters:**
++*   **Tile Dimensions:** 32 pixels wide by 4 pixels high [S1, book].
++*   **Chunk Size Strategy:** Starts large, decreases as the frame completes [S1, book]. Exact formula for size reduction is not given in the sources [G].
++
+ **Edge Cases and Pitfalls:**
+-- **Cache Line Sharing:** Tile width must be chosen to avoid sharing cache lines with neighbors. A width of 32 pixels is specified to ensure this [S1, book].
+-- **Queue Contention:** Pulling single tiles individually causes high contention. Large initial chunks mitigate this [S1, book].
+-- **Load Imbalance:** Small remaining work requires small chunks to prevent idle processors while one processor finishes a large remaining chunk [S1, book].
+-- **Coordinate Indexing:** Volume texture lookups must cast floating-point ray coordinates to integers before array indexing to prevent `TypeError: can't multiply sequence by non-int of type 'float'` [G].
++*   **Contention:** High contention for the queue can occur if chunk sizes are too small early in the frame. The large initial chunk size mitigates this [S1, book].
++*   **Load Imbalance:** If the workload is extremely uneven, small processors may finish early and idle. The decreasing chunk size helps balance this late in the frame [S1, book].
++*   **Synchronization Overhead:** Synchronizing processors at the required frame rate can reduce efficiency, especially with large numbers of processors (> 64) [S1, book].
+ 
+ ## Subtopics
+ 
+ ### [Scanline Interleaving](2757-scanline-interleaving.md)
+-Distributes pixels in a striped, round-robin pattern to balance load based on depth complexity variations. It sets itself apart by assuming neighbor mesh-cells have equal workload, whereas this method explicitly models per-tile complexity. Choose it when depth complexity varies locally across the screen.
++Scanline Interleaving is an image-space partitioning strategy that distributes pixels across processors in a striped, round-robin pattern to balance the computational load of ray-merging operations. It addresses variations in depth complexity caused by local variations in cell sizes by dispersing ray-merging computations evenly across the screen. Unlike Dynamic Load Balancing via Tile Queue, which uses a queue of tiles, Scanline Interleaving uses a static pattern.
+ 
+ ### [Load-Balanced Cell Assignment](4194-load-balanced-cell-assignment.md)
+-Assigns coarse 2D mesh-cells to processors based on global ray-segment counts to minimize communication during merging. It sets itself apart by explicitly modeling each mesh-cell's computational load rather than assuming uniform neighbor workloads. Choose it during the Local Pixel Merging phase when ray-segments from different processors must be combined.
++Load-Balanced Cell Assignment (PA) distributes the ray-segment merging workload in tiled parallel volume rendering by assigning coarse 2D mesh-cells to processors. It solves the problem of balancing computational load during the Local Pixel Merging (LPM) phase, where ray-segments generated by different processors for the same pixel must be combined into an atomic task per mesh-cell. Unlike Dynamic Load Balancing via Tile Queue, which dynamically assigns tiles, PA explicitly models each mesh-cell's computational load based on its global ray-segment count to achieve a balanced distribution.
+ 
+ ### [Farm on Demand (FD)](7455-farm-on-demand-fd.md)
+-A parallel isosurface extraction algorithm based on the processor farm paradigm where balancing is obtained dynamically. It sets itself apart by relying on task granularity rather than image-space tiling. Choose it when enough partitions (tasks) can be generated to sustain dynamic balancing.
++Farm on Demand (FD) is a parallel isosurface extraction algorithm that achieves dynamic load balancing by subdividing a volumetric dataset into a large number of fine-grained tasks and distributing them to worker processes on demand. It builds on Dynamic Load Balancing via Tile Queue by applying the processor farm paradigm to volume data, where the master assigns small intervals of slices to workers as they become available, rather than using static partitioning. Unlike its sibling Load Balanced Cell Assignment (LBC), which uses static contiguous partitions, FD provides near-perfect computational load balancing for uneven isosurface distributions but probabilistically produces a significantly higher number of shared vertices due to non-contiguous task assignment.
+ 
+ ### [Hybrid Image Partitioning](7675-hybrid-image-partitioning.md)
+-Combines static block assignment with dynamic tile grabbing to balance load distribution and minimize overlapping voxel accesses. It sets itself apart by merging static locality with dynamic queue mechanics. Choose it when minimizing redundant voxel fetches is critical alongside load balancing.
++Hybrid Image Partitioning is a dynamic load balancing scheme for parallel volume rendering that combines static block assignment with dynamic tile grabbing to balance load distribution and minimize overlapping voxel accesses. It sets itself apart from static contiguous partitioning by avoiding poor load distribution caused by varying image complexity, and from static interleaved partitioning by minimizing excessive overlapping voxel accesses through spatial locality. It builds on Dynamic Load Balancing via Tile Queue by distributing the queue management across processors to avoid the bottleneck of a centralized point of control.
++
++### Central Queue Load Balancing
++Central Queue Load Balancing introduces a central queue of work where processors grab pending loads as soon as they become available [S2, unofficial]. Processors use a shared queue containing a front-to-back sorted list of bricks, rendering corresponding bricks to a shared frame buffer [S2, unofficial]. Race conditions are solved by having each processor render each brick to a private buffer, then moving to a complete work queue, blending from the private buffer onto the shared buffer only once all dependent bricks are in the completed work queue [S2, unofficial]. However, choosing a central dispatching mechanism serializes the program, creating a single point of control that becomes a bottleneck as the number of processors increases [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Efficiency:** On 128 processors, efficiency is 91% for View 1 (nearly 100% pixel coverage) and 80% for View 2 (approx 75% pixel coverage) [S1, book].
+-- **Performance:** For a 512x512 image of the Visible Human bone isosurface, 128 CPUs achieved 20.49 FPS (View 1) and 39.98 FPS (View 2) [S1, book].
+-- **Scalability:** Speedup is linear up to 32 processors. Beyond 64 processors, efficiency drops due to load imbalances and synchronization time required to maintain frame rates [S1, book].
+-- **Strengths:** High utilization across varying views; reduces contention via large initial chunks; balances load efficiently near frame completion via small chunks [S1, book].
+-- **Limitations:** Efficiency decreases with more processors (>64) due to synchronization overhead and load imbalance; efficiency would be higher for larger images [S1, book].
++**Time and Memory Complexity:**
++*   **Time:** The algorithm is dynamic, so time complexity depends on the workload distribution. The overhead of queue operations is $O(1)$ per tile pull, but contention can increase this.
++*   **Memory:** Memory usage is proportional to the number of tiles in the queue and the private buffers used in variants like Central Queue Load Balancing.
++
++**Measured Performance:**
++*   **Hardware:** 128 CPUs [S1, book].
++*   **Scene:** Bone isosurface in the Visible Human dataset [S1, book].
++*   **Resolution:** 512x512 image [S1, book].
++*   **Results:**
++    *   **View 1 (nearly 100% pixel coverage):** 20.49 FPS, 91% efficiency [S1, book].
++    *   **View 2 (approx 75% pixel coverage):** 39.98 FPS, 80% efficiency [S1, book].
++*   **Scalability:** Efficiency drops with larger numbers of processors (> 64) due to load imbalances and synchronization time [S1, book].
++
++**Strengths and Limitations:**
++*   **Strengths:** High processor utilization over a wide range of views; adapts to unpredictable isosurface complexity; reduces contention with large initial chunks [S1, book].
++*   **Limitations:** Synchronization overhead at high processor counts; requires a shared queue mechanism which can become a bottleneck if not distributed [S1, book][S2, unofficial].
++
++**When to Use:**
++*   Use when the workload per pixel is unpredictable (e.g., complex isosurfaces).
++*   Use when static partitioning leads to poor load balance.
++
++**When Not to Use:**
++*   Use when the workload is uniform and predictable; static partitioning is simpler and has less overhead.
++*   Use when the number of processors is very large and synchronization overhead becomes prohibitive.
+ 
+ ## Background
+-The method was developed for fast isosurface extraction from large image datasets, specifically the Visible Human dataset [S1, book]. It was introduced in the context of real-time ray-tracing for volume rendering, addressing the challenge of unpredictable isosurface extraction complexity per pixel [S1, book]. The approach is part of a broader strategy involving data bricking and spatial hierarchies to optimize cache locality and empty space skipping [S1, book].
++Dynamic Load Balancing via Tile Queue was introduced in the context of large-scale isosurface extraction methods for large image data sets [S1, book]. It was developed to address the challenges of real-time ray-tracing on large datasets, specifically the Visible Human dataset [S1, book]. The method was part of a broader effort to optimize parallel volume rendering on CPU clusters, leveraging cache locality through bricking and spatial hierarchies [S1, book].
+ 
+ ## Sources
+-[S1] Fast Isosurface Extraction Methods for Large Image Data sets, https://publications.sci.utah.edu/publications/livnat08/Large-scale-isosurface08.pdf, fetched 2026-10-28 (book)+[S1] Fast Isosurface Extraction Methods for Large Image Data sets, https://publications.sci.utah.edu/publications/livnat08/Large-scale-isosurface08.pdf, fetched 2026-10-28 (book)
++[S2] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

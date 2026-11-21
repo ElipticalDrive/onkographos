@@ -1,0 +1,377 @@
+--- v006.md
++++ v007.md
+@@ -4,251 +4,152 @@
+ 
+ ## Overview
+-This method converts 2D screen pixel coordinates into 3D ray origins and directions in world space, enabling volume rendering and ray marching. It solves the problem of "lifting" 2D image coordinates into 3D space by using the inverse of the camera's projection and view transformations. Unlike [Pinhole Camera Projection](3162-pinhole-camera-projection-pixel-to-camera.md), which maps pixels to 3D points at a specific depth (often for point cloud reconstruction), this method generates the full ray vector (origin and direction) required for marching through a volume. It builds on [General NDC Ray Conversion](2429-general-ndc-ray-conversion.md) by handling the specific case of generating rays for a standard perspective camera, often assuming the camera is at the origin in view space or using a full inverse Projection-View matrix to reach world space.
++Ray Generation from Pixel Coordinates converts 2D screen pixel coordinates into 3D world-space ray origins and directions, serving as the foundational step for raymarching and volume rendering [S1, S5, S9, unofficial]. It solves the problem of "lifting" 2D image data into 3D space by establishing the geometric relationship between the camera sensor and the world [S3, S6, unofficial]. Unlike [Pinhole Camera Projection (Pixel to Camera)](3162-pinhole-camera-projection-pixel-to-camera.md), which focuses on the algebraic backprojection to camera space, this method explicitly constructs world-space rays, often leveraging the inverse Projection-View matrix or explicit NDC-to-world transformations [S1, S4, S5, unofficial]. It builds on [General NDC Ray Conversion](2429-general-ndc-ray-conversion.md) by handling the final mapping from pixel indices to the specific camera model's world coordinates [S4, S5, unofficial].
+ 
+ ## How it works
+-The method typically follows one of two paths depending on the available camera representation: using a full inverse Projection-View matrix (general case) or using intrinsic parameters (pinhole/FOV case). Both paths aim to determine a ray origin (usually the camera center) and a ray direction (passing through the pixel).
++**Inputs:**
++*   Pixel coordinates $(u, v)$ or a grid of pixel indices.
++*   Image resolution $(W, H)$.
++*   Camera parameters: Intrinsic matrix $K$ (or focal length $f$, principal point $c_x, c_y$), Extrinsics (Rotation $R$, Translation $T$), and Projection matrix $P$ (or View-Projection matrix $VP$).
++*   Field of View (FOV) and aspect ratio, if using explicit geometric construction.
+ 
+-### Inputs and Outputs
+-- **Inputs**:
+-  - Pixel coordinates $(u, v)$ or $(x, y)$ in integer or float format.
+-  - Image resolution: Width $W$, Height $H$.
+-  - Camera parameters: Either a $4 \times 4$ inverse Projection-View matrix ($M_{inv}$), or Field of View (FOV) and aspect ratio.
+-  - Near plane distance $z_{near}$ (often 1.0 or 0.0 depending on convention).
+-- **Outputs**:
+-  - Ray origin $\mathbf{o}$ (world space position).
+-  - Ray direction $\mathbf{d}$ (normalized world space vector).
++**Outputs:**
++*   Ray origins $\mathbf{o} \in \mathbb{R}^3$ (typically the camera center).
++*   Ray directions $\mathbf{d} \in \mathbb{R}^3$ (normalized vectors pointing from origin through the pixel).
+ 
+-### Data Structures
+-- **Ray Bundle**: A structure containing arrays for origins $\mathbf{o}$ and directions $\mathbf{d}$, typically shaped $(N, 3)$ for $N$ rays.
+-- **NDC Grid**: A tensor of shape $(H, W, 2)$ or $(N, 2)$ containing normalized device coordinates.
++**Data Structures:**
++*   **RayBundle**: A structure containing tensors for origins and directions.
++    *   `rays_o`: Shape $(N, 3)$, where $N = W \times H$ (or batch size $\times N$).
++    *   `rays_d`: Shape $(N, 3)$, normalized direction vectors.
++    *   `sample_points`: Shape $(N, 0)$ or $(N, K, 3)$, initialized to zeros (placeholder for marching steps) [S2, S4, S5, unofficial].
+ 
+-### Steps (General Matrix-Based Approach)
+-This approach is used when the full camera matrix is available [S1, S4, unofficial].
++**Steps:**
+ 
+-1. **Convert Pixel to NDC**:
+-   Map pixel coordinates $(x, y)$ to Normalized Device Coordinates (NDC) range $[-1, 1]$.
+-   $$ x_{ndc} = \frac{2x}{W} - 1 $$
+-   $$ y_{ndc} = \frac{2y}{H} - 1 $$
+-   [S1, S3, unofficial]
++1.  **Generate Pixel Grid**: Create a grid of pixel coordinates $(u, v)$ for all pixels in the image.
++    *   $u \in [0, W-1]$, $v \in [0, H-1]$.
++    *   Note: Coordinate systems vary. OpenGL/Metal often use top-left $(0,0)$ [S6, unofficial], while some implementations assume center $(0,0)$ [S8, unofficial].
+ 
+-2. **Construct NDC Point**:
+-   Create a 3D point in NDC space. For ray generation, we typically need two points: one on the near plane (origin) and one on a reference plane (direction).
+-   - Point 1 (Origin): $P_0 = (x_{ndc}, y_{ndc}, z_{near\_ndc})$
+-   - Point 2 (Direction Reference): $P_1 = (x_{ndc}, y_{ndc}, z_{ref\_ndc})$
+-   
+-   The Z-coordinate in NDC depends on the projection matrix. For a standard OpenGL-style projection, $z_{ndc}$ for a world Z of $z_{world}$ is calculated via the projection matrix. However, a common simplification for ray generation is to set $z_{near\_ndc}$ corresponding to the near plane (e.g., 0 or -1) and $z_{ref\_ndc}$ corresponding to a plane at $Z=1$ in view space or similar [S1, unofficial].
+-   
+-   Specifically, [S1, unofficial] uses:
+-   $$ \text{store} = \left( \frac{2x}{W} - 1, \frac{2y}{H} - 1, \text{projectionZPos} \cdot 2 - 1 \right) $$
+-   where `projectionZPos` is the Z value in NDC space for the desired depth.
++2.  **Convert to Normalized Device Coordinates (NDC)**:
++    *   Map pixel coordinates to NDC space $[-1, 1]$.
++    *   Formula:
++        $$ x_{ndc} = \frac{2 u}{W} - 1 $$
++        $$ y_{ndc} = \frac{2 v}{H} - 1 $$
++    *   For a point on the near plane at $Z=1$ (in camera/NDC space), the 3D NDC point is $\mathbf{p}_{ndc} = [x_{ndc}, y_{ndc}, 1.0]^T$ [S1, S3, S5, unofficial].
++    *   *Alternative (Explicit FOV)*: If not using matrix inversion, calculate centered UVs:
++        $$ xy = [u - W/2.0, v - H/2.0] $$
++        $$ z = \frac{H}{2 \tan(\text{FOV}_{vertical} / 2)} $$
++        $$ \mathbf{d}_{cam} = \text{normalize}([xy_x, xy_y, -z]) $$ [S6, S8, unofficial].
+ 
+-3. **Transform to World Space**:
+-   Multiply the NDC point by the inverse Projection-View matrix ($M_{inv}$).
+-   $$ P_{world\_homo} = M_{inv} \cdot \begin{bmatrix} x_{ndc} \\ y_{ndc} \\ z_{ndc} \\ 1 \end{bmatrix} $$
+-   [S1, S4, unofficial]
++3.  **Unproject to World Space**:
++    *   **Method A: Inverse Projection-View Matrix** [S1, S4, S5, unofficial]:
++        *   Form homogeneous NDC point: $\mathbf{p}_{ndc}^{hom} = [x_{ndc}, y_{ndc}, 1.0, 1.0]^T$.
++        *   Compute inverse matrix $M^{-1} = (VP)^{-1}$ [S1, unofficial].
++        *   Transform: $\mathbf{p}_{world}^{hom} = M^{-1} \mathbf{p}_{ndc}^{hom}$.
++        *   Perform perspective division: $\mathbf{p}_{world} = \mathbf{p}_{world}^{hom} / w$, where $w$ is the fourth component of $\mathbf{p}_{world}^{hom}$ [S1, unofficial].
++        *   This yields a point on the image plane in world space.
++    *   **Method B: Camera Unproject API** [S2, S3, S7, unofficial]:
++        *   Use a library function (e.g., `camera.unproject_points`) that takes NDC points and returns world coordinates, handling the matrix inversion internally [S2, S5, unofficial].
+ 
+-4. **Perspective Division**:
+-   Perform perspective division to get Cartesian coordinates.
+-   $$ P_{world} = \left( \frac{P_{world\_homo.x}}{P_{world\_homo.w}}, \frac{P_{world\_homo.y}}{P_{world\_homo.w}}, \frac{P_{world\_homo.z}}{P_{world\_homo.w}} \right) $$
+-   [S1, unofficial]
++4.  **Determine Ray Origin**:
++    *   The ray origin is the camera center in world space.
++    *   $\mathbf{o} = \text{camera.get_camera_center()}$ [S2, S4, S5, unofficial].
++    *   If using extrinsics $R, T$, the camera center is $-\mathbf{R}^T \mathbf{T}$ [S9, unofficial].
+ 
+-5. **Compute Ray Origin and Direction**:
+-   - **Origin**: The camera center. This can be obtained by transforming the origin $(0,0,0)$ in view space or by using a dedicated camera center function. In many implementations, the origin is simply the camera position in world space [S4, S8, unofficial].
+-   - **Direction**: The vector from the origin to the transformed point on the image plane (usually at $Z=1$ in view space or the near plane in world space), normalized.
+-     $$ \mathbf{d} = \text{normalize}(P_{world\_ref} - \mathbf{o}) $$
+-     [S1, S4, unofficial]
++5.  **Compute Ray Direction**:
++    *   Calculate the vector from the origin to the unprojected world point on the image plane.
++    *   $\mathbf{d}_{raw} = \mathbf{p}_{world} - \mathbf{o}$ [S2, S3, S5, unofficial].
++    *   Normalize the direction:
++        $$ \mathbf{d} = \frac{\mathbf{d}_{raw}}{\|\mathbf{d}_{raw}\|} $$ [S2, S3, S5, S7, unofficial].
+ 
+-### Steps (FOV/Pinhole Approach)
+-This approach is used when only FOV and resolution are known, common in simple ray marchers [S5, S7, unofficial].
++**Pseudocode:**
+ 
+-1. **Calculate Centered UV**:
+-   Adjust pixel coordinates to be relative to the image center.
+-   $$ u = x - \frac{W}{2} $$
+-   $$ v = y - \frac{H}{2} $$
+-   [S5, unofficial]
++```python
++import torch
++import torch.nn.functional as F
+ 
+-2. **Calculate Z Component**:
+-   Using the vertical field of view ($\theta$) and height $H$:
+-   $$ z = \frac{H}{2 \tan(\theta / 2)} $$
+-   [S5, unofficial]
+-
+-3. **Compute Direction**:
+-   The ray direction in camera space (assuming camera looks down -Z) is:
+-   $$ \mathbf{d}_{cam} = \text{normalize}(u, v, -z) $$
+-   [S5, S7, unofficial]
+-   Note: [S7, unofficial] uses `normalize(vec3(uv, -1.0))` where `uv` are already aspect-corrected. If aspect correction is not applied in step 1, it must be applied here: $u_{corr} = u \cdot \frac{H}{W}$.
+-
+-4. **Transform to World Space**:
+-   If the camera is not at the world origin or not aligned with axes, rotate $\mathbf{d}_{cam}$ by the camera's rotation matrix $R$ and translate the origin $\mathbf{o}$ by the camera's position $T$.
+-   $$ \mathbf{d}_{world} = R \cdot \mathbf{d}_{cam} $$
+-   $$ \mathbf{o}_{world} = T $$
+-   [S8, unofficial]
+-
+-### Pseudocode (Matrix-Based)
+-```python
+-def generate_rays_matrix(pixels, width, height, inv_proj_view):
++def generate_rays_from_pixels(image_size, camera):
+     """
+-    pixels: Tensor of shape (N, 2) containing (x, y) in pixel coordinates.
+-    width, height: Image dimensions.
+-    inv_proj_view: 4x4 inverse Projection-View matrix.
+-    Returns: origins (N, 3), directions (N, 3)
++    Generates ray origins and directions for all pixels in an image.
++    
++    Args:
++        image_size: Tuple (W, H)
++        camera: Camera object with methods get_camera_center() and unproject_points()
++        
++    Returns:
++        rays_o: Tensor of shape (N, 3)
++        rays_d: Tensor of shape (N, 3)
+     """
+-    # 1. Convert to NDC
+-    # pixels shape: (N, 2) -> (x, y)
+-    x_ndc = (2.0 * pixels[:, 0] / width) - 1.0
+-    y_ndc = (2.0 * pixels[:, 1] / height) - 1.0
++    W, H = image_size
++    N = W * H
+     
+-    # 2. Create NDC points for near plane (z=0 in view space -> specific NDC z)
+-    # For simplicity, assuming we want rays from camera center to a plane at Z=1 in view space.
+-    # We need two points: one for origin (camera center) and one for direction.
++    # Step 1: Generate pixel coordinates
++    # Create meshgrid of pixel indices
++    # Note: meshgrid(y, x) creates grids where first dim is y (rows) and second is x (cols)
++    y_indices, x_indices = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+     
+-    # Camera center in NDC is typically (0,0,0) or similar depending on projection.
+-    # A robust way is to unproject (0,0,0) in view space for origin.
+-    # But often, origin is just camera position.
++    # Flatten to list of (x, y) pairs
++    # Shape: (N, 2)
++    pixel_coords = torch.stack([x_indices.flatten(), y_indices.flatten()], dim=-1).float()
+     
+-    # Let's generate points at Z=1 in view space for direction calculation.
+-    # In NDC, Z=1 in view space maps to a specific value. 
+-    # For OpenGL projection, Z=1 in view space is not directly 1 in NDC.
+-    # However, a common trick is to unproject (x_ndc, y_ndc, 0) and (x_ndc, y_ndc, 1) 
+-    # if the projection matrix is identity (orthographic) or handled by the unproject function.
++    # Step 2: Convert to NDC
++    # Map [0, W-1] -> [-1, 1]
++    ndc_x = (2.0 * pixel_coords[:, 0]) / W - 1.0
++    ndc_y = (2.0 * pixel_coords[:, 1]) / H - 1.0
+     
+-    # General approach: Unproject (x_ndc, y_ndc, -1) and (x_ndc, y_ndc, 1) in NDC?
+-    # No, standard NDC Z is [-1, 1] for OpenGL.
+-    # Let's use the method from [S1, unofficial]:
+-    # Point 1: Z_ndc corresponding to near plane.
+-    # Point 2: Z_ndc corresponding to Z=1 in view space? 
+-    # Actually, [S1, unofficial] uses GetWorldPosition(x, y, 0) and GetWorldPosition(x, y, 1).
+-    # This implies the Z argument is in VIEW SPACE Z.
++    # Construct NDC points on the near plane (Z=1 in camera/NDC space)
++    # Shape: (N, 3)
++    ndc_points = torch.stack([ndc_x, ndc_y, torch.ones_like(ndc_x)], dim=-1)
+     
+-    # So we need to map View Z=0 and View Z=1 to NDC Z.
+-    # This requires the Projection Matrix, not just the inverse PV.
+-    # If we only have Inverse PV, we can't easily map View Z to NDC Z without the Projection part.
++    # Step 3: Unproject to World Space
++    # Append homogeneous coordinate 1.0
++    ndc_points_hom = torch.cat([ndc_points, torch.ones_like(ndc_points[..., :1])], dim=-1) # Shape: (N, 4)
+     
+-    # Alternative: Use the camera's unproject function which handles this [S4, unofficial].
+-    # Since we are writing plain text, we assume a helper `unproject_ndc` exists 
+-    # or we construct the points manually if we know the projection.
++    # Use camera's unproject method. 
++    # Assumes camera handles the inverse VP matrix multiplication and perspective division.
++    # from_ndc=True indicates input is in NDC space [-1, 1]
++    world_points = camera.unproject_points(ndc_points_hom, from_ndc=True) # Shape: (N, 3)
+     
+-    # Let's assume we have a function `unproject_ndc(ndc_x, ndc_y, ndc_z, inv_pv)`
+-    # which returns world coordinates.
++    # Step 4: Get Ray Origin
++    # Get camera center in world space
++    cam_center = camera.get_camera_center() # Shape: (3,)
+     
+-    # To get the direction, we need a point on the image plane.
+-    # The image plane is often defined at Z=1 in view space.
+-    # We need to find the NDC Z that corresponds to View Z=1.
+-    # This is complex without the forward projection matrix.
++    # Expand to match number of rays
++    rays_o = cam_center.expand(N, -1) # Shape: (N, 3)
+     
+-    # Simplified Implementation (assuming Orthographic or specific setup):
+-    # If the camera is perspective, we usually unproject (x_ndc, y_ndc, -1) and (x_ndc, y_ndc, 1) 
+-    # to get points in the frustum, then compute direction.
++    # Step 5: Compute Ray Direction
++    # Vector from origin to world point on image plane
++    rays_d = world_points - rays_o # Shape: (N, 3)
+     
+-    # Let's stick to the [S4, unofficial] logic which uses `camera.unproject_points`.
+-    # We will write a generic version assuming we can get World Points from NDC.
++    # Normalize directions
++    rays_d = F.normalize(rays_d, dim=-1) # Shape: (N, 3)
+     
+-    # Construct NDC grid
+-    # ndc_points shape: (N, 3) -> (x_ndc, y_ndc, z_ndc)
+-    # We need two sets of points: one for origin (camera center) and one for direction.
+-    
+-    # Origin: Camera Center. This is often (0,0,0) in view space.
+-    # In NDC, (0,0,0) is the center of the screen.
+-    # But (0,0,0) in view space is the camera center.
+-    # So, unproject (0,0,0) in NDC? No, (0,0,0) in NDC is a ray, not a point.
+-    # We need a specific Z.
+-    # The camera center is at View Z=0.
+-    # What is the NDC Z for View Z=0? It depends on the projection matrix.
+-    
+-    # Let's use the [S1, unofficial] approach which explicitly calculates World Position from View Z.
+-    # This requires the Projection Matrix.
+-    
+-    # Since the prompt asks for "Ray Generation from Pixel Coordinates" and cites [S1, unofficial] which uses Inverse PV,
+-    # let's assume the `GetWorldPosition` function handles the Z mapping internally or the Z passed is NDC Z.
+-    # In [S1, unofficial], `projectionZPos` is passed.
+-    
+-    # Let's provide the FOV-based pseudocode as it is self-contained and widely used for "Beaming Rays" [S5, S7, unofficial].
+-    pass
+-
+-def generate_rays_fov(pixels, width, height, fov_degrees):
+-    """
+-    pixels: Tensor of shape (N, 2) containing (x, y) in pixel coordinates.
+-    width, height: Image dimensions.
+-    fov_degrees: Vertical Field of View in degrees.
+-    Returns: origins (N, 3), directions (N, 3) in Camera Space.
+-    """
+-    # 1. Center coordinates
+-    # pixels: (N, 2)
+-    x = pixels[:, 0]
+-    y = pixels[:, 1]
+-    
+-    # Center relative to image center
+-    # Metal/OpenGL: (0,0) at top-left.
+-    # We want (0,0) at center.
+-    x_centered = x - width / 2.0
+-    y_centered = y - height / 2.0
+-    
+-    # 2. Calculate Z component
+-    # z = height / (2 * tan(fov/2))
+-    # Note: [S5, unofficial] uses `size.y / tan(radians(fieldOfView) / 2.0)`
+-    # This formula assumes the y-coordinate is already scaled by the tangent?
+-    # Let's derive:
+-    # tan(fov/2) = (height/2) / focal_length
+-    # focal_length = (height/2) / tan(fov/2)
+-    # Ray direction in camera space (looking down -Z):
+-    # dx = x_centered / focal_length
+-    # dy = y_centered / focal_length
+-    # dz = -1.0
+-    # So, direction = normalize(x_centered, y_centered, -focal_length)
+-    # This is equivalent to normalize(x_centered, y_centered, -height/(2*tan(fov/2)))
+-    
+-    fov_rad = radians(fov_degrees)
+-    focal_length = height / (2.0 * tan(fov_rad / 2.0))
+-    
+-    # 3. Compute Direction
+-    # Directions in camera space
+-    # x component is x_centered, y is y_centered, z is -focal_length
+-    # We need to normalize this vector.
+-    
+-    # To handle aspect ratio correctly, we should scale x by aspect ratio if fov is vertical.
+-    # The formula `x_centered / focal_length` implicitly handles aspect if x_centered is in pixels.
+-    # Because focal_length is derived from height, the x-axis is naturally scaled by width/height ratio.
+-    
+-    directions_cam = torch.stack([x_centered, y_centered, -focal_length * torch.ones_like(x_centered)], dim=-1)
+-    directions_cam = F.normalize(directions_cam, dim=-1)
+-    
+-    # 4. Origin
+-    # In camera space, origin is (0,0,0)
+-    origins_cam = torch.zeros_like(directions_cam)
+-    
+-    return origins_cam, directions_cam
++    return rays_o, rays_d
+ ```
+ 
+-### Parameters
+-- **FOV**: Vertical field of view in degrees. Typical value: 45.0 [S5, unofficial].
+-- **Resolution**: Width and Height of the output image.
+-- **Near Plane**: Distance to the near clipping plane. Often 1.0 or 0.01 depending on the scene scale.
+-
+-### Edge Cases and Pitfalls
+-- **Coordinate System**: Metal and some APIs have (0,0) at the top-left, while others may vary. Adjust `fragCoord` accordingly [S5, unofficial].
+-- **Aspect Ratio**: If the FOV is vertical, the horizontal field of view is determined by the aspect ratio. The direction calculation must account for this, either by scaling the x-coordinate or using a horizontal FOV.
+-- **Precision**: Using `float32` is standard, but `float64` may be needed for large scenes to avoid jittering [G].
+-- **Matrix Inversion**: If using the matrix method, ensure the inverse Projection-View matrix is correctly computed and not singular.
++**Edge Cases and Pitfalls:**
++*   **Coordinate System Origin**: Metal/OpenGL uses top-left $(0,0)$ for pixels, while some mathematical derivations assume center $(0,0)$ [S6, unofficial]. Implementations must adjust `fragCoord` by subtracting `size / 2.0` if using the explicit FOV method [S6, S8, unofficial].
++*   **Homogeneous Dimension**: When appending the homogeneous coordinate, ensure the shape matches the expected input of the unprojection function. Some APIs expect $(N, 4)$, others handle $(N, 3)$ NDC internally [S2, S4, unofficial].
++*   **Device Agnosticism**: Hardcoding `.cuda()` breaks execution on CPU or other devices [S4, unofficial]. Use `camera.device` or `tensor.device` [S7, unofficial].
++*   **Aspect Ratio**: If the explicit FOV method is used, the vertical FOV must be combined with the aspect ratio (implicitly via $W/H$ in the $xy$ calculation) to prevent distortion [S8, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Pinhole Camera Projection (Pixel to Camera)](3162-pinhole-camera-projection-pixel-to-camera.md)
+-This method converts 2D pixel coordinates $(u, v)$ and a depth value $z$ into 3D homogeneous coordinates in the camera coordinate frame using the camera intrinsic matrix. It solves the problem of "lifting" a depth map into 3D space, which is a prerequisite for ray generation in volume rendering and point cloud reconstruction. It is the inverse of the camera projection operator $\pi$. Unlike variants that assume zero skew or specific pixel centering conventions, this method provides the general algebraic backprojection formula, though implementations often simplify based on sensor assumptions.
++Converts 2D pixel coordinates $(u, v)$ and depth $z$ into 3D homogeneous coordinates in the camera frame using the intrinsic matrix. It is the inverse of the projection operator $\pi$. Unlike this method, which outputs world-space rays, this variant outputs camera-space points, serving as a prerequisite for ray generation in point cloud reconstruction. It provides the general algebraic backprojection formula without assuming zero skew or specific pixel centering.
+ 
+-### NDC-to-World Ray Generation
+-Computes the world-space position of a ray origin for a given Normalized Device Coordinate (NDC) pixel, assuming the camera is at the origin in view space, facing positive Z, with a near plane at Z=1 [S9, unofficial]. It calculates the view position using the near plane width and height derived from the horizontal FOV and aspect ratio, then adds the camera position to get the world position [S9, unofficial].
++### [NDC-to-World Ray Generation](3437-ndc-to-world-ray-generation.md)
++Computes the world-space origin of a ray for a given NDC pixel, assuming a pinhole camera at the origin facing positive Z with a near plane at $Z=1$. It differs from this method by explicitly constructing the ray origin based on FOV and aspect ratio geometry rather than using a general inverse Projection-View matrix. A common pitfall is incorrectly offsetting the ray origin by screen-space coordinates, causing FOV distortion.
+ 
+ ### NDC to Screen Camera Conversion
+-Transforms a camera from normalized device coordinates (NDC) space to screen pixel coordinates for rasterization [S10, unofficial]. It computes a screen focal length and principal point based on the image size and camera focal length, returning a `PerspectiveCameras` object with `in_ndc=False` [S10, unofficial].
++Transforms a camera from NDC space to screen pixel coordinates for rasterization [S10, unofficial]. It calculates screen focal length as $f_{screen} = f \cdot \min(W, H) / 2.0$ and sets the principal point to $(W/2, H/2)$ [S10, unofficial]. This is the inverse operation of the projection step in ray generation, used for rendering rather than raycasting.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N)$ where $N$ is the number of pixels, as each pixel's ray is computed independently.
+-- **Memory Complexity**: $O(N)$ to store the ray origins and directions.
+-- **Performance**: Very fast, typically taking less than a millisecond for 1080p images on modern CPUs/GPUs.
+-- **Strengths**: Simple to implement, robust for standard perspective cameras.
+-- **Limitations**: Requires accurate camera parameters. The FOV method assumes a pinhole camera model and may not account for lens distortion.
++*   **Time Complexity**: $O(N)$, where $N = W \times H$. The operations (grid generation, matrix multiplication, normalization) are vectorizable and parallelizable across pixels.
++*   **Memory Complexity**: $O(N)$ to store origins and directions.
++*   **Performance**: Highly efficient on GPUs due to tensor operations. The bottleneck is typically the matrix inversion if done per-frame (though $VP$ is usually constant per camera pose) or the unprojection API call overhead.
++*   **Strengths**: Generalizable to any camera model supported by the unprojection API; handles arbitrary extrinsics and intrinsics.
++*   **Limitations**: Requires accurate camera calibration. If the inverse matrix is singular (e.g., camera at infinity), it fails. Precision issues may arise with very large or very small scene scales if not using double precision for the matrix inversion [S1, unofficial].
+ 
+ ## Background
+-Ray generation is a fundamental step in ray tracing and volume rendering. The method of converting pixel coordinates to rays has been standard since the early days of computer graphics. The specific implementation using NDC and inverse matrices is common in OpenGL and Vulkan-based renderers. The FOV-based "beaming" approach is popular in real-time ray marching shaders due to its simplicity and lack of dependency on complex camera matrices.
++Ray generation from pixel coordinates is a fundamental technique in computer graphics, originating from the development of ray tracing and ray marching algorithms in the 1980s [S8, unofficial]. It is essential for volume rendering, neural radiance fields (NeRF), and 3D Gaussian Splatting [S2, S4, S5, S10, unofficial]. The specific implementation using NDC and inverse Projection-View matrices is standard in modern graphics APIs (OpenGL, Vulkan, Metal) and deep learning frameworks (PyTorch3D, DiffRast) [S1, S2, S4, S6, unofficial].
+ 
+ ## Sources
+@@ -257,8 +158,8 @@
+ [S3] omkarchittar/Neural_Radiance_Fields, https://github.com/omkarchittar/Neural_Radiance_Fields, fetched 2026-10-26 (unofficial)
+ [S4] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+-[S5] markpmlim/RaymarchingAndSDF, https://github.com/markpmlim/RaymarchingAndSDF, fetched 2026-10-27 (unofficial)
+-[S6] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
+-[S7] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)
+-[S8] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+-[S9] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
++[S5] Shreyas120/l3d_assignment3, https://github.com/Shreyas120/l3d_assignment3, fetched 2026-10-26 (unofficial)
++[S6] markpmlim/RaymarchingAndSDF, https://github.com/markpmlim/RaymarchingAndSDF, fetched 2026-10-27 (unofficial)
++[S7] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
++[S8] Painting with Math: A Gentle Study of Raymarching, https://blog.maximeheckel.com/posts/painting-with-math-a-gentle-study-of-raymarching/, fetched 2026-10-27 (unofficial)
++[S9] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+ [S10] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)

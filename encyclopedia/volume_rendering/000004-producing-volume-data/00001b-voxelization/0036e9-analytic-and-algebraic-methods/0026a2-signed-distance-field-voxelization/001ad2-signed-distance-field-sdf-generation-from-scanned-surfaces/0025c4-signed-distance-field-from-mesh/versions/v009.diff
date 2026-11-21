@@ -1,0 +1,316 @@
+--- v008.md
++++ v009.md
+@@ -4,100 +4,176 @@
+ 
+ ## Overview
+-This method converts an explicit triangle mesh into a 3D Signed Distance Field (SDF) volume, where each voxel stores the signed Euclidean distance to the nearest point on the mesh surface [S1, S2, unofficial][S4]. The sign is negative inside the surface and positive outside, enabling robust rendering via interval-arithmetic bisection or isosurfacing [S1, S3, unofficial]. It differs from [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md) by computing distances directly from geometric primitives rather than projecting slices, and from [Projective TSDF Fusion](2658-projective-tsdf-fusion.md) by operating on explicit geometry rather than raw depth buffers [S1, unofficial].
++This method converts a triangulated surface mesh into a voxelized Signed Distance Field (SDF) volume, where each voxel stores the signed Euclidean distance to the nearest point on the mesh surface [S1, S2, unofficial][S4]. The sign is negative inside the surface and positive outside, enabling the mesh to be rendered as a robust implicit surface using interval-arithmetic bisection or ray marching [S1, S3, unofficial]. It differs from [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md) by computing distances directly from explicit geometric primitives (triangles) rather than projecting slices, and from [Projective TSDF Fusion](2658-projective-tsdf-fusion.md) by operating on a single static mesh rather than fusing multiple depth buffers [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A closed (or open, with caveats) triangle mesh (e.g., STL, OBJ) [S1, unofficial][S4].
+-- Output: A 3D texture or volume grid where each voxel $(x, y, z)$ contains a scalar signed distance [S2, S5, unofficial].
++*   **Input:** A triangulated mesh (e.g., STL format) defined by vertices and faces. The mesh is assumed to be closed for correct sign determination, though open meshes are supported with specific caveats [S3, unofficial][S4].
++*   **Output:** A 3D texture or voxel grid where each cell $(i, j, k)$ contains a scalar value representing the signed distance. The grid typically maps to a canonical space, such as $[-1, 1]^3$ [S2, unofficial].
+ 
+ **Data Structures:**
+-- **Mesh Representation:** Stored as a list of triangles. For CPU methods, often wrapped in an Accelerated Bounding Volume Hierarchy (BVH) or AABB tree for efficient nearest-point queries [S4]. For GPU methods, vertices may be stored in a texture (`meshtex`) with layout: 3 floats (RGB) per texel, stride 16384 texels per row [S2, unofficial].
+-- **Voxel Grid:** Defined by resolution `res` (e.g., 50) and bounds (typically $[-1, 1]^3$) [S2, unofficial]. The grid stores `float` values.
+-
+-**Steps:**
+-1. **Preprocessing:** Load the mesh and compute its bounding box. Normalize the mesh to fit within a canonical space, typically the unit cube $[-1, 1]^3$ centered at the origin [S2, S1, unofficial].
+-2. **Grid Initialization:** Define the voxel grid resolution and origin. Map voxel indices to world coordinates [S5, unofficial].
+-3. **Distance Computation:** For each voxel center `pos`:
+-   - Find the closest point `cp` on the mesh surface [S4].
+-   - Compute the unsigned Euclidean distance $d = \| \mathbf{pos} - \mathbf{cp} \|_2$ [S4].
+-   - Determine the sign based on the mesh topology and the position of `pos` relative to the surface [S3, unofficial][S4].
+-4. **Sign Determination:**
+-   - If the mesh is closed and `pos` is on the bounded (inside) side, negate the distance: $d_{signed} = -d$ [S4].
+-   - Alternatively, use the closest triangle's face normal $\mathbf{n}$: if $\mathbf{n} \cdot (\mathbf{pos} - \mathbf{v}) < 0$ (where $\mathbf{v}$ is a vertex on the triangle), the point is inside [S3, unofficial].
+-5. **Storage:** Write $d_{signed}$ to the voxel [S2, S5, unofficial].
++1.  **Mesh Representation:**
++    *   Vertices: Array of 3D points $(x, y, z)$.
++    *   Faces: Array of indices referencing vertices.
++    *   Acceleration Structure: An Axis-Aligned Bounding Box (AABB) tree built over the mesh triangles to accelerate closest-point queries [S4]. In naive implementations, a flat list of triangles is used [S2, unofficial].
++2.  **Voxel Grid:**
++    *   Dimensions: $R_x \times R_y \times R_z$ (e.g., $50 \times 50 \times 50$ or $50 \times 2500$ for 2D slices) [S2, unofficial].
++    *   Layout: Linear array or 3D texture. Each element stores a `float` distance value.
++    *   Coordinate Mapping: Voxel indices are mapped to world space. For a grid of resolution `res` covering $[-1, 1]^3$, the center of voxel $(i, j, k)$ is calculated as:
++        $$ \mathbf{pos} = \left( \frac{i}{R_x}, \frac{j}{R_y}, \frac{k}{R_z} \right) \times 2.0 - 1.0 $$
++        [S2, unofficial].
++
++**Algorithm Steps:**
++1.  **Initialization:** Load the mesh file. Compute the bounding box of the mesh. Build an AABB tree from the mesh faces [S4]. Initialize the output volume with a large distance value (e.g., 10000.0) or infinity [S2, unofficial].
++2.  **Voxel Sampling:** Iterate through each voxel in the grid. Calculate the 3D position $\mathbf{p}$ of the voxel center in the mesh's coordinate space [S2, unofficial].
++3.  **Distance Query:** Compute the unsigned Euclidean distance $d$ from $\mathbf{p}$ to the mesh surface.
++    *   **Naive Approach:** Iterate over all triangles. For each triangle with vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$, compute the distance to the triangle using a point-to-triangle distance function [S2, unofficial]. Update the minimum distance found: $d = \min(d, d_{\text{triangle}})$ [S2, unofficial].
++    *   **Accelerated Approach:** Use the AABB tree to find the closest point $\mathbf{c}_p$ on the mesh to $\mathbf{p}$. Compute $d = \|\mathbf{p} - \mathbf{c}_p\|$ [S4].
++4.  **Sign Determination:** Determine the sign of the distance.
++    *   **Closed Mesh:** If the mesh is known to be closed, use a point-in-mesh test. In CGAL, this is done via a `Side_of_triangle_mesh` functor. If $\mathbf{p}$ is on the bounded side (inside), negate the distance: $d = -d$ [S4].
++    *   **Normal-Based Sign:** If the mesh is closed and has consistent winding (counter-clockwise when viewed from outside), the sign can be determined by the closest triangle's face normal $\mathbf{n}$. If the vector from the closest point on the triangle to $\mathbf{p}$ points against the normal, the point is inside [S3, unofficial].
++    *   **Ray Casting (Alternative):** Cast a ray from $\mathbf{p}$ along an axis (e.g., X-axis). Count intersections with the mesh. An odd number of intersections implies inside (negative sign), even implies outside (positive sign) [S2, unofficial]. Note: Some implementations ignore this and output absolute distance [S2, unofficial].
++5.  **Storage:** Store the signed distance $d$ in the voxel corresponding to $(i, j, k)$ [S2, unofficial][S4].
+ 
+ **Formulas:**
+-- **Triangle Distance (GPU/Naive):** For a point $\mathbf{p}$ and triangle vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$:
+-  - Let $\mathbf{e}_1 = \mathbf{v}_1 - \mathbf{v}_0$, $\mathbf{e}_2 = \mathbf{v}_2 - \mathbf{v}_0$, $\mathbf{pa} = \mathbf{p} - \mathbf{v}_0$.
+-  - Compute barycentric coordinates or projection to find the closest point on the triangle [S2, unofficial].
+-  - If outside: $d = \| \mathbf{p} - \mathbf{cp} \|$ [S2, unofficial].
+-  - If inside: $d = \frac{(\mathbf{n} \cdot \mathbf{pa})^2}{\mathbf{n} \cdot \mathbf{n}}$ (projected distance to plane) [S2, unofficial].
+-  - Inside check: $\sum \text{sign}(\mathbf{ba} \times \mathbf{n} \cdot \mathbf{pa}) < 2$ [S2, unofficial].
+-- **Ray-Triangle Intersection (Möller-Trumbore):** Used for raycasting approaches [S2, unofficial]:
+-  - $\mathbf{e}_1 = \mathbf{v}_1 - \mathbf{v}_0$, $\mathbf{e}_2 = \mathbf{v}_2 - \mathbf{v}_0$, $\mathbf{pvec} = \mathbf{dir} \times \mathbf{e}_2$, $\mathbf{tvec} = \mathbf{p} - \mathbf{v}_0$.
+-  - $det = \mathbf{e}_1 \cdot \mathbf{pvec}$. If $|det| < 10^{-8}$, parallel.
+-  - $u = (\mathbf{tvec} \cdot \mathbf{pvec}) / det$, $v = (\mathbf{dir} \cdot \mathbf{qvec}) / det$ (where $\mathbf{qvec} = \mathbf{tvec} \times \mathbf{e}_1$).
+-  - Hit if $0 \le u, v$ and $u + v \le 1$ [S2, unofficial].
+-
+-**Parameters:**
+-- `res`: Voxel resolution (e.g., 50) [S2, unofficial].
+-- `is_closed`: Boolean flag indicating if the mesh is closed, used to determine sign [S4].
+-- `trunc_dist`: Truncation distance for TSDF variants (not given in sources for pure SDF) [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Open Meshes:** Grow a "skirt" up to `trunc_dist` past their rim [S3, unofficial].
+-- **Inside-Out Meshes:** If the mesh winding is clockwise (inward normals), the SDF will be inverted (inside-out) [S3, unofficial].
+-- **Winding:** Requires counter-clockwise winding seen from outside (normal $\mathbf{n} = \text{cross}(\mathbf{v}_1 - \mathbf{v}_0, \mathbf{v}_2 - \mathbf{v}_0)$ points out) [S3, unofficial].
+-- **Sharp Corners:** Edges/corners with faces meeting at under 90 degrees may take the wrong side due to nearest-face tie-breaking by lowest index [S3, unofficial]. A 90-degree edge off-grid axes also fails [S3, unofficial].
+-- **Precision:** Rounding errors can cause incorrect sign assignment near boundaries [S3, unofficial].
+-
+-**Pseudocode (CPU/AABB Tree Approach):**
++*   **Point-to-Triangle Distance ($d_{\text{triangle}}$):**
++    Let $\mathbf{a}, \mathbf{b}, \mathbf{c}$ be the triangle vertices. Let $\mathbf{pa} = \mathbf{p} - \mathbf{a}$ and $\mathbf{ba} = \mathbf{a} - \mathbf{b}$.
++    The distance is the minimum of distances to the three edges and the triangle interior [S2, unofficial].
++    Projection onto edge $\mathbf{ba}$:
++    $$ \mathbf{proj} = \mathbf{ba} \cdot \text{clamp}\left( \frac{\mathbf{ba} \cdot \mathbf{pa}}{\mathbf{ba} \cdot \mathbf{ba}}, 0, 1 \right) - \mathbf{pa} $$
++    [S2, unofficial].
++    If outside the triangle's influence, $d = \sqrt{\min(\dots)}$. If inside the projection, $d = \frac{|\mathbf{n} \cdot \mathbf{pa}|}{\|\mathbf{n}\|}$, where $\mathbf{n} = (\mathbf{b}-\mathbf{a}) \times (\mathbf{c}-\mathbf{a})$ [S2, unofficial].
++*   **Inside Check (Barycentric/Ray):**
++    One method uses the sum of signed angles or ray intersections. For ray casting along direction $\mathbf{dir}$, using Möller-Trumbore intersection:
++    $$ \mathbf{e1} = \mathbf{v1}-\mathbf{v0}, \quad \mathbf{e2} = \mathbf{v2}-\mathbf{v0}, \quad \mathbf{pvec} = \mathbf{dir} \times \mathbf{e2} $$
++    $$ det = \mathbf{e1} \cdot \mathbf{pvec} $$
++    If $|det| < 10^{-8}$, the ray is parallel. Otherwise:
++    $$ u = \frac{(\mathbf{tvec} \cdot \mathbf{pvec})}{det}, \quad v = \frac{(\mathbf{dir} \cdot \mathbf{qvec})}{det} $$
++    Hit if $0 \le u, v$ and $u+v \le 1$ [S2, unofficial].
++
++**Pseudocode:**
+ ```python
+ import numpy as np
+-from cgal import AABB_tree, Side_of_triangle_mesh # Pseudo-import for CGAL-like API
+-
+-def generate_sdf_from_mesh(mesh, resolution, bounds=(-1.0, 1.0)):
++
++def compute_mesh_sdf(mesh_vertices, mesh_faces, resolution=50):
+     """
+-    Generate SDF from a closed triangle mesh using AABB tree.
+-    mesh: List of triangles (each triangle is 3 vertices, each vertex is (x,y,z))
+-    resolution: int, grid size in each dimension
+-    bounds: tuple, (min_val, max_val) for the canonical space
++    Compute SDF for a mesh using naive triangle iteration.
++    mesh_vertices: (N, 3) array of vertex positions.
++    mesh_faces: (M, 3) array of vertex indices.
++    resolution: Grid resolution (assumes cubic grid for simplicity).
+     """
+-    # 1. Build AABB tree from mesh faces
+-    tree = AABB_tree(mesh.faces)
+-    
+-    # 2. Initialize sign functor
+-    # Assumes mesh is closed and winding is correct (outward normals)
+-    is_closed = True # Must be verified or assumed
+-    sotm = Side_of_triangle_mesh(mesh)
+-    
+-    # 3. Define grid
+-    min_val, max_val = bounds
+-    step = (max_val - min_val) / resolution
+-    grid = np.zeros((resolution, resolution, resolution))
+-    
+-    # 4. Iterate over voxel centers
+-    for i in range(resolution):
+-        for j in range(resolution):
+-            for k in range(resolution):
+-                # Map grid index to world coordinate
+-                x = min_val + (i + 0.5) * step
+-                y = min_val + (j + 0.5) * step
+-                z = min_val + (k + 0.5) * step
+-                p = np.array([x, y, z])
+-                
+-                # 5. Find closest point on mesh
+-                cp = tree.closest_point(p)
+-                
+-                # 6. Compute unsigned distance
+-                d = np.linalg.norm(p - cp)
+-                
+-                # 7. Determine sign
+-                if is_closed and sotm(p) == Side_of_triangle_mesh.ON_BOUNDED_SIDE:
+-                    d = -d
+-                
+-                grid[i, j, k] = d
+-                
+-    return grid
++    # 1. Initialize grid
++    grid_size = resolution
++    sdf_volume = np.full((grid_size, grid_size, grid_size), 10000.0)
++    
++    # 2. Define grid bounds (canonical [-1, 1]^3)
++    # Note: In practice, bounds should match the mesh bounding box.
++    # Here we assume the mesh is already normalized to [-1, 1]^3.
++    step = 2.0 / grid_size
++    x = np.linspace(-1.0 + step/2, 1.0 - step/2, grid_size)
++    y = np.linspace(-1.0 + step/2, 1.0 - step/2, grid_size)
++    z = np.linspace(-1.0 + step/2, 1.0 - step/2, grid_size)
++    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
++    voxel_centers = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
++    
++    # 3. Precompute triangle data
++    v0 = mesh_vertices[mesh_faces[:, 0]]
++    v1 = mesh_vertices[mesh_faces[:, 1]]
++    v2 = mesh_vertices[mesh_faces[:, 2]]
++    
++    # 4. Iterate over voxels
++    for idx, p in enumerate(voxel_centers):
++        min_dist = 10000.0
++        
++        # Naive loop over all triangles
++        for i in range(len(mesh_faces)):
++            va = v0[i]
++            vb = v1[i]
++            vc = v2[i]
++            
++            # Compute distance to triangle
++            d_tri = point_to_triangle_distance(p, va, vb, vc)
++            if d_tri < min_dist:
++                min_dist = d_tri
++        
++        # 5. Sign determination (Naive: assume closed, use ray cast or normal)
++        # For simplicity, this example outputs absolute distance.
++        # To get signed distance, one must determine if p is inside.
++        # A robust method uses the closest triangle's normal.
++        
++        # Find closest triangle index (re-scan or store during min_dist update)
++        # [G] Implementation detail: Store closest triangle index during loop.
++        # Assuming we found closest triangle at index 'closest_idx':
++        # normal = np.cross(v1[closest_idx] - v0[closest_idx], v2[closest_idx] - v0[closest_idx])
++        # normal = normal / np.linalg.norm(normal)
++        # closest_point_on_tri = ... # Project p onto triangle
++        # if np.dot(p - closest_point_on_tri, normal) < 0:
++        #     min_dist = -min_dist
++        
++        sdf_volume.ravel()[idx] = min_dist
++        
++    return sdf_volume
++
++def point_to_triangle_distance(p, v0, v1, v2):
++    """Compute Euclidean distance from point p to triangle v0-v1-v2."""
++    e1 = v1 - v0
++    e2 = v2 - v0
++    ba = v0 - v1
++    pa = p - v0
++    
++    # Project p onto the plane of the triangle
++    n = np.cross(e1, e2)
++    n_norm_sq = np.dot(n, n)
++    
++    if n_norm_sq == 0:
++        return np.linalg.norm(p - v0) # Degenerate triangle
++    
++    # Check if p is inside the triangle's projection
++    # Using barycentric coordinates or edge tests
++    # Edge test: sum of signs of cross products
++    # sign1 = np.sign(np.dot(np.cross(ba, pa), n))
++    # ... (simplified to distance to edges and interior)
++    
++    # Distance to edges
++    def dist_to_segment(p, a, b):
++        ab = b - a
++        ap = p - a
++        t = np.dot(ap, ab) / np.dot(ab, ab)
++        t = np.clip(t, 0.0, 1.0)
++        closest = a + t * ab
++        return np.linalg.norm(p - closest)
++
++    d1 = dist_to_segment(p, v0, v1)
++    d2 = dist_to_segment(p, v1, v2)
++    d3 = dist_to_segment(p, v2, v0)
++    
++    # Check if inside
++    # If inside, distance is to the plane
++    # Plane distance
++    dist_plane = np.abs(np.dot(n, pa)) / np.sqrt(n_norm_sq)
++    
++    # Simple inside check: sum of angles or barycentric
++    # Using barycentric
++    v0v1 = v1 - v0
++    v0v2 = v2 - v0
++    v0p = p - v0
++    
++    d11 = np.dot(v0v1, v0v1)
++    d12 = np.dot(v0v1, v0v2)
++    d22 = np.dot(v0v2, v0v2)
++    d21 = np.dot(v0p, v0v1)
++    d20 = np.dot(v0p, v0v2)
++    
++    denom = d11 * d22 - d12 * d12
++    if denom == 0:
++        return min(d1, d2, d3)
++        
++    v = (d22 * d21 - d12 * d20) / denom
++    w = (d11 * d20 - d12 * d21) / denom
++    u = 1.0 - v - w
++    
++    if u >= 0 and v >= 0 and w >= 0:
++        return dist_plane
++    else:
++        return min(d1, d2, d3)
+ ```
+ 
+@@ -105,30 +181,32 @@
+ 
+ ### [Explicit Surface to TSDF Conversion](2615-explicit-surface-to-tsdf-conversion.md)
+-Converts explicit geometry (triangle meshes, oriented point clouds) into a Truncated Signed Distance Field (TSDF) voxel grid. It differs from [Projective TSDF Fusion](2658-projective-tsdf-fusion.md) by operating directly on explicit primitives rather than raw depth buffers, and from [Sparse VDB SDF Generation](4498-sparse-vdb-sdf-generation.md) by focusing on the initial conversion of a single explicit surface into a dense or sparse voxel volume. Choose this when you need a bounded distance field for integration or rendering, and the input is a clean mesh.
++Converts explicit geometry to a Truncated SDF. Differs by truncating distances and handling orientation from point clouds.
+ 
+ ### [SDF Dataset Normalization](3787-sdf-dataset-normalization.md)
+-Preprocessing step that transforms vertex coordinates of an input 3D mesh to fit within a standardized canonical space, typically the unit cube $[-1, 1]^3$ centered at the origin. It solves the problem of inconsistent scale and position in raw mesh data, which is critical for downstream SDF generation where grid resolution and sampling bounds depend on predictable input dimensions. Choose this before any voxelization method to ensure consistent results.
++Preprocesses mesh coordinates to a canonical space. Differs by operating on vertices before voxelization.
+ 
+ ### [Sparse VDB SDF Generation](4498-sparse-vdb-sdf-generation.md)
+-Converts a triangle mesh into a sparse, tree-structured signed or unsigned distance grid using OpenVDB, storing only active voxels near the surface for memory efficiency. It differs from dense voxelization by dynamically allocating memory only for the narrow band around the mesh, making it suitable for large or complex models where ray-marched rendering or fast implicit queries are required. Choose this for large-scale scenes or when memory is constrained.
++Uses OpenVDB for sparse storage. Differs by memory efficiency for large scenes.
++
++### [Mesh to SDF Volume Conversion](7167-mesh-to-sdf-volume-conversion.md)
++GPU-accelerated conversion using ray tracing and sweeping. Differs by performance optimization.
+ 
+ ### [Naive SDF Generation (CPU)](10688-naive-sdf-generation-cpu.md)
+-Computes the SDF for a triangle mesh by explicitly evaluating the distance from every voxel sample point to every triangle in the mesh. It converts an explicit mesh representation into an implicit volume representation suitable for ray marching or voxel-based rendering [G]. Unlike spatial acceleration methods, it performs a linear scan of all triangles for each sample, making it simple to implement but computationally prohibitive for high-resolution volumes or complex meshes. Choose this for small meshes or prototyping.
++Linear scan of triangles. Differs by simplicity and lack of acceleration.
+ 
+ ### [SDF BSP Tree Construction](15293-sdf-bsp-tree-construction.md)
+-Generates a Signed Distance Field (SDF) from a triangle mesh by recursively subdividing space into two sets using dividing hyperplanes, allowing ray traversal to calculate the distance to the nearest point on the surface. It offers perfect accuracy compared to voxel grids by using original triangles, but suffers from poor generation and runtime performance due to sequential CPU construction and GPU-unfriendly branching. Choose this when exact distance queries are required and voxelization artifacts are unacceptable.
++Uses BSP trees for exact distance. Differs by using original triangles instead of voxels.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot M)$ for naive CPU methods, where $N$ is the number of voxels and $M$ is the number of triangles [S1, unofficial]. With AABB trees, it reduces to $O(N \log M)$ [S4]. GPU implementations can parallelize the voxel loop, but triangle traversal remains a bottleneck [S2, unofficial].
+-- **Memory Complexity:** $O(N)$ for dense voxel grids [S1, unofficial]. Sparse methods (VDB) use $O(K)$ where $K \ll N$ is the number of active voxels near the surface [S1, unofficial].
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Performance degrades linearly with resolution in naive methods. Accelerated methods scale better but have higher overhead for tree construction [S4].
+-- **Strengths:** Robust rendering with interval arithmetic [S1, unofficial]; exact distance queries (non-voxelized variants) [S1, unofficial]; supports CSG operations [S1, unofficial].
+-- **Limitations:** Open meshes cause artifacts (skirts) [S3, unofficial]; sensitive to mesh winding and topology [S3, unofficial]; high memory usage for dense grids [S1, unofficial].
+-- **When to use:** Rendering CAD meshes, isosurfacing offset meshes [S4][S1, unofficial].
+-- **When not to use:** Open meshes without truncation (use Shell mode) [S3, unofficial]; extremely high-resolution meshes where naive CPU methods are too slow [S1, unofficial].
++*   **Time Complexity:** Naive CPU implementation is $O(N \cdot M)$, where $N$ is the number of voxels and $M$ is the number of triangles [S2, unofficial]. With an AABB tree, the average case is closer to $O(N \log M)$ or $O(N)$ depending on the narrow band width [S4].
++*   **Memory Complexity:** $O(N)$ for the voxel grid. The mesh storage is $O(M)$. Sparse methods reduce this to $O(K)$ where $K$ is the number of active voxels near the surface [S1, unofficial].
++*   **Performance:** Naive generation is computationally prohibitive for high-resolution volumes or complex meshes [S1, unofficial]. GPU acceleration and spatial acceleration structures are recommended for practical use [S1, S2, unofficial].
++*   **Strengths:** Provides a continuous, differentiable representation of the mesh. Robust for ray marching and implicit rendering [S1, S3, unofficial].
++*   **Limitations:** Open meshes produce artifacts (skirts) extending past the rim [S3, unofficial]. Inside-out meshes remain inside-out [S3, unofficial]. Edges with angles under 90 degrees may have incorrect signs due to nearest-face tie-breaking [S3, unofficial].
++*   **When to Use:** When rendering meshes as implicit surfaces with robust interval arithmetic or when needing a continuous distance field for deformation/optimization [S1, unofficial][S4].
++*   **When Not to Use:** For very large, open, or highly non-manifold meshes where sign ambiguity is high, or when memory constraints prevent storing a dense grid [S3, unofficial].
+ 
+ ## Background
+-Originated from the need to render complex CAD meshes (e.g., brake calipers, sheet-metal hooks) as implicit surfaces using robust interval-arithmetic bisection [S1, unofficial]. The method is implemented in libraries like `isoray` (MeshSDF class) and CGAL (Isosurfacing_3 module) [S1, unofficial][S4]. It allows meshes to be treated as analytic implicit functions, enabling seamless integration with CSG operations and differentiable rendering [S1, unofficial].
++The method originates from the need to render triangle meshes using implicit surface techniques, such as interval-arithmetic bisection [S1, unofficial]. It is used in libraries like `isoray` for rendering CAD meshes (e.g., brake calipers, brackets) as implicit surfaces [S1, unofficial]. CGAL's Isosurfacing_3 module also implements this for generating signed offset fields from closed surface meshes [S4]. The approach is foundational for converting explicit geometry into implicit representations for volume rendering and differentiable rendering pipelines [S1, S2, unofficial].
+ 
+ ## Sources
+@@ -136,4 +214,3 @@
+ [S2] yeataro/TD-Raymarching-System, https://github.com/yeataro/TD-Raymarching-System, fetched 2026-10-27 (unofficial)
+ [S3] taojin-6/volumetric_kit_grid, https://github.com/taojin-6/volumetric_kit_grid, fetched 2026-10-28 (unofficial)
+-[S4] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29
+-[S5] here, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)+[S4] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29

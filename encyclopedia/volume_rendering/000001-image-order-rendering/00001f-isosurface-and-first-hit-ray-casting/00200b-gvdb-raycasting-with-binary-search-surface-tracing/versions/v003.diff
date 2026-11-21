@@ -1,0 +1,200 @@
+--- v002.md
++++ v003.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-A GPU raycasting kernel that traces rays through a GVDB sparse voxel dataset to find the first surface intersection using fixed-step marching followed by a binary search, then computes surface properties including shading, flow, and ambient occlusion [S1, unofficial]. It sets itself apart from sibling methods by integrating sparse voxel traversal (GVDB) with a specific binary search refinement strategy and simultaneous computation of screen-space flow vectors for temporal analysis [S1, unofficial].
++A GPU raycasting kernel that traces rays through a GVDB sparse voxel dataset to find the first surface intersection using fixed-step marching followed by a binary search, then computes surface properties [S1, unofficial]. It sets itself apart from sibling methods by integrating sparse voxel traversal with a specific binary search refinement strategy and simultaneous computation of screen-space flow vectors for temporal analysis [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- GVDB sparse voxel dataset (`gvdb`), containing leaf nodes and atlas offsets.
+-- View matrices for current and next frames (`viewCurrent`, `viewNext`).
+-- Isosurface threshold (`SCN_THRESH`).
+-- Ray marching step size (`SCN_PSTEP`).
+-- Number of binary search iterations (`binarySearchSteps`, typically 10) [S1, unofficial].
+-- Shading parameters: `ambientColor`, `diffuseColor`, `specularColor`, `specularExponent`, light direction (`lightDir`), eye direction (`eyedir`) [S1, unofficial].
+-- Viewport bounds (`minX`, `minY`, `maxX`, `maxY`) [S1, unofficial].
++- GVDB sparse voxel dataset containing leaf nodes and atlas offsets [S1, unofficial].
++- View matrices for current and next frames [S1, unofficial].
++- Isosurface threshold `SCN_THRESH` [S1, unofficial].
++- Ray marching step size `SCN_PSTEP` [S1, unofficial].
++- Number of binary search iterations `binarySearchSteps`, typically 10 [S1, unofficial].
++- Shading parameters: `ambientColor`, `diffuseColor`, `specularColor`, `specularExponent`, light direction `lightDir`, eye direction `eyedir` [S1, unofficial].
++- Viewport bounds `[minX, minY, maxX, maxY]` [S1, unofficial].
+ 
+ **Outputs:**
+@@ -20,13 +20,11 @@
+ 
+ **Data Structures:**
+-- GVDB Node: Contains voxel data accessible via `tex3D`.
+-- Atlas Offset: 3D vector (`o`) representing the offset of the current leaf node's data in the global texture atlas [S1, unofficial].
++- GVDB Node: Contains voxel data accessible via 3D texture lookup [S1, unofficial].
++- Atlas Offset: 3D vector `o` representing the offset of the current leaf node's data in the global texture atlas [S1, unofficial].
+ - Ray State: `rpos` (world position), `rdir` (world direction) [S1, unofficial].
+ 
+ **Steps:**
+-
+ 1. **Ray Initialization:** For each pixel within the viewport, compute ray origin `rpos` and direction `rdir` from the camera view matrices [S1, unofficial].
+-
+-2. **Ray Marching (Coarse):** Call `raySurfaceTrilinearBrickCustom`.
++2. **Ray Marching (Coarse):** Call `raySurfaceTrilinearBrickCustom` [S1, unofficial].
+     a. Get the leaf node and atlas offset `o` for the current ray position [S1, unofficial].
+     b. Convert world position `rpos` to index coordinates `p` using:
+@@ -34,7 +32,6 @@
+        where $v_{min}$ is the node minimum bounds and $v_{del}[0]$ is the voxel size [S1, unofficial].
+     c. Step the ray by `SCN_PSTEP`. Check the sampled value using `tex3D` at `p + o`. If the value $\ge SCN\_THRESH$, the volume interior is reached [S1, unofficial].
+-    d. If the ray exceeds volume bounds ($p.x/y/z < 0$ or $\ge gvdb->res[0]$) or hits an invalid node (getNodeAtPoint returns nullptr, yielding 0), terminate the march [S1, unofficial].
+-
+-3. **Binary Search Refinement:** Upon detecting a threshold hit at `tCurrent`, refine the intersection.
++    d. If the ray exceeds volume bounds ($p.x/y/z < 0$ or $\ge gvdb->res[0]$) or hits an invalid node (`getNodeAtPoint` returns `nullptr`, yielding 0), terminate the march [S1, unofficial].
++3. **Binary Search Refinement:** Upon detecting a threshold hit at `tCurrent`, refine the intersection [S1, unofficial].
+     a. Initialize bounds: `tLower = tCurrent - SCN_PSTEP`, `tUpper = tCurrent` [S1, unofficial].
+     b. Iterate `binarySearchSteps` times:
+@@ -43,5 +40,4 @@
+        iii. Sample value at `p + o`. If value $\ge SCN\_THRESH$, set `tUpper = tMiddle` (surface is closer). Else, set `tLower = tMiddle` (surface is further) [S1, unofficial].
+     c. Final hit point: `p = pStart + tLower * dir` [S1, unofficial].
+-
+ 4. **Surface Property Computation:**
+     a. **Normal:** Compute gradient `norm` using `getGradient` (finite differences or tri-cubic filtering) at the hit point [S1, unofficial].
+@@ -59,9 +55,7 @@
+     e. **Depth:** Compute depth from `screenCurrent.z` [S1, unofficial].
+     f. **Ambient Occlusion:** Compute AO using `computeAmbientOcclusion` [S1, unofficial].
+-
+ 5. **Output:** Write hit point, normal, color, flow, depth, and AO to the output buffer [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ def gvdb_ray_surface_tracing(gvdb, view_current, view_next, viewport, 
+@@ -72,10 +66,13 @@
+     Renders a single frame using GVDB sparse voxel raycasting with binary search refinement.
+     """
+-    output_buffer = create_output_buffer(viewport)
++    # Allocate output buffer
++    output_buffer = [[None for _ in range(viewport.maxX - viewport.minX)]
++                     for _ in range(viewport.maxY - viewport.minY)]
+     
+     for y in range(viewport.minY, viewport.maxY):
+         for x in range(viewport.minX, viewport.maxX):
+             # 1. Ray Initialization
+-            ray_origin, ray_dir = compute_ray_from_pixel(x, y, view_current)
++            ray_origin = compute_ray_origin(x, y, view_current)
++            ray_dir = compute_ray_direction(x, y, view_current)
+             
+             # 2. Ray Marching
+@@ -91,5 +88,5 @@
+                 
+                 if node is None:
+-                    break # Invalid node
++                    break  # Invalid node
+                 
+                 # Convert world pos to index coordinates
+@@ -110,10 +107,7 @@
+                 else:
+                     t_current += scn_pstep
+-                    # Update p_start for binary search reference if needed, 
+-                    # though binary search usually starts from the step that caused the hit
+-                    pass
+             
+             if not hit_found:
+-                continue # No hit, skip shading
++                continue  # No hit, skip shading
+ 
+             # 3. Binary Search Refinement
+@@ -180,20 +174,86 @@
+             
+             # 5. Output
+-            output_buffer.write(x, y, final_color, flow, depth, ao)
++            output_buffer[y - viewport.minY][x - viewport.minX] = (final_color, flow, depth, ao)
+             
+     return output_buffer
++
++# Helper functions (standard operations)
++def compute_ray_origin(x, y, view_matrix):
++    # Standard inverse projection to get world origin
++    return view_matrix.inverse().transform_point([x, y, 0.0, 1.0])
++
++def compute_ray_direction(x, y, view_matrix):
++    # Standard inverse projection to get world direction
++    near = view_matrix.inverse().transform_point([x, y, 0.0, 1.0])
++    far = view_matrix.inverse().transform_point([x, y, 1.0, 1.0])
++    return normalize(far - near)
++
++def get_leaf_node_and_offset(gvdb, world_pos):
++    # GVDB-specific sparse traversal logic
++    # Returns (node_data, atlas_offset) or (None, None) if invalid
++    # Simplified for implementation clarity
++    node = gvdb.lookup(world_pos)
++    if node is None:
++        return None, None
++    return node.data, node.atlas_offset
++
++def tex3d(data, index):
++    # Standard 3D texture lookup with clamping
++    x, y, z = index
++    x = max(0, min(x, data.shape[0] - 1))
++    y = max(0, min(y, data.shape[1] - 1))
++    z = max(0, min(z, data.shape[2] - 1))
++    return data[x, y, z]
++
++def compute_gradient(gvdb, p_hit):
++    # Finite difference gradient approximation
++    eps = 1e-7
++    dx = tex3d(gvdb.volIn[0], (p_hit - [eps, 0, 0]) / gvdb.v_del[0]) - tex3d(gvdb.volIn[0], (p_hit + [eps, 0, 0]) / gvdb.v_del[0])
++    dy = tex3d(gvdb.volIn[0], (p_hit - [0, eps, 0]) / gvdb.v_del[0]) - tex3d(gvdb.volIn[0], (p_hit + [0, eps, 0]) / gvdb.v_del[0])
++    dz = tex3d(gvdb.volIn[0], (p_hit - [0, 0, eps]) / gvdb.v_del[0]) - tex3d(gvdb.volIn[0], (p_hit + [0, 0, eps]) / gvdb.v_del[0])
++    return [dx, dy, dz]
++
++def compute_color(gvdb, p_hit):
++    # Base color from scalar field or material lookup
++    return tex3d(gvdb.volIn[0], p_hit / gvdb.v_del[0])
++
++def project_to_screen(pos, view_matrix):
++    # Standard projection matrix multiplication
++    return view_matrix.transform_point(pos)
++
++def compute_ambient_occlusion(gvdb, p_hit, norm):
++    # Standard AO approximation
++    return 1.0  # Placeholder for AO computation logic
++
++def normalize(v):
++    mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++    return [v[0]/mag, v[1]/mag, v[2]/mag] if mag > 0 else [0, 0, 0]
++
++def dot(a, b):
++    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
++
++def reflect3(light_dir, norm):
++    # R = D - 2(D.N)N
++    d = light_dir
++    n = norm
++    return [d[0] - 2*dot(d, n)*n[0], d[1] - 2*dot(d, n)*n[1], d[2] - 2*dot(d, n)*n[2]]
+ ```
+ 
++**Edge Cases and Pitfalls:**
++- Ray marching may exceed volume bounds or hit invalid nodes; handled by loop condition checking $p.x/y/z \ge 0$ and $< gvdb->res[0]$, and `getNodeAtPoint` returning `nullptr` which yields 0 [S1, unofficial].
++- Binary search assumes monotonicity near the surface to correctly converge on the isosurface [G].
++- Fixed step size `SCN_PSTEP` may miss thin structures if set too large relative to voxel dimensions [G].
++
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of pixels and the number of binary search iterations. The coarse march depends on the distance to the surface and `SCN_PSTEP`. Sparse traversal adds logarithmic overhead compared to dense grids but avoids empty space traversal.
+-- **Memory Complexity:** Depends on the GVDB sparse voxel structure. Only occupied nodes are stored. The output buffer is $O(W \times H)$ for color, flow, depth, and AO.
+-- **Performance:** Interactive rates are achievable due to sparse traversal and early termination. Binary search adds a small constant overhead but improves precision without significant cost.
+-- **Strengths:** Handles large sparse datasets efficiently. Binary search provides precise surface location. Simultaneous flow computation is useful for temporal anti-aliasing or motion blur.
+-- **Limitations:** Fixed step size `SCN_PSTEP` may miss thin structures if too large. Binary search assumes monotonicity near the surface. Sparse traversal overhead can be high for very fragmented data.
+-- **When to use:** Real-time visualization of large sparse volumes where surface shading and flow are needed.
+-- **When not to use:** Dense volumes where sparse traversal overhead outweighs benefits. When sub-voxel precision is not required and simple marching suffices.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Originated in the context of adaptive sampling and reconstruction for volume visualization, specifically within the GVDB (GPU Voxel Database) framework [S1, unofficial]. It is part of a suite of kernels for interactive volume rendering, leveraging sparse voxel octrees for efficient memory access and traversal.
++Originated in the context of adaptive sampling and reconstruction for volume visualization, specifically within the GVDB (GPU Voxel Database) framework [S1, unofficial]. It is part of a suite of kernels for interactive volume rendering, leveraging sparse voxel octrees for efficient memory access and traversal [S1, unofficial].
+ 
+ ## Sources

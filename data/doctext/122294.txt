@@ -1,0 +1,361 @@
+This tutorial explains how to create complex 3D shapes in a volumetric shader, using signed distance functions. Unity tutorial and code provided.
+
+Volumetric Rendering: Signed Distance Functions - Alan Zucconi
+Skip to content
+Volumetric Rendering: Signed Distance Functions
+Jul 1, 2016
+—
+in Shaders, Tutorial, Unity
+This tutorial explains how to create complex 3D shapes inside volumetric shaders. Signed Distance Functions (often referred to as Fields) are mathematical tools used to describe geometrical shapes such as spheres, boxes and tori. Compared to traditional 3D models made out of triangles, signed distance functions provide virtually infinite resolution, and are amenable to geometric manipulation. The following animation, from formulanimation tutorial :: making a snail, shows how a snail can be created using simpler shapes:
+Introduction
+Part 1. SDF Sphere
+Part 2. Union and Intersection
+Part 3. SDF Box
+Part 4. Shape Blending
+Part 5. Smooth Union
+Part 6. SDF Algebra
+Conclusion
+You can find here all the other posts in this series:
+Part 1: Volumetric Rendering
+Part 2: Raymarching
+Part 3: Surface Shading
+Part 4: Signed Distance Fields
+Part 5: Ambient Occlusion
+🚧 Part 6: Hard and Soft Shadows
+The full Unity package is available at the end of this article. 📦
+Introduction
+The way most modern 3D engines – such as Unity – handle geometries is by using triangles. Every object, no matter how complex, must be composed of those primitive triangles. Despite being the de-facto standard in computer graphics, there are objects which cannot be represented with triangles. Spheres, and all other curved geometries, are impossible to tessellate with flat entities. It is indeed true that we can approximate a sphere by covering its surface with a lot of small triangles, but this comes at the cost of adding more primitives to draw.
+Alternative ways to represent geometries exist. One of these uses signed distance functions, which are mathematical descriptions of the objects we want to represent. When you replace the geometry of a sphere with its very equation, you have suddenly removed any approximation error from your 3D engine. You can think of signed distance fields as the SVG equivalent of triangles. You can scale up and zoom SDF geometries without ever losing detail. A sphere will always be smooth, regardless of how close you are to its edges.
+Signed-distance functions are based on the idea that every primitive object must be represented with a function. It takes a 3D point as a parameter and returns a value that indicates how distant that point is to the object surface.
+SDF Sphere
+In the first post of this series, Volumetric Rendering, we’ve seen a hit function that indicates if we are inside a sphere or not:
+```
+bool sphereHit (float3 p)
+{
+    return distance(p,_Centre) &lt; _Radius;
+}
+```
+We can change this function so that it returns the distance from the sphere surface instead:
+```
+float sdf_sphere (float3 p, float3 c, float r)
+{
+    return distance(p,c) - r;
+}
+```
+If sdf_sphere returns a positive distance, we’re not hitting the sphere. A negative distance indicates that we are inside the sphere, while zero is reserved for the points of the space which actually make up the surface.
+Union and Intersection
+The concept of signed distance function was briefly introduced in Raymarching tutorial, where it guided the advancement of the camera rays into the material. There is another reason why SDFs are used. And it is because they are amenable to composition. Given the SDFs of two different spheres, how can we merge them into a single SDF?
+We can think about this from the perspective of a camera ray, advancing into the material. At each step, the ray must find its closest obstacle. If there are two spheres, we should evaluate the distance from both and get the smallest. We don’t want to overshoot the sphere, so we must advance by the most conservative estimation.
+This toy example can be extended to any two SDFs. Taking the minimum value between them returns another SDF which corresponds to their union:
+```
+float map (float3 p)
+{
+    return min
+        (
+            sdf_sphere(p, - float3 (1.5, 0, 0), 2), // Left sphere
+            sdf_sphere(p, + float3 (1.5, 0, 0), 2)  // Right sphere
+        );
+}
+```
+The result can be seen in the following picture (which also features a few other visual enhancements that will be discussed in the next post on Ambient Occlusion):
+With the same reasoning, it’s easy to see that taking the maximum value between two SDFs returns their intersection:
+```
+float map (float3 p)
+{
+    return max
+        (
+            sdf_sphere(p, - float3 (1.5, 0, 0), 2), // Left sphere
+            sdf_sphere(p, + float3 (1.5, 0, 0), 2)  // Right sphere
+        );
+}
+```
+⭐ Recommended Unity Assets
+Unity is free, but you can upgrade to Unity Pro or Unity Plus subscription plans to get more functionalities and training resources for your games.
+SDF Box
+Many geometries can be constructed with what we already know. If we want to push out knowledge further, we need to introduce a new SDF primitive: the half-space. As the name suggests, it is nothing more than just a primitive that occupies half of the 3D space.
+```
+// X Axis
+d = + p.x - c.x; // Left half-space full
+d = - p.x + c.x; // Right half-space full
+
+// Y Axis
+d = + p.y - c.y; // Left half-space full
+d = - p.y + c.y; // Right half-space full
+
+// Z Axis
+d = + p.z - c.z; // Left half-space full
+d = - p.z + c.z; // Right half-space full
+```
+The trick is to intersect six planes in order to create a box with the given size s, like shown in the animation below:
+```
+float sdf_box (float3 p, float3 c, float3 s)
+{
+    float x = max
+    (   p.x - c.x - float3(s.x / 2., 0, 0),
+        c.x - p.x - float3(s.x / 2., 0, 0)
+    );
+
+    float y = max
+    (   p.y - c.y - float3(s.y / 2., 0, 0),
+        c.y - p.y - float3(s.y / 2., 0, 0)
+    );
+    
+    float z = max
+    (   p.z - c.z - float3(s.z / 2., 0, 0),
+        c.z - p.z - float3(s.z / 2., 0, 0)
+    );
+
+    float d = x;
+    d = max(d,y);
+    d = max(d,z);
+    return d;
+}
+```
+There are more compact (yet less precise) ways to create a box, which take advantage of the symmetries around the centre:
+```
+float vmax(float3 v)
+{
+	return max(max(v.x, v.y), v.z);
+}
+
+float sdf_boxcheap(float3 p, float3 c, float3 s)
+{
+	return vmax(abs(p-c) - s);
+}
+```
+Shape Blending
+If you are familiar with the concept of alpha blending, you will probably recognise the following piece of code:
+```
+float sdf_blend(float d1, float d2, float a)
+{
+	return a * d1 + (1 - a) * d2;
+}
+```
+Its purpose is to create a blending between two values, d1 and d2 , controlled by a value a (from zero to one). The exact same code used to blend colours can also be used to blend shapes. For instance, the following code blends a sphere into a cube:
+```
+d = sdf_blend
+(
+	sdf_sphere(p, 0, r),
+	sdf_box(p, 0, r),
+	(_SinTime[3] + 1.) / 2.
+);
+```
+Smooth Union
+In a previous section, we’ve seen how two SDFs can be merged together using min. If it is true that the SDF union is indeed effective, it is also true that its results are rather unnatural. Working with SDFs allows for many ways in which primitives can be blended together. One of these techniques, exponential smoothing (link: Smooth Minimum), has been used extensively in the original animations of this tutorial.
+```
+float sdf_smin(float a, float b, float k = 32)
+{
+	float res = exp(-k*a) + exp(-k*b);
+	return -log(max(0.0001,res)) / k;
+}
+```
+When two shapes are joined using this new operator, they merge softly, creating a gentle step that removes any sharp edge. In the following animation, you can see how the spheres merge together:
+SDF Algebra
+As you can anticipate, all those SDF primitives and operators are part of a signed distance function algebra. Rotations, scaling, bending, twisting… all those operations can be performed with signed distance functions.
+In his article titled Modeling With Distance Functions, Íñigo Quílez has worked on a vast collection of SDFs that can be used as primitive for the construction of more complex geometries. You can see some of them by clicking on the interactive ShaderToy below:
+An even larger collection of primitives and operators is available in the library hg_sdf (link here) curated by the MERCURY group. Despite being written in GLSL, the functions are easily portable to Unity’s Cg/HLSL.
+What’s next…
+The number of transformations that can be performed with SDFs is virtually endless. This post provided just a quick introduction to the topic. If you really want to master volumetric rendering, improving your knowledge of SDFs is a good starting point.
+You can find the full list of articles in the series here:
+Part 1: Volumetric Rendering
+Part 2: Raymarching
+Part 3: Surface Shading
+Part 4: Signed Distance Fields
+Part 5: Ambient Occlusion
+🚧 Part 6: Hard and Soft Shadows
+⚠ Part 6 of this series is available for preview on Patreon, as its written content needs to be completed.
+If you are interested in volumetric rendering for non-solid materials (clouds, smoke, …) or transparent ones (water, glass, …) the topic is resumed in detail in the Atmospheric Volumetric Scattering series!
+By the end of this series you’ll be able to create objects like this one, with just three lines of code and a volumetric shader:
+Additional resources
+Raymarching Distance Fields
+Modeling with Signed Distance Fields
+Download Unity Package 📦
+Become a Patron!
+The Unity package contains everything needed to replicate the visual seen in this tutorial, including the shader code, the assets and the scene.
+raymarching SDF shader signed distance field signed distance function unity volume rendering
+💖 Support this blog
+This website exists thanks to the support of patrons on Patreon. If you think my work has helped or inspired you, please consider joining!
+👉
+Become a member
+👈
+Comments
+16 responses to “Volumetric Rendering: Signed Distance Functions”
+Procedural 3D mesh generation in a 64kB intro – News Factory
+April 2, 2023
+[…] fully various methodology than what we’ve viewed to this level: implicit surface expressed with signed-distance fields (SDF). Here’s a strategy very authorized in 4kB intros, usually ragged with the ray marching […]
+Reply
+Michael Hutton
+October 4, 2021
+Hi Alan,
+Amazing tutorial. I don’t fully understand all this yet but it seems amazingly powerful. Could I ask one question? How would I start to explore this using ShaderGraph in unity? Would this be a relatively easy thing to do? (two questions – sorry). Where would I start? (three.)
+Reply
+borbs727
+October 1, 2020
+Thanks for the cool tut! Any idea why _WorldSpaceLightPos0 and _LightColor won’t work for me? I’m using Unity 2020.1 HDRP
+Shader “Custom/03SurfaceShading”
+{
+Properties
+{
+// _MainTex (“Texture”, 2D) = “white” {}
+_Radius (“Radius”, float) = 1
+_Center (“Center”, vector) = (0, 0, 0, 1)
+_Color (“Color”, color) = (1, 1, 1, 1)
+_Steps (“Steps”, float) = .1
+_MinDistance (“Min Distance”, float) = .01
+}
+SubShader
+{
+// No culling or depth
+// Cull Off ZWrite Off ZTest Always
+Pass
+{
+// Tags {“LightMode”=”ForwardBase”}
+CGPROGRAM
+#pragma vertex vert
+#pragma fragment frag
+#include “UnityCG.cginc”
+#include “UnityLightingCommon.cginc”
+float _Radius;
+float4 _Center;
+float4 _Color;
+float _Steps;
+float _MinDistance;
+struct appdata {
+float4 vertex : POSITION;
+// float2 uv : TEXCOORD0;
+};
+struct v2f {
+// float2 uv : TEXCOORD0;
+fixed4 diff : COLOR0;
+float4 vertex : SV_POSITION; // Clip space
+float3 wPos : TEXCOORD1; // World position
+};
+// Vertex function
+v2f vert (appdata v) {
+v2f o;
+o.vertex = UnityObjectToClipPos(v.vertex);
+o.wPos = mul(unity_ObjectToWorld, v.vertex).xyz;
+return o;
+}
+fixed4 simpleLambert (fixed3 normal) {
+fixed3 lightDir = _WorldSpaceLightPos0.xyz; // Light direction
+fixed3 lightCol = _LightColor0.rgb; // Light color
+fixed NdotL = max(dot(normal, lightDir),0);
+fixed4 c;
+c.rgb = _Color * lightCol * NdotL;
+c.a = 1;
+return c;
+}
+float map (float3 p)
+{
+return distance(p, _Center) – _Radius;
+}
+float3 normal (float3 p)
+{
+const float eps = 0.01;
+return normalize(
+float3(
+map(p + float3(eps, 0, 0) ) – map(p – float3(eps, 0, 0)),
+map(p + float3(0, eps, 0) ) – map(p – float3(0, eps, 0)),
+map(p + float3(0, 0, eps) ) – map(p – float3(0, 0, eps))
+)
+);
+}
+fixed4 renderSurface(float3 p)
+{
+float3 n = normal(p);
+return simpleLambert(n);
+}
+fixed4 raymarch (float3 position, float3 direction) {
+for (int i = 0; i < _Steps; i++) {
+float distance = map(position);
+if (distance < _MinDistance)
+return renderSurface(position);
+position += distance * direction;
+}
+return fixed4(1,1,1,1);
+}
+// Fragment function
+fixed4 frag (v2f i) : SV_Target {
+float3 worldPosition = i.wPos;
+float3 viewDirection = normalize(i.wPos – _WorldSpaceCameraPos);
+return raymarch(worldPosition, viewDirection);
+}
+ENDCG
+}
+}
+}
+Reply
+Alan Zucconi
+October 3, 2020
+HDRP works in a slightly different way, so che Cg code might need some changes to be ported correctly!
+A good workaround is probably to use Shader Graph!
+Reply
+Filippo Ceffa
+November 5, 2018
+I’d like to point out a fairly important thing about SDFs that is not covered by any introduction article I found online.
+An SDF describes the distance between a point and a shape. Among the functions you introduced above, only the sphere and half plane are correct SDFs.
+Let’s consider the box: intersecting 6 half planes is NOT equivalent to the point-box distance. If the point is outside of a corner of the box, its distance will be the diagonal line connecting it to the vertex. However, intersection will only get the maximum of the three distances along the three axes.
+Why do we care? If we just need to test a point against an SDF, we don’t care. We just care if a point is inside or outside, we don’t care about the correct distance. Following this, we could just have the function return a boolean, and maybe we could squeeze in some optimizations (for example, compare the squared length in the Sphere function, instead of the more expensive length which requires a square root).
+So, when do we care about an SDF being correct? We do if the SDF is then used for further processing. For example: blending!
+If you blend two SDF where at least one is wrong (i.e. sphere and box described in the article), the blended result will not be exactly right! Maybe it will look ok, but not quite right! If you were to spend time writing a mathematically correct box SDFs and lerp it with a sphere, you would see how better the transition looks!
+That being said, I also want to list which functions are conservative (i.e. if two input SDF are correct, the result is correct) and which arent:
+Union: Conservative!
+Intersection: Not Conservative! (that’s why intersecting 6 correct half planes does NOT give you a correct Box!)
+Blend: Not conservative!
+Be careful to use intersection and blending if you plan to use other SDF operations afterwards!
+One final note: if you have a correct SDF, you can also check the intersection with a sphere! If the SDF is not correct, the distance distribution will be wrong and that wont work.
+I hope this was useful to read, I might wrap it up in an article more nicely, as I discovered most of these things the hard way while working on a project, and it could save other people pain and effort!
+Reply
+Alan Zucconi
+November 6, 2018
+Thank you, this is a very interesting topic!
+Reply
+Erik
+September 9, 2018
+In the sdf_box function, is the following statement correct?
+float x = max
+( p.x – c.x – float3(s.x / 2., 0, 0),
+c.x – p.x – float3(s.x / 2., 0, 0)
+);
+How can a vector (float3) can be subtracted from scalars (p.x and c.x)?
+Reply
+TobberH
+May 30, 2017
+Seems like there is a mistake in the sdf_box function. It should use the input variable c and not _Centre as the center position?
+Reply
+Alan Zucconi
+May 30, 2017
+Indeed! Well spotted, thank you! <3
+There’s a problem with my website and I can’t change the page right now unfortunately.
+Hopefully I’ll remember to do it when is all done!
+Reply
+TobberH
+May 30, 2017
+Wouldn’t it be more correct to call the sdf_blend function a linear interpolation also commonly referred to as lerp? Wikipedia has an example like this and I guessing it would give the same result?:
+float lerp(float v0, float v1, float t) {
+return (1 – t) * v0 + t * v1;
+}
+Reply
+Alan Zucconi
+May 30, 2017
+Hey!
+Yes, indeed it would. But I wanted to use names that were resonating more with 3D modelling, than Maths. :p
+Reply
+Volumetric Rendering – Alan Zucconi
+November 9, 2016
+[…] 4: Signed Distance Functions | An in depth discussion on the mathematical tools that allow us to generate and combine […]
+Reply
+Åsmund Kløvstad
+August 4, 2016
+Is there a way to go about building larger scenes comprised of many SDF’s without endless nested unions?
+Reply
+Issue 4 – Unity Dev Weekly
+July 29, 2016
+[…] Volumetric Rendering: Signed Distance Functions […]
+Reply
+Volumetric Rendering: Raymarching – Alan Zucconi
+July 14, 2016
+[…] Part 4: Signed Distance Fields […]
+Reply
+Leave a Reply Cancel reply

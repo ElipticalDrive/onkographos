@@ -1,0 +1,1457 @@
+### webpack.config.js
+```
+module.exports = {
+  entry: "./src/App",
+  output: {
+    filename: "bundle.js",
+  },
+  module: {
+    rules: [
+      {
+        test: /\.js$/,
+        exclude: /node_modules/,
+        use: "babel-loader",
+      },
+      {
+        test: /\.css$/,
+        use: [
+          "style-loader",
+          {
+            loader: "css-loader",
+            options: {
+              importLoaders: 1,
+              modules: true,
+            },
+          },
+        ],
+      },
+      {
+        test: /\.png$/,
+        use: "file-loader",
+      },
+    ],
+  },
+};
+```
+
+### src/App.js
+```
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { Dicom3DViewer } from "./components/Dicom3DViewer";
+import "./style.css";
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<Dicom3DViewer />);
+```
+
+### src/components/Dicom3DViewer.js
+```
+import React, { useEffect, useMemo, useState } from "react";
+import styled from "styled-components";
+import ReactSlider from "react-slider";
+import {
+  BackSide,
+  BoxGeometry,
+  ClampToEdgeWrapping,
+  FloatType,
+  FrontSide,
+  ImageUtils,
+  LinearFilter,
+  Mesh,
+  NearestFilter,
+  PerspectiveCamera,
+  Scene,
+  ShaderMaterial,
+  Texture,
+  TextureLoader,
+  WebGLRenderer,
+  WebGLRenderTarget,
+} from "three";
+import { Detector } from "../utils/detector";
+import * as VolumeRendererUtils from "../utils/volumeRenderer";
+
+const StyledSlider = styled(ReactSlider)`
+  width: 100%;
+  height: 18px;
+  margin-bottom: 16px;
+`;
+
+const StyledThumb = styled.div`
+  height: 18px;
+  line-height: 18px;
+  width: 18px;
+  text-align: center;
+  background-color: #ff00ff;
+  color: #fff;
+  border-radius: 50%;
+  cursor: grab;
+`;
+
+const Thumb = (props, state) => (
+  <StyledThumb {...props}>
+    {/* {((state.valueNow / 100) * 255).toFixed(0)} */}
+  </StyledThumb>
+);
+
+const StyledTrack = styled.div`
+  top: 0;
+  bottom: 0;
+  background: ${(props) =>
+    props.index === 2 ? "#fff" : props.index === 1 ? "#f00" : "#fff"};
+  border-radius: 999px;
+`;
+
+const Track = (props, state) => <StyledTrack {...props} index={state.index} />;
+
+const StyledContainer = styled.div`
+  resize: horizontal;
+  overflow: auto;
+  width: 50%;
+  max-width: 100%;
+  padding-right: 8px;
+`;
+
+export const Dicom3DViewer = () => {
+  const [animateReady, setAnimateReady] = useState(false);
+  const [error, setError] = useState("");
+
+  let colorTreshLow = 0.0;
+  let colorTreshHigh = 1.0;
+  let alphaCorrection = 2.0;
+  let contrast = 1;
+  let brightness = 0;
+
+  useEffect(() => {
+    if (!Detector.webgl) Detector.addGetWebGLMessage();
+    const initFn = async () => {
+      const status = await VolumeRendererUtils.init();
+      if (status === "success") {
+        setAnimateReady(true);
+      } else {
+        setError(status);
+      }
+    };
+    initFn();
+  }, []);
+
+  useEffect(() => {
+    if (animateReady) {
+      console.log("ready");
+
+      const animate = () => {
+        requestAnimationFrame(animate);
+        VolumeRendererUtils.render(
+          colorTreshLow,
+          colorTreshHigh,
+          alphaCorrection,
+          contrast,
+          brightness
+        );
+      };
+      animate();
+    } else {
+      console.log("not ready");
+    }
+  }, [animateReady]);
+
+  if (error !== "") {
+    return <p>{error}</p>;
+  }
+
+  return (
+    <div>
+      <div
+        style={{
+          position: "absolute",
+          width: "300px",
+          right: "16px",
+        }}
+      >
+        <p
+          style={{
+            color: "white",
+          }}
+        >
+          Trimmer
+        </p>
+        <StyledSlider
+          defaultValue={[0, 100]}
+          renderTrack={Track}
+          renderThumb={Thumb}
+          onChange={(value) => {
+            colorTreshLow = value[0] / 100;
+            colorTreshHigh = value[1] / 100;
+          }}
+        />
+        <p
+          style={{
+            color: "white",
+          }}
+        >
+          Alpha Correction
+        </p>
+        <StyledSlider
+          defaultValue={50}
+          renderTrack={Track}
+          renderThumb={Thumb}
+          onChange={(value) => {
+            alphaCorrection = (value / 100) * 4;
+          }}
+        />
+        <p
+          style={{
+            color: "white",
+          }}
+        >
+          Contrast
+        </p>
+        <StyledSlider
+          defaultValue={10}
+          renderTrack={Track}
+          renderThumb={Thumb}
+          onChange={(value) => {
+            contrast = (value / 100) * 10;
+          }}
+        />
+        <p
+          style={{
+            color: "white",
+          }}
+        >
+          Brightness
+        </p>
+        <StyledSlider
+          defaultValue={50}
+          renderTrack={Track}
+          renderThumb={Thumb}
+          onChange={(value) => {
+            brightness = (value / 100) * 2 - 1.1;
+          }}
+        />
+      </div>
+      <div id="3d-view"></div>
+    </div>
+  );
+};
+```
+
+### src/shaders/fragmentShaders.js
+```
+const fragmentShaders = {
+  firstPass: `
+    varying vec3 worldSpaceCoords;
+
+    void main()
+    {
+      gl_FragColor = vec4( worldSpaceCoords.xyz, 1 );
+    }
+  `,
+  secondPass: `
+    precision highp sampler3D;
+
+    varying vec3 worldSpaceCoords;
+    varying vec4 projectedCoords;
+    uniform sampler2D tex, transferTex;
+    uniform sampler3D cubeTex;
+    uniform sampler3D cubeTex2;
+    uniform float steps;
+    uniform float alphaCorrection;
+    uniform float colorTreshLow;
+    uniform float colorTreshHigh;
+    uniform float contrast;
+    uniform float brightness;
+
+    void main( void ) {
+      // Transfer coordinates from [-1, 1] to [0, 1]
+      vec2 texc = vec2(((projectedCoords.x / projectedCoords.w) + 1.0 ) / 2.0, 
+        ((projectedCoords.y / projectedCoords.w) + 1.0 ) / 2.0);
+      
+      // backPosition is 3d texture coordinates from previous pass
+      vec3 backPosition = texture2D(tex, texc).xyz;
+
+      // frontPosition is 3d texture coordinates from this pass
+      vec3 frontPosition = worldSpaceCoords;
+
+      // if there is invalid backPosition value at the edge of the cube, just return;
+      if ((backPosition.x == 0.0) && (backPosition.y == 0.0))
+      {
+        gl_FragColor = vec4(0.0);
+        return;
+      }
+
+      // get ray vector and length
+      vec3 ray = backPosition - frontPosition;
+      float rayLength = length(ray);
+
+      // calculate value and direction of the increment of each step
+      float delta = 1.0 / steps;
+      vec3 deltaDirection = normalize(ray) * 1.0 / steps;
+      float deltaLength = length(deltaDirection);
+
+      // start the ray casting from frontPosition
+      vec3 currentPosition = frontPosition;
+
+      vec4 accumulatedColor;
+      float accumulatedLength;
+
+      float textureIntensity;
+      vec4 color;
+
+      for(int i = 0; i < 998; i++) {
+        // get intensity value for each step
+        textureIntensity = texture(cubeTex, currentPosition).r;
+        textureIntensity = (contrast * textureIntensity) + brightness;
+
+
+        // if textureIntensity outside the treshold, then it is not contribute to the accumulated color
+        if (textureIntensity <= colorTreshLow || textureIntensity >=  colorTreshHigh) {
+          textureIntensity = 0.0;
+        } 
+
+        if (textureIntensity >= 0.5) {
+          textureIntensity = textureIntensity * 2.56 * alphaCorrection * delta;
+          color = vec4(textureIntensity, 0.0, 0.0, textureIntensity);
+        } else {
+          textureIntensity = textureIntensity * 2.56 * alphaCorrection * delta;
+          color = vec4(textureIntensity, textureIntensity, textureIntensity, textureIntensity);
+        }
+
+        // adjust the color accumulation by some constant and alphaCorrection slider
+        // multiply its by delta means that if the step size change, the accumulated color's range will still the same
+        // multiply by (1.0 - accumulatedColor) the more color accumulated, the least its contribute to the final color
+        // accumulatedColor += color * 2.56 * alphaCorrection * delta * (1.0 - accumulatedColor);
+        accumulatedColor += color;
+
+        // make a step
+        accumulatedLength += deltaLength;
+        currentPosition += deltaDirection;
+
+        // early termination when the color is max and break when the finished
+        if(accumulatedLength >= rayLength || accumulatedColor.a >= 1.0 )
+						break;
+      }
+
+      gl_FragColor = accumulatedColor;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      // vec2 texc = vec2(((projectedCoords.x / projectedCoords.w) + 1.0 ) / 2.0,
+      //         ((projectedCoords.y / projectedCoords.w) + 1.0 ) / 2.0);
+
+      // // backPos is the worldSpaceCoords from the previous pass
+      // vec3 backPos = texture2D(tex, texc).xyz;
+      // vec3 frontPos = worldSpaceCoords;
+
+      // if ((backPos.x == 0.0) && (backPos.y == 0.0))
+      // {
+      //   gl_FragColor = vec4(0.0);
+      //   return;
+      // }
+
+      // vec3 dir = backPos - frontPos;
+
+      // float rayLength = length(dir);
+
+      // float delta = 1.0 / steps;
+
+      // vec3 deltaDirection = normalize(dir) * delta;
+      // float deltaDirectionLength = length(deltaDirection);
+
+      // vec3 currentPosition = frontPos;
+      // vec4 accumulatedColor = vec4(0.0);
+      // float accumulatedAlpha = 0.0;
+      // float accumulatedLength = 0.0;
+
+      // vec4 color;
+      // float alphaFactor;
+
+      // for (int i = 0; i < 999; i++) {
+      //   float textureIntensity = texture(cubeTex, currentPosition).r;
+
+      //   textureIntensity = (contrast * textureIntensity) + brightness;
+
+      //   if (textureIntensity >= colorTreshLow && textureIntensity <=  colorTreshHigh) {
+      //     // if (texture(cubeTex2, currentPosition).r == 1.0) {
+      //     //   color = vec4(1.0, 0.0, 0.0, textureIntensity);
+      //     // } else {
+      //     //   color = vec4(1.0, 1.0, 1.0, textureIntensity);
+      //     // }
+      //     color = vec4(1.0, 1.0, 1.0, textureIntensity);
+      //   } else {
+      //     color = vec4(0.0, 0.0, 0.0, 0.0);
+      //   }
+      
+        
+      //   accumulatedColor += color * delta * 25.6 * (1.0 - accumulatedColor.r) * alphaCorrection;
+
+
+      //   currentPosition += deltaDirection;
+      //   accumulatedLength += deltaDirectionLength;
+
+      //   if(accumulatedLength >= rayLength || accumulatedColor.r >= 1.0 )
+      //     break;
+      // }
+
+      // gl_FragColor = accumulatedColor;
+
+
+
+
+
+
+      // vec4 accumulatedColor = vec4(0.0);
+      // float accumulatedAlpha = 0.0;
+      // float accumulatedLength = 0.0;
+      // float alphaScaleFactor = 25.6 * delta;
+
+      // vec4 colorSample;
+      // float alphaSample;
+
+      // for(int i = 0; i < MAX_STEPS; i++)
+      // {
+        
+      //   float textureColor = texture(cubeTex, currentPosition).r;
+      //   if (true) {
+      //     accumulatedColor = vec4(textureColor, 0.0, 0.0, 1.0);
+      //   break;
+
+      //   } else {
+      //     // accumulatedColor = vec4(0.0, 1.0, 0.0, 1.0);
+      //   }
+      //   // // contrast and brightness adjustment
+      //   // textureColor = (alpha * textureColor) + beta;
+
+      //   // // if (textureColor > 1.0) {
+      //   // //   textureColor = 1.0;
+      //   // // }
+
+      //   // // // adjust brightness and contrass
+      //   // // textureColor = mix(textureColor * brightness, 
+      //   // //   mix(0.5, textureColor, contrast), 0.5);
+
+      //   // colorSample = vec4(1.0, 1.0, 1.0, textureColor);
+      //   // if (textureColor <= colorTreshLow || textureColor >= colorTreshHigh) {
+      //   //   colorSample = vec4(1.0, 1.0, 1.0, 0.0);
+      //   // }
+
+      //   // alphaSample = colorSample.a * alphaCorrection * alphaScaleFactor * (1.0 - accumulatedAlpha);
+
+      //   // accumulatedColor += colorSample * alphaSample;
+      //   // accumulatedAlpha += alphaSample;
+
+      //   // currentPosition += deltaDirection;
+      //   // accumulatedLength += deltaDirectionLength;
+
+      //   if(accumulatedLength >= rayLength || accumulatedAlpha >= 1.0 )
+      //     break;
+      // }
+
+      // // gl_FragColor = accumulatedColor;
+      // gl_FragColor = vec4(worldSpaceCoords, 1.0);
+      // // gl_FragColor  = vec4(1.0, 1.0, 1.0, -1.0);
+
+      // // gl_FragColor = vec4(currentPosition, 1.0);
+    }
+  `,
+};
+
+export default fragmentShaders;
+```
+
+### src/shaders/vertexShaders.js
+```
+const vertexShaders = {
+  firstPass: `
+    varying vec3 worldSpaceCoords;
+
+    uniform float stackLengthRatio;
+
+    void main()
+    {
+      mat4 scaleMatrix;
+      scaleMatrix[0] = vec4(1.0 / stackLengthRatio, 0.0, 0.0, 0.0);
+      scaleMatrix[1] = vec4(0.0, 1.0, 0.0, 0.0);
+      scaleMatrix[2] = vec4(0.0, 0.0, 1.0, 0.0);
+      scaleMatrix[3] = vec4(0.0, 0.0, 0.0, 1.0);
+
+      vec4 scaledWorldSpaceCoords = scaleMatrix * vec4((position + vec3(stackLengthRatio / 2.0, 0.5, 0.5)), 1.0);
+      worldSpaceCoords = scaledWorldSpaceCoords.xyz; 
+      
+      gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+    }
+  `,
+  secondPass: `
+    varying vec3 worldSpaceCoords;
+    varying vec4 projectedCoords;
+
+    uniform float stackLengthRatio;
+
+    void main()
+    {
+      mat4 scaleMatrix;
+      scaleMatrix[0] = vec4(1.0 / stackLengthRatio, 0.0, 0.0, 0.0);
+      scaleMatrix[1] = vec4(0.0, 1.0, 0.0, 0.0);
+      scaleMatrix[2] = vec4(0.0, 0.0, 1.0, 0.0);
+      scaleMatrix[3] = vec4(0.0, 0.0, 0.0, 1.0);
+
+      vec4 scaledWorldSpaceCoords = scaleMatrix * vec4((position + vec3(stackLengthRatio / 2.0, 0.5, 0.5)), 1.0);
+      worldSpaceCoords = scaledWorldSpaceCoords.xyz; 
+      
+      gl_Position = projectionMatrix *  modelViewMatrix * vec4( position, 1.0 );
+      
+      projectedCoords =  projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+    }
+  `,
+};
+
+export default vertexShaders;
+```
+
+### src/utils/detector.js
+```
+export const Detector = {
+  canvas: !!window.CanvasRenderingContext2D,
+  webgl: (function () {
+    try {
+      var canvas = document.createElement("canvas");
+      return (
+        !!window.WebGLRenderingContext &&
+        (canvas.getContext("webgl") || canvas.getContext("experimental-webgl"))
+      );
+    } catch (e) {
+      return false;
+    }
+  })(),
+  workers: !!window.Worker,
+  fileapi: window.File && window.FileReader && window.FileList && window.Blob,
+
+  getWebGLErrorMessage: function () {
+    var element = document.createElement("div");
+    element.id = "webgl-error-message";
+    element.style.fontFamily = "monospace";
+    element.style.fontSize = "13px";
+    element.style.fontWeight = "normal";
+    element.style.textAlign = "center";
+    element.style.background = "#fff";
+    element.style.color = "#000";
+    element.style.padding = "1.5em";
+    element.style.width = "400px";
+    element.style.margin = "5em auto 0";
+
+    if (!this.webgl) {
+      element.innerHTML = window.WebGLRenderingContext
+        ? [
+            'Your graphics card does not seem to support <a href="http://khronos.org/webgl/wiki/Getting_a_WebGL_Implementation" style="color:#000">WebGL</a>.<br />',
+            'Find out how to get it <a href="http://get.webgl.org/" style="color:#000">here</a>.',
+          ].join("\n")
+        : [
+            'Your browser does not seem to support <a href="http://khronos.org/webgl/wiki/Getting_a_WebGL_Implementation" style="color:#000">WebGL</a>.<br/>',
+            'Find out how to get it <a href="http://get.webgl.org/" style="color:#000">here</a>.',
+          ].join("\n");
+    }
+
+    return element;
+  },
+
+  addGetWebGLMessage: function (parameters) {
+    var parent, id, element;
+
+    parameters = parameters || {};
+
+    parent =
+      parameters.parent !== undefined ? parameters.parent : document.body;
+    id = parameters.id !== undefined ? parameters.id : "oldie";
+
+    element = Detector.getWebGLErrorMessage();
+    element.id = id;
+
+    parent.appendChild(element);
+  },
+};
+```
+
+### src/utils/getData.js
+```
+import axios from "axios";
+import { stackImages } from "./stackImages";
+
+export const getData = async () => {
+  let imageResponse;
+  let segmentationResponse;
+  try {
+    segmentationResponse = await axios.get("http://localhost:3003/box");
+    imageResponse = await axios.get("http://localhost:3003/scans2");
+  } catch (error) {
+    return undefined;
+  }
+  const imageStack = stackImages(imageResponse.data.stack);
+  const segmentationStack = stackImages(segmentationResponse.data.stack);
+
+  return {
+    imageTexture: imageStack,
+    imageStackLength: imageResponse.data.stack.length,
+    imageLengthRatio: imageResponse.data.stackLengthRatio,
+    segmentationTexture: segmentationStack,
+    segmentationStackLength: segmentationResponse.data.stack.length,
+    segmentationLengthRatio: segmentationResponse.data.stackLengthRatio,
+  };
+};
+```
+
+### src/utils/orbitControls.js
+```
+/**
+ * @author qiao / https://github.com/qiao
+ * @author mrdoob / http://mrdoob.com
+ * @author alteredq / http://alteredqualia.com/
+ * @author WestLangley / http://github.com/WestLangley
+ * @author erich666 / http://erichaines.com
+ */
+/*global THREE, console */
+
+// This set of controls performs orbiting, dollying (zooming), and panning. It maintains
+// the "up" direction as +Y, unlike the TrackballControls. Touch on tablet and phones is
+// supported.
+//
+//    Orbit - left mouse / touch: one finger move
+//    Zoom - middle mouse, or mousewheel / touch: two finger spread or squish
+//    Pan - right mouse, or arrow keys / touch: three finter swipe
+//
+// This is a drop-in replacement for (most) TrackballControls used in examples.
+// That is, include this js file and wherever you see:
+//    	controls = new THREE.TrackballControls( camera );
+//      controls.target.z = 150;
+// Simple substitute "OrbitControls" and the control should work as-is.
+
+THREE.OrbitControls = function ( object, domElement ) {
+
+	this.object = object;
+	this.domElement = ( domElement !== undefined ) ? domElement : document;
+
+	// API
+
+	// Set to false to disable this control
+	this.enabled = true;
+
+	// "target" sets the location of focus, where the control orbits around
+	// and where it pans with respect to.
+	this.target = new THREE.Vector3();
+
+	// center is old, deprecated; use "target" instead
+	this.center = this.target;
+
+	// This option actually enables dollying in and out; left as "zoom" for
+	// backwards compatibility
+	this.noZoom = false;
+	this.zoomSpeed = 1.0;
+
+	// Limits to how far you can dolly in and out
+	this.minDistance = 0;
+	this.maxDistance = Infinity;
+
+	// Set to true to disable this control
+	this.noRotate = false;
+	this.rotateSpeed = 1.0;
+
+	// Set to true to disable this control
+	this.noPan = false;
+	this.keyPanSpeed = 7.0;	// pixels moved per arrow key push
+
+	// Set to true to automatically rotate around the target
+	this.autoRotate = false;
+	this.autoRotateSpeed = 2.0; // 30 seconds per round when fps is 60
+
+	// How far you can orbit vertically, upper and lower limits.
+	// Range is 0 to Math.PI radians.
+	this.minPolarAngle = 0; // radians
+	this.maxPolarAngle = Math.PI; // radians
+
+	// Set to true to disable use of the keys
+	this.noKeys = false;
+
+	// The four arrow keys
+	this.keys = { LEFT: 37, UP: 38, RIGHT: 39, BOTTOM: 40 };
+
+	////////////
+	// internals
+
+	var scope = this;
+
+	var EPS = 0.000001;
+
+	var rotateStart = new THREE.Vector2();
+	var rotateEnd = new THREE.Vector2();
+	var rotateDelta = new THREE.Vector2();
+
+	var panStart = new THREE.Vector2();
+	var panEnd = new THREE.Vector2();
+	var panDelta = new THREE.Vector2();
+	var panOffset = new THREE.Vector3();
+
+	var offset = new THREE.Vector3();
+
+	var dollyStart = new THREE.Vector2();
+	var dollyEnd = new THREE.Vector2();
+	var dollyDelta = new THREE.Vector2();
+
+	var phiDelta = 0;
+	var thetaDelta = 0;
+	var scale = 1;
+	var pan = new THREE.Vector3();
+
+	var lastPosition = new THREE.Vector3();
+	var lastQuaternion = new THREE.Quaternion();
+
+	var STATE = { NONE : -1, ROTATE : 0, DOLLY : 1, PAN : 2, TOUCH_ROTATE : 3, TOUCH_DOLLY : 4, TOUCH_PAN : 5 };
+
+	var state = STATE.NONE;
+
+	// for reset
+
+	this.target0 = this.target.clone();
+	this.position0 = this.object.position.clone();
+
+	// so camera.up is the orbit axis
+
+	var quat = new THREE.Quaternion().setFromUnitVectors( object.up, new THREE.Vector3( 0, 1, 0 ) );
+	var quatInverse = quat.clone().inverse();
+
+	// events
+
+	var changeEvent = { type: 'change' };
+	var startEvent = { type: 'start'};
+	var endEvent = { type: 'end'};
+
+	this.rotateLeft = function ( angle ) {
+
+		if ( angle === undefined ) {
+
+			angle = getAutoRotationAngle();
+
+		}
+
+		thetaDelta -= angle;
+
+	};
+
+	this.rotateUp = function ( angle ) {
+
+		if ( angle === undefined ) {
+
+			angle = getAutoRotationAngle();
+
+		}
+
+		phiDelta -= angle;
+
+	};
+
+	// pass in distance in world space to move left
+	this.panLeft = function ( distance ) {
+
+		var te = this.object.matrix.elements;
+
+		// get X column of matrix
+		panOffset.set( te[ 0 ], te[ 1 ], te[ 2 ] );
+		panOffset.multiplyScalar( - distance );
+		
+		pan.add( panOffset );
+
+	};
+
+	// pass in distance in world space to move up
+	this.panUp = function ( distance ) {
+
+		var te = this.object.matrix.elements;
+
+		// get Y column of matrix
+		panOffset.set( te[ 4 ], te[ 5 ], te[ 6 ] );
+		panOffset.multiplyScalar( distance );
+		
+		pan.add( panOffset );
+
+	};
+	
+	// pass in x,y of change desired in pixel space,
+	// right and down are positive
+	this.pan = function ( deltaX, deltaY ) {
+
+		var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+		if ( scope.object.fov !== undefined ) {
+
+			// perspective
+			var position = scope.object.position;
+			var offset = position.clone().sub( scope.target );
+			var targetDistance = offset.length();
+
+			// half of the fov is center to top of screen
+			targetDistance *= Math.tan( ( scope.object.fov / 2 ) * Math.PI / 180.0 );
+
+			// we actually don't use screenWidth, since perspective camera is fixed to screen height
+			scope.panLeft( 2 * deltaX * targetDistance / element.clientHeight );
+			scope.panUp( 2 * deltaY * targetDistance / element.clientHeight );
+
+		} else if ( scope.object.top !== undefined ) {
+
+			// orthographic
+			scope.panLeft( deltaX * (scope.object.right - scope.object.left) / element.clientWidth );
+			scope.panUp( deltaY * (scope.object.top - scope.object.bottom) / element.clientHeight );
+
+		} else {
+
+			// camera neither orthographic or perspective
+			console.warn( 'WARNING: OrbitControls.js encountered an unknown camera type - pan disabled.' );
+
+		}
+
+	};
+
+	this.dollyIn = function ( dollyScale ) {
+
+		if ( dollyScale === undefined ) {
+
+			dollyScale = getZoomScale();
+
+		}
+
+		scale /= dollyScale;
+
+	};
+
+	this.dollyOut = function ( dollyScale ) {
+
+		if ( dollyScale === undefined ) {
+
+			dollyScale = getZoomScale();
+
+		}
+
+		scale *= dollyScale;
+
+	};
+
+	this.update = function () {
+
+		var position = this.object.position;
+
+		offset.copy( position ).sub( this.target );
+
+		// rotate offset to "y-axis-is-up" space
+		offset.applyQuaternion( quat );
+
+		// angle from z-axis around y-axis
+
+		var theta = Math.atan2( offset.x, offset.z );
+
+		// angle from y-axis
+
+		var phi = Math.atan2( Math.sqrt( offset.x * offset.x + offset.z * offset.z ), offset.y );
+
+		if ( this.autoRotate ) {
+
+			this.rotateLeft( getAutoRotationAngle() );
+
+		}
+
+		theta += thetaDelta;
+		phi += phiDelta;
+
+		// restrict phi to be between desired limits
+		phi = Math.max( this.minPolarAngle, Math.min( this.maxPolarAngle, phi ) );
+
+		// restrict phi to be betwee EPS and PI-EPS
+		phi = Math.max( EPS, Math.min( Math.PI - EPS, phi ) );
+
+		var radius = offset.length() * scale;
+
+		// restrict radius to be between desired limits
+		radius = Math.max( this.minDistance, Math.min( this.maxDistance, radius ) );
+		
+		// move target to panned location
+		this.target.add( pan );
+
+		offset.x = radius * Math.sin( phi ) * Math.sin( theta );
+		offset.y = radius * Math.cos( phi );
+		offset.z = radius * Math.sin( phi ) * Math.cos( theta );
+
+		// rotate offset back to "camera-up-vector-is-up" space
+		offset.applyQuaternion( quatInverse );
+
+		position.copy( this.target ).add( offset );
+
+		this.object.lookAt( this.target );
+
+		thetaDelta = 0;
+		phiDelta = 0;
+		scale = 1;
+		pan.set( 0, 0, 0 );
+
+		// update condition is:
+		// min(camera displacement, camera rotation in radians)^2 > EPS
+		// using small-angle approximation cos(x/2) = 1 - x^2 / 8
+
+		if ( lastPosition.distanceToSquared( this.object.position ) > EPS
+		    || 8 * (1 - lastQuaternion.dot(this.object.quaternion)) > EPS ) {
+
+			this.dispatchEvent( changeEvent );
+
+			lastPosition.copy( this.object.position );
+			lastQuaternion.copy (this.object.quaternion );
+
+		}
+
+	};
+
+
+	this.reset = function () {
+
+		state = STATE.NONE;
+
+		this.target.copy( this.target0 );
+		this.object.position.copy( this.position0 );
+
+		this.update();
+
+	};
+
+	function getAutoRotationAngle() {
+
+		return 2 * Math.PI / 60 / 60 * scope.autoRotateSpeed;
+
+	}
+
+	function getZoomScale() {
+
+		return Math.pow( 0.95, scope.zoomSpeed );
+
+	}
+
+	function onMouseDown( event ) {
+
+		if ( scope.enabled === false ) return;
+		event.preventDefault();
+
+		if ( event.button === 0 ) {
+			if ( scope.noRotate === true ) return;
+
+			state = STATE.ROTATE;
+
+			rotateStart.set( event.clientX, event.clientY );
+
+		} else if ( event.button === 1 ) {
+			if ( scope.noZoom === true ) return;
+
+			state = STATE.DOLLY;
+
+			dollyStart.set( event.clientX, event.clientY );
+
+		} else if ( event.button === 2 ) {
+			if ( scope.noPan === true ) return;
+
+			state = STATE.PAN;
+
+			panStart.set( event.clientX, event.clientY );
+
+		}
+
+		document.addEventListener( 'mousemove', onMouseMove, false );
+		document.addEventListener( 'mouseup', onMouseUp, false );
+		scope.dispatchEvent( startEvent );
+
+	}
+
+	function onMouseMove( event ) {
+
+		if ( scope.enabled === false ) return;
+
+		event.preventDefault();
+
+		var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+		if ( state === STATE.ROTATE ) {
+
+			if ( scope.noRotate === true ) return;
+
+			rotateEnd.set( event.clientX, event.clientY );
+			rotateDelta.subVectors( rotateEnd, rotateStart );
+
+			// rotating across whole screen goes 360 degrees around
+			scope.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
+
+			// rotating up and down along whole screen attempts to go 360, but limited to 180
+			scope.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
+
+			rotateStart.copy( rotateEnd );
+
+		} else if ( state === STATE.DOLLY ) {
+
+			if ( scope.noZoom === true ) return;
+
+			dollyEnd.set( event.clientX, event.clientY );
+			dollyDelta.subVectors( dollyEnd, dollyStart );
+
+			if ( dollyDelta.y > 0 ) {
+
+				scope.dollyIn();
+
+			} else {
+
+				scope.dollyOut();
+
+			}
+
+			dollyStart.copy( dollyEnd );
+
+		} else if ( state === STATE.PAN ) {
+
+			if ( scope.noPan === true ) return;
+
+			panEnd.set( event.clientX, event.clientY );
+			panDelta.subVectors( panEnd, panStart );
+			
+			scope.pan( panDelta.x, panDelta.y );
+
+			panStart.copy( panEnd );
+
+		}
+
+		scope.update();
+
+	}
+
+	function onMouseUp( /* event */ ) {
+
+		if ( scope.enabled === false ) return;
+
+		document.removeEventListener( 'mousemove', onMouseMove, false );
+		document.removeEventListener( 'mouseup', onMouseUp, false );
+		scope.dispatchEvent( endEvent );
+		state = STATE.NONE;
+
+	}
+
+	function onMouseWheel( event ) {
+
+		if ( scope.enabled === false || scope.noZoom === true ) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+
+		var delta = 0;
+
+		if ( event.wheelDelta !== undefined ) { // WebKit / Opera / Explorer 9
+
+			delta = event.wheelDelta;
+
+		} else if ( event.detail !== undefined ) { // Firefox
+
+			delta = - event.detail;
+
+		}
+
+		if ( delta > 0 ) {
+
+			scope.dollyOut();
+
+		} else {
+
+			scope.dollyIn();
+
+		}
+
+		scope.update();
+		scope.dispatchEvent( startEvent );
+		scope.dispatchEvent( endEvent );
+
+	}
+
+	function onKeyDown( event ) {
+
+		if ( scope.enabled === false || scope.noKeys === true || scope.noPan === true ) return;
+		
+		switch ( event.keyCode ) {
+
+			case scope.keys.UP:
+				scope.pan( 0, scope.keyPanSpeed );
+				scope.update();
+				break;
+
+			case scope.keys.BOTTOM:
+				scope.pan( 0, - scope.keyPanSpeed );
+				scope.update();
+				break;
+
+			case scope.keys.LEFT:
+				scope.pan( scope.keyPanSpeed, 0 );
+				scope.update();
+				break;
+
+			case scope.keys.RIGHT:
+				scope.pan( - scope.keyPanSpeed, 0 );
+				scope.update();
+				break;
+
+		}
+
+	}
+
+	function touchstart( event ) {
+
+		if ( scope.enabled === false ) return;
+
+		switch ( event.touches.length ) {
+
+			case 1:	// one-fingered touch: rotate
+
+				if ( scope.noRotate === true ) return;
+
+				state = STATE.TOUCH_ROTATE;
+
+				rotateStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+				break;
+
+			case 2:	// two-fingered touch: dolly
+
+				if ( scope.noZoom === true ) return;
+
+				state = STATE.TOUCH_DOLLY;
+
+				var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+				var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+				var distance = Math.sqrt( dx * dx + dy * dy );
+				dollyStart.set( 0, distance );
+				break;
+
+			case 3: // three-fingered touch: pan
+
+				if ( scope.noPan === true ) return;
+
+				state = STATE.TOUCH_PAN;
+
+				panStart.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+				break;
+
+			default:
+
+				state = STATE.NONE;
+
+		}
+
+		scope.dispatchEvent( startEvent );
+
+	}
+
+	function touchmove( event ) {
+
+		if ( scope.enabled === false ) return;
+
+		event.preventDefault();
+		event.stopPropagation();
+
+		var element = scope.domElement === document ? scope.domElement.body : scope.domElement;
+
+		switch ( event.touches.length ) {
+
+			case 1: // one-fingered touch: rotate
+
+				if ( scope.noRotate === true ) return;
+				if ( state !== STATE.TOUCH_ROTATE ) return;
+
+				rotateEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+				rotateDelta.subVectors( rotateEnd, rotateStart );
+
+				// rotating across whole screen goes 360 degrees around
+				scope.rotateLeft( 2 * Math.PI * rotateDelta.x / element.clientWidth * scope.rotateSpeed );
+				// rotating up and down along whole screen attempts to go 360, but limited to 180
+				scope.rotateUp( 2 * Math.PI * rotateDelta.y / element.clientHeight * scope.rotateSpeed );
+
+				rotateStart.copy( rotateEnd );
+
+				scope.update();
+				break;
+
+			case 2: // two-fingered touch: dolly
+
+				if ( scope.noZoom === true ) return;
+				if ( state !== STATE.TOUCH_DOLLY ) return;
+
+				var dx = event.touches[ 0 ].pageX - event.touches[ 1 ].pageX;
+				var dy = event.touches[ 0 ].pageY - event.touches[ 1 ].pageY;
+				var distance = Math.sqrt( dx * dx + dy * dy );
+
+				dollyEnd.set( 0, distance );
+				dollyDelta.subVectors( dollyEnd, dollyStart );
+
+				if ( dollyDelta.y > 0 ) {
+
+					scope.dollyOut();
+
+				} else {
+
+					scope.dollyIn();
+
+				}
+
+				dollyStart.copy( dollyEnd );
+
+				scope.update();
+				break;
+
+			case 3: // three-fingered touch: pan
+
+				if ( scope.noPan === true ) return;
+				if ( state !== STATE.TOUCH_PAN ) return;
+
+				panEnd.set( event.touches[ 0 ].pageX, event.touches[ 0 ].pageY );
+				panDelta.subVectors( panEnd, panStart );
+				
+				scope.pan( panDelta.x, panDelta.y );
+
+				panStart.copy( panEnd );
+
+				scope.update();
+				break;
+
+			default:
+
+				state = STATE.NONE;
+
+		}
+
+	}
+
+	function touchend( /* event */ ) {
+
+		if ( scope.enabled === false ) return;
+
+		scope.dispatchEvent( endEvent );
+		state = STATE.NONE;
+
+	}
+
+	this.domElement.addEventListener( 'contextmenu', function ( event ) { event.preventDefault(); }, false );
+	this.domElement.addEventListener( 'mousedown', onMouseDown, false );
+	this.domElement.addEventListener( 'mousewheel', onMouseWheel, false );
+	this.domElement.addEventListener( 'DOMMouseScroll', onMouseWheel, false ); // firefox
+
+	this.domElement.addEventListener( 'touchstart', touchstart, false );
+	this.domElement.addEventListener( 'touchend', touchend, false );
+	this.domElement.addEventListener( 'touchmove', touchmove, false );
+
+	window.addEventListener( 'keydown', onKeyDown, false );
+
+	// force an update at start
+	this.update();
+
+};
+
+THREE.OrbitControls.prototype = Object.create( THREE.EventDispatcher.prototype );
+```
+
+### src/utils/stackImages.js
+```
+export const stackImages = (stack) => {
+  const sizeX = stack.length;
+  const sizeY = stack[0].length;
+  const sizeZ = stack[0][0].length;
+
+  const stackBuffer = new Uint8Array(sizeX * sizeY * sizeZ);
+  let i = 0;
+  for (let z = 0; z < sizeZ; z++) {
+    for (let y = 0; y < sizeY; y++) {
+      for (let x = 0; x < sizeX; x++) {
+        stackBuffer[i] = stack[x][y][z];
+        i++;
+      }
+    }
+  }
+  return stackBuffer;
+};
+```
+
+### src/utils/volumeRenderer.js
+```
+import {
+  BackSide,
+  BoxGeometry,
+  ClampToEdgeWrapping,
+  Data3DTexture,
+  FloatType,
+  FrontSide,
+  LinearFilter,
+  Mesh,
+  NearestFilter,
+  NearestMipmapNearestFilter,
+  PerspectiveCamera,
+  RedFormat,
+  Scene,
+  ShaderMaterial,
+  WebGLRenderer,
+  WebGLRenderTarget,
+} from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { getData } from "./getData";
+import fragmentShaders from "../shaders/fragmentShaders";
+import vertexShaders from "../shaders/vertexShaders";
+
+let container,
+  camera,
+  renderer,
+  geometry,
+  cubeTexture,
+  cubeTexture2,
+  renderingTargetTexture,
+  sceneFirstPass,
+  materialFirstPass,
+  cubeFirstPass,
+  sceneSecondPass,
+  materialSecondPass,
+  cubeSecondPass;
+
+export const init = async () => {
+  // get data
+  const {
+    imageTexture,
+    imageStackLength,
+    imageLengthRatio,
+    segmentationTexture,
+    segmentationStackLength,
+    segmentationLengthRatio,
+  } = await getData();
+  if (!imageTexture) {
+    return "Error: Texture is not loaded";
+  }
+
+  // setup container element
+  container = document.getElementById("3d-view");
+
+  // Setup Camera
+  camera = new PerspectiveCamera(
+    40,
+    window.innerWidth / window.innerHeight,
+    0.01,
+    3000.0
+  );
+  camera.position.z = 2.0;
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+
+  // Setup Orbit Control
+  new OrbitControls(camera, container);
+
+  // Setup WebGLRenderer
+  renderer = new WebGLRenderer();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  container.appendChild(renderer.domElement);
+
+  // Setup Geometry
+  geometry = new BoxGeometry(imageLengthRatio, 1, 1);
+
+  // Setup Texture
+  cubeTexture = new Data3DTexture(imageTexture, imageStackLength, 256, 256);
+  cubeTexture.generateMipmaps = false;
+  cubeTexture.minFilter = LinearFilter;
+  cubeTexture.magFilter = LinearFilter;
+  cubeTexture.format = RedFormat;
+  cubeTexture.needsUpdate = true;
+
+  cubeTexture2 = new Data3DTexture(
+    segmentationTexture,
+    segmentationStackLength,
+    256,
+    256
+  );
+  cubeTexture2.generateMipmaps = false;
+  cubeTexture2.minFilter = LinearFilter;
+  cubeTexture2.magFilter = LinearFilter;
+  cubeTexture2.format = RedFormat;
+  cubeTexture2.needsUpdate = true;
+
+  // Setup First Pass Rendering Target
+  renderingTargetTexture = new WebGLRenderTarget(
+    window.innerWidth,
+    window.innerHeight,
+    {
+      minFilter: NearestFilter,
+      magFilter: NearestFilter,
+      wrapS: ClampToEdgeWrapping,
+      wrapT: ClampToEdgeWrapping,
+      type: FloatType,
+      generateMipmaps: false,
+    }
+  );
+
+  // Setup First Pass
+  sceneFirstPass = new Scene();
+  materialFirstPass = new ShaderMaterial({
+    vertexShader: vertexShaders.firstPass,
+    fragmentShader: fragmentShaders.firstPass,
+    side: BackSide,
+    uniforms: {
+      stackLengthRatio: { value: imageLengthRatio },
+    },
+  });
+  cubeFirstPass = new Mesh(geometry, materialFirstPass);
+  sceneFirstPass.add(cubeFirstPass);
+
+  // Setup Second Pass
+  sceneSecondPass = new Scene();
+  materialSecondPass = new ShaderMaterial({
+    vertexShader: vertexShaders.secondPass,
+    fragmentShader: fragmentShaders.secondPass,
+    side: FrontSide,
+    transparent: true,
+    uniforms: {
+      tex: { value: renderingTargetTexture.texture },
+      cubeTex: { value: cubeTexture },
+      cubeTex2: { value: cubeTexture2 },
+      steps: { value: 256 },
+      stackLengthRatio: { value: imageLengthRatio },
+      colorTreshLow: {},
+      colorTreshHigh: {},
+      alphaCorrection: {},
+      contrast: {},
+      brightness: {},
+    },
+  });
+  cubeSecondPass = new Mesh(geometry, materialSecondPass);
+  sceneSecondPass.add(cubeSecondPass);
+  return "success";
+};
+
+export const render = (
+  colorTreshLow,
+  colorTreshHigh,
+  alphaCorrection,
+  contrast,
+  brightness
+) => {
+  // update uniforms
+  materialSecondPass.uniforms.colorTreshLow.value = colorTreshLow;
+  materialSecondPass.uniforms.colorTreshHigh.value = colorTreshHigh;
+  materialSecondPass.uniforms.alphaCorrection.value = alphaCorrection;
+  materialSecondPass.uniforms.contrast.value = contrast;
+  materialSecondPass.uniforms.brightness.value = brightness;
+
+  // set render target to a texture
+  renderer.setRenderTarget(renderingTargetTexture);
+  renderer.render(sceneFirstPass, camera);
+
+  // reset render target back to canvas
+  renderer.resetState();
+  renderer.render(sceneSecondPass, camera);
+};
+```

@@ -1,0 +1,137 @@
+# Strobe Silhouettes
+
+Also called: Strobe silhouette effect
+
+## Overview
+Strobe silhouettes is an illustrative visualization technique that provides visual cues of feature histories by offsetting receding sections of feature boundaries multiple times along the path of motion with reduced thickness and detail [S1, unofficial]. It solves the problem of conveying the temporal history and deformation of a specific feature within a single static image, allowing the observer to view the approximate time-history of a feature without animation [S1, unofficial]. It sets itself apart from sibling techniques like [Speedlines](link) (which use cones/lines) and [Opacity Modulation](link) (which uses transparency) by generating discrete, geometric tube-like silhouettes that represent the feature's past positions.
+
+## How it works
+The method operates on a vector field and a geometric feature $f$ defined on an unstructured mesh. It constructs a series of offset contours representing the feature's motion history.
+
+**Inputs:**
+*   Feature geometry $f$ (surface or boundary).
+*   Velocity data associated with the feature (instantaneous average velocity $v_{avg}$).
+*   User parameters:
+    *   $N$: Number of strobe silhouettes to generate [S1, unofficial].
+    *   $\Delta t$: Time-difference (time step) for offset calculation [S1, unofficial].
+    *   $r_{init}$: Initial tube diameter [S1, unofficial].
+    *   $\alpha$: Reduction factor for curve point count and tube diameter per step [S1, unofficial].
+    *   $k$: User-specified portion of end points to remove per step [S1, unofficial].
+    *   $C_{color}$: Silhouette color/intensity [S1, unofficial].
+    *   $F_{facets}$: Number of facets per tube [S1, unofficial].
+    *   Smoothing parameters for DCT and Gaussian filters [S1, unofficial].
+
+**Outputs:**
+*   A mesh geometry containing the original feature and a series of offset cylindrical silhouettes.
+
+**Data Structures:**
+*   **Contour ($bc$):** A sequence of 3D points representing the bounding contour of feature $f$.
+*   **Receding Curve ($s$):** A subsequence of points from $bc$ representing the receding portion.
+*   **Offset Curve ($s_{new}$):** A sequence of 3D points representing the shifted silhouette.
+
+**Steps:**
+
+1.  **Boundary Identification:** Obtain the bounding contour $bc$ of feature $f$ using a boundary extraction algorithm (e.g., Algorithm 3 from source) [S1, unofficial].
+2.  **Smoothing:** Apply a Discrete Cosine Transform (DCT) smoothing filter to $bc$ to reduce noise [S1, unofficial].
+3.  **Receding Portion Extraction:** Reduce $bc$ to the receding portion $s$. This is done by:
+    a.  Calculating the distance $d_i$ for each point $p_i$ in $bc$ relative to the direction of motion (see Formula).
+    b.  Identifying the minimum distance $d_{min}$ and maximum distance $d_{max}$ (if applicable) to define the range of receding points [S1, unofficial].
+    c.  Selecting points between the indices corresponding to $d_{min}$ and $d_{max}$ [S1, unofficial].
+4.  **Initial Offset:** Calculate the offset vector $V = v_{avg} \cdot \Delta t$. Offset the curve $s$ by $V$ to create the first silhouette position [S1, unofficial].
+5.  **Trimming Overlaps:** To prevent the silhouette from overlapping with the current feature position:
+    a.  Scan points in the original bounding contour $bc$ to find the minimum distance value $d_{min}$ using Equation 11 [S1, unofficial].
+    b.  For each point $i$ in the offset curve $s$, calculate its distance $d_i$ using Equation 11.
+    c.  Remove all points $i$ from $s$ where $d_i > d_{min}$ [S1, unofficial]. This ensures the silhouette starts at the rear-most edge of the feature relative to motion.
+6.  **First Silhouette Generation:** Extrude the trimmed curve $s$ into cylinders (tubes) using a built-in mesh generation filter (e.g., VTK `TubeFilter`) with parameters $r_{init}$ and $F_{facets}$. Add these cylinders to the output mesh with color $C_{color}$ [S1, unofficial].
+7.  **Iterative Strobe Generation:** Repeat the following loop $N$ times:
+    a.  **Offset:** Offset the current curve $s$ by $V$ again [S1, unofficial].
+    b.  **Trim Ends:** Remove a user-specified portion $k$ of the end points from the offset curve $s$ to simulate fading or truncation [S1, unofficial].
+    c.  **Smooth:** Apply Gaussian smoothing to the resulting curve $s$ [S1, unofficial].
+    d.  **Generate:** Extrude the new curve $s$ into cylinders. Reduce the tube diameter by the reduction factor $\alpha$ relative to the previous step. Add to the output mesh with color $C_{color}$ (potentially with reduced intensity/opacity if specified by user) [S1, unofficial].
+
+**Formula:**
+The distance function used for trimming and identifying receding points is:
+$$ d_i = (p_i - c) \cdot v_{avg} $$
+Where:
+*   $p_i$ is the position of point $i$ on the contour.
+*   $c$ is the centroid of the feature or contour.
+*   $v_{avg}$ is the average feature velocity vector.
+*   $\cdot$ denotes the dot product [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def strobe_silhouettes(feature_f, velocity_field, params):
+    """
+    feature_f: Geometry object with method get_bounding_contour()
+    velocity_field: Provides average velocity v_avg for the feature
+    params: Dictionary containing N, dt, r_init, alpha, k, color, facets, smoothing_params
+    """
+    # 1. Identify boundary
+    bc = feature_f.get_bounding_contour()
+    
+    # 2. DCT Smoothing
+    bc = dct_smooth(bc, params['dct_params'])
+    
+    # 3. Extract receding portion (s)
+    # Assuming Algorithm 6 logic is encapsulated or available
+    # This involves calculating di for all points in bc and selecting the receding segment
+    s = extract_receding_portion(bc, velocity_field)
+    
+    # 4. Initial Offset
+    v_avg = feature_f.get_average_velocity(velocity_field)
+    offset_vector = v_avg * params['dt']
+    s = offset_curve(s, offset_vector)
+    
+    # 5. Trim overlaps
+    # Find dmin from the original bounding contour bc
+    centroid = feature_f.get_centroid()
+    d_min = min((p - centroid).dot(v_avg) for p in bc)
+    
+    # Remove points in s where di > dmin
+    s = [p for p in s if (p - centroid).dot(v_avg) <= d_min]
+    
+    # 6. Generate first silhouette
+    mesh = feature_f.get_mesh()
+    tube1 = generate_tubes(s, diameter=params['r_init'], facets=params['facets'])
+    mesh.add_geometry(tube1, color=params['color'])
+    
+    # 7. Iterative generation
+    current_s = s
+    current_diameter = params['r_init']
+    
+    for i in range(params['N']):
+        # a. Offset
+        current_s = offset_curve(current_s, offset_vector)
+        
+        # b. Remove end points
+        num_to_remove = int(len(current_s) * params['k'])
+        if num_to_remove > 0:
+            current_s = current_s[:-num_to_remove]
+            
+        # c. Gaussian Smoothing
+        current_s = gaussian_smooth(current_s, params['gaussian_params'])
+        
+        # d. Generate tube with reduced diameter
+        current_diameter *= params['alpha']
+        tube_next = generate_tubes(current_s, diameter=current_diameter, facets=params['facets'])
+        mesh.add_geometry(tube_next, color=params['color']) # Intensity reduction handled by color alpha if needed
+        
+    return mesh
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of points in the bounding contour and the number of strobes $N$. The dominant costs are the contour extraction, smoothing (DCT/Gaussian), and tube generation per iteration.
+*   **Memory Complexity:** Proportional to the number of points in the contour multiplied by $N$ (for the stored silhouette points) plus the mesh storage for the generated tubes.
+*   **Strengths:** Provides clear, discrete visual cues for motion history and deformation in a single image. It is computationally efficient compared to full temporal volume compositing.
+*   **Limitations:** Relies on the assumption of constant average velocity between steps. It only visualizes the "receding" portion, potentially ignoring leading-edge history. Accuracy depends heavily on the quality of the velocity field and contour extraction.
+*   **When to use:** When the user needs to understand the trajectory and deformation of a specific feature boundary over a short time interval in a static view.
+*   **When not to use:** When the velocity field is highly non-uniform or turbulent, or when the full volumetric history (not just the boundary) is required.
+
+## Background
+The technique was developed by Joshi and Rheingans [S1, unofficial] and is part of a generalized framework for illustrative visualization of time-varying data on unstructured meshes. It is motivated by earlier work in illustrative visualization [S1, unofficial]. It is distinct from "Speedlines" (which use cones) and "Opacity Modulation" (which uses transparency) within the same family of techniques.
+
+## Sources
+[S1] Generalized Framework and Algorithms for Illustrative Visualization of Time-Varying Data on Unstructured Meshes, https://digital.library.unt.edu/ark:/67531/metadc838861/?q=illustrative volume rendering, fetched 2026-10-28 (unofficial)

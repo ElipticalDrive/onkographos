@@ -1,0 +1,115 @@
+# MLP Neural Field
+
+Also called: Baseline MLP, Coordinate MLP, Plain MLP, Plain MLP Neural Field, ReLU-MLP
+
+## Overview
+A plain MLP neural field maps continuous input coordinates to signal values (such as density and color) using a standard Multi-Layer Perceptron with ReLU activations [S1, unofficial]. It serves as the fundamental baseline for coordinate-based neural representations, contrasting with specialized architectures like SIREN [1250-siren-neural-field.md] that use sinusoidal activations to overcome spectral bias and represent high-frequency details [S1, unofficial]. Unlike [MLP with Input Skips](1643-mlp-with-input-skips.md), the plain variant does not concatenate input features to intermediate layers, relying solely on hierarchical feature extraction through depth [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A tensor of continuous coordinates $\mathbf{x} \in \mathbb{R}^{N \times D_{in}}$, where $N$ is the batch size and $D_{in}$ is the spatial dimensionality (typically 3 for 3D space).
+*   **Output:** A tensor of signal values $\mathbf{y} \in \mathbb{R}^{N \times D_{out}}$, typically representing density ($\sigma$) and RGB color ($\mathbf{c}$).
+
+**Data Structures:**
+The network is a sequential stack of linear layers and activation functions.
+*   **Layer 1:** Linear transformation $W_1 \in \mathbb{R}^{H \times D_{in}}$, bias $b_1 \in \mathbb{R}^H$.
+*   **Layers $2 \dots L-1$:** Hidden layers with weight matrices $W_i \in \mathbb{R}^{H \times H}$ and biases $b_i \in \mathbb{R}^H$.
+*   **Layer $L$:** Output layer with weight matrix $W_L \in \mathbb{R}^{D_{out} \times H}$ and bias $b_L \in \mathbb{R}^{D_{out}}$.
+*   **Activation:** Element-wise ReLU function $\text{ReLU}(z) = \max(0, z)$ applied after every hidden layer.
+
+**Parameters:**
+*   `in_features` ($D_{in}$): Dimensionality of input coordinates.
+*   `out_features` ($D_{out}$): Dimensionality of output values.
+*   `hidden_features` ($H$): Width of hidden layers.
+*   `hidden_layers` ($L-2$): Number of hidden layers (excluding input and output).
+*   `bias` ($bool$): Whether linear layers include a bias term (default: True).
+*   `activation` ($str$): Name of the activation function (default: "ReLU").
+
+**Algorithm:**
+1.  **Preprocessing:** Clone the input coordinate tensor $\mathbf{x}$ to create $\mathbf{x}'$. Enable gradient tracking on $\mathbf{x}'$ to allow differentiation with respect to spatial coordinates [S1, unofficial].
+2.  **Forward Pass:**
+    *   Compute hidden representation $h_1 = \text{ReLU}(W_1 \mathbf{x}' + b_1)$.
+    *   For $i = 2$ to $L-1$:
+        $$h_i = \text{ReLU}(W_i h_{i-1} + b_i)$$
+    *   Compute output:
+        $$\mathbf{y} = W_L h_{L-1} + b_L$$
+3.  **Return:** The output tensor $\mathbf{y}$ and the gradient-enabled coordinate tensor $\mathbf{x}'$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class PlainMLP(nn.Module):
+    def __init__(self, in_features, out_features, hidden_features, hidden_layers, bias=True, activation="ReLU"):
+        super().__init__()
+        layers = []
+        # Input layer
+        layers.append(nn.Linear(in_features, hidden_features, bias=bias))
+        layers.append(get_activation(activation))
+        
+        # Hidden layers
+        for _ in range(hidden_layers - 1):
+            layers.append(nn.Linear(hidden_features, hidden_features, bias=bias))
+            layers.append(get_activation(activation))
+            
+        # Output layer
+        layers.append(nn.Linear(hidden_features, out_features, bias=bias))
+        
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        # Clone input and enable gradients for coordinate differentiation
+        x_grad = x.clone().detach().requires_grad_(True)
+        
+        # Pass through network
+        out = self.network(x_grad)
+        
+        return out, x_grad
+
+def get_activation(name):
+    if name == "ReLU":
+        return nn.ReLU()
+    elif name == "Tanh":
+        return nn.Tanh()
+    elif name == "GELU":
+        return nn.GELU()
+    else:
+        raise ValueError(f"Activation {name} not supported")
+```
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate Convention:** Inputs must follow the $[-1, 1]$ normalization convention [S1, unofficial].
+*   **Gradient Tracking:** The input tensor must be cloned and have gradients enabled; otherwise, computing spatial derivatives (e.g., for sphere tracing or volume rendering gradients) will fail [S1, unofficial].
+*   **Spectral Bias:** The plain ReLU-MLP suffers from spectral bias, struggling to learn high-frequency signals compared to SIREN [S1, unofficial].
+
+## Subtopics
+
+### [MLP with Input Skips](1643-mlp-with-input-skips.md)
+An MLP architecture that concatenates the original input vector to intermediate layers, allowing the network to access low-level features at deeper layers. It serves as the baseline for standard NeRF-style neural fields, contrasting with SIREN by using ReLU activations and explicit skip connections rather than sinusoidal embeddings.
+
+### [Deformation MLP Configuration](9661-deformation-mlp-configuration.md)
+The Deformation MLP Configuration defines the architecture, initialization, and conditioning mechanisms for a Multi-Layer Perceptron (MLP) used to predict spatial or temporal deformations in neural volume representations. It solves the problem of mapping canonical coordinates to deformed coordinates (or vice versa) by providing a structured way to inject instance-specific or time-specific information into the network's feature space. It is distinguished from sibling methods like [MLP with Input Skips](1643-mlp-with-input-skips.md) by its explicit use of feature-wise modulation (often via Conditional Batch Normalization or FiLM) to handle conditional inputs, and from [Residual Block with Shortcut (ReLU MLP Extension)](10016-residual-block-with-shortcut-relu-mlp-extension.md) by its focus on deformation dynamics rather than static residual learning.
+
+### [Residual Block with Shortcut (ReLU MLP Extension)](10016-residual-block-with-shortcut-relu-mlp-extension.md)
+This method extends the analytic marching algorithm for implicit surface reconstruction to Multi-Layer Perceptrons (MLPs) constructed with residual blocks containing shortcut connections. It enables the theoretical analysis and exact linear region partitioning of such architectures, allowing for efficient meshing via analytic marching.
+
+### MLP Decomposition Baseline
+An alternative decomposition method where a neural network (MLP) with a softmax activation outputs the weights $w_{\phi n}(\mathbf{x})$. It is used as a baseline to demonstrate the efficiency of Voronoi decomposition [S2]. While it has similar theoretical operation counts to Voronoi decomposition, it suffers from random memory access during integration, leading to much faster runtime growth as the number of heads increases [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(L \cdot H^2)$ per sample, where $L$ is the number of layers and $H$ is the hidden width. Training time is significantly longer than SIREN for high-frequency scenes; fitting an image may require ~2000 steps for ReLU-MLP compared to ~100 steps for SIREN [S1, unofficial].
+*   **Memory Complexity:** $O(L \cdot H^2)$ for storing weights.
+*   **Strengths:** Simple to implement; standard ReLU activations are computationally efficient and widely supported; serves as a robust baseline for comparing spectral bias effects.
+*   **Limitations:** Poor at representing high-frequency details due to spectral bias; requires more training steps to converge on complex scenes compared to sinusoidal-based fields [S1, unofficial].
+*   **When to Use:** As a baseline for comparison; for low-frequency or smooth scenes; when computational efficiency of activation functions is prioritized over reconstruction fidelity.
+*   **When Not to Use:** For high-frequency details (e.g., sharp edges, fine textures); when training time is constrained.
+
+## Background
+The plain MLP neural field was introduced as a baseline method in early neural rendering research to contrast with the SIREN (Sinusoidal Representation Networks) architecture [S1, unofficial]. While SIREN demonstrated the ability to represent high-frequency signals using sine activations, the ReLU-MLP highlighted the limitations of standard feedforward networks in this domain, specifically spectral bias [S1, unofficial]. It is commonly used in educational implementations of differentiable rendering to illustrate the fundamental mapping from coordinates to signal values [S1, unofficial].
+
+## Sources
+[S1] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)
+[S2] DeRF: Decomposed Radiance Fields, https://doi.org/10.1109/cvpr46437.2021.01393, fetched 2026-10-26

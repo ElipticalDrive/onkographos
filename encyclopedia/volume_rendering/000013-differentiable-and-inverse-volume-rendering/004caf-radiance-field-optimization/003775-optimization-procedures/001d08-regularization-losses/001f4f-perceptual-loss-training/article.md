@@ -1,0 +1,175 @@
+# Perceptual Loss Training
+
+Also called: PIPS Loss, Perceptual Loss for 3DGS, Perceptual loss for dynamic NeRF
+
+## Overview
+Perceptual Loss Training is an optimization strategy that incorporates a perceptual loss term to improve the visual fidelity of rendered images, addressing the smoothness and texture distortion issues inherent in pixel-wise losses like L1 or L2 [S1, S2, S3]. It sets itself apart from its siblings by leveraging features from pre-trained convolutional neural networks (typically VGG) to enforce high-level structural consistency, whereas methods like [Total Variation Regularization](860-total-variation-regularization.md) operate directly on spatial gradients of the output or scene parameters [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Rendered image $\hat{I}$ (prediction), ground truth image $I_g$, pre-trained feature extractor network $\Phi$ (e.g., VGG-19), and loss weights $\lambda_l$ or $w_{\cdot}$.
+*   **Output:** Scalar loss value $\mathcal{L}_{\text{perc}}$ used for backpropagation.
+
+**Data Structures:**
+*   **Feature Maps:** Intermediate activations from the pre-trained network. For VGG-19, these are typically extracted from specific convolutional layers.
+*   **Weights:** Scalars $\lambda_l$ balancing the contribution of each layer's feature distance [S2].
+
+**Steps:**
+1.  **Feature Extraction:** Pass both the rendered image $\hat{I}$ and the ground truth image $I_g$ through the pre-trained network $\Phi$. Extract feature maps from a set of layers $L$.
+    $$ \mathbf{F}_{\hat{I}}^l = \Phi_l(\hat{I}), \quad \mathbf{F}_{I_g}^l = \Phi_l(I_g) \quad \forall l \in L $$
+2.  **Distance Calculation:** Compute the distance between the feature maps of the prediction and the ground truth. The L1 norm is commonly used [S2, S4].
+    $$ D^l = \| \mathbf{F}_{\hat{I}}^l - \mathbf{F}_{I_g}^l \|_1 $$
+3.  **Aggregation:** Sum the distances weighted by layer-specific coefficients $\lambda_l$.
+    $$ \mathcal{L}_{\text{perc}} = \sum_{l \in L} \lambda_l D^l $$
+
+**Formulas:**
+The general perceptual loss is defined as [S2]:
+$$ L(P_f, \theta) = \sum_l \lambda_l \| \Phi_l(I_g) - \Phi_l(f(P_f; \theta)) \|_1 $$
+where $P_f$ represents the scene parameters (e.g., point features), $\theta$ are the network parameters, $f$ is the rendering function, and $\Phi_l$ are the VGG-19 layers [S2].
+
+In the context of Gaussian Splatting (PIPS), the total loss combines L1, SSIM, and Perceptual (PIPS) terms [S1]:
+$$ \mathcal{L} = (1 - \lambda_1 - \lambda_2)\mathcal{L}_1 + \lambda_1\mathcal{L}_{\text{SSIM}} + \lambda_2\mathcal{L}_{\text{PIPS}} $$
+where $\mathcal{L}_{\text{PIPS}}$ is the perceptual loss term [S1].
+
+**Parameters:**
+*   **VGG-19 Layers:** Commonly used layers include 'input', 'conv1-2', 'conv2-2', 'conv3-2', 'conv4-2', and 'conv5-2' [S2].
+*   **Weights ($\lambda_l$):** Balancing weights for each layer. Specific values are not provided in the sources, but they follow the scheme in Chen et al. [S2].
+*   **Weights ($\lambda_1, \lambda_2$):** In the PIPS formulation, $\lambda_1$ weights the SSIM term and $\lambda_2$ weights the perceptual term. Exact values are not given [S1].
+*   **Optimization:** Adam optimizer is typically used [S2, S4].
+    *   [S2] Learning rate initialized at 0.01, decreased every 7 epochs: $0.01 \to 0.005 \to 0.001$.
+    *   [S4] Learning rate $10^{-4}$.
+
+**Pitfalls:**
+*   **Computational Overhead:** CNN-based perceptual loss computation is expensive. It is recommended to compute it every 20 training iterations to alleviate overhead without significantly impacting quality [S1].
+*   **Color Shifts:** Perceptual loss can introduce color shifts in the rendered output [S4]. This may require auxiliary terms like Anti-Bias Loss to correct [S4].
+*   **Visual Quality Degradation:** Omitting perceptual loss increases LPIPS distance, indicating degraded visual quality even if pixel-wise metrics (PSNR/SSIM) remain acceptable [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_perceptual_loss(rendered_image, ground_truth, vgg_model, layers, weights):
+    """
+    Computes the perceptual loss using VGG features.
+    
+    Args:
+        rendered_image (Tensor): Rendered image tensor, shape (H, W, 3).
+        ground_truth (Tensor): Ground truth image tensor, shape (H, W, 3).
+        vgg_model (nn.Module): Pre-trained VGG-19 model.
+        layers (List[str]): List of layer names to extract features from.
+        weights (Dict[str, float]): Weights for each layer's loss contribution.
+        
+    Returns:
+        Tensor: Scalar perceptual loss.
+    """
+    # Ensure inputs are normalized similarly to VGG training (e.g., mean/std of ImageNet)
+    # [G] Standard VGG preprocessing: normalize by ImageNet mean and std.
+    
+    # Extract features
+    features_pred = {}
+    features_gt = {}
+    
+    # Forward pass through VGG to get intermediate features
+    # [G] Assuming vgg_model returns a dict of features for requested layers
+    # or we hook into the model. Here we assume a helper function.
+    features_pred = vgg_model.extract_features(rendered_image, layers)
+    features_gt = vgg_model.extract_features(ground_truth, layers)
+    
+    loss = 0.0
+    
+    for layer in layers:
+        feat_p = features_pred[layer]
+        feat_g = features_gt[layer]
+        
+        # Compute L1 distance between feature maps
+        # [G] torch.nn.functional.l1_loss computes mean over all elements
+        layer_loss = torch.nn.functional.l1_loss(feat_p, feat_g)
+        
+        # Weight the layer loss
+        if layer in weights:
+            layer_loss *= weights[layer]
+            
+        loss += layer_loss
+        
+    return loss
+
+def compute_pips_loss(rendered_image, ground_truth, vgg_model, lambda1, lambda2):
+    """
+    Computes the PIPS loss as part of the total loss for Gaussian Splatting.
+    
+    Args:
+        rendered_image (Tensor): Rendered image.
+        ground_truth (Tensor): Ground truth image.
+        vgg_model (nn.Module): Pre-trained VGG-19.
+        lambda1 (float): Weight for SSIM loss.
+        lambda2 (float): Weight for Perceptual loss.
+        
+    Returns:
+        Tensor: Total loss scalar.
+    """
+    # 1. L1 Loss
+    l1_loss = torch.nn.functional.l1_loss(rendered_image, ground_truth)
+    
+    # 2. SSIM Loss
+    # [G] Assuming a standard SSIM implementation
+    ssim_loss = 1.0 - compute_ssim(rendered_image, ground_truth)
+    
+    # 3. Perceptual (PIPS) Loss
+    # [G] Use specific layers as per S2: 'input', 'conv1-2', etc.
+    layers = ['input', 'conv1-2', 'conv2-2', 'conv3-2', 'conv4-2', 'conv5-2']
+    # [G] Weights for VGG layers as per Chen et al. [S2]
+    vgg_weights = {
+        'input': 1.0, 
+        'conv1-2': 1.0, 
+        'conv2-2': 1.0, 
+        'conv3-2': 1.0, 
+        'conv4-2': 1.0, 
+        'conv5-2': 1.0
+    }
+    pips_loss = compute_perceptual_loss(rendered_image, ground_truth, vgg_model, layers, vgg_weights)
+    
+    # Total Loss Formula from S1
+    # L = (1 - lambda1 - lambda2)*L1 + lambda1*L_SSIM + lambda2*L_PIPS
+    total_loss = (1 - lambda1 - lambda2) * l1_loss + lambda1 * ssim_loss + lambda2 * pips_loss
+    
+    return total_loss
+```
+
+## Subtopics
+
+### [Stable View Synthesis (SVS) Baseline](2483-stable-view-synthesis-svs-baseline.md)
+Stable View Synthesis (SVS) is a view synthesis method that blends training images together to render novel views, relying on proxy geometry from an external system. It is distinguished from its siblings by its explicit dependence on external proxy geometry (typically piecewise planar meshes) and access to all training images, whereas [High-Frequency Aware Loss](7589-high-frequency-aware-loss.md) and [WD-Regularized Loss](15613-wd-regularized-loss.md) operate within different optimization frameworks without this specific blending-and-proxy requirement.
+
+### [High-Frequency Aware Loss](7589-high-frequency-aware-loss.md)
+High-Frequency Aware Loss (LHF) is a perceptual regularization term designed to recover high-frequency details in rendered images while avoiding the texture distortion common in deeper perceptual losses. It sets itself apart from standard VGG-based perceptual losses by restricting feature extraction to the first block of the network, before any max-pooling operations, thereby preserving fine-grained spatial information. It builds on [Perceptual Loss Training](2000-perceptual-loss-training.md) by specifically targeting the loss of high-frequency content that occurs when using pixel-wise losses on misaligned data.
+
+### [WD-Regularized Loss](15613-wd-regularized-loss.md)
+A training objective that augments the Wasserstein Distance (WD) perceptual loss with a lightly weighted version of the original 3DGS pixel-level loss to avoid artifacts in regions with constrained splat counts or small numbers of training views.
+
+### Anti-Bias Loss
+An l1 loss applied to downsampled versions of prediction and ground truth to eliminate color shifts introduced by perceptual loss while remaining robust against minor misalignments [S4].
+**Formula:**
+Calculate Lab as the l1 distance between k-fold downsampled ground truth patch $P$ and predicted patch $\hat{P}$:
+$$ L_{ab} = \| DSk(P) - DSk(\hat{P}) \|_1 $$
+where $DSk(\cdot)$ denotes k-fold downsampling [S4].
+The full objective function is:
+$$ L = w_{l1} \cdot L_{l1} + w_{vgg} \cdot L_{vgg} + w_{ab} \cdot L_{ab} $$
+where $L_{l1}$ is pixel-wise l1 distance, $L_{vgg}$ is perceptual loss, and $w_{\cdot}$ are weights [S4].
+
+## Operating characteristics
+*   **Time Complexity:** High. Perceptual loss requires forward passes through a deep CNN (VGG-19) for both the rendered and ground truth images. [S1] notes that computing it every 20 iterations is necessary to alleviate this overhead. [S2] reports training taking on average 41.5 hours per scene on one GeForce 1080 Ti.
+*   **Memory Complexity:** Moderate to High. Requires storing intermediate feature maps from the VGG network for the backpropagation step.
+*   **Performance:** Improves perceptual quality (LPIPS) significantly compared to pixel-wise losses [S3]. However, it may introduce color shifts if not regularized (e.g., with Anti-Bias Loss) [S4].
+*   **Strengths:** Better visual fidelity, recovers high-frequency details, reduces structural artifacts [S1, S3].
+*   **Limitations:** Computationally expensive, prone to color shifts, requires careful tuning of weights [S1, S4].
+*   **When to use:** When visual quality is prioritized over training speed, and when pixel-wise losses result in overly smooth or blurry outputs.
+*   **When not to use:** When real-time training is required, or when color accuracy is critical and auxiliary bias correction is not feasible.
+
+## Background
+Perceptual loss was originally introduced for image generation tasks [S2]. In the context of volume rendering and radiance fields, it has been adopted to address the "smoothness" problem of L1/L2 losses, which often produce blurry results [S1]. It is used in various NeRF and Gaussian Splatting optimizations to enhance high-frequency details and structural consistency [S2, S3, S4].
+
+## Sources
+[S1] Duplex-GS: Proxy-Guided Weighted Blending for Real-Time Order-Independent Gaussian Splatting, https://doi.org/10.1109/tcsvt.2026.3666188, fetched 2026-10-30
+[S2] Neural Point Cloud Rendering via Multi-Plane Projection, https://doi.org/10.1109/cvpr42600.2020.00785, fetched 2026-10-30
+[S3] Learning Neural Volumetric Representations of Dynamic Humans in Minutes, https://doi.org/10.1109/cvpr52729.2023.00846, fetched 2026-10-30
+[S4] DINER: Depth-aware Image-based NEural Radiance fields, https://doi.org/10.1109/cvpr52729.2023.01198, fetched 2026-10-29

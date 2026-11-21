@@ -1,0 +1,106 @@
+# KDTree-based Neighbor Counting
+
+Also called: KDTree Density Evaluation, Per-Voxel Point Density Calculation via KDTree
+
+## Overview
+KDTree-based Neighbor Counting calculates the density of mesh vertices or point cloud samples within each voxel by querying neighboring points using a KDTree and normalizing the counts [S1, unofficial]. It solves the problem of quantifying local point distribution for voxelization, setting itself apart from [Grid-based DBSCAN](11706-grid-based-dbscan.md) by using a fixed spherical radius rather than a connectivity-based clustering approach, and from [Parzen Density Estimation](11796-parzen-density-estimation.md) by providing discrete counts rather than a smoothed kernel sum [S1, unofficial].
+
+## How it works
+**Inputs:** A set of mesh vertices or point cloud samples $P = \{p_1, p_2, \dots, p_N\}$, and a voxel grid with side length $x$.
+**Outputs:** A voxel grid where each voxel stores a normalized density value $d \in [0, 1]$.
+
+**Data Structures:**
+1.  **KDTree:** A spatial index built from the input points $P$. In SciPy, this is typically a `cKDTree` object.
+2.  **Voxel Grid:** A 3D array or list of voxel centers $C = \{c_1, c_2, \dots, c_M\}$, where $M$ is the number of voxels. Each voxel $c_i$ has a field `density` initialized to 0.
+
+**Steps:**
+1.  **Calculate Query Radius:** Compute the radius $r$ of a sphere that has the same volume as the voxel cube with side length $x$.
+    $$ V_{cube} = x^3 $$
+    $$ V_{sphere} = \frac{4}{3} \pi r^3 $$
+    Equating volumes:
+    $$ x^3 = \frac{4}{3} \pi r^3 \implies r = x \left( \frac{3}{4 \pi} \right)^{1/3} $$
+2.  **Build KDTree:** Construct a KDTree from the input points $P$.
+3.  **Query Neighbors:** For each voxel center $c_i$ in $C$, query the KDTree for all points within distance $r$.
+    $$ N_i = \{ p \in P \mid \| p - c_i \| \le r \} $$
+    *Note: Using a spherical query for cubic voxels yields imperfect boundary results, as the sphere extends beyond the cube faces [S1, unofficial].*
+4.  **Count Vertices:** Count the number of points in each neighborhood:
+    $$ count_i = |N_i| $$
+5.  **Normalize:** Find the maximum count across all voxels:
+    $$ count_{max} = \max_{i} (count_i) $$
+    Normalize each count to the range $[0, 1]$:
+    $$ d_i = \frac{count_i}{count_{max}} $$
+6.  **Attach Field:** Assign $d_i$ to the `density` field of voxel $c_i$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial import cKDTree
+
+def kdtree_neighbor_counting(points, voxel_centers, voxel_side_length):
+    """
+    Calculate normalized point density for each voxel using KDTree.
+    
+    Args:
+        points: Array of shape (N, 3) containing mesh vertices or point cloud samples.
+        voxel_centers: Array of shape (M, 3) containing the center coordinates of each voxel.
+        voxel_side_length: Float, the side length x of the cubic voxels.
+        
+    Returns:
+        densities: Array of shape (M,) containing normalized density values in [0, 1].
+    """
+    # Step 1: Calculate the equivalent-volume sphere radius
+    # r = x * (3 / (4 * pi))^(1/3)
+    r = voxel_side_length * (3.0 / (4.0 * np.pi)) ** (1.0 / 3.0)
+    
+    # Step 2: Build KDTree from input points
+    tree = cKDTree(points)
+    
+    # Step 3 & 4: Query neighbors and count
+    # query_ball_point returns a list of lists, where each inner list contains
+    # indices of points within distance r of the corresponding center.
+    neighborhoods = tree.query_ball_point(voxel_centers, r)
+    counts = np.array([len(nbhd) for nbhd in neighborhoods])
+    
+    # Step 5: Normalize
+    max_count = np.max(counts)
+    if max_count == 0:
+        return np.zeros_like(counts, dtype=float)
+    
+    densities = counts / max_count
+    
+    # Step 6: Return densities (in a full implementation, these would be attached to voxel objects)
+    return densities
+```
+
+**Parameters:**
+*   `voxel_side_length` ($x$): Determines the resolution of the grid and the query radius. Typical values depend on the scene scale.
+*   `r`: Derived parameter. $r \approx 0.62035 \times x$.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Imperfection:** The spherical query radius extends beyond the cubic voxel boundaries, potentially including points that are geometrically outside the voxel but within the sphere [S1, unofficial].
+*   **Empty Voxels:** If no points are within radius $r$ of a voxel center, the count is 0. Normalization handles this correctly if $count_{max} > 0$.
+*   **Precision:** Floating-point precision in distance calculations may affect neighbor inclusion near the boundary $r$.
+
+## Subtopics
+
+### [Efficient kNN Implementation](10966-efficient-knn-implementation.md)
+Accelerates kNN searches by leveraging camera parameters for local search, distinct from the global spherical query here.
+
+### [Kernel Density Estimation (KDE)](13917-kernel-density-estimation-kde.md)
+Provides smooth continuous density fields via kernels, unlike the discrete counting method described here.
+
+## Operating characteristics
+*   **Time Complexity:** Building the KDTree is $O(N \log N)$. Querying $M$ voxels with radius $r$ is generally $O(M \log N)$ on average, but worst-case $O(MN)$ if points are clustered or $r$ is large.
+*   **Memory Complexity:** $O(N)$ for the KDTree structure. $O(M)$ for storing voxel centers and results.
+*   **Strengths:** Simple to implement using standard libraries (e.g., SciPy); effective for moderate datasets; provides exact neighbor counts within a defined radius.
+*   **Limitations:** Spherical approximation for cubic voxels introduces geometric inaccuracy; performance degrades with very large $N$ or $M$ without further optimization (e.g., [Efficient kNN Implementation](10966-efficient-knn-implementation.md)); sensitive to the choice of $r$.
+*   **When to Use:** When a quick, approximate density estimate is needed for voxelization or visualization, and exact cubic boundary adherence is not critical.
+*   **When Not to Use:** When high precision at voxel boundaries is required (consider [Grid-based DBSCAN](11706-grid-based-dbscan.md) or exact geometric intersection); for very large-scale scenes where global KDTree queries are too slow.
+
+## Background
+This method is described in a tutorial on voxelizing meshes and point clouds in Python using PyVista and SciPy [S1, unofficial]. It is presented as a useful analysis step for creating interactive GUIs for mesh thresholding, leveraging SciPy's `query_ball_point` functionality.
+
+## Sources
+[S1] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)

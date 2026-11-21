@@ -1,0 +1,1182 @@
+### examples/main.rs
+```
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Marceline Cramer
+
+use argh::FromArgs;
+use minifb::{Key, Window, WindowOptions};
+
+use svo_cpu::binvox::import_binvox_svo as import_svo;
+use svo_cpu::camera::spinny_camera::SpinnyCamera;
+use svo_cpu::fb::ColorBuffer;
+use svo_cpu::procgen::generate_voxbuf;
+use svo_cpu::procgen::terrain::TerrainGen;
+use svo_cpu::voxbuf::VoxBuf;
+
+#[derive(FromArgs)]
+/// CPU-based sparse voxel octree (SVO) rasterizer
+struct Args {
+    /// model to draw (defaults to "dragon")
+    #[argh(option, default = "default_model()", from_str_fn(select_model))]
+    model: VoxBuf,
+}
+
+fn default_model() -> VoxBuf {
+    import_svo(include_bytes!("models/stanford_bunny.binvox"))
+}
+
+fn select_model(option: &str) -> Result<VoxBuf, String> {
+    match option {
+        "bunny" => Ok(default_model()),
+        "dragon" => Ok(import_svo(include_bytes!("models/stanford_dragon.binvox"))),
+        "buddha" => Ok(import_svo(include_bytes!("models/stanford_buddha.binvox"))),
+        "terrain" => Ok(generate_voxbuf(TerrainGen::default())),
+        _ => Err("invalid model (must be one of [bunny, dragon, buddha, terrain])".into()),
+    }
+}
+
+fn main() {
+    let args: Args = argh::from_env();
+    let vb = args.model;
+
+    let mut fb = ColorBuffer::default();
+    let mut spinny_cam = SpinnyCamera::new(&fb);
+    vb.draw(&spinny_cam.camera, &spinny_cam.draw_config, &mut fb);
+
+    let mut window = Window::new(
+        "Test - ESC to exit",
+        fb.width,
+        fb.height,
+        WindowOptions::default(),
+    )
+    .unwrap_or_else(|e| {
+        panic!("{}", e);
+    });
+
+    window.limit_update_rate(Some(std::time::Duration::from_micros(16600)));
+
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        spinny_cam.update(&fb);
+        fb.clear();
+        vb.draw(&spinny_cam.camera, &spinny_cam.draw_config, &mut fb);
+        window
+            .update_with_buffer(&fb.data, fb.width, fb.height)
+            .unwrap();
+    }
+}
+```
+
+### src/binvox.rs
+```
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Marceline Cramer
+
+use super::voxbuf::*;
+use std::io::{BufRead, Read};
+use std::time::Instant;
+
+pub fn import_binvox_svo(bv: &[u8]) -> VoxBuf {
+    let timer = Instant::now();
+
+    let mut reader = std::io::BufReader::new(bv);
+
+    let mut header = String::new();
+    reader.read_line(&mut header).unwrap();
+    if !header.starts_with("#binvox 1") {
+        panic!("data is not a binvox");
+    }
+
+    let mut dim = String::new();
+    reader.read_line(&mut dim).unwrap();
+    if !dim.starts_with("dim 512 512 512") {
+        unimplemented!("unsupported dimension");
+    }
+
+    let dim = 512;
+    let dim2 = dim * dim;
+
+    let mut junk = String::new();
+    reader.read_line(&mut junk).unwrap(); // translate
+    reader.read_line(&mut junk).unwrap(); // scale
+    reader.read_line(&mut junk).unwrap(); // data
+
+    let mut rle_data = Vec::<u8>::new();
+    let rle_size = reader.read_to_end(&mut rle_data).unwrap() / 2;
+
+    let capacity = dim * dim * dim;
+    let mut data = vec![0 as u8; capacity];
+
+    let mut filled: usize = 0;
+    let mut cur = 0;
+    for pair in 0..rle_size {
+        let value = rle_data[pair << 1];
+        let count = rle_data[pair << 1 | 1] as usize;
+        if value != 0 {
+            filled += count;
+        }
+        if cur + count > capacity {
+            panic!("voxel data RLE overflow");
+        }
+        for _ in 0..count {
+            data[cur] = value;
+            cur += 1;
+        }
+    }
+
+    let mut nodes = vec![Node::default()];
+
+    let mut stack = std::collections::VecDeque::<(
+        u16,     // 0: x
+        u16,     // 1: y
+        u16,     // 2: z
+        NodeRef, // 3: node
+        u8,      // 4: lod
+    )>::new();
+
+    stack.push_front((0, 0, 0, 0, 8));
+
+    let mut placed_voxels = 0;
+
+    while let Some(iter) = stack.pop_back() {
+        let parent = iter.3 as usize;
+        let lod = iter.4;
+
+        let cursor = nodes.len();
+        nodes.resize_with(cursor + 8, Default::default);
+        let node = nodes.get_mut(parent).unwrap();
+
+        let mut offsets: [(u16, u16, u16); 8] = [(0, 0, 0); 8];
+        for i in 0..8 {
+            offsets[i] = (
+                iter.0 | ((i & 1) << lod) as u16,
+                iter.1 | (((i & 2) >> 1) << lod) as u16,
+                iter.2 | (((i & 4) >> 2) << lod) as u16,
+            );
+        }
+
+        if lod == 0 {
+            node.occupancy = 0x00;
+            for i in 0..8 {
+                let offset = offsets[i];
+                let index =
+                    (offset.2 as usize * dim2) + (offset.1 as usize * dim) + offset.0 as usize;
+                if data[index] != 0 {
+                    node.occupancy |= Node::index_to_mask(i as ChildMask);
+                    node.children[i] = (cursor + i) as NodeRef;
+                    placed_voxels += 1;
+                }
+            }
+
+            if node.occupancy == 0x00 {
+                node.data.color = 0;
+            }
+        } else {
+            node.data.color = 0xff00ffff;
+            node.occupancy = 0xff;
+            node.for_kids_all_mut(|index, _mask, child| {
+                let index = index as usize;
+                let child_ref = (cursor + index) as NodeRef;
+                let offset = offsets[index];
+                *child = child_ref;
+                stack.push_back((offset.0, offset.1, offset.2, child_ref, lod - 1));
+            });
+        }
+    }
+
+    println!("converted in {:?}", timer.elapsed());
+    println!("{} nodes", capacity);
+    println!("{} voxels", filled);
+    println!("{} voxels were treed", placed_voxels);
+
+    VoxBuf::from_nodes(nodes)
+}
+```
+
+### src/fb.rs
+```
+use glam::Vec3A;
+
+type Bounds = (usize, usize, usize, usize);
+type Point = (usize, usize);
+
+type Pixel = u32;
+pub type ColorBuffer = Framebuffer<Pixel>;
+
+pub trait Target<P> {
+    fn draw(ptr: *mut P, p: P);
+    fn test(ptr: *const P) -> bool;
+}
+
+pub struct Framebuffer<P> {
+    pub width: usize,
+    pub height: usize,
+    pub px: f32,
+    pub data: Vec<P>,
+}
+
+impl Default for Framebuffer<Pixel> {
+    fn default() -> Self {
+        let width = 1280;
+        let height = 720;
+        let px = std::cmp::min(width, height) as f32;
+        let data = vec![0; width * height];
+        Self {
+            width,
+            height,
+            px,
+            data,
+        }
+    }
+}
+
+fn pixel_to_simd(p: Pixel) -> packed_simd::u32x4 {
+    let a = (p >> 24) & 0xff;
+    let r = (p >> 16) & 0xff;
+    let g = (p >> 8) & 0xff;
+    let b = p & 0xff;
+    packed_simd::u32x4::new(a, r, g, b)
+}
+
+fn simd_to_pixel(simd: packed_simd::u32x4) -> Pixel {
+    unsafe {
+        (simd.extract_unchecked(0) << 24) | // a
+        (simd.extract_unchecked(1) << 16) | // r
+        (simd.extract_unchecked(2) << 8) | // g
+        simd.extract_unchecked(3) // b
+    }
+}
+
+const ALPHA_BIAS: u32 = 24;
+const MAX_PIXEL: packed_simd::u32x4 = packed_simd::u32x4::new(0xff, 0xff, 0xff, 0xff);
+
+impl Target<Pixel> for Framebuffer<Pixel> {
+    fn draw(ptr: *mut Pixel, p: Pixel) {
+        unsafe {
+            let dst = *ptr;
+            if dst == 0 {
+                *ptr = p;
+            } else {
+                let dst = pixel_to_simd(dst);
+                let dst_a = dst.extract_unchecked(0);
+                if dst_a < 255 {
+                    let a = 256 - dst_a;
+                    let dst = dst.replace_unchecked(0, dst_a + ALPHA_BIAS);
+                    let src = pixel_to_simd(p);
+                    let dst = MAX_PIXEL.min(((src * a) >> 8) + dst);
+                    *ptr = simd_to_pixel(dst);
+                }
+            }
+        }
+    }
+
+    fn test(ptr: *const Pixel) -> bool {
+        unsafe { *ptr & 0xff000000 != 0xff000000 }
+    }
+}
+
+impl Framebuffer<Pixel> {
+    pub fn draw_point(&mut self, xy: Point, p: Pixel) {
+        if let Some(offset) = self.calc_offset(xy) {
+            let ptr = unsafe { self.data.as_mut_ptr().add(offset) };
+            Self::draw(ptr, p);
+        }
+    }
+
+    pub fn test_point(&self, xy: Point) -> bool {
+        if let Some(offset) = self.calc_offset(xy) {
+            let ptr = unsafe { self.data.as_ptr().add(offset) };
+            Self::test(ptr)
+        } else {
+            false
+        }
+    }
+
+    pub fn draw_rect(&mut self, b: Bounds, c: Pixel) {
+        unsafe {
+            let (l, t, r, b) = b;
+            let w = r - l;
+            let h = b - t;
+            let space = self.width - w;
+            let start = t * self.width + l;
+            let mut ptr = self.data.as_mut_ptr().add(start);
+            let mut y = 0;
+            while y < h {
+                let mut x = 0;
+                while x < w {
+                    Self::draw(ptr, c);
+                    ptr = ptr.add(1);
+                    x += 1;
+                }
+                ptr = ptr.add(space);
+                y += 1;
+            }
+        }
+    }
+
+    pub fn test_rect(&self, b: Bounds) -> bool {
+        unsafe {
+            let (l, t, r, b) = b;
+            let w = r - l;
+            let h = b - t;
+            let space = self.width - w;
+            let start = t * self.width + l;
+            let mut ptr = self.data.as_ptr().add(start);
+            let mut y = 0;
+            while y < h {
+                let mut x = 0;
+                while x < w {
+                    if Self::test(ptr) {
+                        return true;
+                    }
+                    ptr = ptr.add(1);
+                    x += 1;
+                }
+                ptr = ptr.add(space);
+                y += 1;
+            }
+            false
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.data.fill(0);
+    }
+}
+
+impl<P> Framebuffer<P> {
+    pub fn frag_xy(&self, frag: &Vec3A) -> (usize, usize) {
+        let w = self.width as f32;
+        let h = self.height as f32;
+        let screen_pos = glam::Vec2::new(frag.x, frag.y) * 0.5 + 0.5;
+        let screen_scale = glam::Vec2::new(w, h);
+        let screen_pos = screen_pos * screen_scale;
+        let screen_pos = screen_pos.floor();
+        let x = screen_pos.x as usize;
+        let y = screen_pos.y as usize;
+        (x, y)
+    }
+
+    pub fn point_bounds(&self, center: &Vec3A) -> Option<(usize, usize, usize, usize)> {
+        if center.x < (-center.z - 1.0) || center.y < (-center.z - 1.0) {
+            return None;
+        }
+
+        let w = self.width as f32;
+        let h = self.height as f32;
+
+        if center.x > (1.0 + center.z) || center.y > (1.0 + center.z) {
+            return None;
+        }
+
+        let screen_pos = glam::Vec2::new(center.x, center.y) * 0.5 + 0.5;
+        let screen_scale = Vec3A::new(w, h, self.px);
+        let screen_pos: Vec3A = screen_pos.extend(center.z).into();
+        let screen_pos = screen_pos * screen_scale;
+
+        let [x, y, r] = screen_pos.to_array();
+
+        const MIN_MARGIN: usize = 1;
+        const MAX_MARGIN: usize = 1;
+        let l = (x - r).max(MIN_MARGIN as f32) as usize - MIN_MARGIN;
+        let t = (y - r).max(MIN_MARGIN as f32) as usize - MIN_MARGIN;
+        let b = ((y + r) as usize + MAX_MARGIN).min(self.height);
+        let r = ((x + r) as usize + MAX_MARGIN).min(self.width);
+
+        if l < r && t < b {
+            Some((l, t, r, b))
+        } else {
+            None
+        }
+    }
+
+    fn calc_offset(&self, xy: Point) -> Option<usize> {
+        if xy.0 >= self.width || xy.1 >= self.height {
+            None
+        } else {
+            Some(xy.1 * self.width + xy.0)
+        }
+    }
+}
+```
+
+### src/lib.rs
+```
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Marceline Cramer
+
+#[macro_use]
+extern crate lazy_static;
+
+pub mod binvox;
+pub mod camera;
+pub mod fb;
+pub mod procgen;
+pub mod voxbuf;
+```
+
+### src/voxbuf.rs
+```
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Marceline Cramer
+
+use super::camera::{Camera, DrawConfig};
+use super::fb::ColorBuffer;
+use glam::{Vec3A, Vec4};
+use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
+use std::time::Instant;
+
+pub type ChildIndex = u8;
+pub type ChildMask = u8;
+pub type ChildOrder = u8;
+pub type NodeRef = u32;
+
+pub const INVALID_NODE: NodeRef = NodeRef::MAX;
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct VoxBuf {
+    nodes: Vec<Node>,
+}
+
+impl VoxBuf {
+    pub const ROOT_NODE: NodeRef = 0;
+
+    pub fn new() -> Self {
+        Self {
+            nodes: vec![Node::default()],
+        }
+    }
+
+    pub fn from_nodes(nodes: Vec<Node>) -> Self {
+        let mut vb = Self { nodes };
+        let dummy_eye = Vec3A::new(3.0, 2.0, 1.0);
+
+        print!("unprocessed:\n  ");
+        vb.walk_all(&dummy_eye);
+
+        print!("after culling unfilled:\n  ");
+        vb.cull_unfilled();
+        vb.walk_all(&dummy_eye);
+
+        print!("after breadth-sorting:\n  ");
+        vb.breadth_sort_nodes();
+        vb.walk_all(&dummy_eye);
+
+        print!("after depth-sorting:\n  ");
+        vb.depth_sort_nodes();
+        vb.walk_all(&dummy_eye);
+
+        vb
+    }
+
+    pub fn new_dummy() -> Self {
+        let root_node = Node {
+            occupancy: 0b00000001,
+            children: [1, 0, 0, 0, 0, 0, 0, 0],
+            data: Payload::default(),
+        };
+
+        let leaf_node = Node::default();
+
+        Self {
+            nodes: vec![root_node, leaf_node],
+        }
+    }
+
+    pub fn cull_unfilled(&mut self) {
+        let timer = Instant::now();
+        self.cull_unfilled_children(Self::ROOT_NODE);
+        println!("culled unfilled branches in {:?}", timer.elapsed());
+    }
+
+    fn cull_unfilled_children(&mut self, parent_ref: NodeRef) -> bool {
+        let mut parent = *self.nodes.get(parent_ref as usize).unwrap();
+
+        if parent.is_leaf() {
+            if parent.data.color == 0 {
+                return false;
+            }
+        } else {
+            for index in 0..8 {
+                let mask = Node::index_to_mask(index);
+                if parent.is_occupied(mask) {
+                    let child_index = parent.children[index as usize];
+                    if !self.cull_unfilled_children(child_index) {
+                        let mask = !Node::index_to_mask(index);
+                        parent.occupancy &= mask;
+                    }
+                }
+            }
+
+            if parent.is_leaf() {
+                return false;
+            }
+
+            self.nodes[parent_ref as usize] = parent;
+        }
+
+        true
+    }
+
+    /// depth-sorts nodes
+    /// also removes unused nodes
+    pub fn depth_sort_nodes(&mut self) {
+        let timer = Instant::now();
+
+        let mut nodes = Vec::<Node>::new();
+
+        self.depth_sort_sub(&mut nodes, Self::ROOT_NODE);
+
+        println!(
+            "depth-sorted {} nodes to {} nodes in {:?}",
+            self.nodes.len(),
+            nodes.len(),
+            timer.elapsed()
+        );
+
+        self.nodes = nodes;
+    }
+
+    fn depth_sort_sub(&mut self, nodes: &mut Vec<Node>, old_ref: NodeRef) -> NodeRef {
+        let new_ref = nodes.len() as NodeRef;
+        let mut node = self.nodes[old_ref as usize].to_owned();
+        nodes.push(node);
+        node.for_kids_mut(|_index, child| {
+            *child = self.depth_sort_sub(nodes, *child);
+        });
+        nodes[new_ref as usize] = node;
+        new_ref
+    }
+
+    /// breadth-sorts nodes
+    /// also removes unused nodes
+    pub fn breadth_sort_nodes(&mut self) {
+        let timer = Instant::now();
+
+        let mut nodes = Vec::<Node>::new();
+        let mut cursor = 1;
+
+        let mut queue = std::collections::VecDeque::<NodeRef>::new();
+        queue.push_front(Self::ROOT_NODE);
+        while let Some(node_ref) = queue.pop_back() {
+            let mut node = self.nodes.get(node_ref as usize).unwrap().clone();
+
+            node.for_kids_mut(|_index, child| {
+                queue.push_front(*child);
+                *child = cursor as NodeRef;
+                cursor += 1;
+            });
+
+            if node.data.color != 0 {
+                let color = (node_ref << 2) & 0xffffff;
+                /*const R_MASK: u32 = 0xff0000;
+                const G_MASK: u32 = 0x00ff00;
+                const B_MASK: u32 = 0x0000ff;
+                let color = (((color & R_MASK) >> 1) & R_MASK)
+                    | (((color & G_MASK) >> 1) & G_MASK)
+                    | (((color & B_MASK) >> 1) & B_MASK);*/
+                node.data.color = 0xff000000 | color;
+            }
+
+            nodes.push(node);
+        }
+
+        println!(
+            "breadth-sorted {} nodes to {} nodes in {:?}",
+            self.nodes.len(),
+            nodes.len(),
+            timer.elapsed()
+        );
+
+        self.nodes = nodes;
+    }
+
+    pub fn depth_to_offset(depth: u32) -> f32 {
+        unsafe {
+            let exp = 126 - depth;
+            let f = exp << 23;
+            std::mem::transmute::<u32, f32>(f)
+        }
+    }
+
+    pub fn walk<F>(&self, eye: &Vec3A, mut on_node: F)
+    where
+        F: FnMut(bool, &Payload, Vec4) -> bool,
+    {
+        let timer = Instant::now();
+
+        let mut walked_num = 0;
+        let mut leaf_num = 0;
+        let origin = Vec3A::new(0.0, 0.0, 0.0);
+        let mut stack = vec![(Self::ROOT_NODE, origin, 0 as u32)];
+
+        while let Some((node_ref, stem, depth)) = stack.pop() {
+            walked_num += 1;
+            let node = self.nodes.get(node_ref as usize).unwrap();
+            let offset = Self::depth_to_offset(depth);
+            let voxel = stem.extend(offset);
+
+            let is_leaf = node.is_leaf();
+            if is_leaf {
+                leaf_num += 1
+            };
+            if on_node(is_leaf, &node.data, voxel) & !is_leaf {
+                let order = Node::sorting_order(&eye, &stem);
+                let next_level = depth + 1;
+                node.for_kids_ordered(order, |index, child| {
+                    let origin = stem + Node::index_offset(index, offset);
+                    stack.push((*child, origin, next_level));
+                });
+            }
+        }
+
+        println!(
+            "walked {} nodes ({} leaves) in {:?}",
+            walked_num,
+            leaf_num,
+            timer.elapsed()
+        );
+    }
+
+    pub unsafe fn fast_walk<F>(&self, eye: &Vec3A, mut on_node: F)
+    where
+        F: FnMut(bool, &Payload, Vec4) -> bool,
+    {
+        let svo_ptr = self.nodes.as_ptr();
+        let origin = Vec3A::new(0.0, 0.0, 0.0);
+        let mut stack = [(svo_ptr.add(Self::ROOT_NODE as usize), origin, 0 as u32); 256];
+        let stack_base = stack.as_mut_ptr();
+        let mut stack_ptr = stack_base.add(1);
+
+        while stack_ptr > stack_base {
+            stack_ptr = stack_ptr.sub(1);
+            let (node_ptr, stem, depth) = *stack_ptr;
+
+            let node = *node_ptr;
+            let offset = Self::depth_to_offset(depth);
+            // TODO bit magic 2.0 ^ -depth * sqrt(3)
+            let voxel = stem.extend(offset * 1.73);
+
+            let is_leaf = node.is_leaf();
+            if on_node(is_leaf, &node.data, voxel) & !is_leaf {
+                let order = Node::sorting_order(&eye, &stem);
+                let next_level = depth + 1;
+                node.for_kids_ordered(order, |index, child| {
+                    let origin = stem + Node::index_offset(index, offset);
+                    let next = (svo_ptr.add(*child as usize), origin, next_level);
+                    *stack_ptr = next;
+                    stack_ptr = stack_ptr.add(1);
+                });
+            }
+        }
+    }
+
+    pub fn walk_all(&self, eye: &Vec3A) -> Vec<(Payload, Vec4)> {
+        let mut nodes = Vec::<(Payload, Vec4)>::new();
+        self.walk(eye, |is_leaf, data, voxel| {
+            if is_leaf {
+                nodes.push((*data, voxel));
+            }
+            true
+        });
+        nodes
+    }
+
+    pub fn draw(&self, camera: &Camera, config: &DrawConfig, fb: &mut ColorBuffer) {
+        let timer = Instant::now();
+
+        unsafe {
+            self.fast_walk(&camera.eye, |is_leaf, data, voxel| {
+                camera.draw_voxel(fb, config, is_leaf, &voxel, data.color)
+            });
+        };
+
+        println!("done drawing in {:?}", timer.elapsed());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct Payload {
+    pub color: u32,
+}
+
+impl Default for Payload {
+    fn default() -> Self {
+        Self { color: 0xff0000ff }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct Node {
+    pub occupancy: ChildMask,
+    pub children: [NodeRef; 8],
+    pub data: Payload,
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Self {
+            occupancy: 0,
+            children: [0; 8],
+            data: Payload::default(),
+        }
+    }
+}
+
+const HILBERT_ORDER: [(ChildIndex, ChildMask); 8] = [
+    (0, 0x01),
+    (1, 0x02),
+    (3, 0x08),
+    (2, 0x04),
+    (6, 0x40),
+    (7, 0x80),
+    (5, 0x20),
+    (4, 0x10),
+];
+
+impl Node {
+    pub fn get_child(&self, index: ChildIndex) -> NodeRef {
+        self.children[index as usize]
+    }
+
+    pub fn index_to_mask(index: ChildIndex) -> ChildMask {
+        if index < 8 {
+            1 << index
+        } else {
+            0
+        }
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        self.occupancy == 0
+    }
+
+    pub fn is_occupied(&self, mask: ChildMask) -> bool {
+        (self.occupancy & mask) != 0
+    }
+
+    pub fn for_kids_all<F>(&self, mut f: F)
+    where
+        F: FnMut(ChildIndex, ChildMask),
+    {
+        for (index, mask) in HILBERT_ORDER.iter() {
+            f(*index, *mask);
+        }
+    }
+
+    pub fn for_kids_all_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(ChildIndex, ChildMask, &mut NodeRef),
+    {
+        for (index, mask) in HILBERT_ORDER.iter() {
+            f(*index, *mask, &mut self.children[*index as usize]);
+        }
+    }
+
+    pub fn for_kids<F>(&self, mut f: F)
+    where
+        F: FnMut(ChildIndex, &NodeRef),
+    {
+        let occupancy = self.occupancy.clone();
+        if !self.is_leaf() {
+            for (index, mask) in HILBERT_ORDER.iter() {
+                if (occupancy & mask) != 0 {
+                    f(*index, &self.children[*index as usize]);
+                }
+            }
+        }
+    }
+
+    pub fn for_kids_mut<F>(&mut self, mut f: F)
+    where
+        F: FnMut(ChildIndex, &mut NodeRef),
+    {
+        let occupancy = self.occupancy.clone();
+        if !self.is_leaf() {
+            for (index, mask) in HILBERT_ORDER.iter() {
+                if (occupancy & mask) != 0 {
+                    f(*index, &mut self.children[*index as usize]);
+                }
+            }
+        }
+    }
+
+    pub fn for_kids_ordered<F>(&self, order: ChildOrder, mut f: F)
+    where
+        F: FnMut(ChildIndex, &NodeRef),
+    {
+        if !self.is_leaf() {
+            let occupancy = self.occupancy.clone();
+            let indices = SORTED_ORDER_INDICES[order as usize].clone();
+            for (index, mask) in indices.iter() {
+                if (occupancy & *mask) != 0 {
+                    f(*index, &self.children[*index as usize]);
+                }
+            }
+        }
+    }
+
+    pub fn index_offset(index: ChildIndex, offset: f32) -> Vec3A {
+        match index {
+            0 => [-offset, -offset, -offset],
+            1 => [offset, -offset, -offset],
+            2 => [-offset, offset, -offset],
+            3 => [offset, offset, -offset],
+            4 => [-offset, -offset, offset],
+            5 => [offset, -offset, offset],
+            6 => [-offset, offset, offset],
+            7 => [offset, offset, offset],
+            _ => panic!("invalid child index"),
+        }
+        .into()
+    }
+
+    /// based on: https://iquilezles.org/www/articles/volumesort/volumesort.htm
+    pub fn sorting_order(eye: &Vec3A, stem: &Vec3A) -> ChildOrder {
+        let s = eye.cmpge(*stem).bitmask();
+        let sx = (s & 0b001) as ChildOrder;
+        let sy = ((s & 0b010) >> 1) as ChildOrder;
+        let sz = ((s & 0b100) >> 2) as ChildOrder;
+        let a = (*eye - *stem).abs();
+
+        if a.x > a.y && a.x > a.z {
+            if a.y > a.z {
+                (sx << 2) | (sy << 1) | sz
+            } else {
+                8 + ((sx << 2) | (sz << 1) | sy)
+            }
+        } else if a.y > a.z {
+            if a.x > a.z {
+                16 + ((sy << 2) | (sx << 1) | sz)
+            } else {
+                24 + ((sy << 2) | (sz << 1) | sx)
+            }
+        } else {
+            if a.x > a.y {
+                32 + ((sz << 2) | (sx << 1) | sy)
+            } else {
+                40 + ((sz << 2) | (sy << 1) | sx)
+            }
+        }
+    }
+}
+
+fn calc_child_orders_sub(x: u8, y: u8, z: u8) -> [ChildIndex; 8] {
+    let mut orders = [0 as u8; 8];
+    let masks = (1 << x, 1 << y, 1 << z);
+    for i in 0..8 {
+        let mut c: u8 = 0x07;
+
+        if (i & masks.0) != 0 {
+            c = 0b110;
+        }
+
+        if (i & masks.1) != 0 {
+            c &= 0b101;
+        }
+
+        if (i & masks.2) != 0 {
+            c &= 0b011;
+        }
+
+        orders[i] = c;
+    }
+    orders
+}
+
+fn calc_child_orders_flip(x: u8, y: u8, z: u8) -> [[(ChildIndex, ChildMask); 8]; 8] {
+    let mut orders = [[(0 as u8, 0 as u8); 8]; 8];
+    let base = calc_child_orders_sub(x, y, z);
+    for i in 0..8 {
+        let order = &mut orders[i];
+        for j in 0..8 {
+            let index = j as u8 ^ base[i];
+            order[j] = (index, Node::index_to_mask(index));
+        }
+    }
+    orders
+}
+
+fn calc_child_orders() -> [[(ChildIndex, ChildMask); 8]; 48] {
+    [
+        calc_child_orders_flip(2, 1, 0),
+        calc_child_orders_flip(2, 0, 1),
+        calc_child_orders_flip(1, 2, 0),
+        calc_child_orders_flip(0, 2, 1),
+        calc_child_orders_flip(1, 0, 2),
+        calc_child_orders_flip(0, 1, 2),
+    ]
+    .concat()
+    .try_into()
+    .unwrap()
+}
+
+lazy_static! {
+    static ref SORTED_ORDER_INDICES: [[(ChildIndex, ChildMask); 8]; 48] = {
+        let orders = calc_child_orders();
+        orders
+    };
+}
+```
+
+### src/camera/mod.rs
+```
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Marceline Cramer
+
+use crate::fb::ColorBuffer;
+use glam::{Mat4, Vec3A, Vec4};
+
+pub mod spinny_camera;
+
+pub struct Camera {
+    pub eye: Vec3A,
+    pub vp: Mat4,
+}
+
+pub struct DrawConfig {
+    pub min_rect: f32,
+    pub max_rect: f32,
+    pub max_test: usize,
+}
+
+impl Camera {
+    pub fn project_voxel(&self, center: &Vec4) -> Vec3A {
+        let mut vertex = center.clone();
+        vertex.w = 1.0;
+        let mut frag = self.vp * vertex;
+        frag.z = -center.w;
+        (frag / frag.w).into()
+    }
+
+    pub fn draw_voxel(
+        &self,
+        fb: &mut ColorBuffer,
+        c: &DrawConfig,
+        is_leaf: bool,
+        center: &Vec4,
+        color: u32,
+    ) -> bool {
+        let projected = self.project_voxel(&center);
+        if !is_leaf {
+            if projected.z > c.max_rect {
+                Self::test_rect(c.max_test, fb, &projected)
+            } else if projected.z > c.min_rect {
+                Self::draw_rect(fb, &projected, color);
+                false
+            } else {
+                Self::draw_point(fb, &projected, color);
+                false
+            }
+        } else {
+            if projected.z < c.min_rect {
+                Self::draw_point(fb, &projected, color);
+                false
+            } else {
+                Self::draw_rect(fb, &projected, color);
+                false
+            }
+        }
+    }
+
+    pub fn test_rect(max_test: usize, fb: &mut ColorBuffer, projected: &Vec3A) -> bool {
+        if let Some(bounds) = fb.point_bounds(projected) {
+            let area = (bounds.2 - bounds.0) * (bounds.3 - bounds.1);
+            if area < max_test {
+                fb.test_rect(bounds)
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn draw_rect(fb: &mut ColorBuffer, projected: &Vec3A, color: u32) {
+        if let Some(bounds) = fb.point_bounds(projected) {
+            fb.draw_rect(bounds, color);
+        }
+    }
+
+    pub fn draw_point(fb: &mut ColorBuffer, projected: &Vec3A, color: u32) {
+        let xy = fb.frag_xy(projected);
+        fb.draw_point(xy, color);
+    }
+}
+```
+
+### src/camera/spinny_camera.rs
+```
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Marceline Cramer
+
+use super::{Camera, DrawConfig};
+use crate::fb::ColorBuffer as Framebuffer;
+use glam::{Mat4, Vec3};
+use std::time::Instant;
+
+pub struct SpinnyCamera {
+    pub camera: Camera,
+    pub draw_config: DrawConfig,
+    start: Instant,
+}
+
+impl SpinnyCamera {
+    pub fn new(fb: &Framebuffer) -> Self {
+        let eye = Self::make_eye(0.0);
+        let camera = Camera {
+            eye: eye.into(),
+            vp: Self::make_vp(&eye, fb.width, fb.height),
+        };
+
+        let draw_config = DrawConfig {
+            min_rect: 0.5 / fb.px,
+            max_rect: 6.0 / fb.px,
+            max_test: 1024,
+        };
+
+        Self {
+            camera,
+            draw_config,
+            start: Instant::now(),
+        }
+    }
+
+    fn make_eye(step: f32) -> Vec3 {
+        const R: f32 = 3.0;
+        const H: f32 = 2.0;
+        let angle = step;
+        Vec3::new(angle.cos() * R, H, angle.sin() * R)
+    }
+
+    fn make_vp(eye: &Vec3, width: usize, height: usize) -> Mat4 {
+        const FOV: f32 = 60.0;
+        const NEAR: f32 = 0.1;
+        const FAR: f32 = 100.0;
+        let center = Vec3::new(0.0, -0.15, 0.0);
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let v = Mat4::look_at_lh(*eye, center, up);
+        let aspect = (width as f32) / (height as f32);
+        let p = Mat4::perspective_rh(FOV.to_radians(), aspect, NEAR, FAR);
+        p * v
+    }
+
+    pub fn update(&mut self, fb: &Framebuffer) {
+        let step = self.start.elapsed().as_micros() as f32 / 1_000_000.0;
+        let eye = Self::make_eye(step);
+        self.camera.eye = eye.into();
+        self.camera.vp = Self::make_vp(&eye, fb.width, fb.height);
+    }
+}
+```
+
+### src/procgen/mod.rs
+```
+pub mod terrain;
+
+pub use crate::voxbuf::{ChildIndex, Node, NodeRef, VoxBuf};
+pub use glam::Vec3A;
+use std::time::Instant;
+
+pub trait ProcGen {
+    fn is_occupied(&self, pos: &Vec3A) -> bool;
+}
+
+pub fn generate_voxbuf<T>(procgen: T) -> VoxBuf
+where
+    T: ProcGen,
+{
+    let timer = Instant::now();
+
+    const MAX_DEPTH: u32 = 4;
+
+    let mut nodes = vec![Node::default()];
+    let mut filled = 0;
+    let origin = Vec3A::new(0.0, 0.0, 0.0);
+    let mut stack = vec![(VoxBuf::ROOT_NODE, origin, 0 as u32)];
+
+    while let Some((node_ref, stem, depth)) = stack.pop() {
+        let cursor = nodes.len();
+        nodes.resize_with(cursor + 8, Default::default);
+        let node = nodes.get_mut(node_ref as usize).unwrap();
+        let offset = VoxBuf::depth_to_offset(depth);
+
+        if depth >= MAX_DEPTH {
+            node.occupancy = 0x00;
+            for i in 0..8 {
+                if procgen.is_occupied(&stem) {
+                    node.occupancy |= Node::index_to_mask(i as ChildIndex);
+                    node.children[i] = (cursor + i) as NodeRef;
+                    filled += 1;
+                }
+            }
+
+            if node.occupancy == 0x00 {
+                node.data.color = 0;
+            }
+        } else {
+            node.data.color = 0xff00ffff;
+            node.occupancy = 0xff;
+            node.for_kids_all_mut(|index, _mask, child| {
+                let index = index as usize;
+                let child_ref = (cursor + index) as NodeRef;
+                let origin = stem + Node::index_offset(index as ChildIndex, offset);
+                *child = child_ref;
+                stack.push((child_ref, origin, depth + 1));
+            });
+        }
+    }
+
+    println!("generated in {:?}", timer.elapsed());
+    println!("{} voxels", filled);
+
+    VoxBuf::from_nodes(nodes)
+}
+```
+
+### src/procgen/noise.rs
+```
+// noise functions borrowed from minetest
+
+const NOISE_MAGIC_X: isize = 1619;
+const NOISE_MAGIC_Y: isize = 31337;
+const NOISE_MAGIC_Z: isize = 52591;
+const NOISE_MAGIC_SEED: isize = 1013;
+
+pub fn noise2d(x: isize, y: isize, seed: isize) -> f32 {
+    let n = (NOISE_MAGIC_X * x + NOISE_MAGIC_Y * y + NOISE_MAGIC_SEED * seed) & 0x7fffffff;
+    let n = (n >> 13) ^ n;
+    let n = (n * (n * n * 60493 + 199990303) + 1376312589) & 0x7fffffff;
+    1.0 - (n as f32 / 0x40000000 as f32)
+}
+
+pub fn noise3d(x: isize, y: isize, z: isize, seed: isize) -> f32 {
+    let n = (NOISE_MAGIC_X * x + NOISE_MAGIC_Y * y + NOISE_MAGIC_Z * z + NOISE_MAGIC_SEED * seed)
+        & 0x7fffffff;
+    let n = (n >> 13) ^ n;
+    let n = (n * (n * n * 60493 + 19990303) + 1376312589) & 0x7fffffff;
+    1.0 - (n as f32 / 0x40000000 as f32)
+}
+```
+
+### src/procgen/terrain.rs
+```
+use super::*;
+
+pub struct TerrainGen {}
+
+impl Default for TerrainGen {
+    fn default() -> Self {
+        Self {}
+    }
+}
+
+impl ProcGen for TerrainGen {
+    fn is_occupied(&self, pos: &Vec3A) -> bool {
+        let i: i32 = rand::random();
+        let i = i & 0xff;
+        let i = (i as f32) / 127.0 - 1.0;
+        (i + pos.y) < 0.0
+    }
+}
+```

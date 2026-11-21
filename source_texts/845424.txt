@@ -1,0 +1,235 @@
+Linux DRM/KMS virtual display driver — streams the compositor's scanout zero-copy as a DMA-BUF straight into a hardware encoder. An EVDI alternative for low-latency screen capture (used by Hermes). - tools: EGL/CUDA import checkers — NVIDIA finding for the NVENC validation roadmap item by teodorgross · Pull Request #1 · MrOz59/Hermes-KMS
+
+tools: EGL/CUDA import checkers — NVIDIA finding for the NVENC validation roadmap item by teodorgross · Pull Request #1 · MrOz59/Hermes-KMS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+teodorgross
+commented
+Aug 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Companion to MrOz59/Hermes#16 (NVIDIA/NVENC support). Adds two self-contained diagnostic consumers under tools/hermes-egl-import-check/:
+hermes_egl_import_check.c — validates the NVENC-style consumer chain against a live frame: ACQUIRE_FRAME → eglCreateImage(EGL_LINUX_DMA_BUF_EXT) → texture bind (OES with glEGLImageTargetTexStorageEXT fallback) → FBO readback → GL blit into an own texture → cuGraphicsGLRegisterImage (mirrors the Hermes CUDA converter flow), with CRC cross-checks against the CPU view.
+pitch_detect.c — compares the GPU's view of the imported frame against the CPU view of the same DMA-BUF under several corruption hypotheses (declared pitch, width*4, vertical flip, R/B swap, brute-forced pitch scan, drift-filtered row comparison).
+Finding these tools document (NVIDIA 595.84, RTX 5060 Ti, kernel 7.1.4)
+NVIDIA imports the driver's system-memory DMA-BUFs via EGL_EXT_image_dma_buf_import without error (the OES texture bind fails with GL_INVALID_OPERATION; the GL_EXT_EGL_image_storage bind succeeds), but sampled content is only correct for roughly the first contiguous ~2 MB of the buffer. Beyond that the GPU reads the wrong pages — visible as diagonal stripe corruption at larger modes — while mmap of the very same DMA-BUF on the CPU is pixel-perfect. Smaller framebuffers can appear to work when their pages happen to be allocated contiguously, which is why 1920x1080 looked fine and 2796x1290 didn't.
+Consequence for consumers: the Hermes NVIDIA fork routes NVENC sessions through a CPU-copy path for now. If the driver could hand out physically contiguous framebuffer memory (or the root cause turns out to be fixable in the export path), true zero-copy NVENC would become viable — happy to help test either direction on this hardware.
+🤖 Generated with Claude Code
+tools: add EGL/CUDA import checkers for the NVENC validation roadmap …
+…
+7685798
+```
+…item
+
+hermes-egl-import-check validates the full NVENC-style consumer chain
+(EGL import -> GL bind incl. TexStorageEXT fallback -> FBO readback ->
+GL converter pass -> CUDA interop) against a live frame. pitch_detect
+compares the GPU's view of the imported frame with the CPU view of the
+same DMA-BUF under several corruption hypotheses.
+
+Documents the finding that NVIDIA (595.84, RTX 5060 Ti) imports these
+system-memory DMA-BUFs but reads wrong pages past the first ~2 MB while
+the CPU view stays pixel-perfect.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015xwAwhPQ3uFnRWkLLbcNip
+```
+MrOz59
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Owner
+Hey, thank you for contributing these diagnostic tools.
+I do not currently have an NVIDIA GPU available for local testing, so I cannot independently reproduce the results. However, I reviewed the tools against the frame acquisition and synchronization contract implemented by the driver.
+The overall direction is useful:
+Having a standalone DMA-BUF, EGL, OpenGL and CUDA validation tool should make driver interoperability issues easier to investigate.
+Reporting the framebuffer format, modifier, pitch and offset provides useful information when debugging imports.
+Separating the EGL and CUDA stages helps identify where an interoperability failure occurs.
+The pitch experiment may help determine whether the observed corruption is related to framebuffer layout assumptions.
+The main checker allows an explicit render node to be selected, which is important on multi-GPU systems.
+This PR only adds diagnostic utilities under "tools/" and does not modify the kernel module, its ABI or the normal Hermes-KMS build. Therefore, the risk of introducing a runtime regression into the driver is low.
+However, there are several correctness issues in the tools that should be fixed before their results can be considered reliable.
+The main issue is frame synchronization.
+The checker requests "HERMES_KMS_FRAME_REQUEST_SYNC_FILE", but it does not wait for the sync file returned by "ACQUIRE_FRAME".
+Hermes-KMS exports the framebuffer write fence through "sync_file_fd". The successful return of "ACQUIRE_FRAME" guarantees that a frame was acquired and its descriptors were exported, but it does not guarantee that the producer has completed writing to the framebuffer.
+When the driver returns a valid sync file, the consumer must wait for it before reading the frame or using its contents as a validation reference.
+Without this wait, the checker may inspect an incomplete frame and incorrectly report corruption or a mismatch in a later stage.
+The CPU CRC path also reads the mmaped DMA-BUF without using "DMA_BUF_IOCTL_SYNC".
+CPU access should be bracketed by:
+"DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ"
+before reading the mapped memory, and:
+"DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ"
+afterwards.
+This is especially important because the CPU CRC is used as the reference result. An unsynchronized reference read could cause the tool to report a false EGL, OpenGL or CUDA mismatch.
+The same synchronization problem exists in "pitch_detect.c". It reads the framebuffer through mmap without requesting or waiting for the exported fence and without performing DMA-BUF CPU synchronization.
+Because of this, its output may reflect an incomplete or stale frame rather than an actual pitch or layout problem.
+There are also some issues with GPU selection in the CUDA checker.
+The EGL/OpenGL context is created using a user-selected DRM render node, but the CUDA stage always selects CUDA device 0 with "cuDeviceGet()".
+On a system with multiple GPUs, CUDA device 0 may not correspond to the GPU used by the OpenGL context. A registration failure in that situation would indicate a device mismatch rather than a Hermes-KMS DMA-BUF interoperability problem.
+The CUDA device should be selected based on the active OpenGL context, using an API such as "cuGLGetDevices()", instead of assuming device 0.
+The current "cuCtxCreate()" call also appears to depend on the CUDA 13 API signature. CUDA 12 exposes a different signature for the unversioned function.
+The tool should either:
+Handle the CUDA 12 and CUDA 13 APIs at compile time;
+Use the correct versioned CUDA function; or
+Use the primary context APIs, which may avoid this version-specific context creation difference.
+The result reporting also needs to distinguish between a passed, failed and skipped CUDA stage.
+Currently, when CUDA support is disabled, unavailable at build time or fails during initialization, the tool can still report that the complete DMA-BUF to CUDA chain succeeded.
+A full-chain success should only be reported when every required stage actually ran and passed.
+It would be clearer to report each stage independently:
+Frame acquisition: PASS / FAIL
+Fence wait: PASS / FAIL / NOT PROVIDED
+CPU reference read: PASS / FAIL
+EGL import: PASS / FAIL
+OpenGL validation: PASS / FAIL
+CUDA registration: PASS / FAIL / SKIPPED
+Complete interoperability chain: PASS / FAIL / INCOMPLETE
+"pitch_detect.c" also needs additional error checking.
+Several resources and function pointers are used without fully validating that they were created or resolved successfully, including:
+The selected render-node file descriptor;
+The GBM device;
+The EGL display and context;
+Required EGL and OpenGL extension functions;
+Temporary memory allocations;
+The framebuffer completeness result.
+In particular, "glEGLImageTargetTexStorageEXT" should only be called after verifying that its function pointer is available. Otherwise, the tool may crash on a driver that does not provide that extension.
+The pitch tool also automatically selects the first non-Hermes render node. This is unreliable on multi-GPU systems and may cause it to test a different GPU from the intended one.
+It should support an explicit render-node argument, similar to the main checker.
+Modifier handling should also be consistent. When Hermes-KMS reports an invalid or unavailable modifier, the modifier attributes should be omitted from the EGL import instead of being passed unconditionally.
+There are also minor resource-cleanup issues involving file descriptors, EGL objects, GBM resources and OpenGL objects. They are not critical for short-lived diagnostic programs, but fixing them would improve the quality and maintainability of the tools.
+My conclusion is:
+The PR does not introduce runtime risk to the Hermes-KMS driver because it only adds standalone tools.
+The diagnostic approach is useful.
+The current tools do not yet correctly follow the synchronization contract exposed by "ACQUIRE_FRAME".
+The unsynchronized CPU reference read can produce misleading validation results.
+CUDA device selection and CUDA version compatibility need improvement.
+The final result can currently report success even when part of the validation chain was skipped.
+The pitch checker needs more robust device selection and error handling.
+I would prefer these issues to be addressed before merging, so that the tools produce deterministic results and do not confuse synchronization, device-selection or API-version problems with actual driver interoperability failures.
+Thank you again for working on this. Reliable validation tools will be very useful for expanding and debugging Hermes-KMS support across different GPU drivers.
+teodorgross
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Author
+Thank you for the thorough review, you are right on the synchronization point. I checked the driver source and ACQUIRE_FRAME never waits, so the consumer has to wait on the exported sync file and bracket CPU reads with DMA_BUF_IOCTL_SYNC. Honestly I posted this a bit prematurely because I was so happy to finally get it running on NVIDIA haha. I will fix this along with the other points you raised and update everything accordingly.
+MrOz59
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Owner
+No problem at all! I really appreciate your contribution. With more people contributing and testing different hardware, Hermes and Hermes-KMS can keep getting better and more reliable
+I completely understand the excitement after finally getting it working on NVIDIA haha. I’m looking forward to reviewing the updated version and merging it once everything is a bit more polished
+tools: follow the frame synchronization contract and report per-stage…
+…
+715f2d2
+```
+… results
+
+Review fixes for the EGL/CUDA import checkers:
+
+- wait on the sync file exported by ACQUIRE_FRAME before reading or
+  importing the frame; pitch_detect now requests and waits on it too
+- bracket CPU reads of the mmapped DMA-BUF with DMA_BUF_IOCTL_SYNC;
+  the CPU CRC is the reference every later stage is compared against
+- select the CUDA device with cuGLGetDevices so it matches the GL
+  context instead of assuming device 0 on multi-GPU systems
+- use the primary-context API instead of cuCtxCreate, whose unversioned
+  signature differs between CUDA 12 and CUDA 13
+- report every stage as PASS/FAIL/SKIPPED/NOT PROVIDED and only claim a
+  complete chain when all required stages ran and passed; exit codes
+  0 (complete pass), 1 (stage failed), 2 (incomplete)
+- pitch_detect: explicit --device/--gpu arguments, error checking on the
+  render node, GBM, EGL and extension setup, modifier attributes only
+  when valid and advertised, and resource cleanup
+- work around an NVIDIA driver segfault when the last GPU reference to
+  an imported system-memory DMA-BUF is released after CUDA/GL interop
+  ran in the same process (documented in the README)
+```
+teodorgross
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Author
+Pushed the fixes. Both tools now wait on the exported sync file before touching the frame and bracket their CPU reads with DMA_BUF_IOCTL_SYNC, the CUDA device is matched to the GL context via cuGLGetDevices instead of assuming device 0, and context handling uses the primary context API so the same code builds against CUDA 12 and 13 headers. Results are reported per stage with a PASS/FAIL/SKIPPED/NOT PROVIDED summary and exit codes 0/1/2, so a skipped CUDA stage can no longer look like a full chain success. pitch_detect gained --device and --gpu arguments plus the missing error checking, modifier guard and cleanup.
+Verified live against a running NVENC stream on the RTX 5060 Ti: full chain PASS with the fence signalled, the no-cuda build reports INCOMPLETE with exit 2, and pitch_detect reproduces the known import corruption on drift-stable rows. One new finding from testing the cleanup: once CUDA/GL interop has touched the imported buffer, the NVIDIA driver segfaults when the last GPU reference to the import is released, in any teardown order, while the identical teardown runs clean without the CUDA stage. The checker documents and works around that (README has the details). CUDA 12 is covered at the API level; I still plan to do a containerized CUDA 12 compile check and will note the result here.
+teodorgross
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Author
+CUDA 12 check done, no container needed: the checker compiles warning free against the CUDA 12.8 headers (CUDA_VERSION 12080), links against the 12.8 stub libcuda, and the resulting binary runs the complete chain to PASS on the live stream through the current driver. Same source builds and passes against CUDA 13.2, so both toolkit generations are covered.
+MrOz59
+commented
+Aug 9, 2026
+Copy link
+Copy Markdown
+Owner
+Thank you for this. Reviewed and validated locally, and the short version is that I want to merge it, with one thing wired up first.
+I appreciate that you applied the same synchronization corrections here that you applied to the consumer side. The checker waits on the exported sync file before reading and brackets its CPU reference read with DMA_BUF_IOCTL_SYNC, so the ground truth it compares everything against is actually trustworthy. That was the whole point of the objection in Hermes#16 and it would have been easy to fix only the consumer and leave the diagnostic tool reading in-flight frames.
+What I verified on my machine (Arch, kernel 7.0.9, CUDA 13.3, no NVIDIA GPU, hermes_kms loaded):
+Both files compile clean with -Wall -Wextra, with and without -DHAVE_CUDA. The CUDA path compiles against CUDA 13 headers, which is the case most likely to break.
+hermes-egl-import-check runs correctly against the loaded module. Without a compositor driving a HERMES output it fails at exactly the right stage with an accurate message, prints the full stage summary, and exits 1 as documented. The staged PASS/FAIL/SKIPPED/NOT PROVIDED reporting with the three-way exit code is a better diagnostic contract than the existing VAAPI checker has, and RESULT: INCOMPLETE as distinct from PASS is the right call, a skipped CUDA stage genuinely does not validate the chain.
+Your cuCtxCreate reasoning is correct, I checked it in the CUDA 13.3 headers: cuCtxCreate is #defined to cuCtxCreate_v4 and now takes a CUctxCreateParams argument, while cuDevicePrimaryCtxRetain kept its signature. Using the primary-context API is the right choice for a tool that has to build across 11/12/13. Same for cuGLGetDevices() over device 0, on a multi-GPU host a failure on the wrong device would have been a misleading result.
+open_auto_hermes() scanning renderD* as well as card* is a real improvement over the existing checker, which only scans card*. Every Hermes-KMS ioctl is DRM_RENDER_ALLOW, so the tool correctly works unprivileged through a render node.
+One thing before merge: neither tool is wired into the build.
+make tools builds hermes-kmsctl and hermes-kms-import-check from explicit targets in the Makefile, and make clean removes both. The two new binaries have no target, so they are only buildable by copy-pasting the cc line out of the README, and make clean will not clean them. Since they ship inside the DKMS source tree (make copies tools/ wholesale) they should participate in the same build.
+Could you add targets alongside the existing ones? Something in the shape of the current hermes-kms-import-check rule, guarded so a host without CUDA still builds the tool with the CUDA stage compiled out rather than failing the whole tools target. The existing rule's test -n $(IMPORT_CHECK_LIBS) pattern is a reasonable model for the EGL/GBM pkg-config side, but CUDA should be opt-in rather than required, the tool already handles HAVE_CUDA being absent. The clean target needs the two new binaries too, and .gitignore should cover them.
+Two smaller notes, neither blocking:
+Helper duplication. open_if_hermes, open_auto_hermes, close_frame_fds, wait_for_frame and acquire_frame now exist in three copies across tools/, with small divergences already (the render-node scan being the useful one). Not worth restructuring in this PR, but if a fourth tool shows up I will want a shared tools/common/ header. Mentioning it so the intent is on record.
+The _exit workaround. I read the comment carefully and I am satisfied it is the right call for a diagnostic tool, the verdict is printed and flushed before any teardown, so a driver crash cannot cost you the result. The finding it documents, that the NVIDIA driver segfaults when the last GPU-side reference to an imported system-memory DMA-BUF is dropped after CUDA interop touched it, is worth having written down independently of this tool. It is a second data point pointing at the same import path as the pitch corruption.
+On the finding itself: the roughly 2 MB contiguity boundary, with the CPU view of the same buffer being pixel-perfect, is a much sharper characterization than I expected to get without NVIDIA hardware here, and it explains cleanly why 1080p appeared to work and 2796x1290 did not. I cannot reproduce any of it myself, so having the tools in-tree is precisely how someone else can confirm it on a different generation.
+Add the Makefile targets and I will merge this. It is additive, it touches no driver or kernel code, and it is the kind of thing I would rather have in-tree before 0.5.0 ships than after.
+tools: wire the EGL/CUDA checkers into the tools target
+…
+7cb7d8e
+```
+make tools now builds hermes-egl-import-check and pitch-detect alongside
+the existing tools, guarded by the same pkg-config presence check as the
+VAAPI checker. The CUDA stage stays opt-in via HAVE_CUDA=1 so hosts
+without the CUDA toolkit still build the whole tools target; the checker
+already compiles the stage out in that case. clean removes both binaries
+and .gitignore covers them.
+```
+teodorgross
+commented
+Aug 9, 2026
+Copy link
+Copy Markdown
+Author
+Makefile wiring is in: make tools now builds both checkers alongside the existing tools, using the same pkg-config guard pattern as the VAAPI checker. CUDA stays opt-in via make tools HAVE_CUDA=1, and without it the tool compiles the CUDA stage out, so a host without the toolkit still completes the whole tools target. clean removes both binaries and .gitignore covers them. Verified locally: make tools with and without HAVE_CUDA=1, make clean, and a run against the loaded module (correct FAIL stage and exit 1 without an active output). Noted on the helper duplication, happy to add a shared tools/common header when a fourth tool shows up.
+MrOz59
+merged commit 47800d5
+into
+MrOz59:main
+Aug 9, 2026
+MrOz59
+mentioned this pull request
+Sep 7, 2026
+feat(hdr): advertise HDR to compositors via EDID metadata and connect…
+#4
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

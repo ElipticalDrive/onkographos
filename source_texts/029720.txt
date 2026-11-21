@@ -1,0 +1,625 @@
+# Seeing through Light and Darkness: Sensor-Physics Grounded Deblurring HDR NeRF from Single-Exposure Images and Events
+
+Yunshan Qi1 Lin Zhu2\* Nan Bao1 Yifan Zhao1 Jia Li1\*
+
+1State Key Laboratory of Virtual Reality Technology and Systems, SCSE & QRI, Beihang University 2School of Artificial Intelligence, Beijing Normal University
+
+{qi yunshan, nbao, zhaoyf, jiali}@buaa.edu.cn, linzhu@bnu.edu.cn
+
+# Abstract
+
+
+
+
+
+Novel view synthesis from low dynamic range (LDR) blurry images, which are common in the wild, struggles to recover high dynamic range (HDR) and sharp 3D representations in extreme lighting conditions. Although existing methods employ event data to address this issue, they ignore the sensor-physics mismatches between the camera output and physical world radiance, resulting in suboptimal HDR and deblurring results. To cope with this problem, we propose a unified sensor-physics grounded NeRF framework for sharp HDR novel view synthesis from single-exposure blurry LDR images and corresponding events. We employ NeRF to directly represent the actual radiance of the 3D scene in the HDR domain and model raw HDR scene rays hitting the sensor pixels as in the physical world. A 2D pixel-wise RGB CRF model is introduced to align the NeRF rendered pixel values with the sensor-recorded LDR pixel values of the input images. A novel event CRF model is also designed to bridge the gap between physical scene dynamics and event sensor output. The two models are jointly optimized with the NeRF network, leveraging the spatial and temporal dynamic information in events to enhance the sharp HDR 3D representation learning. Experiments on the collected and public datasets demonstrate that our method achieves stateof-the-art HDR and deblurring novel view synthesis results with single-exposure blurry LDR images and corresponding events. Our code and datasets are publicly available at .
+
+# 1. Introduction
+
+Recent novel view synthesis (NVS) works, Neural Radiance Fields (NeRF) [32] and 3D Gaussian Splatting (3DGS) [23], achieve high-fidelity and high-speed NVS results with ideal
+
+Figure 1. Events corresponding to a blurry LDR image contain spatial difference (High Dynamic Range) and temporal difference (High Temporal Resolution) information of the scene radiance, making it an ideal data for enhancing HDR sharp 3D scene reconstruction. See-NeRF models the physical imaging process with proposed RGB and event CRF models to bridge the sensor-physics discrepancy, leveraging events to infer scene dynamics and achieving sharper and better HDR novel view synthesis results compared to the physical unaligned method EvHDR-NeRF [6].
+
+low dynamic range (LDR) sharp images as input, respectively. However, their performance suffers from two limitations: handling extreme lighting scenes with both highlight
+
+\*Correspondence should be addressed to Jia Li and Lin Zhu. Website: 
+
+and low-light areas and robustness to camera motion blur, which are caused by the inherent information loss in the blurred and compressed LDR images with both underexposed and overexposed regions. Some recent image-based NeRF and 3DGS related works utilize multi-exposure LDR images [4, 6, 29] to compensate for the limited dynamic range and model the camera motion [31, 47, 58] to mitigate the influence of motion blur, while they are still susceptible to the requirement of cumbersome multi-exposure capture and severe motion blur under long-exposure conditions.
+
+Event cameras provide a promising sensing modality by asynchronously recording brightness changes in the log domain, thereby preserving high temporal resolution and dynamic range information that is typically lost in conventional frame-based RGB cameras [12]. As shown in the upper half of Fig. 1, event data can effectively record spatial-temporal differential data even in blurred, overexposed, and underexposed areas of an LDR image. Motivated by this advantage, recent approaches have explored using event and RGB image (ERGB) data for the deblurring NVS task [5, 10, 36–38], while their performance is limited by a lack of grounding in the sensor-physics mismatch between the recorded RGB image and the physical scene brightness. EvHDR-NeRF [6] first incorporates events into the single-exposure HDR and deblurring NeRF reconstruction task. However, its framework largely follows HDR-NeRF [19] by applying the same tone mapping strategy directly to 3D points and extending it to the event-based setting without considering the event generation character.
+
+We argue that achieving accurate and physically consistent 3D representation learning in the ERGB setting requires more than directly extending existing image-based frameworks. In particular, it is essential to explicitly model how scene radiance is transformed into actual sensor measurements through device-specific processes. For RGB cameras, this involves temporal integration and non-linear camera response functions (CRF); for event cameras, this includes contrast thresholding, latency effects, and photometric quantization. Without accounting for these physical transformations, the rendered outputs of the learned model may not align with the supervision signals derived from input images and events, weakening the learning of actual scene geometry and appearance as shown in the lower half of Fig. 1. Therefore, a sensor-physics grounded modeling of both RGB and event sensing pipelines is critical for fully exploiting the complementary information in ERGB data and achieving robust deblurring HDR NVS performance.
+
+In this paper, we present a novel framework that exploits Single-Exposure blurry images and corresponding Events to enable sharp HDR NeRF reconstruction (See-NeRF). Specifically, built upon the physical imaging principles of RGB and event sensors, we adopt NeRF to focus on learning the actual radiance of the scene in the HDR domain and intro-
+
+duce two differentiable CRF models: a 2D pixel-wise RGB CRF model that accounts for exposure integration and camera response function in image generation, and a novel event CRF model that accounts for latency and photometric deviations in event generation. These two modules align the predicted radiance with the sensor measurements and are jointly optimized with the NeRF network under the supervision of input images and events. By modeling the radianceto-measurement process explicitly, See-NeRF can accurately reconstruct physically consistent, sharp HDR 3D representations, achieving state-of-the-art deblurring HDR NVS results on both public and collected datasets. Our contributions are summarized as follows:
+
+1) We propose See-NeRF, a sensor-physics grounded framework that uses events to compensate for the scene dynamics to learn a sharp HDR 3D representation from singleexposure blurry LDR images in extreme lighting scenes.
+
+2) We introduce a physically grounded RGB CRF model and a latency-aware photometrically calibrated event CRF model to bridge the discrepancy between physical radiance values and sensor measurements.
+
+3) We collect both synthetic and real datasets for training and testing. The experiment results show that our method achieves the best performance on both ERGB-based HDR and deblurring novel view synthesis tasks.
+
+# 2. Related work
+
+# 2.1. HDR and deblurring novel view synthesis
+
+NeRF [32] extensively promotes the development of the novel view synthesis (NVS) task and 3D implicit representation learning. 3DGS [23] further improve the speed of 3D reconstruction and view rendering. However, NeRF and 3DGS can only learn a sharp LDR scene representation with sharp LDR images. For the HDR NVS task, RawNeRF [33] and RawGS [22] aim to reconstruct an HDR 3D representation from noisy HDR raw images. HDR-NeRF [19] and HDR-GS [4] introduce a 3D points tone mapper to transform the HDR 3D representation into the LDR 3D representation, optimized with multi-exposure LDR images. HDR-HexPlane [50] further extends HDR-NeRF to dynamic scenes. GaussHDR [29] accepts additional context features as input to improve HDR NVS. Gaussian in the dark [53] uses a CNN-based feature map to enhance the tone mapper learning. For the Deblurring NVS task, Deblur-NeRF [31] proposes a deformable sparse kernel module to model the blur kernels. BAD-NeRF [47] and BAD-GS [58] transform the camera poses into SE(3) space and interpolate the poses to recover the camera motion trajectory. DP-NeRF [24] imposes 3D consistency and refines the color with the relationship between depth and blur. Although these image-based methods have achieved promising HDR and deblurring NVS performance, they still fundamentally suffer from the inher-
+
+
+
+ent information loss of the motion-blurred LDR images.
+
+#### 2.2. ERGB-based novel view synthesis
+
+Event cameras are bio-inspired sensors detecting brightness changes at individual pixels with high temporal resolution [12]. This scene radiance measurement paradigm has higher dynamic range and temporal resolution compared to traditional frame-based RGB cameras, attracting a lot of research in the fields of event-based image deblurring [21, 28, 35, 43, 51], HDR image reconstruction [8, 14, 15, 34, 46, 48, 49], and high-speed HDR video generation [39, 52, 59, 61]. Some recent works explore the event-based NVS task [11, 13, 13, 20, 30, 31, 41, 55, 57], while other works integrate both image and event (ERGB) data into the deblurring NVS task, such as NeRF-based works [5, 27, 36–38, 44] and 3DGS-based works [10, 18, 26, 54]. Addressing the limitations of blurry LDR inputs, EvHDR-NeRF [6] first jointly exploits single-exposure images and events to reconstruct HDR NeRF. However, these previous ERGB-based NVS methods do not fully consider the gap between sensor output and physical radiance, leading to limited HDR and deblurring NVS performance.
+
+# 3. Background
+
+In this section, we leverage the principles of event and LDR image generation to explain why events can enhance HDR deblurring NVS with single-exposure blurry LDR images.
+
+#### 3.1. From scene radiance to LDR images
+
+In an extreme lighting scene with both highlight and lowlight areas, a typical RGB camera sensor records the physical scene radiance through a frame-based integral model, generating a raw image with high dynamic range pixel values. To fit human eye perceptual characteristics and reduce storage costs, the raw image is processed by the image signal processor (ISP), applying non-linear ISO gain, RGB demosaicing, tone mapping, gamma compression, white-balance, and quantization to yield an 8-bit LDR image, which is always modeled by a camera response function (CRF) f in practice [2]:
+
+
+$$\mathcal{I}_{\text{LDR}} = f\left(\int_{t_{\text{start}}}^{t_{\text{tend}}} L(t) dt\right), \quad (1)$$
+
+where L(t) is the raw scene radiance hitting the sensor at time t. tstart and tend are the start and end time of exposure. ILDR is the final color value that we can obtain from the LDR image. This integral model and non-linear CRF f inherently obscure the temporal dynamics of L(t) and compress the critical HDR spatial radiance differential information in highlight and low-light areas, ineluctably leading to artifacts like motion blur, overexposure (pixel values saturation at 255), and underexposure (pixel values clipping at 0) in the LDR images, respectively.
+
+Figure 2. HDR reconstruction from Events. The first row shows the input data. The second row shows the estimated CRF curves and the dynamic range schematic. For a single-exposure LDR image with exposure time ∆t2, its 8-bit pixel values 0-255 (normalized to 0-1 as ILDR in the figure) represent a limited range of scene radiance ln(L(t)) (width of the blue box). Traditional methods fuse multi-exposure LDR images with exposure times ∆t0, ∆t4 to compensate for the limited scene brightness representation (width of the yellow and green boxes). We leverage the spatial differential in events to infer the scene radiance of highlight and low-light regions from the single-exposure LDR image (∆t2), which expands the representation of scene radiance (width of the orange and cyan boxes), enabling more accurate CRF curves estimation.
+
+#### 3.2. From scene dynamics to events
+
+Event cameras asynchronously detect the change of the scene radiance hitting the sensor L(t) in the log domain and trigger an event e(x, y, p, τ ) whenever the change reaches the threshold Θ. (x, y) represents the pixel coordinates and τ is the trigger time. The change direction is encoded in p ∈ {1, −1}. This spike model can preserve temporal radiance dynamics and spatial radiance gradient distribution:
+
+| Temporal: $\partial_t \log L(x, y, t)$ , | (2) |
+|------------------------------------------|-----|
+| Spatial: $\nabla_{xy} \log L(x, y, t)$ , |     |
+
+which precisely compensates for the temporal and spatial dynamics loss of blurry compressed LDR images (Sec. 3.1\).
+
+# 3.3. Events for deblurring and HDR NVS
+
+According to Sec. 3.1, the core problem of recovering the sharp HDR scene radiance from blurry LDR images is formulated as the joint estimation of the latent sharp luminance L(t) and the CRF f. The temporal radiance dynamics of events in Eq. \(2\) can be used to estimate the latent sharp L(t) along the time dimension from blurry ILDR as proved in ERGB-based deblurring works [35, 36]. The spatial dynamics of events in Eq. \(2\) can provide extra radiance differential information for the highlight and low-light areas and expand the dynamic range of the single-exposure LDR image ILDR, as shown in Fig. 2, with which the network in Sec. 4.2 can obtain a wider range of ln(L(t)) as input and infer a CRF curve closer to the ground truth.
+
+
+
+Figure 3. The data generation process of event and RGB cameras (upper parts) and the pipeline of See-NeRF (lower parts) are shown in the figure. We use NeRF to represent the actual radiance of an extreme lighting scene in the HDR domain. The volume rendering simulates the raw scene radiance rays hitting the sensor and obtaining the raw sensor values. The predicted LDR images and events are generated with our proposed sensor-physics grounded RGB and event CRF models (details are shown in the right part of the figure). The image loss and event loss are employed to jointly supervise the optimization of the two CRF models and the NeRF network.
+
+
+
+# 4. Method
+
+In this section, we introduce the See-NeRF and theoretically demonstrate how it leverages sensor-physics priors to achieve high-quality deblurring HDR NVS with singleexposure blurry LDR images and corresponding events
+
+### 4.1. HDR scene representation
+
+Firstly, we use the NeRF network Fθ with parameters θ to represent the actual radiance e and density σ of a 3D point o in an extreme lighting scene, rather than the cameraprocessed LDR radiance used in the original NeRF [32]:
+
+$$(\mathbf{e}, \sigma) = F_\theta(\gamma_o(\mathbf{o}), \gamma_d(\mathbf{d})), \quad (3)$$
+
+where d denotes the observation direction and γ(·) is used to transform the input into a higher dimension:
+
+$$\gamma_M(x) = \{\sin(2^m \pi x), \cos(2^m \pi x)\}_{m=0}^M. \quad (4)$$
+
+Then we use volume rendering to simulate the process of HDR scene rays o + d hitting the imaging sensor at pixel (x, y) corresponding to the camera pose p(t) and obtain the latent sharp HDR radiance at time t:
+
+$$E(x, y, p(t)) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{e}_i, \quad (5)$$
+where  $T(i) = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ .
+
+δi is the distance between adjacent sampled 3D points.
+
+Figure 4. Effectiveness of physically grounded RGB CRF model.
+
+# 4.2. Physically grounded RGB CRF model
+
+To simulate the integral model of the RGB camera, we discretely sample b+ 1 time points {ti} b i=0 within the exposure time tstart to tend as in [37], and the predicted raw pixel value of the RGB imaging sensor during exposure is:
+
+
+$$\hat{\mathcal{I}}_{\text{HDR}}(x, y) = \sum_{i=0}^b w_i E_i(x, y, p(t_i)), \quad (6)$$
+
+where wi is weight parameters calculated by time points {ti} b i=0 [37]. Since p(t) is constantly changing during exposure in the handheld situation, we use the event-guided COLMAP [42] strategy in [36, 37] for the pose estimation. To bridge the gap between the raw sensor value and the LDR image calculated by the CRF f in Eq. \(1\), we used three MLPs fcrf to fit this function in the log domain for three color channels separately and obtain the estimated LDR pixels:
+
+
+$$\hat{\mathcal{L}}_{\text{DR}}(x, y) = f_{\text{cff}}(\ln(\hat{\mathcal{L}}_{\text{HDR}}(x, y) \Delta t_{\text{exp}})), \quad (7)$$
+
+where ∆texp = tend − tstart is the exposure time.
+
+As shown in Fig. 4, unlike HDR-NeRF applying the CRF function directly on the radiance of 3D points e in Eq. \(3\), we employ CRF after volume rendering at the pixel-level for the raw pixel values Iˆ HDR, aligning with the imaging process in the physical world (Fig. 3\), which allows fcrf to focus on nonlinear color tone mapping learning without being affected by the linear volume rendering, while NeRF Fθ focuses on learning 3D density σ and raw radiance e without being affected by fcrf. Besides, our blur synthesis on the HDR pixel values (Eq. \(6\)) is more physically grounded. Therefore, our proposed RGB CRF model can significantly improve the HDR and deblurring NVS results as demonstrated by the experiment in Sec. 5.4.
+
+#### 4.3. Latency-aware and photometrically calibrated event CRF model
+
+Usually, we can estimate the generated event number during t1 and t2 at pixel (x, y) with an ideal model:
+
+$$B(t_1, t_2, x, y) = \text{floor}\left(\frac{\ln(L(t_2)) - \ln(L(t_1))}{\Theta}\right), \quad (8)$$
+
+where floor(·) means taking the integer between the input and zero that is closest to the input. However, the actual event generation may deviate from this ideal model with a significant delay in low-light regions [17], and due to the fixed contrast threshold Θ in event generation, the minimum detectable brightness change is lower-bounded, leading to quantifiable errors in radiometric estimation. To bridge the gap between actual radiance dynamics and actual event generation, we propose a novel event CRF model comprising three core components: Bayer pattern adaptation, temporal delay compensation, and photometric quantity calibration.
+
+Bayer pattern adaptation: Like in [5, 6], we input the b+ 1 scene radiance values {E(x, y, p(ti))} b i=0 with three color channels into an RGGB Bayer pattern to obtain the pixel radiance values of the event sensor {Eev(x, y, p(ti))} b i=0. Temporal delay compensation: Since event delay is mainly determined by the pixel radiance values [17], we calculate the delay coefficient with a MLP-based function fev:
+
+$$\epsilon_i = f_{\text{ev}}(E_{\text{ev}}(x, y, p(t_i))). \quad (9)$$
+
+Then, we use a second-order low-pass filter to synthesize the event latency with the estimated coefficient ϵi :
+
+$$L_{\text{lp}} = (1 - \epsilon_i) L_{\text{lp}}^{-1} + \epsilon_i E_{\text{ev}}(p(t_i)). \quad (10)$$
+
+We omit (x, y) in Eq. \(10\) because the above operation is the same for all pixels. We set L 0 lp = Eev(p(t0)) and substitute {L i lp} b i=0 into the event generation model (Eq. \(8\)) to calculate the estimated numbers of events:
+
+$$\{\hat{B}'(t_i, t_{i+1})\}_{i=0}^{b-1} = \text{floor}\left(\frac{\ln(L_{\text{lp}}^{i+1}) - \ln(L_{\text{lp}}^i)}{\Theta}\right). \quad (11)$$
+
+Photometric quantity calibration: Since event acquisition exhibits uncertainty when brightness changes are below the threshold or our sampled time points ti may not precisely align with the timestamp of the last triggered event at this pixel, we pre-estimate an offset from the input events by using h(·), and then subtract this offset for the final estimated number of events to compensate this discrepancy:
+
+$$\{\hat{B}(t_i, t_{i+1})\}_{i=0}^{b-1} = \hat{B}'(t_i, t_{i+1}) - h(B(t_i, t_{i+1})), \quad (12)$$
+
+h(·) is explained in detail in the supplementary materials.
+
+#### 4.4. Loss functions and optimization
+
+We use the LDR image loss and event loss to jointly supervise the optimization of the HDR scene radiance representation (Eq. \(3\)) and the two CRF models:
+
+$$\mathcal{L}_{\text{ldr}} = \sum_{(x,y) \in \mathcal{X}} \|\hat{\mathcal{I}}_{\text{LDR}}(x, y) - \mathcal{I}_{\text{LDR}}(x, y)\|_2^2, \quad (13)$$
+
+$$\mathcal{L}_{\text{evs}} = \sum_{(x,y) \in \mathcal{X}} \sum_{i=0}^{b-1} \|\hat{B}(t_i, t_{i+1}) - B(t_i, t_{i+1})\|_2^2, \quad (14)$$
+
+where X denotes all pixels of the camera sensor. Then the final loss is defined as:
+
+$$\mathcal{L} = \lambda \mathcal{L}_{\text{evs}} + \mathcal{L}_{\text{ldr}}. \quad (15)$$
+
+We take λ = 0.005 and optimize a coarse and a fine network simultaneously as in [37]. During testing, we can obtain the novel view sharp HDR images with Eq. \(6\) and LDR images with novel exposure with Eq. \(7\). We set b = 4 as a trade-off between performance and training time as in [36]. The implementation details and more evaluation on b and λ are provided in Sec. C and Sec. D of the supplementary.
+
+# 5. Experiments
+
+Since EvHDR-NeRF [6] has not released its datasets, we construct both synthetic and real datasets for the deblurring HDR NVS task from single-exposure blurry LDR images and corresponding events. We also adopt the public Real-World-Challenge dataset [37] with challenging blurry ERGB input and GT sharp test images to evaluate the deblurring effect of See-NeRF. Due to space limitations, we only briefly describe the collected dataset here and provide further dataset generation and experimental details in the Secs. B, C, and D of the supplementary materials.
+
+# 5.1. Experiment settings
+
+Synthetic dataset: The synthetic dataset consists of 8 HDR "Blender" scenes from HDR-NeRF [19]. Each scene contains 18 training and 17 test views. We use Blender [1] and v2e [17] to generate blurry images with exposure time
+
+Table 1. Quantitative results on our synthetic and real dataset for the HDR and novel exposure NVS tasks. The results are the average of all scenes in the dataset. HDR-NeRFref: training HDR-NeRF [19] with multi-exposure input. HDR-NeRF+: training HDR-NeRF with sharp HDR images obtained by the cascaded ERGB-based image deblurring method EDI [35] and HDR reconstruction method HDRev [52].
+
+
+
+| Methods               |           |        | Image | Input |   |           | Event PSNR | HDR ↑ SSIM | Our ↑ LPIPS | Synthetic Novel ↓ PSNR | Dataset Exposure ↑ SSIM | ( ∆ t 1 , ∆ ↑ LPIPS | t 3 ) ↓ PSNR | HDR ↑ SSIM | Our ↑ LPIPS | Real Novel ↓ PSNR | Dataset Exposure ↑ SSIM | ( ∆ t 1 , ∆ t 3 ) ↑ LPIPS ↓ |
+|-----------------------|-----------|--------|-------|-------|---|-----------|------------|------------|-------------|------------------------|-------------------------|---------------------|--------------|------------|-------------|-------------------|-------------------------|-----------------------------|
+| Reference HDR-NeRF    | ref Sharp | ( ∆    | t 0 , | ∆ t   | 2 | , ∆ t 4 ) | 26.91      | .8906      | .1705       | 29.22                  | .9247                   | .1265               | 26.26        | .8716      | .1576       | 33.44             | .9618                   | .0950                       |
+| HDR NVS               |           |        |       |       |   |           |            |            |             |                        |                         |                     |              |            |             |                   |                         |                             |
+| HDR-NeRF              | [19]      | Sharp  | (     | ∆ t   | 2 | )         | 17.02      | .7384      | .3450       | 24.61                  | .9178                   | .1349               | 10.87        | .5473      | .4229       | 22.18             | .9013                   | .1230                       |
+| HDR-GS RGB-Based      | [4]       | Sharp  | (     | ∆ t   | 2 | )         | 13.54      | .6993      | .5096       | 15.13                  | .7428                   | .3533               | 14.18        | .6944      | .4700       | 19.23             | .8407                   | .1980                       |
+| Gaussian-DK           | [53]      | Sharp  | (     | ∆ t   | 2 | )         | 12.74      | .6826      | .3206       | 25.87                  | .9197                   | .1792               | 14.33        | .7113      | .4055       | 26.41             | .8966                   | .1184                       |
+| GaussHDR              | [29]      | Sharp  | (     | ∆ t   | 2 | )         | 12.96      | .7805      | .3015       | 14.69                  | .7565                   | .2154               | 20.39        | .8669      | .1723       | 26.77             | .9361                   | .1771                       |
+| HDR NVS               |           |        |       |       |   |           |            |            |             |                        |                         |                     |              |            |             |                   |                         |                             |
+| HDR-NeRF+ ERGB-Based  |           | Blurry | (     | ∆ t   | 2 | )         | ! 16.08    | .6436      | .3696       | 17.63                  | .7178                   | .2786               | 18.61        | .8092      | .2872       | 15.30             | .5936                   | .3444                       |
+| EvHDR-NeRF Deblurring | [6]       | Blurry | (     | ∆ t   | 2 | )         | ! 21.73    | .8192      | .3446       | 24.37                  | .8712                   | .2848               | 19.00        | .6962      | .2612       | 23.76             | .8830                   | .1650                       |
+| See-NeRF              |           | Blurry | (     | ∆ t   | 2 | )         | ! 24.13    | .8927      | .1916       | 27.57                  | .9270                   | .1328               | 26.49        | .8953      | .1638       | 29.11             | .9364                   | .1060                       |
+
+Figure 5. Qualitative results on the synthetic "dogroom" scene and real-world "bear" scene of our datasets for the HDR novel view synthesis task. Our See-NeRF achieves the best results on both under-exposure and over-exposure regions.
+
+∆t2 and corresponding events as in [36] for training views. We also provide sharp LDR images with exposure times ∆t0, ∆t2, ∆t4 for the RGB-based HDR NVS methods without deblurring effects. For test views, we provide GT sharp HDR images and LDR images with ∆t1, ∆t3 for HDR and novel exposure evaluation as in [19].
+
+Real dataset: The real dataset includes 5 scenes captured under extreme lighting conditions using the DAVIS 346 event camera [45]. Each scene has 16 training and 12 test views. For training views, we use a handheld DAVIS 346 to capture the blurry LDR images with exposure time ∆t2 along with the corresponding event data. We also captured sharp LDR images with a tripod with exposure times ∆t0, ∆t2, ∆t4. For the test views, we use a tripod to capture GT sharp LDR images with exposure times ∆t1, ∆t3. We also capture the GT sharp LDR images with ∆t0, ∆t2, ∆t4, and use the classic multi-exposure HDR reconstruction algorithm De-Bevec [9] to generate the GT sharp HDR image with the 5 sharp LDR images with different exposures for each test view as in RawHDR [60].
+
+Metrics: We use PSNR, SSIM, and LPIPS [56] to quantitatively evaluate the deblurring and novel exposure NVS results. For the HDR NVS task, we tone map [16] both the
+
+generated and GT HDR images into the LDR domain for quantitative and qualitative evaluation as in [4, 19, 60].
+
+# 5.2. HDR and novel exposure NVS experiment
+
+We choose the RGB-based HDR NVS works [4, 19, 29, 53] for comparison with sharp single-exposure images as input, considering they cannot handle the blurry images. We also use multi-exposure images as input for HDR-NeRF as a reference (HDR-NeRFref). For the ERGB-based methods, we use EDI [35] and HDRev [52] to deblur the blurry LDR images and generate sharp HDR images with event data, which are input into the HDR-NeRF for training (HDR-NeRF+). We also compare with the ERGB-based deblurring HDR NeRF method, EvHDR-NeRF.
+
+Quantitative results: As in Tab. 1, our See-NeRF significantly outperforms the compared methods on both synthetic and real datasets. The HDR reconstruction results on the real dataset are even better than HDR-NeRFref. In comparison, RGB-based HDR NVS methods exhibit constrained performance owing to their dependence on multi-exposure input. Cascaded method HDR-NeRF+ achieves superior results compared to RGB-based methods but underperforms EvHDR-NeRF due to its decoupled pipeline that separately
+
+
+
+
+
+Figure 6. Qualitative results on the synthetic "diningroom" (upper) and "bathroom" (lower) scenes for novel exposure synthesis task.
+
+Table 2. Results on the Real-World-Challenge dataset of the deblurring NVS task. The results are the average of all five scenes.
+
+| Methods                  |        | PSNR  | ↑ SSIM | ↑ LPIPS ↓ |
+|--------------------------|--------|-------|--------|-----------|
+| Deblurring NVS           |        |       |        |           |
+| BAD-NeRF RGB-Based       | [47]   | 25.63 | .8575  | .4400     |
+| DP-NeRF                  | [24]   | 28.85 | .9226  | .3015     |
+| Deblurring NVS           |        |       |        |           |
+| EBAD-NeRF                | [38]   | 27.74 | .9010  | .3349     |
+| Ev-DeblurNeRF ERGB-Based | [5]    | 27.83 | .9132  | .3157     |
+| E2GS                     | [10]   | 28.04 | .9211  | .2538     |
+| 2 NeRF E                 | [36]   | 29.92 | .9346  | .2356     |
+| 3 NeRF E                 | [37]   | 31.40 | .9464  | .2000     |
+| Deblurring HDR NVS       |        |       |        |           |
+| EvHDR-NeRF ERGB-Based    | [6]    | 27.19 | .8960  | .3731     |
+| See-NeRF                 | (Ours) | 32.70 | .9564  | .1574     |
+
+
+
+Figure 7. Qualitative results on the "shelf" scene of the Real-World-Challenge data for the deblurring NVS task.
+
+handles 3D reconstruction and HDR sharp image generation, constrained by the inherent bottlenecks of EDI and HDRev. EvHDR-NeRF realizes the second-best overall results, but is significantly worse than our See-NeRF.
+
+Qualitative results: Fig. 5 displays the qualitative HDR NVS results, and our See-NeRF achieves the best performance. The results of EvHDR-NeRF exhibit slight color deviation and blur artifacts, which stem from inaccurate CRF estimation and unmodeled radiance integration of the RGB sensor. HDR-NeRF+ generates results with elevated luminance but significant color distortion, a limitation primarily attributable to suboptimal radiance estimation of HDRev. Lack of multi-exposure input, RGB-based methods have serious color casts, especially in the overexposed parts of the real data. For the novel exposure NVS task, See-NeRF perfectly recovers both overexposed and underexposed areas, while other methods are affected by color and brightness mismatch as shown in Fig. 6.
+
+# 5.3. Deblurring NVS experiment
+
+In this experiment, we compared our method with recent RGB-based and ERGB-based deblurring NVS works, and the quantitative results are shown in Tab. 2. Our See-NeRF achieves significant performance improvements, especially on the LPIPS, proving that our proposed event and RGB CRF models effectively bridge the sensor-physics discrepancy, strengthening the use of non-ideal data to reconstruct the sharp 3D scene. Fig. 7 shows that See-NeRF successfully recovers the blue eyes and two pink cheek dots of the rabbit, while the best ERGB-based deblurring NVS method E 3NeRF misses these subtle details. The results of the best RGB-based deblurring NVS method, DP-NeRF, are inferior due to the lack of event enhancement.
+
+## 5.4. Ablation study
+
+Effect of RGB CRF model: Comparing See-NeRFBase (training the base model without events) and See-NeRFNoEv (training See-NeRF without events) in Tab. 3 shows that our RGB CRF model enables the network to perform HDR NVS while improving the deblurring NVS results.
+
+2D pixel-wise CRF versus 3D points CRF: The results of See-NeRF3D of Tab. 3 show that substituting our 2D pixelwise RGB CRF model with the 3D point CRF of [4, 6, 19] significantly reduces performance in HDR and deblurring NVS and leads to incorrect CRF curve estimation in Fig. 8. Effect of event input: The second and third lines of Tab. 3 prove that event supervision plays a key role in both HDR and deblurring NVS, as theoretically deduced in Sec. 3. Fig. 8 further indicates that events can help our model to learn the correct CRF curve of the RGB sensor.
+
+Effect of event CRF model: Comparing See-NeRFNoEM and See-NeRF in Tab. 3, our event CRF model marginally helps align the CRF curve (Fig. 8\), achieving further improvement on HDR and Deblurring NVS. However, replacing our event CRF model with the eCRF in EvDeblur-NeRF [5] leads to barely satisfactory reconstruction results and CRF estimation (See-NeRFEvD in Tab. 3 and Fig. 8\).
+
+### 5.5. Discussions
+
+Robustness to LDR images with different exposures and event noise: As shown in Tab. 4, we conduct a robustness experiment on the synthetic "Catroom" scene for the HDR NVS task. Firstly, we use the single-exposure images with exposure times ∆t0, ∆t2, ∆t4 as inputs, respectively. The
+
+Table 3. Quantitative results of our ablation study. The results are the averages of all scenes.
+
+
+
+| See-NeRF Base | Event Input Event CRF Model | RGB CRF model Naive [32, 36, 37] | Our PSNR ↑ | Synthesis Data SSIM ↑ | (HDR) LPIPS ↓ | Our PSNR ↑ | Real Data SSIM ↑ | (HDR) LPIPS ↓ | PSNR ↑ 28.79 | Real-World-Challenge SSIM ↑ .9201 | Data LPIPS ↓ .2939 |
+|---------------|-----------------------------|----------------------------------|------------|-----------------------|---------------|------------|------------------|---------------|--------------|-----------------------------------|--------------------|
+| See-NeRF NoEv |                             | ours                             | 22.19      | .8361                 | .2600         | 19.84      | .7881            | .2502         | 30.22        | .9350                             | .2425              |
+| See-NeRF NoEM | ! Naive [6, 36, 37]         | ours                             | 22.23      | .8682                 | .2254         | 25.87      | .8867            | .1701         | 32.47        | .9547                             | .1686              |
+| See-NeRF 3D   | ! ours                      | 3D Points CRF [4, 6, 19]         | 20.67      | .8561                 | .2306         | 24.95      | .8323            | .1962         | 31.58        | .9534                             | .1634              |
+| See-NeRF EvD  | ! eCRF [5]                  | ours                             | 22.02      | .8669                 | .2474         | 16.43      | .6932            | .3210         | 29.52        | .9267                             | .2776              |
+| See-NeRF      | ! ours                      | ours                             | 24.13      | .8927                 | .1916         | 26.49      | .8953            | .1638         | 32.70        | .9564                             | .1574              |
+
+
+
+Figure 8. Qualitative results (estimated CRF curve and HDR NVS results) on our real "computerhard" scene for the ablation study.
+
+Table 4. Discussion on Robustness of See-NeRF.
+
+
+
+|     |   |     | Robustness |   | to PSNR | Different ∆ ↑ SSIM | t Input ↑ LPIPS ↓ | Noise Level | Robustness PSNR | to Event ↑ SSIM | Noise ↑ LPIPS ↓ |
+|-----|---|-----|------------|---|---------|--------------------|-------------------|-------------|-----------------|-----------------|-----------------|
+| ∆ t | 0 | = 0 | 001        | s | 24.66   | .8886              | .2547             | × 1         | 25.08           | .8956           | .2324           |
+| ∆ t | 2 | = 0 | 016        | s | 25.08   | .8956              | .2324             | × 2         | 24.99           | .8956           | .2342           |
+| ∆ t | 4 | = 0 | 256        | s | 25.68   | .9062              | .2193             | × 4         | 24.86           | .8948           | .2343           |
+
+overall results do not fluctuate significantly, while longer exposure input leads to better results, indicating that the low-light regions of the scene are more difficult to learn than the highlight regions. Secondly, we use events with different noise levels as input. Tab. 4 and the supplement video results on real data show that event noise does not lead to a significant performance degradation, because NeRF training refers to multi-view input, which can inherently weaken the impact of sparse random noise in each individual view, as proved in RawNeRF [33]. Therefore, See-NeRF does not target the processing of event noise, and it could be a future optimization direction of ERGB-based NVS methods.
+
+Table 5. Discussion on training and rendering time and 3DGS.
+
+|             | Novel PSNR ↑ | Exposure SSIM ↑ | LPIPS ↓ | PSNR ↑ | HDR SSIM ↑ | LPIPS ↓ | Training hours | Rendering fps |
+|-------------|--------------|-----------------|---------|--------|------------|---------|----------------|---------------|
+| HDR-GS [4]  | 19.19        | .7745           | .2537   | 9.25   | .4036      | .6376   | 0.03           | 4.29          |
+| Ours + 3DGS | 20.39        | .8204           | .2166   | 18.27  | .7244      | .3481   | 0.05           | 5.11          |
+| Ours        | 24.15        | .8576           | .1154   | 19.43  | .7979      | .2469   | 2.5            | 0.37          |
+
+Training and rendering time and availability on 3DGS: The training time of our See-NeRF (2.5 h) is slightly longer than that of HDR-NeRF (2.1 h) due to the introduction of event-related computation. We also replace the NeRF network of our method with 3DGS and conduct an experiment on the "computerhard" scene of our real data. As shown in Tab. 5, "Ours + 3DGS" is better than HDR-GS, especially on the HDR NVS task, and the training speed is also increased by about 50 times with the high-speed rendering of 3DGS. Note that the rendering speed of "Ours + 3DGS" is even faster than HDR-GS, demonstrating our 2D pixel-wise RGB CRF model is more efficient than the 3D point CRF of HDR-GS. However, the performance of "Ours + 3DGS" is significantly lower than See-NeRF on the novel exposure task. We think this is because the MLP-based CRF model does not perfectly match the 3DGS during optimization, and ERGB-based HDR 3DGS may be a promising future work.
+
+# 6. Conclusion
+
+In this paper, we propose a unified sensor-physics grounded framework, See-NeRF, for deblurring HDR NVS from single-exposure LDR images and corresponding events, which bridges the discrepancy between the scene radiance and the sensor-recorded ERGB data based on the physical imaging laws and the sensor processing characteristics, achieving the state-of-the-art deblurring HDR NVS results.
+
+# Acknowledgements
+
+This work is partially supported by grants from the National Natural Science Foundation of China (No. 62132002), Guizhou Provincial Major Scientific and Technological Program (Qiankehe Zhongda [2025] No. 032), Beijing Nova Program (No.20250484786), the Fundamental Research Funds for the Central Universities, and the China Scholarship Council (No. 202506020106)
+
+# References
+
+[1] Blender Foundation. Blender 3.4.1, 2023. Software available from https://www.blender.org. 5, 11 [2] MS Brown and S Kim. Understanding color and the incamera image processing pipeline for computer vision. In ICCV Tutorial, pages 1–247, 2019. 3 [3] Minh-Quan Viet Bui, Jongmin Park, Jihyong Oh, and Munchurl Kim. Moblurf: Motion deblurring neural radiance fields for blurry monocular video. TPAMI, 2025. 12 [4] Yuanhao Cai, Zihao Xiao, Yixun Liang, Minghan Qin, Yulun Zhang, Xiaokang Yang, Yaoyao Liu, and Alan L Yuille. Hdrgs: Efficient high dynamic range novel view synthesis at 1000x speed via gaussian splatting. Nips, 2024. 2, 6, 7, 8, 11, 12, 15, 16 [5] Marco Cannici and Davide Scaramuzza. Mitigating motion blur in neural radiance fields with events and frames. In CVPR, pages 9286–9296, 2024. 2, 3, 5, 7, 8, 13 [6] Zehao Chen, Zhanfeng Liao, De Ma, Huajin Tang, Qian Zheng, and Gang Pan. Evhdr-nerf: Building high dynamic range radiance fields with single exposure images and events. In AAAI, pages 2376–2384, 2025. 1, 2, 3, 5, 6, 7, 8, 15, 16 [7] Zehao Chen, Zhan Lu, De Ma, Huajin Tang, Xudong Jiang, Qian Zheng, and Gang Pan. Evhdr-gs: Event-guided hdr video reconstruction with 3d gaussian splatting. In AAAI, pages 2367–2375, 2025. 14 [8] Mengyao Cui, Zhigang Wang, Dong Wang, Bin Zhao, and Xuelong Li. Color event enhanced single-exposure hdr imaging. In AAAI, pages 1399–1407, 2024. 3 [9] Paul E Debevec and Jitendra Malik. Recovering high dynamic range radiance maps from photographs. In Seminal Graphics Papers: Pushing the Boundaries, Volume 2, pages 643–652. 2023. 6, 12 [10] Hiroyuki Deguchi, Mana Masuda, Takuya Nakabayashi, and Hideo Saito. E2gs: Event enhanced gaussian splatting. In ICIP, pages 1676–1682. IEEE, 2024. 2, 3, 7, 13 [11] Chaoran Feng, Wangbo Yu, Xinhua Cheng, Zhenyu Tang, Junwu Zhang, Li Yuan, and Yonghong Tian. Ae-nerf: Augmenting event-based neural radiance fields for non-ideal conditions and larger scenes. In AAAI, pages 2924–2932, 2025. 3 [12] Guillermo Gallego, Tobi Delbruck, Garrick Orchard, Chiara ¨ Bartolozzi, Brian Taba, Andrea Censi, Stefan Leutenegger, Andrew J Davison, Jorg Conradt, Kostas Daniilidis, et al. ¨ Event-based vision: A survey. TPAMI, 44(1):154–180, 2020. 2, 3 [13] Haiqian Han, Jianing Li, Henglu Wei, and Xiangyang Ji. Event-3dgs: Event-based 3d reconstruction using 3d gaussian splatting. NIPS, 37:128139–128159, 2025. 3 [14] Jin Han, Chu Zhou, Peiqi Duan, Yehui Tang, Chang Xu, Chao Xu, Tiejun Huang, and Boxin Shi. Neuromorphic camera guided high dynamic range imaging. In CVPR, pages 1730– 1739, 2020. 3 [15] Jin Han, Yixin Yang, Peiqi Duan, Chu Zhou, Lei Ma, Chao Xu, Tiejun Huang, Imari Sato, and Boxin Shi. Hybrid high dynamic range imaging fusing neuromorphic and conventional images. TPAMI, 45(7):8553–8565, 2023. 3 [16] HDRsoft. Photomatix pro 7.1.2, 2024. Software available from https://www.softpedia.com/. 6, 12 [17] Yuhuang Hu, Shih-Chii Liu, and Tobi Delbruck. v2e: From video frames to realistic dvs events. In CVPR, 2021. 5, 11, 14 [18] Junwu Huang, Zhexiong Wan, Zhicheng Lu, Juanjuan Zhu, Mingyi He, and Yuchao Dai. Ev3dgs: Event enhanced 3d gaussian splatting from blurry images. In 2024 Asia Pacific Signal and Information Processing Association Annual Summit and Conference (APSIPA ASC), pages 1–6. IEEE, 2024. 3 [19] Xin Huang, Qi Zhang, Ying Feng, Hongdong Li, Xuan Wang, and Qing Wang. Hdr-nerf: High dynamic range neural radiance fields. In CVPR, 2022. 2, 5, 6, 7, 8, 11, 12, 15, 16 [20] Inwoo Hwang, Junho Kim, and Young Min Kim. Ev-nerf: Event based neural radiance field. In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision, pages 837–847, 2023. 3 [21] Zhe Jiang, Yu Zhang, Dongqing Zou, Jimmy Ren, Jiancheng Lv, and Yebin Liu. Learning event-based motion deblurring. In CVPR, pages 3320–3329, 2020. 3 [22] Xin Jin, Pengyi Jiao, Zheng-Peng Duan, Xingchao Yang, Chongyi Li, Chun-Le Guo, and Bo Ren. Lighting every darkness with 3dgs: Fast training and real-time rendering for hdr view synthesis. NIPS, 37:80191–80219, 2025. 2 [23] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuhler, and ¨ George Drettakis. 3d gaussian splatting for real-time radiance field rendering. TOG, 42(4):139–1, 2023. 1, 2, 14 [24] Dogyoon Lee, Minhyeok Lee, Chajin Shin, and Sangyoun Lee. Dp-nerf: Deblurred neural radiance field with physical scene priors. In CVPR, pages 12386–12396, 2023. 2, 7, 12 [25] Jungho Lee, Donghyeong Kim, Dogyoon Lee, Suhwan Cho, Minhyeok Lee, and Sangyoun Lee. Crim-gs: Continuous rigid motion-aware gaussian splatting from motion-blurred images. arXiv preprint arXiv:2407.03923, 2024. 12 [26] Seungjun Lee and Gim Hee Lee. Diet-gs: Diffusion prior and event stream-assisted motion deblurring 3d gaussian splatting. In CVPR, pages 21739–21749, 2025. 3 [27] Wenpu Li, Pian Wan, Peng Wang, Jinghang Li, Yi Zhou, and Peidong Liu. Benerf: neural radiance fields from a single blurry image and event stream. In ECCV, pages 416–434. Springer, 2024. 3 [28] Songnan Lin, Jiawei Zhang, Jinshan Pan, Zhe Jiang, Dongqing Zou, Yongtian Wang, Jing Chen, and Jimmy Ren. Learning event-driven video deblurring and interpolation. In ECCV, pages 695–710. Springer, 2020. 3 [29] Jinfeng Liu, Lingtong Kong, Bo Li, and Dan Xu. Gausshdr: High dynamic range gaussian splatting via learning unified 3d and 2d local tone mapping. In CVPR, 2025. 2, 6, 11, 12, 15, 16 [30] Weng Fei Low and Gim Hee Lee. Robust e-nerf: Nerf from sparse & noisy events under non-uniform motion. In ICCV, pages 18335–18346, 2023. 3 [31] Weng Fei Low and Gim Hee Lee. Deblur e-nerf: Nerf from motion-blurred events under high-speed or low-light conditions. In ECCV, pages 192–209. Springer, 2024. 2, 3, 14 [32] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 1, 2, 4, 8 [33] Ben Mildenhall, Peter Hedman, Ricardo Martin-Brualla, Pratul P Srinivasan, and Jonathan T Barron. Nerf in the dark: High dynamic range view synthesis from noisy raw images. In CVPR, pages 16190–16199, 2022. 2, 8 [34] Mohammad Mostafavi, Lin Wang, and Kuk-Jin Yoon. Learning to reconstruct hdr images from events, with applications to depth and flow prediction. IJCV, 129(4):900–920, 2021. 3 [35] Liyuan Pan, Cedric Scheerlinck, Xin Yu, Richard Hartley, Miaomiao Liu, and Yuchao Dai. Bringing a blurry frame alive at high frame-rate with an event camera. In CVPR, pages 6820–6829, 2019. 3, 6 [36] Yunshan Qi, Lin Zhu, Yu Zhang, and Jia Li. E2 nerf: Event enhanced neural radiance fields from blurry images. In ICCV, pages 13254–13264, 2023. 2, 3, 4, 5, 6, 7, 8, 12, 13 [37] Yunshan Qi, Jia Li, Yifan Zhao, Yu Zhang, and Lin Zhu. E nerf: Efficient event-enhanced neural radiance fields from blurry images, 2024. 4, 5, 7, 8, 11, 12, 13, 14 [38] Yunshan Qi, Lin Zhu, Yifan Zhao, Nan Bao, and Jia Li. Deblurring neural radiance fields with event-driven bundle adjustment. In ACM MM, pages 9262–9270, 2024. 2, 3, 7, 12 [39] Henri Rebecq, Rene Ranftl, Vladlen Koltun, and Davide ´ Scaramuzza. High speed and high dynamic range video with an event camera. TPAMI, 43(6):1964–1980, 2019. 3 [40] Erik Reinhard, Michael Stark, Peter Shirley, and James Ferwerda. Photographic tone reproduction for digital images. In Seminal Graphics Papers: Pushing the Boundaries, Volume 2, pages 661–670. 2023. 11 [41] Viktor Rudnev, Mohamed Elgharib, Christian Theobalt, and Vladislav Golyanik. Eventnerf: Neural radiance fields from a single colour event camera. In CVPR, pages 4992–5002, 2023. 3 [42] Johannes Lutz Schonberger and Jan-Michael Frahm. ¨ Structure-from-motion revisited. In CVPR, 2016. 4 [43] Wei Shang, Dongwei Ren, Dongqing Zou, Jimmy S Ren, Ping Luo, and Wangmeng Zuo. Bringing events into video deblurring with non-consecutively blurry frames. In ICCV, pages 4531–4540, 2021. 3 [44] Wei Zhi Tang, Daniel Rebain, Konstantinos G Derpanis, and Kwang Moo Yi. Lse-nerf: Learning sensor modeling errors for deblured neural radiance fields with rgb-event stereo. In 2025 International Conference on 3D Vision (3DV), pages 534–543. IEEE, 2025. 3 [45] Gemma Taverni, Diederik Paul Moeys, Chenghan Li, Celso Cavaco, Vasyl Motsnyi, David San Segundo Bello, and Tobi Delbruck. Front and back illuminated dynamic and active pixel vision sensors comparison. IEEE Transactions on Circuits and Systems II: Express Briefs, 65(5):677–681, 2018. 6, 11 [46] Lin Wang, Yo-Sung Ho, Kuk-Jin Yoon, et al. Event-based high dynamic range image and very high frame rate video generation using conditional generative adversarial networks. In CVPR, pages 10081–10090, 2019. 3 [47] Peng Wang, Lingzhe Zhao, Ruijie Ma, and Peidong Liu. Badnerf: Bundle adjusted deblur neural radiance fields. In CVPR, pages 4170–4179, 2023. 2, 7, 12 [48] Ziwei Wang, Yonhon Ng, Cedric Scheerlinck, and Robert Mahony. An asynchronous kalman filter for hybrid event cameras. In ICCV, pages 448–457, 2021. 3 [49] Ziwei Wang, Yonhon Ng, Cedric Scheerlinck, and Robert Mahony. An asynchronous linear filter architecture for hybrid event-frame cameras. TPAMI, 46(2):695–711, 2023. 3 [50] Guanjun Wu, Taoran Yi, Jiemin Fang, Wenyu Liu, and Xinggang Wang. Fast high dynamic range radiance fields for dynamic scenes. In 2024 International Conference on 3D Vision (3DV), pages 862–872. IEEE, 2024. 2 [51] Fang Xu, Lei Yu, Bishan Wang, Wen Yang, Gui-Song Xia, Xu Jia, Zhendong Qiao, and Jianzhuang Liu. Motion deblurring with real events. In ICCV, pages 2583–2592, 2021. 3 [52] Yixin Yang, Jin Han, Jinxiu Liang, Imari Sato, and Boxin Shi. Learning event guided high dynamic range video reconstruction. In CVPR, pages 13924–13934, 2023. 3, 6, 15 [53] Sheng Ye, Zhen-Hui Dong, Yubin Hu, Yu-Hui Wen, and Yong-Jin Liu. Gaussian in the dark: Real-time view synthesis from inconsistent dark images using gaussian splatting. In Computer Graphics Forum, page e15213. Wiley Online Library, 2024. 2, 6, 11, 12, 15, 16 [54] Wangbo Yu, Chaoran Feng, Jianing Li, Jiye Tang, Jiashu Yang, Zhenyu Tang, Meng Cao, Xu Jia, Yuchao Yang, Li Yuan, et al. Evagaussians: Event stream assisted gaussian splatting from blurry images. In ICCV, pages 24780–24790, 2025. 3 [55] Toshiya Yura, Ashkan Mirzaei, and Igor Gilitschenski. Eventsplat: 3d gaussian splatting from moving event cameras for real-time rendering. In CVPR, pages 26876–26886, 2025. 3 [56] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In CVPR, pages 586–595, 2018. 6 [57] Zixin Zhang, Kanghao Chen, and Lin Wang. Elite-evgs: Learning event-based 3d gaussian splatting by distilling event-to-video priors. In IEEE International Conference on Robotics and Automation (ICRA), pages 13972–13978. IEEE, 2025. 3 [58] Lingzhe Zhao, Peng Wang, and Peidong Liu. Bad-gaussians: Bundle adjusted deblur gaussian splatting. In ECCV, pages 233–250. Springer, 2024. 2, 12 [59] Yunhao Zou, Yinqiang Zheng, Tsuyoshi Takatani, and Ying Fu. Learning to reconstruct high speed and high dynamic range videos from events. In CVPR, pages 2024–2033, 2021. 3 [60] Yunhao Zou, Chenggang Yan, and Ying Fu. Rawhdr: High dynamic range image reconstruction from a single raw image. In ICCV, pages 12334–12344, 2023. 6, 12 [61] Yunhao Zou, Ying Fu, Tsuyoshi Takatani, and Yinqiang Zheng. Eventhdr: From event to high-speed hdr videos and beyond. TPAMI, 47(1):32–50, 2025. 3
+
+#### A. Details of event calibration and division
+
+Photometric quantity calibration function h(·): For the input event bin B(ti , ti+1) between ti and ti+1, we use (x, y, ti first, pi first) and (x, y, ti last, pi last) to represent the first and last triggered event at pixel (x, y), respectively. Then we can calculate the offset of each pixel for the input event bin B(ti , ti+1) with:
+
+
+$$h(B(t_i, t_{i+1})) = \phi\left(\frac{(t_{i+1} - t_{\text{last}}^i)}{t_{\text{first}}^{i+1} - t_{\text{last}}^i}, p_{\text{first}}^{i+1}\right) - \phi\left(\frac{(t_i - t_{\text{last}}^i)}{t_{\text{first}}^i - t_{\text{last}}^{i-1}}, p_{\text{first}}^i\right), \quad (16)$$
+
+where ϕ(·) is a conditional function to determine whether there are adjacent events triggered before and after the current event bin, and whether the polarities are consistent:
+
+$$\phi(z, p_{\text{first}}^i) = \begin{cases} z p_{\text{first}}^i & \text{if } p_{\text{first}}^i = p_{\text{last}}^{i-1} \\ 0 & \text{if } p_{\text{first}}^i \neq p_{\text{last}}^{i-1} \\ 0.5 & \text{if } \nexists p_{\text{first}}^i \vee \nexists p_{\text{last}}^{i-1} \end{cases} \quad (17)$$
+
+Since the above operations are the same for all pixels, we omit the (x, y) in Eq. \(16\) and Eq. \(17\).
+
+Events division: For each training view, we split the input event stream B(tstart, tend) that corresponding to the input LDR blurry image ILDR into b bins B(ti , ti+1)} b−1 i=0 , where t0 = tstart and tb = tend are the start and end exposure time of the image. t1, ..., tb−1 are the time points that divide the event stream into b event bins with an equal number of events as in the E3NeRF [37], which leverages the temporal blur prior in event distribution for event loss optimization, achieving better performance.
+
+# B. Details of our dataset generation
+
+# B.1. Synthetic dataset:
+
+Our synthetic dataset consists of 8 HDR Blender [1] scenes ("bathroom", "catroom", "dogroom", "diningroom", "sofa", "sponza", "toyroom", "warmroom") in the synthetic data of HDR-NeRF [19], which contain both highlight and darkness areas in each scene, resulting in the rendered single-exposure images containing both overexposure and underexposure areas as in the first column of Fig. 12. All synthetic data are at a resolution of 400 × 400. Below, we introduce the training and test data generation process, respectively.
+
+Training images and events generation: For each scene, there are 18 views of LDR blurry images with a singleexposure time ∆t2 and corresponding events within the exposure time for training. For each view, we add camera shaking and generate 17 sharp HDR raw images {Ii HDR} 16 i=0 at time ti with camera poses p(ti). The camera pose p(ti) changes over time, indicating the camera shake process. Note that tstart ≤ ti ≤ tend, where tstart and tend are the start time and
+
+end time of the exposure as defined in the main paper. Then the 17 sharp HDR raw images are averaged to obtain the blurred HDR raw image I blur HDR. We used the classic Reinhard tone mapping [40] algorithm in Eq. \(18\) to convert the blurred HDR raw image into an LDR blurred image with exposure time ∆t2 for training as in HDR-NeRF [19]:
+
+
+$$\mathcal{I}_{\text{LDR}}^{\Delta t_2} = \left( \frac{\Phi \Delta t_2 \mathcal{I}_{\text{HDR}}^{\text{blur}}}{\Phi \Delta t_2 \mathcal{I}_{\text{HDR}}^{\text{blur}} + 1} \right)^{\frac{1}{2.2}}. \quad (18)$$
+
+Φ is a scale factor, and we take it as 62.5. The 17 sharp HDR raw images {Ii HDR} 16 i=0 are also input into the event simulator v2e [17] with "noisy" option, which involves the event latency and noise simulation into the data generation. Then the events corresponding to the synthetic LDR blurry image I ∆t2 LDR is obtained:
+
+$$B(t_{\text{start}}, t_{\text{end}}) = \mathbf{v}\mathbf{2e}(\{\mathcal{I}_{\text{HDR}}\}_{i=0}^{16}). \quad (19)$$
+
+Note that we add a Bayer filter in the v2e to generate the color events as in the DAVIS 346 Color [45] event camera. Additional training images: For each training view, we also use Eq. \(18\) to tone map the 8-th raw sharp image I 7 HDR in {Ii HDR} 16 i=0 into LDR domain with exposure times ∆t0, ∆t2 and ∆t4, which are used to train the RGB-based HDR NVS works [4, 19, 29, 53] without deblurring effects and to train HDR-NeRF [19] with multi-exposure sharp LDR images as input for reference.
+
+Test images generation: For each scene, there are 17 novel views for testing. For each test view, we render 1 groundtruth (GT) sharp HDR raw image I sharp HDR with Blender for the HDR novel view synthesis (NVS) test. We also use Eq. \(18\) to transform the sharp HDR image I sharp HDR into two GT sharp LDR images with novel exposure times ∆t1 and ∆t3 for the novel exposure NVS test.
+
+### B.2. Real dataset:
+
+Our real dataset consists of 5 real-world extreme lighting scenes ("bear", "computer", "computerhard", "desktop", "table") with both highlight and darkness areas, resulting in the captured single-exposure LDR images containing both overexposure and underexposure areas. The upper part of Tab. 6 shows the minimum and maximum luminance of the scenes in our real data, which contains a very wide dynamic range. All data is obtained by a DAVIS 346 Color camera [45], which can capture spatial-temporal aligned images and corresponding events at resolution 346 × 260.
+
+Training images and events generation: For each scene, there are 16 training views. For each view, we capture 1 LDR blurry image at a single-exposure time ∆t2 and corresponding events within the exposure time with a handheld DAVIS 346 Color camera.
+
+Additional training images: For each training view, we also capture three sharp LDR images with exposure times ∆t0,
+
+Table 6. The illumination conditions of our real-world scenes and the exposure time settings of our synthetic and real-world datasets.
+
+|           |           |     |   | Synthetic |   |      |     |                      | Real-World |       | Scenes |         |     |       |     |
+|-----------|-----------|-----|---|-----------|---|------|-----|----------------------|------------|-------|--------|---------|-----|-------|-----|
+|           |           |     |   | Scenes    |   | Bear |     | ComputerComputerhard |            |       |        | Desktop |     | Table |     |
+| Min Scene | luminance |     |   |           |   | 70   | lux | 50                   | lux        | 30    | lux    | 20      | lux | 10    | lux |
+| Max Scene | luminance |     |   |           |   | 2000 | lux | 4000                 | lux        | 5000  | lux    | 1000    | lux | 1500  | lux |
+| Exposure  | Time      | ∆ t | 0 | 0.001     | s | 0.05 | s   | 0.02                 | s          | 0.002 | s      | 0.05    | s   | 0.05  | s   |
+| Exposure  | Time      | ∆ t | 1 | 0.004     | s | 0.10 | s   | 0.04                 | s          | 0.004 | s      | 0.10    | s   | 0.10  | s   |
+| Exposure  | Time      | ∆ t | 2 | 0.016     | s | 0.15 | s   | 0.06                 | s          | 0.006 | s      | 0.15    | s   | 0.15  | s   |
+| Exposure  | Time      | ∆ t | 3 | 0.064     | s | 0.20 | s   | 0.08                 | s          | 0.008 | s      | 0.20    | s   | 0.20  | s   |
+| Exposure  | Time      | ∆ t | 4 | 0.256     | s | 0.25 | s   | 0.10                 | s          | 0.010 | s      | 0.25    | s   | 0.25  | s   |
+
+∆t2, and ∆t4 with a tripod-fixed DAIVS 346 Color camera to train the RGB-based HDR NVS works [4, 19, 29, 53] without deblurring effects and to train HDR-NeRF [19] with multi-exposure sharp LDR images as input for reference.
+
+Test images generation: For each scene, there are 12 novel views for testing. For each test view, we capture 5 LDR sharp images with exposure times {∆ti} 4 i=0 with a tripodfixed DAIVS 346 Color camera. The LDR sharp images with novel exposure times ∆t1 and ∆t3 are used for the novel exposure NVS test, which is the same as the synthetic dataset. The GT HDR sharp image for the HDR NVS test is obtained by merging the five LDR sharp images with exposure times {∆ti} 4 i=0 with the classic multi-exposure HDR reconstruction algorithm Debevec [9] as in RawHDR [60].
+
+# C. Implementation details
+
+Our framework is built upon E2NeRF [36], and all experiments are conducted on a single RTX 3090 GPU. We set the number of sampled points on each ray to 64 and 128 for the coarse and fine networks, respectively. The batch size of sampled rays is set to 512 and 1024 for the real data and synthetic data, respectively, and we take 50k iterations for each scene. The above NeRF network settings are the same for all the compared NeRF-based methods and our See-NeRF in the experiments. For the 3DGS-based methods, the number of iterations is set to 30000, and other parameters are set to their default parameter. For the detailed evaluation of hyperparameters b, λ, and training time of our See-NeRF, please refer to Sec. D.2.
+
+### C.1. Exposure time settings
+
+The lower part of Tab. 6 shows the value of exposure times {∆ti} 4 i=0 of our synthetic and real datasets. For the Real-World-Challenge dataset [37] of the deblurring experiment, the exposure times of the input blurry images are 0.1 s, 0.12 s, 0.1 s, 0.1 s, 0.15 s, for the "corridor", "lab", "lobby", "shelf", "table" scenes, respectively. We use these exposure times to train and test our See-NeRF to obtain the corresponding deblurred novel view LDR images.
+
+Table 7. Evaluation of the HDR NVS performance boundaries between multi-exposure RGB-based HDR-NeRF and our singleexposure ERGB-based See-NeRF on the real "Table" scene.
+
+|                        | Real “Table” Scene of Our Dataset               |
+|------------------------|-------------------------------------------------|
+|                        | Input Data HDR Results                          |
+|                        | Exposure Time Image Event PSNR ↑ SSIM ↑ LPIPS ↓ |
+| HDR-NeRF ref           | ∆ t 0 , ∆ t 2 , ∆ t 4 Sharp 28.23 .9207 .1550   |
+| HDR-NeRF ∆ t 2 , ∆ t 4 | ∆ t 2 , ∆ t 4 Sharp 21.78 .8404 .1867           |
+| HDR-NeRF ∆ t 2         | ∆ t 2 Sharp 12.47 .6804 .3551                   |
+| HDR-NeRF ref-blur      | ∆ t 0 , ∆ t 2 , ∆ t 4 Blurry 25.54 .8640 .3017  |
+| See-NeRF               | ∆ t 2 Blurry ! 27.12 .9093 .1548                |
+
+#### C.2. Pose estimation
+
+We use the pose generation framework of E2NeRF [36] to obtain the poses {p(ti)} b i=0 corresponding to the blurry images for all the compared methods and our See-NeRF, which ensures the input poses are the same, so the reconstruction result is only affected by the network architecture. Recent RGB-based deblurring NVS works provide different camera pose estimation strategies [24, 47, 58] and dynamic scene pose estimation strategies [3, 25]. Integrating the event supervision into these methods would be a promising future research direction for the ERGB-based HDR deblurring NVS task, as demonstrated in EBAD-NeRF [38].
+
+# C.3. Evaluation of HDR results
+
+For the HDR NVS task, we first use the "Enhancer" and "Compressor" options of Photomatrix Pro [16] to tone map the reconstructed and ground truth HDR images into the LDR domain for the synthetic and real data, respectively. Then, we use the tone-mapped images to quantitatively and qualitatively evaluate our results in our main paper and supplementary materials, as in [4, 19].
+
+# D. Additional evaluations
+
+#### D.1. Single-exposure vs. multi-exposure
+
+In this experiment, we train HDR-NeRF [19] with different input exposure ranges to evaluate the HDR NVS performance boundaries of multi-exposure RGB-based HDR-NeRF and our single-exposure ERGB-based See-NeRF.
+
+Quantitative results: HDR-NeRFref in Tab. 7 demonstrates that multi-exposure RGB-based HDR-NeRF only surpasses our single-exposure ERGB-Based See-NeRF in overall performance when the input LDR images are sharp and cover exposure times at all three scales: short (∆t0), medium (∆t2), and long (∆t4). When the input images are motionblurred, the results of HDR-NeRFref-blur will be significantly affected by the motion blur and degraded. In contrast, our See-NeRF achieves the best HDR NVS results with blurry single-exposure LDR images and corresponding events.
+
+Qualitative results: HDR-NeRF∆t2 in Fig. 9 illustrates that with images with single-exposure time ∆t2 as input,
+
+
+
+Figure 9. Evaluation of the HDR NVS performance boundaries between multi-exposure RGB-based HDR-NeRF and our single-exposure ERGB-based See-NeRF on the real "Table" scene. The upper and lower parts of the figure are the estimated CRF curves and HDR NVS results, respectively. See-NeRF can effectively leverage events to replace the CRF curve correction effect of the LDR images with exposure times ∆t0 and ∆t4 in HDR-NeRFref. Besides, See-NeRF is also robust to the image motion blur compared to HDR-NeRFref-blur .
+
+the estimated CRF curve deviates completely from GT, and the HDR NVS results are also completely distorted. When adding the images with longer exposure time ∆t4 for training, HDR-NeRF∆t2, ∆t4 can accurately recover the CRF curve of the low-light area. At the same time, there is still a deviation in the CRF curve of the highlight area, and the HDR NVS results will show a color cast in the highlight area. When further adding the images with shorter exposure time ∆t0, the CRF curve of the highlight area is further corrected and closer to the GT CRF curve, as shown in the results of HDR-NeRFref. However, in the case of blurry input, the estimated CRF curves of HDR-NeRFref-blur are distorted, and the reconstruction results are blurred. In comparison, See-NeRF achieves accurate CRF curve estimation and produces sharp, high-quality HDR NVS results. This demonstrates that See-NeRF effectively leverages spatial and temporal differential information of events in low-light, highlight, and blurry regions to infer the actual scene brightness to enhance CRF estimation and eliminate the effects of blurred input, which is consistent with the theoretical proof in Sec. 3.
+
+Table 8. Evaluation of parameter b and training time.
+
+
+
+| b | HDR PSNR | (“Desktop” ↑ SSIM | scene) ↑ LPIPS | ↓ PSNR | Deblurring (“Lab” ↑ SSIM | scene) ↑ LPIPS | Time ↓ hours |
+|---|----------|-------------------|----------------|--------|--------------------------|----------------|--------------|
+| 2 | 27.10    | .9127             | .1930          | 33.98  | .9657                    | .1458          | 1.75         |
+| 4 | 28.13    | .9152             | .1796          | 34.56  | .9681                    | .1374          | 2.50         |
+| 6 | 26.89    | .8856             | .1842          | 35.21  | .9712                    | .1277          | 3.23         |
+| 8 | 26.49    | .8753             | .1834          | 35.57  | .9742                    | .1193          | 3.95         |
+
+### D.2. Parameters and efficiency
+
+Parameter b: b in Eq. (6) represents the discretization of Eq. (1) with b discrete time points. Therefore, a larger b leads to better simulation of the imaging process and generates better results, but at the same time requires more iterations and increases the training time as shown in Tab. 8. For the
+
+HDR NVS task, when b = 4, See-NeRF gets the best results. For the deblurring NVS task, when b > 6, the improvement is marginal. So we set b = 4 for the HDR and novel exposure NVS experiments on our proposed real-world datasets and b = 6 for the deblurring NVS experiments for the Real-World-Challenge dataset.
+
+Training and rendering time: Compared to HDR-NeRF (2.1h), See-NeRF (2.5h) increases computation and training time by 19.05% under the same conditions (same NeRFrelated parameters, number of iterations, and batch size; on a single RTX 3090 GPU; on our real dataset). The increased computation is mainly due to the event-related calculations. However, the rendering speed of See-NeRF (0.37 fps) is slightly faster than HDR-NeRF (0.35 fps) under a resolution of 346\*260. This is mainly because no events are involved during test time, and our 2D pixel-wise tone mapping is more efficient than the 3D points tone mapping of HDR-NeRF.
+
+
+
+Figure 10. Evaluation of parameter λ.
+
+Parameter λ: As in Fig. 10, we evaluate the impact of λ on the real-world "desktop" and "lab" scenes for the HDR and deblurring NVS tasks, respectively. When λ = 0.005, See-NeRF can achieve the best overall results on both tasks.
+
+### D.3. Sensor-Physics grounded deblurring effect
+
+Our See-NeRF significantly surpasses previous ERGBbased deblurring NVS methods E2NeRF [36], E3NeRF [37], E2GS [10], and Ev-DeblurNeRF [5] as shown in Tab. 16. This is because these methods all perform the motion blur
+
+Table 9. Results of the ablation study on previous related CRF models. The results are the averages of all scenes. LPF: Low-Pass Filter
+
+|                   | Event CRF Model                               | RGB CRF Model              | Our PSNR ↑ | Real Data SSIM ↑ | (HDR) LPIPS ↓ | PSNR ↑ | Real-World-Challenge SSIM ↑ | Data LPIPS ↓ |
+|-------------------|-----------------------------------------------|----------------------------|------------|------------------|---------------|--------|-----------------------------|--------------|
+| See-NeRF Pow      | ours                                          | Power Function F ( x ) = x |            |                  |               |        |                             |              |
+|                   |                                               | a CRF [7]                  | 19.75      | .7239            | .2696         | 28.35  | .9242                       | .2657        |
+| See-NeRF          | ours                                          | MLP-Based CRF (ours)       | 26.49      | .8953            | .1638         | 32.70  | .9564                       | .1574        |
+| See-NeRF v2e      | Explicitly Parameterized 2nd-Order LPF [17]   | ours                       | 22.10      | .8644            | .1938         | 30.51  | .9441                       | .1748        |
+| See-NeRF Deblur e | Explicitly Parameterized 4th-Order LPF [31]   | ours                       | 24.28      | 8859             | .1847         | 31.84  | .9521                       | .1664        |
+| See-NeRF          | Implicitly MLP-Optimized 2nd-Order LPF (ours) | ours                       | 26.49      | .8953            | .1638         | 32.70  | .9564                       | .1574        |
+
+
+
+Figure 11. Analysis of sensor-physics grounded deblurring effect.
+
+and events synthesis directly on the nonlinear LDR images rendered by their 3D representation network, as shown in Fig. 11. In contrast, our See-NeRF performs the motion blur and events synthesis on the linear raw HDR values of the scene radiance rendered by the NeRF network, and then tone maps the blurry raw HDR image to the LDR domain, aligning with the physical imaging process of sensors in the real world. On the other hand, our event CRF model eliminates the effects of event delay and further improves the performance. Therefore, See-NeRF achieves SOTA results in the ERGB-based deblurring NeRF task.
+
+## D.4. Ablation on previous related CRF models
+
+We conduct an ablation study on previous related CRF models on our real-world dataset and the Real-World-Challenge dataset, respectively, as shown in Tab. 9
+
+RGB CRF model of EvHDR-GS [7]: Recently, EvHDR-GS uses 3DGS [23] as a backbone for the ERGB-based HDR video reconstruction task. Though it uses a similar design that RGB CRF is applied after volumetric rendering, it does not consider the image integration process and simply models the RGB CRF with one power function F(x) = x a for the three color channels during the 2D tone mapping, while See-NeRF address these two aspects with Eq. (6) in the main paper and a three-independent MLP-Based RGB CRF model, as shown in the Fig. 3 of the main paper. Therefore, applying its imaging model to See-NeRF degrades the performance significantly on both HDR and deblurring NVS tasks, as shown in the results of See-NeRFPow in Tab. 9.
+
+Event CRF model of v2e [17] and Deblur e-NeRF [31]: v2e and Deblur e-NeRF models intensity-dependent pixel bandwidth and latency with the explicitly parameterized 2ndorder and 4th-order low-pass filter, respectively. However, our See-NeRF incorporates scene/camera-related event delay factors into an MLP to calculate the delay coefficient for the 2nd-order low-pass filter. Replacing our event CRF model with the models of v2e and Deblur e-NeRF weakens the performance of See-NeRF on both deblurring and HDR tasks, as in the results of See-NeRFv2e and See-NeRFDeblur e in Tab. 9, proving the effectiveness of our event CRF model.
+
+# E. Supplementary detailed results
+
+# E.1. Detailed quantitative results
+
+Our synthetic dataset: Tab. 10 and Tab. 11 illustrate the detailed quantitative novel exposure NVS results on each scene of our synthetic dataset. See-NeRF achieves the best overall performance. In certain scenes, the novel exposure results of the compared RGB-based HDR NVS methods are better than those of See-NeRF because it uses sharp images as input. Besides, the detailed quantitative results in Tab. 12 and Tab. 13 illustrate that their performance drops significantly on the HDR NVS task, indicating that they are overfitted to the LDR image supervision, thus learning a wrong scene HDR representation. In contrast, See-NeRF achieves the best HDR NVS results for all three metrics.
+
+Our real dataset: Tab. 14 and Tab. 15 illustrate the detailed quantitative novel exposure and HDR NVS results on each scene of our real dataset. Some results of the compared RGBbased HDR NVS methods are better than those of See-NeRF on LPIPS due to the sharp images input, while our See-NeRF still achieves the best overall performance. For the HDR experiment, See-NeRF is even better than HDR-NeRFref in "Bear", "Computerhard", and "Desktop" scenes, resulting in its average results in Tab. 1 of the main paper outperforming HDR-NeRFref. This is likely attributable to the low imaging quality of the DAVIS 346 RGB sensor, which is not suitable for RGB-based methods.
+
+Real-World-Challenge dataset: Tab. 16 illustrates the detailed quantitative deblurring NVS results on each scene of the Real-World-Challenge dataset [37]. Our See-NeRF realizes the SOTA performance compared to the previous RGB-based and ERGB-based deblurring NVS methods.
+
+Table 10. Detailed quantitative novel exposure NVS results on each scene of our synthetic dataset.
+
+
+
+| Methods               |           |        | Image | Input |   |           | Event PSNR | Bathroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Catroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Diningroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Dogroom ↑ SSIM | ↑ LPIPS ↓ |
+|-----------------------|-----------|--------|-------|-------|---|-----------|------------|-----------------|---------|--------|----------------|---------|--------|-------------------|---------|--------|----------------|-----------|
+| Reference HDR-NeRF    | ref Sharp | ( ∆    | t 0 , | ∆ t   | 2 | , ∆ t 4 ) | 29.69      | .9148           | .1798   | 26.56  | .9089          | .1589   | 29.02  | .9493             | .1053   | 25.20  | .8537          | .1028     |
+| HDR NVS               |           |        |       |       |   |           |            |                 |         |        |                |         |        |                   |         |        |                |           |
+| HDR-NeRF              | [19]      | Sharp  | (     | ∆ t   | 2 | )         | 27.13      | .9161           | .1920   | 24.56  | .8954          | .1769   | 23.68  | .9454             | .1002   | 21.11  | .8382          | .1088     |
+| HDR-GS RGB-Based      | [4]       | Sharp  | (     | ∆ t   | 2 | )         | 17.17      | .7536           | .3440   | 15.66  | .7041          | .3088   | 12.73  | .6970             | .4790   | 13.24  | .7189          | .3377     |
+| Gaussian-DK           | [53]      | Sharp  | (     | ∆ t   | 2 | )         | 29.99      | .9599           | .1580   | 28.46  | .9478          | .1636   | 21.21  | .9142             | .1409   | 24.24  | .9714          | .1593     |
+| GaussHDR              | [29]      | Sharp  | (     | ∆ t   | 2 | )         | 15.30      | .7288           | .1925   | 14.37  | .7367          | .1858   | 12.73  | .7483             | .2230   | 12.03  | .7115          | .2473     |
+| HDR NVS               |           |        |       |       |   |           |            |                 |         |        |                |         |        |                   |         |        |                |           |
+| HDR-NeRF+ ERGB-Based  |           | Blurry | (     | ∆ t   | 2 | )         | ! 19.50    | .7311           | .3197   | 18.58  | .7288          | .2970   | 14.59  | .7336             | .2699   | 14.74  | .5893          | .3586     |
+| EvHDR-NeRF Deblurring | [6]       | Blurry | (     | ∆ t   | 2 | )         | ! 26.43    | .8729           | .3124   | 25.11  | .8855          | .3249   | 20.45  | .8412             | .2847   | 22.81  | .8229          | .2903     |
+| See-NeRF              |           | Blurry | (     | ∆ t   | 2 | )         | ! 28.13    | .9141           | .1596   | 27.45  | .9214          | .1774   | 23.28  | .9315             | .1314   | 24.81  | .8678          | .1430     |
+
+Table 11. Detailed quantitative novel exposure NVS results on each scene of our synthetic dataset.
+
+
+
+| Methods               |           |        | Image | Input |   |           | Event PSNR | Sofa ↑ SSIM | ↑ LPIPS | ↓ PSNR | Sponza ↑ SSIM | ↑ LPIPS | ↓ PSNR | Toyroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Warmroom ↑ SSIM | ↑ LPIPS ↓ |
+|-----------------------|-----------|--------|-------|-------|---|-----------|------------|-------------|---------|--------|---------------|---------|--------|----------------|---------|--------|-----------------|-----------|
+| Reference HDR-NeRF    | ref Sharp | ( ∆    | t 0 , | ∆ t   | 2 | , ∆ t 4 ) | 30.66      | .9292       | .1139   | 31.49  | .9555         | .1161   | 31.69  | .9641          | .0694   | 29.47  | .9224           | .1657     |
+| HDR NVS               |           |        |       |       |   |           |            |             |         |        |               |         |        |                |         |        |                 |           |
+| HDR-NeRF              | [19]      | Sharp  | (     | ∆ t   | 2 | )         | 20.48      | .9199       | .1248   | 29.48  | .9504         | .1252   | 25.48  | .9569          | .0934   | 24.97  | .9200           | .1583     |
+| HDR-GS RGB-Based      | [4]       | Sharp  | (     | ∆ t   | 2 | )         | 12.97      | .7777       | .2391   | 18.78  | .7352         | .4568   | 15.04  | .7682          | .3198   | 15.42  | .7873           | .3411     |
+| Gaussian-DK           | [53]      | Sharp  | (     | ∆ t   | 2 | )         | 24.46      | .9787       | .1351   | 20.27  | .6563         | .3864   | 28.63  | .9681          | .1526   | 29.74  | .9609           | .1378     |
+| GaussHDR              | [29]      | Sharp  | (     | ∆ t   | 2 | )         | 13.79      | .7391       | .2252   | 22.34  | .8678         | .2037   | 12.49  | .7607          | .2293   | 14.50  | .7589           | .2164     |
+| HDR NVS               |           |        |       |       |   |           |            |             |         |        |               |         |        |                |         |        |                 |           |
+| HDR-NeRF+ ERGB-Based  |           | Blurry | (     | ∆ t   | 2 | )         | ! 18.22    | .7045       | .2436   | 18.06  | .6032         | .2696   | 17.18  | .8291          | .1948   | 20.15  | .8232           | .2753     |
+| EvHDR-NeRF Deblurring | [6]       | Blurry | (     | ∆ t   | 2 | )         | ! 24.04    | .9048       | .2283   | 24.40  | .8551         | .2655   | 25.70  | .9142          | .2871   | 26.05  | .8728           | .2850     |
+| See-NeRF              |           | Blurry | (     | ∆ t   | 2 | )         | ! 28.03    | .9399       | .1075   | 33.33  | .9693         | .0929   | 28.76  | .9533          | .0937   | 26.75  | .9185           | .1572     |
+
+# E.2. Detailed qualitative results
+
+Our synthetic dataset: Fig. 12 shows the detailed qualitative HDR NVS results on our synthetic dataset. The results of See-NeRF are closest to GT across all scenes. HDR-GS suffers from severe color shifts. HDR-NeRF fails to reconstruct the overexposed and underexposed areas. HDR-NeRF+ is limited by the HDREv-Net [52], which only achieves a brightening effect relative to the input image without fully restoring the scene color details. EvHDR-NeRF still suffers from slight color casts and motion blur.
+
+Our real dataset Fig. 13 shows the detailed qualitative HDR NVS results on our real dataset, and the results of See-NeRF are closest to GT across all scenes. The compared methods show the same phenomenon as in the synthetic data.
+
+Real-World-Challenge dataset Fig. 14 shows the detailed qualitative deblurring NVS results on the Real-World-Challenge dataset. See-NeRF shows impressive deblurring performance compared to other methods. Note that EvHDR-NeRF is significantly affected by the motion blur.
+
+# E.3. Supplementary video results
+
+We also provide supplementary video rendering results to show the impressive HDR and deblurring novel view synthesis results of See-NeRF and the robustness to noise events of our framework. We highly recommend that the reviewers refer to the attached video for details on our project web page: [https://icvteam.github.io/See-](https://icvteam.github.io/See-NeRF.html)[NeRF.html](https://icvteam.github.io/See-NeRF.html).
+
+Table 12. Detailed quantitative HDR NVS results on each scene of our synthetic dataset.
+
+
+
+| Methods               |           |        | Image | Input |   |           | Event PSNR | Bathroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Catroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Diningroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Dogroom ↑ SSIM | ↑ LPIPS ↓ |
+|-----------------------|-----------|--------|-------|-------|---|-----------|------------|-----------------|---------|--------|----------------|---------|--------|-------------------|---------|--------|----------------|-----------|
+| Reference HDR-NeRF    | ref Sharp | ( ∆    | t 0 , | ∆ t   | 2 | , ∆ t 4 ) | 25.96      | .8412           | .2413   | 26.09  | .8914          | .2015   | 25.45  | .9280             | .1432   | 24.65  | .8332          | .1261     |
+| HDR NVS               |           |        |       |       |   |           |            |                 |         |        |                |         |        |                   |         |        |                |           |
+| HDR-NeRF              | [19]      | Sharp  | (     | ∆ t   | 2 | )         | 19.06      | .7886           | .3384   | 19.84  | .8531          | .2722   | 11.15  | .4079             | .6993   | 14.65  | .6379          | .3291     |
+| HDR-GS RGB-Based      | [4]       | Sharp  | (     | ∆ t   | 2 | )         | 12.16      | .6562           | .5850   | 13.58  | .7421          | .5033   | 12.90  | .6761             | .4857   | 14.56  | .6995          | .4755     |
+| Gaussian-DK           | [53]      | Sharp  | (     | ∆ t   | 2 | )         | 13.57      | .7088           | .2689   | 12.04  | .7207          | .2380   | 10.71  | .5619             | .4420   | 12.87  | .7302          | .2583     |
+| GaussHDR              | [29]      | Sharp  | (     | ∆ t   | 2 | )         | 13.39      | .7976           | .1398   | 10.81  | .7321          | .1784   | 12.27  | .7389             | .1540   | 10.86  | .7789          | .1763     |
+| HDR NVS               |           |        |       |       |   |           |            |                 |         |        |                |         |        |                   |         |        |                |           |
+| HDR-NeRF+ ERGB-Based  |           | Blurry | (     | ∆ t   | 2 | )         | ! 16.18    | .6439           | .3847   | 14.29  | .6153          | .3434   | 12.95  | .5215             | .6971   | 16.15  | .5081          | .3807     |
+| EvHDR-NeRF Deblurring | [6]       | Blurry | (     | ∆ t   | 2 | )         | ! 22.85    | .7915           | .3624   | 23.56  | .8594          | .3784   | 23.11  | .8841             | .2452   | 17.62  | .7442          | .3509     |
+| See-NeRF              |           | Blurry | (     | ∆ t   | 2 | )         | ! 20.83    | .8282           | .2801   | 25.08  | .8956          | .2324   | 24.71  | .9219             | .1414   | 21.99  | .8638          | .1757     |
+
+Table 13. Detailed quantitative HDR NVS results on each scene of our synthetic dataset.
+
+
+
+| Methods               |           |        | Image | Input |   |           | Event PSNR | Sofa ↑ SSIM | ↑ LPIPS | ↓ PSNR | Sponza ↑ SSIM | ↑ LPIPS | ↓ PSNR | Toyroom ↑ SSIM | ↑ LPIPS | ↓ PSNR | Warmroom ↑ SSIM | ↑ LPIPS ↓ |
+|-----------------------|-----------|--------|-------|-------|---|-----------|------------|-------------|---------|--------|---------------|---------|--------|----------------|---------|--------|-----------------|-----------|
+| Reference HDR-NeRF    | ref Sharp | ( ∆    | t 0 , | ∆ t   | 2 | , ∆ t 4 ) | 28.34      | .9000       | .1504   | 26.24  | .8841         | .2189   | 30.66  | .9525          | .0994   | 27.94  | .8948           | .1828     |
+| HDR NVS               |           |        |       |       |   |           |            |             |         |        |               |         |        |                |         |        |                 |           |
+| HDR-NeRF              | [19]      | Sharp  | (     | ∆ t   | 2 | )         | 13.45      | .7020       | .3381   | 24.93  | .8736         | .2469   | 14.60  | .8315          | .2605   | 18.50  | .8126           | .2752     |
+| HDR-GS RGB-Based      | [4]       | Sharp  | (     | ∆ t   | 2 | )         | 12.29      | .6713       | .5124   | 17.00  | .7045         | .5966   | 13.30  | .7606          | .4901   | 12.53  | .6837           | .4284     |
+| Gaussian-DK           | [53]      | Sharp  | (     | ∆ t   | 2 | )         | 15.00      | .7883       | .2829   | 11.20  | .5116         | .5422   | 12.85  | .7376          | .2544   | 13.66  | .7014           | .2782     |
+| GaussHDR              | [29]      | Sharp  | (     | ∆ t   | 2 | )         | 13.89      | .8521       | .1467   | 16.48  | .7860         | .2726   | 12.92  | .8112          | .1398   | 13.03  | .7470           | .1647     |
+| HDR NVS               |           |        |       |       |   |           |            |             |         |        |               |         |        |                |         |        |                 |           |
+| HDR-NeRF+ ERGB-Based  |           | Blurry | (     | ∆ t   | 2 | )         | ! 17.93    | .5986       | .3015   | 17.90  | .8002         | .2967   | 17.77  | .7607          | .2310   | 15.45  | .7002           | .3215     |
+| EvHDR-NeRF Deblurring | [6]       | Blurry | (     | ∆ t   | 2 | )         | ! 20.63    | .8312       | .2983   | 20.91  | .7667         | .4215   | 21.24  | .8450          | .3948   | 23.93  | .8315           | .3056     |
+| See-NeRF              |           | Blurry | (     | ∆ t   | 2 | )         | ! 23.55    | .9117       | .1447   | 26.74  | .9102         | .2127   | 26.01  | .9357          | .1604   | 24.13  | .8746           | .1850     |
+
+Table 14. Detailed quantitative novel exposure NVS results on each scene of our real dataset.
+
+
+
+| Methods     |               | Image | Input |   |           | Event PSNR | Bear ↑ SSIM | ↑ LPIPS | ↓ PSNR | Computer ↑ SSIM | ↑ LPIPS | ↓ PSNR | Computerhard ↑ SSIM | ↑ LPIPS | ↓ PSNR | Desktop ↑ SSIM | ↑ LPIPS | ↓ PSNR | Table ↑ SSIM | ↑ LPIPS ↓ |
+|-------------|---------------|-------|-------|---|-----------|------------|-------------|---------|--------|-----------------|---------|--------|---------------------|---------|--------|----------------|---------|--------|--------------|-----------|
+| HDR-NeRF    | ref Sharp ( ∆ | t 0 , | ∆ t   | 2 | , ∆ t 4 ) | 32.89      | .9611       | .1208   | 28.95  | .9451           | .0675   | 32.69  | .9685               | .0440   | 35.71  | .9612          | .1353   | 36.97  | .9732        | .1072     |
+| HDR-NeRF    | Sharp         | (     | ∆ t   | 2 | )         | 20.05      | .9138       | .1498   | 20.95  | .8721           | .1098   | 20.44  | .8787               | .0977   | 24.65  | .9102          | .1381   | 24.82  | .9315        | .1196     |
+| HDR-GS      | Sharp         | (     | ∆ t   | 2 | )         | 18.35      | .8736       | .1901   | 18.76  | .7913           | .1863   | 19.19  | .8257               | .1537   | 21.03  | .8965          | .2218   | 18.83  | .8163        | .2382     |
+| Gaussian-DK | Sharp         | (     | ∆ t   | 2 | )         | 25.32      | .9541       | .1201   | 23.50  | .8821           | .1085   | 21.83  | .7411               | .1257   | 30.79  | .9440          | .1348   | 30.61  | .9619        | .1030     |
+| GaussHDR    | Sharp         | (     | ∆ t   | 2 | )         | 25.07      | .9454       | .1862   | 24.63  | .9236           | .1777   | 23.28  | .9101               | .1763   | 30.13  | .9454          | .1829   | 30.74  | .9561        | .1626     |
+| HDR-NeRF+   | Blurry        | (     | ∆ t   | 2 | )         | ! 17.13    | .7716       | .3123   | 13.30  | .5075           | .2917   | 12.60  | .3793               | .4650   | 16.93  | .6431          | .3710   | 16.55  | .6665        | .2819     |
+| EvHDR-NeRF  | Blurry        | (     | ∆ t   | 2 | )         | ! 22.14    | .9059       | .1937   | 23.91  | .8760           | .1228   | 21.12  | .8187               | .1598   | 25.94  | .8984          | .1777   | 25.68  | .9160        | .1709     |
+| See-NeRF    | Blurry        | (     | ∆ t   | 2 | )         | ! 30.24    | .9591       | .1202   | 27.04  | .9481           | .0713   | 24.15  | .8576               | .1154   | 31.84  | .9536          | .1155   | 32.27  | .9621        | .1076     |
+
+Table 15. Detailed quantitative HDR NVS results on each scene of our real dataset.
+
+
+
+| Methods     |               | Image | Input |   |           | Event PSNR | Bear ↑ SSIM | ↑ LPIPS | ↓ PSNR | Computer ↑ SSIM | ↑ LPIPS | ↓ PSNR | Computerhard ↑ SSIM | ↑ LPIPS | ↓ PSNR | Desktop ↑ SSIM | ↑ LPIPS | ↓ PSNR | Table ↑ SSIM | ↑ LPIPS ↓ |
+|-------------|---------------|-------|-------|---|-----------|------------|-------------|---------|--------|-----------------|---------|--------|---------------------|---------|--------|----------------|---------|--------|--------------|-----------|
+| HDR-NeRF    | ref Sharp ( ∆ | t 0 , | ∆ t   | 2 | , ∆ t 4 ) | 30.79      | .9479       | .1045   | 28.08  | .8976           | .1226   | 17.03  | .6914               | .2024   | 27.15  | .9006          | .2036   | 28.23  | .9207        | .1550     |
+| HDR-NeRF    | Sharp         | (     | ∆ t   | 2 | )         | 10.15      | .4789       | .4333   | 10.28  | .4684           | .4552   | 9.76   | .4989               | .4850   | 11.71  | .6101          | .3860   | 12.47  | .6804        | .3551     |
+| HDR-GS      | Sharp         | (     | ∆ t   | 2 | )         | 17.11      | .8773       | .3282   | 14.29  | .5777           | .5406   | 9.25   | .4036               | .6376   | 15.00  | .7993          | .4103   | 15.24  | .8140        | .4334     |
+| Gaussian-DK | Sharp         | (     | ∆ t   | 2 | )         | 14.27      | .8181       | .3253   | 12.75  | .6314           | .4308   | 11.09  | .4588               | .5935   | 16.47  | .8113          | .3343   | 17.08  | .8367        | .3436     |
+| GaussHDR    | Sharp         | (     | ∆ t   | 2 | )         | 19.55      | .9288       | .1939   | 16.35  | .8305           | .2451   | 17.40  | .7771               | .1689   | 24.21  | .8934          | .1432   | 24.43  | .9047        | .1102     |
+| HDR-NeRF+   | Blurry        | (     | ∆ t   | 2 | )         | ! 21.10    | .8996       | .2196   | 18.09  | .7855           | .2772   | 12.18  | .6128               | .4355   | 18.68  | .8443          | .3110   | 23.01  | .9039        | .1925     |
+| EvHDR-NeRF  | Blurry        | (     | ∆ t   | 2 | )         | ! 18.17    | .7972       | .2138   | 23.18  | .8251           | .2216   | 10.39  | .1939               | .4011   | 21.85  | .8000          | .2465   | 21.40  | .8649        | .2229     |
+| See-NeRF    | Blurry        | (     | ∆ t   | 2 | )         | ! 31.91    | .9558       | .0999   | 25.85  | .8982           | .1379   | 19.43  | .7979               | .2469   | 28.13  | .9152          | .1796   | 27.13  | .9093        | .1548     |
+
+Table 16. Detailed quantitative deblurring NVS results on each scene of the Real-World-Challenge dataset.
+
+
+
+| Methods                  | PSNR  | Corridor ↑ SSIM | ↑ LPIPS | ↓ PSNR | Lab ↑ SSIM | ↑ LPIPS | ↓ PSNR | Lobby ↑ SSIM | ↑ LPIPS | ↓ PSNR | Shelf ↑ SSIM | ↑ LPIPS | ↓ PSNR | Table ↑ SSIM | ↑ LPIPS ↓ |
+|--------------------------|-------|-----------------|---------|--------|------------|---------|--------|--------------|---------|--------|--------------|---------|--------|--------------|-----------|
+| Deblurring NVS           |       |                 |         |        |            |         |        |              |         |        |              |         |        |              |           |
+| BAD-NeRF RGB-Based       | 26.24 | .8950           | .4761   | 28.86  | .9125      | .2386   | 23.06  | .8175        | .6265   | 29.61  | .8820        | .2487   | 20.39  | .7804        | .6102     |
+| DP-NeRF                  | 29.64 | .9508           | .3361   | 31.40  | .9452      | .2350   | 27.52  | .9168        | .3093   | 29.92  | .9036        | .2937   | 25.79  | .8964        | .3336     |
+| Deblurring NVS           |       |                 |         |        |            |         |        |              |         |        |              |         |        |              |           |
+| EBAD-NeRF                | 28.74 | .9288           | .4018   | 30.10  | .9354      | .2052   | 26.66  | .8867        | .4048   | 29.88  | .8965        | .2646   | 23.34  | .8574        | .3981     |
+| Ev-DeblurNeRF ERGB-Based | 31.27 | .9546           | .2960   | 31.64  | .9570      | .1790   | 22.48  | .8611        | .4917   | 31.53  | .9285        | .2141   | 22.23  | .8647        | .3975     |
+| E2GS                     | 23.83 | .8699           | .5516   | 32.84  | .9571      | .2131   | 27.92  | .9132        | .4155   | 31.81  | .9205        | .2348   | 26.91  | .9218        | .2807     |
+| 2 NeRF E                 | 30.13 | .9584           | .2228   | 32.16  | .9581      | .1717   | 28.94  | .9258        | .2635   | 31.23  | .9109        | .2578   | 27.15  | .9196        | .2622     |
+| 3 NeRF E                 | 31.50 | .9636           | .2213   | 34.02  | .9641      | .1505   | 30.25  | .9339        | .2479   | 32.48  | .9342        | .1736   | 28.75  | .9362        | .2067     |
+| Deblurring HDR NVS       |       |                 |         |        |            |         |        |              |         |        |              |         |        |              |           |
+| EvHDR-NeRF ERGB-Based    | 29.98 | .9444           | .3701   | 27.34  | .9078      | .3400   | 27.24  | .9064        | .3544   | 28.08  | .8639        | .3345   | 23.32  | .8575        | .4665     |
+| See-NeRF                 | 34.12 | .9749           | .1313   | 35.21  | .9712      | .1277   | 31.12  | .9449        | .2248   | 34.40  | .9545        | .1065   | 28.64  | .9367        | .1965     |
+
+
+
+
+
+Figure 12. Detailed qualitative HDR NVS results on each scene of our synthetic dataset.
+
+
+
+
+
+Figure 13. Detailed qualitative HDR NVS results on each scene of our real dataset.
+
+
+
+
+
+Figure 14. Detailed qualitative deblurring NVS results on each scene of the Real-World-Challenge dataset.

@@ -1,0 +1,1755 @@
+E VI S PLAT: P RESERVING M ULTI -V IEW E VIDENCE IN
+3D G AUSSIAN S PLATTING FOR O PEN -VOCABULARY
+S EGMENTATION
+Sungho Moon1 Kota Shimomura2,5 Junwoo Park1 Wonhyeok Choi1
+Seunghun Lee3 Takayoshi Yamashita2 Sunghoon Im4
+1
+DGIST, Daegu, Republic of Korea
+3
+Chubu University, Japan
+HUAWEI, Singapore
+4
+5
+KAIST, Daejeon, Republic of Korea
+Elith Inc., Japan
+arXiv:2609.34853v1 [cs.CV] 28 Sep 2026
+2
+A BSTRACT
+Open-vocabulary 3D scene understanding enables object localization and segmentation from free-form text queries without a fixed category vocabulary. Many
+recent methods build on 3D Gaussian Splatting and consolidate multi-view observations, such as masked crops from individual views, into language features or
+compact object descriptors before the query is known. However, observations of
+the same object vary across viewpoints and are not equally informative: some reveal cues relevant to a particular query, whereas others provide incomplete or misleading evidence. Pre-query consolidation can therefore suppress cues on which
+a later query depends. We introduce EviSplat, which preserves individual observation features as evidence for later text queries. EviSplat retains individual
+observation features within class-agnostic 3D instances that represent objects, object parts, or background regions. It also learns, for each Gaussian, a distribution
+describing which visual appearances its observations support. Given a text query,
+EviSplat scores each instance using its most relevant observations. It then computes a score for each Gaussian by combining instance-level relevance with locally
+supported evidence, weighted by how often and how unambiguously that Gaussian was observed. Different queries can thus draw on different visual cues from
+the same preserved evidence. Experiments across diverse datasets and evaluation
+protocols demonstrate state-of-the-art performance, supporting the benefit of preserving multi-view evidence until query time and aggregating it according to the
+query.
+1
+I NTRODUCTION
+Open-vocabulary 3D scene understanding aims to make a reconstructed scene queryable with freeform text rather than a fixed set of category labels (Kerr et al., 2023; Qin et al., 2024; Shi et al.,
+2024; Wu et al., 2024). We focus on open-vocabulary 3D object segmentation, where the goal is
+to localize and segment the object referred to by a text query (Qin et al., 2024; Wu et al., 2024;
+Cen et al., 2025b). Each masked crop from a source view forms an observation, which we encode
+as a CLIP feature. These observations can reveal different appearance cues as the viewpoint (Cen
+et al., 2025b) and mask granularity change (Peng et al., 2024).Other observations are incomplete or
+misleading because of occlusion, blur, or inaccurate masks (Huang et al., 2025; Cheng et al., 2024;
+Wang et al., 2026). The view-specific cues carried by these observations constitute the multi-view
+evidence available to a later text query.
+Recent methods represent scenes with 3D Gaussian Splatting (3DGS) (Kerbl et al., 2023) and store
+language cues either as features learned at individual Gaussians (Qin et al., 2024; Shi et al., 2024; Li
+et al., 2026b) or as descriptors attached to class-agnostic 3D instances (Wu et al., 2024; Cen et al.,
+2025b), which represent objects, object parts, or background regions as groups of Gaussians. A
+common design combines features from multiple observations before the query is known, through
+feature distillation or descriptor clustering. However, a feature that represents an object well overall
+may not preserve the cues needed to distinguish it for a particular query. Fig. 1 (top) illustrates scoring these aggregated features against the query. Once individual observation features are replaced
+1
+Pre-query consolidation
+Query relevance
+Instance
+A group of Gaussians,
+in color
+…
+…
+Multi-view images
+consolidate
+Aggregated
+features
+EviSplat: preserve evidence
+…
+Score aggregated
+features
+IoU: 0.46
+Text query 𝑡:
+“jake”
+Query relevance
+Top-𝜷
+…
+Per-view observation
+features
+preserve
+Individual
+observation features
+Select among
+individual observations
+IoU: 0.91
+Figure 1: Pre-query consolidation vs. EviSplat: preserve evidence. Top: features aggregated
+across observations are scored against the query. Bottom: EviSplat retains individual observation
+features for query-dependent selection and score aggregation. Crops illustrate the source observations; feature vectors and relevance bars are schematic. For the query “jake” in the same view, the
+masks show LaGa (top, IoU 0.46) and the full EviSplat model (bottom, IoU 0.91).
+by these summaries, the query cannot select among the original observations, potentially weakening
+query-relevant cues.
+To address this limitation, we propose EviSplat, which keeps individual observation features available for query-dependent selection. Using LaGa’s class-agnostic grouping (Cen et al., 2025b), EviSplat organizes these features into instance observation banks (Fig. 1, bottom). Since different observations may cover different subsets of an instance’s Gaussians, an instance-level score alone cannot
+distinguish where query-relevant cues are supported. EviSplat therefore learns an appearance distribution for each Gaussian to capture its locally supported evidence. Given a query, query-guided
+evidence aggregation forms an instance-level score from the most relevant observations and refines
+each Gaussian’s score with local evidence weighted by observation reliability.
+We evaluate EviSplat on LERF-OVS, 3D-OVS, and ScanNet for open-vocabulary 3D segmentation.
+On LERF-OVS, EviSplat improves mean IoU from 63.6 to 70.7, an 11.2% relative gain over our
+LaGa baseline (Cen et al., 2025b). Our contributions are threefold:
+1. We propose a two-level evidence representation that combines instance observation banks with
+a Gaussian evidence field, encoding which visual appearances are supported at each Gaussian.
+2. We propose query-guided evidence aggregation, which selects the most relevant observations of
+each instance and adds reliable Gaussian-local evidence on top of the resulting instance score.
+3. We demonstrate that EviSplat improves open-vocabulary 3D segmentation across multiple
+benchmarks under both rendered-view and point-level evaluations, and that instance-level observation selection and Gaussian-local evidence provide complementary gains.
+2
+R ELATED W ORK
+Language fields and instance grouping. Language fields incorporate pretrained image–language
+features into 3D scene representations that can be queried using natural language. LERF (Kerr
+et al., 2023) distills multi-scale CLIP features into a NeRF (Mildenhall et al., 2021), and LangSplat
+(Qin et al., 2024) extends this approach to 3DGS with hierarchical mask supervision and a scenespecific feature autoencoder. LEGaussians (Shi et al., 2024) compresses CLIP and DINO features
+through quantization, while LangSplatV2 (Li et al., 2026b) represents language features using sparse
+coefficients over a shared dictionary. VLGS (Peng et al., 2025) improves semantic rendering through
+cross-modal rasterization and camera-view blending.
+Class-agnostic representations group scene elements into instances without assigning semantic categories, allowing language features to be associated with these instances. Gaussian Grouping (Ye
+2
+et al., 2024) learns identity encodings from SAM masks associated across views by a zero-shot
+tracker, and SAGA (Cen et al., 2025a) learns scale-gated affinity features. OpenGaussian (Wu et al.,
+2024) connects instance features to language through codebook discretization and 3D–2D association. GALA (Alegret et al., 2026) couples instance and language codebooks, while OpenGaFF (Li
+et al., 2026a) retrieves language features from a structured codebook using a geometry-conditioned
+feature field.
+Multi-view association and semantic aggregation. Across views, observations of the same object differ in visibility, mask extent, and semantic features. Multi-view association links corresponding observations, while semantic aggregation combines their information into a 3D representation.
+GAGS (Peng et al., 2024) adapts supervision granularity, and CCL-LGS (Tian et al., 2025) associates SAM masks across views with a zero-shot tracker before contrastive codebook learning.
+OpenInsGaussian (Huang et al., 2025) combines context-aware feature extraction with attentiondriven fusion, while ReLaGS (Xie et al., 2026) aggregates language features within a hierarchical
+Gaussian scene. Direct feature registration offers an alternative to rendering-based feature distillation: Occam’s LGS (Cheng et al., 2024) uses rendering-weighted aggregation, Dr. Splat (Kim et al.,
+2025) assigns embeddings to dominant ray-intersected Gaussians, and VALA (Wang et al., 2026)
+combines visibility gating with robust aggregation. At the object level, LaGa (Cen et al., 2025b)
+clusters and reweights multiple semantic descriptors. Arafa and Stricker (Arafa & Stricker, 2025)
+retain per-view CLIP embeddings for each object and average the top-k query-relevance scores to
+obtain an object-level retrieval score.
+3
+P RELIMINARIES
+3D Gaussian Splatting. 3D Gaussian Splatting (3DGS) (Kerbl et al., 2023) represents a scene
+explicitly as a set G of anisotropic 3D Gaussians, each parameterized by a center, a covariance
+matrix, an opacity, and a view-dependent color given by spherical-harmonic coefficients. To render
+a pixel p in view v, the Gaussians overlapping its ray are sorted front to back and α-blended. The
+contribution of Gaussian g ∈ G is weighted by
+Y
+
+(v)
+(v)
+1 − αg′ (p) ,
+(1)
+A(v)
+g (p) = αg (p)
+g ′ ≺v g
+(v)
+where αg (p) is the projected opacity of g at pixel p in view v, and g ′ ≺v g denotes a Gaussian
+lying in front of g along the ray.
+Language features and query relevance. Language-embedded 3DGS methods (Qin et al., 2024;
+Cen et al., 2025b) typically localize a text query in three stages. First, each source view is segmented
+by SAM (Kirillov et al., 2023) at a set S of semantic scales corresponding to different mask granularities (Qin et al., 2024). Each masked crop is then encoded as a unit-norm feature by a frozen CLIP
+image encoder (Radford et al., 2021). Second, before a query is known, the features collected across
+views are consolidated into aggregated features attached to the 3D scene, such as one language feature per Gaussian (Qin et al., 2024) or a set of descriptors per 3D object (Cen et al., 2025b). Third,
+given a text query t, each aggregated feature x is scored using the LERF relevance function (Kerr
+et al., 2023),
+exp(x⊤ ϕt )
+r(x, t) = ′ min
+∈ (0, 1),
+(2)
+t ∈Tcanon exp(x⊤ ϕt ) + exp(x⊤ ϕt′ )
+where ϕt is the unit-norm CLIP text embedding of t, and Tcanon is a fixed set of canonical negative
+phrases such as “object”. In particular, r(x, t) > 0.5 if and only if x is more similar to the query
+than to every canonical phrase. Features with high relevance are subsequently selected to localize
+the query in the 3D scene.
+4
+M ETHOD
+EviSplat preserves individual observation features and aggregates their relevance at query time, assigning each Gaussian an evidence-aggregated score sg (t) in place of the relevance of aggregated
+3
+Multi-view Evidence Preservation (Sec. 4.1)
+CLIP
+Instance observation bank
+Codebook
+&
+per crop
+')
+'*
+'+
+…
+2
+1
+2
+Empirical evidence
+distribution
+Evidence set
+'(
+%
+Decoder
+1
+…
+Retained observations
+of 3D instance
+SAM-Cropped
+images
+Gaussian evidence field
+3D Gaussian
+Largest
+per view
+…
+Learned distribution
+Query-Guided Evidence Aggregation (Sec. 4.2)
+Text query
+“jake”
+Instance prior
+Gaussian-local evidence
+2
+! , -
+, -
+.,01 , .,& , Data flow
+high
+low
+Average top-β relevance observations
+1
+3
+1
+2
+2
+3
+…
+Aggregate over
+fixed probability mass
+Query
+Frozen
+Observation reliability
+!
+Trainable
+∗
+"
+and fusion
+#!
+"
+$
+: observation reliability from evidence set ℰ
+! , -
+#!
+$
+2D rendered mask
+3D mask
+Figure 2: Overview of EviSplat. Top: multi-view evidence preservation, illustrated for one instance
+i (three of its retained observations shown) and one Gaussian g seen in three views. Bottom: queryguided evidence aggregation for the query “jake”. Histograms show a subset of the K prototype
+bins, colored consistently with the codebook; only the latents and decoders (purple) are trained. The
+two stages share the observation banks Bi , codebook C, and learned distributions pg .
+features r(x, t) for final localization. As illustrated in Fig. 2, EviSplat comprises two stages. Multiview evidence preservation (§4.1) constructs two representations before querying. The instance
+observation banks retain individual multi-view features for query-dependent selection, while the
+Gaussian evidence field records a distribution of the appearances supported at each Gaussian.After
+this stage, Query-guided evidence aggregation (§4.2) scores both representations against an incoming query and computes the final scores of individual Gaussians.
+4.1
+M ULTI - VIEW E VIDENCE P RESERVATION
+We construct the instance observation banks and Gaussian evidence field from the per-view SAM
+masks and CLIP features described in §3. Unless stated otherwise, all quantities are scale-specific;
+only the Gaussian latent zg is shared across semantic scales.
+Instance observation banks. We collect observations across source views into a set O. Each
+observation o ∈ O is associated with its source view and consists of a SAM mask mo and the
+unit-norm CLIP feature xo of its masked crop. We group observations of the same scene element
+without merging their features, allowing a later query to select among the retained evidence. To
+associate masks across views, we adopt the class-agnostic affinity field of LaGa (Cen et al., 2025b),
+which assigns each Gaussian g an affinity feature ag such that Gaussians covered by the same mask
+have similar features. We render this field and pool it over each mask mo to obtain an observationlevel affinity feature ao . HDBSCAN (McInnes et al., 2017) then clusters {ao }o∈O across views.
+Each resulting cluster defines a class-agnostic 3D instance i ∈ I, and its members form the instance
+observation bank Bi ⊆ O. Depending on the semantic scale, an instance may represent an object, an
+object part, or a background region; we do not assume that every instance corresponds to a complete
+object.
+Evidence sets. The observation banks preserve evidence at the instance level but do not specify
+where each observation is supported within an instance. We therefore associate each Gaussian g
+with at most one observation from each source view. Let V denote the set of source views. For each
+v ∈ V, let Ov ⊆ O be the observations extracted from v. For an observation o ∈ Ov , we define its
+4
+association with g as the fraction of the rendered mass of g that falls within mo :
+P
+(v)
+p∈mo Ag (p)
+ug (o) = P
+,
+(v)
+p∈Pv Ag (p)
+(3)
+(v)
+where Ag (·) is the compositing weight of Eq. 1, Pv is the set of all pixels of view v, and we set
+ug (o) = 0 when g contributes to no pixel in that view. Unlike a test on the projected Gaussian
+center, this association accounts for occlusion and transmittance through the compositing weights.
+(v)
+For each view with Ov ̸= ∅, we select one observation og with the largest association, breaking
+ties consistently. The evidence set retains selections with positive association:
+o(v)
+g ∈ arg max ug (o),
+Eg
+o∈Ov
+(v)
+= {o(v)
+g | v ∈ V, Ov ̸= ∅, ug (og ) > 0}.
+(4)
+For a selected observation o ∈ Eg ∩ Ov , we confidence in this Gaussian-mask association by its
+relative margin over the runner-up in the same view,
+ωg (o) = 1 −
+maxo′ ∈Ov \{o} ug (o′ )
+∈ [0, 1],
+ug (o)
+(5)
+If o is the only mask in its view, we set ωg (o) = 1. We obtain wg (o) by normalizing the assignment
+margins across Gaussians with selected observations in the same view. When their sum is positive,
+this gives each view unit total weight, independently of how many Gaussians receive observations.
+Evidence distribution. A single mean feature does not uniquely determine the underlying observation distribution. Let Pg denote the empirical distribution of features in Eg , with probabilities
+proportional to wg (o), and let x̄g be its normalized mean. Because query relevance is nonlinear,
+scoring this mean generally differs from averaging the individual relevance scores:
+x̄g =
+Ex∼Pg [x]
+,
+Ex∼Pg [x] 2
+r(x̄g , t) ̸= Ex∼Pg [r(x, t)].
+(6)
+Different observation distributions can share the same normalized mean while yielding different relevance distributions for a query. To retain information for query-dependent selection, we
+therefore approximate the observation distribution with a weighted histogram over visual prototypes. Specifically, we cluster {xo }o∈O using spherical K-means to construct a frozen codebook
+C = {ck }K
+k=1 of unit-norm visual prototypes shared by all Gaussians in the scene. These prototypes represent observed appearances without relying on a predefined category vocabulary. Let
+κ(o) = arg maxk c⊤
+k xo be the prototype nearest to observation o. For evidence sets with positive
+total weight, the empirical distribution qg is the normalized weighted histogram over prototypes:
+P
+o∈Eg ,κ(o)=k wg (o)
+P
+,
+(7)
+qg (k) =
+o∈Eg wg (o)
+Each selected observation contributes a weighted vote to its nearest prototype, and qg records the
+normalized distribution of these votes.
+Storing qg sparsely requires more entries as observations support additional prototypes. To control
+this storage, we learn a latent vector zg ∈ RD for each Gaussian, shared across scales, and a linear
+decoder W ∈ RK×D for each scale to approximate qg :
+
+
+Wzg
+pg = softmax
+,
+∥zg ∥2
+Levid = − Eg
+K
+hX
+i
+qg (k) log pg (k) ,
+(8)
+k=1
+P
+where Gaussians are sampled with probability proportional to o∈Eg wg (o), so that every observation contributes to the loss in proportion to its weight. We call the map g 7→ pg the Gaussian
+evidence field. The latents and decoders are the only trained parameters of EviSplat; the 3DGS
+scene, the CLIP encoder, and the affinity field remain frozen, and training uses neither text queries
+nor a label vocabulary.
+5
+4.2
+Q UERY-G UIDED E VIDENCE AGGREGATION
+Given a text query t, every Gaussian g receives the score
+
+sg (t) = bg (t) + ρg max eg (t) − bg (t), 0 .
+(9)
+The instance prior bg (t) provides a base score for g by combining instance relevance scores according to its affinity-based assignments. The Gaussian-local evidence eg (t) is the relevance of
+the appearances observed at g itself, computed from the evidence field. The observation reliability
+ρg ∈ [0, 1], computed from the evidence sets, determines how much the local evidence may raise
+the prior. We define the three terms in turn.
+Instance prior bg (t). We apply the relevance of Eq. 2 to the individual features of each bank rather
+than to a consolidated descriptor. Average pooling over a bank can dilute useful cues, whereas max
+pooling is sensitive to individual noisy observations, as also reported by LaGa (Cen et al., 2025b).
+For a set of n scores, let meanβ denote the mean of its ⌈βn⌉ largest elements, with β ∈ (0, 1];
+β = 1 gives average pooling and β → 0 gives max pooling. To pass instance scores to Gaussians,
+we compute query-independent affinity assignments once,
+X
+
+πg (i) ∝ exp cos(ag , ai )/T ,
+πg (i) = 1.
+(10)
+i∈I
+This averaging is used only for affinity-based assignment; the CLIP features in each bank remain
+separate. Here ai is the mean of ao over Bi , cos(·, ·) denotes cosine similarity, and T > 0 controls
+assignment sharpness; only the observation scores change with query. The instance relevance and
+its assignment-weighted Gaussian prior are
+X
+Ri (t) = meanβ {r(xo , t) | o ∈ Bi },
+bg (t) =
+πg (i)Ri (t).
+(11)
+i∈I
+Gaussian-local evidence eg (t). The instance prior draws on instance-level observations, whereas
+the evidence field records the appearances supported at Gaussian g itself. Here the relevance is applied to the codebook prototypes, r(ck , t), while pg remains fixed. Expected relevance averages over
+the full distribution, while maximum relevance ignores probability support. Our component analysis compares both alternatives with fixed-mass aggregation (Tab. 3).We therefore take the largest
+average relevance attainable with a fixed amount γ ∈ (0, 1] of probability mass:
+K
+eg (t) = max
+δ
+1X
+δ(k) r(ck , t)
+γ
+s.t.
+k=1
+0 ≤ δ(k) ≤ pg (k),
+K
+X
+δ(k) = γ.
+(12)
+k=1
+Here, δ(k) is the probability mass selected from prototype k. The maximum is attained greedily:
+visiting the prototypes in order of decreasing relevance (the relevance bar above each bin of pg in
+Fig. 2), each contributes its full probability until the budget γ is reached, and the last one contributes
+only the remainder. A highly relevant prototype with little mass therefore contributes only in proportion to that mass, and γ = 1 recovers the expected relevance. Thus, β selects a fraction of
+observations, while γ selects a fraction of probability mass. The number of selected prototypes can
+vary across Gaussians: a concentrated distribution may fill the probability budget with one prototype, whereas a diffuse distribution may require several.
+Observation reliability ρg and fusion. Two Gaussians can have similar appearance distributions
+even when one is supported by far fewer observations. To account explicitly for observation count
+and assignment ambiguity, we derive a reliability weight from the evidence set:
+ng
+1 X
+ρg =
+ω̄g ∈ [0, 1],
+ng = |Eg |,
+ω̄g =
+ωg (o),
+(13)
+ng + n̄
+ng
+o∈Eg
+where n̄ is the mean of ng over the Gaussians with a non-empty evidence set, and ρg = 0 if Eg is
+empty. The factor ng /(ng + n̄) downweights Gaussians with fewer observations relative to the scene
+average, while the mean assignment margin ω̄g reduces reliability when associations are ambiguous.
+We average the margins rather than wg (o), whose magnitude also depends on the total assignment
+6
+margin in its source view. Like the assignment, the reliability does not depend on the query and is
+computed once; since n̄ comes from the scene itself, it introduces no hyperparameter.
+Because local observations may be incomplete or ambiguously associated, we use Gaussian-local
+evidence to supplement the instance prior rather than reduce it. The prior remains unchanged when
+eg (t) ≤ bg (t). Otherwise, sg (t) moves from bg (t) toward eg (t) by the fraction ρg , so unreliable local
+evidence produces a smaller correction. Both terms aggregate the same query relevance function,
+evaluated on bank features and codebook prototypes, respectively (the two dashed arrows from the
+query in Fig. 2).
+Multi-scale score and segmentation. We average the scores across semantic scales ℓ ∈ S as
+P
+(ℓ)
+(ℓ)
+s̄g (t) = |S|−1 ℓ∈S sg (t), where sg (t) is Eq. 9 evaluated at scale ℓ. In place of the relevance of
+aggregated features used by prior methods (§3), we threshold s̄g (t) and render the selected Gaussians
+to obtain the segmentation mask. A new query changes the relevance scores r(xo , t) and r(ck , t);
+the representations, πg , and ρg are built once without text and shared by all queries.
+5
+E XPERIMENTS
+5.1
+E XPERIMENTAL S ETUP
+Datasets and metrics. We evaluate open-vocabulary segmentation on LERF-OVS (Kerr et al.,
+2023; Qin et al., 2024), 3D-OVS (Liu et al., 2023), and ScanNet (Dai et al., 2017). We report mIoU
+on all three datasets, together with mAcc@0.25 on LERF-OVS and the class-averaged accuracy
+mAcc on ScanNet. LERF-OVS and 3D-OVS evaluate rendered masks; ScanNet evaluates 3D points
+in ten scenes following OpenGaussian (Wu et al., 2024). Table 1 separates methods that query
+rendered language feature maps from those that score and select 3D Gaussians before rendering.
+EviSplat and our LaGa baseline follow the latter. For prior methods, we report mAcc@0.25 when
+available.
+Implementation. We use SAM (Kirillov et al., 2023) for source-view mask generation and the
+OpenCLIP ViT-B/16 model of CLIP (Radford et al., 2021) for image–text encoding across datasets.
+On LERF-OVS we use three semantic scales, D = 32, K = 256 per scale, 10k steps, and aggregation parameters β = 0.5, γ = 0.25, T = 0.07. We use the same aggregation parameters across
+all four LERF-OVS scenes; the supplementary reports sensitivity analyses. Training and inference
+details are provided in the supplementary.
+5.2
+M AIN R ESULTS
+LERF-OVS. EviSplat achieves the highest mIoU on three of the four scenes and the highest mean,
+70.7, which is 5.1 points above the best prior mean in either group (Tab. 1). It also reaches the highest
+mAcc@0.25, 86.5 against 82.9. The largest margin over the strongest prior result is on FIGURINES.
+3D-OVS and ScanNet. On 3D-OVS, EviSplat reaches 97.4 mIoU, compared with 97.1 for the
+best prior method. On ScanNet, EviSplat achieves the highest mIoU for 19 and 15 classes and
+the second highest for 10 classes, together with the highest mAcc for 15 and 10 classes (Tab. 2).
+These results extend the gains beyond the LERF-OVS scenes to both rendered-view and point-level
+segmentation.
+5.3
+C OMPONENT A NALYSIS
+Instance observations and the evidence field. Across variants, we keep the reconstructed geometry, LaGa affinity field, renderer, and post-processing fixed. The instance-only variant scores each
+Gaussian by the instance prior bg (t) alone (Eq. 11), without the Gaussian-local correction; it raises
+the baseline from 63.6 to 66.2 mIoU without additional representation learning (Tab. 3), already
+above the best prior mean of 65.6 (Tab. 1). Averaging the query relevance scores of all retained observations yields 62.8 mIoU and taking the maximum score yields 60.0, compared with 66.2 for the
+top-β mean, supporting query-dependent selection of a subset of observations. Adding Gaussian7
+Table 1: LERF-OVS segmentation. † denotes our reproduced baseline for LaGa (Cen et al., 2025b);
+other prior results are cited as reported value. Metrics are four-scene averages, and our EviSplat reports three-run means ± population SD. mAcc: mask IoU > 0.25 success rate (Best / Second-Best).
+Method
+Per-scene mIoU
+2D rendered-feature querying
+LERF (Kerr et al., 2023)
+LangSplat (Qin et al., 2024)
+Occam’s LGS (Cheng et al., 2024)
+OpenGaFF (Li et al., 2026a)
+CCL-LGS (Tian et al., 2025)
+3D Gaussian-level querying
+OpenGaussian (Wu et al., 2024)
+LightSplat (Bang et al., 2026)
+OpenGaFF (Li et al., 2026a)
+VALA (Wang et al., 2026)
+LaGa (Cen et al., 2025b)
+LaGa†
+EviSplat (Ours)
+Mean
+Fig.
+Tea.
+Ram.
+Wal.
+mIoU
+mAcc
+38.6
+44.7
+58.6
+64.3
+61.2
+45.0
+65.1
+70.2
+76.1
+71.8
+28.2
+51.2
+51.0
+53.8
+62.3
+37.9
+44.5
+65.3
+65.8
+67.1
+37.4
+51.4
+61.3
+65.0
+65.6
+–
+–
+–
+–
+–
+39.3
+50.6
+59.4
+60.4
+64.1
+63.4
+60.4
+59.7
+71.0
+70.6
+70.9
+67.1
+31.0
+45.1
+38.4
+45.4
+55.6
+60.8
+22.7
+35.0
+48.6
+55.7
+65.6
+62.9
+38.4
+47.6
+54.4
+58.0
+64.0
+63.6
+51.4
+68.3
+80.8
+82.9
+–
+81.9
+74.8 ±0.17 73.5 ±0.01 62.9 ±0.27 71.5 ±0.07 70.7 ±0.10 86.5 ±0.00
+Table 2: Open-vocabulary segmentation on 3D-OVS and ScanNet. 3D-OVS: five-scene mean
+mIoU. ScanNet: ten-scene point-level mIoU/mAcc under the OpenGaussian 19/15/10-class protocol. Prior method results are cited from their original manuscripts (Best / Second-best).
+(a) 3D-OVS
+(b) ScanNet
+Method
+Mean
+Method (mIoU/mAcc)
+19 cls.
+15 cls.
+10 cls.
+LangSplat (Qin et al., 2024)
+ReasonGrounder (Liu et al., 2025)
+Occam’s LGS (Cheng et al., 2024)
+LaGa (Cen et al., 2025b)
+Hi-LSplat (Zhan et al., 2025)
+VLGS (Peng et al., 2025)
+93.4
+94.7
+95.0
+95.3
+96.1
+97.1
+OpenGaussian (Wu et al., 2024)
+ReLaGS (Xie et al., 2026)
+LaGa (Cen et al., 2025b)
+LUDVIG (Marrie et al., 2025)
+LightSplat (Bang et al., 2026)
+OpenInsGaussian (Huang et al., 2025)
+24.73 41.54
+32.35 44.52
+32.50 49.10
+33.90 51.40
+37.11 58.66
+37.50 54.38
+30.13 48.25
+40.04 60.59
+35.50 53.50
+37.40 57.20
+39.78 60.91
+38.14 55.30
+38.29 55.19
+47.17 66.08
+42.60 63.20
+46.40 66.20
+47.78 68.21
+51.42 69.15
+EviSplat (Ours)
+97.4
+EviSplat (Ours)
+40.41 57.88 44.85 62.89
+50.71 71.03
+local evidence with reliability-weighted fusion yields a further 4.5-point gain, reaching 70.7 mIoU.
+It improves three scenes over the instance-only variant but lowers RAMEN from 65.1 to 62.9.
+Evidence representation and aggregation. We also vary how Gaussian-local evidence is represented and aggregated, using β = 0.5 for the instance prior and keeping the fusion rule fixed (Tab. 3).
+The mean observation feature variant averages each Gaussian’s original CLIP observation features
+with their observation weights, normalizes the result, and scores this single feature against the query,
+yielding 68.2 mIoU. The other two alternatives use the same learned evidence distributions as EviSplat: averaging all prototype relevances with their probabilities as weights yields 67.5, while taking
+the maximum prototype relevance regardless of its probability yields 44.2. This maximum assigns
+the same local score to every Gaussian at a given scale and query. Our aggregation over a fixed
+probability mass achieves 70.7 mIoU averaged over three runs. These results support retaining multiple appearances and considering their probability support during aggregation, although the mean
+observation feature performs better on RAMEN.
+Representation size and storage. We use D = 32 as the default for its higher mean accuracy.
+At K = 256, mean mIoU decreases as the latent dimension is reduced; at D = 8, reducing K
+from 256 to 128 further lowers it from 69.3 to 67.8 (Tab. 3). At β = 0.5, the D = 16 field
+provides a lower-storage operating point: it achieves comparable mean mIoU to directly stored
+sparse empirical distributions (70.2 vs. 70.1), while reducing local representation storage by 43.7%
+(173.3 vs. 307.7 MiB). With the full-view observation bank and codebooks fixed, increasing local
+evidence coverage from 10% to 100% raises sparse storage from 121.6 to 307.7 MiB, while the
+D = 16 field remains at 173.3 MiB. These storage measurements exclude the observation bank and
+8
+Baseline
++Instance prior only
+EviSplat
+IoU : 0.276
+IoU : 0.347
+IoU : 0.909
+Table 3: Component and size analysis on LERF-OVS (mIoU). Baseline reproduces LaGa. D:
+latent dimension; K: prototypes per semantic scale. Local storage totals four scenes and excludes
+shared components.
+Fig. Tea. Ram. Wal. Mean Local storage(MiB) ↓
+IoU : 0.777
+IoU : 0.777
+IoU : 0.873
+Instance observations and the evidence field
+Text query
+Baseline (Cen et al., 2025b)
+63.4 67.1
+Query-guided evidence aggregation (instance only) 65.2 69.8
+“coffee”
+Evidence
+representation and aggregation
+“coffee mug”
+Mean
+feature
+67.3 72.8
+“teaobservation
+in a glass”
+Mean prototype relevance (probability-weighted) 66.6 72.6
+IoU : 0.811
+Maximum prototype relevance
+31.8 49.4
+60.8 62.9
+65.1 64.8
+63.6
+66.2
+–
+–
+65.6 67.3
+65.4 65.5
+IoU : 0.809
+37.1 58.5
+68.2
+67.5
+44.2
+–
+–
+IoU : 0.996
+–
+Representation size and storage
+Sparse empirical distribution
+EviSplat (D = 8, K = 128)
+EviSplat (D = 8, K = 256)
+EviSplat (D = 16, K = 256)
+EviSplat (D = 32, K = 256)
+63.0
+63.3
+63.8
+63.5
+62.9
+70.1
+67.8
+69.3
+70.2
+70.7
+307.7
+86.6
+86.7
+173.3
+346.7
+73.5 72.7
+70.9 70.0
+71.5 73.2
+72.5 73.7
+74.8 73.5
+71.4
+67.1
+68.6
+70.9
+71.5
+Baseline
++Instance prior only
+EviSplat
+IoU : 0.276
+IoU : 0.347
+IoU : 0.909
+IoU : 0.811
+IoU : 0.809
+IoU : 0.996
+Text query
+“coffee”
+“tea in a glass”
+Figure 3: Qualitative comparison on LERF-OVS. Left: the input view and color-coded queries.
+Right: the reproduced baseline, the instance prior alone, and EviSplat.
+other shared components; the supplementary provides the view-coverage analysis and additional
+training and query costs.
+Qualitative comparison. Fig. 3 compares the baseline, the instance-only variant, and EviSplat for
+three queries in the same view of TEATIME. For “coffee,” the instance-only variant raises IoU from
+0.276 to 0.347 but still includes part of the glass; EviSplat more closely matches the annotated mug,
+reaching 0.909. For “tea in a glass,” the instance-only masks remain similar to the baseline, whereas
+EviSplat provides more complete coverage of the annotated targets. Local evidence improves segmentation even when instance-only gains are small.
+6
+C ONCLUSION
+We presented EviSplat, an approach to open-vocabulary 3D segmentation that preserves individual
+observation features for query-dependent selection. Instance observation banks retain multi-view
+evidence, while a Gaussian evidence field learns a compact distribution over the visual appearances
+supported at each Gaussian. Query-guided evidence aggregation forms an instance prior from the
+most relevant observations and refines each Gaussian’s score with reliable Gaussian-local evidence.
+This allows different queries to draw on different cues from the same preserved evidence, without retraining the representation. Across three datasets, EviSplat improves over the corresponding
+9
+baselines under both rendered-view and point-level evaluation protocols, with component analyses
+showing complementary gains from instance observation selection and Gaussian-local evidence.
+Limitations. EviSplat remains dependent on source-mask quality and frozen CLIP features; preserving observations alone may not overcome CLIP’s limitations in understanding attribute combinations and spatial relations (Yuksekgonul et al., 2023). Refining the fixed Gaussian-to-instance
+assignments and improving compositional query understanding remain directions for future work.
+AI USE STATEMENT
+We used generative AI tools to assist with text editing and proofreading, implementing and debugging experimental and analysis code, and formatting schematic figure drafts. Additional support was
+limited to structural layout exploration and verifying equation formatting for clarity. All numerical
+values, experimental designs, mathematical derivations, and literature citations were independently
+verified and validated using original sources and code execution outputs. The authors retain full
+responsibility for all content, scientific claims, experimental results, and final text presented in this
+manuscript. The authors take responsibility for the final manuscript, experimental results, code, and
+figures, including all content developed with AI assistance.
+E THICS STATEMENT
+This work studies open-vocabulary 3D segmentation using existing research benchmarks. The
+method may inherit biases and errors from pretrained vision–language and segmentation models.
+In particular, segmentation quality can vary with the query, object appearance, and visibility, and
+benchmark performance does not establish reliability in safety-critical applications. Language-based
+retrieval in reconstructed indoor scenes can also expose sensitive information about personal spaces
+and belongings. Applications involving such scenes should account for consent, access control, and
+privacy when collecting, querying, or sharing the data. Use and redistribution of benchmark data
+and pretrained models should follow their respective licenses and access conditions.
+R EPRODUCIBILITY STATEMENT
+Section 4 describes the evidence representation, training objective, and query-guided evidence aggregation. Section 5 describes the datasets and evaluation settings. Appendix A specifies observation preparation, weight normalization and empty-target handling, and training and inference conventions. Appendix B explains metric averaging and the repeated-run protocol, including which
+components are held fixed when varying the evidence-field training seed. Appendix C provides controlled comparisons of evidence representations and aggregation rules, together with sensitivity and
+observation-quality experiments. These descriptions identify the configurations and controls needed
+to interpret the comparisons and distinguish single-run ablations from repeated-run results.
+R EFERENCES
+Elena Alegret, Kunyi Li, Sen Wang, Siyun Liang, Michael Niemeyer, Stefano Gasperini, Nassir
+Navab, and Federico Tombari. Gala: Guided attention with language alignment for open vocabulary gaussian splatting. In 2026 International Conference on 3D Vision (3DV), pp. 1717–1727.
+IEEE, 2026.
+Abdalla Arafa and Didier Stricker. Beyond averages: Open-vocabulary 3D scene understanding
+with Gaussian splatting and bag of embeddings. arXiv preprint arXiv:2509.12938, 2025.
+Jaehun Bang, Jinhyeok Kim, Minji Kim, Seungheon Jeong, and Kyungdon Joo. Lightsplat: Fast and
+memory-efficient open-vocabulary 3d scene understanding in five seconds. In 2026 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), pp. 19812–19821. IEEE, 2026.
+Jiazhong Cen, Jiemin Fang, Chen Yang, Lingxi Xie, Xiaopeng Zhang, Wei Shen, and Qi Tian.
+Segment any 3D Gaussians. In AAAI, 2025a.
+10
+Jiazhong Cen, Xudong Zhou, Jiemin Fang, Changsong Wen, Lingxi Xie, Xiaopeng Zhang, Wei
+Shen, and Qi Tian. Tackling view-dependent semantics in 3D language gaussian splatting. In
+ICML, 2025b. arXiv:2505.24746.
+Jiahuan Cheng, Jan-Nico Zaech, Luc Van Gool, and Danda Pani Paudel. Occam’s LGS: A simple
+approach for language Gaussian splatting. arXiv preprint arXiv:2412.01807, 2024.
+Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias
+Nießner. Scannet: Richly-annotated 3d reconstructions of indoor scenes. In Proc. Computer
+Vision and Pattern Recognition (CVPR), IEEE, 2017.
+Tianyu Huang, Runnan Chen, Dongting Hu, Fengming Huang, Mingming Gong, and Tongliang Liu.
+Openinsgaussian: Open-vocabulary instance gaussian segmentation with context-aware crossview fusion. In 2025 IEEE/CVF International Conference on Computer Vision Workshops (ICCVW), pp. 6400–6409. IEEE, 2025.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, George Drettakis, et al. 3d gaussian splatting for real-time radiance field rendering. ACM Trans. Graph., 42(4):139–1, 2023.
+Justin Kerr, Chung Min Kim, Ken Goldberg, Angjoo Kanazawa, and Matthew Tancik. LERF:
+Language embedded radiance fields. In ICCV, 2023.
+Jun-Seong Kim, GeonU Kim, Yu-Ji Kim, Yu-Chiang Frank Wang, Jaesung Choe, and Tae-Hyun Oh.
+Dr. splat: Directly referring 3D Gaussian splatting via direct language embedding registration. In
+CVPR, 2025. arXiv:2502.16652.
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In International
+Conference on Learning Representations, 2015. URL https://arxiv.org/abs/1412.
+6980.
+Alexander Kirillov, Eric Mintun, Nikhila Ravi, Hanzi Mao, Chloe Rolland, Laura Gustafson, Tete
+Xiao, Spencer Whitehead, Alexander C Berg, Wan-Yen Lo, et al. Segment anything. In 2023
+IEEE/CVF international conference on computer vision (ICCV), pp. 3992–4003. IEEE, 2023.
+Kunyi Li, Michael Niemeyer, Sen Wang, Stefano Gasperini, Nassir Navab, and Federico Tombari.
+OpenGaFF: Open-vocabulary Gaussian feature field with codebook attention. arXiv preprint
+arXiv:2605.06088, 2026a.
+Wanhua Li, Yujie Zhao, Minghan Qin, Yang Liu, Yuanhao Cai, Chuang Gan, and Hanspeter Pfister. Langsplatv2: High-dimensional 3d language gaussian splatting with 450+ fps. Advances in
+Neural Information Processing Systems, 38:174306–174330, 2026b.
+Siyun Liang, Sen Wang, Kunyi Li, Michael Niemeyer, Stefano Gasperini, Nassir Navab, and Federico Tombari. SuperGSeg: Open-vocabulary 3D segmentation with structured super-Gaussians.
+arXiv preprint arXiv:2412.10231, 2024.
+Kunhao Liu, Fangneng Zhan, Jiahui Zhang, Muyu Xu, Yingchen Yu, Abdulmotaleb El Saddik,
+Christian Theobalt, Eric Xing, and Shijian Lu. Weakly supervised 3d open-vocabulary segmentation. arXiv preprint arXiv:2305.14093, 2023.
+Zhenyang Liu, Yikai Wang, Sixiao Zheng, Tongying Pan, Longfei Liang, Yanwei Fu, and Xiangyang
+Xue. ReasonGrounder: LVLM-guided hierarchical feature splatting for open-vocabulary 3D visual grounding and reasoning. In CVPR, 2025. arXiv:2503.23297.
+Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. In International Conference on Learning Representations, 2019. URL https://openreview.net/forum?id=
+Bkg6RiCqY7.
+Juliette Marrie, Romain Ménégaux, Michael Arbel, Diane Larlus, and Julien Mairal. Ludvig:
+Learning-free uplifting of 2d visual features to gaussian splatting scenes. In 2025 IEEE/CVF
+International Conference on Computer Vision (ICCV), pp. 7440–7450. IEEE, 2025.
+Leland McInnes, John Healy, and Steve Astels. hdbscan: Hierarchical density based clustering. The
+Journal of Open Source Software, 2(11):205, 2017.
+11
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and
+Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications
+of the ACM, 65(1):99–106, 2021.
+Qucheng Peng, Benjamin Planche, Zhongpai Gao, Meng Zheng, Anwesa Choudhuri, Terrence
+Chen, Chen Chen, and Ziyan Wu. 3D vision-language Gaussian splatting. In ICLR, 2025.
+Yuning Peng, Haiping Wang, Yuan Liu, Chenglu Wen, Zhen Dong, and Bisheng Yang.
+GAGS: Granularity-aware feature distillation for language Gaussian splatting. arXiv preprint
+arXiv:2412.13654, 2024.
+Minghan Qin, Wanhua Li, Jiawei Zhou, Haoqian Wang, and Hanspeter Pfister. LangSplat: 3D
+language gaussian splatting. In CVPR, 2024.
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal,
+Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning transferable visual
+models from natural language supervision. In International conference on machine learning, pp.
+8748–8763. PmLR, 2021.
+Jin-Chuan Shi, Miao Wang, Hao-Bin Duan, and Shao-Hua Guan. Language embedded 3D Gaussians for open-vocabulary scene understanding. In CVPR, 2024.
+Lei Tian, Xiaomin Li, Liqian Ma, Hao Yin, Zirui Zheng, Hefei Huang, Taiqing Li, Huchuan Lu, and
+Xu Jia. CCL-LGS: Contrastive codebook learning for 3D language gaussian splatting. In ICCV,
+2025. arXiv:2505.20469.
+Sen Wang, Kunyi Li, Siyun Liang, Elena Alegret, Jing Ma, Nassir Navab, and Stefano Gasperini.
+Visibility-aware language aggregation for open-vocabulary segmentation in 3D Gaussian splatting. In 3DV, 2026. arXiv:2509.05515.
+Yanmin Wu, Jiarui Meng, Haijie Li, Chenming Wu, Yahao Shi, Xinhua Cheng, Chen Zhao,
+Haocheng Feng, Errui Ding, Jingdong Wang, and Jian Zhang. OpenGaussian: Towards pointlevel 3D gaussian-based open vocabulary understanding. In NeurIPS, 2024.
+Yaxu Xie, Abdalla Arafa, Alireza Javanmardi, Christen Millerdurai, Jia Cheng Hu, Shaoxiang Wang,
+Alain Pagani, and Didier Stricker. ReLaGS: Relational language gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2026.
+Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke. Gaussian grouping: Segment and edit
+anything in 3D scenes. In ECCV, 2024.
+Mert Yuksekgonul, Federico Bianchi, Pratyusha Kalluri, Dan Jurafsky, and James Zou. When and
+why vision-language models behave like bags-of-words, and what to do about it? In International
+Conference on Learning Representations, 2023. URL https://arxiv.org/abs/2210.
+01936.
+Chenlu Zhan, Yufei Zhang, Gaoang Wang, and Hongwei Wang. Hi-LSplat: Hierarchical 3D language gaussian splatting. arXiv preprint arXiv:2506.06822, 2025.
+12
+Table A.1: Implementation and evaluation settings.
+Setting
+LERF-OVS
+Observations
+Mask generator
+Image encoder
+Minimum mask size
+SAM ViT-H
+OpenCLIP ViT-B/16; 512-D unit-norm features
+> 400 px
+> 400 px
+> 400 px
+Evidence field
+Semantic scales
+Latent dimension D
+Codebook size K (per scale)
+Optimization steps
+Latent optimizer
+Decoder optimizer
+Trainable parameters
+3D-OVS
+ScanNet
+3
+32
+256
+10,000
+1
+1
+32
+32
+128
+256
+10,000
+10,000
+SparseAdam, learning rate 3 × 10−3 , constant
+AdamW, learning rate 10−3 , weight decay 10−4 , cosine decay
+Gaussian latents and scale-specific linear decoders only
+Query-guided aggregation
+Observation fraction β
+Probability mass γ
+Instance assignment
+CLIP relevance scale
+0.5
+0.5
+0.5
+0.25
+0.25
+0.25
+Soft, T = 0.07 Soft, T = 0.07
+Soft, T = 0.07
+λ = 10 against the fixed canonical negatives
+Evaluation
+Evaluation unit
+Score normalization
+Cosine gate
+Selection threshold
+Mask threshold
+Score smoothing
+Class subsets
+Rendered views
+Quantile clip 0.25, then min–max
+0.23
+0 (sign of cosine)
+0.7 (Gaussian) 0.7 (Gaussian)
+0.3
+0.8 (rendered)
+None
+None
+n/a
+n/a
+Runs
+Shared components
+Hardware
+Software
+Fixed 3DGS and affinity-field checkpoints for within-method ablations
+NVIDIA B200, CUDA 12.8
+PyTorch 2.8.0, gsplat 1.3.0, open clip 3.3.0
+A
+Points
+Raw fused scores
+Off
+Zero-score rejection
+n/a
+None
+19/15/10, scored separately
+I MPLEMENTATION AND C OMPLEXITY D ETAILS
+This appendix provides implementation and evaluation details, followed by analyses of observation
+selection, Gaussian-local evidence, and representation size.
+A.1
+O BSERVATION P REPARATION AND T RAINING
+Observation filtering. For LERF-OVS, both the instance observation bank and the evidence-set
+association cache retain masks with more than 400 pixels. The bank reuses the baseline’s cached
+mask filtering and instance memberships; observations labeled as noise by HDBSCAN belong to no
+bank. For the association cache, masks at each scale are compared with masks at earlier, finer scales
+in the same view. A mask is removed if its IoU with any such mask is at least 0.8; a filtering step
+is skipped if it would remove every remaining mask at that scale. The bank and association cache
+therefore use different filtered subsets of the observation set O defined in the main text. Codebook
+construction uses the subset retained in the association cache.
+Observation weights and empty targets. We normalize assignment confidence within each
+source view so that views with many associated Gaussians do not automatically receive more total weight. At a fixed semantic scale, let Gv contain the Gaussians with a selected observation from
+view v. The implementation uses
+(v)
+Sv =
+X
+(v)
+ωh (oh ),
+wg (o(v)
+g )=
+h∈Gv
+13
+ωg (og )
+,
+max(Sv , ε)
+ε = 10−12 .
+(A.1)
+Thus, the weights sum to one when Sv ≥ ε. If all assignment margins in a view are zero,
+that view
+P contributes zero weight; no uniform fallback is added. For each Gaussian, define
+Zg = o∈Eg wg (o). Equation 7 defines a normalized target only when Zg > 0. When Zg = 0, either because the evidence set is empty or because all its weights are zero, the implementation stores
+an all-zero target row as a placeholder, not as a probability distribution. At each training step, a
+semantic scale is sampled uniformly, followed by Gaussians sampled with probability proportional
+to Zg at that scale. Zero-weight rows are therefore never sampled and contribute no loss; training
+stops with an error if a scale has no positive-weight rows. This exclusion applies to a Gaussian
+at that scale: its shared latent may still be trained through other scales with positive weight. For
+empty evidence or all-zero assignment margins, observation reliability is zero, so fusion retains the
+instance prior regardless of the decoded local distribution.
+Optimization. The evidence field is trained to reproduce the empirical evidence distributions before any text query is given. Gaussian latents are implemented as a sparse lookup table. We
+use SparseAdam, a sparse-gradient variant of Adam (Kingma & Ba, 2015), for the latents and
+AdamW (Loshchilov & Hutter, 2019) for the scale-specific decoders, with settings listed in Tab. A.1.
+Only the decoder learning rate follows cosine decay; the latent learning rate remains constant. At
+query time, the stored observation features and prototypes are reused without another image-encoder
+pass.
+A.2
+S CORING I MPLEMENTATION AND P OST- PROCESSING
+This section specifies numerical conventions and computation shared across queries for the scoring
+terms defined in §4.2, together with the post-processing settings.
+Numerical conventions. The relative assignment margin is computed as the difference between
+the largest and second-largest association values divided by the largest value clamped below at
+ε = 10−12 , then clipped to [0, 1]. A view with only one candidate mask uses margin one for its
+associated Gaussians. Per-view weight normalization follows Eq. A.1. For the relevance function
+in Eq. 2, the implementation multiplies both the query and canonical-negative similarity logits by
+λ = 10 before exponentiation.
+Shared scoring computation. Soft assignments and observation reliability are computed once and
+reused across queries. For Gaussian-local evidence, prototype relevances are sorted once per query
+and scale; this order is shared by all Gaussians when accumulating the probability mass specified in
+Eq. 12.
+Post-processing. For LERF-OVS, we retain LaGa’s post-processing and apply it to the fused
+Gaussian scores. After averaging across semantic scales, scores below the 25th percentile are clipped
+to that percentile, followed by min–max normalization. For the inherited cosine gate, each Gaussian uses its highest-affinity instance at each scale. Within that instance, we take the query cosine
+similarity of the LaGa descriptor selected by its weighted relevance, then take the maximum across
+scales. Fused scores are set to zero when this value is below 0.23. We then select Gaussians with
+scores above 0.7, render the selection, and threshold the rendered mask at 0.3. No additional 3D
+smoothing is applied.
+B
+E VALUATION P ROTOCOL
+Averaging. On LERF-OVS and 3D-OVS, the mIoU of a scene is the mean IoU over all annotated
+(frame, class) pairs rather than the mean of per-class averages. Unequal numbers of annotated
+frames per class can make these averages differ; we use the same convention for all rows within
+each comparison. The reported mean over scenes is unweighted.
+Single operating point. Every reported configuration uses one set of aggregation hyperparameters
+(β, γ, T ) and one set of post-processing thresholds across all four LERF-OVS scenes. Table A.1
+summarizes the training and inference settings used for the reported results.
+14
+Table C.1: Extended LERF-OVS comparison. †: reproduced by us and used as our baseline; ‡: reevaluated by LightSplat under Gaussian-level querying. Other prior results are as reported. EviSplat
+means and standard deviations follow Tab. 1. Bold/underline: best/second-best displayed mean per
+column; ties share emphasis.
+mIoU
+mAcc@0.25
+Mean
+Method
+Fig.
+Tea.
+Ram.
+Wal.
+Fig. Tea. Ram. Wal.
+mIoU
+mAcc
+2D rendered-feature querying
+LERF (Kerr et al., 2023)
+LEGaussians (Shi et al., 2024)
+LangSplat (Qin et al., 2024)
+Occam’s LGS (Cheng et al., 2024)
+VLGS (Peng et al., 2025)
+ReLaGS (Xie et al., 2026)
+OpenGaFF (Li et al., 2026a)
+CCL-LGS (Tian et al., 2025)
+38.6
+60.3
+44.7
+58.6
+58.1
+64.7
+64.3
+61.2
+45.0
+44.5
+65.1
+70.2
+73.5
+81.0
+76.1
+71.8
+28.2
+52.6
+51.2
+51.0
+61.4
+51.2
+53.8
+62.3
+37.9
+41.4
+44.5
+65.3
+54.8
+60.6
+65.8
+67.1
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+–
+37.4
+46.9
+51.4
+61.3
+62.0
+64.4
+65.0
+65.6
+–
+–
+–
+–
+–
+–
+–
+–
+3D Gaussian-level querying
+LangSplat‡ (Qin et al., 2024)
+LEGaussians‡ (Shi et al., 2024)
+SuperGSeg (Liang et al., 2024)
+OpenGaussian (Wu et al., 2024)
+OpenInsGaussian (Huang et al., 2025)
+Dr. Splat (Kim et al., 2025)
+Occam’s LGS (Cheng et al., 2024)
+LightSplat (Bang et al., 2026)
+OpenGaFF (Li et al., 2026a)
+VALA (Wang et al., 2026)
+LaGa (Cen et al., 2025b)
+LaGa†
+9.6
+16.4
+43.7
+39.3
+53.8
+54.4
+52.9
+50.6
+59.4
+60.4
+64.1
+63.4
+7.9
+21.9
+55.3
+60.4
+58.6
+57.4
+61.0
+59.7
+71.0
+70.6
+70.9
+67.1
+3.5
+14.2
+18.1
+31.0
+26.4
+24.3
+32.0
+45.1
+38.4
+45.4
+55.6
+60.8
+9.6
+17.2
+26.7
+22.7
+31.8
+37.1
+43.0
+35.0
+48.6
+55.7
+65.6
+62.9
+14.3 8.5
+25.0 33.9
+60.7 78.0
+55.4 76.3
+76.8 78.0
+80.4 78.0
+78.6 93.2
+76.8 79.7
+92.9 89.8
+89.3 88.1
+–
+–
+78.6 86.4
+5.6
+28.2
+23.9
+42.3
+43.7
+35.2
+54.9
+57.8
+63.4
+67.6
+–
+76.1
+9.1
+27.3
+45.5
+31.8
+50.0
+63.6
+72.7
+59.1
+77.3
+86.4
+–
+86.4
+7.7
+17.4
+35.9
+38.4
+42.6
+43.3
+47.2
+47.6
+54.4
+58.0
+64.0
+63.6
+9.4
+28.6
+52.0
+51.4
+62.1
+64.3
+74.8
+68.3
+80.8
+82.9
+–
+81.9
+EviSplat (Ours)
+74.8 ±0.17 73.5 ±0.01 62.9 ±0.27 71.5 ±0.07 91.1 88.1 76.1 90.9 70.7 ±0.10 86.5 ±0.00
+Repeated runs. The three-run statistics in Tab. 1 and the D = 32, K = 256 row of Tab. 3 vary the
+seed of evidence-field training (codebook initialization, Gaussian sampling, and latent initialization)
+while keeping the photometric scene and the affinity field fixed. Within-method ablations reuse the
+same affinity-field checkpoints to isolate changes to evidence representation and aggregation.
+LERF-OVS accuracy. For each scene, mAcc@0.25 is the fraction of annotated (frame, query)
+pairs whose mask IoU exceeds 0.25; the reported mean averages the four scenes. It is distinct from
+per-class point recall on ScanNet and from localization accuracy based on the highest-scoring image
+pixel. For the main setting, all three evidence-field seeds give 86.54%: their masks differ, but the
+numbers of pairs crossing the IoU threshold are unchanged.
+C
+A DDITIONAL E XPERIMENTS ON LERF-OVS
+The following experiments examine the roles of observation selection, Gaussian-local evidence, and
+learned representation size in the accuracy gains reported in the main paper. We also test sensitivity to observation quality and examine how cross-view appearance differences relate to the gains.
+Unless varied explicitly, we use the main LERF-OVS setting (β, γ, T ) = (0.5, 0.25, 0.07). The aggregation and sensitivity ablations use one of the three evidence-field seeds reported in Tab. 1, with
+its checkpoint fixed across inference variants.
+Full comparison on LERF-OVS. Tab. C.1 extends the main comparison with additional methods
+and per-scene accuracies. The upper group queries rendered feature maps; the lower group selects
+Gaussians and renders the selected geometry. We report mask success rates only for the latter protocol.
+C.1
+O BSERVATION Q UALITY
+We test sensitivity to misleading features and incomplete masks using feature replacement and mask
+erosion (Fig. C.1). For both experiments, we perturb nested subsets of 10% and 30% of source
+views, keeping geometry, grouping, and codebooks fixed. The affected representations are rebuilt
+15
+Replace
+the stored CLIP feature
+Original CLIP feature
+Original observation
+Observation
+From another instance
+Original observation
+Replacement CLIP feature
+Eroded mask
+Masked observation
+Replace
+the stored CLIP feature
+Original CLIP feature
+Replacement CLIP feature
+Removed boundary pixels
+(a) Feature replacement
+Retained mask
+(b) Mask erosion
+Figure C.1: Controlled changes to source observations. (a) Another instance supplies the replacement CLIP feature; the source RGB and mask stay fixed. (b) Boundary pixels are removed before
+Original observation
+observation
+CLIP
+re-encoding. Eroded
+The mask
+illustratedMasked
+erosion
+is exaggerated for visibility; orange and blue indicate
+removed and retained mask pixels, respectively.
+Table C.2: Sensitivity to source-observation perturbations. Four-scene mean mIoU (%). Parentheses give changes in percentage points from the control within each block. Erosion uses a matched
+re-encoding control. Light-blue shading highlights changes from the corresponding control.
+Removed boundary pixels
+Perturbed source views
+Retained mask
+Baseline
+Instance-only
+EviSplat
+Feature replacement
+Clean
+10%
+64.15
+62.48 (−1.67)
+66.22
+66.30 (+0.08)
+70.54
+70.22 (−0.32)
+30%
+59.38 (−4.78)
+64.15 (−2.07)
+68.63 (−1.91)
+Mask erosion
+Re-encoding control
+10%
+62.91
+63.50 (+0.60)
+66.42
+66.90 (+0.48)
+70.64
+70.77 (+0.13)
+30%
+63.13 (+0.22)
+66.35 (−0.07)
+70.61 (−0.03)
+and the evidence field is retrained; all three variants receive the same modified observations. The
+rates refer to selected source views, not the removed mask area or fraction of all feature vectors.
+Table C.2 reports mean mIoU and changes from each experiment’s control. The matched local
+runs are distinct from the baseline run in the main table. These tests concern source-observation
+perturbations on a fixed scene, rather than physical occlusion.
+Feature replacement. To test sensitivity to mismatched visual features, we replace a stored CLIP
+feature with one from another instance, leaving the source RGB and mask unchanged (Fig. C.1a).
+Replacement features come from the same scene and semantic scale, with non-overlapping fixedinstance memberships; they are not guaranteed to belong to a different semantic class. EviSplat is
+more robust than the baseline to the tested replacements: at 30% replacement, its mIoU drops by
+1.91 points, compared with 4.78 points for the baseline and 2.07 points for instance-only.
+Mask erosion. To test sensitivity to incomplete masks, we shrink the source
+p mask and re-encode
+the remaining crop (Fig. C.1b). The erosion radius is max(1, round(0.03 A/π)) pixels for mask
+area A; masks that would become empty retain their original shape. Existing observation slots are
+kept, and renderer associations are recomputed for affected views. Both erosion conditions and their
+control re-encode the same 30% view subset using the same encoder and crop procedure. The 10%
+condition erodes only a nested subset, while the control performs no erosion. This separates mask
+shrinkage from changes caused by re-encoding. EviSplat maintains nearly unchanged accuracy,
+with changes within 0.13 points of this control; all three variants change by at most 0.60 points.
+Test-view occlusion. We test whether EviSplat also improves segmentation when other objects
+hide part of the target, as with “green apple” in the FIGURINES example of Fig. D.1. We inspect all
+208 frame–query pairs from the four LERF-OVS scenes and estimate how much of each target is
+hidden, grouping cases into ≤ 30% and > 30% occlusion. The labels combine author annotations
+16
+Table C.3: Segmentation under estimated test-view occlusion. Mean IoU (%) over frame–query
+pairs pooled across four LERF-OVS scenes. Groups use provisional visual estimates of external occlusion. n is the number of pairs; shaded values give EviSplat’s gain over the baseline in percentage
+points.
+Estimated occlusion
+≤ 30%
+> 30%
+n
+Baseline
+Instance-only
+EviSplat
+Gain
+125
+19
+66.04
+55.98
+69.00
+58.11
+71.56
+66.40
++5.52
++10.42
+Table C.4: Target separation using the same observation bank. Mean target–competitor score
+gap (↑), averaged within each scene–query pair and then across 66 pairs. Ground-truth-matched
+instances and scales with mask IoU ≥ 0.5 retain 202 of 208 frame–query pairs. Competitors have
+zero target-mask overlap and at least max(16, 10−4 HW ) rendered pixels for image size H × W .
+All methods use the same competitor set. Values are relevance gaps, not segmentation IoU.
+Mean score gap ↑
+Observation aggregation
+Average features, then score
+Score observations, then average
+Score observations, then select top 50%
+0.065
+0.054
+0.078
+and visual estimates. Cases with unclear occlusion or targets cut off by the image boundary are
+excluded. The final analysis includes 125 pairs with ≤ 30% occlusion and 19 pairs with > 30%
+occlusion. We compare the existing baseline, instance-only, and EviSplat predictions on the same
+pairs, without changing the source observations or retraining. Table C.3 shows that EviSplat improves mean IoU over the baseline in both groups, with a larger gain for targets with more than 30%
+occlusion (10.42 vs. 5.52 points). The gains vary across scenes, and the higher-occlusion group in
+TEATIME contains only one pair. Each frame–query pair has equal weight in these averages, unlike
+the scene-level averaging in the main table.
+C.2
+Q UERY-G UIDED E VIDENCE AGGREGATION
+We first compare averaging observation features with query-guided observation selection, then examine Gaussian-local evidence, fusion, parameter sensitivity, and variation across evidence-field
+training seeds.
+Averaging features versus selecting observations. We test whether keeping observations available for query-guided selection helps distinguish a target from competing instances. Using the same
+observation bank and CLIP relevance function, we compare averaging features before scoring, averaging scores from individual observations, and averaging the top 50% of observation scores. The
+averaged feature is L2-normalized before scoring; all three methods use the same text features and
+canonical negatives. We measure the score gap: the target’s relevance minus the highest relevance
+among competing instances. A positive gap places the target above all competitors. Table C.4
+shows that selection increases the mean gap from 0.065 to 0.078, with a positive mean improvement in each of the four scenes. This comparison supports retaining observations for query-guided
+selection rather than summarizing them by a single mean feature.
+Appearance variation and Gaussian-local evidence. Different views of the same instance can
+reveal different visual cues, as illustrated by the bag observations in Fig. C.2(a). The instance prior
+aggregates observations at the instance level, while Gaussian-local evidence additionally accounts
+for the appearance support associated with each Gaussian. We examine whether greater variation
+across observed appearances is associated with larger gains from this local refinement. We measure
+appearance differences using cosine distances between unit CLIP observation features from different
+views, averaging observation pairs within each view pair and then weighting view pairs equally.
+Larger distances indicate greater differences between observed appearances. This measure does not
+use text relevance. We select the instance and scale by ground-truth correspondence and average
+measurements and IoU gains across frames within each of the 67 scene–query pairs.
+17
+Different views of the same instance
+Target vs Competitor
+Same instance, different views
+Text query “bag”
+0.387
+0.448
+0.546
+Query relevance
+(a) Query: “bag”
+IoU gain (percentage points)
+Gain from instance
+observation selection
+Additional gain from
+Gaussian-local evidence
+60 Spearman r = 0.055
+Spearman r = 0.388
+40
+20
+0
+20
+40
+0.15
+0.20 0.25 0.30 0.35
+Cross-view feature distance
+Figurines
+Teatime
+0.40
+0.15
+0.20 0.25 0.30 0.35
+Cross-view feature distance
+Ramen
+Waldo kitchen
+0.40
+(b) Appearance variation and IoU gains
+Figure C.2: Appearance variation and Gaussian-local evidence. (a) Views of the same bag with
+query relevance scores. (b) Cross-view feature distance versus IoU gains from the instance prior
+(left plot) and additional Gaussian-local evidence (right plot), for all 67 scene–query pairs. Feature
+distance is distinct from query relevance; positive gains indicate improved IoU.
+The two plots in Fig. C.2(b) separate the gain from the instance prior (left plot) from the additional
+gain of the full model (right plot). The horizontal axis measures cross-view feature differences.
+The vertical axis shows the IoU gain of the instance prior over the baseline in the left plot, and of
+the full model over the instance prior in the right plot. Points above zero indicate an improvement.
+Cross-view feature distance is more strongly associated with the additional gain from Gaussian-local
+evidence (Spearman r = 0.388) than with the gain from instance observation selection (r = 0.055).
+Thus, larger observed feature differences are associated with larger gains from local refinement,
+while the instance-prior gain shows little association. After adjusting the rank correlations for scene,
+log observation count, and target-mask size, the coefficients are 0.106 for instance observation selection and 0.231 for the additional local-evidence gain. To account for queries that refer to the same
+target, we also merge queries sharing instance–scale identities. The resulting 64 groups retain the
+qualitative pattern, although these groups do not constitute physical-object ground truth. The association varies across scenes, and feature distance can reflect changes in visibility and mask content
+as well as viewpoint-dependent appearance.
+Gaussian-local evidence aggregation. We test whether the same learned evidence distribution
+can be summarized by a single feature without reducing segmentation accuracy. The main component analysis compares fixed-mass aggregation with probability-weighted mean and maximum
+relevance; here we instead average the prototype features before scoring the query. The mean prototype feature variant in Tab. C.5 averages prototypes using their learned probabilities as weights,
+then normalizes the resulting feature before computing relevance. With the same instance prior and
+learned distribution at β = 0.5, it yields 67.67 mIoU, compared with 70.59 for fixed-mass aggregation. This result supports using the distribution to select query-relevant prototype support rather
+than reducing it to a mean feature. The comparison differs from averaging relevance scores or the
+original Gaussian-associated observation features evaluated in the main table.
+Observation reliability and fusion. We examine how strongly local evidence should modify the
+instance prior, and whether it should also be allowed to lower that prior. Observation reliability controls the strength of the correction using observation count and assignment confidence; we compare
+these two factors under otherwise identical settings. Removing reliability weighting gives 70.23
+mIoU, compared with 70.59 for the full rule. Count-only and assignment-confidence-only weights
+give 70.41 and 70.22, respectively. The four weighting variants differ by less than 0.4 mIoU points
+in this run. The combined weight accounts for both observation count and assignment confidence.
+We also compare positive-only fusion with signed correction, bg (t) + ρg [eg (t) − bg (t)], keeping
+observation selection, fixed-mass aggregation, and reliability weights unchanged. Signed correction
+also allows local evidence to lower the prior, unlike the positive-only rule in Eq. 9. Positive-only
+18
+Table C.5: Aggregation and evidence representation (LERF-OVS mIoU, %). Matched singlerun comparisons at β = 0.5. Blue rows mark the reference; bold/underline mark the best/secondbest Mean within each block (descriptive ranks).
+Wal. Mean ↑
+Variant
+Fig.
+Tea. Ram.
+Local evidence alternatives
+EviSplat (fixed mass)
+Mean prototype feature
+74.53 73.53 62.83 71.45
+66.61 73.10 65.40 65.56
+70.59
+67.67
+Observation reliability and fusion
+EviSplat (fixed mass)
+74.53 73.53 62.83 71.45
+No weighting (ρg = 1)
+74.57 74.60 61.74 70.02
+Count only
+74.31 73.49 62.06 71.77
+Assignment confidence only 74.57 74.61 62.06 69.64
+Signed local correction
+74.67 73.07 61.53 71.92
+70.59
+70.23
+70.41
+70.22
+70.30
+Table C.6: Parameter sensitivity (LERF-OVS mean mIoU, %). Single-run sweeps around
+(β, γ, T ) = (0.5, 0.25, 0.07), varying one factor at a time. Blue rows mark the reference setting;
+bold/underline indicate best/second-best within each parameter block and column.
+Factor
+Value
+β
+max observation relevance
+0.10
+0.25
+0.50 (reference)
+1.00 (mean relevance)
+γ
+0.10
+0.25 (reference)
+0.50
+1.00 (expectation)
+T
+hard assignment
+0.03
+0.07 (reference)
+0.15
+0.30
+Instance only ↑
+Full model ↑
+59.99
+66.57
+67.19
+66.22
+62.84
+62.35
+68.15
+69.93
+70.59
+68.36
+–
+–
+–
+–
+68.96
+70.59
+69.63
+67.50
+66.76
+66.53
+66.22
+59.45
+54.33
+70.38
+70.42
+70.59
+68.44
+65.73
+fusion yields a slightly higher mean mIoU (70.59 vs. 70.30), although the relative performance
+varies across scenes (Tab. C.5).
+Parameter sensitivity. We examine how accuracy changes when the method selects more observations, includes more local probability mass, or assigns Gaussians more broadly across instances.
+Each block of Tab. C.6 varies one parameter at a time around (β, γ, T ) = (0.5, 0.25, 0.07). The
+highest mean among the tested observation fractions occurs at β = 0.25 for the instance-only variant (67.19) and β = 0.5 for the full model (70.59). At fixed β = 0.5, the full-model mean is
+highest at γ = 0.25 among the tested mass budgets. For the soft assignment of Eq. 10, hard assignment and T = 0.03, 0.07 give similar full-model means of 70.38, 70.42, and 70.59. The more
+diffuse assignments at T = 0.15 and 0.30 reduce the mean to 68.44 and 65.73, with the largest
+scene-level decreases on WALDO KITCHEN. For the instance-only variant, hard assignment gives
+a slightly higher mean than T = 0.07. Together, these results show that the preferred observation
+fraction depends on whether local evidence is used, and that overly diffuse instance assignments
+reduce accuracy in this sweep.
+Evidence-field training seeds. To check whether the observation-fraction comparison is consistent across training seeds, we evaluate β = 0.25 and β = 0.5 on the same three trained fields. Only
+the observation fraction changes; the fields and remaining inference settings are fixed. The means
+are 69.89 ± 0.04 and 70.67 ± 0.10 mIoU, respectively (population standard deviations). The paired
+gains are 0.65, 0.92, and 0.78 points. Across seeds, WALDO KITCHEN improves by 3.81 points and
+TEATIME by 0.43, while FIGURINES and RAMEN decrease by 0.71 and 0.40. This supports the ob19
+served mean improvement across evidence-field seeds, rather than a uniform scene-level gain. We
+use β = 0.5 in the main LERF-OVS results following this benchmark sweep; these evaluations do
+not constitute a held-out test of the parameter choice.
+C.3
+R EPRESENTATION S IZE , S TORAGE , AND C OMPUTATIONAL C OST
+Local representation storage. Let N be the number of Gaussians, L the number of semantic
+scales, and dc the visual-feature dimension. The evidence field stores N D + LDK trainable scalars
+and LKdc frozen codebook scalars. The latent dimension D controls the per-Gaussian storage
+budget, and the same latent is decoded at each scale. In comparison, dense empirical distributions
+require N LK probability values. A sparse representation stores only supported bins and their in(ℓ)
+(ℓ)
+dices: at scale ℓ, their number satisfies sg ≤ min(K, |Eg |). For fixed geometry and codebooks,
+field storage is determined by the latent dimension, whereas sparse storage depends on the number
+of supported prototype bins. Both representations additionally use the instance observation bank
+and affinity field.
+The storage comparison in Tab. 3 measures logical payloads for the local representation: sparse
+probability values with their CSR indices and offsets, or Gaussian latents with decoder weights. All
+rows exclude the common observation bank (190.24 MiB), codebooks (3.00 MiB), and reliability
+values (32.47 MiB), as well as the affinity field and geometry. The stored latents and sparse probabilities use FP16; decoders use FP32, and CSR prototype indices and row offsets use uint8 and int32,
+respectively. These are payload measurements rather than serialized checkpoint sizes or complete
+system storage.
+Evidence-field size and accuracy. We compare the learned evidence field with directly stored
+empirical distributions to test whether useful local evidence can be retained with a smaller storage
+budget. Replacing the decoded pg with the empirical qg , while keeping the prior, reliability, and
+fixed-mass aggregation unchanged at β = 0.5, gives 70.15 mIoU versus 70.59 for the D = 32
+field in the matched single run. The D = 8 field uses 86.7 MiB instead of 307.7 MiB for sparse
+empirical distributions, a 71.8% reduction in local payload, with mean mIoU decreasing to 69.29.
+Table 3 shows that D = 16 retains comparable mean mIoU to sparse storage (70.2 vs. 70.1) using
+173.3 rather than 307.7 MiB, a 43.7% reduction. This provides a smaller local representation with
+similar accuracy in the measured comparison. The D = 32 field uses 346.7 MiB, exceeding sparse
+storage; its single-run accuracy above is distinct from the three-seed mean reported in the main table.
+Storage with increasing source views. A new observation increases sparse storage only if it adds
+support to a previously unused prototype bin. In contrast, field storage is fixed once the Gaussian
+set, codebooks, and latent dimension are fixed. Figure C.3 illustrates this distinction on FIGURINES:
+the measured sparse payload grows from 17.4 to 46.5 MiB over 29–299 source views, while the
+D = 16 field uses 22.0 MiB. The dashed continuation beyond 299 views assumes increasingly
+rapid discovery of new prototype support; it is illustrative rather than a measured or predicted trend.
+With fixed codebooks, support is bounded by K bins per Gaussian and scale. The observation bank
+and other shared components are excluded, so fixed field storage does not imply fixed total system
+storage.
+Computational complexity, query time, and training cost. We report the computation and training required by the evidence field alongside its storage savings. Decoding all distributions costs
+O(N LDK). The decoded probabilities are query-independent and can be reused across queries, either within processing chunks or in a full O(N LK) cache. For each query, prototype scoring costs
+O(LKdc ), sorting costs O(LK log K), and local aggregation costs O(N LK). Instance-observation
+scoring, pooling, soft assignment, and rendering incur additional costs. Tab. C.7 reports measured
+local query and evidence-field training costs.
+The costs in Tab. C.7 were measured on a dedicated NVIDIA B200 with no overlapping CUDA
+workload. These measurements concern field preparation, training, and the local query computation,
+which does not depend on the instance observation fraction β. Local query time averages each
+scene’s median over its queries and three passes, excluding warmup, text encoding, instance-prior
+computation, fusion, rendering, and I/O. The per-query block shows that sparse aggregation takes
+6.90 ms, versus 12.13 and 13.34 ms for the D = 8 and D = 32 fields, which include fused decoding
+20
+Measured sparse storage
+Hypothetical sparse storage
+Field
+Field
+16
+32
+Local representation storage (MiB)
+Illstrative scenario – not measured
+At 299 views(figurines),
+Field (D=16): 22.0 MiB
+Field (D=32): 43.2 MiB
+Sparse: 46.5 MiB
+Assumes increasingly rapid discovery of new
+prototype support
+Number of source views
+Figure C.3: Local representation storage as observations accumulate. Solid markers show measurements on FIGURINES. The shaded continuation is hypothetical, not measured or predicted. Field
+capacity assumes fixed geometry and codebook size; shared storage is excluded.
+Table C.7: Evidence-field computation cost. Preparation, optimization, and local query times
+average scenes. Peak memory is the maximum over scenes. Lower is better; timings are not ranked.
+Quantity ↓
+Sparse qg Field D = 8 Field D = 32
+One-time field preparation and training
+Cached preparation (s)
+–
+10k-step optimization (s)
+–
+Peak allocated memory (GiB)
+–
+17.00
+31.21
+5.98
+14.07
+29.16
+6.56
+Per-query local computation
+Local query time (ms)
+12.13
+13.34
+6.90
+and local aggregation. The sparse implementation visits occupied bins, while the field produces K
+logits per Gaussian; the field is slower in this measured local-query comparison.
+The additional 10k-step field optimization averages 31.21 s for D = 8 and 29.16 s for D = 32; these
+measurements do not establish a runtime ordering between the dimensions. Cached preparation is
+reported separately and excludes construction of the affinity field and the evidence-set association
+cache. Optimization timing also excludes checkpoint serialization. Peak allocated memory includes
+the resident training caches, with maxima of 5.98 and 6.56 GiB across scenes. Raw empirical
+distributions need no field optimization; their cache-construction cost is not measured by this timing
+comparison.
+21
+D
+Q UALITATIVE R ESULTS
+Figures D.1 and D.2 compare the baseline, instance prior only, and EviSplat on LERF-OVS and
+ScanNet, respectively. The examples show changes in target coverage and false-positive regions
+as instance observations and Gaussian-local evidence are introduced. The gains are not uniform:
+for “rubics cube” and “pour-over vessel” on LERF-OVS, the instance prior alone falls below the
+baseline, while adding Gaussian-local evidence recovers the target.
+Baseline
++Instance prior only
+EviSplat
+IoU : 0.880
+IoU : 0.832
+IoU : 0.965
+IoU : 0.372
+IoU : 0.485
+IoU : 0.929
+IoU : 0.683
+IoU : 0.519
+IoU : 0.959
+IoU : 0.411
+IoU : 0.513
+IoU : 0.954
+IoU : 0.906
+IoU : 0.921
+IoU : 0.982
+IoU : 0.811
+IoU : 0.809
+IoU : 0.996
+IoU : 0.689
+IoU : 0.752
+IoU : 0.836
+IoU : 0.194
+IoU : 0.225
+IoU : 0.472
+IoU : 0.664
+IoU : 0.615
+IoU : 0.835
+Figurines
+“green apple”
+“toy cat statue”
+“rubics cube”
+Teatime
+“coffee”
+“stuffed bear”
+“tea in a glass”
+Waldo kitchen
+“knife”
+“ottolenghi”
+“pour-over-vessel”
+Figure D.1: Qualitative results on LERF-OVS. Baseline, instance prior only, and EviSplat. Red
+outlines mark ground truth; values report rendered-view mask IoU.
+22
+Text query
+Baseline
++Instance prior only
+EviSplat
+“sofa”
+IoU : 0.810
+IoU : 0.815
+IoU : 0.844
+“door”
+IoU : 0.719
+IoU : 0.747
+IoU : 0.774
+“chair”
+IoU : 0.331
+IoU : 0.600
+IoU : 0.648
+“floor”
+IoU : 0.648
+IoU : 0.684
+IoU : 0.732
+“refrigerator”
+IoU : 0.622
+IoU : 0.632
+IoU : 0.634
+“bed”
+IoU : 0.692
+IoU : 0.710
+IoU : 0.728
+Figure D.2: Qualitative results on ScanNet. Baseline, instance prior only, and EviSplat, shown
+from selected views. Values report query-specific point IoU over the full scene.
+23

@@ -1,0 +1,132 @@
+--- v002.md
++++ v003.md
+@@ -1,56 +1,96 @@
+ # Evaluation Pipeline
+-
+-Also called: Reconstruction Evaluation, Visible Surface Evaluation
++Also called: Reconstruction Evaluation Pipeline, Visible Surface Evaluation Protocol
+ 
+ ## Overview
+-This pipeline computes Chamfer distance ($C_{\ell1}$), intersection-over-union (IoU), normal consistency (NC), and F-score on reconstructed surfaces visible in the input color/depth streams [S1]. It differs from standard mesh evaluation by explicitly culling occluded or unseen geometry to prevent error inflation from regions where the network output is unpredictable or where ground truth contains hidden surfaces [S1]. It builds on [Mesh/Point Cloud Evaluation Metrics](4797-mesh-point-cloud-evaluation-metrics.md) but restricts the comparison domain to the viewing frusta of the input cameras [S1].
++The Evaluation Pipeline is a standardized protocol for assessing the geometric quality of 3D surface reconstructions from color and depth inputs, specifically computing Chamfer distance ($C_{\ell_1}$), Intersection over Union (IoU), Normal Consistency (NC), and F-score [S1]. It distinguishes itself from general mesh metrics by explicitly culling occluded and unseen geometry using ground-truth camera trajectories, ensuring that errors are only computed on regions visible in the input streams [S1]. This prevents error inflation from hidden surfaces or unpredictable network outputs in unseen areas [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Reconstructed mesh $M_{rec}$ [S1].
+-- Ground truth mesh $M_{gt}$ [S1].
+-- Camera poses and intrinsics for all input frames [S1].
+-- Input color/depth streams [S1].
++1.  Reconstructed mesh $M_{pred}$ (triangle soup or manifold mesh).
++2.  Ground-truth mesh $M_{gt}$ (optional, depending on metric; typically used for visibility definition or as reference).
++3.  Ground-truth camera poses (extrinsics and intrinsics) for the input color/depth frames.
++4.  Input color/depth streams (to define the viewing frusta).
+ 
+ **Outputs:**
+-- Scalar metrics: $C_{\ell1}$, IoU, NC, F-score [S1].
++Scalar values for Chamfer distance ($C_{\ell_1}$), IoU, NC, and F-score.
+ 
+ **Data Structures:**
+-- Point cloud $S_{rec}$: Set of 3D points sampled from $M_{rec}$ [G].
+-- Point cloud $S_{gt}$: Set of 3D points sampled from $M_{gt}$ [G].
+-- Voxel grid $V_{rec}$: Binary occupancy grid for $M_{rec}$ [G].
++*   **Mesh:** List of vertices $V$ and faces $F$.
++*   **Point Cloud:** List of 3D points $P$ and associated normals $N$.
++*   **Voxel Grid:** 3D grid with edge length $L_v = 5$ cm.
++
++**Steps:**
++
++1.  **Mesh Subdivision:**
++    Subdivide all triangles in $M_{pred}$ such that the maximum edge length is strictly less than $1.5$ cm [S1]. This ensures sufficient geometric resolution for sampling.
++
++2.  **Visibility Detection:**
++    For each vertex $v \in V_{pred}$, determine if it is visible in at least one input camera frame using the ground-truth camera poses [S1].
++    *   Project $v$ into the image plane of each camera.
++    *   Check if the projection lies within the image bounds and if the depth of $v$ is consistent with the input depth buffer (within a small tolerance) [S1].
++    *   Mark vertex $v$ as "visible" if it passes this check for any frame.
++
++3.  **Culling:**
++    Identify triangles $f \in F_{pred}$ where all three vertices are marked as "invisible" [S1].
++    *   Remove these triangles from $M_{pred}$.
++    *   This step excludes occluded geometry and regions outside the viewing frusta, which are either hidden in the ground truth or unpredictable by the network [S1].
++
++4.  **Point Cloud Sampling:**
++    Sample the culled mesh $M_{pred}$ to generate a point cloud $P_{pred}$ [S1].
++    *   Density: 1 point per cm² of surface area.
++    *   For each triangle, compute its area. Distribute points uniformly across the triangle surface proportional to its area.
++    *   Compute the surface normal for each sampled point.
++
++5.  **Metric Computation:**
++
++    *   **Chamfer Distance ($C_{\ell_1}$):**
++        Compute the average nearest-neighbor distance between $P_{pred}$ and the corresponding ground-truth point cloud $P_{gt}$ (sampled similarly from visible regions of $M_{gt}$) [S1].
++        $$ C_{\ell_1} = \frac{1}{|P_{pred}|} \sum_{p \in P_{pred}} \min_{q \in P_{gt}} \|p - q\|_1 + \frac{1}{|P_{gt}|} \sum_{q \in P_{gt}} \min_{p \in P_{pred}} \|p - q\|_1 $$
++        *(Note: The source specifies $C_{\ell_1}$, implying L1 norm, though L2 is common. We follow the source notation [S1].)*
++
++    *   **Normal Consistency (NC):**
++        Compute the mean cosine similarity between the normal of each point in $P_{pred}$ and its nearest neighbor in $P_{gt}$ [S1].
++        $$ NC = \frac{1}{|P_{pred}|} \sum_{p \in P_{pred}} \max(0, n_p \cdot n_{\hat{q}}) $$
++        where $n_p$ is the normal at $p$, and $n_{\hat{q}}$ is the normal at the nearest neighbor $\hat{q} \in P_{gt}$. The $\max(0, \cdot)$ ensures only consistent orientations contribute.
++
++    *   **IoU and F-score:**
++        1.  Voxelize $M_{pred}$ and $M_{gt}$ (or their sampled point clouds) into a 3D grid with voxel edge length $L_v = 5$ cm [S1].
++        2.  A voxel is "occupied" if it contains any part of the mesh/point cloud.
++        3.  Compute Intersection ($I$) and Union ($U$) of occupied voxels.
++        4.  $$ IoU = \frac{|I|}{|U|} $$
++        5.  Compute Precision ($P$) and Recall ($R$) based on a threshold distance $d_{th} = 5$ cm [S1].
++            *   A predicted voxel is "correct" if its center is within $d_{th}$ of any ground-truth voxel center.
++            *   $$ P = \frac{\text{Correct Predicted Voxels}}{\text{Total Predicted Voxels}} $$
++            *   $$ R = \frac{\text{Correct Ground Truth Voxels}}{\text{Total Ground Truth Voxels}} $$
++        6.  $$ F\text{-score} = \frac{2 \cdot P \cdot R}{P + R} $$
+ 
+ **Parameters:**
+-- Max edge length for subdivision: $L_{max} = 1.5$ cm [S1].
+-- Sampling density: $\rho = 1$ point/cm² [S1].
+-- Voxel edge length: $L_{vox} = 5$ cm [S1].
+-- F-score threshold: $\tau = 5$ cm [S1].
++*   Max edge length for subdivision: $< 1.5$ cm [S1].
++*   Sampling density: 1 point/cm² [S1].
++*   Voxel edge length: 5 cm [S1].
++*   F-score threshold: 5 cm [S1].
+ 
+-**Steps:**
+-1. **Mesh Subdivision**: Subdivide all triangles in $M_{rec}$ until every edge length is strictly less than $L_{max} = 1.5$ cm [S1].
+-2. **Visibility Detection**: Detect visible vertices using the ground truth camera trajectory [S1]. Cull triangles with zero visible vertices (occluded or outside viewing frusta) to avoid error computation in unseen regions [S1].
+-3. **Point Cloud Sampling**: Sample the culled geometry of $M_{rec}$ at a density of $\rho = 1$ point/cm² to form point cloud $S_{rec}$ [S1]. Similarly, sample points from the corresponding visible regions of $M_{gt}$ to form $S_{gt}$ [S1].
+-4. **Chamfer Distance and Normal Consistency**: Compute $C_{\ell1}$ between $S_{rec}$ and $S_{gt}$ [S1]. Compute NC based on cosine similarity between the normal at each point in $S_{rec}$ and the nearest point's normal in $S_{gt}$ [S1].
+-5. **IoU and F-score**: Voxelize $M_{rec}$ into a binary grid with edge length $L_{vox} = 5$ cm [S1]. Compute IoU on the resulting voxel sets [S1]. Compute F-score using a distance threshold of $\tau = 5$ cm [S1].
+-
+-**Pitfalls:**
+-- **Occlusion Handling**: Failing to cull occluded triangles inflates error metrics because the network cannot predict geometry it never saw, and GT may contain hidden surfaces [S1].
++**Edge Cases and Pitfalls:**
++*   **Occluded Geometry:** Failing to cull occluded triangles inflates error metrics because the network cannot predict hidden surfaces, and ground-truth meshes may contain hidden geometry not present in the input views [S1].
++*   **Unseen Regions:** Regions outside the viewing frusta must be excluded, as the network's output in these areas is unpredictable and not constrained by input data [S1].
+ 
+ ## Subtopics
+ 
+ ### [Uniform Sampling Evaluation](9611-uniform-sampling-evaluation.md)
+-A geometric evaluation protocol for surface reconstruction that eliminates vertex-density bias by uniformly sampling a fixed number of points from the reconstructed mesh surface within the ground truth crop volume. It ensures a strictly fair geometric comparison by decoupling the evaluation density from the mesh tessellation quality. Unlike legacy vertex-based metrics, it prevents scores from being artificially inflated by denser tessellations. It is primarily used for evaluating Gaussian-based surface reconstruction on Tanks and Temples and structured scan datasets.
++Eliminates vertex-density bias by uniformly sampling points from the reconstructed mesh surface, decoupling evaluation density from tessellation quality.
++
++### [Intersection over Union (IoU)](17963-intersection-over-union-iou.md)
++Measures spatial overlap between binary segmentation masks, sensitive to floaters and missing geometry.
+ 
+ ## Operating characteristics
+-- **Time and Memory Complexity**: Not given in the sources.
+-- **Measured Performance**: Not given in the sources.
+-- **Scaling**: Not given in the sources.
+-- **Strengths**: Provides a fair evaluation of reconstruction quality by ignoring regions the model could not possibly have reconstructed correctly (occlusions/unseen areas) [S1].
+-- **Limitations**: Metrics are sensitive to the visibility detection algorithm. If visibility is incorrectly determined, valid geometry may be culled or invalid geometry retained [S1]. The choice of subdivision and sampling parameters affects precision [S1].
+-- **When to use**: Evaluating RGB-D reconstruction methods where input views are limited and occlusions are prevalent [S1].
+-- **When not to use**: When evaluating scene completion or methods that explicitly predict hidden geometry [S1].
++*   **Time Complexity:** Dominated by visibility detection ($O(V \cdot C)$ where $V$ is vertices, $C$ is cameras) and nearest-neighbor search for Chamfer/NC ($O(N \log N)$ with spatial indexing). Voxelization is $O(N)$.
++*   **Memory Complexity:** $O(V + F + N)$ for storing mesh and point clouds. Voxel grid is $O(L^3)$ where $L$ is scene extent in voxels.
++*   **Strengths:** Fair comparison by ignoring unseen/occluded regions; robust to tessellation density via subdivision and uniform sampling.
++*   **Limitations:** Requires ground-truth camera poses for visibility culling; sensitive to voxel size choice for IoU/F-score.
++*   **When to use:** Evaluating surface reconstruction from RGB-D data where visibility is a key constraint.
++*   **When not to use:** When evaluating scene completion (including hidden geometry) or when ground-truth camera poses are unavailable.
+ 
+ ## Background
+-The pipeline was introduced in the context of Neural RGB-D Surface Reconstruction [S1]. It addresses the limitation of standard mesh metrics by acknowledging that reconstruction methods are typically trained only on visible geometry [S1]. By restricting evaluation to the viewing frusta of input images, it provides a more meaningful assessment of the method's ability to reconstruct observed surfaces [S1].
++The pipeline was introduced in the context of Neural RGB-D Surface Reconstruction [S1]. It addresses the need for fair evaluation metrics that account for the inherent limitations of reconstruction from limited views, specifically by excluding regions that are not visible in the input data. It is used on datasets like Tanks and Temples and structured scan datasets.
+ 
+ ## Sources

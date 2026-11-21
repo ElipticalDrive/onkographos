@@ -1,0 +1,290 @@
+I made a voxel raycaster in Unity using a compute shader and a texture. But at 1080p, it is limited to a view distance of only 100 at 30 fps. With no light bounces yet or anything, I am quite disappointed with this performance. 
+ I tried learning Vulkan and the best tutorials are based on rasterization, and I guess all I really want to do is compute pixels in parallel on the GPU. I am familiar with CUDA and I've read that is sometimes used for rendering? Or is there a simple way of just computing pixels in parallel in Vulcan? I've already got a template Vulkan project that opens a blank window. I don't need to get any data back from the GPU just render straight to the screen after giving it data. 
+ And with the code below would it be significantly faster in Vulkan as opposed to a Unity compute shader? It has A LOT of if/else statements in it which I have read is bad for GPUs but I can't think of any other way of writing it. 
+ EDIT: I optimized it as much as I could but it's still pretty slow, like 30 fps at 1080p. 
+ Here is the compute shader: 
+ #pragma kernel CSMain
+
+RWTexture2D<float4> Result; // the actual array of pixels the player sees
+const float width; // in pixels
+const float height;
+
+const StructuredBuffer<int> voxelMaterials; // for now just getting a flat voxel array
+const int voxelBufferRowSize;
+const int voxelBufferPlaneSize;
+const int voxelBufferSize;
+const StructuredBuffer<float3> rayDirections; // I'm now actually using it as points instead of directions
+const float maxRayDistance;
+
+const float3 playerCameraPosition; // relative to the voxelData, ie the first voxel's bottom, back, left corner position, no negative coordinates
+const float3 playerWorldForward;
+const float3 playerWorldRight;
+const float3 playerWorldUp;
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    Result[id.xy] = float4(0, 0, 0, 0); // setting the pixel to black by default
+    float3 pointHolder = playerCameraPosition; // initializing the first point to the player's position
+    const float3 p = rayDirections[id.x + (id.y * width)]; // vector transformation getting the world space directions of the rays relative to the player
+    const float3 u1 = p.x * playerWorldRight;
+    const float3 u2 = p.y * playerWorldUp;
+    const float3 u3 = p.z * playerWorldForward;
+    const float3 direction = u1 + u2 + u3; // the direction to that point
+
+    float distanceTraveled = 0;
+    int3 directionAxes; // 1 for positive, 0 for zero, -1 for negative
+    int3 directionIfReplacements = { 0, 0, 0 }; // 1 for positive, 0 for zero, -1 for negative
+    float3 axesUnit = { 1 / abs(direction.x), 1 / abs(direction.y), 1 / abs(direction.z) };
+    float3 distancesXYZ = { 1000, 1000, 1000 };
+    int face = 0; // 1 = x, 2 = y, 3 = z // the current face the while loop point is on
+
+    // comparing the floats once in the beginning so the rest of the ray traversal can compare ints
+    if (direction.x > 0) {
+        directionAxes.x = 1;
+        directionIfReplacements.x = 1;
+    }
+    else if (direction.x < 0) {
+        directionAxes.x = -1;
+    }
+    else {
+        distanceTraveled = maxRayDistance; // just ending the ray for now if one of it's direction axes is exactly 0. You'll see a line of black pixels if the player's rotation is zero but this never happens naturally
+        directionAxes.x = 0;
+    }
+    if (direction.y > 0) {
+        directionAxes.y = 1;
+        directionIfReplacements.y = 1;
+    }
+    else if (direction.y < 0) {
+        directionAxes.y = -1;
+    }
+    else {
+        distanceTraveled = maxRayDistance;
+        directionAxes.y = 0;
+    }
+    if (direction.z > 0) {
+        directionAxes.z = 1;
+        directionIfReplacements.z = 1;
+    }
+    else if (direction.z < 0) {
+        directionAxes.z = -1;
+    }
+    else {
+        distanceTraveled = maxRayDistance;
+        directionAxes.z = 0;
+    }
+
+    // calculating the first point
+    if (playerCameraPosition.x < voxelBufferRowSize &&
+        playerCameraPosition.x >= 0 &&
+        playerCameraPosition.y < voxelBufferRowSize &&
+        playerCameraPosition.y >= 0 &&
+        playerCameraPosition.z < voxelBufferRowSize &&
+        playerCameraPosition.z >= 0)
+    {
+        int voxelIndex = floor(playerCameraPosition.x) + (floor(playerCameraPosition.z) * voxelBufferRowSize) + (floor(playerCameraPosition.y) * voxelBufferPlaneSize); // the voxel index in the flat array
+
+        switch (voxelMaterials[voxelIndex]) {
+        case 1:
+            Result[id.xy] = float4(1, 0, 0, 0);
+            distanceTraveled = maxRayDistance; // to end the while loop
+            break;
+        case 2:
+            Result[id.xy] = float4(0, 1, 0, 0);
+            distanceTraveled = maxRayDistance;
+            break;
+        case 3:
+            Result[id.xy] = float4(0, 0, 1, 0);
+            distanceTraveled = maxRayDistance;
+            break;
+        default:
+            break;
+        }
+    }
+
+    // traversing the ray beyond the first point
+    while (distanceTraveled < maxRayDistance) 
+    {
+        switch (face) {
+        case 1:
+            distancesXYZ.x = axesUnit.x;
+            distancesXYZ.y = (floor(pointHolder.y + directionIfReplacements.y) - pointHolder.y) / direction.y;
+            distancesXYZ.z = (floor(pointHolder.z + directionIfReplacements.z) - pointHolder.z) / direction.z;
+            break;
+        case 2:
+            distancesXYZ.y = axesUnit.y;
+            distancesXYZ.x = (floor(pointHolder.x + directionIfReplacements.x) - pointHolder.x) / direction.x;
+            distancesXYZ.z = (floor(pointHolder.z + directionIfReplacements.z) - pointHolder.z) / direction.z;
+            break;
+        case 3:
+            distancesXYZ.z = axesUnit.z;
+            distancesXYZ.x = (floor(pointHolder.x + directionIfReplacements.x) - pointHolder.x) / direction.x;
+            distancesXYZ.y = (floor(pointHolder.y + directionIfReplacements.y) - pointHolder.y) / direction.y;
+            break;
+        default:
+            distancesXYZ.x = (floor(pointHolder.x + directionIfReplacements.x) - pointHolder.x) / direction.x;
+            distancesXYZ.y = (floor(pointHolder.y + directionIfReplacements.y) - pointHolder.y) / direction.y;
+            distancesXYZ.z = (floor(pointHolder.z + directionIfReplacements.z) - pointHolder.z) / direction.z;
+            break;
+        }
+
+        face = 0; // 1 = x, 2 = y, 3 = z
+        float smallestDistance = 1000;
+        if (distancesXYZ.x < smallestDistance) {
+            smallestDistance = distancesXYZ.x;
+            face = 1;
+        }
+        if (distancesXYZ.y < smallestDistance) {
+            smallestDistance = distancesXYZ.y;
+            face = 2;
+        }
+        if (distancesXYZ.z < smallestDistance) {
+            smallestDistance = distancesXYZ.z;
+            face = 3;
+        }
+        if (smallestDistance == 0) {
+            break;
+        }
+
+        int3 facesIfReplacement = { 1, 1, 1 };
+        switch (face) { // directionIfReplacements is positive if positive but I want to subtract so invert it to subtract 1 when negative subtract nothing when positive
+        case 1:
+            facesIfReplacement.x = 1 - directionIfReplacements.x;
+            break;
+        case 2:
+            facesIfReplacement.y = 1 - directionIfReplacements.y;
+            break;
+        case 3:
+            facesIfReplacement.z = 1 - directionIfReplacements.z;
+            break;
+        }
+
+        pointHolder += direction * smallestDistance; // the acual ray marching
+        distanceTraveled += smallestDistance;
+
+        int3 voxelIndexXYZ = { -1,-1,-1 }; // the integer coordinates within the buffer
+        voxelIndexXYZ.x = ceil(pointHolder.x - facesIfReplacement.x);
+        voxelIndexXYZ.y = ceil(pointHolder.y - facesIfReplacement.y);
+        voxelIndexXYZ.z = ceil(pointHolder.z - facesIfReplacement.z);
+
+        //check if voxelIndexXYZ is within bounds of the voxel buffer before indexing the array
+        if (voxelIndexXYZ.x < voxelBufferRowSize &&
+            voxelIndexXYZ.x >= 0 &&
+            voxelIndexXYZ.y < voxelBufferRowSize &&
+            voxelIndexXYZ.y >= 0 &&
+            voxelIndexXYZ.z < voxelBufferRowSize &&
+            voxelIndexXYZ.z >= 0)
+        {
+            int voxelIndex = voxelIndexXYZ.x + (voxelIndexXYZ.z * voxelBufferRowSize) + (voxelIndexXYZ.y * voxelBufferPlaneSize); // the voxel index in the flat array
+            switch (voxelMaterials[voxelIndex]) {
+            case 1:
+                Result[id.xy] = float4(1, 0, 0, 0) * (1 - (distanceTraveled / maxRayDistance));
+                distanceTraveled = maxRayDistance; // to end the while loop
+                break;
+            case 2:
+                Result[id.xy] = float4(0, 1, 0, 0) * (1 - (distanceTraveled / maxRayDistance));
+                distanceTraveled = maxRayDistance;
+                break;
+            case 3:
+                Result[id.xy] = float4(0, 0, 1, 0) * (1 - (distanceTraveled / maxRayDistance));
+                distanceTraveled = maxRayDistance;
+                break;
+            }
+        }
+        else {
+            break; // should be uncommented in actual game implementation where the player will always be inside the voxel buffer
+        }
+    }
+}
+ 
+ Depending on the voxel data you give it it produces this:
+ 
+ And here is the shader after "optimizing" it and taking out all branching or diverging conditional statements (I think): 
+ #pragma kernel CSMain
+
+RWTexture2D<float4> Result; // the actual array of pixels the player sees
+float4 resultHolder;
+const float width; // in pixels
+const float height;
+
+const Buffer<int> voxelMaterials; // for now just getting a flat voxel array
+const Buffer<float4> voxelColors;
+const int voxelBufferRowSize;
+const int voxelBufferPlaneSize;
+const int voxelBufferSize;
+const Buffer<float3> rayDirections; // I'm now actually using it as points instead of directions
+const float maxRayDistance;
+
+const float3 playerCameraPosition; // relative to the voxelData, ie the first voxel's bottom, back, left corner position, no negative coordinates
+const float3 playerWorldForward;
+const float3 playerWorldRight;
+const float3 playerWorldUp;
+
+[numthreads(16, 16, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    resultHolder = float4(0, 0, 0, 0); // setting the pixel to black by default
+    float3 pointHolder = playerCameraPosition; // initializing the first point to the player's position
+    const float3 p = rayDirections[id.x + (id.y * width)]; // vector transformation getting the world space directions of the rays relative to the player
+    const float3 u1 = p.x * playerWorldRight;
+    const float3 u2 = p.y * playerWorldUp;
+    const float3 u3 = p.z * playerWorldForward;
+    const float3 direction = u1 + u2 + u3; // the transformed ray direction in world space
+    const bool anyDir0 = direction.x == 0 || direction.y == 0 || direction.z == 0; // preventing a division by zero
+    float distanceTraveled = maxRayDistance * anyDir0;
+
+    const float3 nonZeroDirection = { // to prevent a division by zero
+        direction.x + (1 * anyDir0),
+        direction.y + (1 * anyDir0),
+        direction.z + (1 * anyDir0)
+    };
+    const float3 axesUnits = { // the distances if the axis is an integer
+        1.0f / abs(nonZeroDirection.x),
+        1.0f / abs(nonZeroDirection.y),
+        1.0f / abs(nonZeroDirection.z)
+    };
+    const bool3 isDirectionPositiveOr0 = {
+        direction.x >= 0,
+        direction.y >= 0,
+        direction.z >= 0
+    };
+
+    while (distanceTraveled < maxRayDistance)
+    {
+        const bool3 pointIsAnInteger = {
+            (int)pointHolder.x == pointHolder.x,
+            (int)pointHolder.y == pointHolder.y,
+            (int)pointHolder.z == pointHolder.z
+        };
+
+        const float3 distancesXYZ = {
+            ((floor(pointHolder.x + isDirectionPositiveOr0.x) - pointHolder.x) / direction.x * !pointIsAnInteger.x)  +  (axesUnits.x * pointIsAnInteger.x),
+            ((floor(pointHolder.y + isDirectionPositiveOr0.y) - pointHolder.y) / direction.y * !pointIsAnInteger.y)  +  (axesUnits.y * pointIsAnInteger.y),
+            ((floor(pointHolder.z + isDirectionPositiveOr0.z) - pointHolder.z) / direction.z * !pointIsAnInteger.z)  +  (axesUnits.z * pointIsAnInteger.z)
+        };
+
+        float smallestDistance = min(distancesXYZ.x, distancesXYZ.y);
+        smallestDistance = min(smallestDistance, distancesXYZ.z);
+
+        pointHolder += direction * smallestDistance;
+        distanceTraveled += smallestDistance;
+
+        const int3 voxelIndexXYZ = {
+            floor(pointHolder.x) - (!isDirectionPositiveOr0.x && (int)pointHolder.x == pointHolder.x), 
+            floor(pointHolder.y) - (!isDirectionPositiveOr0.y && (int)pointHolder.y == pointHolder.y),
+            floor(pointHolder.z) - (!isDirectionPositiveOr0.z && (int)pointHolder.z == pointHolder.z)
+        };
+
+        const bool inBounds = (voxelIndexXYZ.x < voxelBufferRowSize && voxelIndexXYZ.x >= 0) && (voxelIndexXYZ.y < voxelBufferRowSize && voxelIndexXYZ.y >= 0) && (voxelIndexXYZ.z < voxelBufferRowSize && voxelIndexXYZ.z >= 0);
+
+        const int voxelIndexFlat = (voxelIndexXYZ.x + (voxelIndexXYZ.z * voxelBufferRowSize) + (voxelIndexXYZ.y * voxelBufferPlaneSize)) * inBounds; // meaning the voxel on 0,0,0 will always be empty and act as a our index out of range prevention
+
+        if (voxelMaterials[voxelIndexFlat] > 0) {
+            resultHolder = voxelColors[voxelMaterials[voxelIndexFlat]] * (1 - (distanceTraveled / maxRayDistance));
+            break;
+        }   
+        if (!inBounds) break;
+    }
+    Result[id.xy] = resultHolder;
+}
+ 

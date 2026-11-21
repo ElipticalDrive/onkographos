@@ -1,0 +1,177 @@
+For the past year, I’ve been working with the Amethyst Engine, not just on voxel stuff, but trying to make a game that uses voxels to simplify the art process. I’m no artist, but I know that…
+
+Smooth Voxel Mapping: a Technical Deep Dive on Real-time Surface Nets and Texturing | by DreamCat Games | Aug, 2020 | Medium
+Responses
+Smooth Voxel Mapping: a Technical Deep Dive on Real-time Surface Nets and Texturing
+DreamCat Games
+Follow
+Aug 1 · 18 min read
+Multi-material mesh with blending
+For the past year, I’ve been working with the Amethyst Engine, not just on voxel stuff, but trying to make a game that uses voxels to simplify the art process. I’m no artist, but I know that procedurally generated content is a thing. I started off with a Minecraft-like map that could be meshed with a simple algorithm that generates a quad for each visible face. Then I extended it to the greedy algorithm proposed in the 0fps blog. I wrote some code that procedurally generates dungeons. I even used the wonderful ncollide library to make a bounding volume hierarchy (BVH) of axis-aligned boxes (AABBs) for doing collisions and raycasts with the voxels. Everything was going well.
+Somewhere along the way, I realized that I wanted to put smooth ramps, or stairs, between plateaus in my maps, and the simple cubic meshing algorithm I had didn’t work for that. If I drastically reduced the size of my voxels, I could give a slope effect which was really just a set of tiny stairs. I also considered extending my meshing algorithm to understand “slope voxels,” but without more complex indexing logic, I wouldn’t be able to greedily merge the diagonal quads.
+The elusive slope voxel. LOL look at my stupid reflection in the whiteboard.
+So this definitely wasn’t an insurmountable problem, but instead of taking the easy way out, I took the opportunity to explore the world of smooth voxel meshing, and I think I’ve fully converted. All of my work has culminated in the Voxel Mapper project. I’m going to explain how it works in great detail.
+Demo of the editor
+Voxel Data Structures
+First I’m going to give some quick background about my voxel data structures. The most cache-friendly storage for voxels is a simple array. Every voxel in my game is stored in a std::vec::Vec. And I have a nice wrapper object that lets you index using 3-dimensional coordinates.
+But when you have large maps, say a cube with side length 10⁶, you end up with 10¹⁸ voxels. If a voxel is only one byte, you need an exabyte of RAM to store that many. That clearly doesn’t work. We need to take advantage of the sparsity of your typical maps (ones that have a sky, and rooms, etc). The simplest thing I could think of was a hash map of chunks of voxels. So effectively, my current data structure is just a HashMap<Point, Vec<Voxel>>. The Point contains the coordinates of the chunk. I find the chunk for any voxel point p by doing p / CHUNK_SIZE. I chose my CHUNK_SIZE to be a cube of 16³ voxels.
+It’s that simple! You can go further and implement sparse voxel octrees, but I haven’t found it necessary yet. I’ve made all of my voxel data structures and algorithms available on my GitHub, under the “ilattice3” and “ilattice3-mesh” repositories. I’ll hopefully release these on crates.io once I think they’re “production ready.”
+But what data actually goes in a Voxel? We’ll discover that as we learn what is required of a voxel in order to draw it.
+Meshing Algorithms
+So how can we take a voxel map and make a smooth mesh from it? There are many resources on the Internet that provide source code or prosaic explanations of the various algorithms invented for this purpose. I found the most useful resource was, again, 0fps, in the wonderful 2-part series. You should read it if you have the time!
+But unless you are a real smarty-pants, it’s pretty hard to read one of these articles and be ready for implementing an algorithm by yourself. Too many details are left out. There are edge cases where the meshes don’t line up on chunk boundaries. It can be hard to optimize these algorithm for real time performance. And once you have a mesh, how do you texture it? How do you calculate normal vectors? I want to cover all of this stuff here! Hopefully I can make it understandable, but there is no replacement for reading an implementation in code. I’ll give you one of those too.
+To summarize the problem, you are trying to find the isosurface (0 level set) of a 3D function called a “signed distance field.” At each point, the function is defined as the distance from that point to the nearest point on the surface of a volume. Points where the function is positive are considered outside of the volume, and points where the function is negative are considered inside of the volume. The volume’s surface is precisely the set of points where the function is 0: the isosurface.
+An example of a signed distance field
+The most pervasive isosurface algorithm is Marching Cubes. While fast and relatively understandable (if you copy the lookup table instead of figuring out all of the 256 cases yourself), as a naive human, I found the Naive Surface Nets algorithm to be a bit simpler to understand. And it apparently generates fewer triangles, so that’s a plus! I think optimized implementations of Marching Cubes and Surface Nets will be competitive, based on the benchmarks provided in the 0fps article, so you probably don’t need to worry about that if you’re trying to choose between these algorithms.
+Maybe you think Marching Cubes is simpler and better than Surface Nets. That’s OK, you might be right! But I don’t care, and I’m going to talk about Surface Nets, because that’s what I know, and everyone else has already talked Marching Cubes to death. I haven’t been able to find a really comprehensive tutorial on Surface Nets anywhere on the Internet, so I’m trying to do that here.
+It’s worth mentioning that there is an even fancier algorithm that’s so hot right now; it’s called Dual Contouring. I haven’t gotten around to trying it yet… maybe one day in the future. I hear it works really well with level of detail, but I haven’t found the need for that yet, so I’m ignoring it for now.
+Surface Nets
+The summary of Surface Nets is that you look at a grid of cubes, and for each cube, you decide if and where an isosurface point should be inside of that cube. The catch is, the cubes aren’t your voxels, Once you have all of the isosurface points, you use them as the vertices to make a bunch of quads that ultimately form the surface mesh.
+Note: My words will describe the 3D algorithm, but my pictures are going to be mostly in 2D for this part because it makes it a lot simpler to visualize (and draw). So when you see a square in the pictures, think cube.
+Finding the Mesh Positions
+So the first step is to understand what the grid of cubes looks like relative to your input. Our input is a 3D grid of voxels. For Surface Nets, you should imagine that each voxel is actually not a cube but instead a single point in 3D space (the same 3D space where we define the signed distance function). That point is a corner shared by 8 cubes in the grid.
+The voxels are the pluses (+) and minuses (-) on the corners of the “cubes”.
+So each voxel must store the value of the signed distance function at a corner in the grid. Now we know one of the pieces of data to store in our Voxel type. (Don’t worry, we’re not going to store an f32).
+Now, for each cube in the grid, we need to determine where we would find an isosurface point, if there is one at all. We can look at the 8 corners of a cube, and if there is a mix of positive and negative distances at those corners, we can say that there must be a surface point somewhere in the cube.
+The pink dots are surface points. Note that they only appear in “cubes” where the corners don’t all have the same sign.
+Similarly, we can look at the 12 edges of the cube, and we know that if an edge connects two points (voxels) with different sign, then by the Intermediate Value Theorem, there must be some point on the edge which has value 0, i.e. it’s a surface point, and that edge intersects the surface there. We take all such edges in the cube and average their surface intersection points to get an approximate surface point that lies inside of the cube. If there are no such edges, then we skip this cube, as it does not contain a surface point.
+The pink line segments form the “surface.” (In 3D, they would be quads). Notice that the surface only crosses “cube” edges where the sign changes along the edge.
+So how do we calculate the intersection point for one edge? This is where the actual distance values come into play. Technically, we only know the distance from a corner to the closest point on the isosurface (this is the definition of the signed distance function), but that’s not necessarily the point of surface-edge intersection (the point labeled Ps in the diagram below).
+We can’t have enough information in our finite grid to calculate the exact intersection. But what if we make the assumption that the surface is approximately flat in the neighborhood of the intersection? This is true in the limiting case for manifolds, which is why you get a better approximation as the grid resolution increases.
+Consider the diagram below.
+P1 and P2 are corners of a cube. The edge between them intersects the surface at Ps. f is the signed distance function. The perpendicular dotted lines indicate the distances from P1 and P2 to the surface.
+We see an edge connecting two corners with 3D coordinates P1 and P2, with the respective signed distance values d1 and d2. The surface intersects the edge at a point with coordinates Ps.
+By similarity of the triangles, the ratio
+d1 / d2
+should be equal to the ratio
+|P1 - Ps| / |Ps - P2|
+In fact, it is only the ratio that we need to calculate the point of surface-edge intersection. So we use linear interpolation to find the point on the edge where the signed distance must be zero.
+Finding the surface-edge intersection point with linear interpolation.
+Then, like I said before, we do this calculation of Ps for every intersecting edge, and we find the average of all of those Ps’s. This average is the surface point inside the cube!
+Find the average of the surface-edge intersection points.
+Calculating Mesh Normals
+You remember this math, right?
+Calculating normals is actually quite straightforward. If you remember your multivariable calculus, vectors orthogonal to a level set are always gradients of the function. For a function with a 2D domain, you can imagine a topographical map. The level sets, curves of constant altitude, are always orthogonal to the gradient vector, i.e. the vector pointing in the steepest direction. So for a function with a 3D domain, like our signed distance function, the isosurface is a level set, and its normal vectors are gradients of the signed distance function.
+So we will approximate the gradient at a surface point by looking at the same set of 8 cube corners. To get the x coordinate of the gradient, take the sum of the differences between corners along edges in the x direction. Likewise for y and z.
+Approximating the normal vector components in 2D. The d values are the signed distances at each corner.
+Building the Mesh Triangles
+The final step is to write out an index buffer that defines all of the triangles in your mesh. Get yourself amped because this is probably the most confusing part.
+Again, we’ll be looking at edges of cubes, but in a slightly different way. We will iterate over all of the surface points we found before. A pseudocode description goes like this:
+```
+mesh_quads = []for P1 in surface_points:    for axis in [x_axis, y_axis, z_axis]:        edge = get a cube edge in the direction of "axis"        quad = get a quad, orthogonal to "axis", of surface points               where P1 is the maximal corner        if edge is (-,+) or edge is (+,-):            insert quad into mesh_quads
+```
+But which cube edge and which quad are we looking for? The easiest way for me to describe is with pictures, and they’re in 3D this time!
+One of the 3 possible quads at P1. An edge intersects the quad. The edge is shared by 4 cubes, and the corners of the quad are the surface points inside of each cube.
+There can be up to 3 quads found for surface point P1.
+Hopefully that picture gets my point across. And for fun, here’s the 2D analog (an overhead view).
+An edge intersecting a surface line segment in 2D. The edge is shared by 2 squares, and the endpoints of the line segment are the surface points inside of each square.
+At least in my implementation, I look in the negative directions from p1 to get the other quad corners (p2). Be careful on the boundaries of your grid, since there may not exist surface points in the directions you need to look.
+Once you have your quad corners, you need to write the indices of those corners into the index buffer in a winding order that points the normal vector in the correct direction. (You will in fact be using 6 indices to make 2 triangles).
+Gimme Some Real Code to Look At!
+It’s one thing for me to blather on about the algorithm, and another for you to understand it concretely enough to implement it. So I might as well just give you a cheat sheet. Here’s my implementation of Surface Nets. Sorry I didn’t provide any snippets in this article inline, but it’s kind of hard to make sense of them without seeing all the code at once.
+Surface Nets with Chunks
+Recall that our voxel map is a set of chunks. Each chunk has a separate mesh. So any time a voxel changes, then the mesh for that chunk needs to change. Rather than trying to figure out how to apply deltas to a mesh, it’s quite simple to just regenerate the entire mesh any time the chunk changes.
+But there is an important issue to consider. Do we know that our chunk meshes will be compatible at the chunk boundaries? It turns out that, if you only look at the voxels in a chunk when meshing, you will have discontinuities in your mesh! This happens because Surface Nets only calculates surface points inside of the cubes that you give it. But, looking at the entire set of chunks, there are cubes with corners from multiple chunks.
+Each orange square is a chunk, and the V’s inside are the voxels. The pink dots are the surface points, but the pink O’s show where surface points are missing.
+Thankfully, the remedy is pretty simple. When meshing a chunk, you look not only at the voxels in that chunk, but all adjacent voxels as well. This will make sure we don’t miss any cubes, and the meshes will calculate identical surface points on the boundary, so they will line up seamlessly.
+This solution comes with a cost. Now when you update a voxel on the boundary of a chunk, it will affect the meshes of all adjacent chunks. In fact, any voxels adjacent to boundary voxels will also affect the meshes of adjacent chunks!
+All of the voxels between the orange and purple boundaries will induce a mesh dependency with the adjacent chunk they are closest to.
+This is something that the Voxel Mapper accounts for here. Here’s a picture showing what happens when you fail to account for this.
+Meshes incompatible on a chunk boundary
+Even once I had implemented all of these fixes, there was yet another problem with the meshes that caused some ugliness. No, it’s not the nasty green color of this mesh (I was working on material blending at the time).
+Z fighting of redundant quads
+What’s going on here? Do you see the green quad surrounded by darker green quads? That’s actually two overlapping meshes, Z fighting. There are redundant quads being generated on chunk boundaries. Here’s one example of how this can happen:
+The chunks generating the same quad (double line) on a boundary
+Again, the fix for this is pretty simple once you’ve thought about it for a while. You need to resolve the conflict between the two chunks. You can do this by forcing the chunks to only generate quads on 3 of their 6 boundaries. This only requires a few extra “if” statements (boundary checks) in your code. Here’s what that looks like in 2D:
+A chunk only generates quads on the solid lines (planes). It leaves the dotted lines (planes) alone, since they will be picked up by an adjacent chunk.
+Real-time Voxel Editing
+Phew. Let’s take a break from the meshing algorithms and talk about implementing systems for editing voxels in real time.
+After a bit of optimization, I got the latency of Surface Nets down to under 500 microseconds per 16³ chunk (single-threaded on my Intel i5 4590, 3.3 GHz). The most detrimental issue I had with the performance of Surface Nets was related to indexing my voxels. Since they live in an array, and I’m using 3D coordinates, I was doing 3 multiplications on every single voxel lookup to convert the 3D coordinates into a linear index.
+```
+linear_index(x, y, z) = y * x_size * z_size + z * x_size + x
+```
+My solution was to pre-calculate the linear strides for moving in the x, y, and z directions before entering tight loops. This gave me a generous speed up. Meshing multiple chunks in parallel is also a potential optimization that I have yet to take advantage of.
+Another expensive operation is updating the bounding volume hierarchy of voxels. The best way to optimize that is to make bounding volumes only for visible voxels. I won’t go into more details, as collisions are a bit out of scope for this article, but keep your eyes out for another post about that.
+Even if the latency for a meshing a single chunk is low, when editing many chunks at once, the total latency could exceed the frame time (~13 milliseconds for 60 FPS).
+Looking at a thread profile in Chrome’s built-in tracing view. There’s a little pink region for each invocation of Surface Nets on a chunk. It all adds up to ~17 ms. The green regions are updates to the bounding volume hierarchy.
+EDIT: I actually scrapped the queueing idea that I discuss below. The main issue was that, for correctness, I was copying chunks along with their boundary before placing them in the queue. This turned out to be too expensive. It wasn’t worth that cost just to prevent frame rate slowdown for a workload that really doesn’t fit in the acceptable region anyway.
+Rather than letting the frame rate drop, I just limit the number of chunks that can be meshed in a single frame, keeping an upper bound on the total latency. This requires keeping a queue of chunk changes that still need to be applied, since we might not be able to re-mesh all of the changed chunks in one frame.
+When queueing chunk changes, it is important that if multiple chunks were mutated within a single frame, then their updated meshes also become visible in the same frame. In other words, the chunks need to be re-meshed atomically. Otherwise, you will have noticeable artifacts where one chunk lags behind the other, and you get transient mesh misalignment on chunk boundaries. The way I ensured this was to have a single system responsible for updating voxels (via events from other systems); it bundles all of the chunks changed in a single frame into one “change set” that gets sent to the chunk meshing system.
+When pushing new change sets onto the queue, it can be beneficial to combine change sets with many chunks in common. I do this up to some limit on the number of chunks that can be changed in a single set.
+These ideas of queueing and combining resemble techniques used in other performant transactional systems.
+Texturing a Generated Mesh
+So once you have your meshes, how do you make them look nice? You probably want to texture them. This requires generating UV coordinates for every vertex in the mesh.
+Procedurally generating UVs, also known as UV unwrapping, is actually a rather difficult problem that’s expensive to implement, especially for a real-time application. I tried it, and it didn’t go well.
+My failure at UV unwrapping. Obviously there are well-known techniques for doing this on a sphere, but we need something that works on any manifold.
+If you can figure out real-time UV unwrapping that looks good, you are awesome, you should write about it! But I’m not that awesome, so instead I chose to use a simpler technique called Triplanar Mapping.
+Triplanar Mapping
+The basic idea of Triplanar Mapping is pretty easy to understand. You take three different texture samples for a single vertex and blend them together using weights determined by the normal vector. You are essentially tiling the textures across the entire world and projecting the them onto the surface in the three axis directions. I’m not going to explain this in detail, since there are already some great references on this:
+a somewhat terse article with sample shader code by Martin Palko
+a wonderful article about triplanar normal mapping by Ben Golus
+my own fragment shader for my voxel render pass; I paste the relevant parts of this further down in this article
+The main takeaway here is that the mesh vertices only require position and normal attributes to work with Triplanar Mapping, and you don’t have to generate any UVs until you get to the fragment shader stage.
+Splatting Multiple Materials
+Once you have texturing in place, you might wonder how you can paint your mesh with multiple materials. It would be really nice to just assign each voxel a material and have it be drawn with the correct textures. It would be even better if there were natural transitions between materials in the final image.
+The technique I use for this is called Texture Splatting. The way it works is we add an additional vertex attribute to our meshes, and that attribute contains what I call “material weights,” which describe how much of each material we want to use when shading a fragment. The GPU fragment stage will take care of the interpolation of material weights between triangle vertices for us. I decided that 4 triplanar materials per mesh ought to be sufficient, so I use a [f32; 4] to represent the weights.
+Material weights m at each vertex. Linear interpolation of material weights for triangle fragments.
+In the fragment shader, each time I do triplanar sampling of a texture, I take the weighted average of texture samples from 4 different materials. This causes the smooth transitions between materials in the final image. Eventually I would like to use depth maps to make the transition even better, as described in the Texture Splatting article I linked.
+So how do we actually generate material weights from our voxels? It’s not efficient to store them in our voxel data structure, but they can be generated efficiently on the fly. I do this by iterating over the surface points generated by Surface Nets. Or more specifically, I iterate over the voxel coordinates of the cubes that contain those surface points. For each surface point, I look at the surrounding cube corners and take the sum of the weights for their materials. Since I limit the number of material per chunk to 4, I refer to them by an index in {0, 1, 2, 3}.
+Calculating the material weights for a mesh vertex
+Here’s a simplified code snippet to help explain how this works:
+Once the weights reach the vertex shader stage, they are L1-normalized (so the weights add up to 1). That’s important so the magnitude of the texture sample doesn’t go wild.
+When doing the actual texture sampling, you need access to the textures of 4 materials at the same time. The way I implemented this was by using “array textures” and the sampler2DArray type in GLSL. You could also use texture arrays, but this was not supported by Amethyst’s rendering libraries at the time of writing. There are subtle differences between the two kinds of textures, described here. Array textures are created by simply concatenating multiple textures vertically. So every texture in my “array material” is an array texture with 4 layers, one from each material.
+A shrunk version of my albedo array texture. Just a combination of the albedo textures of the 4 materials.
+Once you combine Triplanar Mapping and Texture Splatting, the sampling code in the fragment shader look like this:
+Be careful not to confuse the “blend" variable with "material_weights”. One is used for blending in the Triplanar Mapping, and the other blends between materials.
+The main problem you might encounter with this combination of techniques is that is requires a lot of texture fetching. With 4 materials, 3 planar samples per texture, and 5 textures per material, it requires 3 * 4 * 5 = 60 fetches per fragment. Most modern GPUs can handle this no problem, but you might need to tune your mipmaps, use “nearest” sampling instead of “linear”, or reduce detail in some other way for this to run well on weak computers.
+Voxel Representation
+So we made it through everything I had to say about rendering smooth voxel meshes! Woo! Throughout the process, we found out that there are two important pieces of data we need to assign to each voxel: signed distance and material index. How do we store these efficiently?
+For signed distance, we can use an f32 during the actual computations in Surface Nets, but we shouldn’t store it in the voxel map that way. It’s too expensive to store 4 bytes for a single number for every voxel. Instead, we can quantize the signed distance into an i8. This gives us a signed distance resolution of 256 possible values, which is plenty for representing the small range of distances needed by voxels adjacent to the isosurface. Remember, if a voxel isn’t adjacent to the isosurface, then it’s signed distance value isn’t used! The only hard part is doing the conversion between f23 and i8 in a way that preserves as much resolution as possible without going out of bounds. Personally, I just multiply the f32 by 50 and clamp it before casting to i8.
+There’s probably a more correct way to figure out the quantizing factor, but I haven’t taken the time to figure it out yet. 50 seems to work pretty well.
+As for the material index, a number in {0, 1, 2, 3}, rather than packing that into 2 bits somewhere, I’m actually storing it out-of-band in a “palette” array. Since I assume I’ll need more metadata about my voxels in the future, I use one byte of the voxel as an address to look up that metadata in the palette array. This allows voxels to reference large pieces of metadata that don’t need to vary a lot between voxels. Basically, each voxel “type” gets it’s own entry in the palette, and only the palette address is stored in the voxel. This lets me have up to 256 voxel types in one map.
+Conclusion
+There you go. I’ve explained pretty much everything about the Voxel Mapper rendering system. I did this partly as a form of documentation for myself, but also hoping that others will find it useful for breaking into voxel gamedev. It’s been a long journey so far, and I’m sure it’s far from over, so you’ll soon be reading more about my gamedev adventures. Bye, for now.
+169
+Voxel
+Graphics
+Rendering
+Gamedev
+Dev
+169 claps
+169 claps
+Written by
+DreamCat Games
+Follow
+Indie game developer
+Follow
+Written by
+DreamCat Games
+Follow
+Indie game developer
+More From Medium
+RESTful APIs: Tutorial of OpenAPI Specification
+Amir Lavasani
+Maximize Your Kubectl Productivity With Shortcut Names for Kubernetes Resources
+Tremaine Eto in The Startup
+Top 5 Node.js Frameworks to Increase Coding Productivity
+Shahid
+Creating a custom Combine Publisher to extend UIKit
+Antoine van der lee 🇳🇱 in The Startup
+How to ETL with MongoDB and Postgres (Part 1)
+Jim Medlock in Chingu
+HashMap Internal working
+Pranay kumar goud in The Glitcher
+Running a serverless batch workload on GCP with Cloud Scheduler, Cloud Functions, and Compute…
+Marcelo Costa in Google Cloud - Community
+5 Reasons to Become a Software Craftsman
+Dieter Jordens in Better Programming
+Discover Medium
+Welcome to a place where words matter. On Medium, smart voices and original ideas take center stage - with no ads in sight. Watch
+Make Medium yours
+Follow all the topics you care about, and we’ll deliver the best stories for you to your homepage and inbox. Explore
+Become a member
+Get unlimited access to the best stories on Medium — and support writers while you’re at it. Just $5/month. Upgrade
+About
+Help
+Legal
+Get the Medium app

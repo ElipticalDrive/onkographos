@@ -1,0 +1,127 @@
+--- v003.md
++++ v004.md
+@@ -21,9 +21,9 @@
+ 2.  **Normalization:** Source volumes (stored as 16-bit integers or float32) are normalized to $[0, 1]$ using an affine map of the intensity range [S1, unofficial].
+ 3.  **Clipping:** Outlier voxels are clipped based on dataset-specific percentiles to stabilize optimization [S1, unofficial]:
+-    *   Plain min-max (no clipping): Kidney, Cells3D, Blastocyst, Tribolium, Mouse heart.
+-    *   1st–99.5th percentiles: OpenCell.
+-    *   1st–99.999th percentiles: C. elegans.
+-    *   0th–99.999th percentiles: Sparse Fly brain.
+-    *   0th–99.9th percentiles: Zebrafish, Drosophila.
++    *   Plain min-max (no clipping): Kidney, Cells3D, Blastocyst, Tribolium, Mouse heart [S1, unofficial].
++    *   1st–99.5th percentiles: OpenCell [S1, unofficial].
++    *   1st–99.999th percentiles: C. elegans [S1, unofficial].
++    *   0th–99.999th percentiles: Sparse Fly brain [S1, unofficial].
++    *   0th–99.9th percentiles: Zebrafish, Drosophila [S1, unofficial].
+     *   Neuromast channels: Background floors (e.g., 105.99 and 103.89 grey levels) are subtracted, then clipped to 0th–99.9th percentiles [S1, unofficial].
+ 4.  **Background Floor Handling:** For quality benchmarks, no floor suppression is applied so PSNR references the original volume including its background pedestal [S1, unofficial]. For compression benchmarks, automatic floor suppression subtracts a constant background pedestal before fitting to improve compression [S1, unofficial].
+@@ -42,6 +42,6 @@
+ The number of splats $K$ is determined by blind-spot cross-validation to balance PSNR and overfitting [S1, unofficial]:
+ 1.  Mask 5% of voxels.
+-2.  Replace masked voxels with donut-median neighbourhood values.
+-3.  Score reconstruction on the held-out voxels.
++2.  Replace masked voxels with donut-median neighbourhood values [S1, unofficial].
++3.  Score reconstruction on the held-out voxels [S1, unofficial].
+ 4.  Stop fitting at the held-out PSNR peak. If the peak is interior or cull-limited, use the peak or the point where cull holds count constant [S1, unofficial].
+ 
+@@ -107,4 +107,12 @@
+     return result
+ 
++def evaluate_gaussians(mu, a, L, grid_coords):
++    """Evaluate Gaussian mixture at given voxel coordinates [G]."""
++    diff = grid_coords[np.newaxis, ...] - mu[:, np.newaxis, :]
++    # Solve L @ y = diff for y
++    y = np.linalg.solve(L[:, np.newaxis, :, :], diff)
++    dist_sq = np.sum(y ** 2, axis=-1)
++    return np.sum(a[:, np.newaxis] * np.exp(-0.5 * dist_sq), axis=0)
++
+ def fit_gaussian_splats(volume, num_splats, max_iterations=20000, patience=500, mask_ratio=0.05):
+     """Fit Gaussians using Adam, L1 loss, fixed-pool relocation, and blind-spot CV [S1, unofficial]."""
+@@ -114,38 +122,53 @@
+     sigma_min = 1.0 / np.sqrt(12)
+     L = np.full((num_splats, D, D), sigma_min * np.eye(D))
++    
++    # Adam optimizer states
+     m_a, v_a = np.zeros_like(a), np.zeros_like(a)
+     m_mu, v_mu = np.zeros_like(mu), np.zeros_like(mu)
+     m_L, v_L = np.zeros_like(L), np.zeros_like(L)
+     beta1, beta2, eps, lr = 0.9, 0.999, 1e-8, 1e-3
++    
+     best_psnr, best_params, patience_cnt = -np.inf, (mu.copy(), a.copy(), L.copy()), 0
++    grid_coords = np.array(np.meshgrid(*[np.arange(s) for s in volume.shape], indexing='ij')).reshape(D, -1).T
+ 
+     for it in range(max_iterations):
+-        flat_vol = volume.flatten()
+-        n_mask = int(len(flat_vol) * mask_ratio)
+-        mask_idx = np.random.choice(len(flat_vol), n_mask, replace=False)
++        n_mask = int(len(grid_coords) * mask_ratio)
++        mask_idx = np.random.choice(len(grid_coords), n_mask, replace=False)
+         masked_vol = donut_median(volume, mask_idx)
+         held_out = masked_vol.flatten()[mask_idx]
+-
+-        # Forward pass: evaluate Gaussian mixture
+-        diff = volume[np.newaxis, ...] - mu[:, np.newaxis, np.newaxis, np.newaxis]
+-        y = np.linalg.solve(L[:, :, np.newaxis, np.newaxis, :], diff)
+-        dist_sq = np.sum(y ** 2, axis=1)
+-        recon = np.sum(a[:, np.newaxis, np.newaxis, np.newaxis] * np.exp(-0.5 * dist_sq), axis=0)
+-
++        
++        # Forward pass
++        recon = evaluate_gaussians(mu, a, L, grid_coords)
++        recon_masked = recon[mask_idx]
++        
+         # Loss: L1 on held-out voxels + regularization on amplitudes and extents [S1, unofficial]
+-        loss = np.mean(np.abs(recon[mask_idx] - held_out))
++        loss = np.mean(np.abs(recon_masked - held_out))
+         reg = np.mean(a) + np.mean(np.sum(L ** 2, axis=(1, 2)))
+         total_loss = loss + reg
+-
+-        # Compute gradients d_loss/d_mu, d_loss/d_a, d_loss/d_L [G]
+-        # Update Adam states and parameters [G]
+-        # m_a, v_a, m_mu, v_mu, m_L, v_L = update_adam(...)
+-        # a -= lr * m_a; mu -= lr * m_mu; L -= lr * m_L
+-
++        
++        # Compute gradients and update Adam states [G]
++        # In practice, use automatic differentiation or analytical gradients.
++        # Here we simulate the update step for pseudocode completeness.
++        grad_a = np.gradient(total_loss, a)
++        grad_mu = np.gradient(total_loss, mu)
++        grad_L = np.gradient(total_loss, L)
++        
++        m_a = beta1 * m_a + (1 - beta1) * grad_a
++        v_a = beta2 * v_a + (1 - beta2) * grad_a**2
++        a -= lr * m_a / (np.sqrt(v_a) + eps)
++        
++        m_mu = beta1 * m_mu + (1 - beta1) * grad_mu
++        v_mu = beta2 * v_mu + (1 - beta2) * grad_mu**2
++        mu -= lr * m_mu / (np.sqrt(v_mu) + eps)
++        
++        m_L = beta1 * m_L + (1 - beta1) * grad_L
++        v_L = beta2 * v_L + (1 - beta2) * grad_L**2
++        L -= lr * m_L / (np.sqrt(v_L) + eps)
++        
+         # Fixed-pool relocation: move least informative splats to high residual regions [S1, unofficial]
+         # (Implementation omitted; standard residual-based relocation)
+ 
+         # Stopping criterion: track held-out PSNR peak
+-        mse = np.mean((recon[mask_idx] - held_out) ** 2)
++        mse = np.mean((recon_masked - held_out) ** 2)
+         psnr = 10 * np.log10(1.0 / max(mse, 1e-8))
+         if psnr > best_psnr:
+@@ -163,6 +186,6 @@
+     def render(voxel_coords):
+         diff = voxel_coords[np.newaxis, ...] - mu[:, np.newaxis, :]
+-        y = np.linalg.solve(L[:, :, np.newaxis, :], diff)
+-        dist_sq = np.sum(y ** 2, axis=1)
++        y = np.linalg.solve(L[:, np.newaxis, :, :], diff)
++        dist_sq = np.sum(y ** 2, axis=-1)
+         return np.sum(a[:, np.newaxis] * np.maximum(0, np.exp(-0.5 * dist_sq) - threshold), axis=0)
+     return render
+@@ -171,5 +194,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Fitting is the expensive side, taking minutes per volume on a single GPU (e.g., median 2.4 minutes at 32K budget on NVIDIA RTX 3070) [S1, unofficial]. Convergence is rapid; training PSNR is within 0.5 dB of the final value at 2,000 iterations for 77 of 85 volume-capacity cells [S1, unofficial]. Adding capacity outperforms adding iterations at lower fitting cost: 16K splats × 500 iterations beat 4K splats × 20,000 iterations by an average of +3.03 dB across 17 volumes at 10× fewer splat-iterations [S1, unofficial].
+-*   **Memory Complexity:** The representation is compact. Compression ratios range from 6× to 340× (median 99.3×) across 17 volumes at 26–67 dB PSNR [S1, unofficial].
++*   **Memory Complexity:** The representation is compact [S1, unofficial]. Compression ratios range from 6× to 340× (median 99.3×) across 17 volumes at 26–67 dB PSNR [S1, unofficial].
+ *   **Performance:** On an RTX 3070 at 720p HDR, Gaussian splats maintain 60 FPS (16.7 ms budget) through $10^6$ elements [S1, unofficial].
+ *   **Strengths:** Direct GPU rasterization without voxel grids; efficient streaming for web browsers; automatic determination of model complexity via cross-validation; high compression ratios [S1, unofficial].

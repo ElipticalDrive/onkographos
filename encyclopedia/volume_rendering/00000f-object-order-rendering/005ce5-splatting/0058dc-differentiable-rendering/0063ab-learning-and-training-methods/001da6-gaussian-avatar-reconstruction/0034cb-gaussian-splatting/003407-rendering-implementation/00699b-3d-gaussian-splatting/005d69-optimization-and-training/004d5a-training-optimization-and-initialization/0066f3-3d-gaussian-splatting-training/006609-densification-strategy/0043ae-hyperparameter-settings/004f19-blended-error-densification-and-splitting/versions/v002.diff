@@ -1,0 +1,240 @@
+--- v001.md
++++ v002.md
+@@ -4,155 +4,133 @@
+ 
+ ## Overview
+-Blended Error Densification and Splitting is a training optimization strategy for 3D Gaussian Splatting that uses accumulated per-primitive rendering errors to guide the adaptive refinement of the scene representation. Unlike methods that rely on positional gradient magnitudes, this approach steers densification based on an auxiliary error metric, addressing the limitation where gradient-based signals are blind to absolute error values in high-frequency areas [S1, 15319-error-based-densification.md]. It sets itself apart from sibling methods by normalizing these accumulated errors to create probability weights for selective splitting, rather than using deterministic thresholds on raw gradients.
++Blended Error Densification and Splitting is a strategy for growing Gaussian primitives in 3D Gaussian Splatting that uses an auxiliary per-pixel error metric to drive densification decisions, rather than relying on positional gradient magnitudes [S1]. It solves the limitation of gradient-based methods, which are sensitive to error changes but blind to absolute error values in high-frequency areas, by redistributing per-pixel errors to primitives proportional to their rendering contribution [S1]. This method is distinct from sibling strategies like [Conditional 3DGS Optimization and Rendering](11459-conditional-3dgs-optimization-and-rendering.md) by explicitly utilizing accumulated L1 error norms as probability weights for splitting [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** The current set of 3D Gaussian primitives (surfels), each defined by mean position $\mu_i$, covariance matrix (derived from scales $\sigma_{i,1}, \sigma_{i,2}, \sigma_{i,3}$ and rotation), opacity, and spherical harmonics coefficients. The rendering pipeline must return per-primitive blended L1 errors during the backward pass.
+-*   **Output:** A modified set of primitives where a subset has been split into two smaller primitives, reducing the overall reconstruction error.
++**Inputs:**
++- Current set of Gaussian primitives $\mathcal{G} = \{g_i\}$, where each primitive $g_i$ has mean $\mu_i$, covariance $\Sigma_i$ (defined by scales $\sigma_{i,1}, \sigma_{i,2}, \sigma_{i,3}$ and rotation), opacity $\alpha_i$, and color/feature coefficients.
++- Per-pixel rendering error $E_{pixel}$ from the current iteration (typically L1 loss against ground truth).
++- Blended error accumulator $B_i$ for each primitive (initialized to 0).
++
++**Outputs:**
++- Updated set of primitives $\mathcal{G}'$, where a subset of primitives has been split into two.
+ 
+ **Data Structures:**
+-*   **Primitive:** Stores $\mu_i \in \mathbb{R}^3$, scales $\sigma_{i,1}, \sigma_{i,2}, \sigma_{i,3} \in \mathbb{R}$, rotation $q_i \in \mathbb{R}^4$, opacity $\alpha_i$, and SH coefficients.
+-*   **Accumulated Error Buffer:** A scalar value $E_i$ per primitive, initialized to 0. This buffer accumulates the blended L1 errors over iterations.
++- `blended_errors`: Array of floats, size $N$ (number of primitives). Stores the accumulated scalar error value for each primitive.
++- `primitive_list`: List of primitive objects containing fields: `mean` (vec3), `scale` (vec3), `rotation` (quat), `opacity` (float), `colors` (tensor), `gamma` (float).
+ 
+ **Steps:**
+-1.  **Error Accumulation:** During the backward pass of each training iteration, retrieve the blended L1 error for each primitive $i$, denoted as $e_i$. Update the accumulated error buffer by addition:
+-    $$ E_i \leftarrow E_i + e_i $$
+-    This accumulation is performed instead of taking the primitive-wise maximum of errors [S1].
+ 
+-2.  **Normalization and Sampling:** Normalize the accumulated errors $E_i$ across all primitives to form probability weights. Let $E_{max} = \max_j(E_j)$. The probability $p_i$ of selecting primitive $i$ for splitting is proportional to its normalized error:
+-    $$ p_i = \frac{E_i}{E_{max}} $$
+-    Sample a subset of primitives for splitting. The target fraction of primitives to split is 5% of the current total count [S1]. The selection is weighted by $p_i$.
++1. **Backward Pass Error Calculation:**
++   During the backward pass of each training iteration, compute the blended L1 error for each primitive. This involves redistributing the per-pixel L1 error $E_{pixel}$ to the contributing primitives proportional to their rendering contribution (opacity and depth weighting) as defined by Rota Bulò et al. [S1]. Let $b_i$ be the blended error contribution for primitive $i$ in the current iteration.
+ 
+-3.  **Splitting Operation:** For each selected primitive $i$:
+-    *   Identify the principal axis of the covariance. Assume the scales are ordered such that $\sigma_{i,1} \ge \sigma_{i,2} \ge \sigma_{i,3}$, where $\sigma_{i,1}$ corresponds to the longest axis and $v_{i,1}$ is the corresponding eigenvector (direction) [S1].
+-    *   Create two new primitives, $i_a$ and $i_b$.
+-    *   **Scales:** Both new primitives inherit the scales:
+-        $$ \sigma_{i_a,1} = \sigma_{i_b,1} = \frac{\sigma_{i,1}}{2} $$
+-        $$ \sigma_{i_a,2} = \sigma_{i_b,2} = \sigma_{i,2} $$
+-        $$ \sigma_{i_a,3} = \sigma_{i_b,3} = \sigma_{i,3} $$
+-    *   **Means:** The new means are displaced along the longest axis $v_{i,1}$ by half the new length of that axis:
+-        $$ \mu_{i_a} = \mu_i - \frac{\sigma_{i,1}}{2} v_{i,1} $$
+-        $$ \mu_{i_b} = \mu_i + \frac{\sigma_{i,1}}{2} v_{i,1} $$
+-    *   **Other Properties:** Copy all other properties from the original primitive $i$, including rotation, opacity, SH coefficients, and the $\gamma$ values (neural texture parameters) [S1].
++2. **Accumulation:**
++   Update the accumulated blended error for each primitive by adding the current iteration's contribution, rather than taking the maximum:
++   $$ B_i^{(t)} = B_i^{(t-1)} + b_i^{(t)} $$
++   where $t$ is the iteration index [S1].
+ 
+-4.  **Replacement:** Remove the original primitive $i$ and insert $i_a$ and $i_b$ into the scene representation. Reset or manage the error buffer for the new primitives as required by the implementation (typically initialized to 0 or inherited, though the source specifies copying $\gamma$ but not explicitly $E$, implying a reset or new accumulation start for the children is standard practice to avoid double-counting the parent's history, but strictly following the text, only $\gamma$ is explicitly mentioned as copied. The error accumulation logic implies $E$ is per-primitive state. If not reset, the children would inherit the parent's high error, potentially causing immediate re-splitting. Standard practice in such heuristics is to reset $E$ for new primitives. If the source does not specify, this is a gap [G]).
++3. **Normalization and Sampling:**
++   Normalize the accumulated blended errors to form probability weights. Let $B_{max} = \max_i(B_i)$. The probability $p_i$ of selecting primitive $i$ for splitting is:
++   $$ p_i = \frac{B_i}{\sum_j B_j} $$
++   Sample a subset of primitives for splitting. The target fraction of primitives to split is 5% of the current total count $N$ [S1]. Specifically, select $K = \lfloor 0.05 \times N \rfloor$ primitives. Selection is performed by sampling indices from the distribution defined by $p_i$ without replacement, or by thresholding if a deterministic approach is preferred, though the source specifies sampling based on normalized weights [S1].
++
++4. **Splitting Operation:**
++   For each selected primitive $i$:
++   a. Identify the principal axis of the covariance matrix. Let the scales be sorted such that $\sigma_{i,1} \ge \sigma_{i,2} \ge \sigma_{i,3}$. The split occurs along the longest axis (associated with $\sigma_{i,1}$) [S1].
++   b. Let $v_{i,1}$ be the unit vector corresponding to the eigenvector of $\Sigma_i$ associated with $\sigma_{i,1}$ [S1].
++   c. Create two new primitives, $g_{i,a}$ and $g_{i,b}$, with the following properties:
++      - **Scales:** Both new primitives have scales $(\frac{\sigma_{i,1}}{2}, \sigma_{i,2}, \sigma_{i,3})$ [S1].
++      - **Means:**
++        $$ \mu_{i,a} = \mu_i - \frac{\sigma_{i,1}}{2} v_{i,1} $$
++        $$ \mu_{i,b} = \mu_i + \frac{\sigma_{i,1}}{2} v_{i,1} $$
++      - **Other Properties:** Copy all other properties from the original primitive $i$, including opacity, color coefficients, rotation (relative to the new mean), and the $\gamma$ value [S1].
++   d. Remove the original primitive $i$ from the list and insert $g_{i,a}$ and $g_{i,b}$ [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def blended_error_densification(primitives, accumulated_errors, iteration):
++def blended_error_densification(primitives, blended_errors, iteration_errors):
+     """
+     primitives: List of Primitive objects
+-    accumulated_errors: List of floats, same length as primitives
++    blended_errors: List[float], accumulated error per primitive
++    iteration_errors: List[float], blended L1 error contribution per primitive for current step
++    
++    Returns: Updated list of primitives
+     """
+-    if len(primitives) == 0:
+-        return primitives, accumulated_errors
+-
+-    # Step 1: Accumulate errors (assumed to be done in backward pass, 
+-    # but here we assume accumulated_errors is updated externally or passed in.
+-    # The source says "In the backwards pass... return blended L1 errors... Accumulate... by adding".
+-    # We assume accumulated_errors is already updated with the current iteration's error e_i.
++    # Step 2: Accumulate errors
++    for i in range(len(primitives)):
++        blended_errors[i] += iteration_errors[i]
++        
++    # Step 3: Normalize and sample
++    total_error = sum(blended_errors)
++    if total_error == 0:
++        return primitives
++        
++    probabilities = [e / total_error for e in blended_errors]
+     
+-    # Step 2: Normalize and determine split count
+-    max_error = max(accumulated_errors)
+-    if max_error == 0:
+-        return primitives, accumulated_errors
+-        
+-    # Calculate probabilities
+-    probabilities = [e / max_error for e in accumulated_errors]
+-    
+-    # Target 5% of primitives to split
+-    num_to_split = int(0.05 * len(primitives))
+-    if num_to_split == 0:
+-        return primitives, accumulated_errors
+-        
+-    # Sample primitives based on probabilities
+-    # Note: Standard sampling without replacement weighted by probabilities
+-    indices_to_split = weighted_sample_without_replacement(
+-        range(len(primitives)), probabilities, num_to_split
+-    )
++    # Sample 5% of primitives
++    num_to_split = max(1, int(0.05 * len(primitives)))
++    # Note: Standard sampling without replacement from categorical distribution
++    # Implementation detail: Use numpy.random.choice or similar
++    indices_to_split = sample_without_replacement(len(primitives), probabilities, num_to_split)
+     
+     new_primitives = []
+-    new_accumulated_errors = []
+-    
+-    for idx, prim in enumerate(primitives):
+-        if idx in indices_to_split:
+-            # Step 3: Split
+-            # Assume prim.scales is sorted such that sigma_1 >= sigma_2 >= sigma_3
+-            # prim.scales[0] is sigma_1, prim.eigenvectors[0] is v_1
+-            sigma_1 = prim.scales[0]
+-            v_1 = prim.eigenvectors[0]
++    for i, prim in enumerate(primitives):
++        if i in indices_to_split:
++            # Step 4: Split
++            # Assume scales are stored as [sigma1, sigma2, sigma3] with sigma1 >= sigma2 >= sigma3
++            # v1 is the eigenvector corresponding to sigma1
++            sigma1 = prim.scale[0]
++            v1 = prim.eigenvector_0 # Unit vector for longest axis
+             
+-            # New scales
+-            new_sigma_1 = sigma_1 / 2.0
+-            new_sigma_2 = prim.scales[1]
+-            new_sigma_3 = prim.scales[2]
++            # New scales: halve the longest axis
++            new_scale = [sigma1 / 2.0, prim.scale[1], prim.scale[2]]
+             
+             # New means
+-            displacement = (sigma_1 / 2.0) * v_1
+-            mean_a = prim.mean - displacement
+-            mean_b = prim.mean + displacement
++            offset = (sigma1 / 2.0) * v1
++            mean_a = prim.mean - offset
++            mean_b = prim.mean + offset
+             
+             # Create new primitives
+-            # Copy all properties except mean and scales
+             prim_a = Primitive(
+                 mean=mean_a,
+-                scales=[new_sigma_1, new_sigma_2, new_sigma_3],
+-                rotation=prim.rotation,
++                scale=new_scale,
++                rotation=prim.rotation, # Copy rotation
+                 opacity=prim.opacity,
+-                sh_coeffs=prim.sh_coeffs,
+-                gamma=prim.gamma # Explicitly copied per source
++                colors=prim.colors,
++                gamma=prim.gamma
+             )
+             
+             prim_b = Primitive(
+                 mean=mean_b,
+-                scales=[new_sigma_1, new_sigma_2, new_sigma_3],
+-                rotation=prim.rotation,
++                scale=new_scale,
++                rotation=prim.rotation, # Copy rotation
+                 opacity=prim.opacity,
+-                sh_coeffs=prim.sh_coeffs,
+-                gamma=prim.gamma # Explicitly copied per source
++                colors=prim.colors,
++                gamma=prim.gamma
+             )
+             
+             new_primitives.append(prim_a)
+             new_primitives.append(prim_b)
+-            
+-            # Error buffer for new primitives: Reset to 0 [G]
+-            # Source does not specify, but accumulating parent error would be incorrect.
+-            new_accumulated_errors.append(0.0)
+-            new_accumulated_errors.append(0.0)
+-            
+         else:
+             new_primitives.append(prim)
+-            new_accumulated_errors.append(accumulated_errors[idx])
+             
+-    return new_primitives, new_accumulated_errors
++    return new_primitives
+ ```
+ 
+-**Parameters:**
+-*   **Split Fraction:** 5% of current primitives [S1].
+-*   **Error Metric:** Blended L1 error [S1].
+-*   **Accumulation Method:** Summation (addition) [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Zero Error:** If all accumulated errors are zero, no primitives are split.
+-*   **Precision:** Displacement calculation $\frac{\sigma_{i,1}}{2} v_{i,1}$ must handle floating-point precision for very small scales.
+-*   **Degenerate Input:** If $\sigma_{i,1} \approx 0$, the split displacement is negligible, resulting in overlapping primitives. The assumption $\sigma_{i,1} \ge \sigma_{i,2}$ ensures the longest axis is split, but if all scales are near zero, the primitive is already small.
+-*   **$\gamma \to \infty$:** When the neural texture parameter $\gamma_i$ approaches infinity, the split operation perfectly halves the quad along its long axis [S1]. This implies the splitting logic is consistent with the geometric interpretation of the surfel.
++- If $\sigma_{i,1}$ is very small, the split displacement is small, potentially leading to overlapping primitives.
++- The assumption $\sigma_{i,1} \ge \sigma_{i,2}$ must be enforced or checked before splitting to ensure the correct axis is chosen [S1].
++- Precision issues may arise if $B_i$ values vary significantly in magnitude; normalization helps but underflow/overflow should be monitored [G].
+ 
+ ## Subtopics
+ 
+-### [Error-based Densification](15319-error-based-densification.md)
+-A densification strategy that steers growing decisions based on an auxiliary per-pixel error function $E_\pi$ (e.g., Structural Similarity) rather than positional gradient magnitude, solving the issue where gradient-based methods are blind to absolute error values in high-frequency areas.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The densification step involves calculating probabilities ($O(N)$) and sampling ($O(N \log N)$ or $O(N)$ with aliasing methods) and creating new primitives ($O(K)$ where $K$ is the number of splits). The splitting itself is $O(1)$ per primitive. Overall, it adds a linear overhead per iteration relative to the number of primitives.
+-*   **Memory Complexity:** Increases by 5% of the current primitive count per densification step.
+-*   **Performance:** The method is designed for real-time novel view synthesis with sparse primitives, as indicated by the Nexels paper [S1]. By splitting only 5% of primitives, it controls the growth rate and memory usage.
+-*   **Strengths:** Directly targets areas of high reconstruction error, potentially leading to more efficient primitive distribution than gradient-based methods which may split in areas with high gradient but low absolute error (or vice versa).
+-*   **Limitations:** Requires the computation and accumulation of per-primitive errors, which may be more expensive than simple gradient magnitude checks. The choice of 5% is a heuristic [S1].
+-*   **When to use:** When the scene has high-frequency details that are not well-captured by gradient-based densification, or when memory constraints require controlled, error-driven growth.
+-*   **When not to use:** If the error metric is noisy or expensive to compute, or if the scene is simple and gradient-based methods are sufficient.
++- **Time Complexity:** $O(N)$ for accumulation and normalization, where $N$ is the number of primitives. Sampling is $O(K)$ where $K=0.05N$. Splitting is $O(K)$ as it involves constant-time geometric operations per split.
++- **Memory Complexity:** Increases by 5% per densification step (since each split replaces 1 primitive with 2).
++- **Performance:** The method effectively targets high-error regions, improving reconstruction quality in textured areas [S1]. It avoids the noise sensitivity of pure gradient-based methods [S1].
++- **Limitations:** Relies on the accuracy of the blended error calculation from the backward pass. If the error metric is noisy, densification may be erratic [S1].
+ 
+ ## Background
+-The method originates from the "Nexels: Neurally-Textured Surfels for Real-Time Novel View Synthesis with Sparse Primitives" paper [S1]. It builds on the 3D Gaussian Splatting framework [22] and incorporates ideas from 3DGS-MCMC [23] regarding the use of error-based sampling. The specific splitting geometry is designed to preserve textured surfaces, with the property that for $\gamma_i \to \infty$, the split perfectly halves the quad along its long axis [S1]. The use of accumulated errors rather than maximums is a specific heuristic choice in this implementation [S1].
++This method is described in the context of "Nexels: Neurally-Textured Surfels for Real-Time Novel View Synthesis with Sparse Primitives" [S1]. It builds upon the densification strategies of 3D Gaussian Splatting but introduces a specific error-based splitting heuristic inspired by 3DGS-MCMC [S1]. The error redistribution logic references the work of Rota Bulò et al. .
+ 
+ ## Sources

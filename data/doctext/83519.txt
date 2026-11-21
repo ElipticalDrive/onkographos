@@ -1,0 +1,1636 @@
+### C# Example/Program.cs
+```
+﻿using System.Collections.Concurrent;
+using System.Drawing;
+using System.Numerics;
+using GalensUnified.CubicGrid.Core;
+using GalensUnified.CubicGrid.Renderer.NET;
+using GalensUnified.CubicGrid.Renderer.NET.Shapes;
+using Microsoft.DotNet.PlatformAbstractions;
+using Silk.NET.Input;
+using Silk.NET.Maths;
+using Silk.NET.OpenGL;
+using Silk.NET.Windowing;
+
+static class Program
+{
+    // MSAA allows partial transparency.
+    // Disabling limits to cutout transparency.
+    const bool MSAATransparency = true;
+    const int worldLengthInChunks = 33;
+    const float shadowIntensity = 0.3f; // light level of shadows 0-1
+    public static bool cursorVisible = false;
+    public static float moveSpeed = 2f;
+    public static Vector2 previousMousePosition;
+
+    static void Main(string[] args)
+    {
+        WindowOptions options = WindowOptions.Default;
+        options.Title = "Cubic-Grid Voxel Rendering Example";
+        options.PreferredDepthBufferBits = 32;
+        if (MSAATransparency)
+            options.Samples = 8;
+        IWindow window = Window.Create(options);
+        window.Load += () => Load(window);
+        window.Run();
+    }
+
+    static void Load(IWindow window)
+    {
+        // Camera
+        float mouseSensitivity = 0.0025f;
+        Camera cam = new
+        (
+            Vector3.One * 1.5f,
+            Vector3.UnitY * float.Pi, // Pitch, Yaw
+            MathF.PI * (120f / 360f),
+            (float)window.Size.X / window.Size.Y,
+            0.1f,
+            2000f
+        );
+        window.Resize += size => cam.AspectRatio = (float)size.X / size.Y;
+
+        // Inputs
+        IInputContext input = window.CreateInput();
+        input.Mice[0].Cursor.CursorMode = CursorMode.Raw;
+        input.Keyboards[0].KeyDown += (keboard, key, num) =>
+        {
+            if (key == Key.Escape)
+                Environment.Exit(0);
+            if (key == Key.E)
+            {
+                cursorVisible = !cursorVisible;
+                input.Mice[0].Cursor.CursorMode = cursorVisible ? CursorMode.Normal : CursorMode.Raw;
+            }
+        };
+        previousMousePosition = input.Mice[0].Position;
+        input.Mice[0].MouseMove += (mouse, pos) => cam.EurlerAngles += GetCameraRotationDelta(mouse, pos, mouseSensitivity);
+        window.Update += delta => cam.Position += GetCameraPositionDelta(delta, input, cam.EurlerAngles.Y);
+
+        // Load assets
+        DirectoryInfo assets = Directory.CreateDirectory(Path.Combine(ApplicationEnvironment.ApplicationBasePath, "Assets"));
+        FileInfo[] textureFiles = Directory.CreateDirectory(Path.Combine(assets.FullName, "Textures")).GetFiles();
+        TextureLoader.Texture[] textures = TextureLoader.LoadImages(textureFiles);
+        BlockRenderData.Factory BRDFactory = new(textures);
+        // Create Blocks
+        // Shapes
+        List<Shape> shapes = [];
+        Cube cube = new();
+        shapes.AddRange(cube.Create(shapes.Count));
+        IShape ramp = new Ramp(cube.shapeIDByFace[(int)Direction.Back], cube.shapeIDByFace[(int)Direction.Bottom]);
+        shapes.AddRange(ramp.Create(shapes.Count));
+        // Faces are named by the Assets/Textures file name.
+        BlockRenderData.renderDataByBlock =
+        [
+            // Air, index  0
+            default,
+            // Grass, index 1
+            BRDFactory.CreateWithNames("Grass_Side", "Grass_Side", "Grass", "Dirt", "Grass_Side", "Grass_Side", cube),
+            // Dirt, index 2
+            BRDFactory.CreateWithName("Dirt", cube),
+            // Stone, index 3
+            BRDFactory.CreateWithName("Stone", cube),
+            // Glass, index 4
+            MSAATransparency
+                ? BRDFactory.CreateWithName("Glass_Shade", cube)
+                : BRDFactory.CreateWithName("Glass_Cutout", cube),
+            // Grass Side Dirt, to bypass grass tinting, index 5
+            BRDFactory.CreateWithNames("Grass_Side_Dirt", "Grass_Side_Dirt", "Dirt", "Dirt", "Grass_Side_Dirt", "Grass_Side_Dirt", cube),
+            // Ramp, index 6
+            BRDFactory.CreateWithNames("Dirt", "Dirt", "Grass", "Dirt", "Dirt", "Dirt", ramp),
+        ];
+        // Culling information for BlockCulling
+        Dictionary<ushort, BlockCulling.TransparencyMode> transparancyByBlock = new()
+        {
+            // Air
+            {0, BlockCulling.TransparencyMode.CullOnTransparent},
+            // Grass
+            {1, BlockCulling.TransparencyMode.Opaque},
+            // Dirt
+            {2, BlockCulling.TransparencyMode.Opaque},
+            // Stone
+            {3, BlockCulling.TransparencyMode.Opaque},
+            // Glass
+            {
+                4, MSAATransparency
+                    ? BlockCulling.TransparencyMode.RenderOnTransparent
+                    : BlockCulling.TransparencyMode.CullOnTransparent
+            },
+            // Grass Side Dirt, to bypass grass tinting
+            {5, BlockCulling.TransparencyMode.Opaque},
+            // Ramp, index 6
+            {6, BlockCulling.TransparencyMode.RenderOnTransparent}
+        };
+        foreach ((ushort block, BlockCulling.TransparencyMode mode) in transparancyByBlock)
+            BlockCulling.transparencyModeByBlock.Add(block, mode);
+
+        // Create Graphics and Shader
+        GL graphics = window.CreateOpenGL();
+        if (MSAATransparency)
+        {
+            graphics.Enable(EnableCap.Multisample);
+            graphics.Enable(EnableCap.SampleAlphaToCoverage);
+        }
+        graphics.Enable(EnableCap.DepthTest);
+        graphics.DepthFunc(DepthFunction.Less);
+        graphics.ClearColor(System.Drawing.Color.CornflowerBlue);
+        window.Resize += size => graphics.Viewport(0, 0, (uint)window.FramebufferSize.X, (uint)window.FramebufferSize.Y);
+        window.Update += delta => graphics.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+        int chunkLength = 16;
+        // Ambiguous between mine and Silk.NET.OpenGL.Shader :sob:
+        GalensUnified.CubicGrid.Renderer.NET.Shader shader = new
+        (
+            graphics,
+            Path.Combine(assets.FullName, "GLSL SpriV Translation"),
+            chunkLength,
+            chunkLength * chunkLength * chunkLength * ShapeInstance.MemorySize * 32, // ChunkVolume * BlockInstance memory size * 32 chunks, 32 is adjustable.
+            cam.NearPlane,
+            [.. textures.Select(t => t.Image)],
+            [.. shapes],
+            messageErr => Console.WriteLine(messageErr),
+            messageLog => Console.WriteLine(messageLog)
+        );
+
+        // Create World
+        int worldLength = worldLengthInChunks * chunkLength;
+        Vector3D<int> worldPosition = -Vector3D<int>.One * worldLength / 2;
+        worldPosition.Y += chunkLength * 2;
+        CreateWorld(shader, worldPosition, chunkLength, worldLength);
+
+        window.Render += dt => shader.Render(cam);
+    }
+
+    /// <summary>Calculates the camera rotation delta every frame.</summary>
+    /// <returns>Amount to rotate the camera.</returns>
+    static Vector3 GetCameraRotationDelta(IMouse mouse, Vector2 pos, float sensitivity)
+    {
+        if (mouse.Cursor.CursorMode != CursorMode.Raw)
+            return Vector3.Zero;
+
+        Vector2 delta = pos - previousMousePosition;
+        previousMousePosition = pos;
+
+        float Yaw = delta.X * sensitivity;
+        float Pitch = delta.Y * sensitivity;
+
+        // clamp pitch to avoid flipping
+        float limit = MathF.PI / 2f - 0.01f;
+        Pitch = Math.Clamp(Pitch, -limit, limit);
+        return new(-Pitch, -Yaw, 0);
+    }
+
+    /// <summary>Calculates the distance the camera needs to move every frame.</summary>
+    /// <returns>Distance to move the camera.</returns>
+    static Vector3 GetCameraPositionDelta(double deltaTime, IInputContext input, float camYaw)
+    {
+        IKeyboard keyboard = input.Keyboards[0];
+        Vector3 dir = new(-MathF.Sin(camYaw), 0, -(float)Math.Cos(camYaw));
+        Vector3 toMove = Vector3.Zero;
+        if (keyboard.IsKeyPressed(Key.A))
+            toMove = new Vector3(-dir.Z, 0, dir.X) * -1;
+        else if (keyboard.IsKeyPressed(Key.D))
+            toMove = new Vector3(-dir.Z, 0, dir.X) * 1;
+
+        if (keyboard.IsKeyPressed(Key.S))
+            toMove += dir * -1;
+        else if (keyboard.IsKeyPressed(Key.W))
+            toMove += dir * 1;
+
+        if (keyboard.IsKeyPressed(Key.Space))
+            toMove.Y = 1;
+        else if (keyboard.IsKeyPressed(Key.ShiftLeft))
+            toMove.Y = -1;
+
+        float speedMult = input.Mice[0].ScrollWheels[0].Y;
+        speedMult = (speedMult > 0) ? 1.25f : (speedMult < 0) ? 0.75f : 0;
+        if (speedMult != 0)
+            moveSpeed *= speedMult;
+
+        return toMove * (float)deltaTime * moveSpeed;
+    }
+
+    /// <summary>Loops through all chunks and their blocks to create the world.</summary>
+    static void CreateWorld(GalensUnified.CubicGrid.Renderer.NET.Shader shader, Vector3D<int> worldPosition, int chunkLength, int worldLength)
+    {
+        // Spin up threads
+        ThreadBatch threadBatch = new(Environment.ProcessorCount);
+        // Find positions to create
+        List<Vector3D<int>> toCreate = [];
+        for (int chunkZ = worldPosition.Z; chunkZ < worldPosition.Z + worldLength; chunkZ += chunkLength)
+        for (int chunkX = worldPosition.X; chunkX < worldPosition.X + worldLength; chunkX += chunkLength)
+        for (int chunkY = worldPosition.Y; chunkY < worldPosition.Y + worldLength; chunkY += chunkLength)
+            toCreate.Add(new(chunkX, chunkY, chunkZ));
+        // Create Chunks
+        Task[] tasks = new Task[toCreate.Count];
+        int taskIndex = 0;
+        ConcurrentDictionary<Vector3, ushort[]> chunkByPos = [];
+        foreach (Vector3D<int> chunkPos in toCreate)
+        tasks[taskIndex++] = threadBatch.EnqueueJob(() =>
+        {
+            int chunkVolume = chunkLength * chunkLength * chunkLength;
+            ushort[] blocks = new ushort[chunkVolume];
+            bool allSame = true;
+            for (int blockZ = 0; blockZ < chunkLength; blockZ++)
+            for (int blockX = 0; blockX < chunkLength; blockX++)
+            for (int blockY = 0; blockY < chunkLength; blockY++)
+            {
+                Vector3D<int> blockPos = new Vector3D<int>(blockX, blockY, blockZ) + chunkPos;
+                int i = (blockZ * chunkLength + blockY) * chunkLength + blockX;
+                blocks[i] = blockPos.Y switch
+                {
+                    > 0 => 0,   // Air above 0
+                    0 => 1,     // Grass floor
+                    -2 => 0,    // Air slice
+                    > -5 => 2,  // Dirt between -5 and 0, the soil layer
+                    -16 => 0,   // Air slice
+                    -31 => 0,   // Air slice
+                    -49 => 0,   // Air slice
+                    _ => 3,     // Stone default
+                };
+                blocks[i] = (Math.Abs(blockPos.Z) % 96 > 80 && Math.Abs(blockPos.X) % 96 > 80) ? (ushort)0 : blocks[i];
+                blocks[i] = (Math.Abs(blockPos.Z) % 96 == 80 && Math.Abs(blockPos.X) % 96 > 80) ? (ushort)4 : blocks[i];
+                blocks[i] = (Math.Abs(blockPos.Z) % 96 > 80 && Math.Abs(blockPos.X) % 96 == 0 && blockPos.X != 0) ? (ushort)4 : blocks[i];
+                blocks[i] = (Math.Abs(blockPos.Z) % 96 == 0 && Math.Abs(blockPos.X) % 96 > 80 && blockPos.Z != 0) ? (ushort)4 : blocks[i];
+                blocks[i] = (Math.Abs(blockPos.Z) % 96 > 80 && Math.Abs(blockPos.X) % 96 == 80) ? (ushort)4 : blocks[i];
+                blocks[i] = (Math.Abs(blockPos.Z) == blockPos.Y && blockPos.Y > 0 && Math.Abs(blockPos.X) % 10 > 5) ? (ushort)6 : blocks[i];
+                blocks[i] = (Math.Abs(blockPos.X) == blockPos.Y && blockPos.Y > 0 && Math.Abs(blockPos.Z) % 14 > 7) ? (ushort)6 : blocks[i];
+                if (blocks[i] != blocks[0])
+                    allSame = false;
+            }
+            if (allSame && blocks[0] == 0)
+                return;
+            chunkByPos.TryAdd((Vector3)chunkPos, blocks);
+        }).ContinueWith(T => { if (T.Exception != null) throw T.Exception; });
+        Task.WhenAll(tasks).GetAwaiter().GetResult();
+        // Cull, Shade and tint faces
+        FastNoiseLite noise = new();
+        Vector3 color1 = new(0.8f, 0.7f, 1.0f);
+        Vector3 color2 = new(0.0f, 1.0f, 1.0f);
+        taskIndex = 0;
+        tasks = new Task[chunkByPos.Count];
+        ConcurrentDictionary<Vector3, ShapeInstance[]> chunksToRender = [];
+        foreach (KeyValuePair<Vector3, ushort[]> kvp in chunkByPos)
+        tasks[taskIndex++] = threadBatch.EnqueueJob(() =>
+        {
+            CullingHandler cullingHandler = new();
+            cullingHandler.chunkPosition = kvp.Key;
+            ushort[] negZChunk = chunkByPos.TryGetValue(kvp.Key + (BlockCulling.directions[0] * chunkLength), out ushort[]? negZBlocks) ? negZBlocks : [];
+            ushort[] posZChunk = chunkByPos.TryGetValue(kvp.Key + (BlockCulling.directions[1] * chunkLength), out ushort[]? posZBlocks) ? posZBlocks : [];
+            ushort[] posYChunk = chunkByPos.TryGetValue(kvp.Key + (BlockCulling.directions[2] * chunkLength), out ushort[]? posYBlocks) ? posYBlocks : [];
+            ushort[] negYChunk = chunkByPos.TryGetValue(kvp.Key + (BlockCulling.directions[3] * chunkLength), out ushort[]? negYBlocks) ? negYBlocks : [];
+            ushort[] negXChunk = chunkByPos.TryGetValue(kvp.Key + (BlockCulling.directions[4] * chunkLength), out ushort[]? negXBlocks) ? negXBlocks : [];
+            ushort[] posXChunk = chunkByPos.TryGetValue(kvp.Key + (BlockCulling.directions[5] * chunkLength), out ushort[]? posXBlocks) ? posXBlocks : [];
+            cullingHandler = BlockCulling.CullChunk(kvp.Value, cullingHandler, chunkLength,  negZChunk, posZChunk, posYChunk, negYChunk, negXChunk, posXChunk);
+            if (cullingHandler.instances.Count > 0)
+                chunksToRender.TryAdd(kvp.Key, [.. cullingHandler.instances]);
+        }).ContinueWith(T => { if (T.Exception != null) throw T.Exception; });
+        Task.WhenAll(tasks).GetAwaiter().GetResult();
+        // Render
+        foreach ((Vector3 chunkPos, ShapeInstance[] blocks) in chunksToRender)
+            shader.RenderChunk(chunkPos, blocks);
+        threadBatch.Dispose();
+    }
+
+    public struct CullingHandler : IBlockCullingHandler
+    {
+        public Vector3 chunkPosition;
+
+        public List<ShapeInstance> instances;
+
+        private List<Vector3> tintStorage; // We don't want to allocate this for every shape
+
+        static readonly FastNoiseLite noise = new();
+        static readonly Vector3 color1 = new(0.8f, 0.7f, 1.0f);
+        static readonly Vector3 color2 = new(0.0f, 1.0f, 1.0f);
+
+        public void CullBegan()
+        {
+            instances = [];
+            tintStorage = [];
+        }
+
+        public readonly void ShapeVisible(Vector3 localBlockPosition, ushort block, List<Direction> facesVisible)
+        {
+            Vector3 blockPos = localBlockPosition + chunkPosition;
+            BlockRenderData renderData = BlockRenderData.renderDataByBlock[block];
+            tintStorage.Clear();
+            for (int i = 0; i < facesVisible.Count; i++)
+            {
+                // Grass sides needs another face for the dirt that doesn't get tinted.
+                if (block == 1 && facesVisible[i] is not (Direction.Top or Direction.Bottom))
+                {
+                    float shadow = GetShadow(blockPos, block, facesVisible[i]);
+                    BlockRenderData grassSideDirtRD = BlockRenderData.renderDataByBlock[5];
+                    instances.AddRange(grassSideDirtRD.Instance(localBlockPosition, [facesVisible[i]], Direction.Top, 0));
+                }
+                tintStorage.Add(GetShadedTint(blockPos, block, facesVisible[i]));
+            }
+            // Rotation
+            Direction up = Direction.Top;
+            int forward = 0;
+            if (block == 6)
+            {
+                if (blockPos.Z == blockPos.Y)
+                    forward = 2;
+                else if (-blockPos.Z == blockPos.Y)
+                    forward = 0;
+                else if (blockPos.X == blockPos.Y)
+                    forward = 1;
+                else if (-blockPos.X == blockPos.Y)
+                    forward = 3;
+            }
+            instances.AddRange(renderData.InstanceMixTints(localBlockPosition, tintStorage, facesVisible, up, forward));
+        }
+
+        private readonly float GetShadow(Vector3 blockPos, ushort block, Direction faceNormal)
+        {
+            // Shading. Assumes how the world was made to make these shadows.
+            float shadow = 1;
+            bool transparent = BlockCulling.transparencyModeByBlock[block] != BlockCulling.TransparencyMode.Opaque;
+            if (blockPos.Y < -2)
+                shadow = shadowIntensity;
+            else if (blockPos.Y <= 0 && blockPos.Z != 0 && Math.Abs(blockPos.X) % 10 > 5)
+                shadow = shadowIntensity;
+            else if (blockPos.Y <= 0 && blockPos.X != 0 && Math.Abs(blockPos.Z) % 14 > 7)
+                shadow = shadowIntensity;
+            else if (faceNormal == Direction.Bottom && !transparent)
+                shadow = shadowIntensity;
+            return shadow;
+        }
+
+        private readonly Vector3 GetShadedTint(Vector3 blockPos, ushort block, Direction faceNormal)
+        {
+            float shadow = GetShadow(blockPos, block, faceNormal);
+
+            Vector3 tint = Vector3.One;
+            bool doTint = false;
+            if (block == 1 && faceNormal != Direction.Bottom) // Grass, not bottoms
+                doTint = true;
+            if (block == 6 && faceNormal == Direction.Top) // Ramp Tops
+                doTint = true;
+
+            if (doTint)
+            {
+                float noiseSample = (noise.GetNoise(blockPos.X, blockPos.Z) + 1) / 2;
+                tint = Vector3.Lerp(color1, color2, noiseSample);
+            }
+            return tint * shadow;
+        }
+    }
+}
+```
+
+### C# Wrapper/BlockCulling.cs
+```
+using System.Numerics;
+using GalensUnified.CubicGrid.Core;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+public static class BlockCulling
+{
+    public enum TransparencyMode
+    {
+        /// <summary>This block is fully opaque.</summary>
+        Opaque,
+        /// <summary>No face culling when next to another transparent block.</summary>
+        RenderOnTransparent,
+        /// <summary>Culls this face when next to another transparent block.</summary>
+        CullOnTransparent
+    }
+    public static readonly Dictionary<ushort, TransparencyMode> transparencyModeByBlock = [];
+    /// <summary>Provides a standared order for directions. -z, +z, +y, -y, -x then +x.</summary>
+    public static readonly Vector3[] directions =
+    [
+        -Vector3.UnitZ,
+         Vector3.UnitZ,
+         Vector3.UnitY,
+        -Vector3.UnitY,
+        -Vector3.UnitX,
+         Vector3.UnitX
+    ];
+
+    /// <summary>Calculates the 1D index of a local chunk position with z > y > x index ordering.</summary>
+    public static int IndexByLocalPos(Vector3 position, int chunkLength) =>
+        ((int)position.Z * chunkLength + (int)position.Y) * chunkLength + (int)position.X;
+
+    /// <summary>Determines if <paramref name="position"/> is within the chunk.</summary>
+    public static bool IsLocal(Vector3 position, int chunkLength) =>
+        position.X >= 0 && position.X < chunkLength &&
+        position.Y >= 0 && position.Y < chunkLength &&
+        position.Z >= 0 && position.Z < chunkLength;
+
+    /// <summary>
+    /// Determines if the block at <paramref name="position"/> is air.
+    /// Uses <see cref="IndexByLocalPos"/> which assumes  z > y > x index ordering.
+    /// If <paramref name="position"/> is outside the chunk it will assume air and return true.
+    /// </summary>
+    public static bool IsAir(Vector3 position, Span<ushort> blocks, int chunkLength) =>
+        !IsLocal(position, chunkLength) || blocks[IndexByLocalPos(position, chunkLength)] == 0;
+
+    public static bool IsTransparent(Vector3 position, Span<ushort> blocks, int chunkLength) =>
+        !IsLocal(position, chunkLength) || transparencyModeByBlock[blocks[IndexByLocalPos(position, chunkLength)]] != TransparencyMode.Opaque;
+
+    /// <summary>Wraps a global position into a local chunk position.</summary>
+    /// <remarks>
+    /// Uses a double-masking pattern to correctly handle negative coordinates,
+    /// ensuring the result is always a positive offset within the region.
+    /// </remarks>
+    public static Vector3 LocalPosByGlobalPos(Vector3 pos, int chunkLength) => new
+    (
+        ((pos.X % chunkLength) + chunkLength) % chunkLength,
+        ((pos.Y % chunkLength) + chunkLength) % chunkLength,
+        ((pos.Z % chunkLength) + chunkLength) % chunkLength
+    );
+
+    /// <summary>Culls any blocks that isn't touching air. Chunk borders are assumed air.</summary>
+    /// <param name="blocks">The collection of block IDs comprising the chunk. With z > y > x index ordering.</param>
+    /// <param name="handler">The handler invoked for every visible face. The mutated instance is returned.</param>
+    public static THandler CullSingleChunk<THandler>(Span<ushort> blocks, THandler handler, int chunkLength)
+    where THandler : struct, IBlockCullingHandler
+    {
+        handler.CullBegan();
+        List<Direction> directionsVisible = [];
+        for (int z = 0; z < chunkLength; z++)
+        for (int y = 0; y < chunkLength; y++)
+        for (int x = 0; x < chunkLength; x++)
+        {
+            Vector3 pos = new(x, y, z);
+            if (IsAir(pos, blocks, chunkLength))
+                continue;
+            TransparencyMode thisTransparent = transparencyModeByBlock[blocks[IndexByLocalPos(pos, chunkLength)]];
+            directionsVisible.Clear();
+            for (Direction d = 0; d < (Direction)6; d++)
+                if
+                (
+                    IsAir(pos + directions[(int)d], blocks, chunkLength) ||
+                    (thisTransparent != TransparencyMode.CullOnTransparent && IsTransparent(pos + directions[(int)d], blocks, chunkLength))
+                )
+                    directionsVisible.Add(d);
+            ushort block = blocks[IndexByLocalPos(pos, chunkLength)];
+            if (directionsVisible.Count > 0)
+                handler.ShapeVisible(pos, block, directionsVisible);
+        }
+        return handler;
+    }
+
+    /// <summary>Culls any blocks that isn't touching air.</summary>
+    /// <param name="blocks">The collection of block IDs comprising the chunk. With z > y > x index ordering.</param>
+    /// <param name="handler">The handler invoked for every visible face. The mutated instance is returned.</param>
+    /// <remarks>Any neighbor chunks that are not the chunk volume size will be assumed air.</remarks>
+    public static THandler CullChunk<THandler>
+    (
+        Span<ushort> blocks,
+        THandler handler,
+        int chunkLength,
+        Span<ushort> negZChunk,
+        Span<ushort> posZChunk,
+        Span<ushort> posYChunk,
+        Span<ushort> negYChunk,
+        Span<ushort> negXChunk,
+        Span<ushort> posXChunk
+    )
+    where THandler : struct, IBlockCullingHandler
+    {
+        handler.CullBegan();
+        List<Direction> directionsVisible = [];
+        for (int z = 0; z < chunkLength; z++)
+        for (int y = 0; y < chunkLength; y++)
+        for (int x = 0; x < chunkLength; x++)
+        {
+            Vector3 pos = new(x, y, z);
+            if (IsAir(pos, blocks, chunkLength))
+                continue;
+            TransparencyMode thisTransparent = transparencyModeByBlock[blocks[IndexByLocalPos(pos, chunkLength)]];
+            directionsVisible.Clear();
+            for (Direction d = 0; d < (Direction)6; d++)
+            {
+                Vector3 blockChecking = pos + directions[(int)d];
+                Span<ushort> chunkChecking;
+                if (IsLocal(blockChecking, chunkLength))
+                    chunkChecking = blocks;
+                else
+                {
+                    blockChecking = LocalPosByGlobalPos(blockChecking, chunkLength);
+                    chunkChecking = (int)d switch
+                    {
+                        0 => negZChunk,
+                        1 => posZChunk,
+                        2 => posYChunk,
+                        3 => negYChunk,
+                        4 => negXChunk,
+                        _ => posXChunk
+                    };
+                }
+                if
+                (
+                    chunkChecking.Length != blocks.Length ||
+                    IsAir(blockChecking, chunkChecking, chunkLength) ||
+                    (thisTransparent != TransparencyMode.CullOnTransparent && IsTransparent(blockChecking, chunkChecking, chunkLength))
+                )
+                    directionsVisible.Add(d);
+            }
+            ushort block = blocks[IndexByLocalPos(pos, chunkLength)];
+            if (directionsVisible.Count > 0)
+                handler.ShapeVisible(pos, block, directionsVisible);
+        }
+        return handler;
+    }
+}
+```
+
+### C# Wrapper/BlockRenderData.cs
+```
+using System.Collections.Frozen;
+using System.Numerics;
+using GalensUnified.CubicGrid.Core;
+using GalensUnified.CubicGrid.Renderer.NET.Shapes;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+/// <summary>The rendering information about this block.</summary>
+/// <param name="faceBack   ">The texture ID for -Z face.</param>
+/// <param name="faceFront  ">The texture ID for +Z face.</param>
+/// <param name="faceTop    ">The texture ID for +Y face.</param>
+/// <param name="faceBottom ">The texture ID for -Y face.</param>
+/// <param name="faceLeft   ">The texture ID for -X face.</param>
+/// <param name="faceRight  ">The texture ID for +X face.</param>
+/// <param name="tintBack   ">The tint color for -Z face.</param>
+/// <param name="tintFront  ">The tint color for +Z face.</param>
+/// <param name="tintTop    ">The tint color for +Y face.</param>
+/// <param name="tintBottom ">The tint color for -Y face.</param>
+/// <param name="tintLeft   ">The tint color for -X face.</param>
+/// <param name="tintRight  ">The tint color for +X face.</param>
+/// <param name="shape">The shape this block uses.</param>
+public struct BlockRenderData
+(
+    int faceBack, int faceFront, int faceTop, int faceBottom, int faceLeft, int faceRight,
+    Vector3 tintBack, Vector3 tintFront, Vector3 tintTop, Vector3 tintBottom, Vector3 tintLeft, Vector3 tintRight,
+    IShape shape
+)
+{
+    public int faceBack = faceBack;
+    public int faceFront = faceFront;
+    public int faceTop = faceTop;
+    public int faceBottom = faceBottom;
+    public int faceLeft = faceLeft;
+    public int faceRight = faceRight;
+    public Vector3 tintBack = tintBack;
+    public Vector3 tintFront = tintFront;
+    public Vector3 tintTop = tintTop;
+    public Vector3 tintBottom = tintBottom;
+    public Vector3 tintLeft = tintLeft;
+    public Vector3 tintRight = tintRight;
+    public IShape shape = shape;
+
+    /// <summary>Store your block render data here. Index is blockID.</summary>
+    public static BlockRenderData[] renderDataByBlock = [];
+
+    /// <summary>Fetch the texture ID by block and face.</summary>
+    public readonly int GetTextureID(Direction face) => face switch
+    {
+        Direction.Back   => faceBack,
+        Direction.Front  => faceFront,
+        Direction.Top    => faceTop,
+        Direction.Bottom => faceBottom,
+        Direction.Left   => faceLeft,
+        Direction.Right  => faceRight,
+        _ => throw new Exception($"Direction({face}) does not exist.")
+    };
+
+    /// <summary>Fetch the tint color by block and face.</summary>
+    public readonly Vector3 GetTint(Direction face) => face switch
+    {
+        Direction.Back   => tintBack,
+        Direction.Front  => tintFront,
+        Direction.Top    => tintTop,
+        Direction.Bottom => tintBottom,
+        Direction.Left   => tintLeft,
+        Direction.Right  => tintRight,
+        _ => throw new Exception($"Direction({face}) does not exist.")
+    };
+
+    private readonly ShapeInstance[] Instance(Vector3 pos, List<Vector3> faceTints, List<Direction> facesVisible, Direction up, int forward) =>
+        shape.Instance(pos, this, faceTints, facesVisible, up, forward);
+
+    /// <summary>Make a new instance of this block.</summary>
+    /// <param name="facesVisible">Which faces are visible, aka the block neighbors that are transparent.</param>
+    /// <returns>The shape instances to render.</returns>
+    public readonly ShapeInstance[] Instance(Vector3 pos, List<Direction> facesVisible, Direction up, int forward)
+    {
+        List<Vector3> tints = [];
+        foreach (Direction face in facesVisible)
+            tints.Add(GetTint(face));
+        return Instance(pos, tints, facesVisible, up, forward);
+    }
+
+    /// <summary>Make a new instance of this block. Face tints are multiplied with the ones providied.</summary>
+    /// <param name="facesVisible">Which faces are visible, aka the block neighbors that are transparent.</param>
+    /// <param name="faceTints">
+    /// Mix these face's tints with this blocks base colors.
+    /// Must match <see cref="facesVisible"/>, e.g <see cref="faceTints"/>[0] tints <see cref="facesVisible"/>[0] ect.</param>
+    /// <returns>The shape instances to render.</returns>
+    public readonly ShapeInstance[] InstanceMixTints(Vector3 pos, List<Vector3> faceTints,  List<Direction> facesVisible, Direction up, int forward)
+    {
+        for (int i = 0; i < facesVisible.Count; i++)
+            faceTints[i] *= GetTint(facesVisible[i]);
+        return Instance(pos, faceTints, facesVisible, up, forward);
+    }
+
+    /// <summary>Make a new instance of this block. Face tints are replaced with the ones provided.</summary>
+    /// <param name="facesVisible">Which faces are visible, aka the block neighbors that are transparent.</param>
+    /// <param name="faceTints">
+    /// Ignore and replace this blocks base colors with these face's tints.
+    /// Must match <see cref="facesVisible"/>, e.g <see cref="faceTints"/>[0] tints <see cref="facesVisible"/>[0] ect.</param>
+    /// <returns>The shape instances to render.</returns>
+    public readonly ShapeInstance[] InstanceReplaceTints(Vector3 pos, List<Vector3> faceTints,  List<Direction> facesVisible, Direction up, int forward) =>
+        Instance(pos, faceTints, facesVisible, up, forward);
+
+    /// <summary>Helps with converting texture names into <see cref="BlockRenderData"/>.</summary>
+    public class Factory(IEnumerable<string> nameByID)
+    {
+        public readonly FrozenDictionary<string, int> textureIDByName = nameByID.Select((Name, i) => (Name, i)).ToDictionary().ToFrozenDictionary();
+
+        private static readonly Vector3 White = Vector3.One;
+#region Create
+        private BlockRenderData Create
+        (
+            string faceBack, string faceFront, string faceTop, string faceBottom, string faceLeft, string faceRight,
+            Vector3 tintBack, Vector3 tintFront, Vector3 tintTop, Vector3 tintBottom, Vector3 tintLeft, Vector3 tintRight,
+            IShape shape
+        ) => new
+        (
+            textureIDByName[faceBack], textureIDByName[faceFront], textureIDByName[faceTop], textureIDByName[faceBottom], textureIDByName[faceLeft], textureIDByName[faceRight],
+            tintBack, tintFront, tintTop, tintBottom, tintLeft, tintRight,
+            shape
+        );
+
+        /// <summary>
+        /// Creates a <see cref="BlockRenderData"/> using the provided information.
+        /// Tints default to white Vector3(1, 1, 1).
+        /// </summary>
+        public BlockRenderData CreateWithNames
+        (
+            string faceBack, string faceFront, string faceTop, string faceBottom, string faceLeft, string faceRight,
+            IShape shape
+        ) => Create
+        (
+            faceBack, faceFront, faceTop, faceBottom, faceLeft, faceRight,
+            White, White, White, White, White, White,
+            shape
+        );
+
+        /// <summary>
+        /// Creates a <see cref="BlockRenderData"/> using the provided information.
+        /// Tints default to white Vector3(1, 1, 1).
+        /// </summary>
+        public BlockRenderData CreateWithName(string allFaces, IShape shape) => Create
+        (
+            allFaces, allFaces, allFaces, allFaces, allFaces, allFaces,
+            White, White, White, White, White, White,
+            shape
+        );
+
+        /// <summary>
+        /// Creates a <see cref="BlockRenderData"/> using the provided information.
+        /// </summary>
+        public BlockRenderData CreateWithNamesAndTints
+        (
+            string faceBack, string faceFront, string faceTop, string faceBottom, string faceLeft, string faceRight,
+            Vector3 tintBack, Vector3 tintFront, Vector3 tintTop, Vector3 tintBottom, Vector3 tintLeft, Vector3 tintRight,
+            IShape shape
+        ) => Create
+        (
+            faceBack, faceFront, faceTop, faceBottom, faceLeft, faceRight,
+            tintBack, tintFront, tintTop, tintBottom, tintLeft, tintRight,
+            shape
+        );
+
+        /// <summary>
+        /// Creates a <see cref="BlockRenderData"/> using the provided information.
+        /// All faces share the same textureID.
+        /// </summary>
+        public BlockRenderData CreateWithNameAndTints
+        (
+            string allFaces,
+            Vector3 tintBack, Vector3 tintFront, Vector3 tintTop, Vector3 tintBottom, Vector3 tintLeft, Vector3 tintRight,
+            IShape shape
+        ) => Create
+        (
+            allFaces, allFaces, allFaces, allFaces, allFaces, allFaces,
+            tintBack, tintFront, tintTop, tintBottom, tintLeft, tintRight,
+            shape
+        );
+
+        /// <summary>
+        /// Creates a <see cref="BlockRenderData"/> using the provided information.
+        /// All faces share the same color tint.
+        /// </summary>
+        public BlockRenderData CreateWithNamesAndTint
+        (
+            string faceBack, string faceFront, string faceTop, string faceBottom, string faceLeft, string faceRight,
+            Vector3 allTints,
+            IShape shape
+        ) => Create
+        (
+            faceBack, faceFront, faceTop, faceBottom, faceLeft, faceRight,
+            allTints, allTints, allTints, allTints, allTints, allTints,
+            shape
+        );
+
+        /// <summary>
+        /// Creates a <see cref="BlockRenderData"/> using the provided information.
+        /// All faces share the same textureID.
+        /// All faces share the same color tint.
+        /// </summary>
+        public BlockRenderData CreateWithNameAndTint
+        (
+            string allFaces,
+            Vector3 allTints,
+            IShape shape
+        ) => Create
+        (
+            allFaces, allFaces, allFaces, allFaces, allFaces, allFaces,
+            allTints, allTints, allTints, allTints, allTints, allTints,
+            shape
+        );
+#endregion
+
+        public Factory(TextureLoader.Texture[] textureByID) : this(textureByID.Select(t => t.Name)) { }
+    }
+}
+```
+
+### C# Wrapper/Camera.cs
+```
+using System.Numerics;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+public interface ICamera
+{
+    public Vector3 Position { get; }
+    public Vector3 EurlerAngles { get; }
+    public float Fov { get; }
+    public float AspectRatio { get; }
+    public float NearPlane { get; }
+    public float FarPlane { get; }
+}
+
+public class Camera(Vector3 Position, Vector3 EurlerAngles, float Fov, float AspectRatio, float NearPlane, float FarPlane) : ICamera
+{
+    public Vector3 Position { get; set; } = Position;
+
+    public Vector3 EurlerAngles { get; set; } = EurlerAngles;
+
+    public float Fov { get; set; } = Fov;
+
+    public float AspectRatio { get; set; } = AspectRatio;
+
+    public float NearPlane { get; set; } = NearPlane;
+
+    public float FarPlane { get; set; } = FarPlane;
+}
+```
+
+### C# Wrapper/CameraMatrices.cs
+```
+using System.Numerics;
+using System.Runtime.CompilerServices;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+public static class CameraMatrices
+{
+    /// <summary>Creates a perspective projection matrix based on a field of view.</summary>
+    /// <param name="Fov">Field of view in radians.</param>
+    /// <param name="AspectRatio">Aspect ratio, defined as view width divided by height.</param>
+    /// <param name="NearPlane">Distance to the near view plane.</param>
+    /// <param name="FarPlane">Distance to the far view plane.</param>
+    /// <returns>The projection matrix.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Matrix4x4 CreateProjectionMatrix(float Fov, float AspectRatio, float NearPlane, float FarPlane) =>
+        Matrix4x4.CreatePerspectiveFieldOfView(Fov, AspectRatio, NearPlane, FarPlane);
+
+    /// <summary>Creates a view matrix using a camera position, a forward direction, and an up vector.</summary>
+    /// <param name="position">The world position of the camera.</param>
+    /// <param name="facing">The direction vector the camera is looking toward.</param>
+    /// <param name="up">The upward direction of the world, usually <see cref="Vector3.UnitY"/>.</param>
+    /// <returns>The view matrix.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Matrix4x4 CreateViewMatrix(Vector3 position, Vector3 facing, Vector3 up) =>
+        Matrix4x4.CreateLookAt(position, position + facing, up);
+
+    /// <summary>Creates a view matrix using a camera position and a rotation quaternion.</summary>
+    /// <param name="position">The world position of the camera.</param>
+    /// <param name="rotation">The orientation of the camera.</param>
+    /// <returns>The view matrix.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Matrix4x4 CreateViewMatrix(Vector3 position, Quaternion rotation) =>
+        CreateViewMatrix(position, Vector3.Transform(-Vector3.UnitZ, rotation), Vector3.Transform(Vector3.UnitY, rotation));
+
+    /// <summary>Creates a view matrix using a camera position and Euler angles.</summary>
+    /// <param name="position">The world position of the camera.</param>
+    /// <param name="pitch">The pitch angle in radians.</param>
+    /// <param name="yaw">The yaw angle in radians.</param>
+    /// <param name="roll">The roll angle in radians.</param>
+    /// <returns>The view matrix.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Matrix4x4 CreateViewMatrix(Vector3 position, float pitch, float yaw, float roll) =>
+        CreateViewMatrix(position, Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll));
+}
+```
+
+### C# Wrapper/IBlockCullingHandler.cs
+```
+using System.Numerics;
+using GalensUnified.CubicGrid.Core;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+/// <summary>Handles callbacks for chunk culling, specifically called when a face needs to be created.</summary>
+public interface IBlockCullingHandler
+{
+    /// <summary>Called before <see cref="FaceVisible"/>.</summary>
+    void CullBegan();
+    /// <summary>Called if any face is visible of a shape had false value in <see cref="BlockCulling.isFullBlockByBlock"/>.</summary>
+    /// <param name="localBlockPosition">The blocks position local to the chunk.</param>
+    /// <param name="block">The block id.</param>
+    /// <param name="facesVisible">All of the neighbor blocks that were transparent.</param>
+    void ShapeVisible(Vector3 localBlockPosition, ushort block, List<Direction> facesVisible);
+}
+```
+
+### C# Wrapper/MatrixPlanes.cs
+```
+using System.Numerics;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+// AI wrote this. I did some cleanup.
+public static class MatrixPlanes
+{
+    public struct Plane
+    {
+        public Vector3 Normal;
+        public float Distance;
+    }
+
+    /// <summary>Creates the view frustum from the (view x projection) matrix.</summary>
+    /// <returns>Near, Far, Top, Bottom, Left and Right planes of the <paramref name="view"/> x <paramref name="projection"/> matrix in that order.</returns>
+    public static Plane[] ViewFrustum(Matrix4x4 view, Matrix4x4 projection) =>
+        ViewFrustum(view * projection);
+
+    /// <summary>Creates the view frustum from the (view x projection) matrix.</summary>
+    /// <param name="vp">View projection created from multiplying projection and view matrices. Multiplication order matters.</param>
+    /// <returns>Near, Far, Top, Bottom, Left and Right planes of the <paramref name="vp"/> in that order.</returns>
+    public static Plane[] ViewFrustum(Matrix4x4 vp) =>
+    [
+        // Near: Col3 (Assuming 0 to 1 depth range)
+        CreatePlane(vp.M13, vp.M23, vp.M33, vp.M43),
+        // Far: Col4 - Col3
+        CreatePlane(vp.M14 - vp.M13, vp.M24 - vp.M23, vp.M34 - vp.M33, vp.M44 - vp.M43),
+        // Top: Col4 - Col2
+        CreatePlane(vp.M14 - vp.M12, vp.M24 - vp.M22, vp.M34 - vp.M32, vp.M44 - vp.M42),
+        // Bottom: Col4 + Col2
+        CreatePlane(vp.M14 + vp.M12, vp.M24 + vp.M22, vp.M34 + vp.M32, vp.M44 + vp.M42),
+        // Left: Col4 + Col1
+        CreatePlane(vp.M14 + vp.M11, vp.M24 + vp.M21, vp.M34 + vp.M31, vp.M44 + vp.M41),
+        // Right: Col4 - Col1
+        CreatePlane(vp.M14 - vp.M11, vp.M24 - vp.M21, vp.M34 - vp.M31, vp.M44 - vp.M41),
+    ];
+
+    private static Plane CreatePlane(float x, float y, float z, float w)
+    {
+        Vector3 normal = new(x, y, z);
+        float length = normal.Length();
+        return new Plane { Normal = normal / length, Distance = w / length };
+    }
+
+    public static bool IsBoxInFrustum(Plane[] planes, Vector3 min, Vector3 max)
+    {
+        for (int i = 0; i < 6; i++)
+        {
+            Vector3 normal = planes[i].Normal;
+            // Find the "positive" corner (most in the direction of the normal)
+            Vector3 positive = new
+            (
+                normal.X >= 0 ? max.X : min.X,
+                normal.Y >= 0 ? max.Y : min.Y,
+                normal.Z >= 0 ? max.Z : min.Z
+            );
+            // If the most-positive corner is behind the plane, the box is out
+            if (Vector3.Dot(normal, positive) + planes[i].Distance < 0)
+                return false;
+        }
+        return true;
+    }
+}
+```
+
+### C# Wrapper/Shader.cs
+```
+﻿using System.Collections;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using GalensUnified.Graphics;
+using GalensUnified.Graphics.Buffers;
+using Silk.NET.GLFW;
+using Silk.NET.OpenGL;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+public class Shader
+{
+    public record ChunkRenderingData(Vector3 Position, ShapeInstance[] Shapes, int RegionInstanceIndex, int RegionID);
+
+    public readonly Dictionary<Vector3, ChunkRenderingData> chunkByPos = [];
+    public Action<string>? OutputLog;
+    public Action<string>? OutputError;
+    public uint shaderProgram;
+
+    private readonly int chunkLength;
+    private readonly int chunkVolume;
+    private readonly uint verticesPerShape;
+    private readonly int projectionLocation;
+    private readonly int viewLocation;
+    private readonly int chunkPosLocation;
+    private readonly uint vao;
+    private readonly uint tbo;
+    private readonly uint bufferSize;
+    private readonly nint memShapeInstanceTextureOffset;
+    private readonly nint memShapeInstanceTintOffset;
+    private readonly nint memShapeInstanceShapeOffset;
+    private readonly nint memRotationInstanceShapeOffset;
+
+    private readonly GL GL;
+    private readonly Dictionary<int, RegionBuffer> regionByID = [];
+    private int currentRegionID = 0;
+
+    /// <summary>Registers or replaces a chunk for rendering and assignes them to a VBO to render.</summary>
+    /// <param name="position">The world-space position of the chunk.</param>
+    /// <param name="shapes">The collection of shape instances to render.</param>
+    public unsafe void RenderChunk(Vector3 position, ShapeInstance[] shapes)
+    {
+        GL.UseProgram(shaderProgram);
+        nuint size = (nuint)(shapes.Length * ShapeInstance.MemorySize);
+        if (!regionByID[currentRegionID].CanFit(size))
+            NewRegion();
+        int index = regionByID[currentRegionID].BytePointer;
+        regionByID[currentRegionID].SSBO.SetSubData(shapes, index, true);
+        ChunkRenderingData chunk = new(position, shapes, index / ShapeInstance.MemorySize, currentRegionID);
+        regionByID[currentRegionID].BytePointer += (int)size;
+        regionByID[currentRegionID].Chunks.Add(position);
+        chunkByPos[position] = chunk;
+        OutputErrors("Voxel Mat Creating Chunk");
+    }
+
+    /// <summary>Deregisters a chunk for rendering, freeing it to be overwritten.</summary>
+    public unsafe void DeactivateChunk(Vector3 position)
+    {
+        if (!chunkByPos.Remove(position, out ChunkRenderingData? chunk))
+            return;
+        regionByID[chunk.RegionID].Chunks.Remove(position);
+        if (regionByID[chunk.RegionID].Chunks.Count == 0 && chunk.RegionID != currentRegionID)
+        {
+            GL.DeleteBuffer(regionByID[chunk.RegionID].SSBO.Handle);
+            regionByID.Remove(chunk.RegionID);
+        }
+        OutputErrors("Voxel Mat DeactivateChunk");
+    }
+
+    private unsafe void NewRegion()
+    {
+        ShaderStorageBufferObject<ShapeInstance> SSBO = new(GL, BufferUsageARB.DynamicDraw, 0, bufferSize);
+        regionByID.Add(++currentRegionID, new RegionBuffer(SSBO, bufferSize));
+        OutputErrors("Voxel Mat Creating Region");
+    }
+
+    /// <summary>Executes the rendering pass for all registered chunks that pass the occlusion test.</summary>
+    public unsafe void Render(ICamera cam)
+    {
+        Matrix4x4 viewMatrix = CameraMatrices.CreateViewMatrix(Vector3.Zero, cam.EurlerAngles.X, cam.EurlerAngles.Y, cam.EurlerAngles.Z);
+        Matrix4x4 projectionMatrix = CameraMatrices.CreateProjectionMatrix(cam.Fov, cam.AspectRatio, cam.NearPlane, cam.FarPlane);
+        // Render
+        GL.UseProgram(shaderProgram);
+        GL.UniformMatrix4(projectionLocation, 1, false, (float*)&projectionMatrix);
+        GL.UniformMatrix4(viewLocation, 1, false, (float*)&viewMatrix);
+        MatrixPlanes.Plane[] planes = MatrixPlanes.ViewFrustum(viewMatrix, projectionMatrix);
+
+        GL.BindVertexArray(vao);
+        GL.BindTexture(GLEnum.Texture2DArray, tbo);
+        foreach (RegionBuffer region in regionByID.Values)
+        {
+            region.SSBO.BindBase();
+            OutputErrors("Voxel Mat Bind");
+            foreach (ChunkRenderingData chunk in region.Chunks.Select(p => chunkByPos[p]))
+            {
+                Vector3 offsetPos = chunk.Position - cam.Position;
+                if (!MatrixPlanes.IsBoxInFrustum(planes, offsetPos, offsetPos + Vector3.One * chunkLength))
+                    continue;
+                GL.Uniform3(chunkPosLocation, offsetPos);
+                GL.DrawArraysInstancedBaseInstance(PrimitiveType.Triangles, 0, verticesPerShape, (uint)chunk.Shapes.Length, (uint)chunk.RegionInstanceIndex);
+            }
+            OutputErrors("Voxel Mat Chunks");
+        }
+        OutputErrors("Voxel Mat Render");
+    }
+    /// <summary>Initializes the voxel engine by compiling shaders, allocating GPU buffers, and building the texture array.</summary>
+    /// <param name="openGL">The GL interface for executing commands.</param>
+    /// <param name="GLSLScriptsPath">The directory path containing the .glsl shader files.</param>
+    /// <param name="chunkLength">The width/height/depth of a single chunk in blocks.</param>
+    /// <param name="vramBufferRegionSize">Vram batch size in bytes to reserve.</param>
+    /// <param name="cameraNearPlane">The distance to the camera's near clipping plane.</param>
+    /// <param name="imageByTextureID">Maps <see cref="Image"/> textures to a specific textureID.</param>
+    /// <param name="shapeByShapeID">
+    /// Maps <see cref="Shape"/>s to a specific shapeIndex. Defualts to <see cref="DefaultShapes.Create"/>.
+    /// Warning! Keep shapes small as every shape will share the same number of <see cref="Vertex"/>s.
+    /// </param>
+    /// <param name="errorAction">An optional delegate for handling error messages.</param>
+    /// <param name="logAction">An optional delegate for handling shader compilation logs.</param>
+    public unsafe Shader
+    (
+        GL openGL,
+        string GLSLScriptsPath,
+        int chunkLength,
+        int vramBufferRegionSize,
+        float cameraNearPlane,
+        Image[] imageByTextureID,
+        Shape[] shapeByShapeID,
+        Action<string>? errorAction = null,
+        Action<string>? logAction = null
+    )
+    {
+        GL = openGL;
+        OutputError = errorAction;
+        OutputLog = logAction;
+        //Create Shader
+        string vertexShaderCode = File.ReadAllText(Path.Combine(GLSLScriptsPath, "Vertex.glsl"));
+        Shaders.ShaderScript Vertex = new(vertexShaderCode, ShaderType.VertexShader);
+        string fragmentShaderCode = File.ReadAllText(Path.Combine(GLSLScriptsPath, "Fragment.glsl"));
+        Shaders.ShaderScript Fragment = new(fragmentShaderCode, ShaderType.FragmentShader);
+        shaderProgram = Shaders.CreateShaderProgram(GL, [Vertex, Fragment]);
+        GL.UseProgram(shaderProgram);
+        // Assing shader variables
+        projectionLocation = GL.GetUniformLocation(shaderProgram, "Uniforms.projection");
+        viewLocation = GL.GetUniformLocation(shaderProgram, "Uniforms.view");
+        this.chunkLength = chunkLength;
+        chunkVolume = chunkLength * chunkLength * chunkLength;
+        chunkPosLocation = GL.GetUniformLocation(shaderProgram, "Uniforms.chunkPos");
+        // Region Buffers
+        int maxSSBOSize = GL.GetInteger(GLEnum.MaxShaderStorageBlockSize);
+        if (vramBufferRegionSize > maxSSBOSize)
+            throw new Exception($"vramBufferRegionSize size exceeds hardware's allowed size of {maxSSBOSize}");
+        int chunkVolumeSize = ShapeInstance.MemorySize * chunkVolume;
+        if (vramBufferRegionSize < chunkVolumeSize)
+            throw new Exception($"vramBufferRegionSize size less than a single chunk. Min {chunkVolumeSize}");
+        int waste = vramBufferRegionSize % chunkVolumeSize;
+        if (waste > 0)
+            OutputLogs("Voxel Mat Instantiator", $"vramBufferRegionSize doesn't align with chunk size {chunkVolumeSize} and wastes {waste} bytes.");
+        bufferSize = (uint)vramBufferRegionSize;
+        memShapeInstanceTextureOffset = Marshal.OffsetOf<ShapeInstance>(nameof(ShapeInstance.texture));
+        memShapeInstanceTintOffset = Marshal.OffsetOf<ShapeInstance>(nameof(ShapeInstance.tint));
+        memShapeInstanceShapeOffset = Marshal.OffsetOf<ShapeInstance>(nameof(ShapeInstance.shape));
+        memRotationInstanceShapeOffset = Marshal.OffsetOf<ShapeInstance>(nameof(ShapeInstance.rotation));
+        currentRegionID = -1;
+        NewRegion();
+        vao = GL.GenVertexArray();
+
+        // Textures
+        uint maxX = 0, maxY = 0;
+        foreach (Image img in imageByTextureID)
+        {
+            maxX = (uint)Math.Max(maxX, img.Width);
+            maxY = (uint)Math.Max(maxY, img.Height);
+        }
+        uint tbo;
+        GL.GenTextures(1, &tbo);
+        GL.BindTexture(GLEnum.Texture2DArray, tbo);
+        GL.TexImage3D(GLEnum.Texture2DArray, 0, (int)GLEnum.Rgba, maxX, maxY, (uint)imageByTextureID.Length, 0, GLEnum.Rgba, GLEnum.UnsignedByte, null);
+        GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Nearest);
+        GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureMagFilter, (int)TextureMinFilter.Nearest);
+        GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapS, (int)GLEnum.Repeat);
+        GL.TexParameter(TextureTarget.Texture2DArray, TextureParameterName.TextureWrapT, (int)GLEnum.Repeat);
+        for (int i = 0; i < imageByTextureID.Length; i++)
+        {
+            Image img = imageByTextureID[i];
+            GL.TexSubImage3D
+            (
+                GLEnum.Texture2DArray,
+                0,
+                0,
+                0,
+                i,
+                (uint)img.Width,
+                (uint)img.Height,
+                1,
+                PixelFormat.Rgba,
+                PixelType.UnsignedByte,
+                img.Pixels
+            );
+        }
+        this.tbo = tbo;
+        GL.Uniform1(GL.GetUniformLocation(shaderProgram, "textureArray"), 0);
+        // Shapes
+        for (int s = 0; s < shapeByShapeID.Length; s++)
+            if (shapeByShapeID[s].Vertices.Length > verticesPerShape)
+                verticesPerShape = (uint)shapeByShapeID[s].Vertices.Length;
+        GL.Uniform1(GL.GetUniformLocation(shaderProgram, "Uniforms.verticesPerShape"), (int)verticesPerShape);
+        Vertex[] condensedShapes = new Vertex[shapeByShapeID.Length * verticesPerShape];
+        for (int s = 0; s < shapeByShapeID.Length; s++)
+        for (int v = 0; v < verticesPerShape; v++)
+        {
+            if (v < shapeByShapeID[s].Vertices.Length)
+                condensedShapes[s * verticesPerShape + v] = shapeByShapeID[s].Vertices[v];
+            else
+                condensedShapes[s * verticesPerShape + v] = new();
+
+        }
+        uint shapesBuffer = GL.GenBuffer();
+        GL.BindBuffer(BufferTargetARB.ShaderStorageBuffer, shapesBuffer);
+        fixed (void* buf = condensedShapes)
+        {
+            GL.BufferData(BufferTargetARB.ShaderStorageBuffer, (nuint)(condensedShapes.Length * sizeof(Vertex)), buf, BufferUsageARB.DynamicDraw);
+        }
+        GL.BindBufferBase(BufferTargetARB.ShaderStorageBuffer, 3, shapesBuffer);
+
+        OutputLogs("Shader", GL.GetProgramInfoLog(shaderProgram));
+        OutputErrors("Voxel Mat Instantiator");
+    }
+
+    private void OutputErrors(string location)
+    {
+        GLEnum err;
+        while ((err = GL.GetError()) != GLEnum.NoError)
+            OutputError?.Invoke($"OpenGL Error @{location}: {err}");
+    }
+
+    private void OutputLogs(string location, string log)
+    {
+        if (string.IsNullOrEmpty(log))
+            return;
+        OutputLog?.Invoke($"OpenGL Log @{location}: {log}");
+    }
+
+
+    private class RegionBuffer(ShaderStorageBufferObject<ShapeInstance> SSBO, uint BufferSize)
+    {
+        public readonly ShaderStorageBufferObject<ShapeInstance> SSBO = SSBO;
+        public int BytePointer = 0;
+        public readonly HashSet<Vector3> Chunks = [];
+
+        public bool CanFit(nuint size) =>
+            (nuint)BytePointer + size < BufferSize;
+    }
+}
+```
+
+### C# Wrapper/TextureLoader.cs
+```
+using System.Runtime.InteropServices;
+using Silk.NET.GLFW;
+using StbImageSharp;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+public static class TextureLoader
+{
+
+    public record Texture(string Name, Image Image);
+
+    /// <summary>Loads a collection of images from the specified file information array into a dictionary.</summary>
+    /// <param name="images">An array of <see cref="FileInfo"/> objects representing the image files to load.</param>
+    /// <param name="flip">Whether to flip the images during loading. Defaults to <c>true</c>.</param>
+    /// <returns>An array of <see cref="Texture"/> records containing the file name and <see cref="Image"/>.</returns>
+    public static Texture[] LoadImages(FileInfo[] images, bool flip = true)
+    {
+        List<Texture> toReturn = [];
+        foreach (FileInfo texture in images.OrderBy(di => di.Name))
+        {
+            Image image = LoadImage(texture, flip);
+            toReturn.Add(new(Path.GetFileNameWithoutExtension(texture.Name), image));
+        }
+        return [.. toReturn];
+    }
+
+    /// <summary>Loads a single image from a file into unmanaged memory.</summary>
+    /// <param name="path">The <see cref="FileInfo"/> pointing to the image file.</param>
+    /// <param name="flip">Whether to flip the image vertically. Defaults to <c>true</c>.</param>
+    /// <returns>An <see cref="Image"/> object containing dimensions and a pointer to the pixel data.</returns>
+    /// <remarks>This method allocates unmanaged memory via <see cref="Marshal.AllocHGlobal"/>.</remarks>
+    public unsafe static Image LoadImage(FileInfo path, bool flip = true)
+    {
+        Image toReturn;
+        using (Stream stream = path.OpenRead())
+        {
+            ImageResult imageResult = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+            toReturn = new Image
+                    {
+                        Width = imageResult.Width,
+                        Height = imageResult.Height,
+                        // Pin the byte array in memory and get a pointer to the raw pixel data
+                        Pixels = (byte*)Marshal.AllocHGlobal(imageResult.Data.Length)
+                    };
+
+            // Copy the data to the unmanaged memory
+            Marshal.Copy(imageResult.Data, 0, (IntPtr)toReturn.Pixels, imageResult.Data.Length);
+        }
+        if (flip)
+            return FlipImage(toReturn);
+        else
+            return toReturn;
+    }
+
+    /// <summary>Flips the pixel data of an image.</summary>
+    /// <param name="image">The <see cref="Image"/> to flip.</param>
+    /// <returns>The <see cref="Image"/> with updated pixel data pointers.</returns>
+    /// <warning>Note: This method currently assigns a pointer to a local stack-allocated array, which may cause memory safety issues outside the scope of the method.</warning>
+    public unsafe static Image FlipImage(Image image)
+    {
+        int count = image.Height * image.Width;
+        byte[] fliped = new byte[count * 4];
+        for (int p = 0; p < count; p++)
+        {
+            int index = p * 4;
+            fliped[fliped.Length - 1 - (index + 0)] = image.Pixels[index + 3];
+            fliped[fliped.Length - 1 - (index + 1)] = image.Pixels[index + 2];
+            fliped[fliped.Length - 1 - (index + 2)] = image.Pixels[index + 1];
+            fliped[fliped.Length - 1 - (index + 3)] = image.Pixels[index + 0];
+        }
+
+        fixed (byte* ptr = fliped)
+        {
+            image.Pixels = ptr;
+        }
+        return image;
+    }
+}
+```
+
+### HLSL/Fragment.hlsl
+```
+#include "Common.hlsli"
+// Texture2DArraySample must be defined after including Common.hlsli when using ShapeShade.
+
+Texture2DArray textureArray : register(t0);
+SamplerState textureSampler : register(s0);
+
+float4 Texture2DArraySample(float3 textureSample) { return textureArray.Sample(textureSampler, textureSample); }
+
+float4 PSMain(ShapeVaryings input) : SV_TARGET
+{
+    return ShapeShade(input);
+}
+```
+
+### HLSL/Vertex.hlsl
+```
+#include "Common.hlsli"
+// WorldPositionToClip must be defined after including Common.hlsli when using CreateShapeVaryings.
+
+cbuffer Uniforms : register(b0)
+{
+    float4x4 view;
+    float4x4 projection;
+    float3 chunkPos;
+    int verticesPerShape;
+};
+
+StructuredBuffer<ShapeVertex> ShapeVertices : register(t3);
+
+StructuredBuffer<ShapeInstance> ShapeInstances : register(t0);
+
+float4 WorldPositionToClip(float3 worldPosition) { return mul(mul(float4(worldPosition, 1.0), view), projection); }
+
+ShapeVaryings VSMain(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
+{
+    ShapeInstance instance = ShapeInstances[instanceID];
+    ShapeVertex vert = ShapeVertices[vertexID + ShapeIndex(instance) * verticesPerShape];
+    return CreateShapeVaryings(instance, vert, chunkPos);
+}
+```
+
+### C# Wrapper/Shapes/Cube.cs
+```
+using System.Numerics;
+using GalensUnified.CubicGrid.Core;
+
+namespace GalensUnified.CubicGrid.Renderer.NET.Shapes;
+
+public class Cube() : IShape
+{
+    public readonly int[] shapeIDByFace = new int[6];
+
+    public ShapeInstance[] Instance(Vector3 position, BlockRenderData renderData, List<Vector3> faceTints, List<Direction> facesVisible,  Direction up, int forward)
+    {
+        ShapeInstance[] toReturn = new ShapeInstance[facesVisible.Count];
+        for (int i = 0; i < facesVisible.Count; i++)
+            toReturn[i] = new(position, renderData.GetTextureID(facesVisible[i]), faceTints[i], shapeIDByFace[(int)facesVisible[i]], up, forward);
+        return toReturn;
+    }
+
+    /// <summary>When making a square out of triangles use this to index <see cref="quads"/> as the corner.</summary>
+    public readonly static int[] quadsOffsetForTris = [0, 1, 2, 2, 1, 3];
+    /// <summary>A 2D flattened array for indexing <see cref="vertices"/>. Index this at 4 * face + corner.</summary>
+    public static readonly int[] quads = [0, 3, 1, 2, 5, 6, 4, 7, 3, 7, 2, 6, 1, 5, 0, 4, 4, 7, 0, 3, 1, 2, 5, 6];
+    /// <summary>Bottom left, counter clock wise, -z corners then +z corners.</summary>
+    public static readonly Vector3[] vertices =
+    [
+        new Vector3(0.0f, 0.0f, 0.0f), new Vector3(1.0f, 0.0f, 0.0f), new Vector3(1.0f, 1.0f, 0.0f), new Vector3(0.0f, 1.0f, 0.0f),
+        new Vector3(0.0f, 0.0f, 1.0f), new Vector3(1.0f, 0.0f, 1.0f), new Vector3(1.0f, 1.0f, 1.0f), new Vector3(0.0f, 1.0f, 1.0f)
+    ];
+    public static readonly Vector2[] uvOffsets =
+    [
+        new Vector2(0.0f, 0.0f),
+        new Vector2(0.0f, 1.0f),
+        new Vector2(1.0f, 0.0f),
+        new Vector2(1.0f, 1.0f)
+    ];
+
+    public Shape[] Create(int nextShapeID)
+    {
+        for (int i = 0; i < 6; i++)
+            shapeIDByFace[i] = nextShapeID + i;
+        return CreateFaces();
+    }
+
+    /// <summary>Create any side of a cube.</summary>
+    /// <param name="face">The face to create.</param>
+    /// <returns>One face of a cube.</returns>
+    /// <remarks>If you aren't modifying this face for your shape consider reusing the face shapeID made from the cube.</remarks>
+    public static Shape CreateFace(Direction face)
+    {
+        Shape toReturn = new(new Vertex[6]);
+        for (int t = 0; t < 6; t++)
+        {
+            toReturn.Vertices[t] = new
+            (
+                vertices[quads[4 * (int)face + quadsOffsetForTris[t]]],
+                uvOffsets[quadsOffsetForTris[t]]
+            );
+        }
+        return toReturn;
+    }
+
+    /// <summary>Creates all 6 faces to make a cube.</summary>
+    public static Shape[] CreateFaces()
+    {
+        Shape[] toReturn = new Shape[6];
+        for (Direction f = 0; f < (Direction)6; f++)
+            toReturn[(int)f] = CreateFace(f);
+        return [.. toReturn];
+    }
+}
+```
+
+### C# Wrapper/Shapes/IShape.cs
+```
+using System.Numerics;
+using GalensUnified.CubicGrid.Core;
+
+namespace GalensUnified.CubicGrid.Renderer.NET.Shapes;
+
+public interface IShape
+{
+    /// <summary>Creates the shapes that can be instanced.</summary>
+    /// <param name="nextShapeID">The first available shapeID.</param>
+    /// <returns>The new shapes that were created.</returns>
+    public Shape[] Create(int nextShapeID);
+    public ShapeInstance[] Instance(Vector3 position, BlockRenderData renderData, List<Vector3> faceTints, List<Direction> facesVisible,  Direction up, int forward);
+}
+```
+
+### C# Wrapper/Shapes/Ramp.cs
+```
+using System.Numerics;
+using GalensUnified.CubicGrid.Core;
+
+using static GalensUnified.CubicGrid.Renderer.NET.Shapes.Cube;
+
+namespace GalensUnified.CubicGrid.Renderer.NET.Shapes;
+
+/// <remarks>Top texture is used, not front.</remarks>
+public class Ramp(int cubeBackFaceShapeID, int cubeBottomFaceShapeID) : IShape
+{
+    public int slopeID;
+    public int leftTriangleID;
+    public int rightTriangleID;
+
+    public Shape[] Create(int nextShapeID)
+    {
+        Vertex[] slopeVerts =
+        [
+            new(new(0.0f, 1.0f, 0.0f), uvOffsets[quadsOffsetForTris[0]]),
+            new(new(0.0f, 0.0f, 1.0f), uvOffsets[quadsOffsetForTris[1]]),
+            new(new(1.0f, 1.0f, 0.0f), uvOffsets[quadsOffsetForTris[2]]),
+            new(new(1.0f, 1.0f, 0.0f), uvOffsets[quadsOffsetForTris[3]]),
+            new(new(0.0f, 0.0f, 1.0f), uvOffsets[quadsOffsetForTris[4]]),
+            new(new(1.0f, 0.0f, 1.0f), uvOffsets[quadsOffsetForTris[5]])
+        ];
+        slopeID = nextShapeID;
+        Vertex[] leftTriangleVerts =
+        [
+            new(new(0.0f, 0.0f, 1.0f), uvOffsets[quadsOffsetForTris[0]]),
+            new(new(0.0f, 1.0f, 0.0f), uvOffsets[quadsOffsetForTris[1]]),
+            new(new(0.0f, 0.0f, 0.0f), uvOffsets[quadsOffsetForTris[2]])
+        ];
+        leftTriangleID = nextShapeID + 1;
+        Vertex[] rightTriangleVerts =
+        [
+            new(new(1.0f, 0.0f, 0.0f), uvOffsets[quadsOffsetForTris[0]]),
+            new(new(1.0f, 1.0f, 0.0f), uvOffsets[quadsOffsetForTris[1]]),
+            new(new(1.0f, 0.0f, 1.0f), uvOffsets[quadsOffsetForTris[2]])
+        ];
+        rightTriangleID = nextShapeID + 2;
+        return [ new Shape(slopeVerts), new Shape(leftTriangleVerts), new Shape(rightTriangleVerts) ];
+    }
+
+    public ShapeInstance[] Instance(Vector3 position, BlockRenderData renderData, List<Vector3> faceTints, List<Direction> facesVisible,  Direction up, int forward)
+    {
+        List<ShapeInstance> toReturn = [];
+        bool drawSlope = false;
+        Vector3[] tints = [ Vector3.One, Vector3.One, Vector3.One ]; // Top, Left, Right
+        for (int i = 0; i < facesVisible.Count; i++)
+        {
+            if (facesVisible[i] is Direction.Left or Direction.Right or Direction.Top or Direction.Front)
+            {
+                drawSlope = true;
+                Vector3 tint = faceTints[i];
+                int tintID =
+                      facesVisible[i] is Direction.Top or Direction.Front ? 0
+                    : facesVisible[i] is Direction.Left ? 1
+                    : 2;
+                // Sets the assigned tint.
+                tints[tintID] = tint;
+                // If face wasn't specifically tinted, assume another's.
+                tints[0] = tints[0] == Vector3.One ? tint : tints[0];
+                tints[1] = tints[1] == Vector3.One ? tint : tints[1];
+                tints[2] = tints[2] == Vector3.One ? tint : tints[2];
+            }
+            else // Back or Bottom
+                toReturn.Add(new
+                (
+                    position,
+                    renderData.GetTextureID(facesVisible[i]),
+                    faceTints[i],
+                    facesVisible[i] == Direction.Back ? cubeBackFaceShapeID : cubeBottomFaceShapeID,
+                    up,
+                    forward
+                ));
+        }
+        if (drawSlope)
+        {
+            toReturn.Add(new(position, renderData.GetTextureID(Direction.Top), tints[0], slopeID, up, forward));
+            toReturn.Add(new(position, renderData.GetTextureID(Direction.Left), tints[1], leftTriangleID, up, forward));
+            toReturn.Add(new(position, renderData.GetTextureID(Direction.Right), tints[2], rightTriangleID, up, forward));
+        }
+        return [.. toReturn];
+    }
+}
+```
+
+### C# Wrapper/Shapes/ShapeInstance.cs
+```
+using System.Numerics;
+using System.Runtime.InteropServices;
+using GalensUnified.CubicGrid.Core;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+/// <summary>Instances a shape with a unique position, texture and color.</summary>
+/// <param name="position">The cubes position local to the chunks position.</param>
+/// <param name="texture">The texture to apply to this shape.</param>
+/// <param name="tint">The color to tint the texture.</param>
+/// <param name="shape">The shape id.</param>
+/// <param name="up">What is up for this shape.</param>
+/// <param name="forward">Clock-wise rotation perpendicular to up. range 0-3.</param>
+[StructLayout(LayoutKind.Explicit, Pack = 1)]
+public readonly struct ShapeInstance(Vector3 position, int texture, Vector3 tint, int shape, Direction up, int forward)
+{
+    public const int MemorySize = 32;
+    [FieldOffset(0)]
+    public readonly Vector3 position = position;
+    [FieldOffset(12)]
+    public readonly int texture = texture;
+    // in shader code this ushort(2 bytes) shape is the first half of the uint(4 bytes) shapeRotation
+    [FieldOffset(16)]
+    public readonly ushort shape = (ushort)shape;
+    // in shader code this ushort(2 bytes) rotation is the second half of the uint(4 bytes) shapeRotation
+    [FieldOffset(18)]
+    public readonly ushort rotation = (ushort)((int)up * 4 + forward);
+    [FieldOffset(20)]
+    public readonly Vector3 tint = tint;
+}
+```
+
+### C# Wrapper/Shapes/Vertex.cs
+```
+using System.Numerics;
+using System.Runtime.InteropServices;
+
+namespace GalensUnified.CubicGrid.Renderer.NET;
+
+public record Shape(Vertex[] Vertices);
+
+public struct Vertex(Vector3 position, Vector2 uv)
+{
+    public Vector3 position = position;
+    private float _pad0 = 0; // Padding helps C# and GLSL have the same memory size.
+    public Vector2 uv = uv;
+    private float _pad2 = 0;
+    private float _pad1 = 0;
+}
+```
+
+### C# Example/Assets/GLSL SpriV Translation/Fragment.glsl
+```
+#version 450
+
+uniform sampler2DArray SPIRV_Cross_CombinedtextureArraytextureSampler;
+
+layout(location = 0) in vec2 in_var_TEXCOORD0;
+layout(location = 1) flat in int in_var_TEXCOORD1;
+layout(location = 2) in vec3 in_var_TEXCOORD2;
+layout(location = 0) out vec4 out_var_SV_TARGET;
+
+void main()
+{
+    vec4 _37 = texture(SPIRV_Cross_CombinedtextureArraytextureSampler, vec3(in_var_TEXCOORD0, float(in_var_TEXCOORD1)));
+    float _38 = _37.w;
+    if (_38 < 0.00999999977648258209228515625)
+    {
+        discard;
+    }
+    out_var_SV_TARGET = vec4(_37.xyz * in_var_TEXCOORD2, _38);
+}
+```
+
+### C# Example/Assets/GLSL SpriV Translation/Vertex.glsl
+```
+#version 450
+#ifdef GL_ARB_shader_draw_parameters
+#extension GL_ARB_shader_draw_parameters : enable
+#endif
+
+struct ShapeVertex
+{
+    vec3 position;
+    float _pad0;
+    vec2 uv;
+    float _pad2;
+    float _pad1;
+};
+
+struct ShapeInstance
+{
+    float posX;
+    float posY;
+    float posZ;
+    int textureIndex;
+    uint shapeRotation;
+    float tintR;
+    float tintG;
+    float tintB;
+};
+
+const mat3 _87[24] = mat3[](mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0)), mat3(vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(-1.0, 0.0, 0.0)), mat3(vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(0.0, -1.0, 0.0)), mat3(vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, -1.0), vec3(1.0, 0.0, 0.0)), mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, -1.0, 0.0)), mat3(vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(-1.0, 0.0, 0.0)), mat3(vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0)), mat3(vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0)), mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0)), mat3(vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0), vec3(-1.0, 0.0, 0.0)), mat3(vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, -1.0)), mat3(vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0)), mat3(vec3(-1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, 1.0)), mat3(vec3(0.0, 0.0, -1.0), vec3(0.0, -1.0, 0.0), vec3(-1.0, 0.0, 0.0)), mat3(vec3(1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0), vec3(0.0, 0.0, -1.0)), mat3(vec3(0.0, 0.0, 1.0), vec3(0.0, -1.0, 0.0), vec3(1.0, 0.0, 0.0)), mat3(vec3(0.0, 0.0, 1.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0)), mat3(vec3(0.0, 1.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)), mat3(vec3(0.0, 0.0, -1.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)), mat3(vec3(0.0, -1.0, 0.0), vec3(-1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0)), mat3(vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0)), mat3(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, -1.0)), mat3(vec3(0.0, 0.0, -1.0), vec3(1.0, 0.0, 0.0), vec3(0.0, -1.0, 0.0)), mat3(vec3(0.0, -1.0, 0.0), vec3(1.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0)));
+
+struct type_Uniforms
+{
+    mat4 view;
+    mat4 projection;
+    vec3 chunkPos;
+    int verticesPerShape;
+};
+
+uniform type_Uniforms Uniforms;
+
+layout(binding = 3, std430) readonly buffer type_StructuredBuffer_ShapeVertex
+{
+    ShapeVertex _m0[];
+} ShapeVertices;
+
+layout(binding = 0, std430) readonly buffer type_StructuredBuffer_ShapeInstance
+{
+    ShapeInstance _m0[];
+} ShapeInstances;
+
+#ifdef GL_ARB_shader_draw_parameters
+#define SPIRV_Cross_BaseInstance gl_BaseInstanceARB
+#else
+uniform int SPIRV_Cross_BaseInstance;
+#endif
+layout(location = 0) out vec2 out_var_TEXCOORD0;
+layout(location = 1) flat out int out_var_TEXCOORD1;
+layout(location = 2) out vec3 out_var_TEXCOORD2;
+
+mat4 spvWorkaroundRowMajor(mat4 wrap) { return wrap; }
+
+void main()
+{
+    uint _126 = uint(gl_VertexID) + ((ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].shapeRotation & 65535u) * uint(Uniforms.verticesPerShape));
+    gl_Position = spvWorkaroundRowMajor(Uniforms.projection) * (spvWorkaroundRowMajor(Uniforms.view) * vec4((((_87[ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].shapeRotation >> 16u] * (ShapeVertices._m0[_126].position - vec3(0.5))) + vec3(0.5)) + Uniforms.chunkPos) + vec3(ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].posX, ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].posY, ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].posZ), 1.0));
+    out_var_TEXCOORD0 = ShapeVertices._m0[_126].uv;
+    out_var_TEXCOORD1 = ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].textureIndex;
+    out_var_TEXCOORD2 = vec3(ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].tintR, ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].tintG, ShapeInstances._m0[uint((gl_InstanceID + SPIRV_Cross_BaseInstance))].tintB);
+}
+```

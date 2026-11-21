@@ -1,0 +1,222 @@
+# Mesh BVH
+
+Also called: GPU BVH for Triangle Mesh, MeshBVH, TriangleMeshSDF BVH
+
+## Overview
+Mesh BVH is a GPU-accelerated bounding volume hierarchy designed for triangle meshes to support efficient distance queries, signed distance field (SDF) computation, and ray intersection tests [S1, unofficial][S4]. It solves the problem of rapidly determining the closest point on a complex triangle mesh or the sign of a point relative to the mesh surface, which is a bottleneck in neural rendering and collision detection [S1, unofficial][S4]. It is distinguished from hierarchical grid methods (like Octree Traversal) by operating directly on unstructured triangle geometry rather than voxelized or grid-based volumes, and from software-only BVHs by leveraging NVIDIA OptiX hardware acceleration for ray-triangle intersections [S4].
+
+## How it works
+**Inputs and Outputs:**
+The primary implementation takes a triangle mesh defined by vertices $V \in \mathbb{R}^{N_v \times 3}$ (float32) and faces $F \in \mathbb{Z}^{N_f \times 3}$ (int32 vertex indices) [S1, unofficial]. Queries accept a set of points $P \in \mathbb{R}^{N_p \times 3}$ (float32) [S1, unofficial][S4].
+
+**Data Structures:**
+The hierarchy is a binary tree where internal nodes contain Axis-Aligned Bounding Boxes (AABBs) enclosing their descendants [S1, unofficial][S4]. Leaves contain individual triangles [S1, unofficial]. For signed distance computation, the structure supports traversal for unsigned distance and subsequent ray casting for sign determination [S4].
+
+**Algorithm Steps:**
+
+1.  **Construction:** Build the BVH from input vertices and faces. On GPU implementations, this is often done via a parallel cluster merging approach to avoid CPU-GPU synchronization bottlenecks [S1, unofficial]. The builder assigns triangles to leaf nodes and computes AABBs for internal nodes by merging child bounds [S1, unofficial].
+2.  **Unsigned Distance Query:** Given a query point $p$, traverse the BVH to find the closest triangle.
+    *   Start at the root.
+    *   For each node, compute the distance from $p$ to the node's AABB. If the distance exceeds the current best distance $d_{min}$, prune the node.
+    *   If a leaf (triangle) is reached, compute the exact distance from $p$ to the triangle using Voronoi region tests [S1, unofficial].
+    *   Update $d_{min}$ if the triangle distance is smaller.
+    *   Return the minimum distance $d$, the closest point $c$, and the face ID [S1, unofficial].
+3.  **Sign Determination (SDF):** To determine if $p$ is inside or outside the mesh:
+    *   **Method A (Stab Rays):** Trace $K=32$ rays from $p$ in directions distributed uniformly over the sphere using a Fibonacci lattice, with pseudorandom offsets per point [S4].
+    *   If any ray reaches infinity (no intersection), $p$ is outside (sign $+1$) [S4].
+    *   If all rays intersect the mesh, $p$ is inside (sign $-1$) [S4].
+    *   **Method B (Normal Check):** For watertight meshes, use the normal of the closest triangle found in Step 2. If the dot product of the vector $(p - c)$ and the triangle normal is positive, $p$ is outside; otherwise, inside. This is disabled by default due to incompatibility with non-watertight meshes [S4].
+4.  **Winding Number:** Compute the winding number by summing the solid angle subtended by each triangle at $p$, or via ray casting parity [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def closest_point_triangle(p, a, b, c):
+    """
+    Computes the closest point on triangle abc to point p.
+    Based on Ericson, Real-Time Collision Detection, 5.1.5.
+    """
+    ab = b - a
+    ac = c - a
+    ap = p - a
+    
+    d1 = dot(ab, ap)
+    d2 = dot(ac, ap)
+    
+    if d1 <= 0.0 and d2 <= 0.0:
+        return a
+    
+    bp = p - b
+    d3 = dot(ab, bp)
+    d4 = dot(ac, bp)
+    
+    if d3 >= 0.0 and d4 <= d3:
+        return b
+    
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        v = d1 / (d1 - d3)
+        return a + ab * v
+    
+    cp = p - c
+    d5 = dot(ab, cp)
+    d6 = dot(ac, cp)
+    
+    if d6 >= 0.0 and d5 <= d6:
+        return c
+    
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        w = d2 / (d2 - d6)
+        return a + ac * w
+    
+    de = dot(ab, ac)
+    dv = de * de - dot(ab, ab) * dot(ac, ac)
+    
+    if dv == 0.0:
+        return (a + b) * 0.5
+    
+    u = (de * d4 - d3 * de) / dv
+    w = (de * d1 - d5 * de) / dv
+    
+    if u + w <= 1.0:
+        if u < 0.0:
+            u = 0.0
+            if w < 0.0:
+                w = 0.0
+            else:
+                w = 1.0 - u
+        elif w < 0.0:
+            w = 0.0
+    else:
+        u = 1.0 - w
+        if u < 0.0:
+            u = 0.0
+            if w > 1.0:
+                w = 1.0
+            else:
+                w = 1.0 - u
+        elif w > 1.0:
+            w = 1.0
+    
+    return a + ab * u + ac * w
+
+def query_bvh_distance(root, p, current_min_dist=float('inf')):
+    """
+    Recursive BVH traversal to find closest triangle distance.
+    """
+    if root is None:
+        return current_min_dist
+    
+    # Compute distance from p to node AABB
+    dist_to_aabb = distance_point_aabb(p, root.aabb)
+    
+    if dist_to_aabb >= current_min_dist:
+        return current_min_dist
+    
+    if root.is_leaf():
+        a, b, c = root.triangle_vertices()
+        closest = closest_point_triangle(p, a, b, c)
+        dist = length(p - closest)
+        return min(current_min_dist, dist)
+    
+    # Visit children
+    dist_left = query_bvh_distance(root.left, p, current_min_dist)
+    if dist_left < current_min_dist:
+        current_min_dist = dist_left
+        
+    dist_right = query_bvh_distance(root.right, p, current_min_dist)
+    return min(current_min_dist, dist_right)
+
+def compute_signed_distance(p, bvh, num_stab_rays=32):
+    """
+    Computes signed distance using BVH for unsigned distance and stab rays for sign.
+    """
+    # 1. Unsigned distance
+    dist, closest_point, face_id = query_bvh_distance(bvh.root, p)
+    
+    # 2. Sign determination via stab rays
+    # Generate directions using Fibonacci lattice
+    directions = []
+    golden_ratio = (1 + math.sqrt(5)) / 2
+    for i in range(num_stab_rays):
+        theta = 2 * math.pi * i / golden_ratio
+        phi = math.acos(1 - 2 * (i + 0.5) / num_stab_rays)
+        # Add pseudorandom offset per point (omitted for brevity, assumed handled)
+        x = math.sin(phi) * math.cos(theta)
+        y = math.sin(phi) * math.sin(theta)
+        z = math.cos(phi)
+        directions.append((x, y, z))
+        
+    is_outside = False
+    for dir in directions:
+        # Trace ray from p in direction dir
+        # If ray hits infinity (no intersection), point is outside
+        if not ray_intersects_mesh(p, dir, bvh):
+            is_outside = True
+            break
+            
+    sign = 1.0 if is_outside else -1.0
+    return sign * dist
+```
+
+**Parameters:**
+*   Number of stab rays: 32 [S4].
+*   Ray tracing framework: NVIDIA OptiX 7 [S4].
+
+**Edge Cases and Pitfalls:**
+*   **Non-watertight meshes:** Normal-based signing is unreliable and disabled by default [S4]. Stab rays are required.
+*   **Precision:** Floating-point errors in ray casting may cause incorrect sign determination for points very close to the surface [S4].
+*   **Degenerate triangles:** The closest point algorithm handles degenerate triangles (lines/points) via the Voronoi region logic [S1, unofficial].
+
+## Subtopics
+
+### [Position-Normal Tree](4222-position-normal-tree.md)
+A binary tree hierarchy over a triangle mesh where leaves are triangles and internal nodes contain a 3D axis-aligned bounding box (AABB) over positions and a bounding cone over shading normals for all descendants. It stores position and normal information for boundary triangles to enable hierarchical pruning of refractive path searches. It is distinguished from interval-based refinement by prioritizing speed over guaranteed convergence, typically running 2 to 5 times faster while producing visually equivalent results.
+
+### [Voxel Mesh Ray Intersection via BVH](6900-voxel-mesh-ray-intersection-via-bvh.md)
+Voxel Mesh Ray Intersection via BVH is a raycasting method for voxel meshes that traverses a grid of oriented sub-cubes to find intersections with voxel geometry using Binary Volume Hierarchy (BVH) triangle intersection tests. It handles multiple meshes by first checking bounding boxes and then delegating to the specific mesh's BVH. This method builds on [Mesh BVH](1062-mesh-bvh.md) by providing the specific traversal logic and data structures required to query triangle meshes stored within a voxelized world structure.
+
+### [GPU BVH Construction via Cluster Merging](16461-gpu-bvh-construction-via-cluster-merging.md)
+This method constructs a Binary Volume Hierarchy (BVH) on the GPU by iteratively merging clusters of triangles. It solves the problem of building hierarchical acceleration structures for ray tracing without CPU-GPU synchronization bottlenecks by using a fully parallel, double-buffered approach involving neighbor finding, prefix scans, and reallocation. It differs from CPU-based top-down or bottom-up builders by keeping all data on the GPU and using a "merge-compact" loop that reduces the number of active clusters by half (approximately) each iteration until a single root remains.
+
+### BVH-based Geometric Attribute Correction
+Uses a BVH to compute the unsigned distance and barycentric coordinates from interpolated UV-space positions back to the original high-resolution mesh, correcting geometric errors from simplification/remeshing [S2, unofficial].
+1.  Query BVH: `_, face_id, uvw = bvh.unsigned_distance(valid_pos, return_uvw=True)` [S2, unofficial].
+2.  Fetch original triangle vertices: `orig_tri_verts = vertices[faces[face_id.long()]]` [S2, unofficial].
+3.  Reconstruct corrected position via barycentric interpolation: `valid_pos = (orig_tri_verts * uvw.unsqueeze(-1)).sum(dim=1)` [S2, unofficial].
+
+### BVH for Blending
+A bounding volume hierarchy adapted for the management of the blending operation, used for efficient evaluation of field functions on large skeletons [S3].
+
+### Efficient Signed Distance to Triangle Mesh
+A method to compute the signed distance from a 3D point to a triangle mesh efficiently using a BVH for unsigned distance and ray casting for sign determination [S4].
+1.  Construct a triangle BVH for efficient unsigned distance queries, achieving $O(\log N_{triangles})$ average complexity [S4].
+2.  Trace 32 'stab rays' distributed uniformly over the sphere using a Fibonacci lattice, pseudorandomly and independently offset for every training position [S4].
+3.  If any ray reaches infinity, mark the position as 'outside' and the distance as positive. Otherwise, mark it as negative [S4].
+4.  Use NVIDIA ray tracing hardware via the OptiX 7 framework for ray-triangle intersections to maximize efficiency [S4].
+*   **Parameter:** Number of stab rays: 32 [S4].
+*   **Pitfall:** For watertight meshes, signing distance based on the normal of the closest triangle is cheaper, but this is disabled by default due to incompatibility with typical non-watertight meshes found in the wild [S4].
+*   **Comparison:** Using OptiX 7 is over an order of magnitude faster than using a software triangle BVH for ray-shape intersections on an RTX 3090 GPU [S4].
+
+## Operating characteristics
+*   **Time Complexity:** Unsigned distance query is $O(\log N_{triangles})$ on average [S4]. Signed distance adds $O(K \cdot \log N_{triangles})$ for $K$ stab rays [S4].
+*   **Hardware Acceleration:** When using NVIDIA OptiX 7, performance is over an order of magnitude faster than software BVH implementations on RTX 3090 GPUs [S4].
+*   **Memory:** Depends on the BVH construction method. GPU-based cluster merging requires double-buffered memory for intermediate clusters [S1, unofficial].
+*   **Strengths:** High performance for distance queries and SDF computation on GPUs; supports complex, non-watertight meshes; integrates well with neural rendering pipelines [S1, unofficial][S4].
+*   **Limitations:** Stab ray method is probabilistic and may fail for very thin structures or if rays are not dense enough; normal-based signing is unreliable for non-watertight meshes [S4].
+*   **When to use:** When computing SDFs or closest points for triangle meshes in a GPU-accelerated environment, especially for neural rendering or collision detection [S1, unofficial][S4].
+*   **When not to use:** For static, watertight meshes where normal-based signing is sufficient and faster, or when CPU-only resources are available and OptiX is not an option [S4].
+
+## Background
+Mesh BVH was introduced as part of the `isoext` library for GPU-based signed distance field computation from triangle meshes [S1, unofficial]. It has been widely adopted in neural graphics primitives, such as Instant Neural Graphics Primitives (INGP), for efficient signed distance field computation and ray marching acceleration [S4]. The method leverages NVIDIA's OptiX ray tracing API to offload triangle intersection tests to dedicated hardware [S4]. Variants like BVH-based geometric attribute correction have been developed to handle high-resolution mesh details in voxelized representations [S2, unofficial].
+
+## Sources
+[S1] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)
+[S2] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
+[S3] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26
+[S4] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28

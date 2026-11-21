@@ -1,0 +1,600 @@
+NoSQL data store using the Seastar framework, compatible with Apache Cassandra and Amazon DynamoDB - sstables: Give the compression dictionary machinery a service of its own by xemul · Pull Request #32655 · scylladb/scylladb
+
+sstables: Give the compression dictionary machinery a service of its own by xemul · Pull Request #32655 · scylladb/scylladb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xemul
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+Cluster-wide SSTable sampling, dictionary training and publishing the result to system.dicts sit in storage_service for no better reason than storage_service having had all the needed pieces at hand when they were written -- the commit that added them says exactly that, and suggests a service of their own. Everything that uses them, from the REST endpoints through the automatic training loop to alternator's table size estimate, has to reach through storage_service to get there. The RPC compression dictionaries have had such a service since the beginning; this gives the SSTable ones theirs.
+Refs #2737
+Improving components inter-dependencies, not backporting
+🤖 Generated with Claude Code
+xemul
+and others
+added 6 commits
+October 28, 2026 13:47
+idl: Move the sstable dict verbs into their own rpc group
+…
+b9238e2
+```
+The estimate_sstable_volume and sample_sstables verbs serve the sstable
+compression dictionary machinery, which is about to move out of
+storage_service into a service of its own. They cannot stay in the
+storage_service verb group, because its generated unregister() tears
+down the whole group at once, so storage_service shutdown would
+unregister handlers owned by another service.
+
+The verb ids are unchanged, so this is invisible on the wire.
+
+Signed-off-by: Pavel Emelyanov <xemul@scylladb.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+sstables: Introduce dictionary_service
+…
+e74b174
+```
+The SSTable compression dictionary machinery -- cluster-wide sampling,
+training and publishing the result to system.dicts -- lives in
+storage_service only because storage_service happened to have all the
+pieces it needs at hand. It is unrelated to the rest of storage_service,
+and everybody who needs it (the REST API, the automatic training loop,
+alternator's table size estimate) has to reach through storage_service
+to get there.
+
+Give it a service of its own with explicit dependencies, the way the RPC
+compression dictionary_service already has one. The code itself doesn't
+move anywhere yet, it stays where it is in storage_service.cc with the
+namespace broken around it, so that this patch shows the change of
+ownership alone. Its messages now go to the "sstable_dictionary_service"
+logger.
+
+Signed-off-by: Pavel Emelyanov <xemul@scylladb.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+sstables: Move the dictionary_service code into its own file
+…
+abce2bc
+```
+Pure code motion: the dictionary_service methods introduced in the
+previous patch are carried out of storage_service.cc into a file of
+their own, which also repairs the namespace that patch had to break.
+
+Signed-off-by: Pavel Emelyanov <xemul@scylladb.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+api: Add the sstable dicts module
+…
+5a585f6
+```
+The estimate_compression_ratios and retrain_dict endpoints are the REST
+face of the sstable dictionary_service, not of storage_service, so give
+them a module of their own next to the service they drive, the way other
+services have theirs, and register it right where the service itself is
+started. This also lets the temporary dictionary_service reference that
+was threaded into set_storage_service go away.
+
+With that the endpoints have no business with storage_service at all:
+the async gate they hold and the compressor factory they compare
+dictionaries against both come from the dictionary_service now. They
+also get unregistered on shutdown, which they never were.
+
+Signed-off-by: Pavel Emelyanov <xemul@scylladb.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+code: Stop dragging storage_service into the dict users
+…
+246e2d6
+```
+With the dictionary machinery owned by its own service, the automatic
+training loop and alternator keep a storage_service reference out of
+pure habit. Alternator's is plainly unused now, and the training loop
+only needs things the dictionary_service can answer itself -- it holds
+the database, the system keyspace and the group0 handle anyway. Let
+both of them depend on the service they actually use.
+
+Signed-off-by: Pavel Emelyanov <xemul@scylladb.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+sstables: Train dictionaries on the worker thread directly
+…
+7b213ad
+```
+The dict trainer used to be plugged into storage_service as a callback
+from main(), because training must run on a non-reactor thread and
+storage_service had no business holding an alien worker. The sstable
+dictionary_service does, it is exactly the component that trains
+dictionaries, so let it take the worker like the RPC dictionary_service
+takes it and call the trainer itself.
+
+Signed-off-by: Pavel Emelyanov <xemul@scylladb.com>
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+xemul
+requested review from
+nyh and
+tgrabiec
+as code owners
+October 28, 2026 13:40
+xemul
+added
+the
+backport/none
+Backport is not required
+label
+Oct 28, 2026
+xemul
+requested a review
+from michoecho
+October 28, 2026 13:41
+scylladbbot
+added
+the
+status/ci_in_progress
+label
+Oct 28, 2026
+qodo-scylladb
+Bot
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Code Review by Qodo
+🐞 Bugs (1)
+🟠 Medium
+1. Retrain request during startup can crash the node 🐞 Bug
+Description
+```
+set_server_sstable_dicts() registers the dictionary routes while _group0 is still null and
+before messaging starts listening. Because the HTTP server is already listening and persisted
+features are enabled, a request in this startup interval can enter sampling RPCs before messaging is
+ready; a retrain_dict request that reaches publish_new_sstable_dict() dereferences _group0 and
+crashes the node.
+```
+Code
+main.cc[R2116-2119]
+```
++            api::set_server_sstable_dicts(ctx, sst_dicts, group0_client).get();
++            auto stop_sst_dicts_api = defer_verbose_shutdown("sstable dicts API", [&ctx] {
++                api::unset_server_sstable_dicts(ctx).get();
++            });
+```
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+The dictionary REST routes become reachable before group 0 is assigned and messaging is ready. A retraining request that reaches publication can dereference a null `_group0`.
+
+## Fix Focus Areas
+- main.cc[2116-2119]
+- main.cc[2212-2213]
+- main.cc[2572-2584]
+- sstables/dictionary_service.cc[137-140]
+
+## Recommended Fix
+Move `api::set_server_sstable_dicts(...)` and its deferred unset to the storage_service API registration area, after group 0 is assigned and messaging is ready to handle sampling RPCs. Keep the unset guard ordered so the routes are removed before the service and its dependencies stop. Defensively, make `publish_new_sstable_dict()` and `is_raft_leader()` throw or return false when `_group0` is null.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Dismiss ↗ | View ↗
+Resolved findings
+1. Shutdown can hang while a dictionary is being published ✓ Resolved
+Description
+```
+publish_new_sstable_dict holds the group 0 gate while using dictionary_service::_group0_as, but
+that abort source is fired only by dictionary_service::stop(), whose shutdown guard runs after
+group 0 shutdown. An in-flight autotrainer or REST publish can therefore block group 0 drain while
+waiting in start_operation or commit; retraining requests also remain accepted while group 0 is
+closing and can reach the already-closed gate.
+```
+Code
+sstables/dictionary_service.cc[R61-66]
+```
++future<> dictionary_service::stop() {
++    if (!_group0_as.abort_requested()) {
++        _group0_as.request_abort();
++    }
++    co_await _async_gate.close();
++    co_await ser::sstable_dicts_rpc_verbs::unregister(&_messaging.local());
+```
+Agent prompt
+```
+The issue below was found during a code review. Follow the provided context and guidance below and implement a solution
+
+## Issue description
+Dictionary-service publication can remain active while group 0 drains because its abort source is fired only after group 0 shutdown. Retraining routes also remain available while their group 0 dependency is closing.
+
+## Fix Focus Areas
+- sstables/dictionary_service.cc[61-71]
+- sstables/dictionary_service.hh[93-103]
+- main.cc[2113-2119]
+- main.cc[2211-2226]
+- main.cc[2369-2378]
+
+## Recommended Fix
+Add a `dictionary_service::abort_group0_operations()` method that uses `invoke_on_all` to call `_group0_as.request_abort()`. After `sst_dicts.local().set_group0(group0_service)`, register a `defer_verbose_shutdown` guard to call it before `group0_service.abort_and_drain()`, and call it from the drain path alongside `ss.wait_for_group0_stop()` so autotrainer and REST publishes are aborted before group 0 drains. Remove retraining routes and drain dictionary-service requests before group 0 begins shutdown, while preserving a cleanup guard for startup failures before the later shutdown guards are installed.
+```
+ⓘ Copy this prompt and use it to remediate the issue with your preferred AI generation tools
+Tip of the day
+```
+💡 Did you know, you can turn on the rule miner and Qodo learns your standards from review history
+```
+More tips ↗ | Customize Qodo ↗ | Qodo docs ↗
+Powered by Qodo
+qodo-scylladb
+Bot
+reviewed
+Oct 28, 2026
+View reviewed changes
+Comment thread
+sstables/dictionary_service.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+coderabbitai
+Bot
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+No actionable comments were generated in the recent review.
+Recent review info
+Run configuration
+Source mode: Auto
+Repository: scylladb/scylladb
+Branch: master
+File: .coderabbit.yaml
+Commit: 24d4faa
+Layers: Repository YAML
+Review profile: ASSERTIVE
+Plan: Essentials
+Run ID: 662573b2-278a-4d01-a9fa-b5100452c286
+Commits
+Reviewing files that changed from the base of the PR and between 899a2b1 and 6fa1421.
+Files selected for processing: 4
+main.cc
+service/storage_service.hh
+sstables/dictionary_service.cc
+sstables/dictionary_service.hh
+Included review availability: This review used your included allowance. Your plan provides up to 10 included reviews per hour; 8 remain after this review.
+📝 Summary
+Summary by CodeRabbit
+New Features
+Added REST endpoints to estimate compression ratios for SSTable data and retrain compression dictionaries for a table. These endpoints are available when the SSTable compression dictionaries feature is enabled.
+SSTable dictionary sampling, training, and publication now run through a dedicated service. Automatic dictionary training remains supported, including checks that determine whether a trained dictionary meets the configured improvement threshold before publication.
+The pull request adds sstables::dictionary_service for SSTable volume estimation, sampling, dictionary training, and publication. It moves related RPC operations out of storage_service and adds HTTP routes for compression-ratio estimation and dictionary retraining. Startup, the Alternator executor and controller, and the autotrainer now use the new service.
+Priority: Normal
+Estimated code review effort: 4 (Complex) | ~45 minutes
+Possibly related PRs
+scylladb/scylladb#32526: Changes SSTable volume-estimation and sampling operations and updates the Alternator executor call path.
+Merge Risk: Minimal · up to 6fa14
+The previously identified dictionary-publication shutdown risk is resolved, and no actionable merge-blocking issue remains after normal checks.
+Pre-merge checks: 4
+Check name
+Status
+Explanation
+Title check
+The title clearly identifies the main change: moving SSTable compression dictionary machinery into a dedicated service.
+Description check
+The description explains the architectural change, affected consumers, issue reference, and that the change is not a backport. It satisfies the available template requirement.
+Linked Issues check
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+Check skipped because no linked issues were found for this pull request.
+Autofix · Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts
+Comment @coderabbitai help to get the list of available commands.
+coderabbitai
+Bot
+requested changes
+Oct 28, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+Review info
+Run configuration
+Source mode: Auto
+Repository: scylladb/scylladb
+Branch: master
+File: .coderabbit.yaml
+Commit: 349d7ea
+Layers: Repository YAML
+Review profile: ASSERTIVE
+Plan: Essentials
+Run ID: bfc7720d-dd8c-4624-ba1d-84095466f425
+Commits
+Reviewing files that changed from the base of the PR and between 349d7ea and 7b213ad.
+Files selected for processing: 24
+alternator/controller.cc
+alternator/controller.hh
+alternator/executor.cc
+alternator/executor.hh
+api/CMakeLists.txt
+api/api.cc
+api/api_init.hh
+api/sstable_dicts.cc
+api/sstable_dicts.hh
+api/storage_service.cc
+configure.py
+idl/CMakeLists.txt
+idl/sstable_dicts.idl.hh
+idl/storage_service.idl.hh
+main.cc
+message/messaging_service.cc
+service/storage_service.cc
+service/storage_service.hh
+sstable_dict_autotrainer.cc
+sstable_dict_autotrainer.hh
+sstables/CMakeLists.txt
+sstables/dictionary_service.cc
+sstables/dictionary_service.hh
+test/boost/alternator_export_test.cc
+Files with no reviewable changes: 4
+service/storage_service.cc
+idl/storage_service.idl.hh
+service/storage_service.hh
+api/storage_service.cc
+Included review availability: This review used your included allowance. Your plan provides up to 10 included reviews per hour; 9 remain after this review.
+Comment thread
+main.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+scylladbbot
+removed
+the
+status/ci_in_progress
+label
+Oct 28, 2026
+scylladbbot
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+⚫ CI Aborted — superseded by build #36013
+This CI run (#36002) was automatically cancelled because a newer build (#36013) was triggered for this PR.
+No action needed — results from build #36013 will be posted when it completes.
+coderabbitai
+Bot
+requested changes
+Oct 28, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+Review info
+Run configuration
+Source mode: Auto
+Repository: scylladb/scylladb
+Branch: master
+File: .coderabbit.yaml
+Commit: 349d7ea
+Layers: Repository YAML
+Review profile: ASSERTIVE
+Plan: Essentials
+Run ID: 155fa7be-afc5-4195-8850-8eff7fd76742
+Commits
+Reviewing files that changed from the base of the PR and between 7b213ad and 899a2b1.
+Files selected for processing: 3
+main.cc
+sstables/dictionary_service.cc
+sstables/dictionary_service.hh
+Included review availability: This review used your included allowance. Your plan provides up to 10 included reviews per hour; 9 remain after this review.
+Comment thread
+main.cc
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+scylladbbot
+added
+the
+status/ci_in_progress
+label
+Oct 28, 2026
+michoecho
+approved these changes
+Oct 28, 2026
+View reviewed changes
+sstables: Keep dict publishing in the group 0 shutdown protocol
+…
+6fa1421
+```
+While the publishing code lived in storage_service, it used that service's
+group 0 abort source, so wait_for_group0_stop() woke it up before group 0
+was drained, on every shutdown path. The new service got an abort source
+of its own, which nothing fires until the service itself is stopped --
+long after group 0 is gone. A publish in flight at that moment holds the
+group 0 gate and the drain waits for it with nothing to wake it up.
+
+Chain the new abort source onto the one storage_service already fires, so
+that publishing stays a member of the group 0 shutdown protocol it used to
+belong to.
+
+Signed-off-by: Pavel Emelyanov <xemul@scylladb.com>
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+xemul
+force-pushed
+the
+br-sstable-dictionary-service
+branch
+from
+899a2b1 to
+6fa1421
+Compare
+October 28, 2026 17:09
+github-actions
+Bot
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Contributor
+Changes since previous version (899a2b16df → 6fa1421a28)
+1/7 unchanged: idl: Move the sstable dict verbs into their own rpc group
+2/7 unchanged: sstables: Introduce dictionary_service
+3/7 unchanged: sstables: Move the dictionary_service code into its own file
+4/7 unchanged: api: Add the sstable dicts module
+5/7 unchanged: code: Stop dragging storage_service into the dict users
+6/7 unchanged: sstables: Train dictionaries on the worker thread directly
+– dropped: sstables: Abort dict publishing before group 0 drains
+7/7 new: sstables: Keep dict publishing in the group 0 shutdown protocol
+coderabbitai
+Bot
+approved these changes
+Oct 28, 2026
+View reviewed changes
+scylladbbot
+removed
+the
+status/ci_in_progress
+label
+Oct 28, 2026
+scylladbbot
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+⚫ CI Aborted — superseded by build #36018
+This CI run (#36013) was automatically cancelled because a newer build (#36018) was triggered for this PR.
+No action needed — results from build #36018 will be posted when it completes.
+scylladbbot
+added
+status/ci_in_progress
+and removed
+status/ci_in_progress
+labels
+Oct 28, 2026
+scylladbbot
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+🟢 CI State: SUCCESS
+Mode
+Stage
+Status
+Queue Time
+Run Time
+Node
+Checkout
+✅
+2m
+spider9.cloudius-systems.com
+Framework test
+✅
+0m
+spider9.cloudius-systems.com
+Build
+✅
+11h 54m
+43m
+spider5.cloudius-systems.com
+dev
+test.py
+✅
+15m
+spider5.cloudius-systems.com
+Unit Tests Custom
+🔹 test/boost/alternator_export_test.cc
+✅
+0m
+1m
+spider5.cloudius-systems.com
+release
+test.py
+✅
+23m
+spider5.cloudius-systems.com
+Unit Tests Custom
+🔹 test/boost/alternator_export_test.cc
+✅
+0m
+1m
+spider5.cloudius-systems.com
+debug
+test.py
+✅
+3h 31m
+spider5.cloudius-systems.com
+Unit Tests Custom
+🔹 test/boost/alternator_export_test.cc
+✅
+0m
+3m
+spider5.cloudius-systems.com
+dtest
+dtest with tablets
+✅
+24m
+spider5.cloudius-systems.com
+dtest with consistent topology changes
+✅
+24m
+spider5.cloudius-systems.com
+Build Details:
+Total Queue: 11h 54m
+Total Run: 17h 45m
+xemul
+added
+the
+status/merge_candidate
+Item needs a maintainer's assistance in merging
+label
+Oct 29, 2026
+coderabbitai
+Bot
+mentioned this pull request
+Nov 3, 2026
+alternator: implement orchestration for export to S3
+#32045
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+backport/none
+Backport is not required
+status/merge_candidate
+Item needs a maintainer's assistance in merging
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

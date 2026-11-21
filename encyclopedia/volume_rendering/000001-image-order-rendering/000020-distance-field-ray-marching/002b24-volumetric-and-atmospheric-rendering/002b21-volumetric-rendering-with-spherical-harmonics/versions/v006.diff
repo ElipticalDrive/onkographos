@@ -1,0 +1,213 @@
+--- v005.md
++++ v006.md
+@@ -1,12 +1,12 @@
+ # Volumetric Rendering with Spherical Harmonics
+ 
+-Also called: Spherical Harmonics Rendering, Volume Rendering with Spherical Harmonics (Forward)
++Also called: Volume Rendering with Spherical Harmonics (Forward)
+ 
+ ## Overview
+-Volumetric Rendering with Spherical Harmonics is a direct volume ray casting method that represents view-dependent color and opacity data using spherical harmonic (SH) coefficients stored in a voxel grid [S1, S3, unofficial]. It solves the problem of expensive per-sample shading and transfer function evaluation by encoding the directional dependence of radiance directly into the volume data, allowing color to be computed via algebraic dot products during compositing [S1, S3, unofficial]. It sets itself apart from standard direct volume rendering by replacing the scalar-to-color transfer function lookup with a continuous SH basis evaluation, and from [Neural volume rendering](1576-neural-volume-rendering.md) by using a fixed, non-learnable basis for directional representation rather than a neural network [S1, S3, unofficial].
++Volumetric Rendering with Spherical Harmonics is a direct volume ray casting method that traces rays through a sparse grid represented by spherical harmonic (SH) coefficients, computing color output and optionally log-transmittance for background compositing [S1, unofficial]. It encodes directional color variation into SH coefficients evaluated per sample, allowing view-dependent shading via algebraic projections during compositing [S1, S2, unofficial]. It differs from standard direct volume rendering by replacing scalar transfer function lookups with continuous SH basis evaluation, and from [Neural volume rendering](1576-neural-volume-rendering.md) by using explicit SH basis functions rather than implicit neural fields [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A sparse voxel grid where each occupied voxel stores a scalar density (or opacity coefficient) and a vector of spherical harmonic coefficients [S1, S2, unofficial]. Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) and ray bounds $[t_{near}, t_{far}]$ [S2, unofficial].
++- **Input:** A sparse voxel grid where each active voxel stores a scalar density/opacity proxy and a vector of spherical harmonic coefficients [S1, S2, unofficial]. Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) and ray bounds $[t_{near}, t_{far}]$ [S2, unofficial].
+ - **Output:** Final pixel color $\mathbf{C}_{out}$ and optionally accumulated log-transmittance for background compositing [S1, unofficial].
+ 
+@@ -19,22 +19,18 @@
+ **Numbered Steps:**
+ 
+-1.  **Ray Initialization:** For each pixel/ray $i$, define the ray segment $[t_{near}, t_{far}]$ by intersecting the ray with the volume bounding box [S2, unofficial]. Discretize the segment into $N$ samples (default $N=512$ or $100$) at positions $t_j = t_{near} + j \cdot \Delta t$, where $\Delta t = (t_{far} - t_{near}) / N$ [S2, unofficial]. Sample positions are often parameterized in $[0.05, 0.95]$ to avoid boundary artifacts [S2, unofficial].
+-
+-2.  **Voxel Interpolation:** At each sample position $\mathbf{p}_j$, perform trilinear interpolation on the voxel grid to retrieve the local density $\sigma_j$ and the SH coefficient vector $\mathbf{c}_j$ [S1, S2, unofficial].
+-    - Extract opacity proxy: $\alpha_{raw, j} = \text{interp}(\text{density})$ [S2, unofficial].
++1.  **Ray Initialization:** For each pixel/ray $i$, define the ray segment $[t_{near}, t_{far}]$ by intersecting the ray with the volume bounding box [G]. Discretize the segment into $N$ samples (default $N=512$ or $100$) at positions $t_j = t_{near} + j \cdot \Delta t$, where $\Delta t = (t_{far} - t_{near}) / N$ [S2, unofficial]. Sample positions are often parameterized in $[0.05, 0.95]$ to avoid boundary artifacts [S2, unofficial].
++2.  **Voxel Interpolation:** At each sample position $\mathbf{p}_j$, perform trilinear interpolation on the voxel grid to retrieve the local density/opacity proxy $\sigma_j$ and the SH coefficient vector $\mathbf{c}_j$ [S1, S2, unofficial].
++    - Extract opacity proxy: $\sigma_j = \text{interp}(\text{density})$ [S2, unofficial].
+     - Extract SH coefficients: $\mathbf{c}_j = \text{interp}(\text{sh\_coeffs})$ [S2, unofficial].
+-
+ 3.  **SH Basis Evaluation:** Compute the SH basis functions $\mathbf{Y}(\mathbf{d}_i)$ for the viewing direction $\mathbf{d}_i$ of the ray [S2, unofficial]. The basis evaluation depends on the chosen degree $L$ (typically 1 or 2) [S3, unofficial].
+     - Let $\mathbf{y}_i = \mathbf{Y}(\mathbf{d}_i)$ be the vector of basis values [S2, unofficial].
+-
+ 4.  **Color Computation:** Compute the view-dependent color $\mathbf{C}_j$ at sample $j$ by taking the dot product of the interpolated SH coefficients and the basis vector [S2, unofficial]:
+     $$
+     \mathbf{C}_j = \mathbf{c}_j \cdot \mathbf{y}_i
+     $$
+-    Note: In some implementations, the SH coefficients are stored per-sample and multiplied by the basis before summation [S2, unofficial].
+-
++    Note: In some implementations, the SH coefficients are reshaped to separate color channels before projection [S4, unofficial].
+ 5.  **Transmittance and Opacity Calculation:** Compute the optical depth and transmittance for each sample [S2, unofficial].
+     - Compute step sizes: $\Delta t_j = t_{j+1} - t_j$ (for $j=0 \dots N-2$) [S2, unofficial].
+-    - Compute weighted optical depth deltas: $\delta_j = \sigma_j \cdot \Delta t_j$ [S2, unofficial].
++    - Compute weighted optical depth deltas: $\delta_j = -\Delta t_j \cdot \sigma_j$ [S2, unofficial].
+     - Compute cumulative transmittance $T_j$ from front to back:
+         $$
+@@ -42,18 +38,10 @@
+         $$
+         $$
+-        T_{j+1} = T_j \cdot e^{-\delta_j}
+-        $$
+-        Alternatively, using cumulative sum of negative deltas:
+-        $$
+-        \text{cum\_delta}_j = \sum_{k=0}^{j-1} -\delta_k
+-        $$
+-        $$
+-        T_j = e^{\text{cum\_delta}_j}
+-        $$
+-    - Compute per-sample opacity contribution: $\alpha_j = 1 - e^{-\delta_j}$ [S2, unofficial].
+-
++        T_{j+1} = \exp\left(\sum_{k=0}^{j} \delta_k\right)
++        $$
++    - Compute per-sample opacity contribution: $\alpha_j = 1 - \exp(\delta_j)$ [S2, unofficial].
+ 6.  **Front-to-Back Compositing:** Composite the samples into the final color [S2, unofficial]:
+     $$
+-    \mathbf{C}_{out} = \sum_{j=0}^{N-1} \mathbf{C}_j \cdot T_j \cdot \alpha_j
++    \mathbf{C}_{out} = \sum_{j=0}^{N-1} T_j \cdot \alpha_j \cdot \mathbf{C}_j
+     $$
+     $$
+@@ -67,7 +55,6 @@
+     T_{j+1} \leftarrow T_j \cdot (1 - \alpha_j)
+     $$
+-
+ 7.  **Background Compositing (Optional):** If background rendering is enabled, compute the log-transmittance for the ray and composite the background color using the accumulated transmittance [S1, unofficial].
+-    - Log-transmittance: $\log T_{final} = \sum_{j=0}^{N-1} -\delta_j$ [S1, unofficial].
++    - Log-transmittance: $\log T_{final} = \sum_{j=0}^{N-1} \delta_j$ [S1, unofficial].
+     - Composite with background color $\mathbf{C}_{bg}$:
+         $$
+@@ -110,5 +97,5 @@
+ 
+ def render_volumetric_sh(voxel_grid, ray_origins, ray_directions, 
+-                         num_samples=512, sh_degree=1, 
++                         t_near, t_far, num_samples=512, sh_degree=1, 
+                          background_enabled=False, background_colors=None):
+     """
+@@ -120,4 +107,6 @@
+         ray_origins: (Q, 3) array of ray origins.
+         ray_directions: (Q, 3) array of ray directions (normalized).
++        t_near: (Q,) array of ray entry parameters.
++        t_far: (Q,) array of ray exit parameters.
+         num_samples: int, number of samples per ray.
+         sh_degree: int, degree of spherical harmonics (0, 1, 2).
+@@ -134,20 +123,12 @@
+     # Precompute SH basis for all ray directions
+     # Shape: (Q, K)
+-    ray_sh_bases = np.zeros((Q, K))
+-    for i in range(Q):
+-        ray_sh_bases[i] = spherical_harmonics_basis(ray_directions[i], sh_degree)
++    ray_sh_bases = np.array([spherical_harmonics_basis(ray_directions[i], sh_degree) for i in range(Q)])
+         
+     colors = np.zeros((Q, 3))
+     transmittances = np.ones(Q)
+     
+-    # Determine ray bounds (simplified: assume unit sphere or pre-computed t_near/t_far)
+-    # In practice, intersect with AABB. Here we assume t_near=0, t_far=1 for simplicity
+-    # or that ray_directions are scaled to the volume extent.
+-    t_near = 0.0
+-    t_far = 1.0
+-    
+     for i in range(Q):
+         # Sample positions along the ray
+-        t_samples = np.linspace(t_near, t_far, num_samples + 1)
++        t_samples = np.linspace(t_near[i], t_far[i], num_samples + 1)
+         # Sample points in world space
+         sample_points = ray_origins[i] + t_samples[:, None] * ray_directions[i]
+@@ -157,9 +138,9 @@
+         # Here we simulate the interpolation result
+         # interp_data shape: (num_samples + 1, 1 + K)
+-        # Column 0: density, Columns 1:K+1: sh_coeffs
++        # Column 0: density/opacity proxy, Columns 1:K+1: sh_coeffs
+         interp_data = voxel_grid.interpolate(sample_points)
+         
+-        densities = interp_data[:, 0]
+-        sh_coeffs = interp_data[:, 1:]
++        interp_opacities = interp_data[:, 0]
++        interp_sh_coeffs = interp_data[:, 1:]
+         
+         # Compute SH basis for the ray direction (constant for all samples on the ray)
+@@ -170,24 +151,18 @@
+         # sh_coeffs shape: (num_samples + 1, K)
+         # ray_basis shape: (K,)
+-        sample_colors = np.dot(sh_coeffs, ray_basis) # Shape: (num_samples + 1, 3)
++        sample_colors = np.dot(interp_sh_coeffs, ray_basis) # Shape: (num_samples + 1, 3)
+         
+         # Compute optical depth deltas
+-        # deltas = t_samples[1:] - t_samples[:-1]
+         deltas = np.diff(t_samples)
+         
+-        # Use densities as extinction coefficients
+-        # Note: densities might need scaling or clamping
+-        sigmas = np.maximum(densities[:-1], 1e-6)
+-        
+-        # Weighted deltas
+-        weighted_deltas = sigmas * deltas
+-        
+-        # Cumulative transmittance
+-        # T_j = exp(-sum_{k=0}^{j-1} weighted_deltas_k)
+-        cum_weighted_deltas = np.cumsum(weighted_deltas)
+-        T = np.exp(-np.concatenate(([0], cum_weighted_deltas)))
+-        
+-        # Per-sample opacity
+-        alpha = 1 - np.exp(-weighted_deltas)
++        # Weighted deltas for transmittance (matches S2: deltas_times_sigmas = - deltas * interp_opacities[:-1])
++        deltas_times_sigmas = -deltas * interp_opacities[:-1]
++        
++        # Cumulative transmittance (matches S2: cumsum prepended with 0)
++        cum_weighted_deltas = np.concatenate(([0], np.cumsum(deltas_times_sigmas)))
++        T = np.exp(cum_weighted_deltas)
++        
++        # Per-sample opacity (matches S2: tmp2 = 1 - exp(deltas_times_sigmas))
++        alpha = 1 - np.exp(deltas_times_sigmas)
+         
+         # Front-to-back compositing
+@@ -195,8 +170,4 @@
+         # T_j here is transmittance BEFORE sample j
+         # alpha_j is opacity of sample j
+-        
+-        # Adjust T to be transmittance before each sample
+-        # T[0] is 1.0 (before first sample)
+-        # T[1] is transmittance after first sample
+         
+         contribution = T[:-1] * alpha * sample_colors[:-1]
+@@ -219,25 +190,28 @@
+ - **Boundary Artifacts:** Sampling at exact boundaries can cause interpolation errors. Using parameterized ranges like $[0.05, 0.95]$ helps [S2, unofficial].
+ - **SH Degree Limits:** Higher SH degrees increase memory usage and reduce the maximum number of splats/voxels that can be rendered due to memory constraints (e.g., Degree 2 limits splat count to ~8,000,000 vs ~16,000,000 for Degree 0) [S3, unofficial].
+-- **Precision:** Floating-point precision in cumulative transmittance calculation can lead to artifacts in deep volumes. Using log-transmittance can mitigate this [S1, unofficial].
++- **Precision:** Floating-point precision in cumulative transmittance calculation can lead to artifacts in deep volumes. Log-transmittance is computed for background compositing [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Spherical Harmonics](5603-spherical-harmonics.md)
+-General SH representation for directional functions.
++Spherical Harmonics (SH) provide an orthonormal basis for representing directional functions defined on the unit sphere $S^2$, enabling the compact storage and efficient manipulation of volumetric radiance distributions. This family of methods solves the problem of expensive numerical integration for directional signals (such as in-scattering or visibility) by projecting them into a coefficient space where operations like rotation and integration become analytic or linear algebraic. It differs from its siblings, such as [Volumetric Spherical Harmonics Precomputed Radiance Transfer](5807-volumetric-spherical-harmonics-precomputed-radiance-transfer.md) and [Spherical Harmonic Volume Shading](5946-spherical-harmonic-volume-shading.md), by serving as the fundamental mathematical representation layer; while the siblings apply this representation to specific shading or transfer pipelines, the core SH family focuses on the basis definition, coefficient projection, and the algebraic properties (like the product convolution) that make these applications feasible.
+ 
+ ### [Volumetric Spherical Harmonics Precomputed Radiance Transfer](5807-volumetric-spherical-harmonics-precomputed-radiance-transfer.md)
+-Precomputes radiance transfer for dynamic lighting.
++Volumetric Spherical Harmonics Precomputed Radiance Transfer (VSH-PRT) is a technique for rendering semi-transparent volumetric datasets with dynamic lighting by precomputing the scene's response to illumination. It solves the problem of expensive real-time volume rendering by compressing the 6D Volume Radiance Transfer function into spherical harmonic coefficients stored on a surface mesh, allowing for fast runtime evaluation under arbitrary distant lighting. It sets itself apart from direct volume rendering by decoupling the expensive volume integration from the render loop, and from standard surface PRT by explicitly handling the volumetric scattering process to determine the exit radiance.
+ 
+ ### [Spherical Harmonic Volume Shading](5946-spherical-harmonic-volume-shading.md)
+-SH-based shading in Fourier Volume Rendering.
++Spherical Harmonic Volume Shading is a method for computing diffuse illumination in Fourier Volume Rendering (FVR) by approximating the non-linear shading operator (specifically the $\max(N \cdot L, 0)$ term) using spherical harmonics. It solves the problem of interactive relighting in the frequency domain, where traditional methods require expensive recomputation of 3D Fourier transforms for every change in light direction. Unlike [Volumetric Spherical Harmonics Precomputed Radiance Transfer](5807-volumetric-spherical-harmonics-precomputed-radiance-transfer.md), which precomputes transfer functions for specific geometries, this method operates directly on the volume's gradient-derived normals in the Fourier domain, allowing light direction changes to be handled via simple coefficient updates without re-transforming the volume data.
+ 
+ ### [Ray Tracing Backward Pass](5966-ray-tracing-backward-pass.md)
+-Gradient computation for SH coefficients in ray tracing.
++The Ray Tracing Backward Pass computes the gradients of a differentiable volume rendering loss with respect to the scene representation (spherical harmonic coefficients and density) and auxiliary parameters, given the rendered image and ground truth. It serves as the differentiable counterpart to the forward ray casting pass, enabling end-to-end training of volumetric models like Plenoxels. Unlike the forward pass which accumulates color and transmittance, this method propagates error signals backward through the ray integration, handling RGB normalization and optional regularization losses (beta, sparsity).
+ 
+ ### [Zonal Method (Bhate and Tokuta)](12221-zonal-method-bhate-and-tokuta.md)
+-Deterministic global illumination for participating media with surface interactions.
++The Zonal Method (Bhate and Tokuta) is a global illumination technique for participating media that extends the classical zonal method by incorporating spherical harmonics to handle anisotropic scattering and surface-volume interactions. Unlike the standard zonal method which assumes isotropic media and ignores surface effects, this method represents the phase function and radiance using spherical harmonics, allowing for the approximation of Mie scattering while maintaining ideal diffuse surfaces. It is distinguished from its siblings by its specific use of an extended hemicube technique to compute spherical harmonic form factors and a Gauss-Seidel solver for the coupled volume-surface system.
++
++### Spherical Harmonics Rendering
++Renders RGB values by projecting spherical harmonics coefficients along viewing directions, then compositing with weights [S4, unofficial]. Reshapes SH coefficients to separate color channels, computes SH basis components for given directions, multiplies coefficients by components, sums over SH components and adds bias, applies optional activation function to RGB, and composites using RGBRenderer.combine_rgb [S4, unofficial]. The activation function defaults to `nn.Sigmoid()` [S4, unofficial]. A known pitfall in some source implementations is that the code overwrites the RGB tensor in the sum step (`rgb = torch.sum(sh, dim=-1) + 0.5`), discarding the channel multiplication result [S4, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(Q \cdot N \cdot K)$, where $Q$ is the number of rays, $N$ is the number of samples per ray, and $K$ is the number of SH coefficients ($K=(L+1)^2$) [S1, S2, unofficial]. The SH basis evaluation is $O(K)$ per sample, but since the direction is constant per ray, it can be optimized to $O(K)$ per ray [S2, unofficial].
++- **Time Complexity:** $O(Q \cdot N \cdot K)$, where $Q$ is the number of rays, $N$ is the number of samples per ray, and $K$ is the number of SH coefficients ($K=(L+1)^2$) [S1, S2, unofficial].
+ - **Memory Complexity:** $O(V \cdot K)$, where $V$ is the number of active voxels and $K$ is the number of SH coefficients per voxel [S1, S3, unofficial].
+ - **Measured Performance:** Limits on splat count depend on SH degree: Degree 0 allows ~16,000,000 splats, Degree 1 allows ~11,000,000, and Degree 2 allows ~8,000,000 [S3, unofficial].
+@@ -253,3 +227,4 @@
+ [S1] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)
+ [S2] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)
+-[S3] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)+[S3] mkkellogg/GaussianSplats3D, https://github.com/mkkellogg/GaussianSplats3D, fetched 2026-10-27 (unofficial)
++[S4] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)

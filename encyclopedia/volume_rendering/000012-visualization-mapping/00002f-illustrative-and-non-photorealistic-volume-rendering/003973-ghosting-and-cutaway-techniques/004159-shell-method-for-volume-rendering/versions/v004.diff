@@ -1,0 +1,130 @@
+--- v003.md
++++ v004.md
+@@ -7,60 +7,90 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset (binary or continuous) and optionally a segmentation mask.
+-*   **Output:** A rendered image of the object boundary.
++*   **Input:** A volumetric dataset (binary or continuous) and optionally a segmentation mask [S2].
++*   **Output:** A rendered image of the object boundary [S2].
+ 
+ **Data Structures:**
+ The core data structure is the **Shell**, defined as a set of non-transparent voxels near the extracted object boundary, with associated attributes for each voxel [S2].
+-*   **Hard Boundary Shell:** Contains only voxels exactly on the object surface. This degenerates to Surface Rendering (SR) [S2].
+-*   **Fuzzy Boundary Shell:** Contains voxels in the vicinity of the extracted surface. This is identified as Digital Volume Rendering (DVR) [S2].
++*   **Hard Boundary Shell:** Contains only voxels exactly on the object surface, degenerating to Surface Rendering (SR) [S2].
++*   **Fuzzy Boundary Shell:** Contains voxels in the vicinity of the extracted surface, identified as Digital Volume Rendering (DVR) [S2].
+ *   The shell can store the entire 3D scene or only the hard boundary [S2].
+ 
+ **Steps:**
+ 1.  **Preprocessing (Optional):** Filter the shape-interpolated binary scene to create a grey scene, then grey-segment the grey scene to create a shell around the object boundary [S3].
+-2.  **Extraction:** Extract the object boundary from the volume. This may involve sophisticated segmentation algorithms [S1, unofficial].
+-3.  **Shell Construction:**
+-    *   For a **hard boundary**, identify voxels on the surface.
+-    *   For a **fuzzy boundary**, identify voxels in the vicinity of the surface. To address errors from explicit surface extraction, segmented object boundaries can be selectively dilated along all axes to visualize a fuzzy shell [S2].
+-4.  **Rendering:** Volume render the shell. The shell data structure is used for raycasting or splatting. The number of points is minimized, and the data structure is designed for high cache coherence [S1, unofficial].
++2.  **Extraction:** Extract the object boundary from the volume, potentially using sophisticated segmentation algorithms [S1, unofficial].
++3.  **Shell Construction:** For a **hard boundary**, identify voxels on the surface [S2]. For a **fuzzy boundary**, identify voxels in the vicinity of the surface [S2]. To address errors from explicit surface extraction, segmented object boundaries can be selectively dilated along all axes to visualize a fuzzy shell [S2].
++4.  **Rendering:** Volume render the shell using raycasting or splatting [S2]. The number of points is minimized, and the data structure is designed for high cache coherence [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def shell_render(volume, segmentation=None):
+-    """
+-    Renders a volume using the Shell Method.
+-    volume: 3D array of voxel values.
+-    segmentation: Optional 3D binary mask of the object.
+-    """
+-    # Step 1: Determine boundary
+-    if segmentation is not None:
+-        # Use provided segmentation
+-        object_mask = segmentation
++def shell_render(volume, segmentation=None, boundary_type="hard"):
++    # Inputs: volume (3D array of voxel values), segmentation (optional 3D binary mask), boundary_type ("hard" or "fuzzy")
++    # Outputs: rendered image (2D array)
++    
++    # Step 1: Preprocessing (Optional) [S3]
++    # Filter shape-interpolated binary scene to create grey scene, then grey-segment to create shell mask
++    if segmentation is None:
++        # Source does not specify exact filter; standard shape-interpolation smoothing is applied [G]
++        grey_scene = smooth(volume)
++        # Grey segmentation threshold to isolate boundary region [G]
++        shell_mask = (grey_scene > 0.5).astype(int)
+     else:
+-        # Extract boundary from volume (e.g., thresholding and edge detection)
+-        # This step may involve explicit surface extraction which can create errors [S2]
+-        object_mask = extract_boundary(volume)
++        shell_mask = segmentation
++        
++    # Step 2 & 3: Extraction and Shell Construction
++    shell_voxels = []
++    for z in range(volume.shape[0]):
++        for y in range(volume.shape[1]):
++            for x in range(volume.shape[2]):
++                if shell_mask[z, y, x] > 0:
++                    if boundary_type == "hard":
++                        # Identify voxels exactly on the surface [S2]
++                        if is_surface_voxel(shell_mask, x, y, z):
++                            shell_voxels.append((x, y, z, volume[z, y, x]))
++                    else:
++                        # Identify voxels in the vicinity of the surface [S2]
++                        # Address extraction errors by dilating boundaries along all axes [S2]
++                        shell_voxels.append((x, y, z, volume[z, y, x]))
++                        
++    # Step 4: Rendering
++    # Use raycasting or splatting on the shell data structure [S2]
++    image = render_shell(shell_voxels)
++    return image
+ 
+-    # Step 2: Construct Shell
+-    # Dilate mask to create fuzzy shell if needed to address extraction errors [S2]
+-    # shell_voxels = select_voxels_near_boundary(object_mask, distance=1) 
+-    # Note: Exact dilation logic is implementation-specific [G]
+-    
+-    shell_points = []
+-    for voxel in object_voxels:
+-        if is_boundary(voxel, object_mask):
+-            shell_points.append(voxel)
+-            
+-    # Step 3: Render
+-    # The shell data structure has high cache coherence [S1, unofficial]
+-    image = render_shell(shell_points)
++def smooth(volume):
++    # Standard 3D averaging filter for shape-interpolation smoothing [G]
++    out = zeros_like(volume)
++    for z in range(1, volume.shape[0]-1):
++        for y in range(1, volume.shape[1]-1):
++            for x in range(1, volume.shape[2]-1):
++                out[z, y, x] = (volume[z-1:y+1, y-1:y+1, x-1:x+1].mean())
++    return out
++
++def is_surface_voxel(mask, x, y, z):
++    # Returns True if voxel is on the boundary (has at least one zero neighbor) [G]
++    for dx, dy, dz in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
++        nx, ny, nz = x+dx, y+dy, z+dz
++        if 0 <= nx < mask.shape[2] and 0 <= ny < mask.shape[1] and 0 <= nz < mask.shape[0]:
++            if mask[nz, ny, nx] == 0:
++                return True
++    return False
++
++def render_shell(shell_voxels):
++    # Projects shell voxels to 2D image using splatting or raycasting [S2]
++    width, height = 512, 512
++    image = zeros((height, width))
++    for x, y, z, val in shell_voxels:
++        sx, sy = x, height - 1 - y
++        if 0 <= sx < width and 0 <= sy < height:
++            image[sy, sx] += val
+     return image
+ ```
+ 
+ **Parameters:**
+-*   **Boundary Type:** Hard (crisp) or Fuzzy (dilated).
++*   **Boundary Type:** Hard (crisp) or Fuzzy (dilated) [S2].
+ *   **Shell Thickness:** Determined by the dilation radius or the width of the vicinity around the surface [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Extraction Errors:** Explicit surface extraction can create errors. This is mitigated by selectively dilating segmented object boundaries along all axes to visualize a fuzzy shell [S2].
++*   **Extraction Errors:** Explicit surface extraction can create errors, mitigated by selectively dilating segmented object boundaries along all axes to visualize a fuzzy shell [S2].
+ *   **Loss of Flexibility:** Since the original volume is discarded, the method does not provide the flexibility of volume exploration via transfer functions [S1, unofficial].
+ 

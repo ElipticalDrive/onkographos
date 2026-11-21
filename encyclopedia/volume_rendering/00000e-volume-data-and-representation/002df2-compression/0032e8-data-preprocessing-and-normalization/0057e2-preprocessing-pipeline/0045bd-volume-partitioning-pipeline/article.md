@@ -1,0 +1,276 @@
+# Volume Partitioning Pipeline
+
+
+## Overview
+The Volume Partitioning Pipeline preprocesses 3D volumetric data by identifying foreground regions, optionally partitioning them spatially or by intensity, cropping them to tight bounding boxes, and exporting them as compact raw files with associated metadata [S1, unofficial]. It solves the problem of managing large, sparse, or heterogeneous volumes by reducing memory footprint and preparing data for efficient downstream rendering or compression [S1, unofficial]. It differs from sibling methods like [VolumeSegmenter Pipeline](11584-volumesegmenter-pipeline.md) by focusing on explicit partitioning and bounding-box extraction rather than general segmentation, and from [3D Seismic Data Compression Pipeline](11727-3d-seismic-data-compression-pipeline.md) by being a generic preprocessing step rather than a domain-specific compression scheme.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A 3D volume (typically uint8 or uint16), processing parameters (mode, components, threshold, etc.).
+- **Output:** A directory containing one `.raw` file per component (containing cropped, downsampled voxel data) and a `metadata.json` file describing the structure, origins, and integrity of the data [S1, unofficial].
+
+**Data Structures:**
+- **Metadata JSON:** A single JSON object with the following fields:
+  - `schema_version` (int): Set to 2.
+  - `dtype` (str): Data type, e.g., 'uint8'.
+  - `array_order` (str): Memory layout, e.g., 'ZYX'.
+  - `coordinate_order` (str): Spatial axis order, e.g., 'XYZ'.
+  - `input_file` (str): Path to original input.
+  - `input_sha256` (str): SHA-256 hash of input.
+  - `dimensions_xyz` (list[int]): Original volume dimensions.
+  - `original_bytes` (int): Size of original volume in bytes.
+  - `parameters` (dict): The parameters used for processing.
+  - `foreground_metrics` (dict): Metrics about foreground detection (e.g., `original_nonzero`, `retained_nonzero`).
+  - `components` (list[dict]): One entry per partitioned component. Each entry contains:
+    - `file` (str): Filename of the component raw file.
+    - `dimensions_xyz` (list[int]): Dimensions of the cropped component.
+    - `origin_xyz` (list[int]): Origin of the crop box in original coordinates.
+    - `spacing_xyz` (list[float]): Voxel spacing.
+    - `extent_xyz` (list[int]): Size of the crop box.
+    - `bytes` (int): Size of the raw file.
+    - `sha256` (str): SHA-256 hash of the raw file.
+  - `output_bytes` (int): Total size of all component raw files.
+  - `processing_seconds` (float): Time taken to process.
+  - `reconstruction` (str): Note on how to reconstruct the original or interpret the data.
+
+**Parameters:**
+- `mode` (str): Processing mode. Choices: 'original', 'crop', 'partition'. Default: 'partition' [S1, unofficial].
+- `components` (int): Number of partitions. Range: 1–15. Default: 8 [S1, unofficial].
+- `spatial_weight` (float): Weight for k-means partitioning. Range: [0,1]. Default: 0.5 [S1, unofficial].
+- `downsample` (int): Downsampling factor applied to all axes. Range: >= 1. Default: 1 [S1, unofficial].
+- `threshold` (float or None): Foreground cutoff value. Range: [0,255]. If None, uses automatic background thresholding [S1, unofficial].
+- `cleanup` (str): Foreground cleanup strategy. Choices: 'none', 'connected', 'opening', 'legacy'. Default: 'none' [S1, unofficial].
+- `min_region_voxels` (int): Minimum voxel count for valid regions. Default: 512 [S1, unofficial].
+- `strategy` (str): Partition strategy. Choices: 'spatial', 'kmeans'. Default: 'spatial' [S1, unofficial].
+- `seed` (int): Random seed for k-means. Default: 42 [S1, unofficial].
+
+**Steps:**
+1. **Validate Inputs:** Ensure `mode` is one of 'original', 'crop', 'partition'. Ensure `components` is between 1 and 15. Ensure `spatial_weight` is in [0,1]. Ensure `downsample` is an integer >= 1. If `threshold` is provided, ensure it is in [0,255] [S1, unofficial].
+2. **Read Volume and Compute Cutoff:** Read the input volume. Determine the cutoff value:
+   - If `mode` is 'original', cutoff = 0.0.
+   - Otherwise, if `threshold` is None, compute `cutoff = background_threshold(original, seed)`.
+   - Else, `cutoff = float(threshold)` [S1, unofficial].
+3. **Compute Foreground Mask:** Call `select_foreground(cutoff, cleanup, min_region_voxels)` to generate a boolean mask and metrics. Create a `retained` array where `retained = np.where(mask, original, 0).astype(np.uint8)` [S1, unofficial].
+4. **Partition (if mode is 'partition'):**
+   - If `strategy` is 'spatial', call `spatial_partition(retained, components)` to get label IDs.
+   - If `strategy` is 'kmeans', call `kmeans_partition(retained, components, seed, spatial_weight)` to get label IDs.
+   - If `mode` is 'crop' or 'original', set `labels = (retained > 0).astype(np.uint8)` (single foreground label) [S1, unofficial].
+5. **Process Components:** Iterate over unique label IDs > 0. For each ID:
+   - Compute the bounding box `(lo, hi)` from the coordinates of voxels with this label.
+   - Extract the subvolume defined by `(lo, hi)`.
+   - Apply the mask for this label to the subvolume.
+   - Downsample the data by the `downsample` factor along all axes: `data = data[::downsample, ::downsample, ::downsample].copy()` [S1, unofficial].
+   - Write `data` to `component_{id}.raw`.
+   - Record dimensions, origin, spacing, extent, bytes, and SHA-256 hash of the file [S1, unofficial].
+6. **Generate Metadata:** Create `metadata.json` with schema version 2, dtype, array/coordinate order, input metadata, parameters, foreground metrics, component records, and a reconstruction note [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import hashlib
+import json
+import os
+from pathlib import Path
+
+def volume_partitioning_pipeline(input_path, output_dir, params):
+    # 1. Validate Inputs
+    mode = params.get('mode', 'partition')
+    components = params.get('components', 8)
+    spatial_weight = params.get('spatial_weight', 0.5)
+    downsample = params.get('downsample', 1)
+    threshold = params.get('threshold', None)
+    cleanup = params.get('cleanup', 'none')
+    min_region_voxels = params.get('min_region_voxels', 512)
+    strategy = params.get('strategy', 'spatial')
+    seed = params.get('seed', 42)
+
+    if mode not in ('original', 'crop', 'partition'):
+        raise ValueError(f"Invalid mode: {mode}")
+    if not (1 <= components <= 15):
+        raise ValueError(f"Components must be 1-15, got {components}")
+    if not (0 <= spatial_weight <= 1):
+        raise ValueError(f"spatial_weight must be in [0,1], got {spatial_weight}")
+    if not isinstance(downsample, int) or downsample < 1:
+        raise ValueError(f"downsample must be integer >= 1, got {downsample}")
+    if threshold is not None and not (0 <= threshold <= 255):
+        raise ValueError(f"threshold must be in [0,255], got {threshold}")
+
+    # Check output directory is empty
+    out = Path(output_dir)
+    if out.exists() and any(out.iterdir()):
+        raise ValueError("Output directory must be empty")
+    out.mkdir(parents=True, exist_ok=True)
+
+    # 2. Read Volume and Compute Cutoff
+    original = np.load(input_path) # Assume numpy array for simplicity; actual impl may use Zarr
+    if mode == 'original':
+        cutoff = 0.0
+    else:
+        if threshold is None:
+            cutoff = background_threshold(original, seed) # [G] Placeholder for specific background thresholding logic
+        else:
+            cutoff = float(threshold)
+
+    # 3. Compute Foreground Mask
+    mask, metrics = select_foreground(cutoff, cleanup, min_region_voxels) # [G] Placeholder for mask generation
+    retained = np.where(mask, original, 0).astype(np.uint8)
+
+    # 4. Partition
+    if mode == 'partition':
+        if strategy == 'spatial':
+            labels = spatial_partition(retained, components) # [G] Placeholder for spatial partitioning
+        elif strategy == 'kmeans':
+            labels = kmeans_partition(retained, components, seed, spatial_weight) # [G] Placeholder for k-means
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+    else:
+        labels = (retained > 0).astype(np.uint8)
+
+    unique_labels = np.unique(labels)
+    unique_labels = unique_labels[unique_labels > 0] # Exclude background
+
+    component_records = []
+    total_output_bytes = 0
+
+    # 5. Process Components
+    for label_id in unique_labels:
+        # Compute bounding box
+        coords = np.argwhere(labels == label_id)
+        if len(coords) == 0:
+            continue
+        lo = coords.min(axis=0)
+        hi = coords.max(axis=0)
+
+        # Extract subvolume
+        # Note: hi is inclusive, so slice end is hi + 1
+        subvol = retained[lo[0]:hi[0]+1, lo[1]:hi[1]+1, lo[2]:hi[2]+1]
+        submask = mask[lo[0]:hi[0]+1, lo[1]:hi[1]+1, lo[2]:hi[2]+1]
+        subvol = np.where(submask, subvol, 0).astype(np.uint8)
+
+        # Downsample
+        if downsample > 1:
+            subvol = subvol[::downsample, ::downsample, ::downsample].copy()
+
+        # Write raw file
+        filename = f"component_{label_id}.raw"
+        filepath = out / filename
+        subvol.tofile(filepath)
+        file_bytes = subvol.nbytes
+        total_output_bytes += file_bytes
+
+        # Compute hash
+        sha256_hash = hashlib.sha256(subvol.tobytes()).hexdigest()
+
+        # Record dimensions and origin
+        # Origin is in original coordinates
+        origin_xyz = lo.tolist()
+        # Extent is the size of the crop box before downsampling
+        extent_xyz = (hi - lo + 1).tolist()
+        # Dimensions are the size after downsampling
+        dimensions_xyz = subvol.shape
+
+        component_records.append({
+            "file": filename,
+            "dimensions_xyz": list(dimensions_xyz),
+            "origin_xyz": origin_xyz,
+            "spacing_xyz": [1.0, 1.0, 1.0], # [G] Placeholder for actual spacing from input metadata
+            "extent_xyz": extent_xyz,
+            "bytes": file_bytes,
+            "sha256": sha256_hash
+        })
+
+    # 6. Generate Metadata
+    metadata = {
+        "schema_version": 2,
+        "dtype": "uint8",
+        "array_order": "ZYX", # [G] Placeholder for actual array order
+        "coordinate_order": "XYZ",
+        "input_file": str(input_path),
+        "input_sha256": hashlib.sha256(original.tobytes()).hexdigest(), # [G] Placeholder for actual input hash
+        "dimensions_xyz": list(original.shape),
+        "original_bytes": original.nbytes,
+        "parameters": params,
+        "foreground_metrics": metrics,
+        "original_nonzero": int(np.count_nonzero(original)),
+        "retained_nonzero": int(np.count_nonzero(retained)),
+        "components": component_records,
+        "output_bytes": total_output_bytes,
+        "processing_seconds": 0.0, # [G] Placeholder for actual time
+        "reconstruction": "Components can be reconstructed by placing each component's data at its origin_xyz with its extent_xyz, then upsampling if needed."
+    }
+
+    with open(out / "metadata.json", "w") as f:
+        json.dump(metadata, f, separators=(',', ':'))
+
+def background_threshold(volume, seed):
+    # [G] Placeholder implementation: Otsu's method or similar
+    pass
+
+def select_foreground(cutoff, cleanup, min_region_voxels):
+    # [G] Placeholder implementation: threshold, cleanup, and filter small regions
+    pass
+
+def spatial_partition(volume, components):
+    # [G] Placeholder implementation: Greedy axis-aligned spatial partitioning
+    pass
+
+def kmeans_partition(volume, components, seed, spatial_weight):
+    # [G] Placeholder implementation: K-means clustering on spatial and intensity features
+    pass
+```
+
+## Subtopics
+
+### [Bounded-Memory Large Volume Export](11587-bounded-memory-large-volume-export.md)
+Processes large 3D volumes with bounded memory by streaming chunks, computing intensity baselines, cropping to disjoint aligned bricks, and writing compressed outputs. It differs by explicitly enforcing a memory bound through chunked streaming and packing only foreground voxels into a compact, offset-indexed raw file, discarding background values entirely.
+
+### [K-Means Spatial-Intensity Partitioning](11588-k-means-spatial-intensity-partitioning.md)
+Partitions a 3D volume into components by clustering foreground voxels based on a weighted combination of spatial coordinates and intensity values. It sets itself apart by incorporating intensity into the clustering metric, producing multiple semantic partitions rather than a single binary mask.
+
+### [Greedy Axis-Aligned Spatial Partitioning](11589-greedy-axis-aligned-spatial-partitioning.md)
+Creates a disjoint spatial partition of a 3D volume into axis-aligned bounding boxes using a greedy heuristic that minimizes bounding box volume. It differs by using a direct greedy box-splitting approach rather than slab-projection slices for out-of-core processing.
+
+### [Automatic Crop Box Generation via Otsu Thresholding](17117-automatic-crop-box-generation-via-otsu-thresholding.md)
+Automatically computes a tight bounding box for a 3D volume by thresholding a downsampled level using Otsu's method, identifying connected components, and projecting the result to the target resolution. It sets itself apart by focusing on global intensity separation rather than spatial clustering.
+
+### [Temporal Sequence Segmentation](17546-temporal-sequence-segmentation.md)
+Splits a volumetric time sequence into multiple short segments of varying length to facilitate robust clustering and reduce computational load. It differs by grouping neighboring time steps based on high similarity and temporal continuity without seeking global distinct boundaries.
+
+### Data Partitioning
+Divides display data into N equal sizes according to the sub-display system size. It is used in swept-volume volumetric displays to reduce data needed for rendering [S2].
+
+### Feature Plane Splitting
+Handles segmented datasets by replacing small blocks of N voxels with a single voxel split by a feature plane into two regions of constant values. It provides minimal geometric information about underlying volume regions that can be effectively exploited for volume rendering [S3].
+
+### VolumeRange Partitioning
+Partitions the interval [t0, t1] of a VolumeRange into n_samples sub-intervals using provided midpoints, returning lower bounds, upper bounds, and deltas for each sample. It is used in camera sampling for novel view synthesis [S4, unofficial].
+
+### Data Partitioning
+Divides display data into N equal sizes according to the sub-display system size [S2]. It is used in swept-volume volumetric displays to reduce the data needed for rendering by assigning slices' data from (Nslice/2+1) to Nslice with from 0 to (Nslice/2-1) [S2]. Parameter: N: Number of sub-display modules [S2].
+
+### Feature Plane Splitting
+Handles segmented datasets by replacing small blocks of N voxels with a single voxel split by a feature plane into two regions of constant values [S3]. Steps: Identify small blocks of N voxels in segmented datasets. Replace each block with a single voxel. Define a feature plane that splits the voxel into two regions. Assign constant values to each region [S3]. Comparison: Has little overhead over storing precomputed gradients. Feature planes provide minimal geometric information about underlying volume regions that can be effectively exploited for volume rendering [S3].
+
+### VolumeRange Partitioning
+Partitions the interval [t0, t1] of a VolumeRange into n_samples sub-intervals using provided midpoints ts, returning lower bounds, upper bounds, and deltas for each sample [S4, unofficial]. Steps: Compute midpoints between consecutive samples: mids = (ts[..., 1:, :] + ts[..., :-1, :]) * 0.5. Construct lower bounds by concatenating t0 with mids: lower = torch.cat([self.t0[..., None, :], mids], dim=-2). Construct upper bounds by concatenating mids with t1: upper = torch.cat([mids, self.t1[..., None, :]], dim=-2). Compute deltas as the difference between upper and lower: delta = upper - lower [S4, unofficial]. Parameter: ts: Input tensor of shape [batch_size, *shape, n_samples, 1] containing sample positions [S4, unofficial]. Layout: Returns a tuple of three tensors (lower, upper, delta), each with shape [batch_size, *shape, n_samples, 1] [S4, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the partitioning strategy. Spatial partitioning is greedy and may be O(N) where N is the number of voxels. K-means is O(I * N * K) where I is iterations, N is voxels, K is components. Bounded-memory export is O(N) but with lower constant factors due to streaming.
+- **Memory Complexity:** Bounded-memory export uses O(1) additional memory relative to the full volume, processing chunks at a time [S1, unofficial]. Standard partitioning may require loading the full volume and label arrays into memory.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales well with volume size when using bounded-memory export. Standard partitioning may hit memory limits for very large volumes.
+- **Strengths:** Reduces data size significantly by cropping and downsampling. Prepares data for efficient rendering/compression. Bounded-memory export allows processing of volumes larger than RAM.
+- **Limitations:** Loss of information due to cropping and downsampling. Partitioning quality depends on parameters. K-means may be slow for large volumes.
+- **When to use:** When dealing with large, sparse volumes that need to be processed or rendered efficiently. When memory is constrained.
+- **When not to use:** When full resolution and full volume extent are required. When real-time processing of the entire volume is needed without preprocessing.
+
+## Background
+The Volume Partitioning Pipeline is a preprocessing method for volumetric data, often used in conjunction with volume rendering and compression pipelines. It builds on techniques for foreground detection, spatial partitioning, and data compression. The specific implementation described in [S1, unofficial] is part of the VolumeSegmenter project, which aims to provide tools for segmenting and processing volumetric data. The method is used to prepare data for downstream tasks such as rendering, compression, and analysis.
+
+## Sources
+[S1] Winson-L/VolumeSegmenter, https://github.com/Winson-L/VolumeSegmenter, fetched 2026-10-27 (unofficial)
+[S2] PDF An Improved Design of 3D Swept-Volume Volumetric Display, https://jcomputers.us/vol9/jcp0901-34.pdf, fetched 2026-10-28
+[S3] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S4] gsgen3d/gsgen, https://github.com/gsgen3d/gsgen, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,848 @@
+Spheres
+3.2 Spheres
+Spheres are a special case of a general type of surface called
+quadrics—surfaces described by quadratic polynomials in
+x
+,
+y
+,
+and
+z
+.
+They are the simplest type of curved surface that is useful to a ray tracer
+and are a good starting point for general ray intersection routines.
+pbrt supports six types of quadrics: spheres, cones, disks (a special case of a
+cone), cylinders, hyperboloids, and paraboloids.
+Many surfaces can be described in one of two main ways: in
+implicit form and in parametric form. An implicit function
+describes a 3D surface as
+f left-parenthesis x comma y comma z right-parenthesis equals 0 period
+The set of all points (
+x
+,
+y
+,
+z
+) that fulfill this condition defines the
+surface. For a unit sphere at the origin, the familiar implicit equation is
+x squared plus y squared plus z squared minus 1 equals 0
+. Only the set of points one unit from the origin
+satisfies this constraint, giving the unit sphere’s surface.
+Many surfaces can also be described parametrically using a function to map
+2D points to 3D points on the surface. For example, a sphere of radius
+r
+can be described as a function of 2D spherical coordinates
+left-parenthesis theta comma phi right-parenthesis
+, where
+theta
+ranges from
+0
+to
+pi
+and
+phi
+ranges from
+0
+to
+2 pi
+(Figure 3.4):
+StartLayout 1st Row 1st Column x 2nd Column equals r sine theta cosine phi 2nd Row 1st Column y 2nd Column equals r sine theta sine phi 3rd Row 1st Column z 2nd Column equals r cosine theta period EndLayout
+Figure 3.4: Basic Setting for the Sphere Shape. It has a radius of
+r
+and is centered at the object space origin.
+A partial sphere may be described by specifying a maximum
+phi
+value.
+We can transform this function
+f left-parenthesis theta comma phi right-parenthesis
+into a function
+f left-parenthesis u comma v right-parenthesis
+over
+left-bracket 0 comma 1 right-bracket squared
+and also generalize it slightly to allow partial
+spheres that only sweep out
+theta element-of left-bracket theta Subscript normal m normal i normal n Baseline comma theta Subscript normal m normal a normal x Baseline right-bracket
+and
+phi element-of left-bracket 0 comma phi Subscript normal m normal a normal x Baseline right-bracket
+with the substitution
+StartLayout 1st Row 1st Column phi 2nd Column equals u phi Subscript normal m normal a normal x Baseline 2nd Row 1st Column theta 2nd Column equals theta Subscript normal m normal i normal n Baseline plus v left-parenthesis theta Subscript normal m normal a normal x Baseline minus theta Subscript normal m normal i normal n Baseline right-parenthesis period EndLayout
+This form is particularly useful for texture mapping, where it can be directly
+used to map a texture defined over
+left-bracket 0 comma 1 right-bracket squared
+to the sphere.
+Figure 3.5 shows an image of two spheres; a grid image
+map has been used to show the
+left-parenthesis u comma v right-parenthesis
+parameterization.
+Figure 3.5: Two Spheres. On the left is a
+complete sphere, and on the right is a partial sphere (with
+z Subscript normal m normal a normal x Baseline less-than r
+and
+phi Subscript normal m normal a normal x Baseline less-than 2 pi
+). Note that the texture map used shows the
+left-parenthesis u comma v right-parenthesis
+parameterization of the shape; the singularity at one of the poles is
+visible in the complete sphere.
+As we describe the implementation of the sphere shape, we will make use
+of both the implicit and parametric descriptions of the shape, depending on
+which is a more natural way to approach the particular problem we’re
+facing.
+The Sphere class represents a sphere that is centered at the origin
+in object space. Its implementation is in the files shapes/sphere.h
+and shapes/sphere.cpp.
+<<Sphere Declarations>>=
+class Sphere : public Shape {
+public:
+<<Sphere Public Methods>>
+Sphere(const Transform *ObjectToWorld, const Transform *WorldToObject,
+bool reverseOrientation, Float radius, Float zMin, Float zMax,
+Float phiMax)
+: Shape(ObjectToWorld, WorldToObject, reverseOrientation),
+radius(radius), zMin(Clamp(std::min(zMin, zMax), -radius, radius)),
+zMax(Clamp(std::max(zMin, zMax), -radius, radius)),
+thetaMin(std::acos(Clamp(zMin / radius, -1, 1))),
+thetaMax(std::acos(Clamp(zMax / radius, -1, 1))),
+phiMax(Radians(Clamp(phiMax, 0, 360))) { }
+Bounds3f ObjectBound() const;
+bool Intersect(const Ray &ray, Float *tHit, SurfaceInteraction *isect,
+bool testAlphaTexture) const;
+bool IntersectP(const Ray &ray, bool testAlphaTexture) const;
+Float Area() const;
+Interaction Sample(const Point2f &u) const;
+Interaction Sample(const Interaction &ref, const Point2f &u) const;
+Float Pdf(const Interaction &ref, const Vector3f &wi) const;
+private:
+<<Sphere Private Data>>
+const Float radius;
+const Float zMin, zMax;
+const Float thetaMin, thetaMax, phiMax;
+};
+To place a sphere elsewhere in the scene, the user must
+apply an appropriate transformation when specifying the sphere in the input
+file. It takes both the object-to-world and world-to-object
+transformations as parameters to the constructor, passing them along to the
+parent Shape constructor.
+The radius of the sphere can have an arbitrary positive value, and the
+sphere’s extent can be truncated in two different ways. First, minimum and
+maximum
+z
+values may be set; the parts of the sphere below and above
+these planes, respectively, are cut off. Second, considering the
+parameterization of the sphere in spherical coordinates, a maximum
+phi
+value can be set. The sphere sweeps out
+phi
+values from 0 to the given
+phi Subscript normal m normal a normal x
+such that the section of the sphere with spherical
+phi
+values
+above
+phi Subscript normal m normal a normal x
+is also removed.
+<<Sphere Public Methods>>=
+Sphere(const Transform *ObjectToWorld, const Transform *WorldToObject,
+bool reverseOrientation, Float radius, Float zMin, Float zMax,
+Float phiMax)
+: Shape(ObjectToWorld, WorldToObject, reverseOrientation),
+radius(radius), zMin(Clamp(std::min(zMin, zMax), -radius, radius)),
+zMax(Clamp(std::max(zMin, zMax), -radius, radius)),
+thetaMin(std::acos(Clamp(zMin / radius, -1, 1))),
+thetaMax(std::acos(Clamp(zMax / radius, -1, 1))),
+phiMax(Radians(Clamp(phiMax, 0, 360))) { }
+<<Sphere Private Data>>=
+const Float radius;
+const Float zMin, zMax;
+const Float thetaMin, thetaMax, phiMax;
+3.2.1 Bounding
+Computing an object space bounding box for a sphere is
+straightforward. The implementation here uses the values of
+z Subscript normal m normal i normal n
+and
+z Subscript normal m normal a normal x
+provided by the user to tighten up the bound when less than an
+entire sphere is being rendered. However, it doesn’t do the extra work to
+compute a tighter bounding box when
+phi Subscript normal m normal a normal x
+is less than
+3 pi slash 2
+. This improvement is left as an exercise.
+<<Sphere Method Definitions>>=
+Bounds3f Sphere::ObjectBound() const {
+return Bounds3f(Point3f(-radius, -radius, zMin),
+Point3f( radius, radius, zMax));
+}
+3.2.2 Intersection Tests
+The task of deriving a ray–sphere intersection test is
+simplified by the fact that the sphere is centered at the origin. However,
+if the sphere has been transformed to another position in world space, then
+it is necessary to transform rays to object space before intersecting them
+with the sphere, using the world-to-object transformation. Given a ray in
+object space, the intersection computation can be performed in object space
+instead.
+†
+The following fragment shows the entire intersection method:
+<<Sphere Method Definitions>>+=
+bool Sphere::Intersect(const Ray &r, Float *tHit,
+SurfaceInteraction *isect, bool testAlphaTexture) const {
+Float phi;
+Point3f pHit;
+<<Transform Ray to object space>>
+Vector3f oErr, dErr;
+Ray ray = (*WorldToObject)(r, &oErr, &dErr);
+<<Compute quadratic sphere coefficients>>
+<<Initialize EFloat ray coordinate values>>
+EFloat ox(ray.o.x, oErr.x), oy(ray.o.y, oErr.y), oz(ray.o.z, oErr.z);
+EFloat dx(ray.d.x, dErr.x), dy(ray.d.y, dErr.y), dz(ray.d.z, dErr.z);
+EFloat a = dx * dx + dy * dy + dz * dz;
+EFloat b = 2 * (dx * ox + dy * oy + dz * oz);
+EFloat c = ox * ox + oy * oy + oz * oz - EFloat(radius) * EFloat(radius);
+<<Solve quadratic equation for t values>>
+EFloat t0, t1;
+if (!Quadratic(a, b, c, &t0, &t1))
+return false;
+<<Check quadric shape t0 and t1 for nearest intersection>>
+if (t0.UpperBound() > ray.tMax || t1.LowerBound() <= 0)
+return false;
+EFloat tShapeHit = t0;
+if (tShapeHit.LowerBound() <= 0) {
+tShapeHit = t1;
+if (tShapeHit.UpperBound() > ray.tMax)
+return false;
+}
+<<Compute sphere hit position and
+phi
+>>
+pHit = ray((Float)tShapeHit);
+<<Refine sphere intersection point>>
+pHit *= radius / Distance(pHit, Point3f(0, 0, 0));
+if (pHit.x == 0 && pHit.y == 0) pHit.x = 1e-5f * radius;
+phi = std::atan2(pHit.y, pHit.x);
+if (phi < 0) phi += 2 * Pi;
+<<Test sphere intersection against clipping parameters>>
+if ((zMin > -radius && pHit.z < zMin) ||
+(zMax < radius && pHit.z > zMax) || phi > phiMax) {
+if (tShapeHit == t1) return false;
+if (t1.UpperBound() > ray.tMax) return false;
+tShapeHit = t1;
+<<Compute sphere hit position and
+phi
+>>
+pHit = ray((Float)tShapeHit);
+<<Refine sphere intersection point>>
+pHit *= radius / Distance(pHit, Point3f(0, 0, 0));
+if (pHit.x == 0 && pHit.y == 0) pHit.x = 1e-5f * radius;
+phi = std::atan2(pHit.y, pHit.x);
+if (phi < 0) phi += 2 * Pi;
+if ((zMin > -radius && pHit.z < zMin) ||
+(zMax < radius && pHit.z > zMax) || phi > phiMax)
+return false;
+}
+<<Find parametric representation of sphere hit>>
+Float u = phi / phiMax;
+Float theta = std::acos(Clamp(pHit.z / radius, -1, 1));
+Float v = (theta - thetaMin) / (thetaMax - thetaMin);
+<<Compute sphere
+partial-differential normal p slash partial-differential u
+and
+partial-differential normal p slash partial-differential v
+>>
+Float zRadius = std::sqrt(pHit.x * pHit.x + pHit.y * pHit.y);
+Float invZRadius = 1 / zRadius;
+Float cosPhi = pHit.x * invZRadius;
+Float sinPhi = pHit.y * invZRadius;
+Vector3f dpdu(-phiMax * pHit.y, phiMax * pHit.x, 0);
+Vector3f dpdv = (thetaMax - thetaMin) *
+Vector3f(pHit.z * cosPhi, pHit.z * sinPhi,
+-radius * std::sin(theta));
+<<Compute sphere
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+>>
+Vector3f d2Pduu = -phiMax * phiMax * Vector3f(pHit.x, pHit.y, 0);
+Vector3f d2Pduv = (thetaMax - thetaMin) * pHit.z * phiMax *
+Vector3f(-sinPhi, cosPhi, 0.);
+Vector3f d2Pdvv = -(thetaMax - thetaMin) * (thetaMax - thetaMin) *
+Vector3f(pHit.x, pHit.y, pHit.z);
+<<Compute coefficients for fundamental forms>>
+Float E = Dot(dpdu, dpdu);
+Float F = Dot(dpdu, dpdv);
+Float G = Dot(dpdv, dpdv);
+Vector3f N = Normalize(Cross(dpdu, dpdv));
+Float e = Dot(N, d2Pduu);
+Float f = Dot(N, d2Pduv);
+Float g = Dot(N, d2Pdvv);
+<<Compute
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+from fundamental form coefficients>>
+Float invEGF2 = 1 / (E * G - F * F);
+Normal3f dndu = Normal3f((f * F - e * G) * invEGF2 * dpdu +
+(e * F - f * E) * invEGF2 * dpdv);
+Normal3f dndv = Normal3f((g * F - f * G) * invEGF2 * dpdu +
+(f * F - g * E) * invEGF2 * dpdv);
+<<Compute error bounds for sphere intersection>>
+Vector3f pError = gamma(5) * Abs((Vector3f)pHit);
+<<Initialize SurfaceInteraction from parametric information>>
+*isect = (*ObjectToWorld)(
+SurfaceInteraction(pHit, pError, Point2f(u, v), -ray.d, dpdu, dpdv,
+dndu, dndv, ray.time, this));
+<<Update tHit for quadric intersection>>
+*tHit = (Float)tShapeHit;
+return true;
+}
+First, the given world space ray is transformed to the sphere’s object
+space. The remainder of the intersection test will take place in that
+coordinate system. The oErr and dErr variables respectively
+bound the floating-point round-off error in the transformed ray’s origin
+and direction that was introduced by applying the transformation. (See
+Section 3.9 for more information about floating-point
+arithmetic and its implications for accurate ray intersection
+calculations.)
+<<Transform Ray to object space>>=
+Vector3f oErr, dErr;
+Ray ray = (*WorldToObject)(r, &oErr, &dErr);
+If a sphere is centered at the origin with radius
+r
+, its implicit
+representation is
+x squared plus y squared plus z squared minus r squared equals 0 period
+By substituting the parametric representation of the ray
+from Equation (2.3) into the implicit sphere equation, we have
+left-parenthesis normal o Subscript x Baseline plus t bold d Subscript x Baseline right-parenthesis squared plus left-parenthesis normal o Subscript y Baseline plus t bold d Subscript y Baseline right-parenthesis squared plus left-parenthesis normal o Subscript z Baseline plus t bold d Subscript z Baseline right-parenthesis squared equals r squared period
+Note that all elements of this equation besides
+t
+are known values. The
+t
+values where the equation holds give the parametric positions along the
+ray where the implicit sphere equation holds and thus the points along the
+ray where it intersects the sphere.
+We can expand this equation and gather the coefficients for a general
+quadratic equation in
+t
+,
+a t squared plus b t plus c equals 0 comma
+where
+†
+StartLayout 1st Row 1st Column a 2nd Column equals bold d Subscript x Superscript 2 Baseline plus bold d Subscript y Superscript 2 Baseline plus bold d Subscript z Superscript 2 Baseline 2nd Row 1st Column b 2nd Column equals 2 left-parenthesis bold d Subscript x Baseline normal o Subscript x Baseline plus bold d Subscript y Baseline normal o Subscript y Baseline plus bold d Subscript z Baseline normal o Subscript z Baseline right-parenthesis 3rd Row 1st Column c 2nd Column equals normal o Subscript x Superscript 2 Baseline plus normal o Subscript y Superscript 2 Baseline plus normal o Subscript z Superscript 2 Baseline minus r squared period EndLayout
+This result directly translates to this fragment of source code. Note that
+in this code, instances of the EFloat class, not Floats, are
+used to represent floating-point values.
+EFloat tracks accumulated
+floating-point rounding error; its use is discussed in
+Section 3.9. For now, it can just be read as being
+equivalent to Float.
+<<Compute quadratic sphere coefficients>>=
+<<Initialize EFloat ray coordinate values>>
+EFloat ox(ray.o.x, oErr.x), oy(ray.o.y, oErr.y), oz(ray.o.z, oErr.z);
+EFloat dx(ray.d.x, dErr.x), dy(ray.d.y, dErr.y), dz(ray.d.z, dErr.z);
+EFloat a = dx * dx + dy * dy + dz * dz;
+EFloat b = 2 * (dx * ox + dy * oy + dz * oz);
+EFloat c = ox * ox + oy * oy + oz * oz - EFloat(radius) * EFloat(radius);
+The ray origin and direction values used in the intersection test are
+initialized with the floating-point error bounds from transforming the ray
+to object space.
+<<Initialize EFloat ray coordinate values>>=
+EFloat ox(ray.o.x, oErr.x), oy(ray.o.y, oErr.y), oz(ray.o.z, oErr.z);
+EFloat dx(ray.d.x, dErr.x), dy(ray.d.y, dErr.y), dz(ray.d.z, dErr.z);
+There are two possible solutions to the quadratic equation, giving zero,
+one, or two nonimaginary
+t
+values where the ray intersects the sphere.
+<<Solve quadratic equation for t values>>=
+EFloat t0, t1;
+if (!Quadratic(a, b, c, &t0, &t1))
+return false;
+<<Check quadric shape t0 and t1 for nearest intersection>>
+if (t0.UpperBound() > ray.tMax || t1.LowerBound() <= 0)
+return false;
+EFloat tShapeHit = t0;
+if (tShapeHit.LowerBound() <= 0) {
+tShapeHit = t1;
+if (tShapeHit.UpperBound() > ray.tMax)
+return false;
+}
+The Quadratic() utility function solves a quadratic equation,
+returning false if there are no real solutions and returning
+true and setting t0 and t1 appropriately if there are
+solutions. It is defined later in
+Section 3.9.4, where we discuss how to implement
+it robustly using floating-point arithmetic.
+The computed parametric distances t0 and t1 track uncertainty due
+to errors in the original ray parameters and errors accrued in Quadratic();
+the lower and upper range of the uncertainty interval can be queried using the
+methods EFloat::LowerBound() and EFloat::UpperBound().
+The fragment <<Check quadric shape t0 and t1 for
+nearest intersection>> takes the two intersection
+t
+values and determines
+which, if any, is the closest valid intersection. For an intersection to
+be valid, its
+t
+value must be greater than zero and less than
+ray.tMax. The following code uses the error intervals provided by
+the EFloat class and only accepts intersections that are
+unequivocally in the range
+left-parenthesis 0 comma monospace t monospace upper M monospace a monospace x monospace right-parenthesis
+.
+Since
+t 0
+is guaranteed to be less than or equal to
+t 1
+(and
+0
+is
+less than tMax), then if
+t 0
+is greater than tMax or
+t 1
+is less than
+0
+, it is certain that both intersections are out of the
+range of interest. Otherwise,
+t 0
+is the tentative hit
+t
+value. It
+may be less than
+0
+, however, in which case we ignore it and try
+t 1
+.
+If that is also out of range, we have no valid intersection. If there is
+an intersection, then tShapeHit is initialized to hold the
+parametric
+t
+value for the intersection.
+<<Check quadric shape t0 and t1 for nearest intersection>>=
+if (t0.UpperBound() > ray.tMax || t1.LowerBound() <= 0)
+return false;
+EFloat tShapeHit = t0;
+if (tShapeHit.LowerBound() <= 0) {
+tShapeHit = t1;
+if (tShapeHit.UpperBound() > ray.tMax)
+return false;
+}
+Given the parametric distance along the ray to the intersection with a full
+sphere, the intersection point pHit can be computed as that offset
+along the ray.
+It is next necessary to handle partial spheres with clipped
+z
+or
+phi
+ranges—intersections that are in clipped areas must be
+ignored. The implementation starts by computing the
+phi
+value for the
+hit point. Using the parametric representation of the sphere,
+StartFraction y Over x EndFraction equals StartFraction r sine theta sine phi Over r sine theta cosine phi EndFraction equals tangent phi comma
+so
+phi equals arc tangent y slash x
+. It is necessary to remap the result of the standard library’s
+std::atan() function to a value between
+0
+and
+2 pi
+, to match the
+sphere’s original definition.
+<<Compute sphere hit position and
+phi
+>>=
+pHit = ray((Float)tShapeHit);
+<<Refine sphere intersection point>>
+pHit *= radius / Distance(pHit, Point3f(0, 0, 0));
+if (pHit.x == 0 && pHit.y == 0) pHit.x = 1e-5f * radius;
+phi = std::atan2(pHit.y, pHit.x);
+if (phi < 0) phi += 2 * Pi;
+Due to floating-point precision limitations, this computed intersection
+point pHit may lie a bit to one side of the actual sphere
+surface; the <<Refine sphere intersection point>> fragment, which is
+defined in Section 3.9.4, improves the precision
+of this value.
+The hit point can now be tested against the specified minima and maxima for
+z
+and
+phi
+. One subtlety is that it’s important to skip the
+z
+tests
+if the
+z
+range includes the entire sphere; the computed pHit.z
+value may be slightly out of the
+z
+range due to floating-point round-off,
+so we should only perform this test when the user expects the sphere to be
+partially incomplete. If the
+t 0
+intersection wasn’t actually valid, the
+routine tries again with
+t 1
+.
+<<Test sphere intersection against clipping parameters>>=
+if ((zMin > -radius && pHit.z < zMin) ||
+(zMax < radius && pHit.z > zMax) || phi > phiMax) {
+if (tShapeHit == t1) return false;
+if (t1.UpperBound() > ray.tMax) return false;
+tShapeHit = t1;
+<<Compute sphere hit position and
+phi
+>>
+pHit = ray((Float)tShapeHit);
+<<Refine sphere intersection point>>
+pHit *= radius / Distance(pHit, Point3f(0, 0, 0));
+if (pHit.x == 0 && pHit.y == 0) pHit.x = 1e-5f * radius;
+phi = std::atan2(pHit.y, pHit.x);
+if (phi < 0) phi += 2 * Pi;
+if ((zMin > -radius && pHit.z < zMin) ||
+(zMax < radius && pHit.z > zMax) || phi > phiMax)
+return false;
+}
+At this point in the routine, it is certain that the ray hits the sphere.
+The method next computes
+u
+and
+v
+values by scaling the previously
+computed
+phi
+value for the hit to lie between 0 and 1 and by computing a
+theta
+value between 0 and 1 for the hit point, based on the range of
+theta
+values for the given sphere. Then it finds the parametric
+partial derivatives of position
+partial-differential normal p slash partial-differential u
+and
+partial-differential normal p slash partial-differential v
+and surface normal
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+.
+<<Find parametric representation of sphere hit>>=
+Float u = phi / phiMax;
+Float theta = std::acos(Clamp(pHit.z / radius, -1, 1));
+Float v = (theta - thetaMin) / (thetaMax - thetaMin);
+<<Compute sphere
+partial-differential normal p slash partial-differential u
+and
+partial-differential normal p slash partial-differential v
+>>
+Float zRadius = std::sqrt(pHit.x * pHit.x + pHit.y * pHit.y);
+Float invZRadius = 1 / zRadius;
+Float cosPhi = pHit.x * invZRadius;
+Float sinPhi = pHit.y * invZRadius;
+Vector3f dpdu(-phiMax * pHit.y, phiMax * pHit.x, 0);
+Vector3f dpdv = (thetaMax - thetaMin) *
+Vector3f(pHit.z * cosPhi, pHit.z * sinPhi,
+-radius * std::sin(theta));
+<<Compute sphere
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+>>
+Vector3f d2Pduu = -phiMax * phiMax * Vector3f(pHit.x, pHit.y, 0);
+Vector3f d2Pduv = (thetaMax - thetaMin) * pHit.z * phiMax *
+Vector3f(-sinPhi, cosPhi, 0.);
+Vector3f d2Pdvv = -(thetaMax - thetaMin) * (thetaMax - thetaMin) *
+Vector3f(pHit.x, pHit.y, pHit.z);
+<<Compute coefficients for fundamental forms>>
+Float E = Dot(dpdu, dpdu);
+Float F = Dot(dpdu, dpdv);
+Float G = Dot(dpdv, dpdv);
+Vector3f N = Normalize(Cross(dpdu, dpdv));
+Float e = Dot(N, d2Pduu);
+Float f = Dot(N, d2Pduv);
+Float g = Dot(N, d2Pdvv);
+<<Compute
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+from fundamental form coefficients>>
+Float invEGF2 = 1 / (E * G - F * F);
+Normal3f dndu = Normal3f((f * F - e * G) * invEGF2 * dpdu +
+(e * F - f * E) * invEGF2 * dpdv);
+Normal3f dndv = Normal3f((g * F - f * G) * invEGF2 * dpdu +
+(f * F - g * E) * invEGF2 * dpdv);
+Computing the partial derivatives of a point on the sphere is a short
+exercise in algebra. Here we will show how the
+x
+component of
+partial-differential normal p slash partial-differential u
+,
+partial-differential normal p Subscript x slash partial-differential u
+, is calculated; the other components are found similarly. Using the
+parametric definition of the sphere, we have
+StartLayout 1st Row 1st Column x 2nd Column equals r sine theta cosine phi 2nd Row 1st Column StartFraction partial-differential normal p Subscript Baseline Subscript x Baseline Over partial-differential u EndFraction 2nd Column equals StartFraction partial-differential Over partial-differential u EndFraction left-parenthesis r sine theta cosine phi right-parenthesis 3rd Row 1st Column Blank 2nd Column equals r sine theta StartFraction partial-differential Over partial-differential u EndFraction left-parenthesis cosine phi right-parenthesis 4th Row 1st Column Blank 2nd Column equals r sine theta left-parenthesis minus phi Subscript normal m normal a normal x Baseline sine phi right-parenthesis period EndLayout
+Using a substitution based on the parametric definition of the sphere’s
+y
+coordinate, this simplifies to
+StartFraction partial-differential normal p Subscript Baseline Subscript x Baseline Over partial-differential u EndFraction equals minus phi Subscript normal m normal a normal x Baseline y period
+Similarly,
+StartFraction partial-differential normal p Subscript Baseline Subscript y Baseline Over partial-differential u EndFraction equals phi Subscript normal m normal a normal x Baseline x comma
+and
+StartFraction partial-differential normal p Subscript Baseline Subscript z Baseline Over partial-differential u EndFraction equals 0 period
+A similar process gives
+partial-differential normal p slash partial-differential v
+. The complete result is
+StartLayout 1st Row 1st Column StartFraction partial-differential normal p Over partial-differential u EndFraction 2nd Column equals left-parenthesis minus phi Subscript normal m normal a normal x Baseline y comma phi Subscript normal m normal a normal x Baseline x comma 0 right-parenthesis 2nd Row 1st Column StartFraction partial-differential normal p Over partial-differential v EndFraction 2nd Column equals left-parenthesis theta Subscript normal m normal a normal x Baseline minus theta Subscript normal m normal i normal n Baseline right-parenthesis left-parenthesis z cosine phi comma z sine phi comma minus r sine theta right-parenthesis period EndLayout
+<<Compute sphere
+partial-differential normal p slash partial-differential u
+and
+partial-differential normal p slash partial-differential v
+>>=
+Float zRadius = std::sqrt(pHit.x * pHit.x + pHit.y * pHit.y);
+Float invZRadius = 1 / zRadius;
+Float cosPhi = pHit.x * invZRadius;
+Float sinPhi = pHit.y * invZRadius;
+Vector3f dpdu(-phiMax * pHit.y, phiMax * pHit.x, 0);
+Vector3f dpdv = (thetaMax - thetaMin) *
+Vector3f(pHit.z * cosPhi, pHit.z * sinPhi,
+-radius * std::sin(theta));
+3.2.3 Partial Derivatives of Normal Vectors
+It is also useful to determine how the normal changes as we move along the
+surface in the
+u
+and
+v
+directions. For example, the antialiasing
+techniques in Chapter 10 are dependent on this
+information to antialias textures on objects that are seen reflected in curved
+surfaces. The differential changes in normal
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+are given by the
+Weingarten equations from differential geometry:
+StartLayout 1st Row 1st Column StartFraction partial-differential bold n Over partial-differential u EndFraction 2nd Column equals StartFraction f upper F minus e upper G Over upper E upper G minus upper F squared EndFraction StartFraction partial-differential normal p Over partial-differential u EndFraction plus StartFraction e upper F minus f upper E Over upper E upper G minus upper F squared EndFraction StartFraction partial-differential normal p Over partial-differential v EndFraction 2nd Row 1st Column StartFraction partial-differential bold n Over partial-differential v EndFraction 2nd Column equals StartFraction g upper F minus f upper G Over upper E upper G minus upper F squared EndFraction StartFraction partial-differential normal p Over partial-differential u EndFraction plus StartFraction f upper F minus g upper E Over upper E upper G minus upper F squared EndFraction StartFraction partial-differential normal p Over partial-differential v EndFraction comma EndLayout
+where
+upper E
+,
+upper F
+, and
+upper G
+are coefficients of the first fundamental
+form and are given by
+StartLayout 1st Row 1st Column upper E 2nd Column equals StartAbsoluteValue StartFraction partial-differential normal p Over partial-differential u EndFraction EndAbsoluteValue squared 2nd Row 1st Column upper F 2nd Column equals left-parenthesis StartFraction partial-differential normal p Over partial-differential u EndFraction dot StartFraction partial-differential normal p Over partial-differential v EndFraction right-parenthesis 3rd Row 1st Column upper G 2nd Column equals StartAbsoluteValue StartFraction partial-differential normal p Over partial-differential v EndFraction EndAbsoluteValue squared period EndLayout
+These are easily computed with the
+partial-differential normal p slash partial-differential u
+and
+partial-differential normal p slash partial-differential v
+values found earlier.
+The
+e
+,
+f
+, and
+g
+are coefficients of the second
+fundamental form,
+StartLayout 1st Row 1st Column e 2nd Column equals left-parenthesis bold n Subscript Baseline dot StartFraction partial-differential squared normal p Over partial-differential u squared EndFraction right-parenthesis 2nd Row 1st Column f 2nd Column equals left-parenthesis bold n Subscript Baseline dot StartFraction partial-differential squared normal p Over partial-differential u partial-differential v EndFraction right-parenthesis 3rd Row 1st Column g 2nd Column equals left-parenthesis bold n Subscript Baseline dot StartFraction partial-differential squared normal p Over partial-differential v squared EndFraction right-parenthesis period EndLayout
+The two fundamental forms capture elementary metric properties of a surface,
+including notions of distance, angle, and curvature; see a differential
+geometry textbook such as Gray (1993) for details. To find
+e
+,
+f
+, and
+g
+,
+it is necessary to compute the second-order partial derivatives
+partial-differential squared normal p slash partial-differential u squared
+and so on.
+For spheres, a little more algebra gives the second derivatives:
+StartLayout 1st Row 1st Column StartFraction partial-differential squared normal p Over partial-differential u squared EndFraction 2nd Column equals minus phi Subscript normal m normal a normal x Superscript 2 Baseline left-parenthesis x comma y comma 0 right-parenthesis 2nd Row 1st Column StartFraction partial-differential squared normal p Over partial-differential u partial-differential v EndFraction 2nd Column equals left-parenthesis theta Subscript normal m normal a normal x Baseline minus theta Subscript normal m normal i normal n Baseline right-parenthesis z phi Subscript normal m normal a normal x Baseline left-parenthesis minus sine phi comma cosine phi comma 0 right-parenthesis 3rd Row 1st Column StartFraction partial-differential squared normal p Over partial-differential v squared EndFraction 2nd Column equals minus left-parenthesis theta Subscript normal m normal a normal x Baseline minus theta Subscript normal m normal i normal n Baseline right-parenthesis squared left-parenthesis x comma y comma z right-parenthesis period EndLayout
+<<Compute sphere
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+>>=
+Vector3f d2Pduu = -phiMax * phiMax * Vector3f(pHit.x, pHit.y, 0);
+Vector3f d2Pduv = (thetaMax - thetaMin) * pHit.z * phiMax *
+Vector3f(-sinPhi, cosPhi, 0.);
+Vector3f d2Pdvv = -(thetaMax - thetaMin) * (thetaMax - thetaMin) *
+Vector3f(pHit.x, pHit.y, pHit.z);
+<<Compute coefficients for fundamental forms>>
+Float E = Dot(dpdu, dpdu);
+Float F = Dot(dpdu, dpdv);
+Float G = Dot(dpdv, dpdv);
+Vector3f N = Normalize(Cross(dpdu, dpdv));
+Float e = Dot(N, d2Pduu);
+Float f = Dot(N, d2Pduv);
+Float g = Dot(N, d2Pdvv);
+<<Compute
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+from fundamental form coefficients>>
+Float invEGF2 = 1 / (E * G - F * F);
+Normal3f dndu = Normal3f((f * F - e * G) * invEGF2 * dpdu +
+(e * F - f * E) * invEGF2 * dpdv);
+Normal3f dndv = Normal3f((g * F - f * G) * invEGF2 * dpdu +
+(f * F - g * E) * invEGF2 * dpdv);
+<<Compute coefficients for fundamental forms>>=
+Float E = Dot(dpdu, dpdu);
+Float F = Dot(dpdu, dpdv);
+Float G = Dot(dpdv, dpdv);
+Vector3f N = Normalize(Cross(dpdu, dpdv));
+Float e = Dot(N, d2Pduu);
+Float f = Dot(N, d2Pduv);
+Float g = Dot(N, d2Pdvv);
+<<Compute
+partial-differential bold n Subscript slash partial-differential u
+and
+partial-differential bold n Subscript slash partial-differential v
+from fundamental form coefficients>>=
+Float invEGF2 = 1 / (E * G - F * F);
+Normal3f dndu = Normal3f((f * F - e * G) * invEGF2 * dpdu +
+(e * F - f * E) * invEGF2 * dpdv);
+Normal3f dndv = Normal3f((g * F - f * G) * invEGF2 * dpdu +
+(f * F - g * E) * invEGF2 * dpdv);
+3.2.4 SurfaceInteraction Initialization
+Having computed the surface parameterization and all the relevant
+partial derivatives, the SurfaceInteraction structure can be
+initialized with the geometric information for this intersection. The
+pError value passed to the SurfaceInteraction constructor
+bounds the rounding error in the computed pHit point. It is
+initialized in the fragment <<Compute error bounds for sphere
+intersection>>, which is defined later, in
+Section 3.9.4.
+<<Initialize SurfaceInteraction from parametric information>>=
+*isect = (*ObjectToWorld)(
+SurfaceInteraction(pHit, pError, Point2f(u, v), -ray.d, dpdu, dpdv,
+dndu, dndv, ray.time, this));
+Since there is an intersection, the tHit parameter to the
+Intersect() method is updated with the parametric hit distance along
+the ray, which was stored in tShapeHit. Updating *tHit
+allows subsequent intersection tests to terminate early if the potential
+hit would be farther away than the existing intersection.
+<<Update tHit for quadric intersection>>=
+*tHit = (Float)tShapeHit;
+A natural question to ask at this point is, “What effect does the
+world-to-object transformation have on the correct parametric distance to
+return?” Indeed, the intersection method has found a parametric distance
+to the intersection for the object space ray, which may have been
+translated, rotated, scaled, or worse when it was transformed from world
+space. However, it can be shown that the parametric distance to an
+intersection in object space is exactly the same as it would have been if
+the ray was left in world space and the intersection had been done there
+and, thus, tHit can be set directly. Note that if the
+object space ray’s direction had been normalized after the transformation,
+then this would no longer be the case and a correction factor related to
+the unnormalized ray’s length would be needed. This is another motivation
+for not normalizing the object space ray’s direction vector after
+transformation.
+The Sphere::IntersectP() routine is almost identical to
+Sphere::Intersect(), but it does not initialize the
+SurfaceInteraction structure. Because the Intersect() and
+IntersectP() methods are always so closely related, in the following
+we will not show implementations of IntersectP() for the remaining
+shapes.
+<<Sphere Method Definitions>>+=
+bool Sphere::IntersectP(const Ray &r, bool testAlphaTexture) const {
+Float phi;
+Point3f pHit;
+<<Transform Ray to object space>>
+Vector3f oErr, dErr;
+Ray ray = (*WorldToObject)(r, &oErr, &dErr);
+<<Compute quadratic sphere coefficients>>
+<<Initialize EFloat ray coordinate values>>
+EFloat ox(ray.o.x, oErr.x), oy(ray.o.y, oErr.y), oz(ray.o.z, oErr.z);
+EFloat dx(ray.d.x, dErr.x), dy(ray.d.y, dErr.y), dz(ray.d.z, dErr.z);
+EFloat a = dx * dx + dy * dy + dz * dz;
+EFloat b = 2 * (dx * ox + dy * oy + dz * oz);
+EFloat c = ox * ox + oy * oy + oz * oz - EFloat(radius) * EFloat(radius);
+<<Solve quadratic equation for t values>>
+EFloat t0, t1;
+if (!Quadratic(a, b, c, &t0, &t1))
+return false;
+<<Check quadric shape t0 and t1 for nearest intersection>>
+if (t0.UpperBound() > ray.tMax || t1.LowerBound() <= 0)
+return false;
+EFloat tShapeHit = t0;
+if (tShapeHit.LowerBound() <= 0) {
+tShapeHit = t1;
+if (tShapeHit.UpperBound() > ray.tMax)
+return false;
+}
+<<Compute sphere hit position and
+phi
+>>
+pHit = ray((Float)tShapeHit);
+<<Refine sphere intersection point>>
+pHit *= radius / Distance(pHit, Point3f(0, 0, 0));
+if (pHit.x == 0 && pHit.y == 0) pHit.x = 1e-5f * radius;
+phi = std::atan2(pHit.y, pHit.x);
+if (phi < 0) phi += 2 * Pi;
+<<Test sphere intersection against clipping parameters>>
+if ((zMin > -radius && pHit.z < zMin) ||
+(zMax < radius && pHit.z > zMax) || phi > phiMax) {
+if (tShapeHit == t1) return false;
+if (t1.UpperBound() > ray.tMax) return false;
+tShapeHit = t1;
+<<Compute sphere hit position and
+phi
+>>
+pHit = ray((Float)tShapeHit);
+<<Refine sphere intersection point>>
+pHit *= radius / Distance(pHit, Point3f(0, 0, 0));
+if (pHit.x == 0 && pHit.y == 0) pHit.x = 1e-5f * radius;
+phi = std::atan2(pHit.y, pHit.x);
+if (phi < 0) phi += 2 * Pi;
+if ((zMin > -radius && pHit.z < zMin) ||
+(zMax < radius && pHit.z > zMax) || phi > phiMax)
+return false;
+}
+return true;
+}
+3.2.5 Surface Area
+To compute the surface area of quadrics, we use a standard formula from integral
+calculus. If a curve
+y equals f left-parenthesis x right-parenthesis
+from
+x equals a
+to
+x equals b
+is revolved around the
+x
+axis, the surface area of the resulting swept surface is
+2 pi integral Subscript a Superscript b Baseline f left-parenthesis x right-parenthesis StartRoot 1 plus left-parenthesis f prime left-parenthesis x right-parenthesis right-parenthesis squared EndRoot normal d x comma
+where
+f prime left-parenthesis x right-parenthesis
+denotes the derivative
+normal d f slash normal d x
+.
+†
+Since most of our surfaces of revolution are
+only partially swept around the axis, we will instead use the formula
+phi Subscript normal m normal a normal x Baseline integral Subscript a Superscript b Baseline f left-parenthesis x right-parenthesis StartRoot 1 plus left-parenthesis f prime left-parenthesis x right-parenthesis right-parenthesis squared EndRoot normal d x period
+The sphere is a surface of revolution of a circular arc. The function that defines
+the profile curve along the
+z
+axis of the sphere is
+f left-parenthesis z right-parenthesis equals StartRoot r squared minus z squared EndRoot comma
+and its derivative is
+f prime left-parenthesis z right-parenthesis equals minus StartFraction z Over StartRoot r squared minus z squared EndRoot EndFraction period
+Recall that the sphere is clipped at
+z Subscript normal m normal i normal n
+and
+z Subscript normal m normal a normal x
+. The surface area is therefore
+StartLayout 1st Row 1st Column upper A 2nd Column equals phi Subscript normal m normal a normal x Baseline integral Subscript z Subscript normal m normal i normal n Baseline Superscript z Subscript normal m normal a normal x Baseline Baseline StartRoot r squared minus z squared EndRoot StartRoot 1 plus StartFraction z squared Over r squared minus z squared EndFraction EndRoot normal d z 2nd Row 1st Column Blank 2nd Column equals phi Subscript normal m normal a normal x Baseline integral Subscript z Subscript normal m normal i normal n Baseline Superscript z Subscript normal m normal a normal x Baseline Baseline StartRoot r squared minus z squared plus z squared EndRoot normal d z 3rd Row 1st Column Blank 2nd Column equals phi Subscript normal m normal a normal x Baseline integral Subscript z Subscript normal m normal i normal n Baseline Superscript z Subscript normal m normal a normal x Baseline Baseline r normal d z 4th Row 1st Column Blank 2nd Column equals phi Subscript normal m normal a normal x Baseline r left-parenthesis z Subscript normal m normal a normal x Baseline minus z Subscript normal m normal i normal n Baseline right-parenthesis period EndLayout
+For the full sphere
+phi Subscript normal m normal a normal x Baseline equals 2 pi
+,
+z Subscript normal m normal i normal n Baseline equals negative r
+, and
+z Subscript normal m normal a normal x Baseline equals r
+, so we have
+the standard formula
+upper A equals 4 pi r squared
+, confirming that the formula makes sense.
+<<Sphere Method Definitions>>+=
+Float Sphere::Area() const {
+return phiMax * radius * (zMax - zMin);
+}

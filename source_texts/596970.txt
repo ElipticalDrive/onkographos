@@ -1,0 +1,260 @@
+Flax Engine – multi-platform 3D game engine. Contribute to FlaxEngine/FlaxEngine development by creating an account on GitHub.
+
+Fix the view direction rounding far from the origin by meet-brad-ch · Pull Request #4356 · FlaxEngine/FlaxEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+meet-brad-ch
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Fixes #4312.
+Problem
+In builds without large worlds (32-bit Real), the engine rounds the view direction far from the world origin. A camera that turns slowly holds still and then jumps in steps. #4312 has the full analysis.
+Cause
+The engine builds the view matrices as LookAt(position, position + direction, up). LookAt gets the direction back as target - eye. Far from the origin, position + direction is rounded to the precision of position. Thus the direction is rounded too.
+Fix
+The fix follows the suggestion of @odunov in #4312. A new function LookTo(eye, direction, up) builds the view matrix from the view direction, so position + direction is never computed. It is in Matrix (C++ and C#) and in Double4x4 (C++). LookAt now calls LookTo with target - eye. Thus both use one implementation, and LookAt gives the same matrices as before. The four places that the issue names build the view matrix with LookTo:
+Camera::GetMatrices (the camera view of the renderer, and Camera::ProjectPoint and UnprojectPoint)
+RenderView::SetProjector (C++) and RenderView.SetProjector (C#)
+EditorViewport.CreateViewMatrix (the editor viewport camera)
+RenderView::SetFace does not change, because its axis-aligned unit directions do not round.
+Test
+A new FlaxTests case CameraView (Source/Engine/Tests/TestCameraView.cpp):
+Test Camera view direction far from the origin: a camera turns in 0.01° steps over 2° (201 steps). The test reads the yaw back from the view matrix of Camera::GetMatrices. Each step must give a new yaw, with an error below 0.001°. The test also checks that the view matrix near the origin is equal to Matrix::LookAt(position, position + direction, up).
+Test RenderView::SetProjector view direction far from the origin: the same steps through RenderView::SetProjector.
+Position
+master
+this PR
+(0, 500, 0)
+201 distinct yaw values, max error 0.0000°
+201, 0.0000°
+(407037, 100490, 526640)
+2 distinct yaw values, max error 1.2851° (fails)
+201, 0.0000° (passes)
+All 28 FlaxTests test cases pass (Windows, Development, no large worlds). On Linux (Ubuntu 24.04, WSL, built as the Linux CI does, with large worlds), all 28 test cases pass too.
+Editor test (Windows, Development editor, DX11): a copy of the BasicTemplate sample in play mode, with a camera at (407037, 100490, 526640). The camera turns at 12° per second in a ring of 12 spheres. I captured the window about every 0.2 s and measured the horizontal shift of the game view between two captures (phase correlation).
+1.12.6912 without large worlds: the shift alternates between about 44 px and 0. The view holds, then jumps. 14 of 89 pairs had no shift.
+1.12.6912 with the same change in Camera::GetMatrices: the shift is steady, 20 to 35 px for each capture interval.
+master with this PR: the shift is steady, 36 to 62 px. The capture intervals were longer in this run.
+I made these measurements with the first version of this PR. It computed the same matrix.
+The editor viewport also renders correctly with LookTo in EditorViewport.CreateViewMatrix. I did not build on Mac. The change has no platform code.
+Risk
+Low. The matrices are the same as before, except for the rounding.
+cNori
+commented
+Oct 21, 2026
+Copy link
+Copy Markdown
+Contributor
+a yes pulling bits from the void
+cNori
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+close it this makes 0 sence done full cheak on it to inline fix with curent funcion
+result bs code:
+//target is 0 - eye = -zaxis below sub is not needed
+//Float3.Subtract(ref target, ref eye, out var zaxis);
+var zaxis = -target;
+zaxis.Normalize(); //to -1,0
+Float3.Cross(ref up, ref zaxis, out var xaxis);
+xaxis.Normalize();
+Float3.Cross(ref zaxis, ref xaxis, out var yaxis);
+result = Identity;
+result.M11 = xaxis.X;
+result.M21 = xaxis.Y;
+result.M31 = xaxis.Z;
+result.M12 = yaxis.X;
+result.M22 = yaxis.Y;
+result.M32 = yaxis.Z;
+result.M13 = zaxis.X;
+result.M23 = zaxis.Y;
+result.M33 = zaxis.Z;
+Float3.Dot(ref xaxis, ref eye, out result.M41);
+Float3.Dot(ref yaxis, ref eye, out result.M42);
+Float3.Dot(ref zaxis, ref eye, out result.M43);
+result.M41 = -result.M41;
+result.M42 = -result.M42;
+result.M43 = -result.M43;
+//the fix same stuff as Float3.Dot(ref xaxis, ref eye, out result.M41);... up just reordered
+//and discards a lot of code allrady done
+result.M41 = -Float3.Dot(eye, new Float3(result.M11, result.M21, result.M31));
+result.M42 = -Float3.Dot(eye, new Float3(result.M12, result.M22, result.M32));
+result.M43 = -Float3.Dot(eye, new Float3(result.M13, result.M23, result.M33));
+error creep is somwhere else
+meet-brad-ch
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@cNori, thank you for this detailed check. You are correct: the translation row is the same computation as in LookAt, -dot(axis, eye). This is intended. The PR gives the same matrix as LookAt.
+The change is in the input to LookAt, not in its math. In builds without large worlds (32-bit Real), Camera::GetMatrices on master passes target = position + direction. This sum is rounded to the precision of position before LookAt runs. LookAt then gets the view direction back as target - eye. This is where the direction is lost. With large worlds, Camera::GetMatrices on master already computes this sum in double, and the PR gives the same matrix there.
+At the test position (407037, 100490, 526640), the float spacing is 0.031, 0.0078 and 0.0625. Thus each component of the unit direction is rounded to these steps. At the yaw of the test (30°), these steps move the yaw by about 1.5° to 1.8°.
+With the PR, LookAt gets eye = 0 and target = direction. Thus the direction is never rounded. No bits come back from the void, because the PR does not remove them in the first place. The rounding of the position itself does not change. That is the normal 32-bit limit that you describe.
+The PR adds a test for this, Test Camera view direction far from the origin. It turns the camera in 201 steps of 0.01° and reads the yaw back from the view matrix:
+On master, it gets 2 different yaw values (max error 1.29°) and fails.
+With the PR, it gets 201 values (max error 0.0000°) and passes.
+A second section does the same for RenderView::SetProjector. To check it, run FlaxTests with and without the change in Camera.cpp.
+cNori
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Contributor
+issue is deeper i did look around you are testing functions, not engine did poke around also camera view matrix is getting quantized noting can be done about it
+result.M41 = -Float3.Dot(eye, new Float3(result.M11, result.M21, result.M31));
+result.M42 = -Float3.Dot(eye, new Float3(result.M12, result.M22, result.M32));
+result.M43 = -Float3.Dot(eye, new Float3(result.M13, result.M23, result.M33));
+geting the Dot is geting a hudge value on the eye component
+and result.M13 is tiny component
+dot is def is left.X * right.X + left.Y * right.Y + left.Z * right.Z
+so 10 000.94035943f * result.M11... M11 is range from 0 to 1
+part of the 10 000.94035943f will get quantized by * operation
+matrix mul cares alot about the decimal part it is very sensitive to it
+and value is later multyplayed with model matrix resulting in snapping
+final martix matters what gpu will do the vertex * finalmatrix with is 3 or 4 mulls
+it is not camrea snaping it is whole worlds snaping
+becuse view matrix has nuts values
+u cant pull lost precision form void at the end
+meet-brad-ch
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@cNori, thank you for this deeper look. You are correct: in builds without large worlds, the translation row and the vertex positions are quantized. This PR does not change that.
+To find the size of each error, I measured both. I reproduced the float math of Matrix::LookAt and Camera::GetMatrices in C#, for master and for this PR. I used Float3 and Matrix, and compared the results with a double reference:
+The camera is at the test position (407037, 100490, 526640). It turns in 201 steps of 0.01°.
+A fixed vertex is 100 m (10,000 units) in front of the camera. It goes through the view matrix with float multiply-adds, as on the GPU.
+master
+this PR
+distinct yaw values
+2 of 201
+201 of 201
+direction error, max
+1.2851°
+0.0000°
+translation row error, max
+—
+0.11 units (1.1 mm)
+vertex at 100 m, error in view space, max
+224 units
+0.08 units
+vertex at 100 m, error on screen, max
+1.285°
+0.00033°
+vertex at 100 m, deviation from a smooth turn, max
+1.51°
+0.00038°
+Thus the quantization that you describe exists. It is approximately 1 mm, which is almost two float steps. It moves the vertex by 0.00033° on screen. On master, the rounded direction moves the vertex by 1.285°. This is approximately 3,900 times more, and it is the jump that a user sees. The PR removes only the direction error. The remaining error is the normal 32-bit limit, and large worlds are the solution for it.
+The renderer gets its view from Camera::GetMatrices (in RenderView::CopyFrom). Thus the FlaxTests case tests the matrix that the engine uses to draw. The PR description also has a test in play mode at the same position:
+On master, the view holds and then jumps. The shift between two captures is approximately 44 px or 0.
+With the PR, the shift is steady.
+cNori
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+done the test there is compere:
+Master at Different values from origin
+2026-10-23.05-23-00.mp4
+Pr at Different values from origin
+2026-10-23.05-35-42.mp4
+it is better kinda i can see rounding annyway but it is less snappy
+but it is visable on grid shader is qantazing values there
+also a lot of editor will not work right very far from orgin right now all the editor stuff is relative to view at 10km u can see it clear on the nav gizmo in the corner quantization is starting to take effect
+this will make the float more usable but from what i see rules will still applay 10km from origin max
+now it is closer what unity is doing probably
+also code in general can be better so it is not discarding work already done by other steps
+on c++ side call with params with are discarded ads cost and might not be optimized if compiler dose not inline the funcion
+C# has wirde rules some time same stuff will be best so
+cheak math simptyfi it and add overloads for LookAt
+or replace implmenation inside becuse if 1 renderer is using A and lookAt B some one will pass wrong stuff in futrue to renderer and wonder why is screwd up
+cNori
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+@mafiesto4 done full visual check check free to merge if pr has handled the discarded work from functions right away or add overloads
+gizmo move was not tested becuse it broke on master (probably for only me knowing my luck)
+mafiesto4
+added
+editor
+graphics
+fix
+labels
+Oct 23, 2026
+mafiesto4
+added this to the
+1.14 milestone
+Oct 23, 2026
+Fix the view direction rounding far from the origin
+…
+a4daf9e
+```
+View matrices were built as LookAt(position, position + direction), which rounds the direction to the precision of the position in builds without large worlds. The rotation is now built with the eye at zero and the translation is added. Fixes FlaxEngine#4312. Adds a FlaxTests case.
+```
+meet-brad-ch
+force-pushed
+the
+fix/camera-view-direction-precision
+branch
+from
+fc4f209 to
+a4daf9e
+Compare
+October 23, 2026 21:02
+Add LookTo and use it for the view matrices
+…
+247462f
+```
+Matrix::LookTo, Double4x4::LookTo and Matrix.LookTo build the view
+matrix from the eye position and the view direction. LookAt calls LookTo
+with target - eye, so both use one implementation. The camera, RenderView
+and the editor viewport call LookTo, without the extra work of LookAt with
+the eye at zero and a new translation row.
+```
+meet-brad-ch
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@cNori Thank you for the visual test and the videos. I changed the code as you suggested:
+A new function LookTo(eye, direction, up) is in Matrix (C++ and C#) and in Double4x4 (C++). It builds the view matrix from the view direction.
+LookAt now calls LookTo with target - eye. Thus LookAt and the renderer use one implementation, and LookAt gives the same matrices as before.
+The four call sites call LookTo, one line each. The work that was discarded (the subtraction with a zero eye, and the translation row that was then replaced) is gone.
+All 28 FlaxTests test cases pass on Windows and on Linux (Ubuntu 24.04).
+You are correct that the grid shader, the editor gizmos and the 10 km limit still show the 32-bit quantization. This PR removes only the rounding of the view direction. The remaining error is the normal float limit, and large worlds are the solution for it.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+editor
+fix
+graphics
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

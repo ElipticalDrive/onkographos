@@ -1,0 +1,189 @@
+A GPU-driven game engine written in Rust, with meshlet-based rendering and an editor. - docs(research): order-independent CSG composition — recommend postfix RPN by lobinuxsoft · Pull Request #308 · lobinuxsoft/kooch
+
+docs(research): order-independent CSG composition — recommend postfix RPN by lobinuxsoft · Pull Request #308 · lobinuxsoft/kooch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lobinuxsoft
+commented
+Apr 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #211. Implementation: #307 (RPN tree). Edit baker: #309.
+Summary
+Design doc at `docs/research/sdf-csg-composition.md` analysing six approaches to the order-dependent blend bug in `eval_scene` and recommending Approach D — postfix RPN tree as the foundation for the destructible-terrain + planet-scale rendering roadmap.
+Why postfix RPN, not 3-pass roles
+Three-pass roles (Approach A in the doc) is order-independent within each pass — fixes the bug — but throws away the tree structure that the rest of the roadmap requires. Shipping A means rewriting half of `eval_scene` again the moment we add chunking or runtime CSG edits. RPN ships the same bug fix and is the endgame:
+Same data model powers chunking (World streaming básico #54), BVH culling (feat(core): Spatial Acceleration Structure — BVH/Octree compartido #115), sparse SDF storage (feat(sdf): Sparse SDF Storage #136), and the edit baker (feat(render): RPN edit baker — bridge runtime CSG edits into sparse SDF chunks #309 — new).
+Equivalent expressiveness to a real CSG tree.
+Flat array, GPU-driven idiom, single linear loop in the shader.
+16-slot stack covers any balanced tree up to 65k leaves; validated CPU-side at upload.
+Cost intermediate (4–7 days) and result is the foundation, not throwaway MVP.
+Comparison summary
+A — 3-pass roles
+C — naive tree
+D — postfix RPN
+E — assoc smin
+Bug fix (order-indep)
+✅
+✅
+✅
+✅ union only
+Per-edge `k`
+❌
+✅
+✅
+✅
+Mixed hard/smooth
+❌
+✅
+✅
+❌
+GPU-driven idiom
+✅
+⚠️ stack-walk
+✅ flat loop
+✅
+Path to destructibles
+rewrite
+partial
+direct
+rewrite
+Cost
+1–2 days
+1–2 weeks
+4–7 days
+0.5 day (half-fix)
+Roadmap connections (cross-references)
+Piece
+Issue
+1. CSG tree (RPN)
+#307 (reformulated)
+2. Spatial chunking
+#54 (body updated with per-chunk data contract)
+3. BVH per-chunk culling
+#115
+4. Sparse SDF storage
+#136 (body updated with input-pipeline section)
+5. Edit Baker pipeline
+#309 (NEW)
+Adjacent: #91 (Hybrid Pipeline), #90 (Navigation w/ terraformation), #248 (AtmosphereVolume per-planet — "planet visible from space"), #53 (LOD), #117 (Virtual Geometry), #224 (segment tracing perf), #127 (SDF pathtracer future), #40 (SDF collision future).
+How `SdfBlend` (smooth blending) maps to RPN
+The current `SdfBlend { mode, smoothness }` semantics are preserved end-to-end. Per-instance smoothness migrates to operator-edge attributes (where binary smin mathematically belongs). Existing scenes load via a canonical default tree: `smooth_subtract(smooth_intersect(smooth_union(adds), intersects), subs)`. Render output of migrated scenes is byte-identical to Approach A's output — A is literally the static-tree degenerate case of D.
+References examined
+Inigo Quilez — Smooth Minimum (associativity analysis: only exponential / circular geometric smin are associative; CD-quadratic — what we use — is not, but RPN sidesteps the issue because each smin is a binary leaf op, never folded).
+Inigo Quilez — Modeling with Distance Functions (canonical operators).
+Alex Evans — Media Molecule's Dreams SIGGRAPH 2015 talk (Operationally Transformed CSG trees + chunking; validates the roadmap shape).
+Galin et al. — Synchronized Tracing of Primitive-based Implicit Volumes (ACM TOG 2024, BVH over CSG primitives — companion to feat(render): segment tracing with local Lipschitz bounds (Galin et al. 2020) #224).
+Blender meta-objects (additive field model — discarded as ray-march incompatible).
+Test plan
+Doc renders cleanly on GitHub.
+All issue cross-references resolve (Estructura de SDF Scene con ECS #21, fix(render): SDF ray-marcher artifacts in concave intersections + hard CSG seams #221, research(render): why naive ESL/over-relaxation introduces normal-discontinuity artifacts in CSG scenes #225, feat(render): SDF Compute Pathtracer — iluminación físicamente correcta #127, Collision detection con SDF #40, feat(render): segment tracing with local Lipschitz bounds (Galin et al. 2020) #224, World streaming básico #54, feat(core): Spatial Acceleration Structure — BVH/Octree compartido #115, feat(sdf): Sparse SDF Storage #136, feat(render): postfix RPN CSG tree (Approach D from sdf-csg-composition.md) #307, feat(render): RPN edit baker — bridge runtime CSG edits into sparse SDF chunks #309, Hybrid Rendering Pipeline (SDF + Mesh) #91, Navigation for planets and editable terrain — research first #90, feat(render): AtmosphereVolume component per-planet (sky PR B) #248, feat(render): LOD basado en distancia — meshlet LOD selection #53, epic(render): Phase 1 — Mesh GPU-driven Pipeline (Nanite-style) #117).
+External references reachable (IQ articles, Beyond3D forum, Blender docs, Galin paper).
+docs(research): order-independent CSG composition for SDF ray-march
+…
+8120a1a
+```
+Design doc evaluating five approaches to fix the directional / order-dependent
+blend semantics in eval_scene (the bug in #211: first entity's blend_mode is
+a no-op, last entity dominates).
+
+Approaches surveyed:
+- A — three-pass union → subtract → intersect (role-based, per-instance k)
+- B — role-based with global k (single pass, less expressive)
+- C — CSG tree, Dreams-style (long-term endgame)
+- D — switch to associative smin (exponential / circular geometric — partial fix)
+- E — additive Blender-style field (incompatible with sphere-tracing)
+
+Recommendation: A as MVP, C as future when scale or expressiveness demands it.
+Approach A makes role explicit per entity, swaps the flat loop for three
+filtered loops sorted by role on the CPU. Solves all three operators (union,
+subtraction, intersection) commutatively with per-instance smoothness preserved.
+Cost is 3× per ray-march sample (acceptable for the typical sub-100-instance
+scene; BVH or segment tracing closes the gap when scenes grow).
+
+Implementation issue filed as #307. Closes #211.
+
+References: IQ smin (associativity analysis), IQ distfunctions (canonical
+operators), Media Molecule's Dreams (Operationally Transformed CSG trees,
+SIGGRAPH 2015 — Alex Evans), Blender meta-objects (additive field model,
+discarded for the ray-march path).
+```
+lobinuxsoft
+mentioned this pull request
+Apr 26, 2026
+feat(render): postfix RPN CSG tree (Approach D from sdf-csg-composition.md)
+#307
+Closed
+19 tasks
+docs(research): pivot recommendation to postfix RPN tree (Approach D)
+…
+a18b2cb
+```
+Rewrites the design doc to recommend Approach D (postfix RPN tree)
+instead of Approach A (3-pass roles). The pivot is driven by the
+broader roadmap: destructible terrain + planet-scale rendering.
+
+Approach A is order-independent within passes but throws away tree
+structure — so the moment chunking, runtime edits, or nested groupings
+are needed, A becomes a rewrite. Approach D ships the same bug fix
+(order-independent semantics on user intent) AND is the foundation
+the rest of the roadmap is built on.
+
+D linearises the CSG tree to a flat array of tokens in postfix order.
+CPU walks the tree DFS once and emits tokens; GPU iterates the array
+once with a 16-slot stack. Equivalent expressiveness to a real tree,
+single linear loop in the shader, no GPU recursion. Stack size is
+bounded (16 covers any balanced tree up to ~65k leaves), validated
+CPU-side at upload.
+
+Doc additions:
+- Section "How SdfBlend (smooth blending) maps to RPN" — preserves
+  current per-instance smoothness semantics by promoting them to
+  operator-edge attributes; documents the canonical default tree
+  used by scene migration.
+- Section "Roadmap: destructible terrain + planet visualisation" —
+  cross-references #54 (chunking), #115 (BVH), #136 (sparse SDF),
+  #309 (edit baker, new), plus #91 / #90 / #248 / #53 / #117 as
+  consumers / siblings of the same data model.
+- Per-chunk data contract: ChunkData = (sparse baseline, RPN delta,
+  BVH AABB, LOD level, last_baked_at). Each roadmap piece touches
+  only its own field; clean boundaries.
+
+Closes #211. Implementation: #307 (RPN tree). Edit baker: #309.
+```
+lobinuxsoft
+changed the title
+docs(research): order-independent CSG composition for SDF ray-march
+docs(research): order-independent CSG composition — recommend postfix RPN
+Apr 26, 2026
+lobinuxsoft
+merged commit 6f537ee
+into
+development
+Apr 26, 2026
+lobinuxsoft
+deleted the
+211-researchrender-order-independent-csg-composition-for-sdf-ray-march
+branch
+May 7, 2026 20:39
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

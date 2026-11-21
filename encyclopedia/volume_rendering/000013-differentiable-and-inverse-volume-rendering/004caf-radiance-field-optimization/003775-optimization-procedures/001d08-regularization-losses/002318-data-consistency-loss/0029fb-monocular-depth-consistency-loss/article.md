@@ -1,0 +1,170 @@
+# Monocular Depth Consistency Loss
+
+Also called: Monocular Depth Loss, Monocular Depth Regularization
+
+## Overview
+Monocular Depth Consistency Loss enforces geometric consistency between a rendered depth map and dense depth priors estimated by off-the-shelf monocular depth estimation networks, resolving the scale ambiguity inherent in single-view depth prediction [S1, S2]. It differs from its siblings, [Optimal Transport Loss](7472-optimal-transport-loss.md) and [Cross-View Consistent Loss](12062-cross-view-consistent-loss.md), by explicitly modeling the affine relationship (scale and shift) between the rendered geometry and the monocular prior via a closed-form least-squares solution, rather than relying on distributional matching or cross-view geometric constraints [S1, S2].
+
+## How it works
+The method aligns the scale and shift of a predicted monocular depth map with the scene geometry, typically using sparse Structure-from-Motion (SfM) points as a bridge for scale alignment [S1]. It is primarily used when sensor depth data is unavailable, such as in monocular endoscopic sequences [S2].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   $\hat{D}(\mathbf{r})$: Rendered depth map for rays $\mathbf{r}$ sampled from the current view.
+    *   $\bar{D}(\mathbf{r})$: Dense monocular depth estimate for the same view, obtained from a pre-trained network (e.g., ZoeDepth, DepthAnything) [S1, S2].
+    *   $D_{\text{sparse}}$: Sparse depth map derived from projecting SfM points to the camera view [S1].
+*   **Outputs:**
+    *   $\mathcal{L}_{Mono}$: The scalar loss value used for backpropagation.
+    *   $\eta, \epsilon$: The optimal scale and shift parameters for the current batch [S2].
+
+### Data Structures
+*   **Depth Maps:** 2D arrays of floating-point values representing depth along rays or pixel coordinates [G].
+*   **SfM Points:** A set of 3D points with known camera poses, projected to 2D pixel coordinates $(u, v)$ and depth $z$ [G].
+
+### Steps
+1.  **Obtain Monocular Estimate:** Run an off-the-shelf monocular depth estimation network on the input image to generate $D_{\text{mono}}$ [S1].
+2.  **Obtain Sparse Depth:** Project the known SfM points to the current camera view to create a sparse depth map $D_{\text{sparse}}$ [S1].
+3.  **Align Scale and Shift:** Solve for the scale $a$ and shift $b$ that minimize the squared error between the aligned monocular depth and the sparse depth using a closed-form linear regression solution [S1]:
+    $$ \hat{a}, \hat{b} = \arg\min_{a,b} \sum_{ij} \| (a \cdot D_{\text{mono},ij} + b) - D_{\text{sparse},ij} \|_2^2 $$
+    where $D_{\text{sparse},ij}$ and $D_{\text{mono},ij}$ are per-pixel correspondences [S1].
+4.  **Compute Loss:** Calculate the consistency loss between the rendered depth $\hat{D}(\mathbf{r})$ and the monocular prior $\bar{D}(\mathbf{r})$ using the derived parameters $\eta$ (scale) and $\epsilon$ (shift) [S2]:
+    $$ \mathcal{L}_{Mono}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \sum_i \mathbb{E}_{\mathbf{r} \sim \bar{D}_i} \left\| (\eta \hat{D}(\mathbf{r}) + \epsilon) - \bar{D}(\mathbf{r}) \right\|^2 $$
+    where $\eta$ and $\epsilon$ are calculated separately for each batch [S2].
+
+### Formulas
+The core loss function is defined as [S2]:
+$$ \mathcal{L}_{Mono}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \sum_i \mathbb{E}_{\mathbf{r} \sim \bar{D}_i} \left\| (\eta \hat{D}(\mathbf{r}) + \epsilon) - \bar{D}(\mathbf{r}) \right\|^2 $$
+
+The scale parameter $\eta$ is the closed-form least-squares solution [S2]:
+$$ \eta = \left( \hat{D}(\mathbf{r})^T \hat{D}(\mathbf{r}) \right)^{-1} \hat{D}(\mathbf{r})^T \bar{D}(\mathbf{r}) $$
+
+The shift parameter $\epsilon$ is defined as [S2]:
+$$ \epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r}) $$
+
+Note: In some implementations, the alignment is performed against sparse SfM points first to determine the global scale/shift, which is then applied to the monocular prior before comparing with rendered depth [S1]. The formula above directly aligns rendered depth to the monocular prior, assuming the monocular prior has been pre-aligned or the alignment is implicit in the batch-wise calculation [S2].
+
+### Parameters
+*   $\eta$: Scale parameter. Calculated per batch [S2].
+*   $\epsilon$: Shift parameter. Calculated per batch [S2].
+*   Typical values: $\eta$ and $\epsilon$ are data-dependent and computed dynamically; no fixed hyperparameters are specified for these variables [S2].
+
+### Edge Cases and Pitfalls
+*   **Batch-wise Variation:** Predicted depth maps can vary in scale and shift across different batches. Therefore, $\eta$ and $\epsilon$ must be calculated separately for each batch to avoid incorrect alignment [S2].
+*   **Scale Ambiguity:** Monocular depth estimates lack absolute scale. Without alignment to sparse SfM points or a similar reference, the loss may converge to a locally consistent but globally incorrect scale [S1].
+*   **No Sensor Depth:** This method is specifically designed for scenarios where no sensor depth data is available [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def monocular_depth_consistency_loss(rendered_depth, monocular_depth, sparse_depth):
+    """
+    Computes the Monocular Depth Consistency Loss.
+    
+    Args:
+        rendered_depth (list of list or array): Rendered depth map D_hat(r) for the current view.
+        monocular_depth (list of list or array): Dense monocular depth estimate D_bar(r).
+        sparse_depth (list of list or array): Sparse depth map from SfM points D_sparse.
+        
+    Returns:
+        float: The computed loss L_Mono.
+        float: The scale parameter eta.
+        float: The shift parameter epsilon.
+    """
+    # Flatten inputs to 1D lists, filtering out invalid/non-positive depths
+    D_hat = [d for row in rendered_depth for d in row if d > 0]
+    D_bar = [d for row in monocular_depth for d in row if d > 0]
+    D_sparse = [d for row in sparse_depth for d in row if d > 0]
+    D_mono = [d for row in monocular_depth for d in row if d > 0]
+
+    # Step 1: Optional SfM alignment to resolve scale ambiguity [S1]
+    if len(D_mono) > 0 and len(D_sparse) > 0:
+        n = len(D_mono)
+        sum_mono = sum(D_mono)
+        sum_sparse = sum(D_sparse)
+        mean_mono = sum_mono / n
+        mean_sparse = sum_sparse / n
+        
+        numerator = sum((x - mean_mono) * (y - mean_sparse) for x, y in zip(D_mono, D_sparse))
+        denominator = sum((x - mean_mono) ** 2 for x in D_mono)
+        
+        if denominator == 0:
+            a = 1.0
+            b = mean_sparse - mean_mono
+        else:
+            a = numerator / denominator
+            b = mean_sparse - a * mean_mono
+            
+        aligned_mono = [a * x + b for x in D_mono]
+    else:
+        aligned_mono = D_mono
+
+    # Step 2: Compute L_Mono between rendered depth and monocular prior per batch [S2]
+    if len(D_hat) == 0 or len(aligned_mono) == 0:
+        return 0.0, 1.0, 0.0
+
+    n = len(D_hat)
+    sum_hat = sum(D_hat)
+    sum_bar = sum(aligned_mono)
+    mean_hat = sum_hat / n
+    mean_bar = sum_bar / n
+
+    # Closed-form least squares for eta and epsilon [S2]
+    numerator_eta = sum(x * y for x, y in zip(D_hat, aligned_mono))
+    denominator_eta = sum(x ** 2 for x in D_hat)
+
+    if denominator_eta == 0:
+        eta = 1.0
+        epsilon = mean_bar - mean_hat
+    else:
+        eta = numerator_eta / denominator_eta
+        epsilon = mean_bar - eta * mean_hat
+
+    # Compute loss: sum || (eta * D_hat + epsilon) - D_bar ||^2
+    loss = sum((eta * x + epsilon - y) ** 2 for x, y in zip(D_hat, aligned_mono))
+
+    return loss, eta, epsilon
+```
+
+## Subtopics
+
+### [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md)
+This method determines the reliability of monocular depth estimates by reprojecting them into a nearest training view and comparing the resulting image intensities against the actual captured view. It solves the problem of noisy or incorrect depth predictions (e.g., in specular regions or textureless areas) by generating a binary mask that selects only those depth values where the reprojection error is low. It differs from its siblings, [Pseudo-depth Supervised Loss](7487-pseudo-depth-supervised-loss.md) and [Depth Prior Loss](10801-depth-prior-loss.md), by using geometric consistency via reprojection error rather than direct pixel-wise regression or static priors to weight the supervision signal [7293-reliable-depth-estimation-via-reprojection.md].
+
+### [Pseudo-depth Supervised Loss](7487-pseudo-depth-supervised-loss.md)
+Pseudo-depth Supervised Loss is a regularization technique that mitigates floating artifacts and enforces geometric consistency in neural radiance fields by comparing rendered depth against pseudo-depth targets derived from Structure-from-Motion (SfM) data. Unlike standard photometric losses that only constrain color, this method explicitly constrains the density distribution along rays. It distinguishes itself from sibling methods like [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md) by relying on sparse SfM point clouds rather than dense multi-view stereo consistency, making it suitable for scenarios where dense depth priors are unavailable but camera poses are known.
+
+### [Self-Supervised Depth Losses](9374-self-supervised-depth-losses.md)
+Self-supervised depth losses constrain the estimated depth and confidence intervals in a self-supervised manner using monocular depth estimates and image gradients, addressing the difficulty of obtaining ground truth depth. They are distinguished from sibling methods by their reliance on explicit smoothness priors derived from monocular disparity maps rather than reprojection consistency or pseudo-depth supervision.
+
+### [Depth Prior Loss](10801-depth-prior-loss.md)
+Depth Prior Loss is a regularization term that constrains the geometry of a radiance field by enforcing consistency between rendered depth and monocular depth priors. It is typically combined with cross-scale geometric adaptation losses (e.g., $L_{geo}$) to leverage their complementarity.
+
+### [Patch-level Scale-Shift Alignment](12336-patch-level-scale-shift-alignment.md)
+Patch-level Scale-Shift Alignment is a regularization technique used in differentiable volume rendering to align predicted monocular depth maps with reference or ground truth depths by optimizing scale and shift parameters locally per image patch rather than globally per image. It solves the problem of local depth misalignment errors that arise when a single global affine transformation fails to account for depth inconsistencies among different objects within a scene. Unlike image-level fitting, which computes a single scale and shift for the entire depth map, this method adapts locally, significantly reducing misalignment errors in rendered depth maps.
+
+### MonoSDF
+MonoSDF uses monocular depth and normal cues for constraints to address weak texture area reconstruction [S3, unofficial].
+
+### Scale Alignment of Depth Priors
+Scale Alignment of Depth Priors aligns the scale of a predicted monocular depth map with sparse COLMAP depths to enable supervision during NeRF optimization [S4]. The scale factor $\alpha$ is computed by averaging the log-difference over all valid pixels:
+$$ \alpha (D^i_p, D^i_{Sparse}) = \frac {1}{n} \sum _j(\log D^i_p(j) - \log D^i_{Sparse}(j)) $$
+where $\alpha$ is the scale factor, $D^i_p$ is the predicted depth for view $i$, $D^i_{Sparse}$ is the sparse depth for view $i$, $n$ is the number of valid pixels, and $j$ indexes the pixels [S4].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** In endoscopic sequences, replacing the standard depth loss $L_D$ with $L_{Mono}$ improves reconstruction quality by handling the relative nature of depth cues [S2].
+*   **Strengths:** Handles scale ambiguity effectively; leverages strong priors from modern monocular depth networks; computationally lightweight [S1, G].
+*   **Limitations:** Relies on the accuracy of the off-the-shelf monocular depth network; performance degrades if the monocular prior is significantly incorrect (e.g., in textureless or specular regions) without additional reliability masking [7293-reliable-depth-estimation-via-reprojection.md, G].
+*   **When to Use:** When no sensor depth data is available and camera poses (for SfM) are known [S1]. Particularly useful for monocular endoscopic sequences [S2].
+*   **When Not to Use:** When high-precision absolute depth is required and no reliable sparse SfM points are available to anchor the scale [S1].
+
+## Background
+Monocular Depth Consistency Loss originated from the need to regularize neural radiance fields and implicit surface reconstructions in the absence of multi-view stereo depth sensors [S2]. Early works like NeuS faced challenges in weak texture areas [S3, unofficial]. MonoSDF, introduced in NeurIPS 2022, explicitly explored monocular geometric cues (depth and normal) to address these challenges [S3, unofficial]. DN-Splatter (WACV 2025) and Efficient Deformable Tissue Reconstruction (TMI 2024) formalized the use of scale-aligned monocular depth priors using closed-form least-squares solutions to align with sparse SfM points, enabling robust optimization in monocular settings [S1, S2]. The method is applied to monocular endoscopic sequences [S2].
+
+## Sources
+[S1] DN-Splatter: Depth and Normal Priors for Gaussian Splatting and Meshing, https://doi.org/10.1109/wacv61041.2025.00241, fetched 2026-10-26
+[S2] Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane, https://doi.org/10.1109/tmi.2024.3388559, fetched 2026-10-26
+[S3] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
+[S4] Depth-Guided Optimization of Neural Radiance Fields for Indoor Multi-View Stereo, https://doi.org/10.1109/tpami.2023.3263464, fetched 2026-10-27

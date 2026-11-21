@@ -1,0 +1,2021 @@
+## Introduction
+
+ALG_MarchingCubes_GPU is an isosurface extraction plug-in for Grasshopper using [Marching Cubes algorithm](https://en.wikipedia.org/wiki/Marching_cubes) on GPU. 
+![](https://albertlidesign.github.io/post-images/1586082938627.png)
+
+## Algorithm
+
+1. Classify voxels: Mark all the active voxels to get an active voxels array and calculate the number of vertices in each voxel by looking up vertices table. It is executed using one thread per voxel.
+
+2. Exclusive sum scan:  Get the total number of active voxels and the total number of resulting vertices using exclusive scan algorithm. They are obtained by the sum of the last value of the exclusive scan and the last value of input array.
+
+3. Compact voxels: This compacts the active voxels array to get rid of empty voxels. This allows us to execute Isosurface Extraction on only the active voxels.
+
+4. Isosurface extraction: Calculate the position of the points in the active voxel and obtain all the result points by looking up triangle table.
+
+5. Generate a mesh model from result points.
+
+## Reference
+
+[1] Dyken, C., Ziegler, G., Theobalt, C., & Seidel, H. P. (2008, December). High‐speed marching cubes using histopyramids. In Computer Graphics Forum (Vol. 27, No. 8, pp. 2028-2039). Oxford, UK: Blackwell Publishing Ltd.
+
+[2] Lorensen W E, Cline H E. Marching cubes: A high resolution 3D surface construction algorithm. ACM SIGGRAPH Computer Graphics. 1987;21(4)
+
+[3] C. Dyken, G. Ziegler, C. Theobalt, and H.-P. Seidel. High-speed Marching Cubes using HistoPyramids. Computer Graphics Forum, 27(8):2028–2039, Dec. 2008.
+
+[4] The algorithm and lookup tables by Paul Bourke httppaulbourke.netgeometrypolygonise：http://paulbourke.net/geometry/polygonise/
+
+[5] Marching Cubes implementation using OpenCL and OpenGL：https://www.eriksmistad.no/marching-cubes-implementation-using-opencl-and-opengl/
+
+[6] A sample extracts a geometric isosurface from a volume dataset using the marching cubes algorithm.: https://github.com/tpn/cuda-samples/tree/master/v10.2/2_Graphics/marchingCubes
+
+[7] The introduction of marching cubes: http://www.cs.carleton.edu/cs_comps/0405/shape/marching_cubes.html
+
+[8] The introduction of marching cubes: https://medium.com/zeg-ai/voxel-to-mesh-conversion-marching-cube-algorithm-43dbb0801359
+
+### Basic Functions/BasicFunctions.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Rhino.Geometry;
+using Grasshopper.Kernel;
+using Grasshopper.Kernel.Types;
+using Grasshopper.Kernel.Types.Transforms;
+
+namespace ALG_MarchingCubes
+{
+    public class BasicFunctions
+    {
+        public static List<Line> GetBoundingBoxBoundaries(Box box)
+        {
+            List<Line> lines = new List<Line>();
+            Point3d[] corners = box.GetCorners();
+
+            lines.Add(new Line(corners[0], corners[1]));
+            lines.Add(new Line(corners[1], corners[2]));
+            lines.Add(new Line(corners[2], corners[3]));
+            lines.Add(new Line(corners[3], corners[0]));
+            lines.Add(new Line(corners[4], corners[0]));
+            lines.Add(new Line(corners[5], corners[1]));
+            lines.Add(new Line(corners[6], corners[2]));
+            lines.Add(new Line(corners[7], corners[3]));
+            lines.Add(new Line(corners[4], corners[5]));
+            lines.Add(new Line(corners[5], corners[6]));
+            lines.Add(new Line(corners[6], corners[7]));
+            lines.Add(new Line(corners[7], corners[4]));
+            return lines;
+        }
+        //构建用于映射的Box
+        public static Box CreateUnionBBoxFromGeometry(List<IGH_GeometricGoo> geos, double scale)
+        {
+            Plane worldXY = Plane.WorldXY;
+            Transform xform = Transform.ChangeBasis(Plane.WorldXY, worldXY);
+            BoundingBox empty = BoundingBox.Empty;
+            int num = geos.Count - 1;
+            for (int i = 0; i <= num; i++)
+            {
+                if (geos[i] != null)
+                {
+                    BoundingBox boundingBox = geos[i].GetBoundingBox(xform);
+                    empty.Union(boundingBox);
+                }
+            }
+
+            Transform xform2 = Transform.Scale(empty.Center, scale);
+            empty.Transform(xform2);
+            Box box = new Box(empty);
+            return box;
+        }
+        //Box映射
+        public static IGH_GeometricGoo BoxMapping(Box box1, Box box2, IGH_GeometricGoo geo)
+        {
+
+            if (!box1.IsValid || !box2.IsValid)
+            {
+                return null;
+            }
+            Plane plane1 = box1.Plane;
+            Plane plane2 = box2.Plane;
+            plane1.Origin = box1.Center;
+            plane2.Origin = box2.Center;
+            double xscale = box2.X.Length / box1.X.Length;
+            double yscale = box2.Y.Length / box1.Y.Length;
+            double zscale = box2.Z.Length / box1.Z.Length;
+            ITransform item = new Scale(plane1, xscale, yscale, zscale);
+            ITransform item2 = new Orientation(plane1, plane2);
+            GH_Transform gh_Transform = new GH_Transform();
+            gh_Transform.CompoundTransforms.Add(item);
+            gh_Transform.CompoundTransforms.Add(item2);
+            gh_Transform.ClearCaches();
+
+            IGH_GeometricGoo geo2 = geo.DuplicateGeometry();
+            geo2 = geo2.Transform(gh_Transform.Value);
+            return geo2;
+        }
+        public static IGH_GeometricGoo BoxTrans(Box box1, Box box2, IGH_GeometricGoo geo)
+        {
+
+            if (!box1.IsValid || !box2.IsValid)
+            {
+                return null;
+            }
+            Plane plane1 = box1.Plane;
+            Plane plane2 = box2.Plane;
+            plane1.Origin = box1.Center;
+            plane2.Origin = box2.Center;
+            ITransform item = new Orientation(plane1, plane2);
+            GH_Transform gh_Transform = new GH_Transform();
+            gh_Transform.CompoundTransforms.Add(item);
+            gh_Transform.ClearCaches();
+
+            IGH_GeometricGoo geo2 = geo.DuplicateGeometry();
+            geo2 = geo2.Transform(gh_Transform.Value);
+            return geo2;
+        }
+
+        public static List<IGH_GeometricGoo> ConvertPointsToGeo(List<Point3d> pts)
+        {
+            List<IGH_GeometricGoo> geos = new List<IGH_GeometricGoo>();
+            for (int i = 0; i < pts.Count; i++)
+            {
+                GH_Point point = new GH_Point(pts[i]);
+                geos.Add(point);
+            }
+            return geos;
+        }
+        public static List<Point3d> ConvertGeosToPoints(List<IGH_GeometricGoo> geos)
+        {
+            List<Point3d> pts = new List<Point3d>();
+            for (int i = 0; i < geos.Count; i++)
+            {
+                if (geos[i].IsValid)
+                {
+                    Point3d point = new Point3d();
+                    GH_Convert.ToPoint3d(geos[i], ref point, GH_Conversion.Both);
+                    pts.Add(point);
+                }
+            }
+            return pts;
+        }
+        public static Mesh ExtractMesh(List<Point3d> pts)
+        {
+            Mesh mesh = new Mesh();
+            int FCount = pts.Count / 3;
+
+            mesh.Vertices.AddVertices(pts);
+
+            MeshFace[] mfs = new MeshFace[FCount];
+            Parallel.For(0, FCount, i =>
+           {
+               MeshFace mf = new MeshFace(i * 3, i * 3 + 1, i * 3 + 2);
+               mfs[i] = mf;
+           });
+            mesh.Faces.AddFaces(mfs);
+            return mesh;
+        }
+
+    }
+}
+```
+
+### Basic Functions/MeshChecker.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using Grasshopper.Kernel;
+using Rhino.Geometry;
+using System.Diagnostics;
+using Plankton;
+using PlanktonGh;
+using System.Threading.Tasks;
+using System.Linq;
+
+namespace ALG_MarchingCubes
+{
+    public class MeshChecker : GH_Component
+    {
+        public Rhino.Geometry.Collections.MeshVertexList MV;
+        public Rhino.Geometry.Collections.MeshTopologyVertexList MTV;
+        public Rhino.Geometry.Collections.MeshTopologyEdgeList MTE;
+        public Rhino.Geometry.Collections.MeshFaceList MF;
+        public MeshChecker()
+          : base("MeshChecker", "MC", "Check the quality of your mesh. ", "ALG", "MeshChecker") { }
+        public override GH_Exposure Exposure => GH_Exposure.secondary;
+        protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
+        {
+            pManager.AddMeshParameter("Mesh", "M", "Input a mesh.", GH_ParamAccess.list);
+        }
+
+        protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
+        {
+            pManager.AddCurveParameter("Non-Manifold Edges", "NME", "Output non-manifold edges.", GH_ParamAccess.list);
+            pManager.AddIntegerParameter("Non-Manifold Vertices Indices", "NMVI", "Output indices of non-manifold vertices.", GH_ParamAccess.list);
+        }
+
+        public override Guid ComponentGuid
+        {
+            get { return new Guid("{818AB035-1E66-4E04-AE1D-B5FB51130068}"); }
+        }
+        protected override void SolveInstance(IGH_DataAccess DA)
+        {
+            List<Mesh> ms = new List<Mesh>();
+            DA.GetDataList("Mesh", ms);
+            List<int> NMVI = new List<int>();
+            List<Line> NME = new List<Line>();
+            List<int> NMEI = new List<int>();
+
+            Mesh M = new Mesh();
+            string report = null;
+            List<string> reports = new List<string>();
+
+            foreach (var item in ms)
+            {
+                M.Append(item);
+            }
+
+            if (M == null || !M.IsValid)
+            {
+                report = "This is a invalid mesh.";
+                Message = report;
+                return;
+            }
+
+            MV = M.Vertices;
+            MTV = M.TopologyVertices;
+            MTE = M.TopologyEdges;
+
+            if (M.DisjointMeshCount > 1)
+            {
+                reports.Add(string.Format("Disjoined Pieces: {0}", M.DisjointMeshCount));
+            }
+
+            NMVI = NonManifoldVertices(M);
+
+            NME = new List<Line>();//非流形边
+            NMEI = NonManifoldEdges(M, ref NME);//非流形边索引
+
+            if (NMVI.Count + NMEI.Count == 0)
+            {
+                bool hasBoundaries = hasBoundary(M);
+                if (hasBoundaries == true)//外露边检查
+                {
+                    Polyline[] pls = M.GetNakedEdges();
+                    int num2 = 0;
+                    foreach (var item in pls)
+                    {
+                        num2 += item.SegmentCount;
+                    }
+                    reports.Add(string.Format("Naked Edges: {0}", num2));
+                }
+                else//优质网格
+                {
+                    report = "This is a good mesh.";
+                    Message = report;
+                    return;
+                }
+            }
+
+            if (NMEI.Count > 0)//非流形边报错
+            {
+                reports.Add(string.Format("Non-Manifold Edges: {0}", NMEI.Count));
+            }
+            if (NMVI.Count > 0)//非流形顶点报错
+            {
+                reports.Add(string.Format("Non-Manifold Vertices: {0}", NMVI.Count));
+            }
+
+            report = string.Join("\n", reports.ToArray());
+            Message = report;
+
+            DA.SetDataList("Non-Manifold Edges", NME);
+            DA.SetDataList("Non-Manifold Vertices Indices", NMVI);
+        }
+
+        protected override Bitmap Icon => null;
+
+        public static List<double> CheckPlanarFaces(Mesh mesh)
+        {
+            List<double> values = new List<double>();
+
+            for (int i = 0; i < mesh.Faces.Count; i++)
+            {
+                Point3d a = mesh.Vertices[mesh.Faces[i].A];
+                Point3d b = mesh.Vertices[mesh.Faces[i].B];
+                Point3d c = mesh.Vertices[mesh.Faces[i].C];
+                Point3d d = mesh.Vertices[mesh.Faces[i].D];
+
+                Line ac = new Line(a, c);
+                Line bd = new Line(b, d);
+
+                Rhino.Geometry.Intersect.Intersection.LineLine(ac, bd, out double t1, out double t2);
+                double distance = ac.PointAt(t1).DistanceTo(bd.PointAt(t2));
+
+                values.Add(distance);
+            }
+
+            return values;
+        }
+        public static bool isNonManifold(Mesh mesh)
+        {
+            bool isOriented = false;
+            bool hasBoundary = false;
+            bool isNonManifold = mesh.IsManifold(true, out isOriented, out hasBoundary);
+            return !isNonManifold;
+        }
+        public static bool hasBoundary(Mesh mesh)
+        {
+            PlanktonMesh PM = mesh.ToPlanktonMesh();
+            return !PM.IsClosed();
+        }
+
+        public static List<int> NonManifoldEdges(Mesh mesh, ref List<Line> NME)
+        {
+            var MTE = mesh.TopologyEdges;
+            var MTV = mesh.TopologyVertices;
+            List<int> NMEI = new List<int>();
+            for (int te = 0; te < MTE.Count; te++)
+            {
+                int[] connFaces = MTE.GetConnectedFaces(te);
+                if (connFaces.Length > 2)
+                {
+                    NMEI.Add(te);
+                    NME.Add(mesh.TopologyEdges.EdgeLine(te));
+                }
+            }
+            return NMEI;
+        }
+        //检查非流形点
+        public static List<int> NonManifoldVertices(Mesh mesh)
+        {
+            List<int> NMVI = new List<int>();
+            var MTE = mesh.TopologyEdges;
+            var MTV = mesh.TopologyVertices;
+            bool[] sampledV = new bool[MTV.Count];
+
+            int k = 0;
+            Parallel.For(k, MTV.Count, tv =>
+            {
+                List<int> fList = MTV.ConnectedFaces(tv).ToList();
+                if (fList.Count == 1) return;
+                bool[] sampled = new bool[fList.Count];
+                int clusters = 0;
+
+                for (int i = 0; i < fList.Count; i++)
+                {
+                    if (!sampled[i])
+                    {
+                        List<int> clusterIndices = new List<int>();
+                        clusterIndices.Add(i);
+                        sampled[i] = true;
+                        do
+                        {
+                            for (int j = 0; j < fList.Count; j++)
+                            {
+                                if (j != clusterIndices[0] && !sampled[j])
+                                {
+                                    List<int> faceIEI = MTE.GetEdgesForFace(fList[clusterIndices[0]]).ToList();
+                                    List<int> faceJEI = MTE.GetEdgesForFace(fList[j]).ToList();
+                                    List<int> common = faceIEI.Intersect(faceJEI).ToList();
+                                    if (common.Any())
+                                    {
+                                        clusterIndices.Add(j);
+                                        sampled[j] = true;
+                                    }
+                                }
+                            }
+                            clusterIndices.RemoveAt(0);
+                        } while (clusterIndices.Count > 0);
+                        clusters++;
+                    }
+                }
+
+                if (clusters > 1)
+                {
+                    NMVI.Add(tv);
+                }
+            });
+
+            return NMVI;
+        }
+    }
+}
+```
+
+### MarchingCubesDLL/MarchingCubesGPU.cpp
+```
+﻿
+# include<iostream>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include<stdlib.h>
+
+#include <cuda_runtime.h>
+#include <vector_types.h>
+#include <vector_functions.h>
+#include <device_launch_parameters.h>
+
+#include <helper_cuda.h>
+#include <helper_functions.h>
+
+#include "MarchingCubesGPU.h"
+
+#include<time.h>
+
+extern "C" __declspec(dllexport)  bool computMC(cfloat3 bP, cfloat3 vS,
+    int xCount, int yCount, int zCount, float iso,  size_t & resultLength);
+extern "C" __declspec(dllexport)  void getResult(cfloat3 * result);
+
+bool computMC(cfloat3 bP, cfloat3 vS, int xCount, int yCount, int zCount,  float iso, size_t& resultLength)
+{
+    bool successful = true;
+
+    basePoint = Convert(bP);
+    gridSize = make_uint3(xCount, yCount, zCount);
+    numVoxels = xCount * yCount * zCount;
+    voxelSize = Convert(vS);
+    isoValue = iso;
+
+    initMC();
+
+#pragma region Classify all voxels
+    int threads = 128;
+    dim3 grid((numVoxels + threads - 1) / threads, 1, 1);
+
+    // get around maximum grid size of 65535 in each dimension
+    if (grid.x > 65535)
+    {
+        grid.y = grid.x / 32768;
+        grid.x = 32768;
+    }
+
+    // calculate number of vertices need per voxel
+    launch_classifyVoxel(grid, threads,
+        d_voxelVerts, d_voxelOccupied, gridSize,
+        numVoxels, basePoint, voxelSize, isoValue);
+#pragma endregion
+
+    /*
+    Scan occupied voxels
+    after classifying voxels, we will get a lot of empty voxels.
+    in order to cull them, we have to use exclusive sum scan to get a new array
+    the last element in this new array plus the last element in the array before scan
+    equals the number of active voxels
+    */
+    exclusiveSumScan(d_voxelOccupiedScan, d_voxelOccupied, numVoxels);
+
+#pragma region Find the number of active voxels
+    uint lastElement, lastScanElement;
+    // only copy the last elements from two arrays on the device
+    checkCudaErrors(cudaMemcpy((void*)&lastElement,
+        (void*)(d_voxelOccupied + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy((void*)&lastScanElement,
+        (void*)(d_voxelOccupiedScan + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+
+    // comput the number of active voxels
+    num_activeVoxels = lastElement + lastScanElement;
+
+    if (num_activeVoxels == 0)
+    {
+        // return if there are no full voxels
+        num_resultVertices = 0;
+        successful = false;
+        return successful;
+    }
+#pragma endregion
+
+    // Compact voxels
+    // compact voxel index array
+    launch_compactVoxels(grid, threads, d_compVoxelArray, d_voxelOccupied, d_voxelOccupiedScan, numVoxels);
+
+    // Scan the number of vertices each voxel has
+    // compute the number of output vertices
+    exclusiveSumScan(d_voxelVertsScan, d_voxelVerts, numVoxels);
+
+#pragma region Find the number of sum vertices
+    uint lastElement2, lastScanElement2;
+    checkCudaErrors(cudaMemcpy((void*)&lastElement2,
+        (void*)(d_voxelVerts + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy((void*)&lastScanElement2,
+        (void*)(d_voxelVertsScan + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+    num_resultVertices = lastElement2 + lastScanElement2;
+#pragma endregion
+
+    // free pinned memory
+    cudaFreeHost(d_voxelOccupied);
+    cudaFreeHost(d_voxelVerts);
+
+#pragma region Generate isosurface
+
+    checkCudaErrors(cudaMalloc((void**)&(d_result), num_resultVertices * sizeof(float3)));
+
+    dim3 grid2((num_activeVoxels + threads - 1) / threads, 1, 1);
+
+    // get around maximum grid size of 65535 in each dimension
+    if (grid.x > 65535)
+    {
+        grid2.x /= 2;
+        grid2.y *= 2;
+    }
+
+    launch_extractIsosurface(grid2, threads, d_result, d_compVoxelArray, d_voxelVertsScan,
+        gridSize, basePoint, voxelSize, isoValue);
+
+    resultPts = new float3[num_resultVertices];
+    checkCudaErrors(cudaMemcpy(resultPts,
+        d_result, num_resultVertices * sizeof(float3),
+        cudaMemcpyDeviceToHost));
+#pragma endregion
+
+    cleanup();
+
+    resultLength = (size_t)num_resultVertices;
+
+    return successful;
+}
+void getResult(cfloat3* results)
+{
+    for (int i = 0; i < num_resultVertices; i++)
+    {
+        results[i] = Convert(resultPts[i]);
+    }
+    delete[] resultPts;
+}
+void initMC()
+{
+    // allocate device memory
+    uint memSize = sizeof(uint) * numVoxels;
+    checkCudaErrors(cudaMalloc((void**)&d_voxelVertsScan, memSize));
+    checkCudaErrors(cudaMalloc((void**)&d_voxelOccupiedScan, memSize));
+    checkCudaErrors(cudaMalloc((void**)&d_compVoxelArray, memSize));
+
+    // allocate pinned memory
+    cudaError_t status = cudaMallocHost((void**)&d_voxelOccupied, memSize);
+    if (status != cudaSuccess)
+        printf("Error allocating pinned host memory\n");
+
+    cudaError_t status2 = cudaMallocHost((void**)&d_voxelVerts, memSize);
+    if (status2 != cudaSuccess)
+        printf("Error allocating pinned host memory\n");
+}
+void cleanup()
+{
+    checkCudaErrors(cudaFree(d_result));
+
+    checkCudaErrors(cudaFree(d_voxelVertsScan));
+    checkCudaErrors(cudaFree(d_voxelOccupiedScan));
+    checkCudaErrors(cudaFree(d_compVoxelArray));
+}
+```
+
+### MarchingCubesDLL/MarchingCubesGPU.h
+```
+#pragma once
+#include <cuda_runtime.h>
+#include <vector_types.h>
+#include <vector_functions.h>
+#include <SDKDDKVer.h>
+
+typedef int uint;
+typedef unsigned char uchar;
+
+using namespace std;
+
+extern "C" void launch_classifyVoxel(dim3 grid, dim3 threads, uint * voxelVerts, uint * voxelOccupied, uint3 gridSize,
+    uint numVoxels, float3 basePoint, float3 voxelSize, float isoValue);
+
+extern "C" void launch_compactVoxels(dim3 grid, dim3 threads, uint * compactedVoxelArray, uint * voxelOccupied,
+    uint * voxelOccupiedScan, uint numVoxels);
+
+extern "C" void launch_extractIsosurface(dim3 grid, dim3 threads,
+    float3 * result, uint * compactedVoxelArray, uint * numVertsScanned,
+    uint3 gridSize, float3 basePoint, float3 voxelSize, float isoValue);
+
+extern "C" void exclusiveSumScan(uint * output, uint * input, uint numElements);
+struct cfloat3
+{
+    float x, y, z;
+};
+float3 Convert(cfloat3 a)
+{
+    return make_float3(a.x, a.y, a.z);
+}
+cfloat3 Convert(float3 a)
+{
+    cfloat3 cf;
+    cf.x = a.x;
+    cf.y = a.y;
+    cf.z = a.z;
+    return cf;
+}
+
+// constants
+float3 basePoint;
+uint3 gridSize;
+
+float3 voxelSize;
+uint numVoxels = 0;
+uint num_activeVoxels = 0;
+uint num_resultVertices = 0;
+
+float isoValue = 0.2f;
+
+// device data
+float3* d_result = 0;
+
+uint* d_voxelVerts = 0;
+uint* d_voxelVertsScan = 0;
+uint* d_voxelOccupied = 0;
+uint* d_voxelOccupiedScan = 0;
+uint* d_compVoxelArray;
+
+// output
+float3* resultPts;
+
+// forward declarations
+void initMC();
+void cleanup();
+```
+
+### MarchingCubesDLL/kernels.cu
+```
+#include <stdio.h>
+#include <string.h>
+
+#include <cuda_runtime_api.h>
+
+#include <thrust/device_vector.h>
+#include <thrust/scan.h>
+#include <device_launch_parameters.h>
+
+#include <helper_cuda.h>
+#include <helper_math.h>
+
+#include "tables.h"
+
+
+// compute values of each corner point
+__device__ float computeValue(float x, float y, float z)
+{
+    return cos(x) * sin(y) + cos(y) * sin(z) + cos(z) * sin(x);
+}
+__device__ float computeValue(float3 p)
+{
+    return computeValue(p.x,p.y,p.z);
+}
+__device__ float4 computeValue4(float3 p)
+{
+    float v = computeValue(p.x, p.y, p.z);
+    const float d = 0.001f;
+    float dx = computeValue(p.x + d, p.y, p.z) - v;
+    float dy = computeValue(p.x, p.y + d, p.z) - v;
+    float dz = computeValue(p.x, p.y, p.z + d) - v;
+
+    return make_float4(dx, dy, dz, v);
+}
+// compute 3d index in the grid from 1d index
+__device__ uint3 calcGridPos(uint i, uint3 gridSize)
+{
+    uint3 gridPos;
+
+    gridPos.z = i / (gridSize.x * gridSize.y);
+    gridPos.y = i % (gridSize.x * gridSize.y) / gridSize.x;
+    gridPos.x = i % (gridSize.x * gridSize.y) % gridSize.x;
+    return gridPos;
+}
+__device__ void calcOffsetValue(float isolevel, float3 p0, float3 p1, float4 f0, float4 f1, float3& p)
+{
+    float t = (isolevel - f0.w) / (f1.w - f0.w);
+    p = p0 + t * (p1 - p0);
+}
+
+
+// classify voxel
+__global__ void classifyVoxel(uint* voxelVerts, uint* voxelOccupied, uint3 gridSize,
+    uint numVoxels, float3 basePoint, float3 voxelSize, float isoValue)
+{
+    uint blockId = blockIdx.y * gridDim.x + blockIdx.x;
+    uint i = blockId * blockDim.x + threadIdx.x;
+
+    uint3 gridPos = calcGridPos(i, gridSize);
+
+    float3 p;
+    p.x = basePoint.x + gridPos.x * voxelSize.x;
+    p.y = basePoint.y + gridPos.y * voxelSize.y;
+    p.z = basePoint.z + gridPos.z * voxelSize.z;
+
+    float field0 = computeValue(p);
+    float field1 = computeValue(make_float3(voxelSize.x + p.x, 0.0f + p.y, 0.0f + p.z));
+    float field2 = computeValue(make_float3(voxelSize.x + p.x, voxelSize.y + p.y, 0.0f + p.z));
+    float field3 = computeValue(make_float3(0.0f + p.x, voxelSize.y + p.y, 0.0f + p.z));
+    float field4 = computeValue(make_float3(0.0f + p.x, 0.0f + p.y, voxelSize.z + p.z));
+    float field5 = computeValue(make_float3(voxelSize.x + p.x, 0.0f + p.y, voxelSize.z + p.z));
+    float field6 = computeValue(make_float3(voxelSize.x + p.x, voxelSize.y + p.y, voxelSize.z + p.z));
+    float field7 = computeValue(make_float3(0.0f + p.x, voxelSize.y + p.y, voxelSize.z + p.z));
+
+    // calculate flag indicating if each vertex is inside or outside isosurface
+    uint cubeindex;
+    cubeindex = uint(field0 < isoValue);
+    cubeindex += uint(field1 < isoValue) * 2;
+    cubeindex += uint(field2 < isoValue) * 4;
+    cubeindex += uint(field3 < isoValue) * 8;
+    cubeindex += uint(field4 < isoValue) * 16;
+    cubeindex += uint(field5 < isoValue) * 32;
+    cubeindex += uint(field6 < isoValue) * 64;
+    cubeindex += uint(field7 < isoValue) * 128;
+
+    // read number of vertices from texture
+    uint numVerts = numVertsTable[cubeindex];
+
+    voxelVerts[i] = numVerts;
+    if ((numVerts > 0))
+    {
+        voxelOccupied[i] = 1;
+    }
+}
+
+// compact voxel array
+__global__ void compactVoxels(uint* compactedVoxelArray, uint* voxelOccupied, uint* voxelOccupiedScan, uint numVoxels)
+{
+    uint blockId = __mul24(blockIdx.y, gridDim.x) + blockIdx.x;
+    uint i = __mul24(blockId, blockDim.x) + threadIdx.x;
+
+    if (voxelOccupied[i] && (i < numVoxels))
+    {
+        compactedVoxelArray[voxelOccupiedScan[i]] = i;
+    }
+}
+
+__global__ void extractIsosurface(float3* result, uint* compactedVoxelArray, uint* numVertsScanned,
+    uint3 gridSize, float3 basePoint, float3 voxelSize, float isoValue)
+{
+    uint blockId = __mul24(blockIdx.y, gridDim.x) + blockIdx.x;
+    uint i = __mul24(blockId, blockDim.x) + threadIdx.x;
+
+    // compute position in 3d grid
+    uint3 gridPos = calcGridPos(compactedVoxelArray[i], gridSize);
+
+    float3 p;
+    p.x = basePoint.x + gridPos.x * voxelSize.x;
+    p.y = basePoint.y + gridPos.y * voxelSize.y;
+    p.z = basePoint.z + gridPos.z * voxelSize.z;
+
+    float3 v0 = p;
+    float3 v1 = make_float3(voxelSize.x + p.x, 0.0f + p.y, 0.0f + p.z);
+    float3 v2 = make_float3(voxelSize.x + p.x, voxelSize.y + p.y, 0.0f + p.z);
+    float3 v3 = make_float3(0.0f + p.x, voxelSize.y + p.y, 0.0f + p.z);
+    float3 v4 = make_float3(0.0f + p.x, 0.0f + p.y, voxelSize.z + p.z);
+    float3 v5 = make_float3(voxelSize.x + p.x, 0.0f + p.y, voxelSize.z + p.z);
+    float3 v6 = make_float3(voxelSize.x + p.x, voxelSize.y + p.y, voxelSize.z + p.z);
+    float3 v7 = make_float3(0.0f + p.x, voxelSize.y + p.y, voxelSize.z + p.z);
+
+   float4 field0 = computeValue4(v0);
+   float4 field1 = computeValue4(v1);
+   float4 field2 = computeValue4(v2);
+   float4 field3 = computeValue4(v3);
+   float4 field4 = computeValue4(v4);
+   float4 field5 = computeValue4(v5);
+   float4 field6 = computeValue4(v6);
+   float4 field7 = computeValue4(v7);
+
+    // calculate flag indicating if each vertex is inside or outside isosurface
+    uint cubeindex;
+    cubeindex = uint(field0.w < isoValue);
+    cubeindex += uint(field1.w < isoValue) * 2;
+    cubeindex += uint(field2.w < isoValue) * 4;
+    cubeindex += uint(field3.w < isoValue) * 8;
+    cubeindex += uint(field4.w < isoValue) * 16;
+    cubeindex += uint(field5.w < isoValue) * 32;
+    cubeindex += uint(field6.w < isoValue) * 64;
+    cubeindex += uint(field7.w < isoValue) * 128;
+
+    float3 vertlist[12];
+    float offsetV[12];
+
+    // compute the position of all vertices
+    calcOffsetValue(isoValue, v0, v1, field0, field1, vertlist[0]);
+    calcOffsetValue(isoValue, v1, v2, field1, field2, vertlist[1]);
+    calcOffsetValue(isoValue, v2, v3, field2, field3, vertlist[2]);
+    calcOffsetValue(isoValue, v3, v0, field3, field0, vertlist[3]);
+    calcOffsetValue(isoValue, v4, v5, field4, field5, vertlist[4]);
+    calcOffsetValue(isoValue, v5, v6, field5, field6, vertlist[5]);
+    calcOffsetValue(isoValue, v6, v7, field6, field7, vertlist[6]);
+    calcOffsetValue(isoValue, v7, v4, field7, field4, vertlist[7]);
+    calcOffsetValue(isoValue, v0, v4, field0, field4, vertlist[8]);
+    calcOffsetValue(isoValue, v1, v5, field1, field5, vertlist[9]);
+    calcOffsetValue(isoValue, v2, v6, field2, field6, vertlist[10]);
+    calcOffsetValue(isoValue, v3, v7, field3, field7, vertlist[11]);
+
+    // read number of vertices from texture
+    uint numVerts = numVertsTable[cubeindex];
+
+    for (int j = 0; j < numVerts; j++)
+    {
+        //find out which edge intersects the isosurface
+        uint edge = triTable[cubeindex * 16 + j];
+        uint index = numVertsScanned[compactedVoxelArray[i]] + j;
+
+        result[index] = vertlist[edge];
+    }
+}
+
+#pragma region pass methods
+
+
+extern "C" void launch_classifyVoxel(dim3 grid, dim3 threads, uint * voxelVerts, uint * voxelOccupied, uint3 gridSize,
+    uint numVoxels, float3 basePoint, float3 voxelSize, float isoValue)
+{
+    // calculate number of vertices need per voxel
+    classifyVoxel << <grid, threads >> > (voxelVerts, voxelOccupied, gridSize,
+        numVoxels, basePoint, voxelSize, isoValue);
+    getLastCudaError("classifyVoxel failed");
+}
+
+extern "C" void launch_compactVoxels(dim3 grid, dim3 threads, uint * compactedVoxelArray, uint * voxelOccupied, uint * voxelOccupiedScan, uint numVoxels)
+{
+    compactVoxels << <grid, threads >> > (compactedVoxelArray, voxelOccupied,
+        voxelOccupiedScan, numVoxels);
+    getLastCudaError("compactVoxels failed");
+}
+
+extern "C" void exclusiveSumScan(uint * output, uint * input, uint numElements)
+{
+    thrust::exclusive_scan(thrust::device_ptr<uint>(input),
+        thrust::device_ptr<uint>(input + numElements),
+        thrust::device_ptr<uint>(output));
+}
+
+extern "C" void launch_extractIsosurface(dim3 grid, dim3 threads,
+    float3 * result, uint * compactedVoxelArray, uint * numVertsScanned,
+    uint3 gridSize, float3 basePoint, float3 voxelSize, float isoValue)
+{
+    extractIsosurface << <grid, threads >> > (result, compactedVoxelArray, numVertsScanned,
+        gridSize, basePoint, voxelSize, isoValue);
+    getLastCudaError("extract Isosurface failed");
+}
+#pragma endregion
+```
+
+### MarchingCubesDLL/tables.h
+```
+#pragma once
+
+typedef unsigned int uint;
+typedef unsigned char uchar;
+
+#define X 255
+__constant__ uint triTable[4096] =
+{
+    X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    0, 8, 3, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    0, 1, 9, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    1, 8, 3, 9, 8, 1, X, X, X, X, X, X, X, X, X, X,
+    1, 2, 10, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    0, 8, 3, 1, 2, 10, X, X, X, X, X, X, X, X, X, X,
+    9, 2, 10, 0, 2, 9, X, X, X, X, X, X, X, X, X, X,
+    2, 8, 3, 2, 10, 8, 10, 9, 8, X, X, X, X, X, X, X,
+    3, 11, 2, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    0, 11, 2, 8, 11, 0, X, X, X, X, X, X, X, X, X, X,
+    1, 9, 0, 2, 3, 11, X, X, X, X, X, X, X, X, X, X,
+    1, 11, 2, 1, 9, 11, 9, 8, 11, X, X, X, X, X, X, X,
+    3, 10, 1, 11, 10, 3, X, X, X, X, X, X, X, X, X, X,
+    0, 10, 1, 0, 8, 10, 8, 11, 10, X, X, X, X, X, X, X,
+    3, 9, 0, 3, 11, 9, 11, 10, 9, X, X, X, X, X, X, X,
+    9, 8, 10, 10, 8, 11, X, X, X, X, X, X, X, X, X, X,
+    4, 7, 8, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    4, 3, 0, 7, 3, 4, X, X, X, X, X, X, X, X, X, X,
+    0, 1, 9, 8, 4, 7, X, X, X, X, X, X, X, X, X, X,
+    4, 1, 9, 4, 7, 1, 7, 3, 1, X, X, X, X, X, X, X,
+    1, 2, 10, 8, 4, 7, X, X, X, X, X, X, X, X, X, X,
+    3, 4, 7, 3, 0, 4, 1, 2, 10, X, X, X, X, X, X, X,
+    9, 2, 10, 9, 0, 2, 8, 4, 7, X, X, X, X, X, X, X,
+    2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, X, X, X, X,
+    8, 4, 7, 3, 11, 2, X, X, X, X, X, X, X, X, X, X,
+    11, 4, 7, 11, 2, 4, 2, 0, 4, X, X, X, X, X, X, X,
+    9, 0, 1, 8, 4, 7, 2, 3, 11, X, X, X, X, X, X, X,
+    4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, X, X, X, X,
+    3, 10, 1, 3, 11, 10, 7, 8, 4, X, X, X, X, X, X, X,
+    1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, X, X, X, X,
+    4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, X, X, X, X,
+    4, 7, 11, 4, 11, 9, 9, 11, 10, X, X, X, X, X, X, X,
+    9, 5, 4, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    9, 5, 4, 0, 8, 3, X, X, X, X, X, X, X, X, X, X,
+    0, 5, 4, 1, 5, 0, X, X, X, X, X, X, X, X, X, X,
+    8, 5, 4, 8, 3, 5, 3, 1, 5, X, X, X, X, X, X, X,
+    1, 2, 10, 9, 5, 4, X, X, X, X, X, X, X, X, X, X,
+    3, 0, 8, 1, 2, 10, 4, 9, 5, X, X, X, X, X, X, X,
+    5, 2, 10, 5, 4, 2, 4, 0, 2, X, X, X, X, X, X, X,
+    2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, X, X, X, X,
+    9, 5, 4, 2, 3, 11, X, X, X, X, X, X, X, X, X, X,
+    0, 11, 2, 0, 8, 11, 4, 9, 5, X, X, X, X, X, X, X,
+    0, 5, 4, 0, 1, 5, 2, 3, 11, X, X, X, X, X, X, X,
+    2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, X, X, X, X,
+    10, 3, 11, 10, 1, 3, 9, 5, 4, X, X, X, X, X, X, X,
+    4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, X, X, X, X,
+    5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, X, X, X, X,
+    5, 4, 8, 5, 8, 10, 10, 8, 11, X, X, X, X, X, X, X,
+    9, 7, 8, 5, 7, 9, X, X, X, X, X, X, X, X, X, X,
+    9, 3, 0, 9, 5, 3, 5, 7, 3, X, X, X, X, X, X, X,
+    0, 7, 8, 0, 1, 7, 1, 5, 7, X, X, X, X, X, X, X,
+    1, 5, 3, 3, 5, 7, X, X, X, X, X, X, X, X, X, X,
+    9, 7, 8, 9, 5, 7, 10, 1, 2, X, X, X, X, X, X, X,
+    10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, X, X, X, X,
+    8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, X, X, X, X,
+    2, 10, 5, 2, 5, 3, 3, 5, 7, X, X, X, X, X, X, X,
+    7, 9, 5, 7, 8, 9, 3, 11, 2, X, X, X, X, X, X, X,
+    9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, X, X, X, X,
+    2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, X, X, X, X,
+    11, 2, 1, 11, 1, 7, 7, 1, 5, X, X, X, X, X, X, X,
+    9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, X, X, X, X,
+    5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, X,
+    11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, X,
+    11, 10, 5, 7, 11, 5, X, X, X, X, X, X, X, X, X, X,
+    10, 6, 5, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    0, 8, 3, 5, 10, 6, X, X, X, X, X, X, X, X, X, X,
+    9, 0, 1, 5, 10, 6, X, X, X, X, X, X, X, X, X, X,
+    1, 8, 3, 1, 9, 8, 5, 10, 6, X, X, X, X, X, X, X,
+    1, 6, 5, 2, 6, 1, X, X, X, X, X, X, X, X, X, X,
+    1, 6, 5, 1, 2, 6, 3, 0, 8, X, X, X, X, X, X, X,
+    9, 6, 5, 9, 0, 6, 0, 2, 6, X, X, X, X, X, X, X,
+    5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, X, X, X, X,
+    2, 3, 11, 10, 6, 5, X, X, X, X, X, X, X, X, X, X,
+    11, 0, 8, 11, 2, 0, 10, 6, 5, X, X, X, X, X, X, X,
+    0, 1, 9, 2, 3, 11, 5, 10, 6, X, X, X, X, X, X, X,
+    5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, X, X, X, X,
+    6, 3, 11, 6, 5, 3, 5, 1, 3, X, X, X, X, X, X, X,
+    0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, X, X, X, X,
+    3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, X, X, X, X,
+    6, 5, 9, 6, 9, 11, 11, 9, 8, X, X, X, X, X, X, X,
+    5, 10, 6, 4, 7, 8, X, X, X, X, X, X, X, X, X, X,
+    4, 3, 0, 4, 7, 3, 6, 5, 10, X, X, X, X, X, X, X,
+    1, 9, 0, 5, 10, 6, 8, 4, 7, X, X, X, X, X, X, X,
+    10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, X, X, X, X,
+    6, 1, 2, 6, 5, 1, 4, 7, 8, X, X, X, X, X, X, X,
+    1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, X, X, X, X,
+    8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, X, X, X, X,
+    7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, X,
+    3, 11, 2, 7, 8, 4, 10, 6, 5, X, X, X, X, X, X, X,
+    5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, X, X, X, X,
+    0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, X, X, X, X,
+    9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, X,
+    8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, X, X, X, X,
+    5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, X,
+    0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, X,
+    6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, X, X, X, X,
+    10, 4, 9, 6, 4, 10, X, X, X, X, X, X, X, X, X, X,
+    4, 10, 6, 4, 9, 10, 0, 8, 3, X, X, X, X, X, X, X,
+    10, 0, 1, 10, 6, 0, 6, 4, 0, X, X, X, X, X, X, X,
+    8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, X, X, X, X,
+    1, 4, 9, 1, 2, 4, 2, 6, 4, X, X, X, X, X, X, X,
+    3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, X, X, X, X,
+    0, 2, 4, 4, 2, 6, X, X, X, X, X, X, X, X, X, X,
+    8, 3, 2, 8, 2, 4, 4, 2, 6, X, X, X, X, X, X, X,
+    10, 4, 9, 10, 6, 4, 11, 2, 3, X, X, X, X, X, X, X,
+    0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, X, X, X, X,
+    3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, X, X, X, X,
+    6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, X,
+    9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, X, X, X, X,
+    8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, X,
+    3, 11, 6, 3, 6, 0, 0, 6, 4, X, X, X, X, X, X, X,
+    6, 4, 8, 11, 6, 8, X, X, X, X, X, X, X, X, X, X,
+    7, 10, 6, 7, 8, 10, 8, 9, 10, X, X, X, X, X, X, X,
+    0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, X, X, X, X,
+    10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, X, X, X, X,
+    10, 6, 7, 10, 7, 1, 1, 7, 3, X, X, X, X, X, X, X,
+    1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, X, X, X, X,
+    2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, X,
+    7, 8, 0, 7, 0, 6, 6, 0, 2, X, X, X, X, X, X, X,
+    7, 3, 2, 6, 7, 2, X, X, X, X, X, X, X, X, X, X,
+    2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, X, X, X, X,
+    2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, X,
+    1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, X,
+    11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, X, X, X, X,
+    8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, X,
+    0, 9, 1, 11, 6, 7, X, X, X, X, X, X, X, X, X, X,
+    7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, X, X, X, X,
+    7, 11, 6, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    7, 6, 11, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    3, 0, 8, 11, 7, 6, X, X, X, X, X, X, X, X, X, X,
+    0, 1, 9, 11, 7, 6, X, X, X, X, X, X, X, X, X, X,
+    8, 1, 9, 8, 3, 1, 11, 7, 6, X, X, X, X, X, X, X,
+    10, 1, 2, 6, 11, 7, X, X, X, X, X, X, X, X, X, X,
+    1, 2, 10, 3, 0, 8, 6, 11, 7, X, X, X, X, X, X, X,
+    2, 9, 0, 2, 10, 9, 6, 11, 7, X, X, X, X, X, X, X,
+    6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, X, X, X, X,
+    7, 2, 3, 6, 2, 7, X, X, X, X, X, X, X, X, X, X,
+    7, 0, 8, 7, 6, 0, 6, 2, 0, X, X, X, X, X, X, X,
+    2, 7, 6, 2, 3, 7, 0, 1, 9, X, X, X, X, X, X, X,
+    1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, X, X, X, X,
+    10, 7, 6, 10, 1, 7, 1, 3, 7, X, X, X, X, X, X, X,
+    10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, X, X, X, X,
+    0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, X, X, X, X,
+    7, 6, 10, 7, 10, 8, 8, 10, 9, X, X, X, X, X, X, X,
+    6, 8, 4, 11, 8, 6, X, X, X, X, X, X, X, X, X, X,
+    3, 6, 11, 3, 0, 6, 0, 4, 6, X, X, X, X, X, X, X,
+    8, 6, 11, 8, 4, 6, 9, 0, 1, X, X, X, X, X, X, X,
+    9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, X, X, X, X,
+    6, 8, 4, 6, 11, 8, 2, 10, 1, X, X, X, X, X, X, X,
+    1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, X, X, X, X,
+    4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, X, X, X, X,
+    10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, X,
+    8, 2, 3, 8, 4, 2, 4, 6, 2, X, X, X, X, X, X, X,
+    0, 4, 2, 4, 6, 2, X, X, X, X, X, X, X, X, X, X,
+    1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, X, X, X, X,
+    1, 9, 4, 1, 4, 2, 2, 4, 6, X, X, X, X, X, X, X,
+    8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, X, X, X, X,
+    10, 1, 0, 10, 0, 6, 6, 0, 4, X, X, X, X, X, X, X,
+    4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, X,
+    10, 9, 4, 6, 10, 4, X, X, X, X, X, X, X, X, X, X,
+    4, 9, 5, 7, 6, 11, X, X, X, X, X, X, X, X, X, X,
+    0, 8, 3, 4, 9, 5, 11, 7, 6, X, X, X, X, X, X, X,
+    5, 0, 1, 5, 4, 0, 7, 6, 11, X, X, X, X, X, X, X,
+    11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, X, X, X, X,
+    9, 5, 4, 10, 1, 2, 7, 6, 11, X, X, X, X, X, X, X,
+    6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, X, X, X, X,
+    7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, X, X, X, X,
+    3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, X,
+    7, 2, 3, 7, 6, 2, 5, 4, 9, X, X, X, X, X, X, X,
+    9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, X, X, X, X,
+    3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, X, X, X, X,
+    6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, X,
+    9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, X, X, X, X,
+    1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, X,
+    4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, X,
+    7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, X, X, X, X,
+    6, 9, 5, 6, 11, 9, 11, 8, 9, X, X, X, X, X, X, X,
+    3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, X, X, X, X,
+    0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, X, X, X, X,
+    6, 11, 3, 6, 3, 5, 5, 3, 1, X, X, X, X, X, X, X,
+    1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, X, X, X, X,
+    0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, X,
+    11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, X,
+    6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, X, X, X, X,
+    5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, X, X, X, X,
+    9, 5, 6, 9, 6, 0, 0, 6, 2, X, X, X, X, X, X, X,
+    1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, X,
+    1, 5, 6, 2, 1, 6, X, X, X, X, X, X, X, X, X, X,
+    1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, X,
+    10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, X, X, X, X,
+    0, 3, 8, 5, 6, 10, X, X, X, X, X, X, X, X, X, X,
+    10, 5, 6, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    11, 5, 10, 7, 5, 11, X, X, X, X, X, X, X, X, X, X,
+    11, 5, 10, 11, 7, 5, 8, 3, 0, X, X, X, X, X, X, X,
+    5, 11, 7, 5, 10, 11, 1, 9, 0, X, X, X, X, X, X, X,
+    10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, X, X, X, X,
+    11, 1, 2, 11, 7, 1, 7, 5, 1, X, X, X, X, X, X, X,
+    0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, X, X, X, X,
+    9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, X, X, X, X,
+    7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, X,
+    2, 5, 10, 2, 3, 5, 3, 7, 5, X, X, X, X, X, X, X,
+    8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, X, X, X, X,
+    9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, X, X, X, X,
+    9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, X,
+    1, 3, 5, 3, 7, 5, X, X, X, X, X, X, X, X, X, X,
+    0, 8, 7, 0, 7, 1, 1, 7, 5, X, X, X, X, X, X, X,
+    9, 0, 3, 9, 3, 5, 5, 3, 7, X, X, X, X, X, X, X,
+    9, 8, 7, 5, 9, 7, X, X, X, X, X, X, X, X, X, X,
+    5, 8, 4, 5, 10, 8, 10, 11, 8, X, X, X, X, X, X, X,
+    5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, X, X, X, X,
+    0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, X, X, X, X,
+    10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, X,
+    2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, X, X, X, X,
+    0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, X,
+    0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, X,
+    9, 4, 5, 2, 11, 3, X, X, X, X, X, X, X, X, X, X,
+    2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, X, X, X, X,
+    5, 10, 2, 5, 2, 4, 4, 2, 0, X, X, X, X, X, X, X,
+    3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, X,
+    5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, X, X, X, X,
+    8, 4, 5, 8, 5, 3, 3, 5, 1, X, X, X, X, X, X, X,
+    0, 4, 5, 1, 0, 5, X, X, X, X, X, X, X, X, X, X,
+    8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, X, X, X, X,
+    9, 4, 5, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    4, 11, 7, 4, 9, 11, 9, 10, 11, X, X, X, X, X, X, X,
+    0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, X, X, X, X,
+    1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, X, X, X, X,
+    3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, X,
+    4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, X, X, X, X,
+    9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, X,
+    11, 7, 4, 11, 4, 2, 2, 4, 0, X, X, X, X, X, X, X,
+    11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, X, X, X, X,
+    2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, X, X, X, X,
+    9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, X,
+    3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, X,
+    1, 10, 2, 8, 7, 4, X, X, X, X, X, X, X, X, X, X,
+    4, 9, 1, 4, 1, 7, 7, 1, 3, X, X, X, X, X, X, X,
+    4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, X, X, X, X,
+    4, 0, 3, 7, 4, 3, X, X, X, X, X, X, X, X, X, X,
+    4, 8, 7, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    9, 10, 8, 10, 11, 8, X, X, X, X, X, X, X, X, X, X,
+    3, 0, 9, 3, 9, 11, 11, 9, 10, X, X, X, X, X, X, X,
+    0, 1, 10, 0, 10, 8, 8, 10, 11, X, X, X, X, X, X, X,
+    3, 1, 10, 11, 3, 10, X, X, X, X, X, X, X, X, X, X,
+    1, 2, 11, 1, 11, 9, 9, 11, 8, X, X, X, X, X, X, X,
+    3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, X, X, X, X,
+    0, 2, 11, 8, 0, 11, X, X, X, X, X, X, X, X, X, X,
+    3, 2, 11, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    2, 3, 8, 2, 8, 10, 10, 8, 9, X, X, X, X, X, X, X,
+    9, 10, 2, 0, 9, 2, X, X, X, X, X, X, X, X, X, X,
+    2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, X, X, X, X,
+    1, 10, 2, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    1, 3, 8, 9, 1, 8, X, X, X, X, X, X, X, X, X, X,
+    0, 9, 1, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    0, 3, 8, X, X, X, X, X, X, X, X, X, X, X, X, X,
+    X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X
+};
+#undef X
+
+__constant__ uint numVertsTable[256] =
+{
+    0,
+    3,
+    3,
+    6,
+    3,
+    6,
+    6,
+    9,
+    3,
+    6,
+    6,
+    9,
+    6,
+    9,
+    9,
+    6,
+    3,
+    6,
+    6,
+    9,
+    6,
+    9,
+    9,
+    12,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    9,
+    3,
+    6,
+    6,
+    9,
+    6,
+    9,
+    9,
+    12,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    9,
+    6,
+    9,
+    9,
+    6,
+    9,
+    12,
+    12,
+    9,
+    9,
+    12,
+    12,
+    9,
+    12,
+    15,
+    15,
+    6,
+    3,
+    6,
+    6,
+    9,
+    6,
+    9,
+    9,
+    12,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    9,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    15,
+    9,
+    12,
+    12,
+    15,
+    12,
+    15,
+    15,
+    12,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    6,
+    9,
+    9,
+    12,
+    12,
+    15,
+    12,
+    15,
+    9,
+    6,
+    9,
+    12,
+    12,
+    9,
+    12,
+    15,
+    9,
+    6,
+    12,
+    15,
+    15,
+    12,
+    15,
+    6,
+    12,
+    3,
+    3,
+    6,
+    6,
+    9,
+    6,
+    9,
+    9,
+    12,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    9,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    15,
+    9,
+    6,
+    12,
+    9,
+    12,
+    9,
+    15,
+    6,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    15,
+    9,
+    12,
+    12,
+    15,
+    12,
+    15,
+    15,
+    12,
+    9,
+    12,
+    12,
+    9,
+    12,
+    15,
+    15,
+    12,
+    12,
+    9,
+    15,
+    6,
+    15,
+    12,
+    6,
+    3,
+    6,
+    9,
+    9,
+    12,
+    9,
+    12,
+    12,
+    15,
+    9,
+    12,
+    12,
+    15,
+    6,
+    9,
+    9,
+    6,
+    9,
+    12,
+    12,
+    15,
+    12,
+    15,
+    15,
+    6,
+    12,
+    9,
+    15,
+    12,
+    9,
+    6,
+    12,
+    3,
+    9,
+    12,
+    12,
+    15,
+    12,
+    15,
+    9,
+    12,
+    12,
+    15,
+    15,
+    6,
+    9,
+    12,
+    6,
+    3,
+    6,
+    9,
+    9,
+    6,
+    9,
+    12,
+    6,
+    3,
+    9,
+    6,
+    12,
+    3,
+    6,
+    3,
+    3,
+    0,
+};
+```
+
+### MarchingCubesTest/MarchingCubesTest.cpp
+```
+﻿
+# include<iostream>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include<stdlib.h>
+
+#include <cuda_runtime.h>
+#include <vector_types.h>
+#include <vector_functions.h>
+#include <device_launch_parameters.h>
+
+#include <helper_cuda.h>
+#include <helper_functions.h>
+
+#include "..\MarchingCubesDLL\MarchingCubesGPU.h"
+
+#include<time.h>
+
+//extern "C" __declspec(dllexport)  bool computMC(cfloat3 bP, cfloat3 vS,
+//    int xCount, int yCount, int zCount, float iso,  size_t & resultLength);
+//extern "C" __declspec(dllexport)  void getResult(cfloat3 * result);
+
+bool computMC(cfloat3 bP, cfloat3 vS, int xCount, int yCount, int zCount, float iso, size_t& resultLength);
+void getResult(cfloat3* result);
+
+int main()
+{
+    cfloat3 bP, vS;
+    bP.x = 34;
+    bP.y = -30;
+    bP.z = 0;
+
+    int xCount = 50;
+    int yCount = 77;
+    int zCount = 41;
+
+    vS.x =0.54;
+    vS.y = 0.337;
+    vS.z = 0.512;
+
+    float iso = 0.31;
+
+    size_t resultLength;
+    computMC(bP, vS, xCount, yCount, zCount, iso, resultLength);
+    cout << resultPts[0].x << '\t' << resultPts[1].y << '\t' << resultPts[2].z << endl;
+    return 0;
+}
+
+bool computMC(cfloat3 bP, cfloat3 vS, int xCount, int yCount, int zCount, float iso, size_t& resultLength)
+{
+    bool successful = true;
+
+    basePoint = Convert(bP);
+    gridSize = make_uint3(xCount, yCount, zCount);
+    numVoxels = xCount * yCount * zCount;
+    voxelSize = Convert(vS);
+    isoValue = iso;
+
+    initMC();
+
+#pragma region Classify all voxels
+    int threads = 256;
+    dim3 grid((numVoxels + threads - 1) / threads, 1, 1);
+
+    // get around maximum grid size of 65535 in each dimension
+    if (grid.x > 65535)
+    {
+        grid.y = grid.x / 32768;
+        grid.x = 32768;
+    }
+
+    // calculate number of vertices need per voxel
+    launch_classifyVoxel(grid, threads,
+        d_voxelVerts, d_voxelOccupied, gridSize,
+        numVoxels, basePoint, voxelSize, isoValue);
+#pragma endregion
+
+    /*
+    Scan occupied voxels
+    after classifying voxels, we will get a lot of empty voxels.
+    in order to cull them, we have to use exclusive sum scan to get a new array
+    the last element in this new array plus the last element in the array before scan
+    equals the number of active voxels
+    */
+    exclusiveSumScan(d_voxelOccupiedScan, d_voxelOccupied, numVoxels);
+
+#pragma region Find the number of active voxels
+    uint lastElement, lastScanElement;
+    // only copy the last elements from two arrays on the device
+    checkCudaErrors(cudaMemcpy((void*)&lastElement,
+        (void*)(d_voxelOccupied + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy((void*)&lastScanElement,
+        (void*)(d_voxelOccupiedScan + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+
+    // comput the number of active voxels
+    num_activeVoxels = lastElement + lastScanElement;
+
+    if (num_activeVoxels == 0)
+    {
+        // return if there are no full voxels
+        num_resultVertices = 0;
+        successful = false;
+        return successful;
+    }
+#pragma endregion
+
+    // Compact voxels
+    // compact voxel index array
+    launch_compactVoxels(grid, threads, d_compVoxelArray, d_voxelOccupied, d_voxelOccupiedScan, numVoxels);
+
+    // Scan the number of vertices each voxel has
+    // compute the number of output vertices
+    exclusiveSumScan(d_voxelVertsScan, d_voxelVerts, numVoxels);
+
+#pragma region Find the number of sum vertices
+    uint lastElement2, lastScanElement2;
+    checkCudaErrors(cudaMemcpy((void*)&lastElement2,
+        (void*)(d_voxelVerts + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy((void*)&lastScanElement2,
+        (void*)(d_voxelVertsScan + numVoxels - 1),
+        sizeof(uint), cudaMemcpyDeviceToHost));
+    num_resultVertices = lastElement2 + lastScanElement2;
+#pragma endregion
+
+    // free pinned memory
+    cudaFreeHost(d_voxelOccupied);
+    cudaFreeHost(d_voxelVerts);
+
+#pragma region Generate isosurface
+
+    checkCudaErrors(cudaMalloc((void**)&(d_result), num_resultVertices * sizeof(float3)));
+
+    dim3 grid2((num_activeVoxels + threads - 1) / threads, 1, 1);
+
+    // get around maximum grid size of 65535 in each dimension
+    if (grid.x > 65535)
+    {
+        grid2.x /= 2;
+        grid2.y *= 2;
+    }
+
+    launch_extractIsosurface(grid2, threads, d_result, d_compVoxelArray, d_voxelVertsScan,
+        gridSize, basePoint, voxelSize, isoValue);
+
+    resultPts = new float3[num_resultVertices];
+    checkCudaErrors(cudaMemcpy(resultPts,
+        d_result, num_resultVertices * sizeof(float3),
+        cudaMemcpyDeviceToHost));
+#pragma endregion
+
+    cleanup();
+
+    resultLength = (size_t)num_resultVertices;
+
+    return successful;
+}
+void getResult(cfloat3* results)
+{
+    for (int i = 0; i < num_resultVertices; i++)
+    {
+        results[i] = Convert(resultPts[i]);
+    }
+    delete[] resultPts;
+}
+void initMC()
+{
+    // allocate device memory
+    uint memSize = sizeof(uint) * numVoxels;
+    checkCudaErrors(cudaMalloc((void**)&d_voxelVertsScan, memSize));
+    checkCudaErrors(cudaMalloc((void**)&d_voxelOccupiedScan, memSize));
+    checkCudaErrors(cudaMalloc((void**)&d_compVoxelArray, memSize));
+
+    // allocate pinned memory
+    cudaError_t status = cudaMallocHost((void**)&d_voxelOccupied, memSize);
+    if (status != cudaSuccess)
+        printf("Error allocating pinned host memory\n");
+
+    cudaError_t status2 = cudaMallocHost((void**)&d_voxelVerts, memSize);
+    if (status2 != cudaSuccess)
+        printf("Error allocating pinned host memory\n");
+}
+void cleanup()
+{
+    checkCudaErrors(cudaFree(d_result));
+
+    checkCudaErrors(cudaFree(d_voxelVertsScan));
+    checkCudaErrors(cudaFree(d_voxelOccupiedScan));
+    checkCudaErrors(cudaFree(d_compVoxelArray));
+}
+```
+
+### Properties/AssemblyInfo.cs
+```
+﻿using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+[assembly: AssemblyTitle("ALG_MarchingCubes_GPU")]
+[assembly: AssemblyDescription("")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("")]
+[assembly: AssemblyProduct("ALG_MarchingCubes_GPU")]
+[assembly: AssemblyCopyright("Copyright ©  2020")]
+[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCulture("")]
+
+[assembly: ComVisible(false)]
+
+[assembly: Guid("77d0b7bd-b9b4-4974-b1d7-158aa60159ba")]
+
+[assembly: AssemblyVersion("1.0.1")]
+[assembly: AssemblyFileVersion("1.0.1")]
+```
+
+### ALG_MarchingCubes_CUDA/Based on CUDA/ExtractIsosurface.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading.Tasks;
+using Rhino.Geometry;
+
+namespace ALG.MarchingCubes
+{
+    [StructLayout(LayoutKind.Sequential)]
+    struct cfloat3
+    {
+        public float x, y, z;
+    }
+    class ExtractIsosurface
+    {
+        public Point3d basePoint;
+        public int xCount;
+        public int yCount;
+        public int zCount;
+        public float isoValue;
+        public List<Point3d> samplePoints;
+
+        public ExtractIsosurface() { }
+        public ExtractIsosurface(Point3d basePoint, int xCount, int yCount, int zCount, float isoValue)
+        {
+            this.basePoint = basePoint;
+            this.xCount = xCount;
+            this.yCount = yCount;
+            this.zCount = zCount;
+            this.isoValue = isoValue;
+        }
+
+        [DllImport("MarchingCubesDLL.dll", EntryPoint = "computMC")]
+        public static extern bool computMC(cfloat3 bP, cfloat3 vS, int xCount, int yCount, int zCount, float iso,  ref uint resultLength);
+        [DllImport("MarchingCubesDLL.dll", EntryPoint = "getResult")]
+        public static extern void getResult(IntPtr result);
+        public bool runIsosurface(float x, float y, float z, ref List<Point3d> vertices, ref int num_activeVoxels)
+        {
+            cfloat3 bP = ConvertPtToFloat3(basePoint);
+            cfloat3 vS = new cfloat3();
+            vS.x = x;
+            vS.y = y;
+            vS.z = z;
+
+            uint resultLength = 0;
+            bool successful = computMC(bP, vS, xCount, yCount, zCount, isoValue, ref resultLength);
+
+            if (successful == false)
+            {
+                return successful;
+            }
+            else
+            {
+                int size = Marshal.SizeOf(typeof(cfloat3)) * (int)resultLength;
+                IntPtr result = Marshal.AllocHGlobal(size);
+
+                getResult(result);
+                Point3d[] pts = new Point3d[(int)resultLength];
+
+                Parallel.For(0, (int)resultLength, i =>
+                {
+                    IntPtr pPointor = new IntPtr(result.ToInt64() + Marshal.SizeOf(typeof(cfloat3)) * i);
+                    pts[i] = ConvertFloat3ToPt((cfloat3)Marshal.PtrToStructure(pPointor, typeof(cfloat3)));
+                });
+                Marshal.FreeHGlobal(result);
+                vertices = pts.ToList();
+                return successful;
+
+            }
+        }
+
+        public cfloat3 ConvertPtToFloat3(Point3d p)
+        {
+            cfloat3 a = new cfloat3();
+            a.x = (float)p.X;
+            a.y = (float)p.Y;
+            a.z = (float)p.Z;
+            return a;
+        }
+        public Point3d ConvertFloat3ToPt(cfloat3 p)
+        {
+            Point3d a = new Point3d();
+            a.X = p.x;
+            a.Y = p.y;
+            a.Z = p.z;
+            return a;
+        }
+    }
+}
+```
+
+### ALG_MarchingCubes_CUDA/Based on CUDA/Isosurface.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using Grasshopper.Kernel;
+using Rhino.Geometry;
+using Grasshopper.Kernel.Types;
+using System.Drawing;
+using System.Diagnostics;
+using Grasshopper;
+using Grasshopper.Kernel.Data;
+using System.Linq;
+
+namespace ALG.MarchingCubes
+{
+    public class ALG_Isosurface : GH_Component
+    {
+        public ALG_Isosurface()
+          : base("MarchingCubes", "MarchingCubes", "Extract isosurface from points using marching cubes algorithm on GPU.", "Mesh", "Triangulation") { }
+        public override GH_Exposure Exposure => GH_Exposure.primary;
+        protected override void RegisterInputParams(GH_Component.GH_InputParamManager pManager)
+        {
+            pManager.AddBoxParameter("Box", "B", "Define the boundary of marching cubes.", GH_ParamAccess.item);
+            pManager.AddIntegerParameter("X", "X", "The number of voxels in X asis", GH_ParamAccess.item, 10);
+            pManager.AddIntegerParameter("Y", "Y", "The number of voxels in Y asis", GH_ParamAccess.item, 10);
+            pManager.AddIntegerParameter("Z", "Z", "The number of voxels in Z asis", GH_ParamAccess.item, 10);
+            pManager.AddNumberParameter("Isovalue", "Iso", "Isovalue.", GH_ParamAccess.item);
+        }
+
+        protected override void RegisterOutputParams(GH_Component.GH_OutputParamManager pManager)
+        {
+            pManager.AddMeshParameter("Mesh", "M", "Extract isosurface.", GH_ParamAccess.item);
+            pManager.AddNumberParameter("Time", "T", "time", GH_ParamAccess.list);
+        }
+
+        protected override void SolveInstance(IGH_DataAccess DA)
+        {
+            #region input parameters
+            Box box1 = new Box();
+            int xCount = 0, yCount = 0, zCount = 0;
+            double isovalue = 5.0;
+
+            List<double> time = new List<double>();
+            Stopwatch sw = new Stopwatch();
+
+            DA.GetData("Box", ref box1);
+            DA.GetData("X", ref xCount);
+            DA.GetData("Y", ref yCount);
+            DA.GetData("Z", ref zCount);
+            DA.GetData("Isovalue", ref isovalue);
+            #endregion
+
+            sw.Start();
+            #region initialization
+            if (xCount<2 || yCount<2 || zCount <2)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "The number of voxels on some axis is too small.");
+                return;
+            }
+            Interval xD = box1.X;
+            Interval yD = box1.Y;
+            Interval zD = box1.Z;
+
+            Point3d[] a = box1.GetCorners();
+            List<double> b = new List<double>();
+            for (int i = 0; i < 8; i++)
+            {
+                double t = a[i].X + a[i].Y + a[i].Z;
+                b.Add(t);
+            }
+            Point3d baseP = a[b.IndexOf(b.Min())];
+
+            float xSize = (float)(xD.Length / xCount);
+            float ySize = (float)(yD.Length / yCount);
+            float zSize = (float)(zD.Length / zCount);
+
+            var isoSurface = new ExtractIsosurface(baseP, xCount, yCount, zCount, (float)isovalue);
+            #endregion
+            sw.Stop();
+            double ta = sw.Elapsed.TotalMilliseconds;
+
+            int num_activeVoxels = 0, num_Voxels = xCount*yCount*zCount;
+            List<Point3d> resultPts = new List<Point3d>();
+            sw.Restart();
+            bool successful = isoSurface.runIsosurface(xSize,ySize, zSize, ref resultPts,  ref num_activeVoxels);
+
+            if (successful == false)
+            {
+                AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "No eligible isosurface can be extracted, please change isovalue.");
+                return;
+            }
+            this.Message = num_Voxels.ToString();
+            sw.Stop();
+            double tb = sw.Elapsed.TotalMilliseconds;
+            // extract the mesh from result vertices
+
+            sw.Restart();
+            Mesh mesh = BasicFunctions.ExtractMesh(resultPts);
+            //mesh.Faces.CullDegenerateFaces();
+            mesh.FaceNormals.ComputeFaceNormals();
+            mesh.Normals.ComputeNormals();
+
+            sw.Stop();
+            double tc = sw.Elapsed.TotalMilliseconds;
+
+            time.Add(tb);
+            time.Add(tc);
+
+            DA.SetData("Mesh", mesh);
+            DA.SetDataList("Time", time);
+        }
+
+        protected override Bitmap Icon => null;
+        public override Guid ComponentGuid
+        {
+            get { return new Guid("{04728D21-346C-4D33-B0DF-0BC34E99CC82}"); }
+        }
+    }
+}
+```
+
+### ALG_MarchingCubes_CUDA/Basic Functions/BasicFunctions.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using Rhino.Geometry;
+using Grasshopper.Kernel;
+using Grasshopper.Kernel.Types;
+using Grasshopper.Kernel.Types.Transforms;
+
+namespace ALG.MarchingCubes
+{
+    public class BasicFunctions
+    {
+        public static List<Line> GetBoundingBoxBoundaries(Box box)
+        {
+            List<Line> lines = new List<Line>();
+            Point3d[] corners = box.GetCorners();
+
+            lines.Add(new Line(corners[0], corners[1]));
+            lines.Add(new Line(corners[1], corners[2]));
+            lines.Add(new Line(corners[2], corners[3]));
+            lines.Add(new Line(corners[3], corners[0]));
+            lines.Add(new Line(corners[4], corners[0]));
+            lines.Add(new Line(corners[5], corners[1]));
+            lines.Add(new Line(corners[6], corners[2]));
+            lines.Add(new Line(corners[7], corners[3]));
+            lines.Add(new Line(corners[4], corners[5]));
+            lines.Add(new Line(corners[5], corners[6]));
+            lines.Add(new Line(corners[6], corners[7]));
+            lines.Add(new Line(corners[7], corners[4]));
+            return lines;
+        }
+        //构建用于映射的Box
+        public static Box CreateUnionBBoxFromGeometry(List<Point3d> pts, double scale)
+        {
+
+            Plane worldXY = Plane.WorldXY;
+            Transform xform = Transform.ChangeBasis(Plane.WorldXY, worldXY);
+            BoundingBox empty = BoundingBox.Empty;
+            int num = pts.Count - 1;
+            for (int i = 0; i <= num; i++)
+            {
+                if (pts[i] != null)
+                {
+                    GH_Point ghp = new GH_Point(pts[i]);
+                    BoundingBox boundingBox = ghp.GetBoundingBox(xform);
+                    empty.Union(boundingBox);
+                }
+            }
+
+            Transform xform2 = Transform.Scale(empty.Center, scale);
+            empty.Transform(xform2);
+            Box box = new Box(empty);
+            return box;
+        }
+        //Box映射
+        public static IGH_GeometricGoo BoxMapping(Box box1, Box box2, IGH_GeometricGoo geo)
+        {
+
+            if (!box1.IsValid || !box2.IsValid)
+            {
+                return null;
+            }
+            Plane plane1 = box1.Plane;
+            Plane plane2 = box2.Plane;
+            plane1.Origin = box1.Center;
+            plane2.Origin = box2.Center;
+            double xscale = box2.X.Length / box1.X.Length;
+            double yscale = box2.Y.Length / box1.Y.Length;
+            double zscale = box2.Z.Length / box1.Z.Length;
+            ITransform item = new Scale(plane1, xscale, yscale, zscale);
+            ITransform item2 = new Orientation(plane1, plane2);
+            GH_Transform gh_Transform = new GH_Transform();
+            gh_Transform.CompoundTransforms.Add(item);
+            gh_Transform.CompoundTransforms.Add(item2);
+            gh_Transform.ClearCaches();
+
+            IGH_GeometricGoo geo2 = geo.DuplicateGeometry();
+            geo2 = geo2.Transform(gh_Transform.Value);
+            return geo2;
+        }
+        public static IGH_GeometricGoo BoxTrans(Box box1, Box box2, IGH_GeometricGoo geo)
+        {
+
+            if (!box1.IsValid || !box2.IsValid)
+            {
+                return null;
+            }
+            Plane plane1 = box1.Plane;
+            Plane plane2 = box2.Plane;
+            plane1.Origin = box1.Center;
+            plane2.Origin = box2.Center;
+            ITransform item = new Orientation(plane1, plane2);
+            GH_Transform gh_Transform = new GH_Transform();
+            gh_Transform.CompoundTransforms.Add(item);
+            gh_Transform.ClearCaches();
+
+            IGH_GeometricGoo geo2 = geo.DuplicateGeometry();
+            geo2 = geo2.Transform(gh_Transform.Value);
+            return geo2;
+        }
+
+        public static List<IGH_GeometricGoo> ConvertPointsToGeo(List<Point3d> pts)
+        {
+            List<IGH_GeometricGoo> geos = new List<IGH_GeometricGoo>();
+            for (int i = 0; i < pts.Count; i++)
+            {
+                GH_Point point = new GH_Point(pts[i]);
+                geos.Add(point);
+            }
+            return geos;
+        }
+        public static List<Point3d> ConvertGeosToPoints(List<IGH_GeometricGoo> geos)
+        {
+            List<Point3d> pts = new List<Point3d>();
+            for (int i = 0; i < geos.Count; i++)
+            {
+                if (geos[i].IsValid)
+                {
+                    Point3d point = new Point3d();
+                    GH_Convert.ToPoint3d(geos[i], ref point, GH_Conversion.Both);
+                    pts.Add(point);
+                }
+            }
+            return pts;
+        }
+        public static Mesh ExtractMesh(List<Point3d> pts)
+        {
+            Mesh mesh = new Mesh();
+            int FCount = pts.Count / 3;
+
+            mesh.Vertices.AddVertices(pts);
+
+            MeshFace[] mfs = new MeshFace[FCount];
+            Parallel.For(0, FCount, i =>
+            {
+               MeshFace mf = new MeshFace(i * 3, i * 3 + 1, i * 3 + 2);
+               mfs[i] = mf;
+            });
+            mesh.Faces.AddFaces(mfs);
+            return mesh;
+        }
+
+    }
+}
+```
+
+### ALG_MarchingCubes_CUDA/Properties/AssemblyInfo.cs
+```
+﻿using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+// 有关程序集的一般信息由以下
+// 控制。更改这些特性值可修改
+// 与程序集关联的信息。
+[assembly: AssemblyTitle("ALG_MarchingCubes_CUDA")]
+[assembly: AssemblyDescription("")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("")]
+[assembly: AssemblyProduct("ALG_MarchingCubes_CUDA")]
+[assembly: AssemblyCopyright("Copyright ©  2020")]
+[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCulture("")]
+
+// 将 ComVisible 设置为 false 会使此程序集中的类型
+//对 COM 组件不可见。如果需要从 COM 访问此程序集中的类型
+//请将此类型的 ComVisible 特性设置为 true。
+[assembly: ComVisible(false)]
+
+// 如果此项目向 COM 公开，则下列 GUID 用于类型库的 ID
+[assembly: Guid("84fa415f-6f63-4efe-a1ef-31593631ea97")]
+
+// 程序集的版本信息由下列四个值组成: 
+//
+//      主版本
+//      次版本
+//      生成号
+//      修订号
+//
+//可以指定所有这些值，也可以使用“生成号”和“修订号”的默认值
+//通过使用 "*"，如下所示:
+// [assembly: AssemblyVersion("1.0.*")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+```

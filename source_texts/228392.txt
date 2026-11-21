@@ -1,0 +1,313 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+feat(render): update probe volumes from the scene through the software trace by fesoliveira014 · Pull Request #139 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Sep 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changed
+Probe volumes gain a third fill, ProbeFill.SCENE: each update traces rays from the volume's probes through the software BVH, shades the hits with a frustum-free light list, software shadow rays, emission and the bounce the probe atlases already hold, and blends the result into the existing irradiance and visibility atlases with hysteresis. This gives multi-bounce diffuse GI for static geometry and moving lights without ray-tracing hardware.
+c3d::light: ProbeFill.SCENE, ProbeUpdateDesc (rays_per_probe 32 to 256, probes_per_frame round-robin window, hysteresis in [0, 1)), PROBE_UPDATE_DEFAULT (128 rays, every probe, 0.97), validity terms.
+c3d::maths: spherical_fibonacci, random_rotation (Shoemake), mirrored in sampling.glsl with quaternion_rotate.
+ABI: RayResultGpu, ProbeTraceRoot, ProbeBlendRoot.
+Shaders: probe_trace.comp (miss reads the lighting environment, back faces return 0 and a negative distance, hits add Lambert direct light with traced shadows, emission and albedo / PI times the atlas irradiance at the hit) and probe_blend.comp (cosine-weighted irradiance times PI, Chebyshev moments with a cosine power of 50, hysteresis blend). trace_miss_radiance moved to ibl.glsl; the environment fill writes zero irradiance without an environment (the clear of a new SCENE atlas).
+Renderer (render/probe_update.c3, render/probe_volume.c3): per-frame, per-scene update inside the first view that renders the scene; first sweep with hysteresis 0 behind a cleared atlas, views keep the SH until every probe holds an estimate; a node jump above half the smallest spacing restarts the atlas; hidden volumes are not updated; the bounce reads a hit set packed at unit energy so a high energy cannot make the feedback diverge; a discarded frame restores the fill state; the ray buffer grows on demand and is freed with the renderer. Pass.PROBE_UPDATE moves ahead of instance culling; Stats.probe_rays, Stats.probe_updates.
+GUI: inspector gains the fill "Scene" and the update fields; the stats panel lists probe rays, updates and dropped volumes.
+Examples: probe_volume --fill none|environment|scene and a "Move sun" control; gltf_viewer --benchmark gains --probe-fill, --probe-window, --point-shadows, and the CSV a gpu_probe_update_ms column.
+Docs: docs/probe_volumes.md (scene updates, lights, sweep, restarts, probes inside geometry, measured costs), docs/benchmarking.md.
+Notes
+Back-face rays count in the irradiance average with zero radiance and their weight, rather than being skipped. A probe inside a wall sees mostly back faces; skipping them left its few grazing rays that reach lit faces to carry its whole estimate, and that light leaked into a closed room through the visibility floor (found by the GPU acceptance).
+The acceptance cases read the atlases back through a compute copy (the atlases have no transfer usage) and compare the mean interior irradiance instead of floor pixels, since the leak and stability claims are about the probes.
+The open-sky case checks the top probe's upward texel against PI x sky radiance instead of a floor pixel against the SH render: a floor pixel reads about a quarter below the SH because the probe layer under the floor enters it through the visibility weights. The docs state this limit; probes are not relocated or classified.
+The two-scene case checks two updates per frame and each room's leak or light instead of pixel equality with single-scene renders.
+Verification
+python3 scripts/build.py --test (WSL): green; root unit target 628 passed (9 new CPU tests: sequences, update window, validity, sweep, restart, fill switches, discard restore, hit set versus view set).
+GPU acceptance on an RTX 4090 (Windows host; WSL Vulkan enumeration hangs): c3c test acceptance --path test/gpu/render 72 passed, 0 failed at the last test change (7 new cases). Closed room 0.06 percent of the open room, restart after a jump reads 0, energy-4 lamp room changes 0.4 percent between 250 and 300 updates, open-sky texel within 1.3 percent of PI x sky, no NaN or infinity after the clear and the sweep, hidden volumes take no update and no slot, validation clean.
+RTX 4090, Sponza, 3840 x 2160, Pass.PROBE_UPDATE medians: 256 probes x 128 rays 0.69 ms (sun only) and 0.95 ms (64 shadowing point lights); 4096 probes with a window of 512 0.65 and 0.80 ms; 32768 probes with a window of 512 0.70 ms. Largest 90th percentile 1.31 ms, under the 2 ms budget. Border copies over the largest atlases do not show above the window spread. A ray-traced reflection view records in 0.21 ms of CPU with a SCENE volume against 0.18 ms without.
+examples/probe_volume --fill scene on Sponza matches a path-traced reference render (dark corridors and arches, the same sunlit strip); the environment fill overlights the interiors.
+Remaining
+Probes inside geometry are dark and low-weighted but not excluded; relocation or classification is not part of this change.
+Hardware ray-query probe updates and screen-space GI follow separately.
+fesoliveira014
+added 10 commits
+September 28, 2026 10:04
+feat(render): trace the scene from probe volumes and blend it into th…
+…
+93379b5
+```
+…eir atlases
+
+A SCENE probe volume casts rays through the software scene trace from a
+round-robin window of its probes each frame, shades the hits with a
+frustum-free light list, software shadow rays, emission and the bounce
+its atlases already hold, and blends the result with hysteresis. New
+atlases are cleared and swept before views read them; a jump of the node
+restarts them; discarded frames restore the fill state.
+```
+feat(examples): scene fill and a moving sun in the probe example, pro…
+…
+a079e1e
+```
+…be update options for the scene benchmark
+```
+docs: describe scene updates of probe volumes, their lights, sweep, r…
+…
+2a01020
+```
+…estarts and cost
+```
+test(render): read probe atlases back through a compute copy
+3dba9de
+fix(render): keep a new mirror's planned fill, store irradiance rathe…
+…
+6cf5d43
+```
+…r than mean radiance in scene updates
+```
+test(render): check the open-sky probe texel against the SH, compare …
+…
+1abe251
+```
+…mean irradiance for leaks
+```
+fix(render): count back-face probe rays as dark in the irradiance blend
+…
+d6f7d90
+```
+A probe inside a wall saw almost only back faces; skipping them left the few
+grazing rays that reached lit surfaces to carry its whole estimate, and that
+light leaked into closed rooms through the visibility floor.
+```
+docs: state probes inside geometry and the measured update costs
+…
+9c58410
+```
+Also put the benchmark light placement parameters one per line and state
+why the closed-room leak bound holds.
+```
+docs: describe the spread of windowed probe update costs
+353bf49
+test(render): read the mean interior irradiance only
+30858b6
+fesoliveira014
+commented
+Sep 28, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: MERGE after comment 1 (required) and green CI. Comments 2 to 6 are optional. Two visual items of the exit criterion are not shown yet; they do not block the merge and are listed below.
+Read at 30858b6 with docs/style.md, c3-expert and c3-style loaded: every changed file except the generated ABI and variant tables.
+What holds
+The update records in the uploads scope, once per frame and scene. The software trace is prepared before the copies, and the root address is passed on; no extra state repeats the trace's own idempotence.
+The probe frame root has its own writer. The probe shaders call ray_shadow_visibility, trace_miss_radiance, indirect_diffuse_irradiance, sample_light and light_casts_shadow; none reads a view field. The guard of hit_shading.glsl is unchanged.
+A shadow ray is traced only for a light that faces the hit, reaches it and casts shadows.
+The hit set is packed at unit energy, apart from the view sets.
+plan_probe_scene has the three cases as branches; an environment fill resets the scene flags, so the way back is defined.
+A discarded frame restores the fill state and resets updated_frame.
+The blend never reads an undefined texel: new atlases are cleared in the frame they are created.
+The blend stores irradiance: the cosine-weighted mean radiance times pi.
+Target.transition records a barrier even when the state repeats, so the border copy is ordered after the blend.
+No new import crosses a module boundary.
+Divergence accepted
+Back-face rays count in the irradiance blend with zero radiance and their weight. The record shows the reason: a probe inside a wall had 118 of 128 rays on back faces, and skipping them let 10 grazing rays carry its whole estimate into the closed room. The cost is the limit in comment 4.
+Verification as reported
+Unit target: 628 passed on the WSL host.
+GPU acceptance on the RTX 4090: 72 passed at 9c58410 and at this head. Closed room 0.000000; two scenes in one frame, closed room at 0.06 percent of the open one; restart after a jump 0.000000; energy 4 stable within 0.4 percent over 50 updates; upward texel within 1.3 percent of pi times the sky radiance.
+Pass.PROBE_UPDATE on the RTX 4090, Sponza, 3840 x 2160, medians of 300 frames: 0.69 ms for 256 probes x 128 rays, 0.65 ms for 4096 probes with a window of 512, 0.70 ms for 32768 probes with a window of 512; with 64 shadowing point lights 0.95 ms and 0.80 ms. Largest 90th percentile 1.31 ms. The 2 ms budget is met.
+Not run by the reviewer: the GPU acceptance cases. Vulkan enumeration hangs on the WSL host.
+Exit criterion, not shown yet
+Colour bleed from the banners onto the floor: the record says it is too faint to judge at the default camera. One capture with the camera at the floor under the banners, SCENE against ENVIRONMENT, settles it.
+Sun motion without flicker: no record. One number settles it: the largest frame-to-frame change of a floor pixel over 100 frames with the sun at rest after convergence, and the same with the sun moving.
+The captures that exist agree with the path-traced reference: dark corridors and arches, the same sunlit strip; the environment fill overlights the interiors.
+Pull request text
+The heading "Divergences from the design and why" is plan vocabulary; "Notes" says the same.
+Comment thread
+src/c3d/render/probe_update.c3
+});
+foreach (&update : recording.updates[:recording.update_count]) {
+usz set_index;
+while (order[set_index] != update.slot) set_index++;
+fesoliveira014
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Required. This loop has no bound and relies on the updated mirror being in the hit set. A volume on a node with layers == 0 breaks that.
+probe_scene_due tests visible_effective only, so the volume is planned and queued.
+order_probe_volumes tests node.layers & layers with uint::max for the hit set (probe_volume.c3:171), so a node with no layer bit is left out.
+The loop then runs past count. order is zero-initialized: for slot 0 it stops at the first unused entry and the shader reads a zeroed volume; for any other slot it runs past the array.
+The interview decided that layers do not gate the update and that the hit set has no layer filter. Fix: the hit set skips the layer test (a flag, not a mask of all bits). Add the case to test_hit_set_ignores_layers_and_keeps_unswept_volumes: a volume on a node with layers = 0 is in the hit set.
+Comment thread
+src/c3d/render/probe_volume.c3
+Outdated
+state.irradiance = *current;
+state.visibility_distance = max_distance;
+state.visibility_filled = true;
+state.scene_defined = false;
+fesoliveira014
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Optional. These three resets run only when an environment exists. In the branch above (!current) the scene flags stay, so a volume switched from SCENE to ENVIRONMENT in a scene without an environment stays in the view sets through scene_swept and keeps lighting with its last scene texels. The documented rule is that such a volume lights nothing. Reset the flags in that branch too.
+Comment thread
+src/c3d/render/probe_update.c3
+Outdated
+import gpu;
+import std::math;
+const float PROBE_RESTART_SPACING @private = 0.5f; // of the smallest spacing; a larger jump between updates restarts the atlas
+fesoliveira014
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Optional. Lines 11 and 12 here and probe_volume.c3:364 are over 120 columns. The docstring of prepare_probe_updates (line 88) has a summary line on a private function; the other private helpers keep the @require only.
+Comment thread
+docs/probe_volumes.md
+hit. A scene with a `SCENE` volume prepares the software scene trace every frame it renders, which walks
+every traceable mesh and batch instance.
+- **Two scenes in one frame** both update; the software trace is rebuilt for each.
+- **Probes inside or behind geometry.** A probe inside a wall sees mostly back faces and reads dark, so it
+fesoliveira014
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Optional, and one item to carry forward. The darkening has a size an author can control, and the docs can say how.
+A surface between a buried layer and the next one takes the buried probes at 1 - alpha of the trilinear weight, where alpha is its distance above the buried layer in spacings. The buried probes keep the visibility floor of 0.05. Computed from the weights, not measured:
+floor 0.1 of a spacing above the buried layer: buried share about 0.31, the quarter the record reports;
+floor 0.9 of a spacing above it: buried share about 0.006.
+So the advice is: place the volume so that floors and walls lie just under the next probe layer, not just over a buried one. The example puts the lowest layer at the model's lower bound, which is the unfavourable case.
+Carry forward in the close-out: probes inside geometry are neither moved nor switched off; the owner decides whether that becomes a milestone.
+Comment thread
+test/gpu/render/test_probe_update.c3
+Outdated
+uint[<3>] counts = { SKY_COUNTS.x, SKY_COUNTS.y, top_probe.z + 1 };
+uint[<2>] cell = render::probe_cell(counts, mirror.slices_per_row, top_probe);
+Vec2 up = render::probe_atlas_texel(cell, shader::PROBE_IRRADIANCE_CELL, { 0, 1, 0 });
+usz texel = (usz)(up.y - 0.5f) * mirror.irradiance.width + (usz)up.x;
+fesoliveira014
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Optional. The two axes are rounded differently (up.y - 0.5f against up.x); state why in one comment or floor both the same way. The case's name says it matches the SH, and it compares against pi times the sky radiance; name what it checks.
+Comment thread
+shaders/probe_blend.comp.glsl
+Outdated
+vec3 direction = quaternion_rotate(root.rotation, spherical_fibonacci(ray, root.rays_per_probe));
+float cosine = max(dot(texel_direction, direction), 0.0);
+if (irradiance) {
+// Back-face rays carry zero radiance and keep their weight, so a probe inside geometry goes dark.
+fesoliveira014
+Sep 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Optional. The comment states what the branch does and why for the probe inside geometry. Add the other half of the reason, which the record has and the code does not: skipping these rays leaves the few grazing rays of such a probe to carry its whole estimate.
+fix(render): keep every visible probe volume in the hit set whatever …
+…
+b659d50
+```
+…its layers
+
+A scene-updated volume on a node without layers was queued for an update but
+left out of the hit set, so the update searched past the set for its index.
+Also clear the scene state when an environment fill has no environment, wrap
+long lines, name the open-sky comparison after the sky, and advise where
+floors and walls sit relative to the probe layers.
+```
+fesoliveira014
+commented
+Sep 28, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: MERGE. CI is green on both jobs at b659d50.
+Read the one commit on 30858b6.
+Required fix applied. The hit set skips the layer test, so every updated mirror is in it: an update is queued only for a visible node, and the plan marks its texels defined. The unit test holds a volume on a node with no layer bit.
+Optional comments applied: an environment fill resets the scene state also without an environment, with a test line; lines wrapped; the placement advice is in the docs, marked as computed from the sampling weights; the open-sky case is named after what it checks and floors both axes the same way; the blend comment carries both halves of its reason.
+No other behavior change.
+Verification as reported at this head
+Unit target green on the WSL host.
+RTX 4090: acceptance 72 of 72.
+Not run by the reviewer: the GPU acceptance cases. Vulkan enumeration hangs on the WSL host.
+Exit criterion
+Update cost under 2 ms: met (largest 90th percentile 1.31 ms).
+Sun motion without flicker: shown by measurement. The largest frame-to-frame change of a floor pixel is 1 of 255 at rest and with the sun turning, at three floor points; the open point drifts by up to 5 levels over 100 frames. The case that measured it is not in the acceptance suite.
+No light through side walls: shown against the path-traced reference.
+Colour bleed: not shown. The reference shows none at this sun direction either, so this scene cannot show it. What the change has no check for is the bounce itself: every acceptance case passes with a bounce of zero.
+Follow-up, not part of this merge
+One acceptance case in the closed room with the lamp and one red wall: the mean interior irradiance after convergence exceeds the value after the first update by a stated factor (the bounce exists), and its red to green ratio exceeds the first update's (the bounce carries the wall's colour). Until it passes on the device, the milestone stays open.
+Hide details
+View details
+fesoliveira014
+merged commit 61343e1
+into
+main
+Sep 28, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

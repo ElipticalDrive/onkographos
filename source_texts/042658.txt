@@ -1,0 +1,1424 @@
+C3 P-VoxelMap: Compact, Cumulative and Coalescible Probabilistic
+Voxel Mapping
+arXiv:2406.01195v2 [cs.RO] 10 Oct 2024
+Xu Yang, Wenhao Li, Qijie Ge, Lulu Suo, Weijie Tang, Zhengyu Wei, Longxiang Huang, and Bo Wang
+Abstract— This work presents a compact, cumulative, and
+coalescible probabilistic voxel mapping method to enhance
+performance, accuracy, and memory efficiency in LiDAR odometry. Probabilistic voxel mapping requires storing past point
+clouds and re-iterating them to update the uncertainty at every
+iteration, which consumes large memory space and CPU cycles.
+To solve this problem, we propose a two-fold strategy. First, we
+introduce a compact point-free representation for probabilistic
+voxels and derive a cumulative update of the planar uncertainty
+without caching original point clouds. Our voxel structure only
+keeps track of a predetermined set of statistics for points that
+lie inside it. This method reduces the runtime complexity from
+O(M N ) to O(N ) and the space complexity from O(N ) to O(1)
+where M is the number of iterations and N is the number
+of points. Second, to further minimize memory usage and
+enhance mapping accuracy, we provide a strategy to dynamically merge voxels associated with the same physical planes by
+taking advantage of the geometric features in the real world.
+Rather than constantly scanning for these coalescible voxels at
+every iteration, our merging strategy accumulates voxels in a
+locality-sensitive hash and triggers merging lazily. On-demand
+merging reduces memory footprint with minimal computational
+overhead and improves localization accuracy thanks to crossvoxel denoising. Experiments exhibit 20% higher accuracy,
+20% faster performance, and 70% lower memory consumption
+than the state-of-the-art.
+I. I NTRODUCTION
+LiDAR SLAM has been extensively studied in the past
+decade thanks to the wide availability of depth sensors. The
+direct and precise depth acquisition facilitates pose estimation and map reconstruction. Numerous works contribute to
+the advancement of LiDAR SLAM [1]–[7]. These works can
+be broadly divided into direct and indirect methods based on
+how they use raw point clouds.
+Indirect methods explicitly extract geometric features like
+straight lines or planes from point clouds and perform
+localization and mapping with respect to the extracted features [1], [4], [7]. Although effective in creating sparse
+maps, feature extraction and correspondence association are
+computationally intensive and heavily rely on sensor-specific
+patterns like circular LiDAR scans.
+In contrast, direct methods obviate the need for feature
+extraction and directly register raw points to the map [2],
+[6]. These approaches leverage all available raw points for
+mapping and create dense maps. Consequently, there is
+a growing demand for efficient map organization in realAll authors are with Deptrum Ltd. Wenhao Li and Qijie Ge
+contributed equally to this work. Corresponding author: Xu Yang
+xu.yang@deptrum.com
+Fig. 1. Bias-variance tradeoff of voxel maps. (a) Small voxels capture
+details of the environment but are susceptible to noise, i.e., large variance
+(note the wiggling planes on the walls and the ground). (b) Large voxels
+are more resistant to noise but might lead to approximation bias (note the
+thick wall is over-smoothed into a plane).
+time LiDAR SLAM, particularly on resource-constrained
+platforms like embedded devices.
+Direct methods usually adopt one of the two kinds of map
+representations for point registration: irregular tree structures
+or regular voxel maps. K-d tree partitions the space into
+blocks of dynamic sizes. To locate a plane for pose estimation, a tree traverse searches for the nearest neighbors [2], [6].
+The performance of traversal may degrade when the tree is
+heavily unbalanced. Tree re-balancing and maintenance are
+complicated and often cause unexpected global pauses for
+real-time tasks. In contrast, hash-based voxel maps are more
+effective and universal. Voxel map partitions the space into
+blocks of fixed size and locates them with a hash function.
+Recent works [3], [5] have demonstrated the outstanding
+efficiency of voxel maps. Given these advantages, voxel maps
+still face several challenges:
+1) Probabilistic voxel mapping requires keeping all points
+to update the map because an iteration on all points
+is required to recompute the uncertainty of voxel
+planes [3]. This non-cumulative process is both timeconsuming and memory-inefficient.
+2) A regular voxel structure cannot capture large geometric features, e.g., walls, floors, ceilings, in the
+real world. This inflexibility leads to a duplication in
+representing a single large feature with many voxels.
+3) Bias-variance tradeoff on voxel sizes. Large voxels
+excel at collecting a substantial amount of points to
+reduce variance, but they tend to oversmooth the environment, resulting in a representation bias. Conversely,
+small voxels excel at capturing map details, i.e., lower
+bias, but are susceptible to noise, i.e., higher variance,
+especially when the point cloud is sparse. (see Fig. 1)
+To address the above challenges, we propose C3 PVoxelMap with the following contributions:
+1) We derive a compact point-free representation of plane
+uncertainty and a cumulative update scheme for each
+voxel. Our approach eliminates the recalculation of
+Jacobians for plane parameters w.r.t. each point and
+reduces the computation workload substantially. Moreover, the memory consumption of each voxel is independent of the number of points therein, resulting in
+significant memory savings.
+2) We introduce a voxel merging strategy to dynamically
+adapt to large planar features in the real world. With
+voxel merging, a large planar feature only requires
+one or a few voxels to represent. Moreover, voxel
+merging improves mapping accuracy by estimating a
+single large feature with points from multiple voxels.
+3) We propose an on-demand merging strategy with a
+locality-sensitive hash that triggers a merge operation
+only when enough coalescible voxels are aggregated.
+This strategy realizes voxel merging with minimal
+overhead and avoids brute-force search.
+II. R ELATED W ORKS
+This section briefly reviews the related works on direct and
+voxel-based mapping methods in recent years and details the
+difference with our proposed C3 P-VoxelMap.
+Probabilistic voxel mapping originates from NDT [8] and
+has evolved into many variations [3], [9], [10]. [9] first
+proposed to model voxelized point clouds with Gaussian distributions and minimize the Mahalanobis distance between
+source points and the target voxel distributions, leading to an
+efficient inquiry and registration. LiTAMIN [11] incorporates
+NDT’s voxelization in the target point set, which is usually
+large in size while adopting a k-d tree for nearest neighbor
+search (NNS) in the source point set. LiTAMIN2 [10]
+extends LiTAMIN by applying KL-divergence to measure
+the distribution-to-distribution distance.
+Different from Fast-LIO2 [6] that uses NNS of a k-d tree,
+Faster-LIO [5] points out that the strict NNS is unnecessary
+for LIO and utilizes the voxel structure with approximate
+NNS. To manage the unbounded growth of the map, incremental voxel pruning removes voxels that haven’t been
+recently used. Consequently, Faster-LIO achieves similar
+accuracy as Fast-LIO2 [6] while being more efficient in
+computation and memory consumption.
+In [6] and [5], local planes are treated as deterministic features. That is, the system only estimates the pose of a plane
+but not its uncertainty during state estimation. However,
+the pose of a plane is regressed from points from multiple
+LiDAR scans and is estimated in the global frame, thus, the
+uncertainty raised from both LiDAR measurements and egopose estimation contributes to the latent plane distribution.
+To address this issue, VoxelMap [3] proposes a probabilistic
+plane representation and explicitly parameterizes the plane
+as a multivariate function of all points. The uncertainty of a
+plane is jointly determined by the points and the ego-poses.
+Probabilistic plane representation has demonstrated its
+effectiveness in improving mapping accuracy [3]. However,
+to update a plane with newly observed points, all past points
+are required to calculate the new uncertainty, which creates
+a big burden for both memory and computation. To enhance
+memory efficiency, VoxelMap++ [12] replaces the 6-DoF
+plane parameters with a 3-DoF representation. Since each
+voxel contains only a single plane but hundreds of points,
+the memory usage is dominated by the points therein. Thus,
+the space savings from 3-DoF representation are limited. In
+this work, a compact representation and a cumulative plane
+update are proposed, eliminating the storage of past points
+and repeated computation.
+To overcome the inability to adapt to large geometric
+features, [13] and [3] utilize a coarse-to-fine voxel hierarchy.
+A regular voxel hash map is used for the coarse level,
+and for finer granularity, each voxel is further subdivided
+into sub-voxels that are indexed by an octree. Representing
+larger or irregular features in this voxel hierarchy is still
+unmanageable. [12] proposes to merge voxels with similar plane parameters. This design shares some similarities
+with our on-demand merging, but there exist several key
+differences. First, instead of searching for coalescible voxels
+constantly with union-find [12], our on-demand merging is
+triggered only when enough mergeable voxels are gathered
+in the locality-sensitive hash. Therefore, the voxel merging
+overhead is much smaller. Second, our merging strategy
+incorporates cross-voxel updates of probabilistic planes with
+respect to the uncertainty from all voxels.
+In sum, [3], [5], [6], [12] are the most relevant works to
+ours. The differences among these methods are listed in Table
+I. In terms of the state estimation, all the above methods
+are developed under the Iterative Error State Kalman filter
+(IESKF). Since this work mainly focuses on how to manage
+the voxel map compactly, we keep the state estimation
+algorithm the same. [6] gives a detailed introduction to
+IESKF.
+TABLE I
+C OMPARISON OF M ETHODS
+Fast-LIO2
+Faster-LIO
+VoxelMap
+VoxelMap++
+Ours
+Map Structure
+Plane Rep.
+Plane Update
+Incremental K-d tree
+Incremental Voxel
+Adaptive Voxel
+Mergeable Voxel
+C3 P Voxel
+Det.
+Det.
+Prob.
+Prob.
+Prob.
+No update
+No update
+Non-cumulative
+Non-cumulative
+Cumulative
+Det. is short for Deterministic.
+Prob. is short for Probabilistic.
+III. S YSTEM OVERVIEW
+3
+C P-VoxelMap incorporates a coalescible voxel map with
+probabilistic plane representation and optimizes the estimation with IESKF. The voxel map is a 3D grid of the
+space where each voxel stores a probabilistic plane extracted
+from point clouds aggregated across multiple frames. The
+uncertainty of a plane is represented by a covariance matrix,
+jointly determined by the noise of all past points and the
+associated camera poses.
+IESKF optimizes probabilistic plane configurations and
+camera poses by minimizing the point-to-plane distance. This
+probabilistic representation provides a more accurate pointto-plane measurement model than deterministic representations, as it accounts for the plane’s uncertainty [3]. C3 PVoxelMap enables cumulative update to the covariance of
+probabilistic planes without storing and re-iterating on past
+point clouds (see Section IV).
+To merge voxels representing the same physical planes
+on demand, voxels are hashed into buckets based on their
+locations and plane orientations. When a bucket accumulates
+sufficient voxels, small planes are merged into a large one.
+The uncertainty of the merged plane is updated using the
+same cumulative method as for individual voxel planes. Each
+voxel subsequently adopts the merged plane as its feature in
+the filtering process (see Section V).
+IV. C UMULATIVE P ROBABILISTIC U PDATE
+Following the formulation in probabilistic voxel mapping
+[3], our system employs planes as the feature in the voxel
+map, which exist ubiquitously in the real world. A probabilistic plane is composed of a normal vector n, a center point q,
+and a covariance matrix Σn,q denoting the uncertainty. The
+uncertainty model of a voxel plane considers both sensor
+noise and the estimated pose noise in the world frame.
+Considering a point p as a 3-dimensional random variable
+sampled from a plane, the parameter of the plane can be
+formulated as a multi-variate function f of all points:
+ gt gt T
+n ,q
+= f (p1 + δ p1 , p2 + δ p2 , . . . , pN + δ pN )
+N
+X
+∂f
+i=1
+∂pi
+δ pi
+(1)
+where [ngt , qgt ] denotes the ground truth plane, and δ pi
+denotes the Gaussian distributed noise of the i-th point. Here,
+function f first computes the mean q and the covariance
+matrix A from the point clouds:
+q=
+N
+X
+1
+pi
+N i=1
+A=
+N
+X
+1
+pi pTi − qqT
+N i=1
+U = [u1 , u2 , u3 ]
+(4)
+The Jocabian of n, q w.r.t. each point pi in (1) is computed
+as follows [3]:
+
+
+T
+
+
+(pi − q) F1
+∂n
+1 1 1
+ ∂q
+
+= U  (pi − q)T F2  ,
+= diag
+, ,
+∂pi
+∂pi
+N N N
+T
+(pi − q) F3
+(5)
+
+
+1
+T
+T
+u
+n
++
+nu
+,
+m
+=
+̸
+3,
+m
+m
+N (λ3 −λm )
+Fm =
+(6)
+01×3
+, m = 3.
+Thus, the plane uncertainty is a linear combination of all
+Σpi :
+
+
+N
+X
+∂f T ∂f
+∂n ∂q
+∂f
+Σpi
+,
+=
+,
+(7)
+Σn,q =
+∂pi
+∂pi ∂pi
+∂pi ∂pi
+i=1
+where Σpi ∈ R3×3 denotes the covariance matrix of the i-th
+point in the world coordinate frame.
+B. Cumulative Update
+Upon the arrival of new points, both the pose n, q, and
+uncertainty Σn,q of a voxel plane need to be updated. Updating q cumulatively w.r.t. a new point p is straightforward.
+N
+1
+q+
+p
+(8)
+N +1
+N +1
+The update of n is based on an cumulative update of A
+N
+1
+T
+(A + qqT ) +
+ppT − q′ q′
+(9)
+N +1
+N +1
+The normal vector n′ is the third singular vector of the
+covariance matrix A′ ∈ R3×3 under singular value decomposition.
+However, the cumulative update of Σn,q is non-trivial
+because this update triggers a re-computation of the Jacobian
+of n, q w.r.t. pi . As shown in (7), the re-computation
+involves every point that falls into a voxel in the past. The recomputation is not only time-consuming but also memoryinefficient because all past points must be stored and reiterated. We derive a new algorithm that makes cumulative
+updates possible and avoids the storage of past points.
+By expanding (7) we have
+A′ =
+Σn,q =
+=
+N
+X
+∂f
+∂f T
+Σpi
+∂pi
+∂pi
+i=1
+"
+N
+∂n
+∂n T
+X
+∂pi Σpi ∂pi
+i=1
+(2)
+(3)
+∂q
+∂n T
+∂pi Σpi ∂pi
+∂n T
+∂n
+i=1 ∂pi Σpi ∂pi
+PN ∂q
+∂n T
+i=1 ∂pi Σpi ∂pi
+" PN
+=
+then followed a singular value decomposition (SVD) of
+matrix A to obtain eigenvalues and eigenvectors:
+A = U diag(λ1 , λ2 , λ3 )UT
+n = u3
+q′ =
+A. Probabilistic Plane Representation
+≈ [n, q]T +
+where λ1 , λ2 and λ3 are singular values in a descend order,
+u1 , u2 and u3 are singular vectors. The normal n of the
+voxel plane is simply obtained by
+def
+=
+
+Σnn
+Σnq T
+Σnq
+Σqq
+∂q T
+∂n
+∂pi Σpi ∂pi
+∂q
+∂q T
+∂pi Σpi ∂pi
+#
+∂q T
+∂n
+i=1 ∂pi Σpi ∂pi
+PN ∂q
+∂q T
+i=1 ∂pi Σpi ∂pi
+PN
+#
+
+(10)
+Given the similarity in form among Σnn , Σnq , and Σqq ,
+we will use Σnn as an example to provide a detailed derivation of the cumulative update process for plane covariance.
+First, we substitute (5) in Σnn
+Σnn =
+N
+X
+∂n
+i=1
+∂pi
+
+Σpi
+bpp
+mn =
+∂n T
+∂pi
+T
+=
+
+(pi − q) F1
+FT1 (pi − q)
+
+
+T
+=
+U  (pi − q) F2  Σpi  FT2 (pi − q)  UT
+T
+i=1
+FT3 (pi − q)
+(pi − q) F3
+
+
+
+ T
+T
+(pi − q) F1
+N
+F1 (pi − q)
+X
+
+
+T
+T
+=U
+ (pi − q) F2  Σpi  FT2 (pi − q)  U
+T
+T
+i=1
+F3 (pi − q)
+(pi − q) F3
+N
+X
+Substituting (13-14) in bpp
+mn and expanding it yields a more
+concise form:
+
+bpp
+mn =
+=
+=
+−
+i=1
+N
+X
+i=1
+qT Fm Σpi FTn pi +
+pi T Fm ej eTj Σpi ek eTk FTn pi
+N X
+3 X
+3
+X
+tr pi T Fm ej eTj Σpi ek eTk FTn pi
+
+N X
+3 X
+3
+X
+tr pi pi T Fm ej eTj Σpi ek eTk FTn
+
+tr eTj Σpi ek pi pi T Fm ej eTk FTn
+
+i=1 j=1 k=1
+=
+N X
+3 X
+3
+X
+i=1 j=1 k=1
+=
+3
+3 X
+X
+tr
+=
+3
+3 X
+X
+N
+X
+!
+eTj Σpi ek pi pi T
+
+Fm ej eTk FTn
+i=1
+j=1 k=1
+i=1
+N
+X
+(15)
+i=1 j=1 k=1
+(11)
+where B ∈ R3×3 .
+This transformation isolates U from the point-related
+computation. Thus, to derive an update formula concerning
+new points, we only need to compute B cumulatively.
+Let bmn be the element at m-th row and n-th column of
+B.
+N
+X
+T
+bmn =
+(pi − q) Fm Σpi Fn T (pi − q)
+pi Fm Σpi FTn pi −
+i=1
+N
+3 X
+3
+XX
+According to the trace trick in Lemma 2 and the associative property of matrix multiplication, (15) can be further
+transformed as follows.
+= UBUT
+T
+vimT Di vin
+i=1 j=1 k=1
+
+def
+N
+X
+N
+X
+tr Xj,k Fm ej eTk FTn
+
+j=1 k=1
+T
+pi Fm Σpi FTn q
+(12)
+i=1
+N
+X
+qT Fm Σpi FTn q
+i=1
+We would like to leverage statistics of all points to get rid
+of the dependency on the value of each point individually.
+To achieve this goal, we introduce two lemmas below.
+Lemma 1: Given a standard orthogonal basis in R3 : e1 =
+T
+T
+T
+[1, 0, 0] , e2 = [0, 1, 0] , e3 = [0, 0, 1] ∀A ∈ R3×3 , each
+element of A can be represented as aij = eTi Aej ,where
+i, j ∈ {1, 2, 3}
+Lemma 2: Given x, y ∈ R3 , A ∈ R3×3 , then xT Ay ∈
+R, yxT A ∈ R3×3 and xT Ay = tr(xT Ay) = tr(yxT A),
+where tr(.) is the trace of the matrix.
+Let bpp
+mn be the first term of bmn in (12), i.e.,
+PN
+T
+T
+bpp
+mn =
+i=1 pi Fm Σpi Fn pi
+Below we show how to update bpp
+mn cumulatively. Other
+terms of bmn can be computed similarly.
+Let vim = FTm pi ∈ R3×1 , Di = Σpi ∈ R3×3 , vin =
+T
+Fn pi ∈ R3×1 .
+According to Lemma 1, each element of vim , vin and Di
+can be explicitly represented by the basis.
+ T T
+
+ T T
+
+e1 Fm pi
+e1 Fn pi
+vim =  eT2 FTm pi 
+vin =  eT2 FTn pi 
+(13)
+T T
+e3 Fm pi
+eT3 FTn pi
+ T
+
+e1 Σpi e1 eT1 Σpi e2 eT1 Σpi e3
+Di =  eT2 Σpi e1 eT2 Σpi e2 eT2 Σpi e3 
+(14)
+eT3 Σpi e1 eT3 Σpi e2 eT3 Σpi e3
+(16)
+where
+Xj,k =
+N
+X
+eTj Σpi ek pi pi T
+∀j, k ∈ {1, 2, 3}
+(17)
+i=1
+It is noteworthy that terms related to points, specifically
+pi and its covariance matrix Σpi , can be incrementally
+accumulated in Xj,k , thanks to Xj,k being independent
+of Fm . Furthermore, in (6), Fm is computed from the
+singular vectors of the covariance matrix A, which has a
+trivial cumulative update formula in (9). Similarly, all terms
+in Σn,q can be updated cumulatively with three statistics
+Xj,k , Yj and Z.
+Yj =
+Z=
+N
+X
+i=1
+N
+X
+Σpi ej pi T
+Σpi
+∀j ∈ {1, 2, 3}
+(18)
+(19)
+i=1
+Given a new point pi and its covariance matrix Σpi , all
+three statistics can be updated cumulatively.
+C. Complexity Analysis
+As 3 × 3 symmetric matrices, only the upper-triangles
+of Xj,k and Z need to be stored, each with six scalars
+respectively. Given that Yj is asymmetric, nine scalars
+are needed. Considering the number of matrices for each
+statistic, we can store all statistic matrices for a plane’s
+uncertainty in a total of 6 × 6 + 3 × 9 + 6 = 69 scalars.
+In contrast, non-cumulative methods like VoxelMap [3]
+store each point in a 3D vector and a 3×3 covariance matrix,
+Time k
+z u
+Regular Voxel
+LSH
+d
+Reference Voxel
+On-demand merge
+n
+φ
+Buckets
+v
+Time k+1
+y
+LSH
+θ
+LSH
+LSH
+Merge
+Buckets
+x
+Fig. 2. Locality-sensitive hash keys are comprised of five parameters: θ,
+φ are spherical coordinates of normal n, d is distance from origin to the
+plane, u and v are projection coordinates of a voxel on the plane.
+Fig. 3. Illustration of voxel merging. Through LSH, voxel planes proximate
+to each other in the parameter space are hashed into the same bucket. A
+merge operation is triggered once a bucket accumulates enough voxels.
+resulting in a space complexity of O(N ) where N is the
+number of points. Our compact representation has a constant
+O(1) space complexity regardless of the number of points.
+Due to the re-computation in plane uncertainty update,
+non-cumulative methods have a time complexity of O(M N )
+where M is the number of iterations. Our cumulative method
+reduces the time complexity to O(N ), making the updates
+much more efficient and scalable.
+A voxel plane is hashed into a bucket indexed by k ∈ R5 .
+
+T
+θ
+φ
+d
+u
+v
+k= ⌊
+⌋, ⌊
+⌋, ⌊
+⌋, ⌊
+⌋, ⌊
+⌋
+(23)
+∆θ
+∆φ
+∆d
+∆u
+∆v
+V. O N - DEMAND VOXEL M ERGING
+The cumulative update strategy reduces the computation
+and storage for each voxel. Further improvement is achieved
+by reducing the number of voxels through merging. To
+reduce the overhead of searching for coalescible voxels in
+a brute-force manner, we design a locality-sensitive hash to
+aggregate voxels aligning on similar physical planes (Section
+V-A). We propose the merge procedure and criterion to
+ensure merging consistency (Section V-B). Moreover, we
+analyze the accuracy improvement of plane estimation due
+to voxel merging (Section V-C).
+A. Locality-Sensitive Hash
+To hash voxel planes according to their proximity in the
+parameter space, we employ [θ, φ, d] for a representation
+with minimum DoF, where azimuthal angle θ and polar angle
+φ are spherical coordinates computed from the normal vector
+n, as in Fig. 2, and d is computed by
+d = −nT q
+(20)
+Given that a physical plane has limited area in the real
+world, voxel planes with similar parameters θ, φ, d but
+distributed far away might be associated with different realworld features and should not be merged. To accommodate
+this property, we introduce a proximity coordinates [u, v]
+computed as follows:
+
+  T T 
+u
+e1 R q
+(21)
+=
+v
+eT2 RT q
+where R indicates the rotation transform from global frame
+to the plane as computed in (22), making z-axis aligns with
+the direction of n, and e1 , e2 are defined in Lemma 1.
+
+
+
+cosθ −sinθ 0
+cosφ 0 sinφ
+0
+1
+0  (22)
+R =  sinθ cosθ 0  
+0
+0
+1
+−sinφ 0 cosφ
+where ⌊·⌋ rounds a number down to the nearest integer; ∆θ,
+∆φ, ∆d, ∆u and ∆v are the widths of the bucket along
+each dimension. Voxels with similar plane orientation and
+proximate to each other are likely to be hashed into the same
+bucket.
+B. Voxel Merging
+When a hash bucket accumulates enough voxels, a merge
+operation is triggered as shown in Fig. 3. Given multiple
+voxels in a bucket to be merged, we first find the voxel with
+the most points and then merge other voxels into this one
+by testing them against the merge criterion. This is because
+the uncertainty of a plane is gradually reduced with point
+accumulation. By taking the voxel with the most points as the
+reference, we are more confident in the merging correctness.
+To avoid merging voxels associated with different physical
+planes by error, we check the following merging criterion.
+Specifically, we require the eigenvalues of the covariance
+matrix A satisfy the planar assumption, i.e.,
+λ3
+<η
+λ1
+λ3
+<η
+λ2
+(24)
+where λ1 , λ2 , λ3 are eigenvalues of A in the descending
+order and η is a sufficient small threshold closed to zero.
+Once merged with the reference voxel of a bucket, the
+parameters of the merged voxels, i.e., n, q and Σn,q , as well
+as the memory allocated for them, are released. In contrast,
+the memory of a reference voxel is shared by other voxels
+merged into it, leading to a considerable saving of memory
+footprint. Future points falling into any of these merged
+voxels cumulatively update the reference voxel. Thanks to
+the cumulative update approach presented in Section IV-B,
+the statistics term of each voxel can be summed trivially
+without iterating the vast number of points for the large plane
+being merged.
+The voxel merging strategy enables a flexible representation of physical planes larger than the voxel dimension
+with only a single voxel. Consequently, the challenge of biasvariance trade-off in terms of voxel size detailed in Section
+I can be addressed.
+C. Accuracy Analysis
+Voxel merging enhances mapping accuracy thanks to
+cross-voxel denoising. We provide a theoretic analysis in this
+section.
+Given two voxels with point set P and point set Q
+respectively. Both sets are sampled from the same physical
+plane. Suppose P and Q contains M and N points following
+normal distribution:
+P = {p1 , p2 , ..., pM }
+∀pi ∼ N (µp , Σp )
+(25)
+Q = {q1 , q2 , ..., qN }
+∀qi ∼ N (µq , Σq )
+(26)
+According to Section IV-B, the mean µpq and covariance
+matrix Σpq after merging P and Q can be updated cumulatively:
+µpq = tµp + (1 − t)µq ,
+t=
+M
+M +N
+(27)
+Σpq = tΣp +(1−t)Σq +t(1−t)(µp −µq )(µp −µq )T (28)
+where tΣp + (1 − t)Σq is linear combination of sample
+covariance weighted by points, and µp − µq is a vector
+pointing from the center of Q to the center of P. Here we
+introduce two lemmas to analyze why voxel merging benefits
+the accuracy.
+Lemma 3: Given a non-zero vector v ∈ Rn , the matrix
+vvT has only one non-zero eigenvalue λ = ∥v∥2 with
+the corresponding eigenvector v, where ∥·∥ denotes the
+Euclidean norm.
+Lemma 4: For a symmetric matrix S = vvT , where v is a
+non-zero vector in Rn , the eigenvectors and singular vectors
+of S are identical. The principal component of S computed
+using Principal Component Analysis is in the direction of v.
+According to Lemma 3 and 4, apart from the sample
+covariance Σp and Σq , Σpq in (28) increases along the
+direction of µp −µq , which is expected to be on the physical
+plane. The increased variance on the plane enhances the
+magnitudes of the first and second principal components.
+As a result, the third principal component, i.e., the estimated
+normal direction in (4), gains increased robustness under the
+same noise level, as illustrated in Fig. 4.
+noise level
+voxel 1
+voxel 2
+noise level
+ground-truth plane
+estimated plane
+estimated normal
+sample point
+merged voxel
+Fig. 4. Illustration of accuracy enhancement thanks to voxel merging.
+The solid angle represents the robustness of plane estimation against noise.
+Merged voxel demonstrates a smaller angle than the original voxel under
+the same noise level.
+VI. E XPERIMENTS
+This section presents experiments on the accuracy and
+efficiency of C3 P-VoxelMap against the state-of-the-art on
+benchmarks including KITTI [14], UTBM [15] and our selfcollected data with a solid-state LiDAR Livox Mid360. The
+benchmarks cover both urban and indoor scenarios.
+We compare our method with five direct LO/LIO methods,
+namely Fast-LIO2 [6], Faster-LIO [5], VoxelMap [3], VoxelMap++ [12] and LiTAMIN2 [10]. A comparison of these
+approaches is shown in Table I. C3 P-VoxelMap is built on
+[3] and publicly available on Github1 .
+A. Accuracy Evaluation
+In this section, we evaluate our method on the odometry
+datasets of the KITTI Vision Benchmark [14] and UTBM
+[15]. Default parameters are used to evaluate open-sourced
+algorithms without extra tuning. Specifically, for VoxelMap
+and our proposed method, the maximum voxel size is 3m
+and the maximum octo-tree layer is 3, leading to a minimum
+voxel size of 0.375m. Since LiTAMIN2 is not open-sourced,
+we use results reported in the paper [10]. The results of
+TABLE II
+ACCURACY (ATE I N M ETERS ) C OMPARISON ON UTBM DATESET
+Approach
+(Length [m])
+Ours
+VoxelMap
+Faster-LIO
+Fast-LIO2
+0713
+(5086)
+9.71
+10.99
+14.88
+13.11
+0717
+(4998)
+10.28
+11.26
+15.36
+14.98
+0719
+(4994)
+13.68
+15.80
+16.30
+16.18
+0720
+(5035)
+10.84
+14.58
+15.05
+15.45
+Average
+(5028)
+11.09
+13.13
+15.38
+14.9
+experiments on UTBM and KITTI are listed in Table II
+and III, respectively. Since KITTI datasets provide no IMU
+data and the LiDAR scans have already been undistorted,
+a constant motion model is employed for all methods. We
+utilize absolute trajectory error (ATE) defined in [16] as the
+metric to evaluate all methods. Lower ATE indicates higher
+odometry accuracy. The last column is the average ATE of
+all sequences weighted by the number of frames. It is shown
+that our method demonstrates around 20% higher accuracy
+than the state-of-the-art [3], especially on long sequences like
+KITTI-02 and UTBM-0720.
+From Table II and III, Fast-LIO2 and Faster-LIO are
+similar in terms of accuracy, because both methods employ
+the same deterministic plane representation and the same
+measurement model in state estimation. This experiment
+indicates that the voxel structure does not contribute directly
+to the accuracy compared with the k-d tree structure. In
+contrast, VoxelMap [3] realizes higher accuracy by adopting
+probabilistic planes in the residual computation of IESKF.
+Our method further improves the accuracy with respect to
+VoxelMap thanks to the proposed on-demand merging.
+For a better understanding of the accuracy improvement
+due to voxel merging, we visualize the merged voxels with
+distinct colors in Fig. 5. The large plane features, e.g.,
+ground, walls, and ceilings, are merged successfully. Since
+the uncertainty of these planes is jointly determined by all
+merged voxels, a higher mapping accuracy is achieved than
+estimating the uncertainty of each voxel separately.
+B. Efficiency Evaluation
+Besides accuracy, we evaluate both the computation performance and the memory consumption of our algorithm
+1 https://github.com/deptrum/c3p-voxelmap
+TABLE III
+ACCURACY (ATE I N M ETERS ) C OMPARISON ON KITTI O DOMETRY T RAINING S EQUENCES
+Approach
+(Length [m])
+Ours
+VoxelMap
+VoxelMap++
+Faster-LIO
+Fast-LIO2
+LiTAMIN2
+00
+(3724)
+1.97
+3.34
+5.016
+9.426
+5.8
+01
+(2453)
+3.69
+4.52
+19.495
+20.77
+15.9
+02
+(5067)
+5.74
+10.88
+9.692
+9.537
+10.7
+03
+(560)
+0.92
+0.95
+1.39
+0.977
+1.06
+0.8
+04
+(393)
+0.26
+0.18
+0.41
+0.397
+0.435
+0.7
+05
+(2205)
+0.98
+1.10
+1.661
+1.999
+2.4
+06
+(1232)
+0.31
+0.30
+0.33
+2.142
+2.152
+0.9
+07
+(694)
+0.56
+0.71
+0.55
+1.018
+1.15
+0.6
+08
+(3222)
+3.33
+2.77
+4.307
+4.361
+2.5
+09
+(1705)
+2.65
+1.84
+1.40
+2.326
+2.458
+2.1
+10
+(919)
+1.34
+1.34
+1.71
+1.866
+2.399
+1.0
+Average
+(2016)
+2.74
+3.95
+5.25
+6.24
+5.1
+Bold denotes the best accuracy for the case, “-” indicates a significant drift from the ground-truth.
+TABLE IV
+T IME E VALUATION ( IN MILLISECONDS )
+Map ID
+KITTI
+E
+Ours (w/ merge)
+M
+Total
+Ours (w/o merge)
+E
+M
+Total
+VoxelMap
+M
+Total
+E
+E
+Faster-LIO
+M
+Total
+E
+Fast-LIO2
+M
+Total
+00
+01
+02
+03
+04
+05
+06
+07
+08
+09
+10
+23.54
+48.23
+25.35
+35.60
+38.28
+31.52
+46.83
+24.11
+39.32
+35.85
+23.74
+7.25
+14.23
+8.05
+10.40
+11.05
+8.66
+12.90
+6.72
+10.66
+9.90
+6.77
+30.79
+62.46
+33.40
+46.00
+49.33
+40.18
+59.73
+30.83
+49.98
+45.75
+30.51
+26.06
+48.92
+24.26
+35.72
+37.24
+31.15
+45.09
+23.85
+39.31
+36.86
+23.70
+4.36
+9.41
+4.58
+6.41
+7.48
+5.01
+7.36
+4.16
+6.15
+6.15
+4.11
+30.42
+58.33
+28.84
+42.13
+44.72
+36.16
+52.45
+28.01
+45.46
+43.01
+27.81
+26.06
+50.47
+25.84
+37.41
+38.82
+33.57
+47.97
+25.04
+42.06
+38.53
+24.50
+14.01
+21.22
+16.36
+25.38
+22.55
+16.88
+29.99
+14.72
+18.91
+18.98
+14.20
+40.07
+71.69
+42.20
+62.79
+61.37
+50.45
+77.96
+39.76
+60.97
+57.51
+38.7
+47.49
+71.87
+46.81
+60.05
+56.96
+55.53
+89.70
+41.10
+69.34
+54.85
+38.39
+1.01
+2.23
+1.10
+1.29
+1.58
+0.97
+1.32
+0.76
+1.39
+1.25
+0.81
+48.50
+74.10
+47.91
+61.34
+58.54
+56.50
+91.02
+41.86
+70.73
+56.10
+39.20
+35.30
+55.26
+35.07
+45.58
+50.23
+37.14
+55.77
+32.25
+45.23
+42.77
+30.39
+3.43
+7.73
+3.77
+4.05
+6.19
+3.16
+3.59
+2.85
+4.28
+4.67
+2.92
+38.73
+62.99
+38.84
+49.63
+56.42
+40.30
+59.36
+35.10
+49.51
+47.44
+33.31
+Avg.
+31.37
+9.06
+40.43
+31.59
+5.38
+36.97
+33.18
+17.66
+50.84
+55.58
+1.17
+56.75
+39.78
+3.91
+43.69
+“E” denotes the state estimation stage, “M” denotes the map update stage.
+Fig. 5. Illustration of voxel planes: (a) w/o merge and (b) w/ merge. Voxel
+merge eliminates the wiggling of planes and unifies the poses of planes
+associated with the same physical plane.
+against others. Experiments are conducted on a computer
+with Intel Core i5-12500H of 3.3GHz and 16GB RAM.
+We notice some open-source implementations employ multi-threading techniques, e.g., TBB in FasterLIO, OpenMP in Fast-LIO2 and VoxelMap. To compare the efficiency of the algorithm itself, we leave out
+the implementation-related performance gain from multithreading. Thus, for a fair comparison, tests are performed
+on a single-threaded setup.
+Time Efficiency: The performance results are listed in Table
+IV. All methods include two primary modules: state estimation and map update, and our C3 P-VoxelMap outperforms
+others in the overall processing time.
+For the state estimation stage, although the same IESKF
+framework is employed for all the tested methods, the difference in processing time cannot be ignored. As listed in Table
+IV, Faster-LIO consumes the longest 55.58 milliseconds in
+this stage as it requires a nearby voxel search which is time-
+consuming. Fast-LIO2 also spends 8.41 milliseconds more
+time than ours in indexing neighbor points in the k-d tree and
+re-estimate planes. In contrast, [3] and our C3 P-VoxelMap
+obviate the need for NNS because each voxel contains an
+individual plane, which can be directly hashed in the voxel
+map. Thus, our method saves 20% and 43% time usage
+compared with Fast-LIO2 and Faster-LIO, respectively.
+For the map update stage, thanks to our cumulative
+probabilistic update of voxel planes, the iteration of points
+and recalculation of Jacobians are eliminated and the time
+complexity is independent of the number of points. As a
+result, our C3 P-VoxelMap runs 70%(w/o merge) and 49%(w/
+merge) faster than the original VoxelMap as shown in Table
+IV. Since we not only update plane parameters but also
+update the uncertainty of the probabilistic plane, the time
+usage in our method takes longer than Fast-LIO2. However,
+our total processing time is 20% lower than VoxelMap and
+7% lower than Fast-LIO2.
+Memory Efficiency: We conduct two experiments to
+demonstrate the memory efficiency of our method against the
+others: First, we verify the constant complexity of cumulative
+probabilistic update. Second, we test the memory usage in
+both structured and unstructured environments.
+To verify the constant space complexity against the number of voxel points therein, we adjust the maximum number
+of points N stored in each voxel when comparing our method
+with the original VoxelMap [3]. If a voxel is updated by more
+than N points, the plane uncertainty will not be updated
+anymore. We compare the memory consumption between the
+original VoxelMap and ours on KITTI’s 06 sequence under
+different voxel granularity: a single-layer voxel map with a
+fixed 2m voxel size, and a multi-layer voxel map with 3m
+root voxel and a 3-layer sub-voxel as used in VI-A.
+1600
+1400
+Memory Usage (MB)
+1200
+Memory Usage w.r.t. Num of Points
+Single-layer of ours
+Single-layer VoxelMap
+Multi-layer of ours
+Multi-layer VoxelMap
+the localization accuracy by smoothing out noises thanks to
+the cross-voxel updates. Experiments on KITTI and UTBM
+benchmark demonstrate that our C3 P-VoxelMap outperforms
+the state-of-the-art with 20% higher accuracy, 20% higher
+performance, and 70% lower memory consumption. The high
+performance and low memory footprint of C3 P-VoxelMap
+show promises in achieving real-time LiDAR SLAM on
+resource-constrained platforms.
+1000
+R EFERENCES
+800
+600
+400
+200
+0
+Fig. 6.
+200
+400
+600
+Num of Points
+800
+1000
+Comparison of memory usage between VoxelMap and ours.
+As illustrated in Fig. 6, the multi-layer experiment consumes more memory than the single-layer setup as the
+granularity of the map is finer. However, compared to the
+linear complexity of the original VoxelMap, our method
+only occupies a constant memory that is independent of the
+number of points used by the voxel map, leading to constant
+memory usage.
+TABLE V
+C OMPARISON OF M EMORY U SAGE ( IN MB )
+Approach
+(Length [m])
+04
+(393)
+06
+(1232)
+09
+(1705)
+Indoor
+(560)
+C3 P-VoxelMap
+VoxelMap
+243.7
+521.0
+315.9
+1433.6
+878.7
+2150.4
+229.6
+1433.6
+The comparison of the memory usage between C3 PVoxelMap and the original VoxelMap is listed in Table V.
+Besides urban environment tests on benchmark datasets, we
+also test our algorithm in an indoor environment with Livox
+Mid-360 LiDAR. The results demonstrate that our method
+behaves 70% greater memory efficiency than the VoxelMap.
+VII. C ONCLUSION
+This work presents a compact, cumulative, and coalescible
+probabilistic voxel mapping method termed C3 P-VoxelMap,
+which involves a point-free representation of voxel planes, a
+cumulative probabilistic update method, and an on-demand
+voxel merging strategy. The plane uncertainty is represented
+by a fixed set of statistics regardless of the number of points
+and supports cumulative updates without re-computation.
+Our compact formulation reduces the space complexity from
+O(N ) to O(1) and the time complexity from O(M N ) to
+O(N ) with respect to the number of iterations and the number of points N. The memory efficiency is further optimized
+by merging voxels associated with the same physical planes.
+Thanks to the proposed locality-sensitive hash, the merging
+process is triggered on-demand with a small overhead. Ondemand merging enhances the adaptability of our voxel map
+to represent the real world and achieves a balance in the biasvariance tradeoff. Moreover, this merging method improves
+[1] T. Shan and B. Englot, “Lego-loam: Lightweight and groundoptimized lidar odometry and mapping on variable terrain,” in 2018
+IEEE/RSJ International Conference on Intelligent Robots and Systems
+(IROS), 2018, pp. 4758–4765.
+[2] K. Chen, R. Nemiroff, and B. T. Lopez, “Direct lidar-inertial odometry: Lightweight lio with continuous-time motion correction,” in 2023
+IEEE International Conference on Robotics and Automation (ICRA),
+2023, pp. 3983–3989.
+[3] C. Yuan, W. Xu, X. Liu, X. Hong, and F. Zhang, “Efficient and probabilistic adaptive voxel mapping for accurate online lidar odometry,”
+IEEE Robotics and Automation Letters, vol. 7, no. 3, pp. 8518–8525,
+2022.
+[4] L. Zhou, G. Huang, Y. Mao, J. Yu, S. Wang, and M. Kaess, “PLClislam: Lidar slam with planes, lines, and cylinders,” IEEE Robotics
+and Automation Letters, vol. 7, no. 3, pp. 7163–7170, 2022.
+[5] C. Bai, T. Xiao, Y. Chen, H. Wang, F. Zhang, and X. Gao, “Fasterlio: Lightweight tightly coupled lidar-inertial odometry using parallel
+sparse incremental voxels,” IEEE Robotics and Automation Letters,
+vol. 7, no. 2, pp. 4861–4868, 2022.
+[6] W. Xu, Y. Cai, D. He, J. Lin, and F. Zhang, “Fast-lio2: Fast direct lidarinertial odometry,” IEEE Transactions on Robotics, vol. 38, no. 4, pp.
+2053–2073, 2022.
+[7] D. V. Nam and K. Gon-Woo, “Solid-state lidar based-slam: A concise
+review and application,” in 2021 IEEE International Conference on
+Big Data and Smart Computing (BigComp), 2021, pp. 302–305.
+[8] P. Biber and W. Strasser, “The normal distributions transform: a new
+approach to laser scan matching,” in Proceedings 2003 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS
+2003) (Cat. No.03CH37453), vol. 3, 2003, pp. 2743–2748 vol.3.
+[9] M. Magnusson, A. Lilienthal, and T. Duckett, “Scan registration
+for autonomous mining vehicles using 3d-ndt,” Journal of Field
+Robotics, vol. 24, no. 10, pp. 803–827, 2007. [Online]. Available:
+https://onlinelibrary.wiley.com/doi/abs/10.1002/rob.20204
+[10] M. Yokozuka, K. Koide, S. Oishi, and A. Banno, “Litamin2: Ultra
+light lidar-based slam using geometric approximation applied with kldivergence,” in 2021 IEEE International Conference on Robotics and
+Automation (ICRA), 2021, pp. 11 619–11 625.
+[11] M. Yokozuka, K. Koide, S. Oishi, and A. Banno, “Litamin: Lidarbased tracking and mapping by stabilized icp for geometry approximation with normal distributions,” in 2020 IEEE/RSJ International
+Conference on Intelligent Robots and Systems (IROS), 2020, pp. 5143–
+5150.
+[12] C. Wu, Y. You, Y. Yuan, X. Kong, Y. Zhang, Q. Li, and K. Zhao,
+“Voxelmap++: Mergeable voxel mapping method for online lidar(inertial) odometry,” IEEE Robotics and Automation Letters, vol. 9,
+no. 1, pp. 427–434, 2024.
+[13] Z. Liu and F. Zhang, “Balm: Bundle adjustment for lidar mapping,”
+IEEE Robotics and Automation Letters, vol. 6, no. 2, pp. 3184–3191,
+2021.
+[14] A. Geiger, P. Lenz, and R. Urtasun, “Are we ready for autonomous
+driving? the kitti vision benchmark suite,” in 2012 IEEE Conference
+on Computer Vision and Pattern Recognition, 2012, pp. 3354–3361.
+[15] Z. Yan, L. Sun, T. Krajnı́k, and Y. Ruichek, “Eu long-term dataset
+with multiple sensors for autonomous driving,” in 2020 IEEE/RSJ
+International Conference on Intelligent Robots and Systems (IROS),
+2020, pp. 10 697–10 704.
+[16] Z. Zhang and D. Scaramuzza, “A tutorial on quantitative trajectory
+evaluation for visual(-inertial) odometry,” in 2018 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), 2018, pp.
+7244–7251.

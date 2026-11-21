@@ -1,0 +1,184 @@
+# Soft Shadows via Cone Tracing
+
+Also called: Cone Tracing for Soft Shadows, Cone-based Shadowing, Scattering approximation via cones, Soft Shadows via Shadow Cones
+
+## Overview
+Soft shadows via cone tracing approximate soft shadow boundaries and light scattering by casting a cone $\Psi$ from a surface point towards the light source instead of a single ray [S2, unofficial]. Unlike standard shadow rays that only measure binary occlusion, this method aggregates extinction values within the cone to estimate both occlusion and scattered light, producing visually plausible soft shadow borders [S2, unofficial]. It is distinguished from its sibling [Cone Tracing](5679-cone-tracing.md) by its specific application to light transport in participating media, where the cone aperture controls the softness and scattering range [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Surface point $x$, light direction, light intensity $I_L$, extinction coefficient field $\tau(t)$, and cone aperture angle.
+*   **Outputs:** Shadowed and scattered lighting term $I_{Sh}(s)$ [S2, unofficial].
+
+**Data Structures:**
+*   **Cone $\Psi$:** Defined by origin $x$, direction (light vector), and aperture angle. The cone diameter grows with distance from the origin [S2, unofficial].
+*   **Extinction Field:** Discretized volume data (voxels) containing extinction coefficients $\tau(t)$ [S2, unofficial].
+
+**Parameters:**
+*   **Aperture Angle:** Controls the trade-off between scattering range and influence magnitude.
+    *   Narrow cone (e.g., 1 degree): Approximates forward scattering; limited range, strong influence [S1, S2, unofficial].
+    *   Wide cone (e.g., 25 degrees): Approximates isotropic scattering; broad range, less influence of individual voxels [S1, S2, unofficial].
+    *   Tested values: 1°, 5°, 10°, 25° [S1, unofficial].
+
+**Formulas:**
+The shadowed and scattered lighting term $I_{Sh}(s)$ is calculated as [S2, unofficial]:
+
+$$
+I_{Sh}(s) \approx I_L \cdot e^{-\int_{t_{Sh}} h(t) \tau(t) dt}
+$$
+
+Where:
+*   $I_{Sh}(s)$: Shadowed and scattered lighting term.
+*   $I_L$: Incoming light intensity.
+*   $t_{Sh}$: Path within the cone $\Psi$.
+*   $\tau(t)$: Extinction coefficient at distance $t$.
+*   $h(t)$: Weighting function, defined as the inverse of the aggregate query size $V_q^{-1}$ [S2, unofficial].
+
+**Steps:**
+1.  **Initialize:** Start at surface point $x$ with accumulated occlusion $\delta = 0$ [S1, unofficial].
+2.  **March Cone:** Step along the light direction, expanding the cone $\Psi$ according to the aperture angle [S2, unofficial].
+3.  **Query Extinction:** For each step, aggregate extinction values $\tau(t)$ within the current cone cross-section [S2, unofficial].
+4.  **Apply Weighting:** Multiply the aggregated extinction by the weighting function $h(t) = V_q^{-1}$, where $V_q$ is the query volume size [S2, unofficial]. Note that $V_q$ grows with distance and cone diameter, causing influence to decrease rapidly [S2, unofficial].
+5.  **Update Occlusion:** Update the ambient occlusion term $\delta$ using the decay factor $f(r)$ and user-defined decay rate $\lambda$ [S1, unofficial]:
+    $$
+    \delta = \delta + (1-\delta)\alpha_2 f(r)
+    $$
+    Where $\alpha_2$ is the occlusion value accumulated at the step [S1, unofficial].
+6.  **Compute Final Lighting:** Calculate $I_{Sh}(s)$ using the exponential attenuation formula [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_soft_shadow_cone_tracing(surface_point, light_direction, light_intensity, extinction_field, aperture_angle, decay_rate):
+    """
+    Computes soft shadows and scattering using cone tracing.
+    
+    Args:
+        surface_point: 3D vector, origin of the cone.
+        light_direction: Normalized 3D vector, direction of the light.
+        light_intensity: Scalar, I_L.
+        extinction_field: Function or lookup table, returns tau(t) at position t.
+        aperture_angle: Scalar, cone aperture in radians.
+        decay_rate: Scalar, lambda, controls decay of f(r).
+        
+    Returns:
+        Scalar, I_Sh(s).
+    """
+    # Initialize accumulated occlusion
+    delta = 0.0
+    
+    # Cone parameters
+    # Cone radius r(t) at distance t from origin: r(t) = t * tan(aperture_angle / 2)
+    # We march along the light direction
+    
+    t = 0.0
+    step_size = 0.1 # Implementation detail: step size for marching [G]
+    max_distance = 10.0 # Implementation detail: max distance to trace [G]
+    
+    while t < max_distance:
+        # Current position on the cone axis
+        current_pos = surface_point + light_direction * t
+        
+        # Calculate cone radius at this distance
+        cone_radius = t * tan(aperture_angle / 2.0)
+        
+        # Aggregate extinction within the cone cross-section at current_pos
+        # This involves querying the extinction field over the circular area
+        # defined by current_pos and cone_radius.
+        # The result is the integral of tau(t) over the cone volume slice.
+        # In practice, this is approximated by sampling voxels intersecting the cone.
+        aggregated_extinction = query_cone_extinction(current_pos, light_direction, cone_radius, extinction_field)
+        
+        # Calculate weighting function h(t) = 1 / V_q
+        # V_q is the volume of the query region (cone slice).
+        # For a thin slice of thickness dt, V_q approx pi * r(t)^2 * dt.
+        # However, the source defines h(t) as inverse of aggregate query size.
+        # We assume the aggregation step already accounts for the volume,
+        # so h(t) scales the contribution based on the growing query size.
+        # A common implementation is to normalize by the cone volume or area.
+        # Based on [S2, unofficial], h(t) = V_q^-1.
+        # Let's assume the aggregation returns a raw sum, and we weight it.
+        # To be precise, we need the volume of the cone segment.
+        # V_segment = (1/3) * pi * h * (R^2 + R*r + r^2) for a frustum, 
+        # but for a thin slice, it's approx Area * dt.
+        # Since dt is small, we can approximate V_q as the cross-sectional area * dt.
+        # However, the source says h(t) is inverse of aggregate query size.
+        # Let's assume the query returns the sum of tau, and we multiply by h(t).
+        
+        # Calculate query volume size V_q for the current step
+        # Approximating V_q as the cross-sectional area of the cone at distance t
+        cone_area = pi * (cone_radius ** 2)
+        # V_q is proportional to cone_area. Let's assume dt=1 for normalization or include it.
+        # The source implies h(t) decreases rapidly as V_q grows.
+        h_t = 1.0 / (cone_area + epsilon) # epsilon to avoid division by zero [G]
+        
+        # Weighted extinction contribution
+        weighted_extinction = aggregated_extinction * h_t
+        
+        # Update occlusion delta
+        # f(r) is a decay function along traced distance r (which is t here)
+        # f(r) = exp(-lambda * r) or similar. Source mentions lambda controls decay.
+        # Let's assume f(t) = exp(-decay_rate * t)
+        f_r = exp(-decay_rate * t)
+        
+        # Alpha_2 is the occlusion value at this step. 
+        # In the context of [S1, unofficial], alpha_2 is likely the result of the query (0 to 1).
+        # If aggregated_extinction is a sum, it might need normalization.
+        # Assuming alpha_2 is derived from the weighted extinction.
+        # A common soft shadow accumulation is:
+        # alpha_2 = 1.0 - exp(-weighted_extinction) # or similar attenuation
+        # However, [S1, unofficial] says "only accumulate the occlusion value alpha_2".
+        # Let's assume alpha_2 is the local occlusion factor.
+        alpha_2 = 1.0 - exp(-weighted_extinction) # [G] standard attenuation model
+        
+        delta = delta + (1.0 - delta) * alpha_2 * f_r
+        
+        t += step_size
+        
+    # Final lighting calculation
+    # I_Sh(s) approx I_L * exp(-integral h(t) tau(t) dt)
+    # The integral is approximated by the accumulated delta? 
+    # No, delta is an AO term. The formula in [S2, unofficial] is for I_Sh.
+    # The integral in [S2, unofficial] is the same as the one used to compute delta?
+    # [S2, unofficial] says: "tau_0^L = exp(- integral h(t) tau(t) dt)"
+    # And I_Sh = I_L * tau_0^L.
+    # So we need to compute the integral separately or reuse delta.
+    # Delta in [S1, unofficial] is AO. I_Sh in [S2, unofficial] is shadowed lighting.
+    # They are related but distinct.
+    # Let's compute the integral for I_Sh directly.
+    
+    integral_value = 0.0
+    t = 0.0
+    while t < max_distance:
+        cone_radius = t * tan(aperture_angle / 2.0)
+        aggregated_extinction = query_cone_extinction(surface_point + light_direction * t, light_direction, cone_radius, extinction_field)
+        cone_area = pi * (cone_radius ** 2)
+        h_t = 1.0 / (cone_area + epsilon)
+        integral_value += aggregated_extinction * h_t * step_size # Numerical integration
+        t += step_size
+        
+    I_Sh = light_intensity * exp(-integral_value)
+    
+    return I_Sh
+```
+
+**Edge Cases and Pitfalls:**
+*   **Homogeneous Media Assumption:** The method assumes the scattering function $R$ is constant for all directions and scattering is proportional to extinction [S2, unofficial]. This works well for homogeneous media like smoke or wax-like materials but may fail for heterogeneous media without separate transfer functions [S2, unofficial].
+*   **Cone Angle Selection:** A narrow cone may miss scattered light from wide angles, while a wide cone may dilute the signal from individual voxels [S2, unofficial].
+*   **Precision:** The weighting function $h(t)$ decreases rapidly as the cone grows, which may lead to underflow or loss of precision for distant occluders [S2, unofficial].
+
+## Operating characteristics
+*   **Performance:** Shadow computation using cones is 40% faster than classical shadow rays (0.0079s vs. 0.0132s) [S2, unofficial].
+*   **Memory:** Requires storage for the extinction field and potentially normal/albedo textures if used in a deferred shading context [S1, unofficial].
+*   **Strengths:** Fast approximation for soft shadows and light scattering; produces visually plausible soft shadow borders; integrates scattering into the shadow term [S2, unofficial].
+*   **Limitations:** Approximation may not accurately model complex scattering in heterogeneous media; requires careful tuning of cone aperture [S2, unofficial].
+
+## Background
+*   **Origin:** The method is based on the concept of cone tracing, an extension of sphere tracing for SDF rendering [Parent]. The specific application to soft shadows and scattering in volume rendering was proposed in [S2, unofficial].
+*   **History:** Cone tracing was originally introduced for SDF rendering [Parent]. The adaptation for soft shadows in voxel-based global illumination was explored in [S1, unofficial] and [S2, unofficial].
+*   **Usage:** Used in real-time global illumination systems, particularly those using voxel cone tracing for indirect lighting [S1, unofficial].
+
+## Sources
+[S1] Deferred Voxel Shading for Real Time Global Illumination, https://jose-villegas.github.io/post/deferred_voxel_shading/, fetched 2026-10-27 (unofficial)
+[S2] PDF Extinction-based Shading and Illumination in GPU Volume Ray-Casting - UZH, https://www.ifi.uzh.ch/dam/jcr:ffffffff-9e7f-2af5-ffff-ffffcf9259bb/FastShadows.pdf, fetched 2026-10-30 (unofficial)

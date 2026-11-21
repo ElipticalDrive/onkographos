@@ -1,0 +1,293 @@
+--- v002.md
++++ v003.md
+@@ -4,143 +4,138 @@
+ 
+ ## Overview
+-Frequency Domain Volume Rendering (FVR) is a rendering pipeline that transforms scalar volumetric data from the spatial domain to the frequency domain, slices the resulting frequency volume, and inverse-transforms the slice back to the spatial domain to generate the image [S1, S2, unofficial]. This method avoids the $O(N^3)$ computational cost of spatial domain projection by leveraging the efficiency of the Fast Fourier Transform (FFT) [S1, unofficial]. Unlike standard object-order methods that project voxels along rays, FVR decouples the rendering performance from the dataset resolution, making it suitable for interactive visualization on hardware that supports floating-point textures [S2, unofficial].
++Frequency Domain Volume Rendering (FVR) is a volume rendering technique that transforms scalar data from the spatial domain to the frequency domain, extracts a 2D projection slice, and inverse-transforms the result to the spatial domain, thereby avoiding the $O(N^3)$ computational complexity of spatial projection methods [S1, S3, unofficial]. It is distinguished from its siblings by its reliance on the Projection-Slice Theorem to decouple the rendering step from the dataset resolution, allowing the rendering performance to depend primarily on the output image resolution rather than the input volume size [S2, S3, unofficial].
+ 
+ ## How it works
+-The method consists of an offline pre-processing stage (typically CPU-based) and an online rendering stage (GPU-based) [S2, unofficial].
++The method follows the three-stage pipeline of domain-transform methods: Global Transformation, Slice Extraction, and Inverse Transformation [S1, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Input:** A scalar volumetric dataset of size $N_x \times N_y \times N_z$ [S1, unofficial].
+-*   **Output:** A 2D image (projection slice) of resolution $M_x \times M_y$ [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A 3D scalar volume $f(x, y, z)$ of size $N_x \times N_y \times N_z$.
++*   **Output:** A 2D projection image of size $M_x \times M_y$.
+ 
+-### Data Structures
+-1.  **Spatial Volume:** The input scalar data [S1, unofficial].
+-2.  **Frequency Volume:** A 3D texture representing the complex-valued 3D FFT of the spatial volume [S1, unofficial].
+-    *   **Format:** Two-channel 32-bit floating-point 3D texture (real and imaginary components) [S1, unofficial].
+-    *   **Dimensions:** Must be powers of two. If the input volume dimensions are not powers of two, zero-padding in the frequency domain is applied [S1, unofficial].
+-    *   **Layout:** Low frequencies are centered in the texture [S1, unofficial].
+-3.  **Lookup Textures:**
+-    *   **Scramble Lookup:** Pre-computed texture mapping index $x$ to its bit-reversed counterpart $y$ for the scrambling phase of the IFFT [S1, unofficial].
+-    *   **Butterfly Lookup:** Texture containing addresses of contributing samples ($a, b$) and the principal $N$-th root of unity ($w$) for butterfly passes [S1, unofficial].
+-4.  **Interpolation Kernels:** 1D discretized kernels stored in textures [S2, unofficial]. Higher-order schemes (tri-cubic, windowed sinc) use a kernel resolution of 64 samples per filter tile [S2, unofficial].
++**Data Structures:**
++1.  **Frequency Volume:** A 3D texture storing complex numbers. In GPU implementations, this is typically a two-channel 32-bit floating-point 3D texture (real and imaginary parts) [S1, unofficial]. If the input dimensions are not powers of two, zero-padding is applied in the frequency domain to meet hardware texture dimension constraints [S1, unofficial].
++2.  **Kernel Texture:** A 1D floating-point RGBA texture storing the discretized filter kernel. For a kernel of width four, each channel stores one tile of the kernel. A single texture fetch at position $X$ returns four weight values [S3, unofficial].
++3.  **Scramble Lookup Texture:** A texture containing pre-computed bit-reversal indices for the FFT scrambling phase [S1, unofficial].
++4.  **Roots of Unity Texture:** A texture storing the principal $N$-th roots of unity required for butterfly passes [S1, unofficial].
++5.  **Ping-Pong Buffers:** Two 2D textures used as source and destination buffers for iterative passes (scrambling and butterfly) [S1, unofficial].
+ 
+-### Pre-processing (CPU)
+-1.  **Wrap-around:** Rearrange spatial data to move the origin from the corner $[0,0,0]$ to the center of the data cube [S1, unofficial].
+-2.  **Vignetting Correction (Optional):** Spatially premultiply the original volume with the reciprocal of the interpolation filter's frequency response to suppress vignetting artifacts [S2, unofficial].
+-3.  **3D FFT:** Perform a 3D Fast Fourier Transform on the rearranged data [S1, unofficial].
+-4.  **Frequency Rearrangement:** Rearrange the transformed data again to center the low frequencies [S1, unofficial].
+-5.  **Upload:** Upload the complex data as a two-channel 32-bit floating-point 3D texture to GPU memory [S1, unofficial].
++**Parameters:**
++*   **Interpolation Scheme:** Nearest Neighbor (NN), Tri-linear (TL), Tri-cubic (TC), or Windowed Sinc [S2, unofficial].
++*   **Window Function:** For Windowed Sinc, a Blackman window of width four is used [S2, unofficial].
++*   **Kernel Resolution:** The discretized kernel has a resolution of 64 samples per filter tile [S2, unofficial].
++*   **Samples per Tile:** For cubic B-spline, the number of samples per filter tile can be 1, 4, or 16, influencing image quality [S2, unofficial].
++*   **Projection Slice Resolution:** Typically $256 \times 256$ or $512 \times 512$ [S2, unofficial].
+ 
+-### Rendering Stage (GPU)
+-The rendering stage is divided into Slicing and Inverse FFT [S2, unofficial].
++**Steps:**
+ 
+-#### 1. Slicing Setup
+-*   Map the 3D frequency texture onto a proxy geometry (a single quad) stretched over the rendering target [S1, unofficial].
+-*   Texture coordinates cover the entire 3D texture, allowing slicing along any direction [S1, unofficial].
+-*   To change the viewing direction, rotate the texture around the frequency volume origin (the central sample) [S1, unofficial].
+-*   Use an invisible rendering target (e.g., OpenGL Pbuffer) to store intermediate results between passes [S1, unofficial].
++1.  **Pre-processing (CPU):**
++    1.  Rearrange spatial data to move the origin from the corner $[0,0,0]$ to the center (wrap-around operation) [S1, unofficial].
++    2.  Perform a 3D Fast Fourier Transform (FFT) on the rearranged data [S1, unofficial].
++    3.  Rearrange the transformed data to center low frequencies [S1, unofficial].
++    4.  Upload the complex data to the GPU as a 3D texture [S1, unofficial].
++    *   *Optional:* Suppress vignetting by spatially premultiplying the original volume with the reciprocal of the interpolation filter's frequency response [S2, unofficial].
+ 
+-#### 2. Slicing (Resampling)
+-Resample the projection slice perpendicular to the viewing direction, intersecting the frequency volume origin [S1, unofficial].
+-*   **Interpolation Schemes:** Nearest Neighbor (NN) [S2, unofficial], Tri-linear (TL) [S2, unofficial], Tri-cubic (TC) [S2, unofficial], and Windowed Sinc (using a Blackman window of width 4) [S2, unofficial].
+-*   **Quality Constraint:** The rendering target resolution must meet the Nyquist criterion to avoid aliasing [S1, unofficial]. For a dataset of resolution $N$, the projection slice resolution should be at least $2N \times 2N$ to avoid overlapping artifacts [S2, unofficial].
++2.  **Slicing Setup (GPU):**
++    1.  Map the 3D frequency texture onto a proxy geometry (a single quad) stretched over the rendering target [S1, unofficial].
++    2.  Set texture coordinates to cover the entire 3D texture [S1, unofficial].
++    3.  Rotate the texture around the frequency volume origin to define the viewing direction [S1, unofficial]. The slice is perpendicular to the viewing direction and intersects the origin of the frequency spectrum [S1, unofficial].
+ 
+-#### 3. Inverse 2D FFT
+-Transform the resampled 2D slice back to the spatial domain [S1, unofficial]. This is split into two passes (rows, then columns), each consisting of a scrambling phase and $\log_2(M)$ butterfly passes [S1, unofficial].
++3.  **Slice Extraction (Resampling):**
++    1.  For each fragment (pixel) in the rendering target, determine the corresponding 3D coordinate in the frequency texture based on the rotated texture coordinates [S1, unofficial].
++    2.  Estimate blending factors by multiplying texture coordinates with the original texture resolution; the blending factors are the fractional parts of these new coordinates [S3, unofficial].
++    3.  Fetch neighboring voxels from the 3D texture using the chosen interpolation scheme (NN, TL, TC, or Windowed Sinc) [S2, unofficial].
++    4.  Compute the weighted sum of the fetched voxels to produce the 2D slice value [S2, unofficial].
++    *   *Note:* Higher-order filters (TC, Windowed Sinc) require more surrounding voxels (e.g., 64 for a $5 \times 5 \times 5$ filter) compared to Tri-linear (8 voxels) [S4, unofficial].
+ 
+-**Scrambling Phase:**
+-*   Swap samples at position $x$ and $y$, where $y$ is the bit-reversal of $x$ [S1, unofficial].
+-*   Implemented using the pre-computed scramble lookup texture [S1, unofficial].
++4.  **Inverse Transformation (GPU):**
++    1.  Perform a 2D Inverse Fast Fourier Transform (IFFT) on the extracted 2D slice [S1, unofficial].
++    2.  Split the 2D IFFT into two passes: rows then columns [S1, unofficial].
++    3.  **Scrambling Phase:** Swap samples at position $x$ and $y$, where $y$ is the bit-reversal of $x$. Use the scramble lookup texture for efficient swapping [S1, unofficial].
++    4.  **Butterfly Passes:** Perform $\log_2(N)$ butterfly passes, where $N$ is the number of rows or columns [S1, unofficial].
++        *   Use ping-pong buffer swapping between source and destination textures [S1, unofficial].
++        *   Fetch addresses of two contributing samples ($a, b$) and the principal $N$-th root of unity ($w$) from lookup textures [S1, unofficial].
++        *   Perform complex multiplication and two additions: $a' = a + w \cdot b$, $b' = a - w \cdot b$ [S1, unofficial].
++    5.  Scale the final output by $N^{-1}$ (where $N$ is the total number of points in the 2D transform) [S1, unofficial].
+ 
+-**Butterfly Passes:**
+-*   Perform ping-pong buffer swapping between source and target textures [S1, unofficial].
+-*   For each fragment, fetch addresses of two contributing samples ($a, b$) and the principal $M$-th root of unity ($w$) from the butterfly lookup texture [S1, unofficial].
+-*   Perform complex multiplication and two additions:
+-    $$
+-    \begin{aligned}
+-    t &= w \cdot b \\
+-    a' &= a + t \\
+-    b' &= a - t
+-    \end{aligned}
+-    $$
+-    [S1, unofficial]
+-*   After all butterfly passes, scale the values by $M^{-1}$ for the inverse transform [S1, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def frequency_domain_volume_rendering(frequency_texture_3d, view_direction, slice_resolution):
+-    """
+-    Renders a volume using Frequency Domain Volume Rendering.
+-    Assumes pre-processing has been completed and frequency volume is on GPU.
+-    """
+-    M = slice_resolution[0]
++def frequency_domain_volume_rendering(volume_3d, viewing_direction, output_size):
++    # Step 1: Pre-processing (CPU)
++    # Rearrange origin to center
++    volume_centered = rearrange_origin_to_center(volume_3d)
+     
+-    # 1. Slicing Stage
+-    # Resample the 3D frequency texture onto a 2D slice perpendicular to view_direction.
+-    # Uses interpolation scheme (NN, TL, TC, or Windowed Sinc) [S2, unofficial].
+-    # Kernel application details are implementation-specific [S2, unofficial].
+-    slice_2d = resample_3d_to_2d(frequency_texture_3d, view_direction, slice_resolution)
++    # 3D FFT
++    freq_volume_3d = fft3d(volume_centered)
+     
+-    # 2. Inverse 2D FFT Stage
+-    # Process rows
+-    data = bit_reverse_scramble(slice_2d)
+-    for pass_idx in range(int(math.log2(M))):
+-        data = butterfly_pass(data, pass_idx, M)
+-        
+-    # Transpose to process columns
+-    data = transpose(data)
++    # Center low frequencies
++    freq_volume_centered = fftshift(freq_volume_3d)
+     
+-    # Process columns
+-    data = bit_reverse_scramble(data)
+-    for pass_idx in range(int(math.log2(M))):
+-        data = butterfly_pass(data, pass_idx, M)
+-        
+-    # Final scaling and transpose back
+-    final_image = transpose(data)
+-    final_image = final_image * (1.0 / (M * M))
++    # Upload to GPU as 3D texture (two-channel 32-bit float)
++    gpu_freq_texture = upload_to_gpu(freq_volume_centered)
++    
++    # Step 2 & 3: Slicing (GPU Shader)
++    # Map 3D texture to proxy quad, rotate by viewing_direction
++    # For each pixel (x, y) in output_size x output_size:
++    #   1. Calculate 3D coordinate in frequency space based on rotation
++    #   2. Resample using interpolation scheme (e.g., tri-linear)
++    #   3. Store result in 2D slice texture
++    
++    slice_2d = resample_slice(gpu_freq_texture, viewing_direction, output_size)
++    
++    # Step 4: Inverse 2D FFT (GPU Shader)
++    # Transform rows
++    slice_rows_transformed = ifft1d(slice_2d, axis='rows')
++    
++    # Transform columns
++    slice_cols_transformed = ifft1d(slice_rows_transformed, axis='columns')
++    
++    # Scale by N^-1
++    final_image = slice_cols_transformed / (output_size[0] * output_size[1])
+     
+     return final_image
+ 
+-def bit_reverse_scramble(data_2d):
+-    """
+-    Swaps data[x] with data[bit_reverse(x)] for all x in each row/column.
+-    Uses a pre-computed scramble lookup texture for efficiency [S1, unofficial].
+-    """
+-    M = data_2d.shape[0]
+-    scrambled = empty_like(data_2d)
+-    for i in range(M):
+-        for j in range(M):
+-            y = bit_reverse(j, int(math.log2(M)))
+-            scrambled[i, j] = data_2d[i, y]
+-    return scrambled
++def ifft1d(data, axis='rows'):
++    # Scrambling
++    scrambled_data = bit_reverse_scramble(data)
++    
++    # Butterfly passes
++    N = data.shape[0] if axis == 'rows' else data.shape[1]
++    num_passes = log2(N)
++    
++    buffer_a = scrambled_data
++    buffer_b = empty_buffer_like(buffer_a)
++    
++    for i in range(num_passes):
++        w = get_root_of_unity(i, N)
++        # Ping-pong swap
++        buffer_a, buffer_b = butterfly_pass(buffer_a, buffer_b, w)
++        
++    return buffer_a
+ 
+-def butterfly_pass(data_2d, pass_idx, M):
+-    """
+-    Performs one pass of the FFT butterfly algorithm.
+-    Fetches w, a_idx, b_idx from lookup textures based on pass_idx [S1, unofficial].
+-    """
+-    M_log = int(math.log2(M))
+-    N = 1 << (M_log - pass_idx)
+-    w = fetch_twiddle_factor(pass_idx, N) # From butterfly lookup texture [S1, unofficial]
+-    output = empty_like(data_2d)
+-    for i in range(M):
+-        for j in range(0, M, N):
+-            for k in range(N // 2):
+-                idx_a = j + k
+-                idx_b = j + k + N // 2
+-                a = data_2d[i, idx_a]
+-                b = data_2d[i, idx_b]
+-                t = w ** k * b
+-                output[i, idx_a] = a + t
+-                output[i, idx_b] = a - t
+-    return output
++def butterfly_pass(buffer_src, buffer_dst, w):
++    for each fragment:
++        idx_a, idx_b = get_butterfly_indices(fragment, w)
++        val_a = fetch(buffer_src, idx_a)
++        val_b = fetch(buffer_src, idx_b)
++        
++        # Complex multiplication and additions
++        # a' = a + w * b
++        # b' = a - w * b
++        prod = complex_multiply(w, val_b)
++        val_a_new = complex_add(val_a, prod)
++        val_b_new = complex_sub(val_a, prod)
++        
++        write(buffer_dst, fragment, val_a_new)
++        # Note: In ping-pong, the other buffer is written in parallel or subsequent pass
++    return buffer_dst
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Aliasing:** If the rendering target resolution does not meet the Nyquist criterion, ghosts or non-existent frequencies appear [S1, unofficial].
+-*   **Ghosting/Copy Artifacts:** Caused by the absence of zero-padding in the spatial domain during pre-processing, resulting in visible copies of the dataset [S2, unofficial].
+-*   **Vignetting Artifact:** Central values of the final image are overemphasized due to the frequency response of the interpolation filter. This can be suppressed by spatial premultiplication in pre-processing, though this may increase ghosting [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Aliasing:** The rendering target resolution must meet the Nyquist criterion. Low resampling quality introduces ghosts or non-existent frequencies [S1, S2, unofficial].
++*   **Ghosting/Copy Artifacts:** Caused by the absence of zero-padding in the spatial domain, resulting in visible copies of the dataset [S2, unofficial].
++*   **Vignetting Artifact:** Central values of the final image are overemphasized due to the frequency response of the interpolation filter. Mitigated by spatial premultiplication with the reciprocal of the filter's frequency response [S2, unofficial].
+ *   **Overlapping Artifacts:** Occur if the projection slice resolution is insufficient for the dataset resolution (e.g., a $256^3$ dataset requires at least a $512 \times 512$ slice) [S2, unofficial].
+-*   **Hardware Limitations:** NVIDIA GPUs do not natively support floating-point 3D textures; values must be stored in four-channel fixed-point textures, requiring additional conversion before interpolation [S1, unofficial].
++*   **Hardware Limitations:** NVIDIA GPUs do not natively support floating-point 3D textures, requiring storage in four-channel fixed-point textures and additional conversion before interpolation [S1, unofficial].
+ 
+ ## Subtopics
+@@ -150,22 +145,22 @@
+ 
+ ### Hardware FVR Engine Architecture
+-A hardware realization of the FVR algorithm consisting of a memory block, a resampling block, and an Inverse FHT/FFT block [S4, unofficial]. It calculates timing constraints of 40 ms per frame (25 fps), requiring one interpolation step for a 512x512 plane within ~150 ns [S4, unofficial]. Resampling is implemented with a single interpolation unit and memory addressing logic, using a lookup table (e.g., EPROM) for precomputed POCS function values to handle 5x5x5 filter complexity [S4, unofficial]. A 5x5x5 filter needs 64 surrounding voxels per sample point, compared to 8 for tri-linear interpolation [S4, unofficial]. Dataset size is 256^3 (16 bits wide, 32 Mb) [S4, unofficial].
++A hardware realization of the FVR algorithm consisting of a memory block, a resampling block, and an Inverse FHT/FFT block [S4, unofficial]. For a $256^3$ dataset and 25 frames/sec frame rate, one interpolation step for a $512 \times 512$ plane must be done within approximately 150 ns [S4, unofficial]. This timing allows for a single interpolation unit and memory addressing logic without parallelization [S4, unofficial]. A $5 \times 5 \times 5$ filter (like tri-cubic spline or POCS) requires 64 surrounding voxels per sample point, which can be handled using a lookup table (e.g., EPROM) for precomputed function values [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The rendering stage complexity is $O(M^2 \log M)$, where $M$ is the resolution of the projection slice, rather than $O(N^3)$ for the dataset [S1, S2, unofficial].
+-*   **Memory Complexity:** Requires storage for the 3D frequency volume (two-channel 32-bit float) and intermediate ping-pong buffers for the IFFT [S1, unofficial].
+-*   **Performance Dependency:** Rendering performance depends on the resolution of the projection slice (number of resampling points), not explicitly on the dataset resolution [S2, unofficial]. Dataset resolution affects texture cache efficiency; higher resolution leads to more cache misses, causing slight performance differences (typically $\pm 2$ fps for a $512 \times 512$ slice) [S2, unofficial].
+-*   **Measured Performance (ATI Radeon 9800 XT, $256^3$ dataset):**
+-    *   Slice Resolution $256 \times 256$: NN=400 fps, TL=1050 fps, TC=180 fps, IFFT 2D=153 fps [S2, unofficial].
+-    *   Slice Resolution $512 \times 512$: NN=500 fps, TL=350 fps, TC=45 fps, IFFT 2D=35 fps [S2, unofficial].
+-    *   CPU Baseline (AMD Athlon XP 2200+, tri-linear, $256 \times 256$ slice): 17 fps [S2, unofficial].
+-    *   Speed-up: GPU implementation achieves approximately 17x speed-up over CPU [S2, unofficial].
+-*   **Strengths:** Interactive framerates; performance independent of dataset size; avoids $O(N^3)$ projection cost.
+-*   **Limitations:** Requires hardware support for floating-point 3D textures (or workarounds for NVIDIA); sensitive to interpolation quality; vignetting and ghosting artifacts require careful handling [S1, S2, unofficial].
++*   **Time Complexity:** The global transformation is $O(N^3 \log N)$ and performed once offline. The rendering step is $O(M^2 \log M)$, where $M$ is the projection slice resolution [S1, unofficial].
++*   **Memory Complexity:** Requires storage for the 3D frequency volume ($O(N^3)$) and intermediate buffers for the 2D IFFT [S1, unofficial].
++*   **Performance:** Rendering performance depends on the resolution of the projection slice, not explicitly on the dataset resolution [S2, unofficial]. Dataset resolution affects texture cache efficiency; higher resolution leads to more cache misses, causing slight performance differences (± 2 fps for a $512 \times 512$ slice) [S2, unofficial].
++*   **Measured Performance:** On an ATI Radeon 9800 XT, at $256 \times 256$ resolution: NN=400 fps, TL=1050 fps, TC=180 fps, IFFT 2D=153 fps. At $512 \times 512$ resolution: NN=500 fps, TL=350 fps, TC=45 fps, IFFT 2D=35 fps [S2, unofficial]. The GPU implementation achieves a speed-up factor of approximately 17 compared to a CPU-based approach (17 fps on AMD Athlon XP 2200+) [S2, unofficial].
++*   **Strengths:** High performance for static views; decouples rendering speed from dataset size.
++*   **Limitations:** Limited interactivity for display parameters other than viewing direction; requires significant preprocessing; sensitive to interpolation quality and resolution [S1, S2, unofficial].
++*   **When to use:** When rendering large static volumes with high performance requirements and fixed viewing parameters.
++*   **When not to use:** When interactive modification of opacity, lighting, or other transfer function parameters is required [S1, unofficial].
+ 
+ ## Background
+-Frequency Domain Volume Rendering was introduced as a hardware-accelerated technique to improve rendering performance for large volumetric datasets [S1, S2, unofficial]. The method leverages the projection-slice theorem, where a projection in the spatial domain corresponds to a slice through the origin in the frequency domain [S1, S2, unofficial]. The approach was notably mapped to GPU hardware, demonstrating significant speed-ups over CPU-based implementations using optimized FFT libraries like FFTW [S1, S2, unofficial]. The work was funded by the ADAPT project and presented in publications from TU Wien [S1, S2, unofficial].
++Frequency Domain Volume Rendering was introduced by Ivan Viola, Armin Kanitsar, and Eduard Gröller in 2004 [S3, unofficial]. The method leverages the Projection-Slice Theorem to accelerate volume rendering by moving the computationally expensive projection step into the frequency domain, where it becomes a simple slice extraction [S1, unofficial]. The GPU-based implementation was recognized with the second-best paper award at SCCG 2004 [S3, unofficial].
+ 
+ ## Sources
+-[S1] GPU-based Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
+-[S2] Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)+[S1] GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
++[S2] Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
++[S3] GPU-based Frequency Domain Volume Rendering | TU Wien – Research Unit of Computer Graphics, https://www.cg.tuwien.ac.at/research/vis/adapt/2004_hwfvr/index.html, fetched 2026-10-29 (unofficial)
++[S4] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)

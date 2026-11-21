@@ -1,0 +1,161 @@
+# GraphiXS
+
+Also called: GraphiGS, GraphiTS, Graphical X Splatting
+
+## Overview
+GraphiXS is a probabilistic graphical model for 4D Gaussian Splatting that reformulates reconstruction as a Maximum a Posteriori (MAP) estimation problem, introducing structured dependencies among cameras, time, and components to handle uncertainty [S1]. Unlike deterministic 4DGS methods that minimize photometric error directly, GraphiXS uses stochastic priors and Bayesian inference to regularize dynamics and component visibility, making it robust to sparse views and missing frames [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of 2D images $I_{ct}$ indexed by camera $c$ and time $t$; camera poses $C$; time indices $T$.
+- **Outputs:** A set of 4D Gaussian components parameterized by $\theta$, including mean $\mu$, covariance $\Sigma$, base opacity $o$, spherical harmonics color $sh$, appearance time $g$, duration $u$, velocity $v$, acceleration $a$, jerk $j$, and snap $s$ [S1].
+
+**Data Structures:**
+Each component $p$ stores:
+- $\mu \in \mathbb{R}^3$: Mean position.
+- $\Sigma \in \mathbb{R}^{3 \times 3}$: Covariance matrix (symmetric positive definite).
+- $o \in \mathbb{R}$: Base opacity.
+- $sh$: Spherical harmonics coefficients for color.
+- $g \in \mathbb{R}$: Appearance time.
+- $u \in \mathbb{R}$: Duration of existence.
+- $v, a, j, s \in \mathbb{R}^3$: Velocity, acceleration, jerk, and snap parameters for dynamics [S1].
+
+**Generative Process:**
+The model defines a generative process with four steps [S1]:
+1. **Component Selection:** Given mixture model $F$, camera $c \sim C$, and time $t \sim T$, sample a subset of components $\{\alpha_i\}$ with $L$ components for image $I_{ct}$.
+2. **Ray Casting:** For each pixel $X_{c,d}^t$, cast a ray $R_{c,d}^t$ from camera $c$ at time $t$.
+3. **Intersection:** Identify the subset of components $\{\beta_j\}$ from $\{\alpha_i\}$ that intersect with ray $R_{c,d}^t$.
+4. **Rasterization:** Generate the color for pixel $X_{c,d}^t$ based on $\{\beta_j\}$ and ray $R_{c,d}^t$ [S1].
+
+**Factorized Likelihood:**
+The likelihood is factorized according to the graphical dependencies [S1]:
+$$ P(X | \cdot) = P(X | \beta, R) P(\beta | \alpha, R) P(R | C, T) P(\alpha | \delta_\theta, C, T) $$
+where $X$ is the image, $\beta$ are per-pixel components, $R$ is the ray, $\alpha$ are per-image components, and $\delta_\theta$ is the mixture model [S1].
+
+**Rendering (Rasterization):**
+The rendering step $P(X | \beta, R)$ is implemented as standard alpha blending [S1]:
+$$ Ras(X; \beta, R) = \sum_{i=1}^N \lambda_i \beta_{2D}^i(X) $$
+where $\lambda_i = s_i o_i \prod_{j=1}^{i-1} (1 - o_j \beta_{2D}^j(X))$ is the transmittance/weight, $s_i$ is a scale/color factor, $o_i$ is opacity, and $\beta_{2D}^i(X)$ is the projected 2D Gaussian [S1].
+
+**Image Loss (Energy-based Likelihood):**
+The baseline rendering loss is converted into an energy-based likelihood [S1]:
+$$ P(I | \beta, R, \theta, C, T) \propto \exp \left( - \sum_{t} \sum_{c}^{M} L_{img}(I_{ct}) \right) $$
+where the image loss $L_{img}$ is [S1]:
+$$ L_{img} = (1 - \epsilon_D - SSIM) L_1 + (\epsilon_D - SSIM) L_{D-SSIM} + \epsilon_o \sum_i ||o_i||_1 + \epsilon_\Sigma \sum_{i,j} ||\lambda_{i,j}||_1 $$
+Here, $L_1$ and $L_{D-SSIM}$ are L1 and Deep-SSIM losses, $\lambda_{i,j}$ are eigenvalues of covariance $\Sigma$, and $\epsilon$ terms are hyperparameters [S1].
+
+**Priors:**
+The prior $P(\theta)$ regularizes the parameters to ensure well-behaved dynamics and structure [S1]:
+
+1.  **Mean Dynamics (Brownian Motion):**
+    The mean $\mu$ evolves via Brownian motion with a deterministic drift $f(\mu, t)$ [S1]:
+    $$ \frac{d\mu}{dt} = f(\mu, t) + \mathcal{N}(0, \epsilon^2 I) $$
+    Discretized as [S1]:
+    $$ \mu(t) = \mu(t-1) + f(\mu, t)\Delta t + \mathcal{N}(0, \epsilon^2 I)\Delta t $$
+    The drift function $f(\mu, t)\Delta t$ uses higher-order derivatives [S1]:
+    $$ f(\mu, t)\Delta t = v(t-g) + \frac{1}{2}a(t-g)^2 + \frac{1}{6}j(t-g)^3 + \frac{1}{24}s(t-g)^4 $$
+    where $v, a, j, s$ are velocity, acceleration, jerk, and snap, and $g$ is the appearance time [S1].
+
+2.  **Opacity Prior:**
+    $$ P(o) \propto \frac{1}{N_1} \sum_{i=1}^N o_i^2 \exp\left(-\frac{(t-g)^2}{2u^2}\right) \psi(\cdot) $$
+    where $u$ is the duration a component lasts, $N_1$ is a normalization constant, and $\psi(\cdot)$ is the splatting response [S1].
+
+3.  **Dynamics Prior:**
+    $$ P(v_p, a_p, j_p, s_p) \propto \exp\left(-\lambda_h \sum_{t=1}^{N_t} \frac{||v_p||^2 + ||a_p||^2 + ||j_p||^2 + ||s_p||^2}{|\det(\Sigma_p)|^{1/2}}\right) $$
+    This prefers slowly moving components, weighted by the volume proxy $|\det(\Sigma_p)|$ [S1].
+
+4.  **Covariance Prior:**
+    $$ P(\Sigma_p) \propto \exp\left(-\lambda_\sigma \frac{1}{N_t} \sum_{p} ||\Sigma_p - \hat{\Sigma}_t||_F^2\right) $$
+    where $\hat{\Sigma}_t$ is the mean covariance of components at time $t$ [S1].
+
+5.  **Component Confidence:**
+    A metric to prefer components visible across all frames [S1]:
+    $$ P(\alpha | \delta_\theta, C, T) = E\{P(r_{c,d}^t | \alpha)\} \approx \frac{\sum_{c,t,d} P(r_{c,d}^t | \alpha)}{\sum_{p,c,t,d} P(r_{c,d}^t | \delta_{\theta_p})} $$
+    The numerator is the soft visibility of component $\alpha$ to all pixels; the denominator is the sum of soft visibility of all components [S1].
+
+**Full Prior:**
+$$ P(\theta(t)) = P(o) P(\mu(1)) \prod_{t=2}^K \mathcal{N}(\mu(t-1) + f(\mu, t), \epsilon^2 I) \prod_{t=1}^K P(v, a, j, s) P(\Sigma) $$
+[ S1 ]
+
+**Optimization (MAP):**
+The objective is to maximize the posterior [S1]:
+$$ \arg\max_\theta \log P(X | R, \beta, \alpha, C, T, \theta) P(\theta) $$
+Equivalent to minimizing [S1]:
+$$ L_{full} = -\log P(I | \cdot) - \log P(\alpha | \cdot) - \log P(\theta) $$
+$$ L_{full} = L_{img} + L_\alpha + L_\theta $$
+[ S1 ]
+
+**Algorithm:**
+Optimization uses Stochastic Gradient Hamiltonian Monte Carlo (SGHMC) [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_graphixs(images, cameras, times, initial_components, num_iterations):
+    # Initialize parameters theta for all components
+    # theta includes mu, Sigma, o, sh, g, u, v, a, j, s
+    theta = initialize_parameters(initial_components)
+    
+    # SGHMC parameters
+    friction_coefficient = 120
+    noise_scale = 1.0
+    burn_in_iterations = 7000
+    burn_in_friction = 5e5
+    brownian_noise_std = 1e-4
+    
+    # Loss weights
+    lambda_alpha = 1e-3
+    temporal_opacity_weight = 0.01
+    lambda_h = 1e-4
+    epsilon_D_SSIM = 0.2 # Example value, check source for exact if needed, source implies structure
+    epsilon_o = 0.01
+    epsilon_Sigma = 0.01
+    
+    for iteration in range(num_iterations):
+        # Sample a batch of (camera, time) pairs
+        batch_cameras, batch_times = sample_batch(cameras, times)
+        
+        # Anneal learning rates for dynamics parameters
+        lr_v, lr_a, lr_j, lr_s, lr_u = anneal_learning_rate(iteration, start=1e-2, end=1e-4)
+        
+        # Compute gradients
+        grads = compute_gradients(theta, batch_cameras, batch_times, images, 
+                                  lambda_alpha, temporal_opacity_weight, lambda_h,
+                                  epsilon_o, epsilon_Sigma)
+        
+        # SGHMC Update
+        if iteration < burn_in_iterations:
+            current_friction = burn_in_friction
+        else:
+            current_friction = friction_coefficient
+            
+        # Add SGHMC noise
+        noise = sample_normal_noise(grads, noise_scale, current_friction)
+        
+        # Update parameters
+        theta = update_parameters(theta, grads, noise, lr_v, lr_a, lr_j, lr_s, lr_u)
+        
+        # Handle component addition/removal if using stochastic strategy
+        # Note: Deterministic variant uses top-N selection
+        theta = manage_components(theta, images, batch_cameras, batch_times)
+        
+    return theta
+```
+
+**Edge Cases and Pitfalls:**
+- Methods relying on a canonical Gaussian set deformed via a neural field (e.g., HexPlane or MLP) cannot be upgraded directly; instead, GraphiXS priors must be applied to the displaced components at each sampled timestamp with gradients backpropagated through the deformation network [S1].
+- The deterministic variant replaces SGHMC with Adam, disables component confidence loss, removes Brownian motion noise, and uses deterministic top-N selection for densification [S1].
+
+## Operating characteristics
+- **Time and Memory Complexity:** The method involves millions of parameters, requiring significant memory for storing component states and gradients [S1]. Optimization uses SGHMC, which adds computational overhead due to noise injection and momentum tracking compared to standard Adam [S1].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** The total number of components is capped at 1.5 million in experiments [S1].
+- **Strengths:** Robust to sparse views and missing frames due to probabilistic modeling of uncertainty and component confidence [S1]. Handles arbitrary and potentially discontinuous motions via Brownian motion and higher-order derivatives [S1].
+- **Limitations:** Computationally expensive due to SGHMC and large parameter space [S1]. Not directly applicable to implicit deformation-based methods without modification [S1].
+- **When to use:** When dealing with dynamic scenes with uncertainty, sparse views, or missing temporal data, and when using explicit 3D/4D Gaussians or similar primitives (e.g., FTGS, Ex4DGS, 4DGS-1) [S1].
+
+## Background
+GraphiXS was introduced by Zhu et al. in 2025 [S1]. It generalizes the unnormalized mixture model of 3D/4DGS by introducing structured dependencies among random variables to enable Bayesian inference and regularization [S1]. It builds on the framework of 4D Gaussian Splatting [S1].
+
+## Sources
+[S1] Graphical X Splatting (GraphiXS): A Graphical Model for 4D Gaussian Splatting under Uncertainty, https://doi.org/10.1145/3799902.3811085, fetched 2026-11-05

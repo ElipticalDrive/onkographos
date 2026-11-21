@@ -1,0 +1,1416 @@
+# Image-to-Voxel Pipeline
+
+Converts any image (or emoji) into a 3D voxelized mesh for use in the Smash game. Runs locally on Apple Silicon GPU (MPS) using [TripoSR](https://huggingface.co/stabilityai/TripoSR) from Hugging Face.
+
+## Setup (one-time)
+
+```bash
+# Create virtual environment and install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Clone TripoSR (the 3D reconstruction model)
+git clone --depth 1 https://github.com/VAST-AI-Research/TripoSR.git triposr_repo
+
+# Install TripoSR-specific dependencies
+pip install git+https://github.com/tatsy/torchmcubes.git
+pip install omegaconf einops rtree xatlas moderngl imageio
+```
+
+The TripoSR model weights (~1.7 GB) are downloaded automatically from Hugging Face on first run.
+
+## Usage
+
+Always activate the venv first:
+
+```bash
+source .venv/bin/activate
+```
+
+### Single emoji
+
+```bash
+python -m src.pipeline --emoji "🐶" --resolution 32
+```
+
+### Single image (any PNG/JPG)
+
+```bash
+python -m src.pipeline --image ./my_sprite.png --name "hero" --resolution 32
+```
+
+### Batch all game emojis
+
+```bash
+python -m src.pipeline --batch-emojis --resolution 32
+```
+
+### Batch specific categories
+
+```bash
+python -m src.pipeline --batch-emojis --categories animals food --resolution 32
+```
+
+### Higher resolution
+
+```bash
+python -m src.pipeline --emoji "🐶" --resolution 64
+```
+
+## Re-running / Regenerating
+
+The pipeline supports **resume by default** — it skips emojis that already have a `_voxels.json` output. Just re-run the same command and it picks up where it left off:
+
+```bash
+# Resume from where it stopped (skips already-processed)
+python -m src.pipeline --batch-emojis --resolution 32
+
+# Force re-process everything (no resume)
+python -m src.pipeline --batch-emojis --resolution 32 --no-resume
+
+# Clear all output and start fresh
+rm -rf output/
+python -m src.pipeline --batch-emojis --resolution 32
+```
+
+The pipeline automatically copies the atlas to `public/voxel_assets/voxel_atlas.json` when finished.
+
+## Parallelism & Performance
+
+The batch pipeline uses a **concurrent 3-stage architecture** to maximize hardware utilization on Apple Silicon:
+
+```
+Stage 1 (CPU pool)      Stage 2 (GPU)         Stage 3 (CPU pool)
+Image Preparation  →→→  TripoSR Inference  →→→  Voxelization
+  N workers              Batched (4/pass)        N workers
+  ProcessPoolExecutor    MPS GPU                 ProcessPoolExecutor
+```
+
+- **Stage 1**: Renders emojis and applies stylization across all CPU cores via `ProcessPoolExecutor`
+- **Stage 2**: Runs TripoSR on the MPS GPU, processing **4 images per forward pass** for better throughput
+- **Stage 3**: Voxelizes meshes in parallel across all CPU cores via `ProcessPoolExecutor`
+
+All 3 stages run **simultaneously** via queues — while the GPU processes batch N, CPUs are preparing batch N+1 and voxelizing batch N-1.
+
+### Typical performance (M4 Pro, 48 GB)
+
+- **~5 seconds per emoji** (GPU-bottlenecked)
+- **~225 emojis in ~19 minutes**
+- GPU utilization: ~80%, CPU: ~60%, RAM: ~23 GB
+
+The GPU is the bottleneck — TripoSR inference is sequential. CPU stages overlap with GPU work so no time is wasted.
+
+### Live progress bar
+
+Batch runs show a single-line progress bar with all 3 stages:
+
+```
+  ████████░░░░░░░░░░░░  40% │ 📋 225/225 → 🖥️  100/225 → 🧊 90/225 │ ⏱️  450s (ETA 675s) │ 🐶
+```
+
+## Pipeline Stages
+
+```
+Image → Prepare+Stylize → TripoSR (Image-to-3D) → Voxelize → Export JSON
+```
+
+| Stage | Script | Description |
+|-------|--------|-------------|
+| 1 | `prepare_image.py` | Render emoji or load image, apply shading/AO for depth cues |
+| 2 | `image_to_mesh.py` | TripoSR inference on MPS GPU → triangle mesh with vertex colors |
+| 3 | `voxelize.py` | Mesh → voxel grid at target resolution, surface color sampling |
+| 4 | `export_voxels.py` | Combine per-asset JSONs into a single atlas |
+
+### Running stages individually
+
+```bash
+# Stage 1: Prepare image
+python -m src.prepare_image --emoji "🍕" --output prepared.png
+
+# Stage 2: Image to mesh
+python -m src.image_to_mesh prepared.png --output mesh.obj
+
+# Stage 3: Voxelize mesh
+python -m src.voxelize mesh.obj --resolution 32 --output voxels.json --name "🍕"
+
+# Stage 4: Build atlas from all individual JSONs
+python -m src.export_voxels output/ --output ../../public/voxel_assets/voxel_atlas.json
+```
+
+## CLI Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--emoji` | Emoji character to process | — |
+| `--image` | Path to input image (PNG/JPG) | — |
+| `--batch-emojis` | Process all game emojis | — |
+| `--name` | Asset name (for `--image` mode) | filename |
+| `--resolution`, `-r` | Voxel grid resolution | 32 |
+| `--mc-resolution` | Marching cubes resolution for mesh extraction | 256 |
+| `--output-dir`, `-o` | Output directory | `output` |
+| `--categories` | Emoji categories: `animals`, `transport`, `food`, `faces` | all |
+| `--no-resume` | Don't skip already-processed emojis | off |
+| `--cpu` | Force CPU (no GPU) | off |
+| `--skip-rembg` | Skip background removal (for `--image` mode) | off |
+
+## System Requirements
+
+- **macOS with Apple Silicon** (M1/M2/M3/M4) — uses MPS for GPU acceleration
+- **Python 3.9+**
+- **~6 GB GPU memory** for TripoSR model
+- **~23 GB RAM** during batch processing (parallel workers)
+- **~5 seconds per emoji** on M4 Pro
+
+## Output Format
+
+The atlas JSON uses compact flat arrays for efficient loading:
+
+```json
+{
+  "🐶": {
+    "resolution": 32,
+    "count": 1234,
+    "bounds": { "min": [0, 0, 0], "max": [31, 31, 31] },
+    "positions": [x0, y0, z0, x1, y1, z1, ...],
+    "colors": [r0, g0, b0, r1, g1, b1, ...]
+  }
+}
+```
+
+The Three.js integration (`voxelFactory.ts`) builds `BufferGeometry` with:
+- **Exposed-face-only rendering** — adjacent voxels share faces, only visible faces are emitted
+- **Vertex colors** — per-voxel RGB from the mesh surface
+- **Flat shading** — matches the Minecraft-like letter voxel aesthetic
+
+## Troubleshooting
+
+**Blank/identical meshes**: The emoji font rendering failed. Apple Color Emoji only supports specific pixel sizes (160, 96, etc.). Verify with:
+```bash
+python -c "from prepare_image import render_emoji; import numpy as np; img = render_emoji('🍕'); print('std:', np.array(img).std())"
+```
+`std` should be > 0. If 0, the emoji rendered as blank white.
+
+**MPS errors**: TripoSR auto-falls back to CPU for marching cubes (torchmcubes doesn't support Metal). If the full model fails on MPS, use `--cpu`.
+
+**Out of memory**: Reduce `--mc-resolution` (default 256, try 128) or reduce parallel workers.
+
+**Resume not working**: The pipeline checks for `<name>_voxels.json` in the output dir. If you changed resolution or want to regenerate, use `--no-resume`.
+
+### src/__init__.py
+```
+"""Image-to-Voxel Pipeline: Convert images and emojis to 3D voxel assets."""
+
+__version__ = "1.0.0"
+```
+
+### src/export_voxels.py
+```
+"""
+Export voxel data in compact format for web loading.
+
+Supports individual JSON files per asset and a combined atlas.
+Uses compact flat arrays instead of per-voxel objects.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Dict
+
+
+def build_atlas(voxel_dir: str, output_path: str) -> None:
+    """Combine individual voxel JSON files into a single atlas.
+
+    The atlas uses compact arrays for efficiency:
+    - positions: flat [x0,y0,z0, x1,y1,z1, ...] array
+    - colors: flat [r0,g0,b0, r1,g1,b1, ...] array
+    """
+    voxel_path = Path(voxel_dir)
+    atlas: Dict[str, dict] = {}
+
+    files = sorted(voxel_path.glob("*.json"))
+    if not files:
+        print(f"No voxel JSON files found in {voxel_dir}")
+        return
+
+    for f in files:
+        if f.name == "voxel_atlas.json":
+            continue
+        with open(f) as fp:
+            data = json.load(fp)
+
+        name = data.get("name", f.stem)
+        atlas[name] = {
+            "resolution": data["resolution"],
+            "count": data["count"],
+            "bounds": data["bounds"],
+            "positions": data["positions"],
+            "colors": data["colors"],
+        }
+        print(f"  Added: {name} ({data['count']} voxels)")
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(atlas, f)
+
+    size_kb = Path(output_path).stat().st_size / 1024
+    print(f"\nAtlas saved to {output_path}")
+    print(f"  Assets: {len(atlas)}")
+    print(f"  Size: {size_kb:.1f} KB")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Build voxel atlas from individual files")
+    parser.add_argument("voxel_dir", type=str, help="Directory containing voxel JSON files")
+    parser.add_argument("--output", "-o", type=str, default="voxel_atlas.json",
+                        help="Output atlas path")
+    args = parser.parse_args()
+    build_atlas(args.voxel_dir, args.output)
+```
+
+### src/image_to_mesh.py
+```
+"""
+Image-to-3D mesh conversion using TripoSR from Hugging Face.
+
+Converts a prepared 2D image into a 3D triangle mesh with vertex colors.
+Runs on MPS (Apple Silicon) with CPU fallback.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import torch
+from PIL import Image
+
+# Add the local TripoSR repo to path
+TRIPOSR_DIR = os.path.join(os.path.dirname(__file__), "triposr_repo")
+if TRIPOSR_DIR not in sys.path:
+    sys.path.insert(0, TRIPOSR_DIR)
+
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.WARNING
+)
+
+
+def get_device() -> torch.device:
+    """Get the best available device, preferring MPS for Apple Silicon."""
+    if torch.backends.mps.is_available():
+        logging.info("Using MPS (Apple Silicon GPU)")
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        logging.info("Using CUDA GPU")
+        return torch.device("cuda")
+    else:
+        logging.info("Using CPU (no GPU acceleration)")
+        return torch.device("cpu")
+
+
+_model_cache = {}
+
+
+def load_triposr(device: torch.device):
+    """Load the TripoSR model from Hugging Face (cached)."""
+    device_key = str(device)
+    if device_key in _model_cache:
+        return _model_cache[device_key]
+
+    from tsr.system import TSR
+
+    logging.info("Loading TripoSR model from Hugging Face...")
+    model = TSR.from_pretrained(
+        "stabilityai/TripoSR",
+        config_name="config.yaml",
+        weight_name="model.ckpt",
+    )
+    model.renderer.set_chunk_size(8192)
+    model.to(device)
+    _model_cache[device_key] = model
+    logging.info("Model loaded successfully")
+    return model
+
+
+def preprocess_for_triposr(image: Image.Image, foreground_ratio: float = 0.85) -> Image.Image:
+    """Preprocess image for TripoSR: remove bg, resize foreground, gray bg."""
+    import rembg
+    from tsr.utils import remove_background, resize_foreground
+
+    rembg_session = rembg.new_session()
+    image = remove_background(image, rembg_session)
+    image = resize_foreground(image, foreground_ratio)
+
+    # TripoSR expects RGB with 50% gray background
+    image = np.array(image).astype(np.float32) / 255.0
+    image = image[:, :, :3] * image[:, :, 3:4] + (1 - image[:, :, 3:4]) * 0.5
+    image = Image.fromarray((image * 255.0).astype(np.uint8))
+    return image
+
+
+def image_to_mesh(
+    image_path: str,
+    output_path: str,
+    device: Optional[torch.device] = None,
+    mc_resolution: int = 256,
+    foreground_ratio: float = 0.85,
+) -> str:
+    """Convert a 2D image to a 3D mesh using TripoSR.
+
+    Args:
+        image_path: Path to input image
+        output_path: Path for output mesh file (.obj or .glb)
+        device: Torch device (auto-detected if None)
+        mc_resolution: Marching cubes resolution (higher = more detail)
+        foreground_ratio: Foreground size ratio for preprocessing
+
+    Returns:
+        Path to the output mesh file
+    """
+    if device is None:
+        device = get_device()
+
+    image = Image.open(image_path)
+    processed = preprocess_for_triposr(image, foreground_ratio)
+
+    out_dir = Path(output_path).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    model = load_triposr(device)
+
+    with torch.no_grad():
+        scene_codes = model([processed], device=device)
+
+    meshes = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)
+    mesh = meshes[0]
+
+    # Save mesh
+    output = Path(output_path)
+    if output.suffix == ".glb":
+        mesh.export(str(output), file_type="glb")
+    else:
+        mesh.export(str(output))
+
+    vertex_count = len(mesh.vertices) if hasattr(mesh, 'vertices') else 'unknown'
+    face_count = len(mesh.faces) if hasattr(mesh, 'faces') else 'unknown'
+    logging.info(f"Saved mesh to {output_path}")
+    logging.info(f"  Vertices: {vertex_count}")
+    logging.info(f"  Faces: {face_count}")
+
+    return str(output)
+
+
+def batch_image_to_mesh(
+    items: list,
+    device: Optional[torch.device] = None,
+    mc_resolution: int = 256,
+    foreground_ratio: float = 0.85,
+) -> list:
+    """Batch-process multiple images through TripoSR in one forward pass.
+
+    Args:
+        items: List of (image_path, output_path) tuples
+        device: Torch device
+        mc_resolution: Marching cubes resolution
+
+    Returns:
+        List of (output_path, success, error) tuples
+    """
+    if not items:
+        return []
+    if device is None:
+        device = get_device()
+
+    model = load_triposr(device)
+    results = []
+
+    # Preprocess all images
+    processed_images = []
+    valid_items = []
+    for image_path, output_path in items:
+        try:
+            image = Image.open(image_path)
+            processed = preprocess_for_triposr(image, foreground_ratio)
+            processed_images.append(processed)
+            valid_items.append((image_path, output_path))
+        except Exception as e:
+            results.append((output_path, False, str(e)))
+
+    if not processed_images:
+        return results
+
+    # Batch inference
+    with torch.no_grad():
+        scene_codes = model(processed_images, device=device)
+
+    # Extract meshes
+    meshes = model.extract_mesh(scene_codes, has_vertex_color=True, resolution=mc_resolution)
+
+    for mesh, (image_path, output_path) in zip(meshes, valid_items):
+        try:
+            output = Path(output_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if output.suffix == ".glb":
+                mesh.export(str(output), file_type="glb")
+            else:
+                mesh.export(str(output))
+            results.append((output_path, True, None))
+        except Exception as e:
+            results.append((output_path, False, str(e)))
+
+    return results
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Convert image to 3D mesh using TripoSR")
+    parser.add_argument("input", type=str, help="Path to input image")
+    parser.add_argument("--output", "-o", type=str, help="Output mesh path (.obj or .glb)")
+    parser.add_argument("--resolution", type=int, default=256,
+                        help="Marching cubes resolution (default: 256)")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU (skip GPU)")
+    args = parser.parse_args()
+
+    device = torch.device("cpu") if args.cpu else get_device()
+    out = args.output or f"{Path(args.input).stem}.obj"
+
+    image_to_mesh(args.input, out, device=device, mc_resolution=args.resolution)
+```
+
+### src/pipeline.py
+```
+"""
+Image-to-Voxel Pipeline CLI Orchestrator.
+
+Converts any image (or emoji) to a 3D voxelized mesh through:
+  1. Image preparation & stylization
+  2. Image-to-3D mesh (TripoSR)
+  3. Mesh voxelization
+  4. Export to compact JSON
+
+Usage:
+  python pipeline.py --emoji "🐶" --resolution 32
+  python pipeline.py --image ./sprite.png --name "hero" --resolution 32
+  python pipeline.py --batch-emojis --resolution 32
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Optional, List, Dict
+
+# All emojis from the game's modes.ts
+GAME_EMOJIS = {
+    "animals": [
+        "🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐨","🐯",
+        "🦁","🐮","🐷","🐸","🐵","🐔","🐧","🐦","🦆","🐴",
+        "🦄","🐝","🦋","🐢","🐍","🐙","🐠","🐬","🐳","🦈",
+        "🐊","🐘","🦒","🦘","🦩","🦜","🐿️","🦔","🦥","🐓",
+        "🦝","🦡","🦫","🦃","🦤","🦚","🦢","🐇","🐁","🐀",
+        "🦨","🦦","🐕","🐈","🐅","🐆","🦓","🦍","🦧","🐪",
+        "🐫","🦙","🦣","🐃","🐂","🐄","🐎","🐖","🐐","🐑","🐏",
+    ],
+    "transport": [
+        "🚗","🚕","🚙","🚌","🏎️","🚓","🚑","🚒","🚐","🚚",
+        "🚜","🏍️","🛵","🚲","🚂","🚄","🚅","🚇","✈️","🚀",
+        "🛸","🚁","⛵","🚤","🚢","🛶","🚠","🛻","🚃","🚡",
+        "🛺","🏗️","🚛","🚎","🛩️","🚟","🛤️","⛽","🚏","🛣️",
+        "🚧","⚓","🛥️","🚿","🛞","🛴","🛳️","🚞",
+    ],
+    "food": [
+        "🍕","🍔","🍟","🌭","🍿","🧁","🍩","🍪","🎂","🍰",
+        "🍫","🍬","🍭","🍯","🍎","🍊","🍋","🍌","🍉","🍇",
+        "🍓","🫐","🍑","🥝","🍍","🥭","🥑","🧀","🥐",
+        "🥨","🥯","🍖","🍗","🥩","🌯","🫕","🥗","🥘","🫔",
+        "🥙","🧆","🥚","🧈","🥞","🧇","🍤","🦐","🦑","🦪",
+        "🍱","🍘","🍙","🍚","🍛","🍝","🥮","🥟","🍠","🥧",
+    ],
+    "faces": [
+        "😀","😃","😄","😁","😆","🥹","😅","😂","🤣","🥲",
+        "😊","😇","🙂","🙃","😉","😌","😍","🥰","😘","😗",
+        "😙","😚","😋","😛","😜","🤪","😝","🤑","🤗","🤭",
+        "🫢","🫣","🤫","🤔","🫡","🤐","🤨","😐","😑","😶",
+        "🫥","😏","😒","🙄","😬","🤥","😔",
+    ],
+}
+
+
+def get_all_emojis() -> list[str]:
+    """Get all emoji characters from the game."""
+    emojis = []
+    for category in GAME_EMOJIS.values():
+        emojis.extend(category)
+    return emojis
+
+
+def emoji_to_filename(emoji: str) -> str:
+    """Convert an emoji to a safe filename using codepoints."""
+    codepoints = "-".join(f"{ord(c):x}" for c in emoji if ord(c) > 0xFF)
+    return codepoints or f"u{ord(emoji[0]):04x}"
+
+
+def process_single(
+    emoji: str | None = None,
+    image_path: str | None = None,
+    name: str | None = None,
+    resolution: int = 32,
+    output_dir: str = "output",
+    mc_resolution: int = 256,
+    skip_rembg: bool = False,
+    cpu: bool = False,
+) -> dict | None:
+    """Process a single image through the full pipeline."""
+    import torch
+    from prepare_image import prepare_image
+    from image_to_mesh import image_to_mesh, get_device
+    from voxelize import voxelize_mesh
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine asset name
+    if name:
+        asset_name = name
+    elif emoji:
+        asset_name = emoji
+    elif image_path:
+        asset_name = Path(image_path).stem
+    else:
+        raise ValueError("Must provide --emoji, --image, or --name")
+
+    safe_name = emoji_to_filename(emoji) if emoji else Path(image_path).stem
+
+    # Stage 1: Prepare image
+    print(f"\n{'='*60}")
+    print(f"Processing: {asset_name}")
+    print(f"{'='*60}")
+
+    prepared_path = out_dir / f"{safe_name}_prepared.png"
+    print(f"\n[Stage 1/3] Preparing image...")
+    img = prepare_image(
+        emoji=emoji,
+        image_path=image_path,
+        output_path=str(prepared_path),
+        skip_rembg=skip_rembg or bool(emoji),
+    )
+
+    # Stage 2: Image to mesh
+    mesh_path = out_dir / f"{safe_name}.obj"
+    print(f"\n[Stage 2/3] Converting to 3D mesh...")
+    device = torch.device("cpu") if cpu else get_device()
+    try:
+        image_to_mesh(
+            str(prepared_path),
+            str(mesh_path),
+            device=device,
+            mc_resolution=mc_resolution,
+        )
+    except Exception as e:
+        print(f"  ERROR in mesh generation: {e}")
+        if "mps" in str(device):
+            print("  Retrying with CPU fallback...")
+            image_to_mesh(
+                str(prepared_path),
+                str(mesh_path),
+                device=torch.device("cpu"),
+                mc_resolution=mc_resolution,
+            )
+        else:
+            raise
+
+    # Stage 3: Voxelize
+    voxel_path = out_dir / f"{safe_name}_voxels.json"
+    print(f"\n[Stage 3/3] Voxelizing at {resolution}³...")
+    try:
+        result = voxelize_mesh(
+            str(mesh_path),
+            resolution=resolution,
+            output_path=str(voxel_path),
+            name=asset_name,
+        )
+    except Exception as e:
+        print(f"  ERROR in voxelization: {e}")
+        return None
+
+    print(f"\n✅ Done: {asset_name} → {result['count']} voxels")
+    return result
+
+
+def batch_emojis(
+    resolution: int = 32,
+    output_dir: str = "output",
+    mc_resolution: int = 256,
+    resume: bool = True,
+    cpu: bool = False,
+    categories: list[str] | None = None,
+) -> None:
+    """Process all game emojis with a concurrent 3-stage pipeline.
+
+    All stages run simultaneously via queues:
+    - Stage 1 (CPU pool): Image preparation feeds into →
+    - Stage 2 (GPU thread): TripoSR inference feeds into →
+    - Stage 3 (CPU pool): Voxelization
+    This keeps CPU cores AND GPU busy at all times.
+    """
+    import concurrent.futures
+    import multiprocessing
+    import queue
+    import threading
+    import torch
+    from export_voxels import build_atlas
+    from prepare_image import prepare_image
+    from image_to_mesh import batch_image_to_mesh, get_device, load_triposr
+    from voxelize import voxelize_mesh
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Collect emojis
+    if categories:
+        emojis = []
+        for cat in categories:
+            if cat in GAME_EMOJIS:
+                emojis.extend(GAME_EMOJIS[cat])
+            else:
+                print(f"Warning: unknown category '{cat}'")
+    else:
+        emojis = get_all_emojis()
+
+    # Filter already-processed
+    work_items = []
+    skipped = 0
+    for emoji in emojis:
+        safe_name = emoji_to_filename(emoji)
+        voxel_file = out_dir / f"{safe_name}_voxels.json"
+        if resume and voxel_file.exists():
+            skipped += 1
+            continue
+        work_items.append((emoji, safe_name))
+
+    total = len(work_items)
+    print(f"Processing {total} emojis at {resolution}³ resolution ({skipped} already done)")
+    if total == 0:
+        print("Nothing to do!")
+        _finalize_atlas(out_dir)
+        return
+
+    # Pre-warm the TripoSR model
+    device = torch.device("cpu") if cpu else get_device()
+    print("Pre-loading TripoSR model...")
+    load_triposr(device)
+
+    num_cpu_workers = max(2, multiprocessing.cpu_count() - 2)
+    print(f"Pipeline: {num_cpu_workers} CPU workers + 1 GPU thread\n")
+
+    # Queues between stages
+    prep_to_gpu = queue.Queue(maxsize=32)   # prepared images → GPU (big buffer)
+    gpu_to_voxel = queue.Queue(maxsize=32)  # meshes → voxelization
+
+    GPU_BATCH_SIZE = 4  # Process multiple images per GPU forward pass
+
+    # Shared progress counters
+    progress = {"prep": 0, "gpu": 0, "voxel": 0, "failed": 0}
+    start_time = time.time()
+    lock = threading.Lock()
+
+    def update_progress(stage: str, emoji: str = ""):
+        with lock:
+            progress[stage] += 1
+            elapsed = time.time() - start_time
+            p, g, v = progress["prep"], progress["gpu"], progress["voxel"]
+            f = progress["failed"]
+            rate = v / elapsed if elapsed > 0 and v > 0 else 0
+            eta = (total - v) / rate if rate > 0 else 0
+            bar_w = 20
+            filled = int(bar_w * v / total) if total > 0 else 0
+            bar = "█" * filled + "░" * (bar_w - filled)
+            pct = v * 100 // total if total > 0 else 0
+            status = (
+                f"\r  {bar} {pct:3d}% │ "
+                f"📋 {p}/{total} → 🖥️  {g}/{total} → 🧊 {v}/{total} │ "
+                f"{'❌ ' + str(f) + ' │ ' if f else ''}"
+                f"⏱️  {elapsed:.0f}s"
+            )
+            if eta > 0:
+                status += f" (ETA {eta:.0f}s)"
+            if emoji:
+                status += f" │ {emoji}"
+            print(status, end="", flush=True)
+
+    def fail_progress(emoji: str, stage: str, err: str):
+        with lock:
+            progress["failed"] += 1
+        print(f"\n  ✗ {emoji} {stage} failed: {err}", flush=True)
+
+    # Stage 1: Prepare images (process pool for true CPU parallelism)
+    def prep_worker():
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_cpu_workers) as pool:
+            futures = {
+                pool.submit(_prepare_one, emoji, safe_name, str(out_dir)): (emoji, safe_name)
+                for emoji, safe_name in work_items
+            }
+            for f in concurrent.futures.as_completed(futures):
+                emoji, safe_name, path, err = f.result()
+                if err:
+                    fail_progress(emoji, "prep", err)
+                else:
+                    update_progress("prep", emoji)
+                    prep_to_gpu.put((emoji, safe_name, path))
+        prep_to_gpu.put(None)
+
+    # Stage 2: GPU inference with batching (process N images per forward pass)
+    GPU_BATCH_SIZE = 4
+    def gpu_worker():
+        while True:
+            batch = []
+            item = prep_to_gpu.get()
+            if item is None:
+                break
+            batch.append(item)
+            # Fill batch from queue without blocking
+            while len(batch) < GPU_BATCH_SIZE:
+                try:
+                    item = prep_to_gpu.get_nowait()
+                    if item is None:
+                        prep_to_gpu.put(None)  # re-queue sentinel
+                        break
+                    batch.append(item)
+                except queue.Empty:
+                    break
+
+            items_for_gpu = [
+                (path, str(out_dir / f"{sn}.obj"))
+                for _, sn, path in batch
+            ]
+            try:
+                results = batch_image_to_mesh(
+                    items_for_gpu, device=device, mc_resolution=mc_resolution,
+                )
+                for (emoji, safe_name, _), (out_path, success, err) in zip(batch, results):
+                    if success:
+                        update_progress("gpu", emoji)
+                        gpu_to_voxel.put((emoji, safe_name, out_path))
+                    else:
+                        fail_progress(emoji, "mesh", err or "unknown")
+            except Exception as e:
+                # Fallback: process one at a time
+                from image_to_mesh import image_to_mesh
+                for emoji, safe_name, prepared_path in batch:
+                    mesh_path = str(out_dir / f"{safe_name}.obj")
+                    try:
+                        image_to_mesh(prepared_path, mesh_path, device=device, mc_resolution=mc_resolution)
+                        update_progress("gpu", emoji)
+                        gpu_to_voxel.put((emoji, safe_name, mesh_path))
+                    except Exception as e2:
+                        fail_progress(emoji, "mesh", str(e2))
+        gpu_to_voxel.put(None)
+
+    # Stage 3: Voxelization
+    def voxel_worker():
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_cpu_workers) as pool:
+            pending = {}
+            while True:
+                try:
+                    item = gpu_to_voxel.get(timeout=0.5)
+                    if item is None:
+                        break
+                    emoji, safe_name, mesh_path = item
+                    future = pool.submit(
+                        _voxelize_one, mesh_path, resolution,
+                        str(out_dir / f"{safe_name}_voxels.json"), emoji,
+                    )
+                    pending[future] = emoji
+                except queue.Empty:
+                    pass
+
+                done = [f for f in pending if f.done()]
+                for f in done:
+                    emoji = pending.pop(f)
+                    try:
+                        success, err = f.result()
+                        if success:
+                            update_progress("voxel", emoji)
+                        else:
+                            fail_progress(emoji, "voxelize", err)
+                    except Exception as e:
+                        fail_progress(emoji, "voxelize", str(e))
+
+            for f in concurrent.futures.as_completed(pending):
+                emoji = pending[f]
+                try:
+                    success, err = f.result()
+                    if success:
+                        update_progress("voxel", emoji)
+                    else:
+                        fail_progress(emoji, "voxelize", err)
+                except Exception as e:
+                    fail_progress(emoji, "voxelize", str(e))
+
+    # Launch pipeline
+    print(f"\r  {'░' * 20}   0% │ 📋 0/{total} → 🖥️  0/{total} → 🧊 0/{total} │ ⏱️  0s", end="", flush=True)
+    t1 = threading.Thread(target=prep_worker, name="prep")
+    t2 = threading.Thread(target=gpu_worker, name="gpu")
+    t3 = threading.Thread(target=voxel_worker, name="voxel")
+
+    t1.start()
+    t2.start()
+    t3.start()
+
+    t1.join()
+    t2.join()
+    t3.join()
+
+    elapsed = time.time() - start_time
+    done = progress["voxel"]
+    failed = progress["failed"]
+    print(f"\n\n{'='*60}")
+    print(f"✅ Complete: {done} processed, {skipped} skipped, {failed} failed")
+    print(f"⏱️  Total: {elapsed:.1f}s ({elapsed/max(done,1):.1f}s per emoji)")
+
+    _finalize_atlas(out_dir)
+
+
+def _prepare_one(emoji, safe_name, out_dir):
+    """Standalone function for ProcessPoolExecutor (must be top-level picklable)."""
+    try:
+        from prepare_image import prepare_image
+        prepared_path = str(Path(out_dir) / f"{safe_name}_prepared.png")
+        prepare_image(emoji=emoji, output_path=prepared_path, skip_rembg=True)
+        return (emoji, safe_name, prepared_path, None)
+    except Exception as e:
+        return (emoji, safe_name, None, str(e))
+
+
+def _voxelize_one(mesh_path, resolution, output_path, name):
+    """Standalone function for ProcessPoolExecutor (must be top-level picklable)."""
+    try:
+        from voxelize import voxelize_mesh
+        voxelize_mesh(mesh_path, resolution=resolution, output_path=output_path, name=name)
+        return (True, None)
+    except Exception as e:
+        return (False, str(e))
+
+
+def _finalize_atlas(out_dir: Path) -> None:
+    """Build atlas and copy to public directory."""
+    from export_voxels import build_atlas
+
+    atlas_path = str(out_dir / "voxel_atlas.json")
+    print(f"\nBuilding atlas...")
+    build_atlas(str(out_dir), atlas_path)
+
+    # Copy to public assets dir for the game to load
+    public_dir = Path(__file__).parent.parent.parent / "public" / "voxel_assets"
+    public_dir.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copy2(atlas_path, str(public_dir / "voxel_atlas.json"))
+    print(f"Copied atlas to {public_dir / 'voxel_atlas.json'}")
+
+
+def main():
+    """CLI entry point for the image-to-voxel pipeline."""
+    parser = argparse.ArgumentParser(
+        description="Image-to-Voxel Pipeline: convert images to 3D voxel assets",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --emoji "🐶" --resolution 32
+  %(prog)s --image ./sprite.png --name "hero" --resolution 64
+  %(prog)s --batch-emojis --resolution 32
+  %(prog)s --batch-emojis --categories animals food --resolution 32
+        """,
+    )
+
+    # Input modes
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--emoji", type=str, help="Single emoji character")
+    input_group.add_argument("--image", type=str, help="Path to input image")
+    input_group.add_argument("--batch-emojis", action="store_true",
+                             help="Process all game emojis")
+
+    # Options
+    parser.add_argument("--name", type=str, help="Asset name (for --image mode)")
+    parser.add_argument("--resolution", "-r", type=int, default=32,
+                        help="Voxel resolution (default: 32)")
+    parser.add_argument("--mc-resolution", type=int, default=256,
+                        help="Marching cubes resolution for mesh extraction (default: 256)")
+    parser.add_argument("--output-dir", "-o", type=str, default="output",
+                        help="Output directory (default: output)")
+    parser.add_argument("--categories", nargs="+", type=str,
+                        choices=list(GAME_EMOJIS.keys()),
+                        help="Emoji categories to process (for --batch-emojis)")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Don't skip already-processed emojis")
+    parser.add_argument("--cpu", action="store_true",
+                        help="Force CPU (no GPU acceleration)")
+    parser.add_argument("--skip-rembg", action="store_true",
+                        help="Skip background removal for --image input")
+
+    args = parser.parse_args()
+
+    if args.batch_emojis:
+        batch_emojis(
+            resolution=args.resolution,
+            output_dir=args.output_dir,
+            mc_resolution=args.mc_resolution,
+            resume=not args.no_resume,
+            cpu=args.cpu,
+            categories=args.categories,
+        )
+    else:
+        result = process_single(
+            emoji=args.emoji,
+            image_path=args.image,
+            name=args.name,
+            resolution=args.resolution,
+            output_dir=args.output_dir,
+            mc_resolution=args.mc_resolution,
+            skip_rembg=args.skip_rembg,
+            cpu=args.cpu,
+        )
+        if result:
+            # For single items, also copy to the public assets dir
+            public_dir = Path(__file__).parent.parent.parent / "public" / "voxel_assets"
+            public_dir.mkdir(parents=True, exist_ok=True)
+
+            from export_voxels import build_atlas
+            build_atlas(args.output_dir, str(public_dir / "voxel_atlas.json"))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### src/prepare_image.py
+```
+"""
+Image preparation and stylization for the image-to-voxel pipeline.
+
+Two input modes:
+  - Emoji mode: renders an emoji character to an image
+  - Image mode: loads any image file (PNG, JPG, etc.)
+
+Then applies stylization (background removal, shading, AO) to help
+the 3D reconstruction model produce better meshes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import platform
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from scipy import ndimage
+
+
+def render_emoji(emoji: str, size: int = 512) -> Image.Image:
+    """Render an emoji character to a PIL Image on a white background."""
+    font = None
+
+    if platform.system() == "Darwin":
+        # Apple Color Emoji only supports specific sizes (multiples of 16 up to 160)
+        # Render at the largest supported size then scale up
+        for font_size in [160, 96, 64, 48, 32]:
+            try:
+                font = ImageFont.truetype(
+                    "/System/Library/Fonts/Apple Color Emoji.ttc", font_size
+                )
+                break
+            except (OSError, IOError):
+                continue
+
+    if font is None:
+        for name in ["NotoColorEmoji.ttf", "Segoe UI Emoji", "Arial"]:
+            try:
+                font = ImageFont.truetype(name, int(size * 0.72))
+                break
+            except (OSError, IOError):
+                continue
+
+    if font is None:
+        font = ImageFont.load_default()
+
+    # Render at native font size first
+    bbox = font.getbbox(emoji)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    pad = max(tw, th) // 4
+    canvas_w, canvas_h = tw + pad * 2, th + pad * 2
+
+    img = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    x = pad - bbox[0]
+    y = pad - bbox[1]
+    draw.text((x, y), emoji, font=font, embedded_color=True)
+
+    # Scale up to target size
+    img = img.resize((size, size), Image.LANCZOS)
+
+    return img
+
+
+def load_image(path: str, size: int = 512) -> Image.Image:
+    """Load any image file, resize/pad to square, center the subject."""
+    img = Image.open(path).convert("RGBA")
+
+    # Resize maintaining aspect ratio, pad to square
+    w, h = img.size
+    scale = size / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # Center on white background
+    result = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+    offset_x = (size - new_w) // 2
+    offset_y = (size - new_h) // 2
+    result.paste(img, (offset_x, offset_y), img)
+
+    return result
+
+
+def remove_background(img: Image.Image) -> Image.Image:
+    """Remove background using rembg, place subject on white."""
+    from rembg import remove
+
+    # rembg works on the raw image bytes
+    result = remove(img)
+    # Composite onto white background
+    white = Image.new("RGBA", result.size, (255, 255, 255, 255))
+    white.paste(result, mask=result.split()[3])
+    return white
+
+
+def apply_stylization(img: Image.Image) -> Image.Image:
+    """Apply shading and depth cues to help 3D reconstruction."""
+    arr = np.array(img).astype(np.float32)
+    h, w = arr.shape[:2]
+
+    # Convert to grayscale for edge/depth analysis
+    gray = np.mean(arr[:, :, :3], axis=2)
+
+    # Detect the subject mask (non-white pixels)
+    white_thresh = 240
+    subject_mask = np.any(arr[:, :, :3] < white_thresh, axis=2).astype(np.float32)
+
+    if subject_mask.sum() < 100:
+        # No significant subject found, return as-is
+        return img
+
+    # Find subject centroid
+    coords = np.argwhere(subject_mask > 0)
+    cy, cx = coords.mean(axis=0)
+
+    # --- Edge-aware shading ---
+    # Compute distance from subject edges (inward)
+    dist_from_edge = ndimage.distance_transform_edt(subject_mask)
+    max_dist = dist_from_edge.max()
+    if max_dist > 0:
+        dist_norm = dist_from_edge / max_dist
+    else:
+        dist_norm = dist_from_edge
+
+    # --- Radial gradient for volume ---
+    yy, xx = np.mgrid[0:h, 0:w]
+    radial = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+    max_radial = radial[subject_mask > 0].max() if subject_mask.sum() > 0 else 1.0
+    radial_norm = np.clip(radial / max(max_radial, 1.0), 0, 1)
+
+    # Combine: lighter at center/top, darker at edges/bottom
+    # Simulate top-left light source
+    light_dir_x, light_dir_y = -0.3, -0.5
+    light_map = 1.0 - 0.15 * (
+        light_dir_x * (xx - cx) / max(max_radial, 1) +
+        light_dir_y * (yy - cy) / max(max_radial, 1)
+    )
+    light_map = np.clip(light_map, 0.7, 1.15)
+
+    # Edge darkening (ambient occlusion)
+    ao = 0.85 + 0.15 * dist_norm
+    ao = ndimage.gaussian_filter(ao, sigma=3)
+
+    # Combine shading
+    shading = light_map * ao
+    shading = np.clip(shading, 0.6, 1.2)
+
+    # Apply shading only to the subject
+    for c in range(3):
+        channel = arr[:, :, c]
+        # Only shade non-white areas
+        shaded = channel * shading
+        arr[:, :, c] = np.where(subject_mask > 0, shaded, channel)
+
+    arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+    # --- Soft drop shadow ---
+    shadow_offset = int(h * 0.02)
+    shadow_mask = ndimage.shift(subject_mask, [shadow_offset, shadow_offset // 2])
+    shadow_mask = ndimage.gaussian_filter(shadow_mask, sigma=8) * 0.3
+    for c in range(3):
+        arr[:, :, c] = np.clip(
+            arr[:, :, c].astype(np.float32) * (1 - shadow_mask * 0.5),
+            0, 255
+        ).astype(np.uint8)
+
+    return Image.fromarray(arr)
+
+
+def prepare_image(
+    emoji: Optional[str] = None,
+    image_path: Optional[str] = None,
+    size: int = 512,
+    skip_rembg: bool = False,
+    output_path: Optional[str] = None,
+) -> Image.Image:
+    """Main entry point: prepare an image for 3D reconstruction."""
+    if emoji:
+        img = render_emoji(emoji, size)
+        # Emojis on white bg usually don't need rembg
+        skip_rembg = True
+    elif image_path:
+        img = load_image(image_path, size)
+    else:
+        raise ValueError("Must provide either --emoji or --image")
+
+    # Background removal for arbitrary images
+    if not skip_rembg:
+        img = remove_background(img)
+
+    # Apply stylization
+    img = apply_stylization(img)
+
+    if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        img.save(output_path)
+
+
+    return img
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Prepare image for 3D reconstruction")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--emoji", type=str, help="Emoji character to render")
+    group.add_argument("--image", type=str, help="Path to input image")
+    parser.add_argument("--size", type=int, default=512, help="Output size (default: 512)")
+    parser.add_argument("--output", "-o", type=str, help="Output path")
+    parser.add_argument("--skip-rembg", action="store_true", help="Skip background removal")
+    args = parser.parse_args()
+
+    out = args.output
+    if not out:
+        if args.emoji:
+            out = f"prepared_{ord(args.emoji[0]):x}.png"
+        else:
+            out = f"prepared_{Path(args.image).stem}.png"
+
+    prepare_image(
+        emoji=args.emoji,
+        image_path=args.image,
+        size=args.size,
+        skip_rembg=args.skip_rembg,
+        output_path=out,
+    )
+```
+
+### src/voxelize.py
+```
+"""
+Mesh-to-voxel conversion with surface color sampling.
+
+Converts a triangle mesh into a voxel grid at configurable resolution.
+Uses surface-based color sampling (not voxel-center) for accurate colors.
+"""
+
+from __future__ import annotations
+
+import argparse
+import warnings
+
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="trimesh")
+import json
+from pathlib import Path
+from typing import Optional, Dict
+
+import numpy as np
+import trimesh
+
+
+def voxelize_mesh(
+    mesh_path: str,
+    resolution: int = 32,
+    output_path: Optional[str] = None,
+    name: Optional[str] = None,
+) -> dict:
+    """Convert a triangle mesh to a colored voxel grid.
+
+    Args:
+        mesh_path: Path to input mesh (.obj, .glb, .ply, etc.)
+        resolution: Voxel grid resolution (default 32)
+        output_path: Optional path to save voxel data
+        name: Asset name (emoji char or image name)
+
+    Returns:
+        Dict with voxel data
+    """
+    scene_or_mesh = trimesh.load(mesh_path, process=False)
+
+    # Handle scene vs mesh
+    if isinstance(scene_or_mesh, trimesh.Scene):
+        meshes = [g for g in scene_or_mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
+        if not meshes:
+            raise ValueError("No valid meshes found in scene")
+        mesh = trimesh.util.concatenate(meshes)
+    else:
+        mesh = scene_or_mesh
+
+    # Normalize mesh to fit in unit cube centered at origin
+    bounds = mesh.bounds
+    center = (bounds[0] + bounds[1]) / 2
+    scale = (bounds[1] - bounds[0]).max()
+    if scale > 0:
+        mesh.vertices = (mesh.vertices - center) / scale
+
+    # Voxelize using trimesh
+    pitch = 1.0 / resolution
+    voxel_grid = mesh.voxelized(pitch)
+    filled = voxel_grid.matrix
+
+    # Remove interior voxels (keep only surface shell)
+    from scipy import ndimage
+    eroded = ndimage.binary_erosion(filled)
+    surface = filled & ~eroded
+
+    # Sample colors from the mesh surface
+    colors = _sample_surface_colors(mesh, voxel_grid, surface, resolution)
+
+    # Build voxel data
+    voxels = []
+    indices = np.argwhere(surface)
+    for idx, (ix, iy, iz) in enumerate(indices):
+        r, g, b = colors[idx]
+        voxels.append({
+            "x": int(ix), "y": int(iy), "z": int(iz),
+            "r": int(r), "g": int(g), "b": int(b),
+        })
+
+    # Also build compact format: flat arrays for efficiency
+    n = len(voxels)
+    positions = []
+    color_data = []
+    for v in voxels:
+        positions.extend([v["x"], v["y"], v["z"]])
+        color_data.extend([v["r"], v["g"], v["b"]])
+
+    result = {
+        "name": name or Path(mesh_path).stem,
+        "resolution": resolution,
+        "count": n,
+        "bounds": {
+            "min": [int(indices[:, 0].min()), int(indices[:, 1].min()), int(indices[:, 2].min())] if n > 0 else [0, 0, 0],
+            "max": [int(indices[:, 0].max()), int(indices[:, 1].max()), int(indices[:, 2].max())] if n > 0 else [0, 0, 0],
+        },
+        # Compact arrays: positions as [x0,y0,z0,x1,y1,z1,...], colors as [r0,g0,b0,...]
+        "positions": positions,
+        "colors": color_data,
+    }
+
+    if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(result, f)
+
+    return result
+
+
+def _sample_surface_colors(
+    mesh: trimesh.Trimesh,
+    voxel_grid,
+    surface_mask: np.ndarray,
+    resolution: int,
+) -> np.ndarray:
+    """Sample colors from the nearest mesh surface for each surface voxel.
+
+    Uses closest-point queries on the mesh surface rather than voxel-center
+    sampling, which avoids the problem of centers landing inside empty space.
+    """
+    indices = np.argwhere(surface_mask)
+    n = len(indices)
+
+    # Convert voxel indices to world coordinates (centers of voxels)
+    voxel_origins = voxel_grid.transform[:3, 3]
+    voxel_scale = voxel_grid.scale
+    if hasattr(voxel_grid, 'pitch'):
+        pitch = voxel_grid.pitch
+    else:
+        pitch = voxel_scale
+    world_points = indices * pitch + voxel_origins + pitch / 2
+
+    # Find closest points on mesh surface
+    closest_points, _, face_indices = mesh.nearest.on_surface(world_points)
+
+    # Get colors at those surface points
+    colors = np.full((n, 3), 180, dtype=np.uint8)  # default gray
+
+    if mesh.visual is not None:
+        if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
+            # Vertex colors: interpolate from face vertices
+            try:
+                vc = np.array(mesh.visual.vertex_colors[:, :3], dtype=np.float32)
+                for i, fi in enumerate(face_indices):
+                    if fi < 0 or fi >= len(mesh.faces):
+                        continue
+                    face_verts = mesh.faces[fi]
+                    face_colors = vc[face_verts]
+                    colors[i] = face_colors.mean(axis=0).astype(np.uint8)
+            except (IndexError, AttributeError):
+                pass
+
+        elif hasattr(mesh.visual, 'material') and hasattr(mesh.visual, 'uv'):
+            # Texture: sample from material image
+            try:
+                material = mesh.visual.material
+                if hasattr(material, 'image') and material.image is not None:
+                    tex_img = np.array(material.image.convert("RGB"))
+                    uvs = mesh.visual.uv
+                    th, tw = tex_img.shape[:2]
+                    for i, fi in enumerate(face_indices):
+                        if fi < 0 or fi >= len(mesh.faces):
+                            continue
+                        face_verts = mesh.faces[fi]
+                        face_uvs = uvs[face_verts]
+                        avg_uv = face_uvs.mean(axis=0)
+                        px = int(np.clip(avg_uv[0] * tw, 0, tw - 1))
+                        py = int(np.clip((1 - avg_uv[1]) * th, 0, th - 1))
+                        colors[i] = tex_img[py, px]
+            except (IndexError, AttributeError):
+                pass
+
+    return colors
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Voxelize a 3D mesh")
+    parser.add_argument("input", type=str, help="Path to input mesh")
+    parser.add_argument("--resolution", "-r", type=int, default=32,
+                        help="Voxel resolution (default: 32)")
+    parser.add_argument("--output", "-o", type=str, help="Output JSON path")
+    parser.add_argument("--name", type=str, help="Asset name")
+    args = parser.parse_args()
+
+    out = args.output or f"{Path(args.input).stem}_voxels.json"
+    voxelize_mesh(args.input, resolution=args.resolution, output_path=out, name=args.name)
+```

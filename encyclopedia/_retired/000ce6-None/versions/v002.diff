@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -4,20 +4,20 @@
+ 
+ ## Overview
+-Multi-Texture Trilinear Estimation is a direct volume ray casting technique that renders scalar field data defined on a 3D rectilinear grid by stacking parallel quads textured with scalar information and compositing them in depth order [S1, unofficial]. It solves the problem of visualizing space data where grid cells are not uniform cubes by reconstructing scalar values from a Piecewise Rational (PRI) representation using a hybrid interpolation scheme [S1, S2, unofficial]. It sets itself apart from basic 2D texture rendering by substituting standard trilinear interpolation with two bilinear interpolations and one linear interpolation to improve image quality and speed [S2, unofficial], and from [Trilinear Interpolation](1531-trilinear-interpolation.md) by relying on a stack of slices and dependent texturing rather than direct 3D texture mapping or software-based coordinate array interpolation.
++Multi-Texture Trilinear Estimation is a direct volume ray casting technique that renders scalar field data defined on a 3D rectilinear grid by stacking parallel quads textured with scalar information and compositing them in depth order [S1, unofficial]. It solves the problem of visualizing space data where grid cells are not uniform cubes by reconstructing scalar values from a Piecewise Rational (PRI) representation using a hybrid interpolation scheme [S1, S2, unofficial]. It sets itself apart from basic 2D texture rendering by substituting standard trilinear interpolation with two bilinear interpolations and one linear interpolation to improve image quality and speed [S2, unofficial], and from [Trilinear Interpolation](1531-trilinear-interpolation.md) by relying on a stack of slices and dependent texturing rather than direct 3D texture mapping or software-based coordinate array interpolation [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Volumetric scalar field data.
++*   Volumetric scalar field data [S1, unofficial].
+ *   A Piecewise Rational (PRI) representation of the data, stored as two float textures: one for scalar values and one for knot distances [S1, unofficial].
+ *   An index texture mapping spatial positions to spline segments [S1, unofficial].
+-*   Camera view direction.
++*   Camera view direction [S1, unofficial].
+ 
+ **Outputs:**
+-*   Final 2D image with color and opacity values.
++*   Final 2D image with color and opacity values [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Index Texture:** 2D texture where each texel corresponds to a pixel on the PRI sampling plane. Dimensions $w \times h$.
+-2.  **Knots Texture:** 2D texture storing the linear splines. Each texel (or set of texels) represents a spline segment. The knots within each spline are sorted in depth (z-direction) [S1, unofficial].
+-3.  **Slice Geometry:** A stack of parallel quads.
++1.  **Index Texture:** 2D texture where each texel corresponds to a pixel on the PRI sampling plane [S1, unofficial].
++2.  **Knots Texture:** 2D texture storing the linear splines [S1, unofficial]. Each texel (or set of texels) represents a spline segment [S1, unofficial]. The knots within each spline are sorted in depth (z-direction) [S1, unofficial].
++3.  **Slice Geometry:** A stack of parallel quads [S1, unofficial].
+     *   *Axis-aligned:* Slices are perpendicular to the PRI sampling direction [S1, unofficial].
+     *   *View-aligned:* Slices are parallel to the image plane [S1, unofficial].
+@@ -43,8 +43,8 @@
+ ```python
+ def render_slice_stack(slices, index_texture, knots_texture, view_direction):
+-    # Determine slicing mode
+-    if view_direction is aligned_with_axes:
++    # Determine slicing mode based on view direction
++    if view_direction is parallel_to_axes:
+         mode = "axis_aligned"
+-        # Requires 3 orthogonal PRIs, select the one most parallel to view
++        # Requires 3 orthogonal PRIs; select the one most parallel to view
+         pri = select_most_parallel_PRI(view_direction, [PRI_X, PRI_Y, PRI_Z])
+     else:
+@@ -53,20 +53,18 @@
+         pri = PRI_0
+ 
+-    for slice in slices:
+-        # Step 1: Project fragment to sampling plane
+-        # For a fragment at (x, y, z) in PRI space
+-        x_proj, y_proj = drop_z_coordinate(x, y, z)
++    for fragment in slices:
++        x, y, z = fragment.position
++        # Step 1: Parallel project to sampling plane by dropping z
++        x_proj, y_proj = x, y
+         
+-        # Step 2: Identify 4 nearest neighbors on sampling plane
+-        neighbors = get_four_nearest_neighbors(x_proj, y_proj, index_texture)
++        # Step 2: Identify four nearest neighbors on sampling plane
++        neighbors = get_four_nearest_neighbors(x_proj, y_proj)
+         
+-        # Step 3: Retrieve index texels and associated splines
++        # Step 3 & 4: Retrieve index texels, access knots via dependent texturing, binary search
+         spline_segments = []
+         for neighbor in neighbors:
+             # Access knots texture via dependent texturing
+             spline_data = dependent_texture_lookup(index_texture, knots_texture, neighbor)
+-            
+-            # Step 4: Binary search for segment overlapping z
+-            # Knots are sorted in depth
++            # Binary search on knots (sorted in depth) to find segment overlapping z
+             segment = binary_search_knots(spline_data.knots, z)
+             spline_segments.append(segment)
+@@ -74,15 +72,51 @@
+         # Step 5: Interpolation
+         # Four linear interpolations in z direction
+-        z_interpolated_values = []
++        z_values = []
+         for segment in spline_segments:
+             val = linear_interpolate(segment, z)
+-            z_interpolated_values.append(val)
+-            
++            z_values.append(val)
+         # Bilinear interpolation in x and y directions
+-        scalar_value = bilinear_interpolate(z_interpolated_values, x_proj, y_proj)
++        scalar_value = bilinear_interpolate(z_values, x_proj, y_proj)
+         
+         # Step 6: Classification and Compositing
+         color, opacity = transfer_function(scalar_value)
+         composite_front_to_back(color, opacity)
++
++# Helper definitions
++def get_four_nearest_neighbors(x, y):
++    # Returns indices of four surrounding pixels on the sampling plane
++    return [(int(x), int(y)), (int(x)+1, int(y)), (int(x), int(y)+1), (int(x)+1, int(y)+1)]
++
++def dependent_texture_lookup(index_tex, knots_tex, neighbor_idx):
++    # Retrieves spline data associated with the neighbor index
++    return knots_tex[neighbor_idx]
++
++def binary_search_knots(knots, z):
++    # Finds the spline segment where knots[i].dist <= z < knots[i+1].dist
++    for i in range(len(knots) - 1):
++        if knots[i].dist <= z < knots[i+1].dist:
++            return knots[i]
++    return knots[-1]
++
++def linear_interpolate(segment, z):
++    # Linear interpolation along the spline segment at z
++    t = (z - segment.start_dist) / (segment.end_dist - segment.start_dist)
++    return segment.start_val + t * (segment.end_val - segment.start_val)
++
++def bilinear_interpolate(values, x, y):
++    # Bilinear interpolation of four z-interpolated values
++    # values layout: [bottom_left, bottom_right, top_left, top_right]
++    dx = x - int(x)
++    dy = y - int(y)
++    return (values[0] * (1 - dx) * (1 - dy) + values[1] * dx * (1 - dy) +
++            values[2] * (1 - dx) * dy + values[3] * dx * dy)
++
++def transfer_function(scalar):
++    # Maps scalar value to color and opacity
++    return scalar, scalar
++
++def composite_front_to_back(color, opacity):
++    # Accumulates color and opacity into the framebuffer
++    pass
+ ```
+ 
+@@ -103,6 +137,6 @@
+ *   **Strengths:** Improves image quality over basic 2D texture rendering by reducing artifacts associated with bilinear interpolation [S2, unofficial]. View-aligned slicing requires only one PRI [S1, unofficial].
+ *   **Limitations:** High storage requirements limit data size [S2, unofficial]. Dependent texturing and binary search are inefficient on GPUs [S1, unofficial]. Switching artifacts occur with large view angle changes unless multiple copies are used [S2, unofficial].
+-*   **When to use:** When image quality is prioritized over raw speed and data size is small enough to fit multiple copies in memory [S2, unofficial]. When GPU hardware supports efficient dependent texturing [S1, unofficial].
+-*   **When not to use:** When rendering large datasets that exceed texture memory [S2, unofficial]. When real-time performance is critical and GPU architecture is inefficient for dependent texturing [S1, unofficial].
++*   **When to use:** When data size is small enough to fit multiple copies in memory and view changes are limited [S2, unofficial].
++*   **When not to use:** When rendering large datasets that exceed texture memory [S2, unofficial]. When real-time performance is critical due to GPU bottlenecks with dependent texturing [S1, unofficial].
+ 
+ ## Background

@@ -1,0 +1,161 @@
+# Debug Splat Point Rendering
+
+Also called: Debug Point Rendering, Gaussian Splatting/Debug/Render Points, GaussianDebugRenderPoints, Splat Center Visualization
+
+## Overview
+Debug Splat Point Rendering is a diagnostic visualization technique that renders individual 3D Gaussian splats as small screen-space quads centered at their projected positions [S1, S2, unofficial]. Unlike the production rendering path which draws full elliptical splats for opacity blending, this method isolates the center location and basic attributes of each splat, allowing developers to inspect splat distribution, density, and attribute correctness [S2, unofficial]. It serves as a lightweight alternative to full splat rendering for verifying the correctness of the splat data pipeline and camera projection logic [S1, S2, unofficial].
+
+## How it works
+The method renders one quad per splat using a single draw call with instanced rendering. It bypasses the complex spherical harmonic color evaluation and alpha blending of the main renderer, opting instead for either the raw SH color or a normalized index-based color map [S1, S2, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   **Splat Data Buffer:** A structured buffer containing splat attributes. Each splat entry includes:
+    *   `centerWorldPos`: World-space position of the splat center [S1, S2, unofficial].
+    *   `sh.col`: The spherical harmonic color coefficient (typically the 0th order, representing diffuse color) [S2, unofficial].
+    *   `opacity`: (Optional, not used in color output but part of the data structure) [S1, S2, unofficial].
+*   **Shader Parameters:**
+    *   `_SplatSize`: Float scalar defining the width/height of the debug quad in screen pixels [S2, unofficial].
+    *   `_DisplayIndex`: Boolean flag. If true, colors represent splat indices; if false, colors represent SH color [S2, unofficial].
+    *   `_SplatCount`: Integer scalar, the total number of splats, used for normalizing indices [S2, unofficial].
+    *   `_ScreenParams`: Vector containing the current viewport width and height in pixels [S1, S2, unofficial].
+
+**Outputs:**
+*   **Framebuffer:** A 2D image where each splat appears as a small square at its projected center.
+
+### Data Structures
+The vertex shader processes instances. The input structure for the vertex shader is defined by the graphics API's instance ID mechanism.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```hlsl
+struct SplatData {
+    float3 centerWorldPos; // World space position
+    float3 sh_col;         // Spherical Harmonic color (RGB)
+    float opacity;         // Opacity (available but not used for color in debug mode)
+};
+
+struct v2f {
+    float4 vertex : SV_POSITION; // Clip space position
+    half3 color : TEXCOORD0;     // Output color
+};
+```
+
+### Numbered Steps
+
+1.  **Retrieve Splat Data:**
+    For each instance, retrieve the splat data using the instance ID as the index into the splat buffer [S2, unofficial].
+    $$ \text{splat} = \text{LoadSplatData}(\text{instID}) $$
+
+2.  **Transform to Clip Space:**
+    Transform the splat's world position to clip space to determine the center of the quad on the screen [S1, S2, unofficial].
+    $$ \text{centerWorld} = \text{splat.centerWorldPos} $$
+    $$ \text{centerClip} = \text{UNITY\_MATRIX\_VP} \times [\text{centerWorld}, 1]^T $$
+
+3.  **Generate Quad Geometry:**
+    Generate a 2x2 quad in screen space centered on the projected vertex. The four vertices of the quad are determined by the vertex ID (`vtxID`) within the instance [S1, S2, unofficial].
+    Calculate a 2D offset vector `quadPos` based on `vtxID`:
+    $$ \text{quadPos}.x = (\text{vtxID} \ \& \ 1) \times 2.0 - 1.0 $$
+    $$ \text{quadPos}.y = ((\text{vtxID} \gg 1) \ \& \ 1) \times 2.0 - 1.0 $$
+    This maps `vtxID` 0-3 to corners (-1,-1), (1,-1), (-1,1), (1,1) respectively [S1, S2, unofficial].
+
+4.  **Apply Screen-Space Offset:**
+    Offset the vertex position in screen space. The offset is scaled by `_SplatSize` relative to the screen resolution, and adjusted by the clip-space W component to maintain correct perspective division behavior [S1, S2, unofficial].
+    $$ \text{offset} = \text{quadPos} \times \frac{\_SplatSize}{\_ScreenParams.xy} \times \text{centerClip}.w $$
+    $$ \text{outputVertex}.xy = \text{centerClip}.xy + \text{offset} $$
+    $$ \text{outputVertex}.z = \text{centerClip}.z $$
+    $$ \text{outputVertex}.w = \text{centerClip}.w $$
+
+5.  **Compute Fragment Color:**
+    Determine the color for the fragment based on the `_DisplayIndex` flag [S1, S2, unofficial].
+    
+    *Case A: Display SH Color (`_DisplayIndex` is false)*
+    $$ \text{color} = \text{saturate}(\text{splat.sh\_col}) $$
+    
+    *Case B: Display Index (`_DisplayIndex` is true)*
+    Encode the splat index into RGB channels to visualize the distribution of indices [S1, S2, unofficial].
+    $$ \text{normalizedIndex} = \frac{\text{instID}}{\_SplatCount} $$
+    $$ r = \text{frac}(\text{normalizedIndex} \times 100) $$
+    $$ g = \text{frac}(\text{normalizedIndex} \times 10) $$
+    $$ b = \text{normalizedIndex} $$
+    $$ \text{color} = [r, g, b] $$
+
+6.  **Output:**
+    Pass the computed color and clip-space position to the fragment shader. The fragment shader simply outputs the interpolated color.
+
+### Pseudocode (HLSL-like)
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```hlsl
+// Vertex Shader
+v2f vert(uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
+{
+    v2f o;
+    
+    // 1. Load Splat Data
+    SplatData splat = LoadSplatData(instID);
+    
+    // 2. Transform to Clip Space
+    float3 centerWorld = splat.centerWorldPos;
+    float4 centerClip = mul(UNITY_MATRIX_VP, float4(centerWorld, 1.0));
+    
+    // 3 & 4. Generate Quad and Apply Offset
+    // Calculate 2x2 quad corner offset based on vertex ID
+    float2 quadPos = float2(vtxID & 1, (vtxID >> 1) & 1) * 2.0 - 1.0;
+    
+    // Apply offset in screen space
+    // Scale by SplatSize, normalize by ScreenParams, adjust for perspective
+    float2 offset = quadPos * (_SplatSize / _ScreenParams.xy) * centerClip.w;
+    
+    o.vertex.xy = centerClip.xy + offset;
+    o.vertex.z = centerClip.z;
+    o.vertex.w = centerClip.w;
+    
+    // 5. Compute Color
+    if (_DisplayIndex)
+    {
+        float normalizedIndex = (float)instID / (float)_SplatCount;
+        o.color.r = frac(normalizedIndex * 100.0);
+        o.color.g = frac(normalizedIndex * 10.0);
+        o.color.b = normalizedIndex;
+    }
+    else
+    {
+        o.color.rgb = saturate(splat.sh_col);
+    }
+    
+    return o;
+}
+
+// Fragment Shader
+half4 frag(v2f i) : SV_Target
+{
+    return half4(i.color, 1.0);
+}
+```
+
+### Parameters and Typical Values
+*   `_SplatSize`: Typically a small integer value (e.g., 2-4 pixels) to ensure splats do not overlap excessively and allow individual inspection [S2, unofficial].
+*   `_DisplayIndex`: Toggle between `true` (debugging index distribution) and `false` (debugging color/SH data) [S2, unofficial].
+*   `_SplatCount`: Must match the total number of splats in the buffer [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Quad Generation Assumption:** The method assumes a fixed 2x2 grid per splat (4 vertices). If the rendering pipeline uses a different primitive topology or vertex count per instance, the bitwise offset calculation will produce incorrect geometry [S2, unofficial].
+*   **Precision:** Using `frac()` for index encoding can lead to visual banding if `_SplatCount` is very large, as the precision of floating-point representation limits the distinctness of adjacent indices [S1, S2, unofficial].
+*   **Occlusion:** Since this is a debug tool, it typically does not perform depth testing or sorting. Splats will overwrite each other based on draw order (usually instance ID order), which may obscure splats with higher indices if they are drawn later [S2, unofficial].
+*   **Boundary Conditions:** If `_SplatSize` is larger than the screen resolution, quads will overflow the viewport. If `_SplatCount` is 0, division by zero occurs in the index encoding path [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of splats. The vertex shader performs constant-time operations per splat.
+*   **Memory Complexity:** $O(1)$ additional memory beyond the splat data buffer. No auxiliary buffers (like depth buffers or accumulation buffers) are required for the debug visualization itself.
+*   **Performance:** Significantly faster than full Gaussian Splatting rendering because it avoids the expensive spherical harmonic evaluation, alpha blending, and complex fragment shader logic. It is primarily limited by vertex throughput and fill rate for the small quads.
+*   **Strengths:** Provides immediate visual feedback on splat positions and colors. Useful for verifying that the splat data has been correctly loaded and transformed.
+*   **Limitations:** Does not represent the actual visual appearance of the scene (no elliptical shape, no transparency). Not suitable for final image generation.
+
+## Background
+Debug Splat Point Rendering is a specialized technique developed within the context of real-time 3D Gaussian Splatting implementations, particularly in game engines like Unity. It emerged as a necessary tool for developers working on [Gaussian Splatting](link) to debug the complex data pipeline involving splat generation, sorting, and rendering. The specific implementation details described here are derived from unofficial community implementations and forks of Gaussian Splatting projects, such as those by [aras-p](S1, unofficial) and [nigelhartman](S2, unofficial), which adapted the rendering logic for interactive debugging.
+
+## Sources
+[S1] aras-p/UnityGaussianSplatting, https://github.com/aras-p/UnityGaussianSplatting, fetched 2026-10-26 (unofficial)
+[S2] nigelhartman/worldlabs_unity, https://github.com/nigelhartman/worldlabs_unity, fetched 2026-10-27 (unofficial)

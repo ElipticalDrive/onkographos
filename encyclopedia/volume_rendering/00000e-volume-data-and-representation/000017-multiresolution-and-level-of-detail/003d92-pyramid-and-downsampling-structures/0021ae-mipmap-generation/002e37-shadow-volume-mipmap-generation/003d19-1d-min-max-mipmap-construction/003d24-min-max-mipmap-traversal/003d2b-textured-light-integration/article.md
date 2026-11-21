@@ -1,0 +1,104 @@
+# Textured Light Integration
+
+Also called: Rectified Light Texture Integration
+
+## Overview
+Textured Light Integration extends Min-Max Mipmap Traversal to simulate complex light sources with spatially varying intensity, such as stained-glass windows. It solves the problem of integrating light transport through volumetric media when the light source itself is not uniform. It differs from standard Min-Max Mipmap Traversal by incorporating a rectified light texture $T(\alpha, \gamma)$ into the integrand, requiring precomputed prefix sums of the product $\Gamma_i(\gamma)T(\alpha, \gamma)$ rather than just $\Gamma_i(\gamma)$.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray parameters $(x, y)$, depth $D[x, y]$, min-max mipmap data (min/max shadow boundaries per node), precomputed prefix sums of rectified light transport $\Gamma_{sum}$, and the rectified light texture $T(\alpha, \gamma)$.
+*   **Output:** Radiance $L(\alpha, \gamma)$ accumulated along the ray.
+
+**Data Structures:**
+*   **Rectified Light Texture $T(\alpha, \gamma)$:** A 2D texture where $\alpha$ is the angular coordinate of the light source and $\gamma$ is the angular coordinate of the ray direction relative to the light. The texture stores the intensity distribution of the light source after rectification.
+*   **Prefix Sum Texture $\Gamma_{sum}$:** Stores the cumulative sums of $\Gamma_i(\gamma)T(\alpha, \gamma)$. For textured lights, this requires $O(\log_2 t)$ ping-pong passes to compute, where $t$ is the $\gamma$-resolution of the rectified light texture. The sums are computed per $\alpha$ slice.
+
+**Steps:**
+1.  **Rectification:** Rectify the light texture map to obtain $T(\alpha, \gamma)$, similar to how the shadow map is rectified. This function is kept separate from the volume integrand $I$ because it may not vary smoothly [S1].
+2.  **Precomputation:** Compute prefix sums of $\Gamma_i(\gamma)T(\alpha, \gamma)$ instead of just $\Gamma_i(\gamma)$. This is done using $O(\log_2 t)$ ping-pong passes [S1].
+3.  **Traversal:** Perform the iterative min-max mipmap traversal as defined in Min-Max Mipmap Traversal.
+4.  **Integration:** For each fully lit node encountered during traversal, update the integral. To optimize, delay the integral update until encountering the next unlit node or the end of the traversal to avoid adding/subtracting cancelling terms [S1].
+5.  **Formula:** The radiance is approximated by:
+    $$L(\alpha, \gamma) \approx \sum_i^N \left( B_i(\beta) \sum_{\substack{\gamma < D(\alpha, \beta) \\ S(\alpha, \gamma) > \beta}} \Gamma_i(\gamma) T(\alpha, \gamma) \Delta \gamma \right)$$
+    where $B_i(\beta)$ is the volume scattering term, $\Gamma_i(\gamma)$ is the light transport term, and $T(\alpha, \gamma)$ is the rectified light texture [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def INTEGRATE_RAYED_LIGHT(x, y):
+    depth = D[x, y]
+    alpha, beta, gamma1 = TO_EPIPOLAR(x, y, depth)
+    node = 1  # Start at root
+    gamma_minus, gamma_plus = RANGE(node)
+    out = (0.0, 0.0, 0.0, 0.0)  # RGBA accumulator
+    pending_update = False
+    pending_gamma_minus = 0
+    pending_gamma_plus = 0
+
+    while True:
+        min_val = min[node, alpha]
+        max_val = max[node, alpha]
+
+        if min_val <= beta < max_val:
+            # Node intersects the ray; recurse to left child
+            node = node * 2
+            gamma_minus, gamma_plus = RANGE(node)
+        else:
+            # Node is fully lit or fully shadowed
+            if beta < min_val:
+                # Fully lit segment
+                if not pending_update:
+                    pending_gamma_minus = gamma_minus
+                    pending_gamma_plus = min(gamma1, gamma_plus)
+                    pending_update = True
+                else:
+                    # Accumulate the pending segment
+                    # Access prefix sum texture for rectified light
+                    # Note: Gamma_sum stores prefix sums of Gamma * T
+                    val = GAMMA_SUM[pending_gamma_plus] - GAMMA_SUM[pending_gamma_minus]
+                    out = out + val
+                    pending_update = False
+            # Advance to next node
+            node = node + 1
+            # Optimization: Only go up one level if needed (replace while with if)
+            if node % 2 == 0:
+                node = node // 2
+            else:
+                break  # End of traversal
+
+    # Finalize any pending update
+    if pending_update:
+        val = GAMMA_SUM[min(gamma1, gamma_plus)] - GAMMA_SUM[pending_gamma_minus]
+        out = out + val
+
+    return out
+```
+
+**Parameters:**
+*   $t$: $\gamma$-resolution of the rectified light texture. Typical value: 512 [S1].
+*   Resolution of light texture: Can be lower than shadow map resolution (e.g., 512x512) to reduce memory bandwidth [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Data Access Cost:** Textured lights require accessing 24 floats (3 color channels * 4 singular vectors * 2 endpoints) per integration step, compared to 8 floats for untextured lights [S1].
+*   **Quantization Error:** Using a lower resolution for the light texture introduces quantization error, but this is visually negligible [S1].
+*   **Recursion Depth:** The iterative traversal avoids deep recursion, but the optimization to only go up one level assumes a specific tree structure [S1].
+
+## Subtopics
+
+### [Low-Resolution Light Texture Approximation](9428-low-resolution-light-texture-approximation.md)
+Approximates light transport by performing rectification and prefix sum computations at a lower resolution than the shadow map, using hardware linear interpolation during integration. Chosen to reduce memory bandwidth and computational cost for colored textured lights.
+
+## Operating characteristics
+*   **Time Complexity:** The precomputation of prefix sums for textured lights requires $O(\log_2 t)$ ping-pong passes, where $t$ is the $\gamma$-resolution [S1]. The traversal itself is similar to Min-Max Mipmap Traversal.
+*   **Memory Complexity:** Higher memory bandwidth requirements due to accessing 24 floats per step for textured lights vs. 8 for untextured [S1].
+*   **Performance:** Using a lower resolution for the light texture (e.g., 512x512) significantly improves performance with negligible visual error [S1].
+*   **Strengths:** Enables realistic rendering of complex light sources like stained-glass windows.
+*   **Limitations:** Increased computational cost for precomputation and per-step data access compared to untextured lights.
+
+## Background
+Textured Light Integration is part of the Real-Time Volumetric Shadows using 1D Min-Max Mipmaps method, introduced by [S1]. It extends the basic min-max mipmap traversal to handle non-uniform light sources, allowing for the simulation of effects such as stained-glass windows.
+
+## Sources
+[S1] Real-Time Volumetric Shadows using 1D Min-Max Mipmaps, https://groups.csail.mit.edu/graphics/mmvs/mmvs.pdf, fetched 2026-10-28

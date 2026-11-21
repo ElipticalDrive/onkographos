@@ -1,0 +1,396 @@
+--- v009.md
++++ v010.md
+@@ -4,54 +4,70 @@
+ 
+ ## Overview
+-Gaussian Splitting and Pruning is a deterministic density control method that modifies the number of 3D Gaussian primitives in a radiance field by splitting those with high reconstruction responsibility and removing those with minimal contribution, based on statistical criteria [S1, unofficial]. It solves the problem of under-reconstructed or blurry regions (by splitting) and redundant or invisible primitives (by pruning) after an initial convergence phase [S1, unofficial]. Unlike the gradient-based sibling [Adaptive Densification](3034-adaptive-densification.md) which operates continuously during training, this method is typically applied periodically or after initial convergence, using a statistical analysis of rendering weights and losses to make decisions [S1, unofficial].
++Gaussian Splitting and Pruning is a deterministic density control method for 3D Gaussian Splatting that modifies the primitive count based on statistical analysis of reconstruction loss and blending weights [S1, unofficial]. It solves the problem of under-reconstructed or blurry regions by splitting Gaussians with high reconstruction responsibility, while removing those with minimal contribution [S1, unofficial]. Unlike the gradient-based adaptive densification used in standard 3D Gaussian Splatting, this method operates on converged models using a batch of rays to estimate per-Gaussian loss statistics, allowing for iterative detail refinement without relying on view-space positional gradients [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of 3D Gaussians $G = \{G_i\}$ with converged parameters (position $\mathbf{p}_i$, covariance $\Sigma_i$, opacity weight $\lambda_i$, color $c_i$); a random batch of rays $R_{batch}$ (typically ~5% of the dataset); loss function $L(\cdot)$; z-scores $z_\lambda$ and $z_{\bar{l}}$.
+-*   **Outputs:** A modified set of Gaussians $G'$ with some removed and some split into two.
++*   **Input:** A converged set of 3D Gaussians $\{G_i\}$, where each Gaussian $G_i$ has position $\mu_i$, covariance $\Sigma_i$ (defined by eigenvalues $\sigma_{1,i}, \sigma_{2,i}, \sigma_{3,i}$ and eigenvectors $\vec{v}_{1,i}, \vec{v}_{2,i}, \vec{v}_{3,i}$), opacity weight $\lambda_i$, and color $c_i$.
++*   **Input:** A random batch of rays $\mathcal{R}$ (typically $\approx 5\%$ of the dataset).
++*   **Input:** A reconstruction loss function $L(\cdot)$ (e.g., L1 or LPIPS).
++*   **Output:** A modified set of Gaussians with updated counts, positions, scales, and attributes.
+ 
+ **Data Structures:**
+-*   Gaussian $G_i$: Contains position $\mathbf{p}_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or rotation/scale), opacity weight $\lambda_i \in \mathbb{R}$, and color $c_i \in \mathbb{R}^3$.
+-*   Ray Batch: List of rays, each with associated per-ray loss $L_j$ and the set of weights $\{w_{i,j}\}$ contributed by each Gaussian $G_i$ to that ray.
++*   Gaussian attributes are stored in arrays. $\lambda_i$ is the opacity weight. $c_i$ is the color in spherical harmonics or RGB.
++*   Covariance $\Sigma_i$ is typically stored in a compact form (e.g., quaternion for rotation and log-scale for dimensions) but decomposed into eigenvalues/vectors for splitting.
++
++**Parameters:**
++*   $z_\lambda$: Z-score for pruning threshold. Typical value: $2$ [S1, unofficial].
++*   $z_{\bar{l}}$: Z-score for splitting threshold. Typical value: $1$ [S1, unofficial].
++*   $\epsilon_w$: Noise scale for log-weights. Typical value: $0.1$ [S1, unofficial].
++*   $\epsilon_c$: Noise scale for inverse-sigmoid colors. Typical value: $0.1$ [S1, unofficial].
++*   $\sqrt{2/\pi} \approx 0.8$: Scaling factor for mean shift [S1, unofficial].
++*   $\sqrt{1 - 2/\pi} \approx 0.6$: Scaling factor for dominant eigenvalue [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Pruning (Remove Minimal Contributors):**
+-    *   Compute the mean $\mu_\lambda$ and standard deviation $\sigma_\lambda$ of the opacity weights $\lambda_i$ across all Gaussians.
+-    *   Identify Gaussians to remove where:
+-        $$ \lambda_i \leq \mu_\lambda - z_\lambda \sigma_\lambda $$
+-        where $z_\lambda$ is a z-score, typically set to 2 [S1, unofficial].
+-    *   Remove these Gaussians from the scene.
+-
+-2.  **Splitting Criteria (Identify High Responsibility):**
+-    *   Select a random batch of $M$ rays (e.g., 5% of the dataset) [S1, unofficial].
+-    *   For each ray $j$ in the batch, compute the per-ray loss $L_j$ (using any reconstruction loss, e.g., Eq. 14 in [S1, unofficial]) and the set of computed weights $w_{i,j}$ for each Gaussian $G_i$ (derived from Eqs. 7 and 9 in [S1, unofficial]).
+-    *   Estimate the average loss associated with each Gaussian $G_i$ over the batch:
+-        $$ \bar{l}_i = \frac{1}{M} \sum_{j=1}^M L_j \cdot w_{i,j} $$
+-    *   Compute the mean $\mu_{\bar{l}}$ and standard deviation $\sigma_{\bar{l}}$ of these average losses $\bar{l}_i$.
+-    *   Identify Gaussians to split where:
+-        $$ \bar{l}_i \geq \mu_{\bar{l}} + z_{\bar{l}} \sigma_{\bar{l}} $$
+-        where $z_{\bar{l}}$ is a z-score, typically set to 1 [S1, unofficial].
+-
+-3.  **Splitting Operation:**
+-    *   For each Gaussian $G_i$ selected for splitting:
+-        *   Compute the eigenvalues and eigenvectors of its covariance matrix $\Sigma_i$. Let $\sigma_1$ be the dominant eigenvalue and $\vec{v}_1$ be the corresponding dominant eigenvector [S1, unofficial].
+-        *   Generate two new Gaussians, $G_a$ and $G_b$.
+-        *   **Positions:** Shift the original mean $\mu$ (position $\mathbf{p}_i$) in opposite directions along $\vec{v}_1$ by a factor derived from the half-normal distribution:
+-            $$ \mu_{a,b} = \mu \pm \sigma_1 \vec{v}_1 \sqrt{\frac{2}{\pi}} $$
+-            The scaling factor $\sqrt{\frac{2}{\pi}} \approx 0.8$ [S1, unofficial].
+-        *   **Covariance:** Set identical covariance matrices for $G_a$ and $G_b$, reconstructed from the initial eigenvalues and eigenvectors, but with the dominant eigenvalue scaled:
+-            $$ \sigma_{1_{a,b}} = \sigma_1 \sqrt{1 - \frac{2}{\pi}} $$
+-            The scaling factor $\sqrt{1 - \frac{2}{\pi}} \approx 0.6$ [S1, unofficial]. The other eigenvalues remain unchanged.
+-        *   **Weights:** Replicate the initial weight $\lambda$, but add noise in the unconstrained parameterization space (log-space) to avoid coupled gradients:
+-            $$ \log(\lambda_{a,b}) = \log(\lambda) + \mathcal{N}(0, \epsilon_w) $$
+-            where $\epsilon_w = 0.1$ [S1, unofficial].
+-        *   **Colors:** Replicate the initial color $c$, but add noise in the unconstrained parameterization space (inverse-sigmoid space):
+-            $$ \sigma^{-1}(c_{a,b}) = \sigma^{-1}(c) + \mathcal{N}(0, \epsilon_c) $$
+-            where $\epsilon_c = 0.1$ [S1, unofficial].
+-        *   Remove the original Gaussian $G_i$ and add $G_a$ and $G_b$.
+-
+-4.  **Optimization:**
+-    *   Repeat the optimization process with the modified set of Gaussians [S1, unofficial].
++1.  **Compute Weight Statistics:**
++    Calculate the mean $\mu_\lambda$ and standard deviation $\sigma_\lambda$ of the opacity weights $\lambda_i$ across all Gaussians.
++    $$ \mu_\lambda = \frac{1}{N} \sum_{i=1}^N \lambda_i $$
++    $$ \sigma_\lambda = \sqrt{\frac{1}{N} \sum_{i=1}^N (\lambda_i - \mu_\lambda)^2} $$
++
++2.  **Prune Low-Contribution Gaussians:**
++    Remove any Gaussian $G_i$ where:
++    $$ \lambda_i \leq \mu_\lambda - z_\lambda \sigma_\lambda $$
++    [S1, unofficial]
++
++3.  **Estimate Per-Gaussian Loss:**
++    For the batch of $M$ rays $\mathcal{R}$:
++    a. Render the batch and compute the per-ray loss $L_j$ for each ray $j \in \{1, \dots, M\}$.
++    b. For each ray, retrieve the set of blending weights $w_{i,j}$ assigned to each Gaussian $G_i$ during compositing.
++    c. Estimate the average loss $\bar{l}_i$ associated with each Gaussian $G_i$ over the batch:
++    $$ \bar{l}_i = \frac{1}{M} \sum_{j=1}^M L_j \cdot w_{i,j} $$
++    [S1, unofficial]
++
++4.  **Compute Loss Statistics:**
++    Calculate the mean $\mu_{\bar{l}}$ and standard deviation $\sigma_{\bar{l}}$ of the average losses $\bar{l}_i$.
++    $$ \mu_{\bar{l}} = \frac{1}{N} \sum_{i=1}^N \bar{l}_i $$
++    $$ \sigma_{\bar{l}} = \sqrt{\frac{1}{N} \sum_{i=1}^N (\bar{l}_i - \mu_{\bar{l}})^2} $$
++
++5.  **Split High-Loss Gaussians:**
++    Identify Gaussians where $\bar{l}_i \geq \mu_{\bar{l}} + z_{\bar{l}} \sigma_{\bar{l}}$. For each such Gaussian $G_i$:
++    a. Compute the dominant eigenvector $\vec{v}_1$ and eigenvalue $\sigma_1$ of the covariance matrix $\Sigma_i$.
++    b. Generate two new Gaussians, $G_a$ and $G_b$.
++    c. **Positions:** Shift the original mean $\mu_i$ along the dominant eigenvector $\vec{v}_1$ by $\pm \sigma_1 \sqrt{2/\pi}$:
++    $$ \mu_{a,b} = \mu_i \pm \sigma_1 \vec{v}_1 \sqrt{\frac{2}{\pi}} $$
++    [S1, unofficial]
++    d. **Covariance:** Set the covariance matrices for $G_a$ and $G_b$ to be identical, reconstructed from the original eigenvectors but with the dominant eigenvalue scaled by $\sqrt{1 - 2/\pi}$:
++    $$ \sigma_{1_{a,b}} = \sigma_1 \sqrt{1 - \frac{2}{\pi}} $$
++    The other eigenvalues $\sigma_{2,i}, \sigma_{3,i}$ remain unchanged.
++    [S1, unofficial]
++    e. **Attributes:** Replicate the original weight $\lambda$ and color $c_i$, adding noise in the unconstrained parameterization space:
++    $$ \log(\lambda_{a,b}) = \log(\lambda_i) + \mathcal{N}(0, \epsilon_w) $$
++    $$ \sigma^{-1}(c_{a,b}) = \sigma^{-1}(c_i) + \mathcal{N}(0, \epsilon_c) $$
++    where $\mathcal{N}(0, \epsilon)$ denotes Gaussian noise with standard deviation $\epsilon$.
++    [S1, unofficial]
++    f. Remove the original Gaussian $G_i$.
++
++6.  **Re-optimize:**
++    Repeat the optimization process (gradient descent) on the modified set of Gaussians [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -60,5 +76,6 @@
+ import numpy as np
+ 
+-def gaussian_splitting_and_pruning(gaussians, rays_batch, z_lambda=2.0, z_lbar=1.0, epsilon_w=0.1, epsilon_c=0.1):
++def gaussian_splitting_and_pruning(gaussians, rays, loss_fn, z_lambda=2.0, z_lbar=1.0, 
++                                   epsilon_w=0.1, epsilon_c=0.1):
+     """
+     Perform deterministic splitting and pruning of 3D Gaussians.
+@@ -66,168 +83,128 @@
+     Args:
+         gaussians: List of Gaussian objects with attributes:
+-                   - p: position (3,)
+-                   - cov: covariance matrix (3,3)
+-                   - lambda: opacity weight (scalar)
+-                   - c: color (3,)
+-        rays_batch: List of ray objects with attributes:
+-                    - loss: per-ray loss (scalar)
+-                    - weights: dict mapping gaussian_index to weight (scalar)
+-        z_lambda: Z-score for pruning threshold.
+-        z_lbar: Z-score for splitting threshold.
+-        epsilon_w: Noise scale for log-weights.
+-        epsilon_c: Noise scale for inverse-sigmoid colors.
++                   .mu (3,), .cov (3x3 matrix or eigenvalues/vectors), 
++                   .lambda (float), .c (color vector)
++        rays: List of ray objects or indices representing a batch (~5% of dataset)
++        loss_fn: Function that renders rays and returns per-ray loss
++        z_lambda: Z-score for pruning
++        z_lbar: Z-score for splitting
++        epsilon_w: Noise scale for log-weights
++        epsilon_c: Noise scale for inverse-sigmoid colors
+         
+     Returns:
+-        new_gaussians: List of updated Gaussian objects.
+-    """
+-    new_gaussians = []
+-    gaussians_to_remove = set()
+-    gaussians_to_split = []
+-    
+-    # Step 1: Pruning
+-    lambdas = [g.lambda_val for g in gaussians]
++        Modified list of Gaussians
++    """
++    # Step 1: Compute Weight Statistics
++    lambdas = np.array([g.lambda_val for g in gaussians])
+     mu_lambda = np.mean(lambdas)
+     sigma_lambda = np.std(lambdas)
+-    prune_threshold = mu_lambda - z_lambda * sigma_lambda
+-    
+-    for i, g in enumerate(gaussians):
+-        if g.lambda_val <= prune_threshold:
+-            gaussians_to_remove.add(i)
+-            
+-    # Step 2: Splitting Criteria
+-    # Compute average loss per Gaussian over the batch
+-    M = len(rays_batch)
+-    avg_losses = np.zeros(len(gaussians))
+-    
+-    for ray in rays_batch:
+-        L_j = ray.loss
+-        for idx, w in ray.weights.items():
+-            avg_losses[idx] += L_j * w
+-            
+-    avg_losses /= M
+-    
+-    mu_lbar = np.mean(avg_losses)
+-    sigma_lbar = np.std(avg_losses)
+-    split_threshold = mu_lbar + z_lbar * sigma_lbar
+-    
+-    for i, l_bar in enumerate(avg_losses):
+-        if l_bar >= split_threshold:
+-            gaussians_to_split.append(i)
+-            
+-    # Step 3: Splitting Operation
+-    for i in gaussians_to_split:
+-        if i in gaussians_to_remove:
+-            continue # Already pruned, or handle priority? Source implies separate criteria.
+-                      # Assuming split takes precedence if both criteria met, or they are disjoint.
+-                      # Source doesn't specify overlap handling. We'll split if selected.
+-        
+-        g = gaussians[i]
+-        
+-        # Eigen decomposition
+-        eigenvalues, eigenvectors = np.linalg.eigh(g.cov)
+-        # Sort by eigenvalue descending to get dominant
+-        idx_sort = np.argsort(eigenvalues)[::-1]
+-        eigenvalues = eigenvalues[idx_sort]
+-        eigenvectors = eigenvectors[:, idx_sort]
+-        
+-        sigma_1 = eigenvalues[0]
+-        v_1 = eigenvectors[:, 0]
+-        
+-        # Scaling factors from half-normal distribution
+-        scale_pos = np.sqrt(2.0 / np.pi)
+-        scale_cov = np.sqrt(1.0 - 2.0 / np.pi)
+-        
+-        # New positions
+-        mu_a = g.p + sigma_1 * v_1 * scale_pos
+-        mu_b = g.p - sigma_1 * v_1 * scale_pos
+-        
+-        # New covariance: scale dominant eigenvalue
+-        new_eigenvalues = eigenvalues.copy()
+-        new_eigenvalues[0] = sigma_1 * scale_cov
+-        
+-        # Reconstruct covariance matrix
+-        # cov = V * diag(eigenvalues) * V^T
+-        cov_a = eigenvectors @ np.diag(new_eigenvalues) @ eigenvectors.T
+-        cov_b = cov_a.copy()
+-        
+-        # New weights (log-space)
+-        log_lambda_a = np.log(g.lambda_val) + np.random.normal(0, epsilon_w)
+-        log_lambda_b = np.log(g.lambda_val) + np.random.normal(0, epsilon_w)
+-        lambda_a = np.exp(log_lambda_a)
+-        lambda_b = np.exp(log_lambda_b)
+-        
+-        # New colors (inverse-sigmoid space)
+-        # Assuming sigmoid inverse is logit: logit(c) = log(c / (1-c))
+-        # Note: Source uses sigma^-1(c). Implementation depends on color representation.
+-        # Assuming c is in [0,1].
+-        inv_c_a = np.log(g.c / (1 - g.c + 1e-8)) + np.random.normal(0, epsilon_c, 3)
+-        inv_c_b = np.log(g.c / (1 - g.c + 1e-8)) + np.random.normal(0, epsilon_c, 3)
+-        
+-        # Sigmoid to get back to [0,1]
+-        c_a = 1 / (1 + np.exp(-inv_c_a))
+-        c_b = 1 / (1 + np.exp(-inv_c_b))
+-        
+-        # Create new Gaussian objects
+-        g_a = Gaussian(p=mu_a, cov=cov_a, lambda_val=lambda_a, c=c_a)
+-        g_b = Gaussian(p=mu_b, cov=cov_b, lambda_val=lambda_b, c=c_b)
+-        
+-        new_gaussians.append(g_a)
+-        new_gaussians.append(g_b)
+-        gaussians_to_remove.add(i)
+-        
+-    # Step 4: Collect remaining gaussians
+-    for i, g in enumerate(gaussians):
+-        if i not in gaussians_to_remove:
++    
++    # Step 2: Prune Low-Contribution Gaussians
++    prune_mask = lambdas > (mu_lambda - z_lambda * sigma_lambda)
++    gaussians = [g for g, keep in zip(gaussians, prune_mask) if keep]
++    
++    # Re-index or update list if necessary
++    # Note: In practice, indices might need remapping if Gaussians are removed
++    
++    # Step 3: Estimate Per-Gaussian Loss
++    # Render batch and get per-ray losses and weights
++    # Assume render_batch returns: ray_losses (M,), gaussian_weights (M, N_active)
++    ray_losses, gaussian_weights = render_batch_with_weights(rays, gaussians)
++    
++    # Compute average loss per Gaussian
++    # gaussian_weights shape: (M, N), ray_losses shape: (M,)
++    # l_bar_i = sum_j (L_j * w_ij) / M
++    l_bars = np.dot(gaussian_weights.T, ray_losses) / len(ray_losses)
++    
++    # Step 4: Compute Loss Statistics
++    mu_lbar = np.mean(l_bars)
++    sigma_lbar = np.std(l_bars)
++    
++    # Step 5: Split High-Loss Gaussians
++    split_mask = l_bars >= (mu_lbar + z_lbar * sigma_lbar)
++    gaussians_to_split = [g for g, split in zip(gaussians, split_mask) if split]
++    
++    new_gaussians = []
++    for g in gaussians:
++        if split_mask[gaussians.index(g)]: # Check if this specific Gaussian is to be split
++            # Get dominant eigenvector and eigenvalue
++            eigenvalues, eigenvectors = np.linalg.eigh(g.cov)
++            # Eigenvalues are sorted ascending; dominant is the last one
++            idx = np.argmax(eigenvalues)
++            sigma_1 = eigenvalues[idx]
++            v_1 = eigenvectors[:, idx]
++            
++            # Create two new Gaussians
++            # Position shift
++            shift = sigma_1 * v_1 * np.sqrt(2 / np.pi)
++            
++            # New mean
++            mu_a = g.mu + shift
++            mu_b = g.mu - shift
++            
++            # New covariance: scale dominant eigenvalue
++            new_eigenvalues = eigenvalues.copy()
++            new_eigenvalues[idx] = sigma_1 * np.sqrt(1 - 2 / np.pi)
++            cov_a = eigenvectors @ np.diag(new_eigenvalues) @ eigenvectors.T
++            cov_b = cov_a.copy()
++            
++            # New attributes with noise
++            log_lambda_a = np.log(g.lambda_val) + np.random.normal(0, epsilon_w)
++            log_lambda_b = np.log(g.lambda_val) + np.random.normal(0, epsilon_w)
++            
++            # Inverse sigmoid for color
++            inv_sigmoid_c = inv_sigmoid(g.c)
++            c_a = sigmoid(inv_sigmoid_c + np.random.normal(0, epsilon_c))
++            c_b = sigmoid(inv_sigmoid_c + np.random.normal(0, epsilon_c))
++            
++            # Create Gaussian objects
++            g_a = Gaussian(mu=mu_a, cov=cov_a, lambda_val=np.exp(log_lambda_a), c=c_a)
++            g_b = Gaussian(mu=mu_b, cov=cov_b, lambda_val=np.exp(log_lambda_b), c=c_b)
++            
++            new_gaussians.append(g_a)
++            new_gaussians.append(g_b)
++        else:
+             new_gaussians.append(g)
+             
+     return new_gaussians
+ 
+-class Gaussian:
+-    def __init__(self, p, cov, lambda_val, c):
+-        self.p = p
+-        self.cov = cov
+-        self.lambda_val = lambda_val
+-        self.c = c
++def render_batch_with_weights(rays, gaussians):
++    """
++    Placeholder for the differentiable rendering function.
++    Returns per-ray loss and the blending weights w_ij for each ray i and Gaussian j.
++    """
++    # Implementation depends on the specific renderer
++    # This function must compute the compositing weights w_ij
++    pass
++
++def inv_sigmoid(x):
++    return np.log(x / (1 - x))
++
++def sigmoid(x):
++    return 1 / (1 + np.exp(-x))
+ ```
+ 
+-**Parameters:**
+-*   $z_\lambda$: Z-score for pruning. Typical value: 2 [S1, unofficial].
+-*   $z_{\bar{l}}$: Z-score for splitting. Typical value: 1 [S1, unofficial].
+-*   $\epsilon_w$: Noise scale for log-weights. Typical value: 0.1 [S1, unofficial].
+-*   $\epsilon_c$: Noise scale for inverse-sigmoid colors. Typical value: 0.1 [S1, unofficial].
+-*   Batch size: Typically 5% of the dataset [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Coupled Gradients:** Noise is added in unconstrained parameterization space (log for weights, inverse-sigmoid for colors) to prevent coupled gradients during subsequent optimization [S1, unofficial].
+-*   **Initial Convergence:** The method is designed to be applied after the initial model has converged, not continuously during early training [S1, unofficial].
+-*   **Loss Function:** Any reconstruction loss is viable for $L_j$, but the specific loss used in the source is referenced as Eq. 14 in [S1, unofficial] (likely a combination of L1 and SSIM).
++*   **Degenerate Covariance:** If a Gaussian has a near-zero dominant eigenvalue, the split shift becomes negligible. Guard against division by zero or numerical instability when computing eigenvectors.
++*   **Coupled Gradients:** Noise must be added in the unconstrained parameterization space (log-weights, inverse-sigmoid colors) to prevent coupled gradients during subsequent optimization [S1, unofficial].
++*   **Batch Size:** The loss estimation relies on a random batch. If the batch is too small, the statistics $\mu_{\bar{l}}$ and $\sigma_{\bar{l}}$ may be noisy, leading to incorrect splitting/pruning decisions [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Octree refinement](8792-octree-refinement.md)
+-Octree refinement is a spatial subdivision technique used to reorder Gaussian splats for progressive rendering, ensuring that sparsely captured areas of a scene are reconstructed earlier than they would be by global contribution metrics alone. It differs from simple global sorting by enforcing a minimum representation per spatial region, thereby improving background quality at the cost of slight foreground degradation.
+-
+-### [Gaussian Pruning and Sampling](9219-gaussian-pruning-and-sampling.md)
+-Gaussian Pruning and Sampling is a density control strategy that reduces the number of 3D Gaussian primitives in a radiance field by removing those with minimal contribution to the rendered image. It solves the problem of redundant Gaussian representation and inefficient spatial distribution, which leads to high storage costs and slow optimization times. Unlike opacity-based pruning, which can cause noticeable quality drops or require aggressive thresholds, weight-based pruning evaluates the accumulated blending weights of Gaussians across views, balancing rendering quality with computational efficiency.
+-
+-### [Blur Split](9237-blur-split.md)
+-Blur Split is a densification technique for 3D Gaussian Splatting that addresses "under-reconstruction" and blur artifacts in regions with smooth color transitions where gradient-based methods fail. It identifies Gaussians with excessively large maximum contribution areas in screen space and splits them to improve local detail. Unlike standard pruning which removes large Gaussians, Blur Split actively refines them to resolve blurry regions.
+-
+ ### Spatial Splitting with Error Moments
+-A densification technique that splits Gaussians with error above a threshold $\tau_{space}$ by placing a splitting plane through the Gaussian's center, oriented based on the error moments rather than the Gaussian's longest axis [S2]. For each Gaussian $g$ with error $> \tau_{space}$, the splitting plane normal $\mathbf{n}$ is calculated as the normalized product of the inverse error covariance matrix $\mathbf{S}_g^c$ and the first moment vector $\mathbf{r}_g$:
++A densification technique that splits Gaussians with error above a threshold $\tau_{space}$ by placing a splitting plane through the Gaussian's center, oriented based on the error moments rather than the Gaussian's longest axis [S2]. Unlike FCC* 24 and DDL* 25b which use a plane perpendicular to the Gaussian's longest axis, this method uses the error moments to determine orientation to avoid Gaussians becoming too small too quickly [S2]. The splitting plane normal $\mathbf{n}$ is calculated as the normalized product of the inverse error covariance matrix $\mathbf{S}_g^c$ and the first moment vector $\mathbf{r}_g$:
+ $$ \mathbf{n} = \frac{(\mathbf{S}_g^c)^{-1} \mathbf{r}_g}{\left\| (\mathbf{S}_g^c)^{-1} \mathbf{r}_g \right\|} $$
+-Unlike FCC* 24 and DDL* 25b which use a plane perpendicular to the Gaussian's longest axis, this method uses the error moments to determine orientation to avoid Gaussians becoming too small too quickly [S2].
++[S2]
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The pruning step is $O(N)$ where $N$ is the number of Gaussians. The splitting criteria computation is $O(M \cdot N)$ where $M$ is the batch size. Splitting itself is $O(K)$ where $K$ is the number of Gaussians to split. Overall, it is linear in the number of Gaussians per densification step.
+-*   **Memory Complexity:** $O(N)$ for storing Gaussians. The batch of rays requires $O(M \cdot N)$ memory if all weights are stored, but can be computed on the fly or aggregated to $O(N)$ if only the average loss per Gaussian is stored.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Strengths:** Deterministic and statistically grounded; avoids the instability of gradient-based methods by operating after convergence; effectively removes redundant primitives and refines blurry regions.
+-*   **Limitations:** Requires a batch of rays and loss computation; may not adapt as quickly to dynamic changes as continuous gradient-based methods; relies on the choice of z-scores and batch size.
+-*   **When to use:** When a stable, high-quality reconstruction is needed after initial training, or when gradient-based methods fail to resolve certain artifacts.
+-*   **When not to use:** In real-time applications where densification must be continuous and low-latency; when the scene is highly dynamic and requires frequent re-evaluation.
++*   **Time Complexity:** The method requires an additional forward pass (rendering a batch of rays) to compute losses and weights, followed by a statistical analysis pass over all Gaussians. Splitting increases the number of Gaussians, which increases the cost of subsequent rendering and optimization steps.
++*   **Memory Complexity:** Memory usage increases as Gaussians are split. Pruning reduces memory usage for low-contribution Gaussians. The batch of rays requires temporary storage for losses and weights.
++*   **Strengths:** Deterministic and based on actual reconstruction error rather than heuristic gradients. Allows for iterative refinement of converged models. Effective at resolving blurry regions where gradients might be small or misleading.
++*   **Limitations:** Requires rendering a batch of rays, which adds overhead. Sensitive to the choice of z-scores and batch size. May not adapt as quickly to dynamic scenes as gradient-based methods if not re-run frequently.
++*   **When to use:** When high-fidelity detail is required in static scenes, or when gradient-based methods fail to capture fine details due to smooth color transitions or sparse views.
++*   **When not to use:** In real-time applications where the overhead of batch rendering and statistical analysis is prohibitive. In highly dynamic scenes where the model does not converge between splits.
+ 
+ ## Background
+-Originating from the paper "Flexible Techniques for Differentiable Rendering with 3D Gaussians" [S1, unofficial], this method was developed as an alternative to the heuristic merging and splitting techniques explored in the original 3D Gaussian Splatting paper [33]. It provides a deterministic, statistically driven approach to density control. The method is cited in [S1, unofficial] as allowing for increasing detail in an iterative way.
++Gaussian Splitting and Pruning was introduced as a deterministic alternative to the heuristic splitting methods in the original 3D Gaussian Splatting paper [S1, unofficial]. It leverages statistical criteria based on reconstruction loss and blending weights to control density. The method is detailed in "Flexible Techniques for Differentiable Rendering with 3D Gaussians" [S1, unofficial]. Spatial Splitting with Error Moments is a variant proposed in "Adaptive Spatio‐Temporal 3D Gaussian Splatting for Scenes with Oscillatory Motion" [S2].
+ 
+ ## Sources

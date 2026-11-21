@@ -1,0 +1,397 @@
+A 3D engine in Rust for large open-world games on cutting-edge hardware. - Trace each point light's shadow ray, ending at the light by gariasf · Pull Request #265 · gariasf/praxis
+
+Trace each point light's shadow ray, ending at the light by gariasf · Pull Request #265 · gariasf/praxis · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+gariasf
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Closes #205
+Rebased onto #204 (#264 and #266, main 80227bc), as agreed with its session: shadowed() traces the static TLAS, then the dynamic TLAS where the static one finds nothing, so every ray here queries both.
+What
+Every point light that reaches a pixel traces one hard shadow ray there, inline in the lit pass, through #203's shadowed(). The ray starts at the centroid-interpolated position, offset along the normal, and ends at the light itself, so whatever lies beyond a light shadows nothing it lights. A ray is skipped only where the light adds nothing: where the surface faces away from it, or lies beyond its range. Nothing caps the rays per pixel or per Froxel (decision item 4 on #17). Brute force and the Froxel lists trace the same rays, and the shadow_rays Render switch turns them off along with the directional lights'. ADRs 0019 and 0020 now say what is implemented.
+Routine calls, with their reasons:
+The trace conditions are tested at the ray's start. That is the centroid position; the shading takes the light's offset from the pixel's centre. N·L > 0 at the start guarantees a non-zero offset, so normalize never sees a zero vector. At MSAA edge pixels the two positions can disagree only where the light adds almost nothing: at the edge of its range, or where the surface turns from it.
+A Renderer test covers the ray's end, outside the ticket's seams. No Reference scene puts geometry beyond a light, so tests/shadows.rs also passes with unbounded rays.
+uv-grid's Goldens stay. Its capture moves 3 pixels by one step against main's. That is codegen rounding on a plane with nothing to cast a shadow (two of the three pixels brighten), within the Goldens' tolerance, as Trace the sun's shadow rays; add the shadows Reference scene #258 and Trace shadow rays against a dynamic TLAS of Moving Instances #264 kept it.
+Verification
+scripts/verify.sh on the M4 Pro (Metal), on 80227bc with this PR and its re-recorded Baselines:
+```
+ok    fmt        1s
+ok    clippy     2s
+ok    build      5s
+ok    test      85s
+ok    bench     11s
+ok    verify   104s
+```
+CI: every job green on d0f723f, including software Vulkan's Goldens, tests/shadows.rs, the new Renderer test and the bench counters.
+Tests at the ticket's seam, each shown red:
+Capture (tests/shadows.rs).
+The oracle classifies each pixel centre per light: the sun, and the point light at (1.5, 2.5, 1.0) m.
+Outside the one-pixel band and both lights' terminator bands, it judges 5,851 pixels in the sun's shadow and 18,719 in the point light's.
+Before the shader change, 18,719 judged pixels were wrong: the point light's whole shadow, not darkened (magenta).
+Under the point light, whose rays graze the ground farther out, the triangles' shadow outline lies within 11 mm of the true sphere's: three quarters of a pixel, inside the band.
+Renderer (a_point_lights_shadow_ray_ends_at_the_light).
+A 0.2 m square 1 m beyond the light leaves the frame unchanged.
+The same square 0.5 m from the light, between it and the floor, darkens the floor's middle.
+Red with the ray run to f32's largest distance: "a square beyond the point light shadowed the floor".
+Review: Standards and Spec axes, 8 found, 3 fixed, 5 declined, none deferred.
+Fixed:
+the centroid offset's name (centroid_to_light), and the comment saying where the trace conditions are tested;
+the oracle's per-light arrays, now sized by its lights;
+the new test's square, whose comment said it faced the camera from behind it.
+Declined:
+shared helpers for the Renderer tests' white floor and squares: the module sets up each test inline, as nine_point_lights_each_light_the_surface_under_them does, and a helper would refactor tests outside this ticket;
+the guard pattern repeated per light: it is the directional lights' form, which keeps the shading call unconditional;
+regenerating uv-grid's Goldens (above);
+testing the trace conditions at the pixel's centre (the zero-vector guard above);
+CONTEXT.md's Render switches entry naming the crowd scene's switch, which crowd BLAS refit through wgpu-hal #209 adds (outside this diff).
+Metrics
+Shadow-ray time per scene: M4 Pro, 2560 × 1440, 4x MSAA. Medians over three interleaved runs of four binaries, 2,048 frames each: main (79cdabb) and this branch, each with shadow_rays on and off. They were measured before #266, which times the dynamic TLAS's build and touches no pass a ray runs in. The machine was in interactive use, so the spreads (± half the range across rounds) are wider than on a quiet one.
+Scene
+Lit pass: no rays → sun's (main) → every light's (µs)
+Point lights' rays
+Every ray (on − off)
+GPU frame, every ray (µs)
+Rays off − main's rays off, GPU frame
+far-coplanar
+314 → 2,753 → 2,830
++0.08 ms
++2.52 ms
+3,563 (±1)
++3.2 µs
+minification
+462 → 2,617 → 3,811
++1.19 ms
++3.35 ms
+4,555 (±2)
++0.9 µs
+uv-grid
+410 → 1,661 → 3,498
++1.84 ms
++3.09 ms
+4,183 (±8)
++0.1 µs
+orrery
+294 → 1,693 → 5,724
++4.03 ms
++5.43 ms
+6,505 (±155)
++4.5 µs
+normal-tangent
+441 → 3,445 → 8,204
++4.76 ms
++7.76 ms
+9,130 (±140)
++2.7 µs
+shadows
+439 → 6,045 → 11,242
++5.20 ms
++10.80 ms
+12,026 (±210)
++2.3 µs
+pbr-sweep
+410 → 3,064 → 9,695
++6.63 ms
++9.28 ms
+10,476 (±194)
++2.5 µs
+helmet
+715 → 9,498 → 40,569
++31.07 ms
++39.85 ms
+41,514 (±2,789)
++1.5 µs
+texture-wall
+967 → 5,247 → 5,414
++0.17 ms, no point lights
++4.45 ms
+15,700 (±49)
+−265 µs, within its spread
+Each point light costs up to what the sun's ray costs in the same scene.
+Helmet: 7.8 ms for each of its four coloured lights, against the sun's 8.8 ms, on its dense, self-shadowing Meshes.
+shadows: 5.2 ms for its one point light, against the sun's 5.6 ms.
+The other scenes: 0.5 to 1.7 ms per light.
+ADR 0013's 12 ms GPU frame.
+The helmet scene breaks it, at 41.5 ms.
+shadows reaches it, at 12.03 ms.
+texture-wall was over it before Sun shadow rays and the shadows Reference scene #203 (Offender: 10,005 bound Textures cost 1.1–1.8 ms of CPU a frame #183).
+Decision item 2 judges this Budget on town's frame total at the exit, rays included. town has 1,024 point lights, so this is why Offender: the sun's shadow rays cost 0.5 to 8 ms of the lit pass at 1440p #260 is under Decide below.
+Code that traces nothing still costs. Where no point-light ray is traced (far-coplanar's lights reach no surface it shows, and texture-wall has no point lights), the lit pass still grows by 0.08 and 0.17 ms. The ray query's code in the loop costs the pass anyway, as Trace shadow rays against a dynamic TLAS of Moving Instances #264 found for the dynamic TLAS's second query.
+Must not regress beyond the rays' cost: holds. With rays off, every GPU frame is main's with rays off to within 4.5 µs, except texture-wall, within its spread.
+CPU frame. Unchanged by construction: the change is in the lit pass's shader only. The machine's interactive load moved CPU medians by up to 2× between rounds, so they are not quoted.
+Counters. Unchanged on both adapters: verify's compare on the M4 Pro and CI's bench counters on lavapipe pass against Trace shadow rays against a dynamic TLAS of Moving Instances #264's Baselines.
+Baselines. This PR merges after Time the dynamic TLAS's build on the CPU and the GPU #266, so it re-records the M4 Pro Baselines, as agreed with Moving Instances and the dynamic TLAS #204's session.
+Of four runs, the quietest is kept for every scene: the last, recorded once other sessions' GPU work had ended.
+GPU p95 is within 1.06 of the median in five scenes, 1.064 in texture-wall, and 1.09 to 1.23 in shadows, pbr-sweep and orrery.
+CPU medians are the lowest of the four in seven scenes.
+Counters are identical across the runs and match main's.
+The helmet's Baseline median is 36.1 ms, against the A/B's 41.5 ms. With every ray on, its frame read 36 to 47 ms from run to run on this machine.
+lavapipe's Baselines stay Time the dynamic TLAS's build on the CPU and the GPU #266's. CI compares only their counters, which this PR leaves unchanged, and uploads results only when a compare fails.
+Images
+Visual check 3, covering #203, #204 and this PR.
+Before: main's Golden at 1d9fde2, before the bundle's first ray. The helmet has no Golden, so its before is this branch's capture with shadow_rays off, byte-identical to a 1d9fde2 build's.
+After: this PR's Golden.
+Difference: each pixel more than one step from before, in red.
+This PR: the same against main's Golden at 79cdabb, so the point lights' rays alone.
+Scene
+Before
+After
+Difference
+This PR
+pbr-sweep, Metal
+pbr-sweep, software Vulkan
+normal-tangent, Metal
+normal-tangent, software Vulkan
+shadows, Metal
+shadows, software Vulkan
+orrery, Metal
+orrery, software Vulkan
+helmet, Metal, 1280 × 720 (no Golden)
+Pixels past one step, for the bundle and for this PR alone (Metal; software Vulkan in parentheses):
+Scene
+Bundle
+This PR
+What changes
+pbr-sweep
+5,139 (5,146)
+4,194 (4,199)
+The coloured lights' shadows between the spheres
+normal-tangent
+8,334 (8,303)
+6,511 (6,480)
+The real bumps' shadows on their plate, one per light
+shadows
+25,756 (25,761)
+19,501 (19,504)
+The point light's shadow, left of the sphere, beside the sun's
+orrery
+225 (221)
+194 (190)
+A planet's underside, where the planet below it hides a coloured light; specks at the terminators
+helmet, 1280 × 720
+76,304
+33,719
+Each helmet's self-shadowing under the coloured lights
+uv-grid, far-coplanar, minification and texture-wall do not change. uv-grid is a lone plane, with 3 pixels one step off. far-coplanar's lights reach no surface it shows, minification has nothing between its floor and its light, and texture-wall has no point lights.
+Zooms:
+Before, the sun's shadows only (main), then every light's:
+pbr-sweep's lower right:
+one helmet:
+The orrery's middle planet: main, this PR, and this PR's difference:
+Decide
+Answered by the owner, and confirmed in this session:
+Visual check 3 (Sun shadow rays and the shadows Reference scene #203, Moving Instances and the dynamic TLAS #204 and this PR): accepted ("visual checks out"; recorded).
+The rays' cost: accepted, and Offender: the sun's shadow rays cost 0.5 to 8 ms of the lit pass at 1440p #260 triaged now (recorded). Offender: the sun's shadow rays cost 0.5 to 8 ms of the lit pass at 1440p #260 is in M3 and blocks town Baselines, ADR 0019's gate and the dynamic TLAS ceilings #207 (triage scope, map decision).
+The original items, for the record:
+Visual check 3. It covers the sun's shadows (Trace the sun's shadow rays; add the shadows Reference scene #258), the planets' (Trace shadow rays against a dynamic TLAS of Moving Instances #264) and every point light's (this PR), in the images above, from before the bundle's first ray to now. Known artifact: the terminator of a coarse smooth-shaded mesh steps along its triangles where they face away from a light, now under each point light too. It shows as specks along the spheres' terminators in shadows and the orrery, and is the fog line "Shadow terminator on coarse smooth-shaded meshes" on Foundations and ladder: architecture decisions and milestone order #17.
+The rays' cost. With point lights shadowed, the helmet scene's GPU frame is 36 to 42 ms against the 12 ms Budget. town has 1,024 point lights and no cap, at 0.5 to 8 ms per light per screenful of rays. Recommended: merge as decided, and triage Offender: the sun's shadow rays cost 0.5 to 8 ms of the lit pass at 1440p #260 now rather than at town Baselines, ADR 0019's gate and the dynamic TLAS ceilings #207.
+🤖 Generated with Claude Code
+gariasf
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+Take the software Vulkan Goldens the point lights change from CI
+…
+30f8165
+```
+CI's lavapipe captures of pbr-sweep, normal-tangent and shadows, from
+the golden-differences artifact of #265's first run.
+```
+gariasf
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+Take the software Vulkan Goldens the point lights change from CI
+…
+6801417
+```
+CI's lavapipe captures of pbr-sweep, normal-tangent and shadows, from
+the golden-differences artifact of #265's first run.
+```
+gariasf
+force-pushed
+the
+feat/point-light-shadow-rays
+branch
+from
+a2f876c to
+24a54ea
+Compare
+October 23, 2026 11:33
+gariasf
+added a commit
+that referenced
+this pull request
+Oct 23, 2026
+Images for #265: visual check 3, from before #203 to point-light shad…
+…
+d2693c6
+```
+…ow rays
+```
+gariasf
+marked this pull request as ready for review
+October 23, 2026 12:44
+gariasf
+mentioned this pull request
+Oct 23, 2026
+Offender: the sun's shadow rays cost 0.5 to 8 ms of the lit pass at 1440p
+#260
+Closed
+gariasf
+added 5 commits
+October 23, 2026 15:08
+Trace each point light's shadow ray, ending at the light
+…
+b5613c0
+```
+Every point light that reaches a pixel now traces one hard shadow ray
+there, as decision item 4 on #17 sets: skipped only where the light adds
+nothing (the surface faces away, or lies beyond its range), and with no
+cap per pixel or per Froxel, so shadows cannot pop as Froxel contents
+change. The ray starts at the centroid-interpolated position, as the
+directional lights' do, and runs to the light, so geometry beyond a
+light shadows nothing.
+
+The shadows test now judges the point light's analytic shadow beside
+the sun's; a Renderer test covers the ray's end, which no Reference
+scene exercises.
+```
+Regenerate the Metal Goldens the point lights' shadows change
+…
+04a523d
+```
+pbr-sweep's spheres and normal-tangent's bumps now cast the coloured
+lights' shadows, and shadows shows its point light's. uv-grid's capture
+differs from its Golden in three pixels by one step, codegen rounding
+within the Goldens' tolerance on a plane with nothing to cast a shadow,
+so its Golden stays.
+```
+Take the software Vulkan Goldens the point lights change from CI
+…
+e2b96df
+```
+CI's lavapipe captures of pbr-sweep, normal-tangent and shadows, from
+the golden-differences artifact of #265's first run.
+```
+Apply the review's fixes to the point lights' shadow rays
+…
+ad2175f
+```
+The offset from the centroid position is named for it, so a reader sees
+why the shading builds its own from the pixel's centre, and the comment
+says the trace conditions are tested there. The oracle sizes its
+per-light arrays by its lights, and the new Renderer test's square says
+which way it faces: +Z, away from the camera when behind it.
+```
+Regenerate the orrery's Goldens for its planets' point-light shadows
+…
+f3fd83e
+```
+On #204's dynamic TLAS the planets now trace and cast the coloured
+lights' shadows: one shades the underside of the planet above it, and
+their terminators step as the static spheres' do. Software Vulkan's
+Golden is CI's capture from the golden-differences artifact.
+```
+gariasf
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Decision 2026-10-23 (owner, in the #204 session): visual check 3 accepted (#203, #204 and this PR, as the bundle rule has it). The owner's words: "visual checks out", in reply to the note that visual check 3 waited on them here. The Decide item on the rays' cost and #260's triage is not covered by it and stays open.
+gariasf
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Decision 2026-10-23 (owner, in the #204 session): the rays' cost is accepted, and #260 is triaged now rather than at #207, as recommended above. Both of this PR's Decide items are answered; it merges once rebased onto main (80227bc) with its Baselines re-recorded.
+gariasf
+mentioned this pull request
+Oct 23, 2026
+Foundations and ladder: architecture decisions and milestone order
+#17
+Open
+gariasf
+force-pushed
+the
+feat/point-light-shadow-rays
+branch
+from
+b3e94ed to
+696593d
+Compare
+October 23, 2026 13:27
+Re-record the M4 Pro Baselines with every light's shadow rays
+…
+d0f723f
+```
+This PR merges after #266, so it re-records the Baselines on top of the
+dynamic TLAS's timing, as agreed with #204's session. The quietest of
+four runs is kept for every scene: its GPU p95 is within 1.06 of the
+median in five scenes, 1.064 in texture-wall and 1.09 to 1.23 in
+shadows, pbr-sweep and orrery, and its CPU medians are the lowest of the
+four in seven scenes. Counters are identical across the runs and match
+main's.
+```
+gariasf
+force-pushed
+the
+feat/point-light-shadow-rays
+branch
+from
+696593d to
+d0f723f
+Compare
+October 23, 2026 13:34
+Hide details
+View details
+gariasf
+merged commit 5a5f075
+into
+main
+Oct 23, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+gariasf
+deleted the
+feat/point-light-shadow-rays
+branch
+October 23, 2026 13:49
+This was referenced Oct 23, 2026
+town: the dense Reference scene
+#206
+Closed
+Require gallery images on rendering PRs in the PR form check
+#375
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

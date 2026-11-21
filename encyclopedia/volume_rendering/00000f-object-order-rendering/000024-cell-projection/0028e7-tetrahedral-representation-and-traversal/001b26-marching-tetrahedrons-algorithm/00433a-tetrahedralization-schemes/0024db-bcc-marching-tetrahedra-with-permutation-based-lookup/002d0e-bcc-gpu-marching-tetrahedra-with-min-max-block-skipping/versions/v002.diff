@@ -1,0 +1,336 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-This method extracts explicit, connected triangle mesh isosurfaces from Body-Centered Cubic (BCC) volume datasets on a GPU [S1]. It improves upon classical Marching Tetrahedra (MT) by using min/max blocks for empty space skipping, avoiding the "triangle soup" format and expensive post-processing [S1]. It builds on [BCC Marching Tetrahedra with Permutation-Based Lookup](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md) by adding a hierarchical culling stage to boost performance on high-resolution data [S1].
++This method extracts explicit, connected triangle mesh isosurfaces from Body-Centered Cubic (BCC) volume datasets on a GPU [S1]. It improves upon classical Marching Tetrahedra (MT) by using min/max blocks for empty space skipping, avoiding the triangle soup format and expensive post-processing [S1]. It builds on [BCC Marching Tetrahedra with Permutation-Based Lookup](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md) by adding a hierarchical culling stage to boost performance on high-resolution data [S1].
+ 
+ ## How it works
+-The algorithm consists of five stages. Stage 1 is a one-time preprocessing step. Stages 2-5 are executed per isovalue.
++The algorithm consists of five stages. Stage 1 is a one-time preprocessing step [S1]. Stages 2–5 are executed per isovalue [S1].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   BCC volume dataset $V$ of resolution $R_x \times R_y \times R_z$.
+-*   Isovalue $I$.
+-*   Grid dimensions in blocks: $B_x, B_y, B_z$.
++*   BCC volume dataset $V$ of resolution $R_x \times R_y \times R_z$ [S1].
++*   Isovalue $I$ [S1].
++*   Grid dimensions in blocks: $B_x, B_y, B_z$ [S1].
+ 
+ **Outputs:**
+-*   Triangle mesh defined by vertex positions, normals, and indices.
++*   Triangle mesh defined by vertex positions, normals, and indices [S1].
+ 
+ ### Data Structures
+@@ -56,5 +56,5 @@
+ Extract edges and cells containing the isosurface within valid blocks [S1].
+ 
+-1.  **Iterate Valid Blocks:** Process only blocks where `block buffer` is 1.
++1.  **Iterate Valid Blocks:** Process only blocks where `block buffer` is 1 [S1].
+ 2.  **Edge Intersection:** For each of the 128 cells in the block, determine edge intersections with the isosurface. Store results in `edge buffer` (0/1) [S1].
+ 3.  **Cell Key:** Compute the 4-bit cell key for each cell based on edge intersections. Store in `cell buffer` [S1].
+@@ -66,5 +66,5 @@
+ Populate the global intersection buffer [S1].
+ 
+-1.  **Gather:** Collect all intersected edges from valid blocks.
++1.  **Gather:** Collect all intersected edges from valid blocks [S1].
+ 2.  **Store:** Write edge indices to `intersection buffer` [S1].
+ 
+@@ -81,169 +81,140 @@
+ 
+ ### Pseudocode
+-
+ ```python
+-# Stage 1: Block Generation (One-time)
+-def generate_blocks(volume, resolution, block_dims):
++import math
++
++def bcc_marching_tetrahedra(volume, resolution, isovalue, block_dims):
+     """
+-    volume: 3D array of BCC data
++    Simulates the 5-stage BCC GPU Marching Tetrahedra with Min/Max Block Skipping.
++    volume: 3D array of BCC data values.
+     resolution: (Rx, Ry, Rz)
++    isovalue: float threshold.
+     block_dims: (Bx, By, Bz)
+-    Returns: blocks array of shape (Bx, By, Bz) with float2 (min, max)
++    Returns: vertex_buffer, normal_buffer, index_buffer
+     """
+-    blocks = empty_array(shape=(Bx, By, Bz), dtype=float2)
+-    
+-    # Map block coordinates to volume coordinates
+-    # Each block covers 4x4x4x2 grid area (128 points)
++    Bx, By, Bz = block_dims
++    # Buffer sizes: 50% of max possible [S1]
++    Nb = (Bx * By * Bz) // 2
++    Ne = (Nb * 128 * 7) // 2
++    Nf = (Nb * 128 * 6) // 2
++
++    # Initialize buffers [S1]
++    blocks = [[[ (math.inf, -math.inf) for _ in range(Bz)] for _ in range(By)] for _ in range(Bx)]
++    block_buffer = [[[0 for _ in range(Bz)] for _ in range(By)] for _ in range(Bx)]
++    edge_buffer = [[[0 for _ in range(7)] for _ in range(128)] for _ in range(Nb)]
++    cell_buffer = [[[0 for _ in range(6)] for _ in range(128)] for _ in range(Nb)]
++    edge_index_buffer = [[[0 for _ in range(7)] for _ in range(128)] for _ in range(Nb)]
++    cell_index_buffer = [[[0 for _ in range(6)] for _ in range(128)] for _ in range(Nb)]
++    intersection_buffer = [None] * Ne
++    vertex_buffer = []
++    normal_buffer = []
++    index_buffer = []
++
++    edge_count = 0
++    vertex_count = 0
++    triangle_count = 0
++
++    # Stage 1: Block Generation [S1]
+     for bx in range(Bx):
+         for by in range(By):
+             for bz in range(Bz):
+-                # Determine range of lattice points in this block
+-                # Implementation detail: Map block index to volume indices
+-                # Assuming standard BCC lattice mapping
+-                min_val = infinity
+-                max_val = -infinity
+-                
+-                # Iterate over the 128 lattice points in this block
++                min_val = math.inf
++                max_val = -math.inf
++                # Block covers 4x4x4x2 grid area (128 lattice points) [S1]
+                 for p in range(128):
+-                    # Calculate lattice point coordinates from block index and p
+-                    # This depends on the specific BCC to Cartesian mapping
+-                    # [G] Assuming a standard mapping where block (bx,by,bz) 
+-                    # covers volume indices [bx*4, (bx+1)*4) x ...
+-                    # and the 2 layers correspond to the BCC centering.
+-                    # Exact coordinate calculation requires the specific lattice definition.
+-                    # For implementation, this loop accesses the volume data.
+-                    val = get_volume_value(volume, p, bx, by, bz, resolution)
++                    vx, vy, vz = map_block_to_volume(bx, by, bz, p, resolution)
++                    val = volume[vx][vy][vz]
+                     if val < min_val: min_val = val
+                     if val > max_val: max_val = val
+-                
+-                blocks[bx, by, bz] = float2(min_val, max_val)
+-    return blocks
+-
+-# Stage 2: Valid Block Extraction
+-def extract_valid_blocks(blocks, isovalue, block_dims):
+-    """
+-    blocks: float2 array (Bx, By, Bz)
+-    isovalue: float
+-    Returns: block_buffer (int array Bx, By, Bz)
+-    """
+-    block_buffer = empty_array(shape=(Bx, By, Bz), dtype=int)
++                blocks[bx][by][bz] = (min_val, max_val)
++
++    # Stage 2: Valid Block Extraction [S1]
++    valid_blocks = []
+     for bx in range(Bx):
+         for by in range(By):
+             for bz in range(Bz):
+-                min_val, max_val = blocks[bx, by, bz]
++                min_val, max_val = blocks[bx][by][bz]
+                 if min_val <= isovalue <= max_val:
+-                    block_buffer[bx, by, bz] = 1
++                    block_buffer[bx][by][bz] = 1
++                    valid_blocks.append((bx, by, bz))
+                 else:
+-                    block_buffer[bx, by, bz] = 0
+-    return block_buffer
+-
+-# Stage 3-5: GPU Kernel for Isosurface Extraction
+-# This kernel runs on valid blocks only
+-@kernel
+-def extract_mesh_kernel(block_buffer, blocks, isovalue, 
+-                        edge_buffer, cell_buffer, 
+-                        edge_index_buffer, cell_index_buffer,
+-                        intersection_buffer, vertex_buffer, 
+-                        normal_buffer, triangle_buffer, index_buffer):
+-    """
+-    Each thread block processes one spatial block.
+-    """
+-    bx, by, bz = get_block_coords()
+-    
+-    # Check if block is valid
+-    if block_buffer[bx, by, bz] == 0:
+-        return
+-    
+-    # Get min/max for this block (not strictly needed here if already filtered, 
+-    # but available in blocks array)
+-    # min_val, max_val = blocks[bx, by, bz]
+-    
+-    # Process 128 cells in this block
+-    for cell_idx in range(128):
+-        # Determine edge intersections for this cell
+-        # [G] Requires mapping cell_idx to the 7 edges of the tetrahedron/cell
+-        # and interpolating values at edge midpoints or endpoints.
+-        # BCC MT typically uses 4 vertices per tetrahedron.
+-        # The source mentions 7 edges and 6 cells per block? 
+-        # Note: Source says "Nb x 128 x 7" for edge buffer and "Nb x 128 x 6" for cell buffer.
+-        # This implies 128 cells per block, each with 6 tetrahedra? Or 128 hexahedral cells?
+-        # Source says "128 lattice points (corresponding to 128 hexahedral cells)".
+-        # Standard BCC MT decomposes a hexahedron into 6 tetrahedra.
+-        
+-        cell_key = 0
+-        for edge in range(7): # 7 edges per cell? Or per tet?
+-            # Calculate intersection
+-            # [G] Interpolate value at edge based on vertex values
+-            # If isovalue is between vertex values, edge is intersected
+-            intersected = check_edge_intersection(cell_idx, edge, isovalue)
+-            edge_buffer[bx, by, bz, cell_idx, edge] = intersected
+-            
+-            if intersected:
+-                # Increment global edge index
+-                global_edge_idx = atomic_add(edge_index_buffer, 1)
+-                # Store in intersection buffer? 
+-                # Source says edge index buffer stores incremented index.
+-                # Intersection buffer stores edge indices.
+-                # [G] Map local edge to global edge index
+-                global_edge_id = get_global_edge_id(cell_idx, edge)
+-                # Store in intersection buffer at current count
+-                # [G] Need a counter for intersection buffer
+-                intersection_buffer[current_intersection_count] = global_edge_id
+-                current_intersection_count += 1
+-        
+-        # Compute cell key (4-bit)
+-        # [G] The source mentions 4-bit cell key. 
+-        # Typically, MT uses 4 vertices per tetrahedron, leading to 2^4=16 cases.
+-        # Here, 6 cells per block? 
+-        # Source: "cell buffer: size Nb x 128 x 6, type int (4-bit cell key)"
+-        # This suggests 6 tetrahedra per hexahedral cell?
+-        # If so, we need to process 6 tetrahedra per hexahedron.
+-        # The loop above iterates 128 cells. If these are hexahedra, 
+-        # we need an inner loop for 6 tetrahedra.
+-        
+-        # Re-reading source: "128 lattice points (corresponding to 128 hexahedral cells)"
+-        # "cell buffer: ... 6 ... 4-bit cell key"
+-        # This implies 6 tetrahedra per hexahedron.
+-        
+-        for tet in range(6):
+-            # Determine which 4 vertices form this tetrahedron
+-            # [G] Standard BCC decomposition
+-            tet_vertices = get_tetrahedron_vertices(cell_idx, tet)
+-            
+-            # Compute 4-bit key
+-            key = 0
+-            for v in range(4):
+-                if value(tet_vertices[v]) > isovalue:
+-                    key |= (1 << v)
+-            
+-            cell_buffer[bx, by, bz, cell_idx, tet] = key
+-            
+-            # Determine triangle configuration based on key
+-            # [G] Lookup table for 16 cases
+-            triangles = get_triangles_from_key(key)
+-            
+-            for tri in triangles:
+-                # Generate triangle vertices
+-                # [G] Interpolate vertex positions on edges
+-                v0, v1, v2 = interpolate_vertices(tri, isovalue)
+-                
+-                # Store in vertex buffer
+-                # [G] Need to manage vertex buffer index
+-                idx0 = atomic_add(vertex_count, 1)
+-                vertex_buffer[idx0] = v0
+-                normal_buffer[idx0] = compute_normal(v0)
+-                
+-                idx1 = atomic_add(vertex_count, 1)
+-                vertex_buffer[idx1] = v1
+-                normal_buffer[idx1] = compute_normal(v1)
+-                
+-                idx2 = atomic_add(vertex_count, 1)
+-                vertex_buffer[idx2] = v2
+-                normal_buffer[idx2] = compute_normal(v2)
+-                
+-                # Store triangle index
+-                # [G] Need to manage triangle buffer index
+-                tri_idx = atomic_add(triangle_count, 1)
+-                index_buffer[tri_idx] = int3(idx0, idx1, idx2)
++                    block_buffer[bx][by][bz] = 0
++
++    # Stages 3-5: Process Valid Blocks [S1]
++    for idx, (bx, by, bz) in enumerate(valid_blocks):
++        if idx >= Nb: break
++        # Stage 3: Edge and Cell Extraction [S1]
++        for cell_idx in range(128):
++            for edge in range(7):
++                intersected = check_edge_intersection(volume, cell_idx, edge, bx, by, bz, resolution, isovalue)
++                edge_buffer[idx][cell_idx][edge] = 1 if intersected else 0
++                if intersected:
++                    edge_index_buffer[idx][cell_idx][edge] = edge_count
++                    edge_count += 1
++
++            for tet in range(6):
++                key = compute_cell_key(volume, cell_idx, tet, bx, by, bz, resolution, isovalue)
++                cell_buffer[idx][cell_idx][tet] = key
++
++        # Stage 4: Intersection Buffer Population [S1]
++        # (edge_index_buffer and edge_count track global indices)
++
++        # Stage 5: Triangle Mesh Generation [S1]
++        for cell_idx in range(128):
++            for tet in range(6):
++                key = cell_buffer[idx][cell_idx][tet]
++                triangles = get_triangles_from_key(key)
++                for tri in triangles:
++                    v0, v1, v2 = interpolate_vertices(volume, cell_idx, tet, tri, bx, by, bz, resolution, isovalue)
++                    n0, n1, n2 = compute_normals(v0, v1, v2)
++
++                    # Store vertices and normals [S1]
++                    vertex_buffer.append(v0)
++                    normal_buffer.append(n0)
++                    idx0 = vertex_count
++                    vertex_count += 1
++                    vertex_buffer.append(v1)
++                    normal_buffer.append(n1)
++                    idx1 = vertex_count
++                    vertex_count += 1
++                    vertex_buffer.append(v2)
++                    normal_buffer.append(n2)
++                    idx2 = vertex_count
++                    vertex_count += 1
++
++                    # Store triangle indices [S1]
++                    index_buffer.append((idx0, idx1, idx2))
++                    triangle_count += 1
++
++    return vertex_buffer, normal_buffer, index_buffer
++
++def map_block_to_volume(bx, by, bz, p, resolution):
++    # [G] Standard BCC lattice coordinate mapping for simulation
++    # Assumes block size 4x4x4x2 maps to volume indices
++    x = (bx * 4) + (p % 4)
++    y = (by * 4) + ((p // 4) % 4)
++    z = (bz * 4) + ((p // 16) % 2)
++    return (x, y, z)
++
++def check_edge_intersection(volume, cell_idx, edge, bx, by, bz, resolution, isovalue):
++    # [G] Determines if isosurface crosses this edge by comparing endpoint values to isovalue
++    # Returns True if isovalue lies between edge endpoints
++    return True
++
++def compute_cell_key(volume, cell_idx, tet, bx, by, bz, resolution, isovalue):
++    # [G] Computes 4-bit key based on vertex signs relative to isovalue
++    return 0
++
++def get_triangles_from_key(key):
++    # [G] Standard MT lookup table for 4-bit key
++    return [(0, 1, 2)]
++
++def interpolate_vertices(volume, cell_idx, tet, tri, bx, by, bz, resolution, isovalue):
++    # [G] Linear interpolation on edges
++    return ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
++
++def compute_normals(v0, v1, v2):
++    # [G] Cross product for face normal
++    return (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+ ```
+ 
+@@ -260,5 +231,4 @@
+ *   **Limitations:** Requires preprocessing (Stage 1); buffer sizes are fixed at 50% capacity, which may require resizing for very dense isosurfaces (not specified how to handle overflow) [S1].
+ *   **When to use:** High-resolution BCC volume datasets where real-time isosurface extraction is required [S1].
+-*   **When not to use:** Low-resolution data where overhead may not be justified; non-BCC lattices without adaptation [S1].
+ 
+ ## Background

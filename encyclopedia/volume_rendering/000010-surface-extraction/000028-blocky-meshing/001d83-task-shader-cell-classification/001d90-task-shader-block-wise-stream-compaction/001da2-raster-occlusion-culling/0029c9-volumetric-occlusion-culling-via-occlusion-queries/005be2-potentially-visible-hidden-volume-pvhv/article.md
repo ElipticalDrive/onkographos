@@ -1,0 +1,122 @@
+# Potentially Visible Hidden Volume (PVHV)
+
+Also called: Linear Novel View PVHV Definition
+
+## Overview
+Potentially Visible Hidden Volumes (PVHVs) are 3D volumes that are occluded at a known source view but potentially visible at novel views [S1]. They solve the problem of redundant fragment capture in multi-view image warping by allowing batch-testing of source fragment visibilities without iterating individual novel views [S1]. Unlike classical occlusion culling or Potential Visible Sets (PVS) which rely on the shapes or bounding volumes of occluders, PVHVs utilize edge-based geometric analysis of foreground fragments, making the visibility determination simpler and more efficient [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Source view $s$, a set of novel views $N$ bounded by a distance $E$ from $s$, the farthest view $n \in N$, depth texture $Z$ from previous rendering layers, and a fragment $p$ to test.
+*   **Outputs:** Boolean indicating if fragment $p$ is inside the PVHV $H_s(N)$, requiring capture for warping.
+
+**Data Structures:**
+*   **Fragment:** A 3D point $p = (p_x, p_y, p_z)$ in world or view space, with depth $p_z$.
+*   **Blocker:** A foreground fragment $f$ with depth $f_z$.
+*   **Outer Blocker:** An adjacent farther fragment $g$ with depth $g_z$.
+
+**Formulas and Definitions:**
+The scene volume $W$ is decomposed into visible volume $V_s$ and hidden occlusion volume $O_s$ for source view $s$ [S1]. The PVHV for a specific novel view $n$ is defined as:
+$$ H_s(n) := O_s \cap V_n $$
+Objects in $H_s(n)$ are unavailable in the foreground rendered for $s$ but require capture for $n$ [S1]. Redundancy (fragments invisible from both $s$ and $n$) is found at $O_s - H_s(n)$ [S1].
+
+For a set of novel views $N$ spanning distance $E$ from $s$, let $n$ be the farthest view in $N$. The PVHV $H_s(N)$ encompassing all views in $N$ is defined by the following conditions for a point $p \in W$:
+1.  **Depth:** $p_z > f_z$ (the fragment is behind the inner blocker $f$) [S1].
+2.  **Radial Bound:** $|p - p'| < R(p, f)$, where $R(p, f)$ is the radius of the Local COC (LCOC) determined by the distance to the blocker [S1].
+3.  **Side Bound:** $(p - p') \cdot (n - s) < 0$, ensuring $p$ is on the correct side of the edge ray $e(s, f)$ to exclude fragments on the left, ensuring $f$ is the inner occluder [S1].
+
+Here, $p'$ is the projection of $p$ onto the line segment connecting $s$ and $n$, or specifically the point on the edge ray $e(s, f)$ closest to $p$ in the context of the 2D triangle definition for linear views [S1]. The edge rays are $e(s, f)$ emanating from $s$ through $f$, and $e(n, f)$ emanating from $n$ through $f$ [S1].
+
+**Parameters:**
+*   $E$: The distance spanned by the set of novel views $N$ from the source view $s$. It acts as the scaling factor for the LCOC radius [S1].
+*   $n$: The farthest view in the set of novel views $N$. Used to define the direction vector $n-s$ and the edge ray $e(n, f)$ [S1].
+
+**Algorithm Steps (Effective Depth Peeling with PVHV):**
+1.  Render the scene to obtain depth texture $Z$ for the current layer [S1].
+2.  For each fragment $p$ in the current layer:
+    a. Identify the inner blocker fragment $f$ such that $f_z < p_z$ and $f$ occludes $p$ from $s$.
+    b. Check if $p$ is inside the PVHV $H_s(N)$ using the conditions above.
+    c. If $p \in H_s(N)$, mark $p$ for capture in multi-fragment rendering.
+    d. If $p \notin H_s(N)$, it is completely hidden from all novel views in $N$ and can be culled [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def is_in_pvhp(p, f, n, s, E):
+    """
+    Check if fragment p is in the Potentially Visible Hidden Volume
+    defined by inner blocker f, source view s, and farthest novel view n.
+    """
+    # Condition 1: Depth must be behind the blocker
+    if p.z <= f.z:
+        return False
+
+    # Condition 2: Radial bound (LCOC radius)
+    # R(p, f) is derived from the distance and E. 
+    # The source defines |p - p'| < R(p, f). 
+    # Assuming p' is the projection on the edge ray e(s,f) or similar geometric construct.
+    # For implementation, this is often approximated or computed via the specific LCOC radius formula.
+    # Here we assume a function compute_lcoc_radius exists which uses E and geometry.
+    radius = compute_lcoc_radius(p, f, E)
+    distance_to_edge = compute_distance_to_edge_ray(p, s, f)
+    if distance_to_edge >= radius:
+        return False
+
+    # Condition 3: Side bound (dot product)
+    # (p - p') . (n - s) < 0
+    # p' is the point on the edge ray e(s,f) corresponding to p's depth or projection.
+    # In the 2D linear case, this ensures p is to the right of e(s,f) relative to n-s.
+    # We assume a helper to get the vector from the edge ray to p at the same depth.
+    vector_to_edge = compute_vector_to_edge_ray(p, s, f)
+    view_displacement = n - s
+    if dot(vector_to_edge, view_displacement) >= 0:
+        return False
+
+    return True
+
+def effective_depth_peeling(Z, s, n, E):
+    """
+    Process fragments to determine which need capture for novel views N.
+    """
+    captured_fragments = []
+    for p in fragments_from_depth_texture(Z):
+        f = find_inner_blocker(p, Z)
+        if f is not None:
+            if is_in_pvhp(p, f, n, s, E):
+                captured_fragments.append(p)
+            else:
+                # Cull p as it is hidden from all novel views in N
+                pass
+        else:
+            # p is visible from source, always capture
+            captured_fragments.append(p)
+    return captured_fragments
+```
+
+**Edge Cases and Pitfalls:**
+*   The condition $(p - p') \cdot (n - s) < 0$ is critical to ensure $f$ is the inner occluder; failing this may include fragments on the left side of the edge ray $e(s, f)$ which are not potentially visible [S1].
+*   For linear views, the PVHV is a 2D triangle. For areal views, it is a 3D volume.
+*   The method assumes fragments have a square shape for the edge ray definition [S1].
+
+## Subtopics
+
+### Circular Areal Novel View PVHV
+For circular areal views (e.g., Depth of Field rendering), the PVHV is modeled as a revolution of the 2D linear PVHV triangle, forming a cone [S1]. The implementation uses the same 2D equation but defines $n$ as the farthest view along the projection of $f-s$ onto the novel view plane [S1]. To handle the full circular view efficiently, the algorithm throws circular samples around the blocker $q$, which is equivalent to revolving the line search bound, forming a fully circular cone that concatenates two half-cone PVHVs [S1]. This avoids test redundancy for all rotational variations [S1].
+
+### Point Novel View PVHV Approximation
+For point novel views, the exact PVHV is a truncated variant of the linear PVHV, cut by an additional edge $e(n, g)$ where $g$ is the outer blocker [S1]. However, computing the exact shape requires finding both $f$ and $g$, adding complexity [S1]. The method approximates this by using the larger linear PVHV volume to conservatively include the point view PVHV [S1]. This merging scheme is similar to occluder fusion or virtual occluders in PVS [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method allows batch-testing visibilities without iterating individual novel views, reducing the complexity from $O(N \times F)$ to $O(F)$ where $N$ is the number of novel views and $F$ is the number of fragments [S1].
+*   **Memory Complexity:** Requires storing depth textures and fragment data. No additional large geometric structures are needed compared to bounding volume approaches [S1].
+*   **Strengths:** Simpler and more efficient than classical occlusion culling as it requires less occluder information (only fragment edges) [S1]. Reduces warping cost by culling redundant fragments prior to warping [S1].
+*   **Limitations:** Requires a coarse yet conservative bound of potential view displacements rather than individual novel views [S1]. Clipping by view frusta is not strictly necessary as fragments outside can be ignored during warping, but the PVHV definition itself does not inherently clip to frusta [S1].
+*   **When to use:** Multi-view image warping where a bound of novel views is known.
+*   **When not to use:** When precise visibility for individual, widely dispersed novel views is required without a bounding envelope, or when occluder shapes are complex and fragment edges are insufficient.
+
+## Background
+PVHVs were introduced by Janghun Kim and Sungkil Lee in the paper "Potentially Visible Hidden-Volume Rendering for Multi-View Warping" (2023) [S1]. The approach is similar to shadow volumes in terms of using 3D volumes to determine visibilities [S1]. It was realized in Depth Peeling (DP) as Effective Depth Peeling (EDP) to reduce the number of completely hidden fragments and capture important fragments early [S1].
+
+## Sources
+[S1] Potentially Visible Hidden-Volume Rendering for Multi-View Warping, https://doi.org/10.1145/3592108, fetched 2026-11-08

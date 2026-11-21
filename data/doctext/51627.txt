@@ -1,0 +1,5811 @@
+# Realtime Global Illumination with Voxel Cone Tracing
+
+![alt text](https://raw.githubusercontent.com/righier/gidemo/master/screenshots/1.jpg)
+
+video: https://www.youtube.com/watch?v=OcmgxbZ4vmA
+
+Screenshots:
+[1](https://raw.githubusercontent.com/righier/gidemo/master/screenshots/1.jpg)
+[2](https://raw.githubusercontent.com/righier/gidemo/master/screenshots/2.jpg)
+[3](https://raw.githubusercontent.com/righier/gidemo/master/screenshots/3.jpg)
+[4](https://raw.githubusercontent.com/righier/gidemo/master/screenshots/4.jpg)
+
+In this demo I implemented realtime global illumination using the voxel cone tracing technique (https://doi.org/10.1111/j.1467-8659.2011.02063.x)
+
+I then improved on the original technique by propagating light temporally across frames, which approximates the effect of simulating infinite light bounces.
+
+For more information check out the [report](https://raw.githubusercontent.com/righier/gidemo/master/report.pdf).
+
+**Features:**
+- Diffuse Cones
+- Specular Cones
+- Shadow Cones
+- Emissive materials
+- HDR RGBA16f storage
+- Anisotropic voxels
+- Light temporal multi-bounce
+- Particle systems
+
+**Commands**
+- **WASD**: Horizontal movement
+- **QE** Vertical movement
+- **SPACE** Toggle GUI / free camera movement
+
+OpenGL 4.6 required
+
+### src/assets.h
+```
+#pragma once
+
+#include <glad/glad.h>
+
+#include <unordered_map>
+
+#include "utils.h"
+#include "window.h"
+
+static inline string getAssetsFolder() {
+	return "../assets/";
+}
+
+/* Base class for all assets types, handles loading and disposing of assets,
+ * as well as file dependencies */
+struct Asset {
+	vector<string> files; /* list of files the asset depends on */
+	double loadTime = -100.0; /* last time the asset was loaded */
+
+	virtual void loadImpl() {
+
+	}
+
+	bool checkTime() {
+		return System::time() - loadTime > 0.5;
+	}
+
+	void updateLoadTime() {
+		loadTime = System::time();
+	}
+
+	void load() {
+		loadTime = System::time();
+		loadImpl();
+	}
+
+	void checkAndLoad() {
+		double currTime = System::time();
+		if (currTime - loadTime > 0.5) {
+			loadImpl();
+			loadTime = currTime;
+		}
+	}
+
+	virtual void dispose() {
+		
+	}
+};
+
+/* Handles automatic reload of modified assets */
+struct AssetStore {
+	std::unordered_map<string, Asset*> assets; /* loaded assets */
+	std::unordered_map<string, Asset*> deps; /* map filename to asset */
+
+	AssetStore() {
+		init();
+	}
+
+	void init();
+
+	void update();
+
+	template<typename T>
+	T *add(const string &name, T* asset) {
+		for (string dep: asset->files) {
+			/* when the asset is added we set all of its files pointing to the asset
+			in order to update it when the files change */
+			deps[dep] = (Asset*)asset;
+		}
+		assets[name] = (Asset*)asset;
+		return asset;
+	}
+
+	Asset *get(const string &name) {
+		return assets[name];
+	}
+
+};
+
+/* Texture wrapper class */
+struct Texture: Asset {
+	u32 id = 0;
+	u32 type;
+	u32 format;
+	u32 storageType;
+
+	/* utility function to create 3D textures */
+	static Texture *init3D(int size, bool mipmap, bool hdr) {
+		Texture *t = new Texture();
+		t->type = GL_TEXTURE_3D;
+		t->format = GL_RGBA;
+		/* use different storage for hdr */
+		t->storageType = hdr ? GL_RGBA16F : GL_RGBA8; 
+
+		glGenTextures(1, &t->id);
+		glBindTexture(t->type, t->id);
+
+		glTexParameteri(t->type, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+		glTexParameteri(t->type, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+		glTexParameteri(t->type, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+
+		if (mipmap) {
+			glTexParameteri(t->type, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		} else {
+			glTexParameteri(t->type, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		}
+
+		glTexParameteri(t->type, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+		u32 levels = mipmap ? (u32)std::floor(std::log2(size))+1 : 1;
+		LOG("3D texture - size: ", size, " levels: ", levels);
+		glTexStorage3D(t->type, levels, t->storageType, size, size, size);
+
+		return t;
+	}
+
+	/* utility function to create a shadow map texture */
+	static Texture *shadowMap(int width, int height) {
+		Texture *t = new Texture();
+		t->type = GL_TEXTURE_2D;
+		t->format = GL_DEPTH_COMPONENT; /* only need depth */
+		t->storageType = GL_FLOAT;
+		glGenTextures(1, &t->id);
+		t->bind(0);
+		glTexImage2D(t->type, 0, t->format, width, height, 0, t->format, t->storageType, NULL);
+		glTexParameteri(t->type, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(t->type, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(t->type, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER); 
+		glTexParameteri(t->type, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER); 
+		return t;
+	}
+
+	void bind(int channel) {
+		glActiveTexture(GL_TEXTURE0 + channel);
+		glBindTexture(type, id);
+	}
+
+	void clear(const vec4& value) {
+		glClearTexImage(id, 0, format, GL_FLOAT, &value[0]);
+	}
+
+	void dispose() {
+		glDeleteTextures(1, &id);
+		id = 0;
+	}
+
+	~Texture() {
+		dispose();
+	}
+};
+
+/* Framebuffer wrapper class */
+struct Framebuffer {
+	int width, height;
+	u32 id;
+	Texture *t;
+
+	Framebuffer(int width, int height): width(width), height(height) {
+		glGenFramebuffers(1, &id);
+	}
+
+	void setViewport() {
+		glViewport(0, 0, width, height);
+	}
+
+	void bind() {
+		glBindFramebuffer(GL_FRAMEBUFFER, id);
+	}
+
+	void dispose() {
+		glDeleteFramebuffers(1, &id);
+	}
+
+	static Framebuffer *shadowMap(int width, int height) {
+		Framebuffer *buffer = new Framebuffer(width, height);
+		buffer->t = Texture::shadowMap(width, height);
+
+		buffer->bind();
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, buffer->t->id, 0);
+		glDrawBuffer(GL_NONE);
+		glReadBuffer(GL_NONE);
+		Framebuffer::reset();
+
+		return buffer;
+	}
+
+	static void reset() {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
+
+};
+
+/* Shader wrapper class */
+struct Shader: Asset {
+	int id = 0;
+	string vpath, gpath, fpath;
+
+	string header = "";
+
+	/* constructors for compute shaders and standard shaders */
+	Shader() {}
+	Shader(const string &cpath, const string &header);
+	Shader(const string &vpath, const string &fpath, const string &header);
+	Shader(const string &vpath, const string &gpath, const string &fpath, const string &header);
+
+	void loadImpl();
+
+	/* binds shader */
+	void bind();
+
+	/* used to run compute shaders */
+	void dispatch(u32 sx, u32 sy, u32 sz);
+
+	void set(u32 uid, const int *value, int count) {
+		glUniform1iv(uid, count, value);
+	}
+
+	void set(u32 uid, const float *value, int count) {
+		glUniform1fv(uid, count, value);
+	}
+
+	void set(u32 uid, const vec2* value, int count) {
+		glUniform2fv(uid, count, (const float*)value);
+	}
+
+	void set(u32 uid, const vec3* value, int count) {
+		glUniform3fv(uid, count, (const float *)value);
+	}
+
+	void set(u32 uid, const vec4* value, int count) {
+		glUniform4fv(uid, count, (const float *)value);
+	}
+
+	void set(u32 uid, const mat2* value, int count) {
+		glUniformMatrix2fv(uid, count, GL_FALSE, (const float *)value);
+	}
+
+	void set(u32 uid, const mat3* value, int count) {
+		glUniformMatrix3fv(uid, count, GL_FALSE, (const float *)value);
+	}
+
+	void set(u32 uid, const mat4* value, int count) {
+		glUniformMatrix4fv(uid, count, GL_FALSE, (const float *)value);
+	}
+
+	void set(u32 uid, int value) {
+		glUniform1i(uid, value);
+	}
+
+	void set(u32 uid, float value) {
+		glUniform1f(uid, value);
+	}
+
+	void set(u32 uid, const vec2& value) {
+		glUniform2fv(uid, 1, &value[0]);
+	}
+
+	void set(u32 uid, const vec3& value) {
+		glUniform3fv(uid, 1, &value[0]);
+	}
+
+	void set(u32 uid, const vec4& value) {
+		glUniform4fv(uid, 1, &value[0]);
+	}
+
+	void set(u32 uid, const mat2& value) {
+		glUniformMatrix2fv(uid, 1, GL_FALSE, &value[0][0]);
+	}
+
+	void set(u32 uid, const mat3& value) {
+		glUniformMatrix3fv(uid, 1, GL_FALSE, &value[0][0]);
+	}
+
+	void set(u32 uid, const mat4& value) {
+		glUniformMatrix4fv(uid, 1, GL_FALSE, &value[0][0]);
+	}
+
+	template <class T>
+	void set(const char *name, T value) {
+		u32 uid = glGetUniformLocation(this->id, name);
+		set(uid, value);
+	}
+
+	template <class T>
+	void set(const char *name, T value, u32 count) {
+		u32 uid = glGetUniformLocation(this->id, name);
+		set(uid, value, count);
+	}
+
+	static const char *getUniformName(const char *name, int index);
+
+	/* utility to set uniform arrays */
+	template <class T>
+	void setIndex(const char *name, int index, T value) {
+		set(getUniformName(name, index), value);
+	}
+
+	void dispose();
+};
+
+struct Vertex {
+    vec3 p; //position
+    vec2 uv; //texture uv
+    vec3 n; //normal
+    vec3 t; //tangent
+    vec3 b; //bitangent
+};
+
+/* Mesh class, stores vertices and indices and loads everything to gpu */
+struct Mesh: Asset {
+	vector<Vertex> vertices;
+	vector<u32> indices;
+	u32 vao = 0, vbo = 0, ebo = 0;
+
+	Mesh(vector<Vertex> &vertices, vector<u32> &indices);
+
+	Mesh(Mesh &&);
+
+	~Mesh();
+
+	Mesh &operator=(Mesh &&);
+
+	Mesh(const Mesh &copy) = delete;
+	Mesh &operator=(const Mesh &) = delete;
+
+
+	void bind();
+
+	static void reset();
+
+	void drawNoBind();
+
+	void draw();
+
+	void setup();
+
+	void dispose();
+};
+
+
+/* loads only one group from an OBJ file handle*/
+Mesh *loadMesh(void *obj_handle, int group_id);
+
+/* loads a OBJ file as a single mesh */
+Mesh *loadMesh(const string &path);
+
+/* loads a texture from path */
+Texture *loadTexture(const char *path);
+
+/* creates a texture from memory */
+Texture *createTexture(u8 *data, int width, int height, bool mipmap = true, bool aniso = true);
+
+Texture *whiteTexture();
+Texture *blackTexture();
+Texture *normalTexture();
+
+/* generates one mipmap level for a 3D texture using the given compute shader */
+void genMipmapLevel(Shader *program, Texture *src, Texture *dest, int level, int size, bool aniso, int dir);
+
+/* generates a mipmap for a 3D anisotropic texture using the given compute shader */
+void genMipmap(Shader *program, Texture *texture, int size, bool aniso, int dir);
+
+/* generates a mipmap for a 3D texture using the given compute shader */
+void genMipmap(Shader *program, Texture *texture, int size);
+```
+
+### src/assetstore.cpp
+```
+#include <queue>
+
+#include "assets.h"
+#include "utils.h"
+#include "window.h"
+
+/* automatic asset reload is implemented only for windows */
+#ifdef _WIN32
+#include <windows.h>
+
+/* this queue is used to communicate between the main and worker thread */
+std::queue<string> fileChanges;
+
+HANDLE mutex;
+HANDLE changeHandle;
+FILE_NOTIFY_INFORMATION infoBuffer[1024];
+
+DWORD WINAPI worker(LPVOID lpParam) {
+	UNUSED(lpParam);
+	while(true) {
+		DWORD bytesReturned;
+		/* waits for a file to be modified */
+		if (ReadDirectoryChangesW(changeHandle, infoBuffer, sizeof(infoBuffer), FALSE, FILE_NOTIFY_CHANGE_LAST_WRITE, &bytesReturned, NULL, NULL)) {
+
+			/* iterate on every modified file */
+			auto *p = &infoBuffer[0];
+			do {
+				std::wstring wname(p->FileName, p->FileNameLength/2);
+				string name = ws2s(wname);
+				name.resize(p->FileNameLength / 2);
+
+				/* lock the queue */
+				WaitForSingleObject(mutex, INFINITE);
+
+				LOG("CHANGED: ", name);
+				fileChanges.push(name);
+
+				/* unlock the queue */
+				ReleaseMutex(mutex);
+
+				p += p->NextEntryOffset;
+			} while(p->NextEntryOffset);
+		}
+	}
+}
+
+void AssetStore::init() {
+
+	mutex = CreateMutex(NULL, FALSE, NULL);
+
+	/* base directory to wait for updates */
+	char *path = "../assets/shaders";
+
+	changeHandle = CreateFile(path, 
+		FILE_LIST_DIRECTORY,
+		FILE_SHARE_WRITE | FILE_SHARE_READ | FILE_SHARE_DELETE,
+		NULL, 
+		OPEN_EXISTING,
+		FILE_FLAG_BACKUP_SEMANTICS,
+		NULL);
+
+	if (changeHandle == INVALID_HANDLE_VALUE) {
+		LOG("invalid handle error");
+	} else {
+		/* start worker thread */
+		CreateThread( NULL, 0, worker, NULL, 0, NULL );
+	}
+}
+
+/* function to load modified assets */
+void AssetStore::update() {
+	WaitForSingleObject(mutex, INFINITE);
+
+	while (!fileChanges.empty()) {
+		string file = fileChanges.front();
+		fileChanges.pop();
+
+		/* searched for an asset that uses the modified file, if found reload */
+		auto it = deps.find(file);
+		if (it != deps.end()) {
+			System::sleep(0.1);
+			Asset *asset = it->second;
+			asset->checkAndLoad();
+		}
+
+	}
+
+	ReleaseMutex(mutex);
+}
+
+#else
+void AssetStore::init() {
+
+}
+
+void AssetStore::update() {
+
+}
+#endif
+```
+
+### src/camera.h
+```
+#pragma once
+
+#include "utils.h"
+
+/* perspective camera utility class */
+struct Camera {
+	/* ratio is width / height */
+	float fov, ratio, near, far;
+
+	vec3 pos;
+	/* rotation around Y and X axes */
+	float hrot, vrot;
+
+	mat4 proj; /* perspective projection matrix */
+	mat4 view; /* translation and rotation matrix */
+	mat4 final;
+
+	Camera() {
+		
+	}
+
+	Camera(float fov, float ratio, float near, float far) {
+		this->fov = fov;
+		this->ratio = ratio;
+		this->near = near;
+		this->far = far;
+		this->pos = vec3(0, 0, 0);
+		this->hrot = 0.f;
+		this->vrot = 0.f;
+
+		update();
+	}
+
+	/* moves the camera by dpos */
+	void move(const vec3 &dpos) {
+		pos += dpos;
+	}
+
+	/* rotates the camera around the Y and X axes */
+	void rotate(float dh, float dv) {
+		hrot = glm::mod(hrot+dh, pi * 2.f); 
+		vrot = glm::clamp(vrot+dv, -pi * .5f, pi * .5f); /* lock at 90 degrees */
+	}
+
+	/* updates the view matrix */
+	void updateView() {
+		view = glm::identity<mat4>();
+		/* the order is important */
+		view = glm::rotate(view, -vrot, vec3(1.f, 0.f, 0.f));
+		view = glm::rotate(view, -hrot, vec3(0.f, 1.f,0.f));
+		view = glm::translate(view, -pos);
+	}
+
+	/* udates the proj matrix */
+	void updateProj() {
+		proj = glm::perspective(fov, ratio, near, far);
+	}
+
+	/* updates the final matrix */
+	void update() {
+		updateProj();
+		updateView();
+		final = proj * view;
+	}
+
+};
+```
+
+### src/fast_obj.h
+```
+/*
+ *
+ * MIT License
+ *
+ * Copyright (c) 2018 Richard Knight
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ */
+
+#ifndef FAST_OBJ_HDR
+#define FAST_OBJ_HDR
+
+
+typedef struct
+{
+    /* Texture name from .mtl file */
+    char*                       name;
+
+    /* Resolved path to texture */
+    char*                       path;
+
+} fastObjTexture;
+
+
+typedef struct
+{
+    /* Material name */
+    char*                       name;
+
+    /* Parameters */
+    float                       Ka[3];  /* Ambient */
+    float                       Kd[3];  /* Diffuse */
+    float                       Ks[3];  /* Specular */
+    float                       Ke[3];  /* Emission */
+    float                       Kt[3];  /* Transmittance */
+    float                       Ns;     /* Shininess */
+    float                       Ni;     /* Index of refraction */
+    float                       Tf[3];  /* Transmission filter */
+    float                       d;      /* Disolve (alpha) */
+    int                         illum;  /* Illumination model */
+
+    /* Texture maps */
+    fastObjTexture              map_Ka;
+    fastObjTexture              map_Kd;
+    fastObjTexture              map_Ks;
+    fastObjTexture              map_Ke;
+    fastObjTexture              map_Kt;
+    fastObjTexture              map_Ns;
+    fastObjTexture              map_Ni;
+    fastObjTexture              map_d;
+    fastObjTexture              map_bump;
+
+} fastObjMaterial;
+
+/* Allows user override to bigger indexable array */
+#ifndef FAST_OBJ_UINT_TYPE
+#define FAST_OBJ_UINT_TYPE unsigned int
+#endif
+
+typedef FAST_OBJ_UINT_TYPE fastObjUInt;
+
+typedef struct
+{
+    fastObjUInt                 p;
+    fastObjUInt                 t;
+    fastObjUInt                 n;
+
+} fastObjIndex;
+
+
+typedef struct
+{
+    /* Group name */
+    char*                       name;
+
+    /* Number of faces */
+    unsigned int                face_count;
+
+    /* First face in fastObjMesh face_* arrays */
+    unsigned int                face_offset;
+
+    /* First index in fastObjMesh indices array */
+    unsigned int                index_offset;
+
+} fastObjGroup;
+
+
+typedef struct
+{
+    /* Vertex data */
+    unsigned int                position_count;
+    float*                      positions;
+
+    unsigned int                texcoord_count;
+    float*                      texcoords;
+
+    unsigned int                normal_count;
+    float*                      normals;
+
+    /* Face data: one element for each face */
+    unsigned int                face_count;
+    unsigned int*               face_vertices;
+    unsigned int*               face_materials;
+
+    /* Index data: one element for each face vertex */
+    fastObjIndex*               indices;
+
+    /* Materials */
+    unsigned int                material_count;
+    fastObjMaterial*            materials;
+
+    /* Mesh groups */
+    unsigned int                group_count;
+    fastObjGroup*               groups;
+
+} fastObjMesh;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+fastObjMesh*                    fast_obj_read(const char* path);
+void                            fast_obj_destroy(fastObjMesh* mesh);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+
+
+#ifdef FAST_OBJ_IMPLEMENTATION
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef FAST_OBJ_REALLOC
+#define FAST_OBJ_REALLOC        realloc
+#endif
+
+#ifndef FAST_OBJ_FREE
+#define FAST_OBJ_FREE           free
+#endif
+
+#ifdef _WIN32
+#define FAST_OBJ_SEPARATOR      '\\'
+#define FAST_OBJ_OTHER_SEP      '/'
+#else
+#define FAST_OBJ_SEPARATOR      '/'
+#define FAST_OBJ_OTHER_SEP      '\\'
+#endif
+
+
+/* Size of buffer to read into */
+#define BUFFER_SIZE             65536
+
+/* Max supported power when parsing float */
+#define MAX_POWER               20
+
+typedef struct
+{
+    /* Final mesh */
+    fastObjMesh*                mesh;
+
+    /* Current group */
+    fastObjGroup                group;
+
+    /* Current material index */
+    unsigned int                material;
+
+    /* Current line in file */
+    unsigned int                line;
+
+    /* Base path for materials/textures */
+    char*                       base;
+
+} fastObjData;
+
+
+static const
+double POWER_10_POS[MAX_POWER] =
+{
+    1.0e0,  1.0e1,  1.0e2,  1.0e3,  1.0e4,  1.0e5,  1.0e6,  1.0e7,  1.0e8,  1.0e9,
+    1.0e10, 1.0e11, 1.0e12, 1.0e13, 1.0e14, 1.0e15, 1.0e16, 1.0e17, 1.0e18, 1.0e19,
+};
+
+static const
+double POWER_10_NEG[MAX_POWER] =
+{
+    1.0e0,   1.0e-1,  1.0e-2,  1.0e-3,  1.0e-4,  1.0e-5,  1.0e-6,  1.0e-7,  1.0e-8,  1.0e-9,
+    1.0e-10, 1.0e-11, 1.0e-12, 1.0e-13, 1.0e-14, 1.0e-15, 1.0e-16, 1.0e-17, 1.0e-18, 1.0e-19,
+};
+
+
+static void* memory_realloc(void* ptr, size_t bytes)
+{
+    return FAST_OBJ_REALLOC(ptr, bytes);
+}
+
+
+static
+void memory_dealloc(void* ptr)
+{
+    FAST_OBJ_FREE(ptr);
+}
+
+
+#define array_clean(_arr)       ((_arr) ? memory_dealloc(_array_header(_arr)), 0 : 0)
+#define array_push(_arr, _val)  (_array_mgrow(_arr, 1) ? ((_arr)[_array_size(_arr)++] = (_val), _array_size(_arr) - 1) : 0)
+#define array_size(_arr)        ((_arr) ? _array_size(_arr) : 0)
+#define array_capacity(_arr)    ((_arr) ? _array_capacity(_arr) : 0)
+#define array_empty(_arr)       (array_size(_arr) == 0)
+
+#define _array_header(_arr)     ((fastObjUInt*)(_arr)-2)
+#define _array_size(_arr)       (_array_header(_arr)[0])
+#define _array_capacity(_arr)   (_array_header(_arr)[1])
+#define _array_ngrow(_arr, _n)  ((_arr) == 0 || (_array_size(_arr) + (_n) >= _array_capacity(_arr)))
+#define _array_mgrow(_arr, _n)  (_array_ngrow(_arr, _n) ? (_array_grow(_arr, _n) != 0) : 1)
+#define _array_grow(_arr, _n)   (*((void**)&(_arr)) = array_realloc(_arr, _n, sizeof(*(_arr))))
+
+
+static void* array_realloc(void* ptr, fastObjUInt n, fastObjUInt b)
+{
+    fastObjUInt sz = array_size(ptr);
+    fastObjUInt nsz = sz + n;
+    fastObjUInt cap = array_capacity(ptr);
+    fastObjUInt ncap = 3 * cap / 2;
+    fastObjUInt* r;
+
+
+    if (ncap < nsz)
+        ncap = nsz;
+    ncap = (ncap + 15) & ~15u;
+
+    r = (fastObjUInt*)(memory_realloc(ptr ? _array_header(ptr) : 0, b * ncap + 2 * sizeof(fastObjUInt)));
+    if (!r)
+        return 0;
+
+    r[0] = sz;
+    r[1] = ncap;
+
+    return (r + 2);
+}
+
+
+static
+void* file_open(const char* path)
+{
+    return fopen(path, "rb");
+}
+
+
+static
+void file_close(void* file)
+{
+    FILE* f;
+    
+    f = (FILE*)(file);
+    fclose(f);
+}
+
+
+static
+size_t file_read(void* file, void* dst, size_t bytes)
+{
+    FILE* f;
+    
+    f = (FILE*)(file);
+    return fread(dst, 1, bytes, f);
+}
+
+
+static
+unsigned long file_size(void* file)
+{
+    FILE* f;
+    long p;
+    long n;
+    
+    f = (FILE*)(file);
+
+    p = ftell(f);
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, p, SEEK_SET);
+
+    if (n > 0)
+        return (unsigned long)(n);
+    else
+        return 0;
+}
+
+
+static
+char* string_copy(const char* s, const char* e)
+{
+    size_t n;
+    char*  p;
+        
+    n = (size_t)(e - s);
+    p = (char*)(memory_realloc(0, n + 1));
+    if (p)
+    {
+        memcpy(p, s, n);
+        p[n] = '\0';
+    }
+
+    return p;
+}
+
+
+static
+char* string_substr(const char* s, size_t a, size_t b)
+{
+    return string_copy(s + a, s + b);
+}
+
+
+static
+char* string_concat(const char* a, const char* s, const char* e)
+{
+    size_t an;
+    size_t sn;
+    char*  p;
+        
+    an = a ? strlen(a) : 0;
+    sn = (size_t)(e - s);
+    p = (char*)(memory_realloc(0, an + sn + 1));
+    if (p)
+    {
+        if (a)
+            memcpy(p, a, an);
+        memcpy(p + an, s, sn);
+        p[an + sn] = '\0';
+    }
+
+    return p;
+}
+
+
+static
+int string_equal(const char* a, const char* s, const char* e)
+{
+    size_t an = strlen(a);
+    size_t sn = (size_t)(e - s);
+
+    return an == sn && memcmp(a, s, an) == 0;
+}
+
+
+static
+int string_find_last(const char* s, char c, size_t* p)
+{
+    const char* e;
+
+    e = s + strlen(s);
+    while (e > s)
+    {
+        e--;
+
+        if (*e == c)
+        {
+            *p = (size_t)(e - s);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+static
+void string_fix_separators(char* s)
+{
+    while (*s)
+    {
+        if (*s == FAST_OBJ_OTHER_SEP)
+            *s = FAST_OBJ_SEPARATOR;
+        s++;
+    }
+}
+
+
+static
+int is_whitespace(char c)
+{
+    return (c == ' ' || c == '\t' || c == '\r');
+}
+
+static
+int is_end_of_name(char c)
+{
+    return (c == '\t' || c == '\r' || c == '\n');
+}
+
+static
+int is_newline(char c)
+{
+    return (c == '\n');
+}
+
+
+static
+int is_digit(char c)
+{
+    return (c >= '0' && c <= '9');
+}
+
+
+static
+int is_exponent(char c)
+{
+    return (c == 'e' || c == 'E');
+}
+
+
+static
+const char* skip_whitespace(const char* ptr)
+{
+    while (is_whitespace(*ptr))
+        ptr++;
+
+    return ptr;
+}
+
+
+static
+const char* skip_line(const char* ptr)
+{
+    while (!is_newline(*ptr++))
+        ;
+
+    return ptr;
+}
+
+
+static
+fastObjGroup group_default(void)
+{
+    fastObjGroup group;
+
+    group.name         = 0;
+    group.face_count   = 0;
+    group.face_offset  = 0;
+    group.index_offset = 0;
+
+    return group;
+}
+
+
+static
+void group_clean(fastObjGroup* group)
+{
+    memory_dealloc(group->name);
+}
+
+
+static
+void flush_output(fastObjData* data)
+{
+    /* Add group if not empty */
+    if (data->group.face_count > 0)
+        array_push(data->mesh->groups, data->group);
+    else
+        group_clean(&data->group);
+
+    /* Reset for more data */
+    data->group = group_default();
+    data->group.face_offset = array_size(data->mesh->face_vertices);
+    data->group.index_offset = array_size(data->mesh->indices);
+}
+
+
+static
+const char* parse_int(const char* ptr, int* val)
+{
+    int sign;
+    int num;
+
+
+    if (*ptr == '-')
+    {
+        sign = -1;
+        ptr++;
+    }
+    else
+    {
+        sign = +1;
+    }
+
+    num = 0;
+    while (is_digit(*ptr))
+        num = 10 * num + (*ptr++ - '0');
+
+    *val = sign * num;
+
+    return ptr;
+}
+
+
+static
+const char* parse_float(const char* ptr, float* val)
+{
+    double        sign;
+    double        num;
+    double        fra;
+    double        div;
+    int           eval;
+    const double* powers;
+
+
+    ptr = skip_whitespace(ptr);
+
+    switch (*ptr)
+    {
+    case '+':
+        sign = 1.0;
+        ptr++;
+        break;
+
+    case '-':
+        sign = -1.0;
+        ptr++;
+        break;
+
+    default:
+        sign = 1.0;
+        break;
+    }
+
+
+    num = 0.0;
+    while (is_digit(*ptr))
+        num = 10.0 * num + (double)(*ptr++ - '0');
+
+    if (*ptr == '.')
+        ptr++;
+
+    fra = 0.0;
+    div = 1.0;
+
+    while (is_digit(*ptr))
+    {
+        fra  = 10.0 * fra + (double)(*ptr++ - '0');
+        div *= 10.0;
+    }
+
+    num += fra / div;
+
+    if (is_exponent(*ptr))
+    {
+        ptr++;
+
+        switch (*ptr)
+        {
+        case '+':
+            powers = POWER_10_POS;
+            ptr++;
+            break;
+
+        case '-':
+            powers = POWER_10_NEG;
+            ptr++;
+            break;
+
+        default:
+            powers = POWER_10_POS;
+            break;
+        }
+
+        eval = 0;
+        while (is_digit(*ptr))
+            eval = 10 * eval + (*ptr++ - '0');
+
+        num *= (eval >= MAX_POWER) ? 0.0 : powers[eval];
+    }
+
+    *val = (float)(sign * num);
+
+    return ptr;
+}
+
+
+static
+const char* parse_vertex(fastObjData* data, const char* ptr)
+{
+    unsigned int ii;
+    float        v;
+
+
+    for (ii = 0; ii < 3; ii++)
+    {
+        ptr = parse_float(ptr, &v);
+        array_push(data->mesh->positions, v);
+    }
+
+    return ptr;
+}
+
+
+static
+const char* parse_texcoord(fastObjData* data, const char* ptr)
+{
+    unsigned int ii;
+    float        v;
+
+
+    for (ii = 0; ii < 2; ii++)
+    {
+        ptr = parse_float(ptr, &v);
+        array_push(data->mesh->texcoords, v);
+    }
+
+    return ptr;
+}
+
+
+static
+const char* parse_normal(fastObjData* data, const char* ptr)
+{
+    unsigned int ii;
+    float        v;
+
+
+    for (ii = 0; ii < 3; ii++)
+    {
+        ptr = parse_float(ptr, &v);
+        array_push(data->mesh->normals, v);
+    }
+
+    return ptr;
+}
+
+
+static
+const char* parse_face(fastObjData* data, const char* ptr)
+{
+    unsigned int count;
+    fastObjIndex vn;
+    int          v;
+    int          t;
+    int          n;
+
+
+    ptr = skip_whitespace(ptr);
+
+    count = 0;
+    while (!is_newline(*ptr))
+    {
+        v = 0;
+        t = 0;
+        n = 0;
+
+        ptr = parse_int(ptr, &v);
+        if (*ptr == '/')
+        {
+            ptr++;
+            if (*ptr != '/')
+                ptr = parse_int(ptr, &t);
+
+            if (*ptr == '/')
+            {
+                ptr++;
+                ptr = parse_int(ptr, &n);
+            }
+        }
+
+        if (v < 0)
+            vn.p = (array_size(data->mesh->positions) / 3) - (fastObjUInt)(-v);
+        else
+            vn.p = (fastObjUInt)(v);
+
+        if (t < 0)
+            vn.t = (array_size(data->mesh->texcoords) / 2) - (fastObjUInt)(-t);
+        else if (t > 0)
+            vn.t = (fastObjUInt)(t);
+        else
+            vn.t = 0;
+
+        if (n < 0)
+            vn.n = (array_size(data->mesh->normals) / 3) - (fastObjUInt)(-n);
+        else if (n > 0)
+            vn.n = (fastObjUInt)(n);
+        else
+            vn.n = 0;
+
+        array_push(data->mesh->indices, vn);
+        count++;
+
+        ptr = skip_whitespace(ptr);
+    }
+
+    array_push(data->mesh->face_vertices, count);
+    array_push(data->mesh->face_materials, data->material);
+
+    data->group.face_count++;
+
+    return ptr;
+}
+
+
+static
+const char* parse_group(fastObjData* data, const char* ptr)
+{
+    const char* s;
+    const char* e;
+
+
+    ptr = skip_whitespace(ptr);
+
+    s = ptr;
+    while (!is_end_of_name(*ptr))
+        ptr++;
+
+    e = ptr;
+
+    flush_output(data);
+    data->group.name = string_copy(s, e);
+
+    return ptr;
+}
+
+
+static
+fastObjTexture map_default(void)
+{
+    fastObjTexture map;
+
+    map.name = 0;
+    map.path = 0;
+
+    return map;
+}
+
+
+static
+fastObjMaterial mtl_default(void)
+{
+    fastObjMaterial mtl;
+
+    mtl.name = 0;
+
+    mtl.Ka[0] = 0.0;
+    mtl.Ka[1] = 0.0;
+    mtl.Ka[2] = 0.0;
+    mtl.Kd[0] = 1.0;
+    mtl.Kd[1] = 1.0;
+    mtl.Kd[2] = 1.0;
+    mtl.Ks[0] = 0.0;
+    mtl.Ks[1] = 0.0;
+    mtl.Ks[2] = 0.0;
+    mtl.Ke[0] = 0.0;
+    mtl.Ke[1] = 0.0;
+    mtl.Ke[2] = 0.0;
+    mtl.Kt[0] = 0.0;
+    mtl.Kt[1] = 0.0;
+    mtl.Kt[2] = 0.0;
+    mtl.Ns    = 1.0;
+    mtl.Ni    = 1.0;
+    mtl.Tf[0] = 1.0;
+    mtl.Tf[1] = 1.0;
+    mtl.Tf[2] = 1.0;
+    mtl.d     = 1.0;
+    mtl.illum = 1;
+
+    mtl.map_Ka   = map_default();
+    mtl.map_Kd   = map_default();
+    mtl.map_Ks   = map_default();
+    mtl.map_Ke   = map_default();
+    mtl.map_Kt   = map_default();
+    mtl.map_Ns   = map_default();
+    mtl.map_Ni   = map_default();
+    mtl.map_d    = map_default();
+    mtl.map_bump = map_default();
+
+    return mtl;
+}
+
+
+static
+const char* parse_usemtl(fastObjData* data, const char* ptr)
+{
+    const char*      s;
+    const char*      e;
+    unsigned int     idx;
+    fastObjMaterial* mtl;
+
+
+    ptr = skip_whitespace(ptr);
+
+    /* Parse the material name */
+    s = ptr;
+    while (!is_end_of_name(*ptr))
+        ptr++;
+
+    e = ptr;
+
+
+    /* If there are no materials yet, add a dummy invalid material at index 0 */
+    if (array_empty(data->mesh->materials))
+        array_push(data->mesh->materials, mtl_default());
+
+
+    /* Find an existing material with the same name */
+    idx = 0;
+    while (idx < array_size(data->mesh->materials))
+    {
+        mtl = &data->mesh->materials[idx];
+        if (mtl->name && string_equal(mtl->name, s, e))
+            break;
+
+        idx++;
+    }
+
+    if (idx == array_size(data->mesh->materials))
+        idx = 0;
+
+    data->material = idx;
+
+    return ptr;
+}
+
+
+static
+void map_clean(fastObjTexture* map)
+{
+    memory_dealloc(map->name);
+    memory_dealloc(map->path);
+}
+
+
+static
+void mtl_clean(fastObjMaterial* mtl)
+{
+    map_clean(&mtl->map_Ka);
+    map_clean(&mtl->map_Kd);
+    map_clean(&mtl->map_Ks);
+    map_clean(&mtl->map_Ke);
+    map_clean(&mtl->map_Kt);
+    map_clean(&mtl->map_Ns);
+    map_clean(&mtl->map_Ni);
+    map_clean(&mtl->map_d);
+    map_clean(&mtl->map_bump);
+
+    memory_dealloc(mtl->name);
+}
+
+
+static
+const char* read_mtl_int(const char* p, int* v)
+{
+    return parse_int(p, v);
+}
+
+
+static
+const char* read_mtl_single(const char* p, float* v)
+{
+    return parse_float(p, v);
+}
+
+
+static
+const char* read_mtl_triple(const char* p, float v[3])
+{
+    p = read_mtl_single(p, &v[0]);
+    p = read_mtl_single(p, &v[1]);
+    p = read_mtl_single(p, &v[2]);
+
+    return p;
+}
+
+
+static
+const char* read_map(fastObjData* data, const char* ptr, fastObjTexture* map)
+{
+    const char* s;
+    const char* e;
+    char*       name;
+    char*       path;
+
+    ptr = skip_whitespace(ptr);
+
+    /* Don't support options at present */
+    if (*ptr == '-')
+        return ptr;
+
+
+    /* Read name */
+    s = ptr;
+    while (!is_end_of_name(*ptr))
+        ptr++;
+
+    e = ptr;
+
+    name = string_copy(s, e);
+
+    path = string_concat(data->base, s, e);
+    string_fix_separators(path);
+
+    map->name = name;
+    map->path = path;
+
+    return e;
+}
+
+
+static
+int read_mtllib(fastObjData* data, void* file)
+{
+    unsigned long   n;
+    const char*     s;
+    char*           contents;
+    size_t          l;
+    const char*     p;
+    const char*     e;
+    int             found_d;
+    fastObjMaterial mtl;
+
+
+    /* Read entire file */
+    n = file_size(file);
+
+    contents = (char*)(memory_realloc(0, n + 1));
+    if (!contents)
+        return 0;
+
+    l = file_read(file, contents, n);
+    contents[l] = '\n';
+
+    mtl = mtl_default();
+
+    found_d = 0;
+
+    p = contents;
+    e = contents + l;
+    while (p < e)
+    {
+        p = skip_whitespace(p);
+
+        switch (*p)
+        {
+        case 'n':
+            p++;
+            if (p[0] == 'e' &&
+                p[1] == 'w' &&
+                p[2] == 'm' &&
+                p[3] == 't' &&
+                p[4] == 'l' &&
+                is_whitespace(p[5]))
+            {
+                /* Push previous material (if there is one) */
+                if (mtl.name)
+                {
+                    array_push(data->mesh->materials, mtl);
+                    mtl = mtl_default();
+                }
+
+
+                /* Read name */
+                p += 5;
+
+                while (is_whitespace(*p))
+                    p++;
+
+                s = p;
+                while (!is_end_of_name(*p))
+                    p++;
+
+                mtl.name = string_copy(s, p);
+            }
+            break;
+
+        case 'K':
+            if (p[1] == 'a')
+                p = read_mtl_triple(p + 2, mtl.Ka);
+            else if (p[1] == 'd')
+                p = read_mtl_triple(p + 2, mtl.Kd);
+            else if (p[1] == 's')
+                p = read_mtl_triple(p + 2, mtl.Ks);
+            else if (p[1] == 'e')
+                p = read_mtl_triple(p + 2, mtl.Ke);
+            else if (p[1] == 't')
+                p = read_mtl_triple(p + 2, mtl.Kt);
+            break;
+
+        case 'N':
+            if (p[1] == 's')
+                p = read_mtl_single(p + 2, &mtl.Ns);
+            else if (p[1] == 'i')
+                p = read_mtl_single(p + 2, &mtl.Ni);
+            break;
+
+        case 'T':
+            if (p[1] == 'r')
+            {
+                float Tr;
+                p = read_mtl_single(p + 2, &Tr);
+                if (!found_d)
+                {
+                    /* Ignore Tr if we've already read d */
+                    mtl.d = 1.0f - Tr;
+                }
+            }
+            else if (p[1] == 'f')
+                p = read_mtl_triple(p + 2, mtl.Tf);
+            break;
+
+        case 'd':
+            if (is_whitespace(p[1]))
+            {
+                p = read_mtl_single(p + 1, &mtl.d);
+                found_d = 1;
+            }
+            break;
+
+        case 'i':
+            p++;
+            if (p[0] == 'l' &&
+                p[1] == 'l' &&
+                p[2] == 'u' &&
+                p[3] == 'm' &&
+                is_whitespace(p[4]))
+            {
+                p = read_mtl_int(p + 4, &mtl.illum);
+            }
+            break;
+
+        case 'm':
+            p++;
+            if (p[0] == 'a' &&
+                p[1] == 'p' &&
+                p[2] == '_')
+            {
+                p += 3;
+                if (*p == 'K')
+                {
+                    p++;
+                    if (is_whitespace(p[1]))
+                    {
+                        if (*p == 'a')
+                            p = read_map(data, p + 1, &mtl.map_Ka);
+                        else if (*p == 'd')
+                            p = read_map(data, p + 1, &mtl.map_Kd);
+                        else if (*p == 's')
+                            p = read_map(data, p + 1, &mtl.map_Ks);
+                        else if (*p == 'e')
+                            p = read_map(data, p + 1, &mtl.map_Ke);
+                        else if (*p == 't')
+                            p = read_map(data, p + 1, &mtl.map_Kt);
+                    }
+                }
+                else if (*p == 'N')
+                {
+                    p++;
+                    if (is_whitespace(p[1]))
+                    {
+                        if (*p == 's')
+                            p = read_map(data, p + 1, &mtl.map_Ns);
+                        else if (*p == 'i')
+                            p = read_map(data, p + 1, &mtl.map_Ni);
+                    }
+                }
+                else if (*p == 'd')
+                {
+                    p++;
+                    if (is_whitespace(*p))
+                        p = read_map(data, p, &mtl.map_d);
+                }
+                else if ((p[0] == 'b' || p[0] == 'B') &&
+                         p[1] == 'u' &&
+                         p[2] == 'm' &&
+                         p[3] == 'p' &&
+                         is_whitespace(p[4]))
+                {
+                    p = read_map(data, p + 4, &mtl.map_bump);
+                }
+            }
+            break;
+
+        case '#':
+            break;
+        }
+
+        p = skip_line(p);
+    }
+
+    /* Push final material */
+    if (mtl.name)
+        array_push(data->mesh->materials, mtl);
+
+    memory_dealloc(contents);
+
+    return 1;
+}
+
+
+static
+const char* parse_mtllib(fastObjData* data, const char* ptr)
+{
+    const char* s;
+    const char* e;
+    char*       lib;
+    void*       file;
+
+
+    ptr = skip_whitespace(ptr);
+
+    s = ptr;
+    while (!is_end_of_name(*ptr))
+        ptr++;
+
+    e = ptr;
+
+    lib = string_concat(data->base, s, e);
+    if (lib)
+    {
+        string_fix_separators(lib);
+
+        file = file_open(lib);
+        if (file)
+        {
+            read_mtllib(data, file);
+            file_close(file);
+        }
+
+        memory_dealloc(lib);
+    }
+
+    return ptr;
+}
+
+
+static
+void parse_buffer(fastObjData* data, const char* ptr, const char* end)
+{
+    const char* p;
+    
+    
+    p = ptr;
+    while (p != end)
+    {
+        p = skip_whitespace(p);
+
+        switch (*p)
+        {
+        case 'v':
+            p++;
+
+            switch (*p++)
+            {
+            case ' ':
+            case '\t':
+                p = parse_vertex(data, p);
+                break;
+
+            case 't':
+                p = parse_texcoord(data, p);
+                break;
+
+            case 'n':
+                p = parse_normal(data, p);
+                break;
+
+            default:
+                p--; /* roll p++ back in case *p was a newline */
+            }
+            break;
+
+        case 'f':
+            p++;
+
+            switch (*p++)
+            {
+            case ' ':
+            case '\t':
+                p = parse_face(data, p);
+                break;
+
+            default:
+                p--; /* roll p++ back in case *p was a newline */
+            }
+            break;
+
+        case 'g':
+            p++;
+
+            switch (*p++)
+            {
+            case ' ':
+            case '\t':
+                p = parse_group(data, p);
+                break;
+
+            default:
+                p--; /* roll p++ back in case *p was a newline */
+            }
+            break;
+
+        case 'm':
+            p++;
+            if (p[0] == 't' &&
+                p[1] == 'l' &&
+                p[2] == 'l' &&
+                p[3] == 'i' &&
+                p[4] == 'b' &&
+                is_whitespace(p[5]))
+                p = parse_mtllib(data, p + 5);
+            break;
+
+        case 'u':
+            p++;
+            if (p[0] == 's' &&
+                p[1] == 'e' &&
+                p[2] == 'm' &&
+                p[3] == 't' &&
+                p[4] == 'l' &&
+                is_whitespace(p[5]))
+                p = parse_usemtl(data, p + 5);
+            break;
+
+        case '#':
+            break;
+        }
+
+        p = skip_line(p);
+
+        data->line++;
+    }
+}
+
+
+void fast_obj_destroy(fastObjMesh* m)
+{
+    unsigned int ii;
+
+
+    for (ii = 0; ii < array_size(m->groups); ii++)
+        group_clean(&m->groups[ii]);
+
+    for (ii = 0; ii < array_size(m->materials); ii++)
+        mtl_clean(&m->materials[ii]);
+
+    array_clean(m->positions);
+    array_clean(m->texcoords);
+    array_clean(m->normals);
+    array_clean(m->face_vertices);
+    array_clean(m->face_materials);
+    array_clean(m->indices);
+    array_clean(m->groups);
+    array_clean(m->materials);
+
+    memory_dealloc(m);
+}
+
+
+fastObjMesh* fast_obj_read(const char* path)
+{
+    fastObjData  data;
+    fastObjMesh* m;
+    void*        file;
+    char*        buffer;
+    char*        start;
+    char*        end;
+    char*        last;
+    fastObjUInt  read;
+    size_t       sep;
+    size_t       sep2;
+    int          found_sep;
+    fastObjUInt  bytes;
+
+
+    /* Open file */
+    file = file_open(path);
+    if (!file)
+        return 0;
+
+
+    /* Empty mesh */
+    m = (fastObjMesh*)(memory_realloc(0, sizeof(fastObjMesh)));
+    if (!m)
+        return 0;
+
+    m->positions      = 0;
+    m->texcoords      = 0;
+    m->normals        = 0;
+    m->face_vertices  = 0;
+    m->face_materials = 0;
+    m->indices        = 0;
+    m->materials      = 0;
+    m->groups         = 0;
+
+
+    /* Add dummy position/texcoord/normal */
+    array_push(m->positions, 0.0f);
+    array_push(m->positions, 0.0f);
+    array_push(m->positions, 0.0f);
+
+    array_push(m->texcoords, 0.0f);
+    array_push(m->texcoords, 0.0f);
+
+    array_push(m->normals, 0.0f);
+    array_push(m->normals, 0.0f);
+    array_push(m->normals, 1.0f);
+
+
+    /* Data needed during parsing */
+    data.mesh     = m;
+    data.group    = group_default();
+    data.material = 0;
+    data.line     = 1;
+    data.base     = 0;
+
+
+    /* Find base path for materials/textures */
+    sep = sep2 = 0;
+    found_sep = string_find_last(path, FAST_OBJ_SEPARATOR, &sep);
+    found_sep = found_sep || string_find_last(path, FAST_OBJ_OTHER_SEP, &sep2);
+    if (sep2 > sep) sep = sep2;
+    if (found_sep)
+        data.base = string_substr(path, 0, sep + 1);
+
+
+    /* Create buffer for reading file */
+    buffer = (char*)(memory_realloc(0, 2 * BUFFER_SIZE * sizeof(char)));
+    if (!buffer)
+        return 0;
+
+    start = buffer;
+    for (;;)
+    {
+        /* Read another buffer's worth from file */
+        read = (fastObjUInt)(file_read(file, start, BUFFER_SIZE));
+        if (read == 0 && start == buffer)
+            break;
+
+
+        /* Ensure buffer ends in a newline */
+        if (read < BUFFER_SIZE)
+        {
+            if (read == 0 || start[read - 1] != '\n')
+                start[read++] = '\n';
+        }
+
+        end = start + read;
+        if (end == buffer)
+            break;
+
+
+        /* Find last new line */
+        last = end;
+        while (last > buffer)
+        {
+            last--;
+            if (*last == '\n')
+                break;
+        }
+
+
+        /* Check there actually is a new line */
+        if (*last != '\n')
+            break;
+
+        last++;
+
+
+        /* Process buffer */
+        parse_buffer(&data, buffer, last);
+
+
+        /* Copy overflow for next buffer */
+        bytes = (fastObjUInt)(end - last);
+        memmove(buffer, last, bytes);
+        start = buffer + bytes;
+    }
+
+
+    /* Flush final group */
+    flush_output(&data);
+    group_clean(&data.group);
+
+    m->position_count = array_size(m->positions) / 3;
+    m->texcoord_count = array_size(m->texcoords) / 2;
+    m->normal_count   = array_size(m->normals) / 3;
+    m->face_count     = array_size(m->face_vertices);
+    m->material_count = array_size(m->materials);
+    m->group_count    = array_size(m->groups);
+
+
+    /* Clean up */
+    memory_dealloc(buffer);
+    memory_dealloc(data.base);
+
+    file_close(file);
+
+    return m;
+}
+
+#endif
+```
+
+### src/keys.h
+```
+#pragma once
+
+namespace Input {
+	/* The unknown key */
+#define KEY_UNKNOWN            -1
+
+/* Printable keys */
+#define KEY_SPACE              32
+#define KEY_APOSTROPHE         39  /* ' */
+#define KEY_COMMA              44  /* , */
+#define KEY_MINUS              45  /* - */
+#define KEY_PERIOD             46  /* . */
+#define KEY_SLASH              47  /* / */
+#define KEY_0                  48
+#define KEY_1                  49
+#define KEY_2                  50
+#define KEY_3                  51
+#define KEY_4                  52
+#define KEY_5                  53
+#define KEY_6                  54
+#define KEY_7                  55
+#define KEY_8                  56
+#define KEY_9                  57
+#define KEY_SEMICOLON          59  /* ; */
+#define KEY_EQUAL              61  /* = */
+#define KEY_A                  65
+#define KEY_B                  66
+#define KEY_C                  67
+#define KEY_D                  68
+#define KEY_E                  69
+#define KEY_F                  70
+#define KEY_G                  71
+#define KEY_H                  72
+#define KEY_I                  73
+#define KEY_J                  74
+#define KEY_K                  75
+#define KEY_L                  76
+#define KEY_M                  77
+#define KEY_N                  78
+#define KEY_O                  79
+#define KEY_P                  80
+#define KEY_Q                  81
+#define KEY_R                  82
+#define KEY_S                  83
+#define KEY_T                  84
+#define KEY_U                  85
+#define KEY_V                  86
+#define KEY_W                  87
+#define KEY_X                  88
+#define KEY_Y                  89
+#define KEY_Z                  90
+#define KEY_LEFT_BRACKET       91  /* [ */
+#define KEY_BACKSLASH          92  /* \ */
+#define KEY_RIGHT_BRACKET      93  /* ] */
+#define KEY_GRAVE_ACCENT       96  /* ` */
+#define KEY_WORLD_1            161 /* non-US #1 */
+#define KEY_WORLD_2            162 /* non-US #2 */
+
+/* Function keys */
+#define KEY_ESCAPE             256
+#define KEY_ENTER              257
+#define KEY_TAB                258
+#define KEY_BACKSPACE          259
+#define KEY_INSERT             260
+#define KEY_DELETE             261
+#define KEY_RIGHT              262
+#define KEY_LEFT               263
+#define KEY_DOWN               264
+#define KEY_UP                 265
+#define KEY_PAGE_UP            266
+#define KEY_PAGE_DOWN          267
+#define KEY_HOME               268
+#define KEY_END                269
+#define KEY_CAPS_LOCK          280
+#define KEY_SCROLL_LOCK        281
+#define KEY_NUM_LOCK           282
+#define KEY_PRINT_SCREEN       283
+#define KEY_PAUSE              284
+#define KEY_F1                 290
+#define KEY_F2                 291
+#define KEY_F3                 292
+#define KEY_F4                 293
+#define KEY_F5                 294
+#define KEY_F6                 295
+#define KEY_F7                 296
+#define KEY_F8                 297
+#define KEY_F9                 298
+#define KEY_F10                299
+#define KEY_F11                300
+#define KEY_F12                301
+#define KEY_F13                302
+#define KEY_F14                303
+#define KEY_F15                304
+#define KEY_F16                305
+#define KEY_F17                306
+#define KEY_F18                307
+#define KEY_F19                308
+#define KEY_F20                309
+#define KEY_F21                310
+#define KEY_F22                311
+#define KEY_F23                312
+#define KEY_F24                313
+#define KEY_F25                314
+#define KEY_KP_0               320
+#define KEY_KP_1               321
+#define KEY_KP_2               322
+#define KEY_KP_3               323
+#define KEY_KP_4               324
+#define KEY_KP_5               325
+#define KEY_KP_6               326
+#define KEY_KP_7               327
+#define KEY_KP_8               328
+#define KEY_KP_9               329
+#define KEY_KP_DECIMAL         330
+#define KEY_KP_DIVIDE          331
+#define KEY_KP_MULTIPLY        332
+#define KEY_KP_SUBTRACT        333
+#define KEY_KP_ADD             334
+#define KEY_KP_ENTER           335
+#define KEY_KP_EQUAL           336
+#define KEY_LEFT_SHIFT         340
+#define KEY_LEFT_CONTROL       341
+#define KEY_LEFT_ALT           342
+#define KEY_LEFT_SUPER         343
+#define KEY_RIGHT_SHIFT        344
+#define KEY_RIGHT_CONTROL      345
+#define KEY_RIGHT_ALT          346
+#define KEY_RIGHT_SUPER        347
+#define KEY_MENU               348
+
+#define KEY_LAST               KEY_MENU
+}
+```
+
+### src/light.h
+```
+#pragma once 
+
+#include "utils.h"
+#include "assets.h"
+
+/*
+struct DirLight {
+	vec3 dir;
+	vec3 color;
+
+	DirLight(vec3 dir, vec3 col): dir(dir), color(col) {
+
+	}
+};
+
+struct PointLight {
+	vec3 pos;
+	vec3 color;
+	vec3 atten;
+
+	PointLight(vec3 pos, vec3 col, vec3 atten): pos(pos), color(col), atten(atten) {
+		
+	}
+};
+*/
+
+/* Simple Spotlight class */
+struct SpotLight {
+	vec3 pos; /* position */
+	vec3 dir; /* direciton */
+	vec3 color; /* color */
+	float angle; /* aperture angle */
+	float smooth; /* aperture of the interpolation angle between light and no light */
+
+	SpotLight() {
+
+	}
+
+	SpotLight(vec3 pos, vec3 dir, vec3 color, float angle, float smooth):
+	pos(pos), dir(dir), color(color), angle(angle), smooth(smooth) {
+
+	}
+
+	/* generates projection matrix from the light point of view */
+	mat4 getProjectionMatrix() {
+		vec3 up = dir + vec3(0,0,1);
+		up = normalize(cross(up, dir)); /* orthogonal vector to dir */
+		mat4 view = glm::lookAt(pos, pos+dir, up);
+		mat4 proj = glm::perspective(glm::radians(angle), 1.f, 0.01f, 3.0f);
+		return proj * view;
+	}
+
+	/* set all the uniforms for the light */
+	void upload(Shader *shader) {
+		shader->set("u_lightPos", pos);
+		shader->set("u_lightDir", glm::normalize(dir));
+		shader->set("u_lightColor", color);
+		shader->set("u_lightInnerCos", cos(.5f * glm::radians(angle - smooth)));
+		shader->set("u_lightOuterCos", cos(.5f * glm::radians(angle)));
+	}
+};
+```
+
+### src/log.h
+```
+#pragma once
+
+#include <iostream>
+#include "math.h"
+#include "utils.h"
+
+inline void LOGA(const vec2& v) {
+	std::cout << "(" << v.x << "," << v.y << ")";
+}
+
+inline void LOGA(const vec3& v) {
+	std::cout << "(" << v.x << "," << v.y << "," << v.z << ")";
+}
+
+inline void LOGA(const vec4& v) {
+	std::cout << "(" << v.x << "," << v.y << "," << v.z << "," << v.w << ")";
+}
+
+inline void LOGA(const mat4& m) {
+	for (int y = 0; y < 4; y++) {
+		for (int x = 0; x < 4; x++) {
+			std::cout << m[y][x] << " ";
+		}
+		std::cout << "\n";
+	}
+}
+
+template<typename First>
+inline void LOGA(First arg) {
+	std::cout << arg;
+}
+
+inline void LOG() {
+	std::cout << std::endl;
+}
+
+template<typename First, typename ... Rest>
+inline void LOG(First arg, const Rest&... rest) {
+	LOGA(arg);
+	std::cout << " ";
+	LOG(rest...);
+}
+```
+
+### src/main.cpp
+```
+#include <glad/glad.h>
+
+#include "window.h"
+#include "utils.h"
+#include "camera.h"
+#include "assets.h"
+#include "scene.h"
+
+#include "particlesystem.h"
+
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw.h"
+#include "imgui/imgui_impl_opengl3.h"
+
+
+/* needed to pring OpenGL errors */
+void GLAPIENTRY
+MessageCallback( GLenum source,
+                 GLenum type,
+                 GLuint id,
+                 GLenum severity,
+                 GLsizei length,
+                 const GLchar* message,
+                 const void* userParam )
+{
+	UNUSED(source);
+	UNUSED(id);
+	UNUSED(length);
+	UNUSED(userParam);
+
+	if (type == 0x8251) return;
+	
+	fprintf( stderr, "GL CALLBACK: %s type = 0x%x, severity = 0x%x, message = %s\n",
+           ( type == GL_DEBUG_TYPE_ERROR ? "** GL ERROR **" : "" ),
+            type, severity, message );
+}
+
+Scene scene; /* the scene contains all objects, light sources, and particle systems */
+AssetStore assets; /* asset manager */
+
+Texture *voxelTexture; /* 3D texture for voxel cone tracing */
+Texture *voxelTextureAniso[6]; /* textures for anisotropic rendering */
+
+Shader *voxelizeShader, *visualizeShader, *voxelConeShader, *shadowShader;
+Shader *mipmapShader, *fixopacityShader;
+
+Shader *particleShader;
+
+Mesh *planeMesh, *cubeMesh;
+
+float shadowBias = 0.0005f; /* bias for shadow maps */
+Framebuffer *shadowMap;
+
+Camera cam;
+
+bool enableIndirectLight = true;
+
+const char *renderModeText[] = {"Direct Light", "Indirect Diffuse", "Indirect Specular", "Global Illumination"};
+int renderMode = 3;
+int voxelCount = 128;
+
+bool dynamicVoxelize = true;
+bool customMipmap = true;
+bool averageConflictingValues = false;
+bool anisotropicVoxels = false;
+string anisoHeader[] = {"", "#define ANISO\n"};
+bool hdrVoxels = true;
+bool temporalMultibounce = true;
+bool addDiffuseNoise = true;
+
+float multibounceRestitution = 0.3f;
+float restitution = 0.3f;
+
+bool enableTracedShadows = false;
+float shadowAperture = 2;
+
+bool toggleVoxels = false;
+float voxelLod = 0;
+int voxelIndex = 0;
+float visualizeQuality = 10.0f;
+
+bool depthPrepass = true;
+
+bool lockfps = false;
+bool vsyncStatus = false;
+int targetfps = 5;
+
+/* initialize 3D textures */
+void initVoxelize() {
+	if (anisotropicVoxels) {
+		voxelTexture = Texture::init3D(voxelCount, false, hdrVoxels);
+		for (int i = 0; i < 6; i++) {
+			voxelTextureAniso[i] = Texture::init3D(voxelCount / 2, true, hdrVoxels);
+		}
+	} else {
+		voxelTexture = Texture::init3D(voxelCount, true, hdrVoxels);
+	}
+}
+
+/* dispose 3D textures */
+/* normally dispose anisotropic textures when they are active, but if flip is true
+ * then it diposes of them when they are inactive */
+void disposeVoxels(bool flip = false) {
+	voxelTexture->dispose();
+	delete voxelTexture;
+
+	if (anisotropicVoxels ^ flip) {
+		for (int i = 0; i < 6; i++) {
+			voxelTextureAniso[i]->dispose();
+			delete voxelTextureAniso[i];
+		}
+	}
+}
+
+/* render the scene to the shadow map */
+void renderShadowMap(double time) {
+
+	shadowShader->bind();
+	shadowShader->set("u_project", scene.light.getProjectionMatrix());
+
+	/* bind the viewport to the shadowmap framebuffer */
+	shadowMap->bind();
+	shadowMap->setViewport();
+
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glEnable(GL_DEPTH_TEST);
+	glClear(GL_DEPTH_BUFFER_BIT);
+
+	/* render the scene without using materials */
+	scene.drawObjects(time, shadowShader, false);
+}
+
+/* voxelizes the scene to the 3D textures */
+void voxelize(double time) {
+	if (!dynamicVoxelize) return;
+
+	voxelizeShader->bind();
+
+	Framebuffer::reset();
+	glViewport(0, 0, voxelCount, voxelCount);
+	glDisable(GL_BLEND);
+	glDisable(GL_CULL_FACE); /* need to voxelize every face */
+	glDisable(GL_DEPTH_TEST);
+	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE); /* no output to framebuffer */
+ 
+	voxelTexture->bind(0);
+	voxelTexture->clear(vec4(0,0,0,0));
+	voxelizeShader->set("u_voxelTexture", 0);
+	/* bind the 3D texture for read and write, in order to perform average */
+	glBindImageTexture(0, voxelTexture->id, 0, GL_TRUE, 0, GL_READ_WRITE, voxelTexture->storageType);
+
+	voxelizeShader->set("u_lightProj", scene.light.getProjectionMatrix());
+	voxelizeShader->set("u_shadowBias", shadowBias);
+
+ 	shadowMap->t->bind(1);
+	voxelizeShader->set("u_shadowMap", 1);
+	voxelizeShader->set("u_averageValues", averageConflictingValues && !hdrVoxels);
+	voxelizeShader->set("u_temporalMultibounce", temporalMultibounce);
+	voxelizeShader->set("u_voxelCount", voxelCount);
+	voxelizeShader->set("u_time", (float)time);
+	voxelizeShader->set("u_restitution", multibounceRestitution);
+	voxelizeShader->set("u_particle", false);
+
+	/* for temporal multibounce we need to access the previous 3D textures */
+	if (!anisotropicVoxels) {
+		/* bind the same voxel texture to use as the previous one */
+		voxelTexture->bind(8);
+		voxelizeShader->set("u_voxelTexturePrev", 8);
+	} else {
+		/* bind the anisotropic texture to use as the previous ones */
+		for (int i = 0; i < 6; i++) {
+			voxelTextureAniso[i]->bind(i+2);
+			voxelizeShader->setIndex("u_voxelTexturePrev", i, i+2);
+		}
+	}
+
+	/* voxelize all objects */
+	scene.drawObjects(time, voxelizeShader);
+
+
+	/* voxelize all particles */
+	voxelizeShader->set("u_particle", true);
+	scene.drawParticles(time, voxelizeShader);
+
+	/* right now the opacity is used as a counter to perform average, this shader
+	 * turns it back into opacity */
+	fixopacityShader->bind();
+	fixopacityShader->set("u_voxel", 0);
+	glBindImageTexture(0, voxelTexture->id, 0, GL_TRUE, 0, GL_READ_WRITE, voxelTexture->storageType);
+	fixopacityShader->dispatch(voxelCount, voxelCount, voxelCount);
+
+	/* generate mipmaps */
+	if (anisotropicVoxels) {
+		/* generate mipmaps for all directions */
+		for (int dir = 0; dir < 6; dir++) {
+			/* the first mipmap level takes samples from the isotropic texture */
+			genMipmapLevel(mipmapShader, voxelTexture, voxelTextureAniso[dir], 0, voxelCount/2, true, dir);
+			genMipmap(mipmapShader, voxelTextureAniso[dir], voxelCount/4, true, dir);
+		}
+	} else if (customMipmap) {
+		/* use custom mipmapping */
+		genMipmap(mipmapShader, voxelTexture, voxelCount/2);
+	} else {
+		/* use hardware mipmapping */
+		voxelTexture->bind(0);
+		glGenerateMipmap(GL_TEXTURE_3D);
+
+	}
+}
+
+void occlusionCulling(double time) {
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+
+	shadowShader->bind();
+	Framebuffer::reset();
+	shadowShader->set("u_project", cam.final);
+	scene.drawObjects(time, shadowShader, true);
+}
+
+void voxelCone(double time) {
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+
+	voxelConeShader->bind();
+	Framebuffer::reset();
+	voxelConeShader->set("u_project", cam.final);
+	voxelConeShader->set("u_cameraPos", cam.pos);
+
+	voxelConeShader->set("u_tracedShadows", enableTracedShadows);
+	voxelConeShader->set("u_shadowAperture", shadowAperture);
+
+	voxelConeShader->set("u_renderMode", renderMode);
+	voxelConeShader->set("u_indirectLight", enableIndirectLight);
+	voxelConeShader->set("u_voxelCount", voxelCount);
+	voxelConeShader->set("u_diffuseNoise", addDiffuseNoise);
+	voxelConeShader->set("u_restitution", restitution);
+
+	voxelTexture->bind(1);
+	voxelConeShader->set("u_voxelTexture", 1);
+	for (int i = 0; i < 6; i++) {
+		if (anisotropicVoxels) {
+			voxelTextureAniso[i]->bind(i+2);
+		}
+		voxelConeShader->setIndex("u_voxelTextureAniso", i, i+2);
+	}
+
+	voxelConeShader->set("u_lightProj", scene.light.getProjectionMatrix());
+	voxelConeShader->set("u_shadowBias", shadowBias);
+	shadowMap->t->bind(0);
+	voxelConeShader->set("u_shadowMap", 0);
+
+	voxelConeShader->set("u_time", (float)time);
+
+	scene.drawObjects(time, voxelConeShader);
+
+	particleShader->bind();
+	particleShader->set("u_project", cam.final);
+	scene.drawParticles(time, particleShader);
+}
+
+/* debug function to show the voxel storage */
+void showVoxels() {
+
+	visualizeShader->bind();
+	visualizeShader->set("u_project", cam.final);
+	visualizeShader->set("u_voxelCount", voxelCount);
+	visualizeShader->set("u_cameraPos", cam.pos);
+	visualizeShader->set("u_voxelLod", voxelLod);
+	visualizeShader->set("u_quality", visualizeQuality);
+	visualizeShader->set("u_voxelIndex", voxelIndex);
+
+	voxelTexture->bind(0);
+	visualizeShader->set("u_voxelTexture", 0);
+
+	for (int i = 0; i < 6; i++) {
+		if (anisotropicVoxels) {
+			voxelTextureAniso[i]->bind(i+1);
+		}
+		visualizeShader->setIndex("u_voxelTextureAniso", i, i+1);
+	}
+
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_FRONT);
+	glClear(GL_DEPTH_BUFFER_BIT);
+	/* I render a cube and then perform raytracing inside the cube to sample the voxel values */
+	cubeMesh->draw();
+}
+
+/* recompiles the shaders with the updated header */
+void recompileShaders() {
+	voxelizeShader->header = anisoHeader[anisotropicVoxels];
+	visualizeShader->header = anisoHeader[anisotropicVoxels];
+	voxelConeShader->header = anisoHeader[anisotropicVoxels];
+	mipmapShader->header = anisoHeader[anisotropicVoxels];
+	voxelizeShader->load();
+	visualizeShader->load();
+	voxelConeShader->load();
+	mipmapShader->load();
+}
+
+/* loads commonly used assets */
+void loadAssets() {
+
+	voxelizeShader = assets.add("voxelize_shader", new Shader("voxelize.vert", "voxelize.geom", "voxelize.frag", anisoHeader[anisotropicVoxels]));
+	visualizeShader = assets.add("visualize_shader", new Shader("showvoxels.vert", "showvoxels.frag", anisoHeader[anisotropicVoxels]));
+	voxelConeShader = assets.add("voxel_cone_shader", new Shader("voxelcone.vert", "voxelcone.frag", anisoHeader[anisotropicVoxels]));
+	shadowShader = assets.add("shadow_shader", new Shader("shadow.vert", "shadow.frag", ""));
+
+	mipmapShader = assets.add("mipmap_shader", new Shader("mipmap.comp", anisoHeader[anisotropicVoxels]));
+	fixopacityShader = assets.add("fixopacity_shader", new Shader("fixopacity.comp", ""));
+
+	particleShader = assets.add("particle_shader", new Shader("particle.vert", "particle.frag", ""));
+
+	cubeMesh = loadMesh("../assets/models/cube.obj");
+	planeMesh = loadMesh("../assets/models/plane.obj");
+
+	shadowMap = Framebuffer::shadowMap(2048, 2048);
+}
+
+/* utility function to generate a fire particle system */
+ParticleSystem fire(vec3 pos, float scale) {
+	static Texture *texture = loadTexture("../assets/textures/fire.jpg");
+
+	auto p = ParticleSystem();
+	p.count = 50;
+	p.life = Prop<float>(1.f, 2.f);
+	p.pos = Prop<vec3>(pos + vec3(-.1f, 0, -.1f) * scale, pos + vec3(.1f, 0, .1f) * scale);
+	p.vel = Prop<vec3>(vec3(0,1,0) * scale, vec3(0,2,0) * scale);
+	p.acc = Prop<vec3>(vec3(0) * scale, vec3(0,2,0) * scale);
+	p.scale = AnimProp<vec3>(vec3(1.0f) * scale);
+	p.rot = AnimProp<vec3>(
+		Prop<vec3>(vec3(1.57, 0, 0), vec3(1.57, 6.28, 6.28)), 
+		Prop<vec3>(vec3(1.57, 0, 0), vec3(1.57, 6.28, 6.28)));
+	p.color = AnimProp<vec3>(
+		Prop<vec3>(vec3(1.0, 0.8, 0.0), vec3(1.0, 0.8, 0.4)),
+		Prop<vec3>(vec3(1.0, 0.2, 0), vec3(1.0, 0, 0)),
+		0.3f);
+	p.opacity = AnimProp<float>(1.0, 0.0, 1.0);
+	p.fadeIn = Prop<float>(0.1f);
+	p.texture = texture;
+	p.mesh = planeMesh;
+	return p;
+}
+
+/* generates a box with green and red walls and a light source */
+/* when useTexture is true it adds some textures to test emission */
+void addCornellBox(bool useTexture = false) {
+
+	multibounceRestitution = 0.15f;
+	restitution = 0.15f;
+
+	scene.light = SpotLight(
+		vec3(0, 1, 0),
+		vec3(0, -1, 0),
+		useTexture ? vec3(0) : vec3(3),
+		110.f, .5f
+		);
+
+	if(useTexture) {
+		scene.add(Object(
+			"floor",
+			planeMesh,
+			Material(
+				loadTexture("../assets/suntemple/textures/M_FloorTiles2_Inst_0_BaseColor.jpg"),
+				loadTexture("../assets/suntemple/textures/M_FloorTiles2_Inst_0_Normal.jpg"),
+				loadTexture("../assets/suntemple/textures/M_FloorTiles2_Inst_0_Specular.jpg"),
+				blackTexture()
+				),
+			vec3(0,-1,0),
+			vec3(1,1,1),
+			quat(vec3(0,0,0))
+			));
+	} else {
+		scene.add(Object(
+			"floor",
+			planeMesh,
+			Material(vec3(1)),
+			vec3(0,-1,0),
+			vec3(1,1,1),
+			quat(vec3(0,0,0))
+			));
+	}
+	scene.add(Object(
+		"ceiling",
+		planeMesh,
+		Material(vec3(1)),
+		vec3(0,1,0),
+		vec3(1,1,1),
+		quat(vec3(pi,0,0))
+		));
+
+	if (useTexture) {
+		Texture *painting = loadTexture("../assets/textures/painting.jpg");
+		scene.add(Object(
+			"painting",
+			planeMesh,
+			Material(painting, normalTexture(), whiteTexture(), painting),
+			vec3(0,0,-1),
+			vec3(1,1,1),
+			quat(vec3(pi*0.5,0,0))
+			));
+	} else {
+		scene.add(Object(
+			"wall",
+			planeMesh,
+			Material(vec3(1)),
+			vec3(0,0,-1),
+			vec3(1,1,1),
+			quat(vec3(pi*0.5,0,0))
+			));
+	}
+
+	scene.add(Object(
+		"red",
+		planeMesh,
+		Material(vec3(1,0,0)),
+		vec3(-1,0,0),
+		vec3(1,1,1),
+		quat(vec3(pi*0.5,pi*0.5,0))
+		));
+	scene.add(Object(
+		"green",
+		planeMesh,
+		Material(vec3(0,1,0)),
+		vec3(1,0,0),
+		vec3(1,1,1),
+		quat(vec3(pi*0.5,-pi*0.5,0))
+		));
+}
+
+/* scene with a bunny */
+void bunnyScene() {
+	auto *bunnyMesh = loadMesh("../assets/models/bunny.obj");
+
+	addCornellBox();
+
+	scene.add(Object(
+		"bunny",
+		bunnyMesh, 
+		Material(vec3(0.8,0.6,0.0),vec3(),1,0.2f), 
+		vec3(.2,-1.,.2), 
+		vec3(.7,.7,.7),
+		quat(vec3(0,0,0))
+		));	
+}
+
+/* scene with a horse */
+void horseScene(bool useTexture = false) {
+	auto *horseMesh = loadMesh("../assets/models/horse.obj");
+
+	addCornellBox(useTexture);
+
+	scene.add(Object(
+		"horse",
+		horseMesh, 
+		Material(vec3(1)), 
+		vec3(0,-1.,0), 
+		vec3(1,1,1),
+		quat(vec3(0,glm::radians(45.f),0))
+		));
+
+	// scene.add(fire(vec3(0.19f, -0.83f , 0.725f), 0.03f));
+
+}
+
+/* scene with two spheres */
+void benchScene() {
+	auto *sphereMesh = loadMesh("../assets/models/sphere.obj");
+
+	addCornellBox();
+
+	scene.add(Object(
+		"big",
+		sphereMesh,
+		Material(vec3(1), vec3(0), 0, 0.5),
+		vec3(-0.45, -0.45, -0.27371),
+		vec3(0.55, 0.55, 0.55),
+		quat(vec3(0,0,0))
+		));
+
+	scene.add(Object(
+		"small",
+		sphereMesh,
+		Material(vec3(1), vec3(0), 0, 0.5),
+		vec3(0.52374, -0.725, 0.28117),
+		vec3(0.275, 0.275, 0.275),
+		quat(vec3(0,0,0))
+		));
+}
+
+/* test scene for particles */
+void particleScene() {
+	auto p = fire(vec3(0), 1);
+	scene.add(p);
+}
+
+/* test scene for pbr materials */
+void pbrScene(bool useTexture = false) {
+	auto *sphereMesh = loadMesh("../assets/models/sphere.obj");
+
+	addCornellBox(useTexture);
+
+	for (int i = 0; i <= 10; i++) {
+		for (int j = 0; j <= 1; j++) {
+			float rough = (float)i/10.f;
+			float metal = (float)j/1.f;
+
+			float scale = 0.07f;
+			float ps = 0.8f;
+			float x = i*.2f*ps - ps;
+			float z = 0.0;
+			float y = j*.5f - 0.5f;
+
+			scene.add(Object(
+				"sphere" + std::to_string(i) + "_" + std::to_string(j),
+				sphereMesh,
+				Material(vec3(1), vec3(0), metal, rough),
+				vec3(x, y, z),
+				vec3(scale, scale, scale),
+				quat(vec3(0,0,0))
+				));
+		}
+	}
+
+}
+
+/*sun temple demo from unreal engine 4 */
+void templeScene() {
+	scene.light = SpotLight(
+		vec3(0, 0.2, 0.5),
+		vec3(0, -1, -1),
+		vec3(10),
+		70.f, 20.f
+		);	
+
+	shadowBias = 0.00006f;
+
+	cam.pos = vec3(0.f, -.8f, 1.f);
+
+	loadScene(scene, "../assets/suntemple/suntemple.obj");
+
+	auto statueBase = scene.get("BottomTrim_Inst_Black");
+	statueBase->mat.rough = 0.3f;
+
+	auto floor1 = scene.get("FloorTiles1_Inst_Inst2");
+	auto floor2 = scene.get("FloorTiles2_Inst");
+	auto floor3 = scene.get("FloorTiles2_Inst_Inst_Inst");
+	floor1->mat.rough = 0.3f;
+	floor2->mat.rough = 0.3f;
+	floor3->mat.rough = 0.3f;
+
+	scene.add(fire(vec3(0.19f, -0.83f , 0.725f), 0.03f));
+	scene.add(fire(vec3(-0.19f, -0.83f , 0.71f), 0.03f));
+	scene.add(fire(vec3(0.74f, -0.83f, 0.195f), 0.03f));
+	scene.add(fire(vec3(-0.73f, -0.83f, 0.195f), 0.03f));
+	scene.add(fire(vec3(0.525f, -0.83f, 0.525f), 0.03f));
+	scene.add(fire(vec3(-0.525f, -0.83f, 0.530f), 0.03f));
+	scene.add(fire(vec3(0.285f, -0.83f, -0.72f), 0.03f));
+	scene.add(fire(vec3(-0.29f, -0.83f, -0.715f), 0.03f));
+
+	Texture *painting = loadTexture("../assets/textures/painting.jpg");
+	Material paintMat = Material(painting, normalTexture(), whiteTexture(), painting, 0.0f);
+	scene.add(Object(
+		"painting",
+		planeMesh,
+		paintMat,
+		vec3(0, -0.8, 0.8),
+		vec3(1,1,1),
+		quat(vec3(pi*0.5,pi,0))
+		));
+}
+
+int main() {
+	System::init(4, 6);
+
+	Window::create(1280, 720, "Voxel Cone Tracing Demo", Window::WINDOWED, vsyncStatus);
+	Window::update();
+
+	/* opengl debug settings */
+	glEnable(GL_DEBUG_OUTPUT);
+	glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+	glDebugMessageCallback(MessageCallback, 0);
+	glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
+
+	/* initialize the camera */
+	cam = Camera(glm::radians(60.f), (float)Window::getWidth() / (float)Window::getHeight(), .1f, 100.f);
+	cam.pos = vec3(0.f, 0.f, 3.f);
+
+	loadAssets();
+	templeScene();
+	// horseScene(true);
+
+	initVoxelize();
+
+	bool showCursor = true;
+	int lockPrev = false;
+	Input::showCursor(showCursor);
+	vec2 oldMousePos = Input::getMousePos();
+
+	double prevTime = System::time();
+	double oldTime = prevTime;
+	int updateCount = 0;
+
+	while(!Window::shouldClose()) {
+		assets.update(); /* reloads modified assets */
+
+		double time = System:: time();
+		float timeDelta = (float)(time - prevTime);
+
+		double targetDelta = 1.0 / (double)targetfps;
+		/* if target fps has been set, wait until it is time to render again */
+		if (lockfps && timeDelta < targetDelta) {
+			double sleepTime = targetDelta - timeDelta - 0.001;
+			if (sleepTime > 0) {
+				System::sleep(targetDelta - timeDelta);
+			}
+			continue;
+		}
+
+		prevTime = time;
+
+		/* every second print current fps to console */
+		if (time - oldTime >= 1.0) {
+			double delta = time - oldTime;
+			LOG("FPS:", updateCount, "--  ms:", (delta / updateCount * 1000 / (time - oldTime)));
+
+			oldTime += 1.0;
+			updateCount = 0;
+		}
+
+		/* space toggle GUI and cursor */
+		int lock = Input::getKey(KEY_SPACE);
+		if (lock & !lockPrev) {
+			showCursor = !showCursor;
+			Input::showCursor(showCursor);
+		}
+		lockPrev = lock;
+
+		vec2 winSize = Window::getSize();
+		if (winSize.y > 0) {
+			cam.ratio = winSize.x / winSize.y;
+		}
+
+		/* updates camera rotation */
+		vec2 mousePos = Input::getMousePos();
+		float mouseSens = 1.f / 500;
+		vec2 mouseDelta = -(mousePos - oldMousePos) * mouseSens;
+		if (showCursor) mouseDelta = vec2(0, 0);
+		oldMousePos = mousePos;
+		cam.rotate(mouseDelta.x, mouseDelta.y);
+
+		/* udpates camera position */
+		vec3 move(0,0,0);
+		if (Input::getKey(KEY_W)) move.z -= 1;
+		if (Input::getKey(KEY_S)) move.z += 1;
+		if (Input::getKey(KEY_A)) move.x -= 1;
+		if (Input::getKey(KEY_D)) move.x += 1;
+		if (Input::getKey(KEY_Q)) move.y -= 1;
+		if (Input::getKey(KEY_E)) move.y += 1;
+
+		float moveSpeed = 0.5f;
+		move = move * moveSpeed * (float)timeDelta;
+		move = glm::rotateY(move, cam.hrot);
+
+		cam.move(move);
+		cam.update();
+
+		/* generate shadow map */
+		renderShadowMap(time);
+
+		/* voxelize the scene */
+		voxelize(time);
+
+		/* resets framebuffer to default */
+		Framebuffer::reset();
+		glViewport(0, 0, (int)winSize.x, (int)winSize.y);
+
+		/* enable face culling and depth testing */
+		glEnable(GL_CULL_FACE);
+		glCullFace(GL_BACK);
+		glEnable(GL_DEPTH_TEST);
+		glDepthFunc(GL_LEQUAL);
+
+		/* enables and clear all channels */
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+		if (!toggleVoxels) {
+			/* if enabled perform occlusion culling */
+			if (depthPrepass) {
+				occlusionCulling(time);
+			}
+			/* perform voxel cone tracing */
+			voxelCone(time);
+		} else {
+			/* debug show voxel storage */
+			showVoxels();
+		}
+
+		updateCount++;
+
+		/* show GUI */
+		if (showCursor) {
+			ImGui::Begin("Scene editor");
+
+			if (ImGui::CollapsingHeader("Objects")) {
+				for (u32 i = 0; i < scene.objects.size(); i++) {
+					auto &obj = scene.objects[i];
+					if (ImGui::TreeNode(obj.name.c_str())) {
+						ImGui::DragFloat3("Pos", &obj.pos.x, 0.05f);
+						ImGui::DragFloat3("Scale", &obj.scale.x, 0.05f);
+						ImGui::ColorEdit3("Diffuse", (float *)&obj.mat.diffuse);
+						ImGui::ColorEdit3("Emission", (float *)&obj.mat.emission);
+						ImGui::DragFloat("Emission Scale", &obj.mat.emissionScale, 0.1f);
+						ImGui::SliderFloat("Roughness", &obj.mat.rough, 0.f, 1.f);
+						ImGui::SliderFloat("Metalness", &obj.mat.metal, 0.f, 1.f);
+						ImGui::TreePop();
+					}
+				}
+			}
+
+			if (ImGui::CollapsingHeader("Particle Systems")) {
+
+				auto uiPropFloat = [](const string &name, Prop<float> &p) {
+					ImGui::Text("%s",name.c_str());
+					ImGui::DragFloat(("Min " + name).c_str(), &p.minVal);
+					ImGui::DragFloat(("Max" + name).c_str(), &p.maxVal);
+				};
+
+				auto uiPropVec3 = [](const string &name, Prop<vec3> &p) {
+					ImGui::Text("%s",name.c_str());
+					ImGui::DragFloat3(("Min " + name).c_str(), (float *)&p.minVal);
+					ImGui::DragFloat3(("Max" + name).c_str(), (float *)&p.maxVal);
+				};
+
+				auto uiPropColor = [](const string &name, Prop<vec3> &p) {
+					ImGui::Text("%s",name.c_str());
+					ImGui::ColorEdit3(("Min " + name).c_str(), (float *)&p.minVal);
+					ImGui::ColorEdit3(("Max" + name).c_str(), (float *)&p.maxVal);
+				};
+
+				auto uiAnimFloat = [&](const string &name, AnimProp<float> &p) {
+					ImGui::Text("%s",name.c_str());
+					ImGui::DragFloat(("Exp " + name).c_str(), &p.interpExp);
+					uiPropFloat("Start " + name, p.startVal);
+					uiPropFloat("End " + name, p.endVal);
+				};
+
+				auto uiAnimVec3 = [&](const string &name, AnimProp<vec3> &p) {
+					ImGui::Text("%s",name.c_str());
+					ImGui::DragFloat(("Exp " + name).c_str(), &p.interpExp);
+					uiPropVec3("Start " + name, p.startVal);
+					uiPropVec3("End " + name, p.endVal);
+				};
+
+				auto uiAnimColor = [&](const string &name, AnimProp<vec3> &p) {
+					ImGui::Text("%s",name.c_str());
+					ImGui::DragFloat(("Exp " + name).c_str(), &p.interpExp);
+					uiPropColor("Start " + name, p.startVal);
+					uiPropColor("End " + name, p.endVal);
+				};
+
+				for (u32 i = 0; i < scene.particles.size(); i++) {
+					auto &ps = scene.particles[i];
+					if (ImGui::TreeNode(std::to_string(i).c_str())) {
+						int count = ps.count;
+						ImGui::DragInt("Particle Count", &count);
+						ps.count = count > 0 ? count : 0;
+						ImGui::Separator();
+						uiPropFloat("Particle Life Time", ps.life);
+						ImGui::Separator();
+						uiPropVec3("Particle Position", ps.pos);
+						ImGui::Separator();
+						uiPropVec3("Particle Velocity", ps.vel);
+						ImGui::Separator();
+						uiPropVec3("Particle Acceleration", ps.acc);
+						ImGui::Separator();
+						uiAnimVec3("Particle Scale", ps.scale);
+						ImGui::Separator();
+						uiAnimVec3("Particle Rotation", ps.rot);
+						ImGui::Separator();
+						uiAnimColor("Particle Color", ps.color);
+						ImGui::Separator();
+						uiAnimFloat("Particle Opacity", ps.opacity);
+						ImGui::Separator();
+						uiPropFloat("Particle Fadein Time", ps.fadeIn);
+
+						ImGui::TreePop();
+					}
+				}
+			}
+
+			if (ImGui::CollapsingHeader("Light")) {
+				ImGui::DragFloat3("Pos", &scene.light.pos.x, 0.1f);
+				ImGui::DragFloat3("Dir", &scene.light.dir.x, 0.1f);
+				ImGui::DragFloat3("Color", &scene.light.color.x, 0.1f);
+				ImGui::SliderFloat("Angle", &scene.light.angle, 0.f, 180.f);
+				ImGui::SliderFloat("Smooth", &scene.light.smooth, 0.f, 180.f);
+				ImGui::SliderFloat("Bias", &shadowBias, -0.00001f, 0.001f, "%.5f", 1.0f);
+			}
+
+			ImGui::End();
+
+			ImGui::Begin("Renderer");
+			ImGui::Checkbox("lock FPS", &lockfps);
+			if (ImGui::Checkbox("vsync", &vsyncStatus)) {
+				Window::setVSyncStatus(vsyncStatus);
+			}
+
+			ImGui::SliderInt("FPS target", &targetfps, 1, 120);
+
+			int prevVoxelCount = voxelCount;
+			const char* voxelCounts[] = {"16", "32", "64", "128", "256", "512", "1024"};
+
+			int currVolumeItem = (int)round(log2(prevVoxelCount/16));
+
+			ImGui::Combo("Volume Size", &currVolumeItem, voxelCounts, 7);
+
+			voxelCount = (1 << currVolumeItem) * 16;
+
+			if (voxelCount != prevVoxelCount) {
+				LOG("changed voxel count");
+				disposeVoxels();
+				initVoxelize();
+			}
+
+			ImGui::Checkbox("Dynamic Voxelization", &dynamicVoxelize);
+			ImGui::Checkbox("Average Conflicting Values", &averageConflictingValues);
+			ImGui::Checkbox("Custom mipmap", &customMipmap);
+			if (ImGui::Checkbox("Anisotropic Voxels", &anisotropicVoxels)) {
+				disposeVoxels(true);
+				initVoxelize();
+				recompileShaders();
+			}
+			if (ImGui::Checkbox("HDR Voxels", &hdrVoxels)) {
+				disposeVoxels();
+				initVoxelize();
+			}
+			ImGui::Checkbox("Temporal Multibounce", &temporalMultibounce);
+			if (temporalMultibounce) {
+				ImGui::SliderFloat("Multibounce restitution", &multibounceRestitution, 0, 1, "%.3f");
+			}
+			ImGui::Checkbox("Show Voxels", &toggleVoxels);
+			if (toggleVoxels) {
+				ImGui::SliderFloat("Quality", &visualizeQuality, 1, 50);
+				ImGui::SliderFloat("LOD", &voxelLod, 0.f, log2f((float)voxelCount+1.f), "%.0f");
+				if (anisotropicVoxels) {
+					ImGui::SliderInt("Dir", &voxelIndex, 0, 5);
+				}
+			} else {
+				ImGui::Checkbox("Depth Prepass", &depthPrepass);
+				ImGui::Combo("Render Mode", &renderMode, renderModeText, 4);
+				ImGui::Checkbox("Add Diffuse Noise", &addDiffuseNoise);
+				ImGui::Checkbox("Enable Traced Shadows", &enableTracedShadows);
+				if (enableTracedShadows) {
+					ImGui::SliderFloat("Traced Shadow Aperture", &shadowAperture, 0.1f, 90.f, "%.01f");
+				}
+			}
+			ImGui::SliderFloat("Diffuse restitution", &restitution, 0, 1, "%.3f");
+			ImGui::End();	
+		}
+
+
+		Window::update();
+	}
+
+	System::exit(0);
+	return 0;
+}
+```
+
+### src/mesh.cpp
+```
+#include <glad/glad.h>
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
+#define FAST_OBJ_IMPLEMENTATION
+#include "fast_obj.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+#include <unordered_map>
+
+#include "assets.h"
+
+Mesh::Mesh(vector<Vertex> &vertices, vector<u32> &indices):
+vertices(std::move(vertices)),
+indices(std::move(indices)) {
+	setup();
+}
+
+Mesh::Mesh(Mesh &&other):
+vertices(std::move(other.vertices)),
+indices(std::move(other.indices)),
+vao(other.vao),
+vbo(other.vbo),
+ebo(other.ebo) {
+	other.vao = 0;
+}
+
+Mesh &Mesh::operator=(Mesh &&other) {
+	if (this != &other) {
+		dispose();
+		vertices = std::move(other.vertices);
+		indices = std::move(other.indices);
+		vao = other.vao;
+		vbo = other.vbo;
+		ebo = other.ebo;
+
+		other.vao = 0;
+	}
+
+	return *this;
+}
+
+
+Mesh::~Mesh() {
+	dispose();
+}
+
+/* loads mesh to GPU memory */
+void Mesh::setup() {
+	glGenVertexArrays(1, &vao);
+	glGenBuffers(1, &vbo);
+	glGenBuffers(1, &ebo);
+
+	glBindVertexArray(vao);
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+	glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);  
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(u32), &indices[0], GL_STATIC_DRAW);
+
+	/* position, uv, normal, tangent, bitangent */
+	glEnableVertexAttribArray(0);	
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, p));
+	glEnableVertexAttribArray(1);	
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, uv));
+	glEnableVertexAttribArray(2);	
+	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, n));
+	glEnableVertexAttribArray(3);	
+	glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, t));
+	glEnableVertexAttribArray(4);	
+	glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, b));
+
+	glBindVertexArray(0);
+
+	LOG("CREATED MESH WITH N VERTICES:", vertices.size());
+	LOG("CREATED MESH WITH N FACES:", indices.size() / 3);
+}
+
+void Mesh::bind() {
+	glBindVertexArray(vao);
+}
+
+void Mesh::reset() {
+	glBindVertexArray(0);
+}
+
+void Mesh::drawNoBind() {
+	glDrawElements(GL_TRIANGLES, (GLsizei)indices.size(), GL_UNSIGNED_INT, 0);
+}
+
+void Mesh::draw() {
+	Mesh::bind();
+	Mesh::drawNoBind();
+	Mesh::reset();
+}
+
+void Mesh::dispose() {
+	if (vao) {
+		glDeleteVertexArrays(1, &vao);
+		glDeleteBuffers(1, &vbo);
+		glDeleteBuffers(1, &ebo);
+	}
+}
+
+bool operator==(const fastObjIndex &a, const fastObjIndex &b) {
+	return a.p == b.p && a.t == b.t && a.n == b.n;
+}
+
+Mesh *loadMesh(void *_obj, int group_id) {
+	fastObjMesh *obj = (fastObjMesh *)_obj;
+
+	vector<Vertex> vertices;
+	vector<u32> indices;
+
+	auto fun = [](const fastObjIndex &val) {
+		return hash(&val, sizeof(val));
+	};
+
+	/* map to reuse duplicate vertices */
+	std::unordered_map<fastObjIndex, u32, decltype(fun)> found(10, fun);
+
+	auto &group = obj->groups[group_id];
+	u32 start = group.index_offset;
+	u32 end = start + group.face_count * 3;
+
+	// generate unique vertices and indices
+	for (u32 i = start; i < end; i++) {
+		auto &index = obj->indices[i];
+
+		if (found.count(index) == 0) {
+			Vertex v;
+			v.p = glm::make_vec3(obj->positions + index.p * 3);
+			v.uv = glm::make_vec2(obj->texcoords + index.t * 2);
+			v.n = glm::make_vec3(obj->normals + index.n * 3);
+			v.t = vec3(0);
+			v.b = vec3(0);
+
+			found[index] = (u32)vertices.size();
+			vertices.push_back(v);
+		}
+
+		indices.push_back(found[index]);
+	}
+
+	// generate tangent and bitangent vectors
+	for (u32 i = 0; i < indices.size(); i += 3) {
+		Vertex &v0 = vertices[indices[i]];
+		Vertex &v1 = vertices[indices[i+1]];
+		Vertex &v2 = vertices[indices[i+2]];
+
+		/* face edges in pos and uv coordinates */
+		vec3 dp1 = v1.p - v0.p;
+		vec3 dp2 = v2.p - v0.p;
+		vec2 dt1 = v1.uv - v0.uv;
+		vec2 dt2 = v2.uv - v0.uv;
+
+		vec3 tan, bit;
+		tan.x = dt2.y * dp1.x - dt1.y * dp2.x;
+		tan.y = dt2.y * dp1.y - dt1.y * dp2.y;
+		tan.z = dt2.y * dp1.z - dt1.y * dp2.z;
+		bit.x = dt2.x * dp1.x - dt1.x * dp2.x;
+		bit.y = dt2.x * dp1.y - dt1.x * dp2.y;
+		bit.z = dt2.x * dp1.z - dt1.x * dp2.z;
+		float f = 1.0f / (dt1.x * dt2.y - dt1.y * dt2.x);
+		tan = glm::normalize(f * tan);
+		bit = glm::normalize(f * bit);
+
+		v0.t += tan;
+		v0.b += bit;
+		v1.t += tan;
+		v1.b += bit;
+		v2.t += tan;
+		v2.b += bit;
+	}
+
+	// normalize tangent and bitangent
+	for (Vertex &v: vertices) {
+		v.t = glm::normalize(v.t);
+		v.b = glm::normalize(v.b);
+	}
+
+	return new Mesh(vertices, indices);
+}
+
+Mesh *loadMesh(const string &path) {
+	fastObjMesh *obj = fast_obj_read(path.c_str());
+
+	Mesh *mesh = loadMesh(obj, 0);
+
+	fast_obj_destroy(obj);
+
+	return mesh;
+}
+```
+
+### src/object.h
+```
+#pragma once
+
+#include "utils.h"
+#include "assets.h"
+/* Material class that handles PBR materials with or without textures */
+struct Material {
+	vec3 diffuse = vec3(1);
+	vec3 emission = vec3(1);
+	float metal = 1.0;
+	float rough = 1.0;
+
+	Texture *diffuseMap = nullptr;
+	Texture *bumpMap = nullptr;
+	Texture *specMap = nullptr;
+	Texture *emissionMap = nullptr;
+	float emissionScale = 1.0;
+
+	void bind(Shader *shader) {
+		shader->set("u_diffuse", diffuse);
+		shader->set("u_emission", emission);
+
+		shader->set("u_metal", metal);
+		shader->set("u_rough", rough);
+		shader->set("u_emissionScale", emissionScale);
+
+		shader->set("u_useMaps", diffuseMap != nullptr);
+
+		/* if it has textures, bind them */
+		if (diffuseMap) {
+			diffuseMap->bind(10);
+			bumpMap->bind(11);
+			specMap->bind(12);
+			emissionMap->bind(13);
+		}
+
+		shader->set("u_diffuseMap", 10);
+		shader->set("u_bumpMap", 11);
+		shader->set("u_specMap", 12);
+		shader->set("u_emissionMap", 13);
+	}
+
+	Material() { }
+
+	Material(vec3 diffuse, vec3 emission, float metal, float rough, float emissionScale = 1.0): 
+	diffuse(diffuse), 
+	emission(emission), 
+	metal(metal), 
+	rough(rough),
+	emissionScale(emissionScale)
+	{ }
+
+	Material(vec3 diffuse): 
+	Material(diffuse, vec3(0), 0.f, 1.f) 
+	{ }
+
+	Material(Texture *dMap, Texture *bMap, Texture *sMap, Texture *eMap, float emissionScale = 1.0): 
+	diffuseMap(dMap),
+	bumpMap(bMap),
+	specMap(sMap),
+	emissionMap(eMap),
+	emissionScale(emissionScale)
+	{ }
+};
+
+/* Object class, an object has a Transform, Mesh and Material */
+struct Object {
+	string name;
+	Mesh *mesh;
+	Material mat;
+
+	vec3 pos;
+	vec3 scale;
+	quat rot;
+
+	Object(string name, Mesh *mesh, Material mat, vec3 pos, vec3 scale, quat rot): 
+	name(name), mesh(mesh), mat(mat), pos(pos), scale(scale), rot(rot) {
+
+	}
+
+	/* Generates the matrix needed to transform local coordinates to world coordinates */
+	mat4 genMatrix() {
+		mat4 t = glm::identity<mat4>();
+		t = glm::translate(t, pos);
+		t = glm::scale(t, scale);
+		t = t * glm::toMat4(rot);
+		return t;
+	}
+
+	/*draws the object using the given Shader */
+	void draw(Shader *shader, bool useMaterial = true) {
+		mat4 transform = genMatrix();
+		shader->set("u_transform", transform);
+		if (useMaterial) mat.bind(shader);
+		mesh->draw();
+	}
+};
+```
+
+### src/particlesystem.h
+```
+#pragma once
+
+#include "utils.h"
+#include "assets.h"
+#include "random.h"
+
+#include <glad/glad.h>
+
+/* A Random value that goes from minVal to maxVal */
+template <typename T>
+struct Prop {
+	T minVal;
+	T maxVal;
+
+	Prop(const T &minVal, const T &maxVal): 
+		minVal(minVal), 
+		maxVal(maxVal) { }
+
+	Prop(const Prop &p):
+		Prop(p.minVal, p.maxVal) { }
+
+	Prop(const T &val): 
+		Prop(val, val) { }
+
+	/* generates a random value using the generator r */
+	T val(Random &r) {
+		return r.next(minVal, maxVal);
+	}
+};
+
+/* An animated value that starts at startVal and ends at endVal with an exponential interpolation
+ * with exponent interpExp */
+template <typename T>
+struct AnimProp {
+	Prop<T> startVal;
+	Prop<T> endVal;
+
+	float interpExp;
+
+	AnimProp(const Prop<T> &startVal, const Prop<T> &endVal, float exp = 1.f): 
+		startVal(startVal),
+		endVal(endVal),
+		interpExp(exp) { }
+
+	AnimProp(const AnimProp &p):
+		AnimProp(p.startVal, p.endVal, p.interpExp) { }
+
+	AnimProp(const Prop<T> &val, float exp = 1.f):
+		AnimProp(val, val, exp) { }
+
+	/* Generates a value interpolated between startVal and endVal using k */
+	T val(Random &r, float k) {
+		k = powf(k, interpExp); /* remaps k to exponential */
+		T start = startVal.val(r);
+		T end = endVal.val(r);
+		return (1.f - k) * start + k * end; /* lerp */
+	}
+
+};
+
+/* Dummy particle class */
+struct Particle {
+	vec3 pos;
+	vec3 scale;
+	vec3 rot;
+	vec3 color;
+	float opacity;
+
+	/* Draws the particle with the given shader and mesh */
+	void draw(Shader *shader, Mesh *mesh) {
+		mat4 t = glm::identity<mat4>();
+		t = glm::translate(t, pos);
+		t = glm::scale(t, scale);
+		t = t * glm::eulerAngleYXZ(rot.y, rot.x, rot.z);
+
+		shader->set("u_transform", t);
+		shader->set("u_emission", color); /* for now we assume all particles to be emissive */
+		shader->set("u_opacity", opacity);
+
+		mesh->drawNoBind(); /* do not rebing the same mesh for performance reasons */
+	}
+};
+
+/* the ParticleSystem class handles the lifespan of its particles, by using a
+ * random number generator, no particle is ever saved, everything gets recalculated every frame.
+ * Every particle keeps cycling the same animation */
+struct ParticleSystem {
+	/* All the particle properties are description of the possible range of values single particle can have */
+	Prop<float> life = Prop<float>(3.f); /* particle time duration */
+	Prop<vec3> pos = Prop<vec3>(vec3(0), vec3(1)); /* position */
+	Prop<vec3> vel = Prop<vec3>(vec3(1)); /*velocity */
+	Prop<vec3> acc = Prop<vec3>(vec3(0)); /*acceleration */
+	AnimProp<vec3> scale = AnimProp<vec3>(vec3(1.f));
+	AnimProp<vec3> rot = AnimProp<vec3>(vec3(0)); /*rotation */
+	AnimProp<vec3> color = AnimProp<vec3>(vec3(1));
+	AnimProp<float> opacity = AnimProp<float>(1.f, 0.f, 1.0f);
+	Prop<float> fadeIn = Prop<float>(.1f); /* duration of the fadeIn animation */
+
+	u32 count; /* number of particles */
+
+	Texture *texture;
+	Mesh *mesh;
+
+	/* generates a new particle at the given simulation time */
+	Particle simulate(Random &r, double time) {
+		float cycle = (life.val(r)); /* total life time of the current particle */
+		float t = (float)glm::mod(time, (double)cycle); /* current particle life time */
+		float k = t / cycle; /* normalized particle life time */
+		Particle p;
+		vec3 p0 = pos.val(r);
+		vec3 v0 = vel.val(r);
+		vec3 a = acc.val(r);
+		p.pos = p0 + t*(v0 + (.5f*t)*a); /*equation of the uniformly accelerated motion */
+		p.scale = scale.val(r, k);
+		p.rot = rot.val(r, k);
+		p.color = color.val(r, k);
+		p.opacity = opacity.val(r, k) * glm::min(t/fadeIn.val(r), 1.0f);
+
+		return p;
+	}
+
+	/* draws the particle system */
+	void draw(Shader *shader, double time, int seed = 0) {
+		Random r(seed);
+
+		glDepthMask(GL_FALSE); 
+		glDisable(GL_CULL_FACE);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+		mesh->bind();
+
+		texture->bind(15);
+		shader->set("u_emissionMap", 15);
+
+		/* simulates all particle and render them */
+		for (size_t i = 0; i < count; i++) {
+			Particle p = simulate(r, time);
+			p.draw(shader, mesh);
+		}
+
+		mesh->reset();
+
+		glDepthMask(GL_TRUE);
+		glDisable(GL_BLEND);
+		glEnable(GL_CULL_FACE);
+	}
+
+};
+```
+
+### src/random.h
+```
+#pragma once
+
+#include "utils.h"
+
+/* Random utility class for generating values starting from a given seed */
+struct Random {
+	u32 state[2];
+
+	static u32 murmur3(u32 h) {
+		h ^= h >> 16;
+		h *= 0x85ebca6b;
+		h ^= h >> 13;
+		h *= 0xc2b2ae35;
+		h ^= h >> 16;
+		return h;
+	}
+
+	Random(u32 seed) {
+		u32 v = murmur3((seed << 1U) | 1U);
+		state[0] = v;
+		state[1] = v ^ 0x49616e42U;
+	}
+
+	u32 nextInt() {
+	    state[0] = (state[0] << 16) + (state[0] >> 16);
+	    state[0] += state[1];
+	    state[1] += state[0];
+	    return state[0];	
+	}
+
+	template <typename T>
+	T next();
+
+	template <typename T>
+	T next(const T &max) {
+		return next<T>() * max;
+	}
+
+	template <typename T>
+	T next(const T &min, const T &max) {
+		return next(max - min) + min;
+	}
+
+};
+
+template<>
+inline float Random::next() {
+	auto x = nextInt();
+	return (float)x / (float)(1ULL<<32ULL);
+}
+
+template <>
+inline vec3 Random::next() {
+	return vec3(next<float>(), next<float>(), next<float>());
+}
+```
+
+### src/scene.cpp
+```
+#include "scene.h"
+
+#include "utils.h"
+#include "object.h"
+#include "assets.h"
+
+
+#include <unordered_map>
+#include "fast_obj.h"
+
+/* loads all meshes and texture from an OBJ file */
+void loadScene(Scene &scene, const char *path) {
+	LOG("loading scene:", path);
+
+	fastObjMesh *obj = fast_obj_read(path);	
+
+	LOG(obj->position_count, obj->texcoord_count, obj->normal_count);
+
+	LOG(obj->group_count);
+
+	LOG("loading materials");
+	vector<Material> materials;
+
+	/* load every material */
+	for (size_t i = 0; i < obj->material_count; i++) {
+		fastObjMaterial &mat = obj->materials[i];
+		LOG("material:", mat.name);
+
+		Texture *dMap = loadTexture(mat.map_Kd.path);
+		Texture *bMap = loadTexture(mat.map_bump.path);
+		Texture *sMap = loadTexture(mat.map_Ks.path);
+		Texture *eMap = loadTexture(mat.map_Ke.path);
+		if (dMap == nullptr) dMap = whiteTexture();
+		if (bMap == nullptr) bMap = normalTexture();
+		if (sMap == nullptr) sMap = whiteTexture();
+		if (eMap == nullptr) eMap = blackTexture();
+
+		Material m(dMap, bMap, sMap, eMap);
+		materials.push_back(m);
+	}
+
+	/* assume that a group uses only one material */
+	for (size_t i = 0; i < obj->group_count; i++) {
+		fastObjGroup &group = obj->groups[i];
+
+		string name = group.name;
+		Mesh *mesh = loadMesh(obj, (int)i);
+		Material mat = materials[obj->face_materials[group.face_offset]];
+
+		scene.add(Object(
+			name,
+			mesh,
+			mat,
+			vec3(0),
+			vec3(1),
+			quat(vec3(0))
+			));
+
+	}
+
+	fast_obj_destroy(obj);
+}
+```
+
+### src/scene.h
+```
+#pragma once
+
+#include "light.h"
+#include "object.h"
+#include "particlesystem.h"
+
+/* Scene class, stores all objects, particle systems and lights */
+struct Scene {
+	vector<Object> objects;
+	vector<ParticleSystem> particles;
+
+	SpotLight light;
+
+	/* add a particle system to the scene */
+	void add(ParticleSystem p) {
+		particles.push_back(p);
+	}
+
+	/* add a object to the scene */
+	void add(Object obj) {
+		objects.push_back(obj);
+	}
+
+	/* draw all objects using the given shader */
+	void drawObjects(double time, Shader *shader, bool useMaterials = true) {
+		UNUSED(time);
+		light.upload(shader);
+
+		for (auto &obj: objects) {
+			obj.draw(shader, useMaterials);
+		}
+	}
+
+	/* draw all particle systems */
+	void drawParticles(double time, Shader *shader) {
+		for (auto &p: particles) {
+			/* use the particle system address as seed for random values */
+			p.draw(shader, time, (int)reinterpret_cast<unsigned long long>(&p));
+		}
+	}
+
+	/* returns an object matching the given name */
+	Object *get(const string &name) {
+		for (Object &o: objects) {
+			if (o.name == name) {
+				return &o;
+			}
+		}
+		LOG("OBJECT NOT FOUND:", name);
+		return nullptr;
+	}
+};
+
+/* loads all meshes and texture from an OBJ file */
+void loadScene(Scene &scene, const char *path);
+```
+
+### src/shader.cpp
+```
+#include <glad/glad.h>
+
+#include "assets.h"
+
+/* check if there is any compilation error and logs it to console */
+bool checkAndLogShaderError(u32 id) {
+	GLint status, logSize;
+	glGetShaderiv(id, GL_COMPILE_STATUS, &status);
+	if (status == GL_FALSE) {
+		glGetShaderiv(id, GL_INFO_LOG_LENGTH, &logSize);
+		auto errorLog = new char[logSize];
+		glGetShaderInfoLog(id, logSize, &logSize, errorLog);
+		LOG(errorLog);
+		delete[] errorLog;
+		return false;
+	} else return true;
+}
+
+/* check if there is any linking error and logs it to console */
+bool checkAndLogProgramError(u32 id) {
+	GLint status, logSize;
+	glGetProgramiv(id, GL_LINK_STATUS, &status);
+	if (status == GL_FALSE) {
+		glGetProgramiv(id, GL_INFO_LOG_LENGTH, &logSize);
+		auto errorLog = new char[logSize];
+		glGetProgramInfoLog(id, logSize, &logSize, errorLog);
+		LOG(errorLog);
+		delete[] errorLog;
+		return false;
+	} else return true;
+}
+
+/* load a shader from a file to GPU memory, then compiles */
+u32 loadShader(const string &path, GLenum type, const string &header) {
+	if (path.size() == 0) return 0;
+
+	string source = "#version 460 core\n" + header;
+	LOG("LOAD: ", path);
+	if (!readFile("../assets/shaders/" + path, source)) {
+		LOG("Cannot find shader source file:", path);
+		return 0;
+	}
+
+	u32 shader = glCreateShader(type);
+	if (!shader) {
+		LOG("Cannot create shader for:", path);
+		return 0;
+	}
+
+	auto cstr = source.c_str();
+	glShaderSource(shader, 1, &cstr, 0);
+	glCompileShader(shader);
+
+	if (!checkAndLogShaderError(shader)) {
+		glDeleteShader(shader);
+		return 0;
+	}
+
+	return shader;
+}
+
+/*load a compute shader from a file then compiles */
+u32 loadComputeShader(const string &cpath, const string &header) {
+	LOG("load compute shader:", cpath);
+
+	u32 comp = loadShader(cpath, GL_COMPUTE_SHADER, header);
+	if (comp == 0) return 0;
+
+	u32 id = glCreateProgram();
+
+	glAttachShader(id, comp);
+	glLinkProgram(id);
+
+	if (!checkAndLogProgramError(id)) {
+		LOG("ERROR COMPUTE LINK");
+		glUseProgram(0);
+		glDeleteProgram(id);
+		id = 0;
+	}
+
+	glDetachShader(id, comp);
+	glDeleteShader(comp);
+	glUseProgram(0);
+	return id;
+}
+
+
+/* load a shader program, that might or might not cotain a geometry shader */
+/* in the case where only vpath is not empty, it is assumed to be a compute shader */
+u32 loadProgram(const string &vpath, const string &gpath, const string &fpath, const string &header) {
+	LOG("load shader:", vpath, fpath);
+	if (fpath=="") return loadComputeShader(vpath, header);
+
+	u32 vert = loadShader(vpath, GL_VERTEX_SHADER, header);
+	u32 geom = loadShader(gpath, GL_GEOMETRY_SHADER, header);
+	u32 frag = loadShader(fpath, GL_FRAGMENT_SHADER, header);
+
+	u32 id = 0;
+
+	if (vert && frag) {
+		LOG("compiled.");
+
+		id = glCreateProgram();
+
+		if (!id) {
+			LOG("Cannot create shader program for:", vpath, fpath);
+		}
+
+		glAttachShader(id, vert);
+		if (geom) glAttachShader(id, geom);
+		glAttachShader(id, frag);
+		glLinkProgram(id);
+
+		if (!checkAndLogProgramError(id)) {
+			LOG("ERROR");
+			glUseProgram(0);
+			glDeleteProgram(id);
+			id = 0;
+		} else {
+			LOG("linked.");
+			glDetachShader(id, vert);
+			if (geom) glDetachShader(id, geom);
+			glDetachShader(id, frag);
+		}
+
+	} else {
+		return id;
+	}
+
+	glDeleteShader(vert);
+	if (geom) glDeleteShader(geom);
+	glDeleteShader(frag);
+
+	glUseProgram(0);
+	return id;
+}
+
+char buffer[64];
+const char *Shader::getUniformName(const char *name, int index) {
+	snprintf(buffer, sizeof(buffer), "%s[%d]", name, index);
+	return buffer;
+}
+
+
+Shader::Shader(const string &vpath, const string &fpath, const string &header): 
+Shader(vpath, "", fpath, header) {
+
+}
+
+Shader::Shader(const string &cpath, const string &header):
+Shader(cpath, "", "", header) {
+
+}
+
+Shader::Shader(const string &vpath, const string &gpath, const string &fpath, const string &header): 
+id(0), vpath(vpath), gpath(gpath), fpath(fpath), header(header) {
+	files.push_back(vpath);
+	files.push_back(gpath);
+	files.push_back(fpath);
+	load();
+	if (id == 0) {
+		exit(-1);
+	}
+}
+
+void Shader::loadImpl() {
+	u32 newId = loadProgram(vpath, gpath, fpath, header);
+	if (newId) {
+		dispose();
+		id = newId;
+	}
+}
+
+void Shader::bind() {
+	glUseProgram(id);
+}
+
+void Shader::dispatch(u32 sx, u32 sy, u32 sz) {
+	glDispatchCompute(sx, sy, sz);
+}
+
+void Shader::dispose() {
+	glUseProgram(0);
+	if (id) glDeleteProgram(id);
+}
+```
+
+### src/texture.cpp
+```
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
+#include "assets.h"
+#include "window.h"
+
+/* creates a texture from memory */
+Texture *createTexture(u8 *data, int width, int height, bool mipmap, bool aniso) {
+	u32 id;
+	glActiveTexture(GL_TEXTURE0);
+	glGenTextures(1, &id);
+	glBindTexture(GL_TEXTURE_2D, id);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+
+	if (mipmap) {
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); 
+	} else {
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	}
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); 
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); 
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT); 
+
+	if (aniso) {
+		float an;
+		glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &an);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, (int)an); 
+	}
+
+	Texture *t = new Texture();
+	t->id = id;
+	t->type = GL_TEXTURE_2D;
+	return t;
+}
+
+/* load a texture from a file */
+Texture *loadTexture(const char *path) {
+	if (path == nullptr) return nullptr;
+
+	auto startTime = System::time();
+
+	i32 width, height, cpp;
+
+	/* load from file */
+	stbi_set_flip_vertically_on_load(true);
+	u8 *data = stbi_load(path, &width, &height, &cpp, 3);
+	if (data == nullptr) {
+		LOG("cannot open texture:", path);
+		return nullptr;
+	}
+
+	/* upload to GPU */
+	Texture *t = createTexture(data, width, height);
+
+	stbi_image_free(data);
+
+	auto endTime = System::time();
+	LOG(endTime - startTime, "loaded texture:", path);
+	return t;
+}
+
+Texture *white = nullptr;
+Texture *black = nullptr;
+Texture *normal = nullptr;
+
+/* generates a 1x1 pixel texture of the given color */
+Texture *colorTexture(float r, float g, float b) {
+	r = glm::clamp(r*256.f, 0.f, 255.f);
+	g = glm::clamp(g*256.f, 0.f, 255.f);
+	b = glm::clamp(b*256.f, 0.f, 255.f);
+	u8 color[] = {(u8)r, (u8)g, (u8)b};
+	return createTexture(color, 1, 1, false, false);
+}
+
+Texture *whiteTexture() {
+	if (!white) white = colorTexture(1.f, 1.f, 1.f);
+	return white;
+}
+
+Texture *blackTexture() {
+	if (!black) black = colorTexture(0.f, 0.f, 0.f);
+	return black;
+}
+
+Texture *normalTexture() {
+	if (!normal) normal = colorTexture(.5f, .5f, 1.f);
+	return normal;
+}
+
+void genMipmapLevel(Shader *program, Texture *src, Texture *dest, int level, int size, bool aniso, int dir) {
+	program->bind();
+	program->set("u_level", std::max(0.0f, (float)(level-1)));
+	program->set("u_src", 0);
+	src->bind(0);
+	program->set("u_dest", 1);
+	program->set("u_aniso", aniso);
+	program->set("u_dir", dir);
+	glBindImageTexture(1, dest->id, level, GL_TRUE, 0, GL_WRITE_ONLY, dest->storageType);
+
+	program->dispatch(size, size, size);
+}
+
+void genMipmap(Shader *program, Texture *texture, int size, bool aniso, int dir) {
+	int level = 1;
+	while (size > 0) {
+		genMipmapLevel(program, texture, texture, level, size, aniso, dir);
+		size /= 2;
+		level++;
+	}
+}
+
+void genMipmap(Shader *program, Texture *texture, int size) {
+	genMipmap(program, texture, size, false, 0);
+}
+```
+
+### src/utils.cpp
+```
+#include <stdio.h>
+#include <locale>
+#include <codecvt>
+#include <random>
+
+#include "utils.h"
+
+bool readFile(const std::string &path, std::string &s) {
+	std::FILE* f;
+#ifdef _WIN32
+	fopen_s(&f, path.c_str(), "rb");
+#else
+	f = fopen(path.c_str(), "rb");
+#endif
+	if (!f) return false;
+
+	size_t startSize = s.size();
+
+	fseek(f, 0, SEEK_END);
+	s.resize(ftell(f) + startSize);
+	rewind(f);
+	fread(&s[startSize], 1, s.size(), f);
+	if (ferror(f)) return false;
+	fclose(f);
+
+	return true;
+}
+
+#ifdef __GNUC__
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#endif
+
+/* good hash function */
+u32 MurmurHash2 ( const void * key, int len, u32 seed ) {
+	const u32 m = 0x5bd1e995;
+	const i32 r = 24;
+	u32 h = seed ^ len;
+	const u8 *data = (const u8 *)key;
+
+	while(len >= 4) {
+		u32 k = *(u32 *)data;
+		k *= m; 
+		k ^= k >> r; 
+		k *= m; 
+		h *= m; 
+		h ^= k;
+		data += 4;
+		len -= 4;
+	}
+	
+	switch(len) {
+		case 3: h ^= data[2] << 16;
+		case 2: h ^= data[1] << 8;
+		case 1: h ^= data[0]; 
+		h *= m;
+	};
+
+	h ^= h >> 13;
+	h *= m;
+	h ^= h >> 15;
+
+	return h;
+} 
+
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+
+u32 hash(const void *buffer, int size) {
+	return MurmurHash2(buffer, size, 0xa5a8ae1e);
+}
+
+std::wstring s2ws(const std::string& str) {
+    using convert_typeX = std::codecvt_utf8<wchar_t>;
+    std::wstring_convert<convert_typeX, wchar_t> converterX;
+    return converterX.from_bytes(str);
+}
+
+std::string ws2s(const std::wstring& wstr) {
+    using convert_typeX = std::codecvt_utf8<wchar_t>;
+    std::wstring_convert<convert_typeX, wchar_t> converterX;
+    return converterX.to_bytes(wstr);
+}
+
+float randomf() {
+	static std::default_random_engine e;
+    static std::uniform_real_distribution<float> dis(0, 1);
+    return dis(e);
+}
+```
+
+### src/utils.h
+```
+#pragma once
+
+#include <cinttypes>
+#include <string>
+#include <vector>
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4201)
+#pragma warning(disable: 4127)
+#endif
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/rotate_vector.hpp>
+#include <glm/gtx/euler_angles.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+using glm::vec2;
+using glm::vec3;
+using glm::vec4;
+using glm::mat2;
+using glm::mat3;
+using glm::mat4;
+using glm::quat;
+
+const float pi = 3.14159265358979323846f;
+
+#include "log.h"
+
+typedef std::int8_t i8;
+typedef std::uint8_t u8;
+typedef std::int16_t i16;
+typedef std::uint16_t u16;
+typedef std::int32_t i32;
+typedef std::uint32_t u32;
+typedef std::int64_t i64;
+typedef std::uint64_t u64;
+
+using std::vector;
+using std::string;
+
+#define UNUSED(x) (void)(x)
+
+/* read an entire file into a string */
+bool readFile(const string &path, string &out);
+
+/* generate a 32 bit hash from a variable length buffer */
+u32 hash(const void *buffer, int size);
+
+/* string wstring conversion */
+std::wstring s2ws(const std::string &str);
+std::string ws2s(const std::wstring& wstr);
+
+/* random float between 0 and 1 */
+float randomf();
+```
+
+### src/window.cpp
+```
+#include "window.h"
+#include "utils.h"
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <iostream>
+
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw.h"
+#include "imgui/imgui_impl_opengl3.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+namespace Window {
+
+	GLFWwindow *window = NULL;
+	std::string title;
+	int w, h;
+	int type;
+	bool vsync;
+
+	void *getNativeWindow() {
+		return window;
+	}
+
+	/* called whenever the window changes size */
+	void callbackResize(GLFWwindow *_window, int width, int height) {
+		UNUSED(_window);
+		w = width;
+		h = height;
+		glViewport(0, 0, width, height);
+		glScissor(0, 0, width, height);
+	}
+
+	void create(int width, int height, std::string _title, int _type, bool _vsync) {
+		w = width;
+		h = height;
+		Window::title = _title;
+		Window::vsync = _vsync;
+		Window::type = _type;
+
+		GLFWmonitor *monitor = NULL;
+
+		if (type == WINDOWED) {
+		// nothing to do
+		} else if (type == BORDERLESS) {
+			/* set the window properties to the currently active monitor ones */
+			monitor = glfwGetPrimaryMonitor();
+			auto mode = glfwGetVideoMode(monitor);
+			glfwWindowHint(GLFW_RED_BITS, mode->redBits);
+			glfwWindowHint(GLFW_GREEN_BITS, mode->greenBits);
+			glfwWindowHint(GLFW_BLUE_BITS, mode->blueBits);
+			glfwWindowHint(GLFW_REFRESH_RATE, mode->refreshRate);
+			w = mode->width;
+			h = mode->height;
+		} else if (type == FULLSCREEN) {
+			monitor = glfwGetPrimaryMonitor();
+		} else {
+			// TODO: unknown type
+		}
+
+		window = glfwCreateWindow(w, h, title.c_str(), monitor, NULL);
+
+		if (window == NULL) {
+			std::cout << "Failed to create window" << std::endl;
+		}
+		glfwMakeContextCurrent(window);
+		glfwSetFramebufferSizeCallback(window, callbackResize);
+
+		/* enable or disable vsync */
+		glfwSwapInterval(vsync);
+
+		/* initialize opengl */
+		if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+			std::cout << "Failed to initialize GLAD" << std::endl;
+		}
+
+		const u8 *v = glGetString(GL_SHADING_LANGUAGE_VERSION);
+
+		std::string glslVersion = "#version ";
+		glslVersion.push_back(v[0]);
+		glslVersion.push_back(v[2]);
+		glslVersion.push_back(v[3]);
+
+		LOG(glslVersion);
+
+		/* inititalize gui */
+		IMGUI_CHECKVERSION();
+		ImGui::CreateContext();
+		ImGuiIO& io = ImGui::GetIO(); (void)io;
+
+		ImGui::StyleColorsDark();
+		ImGui_ImplGlfw_InitForOpenGL(window, true);
+		ImGui_ImplOpenGL3_Init(glslVersion.c_str());
+	}
+
+	void destroy() {
+		glfwDestroyWindow(window);
+	}
+
+
+	bool first_run = true;
+	void update() {
+
+		if (!first_run) {
+			/* draw GUI */
+			ImGui::Render();
+			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+			/* swap render buffers */
+			glfwSwapBuffers(window);
+		} else {
+			first_run = false;
+		}
+
+		/* update input events */
+		glfwPollEvents();
+
+		ImGui_ImplOpenGL3_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();	
+	}
+
+	bool shouldClose() {
+		return glfwWindowShouldClose(window);
+	}
+
+	void setShouldClose(bool value) {
+		glfwSetWindowShouldClose(window, value);
+	}
+
+	int getWidth() {
+		return w;
+	}
+
+	int getHeight() {
+		return h;
+	}
+
+	vec2 getSize() {
+		int ww, hh;
+		glfwGetFramebufferSize(window, &ww, &hh);
+		return vec2((float)ww, (float)hh);
+	}
+
+	int getType() {
+		return type;
+	}
+
+	bool getVSyncStatus() {
+		return vsync;
+	}
+
+	void setVSyncStatus(bool value) {
+		vsync = value;
+		glfwSwapInterval(value);
+	}
+}
+
+namespace Input {
+	int getKey(int id) {
+		return glfwGetKey(Window::window, id) == GLFW_PRESS;
+	}
+
+	int getMouseButton(int id) {
+		return glfwGetMouseButton(Window::window, id) == GLFW_PRESS;
+	}
+
+	vec2 getMousePos() {
+		double x, y;
+		glfwGetCursorPos(Window::window, &x, &y);
+		return vec2((float)x, (float)y);
+	}
+
+	void setMousePos(const vec2& pos) {
+		glfwSetCursorPos(Window::window, pos.x, pos.y);
+	}
+
+	void showCursor(bool state) {
+		u32 val = state ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED;
+		glfwSetInputMode(Window::window, GLFW_CURSOR, val);
+		ImGui_setIgnoreInput(!state);
+	}
+}
+
+namespace System {
+	void init(int gl_major, int gl_minor) {
+		glfwInit();
+
+		glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, gl_major);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, gl_minor);
+		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);	
+		glfwWindowHint(GLFW_SAMPLES, 4); /* number of MSAA samples */
+		glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, true);  
+	#ifdef __APPLE__
+		glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+	#endif
+	}
+
+	void exit(int code) {
+		glfwTerminate();
+		std::exit(code);
+	}
+
+	double time() {
+		return glfwGetTime();
+	}
+
+#ifdef _WIN32
+  void sleep(double t) {
+    Sleep((DWORD)(t * 1000));
+  }
+#else
+#include <unistd.h>
+  void sleep(double t) {
+    usleep(t * 1000000);
+  }
+#endif
+
+}
+```
+
+### src/window.h
+```
+#pragma once
+
+#include <string>
+
+#include "utils.h"
+#include "keys.h"
+
+/* namespace with utilities from handling the application window */
+namespace Window {
+	const int WINDOWED = 1;
+	const int BORDERLESS = 2;
+	const int FULLSCREEN = 3;
+
+	/* create a new window with the given parameters */
+	/* type can be WINDOWED, BORDERLESS, FULLSCREEN */
+	void create(int width, int height, std::string title, int type, bool vsync);
+
+	/* destroy a previously created window */
+	void destroy();
+
+	/* updates the window screen and input */
+	void update();
+
+	/* check if the x button has been pressed */
+	bool shouldClose();
+	/* override the close check */
+	void setShouldClose(bool value);
+
+	/* get window sizes */
+	int getWidth();
+	int getHeight();
+	vec2 getSize();
+
+	int getType();
+	/* get vertical sync status */
+	bool getVSyncStatus();
+	/* set vertical sync status */
+	void setVSyncStatus(bool value);
+
+}
+
+namespace Input {
+	/* get a keyboard key status, 1 = pressed, 0 = not pressed */
+	int getKey(int id);
+	/* get the mouse button status */
+	int getMouseButton(int id);
+	/* get the mouse position */
+	vec2 getMousePos();
+	/* set the mouse position */
+	void setMousePos(const vec2 &pos);
+	/* true to show mouse cursor, false to hide */
+	void showCursor(bool state);
+}
+
+namespace System {
+	/* initialize glfw */
+	void init(int gl_major, int gl_minor);
+	/* exit application */
+	void exit(int code);
+	/* get current time in seconds */
+	double time();
+	/* sleep for the given number of seconds */
+  void sleep(double t);
+}
+```
+
+### assets/shaders/basic.frag
+```
+in vec3 a_pos;
+in vec2 a_uv;
+in vec3 a_normal;
+in vec4 a_posls;
+
+uniform vec3 u_diffuse;
+uniform float u_metal;
+uniform float u_rough;
+uniform float u_opacity;
+uniform vec3 u_emission;
+
+uniform vec3 u_lightPos;
+uniform vec3 u_lightDir;
+uniform vec3 u_lightColor;
+uniform float u_lightInnerCos;
+uniform float u_lightOuterCos;
+
+uniform float u_shadowBias;
+
+uniform sampler2D u_shadowMap;
+
+layout(location = 0) out vec3 o_albedo;
+
+float shadow() {
+	float bias = u_shadowBias;
+	vec3 coords = a_posls.xyz / a_posls.w;
+	coords = coords*0.5 + 0.5;
+	float shadowDepth = texture(u_shadowMap, coords.xy).r;
+	float pointDepth = coords.z;
+	float shadowVal = pointDepth >= shadowDepth + bias ? 1.0 : 0.0;
+	return shadowVal;
+}
+
+vec3 spotlight() {
+	vec3 spotDir = u_lightDir;
+	vec3 lightDir = normalize(u_lightPos - a_pos);
+	float dist = abs(length(a_pos - u_lightPos));
+	float angle = dot(spotDir, -lightDir);
+	float intensity = smoothstep(u_lightOuterCos, u_lightInnerCos, angle);
+	float attenuation = 1.0 / (1.0 + dist);	
+	intensity *= attenuation;
+	intensity *= max(0, dot(a_normal, lightDir));
+	intensity *= 1.0 - shadow();
+	return u_lightColor * intensity;
+}
+
+void main() {
+
+  vec3 lightColor = spotlight();
+
+  vec3 color = lightColor * u_diffuse;
+  o_albedo = pow(color, vec3(1.0/2.2));
+}
+```
+
+### assets/shaders/basic.vert
+```
+layout (location = 0) in vec3 i_position;
+layout (location = 1) in vec2 i_uv;
+layout (location = 2) in vec3 i_normal;
+
+out vec3 a_pos;
+out vec3 a_normal;
+out vec4 a_posls;
+out vec2 a_uv;
+
+uniform mat4 u_project;
+uniform mat4 u_transform;
+uniform mat4 u_rotate;
+uniform mat4 u_lightProj;
+
+void main() {
+	vec4 pos = u_transform * vec4(i_position, 1.0f);
+	a_pos = pos.xyz;
+	gl_Position = u_project * pos;
+	a_posls = u_lightProj * pos;
+
+	mat3 rotate = mat3(transpose(inverse(u_transform)));
+
+	a_normal = normalize(rotate * i_normal);
+}
+```
+
+### assets/shaders/fixopacity.comp
+```
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(RGBA8) uniform image3D u_voxel;
+
+/* this shader sets the opacity to 1.0 for all voxels that have been written to
+ * during the voxelization stage */
+void main() {
+	ivec3 coords = ivec3(gl_GlobalInvocationID);
+
+	vec4 color = imageLoad(u_voxel, ivec3(coords));
+	color.a = (color.a == 0.0) ? 0.0 : 1.0;
+	imageStore(u_voxel, ivec3(coords), color);
+}
+```
+
+### assets/shaders/flat.frag
+```
+in vec3 a_pos;
+in vec2 a_uv;
+in vec3 a_normal;
+
+uniform vec3 u_diffuse;
+
+layout(location = 0) out vec3 o_albedo;
+
+void main() {
+	o_albedo = u_diffuse;
+}
+```
+
+### assets/shaders/flat.vert
+```
+layout (location = 0) in vec3 i_position;
+layout (location = 1) in vec2 i_uv;
+layout (location = 2) in vec3 i_normal;
+
+out vec3 a_pos;
+out vec3 a_normal;
+out vec2 a_uv;
+
+uniform mat4 u_project;
+uniform mat4 u_transform;
+uniform mat4 u_rotate;
+
+void main() {
+	vec4 pos = u_transform * vec4(i_position, 1.0f);
+	a_pos = pos.xyz;
+	gl_Position = u_project * pos;
+
+	mat3 rotate = mat3(transpose(inverse(u_transform)));
+
+	a_normal = rotate * i_normal;
+}
+```
+
+### assets/shaders/mipmap.comp
+```
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+uniform int u_dir;
+uniform float u_level;
+
+uniform sampler3D u_src;
+layout(RGBA8) uniform image3D u_dest;
+
+/* offsets of all the voxels to interpolate from */
+const ivec3 off[8] = {
+	ivec3(0,0,0),
+	ivec3(1,0,0),
+	ivec3(0,1,0),
+	ivec3(1,1,0),
+	ivec3(0,0,1),
+	ivec3(1,0,1),
+	ivec3(0,1,1),
+	ivec3(1,1,1)
+};
+
+/* this shader performs the lighting integration both for anisotropic and
+ * isotropic voxels */
+void main() {
+	ivec3 coords = ivec3(gl_WorkGroupID);
+
+#ifdef ANISO
+	ivec3 pos = coords*2;
+
+	vec4 vals[8];
+
+	for (int i = 0; i < 8; i++) {
+		vals[i] = texelFetch(u_src, pos+off[i], int(u_level));
+	};
+
+  /* in the case of anisotropic voxels we want to sum the light contribution
+   * along the viewing direction, taking into account occlusion and average
+   * along the other two orthogonal axes */
+	vec4 color = vec4(0);
+	if (u_dir == 0) {
+		color = 
+			vals[1] + vals[0] * (1. - vals[1].w) + 
+			vals[3] + vals[2] * (1. - vals[3].w) + 
+			vals[5] + vals[4] * (1. - vals[5].w) + 
+			vals[7] + vals[6] * (1. - vals[7].w);
+	} else if (u_dir == 1) {
+		color = 
+			vals[0] + vals[1] * (1. - vals[0].w) + 
+			vals[2] + vals[3] * (1. - vals[2].w) + 
+			vals[4] + vals[5] * (1. - vals[4].w) + 
+			vals[6] + vals[7] * (1. - vals[6].w);
+	} else if (u_dir == 2) {
+		color = 
+			vals[2] + vals[0] * (1. - vals[2].w) + 
+			vals[3] + vals[1] * (1. - vals[3].w) + 
+			vals[6] + vals[4] * (1. - vals[6].w) + 
+			vals[7] + vals[5] * (1. - vals[7].w);
+	} else if (u_dir == 3) {
+		color = 
+			vals[0] + vals[2] * (1. - vals[0].w) + 
+			vals[1] + vals[3] * (1. - vals[1].w) + 
+			vals[4] + vals[6] * (1. - vals[4].w) + 
+			vals[5] + vals[7] * (1. - vals[5].w);
+	} else if (u_dir == 4) {
+		color = 
+			vals[4] + vals[0] * (1. - vals[4].w) + 
+			vals[5] + vals[1] * (1. - vals[5].w) + 
+			vals[6] + vals[2] * (1. - vals[6].w) + 
+			vals[7] + vals[3] * (1. - vals[7].w);
+	} else if (u_dir == 5) {
+		color = 
+			vals[0] + vals[4] * (1. - vals[0].w) + 
+			vals[1] + vals[5] * (1. - vals[1].w) + 
+			vals[2] + vals[6] * (1. - vals[2].w) + 
+			vals[3] + vals[7] * (1. - vals[3].w);
+	}
+	color *= .25f; /* average value along orthogonal directions */
+	color.w = min(1.0f, color.w); /*opacity cannot ecceed 1.0 */
+
+	imageStore(u_dest, coords, color);
+#else
+	vec3 size = vec3(gl_NumWorkGroups);
+  /* we sample in between voxels to use hardware linear interpolation */
+	vec3 pos = vec3(coords) / size + vec3(0.5 / size);
+
+  /* multiply roughly by 2 to preserve opacity and color on higher mip levels */
+	vec4 color = textureLod(u_src, pos, u_level) * 1.9;
+	imageStore(u_dest, coords, color);
+#endif
+}
+```
+
+### assets/shaders/particle.frag
+```
+in vec3 a_pos;
+in vec2 a_uv;
+
+uniform vec3 u_emission;
+uniform float u_opacity;
+
+uniform sampler2D u_emissionMap;
+
+layout(location = 0) out vec3 o_color;
+
+void main() {
+	float opacity = texture(u_emissionMap, a_uv).r * u_opacity;
+	vec3 color = u_emission * opacity;
+  	o_color = color;
+}
+```
+
+### assets/shaders/particle.vert
+```
+layout (location = 0) in vec3 i_position;
+layout (location = 1) in vec2 i_uv;
+
+uniform mat4 u_project;
+uniform mat4 u_transform;
+
+out vec3 a_pos;
+out vec2 a_uv;
+
+void main() {
+	vec4 pos = u_transform * vec4(i_position, 1.0f);
+	gl_Position = u_project * pos;
+	a_pos = pos.xyz;
+	a_uv = i_uv;
+}
+```
+
+### assets/shaders/shadow.frag
+```
+void main() {
+
+}
+```
+
+### assets/shaders/shadow.vert
+```
+layout (location = 0) in vec3 i_position;
+
+uniform mat4 u_project;
+uniform mat4 u_transform;
+
+void main() {
+	vec4 pos = u_transform * vec4(i_position, 1.f);
+	gl_Position = u_project * pos;
+}
+```
+
+### assets/shaders/showvoxels.frag
+```
+in vec3 a_pos;
+
+uniform vec3 u_cameraPos;
+uniform int u_voxelCount;
+uniform float u_voxelLod;
+uniform float u_quality;
+uniform int u_voxelIndex;
+
+float voxelSize = 1.0f / u_voxelCount;
+
+uniform sampler3D u_voxelTexture;
+
+#ifdef ANISO
+uniform sampler3D u_voxelTextureAniso[6];
+#endif
+
+layout(location = 0) out vec3 o_albedo;
+
+bool inside(vec3 v) {
+  v = abs(v);
+  return max(max(v.x, v.y), v.z) <= 1.0f;
+}
+
+bool insideVoxel(vec3 pos) {
+  return all(lessThanEqual(pos, vec3(1.0f))) && all(greaterThanEqual(pos, vec3(0.0f)));
+}
+
+vec3 toVoxel(vec3 pos) {
+  return pos*(0.5)+0.5;  
+}
+
+float getMaxComponent(vec3 p) {
+  vec3 q = abs(p);
+  return max(max(q.x, q.y), q.z);
+}
+
+void main() {
+  vec3 camv = toVoxel(u_cameraPos);
+  vec3 posv = toVoxel(a_pos);
+  vec3 dir = normalize(posv - camv);
+
+  float hi = length(posv - camv);
+  float lo = 0.0f;
+  for (int i = 0; i < 10; i++) {
+    float mid = (hi + lo) * 0.5f;
+    if (insideVoxel(camv + dir*mid)) hi = mid;
+    else lo = mid;
+  }
+
+  vec3 start = camv + dir * hi;
+
+  vec4 color = vec4(0);
+
+  float stepSize = pow(2, u_voxelLod) / (u_voxelCount*u_quality);
+
+  vec3 pos = start;
+
+  int lod = int(u_voxelLod);
+  vec3 dim = vec3(float(u_voxelCount)/pow(2, float(lod)));
+  int i = 0;
+  int maxi = 1000;
+  while (insideVoxel(pos) && color.a < 0.99f) {
+
+    vec4 cc;
+#ifdef ANISO
+    if (lod > 0) {
+      cc = texelFetch(u_voxelTextureAniso[u_voxelIndex], ivec3(pos*dim), lod-1);
+    } else {
+      cc = texelFetch(u_voxelTexture, ivec3(pos*dim), lod);
+    }
+#else
+    cc = texelFetch(u_voxelTexture, ivec3(pos*dim), lod);
+#endif
+    color += (1.0f - color.a) * cc;//vec4(cc.xyz, 1.0f) * cc.a;
+    pos += dir*stepSize;
+  }
+
+  color = color / (color + vec4(1.0f)); // tone mapping (Reinhard)
+  color = pow(color, vec4(1.0/2.2));
+  o_albedo = color.rgb;
+}
+```
+
+### assets/shaders/showvoxels.vert
+```
+layout (location = 0) in vec3 i_position;
+
+out vec3 a_pos;
+
+uniform mat4 u_project;
+
+void main() {
+	vec4 pos = vec4(i_position, 1.0f);
+	a_pos = pos.xyz;
+	gl_Position = u_project * pos;
+}
+```
+
+### assets/shaders/voxelcone.frag
+```
+in vec3 a_pos;
+in vec2 a_uv;
+in vec3 a_normal;
+in vec4 a_posls;
+in vec3 a_xtan;
+in vec3 a_ytan;
+
+layout(location = 0) out vec3 o_color;
+
+uniform vec3 u_diffuse;
+uniform vec3 u_emission;
+uniform float u_emissionScale;
+uniform float u_metal;
+uniform float u_rough;
+
+uniform bool u_useMaps;
+uniform sampler2D u_diffuseMap;
+uniform sampler2D u_bumpMap;
+uniform sampler2D u_specMap;
+uniform sampler2D u_emissionMap;
+
+uniform vec3 u_cameraPos;
+
+uniform vec3 u_lightPos;
+uniform vec3 u_lightDir;
+uniform vec3 u_lightColor;
+uniform float u_lightInnerCos;
+uniform float u_lightOuterCos;
+
+uniform float u_shadowBias;
+
+uniform sampler2D u_shadowMap;
+
+uniform bool u_tracedShadows;
+uniform float u_shadowAperture;
+
+uniform int u_renderMode;
+uniform int u_voxelCount;
+float voxelSize = 1.0f / float(u_voxelCount);
+
+#ifdef ANISO
+bool u_aniso = true;
+#else
+bool u_aniso = false;
+#endif
+
+uniform sampler3D u_voxelTexture;
+uniform sampler3D u_voxelTextureAniso[6];
+
+uniform bool u_diffuseNoise;
+uniform float u_restitution;
+
+/* the time uniform is used to generate random values */
+uniform float u_time;
+float time = mod(u_time, 1.0);
+
+const float PI = 3.14159265359;
+
+/* wrapper to fetch both isotropic and anisotropic voxels */
+vec4 fetch(vec3 dir, vec3 pos, float lod) {
+  lod = max(0, lod);
+  // pos = clamp(pos, vec3(0), vec3(1));
+#ifdef ANISO
+  /* we need to know for every axis the direction to sample from */
+  bvec3 sig = greaterThan(dir, vec3(0.0f));
+  float l2 = max(0, lod - 1); /* the first level is actually the 2nd */
+  vec4 cx = sig.x ? textureLod(u_voxelTextureAniso[1], pos, l2) 
+    : textureLod(u_voxelTextureAniso[0], pos, l2);
+  vec4 cy = sig.y ? textureLod(u_voxelTextureAniso[3], pos, l2) 
+    : textureLod(u_voxelTextureAniso[2], pos, l2);
+  vec4 cz = sig.z ? textureLod(u_voxelTextureAniso[5], pos, l2) 
+    : textureLod(u_voxelTextureAniso[4], pos, l2);
+  vec3 sd = dir * dir; 
+  vec4 c1 = sd.x * cx + sd.y * cy + sd.z * cz;
+
+  /* if lod < 1 we need to interpolate between aniso and base texture */
+  if (lod < 1) {
+    vec4 c2 = textureLod(u_voxelTexture, pos, 0);
+    return mix(c2, c1, lod);
+  } else {
+    return c1;
+  }
+
+#else
+  return textureLod(u_voxelTexture, pos, lod);
+#endif
+}
+
+/* shadowss with PCF */
+float shadow() {
+  vec4 coords = a_posls;
+  float bias = u_shadowBias;
+  coords = coords*0.5;
+  coords += coords.w;
+  float total = 0;
+  const int nsamples = 4; /* the real sample number is nsample*nsample */
+  float scale = 2 / 2048.0; /* how far is the farthest sample from the origin */
+  for (int i = 0; i < nsamples; i++) {
+    for (int j = 0; j < nsamples; j++) {
+      vec2 offset = vec2(i, j) / nsamples * 2 - 1;
+      offset *= scale;
+      vec4 pos = coords + vec4(offset, 0, 0);
+
+      float shadowDepth = textureProj(u_shadowMap, pos.xyw).r;
+      float pointDepth = coords.z / coords.w; /*normalize depth */
+      float val = float(pointDepth - bias >= shadowDepth);
+      total += val;
+    }
+  }
+
+  /* average of samples */
+  total /= nsamples*nsamples*1.0;
+
+  /* to prevent floating point errors */
+  return clamp(total, 0, 1);
+}
+
+/* returns a vector that is orthogonal to v */
+vec3 ortho(vec3 v) {
+  vec3 w = abs(dot(v, normalize(vec3(.1,0,1)))) < 0.999 
+    ? vec3(.1,0,1) : vec3(1,0,0);
+  return normalize(cross(v, w));
+}
+
+/* returns true if pos is inside the unit cube */
+bool insideVoxel(vec3 pos) {
+  return all(lessThanEqual(pos, vec3(1.0f))) && all(greaterThanEqual(pos, vec3(0.0f)));
+}
+
+/* convert the range [-1, +1] to [0, +1] */
+vec3 toVoxel(vec3 pos) {
+  return pos*(0.5)+0.5;  
+}
+
+/* returns a pseudo random float using v as seed */
+float random(vec3 v) {
+  float a = dot(v, vec3(29.29384, 62.29384, 48.23478));
+  a = sin(a);
+  a = a * 293487.1273498;
+  a = fract(a);
+  return a;
+}
+
+/* returns a preudo random vec3 using v as seed */
+vec3 random3(vec3 p3){
+  p3 = fract(p3 * vec3(443.897, 441.423, 437.195));
+  p3 += dot(p3, p3.zxy + vec3(31.31));
+  return fract((p3.xyz + p3.yzx) * p3.zyx);
+}
+
+/* converts roughness to cone aperture for specular lighting */
+/* source: https://rootserver.rosseaux.net/demoscene/prods/HowToUseVoxelConeTracingWithTwoBouncesForEverythingInsteadOfJustGlobalIllumination.pdf 
+ * */
+float roughnessToAperture(float roughness){
+  roughness = clamp(roughness, 0.0, 1.0);
+  return tan(0.0003474660443456835 + (roughness * (1.3331290497744692 - (roughness * 0.5040552688878546))));
+}
+
+/* normal ditribution function for PBR specular */
+float NormalDistributionTrowbridgeReitz(float NdotH, float roughness) {
+  float a2 = roughness*roughness;
+  float d = NdotH*NdotH * (a2 - 1) + 1;
+  return a2 / (PI * d*d);
+}
+
+/* Geometry shadowing function for PBR specular
+ * (Smith's method, Schlick Approximation)
+ * remaps roughness to (r + 1) / 2 */
+float GeometrySchlickFixed(float NdotL, float NdotV, float roughness) {
+  float r = (roughness + 1);
+  float k = (r*r) / 8;
+  vec2 gs = k + (1 - k) * vec2(NdotL, NdotV);
+  return (NdotL * NdotV) / (gs.x * gs.y);
+}
+
+/* Fresnel function (Schlick Approximation) */
+vec3 FresnelSchlick(float cosTheta, vec3 F0) {
+  return F0 + (1 - F0) * pow(1 - cosTheta, 5);
+}
+
+/* Fresnel function for IBL lighting */
+vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
+  return F0 + (max(vec3(1.0 - roughness), F0) - F0) * pow(1.0 - cosTheta, 5.0);
+} 
+
+/* performs cone tracing starting at from and going into direction dir with
+   cone aperture of apertureTan2, which is = 2*tan(aperture/2) */
+/* smaller quality = higher quality*/
+vec3 ConeTracing(vec3 from, vec3 dir, float apertureTan2, float offset, float quality) {
+  vec4 color = vec4(0); /* starting color and opacity */
+  float dist = (voxelSize) * offset; /* we need a different offset for different effects */
+
+  /* makes sure the paerture is > 0 */
+  float a2 = max((voxelSize), apertureTan2);
+
+  /* keep looping until the cone is fully occluded */
+  while (color.a < 1.0) {
+    /* the idameter of the cone at distance dist */
+    float diameter = max((voxelSize), dist * a2);
+    float lod = log2(diameter * u_voxelCount);//* u_voxelCount);
+    vec3 pos = from + dir * dist; /* updates current position */
+    if (!insideVoxel(pos)) break; /* returns if outside the 3D texture */
+    vec4 cc = fetch(dir, pos, min(lod, 10));
+    color += (1 - color.a) * cc;
+
+    dist += diameter * quality; /* march along the ray direction */
+  }
+
+  return color.rgb;
+}
+
+/* Casts some ray to approximate indirect diffuse lighting at the current pos */
+vec3 TraceDiffuse(vec3 normal) {
+
+  vec3 pos = toVoxel(a_pos); /* normalize pos to texture coordinates */
+  pos += 2 * voxelSize * normal; /* offset to prevent self lighting */
+
+ /* number of cones to use */
+#define CONES 5
+  const vec3 cones[9] = vec3[9]( 
+      vec3(0,0,1), vec3(1,0,1), vec3(-1,0,1), vec3(0,1,1), vec3(0,-1,1), 
+      vec3(1,1,.5), vec3(1,-1,.5), vec3(-1,1,.5), vec3(-1,-1,.5));
+
+  float apertureAngle = 30; /* the aperture must be less than 45 degrees */
+  float apertureTan2 = 2 * tan(radians(apertureAngle)/2);
+
+  vec3 xtan, ytan;
+  if (u_diffuseNoise) { /* random cone directions */
+    xtan = normalize(random3(pos+time) * 2 + 1);
+    xtan = normalize(random3(pos+time));
+    if (abs(dot(xtan, normal)) > 0.999) {
+      xtan = ortho(normal);
+    }
+    ytan = cross(normal, xtan);
+    xtan = cross(normal, ytan);
+  } else { /* not random */
+    xtan = ortho(normal);
+    ytan = cross(normal, xtan);
+  }
+
+  /* normal tangent space */
+  mat3 tanSpace = mat3(xtan, ytan, normal); 
+
+  vec3 color = vec3(0);
+  for (int i = 0; i < CONES; i++) {
+    vec3 dir = tanSpace * cones[i];
+    color += ConeTracing(pos, normalize(dir), apertureTan2, 2, 0.7);
+  }
+  return color; /* the returned color is the sum of all casted cones */
+}
+
+/* casts one cone in the reflected view direction to approximate
+ * specular indirect lighting */
+vec3 TraceSpecular(vec3 normal, float roughness) {
+  vec3 pos = toVoxel(a_pos) + normal * voxelSize * 4;
+  vec3 camPos = toVoxel(u_cameraPos);
+  vec3 camDir = normalize(pos - camPos); /* view direction */
+  vec3 dir = reflect(camDir, normal); /* reflected view direction */
+  /* rougher sourfaces have bigger aperture */
+  float aperture = roughnessToAperture(roughness) * 2; 
+  return ConeTracing(pos, dir, aperture, 0, 0.6);
+}
+
+/* Casts one cone in the direction of the light source to approximate
+ * soft shadows */
+float TraceShadow(vec3 normal) {
+  vec3 from = toVoxel(a_pos);
+  vec3 to = toVoxel(u_lightPos); 
+
+  float aperture = u_shadowAperture;
+  float a2 = tan(radians(aperture / 2)) * 2;
+
+  vec3 dir = normalize(to - from);
+  from += 4 * (voxelSize) * dir;
+  from += 1.5 * (voxelSize) * normal;
+  float maxDist = length(to - from);
+  maxDist = min(maxDist, 1.7);
+
+  /* add random noise to reduce banding*/
+  float dist = (2.5 + random(from)) * (voxelSize);
+
+  float acc = 0;
+  while (acc < 1.0) {
+    float diameter = max((voxelSize)/2, dist * a2);
+    if (dist + diameter > maxDist) break;
+    float lod = max(0, log2(diameter / (voxelSize) + 1.0));
+    vec3 pos = from + dir * dist;
+    float cc = fetch(dir, pos, lod).a;
+    cc = cc*cc; /* makes the shadow less blocky */
+    acc += (1 - acc) * cc;
+    dist += diameter * 0.2; /* need high quality to prevent holes */
+  }
+
+  return 1.0 - clamp(acc, 0.0, 1.0);
+}
+
+/* calculates the light contribution coming from the spotlight 
+ * taking into account the light color, the light attenuation, 
+ * shadows and NdotL*/
+vec3 spotlight(vec3 normal) {
+  vec3 spotDir = u_lightDir;
+  vec3 lightDir = normalize(u_lightPos - a_pos);
+  float dist = abs(length(a_pos - u_lightPos));
+  float angle = dot(spotDir, -lightDir);
+  float intensity = smoothstep(u_lightOuterCos, u_lightInnerCos, angle);
+  float attenuation = 1.0 / (1.0 + dist); 
+  intensity *= attenuation;
+  intensity *= max(0, dot(normal, lightDir));
+  if (intensity > 0) {
+    if (u_tracedShadows) {
+      intensity *= TraceShadow(normal);
+    } else {
+      intensity *= 1.0 - shadow();
+    }
+  }
+  return u_lightColor * intensity;
+}
+
+void main() {
+
+  /* color correction gamma exponents */
+  float gammaEditor = 2.2;
+  float gammaTextures = 2.2;
+
+  vec3 albedo = pow(u_diffuse, vec3(gammaEditor));
+  vec3 emission = pow(u_emission, vec3(gammaEditor)); 
+  emission *= u_emissionScale;
+
+  float roughness = u_rough;
+  float metalness = u_metal;
+
+  vec3 normal = a_normal;
+
+  if (u_useMaps) {
+    albedo *= pow(texture(u_diffuseMap, a_uv).rgb, vec3(gammaTextures));
+    emission *= pow(texture(u_emissionMap, a_uv).rgb, vec3(gammaTextures));
+
+    /* roughness and metalness are stored in the same texture */
+    vec3 specMap = texture(u_specMap, a_uv).rgb;
+    roughness *= specMap.g;
+    metalness *= specMap.b;
+
+    /* normalize inside fragment shader because of 
+     * interpolation between vertices*/
+    mat3 tanSpace = mat3(normalize(a_xtan), normalize(a_ytan), normalize(a_normal));
+    vec2 tn = texture(u_bumpMap, a_uv).rg * 2 - 1; /*remaps normal to [-1,+1] */
+    normal = vec3(tn, sqrt(1 - dot(tn, tn))); /* calculates z component */
+    normal = tanSpace * normal; /* normal vector corrected with normal map */
+  }
+  normal = normalize(normal);
+  float roughnessLinear = roughness;
+  roughness = roughness * roughness; /*better looking materials*/
+
+
+  vec3 color = vec3(0);
+
+
+  // direct lighting
+  vec3 spot = spotlight(normal);
+
+  /* reflectance at normal indidence */
+  vec3 F0 = vec3(0.04);
+  F0 = mix(F0, albedo, metalness);
+
+  vec3 N = normalize(normal);
+  vec3 V = normalize(u_cameraPos - a_pos); /* view vector */
+  vec3 L = normalize(u_lightPos - a_pos); /* light vector */
+  vec3 H = normalize(V+L); /*halfway vector */
+
+  float NdotH = max(dot(N, H), 0.0);
+  float NdotV = abs(dot(N, V));
+  float HdotV = max(dot(H, V), 0.0);
+  float NdotL = max(dot(N, L), 0.0);
+
+  float NDF = NormalDistributionTrowbridgeReitz(NdotH, roughness);   
+  float G   = GeometrySchlickFixed(NdotL, NdotV, roughnessLinear);      
+  vec3 F    = FresnelSchlick(HdotV, F0);
+
+  vec3 nominator = NDF * G * F;
+  float denominator = 4 * NdotV * NdotL + 0.001;
+  vec3 spec = nominator / denominator;
+
+  vec3 kS = F;
+  vec3 kD = 1.0 - kS; 
+  kD *= 1.0 - metalness; /* metals have no diffuse */
+
+  /* compose direct lighting */
+  vec3 directLight = spot * (kD * albedo / PI + spec);
+
+
+  // indirect lighting
+  F = FresnelSchlickRoughness(NdotV, F0, roughness);
+  kS = F;
+  kD = 1.0 - kS;
+  kD *= 1.0 - metalness;
+
+  /* add indirect diffuse component */
+  vec3 indirectDiffuse = vec3(0.0);
+  if (u_renderMode == 1 || u_renderMode == 3) {
+    if (metalness < 1 || u_renderMode == 1) indirectDiffuse = TraceDiffuse(N);
+    indirectDiffuse *= u_restitution;
+    color = indirectDiffuse;
+  }
+
+  /* add indirect specular component */
+  vec3 indirectSpecular = vec3(0.0);
+  if (u_renderMode == 2 || u_renderMode == 3) {
+    indirectSpecular = TraceSpecular(N, roughness);
+    color = indirectSpecular;
+  }
+
+
+  // compose lighting
+  if (u_renderMode == 0 || u_renderMode == 3) {
+    vec3 ambientLight = (kD * indirectDiffuse * albedo + F * indirectSpecular); 
+
+    color = directLight;
+    color += ambientLight;
+    color += emission;
+  }
+
+  // color correction
+  color = color / (color + vec3(1.0f)); // tone mapping (Reinhard)
+  color = pow(color, vec3(1.0/2.2)); // gamma correction
+  o_color = color;
+}
+```
+
+### assets/shaders/voxelcone.vert
+```
+layout (location = 0) in vec3 i_position;
+layout (location = 1) in vec2 i_uv;
+layout (location = 2) in vec3 i_normal;
+layout (location = 3) in vec3 i_xtan;
+layout (location = 4) in vec3 i_ytan;
+
+out vec3 a_pos;
+out vec3 a_normal;
+out vec4 a_posls;
+out vec3 a_xtan;
+out vec3 a_ytan;
+out vec2 a_uv;
+
+uniform mat4 u_project;
+uniform mat4 u_transform;
+uniform mat4 u_lightProj;
+
+void main() {
+	vec4 pos = u_transform * vec4(i_position, 1.0f);
+	gl_Position = u_project * pos; /* position from camera view */
+	a_pos = pos.xyz; /* position in world space */
+	a_posls = u_lightProj * pos; /* position in light space */
+
+	/* extracts the rotation matrix from the transform matrix, we do this 
+	because the normal needs to just be rotated, not translated. (this also 
+	applies scaling to the normal, but we can normalize the vector later) */
+	mat3 rotate = mat3(transpose(inverse(u_transform)));
+
+	a_normal = rotate * i_normal;
+	a_xtan = rotate * i_xtan;
+	a_ytan = rotate * i_ytan;
+
+	a_uv = i_uv;
+}
+```
+
+### assets/shaders/voxelize.frag
+```
+in vec3 b_pos;
+in vec3 b_normal;
+in vec3 b_xtan;
+in vec3 b_ytan;
+in vec4 b_posls;
+in vec2 b_uv;
+
+uniform vec3 u_diffuse;
+uniform vec3 u_emission;
+uniform float u_emissionScale;
+uniform float u_metal;
+uniform float u_rough;
+
+uniform bool u_particle;
+uniform float u_opacity;
+
+uniform bool u_useMaps;
+uniform sampler2D u_diffuseMap;
+uniform sampler2D u_bumpMap;
+uniform sampler2D u_emissionMap;
+
+uniform mat4 u_lightProj;
+uniform float u_shadowBias;
+
+uniform vec3 u_lightPos;
+uniform vec3 u_lightDir;
+uniform vec3 u_lightColor;
+uniform float u_lightInnerCos;
+uniform float u_lightOuterCos;
+
+uniform bool u_averageValues;
+uniform float u_restitution;
+
+uniform int u_voxelCount;
+float voxelSize = 1.0f / float(u_voxelCount);
+
+uniform bool u_temporalMultibounce;
+
+/* the time uniform is used to generate random values */
+uniform float u_time;
+float time = mod(u_time, 1.0f);
+
+uniform sampler2D u_shadowMap;
+
+layout(RGBA8) uniform image3D u_voxelTexture;
+
+#ifdef ANISO
+uniform sampler3D u_voxelTexturePrev[6];
+#else
+uniform sampler3D u_voxelTexturePrev;
+#endif
+
+const float PI = 3.14159265359;
+
+/* wrapper to fetch both isotropic and anisotropic voxels */
+vec4 fetch(vec3 dir, vec3 pos, float lod) {
+#ifdef ANISO
+  /* we need to know for every axis the direction to sample from */
+  bvec3 sig = greaterThan(dir, vec3(0.0f));
+  float l2 = lod; 
+
+  vec4 cx = sig.x ? textureLod(u_voxelTexturePrev[1], pos, l2) 
+                  : textureLod(u_voxelTexturePrev[0], pos, l2);
+  vec4 cy = sig.y ? textureLod(u_voxelTexturePrev[3], pos, l2) 
+                  : textureLod(u_voxelTexturePrev[2], pos, l2);
+  vec4 cz = sig.z ? textureLod(u_voxelTexturePrev[5], pos, l2) 
+                  : textureLod(u_voxelTexturePrev[4], pos, l2);
+  vec3 sd = dir * dir; 
+  vec4 c1 = sd.x * cx + sd.y * cy + sd.z * cz;
+  return c1;
+#else
+  return textureLod(u_voxelTexturePrev, pos, max(1, lod));
+#endif
+}
+
+/* shadows with PCF */
+float shadow() {
+  vec4 coords = u_lightProj * vec4(b_pos, 1.0);
+  float bias = u_shadowBias;
+  coords = coords*0.5;
+  coords += coords.w;
+  float total = 0;
+  const int nsamples = 3; /* the real sample number is nsample*nsample */
+  float scale = voxelSize/2; /* how far is the farthest sample from the origin */
+  for (int i = 0; i < nsamples; i++) {
+    for (int j = 0; j < nsamples; j++) {
+      vec2 offset = vec2(i, j) / nsamples * 2 - 1;
+      offset *= scale;
+      vec3 pos = coords.xyw + vec3(offset, 0);
+
+      float shadowDepth = textureProj(u_shadowMap, pos).r;
+      float pointDepth = coords.z / coords.w; /* normalize depth */
+      float val = float(pointDepth - bias >= shadowDepth);
+      total += val;
+    }
+  }
+
+  /* average of samples */
+  total /= nsamples*nsamples;
+
+  /* to prevent floating point errors */
+  return clamp(total, 0, 1);
+}
+
+/* calculates the light contribution coming from the spotlight 
+ * taking into account the light color, the light attenuation, 
+ * shadows and NdotL*/
+vec3 spotlight(vec3 normal) {
+  vec3 spotDir = u_lightDir;
+  vec3 lightDir = u_lightPos - b_pos;
+  float dist = abs(length(lightDir));
+  lightDir = lightDir / dist;
+  float angle = dot(spotDir, -lightDir);
+  float intensity = smoothstep(u_lightOuterCos, u_lightInnerCos, angle);
+  float attenuation = 1.0 / (1.0 + dist);	
+  intensity *= attenuation;
+  intensity *= max(0, dot(normal, lightDir));
+  if (intensity>0) intensity *= 1.0 - shadow();
+  return u_lightColor * intensity;
+}
+
+/* returns a vector that is orthogonal to v */
+vec3 ortho(vec3 v) {
+  vec3 w = abs(dot(v, normalize(vec3(.1,0,1)))) < 0.999 
+    ? vec3(.1,0,1) : vec3(1,0,0);
+  return normalize(cross(v, w));
+}
+
+/* returns true if pos is inside the unit cube */
+bool insideVoxel(vec3 pos) {
+  return all(lessThanEqual(pos, vec3(1.0f))) 
+      && all(greaterThanEqual(pos, vec3(0.0f)));
+}
+
+/* convert the range [-1, +1] to [0, +1] */
+vec3 toVoxel(vec3 pos) {
+  return pos*(0.5)+0.5;  
+}
+
+/* returns a pseudo random float using v as seed */
+float random(vec3 v) {
+  float a = dot(v, vec3(29.29384, 62.29384, 48.23478));
+  a = sin(a);
+  a = a * 293487.1273498;
+  a = fract(a);
+  return a;
+}
+
+/* returns a preudo random vec3 using v as seed */
+vec3 random3(vec3 v){
+  v = fract(v * vec3(443.897, 441.423, 437.195));
+  v += dot(v, v.zxy + vec3(31.31));
+  return fract((v.xyz + v.yzx) * v.zyx);
+}
+
+/* converts a 32 bit rgba value to a vec4 [0.0, 255.0]*/
+vec4 rgbaToVec(uint val) {
+  return vec4(
+      float((val&0x000000FFu)), 
+      float((val&0x0000FF00u)>>8U), 
+      float((val&0x00FF0000u)>>16U), 
+      float((val&0xFF000000u)>>24U)
+      );
+}
+
+/* converts a vec4 to a 32 bit rgba */
+uint vecToRgba(vec4 val) {
+  vec4 v = clamp(val, vec4(0), vec4(255));
+  return (
+      (uint(v.w)&0x000000FFu)<<24U |
+      (uint(v.z)&0x000000FFu)<<16U |
+      (uint(v.y)&0x000000FFu)<<8U  |
+      (uint(v.x)&0x000000FFu)
+      );
+}
+
+/* performs atomic average image store */
+/* source: https://www.seas.upenn.edu/~pcozzi/OpenGLInsights/OpenGLInsights-SparseVoxelization.pdf 
+ * */
+void imageAtomicAvg(image3D imgUI, ivec3 coords, vec4 val) {
+
+  /* not compiling on some drivers
+     val.xyz = val.xyz * 255.f;
+     uint newVal = vecToRgba(val);
+     uint prevVal = 0;
+     uint curVal;
+
+     while (true) {
+     uint curVal = imageAtomicCompSwap(imgUI, coords, prevVal, newVal);
+     if (curVal == prevVal) return;
+     prevVal = curVal;
+     vec4 rval = rgbaToVec(curVal);
+     rval.xyz = (rval.xyz * rval.w);
+     vec4 curValF = rval + val;
+     curValF.xyz /= curValF.w;
+     newVal = vecToRgba(curValF);
+     }
+   */
+}
+
+/* performs cone tracing starting at from and going into direction dir with
+   cone aperture of apertureTan2, which is = 2*tan(aperture/2) */
+vec3 ConeTracing(vec3 from, vec3 dir, float apertureTan2) {
+  vec4 color = vec4(0); /* starting color and opacity */
+  float dist = voxelSize * 0; /* starting distance */
+
+  /* makes sure the aperture is > 0 */
+  float a2 = max(voxelSize, apertureTan2);
+
+  /* keep looping until the cone is fully occluded */
+  while (color.a < 1.0) {
+    /* the diameter of the cone at distance dist */
+    float diameter = max(voxelSize, dist * a2);
+    float lod = log2(diameter * u_voxelCount); 
+    vec3 pos = from + dir * dist; /* updates current position */
+    if (!insideVoxel(pos)) break; /* returns if outside the 3D texture */
+    vec4 cc = fetch(dir, pos, lod);
+    color += (1 - color.a) * cc; /* scale by unoccluded area */
+
+    dist += diameter * 0.7; /* march along the ray direction */
+  }
+
+  return color.rgb;
+}
+
+/* Casts some ray to approximate indirect diffuse lighting at the current pos */
+vec3 TraceDiffuse(vec3 normal) {
+  vec3 pos = toVoxel(b_pos); /* normalize pos to texture coordinates */
+  pos += 8 * voxelSize * normal; /* offset to prevent self lighting */
+
+ /* number of cones to use */
+#define CONES 5
+  const vec3 cones[9] = vec3[9]( 
+      vec3(0,0,1), vec3(1,0,1), vec3(-1,0,1), vec3(0,1,1), vec3(0,-1,1), 
+      vec3(1,1,1), vec3(1,-1,1), vec3(-1,1,1), vec3(-1,-1,1));
+
+  float apertureAngle = 30; /* the aperture must be less than 45 degrees */
+  float apertureTan2 = 2*tan(radians(apertureAngle)/2); 
+
+  vec3 xtan, ytan; 
+  if(true) { /* random cone directions */
+    xtan = normalize(random3(pos+time) * 2 + 1);
+    xtan = normalize(random3(pos+time));
+    if (abs(dot(xtan, normal)) > 0.999) {
+      xtan = ortho(normal);
+    }
+    ytan = cross(normal, xtan);
+    xtan = cross(normal, ytan);
+  } else { /* not random */
+    xtan = ortho(normal);
+    ytan = cross(normal, xtan);
+  }
+
+  /* normal tangent space */
+  mat3 tanSpace = mat3(xtan, ytan, normal); 
+
+  vec3 color = vec3(0);
+  for (int i = 0; i < CONES; i++) {
+    vec3 dir = tanSpace * cones[i];
+    color += ConeTracing(pos, normalize(dir), apertureTan2);
+  }
+  return color; /* the returning color is the sum of all casted cones */
+}
+
+void main(){
+
+  vec3 posVoxelSpace = toVoxel(b_pos) * 0.999999f; /* needed to include 1.0 */
+  ivec3 dim = imageSize(u_voxelTexture);
+
+  /* color correction gamma exponents */
+  float gammaEditor = 2.2;
+  float gammaTextures = 2.2;
+
+  if (u_particle) { /* if we are drawing fire, we need to add colors not avg */
+    vec3 pos = b_pos;
+    vec3 emission = pow(u_emission, vec3(gammaEditor));
+    float opacity = texture(u_emissionMap, b_uv).r * u_opacity;
+
+    vec4 color = vec4(emission * opacity, 0.0);
+
+    /* no atomic add, but there are no visual artifacts */
+    vec4 prev = imageLoad(u_voxelTexture, ivec3(dim*posVoxelSpace));
+    color += prev;
+    imageStore(u_voxelTexture, ivec3(dim*posVoxelSpace), color);
+    return;
+  }
+
+  vec3 pos = b_pos;
+  vec3 normal = b_normal;
+
+  vec3 albedo = pow(u_diffuse, vec3(gammaEditor));
+  vec3 emission = pow(u_emission, vec3(gammaEditor));
+  emission *= u_emissionScale;
+
+  float rougness = u_rough;
+  float metalness = u_metal;
+
+  if (u_useMaps) { /* if we are using textures sample them */
+    albedo *= pow(texture(u_diffuseMap, b_uv).rgb, vec3(gammaTextures));
+    emission *= pow(texture(u_emissionMap, b_uv).rgb, vec3(gammaTextures));
+
+    /* normalize inside fragment shader because of 
+     * interpolation between vertices*/
+    mat3 tanSpace = mat3(
+        normalize(b_xtan), normalize(b_ytan), normalize(b_normal));
+    vec2 tn = texture(u_bumpMap, b_uv).rg * 2 - 1; /*remaps normal to [-1,+1] */
+    normal = vec3(tn, sqrt(1 - dot(tn, tn))); /* calculates z component */
+    normal = tanSpace * normal;	/* normal vector corrected with normal map */
+  }
+  normal = normalize(normal);
+
+  /* direct lighting */
+  vec3 color = albedo * spotlight(normal) / PI;
+
+  /* indirect lighting */
+  if (u_temporalMultibounce) {
+    vec3 indirect = TraceDiffuse(normal);
+    indirect *= albedo;
+    color += indirect * u_restitution;
+  }
+
+  /* emission */
+  color += emission;
+
+  vec4 val = vec4(color, 1.0f);
+
+  if (u_averageValues) {
+    imageAtomicAvg(u_voxelTexture, ivec3(dim*posVoxelSpace), val);
+  } else {
+    /* we still try to average even without atomic operations, reduces flicker
+     * by a bit */
+    val.a *= 1.f / 255.f;
+    vec4 prev = imageLoad(u_voxelTexture, ivec3(dim*posVoxelSpace));
+    vec3 avg = (prev.rgb * prev.a + val.rgb * val.a) / (prev.a + val.a);
+    val = vec4(avg, prev.a + val.a);
+    imageStore(u_voxelTexture, ivec3(dim*posVoxelSpace), val);
+  }
+}
+```
+
+### assets/shaders/voxelize.geom
+```
+layout(triangles) in;
+layout(triangle_strip, max_vertices = 3) out;
+
+in vec3 a_pos[];
+in vec3 a_normal[];
+in vec3 a_xtan[];
+in vec3 a_ytan[];
+in vec2 a_uv[];
+
+out vec3 b_pos;
+out vec3 b_normal;
+out vec3 b_xtan;
+out vec3 b_ytan;
+out vec2 b_uv;
+
+/* This shader performs the thiangle reprojection on the main axis */
+void main(){
+
+	/* Calculates the normal of the triangle (the cross product of any 2
+	of its edges) */
+	const vec3 a = a_pos[1] - a_pos[0];
+	const vec3 b = a_pos[2] - a_pos[0];
+	const vec3 p = abs(cross(a, b)); 
+
+	/* For every vertex, outputs the correct reprojection depending on which
+	is the biggest component of the normal vector */
+	for(uint i = 0; i < 3; ++i){
+		vec4 pos = gl_in[i].gl_Position;
+		if(p.z > p.x && p.z > p.y){
+			gl_Position = vec4(pos.x, pos.y, 0, 1); /* Z is the biggest */
+		} else if (p.x > p.y){
+			gl_Position = vec4(pos.y, pos.z, 0, 1); /* X is the biggest */
+		} else {
+			gl_Position = vec4(pos.x, pos.z, 0, 1); /* Y is the biggest */
+		}
+		b_pos = a_pos[i];
+		b_normal = a_normal[i];
+		b_xtan = a_xtan[i];
+		b_ytan = a_ytan[i];
+		b_uv = a_uv[i];
+
+		EmitVertex();
+	}
+    EndPrimitive();
+}
+```
+
+### assets/shaders/voxelize.vert
+```
+layout (location = 0) in vec3 i_position;
+layout (location = 1) in vec2 i_uv;
+layout (location = 2) in vec3 i_normal;
+layout (location = 3) in vec3 i_xtan;
+layout (location = 4) in vec3 i_ytan;
+
+uniform mat4 u_transform;
+
+out vec3 a_pos;
+out vec3 a_normal;
+out vec3 a_xtan;
+out vec3 a_ytan;
+out vec2 a_uv;
+
+void main() {
+	/* calculates the position in world coordinates by applying the 
+	transform matrix */
+	vec4 pos = u_transform * vec4(i_position, 1.0f);
+	a_pos = pos.xyz;
+	gl_Position = pos;
+
+	/* extracts the rotation matrix from the transform matrix, we do this 
+	because the normal needs to just be rotated, not translated. (this also 
+	applies scaling to the normal, but we can normalize the vector later) */
+	mat3 rotate = mat3(transpose(inverse(u_transform)));
+
+	a_normal = rotate * i_normal;
+	a_xtan = rotate * i_xtan;
+	a_ytan = rotate * i_ytan;
+
+	a_uv = i_uv;
+}
+```

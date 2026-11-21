@@ -1,0 +1,120 @@
+# Volume Resize and Save
+## Overview
+This method performs post-processing on a reconstructed 3D volume by resizing it to a target dimension, normalizing intensity values, and optionally saving the data as image slices or raw binary files. It solves the problem of converting raw reconstruction outputs into standardized formats for visualization or downstream analysis. It differs from [Image Resizing Utilities](11843-image-resizing-utilities.md) by including specific normalization and rotation steps, and from [Vector Normalization](3145-vector-normalization.md) by handling 3D tensor structures and file I/O.
+## How it works
+**Inputs:**
+- `volume`: 3D numpy array or tensor of shape $(D, H, W)$ or $(H, W, D)$.
+- `target_size`: Integer or tuple specifying the new dimensions.
+- `save_root`: Optional string path for saving output.
+- `format`: String, either `'png_slices'` or `'raw_uint16'`.
+
+**Data Structures:**
+- `volume`: Floating point array (float32/float64).
+- `output_dir`: Directory created if `save_root` is provided.
+
+**Steps:**
+1. **Resize:** Apply bilinear interpolation to resize the volume to `target_size`. If the input is a tensor, use `F.interpolate` with `mode='trilinear'` and `align_corners=False` [S1, unofficial].
+2. **Normalize:** Scale volume values to the range $[0, 1]$ using min-max scaling:
+   $$ v_{norm} = \frac{v - v_{min}}{v_{max} - v_{min}} $$
+   where $v_{min} = \min(v)$ and $v_{max} = \max(v)$ [S1, S2, unofficial].
+3. **Rotate:** Rotate the volume 90 degrees around axes 1 and 2 (typically Y and Z axes in a $(D, H, W)$ layout) [S1, unofficial]. This is implemented as a transpose or rotation matrix application depending on the backend.
+4. **Save:**
+   - If `format == 'png_slices'`: Iterate over the depth dimension. For each slice, scale values to $[0, 255]$ and cast to `uint8`. Save each slice as a PNG image in `save_root` [S1, unofficial].
+   - If `format == 'raw_uint16'`: Scale normalized values to $[0, 65535]$ and cast to `uint16`. Write the raw binary data to a file [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import os
+import torch
+import torch.nn.functional as F
+
+def resize_and_save(volume, target_size, save_root=None, format='png_slices'):
+    # Step 1: Resize using bilinear interpolation
+    # Assuming volume is a torch tensor for interpolation
+    if not isinstance(volume, torch.Tensor):
+        volume = torch.from_numpy(volume).unsqueeze(0).unsqueeze(0) # Add batch, channel dims
+    
+    # Ensure 5D tensor for F.interpolate: (N, C, D, H, W)
+    if volume.dim() == 3:
+        volume = volume.unsqueeze(0).unsqueeze(0)
+    elif volume.dim() == 4:
+        volume = volume.unsqueeze(0)
+        
+    resized = F.interpolate(volume, size=target_size, mode='trilinear', align_corners=False)
+    
+    # Remove batch/channel dims if they were added
+    if resized.dim() == 5:
+        resized = resized.squeeze(0).squeeze(0)
+        
+    # Step 2: Normalize to [0, 1]
+    v_min = resized.min()
+    v_max = resized.max()
+    
+    # Guard against constant volume
+    if v_max == v_min:
+        normalized = torch.zeros_like(resized)
+    else:
+        normalized = (resized - v_min) / (v_max - v_min)
+        
+    # Step 3: Rotate 90 degrees around axes 1 and 2
+    # Rotating around axis 1 (H) and axis 2 (W) in a (D, H, W) tensor
+    # A 90-degree rotation around Y (axis 1) maps (x, z) -> (-z, x)
+    # A 90-degree rotation around Z (axis 2) maps (x, y) -> (-y, x)
+    # The source specifies rotation around axes (1, 2). 
+    # Implementation depends on specific coordinate system, but typically involves transpose/flip.
+    # For a generic 90 deg rotation around axis 1 (H):
+    rotated = torch.rot90(normalized, k=1, dims=(1, 2)) # Rotates in the H-W plane
+    
+    # Step 4: Save
+    if save_root is not None:
+        os.makedirs(save_root, exist_ok=True)
+        
+    if format == 'png_slices':
+        # Convert to numpy for saving
+        vol_np = rotated.cpu().numpy()
+        for i in range(vol_np.shape[0]):
+            slice_data = vol_np[i]
+            # Scale to 0-255 uint8
+            slice_uint8 = (slice_data * 255).astype(np.uint8)
+            # Save as PNG (implementation detail: using PIL or cv2)
+            # Note: Pseudocode omits specific image library calls as per rules, 
+            # but the logic is: save slice_uint8 as PNG in save_root
+            pass # Save slice i as PNG
+    elif format == 'raw_uint16':
+        # Scale to 0-65535 uint16
+        vol_scaled = rotated * 65535.0
+        vol_uint16 = vol_scaled.cpu().numpy().astype(np.uint16)
+        # Write raw binary
+        if save_root:
+            with open(os.path.join(save_root, 'volume.raw'), 'wb') as f:
+                f.write(vol_uint16.tobytes())
+```
+
+**Parameters:**
+- `target_size`: Typically $(128, 128, 128)$ or $(96, 96, 96)$ [S2, unofficial].
+- `format`: `'png_slices'` or `'raw_uint16'`.
+
+**Edge Cases:**
+- Constant volume (min == max): Handled by setting normalized values to 0 [S1, S2, unofficial].
+- Precision: Use float32 for intermediate calculations to avoid overflow during scaling [S2, unofficial].
+
+## Subtopics
+
+### ImageJ Export
+A variant that specifically targets compatibility with ImageJ. It loads the volume from a numpy file, normalizes to $[0, 1]$, scales to $[0, 65535]$, casts to `uint16`, and writes a raw binary file. The resulting file is imported into ImageJ as raw data with specified dimensions (e.g., $128 \times 128 \times 128$) and type `uint16` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, dominated by interpolation and normalization.
+- **Memory Complexity:** $O(N)$ for storing the resized volume.
+- **Strengths:** Standardizes output for visualization tools like ImageJ.
+- **Limitations:** Loss of precision due to quantization to uint8 (PNG) or uint16 (Raw). Rotation is fixed and may not suit all coordinate systems.
+
+## Background
+Originated in post-processing pipelines for 3D reconstruction, specifically in deep learning-based volume rendering and CT reconstruction projects. Used to prepare data for visualization in tools like ImageJ [S1, S2, unofficial].
+
+## Sources
+[S1] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+[S2] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)

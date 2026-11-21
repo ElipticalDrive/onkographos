@@ -1,0 +1,130 @@
+Summary Add a Rayleigh scattering phase function as a new material / phase function type for use in Constant volumes (fog/atmosphere). Must integrate with the existing Pdf-based importance sampling infrastructure — same path as Lambertia...
+
+Add Rayleigh scattering phase function (importance-sampling compatible) · Issue #175 · paulwrubel/luxide · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add Rayleigh scattering phase function (importance-sampling compatible) #175
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Add Rayleigh scattering phase function (importance-sampling compatible)#175
+Copy link
+Labels
+enginerelated to actual pathtracingrelated to actual pathtracingenhancementNew feature or requestNew feature or request
+Description
+paulwrubel
+opened on Jun 29, 2026
+Issue body actions
+Summary
+Add a Rayleigh scattering phase function as a new material / phase function type for use in Constant volumes (fog/atmosphere). Must integrate with the existing Pdf-based importance sampling infrastructure — same path as Lambertian surfaces and the future volume NEE path.
+Phase function
+Rayleigh scattering derives from dipole radiation. The unpolarized (averaged) phase function is:
+```
+p(cosθ) = (3/4) × (1 + cos²θ)
+```
+Key properties:
+Two equal lobes: forward (θ=0) and backward (θ=π) at 1.5× the isotropic average
+Null at 90°: zero scattering at right angles
+Normalized: ∫ p(θ) dΩ = 1 over the sphere
+Implementation plan
+1. New Pdf variant: RayleighSphere
+File: src/shading/pdf.rs
+A Pdf variant that samples directions from the (1 + cos²θ) distribution and evaluates the corresponding probability density.
+Sampling:
+The CDF is invertible in closed form
+cosθ can be sampled by solving a cubic: cos³θ + 3cosθ + 4(1-2ξ) = 0 for uniform random ξ ∈ [0,1]
+Alternatively, rejection sampling from a bounding distribution (e.g., 1.5 × uniform) is simpler and efficient (75% acceptance rate)
+φ sampled uniformly on [0, 2π]
+Density:
+```
+fn density(&self, direction: Vector3) -> f64 {
+    let cos_theta = self.w.dot(direction);     // whichever axis is "forward"
+    (3.0 / 4.0) * (1.0 + cos_theta * cos_theta) / (4.0 * PI)  // normalized over sphere
+}
+```
+Wait — the (1 + cos²θ) distribution is normally defined with respect to the scattering angle θ between incident and scattered directions. For a Pdf variant, the reference direction should come from the incident ray direction, not a fixed axis.
+Actually: Pdf variants like CosineHemisphere use an Onb (orthonormal basis) oriented to the surface normal. For Rayleigh, the scattering is symmetric around the incident direction — the forward lobe points along the original ray direction, the backward lobe points opposite. The phase function only depends on cosθ = ω_i · ω_o.
+So the Pdf variant needs to encode the incident direction (or its reverse) to define the axis. A clean approach: RayleighSphere { incident: Vector3 } where incident is the direction the light came from. Then:
+density(dir) = (3/(16π)) × (1 + (incident.dot(dir))²) — the full sphere normalization (divide by 4π since we're sampling over the sphere, not just cosθ)
+sample() = generates cosθ from inverse CDF of (1+cos²θ), φ uniformly, builds direction relative to incident
+2. New material: RayleighPhaseFunction
+File: src/shading/materials/rayleigh.rs (new)
+Mirrors Isotropic structurally:
+```
+pub struct Rayleigh {
+    reflectance_texture: Arc<dyn Texture>,   // albedo color
+    emittance_texture: Arc<dyn Texture>,     // always SolidColor::BLACK
+}
+
+impl Material for Rayleigh {
+    fn scatter(&self, ray: Ray, ray_hit: &RayHit, hw: &HeroWavelengths) -> Option<ScatterRecord> {
+        Some(ScatterRecord::Pdf(Pdf::RayleighSphere {
+            incident: (-ray.direction).unit_vector(),   // incoming direction
+        }))
+    }
+
+    fn brdf(&self, outgoing: Vector3, incident: Vector3, ...) -> ColorSpectrum {
+        let albedo = self.reflectance_texture.value(u, v, p);
+        let cos_theta = outgoing.dot(incident);
+        albedo * (3.0 / 4.0) * (1.0 + cos_theta * cos_theta) / (4.0 * PI)
+    }
+
+    fn reflectance(&self, u: f64, v: f64, p: Point) -> ColorSpectrum {
+        self.reflectance_texture.value(u, v, p)
+    }
+}
+```
+3. Wavelength-dependent scattering coefficient
+File: src/geometry/volumes/constant.rs (or a new volume type)
+Rayleigh's key feature is the λ⁻⁴ dependence. The scattering coefficient at each wavelength is:
+```
+σ_s(λ) = σ_s(λ₀) × (λ₀ / λ)⁴
+```
+When used inside a Constant volume, the intersect() method currently uses a single density (σ_t) for distance sampling. For spectrally-varying density, you'd need:
+Sample the distance using the maximum σ across all hero wavelengths (to avoid bias from different path lengths)
+Apply per-wavelength transmittance weighting via MIS or track a spectral throughput vector
+This is a secondary concern — even without per-wavelength σ, Rayleigh still gives nice angular behavior. The λ⁻⁴ effect is the cherry on top.
+4. cos_theta handling
+Same issue as #174 — volume scattering uses ∫ phase × L dΩ (no cosine), so the cos_theta term in the Pdf path needs to be 1.0 for phase functions. The fix for #174 applies here identically.
+Acceptance criteria
+Pdf::RayleighSphere variant with correct sampling and density
+Rayleigh material struct implementing Material trait, returning Pdf(RayleighSphere) from scatter()
+brdf() returns albedo × (3/(16π)) × (1 + cos²θ) — the full phase function value including normalization
+brdf / pdf ratio cancels correctly: albedo × (3/16π)(1+cos²θ) / ((3/16π)(1+cos²θ)) = albedo
+Works end-to-end with mixture PDF, MIS, and emissive importance sampling (same infrastructure as Add importance sampling (NEE) support for volume scattering (Isotropic → Pdf path) #174)
+Usable from Constant volume construction (a Constant::new_rayleigh() constructor or a phase_function parameter)
+Out of scope
+Per-wavelength scattering coefficient (λ⁻⁴ spectral variation) — deferred to a follow-up issue
+Polarization tracking (Rayleigh is inherently polarized; unpolarized average is used)
+Mie / Henyey-Greenstein phase functions (separate issue)
+Reactions are currently unavailable
+Activity
+paulwrubel
+added
+enhancementNew feature or requestNew feature or request
+enginerelated to actual pathtracingrelated to actual pathtracing
+on Jul 23, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enginerelated to actual pathtracingrelated to actual pathtracingenhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

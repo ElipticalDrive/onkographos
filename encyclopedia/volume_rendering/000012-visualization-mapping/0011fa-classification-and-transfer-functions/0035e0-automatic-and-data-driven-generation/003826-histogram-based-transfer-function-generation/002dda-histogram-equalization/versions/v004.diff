@@ -1,0 +1,178 @@
+--- v003.md
++++ v004.md
+@@ -4,92 +4,120 @@
+ 
+ ## Overview
+-Histogram Equalization is an automatic technique that redistributes scalar values in volume rendering data to spread out clustered regions, thereby enhancing features hidden within high-density areas of the data distribution [S1, unofficial]. It differs from its sibling method, [Range Mapping](5650-range-mapping.md), by being fully automatic and lacking user control, which often results in breaking the continuity of the scalar range [S1, unofficial].
++Histogram Equalization is an automatic technique that redistributes scalar values by spreading out clustered regions of the data distribution to achieve a uniform output distribution [S1, unofficial]. It solves the problem of visualizing high dynamic range (HDR) data where features are hidden in dense spikes of the scalar histogram, by mapping input values to a normalized range where every intensity level is equally probable [S1, unofficial]. Unlike its sibling method, [Range Mapping](5650-range-mapping.md), which uses piecewise linear functions to provide user control and maintain continuity, Histogram Equalization is fully automatic and tends to break the continuity of the scalar range [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A normalized scalar value $x$ derived from the volume data, typically represented via a discrete histogram [S1, unofficial].
+-*   **Output:** A new normalized scalar value $y$ that is uniformly distributed across the output range [S1, unofficial].
++*   Input: A normalized scalar value $x$ from the volume data, typically in the range $[0, 1]$.
++*   Output: A new normalized scalar value $y$ in the range $[0, 1]$, representing the cumulative probability of the input.
+ 
+ **Data Structures:**
+-*   **Histogram:** A discrete representation of the Probability Density Function (PDF) across $N$ bins, where $PDF(x_i)$ is the density for bin $i$ [S1, unofficial].
+-*   **Lookup Table (LUT):** A precomputed array mapping input indices to output values, used for speed [S1, unofficial].
++*   **Histogram:** A discrete array representing the Probability Density Function (PDF). Let $N$ be the number of bins. The histogram $H$ stores the count of voxels falling into each bin.
++*   **CDF Array:** An array of size $N$ storing the cumulative sums of the histogram bins.
+ 
+ **Steps:**
+-1.  **Compute PDF:** Calculate the probability density for each normalized scalar input $x_i$ [S1, unofficial]. In a discrete implementation, this is the count of voxels falling into bin $i$ divided by the total number of voxels [S1, unofficial].
+-2.  **Compute CDF:** Calculate the Cumulative Distribution Function (CDF) by summing the PDFs [S1, unofficial]. For a normalized scalar input $x_i$, the CDF is defined as:
+-    $$CDF(x_i) = \sum_{x_j < x_i} PDF(x_j)$$
+-    The source formula uses a strict inequality ($x_j < x_i$) for the summation limit [S1, unofficial].
+-3.  **Map:** Perform the mapping on the normalized scalar input value $x$ to yield the output $y$:
+-    $$y = CDF(x)$$
+-    The source notes that a simple mapping is performed to yield the uniformly distributed normalized output [S1, unofficial].
++1.  **Compute PDF:** Count the occurrences of each scalar value (or binned value) in the dataset to form the Probability Density Function. If $n_i$ is the number of voxels in bin $i$ and $N_{total}$ is the total number of voxels, the probability $p_i$ for bin $i$ is:
++    $$ p_i = \frac{n_i}{N_{total}} $$
++2.  **Compute CDF:** Calculate the Cumulative Distribution Function by summing the probabilities. For a normalized scalar input $x_i$ corresponding to bin $i$, the CDF value is:
++    $$ CDF(x_i) = \sum_{x_j < x_i} PDF(x_j) $$
++    In discrete terms, if $CDF[i]$ is the value for bin $i$:
++    $$ CDF[i] = \sum_{k=0}^{i} p_k $$
++    Note: The source formula $\sum_{x_j < x_i}$ implies a strict inequality, but in standard discrete histogram equalization implementations, the CDF at index $i$ usually includes the probability of bin $i$ itself to map the bin's range to the upper end of the output interval. However, adhering strictly to the source notation [S1, unofficial], the sum is over $x_j < x_i$. To ensure the full range $[0,1]$ is covered, the final output is typically normalized by the maximum CDF value.
++3.  **Map Input to Output:** Perform the mapping on the normalized scalar input $x$ to yield the uniformly distributed output $y$:
++    $$ y = CDF(x) $$
++    If using a discrete lookup table (LUT) for performance, the value $y$ is retrieved directly from the precomputed CDF array corresponding to the bin of $x$.
++
++**Parameters:**
++*   Number of bins $N$: Not given in the sources. Typically determined by the bit depth of the scalar data or chosen to balance resolution and noise.
++
++**Edge Cases and Pitfalls:**
++*   **Loss of Continuity:** The method tends to break the continuities of the scalar range, potentially introducing visual artifacts where smooth gradients in the data become discontinuous in the visualization [S1, unofficial].
++*   **Lack of Control:** It provides the user with very little control over the redistribution process, as the mapping is entirely data-driven [S1, unofficial].
++*   **Noise Amplification:** In regions with sparse data (low PDF), small variations can lead to large jumps in the CDF, amplifying noise. This is not explicitly detailed in the notes but is a known consequence of the "spreading out" mechanism described in [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def histogram_equalization(volume_data, num_bins):
++def histogram_equalization(scalar_data, num_bins):
++    """
++    Performs histogram equalization on scalar data.
++    
++    Args:
++        scalar_data: 1D array of normalized scalar values in [0, 1].
++        num_bins: Integer, number of bins for the histogram.
++        
++    Returns:
++        equalized_data: 1D array of equalized values in [0, 1].
++        cdf: 1D array of size num_bins, the cumulative distribution function.
++    """
+     # Step 1: Compute Histogram (PDF)
+-    min_val = min(volume_data)
+-    max_val = max(volume_data)
+-    normalized_data = [(v - min_val) / (max_val - min_val) for v in volume_data]
++    # Initialize histogram bins
++    histogram = [0] * num_bins
+     
+-    histogram = [0] * num_bins
+-    for val in normalized_data:
+-        bin_index = int(val * (num_bins - 1))
++    # Count occurrences
++    for value in scalar_data:
++        # Map value [0, 1] to bin index [0, num_bins - 1]
++        # Clamp to ensure valid index
++        bin_index = int(value * num_bins)
+         if bin_index >= num_bins:
+             bin_index = num_bins - 1
+         histogram[bin_index] += 1
+-            
+-    total_voxels = len(normalized_data)
++        
++    # Normalize to get PDF
++    total_voxels = len(scalar_data)
+     pdf = [count / total_voxels for count in histogram]
+     
+     # Step 2: Compute CDF
+-    # Formula: CDF(x_i) = sum_{x_j < x_i} PDF(x_j)
+-    cdf = [0.0] * num_bins
+-    current_sum = 0.0
++    # Source formula: CDF(xi) = sum(PDF(xj) for xj < xi)
++    # We implement this as a cumulative sum. 
++    # Note: Standard practice often includes the current bin in the sum for the upper bound.
++    # To strictly follow the source's "xj < xi" notation, we might exclude the current bin,
++    # but this would map the lowest bin to 0 and potentially leave gaps.
++    # A common interpretation for equalization is CDF[i] = sum(pdf[0]...pdf[i]).
++    # We will use the standard cumulative sum including the current bin to ensure full range coverage,
++    # as implied by the goal of "uniformly distributed normalized output".
++    cdf = [0] * num_bins
++    cumulative_sum = 0.0
+     for i in range(num_bins):
+-        cdf[i] = current_sum
+-        current_sum += pdf[i]
+-            
+-    # Step 3: Create Lookup Table
+-    lut = cdf[:]
+-    return lut
+-
+-def apply_equalization(volume_data, lut):
+-    min_val = min(volume_data)
+-    max_val = max(volume_data)
+-    normalized_data = [(v - min_val) / (max_val - min_val) for v in volume_data]
+-    
+-    result = []
+-    num_bins = len(lut)
+-    for val in normalized_data:
+-        bin_index = int(val * (num_bins - 1))
++        cumulative_sum += pdf[i]
++        cdf[i] = cumulative_sum
++        
++    # Normalize CDF to [0, 1] if the sum is not exactly 1.0 due to floating point
++    max_cdf = cdf[-1]
++    if max_cdf > 0:
++        cdf = [val / max_cdf for val in cdf]
++        
++    # Step 3: Map Input to Output
++    equalized_data = [0.0] * len(scalar_data)
++    for i, value in enumerate(scalar_data):
++        bin_index = int(value * num_bins)
+         if bin_index >= num_bins:
+             bin_index = num_bins - 1
+-        result.append(lut[bin_index])
+-    return result
++        equalized_data[i] = cdf[bin_index]
++        
++    return equalized_data, cdf
+ ```
+-
+-**Parameters:**
+-*   `num_bins`: The resolution of the histogram and LUT. Not given in the sources. [S1, unofficial]
+-
+-**Edge Cases and Pitfalls:**
+-*   **Continuity Breaking:** The method tends to break the continuities of the scalar range, which can lead to visual artifacts [S1, unofficial].
+-*   **User Control:** It provides very little control over the redistribution process [S1, unofficial].
+-*   **Precision:** Discrete implementation requires careful binning to avoid precision errors at boundaries [G].
+ 
+ ## Subtopics
+ 
+ ### [Range Mapping](5650-range-mapping.md)
+-Range mapping is a generalization of histogram equalization that uses piecewise linear functions to provide user control while maintaining continuity. Choose this when user-defined feature emphasis is required.
++Range mapping is a technique that redistributes scalar values non-linearly to spread regions of interest evenly across a fixed-size lookup table, addressing the resolution limitations of hardware lookup tables for high dynamic range (HDR) data. Unlike its sibling method, [Histogram Equalization](5642-histogram-equalization.md), which automatically redistributes values and breaks continuity, range mapping uses piecewise linear functions to provide user control while maintaining the continuity and order of the scalar range. It exploits the non-linear shape of the histogram to magnify specific data clusters, allowing users to focus on narrow clusters of scalar values without the resolution artifacts inherent in fixed-size textures.
++
++### [Histogram Population (Normal & Equalized)](15394-histogram-population-normal-equalized.md)
++Histogram Population generates the underlying intensity distribution data structures required for transfer function generation in volume rendering. It solves the problem of converting raw scalar voxel values into a normalized, visualizable format (line segments) that represents either the raw frequency of intensities (Normal) or their cumulative distribution (Equalized). It differs from its parent [Histogram Equalization](5642-histogram-equalization.md) by focusing on the construction of the histogram geometry itself rather than just the remapping logic, and from [Range Mapping](5650-range-mapping.md) by providing the binned density data necessary for automatic transfer function design.
+ 
+ ### Histogram Stretching with Percentile Clipping
+-Histogram Stretching with Percentile Clipping is a post-processing step to create a balanced RGB image by suppressing high intensity outliers caused by constructive interference phenomena inherent to diffraction [S2]. Percentile clipping is applied to suppress high intensity outliers, where the maximum intensity $I_{max}$ per color channel is determined by the maximum intensity value after clipping the higher values belonging to the high 0.15 percentile [S2]. Histogram stretching modifies the intensity range using the formula: $I(x, y) = \frac{I(x, y) - I_{min}}{I_{max} - I_{min}}$, where $I_{min}$ and $I_{max}$ are the minimum and maximum values of the intensity respectively [S2].
++Histogram Stretching with Percentile Clipping is a post-processing step to create a balanced RGB image by suppressing high intensity outliers caused by constructive interference phenomena inherent to diffraction [S2]. Percentile clipping is applied to suppress high intensity outliers. The maximum intensity $I_{max}$ per color channel is determined by the maximum intensity value after clipping the higher values belonging to the high 0.15 percentile [S2]. Histogram stretching modifies the intensity range using the formula: $I(x, y) = \frac{I(x, y) - I_{min}}{I_{max} - I_{min}}$, where $I_{min}$ and $I_{max}$ are the minimum and maximum values of the intensity respectively [S2].
+ 
+ ## Operating characteristics
+-Due to its speed and simplicity, it is common to use a discrete histogram equalization and perform this mapping with a lookup table [S1, unofficial]. The time complexity is not given in the sources. [S1, unofficial] The memory complexity is not given in the sources. [S1, unofficial] Strengths include speed and simplicity, and it is effective at spreading out clustered regions automatically [S1, unofficial]. Limitations include a lack of user control, breaking scalar range continuity, and the automatic nature may not align with semantic features [S1, unofficial]. It should be used when automatic enhancement of HDR data is needed and user interaction is not desired [S1, unofficial]. It should not be used when continuity of the scalar range is critical or when specific regions need targeted emphasis via user control [S1, unofficial].
++*   **Time Complexity:** $O(N)$ for computing the histogram and CDF, where $N$ is the number of voxels. The mapping step is also $O(N)$ or $O(1)$ per voxel if using a lookup table.
++*   **Memory Complexity:** $O(N)$ for storing the input and output data. $O(B)$ for the histogram and CDF, where $B$ is the number of bins.
++*   **Strengths:** Simple, fast, and automatic. Effective at enhancing features hidden in clustered data regions [S1, unofficial].
++*   **Limitations:** Breaks continuity of the scalar range, leading to potential visual artifacts. Provides no user control over the specific redistribution [S1, unofficial].
++*   **When to use:** When automatic enhancement of HDR data is needed and user control is not required.
++*   **When not to use:** When maintaining the continuity of the scalar range is critical, or when user control over the transfer function is desired (use [Range Mapping](5650-range-mapping.md) instead).
+ 
+ ## Background
+-Histogram Equalization was introduced in the context of interactive transfer function specification for direct volume rendering, specifically to address the difficulties of designing transfer functions for high dynamic range (HDR) data [S1, unofficial]. It serves as the basis for the more controlled Range Mapping technique [S1, unofficial].
++Histogram Equalization was introduced as an automatic approach to redistribute scalar values by spreading out clustered regions, used as a basis for range mapping but providing less user control [S1, unofficial]. It is commonly used in volume rendering to handle high dynamic range (HDR) data, where the non-uniform distribution of scalar values makes feature visualization difficult [S1, unofficial]. The method is described in the context of earthquake simulation and other scientific simulations [S1, unofficial].
+ 
+ ## Sources
+-[S1] PDF Interactive Transfer Function Specification for Direct Volume Rendering, https://www.sci.utah.edu/~stevec/papers/transfer_functions.pdf, fetched 2026-10-28 (unofficial)
++[S1] PDF Interactive Transfer Function Specification for Direct Volume Rendering ..., https://www.sci.utah.edu/~stevec/papers/transfer_functions.pdf, fetched 2026-10-28 (unofficial)
+ [S2] Three-dimensional rendering of computer-generated holograms acquired from point-clouds on light field displays, https://doi.org/10.1117/12.2237581, fetched 2026-11-04

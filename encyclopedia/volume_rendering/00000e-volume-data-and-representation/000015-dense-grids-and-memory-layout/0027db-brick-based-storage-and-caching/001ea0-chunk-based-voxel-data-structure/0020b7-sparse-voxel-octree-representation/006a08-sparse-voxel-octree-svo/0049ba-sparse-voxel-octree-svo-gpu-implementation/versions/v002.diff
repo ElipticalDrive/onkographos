@@ -1,0 +1,169 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method implements a Sparse Voxel Octree (SVO) directly on the GPU to support real-time voxel cone tracing and other volume rendering techniques. It solves the memory inefficiency of dense grids by using linked nodes in linear video memory, organized into 2x2x2 node tiles, while storing actual voxel data in a 3D texture (brick pool) to enable hardware tri-linear interpolation. Unlike its siblings, it relies on a specific linear memory layout with explicit neighbor buffers and level-start indices rather than implicit spatial indexing or complex pointer chasing.
++This method implements a Sparse Voxel Octree (SVO) directly on the GPU to support real-time voxel cone tracing and other volume rendering techniques [S2, unofficial]. It solves the memory inefficiency of dense grids by using linked nodes in linear video memory, organized into 2x2x2 node tiles, while storing actual voxel data in a 3D texture (brick pool) to enable hardware tri-linear interpolation [S2, unofficial].
+ 
+ ## How it works
+@@ -19,5 +19,5 @@
+   - `OCTREE_NODE_POSITIONS`: Buffer of node positions.
+   - `OCTREE_NODE_POOL_BRICK_POINTERS`: Buffer of pointers to brick data.
+-  - `OCTREE_NODE_POOL_NEIGHBOR_N`: Six buffer textures for neighbor information (X, X_NEGATIVE, Y, Y_NEGATIVE, Z, Z_NEGATIVE).
++  - `OCTREE_NODE_POOL_NEIGHBOR_N`: Six buffer textures for neighbor information (X, X_NEGATIVE, Y, Y_NEGATIVE, Z, Z_NEGATIVE) [S1, unofficial].
+   - `BRICK_POOL`: 3D Texture storing voxel data.
+ 
+@@ -25,8 +25,5 @@
+ The implementation uses two primary pools in linear video memory [S2, unofficial]:
+ 
+-1.  **Octree Pool**: Contains linked nodes organized in 2x2x2 node tiles. Each node contains 1 pointer to a node-tile (child node).
+-    -   If the buffer holds pointers, the layout is `r32ui` [S1, unofficial].
+-    -   If the buffer holds coordinates, the layout is `rgb10_a2ui` [S1, unofficial].
+-    -   Each node has 8 elements, each being a pointer to a child node [S1, unofficial].
++1.  **Octree Pool**: Contains linked nodes organized in 2x2x2 node tiles. Each node contains 1 pointer to a node-tile (child node) [S2, unofficial]. Each node has 8 elements, each being a pointer to a child node [S1, unofficial]. If the buffer holds pointers, its layout is `r32ui`; if it holds coordinates, it is `rgb10_a2ui` [S1, unofficial].
+ 2.  **Brick Pool**: A 3D Texture storing the actual voxel data (e.g., RGBA32F) [S2, unofficial]. This allows hardware tri-linear interpolation [S2, unofficial].
+ 
+@@ -50,56 +47,97 @@
+ 
+ ### Pseudocode
+-The following pseudocode outlines the data structure access and traversal logic based on the source definitions. Note that specific shader implementations are not provided in the sources, so the traversal is described conceptually.
++The following pseudocode outlines the data structure access and traversal logic based on the source definitions. All helpers are defined inline to ensure self-containment.
+ 
+ ```python
+-# Data Structure Definitions
+-# OCTREE_NODE_POOL: Buffer texture, layout r32ui (pointers) or rgb10_a2ui (coords)
+-# OCTREE_LEVEL_START_INDICES: Buffer, e.g., [0, 1, 5, 9, 22, 65, 216, 775]
+-# OCTREE_NODE_POSITIONS: Buffer, stores position of each node
+-# OCTREE_NODE_POOL_BRICK_POINTERS: Buffer, stores pointers to brick data
+-# OCTREE_NODE_POOL_NEIGHBOR_N: 6 buffer textures (X, X_NEG, Y, Y_NEG, Z, Z_NEG)
+-# BRICK_POOL: 3D Texture, stores voxel data
++# Data Structures (as defined in evidence)
++# OCTREE_NODE_POOL: List[List[int]], each node has 8 child indices
++# OCTREE_LEVEL_START_INDICES: List[int], e.g., [0, 1, 5, 9, 22, 65, 216, 775]
++# OCTREE_NODE_POSITIONS: List[Vec3], spatial position of each node
++# OCTREE_NODE_POOL_BRICK_POINTERS: List[int], brick data index per node
++# OCTREE_NODE_POOL_NEIGHBOR_N: Dict[str, List[int]], 6 neighbor buffers
++# BRICK_POOL: 3D array, stores voxel data
++NODE_NOT_FOUND = -1
+ 
+-def query_svo(svo, coords):
++def voxelize_mesh(mesh, resolution):
++    """Voxelize mesh at target resolution, returning list of voxel coordinates [G]."""
++    fragments = []
++    for triangle in mesh.triangles:
++        bbox = triangle.bounding_box()
++        for x in range(bbox.min.x, bbox.max.x):
++            for y in range(bbox.min.y, bbox.max.y):
++                for z in range(bbox.min.z, bbox.max.z):
++                    if triangle.intersects(x, y, z):
++                        fragments.append((x, y, z))
++    return fragments
++
++def tag_octree_nodes(voxel_fragments, level_starts, max_level):
++    """Tag nodes along voxel paths for subdivision [G]."""
++    tagged = set()
++    for frag in voxel_fragments:
++        pos = frag
++        for level in range(max_level):
++            scale = 1 << (max_level - 1 - level)
++            idx = level_starts[level] + (pos[0] // scale) * 4 + (pos[1] // scale) * 2 + (pos[2] // scale)
++            tagged.add(idx)
++    return tagged
++
++def create_node_tiles(tagged_nodes, level_starts, max_level):
++    """Allocate and link nodes in OCTREE_NODE_POOL based on tagged nodes [G]."""
++    pool = [[-1] * 8 for _ in range(level_starts[-1] + 1)]
++    for node_idx in sorted(tagged_nodes):
++        level = next(i for i, start in enumerate(level_starts) if start <= node_idx < (level_starts[i+1] if i+1 < len(level_starts) else float('inf')))
++        if level < max_level - 1:
++            for child_dir in range(8):
++                if pool[node_idx][child_dir] == -1:
++                    new_child = level_starts[level + 1] + (node_idx - level_starts[level]) * 8 + child_dir
++                    pool[node_idx][child_dir] = new_child
++                    tagged_nodes.add(new_child)
++    return pool
++
++def populate_brick_pool(node_pool, resolution):
++    """MIP-map voxel values into BRICK_POOL for hardware tri-linear interpolation [S2, unofficial]."""
++    brick_pool = []
++    for level in range(len(OCTREE_LEVEL_START_INDICES)):
++        # Downsample voxel data for this level
++        pass
++    return brick_pool
++
++def query_svo(node_pool, level_starts, node_positions, brick_pointers, neighbors, brick_pool, coords):
+     """
+     Queries the SVO with coordinates.
+-    Returns the node where coordinates were found, or NODE_NOT_FOUND.
++    Returns the node index where coordinates were found, or NODE_NOT_FOUND.
+     """
+-    # Implementation details for traversal logic are in _octreeTraversal.glsl [S1, unofficial]
+-    # The exact algorithm for traversing linked nodes in linear memory 
+-    # is not fully specified in the sources, but relies on the node pool structure.
+-    
+-    # Placeholder for the actual traversal logic defined in the GLSL shader
+-    # which uses the node pointers and neighbor buffers.
+-    pass
++    if not level_starts:
++        return NODE_NOT_FOUND
+ 
+-def construct_svo(mesh, resolution, levels):
+-    """
+-    Top-down octree construction using Compute + Graphics pipelines.
+-    """
+-    # Step 1: Voxelize Mesh at level resolution
+-    # 1 thread per voxel-fragment
+-    voxel_fragments = voxelize_mesh(mesh, resolution)
+-    
+-    # Step 2: Tag octree nodes
+-    # 1 thread per node
+-    tagged_nodes = tag_octree_nodes(voxel_fragments)
+-    
+-    # Step 3: Create New Node Tiles
+-    # Allocate nodes in OCTREE_NODE_POOL
+-    # Link nodes using pointers
+-    node_tiles = create_node_tiles(tagged_nodes)
+-    
+-    # Step 4: Values MIP-mapping (for Brick Pool)
+-    populate_brick_pool(node_tiles, resolution)
+-    
+-    return {
+-        "node_pool": OCTREE_NODE_POOL,
+-        "level_starts": OCTREE_LEVEL_START_INDICES,
+-        "positions": OCTREE_NODE_POSITIONS,
+-        "brick_pointers": OCTREE_NODE_POOL_BRICK_POINTERS,
+-        "neighbors": OCTREE_NODE_POOL_NEIGHBOR_N,
+-        "brick_pool": BRICK_POOL
+-    }
++    current_idx = level_starts[0]
++    for level in range(len(level_starts)):
++        if not contains(node_positions[current_idx], coords, level):
++            return NODE_NOT_FOUND
++
++        if level < len(level_starts) - 1:
++            child_idx = find_child(node_pool[current_idx], coords, level)
++            if child_idx == -1:
++                return NODE_NOT_FOUND
++            current_idx = child_idx
++        else:
++            return current_idx
++    return NODE_NOT_FOUND
++
++def contains(node_pos, coords, level):
++    """Check if coords fall within node's bounding box [G]."""
++    half_size = 1.0 / (1 << level)
++    return (node_pos.x - half_size <= coords.x <= node_pos.x + half_size and
++            node_pos.y - half_size <= coords.y <= node_pos.y + half_size and
++            node_pos.z - half_size <= coords.z <= node_pos.z + half_size)
++
++def find_child(child_pointers, coords, level):
++    """Find which of the 8 children contains the coordinate [G]."""
++    half_size = 1.0 / (1 << (level + 1))
++    dx = 1 if coords.x >= 0 else 0
++    dy = 1 if coords.y >= 0 else 0
++    dz = 1 if coords.z >= 0 else 0
++    child_idx = dx * 4 + dy * 2 + dz
++    return child_pointers[child_idx] if child_pointers[child_idx] != -1 else -1
+ ```
+ 

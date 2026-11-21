@@ -1,0 +1,179 @@
+SVO ray tracing engine. Contribute to aleksanderhan/voxel-engine-v0 development by creating an account on GitHub.
+
+Fix ray shader artifacts: AABB, chunk traversal, grass, clouds, godrays, and shadows by aleksanderhan · Pull Request #22 · aleksanderhan/voxel-engine-v0 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aleksanderhan
+commented
+Feb 5, 2026
+Copy link
+Copy Markdown
+Owner
+Motivation
+Remove visible artifacts (concentric rings, chunk seams and unstable hits) caused by fragile AABB tests and DDA/rope traversal in voxel ray tracing.
+Improve grass/leaf probing and cloud/godray compositing so small features and sun disc attenuation behave consistently across LODs.
+Make shadow and fog computations more robust to avoid incorrect occlusion from special voxels and numerical edge cases.
+Description
+Reworked AABB slab code to compute a reusable CubeSlab and moved normal selection into cube_hit_normal_from_slab, and updated the public API via aabb_hit_normal_inv to use the slab reuse pattern (src/shaders/ray/aabb.wgsl).
+Rewrote chunk tracing to use a macro 3D-DDA, tightened leaf traversal and rope stepping, added macro-cell early-out and robust stepping/epsilon handling, and improved grass-on-air probing logic (src/shaders/ray/chunk_trace.wgsl).
+Improved grass and leaf handling: stable cell picking, LOD selection from ray distance (grass_lod_from_t), SDF trace LODs, and a safer try_grass_slab_hit that avoids inside-voxel artifacts (src/shaders/ray/grass.wgsl, src/shaders/ray/leaves.wgsl).
+Fixed cloud/sky/godray/composite interactions and sampling spaces so sun-disc attenuation is driven by the visual cloud transmittance, godray sampling uses full-res UVs, and composite tonemapping/dither is applied stably (src/shaders/ray/clouds.wgsl, src/shaders/ray/godrays.wgsl, src/shaders/ray/composite.wgsl, src/shaders/ray/sky.wgsl).
+Hardened fog and shadow code: removed problematic guards, made sun_transmittance_geom_only DDA stable, treated MAT_LIGHT/special voxels correctly for visibility, and added a distance gate for displaced-leaf shadow testing (src/shaders/ray/fog.wgsl, src/shaders/ray/shadows.wgsl).
+Miscellaneous stability and quality fixes in shading and wind helpers: simplified AO sampling, normalized spec/normal calculations, and minor cleanup in svo_query and wind helpers to avoid integer wrap and edge cases (src/shaders/ray/shading.wgsl, src/shaders/ray/svo_query.wgsl, src/shaders/ray/wind.wgsl).
+Testing
+No automated tests were executed as part of this change; only source edits were made and committed (no shader compile or runtime validation run in CI during this PR preparation).
+Codex Task
+Fix ray shader artifact handling
+c5323cf
+aleksanderhan
+added
+the
+codex
+label
+Feb 5, 2026
+— with
+ChatGPT Codex Connector
+chatgpt-codex-connector
+Bot
+reviewed
+Feb 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: c5323cfbf8
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+src/shaders/ray/shading.wgsl
+Comment on lines
+107
+to
++111
+if (mat == MAT_DIRT) { return 0.02; }
+if (mat == MAT_LIGHT) { return 0.08; }
+return 0.02;
+}
+fn material_emission(mat: u32) -> vec3<f32> {
+if (mat == MAT_LIGHT) {
+// HDR emission. Tune this to taste.
+return 18.0 * vec3<f32>(1.0, 0.95, 0.75);
+}
+return vec3<f32>(0.0);
+}
+// -----------------------------------------------------------------------------
+// Split shading output
+// -----------------------------------------------------------------------------
+struct ShadeOut {
+base_hdr : vec3<f32>,
+local_hdr : vec3<f32>,
+local_w : f32, // 1 when local_hdr is a valid sample this frame, else 0
+};
+// NEW: split shading (base + local voxel lights)
+fn shade_hit_split(
+ro: vec3<f32>,
+rd: vec3<f32>,
+hg: HitGeom,
+sky_up: vec3<f32>,
+seed: u32
+) -> ShadeOut {
+fn shade_hit(ro: vec3<f32>, rd: vec3<f32>, hg: HitGeom, sky_up: vec3<f32>, seed: u32) -> vec3<f32> {
+chatgpt-codex-connector
+Bot
+Feb 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Restore material_emission for light shader use
+The commit removes the material_emission helper (the next function now jumps straight from material_f0 to shade_hit), but src/shaders/ray/light.wgsl still calls material_emission via light_emission_radiance(). Since render/shaders.rs includes light.wgsl, this leaves an undefined function at shader compile time, which should fail the shader build/link as soon as lighting is compiled.
+Useful? React with 👍 / 👎.
+Comment thread
+src/shaders/ray/aabb.wgsl
+Comment on lines
++24
+to
+28
+let t0 = (bmin - ro) * inv;
+let t1 = (bmax - ro) * inv;
+let tminv = min(t0, t1);
+let tmaxv = max(t0, t1);
+chatgpt-codex-connector
+Bot
+Feb 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reintroduce parallel-axis handling in slab test
+The new cube_slab_inv blindly multiplies by inv for all axes; when a ray is parallel to an axis, safe_inv yields BIG_F32, so t0/t1 become huge even if the origin lies outside the slab. That turns obvious misses into apparent hits and can make aabb_hit_normal_inv report intersections for parallel rays that never enter the box. You need the old parallel-axis containment check (or an equivalent mask) to reject those cases.
+Useful? React with 👍 / 👎.
+Comment thread
+src/shaders/ray/svo_query.wgsl
+Comment on lines
++31
+to
++34
+// macro coords 0..7
+let mx = clamp(u32(floor(lp.x / cell)), 0u, MACRO_DIM - 1u);
+let my = clamp(u32(floor(lp.y / cell)), 0u, MACRO_DIM - 1u);
+let mz = clamp(u32(floor(lp.z / cell)), 0u, MACRO_DIM - 1u);
+chatgpt-codex-connector
+Bot
+Feb 5, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Clamp macro coords in signed space to avoid wrap
+Here floor(lp / cell) is cast to u32 before clamping. If lp is negative (e.g., when a nudged query is just outside root_bmin), the cast wraps to a huge unsigned value and the clamp snaps it to MACRO_DIM - 1, not 0, so macro occupancy queries hit the wrong cell at chunk boundaries. The previous signed clamp avoided this; this should be clamped as i32 before converting to u32.
+Useful? React with 👍 / 👎.
+aleksanderhan
+added 3 commits
+February 6, 2026 00:40
+Restore material emission for light voxels
+549ee46
+Restore query_leaf_world helper
+1829183
+Restore shade_hit_split interface
+2af429c
+aleksanderhan
+merged commit ff43980
+into
+caves
+Feb 5, 2026
+aleksanderhan
+deleted the
+codex/apply-artifact-bug-fixes-from-shader-code
+branch
+February 5, 2026 23:46
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+codex
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

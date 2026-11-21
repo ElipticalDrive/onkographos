@@ -1,0 +1,197 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,4 @@
+ # Coherent 3D Gaussian Optimization
+ 
+-Also called: CoherentGS
+ 
+ ## Overview
+@@ -11,5 +10,5 @@
+ **Inputs and Outputs:**
+ *   **Inputs:**
+-    *   Set of input views $V$.
++    *   Set of input views $V$ [S1].
+     *   Initial depth maps $D^{\text{init}}_n$ for each view $n$, obtained via monocular depth estimation (Yang et al. [60]) [S1].
+     *   Initial Gaussian parameters $\Sigma, \mathbf{c}$ [G].
+@@ -20,6 +19,6 @@
+ 
+ **Data Structures:**
+-*   **Implicit Decoder $f_\phi$:** A convolutional neural network taking the normalized view index $n$ as input. It outputs a tensor of residual values [S1].
+-*   **Segmentation Mask $S$:** A binary mask of shape $(C, H, W)$, where $C=5$ is the number of regions. Regions are determined by dividing the image based on the input monocular depth $D^{\text{init}}_n$ using the approach by Wang et al. [53] [S1].
++*   **Implicit Decoder $f_\phi$:** A convolutional neural network taking the normalized view index $n$ as input [S1].
++*   **Segmentation Mask $S$:** A binary mask of shape $(C, H, W)$, where $C=5$ is the number of regions [S1].
+ *   **Optical Flow Correspondences:** Pairs of pixels $(\mathbf{p}, \mathbf{q})$ between views $i$ and $j$ computed via optical flow (Shi et al. [45]) [S1].
+ *   **Forward-Backward Consistency Mask $M_{i \rightarrow j}$:** A binary mask indicating reliable pixel correspondences between views $i$ and $j$ [S1].
+@@ -88,29 +87,19 @@
+     """
+     Optimizes 3D Gaussians using coherent regularization.
+-    
+-    Args:
+-        input_views: List of view indices and camera poses.
+-        initial_depths: Dict mapping view index to initial depth map D_init.
+-        initial_gaussians: Initial Gaussian parameters (Sigma, c, alpha).
+-        decoder: Implicit convolutional decoder f_phi.
+-        num_regions: Number of segmentation regions C.
+-        num_epochs: Number of optimization iterations.
+-        
+-    Returns:
+-        Optimized Gaussian parameters Sigma*, c*, and decoder parameters phi*.
+     """
+     phi = decoder.parameters()
+     Sigma = initial_gaussians.Sigma
+     c = initial_gaussians.c
+-    alpha = initial_gaussians.alpha # [G] standard 3DGS parameter
+-
+-    # Precompute segmentation masks for each view
++    alpha = initial_gaussians.alpha
++
++    H, W = initial_depths[input_views[0]].shape
++    camera_poses = {v: get_camera_pose(v) for v in input_views}  # [G]
++    reference_colors = {v: get_reference_image(v) for v in input_views}  # [G]
++    optimizer = torch.optim.Adam(list(phi) + [Sigma, c], lr=1e-3)  # [G]
++
+     segmentation_masks = {}
+     for view_idx in input_views:
+-        D_init = initial_depths[view_idx]
+-        # Divide image into C regions based on D_init [G: Wang et al. strategy]
+-        segmentation_masks[view_idx] = compute_segmentation_mask(D_init, num_regions)
+-
+-    # Precompute optical flow correspondences and consistency masks
++        segmentation_masks[view_idx] = compute_segmentation_mask(initial_depths[view_idx], num_regions)  # [G]
++
+     flow_correspondences = {}
+     consistency_masks = {}
+@@ -118,39 +107,26 @@
+         for j, view_j in enumerate(input_views):
+             if i >= j: continue
+-            # Compute optical flow between view_i and view_j [G: Shi et al.]
+-            flow = compute_optical_flow(view_i, view_j)
+-            # Compute forward-backward consistency mask [G]
+-            mask = compute_consistency_mask(flow)
+-            flow_correspondences[(view_i, view_j)] = flow
+-            consistency_masks[(view_i, view_j)] = mask
++            flow_correspondences[(view_i, view_j)] = compute_optical_flow(view_i, view_j)  # [G]
++            consistency_masks[(view_i, view_j)] = compute_consistency_mask(flow_correspondences[(view_i, view_j)])  # [G]
+ 
+     lambda_s = 0.0
+     for epoch in range(num_epochs):
+         lambda_s = min(1.0, epoch / num_epochs)
++        residual_depths_map = {}
+ 
+         for view_idx in input_views:
+-            # 1. Get residual depth from decoder
+             normalized_view_idx = view_idx / len(input_views)
+-            residual_depth_tensor = decoder(normalized_view_idx) # Shape: (C, H, W)
+-
+-            # 2. Apply segmentation mask and channelwise summation
+-            S = segmentation_masks[view_idx] # Shape: (C, H, W)
+-            residual_depth = np.sum(S * residual_depth_tensor, axis=0) # Shape: (H, W)
+-
+-            # 3. Compute updated depth and 3D positions
++            residual_depth_tensor = decoder(normalized_view_idx)
++            S = segmentation_masks[view_idx]
++            residual_depth = np.sum(S * residual_depth_tensor, axis=0)
++            residual_depths_map[view_idx] = residual_depth
++
+             D_init = initial_depths[view_idx]
+             updated_depth = D_init + residual_depth
+-
+-            # Project pixels to 3D
+-            positions = []
+-            for p in range(H * W):
+-                x = project_pixel_to_3d(p, updated_depth[p], camera_pose[view_idx])
+-                positions.append(x)
+-
+-            # 4. Render depth and color
+-            R_d = render_depth(Sigma, alpha, positions, camera_pose[view_idx]) # [G]
+-            R_c = render_color(Sigma, alpha, positions, c, camera_pose[view_idx], multisample=True) # [G]
+-
+-            # 5. Compute TV Losses
++            positions = [project_pixel_to_3d(p, updated_depth[p], camera_poses[view_idx]) for p in range(H * W)]
++
++            R_d = render_depth(Sigma, alpha, positions, camera_poses[view_idx])
++            R_c = render_color(Sigma, alpha, positions, c, camera_poses[view_idx], multisample=True)
++
+             disparity = 1.0 / (1.0 + R_d)
+             grad_disparity = np.gradient(disparity)
+@@ -163,25 +139,18 @@
+             L_multi = (1 - lambda_s) * L_TV + lambda_s * L_MTV
+ 
+-            # 6. Compute Flow Loss
+             L_flow = 0.0
+             for (view_i, view_j), flow in flow_correspondences.items():
+                 if view_i == view_idx or view_j == view_idx:
+                     for p, q in enumerate(flow):
+-                        D_i = initial_depths[view_i][p] + residual_depths[view_i][p]
+-                        D_j = initial_depths[view_j][q] + residual_depths[view_j][q]
+-                        x_i = project_pixel_to_3d(p, D_i, camera_pose[view_i])
+-                        x_j = project_pixel_to_3d(q, D_j, camera_pose[view_j])
++                        D_i = initial_depths[view_i][p] + residual_depths_map[view_i][p]
++                        D_j = initial_depths[view_j][q] + residual_depths_map[view_j][q]
++                        x_i = project_pixel_to_3d(p, D_i, camera_poses[view_i])
++                        x_j = project_pixel_to_3d(q, D_j, camera_poses[view_j])
+                         M = consistency_masks[(view_i, view_j)][p]
+                         L_flow += M * np.linalg.norm(x_i - x_j, ord=1)
+ 
+-            # 7. Compute Color Loss
+-            L_color = np.mean(np.abs(R_c - reference_color[view_idx]))
+-
+-            # 8. Total Loss
+-            beta_m = 5.0
+-            beta_f = 0.1
+-            total_loss = L_color + beta_m * L_multi + beta_f * L_flow
+-
+-            # 9. Backpropagate and update
++            L_color = np.mean(np.abs(R_c - reference_colors[view_idx]))
++            total_loss = L_color + 5.0 * L_multi + 0.1 * L_flow
++
+             total_loss.backward()
+             optimizer.step()
+@@ -193,26 +162,25 @@
+ def compute_segmentation_mask(D_init, num_regions):
+     # Divide image into C regions based on D_init [G: Wang et al. strategy]
+-    # Implementation depends on specific depth clustering method
+-    pass # Not given in the sources.
++    pass  # Not given in the sources.
+ 
+ def compute_optical_flow(view_i, view_j):
+     # Compute optical flow between view_i and view_j [G: Shi et al.]
+-    pass # Not given in the sources.
++    pass  # Not given in the sources.
+ 
+ def compute_consistency_mask(flow):
+     # Compute forward-backward consistency mask [G]
+-    pass # Not given in the sources.
++    pass  # Not given in the sources.
+ 
+ def project_pixel_to_3d(p, depth, camera_pose):
+     # Standard pinhole projection inverse [G]
+-    pass # Not given in the sources.
++    pass  # Not given in the sources.
+ 
+ def render_depth(Sigma, alpha, positions, camera_pose):
+     # Standard 3DGS depth rendering [G]
+-    pass # Not given in the sources.
++    pass  # Not given in the sources.
+ 
+ def render_color(Sigma, alpha, positions, c, camera_pose, multisample):
+     # Standard 3DGS color rendering with multisampling [G]
+-    pass # Not given in the sources.
++    pass  # Not given in the sources.
+ ```
+ 
+@@ -224,11 +192,11 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sparse Views:** Standard center-sampling leads to semi-transparency. Multisampling is required [S1].
+-*   **Sharp Discontinuities:** Smooth decoder alone fails. Segmentation masks are necessary to handle object boundaries [S1].
++*   **Sparse Views:** Standard center-sampling leads to semi-transparency [S1].
++*   **Sharp Discontinuities:** Smooth decoder alone fails [S1].
+ *   **Optical Flow Errors:** Unreliable correspondences must be masked out using forward-backward consistency [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Higher than standard 3DGS due to the additional decoder forward pass, segmentation mask computation, and flow loss calculation [S1]. The decoder parameters $\phi$ are optimized alongside Gaussians [S1].
+-*   **Memory Complexity:** Requires storing segmentation masks and optical flow correspondences. The decoder adds minimal memory overhead [S1].
++*   **Memory Complexity:** Requires storing segmentation masks and optical flow correspondences [S1].
+ *   **Performance:** Improves novel view synthesis quality in sparse-view settings by reducing artifacts and improving geometry coherence [S1].
+ *   **Strengths:** Handles sparse inputs better than standard 3DGS; enforces smooth geometry; prevents semi-transparency [S1].
